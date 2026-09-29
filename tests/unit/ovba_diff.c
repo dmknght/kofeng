@@ -17,7 +17,7 @@
 #include <string.h>
 #include <dirent.h>
 
-#include "../../libkofeng/extractor/decomp/ovba.h"
+#include "../../libkofeng/extractors/decomp/ovba.h"
 
 struct acc {
 	uint32_t crc;

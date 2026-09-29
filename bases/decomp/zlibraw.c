@@ -77,12 +77,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		return;
 	/*
 	 * Every other module in this directory tests this and this one did
-	 * not. kof_child() answering zero is the host refusing the child -
+	 * not. kunp_rcstruct_done() answering zero is the host refusing the child -
 	 * the object budget is spent - and a module that ignores it reports
 	 * an archive it opened as one that held nothing.
 	 */
-	if (!kof_child())
-		KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+	if (!kunp_rcstruct_done())
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 
 	/*
 	 * ONE STREAM, AND THE REST IS LEFT WHERE IT IS.

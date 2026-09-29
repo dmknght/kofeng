@@ -75,7 +75,7 @@
 
 #include "kofeng.h"
 #include <kofmod/pe.h>
-#include "extractor/unpack/pe_unmap.h"
+#include "extractors/unpack/pe_unmap.h"
 
 #include "wproc.h"
 #include "wdiff.h"

@@ -782,7 +782,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * shows up in a scan's numbers and one that never does.
 			 */
 			kof_debug("UPX.ELF.unknown_shape", (fmt << 8) | ver);
-			KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
 		}
 		kof_debug("UPX.ELF.shape", (unsigned)shape);
 	}
@@ -850,7 +850,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			if (decoder && sz_cpr > skip && sz_unc0 &&
 			    sz_unc0 <= UPX_HDR_PEEK &&
 			    kof_in_obj(at + B_INFO_LEN, sz_cpr)) {
-				got_hdr = kof_unpack_peek(decoder,
+				got_hdr = kunp_static_peek(decoder,
 							  at + B_INFO_LEN + skip,
 							  sz_cpr - skip, hdr,
 							  (uint32_t)sz_unc0);
@@ -868,7 +868,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 					 * trust this child should be told so
 					 * rather than handed a clean-looking
 					 * ELF that this module assembled. */
-					kof_unp_broken(KOF_UNP_DAMAGED);
+					kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 				}
 			}
 		}
@@ -962,7 +962,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * a b_info, so nothing is wrong and nothing is said. */
 			if (!method_of(method) && method != UPX_M_LZMA)
 				break;
-			kof_unp_broken(KOF_UNP_DAMAGED);
+			kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 			if (have < UPX_MIN_CUT)
 				break;
 			/*
@@ -989,7 +989,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * blocks behind it are real output worth keeping.
 		 */
 		if (blocks >= UPX_MAX_BLOCKS) {
-			kof_unp_broken(KOF_UNP_LIMIT);
+			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 			break;
 		}
 
@@ -1000,7 +1000,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			if (decoder == 0) {
 				/* Recorded and NOT returned: the blocks already
 				 * decoded are real output and are kept. */
-				kof_unp_broken(KOF_UNP_DAMAGED);
+				kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 				break;
 			}
 			skip = UPX_LZMA_SKIP;
@@ -1017,9 +1017,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * sz_unc - with three of them put back.
 		 */
 		if (blocks == 0 && hdr_len && hdr_len == sz_unc) {
-			n = kof_emit(hdr, hdr_len) ? hdr_len : 0;
+			n = kunp_rcstruct_write(hdr, hdr_len) ? hdr_len : 0;
 			if (!n)
-				kof_unp_broken(KOF_UNP_LIMIT);
+				kunp_rcstruct_broken(KOF_UNP_LIMIT);
 		} else {
 			n = kof_unpack_at(decoder, at + B_INFO_LEN + skip,
 					  sz_cpr - skip, sz_unc);
@@ -1066,8 +1066,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 				for (k = 0; k < step; k++)
 					zero[k] = 0;
-				if (!kof_emit(zero, step)) {
-					kof_unp_broken(KOF_UNP_LIMIT);
+				if (!kunp_rcstruct_write(zero, step)) {
+					kunp_rcstruct_broken(KOF_UNP_LIMIT);
 					break;
 				}
 				got += step;
@@ -1148,8 +1148,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 					while (n < sizeof buf && k < t_len)
 						buf[n++] = kof_u8(t_off + k++);
-					if (!kof_emit(buf, n)) {
-						kof_unp_broken(KOF_UNP_LIMIT);
+					if (!kunp_rcstruct_write(buf, n)) {
+						kunp_rcstruct_broken(KOF_UNP_LIMIT);
 						break;
 					}
 					got += n;
@@ -1197,11 +1197,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * scan must never give about a packed sample.
 	 */
 	if (blocks) {
-		if (!kof_child())
-			kof_unp_broken(KOF_UNP_LIMIT);
+		if (!kunp_rcstruct_done())
+			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	} else
 		/* Opened it and recovered nothing. The block chain did not begin
 		 * where this module looks, which on this corpus is a damaged file
 		 * far more often than a layout nobody has met. */
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 }

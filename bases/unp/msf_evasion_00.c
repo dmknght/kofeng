@@ -35,7 +35,7 @@
  */
 
 #include <kofmod/kofsig.h>
-#include "msf_pe.h"
+#include <kofanalyze/msf_pe.h>
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -308,7 +308,7 @@ KOF_DEFINE_UNPACK
 					     rc4_byte(s, &i, &j));
 			done++;
 		}
-		if (n && !kof_emit(buf, n))
+		if (n && !kunp_rcstruct_write(buf, n))
 			return;         /* the host has stopped taking bytes */
 	}
 
@@ -318,6 +318,14 @@ KOF_DEFINE_UNPACK
 	 * after the host refused it would claim an unpacking that did not
 	 * happen.
 	 */
-	if (!kof_child())
-		kof_unp_broken(KOF_UNP_LIMIT);
+	/*
+	 * AND THIS OBJECT WAS THE WRAPPER. What came out is what was inside
+	 * it, one layer in - see kunp_rcstruct_supersedes. Without it a sample
+	 * wrapped three deep is reported as three recovered objects, two of
+	 * which are a forty-six byte decryptor in front of bytes nobody can
+	 * read.
+	 */
+	kunp_rcstruct_supersedes();
+	if (!kunp_rcstruct_done())
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

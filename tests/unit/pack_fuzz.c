@@ -51,7 +51,7 @@
 #include "../../libkofeng/databases/dbcore.h"
 #include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/databases/hexprog.h"
-#include "../../libkofeng/detector/matchers/kofmatch.h"
+#include "../../libkofeng/detectors/matchers/kofmatch.h"
 
 static int failures;
 static char root[256];

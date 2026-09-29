@@ -55,7 +55,7 @@
  * In an ELF a region is nearly always one range. In a CFB a stream is a chain of
  * sectors and its region is one extent per run of consecutive ones - so a pattern
  * lying across the join between two sectors is in neither extent and cannot be
- * found in place. That is what kof_gather() is for, and why this format has an
+ * found in place. That is what kunp_static_gather_all() is for, and why this format has an
  * unpacker as well as a parser: the parse names the bytes for free, and joining
  * them up costs budget and happens only when something asks.
  *

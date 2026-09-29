@@ -24,7 +24,7 @@
 #include "kofeng.h"
 #include "kofmod/proc.h"
 #include "kofproc.h"
-#include "../../libkofeng/analyzer/parsers/processes/proc_parse.h"
+#include "../../libkofeng/analyzers/parsers/processes/proc_parse.h"
 
 static int failures;
 
@@ -72,7 +72,7 @@ static const char *scan_rec(kof_scanner *sc, const struct kof_proc_build *b,
 
 	memset(&opt, 0, sizeof opt);
 	opt.as_format = KOF_EVT_PROC;   /* DECLARED - a process never sniffs */
-	s->rc = kof_scan_bytes(sc, rec, n, "proc", &opt, on_object, s);
+	s->rc = kscan_bytes(sc, rec, n, "proc", &opt, on_object, s);
 	return s->name;
 }
 
@@ -106,14 +106,14 @@ int main(int argc, char **argv)
 	struct kof_proc_build b;
 	struct seen s;
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		printf("proc rule: cannot open %s\n", db);
 		return 2;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		return 2;
 	}
 
@@ -281,8 +281,8 @@ int main(int argc, char **argv)
 			fail("the environment was not stored verbatim");
 	}
 
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	printf("proc rule: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

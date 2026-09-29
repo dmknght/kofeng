@@ -141,7 +141,15 @@ CFLAGS  ?= -O2
 # and the link succeeds without it - measured, the flag changes the scan's speed
 # by nothing either way - so it is here for the platforms where the link needs
 # it rather than for anything it does on this one.
-LDFLAGS += -pthread
+LDFLAGS += -pthread -lm
+# libm, because the emulator implements SQRTSD and SQRTSS.
+#
+# The link succeeded without it for a long time: gcc answers sqrt() with the
+# SQRTSD instruction and only calls libm for the branch that sets errno, and
+# whether it emits that branch at all depends on how the surrounding function
+# was inlined. So this was a link that worked by accident and broke the first
+# time kof_emu_run grew - which is exactly the kind of dependency to name
+# rather than to keep getting away with.
 override CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
            -fno-common -Ilibkofeng/kofcore
@@ -905,74 +913,76 @@ $(STAMP): ;
 
 LIB_SRC := libkofeng/kofeng.c \
            libkofeng/databases/dbloader.c \
-           libkofeng/detector/dbindex.c \
+           libkofeng/detectors/dbindex.c \
            libkofeng/databases/dbpacker.c \
-           libkofeng/detector/heur/kofheur.c \
-           libkofeng/detector/matchers/kofmatch.c \
-           libkofeng/detector/matchers/kofplague.c \
-           libkofeng/detector/matchers/kofmultimatch.c \
-           libkofeng/detector/matchers/hexcomp.c \
-           libkofeng/analyzer/parsers/binaries/elf_parse.c \
-           libkofeng/analyzer/parsers/binaries/elf_sym.c \
-           libkofeng/analyzer/parsers/binaries/sym_any.c \
-           libkofeng/analyzer/parsers/kofformat.c \
-           libkofeng/analyzer/normalize/executables.c \
-           libkofeng/analyzer/parsers/scripts/scantext.c \
-           libkofeng/analyzer/parsers/scripts/markup_parse.c \
-           libkofeng/analyzer/parsers/scripts/php_parse.c \
-           libkofeng/analyzer/parsers/scripts/svrpage_parse.c \
-           libkofeng/analyzer/parsers/scripts/cfm_parse.c \
-           libkofeng/analyzer/parsers/scripts/script_parse.c \
-           libkofeng/analyzer/parsers/scripts/script_norm.c \
-           libkofeng/analyzer/parsers/events/amsi_parse.c \
-           libkofeng/analyzer/parsers/processes/proc_parse.c \
-           libkofeng/analyzer/disasm/xref.c \
-           libkofeng/analyzer/disasm/flow.c \
-           libkofeng/analyzer/parsers/binaries/pe_sym.c \
-           libkofeng/analyzer/parsers/binaries/pe_parse.c \
-           libkofeng/analyzer/parsers/binaries/clr_parse.c \
-           libkofeng/analyzer/parsers/containers/gzip_parse.c \
-           libkofeng/analyzer/parsers/containers/docole_parse.c \
-           libkofeng/analyzer/parsers/containers/zip_parse.c \
-           libkofeng/analyzer/parsers/containers/tar_parse.c \
-           libkofeng/analyzer/parsers/containers/sevenzip_parse.c \
-           libkofeng/analyzer/parsers/containers/rar_parse.c \
-           libkofeng/analyzer/parsers/containers/xz_parse.c \
-           libkofeng/analyzer/parsers/containers/bz2_parse.c \
-           libkofeng/analyzer/parsers/containers/chm_parse.c \
-           libkofeng/analyzer/parsers/containers/cab_parse.c \
-           libkofeng/analyzer/parsers/containers/lha_parse.c \
-           libkofeng/analyzer/parsers/containers/arj_parse.c \
-           libkofeng/analyzer/parsers/containers/lnk_parse.c \
-           libkofeng/analyzer/parsers/containers/reg_parse.c \
-           libkofeng/analyzer/parsers/containers/rtf_parse.c \
-           libkofeng/analyzer/parsers/containers/pdf_parse.c \
-           libkofeng/extractor/unpack/pe_rebuild.c \
-           libkofeng/extractor/unpack/pe_unmap.c \
-           libkofeng/extractor/unpack/emu_unpack.c \
-           libkofeng/extractor/unpack/elf_rebuild.c \
-           libkofeng/extractor/decomp/decomp.c \
-           libkofeng/extractor/decomp/inflate.c \
-           libkofeng/extractor/decomp/textcode.c \
-           libkofeng/extractor/decomp/lzw.c \
-           libkofeng/extractor/decomp/bzip2.c \
-           libkofeng/extractor/decomp/lzx.c \
-           libkofeng/extractor/decomp/lzhuf.c \
-           libkofeng/extractor/decomp/ovba.c \
-           libkofeng/extractor/decomp/bcj.c \
-           libkofeng/extractor/decomp/bcj2.c \
-           libkofeng/extractor/decomp/ppmd.c \
-           libkofeng/extractor/decomp/rar3.c \
-           libkofeng/extractor/decomp/rar5.c \
-           libkofeng/extractor/decomp/lzma.c \
-           libkofeng/extractor/decomp/nrv2.c \
+           libkofeng/detectors/heur/kofheur.c \
+           libkofeng/detectors/matchers/kofmatch.c \
+           libkofeng/detectors/matchers/kofplague.c \
+           libkofeng/detectors/matchers/kofmultimatch.c \
+           libkofeng/detectors/matchers/hexcomp.c \
+           libkofeng/analyzers/parsers/binaries/elf_parse.c \
+           libkofeng/analyzers/parsers/binaries/elf_sym.c \
+           libkofeng/analyzers/parsers/binaries/sym_any.c \
+           libkofeng/analyzers/parsers/kofformat.c \
+           libkofeng/analyzers/normalize/executables.c \
+           libkofeng/analyzers/parsers/scripts/scantext.c \
+           libkofeng/analyzers/parsers/scripts/markup_parse.c \
+           libkofeng/analyzers/parsers/scripts/php_parse.c \
+           libkofeng/analyzers/parsers/scripts/svrpage_parse.c \
+           libkofeng/analyzers/parsers/scripts/cfm_parse.c \
+           libkofeng/analyzers/parsers/scripts/script_parse.c \
+           libkofeng/analyzers/parsers/scripts/script_norm.c \
+           libkofeng/analyzers/parsers/events/amsi_parse.c \
+           libkofeng/analyzers/parsers/processes/proc_parse.c \
+           libkofeng/analyzers/disasm/xref.c \
+           libkofeng/analyzers/disasm/flow.c \
+           libkofeng/analyzers/parsers/binaries/pe_sym.c \
+           libkofeng/analyzers/parsers/binaries/pe_parse.c \
+           libkofeng/analyzers/parsers/binaries/clr_parse.c \
+           libkofeng/analyzers/parsers/containers/gzip_parse.c \
+           libkofeng/analyzers/parsers/containers/docole_parse.c \
+           libkofeng/analyzers/parsers/containers/zip_parse.c \
+           libkofeng/analyzers/parsers/containers/tar_parse.c \
+           libkofeng/analyzers/parsers/containers/sevenzip_parse.c \
+           libkofeng/analyzers/parsers/containers/rar_parse.c \
+           libkofeng/analyzers/parsers/containers/xz_parse.c \
+           libkofeng/analyzers/parsers/containers/bz2_parse.c \
+           libkofeng/analyzers/parsers/containers/chm_parse.c \
+           libkofeng/analyzers/parsers/containers/cab_parse.c \
+           libkofeng/analyzers/parsers/containers/lha_parse.c \
+           libkofeng/analyzers/parsers/containers/arj_parse.c \
+           libkofeng/analyzers/parsers/containers/lnk_parse.c \
+           libkofeng/analyzers/parsers/containers/reg_parse.c \
+           libkofeng/analyzers/parsers/containers/rtf_parse.c \
+           libkofeng/analyzers/parsers/containers/pdf_parse.c \
+           libkofeng/extractors/unpack/pe_rebuild.c \
+           libkofeng/extractors/unpack/pe_unmap.c \
+           libkofeng/extractors/unpack/emu_unpack.c \
+           libkofeng/extractors/unpack/elf_rebuild.c \
+           libkofeng/extractors/decomp/decomp.c \
+           libkofeng/extractors/decomp/aplib.c \
+           libkofeng/extractors/decomp/lzmat.c \
+           libkofeng/extractors/decomp/inflate.c \
+           libkofeng/extractors/decomp/textcode.c \
+           libkofeng/extractors/decomp/lzw.c \
+           libkofeng/extractors/decomp/bzip2.c \
+           libkofeng/extractors/decomp/lzx.c \
+           libkofeng/extractors/decomp/lzhuf.c \
+           libkofeng/extractors/decomp/ovba.c \
+           libkofeng/extractors/decomp/bcj.c \
+           libkofeng/extractors/decomp/bcj2.c \
+           libkofeng/extractors/decomp/ppmd.c \
+           libkofeng/extractors/decomp/rar3.c \
+           libkofeng/extractors/decomp/rar5.c \
+           libkofeng/extractors/decomp/lzma.c \
+           libkofeng/extractors/decomp/nrv2.c \
            libkofeng/scanners/scan.c \
            libkofeng/scanners/objtree.c \
            libkofeng/scanners/objctx.c \
            libkofeng/scanners/objsrc.c \
-           libkofeng/detector/overlord/koflib.c \
-           libkofeng/detector/overlord/kofoverlord.c \
-           libkofeng/detector/overlord/ovlflow.c \
+           libkofeng/detectors/overlord/koflib.c \
+           libkofeng/detectors/overlord/kofoverlord.c \
+           libkofeng/detectors/overlord/ovlflow.c \
            libkofeng/disinfect/pzero.c \
            libkofeng/kofcore/kofhash.c
 
@@ -986,7 +996,7 @@ $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
 # kofdisasm/ reads instructions, so it needs the decoder's headers. Only this
 # one directory does; the rest of the engine is kept away from them on purpose,
 # because a parser that can decode is a parser that will start to.
-$(INT)/lib_analyzer/disasm/%.o: libkofeng/analyzer/disasm/%.c $(STAMP) | $(INT)
+$(INT)/lib_analyzers/disasm/%.o: libkofeng/analyzers/disasm/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
@@ -1152,13 +1162,42 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/amsi.h \
            $(SDK)/include/kofmod/proc.h \
            $(SDK)/include/kofmod/clr.h \
-           $(SDK)/include/kofmod/script.h
+           $(SDK)/include/kofmod/script.h \
+           $(SDK)/include/kofanalyze/scfind.h \
+           $(SDK)/include/kofanalyze/msf_pe.h \
+           $(SDK)/include/kofanalyze/msf_elf32.h \
+           $(SDK)/include/kofunpack/pe_reassemble.h \
+           $(SDK)/include/kofunpack/emu_harvest.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
 $(SDK)/include/kofmod/%.h: libkofeng/kofcore/kofmod/%.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+#
+# WHAT A MODULE MAY INCLUDE, IN THREE NAMESPACES RATHER THAN ONE.
+#
+# kofmod/ is the ABI - the vtable, the enums, the macros a module is written
+# against. It is not a dumping ground for anything a module happens to include,
+# and it was becoming one.
+#
+# kofanalyze/ is knowledge about what bytes ARE: where a metasploit stub keeps
+# its payload, what a shellcode entry looks like. That is the analyzer's
+# business and the sources live there.
+#
+# kofunpack/ is the step after - putting an object back together. PE layout
+# arithmetic and what to do with the regions an interpreter run left are both
+# reconstruction, not recognition, and they sit with the rest of the unpack
+# code.
+#
+$(SDK)/include/kofanalyze/%.h: libkofeng/analyzers/payload/%.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/kofunpack/%.h: libkofeng/extractors/unpack/%.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
@@ -1741,7 +1780,7 @@ endif
 # decomp and unp compile to the same pack kind and the engine does not tell them
 # apart - the split is for the people who maintain them. The decompression
 # ALGORITHMS are not here at all: they are host services in
-# libkofeng/extractor/decomp, reached through the module ABI, for the reason
+# libkofeng/extractors/decomp, reached through the module ABI, for the reason
 # kofsig.h gives at the inflate
 # entry. Same division Kaspersky shipped, where _nrv.c and _lzma.c live in the
 # unpacker kernel and the per-packer modules call into them.

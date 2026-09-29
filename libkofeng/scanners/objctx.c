@@ -27,28 +27,31 @@
 #define _GNU_SOURCE
 
 #include <kofmod/kofsym.h>
+#include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
 #include "../kofcore/kofplatform.h"   /* kof_write_all - the spill file below */
-#include "../analyzer/parsers/binaries/elf_sym.h"
-#include "../analyzer/parsers/binaries/pe_sym.h"
-#include "../analyzer/disasm/xref.h"
-#include "../detector/overlord/ovlflow.h"
+#include "../analyzers/parsers/binaries/elf_sym.h"
+#include "../analyzers/parsers/binaries/pe_sym.h"
+#include "../analyzers/disasm/xref.h"
+#include "../detectors/overlord/ovlflow.h"
 #include "../disinfect/pzero.h"
-#include "../analyzer/normalize/executables.h"
+#include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include <kofmod/elf.h>
-#include "../extractor/unpack/emu_unpack.h"
-#include "../extractor/unpack/elf_rebuild.h"
+#include "../extractors/unpack/emu_unpack.h"
+#include "../extractors/unpack/elf_rebuild.h"
 
-#include "../extractor/decomp/ovba.h"
-#include "../extractor/decomp/lzma.h"
-#include "../extractor/decomp/bcj.h"
-#include "../extractor/decomp/rar3.h"
-#include "../extractor/decomp/rar5.h"
-#include "../extractor/decomp/bcj2.h"
+#include "../extractors/decomp/ovba.h"
+#include "../extractors/decomp/lzma.h"
+#include "../extractors/decomp/aplib.h"
+#include "../extractors/decomp/lzmat.h"
+#include "../extractors/decomp/bcj.h"
+#include "../extractors/decomp/rar3.h"
+#include "../extractors/decomp/rar5.h"
+#include "../extractors/decomp/bcj2.h"
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
-#include "../analyzer/parsers/scripts/script_norm.h"
-#include "../analyzer/parsers/scripts/script_parse.h"
+#include "../analyzers/parsers/scripts/script_norm.h"
+#include "../analyzers/parsers/scripts/script_parse.h"
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -60,7 +63,7 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detector/matchers/kofmultimatch.h"
+#include "../detectors/matchers/kofmultimatch.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -122,7 +125,7 @@ static uint32_t c_csum(const struct kof_obj_ctx *ctx, uint64_t off, uint32_t len
  * The level crosses the module ABI like every other argument here, and it was
  * the one that was stored without being read. There are four values; anything
  * else reaches the result array as a number no host can place, and what a host
- * does with one is not "show it oddly" - kof_level_rank answers 0 for an
+ * does with one is not "show it oddly" - kverdict_level_rank answers 0 for an
  * unknown level, the same as for nothing at all, so the finding is counted in
  * no bucket, does not raise the file's verdict, and the file is reported
  * CLEAN with a detection sitting in its result. A stale database, a build that
@@ -573,17 +576,43 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const char *text;
 
-	if (!sc->debug_cb || !sc->cur_mod)
+	if (!sc->cur_mod)
 		return;
 	/* An id the table does not know is a stale table, and says so rather than
 	 * borrowing the neighbouring name - the same rule findings follow. */
 	text = kof_db_name(sc->eng, sc->cur_mod, name_id);
 	if (!text)
 		text = "unknown";
+	/*
+	 * THE MODULE NAMING ITSELF, KEPT - see kof_scanner.mod_tag.
+	 *
+	 * "MPRESS.PE.lc" carries the module's name in front of the field, and
+	 * this is the only place the engine ever sees it. Taken here so a
+	 * child can be stamped with it at the push, rather than left for a
+	 * tool to guess at from whichever note happened to arrive last.
+	 */
+	{
+		const char *dot = text, *last = 0;
+
+		for (; *dot; dot++)
+			if (*dot == '.')
+				last = dot;
+		if (last && last != text) {
+			size_t n = (size_t)(last - text);
+
+			if (n >= sizeof sc->mod_tag)
+				n = sizeof sc->mod_tag - 1u;
+			memcpy(sc->mod_tag, text, n);
+			sc->mod_tag[n] = 0;
+			sc->mod_tag_of = sc->cur_mod;
+		}
+	}
+	if (!sc->debug_cb)
+		return;
 	/* The field, not the whole name: consumers ask "which version" without
 	 * caring which module answered, the same way they always did - only
 	 * without finding the dot themselves once per fact per object. */
-	sc->debug_cb(kof_fact_id(text), text, value, sc->debug_user);
+	sc->debug_cb(kverdict_fact_id(text), text, value, sc->debug_user);
 }
 
 /* ---- producing child objects ------------------------------------------------ */
@@ -693,6 +722,9 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_label_len = 0;
 	sc->pend_kind = 0;
 	sc->pend_entry = KOF_ENTRY_NONE;
+	sc->pend_want = 0;
+	sc->pend_want_level = 0;
+	sc->pend_n_xw = 0;
 	sc->pend_fmt = 0;
 	sc->pend_lang = 0;
 	sc->pend_subtype = sc->pend_subfam = 0;
@@ -700,6 +732,99 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_rgn_fmt = 0;
 	sc->pend_view = 0;
 	sc->n_pend_syms = 0;
+	sc->pend_derived_by = NULL;
+	sc->pend_as_fmt = 0;
+	sc->pend_as_arch = 0;
+	sc->pend_as_base = 0;
+	sc->pend_img_fmt = 0;
+	sc->n_pend_sec = 0;
+	sc->pend_entry_set = 0;
+	sc->pend_entry_rva = 0;
+	memset(sc->pend_dir, 0, sizeof sc->pend_dir);
+	sc->pend_image = 0;
+}
+
+/*
+ * The declared sections, as a region partition.
+ *
+ * ONE MASK PER SECTION, COALESCED WHERE NEIGHBOURS AGREE. The region table has
+ * room for KOF_SRC_MAX_REGIONS entries and a split image easily declares more
+ * sections than that - mp_split draws up to twelve and a real PE may have
+ * ninety-six - so runs of the same kind are joined. They are adjacent by
+ * construction: c_section refuses a section that starts before the previous one
+ * ends.
+ *
+ * PAD AND HOLLOW BECOME UNCLAIMED, which is the whole point of having them.
+ * Alignment fill is not DATA - it was being counted as 3972 bytes of it on one
+ * sample - and a section with no bytes behind it owns nothing to partition.
+ */
+/*
+ * THE VOCABULARY IS THE FORMAT'S, AND THE TWO DO NOT AGREE PAST THE THIRD BIT.
+ *
+ * HEADERS, CODE and DATA happen to share their bit numbers between PE and ELF -
+ * 1u<<1, 1u<<2, 1u<<3 - and that is a coincidence of two independent choices,
+ * not a rule. UNCLAIMED does not: it is 1u<<6 in a PE and 1u<<5 in an ELF,
+ * where 1u<<6 is SLIB_CODE and 1u<<5 is OVERLAY. So a table written in one
+ * format's words and hung on an object of the other is not slightly wrong, it
+ * names a different region - and a module that declared its padding would have
+ * had it reported as a static library's code.
+ *
+ * Which is why this takes the format rather than assuming PE, and why
+ * pend_rgn_fmt is set from the same answer.
+ */
+static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
+{
+	uint32_t i, n = 0;
+	uint64_t hdr_end;
+	uint32_t m_hdr, m_code, m_data, m_unclaimed;
+
+	if (!sc->pend_sec || !sc->n_pend_sec)
+		return;
+	if (fmt == KOF_FMT_ELF) {
+		m_hdr = KOF_SCAN_ELF_HEADERS;
+		m_code = KOF_SCAN_ELF_CODE;
+		m_data = KOF_SCAN_ELF_DATA;
+		m_unclaimed = KOF_SCAN_ELF_UNCLAIMED;
+	} else {
+		m_hdr = KOF_SCAN_PE_HEADERS;
+		m_code = KOF_SCAN_PE_CODE;
+		m_data = KOF_SCAN_PE_DATA;
+		m_unclaimed = KOF_SCAN_PE_UNCLAIMED;
+	}
+	/* Everything before the first section is the header, which no module
+	 * declares and every consumer expects. */
+	hdr_end = sc->pend_sec[0].rva;
+	if (hdr_end && n < KOF_SRC_MAX_REGIONS) {
+		sc->pend_rgn[n].mask = m_hdr;
+		sc->pend_rgn[n].off = 0;
+		sc->pend_rgn[n].len = hdr_end;
+		n++;
+	}
+	for (i = 0; i < sc->n_pend_sec; i++) {
+		const struct kof_sec_decl *d = &sc->pend_sec[i];
+		uint32_t mask;
+
+		if (d->flags & (KOF_SECF_PAD | KOF_SECF_HOLLOW))
+			mask = m_unclaimed;
+		else if (d->flags & KOF_SECF_CODE)
+			mask = m_code;
+		else
+			mask = m_data;
+		if (n && sc->pend_rgn[n - 1u].mask == mask &&
+		    sc->pend_rgn[n - 1u].off + sc->pend_rgn[n - 1u].len ==
+		    d->rva) {
+			sc->pend_rgn[n - 1u].len += d->vsize;
+			continue;
+		}
+		if (n >= KOF_SRC_MAX_REGIONS)
+			break;
+		sc->pend_rgn[n].mask = mask;
+		sc->pend_rgn[n].off = d->rva;
+		sc->pend_rgn[n].len = d->vsize;
+		n++;
+	}
+	sc->n_pend_rgn = n;
+	sc->pend_rgn_fmt = fmt;
 }
 
 static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
@@ -820,6 +945,33 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	/* The regions go the same way and are cleared the same way: a table
 	 * left pending would be worn by the next child, and its offsets are
 	 * offsets into different bytes. */
+	/*
+	 * SECTIONS BECOME THE REGION TABLE, when a module declared them and did
+	 * not declare a region table itself.
+	 *
+	 * The partition is what every rule is scoped to, and until now the only
+	 * way to get one onto a produced child was to synthesise a PE header
+	 * and let the engine parse it back. What that loses is measured in
+	 * `section` in kofsig.h; this is the other direction, and it is one
+	 * pass over a table the module has already filled in.
+	 *
+	 * A module that declares a region table directly - norm_emit does -
+	 * keeps it; the two are not merged, because a caller that said both
+	 * meant the explicit one.
+	 */
+	/*
+	 * ONLY FOR A DECLARED PE IMAGE, because the masks are PE's.
+	 *
+	 * A region bit means nothing on its own - 1u << 5 is UNCLAIMED in an
+	 * ELF and OVERLAY in a PE - so a table written in one format's
+	 * vocabulary and hung on an object of another is worse than no table.
+	 * A producer that declared sections without asking for an image has
+	 * described a layout, not a file, and the partition is not derived
+	 * from it.
+	 */
+	if (!sc->n_pend_rgn && sc->n_pend_sec && sc->pend_image)
+		decl_sec_to_regions(sc, sc->pend_as_fmt ? sc->pend_as_fmt
+							: sc->pend_img_fmt);
 	if (sc->n_pend_rgn) {
 		kof_src_declare_regions(kid, sc->pend_rgn_fmt, sc->pend_rgn,
 					sc->n_pend_rgn);
@@ -866,6 +1018,9 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		struct kof_objsrc **nv = realloc(sc->kids, nc * sizeof *nv);
 		uint8_t *np = NULL;
 		const char **nf = NULL;
+		uint32_t *nw = NULL, *nl = NULL, *nx = NULL;
+		uint64_t *nr = NULL;
+		const struct kof_module **nd = NULL;
 
 		if (nv)
 			sc->kids = nv;
@@ -875,12 +1030,33 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 			sc->kid_packer = np;
 		if (np)
 			nf = realloc(sc->kid_family, nc * sizeof *nf);
-		if (!nf) {
+		if (nf)
+			sc->kid_family = nf;
+		if (nf)
+			nd = realloc(sc->kid_derived_by, nc * sizeof *nd);
+		if (nd)
+			sc->kid_derived_by = nd;
+		if (nd)
+			nw = realloc(sc->kid_want, nc * sizeof *nw);
+		if (nw)
+			sc->kid_want = nw;
+		if (nw)
+			nl = realloc(sc->kid_want_level, nc * sizeof *nl);
+		if (nl)
+			nx = realloc(sc->kid_n_xw, nc * sizeof *nx);
+		if (nx)
+			sc->kid_n_xw = nx;
+		if (nx)
+			nr = realloc(sc->kid_xw,
+				     (size_t)nc * KOF_EMU_EXEC_WATCH * 2u *
+				     sizeof *nr);
+		if (!nl || !nx || !nr) {
 			scan_broken(sc, KOF_BROKEN_LIMIT);
 			kof_src_unref(kid);
 			return 0;
 		}
-		sc->kid_family = nf;
+		sc->kid_want_level = nl;
+		sc->kid_xw = nr;
 		sc->cap_kids = nc;
 	}
 	/*
@@ -890,6 +1066,26 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * to everything downstream, and they are not the same kind of evidence -
 	 * see KOF_UNPACK_KIND in kofsig.h.
 	 */
+	/*
+	 * And what the producing module said has to be done to it, spent here
+	 * the same way every other pending claim is - see pend_clear on why a
+	 * claim may not outlive the one child it was about.
+	 */
+	sc->kid_want[sc->n_kids] = sc->pend_want;
+	sc->kid_want_level[sc->n_kids] = sc->pend_want_level;
+	if (sc->kid_n_xw && sc->kid_xw) {
+		uint32_t q;
+
+		sc->kid_n_xw[sc->n_kids] = sc->pend_n_xw;
+		for (q = 0; q < sc->pend_n_xw; q++) {
+			uint64_t *d = sc->kid_xw +
+				      (size_t)sc->n_kids * KOF_EMU_EXEC_WATCH *
+				      2u + (size_t)q * 2u;
+
+			d[0] = sc->pend_xw[q].rva;
+			d[1] = sc->pend_xw[q].len;
+		}
+	}
 	sc->kid_packer[sc->n_kids] =
 		(uint8_t)(sc->emu_stage ||
 			  (sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER));
@@ -908,6 +1104,32 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 
 		sc->kid_family[sc->n_kids] = (fam && fam[0]) ? fam : NULL;
 	}
+	/*
+	 * AND WHICH MODULE OPENED THE OBJECT THIS CAME OUT OF.
+	 *
+	 * Recorded here because producing a child is what "opened it" means,
+	 * and here is the only place the engine knows both at once: `cur_mod`
+	 * is the module running, and the object it is running ON is the one
+	 * being scanned. See kof_result.opened_by for why it is the parent
+	 * that carries the name and not the child.
+	 */
+	if (sc->cur_mod && !sc->opened_by[0]) {
+		const char *from = (sc->mod_tag_of == sc->cur_mod &&
+				    sc->mod_tag[0])
+				   ? sc->mod_tag
+				   : kof_db_source(sc->eng, sc->cur_mod);
+
+		if (from) {
+			size_t q = strlen(from);
+
+			if (q >= KOF_MOD_TAG)
+				q = KOF_MOD_TAG - 1u;
+			memcpy(sc->opened_by, from, q);
+			sc->opened_by[q] = 0;
+		}
+	}
+	if (sc->kid_derived_by)
+		sc->kid_derived_by[sc->n_kids] = sc->pend_derived_by;
 	sc->kids[sc->n_kids++] = kid;
 	sc->kids_left--;
 	return 1;
@@ -972,6 +1194,64 @@ static void scan_charge(struct kof_scanner *sc, uint64_t n)
  * through a different offset. What bounds it is the child count and the depth,
  * because a window can still be a way of pointing an object at itself.
  */
+static void c_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
+			uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !len || sc->pend_n_xw >= KOF_EMU_EXEC_WATCH)
+		return;
+	sc->pend_xw[sc->pend_n_xw].rva = rva;
+	sc->pend_xw[sc->pend_n_xw].len = len;
+	sc->pend_n_xw++;
+}
+
+/* The same declaration about the object in hand - see emu_watch_here. */
+/* What the declared image becomes - see `as_format` in kofsig.h. */
+static void c_as_format(const struct kof_obj_ctx *ctx, uint8_t fmt,
+			uint8_t arch, uint64_t base)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc)
+		return;
+	sc->pend_as_fmt = fmt;
+	sc->pend_as_arch = arch;
+	sc->pend_as_base = base;
+}
+
+/* This object is a wrapper - see `supersede` in kofsig.h. */
+static void c_supersede(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (sc)
+		sc->superseded = 1;
+}
+
+static void c_emu_watch_here(const struct kof_obj_ctx *ctx, uint64_t rva,
+			     uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !len || sc->n_xw_mod >= KOF_EMU_EXEC_WATCH)
+		return;
+	sc->xw_mod[sc->n_xw_mod].rva = rva;
+	sc->xw_mod[sc->n_xw_mod].len = len;
+	sc->n_xw_mod++;
+}
+
+static void c_child_want(const struct kof_obj_ctx *ctx, uint32_t want,
+			 uint32_t level)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc)
+		return;
+	sc->pend_want = want;
+	sc->pend_want_level = level;
+}
+
 static int c_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -1018,6 +1298,44 @@ static int c_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 		return 0;
 	if (n == 0)
 		return 1;
+	/*
+	 * A FIXED SINK IS WRITTEN AT A CURSOR, NOT APPENDED TO.
+	 *
+	 * The extent is already the right size - it is a copy of the parent, or
+	 * an image laid out from declared sections - so an emit places bytes
+	 * rather than growing anything, and running past the end is a refusal
+	 * and not a reallocation.
+	 *
+	 * This is what lets a decompressor write into a section. c_unpack and
+	 * every decoder behind it hand their output to c_emit; moving the
+	 * cursor with kunp_rcstruct_at is the whole of "decompress to this address",
+	 * and no decoder has to know it happened.
+	 */
+	if (sc->sink_fixed) {
+		/*
+		 * BOUNDED BY WHAT WAS ALLOCATED, NOT BY WHAT IS CURRENTLY IN
+		 * USE, and the two stopped being the same when
+		 * layout_of_produced started cutting.
+		 *
+		 * The extent is the span the module declared and it does not
+		 * move. `sink_len` is how much of it counts as the child, and
+		 * layout_of_produced lowers it to where the image's own header
+		 * says the image ends. A module that then folds something in
+		 * BEHIND the image - emu_harvest.h does, with the pages a run
+		 * wrote outside it - is writing inside the extent it paid for
+		 * and must not be refused for it. Measured: bounded by
+		 * sink_len, every surplus page of 007 Spy.exe was refused at
+		 * the first byte and the child came out with the image alone.
+		 */
+		if (sc->sink_at > sc->sink_cap ||
+		    n > sc->sink_cap - sc->sink_at)
+			return 0;
+		memcpy(sc->sink_mem + sc->sink_at, bytes, n);
+		sc->sink_at += n;
+		if (sc->sink_at > sc->sink_len)
+			sc->sink_len = sc->sink_at;
+		return 1;
+	}
 	/* A length out of a file, refused before it is used to read anything. */
 	if (n > EMIT_MAX) {
 		scan_broken(sc, KOF_BROKEN_LIMIT);
@@ -1342,6 +1660,17 @@ static uint64_t zlib_hdr_len(const uint8_t *p, uint64_t n)
  * so the arithmetic is shared and only the base differs. Answers 0, 32 or 64:
  * the width of the call filter to undo afterwards, and 0 for "none".
  */
+/* And the same question for LZMAT, whose two variants carry no parameters so
+ * they are two ids rather than two ranges. */
+static unsigned lzmat_cto_bits(uint32_t method)
+{
+	if (method == KOF_UNP_LZMAT_MPRESS64)
+		return 64u;
+	if (method == KOF_UNP_LZMAT_MPRESS32)
+		return 32u;
+	return 0u;
+}
+
 static unsigned lzma_cto_bits(uint32_t method)
 {
 	if (method >= KOF_UNP_LZMA_MPRESS64 &&
@@ -1384,6 +1713,8 @@ static int buffered_method(uint32_t method)
 	 * have" and nothing is said about the file.
 	 */
 	return method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
+	       method == KOF_UNP_APLIB ||
+	       method == KOF_UNP_LZMAT || lzmat_cto_bits(method) != 0u ||
 	       method == KOF_UNP_RAR3  || method == KOF_UNP_RAR5 ||
 	       (method >= KOF_UNP_LZMA && method <= KOF_UNP_LZMA + 224u) ||
 	       lzma_cto_bits(method) != 0u ||
@@ -1595,6 +1926,23 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 			scan_release(sc, sn);
 			free(scratch);
 		}
+	} else if (method == KOF_UNP_LZMAT || lzmat_cto_bits(method)) {
+		unsigned cto = lzmat_cto_bits(method);
+
+		/* Buffered like aPLib and for the same reason: a match
+		 * distance has no ceiling and the buffer IS the window. */
+		st = kof_lzmat_decode(in, in_len, buf, want, &produced);
+		/* And the call target conversion undone over the whole of it,
+		 * exactly as the LZMA pair below does it. */
+		if (cto && produced)
+			kof_mpress_cto_decode(buf, produced, cto);
+	} else if (method == KOF_UNP_APLIB) {
+		/*
+		 * Buffered for the reason NRV2 is: an aPLib match distance has
+		 * no ceiling, so the whole output has to stay addressable until
+		 * the stream ends and the buffer IS the window.
+		 */
+		st = kof_aplib_decode(in, in_len, buf, want, &produced);
 	} else if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
 		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
 		/*
@@ -1700,24 +2048,23 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		return n;
 	}
 
-	if (form == KOF_FORM_PE_IMAGE && produced) {
-		uint8_t *rebuilt = NULL;
-		uint64_t rebuilt_len = 0;
-		uint64_t rebuild_cap = scan_room(sc);
+	/*
+	 * KOF_FORM_PE_IMAGE USED TO BE ANSWERED HERE, and is not any more.
+	 *
+	 * It meant "what I just decompressed is an image, put a file back
+	 * together out of it", and the engine did that by hunting for a PE
+	 * header inside the output, allocating a SECOND buffer the size of the
+	 * whole image, and copying every section into it so that the result
+	 * could be parsed back. Two copies of an image to recover a layout that
+	 * was written down in the bytes all along.
+	 *
+	 * A module now asks for the same thing where it can see it happening:
+	 * take an image, decompress into it, and call kunp_rcstruct_layout_of_image
+	 * - which reads that header and DECLARES the sections. One buffer, and
+	 * the module decides when. See upx_pe.c, and `layout_of_produced` in
+	 * kofsig.h.
+	 */
 
-		if (kof_pe_rebuild(kof_buf_make(buf, produced), rebuild_cap, &rebuilt,
-				   &rebuilt_len)) {
-			scan_release(sc, want);
-			free(buf);
-			buf = rebuilt;
-			want = rebuilt_len;
-			produced = rebuilt_len;
-			scan_charge(sc, want);
-		}
-		/* A buffer that could not be rebuilt is emitted as it is: an image
-		 * is still worth searching, and saying nothing about it would be
-		 * worse than handing over something that does not identify. */
-	}
 
 	/* Whatever was decoded is real output and is worth scanning, whether or not
 	 * the stream ended cleanly - the same rule the gzip path follows. */
@@ -2751,6 +3098,63 @@ static int c_child(const struct kof_obj_ctx *ctx)
 	if (sc->sink_len + sc->sink_spilled == 0)
 		return 0;              /* nothing was emitted; not a child */
 
+	/*
+	 * THE HEADER, WRITTEN HERE AND NOWHERE ELSE - see c_image.
+	 *
+	 * Last, because a declaration is allowed to be corrected until the
+	 * child closes: the entry point is often readable only after the
+	 * content exists, and a section's kind only after it has been filled.
+	 * mpress_pe.c does both by hand today, through thirteen
+	 * kunp_rcstruct_poke calls into a header it wrote itself.
+	 */
+	if (sc->pend_image && sc->sink_mem && sc->n_pend_sec) {
+		const struct kof_pe_info *tmpl =
+			(const struct kof_pe_info *)ctx->file_header;
+		uint64_t span = sc->pend_sec[sc->n_pend_sec - 1u].rva +
+				sc->pend_sec[sc->n_pend_sec - 1u].vsize;
+		uint64_t entry = sc->pend_entry_set ? sc->pend_entry_rva : 0;
+		int ok;
+
+		/*
+		 * WHAT THE MODULE SAID, OR WHAT THE PARENT IS.
+		 *
+		 * A packer's child is the parent's own image and the parent's
+		 * header is the template; that is the `as_fmt == 0` case and it
+		 * is the common one. A DECODER's child is shellcode, which is
+		 * no format at all until somebody says which one it should
+		 * become - and after the first layer the parent is formatless,
+		 * so only the module can say. See `as_format` in kofsig.h.
+		 */
+		if (sc->pend_as_fmt == KOF_FMT_ELF) {
+			int is64 = sc->pend_as_arch == KOF_ARCH_X86_64;
+			uint16_t mach = (uint16_t)(is64 ? 62u : 3u);
+
+			ok = kof_elf_write_hdr(sc->sink_mem,
+					       sc->pend_sec[0].rva, is64, mach,
+					       sc->pend_as_base, sc->pend_sec,
+					       sc->n_pend_sec, entry,
+					       span) != 0;
+		} else {
+			ok = (ctx->format == KOF_FMT_PE || sc->pend_as_fmt ==
+							   KOF_FMT_PE) &&
+			     tmpl && tmpl->valid &&
+			     kof_pe_write_hdr(sc->sink_mem,
+					      sc->pend_sec[0].rva, tmpl,
+					      sc->pend_sec, sc->n_pend_sec,
+					      entry, span, sc->pend_dir) != 0;
+		}
+		if (!ok) {
+			/*
+			 * A declared image whose header will not fit, or whose
+			 * parent is not a PE, is not handed over as a headless
+			 * blob: the module asked for a file and got none, and
+			 * saying so is the only honest answer.
+			 */
+			scan_broken(sc, KOF_BROKEN_DAMAGED);
+			return 0;
+		}
+	}
+
 	if (sc->sink_fd >= 0) {
 		if (!sink_spill(sc))
 			return 0;
@@ -2765,6 +3169,8 @@ static int c_child(const struct kof_obj_ctx *ctx)
 		sc->sink_cap = 0;
 	}
 	sc->sink_len = 0;
+	sc->sink_fixed = 0;
+	sc->sink_at = 0;
 
 	/*
 	 * The bytes were charged to the sink and are now the child's. Ownership of
@@ -3102,6 +3508,399 @@ static void c_child_entry(const struct kof_obj_ctx *ctx, uint32_t index)
 	kof_scan_of(ctx)->pend_entry = index;
 }
 
+static void c_note_next(const struct kof_obj_ctx *ctx, const char *text)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	size_t n;
+
+	if (!text || !*text)
+		return;
+	n = strlen(text);
+	if (n > KOF_SRC_LABEL_MAX - 1u)
+		n = KOF_SRC_LABEL_MAX - 1u;
+	memcpy(sc->pend_label, text, n);
+	sc->pend_label[n] = 0;
+	sc->pend_label_len = (uint32_t)n;
+}
+
+/*
+ * The child as it stands: whatever has spilled to the file, then whatever is
+ * still in memory behind it. One address space to the module - see
+ * produced_read in kofsig.h.
+ */
+static uint32_t c_produced_read(const struct kof_obj_ctx *ctx, uint64_t off,
+				void *out, uint32_t cap)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint64_t total = sc->sink_spilled + sc->sink_len;
+	uint32_t got = 0;
+
+	if (!out || !cap || off >= total)
+		return 0;
+	if ((uint64_t)cap > total - off)
+		cap = (uint32_t)(total - off);
+	if (off < sc->sink_spilled && sc->sink_fd >= 0) {
+		uint64_t n = sc->sink_spilled - off;
+
+		if (n > cap)
+			n = cap;
+		got = (uint32_t)kof_pos_io(sc->sink_fd, off, out, n, 0);
+		if (got < n)
+			return got;             /* short read: say so */
+	}
+	if (got < cap && sc->sink_mem) {
+		uint64_t at = off + got - sc->sink_spilled;
+		uint32_t n = cap - got;
+
+		if (at + n > sc->sink_len)
+			n = (uint32_t)(sc->sink_len - at);
+		memcpy((uint8_t *)out + got, sc->sink_mem + at, n);
+		got += n;
+	}
+	return got;
+}
+
+/* And the same span, written over. Never past what exists. */
+static int c_produced_poke(const struct kof_obj_ctx *ctx, uint64_t off,
+			   const void *bytes, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint64_t total = sc->sink_spilled + sc->sink_len;
+	uint32_t did = 0;
+
+	if (!bytes || !n || off >= total || (uint64_t)n > total - off)
+		return 0;
+	if (off < sc->sink_spilled && sc->sink_fd >= 0) {
+		uint64_t k = sc->sink_spilled - off;
+
+		if (k > n)
+			k = n;
+		did = (uint32_t)kof_pos_io(sc->sink_fd, off,
+					   (void *)(uintptr_t)bytes, k, 1);
+		if (did < k)
+			return 0;
+	}
+	if (did < n && sc->sink_mem) {
+		uint64_t at = off + did - sc->sink_spilled;
+
+		memcpy(sc->sink_mem + at, (const uint8_t *)bytes + did,
+		       n - did);
+	}
+	return 1;
+}
+
+/*
+ * THE PARENT AGAIN, AS THE START OF THIS CHILD - see `derive` in kofsig.h.
+ *
+ * Emitted through the ordinary path rather than handed over by reference, so
+ * every budget sees a child the size of its parent, which is what it is. The
+ * saving this is for is not memory - it is that the module stops having to
+ * re-emit bytes it is not changing, and with them the sort and the overlap
+ * resolution it was getting wrong: measured on strxor_tab_00.c, once dropping
+ * 114353 bytes and once letting an over-long record swallow its neighbour.
+ *
+ * REFUSED ON A SINK THAT IS NOT EMPTY. Deriving says where the child STARTS;
+ * after anything has been emitted it would mean appending a copy of the parent
+ * to it, which no caller wants and which would silently double an object.
+ */
+/*
+ * ---- WHAT A MODULE DECLARES ABOUT THE CHILD IT IS BUILDING ------------------
+ *
+ * See `section` in kofsig.h for why these exist rather than a synthesised
+ * header. The table is the module's statement; nothing here writes a container
+ * out of it, and nothing here parses one back.
+ */
+#define DECL_SEC_MAX 96u        /* what a PE may declare, which is the most any
+				 * producer here has reason to */
+
+static int c_section(const struct kof_obj_ctx *ctx, const char *name,
+		     uint64_t rva, uint64_t vsize, uint32_t perm,
+		     uint32_t flags)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_sec_decl *d;
+	uint32_t k;
+	unsigned q;
+
+	if (!sc->pend_sec) {
+		sc->pend_sec = calloc(DECL_SEC_MAX, sizeof *sc->pend_sec);
+		if (!sc->pend_sec)
+			return -1;
+	}
+	if (vsize == 0)
+		return -1;
+	/*
+	 * A REGION IS UNIQUE BY ITS ADDRESS, SO DECLARING IT AGAIN REPLACES IT.
+	 *
+	 * This is what lets a module LOOK AT WHAT IT BUILT before it says what
+	 * the thing is. Declaring up front is unavoidable - the engine sizes
+	 * the image from the table - but a declaration made before the content
+	 * exists is a guess about the PARENT, and getting that backwards was
+	 * measured: vmprotect_pe.c marked its destinations hollow from the
+	 * parent's shape, so in a child that had just been filled they still
+	 * read as empty, the module accepted the same table again, and
+	 * explorer.exe came back as seven identical objects.
+	 *
+	 * So: declare the layout, fill it, read it back, and say again what is
+	 * there. The second word is the one that stands. Nothing is appended
+	 * twice and no index has to be carried around for it - the address is
+	 * the identity.
+	 */
+	for (k = 0; k < sc->n_pend_sec; k++)
+		if (sc->pend_sec[k].rva == rva) {
+			struct kof_sec_decl *e = &sc->pend_sec[k];
+			unsigned q;
+
+			/* An extent may be corrected, but not over its
+			 * neighbour: the table stays ordered and disjoint or
+			 * the engine cannot lay the child out from it. */
+			if (k + 1u < sc->n_pend_sec &&
+			    rva + vsize > sc->pend_sec[k + 1u].rva)
+				return -1;
+			for (q = 0; q < 8u; q++)
+				e->name[q] = name && name[q] ? name[q] : 0;
+			e->name[8] = 0;
+			e->vsize = vsize;
+			e->perm = perm;
+			e->flags = flags;
+			return (int)k;
+		}
+	if (sc->n_pend_sec >= DECL_SEC_MAX)
+		return -1;
+	d = &sc->pend_sec[sc->n_pend_sec];
+	for (q = 0; q < 8u; q++)
+		d->name[q] = name && name[q] ? name[q] : 0;
+	d->name[8] = 0;
+	d->rva = rva;
+	d->vsize = vsize;
+	d->perm = perm;
+	d->flags = flags;
+	return (int)sc->n_pend_sec++;
+}
+
+/* Forget the layout - see `sections_reset` in kofsig.h. The image is
+ * untouched; a module that clears the table and declares nothing gets a child
+ * with no header, which kunp_rcstruct_done refuses. */
+static int c_sections_reset(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	sc->n_pend_sec = 0;
+	return 1;
+}
+
+/* The layout the produced image carries - see `layout_of_produced`. */
+static uint64_t c_layout_of_produced(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint64_t entry = 0, base = 0;
+	uint32_t n;
+
+	if (!sc->sink_fixed || !sc->sink_mem || !sc->sink_len)
+		return 0;
+	if (!sc->pend_sec) {
+		sc->pend_sec = calloc(DECL_SEC_MAX, sizeof *sc->pend_sec);
+		if (!sc->pend_sec)
+			return 0;
+	}
+	n = kof_pe_layout_of(kof_buf_make(sc->sink_mem, sc->sink_len),
+			     sc->pend_sec, DECL_SEC_MAX, &entry, &base,
+			     sc->pend_dir);
+	if (!n)
+		return 0;
+	/*
+	 * AND THE CHILD ENDS WHERE ITS LAST SECTION DOES.
+	 *
+	 * The image was sized from what the container DECLARED, which is not
+	 * where the header found inside it says the image ends. Those trailing
+	 * bytes are past every section, so no claim covers them and the
+	 * partition calls them an OVERLAY - measured on a UPX child, 3233 bytes
+	 * of it on a file that carries nothing appended at all.
+	 *
+	 * Declaring them as padding does not help: padding is deliberately left
+	 * out of the section table, so the last claim would still end before
+	 * them. They are dropped, which is also what the path this replaces
+	 * did - it built a file sized to the sections and never carried the
+	 * remainder at all.
+	 */
+	{
+		uint64_t end = sc->pend_sec[n - 1u].rva +
+			       sc->pend_sec[n - 1u].vsize;
+
+		if (end && end < sc->sink_len)
+			sc->sink_len = (size_t)end;
+		sc->n_pend_sec = n;
+		sc->pend_entry_rva = entry;
+		sc->pend_entry_set = entry ? 1 : 0;
+		/* Where the image ends, for a caller with something to put
+		 * behind it - see layout_of_produced. */
+		return end ? end : (uint64_t)sc->sink_len;
+	}
+}
+
+/*
+ * A directory a module REBUILT, which overrides whatever the parent had - see
+ * `child_dir` in kofsig.h.
+ */
+static int c_child_dir(const struct kof_obj_ctx *ctx, uint32_t idx,
+		       uint64_t rva, uint64_t size)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (idx >= 16u)
+		return 0;
+	sc->pend_dir[idx].rva = rva;
+	sc->pend_dir[idx].size = size;
+	sc->pend_dir[idx].set = 1;
+	return 1;
+}
+
+/* The child's entry point, which is often knowable only after its content
+ * exists - mpress_pe.c reads it out of a fix-up stub it has just decompressed. */
+static int c_child_entry_rva(const struct kof_obj_ctx *ctx, uint64_t rva)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	sc->pend_entry_rva = rva;
+	sc->pend_entry_set = 1;
+	return 1;
+}
+
+/*
+ * THE CHILD IS AN IMAGE THE ENGINE LAYS OUT, from the sections just declared.
+ *
+ * The other half of `section` in kofsig.h. A module declares where things go,
+ * asks for the image, writes content at addresses with kunp_rcstruct_poke in whatever
+ * order suits it, and the engine writes the header at the close. No module
+ * synthesises a container and no engine parses one back.
+ *
+ * ZERO FILLED, so a section a module never writes to reads as absent rather
+ * than as whatever was in the allocator's memory - which matters most for the
+ * sections that ARE absent, the hollow ones.
+ */
+/* Where the next write lands in a fixed sink - see `at` in kofsig.h. */
+static int c_at(const struct kof_obj_ctx *ctx, uint64_t off)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	/* Anywhere inside the extent, for the reason c_emit gives: the cursor
+	 * may be placed past what currently counts as the child, because a cut
+	 * back to the image's end is not a cut to the space that was paid
+	 * for. */
+	if (!sc->sink_fixed || off > sc->sink_cap)
+		return 0;
+	sc->sink_at = off;
+	return 1;
+}
+
+static int c_image(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint64_t span;
+	uint8_t *mem;
+
+	if (!can_produce(sc) || !sc->cur_src)
+		return 0;
+	if (sc->sink_len || sc->sink_spilled || !sc->n_pend_sec)
+		return 0;
+	{
+		const struct kof_sec_decl *last =
+			&sc->pend_sec[sc->n_pend_sec - 1u];
+
+		span = last->rva + last->vsize;
+	}
+	if (!span || span > sc->budget || span > sc->obj_cap ||
+	    sc->resident > sc->resident_max ||
+	    span > sc->resident_max - sc->resident) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	mem = calloc(1, (size_t)span);
+	if (!mem) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	free(sc->sink_mem);
+	sc->sink_mem = mem;
+	sc->sink_cap = (size_t)span;
+	sc->sink_len = (size_t)span;
+	sc->sink_fixed = 1;             /* fixed size, written at a cursor */
+	sc->sink_at = 0;
+	sc->pend_image = 1;
+	/*
+	 * The format whose vocabulary the declared sections will be turned into
+	 * regions with, remembered HERE because this is the last point that has
+	 * the context - kid_push, where the table is built, does not. A module
+	 * that says otherwise with kunp_rcstruct_as overrides it.
+	 */
+	sc->pend_img_fmt = ctx->format;
+
+	sc->budget -= span;
+	scan_charge(sc, span);
+	return 1;
+}
+
+static int c_derive(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b;
+	uint8_t *mem;
+
+	if (!can_produce(sc) || !sc->cur_src)
+		return 0;
+	if (sc->sink_len || sc->sink_spilled)
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	if (!b.p || !b.n)
+		return 0;
+
+	/* The same three ceilings c_emit applies, asked once for the whole
+	 * copy rather than once per megabyte - a derive is all or nothing, and
+	 * half a copy of an object is not a prefix of anything. */
+	if (b.n > sc->budget ||
+	    b.n > sc->obj_cap ||
+	    sc->resident > sc->resident_max ||
+	    b.n > sc->resident_max - sc->resident) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+
+	/*
+	 * ONE ALLOCATION AND ONE COPY, NOT A RUN THROUGH THE SINK.
+	 *
+	 * Through c_emit this would cross SINK_SPILL at one megabyte, put the
+	 * remaining four and a bit into a temporary file, and turn every later
+	 * kunp_rcstruct_poke into a positioned write to a descriptor - on the sample
+	 * this was written for, 259 of them. The size is known in full before
+	 * the first byte moves, so none of that is necessary: take the memory
+	 * once, copy once, and every edit afterwards is a memcpy.
+	 *
+	 * It also means a derived child never spills, which is deliberate. A
+	 * module that derives is editing an object it has already been given
+	 * whole, so the memory was there to begin with.
+	 */
+	mem = malloc((size_t)b.n);
+	if (!mem) {
+		scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	memcpy(mem, b.p, (size_t)b.n);
+	free(sc->sink_mem);
+	sc->sink_mem = mem;
+	sc->sink_cap = (size_t)b.n;
+	sc->sink_len = (size_t)b.n;
+	sc->sink_fixed = 1;
+	sc->sink_at = 0;
+
+	sc->budget -= b.n;
+	scan_charge(sc, b.n);
+
+	/* And the fact that makes it safe to offer this child to everyone
+	 * else: the module that derived it does not see it again. */
+	sc->pend_derived_by = sc->cur_mod;
+	return 1;
+}
+
 static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -3121,7 +3920,7 @@ static void c_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t le
 /*
  * Two vtables, differing only in whether the producer entries are there.
  *
- * A detector gets NULLs, so kof_emit and kof_child_window answer zero for it, and
+ * A detector gets NULLs, so kunp_rcstruct_write and kunp_rcstruct_window answer zero for it, and
  * the rule that only an unpacker produces children is carried by the pointers
  * rather than by a check somewhere that could be missed. Same shape as
  * resolve_scan being NULL when nothing identified the object.
@@ -3553,7 +4352,7 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 	}
 	{
 		struct kof_match_ctx *m = mc(ctx);
-		uint32_t v = kof_entropy_hist(hist, total);
+		uint32_t v = kentropy_hist(hist, total);
 		uint32_t slot = m->ent_next;
 
 		m->ent[slot].off  = (uint64_t)mask;
@@ -3592,7 +4391,7 @@ static uint32_t c_entropy_at(const struct kof_obj_ctx *ctx, uint64_t off,
 			return m->ent[i].val;
 
 	s = kof_slice(m->data, off, len);
-	v = kof_entropy_eighths(s.p, s.n);
+	v = kentropy_eighths(s.p, s.n);
 
 	i = m->ent_next;
 	m->ent[i].off  = off;
@@ -3767,7 +4566,7 @@ struct kof_flow_set {
 
 /* How the decoder should be told to read this object's code. Anything that is
  * not one of the two architectures bddisasm has is refused rather than guessed
- * at - see analyzer/disasm/flow.h. */
+ * at - see analyzers/disasm/flow.h. */
 static int flow_mode(const struct kof_obj_ctx *ctx, unsigned *bits,
 		     unsigned *abi, uint32_t *mask)
 {
@@ -4435,31 +5234,50 @@ static uint32_t c_ovl_shape(const struct kof_obj_ctx *ctx,
 	return kof_ovl_shape_cmp(&cur, ref);
 }
 
+static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch);
+static int c_emu_region(const struct kof_obj_ctx *ctx, uint32_t i,
+			uint64_t *va, uint64_t *len, uint32_t *kind);
+static int c_emu_take(const struct kof_obj_ctx *ctx, uint32_t i);
+static int c_opened_already(const struct kof_obj_ctx *ctx);
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-	NULL, c_find_str_where,
-	NULL, NULL, c_incomplete, NULL, c_syms, c_data_xref,
+	NULL, NULL, NULL, c_find_str_where,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, c_incomplete, NULL, c_syms,
+	c_data_xref,
 	/* Answered for a detector too. The answer is about the database and
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
 	c_plague_score, c_ovl_blocks, c_ovl_chain, c_ovl_shape,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
-	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
+	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
+	/* emu_watch_here - a detector drives no interpreter. */
+	NULL,
+	/* supersede - a detector produces nothing to be superseded by. */
+	NULL,
+	/* as_format - nor an image to write a header for. */
+	NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, c_window, c_emit, c_child, c_unpack,
-	c_unpack_peek, c_child_format, c_child_kind, c_child_entry,
+	c_unpack_peek, c_child_format, c_child_kind, c_child_want, c_emu_watch, c_child_entry,
 	c_unpack_chain, c_find_str_where,
-	c_gather, c_name_next, c_incomplete,
+	c_gather, c_name_next, c_note_next,
+	c_produced_read, c_produced_poke, c_derive, c_image, c_at,
+	c_section, c_sections_reset, c_child_entry_rva,
+	c_child_dir, c_layout_of_produced,
+	c_emu_run, c_emu_region, c_emu_take, c_opened_already, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_plague_score,
 	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
-	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask
+	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
+	c_emu_watch_here, c_supersede, c_as_format
 };
 
 /*
@@ -4562,7 +5380,7 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
  * definition: two of them drifting apart would be an id that means one thing to
  * the engine and another to the tool comparing against it.
  */
-uint32_t kof_fact_id(const char *field)
+uint32_t kverdict_fact_id(const char *field)
 {
 	const char *dot;
 
@@ -4606,6 +5424,9 @@ uint32_t kof_fact_id(const char *field)
 #define EMU_INSN_PER_BYTE  512ull
 #define EMU_INSN_MIN       (16ull << 20)
 #define EMU_INSN_MAX       (256ull << 20)
+
+/* The stall ceiling for a child a module asked to have run - see the call. */
+#define EMU_IDLE_DECLARED  (128ull << 20)
 
 static uint64_t emu_insn(uint64_t obj_size)
 {
@@ -4680,6 +5501,10 @@ static uint64_t emu_pages(const struct kof_scanner *sc)
 #define NOVEL_PROBE  32u
 #define NOVEL_TRIES  16u
 
+/* An assembled image is worth a scan of its own when the run changed more than
+ * one part in this many of what it started from. See where it is used. */
+#define IMG_DIFF_DEN 64u
+
 static int emu_novel(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -4728,6 +5553,75 @@ static int emu_rd(void *user, uint64_t va, void *dst, uint32_t n)
  * a uint32 length and refuses anything over EMIT_MAX - a decompressor already
  * works a window at a time and so does this.
  */
+static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p,
+		    uint64_t n);
+
+/*
+ * ---- ONE OBJECT OUT OF A RUN, NOT A HANDFUL --------------------------------
+ *
+ * A run leaves two kinds of thing behind: the IMAGE a stub assembled, and
+ * SURPLUS - pages it decompressed into the heap, made executable, or simply
+ * wrote. Handing each one over separately is what produced the rows of
+ * anonymous blobs beside the file: `emu:image@0x400000`, `emu:exec@0x20002000`,
+ * `emu:written@...`, each re-parsed from nothing by whoever looked at it.
+ *
+ * They are one program. So the image is reconstructed and the surplus is folded
+ * into it as EXTRA SECTIONS past its end - each keeping the guest address it
+ * was lifted from, in its name, because that is the only thing tying it back to
+ * where the run put it. One child, one section table, one thing to look at.
+ *
+ * AND WHEN THERE IS NO IMAGE, THE SURPLUS IS STILL WORTH HAVING. A stub that
+ * never assembles a PE - a shellcode decoder, a packer that runs its payload
+ * from the heap - leaves only surplus, and that is then the result rather than
+ * a leftover. It goes out raw, one child per region, which is what this did for
+ * everything before the reconstruction existed.
+ */
+#define EMU_EXTRA_MAX 32u
+
+struct emu_extra {
+	const uint8_t *p;
+	/* Set when `p` is a copy this function made - see the note in
+	 * kof_scanner.emu_rgn. It is handed to the scanner with the region and
+	 * freed with it. */
+	uint8_t       *own;
+	uint64_t       n, va;
+	int            code;
+};
+
+/*
+ * THE SAME PAGES, GATHERED TWICE.
+ *
+ * A guest may make one range executable more than once - PECompact's stub
+ * mprotects its scratch area on every pass - and each call leaves a snapshot.
+ * Two snapshots of the same address whose bytes are also the same are one fact
+ * reported twice, and handing both over produced two sections with the same
+ * name and the same content in the child: `.e020000` twice, 8192 bytes each,
+ * on 007 Spy.exe.
+ *
+ * ONLY WHEN THE BYTES MATCH TOO. The same address with DIFFERENT content is two
+ * facts - the page before a decode and after it - and dropping the second would
+ * be dropping the result.
+ *
+ * Here and not in emu_harvest.h: this is the gathering saying the same thing
+ * twice, not a module deciding what a page means.
+ */
+static int emu_dup(const struct emu_extra *ex, uint32_t n_ex, uint64_t va,
+		   const uint8_t *p, uint64_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n_ex; i++)
+		if (ex[i].va == va && ex[i].n == n &&
+		    memcmp(ex[i].p, p, (size_t)n) == 0)
+			return 1;
+	return 0;
+}
+
+static uint64_t emu_pagesz_up(uint64_t n)
+{
+	return (n + 0xfffull) & ~0xfffull;
+}
+
 static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
 {
 	return emit_all(ctx, p, n) == n;
@@ -5247,6 +6141,12 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	kof_buf b;
 	uint32_t it;
 	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
+	/* What the run left behind, gathered rather than handed over one at a
+	 * time - see emu_one_child. */
+	const uint8_t *img_p = NULL;
+	uint64_t img_n = 0, img_va = 0;
+	struct emu_extra ex[EMU_EXTRA_MAX];
+	uint32_t n_ex = 0;
 	const uint8_t *bytes;
 	int any, built = 0, is_pe;
 
@@ -5274,8 +6174,68 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		if (!force && kof_emu_unp_gate_pe(ctx, info, b.p, b.n) ==
 			      KOF_EMU_UNP_NO)
 			return 0;
-		e = kof_emu_unp_run_pe(b.p, b.n, info, emu_insn(b.n),
-				       emu_pages(sc), &rep);
+		{
+			struct kof_emu_oep oep[KOF_EMU_EXEC_WATCH];
+			unsigned k;
+
+			for (k = 0; k < sc->n_xw; k++) {
+				oep[k].rva = sc->xw[k].rva;
+				oep[k].len = sc->xw[k].len;
+			}
+			if (getenv("KOF_EMU_TRACE"))
+				fprintf(stderr, "[emu] oep ranges=%u\n", sc->n_xw);
+			{
+				/* See emu_nolimit_ms in emu_unpack.c: the
+				 * experiment switch, which replaces every work
+				 * bound with a wall clock. 2 GB of guest pages
+				 * is what "bounded by RAM" means here. */
+				uint64_t bi = emu_insn(b.n), bp = emu_pages(sc);
+				uint64_t idle = 0;
+
+				/*
+				 * A MODULE THAT ASKED FOR THE INTERPRETER GETS
+				 * A LONGER LEASH, and only it does.
+				 *
+				 * The stall ceiling ends a run that has not
+				 * touched a new page for four million
+				 * instructions, which is the right answer for
+				 * an object nothing recognised: a decoder fed
+				 * junk spins to the budget and costs the scan
+				 * every second of it. It is the wrong answer
+				 * for a child a packer module produced and
+				 * declared it wants run - measured, an MPRESS
+				 * child computes for 84623471 instructions
+				 * without a new page and then decrypts strings
+				 * that are in neither the packed file nor the
+				 * static unpacker's output, and a Themida one
+				 * needs 5930463.
+				 *
+				 * So the raise is attached to the declaration
+				 * rather than to the constant: a file no
+				 * module claimed is bounded exactly as before.
+				 */
+				/*
+				 * ASKED FOR, BY WHOEVER ASKED. `force` is set
+				 * when a producer declared KOF_ENG_USE_EMU on
+				 * this child and when a heuristic rule asked
+				 * for the object in front of it; it is clear
+				 * when nothing asked and the engine is trying
+				 * the interpreter on its own guess. Reading
+				 * cur_want instead covered only the first of
+				 * those, so a rule that recognised a protector
+				 * got the short ceiling.
+				 */
+				if (force)
+					idle = EMU_IDLE_DECLARED;
+				if (getenv("KOF_EMU_NOLIMIT")) {
+					bi = ~(uint64_t)0 >> 1;
+					bp = 512ull * 1024ull;
+				}
+				e = kof_emu_unp_run_pe(b.p, b.n, info, bi, bp,
+						       idle, oep, sc->n_xw,
+						       &rep);
+			}
+		}
 	} else {
 		const struct kof_elf_info *info = kof_elf(ctx);
 
@@ -5285,6 +6245,144 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		e = kof_emu_unp_run(b.p, b.n, info, emu_insn(b.n),
 				    emu_pages(sc), &rep);
 	}
+	/*
+	 * WHERE THE RUN STOPPED, ON REQUEST.
+	 *
+	 * kofemu.h says of the stop reasons that they "are the map of what to
+	 * implement next", and until this existed there was no way to read the
+	 * map: every one of them arrived in a struct that nothing printed, so a
+	 * run that got nowhere and a run that got 48 million instructions in
+	 * and stopped on one missing instruction looked identical from outside
+	 * - both were "emu recovered nothing".
+	 *
+	 * Two of this engine's gaps were found with exactly this in one
+	 * sitting: PUSHFQ, which four protected samples reached after 22 to 48
+	 * million instructions of real work, and the thread block, which they
+	 * reached immediately after.
+	 *
+	 * Off unless asked for, and the getenv is per RUN - runs are rare and
+	 * cost millions of instructions each, so the lookup is not measurable
+	 * beside one.
+	 */
+	if (getenv("KOF_EMU_TRACE") && e) {
+		uint32_t xr = 0, xt = 0, xv = 0;
+
+		uint64_t tr[256];
+		unsigned nt, ti;
+
+		kof_emu_exc_counts(e, &xr, &xt, &xv);
+		if (getenv("KOF_WIN_TRACE")) {
+			unsigned mi;
+
+			fprintf(stderr, "[emu] module reads:");
+			for (mi = 0; mi < kof_emu_win_mod_count(); mi++)
+				fprintf(stderr, " %s=%llu",
+					kof_emu_win_mod_name(mi),
+					(unsigned long long)
+						kof_emu_mod_reads(e, mi));
+			fprintf(stderr, "\n");
+		}
+		/*
+		 * The registers at the stop. A VM's context pointer is a
+		 * register, and "it read zero from [rbp+0x170]" means nothing
+		 * until rbp is known - it decides whether the guest is reading
+		 * a structure this environment failed to build or one it was
+		 * pointed at by mistake.
+		 */
+		{
+			static const char *const rn[16] = {
+				"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+				"r8","r9","r10","r11","r12","r13","r14","r15"
+			};
+			unsigned ri;
+
+			fprintf(stderr, "[emu] regs:");
+			for (ri = 0; ri < 16u; ri++)
+				fprintf(stderr, "%s %s=%#llx",
+					(ri % 4u) ? "" : "\n     ", rn[ri],
+					(unsigned long long)
+						kof_emu_get_reg(e, ri));
+			fprintf(stderr, "\n");
+		}
+		{
+			uint64_t hi2 = 0, hr = 0;
+
+			kof_emu_first_hop(e, &hi2, &hr);
+			fprintf(stderr, "[emu] first hop at insn=%llu rip=%#llx\n",
+				(unsigned long long)hi2,
+				(unsigned long long)hr);
+		}
+		nt = kof_emu_trace(e, tr, 256u);
+		fprintf(stderr, "[emu] last rips:");
+		for (ti = 0; ti < nt; ti++)
+			fprintf(stderr, " %#llx", (unsigned long long)tr[ti]);
+		fprintf(stderr, "\n");
+		fprintf(stderr, "[emu] exc raised=%u taken=%u veh=%u "
+			"null-calls=%u unhandled=%u\n", xr, xt, xv,
+			kof_emu_null_calls(e), kof_emu_unhandled(e));
+		fprintf(stderr, "[emu] null-reads=%u idle-max=%llu decrypt=%d\n",
+			kof_emu_null_reads(e),
+			(unsigned long long)kof_emu_idle_max(e),
+			kof_emu_write_seen(e));
+	}
+	{
+		/* A guest address to look at when the run stops - the thing a
+		 * fault never tells you is what the code was reading. */
+		const char *pk = getenv("KOF_EMU_PEEK");
+
+		while (pk && *pk && e) {
+			uint64_t at = (uint64_t)strtoull(pk, NULL, 0);
+			uint8_t bf[64];
+			unsigned q;
+
+			if (kof_emu_read(e, at, bf, sizeof bf)) {
+				fprintf(stderr, "[peek] %#llx ",
+					(unsigned long long)at);
+				for (q = 0; q < sizeof bf; q++)
+					fputc(bf[q] >= 32 && bf[q] < 127
+					      ? bf[q] : '.', stderr);
+				fputc('\n', stderr);
+			} else {
+				fprintf(stderr, "[peek] %#llx unreadable\n",
+					(unsigned long long)at);
+			}
+			pk = strchr(pk, ',');
+			if (pk)
+				pk++;
+		}
+	}
+	if (e && kof_emu_itrace_count(e)) {
+		static const char *const rn[16] = {
+			"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+			"r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
+		};
+		unsigned have = kof_emu_itrace_count(e), k, g;
+
+		for (k = 0; k < have; k++) {
+			uint64_t at = 0;
+			const char *tx = NULL;
+			const uint64_t *gp = NULL;
+
+			if (!kof_emu_itrace_get(e, k, &at, &tx, &gp))
+				break;
+			fprintf(stderr, "[ins] %#018llx  %-40s",
+				(unsigned long long)at, tx ? tx : "");
+			for (g = 0; g < 16u; g++)
+				fprintf(stderr, " %s=%llx", rn[g],
+					(unsigned long long)(gp ? gp[g] : 0));
+			fprintf(stderr, "\n");
+		}
+	}
+	if (getenv("KOF_EMU_TRACE"))
+		fprintf(stderr, "[emu] why=%d stop=%d insn=%llu entry=%#llx "
+			"images=%u written=%u returned=%d improvised=%d "
+			"detail=%s refused=%s\n",
+			(int)rep.why, (int)rep.stop,
+			(unsigned long long)rep.insn,
+			(unsigned long long)rep.entry, rep.images, rep.written,
+			rep.returned, rep.improvised,
+			rep.detail ? rep.detail : "-",
+			rep.refused ? rep.refused : "-");
 	if (!e) {
 		/*
 		 * No image could be built, and the reasons are all statements
@@ -5319,6 +6417,124 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * structure and once without.
 	 */
 	sc->emu_stage = 1;
+	/*
+	 * THE WHOLE IMAGE FIRST, when the run put sections back where they
+	 * belong. See kof_pe_image_from_run: a region that starts exactly at a
+	 * section's address is that section, and the allocations, the thread
+	 * block, the stack and the host's own scratch are not. Assembled into
+	 * one file with the parent's header, so what comes out identifies as a
+	 * PE and gets regions, imports and every rule scoped to them.
+	 *
+	 * Before the loop below and not instead of it: a run that put nothing
+	 * at a section address falls through to the old behaviour unchanged.
+	 */
+	if (is_pe) {
+		uint8_t *whole = NULL;
+		uint64_t wlen = 0;
+		const struct kof_pe_info *pi = kof_pe(ctx);
+
+		int ok = pi && pi->valid &&
+			 kof_pe_image_from_run(e, pi, pi->image_base,
+					       sc->obj_cap, &whole, &wlen);
+
+		if (ok) {
+			/*
+			 * THE TEST FOR THIS PRODUCT IS "DID THE RUN CHANGE IT",
+			 * NOT "IS IT NEW".
+			 *
+			 * emu_novel asks whether a majority of an image is
+			 * already in the parent, which is the right question
+			 * about a region a stub mapped - a relocated copy of
+			 * itself is nearly all parent, a decompressed payload
+			 * is almost none. It is the WRONG question about this
+			 * one: an image decrypted in place IS the parent
+			 * everywhere the packer left alone. Measured on an
+			 * MPRESS sample, 1.2 MB of ciphertext inside 8 MB of
+			 * ordinary code - so fourteen of fifteen probes hit and
+			 * the decrypted image was thrown away.
+			 *
+			 * What separates a run that produced something from one
+			 * that did not is whether it WROTE inside the image.
+			 * The stack and the host's exception scratch are not
+			 * the image and are excluded by range, exactly as the
+			 * written-memory harvest below excludes them.
+			 */
+			uint64_t diff = 0, seen = 0;
+			uint32_t si;
+			int changed;
+
+			/*
+			 * HOW MUCH, counted against the file this run started
+			 * from, section by section - raw offset in the file
+			 * against virtual address in the image, which is the
+			 * only pairing that means anything.
+			 *
+			 * Measured, the threshold is the whole point. An MPRESS
+			 * run changes 2112 bytes of an 8245248 byte image and a
+			 * Themida one 2565 of 5910528 - import thunks and a few
+			 * patched sites - so handing the image over costs eight
+			 * megabytes of scan for two kilobytes of new content,
+			 * and the same rules run over the same bytes twice. A
+			 * loader that actually decrypted its sections changes
+			 * them by percent, not by thousandths.
+			 */
+			for (si = 0; si < pi->sec_count &&
+				     si < KOF_PE_MAX_SECTIONS; si++) {
+				const struct kof_pe_sec *ps = &pi->sec[si];
+				uint64_t n = ps->file_size, q;
+
+				if (!n || ps->file_off >= b.n ||
+				    ps->mem_rva >= wlen)
+					continue;
+				if (n > b.n - ps->file_off)
+					n = b.n - ps->file_off;
+				if (n > wlen - ps->mem_rva)
+					n = wlen - ps->mem_rva;
+				seen += n;
+				for (q = 0; q < n; q++)
+					if (b.p[ps->file_off + q] !=
+					    whole[ps->mem_rva + q])
+						diff++;
+			}
+			changed = seen && diff * IMG_DIFF_DEN > seen;
+			if (getenv("KOF_EMU_TRACE"))
+				fprintf(stderr,
+					"[img] len=%llu diff=%llu/%llu "
+					"changed=%d\n",
+					(unsigned long long)wlen,
+					(unsigned long long)diff,
+					(unsigned long long)seen, changed);
+			if (changed) {
+				/* Recorded, not handed over: what this is, is
+				 * the unpack module's to say. The buffer is
+				 * the engine's and is held until the module
+				 * that asked for the run returns. */
+				free(sc->emu_own);
+				sc->emu_own = whole;
+				img_p = whole;
+				img_n = wlen;
+				img_va = pi->image_base;
+				whole = NULL;
+				built = 1;
+				/*
+				 * AND THE REGIONS IT ACCOUNTS FOR ARE SPENT.
+				 * Every section of the assembled file lies in
+				 * [base, base + SizeOfImage), so that range is
+				 * what the snapshot loop below must skip -
+				 * otherwise the same bytes are handed over
+				 * twice, once as a file with a section table
+				 * and once as a formatless region. Measured on
+				 * a PECompact2 sample: 14.81 MB against 8.66,
+				 * the difference being its .text a second
+				 * time. Allocations the run made elsewhere are
+				 * outside the range and still come back.
+				 */
+				built_lo = pi->image_base;
+				built_hi = pi->image_base + img_n;
+			}
+			free(whole);
+		}
+	}
 	for (it = 0; kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
 		uint8_t *file = NULL;
 		uint64_t flen = 0;
@@ -5346,11 +6562,31 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 			 */
 			if (len < 2 || bytes[0] != 'M' || bytes[1] != 'Z')
 				continue;
-			if (!kof_pe_rebuild(kof_buf_make(bytes, len),
-					    sc->obj_cap, &file, &flen))
+			/*
+			 * DECLARED, NOT REBUILT INTO A SECOND BUFFER.
+			 *
+			 * kof_pe_rebuild used to be called here: it hunted for
+			 * the header, allocated an image-sized buffer and
+			 * copied every section into it so the engine could
+			 * parse the result back. The run already put those
+			 * bytes at their addresses - the region IS the image -
+			 * so the copy recovered nothing that was not already
+			 * there.
+			 *
+			 * Now the region is taken as the child and the layout
+			 * is read out of the header inside it. Same source,
+			 * one buffer, and the sections arrive with an origin
+			 * that says a run recovered them.
+			 */
+			if (!emu_novel(ctx, bytes, len))
 				continue;
+			img_p = bytes;
+			img_n = len;
+			img_va = va;
+			built = 1;
 			built_lo = va;
 			built_hi = va + len;
+			break;
 		} else {
 			if (len < 4 || memcmp(bytes, "\177ELF", 4))
 				continue;
@@ -5377,8 +6613,13 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		 * bytes over raw. That is a different question from whether
 		 * anything was produced.
 		 */
-		if (emu_novel(ctx, file, flen) && emu_give(ctx, file, flen)) {
-			c_child(ctx);
+		if (emu_novel(ctx, file, flen)) {
+			free(sc->emu_own);
+			sc->emu_own = file;
+			img_p = file;
+			img_n = flen;
+			img_va = va;
+			file = NULL;
 			built = 1;
 		}
 		free(file);
@@ -5408,9 +6649,20 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		if (!emu_novel(ctx, bytes, len))
 			continue;               /* the stub's own copy of itself */
 		any = 1;
-		if (!emu_give(ctx, bytes, len))
-			break;
-		c_child(ctx);
+		/* Memory the run made executable, or wrote and then ran - see
+		 * the write-then-execute snapshot in kofemu. Collected rather
+		 * than handed over: it belongs to the same program as the
+		 * image, and emu_one_child puts them together. */
+		if (n_ex < EMU_EXTRA_MAX && !emu_dup(ex, n_ex, va, bytes, len)) {
+			ex[n_ex].p = bytes;
+			ex[n_ex].own = NULL;   /* a snapshot lives in the
+						* machine, which outlives the
+						* module - see emu_rgn */
+			ex[n_ex].n = len;
+			ex[n_ex].va = va;
+			ex[n_ex].code = 1;
+			n_ex++;
+		}
 	}
 	/*
 	 * The written-memory fallback needs the run to have FINISHED.
@@ -5458,9 +6710,43 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * statement about one specific address rather than an amnesty for
 	 * every run that went somewhere it should not have.
 	 */
+	/*
+	 * AND A RUN THAT SPENT ITS BUDGET, which this used to refuse.
+	 *
+	 * The reasoning above is that hitting the ceiling "says the budget ran
+	 * out, which says nothing about whether the guest was still producing",
+	 * and that a short run's written set is stub and stack rather than
+	 * payload. Both halves were measured on runs that reached the ceiling
+	 * in a few thousand instructions.
+	 *
+	 * A run that reaches it after a HUNDRED AND SIXTY MILLION is a
+	 * different object. Measured on a PECompact2 sample: 168,558,592
+	 * instructions, eight regions of written memory, and every one of them
+	 * discarded - thirteen seconds spent to throw away whatever eight
+	 * megabytes of decompression had got to. Nothing about "the budget ran
+	 * out" makes those bytes less real.
+	 *
+	 * emu_novel is what keeps this honest, and it is the same filter the
+	 * other three reasons rely on: a region that is the stub's own copy of
+	 * itself is dropped, and so is the stack, by range. What survives is
+	 * memory this run built.
+	 */
+	/*
+	 * STILL ONLY WHEN THERE WERE NO SNAPSHOTS, and an experiment says so.
+	 *
+	 * Relaxing this to "or the run reached ExitProcess" looked right - a
+	 * program that ran to its own exit has its memory in the written set,
+	 * not in two pages of scratch - and measured it reproduced exactly the
+	 * failure this rule exists to prevent: a 329 KB PECompact2 sample came
+	 * back as 30 objects and 140.40 MB, against 6 and 8.62 MB. What that
+	 * sample needed was never the written set; it was the write-then-
+	 * execute snapshot, which goes through the loop above and is not
+	 * gated here at all.
+	 */
 	if (!any && (rep.stop == KOF_EMU_STOP_EXIT ||
 		     rep.stop == KOF_EMU_STOP_HANDOFF ||
 		     rep.stop == KOF_EMU_STOP_STALLED ||
+		     rep.stop == KOF_EMU_STOP_BUDGET ||
 		     rep.returned))
 		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
 			if (va >= built_lo && va < built_hi)
@@ -5470,13 +6756,82 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 			if (rep.stack_hi && va >= rep.stack_lo &&
 			    va < rep.stack_hi)
 				continue;
+			/* Nor the exception records, which the HOST wrote. */
+			if (rep.exc_hi && va >= rep.exc_lo && va < rep.exc_hi)
+				continue;
 			if (!emu_novel(ctx, bytes, len))
 				continue;
-			if (!emu_give(ctx, bytes, len))
-				break;
-			c_child(ctx);
+			if (n_ex < EMU_EXTRA_MAX &&
+			    !emu_dup(ex, n_ex, va, bytes, len)) {
+				/*
+				 * COPIED, BECAUSE THIS ONE IS BORROWED. See
+				 * kof_emu_next_written: the buffer it answers
+				 * with is replaced on the next call, so every
+				 * region but the last would be freed before
+				 * the module that asked for them ran.
+				 */
+				uint8_t *own = malloc((size_t)len);
+
+				if (!own)
+					break;
+				memcpy(own, bytes, (size_t)len);
+				ex[n_ex].p = own;
+				ex[n_ex].own = own;
+				ex[n_ex].n = len;
+				ex[n_ex].va = va;
+				ex[n_ex].code = 0;
+				n_ex++;
+			}
 		}
+
+	/*
+	 * AND THAT IS ALL A RUN DOES: it says what it found.
+	 *
+	 * No child is made here and none ever should be. The interpreter is
+	 * the one component that executes hostile bytes, and giving it the
+	 * power to create objects as well made the widest surface in the engine
+	 * wider still. It gathers; a module reads the gathering and decides
+	 * what any of it is; the engine builds what the module declares. See
+	 * kof_scan_emu_region and kof_scan_emu_take.
+	 *
+	 * The regions point into the machine's own memory, so the machine stays
+	 * alive until the module that asked for the run has returned - see
+	 * kof_scan_emu_release.
+	 */
+	sc->n_emu_rgn = 0;
+	if (img_p && sc->n_emu_rgn < KOF_EMU_RGN_MAX) {
+		sc->emu_rgn[sc->n_emu_rgn].p = img_p;
+		/* img_p is sc->emu_own, freed with it. */
+		sc->emu_rgn[sc->n_emu_rgn].own = NULL;
+		sc->emu_rgn[sc->n_emu_rgn].va = img_va;
+		sc->emu_rgn[sc->n_emu_rgn].n = img_n;
+		sc->emu_rgn[sc->n_emu_rgn].kind = KOF_EMU_RGN_IMAGE;
+		sc->n_emu_rgn++;
+	}
+	{
+		uint32_t q;
+
+		for (q = 0; q < n_ex && sc->n_emu_rgn < KOF_EMU_RGN_MAX; q++) {
+			sc->emu_rgn[sc->n_emu_rgn].p = ex[q].p;
+			sc->emu_rgn[sc->n_emu_rgn].own = ex[q].own;
+			sc->emu_rgn[sc->n_emu_rgn].va = ex[q].va;
+			sc->emu_rgn[sc->n_emu_rgn].n = ex[q].n;
+			sc->emu_rgn[sc->n_emu_rgn].kind = ex[q].code
+				? KOF_EMU_RGN_EXEC : KOF_EMU_RGN_WRITTEN;
+			sc->n_emu_rgn++;
+		}
+	}
 	sc->emu_stage = 0;
+	if (getenv("KOF_EMU_TRACE")) {
+		uint32_t q;
+
+		for (q = 0; q < sc->n_emu_rgn; q++)
+			fprintf(stderr,
+				"[emu] rgn %u va=0x%llx len=%llu kind=%u\n", q,
+				(unsigned long long)sc->emu_rgn[q].va,
+				(unsigned long long)sc->emu_rgn[q].n,
+				sc->emu_rgn[q].kind);
+	}
 
 	/*
 	 * A BUDGET STOP IS NOT REPORTED AS A LIMIT, and that is a departure
@@ -5495,7 +6850,183 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 * would have found the same thing. The flag is worth more kept for the
 	 * case it is true of.
 	 */
-	kof_emu_free(e);
+	/* KEPT, not freed: the regions above point into it. */
+	sc->emu_live = e;
+	return sc->n_emu_rgn;
+}
+
+/*
+ * The machine, and the regions that point into it, let go.
+ *
+ * Called when the module that asked for a run returns - see unpack_object.
+ * Nothing a module kept a pointer to survives this, which is the point: a
+ * region is valid for exactly as long as the call that asked for it.
+ */
+void kof_scan_emu_release(struct kof_scanner *sc)
+{
+	if (!sc)
+		return;
+	if (sc->emu_live) {
+		kof_emu_free(sc->emu_live);
+		sc->emu_live = NULL;
+	}
+	free(sc->emu_own);
+	sc->emu_own = NULL;
+	{
+		uint32_t i;
+
+		for (i = 0; i < sc->n_emu_rgn; i++) {
+			free(sc->emu_rgn[i].own);
+			sc->emu_rgn[i].own = NULL;
+			sc->emu_rgn[i].p = NULL;
+		}
+	}
+	sc->n_emu_rgn = 0;
+}
+
+/*
+ * ---- WHAT A MODULE SEES OF A RUN ------------------------------------------
+ *
+ * The interpreter gathers and these hand the gathering over. Nothing here
+ * creates an object: that is the unpack module's job, through the same
+ * declarations every other producer uses.
+ */
+static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
+{
+	/* A vouch is honoured from the --heur level the module named, and a
+	 * scan with heuristics off honours none - see vouch_level. */
+	int vouched;
+
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	/*
+	 * THE HOST'S REFUSALS, IN ONE PLACE.
+	 *
+	 * A module asks; whether it may is the host's answer, because every
+	 * one of these is a budget - how deep through packers, how many runs
+	 * this scan has already spent, whether an interpreter is allowed at
+	 * all. See QUALITY_AUDIT.txt I.A.
+	 */
+	/*
+	 * WHY A RUN DID NOT HAPPEN, on request.
+	 *
+	 * Every refusal below is silent and there are six of them, so a module
+	 * that asked and got nothing back could not tell "the interpreter ran
+	 * and the program wrote nothing" from "the host never started it" -
+	 * which are opposite problems. Same argument, and same switch, as the
+	 * stop-reason trace further down.
+	 */
+	vouched = sc && vouch && sc->heur_lvl >= vouch;
+	if (sc && getenv("KOF_EMU_TRACE"))
+		fprintf(stderr,
+			"[emu] ask: vouched=%d live=%d banned=%d packed=%d only=%d ask=%d dflt=%d spent=%u\n",
+			vouched, sc->emu_live ? 1 : 0, sc->emu_banned,
+			sc->packed_here, sc->emu_only, sc->emu_ask,
+			sc->emu_default_ok, sc->st.heur_emu);
+	if (!sc || sc->emu_live)
+		return 0;               /* one run at a time */
+	/*
+	 * AND ONE PER OBJECT. The machine is released the moment the module
+	 * that drove it returns, so emu_live is clear again by the time the
+	 * next module is offered the same object - and without this every
+	 * module that declines it in turn would pay for a run of its own.
+	 */
+	if (sc->emu_ran)
+		return 0;
+	/* --emu never, and the packer-depth ceiling. Neither is a budget and
+	 * neither yields to a vouch - see emu_banned in scan.h. */
+	if (sc->emu_banned)
+		return 0;
+	/* A packer already opened this, so the payload is in hand and running
+	 * it as well is peeling it and then running it anyway. Under
+	 * KOF_EMU_ONLY the interpreter stands in for the packer modules, so
+	 * that is not a refusal. */
+	if (sc->packed_here && !sc->emu_only)
+		return 0;
+	/*
+	 * NOBODY SPOKE FOR IT AND UNASKED RUNS ARE OFF. A module that vouches
+	 * and a database that asked both get past this; what does not is the
+	 * generic receiver guessing, in a mode whose caller wants no
+	 * interpreter unless something argued for one.
+	 */
+	if (!vouched && !sc->emu_ask && !sc->emu_default_ok)
+		return 0;
+	/* The scan's own ceiling on how many runs it will spend - see
+	 * KOF_SCAN_EMU_MAX. */
+	if (sc->st.heur_emu >= KOF_SCAN_EMU_MAX)
+		return 0;
+	sc->st.heur_emu++;
+	sc->emu_ran = 1;
+	/* The driving module's watch set lives exactly as long as the run it
+	 * was declared for - see n_xw_mod. Taken now rather than after, so an
+	 * early return inside the run cannot leave it standing. */
+	{
+		uint32_t nmod = sc->n_xw_mod;
+		uint32_t r;
+
+		sc->n_xw_mod = 0;
+		if (nmod) {
+			sc->n_xw = nmod;
+			for (r = 0; r < nmod; r++) {
+				sc->xw[r].rva = sc->xw_mod[r].rva;
+				sc->xw[r].len = sc->xw_mod[r].len;
+			}
+		}
+	}
+	/*
+	 * VOUCHED BY THE MODULE, OR SPOKEN FOR BY THE DATABASE.
+	 *
+	 * A family module vouches because it recognised its packer. The generic
+	 * receiver cannot, and what speaks for its object is a rule that
+	 * declared KOF_ENG_USE_EMU or a producer that said its output needs
+	 * running - both resolved in unpack_object, both invisible from a
+	 * module. Either way `force` means the same thing to the run: skip the
+	 * entropy gate, which is an estimate about objects nobody spoke for.
+	 */
+	return kof_scan_emu_unpack(ctx, vouched || sc->emu_ask);
+}
+
+static int c_emu_region(const struct kof_obj_ctx *ctx, uint32_t i,
+			uint64_t *va, uint64_t *len, uint32_t *kind)
+{
+	return kof_scan_emu_region(kof_scan_of(ctx), i, va, len, kind);
+}
+
+/* One region into the child being built, at the cursor. */
+static int c_emu_take(const struct kof_obj_ctx *ctx, uint32_t i)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || i >= sc->n_emu_rgn)
+		return 0;
+	return emu_give(ctx, sc->emu_rgn[i].p, sc->emu_rgn[i].n);
+}
+
+/* Whether anything has already opened this object. */
+static int c_opened_already(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	return sc && (sc->n_kids || sc->packed_here);
+}
+
+/* What one run left, for the module that asked for it. */
+uint32_t kof_scan_emu_count(const struct kof_scanner *sc)
+{
+	return sc ? sc->n_emu_rgn : 0;
+}
+
+int kof_scan_emu_region(const struct kof_scanner *sc, uint32_t i,
+			uint64_t *va, uint64_t *len, uint32_t *kind)
+{
+	if (!sc || i >= sc->n_emu_rgn)
+		return 0;
+	if (va)
+		*va = sc->emu_rgn[i].va;
+	if (len)
+		*len = sc->emu_rgn[i].n;
+	if (kind)
+		*kind = sc->emu_rgn[i].kind;
 	return 1;
 }
 

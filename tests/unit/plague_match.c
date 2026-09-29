@@ -30,7 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/detector/matchers/kofplague.h"
+#include "../../libkofeng/detectors/matchers/kofplague.h"
 
 static int failures;
 

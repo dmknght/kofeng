@@ -29,7 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzer/parsers/scripts/script_parse.h"
+#include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
 
 static int failures;
 

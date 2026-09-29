@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzer/parsers/containers/chm_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/chm_parse.h"
 #include "chmgen.h"
 
 static int failures;

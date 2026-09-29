@@ -62,20 +62,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			unreached++;
 			continue;
 		}
-		if (!kof_child())
-			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+		if (!kunp_rcstruct_done())
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 		opened++;
 	}
 
 	kof_debug("Xz.opened", opened);
 
 	if (unreached)
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 	if (x->anomalies & (KOF_XZ_ANOM_TRUNCATED | KOF_XZ_ANOM_BAD_BLOCK |
 			    KOF_XZ_ANOM_NO_INDEX | KOF_XZ_ANOM_BAD_FOOTER))
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 	if (x->anomalies & (KOF_XZ_ANOM_BLOCKS_FULL | KOF_XZ_ANOM_EXTENTS_FULL))
-		kof_unp_broken(KOF_UNP_LIMIT);
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	if (!x->n_blocks)
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 }

@@ -273,7 +273,7 @@ static void scan_submission(kof_scanner *sc, struct kof_evt_join *j,
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
 	opt.as_format = KOF_EVT_AMSI;
-	(void)kof_scan_bytes(sc, j->buf, (uint64_t)j->len, name, &opt,
+	(void)kscan_bytes(sc, j->buf, (uint64_t)j->len, name, &opt,
 			     on_object, hits);
 	(*scanned)++;
 }
@@ -367,7 +367,7 @@ static void scan_proc_event(kof_scanner *sc, const struct kof_evt *e, int do_sca
 	 * as anything - see the note in amsi_parse.h that scan_submission
 	 * points at. */
 	opt.as_format = KOF_EVT_PROC;
-	(void)kof_scan_bytes(sc, rec, (uint64_t)n, name, &opt, on_object, hits);
+	(void)kscan_bytes(sc, rec, (uint64_t)n, name, &opt, on_object, hits);
 	(*scanned)++;
 }
 
@@ -753,16 +753,16 @@ int main(int argc, char **argv)
 	 * from here.
 	 */
 	if (do_scan) {
-		eng = kof_engine_open(db_path);
+		eng = keng_open(db_path);
 		if (!eng) {
 			fprintf(stderr, "kofwatchman: cannot load a database "
 				"from %s - continuing without scanning\n",
 				db_path);
 			do_scan = 0;
 		} else {
-			sc = kof_scanner_new(eng);
+			sc = kscan_new(eng);
 			if (!sc) {
-				kof_engine_close(eng);
+				keng_close(eng);
 				eng = NULL;
 				do_scan = 0;
 			} else {
@@ -789,12 +789,12 @@ int main(int argc, char **argv)
 				 * no table.
 				 */
 				/* Keyed on the DATABASE, not on the date
-				 * printed on it - see kof_engine_db_stamp. In
+				 * printed on it - see kdb_stamp. In
 				 * memory and never saved, so the stamp only has
 				 * to outlive this run; it costs nothing to be
 				 * right about it anyway. */
 				fridge = koffridge_open(4096u,
-							kof_engine_db_stamp(eng));
+							kdb_stamp(eng));
 			}
 		}
 	}
@@ -959,7 +959,7 @@ int main(int argc, char **argv)
 
 			hits.e = &e;
 			before = hits.n;
-			(void)kof_scan_path(sc, obj, NULL, on_object, &hits);
+			(void)kscan_path(sc, obj, NULL, on_object, &hits);
 			scanned++;
 
 			/*
@@ -981,9 +981,9 @@ int main(int argc, char **argv)
 		scan_submission(sc, &join, &join_head, do_scan, &hits, &scanned);
 
 	if (do_scan) {
-		kof_scanner_free(sc);
+		kscan_free(sc);
 		koffridge_close(fridge);
-		kof_engine_close(eng);
+		keng_close(eng);
 	}
 
 	kof_evt_print_tally(&tally,

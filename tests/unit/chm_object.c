@@ -134,15 +134,15 @@ int main(void)
 		printf("chm object: out of memory\n");
 		return 1;
 	}
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		free(f);
 		printf("chm object: no database at %s - nothing tested\n", db);
 		return 0;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		free(f);
 		printf("chm object: could not make a scanner\n");
 		return 1;
@@ -150,7 +150,7 @@ int main(void)
 
 	memset(&s, 0, sizeof s);
 	memset(&opt, 0, sizeof opt);
-	n = kof_scan_bytes(sc, f, len, "fixture.chm", &opt, on_object, &s);
+	n = kscan_bytes(sc, f, len, "fixture.chm", &opt, on_object, &s);
 
 	if (n <= 0)
 		fail("scan", "the CHM was not scanned at all");
@@ -164,8 +164,8 @@ int main(void)
 		fail("child", "the child carries no name, though the directory "
 		     "has one for it");
 
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	free(f);
 
 	if (failures) {

@@ -27,9 +27,14 @@
  * can be read beats speed that cannot.
  */
 
+/* clock_gettime, for the wall clock bound - see kof_emu_set_deadline. The
+ * project's other users of it reach for _GNU_SOURCE for the same reason. */
+#define _POSIX_C_SOURCE 199309L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 #include <string.h>
 
 #include "kofemu.h"
@@ -38,6 +43,18 @@
 #define DEF_MAX_INSN   (2u * 1000u * 1000u)
 #define VSYSCALL_BASE  0xffffffffff600000ull
 #define DEF_MAX_PAGES  (16u * 1024u)          /* 64 MB of emulated space */
+
+/* How many unresolved imports a run may call before the answers stop being
+ * plausible - see the null page check in the loop. */
+#define EMU_NULL_CALLS 256u
+
+/* How many exceptions a run may raise with nothing to catch them before it is
+ * no longer unpacking - see WIN_RaiseException. */
+#define EMU_UNHANDLED_MAX 64u
+
+/* How far a write-then-execute snapshot reaches either way from the page that
+ * fired it, in pages. A megabyte each side is past any one function. */
+#define WEX_SPAN_PAGES 256u
 
 /* ---- memory ---------------------------------------------------------------
  *
@@ -51,6 +68,7 @@ struct page {
 	uint8_t *data;
 	unsigned prot;
 	int      written;             /* the stub wrote here - this is the payload */
+	int      snapped;             /* and it has since been executed and taken */
 };
 
 struct kof_emu {
@@ -77,6 +95,9 @@ struct kof_emu {
 	uint64_t flags;               /* only the six that matter, see FL_* */
 
 	uint64_t max_insn, insn;
+	uint64_t idle;          /* KOF_EMU_IDLE unless set */
+	uint64_t deadline_ms;   /* wall clock; 0 for none */
+	uint64_t started_ms;
 	int      stop_on_written_jump;
 	/* 32 or 64. See kof_emu_cfg.bits; everything it changes is marked with
 	 * a reference back to this field. */
@@ -87,6 +108,14 @@ struct kof_emu {
 	char     fault_kind[8];
 
 	uint64_t trace[KOF_EMU_TRACE];
+	/* The instruction trace - see kof_emu_itrace. NULL unless asked for. */
+	struct itrace { uint64_t rip; uint64_t gpr[KOF_EMU_NGPR]; char txt[96]; }
+		*itr;
+	uint32_t itr_cap, itr_n;
+	uint64_t itr_at;   /* freeze the ring here; 0 for never */
+	uint64_t itr_until;
+	int      itr_on_null;  /* freeze at the first unresolved import */
+	int      itr_frozen;
 	uint64_t trace_n;
 
 	/*
@@ -130,8 +159,80 @@ struct kof_emu {
 	 */
 	uint8_t xmm[16][16];
 
-	/* The thread pointer, as arch_prctl set it. */
+	/* The thread pointer, as arch_prctl set it - or, for a Windows guest,
+	 * as emu_unpack.c's thread block builder set it. */
 	uint64_t fs_base, gs_base;
+
+	/*
+	 * The Windows environment's three addresses and its error word. Zero
+	 * on a Linux guest, and every entry point below checks them, so an ELF
+	 * run cannot reach any of it.
+	 */
+	/* Regions where ENTERING means the loader has handed over. */
+	struct { uint64_t lo, hi; } xwatch[KOF_EMU_EXEC_WATCH];
+	uint32_t n_xwatch;
+	/*
+	 * Whether the last instruction fetched was already inside one of them.
+	 *
+	 * A handover is a jump INTO the program, so what ends the run is the
+	 * EDGE and not the address: a run that begins inside a watched range,
+	 * or that is still running through one, has not handed anything over.
+	 * See kof_emu_watch_exec.
+	 */
+	int xw_was_in, xw_have_prev;
+	/* Ranges whose first WRITE means the loader is decrypting the program
+	 * - see kof_emu_watch_write. */
+	struct { uint64_t lo, hi; } wwatch[KOF_EMU_EXEC_WATCH];
+	uint32_t n_wwatch;
+	int      wwatch_hit;
+	uint64_t stub_lo, stub_hi;
+	uint64_t img_lo, img_hi;   /* the image, for the dump at the handover */
+	uint64_t sp0;              /* RSP as the run started - see the OEP test */
+	int      sp0_set;
+	int      oep_watch;        /* the handover test above is armed */
+	int      img_dumped;
+	uint64_t stack_lo, stack_hi;
+	struct { uint64_t lo, hi; uint8_t seen; } hop[KOF_EMU_EXEC_WATCH];
+	uint32_t n_hop;
+	uint64_t hop_first_insn, hop_first_rip;
+	uint64_t fetch_page;   /* never a page base until one is set */
+	uint32_t null_calls;   /* imports this environment did not have */
+	uint64_t cmdline[2];   /* [0] ANSI, [1] UTF-16; 0 until asked for */
+	uint64_t hop_last_rip;
+	uint32_t hop_count;
+
+	uint64_t win_image_base, win_k32_base, win_heap;
+	uint64_t mod_reads[KOF_EMU_WIN_MOD_COUNT];
+	uint8_t  count_mod_reads;
+	uint64_t win_mod_base[KOF_EMU_WIN_MOD_COUNT];
+	uint64_t mmap32_next, winmap_next;
+	uint32_t win_last_error;
+
+	/*
+	 * EXCEPTION DISPATCH, which is a state machine because a handler is
+	 * GUEST code: it has to be called, run to its own `ret`, and answered
+	 * - and the only thing that runs guest code is the loop this lives in.
+	 * So a fault sets this up, the loop notices the handler returning to an
+	 * address nothing maps, and the answer is read there.
+	 */
+	uint64_t win_veh[8];
+	uint32_t n_veh;
+	uint32_t exc_phase;        /* 0 idle, 1 VEH, 2 an SEH frame, 3 the
+				    * top level filter */
+	uint32_t exc_veh_i;        /* which vectored handler is running */
+	uint32_t exc_depth;        /* a handler that faults, and its handler */
+	uint64_t exc_seh_frame;    /* the registration record being tried */
+	uint32_t exc_seh_depth;    /* how far down the chain this walk has gone */
+	uint64_t exc_base;         /* the scratch region, mapped on first use */
+	uint64_t idle_max;     /* the longest the run went without a new page */
+	uint32_t null_reads;   /* fields read off a null pointer */
+	uint32_t exc_unhandled; /* raises nobody took, and we carried on */
+	uint32_t exc_code;     /* what to put in the record; 0 = a fault */
+	uint64_t exc_rip;      /* the guest address to blame; 0 = e->rip */
+	uint32_t exc_raised, exc_taken;   /* faults offered, and faults handled */
+	uint64_t win_tls[64];
+	uint32_t win_tls_next;
+	uint64_t win_top_filter;
 
 	/*
 	 * THE CLOCK, WHICH IS AN ANTI-EMULATION SURFACE AND NOT A CONVENIENCE.
@@ -404,6 +505,59 @@ static int mem_rd(struct kof_emu *e, uint64_t va, void *dst, unsigned n)
 	uint8_t *d = dst;
 	unsigned i;
 
+	/*
+	 * A READ THROUGH A NULL POINTER IS ZERO, NOT THE END OF THE RUN.
+	 *
+	 * On Windows it faults and the process dies. Here the process dying is
+	 * the thing to avoid: what the run is FOR is the plaintext the guest
+	 * writes, and a guest that took a null from something this environment
+	 * could not answer - a function in a library whose export list is
+	 * empty, a handle it never got - then reads a field off it, and the
+	 * run used to end there with the payload still encrypted. Measured on
+	 * an MPRESS sample: `read at 0x14`, one field off a null pointer, at
+	 * 16477255 instructions.
+	 *
+	 * READS ONLY. Execution at zero is still a fault and still means
+	 * "called an import this environment does not have"; a write is still
+	 * a fault, because a write that goes nowhere loses the very bytes this
+	 * exists to collect. The two cases stay apart from this one.
+	 *
+	 * Only the first page, and only where the guest mapped nothing: a guest
+	 * that genuinely mapped page zero is reading its own memory.
+	 */
+	if (va < KOF_EMU_PAGE && (uint64_t)n <= KOF_EMU_PAGE - va &&
+	    !page_lookup(e, va)) {
+		e->null_reads++;
+		memset(d, 0, n);
+		return 1;
+	}
+
+	/*
+	 * READS INTO A LIBRARY IMAGE, COUNTED ONLY WHEN ASKED FOR.
+	 *
+	 * "It called nothing" and "it walked the export table and found
+	 * nothing" look identical from a stop reason and mean opposite things:
+	 * the first says the environment's function list is beside the point,
+	 * the second says exactly which name is missing. Counting the reads
+	 * separates them.
+	 *
+	 * Behind a flag because this is the hottest path in the interpreter and
+	 * eight range tests per byte would be measurable; with the flag clear
+	 * it is one predictable branch.
+	 */
+	if (e->count_mod_reads) {
+		unsigned m;
+
+		for (m = 0; m < KOF_EMU_WIN_MOD_COUNT; m++) {
+			uint64_t b = e->win_mod_base[m];
+
+			if (b && va >= b && va < b + (256u * KOF_EMU_PAGE)) {
+				e->mod_reads[m]++;
+				break;
+			}
+		}
+	}
+
 	for (i = 0; i < n; i++) {
 		struct page *p = page_lookup(e, va + i);
 
@@ -437,6 +591,34 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 		if (!p->written)
 			e->last_new_page = e->insn;
 		p->written = 1;
+		/*
+		 * A WRITE INTO CIPHERTEXT IS THE MOMENT THE PROGRAM APPEARS.
+		 *
+		 * A protector's loader decrypts the program's own sections in
+		 * place, so the first write into one of them is the only signal
+		 * that does not depend on guessing where it will jump
+		 * afterwards. themida-dumper watches exactly this from outside
+		 * the process - it fingerprints the encrypted sections and
+		 * polls them for change - and this is the same test made from
+		 * inside, where it costs a range check instead of a poll. See
+		 * THIRD-PARTY.md.
+		 *
+		 * The image is taken ONCE, at the first such write, and the run
+		 * carries on: a loader decrypts several sections and stopping at
+		 * the first would take the image before the rest exist. The
+		 * snapshot is of the whole image because a section decrypted
+		 * alone is not a program.
+		 */
+		if (e->n_wwatch && !e->wwatch_hit) {
+			uint32_t q;
+
+			for (q = 0; q < e->n_wwatch; q++)
+				if (va + i >= e->wwatch[q].lo &&
+				    va + i < e->wwatch[q].hi) {
+					e->wwatch_hit = 1;
+					break;
+				}
+		}
 		if (e->watch_on && va + i == e->watch_va &&
 		    e->watch_n < KOF_EMU_WATCH_MAX) {
 			e->watch_rip[e->watch_n] = e->rip;
@@ -476,8 +658,12 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 		free(e);
 		return NULL;
 	}
+	/* Not a page base - page bases are aligned - so the first fetch always
+	 * takes the slow path and checks execute permission. See the fetch. */
+	e->fetch_page = ~(uint64_t)0;
 	e->mxcsr = 0x1f80u;             /* the reset value: all exceptions masked */
 	e->max_insn = cfg && cfg->max_insn ? cfg->max_insn : DEF_MAX_INSN;
+	e->idle = KOF_EMU_IDLE;
 	e->stop_on_written_jump = cfg ? cfg->stop_on_written_jump : 0;
 	/* 0 means 64: a caller written before the field existed asks for what
 	 * it always got. */
@@ -516,6 +702,8 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 
 void kof_emu_free(struct kof_emu *e)
 {
+	if (e)
+		free(e->itr);
 	uint32_t i;
 
 	if (!e)
@@ -576,11 +764,89 @@ void kof_emu_set_reg(struct kof_emu *e, unsigned g, uint64_t v)
 	if (g < KOF_EMU_NGPR)
 		e->gpr[g] = v;
 }
+void kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base)
+{
+	if (seg == 4u)
+		e->fs_base = base;
+	else if (seg == 5u)
+		e->gs_base = base;
+}
 uint64_t kof_emu_get_reg(const struct kof_emu *e, unsigned g)
 {
 	return g < KOF_EMU_NGPR ? e->gpr[g] : 0;
 }
 uint64_t kof_emu_rip(const struct kof_emu *e) { return e->rip; }
+/*
+ * How many faults were offered to a guest handler, and how many a handler
+ * actually took. The pair is the measurement that says whether exception
+ * dispatch is reaching anything: raised without taken means the records are
+ * being built and nobody is registered to receive them, which is a different
+ * problem from not building them.
+ */
+void kof_emu_exc_counts(const struct kof_emu *e, uint32_t *raised,
+			uint32_t *taken, uint32_t *veh)
+{
+	if (raised) *raised = e->exc_raised;
+	if (taken)  *taken  = e->exc_taken;
+	if (veh)    *veh    = e->n_veh;
+}
+
+uint64_t kof_emu_last_write(const struct kof_emu *e)
+{
+	return e->last_new_page;
+}
+
+static uint64_t now_ms(void)
+{
+	struct timespec t;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &t))
+		return 0;
+	return (uint64_t)t.tv_sec * 1000ull + (uint64_t)(t.tv_nsec / 1000000);
+}
+
+unsigned kof_emu_null_calls(const struct kof_emu *e)
+{
+	return e ? e->null_calls : 0u;
+}
+
+unsigned kof_emu_unhandled(const struct kof_emu *e)
+{
+	return e ? e->exc_unhandled : 0u;
+}
+
+unsigned kof_emu_null_reads(const struct kof_emu *e)
+{
+	return e ? e->null_reads : 0u;
+}
+
+/* The longest the run went without touching a new page - what the stall
+ * ceiling has to clear for a run like this one to finish. */
+uint64_t kof_emu_idle_max(const struct kof_emu *e)
+{
+	return e ? e->idle_max : 0u;
+}
+
+void kof_emu_set_idle(struct kof_emu *e, uint64_t n)
+{
+	if (e && n)
+		e->idle = n;
+}
+
+void kof_emu_set_deadline(struct kof_emu *e, uint64_t ms)
+{
+	if (!e)
+		return;
+	e->deadline_ms = ms;
+	e->started_ms = ms ? now_ms() : 0;
+}
+
+void kof_emu_set_max_insn(struct kof_emu *e, uint64_t n)
+{
+	if (e && n > e->max_insn)
+		e->max_insn = n;
+}
+
 uint64_t kof_emu_insn_count(const struct kof_emu *e) { return e->insn; }
 const char *kof_emu_stop_detail(const struct kof_emu *e) { return e->detail; }
 
@@ -603,6 +869,115 @@ unsigned kof_emu_watch_hits(const struct kof_emu *e, uint64_t *rip,
 int kof_emu_read(struct kof_emu *e, uint64_t va, void *dst, unsigned n)
 {
 	return mem_rd(e, va, dst, n);
+}
+
+/*
+ * Write into the guest before it runs, which is what a loader does and what
+ * nothing else should.
+ *
+ * It goes through mem_wr rather than round the side of it, so a write to an
+ * address the guest does not have fails here instead of silently landing
+ * somewhere - and so a page this touches is marked written exactly as one the
+ * guest touched would be.
+ */
+int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
+{
+	return mem_wr(e, va, src, n);
+}
+
+void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen)
+{
+	if (!e || hi <= lo || e->n_hop >= KOF_EMU_EXEC_WATCH)
+		return;
+	e->hop[e->n_hop].lo = lo;
+	e->hop[e->n_hop].hi = hi;
+	e->hop[e->n_hop].seen = (uint8_t)(seen != 0);
+	e->n_hop++;
+}
+
+/* The first instruction executed in a region nothing has run in yet. Returns
+ * the region, marking it seen, or -1. */
+static int hop_first(struct kof_emu *e, uint64_t rip)
+{
+	uint32_t i;
+
+	for (i = 0; i < e->n_hop; i++)
+		if (!e->hop[i].seen && rip >= e->hop[i].lo &&
+		    rip < e->hop[i].hi) {
+			e->hop[i].seen = 1;
+			return (int)i;
+		}
+	return -1;
+}
+
+/* Where the image is, so the run can dump it at the moment it hands over. */
+/* Arm the handover test - see the note where it fires. Off by default so a
+ * caller that wants the old behaviour keeps it. */
+void kof_emu_set_oep_watch(struct kof_emu *e, int on)
+{
+	if (e)
+		e->oep_watch = on;
+}
+
+void kof_emu_set_image_range(struct kof_emu *e, uint64_t lo, uint64_t hi)
+{
+	if (e) {
+		e->img_lo = lo;
+		e->img_hi = hi;
+	}
+}
+
+void kof_emu_set_stack_range(struct kof_emu *e, uint64_t lo, uint64_t hi)
+{
+	if (e && hi > lo) {
+		e->stack_lo = lo;
+		e->stack_hi = hi;
+	}
+}
+
+void kof_emu_set_stub_range(struct kof_emu *e, uint64_t lo, uint64_t hi)
+{
+	if (e && hi > lo) {
+		e->stub_lo = lo;
+		e->stub_hi = hi;
+	}
+}
+
+/* Where the ciphertext is, so the run can tell when it stops being ciphertext.
+ * See the write path for what happens then. */
+void kof_emu_watch_write(struct kof_emu *e, uint64_t lo, uint64_t hi)
+{
+	if (!e || hi <= lo || e->n_wwatch >= KOF_EMU_EXEC_WATCH)
+		return;
+	e->wwatch[e->n_wwatch].lo = lo;
+	e->wwatch[e->n_wwatch].hi = hi;
+	e->n_wwatch++;
+}
+
+/* 1 once anything has been written into one of those ranges. */
+int kof_emu_write_seen(const struct kof_emu *e)
+{
+	return e ? e->wwatch_hit : 0;
+}
+
+void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi)
+{
+	if (!e || hi <= lo || e->n_xwatch >= KOF_EMU_EXEC_WATCH)
+		return;
+	e->xwatch[e->n_xwatch].lo = lo;
+	e->xwatch[e->n_xwatch].hi = hi;
+	e->n_xwatch++;
+}
+
+/* Is rip inside a watched region? The edge is what matters - see xw_was_in. */
+static int xwatch_hit(const struct kof_emu *e, uint64_t rip)
+{
+	uint32_t i;
+
+	for (i = 0; i < e->n_xwatch; i++)
+		if (rip >= e->xwatch[i].lo && rip < e->xwatch[i].hi)
+			return 1;
+	return 0;
 }
 
 /*
@@ -666,6 +1041,17 @@ static void snap_take(struct kof_emu *e, uint64_t va, uint64_t len)
 	e->snap_bytes += n;
 	e->n_snap++;
 }
+
+void kof_emu_snap_written(struct kof_emu *e)
+{
+	uint32_t it = 0;
+	uint64_t va, len;
+	const uint8_t *b;
+
+	while (kof_emu_next_written(e, &it, &va, &b, &len))
+		snap_take(e, va, len);
+}
+
 
 int kof_emu_next_snapshot(struct kof_emu *e, uint32_t *it, uint64_t *va,
 			  const uint8_t **bytes, uint64_t *len)
@@ -894,6 +1280,52 @@ static int parity8(uint64_t v)
 	return !c;                                /* PF is set when EVEN */
 }
 
+/*
+ * ---- THE UNDEFINED CORNER OF A 16 BIT DOUBLE SHIFT ------------------------
+ *
+ * SHRD and SHLD mask their count with 31, so a 16 bit form can be asked to
+ * shift by 17..31 - past the operand size, where Intel calls the result
+ * undefined. Real silicon still produces something, consistently, and
+ * VMProtect uses exactly that as an anti-emulation trap: it folds the result
+ * AND the flags into a rolling key, so an interpreter that invents either
+ * value stops matching within a few instructions.
+ *
+ * THE VALUE IS NOT DERIVABLE. It is microarchitecture specific - XVolkolak's
+ * XEmulator says so and solves it the same way, by running the instruction on
+ * the host. This does that where the host is x86-64, which is the only place
+ * the answer would be right anyway.
+ *
+ * Elsewhere the run stops on the instruction rather than guessing: a wrong
+ * answer here is worse than no answer, because it is the guest's key that goes
+ * wrong and the failure surfaces somewhere else entirely.
+ */
+#if defined(__x86_64__)
+#define KOF_HOST_DSHIFT 1
+static uint16_t host_dshift16(uint16_t dst, uint16_t src, uint8_t cnt,
+			      int left, uint64_t *fl)
+{
+	uint16_t r = dst;
+	uint64_t f = 0;
+
+	if (left)
+		__asm__ volatile ("shldw %%cl, %2, %0\n\t"
+				  "pushfq\n\t"
+				  "popq %1"
+				  : "+r"(r), "=r"(f)
+				  : "r"(src), "c"(cnt)
+				  : "cc");
+	else
+		__asm__ volatile ("shrdw %%cl, %2, %0\n\t"
+				  "pushfq\n\t"
+				  "popq %1"
+				  : "+r"(r), "=r"(f)
+				  : "r"(src), "c"(cnt)
+				  : "cc");
+	*fl = f;
+	return r;
+}
+#endif
+
 static void fl_logic(struct kof_emu *e, uint64_t r, unsigned bytes)
 {
 	uint64_t m = mask_of(bytes);
@@ -998,6 +1430,36 @@ static int ea_of(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 	return 1;
 }
 
+/*
+ * THE SEGMENT SELECTORS A WINDOWS USER MODE THREAD ACTUALLY HAS.
+ *
+ * Not decoration and not invented: a protector reads CS to tell a 64-bit
+ * process from a 32-bit one under WOW64 - 0x33 against 0x23 - and reads DS or
+ * ES to check it is in the flat model it expects. `mov bx, ds` is what stopped
+ * two samples here, an MPRESS one and a Themida one, at thirteen million
+ * instructions each.
+ *
+ * The bases are a separate matter and stay where they are: FS on 32-bit and GS
+ * on 64-bit point at the TEB through kof_emu_set_seg_base, and everything else
+ * is flat. This returns the SELECTOR, which is the number the guest sees.
+ *
+ * bddisasm numbers them ES, CS, SS, DS, FS, GS - the same order
+ * kof_emu_set_seg_base is called with.
+ */
+static uint64_t seg_selector(const struct kof_emu *e, unsigned r)
+{
+	static const uint16_t sel64[6] = {
+		0x002bu, 0x0033u, 0x002bu, 0x002bu, 0x0053u, 0x002bu
+	};
+	static const uint16_t sel32[6] = {
+		0x0023u, 0x001bu, 0x0023u, 0x0023u, 0x003bu, 0x0000u
+	};
+
+	if (r >= 6u)
+		return 0;
+	return e->bits == 32 ? sel32[r] : sel64[r];
+}
+
 static int op_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 		 uint64_t *out)
 {
@@ -1005,6 +1467,10 @@ static int op_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 
 	switch (op->Type) {
 	case ND_OP_REG:
+		if (op->Info.Register.Type == ND_REG_SEG) {
+			*out = seg_selector(e, op->Info.Register.Reg);
+			return 1;
+		}
 		if (op->Info.Register.Type != ND_REG_GPR)
 			return 0;
 		*out = reg_rd(e, op->Info.Register.Reg, op->Info.Register.Size,
@@ -1160,28 +1626,72 @@ static unsigned wordsz(const struct kof_emu *e)
 	return e->bits == 32 ? 4u : 8u;
 }
 
-static int push(struct kof_emu *e, uint64_t v)
+/*
+ * THE STACK MOVES BY THE OPERAND SIZE, NOT BY THE WORD SIZE.
+ *
+ * A 16-bit PUSH or POP - `push word ptr [rsi]`, `pop ax`, `push r10w`, any of
+ * them written with the 0x66 prefix - moves RSP by TWO. This used to move it
+ * by eight in 64-bit mode and four in 32-bit, which is what the default
+ * operand size would be, and for ordinary code that is the same number.
+ *
+ * It is not the same number for code that pushes a word on purpose, and an
+ * obfuscator does. Measured on an MPRESS sample, its resolver read the export
+ * ordinal it had just looked up and hid it behind a constant:
+ *
+ *      push  word ptr [rsi]          ; the ordinal, 3
+ *      push  r10w
+ *      mov   r10w, 0x7db2
+ *      add   word ptr [rsp+2], r10w  ; hide it
+ *      pop   r10w
+ *      push  word ptr [rsp]
+ *      pop   ax
+ *      sub   ax, 0x7db2              ; and take it back
+ *      shl   rax, 2
+ *
+ * With an eight-byte push the `[rsp+2]` in the middle addresses a slot that is
+ * not the ordinal, so the value added was never taken back: `sub ax, 0x7db2`
+ * ran on 3 rather than on 0x7db5 and produced 0x8251, the shift made that
+ * 0x20944, and the resolver read its function table at that offset instead of
+ * at 12. It got a zero, added it to the module base, and called the module's
+ * MZ header. Everything after that - 310000 instructions of it - was this
+ * arithmetic.
+ *
+ * PUSH imm8 is not a two-byte push: its operand is one byte and the value is
+ * sign extended to the stack width, so only a size of exactly two is special.
+ */
+static int push_w(struct kof_emu *e, uint64_t v, unsigned w)
 {
-	unsigned w = wordsz(e);
-
+	if (w != 2u)
+		w = wordsz(e);
 	e->gpr[KOF_EMU_RSP] -= w;
-	if (w == 4u)
+	if (wordsz(e) == 4u)
 		e->gpr[KOF_EMU_RSP] &= 0xffffffffu;
 	return mem_wr(e, e->gpr[KOF_EMU_RSP], &v, w);
 }
 
-static int pop(struct kof_emu *e, uint64_t *v)
+static int pop_w(struct kof_emu *e, uint64_t *v, unsigned w)
 {
 	uint64_t t = 0;
-	unsigned w = wordsz(e);
 
+	if (w != 2u)
+		w = wordsz(e);
 	if (!mem_rd(e, e->gpr[KOF_EMU_RSP], &t, w))
 		return 0;
 	e->gpr[KOF_EMU_RSP] += w;
-	if (w == 4u)
+	if (wordsz(e) == 4u)
 		e->gpr[KOF_EMU_RSP] &= 0xffffffffu;
 	*v = t;
 	return 1;
+}
+
+static int push(struct kof_emu *e, uint64_t v)
+{
+	return push_w(e, v, wordsz(e));
+}
+
+static int pop(struct kof_emu *e, uint64_t *v)
+{
+	return pop_w(e, v, wordsz(e));
 }
 
 /* ---- syscalls -------------------------------------------------------------
@@ -1477,6 +1987,2025 @@ static uint64_t i386_nr(uint64_t nr)
 	}
 }
 
+
+/* ---- the Windows environment ----------------------------------------------
+ *
+ * WHY THERE IS ONE AT ALL, GIVEN WHAT kofemu.h SAYS ABOUT SYSCALLS.
+ *
+ * The Linux environment above is short because a packer stub "wants memory and
+ * then it wants to hand over". A Windows stub wants the same two things and
+ * cannot ask for them the same way: there is no syscall it may use, so it asks
+ * kernel32, and to ask kernel32 it must first find it. That is the whole of
+ * what this provides - a kernel32 to find, and answers to the handful of calls
+ * a stub makes once it has.
+ *
+ * WHAT SAID IT WAS WORTH BUILDING. Four Themida protected PEs, measured: each
+ * ran between 22 and 48 million instructions of its own arithmetic and then
+ * stopped, three of them fetching from an address inside their own .idata -
+ * an import thunk the Windows loader fills before the entry point runs and
+ * which nothing here had filled. Every one of the four imports exactly one
+ * function, kernel32!GetModuleHandleA, which is a protector's way of saying
+ * "give me the base and I will find the rest myself".
+ *
+ * SO THE EXPORT DIRECTORY IS THE POINT, not the import thunk. Filling the
+ * thunk alone answers the first call and nothing after it; a loader that has
+ * the base walks the exports by name. emu_unpack.c builds an image with a real
+ * export directory whose every entry points at a stub below.
+ *
+ * HOW A STUB REACHES HERE. Each exported function is eight bytes that load an
+ * id and trap - `syscall` on 64 bit, `int 0x80` on 32 - so the dispatch this
+ * file already has for Linux carries these too. The ids are checked BEFORE the
+ * i386 translation and sit in a range no kernel uses, so an ELF guest cannot
+ * reach them by accident and a Windows guest cannot reach a Linux syscall by
+ * accident either.
+ */
+#define WIN_API_BASE   0x57494e00u      /* 'W','I','N',0 */
+
+enum {
+	WIN_GetModuleHandleA = 0,
+	WIN_GetModuleHandleW,
+	WIN_GetProcAddress,
+	WIN_LoadLibraryA,
+	WIN_LoadLibraryW,
+	WIN_VirtualAlloc,
+	WIN_VirtualFree,
+	WIN_VirtualProtect,
+	WIN_ExitProcess,
+	WIN_GetCurrentProcess,
+	WIN_IsDebuggerPresent,
+	WIN_GetLastError,
+	WIN_SetLastError,
+	WIN_GetVersion,
+	WIN_GetCurrentProcessId,
+	WIN_GetTickCount,
+	WIN_AddVectoredExceptionHandler,
+	WIN_RemoveVectoredExceptionHandler,
+	WIN_GetProcessHeap,
+	WIN_HeapAlloc,
+	WIN_HeapFree,
+	WIN_HeapReAlloc,
+	WIN_HeapSize,
+	WIN_VirtualQuery,
+	WIN_GetSystemInfo,
+	WIN_Sleep,
+	WIN_QueryPerformanceCounter,
+	WIN_QueryPerformanceFrequency,
+	WIN_GetSystemTimeAsFileTime,
+	WIN_GetCurrentThreadId,
+	WIN_GetCurrentThread,
+	WIN_TlsAlloc,
+	WIN_TlsGetValue,
+	WIN_TlsSetValue,
+	WIN_TlsFree,
+	WIN_InitializeCriticalSection,
+	WIN_EnterCriticalSection,
+	WIN_LeaveCriticalSection,
+	WIN_DeleteCriticalSection,
+	WIN_FlushInstructionCache,
+	WIN_GetStdHandle,
+	WIN_CloseHandle,
+	WIN_SetUnhandledExceptionFilter,
+	WIN_GetModuleFileNameA,
+	WIN_GetModuleFileNameW,
+	WIN_GetCommandLineA,
+	WIN_GetCommandLineW,
+	WIN_lstrlenA,
+	WIN_RtlAddFunctionTable,
+	WIN_RtlAllocateHeap,
+	WIN_RtlFreeHeap,
+	WIN_NtQueryInformationProcess,
+	WIN_FreeLibrary,
+	WIN_LocalAlloc,
+	WIN_LocalFree,
+	WIN_GlobalAlloc,
+	WIN_GlobalFree,
+	WIN_lstrcmpA,
+	WIN_lstrcmpiA,
+	WIN_lstrcpyA,
+	WIN_lstrcatA,
+	WIN_lstrlenW,
+	WIN_MultiByteToWideChar,
+	WIN_WideCharToMultiByte,
+	WIN_OutputDebugStringA,
+	WIN_SetErrorMode,
+	WIN_GetStartupInfoA,
+	WIN_GetStartupInfoW,
+	WIN_GetSystemDirectoryA,
+	WIN_GetWindowsDirectoryA,
+	WIN_GetTempPathA,
+	WIN_GetFileAttributesA,
+	WIN_CreateFileA,
+	WIN_ReadFile,
+	WIN_WriteFile,
+	WIN_SetFilePointer,
+	WIN_GetFileSize,
+	WIN_CreateThread,
+	WIN_ResumeThread,
+	WIN_WaitForSingleObject,
+	WIN_TerminateProcess,
+	WIN_RaiseException,
+	WIN_UnhandledExceptionFilter,
+	WIN_InterlockedIncrement,
+	WIN_InterlockedDecrement,
+	WIN_NtProtectVirtualMemory,
+	WIN_NtAllocateVirtualMemory,
+	WIN_RtlGetVersion,
+	WIN_LdrLoadDll,
+	WIN_LdrGetProcedureAddress,
+	WIN_InitializeCriticalSectionAndSpinCount,
+	WIN_IsProcessorFeaturePresent,
+	WIN_IsValidCodePage,
+	WIN_IsBadReadPtr,
+	WIN_IsBadWritePtr,
+	WIN_InterlockedExchange,
+	WIN_InterlockedCompareExchange,
+	WIN_SetHandleCount,
+	WIN_SetStdHandle,
+	WIN_SetEnvironmentVariableA,
+	WIN_SetEnvironmentVariableW,
+	WIN_SetConsoleCtrlHandler,
+	WIN_FreeEnvironmentStringsA,
+	WIN_FreeEnvironmentStringsW,
+	WIN_FlushFileBuffers,
+	WIN_FindClose,
+	WIN_DecodePointer,
+	WIN_EncodePointer,
+	WIN_DeleteFileA,
+	WIN_DisableThreadLibraryCalls,
+	WIN_HeapCreate,
+	WIN_HeapDestroy,
+	WIN_GetCPInfo,
+	WIN_GetACP,
+	WIN_GetOEMCP,
+	WIN_IsUserAnAdmin,
+	WIN_SHGetFolderPathA,
+	WIN_CoInitialize,
+	WIN_CoUninitialize,
+	/*
+	 * THE COUNT COMES FROM THE ENUM AND THE ENUM IS CHECKED AGAINST THE
+	 * TABLE, because writing it by hand is how this broke.
+	 *
+	 * WIN_API_COUNT was a literal, the table grew by 34 entries and the
+	 * literal was set to 53 for 52 of them, and the one-past read crashed
+	 * the scanner in win_eq_nocase against a name pointer that was never
+	 * written. The header already says of the table that "a table in each
+	 * place is a table that disagrees after the first edit"; a hand
+	 * written length is the same mistake one step smaller.
+	 */
+	WIN_API__LAST
+};
+
+#define WIN_API_COUNT ((unsigned)WIN_API__LAST)
+
+/*
+ * THE NAMES AND THE ARGUMENT COUNTS, IN ONE PLACE BECAUSE TWO READERS NEED
+ * THEM TO AGREE.
+ *
+ * This file dispatches on the id; emu_unpack.c writes an export directory that
+ * maps each NAME to the stub for that id, and writes the stub, which on i386
+ * must end in `ret n` with n the argument count because Windows makes the
+ * callee pop. A table in each place is a table that disagrees after the first
+ * edit, so there is one and it is exported.
+ */
+static const struct {
+	uint8_t     mod;        /* an index into win_mod below */
+	const char *name;
+	uint8_t     argc;
+} win_api[] = {
+	{ KOF_EMU_WIN_MOD_K32, "GetModuleHandleA",    1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetModuleHandleW",    1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetProcAddress",      2 },
+	{ KOF_EMU_WIN_MOD_K32, "LoadLibraryA",        1 },
+	{ KOF_EMU_WIN_MOD_K32, "LoadLibraryW",        1 },
+	{ KOF_EMU_WIN_MOD_K32, "VirtualAlloc",        4 },
+	{ KOF_EMU_WIN_MOD_K32, "VirtualFree",         3 },
+	{ KOF_EMU_WIN_MOD_K32, "VirtualProtect",      4 },
+	{ KOF_EMU_WIN_MOD_K32, "ExitProcess",         1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCurrentProcess",   0 },
+	{ KOF_EMU_WIN_MOD_K32, "IsDebuggerPresent",   0 },
+	{ KOF_EMU_WIN_MOD_K32, "GetLastError",        0 },
+	{ KOF_EMU_WIN_MOD_K32, "SetLastError",        1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetVersion",          0 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCurrentProcessId", 0 },
+	{ KOF_EMU_WIN_MOD_K32, "GetTickCount",        0 },
+	{ KOF_EMU_WIN_MOD_K32, "AddVectoredExceptionHandler",    2 },
+	{ KOF_EMU_WIN_MOD_K32, "RemoveVectoredExceptionHandler", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetProcessHeap",       0 },
+	{ KOF_EMU_WIN_MOD_K32, "HeapAlloc",            3 },
+	{ KOF_EMU_WIN_MOD_K32, "HeapFree",             3 },
+	{ KOF_EMU_WIN_MOD_K32, "HeapReAlloc",          4 },
+	{ KOF_EMU_WIN_MOD_K32, "HeapSize",             3 },
+	{ KOF_EMU_WIN_MOD_K32, "VirtualQuery",         3 },
+	{ KOF_EMU_WIN_MOD_K32, "GetSystemInfo",        1 },
+	{ KOF_EMU_WIN_MOD_K32, "Sleep",                1 },
+	{ KOF_EMU_WIN_MOD_K32, "QueryPerformanceCounter",   1 },
+	{ KOF_EMU_WIN_MOD_K32, "QueryPerformanceFrequency", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetSystemTimeAsFileTime",   1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCurrentThreadId",   0 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCurrentThread",     0 },
+	{ KOF_EMU_WIN_MOD_K32, "TlsAlloc",             0 },
+	{ KOF_EMU_WIN_MOD_K32, "TlsGetValue",          1 },
+	{ KOF_EMU_WIN_MOD_K32, "TlsSetValue",          2 },
+	{ KOF_EMU_WIN_MOD_K32, "TlsFree",              1 },
+	{ KOF_EMU_WIN_MOD_K32, "InitializeCriticalSection", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "EnterCriticalSection", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "LeaveCriticalSection", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "DeleteCriticalSection", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "FlushInstructionCache", 3 },
+	{ KOF_EMU_WIN_MOD_K32, "GetStdHandle",         1 },
+	{ KOF_EMU_WIN_MOD_K32, "CloseHandle",          1 },
+	{ KOF_EMU_WIN_MOD_K32, "SetUnhandledExceptionFilter", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetModuleFileNameA",   3 },
+	{ KOF_EMU_WIN_MOD_K32, "GetModuleFileNameW",   3 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCommandLineA",      0 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCommandLineW",      0 },
+	{ KOF_EMU_WIN_MOD_K32, "lstrlenA",             1 },
+	/*
+	 * ntdll's, and RtlAddFunctionTable is the one that matters on amd64:
+	 * a protector that generates code at run time registers an unwind
+	 * table for it, and a call that goes nowhere is a call through a null
+	 * pointer. Answering "done" is truthful here in the only sense that
+	 * matters - there is no unwinder in this build for the table to feed.
+	 */
+	{ KOF_EMU_WIN_MOD_NTDLL, "RtlAddFunctionTable",       3 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "RtlAllocateHeap",           3 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "RtlFreeHeap",               3 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "NtQueryInformationProcess", 5 },
+	{ KOF_EMU_WIN_MOD_K32, "FreeLibrary",           1 },
+	{ KOF_EMU_WIN_MOD_K32, "LocalAlloc",            2 },
+	{ KOF_EMU_WIN_MOD_K32, "LocalFree",             1 },
+	{ KOF_EMU_WIN_MOD_K32, "GlobalAlloc",           2 },
+	{ KOF_EMU_WIN_MOD_K32, "GlobalFree",            1 },
+	{ KOF_EMU_WIN_MOD_K32, "lstrcmpA",              2 },
+	{ KOF_EMU_WIN_MOD_K32, "lstrcmpiA",             2 },
+	{ KOF_EMU_WIN_MOD_K32, "lstrcpyA",              2 },
+	{ KOF_EMU_WIN_MOD_K32, "lstrcatA",              2 },
+	{ KOF_EMU_WIN_MOD_K32, "lstrlenW",              1 },
+	{ KOF_EMU_WIN_MOD_K32, "MultiByteToWideChar",   6 },
+	{ KOF_EMU_WIN_MOD_K32, "WideCharToMultiByte",   8 },
+	{ KOF_EMU_WIN_MOD_K32, "OutputDebugStringA",    1 },
+	{ KOF_EMU_WIN_MOD_K32, "SetErrorMode",          1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetStartupInfoA",       1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetStartupInfoW",       1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetSystemDirectoryA",   2 },
+	{ KOF_EMU_WIN_MOD_K32, "GetWindowsDirectoryA",  2 },
+	{ KOF_EMU_WIN_MOD_K32, "GetTempPathA",          2 },
+	{ KOF_EMU_WIN_MOD_K32, "GetFileAttributesA",    1 },
+	{ KOF_EMU_WIN_MOD_K32, "CreateFileA",           7 },
+	{ KOF_EMU_WIN_MOD_K32, "ReadFile",              5 },
+	{ KOF_EMU_WIN_MOD_K32, "WriteFile",             5 },
+	{ KOF_EMU_WIN_MOD_K32, "SetFilePointer",        4 },
+	{ KOF_EMU_WIN_MOD_K32, "GetFileSize",           2 },
+	{ KOF_EMU_WIN_MOD_K32, "CreateThread",          6 },
+	{ KOF_EMU_WIN_MOD_K32, "ResumeThread",          1 },
+	{ KOF_EMU_WIN_MOD_K32, "WaitForSingleObject",   2 },
+	{ KOF_EMU_WIN_MOD_K32, "TerminateProcess",      2 },
+	{ KOF_EMU_WIN_MOD_K32, "RaiseException",        4 },
+	{ KOF_EMU_WIN_MOD_K32, "UnhandledExceptionFilter", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "InterlockedIncrement",  1 },
+	{ KOF_EMU_WIN_MOD_K32, "InterlockedDecrement",  1 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "NtProtectVirtualMemory",   5 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "NtAllocateVirtualMemory",  6 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "RtlGetVersion",            1 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "LdrLoadDll",               4 },
+	{ KOF_EMU_WIN_MOD_NTDLL, "LdrGetProcedureAddress",   4 },
+	{ KOF_EMU_WIN_MOD_K32, "InitializeCriticalSectionAndSpinCount", 2 },
+	{ KOF_EMU_WIN_MOD_K32, "IsProcessorFeaturePresent", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "IsValidCodePage",         1 },
+	{ KOF_EMU_WIN_MOD_K32, "IsBadReadPtr",            2 },
+	{ KOF_EMU_WIN_MOD_K32, "IsBadWritePtr",           2 },
+	{ KOF_EMU_WIN_MOD_K32, "InterlockedExchange",     2 },
+	{ KOF_EMU_WIN_MOD_K32, "InterlockedCompareExchange", 3 },
+	{ KOF_EMU_WIN_MOD_K32, "SetHandleCount",          1 },
+	{ KOF_EMU_WIN_MOD_K32, "SetStdHandle",            2 },
+	{ KOF_EMU_WIN_MOD_K32, "SetEnvironmentVariableA", 2 },
+	{ KOF_EMU_WIN_MOD_K32, "SetEnvironmentVariableW", 2 },
+	{ KOF_EMU_WIN_MOD_K32, "SetConsoleCtrlHandler",   2 },
+	{ KOF_EMU_WIN_MOD_K32, "FreeEnvironmentStringsA", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "FreeEnvironmentStringsW", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "FlushFileBuffers",        1 },
+	{ KOF_EMU_WIN_MOD_K32, "FindClose",               1 },
+	{ KOF_EMU_WIN_MOD_K32, "DecodePointer",           1 },
+	{ KOF_EMU_WIN_MOD_K32, "EncodePointer",           1 },
+	{ KOF_EMU_WIN_MOD_K32, "DeleteFileA",             1 },
+	{ KOF_EMU_WIN_MOD_K32, "DisableThreadLibraryCalls", 1 },
+	{ KOF_EMU_WIN_MOD_K32, "HeapCreate",              3 },
+	{ KOF_EMU_WIN_MOD_K32, "HeapDestroy",             1 },
+	{ KOF_EMU_WIN_MOD_K32, "GetCPInfo",               2 },
+	{ KOF_EMU_WIN_MOD_K32, "GetACP",                  0 },
+	{ KOF_EMU_WIN_MOD_K32, "GetOEMCP",                0 },
+	{ KOF_EMU_WIN_MOD_SHELL32, "IsUserAnAdmin",       0 },
+	{ KOF_EMU_WIN_MOD_SHELL32, "SHGetFolderPathA",    5 },
+	{ KOF_EMU_WIN_MOD_OLE32, "CoInitialize",          1 },
+	{ KOF_EMU_WIN_MOD_OLE32, "CoUninitialize",        0 },
+};
+
+/*
+ * THE MODULES, AND WHY THERE IS MORE THAN ONE.
+ *
+ * kernel32 alone was enough to get a protector started and not to keep it
+ * going. Measured with KOF_WIN_TRACE on one of the Themida samples: it takes
+ * the kernel32 base, and then asks for five more libraries in a row -
+ * user32, advapi32, ntdll, shell32, shlwapi - is told no to every one, and
+ * dereferences one of the zeros it was given. The fault it stopped on was
+ * never an exception to be handled; it was a module that was not there.
+ *
+ * A MODULE IS AN IMAGE, not an entry in a list, for the reason build_k32_pe
+ * gives: a resolver that has a base walks the export directory at it. Each one
+ * therefore gets its own image and its own stubs INSIDE that image, so that an
+ * address resolved from a module falls within that module's range - which a
+ * careful resolver checks, and which a shared stub page would fail.
+ *
+ * An empty module is still worth having. It answers "yes, loaded, here it is",
+ * which is what the guest is testing for, and a name it then fails to resolve
+ * comes back zero from a directory that really does not list it - the same
+ * answer the real library would give for a name that is not in it.
+ */
+static const struct {
+	const char *name;
+	uint64_t    base64, base32;
+} win_mod[KOF_EMU_WIN_MOD_COUNT] = {
+	{ "kernel32.dll", 0x0000000180000000ull, 0x76000000ull },
+	{ "ntdll.dll",    0x0000000181000000ull, 0x77000000ull },
+	{ "user32.dll",   0x0000000182000000ull, 0x75000000ull },
+	{ "advapi32.dll", 0x0000000183000000ull, 0x74000000ull },
+	{ "shell32.dll",  0x0000000184000000ull, 0x73000000ull },
+	{ "shlwapi.dll",  0x0000000185000000ull, 0x72000000ull },
+	{ "msvcrt.dll",   0x0000000186000000ull, 0x71000000ull },
+	{ "ole32.dll",    0x0000000187000000ull, 0x70000000ull },
+	{ "kernelbase.dll", 0x0000000188000000ull, 0x6f000000ull }
+};
+
+_Static_assert(sizeof win_api / sizeof win_api[0] == (size_t)WIN_API__LAST,
+	       "the Windows API table and its enum have drifted apart");
+
+unsigned    kof_emu_win_api_count(void) { return WIN_API_COUNT; }
+const char *kof_emu_win_api_name(unsigned i)
+{
+	return i < WIN_API_COUNT ? win_api[i].name : 0;
+}
+unsigned    kof_emu_win_api_argc(unsigned i)
+{
+	return i < WIN_API_COUNT ? win_api[i].argc : 0;
+}
+unsigned    kof_emu_win_api_mod(unsigned i)
+{
+	return i < WIN_API_COUNT ? win_api[i].mod : 0;
+}
+uint32_t    kof_emu_win_api_trap(unsigned i) { return WIN_API_BASE + i; }
+
+unsigned    kof_emu_win_mod_count(void) { return KOF_EMU_WIN_MOD_COUNT; }
+const char *kof_emu_win_mod_name(unsigned i)
+{
+	return i < KOF_EMU_WIN_MOD_COUNT ? win_mod[i].name : 0;
+}
+uint64_t    kof_emu_win_mod_base(unsigned i, unsigned bits)
+{
+	if (i >= KOF_EMU_WIN_MOD_COUNT)
+		return 0;
+	return bits == 32u ? win_mod[i].base32 : win_mod[i].base64;
+}
+
+/*
+ * Where an export sits INSIDE its own module: the stubs of one module are
+ * numbered from zero within it, so the n-th function of user32 is at user32's
+ * stub base plus n, not at the global index.
+ */
+unsigned kof_emu_win_api_slot(unsigned i)
+{
+	unsigned k, slot = 0;
+
+	if (i >= WIN_API_COUNT)
+		return 0;
+	for (k = 0; k < i; k++)
+		if (win_api[k].mod == win_api[i].mod)
+			slot++;
+	return slot;
+}
+
+void kof_emu_win_setup(struct kof_emu *e, uint64_t image_base)
+{
+	e->win_image_base = image_base;
+}
+
+void kof_emu_win_set_heap(struct kof_emu *e, uint64_t heap)
+{
+	e->win_heap = heap;
+}
+
+void kof_emu_count_mod_reads(struct kof_emu *e, int on)
+{
+	e->count_mod_reads = (uint8_t)(on != 0);
+}
+
+/* When the run first left the section it started in, and where it went. The
+ * number says how much of a budget is spent reaching a stage a static unpacker
+ * may already have produced. */
+int kof_emu_itrace(struct kof_emu *e, unsigned n)
+{
+	if (!e)
+		return 0;
+	free(e->itr);
+	e->itr = NULL;
+	e->itr_cap = e->itr_n = 0;
+	if (!n)
+		return 1;
+	if (n > KOF_EMU_ITRACE_MAX)
+		n = KOF_EMU_ITRACE_MAX;
+	e->itr = calloc(n, sizeof *e->itr);
+	if (!e->itr)
+		return 0;
+	e->itr_cap = n;
+	e->itr_frozen = 0;
+	return 1;
+}
+
+void kof_emu_itrace_at(struct kof_emu *e, uint64_t rip)
+{
+	if (e)
+		e->itr_at = rip;
+}
+
+void kof_emu_itrace_until(struct kof_emu *e, uint64_t insn)
+{
+	if (e)
+		e->itr_until = insn;
+}
+
+/* Or at the first import this environment could not resolve, which is upstream
+ * of every wrong value that follows it. */
+void kof_emu_itrace_on_null(struct kof_emu *e, int on)
+{
+	if (e)
+		e->itr_on_null = on;
+}
+
+unsigned kof_emu_itrace_count(const struct kof_emu *e)
+{
+	if (!e || !e->itr)
+		return 0;
+	return e->itr_n < e->itr_cap ? e->itr_n : e->itr_cap;
+}
+
+/* Oldest first, so a caller reading 0..count-1 reads them in the order they
+ * ran - which is the only order in which "where did that value come from"
+ * can be answered. */
+int kof_emu_itrace_get(const struct kof_emu *e, unsigned k, uint64_t *rip,
+		       const char **text, const uint64_t **gpr)
+{
+	unsigned have = kof_emu_itrace_count(e), at;
+
+	if (!have || k >= have)
+		return 0;
+	at = e->itr_n <= e->itr_cap ? k
+				    : (unsigned)((e->itr_n - have + k) %
+						 e->itr_cap);
+	if (rip)  *rip  = e->itr[at].rip;
+	if (text) *text = e->itr[at].txt;
+	if (gpr)  *gpr  = e->itr[at].gpr;
+	return 1;
+}
+
+void kof_emu_first_hop(const struct kof_emu *e, uint64_t *insn, uint64_t *rip)
+{
+	if (insn) *insn = e->hop_first_insn;
+	if (rip)  *rip  = e->hop_first_rip;
+}
+
+/* And the last one, which is where execution had got to when the run ended:
+ * the address Unipacker's dump writes as the entry point. See THIRD-PARTY.md.
+ * hop_count says how many stages there were, so one hop can be told from ten. */
+void kof_emu_last_hop(const struct kof_emu *e, uint64_t *rip, uint32_t *count)
+{
+	if (rip)   *rip   = e->hop_last_rip;
+	if (count) *count = e->hop_count;
+}
+
+uint64_t kof_emu_mod_reads(const struct kof_emu *e, unsigned i)
+{
+	return i < KOF_EMU_WIN_MOD_COUNT ? e->mod_reads[i] : 0;
+}
+
+void kof_emu_win_set_module(struct kof_emu *e, unsigned i, uint64_t base)
+{
+	if (i < KOF_EMU_WIN_MOD_COUNT)
+		e->win_mod_base[i] = base;
+	if (i == KOF_EMU_WIN_MOD_K32)
+		e->win_k32_base = base;
+}
+
+static int win_eq_nocase(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++) {
+		char x = *a, y = *b;
+
+		if (x >= 'A' && x <= 'Z') x = (char)(x + 32);
+		if (y >= 'A' && y <= 'Z') y = (char)(y + 32);
+		if (x != y)
+			return 0;
+	}
+	return *a == *b;
+}
+
+/*
+ * The address of an exported function by name, which is three things at once:
+ * what GetProcAddress answers with, what an export directory has to point at,
+ * and what an import thunk has to be filled with. Public for the third, since
+ * filling the thunks is the loader's job and emu_unpack.c is the loader here.
+ */
+uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < WIN_API_COUNT; i++) {
+		uint64_t base;
+
+		if (!win_eq_nocase(win_api[i].name, name))
+			continue;
+		base = e->win_mod_base[win_api[i].mod];
+		if (!base)
+			return 0;       /* that module was not mapped */
+		return base + KOF_EMU_WIN_STUB_RVA +
+		       (uint64_t)kof_emu_win_api_slot(i) * KOF_EMU_WIN_STUB;
+	}
+	return 0;
+}
+
+/* A module handle by name, which is what GetModuleHandle and LoadLibrary both
+ * come down to. */
+static uint64_t win_mod_of(struct kof_emu *e, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < KOF_EMU_WIN_MOD_COUNT; i++) {
+		const char *n = win_mod[i].name;
+		unsigned len = (unsigned)strlen(n);
+
+		if (win_eq_nocase(n, name))
+			return e->win_mod_base[i];
+		/* "kernel32" for "kernel32.dll": a guest may leave the suffix
+		 * off and Windows supplies it. */
+		if (len > 4u && !strncmp(n + len - 4u, ".dll", 4u)) {
+			char bare[64];
+
+			if (len - 4u < sizeof bare) {
+				memcpy(bare, n, len - 4u);
+				bare[len - 4u] = 0;
+				if (win_eq_nocase(bare, name))
+					return e->win_mod_base[i];
+			}
+		}
+	}
+	return 0;
+}
+
+/*
+ * The calling conventions, and they are not the same one.
+ *
+ * amd64 Windows passes the first four in rcx, rdx, r8, r9 - a different set
+ * from the System V order this file's Linux side reads. i386 Windows passes
+ * them on the stack, and the CALLEE pops them, which is why the stubs end in
+ * `ret n` rather than `ret` and why the argument count has to be known here as
+ * well as there.
+ */
+static uint64_t win_arg(struct kof_emu *e, unsigned i)
+{
+	static const unsigned r64[4] = {
+		KOF_EMU_RCX, KOF_EMU_RDX, KOF_EMU_R8, KOF_EMU_R9
+	};
+	uint64_t v = 0;
+
+	if (e->bits == 32) {
+		/* [esp] is the return address the stub's caller pushed. */
+		if (!mem_rd(e, (e->gpr[KOF_EMU_RSP] + 4u + 4u * i) & 0xffffffffu,
+			    &v, 4u))
+			return 0;
+		return v;
+	}
+	if (i < 4u)
+		return e->gpr[r64[i]];
+	if (!mem_rd(e, e->gpr[KOF_EMU_RSP] + 8u + 8u * i, &v, 8u))
+		return 0;
+	return v;
+}
+
+/* A NUL terminated guest string into a host buffer, bounded and always
+ * terminated. A pointer that faults yields the empty string rather than a
+ * failure: a stub asking for a module by a name it cannot read is asking for
+ * nothing, and "not found" is the honest answer to that. */
+static void win_str(struct kof_emu *e, uint64_t va, char *out, unsigned cap,
+		    int wide)
+{
+	unsigned i;
+
+	for (i = 0; i + 1u < cap; i++) {
+		uint64_t c = 0;
+
+		if (!mem_rd(e, va + (wide ? 2u * i : i), &c, wide ? 2u : 1u))
+			break;
+		if (!c)
+			break;
+		out[i] = (char)(c & 0xffu);
+	}
+	out[i] = 0;
+}
+
+
+/*
+ * Reserve guest memory, the way the Linux side's mmap does and from the same
+ * arena - one allocator, so a guest that somehow used both could not be handed
+ * the same page twice.
+ */
+/*
+ * THE ARENA IS ITS OWN, AND THAT IS AN ANTI-EMULATION POINT RATHER THAN
+ * TIDINESS.
+ *
+ * EMU_MMAP_BASE is 0x7f0000000000, which is where LINUX puts an mmap. Windows
+ * does not: a VirtualAlloc comes back low, and a guest that stores the pointer,
+ * or compares it against its own image base, or simply truncates it into a
+ * 32-bit field it declared, learns something true about the machine it is on
+ * and false about the machine it is meant to be on. A protector looking for
+ * exactly that is the reason this number is not shared.
+ */
+#define EMU_WINALLOC_BASE 0x0000000030000000ull
+/* The largest single reservation this will make. A guest with a real use for
+ * more than this is not one a short interpreted run is going to finish. */
+#define EMU_WINALLOC_MAX  (256ull << 20)
+
+static uint64_t win_alloc(struct kof_emu *e, uint64_t want, unsigned prot)
+{
+	uint64_t len;
+	uint64_t at;
+
+	/*
+	 * THE SIZE IS A NUMBER THE GUEST CHOSE, so it is bounded before it is
+	 * rounded. `want + PAGE - 1` wraps to a small value for a request near
+	 * 2^64, which would then map a few pages and report success - and the
+	 * guest would write far past them. The ceiling is the arena itself:
+	 * nothing this interpreter runs has any use for a gigabyte, and a
+	 * refusal is an answer a caller already has to handle.
+	 */
+	if (!want || want > EMU_WINALLOC_MAX)
+		return 0;
+	len = (want + KOF_EMU_PAGE - 1u) & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+	if (!len)
+		return 0;
+	if (!e->winmap_next)
+		e->winmap_next = EMU_WINALLOC_BASE;
+	at = e->winmap_next;
+	/* A guard page between mappings, so a guest that runs off the end of
+	 * one faults here rather than scribbling on the next - the same reason
+	 * the Linux mmap leaves one. */
+	e->winmap_next += len + KOF_EMU_PAGE;
+	if (!vma_add(e, at, len, 0, prot & 7u, 0))
+		return 0;
+	return at;
+}
+
+/*
+ * The 32-bit arena, which cannot be the 64-bit one: EMU_MMAP_BASE is above
+ * 4 GB, so a 32-bit guest storing the pointer truncates it and then writes to
+ * an address nothing mapped. The same reasoning as STACK_TOP_32 in
+ * emu_unpack.c, and the same class of bug it was written for.
+ */
+#define EMU_MMAP_BASE_32 0x20000000ull
+
+static uint64_t win_alloc32(struct kof_emu *e, uint64_t want, unsigned prot)
+{
+	uint64_t len;
+	uint64_t at;
+
+	if (!want || want > EMU_WINALLOC_MAX)
+		return 0;               /* see win_alloc on why this is first */
+	len = (want + KOF_EMU_PAGE - 1u) & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+	if (!len)
+		return 0;
+	if (!e->mmap32_next)
+		e->mmap32_next = EMU_MMAP_BASE_32;
+	at = e->mmap32_next;
+	e->mmap32_next += len + KOF_EMU_PAGE;
+	if (at + len > 0xfffff000ull)
+		return 0;
+	if (!vma_add(e, at, len, 0, prot & 7u, 0))
+		return 0;
+	return at;
+}
+
+/*
+ * PAGE_* to this emulator's three bits. Anything with an EXECUTE in it gets X,
+ * anything writable gets W, and everything readable gets R - the distinctions
+ * Windows draws that this does not (guard pages, write-combine, no-cache) are
+ * about caching and faulting behaviour rather than about what the memory is.
+ */
+static unsigned win_prot(uint64_t p)
+{
+	unsigned r = 0;
+
+	switch (p & 0xffu) {
+	case 0x01: r = 0; break;                                  /* NOACCESS */
+	case 0x02: r = KOF_EMU_R; break;                          /* READONLY */
+	case 0x04: r = KOF_EMU_R | KOF_EMU_W; break;              /* READWRITE */
+	case 0x08: r = KOF_EMU_R | KOF_EMU_W; break;              /* WRITECOPY */
+	case 0x10: r = KOF_EMU_X; break;                          /* EXECUTE */
+	case 0x20: r = KOF_EMU_R | KOF_EMU_X; break;              /* E_READ */
+	case 0x40: r = KOF_EMU_R | KOF_EMU_W | KOF_EMU_X; break;  /* E_RW */
+	case 0x80: r = KOF_EMU_R | KOF_EMU_W | KOF_EMU_X; break;  /* E_WC */
+	default:   r = KOF_EMU_R | KOF_EMU_W; break;
+	}
+	return r;
+}
+
+
+/* ---- exception dispatch --------------------------------------------------
+ *
+ * WHY THIS IS NEEDED AT ALL, WHICH IS NOT "FOR CORRECTNESS".
+ *
+ * A fault is normally the end of a run and that is usually right. It is wrong
+ * for a protected binary, because a protector FAULTS ON PURPOSE. Measured: one
+ * of the four Themida samples walks down its own stack until it runs off the
+ * bottom. Giving it four times the stack did not help and was not meant to -
+ * it ran 7 million instructions further and faulted again exactly one megabyte
+ * lower, because what it is doing is finding the end, not needing the room.
+ * On Windows the fault it provokes is delivered to a handler and the program
+ * carries on. Here it was simply the end.
+ *
+ * So the run loop has to be able to call guest code and come back, and that is
+ * the whole shape of what follows: a fault builds the records Windows would
+ * have built, calls the handler as a function, and the loop recognises its
+ * return by the address it returns to - one nothing maps, so it can never be a
+ * real one.
+ *
+ * TWO MECHANISMS, IN THE ORDER WINDOWS USES THEM.
+ *
+ *   VEH   a flat list, registered by the guest, consulted first, and the same
+ *         on both widths. Protectors like it for exactly that reason.
+ *   SEH   the FS:[0] chain, i386 only. amd64 replaced it with tables in
+ *         .pdata, which are not implemented here - so a 64-bit guest gets VEH
+ *         and nothing else, and a 64-bit guest relying on table SEH still
+ *         stops. That is a gap and is left visible rather than approximated.
+ *
+ * WHAT A HANDLER MAY DO. Return "continue execution", having possibly edited
+ * the CONTEXT - which is the case that matters, because editing the CONTEXT is
+ * how a stack prober says "put me back here and skip that instruction". Return
+ * "continue search", and the next handler is tried. Unwinding is NOT supported:
+ * RtlUnwind is not provided, so a handler that wants to unwind finds nothing
+ * to call and the run ends where it would have unwound from.
+ */
+/*
+ * ONE ADDRESS FOR BOTH WIDTHS, unlike the stack and the thread block above.
+ * Those needed two because a 32-bit guest cannot represent the 64-bit value;
+ * this one is under 4 GB, so the same number is correct in either mode and a
+ * second constant would only be a second thing to keep in step.
+ */
+#define WIN_EXC_BASE     0x2f000000ull
+#define WIN_EXC_PAGES    4u
+#define EXC_REC_OFF      0x000u   /* EXCEPTION_RECORD */
+#define EXC_CTX_OFF      0x400u   /* CONTEXT */
+#define EXC_PTR_OFF      0xf00u   /* EXCEPTION_POINTERS, for a VEH */
+#define WIN_RET_MAGIC    0x2ff00000ull
+#define WIN_EXC_MAX_DEPTH 4u
+
+#define EXC_ACCESS_VIOLATION 0xc0000005u
+/* A handle for the process heap: distinct, non-zero, and never dereferenced. */
+/* The process heap handle IS its address: Windows hands back a pointer to the
+ * HEAP structure, and a guest that reads Flags through it is reading memory
+ * rather than interpreting a token. A made-up token faults the moment it is
+ * dereferenced - which is what 0x18 did. */
+
+static uint64_t win_ret_magic(const struct kof_emu *e)
+{
+	(void)e;
+	return WIN_RET_MAGIC;
+}
+
+static int win_exc_ready(struct kof_emu *e)
+{
+	uint64_t base = WIN_EXC_BASE;
+
+	if (e->exc_base)
+		return 1;
+	if (!vma_add(e, base, (uint64_t)WIN_EXC_PAGES * KOF_EMU_PAGE, 0,
+		     KOF_EMU_R | KOF_EMU_W, 0))
+		return 0;
+	e->exc_base = base;
+	return 1;
+}
+
+/*
+ * The CONTEXT offsets, which are the architecture's published layout and are
+ * the one thing here that cannot be chosen. A handler reads and writes this
+ * structure directly - it is the documented way to resume somewhere else - so
+ * a wrong offset is not a crash, it is a resume at an address made of the
+ * wrong field.
+ */
+#define CTX32_FLAGS  0x000u
+#define CTX32_EDI    0x09cu
+#define CTX32_EIP    0x0b8u
+#define CTX32_EFLAGS 0x0c0u
+#define CTX32_ESP    0x0c4u
+#define CTX32_SIZE   0x2ccu
+
+#define CTX64_FLAGS  0x030u
+#define CTX64_EFLAGS 0x044u
+#define CTX64_RAX    0x078u
+#define CTX64_RIP    0x0f8u
+#define CTX64_SIZE   0x4d0u
+
+/* i386 CONTEXT keeps the six GPRs in this order from CTX32_EDI. */
+static const unsigned ctx32_ord[6] = {
+	KOF_EMU_RDI, KOF_EMU_RSI, KOF_EMU_RBX,
+	KOF_EMU_RDX, KOF_EMU_RCX, KOF_EMU_RAX
+};
+/* amd64 CONTEXT, from CTX64_RAX: rax rcx rdx rbx rsp rbp rsi rdi r8..r15. */
+static const unsigned ctx64_ord[16] = {
+	KOF_EMU_RAX, KOF_EMU_RCX, KOF_EMU_RDX, KOF_EMU_RBX,
+	KOF_EMU_RSP, KOF_EMU_RBP, KOF_EMU_RSI, KOF_EMU_RDI,
+	KOF_EMU_R8,  KOF_EMU_R9,  KOF_EMU_R10, KOF_EMU_R11,
+	KOF_EMU_R12, KOF_EMU_R13, KOF_EMU_R14, KOF_EMU_R15
+};
+
+static void ctx_save(struct kof_emu *e, uint64_t ctx)
+{
+	uint8_t zero[CTX64_SIZE];
+	unsigned i;
+
+	memset(zero, 0, sizeof zero);
+	mem_wr(e, ctx, zero, e->bits == 32 ? CTX32_SIZE : CTX64_SIZE);
+
+	if (e->bits == 32) {
+		uint32_t flags = 0x0001003fu;   /* CONTEXT_FULL, i386 */
+		uint32_t v;
+
+		mem_wr(e, ctx + CTX32_FLAGS, &flags, 4u);
+		for (i = 0; i < 6u; i++) {
+			v = (uint32_t)e->gpr[ctx32_ord[i]];
+			mem_wr(e, ctx + CTX32_EDI + 4u * i, &v, 4u);
+		}
+		v = (uint32_t)e->gpr[KOF_EMU_RBP];
+		mem_wr(e, ctx + CTX32_EDI + 4u * 6u, &v, 4u);   /* Ebp */
+		v = (uint32_t)e->rip;
+		mem_wr(e, ctx + CTX32_EIP, &v, 4u);
+		v = (uint32_t)e->flags;
+		mem_wr(e, ctx + CTX32_EFLAGS, &v, 4u);
+		v = (uint32_t)e->gpr[KOF_EMU_RSP];
+		mem_wr(e, ctx + CTX32_ESP, &v, 4u);
+		return;
+	}
+	{
+		uint32_t flags = 0x0010000bu;   /* CONTEXT_FULL, amd64 */
+		uint32_t ef = (uint32_t)e->flags;
+		uint64_t v;
+
+		mem_wr(e, ctx + CTX64_FLAGS, &flags, 4u);
+		mem_wr(e, ctx + CTX64_EFLAGS, &ef, 4u);
+		for (i = 0; i < 16u; i++) {
+			v = e->gpr[ctx64_ord[i]];
+			mem_wr(e, ctx + CTX64_RAX + 8u * i, &v, 8u);
+		}
+		v = e->rip;
+		mem_wr(e, ctx + CTX64_RIP, &v, 8u);
+	}
+}
+
+static void ctx_load(struct kof_emu *e, uint64_t ctx)
+{
+	unsigned i;
+	uint64_t v = 0;
+
+	if (e->bits == 32) {
+		for (i = 0; i < 6u; i++)
+			if (mem_rd(e, ctx + CTX32_EDI + 4u * i, &v, 4u))
+				e->gpr[ctx32_ord[i]] = v & 0xffffffffu;
+		if (mem_rd(e, ctx + CTX32_EDI + 4u * 6u, &v, 4u))
+			e->gpr[KOF_EMU_RBP] = v & 0xffffffffu;
+		if (mem_rd(e, ctx + CTX32_EIP, &v, 4u))
+			e->rip = v & 0xffffffffu;
+		if (mem_rd(e, ctx + CTX32_EFLAGS, &v, 4u))
+			e->flags = v & 0xffffffffu;
+		if (mem_rd(e, ctx + CTX32_ESP, &v, 4u))
+			e->gpr[KOF_EMU_RSP] = v & 0xffffffffu;
+		return;
+	}
+	for (i = 0; i < 16u; i++)
+		if (mem_rd(e, ctx + CTX64_RAX + 8u * i, &v, 8u))
+			e->gpr[ctx64_ord[i]] = v;
+	if (mem_rd(e, ctx + CTX64_RIP, &v, 8u))
+		e->rip = v;
+	if (mem_rd(e, ctx + CTX64_EFLAGS, &v, 4u))
+		e->flags = v & 0xffffffffu;
+}
+
+/*
+ * Call a guest function and arrange to be told when it returns.
+ *
+ * The return address is an address nothing maps, so the loop's check for it
+ * can never collide with a real return - and if the check were ever removed
+ * the guest would fault there rather than run on into nothing.
+ */
+static int win_call(struct kof_emu *e, uint64_t fn, const uint64_t *arg,
+		    unsigned n)
+{
+	uint64_t magic = win_ret_magic(e);
+	unsigned i;
+
+	if (e->bits == 32) {
+		for (i = n; i > 0; i--)
+			if (!push(e, arg[i - 1]))
+				return 0;
+		if (!push(e, magic))
+			return 0;
+	} else {
+		static const unsigned r[4] = {
+			KOF_EMU_RCX, KOF_EMU_RDX, KOF_EMU_R8, KOF_EMU_R9
+		};
+
+		for (i = 0; i < n && i < 4u; i++)
+			e->gpr[r[i]] = arg[i];
+		/* The shadow space a callee is entitled to spill into, then the
+		 * return address - and the pair leaves rsp 16-aligned before
+		 * the call, which is what the ABI promises a callee. */
+		e->gpr[KOF_EMU_RSP] = (e->gpr[KOF_EMU_RSP] - 32u) & ~15ull;
+		if (!push(e, magic))
+			return 0;
+	}
+	e->rip = fn;
+	return 1;
+}
+
+/* Hand the current exception to handler number `i` of the current phase, or
+ * report that there is none left to try. */
+static int win_exc_dispatch(struct kof_emu *e)
+{
+	uint64_t rec = e->exc_base + EXC_REC_OFF;
+	uint64_t ctx = e->exc_base + EXC_CTX_OFF;
+	uint64_t arg[4];
+
+	if (e->exc_phase == 1u) {
+		uint64_t ptrs = e->exc_base + EXC_PTR_OFF;
+
+		while (e->exc_veh_i < e->n_veh) {
+			uint64_t h = e->win_veh[e->exc_veh_i++];
+
+			if (!h)
+				continue;
+			if (e->bits == 32) {
+				uint32_t a = (uint32_t)rec, b = (uint32_t)ctx;
+
+				mem_wr(e, ptrs, &a, 4u);
+				mem_wr(e, ptrs + 4u, &b, 4u);
+			} else {
+				mem_wr(e, ptrs, &rec, 8u);
+				mem_wr(e, ptrs + 8u, &ctx, 8u);
+			}
+			arg[0] = ptrs;
+			return win_call(e, h, arg, 1u);
+		}
+		/* No vectored handler took it: fall through to the chain. */
+		e->exc_phase = 2u;
+		if (e->bits == 32) {
+			uint64_t head = 0;
+
+			if (mem_rd(e, e->fs_base, &head, 4u))
+				e->exc_seh_frame = head & 0xffffffffu;
+			else
+				e->exc_seh_frame = 0xffffffffu;
+		} else {
+			e->exc_seh_frame = 0xffffffffu;   /* table SEH: absent */
+		}
+	}
+
+	/*
+	 * THE CHAIN IS BOUNDED, because the guest writes it. A registration
+	 * record whose `prev` points at itself is a loop that this walk would
+	 * follow for as long as the instruction budget lasts, calling the same
+	 * handler over and over and pushing a frame each time. Thirty-two is
+	 * far past any real nesting and the limit is on the WALK rather than on
+	 * the guest, so a legitimate deep chain is still followed to its end.
+	 */
+	if (e->exc_phase == 2u && e->exc_seh_depth++ > 32u)
+		return 0;
+
+	while (e->exc_phase == 2u && e->exc_seh_frame &&
+	       e->exc_seh_frame != 0xffffffffull) {
+		uint64_t h = 0;
+
+		if (!mem_rd(e, e->exc_seh_frame + 4u, &h, 4u))
+			break;
+		h &= 0xffffffffu;
+		if (!h)
+			break;
+		arg[0] = rec;
+		arg[1] = e->exc_seh_frame;
+		arg[2] = ctx;
+		arg[3] = 0;
+		return win_call(e, h, arg, 4u);
+	}
+
+	/*
+	 * AND LAST, THE TOP LEVEL FILTER, which is what Windows calls when
+	 * nothing else took the exception.
+	 *
+	 * SetUnhandledExceptionFilter stored one and nothing ever called it,
+	 * which made that entry point a place to put a pointer rather than a
+	 * way to receive an exception. A guest that installs one and no other
+	 * handler - which is the ordinary shape for a program that wants to
+	 * survive its own faults without wrapping every call - was getting the
+	 * run ended at the fault.
+	 *
+	 * It takes EXCEPTION_POINTERS, like a vectored handler, and its
+	 * returns are numbered differently: 1 is EXCEPTION_EXECUTE_HANDLER,
+	 * which for a top level filter means the process is ending, and -1 is
+	 * EXCEPTION_CONTINUE_EXECUTION. win_exc_return reads phase 3 on those
+	 * terms.
+	 */
+	if (e->exc_phase == 2u && e->win_top_filter) {
+		uint64_t ptrs = e->exc_base + EXC_PTR_OFF;
+
+		e->exc_phase = 3u;
+		if (e->bits == 32) {
+			uint32_t a = (uint32_t)rec, b = (uint32_t)ctx;
+
+			mem_wr(e, ptrs, &a, 4u);
+			mem_wr(e, ptrs + 4u, &b, 4u);
+		} else {
+			mem_wr(e, ptrs, &rec, 8u);
+			mem_wr(e, ptrs + 8u, &ctx, 8u);
+		}
+		arg[0] = ptrs;
+		return win_call(e, e->win_top_filter, arg, 1u);
+	}
+	return 0;                       /* nothing left to try */
+}
+
+/*
+ * A fault arrived. Build what Windows would have built and start dispatching,
+ * or report that there is nobody to dispatch to.
+ */
+static int win_exc_begin(struct kof_emu *e)
+{
+	uint64_t rec, ctx;
+	uint32_t w32;
+	uint64_t w64;
+	int is_write = e->fault_kind[0] == 'w';
+
+	if (!e->win_k32_base)
+		return 0;               /* not a Windows guest */
+	if (e->exc_depth >= WIN_EXC_MAX_DEPTH)
+		return 0;               /* a handler faulting inside a handler */
+	if (!win_exc_ready(e))
+		return 0;
+
+	rec = e->exc_base + EXC_REC_OFF;
+	ctx = e->exc_base + EXC_CTX_OFF;
+
+	/*
+	 * EXCEPTION_RECORD. The two parameters of an access violation are the
+	 * kind of access and the address, in that order.
+	 *
+	 * THE CODE IS NOT ALWAYS AN ACCESS VIOLATION, and writing that one in
+	 * regardless is how a raised exception went unhandled. A protector
+	 * raises its own - measured, an MPRESS sample raises 0xc000008e,
+	 * STATUS_FLOAT_DIVIDE_BY_ZERO, on purpose and its handler continues
+	 * from there - and a handler that looks at ExceptionCode before
+	 * deciding sees the wrong number and declines. exc_code carries what
+	 * RaiseException was given; zero means this is a real fault.
+	 */
+	w32 = e->exc_code ? e->exc_code : EXC_ACCESS_VIOLATION;
+	mem_wr(e, rec, &w32, 4u);
+	w32 = 0;                     mem_wr(e, rec + 4u, &w32, 4u);
+	if (e->bits == 32) {
+		w32 = 0;                       mem_wr(e, rec + 8u, &w32, 4u);
+		w32 = (uint32_t)e->rip;        mem_wr(e, rec + 12u, &w32, 4u);
+		w32 = 2u;                      mem_wr(e, rec + 16u, &w32, 4u);
+		w32 = is_write ? 1u : 0u;      mem_wr(e, rec + 20u, &w32, 4u);
+		w32 = (uint32_t)e->fault_va;   mem_wr(e, rec + 24u, &w32, 4u);
+	} else {
+		w64 = 0;                       mem_wr(e, rec + 8u, &w64, 8u);
+		w64 = e->rip;                  mem_wr(e, rec + 16u, &w64, 8u);
+		w32 = 2u;                      mem_wr(e, rec + 24u, &w32, 4u);
+		w64 = is_write ? 1u : 0u;      mem_wr(e, rec + 32u, &w64, 8u);
+		w64 = e->fault_va;             mem_wr(e, rec + 40u, &w64, 8u);
+	}
+
+	ctx_save(e, ctx);
+
+	e->exc_phase = 1u;
+	e->exc_veh_i = 0;
+	e->exc_seh_depth = 0;
+	e->exc_depth++;
+	e->exc_raised++;
+	if (win_exc_dispatch(e)) {
+		/*
+		 * CLEARED ONLY NOW, AND THAT ORDER IS THE POINT. The marks are
+		 * what `unsupported:` reads to tell a fault from an
+		 * instruction this build lacks, so clearing them before
+		 * knowing whether a handler exists turned "faulted reading
+		 * 0x3c" into "unsupported: MOV ax, word ptr [rsi]" - a true
+		 * sentence about the wrong thing, and the exact opposite of
+		 * what the stop reasons are for.
+		 */
+		e->fault_kind[0] = 0;
+		return 1;
+	}
+	e->exc_phase = 0;
+	e->exc_depth--;
+	return 0;
+}
+
+/*
+ * A handler returned to the magic address. Read its answer and either resume
+ * the guest where the CONTEXT now says, or try the next handler.
+ */
+static int win_exc_return(struct kof_emu *e)
+{
+	uint64_t ret = e->gpr[KOF_EMU_RAX] &
+		       (e->bits == 32 ? 0xffffffffu : ~0ull);
+	int resume = 0;
+
+	if (e->exc_phase == 1u)
+		resume = (uint32_t)ret == 0xffffffffu;  /* CONTINUE_EXECUTION */
+	else if (e->exc_phase == 2u)
+		resume = ret == 0;                      /* ContinueExecution */
+	else if (e->exc_phase == 3u)
+		resume = (uint32_t)ret == 0xffffffffu;  /* CONTINUE_EXECUTION */
+
+	if (resume) {
+		e->exc_taken++;
+		ctx_load(e, e->exc_base + EXC_CTX_OFF);
+		e->exc_phase = 0;
+		if (e->exc_depth)
+			e->exc_depth--;
+		return 1;
+	}
+	if (e->exc_phase == 3u) {
+		/* The top level filter is the last one there is. */
+		e->exc_phase = 0;
+		if (e->exc_depth)
+			e->exc_depth--;
+		return 0;
+	}
+	if (e->exc_phase == 2u) {
+		uint64_t prev = 0;
+
+		if (mem_rd(e, e->exc_seh_frame, &prev, 4u))
+			e->exc_seh_frame = prev & 0xffffffffu;
+		else
+			e->exc_seh_frame = 0xffffffffu;
+	}
+	if (win_exc_dispatch(e))
+		return 1;
+	/* Nobody handled it. The run ends where the fault was, which is what
+	 * would have happened without any of this. */
+	e->exc_phase = 0;
+	if (e->exc_depth)
+		e->exc_depth--;
+	return 0;
+}
+
+uint64_t kof_emu_exc_scratch(const struct kof_emu *e, uint64_t *len)
+{
+	if (len)
+		*len = e->exc_base ? (uint64_t)WIN_EXC_PAGES * KOF_EMU_PAGE : 0;
+	return e->exc_base;
+}
+
+/*
+ * WHAT THE GUEST ASKED FOR, on request.
+ *
+ * The same argument as KOF_EMU_TRACE in objctx.c: a call that returns zero and
+ * a call that was never made look identical from a stop reason, and the two
+ * lead to completely different work. A guest faulting at NULL+0x3c has been
+ * handed a zero module handle and has parsed it; which module it asked for is
+ * the only thing that says what to add.
+ */
+static void win_trace(struct kof_emu *e, const char *api, const char *arg,
+		      uint64_t ret)
+{
+	static int on = -1;
+
+	(void)e;
+	if (on < 0)
+		on = getenv("KOF_WIN_TRACE") ? 1 : 0;
+	if (on)
+		fprintf(stderr, "[win] %-24s %-32s -> %#llx\n", api,
+			arg ? arg : "", (unsigned long long)ret);
+}
+
+static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
+{
+	char name[128];
+
+	*stop_out = 0;
+	win_trace(e, kof_emu_win_api_name(id), "(call)", 0);
+	switch (id) {
+	case WIN_GetModuleHandleA:
+	case WIN_GetModuleHandleW: {
+		uint64_t p = win_arg(e, 0);
+
+		/*
+		 * NULL means "this program", which is the image's own base -
+		 * the one thing here that is definitely true. Any other name
+		 * resolves to the one module this environment has.
+		 */
+		if (!p) {
+			win_trace(e, "GetModuleHandle", "(self)",
+				  e->win_image_base);
+			return e->win_image_base;
+		}
+		win_str(e, p, name, sizeof name, id == WIN_GetModuleHandleW);
+		{
+			uint64_t h = win_mod_of(e, name);
+
+			win_trace(e, "GetModuleHandle", name, h);
+			return h;       /* zero is "not loaded", which is true */
+		}
+	}
+	case WIN_LoadLibraryA:
+	case WIN_LoadLibraryW: {
+		uint64_t p = win_arg(e, 0);
+
+		win_str(e, p, name, sizeof name, id == WIN_LoadLibraryW);
+		{
+			uint64_t h = win_mod_of(e, name);
+
+			win_trace(e, "LoadLibrary", name, h);
+			/*
+			 * A library this has no image for fails rather than
+			 * returning a plausible handle. A handle that cannot
+			 * be backed with an export directory is worse than
+			 * none: the guest would take it, resolve a name
+			 * against nothing, and call whatever came back.
+			 */
+			return h;
+		}
+	}
+	case WIN_GetProcAddress: {
+		uint64_t h = win_arg(e, 0), p = win_arg(e, 1);
+
+		{
+			unsigned mi;
+			int known = 0;
+
+			for (mi = 0; mi < KOF_EMU_WIN_MOD_COUNT; mi++)
+				if (h && h == e->win_mod_base[mi])
+					known = 1;
+			if (!known) {
+				/* A handle this environment did not hand out.
+				 * Silent until now, and a zero from here is
+				 * indistinguishable from a name that is not
+				 * exported - two different things to fix. */
+				win_trace(e, "GetProcAddress", "(handle?)", h);
+				return 0;
+			}
+		}
+		/* An ordinal, not a name: the high bits are zero. */
+		if (p < 0x10000u) {
+			win_trace(e, "GetProcAddress", "(by ordinal)", p);
+			return 0;
+		}
+		win_str(e, p, name, sizeof name, 0);
+		{
+			uint64_t a = kof_emu_win_addr_of(e, name);
+
+			win_trace(e, "GetProcAddress", name, a);
+			return a;
+		}
+	}
+	case WIN_VirtualAlloc: {
+		uint64_t at  = win_arg(e, 0), sz = win_arg(e, 1);
+		uint64_t pr  = win_arg(e, 3);
+		unsigned prot = win_prot(pr);
+
+		if (!sz)
+			return 0;
+		if (at) {
+			/* A guest asking for a specific address usually already
+			 * owns it - the Windows call succeeds on memory it has
+			 * reserved. Mapping over it is what MEM_COMMIT does. */
+			uint64_t base = at & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+			uint64_t len = (sz + (at - base) + KOF_EMU_PAGE - 1u) &
+				       ~(uint64_t)(KOF_EMU_PAGE - 1u);
+
+			if (!vma_add(e, base, len, 0, prot, 0))
+				return 0;
+			return at;
+		}
+		return e->bits == 32 ? win_alloc32(e, sz, prot)
+				     : win_alloc(e, sz, prot);
+	}
+	case WIN_VirtualProtect: {
+		uint64_t at = win_arg(e, 0), sz = win_arg(e, 1);
+		uint64_t pr = win_arg(e, 2), old = win_arg(e, 3);
+		uint64_t base = at & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+		uint64_t len = (sz + (at - base) + KOF_EMU_PAGE - 1u) &
+			       ~(uint64_t)(KOF_EMU_PAGE - 1u);
+		uint32_t four = 0x40u;
+
+		(void)base; (void)len;
+		if (!sz)
+			return 0;
+		/*
+		 * THIS IS THE ONE THAT MATTERS TO A SCAN, and it does exactly
+		 * what EMU_SYS_MPROTECT does a few cases down - takes a
+		 * snapshot and reports success, without moving any permission.
+		 *
+		 * The snapshot is the point: a program saying "this is code
+		 * now" about memory it just wrote is a payload saying so about
+		 * itself, and that is what the harvest collects. Not moving the
+		 * permission is the Linux side's decision and is kept here
+		 * rather than diverged from - a run is short, nothing in it
+		 * benefits from being denied access it asked for, and two
+		 * protection models in one interpreter is how they drift.
+		 */
+		if (win_prot(pr) & KOF_EMU_X)
+			snap_take(e, at, sz);
+		if (old)
+			mem_wr(e, old, &four, 4u);
+		return 1;
+	}
+	case WIN_VirtualFree:
+		/* Nothing is reclaimed: a run is short and its memory is what a
+		 * harvest reads afterwards. Freeing would throw away the thing
+		 * this whole interpreter exists to collect. */
+		return 1;
+	case WIN_ExitProcess:
+		*stop_out = KOF_EMU_STOP_EXIT + 1;
+		return 0;
+	case WIN_GetCurrentProcess:
+		return (uint64_t)-1;            /* the pseudo handle */
+	case WIN_IsDebuggerPresent:
+		return 0;
+	case WIN_GetLastError:
+		return e->win_last_error;
+	case WIN_SetLastError:
+		e->win_last_error = (uint32_t)win_arg(e, 0);
+		return 0;
+	case WIN_GetVersion:
+		/*
+		 * MAJOR IS THE LOW BYTE. This returned 0x0a00, which reads as
+		 * major 0, minor 10 - and a program that starts by checking
+		 * `LOBYTE(LOWORD(v)) >= 5` sees major zero and takes its
+		 * failure path. Measured on an MPRESS sample: it read this,
+		 * carried a null pointer from there, tested it with
+		 * IsBadWritePtr, and raised STATUS_FLOAT_DIVIDE_BY_ZERO with
+		 * no handler registered - fourteen and a half million
+		 * instructions in.
+		 *
+		 * 10.0 build 19045, which is what RtlGetVersion above already
+		 * says; the two used to disagree.
+		 */
+		return (19045u << 16) | (0u << 8) | 10u;
+	case WIN_GetCurrentProcessId:
+		return 0x1000u;
+	case WIN_AddVectoredExceptionHandler: {
+		uint64_t first = win_arg(e, 0), h = win_arg(e, 1);
+		unsigned i;
+
+		if (!h || e->n_veh >= sizeof e->win_veh / sizeof e->win_veh[0])
+			return 0;
+		if (first) {
+			/* FIRST means first CALLED, so it goes at the front and
+			 * the rest move down - the order of this list is the
+			 * order they are tried in. */
+			for (i = e->n_veh; i > 0; i--)
+				e->win_veh[i] = e->win_veh[i - 1];
+			e->win_veh[0] = h;
+		} else {
+			e->win_veh[e->n_veh] = h;
+		}
+		e->n_veh++;
+		/* The handle IS the handler address. Windows returns an opaque
+		 * value and a guest may only pass it back to Remove, so the
+		 * simplest value that round-trips is the right one. */
+		return h;
+	}
+	case WIN_RemoveVectoredExceptionHandler: {
+		uint64_t h = win_arg(e, 0);
+		unsigned i, j;
+
+		for (i = 0, j = 0; i < e->n_veh; i++)
+			if (e->win_veh[i] != h)
+				e->win_veh[j++] = e->win_veh[i];
+		if (j == e->n_veh)
+			return 0;
+		e->n_veh = j;
+		return 1;
+	}
+	/*
+	 * A HEAP, WHICH IS ONE ARENA AND NO FREE LIST.
+	 *
+	 * A run is short and its memory is what the harvest reads afterwards,
+	 * so reclaiming would throw away the thing this exists to collect -
+	 * the same decision VirtualFree makes above. HeapAlloc therefore hands
+	 * out fresh pages every time and HeapFree does nothing, which is
+	 * wasteful and cannot be wrong.
+	 */
+	case WIN_GetProcessHeap:
+		return e->win_heap;
+	case WIN_HeapAlloc:
+	case WIN_RtlAllocateHeap: {
+		uint64_t sz = win_arg(e, 2), fl = win_arg(e, 1);
+		uint64_t at = e->bits == 32
+			      ? win_alloc32(e, sz, KOF_EMU_R | KOF_EMU_W)
+			      : win_alloc(e, sz, KOF_EMU_R | KOF_EMU_W);
+
+		/* HEAP_ZERO_MEMORY is bit 3, and the pages are fresh, so the
+		 * flag is already honoured whether it was asked for or not. */
+		(void)fl;
+		return at;
+	}
+	case WIN_HeapReAlloc: {
+		uint64_t sz = win_arg(e, 3);
+
+		/* A new block, and the old contents are NOT copied - which is
+		 * wrong, and is left wrong deliberately rather than guessed
+		 * at: the old size is not knowable here, so a copy would be a
+		 * copy of a length this made up. A caller that depends on it
+		 * will fault or read zeroes, and the trace will say where. */
+		return e->bits == 32 ? win_alloc32(e, sz, KOF_EMU_R | KOF_EMU_W)
+				     : win_alloc(e, sz, KOF_EMU_R | KOF_EMU_W);
+	}
+	case WIN_HeapFree:
+	case WIN_RtlFreeHeap:
+		return 1;
+	case WIN_HeapSize:
+		return 0;
+	case WIN_VirtualQuery: {
+		uint64_t at = win_arg(e, 0), out = win_arg(e, 1);
+		uint64_t page = at & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+		uint32_t w32;
+
+		if (!out)
+			return 0;
+		/* MEMORY_BASIC_INFORMATION, the fields a stub reads: the base,
+		 * the size, the state and the protection. Reported as one
+		 * committed readable-writable-executable page, because that is
+		 * what this interpreter's memory is - it does not model the
+		 * distinctions the rest of the structure draws. */
+		if (e->bits == 32) {
+			w32 = (uint32_t)page;      mem_wr(e, out, &w32, 4u);
+			w32 = (uint32_t)page;      mem_wr(e, out + 4u, &w32, 4u);
+			w32 = 0x40u;               mem_wr(e, out + 8u, &w32, 4u);
+			w32 = KOF_EMU_PAGE;        mem_wr(e, out + 12u, &w32, 4u);
+			w32 = 0x1000u;             mem_wr(e, out + 16u, &w32, 4u);
+			w32 = 0x40u;               mem_wr(e, out + 20u, &w32, 4u);
+			w32 = 0x20000u;            mem_wr(e, out + 24u, &w32, 4u);
+			return 28u;
+		}
+		mem_wr(e, out, &page, 8u);
+		mem_wr(e, out + 8u, &page, 8u);
+		w32 = 0x40u;                  mem_wr(e, out + 16u, &w32, 4u);
+		{ uint64_t sz = KOF_EMU_PAGE; mem_wr(e, out + 24u, &sz, 8u); }
+		w32 = 0x1000u;                mem_wr(e, out + 32u, &w32, 4u);
+		w32 = 0x40u;                  mem_wr(e, out + 36u, &w32, 4u);
+		w32 = 0x20000u;               mem_wr(e, out + 40u, &w32, 4u);
+		return 48u;
+	}
+	case WIN_GetSystemInfo: {
+		uint64_t out = win_arg(e, 0);
+		uint32_t w32;
+
+		if (!out)
+			return 0;
+		w32 = 9u;          mem_wr(e, out, &w32, 4u);        /* AMD64/INTEL */
+		w32 = KOF_EMU_PAGE; mem_wr(e, out + 4u, &w32, 4u);  /* page size */
+		w32 = 1u;          mem_wr(e, out + (e->bits == 32 ? 20u : 32u),
+					  &w32, 4u);               /* one CPU */
+		return 0;
+	}
+	case WIN_Sleep:
+		/* See the Linux side's note on sleeping: it is the cheapest
+		 * anti-emulation trick there is, and the answer is to return
+		 * at once rather than to refuse. */
+		return 0;
+	case WIN_QueryPerformanceCounter: {
+		uint64_t out = win_arg(e, 0);
+		uint64_t v = e->insn;      /* monotonic, and it is the clock */
+
+		if (out)
+			mem_wr(e, out, &v, 8u);
+		return 1;
+	}
+	case WIN_QueryPerformanceFrequency: {
+		uint64_t out = win_arg(e, 0);
+		uint64_t v = 1000000ull;
+
+		if (out)
+			mem_wr(e, out, &v, 8u);
+		return 1;
+	}
+	case WIN_GetSystemTimeAsFileTime: {
+		uint64_t out = win_arg(e, 0);
+		/* A fixed date plus the instruction count, so it is plausible,
+		 * monotonic, and the same on every run of the same file. */
+		uint64_t v = 0x01d80000ull * 0x100000000ull + e->insn;
+
+		if (out)
+			mem_wr(e, out, &v, 8u);
+		return 0;
+	}
+	case WIN_GetCurrentThreadId:
+		return 0x2000u;
+	case WIN_GetCurrentThread:
+		return (uint64_t)-2;            /* the pseudo handle */
+	case WIN_TlsAlloc:
+		return e->win_tls_next < 64u ? e->win_tls_next++
+					     : (uint64_t)-1;
+	case WIN_TlsGetValue: {
+		uint64_t i = win_arg(e, 0);
+
+		return i < 64u ? e->win_tls[i] : 0;
+	}
+	case WIN_TlsSetValue: {
+		uint64_t i = win_arg(e, 0);
+
+		if (i < 64u)
+			e->win_tls[i] = win_arg(e, 1);
+		return 1;
+	}
+	case WIN_TlsFree:
+		return 1;
+	case WIN_InitializeCriticalSection:
+	case WIN_EnterCriticalSection:
+	case WIN_LeaveCriticalSection:
+	case WIN_DeleteCriticalSection:
+		/* One thread, so a lock is never contended and a critical
+		 * section is a structure nobody has to read. */
+		return 1;
+	case WIN_FlushInstructionCache:
+		return 1;
+	case WIN_GetStdHandle:
+		return 0x10u;                   /* a handle, and a distinct one */
+	case WIN_CloseHandle:
+		return 1;
+	case WIN_SetUnhandledExceptionFilter: {
+		uint64_t old = e->win_top_filter;
+
+		e->win_top_filter = win_arg(e, 0);
+		return old;
+	}
+	case WIN_GetModuleFileNameA:
+	case WIN_GetModuleFileNameW: {
+		uint64_t out = win_arg(e, 1), cap = win_arg(e, 2);
+		static const char path[] = "C:\\Windows\\System32\\image.exe";
+		unsigned i, len = (unsigned)sizeof path - 1u;
+		int wide = id == WIN_GetModuleFileNameW;
+
+		if (!out || !cap)
+			return 0;
+		if (len + 1u > cap)
+			len = (unsigned)cap - 1u;
+		for (i = 0; i <= len; i++) {
+			uint32_t c = i < len ? (uint8_t)path[i] : 0u;
+
+			mem_wr(e, out + (wide ? 2u * i : i), &c, wide ? 2u : 1u);
+		}
+		return len;
+	}
+	case WIN_GetCommandLineA:
+	case WIN_GetCommandLineW: {
+		/*
+		 * A REAL POINTER, BECAUSE THE CALLER DEREFERENCES IT.
+		 *
+		 * This used to return 0 on the argument that a caller
+		 * following a null pointer is the visible failure. It is
+		 * visible, and it is also where two samples ended: measured,
+		 * an MPRESS one reached `cmp byte ptr [rdi], 0x22` with rdi
+		 * zero at 13317906 instructions - the CRT looking for the
+		 * quote around argv[0]. Nothing about the run was wrong except
+		 * this answer.
+		 *
+		 * The string is the one GetModuleFileName already invents,
+		 * quoted the way Windows quotes it, so the two answers agree
+		 * with each other. Allocated once per run and kept, which is
+		 * what a caller holding the pointer needs; asking twice gets
+		 * the same address, as it does on Windows.
+		 */
+		static const char cl[] = "\"C:\\Windows\\System32\\image.exe\"";
+		int wide = id == WIN_GetCommandLineW;
+		unsigned len = (unsigned)sizeof cl - 1u, i;
+		uint64_t at = e->cmdline[wide];
+
+		if (at)
+			return at;
+		at = e->bits == 32 ? win_alloc32(e, KOF_EMU_PAGE,
+						 KOF_EMU_R | KOF_EMU_W)
+				   : win_alloc(e, KOF_EMU_PAGE,
+					       KOF_EMU_R | KOF_EMU_W);
+		if (!at)
+			return 0;
+		for (i = 0; i <= len; i++) {
+			uint32_t c = i < len ? (uint8_t)cl[i] : 0u;
+
+			mem_wr(e, at + (wide ? 2u * i : i), &c, wide ? 2u : 1u);
+		}
+		e->cmdline[wide] = at;
+		return at;
+	}
+	case WIN_lstrlenA: {
+		uint64_t p = win_arg(e, 0), i = 0, c = 0;
+
+		while (i < 0x10000u && mem_rd(e, p + i, &c, 1u) && c)
+			i++;
+		return i;
+	}
+	case WIN_RtlAddFunctionTable:
+		return 1;
+	case WIN_NtQueryInformationProcess:
+		/*
+		 * Every class is refused with STATUS_INVALID_INFO_CLASS rather
+		 * than answered. Two of the classes a protector asks for -
+		 * ProcessDebugPort and ProcessDebugObjectHandle - are debugger
+		 * checks, and the honest answer to those is "no debugger",
+		 * which is what a failed query leaves the caller's buffer
+		 * saying: untouched, and it was zeroed before the call.
+		 */
+		return 0xc0000003ull;
+	/*
+	 * THE SECOND BATCH: what a protector reaches for once it has kernel32
+	 * and has started work.
+	 *
+	 * Each one answers the least eventful thing that is true of this
+	 * machine, which is the same rule the Linux side states for the
+	 * services a runtime demands. Where the truthful answer is "that did
+	 * not happen" - a file opened, a thread started - it is a failure and
+	 * not a plausible handle, for the reason LoadLibrary refuses a library
+	 * it has no image for: a handle nothing backs is taken, used, and
+	 * followed into memory that was never there.
+	 */
+	case WIN_FreeLibrary:
+		return 1;
+	case WIN_LocalAlloc:
+	case WIN_GlobalAlloc: {
+		uint64_t sz = win_arg(e, 1);
+
+		return e->bits == 32 ? win_alloc32(e, sz, KOF_EMU_R | KOF_EMU_W)
+				     : win_alloc(e, sz, KOF_EMU_R | KOF_EMU_W);
+	}
+	case WIN_LocalFree:
+	case WIN_GlobalFree:
+		return 0;               /* NULL is success for both */
+	case WIN_lstrcmpA:
+	case WIN_lstrcmpiA: {
+		uint64_t a = win_arg(e, 0), b = win_arg(e, 1), i = 0;
+
+		for (; i < 0x10000u; i++) {
+			uint64_t x = 0, y = 0;
+
+			if (!mem_rd(e, a + i, &x, 1u) ||
+			    !mem_rd(e, b + i, &y, 1u))
+				return 0;
+			if (id == WIN_lstrcmpiA) {
+				if (x >= 'A' && x <= 'Z') x += 32u;
+				if (y >= 'A' && y <= 'Z') y += 32u;
+			}
+			if (x != y)
+				return x < y ? (uint64_t)-1 : 1u;
+			if (!x)
+				return 0;
+		}
+		return 0;
+	}
+	case WIN_lstrcpyA:
+	case WIN_lstrcatA: {
+		uint64_t d = win_arg(e, 0), sp = win_arg(e, 1), i = 0, c = 0;
+
+		if (id == WIN_lstrcatA)
+			while (i < 0x10000u && mem_rd(e, d + i, &c, 1u) && c)
+				i++;
+		{
+			uint64_t k = 0;
+
+			do {
+				if (!mem_rd(e, sp + k, &c, 1u))
+					return 0;
+				if (!mem_wr(e, d + i + k, &c, 1u))
+					return 0;
+				k++;
+			} while (c && k < 0x10000u);
+		}
+		return d;
+	}
+	case WIN_lstrlenW: {
+		uint64_t p = win_arg(e, 0), i = 0, c = 0;
+
+		while (i < 0x10000u && mem_rd(e, p + 2u * i, &c, 2u) && c)
+			i++;
+		return i;
+	}
+	case WIN_MultiByteToWideChar:
+	case WIN_WideCharToMultiByte:
+		/* Nothing is converted and nothing is written. Reporting zero
+		 * characters is the answer for a conversion that did not
+		 * happen; writing a length into a buffer this did not fill
+		 * would be the lie. */
+		return 0;
+	case WIN_OutputDebugStringA:
+		return 0;
+	case WIN_SetErrorMode:
+		return 0;
+	case WIN_GetStartupInfoA:
+	case WIN_GetStartupInfoW: {
+		uint64_t out = win_arg(e, 0);
+		uint32_t cb = e->bits == 32 ? 68u : 104u;
+
+		/* Only cb, which is the field a caller checks. The rest was
+		 * zeroed by whoever allocated it and zero is what a process
+		 * started with no console or redirection has. */
+		if (out)
+			mem_wr(e, out, &cb, 4u);
+		return 0;
+	}
+	case WIN_GetSystemDirectoryA:
+	case WIN_GetWindowsDirectoryA:
+	case WIN_GetTempPathA: {
+		uint64_t out = win_arg(e, id == WIN_GetTempPathA ? 1u : 0u);
+		uint64_t cap = win_arg(e, id == WIN_GetTempPathA ? 0u : 1u);
+		static const char sys[]  = "C:\\Windows\\System32";
+		static const char win[]  = "C:\\Windows";
+		static const char tmp[]  = "C:\\Windows\\Temp\\";
+		const char *p = id == WIN_GetSystemDirectoryA ? sys
+			      : id == WIN_GetWindowsDirectoryA ? win : tmp;
+		unsigned i, len = 0;
+
+		while (p[len])
+			len++;
+		if (!out || cap <= len)
+			return len + 1u;
+		for (i = 0; i <= len; i++) {
+			uint32_t c = (uint8_t)p[i];
+
+			mem_wr(e, out + i, &c, 1u);
+		}
+		return len;
+	}
+	case WIN_GetFileAttributesA:
+		return (uint64_t)-1;            /* INVALID_FILE_ATTRIBUTES */
+	case WIN_CreateFileA:
+		return (uint64_t)-1;            /* INVALID_HANDLE_VALUE */
+	case WIN_ReadFile:
+	case WIN_WriteFile:
+	case WIN_SetFilePointer:
+		return 0;
+	case WIN_GetFileSize:
+		return (uint64_t)-1;
+	case WIN_CreateThread:
+		/*
+		 * NO THREAD, AND SAID SO. There is one instruction pointer
+		 * here, so a thread reported as started is a thread that will
+		 * never run - and the Linux side has the measurement for what
+		 * that costs: a runtime handed a slot to a thread clone had
+		 * reported starting, and then waited on it forever.
+		 */
+		return 0;
+	case WIN_ResumeThread:
+		return (uint64_t)-1;
+	case WIN_WaitForSingleObject:
+		return 0;                       /* WAIT_OBJECT_0 */
+	case WIN_TerminateProcess:
+		*stop_out = KOF_EMU_STOP_EXIT + 1;
+		return 1;
+	case WIN_RaiseException:
+		/*
+		 * A GUEST RAISING ITS OWN EXCEPTION, handed to the same
+		 * dispatcher a fault is. Protectors use this deliberately -
+		 * it is a control transfer their handler completes - so
+		 * refusing it ends the run on the ordinary path of the code
+		 * rather than on an error.
+		 */
+		/*
+		 * THE ADDRESS TO BLAME IS THE CALLER'S, not this stub's. A
+		 * 64-bit handler is found by looking an address up in the
+		 * image's exception directory, and the stub lives in a
+		 * fabricated kernel32 that has none - so the lookup has to be
+		 * made with the return address, which is the instruction
+		 * RaiseException interrupted.
+		 */
+		e->fault_va = win_arg(e, 0);
+		memcpy(e->fault_kind, "raise", 6);
+		e->exc_code = (uint32_t)win_arg(e, 0);
+		{
+			uint64_t back = 0;
+
+			if (mem_rd(e, e->gpr[KOF_EMU_RSP], &back,
+				   e->bits == 32 ? 4u : 8u))
+				e->exc_rip = back;
+		}
+		if (win_exc_begin(e)) {
+			e->exc_code = 0;
+			e->exc_rip = 0;
+			return 0;
+		}
+		e->exc_code = 0;
+		e->exc_rip = 0;
+		e->fault_kind[0] = 0;
+		/*
+		 * NOBODY TOOK IT, AND THE RUN CARRIES ON ANYWAY.
+		 *
+		 * On Windows an unhandled exception ends the process, and this
+		 * used to end the run for the same reason. That is the wrong
+		 * trade for an unpacker. What the run is FOR is the plaintext
+		 * the guest writes, and a guest that raises on purpose - a
+		 * licence check that failed, an anti-analysis trap, a path this
+		 * environment pushed it down by answering something
+		 * imperfectly - has usually not written it yet. Measured on an
+		 * MPRESS sample: 0xc000008e, STATUS_FLOAT_DIVIDE_BY_ZERO, at
+		 * 14.5 million instructions, with no VEH, no top level filter
+		 * and no exception directory in the image - so no handler
+		 * exists to find and stopping here is all this could do.
+		 *
+		 * Returning instead puts the guest back after the call with
+		 * the exception simply not having happened, which is what a
+		 * handler that returned EXCEPTION_CONTINUE_EXECUTION would
+		 * have done.
+		 *
+		 * BOUNDED, because a guest raising forever is not producing.
+		 * Past EMU_UNHANDLED_MAX the run ends as it used to, and the
+		 * count is reported either way.
+		 */
+		if (e->exc_unhandled++ < EMU_UNHANDLED_MAX)
+			return 0;
+		snprintf(e->detail, sizeof e->detail,
+			 "unhandled raise %#llx at rip %#llx, %u of them",
+			 (unsigned long long)win_arg(e, 0),
+			 (unsigned long long)e->rip, e->exc_unhandled);
+		*stop_out = KOF_EMU_STOP_EXIT + 1;
+		return 0;
+	case WIN_UnhandledExceptionFilter:
+		return 1;                       /* EXECUTE_HANDLER */
+	/*
+	 * THE C RUNTIME'S OWN IMPORTS.
+	 *
+	 * Not chosen from a list of what Windows has: measured. A resolver in
+	 * an MPRESS sample walks this module's export directory and, when the
+	 * name is not there, gets a zero and calls it. Recording the first
+	 * letter of each key it searched for gave I, S, F and D - four full
+	 * scans of eighty-one names that found nothing - and those are the
+	 * letters of the CRT startup set. Each answer below is the one the real
+	 * function gives when there is nothing to report, not a number picked
+	 * to get past a check.
+	 */
+	case WIN_InitializeCriticalSectionAndSpinCount:
+		return 1;                       /* TRUE: the section is ready */
+	case WIN_IsProcessorFeaturePresent:
+		return 0;                       /* this machine has no optional
+						 * feature, which is true of it */
+	case WIN_IsValidCodePage:
+		return 1;
+	case WIN_IsBadReadPtr:
+	case WIN_IsBadWritePtr: {
+		uint64_t p = win_arg(e, 0), n = win_arg(e, 1), c = 0;
+
+		/* The honest answer, and this environment can give it: walk the
+		 * range and say whether it is there. */
+		if (!p)
+			return 1;
+		if (n > 0x10000u)
+			n = 0x10000u;
+		while (n--)
+			if (!mem_rd(e, p++, &c, 1u))
+				return 1;
+		return 0;
+	}
+	case WIN_InterlockedExchange: {
+		uint64_t p = win_arg(e, 0), v = win_arg(e, 1), old = 0;
+
+		if (!mem_rd(e, p, &old, 4u))
+			return 0;
+		mem_wr(e, p, &v, 4u);
+		return (uint32_t)old;
+	}
+	case WIN_InterlockedCompareExchange: {
+		uint64_t p = win_arg(e, 0), nv = win_arg(e, 1);
+		uint64_t cmp = win_arg(e, 2), old = 0;
+
+		if (!mem_rd(e, p, &old, 4u))
+			return 0;
+		if ((uint32_t)old == (uint32_t)cmp)
+			mem_wr(e, p, &nv, 4u);
+		return (uint32_t)old;
+	}
+	case WIN_SetHandleCount:
+		return win_arg(e, 0);           /* what it returns on NT */
+	case WIN_SetStdHandle:
+	case WIN_SetEnvironmentVariableA:
+	case WIN_SetEnvironmentVariableW:
+	case WIN_SetConsoleCtrlHandler:
+	case WIN_FreeEnvironmentStringsA:
+	case WIN_FreeEnvironmentStringsW:
+	case WIN_FlushFileBuffers:
+	case WIN_FindClose:
+	case WIN_DeleteFileA:
+	case WIN_DisableThreadLibraryCalls:
+	case WIN_HeapDestroy:
+		return 1;                       /* TRUE */
+	case WIN_DecodePointer:
+	case WIN_EncodePointer:
+		/* With no process cookie these are the identity, which is what
+		 * they are on a system where the cookie is zero. A guest that
+		 * encodes and then decodes gets its pointer back either way,
+		 * and that is the only property anything depends on. */
+		return win_arg(e, 0);
+	case WIN_HeapCreate:
+		/* One heap, the one GetProcessHeap already hands out. A guest
+		 * that makes its own and a guest that uses the process heap
+		 * then behave the same, which is what this environment can
+		 * honestly support. */
+		return e->win_heap;
+	case WIN_GetCPInfo: {
+		uint64_t out = win_arg(e, 1);
+		uint32_t two = 2u, zero = 0;
+
+		/* MaxCharSize 2, DefaultChar "?", no lead byte ranges - a
+		 * double byte code page with nothing special about it. */
+		if (!out)
+			return 0;
+		mem_wr(e, out, &two, 4u);
+		two = (uint32_t)'?';
+		mem_wr(e, out + 4u, &two, 1u);
+		mem_wr(e, out + 5u, &zero, 1u);
+		mem_wr(e, out + 6u, &zero, 4u);
+		return 1;
+	}
+	case WIN_GetACP:
+		return 1252u;                   /* the Latin-1 code page */
+	case WIN_GetOEMCP:
+		return 437u;
+	case WIN_IsUserAnAdmin:
+		/* FALSE. An unpacker's guest is not privileged and saying so
+		 * is both true here and the answer that keeps a program on its
+		 * ordinary path. */
+		return 0;
+	case WIN_CoInitialize:
+		return 0;                       /* S_OK */
+	case WIN_CoUninitialize:
+		return 0;
+	case WIN_SHGetFolderPathA:
+		return 0x80004005u;             /* E_FAIL: no such folder here */
+
+	case WIN_InterlockedIncrement:
+	case WIN_InterlockedDecrement: {
+		uint64_t p = win_arg(e, 0), v = 0;
+
+		if (!mem_rd(e, p, &v, 4u))
+			return 0;
+		v = (uint32_t)(id == WIN_InterlockedIncrement ? v + 1u : v - 1u);
+		mem_wr(e, p, &v, 4u);
+		return v;
+	}
+	case WIN_NtProtectVirtualMemory: {
+		uint64_t at = 0, sz = 0;
+
+		/* The addresses arrive by POINTER, which is what makes this
+		 * different from VirtualProtect and easy to get wrong. */
+		mem_rd(e, win_arg(e, 1), &at, e->bits == 32 ? 4u : 8u);
+		mem_rd(e, win_arg(e, 2), &sz, e->bits == 32 ? 4u : 8u);
+		if (sz && (win_prot(win_arg(e, 3)) & KOF_EMU_X))
+			snap_take(e, at, sz);
+		return 0;                       /* STATUS_SUCCESS */
+	}
+	case WIN_NtAllocateVirtualMemory: {
+		uint64_t pbase = win_arg(e, 1), psz = win_arg(e, 3);
+		uint64_t sz = 0, at;
+
+		mem_rd(e, psz, &sz, e->bits == 32 ? 4u : 8u);
+		at = e->bits == 32 ? win_alloc32(e, sz, KOF_EMU_R | KOF_EMU_W)
+				   : win_alloc(e, sz, KOF_EMU_R | KOF_EMU_W);
+		if (!at)
+			return 0xc0000017ull;   /* NO_MEMORY */
+		mem_wr(e, pbase, &at, e->bits == 32 ? 4u : 8u);
+		return 0;
+	}
+	case WIN_RtlGetVersion: {
+		uint64_t out = win_arg(e, 0);
+		uint32_t v;
+
+		if (!out)
+			return 0xc000000dull;
+		v = 284u; mem_wr(e, out, &v, 4u);        /* dwOSVersionInfoSize */
+		v = 10u;  mem_wr(e, out + 4u, &v, 4u);   /* MajorVersion */
+		v = 0u;   mem_wr(e, out + 8u, &v, 4u);   /* MinorVersion */
+		v = 19045u; mem_wr(e, out + 12u, &v, 4u);/* BuildNumber */
+		return 0;
+	}
+	case WIN_LdrLoadDll:
+		return 0xc0000135ull;           /* DLL_NOT_FOUND */
+	case WIN_LdrGetProcedureAddress:
+		return 0xc0000139ull;           /* ENTRYPOINT_NOT_FOUND */
+	case WIN_GetTickCount:
+		/*
+		 * MONOTONIC AND DERIVED FROM THE INSTRUCTION COUNT, not a
+		 * constant. A stub that times a loop against a clock that
+		 * never moves sees zero elapsed and can conclude it is being
+		 * emulated; one that sees the clock go backwards can conclude
+		 * the same. This moves forward, slowly, and only forward.
+		 */
+		return (e->insn >> 16) & 0xffffffffu;
+	default:
+		return 0;
+	}
+}
+
 /*
  * Arguments three, four and five.
  *
@@ -1513,6 +4042,31 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 				    : e->gpr[KOF_EMU_RDI];
 	uint64_t a1 = e->bits == 32 ? (e->gpr[KOF_EMU_RCX] & 0xffffffffu)
 				    : e->gpr[KOF_EMU_RSI];
+
+	/*
+	 * The Windows ids first, and against the RAW register rather than `nr`:
+	 * a 32-bit guest's number goes through i386_nr, which maps i386 numbers
+	 * onto amd64 ones and would turn one of these into something else
+	 * entirely. See the Windows environment above for why the range is safe.
+	 */
+	{
+		uint32_t raw = (uint32_t)(e->gpr[KOF_EMU_RAX] & 0xffffffffu);
+
+		if (raw >= WIN_API_BASE && raw < WIN_API_BASE + WIN_API_COUNT)
+			{
+				unsigned wid = raw - WIN_API_BASE;
+				uint64_t r = winapi_do(e, wid, stop_out);
+
+				/* The ANSWER, not just the question. A call
+				 * that was made and a call that was answered
+				 * wrongly look the same from the entry line,
+				 * and the second is what sends a program down
+				 * its failure path. */
+				win_trace(e, kof_emu_win_api_name(wid),
+					  "= ", r);
+				return r;
+			}
+	}
 
 	*stop_out = 0;
 	switch (nr) {
@@ -2287,6 +4841,224 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		uint64_t a = 0, b = 0, r = 0, next;
 		unsigned sz;
 		int jumped = 0;
+		/* The instruction being executed, kept for the handover test
+		 * below - by then e->rip is the TARGET. */
+		uint64_t at = 0;
+		unsigned at_len = 0;
+		const uint8_t *at_b = code;
+
+		/*
+		 * AN EXCEPTION HANDLER RETURNING, recognised by the address it
+		 * returns to. Checked before the fetch because the address is
+		 * deliberately unmapped: reaching the fetch with it would be a
+		 * fault, which is the safe way for this to fail if it is ever
+		 * removed.
+		 */
+		/*
+		 * THE HANDOFF, CHECKED BEFORE THE FETCH. See kof_emu_watch_exec
+		 * for what the ranges are and where the idea came from. Whatever
+		 * the loader has written is in memory now and the harvest is
+		 * about to read it; going on would run the program itself,
+		 * which is not what an unpacker is for.
+		 */
+		/*
+		 * A STAGE THIS RUN HAS NOT BEEN IN BEFORE. Copied and left
+		 * running - see kof_emu_hop_add.
+		 */
+		if (e->n_hop) {
+			int h = hop_first(e, e->rip);
+
+			if (h >= 0) {
+				if (!e->hop_first_insn) {
+					e->hop_first_insn = e->insn ? e->insn : 1;
+					e->hop_first_rip = e->rip;
+				}
+				e->hop_last_rip = e->rip;
+				e->hop_count++;
+				snap_take(e, e->hop[h].lo,
+					  e->hop[h].hi - e->hop[h].lo);
+			}
+		}
+
+		if (e->n_xwatch) {
+			/*
+			 * THE EDGE, NOT THE ADDRESS.
+			 *
+			 * This was "rip is inside a watched range", which is
+			 * right for a packer whose program sits where the
+			 * loader never executes - MPRESS, Oreans - and wrong
+			 * for one that shares a section with it. Measured on a
+			 * PECompact2 sample: the entry section is the one the
+			 * image decompresses into AND the one the entry point
+			 * is in, so naming it ended the run at instruction 0,
+			 * and naming every other section ended it six
+			 * instructions later at the stub's own first jump.
+			 *
+			 * A handover is the loader LEAVING and the program
+			 * being entered, so it is a transition. For a range the
+			 * loader never runs in, every arrival is a transition
+			 * and nothing changes; for one it starts in, the run
+			 * has to leave before coming back can mean anything.
+			 */
+			int in = xwatch_hit(e, e->rip);
+
+			if (in && e->xw_have_prev && !e->xw_was_in) {
+				e->stop = KOF_EMU_STOP_HANDOFF;
+				snprintf(e->detail, sizeof e->detail,
+					 "handed over at %#llx",
+					 (unsigned long long)e->rip);
+				goto done;
+			}
+			e->xw_was_in = in;
+			e->xw_have_prev = 1;
+		}
+
+		if (e->exc_phase && e->rip == win_ret_magic(e)) {
+			if (win_exc_return(e))
+				continue;
+			fail(e, KOF_EMU_STOP_FAULT, NULL);
+			goto done;
+		}
+
+		/*
+		 * A CALL TO ADDRESS ZERO IS AN IMPORT THIS ENVIRONMENT DOES
+		 * NOT HAVE, AND IT IS NOT A CRASH.
+		 *
+		 * A stub that resolves its own imports walks a module's export
+		 * directory, compares names, and on a match adds the function's
+		 * RVA to the module base. This environment's kernel32 exports
+		 * eighty-odd names against the real one's fifteen hundred, so a
+		 * name it wants and this does not have comes back as a zero RVA
+		 * - and the stub calls the module base, or, where it had the
+		 * address in a register, calls zero.
+		 *
+		 * WHAT WINDOWS WOULD HAVE DONE is return from a function this
+		 * file does not implement, so that is what happens here: pop
+		 * the return address, put 0 in the accumulator and carry on.
+		 * The stub gets a useless answer to a question this build
+		 * cannot answer, which is exactly what every other unimplemented
+		 * API here gives it, and keeps going.
+		 *
+		 * FAULTING INSTEAD THROWS THE RUN AWAY. Measured on an MPRESS
+		 * sample: it resolved LoadLibraryA, loaded five libraries,
+		 * resolved SetLastError and GetLastError, and then called one
+		 * name too many at instruction 5662007 - and a fault at rip 0
+		 * ends the run with its payload unharvested.
+		 *
+		 * BOUNDED, because a guest that does this forever is not
+		 * unpacking. Past EMU_NULL_CALLS the answer is no longer
+		 * plausible and the fault it would have been happens instead.
+		 *
+		 * Only the UNMAPPED null page. A guest that genuinely mapped
+		 * page zero and put code there is executing its own code.
+		 */
+		if (e->rip < KOF_EMU_PAGE && !page_lookup(e, e->rip)) {
+			uint64_t ret = 0;
+
+			if (e->null_calls < EMU_NULL_CALLS &&
+			    pop(e, &ret) && ret) {
+				/* Freeze the instruction trace at the FIRST of
+				 * these: the call that could not be resolved
+				 * is upstream of every wrong value after it. */
+				if (e->itr && e->itr_on_null && !e->null_calls)
+					e->itr_frozen = 1;
+				e->null_calls++;
+				e->gpr[KOF_EMU_RAX] = 0;
+				e->rip = ret;
+				continue;
+			}
+			e->fault_va = e->rip;
+			memcpy(e->fault_kind, "call0", 6);
+			fail(e, KOF_EMU_STOP_FAULT, NULL);
+			goto done;
+		}
+
+		/*
+		 * EXECUTE PERMISSION, CHECKED ONCE PER PAGE.
+		 *
+		 * Not per instruction: a straight run stays on one page and the
+		 * answer cannot change under it, so the page it last fetched
+		 * from is remembered and only a move to another page pays for a
+		 * lookup. That makes the check a compare in the common case.
+		 *
+		 * What it is for: a guest that walks a library's export
+		 * directory for a name this environment does not list gets 0
+		 * back, adds it to the module base and calls the module's own
+		 * MZ header. Without this the header is executable, the zeroes
+		 * decode as `add [rax],al`, and the run marches two bytes at a
+		 * time until something faults far away - measured on an MPRESS
+		 * sample, 310701 instructions ending at an address built out of
+		 * header bytes. With it the fault is AT THE BASE, which names
+		 * the module and says the miss was an export lookup.
+		 */
+		if ((e->rip & ~(uint64_t)(KOF_EMU_PAGE - 1u)) != e->fetch_page) {
+			struct page *fp = page_lookup(e, e->rip);
+
+			/*
+			 * WRITTEN AND THEN EXECUTED: TAKE IT AND CARRY ON.
+			 *
+			 * Memory a run wrote and then ran is the definition of
+			 * something it produced, and it is the only signal that
+			 * works when a program decrypts a piece of ITSELF - no
+			 * mprotect, no section, no packer to declare anything.
+			 * stop_on_written_jump saw the same thing and STOPPED,
+			 * which is why it is off by default: measured, a
+			 * PECompact2 sample stopped eighteen instructions in.
+			 * Snapshotting and continuing is Unipacker's lesson
+			 * about section hopping applied to the same signal -
+			 * see THIRD-PARTY.md.
+			 *
+			 * WHOLE CONTIGUOUS RUN, because a decrypted function is
+			 * not one page and a snapshot per page hands back
+			 * rubble. Bounded, and each page is taken once.
+			 *
+			 * NOT THE STACK. A return address is written and then
+			 * executed at every call, and the stack is where this
+			 * would otherwise fire constantly and collect nothing.
+			 */
+			if (fp && fp->written && !fp->snapped &&
+			    (fp->prot & KOF_EMU_X) &&
+			    !(e->rip >= e->stack_lo && e->rip < e->stack_hi)) {
+				uint64_t base = e->rip &
+						~(uint64_t)(KOF_EMU_PAGE - 1u);
+				uint64_t lo = base, hi = base + KOF_EMU_PAGE;
+				unsigned k;
+				struct page *q;
+
+				for (k = 0; k < WEX_SPAN_PAGES; k++) {
+					if (lo < KOF_EMU_PAGE)
+						break;
+					q = page_lookup(e, lo - KOF_EMU_PAGE);
+					if (!q || !q->written || q->snapped)
+						break;
+					lo -= KOF_EMU_PAGE;
+				}
+				for (k = 0; k < WEX_SPAN_PAGES; k++) {
+					q = page_lookup(e, hi);
+					if (!q || !q->written || q->snapped)
+						break;
+					hi += KOF_EMU_PAGE;
+				}
+				for (base = lo; base < hi;
+				     base += KOF_EMU_PAGE) {
+					q = page_lookup(e, base);
+					if (q)
+						q->snapped = 1;
+				}
+				snap_take(e, lo, hi - lo);
+
+			}
+
+			if (fp && !(fp->prot & KOF_EMU_X)) {
+				e->fault_va = e->rip;
+				memcpy(e->fault_kind, "exec", 5);
+				fail(e, KOF_EMU_STOP_FAULT, NULL);
+				goto done;
+			}
+			if (fp)
+				e->fetch_page = e->rip &
+						~(uint64_t)(KOF_EMU_PAGE - 1u);
+		}
 
 		if (!mem_rd(e, e->rip, code, sizeof code)) {
 			/* The tail of a mapping is a legitimate place to be: try
@@ -2310,7 +5082,58 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				e->bits == 32 ? ND_DATA_32 : ND_DATA_64);
 		if (!ND_SUCCESS(st)) { fail(e, KOF_EMU_STOP_DECODE, NULL); break; }
 
+		if (!e->sp0_set) {
+			e->sp0 = e->gpr[KOF_EMU_RSP];
+			e->sp0_set = 1;
+		}
+		at = e->rip;
+		at_len = ix.Length;
 		e->trace[e->trace_n++ % KOF_EMU_TRACE] = e->rip;
+		if (e->itr && !e->itr_frozen &&
+		    ((e->itr_at && e->rip == e->itr_at) ||
+		     (e->itr_until && e->insn >= e->itr_until))) {
+			const char *pk = getenv("KOF_EMU_PEEK");
+
+			e->itr_frozen = 1;
+			/* And what memory looked like AT THE FREEZE, which is
+			 * the only moment a key a guest is comparing against
+			 * is still where it was put. Reading it when the run
+			 * stops is far too late. */
+			while (pk && *pk) {
+				uint64_t at = (uint64_t)strtoull(pk, NULL, 0);
+				uint8_t bf[128];
+				unsigned q;
+
+				if (mem_rd(e, at, bf, sizeof bf)) {
+					fprintf(stderr, "[frz] %#llx ",
+						(unsigned long long)at);
+					for (q = 0; q < sizeof bf; q++)
+						fputc(bf[q] >= 32 &&
+						      bf[q] < 127
+						      ? bf[q] : '.', stderr);
+					fputc('\n', stderr);
+				}
+				pk = strchr(pk, ',');
+				if (pk)
+					pk++;
+			}
+		}
+		if (e->itr && !e->itr_frozen) {
+			struct itrace *r = &e->itr[e->itr_n++ % e->itr_cap];
+			char t[ND_MIN_BUF_SIZE];
+			unsigned q = 0;
+
+			r->rip = e->rip;
+			memcpy(r->gpr, e->gpr, sizeof r->gpr);
+			/* The registers are copied BEFORE the instruction runs,
+			 * which is the point: they are its inputs. */
+			if (ND_SUCCESS(NdToText(&ix, e->rip, sizeof t, t)))
+				while (q + 1u < sizeof r->txt && t[q]) {
+					r->txt[q] = t[q];
+					q++;
+				}
+			r->txt[q] = 0;
+		}
 		/* Cleared per instruction so the stop below can tell an operand
 		 * this build cannot express from one it simply could not read.
 		 * They were reported the same way, and an ordinary CMP against
@@ -2334,8 +5157,21 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * cannot interrupt work, and it cuts an idle run to a fraction
 		 * of a second whatever the budget allows.
 		 */
-		if (e->insn - e->last_new_page > KOF_EMU_IDLE) {
+		if (e->insn - e->last_new_page > e->idle_max)
+			e->idle_max = e->insn - e->last_new_page;
+		if (e->insn - e->last_new_page > e->idle) {
 			fail(e, KOF_EMU_STOP_STALLED, NULL);
+			break;
+		}
+		/* And the clock, when one was set - see kof_emu_set_deadline.
+		 * Masked so the read happens once every 64K instructions. */
+		if (e->deadline_ms && !(e->insn & 0xffffu) &&
+		    now_ms() - e->started_ms > e->deadline_ms) {
+			snprintf(e->detail, sizeof e->detail,
+				 "deadline after %llu ms, %llu instructions",
+				 (unsigned long long)(now_ms() - e->started_ms),
+				 (unsigned long long)e->insn);
+			e->stop = KOF_EMU_STOP_BUDGET;
 			break;
 		}
 		next = e->rip + ix.Length;
@@ -3144,6 +5980,79 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			break;
 
 		/*
+		 * RCL / RCR - THE ROTATE THAT INCLUDES CF, AND THAT IS THE
+		 * WHOLE DIFFERENCE FROM THE PAIR BELOW.
+		 *
+		 * ROL and ROR rotate w bits; these rotate w+1, with the carry
+		 * flag as the extra bit. So the count is taken modulo w+1 and
+		 * not modulo w, and a protector that uses them as a checksum -
+		 * which is what they are for outside of multiprecision
+		 * arithmetic - gets a different answer from either mistake.
+		 *
+		 * Measured: two of the four protected samples stopped here,
+		 * with "unsupported: RCR ax, 1", having run 25.9 and 26.7
+		 * million instructions to reach it.
+		 */
+		case ND_INS_RCL: case ND_INS_RCR: {
+			unsigned n, rc, w = sz * 8u, i;
+			uint64_t m = mask_of(sz), cf;
+
+			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
+			    !op_rd(e, &ix, &ix.Operands[1], &b))
+				goto unsupported;
+			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
+			/*
+			 * 8- and 16-bit forms take the count modulo 9 and 17;
+			 * the wider ones are already below w+1 after the mask
+			 * above. The architecture says so and it is not an
+			 * optimisation - a count of 9 on a byte is a full turn
+			 * and leaves the operand alone.
+			 */
+			rc = n % (w + 1u);
+			if (!rc) break;
+			a &= m;
+			cf = (e->flags & FL_CF) ? 1u : 0u;
+			/*
+			 * One step at a time, w+1 bits wide. A closed form
+			 * needs three shifts and two conditionals per
+			 * direction and is where this kind of code goes wrong;
+			 * the count is at most 64 and these run once.
+			 */
+			for (i = 0; i < rc; i++) {
+				if (ix.Instruction == ND_INS_RCL) {
+					uint64_t top = (a >> (w - 1u)) & 1u;
+
+					a = ((a << 1) | cf) & m;
+					cf = top;
+				} else {
+					uint64_t bot = a & 1u;
+
+					a = ((a >> 1) | (cf << (w - 1u))) & m;
+					cf = bot;
+				}
+			}
+			r = a;
+			e->flags &= ~(uint64_t)FL_CF;
+			if (cf)
+				e->flags |= FL_CF;
+			/* OF is defined for a count of one alone, as above. */
+			if (n == 1) {
+				e->flags &= ~(uint64_t)FL_OF;
+				if (ix.Instruction == ND_INS_RCL) {
+					if (((r >> (w - 1u)) & 1u) ^ (cf & 1u))
+						e->flags |= FL_OF;
+				} else {
+					if (((r >> (w - 1u)) & 1u) ^
+					    ((r >> (w - 2u)) & 1u))
+						e->flags |= FL_OF;
+				}
+			}
+			if (!op_wr(e, &ix, &ix.Operands[0], r))
+				goto unsupported;
+			break;
+		}
+
+		/*
 		 * SHIFTS and ROTATES are split, because they touch DIFFERENT
 		 * flags: a shift sets SF/ZF/PF from its result like a logical op,
 		 * a rotate leaves those four alone and moves only CF and OF. The
@@ -3159,6 +6068,106 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * undefined in C, and on the host it wraps mod 64 to a wrong
 		 * answer rather than the all-sign-bits x86 produces.
 		 */
+		/*
+		 * SHRD AND SHLD, which an obfuscator reaches for because they
+		 * are the one shift that mixes two registers - measured, a
+		 * VMProtect stub reaches one 78 instructions in and nothing
+		 * else in this build decoded it.
+		 *
+		 * The count is masked like the other shifts; a count of zero
+		 * leaves the flags alone, and a count past the width is
+		 * UNDEFINED on the hardware, so it is refused rather than
+		 * invented.
+		 */
+		case ND_INS_SHRD: case ND_INS_SHLD: {
+			unsigned n, w = sz * 8u;
+			uint64_t m = mask_of(sz), src;
+
+			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
+			    !op_rd(e, &ix, &ix.Operands[1], &src) ||
+			    !op_rd(e, &ix, &ix.Operands[2], &b))
+				goto unsupported;
+			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
+			if (!n)
+				break;
+			a &= m;
+			src &= m;
+			/*
+			 * A COUNT PAST THE OPERAND SIZE, WHICH ONLY 16 BIT
+			 * OPERANDS CAN HAVE - the mask is 31, so 32 and 64 bit
+			 * forms never reach it.
+			 *
+			 * Intel calls the result undefined here, and that is
+			 * precisely why a protector uses it: the hardware still
+			 * produces something, consistently, because the shift
+			 * runs on a 32 bit datapath over the concatenation of
+			 * the two operands. An interpreter that refuses the
+			 * instruction is telling the guest it is not a CPU.
+			 * Measured, a VMProtect stub reaches `shrd cx, ax, 0x51`
+			 * - count 17 on a 16 bit pair - 78 instructions in.
+			 *
+			 * So it is computed the way the datapath does it, and
+			 * the comment says that this is a choice about
+			 * undefined behaviour rather than an architectural
+			 * fact.
+			 */
+			if (n >= w) {
+#ifdef KOF_HOST_DSHIFT
+				uint64_t hf = 0;
+
+				if (sz != 2u)
+					goto unsupported;
+				r = host_dshift16((uint16_t)a, (uint16_t)src,
+						  (uint8_t)n,
+						  ix.Instruction == ND_INS_SHLD,
+						  &hf);
+				/* The host's own flags, for the bits this
+				 * models - the guest reads them back with
+				 * pushf and folds them in. */
+				{
+					uint64_t keep = FL_CF | FL_PF | FL_AF |
+							FL_ZF | FL_SF | FL_OF;
+
+					e->flags = (e->flags & ~keep) |
+						   (hf & keep);
+				}
+				if (!op_wr(e, &ix, &ix.Operands[0], r))
+					goto unsupported;
+				break;
+#else
+				goto unsupported;
+#endif
+			}
+			if (ix.Instruction == ND_INS_SHRD) {
+				r = ((a >> n) | (src << (w - n))) & m;
+				if ((a >> (n - 1u)) & 1u)
+					b = 1;
+				else
+					b = 0;
+			} else {
+				r = ((a << n) | (src >> (w - n))) & m;
+				b = (a >> (w - n)) & 1u;
+			}
+			fl_logic(e, r, sz);
+			/* AF is architecturally undefined after a shift and
+			 * real x86 SETS it; a protector reading the flags back
+			 * notices the difference. See host_dshift16. */
+			e->flags |= FL_AF;
+			if (b)
+				e->flags |= FL_CF;
+			/* OF is defined only for a count of one, and is the
+			 * sign changing - the same rule the single bit shifts
+			 * above follow. */
+			if (n == 1u && ((r ^ a) >> (w - 1u)) & 1u)
+				e->flags |= FL_OF;
+			if (!op_wr(e, &ix, &ix.Operands[0], r))
+				goto unsupported;
+			break;
+		}
+
+		/* SAL is SHL under another name - the encoding is the same and
+		 * bddisasm reports both. */
+		case ND_INS_SAL:
 		case ND_INS_SHL: case ND_INS_SHR: case ND_INS_SAR: {
 			unsigned n, w = sz * 8u;
 			uint64_t m = mask_of(sz);
@@ -3170,6 +6179,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			if (!n) break;                    /* no shift, no flags */
 			a &= m;
 			switch (ix.Instruction) {
+			case ND_INS_SAL:
 			case ND_INS_SHL: r = n >= w ? 0 : (a << n) & m; break;
 			case ND_INS_SHR: r = n >= w ? 0 : a >> n; break;
 			default: /* SAR: sign-extend, then an arithmetic right shift
@@ -3179,9 +6189,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				break;
 			}
 			fl_logic(e, r, sz);
+			/* AF is architecturally undefined after a shift and real
+			 * x86 SETS it - see host_dshift16 on why that matters. */
+			e->flags |= FL_AF;
 			/* CF is the last bit shifted out, and zero once the count
 			 * has cleared the whole width. */
-			if (ix.Instruction == ND_INS_SHL) {
+			if (ix.Instruction == ND_INS_SHL ||
+			    ix.Instruction == ND_INS_SAL) {
 				if (n <= w && (a >> (w - n)) & 1u)
 					e->flags |= FL_CF;
 			} else if (ix.Instruction == ND_INS_SHR) {
@@ -3244,13 +6258,61 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		}
 
 		case ND_INS_PUSH:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) || !push(e, a))
+			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
+			    !push_w(e, a, ix.Operands[0].Size))
 				goto fault;
 			break;
 
 		case ND_INS_POP:
-			if (!pop(e, &a) || !op_wr(e, &ix, &ix.Operands[0], a))
+			if (!pop_w(e, &a, ix.Operands[0].Size) ||
+			    !op_wr(e, &ix, &ix.Operands[0], a))
 				goto fault;
+			break;
+
+		/*
+		 * PUSHF / POPF - THE PROTECTORS USE THEM, AND FOR THE FLAGS.
+		 *
+		 * Not carried until now, and what it cost was measured rather
+		 * than guessed: three Themida protected PEs ran 25.5, 22.3 and
+		 * 44.2 MILLION instructions each - so the loader is reachable,
+		 * it computes, and none of the API refusals that emu_unpack.h
+		 * warns about had stopped it - and then every one of them
+		 * stopped on "unsupported: PUSHFQ". One instruction between a
+		 * run that got nowhere and a run that might.
+		 *
+		 * A protector reaches for these because they are how you save
+		 * the flags across a sequence that clobbers them; that a
+		 * hardened loader also reads them for its own reasons is a
+		 * separate matter and does not change what the instruction is.
+		 *
+		 * WHAT IS PUSHED IS WHAT THIS BUILD MODELS, plus the two bits
+		 * that are not conditions. FL_* already sit at their real
+		 * EFLAGS positions, so the value needs no rearranging; bit 1 is
+		 * hardwired to 1 on every x86 and bit 9 (IF) is set in every
+		 * user mode process, and code that pushes the flags to look at
+		 * them would find a zero there suspicious in a way the hardware
+		 * never produces.
+		 *
+		 * WHAT POPF TAKES BACK is only the modelled bits. The rest of
+		 * the word is discarded rather than stored, because storing
+		 * bits nothing reads would let a later PUSHF hand back a value
+		 * this interpreter never reasoned about - and IOPL, NT, RF and
+		 * VM are not things a user mode stub can set anyway.
+		 */
+#define FL_MODELLED (FL_CF | FL_PF | FL_AF | FL_ZF | FL_SF | FL_DF | FL_OF)
+#define FL_ALWAYS_1 (1u << 1)
+#define FL_IF       (1u << 9)
+
+		case ND_INS_PUSHF:
+			if (!push(e, e->flags | FL_ALWAYS_1 | FL_IF))
+				goto fault;
+			break;
+
+		case ND_INS_POPF:
+			if (!pop(e, &a))
+				goto fault;
+			e->flags = (e->flags & ~(uint64_t)FL_MODELLED) |
+				   (a & (uint64_t)FL_MODELLED);
 			break;
 
 		/*
@@ -3537,6 +6599,32 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 
 		case ND_INS_LODS: case ND_INS_STOS:
 		case ND_INS_MOVS: case ND_INS_SCAS: case ND_INS_CMPS: {
+			/* WHAT THE GUEST IS MEASURING OR COMPARING, on request.
+			 * A stub that resolves its own imports runs strlen
+			 * over the name it wants before it looks for it, and
+			 * RDI is pointing at that name here - the one place it
+			 * is nameable. Printed once per distinct string. */
+			static int str_on = -1;
+
+			if (str_on < 0)
+				str_on = getenv("KOF_STR_TRACE") ? 1 : 0;
+			if (str_on) {
+				char nm[64];
+				uint64_t c = 0;
+				unsigned q;
+
+				for (q = 0; q + 1 < sizeof nm; q++) {
+					if (!mem_rd(e, e->gpr[KOF_EMU_RDI] + q,
+						    &c, 1u) || !c)
+						break;
+					if (c < 32u || c > 126u)
+						break;
+					nm[q] = (char)c;
+				}
+				nm[q] = 0;
+				if (q >= 5u && !c)
+					fprintf(stderr, "[str] %s\n", nm);
+			}
 			unsigned w = ix.Operands[0].Size ? ix.Operands[0].Size : 1u;
 			int64_t step = (e->flags & FL_DF) ? -(int64_t)w : (int64_t)w;
 			uint64_t iter = 1;
@@ -3691,21 +6779,148 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			 * kof_emu_cfg.stop_on_written_jump for what UPX does to
 			 * that idea. Off unless the caller asked.
 			 */
+			/*
+			 * A WRITTEN PAGE AND OUTSIDE THE STUB. See
+			 * kof_emu_set_stub_range: the first half alone fires on
+			 * a stub unpacking into its own section, which is the
+			 * commonest shape there is.
+			 */
 			struct page *p = e->stop_on_written_jump
 					 ? page_find(e, e->rip) : NULL;
 
+			/*
+			 * NOR THE STACK. A handler that resumes through a
+			 * thunk it built on the stack has written a page and
+			 * jumped to it, and that is not a program starting -
+			 * it is the same code carrying on. Measured on a
+			 * PECompact2 sample, which does exactly this out of
+			 * its own exception handler eighteen instructions in.
+			 */
+			if (p && p->written && e->stub_hi &&
+			    e->rip >= e->stub_lo && e->rip < e->stub_hi)
+				p = NULL;
+			if (p && p->written && e->stack_hi &&
+			    e->rip >= e->stack_lo && e->rip < e->stack_hi)
+				p = NULL;
+
 			if (p && p->written) {
+				snprintf(e->detail, sizeof e->detail,
+					 "written jump to %#llx",
+					 (unsigned long long)e->rip);
 				e->stop = KOF_EMU_STOP_HANDOFF;
 				goto done;
+			}
+
+			/*
+			 * ---- THE HANDOVER, BY THE SHAPE OF THE TRANSFER ----
+			 *
+			 * A stub ends by giving control to the program with
+			 * the stack exactly as it found it. That last part is
+			 * the whole discriminator: a stub CALLING something
+			 * has pushed a return address, a stub HANDING OVER has
+			 * not - it has undone every push it made. XVolkolak's
+			 * XEmulUnpacker builds its per-packer OEP predicates
+			 * on that one invariant, and its MPRESS, PECompact and
+			 * Themida rules differ only in which tail instruction
+			 * they accept. See THIRD-PARTY.md.
+			 *
+			 * WHAT IS REQUIRED OF THE TARGET: inside the image, and
+			 * on a page this run WROTE. Together those say the
+			 * destination is code the stub produced rather than
+			 * code it came with, which is what an unpacker is
+			 * looking for.
+			 *
+			 * WHAT IS REQUIRED OF THE TAIL: one of the four shapes
+			 * a packer ends with. Without this the balanced-stack
+			 * test alone fires on ordinary returns inside the stub.
+			 */
+			if (e->oep_watch && e->sp0_set &&
+			    e->gpr[KOF_EMU_RSP] == e->sp0 &&
+			    e->img_hi > e->img_lo &&
+			    e->rip >= e->img_lo && e->rip < e->img_hi &&
+			    !(e->stack_hi && e->rip >= e->stack_lo &&
+			      e->rip < e->stack_hi)) {
+				struct page *t = page_find(e, e->rip);
+				int tail = 0;
+
+				/* jmp rel32 / call rel32 */
+				if (at_len == 5u &&
+				    (at_b[0] == 0xe9u || at_b[0] == 0xe8u))
+					tail = 1;
+				/* ret, and ret imm16 */
+				else if (at_len == 1u && at_b[0] == 0xc3u)
+					tail = 1;
+				else if (at_len == 3u && at_b[0] == 0xc2u)
+					tail = 1;
+				/* jmp reg / call reg */
+				else if (at_len == 2u && at_b[0] == 0xffu &&
+					 (at_b[1] == 0xe0u || at_b[1] == 0xd0u))
+					tail = 1;
+
+				/*
+				 * AND THE DIRECTION, WHICH IS WHAT KEEPS THIS
+				 * FROM FIRING INSIDE THE STUB.
+				 *
+				 * A loader jumping about within itself does
+				 * every other part of this test: the stack is
+				 * balanced after a `popfq; ret`, the target is
+				 * in the image, and the page is written
+				 * because the loader expanded into it.
+				 * Measured on a Themida sample, that fired
+				 * 25440 instructions in on a jump DOWN from
+				 * one part of the loader to another.
+				 *
+				 * XEmulUnpacker's rules each carry a direction
+				 * - Themida wants a jump UP, PECompact one
+				 * DOWN and out of a region that is not the
+				 * image. Both are the same statement: the
+				 * transfer leaves where the stub was working.
+				 * Without a module to say which packer this
+				 * is, the union of the two is what can be
+				 * required, and it is still enough to drop the
+				 * intra-loader case above.
+				 */
+				if (tail && t && t->written &&
+				    (at < e->rip ||
+				     at < e->img_lo || at >= e->img_hi)) {
+					snprintf(e->detail, sizeof e->detail,
+						 "handover to %#llx, stack "
+						 "balanced", 
+						 (unsigned long long)e->rip);
+					e->stop = KOF_EMU_STOP_HANDOFF;
+					goto done;
+				}
 			}
 		}
 		continue;
 
 unsupported:
+		/*
+		 * MOST FAULTS ARRIVE HERE AND NOT AT `fault:`, which is why
+		 * this test is in both places.
+		 *
+		 * An operand read that cannot reach its memory returns failure
+		 * to the decode arm it was called from, and those arms say
+		 * `goto unsupported` - the label then sorts the two apart by
+		 * whether a fault was recorded. Hooking only `fault:` caught
+		 * the minority: measured, three of four protected samples
+		 * reported a read fault and none of them ever reached the
+		 * dispatcher.
+		 */
+		if (e->fault_kind[0] && win_exc_begin(e))
+			continue;
 		fail(e, e->fault_kind[0] ? KOF_EMU_STOP_FAULT
 					 : KOF_EMU_STOP_UNSUPPORTED, &ix);
 		goto done;
 fault:
+		/*
+		 * A WINDOWS GUEST MAY HAVE ASKED FOR THIS. See the exception
+		 * dispatcher: a protector faults on purpose and expects to be
+		 * handed the fault. Nothing changes for an ELF run, which has
+		 * no win_k32_base and is refused at the first line of it.
+		 */
+		if (win_exc_begin(e))
+			continue;
 		fail(e, KOF_EMU_STOP_FAULT, NULL);
 		goto done;
 	}

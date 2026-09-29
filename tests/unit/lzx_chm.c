@@ -49,8 +49,8 @@
 #include <dirent.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/analyzer/parsers/containers/chm_parse.h"
-#include "../../libkofeng/extractor/decomp/lzx.h"
+#include "../../libkofeng/analyzers/parsers/containers/chm_parse.h"
+#include "../../libkofeng/extractors/decomp/lzx.h"
 #include "slurp.h"
 
 static int failures;
@@ -519,7 +519,7 @@ static void examine_engine(const char *path, struct kof_engine *eng)
 	f = slurp(path, &len);
 	if (!f)
 		return;
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
 		free(f);
 		fail(path, "could not make a scanner");
@@ -527,7 +527,7 @@ static void examine_engine(const char *path, struct kof_engine *eng)
 	}
 	memset(&fd, 0, sizeof fd);
 	memset(&opt, 0, sizeof opt);
-	if (kof_scan_bytes(sc, f, len, "help.chm", &opt, on_object, &fd) <= 0)
+	if (kscan_bytes(sc, f, len, "help.chm", &opt, on_object, &fd) <= 0)
 		fail(path, "the engine did not scan the help file at all");
 	else if (fd.objects < 2)
 		fail(path, "the engine made no child of a help file whose "
@@ -537,7 +537,7 @@ static void examine_engine(const char *path, struct kof_engine *eng)
 		     "a page");
 	scanned++;
 	pages += fd.html;
-	kof_scanner_free(sc);
+	kscan_free(sc);
 	free(f);
 }
 
@@ -586,7 +586,7 @@ int main(void)
 
 	/* Absent on a host with no build in it, and then only the decoder half
 	 * of this runs - which is still worth running. */
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 
 	for (d = 0; d < sizeof dirs / sizeof dirs[0] && examined < 4; d++) {
 		DIR *dp = opendir(dirs[d]);
@@ -613,7 +613,7 @@ int main(void)
 	}
 
 	if (eng)
-		kof_engine_close(eng);
+		keng_close(eng);
 	free(c);
 	free(lz);
 

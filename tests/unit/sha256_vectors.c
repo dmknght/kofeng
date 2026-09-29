@@ -14,7 +14,7 @@
  *   split feeds     a caller streaming a file in chunks and one handing over
  *                   the whole buffer must land on the same digest, or a
  *                   digest depends on the reader's buffer size.
- *   the file path   kof_sha256_file has its own loop and its own early exit,
+ *   the file path   khash_sha256_file has its own loop and its own early exit,
  *                   so it is a second implementation of the same answer.
  *
  * The one-million-'a' vector is here rather than dropped as slow: it is the
@@ -57,7 +57,7 @@ int main(void)
 	unsigned i;
 
 	for (i = 0; i < sizeof v / sizeof v[0]; i++) {
-		if (kof_sha256_bytes(v[i].in, strlen(v[i].in), hex)) {
+		if (khash_sha256_bytes(v[i].in, strlen(v[i].in), hex)) {
 			printf("  FAIL vector %u: refused\n", i);
 			failures++;
 			continue;
@@ -65,11 +65,11 @@ int main(void)
 		check(v[i].in[0] ? v[i].in : "(empty)", hex, v[i].want);
 	}
 
-	kof_sha256_init(&s);
+	khash_sha256_init(&s);
 	for (i = 0; i < 1000000u; i++)
-		kof_sha256_update(&s, "a", 1);
-	kof_sha256_final(&s, d);
-	kof_sha256_hex(d, hex);
+		khash_sha256_update(&s, "a", 1);
+	khash_sha256_final(&s, d);
+	khash_sha256_hex(d, hex);
 	check("one million 'a'", hex,
 	      "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
 
@@ -81,18 +81,18 @@ int main(void)
 		for (i = 0; i < sizeof buf; i++)
 			buf[i] = (unsigned char)(i * 31u + 7u);
 
-		kof_sha256_bytes(buf, sizeof buf, hex);
+		khash_sha256_bytes(buf, sizeof buf, hex);
 
 		/* Steps that are neither a divisor of 64 nor of the length, so
 		 * every call lands mid-block. */
 		for (step = 1; step <= 130u; step += 7u) {
-			kof_sha256_init(&s);
+			khash_sha256_init(&s);
 			for (off = 0; off < sizeof buf; off += step)
-				kof_sha256_update(&s, buf + off,
+				khash_sha256_update(&s, buf + off,
 						  off + step > sizeof buf
 						   ? sizeof buf - off : step);
-			kof_sha256_final(&s, d);
-			kof_sha256_hex(d, other);
+			khash_sha256_final(&s, d);
+			khash_sha256_hex(d, other);
 			if (strcmp(hex, other)) {
 				printf("  FAIL split feed at step %zu:\n"
 				       "    got  %s\n    want %s\n",
@@ -103,13 +103,13 @@ int main(void)
 		}
 
 		/* A zero-length update in the middle must change nothing. */
-		kof_sha256_init(&s);
-		kof_sha256_update(&s, buf, 100);
-		kof_sha256_update(&s, buf, 0);
-		kof_sha256_update(&s, NULL, 0);
-		kof_sha256_update(&s, buf + 100, sizeof buf - 100u);
-		kof_sha256_final(&s, d);
-		kof_sha256_hex(d, other);
+		khash_sha256_init(&s);
+		khash_sha256_update(&s, buf, 100);
+		khash_sha256_update(&s, buf, 0);
+		khash_sha256_update(&s, NULL, 0);
+		khash_sha256_update(&s, buf + 100, sizeof buf - 100u);
+		khash_sha256_final(&s, d);
+		khash_sha256_hex(d, other);
 		check("empty update between feeds", other, hex);
 
 		/* --- and once more through the file path --- */
@@ -125,11 +125,11 @@ int main(void)
 				fwrite(buf, 1, sizeof buf, f);
 				fclose(f);
 
-				if (kof_sha256_file(tmp, other, &size)) {
-					puts("  FAIL kof_sha256_file refused");
+				if (khash_sha256_file(tmp, other, &size)) {
+					puts("  FAIL khash_sha256_file refused");
 					failures++;
 				} else {
-					check("kof_sha256_file", other, hex);
+					check("khash_sha256_file", other, hex);
 					if (size != sizeof buf) {
 						printf("  FAIL size: %llu, "
 						       "want %zu\n",
@@ -146,7 +146,7 @@ int main(void)
 	/* A path that is not there is an error and not an empty digest: a
 	 * caller that treated the two alike would name a missing file with the
 	 * hash of nothing, which is a real digest of the wrong thing. */
-	if (kof_sha256_file("no-such-file.no-such-extension", other, NULL)
+	if (khash_sha256_file("no-such-file.no-such-extension", other, NULL)
 	    != KOF_ERR_OPEN) {
 		puts("  FAIL a missing file did not report KOF_ERR_OPEN");
 		failures++;

@@ -15,32 +15,36 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
+#include "../extractors/unpack/pe_rebuild.h"
 #include "../kofeng.h"
+/* KOF_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
+ * the number because it owns the list it is copied into. */
+#include "../../libkofemu/kofemu.h"
 #include "../databases/dbloader.h"
-#include "../detector/matchers/kofmatch.h"
-#include "../detector/matchers/kofplague.h"
-#include "../detector/overlord/kofoverlord.h"
-#include "../analyzer/parsers/binaries/elf_parse.h"
-#include "../analyzer/parsers/binaries/pe_parse.h"
-#include "../extractor/unpack/pe_rebuild.h"
-#include "../analyzer/parsers/containers/gzip_parse.h"
-#include "../analyzer/parsers/containers/docole_parse.h"
-#include "../analyzer/parsers/containers/zip_parse.h"
-#include "../analyzer/parsers/containers/tar_parse.h"
-#include "../analyzer/parsers/containers/sevenzip_parse.h"
-#include "../analyzer/parsers/containers/rar_parse.h"
-#include "../analyzer/parsers/containers/xz_parse.h"
-#include "../analyzer/parsers/containers/rtf_parse.h"
-#include "../analyzer/parsers/containers/pdf_parse.h"
+#include "../detectors/matchers/kofmatch.h"
+#include "../detectors/matchers/kofplague.h"
+#include "../detectors/overlord/kofoverlord.h"
+#include "../analyzers/parsers/binaries/elf_parse.h"
+#include "../analyzers/parsers/binaries/pe_parse.h"
+#include "../extractors/unpack/pe_rebuild.h"
+#include "../analyzers/parsers/containers/gzip_parse.h"
+#include "../analyzers/parsers/containers/docole_parse.h"
+#include "../analyzers/parsers/containers/zip_parse.h"
+#include "../analyzers/parsers/containers/tar_parse.h"
+#include "../analyzers/parsers/containers/sevenzip_parse.h"
+#include "../analyzers/parsers/containers/rar_parse.h"
+#include "../analyzers/parsers/containers/xz_parse.h"
+#include "../analyzers/parsers/containers/rtf_parse.h"
+#include "../analyzers/parsers/containers/pdf_parse.h"
 #include "objsrc.h"
-#include "../extractor/decomp/inflate.h"
-#include "../extractor/decomp/textcode.h"
-#include "../extractor/decomp/lzw.h"
-#include "../extractor/decomp/bzip2.h"
-#include "../extractor/decomp/lzx.h"
-#include "../extractor/decomp/lzhuf.h"
-#include "../extractor/decomp/nrv2.h"
-#include "../extractor/decomp/lzma.h"
+#include "../extractors/decomp/inflate.h"
+#include "../extractors/decomp/textcode.h"
+#include "../extractors/decomp/lzw.h"
+#include "../extractors/decomp/bzip2.h"
+#include "../extractors/decomp/lzx.h"
+#include "../extractors/decomp/lzhuf.h"
+#include "../extractors/decomp/nrv2.h"
+#include "../extractors/decomp/lzma.h"
 
 /*
  * Everything mutable, one per thread.
@@ -57,6 +61,18 @@ struct kof_flow_set;   /* scanners/objctx.c - the swept call chains */
  * turns it back into KOF_FMT_UNKNOWN once it has skipped the sniff.
  */
 #define KOF_FMT_DECLARED_RAW 0xffu
+
+/* Room for a module's own name - "VMProtect.PE" and the like. */
+#define KOF_MOD_TAG 48
+
+/* How many regions one run may report, and what each one is. */
+/* How many interpreter runs one scan will spend, whatever asks. */
+#define KOF_SCAN_EMU_MAX 512u
+
+#define KOF_EMU_RGN_MAX 64u
+#define KOF_EMU_RGN_IMAGE   0u  /* a PE or ELF a stub assembled */
+#define KOF_EMU_RGN_EXEC    1u  /* memory it wrote and then made executable */
+#define KOF_EMU_RGN_WRITTEN 2u  /* memory it merely wrote */
 
 struct kof_scanner {
 	const struct kof_engine *eng;
@@ -129,6 +145,31 @@ struct kof_scanner {
 	/* And whether this object came out of a packer, which the feed reads
 	 * for the same reason and cannot recover on its own. */
 	uint8_t              cur_from_packer;
+	/* And what its producer declared it needs, travelling with it the same
+	 * way cur_from_packer does - the module that said it is long gone by
+	 * the time the object is scanned. */
+	uint32_t             cur_want, cur_want_level;
+	/* Where the module that recognised this object says its program will
+	 * be. Per OBJECT, not per child - see emu_watch in kofsig.h. */
+	struct { uint64_t rva, len; } xw[KOF_EMU_EXEC_WATCH];
+	uint32_t             n_xw;
+	/*
+	 * AND WHAT THE MODULE DRIVING THE INTERPRETER RIGHT NOW SAYS.
+	 *
+	 * A separate set, not an append to the one above, because the two come
+	 * from different modules at different times and the second must not
+	 * outlive the run it was declared for. `xw` was written by whoever
+	 * produced this object, possibly several modules ago; this is written
+	 * by the module about to call emu_run and is taken when the run starts.
+	 * When it holds anything it REPLACES `xw` for that run - the module in
+	 * the middle of driving knows more about where it is going than the one
+	 * that handed the object over.
+	 */
+	struct { uint64_t rva, len; } xw_mod[KOF_EMU_EXEC_WATCH];
+	uint32_t             n_xw_mod;
+	/* Whether the emulator has produced a child from the object in hand.
+	 * Cleared per object and published in kof_result.emu_unpacked. */
+	uint8_t              emu_produced;
 	/*
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.
@@ -368,6 +409,14 @@ struct kof_scanner {
 	 * module that made it is long out of scope.
 	 */
 	uint8_t            *kid_packer;
+	/* What each child's producer declared it needs. Parallel to `kids` for
+	 * the reason kid_packer is: the claim is the child's and the module
+	 * that made it is out of scope by the time the child is reached. */
+	uint32_t           *kid_want;
+	uint32_t           *kid_want_level;
+	/* One count and KOF_EMU_EXEC_WATCH (rva,len) pairs per child, flat. */
+	uint32_t           *kid_n_xw;
+	uint64_t           *kid_xw;
 	/*
 	 * The family the producing unpacker DECODES, per child, or NULL.
 	 *
@@ -379,6 +428,138 @@ struct kof_scanner {
 	 * fast path. See the push loop in the walk.
 	 */
 	const char        **kid_family;
+	/*
+	 * The name the module currently running last called itself, and which
+	 * module that was. Kept so a child can be stamped with its producer's
+	 * own name rather than with a file path: a reader knows "MPRESS.PE",
+	 * and "unp/mpress_pe.c" is this project's directory layout leaking
+	 * onto their screen.
+	 *
+	 * `mod_tag_of` is what stops it being inherited. Without it a module
+	 * that emits no debug note at all would be labelled with whatever the
+	 * previous one said, which is the defect this whole field exists to
+	 * remove.
+	 */
+	char                mod_tag[KOF_MOD_TAG];
+	const struct kof_module *mod_tag_of;
+	/*
+	 * And which module opened THE OBJECT BEING SCANNED - see
+	 * kof_result.opened_by. Set where that module produces a child,
+	 * because producing one is what "opened it" means, and cleared per
+	 * object beside sc->broken.
+	 */
+	char                opened_by[KOF_MOD_TAG];
+	/*
+	 * THE MODULE THAT DERIVED THE CHILD BEING BUILT, and then the one that
+	 * derived each child - see `derive` in kofsig.h.
+	 *
+	 * A derived object is the parent with ranges changed, so offering it
+	 * back to the module that changed them is offering a module its own
+	 * output. That is what the three hand-written recursion guards were
+	 * for. A NEW object carries NULL here and is offered to everyone,
+	 * which is what keeps a zip inside a zip working.
+	 */
+	/*
+	 * THE SECTIONS A MODULE DECLARED FOR THE CHILD IT IS BUILDING.
+	 *
+	 * Allocated on first use, like every other expensive fixed-size piece
+	 * of per-scan state - most objects never produce a child and no object
+	 * that produces a flat payload declares one. Spent by the push, beside
+	 * the region table and the symbols.
+	 */
+	struct kof_sec_decl      *pend_sec;
+	uint32_t                  n_pend_sec;
+	uint64_t                  pend_entry_rva;
+	int                       pend_entry_set;
+	/* Directories a module rebuilt, which override the parent's - see
+	 * `child_dir` in kofsig.h. */
+	struct kof_dir_decl       pend_dir[16];
+	/* The child is an image laid out by those sections, and the engine
+	 * writes its header - see kof_pe_write_hdr. */
+	int                       pend_image;
+
+	/*
+	 * WHAT A RUN LEFT BEHIND, HELD RATHER THAN HANDED OVER.
+	 *
+	 * The interpreter is not a producer. It gathers, and a MODULE decides
+	 * what any of it is and gives that to the engine - see
+	 * DESIGN-object-pipeline.md. Two reasons, and the second is the one
+	 * that matters: only a module knows what a family's run means, and a
+	 * component that both runs hostile code and creates objects is a wider
+	 * surface than one that only runs it.
+	 *
+	 * `emu_live` is the machine itself, kept alive while the regions below
+	 * still point into its memory, and released when the module that asked
+	 * for the run returns.
+	 */
+	struct kof_emu           *emu_live;
+	/*
+	 * AND WHETHER THIS OBJECT HAS ALREADY HAD ITS RUN.
+	 *
+	 * The machine is released as soon as the module that asked for it
+	 * returns - its regions point into the machine's memory and are not
+	 * valid past that - so `emu_live` cannot double as "already run". This
+	 * can. One interpretation per object: the modules after the one that
+	 * drove are offered the object, not a second run of it, and a file that
+	 * five modules all decline must not cost five runs.
+	 *
+	 * Per object, cleared beside packed_here.
+	 */
+	int                       emu_ran;
+	/*
+	 * WHETHER A MODULE SAID THIS OBJECT IS ONLY A WRAPPER - see `supersede`
+	 * in kofsig.h. Per object, cleared beside packed_here; read where the
+	 * walk reports an object, and ignored at the top level.
+	 */
+	int                       superseded;
+	/*
+	 * WHAT THE DECLARED IMAGE IS TO BE WRITTEN AS - see `as_format` in
+	 * kofsig.h. Pending like every other declaration: set before the child
+	 * is closed, cleared with the rest of the pending set. Zero `as_fmt`
+	 * means "the parent's format", which is what a packer wants.
+	 */
+	uint8_t                   pend_as_fmt, pend_as_arch;
+	/* The format of the object a declared image was built ON, kept for the
+	 * region vocabulary - see decl_sec_to_regions. */
+	uint8_t                   pend_img_fmt;
+	uint64_t                  pend_as_base;
+	/* An image a run ASSEMBLED rather than left lying in its memory - the
+	 * un-mapped PE, the rebuilt ELF. It is the engine's allocation, so the
+	 * engine holds it for as long as a region points at it. */
+	uint8_t                  *emu_own;
+	struct kof_emu_rgn {
+		const uint8_t *p;
+		/*
+		 * WHEN THE ENGINE OWNS THOSE BYTES, AND IT USUALLY MUST.
+		 *
+		 * `kof_emu_next_written` hands back a buffer the emulator owns
+		 * and REPLACES ON THE NEXT CALL - it says so beside itself.
+		 * That was safe while the interpreter emitted each run as it
+		 * walked them; it is not safe now that the regions are gathered
+		 * first and handed to a module afterwards, because every
+		 * pointer but the last is freed before the module ever sees it.
+		 *
+		 * Measured on msfvenom's `poly`: the module was handed a
+		 * four-kilobyte region whose bytes had become the scanner's own
+		 * section table by the time it copied them, so the child came
+		 * out as a correct ELF header in front of 4012 zero bytes.
+		 *
+		 * So a gathered region is copied, and this is the copy to free.
+		 * NULL where the bytes belong to something with a longer life -
+		 * a snapshot lives in the machine and the machine outlives the
+		 * module - and then `p` points into that.
+		 */
+		uint8_t       *own;
+		uint64_t       va, n;
+		uint32_t       kind;    /* KOF_EMU_RGN_* */
+	}                         emu_rgn[KOF_EMU_RGN_MAX];
+	uint32_t                  n_emu_rgn;
+
+	const struct kof_module  *pend_derived_by;
+	/* And the one that derived the object being SCANNED, so it can be
+	 * skipped - see unp_eligible. */
+	const struct kof_module  *cur_derived_by;
+	const struct kof_module **kid_derived_by;
 	uint32_t            n_kids, cap_kids;
 
 	/*
@@ -575,6 +756,22 @@ struct kof_scanner {
 	uint32_t pend_kind;
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */
 	uint32_t pend_entry;
+	/* And what the producing module says has to be DONE to it, in the same
+	 * KOF_ENG_* vocabulary a heuristic rule uses, with the lowest --heur
+	 * level the ask is honoured at. See child_want in kofsig.h. */
+	uint32_t pend_want, pend_want_level;
+	/*
+	 * AND THE OEP RANGES THE NEXT CHILD IS TO BE WATCHED AT.
+	 *
+	 * Declared by a module while the PARENT is in front of it and meant for
+	 * the CHILD, so they travel the same road as pend_want: set here, spent
+	 * by kid_push, handed back when that child is the object being scanned.
+	 * Kept in sc->xw while it is. They used to be written straight into
+	 * sc->xw, which is cleared per object - so a module declared them, the
+	 * child was pushed, the clear ran, and every run saw none.
+	 */
+	uint32_t pend_n_xw;
+	struct { uint64_t rva, len; } pend_xw[KOF_EMU_EXEC_WATCH];
 
 	/* The object being emitted, before it becomes a child. Heap while it is
 	 * small, an unnamed temporary file once it is not - see objsrc.h. */
@@ -582,6 +779,18 @@ struct kof_scanner {
 	size_t    sink_len, sink_cap;
 	int       sink_fd;
 	uint64_t  sink_spilled;   /* bytes already written to sink_fd */
+	/*
+	 * The sink is a FIXED extent - a copy of the parent, or an image laid
+	 * out from declared sections - written at addresses rather than
+	 * appended to. See `derive` and `image` in kofsig.h. It never spills.
+	 *
+	 * `sink_at` is where the next emit lands, which is what lets a
+	 * decompressor write straight into a section: every decoder in the
+	 * engine funnels through c_emit, so moving the cursor is all it takes
+	 * and not one of them has to know.
+	 */
+	int       sink_fixed;
+	uint64_t  sink_at;
 
 	/*
 	 * What is left of the produced-bytes budget for this top level object, and
@@ -687,6 +896,41 @@ struct kof_scanner {
 	 * cannot leave the previous object's answer standing.
 	 */
 	int      raise_carried;
+
+	/*
+	 * WHETHER SOMEBODY ALREADY SPOKE FOR THE INTERPRETER ON THIS OBJECT,
+	 * AND WHETHER IT IS ALLOWED AT ALL.
+	 *
+	 * A module asks for a run with kunp_emu_run and may VOUCH for it - a
+	 * family module that recognised its packer knows the run is worth
+	 * paying for. The generic receiver cannot vouch, because it is on the
+	 * object nobody recognised; what speaks for that object is the
+	 * DATABASE, through a heuristic rule that declared KOF_ENG_USE_EMU, or
+	 * through the producer that made the object and said its output needs
+	 * running.
+	 *
+	 * Both of those are the host's knowledge and neither is reachable from
+	 * a module, so they are resolved here, once, and or-ed into the
+	 * module's vouch inside c_emu_run. Without this the ask was collected
+	 * in unpack_object and then dropped: the entropy gate refuses a
+	 * meterpreter payload for being smaller than its estimate needs, which
+	 * is exactly the object the rule fires on.
+	 *
+	 * `emu_banned` is the other direction and is not a budget: --emu never,
+	 * and the packer-depth ceiling, which no vouch may talk past.
+	 *
+	 * PER OBJECT, set in the same block as raise_carried and for the same
+	 * reason.
+	 */
+	int      emu_ask;
+	int      emu_banned;
+	/* Whether a run nobody asked for is permitted at all - emu_use above
+	 * KOF_EMU_NEVER. It gates the AUTO case and the producer's ask; a
+	 * rule's ask does not read it, for the reason unpack_object gives. */
+	int      emu_default_ok;
+	/* KOF_EMU_ONLY - the interpreter REPLACES the packer modules, so a
+	 * static unpacker having opened this object is not a refusal. */
+	int      emu_only;
 
 	/*
 	 * THE OBJECT'S SYMBOL RECORDS, built at most once per object.
@@ -822,7 +1066,19 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *, int on);
  * and an object nobody tried to open must not carry it, while an object that
  * was tried and could not be opened must.
  */
+/*
+ * Run the interpreter and GATHER. Answers how many regions it left; it creates
+ * nothing - see kof_scan_emu_take_all and the note on kof_scanner.emu_live.
+ */
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force);
+/* The engine's own receiver, for an object no module claimed. */
+int      kof_scan_emu_take_all(const struct kof_obj_ctx *ctx);
+/* What the run left, for whoever is receiving it. */
+uint32_t kof_scan_emu_count(const struct kof_scanner *sc);
+int      kof_scan_emu_region(const struct kof_scanner *sc, uint32_t i,
+			     uint64_t *va, uint64_t *len, uint32_t *kind);
+/* The machine and its regions let go - called when the receiver returns. */
+void     kof_scan_emu_release(struct kof_scanner *sc);
 
 /*
  * The script in the form a signature should be written on, handed over as ONE

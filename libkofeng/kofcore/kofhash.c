@@ -116,7 +116,7 @@ static void block(uint32_t h[8], const uint8_t *p)
 	h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
-void kof_sha256_init(struct kof_sha256 *s)
+void khash_sha256_init(struct kof_sha256 *s)
 {
 	s->h[0] = 0x6a09e667u; s->h[1] = 0xbb67ae85u;
 	s->h[2] = 0x3c6ef372u; s->h[3] = 0xa54ff53au;
@@ -126,7 +126,7 @@ void kof_sha256_init(struct kof_sha256 *s)
 	s->n    = 0;
 }
 
-void kof_sha256_update(struct kof_sha256 *s, const void *bytes, uint64_t n)
+void khash_sha256_update(struct kof_sha256 *s, const void *bytes, uint64_t n)
 {
 	const uint8_t *p = (const uint8_t *)bytes;
 
@@ -165,7 +165,7 @@ void kof_sha256_update(struct kof_sha256 *s, const void *bytes, uint64_t n)
 	}
 }
 
-void kof_sha256_final(struct kof_sha256 *s, uint8_t out[32])
+void khash_sha256_final(struct kof_sha256 *s, uint8_t out[32])
 {
 	uint64_t bits = s->len * 8u;
 	uint8_t  tail[72];
@@ -186,7 +186,7 @@ void kof_sha256_final(struct kof_sha256 *s, uint8_t out[32])
 	/* `len` is wrong by the padding after this call, and nothing reads it
 	 * again - a finalised state is not resumable, and kofeng.h says so
 	 * where a caller would look. */
-	kof_sha256_update(s, tail, (uint64_t)pad + 8u);
+	khash_sha256_update(s, tail, (uint64_t)pad + 8u);
 
 	for (i = 0; i < 8u; i++) {
 		out[4u * i]      = (uint8_t)(s->h[i] >> 24);
@@ -196,7 +196,7 @@ void kof_sha256_final(struct kof_sha256 *s, uint8_t out[32])
 	}
 }
 
-void kof_sha256_hex(const uint8_t digest[32], char out[65])
+void khash_sha256_hex(const uint8_t digest[32], char out[65])
 {
 	static const char hex[] = "0123456789abcdef";
 	unsigned i;
@@ -215,7 +215,7 @@ void kof_sha256_hex(const uint8_t digest[32], char out[65])
 	out[64] = '\0';
 }
 
-int kof_sha256_bytes(const void *bytes, uint64_t n, char out[65])
+int khash_sha256_bytes(const void *bytes, uint64_t n, char out[65])
 {
 	struct kof_sha256 s;
 	uint8_t d[32];
@@ -223,14 +223,14 @@ int kof_sha256_bytes(const void *bytes, uint64_t n, char out[65])
 	if (!out || (!bytes && n))
 		return KOF_ERR_ARG;
 
-	kof_sha256_init(&s);
-	kof_sha256_update(&s, bytes, n);
-	kof_sha256_final(&s, d);
-	kof_sha256_hex(d, out);
+	khash_sha256_init(&s);
+	khash_sha256_update(&s, bytes, n);
+	khash_sha256_final(&s, d);
+	khash_sha256_hex(d, out);
 	return 0;
 }
 
-int kof_sha256_file(const char *path, char out[65], uint64_t *size)
+int khash_sha256_file(const char *path, char out[65], uint64_t *size)
 {
 	/*
 	 * 32KB ON THE STACK, and the number is the only thing in this function
@@ -238,7 +238,7 @@ int kof_sha256_file(const char *path, char out[65], uint64_t *size)
 	 * against the copy, small enough to sit on the stack of a tool that is
 	 * already holding a scanner - which is why it is not the megabyte a
 	 * throughput benchmark would choose, and why it is not static: the
-	 * engine hands several scanners to several threads (kof_scan_path_mt),
+	 * engine hands several scanners to several threads (kscan_path_mt),
 	 * and one shared buffer would digest two files into each other.
 	 */
 	enum { CHUNK = 32u * 1024u };
@@ -255,12 +255,12 @@ int kof_sha256_file(const char *path, char out[65], uint64_t *size)
 	if (!f)
 		return KOF_ERR_OPEN;
 
-	kof_sha256_init(&s);
+	khash_sha256_init(&s);
 	for (;;) {
 		size_t got = fread(buf, 1, CHUNK, f);
 
 		if (got) {
-			kof_sha256_update(&s, buf, got);
+			khash_sha256_update(&s, buf, got);
 			total += got;
 		}
 		if (got < CHUNK) {
@@ -281,8 +281,8 @@ int kof_sha256_file(const char *path, char out[65], uint64_t *size)
 	}
 	fclose(f);
 
-	kof_sha256_final(&s, d);
-	kof_sha256_hex(d, out);
+	khash_sha256_final(&s, d);
+	khash_sha256_hex(d, out);
 	if (size)
 		*size = total;
 	return 0;

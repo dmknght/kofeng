@@ -61,7 +61,7 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
  *
  * THIS WAS LEFT OFF ONCE, with the reasoning that a module producing no child
  * can never be the one that opens an object and so gains nothing by running
- * early. That missed the other way a module ends a pass: KOF_UNP_BROKEN goes
+ * early. That missed the other way a module ends a pass: KUNP_RCSTRUCT_BROKEN goes
  * through the host's `incomplete` hook to sc->broken, and the general pass
  * begins each iteration with `if (sc->broken) break`. So recognising the
  * encoder in the family pass stops the remaining unpackers from being entered
@@ -168,7 +168,7 @@ KOF_DEFINE_UNPACK
 			 * against noise, and the object panel would carry an
 			 * entry that can never say anything.
 			 */
-			KOF_UNP_BROKEN(KOF_UNP_ENCRYPTED);
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_ENCRYPTED);
 		}
 	}
 }

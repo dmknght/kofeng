@@ -92,7 +92,7 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 	b[3] = (uint8_t)(entry >> 24);
 
 	/* e_entry sits at 24 in an ELF64 header - the test builds one. */
-	if (!kof_cure_patch(24u, b, 4u))
+	if (!kcure_patch(24u, b, 4u))
 		return;
 
 	/*
@@ -125,8 +125,8 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 			sz[i]      = (uint8_t)(len >> (8u * i));
 			sz[8u + i] = sz[i];
 		}
-		if (!kof_cure_patch(phoff + 32u, sz, 16u))
+		if (!kcure_patch(phoff + 32u, sz, 16u))
 			return;
 	}
-	kof_cure_truncate(len);
+	kcure_truncate(len);
 }

@@ -97,18 +97,18 @@
 /* The region lists, one per format: rgn_names[] below is generated from them
  * rather than restating them. */
 #include "../libkofeng/kofcore/kofplatform.h"
-#include "../libkofeng/analyzer/parsers/binaries/elf_parse.h"
-#include "../libkofeng/analyzer/parsers/binaries/pe_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/gzip_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/docole_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/zip_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/tar_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/sevenzip_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/rar_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/xz_parse.h"
-#include "../libkofeng/analyzer/parsers/scripts/script_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/rtf_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/pdf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/zip_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/tar_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/sevenzip_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/rar_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/xz_parse.h"
+#include "../libkofeng/analyzers/parsers/scripts/script_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/rtf_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/pdf_parse.h"
 #include <kofmod/pe.h>       /* and the PE ones */
 #include <kofmod/gzip.h>     /* and the gzip ones */
 #include <kofmod/docole.h>   /* and the compound file ones */
@@ -3463,6 +3463,11 @@ static FILE *open_beside(const char *src, const char *rel)
  * would mean changing what the macro sends, and that is the module ABI.
  *
  * Local includes only - <kofmod/...> is the SDK and has no rules in it.
+ *
+ * That exemption is why the shared module headers were moved INTO kofmod/
+ * rather than left under bases/: they are SDK, they are reached by every
+ * module the same way, and none of them calls kof_debug - checked when they
+ * moved, and the thing to check again if one ever wants to.
  */
 static void lint_debug_in_headers(const char *src, size_t n)
 {
@@ -3930,8 +3935,8 @@ static int kind_checks(int kind)
 				"rule names a shape, not a family\n");
 		return 0;
 	}
-	if (src_has("kof_emit(") || src_has("kof_child(") ||
-	    src_has("kof_child_window(") || src_has("kof_gather(")) {
+	if (src_has("kunp_rcstruct_write(") || src_has("kunp_rcstruct_done(") ||
+	    src_has("kunp_rcstruct_window(") || src_has("kunp_static_gather_all(")) {
 		fprintf(stderr, "FAIL: a heuristic rule produces no child "
 				"objects; that is what an unpacker is for\n");
 		return 0;

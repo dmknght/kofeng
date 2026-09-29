@@ -27,6 +27,66 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 📖 **[Full documentation is in the wiki](../../wiki)** — everything below is a
 map to it.
 
+## Engine's structure overview
+
+```
+                         ┌─────────────┐
+                         │    Sniff    │
+                         │  File Type  │
+                         └──────┬──────┘
+                                ↓
+                ┌─────────────────────────────────┐
+                |         Decompress              │
+                │ + Heuristic (Exploit detection) │
+                └───────────────┬─────────────────┘
+                                ↓
+                         ┌─────────────┐
+                         │   Parser    │
+                         └──────┬──────┘
+                                ↓
+                    ┌──────────────────────┐
+                    │       Metadata       │
+                    │      + Heuristic     │
+                    └──────────┬───────────┘
+                               ↓
+                         ┌─────────────┐
+                         │   Unpacker  │
+                         └──────┬──────┘
+                                │
+                       ┌────────┴────────┐
+                       ↓                 ↓
+                 ┌───────────┐     ┌───────────┐
+                 │  Static   │     │  Emulator │
+                 └─────┬─────┘     └─────┬─────┘
+                       └────────┬────────┘
+                                ↓
+                         ┌─────────────┐
+                         │  Decryptor  │
+                         └──────┬──────┘
+                                ↓
+                         ┌─────────────┐
+                         │  Normalizer │
+                         └──────┬──────┘
+                                ↓
+                         ┌─────────────┐
+                         │   Matcher   │
+                         └──────┬──────┘
+                                │
+                    ┌───────────┴───────────┐
+                    ↓                       ↓
+              ┌───────────┐          ┌────────────┐
+              │  Pattern  │          │  Overlord  │──────────────┐
+              └───────────┘          └──────┬─────┘              |
+                                            ↓                    ↓
+                                      ┌───────────┐   ┌────────────────────┐
+                                      │   Plague  │   │  Struct similarity |
+                                      └───────────┘   └────────────────────┘
+                                ↓
+                         ┌─────────────┐
+                         │    Cure     │
+                         └─────────────┘
+```
+
 ## Start here
 
 | | |
@@ -140,6 +200,25 @@ It contains no Kaspersky source or proprietary engine code.
 
 A research and hobby project, still experimental. Not a replacement for a
 production antivirus, and not audited for use as one.
+
+## Thanks to
+
+Projects whose source was read while building this, and what was learned from
+each. **No code from any of them is in this repository** — the debt is to an
+idea or to a format, and it is recorded because a reader who recognises one
+should be able to find where it came from. The detail, and why these licences
+do not attach to kofeng, is under "Read, not taken" in
+[THIRD-PARTY.md](THIRD-PARTY.md).
+
+| project | what it gave |
+|---------|--------------|
+| [ClamAV](https://github.com/Cisco-Talos/clamav) (GPL-2.0) | the NRV2B/NRV2D/NRV2E codings UPX packs with, read to understand the format |
+| [Unlicense](https://github.com/ergrelet/unlicense) (GPL-3.0) | that a packer's handover is found by watching **where the program will be**, not by following what the loader does — this engine's `kof_emu_watch_exec`. Also that `.themida` or `.winlice` marks Themida/WinLicense 3.x, and that a dump is finished by naming its sections from the entry point and the resource directory and truncating to the last section |
+| [RetDec](https://github.com/avast/retdec) (MIT) | that MPRESS says which build wrote a file in the **dword at EP+8**, where its fix-up stub is and the three shapes it comes in, the import hint list it leaves in place of an import directory — so the original entry point and the imports are recoverable **without running anything** — and the LZMAT coding it used before LZMA |
+| [Unipacker](https://github.com/unipacker/unipacker) (GPL-2.0) | that a packed sample is dumped when execution first enters a section it has not run in before — and that the run should **continue** afterwards, so every stage is caught rather than the first. Also how a finished run is rebuilt into a *file*: the entry point is where execution got to rather than the one in the header, raw offsets equal RVAs, and memory the run allocated becomes sections of its own |
+| [Unpacker](https://github.com/anpa1200/Unpacker) (MIT) | named the rule above and pointed at where to read it |
+| [Bitdefender bddisasm](https://github.com/bitdefender/bddisasm) (Apache-2.0) | the x86 decoder, which unlike the above **is** vendored — see the table below |
+
 
 ## Licence
 

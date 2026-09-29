@@ -198,7 +198,7 @@ static int scan(kof_scanner *sc, const char *path, const uint8_t *f, uint64_t n)
 	n_kids = 0;
 	last_n = 0;
 	first_kid_n = 0;
-	return kof_scan_path(sc, path, &opt, on_object, NULL) >= 0;
+	return kscan_path(sc, path, &opt, on_object, NULL) >= 0;
 }
 
 int main(int argc, char **argv)
@@ -213,14 +213,14 @@ int main(int argc, char **argv)
 	kof_scanner *sc;
 	uint64_t n1, n2, n3, ne;
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		printf("msf xor: cannot open %s\n", db);
 		return 2;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		return 2;
 	}
 
@@ -238,10 +238,24 @@ int main(int argc, char **argv)
 	if (!scan(sc, path, elf, ne)) {
 		fail("the scan could not run");
 	} else {
+		/*
+		 * ONE OBJECT, NOT THREE, AND THAT IS THE POINT OF THE WRAPPER.
+		 *
+		 * The module peels one layer and hands the rest over as a
+		 * child, which comes back round and peels the next - so three
+		 * layers are still three objects in the tree and each is still
+		 * scanned by every rule. What changed is what is REPORTED: a
+		 * layer that is nothing but a forty-six byte decryptor in
+		 * front of the next layer's ciphertext is not a thing
+		 * recovered, and the module says so with
+		 * kunp_rcstruct_supersedes. Only the program at the bottom
+		 * comes out.
+		 */
 		printf("  ba lớp bọc -> %llu object con\n",
 		       (unsigned long long)n_kids);
-		if (n_kids != 3)
-			fail("three wrapped layers did not yield three children");
+		if (n_kids != 1)
+			fail("three wrapped layers did not report exactly the "
+			     "innermost program");
 		/*
 		 * The reconstructed header, then the payload. Both halves are
 		 * asserted: the header alone would pass on a module that wrote
@@ -262,10 +276,15 @@ int main(int argc, char **argv)
 			printf("  lớp trong cùng: ELF %u byte + payload %u "
 			       "byte\n", (unsigned)ELF_HDR_N,
 			       (unsigned)sizeof payload);
-		/* And the layers before it are left as they are. */
-		if (first_kid_n < 2 || first_kid[0] != 0xeb ||
-		    first_kid[1] != 0x27)
-			fail("an intermediate layer was given a header too");
+		/*
+		 * AND NO INTERMEDIATE LAYER CAME OUT. With one object
+		 * reported, the first is also the last; asserting that it is
+		 * the ELF rather than a stub is what says the two wrappers
+		 * were superseded rather than merely reordered.
+		 */
+		if (first_kid_n < 4 || memcmp(first_kid, "\177ELF", 4) != 0)
+			fail("an intermediate layer was reported as a thing "
+			     "recovered");
 		else
 			printf("  lớp trung gian vẫn là stub, không bọc\n");
 	}
@@ -286,8 +305,8 @@ int main(int argc, char **argv)
 	}
 
 	remove(path);
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	printf("msf xor: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

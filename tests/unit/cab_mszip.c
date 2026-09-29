@@ -217,15 +217,15 @@ int main(void)
 		return 0;
 	}
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		free(f);
 		printf("cab mszip: no database at %s - nothing tested\n", db);
 		return 0;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		free(f);
 		printf("cab mszip: could not make a scanner\n");
 		return 1;
@@ -233,7 +233,7 @@ int main(void)
 
 	memset(&s, 0, sizeof s);
 	memset(&opt, 0, sizeof opt);
-	if (kof_scan_bytes(sc, f, n, "fixture.cab", &opt, on_object, &s) <= 0)
+	if (kscan_bytes(sc, f, n, "fixture.cab", &opt, on_object, &s) <= 0)
 		fail("scan", "the cabinet was not scanned");
 
 	if (!s.first_ok)
@@ -251,8 +251,8 @@ int main(void)
 		fail("content", "a child came back under the right name with "
 		     "the wrong bytes");
 
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	free(f);
 
 	if (failures) {

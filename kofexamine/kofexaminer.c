@@ -102,8 +102,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/kofsym.h>
-#include "../libkofeng/analyzer/parsers/binaries/elf_sym.h"
-#include "../libkofeng/analyzer/parsers/binaries/pe_sym.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf_sym.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe_sym.h"
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
@@ -121,17 +121,17 @@
 #include <kofmod/reg.h>
 #include <kofmod/rtf.h>
 
-#include "../libkofeng/analyzer/parsers/binaries/elf_parse.h"
-#include "../libkofeng/analyzer/parsers/binaries/pe_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/gzip_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/docole_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/zip_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/tar_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/sevenzip_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/rar_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/xz_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/rtf_parse.h"
-#include "../libkofeng/analyzer/parsers/containers/pdf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/zip_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/tar_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/sevenzip_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/rar_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/xz_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/rtf_parse.h"
+#include "../libkofeng/analyzers/parsers/containers/pdf_parse.h"
 
 #include "kofinspect.h"
 #include "../libkofeng/databases/hexprog.h"
@@ -250,11 +250,11 @@ static void verdict_run(kof_engine *eng, const char *path)
 	 * are added.
 	 */
 	opt.heur_level = KOF_HEUR_LEVEL_MAX;
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc)
 		return;
-	kof_scan_path(sc, path, &opt, verdict_collect, NULL);
-	kof_scanner_free(sc);
+	kscan_path(sc, path, &opt, verdict_collect, NULL);
+	kscan_free(sc);
 }
 
 static void verdict_free(void)
@@ -552,7 +552,7 @@ static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
  *
  * It used to call kof_elf_syms itself, which made it an ELF function by
  * construction. A PE has imports and exports in the same layout now - see
- * analyzer/parsers/binaries/pe_sym.c - so the builder is the caller's business and
+ * analyzers/parsers/binaries/pe_sym.c - so the builder is the caller's business and
  * this prints whatever it is handed. One printer, one layout, two formats.
  */
 static void print_syms(const uint8_t *blk, uint32_t w)
@@ -1777,8 +1777,8 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 				  (t->n_names && t->name[0] ? t->name[0] : NULL);
 
 		/* The engine's spelling, with this tool's own suffix after it
-		 * rather than woven into it - see kof_name_compose. */
-		kof_name_compose(name, sizeof name, NULL,
+		 * rather than woven into it - see kverdict_compose. */
+		kverdict_compose(name, sizeof name, NULL,
 				 kof_maltype_name(t->maltype),
 				 t->family[0] ? t->family : "?", var);
 		if (var && !t->fired_name && t->n_names > 1) {
@@ -2357,6 +2357,28 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	if (res->broken)
 		u->partial++;
 	/*
+	 * WHAT THE ENGINE SAYS, IN PLACE OF WHAT THIS GUESSED.
+	 *
+	 * See the note in on_debug: `via` was inferred from the prefix of the
+	 * last debug note, which is wrong whenever the producer emits none or
+	 * another module speaks after it. The engine now records the producing
+	 * module where the child is pushed, so when it has an answer that is
+	 * the answer. The guess is kept only for a module the engine could not
+	 * name.
+	 */
+	/*
+	 * THE ENGINE'S ANSWER, INCLUDING WHEN IT IS "NOBODY".
+	 *
+	 * Set AND cleared from it. Left sticky, an object nothing opened kept
+	 * the previous one's name: on 111.exe the last child - the one with
+	 * its strings already decrypted and no layer left on it - read
+	 * "StrXor.tab", which is the thing that had just been taken OFF it.
+	 */
+	if (res->opened_by && res->opened_by[0])
+		snprintf(u->via, sizeof u->via, "%s", res->opened_by);
+	else
+		u->via[0] = 0;
+	/*
 	 * <number>.<name>, or <number> alone.
 	 *
 	 * The number is what makes it unique and is the whole identity; the name is
@@ -2408,10 +2430,13 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 			     g_parent_format == KOF_FMT_PE ||
 			     g_parent_format == KOF_FMT_MACHO;
 
-		printf("   via %s%s%s", packed ? C_BAD : C_NOTE, u->via, C_OFF);
+		/* "is", not "via": the name says what this object IS - the
+		 * layer still on it - and not what it came out of. See
+		 * kof_result.opened_by. */
+		printf("   is %s%s%s", packed ? C_BAD : C_NOTE, u->via, C_OFF);
 	}
 	if (res->broken)
-		printf("   %s%s%s", C_BAD, kof_broken_name(res->broken), C_OFF);
+		printf("   %s%s%s", C_BAD, kverdict_broken_name(res->broken), C_OFF);
 	/*
 	 * What the heuristic made of it, on the line that says what it is.
 	 *
@@ -2539,19 +2564,19 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	u.touch = markers ? eng : NULL;
 	g_debug = verbose;
 
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
 		fprintf(stderr, "kofexaminer: out of memory\n");
 		return 0;
 	}
-	kof_scanner_on_debug(sc, on_debug, &u);
-	kof_scan_path(sc, path, &opt, on_unpacked, &u);
-	kof_scanner_free(sc);
+	kscan_on_debug(sc, on_debug, &u);
+	kscan_path(sc, path, &opt, on_unpacked, &u);
+	kscan_free(sc);
 
 	if (u.produced == 0 && !u.root_broken)
 		printf("  unpacked  nothing - no unpacker in the database claimed it\n");
 	else if (u.produced == 0)
-		printf("  unpacked  nothing - %s\n", kof_broken_name(u.root_broken));
+		printf("  unpacked  nothing - %s\n", kverdict_broken_name(u.root_broken));
 	else
 		/*
 		 * Three facts on one line, and each is only worth printing when it
@@ -2563,7 +2588,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 		 */
 		printf("  unpacked  %u object(s)%s%s%s\n", u.produced,
 		       u.root_broken ? "  - not all of it: " : "",
-		       u.root_broken ? kof_broken_name(u.root_broken) : "",
+		       u.root_broken ? kverdict_broken_name(u.root_broken) : "",
 		       u.partial ? "  (some only in part)" : "");
 	return !u.err;
 }
@@ -2668,7 +2693,7 @@ int main(int argc, char **argv)
 	}
 
 	if (db) {
-		eng = kof_engine_open(db);
+		eng = keng_open(db);
 		if (!eng) {
 			fprintf(stderr, "%s: cannot load a database from %s\n",
 				argv[0], db);
@@ -2712,14 +2737,14 @@ int main(int argc, char **argv)
 		files++;
 		verdict_free();
 		if (r < 0) {
-			kof_engine_close(eng);
+			keng_close(eng);
 			return 2;          /* could not write: see above */
 		}
 		if (!r)
 			bad = 1;
 	}
 
-	kof_engine_close(eng);
+	keng_close(eng);
 	if (files == 0) {
 		usage(argv[0]);
 		return 2;

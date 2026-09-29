@@ -152,7 +152,7 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 	b[1] = (uint8_t)(orig >> 8);
 	b[2] = (uint8_t)(orig >> 16);
 	b[3] = (uint8_t)(orig >> 24);
-	kof_cure_patch(24u, b, 4u);
+	kcure_patch(24u, b, 4u);
 
 	/* The loadable segment the entry falls in, shrunk to where the host's
 	 * own bytes ended. PT_LOAD is 1; p_offset is at 4, p_filesz at 16 and
@@ -172,10 +172,10 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 		b[1] = (uint8_t)(keep >> 8);
 		b[2] = (uint8_t)(keep >> 16);
 		b[3] = (uint8_t)(keep >> 24);
-		kof_cure_patch(e + 16u, b, 4u);
-		kof_cure_patch(e + 20u, b, 4u);
+		kcure_patch(e + 16u, b, 4u);
+		kcure_patch(e + 20u, b, 4u);
 		break;
 	}
 
-	kof_cure_truncate(shoff + (uint64_t)shent * shnum);
+	kcure_truncate(shoff + (uint64_t)shent * shnum);
 }

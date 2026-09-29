@@ -60,7 +60,7 @@
  */
 
 #include <kofmod/kofsig.h>
-#include "msf_elf32.h"
+#include <kofanalyze/msf_elf32.h>
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -331,7 +331,7 @@ KOF_DEFINE_UNPACK
 					     (uint8_t)(k + 1u));
 			produced++;
 			if (n == CHUNK) {
-				if (!kof_emit(buf, n))
+				if (!kunp_rcstruct_write(buf, n))
 					return;
 				n = 0;
 			}
@@ -352,7 +352,7 @@ KOF_DEFINE_UNPACK
 			for (b = 0; b < 4u; b++) {
 				buf[n++] = (uint8_t)(pl >> (b * 8));
 				if (n == CHUNK) {
-					if (!kof_emit(buf, n))
+					if (!kunp_rcstruct_write(buf, n))
 						return;
 					n = 0;
 				}
@@ -373,7 +373,7 @@ KOF_DEFINE_UNPACK
 			for (b = 0; b < 4u; b++) {
 				buf[n++] = (uint8_t)(pl >> (b * 8));
 				if (n == CHUNK) {
-					if (!kof_emit(buf, n))
+					if (!kunp_rcstruct_write(buf, n))
 						return;
 					n = 0;
 				}
@@ -383,11 +383,19 @@ KOF_DEFINE_UNPACK
 	}
 
 	(void)produced;
-	if (n && !kof_emit(buf, n))
+	if (n && !kunp_rcstruct_write(buf, n))
 		return;
 
 	/* Checked, for the reason ezuri.c gives: reporting nothing after the host
 	 * refused the child would claim an unpacking that did not happen. */
-	if (!kof_child())
-		kof_unp_broken(KOF_UNP_LIMIT);
+	/*
+	 * AND THIS OBJECT WAS THE WRAPPER. What came out is what was inside
+	 * it, one layer in - see kunp_rcstruct_supersedes. Without it a sample
+	 * wrapped three deep is reported as three recovered objects, two of
+	 * which are a forty-six byte decryptor in front of bytes nobody can
+	 * read.
+	 */
+	kunp_rcstruct_supersedes();
+	if (!kunp_rcstruct_done())
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

@@ -158,5 +158,5 @@ KOF_DEFINE_UNPACK
 	 * A named packer and a recorded reason is the whole of what this file
 	 * supports.
 	 */
-	KOF_UNP_BROKEN(KOF_UNP_ENCRYPTED);
+	KUNP_RCSTRUCT_BROKEN(KOF_UNP_ENCRYPTED);
 }

@@ -26,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/extractor/decomp/bzip2.h"
+#include "../../libkofeng/extractors/decomp/bzip2.h"
 #include "slurp.h"
 
 static int failures;

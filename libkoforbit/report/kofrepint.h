@@ -35,7 +35,7 @@
  * kofrepart.c needs it to scan and to hash. The emitters need it too, and the
  * reason is worth stating: a report carries the engine's OWN answers -
  * kof_result.broken, a composed finding name - and presenting them means
- * printing them in the engine's vocabulary. kof_broken_name is that
+ * printing them in the engine's vocabulary. kverdict_broken_name is that
  * vocabulary, and a second set of words for the same reasons here would be a
  * report that disagrees with the scanner about why a scan stopped.
  *

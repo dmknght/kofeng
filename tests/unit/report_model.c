@@ -584,7 +584,7 @@ int main(void)
 		uint64_t sz = 0;
 
 		f = look(r, KOF_FP_FILE_NEW, "svc32.exe");
-		if (f && kof_sha256_file(subject, want, &sz) == 0) {
+		if (f && khash_sha256_file(subject, want, &sz) == 0) {
 			/* Not the same file, so not the same digest: this is
 			 * only checking that a MISSING file leaves the digest
 			 * empty rather than filled with something plausible. */

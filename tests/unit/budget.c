@@ -123,18 +123,18 @@ static const char evil_name[EVIL_LEN] =
 static void mod_evilname(const struct kof_obj_ctx *ctx)
 {
 	(void)ctx;
-	kof_name_next(EVIL_OFF, EVIL_LEN);
-	kof_child_window(0, 64);
+	kunp_rcstruct_name(EVIL_OFF, EVIL_LEN);
+	kunp_rcstruct_window(0, 64);
 }
 
 static void mod_gather(const struct kof_obj_ctx *ctx)
 {
-	if (kof_gather_max(KOF_SCAN_ALL, GATHER_CAP) != GATHER_CAP)
+	if (kunp_static_gather(KOF_SCAN_ALL, GATHER_CAP) != GATHER_CAP)
 		return;
-	kof_child();
-	if (kof_gather(KOF_SCAN_ALL) != ctx->obj_size)
+	kunp_rcstruct_done();
+	if (kunp_static_gather_all(KOF_SCAN_ALL) != ctx->obj_size)
 		return;
-	kof_child();
+	kunp_rcstruct_done();
 }
 
 
@@ -153,9 +153,9 @@ static void mod_bomb(const struct kof_obj_ctx *ctx)
 
 	for (round = 0; round < 8; round++) {
 		for (i = 0; i < 4u * 1024u * 1024u; i++)
-			if (!kof_emit(filler, sizeof filler))
+			if (!kunp_rcstruct_write(filler, sizeof filler))
 				return;
-		if (!kof_child())
+		if (!kunp_rcstruct_done())
 			return;
 	}
 }
@@ -169,7 +169,7 @@ static void mod_bomb(const struct kof_obj_ctx *ctx)
  */
 static void mod_selfwindow(const struct kof_obj_ctx *ctx)
 {
-	kof_child_window(0, ctx->obj_size);
+	kunp_rcstruct_window(0, ctx->obj_size);
 }
 
 /*
@@ -189,9 +189,9 @@ static void mod_stream(const struct kof_obj_ctx *ctx)
 	(void)ctx;
 	memset(run, 'S', sizeof run);
 	for (i = 0; i < 4096u; i++)          /* 256MB if it were allowed */
-		if (!kof_emit(run, sizeof run))
+		if (!kunp_rcstruct_write(run, sizeof run))
 			return;
-	kof_child();
+	kunp_rcstruct_done();
 }
 
 /*
@@ -214,9 +214,9 @@ static void mod_siblings(const struct kof_obj_ctx *ctx)
 	memset(entry, 'E', sizeof entry);
 	for (i = 0; i < 64u; i++) {          /* 64 entries of 1MB */
 		for (k = 0; k < 16u; k++)
-			if (!kof_emit(entry, sizeof entry))
+			if (!kunp_rcstruct_write(entry, sizeof entry))
 				return;
-		if (!kof_child())
+		if (!kunp_rcstruct_done())
 			return;
 	}
 }
@@ -228,9 +228,9 @@ static void mod_wide(const struct kof_obj_ctx *ctx)
 	uint32_t i;
 
 	for (i = 0; i < 100000u; i++) {
-		if (!kof_emit("x", 1))
+		if (!kunp_rcstruct_write("x", 1))
 			return;
-		if (!kof_child())
+		if (!kunp_rcstruct_done())
 			return;
 	}
 }
@@ -247,8 +247,8 @@ static void mod_bigemit(const struct kof_obj_ctx *ctx)
 {
 	static uint8_t huge[2u << 20];
 
-	if (kof_emit(huge, sizeof huge))
-		kof_child();
+	if (kunp_rcstruct_write(huge, sizeof huge))
+		kunp_rcstruct_done();
 }
 
 /* Emits and never closes the child. Nothing should be produced, and nothing
@@ -258,7 +258,7 @@ static void mod_dangling(const struct kof_obj_ctx *ctx)
 	uint32_t i;
 
 	for (i = 0; i < 1000u; i++)
-		if (!kof_emit("y", 1))
+		if (!kunp_rcstruct_write("y", 1))
 			return;
 }
 

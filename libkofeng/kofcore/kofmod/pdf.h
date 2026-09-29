@@ -746,7 +746,7 @@ struct kof_pdf_object {
 	 * `cat` is the answer; `cat_off` and `cat_len` are the bytes IN THIS
 	 * OBJECT that produced it - `ObjStm` out of /Type /ObjStm, `DCTDecode`
 	 * out of /Filter /DCTDecode. A range and not a string because that is
-	 * what naming a child takes: kof_name_next is given where a name is,
+	 * what naming a child takes: kunp_rcstruct_name is given where a name is,
 	 * never a name, and a module has nothing to build a string in. Every
 	 * other container module in this tree names its children that way and
 	 * this one did not, which is the whole reason a PDF's children arrived

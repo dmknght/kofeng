@@ -81,11 +81,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 		/* What this entry is called, for the report. The name is in the
 		 * archive; the host reads it and makes it safe to print. */
-		kof_name_next(e->name_off, e->name_len);
+		kunp_rcstruct_name(e->name_off, e->name_len);
 
 		if (e->method == KOF_ZIP_M_STORE) {
 			/* Free: the child is a view of bytes that already exist. */
-			if (!kof_child_window(e->data_off, e->csize))
+			if (!kunp_rcstruct_window(e->data_off, e->csize))
 				break;
 			opened++;
 			continue;
@@ -103,7 +103,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			if (kof_unpack_at(KOF_UNP_BZIP2, e->data_off, e->csize,
 					  e->usize) == 0)
 				continue;
-			if (!kof_child())
+			if (!kunp_rcstruct_done())
 				break;
 			opened++;
 			continue;
@@ -136,7 +136,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * about the ones after it. */
 			continue;
 		}
-		if (!kof_child())
+		if (!kunp_rcstruct_done())
 			break;
 		opened++;
 	}
@@ -152,7 +152,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * encrypted archive.
 	 */
 	if (z->n_encrypted)
-		kof_unp_broken(KOF_UNP_ENCRYPTED);
+		kunp_rcstruct_broken(KOF_UNP_ENCRYPTED);
 	else if (unsupported)
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 }

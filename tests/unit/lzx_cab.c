@@ -46,8 +46,8 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/analyzer/parsers/containers/cab_parse.h"
-#include "../../libkofeng/extractor/decomp/lzx.h"
+#include "../../libkofeng/analyzers/parsers/containers/cab_parse.h"
+#include "../../libkofeng/extractors/decomp/lzx.h"
 #include "slurp.h"
 #include "outsink.h"
 
@@ -282,20 +282,20 @@ static int engine_pass(const char *path, struct kof_engine *eng)
 	f = slurp(path, &len);
 	if (!f)
 		return 0;
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
 		free(f);
 		return 0;
 	}
 	memset(&fd, 0, sizeof fd);
 	memset(&opt, 0, sizeof opt);
-	if (kof_scan_bytes(sc, f, len, "cabinet.cab", &opt, on_object, &fd) <= 0)
+	if (kscan_bytes(sc, f, len, "cabinet.cab", &opt, on_object, &fd) <= 0)
 		fail(path, "the engine did not scan the cabinet at all");
 	else if (fd.objects < 2)
 		fail(path, "the engine made no child of a cabinet whose files "
 		     "are all in LZX folders");
 	got = fd.objects - 1;
-	kof_scanner_free(sc);
+	kscan_free(sc);
 	free(f);
 	return got;
 }
@@ -373,13 +373,13 @@ int main(void)
 		printf("lzx cab: out of memory\n");
 		return 1;
 	}
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 
 	for (d = 0; d < sizeof dirs / sizeof dirs[0] && cabinets < 6; d++)
 		walk(dirs[d], c, lz, eng, 6, &children);
 
 	if (eng)
-		kof_engine_close(eng);
+		keng_close(eng);
 	free(c);
 	free(lz);
 

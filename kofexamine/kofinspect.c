@@ -33,13 +33,13 @@
 
 #include "kofinspect.h"
 #include "../libkofeng/kofcore/kofplatform.h"
-#include "../libkofeng/detector/matchers/kofmatch.h"
+#include "../libkofeng/detectors/matchers/kofmatch.h"
 #include "../libkofeng/scanners/scan.h"
 #include <kofmod/script.h>
 /* KOF_PROC_OS_LIST: the platform a process record is from, which is its
  * subtype - see the note on that list. */
 #include <kofmod/proc.h>
-#include "../libkofeng/analyzer/parsers/kofformat.h"
+#include "../libkofeng/analyzers/parsers/kofformat.h"
 
 /*
  * The parsers, by their internal headers.
@@ -49,9 +49,9 @@
  * wanted one. What changed is that there are now two consumers of it in this
  * tree rather than one, so the reach lives here once instead of in each.
  */
-#include "../libkofeng/analyzer/parsers/binaries/elf_parse.h"
-#include "../libkofeng/analyzer/parsers/binaries/pe_parse.h"
-#include "../libkofeng/analyzer/parsers/events/amsi_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzers/parsers/events/amsi_parse.h"
 
 /* ---- the formats, and how to get a view of one ---------------------------- */
 
@@ -1733,7 +1733,7 @@ uint32_t kof_inspect_region_entropy(const struct kof_obj_ctx *ctx,
 			hist[bytes.p[off + k]]++;
 		total += len;
 	}
-	return kof_entropy_hist(hist, total);
+	return kentropy_hist(hist, total);
 }
 
 /* One heap row, or nothing when the heap is absent. */
@@ -2317,8 +2317,8 @@ void kof_touch_name(const struct kof_touch *t, char *out, size_t cap)
 		return;
 	}
 	/* The engine's spelling. The "(n matchers)" tail is this panel's own and
-	 * is added after it, never mixed into it - see kof_name_compose. */
-	kof_name_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
+	 * is added after it, never mixed into it - see kverdict_compose. */
+	kverdict_compose(out, cap, NULL, kof_maltype_name(t->maltype), fam,
 			 t->fired_name);
 	if (!t->fired_name && t->n_names > 1u) {
 		size_t at = strlen(out);

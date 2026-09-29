@@ -484,7 +484,7 @@ struct kof_engine {
 	uint32_t                 n_blk;
 	uint32_t                *blk_pool;
 	uint32_t                 n_blk_pool;
-	/* The index built over the two above - see detector/matchers/kofplague.h. NULL
+	/* The index built over the two above - see detectors/matchers/kofplague.h. NULL
 	 * when there are no blocks. */
 	struct kof_plague_set   *plague;
 
@@ -601,13 +601,13 @@ void               kof_db_free_tables(struct kof_engine *);
  * THE ENGINE, ASSEMBLED: the tables above plus the detector's indexes over
  * them. This is what everything except the assembler itself should call.
  *
- * DECLARED HERE AND DEFINED IN detector/dbindex.c, which is the same
+ * DECLARED HERE AND DEFINED IN detectors/dbindex.c, which is the same
  * arrangement kof_fid_of has in fidset.h and is here for a related reason: the
  * name belongs beside struct kof_engine, and the definition belongs in the
  * layer that knows what an index is. The alternative was the loader calling
  * kof_plague_build and kof_multimatch_build itself, which made these two
  * directories mutually dependent - dbloader.c reaching up into
- * detector/matchers while kofmultimatch.c reached back down for kof_db_str.
+ * detectors/matchers while kofmultimatch.c reached back down for kof_db_str.
  *
  * Semantics are unchanged from when this was one function, and the name is
  * unchanged so that every caller is too.

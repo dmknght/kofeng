@@ -243,7 +243,7 @@ static void one(struct kof_scanner *sc, const char *what, const uint8_t *f,
 	memset(&s, 0, sizeof s);
 	s.want_name = want_name;
 	memset(&opt, 0, sizeof opt);
-	rc = kof_scan_bytes(sc, f, n, what, &opt, on_object, &s);
+	rc = kscan_bytes(sc, f, n, what, &opt, on_object, &s);
 
 	if (rc <= 0)
 		fail(what, "the archive was not scanned at all");
@@ -282,15 +282,15 @@ int main(void)
 		printf("entry child: out of memory\n");
 		return 1;
 	}
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		free(f);
 		printf("entry child: no database at %s - nothing tested\n", db);
 		return 0;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		free(f);
 		printf("entry child: could not make a scanner\n");
 		return 1;
@@ -327,8 +327,8 @@ int main(void)
 	n = build_arj(f, "payload.dat");
 	one(sc, "arj", f, n, "payload.dat");
 
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	free(f);
 
 	if (failures) {

@@ -43,24 +43,24 @@
 
 #define _POSIX_C_SOURCE 199309L
 
-#include "../../libkofeng/analyzer/parsers/kofformat.h"
+#include "../../libkofeng/analyzers/parsers/kofformat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
 
-#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
-#include "../../libkofeng/analyzer/parsers/binaries/pe_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/gzip_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/docole_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/zip_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/tar_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/sevenzip_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/rar_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/xz_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/pdf_parse.h"
-#include "../../libkofeng/analyzer/parsers/containers/rtf_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/gzip_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/docole_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/zip_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/tar_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/sevenzip_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/rar_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/xz_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/pdf_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/rtf_parse.h"
 #include "partition_check.h"
 #include "entry_check.h"
 

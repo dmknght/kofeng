@@ -104,7 +104,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * decoder this build could later grow.
 	 */
 	if (o->encrypted)
-		KOF_UNP_BROKEN(KOF_UNP_ENCRYPTED);
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_ENCRYPTED);
 
 	/*
 	 * Structure that lost bytes, said BEFORE anything is gathered.
@@ -119,7 +119,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			    KOF_DOCOLE_ANOM_STREAM_PAST_EOF |
 			    KOF_DOCOLE_ANOM_FAT_CYCLE |
 			    KOF_DOCOLE_ANOM_DIR_CYCLE))
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 
 	/*
 	 * Held against what the region COVERS, never against what the directory
@@ -155,9 +155,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			continue;
 
 		if (e->flags & KOF_DOCOLE_ENT_OVBA) {
-			kof_name_next(e->name_off, e->name_len);
-			if (kof_unpack_entry(KOF_UNP_OVBA, i, 0)) {
-				if (!kof_child())
+			kunp_rcstruct_name(e->name_off, e->name_len);
+			if (kunp_static_entry(KOF_UNP_OVBA, i, 0)) {
+				if (!kunp_rcstruct_done())
 					break;   /* the host will take no more */
 				opened++;
 				continue;
@@ -177,8 +177,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		for (r = 0; r < e->n_runs; r++)
 			raw += o->ent_run[e->first_run + r].len;
 		if (raw && e->n_runs == 1u) {
-			kof_name_next(e->name_off, e->name_len);
-			if (!kof_child_window(o->ent_run[e->first_run].off, raw))
+			kunp_rcstruct_name(e->name_off, e->name_len);
+			if (!kunp_rcstruct_window(o->ent_run[e->first_run].off, raw))
 				break;
 			opened++;
 		}
@@ -186,15 +186,15 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	kof_debug("DocOLE.macro_children", opened);
 	if (o->anomalies & KOF_DOCOLE_ANOM_ENTRIES_FULL)
-		kof_unp_broken(KOF_UNP_LIMIT);
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 
 	if (o->region_bytes[KOF_DOCOLE_CLS_DATA]) {
-		got = kof_gather_max(KOF_SCAN_DOCOLE_CONTENT_DATA, GATHER_CAP);
+		got = kunp_static_gather(KOF_SCAN_DOCOLE_CONTENT_DATA, GATHER_CAP);
 		/* Recorded rather than returned: the size check below has its
 		 * own reason to report and both are worth saying. */
-		if (got && !kof_child())
-			kof_unp_broken(KOF_UNP_LIMIT);
+		if (got && !kunp_rcstruct_done())
+			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 		if (got < o->region_bytes[KOF_DOCOLE_CLS_DATA])
-			kof_unp_broken(KOF_UNP_LIMIT);
+			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	}
 }

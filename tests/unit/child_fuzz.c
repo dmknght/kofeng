@@ -83,25 +83,25 @@ static void mod_random(const struct kof_obj_ctx *ctx)
 			uint32_t n = (uint32_t)(rnd() % (rnd() % 4 ? 4096u
 							       : sizeof buf));
 			memset(buf, (int)(rnd() & 0xff), n);
-			(void)kof_emit(buf, n);
+			(void)kunp_rcstruct_write(buf, n);
 			break;
 		}
 		case 3:
-			(void)kof_child();
+			(void)kunp_rcstruct_done();
 			break;
 		case 4:
 			/* A window somewhere inside, or somewhere outside. */
-			(void)kof_child_window(rnd() % (ctx->obj_size + 64),
+			(void)kunp_rcstruct_window(rnd() % (ctx->obj_size + 64),
 					       rnd() % (ctx->obj_size + 64));
 			break;
 		case 5:
-			(void)kof_child_window(0, ctx->obj_size);
+			(void)kunp_rcstruct_window(0, ctx->obj_size);
 			break;
 		case 6:
-			(void)kof_emit(buf, 0);       /* nothing at all */
+			(void)kunp_rcstruct_write(buf, 0);       /* nothing at all */
 			break;
 		default:
-			(void)kof_child_window(ctx->obj_size + 1, 16);  /* nowhere */
+			(void)kunp_rcstruct_window(ctx->obj_size + 1, 16);  /* nowhere */
 			break;
 		}
 	}

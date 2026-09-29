@@ -40,8 +40,8 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/extractor/decomp/nrv2.h"
-#include "../../libkofeng/extractor/decomp/lzma.h"
+#include "../../libkofeng/extractors/decomp/nrv2.h"
+#include "../../libkofeng/extractors/decomp/lzma.h"
 
 static uint64_t blocks, matched;
 

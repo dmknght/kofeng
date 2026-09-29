@@ -66,5 +66,5 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (!kof_unpack_at(KOF_UNP_BZIP2, 0, ctx->obj_size, 0))
 		return;
 
-	kof_child();
+	kunp_rcstruct_done();
 }

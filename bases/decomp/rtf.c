@@ -38,13 +38,13 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		/* The object's class, when the document named one, so a finding
 		 * reads as the thing rather than as an index. */
 		if (o->class_len)
-			kof_name_next(o->class_off, o->class_len);
+			kunp_rcstruct_name(o->class_off, o->class_len);
 
 		if (kof_unpack_at(KOF_UNP_HEXTEXT, o->data_off, o->data_len,
 				  o->hex_bytes) == 0)
 			continue;
-		if (!kof_child())
-			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+		if (!kunp_rcstruct_done())
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 		opened++;
 	}
 
@@ -59,8 +59,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	if (r->anomalies & (KOF_RTF_ANOM_UNBALANCED | KOF_RTF_ANOM_BAD_HEX |
 			    KOF_RTF_ANOM_TRUNCATED))
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 	if (r->anomalies & (KOF_RTF_ANOM_OBJECTS_FULL | KOF_RTF_ANOM_EXTENTS_FULL |
 			    KOF_RTF_ANOM_DEPTH))
-		kof_unp_broken(KOF_UNP_LIMIT);
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

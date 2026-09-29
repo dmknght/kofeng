@@ -30,8 +30,8 @@
 
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
-#include "../../libkofeng/analyzer/parsers/binaries/pe_parse.h"
-#include "../../libkofeng/extractor/unpack/emu_unpack.h"
+#include "../../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/extractors/unpack/emu_unpack.h"
 #include "../../libkofeng/kofeng.h"
 
 #define BASE      0x0000000140000000ull
@@ -196,7 +196,7 @@ static void decodes(void)
 	ck(info->entry_rva == TEXT_RVA, "the entry point survived the parse");
 	ck(info->sec_count == 2, "both sections were read");
 
-	e = kof_emu_unp_run_pe(f, len, info, 0, 0, &rep);
+	e = kof_emu_unp_run_pe(f, len, info, 0, 0, 0, NULL, 0, &rep);
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image could be built");
 		goto out;

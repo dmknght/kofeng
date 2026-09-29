@@ -13,7 +13,7 @@
  * IT COMPUTES AND DESCRIBES. IT DOES NOT WRITE.
  *
  * Nothing here opens a file, truncates one, or changes a mode. A cure is a
- * REQUEST - kof_cure_patch and kof_cure_truncate in kofcure.h - which the host
+ * REQUEST - kcure_patch and kcure_truncate in kofcure.h - which the host
  * records, bounds-checks and may refuse; see c_cure_patch in objctx.c, where
  * the bound is enforced because a rule that could name an offset past the end
  * of the object is a rule that could corrupt a file the engine was asked to

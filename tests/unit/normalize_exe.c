@@ -32,7 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzer/normalize/executables.h"
+#include "../../libkofeng/analyzers/normalize/executables.h"
 
 static int fails;
 

@@ -46,8 +46,8 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 {
 	static const uint8_t orig[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
 
-	kof_cure_patch(16u, orig, 4u);
-	kof_cure_truncate(32u);
+	kcure_patch(16u, orig, 4u);
+	kcure_truncate(32u);
 
 	/*
 	 * AND THE REQUESTS THE HOST MUST REFUSE, asked here so the test can
@@ -57,8 +57,8 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 	 * something the host cannot do - and the answer is a refusal, not a
 	 * clamp, because a clamped repair is a different repair.
 	 */
-	kof_cure_patch(16u, orig, 17u);          /* too many bytes */
-	kof_cure_patch(0xffffffffu, orig, 4u);   /* past the object */
-	kof_cure_truncate(0u);                   /* cut to nothing */
-	kof_cure_truncate(0xffffffffu);          /* cut to more than there is */
+	kcure_patch(16u, orig, 17u);          /* too many bytes */
+	kcure_patch(0xffffffffu, orig, 4u);   /* past the object */
+	kcure_truncate(0u);                   /* cut to nothing */
+	kcure_truncate(0xffffffffu);          /* cut to more than there is */
 }

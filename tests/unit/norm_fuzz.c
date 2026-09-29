@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../../libkofeng/analyzer/normalize/executables.h"
+#include "../../libkofeng/analyzers/normalize/executables.h"
 
 static unsigned s = 0x12345678u;
 static unsigned rnd(void){ s = s*1103515245u + 12345u; return s>>8; }

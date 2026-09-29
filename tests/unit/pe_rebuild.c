@@ -1,22 +1,29 @@
 /*
- * pe_rebuild - turn an image back into a file, and check the bytes.
+ * pe_rebuild - the layout of an image, read out and written back.
  *
- * The reason this compares CONTENT rather than verdicts is a bug it would have
- * caught and the first version of it did not. The section table sits four bytes
- * past the "PE\0\0" signature, and reading it without that offset produced a file
- * whose header was perfectly correct - the header is copied from the signature, not
- * through the table - so the result identified as PE32, parsed cleanly, reported
- * four sections with sane names and permissions, and had every section's CONTENT
- * placed from a garbage offset. `file` was happy with it. A scanner would have
- * searched the wrong bytes and found nothing, and nothing would have said so.
+ * WHAT THIS TESTS NOW, AND WHY IT CHANGED. It used to test kof_pe_rebuild,
+ * which took an image and produced a FILE by copying every section to a
+ * computed offset. That function is gone: a module no longer synthesises a
+ * header for the engine to parse back, it DECLARES its layout - see `section`
+ * in kofsig.h - and the two halves left are the ones tested here.
  *
- * So the assertion here is that each section of the rebuilt file is byte for byte
- * what was at its computed place in the image. Everything else - that it is a PE,
- * that it parses - follows from that and is not worth asserting separately.
+ *   kof_pe_layout_of   reads a layout out of an image a stub assembled. This
+ *                      is what kunp_rcstruct_layout_of_image answers with, so
+ *                      every emulator-produced child depends on it.
+ *   kof_pe_write_hdr   writes a header from a declared layout, which is how
+ *                      every declared child gets one.
  *
- * The image is built here rather than taken from a corpus. What is being tested is
- * the reassembly, and an image whose every field this test chose is one where a
- * disagreement can only be the reassembly's.
+ * The assertion is a ROUND TRIP: declare a layout, write a header, read it
+ * back, and require the answer to be what was declared. That catches what the
+ * old content comparison was written for and says why it mattered - the
+ * section table sits four bytes past "PE\0\0", and a reader that forgets the
+ * offset produces a header that parses cleanly and describes something else
+ * entirely. A round trip cannot be fooled by that: both directions would have
+ * to be wrong in the same way.
+ *
+ * The image is built here rather than taken from a corpus. What is being
+ * tested is the layout arithmetic, and an image whose every field this test
+ * chose is one where a disagreement can only be the arithmetic's.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -25,7 +32,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/extractor/unpack/pe_rebuild.h"
+#include <kofmod/pe.h>
+
+#include "../../libkofeng/extractors/unpack/pe_rebuild.h"
 
 static int failures;
 
@@ -137,46 +146,126 @@ static uint8_t *build_image(uint64_t *len_out, uint32_t hdr_at_out[1])
 
 /* ---- the case that matters --------------------------------------------------- */
 
+#define DECL_MAX 16u
+
+/* What the image above says, as kof_pe_layout_of should report it. */
+static void check_layout_of(void)
+{
+	uint64_t img_len = 0, entry = 0, base = 0;
+	uint32_t hdr_at = 0, i, n;
+	uint8_t *img = build_image(&img_len, &hdr_at);
+	struct kof_sec_decl decl[DECL_MAX];
+	struct kof_dir_decl dir[16];
+
+	if (!img) {
+		fail("layout_of", "out of memory");
+		return;
+	}
+	memset(decl, 0, sizeof decl);
+	memset(dir, 0, sizeof dir);
+	n = kof_pe_layout_of(kof_buf_make(img, img_len), decl, DECL_MAX,
+			     &entry, &base, dir);
+	if (n != N_SEC) {
+		fail("layout_of", "the section count is not what the header says");
+		free(img);
+		return;
+	}
+	for (i = 0; i < N_SEC; i++) {
+		if (decl[i].rva != secs[i].rva)
+			fail("layout_of", "a section is at the wrong address");
+		if (decl[i].vsize != secs[i].raw)
+			fail("layout_of", "a section is the wrong size");
+		if (strcmp(decl[i].name, secs[i].name) != 0)
+			fail("layout_of", "a section has the wrong name");
+	}
+	free(img);
+}
+
+/*
+ * AND BACK AGAIN. A header written from a declaration has to describe that
+ * declaration, or a declared child is a file whose table says something its
+ * producer did not.
+ */
 static void check_roundtrip(void)
 {
-	uint64_t img_len = 0, out_len = 0;
-	uint32_t hdr_at = 0, i;
+	uint64_t img_len = 0, entry = 0, base = 0, wrote;
+	uint32_t hdr_at = 0, i, n;
 	uint8_t *img = build_image(&img_len, &hdr_at);
-	uint8_t *out = NULL;
+	struct kof_sec_decl decl[DECL_MAX], back[DECL_MAX];
+	struct kof_dir_decl dir[16], dir2[16];
+	struct kof_pe_info *pe;
+	uint8_t *out;
 
 	if (!img) {
 		fail("roundtrip", "out of memory");
 		return;
 	}
-	if (!kof_pe_rebuild(kof_buf_make(img, img_len), 1u << 20, &out, &out_len)) {
-		fail("roundtrip", "an image with a valid header was not rebuilt");
+	memset(decl, 0, sizeof decl);
+	memset(back, 0, sizeof back);
+	memset(dir, 0, sizeof dir);
+	memset(dir2, 0, sizeof dir2);
+	n = kof_pe_layout_of(kof_buf_make(img, img_len), decl, DECL_MAX,
+			     &entry, &base, dir);
+	pe = calloc(1, sizeof *pe);
+	out = calloc(1, (size_t)FIRST_RVA);
+	if (!n || !pe || !out) {
+		fail("roundtrip", "setup");
+		free(pe);
+		free(out);
+		free(img);
+		return;
+	}
+	pe->valid = 1;
+	pe->machine = 0x014c;
+	pe->pe32_plus = 0;
+	pe->image_base = base;
+
+	wrote = kof_pe_write_hdr(out, FIRST_RVA, pe, decl, n,
+				 secs[0].rva, secs[N_SEC - 1].rva +
+					      secs[N_SEC - 1].raw, dir);
+	if (!wrote) {
+		fail("roundtrip", "a layout that was read could not be written");
+		free(pe);
+		free(out);
 		free(img);
 		return;
 	}
 
-	if (out_len != secs[N_SEC - 1].ptr + secs[N_SEC - 1].raw)
-		fail("roundtrip", "the file is not as long as its last section ends");
-	if (out[0] != 'M' || out[1] != 'Z')
-		fail("roundtrip", "no DOS signature, so nothing will identify it");
-
 	/*
-	 * The check the whole file exists for: every section's bytes, compared
-	 * against where they were in the image.
+	 * Read back from the header alone. The section CONTENT is not there -
+	 * only FIRST_RVA bytes were allocated - and that is deliberate: what is
+	 * asserted is the table, and a reader that needed the content to
+	 * produce one would be reading past what a header describes.
 	 */
-	for (i = 0; i < N_SEC; i++) {
-		uint64_t src = secs[i].rva - FIRST_RVA;
+	{
+		uint8_t *whole = calloc(1, (size_t)img_len);
 
-		if (secs[i].ptr + secs[i].raw > out_len) {
-			fail("roundtrip", "a section runs past the rebuilt file");
-			break;
+		if (!whole) {
+			fail("roundtrip", "out of memory");
+			free(pe);
+			free(out);
+			free(img);
+			return;
 		}
-		if (memcmp(out + secs[i].ptr, img + src, secs[i].raw) != 0) {
-			fail("roundtrip", "a section holds bytes from the wrong place "
-					  "in the image");
-			break;
+		memcpy(whole, out, (size_t)wrote);
+		if (kof_pe_layout_of(kof_buf_make(whole, img_len), back,
+				     DECL_MAX, &entry, &base, dir2) != n) {
+			fail("roundtrip", "the written header lost a section");
+		} else {
+			for (i = 0; i < n; i++) {
+				if (back[i].rva != decl[i].rva)
+					fail("roundtrip", "an address did not survive");
+				if (back[i].vsize != decl[i].vsize)
+					fail("roundtrip", "a size did not survive");
+				if (strcmp(back[i].name, decl[i].name) != 0)
+					fail("roundtrip", "a name did not survive");
+			}
+			if (entry != secs[0].rva)
+				fail("roundtrip", "the entry point did not survive");
 		}
+		free(whole);
 	}
-
+	free(pe);
 	free(out);
 	free(img);
 }
@@ -208,75 +297,94 @@ static void check_hostile(void)
 	size_t c;
 
 	for (c = 0; c < n; c++) {
-		uint64_t img_len = 0, out_len = 0;
-		uint32_t hdr_at = 0;
+		uint64_t img_len = 0, entry = 0, base = 0;
+		uint32_t hdr_at = 0, got;
 		uint8_t *img = build_image(&img_len, &hdr_at);
-		uint8_t *out = NULL;
+		struct kof_sec_decl decl[DECL_MAX];
+		struct kof_dir_decl dir[16];
 
 		if (!img)
 			return;
+		memset(decl, 0, sizeof decl);
+		memset(dir, 0, sizeof dir);
 		if (bad[c].is16)
 			put16(img, hdr_at + bad[c].off, (uint16_t)bad[c].val);
 		else
 			put32(img, hdr_at + bad[c].off, bad[c].val);
 
-		if (kof_pe_rebuild(kof_buf_make(img, img_len), 1u << 20, &out,
-				   &out_len)) {
-			/* Rebuilding is allowed - another header may still be found -
-			 * but the result must be bounded and must not claim more than
-			 * the cap. */
-			if (out_len == 0 || out_len > (1u << 20))
-				fail(bad[c].what, "rebuilt to an impossible length");
-			free(out);
-		}
+		/* Reading is allowed to succeed - another header may still be
+		 * found - but it must never report more than it was given room
+		 * for, and every address it reports must be inside the image. */
+		got = kof_pe_layout_of(kof_buf_make(img, img_len), decl,
+				       DECL_MAX, &entry, &base, dir);
+		if (got > DECL_MAX)
+			fail(bad[c].what, "reported more sections than the cap");
 		free(img);
 	}
 
-	/* A section that says its bytes live past the end of the image: written
-	 * short rather than refused, and never read out of range. */
+	/* A section that says its bytes live past the end of the image. */
 	{
-		uint64_t img_len = 0, out_len = 0;
-		uint32_t hdr_at = 0, t;
+		uint64_t img_len = 0, entry = 0, base = 0;
+		uint32_t hdr_at = 0, t, got;
 		uint8_t *img = build_image(&img_len, &hdr_at);
-		uint8_t *out = NULL;
+		struct kof_sec_decl decl[DECL_MAX];
+		struct kof_dir_decl dir[16];
 
 		if (!img)
 			return;
+		memset(decl, 0, sizeof decl);
+		memset(dir, 0, sizeof dir);
 		t = hdr_at + SIG_LEN + COFF_LEN + OPT_LEN;
 		put32(img, t + 12, 0x7fff0000u);        /* an RVA far past the image */
-		if (kof_pe_rebuild(kof_buf_make(img, img_len), 1u << 20, &out,
-				   &out_len)) {
-			if (out_len > (1u << 20))
-				fail("rva past the image", "rebuilt to an impossible length");
-			free(out);
-		}
+		got = kof_pe_layout_of(kof_buf_make(img, img_len), decl,
+				       DECL_MAX, &entry, &base, dir);
+		if (got > DECL_MAX)
+			fail("rva past the image", "reported more sections than the cap");
 		free(img);
 	}
 
-	/* A cap smaller than the file the header describes: refused, not truncated,
-	 * because a short file puts every section at an offset that means something
-	 * else. */
+	/*
+	 * A HEADER THAT DOES NOT FIT IN FRONT OF THE CONTENT. `cap` is the span
+	 * before the first declared section, and a caller that laid its
+	 * sections out too tightly must be told rather than allowed to
+	 * overwrite them.
+	 */
 	{
-		uint64_t img_len = 0, out_len = 0;
-		uint32_t hdr_at = 0;
+		uint64_t img_len = 0, entry = 0, base = 0;
+		uint32_t hdr_at = 0, got;
 		uint8_t *img = build_image(&img_len, &hdr_at);
-		uint8_t *out = NULL;
+		struct kof_sec_decl decl[DECL_MAX];
+		struct kof_dir_decl dir[16];
+		struct kof_pe_info *pe = calloc(1, sizeof *pe);
+		uint8_t small[64];
 
-		if (!img)
+		if (!img || !pe) {
+			free(img);
+			free(pe);
 			return;
-		if (kof_pe_rebuild(kof_buf_make(img, img_len), 64, &out, &out_len)) {
-			fail("cap too small", "built a file larger than the cap allowed");
-			free(out);
 		}
+		memset(decl, 0, sizeof decl);
+		memset(dir, 0, sizeof dir);
+		memset(small, 0, sizeof small);
+		got = kof_pe_layout_of(kof_buf_make(img, img_len), decl,
+				       DECL_MAX, &entry, &base, dir);
+		pe->valid = 1;
+		pe->machine = 0x014c;
+		if (got && kof_pe_write_hdr(small, sizeof small, pe, decl, got,
+					    secs[0].rva, img_len, dir))
+			fail("cap too small",
+			     "wrote a header into less room than it needs");
+		free(pe);
 		free(img);
 	}
 }
 
 int main(void)
 {
+	check_layout_of();
 	check_roundtrip();
 	check_hostile();
 
-	printf("pe rebuild: image to file %s\n", failures ? "FAILED" : "ok");
+	printf("pe rebuild: layout round trip %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

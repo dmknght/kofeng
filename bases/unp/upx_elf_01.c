@@ -189,9 +189,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				buf[n] = kof_u8(o);
 			n++;
 		}
-		if (!n || !kof_emit(buf, n))
+		if (!n || !kunp_rcstruct_write(buf, n))
 			return;
 		at += n;
 	}
-	kof_child();
+	kunp_rcstruct_done();
 }

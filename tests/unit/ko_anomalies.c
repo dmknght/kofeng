@@ -36,7 +36,7 @@
 #include <kofmod/elf.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
 
 /* The three that carry the word "Truncated" in kofheur.c, plus the two the
  * emulator gate reads - all of which describe a file that was supposed to be

@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzer/parsers/containers/arj_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/arj_parse.h"
 
 static int failures;
 

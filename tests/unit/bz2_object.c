@@ -111,15 +111,15 @@ int main(void)
 		}
 	}
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		free(tar);
 		printf("bz2 object: no database at %s - nothing tested\n", db);
 		return 0;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		free(tar);
 		printf("bz2 object: could not make a scanner\n");
 		return 1;
@@ -132,7 +132,7 @@ int main(void)
 	/* Zeroed is the conservative setting everywhere; heur 1 is what makes a
 	 * scan descend into a container at all - see kof_scan_option. */
 	memset(&opt, 0, sizeof opt);
-	n = kof_scan_path(sc, bz, &opt, on_object, &s);
+	n = kscan_path(sc, bz, &opt, on_object, &s);
 
 	if (n <= 0)
 		fail("scan", "the .bz2 was not scanned at all");
@@ -143,8 +143,8 @@ int main(void)
 		fail("unpack", "a child was produced and it is not the file "
 		     "that was compressed");
 
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	free(tar);
 
 	if (failures) {

@@ -12,15 +12,15 @@
  *
  * Shape:
  *
- *     kof_engine  *eng = kof_engine_open("/var/lib/kofeng/db");
- *     kof_scanner *sc  = kof_scanner_new(eng);          // one per thread
+ *     kof_engine  *eng = keng_open("/var/lib/kofeng/db");
+ *     kof_scanner *sc  = kscan_new(eng);          // one per thread
  *
  *     struct kof_result r;
- *     if (kof_scan_path(sc, path, &r) > 0)
+ *     if (kscan_path(sc, path, &r) > 0)
  *             for (i = 0; i < r.n; i++) ... r.v[i].name ...
  *
- *     kof_scanner_free(sc);
- *     kof_engine_close(eng);
+ *     kscan_free(sc);
+ *     keng_close(eng);
  *
  * The engine is immutable once open, so one engine serves every thread. That is safe
  * rather than safe-by-convention: module code has no writable data and needs no
@@ -63,7 +63,7 @@
  * Higher is stronger. The values are ranks and nothing else: do not store them,
  * do not send them anywhere, and do not assume the gaps mean anything.
  */
-static inline int kof_level_rank(uint32_t level)
+static inline int kverdict_level_rank(uint32_t level)
 {
 	if (level == KOF_LEVEL_INFECT)
 		return 3;
@@ -89,7 +89,7 @@ static inline int kof_level_rank(uint32_t level)
 
 /* Length of the top-level file's name: everything before the first separator,
  * or the whole name when the object IS the file. */
-static inline size_t kof_obj_toplevel_len(const char *name)
+static inline size_t kobj_toplevel_len(const char *name)
 {
 	const char *p = name;
 
@@ -114,7 +114,7 @@ static inline size_t kof_obj_toplevel_len(const char *name)
  * the file's own basename. Both read as a different object from the one on the
  * row.
  */
-static inline const char *kof_obj_leaf(const char *name)
+static inline const char *kobj_leaf(const char *name)
 {
 	const char *p = name, *last = name;
 
@@ -140,7 +140,7 @@ static inline const char *kof_obj_leaf(const char *name)
  * NULL when the leaf carries no label, which is every object the engine did
  * not produce - a file, an archive member named after itself.
  */
-static inline const char *kof_obj_label(const char *leaf)
+static inline const char *kobj_label(const char *leaf)
 {
 	const char *p = leaf;
 
@@ -156,7 +156,7 @@ static inline const char *kof_obj_label(const char *leaf)
  * of one, so a tool that records where a rule came from names the parent. */
 #define KOF_OBJ_LABEL_NORM "norm"
 
-static inline uint32_t kof_obj_depth(const char *name)
+static inline uint32_t kobj_depth(const char *name)
 {
 	uint32_t n = 0;
 	const char *p = name;
@@ -254,7 +254,7 @@ enum kof_sim_kind {
 
 /* Non-zero when this finding is a heuristic's - the maltype word is "Heur",
  * which is the engine's and never a module's family. */
-static inline int kof_finding_is_heur(const struct kof_finding *f)
+static inline int kverdict_is_heur(const struct kof_finding *f)
 {
 	return f->maltype.n == 4 &&
 	       f->name[f->maltype.at + 0] == 'H' &&
@@ -392,6 +392,28 @@ struct kof_result {
 	uint32_t entry_kind;
 
 	/*
+	 * WHICH MODULE OPENED THIS OBJECT, by the name it gives ITSELF -
+	 * "MPRESS.PE", "VMProtect.PE" - or NULL when nothing did.
+	 *
+	 * IT NAMES WHAT THE OBJECT IS, NOT WHERE IT CAME FROM, and getting
+	 * that backwards is worse than saying nothing. 111.exe IS an MPRESS
+	 * file; what MPRESS hands back is a VMProtect one; what VMProtect
+	 * hands back carries an encrypted string table. Written as "which
+	 * module produced this", every row said the layer ABOVE it - the file
+	 * was labelled with nothing and its child was labelled MPRESS, so a
+	 * reader saw MPRESS on the wrong object and counted a layer that is
+	 * not there.
+	 *
+	 * The name is the one in front of every debug note the module emits,
+	 * which is the only place a module says what it is called. A module
+	 * that emits no note is named by its source file instead, which nobody
+	 * says out loud but beats showing nothing.
+	 *
+	 * Valid for the duration of the callback, like everything else here.
+	 */
+	const char *opened_by;
+
+	/*
 	 * WHAT THE HEURISTIC MADE OF THIS OBJECT, WHETHER OR NOT IT REPORTED.
 	 *
 	 * Here rather than left to be recomputed, because it was being
@@ -418,6 +440,25 @@ struct kof_result {
 	 * this is exactly what this field exists to retire.
 	 */
 	uint8_t  from_packer;
+	/*
+	 * THE EMULATOR RAN ON THIS OBJECT AND SOMETHING CAME OUT.
+	 *
+	 * Published rather than kept inside the scan, because it answers a
+	 * question every reader of a result asks and none of them can work out
+	 * for themselves: kofviewer offers "unpack with the emulator" as an
+	 * action, and without this it offers it again on an object that has
+	 * already been unpacked that way - spending a second run of up to 268
+	 * million instructions to produce the children that are already on the
+	 * tree beside it.
+	 *
+	 * SUCCESS ONLY, AND THAT IS THE WHOLE OF ITS MEANING. A run that
+	 * produced nothing leaves this zero, so the action stays available: a
+	 * failed run says the emulator did not reach anything THIS TIME, which
+	 * a larger budget or a later build may change, and marking it would
+	 * turn "we tried" into "there is nothing here". The two are different
+	 * claims and only one of them is true.
+	 */
+	uint8_t  emu_unpacked;
 	int32_t  heur_score;        /* centinats */
 	uint32_t heur_flags;        /* KOF_HEUR_FL(KOF_HEUR_F_*) */
 	uint64_t heur_anomalies;    /* the format's own anomaly word */
@@ -538,12 +579,12 @@ enum kof_broken {
 	KOF_BROKEN_COUNT
 };
 
-const char *kof_broken_name(uint32_t reason);
+const char *kverdict_broken_name(uint32_t reason);
 
 /*
  * HOW A DETECTION IS SPELLED, IN ONE PLACE.
  *
- *     kof_name_compose(buf, sizeof buf, "ELF-x64", "Botnet", "Mirai", "Gen")
+ *     kverdict_compose(buf, sizeof buf, "ELF-x64", "Botnet", "Mirai", "Gen")
  *     -> "ELF-x64/Botnet:Mirai#Gen"
  *
  * The engine composes this for every finding, and three other things reproduce
@@ -559,21 +600,21 @@ const char *kof_broken_name(uint32_t reason);
  *
  * `target` and `variant` may be NULL or empty and are left out when they are.
  */
-void kof_name_compose(char *out, size_t cap, const char *target,
+void kverdict_compose(char *out, size_t cap, const char *target,
 		      const char *maltype, const char *family,
 		      const char *variant);
 
 /*
  * The same composition, onto a finding, recording where each part landed.
  *
- * This is what the engine itself uses; kof_name_compose above stays for a
+ * This is what the engine itself uses; kverdict_compose above stays for a
  * caller that only wants the string - kofinspect builds one to compare against
  * a result it did not produce.
  *
  * `shape` is the heuristic's, appended after a '!'. NULL or empty for a
  * detector's finding, which has no such thing to admit.
  */
-void kof_finding_name(struct kof_finding *f, const char *target,
+void kverdict_name(struct kof_finding *f, const char *target,
 		      const char *maltype, const char *family,
 		      const char *variant, const char *shape);
 
@@ -584,7 +625,7 @@ void kof_finding_name(struct kof_finding *f, const char *target,
  * Composed in three places inside the scanner before this, with the same
  * two-line rule about KOF_ARCH_ANY written out each time.
  */
-void kof_name_target(char *out, size_t cap, uint8_t format, uint8_t arch);
+void kverdict_target(char *out, size_t cap, uint8_t format, uint8_t arch);
 
 
 /*
@@ -668,8 +709,8 @@ typedef struct kof_scanner kof_scanner;
  *
  * NULL if nothing could be loaded.
  */
-kof_engine *kof_engine_open(const char *db_path);
-void        kof_engine_close(kof_engine *);
+kof_engine *keng_open(const char *db_path);
+void        keng_close(kof_engine *);
 
 /*
  * What the database holds, counted as two numbers because it is two things.
@@ -684,12 +725,12 @@ void        kof_engine_close(kof_engine *);
  * rewritten without any signature being added, and is a fact about the engine's
  * internals rather than about the database.
  */
-uint32_t    kof_engine_records(const kof_engine *);
-uint32_t    kof_engine_unpackers(const kof_engine *);
+uint32_t    kdb_records(const kof_engine *);
+uint32_t    kdb_unpackers(const kof_engine *);
 /* How many heuristic rules the database holds. Its own count because a rule is
  * neither a record nor an unpacker, and a database whose rules were invisible in
  * the banner is one nobody checks the loading of. */
-uint32_t    kof_engine_heur_rules(const kof_engine *);
+uint32_t    kmatch_rules(const kof_engine *);
 
 /*
  * WHAT THE MULTI-PATTERN TABLES COST, AND HOW BAD THEIR WORST BUCKET IS.
@@ -712,7 +753,7 @@ uint32_t    kof_engine_heur_rules(const kof_engine *);
  * has no tables, which is not an error: it means every marker is searched one
  * at a time, as this engine did before 2.0.
  */
-int         kof_engine_multimatch(const kof_engine *, uint64_t *bytes,
+int         kmatch_tables(const kof_engine *, uint64_t *bytes,
 				  uint32_t *max_chain);
 
 /*
@@ -887,7 +928,7 @@ struct kof_version {
 	uint32_t build;      /* YYYYMMDDHH in UTC, as the database's is */
 };
 
-void        kof_engine_version(struct kof_version *);
+void        keng_version(struct kof_version *);
 
 struct kof_db_version {
 	uint16_t major;
@@ -896,13 +937,13 @@ struct kof_db_version {
 	uint32_t machine;    /* enum kof_pack_machine, as the packs were built */
 };
 
-int         kof_engine_db_version(const kof_engine *, struct kof_db_version *);
+int         kdb_version(const kof_engine *, struct kof_db_version *);
 
 /*
  * ONE NUMBER FOR THE DATABASE AS IT IS LOADED, for a cache to key on. Zero when
  * nothing is loaded.
  *
- * WHY THE BUILD STAMP IS NOT THAT NUMBER. kof_engine_db_version reports the
+ * WHY THE BUILD STAMP IS NOT THAT NUMBER. kdb_version reports the
  * OLDEST pack's build, to an hour, and a build stamp is a date rather than a
  * description of content:
  *
@@ -926,13 +967,13 @@ int         kof_engine_db_version(const kof_engine *, struct kof_db_version *);
  * kof_fidset_load, which reads a set written under another stamp as an empty
  * one.
  */
-uint64_t    kof_engine_db_stamp(const kof_engine *);
+uint64_t    kdb_stamp(const kof_engine *);
 
 /* One scanner per thread. The engine it is made from must outlive it. */
-kof_scanner *kof_scanner_new(const kof_engine *);
-void         kof_scanner_free(kof_scanner *);
+kof_scanner *kscan_new(const kof_engine *);
+void         kscan_free(kof_scanner *);
 
-const struct kof_stats *kof_scanner_stats(const kof_scanner *);
+const struct kof_stats *kscan_stats(const kof_scanner *);
 
 /* Error returns, distinct from a finding count of zero. */
 #define KOF_ERR_OPEN (-1)      /* could not be opened, or is not a regular file */
@@ -1257,7 +1298,7 @@ struct kof_scan_option {
 	 * A sweep of a machine meets the same files every time, and reading the
 	 * whole database against a file that has not changed since the last run
 	 * is the work a cache exists to avoid. The walk that meets those files
-	 * is in here - see kof_scan_path, and the note there on why a directory
+	 * is in here - see kscan_path, and the note there on why a directory
 	 * and an archive are the same shape - so the question has to be asked
 	 * from in here too.
 	 *
@@ -1362,15 +1403,15 @@ typedef void (*kof_on_debug)(uint32_t fact, const char *what, uint64_t value,
  * once and then compare integers:
  *
  *     static uint32_t f_version;
- *     if (!f_version) f_version = kof_fact_id("version");
+ *     if (!f_version) f_version = kverdict_fact_id("version");
  *     if (fact == f_version) ...
  *
- * Takes the field alone, not the full name - kof_fact_id("version"), not
- * kof_fact_id("UPX.ELF.version").
+ * Takes the field alone, not the full name - kverdict_fact_id("version"), not
+ * kverdict_fact_id("UPX.ELF.version").
  */
-uint32_t kof_fact_id(const char *field);
+uint32_t kverdict_fact_id(const char *field);
 
-void kof_scanner_on_debug(kof_scanner *, kof_on_debug, void *user);
+void kscan_on_debug(kof_scanner *, kof_on_debug, void *user);
 
 /*
  * Scan whatever `path` names.
@@ -1394,11 +1435,11 @@ void kof_scanner_on_debug(kof_scanner *, kof_on_debug, void *user);
  * The bytes are borrowed and must outlive the call. Returns the number of
  * objects scanned, or a KOF_ERR_*.
  */
-int kof_scan_bytes(kof_scanner *, const void *bytes, uint64_t n,
+int kscan_bytes(kof_scanner *, const void *bytes, uint64_t n,
 		   const char *name, const struct kof_scan_option *,
 		   kof_on_object, void *user);
 
-int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option *,
+int kscan_path(kof_scanner *, const char *path, const struct kof_scan_option *,
 		  kof_on_object cb, void *user);
 
 /*
@@ -1417,7 +1458,7 @@ int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option 
  * workers with the default may hold four times what one did.
  *
  * `path` a directory: the files under it are spread across the scanners. `path`
- * a file, or n_sc of 1: identical to kof_scan_path, threads and all skipped.
+ * a file, or n_sc of 1: identical to kscan_path, threads and all skipped.
  *
  * The callback is serialised and needs no locking of its own. The ORDER objects
  * arrive in is not preserved - they come back as workers finish - which is the
@@ -1427,6 +1468,12 @@ int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option 
  */
 /*
  * SHANNON ENTROPY OF A BUFFER, IN EIGHTHS OF A BIT - 0 to 64.
+ *
+ * How evenly the 256 byte values are spread. 0 means every byte is the same
+ * value, 64 means all 256 occur equally often. The prefix is `kentropy_` and
+ * not something shorter because a name nobody can expand is a name that gets
+ * misread, and this number is misread easily enough as it is - see the
+ * paragraph on what it is NOT, below.
  *
  * Public because three places need the same number and were about to have three
  * of them: the emulator's gate uses it to decide whether a segment looks
@@ -1445,10 +1492,12 @@ int kof_scan_path(kof_scanner *, const char *path, const struct kof_scan_option 
  *
  * Zero for an empty buffer, which is honest: no bytes carry no information.
  */
-uint32_t kof_entropy_eighths(const void *bytes, uint64_t n);
+uint32_t kentropy_eighths(const void *bytes, uint64_t n);
 
 /*
- * The same number from a histogram somebody already has.
+ * THE SAME NUMBER, FROM A COUNT SOMEBODY ALREADY HAS.
+ *
+ * `hist[v]` is how many times byte value `v` occurs; `total` is their sum.
  *
  * Two entry points because there are two ways the count arrives and neither is
  * free: a caller measuring one buffer wants the wrapper above, and a caller
@@ -1457,7 +1506,7 @@ uint32_t kof_entropy_eighths(const void *bytes, uint64_t n);
  * buckets and is passed rather than recomputed, since the sliding caller
  * already knows it.
  */
-uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total);
+uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total);
 
 /* ------------------------------------------------------------------- digest */
 
@@ -1471,7 +1520,7 @@ uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total);
  * same bytes by two paths has to notice. Four callers, one answer, and four
  * private copies would be four chances to print a digest nobody reproduces.
  *
- * It sits beside kof_entropy_eighths for the same reason that does: a
+ * It sits beside kentropy_eighths for the same reason that does: a
  * primitive over bytes that says nothing about malice, useful to a host
  * precisely because it is not a verdict. See core/kofhash.c for why SHA-256 is
  * the only one here and why there are no intrinsics behind it.
@@ -1488,19 +1537,19 @@ struct kof_sha256 {
  * always in one place: a file arrives in chunks, and a region of a mapped
  * image is several ranges of one object.
  *
- * A state that has been through kof_sha256_final is FINISHED, not resumable -
+ * A state that has been through khash_sha256_final is FINISHED, not resumable -
  * the padding has been folded in. Init again for another digest.
  */
-void kof_sha256_init(struct kof_sha256 *);
-void kof_sha256_update(struct kof_sha256 *, const void *bytes, uint64_t n);
-void kof_sha256_final(struct kof_sha256 *, uint8_t out[32]);
+void khash_sha256_init(struct kof_sha256 *);
+void khash_sha256_update(struct kof_sha256 *, const void *bytes, uint64_t n);
+void khash_sha256_final(struct kof_sha256 *, uint8_t out[32]);
 
 /* The 32 bytes as 64 lower-case hex characters plus a NUL. Lower case is not
  * a preference - see core/kofhash.c. */
-void kof_sha256_hex(const uint8_t digest[32], char out[65]);
+void khash_sha256_hex(const uint8_t digest[32], char out[65]);
 
 /* One buffer, straight to hex. Returns 0, or KOF_ERR_ARG. */
-int  kof_sha256_bytes(const void *bytes, uint64_t n, char out[65]);
+int  khash_sha256_bytes(const void *bytes, uint64_t n, char out[65]);
 
 /*
  * One file, straight to hex, with the size it hashed when `size` is not NULL.
@@ -1510,9 +1559,9 @@ int  kof_sha256_bytes(const void *bytes, uint64_t n, char out[65]);
  * bytes that were never the artefact. That is the case a tool hashing a file
  * some other process is still writing will actually hit.
  */
-int  kof_sha256_file(const char *path, char out[65], uint64_t *size);
+int  khash_sha256_file(const char *path, char out[65], uint64_t *size);
 
-int kof_scan_path_mt(kof_scanner **, unsigned n_scanners, const char *path,
+int kscan_path_mt(kof_scanner **, unsigned n_scanners, const char *path,
 		     const struct kof_scan_option *, kof_on_object cb, void *user);
 
 #endif /* KOFENG_H */

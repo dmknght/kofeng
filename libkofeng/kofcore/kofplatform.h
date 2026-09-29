@@ -651,7 +651,7 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
  * SOMETHING.
  *
  * WHY THE ENGINE NEEDS THIS AT ALL. "//" is the separator an object name is
- * composed with - "archive.zip//3:entry" - and kof_obj_toplevel_len finds the
+ * composed with - "archive.zip//3:entry" - and kobj_toplevel_len finds the
  * first one to tell a file from what came out of it. A filesystem path may
  * carry one too: a shell writing "$dir/" then "/name" makes one. The top level
  * file then reads as a CHILD of a directory that does not exist, and a caller
@@ -780,6 +780,58 @@ static inline const char *kof_path_base(const char *p)
  * the loop is here to remove.
  */
 #define KOF_WRITE_CHUNK 0x10000000u  /* 256MB - comfortably inside an int */
+
+/*
+ * READ AND WRITE AT AN OFFSET, LEAVING THE FILE POSITION WHERE IT WAS.
+ *
+ * The one caller is a sink that is being appended to and has to look back at
+ * what it already wrote - an unpacker whose header depends on something buried
+ * in the content it has just produced. Seeking and not putting the position
+ * back would append the next bytes over the old ones, so the position is saved
+ * and restored around the access.
+ *
+ * Return the byte count, unlike kof_write_all above: a caller reading a
+ * structure wants to know it got all of it, and a short read here is an
+ * ordinary answer rather than a failure.
+ */
+static inline uint64_t kof_pos_io(int fd, uint64_t off, void *buf, uint64_t n,
+				  int writing)
+{
+	unsigned char *p = (unsigned char *)buf;
+	uint64_t done = 0;
+#ifdef _WIN32
+	__int64 keep = _lseeki64(fd, 0, SEEK_CUR);
+
+	if (keep < 0 || _lseeki64(fd, (__int64)off, SEEK_SET) < 0)
+		return 0;
+#else
+	off_t keep = lseek(fd, 0, SEEK_CUR);
+
+	if (keep < 0 || lseek(fd, (off_t)off, SEEK_SET) < 0)
+		return 0;
+#endif
+	while (done < n) {
+		unsigned int want = n - done > KOF_WRITE_CHUNK
+				  ? KOF_WRITE_CHUNK : (unsigned int)(n - done);
+#ifdef _WIN32
+		int k = writing ? _write(fd, p + done, want)
+				: _read(fd, p + done, want);
+#else
+		ssize_t k = writing ? write(fd, p + done, want)
+				    : read(fd, p + done, want);
+#endif
+
+		if (k <= 0)
+			break;
+		done += (uint64_t)k;
+	}
+#ifdef _WIN32
+	_lseeki64(fd, keep, SEEK_SET);
+#else
+	lseek(fd, keep, SEEK_SET);
+#endif
+	return done;
+}
 
 static inline int kof_write_all(int fd, const void *buf, uint64_t n)
 {

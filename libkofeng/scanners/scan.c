@@ -35,16 +35,16 @@
 
 #include "scan.h"
 #include "objtree.h"
-#include "../detector/matchers/kofmultimatch.h"
-#include "../detector/heur/kofheur.h"
+#include "../detectors/matchers/kofmultimatch.h"
+#include "../detectors/heur/kofheur.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
  * engine-side model next door is a different file with a similar name - see the
  * note at the top of kofmod/heur.h. */
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofmod/kofsym.h"
-#include "../analyzer/parsers/kofformat.h"
-#include "../analyzer/disasm/xref.h"
-#include "../detector/overlord/koflib.h"
+#include "../analyzers/parsers/kofformat.h"
+#include "../analyzers/disasm/xref.h"
+#include "../detectors/overlord/koflib.h"
 #include "../kofcore/kofmod/elf.h"
 
 #include <stdio.h>
@@ -57,7 +57,7 @@
 #include <sys/stat.h>
 
 #include "../kofcore/kofplatform.h"
-#include "../analyzer/normalize/executables.h"
+#include "../analyzers/normalize/executables.h"
 
 struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
 {
@@ -142,6 +142,11 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->kids);
 	free(sc->kid_packer);
 	free(sc->kid_family);
+	free(sc->kid_derived_by);
+	free(sc->kid_want);
+	free(sc->kid_want_level);
+	free(sc->kid_n_xw);
+	free(sc->kid_xw);
 	/*
 	 * KOF_TARGET_COUNT AND NOT KOF_FMT_COUNT.
 	 *
@@ -164,6 +169,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	kof_xref_free(sc->use);
 	free(sc->sym);
 	free(sc->pend_syms);
+	free(sc->pend_sec);
 	free(sc->sym_ext[0]);
 	free(sc->sym_ext[1]);
 	free(sc);
@@ -770,14 +776,14 @@ static void need_plague(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
  * format alone. A "-any" suffix would be a field describing nothing.
  */
 /*
- * The one spelling. See kof_name_compose in kofeng.h for why it is a function.
+ * The one spelling. See kverdict_compose in kofeng.h for why it is a function.
  *
  * "#" between the family and the variant, not "-": a family name may contain a
  * hyphen and several in bases/ do, so the old separator could not be told from
  * the name around it by eye or by anything reading the string back. "#" appears
  * in no family and in no variant.
  */
-void kof_name_compose(char *out, size_t cap, const char *target,
+void kverdict_compose(char *out, size_t cap, const char *target,
 		      const char *maltype, const char *family,
 		      const char *variant)
 {
@@ -825,7 +831,7 @@ static void sep_put(struct kof_finding *f, size_t *at, char c)
 		f->name[(*at)++] = c;
 }
 
-void kof_finding_name(struct kof_finding *f, const char *target,
+void kverdict_name(struct kof_finding *f, const char *target,
 		      const char *maltype, const char *family,
 		      const char *variant, const char *shape)
 {
@@ -871,7 +877,7 @@ void kof_finding_name(struct kof_finding *f, const char *target,
  * An object with no architecture - a script, or one nothing identified - gets
  * the format alone: a "-any" suffix would be a field describing nothing.
  */
-void kof_name_target(char *out, size_t cap, uint8_t format, uint8_t arch)
+void kverdict_target(char *out, size_t cap, uint8_t format, uint8_t arch)
 {
 	const char *fmt = kof_format_name(format);
 
@@ -900,7 +906,7 @@ static void finding_str(const struct kof_scanner *sc,
 			      ? "Heur" : kof_maltype_name(m->maltype);
 	char fmtarch[32];
 
-	kof_name_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
+	kverdict_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
 	/*
 	 * A SIMILARITY VERDICT CARRIES ITS SCORE AND SAYS WHAT IT IS.
 	 *
@@ -910,7 +916,7 @@ static void finding_str(const struct kof_scanner *sc,
 	 * demanding fifty and a sample scoring eighty-three are different
 	 * facts, and the variant a hand-written rule could put there cannot
 	 * know either. The mark names the method, exactly as a heuristic's
-	 * does - see kof_finding_name.
+	 * does - see kverdict_name.
 	 *
 	 * ASKED IS NOT THE SAME AS ANSWERED, and reading it as though it were
 	 * was a bug with a name on it. sc->plague_asked only says
@@ -967,7 +973,7 @@ static void finding_str(const struct kof_scanner *sc,
 					       sc->n_plague_blk);
 		snprintf(sv, sizeof sv, "%08x", f->sim_of);
 		snprintf(shape, sizeof shape, "Plague?%u", pct);
-		kof_finding_name(f, fmtarch, maltype,
+		kverdict_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
 				 sv, shape);
 		return;
@@ -993,12 +999,12 @@ static void finding_str(const struct kof_scanner *sc,
 							  : sc->ovl_pct);
 		f->sim_kind = (uint8_t)KOF_SIM_OVERLORD;
 		snprintf(shape, sizeof shape, "Ovl?%u", sc->ovl_pct);
-		kof_finding_name(f, fmtarch, maltype,
+		kverdict_name(f, fmtarch, maltype,
 				 (family && family[0]) ? family : "unknown",
 				 variant ? variant : "unknown", shape);
 		return;
 	}
-	kof_finding_name(f, fmtarch, maltype,
+	kverdict_name(f, fmtarch, maltype,
 			 (family && family[0]) ? family : "unknown",
 			 variant ? variant : "unknown", NULL);
 }
@@ -1257,7 +1263,47 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
  * is looking at something no measured corpus resembles - and the honest thing
  * then is to stop interpreting, not to keep going.
  */
-#define HEUR_EMU_MAX 512u
+#define HEUR_EMU_MAX KOF_SCAN_EMU_MAX
+
+/*
+ * A PE whose code was never readable, asked once and only when nothing opened
+ * the object. See the call site for why it is not a module.
+ *
+ * The thresholds: 64 KB, because below that a dense section is a resource or a
+ * certificate rather than a program; 7.9 bits, which is where compressed and
+ * encrypted sit and where compiled code does not go - emu_unpack.c measures
+ * the same boundary at 7.5 over 2678 clean PEs, and this is stricter again
+ * because it is answering a harder question with no second signal beside it.
+ */
+#define DENSE_MIN_SEC   (64u << 10)
+#define DENSE_EIGHTHS_R 63u             /* 7.875 bits per byte */
+
+static void dense_code_unread(struct kof_scanner *sc,
+			      const struct kof_obj_ctx *ctx)
+{
+	const struct kof_pe_info *pe = kof_pe(ctx);
+	uint32_t i;
+
+	if (!pe || !pe->valid || pe->entry_sec >= pe->sec_count)
+		return;
+	for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
+		const struct kof_pe_sec *s = &pe->sec[i];
+
+		if (i == pe->entry_sec || !(s->perm & KOF_PE_PERM_X))
+			continue;
+		if (s->file_size < DENSE_MIN_SEC || !s->file_off)
+			continue;
+		if (!ctx->content->entropy_at ||
+		    ctx->content->entropy_at(ctx, s->file_off, s->file_size) <
+		    DENSE_EIGHTHS_R)
+			continue;
+		/* The first reason recorded is the one kept, which is why
+		 * this is guarded rather than assigned. */
+		if (!sc->broken)
+			sc->broken = KOF_BROKEN_UNSUPPORTED;
+		return;
+	}
+}
 
 /*
  * The preconditions an unpacker gets, the same a detector does minus the region
@@ -1265,7 +1311,13 @@ static void identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ct
  * both apply it, and a check that lived in one loop and not the other would let
  * the family pass run a module the general pass would have ruled out.
  */
-static int unp_eligible(const struct kof_module *m,
+static const struct kof_module *kof_scan_derived_by(const struct kof_scanner *sc)
+{
+	return sc ? sc->cur_derived_by : NULL;
+}
+
+static int unp_eligible(const struct kof_scanner *sc,
+			const struct kof_module *m,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_scan_option *opt)
 {
@@ -1275,6 +1327,24 @@ static int unp_eligible(const struct kof_module *m,
 	 * nothing to interpret in a zip.
 	 */
 	if (opt->emu_use == KOF_EMU_ONLY && m->unp_kind == KOF_UNP_PACKER)
+		return 0;
+	/*
+	 * AND NEVER ITS OWN OUTPUT.
+	 *
+	 * A derived object is the parent with ranges changed - see `derive` in
+	 * kofsig.h - so offering it back to the module that changed them is
+	 * offering a module its own work to do again. Three modules wrote
+	 * their own guard against exactly that and two of the three were wrong
+	 * when they were written: `strxor_tab_00.c` first tried "skip a
+	 * payload that already reads as text", which threw away six records
+	 * whose ciphertext is printable by chance.
+	 *
+	 * ONLY A DERIVED OBJECT. A NEW one - a container member, a rebuilt
+	 * image - is a different file and is offered to everyone, so a zip
+	 * inside a zip is opened by the zip module again, and MPRESS under
+	 * MPRESS is unpacked twice.
+	 */
+	if (kof_scan_derived_by(sc) == m)
 		return 0;
 	/*
 	 * Same preconditions as a detector's, from the same place.
@@ -1347,9 +1417,21 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * first container to reach the ceiling stopped every container after it.
 	 */
 	sc->broken = 0;
+	/* Per object, like sc->broken: which module opened the LAST one says
+	 * nothing about this one. See kof_result.opened_by. */
+	sc->opened_by[0] = 0;
 	/* Per object, like sc->broken: whether a packer opened the LAST object
 	 * says nothing about this one. */
 	sc->packed_here = 0;
+	sc->emu_produced = 0;
+	/* One interpreter run per object - see emu_ran. */
+	sc->emu_ran = 0;
+	/* And whether a module says this object is only a wrapper. */
+	sc->superseded = 0;
+	/* The OEP ranges are NOT cleared here. They belong to the object about
+	 * to be scanned and are set from its producer's declaration in
+	 * scan_tree, which runs before this - clearing them here is what made
+	 * every module's kunp_emu_oep_range a no-op. */
 	/*
 	 * Cleared with it, and per OBJECT rather than per file.
 	 *
@@ -1374,6 +1456,49 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * the next object's rules had asked for anything.
 	 */
 	sc->raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
+
+	/*
+	 * AND WHETHER ANYBODY SPOKE FOR THE INTERPRETER ON THIS OBJECT.
+	 *
+	 * Resolved here because every term is the host's: a rule's ask rides in
+	 * `want` from this object's EXAMINE pass, a producer's ask rides in
+	 * cur_want from the module that made the object, and both are bounded
+	 * by options a module cannot see. c_emu_run or-s the result into the
+	 * vouch the asking module passes - see emu_ask in scan.h.
+	 *
+	 * The heur gate applies to the PRODUCER's ask only. A rule's ask came
+	 * from a rule that ran, so the level that let it run has already been
+	 * paid; the producer's is a declaration carried with the child and is
+	 * honoured at the level the producer named.
+	 */
+	/*
+	 * A RULE'S ASK DOES NOT LOOK AT emu_use, AND THAT IS NOT AN OVERSIGHT.
+	 *
+	 * The option word cannot tell an explicit "--emu never" apart from the
+	 * NEVER a default or `--heur 1` leaves behind, and turning the second
+	 * of those into a run is the whole point of the ask. kofexaminer sets
+	 * emu_use nowhere at all, so reading it here is reading a zero nobody
+	 * wrote. `emu_forbidden` is the refusal somebody DID write, and it is
+	 * the one a rule may not talk past.
+	 *
+	 * A PRODUCER's ask is bounded more tightly - it is a declaration
+	 * carried with a child rather than a rule that fired on the object in
+	 * front of us - so it yields to emu_use and to the heuristic level the
+	 * producer named.
+	 */
+	sc->emu_default_ok = opt->emu_use != KOF_EMU_NEVER;
+	sc->emu_ask = (want & KOF_ENG_USE_EMU) != 0 ||
+		      (sc->emu_default_ok && (sc->cur_want & KOF_ENG_USE_EMU) &&
+		       !sc->emu_produced && !opt->heur_off &&
+		       opt->heur_level >= sc->cur_want_level);
+	/*
+	 * THE TWO REFUSALS NO VOUCH TALKS PAST. Not budgets - those are in
+	 * c_emu_run with the other ceilings - but "run nothing, I mean it" and
+	 * "this is already a payload of a payload".
+	 */
+	sc->emu_banned = opt->emu_forbidden ||
+			 pdepth > EMU_MAX_PACKER_DEPTH;
+	sc->emu_only = opt->emu_use == KOF_EMU_ONLY;
 
 	/*
 	 * DEEP SCAN OFF MEANS DO NOT OPEN IT, and this is the only place that
@@ -1455,7 +1580,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
 			const struct kof_module *m = &sc->eng->unp[i];
 
-			if (!unp_eligible(m, ctx, opt) ||
+			if (!unp_eligible(sc, m, ctx, opt) ||
 			    !unp_is_family(sc, m, predict))
 				continue;
 			applies = 1;
@@ -1475,6 +1600,11 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 					sc->n_carved += sc->n_kids - k0;
 			}
 			sc->cur_mod = NULL;
+			/* The machine, if this module asked for one. Its
+			 * regions point into the machine's own memory and the
+			 * module has returned, so nothing may read them
+			 * again - see kof_scanner.emu_live. */
+			kof_scan_emu_release(sc);
 		}
 		/*
 		 * OPENED, AND A CARVE DID NOT OPEN ANYTHING - the same rule
@@ -1502,7 +1632,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	for (i = 0; !family_opened && i < sc->eng->n_unp; i++) {
 		const struct kof_module *m = &sc->eng->unp[i];
 
-		if (!unp_eligible(m, ctx, opt))
+		if (!unp_eligible(sc, m, ctx, opt))
 			continue;
 		/* Skip what the family pass already tried. Guarded on `predict`
 		 * so the resolve-and-compare is not paid on the overwhelming
@@ -1511,7 +1641,23 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			continue;
 
 		applies = 1;
-		if (sc->broken)
+		/*
+		 * NARROWED TO THE LIMIT, for the reason spelled out where the
+		 * interpreter's gate was narrowed the same way: `broken` was
+		 * written here as any reason at all, and that turns one
+		 * module's honest note into a refusal to let the rest look.
+		 *
+		 * Measured: PECompact reports KOF_BROKEN_UNSUPPORTED on
+		 * 007 Spy.exe - true, it recognised the packer and cannot
+		 * unpack that build - and that one line ended the loop before
+		 * emu_generic_00, the module whose whole job is the object
+		 * nothing static could open. The file went from a recovered
+		 * child to "Unsupported by this build".
+		 *
+		 * The budget is the one thing that genuinely stops the tree,
+		 * and it is the only thing this now stops for.
+		 */
+		if (sc->broken == KOF_BROKEN_LIMIT)
 			break;          /* nothing left to spend on this tree */
 
 		if (m->n_str)
@@ -1527,6 +1673,8 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				sc->n_carved += sc->n_kids - k0;
 		}
 		sc->cur_mod = NULL;
+		/* See the same call in the family pass above. */
+		kof_scan_emu_release(sc);
 	}
 	/*
 	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM -
@@ -1624,19 +1772,97 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * sample --heur 1 caught. The shape fires on 0 of 5252 clean objects, so
 	 * it is a safe thing to force emulation on.
 	 */
-	if (!sc->broken && (want & KOF_ENG_USE_EMU) &&
+	/*
+	 * `broken` NARROWED TO THE LIMIT, which is what the note above it
+	 * always meant: "once the tree's budget is gone there is nothing to
+	 * spend". It was written as any reason at all, and that turned a
+	 * module's honest note into a refusal to look.
+	 *
+	 * Measured: the SecureEngine module reports KOF_UNP_ENCRYPTED on the
+	 * object - the loader was recovered, the program beside it was not -
+	 * and that one line stopped the interpreter from running on exactly
+	 * the files it is the only way into. Two samples lost a child each,
+	 * 4 objects to 3 and 5 to 4, for saying something true.
+	 *
+	 * Damaged, unsupported and encrypted are the opposite of a reason to
+	 * stop: they are the object saying no static reader finished with it,
+	 * which is when an interpreter is worth starting. The gate says as
+	 * much itself - KOF_EMU_UNP_WHY_BROKEN exists because "a file whose
+	 * header cannot be loaded has already defeated every module that needs
+	 * structure".
+	 */
+	if (sc->broken != KOF_BROKEN_LIMIT && (want & KOF_ENG_USE_EMU) &&
 	    !opt->emu_forbidden && !sc->packed_here &&
 	    pdepth <= EMU_MAX_PACKER_DEPTH &&
 	    sc->st.heur_emu < HEUR_EMU_MAX) {
 		sc->st.heur_emu++;
-		if (kof_scan_emu_unpack(ctx, 1))
-			applies = 1;
-	} else if (!sc->broken && opt->emu_use != KOF_EMU_NEVER &&
+		/*
+		 * NOTHING HAPPENS HERE ANY MORE, and that is the point.
+		 *
+		 * The interpreter used to be started from this branch and to
+		 * create children as it walked. It is an unpack module's
+		 * business now: a module asks for a run through
+		 * kunp_emu_run, reads what it gathered, and declares what
+		 * it makes of it - see `emu_run` in kofsig.h and
+		 * bases/unp/emu_generic_00.c for the object nobody claimed.
+		 *
+		 * What is left of the gate is the module loop above, which has
+		 * already run; the ceilings moved into c_emu_run, where the
+		 * host still owns them.
+		 */
+	} else if (sc->broken != KOF_BROKEN_LIMIT &&
+		   opt->emu_use != KOF_EMU_NEVER &&
+		   pdepth <= EMU_MAX_PACKER_DEPTH && !sc->packed_here &&
+		   (sc->cur_want & KOF_ENG_USE_EMU) && !sc->emu_produced &&
+		   !opt->heur_off && opt->heur_level >= sc->cur_want_level &&
+		   sc->st.heur_emu < HEUR_EMU_MAX) {
+		/*
+		 * WHAT ITS PRODUCER ASKED FOR, AND NOT WHAT IT LOOKS LIKE.
+		 *
+		 * The entropy gate below asks whether an object is PACKED, and
+		 * it is right to say no here: a packer has just opened this
+		 * one, so its code is code and its average is ordinary. What
+		 * the average hides is a payload the program decrypts ITSELF -
+		 * measured on an MPRESS child, three encrypted blocks of 640,
+		 * 576 and 64 KB inside 8 MB of real x86-64 code, where the
+		 * executable section as a whole reads 4.6 bits per byte and
+		 * the gate therefore refuses it.
+		 *
+		 * THE SIGNAL IS A DECLARATION AND IT IS CERTAIN. The module
+		 * said it with kunp_emu_want before it produced a byte, the
+		 * scanner carried it with the child, and nothing done to the
+		 * object afterwards can erase it. That matters because every
+		 * inference available here is weak: this was first written as
+		 * a heuristic rule that fired on "a PE importing fewer than
+		 * four functions", and both halves of that were a guess - the
+		 * four was never measured against clean Windows binaries, and
+		 * giving the child a header at all is what destroyed the
+		 * stronger evidence, which was that it had none. It was then
+		 * written as `from_packer`, which is certain and too broad:
+		 * every payload of every packer would be run, including the
+		 * ones a static unpacker had just opened completely.
+		 *
+		 * `level` is the module's too. A module that knows its output
+		 * is worth an interpreter can also say how much scrutiny that
+		 * is worth asking for, and the engine drops the ask below it
+		 * rather than the module testing a level it cannot see.
+		 *
+		 * BOUNDED THE SAME WAY A RULE'S ASK IS. One packer layer
+		 * (EMU_MAX_PACKER_DEPTH) and the same whole-scan ceiling, so a
+		 * directory of packed samples cannot turn a scan into minutes.
+		 * `!packed_here` still holds: a child that a second static
+		 * unpacker opened has been opened, and running it as well
+		 * would be the payload peeled and then run anyway.
+		 */
+		/* See the note in the branch above: an unpack module drives
+		 * the interpreter now, and the ceilings moved to c_emu_run. */
+	} else if (sc->broken != KOF_BROKEN_LIMIT &&
+		   opt->emu_use != KOF_EMU_NEVER &&
 		   pdepth <= EMU_MAX_PACKER_DEPTH &&
 		   (opt->emu_use == KOF_EMU_ONLY || !sc->packed_here)) {
 		/* The entropy gate, for objects no rule spoke for. */
-		if (kof_scan_emu_unpack(ctx, opt->emu_use == KOF_EMU_ONLY))
-			applies = 1;
+		/* See the note in the branch above: an unpack module drives
+		 * the interpreter now. */
 	}
 	/*
 	 * THE CARRIED FILES THE STRUCTURE NAMED, AND THIS IS LAST ON PURPOSE.
@@ -1679,6 +1905,31 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		applies = 1;
 
 	kof_mod_unpack_mode(ctx, 0);
+
+	/*
+	 * NOTHING OPENED IT AND ITS CODE IS A CIPHERTEXT, WHICH IS NOT CLEAN.
+	 *
+	 * The last thing asked about a PE, after every unpacker and the
+	 * interpreter have had their turn, and only when none of them produced
+	 * anything. A large EXECUTABLE section at 7.9 bits per byte that the
+	 * entry point is NOT in is a program whose code this scan never saw:
+	 * the bytes that ran are somewhere else, and the ones that are supposed
+	 * to be the program are indistinguishable from random.
+	 *
+	 * AFTER, AND THAT IS THE WHOLE REASON IT IS HERE AND NOT IN A MODULE.
+	 * Of 26 files in one collection with this shape, several are MPRESS and
+	 * UPX - which this engine opens completely. A module would have said
+	 * "unsupported" about them before the module that unpacks them ran, and
+	 * the first reason recorded is the one kept. Asked here, the question
+	 * is the right one: did anything at all get inside?
+	 *
+	 * Measured: a Safengine sample whose .text is 794,624 bytes at 8.00
+	 * bits, entry point in .sedata, reported "clean 1 file(s)" - a true
+	 * statement about bytes nobody could read and a false impression about
+	 * the program.
+	 */
+	if (!sc->broken && !sc->n_kids && ctx->format == KOF_FMT_PE)
+		dense_code_unread(sc, ctx);
 
 	/*
 	 * "Not fully examined" means both halves: something wanted to open this
@@ -1832,6 +2083,10 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	out->heur_flags     = f.flags;
 	out->heur_anomalies = f.anomalies;
 	out->heur_depth     = pdepth > 255u ? 255u : (uint8_t)pdepth;
+	/* And whether the emulator produced anything from this object, which is
+	 * the thing a caller offering "run it" has to know before offering it
+	 * again. See kof_result.emu_unpacked. */
+	out->emu_unpacked   = sc->emu_produced;
 
 	if (score < m->bar_centinats || out->n >= KOF_MAX_FINDINGS)
 		return;
@@ -1877,9 +2132,9 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		 * Heur is not a family and never becomes one. It is the engine
 		 * saying it recognised a shape, not a thing.
 		 */
-		kof_name_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
+		kverdict_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
 		snprintf(sv, sizeof sv, "s%d", score);
-		kof_finding_name(fi, fmtarch, "Heur", guess, sv, NULL);
+		kverdict_name(fi, fmtarch, "Heur", guess, sv, NULL);
 	}
 }
 
@@ -2043,9 +2298,9 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				const char *shape = kof_db_family(sc->eng, m);
 				char fmtarch[32];
 
-				kof_name_target(fmtarch, sizeof fmtarch,
+				kverdict_target(fmtarch, sizeof fmtarch,
 						ctx->format, ctx->arch);
-				kof_finding_name(f, fmtarch, "Heur", pf,
+				kverdict_name(f, fmtarch, "Heur", pf,
 						 variant ? variant : "unknown",
 						 shape);
 			} else {
@@ -2341,9 +2596,39 @@ static uint32_t norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	uint32_t n_in = 0, total, i, kept = 0;
 	uint32_t start_at, start_new = KOF_SYM_NO_START;
 
-	if (!ctx->content || !ctx->content->syms || !sc->cur_lib_ok)
+	if (!ctx->content || !ctx->content->syms)
 		return 0;
-	if (ctx->format != KOF_FMT_ELF || !ctx->file_header)
+	if (!ctx->file_header)
+		return 0;
+	/*
+	 * A PE'S SYMBOLS ARE CARRIED WHOLE, BECAUSE THERE IS NOTHING TO DROP.
+	 *
+	 * Everything below this is about ONE thing: taking the toolchain's
+	 * symbols out of a statically linked ELF, so a similarity question
+	 * asked of a view is not answered by uclibc. A PE has no such problem -
+	 * its symbol block is the import and export tables, which are the
+	 * program's own by construction and are the whole reason to have them.
+	 *
+	 * Written as "ELF only", every PE view came back with NO SYMBOLS AT
+	 * ALL: measured on 1003b.exe, whose child carries 159 records and
+	 * whose `:norm` carried none, and on 111.exe with 17 against none. The
+	 * view is supposed to be the object said plainly, and it was the
+	 * object said without its imports - which is most of what a reader
+	 * opens it for.
+	 *
+	 * It is a copy and not a rebuild, for the reason in the note above:
+	 * the view's own headers are stale wherever something collapsed ahead
+	 * of them, so the block cannot be read out of the view and has to
+	 * travel from the parent.
+	 */
+	if (ctx->format == KOF_FMT_PE) {
+		in = ctx->content->syms(ctx, &n_in);
+		if (!in || !n_in || n_in > cap)
+			return 0;
+		memcpy(out, in, n_in);
+		return n_in;
+	}
+	if (ctx->format != KOF_FMT_ELF || !sc->cur_lib_ok)
 		return 0;
 	e = kof_elf(ctx);
 	in = ctx->content->syms(ctx, &n_in);
@@ -2472,6 +2757,57 @@ static void norm_keep_exec(uint8_t *keep, uint64_t n,
 						     : c->file_off + c->file_size;
 		bits_set(keep, c->file_off, end);
 	}
+}
+
+/*
+ * THE PE HALF OF THE SAME ARGUMENT, AND IT TURNS ON ONE BIT.
+ *
+ * KOF_SCAN_PE_CODE is every section with IMAGE_SCN_MEM_EXECUTE, and keeping it
+ * whole is about INSTRUCTIONS - "opcodes are what a hex rule is written
+ * against, byte for byte". That holds for a section that is executable and NOT
+ * writable, which is what a compiler emits and what a rule is written against.
+ *
+ * It does not hold for a section that is both. A WRITABLE executable section is
+ * a section the program rewrites at run time, which is the shape of a packed
+ * image and of every image an interpreter run hands back - and there the
+ * "instruction stream" is the whole program, strings included. Measured on the
+ * child PECompact yields from 007 Spy.exe: 8,626,176 bytes in one RWX section,
+ * 7,434 runs of UTF-16LE text inside it, and not one of them narrowed in any
+ * view - so an ASCII rule could not match a VB6 program whose every string is
+ * a BSTR.
+ *
+ * WHY THIS COSTS NOTHING THAT MATTERS. kof_exe_unwide is 1:1 - it packs a wide
+ * run to the left and zero-fills the rest, and moves no byte outside the run -
+ * so nothing after a rewrite is displaced. And this is a VIEW: the object
+ * itself is scanned whole and first, so a hex rule written on those bytes still
+ * matches where it always did. A view can only ADD a match.
+ *
+ * The ELF side of this is norm_keep_exec above, which asks the same question a
+ * different way because ELF's CODE is a segment and carries .rodata with it.
+ */
+static void norm_keep_exec_pe(uint8_t *keep, uint64_t n,
+			      const struct kof_pe_info *e,
+			      const struct kof_src_region *r, uint32_t nr)
+{
+	uint32_t i;
+
+	if (!e || !e->valid || !e->sec_count)
+		return;
+	for (i = 0; i < e->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
+		const struct kof_pe_sec *c = &e->sec[i];
+		uint64_t end;
+
+		if ((c->perm & (KOF_PE_PERM_W | KOF_PE_PERM_X)) !=
+		    (KOF_PE_PERM_W | KOF_PE_PERM_X))
+			continue;
+		if (!c->claim_len || c->claim_off >= n)
+			continue;
+		end = c->claim_len > n - c->claim_off
+			      ? n : c->claim_off + c->claim_len;
+		bits_clr(keep, c->claim_off, end);
+	}
+	(void)r;
+	(void)nr;
 }
 
 static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
@@ -2707,6 +3043,10 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * norm_keep_exec. */
 		if (ctx->format == KOF_FMT_ELF && ctx->file_header)
 			norm_keep_exec(keep, buf.n, kof_elf(ctx), rgn, nr);
+		/* And the PE question, which is about the write bit - see
+		 * norm_keep_exec_pe. */
+		if (ctx->format == KOF_FMT_PE && ctx->file_header)
+			norm_keep_exec_pe(keep, buf.n, kof_pe(ctx), rgn, nr);
 	}
 	if (lib->n) {
 		uint32_t a;
@@ -3052,7 +3392,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * raw, rather than an unnamed ELF-looking blob.
 	 */
 	/* The word itself is in kofeng.h, because the tools read it back out
-	 * of the object's name - see kof_obj_label. */
+	 * of the object's name - see kobj_label. */
 	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
 						sizeof sc->pend_label, "%s",
 						KOF_OBJ_LABEL_NORM);
@@ -3332,6 +3672,24 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			uint32_t pdepth, int from_packer,
 			const char *inherit_predict, uint8_t as_fmt)
 {
+	if (getenv("KOF_OBJ_DUMP")) {
+		static unsigned q; char nm[256]; FILE *f;
+		snprintf(nm,sizeof nm,"%s/o%03u.bin",getenv("KOF_OBJ_DUMP"),q++);
+		f=fopen(nm,"wb"); if(f){fwrite(buf.p,1,(size_t)buf.n,f);fclose(f);}
+	}
+
+	if (getenv("KOF_OBJ_DUMP")) {
+		static unsigned q; char nm[256]; FILE *f;
+		snprintf(nm,sizeof nm,"%s/o%03u.bin",getenv("KOF_OBJ_DUMP"),q++);
+		f=fopen(nm,"wb"); if(f){fwrite(buf.p,1,(size_t)buf.n,f);fclose(f);}
+	}
+
+	if (getenv("KOF_OBJ_DUMP")) {
+		static unsigned q; char nm[256]; FILE *f;
+		snprintf(nm,sizeof nm,"%s/o%03u.bin",getenv("KOF_OBJ_DUMP"),q++);
+		f=fopen(nm,"wb"); if(f){fwrite(buf.p,1,(size_t)buf.n,f);fclose(f);}
+	}
+
 	struct kof_obj_ctx ctx;
 	uint32_t present, want, det_n;
 	const char *predict = NULL;
@@ -3972,6 +4330,13 @@ struct layer {
 	 */
 	uint32_t           pdepth;
 	int                from_packer;  /* its producer was a packer */
+	/* And what that producer DECLARED has to be done to it, with the
+	 * lowest --heur level the ask is honoured at. See child_want in
+	 * kofsig.h for why a declaration beats anything inferred later. */
+	uint32_t           want, want_level;
+	/* And where its producer said the program will be - see pend_xw. */
+	uint32_t           n_xw;
+	uint64_t           xw[KOF_EMU_EXEC_WATCH][2];
 	/*
 	 * The family its producer decodes, inherited as a prediction, or NULL.
 	 *
@@ -3981,6 +4346,15 @@ struct layer {
 	 * heuristic fires - see scan_object.
 	 */
 	const char        *inherit_predict;
+	/*
+	 * The module that DERIVED this object, or NULL.
+	 *
+	 * A derived object is the parent with ranges changed, so the module
+	 * that changed them must not be offered it again - see `derive` in
+	 * kofsig.h. A NEW object carries NULL and is offered to everyone,
+	 * which is what keeps a zip inside a zip working.
+	 */
+	const struct kof_module *derived_by;
 };
 
 static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
@@ -3994,7 +4368,13 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	char *name = kof_strdup_n(path, strlen(path));
 	uint32_t depth = 0, pdepth = 0;
 	int from_packer = 0;            /* the root came off the disk */
+	/* What the producer of the object in hand declared it needs. Zero for a
+	 * root, which nothing produced. */
+	uint32_t want_decl = 0, want_decl_level = 0;
+	uint32_t xw_decl_n = 0;                 /* a root has no producer */
+	uint64_t xw_decl[KOF_EMU_EXEC_WATCH][2];
 	const char *inherit = NULL;     /* the root inherits no prediction */
+	const struct kof_module *derived_by = NULL;  /* nothing derived a root */
 
 	/* Every other allocation failure in this function sets out_of_memory so
 	 * the walk is reported incomplete rather than clean - this one didn't,
@@ -4054,9 +4434,18 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 						&w->sc->cur_subtype,
 						&w->sc->cur_subfam);
 		kof_scan_kids_reset(w->sc);
+		w->sc->cur_want = want_decl;
+		w->sc->cur_want_level = want_decl_level;
+		w->sc->n_xw = xw_decl_n;
+		for (uint32_t q = 0; q < xw_decl_n; q++) {
+			w->sc->xw[q].rva = xw_decl[q][0];
+			w->sc->xw[q].len = xw_decl[q][1];
+		}
+		w->sc->cur_derived_by = derived_by;
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
 			    from_packer, inherit, kof_src_fmt_of(src));
 		w->sc->cur_src = NULL;
+		w->sc->cur_derived_by = NULL;
 
 		/*
 		 * A LAYER LEFT UNOPENED IS SAID SO, BEFORE THE VERDICT IS.
@@ -4103,7 +4492,26 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 			 * with, passed on rather than rebuilt by the host -
 			 * see kof_result.syms. */
 			res.syms = kof_src_syms_of(src, &res.n_syms);
-			if (w->cb && name &&
+			/* The module that opened THIS object, recorded by the
+			 * engine where it produced a child - see opened_by. */
+			res.opened_by = w->sc->opened_by[0] ? w->sc->opened_by
+							    : 0;
+			/*
+			 * A WRAPPER IS NOT REPORTED AS A THING RECOVERED.
+			 *
+			 * `superseded` is the module saying the child it just
+			 * produced is what this object WAS - see `supersede`
+			 * in kofsig.h. The object has been scanned by then and
+			 * every rule has run on it; what is skipped is the
+			 * line that says it came out, because a decryptor and
+			 * the ciphertext behind it are not two findings.
+			 *
+			 * NOT AT THE TOP LEVEL. The file the caller handed
+			 * over is reported whatever any module says about it,
+			 * and that is checked here rather than trusted to
+			 * every module.
+			 */
+			if (w->cb && name && !(w->sc->superseded && depth) &&
 			    w->cb(name, ob.p, ob.n, &res, w->user) != 0)
 				w->aborted = 1;
 		}
@@ -4195,9 +4603,27 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 						       w->sc->kid_packer[i];
 				stack[n].pdepth = pdepth +
 					(stack[n].from_packer ? 1u : 0u);
+				stack[n].want = w->sc->kid_want
+						? w->sc->kid_want[i] : 0u;
+				stack[n].want_level = w->sc->kid_want_level
+						? w->sc->kid_want_level[i] : 0u;
+				stack[n].n_xw = w->sc->kid_n_xw
+						? w->sc->kid_n_xw[i] : 0u;
+				if (stack[n].n_xw > KOF_EMU_EXEC_WATCH)
+					stack[n].n_xw = KOF_EMU_EXEC_WATCH;
+				for (uint32_t q = 0; q < stack[n].n_xw; q++) {
+					const uint64_t *sx = w->sc->kid_xw +
+						(size_t)i * KOF_EMU_EXEC_WATCH *
+						2u + (size_t)q * 2u;
+
+					stack[n].xw[q][0] = sx[0];
+					stack[n].xw[q][1] = sx[1];
+				}
 				stack[n].inherit_predict =
 					w->sc->kid_family ? w->sc->kid_family[i]
 							  : NULL;
+				stack[n].derived_by = w->sc->kid_derived_by
+					? w->sc->kid_derived_by[i] : NULL;
 				n++;
 			}
 		}
@@ -4218,7 +4644,15 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		depth = stack[n].depth;
 		pdepth = stack[n].pdepth;
 		from_packer = stack[n].from_packer;
+		want_decl = stack[n].want;
+		want_decl_level = stack[n].want_level;
+		xw_decl_n = stack[n].n_xw;
+		for (uint32_t q = 0; q < xw_decl_n; q++) {
+			xw_decl[q][0] = stack[n].xw[q][0];
+			xw_decl[q][1] = stack[n].xw[q][1];
+		}
 		inherit = stack[n].inherit_predict;
+		derived_by = stack[n].derived_by;
 	}
 
 	while (n > 0) {
@@ -4465,7 +4899,7 @@ static void read_dir(struct walk *w, const char *dir, uint32_t depth)
  *
  * The bytes are borrowed, not taken: they must outlive the call.
  */
-int kof_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
+int kscan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
 		   const char *name, const struct kof_scan_option *opt,
 		   kof_on_object cb, void *user)
 {

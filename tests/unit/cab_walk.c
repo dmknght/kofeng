@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzer/parsers/containers/cab_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/cab_parse.h"
 
 static int failures;
 

@@ -44,7 +44,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			continue;
 		/* The name the entry already carries, so the child is called
 		 * what the archive calls it rather than a number. */
-		kof_name_next(e->name_off, e->name_len);
+		kunp_rcstruct_name(e->name_off, e->name_len);
 		/*
 		 * out_hint is the original size, and for this coding it is
 		 * what ENDS the stream rather than a guess at its output -
@@ -52,7 +52,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 */
 		if (!kof_unpack_at(e->coding[0], e->off, e->len, e->out_hint))
 			continue;
-		if (!kof_child())
+		if (!kunp_rcstruct_done())
 			break;
 		opened++;
 	}

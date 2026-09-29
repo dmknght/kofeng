@@ -366,7 +366,7 @@ int koffridge_get(struct koffridge *f, const void *id, uint32_t id_len,
 /*
  * Which finding to keep, when the scan produced more than one.
  *
- * The worst, by kof_level_rank - which is the engine's own ordering and not a
+ * The worst, by kverdict_level_rank - which is the engine's own ordering and not a
  * second one invented here. A cache that kept the first would keep whichever
  * module happened to sit earliest in the database, and the answer would change
  * with a database update for no reason anybody could see.
@@ -385,7 +385,7 @@ static void fill_verdict(struct koffridge_verdict *v,
 	if (!res->n)
 		return;
 	for (i = 0; i < res->n && i < KOF_MAX_FINDINGS; i++) {
-		int r = kof_level_rank(res->v[i].level);
+		int r = kverdict_level_rank(res->v[i].level);
 
 		if (r > best_rank) {
 			best_rank = r;
@@ -398,7 +398,7 @@ static void fill_verdict(struct koffridge_verdict *v,
 	 *
 	 * Both arrays are 224 bytes, so a memcpy of the whole field read
 	 * nothing it should not - but it copied the TAIL as well as the name.
-	 * kof_finding_name terminates at the length it wrote and leaves
+	 * kverdict_name terminates at the length it wrote and leaves
 	 * everything after it as whatever the result buffer held, and that
 	 * buffer is reused from object to object. The entry then goes to disk
 	 * whole, so the previous object's verdict name travelled into the

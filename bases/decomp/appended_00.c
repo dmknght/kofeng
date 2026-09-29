@@ -197,5 +197,5 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * about yields a shorter child rather than a read past the end - the
 	 * same rule overlay.c relies on.
 	 */
-	kof_child_window(off, len);
+	kunp_rcstruct_window(off, len);
 }

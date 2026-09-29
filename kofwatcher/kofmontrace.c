@@ -157,7 +157,7 @@
  * decided a host's scan policy: which options, which ceiling, whether the
  * interpreter runs. koffridge.h states the rule for the whole of orbit - it
  * may know the engine's TYPES, never drive it - and holding a kof_scanner and
- * calling kof_scan_path is driving it.
+ * calling kscan_path is driving it.
  *
  * So orbit now declares struct kof_rep_engine and this supplies one. The four
  * lines that build the options are the same four lines; what changed is that
@@ -202,7 +202,7 @@ static void on_note(uint32_t fact, const char *what, uint64_t value, void *user)
 	}
 
 	if (!s->f_version)
-		s->f_version = kof_fact_id("version");
+		s->f_version = kverdict_fact_id("version");
 	if (fact == s->f_version && !s->v->packer_version)
 		s->v->packer_version = value;
 }
@@ -235,7 +235,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		s->v->depth    = res->heur_depth;
 		s->v->packed   = (res->heur_depth || res->from_packer) ? 1u : 0u;
 		if (bytes && len)
-			s->v->entropy8 = kof_entropy_eighths(bytes, len);
+			s->v->entropy8 = kentropy_eighths(bytes, len);
 		if (res->n)
 			snprintf(s->v->finding, sizeof s->v->finding, "%s",
 				 res->v[0].name);
@@ -288,9 +288,9 @@ static int rep_ask(void *user, const char *path, struct kof_fp_verdict *v)
 	memset(&opt, 0, sizeof opt);
 	opt.emu_use = KOF_EMU_NEVER;
 
-	kof_scanner_on_debug(sc, on_note, &sink);
-	(void)kof_scan_path(sc, path, &opt, on_object, &sink);
-	kof_scanner_on_debug(sc, NULL, NULL);
+	kscan_on_debug(sc, on_note, &sink);
+	(void)kscan_path(sc, path, &opt, on_object, &sink);
+	kscan_on_debug(sc, NULL, NULL);
 	return 0;
 }
 
@@ -1940,9 +1940,9 @@ int main(int argc, char **argv)
 			fprintf(stderr, "kofmontrace: cannot open a report - "
 				"continuing without one\n");
 		} else {
-			eng = kof_engine_open(db_path);
+			eng = keng_open(db_path);
 			if (eng)
-				sc = kof_scanner_new(eng);
+				sc = kscan_new(eng);
 			if (!sc) {
 				/*
 				 * NOT FATAL, AND NOT SILENT. Without the
@@ -1956,7 +1956,7 @@ int main(int argc, char **argv)
 				 * empty columns.
 				 */
 				if (eng) {
-					kof_engine_close(eng);
+					keng_close(eng);
 					eng = NULL;
 				}
 				fprintf(stderr, "kofmontrace: no database at "
@@ -2286,9 +2286,9 @@ tick:
 	}
 
 	if (sc)
-		kof_scanner_free(sc);
+		kscan_free(sc);
 	if (eng)
-		kof_engine_close(eng);
+		keng_close(eng);
 
 	tracer_close(&tr);
 	return 0;

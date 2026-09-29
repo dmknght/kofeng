@@ -109,7 +109,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		      hdr + size + 1u != ctx->obj_size))
 		return;
 
-	kof_name_next(name_off, i - name_off);
-	if (!kof_child_window(hdr, size))
-		KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+	kunp_rcstruct_name(name_off, i - name_off);
+	if (!kunp_rcstruct_window(hdr, size))
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 }

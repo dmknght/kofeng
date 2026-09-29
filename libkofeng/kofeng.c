@@ -11,36 +11,36 @@
 
 #include "kofeng.h"
 #include "databases/dbloader.h"
-#include "detector/matchers/kofmultimatch.h"
+#include "detectors/matchers/kofmultimatch.h"
 #include "scanners/scan.h"
 
-kof_engine *kof_engine_open(const char *db_path)
+kof_engine *keng_open(const char *db_path)
 {
 	if (!db_path)
 		return NULL;
 	return kof_db_load(db_path);
 }
 
-void kof_engine_close(kof_engine *e)
+void keng_close(kof_engine *e)
 {
 	kof_db_free(e);
 }
 
-uint32_t kof_engine_records(const kof_engine *e)
+uint32_t kdb_records(const kof_engine *e)
 {
 	return e ? e->n_mods : 0;
 }
 
-uint32_t kof_engine_unpackers(const kof_engine *e)
+uint32_t kdb_unpackers(const kof_engine *e)
 {
 	return e ? e->n_unp : 0;
 }
 
-uint32_t kof_engine_heur_rules(const kof_engine *e)
+uint32_t kmatch_rules(const kof_engine *e)
 {
 	return e ? e->n_heur : 0;
 }
-int kof_engine_multimatch(const kof_engine *e, uint64_t *bytes,
+int kmatch_tables(const kof_engine *e, uint64_t *bytes,
 			  uint32_t *max_chain)
 {
 	uint32_t i, worst = 0;
@@ -75,7 +75,7 @@ int kof_engine_multimatch(const kof_engine *e, uint64_t *bytes,
  * and a clause reads as a fragment there. A noun phrase reads correctly in both
  * places.
  */
-const char *kof_broken_name(uint32_t reason)
+const char *kverdict_broken_name(uint32_t reason)
 {
 	switch (reason) {
 	case KOF_BROKEN_LIMIT:       return "Limit reached";
@@ -89,7 +89,7 @@ const char *kof_broken_name(uint32_t reason)
 /*
  * What this build of the library is. See kofeng.h for why it decides nothing.
  */
-void kof_engine_version(struct kof_version *out)
+void keng_version(struct kof_version *out)
 {
 	if (!out)
 		return;
@@ -106,7 +106,7 @@ void kof_engine_version(struct kof_version *out)
  * beside them. Nothing stores these values anywhere, which is the point - one
  * source, and it is the file.
  */
-uint64_t kof_engine_db_stamp(const kof_engine *e)
+uint64_t kdb_stamp(const kof_engine *e)
 {
 	uint64_t acc = 0;
 	uint32_t i, n = 0;
@@ -148,7 +148,7 @@ uint64_t kof_engine_db_stamp(const kof_engine *e)
 	return acc ? acc : 1ull;
 }
 
-int kof_engine_db_version(const kof_engine *e, struct kof_db_version *out)
+int kdb_version(const kof_engine *e, struct kof_db_version *out)
 {
 	uint32_t i;
 	int have = 0;
@@ -178,7 +178,7 @@ int kof_engine_db_version(const kof_engine *e, struct kof_db_version *out)
 	return have;
 }
 
-kof_scanner *kof_scanner_new(const kof_engine *e)
+kof_scanner *kscan_new(const kof_engine *e)
 {
 	if (!e)
 		return NULL;
@@ -191,7 +191,7 @@ kof_scanner *kof_scanner_new(const kof_engine *e)
  * Per scanner rather than per engine: the engine is shared by every thread and is
  * immutable, and one thread wanting diagnostics must not turn them on for the rest.
  */
-void kof_scanner_on_debug(kof_scanner *sc, kof_on_debug cb, void *user)
+void kscan_on_debug(kof_scanner *sc, kof_on_debug cb, void *user)
 {
 	if (!sc)
 		return;
@@ -199,17 +199,17 @@ void kof_scanner_on_debug(kof_scanner *sc, kof_on_debug cb, void *user)
 	sc->debug_user = user;
 }
 
-void kof_scanner_free(kof_scanner *sc)
+void kscan_free(kof_scanner *sc)
 {
 	kof_scan_free(sc);
 }
 
-const struct kof_stats *kof_scanner_stats(const kof_scanner *sc)
+const struct kof_stats *kscan_stats(const kof_scanner *sc)
 {
 	return sc ? kof_scan_stats(sc) : NULL;
 }
 
-int kof_scan_path(kof_scanner *sc, const char *path,
+int kscan_path(kof_scanner *sc, const char *path,
 		  const struct kof_scan_option *opt, kof_on_object cb, void *user)
 {
 	static const struct kof_scan_option conservative;   /* all zero: no recursion */
@@ -219,7 +219,7 @@ int kof_scan_path(kof_scanner *sc, const char *path,
 	return kof_scan_walk(sc, path, opt ? opt : &conservative, cb, user);
 }
 
-int kof_scan_path_mt(kof_scanner **scs, unsigned n_sc, const char *path,
+int kscan_path_mt(kof_scanner **scs, unsigned n_sc, const char *path,
 		     const struct kof_scan_option *opt, kof_on_object cb,
 		     void *user)
 {
@@ -236,7 +236,7 @@ int kof_scan_path_mt(kof_scanner **scs, unsigned n_sc, const char *path,
  * copied: emu_unpack.c now calls this, so there is one implementation and one
  * place for the test in tests/unit/emu_gate.c to check.
  */
-uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total)
+uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total)
 {
 	uint64_t acc = 0, n = total;
 	unsigned k;
@@ -280,7 +280,7 @@ uint32_t kof_entropy_hist(const uint32_t hist[256], uint64_t total)
 	return (uint32_t)(acc / n);
 }
 
-uint32_t kof_entropy_eighths(const void *bytes, uint64_t n)
+uint32_t kentropy_eighths(const void *bytes, uint64_t n)
 {
 	const uint8_t *p = bytes;
 	uint32_t hist[256];
@@ -291,5 +291,5 @@ uint32_t kof_entropy_eighths(const void *bytes, uint64_t n)
 	memset(hist, 0, sizeof hist);
 	for (i = 0; i < n; i++)
 		hist[p[i]]++;
-	return kof_entropy_hist(hist, n);
+	return kentropy_hist(hist, n);
 }

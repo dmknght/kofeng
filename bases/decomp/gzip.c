@@ -58,5 +58,5 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (!kof_unpack_deflate(gz->data_off, gz->data_len))
 		return;
 
-	kof_child();
+	kunp_rcstruct_done();
 }

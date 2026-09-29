@@ -178,7 +178,7 @@ struct run {
 	 * HOW MANY OBJECTS CAME BACK WITH SOMETHING ON THEM.
 	 *
 	 * Not a statistic - it is what lets a caller that hands work to
-	 * kof_scan_path find out afterwards whether that work found anything.
+	 * kscan_path find out afterwards whether that work found anything.
 	 * The callback reports findings and the call itself returns nothing
 	 * about them, so without this a caller can only assume, and ps_file
 	 * assumed clean.
@@ -501,11 +501,11 @@ static void progress_draw(struct run *r, const char *name)
 	 * there and the progress line threw it away, so a scan working
 	 * through a container looked like a scan stuck on nothing.
 	 *
-	 * kof_obj_toplevel_len is the same split the rest of this file uses to
+	 * kobj_toplevel_len is the same split the rest of this file uses to
 	 * key a verdict by its file - see fmap.
 	 */
 	{
-		size_t flen = kof_obj_toplevel_len(name);
+		size_t flen = kobj_toplevel_len(name);
 		const char *p1 = NULL, *p2 = NULL;
 		size_t i;
 
@@ -644,7 +644,7 @@ static int repair_apply(const char *path, const struct kof_repair *rp)
 	 * used to be here wrapped, and a wrapped offset does not fail, it puts
 	 * the sixteen bytes of a repair somewhere else in the user's file. The
 	 * scanner maps a top level file whole however large it is, and
-	 * kof_cure_patch bounds the offset by the OBJECT, so the offset really
+	 * kcure_patch bounds the offset by the OBJECT, so the offset really
 	 * can pass 4 GB.
 	 */
 	FILE *f = kof_fopen_rw(path);
@@ -673,7 +673,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	int worst = -1;
 	const char *worst_name = NULL;
 	const struct kof_finding *worst_f = NULL;
-	size_t flen = kof_obj_toplevel_len(name);
+	size_t flen = kobj_toplevel_len(name);
 
 	(void)bytes;
 	(void)len;
@@ -733,7 +733,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		 * is 1, so ">" on the values alone would let a heuristic outrank a
 		 * named detection. The order a level speaks in is its own fact.
 		 */
-		if (kof_level_rank((uint32_t)(int)lv) > kof_level_rank((uint32_t)worst)) {
+		if (kverdict_level_rank((uint32_t)(int)lv) > kverdict_level_rank((uint32_t)worst)) {
 			worst = (int)lv;
 			worst_name = res->v[i].name;
 			worst_f = &res->v[i];
@@ -818,7 +818,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		if (res->broken < KOF_BROKEN_COUNT)
 			r->by_reason[res->broken]++;
 		if (res->n == 0 || r->verbose)
-			say(r, C_CYN, kof_broken_name(res->broken), name);
+			say(r, C_CYN, kverdict_broken_name(res->broken), name);
 	}
 
 	/*
@@ -835,8 +835,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 */
 	if (worst >= 0 &&
 	    (r->last_level < 0 ||
-	     kof_level_rank((uint32_t)worst) >
-		     kof_level_rank((uint32_t)r->last_level))) {
+	     kverdict_level_rank((uint32_t)worst) >
+		     kverdict_level_rank((uint32_t)r->last_level))) {
 		r->last_level = worst;
 		snprintf(r->last_name, sizeof r->last_name, "%s",
 			 worst_name ? worst_name : "");
@@ -846,7 +846,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		struct fent *e = fmap_get(&r->files, name, flen);
 
 		if (e) {
-			if (worst >= 0 && kof_level_rank((uint32_t)worst) > kof_level_rank((uint32_t)e->level)) {
+			if (worst >= 0 && kverdict_level_rank((uint32_t)worst) > kverdict_level_rank((uint32_t)e->level)) {
 				const struct kof_name_span *k;
 
 				e->level = worst;
@@ -859,7 +859,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 				 * than on the punctuation between them.
 				 */
 				e->kind[0] = 0;
-				if (worst_f && kof_finding_is_heur(worst_f)) {
+				if (worst_f && kverdict_is_heur(worst_f)) {
 					k = worst_f->shape.n ? &worst_f->shape
 							     : &worst_f->family;
 					snprintf(e->kind, sizeof e->kind,
@@ -1336,7 +1336,7 @@ static uint64_t engine_stamp(void)
 	struct kof_version v;
 
 	memset(&v, 0, sizeof v);
-	kof_engine_version(&v);
+	keng_version(&v);
 	return ((uint64_t)v.major << 48) | ((uint64_t)v.minor << 32) | v.build;
 }
 
@@ -1370,11 +1370,11 @@ static void ps_file(struct procscan *p, const char *path)
 
 	if (!p || !path || !path[0])
 		return;
-	st = kof_scanner_stats(p->sc);
+	st = kscan_stats(p->sc);
 	if (st)
 		before_cached = st->cached;
-	(void)kof_scan_path(p->sc, path, p->opt, on_object, p->r);
-	st = kof_scanner_stats(p->sc);
+	(void)kscan_path(p->sc, path, p->opt, on_object, p->r);
+	st = kscan_stats(p->sc);
 	if (st && st->cached != before_cached)
 		p->files_cached++;
 	else
@@ -1483,7 +1483,7 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 			struct kof_scan_option po = *opt;
 
 			po.as_format = KOF_EVT_PROC;
-			(void)kof_scan_bytes(sc, rec, n, who, &po,
+			(void)kscan_bytes(sc, rec, n, who, &po,
 					     on_object, r);
 		}
 
@@ -1534,7 +1534,7 @@ static int scan_procs(struct run *r, kof_scanner *sc,
 					bo.as_view     = it.as_view;
 					bo.as_view_len = it.as_view_len;
 				}
-				(void)kof_scan_bytes(sc, it.p, it.len, nm,
+				(void)kscan_bytes(sc, it.p, it.len, nm,
 						     &bo, on_object, r);
 				/*
 				 * COUNTED HERE AND NOT IN THE WALK'S STATS.
@@ -1945,7 +1945,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
 		return 2;
@@ -1960,16 +1960,16 @@ int main(int argc, char **argv)
 		uint64_t mmb = 0;
 		uint32_t mmc = 0;
 
-		kof_engine_db_version(eng, &dv);
+		kdb_version(eng, &dv);
 		printf("database: format %u.%u build %u, %u record(s), "
 		       "%u unpacker(s), %u heur rule(s)\n",
 		       (unsigned)dv.major, (unsigned)dv.minor, dv.build,
-		       kof_engine_records(eng), kof_engine_unpackers(eng),
-		       kof_engine_heur_rules(eng));
+		       kdb_records(eng), kdb_unpackers(eng),
+		       kmatch_rules(eng));
 		/* The matcher's footprint is a design claim - bucket counts are
 		 * derived from the marker count and bounded - so it is printed
 		 * where a reader will see it rather than left to be inferred. */
-		if (kof_engine_multimatch(eng, &mmb, &mmc) == 0 && mmb)
+		if (kmatch_tables(eng, &mmb, &mmc) == 0 && mmb)
 			printf("          multi-pattern tables %.2f MB, "
 			       "worst bucket %u marker(s)\n",
 			       (double)mmb / 1048576.0, mmc);
@@ -1981,10 +1981,10 @@ int main(int argc, char **argv)
 	 */
 	r.stream_v = (jobs == 1);
 
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
 		fprintf(stderr, "%s: out of memory\n", argv[0]);
-		kof_engine_close(eng);
+		keng_close(eng);
 		return 2;
 	}
 
@@ -2017,7 +2017,7 @@ int main(int argc, char **argv)
 		if (scs) {
 			scs[0] = sc;
 			for (k = 1; k < jobs; k++) {
-				scs[k] = kof_scanner_new(eng);
+				scs[k] = kscan_new(eng);
 				if (!scs[k])
 					break;
 			}
@@ -2079,7 +2079,7 @@ int main(int argc, char **argv)
 		struct kof_db_version dv;
 
 		memset(&dv, 0, sizeof dv);
-		(void)kof_engine_db_version(eng, &dv);
+		(void)kdb_version(eng, &dv);
 		/* The cache is only true of one database - see koffridge.h. */
 		/*
 		 * THE COMPARISON IS WHAT --heur 2 MEANS HERE.
@@ -2120,7 +2120,7 @@ int main(int argc, char **argv)
 		/* --no-cache does not mean "there is no cache file": it means
 		 * this run answers from these bytes alone. The set is still
 		 * where it was, and a finding here has to reach it. */
-		rc = scan_procs(&r, sc, &opt, kof_engine_db_stamp(eng),
+		rc = scan_procs(&r, sc, &opt, kdb_stamp(eng),
 				cache_path, !no_cache,
 				pids, n_pids,
 				!opt.heur_off && opt.heur_level >= 2);
@@ -2164,9 +2164,9 @@ int main(int argc, char **argv)
 				cache_path = cache_buf;
 			if (cache_path) {
 				/* The DATABASE, not the date on it - see
-				 * kof_engine_db_stamp for what a build number
+				 * kdb_stamp for what a build number
 				 * failed to notice. */
-				fs = kof_fidset_open(kof_engine_db_stamp(eng),
+				fs = kof_fidset_open(kdb_stamp(eng),
 						       engine_stamp());
 				if (fs) {
 					struct kof_fidset_stat fst;
@@ -2209,10 +2209,10 @@ int main(int argc, char **argv)
 			}
 		}
 		if (jobs > 1)
-			rc = kof_scan_path_mt(scs, jobs, target, &opt,
+			rc = kscan_path_mt(scs, jobs, target, &opt,
 					      on_object, &r);
 		else
-			rc = kof_scan_path(sc, target, &opt, on_object, &r);
+			rc = kscan_path(sc, target, &opt, on_object, &r);
 		if (fs) {
 			struct kof_fidset_stat fst;
 
@@ -2262,7 +2262,7 @@ int main(int argc, char **argv)
 
 		if (jobs > 1 && scs) {
 			for (k = 0; k < jobs; k++) {
-				one = scs[k] ? kof_scanner_stats(scs[k]) : NULL;
+				one = scs[k] ? kscan_stats(scs[k]) : NULL;
 				if (!one)
 					continue;
 				sum.objects        += one->objects;
@@ -2291,7 +2291,7 @@ int main(int argc, char **argv)
 			}
 			st = &sum;
 		} else {
-			st = kof_scanner_stats(sc);
+			st = kscan_stats(sc);
 		}
 	}
 	mb = st ? (double)st->object_bytes / 1048576.0 : 0.0;
@@ -2524,7 +2524,7 @@ int main(int argc, char **argv)
 			for (k = 1; k < KOF_BROKEN_COUNT; k++)
 				if (rf[k])
 					printf("            %-28s %llu\n",
-					       kof_broken_name(k),
+					       kverdict_broken_name(k),
 					       (unsigned long long)rf[k]);
 		}
 		printf("clean     %s%llu%s file(s)\n",
@@ -2538,7 +2538,7 @@ int main(int argc, char **argv)
 		printf("time      %.2f s (%.0f MB/s)\n", secs, mb / secs);
 	else
 		printf("time      %.3f s\n", secs);
-	/* Copied out while the scanner is alive. kof_scanner_stats hands back a
+	/* Copied out while the scanner is alive. kscan_stats hands back a
 	 * pointer INTO the scanner, and the exit decision below runs after the
 	 * scanner has been freed - reading it there was a use-after-free, reached
 	 * on exactly the scans that found nothing, which is why every run that
@@ -2568,11 +2568,11 @@ int main(int argc, char **argv)
 
 		/* scs[0] is sc, freed below like it always was. */
 		for (k = 1; k < made; k++)
-			kof_scanner_free(scs[k]);
+			kscan_free(scs[k]);
 		free(scs);
 	}
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	fmap_free(&r.files);
 
 	/*

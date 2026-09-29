@@ -66,15 +66,15 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		done++;
 		/* The name the entry already carries, so the child is called
 		 * what the help file calls it rather than a number. */
-		kof_name_next(e->name_off, e->name_len);
+		kunp_rcstruct_name(e->name_off, e->name_len);
 		/*
 		 * The window the file declared, which is not in the stream -
 		 * see lzx.h. out_hint carries how far past the restart the page
 		 * begins and how long it is.
 		 */
-		if (!kof_unpack_entry(e->coding[0], e->index, e->out_hint))
+		if (!kunp_static_entry(e->coding[0], e->index, e->out_hint))
 			continue;
-		if (!kof_child())
+		if (!kunp_rcstruct_done())
 			break;
 		opened++;
 	}

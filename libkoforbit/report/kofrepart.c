@@ -257,7 +257,7 @@ static void set_preview(struct kof_fp_bytes *b, const unsigned char *p,
  *
  * The scan itself is NOT here any more - see struct kof_rep_engine. What used
  * to sit at this spot built a kof_scan_option, installed a note callback and
- * called kof_scan_path, which made this file the place that decided a host's
+ * called kscan_path, which made this file the place that decided a host's
  * scan policy.
  */
 static void ask_engine(const struct kof_report_stage *st, const char *path,
@@ -449,7 +449,7 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 	const char *src = f->text;
 	int      from_spill = 0;
 
-	if (kof_sha256_file(src, f->bytes.file_sha256, &size) != 0) {
+	if (khash_sha256_file(src, f->bytes.file_sha256, &size) != 0) {
 		/*
 		 * GONE, AND SOMEBODY SAW IT GO. A self-deleting dropper is the
 		 * case this whole fallback exists for: the file was real, it
@@ -462,7 +462,7 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 		 * different question.
 		 */
 		if (errno == ENOENT && f->spill && f->spill[0] &&
-		    kof_sha256_file(f->spill, f->bytes.file_sha256,
+		    khash_sha256_file(f->spill, f->bytes.file_sha256,
 				    &size) == 0) {
 			src = f->spill;
 			from_spill = 1;
@@ -633,7 +633,7 @@ static void read_written(struct kof_report *r, struct kof_fingerprint *f,
 		*budget -= got;
 		r->evidence_bytes += got;
 		set_preview(&f->bytes, buf, got);
-		(void)kof_sha256_bytes(buf, got, f->bytes.sha256);
+		(void)khash_sha256_bytes(buf, got, f->bytes.sha256);
 
 		if (dir && *dir && got >= 16u) {
 			char rel[96], path[512];
@@ -718,7 +718,7 @@ int kof_report_finish(struct kof_report *r, const struct kof_report_stage *st)
 	 * against.
 	 */
 	if (r->info.subject && *r->info.subject) {
-		(void)kof_sha256_file(r->info.subject, r->subject_sha256,
+		(void)khash_sha256_file(r->info.subject, r->subject_sha256,
 				      &r->subject_size);
 		ask_engine(st, r->info.subject, &r->subject_verdict);
 

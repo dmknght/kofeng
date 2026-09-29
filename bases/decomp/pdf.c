@@ -47,7 +47,7 @@
  * embedded EXE sitting unfiltered in a PDF is a PE, and only an object gets
  * parsed as one, given its own regions, and unpacked in turn.
  *
- * kof_child_window costs no copy and no byte budget - the child is the parent's
+ * kunp_rcstruct_window costs no copy and no byte budget - the child is the parent's
  * mapping seen at a different offset - so the only thing it spends is a child,
  * and the host bounds those. The same reasoning overlay.c gives for a PE's
  * overlay applies here to every stream that needs no decoding.
@@ -57,7 +57,7 @@
  *
  * Recorded and carried on, never returned on: one stream this build cannot
  * decode says nothing about the next, and a PDF's payload is rarely in the only
- * stream it has. That is what the lower-case kof_unp_broken is for.
+ * stream it has. That is what the lower-case kunp_rcstruct_broken is for.
  *
  * Encryption outranks an unsupported coding when both are true, for the reason
  * zip.c gives: a coding this build lacks is a gap a later build closes, and
@@ -116,7 +116,7 @@ KOF_DEFINE_UNPACK
 	uint32_t i, opened = 0, windowed = 0, unsupported = 0, failed = 0;
 	uint32_t carried = 0, in_region = 0, images = 0, unwanted = 0;
 	uint32_t structural = 0;
-	/* Where the entry walk got to - see the note beside kof_name_next. */
+	/* Where the entry walk got to - see the note beside kunp_rcstruct_name. */
 	uint32_t ent = 0;
 	int encrypted;
 
@@ -147,7 +147,7 @@ KOF_DEFINE_UNPACK
 	 * stream that decodes is worth scanning whatever the trailer said.
 	 */
 	if (encrypted)
-		kof_unp_broken(KOF_UNP_ENCRYPTED);
+		kunp_rcstruct_broken(KOF_UNP_ENCRYPTED);
 
 	kof_debug("Pdf.objects", p->n_objects);
 	kof_debug("Pdf.streams", p->n_streams);
@@ -337,10 +337,10 @@ KOF_DEFINE_UNPACK
 		 *
 		 * UNCONDITIONAL, AND THE GUARD THAT WAS HERE WAS THE BUG.
 		 *
-		 * kof_name_next names the NEXT child, and the host clears the
+		 * kunp_rcstruct_name names the NEXT child, and the host clears the
 		 * pending name on every call before it looks at the range - so
 		 * an empty one is how a caller says "no name". Written as
-		 * `if (o->cat_len) kof_name_next(...)`, an object with no
+		 * `if (o->cat_len) kunp_rcstruct_name(...)`, an object with no
 		 * category never cleared, and the name left pending by an
 		 * earlier object attached to ITS child instead. Two ways to
 		 * arrive there and both happen in an ordinary document: an
@@ -383,10 +383,10 @@ KOF_DEFINE_UNPACK
 			ent++;
 		if (ent < p->n_entries && p->entry[ent].index == i &&
 		    p->entry[ent].name_len)
-			kof_name_next(p->entry[ent].name_off,
+			kunp_rcstruct_name(p->entry[ent].name_off,
 				      p->entry[ent].name_len);
 		else
-			kof_name_next(o->cat_off, o->cat_len);
+			kunp_rcstruct_name(o->cat_off, o->cat_len);
 		/*
 		 * AND WHAT IT IS, from the one mapping both this module and the
 		 * parse read - see kof_pdf_entry_format in kofmod/pdf.h.
@@ -398,33 +398,33 @@ KOF_DEFINE_UNPACK
 		 * IS script; saying so is what makes producing them worth the
 		 * inflation.
 		 *
-		 * Unconditional, like kof_name_next above and for the identical
+		 * Unconditional, like kunp_rcstruct_name above and for the identical
 		 * reason: the call CLEARS a previous claim, so skipping it on a
 		 * category with nothing to say would leave the last one
 		 * standing and the next child would wear it.
 		 */
-		kof_child_format(kof_pdf_entry_format(o->cat));
+		kunp_rcstruct_format(kof_pdf_entry_format(o->cat));
 		/*
 		 * And what it is for. This is what stops a column of identical
 		 * unnamed rows: a page stream and a font program are not called
 		 * anything in a PDF, so name_next above has nothing to point
 		 * at, and 12 of 14 recovered objects arrived blank.
 		 */
-		kof_child_kind(kof_pdf_entry_kind(o->cat));
+		kunp_rcstruct_kind(kof_pdf_entry_kind(o->cat));
 		/*
 		 * And which entry this is the content of. The entry table is a
 		 * projection of the object table, and kof_entry.index holds the
 		 * OBJECT index - which is `i` here, so the two agree by
 		 * construction rather than by a lookup.
 		 */
-		kof_child_entry(i);
+		kunp_rcstruct_child_entry(i);
 
 		/*
 		 * No filter at all: the bytes are already what they are, so the
 		 * child is a window and the decoder is not involved.
 		 */
 		if (!o->filters) {
-			if (!kof_child_window(o->stream_off, o->stream_len))
+			if (!kunp_rcstruct_window(o->stream_off, o->stream_len))
 				break;
 			windowed++;
 			continue;
@@ -463,7 +463,7 @@ KOF_DEFINE_UNPACK
 		 * /Filter [/ASCII85Decode /FlateDecode], the decoder inflated
 		 * ASCII85 text, failed, and a clean document was reported as
 		 * one the engine could not finish. The entry table has the
-		 * chain in the order the file wrote it, and kof_unpack_chain
+		 * chain in the order the file wrote it, and kunp_static_decode_chain
 		 * runs it - which this module could not do itself, because a
 		 * chain needs a buffer between its steps and a module has no
 		 * writable memory.
@@ -485,8 +485,8 @@ KOF_DEFINE_UNPACK
 		 * build closes, and it is the reason this module reports at the
 		 * end when nothing worse was found first.
 		 */
-		if (kof_unpack_chain(i)) {
-			if (!kof_child())
+		if (kunp_static_decode_chain(i)) {
+			if (!kunp_rcstruct_done())
 				break;
 			opened++;
 			continue;
@@ -518,5 +518,5 @@ KOF_DEFINE_UNPACK
 	/* Encryption is already reported above, before anything could overwrite
 	 * it. This is the other reason, and only when there was no first one. */
 	if (!encrypted && unsupported)
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 }

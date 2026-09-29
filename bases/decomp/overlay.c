@@ -179,8 +179,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		if (!kof_unpack_deflate(pe->overlay_off + 2u,
 					pe->overlay_len - 2u))
 			return;
-		if (!kof_child())
-			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+		if (!kunp_rcstruct_done())
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 		return;
 	}
 
@@ -198,6 +198,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * declared extent runs past the end yields a shorter child rather than a
 	 * read past the mapping - the same rule every other byte accessor follows.
 	 */
-	if (!kof_child_window(pe->overlay_off, pe->overlay_len))
-		KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+	if (!kunp_rcstruct_window(pe->overlay_off, pe->overlay_len))
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 }

@@ -44,8 +44,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/extractor/decomp/lzx.h"
-#include "../../libkofeng/extractor/decomp/lzhuf.h"
+#include "../../libkofeng/extractors/decomp/lzx.h"
+#include "../../libkofeng/extractors/decomp/lzhuf.h"
 
 static int failures;
 

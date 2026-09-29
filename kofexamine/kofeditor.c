@@ -35,12 +35,12 @@
  * subtype - see the note on that list. */
 #include <kofmod/proc.h>
 /* For the object facts below - see "what an object IS". */
-#include "../libkofeng/detector/overlord/kofoverlord.h"
-#include "../libkofeng/extractor/unpack/emu_unpack.h"
+#include "../libkofeng/detectors/overlord/kofoverlord.h"
+#include "../libkofeng/extractors/unpack/emu_unpack.h"
 
 #include "kofeditor.h"
 #include "../libkofeng/databases/hexprog.h"
-#include "../libkofeng/detector/matchers/kofmatch.h"
+#include "../libkofeng/detectors/matchers/kofmatch.h"
 #include "../libkofeng/kofcore/kofplatform.h"
 
 
@@ -1467,7 +1467,7 @@ void obj_sha256(struct object *o)
 	if (!o || !o->buf.p || !o->buf.n)
 		return;
 	if (!o->sha256[0])
-		kof_sha256_bytes(o->buf.p, o->buf.n, o->sha256);
+		khash_sha256_bytes(o->buf.p, o->buf.n, o->sha256);
 }
 
 /*
@@ -1572,7 +1572,7 @@ void meta_sample_line(struct kof_editor *e, char *out, size_t cap)
 	 * digest that says it is the same sample - see draft_norm_parent.
 	 */
 	if (par) {
-		const char *pn = kof_obj_leaf(par->name);
+		const char *pn = kobj_leaf(par->name);
 
 		if (pn == par->name)
 			pn = kof_path_base(par->name);
@@ -2428,13 +2428,13 @@ const char *draft_sample(struct kof_editor *e)
 	 * pointed at an OBJECT name: "sample.bin//0:norm" has a '/' inside
 	 * its separator, so the last one leaves "0:norm" and the file - the
 	 * one thing this line exists to record - is gone. That is exactly the
-	 * mistake kof_obj_leaf's note describes, made from the other side.
+	 * mistake kobj_leaf's note describes, made from the other side.
 	 *
-	 * The top level segment IS the file; see kof_obj_toplevel_len.
+	 * The top level segment IS the file; see kobj_toplevel_len.
 	 */
 	n = (&e->obj[e->cur])->name;
 	{
-		size_t k = kof_obj_toplevel_len(n);
+		size_t k = kobj_toplevel_len(n);
 
 		if (k >= sizeof buf)
 			k = sizeof buf - 1u;
@@ -2454,15 +2454,15 @@ const char *draft_sample(struct kof_editor *e)
  * its normalised form.
  *
  * FOUND BY NAME, and the name is the engine's: a view's is its parent's plus
- * the separator and the label kof_obj_label reads back. The parent is the
+ * the separator and the label kobj_label reads back. The parent is the
  * object whose whole name is that prefix, which is a comparison rather than a
  * guess - two objects cannot share a name at one depth.
  */
 static const struct object *draft_norm_parent(struct kof_editor *e)
 {
 	const struct object *ob = &e->obj[e->cur];
-	const char *leaf = kof_obj_leaf(ob->name);
-	const char *lab = kof_obj_label(leaf);
+	const char *leaf = kobj_leaf(ob->name);
+	const char *lab = kobj_label(leaf);
 	size_t cut;
 	uint32_t i;
 
@@ -5860,7 +5860,7 @@ have_path:
 		 * this file still works: the pack format a database must be in
 		 * for this build to load it, and the module ABI the compiled
 		 * signature must present. The engine has no version string of
-		 * its own yet - kofeng.h says so beside kof_engine_db_version -
+		 * its own yet - kofeng.h says so beside kdb_version -
 		 * and inventing one here would put a number in every file that
 		 * nothing else in the tree could confirm.
 		 */
@@ -6264,7 +6264,7 @@ have_path:
 
 		fprintf(f, "\n/* What the sample above asks the system for, in "
 			"order. Read out of its\n * code by the sweep in "
-			"analyzer/disasm/flow.c - no bytes of it are kept. */\n");
+			"analyzers/disasm/flow.c - no bytes of it are kept. */\n");
 		fprintf(f, "static const struct kof_ovlf_chain ref_chain = {\n");
 		fprintf(f, "\t.n = %uu,\n\t.s = {\n", e->dr.chain.n);
 		for (ci = 0; ci < e->dr.chain.n &&
@@ -6272,7 +6272,7 @@ have_path:
 			const struct kof_ovlf_step *st = &e->dr.chain.s[ci];
 
 			/* The capability as a NUMBER with its word beside it:
-			 * enum kof_flow_cap lives in analyzer/disasm/flow.h, which
+			 * enum kof_flow_cap lives in analyzers/disasm/flow.h, which
 			 * is engine-side, and a rule is compiled against the
 			 * kofmod headers alone. */
 			fprintf(f, "\t\t{ %2uu, 0x%02xu, %uu },   /* %s%s */\n",

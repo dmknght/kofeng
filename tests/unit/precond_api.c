@@ -178,35 +178,35 @@ static void name_parts(void)
 	struct kof_finding f;
 	char want[224];
 
-	kof_finding_name(&f, "ELF-x64", "Botnet", "Mirai", "Gen", NULL);
+	kverdict_name(&f, "ELF-x64", "Botnet", "Mirai", "Gen", NULL);
 	ok(strcmp(f.name, "ELF-x64/Botnet:Mirai#Gen") == 0, "detector name");
 	ok(span_is(&f, &f.target, "ELF-x64"), "target span");
 	ok(span_is(&f, &f.maltype, "Botnet"), "maltype span");
 	ok(span_is(&f, &f.family, "Mirai"), "family span");
 	ok(span_is(&f, &f.variant, "Gen"), "variant span");
 	ok(f.shape.n == 0, "a detector has no shape");
-	ok(!kof_finding_is_heur(&f), "Botnet is not Heur");
+	ok(!kverdict_is_heur(&f), "Botnet is not Heur");
 
-	/* The two must agree: kofinspect builds one with kof_name_compose to
+	/* The two must agree: kofinspect builds one with kverdict_compose to
 	 * compare against a finding the engine composed. */
-	kof_name_compose(want, sizeof want, "ELF-x64", "Botnet", "Mirai", "Gen");
+	kverdict_compose(want, sizeof want, "ELF-x64", "Botnet", "Mirai", "Gen");
 	ok(strcmp(want, f.name) == 0, "compose and finding_name agree");
 
-	kof_finding_name(&f, "ELF-x64", "Heur", "Meterp", "g7q2x", "Shellcode");
+	kverdict_name(&f, "ELF-x64", "Heur", "Meterp", "g7q2x", "Shellcode");
 	ok(strcmp(f.name, "ELF-x64/Heur:Meterp#g7q2x!Shellcode") == 0,
 	   "heuristic name");
 	ok(span_is(&f, &f.family, "Meterp"), "the guessed family");
 	ok(span_is(&f, &f.shape, "Shellcode"), "the shape actually recognised");
-	ok(kof_finding_is_heur(&f), "Heur is Heur");
+	ok(kverdict_is_heur(&f), "Heur is Heur");
 
 	/* Absent parts are absent, not empty text in the middle of the name. */
-	kof_finding_name(&f, NULL, "Trojan", "Unknown", NULL, NULL);
+	kverdict_name(&f, NULL, "Trojan", "Unknown", NULL, NULL);
 	ok(strcmp(f.name, "Trojan:Unknown") == 0, "no target, no variant");
 	ok(f.target.n == 0 && f.variant.n == 0, "both spans empty");
 	ok(span_is(&f, &f.maltype, "Trojan"), "maltype still found");
 
 	/* A family with a hyphen in it: the reason the separator became '#'. */
-	kof_finding_name(&f, "ELF-x64", "Trojan", "Some-Family", "v1", NULL);
+	kverdict_name(&f, "ELF-x64", "Trojan", "Some-Family", "v1", NULL);
 	ok(span_is(&f, &f.family, "Some-Family"), "hyphen inside a family name");
 	ok(span_is(&f, &f.variant, "v1"), "and the variant after it");
 }
@@ -215,11 +215,11 @@ static void target_word(void)
 {
 	char w[32];
 
-	kof_name_target(w, sizeof w, KOF_FMT_ELF, KOF_ARCH_X86_64);
+	kverdict_target(w, sizeof w, KOF_FMT_ELF, KOF_ARCH_X86_64);
 	ok(strcmp(w, "ELF-x64") == 0, "ELF-x64");
-	kof_name_target(w, sizeof w, KOF_FMT_ELF, KOF_ARCH_ANY);
+	kverdict_target(w, sizeof w, KOF_FMT_ELF, KOF_ARCH_ANY);
 	ok(strcmp(w, "ELF") == 0, "no architecture, no suffix");
-	kof_name_target(w, sizeof w, KOF_FMT_UNKNOWN, KOF_ARCH_X86_64);
+	kverdict_target(w, sizeof w, KOF_FMT_UNKNOWN, KOF_ARCH_X86_64);
 	ok(strcmp(w, kof_format_name(KOF_FMT_UNKNOWN)) == 0,
 	   "an unidentified object names no architecture");
 }
@@ -233,11 +233,11 @@ static void target_word(void)
  */
 static void levels(void)
 {
-	ok(kof_level_rank(KOF_LEVEL_INFECT) > kof_level_rank(KOF_LEVEL_SUSPECT),
+	ok(kverdict_level_rank(KOF_LEVEL_INFECT) > kverdict_level_rank(KOF_LEVEL_SUSPECT),
 	   "INFECT outranks SUSPECT");
-	ok(kof_level_rank(KOF_LEVEL_SUSPECT) > kof_level_rank(KOF_LEVEL_HEUR),
+	ok(kverdict_level_rank(KOF_LEVEL_SUSPECT) > kverdict_level_rank(KOF_LEVEL_HEUR),
 	   "SUSPECT outranks HEUR");
-	ok(kof_level_rank(KOF_LEVEL_HEUR) > kof_level_rank(99u),
+	ok(kverdict_level_rank(KOF_LEVEL_HEUR) > kverdict_level_rank(99u),
 	   "any verdict outranks none");
 	ok(KOF_LEVEL_HEUR > KOF_LEVEL_INFECT,
 	   "and the raw values really are in the wrong order");
@@ -247,14 +247,14 @@ static void obj_paths(void)
 {
 	const char *a = "file.zip//inner.tar//deep.elf";
 
-	ok(kof_obj_depth("file.elf") == 0, "a file is at depth 0");
-	ok(kof_obj_depth(a) == 2, "two separators, two layers");
-	ok(kof_obj_toplevel_len("file.elf") == 8, "no separator: the whole name");
-	ok(kof_obj_toplevel_len(a) == 8, "up to the first separator");
-	ok(strncmp(a, "file.zip", kof_obj_toplevel_len(a)) == 0, "and it is the file");
+	ok(kobj_depth("file.elf") == 0, "a file is at depth 0");
+	ok(kobj_depth(a) == 2, "two separators, two layers");
+	ok(kobj_toplevel_len("file.elf") == 8, "no separator: the whole name");
+	ok(kobj_toplevel_len(a) == 8, "up to the first separator");
+	ok(strncmp(a, "file.zip", kobj_toplevel_len(a)) == 0, "and it is the file");
 	/* A single slash is a path, not a separator. */
-	ok(kof_obj_depth("/usr/bin/ls") == 0, "single slashes are not separators");
-	ok(kof_obj_toplevel_len("/usr/bin/ls") == 11, "an absolute path is one name");
+	ok(kobj_depth("/usr/bin/ls") == 0, "single slashes are not separators");
+	ok(kobj_toplevel_len("/usr/bin/ls") == 11, "an absolute path is one name");
 }
 
 int main(void)

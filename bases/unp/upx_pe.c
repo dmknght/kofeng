@@ -84,6 +84,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
+#include <kofunpack/pe_reassemble.h>
+
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
@@ -239,7 +241,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (u_len == 0 || c_len == 0 || !kof_in_obj(stream, c_len)) {
 		/* The header contradicts the file it is in. */
-		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 	}
 	if (decoder == 0) {
 		if (kof_u8(ph + PH_METHOD) != UPX_M_LZMA ||
@@ -247,12 +249,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			/* A coding this engine does not have. The file is packed,
 			 * the payload is in there, and nothing here can reach it -
 			 * a verdict of "not examined", never of "clean". */
-			KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
 		}
 		decoder = upx_lzma_method(kof_u8(stream));
 		if (decoder == 0) {
 			/* LZMA parameters outside what the format allows. */
-			KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 		}
 		stream += UPX_LZMA_SKIP;
 		c_len  -= UPX_LZMA_SKIP;
@@ -268,15 +270,34 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * we can hold it to that.
 	 */
 	/*
-	 * What comes out is an IMAGE, not a file: sections at their virtual
-	 * addresses with the original header kept somewhere inside. Saying so is
-	 * what lets the host put the file back together - without it the child is a
-	 * buffer of machine code that identifies as nothing, and every module that
+	 * WHAT COMES OUT IS AN IMAGE, NOT A FILE: sections at their virtual
+	 * addresses with the original header kept somewhere inside.
+	 *
+	 * So: take the room, decompress into it, and then ask the host to read
+	 * the layout out of what is there. The span is declared as one range
+	 * because that is all that is known before the bytes exist; the real
+	 * sections replace it a few lines down.
+	 *
+	 * This was KOF_FORM_PE_IMAGE, which hid the same search inside the
+	 * decoder and then allocated a SECOND buffer the size of the image and
+	 * copied every section into it, so that the engine could parse the
+	 * result back and recover what the header had said all along.
+	 */
+	if (kunp_rcstruct_section("", PEI_PAGE, u_len, KOF_PE_PERM_R,
+			    KOF_SECF_DATA | KOF_SECF_REBUILT) < 0)
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
+	if (!kunp_rcstruct_image() || !kunp_rcstruct_at(PEI_PAGE))
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
+	got = kunp_static_decode(decoder, stream, c_len, u_len, KOF_FORM_RAW);
+	if (got == 0)
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
+	/*
+	 * AND NOW WHAT IT ACTUALLY IS. Without this the child is a buffer of
+	 * machine code that identifies as nothing, and every module that
 	 * targets PE is ruled out before it runs.
 	 */
-	got = kof_unpack_form(decoder, stream, c_len, u_len, KOF_FORM_PE_IMAGE);
-	if (got == 0)
-		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
+	if (!kunp_rcstruct_layout_of_image())
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 
 	/*
 	 * The handover is checked, like every container in this directory
@@ -288,12 +309,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * the object while having produced nothing, which is the one answer a
 	 * scan must never give about a packed sample.
 	 */
-	if (!kof_child())
-		kof_unp_broken(KOF_UNP_LIMIT);
+	if (!kunp_rcstruct_done())
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 
 	/* Short of what the container declared: the stream did not hold what it
 	 * said it held. The host records its own reason when a limit was what
 	 * stopped it, and the first reason recorded is the one kept. */
 	if (got < u_len)
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 }

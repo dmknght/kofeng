@@ -215,7 +215,7 @@ static double scan_once(kof_scanner *sc, const char *path, uint8_t *obj,
 
 	produced_total = 0;
 	t0 = now_ms();
-	rc = kof_scan_path(sc, path, &opt, on_object, NULL);
+	rc = kscan_path(sc, path, &opt, on_object, NULL);
 	if (rc < 0)
 		*err = 1;
 	return now_ms() - t0;
@@ -231,7 +231,7 @@ int main(int argc, char **argv)
 	struct tally t;
 	uint32_t ti, fi, vi;
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		/* Not a failure. This test needs the engine's own database, which
 		 * the parser tests do not, so a tree built for them alone should
@@ -239,7 +239,7 @@ int main(int argc, char **argv)
 		printf("hostile unpack: no database at %s - skipped\n", db);
 		return 0;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	obj = malloc(SEED_MAX + 64u);
 	if (!sc || !obj)
 		return 1;
@@ -364,8 +364,8 @@ int main(int argc, char **argv)
 
 	unlink(path);
 	free(obj);
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 
 	if (t.worst_amp > 0.0)
 		printf("hostile unpack: %llu scan(s) over %u format(s) through "

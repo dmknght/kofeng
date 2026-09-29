@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzer/parsers/containers/lnk_parse.h"
+#include "../../libkofeng/analyzers/parsers/containers/lnk_parse.h"
 
 static int failures;
 

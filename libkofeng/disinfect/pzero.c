@@ -8,7 +8,7 @@
 #include "../kofcore/kofmod/kofsig.h"
 #include "../kofcore/kofmod/elf.h"
 #include "../kofcore/kofmod/pe.h"
-#include "../analyzer/parsers/binaries/elf_parse.h"
+#include "../analyzers/parsers/binaries/elf_parse.h"
 
 uint64_t kof_pz_clean_end(const struct kof_obj_ctx *ctx)
 {

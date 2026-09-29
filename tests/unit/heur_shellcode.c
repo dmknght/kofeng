@@ -183,7 +183,7 @@ static int shellcode_said(kof_scanner *sc, const char *path,
 	opt.max_resident_bytes = 16u << 20;
 	opt.max_object_bytes   = 1u << 20;
 	seen[0] = '\0';
-	if (kof_scan_path(sc, path, &opt, on_object, NULL) < 0) {
+	if (kscan_path(sc, path, &opt, on_object, NULL) < 0) {
 		fail("the scan could not run");
 		return 0;
 	}
@@ -199,14 +199,14 @@ int main(int argc, char **argv)
 	kof_scanner *sc;
 	uint64_t n;
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		printf("heur shellcode: cannot open %s\n", db);
 		return 2;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		return 2;
 	}
 
@@ -237,8 +237,8 @@ int main(int argc, char **argv)
 		fail("an ELF that kept its section table was reported");
 
 	remove(path);
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	printf("heur shellcode: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

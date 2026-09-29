@@ -856,7 +856,7 @@ static void check_stamp(void)
 		if (!e)
 			ok = 0;
 		else {
-			one = kof_engine_db_stamp(e);
+			one = kdb_stamp(e);
 			kof_db_free(e);
 		}
 	}
@@ -874,7 +874,7 @@ static void check_stamp(void)
 		if (!e)
 			ok = 0;
 		else {
-			two = kof_engine_db_stamp(e);
+			two = kdb_stamp(e);
 			kof_db_free(e);
 		}
 	}
@@ -893,7 +893,7 @@ static void check_stamp(void)
 		if (!e)
 			ok = 0;
 		else {
-			changed = kof_engine_db_stamp(e);
+			changed = kdb_stamp(e);
 			kof_db_free(e);
 		}
 	}

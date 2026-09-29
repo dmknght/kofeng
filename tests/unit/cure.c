@@ -261,19 +261,19 @@ int main(int argc, char **argv)
 
 	/* ---- what the scan describes ---------------------------------- */
 
-	e = kof_engine_open(db);
+	e = keng_open(db);
 	if (!e) {
 		printf("cure: cannot open %s - run `make databases "
 		       "BASEDIR=tests/sigs` first\n", db);
 		return 1;
 	}
-	sc = kof_scanner_new(e);
+	sc = kscan_new(e);
 	if (!sc) {
 		printf("cure: cannot make a scanner\n");
 		return 1;
 	}
 	memset(&opt, 0, sizeof opt);
-	rc = kof_scan_path(sc, path, &opt, on_object, NULL);
+	rc = kscan_path(sc, path, &opt, on_object, NULL);
 	ok("the object was scanned", rc >= 0 && n_obj > 0);
 	ok("and reported infected", seen.n > 0);
 
@@ -376,7 +376,7 @@ int main(int argc, char **argv)
 
 			n_obj = 0;
 			memset(&seen, 0, sizeof seen);
-			rc = kof_scan_path(sc, epath, &opt, on_object, NULL);
+			rc = kscan_path(sc, epath, &opt, on_object, NULL);
 			ok("the infection is found", rc >= 0 && seen.n > 0);
 			/*
 			 * TWO patches, not one: e_entry, and the PT_LOAD the
@@ -408,7 +408,7 @@ int main(int argc, char **argv)
 
 			n_obj = 0;
 			memset(&seen, 0, sizeof seen);
-			kof_scan_path(sc, epath, &opt, on_object, NULL);
+			kscan_path(sc, epath, &opt, on_object, NULL);
 			ok("and it no longer reports as infected", seen.n == 0);
 
 			/*
@@ -434,7 +434,7 @@ int main(int argc, char **argv)
 					 dir);
 				n_obj = 0;
 				memset(&seen, 0, sizeof seen);
-				kof_scan_path(sc, dpath, &opt, on_object, NULL);
+				kscan_path(sc, dpath, &opt, on_object, NULL);
 				ok("a doubled slash still reaches the repair",
 				   seen.n > 0 && seen.repair.n_fix == 2);
 			}
@@ -442,8 +442,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-	kof_scanner_free(sc);
-	kof_engine_close(e);
+	kscan_free(sc);
+	keng_close(e);
 
 	/* Leave nothing behind; a repair test that litters is a repair test
 	 * somebody stops running. */

@@ -17,7 +17,7 @@
  * read it is the wrong shape of answer.
  *
  * So this one carries its own decoder. The bytes are read with kof_u8, decoded by
- * arithmetic in this file, and handed over with kof_emit - no host support of any
+ * arithmetic in this file, and handed over with kunp_rcstruct_write - no host support of any
  * kind, and nothing about it that a later build has to grow. It exists to establish
  * that the module ABI is enough to do that, because "signatures can only match
  * strings" would be a real limit and it is not this one.
@@ -104,7 +104,7 @@ KOF_DEFINE_UNPACK
 			for (k = 0; k < run; k++) {
 				out[n++] = val;
 				if (n == CHUNK) {
-					if (!kof_emit(out, n))
+					if (!kunp_rcstruct_write(out, n))
 						return;
 					produced += n;
 					n = 0;
@@ -116,7 +116,7 @@ KOF_DEFINE_UNPACK
 		out[n++] = (uint8_t)(c ^ key);
 		key = (uint8_t)(key + KEY_STEP);
 		if (n == CHUNK) {
-			if (!kof_emit(out, n))
+			if (!kunp_rcstruct_write(out, n))
 				return;
 			produced += n;
 			n = 0;
@@ -124,12 +124,12 @@ KOF_DEFINE_UNPACK
 	}
 
 	if (n) {
-		if (!kof_emit(out, n))
+		if (!kunp_rcstruct_write(out, n))
 			return;
 		produced += n;
 	}
 
 	kof_debug("CustomStub.bytes", produced);
 	if (produced)
-		kof_child();
+		kunp_rcstruct_done();
 }

@@ -306,7 +306,7 @@ struct kof_fp_verdict {
 	uint8_t  packed;
 	uint8_t  depth;         /* executable packer layers above the payload */
 
-	/* kof_entropy_eighths over the object as scanned. A SHAPE and never a
+	/* kentropy_eighths over the object as scanned. A SHAPE and never a
 	 * verdict - 7.9 bits is a packed stage, an archive and a JPEG - and it
 	 * is in the report because it is the cheapest thing that says which
 	 * artefact to look at first. */
@@ -318,7 +318,7 @@ struct kof_fp_verdict {
 
 	/*
 	 * WHAT AN UNPACKER SAID ABOUT ITSELF - "UPX.PE" and its version, from
-	 * the note channel (kof_scanner_on_debug).
+	 * the note channel (kscan_on_debug).
 	 *
 	 * Diagnostics rather than a verdict, and the half a report about a
 	 * packed dropper is actually read for: "packed, and nothing came out"
@@ -646,7 +646,7 @@ void kof_report_health(struct kof_report *, const struct kof_evt_health *,
  * THE RULE THIS RESTORES. koffridge.h states it for the whole of libkoforbit:
  * orbit may know the engine's TYPES, the engine must never know orbit's. This
  * file used to go a step past that - it held a kof_scanner, built a
- * kof_scan_option, installed a debug callback and called kof_scan_path. That
+ * kof_scan_option, installed a debug callback and called kscan_path. That
  * is not knowing a type, it is DRIVING the engine, and driving it is a host's
  * job: the host owns the scanner, its options, its database and its stats, and
  * it is the only side that knows what a scan of a collected artefact should

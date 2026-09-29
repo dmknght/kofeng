@@ -81,7 +81,7 @@
  */
 
 #include <kofmod/kofsig.h>
-#include "msf_pe.h"
+#include <kofanalyze/msf_pe.h>
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -352,7 +352,7 @@ static int emit_elf_hdr(const struct kof_obj_ctx *ctx, uint64_t payload_n)
 	 */
 	put64(ph + 0x28, total);        /* p_memsz                          */
 	put64(ph + 0x30, 0x1000);       /* p_align                          */
-	return kof_emit(h, ELF_HDR_N);
+	return kunp_rcstruct_write(h, ELF_HDR_N);
 }
 
 KOF_DEFINE_UNPACK
@@ -452,7 +452,7 @@ KOF_DEFINE_UNPACK
 			return;
 		}
 	}
-	if (!kof_emit(buf, n))
+	if (!kunp_rcstruct_write(buf, n))
 		return;
 	/* Handed over, so the buffer starts again - without this the tail flush
 	 * below emitted the first chunk a second time. */
@@ -462,12 +462,12 @@ KOF_DEFINE_UNPACK
 		buf[n++] = (uint8_t)(kof_u8(at) ^
 				     key[(uint32_t)((at - ct) % keylen)]);
 		if (n == CHUNK) {
-			if (!kof_emit(buf, n))
+			if (!kunp_rcstruct_write(buf, n))
 				return; /* the host has stopped taking bytes */
 			n = 0;
 		}
 	}
-	if (n && !kof_emit(buf, n))
+	if (n && !kunp_rcstruct_write(buf, n))
 		return;
 
 	/*
@@ -476,6 +476,14 @@ KOF_DEFINE_UNPACK
 	 * after the host refused it would claim an unpacking that did not
 	 * happen.
 	 */
-	if (!kof_child())
-		kof_unp_broken(KOF_UNP_LIMIT);
+	/*
+	 * AND THIS OBJECT WAS THE WRAPPER. What came out is what was inside
+	 * it, one layer in - see kunp_rcstruct_supersedes. Without it a sample
+	 * wrapped three deep is reported as three recovered objects, two of
+	 * which are a forty-six byte decryptor in front of bytes nobody can
+	 * read.
+	 */
+	kunp_rcstruct_supersedes();
+	if (!kunp_rcstruct_done())
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

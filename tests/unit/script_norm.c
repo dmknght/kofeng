@@ -18,7 +18,7 @@
 #include <kofmod/script.h>
 
 #include "../../libkofeng/kofcore/kofcore.h"
-#include "../../libkofeng/analyzer/parsers/scripts/script_norm.h"
+#include "../../libkofeng/analyzers/parsers/scripts/script_norm.h"
 
 static int fails;
 

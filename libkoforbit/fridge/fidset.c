@@ -61,7 +61,7 @@
  *             than read with the fields of a different layout.
  *   stride    the fence's, checked because the search reads it
  *   db_stamp  WHICH DATABASE these answers belong to - see
- *             kof_engine_db_stamp. Not a build date: a date cannot tell one
+ *             kdb_stamp. Not a build date: a date cannot tell one
  *             database from another built the same hour, and removing a pack
  *             does not move it at all.
  *   eng_stamp WHICH ENGINE produced them. The rules can be identical and the

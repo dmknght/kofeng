@@ -32,8 +32,8 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/analyzer/parsers/containers/arj_parse.h"
-#include "../../libkofeng/extractor/decomp/lzhuf.h"
+#include "../../libkofeng/analyzers/parsers/containers/arj_parse.h"
+#include "../../libkofeng/extractors/decomp/lzhuf.h"
 #include "outsink.h"
 
 static int failures;
@@ -341,10 +341,10 @@ int main(void)
 	 * bytes hash to a CRC the archive declares.
 	 */
 	if (!failures) {
-		struct kof_engine *eng = kof_engine_open(db);
+		struct kof_engine *eng = keng_open(db);
 
 		if (eng) {
-			struct kof_scanner *sc = kof_scanner_new(eng);
+			struct kof_scanner *sc = kscan_new(eng);
 			struct fed fd;
 			struct kof_scan_option opt;
 
@@ -353,7 +353,7 @@ int main(void)
 			memset(&fd, 0, sizeof fd);
 			memset(&opt, 0, sizeof opt);
 			if (sc) {
-				if (kof_scan_bytes(sc, f, len, "test.arj", &opt,
+				if (kscan_bytes(sc, f, len, "test.arj", &opt,
 						   on_object, &fd) <= 0)
 					fail("engine", "the archive was not "
 					     "scanned at all");
@@ -361,12 +361,12 @@ int main(void)
 					fail("engine", "the engine produced no "
 					     "child whose bytes the archive's "
 					     "own checksums recognise");
-				kof_scanner_free(sc);
+				kscan_free(sc);
 			}
 			printf("       engine: %d object(s), %d child(ren) "
 			       "matched a declared CRC\n", fd.objects,
 			       fd.matched);
-			kof_engine_close(eng);
+			keng_close(eng);
 		}
 	}
 

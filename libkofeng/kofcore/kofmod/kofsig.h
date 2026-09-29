@@ -1113,7 +1113,7 @@ struct kof_region_shape {
 	uint32_t reserved;
 };
 
-struct kof_ovlf_chain;   /* detector/overlord/ovlflow.h - see ovl_chain */
+struct kof_ovlf_chain;   /* detectors/overlord/ovlflow.h - see ovl_chain */
 struct kof_ovl_shape;    /* kofmod/kofoverlord.h      - see ovl_shape */
 
 struct kof_content {
@@ -1288,6 +1288,72 @@ struct kof_content {
 	void (*child_kind)(const struct kof_obj_ctx *, uint32_t kind);
 
 	/*
+	 * WHAT THE NEXT CHILD WILL NEED DONE TO IT, said by the module that is
+	 * about to make it.
+	 *
+	 * An unpacker knows something about its output that no later look at
+	 * the bytes recovers. MPRESS decompresses an image whose code is
+	 * ordinary and whose payload the PROGRAM decrypts at run time: the
+	 * executable section averages 4.6 bits per byte, so the emulator's
+	 * entropy gate correctly says "not packed" and wrongly concludes
+	 * "nothing to run". The module knew better before it produced a byte.
+	 *
+	 * SAID RATHER THAN INFERRED, and the difference is the point. Every
+	 * inference tried here was weak - "a PE importing fewer than four
+	 * functions" needed a threshold nobody had measured, and giving the
+	 * child a header at all destroyed the stronger evidence, which was
+	 * that it had none. A declaration is a fact about how the object came
+	 * to exist, and it cannot be erased by what is done to the object
+	 * afterwards.
+	 *
+	 * `want` is a KOF_ENG_* mask, the same vocabulary a heuristic rule
+	 * uses. `level` is the lowest --heur the ask is honoured at, so a
+	 * module can say "this is worth the emulator, but only for a caller
+	 * who asked for that much work" - the engine compares it and drops the
+	 * ask rather than the module testing a level it cannot see.
+	 *
+	 * The engine still bounds what it grants: the packer depth ceiling and
+	 * the whole-scan emulation ceiling apply exactly as they do to a
+	 * rule's ask, so a directory of crafted files cannot spend a scan.
+	 */
+	void (*child_want)(const struct kof_obj_ctx *, uint32_t want,
+			   uint32_t level);
+
+	/*
+	 * WHERE THE ORIGINAL PROGRAM WILL BE ONCE THIS OBJECT'S LOADER HAS RUN.
+	 *
+	 * A RANGE HERE IS A FETCH, NOT A HOP, and that decides which packers
+	 * can use this at all. The run ends the moment an instruction is
+	 * fetched from one of these addresses, so a range only means "handover"
+	 * when the loader NEVER executes inside it. That holds for MPRESS and
+	 * for Oreans' protectors, where the program sits in sections the stub
+	 * only ever writes to. It does not hold for PECompact, which
+	 * decompresses into the section its own entry point is in: naming that
+	 * section ends the run at instruction 0, and naming the others ends it
+	 * six instructions later at the stub's first jump - both measured on
+	 * 007 Spy.exe. That family has no range to name, and declaring nothing
+	 * is the correct answer for it.
+	 *
+	 * About the CHILD this module is about to produce, and carried with it:
+	 * it is what the interpreter needs before it starts on that child, so
+	 * that a fetch from one of these ranges ends the run as a handover
+	 * instead of running on into the program itself. The module that
+	 * unpacked the loader is the only thing that knows, and it knows before
+	 * the child exists.
+	 *
+	 * The engine cannot work this out. For one packer the program is in the
+	 * sections that have no file bytes; for another - Oreans' - those are
+	 * the LOADER and the program is in the sections that do, encrypted. The
+	 * two are mirror images and nothing structural tells them apart, so the
+	 * module that recognised the container is the only thing that knows.
+	 *
+	 * `rva` is an address in the object's own image, not a file offset.
+	 * Declaring nothing is normal and means "stop the run the usual ways".
+	 */
+	void (*emu_watch)(const struct kof_obj_ctx *, uint64_t rva,
+			  uint64_t len);
+
+	/*
 	 * WHICH ENTRY THE NEXT CHILD IS THE CONTENT OF.
 	 *
 	 * The third of the three declarations a producer makes before handing a
@@ -1347,7 +1413,7 @@ struct kof_content {
 	 * means the host's ceiling alone.
 	 *
 	 * Returns bytes emitted, which is short of the region when a cap bound. The
-	 * module closes it with kof_child() - gathering does not, because a module may
+	 * module closes it with kunp_rcstruct_done() - gathering does not, because a module may
 	 * want more than one region in one child.
 	 */
 	uint64_t (*gather)(const struct kof_obj_ctx *, uint32_t region_mask,
@@ -1379,6 +1445,228 @@ struct kof_content {
 	 * child that was never produced does not drift onto the next one.
 	 */
 	void (*name_next)(const struct kof_obj_ctx *, uint64_t off, uint64_t len);
+	/*
+	 * AND A NAME THE MODULE KNOWS RATHER THAN READS.
+	 *
+	 * name_next takes the child's name from bytes already in the object,
+	 * which is right for a container: the entry name is in the archive. A
+	 * packer has no such bytes. What it has is what it worked OUT - which
+	 * build of the packer wrote this file - and that is worth carrying on
+	 * the child, because the child is the thing that build produced and a
+	 * reader looking at it in kofviewer has no other way to know.
+	 *
+	 * The string is copied; it may be a literal. It is spent by the next
+	 * child like every other pending claim.
+	 */
+	void (*note_next)(const struct kof_obj_ctx *, const char *text);
+
+	/*
+	 * READ BACK, AND PATCH, WHAT THIS MODULE HAS ALREADY PRODUCED.
+	 *
+	 * unpack_peek decodes the FRONT of a stream into a caller's buffer,
+	 * which answers "the layout is in the first block". It does not answer
+	 * the other shape: a container whose header depends on something buried
+	 * in the content. MPRESS is that shape - the original entry point and
+	 * the import table are written in a fix-up stub that the packer
+	 * compressed along with the program, and measured over six files that
+	 * stub sits between 1.8 KB and 2.0 MB into the decompressed content.
+	 * Peeking cannot reach it and a module may not keep a buffer that size.
+	 *
+	 * So: produce the content, read the stub back out of what was produced,
+	 * and patch the header that was emitted before any of it was known.
+	 * Offsets are from the start of the child, whether it is still in
+	 * memory or has spilled to a file.
+	 *
+	 * produced_read returns the byte count, which is short at the end of
+	 * what exists. produced_poke writes over bytes ALREADY EMITTED and
+	 * refuses anything past them: it is for correcting a field, never for
+	 * appending, and emit remains the only way to make the child longer.
+	 */
+	uint32_t (*produced_read)(const struct kof_obj_ctx *, uint64_t off,
+				  void *out, uint32_t cap);
+	int (*produced_poke)(const struct kof_obj_ctx *, uint64_t off,
+			     const void *bytes, uint32_t n);
+
+	/*
+	 * THE PARENT AGAIN, AS THE START OF THIS CHILD - see DESIGN-object-
+	 * pipeline.md section 5.
+	 *
+	 * For a module that CHANGES an object rather than building a new one.
+	 * `strxor_tab_00.c` alters 7799 bytes of a 5353472 byte object; written
+	 * as an emit it has to re-emit all of it in file order, which means
+	 * sorting its own edit list and resolving its own overlaps - and both
+	 * were got wrong, once dropping 114353 bytes and once letting a record
+	 * swallow its neighbour.
+	 *
+	 * With this it declares the derivation, then uses produced_poke to
+	 * change the ranges it knows about, in any order. The engine holds the
+	 * bytes; the module holds only what it found.
+	 *
+	 * AND IT IS WHAT STOPS A MODULE MEETING ITS OWN OUTPUT. A derived
+	 * object is never offered back to the module that derived it, which
+	 * replaces three hand-written recursion guards - two of which were
+	 * wrong when they were written. A NEW object is still offered to
+	 * everyone, so a zip inside a zip, or MPRESS under MPRESS, is unchanged.
+	 *
+	 * Charged like any other production: the child is as big as the parent
+	 * and the budgets see that.
+	 *
+	 * Returns 0 if the sink is not empty, if a budget refused it, or if the
+	 * host does not carry it.
+	 */
+	int (*derive)(const struct kof_obj_ctx *);
+
+	/*
+	 * The child is an IMAGE the engine lays out from the sections just
+	 * declared: zero filled to their span, written at addresses with
+	 * produced_poke, and given its header by the engine when it closes.
+	 * See `section` below.
+	 */
+	int (*image)(const struct kof_obj_ctx *);
+
+	/*
+	 * WHERE THE NEXT WRITE LANDS, in a child made by `derive` or `image`.
+	 *
+	 * Everything that produces bytes - emit, and every decompressor behind
+	 * unpack_form - goes to the same place, so this is the whole of
+	 * "decompress that stream into this section". Set it, decode, and the
+	 * output is where it belongs; nothing has to be staged in a buffer a
+	 * module cannot afford.
+	 */
+	int (*at)(const struct kof_obj_ctx *, uint64_t off);
+
+	/*
+	 * A SECTION OF THE CHILD, SAID RATHER THAN ENCODED INTO A HEADER.
+	 *
+	 * See DESIGN-object-pipeline.md. A module that rebuilds an image knows
+	 * its layout exactly and has, until now, had one way to pass it on:
+	 * synthesise a PE header and let the engine parse it back. That round
+	 * trip loses whatever the header has no field for, and three of those
+	 * losses are measured:
+	 *
+	 *   - HOLLOW. SizeOfRawData must be the span for the file to be
+	 *     readable, so a section that had no bytes in the original stops
+	 *     looking like one. VMProtect's destinations are recognised by
+	 *     exactly that, so one layer in they became invisible and the
+	 *     module had to anchor on a coincidence in the data instead.
+	 *   - PAD. The zero fill between VirtualSize and the page boundary is
+	 *     inside the section, so the partition hands it to DATA:
+	 *     update_v103.exe's child had a DATA region of 3972 bytes, every
+	 *     one of them NULL.
+	 *   - ORIGIN. MPRESS stands up an import directory that was not in the
+	 *     file. Nothing records that it was invented, so a reader cannot
+	 *     tell it from one that was read.
+	 *
+	 * Declared sections are in address order or they are refused: the
+	 * engine lays the child out from them and a layout it cannot order is
+	 * a layout it cannot write.
+	 *
+	 * Late is normal. A module may declare a section before its content
+	 * exists and correct it afterwards with section_set - which is what
+	 * mpress_pe.c's thirteen kunp_rcstruct_poke calls are doing by hand today.
+	 */
+	int (*section)(const struct kof_obj_ctx *, const char *name,
+		       uint64_t rva, uint64_t vsize, uint32_t perm,
+		       uint32_t flags);
+	/*
+	 * FORGET THE LAYOUT AND SAY IT AGAIN.
+	 *
+	 * For a module whose final shape is not the one it had to declare in
+	 * order to get an image at all. mpress_pe.c is that shape: it lays the
+	 * child out from the parent's sections, decompresses, and only then can
+	 * mp_split find the landmarks that say where the real boundaries are -
+	 * a dozen pieces that do not line up with what was declared. Correcting
+	 * them one at a time cannot express it, because the new pieces sit
+	 * between the old ones.
+	 *
+	 * The image keeps its size and its content; only the description is
+	 * cleared. The table that replaces it still has to cover the same
+	 * extent, and the engine says so at the close rather than trusting it.
+	 */
+	int (*sections_reset)(const struct kof_obj_ctx *);
+	/* The entry point of the child, which is often knowable only after its
+	 * content exists. */
+	int (*child_entry_rva)(const struct kof_obj_ctx *, uint64_t rva);
+
+	/*
+	 * A DATA DIRECTORY OF THE CHILD, for the one a module REBUILT.
+	 *
+	 * The engine carries over the directories the parent declared that
+	 * still point at something. This is the other case: an import table
+	 * MPRESS never had - it keeps a hint list - and that this module stood
+	 * up at an address of its own choosing. Saying it here is what replaces
+	 * poking the address and the size into a header by hand.
+	 */
+	int (*child_dir)(const struct kof_obj_ctx *, uint32_t idx,
+			 uint64_t rva, uint64_t size);
+
+	/*
+	 * READ THE LAYOUT OUT OF WHAT HAS JUST BEEN PRODUCED.
+	 *
+	 * For a packer that hands back an IMAGE and not a file - UPX does. The
+	 * original header is somewhere inside the decompressed bytes and the
+	 * section table in it IS the layout, but the module does not know where
+	 * until it has decompressed, and parsing a PE header is not a thing
+	 * every module should carry its own copy of.
+	 *
+	 * So: declare a span, take an image, decompress into it, and then ask.
+	 * The sections, the entry point and the image base are declared from
+	 * what was found, replacing whatever was declared to get the room.
+	 *
+	 * This replaces KOF_FORM_PE_IMAGE, which did the same search inside the
+	 * decoder and then allocated a SECOND buffer and copied every section
+	 * into it so that the engine could parse the result back. The bytes
+	 * were already where they belonged; only the statement was missing.
+	 */
+	/*
+	 * Answers WHERE THE IMAGE ENDS - the address just past its last
+	 * section, which is also the length the child has just been cut back
+	 * to - or 0 when no layout could be read.
+	 *
+	 * The end is the answer and not a side effect. A module that folds
+	 * something ELSE in behind the image - pages a run wrote outside it -
+	 * has to know where behind is, and it cannot work that out: the span
+	 * it declared to get the image was a guess about size, and the header
+	 * found inside says something else. Returning a flag instead cost the
+	 * surplus: emu_harvest.h wrote its extra pages at the span's end,
+	 * this call then cut the child back to the image, and five declared
+	 * sections came out with SizeOfRawData 0 and SEC_PAST_EOF - measured
+	 * on 007 Spy.exe.
+	 */
+	uint64_t (*layout_of_produced)(const struct kof_obj_ctx *);
+
+	/*
+	 * ---- DRIVING THE INTERPRETER FROM A MODULE -------------------------
+	 *
+	 * An unpack module is the abstraction over HOW a family comes apart -
+	 * statically, by running it, or by alternating. So the run is asked for
+	 * here and its result is read here, and the interpreter creates
+	 * nothing: it gathers, and this module decides what any of it is.
+	 *
+	 * That is a hardening as much as a tidy: the component that executes
+	 * hostile bytes has no path to making objects, declaring regions or
+	 * naming anything. It reports.
+	 *
+	 * emu_run answers how many regions the run left, or 0 - which is also
+	 * what the host answers when it refuses, because a budget is the
+	 * host's and never the module's.
+	 *
+	 * `vouched` is a module saying it RECOGNISED this family and that a run
+	 * is worth its cost. Without it the host asks its own question first -
+	 * is this object dense, unloadable, a loader, carrying an appendix -
+	 * which is the only thing that can be asked about a file nobody
+	 * recognised. Either way the ceilings are the host's.
+	 *
+	 * A region is valid until this module returns; kunp_emu_take copies
+	 * one into the child being built, at the current cursor.
+	 */
+	uint32_t (*emu_run)(const struct kof_obj_ctx *, uint32_t vouch_level);
+	int (*emu_region)(const struct kof_obj_ctx *, uint32_t i, uint64_t *va,
+			  uint64_t *len, uint32_t *kind);
+	int (*emu_take)(const struct kof_obj_ctx *, uint32_t i);
+	/* Whether anything has already opened this object - what a last-resort
+	 * module asks before it spends a run on something already in hand. */
+	int (*opened_already)(const struct kof_obj_ctx *);
 
 	/*
 	 * "I stopped before I was finished."
@@ -1693,6 +1981,99 @@ struct kof_content {
 			      uint32_t n, uint32_t mask, uint32_t key,
 			      uint8_t *out, uint32_t cap);
 
+	/*
+	 * THE SAME DECLARATION, ABOUT THE OBJECT IN HAND RATHER THAN THE NEXT
+	 * CHILD.
+	 *
+	 * emu_watch above is a PRODUCER talking about something that does not
+	 * exist yet: it unpacks a loader, knows the program it just wrote will
+	 * be at such an address, and the engine carries that with the child so
+	 * that when the child is run the interpreter knows where to stop.
+	 *
+	 * This is the other half, and it only became reachable when modules
+	 * started driving the interpreter themselves. The module that
+	 * recognised a packer it cannot decode statically runs THIS object, and
+	 * what it knows before the first instruction is a fact about the file in
+	 * front of it, not about a child.
+	 *
+	 * WHAT IT IS WORTH, MEASURED. pecompact_pe.c finds the stub's last
+	 * instruction - `mov eax,esi; pop edx; pop esi; pop edi; pop ecx;
+	 * pop ebx; pop ebp; jmp eax`, one match in 007 Spy.exe - and names the
+	 * two bytes of that `jmp eax`. The run then ends when the loader is
+	 * finished instead of when the instruction ceiling is: 207,329,920
+	 * instructions and 17.3 seconds become a fraction of that, and the
+	 * image is the one the program was about to run rather than whatever
+	 * the auto-snapshot caught on the way past.
+	 *
+	 * Two entry points rather than a flag, because the two are read at
+	 * different times by different code and confusing them is silent: a
+	 * declaration meant for this run that landed in the pending set would
+	 * be attached to whatever child came next.
+	 *
+	 * Declared before emu_run, and it lives exactly as long as that run.
+	 */
+	void (*emu_watch_here)(const struct kof_obj_ctx *, uint64_t rva,
+			       uint64_t len);
+
+	/*
+	 * THE NEXT CHILD REPLACES THIS OBJECT - it is not a thing this object
+	 * CONTAINS, it is what this object WAS.
+	 *
+	 * For a wrapper that is nothing but a wrapper. msfvenom applies its XOR
+	 * encoder as many times as asked, and each layer is a forty-six byte
+	 * stub in front of the next layer's ciphertext; a module cannot call
+	 * another, so it peels one layer and hands the rest over as a child,
+	 * which comes back round and peels the next. Three layers, three
+	 * objects - and two of them are a decryptor and bytes nobody can read.
+	 * Measured on samples/msfvenom-encr/rc4_1: three objects reported,
+	 * 230, 180 and 250 bytes, and only the last is a program.
+	 *
+	 * So the module says it: what I just produced is me, one layer in. The
+	 * object is still SCANNED - every rule still runs on it, and a stub
+	 * that is itself a detection is still detected - it is not REPORTED as
+	 * a thing recovered, because it is not a separate thing.
+	 *
+	 * NEVER THE FILE ON DISK. A top-level object is what the caller handed
+	 * over and is reported whatever any module says about it; the engine
+	 * refuses this there rather than trusting every module to check.
+	 *
+	 * Said before the child is closed, like every other pending
+	 * declaration, and it applies to the object declaring it rather than
+	 * to the child - which is why it is not spelled as a property of the
+	 * child.
+	 */
+	void (*supersede)(const struct kof_obj_ctx *);
+
+	/*
+	 * WHAT KIND OF FILE THE DECLARED IMAGE IS TO BE WRITTEN AS.
+	 *
+	 * A declared image gets its header from the engine - see `section`. For
+	 * a packer that unpacks a PE the answer needs no asking: the child is
+	 * the parent's own image and the parent's header is the template. For a
+	 * DECODER it does. What comes out of an msfvenom stub is shellcode, and
+	 * shellcode is not a file of any format at all; which file it should
+	 * become is a fact about the payload, not about the bytes - a payload
+	 * peeled out of an ELF is Linux shellcode and belongs in an ELF, one
+	 * peeled out of a PE is Windows shellcode and belongs in a PE - and
+	 * after the first layer the parent is FORMATLESS, so the engine has
+	 * nothing left to copy.
+	 *
+	 * So the module says it. `fmt` is a KOF_FMT_*, `arch` a KOF_ARCH_*, and
+	 * `base` where the image is to be loaded; `entry` is declared
+	 * separately, relative to `base`, like every other address.
+	 *
+	 * This replaces three decoders assembling a fifty-two byte ELF header
+	 * by hand out of a shared file. That is exactly the round trip the
+	 * declaration mechanism exists to end, and it had the failure mode that
+	 * argument predicts: the header was written with kunp_rcstruct_write as
+	 * ordinary content, so nothing in the engine knew it WAS a header, and
+	 * the child's first fifty-two bytes were a region like any other.
+	 *
+	 * Declaring nothing keeps the old answer - the parent's format and the
+	 * parent's header as the template.
+	 */
+	void (*as_format)(const struct kof_obj_ctx *, uint8_t fmt, uint8_t arch,
+			  uint64_t base);
 };
 
 /*
@@ -1732,7 +2113,7 @@ enum kof_unp_method {
 	 * one case that needs saying expressible: an entry that is stored and
 	 * SCATTERED. A stored entry in one range is a window and costs nothing;
 	 * a stored entry in several is a JOIN, which is a copy and a budget,
-	 * and kof_unpack_entry is where that belongs.
+	 * and kunp_static_entry is where that belongs.
 	 *
 	 * A cabinet is why. Its uncompressed folders are cut into blocks with
 	 * an eight byte header between them, so a stored file larger than a
@@ -1800,7 +2181,7 @@ enum kof_unp_method {
 	 * call targets, a stream of jump targets and a range coder that says which
 	 * candidate opcodes were converted. Which packed stream is which comes from
 	 * the folder's bind pairs, so only the host can resolve it - see
-	 * kof_unpack_entry.
+	 * kunp_static_entry.
 	 */
 	KOF_UNP_BCJ2 = 7,
 
@@ -1850,7 +2231,7 @@ enum kof_unp_method {
 	KOF_UNP_ASCII85 = 10,
 
 	/*
-	 * The other two transport codings, and see extractor/decomp/textcode.h for
+	 * The other two transport codings, and see extractors/decomp/textcode.h for
 	 * why the three belong together.
 	 *
 	 * ASCIIHEX is bounded by its input like ASCII85, so it can be a middle
@@ -1867,7 +2248,7 @@ enum kof_unp_method {
 
 	/*
 	 * LZW as PDF and TIFF write it - most-significant-bit first, which is
-	 * NOT the GIF variant. See extractor/decomp/lzw.h.
+	 * NOT the GIF variant. See extractors/decomp/lzw.h.
 	 *
 	 * Worth having because it was superseded: a filter nobody expects is a
 	 * filter a parser was never taught, and that is a cheap way to put
@@ -1879,7 +2260,7 @@ enum kof_unp_method {
 	KOF_UNP_LZW = 13,
 
 	/*
-	 * bzip2, whole streams of it - see extractor/decomp/bzip2.h.
+	 * bzip2, whole streams of it - see extractors/decomp/bzip2.h.
 	 *
 	 * A .bz2 file, a zip entry stored with method 12, and the compressed
 	 * half of a .tar.bz2 are all this one coding, and none of them could be
@@ -1906,7 +2287,7 @@ enum kof_unp_method {
 	 * A cabinet's MSZIP folder is one deflate stream PER BLOCK, each behind
 	 * the two bytes "CK", and every block after the first may reference up
 	 * to 32KB of the previous block's output. So it is decoded through
-	 * kof_unpack_entry rather than kof_unpack_at: what it needs is the list
+	 * kunp_static_entry rather than kof_unpack_at: what it needs is the list
 	 * of blocks, which resolve_entry answers, and a decoder that can be
 	 * seeded, which kof_inflate_seeded is.
 	 *
@@ -1992,6 +2373,36 @@ enum kof_unp_method {
 	KOF_UNP_LZHUF_LH5 = 26,   /* LHA -lh5-: 8KB dictionary */
 	KOF_UNP_LZHUF_LH6 = 27,   /* LHA -lh6-: 32KB */
 	KOF_UNP_LZHUF_LH7 = 28,   /* LHA -lh7-: 64KB */
+
+	/*
+	 * aPLib, which is how a Themida protected PE carries its loader.
+	 *
+	 * No parameters, unlike LZMA: the coding has none. The stream states
+	 * neither its compressed nor its uncompressed length, so a caller
+	 * bounds it with out_cap and checks what came out against whatever its
+	 * container declared - see bases/unp/themida_pe.c, where the container
+	 * is a section's VirtualSize.
+	 */
+	KOF_UNP_APLIB = 29,
+
+	/*
+	 * LZMAT, WHICH IS WHAT MPRESS USED BEFORE IT MOVED TO LZMA.
+	 *
+	 * A byte oriented LZ77 with a nibble stream running through it. No
+	 * parameters - the coding has none - and no declared lengths, so a
+	 * caller bounds it with out_cap and checks the result against whatever
+	 * its container said. Measured, two of the seven MPRESS files here are
+	 * this coding and nothing else in the engine reads it.
+	 *
+	 * The two that follow are the same stream with MPRESS's call target
+	 * conversion undone afterwards, for the same reason the LZMA pair
+	 * below carries it: the transform rewrites addresses relative to a
+	 * position in the OUTPUT, so it runs once the output is whole, and
+	 * the width decides which opcodes were converted.
+	 */
+	KOF_UNP_LZMAT = 30,
+	KOF_UNP_LZMAT_MPRESS32 = 31,
+	KOF_UNP_LZMAT_MPRESS64 = 32,
 
 	/*
 	 * LZMA carries three parameters, so the id carries them.
@@ -2270,6 +2681,10 @@ static inline const char *kof_unp_method_name(uint32_t m)
 	case KOF_UNP_RAR3:          return "rar3";
 	case KOF_UNP_RAR5:          return "rar5";
 	case KOF_UNP_BCJ2:          return "bcj2";
+	case KOF_UNP_APLIB:         return "aplib";
+	case KOF_UNP_LZMAT:         return "lzmat";
+	case KOF_UNP_LZMAT_MPRESS32:
+	case KOF_UNP_LZMAT_MPRESS64: return "lzmat+cto";
 	case KOF_UNP_LZHUF_ARJ:     return "arj";
 	case KOF_UNP_LZHUF_LH5:     return "lh5";
 	case KOF_UNP_LZHUF_LH6:     return "lh6";
@@ -2378,7 +2793,7 @@ struct kof_entry {
 	 * them and the order was lost - PDF stored a BITMASK, said so in its
 	 * own header, and the decompressor then guessed. Measured: on 1 of 3
 	 * real documents that guess fails twice, reaches
-	 * kof_unp_broken(KOF_UNP_UNSUPPORTED), and a clean file is reported as
+	 * kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED), and a clean file is reported as
 	 * one the engine could not finish.
 	 *
 	 * Applied [0] first. A zero terminates - and a FULL array has no
@@ -2744,7 +3159,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  *             const struct kof_pe_info *pe = kof_pe(ctx);
  *
  *             if (pe->overlay_len)
- *                     kof_child_window(pe->overlay_off, pe->overlay_len);
+ *                     kunp_rcstruct_window(pe->overlay_off, pe->overlay_len);
  *     }
  *
  * Same shape as KOF_DEFINE_SCAN and the same reason: it is the only place the
@@ -3045,7 +3460,7 @@ enum kof_analyze {
  *
  * The chain is the capabilities the reference's code asks the system for, in
  * order, with the links between them - written out by the generator in
- * kofviewer, never typed. See detector/overlord/ovlflow.h for what a step holds and
+ * kofviewer, never typed. See detectors/overlord/ovlflow.h for what a step holds and
  * why an address is not one of the things it holds.
  *
  * SUSPECT RATHER THAN INFECT is the generator's default, for the reason the
@@ -3230,7 +3645,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * KOF_XREF_CALL, and neither needs a line changed here.
  *
  * A RANGE, because a blob is not referred to at its first byte - see
- * kof_xref_in in analyzer/disasm/xref.h for the three-load measurement that says so.
+ * kof_xref_in in analyzers/disasm/xref.h for the three-load measurement that says so.
  * Pass the variable's own size; 0 asks about the one address.
  *
  * Zero for a range nothing referred to, and zero for an object with no code to
@@ -3330,9 +3745,9 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 /*
  * YIELDING CHILD OBJECTS
  *
- *     kof_child_window(off, len)     a range of this object, no copy
- *     kof_emit(bytes, n)             bytes that did not exist before
- *     kof_child()                    close this child, start the next
+ *     kunp_rcstruct_window(off, len)     a range of this object, no copy
+ *     kunp_rcstruct_write(bytes, n)             bytes that did not exist before
+ *     kunp_rcstruct_done()                    close this child, start the next
  *
  * Every one returns zero when the engine will take no more - the budget is gone,
  * or the tree is as deep or as wide as it is allowed to get. A module must stop
@@ -3344,20 +3759,20 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  *
  *     while (more_input) {
  *             n = inflate_some(buf, sizeof buf);
- *             if (!kof_emit(buf, n))
+ *             if (!kunp_rcstruct_write(buf, n))
  *                     return;              // budget gone; the scan says so
  *     }
- *     kof_child();
+ *     kunp_rcstruct_done();
  */
-#define kof_child_window(off, len)                                         \
+#define kunp_rcstruct_window(off, len)                                         \
 	((ctx)->content->window ?                                          \
 	 (ctx)->content->window((ctx), (uint64_t)(off), (uint64_t)(len)) : 0)
 
-#define kof_emit(bytes, n)                                                 \
+#define kunp_rcstruct_write(bytes, n)                                                 \
 	((ctx)->content->emit ?                                            \
 	 (ctx)->content->emit((ctx), (bytes), (uint32_t)(n)) : 0)
 
-#define kof_child()                                                        \
+#define kunp_rcstruct_done()                                                        \
 	((ctx)->content->child ? (ctx)->content->child((ctx)) : 0)
 
 /*
@@ -3366,13 +3781,13 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * Does not close the child: a module gathering two regions into one object is a
  * legitimate thing to want, so where the object ends stays the module's decision.
  */
-#define kof_gather_max(region_mask, cap)                                   \
+#define kunp_static_gather(region_mask, cap)                                   \
 	((ctx)->content->gather ?                                          \
 	 (ctx)->content->gather((ctx), (uint32_t)(region_mask),            \
 				(uint64_t)(cap)) : 0)
 
 /* Bounded by the host's ceiling alone. */
-#define kof_gather(region_mask) kof_gather_max((region_mask), 0)
+#define kunp_static_gather_all(region_mask) kunp_static_gather((region_mask), 0)
 
 /*
  * Measure a region instead of reading it.
@@ -3415,8 +3830,8 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 /*
  * Name the next child, from bytes already in this object.
  *
- *     kof_name_next(e->name_off, e->name_len);
- *     kof_child_window(e->data_off, e->size);
+ *     kunp_rcstruct_name(e->name_off, e->name_len);
+ *     kunp_rcstruct_window(e->data_off, e->size);
  *
  * Reporting only. Nothing in the engine reads a child's name back, and nothing
  * ever opens a path built from one - see the note in objsrc.h on why the produced
@@ -3425,15 +3840,15 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 /*
  * Declare what the next child is, when the structure said.
  *
- *     kof_child_format(KOF_FMT_SCRIPT);
- *     kof_child_window(off, len);
+ *     kunp_rcstruct_format(KOF_FMT_SCRIPT);
+ *     kunp_rcstruct_window(off, len);
  *
  * See child_format for when a module may say this and when it must not.
  */
 /*
  * Decode an entry's whole coding chain into a child.
  *
- *     kof_unpack_chain(e->index)
+ *     kunp_static_decode_chain(e->index)
  *
  * For a container that has an entry table: the chain, its order and its
  * bounds are all the host's, and what the module supplies is which entry.
@@ -3453,37 +3868,110 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	((ctx)->content->fmt_wanted ?                                      \
 	 (ctx)->content->fmt_wanted((ctx), (uint8_t)(fmt)) : 1)
 
-#define kof_unpack_chain(index)                                            \
+#define kunp_static_decode_chain(index)                                            \
 	((ctx)->content->unpack_chain ?                                    \
 	 (ctx)->content->unpack_chain((ctx), (uint32_t)(index)) : 0u)
 
 /*
  * Declare what the next child is FOR.
  *
- *     kof_child_kind(KOF_ENT_CONTENT);
- *     kof_child_window(off, len);
+ *     kunp_rcstruct_kind(KOF_ENT_CONTENT);
+ *     kunp_rcstruct_window(off, len);
  *
  * Also names it, when name_next found nothing to name it with.
  */
 /*
  * Declare which entry the next child is the content of.
  *
- *     kof_child_entry(e->index);
- *     kof_unpack_chain(e->index);
+ *     kunp_rcstruct_child_entry(e->index);
+ *     kunp_static_decode_chain(e->index);
  */
-#define kof_child_entry(index)                                             \
+#define kunp_rcstruct_child_entry(index)                                             \
 	((void)((ctx)->content->child_entry ?                               \
 		((ctx)->content->child_entry((ctx), (uint32_t)(index)), 0) : 0))
 
-#define kof_child_kind(kind)                                               \
+#define kunp_rcstruct_kind(kind)                                               \
 	((void)((ctx)->content->child_kind ?                                \
 		((ctx)->content->child_kind((ctx), (uint32_t)(kind)), 0) : 0))
 
-#define kof_child_format(fmt)                                              \
+#define kunp_rcstruct_format(fmt)                                              \
 	((void)((ctx)->content->child_format ?                              \
 		((ctx)->content->child_format((ctx), (uint8_t)(fmt)), 0) : 0))
 
-#define kof_name_next(off, len)                                            \
+/*
+ * Declare what the next child needs and from what --heur level up.
+ *
+ *     kunp_emu_want(KOF_ENG_USE_EMU, 2);
+ *     kunp_static_decode(...);
+ *     kunp_rcstruct_done();
+ *
+ * See child_want for why this is said rather than worked out later.
+ */
+#define kunp_emu_want(w, lvl)                                             \
+	((void)((ctx)->content->child_want ?                                \
+		((ctx)->content->child_want((ctx), (uint32_t)(w),           \
+					    (uint32_t)(lvl)), 0) : 0))
+
+/*
+ * Tell the interpreter where this object's program will be.
+ *
+ *     for (each section that is not the packer's own)
+ *             kunp_emu_oep_range(sec->mem_rva, sec->mem_size);
+ *
+ * Named for what it declares rather than for what reads it: kof_emu_watch is
+ * already the interpreter's own single-address watch, and two spellings one
+ * letter apart would be a macro quietly rewriting a function declaration.
+ *
+ * See emu_watch for why only a module can say this.
+ */
+/*
+ * The same, about the object this module is about to RUN.
+ *
+ *     kunp_emu_oep_here(rva_of_jmp, 2);
+ *     n = kunp_emu_run(2);
+ *
+ * See emu_watch_here for why this is not the same call as the one below.
+ */
+/*
+ * This object is a wrapper and the child about to be closed is what was inside.
+ *
+ *     kunp_rcstruct_write(plain, n);
+ *     kunp_rcstruct_supersedes();
+ *     kunp_rcstruct_done();
+ *
+ * See `supersede` for what it does and does not stop.
+ */
+/*
+ * The declared image is to be written as a file of this format.
+ *
+ *     kunp_rcstruct_section(".text", HDR, n, ..., KOF_SECF_CODE);
+ *     kunp_rcstruct_as(KOF_FMT_ELF, KOF_ARCH_X86, 0x08048000u);
+ *     kunp_rcstruct_image();
+ *     kunp_rcstruct_at(HDR);
+ *
+ * See `as_format` for when this is needed and when the parent answers.
+ */
+#define kunp_rcstruct_as(fmt, arch, base)                                     \
+	((void)((ctx)->content->as_format ?                                 \
+		((ctx)->content->as_format((ctx), (uint8_t)(fmt),           \
+					   (uint8_t)(arch),                 \
+					   (uint64_t)(base)), 0) : 0))
+
+#define kunp_rcstruct_supersedes()                                            \
+	((void)((ctx)->content->supersede ?                                 \
+		((ctx)->content->supersede((ctx)), 0) : 0))
+
+#define kunp_emu_oep_here(rva, len)                                           \
+	((void)((ctx)->content->emu_watch_here ?                            \
+		((ctx)->content->emu_watch_here((ctx), (uint64_t)(rva),      \
+					        (uint64_t)(len)), 0) : 0))
+
+#define kunp_emu_oep_range(rva, len)                                            \
+	((void)((ctx)->content->emu_watch ?                                 \
+		((ctx)->content->emu_watch((ctx), (uint64_t)(rva),          \
+					   (uint64_t)(len)), 0) : 0))
+
+#define kunp_rcstruct_name(off, len)                                            \
 	((void)((ctx)->content->name_next ?                                \
 		((ctx)->content->name_next((ctx), (uint64_t)(off),         \
 					   (uint64_t)(len)), 0) : 0))
@@ -3497,31 +3985,164 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * already gone.
  *
  * It does not close the child. A module may want to put more after the
- * decompressed bytes, or decompress two streams into one object, so kof_child()
+ * decompressed bytes, or decompress two streams into one object, so kunp_rcstruct_done()
  * stays the module's to call:
  *
  *     kof_unpack_deflate(gz->data_off, gz->data_len);
- *     kof_child();
+ *     kunp_rcstruct_done();
  */
-#define kof_unpack_form(method, off, len, out_hint, form)                  \
+#define kunp_static_decode(method, off, len, out_hint, form)                  \
 	((ctx)->content->unpack ?                                          \
 	 (ctx)->content->unpack((ctx), (uint32_t)(method), (uint64_t)(off),\
 				(uint64_t)(len), (uint64_t)(out_hint),     \
 				(uint32_t)(form)) : 0)
 
 /* The output is already a file, which is the ordinary case. */
+/* kunp_rcstruct_note("MPRESS 2.12-2.19 LZMA") - what this module worked out about
+ * the container, carried on the child it is about to produce. */
+#define kunp_rcstruct_note(text)                                                 \
+	((ctx)->content->note_next ? (ctx)->content->note_next((ctx), (text)) \
+				  : (void)0)
+
+/* kunp_rcstruct_read(off, buf, cap) / kunp_rcstruct_poke(off, buf, n) - see
+ * produced_read and produced_poke above. */
+#define kunp_rcstruct_read(off, buf, cap)                                        \
+	((ctx)->content->produced_read                                     \
+	 ? (ctx)->content->produced_read((ctx), (uint64_t)(off), (buf),    \
+					 (uint32_t)(cap)) : 0u)
+
+/*
+ * Start this child as a copy of the object being unpacked, then change it with
+ * kunp_rcstruct_poke. See `derive` in struct kof_content.
+ */
+/*
+ * WHAT A SECTION IS, BEYOND WHERE IT IS.
+ *
+ * Three axes, and they are independent: what the bytes are for, where they came
+ * from, and whether they can be read yet.
+ */
+/*
+ * WHAT A DECLARED SECTION MAY BE READ, WRITTEN OR RUN AS.
+ *
+ * Here and not in kofmod/pe.h because a declaration is not about PE: a module
+ * that targets several formats, or none, still has to say what a range it
+ * recovered is for - and including a format header would tie it to that one
+ * format, which the build refuses for a good reason (kof_<fmt>() casts
+ * ctx->file_header and there is no single view when there are several targets).
+ *
+ * Same bits as KOF_PE_PERM_*, which is what the PE parser already reports.
+ */
+/*
+ * HOW MUCH ROOM THE ENGINE NEEDS IN FRONT OF THE CONTENT when it is asked to
+ * write an ELF header - see kunp_rcstruct_as and kof_elf_write_hdr.
+ *
+ * The ELF header plus one program header, which is what that writer emits: one
+ * PT_LOAD over the whole file. A module declaring its first section at this
+ * address leaves exactly the room and no padding; declaring it further out is
+ * allowed and the gap is padding; declaring it closer is refused, because a
+ * header that does not fit in front of the content would have to overwrite it.
+ *
+ * Published rather than inferred because a module has to place its sections
+ * BEFORE the engine writes anything, so it cannot ask afterwards how much was
+ * used.
+ */
+#define KUNP_HDR_ELF32       0x54u
+#define KUNP_HDR_ELF64       0x78u
+
+#define KUNP_PERM_X          0x0001u
+#define KUNP_PERM_W          0x0002u
+#define KUNP_PERM_R          0x0004u
+
+/* What it is. */
+#define KOF_SECF_CODE        0x0001u
+#define KOF_SECF_DATA        0x0002u
+#define KOF_SECF_PAD         0x0004u  /* alignment fill; belongs to no one */
+#define KOF_SECF_HOLLOW      0x0008u  /* declared with no bytes behind it */
+/* Where it came from - see `section` in struct kof_content. */
+#define KOF_SECF_READ        0x0000u  /* parsed from the file as written */
+#define KOF_SECF_REBUILT     0x0010u  /* recovered from evidence */
+#define KOF_SECF_SYNTHETIC   0x0020u  /* stood up because it had to exist */
+#define KOF_SECF_ORIGIN_MASK 0x0030u
+/* Whether it can be read yet. PLAIN is the absence of the others. */
+#define KOF_SECF_PLAIN       0x0000u
+#define KOF_SECF_COMPRESSED  0x0040u
+#define KOF_SECF_CIPHERTEXT  0x0080u
+#define KOF_SECF_VIRTUALISED 0x0100u
+#define KOF_SECF_STATE_MASK  0x01c0u
+
+#define kunp_rcstruct_at(off)                                                    \
+	((ctx)->content->at ? (ctx)->content->at((ctx), (uint64_t)(off)) : 0)
+
+#define kunp_rcstruct_image()                                                    \
+	((ctx)->content->image ? (ctx)->content->image((ctx)) : 0)
+
+#define kunp_rcstruct_section(name, rva, vsz, perm, flags)                       \
+	((ctx)->content->section                                           \
+	 ? (ctx)->content->section((ctx), (name), (uint64_t)(rva),         \
+				   (uint64_t)(vsz), (uint32_t)(perm),      \
+				   (uint32_t)(flags))                      \
+	 : -1)
+
+#define kunp_rcstruct_reset()                                           \
+	((ctx)->content->sections_reset                                    \
+	 ? (ctx)->content->sections_reset((ctx)) : 0)
+
+
+/* What a run left. See `emu_run` in struct kof_content. */
+#define KOF_EMU_RGN_IMAGE   0u
+#define KOF_EMU_RGN_EXEC    1u
+#define KOF_EMU_RGN_WRITTEN 2u
+
+#define kunp_emu_run(vouch_level)                                          \
+	((ctx)->content->emu_run                                           \
+	 ? (ctx)->content->emu_run((ctx), (uint32_t)(vouch_level)) : 0u)
+
+#define kunp_emu_region(i, va, len, kind)                               \
+	((ctx)->content->emu_region                                        \
+	 ? (ctx)->content->emu_region((ctx), (uint32_t)(i), (va), (len),   \
+				      (kind)) : 0)
+
+#define kunp_emu_take(i)                                                \
+	((ctx)->content->emu_take                                          \
+	 ? (ctx)->content->emu_take((ctx), (uint32_t)(i)) : 0)
+
+#define kunp_opened_already()                                           \
+	((ctx)->content->opened_already                                    \
+	 ? (ctx)->content->opened_already((ctx)) : 0)
+
+#define kunp_rcstruct_layout_of_image()                                       \
+	((ctx)->content->layout_of_produced                                \
+	 ? (ctx)->content->layout_of_produced((ctx)) : (uint64_t)0)
+
+#define kunp_rcstruct_dir(idx, rva, size)                                        \
+	((ctx)->content->child_dir                                         \
+	 ? (ctx)->content->child_dir((ctx), (uint32_t)(idx),               \
+				     (uint64_t)(rva), (uint64_t)(size)) : 0)
+
+#define kunp_rcstruct_entry(rva)                                             \
+	((ctx)->content->child_entry_rva                                   \
+	 ? (ctx)->content->child_entry_rva((ctx), (uint64_t)(rva)) : 0)
+
+#define kunp_rcstruct_derive()                                                   \
+	((ctx)->content->derive ? (ctx)->content->derive((ctx)) : 0)
+
+#define kunp_rcstruct_poke(off, buf, n)                                          \
+	((ctx)->content->produced_poke                                     \
+	 ? (ctx)->content->produced_poke((ctx), (uint64_t)(off), (buf),    \
+					 (uint32_t)(n)) : 0)
+
 #define kof_unpack_at(method, off, len, out_hint)                          \
-	kof_unpack_form((method), (off), (len), (out_hint), KOF_FORM_RAW)
+	kunp_static_decode((method), (off), (len), (out_hint), KOF_FORM_RAW)
 
 /*
  * Decode the front of a stream into `buf`, for a header that is compressed.
  *
  *     uint8_t hdr[512];
- *     n = kof_unpack_peek(KOF_UNP_NRV2E_8, off, len, hdr, sizeof hdr);
+ *     n = kunp_static_peek(KOF_UNP_NRV2E_8, off, len, hdr, sizeof hdr);
  *
  * Reads; produces nothing. See `unpack_peek` above for why it exists.
  */
-#define kof_unpack_peek(method, off, len, buf, cap)                        \
+#define kunp_static_peek(method, off, len, buf, cap)                        \
 	((ctx)->content->unpack_peek ?                                     \
 	 (ctx)->content->unpack_peek((ctx), (uint32_t)(method),            \
 				     (uint64_t)(off), (uint64_t)(len),     \
@@ -3544,11 +4165,11 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * For an entry whose bytes are scattered - a compound file stream is a chain, not
  * a range - which is why this takes an index and not an offset. See `unpack_entry`.
  *
- *     kof_name_next(e->name_off, e->name_len);
- *     if (kof_unpack_entry(KOF_UNP_OVBA, i, 0))
- *             kof_child();
+ *     kunp_rcstruct_name(e->name_off, e->name_len);
+ *     if (kunp_static_entry(KOF_UNP_OVBA, i, 0))
+ *             kunp_rcstruct_done();
  */
-#define kof_unpack_entry(method, index, out_hint)                          \
+#define kunp_static_entry(method, index, out_hint)                          \
 	((ctx)->content->unpack_entry ?                                    \
 	 (ctx)->content->unpack_entry((ctx), (uint32_t)(method),            \
 				      (uint32_t)(index),                   \
@@ -3566,14 +4187,14 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * instead of as clean, with the reason given. Whether it also returns is the
  * caller's choice and is spelled by which of the two forms below is used.
  *
- *     KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);   - records and returns
- *     kof_unp_broken(KOF_UNP_DAMAGED);       - records and carries on
+ *     KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);   - records and returns
+ *     kunp_rcstruct_broken(KOF_UNP_DAMAGED);       - records and carries on
  */
 /*
  * Reasons a module can give. The same set the host uses on its own account, so a
  * caller sees one vocabulary whoever noticed the problem.
  */
-enum kof_unp_broken {
+enum kunp_rcstruct_broken {
 	KOF_UNP_LIMIT = 1,       /* a budget or ceiling stopped it */
 	KOF_UNP_UNSUPPORTED = 2, /* a coding or version this build lacks */
 	KOF_UNP_DAMAGED = 3,     /* the object's own structure is wrong */
@@ -3591,26 +4212,26 @@ enum kof_unp_broken {
 /*
  * Two forms, and the case is what tells them apart.
  *
- * KOF_UNP_BROKEN records the reason and RETURNS, which is what nearly every site
+ * KUNP_RCSTRUCT_BROKEN records the reason and RETURNS, which is what nearly every site
  * wants: the module has found out it cannot go on, and the `return` underneath was
  * a line that only ever said so again. Upper case because it changes control flow -
  * the same rule KOF_SCAN_MATCH follows, and the reason a reader can tell which
  * macros end a function without looking any of them up.
  *
- * kof_unp_broken records and carries on, for the module that has recovered
+ * kunp_rcstruct_broken records and carries on, for the module that has recovered
  * something and means to keep it. That is now the commoner of the two - 37 call
  * sites against 18 - and every one of them is in a module that walks entries,
  * exactly as this note predicted when there were none: an entry in a zip whose
  * compression method this build lacks is a reason to record and move to the NEXT
  * entry, not to abandon the entries already recovered.
  */
-#define kof_unp_broken(reason)                                             \
+#define kunp_rcstruct_broken(reason)                                             \
 	((void)((ctx)->content->incomplete ?                               \
 		((ctx)->content->incomplete((ctx), (uint32_t)(reason)), 0) : 0))
 
-#define KOF_UNP_BROKEN(reason)                                             \
+#define KUNP_RCSTRUCT_BROKEN(reason)                                             \
 	do {                                                               \
-		kof_unp_broken(reason);                                    \
+		kunp_rcstruct_broken(reason);                                    \
 		return;                                                    \
 	} while (0)
 
@@ -4213,21 +4834,21 @@ enum kof_str_word {
  *
  *             b[0] = (uint8_t)orig;  b[1] = (uint8_t)(orig >> 8);
  *             b[2] = (uint8_t)(orig >> 16); b[3] = (uint8_t)(orig >> 24);
- *             kof_cure_patch(24, b, 4);        (* e_entry *)
- *             kof_cure_truncate(ctx->entry_off);
+ *             kcure_patch(24, b, 4);        (* e_entry *)
+ *             kcure_truncate(ctx->entry_off);
  *     }
  *
  * Both return non-zero when the host accepted the request. A cure that is
  * refused has still described itself, which is what a caller that wants to
  * show a repair before applying it reads.
  */
-#define kof_cure_patch(off, bytes, n)                                      \
+#define kcure_patch(off, bytes, n)                                      \
 	((ctx)->content->cure_patch                                        \
 	 ? (ctx)->content->cure_patch((ctx), (uint64_t)(off),              \
 				      (const uint8_t *)(bytes),            \
 				      (uint32_t)(n)) : 0)
 
-#define kof_cure_truncate(len)                                             \
+#define kcure_truncate(len)                                             \
 	((ctx)->content->cure_truncate                                     \
 	 ? (ctx)->content->cure_truncate((ctx), (uint64_t)(len)) : 0)
 

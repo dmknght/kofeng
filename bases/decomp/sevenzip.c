@@ -46,7 +46,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	switch (z->header_kind) {
 	case KOF_7Z_HDR_ENCRYPTED:
-		KOF_UNP_BROKEN(KOF_UNP_ENCRYPTED);
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_ENCRYPTED);
 
 	case KOF_7Z_HDR_PLAIN:
 		/*
@@ -70,18 +70,18 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * bytes, all of it header, and the member bsdtar reads (132 MB
 		 * in one of them) was never extracted at all.
 		 *
-		 * NOT CLOSED WITH kof_child(), unlike the coded case below it.
+		 * NOT CLOSED WITH kunp_rcstruct_done(), unlike the coded case below it.
 		 * A window is not a sink: c_window pushes the child as it is
-		 * called, where kof_emit and kof_unpack_at accumulate into one
-		 * that kof_child() closes. Calling it here finds nothing
+		 * called, where kunp_rcstruct_write and kof_unpack_at accumulate into one
+		 * that kunp_rcstruct_done() closes. Calling it here finds nothing
 		 * pending, answers zero, and this read that as the host
 		 * refusing - every plain-header archive then reported "Limit
 		 * reached" over an archive it had read fine.
 		 */
 		if (z->next_hdr_size &&
-		    kof_child_window(z->next_hdr_off, z->next_hdr_size))
+		    kunp_rcstruct_window(z->next_hdr_off, z->next_hdr_size))
 			break;
-		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 
 	case KOF_7Z_HDR_CODED:
 		/*
@@ -100,20 +100,20 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * lies gets a short decode rather than a large allocation.
 		 */
 		if (z->hdr_coder != KOF_7Z_CODER_LZMA || !z->hdr_pack_size)
-			KOF_UNP_BROKEN(KOF_UNP_UNSUPPORTED);
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
 
 		kof_debug("SevenZip.header_bytes", z->hdr_unpack_size);
 		if (kof_unpack_at(KOF_UNP_LZMA_PROPS(z->hdr_lc, z->hdr_lp, z->hdr_pb),
 				  z->hdr_pack_off, z->hdr_pack_size,
 				  z->hdr_unpack_size) == 0)
-			KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
-		if (!kof_child())
-			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
+		if (!kunp_rcstruct_done())
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 		break;
 
 	default:
 		/* The start header points at a header the object does not contain. */
-		KOF_UNP_BROKEN(KOF_UNP_DAMAGED);
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 	}
 
 	/*
@@ -188,10 +188,10 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 * the jumps and which the range coder is in the folder's
 			 * bind pairs, and only the host can follow them.
 			 */
-			kof_name_next(0, 0);
-			if (kof_unpack_entry(KOF_UNP_BCJ2, i, fo->unpack_size)) {
-				if (!kof_child())
-					KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+			kunp_rcstruct_name(0, 0);
+			if (kunp_static_entry(KOF_UNP_BCJ2, i, fo->unpack_size)) {
+				if (!kunp_rcstruct_done())
+					KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 				opened++;
 			} else {
 				unreached++;
@@ -215,8 +215,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				continue;
 			}
 		}
-		if (!kof_child())
-			KOF_UNP_BROKEN(KOF_UNP_LIMIT);
+		if (!kunp_rcstruct_done())
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_LIMIT);
 		opened++;
 	}
 
@@ -229,16 +229,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * not come back clean.
 	 */
 	if (z->anomalies & KOF_7Z_ANOM_CODER_CHAIN)
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 	else if (unreached)
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 	else if (z->n_folders == 0)
-		kof_unp_broken(KOF_UNP_UNSUPPORTED);
+		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 	/*
 	 * Last, and a different word: an unsized folder is not a coder this
 	 * build lacks - a later build does not fix it - it is a header this
 	 * did not read. DAMAGED is the one an operator acts on differently.
 	 */
 	else if (unsized)
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 }

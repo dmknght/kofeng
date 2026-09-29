@@ -199,17 +199,17 @@ int main(int argc, char **argv)
 
 	build_tree(root);
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		printf("scan mt: cannot open %s\n", db);
 		drop_tree(root);
 		return 2;
 	}
 	for (i = 0; i < n_sc; i++) {
-		scs[i] = kof_scanner_new(eng);
+		scs[i] = kscan_new(eng);
 		if (!scs[i]) {
 			printf("scan mt: out of memory\n");
-			kof_engine_close(eng);
+			keng_close(eng);
 			drop_tree(root);
 			return 2;
 		}
@@ -218,8 +218,8 @@ int main(int argc, char **argv)
 	memset(&opt, 0, sizeof opt);
 	opt.recurse_dirs = 1;
 
-	rc1 = kof_scan_path(scs[0], root, &opt, on_object, &one);
-	rc8 = kof_scan_path_mt(scs, n_sc, root, &opt, on_object, &many);
+	rc1 = kscan_path(scs[0], root, &opt, on_object, &one);
+	rc8 = kscan_path_mt(scs, n_sc, root, &opt, on_object, &many);
 
 	printf("  1 luồng  -> %u object (rc=%d)\n", one.n, rc1);
 	printf("  %u luồng -> %u object (rc=%d)\n", n_sc, many.n, rc8);
@@ -241,7 +241,7 @@ int main(int argc, char **argv)
 		static struct seen solo;
 		int ordered = 1;
 
-		kof_scan_path_mt(scs, 1, root, &opt, on_object, &solo);
+		kscan_path_mt(scs, 1, root, &opt, on_object, &solo);
 		if (solo.n != one.n) {
 			ordered = 0;
 		} else {
@@ -259,14 +259,14 @@ int main(int argc, char **argv)
 
 	/* Abort: the callback stops after a few objects and the walk has to end. */
 	capped.stop_after = 4;
-	kof_scan_path_mt(scs, n_sc, root, &opt, on_object, &capped);
+	kscan_path_mt(scs, n_sc, root, &opt, on_object, &capped);
 	printf("  callback dừng sau 4 -> %u object\n", capped.n);
 	if (capped.n >= one.n)
 		fail("an aborting callback did not stop the parallel walk");
 
 	for (i = 0; i < n_sc; i++)
-		kof_scanner_free(scs[i]);
-	kof_engine_close(eng);
+		kscan_free(scs[i]);
+	keng_close(eng);
 	drop_tree(root);
 	printf("scan mt: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;

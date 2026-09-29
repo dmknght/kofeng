@@ -16,7 +16,7 @@
  * and the facts a reader needs to act on it.
  */
 #include <kofmod/kofsig.h>
-#include "../unp/scfind.h"
+#include <kofanalyze/scfind.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 

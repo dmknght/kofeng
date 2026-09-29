@@ -42,7 +42,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
-#include "../../libkofeng/analyzer/parsers/events/amsi_parse.h"
+#include "../../libkofeng/analyzers/parsers/events/amsi_parse.h"
 
 #include <kofmod/kofsig.h>
 #include <kofmod/amsi.h>
@@ -144,7 +144,7 @@ static const char *scan_as_amsi(kof_scanner *sc, const void *obj, uint64_t n,
 		opt.as_view = &decl;
 		opt.as_view_len = (uint32_t)sizeof decl;
 	}
-	s->rc = kof_scan_bytes(sc, obj, n, "event//1//AMSI_SCAN", &opt,
+	s->rc = kscan_bytes(sc, obj, n, "event//1//AMSI_SCAN", &opt,
 			       on_object, s);
 	return s->name;
 }
@@ -255,14 +255,14 @@ int main(int argc, char **argv)
 	struct seen s;
 	uint64_t n, off;
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		printf("amsi rule: cannot open %s\n", db);
 		return 2;
 	}
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		return 2;
 	}
 
@@ -405,8 +405,8 @@ int main(int argc, char **argv)
 	if (n)
 		partition(rec, n, off, sizeof b64_script, "whole record");
 
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 
 	if (failures) {
 		printf("amsi rule: %d failure(s)\n", failures);

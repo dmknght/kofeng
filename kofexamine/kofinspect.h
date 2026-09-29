@@ -26,7 +26,7 @@
 #include "../libkofeng/kofcore/kofcore.h"
 #include "../libkofeng/kofeng.h"
 #include "../libkofeng/databases/dbloader.h"
-#include "../libkofeng/analyzer/parsers/kofformat.h"
+#include "../libkofeng/analyzers/parsers/kofformat.h"
 #include "../libkoforbit/evt/kofevt.h"
 #include "../libkoforbit/evt/kofevtfmt.h"
 #include "../libkoforbit/evt/kofevtlog.h"
@@ -38,7 +38,7 @@
  * called, what its anomaly bits mean - is one struct published by the engine,
  * because the engine is where the formats are. This header used to carry a
  * second table of the same shape; four test files carried a third, fourth and
- * fifth. See analyzer/parsers/kofformat.h.
+ * fifth. See analyzers/parsers/kofformat.h.
  *
  * What stays out of that struct is rendering, and on purpose: the two front
  * ends in this tree render nothing alike - one prints lines, one paints panes -
@@ -857,7 +857,7 @@ void kof_inspect_event_verbs(const uint64_t *count, uint32_t keep,
  * UNCLAIMED region at 7.9 is a file somebody appended; the same region at 0.0
  * is alignment.
  *
- * NEVER A VERDICT - see kof_entropy_eighths. Zero when the region is empty or
+ * NEVER A VERDICT - see kentropy_eighths. Zero when the region is empty or
  * the object has no parse, which reads as "nothing to measure".
  */
 uint32_t kof_inspect_region_entropy(const struct kof_obj_ctx *ctx,

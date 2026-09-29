@@ -39,7 +39,7 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/databases/dbloader.h"
 #include "../../libkofeng/databases/dbpacker.h"
-#include "../../libkofeng/detector/matchers/kofmatch.h"
+#include "../../libkofeng/detectors/matchers/kofmatch.h"
 #include "../../libkofeng/kofeng.h"
 
 static int failures;
@@ -214,19 +214,19 @@ static int measure(const char *dir, const char *obj, uint32_t mods,
 	if (!ok)
 		return 0;
 
-	eng = kof_engine_open(dir);
+	eng = keng_open(dir);
 	if (!eng)
 		return 0;
-	sc = kof_scanner_new(eng);
+	sc = kscan_new(eng);
 	if (!sc) {
-		kof_engine_close(eng);
+		keng_close(eng);
 		return 0;
 	}
 	memset(&opt, 0, sizeof opt);
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	(void)kof_scan_path(sc, obj, &opt, NULL, NULL);
+	(void)kscan_path(sc, obj, &opt, NULL, NULL);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	st = kof_scanner_stats(sc);
+	st = kscan_stats(sc);
 	if (st) {
 		out->considered     = st->considered;
 		out->ran            = st->ran;
@@ -241,8 +241,8 @@ static int measure(const char *dir, const char *obj, uint32_t mods,
 	}
 	out->secs = (double)(t1.tv_sec - t0.tv_sec) +
 		    (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-	kof_scanner_free(sc);
-	kof_engine_close(eng);
+	kscan_free(sc);
+	keng_close(eng);
 	remove(pack);
 	return st != NULL;
 }

@@ -81,6 +81,40 @@ signature data ever do need to diverge, that is the point at which a file
 saying so earns its place - and not before.
 
 --------------------------------------------------------------------------------
+Projects read, from which no code is taken
+--------------------------------------------------------------------------------
+
+Nothing in this section is redistributed here and none of these terms attach to
+this Software. The names are recorded because the debt is real even where the
+licence does not follow it, and because a reader who recognises a technique
+should be able to find where it came from.
+
+    ClamAV (GPL-2.0)                the NRV2B/D/E codings
+    Unlicense (GPL-3.0)             what an import table rebuild has to do
+    Unipacker (GPL-2.0)             section hopping and write-then-execute
+    RetDec (MIT)                    MPRESS's build table and fix stub
+    Unpacker (MIT)                  the routing rule that named the above
+    VMPStatic (MIT)                 VMProtect's PACKER_INFO and key schedule
+    XVolkolak / XEmulUnpacker (MIT) nSpDelta, and the per-packer hand-over tails
+    themida-unmutate (GPL-3.0)      Themida's mutation layer
+    UnpackThemida (GPL-3.0)         the same, from the other direction
+    themida-dumper (MIT)            the .themida/.winlice and .boot pair
+    Themida-Research                the same
+    VMProtectDumper (PolyForm       the dumping strategy. NONCOMMERCIAL terms:
+      Noncommercial 1.0.0)          nothing is taken, and anyone who later wants
+                                    to take something must read that licence
+    OreansCrack (MIT)               VMProtect's virtual machine
+    vmp2 (MIT)                      the same
+    vid (MIT)                       the same
+    UnSafengine64                   Safengine's shape
+    OllyDbg and x64dbg scripts      per-build offsets, read as documentation
+
+A LICENCE ATTACHES TO CODE, NOT TO A FACT. If any line of any of these were
+reproduced here, that project's terms would apply and the remedy would be to
+remove the line, not to reword this paragraph. THIRD-PARTY.md says, for each
+one, exactly which fact was taken and what was written independently.
+
+--------------------------------------------------------------------------------
 Test material
 --------------------------------------------------------------------------------
 

@@ -309,7 +309,7 @@ KOF_DEFINE_UNPACK
 			n += have;
 			at += have;
 		}
-		if (!kof_emit(buf, n))
+		if (!kunp_rcstruct_write(buf, n))
 			return;         /* the host has stopped taking bytes */
 	}
 	/*
@@ -322,6 +322,6 @@ KOF_DEFINE_UNPACK
 	 * the object while having produced nothing, which is the one answer a
 	 * scan must never give about a packed sample.
 	 */
-	if (!kof_child())
-		kof_unp_broken(KOF_UNP_LIMIT);
+	if (!kunp_rcstruct_done())
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

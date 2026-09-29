@@ -78,7 +78,7 @@ static int scan_named(struct kof_engine *eng, const uint8_t *p, size_t n,
 		      const char *want)
 {
 	struct kof_scan_option opt;
-	struct kof_scanner *sc = kof_scanner_new(eng);
+	struct kof_scanner *sc = kscan_new(eng);
 	struct seen s;
 
 	if (!sc)
@@ -96,9 +96,9 @@ static int scan_named(struct kof_engine *eng, const uint8_t *p, size_t n,
 	 * a fault in the test and not in the pass it is about.
 	 */
 	opt.all_matches = 1;
-	if (kof_scan_bytes(sc, p, n, "fixture.bin", &opt, on_object, &s) <= 0)
+	if (kscan_bytes(sc, p, n, "fixture.bin", &opt, on_object, &s) <= 0)
 		s.hit = -1;
-	kof_scanner_free(sc);
+	kscan_free(sc);
 	return s.hit;
 }
 
@@ -157,7 +157,7 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	make_block(blk);
 
-	eng = kof_engine_open(db);
+	eng = keng_open(db);
 	if (!eng) {
 		printf("plague object: no database at %s - nothing tested\n", db);
 		return 0;
@@ -196,7 +196,7 @@ int main(int argc, char **argv)
 
 	elf_paths(eng);
 
-	kof_engine_close(eng);
+	keng_close(eng);
 	if (failures) {
 		printf("plague object: %d check(s) failed\n", failures);
 		return 1;

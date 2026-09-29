@@ -189,6 +189,148 @@ int kof_emu_map(struct kof_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
  */
 void     kof_emu_set_self(struct kof_emu *e, const uint8_t *bytes, uint64_t n);
 
+/*
+ * The FS or GS base, for a guest whose thread block the host builds.
+ *
+ * A Linux guest sets its own with arch_prctl and this is not needed. A WINDOWS
+ * guest never does: the base is installed by the loader before a single
+ * instruction of the image runs, so an interpreter that starts at the entry
+ * point has to supply what the loader would have. Measured without it - four
+ * Themida protected PEs, each of which ran between 22 and 48 million
+ * instructions and then faulted reading gs:[0x30], which is the TEB's pointer
+ * to itself.
+ *
+ * `seg` is 4 for FS and 5 for GS, which is bddisasm's numbering and the only
+ * numbering this interpreter uses for segments anywhere.
+ */
+void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
+
+/*
+ * ---- THE WINDOWS ENVIRONMENT ----------------------------------------------
+ *
+ * A Windows guest has no syscall it may use: it asks kernel32, and to ask it
+ * must first find it. kofemu.c carries the answers; emu_unpack.c builds the
+ * kernel32 to find. The two have to agree on the name, the trap number and -
+ * on i386, where the callee pops - the argument count of every function, so
+ * the table lives in kofemu.c and is read through these.
+ *
+ * KOF_EMU_WIN_STUB is how far apart the stubs are. Eight bytes is what one
+ * needs (load the trap number, trap, return) and sixteen leaves the next one
+ * aligned, which matters only in that a disassembly of the page is readable.
+ */
+#define KOF_EMU_WIN_STUB 16u
+/* Where the stubs sit inside every module image. One number, because the
+ * images are all built the same way and a resolver never sees it. */
+#define KOF_EMU_WIN_STUB_RVA 0x1000u
+
+/* The libraries this environment can hand out a base for. kernel32 is first
+ * because it is the one a stub always asks for and the one a report names. */
+#define KOF_EMU_WIN_MOD_K32   0u
+#define KOF_EMU_WIN_MOD_NTDLL 1u
+/* The rest of win_mod[], in its order. Only the first two had names, so an
+ * export belonging to any other module could not be written down. */
+#define KOF_EMU_WIN_MOD_USER32   2u
+#define KOF_EMU_WIN_MOD_ADVAPI32 3u
+#define KOF_EMU_WIN_MOD_SHELL32  4u
+#define KOF_EMU_WIN_MOD_SHLWAPI  5u
+#define KOF_EMU_WIN_MOD_MSVCRT   6u
+#define KOF_EMU_WIN_MOD_OLE32    7u
+/*
+ * AND KERNELBASE, WHICH IS NOT AN ALIAS FOR KERNEL32.
+ *
+ * A modern kernel32 forwards most of itself to kernelbase, so answering
+ * GetModuleHandle("kernelbase.dll") with kernel32's base resolves exports
+ * correctly and was what this did. It is wrong for the other thing a guest
+ * does with that handle: a protector PATCHES kernelbase - measured, a Themida
+ * loader takes the handle and VirtualAllocs four pages inside it - and with
+ * one image behind both names those writes land on kernel32's export
+ * directory. Its own image costs a mapping and keeps the two apart.
+ */
+#define KOF_EMU_WIN_MOD_KBASE    8u
+#define KOF_EMU_WIN_MOD_COUNT 9u
+
+unsigned    kof_emu_win_api_count(void);
+const char *kof_emu_win_api_name(unsigned i);
+unsigned    kof_emu_win_api_argc(unsigned i);
+unsigned    kof_emu_win_api_mod(unsigned i);
+unsigned    kof_emu_win_api_slot(unsigned i);
+uint32_t    kof_emu_win_api_trap(unsigned i);
+
+unsigned    kof_emu_win_mod_count(void);
+const char *kof_emu_win_mod_name(unsigned i);
+uint64_t    kof_emu_win_mod_base(unsigned i, unsigned bits);
+void        kof_emu_win_set_module(struct kof_emu *e, unsigned i,
+				   uint64_t base);
+/* Where the process heap structure is. GetProcessHeap hands this back, and a
+ * guest reads its Flags through it - so it is an address and not a token. */
+void        kof_emu_win_set_heap(struct kof_emu *e, uint64_t heap);
+
+/* Count reads that land inside a library image, so "never asked" can be told
+ * from "asked and was not answered". Off by default - see mem_rd. */
+void        kof_emu_count_mod_reads(struct kof_emu *e, int on);
+uint64_t    kof_emu_mod_reads(const struct kof_emu *e, unsigned i);
+/*
+ * ---- INSTRUCTION TRACE ----------------------------------------------------
+ *
+ * The last N instructions, each with the registers AS THEY WERE BEFORE IT RAN.
+ *
+ * WHY THE REGISTERS AND NOT JUST THE ADDRESSES. kof_emu_first_hop and the rip
+ * ring above answer "where did it go"; they cannot answer "where did that
+ * address come from", and that is the question a wrong address always raises.
+ * Measured on an MPRESS sample: the stub read a library at base+0x2296c
+ * through `mov eax, [rsi]`, and knowing the instruction said nothing at all -
+ * the work was finding what had put that value in RSI, which is upstream of
+ * every address in the rip ring.
+ *
+ * OFF BY DEFAULT AND NOT CHEAP. Every instruction is disassembled to text and
+ * sixteen registers are copied, which is far more work than interpreting most
+ * of them. This is a diagnostic to turn on for one file, never something a
+ * scan runs with.
+ *
+ * n is rounded down to KOF_EMU_ITRACE_MAX and 0 turns it off, freeing the
+ * ring. Entries are read oldest first: k from 0 to kof_emu_itrace_count.
+ *
+ * THE RING KEEPS THE LAST N, WHICH IS USUALLY THE WRONG N. A run that goes
+ * wrong at instruction 60000 and then wanders for another 250000 leaves
+ * nothing of the mistake in a ring of any affordable size. kof_emu_itrace_at
+ * names the address to stop recording at, so the ring holds the N
+ * instructions BEFORE it - which is where the value that address was built
+ * from came from. 0 records to the end.
+ */
+#define KOF_EMU_ITRACE_MAX 262144u
+
+int         kof_emu_itrace(struct kof_emu *e, unsigned n);
+void        kof_emu_itrace_at(struct kof_emu *e, uint64_t rip);
+/* Or freeze at an instruction NUMBER, which an address cannot express: an
+ * address inside a dispatch loop is reached thousands of times and the first
+ * hit is never the interesting one. 0 for never. */
+void        kof_emu_itrace_until(struct kof_emu *e, uint64_t insn);
+void        kof_emu_itrace_on_null(struct kof_emu *e, int on);
+unsigned    kof_emu_itrace_count(const struct kof_emu *e);
+int         kof_emu_itrace_get(const struct kof_emu *e, unsigned k,
+			       uint64_t *rip, const char **text,
+			       const uint64_t **gpr);
+
+void        kof_emu_first_hop(const struct kof_emu *e, uint64_t *insn,
+			      uint64_t *rip);
+/* And the last hop, plus how many there were: where execution had got to when
+ * the run ended, which is the address a dump writes as its entry point. */
+void        kof_emu_last_hop(const struct kof_emu *e, uint64_t *rip,
+			     uint32_t *count);
+
+/*
+ * Tell the interpreter where the three Windows regions are. Until this is
+ * called every entry point in that environment answers zero, so an ELF run
+ * cannot reach any of it.
+ */
+void kof_emu_win_setup(struct kof_emu *e, uint64_t image_base);
+
+/* The address a named export resolves to, for filling an import thunk. Zero
+ * for a name this environment does not carry, which is a thunk to leave as the
+ * file wrote it - see fill_iat_pe in emu_unpack.c for why that is better than
+ * a stub that shrugs. */
+uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name);
+
 void     kof_emu_set_rip(struct kof_emu *e, uint64_t rip);
 void     kof_emu_set_reg(struct kof_emu *e, unsigned gpr, uint64_t v);
 uint64_t kof_emu_get_reg(const struct kof_emu *e, unsigned gpr);
@@ -196,9 +338,90 @@ uint64_t kof_emu_rip(const struct kof_emu *e);
 
 enum kof_emu_stop kof_emu_run(struct kof_emu *e);
 
+/*
+ * ---- RUNNING ON, WHEN THE RUN IS STILL PRODUCING -------------------------
+ *
+ * A budget is a guess about how much work an object needs, and the guess is
+ * wrong in both directions. Too small on a real one: measured on a PECompact2
+ * sample, the run reached the ceiling after 168 million instructions having
+ * decompressed 6.5 of the 8.6 megabytes its own header declares - it was
+ * stopped two thirds of the way through something that was working. Too large
+ * on a crafted one, where the whole ceiling buys nothing.
+ *
+ * So the ceiling is raised only for a run that has EARNED it, and the evidence
+ * is the one the interpreter already keeps: kof_emu_last_write says how far
+ * back the last page it had never written before was. A run still touching
+ * fresh memory is still unpacking; one that has not for millions of
+ * instructions is spinning, which is what KOF_EMU_STOP_STALLED already says
+ * about a shorter version of the same thing.
+ *
+ * THE CALLER OWNS THE POLICY. This pair only reports and permits: how many
+ * instructions have run, when memory was last first-written, and a new
+ * ceiling. What a total limit should be, and how many times to grant one, is a
+ * decision about a scan rather than about an interpreter - see emu_unpack.c.
+ * Memory is NOT extended with it: max_pages and the snapshot budget are
+ * unchanged, so a longer run cannot hold more than a short one.
+ */
+uint64_t kof_emu_last_write(const struct kof_emu *e);
+void     kof_emu_set_max_insn(struct kof_emu *e, uint64_t n);
+
+/*
+ * THE TWO BOUNDS THAT ARE NOT AN INSTRUCTION COUNT.
+ *
+ * kof_emu_set_idle replaces KOF_EMU_IDLE for this run: how many instructions
+ * may pass with no page touched for the first time before the run is called
+ * finished. The default is the right answer for a scan; a diagnostic that
+ * wants to see how far a guest WOULD get raises it, and takes on the risk the
+ * default exists to avoid.
+ *
+ * kof_emu_set_deadline is a WALL CLOCK bound and is the only one that holds
+ * when the others are lifted. An instruction budget bounds work, not time, and
+ * the two stop being the same number as soon as the budget is large: a guest
+ * that would run for an hour is not made safe by permitting it. 0 disables it.
+ *
+ * The clock is read once every 64K instructions, so it costs one masked
+ * compare per instruction and is accurate to a few milliseconds.
+ */
+/* How many times the run called an import this environment does not export -
+ * see the null page check in the loop. A high number is a list to extend. */
+unsigned kof_emu_null_calls(const struct kof_emu *e);
+/* And how many exceptions it raised that nothing caught. */
+unsigned kof_emu_unhandled(const struct kof_emu *e);
+/* And how many fields it read off a null pointer. */
+unsigned kof_emu_null_reads(const struct kof_emu *e);
+uint64_t kof_emu_idle_max(const struct kof_emu *e);
+void     kof_emu_set_idle(struct kof_emu *e, uint64_t n);
+void     kof_emu_set_deadline(struct kof_emu *e, uint64_t ms);
+
+/*
+ * Copy every run of written memory into the snapshot set, now.
+ *
+ * FOR THE MOMENT BEFORE A RUN IS ALLOWED TO CARRY ON. A snapshot survives
+ * whatever the run does next; written memory is only harvested for some
+ * endings, so work that was finished and then followed by a fault is thrown
+ * away. Measured: a PECompact2 sample decompressed 6.5 MB, was granted more
+ * budget, and faulted in the extra slice - and the 6.5 MB went with it.
+ *
+ * Taking a copy at each extension makes the grant safe: the state that earned
+ * it is kept before the risk is taken. Bounded by the same snapshot budget as
+ * every other snapshot, so this cannot grow memory without limit.
+ */
+void     kof_emu_snap_written(struct kof_emu *e);
+
 /* How many instructions were retired, and where it stopped. For deciding
  * whether a dump is worth taking and for reporting what a build cannot do. */
 uint64_t    kof_emu_insn_count(const struct kof_emu *e);
+
+/* Faults offered to a guest exception handler, faults a handler took, and how
+ * many vectored handlers the guest registered. See the exception dispatcher in
+ * kofemu.c for why the first two are counted separately. */
+void kof_emu_exc_counts(const struct kof_emu *e, uint32_t *raised,
+			uint32_t *taken, uint32_t *veh);
+
+/* Where the exception records were built, so a harvest can leave them alone -
+ * the same reason kof_emu_unp_report carries the stack. Zero when no exception
+ * was ever raised, in which case nothing was built. */
+uint64_t kof_emu_exc_scratch(const struct kof_emu *e, uint64_t *len);
 const char *kof_emu_stop_name(enum kof_emu_stop s);
 /* The mnemonic that ended an UNSUPPORTED run, or "" - this is the list that
  * says what to implement next, so it is kept rather than merely counted. */
@@ -223,6 +446,114 @@ unsigned kof_emu_trace(const struct kof_emu *e, uint64_t *out, unsigned n);
  * is arranged to make impossible, so it is not offered here either.
  */
 int kof_emu_read(struct kof_emu *e, uint64_t va, void *dst, unsigned n);
+int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n);
+
+/*
+ * ---- WHERE THE ORIGINAL PROGRAM WILL BE, AND STOPPING WHEN IT RUNS --------
+ *
+ * A packer that hollows an image leaves its original sections with a size and
+ * no bytes, fills them at run time and jumps in. The moment of that jump is
+ * the one worth stopping at: everything before it is the loader and everything
+ * after it is the program, and the memory at that instant is the unpacked
+ * image.
+ *
+ * THIS IS NOT stop_on_written_jump, and the difference is why that one is off.
+ * A jump into any page the run wrote "LOOKS like the handoff, and often is
+ * not" - UPX writes and jumps within its own stub constantly. A range declared
+ * here is narrower by construction: it is a region the FILE said exists and
+ * did not supply, so nothing but the run could have put code there.
+ *
+ * THE TECHNIQUE IS NOT MINE - see THIRD-PARTY.md, under "Read, not taken",
+ * which is where this project records what it learned from whom. Kept there
+ * rather than here so that a reader looking for what kofeng owes anyone finds
+ * all of it in one file instead of by grepping the source.
+ *
+ * WHAT ENDS THE RUN IS ENTERING A RANGE, NOT BEING IN ONE. A run that starts
+ * inside a watched range, or is still executing through it, has handed nothing
+ * over; only a fetch that crosses IN from outside has. For a range the loader
+ * never runs in - which is every case this was first written for - the two
+ * readings are the same, because every arrival crosses in. They part company
+ * on a packer that shares a section with the program it unpacks: PECompact
+ * decompresses into the section its own entry point is in, so "being in one"
+ * ended the run at instruction 0.
+ *
+ * Ranges are half open. At most KOF_EMU_EXEC_WATCH of them; more are dropped,
+ * since a file declaring dozens of hollow sections is describing something
+ * other than a packed program.
+ */
+#define KOF_EMU_EXEC_WATCH 16u
+
+void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi);
+
+/*
+ * AND WHERE THE CIPHERTEXT IS.
+ *
+ * A protector decrypts the program's sections in place, so the first write
+ * into one of them says the plaintext is arriving - which is a statement about
+ * the DATA rather than about where execution goes, and is the only signal
+ * available when the loader never hands over in any recognisable way.
+ * themida-dumper polls the same sections from outside the process for the same
+ * reason; see THIRD-PARTY.md.
+ */
+void kof_emu_watch_write(struct kof_emu *e, uint64_t lo, uint64_t hi);
+int  kof_emu_write_seen(const struct kof_emu *e);
+
+/*
+ * WHERE THE STUB ITSELF LIVES, so that a jump into a page it wrote is only a
+ * handover when it LEAVES.
+ *
+ * stop_on_written_jump on its own is the signal kofemu.h warns about: a stub
+ * that decompresses into its own section and jumps there has written and
+ * executed without handing anything over. Measured with it alone, a PECompact2
+ * sample stopped after eighteen instructions and a Themida sample lost a child
+ * it had been producing.
+ *
+ * Adding "and the target is outside this range" is the second half of the
+ * condition, and the pair is what Unpacker (github.com/anpa1200/Unpacker, MIT)
+ * documents Unipacker as using - section hopping OR write-and-execute. See
+ * THIRD-PARTY.md. Given as the entry point's section, which is the stub's own
+ * by definition.
+ */
+void kof_emu_set_stub_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
+/* And the stack, for the same test and the same reason. */
+void kof_emu_set_stack_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
+/* And where the image is - see the dump at the handover in the run loop. */
+void kof_emu_set_image_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
+
+/*
+ * THE HANDOVER, BY THE SHAPE OF THE TRANSFER RATHER THAN BY ITS ADDRESS.
+ *
+ * A stub ends by giving control to the program with the stack exactly as it
+ * found it - every push undone. A stub CALLING something has not. That one
+ * invariant, plus a target inside the image on a page this run wrote, plus a
+ * tail instruction of the shape a packer ends with, is what XVolkolak's
+ * XEmulUnpacker builds every one of its per-packer OEP rules on; see
+ * THIRD-PARTY.md. It needs no ranges from a module and no guess about where
+ * the program will be.
+ */
+void kof_emu_set_oep_watch(struct kof_emu *e, int on);
+
+/*
+ * ---- SECTION HOPPING ------------------------------------------------------
+ *
+ * A region execution has not been in before is a stage that has just been
+ * built: the run starts in the stub's section and everything else it reaches
+ * was written while it ran. Entering one for the first time is worth a
+ * SNAPSHOT.
+ *
+ * SNAPSHOT AND CARRY ON, NOT STOP. A packed sample can have several stages and
+ * stopping at the first gets one of them; taking a copy and letting the run
+ * continue gets all of them, and costs a memory copy. The region is added to
+ * the seen set as it is taken, so a loop inside it copies nothing more.
+ *
+ * NOT THE SAME AS stop_on_written_jump, which stays off. That fires on a stub
+ * decompressing into its own section - measured, a PECompact2 sample stopped
+ * eighteen instructions in and a Themida sample lost a stage. Unipacker
+ * (github.com/unipacker/unipacker, GPL-2) keeps it off by default too and
+ * makes section hopping the ordinary mechanism; its source was read to
+ * understand that and none of it is reproduced here. See THIRD-PARTY.md.
+ */
+void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen);
 
 /*
  * WATCH ONE ADDRESS, so "nothing ever wrote it" can be told apart from "the

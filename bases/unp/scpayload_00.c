@@ -23,7 +23,7 @@
  */
 #include <kofmod/kofsig.h>
 #include <kofmod/wrap.h>
-#include "scfind.h"
+#include <kofanalyze/scfind.h>
 
 /*
  * A PACKER, not a container.
@@ -61,7 +61,7 @@ KOF_DEFINE_UNPACK
 	 * precondition every signature is filtered by.
 	 */
 	hn = kof_wrap_elf(hdr, len, h.bits ? h.bits : 64u);
-	if (!kof_emit(hdr, hn))
+	if (!kunp_rcstruct_write(hdr, hn))
 		return;
 	/*
 	 * Copied a window at a time rather than in one call: kof_u8 is the only
@@ -69,7 +69,7 @@ KOF_DEFINE_UNPACK
 	 * point - the budget is its decision, not this module's.
 	 */
 	if (h.dec_n) {
-		if (!kof_emit(dec, h.dec_n))
+		if (!kunp_rcstruct_write(dec, h.dec_n))
 			return;
 	} else {
 		while (done < len) {
@@ -80,10 +80,10 @@ KOF_DEFINE_UNPACK
 				buf[n] = kof_u8(h.at + done + n);
 				n++;
 			}
-			if (!kof_emit(buf, n))
+			if (!kunp_rcstruct_write(buf, n))
 				return;
 			done += n;
 		}
 	}
-	kof_child();
+	kunp_rcstruct_done();
 }

@@ -56,9 +56,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			continue;
 
 		/* What this entry is called, for the report. */
-		kof_name_next(e->name_off, e->name_len);
+		kunp_rcstruct_name(e->name_off, e->name_len);
 
-		if (!kof_child_window(e->data_off, e->size))
+		if (!kunp_rcstruct_window(e->data_off, e->size))
 			break;                  /* a host limit bound: stop, do not spin */
 		opened++;
 	}
@@ -74,7 +74,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * than refuses.
 	 */
 	if (t->anomalies & (KOF_TAR_ANOM_TRUNCATED | KOF_TAR_ANOM_BAD_SIZE))
-		kof_unp_broken(KOF_UNP_DAMAGED);
+		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 	if (t->anomalies & KOF_TAR_ANOM_ENTRIES_FULL)
-		kof_unp_broken(KOF_UNP_LIMIT);
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

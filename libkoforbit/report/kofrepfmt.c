@@ -164,7 +164,7 @@ static void write_head(struct kof_report *r, FILE *out,
 			(unsigned long)v->examined);
 		if (v->broken)
 			fprintf(out, " %s[the engine did not finish: %s]%s",
-				k->miss, kof_broken_name(v->broken), k->off);
+				k->miss, kverdict_broken_name(v->broken), k->off);
 		/*
 		 * A CLEAN VERDICT WITH NOTHING HAVING RUN IS NOT A CLEAN
 		 * VERDICT, and kofeng.h says so at kof_result.examined: a

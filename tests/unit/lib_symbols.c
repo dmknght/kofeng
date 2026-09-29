@@ -22,8 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/detector/overlord/koflib.h"
-#include "../../libkofeng/analyzer/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/detectors/overlord/koflib.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
 #include "../../libkofeng/kofcore/kofmod/elf.h"
 
 static int fails;
