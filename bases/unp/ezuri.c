@@ -322,6 +322,20 @@ KOF_DEFINE_UNPACK
 	 * the object while having produced nothing, which is the one answer a
 	 * scan must never give about a packed sample.
 	 */
+	/*
+	 * AND WHAT WAS DECRYPTED IS WHAT THIS OBJECT WAS.
+	 *
+	 * An Ezuri object is a key and a ciphertext and nothing else - there is
+	 * no program in it to find and no rule that could match one. Measured on
+	 * a TeamTNT sample: the appended run carved out of the host ELF is 48
+	 * bytes of key and 340004 of ciphertext, and it was reported as a
+	 * recovered object in its own right beside the ELF it decrypts to.
+	 *
+	 * See kunp_rcstruct_supersedes. The object is still scanned; it is no
+	 * longer counted as a thing recovered, because the thing recovered is
+	 * the child.
+	 */
+	kunp_rcstruct_supersedes();
 	if (!kunp_rcstruct_done())
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }
