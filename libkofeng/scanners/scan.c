@@ -1638,9 +1638,31 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * because the family pass above already ran them - re-running one that
 	 * declined would be doing its work twice.
 	 */
-	for (i = 0; !family_opened && i < sc->eng->n_unp; i++) {
-		const struct kof_module *m = &sc->eng->unp[i];
+	/*
+	 * TWO ROUNDS, AND A CARVE GOES IN THE SECOND.
+	 *
+	 * A carve says "there is a whole file glued on here". That is the right
+	 * answer when nothing can explain those bytes and the wrong one when
+	 * something can: on a TeamTNT sample the unclaimed run at the end of a
+	 * Go binary is an Ezuri key and ciphertext, and appended_00.c carved it
+	 * out as 340052 bytes nothing can read - beside the ELF that ezuri.c
+	 * decrypted from the very same bytes. Two objects, one run, and one of
+	 * them unreadable by construction.
+	 *
+	 * Ordering is the whole fix, because the carve module cannot tell: it
+	 * asks kunp_opened_already, and running first it is always the answer
+	 * "no". Deciding by kind rather than by database order also keeps it out
+	 * of the hands of whoever adds the next module.
+	 *
+	 * A carve that finds something a packer already explained still costs
+	 * nothing but the ask - it declines and the loop moves on.
+	 */
+	for (i = 0; !family_opened && i < sc->eng->n_unp * 2u; i++) {
+		const struct kof_module *m = &sc->eng->unp[i % sc->eng->n_unp];
+		int carve_round = i >= sc->eng->n_unp;
 
+		if ((m->unp_kind == KOF_UNP_CARVE) != carve_round)
+			continue;
 		if (!unp_eligible(sc, m, ctx, opt))
 			continue;
 		/* Skip what the family pass already tried. Guarded on `predict`

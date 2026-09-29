@@ -4,8 +4,12 @@
  * THE VALUES IN THIS FILE WERE MEASURED, AND THE MEASUREMENT IS WHY THEY LOOK
  * UNEVEN.
  *
- * Each is log(P(trace | malware) / P(trace | clean)) over 6523 malware ELF
- * objects and 13638 clean ones. The clean set was chosen adversarially: it holds
+ * Each is log(P(trace | malware) / P(trace | clean)) over a population of that
+ * format: 6523 malware ELF against 13638 clean, and 899 malware PE against
+ * 25267 clean. The ELF paragraph below is about the ELF numbers; the PE ones
+ * carry their own note beside them, including what their population is missing.
+ *
+ * FOR THE ELF SIDE: The clean set was chosen adversarially: it holds
  * 1482 legitimate system binaries packed with UPX, Ezuri, gzexe, ward, midgetpack
  * and pakkero, because a clean corpus with no packed files makes "is it packed"
  * look like a perfect detector and it is not.
@@ -70,17 +74,67 @@ uint64_t kof_heur_anomalies(const struct kof_obj_ctx *ctx)
 }
 
 /*
- * ELF ONLY, AND THE MASK BELOW SAYS SO.
+ * TWO FORMATS NOW, AND THE MASK BELOW SAYS WHICH.
  *
- * These numbers came from an ELF population. A PE has a different anomaly
- * vocabulary and a different clean population; a doczip has fewer traces of this
- * kind at all, because a document container that is malformed is usually just a
- * document written by something old. Neither is covered, and the model reports
- * that rather than scoring them with borrowed numbers.
+ * Every term names the format it was measured on and nothing borrows a number
+ * from another: bit 3 is one thing in an ELF and another in a PE, and the clean
+ * populations have nothing in common either. A doczip is still not covered -
+ * a document container that is malformed is usually just a document written by
+ * something old - and the model reports that rather than scoring it with
+ * numbers from somewhere else.
  */
 #define CN(x) ((int32_t)((x) * 100))
 
 static const struct kof_heur_anom_term default_anom[] = {
+	/*
+	 * --- PE -----------------------------------------------------------
+	 *
+	 * Measured the same way and on this machine's own populations: 899
+	 * malware PE from the sample collection against 25267 clean PE - the
+	 * Windows system DLLs of a Wine prefix, .NET assemblies, and game and
+	 * editor binaries. Every term below fires on ZERO of the clean set.
+	 *
+	 * WHAT THIS POPULATION IS NOT. It is not a Windows install and it has
+	 * no legitimately packed members, which is the gap the ELF numbers were
+	 * careful to close - 1482 of the clean ELF are system binaries wrapped
+	 * in UPX, Ezuri and four others, because a clean corpus with no packed
+	 * files makes "is it packed" look like a perfect detector. The PE side
+	 * has no equivalent yet, so the terms here are deliberately ones that
+	 * packing does not produce: a packer writes a well formed header.
+	 *
+	 * AND ONE FILE HAD TO BE THROWN OUT, which is worth recording because
+	 * it is how a clean corpus goes wrong. The first pass found exactly one
+	 * "clean" file with SEC_WRITE_EXEC and it was
+	 * RetDec-v5.0/bin/samples/111.exe - a malware sample shipped with a
+	 * tool. A clean set gathered by path is only as clean as the paths.
+	 *
+	 * WHAT IS LEFT OUT, AND WHY. SEC_OVERLAP, ENTRY_NOT_EXEC and
+	 * ENTRY_UNMAPPED are absent from the clean set too, but appear on 3, 3
+	 * and 2 malware files - too few to be a measurement. SEC_ZERO_RAW
+	 * (+0.14) and ENTRY_ZERO (+0.12) are worth nothing. STUB_NONSTANDARD
+	 * (-1.21) and SECNAME_OBJFORM (-2.49) point the OTHER way on this
+	 * population: 10262 and 6608 of the clean files carry them, because a
+	 * .NET assembly has neither a DOS stub nor image section names. A
+	 * negative term is a thing this model has no shape for, so they are
+	 * left out rather than clamped to zero and forgotten.
+	 *
+	 * The bar is the ELF one, 747, and it did not have to move: the highest
+	 * any of the 25267 clean PE reaches is 110. At that bar these terms
+	 * detect 113 of 899 malware PE - 12.6%, against 11.0% for the ELF side.
+	 *
+	 * Confirmed end to end rather than on the arithmetic alone: a full scan
+	 * of all 25779 clean PE at --heur 1 reports zero heuristic verdicts.
+	 * The sum is not the whole score - the flag terms and the depth of the
+	 * object add to it - so a table that computes clean on paper can still
+	 * fire in a scan.
+	 */
+	{ KOF_FMT_PE,  KOF_PE_ANOM_SEC_WRITE_EXEC,     CN(8.64), "WriteExec" },
+	{ KOF_FMT_PE,  KOF_PE_ANOM_SUMMARY_MISMATCH,   CN(7.93), "HdrMismatch" },
+	{ KOF_FMT_PE,  KOF_PE_ANOM_ENTRY_ZEROFILL,     CN(6.55), "EntryUnwritten" },
+	{ KOF_FMT_PE,  KOF_PE_ANOM_DIR_COUNT_ODD,      CN(6.28), "DirCount"  },
+	{ KOF_FMT_PE,  KOF_PE_ANOM_CERT_PAST_EOF,      CN(6.17), "CertCut"   },
+	{ KOF_FMT_PE,  KOF_PE_ANOM_SEC_PAST_EOF,       CN(1.10), "Truncated" },
+
 	/* --- the file's own structure ----------------------------------- */
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SECTAB_MISSING,    CN(2.75), "Stripped"  },
 	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEG_PAST_EOF,      CN(5.15), "Truncated" },
@@ -132,7 +186,7 @@ static const struct kof_heur_flag_term default_flag[] = {
 static const struct kof_heur_model default_model = {
 	default_anom, (uint32_t)(sizeof default_anom / sizeof default_anom[0]),
 	default_flag, (uint32_t)(sizeof default_flag / sizeof default_flag[0]),
-	1u << KOF_FMT_ELF,
+	(1u << KOF_FMT_ELF) | (1u << KOF_FMT_PE),
 	747
 	/*
 	 * THERE WAS A TERM HERE FOR PACKER DEPTH, AND IT WAS WRONG.
