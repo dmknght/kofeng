@@ -450,8 +450,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		if (!kunp_rcstruct_at(tab.dst[k]))
 			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 		wrote = kunp_static_decode(KOF_UNP_LZMA + tab.props, src,
-					ctx->obj_size - src, room,
-					KOF_FORM_RAW);
+					   ctx->obj_size - src, room);
 		if (!wrote)
 			KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 	}

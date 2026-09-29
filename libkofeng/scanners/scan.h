@@ -153,20 +153,6 @@ struct kof_scanner {
 	 * be. Per OBJECT, not per child - see emu_watch in kofsig.h. */
 	struct { uint64_t rva, len; } xw[KOF_EMU_EXEC_WATCH];
 	uint32_t             n_xw;
-	/*
-	 * AND WHAT THE MODULE DRIVING THE INTERPRETER RIGHT NOW SAYS.
-	 *
-	 * A separate set, not an append to the one above, because the two come
-	 * from different modules at different times and the second must not
-	 * outlive the run it was declared for. `xw` was written by whoever
-	 * produced this object, possibly several modules ago; this is written
-	 * by the module about to call emu_run and is taken when the run starts.
-	 * When it holds anything it REPLACES `xw` for that run - the module in
-	 * the middle of driving knows more about where it is going than the one
-	 * that handed the object over.
-	 */
-	struct { uint64_t rva, len; } xw_mod[KOF_EMU_EXEC_WATCH];
-	uint32_t             n_xw_mod;
 	/* Whether the emulator has produced a child from the object in hand.
 	 * Cleared per object and published in kof_result.emu_unpacked. */
 	uint8_t              emu_produced;

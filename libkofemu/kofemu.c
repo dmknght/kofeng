@@ -1156,13 +1156,6 @@ static uint64_t do_syscall(struct kof_emu *e, int *stop_out)
 	return ret;
 }
 
-unsigned kof_emu_said(const struct kof_emu *e, char *out, unsigned n)
-{
-	unsigned got = e->n_say < n ? e->n_say : n;
-
-	memcpy(out, e->say, got);
-	return got;
-}
 
 unsigned kof_emu_syscall_log(const struct kof_emu *e,
 			     struct kof_emu_syscall *out, unsigned n)
@@ -5100,13 +5093,17 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			 * is still where it was put. Reading it when the run
 			 * stops is far too late. */
 			while (pk && *pk) {
-				uint64_t at = (uint64_t)strtoull(pk, NULL, 0);
+				/* Named apart from the instruction address
+				 * `at` this shadows - see where that one is
+				 * declared, and what the handover test below
+				 * reads it for. */
+				uint64_t keyat = (uint64_t)strtoull(pk, NULL, 0);
 				uint8_t bf[128];
 				unsigned q;
 
-				if (mem_rd(e, at, bf, sizeof bf)) {
+				if (mem_rd(e, keyat, bf, sizeof bf)) {
 					fprintf(stderr, "[frz] %#llx ",
-						(unsigned long long)at);
+						(unsigned long long)keyat);
 					for (q = 0; q < sizeof bf; q++)
 						fputc(bf[q] >= 32 &&
 						      bf[q] < 127
@@ -5119,20 +5116,20 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			}
 		}
 		if (e->itr && !e->itr_frozen) {
-			struct itrace *r = &e->itr[e->itr_n++ % e->itr_cap];
+			struct itrace *it = &e->itr[e->itr_n++ % e->itr_cap];
 			char t[ND_MIN_BUF_SIZE];
 			unsigned q = 0;
 
-			r->rip = e->rip;
-			memcpy(r->gpr, e->gpr, sizeof r->gpr);
+			it->rip = e->rip;
+			memcpy(it->gpr, e->gpr, sizeof it->gpr);
 			/* The registers are copied BEFORE the instruction runs,
 			 * which is the point: they are its inputs. */
 			if (ND_SUCCESS(NdToText(&ix, e->rip, sizeof t, t)))
-				while (q + 1u < sizeof r->txt && t[q]) {
-					r->txt[q] = t[q];
+				while (q + 1u < sizeof it->txt && t[q]) {
+					it->txt[q] = t[q];
 					q++;
 				}
-			r->txt[q] = 0;
+			it->txt[q] = 0;
 		}
 		/* Cleared per instruction so the stop below can tell an operand
 		 * this build cannot express from one it simply could not read.
@@ -5292,7 +5289,10 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 */
 		case ND_INS_FNSTENV: {
 			uint8_t env[28];
-			uint64_t at;
+			/* The operand's effective address. Named apart from
+			 * `at`, the instruction address the handover test
+			 * reads - see where that is declared. */
+			uint64_t ea;
 
 			memset(env, 0, sizeof env);
 			env[12] = (uint8_t)(e->fpu_rip);
@@ -5300,9 +5300,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			env[14] = (uint8_t)(e->fpu_rip >> 16);
 			env[15] = (uint8_t)(e->fpu_rip >> 24);
 			if (ix.Operands[0].Type != ND_OP_MEM ||
-			    !ea_of(e, &ix, &ix.Operands[0], &at))
+			    !ea_of(e, &ix, &ix.Operands[0], &ea))
 				goto unsupported;
-			if (!mem_wr(e, at, env, sizeof env))
+			if (!mem_wr(e, ea, env, sizeof env))
 				goto fault;
 			break;
 		}
@@ -5331,7 +5331,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_FXSAVE:
 		case ND_INS_FXSAVE64: {
 			uint8_t area[512];
-			uint64_t at;
+			uint64_t ea;         /* see FNSTENV above */
 
 			memset(area, 0, sizeof area);
 			if (ix.Instruction == ND_INS_FXSAVE64) {
@@ -5347,9 +5347,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				area[11] = (uint8_t)(e->fpu_rip >> 24);
 			}
 			if (ix.Operands[0].Type != ND_OP_MEM ||
-			    !ea_of(e, &ix, &ix.Operands[0], &at))
+			    !ea_of(e, &ix, &ix.Operands[0], &ea))
 				goto unsupported;
-			if (!mem_wr(e, at, area, sizeof area))
+			if (!mem_wr(e, ea, area, sizeof area))
 				goto fault;
 			break;
 		}

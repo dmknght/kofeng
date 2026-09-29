@@ -609,7 +609,6 @@ unsigned kof_emu_syscall_log(const struct kof_emu *e,
  * the caller.
  */
 #define KOF_EMU_SAY 4096u
-unsigned kof_emu_said(const struct kof_emu *e, char *out, unsigned n);
 
 /*
  * WHAT THE STUB DECOMPRESSED, CAUGHT WHILE IT STILL EXISTS.

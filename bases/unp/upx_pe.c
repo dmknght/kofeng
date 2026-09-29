@@ -466,7 +466,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	if (!kunp_rcstruct_image() || !kunp_rcstruct_at(PEI_PAGE))
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);
-	got = kunp_static_decode(decoder, stream, c_len, u_len, KOF_FORM_RAW);
+	got = kunp_static_decode(decoder, stream, c_len, u_len);
 	if (got == 0)
 		KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
 	/*

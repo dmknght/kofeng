@@ -341,7 +341,6 @@ enum kof_fact {
 	KOF_FACT_YES
 };
 
-const char *kof_fact_name(uint8_t v);
 
 /*
  * THE CALLER CAN SAY THE PICTURE IS INCOMPLETE, and often it is the only side
@@ -353,9 +352,7 @@ const char *kof_fact_name(uint8_t v);
  *
  * Once marked, every NO becomes UNKNOWN.
  */
-void kof_flow_mark_partial(struct kof_flow *f);
 
-const char *kof_flow_rel_name(uint8_t rel);
 
 /*
  * The relation between two nodes, by index. Order matters: relation(a, b) asks
@@ -456,8 +453,6 @@ void kof_flow_add(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
  * Called once, by the first accessor, so a caller cannot forget it. */
 uint32_t kof_flow_n_func(struct kof_flow *f);
 uint32_t kof_flow_n_node(struct kof_flow *f);
-const struct kof_flow_func *kof_flow_func_at(struct kof_flow *f, uint32_t i);
-const struct kof_flow_node *kof_flow_node_at(struct kof_flow *f, uint32_t i);
 
 /*
  * THE CHAIN: what a call to this function DOES, with what it calls inlined

@@ -1218,8 +1218,7 @@ struct kof_content {
 	 * ceiling allows, and a decode that stops when it fills.
 	 */
 	uint64_t (*unpack)(const struct kof_obj_ctx *, uint32_t method,
-			   uint64_t off, uint64_t len, uint64_t out_hint,
-			   uint32_t form);
+			   uint64_t off, uint64_t len, uint64_t out_hint);
 
 	/*
 	 * Decode the front of a stream into the module's own buffer.
@@ -1981,39 +1980,6 @@ struct kof_content {
 			      uint32_t n, uint32_t mask, uint32_t key,
 			      uint8_t *out, uint32_t cap);
 
-	/*
-	 * THE SAME DECLARATION, ABOUT THE OBJECT IN HAND RATHER THAN THE NEXT
-	 * CHILD.
-	 *
-	 * emu_watch above is a PRODUCER talking about something that does not
-	 * exist yet: it unpacks a loader, knows the program it just wrote will
-	 * be at such an address, and the engine carries that with the child so
-	 * that when the child is run the interpreter knows where to stop.
-	 *
-	 * This is the other half, and it only became reachable when modules
-	 * started driving the interpreter themselves. The module that
-	 * recognised a packer it cannot decode statically runs THIS object, and
-	 * what it knows before the first instruction is a fact about the file in
-	 * front of it, not about a child.
-	 *
-	 * WHAT IT IS WORTH, MEASURED. pecompact_pe.c finds the stub's last
-	 * instruction - `mov eax,esi; pop edx; pop esi; pop edi; pop ecx;
-	 * pop ebx; pop ebp; jmp eax`, one match in 007 Spy.exe - and names the
-	 * two bytes of that `jmp eax`. The run then ends when the loader is
-	 * finished instead of when the instruction ceiling is: 207,329,920
-	 * instructions and 17.3 seconds become a fraction of that, and the
-	 * image is the one the program was about to run rather than whatever
-	 * the auto-snapshot caught on the way past.
-	 *
-	 * Two entry points rather than a flag, because the two are read at
-	 * different times by different code and confusing them is silent: a
-	 * declaration meant for this run that landed in the pending set would
-	 * be attached to whatever child came next.
-	 *
-	 * Declared before emu_run, and it lives exactly as long as that run.
-	 */
-	void (*emu_watch_here)(const struct kof_obj_ctx *, uint64_t rva,
-			       uint64_t len);
 
 	/*
 	 * THE NEXT CHILD REPLACES THIS OBJECT - it is not a thing this object
@@ -2117,15 +2083,21 @@ struct kof_content {
  * RAW is the ordinary answer and means the output is already a file - a gzip
  * member, a UPX packed ELF, anything the packer restores whole.
  *
- * PE_IMAGE means the output is a mapped image: it begins at the first section's
- * virtual address and carries the original PE header somewhere inside. The host
- * finds that header and writes the file the loader would have read. Without it the
- * child of an unpacked PE is a buffer of code that nothing recognises.
+ * THERE WAS A SECOND FORM HERE AND IT IS GONE.
+ *
+ * KOF_FORM_PE_IMAGE meant "what I just decompressed is a mapped image, put a
+ * file back together out of it", and the engine answered it by hunting for a PE
+ * header inside the output, allocating a SECOND buffer the size of the whole
+ * image, and copying every section into it so the result could be parsed back -
+ * two copies of an image to recover a layout the bytes already carried.
+ *
+ * A module says it where it can see it happening now: declare a span, take an
+ * image, decompress into it, then kunp_rcstruct_layout_of_image, which reads
+ * that header and DECLARES the sections. One buffer, and the module decides
+ * when. See upx_pe.c and `layout_of_produced`.
+ *
+ * With one form left there is nothing to choose, so the argument went with it.
  */
-enum kof_unp_form {
-	KOF_FORM_RAW = 0,
-	KOF_FORM_PE_IMAGE = 1
-};
 
 enum kof_unp_method {
 	/*
@@ -3948,33 +3920,6 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  * See emu_watch for why only a module can say this.
  */
 /*
- * The same, about the object this module is about to RUN.
- *
- *     kunp_emu_oep_here(rva_of_jmp, 2);
- *     n = kunp_emu_run(2);
- *
- * See emu_watch_here for why this is not the same call as the one below.
- */
-/*
- * This object is a wrapper and the child about to be closed is what was inside.
- *
- *     kunp_rcstruct_write(plain, n);
- *     kunp_rcstruct_supersedes();
- *     kunp_rcstruct_done();
- *
- * See `supersede` for what it does and does not stop.
- */
-/*
- * The declared image is to be written as a file of this format.
- *
- *     kunp_rcstruct_section(".text", HDR, n, ..., KOF_SECF_CODE);
- *     kunp_rcstruct_as(KOF_FMT_ELF, KOF_ARCH_X86, 0x08048000u);
- *     kunp_rcstruct_image();
- *     kunp_rcstruct_at(HDR);
- *
- * See `as_format` for when this is needed and when the parent answers.
- */
-/*
  * Which build of the packer this object is.
  *
  *     b = mp_build_of(ctx, pe);
@@ -3988,20 +3933,34 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	((void)((ctx)->content->packer_build ?                              \
 		((ctx)->content->packer_build((ctx), (s)), 0) : 0))
 
+/*
+ * The declared image is to be written as a file of this format.
+ *
+ *     kunp_rcstruct_section(".text", HDR, n, ..., KOF_SECF_CODE);
+ *     kunp_rcstruct_as(KOF_FMT_ELF, KOF_ARCH_X86, 0x08048000u);
+ *     kunp_rcstruct_image();
+ *     kunp_rcstruct_at(HDR);
+ *
+ * See `as_format` for when this is needed and when the parent answers.
+ */
 #define kunp_rcstruct_as(fmt, arch, base)                                     \
 	((void)((ctx)->content->as_format ?                                 \
 		((ctx)->content->as_format((ctx), (uint8_t)(fmt),           \
 					   (uint8_t)(arch),                 \
 					   (uint64_t)(base)), 0) : 0))
 
+/*
+ * This object is a wrapper and the child about to be closed is what was inside.
+ *
+ *     kunp_rcstruct_write(plain, n);
+ *     kunp_rcstruct_supersedes();
+ *     kunp_rcstruct_done();
+ *
+ * See `supersede` for what it does and does not stop.
+ */
 #define kunp_rcstruct_supersedes()                                            \
 	((void)((ctx)->content->supersede ?                                 \
 		((ctx)->content->supersede((ctx)), 0) : 0))
-
-#define kunp_emu_oep_here(rva, len)                                           \
-	((void)((ctx)->content->emu_watch_here ?                            \
-		((ctx)->content->emu_watch_here((ctx), (uint64_t)(rva),      \
-					        (uint64_t)(len)), 0) : 0))
 
 #define kunp_emu_oep_range(rva, len)                                            \
 	((void)((ctx)->content->emu_watch ?                                 \
@@ -4028,13 +3987,11 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  *     kof_unpack_deflate(gz->data_off, gz->data_len);
  *     kunp_rcstruct_done();
  */
-#define kunp_static_decode(method, off, len, out_hint, form)                  \
+#define kunp_static_decode(method, off, len, out_hint)                        \
 	((ctx)->content->unpack ?                                          \
 	 (ctx)->content->unpack((ctx), (uint32_t)(method), (uint64_t)(off),\
-				(uint64_t)(len), (uint64_t)(out_hint),     \
-				(uint32_t)(form)) : 0)
+				(uint64_t)(len), (uint64_t)(out_hint)) : 0)
 
-/* The output is already a file, which is the ordinary case. */
 /* kunp_rcstruct_note("MPRESS 2.12-2.19 LZMA") - what this module worked out about
  * the container, carried on the child it is about to produce. */
 #define kunp_rcstruct_note(text)                                                 \
@@ -4169,7 +4126,7 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 					 (uint32_t)(n)) : 0)
 
 #define kof_unpack_at(method, off, len, out_hint)                          \
-	kunp_static_decode((method), (off), (len), (out_hint), KOF_FORM_RAW)
+	kunp_static_decode((method), (off), (len), (out_hint))
 
 /*
  * Decode the front of a stream into `buf`, for a header that is compressed.

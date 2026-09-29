@@ -2445,7 +2445,7 @@ struct view {
 	/* The search's own message. Shared with the draft panel's it produced
 	 * a bare "not found" beside the Generate button, which is an answer to
 	 * a question that panel never asked. */
-	char        find_msg[64];
+	char        find_msg[128];   /* a regex compiler message is longer than "No match" */
 	/* Where each control landed, recorded as it is drawn. */
 	int         f_txt[2], f_mode[2], f_rx[2], f_ic[2], f_all[2];
 	int         f_next[2], f_back[2], f_cancel[2];
@@ -24794,6 +24794,25 @@ static void separate_now(struct view *v)
  * about the same file is a finding, and it cannot be seen if one overwrites the
  * other.
  */
+/*
+ * Has the interpreter already run on anything in this tree?
+ *
+ * "Unpack with emulator" runs it on ONE object and marks that object; opening
+ * the file in emu mode runs it on the walk. Either way the answer the reader is
+ * looking at came from the interpreter, and a dump should write THAT answer.
+ */
+static int tree_has_emu(const struct view *v)
+{
+	uint32_t i;
+
+	if (v->emu_mode)
+		return 1;
+	for (i = 0; i < v->n_obj; i++)
+		if (v->obj[i].emu_done)
+			return 1;
+	return 0;
+}
+
 static void dump_all(struct view *v, int use_emu)
 {
 	char dir[KOF_DUMP_PATH_ROOM], sub[KOF_DUMP_PATH_ROOM], why[256];
@@ -24802,7 +24821,25 @@ static void dump_all(struct view *v, int use_emu)
 	uint64_t bytes = 0;
 
 	v->act_ok = 0;
-	if (use_emu != (v->emu_mode != 0)) {
+	/*
+	 * THE TREE ON SCREEN IS THE ANSWER, WHEN IT ALREADY CAME FROM THE
+	 * INTERPRETER.
+	 *
+	 * This compared against emu_mode alone, which is set by OPENING the
+	 * file in emu mode and not by "Unpack with emulator" - so after that
+	 * button the file was reopened and the interpreter ran a second time
+	 * from the beginning. Two costs, and the second is the one that
+	 * matters: 17 seconds and 207 million instructions on a PECompact2
+	 * sample, and a run that need not agree with the first. The
+	 * interpreter carries state a second pass does not reproduce - the
+	 * idle counter, which snapshots it took, null calls, unhandled
+	 * exceptions - so the dump could hold something the reader never saw.
+	 *
+	 * Going the other way still reopens: a reader asking for the STATIC
+	 * dump of a tree that came from the interpreter is asking for
+	 * something this tree does not contain.
+	 */
+	if (use_emu ? !tree_has_emu(v) : (v->emu_mode != 0)) {
 		char keep[KOF_DUMP_PATH_ROOM];
 
 		snprintf(keep, sizeof keep, "%s", v->path);

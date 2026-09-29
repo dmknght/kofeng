@@ -1169,12 +1169,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			      ? kunp_static_decode(
 				    pe->pe32_plus ? KOF_UNP_LZMAT_MPRESS64
 						  : KOF_UNP_LZMAT_MPRESS32,
-				    stream + 6u, c_len, u_len, KOF_FORM_RAW)
+				    stream + 6u, c_len, u_len)
 			      : kunp_static_decode(
 				    KOF_UNP_LZMA_MPRESS_PROPS(
 					lc, lp, pb, pe->pe32_plus ? 64u : 32u),
-				    stream + MP_HDR, c_len - 2u, u_len,
-				    KOF_FORM_RAW);
+				    stream + MP_HDR, c_len - 2u, u_len);
 			got = wrote;
 			if (!wrote)
 				KUNP_RCSTRUCT_BROKEN(KOF_UNP_DAMAGED);
@@ -1306,11 +1305,24 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				 * the fix stub, the entry point - is something
 				 * the steps above worked out.
 				 */
-				if (need)
-					mp_split(ctx, pe, found, fix, hp,
-						 mp_oep_of(ctx, pe, build,
-							   found),
-						 iat_lo, iat_hi);
+				/*
+				 * NOT GATED ON THE IMPORTS. Cutting the one
+				 * big section back into several needs the
+				 * hints, the fix stub and the entry point -
+				 * all of which are in hand here - and the IAT
+				 * only to place one more boundary. An import
+				 * walk that found nothing still leaves a file
+				 * whose 8 MB of image is one RWX section, and
+				 * that is the thing being fixed.
+				 *
+				 * mp_split refuses on its own when there is
+				 * nothing to cut - see the entry-point test at
+				 * its head - so the zero IAT costs a call and
+				 * two landmarks instead of four.
+				 */
+				mp_split(ctx, pe, found, fix, hp,
+					 mp_oep_of(ctx, pe, build, found),
+					 iat_lo, iat_hi);
 			}
 		}
 	}

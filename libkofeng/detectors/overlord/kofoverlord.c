@@ -310,14 +310,6 @@ uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v)
 	return track;
 }
 
-const char *kof_ovl_track_name(uint32_t track)
-{
-	switch (track) {
-	case KOF_OVL_STRUCTURE: return "structure";
-	case KOF_OVL_ANCHOR:    return "anchor";
-	default:                return track ? "mixed" : "none";
-	}
-}
 
 /*
  * CONTAINMENT OVER TWO SORTED SETS, ONCE.

@@ -1193,7 +1193,7 @@ $(SDK)/include/kofmod/%.h: libkofeng/kofcore/kofmod/%.h
 # reconstruction, not recognition, and they sit with the rest of the unpack
 # code.
 #
-$(SDK)/include/kofanalyze/%.h: libkofeng/analyzers/payload/%.h
+$(SDK)/include/kofanalyze/%.h: libkofeng/analyzers/payloads/%.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 

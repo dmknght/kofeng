@@ -257,7 +257,12 @@ uint64_t kof_pe_write_hdr(uint8_t *out, uint64_t cap,
 		unsigned ddir = pe_off + 24u + (plus ? 112u : 96u);
 		unsigned di;
 
-		for (di = 0; di < 16u && di < KOF_PE_DIR_COUNT; di++) {
+		/* Sixteen is what the header has room for; KOF_PE_DIR_COUNT is
+		 * what the parse fills. They are the same today, and the
+		 * smaller of the two is what may be read either way. */
+		for (di = 0; di < (16u < KOF_PE_DIR_COUNT ? 16u
+							 : KOF_PE_DIR_COUNT);
+		     di++) {
 			uint64_t rva = tmpl->dir[di].rva;
 			uint32_t k;
 

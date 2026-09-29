@@ -1595,20 +1595,20 @@ int kof_pe_image_from_run(struct kof_emu *e, const struct kof_pe_info *info,
 	 */
 	for (i = 0; i < info->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
 		const struct kof_pe_sec *sc = &info->sec[i];
-		uint64_t n = sc->mem_size, o;
+		uint64_t n = sc->mem_size, at;
 
 		if (!n || sc->mem_rva >= total)
 			continue;
 		if (n > total - sc->mem_rva)
 			n = total - sc->mem_rva;
-		for (o = 0; o < n; o += KOF_EMU_PAGE) {
-			uint64_t k = n - o < KOF_EMU_PAGE ? n - o : KOF_EMU_PAGE;
+		for (at = 0; at < n; at += KOF_EMU_PAGE) {
+			uint64_t k = n - at < KOF_EMU_PAGE ? n - at : KOF_EMU_PAGE;
 
 			/* A page at a time, because an image may be mapped
 			 * with holes and one unreadable page must not lose
 			 * the rest of the section. */
-			if (kof_emu_read(e, base + sc->mem_rva + o,
-					 b + sc->mem_rva + o, (unsigned)k))
+			if (kof_emu_read(e, base + sc->mem_rva + at,
+					 b + sc->mem_rva + at, (unsigned)k))
 				placed++;
 		}
 	}

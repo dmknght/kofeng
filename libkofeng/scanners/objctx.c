@@ -1235,7 +1235,7 @@ static void c_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
 	sc->pend_n_xw++;
 }
 
-/* The same declaration about the object in hand - see emu_watch_here. */
+/* This object is a wrapper - see `supersede` in kofsig.h. */
 /* Which build of the packer - see `packer_build` in kofsig.h. */
 static void c_packer_build(const struct kof_obj_ctx *ctx, const char *build)
 {
@@ -1264,25 +1264,12 @@ static void c_as_format(const struct kof_obj_ctx *ctx, uint8_t fmt,
 	sc->pend_as_base = base;
 }
 
-/* This object is a wrapper - see `supersede` in kofsig.h. */
 static void c_supersede(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
 	if (sc)
 		sc->superseded = 1;
-}
-
-static void c_emu_watch_here(const struct kof_obj_ctx *ctx, uint64_t rva,
-			     uint64_t len)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-
-	if (!sc || !len || sc->n_xw_mod >= KOF_EMU_EXEC_WATCH)
-		return;
-	sc->xw_mod[sc->n_xw_mod].rva = rva;
-	sc->xw_mod[sc->n_xw_mod].len = len;
-	sc->n_xw_mod++;
 }
 
 static void c_child_want(const struct kof_obj_ctx *ctx, uint32_t want,
@@ -1840,7 +1827,7 @@ static int lzma_props_of(uint32_t method, unsigned *lc, unsigned *lp, unsigned *
 static uint64_t unpack_buffered(struct kof_scanner *sc,
 				const struct kof_obj_ctx *ctx, uint32_t method,
 				int variant, int bits, const uint8_t *in,
-				uint64_t in_len, uint64_t out_hint, uint32_t form,
+				uint64_t in_len, uint64_t out_hint,
 				uint8_t *peek_out, uint32_t peek_cap)
 {
 	uint64_t room, want, produced = 0, decoded, at;
@@ -2167,7 +2154,7 @@ static uint32_t c_unpack_peek(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (!nrv2_of(method, &variant, &bits))
 		variant = bits = 0;
 	return (uint32_t)unpack_buffered(sc, ctx, method, variant, bits,
-					 b.p + off, len, cap, KOF_FORM_RAW,
+					 b.p + off, len, cap,
 					 (uint8_t *)out, cap);
 }
 
@@ -2378,8 +2365,7 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 }
 
 static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
-			 uint64_t off, uint64_t len, uint64_t out_hint,
-			 uint32_t form)
+			 uint64_t off, uint64_t len, uint64_t out_hint)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	kof_buf b;
@@ -2543,7 +2529,7 @@ static uint64_t c_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (!nrv2_of(method, &variant, &bits))
 		variant = bits = 0;
 	return unpack_buffered(sc, ctx, method, variant, bits, b.p + off, len,
-			       out_hint, form, NULL, 0);
+			       out_hint, NULL, 0);
 }
 
 /*
@@ -3472,7 +3458,7 @@ static uint64_t c_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 	 * kof_unpack_at for a container that has entries.
 	 */
 	if (!mid)
-		return c_unpack(ctx, e->coding[last], off, len, e->out_hint, 0);
+		return c_unpack(ctx, e->coding[last], off, len, e->out_hint);
 
 	/*
 	 * INFLATE ONLY, over an intermediate.
@@ -3693,7 +3679,7 @@ static int c_section(const struct kof_obj_ctx *ctx, const char *name,
 	for (k = 0; k < sc->n_pend_sec; k++)
 		if (sc->pend_sec[k].rva == rva) {
 			struct kof_sec_decl *e = &sc->pend_sec[k];
-			unsigned q;
+			unsigned w;
 
 			/* An extent may be corrected, but not over its
 			 * neighbour: the table stays ordered and disjoint or
@@ -3701,8 +3687,8 @@ static int c_section(const struct kof_obj_ctx *ctx, const char *name,
 			if (k + 1u < sc->n_pend_sec &&
 			    rva + vsize > sc->pend_sec[k + 1u].rva)
 				return -1;
-			for (q = 0; q < 8u; q++)
-				e->name[q] = name && name[q] ? name[q] : 0;
+			for (w = 0; w < 8u; w++)
+				e->name[w] = name && name[w] ? name[w] : 0;
 			e->name[8] = 0;
 			e->vsize = vsize;
 			e->perm = perm;
@@ -5298,8 +5284,6 @@ static const struct kof_content kof_detect_vtable = {
 	c_plague_score, c_ovl_blocks, c_ovl_chain, c_ovl_shape,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
-	/* emu_watch_here - a detector drives no interpreter. */
-	NULL,
 	/* supersede - a detector produces nothing to be superseded by. */
 	NULL,
 	/* as_format - nor an image to write a header for. */
@@ -5323,7 +5307,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
-	c_emu_watch_here, c_supersede, c_as_format, c_packer_build
+	c_supersede, c_as_format, c_packer_build
 };
 
 /*
@@ -5661,11 +5645,6 @@ static int emu_dup(const struct emu_extra *ex, uint32_t n_ex, uint64_t va,
 		    memcmp(ex[i].p, p, (size_t)n) == 0)
 			return 1;
 	return 0;
-}
-
-static uint64_t emu_pagesz_up(uint64_t n)
-{
-	return (n + 0xfffull) & ~0xfffull;
 }
 
 static int emu_give(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
@@ -6965,10 +6944,11 @@ static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	vouched = sc && vouch && sc->heur_lvl >= vouch;
 	if (sc && getenv("KOF_EMU_TRACE"))
 		fprintf(stderr,
-			"[emu] ask: vouched=%d live=%d banned=%d packed=%d only=%d ask=%d dflt=%d spent=%u\n",
+			"[emu] ask: vouched=%d live=%d banned=%d packed=%d only=%d ask=%d dflt=%d spent=%llu\n",
 			vouched, sc->emu_live ? 1 : 0, sc->emu_banned,
 			sc->packed_here, sc->emu_only, sc->emu_ask,
-			sc->emu_default_ok, sc->st.heur_emu);
+			sc->emu_default_ok,
+			(unsigned long long)sc->st.heur_emu);
 	if (!sc || sc->emu_live)
 		return 0;               /* one run at a time */
 	/*
@@ -7003,22 +6983,6 @@ static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 		return 0;
 	sc->st.heur_emu++;
 	sc->emu_ran = 1;
-	/* The driving module's watch set lives exactly as long as the run it
-	 * was declared for - see n_xw_mod. Taken now rather than after, so an
-	 * early return inside the run cannot leave it standing. */
-	{
-		uint32_t nmod = sc->n_xw_mod;
-		uint32_t r;
-
-		sc->n_xw_mod = 0;
-		if (nmod) {
-			sc->n_xw = nmod;
-			for (r = 0; r < nmod; r++) {
-				sc->xw[r].rva = sc->xw_mod[r].rva;
-				sc->xw[r].len = sc->xw_mod[r].len;
-			}
-		}
-	}
 	/*
 	 * VOUCHED BY THE MODULE, OR SPOKEN FOR BY THE DATABASE.
 	 *

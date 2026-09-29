@@ -265,7 +265,6 @@ uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v);
  */
 uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
 			    const uint32_t *ref, uint32_t n_ref);
-const char *kof_ovl_track_name(uint32_t track);
 
 /*
  * A SHAPE A RULE CAN DECLARE, and the one number it is asked about.

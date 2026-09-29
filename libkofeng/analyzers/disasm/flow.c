@@ -2030,31 +2030,8 @@ uint32_t kof_flow_n_node(struct kof_flow *f)
 	return f->n_node;
 }
 
-const struct kof_flow_func *kof_flow_func_at(struct kof_flow *f, uint32_t i)
-{
-	if (!f)
-		return NULL;
-	finish(f);
-	return i < f->n_func ? &f->func[i] : NULL;
-}
 
-const struct kof_flow_node *kof_flow_node_at(struct kof_flow *f, uint32_t i)
-{
-	if (!f)
-		return NULL;
-	finish(f);
-	return i < f->n_node ? &f->node[i] : NULL;
-}
 
-const char *kof_flow_rel_name(uint8_t rel)
-{
-	switch (rel) {
-	case KOF_REL_SAME_BLOCK: return "same-block";
-	case KOF_REL_PATH:       return "path";
-	case KOF_REL_EXCLUSIVE:  return "exclusive";
-	default:                 return "unknown";
-	}
-}
 
 /*
  * IS B REACHABLE FROM A THROUGH THE BLOCK GRAPH.
@@ -2127,20 +2104,7 @@ uint8_t kof_flow_relation(struct kof_flow *f, uint32_t a, uint32_t b)
 	}
 }
 
-const char *kof_fact_name(uint8_t v)
-{
-	switch (v) {
-	case KOF_FACT_YES: return "yes";
-	case KOF_FACT_NO:  return "no";
-	default:           return "unknown";
-	}
-}
 
-void kof_flow_mark_partial(struct kof_flow *f)
-{
-	if (f)
-		f->full = 1;
-}
 
 /*
  * A NEGATIVE ANSWER SURVIVES ONLY A COMPLETE SWEEP.
