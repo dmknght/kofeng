@@ -89,6 +89,22 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (at == KOF_BROKEN)
 		return;
 
+	/*
+	 * WHICH PECOMPACT, AS FAR AS THE FILE SUPPORTS SAYING.
+	 *
+	 * "PEC2" in the headers is the 2.x marker - 1.x writes "PEC1" - and
+	 * nothing after it is a version: measured on 007 Spy.exe the four bytes
+	 * following are zero. The minor release is told apart by the SHAPE of
+	 * the stub, which is what DIE's scripts and XVolkolak's per-packer
+	 * unpackers do, and this build has one sample; a table with one row in
+	 * it would be a table of that sample.
+	 *
+	 * So the honest answer is the major version, which the marker proves,
+	 * and it is enough for the thing a build is FOR - the layout this
+	 * module reads the object with is 2.x's.
+	 */
+	kunp_rcstruct_build("PE:PECompact 2.x");
+
 	kof_debug("PECompact.PE.raw", (uint32_t)(e->file_size >> 10));
 	kof_debug("PECompact.PE.virt", (uint32_t)(e->mem_size >> 10));
 

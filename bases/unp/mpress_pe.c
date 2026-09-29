@@ -224,17 +224,17 @@ struct mp_build {
 	uint32_t pco;   /* EP+this holds the packed section's relative address */
 	uint32_t fso;   /* EP+this holds the fix stub's relative address */
 	uint32_t lzmat; /* the coding: 1 for LZMAT, 0 for LZMA */
-	char name[24];
+	char name[28];
 };
 
 static const struct mp_build mp_builds[] = {
-	{ 0x2b6u, 0x2bcu, 0x2b8u, 1u, "MPRESS 1.01-1.05 LZMAT" },
-	{ 0x29eu, 0x2a4u, 0x2a0u, 1u, "MPRESS 1.07-1.27 LZMAT" },
-	{ 0x299u, 0x29fu, 0x29bu, 1u, "MPRESS 2.01 LZMAT"      },
-	{ 0xb57u, 0xb5du, 0xb59u, 0u, "MPRESS 2.05 LZMA"       },
-	{ 0x29cu, 0x2a2u, 0x29eu, 1u, "MPRESS 2.05 LZMAT"      },
-	{ 0xb5au, 0xb60u, 0xb5cu, 0u, "MPRESS 2.12-2.19 LZMA"  },
-	{ 0x29fu, 0x2a5u, 0x2a1u, 1u, "MPRESS 2.12-2.19 LZMAT" }
+	{ 0x2b6u, 0x2bcu, 0x2b8u, 1u, "PE:MPRESS 1.01-1.05 LZMAT" },
+	{ 0x29eu, 0x2a4u, 0x2a0u, 1u, "PE:MPRESS 1.07-1.27 LZMAT" },
+	{ 0x299u, 0x29fu, 0x29bu, 1u, "PE:MPRESS 2.01 LZMAT" },
+	{ 0xb57u, 0xb5du, 0xb59u, 0u, "PE:MPRESS 2.05 LZMA" },
+	{ 0x29cu, 0x2a2u, 0x29eu, 1u, "PE:MPRESS 2.05 LZMAT" },
+	{ 0xb5au, 0xb60u, 0xb5cu, 0u, "PE:MPRESS 2.12-2.19 LZMA" },
+	{ 0x29fu, 0x2a5u, 0x2a1u, 1u, "PE:MPRESS 2.12-2.19 LZMAT" }
 };
 
 /*
@@ -859,6 +859,15 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		return;
 	found = pe->sec_count;
 	build = mp_build_of(ctx, pe);
+	/*
+	 * SAID BEFORE ANYTHING IS READ, because everything read after this
+	 * depends on it - see `packer_build` in kofsig.h. The table this comes
+	 * from is the one below, which the module needs anyway: each build puts
+	 * the packed section's address, the fix stub's address and the coding
+	 * at a different offset from the entry point.
+	 */
+	if (build)
+		kunp_rcstruct_build(build->name);
 
 	for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
 		const struct kof_pe_sec *s = &pe->sec[i];
@@ -890,6 +899,29 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 	if (found >= pe->sec_count)
 		return;                         /* not this packer */
+
+	/*
+	 * AND NOW THE VERSION DECIDES WHETHER TO GO ON, which is the point of
+	 * having worked it out first.
+	 *
+	 * Every offset this module reads past here is taken from the build's
+	 * row - the packed section's address, the fix stub's address, the
+	 * coding - and a PE32 stub whose EP+8 matches no row is a build laid
+	 * out some other way. Reading it anyway is reading whatever happens to
+	 * be at those offsets, and the property bytes below would be the first
+	 * thing misread: an LZMAT stream has none, so its compressed data gets
+	 * interpreted as lc/lp/pb and the file is reported as a coding this
+	 * engine lacks.
+	 *
+	 * PE32+ IS THE EXCEPTION AND NOT A HOLE. The table is RetDec's and
+	 * RetDec does not handle PE32+ at all, so the number at EP+8 in an x64
+	 * stub is not an offset of this kind and no row could match. The x64
+	 * path below does not use the row; it is the x86 path that cannot go on
+	 * without one. Measured: all six PE32 samples here match a row, and the
+	 * seventh is the PE32+ one.
+	 */
+	if (!build && !pe->pe32_plus)
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
 
 	stream = pe->sec[found].file_off;
 	u_len  = pe->sec[found].mem_size;

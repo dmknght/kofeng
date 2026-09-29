@@ -331,7 +331,28 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * section-shaped search worth the walk, and that one needs the packed
 	 * sections' addresses, so it is gated on there being some.
 	 */
-	if (!vmp_find_by_props(ctx, pe, image_end, &tab)) {
+	if (vmp_find_by_props(ctx, pe, image_end, &tab)) {
+		/*
+		 * THE LAYOUT IS THE VERSION, and this module already branched
+		 * on it before it could say so. A props pair in the table is
+		 * what the builds up to 3.8 write; 3.9 moved the properties
+		 * into the loader and stopped writing them, which is why the
+		 * search below exists at all.
+		 *
+		 * So the branch names itself - see `packer_build` in kofsig.h.
+		 * A range rather than a point because that is what the evidence
+		 * supports: the presence of the pair separates the two eras and
+		 * says nothing finer.
+		 */
+		kunp_rcstruct_build("PE:VMProtect <= 3.8");
+	} else {
+		/*
+		 * NOT YET A CLAIM. Having no props pair is what 3.9 looks like
+		 * and also what every PE that is not VMProtect looks like, so
+		 * the name waits until the search below has found blocks. The
+		 * engine drops a build from a module that opens nothing, but a
+		 * module should not be making the claim in the first place.
+		 */
 		/* The hollow sections that are not BSS. */
 		for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
 			const struct kof_pe_sec *s = &pe->sec[i];
@@ -343,6 +364,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			if (n_want < VMP_MAX_BLK)
 				want[n_want++] = (uint32_t)s->mem_rva;
 		}
+		if (n_want)
+			kunp_rcstruct_build("PE:VMProtect 3.9+");
 		if (n_want < VMP_MIN_BLK)
 			return;                          /* not this shape */
 		if (!vmp_find_table(ctx, pe, want, n_want, &tab))

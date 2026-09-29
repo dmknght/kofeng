@@ -1332,7 +1332,13 @@ struct object {
 
 	struct kof_finding *finding;   /* as the engine handed them over */
 	uint32_t          n_finding;
-	char              packer[48];   /* the module that opened or unpacked it */
+	/*
+	 * WHAT OPENED THIS OBJECT, in the engine's own words and in one field:
+	 * "PE:MPRESS 2.12-2.19 LZMA" where the module could name a build,
+	 * "MSF.xor" where it could not. See kof_result.packer_build - the whole
+	 * answer is there and nothing here works any of it out.
+	 */
+	char              packer[48];
 	/*
 	 * The interpreter has already been run on this object.
 	 *
@@ -1384,7 +1390,6 @@ struct object {
 	 * means UPX 3.9x: the module reported a field called version and this
 	 * shows the field.
 	 */
-	long long         packer_ver;
 	/* What the engine said about this object, kept whole. */
 	struct kof_result heur;
 	/*

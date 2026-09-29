@@ -1367,8 +1367,6 @@ struct view {
 	 */
 	uint32_t    foreign;
 
-	char        pending[48];    /* the unpacker that has just spoken */
-	long long   pending_ver;    /* and the version it reported, or -1 */
 	/*
 	 * WHERE A HEURISTIC SAID THE PAYLOAD IS, held the same way and for the
 	 * same reason: a rule reports it while the object is being opened, so
@@ -2707,8 +2705,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 			if (!e->buf.p ||
 			    memcmp(e->buf.p, bytes, (size_t)len) != 0)
 				continue;
-			v->pending[0] = 0;
-			v->pending_ver = -1;
 			v->pend_payload = v->pend_paylen = 0;
 			v->pend_paybits = 0;
 			return 0;
@@ -2748,7 +2744,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	free(o->carve);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
-	o->packer_ver = -1;
 	o->broken = res->broken;
 	/* The engine runs the interpreter by itself when an unpacker declares
 	 * its child needs it, so "already done" is not only what this panel
@@ -2776,17 +2771,22 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * engine records the producer where the child is pushed; that is used
 	 * when it has one, and the guess only when it does not.
 	 */
-	if (res->opened_by && res->opened_by[0]) {
-		snprintf(o->packer, sizeof o->packer, "%s", res->opened_by);
-		o->packer_ver = v->pending_ver;
-		v->pending[0] = 0;
-		v->pending_ver = -1;
-	} else if (v->pending[0]) {
-		snprintf(o->packer, sizeof o->packer, "%s", v->pending);
-		o->packer_ver = v->pending_ver;
-		v->pending[0] = 0;
-		v->pending_ver = -1;
-	}
+	/*
+	 * ONE FIELD, FROM THE ENGINE, AND NOTHING WORKED OUT HERE.
+	 *
+	 * kof_result.packer_build is the whole answer - format, name and build
+	 * where the module could tell one: "PE:MPRESS 2.12-2.19 LZMA". It was
+	 * shown beside opened_by, which is the same fact in fewer words, and
+	 * the row read "MPRESS.PE PE:MPRESS 2.12-2.19 LZMA".
+	 *
+	 * The guess this replaces was worse than redundant. It remembered the
+	 * last debug note anybody emitted and pinned it on whichever object
+	 * arrived next, so a version reported by one module was shown against
+	 * another module's object - and the engine has known which module
+	 * opened what since opened_by existed.
+	 */
+	if (res->packer_build && res->packer_build[0])
+		snprintf(o->packer, sizeof o->packer, "%s", res->packer_build);
 	/* Cleared as it is taken, whether or not anything reported one, so a
 	 * payload named on one object can never be shown against the next. */
 	o->payload_at  = v->pend_payload;
@@ -2929,43 +2929,39 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 	/* Computed once. The engine hands the field's id with every note, so
 	 * picking the one field this cares about is an integer compare rather
 	 * than finding a dot and running strcmp per note per object. */
-	static uint32_t f_version, f_payload, f_paylen, f_paybits;
+	static uint32_t f_payload, f_paylen, f_paybits;
+	static int facts_done;
 
-	if (!f_version) {
-		f_version = kverdict_fact_id("version");
+	if (!facts_done) {
+		facts_done = 1;
 		f_payload = kverdict_fact_id("payload");
 		f_paylen  = kverdict_fact_id("length");
 		f_paybits = kverdict_fact_id("bits");
 	}
 
-	if (n >= sizeof v->pending)
-		n = sizeof v->pending - 1u;
+	(void)n;
 	/*
-	 * A different module speaking drops the version the last one gave, so a
-	 * version can never be shown against a name that did not report it.
+	 * THE NAME AND THE VERSION ARE NO LONGER TAKEN FROM HERE.
+	 *
+	 * This kept the name in front of the last note anybody emitted and the
+	 * number spelled "version" beside it, and pinned the pair on whichever
+	 * object arrived next. Both are facts the engine reports now -
+	 * kof_result.packer_build carries the format, the name and the build in
+	 * one string, attached to the object the module that said it actually
+	 * opened. A guess that had to be kept honest by a rule about "a
+	 * different module speaking" is a guess that should not have existed.
+	 *
+	 * What is still taken is below: where a heuristic said a payload is.
+	 * That one has no other channel yet.
 	 */
-	if (strlen(v->pending) != n || memcmp(v->pending, what, n) != 0)
-		v->pending_ver = -1;
-	memcpy(v->pending, what, n);
-	v->pending[n] = 0;
 	/*
-	 * One field is picked out of everything a module says, and it is the one
-	 * spelled "version". Three modules across two formats report it -
-	 * UPX.ELF, UPX.PE and Rar - and it is the field a reader looking at a
-	 * packed sample asks for first, because it decides which layout the rest
-	 * of the numbers belong to. The others are detail and kofexamine --debug
-	 * prints all of them.
-	 */
-	if (fact == f_version)
-		v->pending_ver = (long long)value;
-	/*
-	 * Two more fields kept, and they are kept for the same reason "version"
-	 * is: a reader looking at this object asks for them. A rule that says
+	 * Two fields are kept, because a reader looking at this object asks for
+	 * them and nothing else reports them yet. A rule that says
 	 * "this file carries a payload" is only half an answer - the other half
 	 * is which of the symbols it is, and that is a number the rule already
 	 * computed and would otherwise be thrown away.
 	 */
-	else if (fact == f_payload)
+	if (fact == f_payload)
 		v->pend_payload = value;
 	else if (fact == f_paylen)
 		v->pend_paylen = value;
@@ -3356,7 +3352,6 @@ static void objects_collect(struct view *v, kof_engine *eng)
 	 */
 	/* -1 rather than the zeroed view's 0, because 0 is a version a container
 	 * can carry. Set here so the first module to speak cannot inherit it. */
-	v->pending_ver = -1;
 	sc = kscan_new(eng);
 	if (!sc)
 		return;
@@ -16906,11 +16901,8 @@ static void draw_marker_line(struct out *o, struct view *v)
 			 (ob->heur.heur_flags &
 			  KOF_HEUR_FL(KOF_HEUR_F_PACKED))) ? A_BAD : A_WARN;
 
-		if (ob->packer_ver >= 0)
-			out_fmt(o, "%s%s" A_OFF A_DIM " v%lld" A_OFF,
-				pcol, ob->packer, ob->packer_ver);
-		else
-			out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
+		/* One field - see where it is filled. */
+		out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
 		out_str(o, A_DIM "  |  " A_OFF);
 	} else if (emu_why_tag(obj_emu_why(ob))) {
 		/*
@@ -23633,11 +23625,7 @@ no_regions:
 	 */
 	if (ob->packer[0] || emu_why_tag(ob->emu_why)) {
 		prop_head("Packer");
-		if (ob->packer[0] && ob->packer_ver >= 0)
-			prop_add("  %-11s " A_BAD "%s" A_OFF A_DIM
-				 "  v%lld" A_OFF, "unpacker", ob->packer,
-				 ob->packer_ver);
-		else if (ob->packer[0])
+		if (ob->packer[0])
 			prop_add("  %-11s " A_BAD "%s" A_OFF,
 				 "unpacker", ob->packer);
 		else
@@ -24382,7 +24370,6 @@ static void emu_here(struct view *v)
 	 * on this node it already has, or the node would not be here.
 	 */
 	opt.emu_use = KOF_EMU_ONLY;
-	v->pending_ver = -1;
 	v->skip_root = 1;
 	/* Everything already in the list belongs to the first pass - see the
 	 * dedup in on_object. Zero afterwards, because an ordinary collect
@@ -31556,7 +31543,6 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	v->bar_sel = -1;
 	v->bar_sub = -1;
 	v->into_obj = -1;
-	v->pending_ver = -1;
 
 	v->proc_pid = pid;
 	snprintf(v->pathbuf, sizeof v->pathbuf, "pid:%lu", (unsigned long)pid);

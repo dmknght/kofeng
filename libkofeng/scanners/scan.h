@@ -450,6 +450,30 @@ struct kof_scanner {
 	 */
 	char                opened_by[KOF_MOD_TAG];
 	/*
+	 * AND WHICH BUILD OF THE PACKER IT IS, as the module that recognised it
+	 * said - see kof_result.packer_build. Copied rather than pointed at: a
+	 * module's string lives in its blob and the answer has to outlive the
+	 * call. Cleared per object, beside opened_by.
+	 */
+	char                packer_build[48];
+	/*
+	 * AND WHAT THE MODULE CURRENTLY RUNNING SAID, WHICH IS NOT THE SAME
+	 * THING.
+	 *
+	 * Every unpacker in the database is offered every object, so several
+	 * speak about one file and only one of them opens it. A build written
+	 * straight through was therefore the LAST module to guess rather than
+	 * the one that was right: on 111.exe, which is MPRESS, VMProtect's
+	 * module ran afterwards, found no props pair, and overwrote
+	 * "MPRESS 2.12-2.19 LZMA" with "VMProtect 3.9+".
+	 *
+	 * So a module's claim waits here and is committed where `opened_by` is
+	 * - producing a child is what makes a claim about the object worth
+	 * keeping. Cleared per module, like the rest of the pending set.
+	 */
+	char                pend_build[48];
+	const struct kof_module *pend_build_of;
+	/*
 	 * THE MODULE THAT DERIVED THE CHILD BEING BUILT, and then the one that
 	 * derived each child - see `derive` in kofsig.h.
 	 *

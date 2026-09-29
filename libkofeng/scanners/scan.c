@@ -1420,6 +1420,10 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	/* Per object, like sc->broken: which module opened the LAST one says
 	 * nothing about this one. See kof_result.opened_by. */
 	sc->opened_by[0] = 0;
+	/* And the build of the packer that opened it - see packer_build. */
+	sc->packer_build[0] = 0;
+	sc->pend_build[0] = 0;
+	sc->pend_build_of = NULL;
 	/* Per object, like sc->broken: whether a packer opened the LAST object
 	 * says nothing about this one. */
 	sc->packed_here = 0;
@@ -1600,6 +1604,11 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 					sc->n_carved += sc->n_kids - k0;
 			}
 			sc->cur_mod = NULL;
+			/* A build claimed by a module that opened nothing is
+			 * a guess about somebody else's file - see
+			 * kof_scanner.pend_build. */
+			sc->pend_build[0] = 0;
+			sc->pend_build_of = NULL;
 			/* The machine, if this module asked for one. Its
 			 * regions point into the machine's own memory and the
 			 * module has returned, so nothing may read them
@@ -1673,7 +1682,9 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				sc->n_carved += sc->n_kids - k0;
 		}
 		sc->cur_mod = NULL;
-		/* See the same call in the family pass above. */
+		/* See the same two in the family pass above. */
+		sc->pend_build[0] = 0;
+		sc->pend_build_of = NULL;
 		kof_scan_emu_release(sc);
 	}
 	/*
@@ -4496,6 +4507,10 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 			 * engine where it produced a child - see opened_by. */
 			res.opened_by = w->sc->opened_by[0] ? w->sc->opened_by
 							    : 0;
+			/* And which build of it, when the module settled one -
+			 * see kof_result.packer_build. */
+			res.packer_build = w->sc->packer_build[0]
+					 ? w->sc->packer_build : 0;
 			/*
 			 * A WRAPPER IS NOT REPORTED AS A THING RECOVERED.
 			 *

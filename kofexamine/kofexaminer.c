@@ -2267,7 +2267,8 @@ struct unp_run {
 	 * opener says its piece once and then yields forty entries, and every
 	 * one of them came from it.
 	 */
-	char        via[64];
+	/* And which build of it - see kof_result.packer_build. */
+	char        build[48];
 	/* Carried so a recovered object gets the same treatment its parent got.
 	 * A marker inside an unpacked image is the case where "which module does
 	 * this belong to" is hardest to answer by eye, so leaving the recovered
@@ -2310,31 +2311,15 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value,
 	if (g_debug)
 		printf("  %-24s %10llu\n", what, (unsigned long long)value);
 	/*
-	 * KNOWN DEFECT: `via` NAMES THE LAST MODULE THAT SAID ANYTHING, NOT THE
-	 * ONE THAT PRODUCED THE CHILD.
+	 * THE GUESS THIS USED TO MAKE IS GONE.
 	 *
-	 * It is inferred here from the prefix of a debug key, because that is
-	 * the only thing in this callback that carries a module's name. A
-	 * producer that emits no debug note at all - overlay.c emits none -
-	 * therefore leaves the previous module's prefix standing, and the child
-	 * is reported as having come out of whatever spoke last. Seen for real:
-	 * an overlay grandchild reported "via Pdf".
-	 *
-	 * Not fixable here. The producing module is known to the ENGINE and is
-	 * not in kof_result, so a tool can only guess at it; the fix is a field
-	 * on the result, set where the child is pushed. Until then this is a
-	 * hint and is worth keeping as one - it is right whenever the producer
-	 * says anything, which is most of them.
+	 * It remembered the name in front of the last debug note anybody
+	 * emitted and used it as "what opened this object". That is now a fact
+	 * the engine reports - kof_result.packer_build, filled wherever
+	 * something opened the object and carrying the build as well - so a
+	 * debug note is a debug note again.
 	 */
-	if (u) {
-		const char *dot = strrchr(what, '.');
-		size_t n = dot ? (size_t)(dot - what) : strlen(what);
-
-		if (n >= sizeof u->via)
-			n = sizeof u->via - 1u;
-		memcpy(u->via, what, n);
-		u->via[n] = 0;
-	}
+	(void)u;
 }
 
 
@@ -2350,6 +2335,20 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	 * only on this result: whether the engine got to the end of it. */
 	if (!tail) {
 		u->root_broken = res->broken;
+		/*
+		 * AND WHICH PACKER THE FILE ITSELF IS, which the description
+		 * above cannot know: it comes from the module that recognised
+		 * it, and the modules run after the parse. Printed here rather
+		 * than remembered, because this is the only point that has it
+		 * and the file's own block has already been written.
+		 */
+		if (res->opened_by && res->opened_by[0]) {
+			/* The build when there is one, the module's own name
+			 * when there is not - see the same choice below. */
+			printf("  packer    %s%s%s\n", C_BAD,
+			       res->packer_build ? res->packer_build
+						 : res->opened_by, C_OFF);
+		}
 		return 0;
 	}
 
@@ -2374,10 +2373,16 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	 * its strings already decrypted and no layer left on it - read
 	 * "StrXor.tab", which is the thing that had just been taken OFF it.
 	 */
-	if (res->opened_by && res->opened_by[0])
-		snprintf(u->via, sizeof u->via, "%s", res->opened_by);
+	/*
+	 * ONE FIELD FROM THE ENGINE AND NOTHING ASSEMBLED HERE.
+	 * kof_result.packer_build is the whole answer - format, name, and the
+	 * build where the module could tell one. It is filled whenever anything
+	 * opened the object, so there is no second field to fall back to.
+	 */
+	if (res->packer_build && res->packer_build[0])
+		snprintf(u->build, sizeof u->build, "%s", res->packer_build);
 	else
-		u->via[0] = 0;
+		u->build[0] = 0;
 	/*
 	 * <number>.<name>, or <number> alone.
 	 *
@@ -2425,15 +2430,16 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	}
 	printf("  recovered %s%-18s%s %s%10llu%s bytes", C_ID, tag, C_OFF,
 	       C_SIZE, (unsigned long long)len, C_OFF);
-	if (u->via[0]) {
+	if (u->build[0]) {
 		int packed = g_parent_format == KOF_FMT_ELF ||
 			     g_parent_format == KOF_FMT_PE ||
 			     g_parent_format == KOF_FMT_MACHO;
 
 		/* "is", not "via": the name says what this object IS - the
 		 * layer still on it - and not what it came out of. See
-		 * kof_result.opened_by. */
-		printf("   is %s%s%s", packed ? C_BAD : C_NOTE, u->via, C_OFF);
+		 * kof_result.packer_build. */
+		printf("   is %s%s%s", packed ? C_BAD : C_NOTE, u->build,
+		       C_OFF);
 	}
 	if (res->broken)
 		printf("   %s%s%s", C_BAD, kverdict_broken_name(res->broken), C_OFF);

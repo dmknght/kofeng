@@ -100,23 +100,187 @@ KOF_TARGET_FORMAT(KOF_FMT_PE);
 KOF_DEFINE_STR(upx_magic, "UPX!", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 /*
- * The PackHeader, from UPX's p_info.h. Only the four fields this needs are named;
- * the rest are checksums and a filter this does not yet reverse.
+ * ---- WHICH UPX, IN UPX'S OWN WORDS ----------------------------------------
+ *
+ * Two places, both in the file, and which one is there says which era the
+ * build is from. Neither is inferred: an inferred version is a guess dressed
+ * as a fact, and the l_version byte is a FORMAT number that would make a
+ * tempting one - measured, adm_atu.exe carries l_version 12 and says 1.07 in
+ * its own stub, while 445.exe carries 13 and says 3.94.
+ *
+ *   BEFORE THE MAGIC. The newer builds write the release as ASCII with a NUL
+ *   after it, immediately in front of `UPX!`:
+ *
+ *       ... 00 00 c0 33 2e 39 36 00 55 50 58 21 0d 24 0e ...
+ *                      3  .  9  6 \0  U  P  X  !
+ *
+ *       445.exe "3.94", 123.exe.1 "3.96". Read backwards from the magic,
+ *       which is where it is anchored and where it costs no search.
+ *
+ *   THE $Id STRING. The older ones carry `$Id: UPX 1.07 Copyright (C)
+ *   1996-2001 the UPX Team...` in the stub instead. adm_atu.exe is one.
+ *
+ * Neither present is an answer too - see `packer_build` in kofsig.h. RetDec
+ * reads the same strings for the same reason; see THIRD-PARTY.md.
+ */
+KOF_DEFINE_STR(upx_id, "$Id: UPX ", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
+
+#define UPX_ID_SKIP  9u         /* past "$Id: UPX " */
+#define UPX_VER_MAX  10u        /* "3.96", "1.07" - never near this */
+
+/* A release is digits and dots and nothing else. */
+static int upx_ver_byte(uint8_t c)
+{
+	return c == '.' || (c >= '0' && c <= '9');
+}
+
+/*
+ * The version written in front of the magic, into `out`, or 0.
+ *
+ * `magic_at` is where "UPX!" was found. The byte before it must be the NUL
+ * that terminates the string, and what runs back from there is the release.
+ */
+static unsigned upx_ver_before(const struct kof_obj_ctx *ctx, uint64_t magic_at,
+			       char *out)
+{
+	uint64_t start;
+	unsigned n = 0;
+
+	if (magic_at < 2u || !kof_in_obj(magic_at - 1u, 1u))
+		return 0;
+	if (kof_u8(magic_at - 1u) != 0)
+		return 0;
+	start = magic_at - 1u;
+	while (start && n < UPX_VER_MAX &&
+	       kof_in_obj(start - 1u, 1u) && upx_ver_byte(kof_u8(start - 1u))) {
+		start--;
+		n++;
+	}
+	/*
+	 * A single digit is not a version - one zero byte followed by "0" and
+	 * a NUL turns up in ordinary data - and neither is a run with no dot
+	 * in it. Both are cheap to require and both were the difference
+	 * between reading a release and reading padding.
+	 */
+	if (n < 3u)
+		return 0;
+	{
+		unsigned k, dots = 0;
+
+		for (k = 0; k < n; k++) {
+			out[k] = (char)kof_u8(start + k);
+			if (out[k] == '.')
+				dots++;
+		}
+		if (!dots)
+			return 0;
+		out[n] = 0;
+	}
+	return n;
+}
+
+/*
+ * Say which build this is, when the file says so. Quietly does nothing when it
+ * does not - see `packer_build` in kofsig.h, where a missing version is an
+ * answer and an invented one is not.
+ */
+static void upx_say_build(const struct kof_obj_ctx *ctx, uint64_t magic_at)
+{
+	char b[7u + UPX_VER_MAX + 1u];
+	uint64_t at;
+	unsigned k;
+
+	b[0] = 'P'; b[1] = 'E'; b[2] = ':';
+	b[3] = 'U'; b[4] = 'P'; b[5] = 'X'; b[6] = ' ';
+	if (upx_ver_before(ctx, magic_at, b + 7)) {
+		kunp_rcstruct_build(b);
+		return;
+	}
+	at = kof_find_str_where(0, ctx->obj_size, upx_id);
+	if (at == KOF_BROKEN)
+		return;
+	at += UPX_ID_SKIP;
+	for (k = 0; k < UPX_VER_MAX; k++) {
+		if (!kof_in_obj(at + k, 1u) || !upx_ver_byte(kof_u8(at + k)))
+			break;
+		b[7u + k] = (char)kof_u8(at + k);
+	}
+	if (k < 3u)
+		return;
+	b[7u + k] = 0;
+	kunp_rcstruct_build(b);
+}
+
+/*
+ * ---- WHICH UPX LAYOUT THIS IS, BEFORE ANY OF IT IS READ --------------------
+ *
+ * Every offset below is a position in a header whose shape UPX chose per
+ * version and per target. The module cannot tell a header it understands from
+ * one it does not by decoding it - a wrong offset yields numbers, and numbers
+ * that happen to pass the bounds checks yield a child of garbage. So the shape
+ * is asked first and the answer is a row in a table, which is what upx_elf_00.c
+ * does for the ELF side and for the same reason.
+ *
+ * ONE ROW, AND THE ELSE IS WHAT EARNS IT ITS PLACE. A version or format outside
+ * it is REPORTED - `UPX.PE.shape` and KOF_UNP_UNSUPPORTED - rather than walked,
+ * so the first genuine variant turns up in a scan's statistics instead of
+ * quietly producing something wrong. That is the signal that a second row is
+ * needed; without it there is no way to know.
+ *
+ * MEASURED: l_format 9 at l_version 12 (adm_atu.exe, "UPX 1.07") and 13
+ * (445.exe, "UPX 3.94"), and l_format 36 at l_version 13 (123.exe.1,
+ * "UPX 3.96") - 9 is the 32-bit PE target and 36 the 64-bit one.
+ *
+ * THE VERSION IS A RANGE AND THE FORMAT IS NOT, and the asymmetry is the whole
+ * care this table needs. l_version moves slowly and the b_info layout did not
+ * change across the span, so a range there is a statement about a layout. A
+ * different l_format is a different TARGET, so widening that would admit
+ * exactly the case this exists to catch - and the first attempt did it by
+ * accident, writing the mask 32 bits wide, which folded format 36 onto 4 and
+ * refused the only x64 sample here.
+ */
+struct upx_pe_shape {
+	uint8_t  ver_min, ver_max;
+	/* Bit per l_format, low bit is format 0. Sixty-four wide because the
+	 * PE formats are not all small: 9 is Win32 PE and 36 is the 64-bit
+	 * one, and a 32-bit mask silently folded the second onto 4. */
+	uint64_t formats;
+};
+
+static const struct upx_pe_shape upx_pe_shapes[] = {
+	{ 10u, 16u, (1ull << 9) | (1ull << 36) }
+};
+
+static int upx_pe_known(uint8_t ver, uint8_t fmt)
+{
+	unsigned k;
+
+	for (k = 0; k < sizeof upx_pe_shapes / sizeof upx_pe_shapes[0]; k++) {
+		const struct upx_pe_shape *r = &upx_pe_shapes[k];
+
+		if (ver < r->ver_min || ver > r->ver_max)
+			continue;
+		if (fmt < 64u && (r->formats & (1ull << fmt)))
+			return 1;
+	}
+	return 0;
+}
+
+/*
+ * The PackHeader is 32 bytes behind "UPX!", and the search for the magic runs
+ * up to a few bytes PAST the section's offset because three of the samples here
+ * put it five bytes inside - see the note at the top of this file.
+ *
+ * SIXTEEN AND NOT EIGHT, and the four bytes of the magic are why. The bound is
+ * a LENGTH and a match has to fit inside it: 123.exe.1 has its magic at 0x205
+ * with the section at 0x200, so the match ends at 0x209 and a bound of eight
+ * stops at 0x208. Measured - that one file went from unpacked to "no unpacker
+ * claimed it" and nothing else moved. Sixteen is the five with room for the
+ * magic and still far short of anything that could reach a second one.
  */
 #define PH_LEN        32u
-/*
- * How far PAST the section's start to keep looking, which is the whole of what
- * changed. Five bytes is what the version string costs in the samples that put
- * the header inside the section; 64 leaves room for a longer one and is still
- * nothing next to the bound it replaces - the alternative to a bound is reading
- * the entire file on every PE that is not packed at all, which is the cost the
- * note below measures at 1334MB.
- *
- * Widening only the UPPER bound cannot change what is found in a file that
- * already worked: the search returns the FIRST occurrence, and every byte it
- * used to cover it still covers, in the same order.
- */
-#define PH_LOOK       64u
+#define PH_LOOK       16u
+
 #define PH_VERSION     4u
 #define PH_FORMAT      5u
 #define PH_METHOD      6u
@@ -236,8 +400,22 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * before the branches below can return.
 	 */
 	kof_debug("UPX.PE.version", kof_u8(ph + PH_VERSION));
+	upx_say_build(ctx, ph);
 	kof_debug("UPX.PE.format", kof_u8(ph + PH_FORMAT));
 	kof_debug("UPX.PE.method", kof_u8(ph + PH_METHOD));
+
+	/*
+	 * AND THE LAYOUT DECIDES WHETHER TO GO ON. Everything read after this
+	 * point is at an offset this row vouches for - see upx_pe_shapes. The
+	 * pair is reported as one number so a scan's statistics name the
+	 * combination that was refused rather than two halves of it.
+	 */
+	if (!upx_pe_known(kof_u8(ph + PH_VERSION), kof_u8(ph + PH_FORMAT))) {
+		kof_debug("UPX.PE.shape",
+			  ((uint32_t)kof_u8(ph + PH_VERSION) << 8) |
+			  kof_u8(ph + PH_FORMAT));
+		KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
+	}
 
 	if (u_len == 0 || c_len == 0 || !kof_in_obj(stream, c_len)) {
 		/* The header contradicts the file it is in. */

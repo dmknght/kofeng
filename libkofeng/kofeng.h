@@ -414,6 +414,34 @@ struct kof_result {
 	const char *opened_by;
 
 	/*
+	 * AND WHICH BUILD OF IT, when the module could tell - "MPRESS 2.12-2.19
+	 * LZMAT", "UPX 3.9x LZMA" - or NULL when it could not or did not look.
+	 *
+	 * WHY THIS IS A FACT ABOUT THE OBJECT AND NOT A DEBUG NOTE. It decides
+	 * what the rest of the numbers mean. MPRESS writes no version anywhere
+	 * in the file, and the seven builds this engine knows put the packed
+	 * section's address, the fix stub's address and the coding at DIFFERENT
+	 * offsets from the entry point - so a module that reads them without
+	 * first knowing which build it has is reading whatever is there. The
+	 * same is true of every packer with more than one layout, and it is why
+	 * the version has to be settled BEFORE the unpacking and not reported
+	 * after it.
+	 *
+	 * It travelled as a debug note until now, which is the wrong channel
+	 * twice over: a note is dropped unless somebody asked for notes, and
+	 * kofviewer had to guess which note belonged to which object by
+	 * remembering the last one anybody emitted.
+	 *
+	 * A RANGE IS AN HONEST ANSWER. "2.12-2.19" is what the evidence
+	 * supports when several builds share a stub layout, and narrowing it to
+	 * one would be inventing precision. RetDec's tables read the same way
+	 * and for the same reason - see THIRD-PARTY.md.
+	 *
+	 * Valid for the duration of the callback, like everything else here.
+	 */
+	const char *packer_build;
+
+	/*
 	 * WHAT THE HEURISTIC MADE OF THIS OBJECT, WHETHER OR NOT IT REPORTED.
 	 *
 	 * Here rather than left to be recomputed, because it was being

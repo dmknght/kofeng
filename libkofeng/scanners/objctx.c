@@ -1127,6 +1127,35 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 			memcpy(sc->opened_by, from, q);
 			sc->opened_by[q] = 0;
 		}
+		/*
+		 * AND THE BUILD, WHICH IS ONE ANSWER AND NOT TWO.
+		 *
+		 * `packer_build` is what a reader is shown, so it is filled
+		 * whenever anything opened the object: the module's own claim
+		 * when it made one - "PE:MPRESS 2.12-2.19 LZMA", which already
+		 * carries the format and the name - and the module's name when
+		 * it did not.
+		 *
+		 * ONE FIELD BECAUSE TWO WERE SHOWN TOGETHER. A tool given both
+		 * printed both, and "MPRESS.PE PE:MPRESS 2.12-2.19 LZMA" says
+		 * MPRESS twice and PE twice. Whoever consumes this should not
+		 * have to decide which of two engine answers to believe.
+		 */
+		if (sc->pend_build[0] && sc->pend_build_of == sc->cur_mod) {
+			size_t q = strlen(sc->pend_build);
+
+			if (q >= sizeof sc->packer_build)
+				q = sizeof sc->packer_build - 1u;
+			memcpy(sc->packer_build, sc->pend_build, q);
+			sc->packer_build[q] = 0;
+		} else if (sc->opened_by[0]) {
+			size_t q = strlen(sc->opened_by);
+
+			if (q >= sizeof sc->packer_build)
+				q = sizeof sc->packer_build - 1u;
+			memcpy(sc->packer_build, sc->opened_by, q);
+			sc->packer_build[q] = 0;
+		}
 	}
 	if (sc->kid_derived_by)
 		sc->kid_derived_by[sc->n_kids] = sc->pend_derived_by;
@@ -1207,6 +1236,21 @@ static void c_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
 }
 
 /* The same declaration about the object in hand - see emu_watch_here. */
+/* Which build of the packer - see `packer_build` in kofsig.h. */
+static void c_packer_build(const struct kof_obj_ctx *ctx, const char *build)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	size_t i;
+
+	if (!sc || !build)
+		return;
+	/* Held until this module produces something - see pend_build. */
+	for (i = 0; i + 1u < sizeof sc->pend_build && build[i]; i++)
+		sc->pend_build[i] = build[i];
+	sc->pend_build[i] = 0;
+	sc->pend_build_of = sc->cur_mod;
+}
+
 /* What the declared image becomes - see `as_format` in kofsig.h. */
 static void c_as_format(const struct kof_obj_ctx *ctx, uint8_t fmt,
 			uint8_t arch, uint64_t base)
@@ -5259,6 +5303,8 @@ static const struct kof_content kof_detect_vtable = {
 	/* supersede - a detector produces nothing to be superseded by. */
 	NULL,
 	/* as_format - nor an image to write a header for. */
+	NULL,
+	/* packer_build - a detector names families, not builds. */
 	NULL
 };
 
@@ -5277,7 +5323,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
-	c_emu_watch_here, c_supersede, c_as_format
+	c_emu_watch_here, c_supersede, c_as_format, c_packer_build
 };
 
 /*

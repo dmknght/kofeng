@@ -2074,6 +2074,29 @@ struct kof_content {
 	 */
 	void (*as_format)(const struct kof_obj_ctx *, uint8_t fmt, uint8_t arch,
 			  uint64_t base);
+
+	/*
+	 * WHICH BUILD OF THE PACKER THIS OBJECT IS - said once, before the
+	 * unpacking, because the unpacking depends on it.
+	 *
+	 * A module that recognises a family usually has to work out WHICH
+	 * version of it before it can read anything: MPRESS writes no version
+	 * in the file, and its seven known builds put the packed section's
+	 * address, the fix stub's address and the coding at different offsets
+	 * from the entry point. A module reading those without settling the
+	 * build first is reading whatever happens to be there.
+	 *
+	 * So the string comes out of the module's OWN table - the one it
+	 * already needs in order to unpack at all - and this hands it to the
+	 * engine, which puts it on the object as kof_result.packer_build. It is
+	 * copied on the way in; a module holds no state and the pointer is only
+	 * good for the call.
+	 *
+	 * Free form, and deliberately: "MPRESS 2.12-2.19 LZMAT" is what the
+	 * evidence supports and a range is an honest answer where several
+	 * builds share a layout.
+	 */
+	void (*packer_build)(const struct kof_obj_ctx *, const char *build);
 };
 
 /*
@@ -3951,6 +3974,20 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
  *
  * See `as_format` for when this is needed and when the parent answers.
  */
+/*
+ * Which build of the packer this object is.
+ *
+ *     b = mp_build_of(ctx, pe);
+ *     if (!b)
+ *             return;              -- an unknown build is not read
+ *     kunp_rcstruct_build(b->name);
+ *
+ * See `packer_build` for why this is settled before anything is unpacked.
+ */
+#define kunp_rcstruct_build(s)                                                \
+	((void)((ctx)->content->packer_build ?                              \
+		((ctx)->content->packer_build((ctx), (s)), 0) : 0))
+
 #define kunp_rcstruct_as(fmt, arch, base)                                     \
 	((void)((ctx)->content->as_format ?                                 \
 		((ctx)->content->as_format((ctx), (uint8_t)(fmt),           \
