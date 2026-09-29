@@ -627,6 +627,13 @@ static int hex_last(void)
 /* One per matcher, for the step of an AT place - see grp_of. Above ED_GRP_PCT
  * and tested as a band, like every other one. */
 #define ED_AT_OFF 800
+/*
+ * The symbol dialog's filter field. A band of one, well clear of ED_AT_OFF's -
+ * every other code here is tested as a band for the reason the note above
+ * gives, and a single code that sat inside somebody else's range would be the
+ * same fault in a smaller place.
+ */
+#define ED_SYMFILT 900
 
 /* Every row the draft panel can ever hold, spelled from the limits rather than
  * counted once: the panel grew three kinds of row after this array was sized,
@@ -896,6 +903,17 @@ struct chooser {
 	int      what;
 	uint32_t arg;               /* which group it is about */
 	int      n, sel;
+	/*
+	 * THE FIRST ROW DRAWN, when the list is taller than the room under it.
+	 *
+	 * A chooser used to paint from item zero and stop at the bottom of the
+	 * screen - so on a short terminal the tail of a long list was invisible
+	 * AND unclickable, which is how a draft with many markers ended up with
+	 * the last ones unreachable from "+ marker". The cap on CH_ITEMS was
+	 * raised for the same symptom once already; the cap was never the
+	 * problem.
+	 */
+	int      off;
 	/*
 	 * THE DRAWN WIDTH, measured from the rows once they are all added.
 	 * Every place that asks how wide the list is - the draw, the click
@@ -2368,6 +2386,33 @@ struct view {
 	int         sym_hoff;
 	int         sy_close[2];        /* the close button */
 	int         sy_tab[2][2];       /* [imports|exports], each a box */
+	/*
+	 * THE SYMBOL FILTER, and why it replaced the line that was there.
+	 *
+	 * The tab row used to end with ".symtab, 1662 records, TRUNCATED" - the
+	 * origin section, a count and a flag. The count is already on both
+	 * tabs, the origin is the same for every row in the dialog and never
+	 * changes while it is open, and TRUNCATED is a property of the block
+	 * the tree row already reports. Three facts, none of them the question
+	 * a reader with 1662 symbols in front of them is asking, sitting in the
+	 * one place wide enough for the thing they ARE asking: which of these
+	 * is called what.
+	 *
+	 * `sy_filt` is the text, `sy_ficase` folds case, `sy_frx` reads it as a
+	 * regular expression. The regex is compiled by the engine -
+	 * kof_regex_compile - and walked by kof_hex_walk_flags, which is the
+	 * same pair the matcher uses, so a pattern that filters here means the
+	 * same thing written into a rule. `sy_frx_bad` is set when the compile
+	 * refuses, and then nothing is filtered: a half-typed pattern must not
+	 * look like a search that found nothing.
+	 */
+	char        sy_filt[64];
+	int         sy_ficase, sy_frx, sy_frx_bad;
+	uint8_t     sy_prog[512];
+	uint32_t    sy_prog_n;
+	int         sy_fbox[2];         /* the text field */
+	int         sy_ic_box[2];       /* [ ] ignore case */
+	int         sy_rx_box[2];       /* [ ] regex */
 	int         goto_file;      /* 1 file offset, 0 offset in this region */
 	char        gotobuf[20];
 	int         find_hex;       /* the text is hex digits, not bytes */
@@ -10493,6 +10538,33 @@ static int64_t at_anchor_val(uint8_t anchor, uint64_t entry, uint64_t size)
 	return 0;                       /* bof */
 }
 
+static int ch_vis(const struct chooser *c);
+
+/*
+ * Keep the highlighted row inside the visible window.
+ *
+ * Called wherever `sel` moves. Without it an arrow key walks the cursor off
+ * the end of the drawn rows and the list stops responding to the eye - the
+ * same failure as a pane whose cursor scrolls and whose view does not.
+ */
+static void ch_follow(struct chooser *c)
+{
+	int vis = ch_vis(c);
+
+	if (c->sel < 0 || c->n <= vis) {
+		c->off = 0;
+		return;
+	}
+	if (c->sel < c->off)
+		c->off = c->sel;
+	else if (c->sel >= c->off + vis)
+		c->off = c->sel - vis + 1;
+	if (c->off > c->n - vis)
+		c->off = c->n - vis;
+	if (c->off < 0)
+		c->off = 0;
+}
+
 static void ch_take(struct view *v)
 {
 	struct chooser *c = &v->ch;
@@ -11168,28 +11240,51 @@ static void ch_take(struct view *v)
 	}
 }
 
+/* How many rows of this list the screen has room for, from where it opened. */
+static int ch_vis(const struct chooser *c)
+{
+	int room = g_rows - c->row + 1;
+
+	if (room < 1)
+		room = 1;
+	return room < c->n ? room : c->n;
+}
+
 static void draw_one_chooser(struct out *o, const struct chooser *c, int live)
 {
 	struct out_clip cl;
-	int i, rows = c->n;
+	int i, vis = ch_vis(c), off = c->off;
 
-	/* Its own box: c->w columns from where it opened, and one row an item
-	 * - cut short by the screen, which is what the loop below already
-	 * checks for each row. Stated once here so the rows cannot be wrong
-	 * about it one at a time. */
-	if (c->row + rows - 1 > g_rows)
-		rows = g_rows - c->row + 1;
-	cl = out_clip_set(o, c->row, c->col, c->row + rows - 1,
+	/* Its own box: c->w columns from where it opened, and one row per
+	 * VISIBLE item. Stated once here so the rows cannot be wrong about it
+	 * one at a time. */
+	if (off > c->n - vis)
+		off = c->n - vis;
+	if (off < 0)
+		off = 0;
+	cl = out_clip_set(o, c->row, c->col, c->row + vis - 1,
 			  c->col + c->w - 1);
 
-	for (i = 0; i < c->n; i++) {
-		/* ch_open lifts a long list up the screen and stops at row one,
-		 * so on a short terminal a very long one can still reach the
-		 * bottom. Painting past it corrupts the rows below rather than
-		 * simply not fitting. */
-		if (c->row + i > g_rows)
-			break;
-		out_at(o, c->row + i, c->col);
+	for (i = off; i < off + vis; i++) {
+		int y = c->row + i - off;
+
+		out_at(o, y, c->col);
+		/*
+		 * SOMETHING ABOVE, SOMETHING BELOW - said on the row itself
+		 * rather than in a scrollbar, because the list is three
+		 * characters wider than its longest item and a bar would come
+		 * out of the text. A reader who cannot see the end of a list
+		 * has to be told there is one.
+		 */
+		if ((i == off && off > 0) ||
+		    (i == off + vis - 1 && off + vis < c->n)) {
+			out_str(o, BAR_ON);
+			out_fmt(o, " %-*.*s", c->w - 3, c->w - 3, "...");
+			out_str(o, i == c->sel ? BAR_CUR : BAR_ON);
+			out_str(o, i == off ? "^" : "v");
+			out_str(o, A_OFF);
+			continue;
+		}
 		/*
 		 * The parent keeps the cursor on the row whose list is open -
 		 * the same thing the menu bar does with sel2, and the reason is
@@ -17806,6 +17901,8 @@ static const struct {
  * the same question about the same object. See the note there. */
 static int obj_maybe_code(const struct object *o);
 
+static int decl_sel_is_text(struct view *v);
+
 static int menu_shown(struct view *v, int a)
 {
 	/*
@@ -17823,6 +17920,21 @@ static int menu_shown(struct view *v, int a)
 	 * menu_gap counts only SHOWN rows, so that follows on its own.
 	 */
 	if (v->log && a == M_DISASM)
+		return 0;
+	/*
+	 * A RUN OF HEX HAS NO STRING TO DECLARE, so the item is not offered.
+	 *
+	 * Greyed, it was a choice that is not one: the bytes are on screen, the
+	 * reader can see they are not text, and the item's only message was
+	 * "not this one". The menu now shows the declaration that applies -
+	 * "Declare as hex" - and nothing beside it.
+	 *
+	 * Only this reason hides it. Nothing selected, too long, too many
+	 * markers: those keep the item visible and greyed, because they are
+	 * things the reader can go and fix, and a vanishing item would not say
+	 * what to fix. See decl_sel_is_text.
+	 */
+	if (a == M_DECL_STR && !decl_sel_is_text(v))
 		return 0;
 	/*
 	 * AND NEITHER HAS A SCRIPT.
@@ -17936,6 +18048,47 @@ static const char *decl_why(struct view *v, int hex)
 		return why;
 	}
 	return NULL;
+}
+
+/*
+ * IS THE SELECTION TEXT - asked on its own, because two callers want different
+ * things from the answer.
+ *
+ * menu_enabled wants a REASON, to grey an item and say why. menu_shown wants a
+ * yes or no, to leave the item out altogether. Offering "Declare as string"
+ * greyed over a run of hex is offering a choice that is not one: the reader can
+ * see the bytes, they are not text, and the item's only message is "not this
+ * one". So the menu shows the item that applies.
+ *
+ * Only about the bytes. Every other reason decl_why can give - nothing
+ * selected, too many markers, too long - applies to both kinds equally, and
+ * those keep the item visible and greyed, because they are things the reader
+ * can fix.
+ */
+static int decl_sel_is_text(struct view *v)
+{
+	uint64_t lo, hi, k, bn = 0;
+	const uint8_t *bp;
+	uint8_t t[DECL_BYTES_MAX];
+	uint32_t n = 0;
+
+	if (v->sel_a == KOF_BROKEN || v->sel_b == KOF_BROKEN)
+		return 1;       /* nothing selected yet: not a verdict */
+	lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;
+	hi = v->sel_a < v->sel_b ? v->sel_b : v->sel_a;
+	if (hi - lo + 1u > DECL_BYTES_MAX)
+		return 1;       /* too long is a different complaint */
+	bp = view_bytes(v, &bn);
+	if (!bp)
+		return 1;
+	for (k = lo; k <= hi; k++) {
+		uint64_t f = view_map(v, k, 0);
+
+		if (f >= bn)
+			return 1;
+		t[n++] = bp[f];
+	}
+	return literal_safe(t, n);
 }
 
 static int menu_enabled(struct view *v, int a)
@@ -26235,15 +26388,120 @@ static const uint8_t *symd_block(struct view *v, uint64_t *n)
  * KOF_SYM_MAX_RECS of them, one dialog is open at a time, and the screen is
  * drawn from one thread.
  */
+/*
+ * Compile the filter when it is being read as a regex.
+ *
+ * kof_regex_compile is the engine's, the same one a rule's pattern goes
+ * through, so what this dialog accepts and what a signature accepts cannot
+ * drift. It refuses a pattern with no concrete run in it - that refusal is
+ * about the PREFILTER a rule needs and is not interesting here, but the
+ * alternative is a second regex implementation, which is worse than a filter
+ * that occasionally says "not yet".
+ *
+ * A refusal leaves sy_frx_bad set and the list unfiltered, so half a pattern
+ * does not read as a search that found nothing.
+ */
+static void symd_filter_compile(struct view *v)
+{
+	v->sy_prog_n = 0;
+	v->sy_frx_bad = 0;
+	if (!v->sy_frx || !v->sy_filt[0])
+		return;
+	v->sy_prog_n = kof_regex_compile(v->sy_filt, v->sy_prog,
+					 (uint32_t)sizeof v->sy_prog, 0);
+	if (!v->sy_prog_n)
+		v->sy_frx_bad = 1;
+}
+
+/*
+ * Does this record's name pass the filter - see view.sy_filt.
+ *
+ * Three ways of asking one question, and the engine answers two of them. A
+ * regex is compiled once when the text changes and walked here with
+ * kof_hex_walk_flags, which is what the matcher itself walks, so a pattern
+ * that selects rows in this dialog selects the same bytes written into a rule.
+ * A plain filter is a substring test, folded or not.
+ *
+ * An empty filter passes everything, and so does a regex that would not
+ * compile: a pattern half typed must not read as a search that found nothing.
+ */
+static int symd_name_ok(struct view *v, const uint8_t *rec)
+{
+	char name[KOF_SYM_NAMELEN + 1];
+	uint32_t i, n = 0;
+
+	if (!v->sy_filt[0])
+		return 1;
+	for (i = 0; i < KOF_SYM_NAMELEN && rec[KOF_SYM_R_NAME + i]; i++)
+		name[n++] = (char)rec[KOF_SYM_R_NAME + i];
+	name[n] = 0;
+	if (v->sy_frx) {
+		kof_buf d;
+
+		if (v->sy_frx_bad || !v->sy_prog_n)
+			return 1;
+		d = kof_buf_make((const uint8_t *)name, n);
+		for (i = 0; i <= n; i++)
+			if (kof_hex_walk_flags(d, i, v->sy_prog,
+					       v->sy_ficase
+					       ? (uint8_t)KOF_STR_ICASE : 0u))
+				return 1;
+		return 0;
+	}
+	{
+		size_t fl = strlen(v->sy_filt);
+
+		if (fl > n)
+			return 0;
+		for (i = 0; i + fl <= n; i++) {
+			size_t k;
+
+			for (k = 0; k < fl; k++) {
+				char a = name[i + k], b = v->sy_filt[k];
+
+				if (v->sy_ficase) {
+					if (a >= 'A' && a <= 'Z')
+						a = (char)(a + 32);
+					if (b >= 'A' && b <= 'Z')
+						b = (char)(b + 32);
+				}
+				if (a != b)
+					break;
+			}
+			if (k == fl)
+				return 1;
+		}
+	}
+	return 0;
+}
+
 static uint32_t *symd_rows_of(struct view *v, uint32_t *n)
 {
 	static uint32_t idx[KOF_SYM_MAX_RECS];
 	const struct object *o = cur_obj(v);
+	uint32_t got, keep = 0, i;
+	uint64_t nb = 0;
+	const uint8_t *b;
 
-	*n = v->probe ? sym_half_recs(o, sym_row_mask(v->sym_open), v->probe,
-				      KOF_SCAN_MAX_EXTENTS, idx,
-				      (uint32_t)(sizeof idx / sizeof *idx))
-		      : 0u;
+	got = v->probe ? sym_half_recs(o, sym_row_mask(v->sym_open), v->probe,
+				       KOF_SCAN_MAX_EXTENTS, idx,
+				       (uint32_t)(sizeof idx / sizeof *idx))
+		       : 0u;
+	if (!v->sy_filt[0]) {
+		*n = got;
+		return idx;
+	}
+	/* In place and in order: the filter removes rows, it does not reorder
+	 * them, and a reader who clears it should find the list where it was. */
+	b = symd_block(v, &nb);
+	for (i = 0; i < got; i++) {
+		const uint8_t *r = b ? kof_sym_rec(b, (uint32_t)nb, idx[i])
+				     : 0;
+
+		if (r && symd_name_ok(v, r))
+			idx[keep++] = idx[i];
+	}
+	*n = keep;
 	return idx;
 }
 
@@ -26421,6 +26679,11 @@ static void sclip_name(struct sclip *c, const uint8_t *r, int nw,
  */
 static void dlg_close(struct view *v)
 {
+	/* The filter field belongs to the dialog, so it goes with it: an edit
+	 * code left standing would send the next keystroke to a box nobody can
+	 * see. */
+	if (v->edit == ED_SYMFILT)
+		v->edit = 0;
 	v->sym_open = 0;
 	v->chain_open = 0;
 	v->dlg_have = 0;
@@ -26867,10 +27130,54 @@ static void draw_symbols(struct out *o, struct view *v)
 			i ? "SYM_EXP" : "SYM_IMP", cnt);
 		v->sy_tab[i][1] = o->col_base + (int)o->col_hint - 1;
 	}
-	out_fmt(o, A_DIM "%s, %u record%s%s" A_OFF,
-		kof_sym_origin_name(b, (uint32_t)nb), n, n == 1 ? "" : "s",
-		(nb > KOF_SYM_H_TRUNC && b && b[KOF_SYM_H_TRUNC])
-			? ", TRUNCATED" : "");
+	/*
+	 * THE FILTER, WHERE THE STATUS LINE USED TO BE.
+	 *
+	 * What was here - ".symtab, 1662 records, TRUNCATED" - said three
+	 * things a reader already has: both counts are on the tabs beside it,
+	 * the origin section is the same for every row in the dialog, and
+	 * TRUNCATED is a property of the block that the tree row reports. What
+	 * they were occupying is the only place in the dialog wide enough for
+	 * the thing somebody with 1662 symbols in front of them actually wants.
+	 *
+	 * "/" for the field rather than a magnifier glyph: the box drawing set
+	 * here is what a VT100 has, the terminal may be in a font with no
+	 * magnifier in it, and a box that draws a question mark instead of an
+	 * icon is worse than a character everybody already reads as "search".
+	 */
+	{
+		int room = w - (int)o->col_hint - 34;
+		const char *ft = v->sy_filt;
+
+		if (room < 8)
+			room = 8;
+		if (room > (int)sizeof v->sy_filt - 1)
+			room = (int)sizeof v->sy_filt - 1;
+		out_fmt(o, "%s/" A_OFF " ", A_ID);
+		v->sy_fbox[0] = o->col_base + (int)o->col_hint;
+		/*
+		 * A_SEL while it is being typed into, like every other field
+		 * in this program; A_BAD when the regex will not compile, so
+		 * the reason the list stopped narrowing is on the field that
+		 * caused it rather than in a message somewhere else.
+		 */
+		out_str(o, v->edit == ED_SYMFILT ? A_SEL
+			   : (v->sy_frx && v->sy_frx_bad) ? A_BAD : A_DIM);
+		out_fmt(o, "%-*.*s", room, room, ft[0] ? ft : "filter");
+		out_str(o, A_OFF);
+		v->sy_fbox[1] = o->col_base + (int)o->col_hint - 1;
+		out_str(o, " ");
+		v->sy_ic_box[0] = o->col_base + (int)o->col_hint;
+		out_fmt(o, "%s[%s] icase" A_OFF, v->sy_ficase ? A_SEL : A_DIM,
+			v->sy_ficase ? "x" : " ");
+		v->sy_ic_box[1] = o->col_base + (int)o->col_hint - 1;
+		out_str(o, " ");
+		v->sy_rx_box[0] = o->col_base + (int)o->col_hint;
+		out_fmt(o, "%s[%s] regex" A_OFF, v->sy_frx ? A_SEL : A_DIM,
+			v->sy_frx ? "x" : " ");
+		v->sy_rx_box[1] = o->col_base + (int)o->col_hint - 1;
+	}
+	(void)b; (void)nb; (void)n;
 	/* The close button hard against the right edge, where a close button
 	 * is, rather than after text whose length changes with the object. The
 	 * gap in front of it is padded, not skipped - see symd_edge. */
@@ -27078,6 +27385,27 @@ static int symd_click(struct view *v)
 				}
 				return 1;
 			}
+		/*
+		 * The filter and its two ticks, on the same row as the tabs.
+		 * Each moves the list back to the top: an offset is a position
+		 * in the rows the filter was showing and means somewhere else
+		 * in the rows it shows now.
+		 */
+		if (g_mx >= v->sy_fbox[0] && g_mx <= v->sy_fbox[1]) {
+			v->edit = ED_SYMFILT;
+			return 1;
+		}
+		if (g_mx >= v->sy_ic_box[0] && g_mx <= v->sy_ic_box[1]) {
+			v->sy_ficase = !v->sy_ficase;
+			v->sym_at = 0;
+			return 1;
+		}
+		if (g_mx >= v->sy_rx_box[0] && g_mx <= v->sy_rx_box[1]) {
+			v->sy_frx = !v->sy_frx;
+			symd_filter_compile(v);
+			v->sym_at = 0;
+			return 1;
+		}
 	}
 	return 1;
 }
@@ -29228,10 +29556,13 @@ static void click(struct view *v, int rclick)
 	v->edit = 0;
 
 	if (v->ch.open) {
-		int k = g_my - v->ch.row;
+		/* The row under the pointer is counted from the first one
+		 * DRAWN, which is not item zero once the list scrolls. */
+		int k = g_my - v->ch.row + v->ch.off;
 
 		if (g_mx >= v->ch.col && g_mx < v->ch.col + v->ch.w &&
-		    k >= 0 && k < v->ch.n) {
+		    g_my >= v->ch.row && k >= 0 && k < v->ch.n &&
+		    k < v->ch.off + ch_vis(&v->ch)) {
 			/* On the rule between two halves: inside the list, so
 			 * it is not a dismiss, and not a row, so it is not a
 			 * pick either. */
@@ -29257,11 +29588,13 @@ static void click(struct view *v, int rclick)
 		 * pick made.
 		 */
 		if (v->ch_up.open) {
-			int ku = g_my - v->ch_up.row;
+			int ku = g_my - v->ch_up.row + v->ch_up.off;
 
 			if (g_mx >= v->ch_up.col &&
 			    g_mx < v->ch_up.col + v->ch_up.w &&
-			    ku >= 0 && ku < v->ch_up.n) {
+			    g_my >= v->ch_up.row &&
+			    ku >= 0 && ku < v->ch_up.n &&
+			    ku < v->ch_up.off + ch_vis(&v->ch_up)) {
 				struct chooser up = v->ch_up;
 
 				up.sel = ku;
@@ -29771,6 +30104,49 @@ static int handle_symd_key(struct view *v, int k)
 	if (v->sym_open && !(k >= K_CLICK && k <= K_RELEASE)) {
 		int pg = symd_rows() > 1 ? symd_rows() - 1 : 1;
 
+		/*
+		 * TYPING GOES TO THE FILTER WHILE IT IS OPEN, and only then.
+		 *
+		 * The dialog's own keys are arrows, Tab and Escape; a field
+		 * that swallowed those would be a field nobody could leave.
+		 * Escape closes the field rather than the dialog, which is the
+		 * one place this differs from the rest of the program and is
+		 * what a reader who mistyped a pattern expects.
+		 */
+		if (v->edit == ED_SYMFILT) {
+			switch (k) {
+			case 27:
+			case '\r':
+			case '\n':
+				v->edit = 0;
+				return 1;
+			case K_UP: case K_DOWN: case K_PGUP: case K_PGDN:
+				break;          /* scroll the list underneath */
+			case 8: case 127:
+				{
+					size_t n = strlen(v->sy_filt);
+
+					if (n)
+						v->sy_filt[n - 1u] = 0;
+				}
+				symd_filter_compile(v);
+				v->sym_at = 0;
+				return 1;
+			default:
+				if (k >= 0x20 && k < 0x7f) {
+					size_t n = strlen(v->sy_filt);
+
+					if (n + 1u < sizeof v->sy_filt) {
+						v->sy_filt[n] = (char)k;
+						v->sy_filt[n + 1u] = 0;
+					}
+					symd_filter_compile(v);
+					v->sym_at = 0;
+					return 1;
+				}
+				return 1;
+			}
+		}
 		switch (k) {
 		/* Escape and the close button, and no letter - see the note on
 		 * bare keys in handle(). */
@@ -30165,6 +30541,7 @@ static int handle_chooser_key(struct view *v, int k)
 				if (to >= 0 && to < v->ch.n && v->ch.sep[to])
 					to = v->ch.sel;
 				v->ch.sel = to;
+				ch_follow(&v->ch);
 			}
 			break;
 		case KV_NAV_IN:
