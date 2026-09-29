@@ -60,6 +60,59 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_DEFINE_STR(upx_magic, "UPX!", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
 /*
+ * ---- WHICH UPX, IN UPX'S OWN WORDS ----------------------------------------
+ *
+ * `$Id: UPX 3.95 Copyright (C) 1996-2018 the UPX Team...` sits in the stub, and
+ * it is the only place a release number appears. NOT l_version, which is next
+ * to the magic and is a FORMAT number: the PE side of this engine measured the
+ * two against each other and they do not track - one sample carries l_version
+ * 12 and says 1.07, another carries 13 and says 3.94. A table mapping one to
+ * the other would be a guess dressed as a fact.
+ *
+ * WHERE THE PE MODULE READS ANOTHER PLACE AND THIS ONE DOES NOT. The newer PE
+ * builds write the release as ASCII immediately before the magic; the ELF
+ * l_info has the magic in the MIDDLE of the struct - { checksum, "UPX!",
+ * lsize, version, format } - so what precedes it is a checksum, and reading
+ * backwards there would be reading a number as text.
+ *
+ * Nothing found is an answer - see `packer_build` in kofsig.h.
+ */
+KOF_DEFINE_STR(upx_id, "$Id: UPX ", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
+
+#define UPX_ID_SKIP  9u          /* past "$Id: UPX " */
+#define UPX_VER_MAX  10u
+
+static void upx_elf_say_build(const struct kof_obj_ctx *ctx)
+{
+	char b[8u + UPX_VER_MAX + 1u];
+	uint64_t at;
+	unsigned k;
+
+	at = kof_find_str_where(0, ctx->obj_size, upx_id);
+	if (at == KOF_BROKEN)
+		return;
+	at += UPX_ID_SKIP;
+	b[0] = 'E'; b[1] = 'L'; b[2] = 'F'; b[3] = ':';
+	b[4] = 'U'; b[5] = 'P'; b[6] = 'X'; b[7] = ' ';
+	for (k = 0; k < UPX_VER_MAX; k++) {
+		uint8_t c;
+
+		if (!kof_in_obj(at + k, 1u))
+			break;
+		c = kof_u8(at + k);
+		if (c != '.' && (c < '0' || c > '9'))
+			break;
+		b[8u + k] = (char)c;
+	}
+	/* "3.95" is four; anything under three is not a release and is more
+	 * likely the string having been cut. */
+	if (k < 3u)
+		return;
+	b[8u + k] = 0;
+	kunp_rcstruct_build(b);
+}
+
+/*
  * l_info is twelve bytes with the magic four bytes in; p_info is the next twelve.
  *
  * Written as "step back to the start of l_info, then over both structures" rather
@@ -768,6 +821,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 		kof_debug("UPX.ELF.version", ver);
 		kof_debug("UPX.ELF.format", fmt);
+		upx_elf_say_build(ctx);
 
 		shape = shape_of(ver, fmt);
 		if (shape < 0) {
