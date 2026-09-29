@@ -3,9 +3,10 @@
  *
  * Test sample: 0dcfa54a7e8a4e631ef466670ce604a61f3b0e8b3e9cf72c943278c0f77c31a2_detected_detected
  * Test sample: 0ad6c635d583de499148b1ec46d8b39ae2785303e8b81996d3e9e47934644e73_detected_detected
+ * Test sample: normalized:00ae07c9fe63b080181b8a6d59c6b3b6f9913938858829e5a42ab90fb72edf7a_detected_detected
  * Researcher:  dmknght
- * Created 2026-09-02, updated 2026-09-02
- * Engine:      db format 8, module ABI 2
+ * Created 2026-09-02, updated 2026-09-30
+ * Engine:      db format 2.0, module ABI 3
  */
 
 #include <kofmod/kofsig.h>
@@ -14,6 +15,7 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_TARGET_NAME(KOF_MALTYPE_MINER, "CoinMiner");
 
 KOF_TARGET_RANGE(scan_range_code_data, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_DATA);
+KOF_TARGET_RANGE(scan_range_sym_exp, KOF_SCAN_SYM_EXP);
 
 KOF_DEFINE_STR(s0, "Started Mining", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s1, "Miner will restart", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
@@ -25,15 +27,18 @@ KOF_DEFINE_STR(s6, "daemon+http://", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s7, "xmr-stak", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s8, "xmrig.com", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s9, "xmrigMiner", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_HEXSTR(s10, "5F 5A 4E ?? 78 6D 72 69 67");
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
+	if (kof_find_str_any(scan_range_code_data, s3, s4, s5, s6))
+		KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
+	if (kof_find_str_any(scan_range_code_data, s7))
+		KOF_SCAN_INFECT("XMRStak");
+	if (kof_find_str_any(scan_range_code_data, s8, s9))
+		KOF_SCAN_INFECT("Xmrig");
+	if (kof_find_str_all(scan_range_sym_exp, s10))
+		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 	if (kof_find_str_any(scan_range_code_data, s0, s1, s2))
 		KOF_SCAN_SUSPECT(KOF_MALVAR_GENERIC);
-	else if (kof_find_str_any(scan_range_code_data, s3, s4, s5, s6))
-		KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
-	else if (kof_find_str_any(scan_range_code_data, s7))
-		KOF_SCAN_INFECT("XMRStak");
-	else if (kof_find_str_any(scan_range_code_data, s8, s9))
-		KOF_SCAN_INFECT("Xmrig");
 }
