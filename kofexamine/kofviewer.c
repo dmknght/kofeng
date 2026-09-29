@@ -2407,7 +2407,9 @@ struct view {
 	 * look like a search that found nothing.
 	 */
 	char        sy_filt[64];
+	uint32_t    sy_foff;            /* how far the field is scrolled */
 	int         sy_ficase, sy_frx, sy_frx_bad;
+	char        sy_rx_err[96];
 	uint8_t     sy_prog[512];
 	uint32_t    sy_prog_n;
 	int         sy_fbox[2];         /* the text field */
@@ -2417,7 +2419,18 @@ struct view {
 	char        gotobuf[20];
 	int         find_hex;       /* the text is hex digits, not bytes */
 	int         find_icase;     /* letters compare either way; text only */
-	int         find_regex;     /* declared, refused: see draw_find */
+	/*
+	 * READ THE TEXT AS A REGULAR EXPRESSION.
+	 *
+	 * The program the engine compiles it to and whether it compiled at all,
+	 * beside the flag - a pattern half typed has to leave the search doing
+	 * something honest, and what it does is nothing.
+	 */
+	int         find_regex;
+	uint8_t     find_prog[512];
+	uint32_t    find_prog_n;
+	int         find_rx_bad;
+	char        find_rx_err[96];
 	int         find_scope;     /* 0 this region, 1 the whole object */
 	uint64_t    find_at;        /* the last hit, in file offsets */
 	uint32_t    find_i, find_n; /* which hit it is, and how many there are */
@@ -11125,10 +11138,28 @@ static void ch_take(struct view *v)
 		 * `all` is a SENTINEL and not the number n: it follows the
 		 * markers, so adding one keeps the rule meaning all of them.
 		 */
-		if (n && want >= n)
-			q->rule = 0;            /* == n  -> find_all */
-		else if (want <= 1u)
+		/*
+		 * ONE MARKER IS "any", NOT "all", AND THE ORDER SAYS SO.
+		 *
+		 * With one marker the two calls test the same thing, so the
+		 * choice is about what the generated source READS as -
+		 * `kof_find_str_all(rng, s0)` is a plural about a single thing.
+		 * The threshold menu offers exactly one row in that case, so
+		 * nothing is being taken away from the author either: there is
+		 * no second answer for this test to be overriding.
+		 *
+		 * It costs the sentinel in that one case. `all` follows the
+		 * markers - adding one keeps the rule meaning all of them -
+		 * and a group that went from one marker to two now reads ">=
+		 * 1" instead of "all 2". That is the right way round: the
+		 * author who adds a second marker is deciding something, and
+		 * the panel shows them what the rule currently says rather
+		 * than changing it under them.
+		 */
+		if (want <= 1u)
 			q->rule = 1;            /* >= 1  -> find_any */
+		else if (n && want >= n)
+			q->rule = 0;            /* == n  -> find_all */
 		else {
 			q->rule = 2;            /* >= N  -> find_multi */
 			q->thresh = want;
@@ -20257,6 +20288,64 @@ static uint32_t find_bytes(const struct view *v, uint8_t *out, uint32_t cap)
  * a pattern lying across two extents of one region is in neither of them, and
  * this reports it where it is rather than inventing a join.
  */
+/*
+ * ---- A REGULAR EXPRESSION, COMPILED BY THE ENGINE ---------------------------
+ *
+ * One helper for the two places that offer one - the find dialog and the symbol
+ * dialog's filter - because they must mean the same thing by a pattern. Both
+ * end up in kof_hex_walk_flags, which is what the matcher itself walks, so a
+ * pattern that finds something here finds the same bytes written into a rule.
+ *
+ * WHAT IT REFUSES, AND WHY THAT IS NOT A BUG HERE. kof_regex_compile rejects a
+ * pattern with no concrete run of bytes in it, because a rule's pattern has to
+ * give the prefilter something to key on. That is a property of a RULE and not
+ * of an interactive search - but the alternative is a second regex
+ * implementation, and two of them would be two answers to "what does this
+ * pattern mean". The refusal is reported instead: the field goes red and the
+ * search does nothing, which is what a half-typed pattern should do.
+ */
+static int rx_compile(const char *text, uint8_t *prog, uint32_t cap,
+		      uint32_t *n_out, char *err, size_t err_n)
+{
+	uint32_t n;
+
+	*n_out = 0;
+	if (err && err_n)
+		err[0] = 0;
+	if (!text || !text[0])
+		return 0;
+	n = kof_regex_compile(text, prog, cap, 0);
+	if (!n) {
+		/*
+		 * THE REASON, COPIED OUT AT ONCE. kof_hex_error returns the
+		 * compiler's own static buffer and the next compile overwrites
+		 * it - and there is one on every keystroke.
+		 */
+		const char *why = kof_hex_error();
+
+		if (err && err_n)
+			snprintf(err, err_n, "%s", why && why[0] ? why
+				 : "the pattern would not compile");
+		return 0;
+	}
+	*n_out = n;
+	return 1;
+}
+
+/* Recompile the find dialog's pattern - called wherever the text or the Regex
+ * tick changes. */
+static void find_compile(struct view *v)
+{
+	v->find_prog_n = 0;
+	v->find_rx_bad = 0;
+	if (!v->find_regex || !v->find[0])
+		return;
+	if (!rx_compile(v->find, v->find_prog, (uint32_t)sizeof v->find_prog,
+			&v->find_prog_n, v->find_rx_err,
+			sizeof v->find_rx_err))
+		v->find_rx_bad = 1;
+}
+
 static uint64_t find_next(struct view *v, uint64_t from)
 {
 	uint8_t pat[64];
@@ -20279,6 +20368,35 @@ static uint64_t find_next(struct view *v, uint64_t from)
 	const uint8_t *bp = view_bytes(v, &bn);
 	uint64_t i;
 
+	/*
+	 * A REGEX IS A DIFFERENT WALK OVER THE SAME BYTES.
+	 *
+	 * The engine's, not one written here: kof_hex_walk_flags answers "does
+	 * the program match starting exactly at this offset", so the scan is
+	 * the loop and the match is the engine's. ICASE is the pattern option
+	 * the matcher itself would apply, passed through rather than folded by
+	 * hand here.
+	 *
+	 * A pattern that would not compile finds nothing, and the field says
+	 * why - see find_compile.
+	 */
+	if (v->find_regex) {
+		kof_buf d = kof_buf_make(bp, bn);
+
+		if (!v->find_prog_n || !bp)
+			return KOF_BROKEN;
+		for (i = from; i < bn; i++) {
+			if (!kof_hex_walk_flags(d, i, v->find_prog,
+						v->find_icase
+						? (uint8_t)KOF_STR_ICASE : 0u))
+				continue;
+			if (v->find_scope == 0 &&
+			    view_unmap(v, i) == KOF_BROKEN)
+				continue;
+			return i;
+		}
+		return KOF_BROKEN;
+	}
 	if (!n || !bp || n > bn)
 		return KOF_BROKEN;
 	for (i = from; i + n <= bn; i++) {
@@ -20355,7 +20473,20 @@ static void find_run(struct view *v, int back)
 			at = find_next(v, 0);           /* wrap */
 	}
 	if (at == KOF_BROKEN) {
-		snprintf(v->find_msg, sizeof v->find_msg, "No match");
+		/*
+		 * "No match" IS NOT THE ANSWER WHEN THE PATTERN NEVER RAN.
+		 *
+		 * A regex the compiler refused finds nothing, and saying "No
+		 * match" about it blames the file for the pattern. The
+		 * compiler's own words are what the reader needs - see
+		 * rx_compile, which copies them out before the next keystroke
+		 * overwrites them.
+		 */
+		if (v->find_regex && v->find_rx_bad && v->find_rx_err[0])
+			snprintf(v->find_msg, sizeof v->find_msg, "%s",
+				 v->find_rx_err);
+		else
+			snprintf(v->find_msg, sizeof v->find_msg, "No match");
 		v->find_i = v->find_n = 0;
 		return;
 	}
@@ -26407,9 +26538,8 @@ static void symd_filter_compile(struct view *v)
 	v->sy_frx_bad = 0;
 	if (!v->sy_frx || !v->sy_filt[0])
 		return;
-	v->sy_prog_n = kof_regex_compile(v->sy_filt, v->sy_prog,
-					 (uint32_t)sizeof v->sy_prog, 0);
-	if (!v->sy_prog_n)
+	if (!rx_compile(v->sy_filt, v->sy_prog, (uint32_t)sizeof v->sy_prog,
+			&v->sy_prog_n, v->sy_rx_err, sizeof v->sy_rx_err))
 		v->sy_frx_bad = 1;
 }
 
@@ -26438,8 +26568,19 @@ static int symd_name_ok(struct view *v, const uint8_t *rec)
 	if (v->sy_frx) {
 		kof_buf d;
 
+		/*
+		 * A PATTERN THAT WILL NOT COMPILE MATCHES NOTHING, and the
+		 * dialog says why - see where sy_rx_err is drawn.
+		 *
+		 * It used to pass everything, on the reasoning that a
+		 * half-typed pattern should not look like a search that found
+		 * nothing. Measured against a reader: it looks like a search
+		 * that found EVERYTHING, which is worse - `xmrig[\d]+Pool` is
+		 * refused for the "+", and the whole symbol table came back
+		 * looking like the answer.
+		 */
 		if (v->sy_frx_bad || !v->sy_prog_n)
-			return 1;
+			return 0;
 		d = kof_buf_make((const uint8_t *)name, n);
 		for (i = 0; i <= n; i++)
 			if (kof_hex_walk_flags(d, i, v->sy_prog,
@@ -27140,20 +27281,23 @@ static void draw_symbols(struct out *o, struct view *v)
 	 * they were occupying is the only place in the dialog wide enough for
 	 * the thing somebody with 1662 symbols in front of them actually wants.
 	 *
-	 * "/" for the field rather than a magnifier glyph: the box drawing set
-	 * here is what a VT100 has, the terminal may be in a font with no
-	 * magnifier in it, and a box that draws a question mark instead of an
-	 * icon is worse than a character everybody already reads as "search".
 	 */
 	{
 		int room = w - (int)o->col_hint - 34;
-		const char *ft = v->sy_filt;
 
 		if (room < 8)
 			room = 8;
 		if (room > (int)sizeof v->sy_filt - 1)
 			room = (int)sizeof v->sy_filt - 1;
-		out_fmt(o, "%s/" A_OFF " ", A_ID);
+		/*
+		 * NO MARKER IN FRONT OF THE FIELD. A "/" there was a label for
+		 * something that needs none: the field is the only place in
+		 * this row that takes typing, it sits after a gap wide enough
+		 * to separate it from the tabs, and a character whose whole
+		 * job is to say "this is a box" is a character a reader has to
+		 * decide to ignore.
+		 */
+		out_str(o, "   ");
 		v->sy_fbox[0] = o->col_base + (int)o->col_hint;
 		/*
 		 * A_SEL while it is being typed into, like every other field
@@ -27161,9 +27305,17 @@ static void draw_symbols(struct out *o, struct view *v)
 		 * the reason the list stopped narrowing is on the field that
 		 * caused it rather than in a message somewhere else.
 		 */
+		/*
+		 * THROUGH field_draw, like every other text box in this
+		 * program. Painted by hand it had no caret, no scroll and no
+		 * selection - and the keys that go with those were written by
+		 * hand too, which is how Ctrl+A came to do nothing here while
+		 * working everywhere else.
+		 */
 		out_str(o, v->edit == ED_SYMFILT ? A_SEL
 			   : (v->sy_frx && v->sy_frx_bad) ? A_BAD : A_DIM);
-		out_fmt(o, "%-*.*s", room, room, ft[0] ? ft : "filter");
+		field_draw(o, v->sy_filt, v->caret, &v->sy_foff, room,
+			   v->edit == ED_SYMFILT, "filter");
 		out_str(o, A_OFF);
 		v->sy_fbox[1] = o->col_base + (int)o->col_hint - 1;
 		out_str(o, " ");
@@ -27243,11 +27395,24 @@ static void draw_symbols(struct out *o, struct view *v)
 		sc.rec_n = 0;
 
 		if (!r) {
-			/* Nothing to draw, but the row still has to be blanked
-			 * INSIDE the border: the box is over other content, and
-			 * a clear-to-end-of-line would take the rest of the
-			 * screen with it. symd_edge does the filling. */
-			(void)0;
+			/*
+			 * WHY THERE IS NOTHING, on the first empty row and only
+			 * there. A filter that refuses every record looks
+			 * identical to a table with no records in it, and when
+			 * the reason is a regex the compiler would not take,
+			 * the reader needs the compiler's own words - see
+			 * rx_compile, which copies them out.
+			 */
+			if (i == 0 && v->sy_frx && v->sy_frx_bad &&
+			    v->sy_rx_err[0])
+				sclip_fmt(&sc, A_BAD, "%s", v->sy_rx_err);
+			else if (i == 0 && v->sy_filt[0] && n == 0)
+				sclip_fmt(&sc, A_DIM, "%s",
+					  "no symbol matches the filter");
+			/* Otherwise nothing to draw, and the row still has to
+			 * be blanked INSIDE the border: the box is over other
+			 * content, and a clear-to-end-of-line would take the
+			 * rest of the screen with it. symd_edge does it. */
 		} else {
 			sym_flag_str(r[KOF_SYM_R_FLAGS], fl);
 			sym_shn_str(r, shn, sizeof shn);
@@ -28412,9 +28577,25 @@ static void draw_find(struct out *o, struct view *v)
 
 	dframe_row(o, f, 1);
 	v->f_rx[0] = o->col_base + (int)o->col_hint;
-	/* Bright black on white, not on bright black: the same colour twice is
-	 * a grey block where a label should be. */
-	out_fmt(o, "\033[47;90m[ ] Regex" A_OFF);
+	/*
+	 * LIVE NOW. It was drawn permanently greyed - bright black on white,
+	 * because the same colour twice is a grey block where a label should
+	 * be - while there was nothing behind it. There is: the engine's own
+	 * regex, compiled by kof_regex_compile and walked by
+	 * kof_hex_walk_flags, which is the pair the matcher uses.
+	 *
+	 * A_BAD when the pattern will not compile, so the reason the search
+	 * stopped finding things is on the control that caused it.
+	 *
+	 * NOT WITH HEX. A regex is over text; hex names bytes, and the two
+	 * spellings of a pattern are not both true of one field.
+	 */
+	if (v->find_hex)
+		out_fmt(o, "\033[47;90m[ ] Regex" A_OFF);
+	else
+		out_fmt(o, "%s[%s] Regex" A_OFF,
+			v->find_rx_bad ? A_BAD : A_ID,
+			v->find_regex ? "x" : " ");
 	v->f_rx[1] = o->col_base + (int)o->col_hint - 1;
 	out_str(o, "   ");
 	v->f_ic[0] = o->col_base + (int)o->col_hint;
@@ -28507,11 +28688,20 @@ static int find_click(struct view *v)
 	if (g_my == top + 1 && g_mx >= v->f_mode[0] &&
 	    g_mx <= v->f_mode[1]) {
 		v->find_hex = !v->find_hex;
+		/* A regex is over text - see the note in draw_find. */
+		if (v->find_hex)
+			v->find_regex = 0;
+		find_compile(v);
 		v->find_at = KOF_BROKEN;
 		return 1;
 	}
 	if (g_my == top + 2) {
-		if (!v->find_hex && g_mx >= v->f_ic[0] && g_mx <= v->f_ic[1]) {
+		if (!v->find_hex && g_mx >= v->f_rx[0] && g_mx <= v->f_rx[1]) {
+			v->find_regex = !v->find_regex;
+			find_compile(v);
+			v->find_at = KOF_BROKEN;
+		} else if (!v->find_hex && g_mx >= v->f_ic[0] &&
+			   g_mx <= v->f_ic[1]) {
 			v->find_icase = !v->find_icase;
 			v->find_at = KOF_BROKEN;
 		} else if (g_mx >= v->f_all[0] && g_mx <= v->f_all[1]) {
@@ -30114,37 +30304,36 @@ static int handle_symd_key(struct view *v, int k)
 		 * what a reader who mistyped a pattern expects.
 		 */
 		if (v->edit == ED_SYMFILT) {
+			/*
+			 * ONE EDITOR. field_key is what every other field in
+			 * this program uses, so the caret, the selection,
+			 * Ctrl+A and paste behave here the way they do
+			 * everywhere - a hand-written copy is a copy that
+			 * drifts, and this one had already drifted before it
+			 * was a day old.
+			 *
+			 * Two keys are the dialog's rather than the field's:
+			 * the vertical ones scroll the list underneath, which
+			 * is what a reader narrowing a long table expects, and
+			 * Escape closes the FIELD - the dialog's own Escape
+			 * would take the table away with it.
+			 */
 			switch (k) {
+			case K_UP: case K_DOWN: case K_PGUP: case K_PGDN:
+				break;          /* the dialog's, see below */
 			case 27:
-			case '\r':
-			case '\n':
 				v->edit = 0;
 				return 1;
-			case K_UP: case K_DOWN: case K_PGUP: case K_PGDN:
-				break;          /* scroll the list underneath */
-			case 8: case 127:
-				{
-					size_t n = strlen(v->sy_filt);
+			default: {
+				int r2 = field_key(v, v->sy_filt,
+						   sizeof v->sy_filt, k, NULL);
 
-					if (n)
-						v->sy_filt[n - 1u] = 0;
-				}
+				if (k == '\r' || k == '\n')
+					v->edit = 0;
 				symd_filter_compile(v);
 				v->sym_at = 0;
-				return 1;
-			default:
-				if (k >= 0x20 && k < 0x7f) {
-					size_t n = strlen(v->sy_filt);
-
-					if (n + 1u < sizeof v->sy_filt) {
-						v->sy_filt[n] = (char)k;
-						v->sy_filt[n + 1u] = 0;
-					}
-					symd_filter_compile(v);
-					v->sym_at = 0;
-					return 1;
-				}
-				return 1;
+				return r2;
+			}
 			}
 		}
 		switch (k) {
@@ -30731,6 +30920,10 @@ static int handle_chooser_key(struct view *v, int k)
 			int esc = k == 27, run = k == '\r' || k == '\n';
 			int r2 = field_key(v, v->find, sizeof v->find, k, NULL);
 
+			/* The pattern changed, so what it compiles to has to -
+			 * see find_compile. Cheap: it is a few dozen bytes of
+			 * text and nothing else asks. */
+			find_compile(v);
 			if (esc) {
 				v->find_open = 0;
 			} else if (run) {

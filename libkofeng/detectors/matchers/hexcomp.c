@@ -765,10 +765,69 @@ static int rx_put_byte(struct hx_step **cur, uint8_t v, int any)
 	return 1;
 }
 
+/*
+ * THE CLASS SHORTHANDS - \d \w \s and their negations.
+ *
+ * Fills a 32-byte bitmap and answers 1 when the letter was one of them, 0 when
+ * it was not - the caller then reads it as an ordinary escape.
+ *
+ * They were missing, and missing SILENTLY, which is the part that mattered:
+ * rx_escape's default arm turns a backslash before anything into that
+ * character, so "[\d]" compiled to a class holding the letter d. A pattern
+ * like `xmrig[\d]+Pool` did not fail - it became something else and matched
+ * accordingly, which is the one outcome a compiler must never produce.
+ */
+static int rx_shorthand(char c, uint8_t *bits)
+{
+	int lo = 0, hi = 0, neg = 0, i;
+
+	switch (c) {
+	case 'D': neg = 1; /* fall through */
+	case 'd': lo = '0'; hi = '9'; break;
+	case 'W': neg = 1; /* fall through */
+	case 'w': break;
+	case 'S': neg = 1; /* fall through */
+	case 's': break;
+	default:  return 0;
+	}
+	memset(bits, 0, 32u);
+	if (c == 'd' || c == 'D') {
+		for (i = lo; i <= hi; i++)
+			bits[i >> 3] |= (uint8_t)(1u << (i & 7u));
+	} else if (c == 'w' || c == 'W') {
+		for (i = '0'; i <= '9'; i++)
+			bits[i >> 3] |= (uint8_t)(1u << (i & 7u));
+		for (i = 'A'; i <= 'Z'; i++)
+			bits[i >> 3] |= (uint8_t)(1u << (i & 7u));
+		for (i = 'a'; i <= 'z'; i++)
+			bits[i >> 3] |= (uint8_t)(1u << (i & 7u));
+		bits['_' >> 3] |= (uint8_t)(1u << ('_' & 7u));
+	} else {
+		static const char ws[] = " \t\n\r\f\v";
+
+		for (i = 0; ws[i]; i++)
+			bits[(unsigned char)ws[i] >> 3] |=
+				(uint8_t)(1u << ((unsigned char)ws[i] & 7u));
+	}
+	if (neg)
+		for (i = 0; i < 32; i++)
+			bits[i] = (uint8_t)~bits[i];
+	return 1;
+}
+
 /* \xNN and the handful of escapes that are worth having. A backslash before
- * anything else is that character, which is how a pattern says "." or "[". */
+ * anything else is that character, which is how a pattern says "." or "[".
+ *
+ * A CLASS SHORTHAND IS NOT ONE OF THEM and must be refused here rather than
+ * falling through to the default arm - see rx_shorthand. The callers that can
+ * hold a set test for it first; this one is reached only where a single byte
+ * is what the grammar allows, and there \d has no single-byte answer. */
 static int rx_escape(uint8_t *out)
 {
+	if (*rx_p && (*rx_p == 'd' || *rx_p == 'D' || *rx_p == 'w' ||
+		      *rx_p == 'W' || *rx_p == 's' || *rx_p == 'S'))
+		return rx_fail("a class shorthand cannot be used here - "
+			       "write it where a class may go");
 	if (!*rx_p)
 		return rx_fail("a backslash at the end of the pattern");
 	switch (*rx_p) {
@@ -812,6 +871,20 @@ static int rx_class(uint8_t *bits)
 		uint8_t lo, hi;
 
 		if (*rx_p == '\\') {
+			uint8_t sh[32];
+
+			/* A shorthand inside a class is the class's own set
+			 * ORed in: "[\dA-F]" is the digits and those letters.
+			 * It has no low end, so it cannot be a range. */
+			if (rx_shorthand(rx_p[1], sh)) {
+				int q;
+
+				rx_p += 2;
+				for (q = 0; q < 32; q++)
+					bits[q] |= sh[q];
+				n++;
+				continue;
+			}
 			rx_p++;
 			if (!rx_escape(&lo))
 				return 0;
@@ -1023,6 +1096,17 @@ static int rx_body(void)
 		} else if (*rx_p == '*' || *rx_p == '+' || *rx_p == '?' ||
 			   *rx_p == '{') {
 			return rx_fail("a count with nothing before it");
+		} else if (*rx_p == '\\' && rx_shorthand(rx_p[1], bits)) {
+			/*
+			 * A BARE SHORTHAND IS A CLASS OF ONE BYTE, which is
+			 * exactly what "[\d]" is - so it takes the same path
+			 * and the two spellings cannot mean different things.
+			 * It does not widen what the compiler accepts: a class
+			 * is one byte long and the prefilter's requirements are
+			 * unchanged.
+			 */
+			rx_p += 2;
+			kind = A_CLASS;
 		} else if (*rx_p == '\\') {
 			rx_p++;
 			if (!rx_escape(&v))

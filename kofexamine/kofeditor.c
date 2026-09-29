@@ -1784,6 +1784,15 @@ void grp_add(struct kof_editor *e)
 	if (e->dr.n_grp >= MAX_GROUP)
 		return;
 	memset(&e->dr.grp[e->dr.n_grp], 0, sizeof e->dr.grp[0]);
+	/*
+	 * A NEW MATCHER STARTS AS "any", because it starts with one marker.
+	 *
+	 * Zero is find_all, which is a plural about a single thing:
+	 * `kof_find_str_all(rng, s0)`. The author who adds a second marker
+	 * chooses from the threshold menu, which is where the choice belongs -
+	 * see where CH_THRESH is taken.
+	 */
+	e->dr.grp[e->dr.n_grp].rule = 1;
 	e->dr.cur_grp = e->dr.n_grp++;
 	e->dr.warn[0] = 0;
 }
