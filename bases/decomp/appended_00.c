@@ -155,6 +155,23 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (kof_entropy_at(u.widest_off, u.widest) < MIN_EIGHTHS)
 		return;
 
+	/*
+	 * AND NOT WHEN SOMETHING ELSE ALREADY OPENED THIS OBJECT.
+	 *
+	 * This is the generic answer to "there are bytes here nobody claimed",
+	 * and a module that knows what those bytes ARE gives a better one. On a
+	 * TeamTNT sample the unclaimed run is an Ezuri key and ciphertext:
+	 * ezuri.c decrypts it and hands back the ELF, and this module carved
+	 * the same run out again as 340052 bytes of ciphertext - a second
+	 * object, from the same bytes, that nothing can read and no rule can
+	 * match.
+	 *
+	 * Same rule emu_generic_00.c follows for the same reason: the general
+	 * mechanism runs where the specific ones declined.
+	 */
+	if (kunp_opened_already())
+		return;
+
 	off = u.widest_off;
 	len = u.widest;
 

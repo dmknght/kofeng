@@ -4,8 +4,9 @@
  * Test sample: normalized:HEUR-Backdoor.Linux.Gafgyt.a-0a3f82108ea0704c3cdf113434d5164eda5f4b59c1159cfe2625596b3d1995f7
  * Test sample: normalized:HEUR-Backdoor.Linux.Gafgyt.a-35729a5f8482fe6f9f20761c788a4a5384480a08424567414e92b8e9fa53eb33
  * Test sample: HEUR-Backdoor.Linux.Gafgyt.a-83fb8edc16b1c955fd226dd3b1a649b6a96250ac5802ace060bfcdc233fff617
+ * Test sample: normalized:0afd9f52ddada582d5f907e0a8620cbdbe74ea31cf775987a5675226c1b228c2_detected_detected
  * Researcher:  dmknght
- * Created 2026-09-26, updated 2026-09-26
+ * Created 2026-09-26, updated 2026-09-30
  * Engine:      db format 2.0, module ABI 3
  */
 
@@ -32,7 +33,11 @@ KOF_DEFINE_HEXSTR(s10, "02010019696E7374616C6C5F70657273697374656E6365", KOF_CAS
 KOF_DEFINE_HEXSTR(s11, "010100156578706C6F69745F7363616E6E65725F656E61626C6564", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_HEXSTR(s12, "0201001976736561747461636B", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_HEXSTR(s13, "0201001953656E64554450427970617373", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
-/* +0x135c0, 3380 bytes, 108 hash(es) */
+KOF_DEFINE_STR(s14, "zyxelscanner", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
+KOF_DEFINE_STR(s15, "huaweiscanner", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
+KOF_DEFINE_HEXSTR(s16, "02010019746370466C303064", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
+KOF_DEFINE_STR(s17, "linksys_scanner", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
+/* +0x0, 0 bytes, 108 hash(es) */
 KOF_PLAGUE_BLOCK(blk_51f88b7c, KOF_SCAN_ELF_CODE, KOF_PLAGUE_RAW,
 	0x00060aa7u, 0x002ebecau, 0x00500f6bu, 0x00580465u,
 	0x005c9d11u, 0x00621426u, 0x00666751u, 0x006bbba9u,
@@ -68,6 +73,6 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	if (kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4, s5, s6) >= 2 || kof_plague_score(blk_51f88b7c) >= 70u)
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 	/* matcher 2: Find malicious export */
-	if (kof_find_str_any(scan_range_sym_exp, s7, s8, s9, s10, s11, s12, s13))
+	if (kof_find_str_any(scan_range_sym_exp, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }
