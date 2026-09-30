@@ -971,104 +971,52 @@ static void print_stats(const struct kof_stats *st)
 	       (unsigned long long)st->heur_emu);
 }
 
+/*
+ * ONE LINE A FLAG.
+ *
+ * This was ninety-eight lines: every flag carried the argument for its own
+ * default - why the cache outlives the run, what a cached file's identity is
+ * made of and when that is sound, what level 2 of --scan-procs compares and
+ * why nothing else can see it. All of it true and none of it what a reader
+ * reaching for --help wants, which is the name of the flag that does the thing
+ * they are trying to do.
+ *
+ * The reasoning is not lost and was never only here: every one of those
+ * paragraphs is a comment beside the code it is about, where somebody changing
+ * the behaviour will read it. A terminal is the wrong place to keep it, and a
+ * usage block nobody finishes reading is a usage block nobody reads.
+ */
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
 		"usage: %s --db <dir-or-blob> --scan-files <path> [options]\n"
 		"       %s --db <dir-or-blob> --scan-procs [options]\n"
 		"\n"
-		"AN INFECTED FILE IS REPAIRED WHERE A RULE KNOWS HOW. There is no\n"
-		"flag for it: a rule that carries a cure has said what the damage\n"
-		"is and how to undo it, and it ran only because that same rule\n"
-		"reported. The file is still reported as infected afterwards - the\n"
-		"verdict is not softened by having been acted on - and the repair\n"
-		"is printed byte for byte. NO BACKUP IS TAKEN: what to keep is\n"
-		"policy and a scanner is the wrong place to decide it.\n"
+		"  --db D            module database: a directory or one blob\n"
+		"  --scan-files P    a file, or a directory scanned recursively\n"
+		"  --scan-procs      scan what is RUNNING, not what is on disk\n"
+		"  --pid N           only this process; repeatable, up to 64\n"
 		"\n"
-		"  --db            module database: a directory of them, or one blob\n"
-		"  --scan-files    file to scan, or directory to scan recursively\n"
-		"  --scan-procs    scan what is RUNNING instead of what is on the\n"
-		"                  disk: every process this user may open, its own\n"
-		"                  record, the files behind its mappings, and the\n"
-		"                  executable memory no file holds\n"
-		"  --pid N         only this process; repeatable, up to 64. Not a\n"
-		"                  filter over the table - the walk opens only what\n"
-		"                  was named, which is the point when something else\n"
-		"                  already decided a process is interesting\n"
-		"                  With --scan-procs, level 2 additionally compares\n"
-		"                  every loaded module that has been WRITTEN TO\n"
-		"                  against the file it was mapped from, and scans\n"
-		"                  whatever differs - which is the only way to see\n"
-		"                  an inline hook, a security stub patched out in a\n"
-		"                  process's own address space, or a hollowed\n"
-		"                  section. None of those exist in any file, and\n"
-		"                  none of them raise an event, because patching\n"
-		"                  the reporting path is what stops the events\n"
-		"  --cache-file F  keep the verdict cache in F instead of the\n"
-		"                  default. The cache OUTLIVES THE RUN by default,\n"
-		"                  in a per-user directory no other unprivileged\n"
-		"                  account can write, because it is the difference\n"
-		"                  between a 5.2s sweep and a 1.0s one. Whoever can\n"
-		"                  write F decides what this scanner calls clean,\n"
-		"                  so a path given here should be no more reachable\n"
-		"                  than the default is\n"
-		"  --no-cache      do not TRUST anything carried between runs.\n"
-		"                  A file is scanned whatever the cache says\n"
-		"                  about it and nothing new is written down -\n"
-		"                  but a file this run finds something in is\n"
-		"                  REMOVED from the cache, so the next ordinary\n"
-		"                  run cannot skip it on a stale entry. For a scan\n"
-		"                  that must answer from this database and these\n"
-		"                  bytes alone - a first look at a machine somebody\n"
-		"                  else has been on. Caching WITHIN a run stays on\n"
-		"                  and has no flag: without it one sweep scans the\n"
-		"                  same ntdll.dll once per process.\n"
-		"                  USE IT ON A MACHINE YOU DO NOT TRUST. A cached\n"
-		"                  file is recognised by what the filesystem says\n"
-		"                  about it - where it is, how big, when written -\n"
-		"                  and every one of those is settable by whoever\n"
-		"                  already has rights there. A file patched in\n"
-		"                  place at the same length with its timestamps\n"
-		"                  put back has the same identity and is skipped.\n"
-		"                  That is sound while something is watching for\n"
-		"                  writes and not otherwise\n"
-		"  --max-depth N   directory depth limit\n"
-		"  --object-depth N  how deep to descend INSIDE a file: an\n"
-		"                  archive's entries, a dropper's payload. 0 is\n"
-		"                  a built-in allowance that falls with size\n"
-		"  --follow-links  follow symbolic links (off by default: a link into\n"
-		"                  an ancestor turns a walk into a loop)\n"
-		"  --all-matches   keep scanning an object after the first finding\n"
-		"  --heur N        1 (default) scores what the format parse found\n"
-		"                  wrong with the object and what the unpackers made\n"
-		"                  of it, and DESCENDS INTO a file - an archive's\n"
-		"                  entries, an attachment, a dropper's payload.\n"
-		"                  0 gathers nothing, scores nothing and descends\n"
-		"                  into nothing: what is inside is still reported,\n"
-		"                  because a container says what it holds without\n"
-		"                  being opened, and those bytes are still searched\n"
-		"                  as regions of the file they are in. Neither costs\n"
-		"                  an extra pass. 2 additionally RUNS an object that\n"
-		"                  no unpacker could open and that looks packed or\n"
-		"                  damaged, and scans what it writes - which is the\n"
-		"                  one level here that costs real time. It reports a\n"
-		"                  level of its own and never a family\n"
-		"  --jobs N        scan on N threads (default 1). The objects come\n"
-	    "                  back in whatever order the workers finish them,\n"
-	    "                  which is the one thing this changes besides speed.\n"
-	    "                  A FILE SWEEP DOES NOT CACHE ON MORE THAN ONE\n"
-	    "                  THREAD: the clean set is not written for\n"
-	    "                  concurrent add, and a cache that lost entries\n"
-	    "                  under workers would be slower the more it was\n"
-	    "                  given\n"
-		"  --stats         report what the prefilter and the presence set earned\n"
-		"  --emu MODE      overrides what --heur chose: never interprets\n"
-	    "                  nothing, auto is what --heur 2 turns on, only\n"
-	    "                  interprets instead of the packer modules, ungated\n"
-	    "  --max-produced N  bytes an object may yield before the scan gives up\n"
-		"  --max-resident N  bytes of produced data that may be alive at once\n"
+		"  --heur N          0 gather nothing  1 score and descend (default)\n"
+		"                    2 also interpret what no unpacker opened\n"
+		"  --emu MODE        never | auto | only; overrides what --heur chose\n"
+		"  --all-matches     keep scanning an object after the first finding\n"
+		"  --max-depth N     directory depth limit\n"
+		"  --object-depth N  how deep to descend INSIDE a file\n"
+		"  --follow-links    follow symbolic links (off by default)\n"
+		"\n"
+		"  --cache-file F    keep the verdict cache in F\n"
+		"  --no-cache        trust nothing carried between runs\n"
+		"  --jobs N          scan on N threads (default 1; disables caching)\n"
+		"  --max-produced N  bytes an object may yield before giving up\n"
+		"  --max-resident N  bytes of produced data alive at once\n"
 		"  --max-object N    bytes any one produced object may reach\n"
-		"  -v              also report objects that came back clean\n"
+		"\n"
+		"  --stats           report what the prefilter earned\n"
+		"  -v                also report objects that came back clean\n"
+		"\n"
+		"An infected file is repaired where a rule knows how; there is no\n"
+		"flag for it and no backup is taken.\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
 		argv0, argv0);
@@ -1918,6 +1866,15 @@ int main(int argc, char **argv)
 			r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
 			r.verbose = 1;
+		/* Asked for by name rather than reached by getting something
+		 * wrong: --help printed "unrecognised argument" first, which
+		 * is the tool telling a reader they made a mistake for using
+		 * the flag every other tool has. */
+		else if (strcmp(argv[i], "--help") == 0 ||
+			 strcmp(argv[i], "-h") == 0) {
+			usage(argv[0]);
+			return 0;
+		}
 		else {
 			fprintf(stderr, "%s: unrecognised argument '%s'\n",
 				argv[0], argv[i]);
