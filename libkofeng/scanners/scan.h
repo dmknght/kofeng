@@ -156,6 +156,7 @@ struct kof_scanner {
 	/* Whether the emulator has produced a child from the object in hand.
 	 * Cleared per object and published in kof_result.emu_unpacked. */
 	uint8_t              emu_produced;
+	const char          *res_why;
 	/*
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.

@@ -719,6 +719,25 @@ struct kof_stats {
 	uint64_t peak_resident;
 
 	/*
+	 * HOW A BUFFERED DECODE GOT ITS OUTPUT BUFFER.
+	 *
+	 * A coding whose whole output must stay addressable while it decodes -
+	 * LZMA, NRV2, aPLib, ASPack - needs a flat buffer the size of what it
+	 * produces. When the caller is filling a DECLARED IMAGE the sink
+	 * already is one, and the decode writes straight into it;
+	 * `decode_inplace` counts those. Otherwise a scratch buffer is taken
+	 * and copied across afterwards, and `decode_scratch` counts those.
+	 *
+	 * Published because the difference is a whole extra copy of the output
+	 * and it is invisible from outside: measured on a VMProtect-under-
+	 * MPRESS sample, the scratch path peaked at 15.31 MB where the objects
+	 * alone are 10.21. A caller watching these can see which path its
+	 * workload takes without reading the engine.
+	 */
+	uint64_t decode_inplace;
+	uint64_t decode_scratch;
+
+	/*
 	 * How many times a heuristic rule's ask for the emulator was honoured.
 	 *
 	 * Reported because it is a cost a FILE's contents can choose - a rule

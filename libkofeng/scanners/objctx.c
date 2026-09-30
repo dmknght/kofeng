@@ -1280,6 +1280,10 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 static void scan_release(struct kof_scanner *sc, uint64_t produced)
 {
 	sc->resident = produced < sc->resident ? sc->resident - produced : 0;
+	if (getenv("KOF_RES_TRACE"))
+		fprintf(stderr, "[res] -%.2f -> %.2f MB\n",
+			(double)produced / 1048576.0,
+			(double)sc->resident / 1048576.0);
 }
 
 static void scan_release_cb(void *sc, uint64_t produced)
@@ -1309,9 +1313,16 @@ static uint64_t scan_room(const struct kof_scanner *sc)
 	     ? sc->resident_max - sc->resident : 0;
 }
 
-static void scan_charge(struct kof_scanner *sc, uint64_t n)
+#define scan_charge(sc, n) (((sc)->res_why = __func__), scan_charge_(sc, n))
+static void scan_charge_(struct kof_scanner *sc, uint64_t n);
+static void scan_charge_(struct kof_scanner *sc, uint64_t n)
 {
 	sc->resident += n;
+	if (getenv("KOF_RES_TRACE"))
+		fprintf(stderr, "[res] +%.2f -> %.2f MB  (%s)\n",
+			(double)n / 1048576.0,
+			(double)sc->resident / 1048576.0,
+			sc->res_why ? sc->res_why : "?");
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 }
@@ -1979,6 +1990,11 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	uint8_t *buf;
 	enum kof_decomp_status st;
 	int capped = 0;
+	/* Whether `buf` is this function's to free - see the note beside the
+	 * allocation. */
+	int own;
+	const uint8_t *sink_was = NULL;
+	size_t cap_was = 0;
 
 	room = scan_room(sc) / 2u;
 	/*
@@ -2052,18 +2068,78 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		}
 	}
 
-	buf = malloc((size_t)want);
-	if (!buf) {
-		scan_broken(sc, KOF_BROKEN_LIMIT);
-		return 0;
-	}
-	/* Charged while it is alive, so a module that unpacks inside an object that
-	 * is itself produced cannot exceed the ceiling between the two of them.
+	/*
+	 * ---- DECODE STRAIGHT INTO THE SINK WHERE THERE IS ONE --------------
 	 *
-	 * `want` DOES NOT MOVE from here to the release at the bottom - the only
-	 * assignment to it below is the PE rebuild's, which releases and
-	 * recharges around itself. That is what makes the pair balance. */
-	scan_charge(sc, want);
+	 * A BUFFERED DECODE WAS COSTING A SECOND COPY OF ITS OWN OUTPUT.
+	 *
+	 * The output has to be addressable in full while it decodes - that is
+	 * what "buffered" means here, and why LZMA, NRV2, aPLib and ASPack are
+	 * on this path at all. But when the caller is filling a DECLARED IMAGE
+	 * the sink is already a flat buffer of exactly the right size, and this
+	 * allocated a second one beside it, decoded into that, and then memcpy'd
+	 * the whole thing across.
+	 *
+	 * Measured on 111.exe, which is VMProtect under MPRESS: the residency
+	 * account ran 5.11 MB for the image, then 5.11 for the child, then
+	 * FOUR more allocations of about five megabytes each - one per decode -
+	 * peaking at 15.31 MB where the two objects alone are 10.21. Half the
+	 * peak of an unpack was a copy nobody needed, plus a memcpy of the
+	 * whole image per decode.
+	 *
+	 * WHAT MAKES IT SAFE, and each of these is a refusal rather than an
+	 * assumption:
+	 *
+	 *   - A FIXED, IN-MEMORY SINK. A spilled one has no buffer to write
+	 *     into, and a growable one is appended to rather than placed at a
+	 *     cursor.
+	 *   - ROOM AT THE CURSOR for the whole of `want`, checked exactly as
+	 *     c_emit's fixed arm checks it - against sink_cap, which does not
+	 *     move, and never against sink_len, which layout_of_produced
+	 *     lowers.
+	 *   - NO OVERLAP with the input. The input is the parent object's
+	 *     bytes and the sink is the child's own allocation, so they cannot
+	 *     alias today; the test is here because "cannot today" is not a
+	 *     property this function can check by reading itself.
+	 *   - NOT THE PEEK PATH, which copies out to a caller's buffer and
+	 *     emits nothing.
+	 *
+	 * And the sink must not move while the decode is in flight - nothing
+	 * resizes it between here and the emit, and the check after the decode
+	 * is what says so out loud.
+	 */
+	own = 1;
+	if (!peek_out && sc->sink_fixed && sc->sink_mem &&
+	    sc->sink_at <= sc->sink_cap && want <= sc->sink_cap - sc->sink_at) {
+		uint8_t *dst = sc->sink_mem + sc->sink_at;
+
+		if (!in || !in_len ||
+		    (const uint8_t *)in + in_len <= dst || in >= dst + want) {
+			buf = dst;
+			own = 0;
+			sink_was = sc->sink_mem;
+			cap_was = sc->sink_cap;
+			sc->st.decode_inplace++;
+		}
+	}
+	if (own) {
+		buf = malloc((size_t)want);
+		if (!buf) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+		sc->st.decode_scratch++;
+		/* Charged while it is alive, so a module that unpacks inside an
+		 * object that is itself produced cannot exceed the ceiling
+		 * between the two of them. Nothing is charged on the path
+		 * above: that room was charged once, when c_image took it.
+		 *
+		 * `want` DOES NOT MOVE from here to the release at the bottom -
+		 * the only assignment to it below is the PE rebuild's, which
+		 * releases and recharges around itself. That is what makes the
+		 * pair balance. */
+		scan_charge(sc, want);
+	}
 
 	if (method == KOF_UNP_RAR3 || method == KOF_UNP_RAR5) {
 		/*
@@ -2258,10 +2334,32 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 	/* Whatever was decoded is real output and is worth scanning, whether or not
 	 * the stream ended cleanly - the same rule the gzip path follows. */
-	at = emit_all(ctx, buf, produced);
-
-	scan_release(sc, want);
-	free(buf);
+	if (own) {
+		at = emit_all(ctx, buf, produced);
+		scan_release(sc, want);
+		free(buf);
+	} else {
+		/*
+		 * ALREADY WHERE IT BELONGS. What is left is the bookkeeping
+		 * c_emit's fixed arm does after its memcpy, and it is spelled
+		 * out here rather than borrowed, because emit_all would copy
+		 * the buffer onto itself.
+		 *
+		 * The sink is re-read rather than trusted: if anything had
+		 * resized it while the decode ran, `buf` would be a pointer
+		 * into a freed block and every byte just written would be
+		 * lost. Nothing does - but a stale pointer is the failure this
+		 * whole path could have, so it is checked instead of assumed.
+		 */
+		if (sc->sink_mem != sink_was || sc->sink_cap != cap_was) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+		sc->sink_at += produced;
+		if (sc->sink_at > sc->sink_len)
+			sc->sink_len = sc->sink_at;
+		at = produced;
+	}
 	/*
 	 * Everything emitted means the decode is what to report; a short emit means
 	 * the sink refused and how far it got is the useful number. The two differ
