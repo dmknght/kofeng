@@ -1318,41 +1318,190 @@ int kof_dump_object(const char *dir, kof_buf buf,
 	return dump_layout(dir, f, ctx, err, err_cap);
 }
 
-int kof_dump_child(const char *dir, const char *tag,
-		   const void *bytes, uint64_t len,
-		   char *sub, uint32_t sub_cap, char *err, uint32_t err_cap)
+
+/*
+ * WHERE AN OBJECT'S DUMP BELONGS, as a path under the dump root.
+ *
+ * HERE AND NOT IN THE ENGINE, although it reads the engine's names. A dump
+ * directory is a thing a TOOL makes on a disk, and the engine has no business
+ * with it - the same line kofscanner's own usage draws when it says what to
+ * keep is policy. What the engine publishes is the VOCABULARY - KOF_OBJ_SEP,
+ * kobj_toplevel_len, KOF_OBJ_LABEL_NORM - and this spells a path out of it.
+ *
+ * THE ENGINE ALREADY KNOWS THE TREE AND THE TOOLS WERE THROWING IT AWAY. An
+ * object's name carries its whole descent - "f//0//1:norm" is the normalised
+ * view of the second child of the first child - and both front ends dumped
+ * with a FLAT counter instead, so every object in a file landed in one
+ * directory as siblings. Measured on 111.exe, which is VMProtect under MPRESS:
+ * four objects three levels deep came out as `unpacked.1`, `unpacked.2`,
+ * `unpacked.3` and `unpacked.4.norm` beside one another, and the last is a
+ * rendering OF the third. A reader cannot tell what came out of what, which is
+ * the one thing the tree was for.
+ *
+ * So the placement is computed here, from the engine's own name, and both
+ * tools ask rather than each inventing a scheme. "f//0//1:norm" gives
+ * "0/1.norm"; the file itself gives "", which is the dump root.
+ *
+ * A VIEW IS NOT A CHILD AND IS NOT GIVEN A LEVEL OF ITS OWN. `norm` is the
+ * same bytes seen another way - see KOF_OBJ_LABEL_NORM - so it hangs off its
+ * object's own name rather than becoming a directory beneath it. A label that
+ * is not a view names the child and does the same, because a label is a word
+ * about the child rather than a step down.
+ *
+ * Returns the length written, or 0 when it would not fit.
+ */
+static uint32_t dump_rel_dir(const char *name, char *out, uint32_t cap)
 {
-	char path[KOF_DUMP_PATH_ROOM];
+	const char *p = name;
+	uint32_t n = 0;
+
+	if (!out || !cap)
+		return 0;
+	out[0] = 0;
+	if (!name)
+		return 0;
+	/* Past the file's own name: everything before the first separator is
+	 * the root and is the caller's to place. */
+	p = name + kobj_toplevel_len(name);
+	while (p[0] == KOF_OBJ_SEP[0] && p[1] == KOF_OBJ_SEP[1]) {
+		const char *seg = p + KOF_OBJ_SEP_LEN;
+		const char *e = seg;
+
+		while (*e && !(e[0] == KOF_OBJ_SEP[0] &&
+			       e[1] == KOF_OBJ_SEP[1]))
+			e++;
+		if (n && n + 1u < cap)
+			out[n++] = '/';
+		while (seg < e) {
+			char c = *seg++;
+
+			/*
+			 * The ':' between an index and its label becomes a
+			 * '.', and anything a path should not carry becomes
+			 * '_'. A label is the engine's word and is not a file
+			 * name - "3:bin/x86" holds a separator of its own, and
+			 * left alone it would make a directory nobody asked
+			 * for.
+			 */
+			if (c == ':')
+				c = '.';
+			else if (c == '/' || c == '\\' || c < 0x20 ||
+				 (unsigned char)c > 0x7e)
+				c = '_';
+			if (n + 1u < cap)
+				out[n++] = c;
+		}
+		p = e;
+	}
+	out[n] = 0;
+	return n;
+}
+
+/*
+ * ---- ONE OBJECT OF A SCAN, WRITTEN WHERE THE TREE SAYS ---------------------
+ *
+ * THE ONE PLACE A DUMP TREE IS LAID OUT, and there used to be two. kofexaminer
+ * wrote from inside the engine's per-object callback; kofviewer kept its own
+ * array of objects and looped over that afterwards. Two walks, two naming
+ * schemes - `unpacked.N` against `N.label` - over one tree, and neither
+ * carried the DEPTH: every object of a file landed in the dump root as
+ * siblings. Measured on 111.exe, which is VMProtect under MPRESS: four objects
+ * three levels apart came out as `unpacked.1` through `unpacked.4.norm`, and
+ * the last is a rendering OF the third.
+ *
+ * The engine already knows the shape - it names an object by its whole descent
+ * - so the placement is asked of it, with dump_rel_dir, and this is the only
+ * caller either tool needs.
+ *
+ * WHAT THE ENGINE DOES AND WHAT THIS DOES. The engine answers WHERE; this
+ * creates the directories and writes the bytes. That split is not tidiness: a
+ * scanner that writes files is a scanner deciding what to keep, and
+ * kofscanner's own usage text says that is policy and the wrong place for it.
+ *
+ * `root` is the dump directory for the FILE - kof_dump_dir_for's answer.
+ * `name` is the engine's name for this object. The object's own bytes are
+ * written as `object` at every level below the top, because at the top they
+ * are already `00.KOF_SCAN_ALL`.
+ */
+static int dump_mkpath(const char *path, char *err, uint32_t err_cap)
+{
+	char tmp[KOF_DUMP_PATH_ROOM];
+	size_t n = strlen(path), i;
+
+	if (n + 1u > sizeof tmp)
+		return dump_fail(err, err_cap, "path too long", path);
+	memcpy(tmp, path, n + 1u);
+	/* Each component in turn, so a tree three deep does not need the
+	 * caller to have made the levels above it. */
+	for (i = 1; i < n; i++) {
+		if (tmp[i] != '/')
+			continue;
+		tmp[i] = 0;
+		if (kof_mkdir(tmp, 0777) != 0 && errno != EEXIST)
+			return dump_fail(err, err_cap, "cannot create", tmp);
+		tmp[i] = '/';
+	}
+	if (kof_mkdir(tmp, 0777) != 0 && errno != EEXIST)
+		return dump_fail(err, err_cap, "cannot create", tmp);
+	return 1;
+}
+
+int kof_dump_walk(const char *root, const char *name, kof_buf buf,
+		  const struct kof_parser *f,
+		  const struct kof_obj_ctx *ctx,
+		  struct kof_dump_stat *st,
+		  char *dir_out, uint32_t dir_cap,
+		  char *err, uint32_t err_cap)
+{
+	char rel[KOF_DUMP_PATH_ROOM], dir[KOF_DUMP_PATH_ROOM];
 
 	if (err && err_cap)
 		err[0] = 0;
+	if (!root || !name)
+		return dump_fail(err, err_cap, "no dump root for", name ? name : "?");
+
+	dump_rel_dir(name, rel, sizeof rel);
+	if (rel[0]) {
+		char path[KOF_DUMP_PATH_ROOM];
+
+		if ((size_t)snprintf(dir, sizeof dir, "%s/%s", root, rel) >=
+		    sizeof dir)
+			return dump_fail(err, err_cap, "path too long under",
+					 root);
+		if (!dump_mkpath(dir, err, err_cap))
+			return 0;
+		/*
+		 * The bytes themselves, beside the regions rather than in
+		 * them: a reader wants the recovered file whole, and a region
+		 * is a view of it.
+		 */
+		if ((size_t)snprintf(path, sizeof path, "%s/object", dir) >=
+		    sizeof path)
+			return dump_fail(err, err_cap, "path too long under",
+					 dir);
+		if (!dump_write(path, buf.p, buf.n, err, err_cap))
+			return 0;
+	} else {
+		if ((size_t)snprintf(dir, sizeof dir, "%s", root) >= sizeof dir)
+			return dump_fail(err, err_cap, "path too long", root);
+		if (!dump_mkpath(dir, err, err_cap))
+			return 0;
+	}
+	if (dir_out && dir_cap &&
+	    (size_t)snprintf(dir_out, dir_cap, "%s", dir) >= dir_cap)
+		return dump_fail(err, err_cap, "path too long", dir);
 	/*
-	 * THE DIRECTORY IS THIS FUNCTION'S TO MAKE, and it used to be somebody
-	 * else's. kof_dump_object creates it, so a child landed beside regions
-	 * that had already been written and nobody noticed the dependency -
-	 * until an object with a child and NO REGIONS came along. A file whose
-	 * format nothing parses has no regions to dump, kof_dump_object is
-	 * never called for it, and every child it produced failed to write
-	 * with "cannot write": the one object whose child is the only way to
-	 * see what it holds is the one that could not be dumped.
+	 * AND THE REGIONS, WHEN THE CALLER HAS THE PARSE IN HAND.
 	 *
-	 * Same idiom and same tolerance of EEXIST as the other creator, so the
-	 * two can run in either order or both.
+	 * A caller with `ctx` is one the engine has just handed an object to,
+	 * and its regions are on that. A caller without it - kofexaminer, which
+	 * re-identifies the bytes so it can DESCRIBE them - takes the directory
+	 * back and dumps the regions from its own parse. Both write the same
+	 * files in the same place; only who parsed differs.
 	 */
-	if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST)
-		return dump_fail(err, err_cap, "cannot create", dir);
-	if ((size_t)snprintf(path, sizeof path, "%s/unpacked.%s", dir, tag)
-	    >= sizeof path)
-		return dump_fail(err, err_cap, "path too long under", dir);
-	if (!dump_write(path, bytes, len, err, err_cap))
-		return 0;
-	if (!sub || !sub_cap)
+	if (!ctx)
 		return 1;
-	if ((size_t)snprintf(sub, sub_cap, "%s.regions", path) >= sub_cap)
-		return dump_fail(err, err_cap, "path too long under", dir);
-	if (kof_mkdir(sub, 0777) != 0 && errno != EEXIST)
-		return dump_fail(err, err_cap, "cannot create", sub);
-	return 1;
+	return kof_dump_object(dir, buf, f, ctx, st, err, err_cap);
 }
 
 /* ---- where a marker is, and in which region ------------------------------ */

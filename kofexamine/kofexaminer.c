@@ -2521,8 +2521,19 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	{
 		char why[256];
 
-		if (!kof_dump_child(u->dump_dir, tag, bytes, len, sub,
-				    sizeof sub, why, sizeof why)) {
+		/*
+		 * WHERE IT GOES IS THE ENGINE'S ANSWER, not a counter's.
+		 *
+		 * This wrote `unpacked.<tag>` in the dump root, with `tag`
+		 * built from u->produced - so every object of a file landed as
+		 * a sibling whatever its depth, and kofviewer's own loop did
+		 * the same thing by a different name. One call now, and the
+		 * placement comes from the name the engine gave the object.
+		 * See kof_dump_walk.
+		 */
+		if (!kof_dump_walk(u->dump_dir, name,
+				   kof_buf_make(bytes, len), NULL, NULL, NULL,
+				   sub, sizeof sub, why, sizeof why)) {
 			fprintf(stderr, "kofexaminer: %s\n", why);
 			u->err = 1;
 			return 0;
@@ -2673,6 +2684,10 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			db = argv[i];
+		} else if (strcmp(argv[i], "--help") == 0 ||
+			   strcmp(argv[i], "-h") == 0) {
+			usage(argv[0]);
+			return 0;
 		} else if (argv[i][0] == '-' && argv[i][1]) {
 			fprintf(stderr, "%s: unrecognised argument '%s'\n",
 				argv[0], argv[i]);

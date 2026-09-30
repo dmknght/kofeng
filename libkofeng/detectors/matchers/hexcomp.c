@@ -779,7 +779,11 @@ static int rx_put_byte(struct hx_step **cur, uint8_t v, int any)
  */
 static int rx_shorthand(char c, uint8_t *bits)
 {
-	int lo = 0, hi = 0, neg = 0, i;
+	/* UNSIGNED, because it indexes a bitmap: `i & 7u` promotes a signed
+	 * counter to unsigned and the compiler is right to say the sign could
+	 * change. Nothing here is ever negative - these are character codes. */
+	unsigned lo = 0, hi = 0, i;
+	int neg = 0;
 
 	switch (c) {
 	case 'D': neg = 1; /* fall through */

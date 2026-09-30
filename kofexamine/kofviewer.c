@@ -20863,7 +20863,16 @@ static const char *bar_label(struct view *v, int i)
 	 */
 	if (i == BI_UNPACKER) {
 		(void)v;
-		return "Unpack with emulator";
+		/*
+		 * "Unpack", not "Unpack with emulator", because it no longer
+		 * names a mechanism: the engine's modules are offered the
+		 * object and the interpreter is the fallback - see emu_here.
+		 * A row that promised the emulator and then quietly used a
+		 * static unpacker would be describing the wrong thing, and a
+		 * reader choosing between two rows would be choosing between
+		 * an action and an implementation detail.
+		 */
+		return "Unpack";
 	}
 	/* Says which way the toggle goes, for the reason above. */
 	if (i == BI_DISASM)
@@ -21221,6 +21230,13 @@ static int bar_gap(struct view *v, int i)
 	return (i > 0 && bar_item[i].sep && bar_shown(v, i)) ? 1 : 0;
 }
 
+/* Defined with dump_all, which is where the tree is rebuilt. */
+static int tree_has_emu(const struct view *v);
+
+static int dump_needs_rebuild(const struct view *v, int use_emu)
+{
+	return use_emu ? !tree_has_emu(v) : (v->emu_mode != 0);
+}
 static int bar_enabled(struct view *v, int i)
 {
 	switch (i) {
@@ -21235,13 +21251,18 @@ static int bar_enabled(struct view *v, int i)
 		return v->path && v->path[0];
 	case BI_DUMP_STATIC:
 	case BI_DUMP_EMU:
-	/* And this one, for the same reason: it rebuilds. */
-	case BI_SEPARATE:
 		/*
-		 * Both may have to rebuild the tree to write the view they
-		 * name, and rebuilding it throws the draft away - the same
-		 * reason stepping to another file is refused with one open.
+		 * A rebuild throws the draft away - the same reason stepping
+		 * to another file is refused with one open - so the wait is on
+		 * the rebuild and not on the item. Dumping the tree that is
+		 * already on screen touches nothing and is allowed with a
+		 * draft open; see dump_needs_rebuild.
 		 */
+		return v->path && v->path[0] &&
+		       (!draft_edited(&v->ed) ||
+			!dump_needs_rebuild(v, i == BI_DUMP_EMU));
+	/* And this one, for the same reason: it rebuilds, always. */
+	case BI_SEPARATE:
 		return v->path && v->path[0] && !draft_edited(&v->ed);
 	case BI_UNPACKER:
 		/* Whether it APPLIES is bar_shown's - emu_here acts on the
@@ -24586,9 +24607,14 @@ static void emu_here(struct view *v)
 		 * Not an error and not silence: the reader pressed a button and
 		 * is owed an answer, and the answer is that this one has been
 		 * asked already. Whatever it produced is in the tree below.
+		 *
+		 * The wording no longer names the emulator, because the action
+		 * no longer does - see emu_here's opt.emu_use. What has been
+		 * spent is an unpack pass over these bytes, whichever way it
+		 * came apart.
 		 */
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Emu already ran on this object");
+			 "This object has already been unpacked");
 		return;
 	}
 	sc = kscan_new(v->eng);
@@ -24628,7 +24654,7 @@ static void emu_here(struct view *v)
 		char note[64];
 		int at;
 
-		snprintf(note, sizeof note, " Unpacking with Emu... ");
+		snprintf(note, sizeof note, " Unpacking... ");
 		at = g_cols - (int)strlen(note);
 		if (at < 1)
 			at = 1;
@@ -24649,11 +24675,24 @@ static void emu_here(struct view *v)
 	 * first pass would have run on it. */
 	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	/*
-	 * ONLY, because the reader asked for the interpreter by name. AUTO
-	 * would decline the moment a packer module claimed the object - which
-	 * on this node it already has, or the node would not be here.
+	 * AUTO, AND THE ENGINE'S MODULES DECIDE - not this tool.
+	 *
+	 * It was ONLY, which the flag's own description calls "interprets
+	 * INSTEAD OF the packer modules": pressing this spent a run even on an
+	 * object a static unpacker opens in milliseconds. The argument for it
+	 * was that AUTO declines once a packer has claimed the object, "which
+	 * on this node it already has" - true of the PARENT's scan, and this
+	 * is a fresh scan of these bytes, where nothing has claimed anything
+	 * yet. So AUTO does exactly what is wanted: every module is offered
+	 * the object first, and the interpreter runs only where none of them
+	 * opened it and something says it is worth a run.
+	 *
+	 * That is also the only honest reading of the button. A reader asking
+	 * to unpack an object is asking for it to come apart, not for a
+	 * particular mechanism; which mechanism worked is the engine's answer
+	 * and is reported afterwards.
 	 */
-	opt.emu_use = KOF_EMU_ONLY;
+	opt.emu_use = KOF_EMU_AUTO;
 	v->skip_root = 1;
 	/* Everything already in the list belongs to the first pass - see the
 	 * dedup in on_object. Zero afterwards, because an ordinary collect
@@ -24684,7 +24723,7 @@ static void emu_here(struct view *v)
 		 */
 		v->act_ok = 0;
 		snprintf(v->act_msg, sizeof v->act_msg,
-			 "Emu recovered nothing");
+			 "Nothing came out of this object");
 		return;
 	}
 	objects_examine_from(v, v->eng, before);
@@ -24813,8 +24852,24 @@ static int tree_has_emu(const struct view *v)
 	return 0;
 }
 
+/*
+ * WOULD THIS DUMP HAVE TO REBUILD THE TREE?
+ *
+ * One predicate, because two places ask it and they were answering
+ * differently. `enabled` refused both dump items whenever a draft was open, on
+ * the grounds that either MIGHT rebuild and a rebuild throws the draft away;
+ * dump_all then decided for itself whether it actually would. So a reader with
+ * a draft open could not dump a tree that needed no rebuilding at all.
+ *
+ * Now that kof_result.emu_unpacked reports honestly - it never did before, see
+ * the note in dump_all - the common case is that no rebuild is needed: the
+ * tree on screen already came from a run, and dumping it writes what the
+ * reader is looking at.
+ */
+
 static void dump_all(struct view *v, int use_emu)
 {
+	int rebuilt = 0;
 	char dir[KOF_DUMP_PATH_ROOM], sub[KOF_DUMP_PATH_ROOM], why[256];
 	struct kof_dump_stat ds;
 	uint32_t i, files = 0, kids = 0, skipped = 0;
@@ -24835,17 +24890,27 @@ static void dump_all(struct view *v, int use_emu)
 	 * idle counter, which snapshots it took, null calls, unhandled
 	 * exceptions - so the dump could hold something the reader never saw.
 	 *
+	 * AND THE OTHER HALF OF THAT WAS IN THE ENGINE. tree_has_emu also
+	 * reads kof_result.emu_unpacked, which a tool uses to know that a tree
+	 * ALREADY came from a run - and the flag behind it,
+	 * kof_scanner.emu_produced, was never set by anything. It was cleared
+	 * per object and read as zero for the life of the object, so a
+	 * PECompact sample the interpreter had just unpacked reported that it
+	 * had not, and this re-ran on it every time. Set now where it means
+	 * something: a child pushed while the machine is live - see kid_push.
+	 *
 	 * Going the other way still reopens: a reader asking for the STATIC
 	 * dump of a tree that came from the interpreter is asking for
 	 * something this tree does not contain.
 	 */
-	if (use_emu ? !tree_has_emu(v) : (v->emu_mode != 0)) {
+	if (dump_needs_rebuild(v, use_emu)) {
 		char keep[KOF_DUMP_PATH_ROOM];
 
 		snprintf(keep, sizeof keep, "%s", v->path);
 		v->emu_mode = use_emu;
 		if (!file_open(v, keep, v->eng))
 			return;         /* file_open left the reason */
+		rebuilt = 1;
 	}
 	/*
 	 * Whatever the dump goes on to say, the reader has just had the tree
@@ -24869,51 +24934,47 @@ static void dump_all(struct view *v, int use_emu)
 		}
 		memcpy(dir + at, "_emu", 5);
 	}
+	/*
+	 * ONE CALL PER OBJECT, AND THE PLACEMENT IS THE ENGINE'S.
+	 *
+	 * This built a tag out of the LIST INDEX - "1", "2.norm" - and wrote
+	 * every object into the dump root as a sibling, so a tree three layers
+	 * deep came out flat and a normalised view sat beside the object it is
+	 * a view of. kofexaminer had a second loop doing the same thing by
+	 * another name. The engine names an object by its whole descent and
+	 * kof_dump_walk asks it; both tools call that and neither lays a tree
+	 * out any more.
+	 */
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
-		const char *into = dir;
 
 		if (o->too_big || !o->buf.n) {
 			skipped++;
 			continue;
 		}
-		if (i) {
-			/* <number>.<label>, or the number alone. The number is
-			 * the identity; the label is there so a directory
-			 * listing reads, and the engine already reduced it to a
-			 * printable basename - so nothing here has to decide
-			 * what to do about a separator or a "..". */
-			const char *lab = strrchr(o->name, ':');
-			char tag[80];
-
-			if (lab && lab[1])
-				snprintf(tag, sizeof tag, "%u.%s", i, lab + 1);
-			else
-				snprintf(tag, sizeof tag, "%u", i);
-			if (!kof_dump_child(dir, tag, o->buf.p, o->buf.n, sub,
-					    sizeof sub, why, sizeof why)) {
-				snprintf(v->act_msg, sizeof v->act_msg,
-					 "Dump stopped: %.120s", why);
-				return;
-			}
-			kids++;
-			into = sub;
-		}
-		if (!kof_dump_object(into, o->buf, o->fmt, &o->ctx, &ds, why,
-				     sizeof why)) {
+		if (!kof_dump_walk(dir, o->name, o->buf, o->fmt, &o->ctx, &ds,
+				   sub, sizeof sub, why, sizeof why)) {
 			snprintf(v->act_msg, sizeof v->act_msg,
 				 "Dump stopped: %.120s", why);
 			return;
 		}
+		if (i)
+			kids++;
 		files += ds.regions;
 		bytes += ds.region_bytes;
 	}
 
+	/*
+	 * AND WHETHER THE TREE WAS THE ONE ON SCREEN, which is the answer to
+	 * the question a reader asks after pressing this twice: the second
+	 * press used to cost a full interpreter run and say nothing about it.
+	 */
 	v->act_ok = 1;
 	snprintf(v->act_msg, sizeof v->act_msg,
-		 "Dumped %u region(s), %llu B, %u recovered -> %.60s%s",
+		 "Dumped %u region(s), %llu B, %u recovered -> %.60s%s%s",
 		 files, (unsigned long long)bytes, kids, base_name(dir),
-		 skipped ? "  (some too large to hold)" : "");
+		 rebuilt ? "  (tree rebuilt)" : "  (tree as shown)",
+		 skipped ? "  some too large to hold" : "");
 }
 
 /*
@@ -32013,6 +32074,7 @@ case K_WHEEL_DOWN:
 
 /* ---- main ----------------------------------------------------------------- */
 
+/* One line a flag - see the note on kofscanner's usage. */
 static void usage(void)
 {
 	fprintf(stderr,
@@ -32021,29 +32083,14 @@ static void usage(void)
 	"  kofviewer [--db <dir>] [--heur 0|1|2] <file|folder>\n"
 	"  kofviewer [--db <dir>] --pid <N>\n"
 	"\n"
-	"  --pid N     open a RUNNING PROCESS instead of a file: its own\n"
-	"              record as the root, the program and every library it\n"
-	"              mapped as objects, and the heap, stack and anonymous\n"
-	"              regions at their addresses.\n"
-	"              A SNAPSHOT - every region is read once, when this\n"
-	"              opens. The process is not stopped, so a region written\n"
-	"              while it was read is torn; nothing here re-reads, so\n"
-	"              what is on screen is what was there at that moment and\n"
-	"              stays that way.\n"
-	"  --db D      load that database. Without it there is one object and\n"
-	"              no markers: unpacking is what modules do, and modules\n"
-	"              live in a database.\n"
-	"  --bases D   the signature source tree, which is also where a drafted\n"
-	"              signature is written. A content root or one of its kind\n"
-	"              directories both work. No default: without it a\n"
-	"              draft can be written but not saved.\n"
-	"  --heur N    0 opens the file WITHOUT separating what it carries:\n"
-	"              the entry table is shown in full instead, one row per\n"
-	"              stream with its kind, name and filter chain, and the\n"
-	"              Analysis menu will separate them when asked. It turns\n"
-	"              the heuristics off too - one flag, the same one\n"
-	"              kofscanner takes. 2 is the default and the most this\n"
-	"              build has.\n");
+	"  --db D      load that database; without it there is one object\n"
+	"              and no markers\n"
+	"  --bases D   the signature source tree, and where a draft is saved\n"
+	"  --pid N     open a RUNNING PROCESS instead of a file, as a snapshot\n"
+	"  --heur N    0 do not separate what a file carries  1 score and\n"
+	"              descend  2 also interpret (default)\n"
+	"\n"
+	"? in the viewer lists the keys.\n");
 }
 
 /*
@@ -32728,6 +32775,12 @@ int main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "--bases") && i + 1 < argc)
 			base = argv[++i];
+		/* Asked for by name, and answered with 0: a reader who typed
+		 * --help did not make a mistake. */
+		else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+			usage();
+			return 0;
+		}
 		else if (argv[i][0] == '-') {
 			usage();
 			return 2;

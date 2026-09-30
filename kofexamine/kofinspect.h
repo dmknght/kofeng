@@ -131,8 +131,13 @@ uint32_t kof_inspect_hex_text(const uint8_t *prog, uint32_t n,
  *         01.<REGION>              one file per region, in offset order
  *         02.<REGION>
  *         LAYOUT                   every extent of every region, in file order
- *         unpacked.1.<label>       a recovered child, whole
- *         unpacked.1.<label>.regions/   and the same treatment applied to it
+ *         <i>/                     a recovered child: its own directory, named
+ *                                  by where the ENGINE put it in the tree, so
+ *                                  a grandchild is <i>/<k>/ and a normalised
+ *                                  view is <i>.norm/ beside its object's
+ *                                  regions. See dump_rel_dir.
+ *         <i>/object               the child's bytes, whole
+ *         <i>/00.KOF_SCAN_ALL ...  and the same treatment applied to it
  *
  * Nothing here prints. Both callers report differently - one to a terminal, one
  * into a status bar - and a printf in here would be one of them borrowing the
@@ -185,16 +190,22 @@ int kof_dump_object(const char *dir, kof_buf buf,
 		    struct kof_dump_stat *st, char *err, uint32_t err_cap);
 
 /*
- * One recovered child, written whole into an existing dump directory, and the
- * directory its own regions go in.
+ * ONE OBJECT OF A SCAN, WRITTEN WHERE THE ENGINE'S TREE SAYS IT BELONGS.
  *
- * `tag` is the caller's name for it - "1.upx", "2" - and becomes
- * unpacked.<tag>. `sub` comes back holding <that>.regions, created and ready to
- * be passed to kof_dump_object; pass NULL for sub_cap 0 to skip making it.
+ * The single entry point both front ends use, called from the engine's
+ * per-object callback. `root` is kof_dump_dir_for's answer for the FILE;
+ * `name` is the engine's name for this object, and its descent is what decides
+ * the sub-directory - see dump_rel_dir, which is where that is worked out.
+ *
+ * Replaces a loop in each tool. See the note beside the definition for what
+ * the two of them disagreed about.
  */
-int kof_dump_child(const char *dir, const char *tag,
-		   const void *bytes, uint64_t len,
-		   char *sub, uint32_t sub_cap, char *err, uint32_t err_cap);
+int kof_dump_walk(const char *root, const char *name, kof_buf buf,
+		  const struct kof_parser *f,
+		  const struct kof_obj_ctx *ctx,
+		  struct kof_dump_stat *st,
+		  char *dir_out, uint32_t dir_cap,
+		  char *err, uint32_t err_cap);
 
 /*
  * Why a module is on the list.

@@ -82,6 +82,19 @@
  * image base, subsystem, and the data directories that still point at something.
  */
 /* A directory a module rebuilt, which overrides whatever `tmpl` had. */
+/*
+ * THE TEMPLATE'S TYPE, NAMED BEFORE IT IS USED.
+ *
+ * kof_pe_write_hdr takes the parent's parse and this header does not include
+ * kofmod/pe.h to get it: a caller that wants the writer may not want the whole
+ * PE vocabulary, and including it here would decide that for them. Declared
+ * instead, which is all a pointer parameter needs - and without it the struct
+ * was declared INSIDE the parameter list, which is a type of its own scoped to
+ * that one declaration, so every caller passed a pointer the compiler could
+ * not check.
+ */
+struct kof_pe_info;
+
 struct kof_dir_decl { uint64_t rva, size; int set; };
 
 struct kof_sec_decl {

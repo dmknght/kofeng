@@ -1233,6 +1233,30 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 			sc->packer_build[q] = 0;
 		}
 	}
+	/*
+	 * AND WHETHER THE INTERPRETER IS WHAT PRODUCED IT.
+	 *
+	 * `emu_produced` is read in three places - the producer's ask, the
+	 * fallback run's gate, and kof_result.emu_unpacked, which is what a
+	 * tool uses to know a tree already came from a run - and NOTHING SET
+	 * IT. It was cleared per object and read as zero for the life of the
+	 * object, every time.
+	 *
+	 * It dates from when the interpreter made children itself. Under the
+	 * object pipeline it does not: a module asks for a run, reads the
+	 * regions and declares what it makes of them - see `emu_run` in
+	 * kofsig.h - so the only thing that knows a child came out of a run is
+	 * the push, while the machine is still live.
+	 *
+	 * What it cost, measured: kofviewer's "dump with emulator" re-ran the
+	 * whole thing on a tree that had already come from a run, because
+	 * emu_unpacked said it had not - 17 seconds and 207 million
+	 * instructions on a PECompact2 sample, for bytes it already had. And
+	 * the two gates that read it were no-ops, so an object whose payload a
+	 * run had already recovered could still be handed to a second one.
+	 */
+	if (sc->emu_live)
+		sc->emu_produced = 1;
 	if (sc->kid_derived_by)
 		sc->kid_derived_by[sc->n_kids] = sc->pend_derived_by;
 	sc->kids[sc->n_kids++] = kid;
