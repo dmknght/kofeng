@@ -111,29 +111,21 @@ static void on_sigint(int sig)
 	g_stop = 1;
 }
 
+/* One line a flag - see the note on kofmontrace's usage. */
 static void usage(void)
 {
-	kof_evt_banner(stderr, "kofwatchman", (uint32_t)KOFENG_BUILD,
-		       "verdicts over a live event stream");
-	fputs("\nusage: kofwatchman [options]\n"
-	      "\n"
-	      "Attaches to a running kofwatchtower and keeps deciding until it\n"
-	      "is stopped. It is the client; the sensor is the server.\n"
-	      "\n"
-	      "  --replay FILE read a log written earlier instead of attaching\n"
-	      "                to a sensor. For analysing after the fact, and\n"
-	      "                for the CI, which has no sensor to attach to.\n"
-	      "  --channel NAME attach to this channel instead of the default\n"
-
-	      "  --db DIR      the signature database (default build/release/databases)\n"
-	      "  --all         print every event, not only the ones that matched\n"
-	      "  --no-scan     do not scan files, only read and count\n"
-	      "\n"
-	      "A live channel and a replay hand over the SAME struct kof_evt in\n"
-	      "the same order, which is what the record format was normalised\n"
-	      "for: a log written on Windows is replayed here by this same\n"
-	      "binary. Ctrl-C to stop - it finishes the log properly.\n",
-	      stderr);
+	fprintf(stderr,
+	"kofwatchman - decide verdicts over a live event stream\n"
+	"\n"
+	"usage: kofwatchman [options]\n"
+	"\n"
+	"  --db DIR       the signature database\n"
+	"  --channel NAME attach to this channel instead of the default\n"
+	"  --replay FILE  read a log written earlier instead of a sensor\n"
+	"  --all          print every event, not only the ones that matched\n"
+	"  --no-scan      do not scan files, only read and count\n"
+	"\n"
+	"Attaches to a running kofwatchtower; Ctrl-C to stop.\n");
 }
 
 /*

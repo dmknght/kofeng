@@ -5827,18 +5827,35 @@ static int label_one(const struct artefact *arts, const uint32_t *member,
 	return at != 0;
 }
 
+/*
+ * EVERY MODE, ONE LINE EACH.
+ *
+ * It listed two of the seven - the default and --extract - so a reader looking
+ * for --tree or --module, which is how this is actually driven, was told the
+ * tool had no such thing. Short is the goal; short and incomplete is a
+ * different failure from long and unreadable, and this had that one.
+ */
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s <artefact-dir> <out-dir>\n"
-		"       %s --extract <signature.c> <out.pat.h> <out.names>"
-		" <out.pre> <out.strs>\n"
+		"ksigbuilder - compile signature sources into a database\n"
 		"\n"
-		"  <artefact-dir>  holds <name>.blob and the .meta, .strs and .names\n"
-		"                  beside each one, as ksigbuilder --module emits them\n"
-		"  --extract       read the declarations out of one signature source;\n"
-		"                  this is what --module calls\n",
-		argv0, argv0);
+		"  %s --tree <bases-dir> <artefact-dir> <out-dir>\n"
+		"                    the whole source tree, in one step\n"
+		"  %s --module <src.c> <artefact-dir>\n"
+		"                    one source to its artefacts\n"
+		"  %s <artefact-dir> <out-dir>\n"
+		"                    artefacts to packs\n"
+		"\n"
+		"  --build           build identification\n"
+		"  --image <linked.elf> <out.blob>    a linked module to a blob\n"
+		"  --object <obj.o> <out.blob>        the same, unlinked\n"
+		"  --extract <signature.c> <out.pat.h> <out.names> <out.pre> <out.strs>\n"
+		"                    the declarations out of one source;\n"
+		"                    what --module calls\n"
+		"  --arch-mask <names>      a KOF_ARCH mask from names\n"
+		"  --subtype-mask <names>   a KOF_SUBTYPE mask from names\n",
+		argv0, argv0, argv0);
 }
 
 /*
@@ -6810,6 +6827,11 @@ static int pack_main(int argc, char **argv)
 	 * which compiler to use - the Makefile, a cross build - says so the same
 	 * way every other C project does.
 	 */
+	if (argc > 1 && (strcmp(argv[1], "--help") == 0 ||
+			 strcmp(argv[1], "-h") == 0)) {
+		usage(argv[0]);
+		return 0;
+	}
 	if (argc > 1 && strcmp(argv[1], "--build") == 0) {
 		const char *entry = NULL;
 
