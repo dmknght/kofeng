@@ -536,8 +536,21 @@ static uint64_t pi_len(const char *s)
  */
 static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 			const struct kof_imp_decl *imp, uint32_t n,
-			const char *pool, uint64_t pool_n)
+			const char *pool, uint64_t pool_n, int is64)
 {
+	/*
+	 * A LOOKUP ENTRY AND A THUNK ARE POINTER SIZED, and on PE32+ that is
+	 * eight bytes with the ordinal flag in bit 63.
+	 *
+	 * Written as four throughout, the table is self-consistent and no
+	 * parser can read it: measured on a PE32+ Go binary, the engine wrote
+	 * 150 entries and its own symbol reader came back with the file's ten
+	 * exports and nothing else, because a reader stepping eight bytes at a
+	 * time through four-byte entries sees the second half of the first
+	 * entry as the whole of the second.
+	 */
+	const uint32_t step = is64 ? 8u : 4u;
+	const uint64_t ord_flag = is64 ? 0x8000000000000000ull : 0x80000000ull;
 	uint32_t i, nmod = 0, nfn = 0;
 	uint64_t strn = 0, ilt, str, w_ilt, w_str;
 	const char *prev = NULL;
@@ -568,7 +581,7 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 	}
 
 	ilt = (uint64_t)(nmod + 1u) * PI_DESC;
-	str = ilt + ((uint64_t)nfn + nmod) * 4u;
+	str = ilt + ((uint64_t)nfn + nmod) * step;
 	if (!img)
 		return str + strn;
 
@@ -593,7 +606,8 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 	 */
 	for (i = 0; i < n; i++)
 		if (imp[i].iat_rva &&
-		    imp[i].iat_rva + 4u > base && imp[i].iat_rva < base + str + strn)
+		    imp[i].iat_rva + step > base &&
+		    imp[i].iat_rva < base + str + strn)
 			return 0;
 	memset(img + base, 0, (size_t)(str + strn));
 
@@ -624,7 +638,7 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 			 * the cursor has to step over it.
 			 */
 			if (prev)
-				w_ilt += 4u;
+				w_ilt += step;
 			desc = base + (uint64_t)nmod * PI_DESC;
 			memcpy(img + base + w_str, d, (size_t)pi_len(d) + 1u);
 			pw_put32(img + desc + 0u,  (uint32_t)(base + w_ilt));
@@ -642,7 +656,7 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 		}
 
 		if (imp[i].ordinal) {
-			ent = 0x80000000u | imp[i].ordinal;
+			ent = ord_flag | imp[i].ordinal;
 		} else {
 			const char *f = pi_str(pool, pool_n, imp[i].fn_off);
 
@@ -655,7 +669,10 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 			       (size_t)pi_len(f) + 1u);
 			w_str += 2u + pi_len(f) + 1u;
 		}
-		pw_put32(img + base + w_ilt, (uint32_t)ent);
+		if (is64)
+			pw_put64(img + base + w_ilt, ent);
+		else
+			pw_put32(img + base + w_ilt, (uint32_t)ent);
 
 		/*
 		 * AND THE SAME VALUE INTO THE THUNK ITSELF.
@@ -671,24 +688,28 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 		 * matched byte for byte, and the one that did not was this
 		 * table.
 		 */
-		if (imp[i].iat_rva && imp[i].iat_rva + 4u <= img_n)
-			pw_put32(img + imp[i].iat_rva, (uint32_t)ent);
-		w_ilt += 4u;
+		if (imp[i].iat_rva && imp[i].iat_rva + step <= img_n) {
+			if (is64)
+				pw_put64(img + imp[i].iat_rva, ent);
+			else
+				pw_put32(img + imp[i].iat_rva, (uint32_t)ent);
+		}
+		w_ilt += step;
 	}
 	return str + strn;
 }
 
 uint64_t kof_pe_imports_size(const struct kof_imp_decl *imp, uint32_t n,
-			     const char *pool, uint64_t pool_n)
+			     const char *pool, uint64_t pool_n, int is64)
 {
-	return pi_walk(NULL, 0, 0, imp, n, pool, pool_n);
+	return pi_walk(NULL, 0, 0, imp, n, pool, pool_n, is64);
 }
 
 uint64_t kof_pe_write_imports(uint8_t *img, uint64_t img_n, uint64_t base,
 			      const struct kof_imp_decl *imp, uint32_t n,
-			      const char *pool, uint64_t pool_n)
+			      const char *pool, uint64_t pool_n, int is64)
 {
 	if (!img)
 		return 0;
-	return pi_walk(img, img_n, base, imp, n, pool, pool_n);
+	return pi_walk(img, img_n, base, imp, n, pool, pool_n, is64);
 }

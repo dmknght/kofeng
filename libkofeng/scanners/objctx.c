@@ -882,6 +882,29 @@ static void mod_name_of(const char *src, char *out, size_t cap)
 	out[n] = 0;
 }
 
+/*
+ * HOW WIDE THE CHILD IS, which decides the size of a lookup entry and of a
+ * thunk - see kof_pe_write_imports.
+ *
+ * What the module said with kunp_rcstruct_as beats what the parent is, for the
+ * reason the header writer gives: a 64-bit payload is routinely carried by a
+ * 32-bit container, and nothing else in the child would say so.
+ */
+static int child_is64(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_pe_info *tmpl;
+
+	if (sc && sc->pend_as_fmt == KOF_FMT_PE) {
+		if (sc->pend_as_arch == KOF_ARCH_X86_64)
+			return 1;
+		if (sc->pend_as_arch == KOF_ARCH_X86)
+			return 0;
+	}
+	tmpl = (const struct kof_pe_info *)ctx->file_header;
+	return tmpl && tmpl->valid && tmpl->pe32_plus;
+}
+
 static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 {
 	if (!kid) {
@@ -3285,7 +3308,8 @@ static int c_child(const struct kof_obj_ctx *ctx)
 							  sc->pend_imp,
 							  sc->n_pend_imp,
 							  sc->imp_pool,
-							  sc->imp_pool_n);
+							  sc->imp_pool_n,
+							  child_is64(ctx));
 
 			if (n && sc->pend_imp_at < span &&
 			    KOF_PE_DIR_IMPORT < 16u) {
@@ -3925,15 +3949,69 @@ static uint64_t c_import_bytes(const struct kof_obj_ctx *ctx)
 	if (!sc || !sc->n_pend_imp)
 		return 0;
 	return kof_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
-				   sc->imp_pool, sc->imp_pool_n);
+				   sc->imp_pool, sc->imp_pool_n,
+				   child_is64(ctx));
 }
 
+/*
+ * WHERE THE TABLE GOES, AND THE ROOM FOR IT, WHICH IS ONE ACT AND NOT TWO.
+ *
+ * A module says "put it here" and the engine writes it when the child closes -
+ * but the child's buffer was sized before any of this was knowable, from the
+ * sections declared to c_image, and the table does not fit in it.
+ *
+ * Measured on 445.exe: the payload is cut back to where the image ends by
+ * layout_of_produced, leaving about 2.7 KB of the allocation spare, and the
+ * table for its 349 imports needs about 7.8 KB. Asking the module to reserve
+ * the room itself is not possible - it cannot know the size until it has
+ * declared every import, and by then the buffer exists.
+ *
+ * So the reservation happens here, where both facts are in hand: the engine
+ * computed the size and the engine owns the buffer. It is a bounded, one-time
+ * growth for a table the engine is about to write, charged to the same budget
+ * as everything else, and refused by the same ceilings.
+ */
 static int c_import_at(const struct kof_obj_ctx *ctx, uint64_t rva)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint64_t need, end;
 
-	if (!sc || !sc->n_pend_imp)
+	if (!sc || !sc->n_pend_imp || !sc->sink_fixed || !sc->sink_mem)
 		return 0;
+	need = kof_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
+				   sc->imp_pool, sc->imp_pool_n,
+				   child_is64(ctx));
+	if (!need)
+		return 0;
+	end = rva + need;
+	if (end < rva)
+		return 0;
+	if (end > sc->sink_cap) {
+		uint64_t add = end - sc->sink_cap;
+		uint8_t *mem;
+
+		if (end > sc->obj_cap || add > sc->budget ||
+		    sc->resident > sc->resident_max ||
+		    add > sc->resident_max - sc->resident) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+		mem = realloc(sc->sink_mem, (size_t)end);
+		if (!mem) {
+			scan_broken(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+		/* The tail has never been written and must not be whatever the
+		 * allocator had there: the table does not fill it exactly and
+		 * the rest goes into the child. */
+		memset(mem + sc->sink_cap, 0, (size_t)add);
+		sc->sink_mem = mem;
+		sc->sink_cap = (size_t)end;
+		sc->budget -= add;
+		scan_charge(sc, add);
+	}
+	if (end > sc->sink_len)
+		sc->sink_len = (size_t)end;
 	sc->pend_imp_at = rva;
 	sc->pend_imp_set = 1;
 	return 1;

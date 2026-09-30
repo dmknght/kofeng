@@ -290,6 +290,13 @@ sources this engine took structure from, under the MIT terms above:
     DOS/PE header signatures `MZfarbrausch` / `MZconspiracy`. Rewritten as
     `struct eps_row` tables; the byte patterns are the same facts about those
     builds.
+  - UPX's PE IMPORT FORMAT, from `xupx.cpp`: the payload's trailer - its last
+    four bytes are the trailer's own offset, and the trailer holds the original
+    NT headers, the original section headers and then where the compact import
+    list is - and the list's own encoding, whose library names are offsets into
+    the PACKED file's import directory rather than into anything decompressed.
+    `upx_imports` in `bases/unp/upx_pe.c` reads it; the declaration it turns
+    into is this engine's own.
   - PETITE'S COMPRESSION LEVEL, from `_detect` in `xpetite.cpp`: the entry
     point is `mov eax, imm32` and the immediate is imageBase plus the
     VirtualAddress of the section holding the loader, which Petite puts LAST at

@@ -55,6 +55,10 @@
 
 static uint64_t rng_state = 1;
 static uint64_t failures, rounds_done, refused, wrote;
+/* PE32 and PE32+ alike: a lookup entry is pointer sized, and writing four
+ * bytes where eight are read is a table no parser can walk. */
+static int is64;
+static uint32_t step;
 
 static uint64_t rnd(void)
 {
@@ -132,6 +136,15 @@ static struct kof_imp_decl imp[MAX_IMP];
  * Returns 0 and complains on the first disagreement. `n` is how many
  * declarations went in; every one of them has to come back, in order.
  */
+static uint64_t rdptr(const uint8_t *p)
+{
+	uint64_t v = rd32(p);
+
+	if (is64)
+		v |= (uint64_t)rd32(p + 4) << 32;
+	return v;
+}
+
 static int verify(uint64_t r, uint64_t base, uint64_t size, uint32_t n)
 {
 	uint32_t i = 0, d = 0;
@@ -174,14 +187,14 @@ static int verify(uint64_t r, uint64_t base, uint64_t size, uint32_t n)
 		}
 
 		for (k = 0; ; k++) {
-			uint64_t at = (uint64_t)olt + (uint64_t)k * 4u;
-			uint32_t ent;
+			uint64_t at = (uint64_t)olt + (uint64_t)k * step;
+			uint64_t ent;
 
-			if (at + 4u > IMG_N) {
+			if (at + step > IMG_N) {
 				fail(r, "a lookup entry lies outside the image");
 				return 0;
 			}
-			ent = rd32(img + at);
+			ent = rdptr(img + at);
 			if (!ent)
 				break;                  /* end of this run */
 			if (i >= n) {
@@ -194,18 +207,21 @@ static int verify(uint64_t r, uint64_t base, uint64_t size, uint32_t n)
 				return 0;
 			}
 			if (imp[i].ordinal) {
-				if (ent != (0x80000000u | imp[i].ordinal)) {
+				if (ent != ((is64 ? 0x8000000000000000ull
+						   : 0x80000000ull) |
+					    imp[i].ordinal)) {
 					fail(r, "an ordinal came back wrong");
 					return 0;
 				}
 			} else {
-				if (ent & 0x80000000u) {
+				if (ent & (is64 ? 0x8000000000000000ull
+						: 0x80000000ull)) {
 					fail(r, "a by-name import came back "
 					        "as an ordinal");
 					return 0;
 				}
 				if (ent + 2u >= IMG_N ||
-				    strcmp((const char *)img + ent + 2u,
+				    strcmp((const char *)img + (size_t)ent + 2u,
 					   pool + imp[i].fn_off) != 0) {
 					fail(r, "a function name came back "
 					        "wrong");
@@ -221,7 +237,7 @@ static int verify(uint64_t r, uint64_t base, uint64_t size, uint32_t n)
 			 */
 			if (imp[i].iat_rva) {
 				if (imp[i].iat_rva !=
-				    (uint64_t)ft + (uint64_t)k * 4u) {
+				    (uint64_t)ft + (uint64_t)k * step) {
 					fail(r, "a slot is not FirstThunk plus "
 					        "its index");
 					return 0;
@@ -250,14 +266,14 @@ static int verify(uint64_t r, uint64_t base, uint64_t size, uint32_t n)
 				 */
 				for (q = i + 1u; q < n; q++)
 					if (imp[q].iat_rva &&
-					    imp[q].iat_rva < imp[i].iat_rva + 4u &&
-					    imp[i].iat_rva < imp[q].iat_rva + 4u) {
+					    imp[q].iat_rva < imp[i].iat_rva + step &&
+					    imp[i].iat_rva < imp[q].iat_rva + step) {
 						overwritten = 1;
 						break;
 					}
 				if (!overwritten &&
-				    imp[i].iat_rva + 4u <= IMG_N &&
-				    rd32(img + imp[i].iat_rva) != ent) {
+				    imp[i].iat_rva + step <= IMG_N &&
+				    rdptr(img + imp[i].iat_rva) != ent) {
 					fail(r, "a thunk was not filled with "
 					        "its lookup entry");
 					return 0;
@@ -286,6 +302,8 @@ static void one(uint64_t r)
 	int valid = 1;
 
 	pool_build();
+	is64 = (rnd() % 2u) != 0;
+	step = is64 ? 8u : 4u;
 
 	n = 1u + (uint32_t)(rnd() % MAX_IMP);
 	base = (rnd() % (IMG_N / 2u)) & ~(uint64_t)3u;
@@ -348,7 +366,7 @@ static void one(uint64_t r)
 				run_at = imp[i].iat_rva;
 				run_k = 0;
 			}
-			imp[i].iat_rva = run_at ? run_at + run_k * 4u : 0u;
+			imp[i].iat_rva = run_at ? run_at + run_k * step : 0u;
 			run_k++;
 		}
 	}
@@ -356,8 +374,9 @@ static void one(uint64_t r)
 	memset(img, MARKER, IMG_N);
 	memcpy(copy, img, IMG_N);
 
-	size = kof_pe_imports_size(imp, n, pool, pool_n);
-	got = kof_pe_write_imports(img, IMG_N, base, imp, n, pool, pool_n);
+	size = kof_pe_imports_size(imp, n, pool, pool_n, is64);
+	got = kof_pe_write_imports(img, IMG_N, base, imp, n, pool, pool_n,
+				   is64);
 	rounds_done++;
 
 	if (size && got && size != got) {
@@ -392,7 +411,7 @@ static void one(uint64_t r)
 
 			for (i = 0; i < n; i++)
 				if (imp[i].iat_rva && k >= imp[i].iat_rva &&
-				    k < imp[i].iat_rva + 4u) {
+				    k < imp[i].iat_rva + step) {
 					is_slot = 1;
 					break;
 				}

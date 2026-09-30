@@ -140,7 +140,7 @@ struct kof_imp_decl {
  * to reserve the room - see import_bytes in kofsig.h.
  */
 uint64_t kof_pe_imports_size(const struct kof_imp_decl *imp, uint32_t n,
-			     const char *pool, uint64_t pool_n);
+			     const char *pool, uint64_t pool_n, int is64);
 
 /*
  * Write it into `img` - the WHOLE child image, addressed by RVA, because the
@@ -152,7 +152,7 @@ uint64_t kof_pe_imports_size(const struct kof_imp_decl *imp, uint32_t n,
  */
 uint64_t kof_pe_write_imports(uint8_t *img, uint64_t img_n, uint64_t base,
 			      const struct kof_imp_decl *imp, uint32_t n,
-			      const char *pool, uint64_t pool_n);
+			      const char *pool, uint64_t pool_n, int is64);
 
 
 #endif /* KOFENG_PE_REBUILD_H */

@@ -82,22 +82,38 @@ struct asp_shape {
 	uint16_t compb;      /* the stub's copy of the decoder table */
 	uint16_t mark;       /* the call/jmp filter's marker byte */
 	uint16_t oep;        /* the original entry point, as an RVA */
+	/*
+	 * WHERE THE PROGRAM'S OWN IMPORT DIRECTORY IS, as an RVA, or 0 for a
+	 * row where it has not been measured.
+	 *
+	 * Not in XVolkolak's table - its ASPack unpacker recovers no imports
+	 * at all - and found here the way that table was built, by looking for
+	 * a known value at a fixed distance from the stub's base. The original
+	 * directory RVA was recovered from the decompressed image of two
+	 * samples by walking for a descriptor array, then searched for in
+	 * their stubs: both hold it at nEp + 0x265, and the third sample's
+	 * dword there points at a descriptor array too. The two files this
+	 * module rejects hold 0x22943d83 and 0x30081357 there, which is what
+	 * that offset means in something that is not this stub.
+	 */
+	uint16_t imp;
 	char     name[24];
 };
 
 static const struct asp_shape asp_shapes[] = {
 	{ { 0x60,0xe8,0x03,0x00,0x00,0x00,0xe9,0xeb }, 8,
-	  0x3b9, 0x57c,  8, 0x70e, 0x6d6, 0x148, 0x39b, "PE:ASPack 2.12" },
+	  0x3b9, 0x57c,  8, 0x70e, 0x6d6, 0x148, 0x39b, 0, "PE:ASPack 2.12" },
 	{ { 0x60,0xe8,0x03,0x00,0x00,0x00,0xe9,0xeb }, 8,
-	  0x414, 0x5d0, 12, 0x6ca, 0x692, 0x145, 0x3f6, "PE:ASPack 2.2" },
+	  0x414, 0x5d0, 12, 0x6ca, 0x692, 0x145, 0x3f6, 0, "PE:ASPack 2.2" },
 	{ { 0x60,0xe8,0x03,0x00,0x00,0x00,0xe9,0xeb }, 8,
-	  0x41f, 0x5d8, 12, 0x76a, 0x732, 0x13a, 0x401, "PE:ASPack 2.12-2.42" },
+	  0x41f, 0x5d8, 12, 0x76a, 0x732, 0x13a, 0x401, 0x265,
+	  "PE:ASPack 2.12-2.42" },
 	{ { 0x60,0xe8,0x03,0x00,0x00,0x00,0xe9,0xeb }, 8,
-	  0x42b, 0x5e4, 12, 0x776, 0x73e, 0x148, 0x40d, "PE:ASPack 2.42" },
+	  0x42b, 0x5e4, 12, 0x776, 0x73e, 0x148, 0x40d, 0, "PE:ASPack 2.42" },
 	{ { 0x60,0xe8,0x70,0x05,0x00,0x00,0xeb,0x00 }, 7,
-	  0x4fb, 0x0de,  8, 0x623, 0x5eb, 0x292, 0x0d2, "PE:ASPack 2.00" },
+	  0x4fb, 0x0de,  8, 0x623, 0x5eb, 0x292, 0x0d2, 0, "PE:ASPack 2.00" },
 	{ { 0x60,0xe8,0x72,0x05,0x00,0x00,0xeb,0x00 }, 7,
-	  0x4fd, 0x0de,  8, 0x625, 0x5ed, 0x294, 0x0d2, "PE:ASPack 2.01" }
+	  0x4fd, 0x0de,  8, 0x625, 0x5ed, 0x294, 0x0d2, 0, "PE:ASPack 2.01" }
 };
 
 #define ASP_SHAPES  (sizeof asp_shapes / sizeof asp_shapes[0])
@@ -108,6 +124,8 @@ static const struct asp_shape asp_shapes[] = {
 #define ASP_MAX_BLK 64u
 /* What the stub writes at `blocks + 4` for a section it does not compress. */
 #define ASP_BLK_SKIP 0xfffffef2u
+/* A descriptor array longer than this is not one. */
+#define ASP_MAX_DESC 256u
 
 /* One stub byte, by its distance from the entry point minus one. */
 static uint32_t asp_u8(const struct kof_obj_ctx *ctx, uint64_t stub, uint32_t at)
@@ -316,5 +334,70 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 	if (!made)
 		return;
+
+	/*
+	 * ---- AND THE IMPORTS, WHICH WERE NEVER TAKEN APART -----------------
+	 *
+	 * ASPack compresses the whole image, INCLUDING the import directory,
+	 * and rebuilds nothing: the descriptors, the lookup tables and the name
+	 * strings all come back out of the blocks exactly as the linker wrote
+	 * them. What it does is repoint the PE header's directory at a little
+	 * table of its own - one thunk per library, which is all its loader
+	 * needs to call LoadLibrary - and keep the real address in its stub.
+	 *
+	 * So there is nothing to declare entry by entry here. The table is
+	 * already in the child; only the pointer to it is missing, and the
+	 * stub has it. Measured on the three samples: 375, 44 and 576 imports
+	 * come back, against 0 before this.
+	 *
+	 * The size is worked out by WALKING to the terminator rather than
+	 * taken from anywhere, because nothing states it - and walking is also
+	 * what checks the address: a row whose offset is wrong points at bytes
+	 * that do not end in a null descriptor.
+	 */
+	if (sh->imp) {
+		uint64_t irva = asp_u32(ctx, stub + sh->imp);
+		uint32_t d = 0;
+
+		if (irva >= pe->size_of_image)
+			irva = 0;
+		while (irva && d < ASP_MAX_DESC) {
+			uint8_t b[20];
+			uint32_t q, zero = 1, nm;
+
+			if (kunp_rcstruct_read(irva + (uint64_t)d * 20u, b,
+					       20u) != 20u)
+				break;
+			for (q = 0; q < 20u; q++)
+				if (b[q]) {
+					zero = 0;
+					break;
+				}
+			if (zero)
+				break;                 /* the terminator */
+			nm = (uint32_t)b[12] | ((uint32_t)b[13] << 8) |
+			     ((uint32_t)b[14] << 16) | ((uint32_t)b[15] << 24);
+			/*
+			 * A DESCRIPTOR NAMES A LIBRARY, and the first byte of
+			 * that name is printable. One cheap check, and it is
+			 * the one that tells a real array from whatever a
+			 * wrong offset pointed at.
+			 */
+			{
+				uint8_t c = 0;
+
+				if (!nm || nm >= pe->size_of_image ||
+				    kunp_rcstruct_read(nm, &c, 1u) != 1u ||
+				    c < 0x21u || c > 0x7eu)
+					break;
+			}
+			d++;
+		}
+		kof_debug("ASPack.PE.imp_desc", d);
+		if (d)
+			kunp_rcstruct_dir(KOF_PE_DIR_IMPORT, irva,
+					  ((uint64_t)d + 1u) * 20u);
+	}
+
 	kunp_rcstruct_done();
 }
