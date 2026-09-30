@@ -489,6 +489,26 @@ struct kof_scanner {
 	int                       pend_image;
 
 	/*
+	 * WHAT THE CHILD IMPORTS, as the producer declared it - see `import`
+	 * in kofsig.h, and kof_pe_write_imports, which turns this into a real
+	 * directory when the child closes.
+	 *
+	 * HELD HERE RATHER THAN WRITTEN AS IT ARRIVES, for the reason the
+	 * sections are: a module may keep declaring until it closes the child,
+	 * and the table's own size is not known until the last one is in. The
+	 * pool is one blob because the strings are short and the count is
+	 * bounded - 32 libraries and 512 functions is what the one module
+	 * doing this meets, and a per-entry allocation for a name that averages
+	 * fifteen bytes would cost more in bookkeeping than in text.
+	 */
+	struct kof_imp_decl      *pend_imp;
+	uint32_t                  n_pend_imp;
+	char                     *imp_pool;
+	uint32_t                  imp_pool_n;
+	uint64_t                  pend_imp_at;
+	int                       pend_imp_set;
+
+	/*
 	 * WHAT A RUN LEFT BEHIND, HELD RATHER THAN HANDED OVER.
 	 *
 	 * The interpreter is not a producer. It gathers, and a MODULE decides

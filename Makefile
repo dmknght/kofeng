@@ -961,6 +961,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/extractors/unpack/elf_rebuild.c \
            libkofeng/extractors/decomp/decomp.c \
            libkofeng/extractors/decomp/aplib.c \
+           libkofeng/extractors/decomp/aspack.c \
            libkofeng/extractors/decomp/lzmat.c \
            libkofeng/extractors/decomp/inflate.c \
            libkofeng/extractors/decomp/textcode.c \
@@ -1140,7 +1141,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofoverlord.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
-           $(SDK)/include/kofmod/wrap.h \
+           $(SDK)/include/kofmod/aspack_tab.h \
            $(SDK)/include/kofmod/elf.h \
            $(SDK)/include/kofmod/pe.h \
            $(SDK)/include/kofmod/gzip.h \
@@ -1165,9 +1166,11 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/script.h \
            $(SDK)/include/kofanalyze/scfind.h \
            $(SDK)/include/kofanalyze/msf_pe.h \
+           $(SDK)/include/kofanalyze/msf_elf64.h \
            $(SDK)/include/kofanalyze/msf_elf32.h \
            $(SDK)/include/kofunpack/pe_reassemble.h \
-           $(SDK)/include/kofunpack/emu_harvest.h
+           $(SDK)/include/kofunpack/emu_harvest.h \
+           $(SDK)/include/kofunpack/ep_shape.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
 	@$(call MKDIR,$(dir $@))

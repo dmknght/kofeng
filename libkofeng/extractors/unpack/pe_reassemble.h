@@ -46,22 +46,18 @@
 #define PEI_CHUNK   0x200u
 #define PEI_PAGE 0x1000u
 
-static void __attribute__((unused)) pei_put16(uint8_t *p, unsigned v)
-{
-	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
-}
-
-static void pei_put32(uint8_t *p, uint32_t v)
-{
-	p[0] = (uint8_t)v;         p[1] = (uint8_t)(v >> 8);
-	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-}
-
-static void __attribute__((unused)) pei_put64(uint8_t *p, uint64_t v)
-{
-	pei_put32(p, (uint32_t)v);
-	pei_put32(p + 4, (uint32_t)(v >> 32));
-}
+/*
+ * THE BYTE POKERS THAT USED TO BE HERE ARE GONE - pei_put16, pei_put32 and
+ * pei_put64. They existed so a module could assemble PE structures: a header
+ * first, and after that stopped, an import directory. Both are declarations
+ * now - see kof_pe_write_hdr and `import` in kofsig.h - and nothing in this
+ * tree builds a PE structure by hand any more.
+ *
+ * Removed rather than left for the next caller, which is the point: a header
+ * that still offered them would be an invitation to encode something, and the
+ * one rule the object pipeline has is that a module says what it found and the
+ * engine writes the file.
+ */
 
 /* How many bytes a section occupies in the reassembled image. */
 static uint64_t __attribute__((unused)) pei_span(const struct kof_pe_sec *s)

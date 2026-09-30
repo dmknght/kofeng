@@ -248,7 +248,8 @@ static void ew16(uint8_t *p, uint16_t v)
 uint64_t kof_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 			   uint16_t machine, uint64_t base,
 			   const struct kof_sec_decl *sec, uint32_t n,
-			   uint64_t entry_rva, uint64_t image_end)
+			   uint64_t entry_rva, int has_entry,
+			   uint64_t image_end)
 {
 	const uint64_t eh = is64 ? 64u : 52u;
 	const uint64_t ph = is64 ? 56u : 32u;
@@ -282,18 +283,36 @@ uint64_t kof_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 	out[4] = (uint8_t)(is64 ? 2 : 1);        /* EI_CLASS   */
 	out[5] = 1;                              /* ELFDATA2LSB */
 	out[6] = 1;                              /* EV_CURRENT  */
-	ew16(out + 0x10, 2);                     /* ET_EXEC     */
+	/*
+	 * ET_EXEC ONLY WHEN THE PRODUCER SAID WHERE EXECUTION STARTS.
+	 *
+	 * It was unconditionally ET_EXEC, and that made it impossible to
+	 * DECLARE the one thing a carved blob honestly is: bytes lifted out of
+	 * a loader's variable, which have no entry point because nothing ever
+	 * jumped to their first byte. Expressed as ET_EXEC with e_entry 0 the
+	 * parser raises KOF_ELF_ANOM_ENTRY_ZERO - correctly, that combination
+	 * is nonsense - so the engine would have flagged its own
+	 * reconstruction, and a module that wanted to avoid it had to write
+	 * the header itself. bases/unp/scpayload_00.c did exactly that.
+	 *
+	 * ET_DYN is not a workaround for the anomaly; it is what the object is.
+	 * The parser's own note says why nothing fires on it: measured over
+	 * /usr/bin and /usr/lib, 535 of 1316 objects are shared libraries with
+	 * a legitimately zero e_entry, so a zero entry is only anomalous where
+	 * the type promises one.
+	 */
+	ew16(out + 0x10, (uint16_t)(has_entry ? 2 : 3));  /* ET_EXEC/ET_DYN */
 	ew16(out + 0x12, machine);
 	ew32(out + 0x14, 1);                     /* e_version   */
 
 	if (is64) {
-		ew64(out + 0x18, base + entry_rva);
+		ew64(out + 0x18, has_entry ? base + entry_rva : 0);
 		ew64(out + 0x20, eh);                /* e_phoff     */
 		ew16(out + 0x34, (uint16_t)eh);      /* e_ehsize    */
 		ew16(out + 0x36, (uint16_t)ph);      /* e_phentsize */
 		ew16(out + 0x38, 1);                 /* e_phnum     */
 	} else {
-		ew32(out + 0x18, (uint32_t)(base + entry_rva));
+		ew32(out + 0x18, (uint32_t)(has_entry ? base + entry_rva : 0));
 		ew32(out + 0x1c, (uint32_t)eh);
 		ew16(out + 0x28, (uint16_t)eh);
 		ew16(out + 0x2a, (uint16_t)ph);

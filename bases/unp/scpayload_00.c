@@ -14,15 +14,52 @@
  *
  * THE PAYLOAD IS WRAPPED, not emitted bare. A blob is not a file: every rule
  * declares a format and scopes itself to a region, so bare bytes are offered to
- * no module and come back "no module targets this format". kof_wrap_elf builds
- * the minimal container that makes the payload reachable, and puts it in a
- * writable non-executable segment so it lands in region DATA - the same region
- * it occupies inside the loader, so ONE DATA-scoped signature reaches both.
- * That last point is the reason for the whole file: a signature written for the
- * payload in the parent needs no second signature for the payload here.
+ * no module and come back "no module targets this format". The container is
+ * what makes the payload reachable.
+ *
+ *
+ * WHAT THE CONTAINER HAS TO BE, and every one of these was paid for once:
+ *
+ *   - A WRITABLE, NON-EXECUTABLE SEGMENT, so the payload lands in region DATA.
+ *     In the PARENT it is in .data, so region DATA, and one DATA-scoped rule
+ *     then reaches both - the un-encoded payload sitting in the loader's
+ *     variable, and the decoded payload here. Nine of twelve samples measured
+ *     are already matchable in the parent that way, with no reconstruction at
+ *     all, and the point is that the SAME rule does both.
+ *   - NO ENTRY POINT. An entry point inside a non-executable segment raises
+ *     KOF_ELF_ANOM_ENTRY_NOT_EXEC, which kof_emu_unp_gate reads as
+ *     "unloadable" and would hand every reconstructed child to the interpreter
+ *     for nothing. A blob lifted out of a variable HAS no entry point; nothing
+ *     ever jumped to its first byte.
+ *   - AND THEREFORE ET_DYN. ET_EXEC with e_entry 0 is a contradiction the
+ *     parser objects to, correctly, with KOF_ELF_ANOM_ENTRY_ZERO.
+ *   - NOT AN RWX SEGMENT WITH THE ENTRY ON IT. That shape lands the payload in
+ *     CODE and is byte for byte what bases/heur/shellcode_00.c looks for - no
+ *     section table, one program header, one executable PT_LOAD that is the
+ *     whole file. Measured: the engine flagged its own reconstruction as an
+ *     msfvenom template.
+ *   - THE WIDTH FOLLOWS THE PAYLOAD, not the parent. A 64-bit loader routinely
+ *     carries 32-bit shellcode, so taking the parent's class would disassemble
+ *     an x86 stub as amd64 - and the architecture is a precondition every
+ *     signature is filtered by.
+ *
+ *
+ * IT USED TO BUILD THAT HEADER ITSELF, through kof_wrap_elf, and it was the
+ * last module in the tree still doing so. The header was handed over with
+ * kunp_rcstruct_write like any other content, which is the round trip the
+ * declaration mechanism exists to end: nothing in the engine knew those bytes
+ * were a header, so the child's first 0x78 were content like the rest and the
+ * layout this module knew exactly had to be recovered by parsing back what
+ * this module had just written.
+ *
+ * WHAT HELD IT UP was the second bullet above. The engine's ELF writer wrote
+ * ET_EXEC unconditionally, so "no entry point" was not expressible as a
+ * declaration at all and a module that needed it had no choice but to write
+ * its own bytes. The writer now takes ET_DYN when nothing declared an entry;
+ * see the note beside it in elf_rebuild.c. Every property in the list above is
+ * now said rather than assembled, and the bytes are the same.
  */
 #include <kofmod/kofsig.h>
-#include <kofmod/wrap.h>
 #include <kofanalyze/scfind.h>
 
 /*
@@ -38,9 +75,8 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_DEFINE_UNPACK
 {
 	uint8_t dec[SCL_SIZE_MAX];
-	uint8_t hdr[KOF_WRAP_ELF_MAX];
 	struct scf_hit h;
-	uint32_t hn, len, done = 0;
+	uint32_t len, done = 0, hdr;
 
 	if (!scf_find(ctx, &h, dec, sizeof dec))
 		return;
@@ -53,16 +89,24 @@ KOF_DEFINE_UNPACK
 	if (!len || len > SCL_SIZE_MAX)
 		return;
 
-	/*
-	 * THE WIDTH FOLLOWS THE PAYLOAD, and 64 only where nothing said
-	 * otherwise. A 64-bit loader routinely carries 32-bit shellcode, so
-	 * taking the parent's class would disassemble an x86 stub as amd64 and
-	 * name the object's architecture wrongly - and the architecture is a
-	 * precondition every signature is filtered by.
-	 */
-	hn = kof_wrap_elf(hdr, len, h.bits ? h.bits : 64u);
-	if (!kunp_rcstruct_write(hdr, hn))
+	hdr = (h.bits == 32u) ? KUNP_HDR_ELF32 : KUNP_HDR_ELF64;
+	if (kunp_rcstruct_section(".data", hdr, len,
+				  KUNP_PERM_R | KUNP_PERM_W,
+				  KOF_SECF_DATA | KOF_SECF_REBUILT) < 0)
 		return;
+	/*
+	 * Base zero, which is not a default but the answer. These bytes were
+	 * never loaded anywhere: they sat in a variable inside another program,
+	 * and any address put on them here would be invented.
+	 *
+	 * No kunp_rcstruct_entry, which is what makes this ET_DYN - see the
+	 * list at the top.
+	 */
+	kunp_rcstruct_as(KOF_FMT_ELF,
+			 h.bits == 32u ? KOF_ARCH_X86 : KOF_ARCH_X86_64, 0);
+	if (!kunp_rcstruct_image() || !kunp_rcstruct_at(hdr))
+		return;
+
 	/*
 	 * Copied a window at a time rather than in one call: kof_u8 is the only
 	 * way to read the object, and the engine may stop accepting at any

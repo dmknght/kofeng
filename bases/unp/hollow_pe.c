@@ -120,6 +120,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * cannot rebuild - and the only thing it can do about it is refuse to
 	 * let the scan end in silence. UNSUPPORTED and not DAMAGED: the file is
 	 * intact and well formed, and it is this engine that falls short.
+	 *
+	 * UNLESS SOMETHING ELSE ALREADY OPENED IT, which is what this shape
+	 * looks like from the outside for every packer there is: one dense
+	 * executable section and nothing else with bytes in it. Measured on the
+	 * Petite sample - petite_pe.c recovered the image and the report still
+	 * read "2 object(s) - not all of it: Unsupported by this build",
+	 * because this module had said its piece about the same object. A
+	 * last-resort finding that outlives the resort is not a finding.
 	 */
+	if (kunp_opened_already())
+		return;
 	KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
 }

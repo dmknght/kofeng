@@ -170,6 +170,8 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->sym);
 	free(sc->pend_syms);
 	free(sc->pend_sec);
+	free(sc->pend_imp);
+	free(sc->imp_pool);
 	free(sc->sym_ext[0]);
 	free(sc->sym_ext[1]);
 	free(sc);

@@ -407,24 +407,42 @@ static uint32_t mp_str_at(const struct kof_obj_ctx *ctx, uint64_t off,
 }
 
 /*
- * Walk the hint list. With `img` NULL this only counts; with it, the directory
- * is written at `base`. Returns the bytes the directory needs, or 0.
+ * WALK THE HINT LIST AND SAY WHAT IT MEANS.
+ *
+ * MPRESS keeps no import table. It keeps a hint list, and the loader builds the
+ * table from it at run time: per library a signed delta to where that library's
+ * IAT slots begin, the library's name, then its functions - a NUL-terminated
+ * name, or a marker byte under 0x21 followed by a two-byte ordinal - and -1
+ * where the libraries end.
+ *
+ * Every fact a symbol needs is therefore in hand here, and this used to ENCODE
+ * them: two passes, one to size an IMAGE_IMPORT_DESCRIPTOR array with its
+ * lookup table and string pool, one to write all three into a buffer, plus a
+ * poke per thunk to fill the IAT the stub would have filled. The engine then
+ * parsed that table back to recover the names this function had just read out
+ * of the file. See `import` in kofsig.h, which is where that round trip is
+ * described and where it ends.
+ *
+ * Now it declares, and one pass is enough: the sizing pass existed only to
+ * measure an encoding that no longer happens here.
+ *
+ * `iat_lo` and `iat_hi` are still worked out, and not for the directory - they
+ * are two of the landmarks mp_split cuts the image on, because the IAT is a
+ * boundary between what the program executes and what it reads.
+ *
+ * Returns the number of entries declared, or 0.
  */
 static uint32_t mp_imports(const struct kof_obj_ctx *ctx,
 			   const struct kof_pe_info *pe, uint32_t found,
-			   uint32_t hints_rva, uint32_t base,
-			   uint8_t *img, uint32_t cap,
+			   uint32_t hints_rva,
 			   uint32_t *iat_lo, uint32_t *iat_hi)
 {
 	uint64_t sect = pe->sec[found].mem_rva;
 	uint32_t lim = (uint32_t)pe->sec[found].mem_size;
 	uint32_t rp = hints_rva, dest = (uint32_t)sect + hints_rva;
-	uint32_t nmod = 0, nfn = 0, strn = 0, m;
-	uint32_t ilt_at, str_at, w_ilt, w_str;
-	char nm[MP_IMP_NAME];
-	uint8_t f4[4];
+	uint32_t nfn = 0, m;
+	char dll[MP_IMP_NAME], fn[MP_IMP_NAME];
 
-	/* ---- pass one: how many, and how much text ---- */
 	for (m = 0; m < MP_IMP_MAX_MOD; m++) {
 		uint8_t raw[4];
 		int32_t diff;
@@ -439,26 +457,45 @@ static uint32_t mp_imports(const struct kof_obj_ctx *ctx,
 			break;
 		dest += (uint32_t)diff;
 		rp += 4u;
-		len = mp_str_at(ctx, sect + rp, nm, MP_IMP_NAME);
+		len = mp_str_at(ctx, sect + rp, dll, MP_IMP_NAME);
 		if (len >= MP_IMP_NAME || !len)
 			return 0;
-		strn += len + 1u;
 		rp += len + 1u;
+
 		for (;;) {
 			uint8_t b = 0;
 
-			if (rp >= lim || kunp_rcstruct_read(sect + rp, &b, 1u) != 1u)
+			if (rp >= lim ||
+			    kunp_rcstruct_read(sect + rp, &b, 1u) != 1u)
 				return 0;
 			if (!b)
 				break;
+			/*
+			 * THE SLOT THIS ENTRY BINDS INTO, which is what makes
+			 * the declaration a binding rather than a list of
+			 * names. The library's slots run from `dest` and this
+			 * is the cnt'th of them.
+			 */
 			if (b <= 0x20u) {
-				rp += 3u;       /* by ordinal */
-			} else {
-				len = mp_str_at(ctx, sect + rp, nm,
-						MP_IMP_NAME);
-				if (len >= MP_IMP_NAME)
+				uint8_t o2[2] = { 0, 0 };
+
+				if (kunp_rcstruct_read(sect + rp + 1u, o2,
+						       2u) != 2u)
 					return 0;
-				strn += 2u + len + 1u;
+				if (!kunp_rcstruct_import(dll, 0,
+							  (uint32_t)o2[0] |
+							  ((uint32_t)o2[1] << 8),
+							  dest + cnt * 4u))
+					return 0;
+				rp += 3u;
+			} else {
+				len = mp_str_at(ctx, sect + rp, fn,
+						MP_IMP_NAME);
+				if (len >= MP_IMP_NAME || !len)
+					return 0;
+				if (!kunp_rcstruct_import(dll, fn, 0,
+							  dest + cnt * 4u))
+					return 0;
 				rp += len + 1u;
 			}
 			if (++cnt > MP_IMP_MAX_FN)
@@ -471,142 +508,33 @@ static uint32_t mp_imports(const struct kof_obj_ctx *ctx,
 		if (iat_hi && dest + cnt * 4u > *iat_hi)
 			*iat_hi = dest + cnt * 4u;
 		dest += cnt * 4u;
-		nmod++;
 	}
-	if (!nmod || nfn > MP_IMP_MAX_FN)
+	if (!m || nfn > MP_IMP_MAX_FN)
 		return 0;
-
-	ilt_at = (nmod + 1u) * 20u;
-	str_at = ilt_at + (nfn + nmod) * 4u;
-	if (str_at + strn > cap)
-		return 0;
-	if (!img)
-		return str_at + strn;
-
-	/* ---- pass two: write it ---- */
-	for (m = 0; m < str_at + strn; m++)
-		img[m] = 0;
-	rp = hints_rva;
-	dest = (uint32_t)sect + hints_rva;
-	w_ilt = ilt_at;
-	w_str = str_at;
-	for (m = 0; m < nmod; m++) {
-		uint8_t raw[4];
-		int32_t diff;
-		uint32_t len, d = m * 20u, step = 0, name_rva;
-
-		if (kunp_rcstruct_read(sect + rp, raw, 4u) != 4u)
-			return 0;
-		diff = (int32_t)((uint32_t)raw[0] | ((uint32_t)raw[1] << 8) |
-				 ((uint32_t)raw[2] << 16) |
-				 ((uint32_t)raw[3] << 24));
-		dest += (uint32_t)diff;
-		rp += 4u;
-		len = mp_str_at(ctx, sect + rp, nm, MP_IMP_NAME);
-		name_rva = base + w_str;
-		for (; w_str < str_at + strn && nm[w_str - name_rva + base]; )
-			break;                  /* placeholder: copied below */
-		{
-			uint32_t k;
-
-			for (k = 0; k <= len; k++)
-				img[w_str + k] = (uint8_t)nm[k];
-			w_str += len + 1u;
-		}
-		rp += len + 1u;
-
-		pei_put32(img + d + 0u, base + w_ilt);   /* OriginalFirstThunk */
-		pei_put32(img + d + 12u, name_rva);      /* Name */
-		pei_put32(img + d + 16u, dest);          /* FirstThunk = the IAT */
-
-		for (;;) {
-			uint8_t b = 0;
-
-			if (kunp_rcstruct_read(sect + rp, &b, 1u) != 1u)
-				return 0;
-			if (!b)
-				break;
-			if (b <= 0x20u) {
-				uint8_t o2[2] = { 0, 0 };
-
-				if (kunp_rcstruct_read(sect + rp + 1u, o2, 2u) != 2u)
-					return 0;
-				pei_put32(img + w_ilt,
-					  0x80000000u |
-					  ((uint32_t)o2[0] |
-					   ((uint32_t)o2[1] << 8)));
-				rp += 3u;
-			} else {
-				uint32_t k;
-
-				len = mp_str_at(ctx, sect + rp, nm,
-						MP_IMP_NAME);
-				pei_put32(img + w_ilt, base + w_str);
-				img[w_str] = 0;
-				img[w_str + 1u] = 0;    /* the hint */
-				for (k = 0; k <= len; k++)
-					img[w_str + 2u + k] = (uint8_t)nm[k];
-				w_str += 2u + len + 1u;
-				rp += len + 1u;
-			}
-			/*
-			 * AND THE SAME VALUE INTO THE IAT ITSELF.
-			 *
-			 * The stub filled these slots at run time and they are
-			 * zero in what this module produced; a loader reading
-			 * the file finds an import directory pointing at an
-			 * empty IAT. Written here with the lookup entry, which
-			 * is what the thunk holds before binding.
-			 *
-			 * Measured against Avast's own unpacked output of the
-			 * same file: 1264 of 1265 pages already matched byte
-			 * for byte, and the one that did not was this table.
-			 */
-			f4[0] = img[w_ilt];      f4[1] = img[w_ilt + 1u];
-			f4[2] = img[w_ilt + 2u]; f4[3] = img[w_ilt + 3u];
-			kunp_rcstruct_poke(dest + step, f4, 4u);
-			w_ilt += 4u;
-			step += 4u;
-		}
-		rp++;
-		w_ilt += 4u;                    /* the null thunk */
-		dest += step;
-	}
-	return str_at + strn;
+	return nfn;
 }
 
 /*
- * Build the directory, append it as a section, and correct the header that was
- * emitted before any of it existed.
+ * Reserve the room the declared imports need and say where they go.
+ *
+ * AFTER THE IMAGE, because there is nowhere inside it that is free: every
+ * address the original program used is occupied by what it put there. The
+ * engine writes the table, fills the thunks and points the directory at it
+ * when the child closes - see the import block in objctx.c.
+ *
+ * Returns the bytes reserved, or 0.
  */
-static void mp_emit_imports(const struct kof_obj_ctx *ctx,
-			    const struct kof_pe_info *pe, uint32_t found,
-			    uint32_t hints_rva, uint32_t need)
+static uint32_t mp_place_imports(const struct kof_obj_ctx *ctx,
+				 const struct kof_pe_info *pe)
 {
-	uint8_t img[MP_IMP_CAP];
+	uint64_t need = kunp_rcstruct_import_bytes();
 	uint32_t base = (uint32_t)pei_image_end(pe);
 
-	if (need > sizeof img)
-		return;
-	if (mp_imports(ctx, pe, found, hints_rva, base, img, sizeof img,
-		       0, 0) != need)
-		return;
-	/*
-	 * WRITTEN WHERE IT BELONGS, AND SAID TO BE THERE.
-	 *
-	 * This used to emit the bytes at whatever the sink had reached, then
-	 * poke five fields into a header the module had built: a section entry,
-	 * NumberOfSections, the import directory's address and size, and
-	 * SizeOfImage. Every one of those is now a consequence of the
-	 * declaration rather than a thing to keep in step by hand - and
-	 * `.kofimp` was reserved in the layout before the image existed, so the
-	 * room is already there.
-	 */
-	if (!kunp_rcstruct_at(base) || !kunp_rcstruct_write(img, need))
-		return;
-	kunp_rcstruct_section(".kofimp", base, need, KOF_PE_PERM_R,
-			KOF_SECF_DATA | KOF_SECF_SYNTHETIC);
-	kunp_rcstruct_dir(KOF_PE_DIR_IMPORT, base, need);
+	if (!need || need > MP_IMP_CAP)
+		return 0;
+	if (!kunp_rcstruct_import_at(base))
+		return 0;
+	return (uint32_t)need;
 }
 
 /*
@@ -654,7 +582,7 @@ static int mp_zero_run(const struct kof_obj_ctx *ctx, uint64_t at, uint32_t n)
 static void mp_split(const struct kof_obj_ctx *ctx,
 		     const struct kof_pe_info *pe, uint32_t found,
 		     uint32_t fix, uint32_t hints, uint32_t oep,
-		     uint32_t iat_lo, uint32_t iat_hi)
+		     uint32_t iat_lo, uint32_t iat_hi, uint32_t imp_len)
 {
 	struct { uint32_t rva, len, code; char nm[8]; } sec[MP_SPLIT_MAX];
 	uint32_t cut[5], n_cut = 0, n = 0, i, j;
@@ -803,10 +731,10 @@ static void mp_split(const struct kof_obj_ctx *ctx,
 				nm[8] = 0;
 				if (kunp_rcstruct_section(nm, sec[q].rva, sec[q].len,
 						    sec[q].code
-						    ? (KOF_PE_PERM_R |
-						       KOF_PE_PERM_X)
-						    : (KOF_PE_PERM_R |
-						       KOF_PE_PERM_W),
+						    ? (KUNP_PERM_R |
+						       KUNP_PERM_X)
+						    : (KUNP_PERM_R |
+						       KUNP_PERM_W),
 						    (sec[q].code
 						     ? KOF_SECF_CODE
 						     : KOF_SECF_DATA) |
@@ -825,25 +753,36 @@ static void mp_split(const struct kof_obj_ctx *ctx,
 		 * to DATA - measured on update_v103.exe, a DATA region of 3972
 		 * bytes with not one non-zero byte in it.
 		 */
-		if (kunp_rcstruct_section(t->name, t->mem_rva, t->mem_size, t->perm,
+		if (kunp_rcstruct_section(t->name, t->mem_rva, t->mem_size,
+				    kof_pe_perm_decl(t->perm),
 				    ((t->perm & KOF_PE_PERM_X) ? KOF_SECF_CODE
 							       : KOF_SECF_DATA) |
 				    KOF_SECF_READ) < 0)
 			return;
 		if (pei_span(t) > t->mem_size &&
 		    kunp_rcstruct_section("", t->mem_rva + t->mem_size,
-				    pei_span(t) - t->mem_size, t->perm,
+				    pei_span(t) - t->mem_size,
+				    kof_pe_perm_decl(t->perm),
 				    KOF_SECF_PAD | KOF_SECF_READ) < 0)
 			return;
 	}
 	/*
 	 * And the import directory. SYNTHETIC because it is not a recovery of
 	 * anything that was in the file: MPRESS keeps a hint list, not a table,
-	 * and what goes here is one this module built to match it. A reader has
-	 * to be able to tell that from an import table that was read.
+	 * and what goes here is one the ENGINE built from what this module
+	 * declared. A reader has to be able to tell that from an import table
+	 * that was read.
+	 *
+	 * ITS OWN LENGTH, NOT A PAGE. It was declared as PEI_PAGE whether or
+	 * not anything was in it, which said two wrong things at once: a file
+	 * with no recoverable imports got a page of declared section with
+	 * nothing behind it, and one whose table ran past a page had the rest
+	 * of it outside every declared section.
 	 */
-	kunp_rcstruct_section(".kofimp", imp_base, PEI_PAGE,
-			KOF_PE_PERM_R, KOF_SECF_DATA | KOF_SECF_SYNTHETIC);
+	if (imp_len)
+		kunp_rcstruct_section(".kofimp", imp_base, imp_len,
+				      KUNP_PERM_R,
+				      KOF_SECF_DATA | KOF_SECF_SYNTHETIC);
 }
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
@@ -1022,7 +961,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * content: measured on update_v103.exe, a DATA region of 3972
 		 * bytes without one non-zero byte in it.
 		 */
-		if (kunp_rcstruct_section(t->name, t->mem_rva, t->mem_size, t->perm,
+		if (kunp_rcstruct_section(t->name, t->mem_rva, t->mem_size,
+				    kof_pe_perm_decl(t->perm),
 				    KOF_SECF_DATA | KOF_SECF_READ) < 0)
 			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 		/*
@@ -1041,7 +981,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		if (pei_span(t) > t->mem_size &&
 		    (build || i + 1u < pe->sec_count) &&
 		    kunp_rcstruct_section("", t->mem_rva + t->mem_size,
-				    pei_span(t) - t->mem_size, t->perm,
+				    pei_span(t) - t->mem_size,
+				    kof_pe_perm_decl(t->perm),
 				    KOF_SECF_PAD | KOF_SECF_READ) < 0)
 			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	}
@@ -1057,7 +998,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * file that has none.
 	 */
 	if (build &&
-	    kunp_rcstruct_section("", pei_image_end(pe), PEI_PAGE, KOF_PE_PERM_R,
+	    kunp_rcstruct_section("", pei_image_end(pe), PEI_PAGE, KUNP_PERM_R,
 			    KOF_SECF_PAD | KOF_SECF_READ) < 0)
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	if (!kunp_rcstruct_image())
@@ -1269,11 +1210,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		}
 
 	/*
-	 * AND THE IMPORT DIRECTORY, APPENDED AND THEN POINTED AT.
+	 * AND THE IMPORT DIRECTORY, DECLARED AND THEN PLACED.
 	 *
-	 * See mp_imports. The section goes after the image because there is
-	 * nowhere inside it that is free, and the header - written before any
-	 * of this was knowable - is corrected once the bytes exist.
+	 * See mp_imports. The table goes after the image because there is
+	 * nowhere inside it that is free; the engine writes it, fills the
+	 * thunks and points the directory at it when the child closes.
 	 */
 	{
 		uint32_t fix = 0, row = 0;
@@ -1281,7 +1222,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		if (build && mp_fixup(ctx, pe, build, found, &fix, &row)) {
 			uint8_t raw[4];
 			uint64_t sect = pe->sec[found].mem_rva;
-			uint32_t hp, need, iat_lo, iat_hi;
+			uint32_t hp, need = 0, iat_lo, iat_hi;
 
 			if (kunp_rcstruct_read(sect + fix + mp_fixes[row].hints,
 					 raw, 4u) == 4u) {
@@ -1291,13 +1232,10 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				      ((uint32_t)raw[2] << 16) |
 				      ((uint32_t)raw[3] << 24));
 				iat_lo = 0; iat_hi = 0;
-				need = mp_imports(ctx, pe, found, hp,
-						  (uint32_t)pei_image_end(pe),
-						  0, MP_IMP_CAP,
-						  &iat_lo, &iat_hi);
-				if (need)
-					mp_emit_imports(ctx, pe, found, hp,
-							need);
+				if (mp_imports(ctx, pe, found, hp,
+					       &iat_lo, &iat_hi))
+					need = mp_place_imports(ctx, pe);
+				kof_debug("MPRESS.PE.imports", need);
 				/*
 				 * AND THE ONE BIG SECTION CUT BACK INTO
 				 * SEVERAL. See mp_split. Done last, because
@@ -1322,7 +1260,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 				 */
 				mp_split(ctx, pe, found, fix, hp,
 					 mp_oep_of(ctx, pe, build, found),
-					 iat_lo, iat_hi);
+					 iat_lo, iat_hi, need);
 			}
 		}
 	}

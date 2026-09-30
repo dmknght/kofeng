@@ -1,7 +1,7 @@
 /*
  * msf_elf32.h - put msfvenom's x86 ELF header back in front of a decoded payload.
  *
- * The 32-bit counterpart of emit_elf_hdr in msf_xor_00.c, and shared by the
+ * The 32-bit counterpart of msf_elf64.h, and shared by the
  * three x86 static decoders because it is byte for byte the same for all of
  * them - the payload they recover is the same x86 stager, and msfvenom wraps it
  * in one fixed template. A header rather than three copies of it: the modules
@@ -87,7 +87,7 @@ static int msf_decl_elf32(const struct kof_obj_ctx *ctx, uint32_t payload_n)
 
 static int msf_emit_hdr(const struct kof_obj_ctx *ctx, uint32_t payload_n)
 {
-	return MSF_RECON_PE(ctx) ? msf_emit_pe(ctx, payload_n, 32)
+	return MSF_RECON_PE(ctx) ? msf_decl_pe(ctx, payload_n, 32)
 				 : msf_decl_elf32(ctx, payload_n);
 }
 

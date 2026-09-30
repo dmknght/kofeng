@@ -41,6 +41,27 @@ points the variants differ at, rather than three near-copies - and no part of
 ClamAV's is reproduced. The note in `nrv2.h` says the same thing beside the
 code.
 
+### TinyAntivirus — GPL-2.0
+
+`github.com/develbranch/TinyAntivirus`, read for its **Sality disinfector**,
+which is the clearest small example of a cure that needs an interpreter.
+
+What it does, in order: emulate from the entry point with a per-instruction
+hook; wait for a one-byte `0xC3`; read `[ESP]` to find where the RET was going,
+which is the virus body; verify two byte signatures there; read the original
+entry point out of the body at a fixed displacement; read the host's original
+first bytes out of a table the virus keeps inside itself, with a flag and a
+length in front of them; write those bytes back at the file offset the entry
+maps to, set the entry point to the recovered value, and truncate the file to
+drop the virus.
+
+WHAT WAS TAKEN IS THE SHAPE, NOT THE CODE. Nothing here is reproduced - the
+Sality offsets are its author's work and this engine has no Sality module. What
+it showed is a gap in this one's ABI: every step after the stop is a read of a
+register or of guest memory, `kof_emu_get_reg` and `kof_emu_read` existed, and
+nothing carried them across to a module. `emu_reg` and `emu_read` are that
+crossing.
+
 ### OllyDbg unpacking scripts for PECompact 2.x/3.x — no licence stated
 
 `github.com/ThomasThelen/OllyDbg-Scripts` and
@@ -239,7 +260,50 @@ program, which is `OEP_CONTEXT` in `dep/XEmulUnpacker/`:
     was wrong; the note in `kofemu.c` says so beside the inline assembly that
     replaced it.
 
-No code is reproduced: XEmulUnpacker is C++ against Qt and Unicorn.
+No code is reproduced from XEmulUnpacker: it is C++ against Qt and Unicorn.
+
+`dep/XStaticUnpacker/xaspack.cpp` and `dep/SpecAbstract/modules/nfd_pe.cpp` ARE
+sources this engine took structure from, under the MIT terms above:
+
+  - THE ASPACK CODING, which is not documented anywhere else this project could
+    find: the bit reader, the four alphabets, the delta-coded code lengths, the
+    repeat-offset history, and the 114-byte table the decoder indexes three ways.
+    `libkofeng/extractors/decomp/aspack.c` is C against this engine's decoder
+    interface rather than a transcription, and every bound in it is this
+    engine's own - the original decodes into an image it owns, and this decodes
+    into a caller's buffer with a hostile file behind it. It reports what it
+    wrote on failure, which the original has no need to.
+  - THE PER-BUILD STUB LAYOUTS, `g_aspackLayouts`: where each ASPack generation
+    keeps its block table, its decoder tables, its call/jmp marker byte and the
+    original entry point, all measured from the entry point minus one. Those
+    offsets were derived there from a packed corpus this project does not have;
+    `bases/unp/aspack_pe.c` carries six of the eight rows and says in the file
+    which one is measured here and which are borrowed. The two left out are
+    2.11 and 2.11c, whose stub head is encrypted per file.
+  - THE DETECTION RULE that makes those rows safe to act on: require the
+    114-byte decoder table at the row's own offset, not just the entry-point
+    signature. `nfd_pe.cpp` carries ASPack's 2.12 signature a SECOND time under
+    the name FAKESIGNATURE, because other packers stamp it at their own entry
+    points; that warning is why `aspack_pe.c` never acts on a signature alone.
+  - THE ENTRY-POINT TABLES for Petite (`2.2-2.3`, `1.3-1.4`, `2.4`, `1.2`) and
+    kkrunchy (`0.23 alpha 1`, `alpha 2`, `alpha 3-4`), and kkrunchy's fused
+    DOS/PE header signatures `MZfarbrausch` / `MZconspiracy`. Rewritten as
+    `struct eps_row` tables; the byte patterns are the same facts about those
+    builds.
+  - PETITE'S COMPRESSION LEVEL, from `_detect` in `xpetite.cpp`: the entry
+    point is `mov eax, imm32` and the immediate is imageBase plus the
+    VirtualAddress of the section holding the loader, which Petite puts LAST at
+    its higher level and second-to-last at the lower one. `pet_level` in
+    `bases/unp/petite_pe.c` is a restatement of that comparison. It is a
+    version rather than a detail because three constants in the static path are
+    chosen by it - how much loader tail to strip, the skew it may sit at, and
+    where the op table is when the loader cannot be read for it.
+  - AND WHERE THE STATIC ROAD ENDS. `xpetite.cpp` recovers Petite's op table
+    statically and then runs the build's own embedded decoder under an
+    emulator, and there is no `xkkrunchy.cpp` at all - kkrunchy is under
+    XEmulUnpacker. Both are why `bases/unp/petite_pe.c` and
+    `bases/unp/kkrunchy_pe.c` drive the interpreter instead of decoding, and
+    both files say so.
 
 ### The Themida and VMProtect research projects — read only
 

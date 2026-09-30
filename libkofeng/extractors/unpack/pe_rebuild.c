@@ -478,3 +478,217 @@ uint32_t kof_pe_layout_of(kof_buf img, struct kof_sec_decl *out, uint32_t cap,
 	}
 	return n;
 }
+
+/* ---- an import directory written from declarations ----------------------- */
+
+/*
+ * THE LAYOUT, and it is the one every PE uses, laid out in the one order that
+ * makes a single pass possible:
+ *
+ *   base                    (nmod + 1) * 20   the descriptors, NUL terminated
+ *   base + ilt              (nfn + nmod) * 4  the lookup entries, one run per
+ *                                             descriptor, each NUL terminated
+ *   base + str              the names          "kernel32.dll", then per function
+ *                                             a 2-byte hint and the name
+ *
+ * A DESCRIPTOR PER RUN, NOT PER DISTINCT NAME - see `import` in kofsig.h. The
+ * caller's order is the table's order, so a container walked in its own order
+ * produces the table its own structure describes.
+ *
+ * The two functions below have to agree about every one of those numbers, so
+ * the sizing one is written as the writing one with the stores left out rather
+ * than as a formula: a formula is a second statement of the layout and the day
+ * it disagrees is the day a table is written past the room reserved for it.
+ */
+
+#define PI_DESC 20u     /* sizeof IMAGE_IMPORT_DESCRIPTOR */
+
+/* A pool string, bounded by the pool. NULL when the offset is not inside it or
+ * the string does not end before the pool does. */
+static const char *pi_str(const char *pool, uint64_t pool_n, uint32_t off)
+{
+	uint64_t k;
+
+	if (!pool || off >= pool_n)
+		return NULL;
+	for (k = off; k < pool_n; k++)
+		if (!pool[k])
+			return pool + off;
+	return NULL;
+}
+
+static uint64_t pi_len(const char *s)
+{
+	uint64_t n = 0;
+
+	while (s[n])
+		n++;
+	return n;
+}
+
+/*
+ * Walk the declarations once, counting or writing.
+ *
+ * `img` NULL counts; otherwise every store is bounded by `img_n` and the walk
+ * gives up the moment one would not fit, which is why the caller checks the
+ * size first and this checks again: the size is computed from the same pool,
+ * but the image may be smaller than the layout the caller promised.
+ */
+static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
+			const struct kof_imp_decl *imp, uint32_t n,
+			const char *pool, uint64_t pool_n)
+{
+	uint32_t i, nmod = 0, nfn = 0;
+	uint64_t strn = 0, ilt, str, w_ilt, w_str;
+	const char *prev = NULL;
+
+	if (!imp || !n || !pool)
+		return 0;
+
+	/* ---- pass one: how many descriptors, how many entries, how much text */
+	for (i = 0; i < n; i++) {
+		const char *d = pi_str(pool, pool_n, imp[i].dll_off);
+
+		if (!d || !*d)
+			return 0;
+		if (!prev || pi_len(d) != pi_len(prev) ||
+		    memcmp(d, prev, (size_t)pi_len(d)) != 0) {
+			nmod++;
+			strn += pi_len(d) + 1u;
+			prev = d;
+		}
+		if (!imp[i].ordinal) {
+			const char *f = pi_str(pool, pool_n, imp[i].fn_off);
+
+			if (!f || !*f)
+				return 0;
+			strn += 2u + pi_len(f) + 1u;   /* the hint, then the name */
+		}
+		nfn++;
+	}
+
+	ilt = (uint64_t)(nmod + 1u) * PI_DESC;
+	str = ilt + ((uint64_t)nfn + nmod) * 4u;
+	if (!img)
+		return str + strn;
+
+	/* ---- pass two: write it ---- */
+	if (base > img_n || str + strn > img_n - base)
+		return 0;
+	/*
+	 * THE TABLE MAY NOT SIT ON THE THUNKS IT FILLS, and this is refused
+	 * rather than ordered around.
+	 *
+	 * A thunk inside [base, base + size) would be written twice - once as
+	 * a slot and once as part of the table - and which survived would
+	 * depend on which store came last, so the same declarations would
+	 * produce different files depending on where in the table the slot
+	 * landed. There is no useful reading of a caller that asks for it: the
+	 * IAT belongs to the program and the table is somewhere the module
+	 * reserved for it.
+	 *
+	 * Checked before the memset, so a refusal leaves the image untouched -
+	 * which is what the caller relies on to hand the child over without
+	 * imports instead of with half a table. imports_fuzz holds it to that.
+	 */
+	for (i = 0; i < n; i++)
+		if (imp[i].iat_rva &&
+		    imp[i].iat_rva + 4u > base && imp[i].iat_rva < base + str + strn)
+			return 0;
+	memset(img + base, 0, (size_t)(str + strn));
+
+	w_ilt = ilt;
+	w_str = str;
+	prev = NULL;
+	nmod = 0;
+	for (i = 0; i < n; i++) {
+		const char *d = pi_str(pool, pool_n, imp[i].dll_off);
+		uint64_t ent;
+
+		/*
+		 * Checked again although pass one checked the same offsets
+		 * against the same pool. Nothing can have changed between them
+		 * - but nothing in this function SAYS so, and a walk that
+		 * trusts an earlier pass is a walk that dereferences NULL the
+		 * day the two stop being called in a pair.
+		 */
+		if (!d || !*d)
+			return 0;
+		if (!prev || pi_len(d) != pi_len(prev) ||
+		    memcmp(d, prev, (size_t)pi_len(d)) != 0) {
+			uint64_t desc;
+
+			/*
+			 * The run before this one ends with a null lookup
+			 * entry, which is already zero from the memset - only
+			 * the cursor has to step over it.
+			 */
+			if (prev)
+				w_ilt += 4u;
+			desc = base + (uint64_t)nmod * PI_DESC;
+			memcpy(img + base + w_str, d, (size_t)pi_len(d) + 1u);
+			pw_put32(img + desc + 0u,  (uint32_t)(base + w_ilt));
+			pw_put32(img + desc + 12u, (uint32_t)(base + w_str));
+			/*
+			 * FirstThunk is the IAT, which is NOT part of this
+			 * table: it is wherever the packer put the slots, and
+			 * the caller told us per entry. The first entry of the
+			 * run is where the run's IAT begins.
+			 */
+			pw_put32(img + desc + 16u, (uint32_t)imp[i].iat_rva);
+			w_str += pi_len(d) + 1u;
+			nmod++;
+			prev = d;
+		}
+
+		if (imp[i].ordinal) {
+			ent = 0x80000000u | imp[i].ordinal;
+		} else {
+			const char *f = pi_str(pool, pool_n, imp[i].fn_off);
+
+			if (!f || !*f)
+				return 0;
+			ent = base + w_str;
+			/* the two hint bytes stay zero: nothing declared one,
+			 * and a hint is an optimisation a loader may ignore */
+			memcpy(img + base + w_str + 2u, f,
+			       (size_t)pi_len(f) + 1u);
+			w_str += 2u + pi_len(f) + 1u;
+		}
+		pw_put32(img + base + w_ilt, (uint32_t)ent);
+
+		/*
+		 * AND THE SAME VALUE INTO THE THUNK ITSELF.
+		 *
+		 * The slot is what the stub filled at run time and it is zero
+		 * in what the module produced, so a reader of the file finds a
+		 * directory pointing at an empty IAT. Before binding, a thunk
+		 * holds its own lookup entry - that is what a loader writes
+		 * there and what this engine's own IAT filler expects to find.
+		 *
+		 * Measured when mpress_pe.c did this by hand, against Avast's
+		 * unpacked output of the same file: 1264 of 1265 pages already
+		 * matched byte for byte, and the one that did not was this
+		 * table.
+		 */
+		if (imp[i].iat_rva && imp[i].iat_rva + 4u <= img_n)
+			pw_put32(img + imp[i].iat_rva, (uint32_t)ent);
+		w_ilt += 4u;
+	}
+	return str + strn;
+}
+
+uint64_t kof_pe_imports_size(const struct kof_imp_decl *imp, uint32_t n,
+			     const char *pool, uint64_t pool_n)
+{
+	return pi_walk(NULL, 0, 0, imp, n, pool, pool_n);
+}
+
+uint64_t kof_pe_write_imports(uint8_t *img, uint64_t img_n, uint64_t base,
+			      const struct kof_imp_decl *imp, uint32_t n,
+			      const char *pool, uint64_t pool_n)
+{
+	if (!img)
+		return 0;
+	return pi_walk(img, img_n, base, imp, n, pool, pool_n);
+}

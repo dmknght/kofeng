@@ -2063,6 +2063,93 @@ struct kof_content {
 	 * builds share a layout.
 	 */
 	void (*packer_build)(const struct kof_obj_ctx *, const char *build);
+
+	/*
+	 * ---- READING THE MACHINE THE RUN LEFT ------------------------------
+	 *
+	 * A run stops somewhere, and where it stopped is usually only half the
+	 * answer. The other half is in the registers and in guest memory: the
+	 * address a RET was about to return to, the buffer a stub had just
+	 * finished writing, the pointer a decryptor kept its table behind.
+	 *
+	 * TinyAntivirus's Sality cure is the case that makes this concrete -
+	 * see THIRD-PARTY.md. It hooks every instruction, waits for a one-byte
+	 * 0xC3, reads [ESP] to find where the virus body is, verifies a
+	 * signature there, and then reads the ORIGINAL entry point and the
+	 * original bytes of the host out of a table the virus keeps inside
+	 * itself. Every step after the stop is a read of a register or of guest
+	 * memory, and a module here could do none of them: kof_emu_get_reg and
+	 * kof_emu_read exist, and nothing carried them across the ABI.
+	 *
+	 * VALID ONLY WHILE THE MACHINE IS. Same lifetime as a region handed
+	 * back by emu_region: from the emu_run that produced it until this
+	 * module returns. The engine frees the machine then - see
+	 * kof_scanner.emu_live.
+	 *
+	 * `gpr` is the index the interpreter numbers registers by, which is the
+	 * x86 encoding order: 0 ax, 1 cx, 2 dx, 3 bx, 4 sp, 5 bp, 6 si, 7 di,
+	 * 8-15 r8-r15. Named that way rather than by a fresh enum because it is
+	 * the numbering the instruction stream itself uses.
+	 */
+	uint64_t (*emu_reg)(const struct kof_obj_ctx *, uint32_t gpr);
+	uint32_t (*emu_read)(const struct kof_obj_ctx *, uint64_t va,
+			     uint8_t *out, uint32_t n);
+
+	/*
+	 * ---- WHAT THE CHILD IMPORTS, SAID RATHER THAN ENCODED --------------
+	 *
+	 * THE LAST ROUND TRIP, and the one the rest of this mechanism was built
+	 * to end. A packer that rebuilds imports KNOWS them: MPRESS keeps a
+	 * hint list - per library a delta to its IAT slot, its name, then its
+	 * functions by name or by ordinal - and a module reading it has every
+	 * fact a symbol needs. It then had nowhere to put them, so it built an
+	 * IMAGE_IMPORT_DESCRIPTOR array, a lookup table and a string pool by
+	 * hand, wrote them into a section it invented, pointed a data directory
+	 * at them, and the engine PARSED THEM BACK to recover what the module
+	 * had known all along. A hundred and fifty lines of PE structure
+	 * encoding inside an unpack module, which is the thing the object
+	 * pipeline forbids.
+	 *
+	 * So the module says it and the engine writes it, exactly as it already
+	 * does for sections and for the header.
+	 *
+	 * import() declares ONE binding: the library, the function, the ordinal
+	 * when it was imported by number instead of by name, and the address of
+	 * the thunk the loader writes into. `fn` is ignored when `ordinal` is
+	 * non-zero and vice versa - a PE import is one or the other and never
+	 * both - and a module that has neither has not got an import.
+	 *
+	 * A DESCRIPTOR PER RUN OF ONE LIBRARY, not per distinct name. Calls are
+	 * grouped in the order they arrive, so a new descriptor begins wherever
+	 * the library differs from the call before it. That is what the source
+	 * tables look like - a hint list is grouped by library and so is an
+	 * import directory - and it means a module that walks its container in
+	 * order gets the natural table without sorting anything. A library that
+	 * genuinely appears twice gets two descriptors, which is legal and is
+	 * what the container said.
+	 *
+	 * import_bytes() answers how much room the declared imports need, so
+	 * that a module can reserve it in the layout IT owns. The module must
+	 * ask: only it knows where a free address is, and the engine must not
+	 * invent one - putting a table somewhere the module did not plan for is
+	 * how a section ends up overlapping.
+	 *
+	 * import_at() says where to write it. The engine writes the table, the
+	 * lookup entries and the names there, FILLS EACH DECLARED THUNK with
+	 * its lookup entry - the value a thunk holds before binding, which is
+	 * what a loader and this engine's own IAT filler expect - and points
+	 * the import directory at it. All of that happens when the child
+	 * closes, beside the header, and for the same reason: a declaration may
+	 * be corrected until then.
+	 *
+	 * Returns 0 on refusal - the table is full, the pool is full, or the
+	 * arguments do not describe an import - so a module stops rather than
+	 * producing a child whose directory is missing entries.
+	 */
+	int (*import)(const struct kof_obj_ctx *, const char *dll,
+		      const char *fn, uint32_t ordinal, uint64_t iat_rva);
+	uint64_t (*import_bytes)(const struct kof_obj_ctx *);
+	int (*import_at)(const struct kof_obj_ctx *, uint64_t rva);
 };
 
 /*
@@ -2400,6 +2487,32 @@ enum kof_unp_method {
 	KOF_UNP_LZMAT_MPRESS64 = 32,
 
 	/*
+	 * ASPACK 2.X's OWN CODING - a Huffman coded LZ77, see aspack.h.
+	 *
+	 * No parameters, and that is measured rather than assumed: the two
+	 * tables that steer it are carried in the stub and are the same bytes
+	 * in every build this engine recognises. The module checks the stub's
+	 * copies before it asks for a decode, so a build that differs is
+	 * reported as unsupported instead of decoded into something plausible.
+	 *
+	 * The stream states no length; the block table in the stub does, and
+	 * out_hint is that length and a hard bound.
+	 *
+	 * KOF_UNP_ASPACK_E8E9 is the same coding with ASPack's call/jmp filter
+	 * undone afterwards, which only the FIRST block of an image carries.
+	 * The filter's marker byte differs per file and rides in the id, the
+	 * way KOF_UNP_LZMA carries lc/lp/pb and for the same reason - a
+	 * parameter meaningless for every other coding is worse than an id
+	 * that says what it is. 256 ids, built with KOF_UNP_ASPACK_MARK.
+	 *
+	 * Placed above KOF_UNP_LZMA_MPRESS64's 640..864 rather than in the gap
+	 * below it, for the reason KOF_UNP_LZX_RESET_BASE's note gives: an id
+	 * range that overlaps another is a bug nothing catches until two
+	 * codings answer to one number.
+	 */
+	KOF_UNP_ASPACK = 33,
+
+	/*
 	 * LZMA carries three parameters, so the id carries them.
 	 *
 	 * lc, lp and pb decide the shape of the probability model and there is no
@@ -2439,8 +2552,15 @@ enum kof_unp_method {
 	 * nothing catches until two codings answer to one number.
 	 */
 	KOF_UNP_LZMA_MPRESS32 = 384,
-	KOF_UNP_LZMA_MPRESS64 = 640
+	KOF_UNP_LZMA_MPRESS64 = 640,
+
+	/* See KOF_UNP_ASPACK. 896..1151, one id per marker byte. */
+	KOF_UNP_ASPACK_E8E9 = 896
 };
+
+/* ASPack's call/jmp coding with `mark` as the filter's marker byte. */
+#define KOF_UNP_ASPACK_MARK(mark)                                           \
+	((uint32_t)KOF_UNP_ASPACK_E8E9 + ((uint32_t)(mark) & 0xffu))
 
 /*
  * Build one. `bits` is the image's width, 32 or 64, and nothing else is
@@ -2655,6 +2775,8 @@ static inline const char *kof_unp_method_name(uint32_t m)
 	if ((m >= KOF_UNP_LZMA_MPRESS32 && m <= KOF_UNP_LZMA_MPRESS32 + 224u) ||
 	    (m >= KOF_UNP_LZMA_MPRESS64 && m <= KOF_UNP_LZMA_MPRESS64 + 224u))
 		return "lzma+mpress";
+	if (m >= KOF_UNP_ASPACK_E8E9 && m <= KOF_UNP_ASPACK_E8E9 + 0xffu)
+		return "aspack+e8e9";
 	if (m >= KOF_UNP_NRV2B_8 && m <= KOF_UNP_NRV2B_32)
 		return "nrv2b";
 	if (m >= KOF_UNP_NRV2D_8 && m <= KOF_UNP_NRV2D_32)
@@ -2677,6 +2799,7 @@ static inline const char *kof_unp_method_name(uint32_t m)
 	case KOF_UNP_RAR5:          return "rar5";
 	case KOF_UNP_BCJ2:          return "bcj2";
 	case KOF_UNP_APLIB:         return "aplib";
+	case KOF_UNP_ASPACK:        return "aspack";
 	case KOF_UNP_LZMAT:         return "lzmat";
 	case KOF_UNP_LZMAT_MPRESS32:
 	case KOF_UNP_LZMAT_MPRESS64: return "lzmat+cto";
@@ -3962,6 +4085,35 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	((void)((ctx)->content->supersede ?                                 \
 		((ctx)->content->supersede((ctx)), 0) : 0))
 
+/*
+ * A register of the machine the last run left, or 0.
+ *
+ *     sp = kunp_emu_reg(KUNP_REG_SP);
+ *     if (kunp_emu_read(sp, b, 4u) == 4u)
+ *             ...                     -- where the RET was going
+ *
+ * See `emu_reg` for the numbering and for how long the answer is good for.
+ */
+#define KUNP_REG_AX 0u
+#define KUNP_REG_CX 1u
+#define KUNP_REG_DX 2u
+#define KUNP_REG_BX 3u
+#define KUNP_REG_SP 4u
+#define KUNP_REG_BP 5u
+#define KUNP_REG_SI 6u
+#define KUNP_REG_DI 7u
+
+#define kunp_emu_reg(gpr)                                                   \
+	((ctx)->content->emu_reg                                            \
+	 ? (ctx)->content->emu_reg((ctx), (uint32_t)(gpr)) : (uint64_t)0)
+
+/* Bytes of the guest's memory at a virtual address. Answers how many were
+ * read, which is 0 for an address the run never mapped. */
+#define kunp_emu_read(va, out, n)                                           \
+	((ctx)->content->emu_read                                           \
+	 ? (ctx)->content->emu_read((ctx), (uint64_t)(va), (out),           \
+				    (uint32_t)(n)) : 0u)
+
 #define kunp_emu_oep_range(rva, len)                                            \
 	((void)((ctx)->content->emu_watch ?                                 \
 		((ctx)->content->emu_watch((ctx), (uint64_t)(rva),          \
@@ -4080,6 +4232,31 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 #define kunp_rcstruct_reset()                                           \
 	((ctx)->content->sections_reset                                    \
 	 ? (ctx)->content->sections_reset((ctx)) : 0)
+
+/*
+ * WHAT THE CHILD IMPORTS - see `import` in struct kof_content.
+ *
+ *     for (each entry the container lists)
+ *             kunp_rcstruct_import(dll, fn, 0, slot_rva);
+ *     need = kunp_rcstruct_import_bytes();
+ *     kunp_rcstruct_section(".kofimp", at, need, KUNP_PERM_R,
+ *                           KOF_SECF_DATA | KOF_SECF_SYNTHETIC);
+ *     kunp_rcstruct_import_at(at);
+ *
+ * By ordinal: pass NULL for `fn` and the number for `ordinal`.
+ */
+#define kunp_rcstruct_import(dll, fn, ordinal, iat_rva)                     \
+	((ctx)->content->import                                            \
+	 ? (ctx)->content->import((ctx), (dll), (fn), (uint32_t)(ordinal), \
+				  (uint64_t)(iat_rva)) : 0)
+
+#define kunp_rcstruct_import_bytes()                                        \
+	((ctx)->content->import_bytes                                      \
+	 ? (ctx)->content->import_bytes((ctx)) : (uint64_t)0)
+
+#define kunp_rcstruct_import_at(rva)                                        \
+	((ctx)->content->import_at                                         \
+	 ? (ctx)->content->import_at((ctx), (uint64_t)(rva)) : 0)
 
 
 /* What a run left. See `emu_run` in struct kof_content. */

@@ -58,6 +58,7 @@
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/extractors/decomp/nrv2.h"
 #include "../../libkofeng/extractors/decomp/lzma.h"
+#include "../../libkofeng/extractors/decomp/aspack.h"
 
 #define OUT_CAP   (1u << 20)
 #define IN_MAX    8192u
@@ -193,6 +194,11 @@ static void harvest_dir(const char *dir)
 
 /* ---- one round --------------------------------------------------------------- */
 
+/* Which coding a round is about. */
+#define W_NRV2   0
+#define W_LZMA   1
+#define W_ASPACK 2
+
 static uint8_t in[IN_MAX];
 static uint8_t out_a[OUT_CAP], out_b[OUT_CAP];
 
@@ -204,21 +210,35 @@ static uint8_t out_a[OUT_CAP], out_b[OUT_CAP];
  * one format, and two copies of the checks would be two places for one of them to
  * be dropped.
  */
-static enum kof_decomp_status decode_any(int lzma, int variant, int bits, unsigned lc,
+static enum kof_decomp_status decode_any(int which, int variant, int bits, unsigned lc,
 				       unsigned lp, unsigned pbits,
 				       const uint8_t *src, uint64_t n,
 				       uint8_t *dst, uint64_t cap,
 				       uint64_t *produced)
 {
-	if (lzma)
+	if (which == W_LZMA)
 		return kof_lzma_decode(lc, lp, pbits, src, n, dst, cap, produced);
+	/*
+	 * ASPack fuzzed here rather than in a test of its own for the reason
+	 * the note at the top gives about NRV2: it has no magic and no header,
+	 * so random bytes walk straight into the decoder instead of being
+	 * turned away, and every bound in it is reachable from any PE.
+	 *
+	 * It is the ONE coding here whose out_cap is not merely the receiver's
+	 * limit - it is the length the packer's block table declared, and the
+	 * symbol loop stops on it. A short buffer is therefore a different
+	 * decode rather than a truncated one, which is why the prefix
+	 * invariant below compares only what both runs produced.
+	 */
+	if (which == W_ASPACK)
+		return kof_aspack_decode(src, n, dst, cap, produced);
 	return kof_nrv2_decode(variant, bits, src, n, dst, cap, produced);
 }
 
 static void one(uint64_t r)
 {
 	uint32_t n;
-	int variant, bits, lzma = 0;
+	int variant, bits, which = W_NRV2;
 	unsigned lc = 3, lp = 0, pbits = 2;
 	uint64_t cap, pa = 0, pb = 0, i;
 	enum kof_decomp_status sa, sb;
@@ -287,10 +307,12 @@ static void one(uint64_t r)
 		 * an attacker would reach for and the ones worth varying.
 		 */
 		if ((rnd() % 3) == 0) {
-			lzma = 1;
+			which = W_LZMA;
 			lc = (unsigned)(rnd() % (KOF_LZMA_MAX_LC + 2));
 			lp = (unsigned)(rnd() % (KOF_LZMA_MAX_LP + 2));
 			pbits = (unsigned)(rnd() % (KOF_LZMA_MAX_PB + 2));
+		} else if ((rnd() % 3) == 0) {
+			which = W_ASPACK;
 		}
 	}
 
@@ -304,7 +326,7 @@ static void one(uint64_t r)
 	}
 
 	memset(out_a, MARKER, cap);
-	sa = decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_a, cap, &pa);
+	sa = decode_any(which, variant, bits, lc, lp, pbits, in, n, out_a, cap, &pa);
 	rounds_done++;
 
 	/*
@@ -337,7 +359,7 @@ static void one(uint64_t r)
 
 	/* Twice, into a different buffer: no state may carry between streams. */
 	memset(out_b, MARKER ^ 0xff, cap);
-	sb = decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_b, cap, &pb);
+	sb = decode_any(which, variant, bits, lc, lp, pbits, in, n, out_b, cap, &pb);
 	if (sa != sb || pa != pb || (pa && memcmp(out_a, out_b, (size_t)pa) != 0)) {
 		fail(r, "the same stream decoded differently the second time");
 		return;
@@ -355,7 +377,7 @@ static void one(uint64_t r)
 		uint64_t small = pa / 2, pc = 0;
 
 		memset(out_b, MARKER ^ 0xff, small);
-		decode_any(lzma, variant, bits, lc, lp, pbits, in, n, out_b, small,
+		decode_any(which, variant, bits, lc, lp, pbits, in, n, out_b, small,
 			   &pc);
 		if (pc > small) {
 			fail(r, "the smaller decode overran its buffer");

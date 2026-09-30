@@ -43,6 +43,7 @@
 #include "../extractors/decomp/ovba.h"
 #include "../extractors/decomp/lzma.h"
 #include "../extractors/decomp/aplib.h"
+#include "../extractors/decomp/aspack.h"
 #include "../extractors/decomp/lzmat.h"
 #include "../extractors/decomp/bcj.h"
 #include "../extractors/decomp/rar3.h"
@@ -742,6 +743,10 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_entry_rva = 0;
 	memset(sc->pend_dir, 0, sizeof sc->pend_dir);
 	sc->pend_image = 0;
+	sc->n_pend_imp = 0;
+	sc->imp_pool_n = 0;
+	sc->pend_imp_at = 0;
+	sc->pend_imp_set = 0;
 }
 
 /*
@@ -825,6 +830,56 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 	}
 	sc->n_pend_rgn = n;
 	sc->pend_rgn_fmt = fmt;
+}
+
+/*
+ * THE MODULE'S NAME WHEN THE MODULE NEVER SAID ONE.
+ *
+ * `kof_db_source` answers where a module's source lives inside the bases tree -
+ * "unp/emu_generic_00.c", "decomp/zlibraw.c" - and that was handed to readers
+ * as the name of whatever opened an object. It is not a name. It is this
+ * project's directory layout on somebody else's screen, and kofviewer showed it
+ * in the packer column beside rows that read "MPRESS.PE" and "UPX.PE".
+ *
+ * A module names itself by the prefix of its first kof_debug note, which is
+ * what every module with something to report already does. Eight produce
+ * children while reporting nothing - the generic interpreter receiver, the
+ * shellcode carver, appended data, bzip2, gzip, the overlay carver, rcpfile
+ * and raw zlib - and for those the source stem IS the only name the database
+ * carries. So it is reduced to one: the last path component, without its
+ * extension and without the "_00" that numbers a module within its family.
+ *
+ * The result is still derived from a file name, and that is honest - it says
+ * the module did not name itself - but it is bounded to a name-shaped word and
+ * can never carry a directory.
+ */
+static void mod_name_of(const char *src, char *out, size_t cap)
+{
+	const char *b;
+	size_t n;
+
+	if (!out || !cap)
+		return;
+	out[0] = 0;
+	if (!src || !*src)
+		return;
+	for (b = src; *src; src++)
+		if (*src == '/' || *src == '\\')
+			b = src + 1;
+	n = strlen(b);
+	if (n > 2u && b[n - 2u] == '.' && b[n - 1u] == 'c')
+		n -= 2u;
+	/* "_00", "_01": which member of a family, not part of the name. */
+	while (n > 1u && b[n - 1u] >= '0' && b[n - 1u] <= '9')
+		n--;
+	if (n > 1u && b[n - 1u] == '_')
+		n--;
+	if (!n)
+		return;
+	if (n >= cap)
+		n = cap - 1u;
+	memcpy(out, b, n);
+	out[n] = 0;
 }
 
 static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
@@ -1114,18 +1169,16 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * that carries the name and not the child.
 	 */
 	if (sc->cur_mod && !sc->opened_by[0]) {
-		const char *from = (sc->mod_tag_of == sc->cur_mod &&
-				    sc->mod_tag[0])
-				   ? sc->mod_tag
-				   : kof_db_source(sc->eng, sc->cur_mod);
-
-		if (from) {
-			size_t q = strlen(from);
+		if (sc->mod_tag_of == sc->cur_mod && sc->mod_tag[0]) {
+			size_t q = strlen(sc->mod_tag);
 
 			if (q >= KOF_MOD_TAG)
 				q = KOF_MOD_TAG - 1u;
-			memcpy(sc->opened_by, from, q);
+			memcpy(sc->opened_by, sc->mod_tag, q);
 			sc->opened_by[q] = 0;
+		} else {
+			mod_name_of(kof_db_source(sc->eng, sc->cur_mod),
+				    sc->opened_by, sizeof sc->opened_by);
 		}
 		/*
 		 * AND THE BUILD, WHICH IS ONE ANSWER AND NOT TWO.
@@ -1236,6 +1289,34 @@ static void c_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
 }
 
 /* This object is a wrapper - see `supersede` in kofsig.h. */
+/*
+ * A register, and guest memory, of the machine the last run left.
+ *
+ * Both answer nothing when no machine is alive, which is the honest answer for
+ * a module that never asked for a run or whose run the host refused.
+ */
+static uint64_t c_emu_reg(const struct kof_obj_ctx *ctx, uint32_t gpr)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->emu_live)
+		return 0;
+	return kof_emu_get_reg(sc->emu_live, gpr);
+}
+
+static uint32_t c_emu_read(const struct kof_obj_ctx *ctx, uint64_t va,
+			   uint8_t *out, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->emu_live || !out || !n)
+		return 0;
+	/* The interpreter answers all-or-nothing for a span, which is the
+	 * right shape here too: a partial read of a structure is a structure
+	 * nobody can check. */
+	return kof_emu_read(sc->emu_live, va, out, n) ? n : 0u;
+}
+
 /* Which build of the packer - see `packer_build` in kofsig.h. */
 static void c_packer_build(const struct kof_obj_ctx *ctx, const char *build)
 {
@@ -1714,6 +1795,23 @@ static unsigned lzma_cto_bits(uint32_t method)
 }
 
 /*
+ * ASPack, and whether this id carries the call/jmp filter's marker.
+ *
+ * Returns -1 for anything else, 0 for the plain coding, and mark + 1 for a
+ * filtered one - so the caller can tell "no filter" from "a filter whose
+ * marker byte is zero", which a bare marker cannot say.
+ */
+static int aspack_mark_of(uint32_t method)
+{
+	if (method == KOF_UNP_ASPACK)
+		return 0;
+	if (method >= KOF_UNP_ASPACK_E8E9 &&
+	    method <= KOF_UNP_ASPACK_E8E9 + 0xffu)
+		return (int)(method - KOF_UNP_ASPACK_E8E9) + 1;
+	return -1;
+}
+
+/*
  * The methods unpack_buffered takes: everything whose whole output has to be
  * addressable at once. DEFLATE and HEXTEXT stream instead and are answered
  * before this is asked.
@@ -1744,7 +1842,7 @@ static int buffered_method(uint32_t method)
 	 * have" and nothing is said about the file.
 	 */
 	return method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86 ||
-	       method == KOF_UNP_APLIB ||
+	       method == KOF_UNP_APLIB || aspack_mark_of(method) >= 0 ||
 	       method == KOF_UNP_LZMAT || lzmat_cto_bits(method) != 0u ||
 	       method == KOF_UNP_RAR3  || method == KOF_UNP_RAR5 ||
 	       (method >= KOF_UNP_LZMA && method <= KOF_UNP_LZMA + 224u) ||
@@ -1974,6 +2072,20 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		 * the stream ends and the buffer IS the window.
 		 */
 		st = kof_aplib_decode(in, in_len, buf, want, &produced);
+	} else if (aspack_mark_of(method) >= 0) {
+		int mark = aspack_mark_of(method);
+
+		/* Buffered for the same reason again - see aspack.h. */
+		st = kof_aspack_decode(in, in_len, buf, want, &produced);
+		/*
+		 * And the call/jmp filter undone over the whole block, where
+		 * the LZMA and BCJ pairs undo theirs and for the same reason:
+		 * it rewrites a displacement against the instruction's own
+		 * position in the OUTPUT.
+		 */
+		if (mark > 0 && produced)
+			kof_aspack_e8e9_decode(buf, produced,
+					       (uint8_t)(mark - 1));
 	} else if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
 		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
 		/*
@@ -3146,6 +3258,45 @@ static int c_child(const struct kof_obj_ctx *ctx)
 		int ok;
 
 		/*
+		 * THE IMPORT DIRECTORY FIRST, BECAUSE THE HEADER POINTS AT IT.
+		 *
+		 * Written here and not when the module declared it, for the
+		 * reason the header is written here: a declaration may be
+		 * corrected until the child closes, and the table's size is
+		 * not settled until the last entry is in.
+		 *
+		 * BEFORE the header, because the directory entry it sets is
+		 * one of the header's own fields - see the pend_dir walk in
+		 * kof_pe_write_hdr. Written after, the header would carry
+		 * whatever the parent's import directory said, which points
+		 * into the PACKER's sections and not into this child's.
+		 *
+		 * A failure here is not silent and not fatal to the child: the
+		 * bytes it would have written are untouched - see
+		 * kof_pe_write_imports, which changes nothing unless the whole
+		 * table fits - and no directory is set, so the child goes out
+		 * as an image with no imports rather than as one pointing at
+		 * a table that is not there.
+		 */
+		if (sc->pend_imp_set && sc->n_pend_imp) {
+			uint64_t n = kof_pe_write_imports(sc->sink_mem,
+							  sc->sink_len,
+							  sc->pend_imp_at,
+							  sc->pend_imp,
+							  sc->n_pend_imp,
+							  sc->imp_pool,
+							  sc->imp_pool_n);
+
+			if (n && sc->pend_imp_at < span &&
+			    KOF_PE_DIR_IMPORT < 16u) {
+				sc->pend_dir[KOF_PE_DIR_IMPORT].rva =
+					sc->pend_imp_at;
+				sc->pend_dir[KOF_PE_DIR_IMPORT].size = n;
+				sc->pend_dir[KOF_PE_DIR_IMPORT].set = 1;
+			}
+		}
+
+		/*
 		 * WHAT THE MODULE SAID, OR WHAT THE PARENT IS.
 		 *
 		 * A packer's child is the parent's own image and the parent's
@@ -3163,13 +3314,55 @@ static int c_child(const struct kof_obj_ctx *ctx)
 					       sc->pend_sec[0].rva, is64, mach,
 					       sc->pend_as_base, sc->pend_sec,
 					       sc->n_pend_sec, entry,
+					       sc->pend_entry_set,
 					       span) != 0;
 		} else {
+			/*
+			 * AND FOR PE, WHAT THE MODULE SAID ABOUT WIDTH AND
+			 * BASE BEATS WHAT THE PARENT IS.
+			 *
+			 * The ELF arm above has always read pend_as_arch and
+			 * pend_as_base; this one read neither, so a module
+			 * could declare KOF_FMT_PE and have its architecture
+			 * silently ignored. That is not hypothetical - it is
+			 * the reason msf_pe.h wrote its own header instead of
+			 * declaring one: msfvenom's 64-bit Windows payload is
+			 * routinely carried by a PE32 template, and a payload
+			 * described as i386 is disassembled and prefiltered as
+			 * i386.
+			 *
+			 * A COPY OF THE TEMPLATE, not a change to the writer's
+			 * arguments. The template is the parent's parse and
+			 * supplies subsystem, characteristics and the
+			 * directories; only the three fields the module
+			 * actually spoke about move. Anything but x86 and
+			 * x86-64 leaves all three alone - the declaration
+			 * cannot say more than the writer can express, and
+			 * guessing a machine number for an architecture this
+			 * builds no PE for would be inventing one.
+			 */
+			struct kof_pe_info as_pe;
+			const struct kof_pe_info *use = tmpl;
+
+			if (tmpl && tmpl->valid &&
+			    sc->pend_as_fmt == KOF_FMT_PE &&
+			    (sc->pend_as_arch == KOF_ARCH_X86 ||
+			     sc->pend_as_arch == KOF_ARCH_X86_64)) {
+				int is64 = sc->pend_as_arch == KOF_ARCH_X86_64;
+
+				as_pe = *tmpl;
+				as_pe.pe32_plus = (uint8_t)(is64 ? 1 : 0);
+				as_pe.machine = (uint16_t)(is64 ? 0x8664u
+								: 0x014cu);
+				if (sc->pend_as_base)
+					as_pe.image_base = sc->pend_as_base;
+				use = &as_pe;
+			}
 			ok = (ctx->format == KOF_FMT_PE || sc->pend_as_fmt ==
 							   KOF_FMT_PE) &&
-			     tmpl && tmpl->valid &&
+			     use && use->valid &&
 			     kof_pe_write_hdr(sc->sink_mem,
-					      sc->pend_sec[0].rva, tmpl,
+					      sc->pend_sec[0].rva, use,
 					      sc->pend_sec, sc->n_pend_sec,
 					      entry, span, sc->pend_dir) != 0;
 		}
@@ -3642,6 +3835,109 @@ static int c_produced_poke(const struct kof_obj_ctx *ctx, uint64_t off,
  */
 #define DECL_SEC_MAX 96u        /* what a PE may declare, which is the most any
 				 * producer here has reason to */
+
+/*
+ * ---- WHAT THE CHILD IMPORTS - see `import` in kofsig.h ---------------------
+ *
+ * The bounds are the same kind the section table has and are chosen the same
+ * way: from what the one container doing this actually holds. MPRESS's hint
+ * list is capped at 32 libraries and 512 functions by the module that reads
+ * it, so a table of 1024 entries cannot be filled by it, and the pool holds
+ * every name those entries can carry at the 64-byte cap that module enforces.
+ * A container that wanted more would be refused here and would say so, which
+ * is the behaviour a cap is for.
+ */
+#define DECL_IMP_MAX  1024u
+#define DECL_POOL_MAX (64u * 1024u)
+
+/* Put a string in the pool once, and answer where it is. The same library name
+ * arrives once per function it exports, so interning is not an economy - it is
+ * what keeps the pool bounded by the NUMBER of names rather than by the number
+ * of entries. */
+static int imp_intern(struct kof_scanner *sc, const char *s, uint32_t *off)
+{
+	uint32_t k, n = 0;
+
+	if (!s)
+		return 0;
+	while (s[n]) {
+		if (n >= DECL_POOL_MAX)
+			return 0;
+		n++;
+	}
+	if (!n)
+		return 0;
+	for (k = 0; k + n < sc->imp_pool_n; k++)
+		if (!memcmp(sc->imp_pool + k, s, n) && !sc->imp_pool[k + n]) {
+			*off = k;
+			return 1;
+		}
+	if (sc->imp_pool_n + n + 1u > DECL_POOL_MAX)
+		return 0;
+	memcpy(sc->imp_pool + sc->imp_pool_n, s, n);
+	sc->imp_pool[sc->imp_pool_n + n] = 0;
+	*off = sc->imp_pool_n;
+	sc->imp_pool_n += n + 1u;
+	return 1;
+}
+
+static int c_import(const struct kof_obj_ctx *ctx, const char *dll,
+		    const char *fn, uint32_t ordinal, uint64_t iat_rva)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_imp_decl *d;
+	uint32_t dll_off = 0, fn_off = 0;
+
+	if (!sc || !dll || !*dll)
+		return 0;
+	/* One or the other, never both and never neither - a PE import is a
+	 * name or a number, and an entry that is neither describes nothing. */
+	if ((ordinal != 0) == (fn != NULL && *fn != 0))
+		return 0;
+	if (ordinal > 0xffffu)
+		return 0;
+	if (!sc->pend_imp) {
+		sc->pend_imp = calloc(DECL_IMP_MAX, sizeof *sc->pend_imp);
+		sc->imp_pool = calloc(DECL_POOL_MAX, 1u);
+		if (!sc->pend_imp || !sc->imp_pool)
+			return 0;
+	}
+	if (sc->n_pend_imp >= DECL_IMP_MAX)
+		return 0;
+	if (!imp_intern(sc, dll, &dll_off))
+		return 0;
+	if (!ordinal && !imp_intern(sc, fn, &fn_off))
+		return 0;
+
+	d = &sc->pend_imp[sc->n_pend_imp++];
+	d->iat_rva = iat_rva;
+	d->dll_off = dll_off;
+	d->fn_off = fn_off;
+	d->ordinal = (uint16_t)ordinal;
+	d->_pad = 0;
+	return 1;
+}
+
+static uint64_t c_import_bytes(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->n_pend_imp)
+		return 0;
+	return kof_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
+				   sc->imp_pool, sc->imp_pool_n);
+}
+
+static int c_import_at(const struct kof_obj_ctx *ctx, uint64_t rva)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->n_pend_imp)
+		return 0;
+	sc->pend_imp_at = rva;
+	sc->pend_imp_set = 1;
+	return 1;
+}
 
 static int c_section(const struct kof_obj_ctx *ctx, const char *name,
 		     uint64_t rva, uint64_t vsize, uint32_t perm,
@@ -5289,7 +5585,13 @@ static const struct kof_content kof_detect_vtable = {
 	/* as_format - nor an image to write a header for. */
 	NULL,
 	/* packer_build - a detector names families, not builds. */
-	NULL
+	NULL,
+	/* emu_reg, emu_read - a detector drives no interpreter, so there is
+	 * never a machine of its own to read. */
+	NULL, NULL,
+	/* import, import_bytes, import_at - a detector produces no child to
+	 * have imports. */
+	NULL, NULL, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -5307,7 +5609,8 @@ static const struct kof_content kof_unpack_vtable = {
 	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
-	c_supersede, c_as_format, c_packer_build
+	c_supersede, c_as_format, c_packer_build, c_emu_reg, c_emu_read,
+	c_import, c_import_bytes, c_import_at
 };
 
 /*

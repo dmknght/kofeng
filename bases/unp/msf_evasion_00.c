@@ -291,7 +291,7 @@ KOF_DEFINE_UNPACK
 	 * 32 bits, because this module declares ARCH_X86 and metasploit builds
 	 * no 64-bit version of the evasion EXE.
 	 */
-	if (!msf_emit_pe(ctx, size, 32))
+	if (!msf_decl_pe(ctx, size, 32))
 		return;
 
 	/* From a fresh schedule: the nine bytes taken above were a test, and

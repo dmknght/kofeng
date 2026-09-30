@@ -82,6 +82,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofanalyze/msf_pe.h>
+#include <kofanalyze/msf_elf64.h>
 
 KOF_UNPACK_KIND(KOF_UNP_PACKER);
 
@@ -273,17 +274,17 @@ static int stub_in_buf(const uint8_t *p, uint32_t n)
 /*
  * THE HEADER msfvenom WOULD HAVE WRITTEN, PUT BACK IN FRONT OF THE PAYLOAD.
  *
- * WHY THIS EXISTS. The payload that comes out of the last layer is machine code
- * and nothing else, so the object had no format - and a signature written for
- * it therefore could not use an ELF region. The alternative was to let rules
- * name two formats and branch on which one they got, and that is worse for the
- * reason the build already gives for keeping one format per module: the branch
- * is N places that can forget, against one that can be tested. Reattaching the
- * header moves the work to the one place that knows the payload is an ELF
- * payload - here.
+ * WHY THIS HAPPENS AT ALL. The payload that comes out of the last layer is
+ * machine code and nothing else, so the object had no format - and a signature
+ * written for it therefore could not use an ELF region. The alternative was to
+ * let rules name two formats and branch on which one they got, and that is
+ * worse for the reason the build already gives for keeping one format per
+ * module: the branch is N places that can forget, against one that can be
+ * tested. Reattaching the header moves the work to the one place that knows
+ * the payload is an ELF payload - here.
  *
  * WHAT IS BEING CLAIMED, and it is narrow. msfvenom does not compile these; it
- * pastes the payload into a fixed template, and the template is these 120 bytes
+ * pastes the payload into a fixed template, and the template is those bytes
  * with two lengths patched. So this is not an invention: it is the same file
  * with the encoder undone, and `cleartext` in the sample set is the reference -
  * a payload built with no encoder at all is byte for byte this layout.
@@ -297,63 +298,14 @@ static int stub_in_buf(const uint8_t *p, uint32_t n)
  * carry twenty reconstructed headers, nineteen of them wrapping a decryptor
  * rather than a payload - work and objects for nothing. The intermediate layers
  * stay formatless, which is what they are.
+ *
+ * THE HEADER ITSELF IS NO LONGER WRITTEN HERE. It was - 0x78 bytes assembled
+ * field by field and handed over with kunp_rcstruct_write - and it is now a
+ * DECLARATION, msf_decl_elf64 in kofanalyze/msf_elf64.h, with the engine
+ * writing the bytes. Same bytes, and the engine now knows they are a header
+ * rather than having to parse them back out of the child to find out. See the
+ * note in that file.
  */
-#define ELF_HDR_N   0x78u
-#define ELF_BASE    0x400000ull
-
-static void put64(uint8_t *p, uint64_t v)
-{
-	unsigned i;
-
-	for (i = 0; i < 8; i++)
-		p[i] = (uint8_t)(v >> (i * 8));
-}
-
-static int emit_elf_hdr(const struct kof_obj_ctx *ctx, uint64_t payload_n)
-{
-	uint8_t h[ELF_HDR_N];
-	uint8_t *ph = h + 0x40;
-	uint64_t total = ELF_HDR_N + payload_n;
-	unsigned k;
-
-	/* Zeroed by hand: a module links against nothing, so there is no
-	 * memset here to call. */
-	for (k = 0; k < ELF_HDR_N; k++)
-		h[k] = 0;
-	h[0] = 0x7f; h[1] = 'E'; h[2] = 'L'; h[3] = 'F';
-	h[4] = 2;                       /* ELFCLASS64                       */
-	h[5] = 1;                       /* ELFDATA2LSB                      */
-	h[6] = 1;                       /* EV_CURRENT                       */
-	h[0x10] = 2;                    /* ET_EXEC                          */
-	h[0x12] = 0x3e;                 /* EM_X86_64                        */
-	h[0x14] = 1;                    /* e_version                        */
-	put64(h + 0x18, ELF_BASE + ELF_HDR_N);   /* e_entry: the payload    */
-	put64(h + 0x20, 0x40);          /* e_phoff                          */
-	/* e_shoff stays zero: the template has no section table, and neither
-	 * has any sample measured. */
-	h[0x34] = 0x40;                 /* e_ehsize                         */
-	h[0x36] = 0x38;                 /* e_phentsize                      */
-	h[0x38] = 1;                    /* e_phnum                          */
-
-	ph[0] = 1;                      /* PT_LOAD                          */
-	ph[4] = 7;                      /* RWX, which is what the template   */
-					/* asks for - the payload writes to  */
-					/* itself                            */
-	put64(ph + 0x08, 0);            /* p_offset                         */
-	put64(ph + 0x10, ELF_BASE);     /* p_vaddr                          */
-	put64(ph + 0x18, ELF_BASE);     /* p_paddr                          */
-	put64(ph + 0x20, total);        /* p_filesz                         */
-	/*
-	 * p_memsz = p_filesz. The template pads it - `cleartext` asks for 680
-	 * bytes of image for 250 of file - and the padding is a constant of the
-	 * template rather than anything derived from the payload, so copying the
-	 * number would be inventing one. Against that sample this reconstruction
-	 * differs in these eight bytes and in nothing else.
-	 */
-	put64(ph + 0x28, total);        /* p_memsz                          */
-	put64(ph + 0x30, 0x1000);       /* p_align                          */
-	return kunp_rcstruct_write(h, ELF_HDR_N);
-}
 
 KOF_DEFINE_UNPACK
 {
@@ -439,16 +391,16 @@ KOF_DEFINE_UNPACK
 	/*
 	 * A layer that decrypts to another stub is a decryptor, not a payload,
 	 * and stays formatless. Only the last one is given its header back - see
-	 * emit_elf_hdr.
+	 * msf_elf64.h.
 	 */
 	/* A Windows payload is reconstructed as a PE and a Linux one as an ELF -
 	 * see MSF_RECON_PE. The stub_in_buf gate is unchanged: an intermediate
 	 * decryptor still gets no header at all. */
 	if (!stub_in_buf(buf, n)) {
 		if (MSF_RECON_PE(ctx)) {
-			if (!msf_emit_pe(ctx, (uint32_t)produced, 64))
+			if (!msf_decl_pe(ctx, (uint32_t)produced, 64))
 				return;
-		} else if (!emit_elf_hdr(ctx, produced)) {
+		} else if (!msf_decl_elf64(ctx, produced)) {
 			return;
 		}
 	}

@@ -461,7 +461,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * copied every section into it, so that the engine could parse the
 	 * result back and recover what the header had said all along.
 	 */
-	if (kunp_rcstruct_section("", PEI_PAGE, u_len, KOF_PE_PERM_R,
+	if (kunp_rcstruct_section("", PEI_PAGE, u_len, KUNP_PERM_R,
 			    KOF_SECF_DATA | KOF_SECF_REBUILT) < 0)
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	if (!kunp_rcstruct_image() || !kunp_rcstruct_at(PEI_PAGE))

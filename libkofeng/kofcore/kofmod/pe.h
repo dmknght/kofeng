@@ -604,6 +604,33 @@ static inline const struct kof_pe_info *kof_pe(const struct kof_obj_ctx *ctx)
 }
 
 /*
+ * A SECTION'S PERMISSIONS, IN THE VOCABULARY A DECLARATION USES.
+ *
+ * The parser reports KOF_PE_PERM_*, which is this format's word for them.
+ * kunp_rcstruct_section takes KUNP_PERM_*, which is format-neutral because a
+ * module may target more than one format and must not have to know which
+ * format's constants it is holding.
+ *
+ * The two families happen to have the same three values, and every module here
+ * was passing the parser's word straight through on that coincidence - which
+ * is the exact confusion KUNP_PERM_* was introduced to remove. Said once, so
+ * that nothing relies on the numbers agreeing and a module that names the
+ * wrong family is a compile error rather than a silent success.
+ */
+static inline uint32_t kof_pe_perm_decl(uint32_t pe_perm)
+{
+	uint32_t p = 0;
+
+	if (pe_perm & KOF_PE_PERM_X)
+		p |= KUNP_PERM_X;
+	if (pe_perm & KOF_PE_PERM_W)
+		p |= KUNP_PERM_W;
+	if (pe_perm & KOF_PE_PERM_R)
+		p |= KUNP_PERM_R;
+	return p;
+}
+
+/*
  * Turn an RVA into a file offset.
  *
  * KOF_BROKEN when no section contains it, which is a thing hostile files arrange

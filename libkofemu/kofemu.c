@@ -6505,6 +6505,35 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			e->gpr[KOF_EMU_RAX] = (uint64_t)(int64_t)(int32_t)e->gpr[KOF_EMU_RAX];
 			break;
 
+		/*
+		 * BRANCH ON THE COUNTER BEING ZERO, and it does NOT decrement.
+		 *
+		 * The one member of this family that reads RCX without
+		 * touching it. Missing, a kkrunchy-packed binary stopped
+		 * 4111 instructions in with "JECXZ" as the reason - the
+		 * decompressor's inner loop is built on it - and all five
+		 * samples here produced nothing at all.
+		 *
+		 * The operand size that matters is the ADDRESS size, not the
+		 * data size: the same encoding reads CX, ECX or RCX depending
+		 * on the address-size prefix and the mode, which is what
+		 * bddisasm reports in AddrMode.
+		 */
+		case ND_INS_JrCXZ: {
+			uint64_t cnt = e->gpr[KOF_EMU_RCX];
+
+			if (ix.AddrMode == ND_ADDR_32)
+				cnt = (uint32_t)cnt;
+			else if (ix.AddrMode == ND_ADDR_16)
+				cnt = (uint16_t)cnt;
+			if (!cnt) {
+				if (!op_rd(e, &ix, &ix.Operands[0], &a))
+					goto unsupported;
+				next = a;
+			}
+			break;
+		}
+
 		/* The count-and-branch forms. RCX is the counter and is NOT a
 		 * flag setter - only the branch decision reads ZF. */
 		case ND_INS_LOOP: case ND_INS_LOOPZ: case ND_INS_LOOPNZ: {

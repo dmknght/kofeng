@@ -91,9 +91,16 @@ int kof_elf_rebuild(uint64_t base, kof_elf_rebuild_rd rd, void *user,
  * a caller that laid its content out too tightly must be told rather than
  * allowed to overwrite it.
  */
+/*
+ * `has_entry` is whether the producer DECLARED an entry point, and it decides
+ * e_type: ET_EXEC with the entry in it when one was declared, ET_DYN with
+ * e_entry 0 when none was. A blob lifted out of a variable has no entry point,
+ * and saying ET_EXEC of it would be a claim the parser correctly objects to.
+ */
 uint64_t kof_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 			   uint16_t machine, uint64_t base,
 			   const struct kof_sec_decl *sec, uint32_t n,
-			   uint64_t entry_rva, uint64_t image_end);
+			   uint64_t entry_rva, int has_entry,
+			   uint64_t image_end);
 
 #endif /* KOFENG_ELF_REBUILD_H */

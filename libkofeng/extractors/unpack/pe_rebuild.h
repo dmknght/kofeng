@@ -113,4 +113,46 @@ uint64_t kof_pe_write_hdr(uint8_t *out, uint64_t cap,
 			  const struct kof_dir_decl *dir);
 
 
+/*
+ * ---- AN IMPORT DIRECTORY WRITTEN FROM DECLARATIONS -------------------------
+ *
+ * The same direction as kof_pe_write_hdr and the same argument for it: a module
+ * that rebuilds imports knows the library, the function and the thunk, and had
+ * to encode all three into PE structures so the engine could parse them back.
+ * See `import` in kofsig.h, where that round trip is described.
+ *
+ * ONE BINDING. `dll` and `fn` are offsets into `pool`, a NUL-separated blob the
+ * caller owns; `fn_off` is ignored when `ordinal` is non-zero. `iat_rva` is the
+ * thunk the loader binds into, and 0 means the caller did not know one - the
+ * entry is still described, it simply has no slot to fill.
+ */
+struct kof_imp_decl {
+	uint64_t iat_rva;
+	uint32_t dll_off, fn_off;
+	uint16_t ordinal;
+	uint16_t _pad;
+};
+
+/*
+ * How many bytes the table needs at `base`, or 0 when it cannot be built.
+ *
+ * Asked before anything is written, because the caller owns the layout and has
+ * to reserve the room - see import_bytes in kofsig.h.
+ */
+uint64_t kof_pe_imports_size(const struct kof_imp_decl *imp, uint32_t n,
+			     const char *pool, uint64_t pool_n);
+
+/*
+ * Write it into `img` - the WHOLE child image, addressed by RVA, because the
+ * thunks this fills are anywhere in it and the table itself is at `base`.
+ *
+ * `img_n` bounds every write. Returns the bytes the table occupies at `base`,
+ * or 0 when anything did not fit - in which case nothing of the child has been
+ * changed, so a caller can refuse rather than hand over a half-written table.
+ */
+uint64_t kof_pe_write_imports(uint8_t *img, uint64_t img_n, uint64_t base,
+			      const struct kof_imp_decl *imp, uint32_t n,
+			      const char *pool, uint64_t pool_n);
+
+
 #endif /* KOFENG_PE_REBUILD_H */
