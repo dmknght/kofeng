@@ -77,7 +77,22 @@ enum kof_emu_stop {
 	 * otherwise consume the entire budget in a loop three instructions
 	 * long. Whatever has been written is still worth dumping.
 	 */
-	KOF_EMU_STOP_STALLED
+	KOF_EMU_STOP_STALLED,
+	/*
+	 * THE INSTRUCTION ABOUT TO RUN IS ONE A MODULE ASKED TO SEE.
+	 *
+	 * Not a failure and not the end: the run is PAUSED with the guest's
+	 * state intact, the module reads what it wants, and kof_emu_run called
+	 * again carries on from the same place. See kof_emu_watch_insn.
+	 */
+	KOF_EMU_STOP_INSN,
+	/*
+	 * THE DECRYPTION FINISHED. Not a failure and not a budget: the guest
+	 * decrypted something and then stopped doing so, which is exactly the
+	 * moment everything this interpreter exists for has already happened.
+	 * See KOF_EMU_QUIET.
+	 */
+	KOF_EMU_STOP_QUIET
 };
 
 /*
@@ -124,6 +139,41 @@ enum kof_emu_stop {
  * see it and an unproductive one ends in a fraction of a second.
  */
 #define KOF_EMU_IDLE      (4u << 20)
+
+/*
+ * HOW LONG A RUN CARRIES ON AFTER THE DECRYPTION STOPS - AND WHY IT IS OFF.
+ *
+ * An "active instruction" is a write landing within a few bytes of the last
+ * one, away from the stack: the output of a decryption loop. See the note in
+ * kofemu.c for why the signal is a memory trace and not an opcode, and for the
+ * measurement that chose this trace over the published one.
+ *
+ * THE SIGNAL IS REAL AND THE THRESHOLD IS NOT. A run that has not produced one
+ * for a while has finished decrypting - that much is sound, and the actives
+ * land exactly on the decrypted body on every sample here. What does not exist
+ * is one number that says "a while". Measured, the largest gap between two
+ * consecutive actives WITHIN a decryption that had not finished:
+ *
+ *     Sality 160e27a3        395
+ *     Sality 8ef99966        335
+ *     Sality f073b23d        418
+ *     Sality 57d128c3      7,992
+ *     Themida telvm.exe    3,973
+ *     PECompact 007 Spy  1,209,199
+ *
+ * Three and a half orders of magnitude. The 1500 below is the figure the
+ * technique's original description uses, and it was chosen against DOS-era
+ * viruses whose decryptors were tight; a modern packer interleaves long
+ * phases that write nothing and is still decrypting. Setting the bar high
+ * enough for PECompact saves nothing at all, and setting it anywhere lower
+ * loses a detection - measured, 57d128c3 stops after 11,066 instructions
+ * having decrypted nothing.
+ *
+ * So this stays behind KOF_EMU_QUIET, off, with the numbers written down. A
+ * relative rule - a multiple of the gaps seen so far - is the obvious next
+ * thing to try and has not been measured.
+ */
+#define KOF_EMU_QUIET     1500u
 
 #define KOF_EMU_MAX_VMA   1024u
 #define KOF_EMU_MAX_SNAP  64u
@@ -249,6 +299,16 @@ void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
 #define KOF_EMU_WIN_MOD_KBASE    8u
 #define KOF_EMU_WIN_MOD_COUNT 9u
 
+/*
+ * How much address space one synthetic library occupies. The builder in
+ * emu_unpack.c writes this as each module's SizeOfImage, and the interpreter
+ * needs the same number to answer "is this address inside a library" - which
+ * VirtualAlloc must know, because Windows refuses an explicit allocation
+ * there and a protector asks in order to find out whether it is being
+ * emulated.
+ */
+#define KOF_EMU_WIN_MOD_SPAN (256u * KOF_EMU_PAGE)
+
 unsigned    kof_emu_win_api_count(void);
 const char *kof_emu_win_api_name(unsigned i);
 unsigned    kof_emu_win_api_argc(unsigned i);
@@ -334,6 +394,12 @@ uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name);
 void     kof_emu_set_rip(struct kof_emu *e, uint64_t rip);
 void     kof_emu_set_reg(struct kof_emu *e, unsigned gpr, uint64_t v);
 uint64_t kof_emu_get_reg(const struct kof_emu *e, unsigned gpr);
+/*
+ * Where the machine is. A module that PAUSED a run - see kof_emu_watch_insn -
+ * is standing at an instruction it asked to stop at, and cannot check what
+ * surrounds it without knowing where it is.
+ */
+uint64_t kof_emu_get_rip(const struct kof_emu *e);
 uint64_t kof_emu_rip(const struct kof_emu *e);
 
 enum kof_emu_stop kof_emu_run(struct kof_emu *e);
@@ -484,6 +550,48 @@ int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n);
 #define KOF_EMU_EXEC_WATCH 16u
 
 void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi);
+
+/*
+ * ---- STOPPING ON WHAT IS ABOUT TO RUN, RATHER THAN ON WHERE ----------------
+ *
+ * kof_emu_watch_exec names an ADDRESS, and that is the wrong question for
+ * three families this engine meets:
+ *
+ *   - PECompact copies its loader to 0x20000000 and finishes there, so the
+ *     bytes that hand over are never executed at the address they occupy in
+ *     the file. The public OllyDbg scripts search them IN MEMORY.
+ *   - Petite ends the same way, at `9D 5F F3 AA 61 66 9D 83 C4 08`.
+ *   - Sality is polymorphic: the whole first stage differs per sample and the
+ *     only fixed thing about it is that it ends in a one-byte `C3`.
+ *
+ * So a module names BYTES. The run stops when the instruction about to execute
+ * begins with them, and that is a pause: registers and memory are as the guest
+ * left them, kof_emu_reg and kof_emu_read answer about that moment, and calling
+ * kof_emu_run again continues from it.
+ *
+ * WHY A PAUSE AND NOT A CALLBACK. A callback would put module code inside the
+ * loop that executes hostile bytes, and the one architectural rule here is that
+ * the interpreter has no path out to a module - it gathers, and the module
+ * decides afterwards. A pause keeps that: the module is the caller throughout,
+ * and what it gets is a machine that has stopped.
+ *
+ * This is how TinyAntivirus finds Sality - hook every instruction, wait for a
+ * one-byte C3, read [ESP] and check what is there - expressed without a hook.
+ * See THIRD-PARTY.md.
+ *
+ * `n` is 1 to KOF_EMU_INSN_WATCH_LEN bytes. Up to KOF_EMU_INSN_WATCH patterns.
+ */
+#define KOF_EMU_INSN_WATCH     8u
+#define KOF_EMU_INSN_WATCH_LEN 8u
+
+void kof_emu_watch_insn(struct kof_emu *e, const uint8_t *bytes, unsigned n);
+
+/*
+ * AND WHETHER THE WHOLE INSTRUCTION IS THAT LONG, which is what tells `C3`
+ * from `C2 imm16` and from a longer instruction that merely starts with those
+ * bytes. 0 means "do not care".
+ */
+void kof_emu_watch_insn_len(struct kof_emu *e, unsigned len);
 
 /*
  * AND WHERE THE CIPHERTEXT IS.

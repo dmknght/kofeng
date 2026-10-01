@@ -27,6 +27,12 @@
 
 #include <stdint.h>
 
+/* The code reader's vocabulary - see kdis.h for what it is for. */
+#include "kdis.h"
+
+/* The two kinds of range kof_mark_infected takes. */
+#include "infected.h"
+
 /*
  * ABI version, and it covers TWO things a module depends on: the vtable it
  * calls through - struct kof_content - and the LAYOUT of every view struct it
@@ -2146,10 +2152,175 @@ struct kof_content {
 	 * arguments do not describe an import - so a module stops rather than
 	 * producing a child whose directory is missing entries.
 	 */
+	/*
+	 * ---- PAUSING A RUN ON WHAT IS ABOUT TO EXECUTE --------------------
+	 *
+	 * emu_watch names an ADDRESS, and for three families here that is the
+	 * wrong question: PECompact and Petite finish in bytes that never run
+	 * at the address they occupy in the file, and Sality's whole first
+	 * stage is polymorphic - the only fixed thing about it is that it ends
+	 * in a one-byte `C3`.
+	 *
+	 * So a module names BYTES instead. The run stops when the instruction
+	 * ABOUT TO EXECUTE begins with them - before it executes, so a `ret`
+	 * still has its target on the stack - and that stop is a PAUSE: the
+	 * machine is intact, emu_reg and emu_read answer about that moment, and
+	 * emu_resume carries on from it.
+	 *
+	 * `len` is the whole instruction's length, or 0 for "do not care". It
+	 * is what tells `C3` from `C2 imm16` and from something longer that
+	 * merely starts with the same byte.
+	 *
+	 * emu_resume returns what emu_run returns: the number of regions when
+	 * the run has finished for good, and 0 when it has paused again. A
+	 * module that resumes without bound would spend a whole budget one
+	 * pause at a time, so it counts its own resumes - the host bounds the
+	 * instructions, not the pauses.
+	 *
+	 * This is TinyAntivirus's Sality detector expressed without a hook:
+	 * it hooks every instruction, waits for a one-byte C3, reads [ESP] and
+	 * checks what is there. A hook would put module code inside the loop
+	 * that executes hostile bytes; a pause keeps the module the caller.
+	 * See THIRD-PARTY.md.
+	 */
+	void (*emu_watch_insn)(const struct kof_obj_ctx *, const uint8_t *bytes,
+			       uint32_t n, uint32_t len);
+	uint32_t (*emu_resume)(const struct kof_obj_ctx *);
+
 	int (*import)(const struct kof_obj_ctx *, const char *dll,
 		      const char *fn, uint32_t ordinal, uint64_t iat_rva);
 	uint64_t (*import_bytes)(const struct kof_obj_ctx *);
 	int (*import_at)(const struct kof_obj_ctx *, uint64_t rva);
+
+	/*
+	 * ---- READING CODE WITHOUT RUNNING IT -------------------------------
+	 *
+	 * See kofmod/kdis.h, which holds the vocabulary and the argument for
+	 * why a module needs this at all. In short: a byte signature over a
+	 * polymorphic decryptor names one GENERATION of it, so a rule has to
+	 * be written against what the instructions MEAN - and until now a
+	 * module could not decode one.
+	 *
+	 * dis_seek starts a walk at an offset. `keep` carries the register
+	 * constant map across the move, which is what following a branch
+	 * inside one walk needs; 0 starts the map empty.
+	 *
+	 * dis_next decodes at the cursor, advances it, and updates the map.
+	 * Answers 0 at the end of the object or on bytes that do not decode.
+	 *
+	 * dis_reg answers a register's constant, or 0 for "not knowable
+	 * here" - which is a real answer and not an error. kdis.c says what
+	 * the map follows and what it deliberately does not.
+	 */
+	/*
+	 * STOP HERE, AND TAKE WHAT THE RUN HAS ALREADY LEFT.
+	 *
+	 * A paused run - see emu_watch_insn - used to have two ends: resume
+	 * until it finishes, or abandon the machine with everything it
+	 * decrypted still inside it. Neither is what a module wants once it
+	 * has what it came for.
+	 *
+	 * MEASURED, and it is not a small cost. The Sality module recognises
+	 * its family at the FIRST pause, a few thousand instructions in, and
+	 * then disarmed the watch and resumed - which ran to the 268,435,456
+	 * instruction ceiling and took forty seconds on one file. Everything
+	 * after the pause was spent proving nothing.
+	 *
+	 * So this ends the run where it stands and gathers the regions
+	 * exactly as a finished run does, answering the same count. It is the
+	 * module's half of "emulate what is necessary": the interpreter
+	 * cannot know when enough has been decrypted, and the module that
+	 * recognised the family can.
+	 */
+	/*
+	 * RUN IN SLICES, so the module can look between them.
+	 *
+	 * Set before emu_run, and honoured by emu_run and emu_resume alike:
+	 * each of them comes back after at most this many instructions with
+	 * the machine ALIVE and paused, exactly as an instruction watch does.
+	 * Zero, the default, means run to the host's ceiling.
+	 *
+	 * This is what periodic scanning is built on - decrypt a little, look,
+	 * decide. The alternative is waiting for the decryptor to finish, and
+	 * measured on Sality that is 186 million instructions for data that is
+	 * in memory after about twenty million.
+	 */
+	void (*emu_slice)(const struct kof_obj_ctx *, uint64_t insn);
+
+	uint32_t (*emu_stop)(const struct kof_obj_ctx *);
+
+	int (*dis_seek)(const struct kof_obj_ctx *, uint64_t off, int keep);
+	int (*dis_next)(const struct kof_obj_ctx *, struct kdis_insn *out);
+	int (*dis_reg)(const struct kof_obj_ctx *, uint8_t r, uint64_t *out);
+
+	/*
+	 * ---- LOOKING AT A REGION A RUN LEFT ---------------------------------
+	 *
+	 * A REGION IS A SNAPSHOT AND emu_read IS THE LIVE MACHINE. While a run
+	 * is paused a module reads the machine; once it has ENDED there is no
+	 * machine, and what survives is what was gathered.
+	 *
+	 * WHY BOTH ARE NEEDED, measured. Three of the four Sality samples pause
+	 * mid-decryption, get looked at, and are recognised out of live memory.
+	 * The fourth never does: its decryptor faults at seven million
+	 * instructions and the run ends - and the body IS in the region that
+	 * run left, at offset 0x14b. Without this the module has the answer in
+	 * its hand and no way to read it.
+	 *
+	 * A module may already COPY these bytes into a child, so being allowed
+	 * to LOOK at them is not a new power.
+	 *
+	 * Returns how many bytes were copied: 0 for a region that does not
+	 * exist, and short at the region's end.
+	 */
+	uint32_t (*emu_region_read)(const struct kof_obj_ctx *, uint32_t i,
+				    uint64_t off, uint8_t *out, uint32_t n);
+
+	/*
+	 * ---- SAYING WHERE THE INFECTION IS ---------------------------------
+	 *
+	 * See `struct kof_infected` in kofeng.h. A module that can repair has
+	 * already located the damage - it could not describe a patch
+	 * otherwise - and this is how that location leaves the module instead
+	 * of being thrown away with it.
+	 *
+	 * Bounds-checked against the object, like every other range a module
+	 * hands over, and silently ignored once the cap is reached.
+	 */
+	void (*infected)(const struct kof_obj_ctx *, uint64_t off, uint64_t len,
+			 uint32_t kind);
+
+	/*
+	 * ---- CHANGING A PAUSED MACHINE ------------------------------------
+	 *
+	 * A watch used to be able to LOOK and nothing else - emu_reg and
+	 * emu_read answer about the moment the run stopped, and then the only
+	 * choices were to resume or to give up. That is half of what stopping
+	 * on an instruction is for.
+	 *
+	 * The other half is INTERVENING, and it is why fault handlers exist in
+	 * the published designs: a handler examines the machine, decides the
+	 * guest is about to do something the interpreter cannot follow, and
+	 * corrects it - it moves the instruction pointer past a construct, it
+	 * substitutes the value a missing library would have returned, it puts
+	 * back something the guest wrecked on purpose. Without a way to write,
+	 * every one of those is a run that simply ends.
+	 *
+	 * ONLY WHILE PAUSED. A machine that is running belongs to the
+	 * interpreter and one that has been handed over no longer exists; both
+	 * refuse.
+	 *
+	 * THE MODULE OWNS WHAT IT BREAKS. None of this is checked for sense -
+	 * an instruction pointer set into the middle of an instruction is a
+	 * legal thing to ask for and a rule may have a reason. What IS checked
+	 * is that the memory exists, because a write to a page the guest does
+	 * not have is a write that would go nowhere quietly.
+	 */
+	void (*emu_set_reg)(const struct kof_obj_ctx *, uint32_t gpr,
+			    uint64_t value);
+	void (*emu_set_ip)(const struct kof_obj_ctx *, uint64_t va);
+	uint32_t (*emu_write)(const struct kof_obj_ctx *, uint64_t va,
+			      const uint8_t *bytes, uint32_t n);
 };
 
 /*
@@ -4102,6 +4273,13 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 #define KUNP_REG_BP 5u
 #define KUNP_REG_SI 6u
 #define KUNP_REG_DI 7u
+/*
+ * AND WHERE THE MACHINE IS. Not a general purpose register and numbered past
+ * them on purpose: a module that paused a run stands at an instruction it
+ * named, and everything it wants to check - what surrounds that instruction,
+ * what it is part of - is relative to this.
+ */
+#define KUNP_REG_IP 16u
 
 #define kunp_emu_reg(gpr)                                                   \
 	((ctx)->content->emu_reg                                            \
@@ -4268,6 +4446,62 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	((ctx)->content->emu_run                                           \
 	 ? (ctx)->content->emu_run((ctx), (uint32_t)(vouch_level)) : 0u)
 
+/*
+ * Pause the run on an instruction, and carry on - see `emu_watch_insn`.
+ *
+ *     kunp_emu_watch_insn(ret, 1, 1);        // a one-byte C3
+ *     n = kunp_emu_run(2);
+ *     while (!n && kunp_emu_paused()) {
+ *             ...read the machine, decide...
+ *             n = kunp_emu_resume();
+ *     }
+ */
+#define kunp_emu_watch_insn(bytes, n, len)                                 \
+	((ctx)->content->emu_watch_insn                                    \
+	 ? (ctx)->content->emu_watch_insn((ctx), (bytes), (uint32_t)(n),   \
+					  (uint32_t)(len)) : (void)0)
+
+/*
+ * End a paused run and take its regions - see `emu_stop`. This and not a
+ * disarm-and-resume is how a module that has what it came for finishes.
+ */
+/*
+ * ---- CHANGING A PAUSED MACHINE - see `emu_set_reg` ------------------------
+ *
+ *     if (!kunp_emu_reg(KUNP_REG_AX)) {
+ *             kunp_emu_set_reg(KUNP_REG_AX, 1);   // what the call would have
+ *             kunp_emu_set_ip(after);             // returned, had it worked
+ *     }
+ *     n = kunp_emu_resume();
+ *
+ * KUNP_REG_IP works through kunp_emu_set_reg too, and means the same thing as
+ * kunp_emu_set_ip.
+ */
+#define kunp_emu_set_reg(gpr, value)                                       \
+	((ctx)->content->emu_set_reg                                       \
+	 ? (ctx)->content->emu_set_reg((ctx), (uint32_t)(gpr),             \
+				       (uint64_t)(value)) : (void)0)
+
+#define kunp_emu_set_ip(va)                                                \
+	((ctx)->content->emu_set_ip                                        \
+	 ? (ctx)->content->emu_set_ip((ctx), (uint64_t)(va)) : (void)0)
+
+#define kunp_emu_write(va, bytes, n)                                       \
+	((ctx)->content->emu_write                                         \
+	 ? (ctx)->content->emu_write((ctx), (uint64_t)(va), (bytes),       \
+				     (uint32_t)(n)) : 0u)
+
+/* Run in slices - see `emu_slice`. Set once, before kunp_emu_run. */
+#define kunp_emu_slice(n)                                                  \
+	((ctx)->content->emu_slice                                         \
+	 ? (ctx)->content->emu_slice((ctx), (uint64_t)(n)) : (void)0)
+
+#define kunp_emu_stop()                                                    \
+	((ctx)->content->emu_stop ? (ctx)->content->emu_stop((ctx)) : 0u)
+
+#define kunp_emu_resume()                                                  \
+	((ctx)->content->emu_resume ? (ctx)->content->emu_resume((ctx)) : 0u)
+
 #define kunp_emu_region(i, va, len, kind)                               \
 	((ctx)->content->emu_region                                        \
 	 ? (ctx)->content->emu_region((ctx), (uint32_t)(i), (va), (len),   \
@@ -4276,6 +4510,224 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 #define kunp_emu_take(i)                                                \
 	((ctx)->content->emu_take                                          \
 	 ? (ctx)->content->emu_take((ctx), (uint32_t)(i)) : 0)
+
+
+#define kunp_emu_oep_range(rva, len)                                            \
+	((void)((ctx)->content->emu_watch ?                                 \
+		((ctx)->content->emu_watch((ctx), (uint64_t)(rva),          \
+					   (uint64_t)(len)), 0) : 0))
+
+#define kunp_rcstruct_name(off, len)                                            \
+	((void)((ctx)->content->name_next ?                                \
+		((ctx)->content->name_next((ctx), (uint64_t)(off),         \
+					   (uint64_t)(len)), 0) : 0))
+
+/*
+ * Decompress a DEFLATE stream at off into the object being produced.
+ *
+ * `len` bounds the input, not the output: the stream ends where DEFLATE says it
+ * does, which is usually sooner. Returns bytes produced - zero when nothing could
+ * be decoded, which is the answer for a corrupt stream and for a budget that was
+ * already gone.
+ *
+ * It does not close the child. A module may want to put more after the
+ * decompressed bytes, or decompress two streams into one object, so kunp_rcstruct_done()
+ * stays the module's to call:
+ *
+ *     kof_unpack_deflate(gz->data_off, gz->data_len);
+ *     kunp_rcstruct_done();
+ */
+#define kunp_static_decode(method, off, len, out_hint)                        \
+	((ctx)->content->unpack ?                                          \
+	 (ctx)->content->unpack((ctx), (uint32_t)(method), (uint64_t)(off),\
+				(uint64_t)(len), (uint64_t)(out_hint)) : 0)
+
+/* kunp_rcstruct_note("MPRESS 2.12-2.19 LZMA") - what this module worked out about
+ * the container, carried on the child it is about to produce. */
+#define kunp_rcstruct_note(text)                                                 \
+	((ctx)->content->note_next ? (ctx)->content->note_next((ctx), (text)) \
+				  : (void)0)
+
+/* kunp_rcstruct_read(off, buf, cap) / kunp_rcstruct_poke(off, buf, n) - see
+ * produced_read and produced_poke above. */
+#define kunp_rcstruct_read(off, buf, cap)                                        \
+	((ctx)->content->produced_read                                     \
+	 ? (ctx)->content->produced_read((ctx), (uint64_t)(off), (buf),    \
+					 (uint32_t)(cap)) : 0u)
+
+/*
+ * Start this child as a copy of the object being unpacked, then change it with
+ * kunp_rcstruct_poke. See `derive` in struct kof_content.
+ */
+/*
+ * WHAT A SECTION IS, BEYOND WHERE IT IS.
+ *
+ * Three axes, and they are independent: what the bytes are for, where they came
+ * from, and whether they can be read yet.
+ */
+/*
+ * WHAT A DECLARED SECTION MAY BE READ, WRITTEN OR RUN AS.
+ *
+ * Here and not in kofmod/pe.h because a declaration is not about PE: a module
+ * that targets several formats, or none, still has to say what a range it
+ * recovered is for - and including a format header would tie it to that one
+ * format, which the build refuses for a good reason (kof_<fmt>() casts
+ * ctx->file_header and there is no single view when there are several targets).
+ *
+ * Same bits as KOF_PE_PERM_*, which is what the PE parser already reports.
+ */
+/*
+ * HOW MUCH ROOM THE ENGINE NEEDS IN FRONT OF THE CONTENT when it is asked to
+ * write an ELF header - see kunp_rcstruct_as and kof_elf_write_hdr.
+ *
+ * The ELF header plus one program header, which is what that writer emits: one
+ * PT_LOAD over the whole file. A module declaring its first section at this
+ * address leaves exactly the room and no padding; declaring it further out is
+ * allowed and the gap is padding; declaring it closer is refused, because a
+ * header that does not fit in front of the content would have to overwrite it.
+ *
+ * Published rather than inferred because a module has to place its sections
+ * BEFORE the engine writes anything, so it cannot ask afterwards how much was
+ * used.
+ */
+#define KUNP_HDR_ELF32       0x54u
+#define KUNP_HDR_ELF64       0x78u
+
+#define KUNP_PERM_X          0x0001u
+#define KUNP_PERM_W          0x0002u
+#define KUNP_PERM_R          0x0004u
+
+/* What it is. */
+#define KOF_SECF_CODE        0x0001u
+#define KOF_SECF_DATA        0x0002u
+#define KOF_SECF_PAD         0x0004u  /* alignment fill; belongs to no one */
+#define KOF_SECF_HOLLOW      0x0008u  /* declared with no bytes behind it */
+/* Where it came from - see `section` in struct kof_content. */
+#define KOF_SECF_READ        0x0000u  /* parsed from the file as written */
+#define KOF_SECF_REBUILT     0x0010u  /* recovered from evidence */
+#define KOF_SECF_SYNTHETIC   0x0020u  /* stood up because it had to exist */
+#define KOF_SECF_ORIGIN_MASK 0x0030u
+/* Whether it can be read yet. PLAIN is the absence of the others. */
+#define KOF_SECF_PLAIN       0x0000u
+#define KOF_SECF_COMPRESSED  0x0040u
+#define KOF_SECF_CIPHERTEXT  0x0080u
+#define KOF_SECF_VIRTUALISED 0x0100u
+#define KOF_SECF_STATE_MASK  0x01c0u
+
+#define kunp_rcstruct_at(off)                                                    \
+	((ctx)->content->at ? (ctx)->content->at((ctx), (uint64_t)(off)) : 0)
+
+#define kunp_rcstruct_image()                                                    \
+	((ctx)->content->image ? (ctx)->content->image((ctx)) : 0)
+
+#define kunp_rcstruct_section(name, rva, vsz, perm, flags)                       \
+	((ctx)->content->section                                           \
+	 ? (ctx)->content->section((ctx), (name), (uint64_t)(rva),         \
+				   (uint64_t)(vsz), (uint32_t)(perm),      \
+				   (uint32_t)(flags))                      \
+	 : -1)
+
+#define kunp_rcstruct_reset()                                           \
+	((ctx)->content->sections_reset                                    \
+	 ? (ctx)->content->sections_reset((ctx)) : 0)
+
+/*
+ * WHAT THE CHILD IMPORTS - see `import` in struct kof_content.
+ *
+ *     for (each entry the container lists)
+ *             kunp_rcstruct_import(dll, fn, 0, slot_rva);
+ *     need = kunp_rcstruct_import_bytes();
+ *     kunp_rcstruct_section(".kofimp", at, need, KUNP_PERM_R,
+ *                           KOF_SECF_DATA | KOF_SECF_SYNTHETIC);
+ *     kunp_rcstruct_import_at(at);
+ *
+ * By ordinal: pass NULL for `fn` and the number for `ordinal`.
+ */
+#define kunp_rcstruct_import(dll, fn, ordinal, iat_rva)                     \
+	((ctx)->content->import                                            \
+	 ? (ctx)->content->import((ctx), (dll), (fn), (uint32_t)(ordinal), \
+				  (uint64_t)(iat_rva)) : 0)
+
+#define kunp_rcstruct_import_bytes()                                        \
+	((ctx)->content->import_bytes                                      \
+	 ? (ctx)->content->import_bytes((ctx)) : (uint64_t)0)
+
+#define kunp_rcstruct_import_at(rva)                                        \
+	((ctx)->content->import_at                                         \
+	 ? (ctx)->content->import_at((ctx), (uint64_t)(rva)) : 0)
+
+
+/* What a run left. See `emu_run` in struct kof_content. */
+#define KOF_EMU_RGN_IMAGE   0u
+#define KOF_EMU_RGN_EXEC    1u
+#define KOF_EMU_RGN_WRITTEN 2u
+
+#define kunp_emu_run(vouch_level)                                          \
+	((ctx)->content->emu_run                                           \
+	 ? (ctx)->content->emu_run((ctx), (uint32_t)(vouch_level)) : 0u)
+
+/*
+ * Pause the run on an instruction, and carry on - see `emu_watch_insn`.
+ *
+ *     kunp_emu_watch_insn(ret, 1, 1);        // a one-byte C3
+ *     n = kunp_emu_run(2);
+ *     while (!n && kunp_emu_paused()) {
+ *             ...read the machine, decide...
+ *             n = kunp_emu_resume();
+ *     }
+ */
+#define kunp_emu_watch_insn(bytes, n, len)                                 \
+	((ctx)->content->emu_watch_insn                                    \
+	 ? (ctx)->content->emu_watch_insn((ctx), (bytes), (uint32_t)(n),   \
+					  (uint32_t)(len)) : (void)0)
+
+#define kunp_emu_resume()                                                  \
+	((ctx)->content->emu_resume ? (ctx)->content->emu_resume((ctx)) : 0u)
+
+#define kunp_emu_region(i, va, len, kind)                               \
+	((ctx)->content->emu_region                                        \
+	 ? (ctx)->content->emu_region((ctx), (uint32_t)(i), (va), (len),   \
+				      (kind)) : 0)
+
+#define kunp_emu_take(i)                                                \
+	((ctx)->content->emu_take                                          \
+	 ? (ctx)->content->emu_take((ctx), (uint32_t)(i)) : 0)
+
+/*
+ * ---- THE CODE READER - see kofmod/kdis.h ---------------------------------
+ *
+ *     struct kdis_insn in;
+ *
+ *     kdis_seek(ctx->entry_off, 0);
+ *     while (kdis_next(&in)) {
+ *             if (in.op == KDIS_JMP && in.target != KOF_BROKEN) {
+ *                     kdis_seek(in.target, 1);      // step through junk
+ *                     continue;
+ *             }
+ *             if (in.op == KDIS_XOR && in.o[0].kind == KDIS_O_MEM)
+ *                     ...                           // a decrypt loop
+ *     }
+ */
+#define kdis_seek(off, keep)                                               \
+	((ctx)->content->dis_seek                                          \
+	 ? (ctx)->content->dis_seek((ctx), (uint64_t)(off), (keep)) : 0)
+
+#define kdis_next(out)                                                     \
+	((ctx)->content->dis_next ? (ctx)->content->dis_next((ctx), (out)) : 0)
+
+#define kdis_reg(r, out)                                                   \
+	((ctx)->content->dis_reg                                           \
+	 ? (ctx)->content->dis_reg((ctx), (uint8_t)(r), (out)) : 0)
+
+/*
+ * Read from a gathered region's SNAPSHOT - see `emu_region_read`. This and not
+ * kunp_emu_read is what a module looks at once its run has ENDED.
+ */
+#define kunp_emu_region_read(i, off, out, n)                               \
+	((ctx)->content->emu_region_read                                   \
+	 ? (ctx)->content->emu_region_read((ctx), (uint32_t)(i),           \
+					   (uint64_t)(off), (out),         \
+					   (uint32_t)(n)) : 0u)
 
 #define kunp_opened_already()                                           \
 	((ctx)->content->opened_already                                    \
@@ -4994,6 +5446,22 @@ enum kof_str_word {
 #define KOF_SCAN_CURABLE(at)                                               \
 	((ctx)->content->cure_offer                                        \
 	 ? (ctx)->content->cure_offer((ctx), (uint64_t)(at)) : (void)0)
+
+/*
+ * MARK A RANGE OF THIS OBJECT AS INFECTED - see `struct kof_infected`.
+ *
+ *     kof_mark_infected(body_off, body_len, KOF_INF_BODY);
+ *     kof_mark_infected(ctx->entry_off, saved, KOF_INF_DAMAGE);
+ *
+ * Says nothing on its own: the verdict is still KOF_SCAN_INFECT's and the
+ * repair is still kcure_patch's. This is the third statement - WHERE - and a
+ * caller may use it without acting on either of the others.
+ */
+#define kof_mark_infected(off, len, kind)                                  \
+	((ctx)->content->infected                                          \
+	 ? (ctx)->content->infected((ctx), (uint64_t)(off),                \
+				    (uint64_t)(len), (uint32_t)(kind))     \
+	 : (void)0)
 
 /*
  * THE TWO THINGS A CURE CAN ASK FOR - see kof_content.cure_patch.

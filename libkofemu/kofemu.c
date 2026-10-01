@@ -63,11 +63,34 @@
  * the table is sized from the page budget at construction so it never has to
  * grow while an emulation is in flight.
  */
+#define KOF_EMU_ICACHE 2048u
+
 struct page {
 	uint64_t va;                  /* page aligned; 0 means the slot is free */
 	uint8_t *data;
 	unsigned prot;
 	int      written;             /* the stub wrote here - this is the payload */
+	/*
+	 * AND WHETHER THE GUEST IS WHAT WROTE IT.
+	 *
+	 * `written` is set by every store, and the HOST makes some: it fills
+	 * the IAT before the run so the guest's calls resolve, and import
+	 * thunks routinely share a page with code. Those bytes really do
+	 * differ from the file, so the region walk is right to take them -
+	 * which is why this is a second flag and not a correction to the
+	 * first.
+	 *
+	 * The hand-over test is the one that must not see them. It accepts a
+	 * jump whose target is on a page the run WROTE, on the argument that
+	 * the target is then code the stub produced rather than code it came
+	 * with - and a page the host merely prepared carries the file's own
+	 * code. Measured on a Sality body, whose IAT is at the very start of
+	 * its only section: the test fired EIGHT INSTRUCTIONS IN, on the
+	 * `push edi; ret` that ends the first stage, and the run stopped
+	 * having decrypted nothing. With this, the same run goes 4,515,539
+	 * instructions and hands a child back.
+	 */
+	int      gwritten;
 	int      snapped;             /* and it has since been executed and taken */
 };
 
@@ -99,6 +122,15 @@ struct kof_emu {
 	uint64_t deadline_ms;   /* wall clock; 0 for none */
 	uint64_t started_ms;
 	int      stop_on_written_jump;
+	/* Instruction patterns a module asked to be paused on - see
+	 * kof_emu_watch_insn. `iw_len` is the whole instruction's length when
+	 * the module pinned it, 0 when it did not. */
+	struct { uint8_t b[KOF_EMU_INSN_WATCH_LEN]; uint8_t n; } iw[KOF_EMU_INSN_WATCH];
+	uint32_t n_iw;
+	unsigned iw_len;
+	/* Whether guest code is what is executing - see `gwritten`. The host
+	 * prepares the image before this is set and after it is cleared. */
+	int      running;
 	/* 32 or 64. See kof_emu_cfg.bits; everything it changes is marked with
 	 * a reference back to this field. */
 	unsigned bits;
@@ -106,6 +138,61 @@ struct kof_emu {
 	 * is a fault nobody can act on. */
 	uint64_t fault_va;
 	char     fault_kind[8];
+
+	/*
+	 * ---- THE DECODED INSTRUCTION CACHE ---------------------------------
+	 *
+	 * WHY IT IS WORTH 245 KILOBYTES. Every instruction used to cost a
+	 * sixteen-byte fetch - sixteen page lookups, one per byte - and a full
+	 * NdDecodeEx, and a decryption loop runs the SAME twenty instructions
+	 * millions of times. Measured on a Sality sample: 186 million
+	 * instructions executed, and the loop that produced them fits in a
+	 * cache line's worth of addresses.
+	 *
+	 * Direct mapped on the address, and an entry is good only while the
+	 * PAGE it came from has not been written since - which is the whole
+	 * difficulty, because the code a packer runs is code it just wrote.
+	 * The page's `wgen` answers that in one comparison.
+	 *
+	 * AN INSTRUCTION THAT CROSSES A PAGE BOUNDARY IS NOT CACHED. Its bytes
+	 * depend on two pages and this checks one; the case is rare and
+	 * refusing it is cheaper than tracking both.
+	 */
+	struct icache_ent {
+		uint64_t          va;
+		const struct page *pg;
+		/*
+		 * THE BYTES IT WAS DECODED FROM, and comparing them is what
+		 * makes the entry valid - not a generation counter on the page.
+		 *
+		 * A PAGE COUNTER WAS TRIED FIRST AND IS WRONG FOR THIS JOB. A
+		 * decryption loop writes into the very page it runs from, so
+		 * every store threw away the decoding of every instruction on
+		 * it; measured, that capped the hit rate at 90.5% on a loop of
+		 * 361 instructions that should never miss twice.
+		 *
+		 * Comparing the bytes is also EXACTLY right where a counter is
+		 * only conservative: code that was overwritten with the same
+		 * bytes decodes the same, and code that was not is caught
+		 * whether or not anything else on the page moved.
+		 */
+		uint8_t           bytes[16];
+		uint8_t           len;
+		uint8_t           valid;
+		/*
+		 * DECIDED ONCE, AT DECODE, AND NEVER AGAIN - see nop_insn.
+		 * An instruction that cannot change anything observable is
+		 * stepped over without entering the execute switch at all.
+		 */
+		uint8_t           inert;
+		INSTRUX           ix;
+	}       *ic;
+
+	/* A hot-address histogram, built only under KOF_EMU_HOT. It answers one
+	 * question: is a run's time spent in a small loop, or spread out? */
+	struct { uint64_t va; uint64_t n; } *hot;
+	uint64_t ic_hit, ic_miss;
+	uint32_t hot_mask;
 
 	uint64_t trace[KOF_EMU_TRACE];
 	/* The instruction trace - see kof_emu_itrace. NULL unless asked for. */
@@ -158,6 +245,76 @@ struct kof_emu {
 	 * own unpacking code.
 	 */
 	uint8_t xmm[16][16];
+	/*
+	 * THE MMX REGISTERS, AND THEY ARE HERE BECAUSE A VIRUS HIDES IN THEM.
+	 *
+	 * Nothing that unpacks a payload needs MMX arithmetic, and this does
+	 * not have any. What it has is the eight registers, because they are
+	 * used as a PLACE TO PUT SOMETHING an emulator will not follow:
+	 * Sality's decryptor begins
+	 *
+	 *     call $+5 ; pop ebp      the address of itself
+	 *     movd mm2, ebp           put it somewhere unusual
+	 *     movd edi, mm2           take it back
+	 *     add edi, 0x20c ; push edi ; ret
+	 *
+	 * and an interpreter without these registers either stops at the movd
+	 * or reads back a zero and returns into nothing. Measured: the run
+	 * ended after THREE instructions, "MOVD mm2, ebp", on every Sality
+	 * sample here.
+	 *
+	 * SEPARATE FROM THE x87 STACK, which is a simplification and not the
+	 * hardware: on a real CPU mm0-mm7 ARE st(0)-st(7)'s mantissas, and
+	 * writing one is visible in the other. A program that deliberately
+	 * interleaved the two would see them as independent here. Nothing that
+	 * hides an address in an MMX register does that - the point of the
+	 * trick is that the value comes back unchanged - and modelling the
+	 * alias would mean modelling the x87 tag word for no reader's benefit.
+	 */
+	uint8_t mmx[8][8];
+
+	/*
+	 * ---- THE x87 REGISTER STACK, AND WHY IT IS HERE AT ALL -------------
+	 *
+	 * It used to not be. x87 was carried only far enough to answer "where
+	 * am I" - FNSTENV reports the address of the last x87 instruction, and
+	 * every Metasploit x86 encoder uses that to find itself - so the
+	 * instructions a GetPC sequence picks from were executed as no-ops that
+	 * set `fpu_rip`, and everything that COMPUTES was deliberately left to
+	 * the unsupported path. The argument was sound: an object that really
+	 * divides would otherwise run on with a wrong st0 and never say so.
+	 *
+	 * WHAT CHANGED IS THAT SOMETHING REALLY DIVIDED. A Sality sample
+	 * reaches `FDIV st0, dword ptr [edx]` seven million instructions in and
+	 * the run ends there. Polymorphic bodies use the FPU as filler, and
+	 * filler is still executed. So the choice is between stopping on it and
+	 * computing it, and computing it correctly is not a large thing.
+	 *
+	 * EIGHT DOUBLES AND A TOP POINTER. The hardware's registers are 80-bit
+	 * extended, and these are 64-bit doubles: eleven bits of mantissa and
+	 * some exponent range are lost. That is a real difference and it is the
+	 * right trade here - a guest whose control flow depends on the 64th
+	 * mantissa bit of an intermediate is not a thing that has been
+	 * measured, and modelling extended precision in software would cost far
+	 * more than every x87 instruction this has ever met.
+	 *
+	 * The memory formats ARE exact: m32, m64 and m80 are read and written
+	 * at their true widths, so a value stored and reloaded round-trips
+	 * through whatever the guest chose - it is only the register that is
+	 * narrower.
+	 *
+	 * ST(i) IS st[(top + i) & 7]. bddisasm reports an x87 operand's `Reg`
+	 * as that relative index already, so a case here never computes it.
+	 */
+	double   st[8];
+	uint8_t  st_tag[8];     /* 0 empty, 1 valid */
+	uint8_t  st_top;
+	/*
+	 * The status word's condition codes. C0, C2 and C3 are what a compare
+	 * leaves and what FNSTSW hands to a guest that branches on it; C1 is
+	 * the stack-fault direction and nothing here reads it.
+	 */
+	uint16_t fsw;
 
 	/* The thread pointer, as arch_prctl set it - or, for a Windows guest,
 	 * as emu_unpack.c's thread block builder set it. */
@@ -301,6 +458,50 @@ struct kof_emu {
 	/* When a page was last written to for the first time - the clock the
 	 * idle test below runs on. */
 	uint64_t last_new_page;
+
+	/*
+	 * ---- IS THE GUEST DECRYPTING RIGHT NOW --------------------------
+	 *
+	 * WHY A MEMORY PATTERN AND NOT AN OPCODE. A polymorphic generator
+	 * chooses the instructions, the registers and the encoding of its
+	 * decryption loop, and re-chooses all three for every copy - so
+	 * nothing about HOW it is written survives. What does not change is
+	 * what it must DO: read a byte of ciphertext, write the plaintext
+	 * back, and move on to the next address. That trace is the work
+	 * itself, and no re-encoding can avoid producing it.
+	 *
+	 * So an "active instruction" here is a READ of an address followed by
+	 * a WRITE to that same address, where the previous such pair was at a
+	 * NEARBY address - the loop stepping through a buffer. Junk between
+	 * them costs nothing: the pair is recognised whenever it happens, not
+	 * at a fixed distance.
+	 *
+	 * WHAT IT IS FOR is knowing when to stop. A run that has not seen one
+	 * of these for a while is a run whose decryption has finished, and
+	 * everything after that is the payload doing its own work - which this
+	 * exists to recover, not to watch. Measured: the interpreter otherwise
+	 * has only a page-granularity idle test, which is far coarser.
+	 */
+	/*
+	 * A RING AND NOT ONE ADDRESS. The read and the write that make a pair
+	 * are two separate instructions and a generator puts junk between
+	 * them - junk that reads memory of its own. Keeping only the last read
+	 * address let one junk load erase the pair, and measured, that made
+	 * the run stop 272,939 instructions in with the body barely started.
+	 */
+#define KOF_EMU_RDRING 8u
+	uint64_t last_read[KOF_EMU_RDRING];
+	unsigned last_read_n;
+	uint64_t pair_va;       /* where the last read-then-write pair was */
+	uint64_t active_n;      /* how many active instructions were seen */
+	uint64_t since_active;  /* instructions since the last one */
+	unsigned in_fetch;      /* reads made to FETCH are not data reads */
+	unsigned quiet_on;      /* KOF_EMU_QUIET armed - see the run loop */
+	unsigned softread;      /* KOF_EMU_SOFTREAD - see mem_rd */
+	unsigned softwrite;     /* KOF_EMU_SOFTWRITE - see mem_wr */
+	uint64_t soft_reads, soft_writes;
+	uint64_t gap_max;
+	uint64_t m_empty, m_va, m_pg, m_bytes;
 
 	/*
 	 * The SSE control word, remembered and otherwise ignored: scalar
@@ -562,11 +763,42 @@ static int mem_rd(struct kof_emu *e, uint64_t va, void *dst, unsigned n)
 		struct page *p = page_lookup(e, va + i);
 
 		if (!p) {
+			/*
+			 * A DATA READ FROM NOWHERE ANSWERS ZERO, UNDER
+			 * MEASUREMENT - see KOF_EMU_SOFTREAD.
+			 *
+			 * The engine already makes this trade for page zero,
+			 * with the argument written beside it: what a run is
+			 * FOR is the plaintext the guest writes, and a read of
+			 * a field off a pointer the environment could not
+			 * supply should not end it. The same argument applies
+			 * to a pointer that is garbage rather than null, and
+			 * the published designs call a run that dies this way
+			 * an INCORRECT termination - something to recover from
+			 * rather than to report.
+			 *
+			 * Measured before it is believed: 125 of 129 runs over
+			 * a Windows corpus end in a fault. Whether tolerating
+			 * them produces anything is the question this flag
+			 * exists to answer, so it is off by default.
+			 */
+			if (e->softread && !e->in_fetch && e->running) {
+				e->soft_reads++;
+				d[i] = 0;
+				continue;
+			}
 			e->fault_va = va + i;
 			memcpy(e->fault_kind, "read", 5);
 			return 0;
 		}
 		d[i] = p->data[(va + i) & (KOF_EMU_PAGE - 1u)];
+	}
+	/* A DATA read, not the fetch of an instruction - see `last_read_va`.
+	 * The fetch reads memory too and counting it would make every program
+	 * look like it was decrypting itself. */
+	if (e->running && !e->in_fetch) {
+		e->last_read[e->last_read_n % KOF_EMU_RDRING] = va;
+		e->last_read_n++;
 	}
 	return 1;
 }
@@ -580,17 +812,97 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 		struct page *p = page_lookup(e, va + i);
 
 		if (!p) {
-			e->fault_va = va + i;
-			memcpy(e->fault_kind, "write", 6);
-			return 0;
+			/*
+			 * A WRITE TO NOWHERE GETS A PAGE, UNDER MEASUREMENT -
+			 * see KOF_EMU_SOFTWRITE.
+			 *
+			 * THE ARGUMENT FOR REFUSING IS THE ARGUMENT FOR THIS.
+			 * The note beside the read path says a write that goes
+			 * nowhere "loses the very bytes this exists to
+			 * collect" - and refusing it loses them just as
+			 * completely, by ending the run. Giving the guest the
+			 * page keeps them, and keeps whatever it writes next.
+			 *
+			 * Measured over 300 Windows samples: of seventeen runs
+			 * that ended in a fault, SEVEN were a write to an
+			 * address nothing mapped.
+			 *
+			 * STILL BOUNDED. page_add refuses past the page budget,
+			 * so a guest that writes at random addresses buys a
+			 * fixed number of pages and then ends exactly as it
+			 * does today.
+			 */
+			if (e->softwrite && e->running) {
+				p = page_add(e, (va + i) &
+					     ~(uint64_t)(KOF_EMU_PAGE - 1u),
+					     KOF_EMU_R | KOF_EMU_W);
+				if (p)
+					e->soft_writes++;
+			}
+			if (!p) {
+				e->fault_va = va + i;
+				memcpy(e->fault_kind, "write", 6);
+				return 0;
+			}
 		}
 		p->data[(va + i) & (KOF_EMU_PAGE - 1u)] = s[i];
+		/*
+		 * A WRITE BACK TO WHAT WAS JUST READ, near where the last one
+		 * was - see `last_read_va`. Eight bytes of slack, so a loop
+		 * working a dword or a qword at a time is still one stride.
+		 */
+		/*
+		 * ---- IS THE GUEST STILL DECRYPTING --------------------------
+		 *
+		 * A WRITE NEXT TO THE LAST ONE. See `last_read` for why the
+		 * signal has to be a memory trace rather than an opcode; this
+		 * is which trace, and it was measured rather than assumed.
+		 *
+		 * THE PUBLISHED HEURISTIC IS A READ FOLLOWED BY A WRITE BACK TO
+		 * THE SAME ADDRESS - decryption in place - AND IT DOES NOT FIT
+		 * THIS FAMILY. Measured on a Sality body: of 408,441 guest
+		 * writes, 350,346 were indeed writes back to something just
+		 * read, and every one of them was the STACK - push and pop
+		 * touching the same slot. The decryption itself reads from one
+		 * place and writes to another, so it never made that pattern
+		 * once in twenty million instructions.
+		 *
+		 * What it does make is a SEQUENTIAL WRITE STREAM: 58,076 writes
+		 * landing within eight bytes of the one before, against 58,066
+		 * loop iterations counted independently. That is the output of
+		 * the decryption, and a decryptor cannot avoid producing it
+		 * whatever instructions it is spelled with.
+		 *
+		 * THE STACK IS EXCLUDED, and it has to be: a run of pushes is
+		 * also a sequential write stream, and without this every
+		 * function prologue would read as decryption.
+		 */
+		if (e->running && !i) {
+			uint64_t sp = e->gpr[KOF_EMU_RSP];
+			uint64_t d = va > sp ? va - sp : sp - va;
+
+			if (d > (64u << 10)) {
+				d = va > e->pair_va ? va - e->pair_va
+						    : e->pair_va - va;
+				if (e->pair_va && d && d <= 8u) {
+					if (e->active_n &&
+					    e->since_active > e->gap_max)
+						e->gap_max = e->since_active;
+					e->active_n++;
+					e->since_active = 0;
+				}
+				e->pair_va = va;
+			}
+		}
 		/* The first write to a page is the unit of progress: see
 		 * KOF_EMU_IDLE. Recorded here, where it happens, so nothing
 		 * else has to remember to. */
 		if (!p->written)
 			e->last_new_page = e->insn;
 		p->written = 1;
+		/* Only while the guest is the one running - see `gwritten`. */
+		if (e->running)
+			p->gwritten = 1;
 		/*
 		 * A WRITE INTO CIPHERTEXT IS THE MOMENT THE PROGRAM APPEARS.
 		 *
@@ -650,6 +962,23 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 	if (pages > (1u << 22))
 		pages = 1u << 22;
 	e->max_pages = (uint32_t)pages;
+	/* Lazily sized once, here, so the run loop never allocates. A failure
+	 * is not fatal: the cache is an optimisation and the loop checks for
+	 * it - see `ic`. */
+	e->ic = calloc(KOF_EMU_ICACHE, sizeof *e->ic);
+	e->quiet_on = getenv("KOF_EMU_QUIET") != NULL;
+	e->softread = getenv("KOF_EMU_SOFTREAD") != NULL;
+	e->softwrite = getenv("KOF_EMU_SOFTWRITE") != NULL;
+	if (getenv("KOF_EMU_HOT")) {
+		e->hot_mask = (1u << 16) - 1u;
+		e->hot = calloc(e->hot_mask + 1u, sizeof *e->hot);
+	}
+	/* Off on demand, so the cache's worth can be measured rather than
+	 * asserted - the same shape as KOF_EMU_TRACE and KOF_EMU_NOLIMIT. */
+	if (e->ic && getenv("KOF_EMU_NOCACHE")) {
+		free(e->ic);
+		e->ic = NULL;
+	}
 	/* Twice the budget, so the table never passes half full and the probe
 	 * chains stay short whatever the addresses look like. */
 	e->tab_mask = pow2_at_least((uint32_t)pages * 2u) - 1u;
@@ -708,6 +1037,48 @@ void kof_emu_free(struct kof_emu *e)
 
 	if (!e)
 		return;
+	if (e->hot) {
+		uint64_t tot = 0, top = 0, best;
+		uint32_t q, n_used = 0, j, k, bi;
+
+		for (q = 0; q <= e->hot_mask; q++)
+			if (e->hot[q].n) { tot += e->hot[q].n; n_used++; }
+		fprintf(stderr, "[act] active=%llu gapmax=%llu tail=%llu\n",
+			(unsigned long long)e->active_n,
+			(unsigned long long)e->gap_max,
+			(unsigned long long)e->since_active);
+		fprintf(stderr, "[hot] miss: empty=%llu va=%llu pg=%llu bytes=%llu\n",
+			(unsigned long long)e->m_empty,
+			(unsigned long long)e->m_va,
+			(unsigned long long)e->m_pg,
+			(unsigned long long)e->m_bytes);
+		fprintf(stderr, "[hot] icache hit=%llu miss=%llu (%.2f%%)\n",
+			(unsigned long long)e->ic_hit,
+			(unsigned long long)e->ic_miss,
+			e->ic_hit + e->ic_miss ? 100.0 * (double)e->ic_hit /
+				(double)(e->ic_hit + e->ic_miss) : 0.0);
+		fprintf(stderr, "[hot] distinct=%u total=%llu\n", n_used,
+			(unsigned long long)tot);
+		for (j = 0; j < 12u; j++) {
+			best = 0; bi = 0;
+			for (k = 0; k <= e->hot_mask; k++)
+				if (e->hot[k].n > best) {
+					best = e->hot[k].n; bi = k;
+				}
+			if (!best)
+				break;
+			top += best;
+			fprintf(stderr, "[hot] %2u %#010llx %llu (%.1f%%)\n",
+				j, (unsigned long long)e->hot[bi].va,
+				(unsigned long long)best,
+				tot ? 100.0 * (double)best / (double)tot : 0.0);
+			e->hot[bi].n = 0;
+		}
+		fprintf(stderr, "[hot] top12 = %.1f%% of the run\n",
+			tot ? 100.0 * (double)top / (double)tot : 0.0);
+	}
+	free(e->hot);
+	free(e->ic);
 	for (i = 0; i <= e->tab_mask; i++)
 		free(e->tab[i].data);
 	free(e->tab);
@@ -774,6 +1145,11 @@ void kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base)
 uint64_t kof_emu_get_reg(const struct kof_emu *e, unsigned g)
 {
 	return g < KOF_EMU_NGPR ? e->gpr[g] : 0;
+}
+
+uint64_t kof_emu_get_rip(const struct kof_emu *e)
+{
+	return e ? e->rip : 0;
 }
 uint64_t kof_emu_rip(const struct kof_emu *e) { return e->rip; }
 /*
@@ -866,8 +1242,47 @@ unsigned kof_emu_watch_hits(const struct kof_emu *e, uint64_t *rip,
 	return got;
 }
 
+/*
+ * THE RANGE IS CHECKED BEFORE ANY OF IT IS COPIED, and that is what makes the
+ * contract above true rather than nearly true.
+ *
+ * `mem_rd` is the interpreter's own path and it copies byte by byte, stopping
+ * at the first page the guest does not have - so by the time it refuses, the
+ * bytes before the hole are already in the caller's buffer. The interpreter
+ * does not care: a refusal there ends the run. A MODULE does care, because a
+ * module reads a span it is about to search or parse, and a refusal it does
+ * not check leaves it looking at a mixture of new bytes and whatever the
+ * buffer held before. Measured by tests/unit/emu_span_read.
+ *
+ * The check is per PAGE, not per byte, so a 4096-byte span costs two lookups
+ * and the interpreter's hot path is not touched at all.
+ *
+ * THE NULL PAGE IS LEFT TO mem_rd. A read off a null pointer answers zeros by
+ * design - see the note there - and pre-rejecting it as unmapped would undo
+ * that.
+ */
 int kof_emu_read(struct kof_emu *e, uint64_t va, void *dst, unsigned n)
 {
+	uint64_t pg, last;
+
+	if (!e || !dst)
+		return 0;
+	if (!n)
+		return 1;
+	if (va + n < va)                        /* the span wraps */
+		return 0;
+	if (!(va < KOF_EMU_PAGE && (uint64_t)n <= KOF_EMU_PAGE - va)) {
+		last = (va + n - 1u) & ~(uint64_t)(KOF_EMU_PAGE - 1u);
+		for (pg = va & ~(uint64_t)(KOF_EMU_PAGE - 1u);; pg += KOF_EMU_PAGE) {
+			if (!page_lookup(e, pg)) {
+				e->fault_va = pg < va ? va : pg;
+				memcpy(e->fault_kind, "read", 5);
+				return 0;
+			}
+			if (pg == last)
+				break;
+		}
+	}
 	return mem_rd(e, va, dst, n);
 }
 
@@ -884,6 +1299,7 @@ int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 {
 	return mem_wr(e, va, src, n);
 }
+
 
 void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen)
 {
@@ -958,6 +1374,52 @@ void kof_emu_watch_write(struct kof_emu *e, uint64_t lo, uint64_t hi)
 int kof_emu_write_seen(const struct kof_emu *e)
 {
 	return e ? e->wwatch_hit : 0;
+}
+
+void kof_emu_watch_insn(struct kof_emu *e, const uint8_t *bytes, unsigned n)
+{
+	if (!e)
+		return;
+	/*
+	 * NO BYTES DISARMS, and a module needs that as much as it needs the
+	 * watch. A run paused more times than the module is willing to look at
+	 * still has to FINISH - what it decrypted is worth having whether or
+	 * not the module could name it - and without a way to stop pausing the
+	 * only exit was to abandon the machine ungathered. Measured: three of
+	 * four Sality samples produced nothing at all for exactly that reason.
+	 */
+	if (!bytes || !n) {
+		e->n_iw = 0;
+		e->iw_len = 0;
+		return;
+	}
+	if (n > KOF_EMU_INSN_WATCH_LEN || e->n_iw >= KOF_EMU_INSN_WATCH)
+		return;
+	memcpy(e->iw[e->n_iw].b, bytes, n);
+	e->iw[e->n_iw].n = (uint8_t)n;
+	e->n_iw++;
+}
+
+void kof_emu_watch_insn_len(struct kof_emu *e, unsigned len)
+{
+	if (e)
+		e->iw_len = len;
+}
+
+/* Does the instruction about to run begin with a pattern a module named? */
+static int iwatch_hit(const struct kof_emu *e, const uint8_t *b, unsigned len)
+{
+	uint32_t i;
+
+	if (!e->n_iw)
+		return 0;
+	if (e->iw_len && len != e->iw_len)
+		return 0;
+	for (i = 0; i < e->n_iw; i++)
+		if (len >= e->iw[i].n &&
+		    !memcmp(b, e->iw[i].b, e->iw[i].n))
+			return 1;
+	return 0;
 }
 
 void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi)
@@ -1200,6 +1662,8 @@ const char *kof_emu_stop_name(enum kof_emu_stop s)
 	case KOF_EMU_STOP_UNSUPPORTED: return "unsupported";
 	case KOF_EMU_STOP_DECODE:      return "decode";
 	case KOF_EMU_STOP_STALLED:     return "stalled";
+	case KOF_EMU_STOP_INSN:        return "watched instruction";
+	case KOF_EMU_STOP_QUIET:       return "decryption finished";
 	}
 	return "?";
 }
@@ -1378,6 +1842,67 @@ static int cond_true(const struct kof_emu *e, unsigned cc)
 	return (cc & 1u) ? !r : r;
 }
 
+/*
+ * DOES THIS INSTRUCTION CHANGE ANYTHING AT ALL?
+ *
+ * ONLY THE FORMS THAT PROVABLY CANNOT, which is a short list and deliberately
+ * so. `xchg eax, eax` and `mov edi, edi` write a register the value they just
+ * read and touch no flag; NOP is the architecture saying the same thing. A
+ * junk generator emits them by the dozen because they cost a disassembler a
+ * line and cost the program nothing.
+ *
+ * NOT A DEAD-CODE ANALYSIS, and the difference is the whole safety of it.
+ * Measured on a Sality decryption loop, these account for 8 of 256
+ * instructions - about three percent. The other junk there is `imul`, `test`
+ * and `lea` writing registers nothing reads again, and removing THOSE needs
+ * liveness over three internal branches INCLUDING the flags; getting it wrong
+ * produces a wrong answer silently, which is the one failure this interpreter
+ * must not have. Three percent that is certain beats fifty that is not.
+ *
+ * A PREFIX DOES NOT MAKE IT ACTIVE. The same generator writes `rep` on
+ * instructions that are not string operations, where the architecture ignores
+ * it - eight more in the same loop. bddisasm reports the instruction it
+ * really is, so those arrive here already stripped.
+ */
+static int nop_insn(const INSTRUX *ix)
+{
+	const ND_OPERAND *a, *b;
+
+	if (ix->Instruction == ND_INS_NOP)
+		return 1;
+	if (ix->Instruction != ND_INS_MOV && ix->Instruction != ND_INS_XCHG)
+		return 0;
+	if (ix->OperandsCount < 2u)
+		return 0;
+	a = &ix->Operands[0];
+	b = &ix->Operands[1];
+	/*
+	 * BOTH THE SAME GENERAL REGISTER, AT THE SAME WIDTH AND THE SAME HALF.
+	 * `mov ah, al` is two different registers inside one; `mov eax, ax`
+	 * is not even the same width. Neither is inert and neither is spelled
+	 * differently from one that is.
+	 */
+	if (a->Type != ND_OP_REG || b->Type != ND_OP_REG)
+		return 0;
+	if (a->Info.Register.Type != ND_REG_GPR ||
+	    b->Info.Register.Type != ND_REG_GPR)
+		return 0;
+	if (a->Info.Register.Reg != b->Info.Register.Reg)
+		return 0;
+	if (a->Info.Register.Size != b->Info.Register.Size)
+		return 0;
+	if (a->Info.Register.IsHigh8 != b->Info.Register.IsHigh8)
+		return 0;
+	/*
+	 * AND NOT A 32-BIT WRITE IN 64-BIT MODE. `mov eax, eax` zeroes the top
+	 * half of RAX on x86-64 - it is the shortest way to truncate a
+	 * register, and treating it as a no-op loses half of a value.
+	 */
+	if (ix->DefCode == ND_CODE_64 && a->Info.Register.Size == 4u)
+		return 0;
+	return 1;
+}
+
 /* ---- operands -------------------------------------------------------------- */
 
 static int ea_of(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
@@ -1422,6 +1947,231 @@ static int ea_of(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 	*out = a;
 	return 1;
 }
+
+/* ---- the x87 stack ---------------------------------------------------------
+ *
+ * See `st` in struct kof_emu for what is modelled and what is not.
+ */
+
+#define FSW_C0 (1u << 8)
+#define FSW_C1 (1u << 9)
+#define FSW_C2 (1u << 10)
+#define FSW_C3 (1u << 14)
+
+/*
+ * The 80-bit extended format, which is the one x87 stores to memory when a
+ * guest asks for `tbyte ptr`. Sign and a 15-bit exponent in the top two bytes,
+ * and a 64-bit mantissa WITH ITS LEADING ONE WRITTEN OUT - unlike every other
+ * IEEE format, where that bit is implied. So the value is simply
+ * mantissa * 2^(exponent - 16383 - 63), and no bit has to be put back.
+ */
+static double f80_rd(const uint8_t *b)
+{
+	uint64_t m = 0;
+	unsigned i, e16 = (unsigned)b[8] | ((unsigned)b[9] << 8);
+	int ex = (int)(e16 & 0x7fffu), sign = (int)(e16 >> 15);
+	double v;
+
+	for (i = 0; i < 8u; i++)
+		m |= (uint64_t)b[i] << (8u * i);
+	if (ex == 0x7fff) {
+		/* Infinity when only the explicit leading one is set, and a NaN
+		 * otherwise. Both are values a guest can store and reload. */
+		v = (m << 1) ? (double)NAN : (double)INFINITY;
+		return sign ? -v : v;
+	}
+	if (!ex && !m)
+		return sign ? -0.0 : 0.0;
+	v = ldexp((double)m, ex - 16383 - 63);
+	return sign ? -v : v;
+}
+
+static void f80_wr(uint8_t *b, double v)
+{
+	unsigned e16 = 0;
+	uint64_t m = 0;
+	int sign = 0, ex;
+
+	if (signbit(v)) {
+		sign = 1;
+		v = -v;
+	}
+	if (isnan(v)) {
+		e16 = 0x7fffu;
+		m = 0xc000000000000000ull;
+	} else if (isinf(v)) {
+		e16 = 0x7fffu;
+		m = 0x8000000000000000ull;
+	} else if (v != 0.0) {
+		double f = frexp(v, &ex);       /* v = f * 2^ex, 0.5 <= f < 1 */
+
+		m = (uint64_t)ldexp(f, 64);     /* so 2^63 <= m < 2^64 */
+		e16 = (unsigned)(ex - 1 + 16383) & 0x7fffu;
+	}
+	{
+		unsigned i;
+
+		for (i = 0; i < 8u; i++)
+			b[i] = (uint8_t)(m >> (8u * i));
+	}
+	e16 |= (unsigned)sign << 15;
+	b[8] = (uint8_t)e16;
+	b[9] = (uint8_t)(e16 >> 8);
+}
+
+static double st_get(const struct kof_emu *e, unsigned i)
+{
+	return e->st[(e->st_top + i) & 7u];
+}
+
+static void st_set(struct kof_emu *e, unsigned i, double v)
+{
+	unsigned k = (e->st_top + i) & 7u;
+
+	e->st[k] = v;
+	e->st_tag[k] = 1;
+}
+
+static void st_push(struct kof_emu *e, double v)
+{
+	e->st_top = (uint8_t)((e->st_top - 1u) & 7u);
+	e->st[e->st_top] = v;
+	e->st_tag[e->st_top] = 1;
+}
+
+static void st_pop(struct kof_emu *e)
+{
+	e->st_tag[e->st_top] = 0;
+	e->st_top = (uint8_t)((e->st_top + 1u) & 7u);
+}
+
+/*
+ * One x87 source operand as a double. `is_int` picks how a MEMORY operand is
+ * read - the instruction says which, not the operand: FILD's m32 and FLD's m32
+ * are the same four bytes and mean different numbers.
+ */
+static int fp_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+		 int is_int, double *out)
+{
+	uint64_t ea;
+	uint8_t b[10];
+	unsigned n = op->Size;
+
+	if (op->Type == ND_OP_REG) {
+		if (op->Info.Register.Type != ND_REG_FPU)
+			return 0;
+		*out = st_get(e, op->Info.Register.Reg);
+		return 1;
+	}
+	if (op->Type != ND_OP_MEM || !ea_of(e, ix, op, &ea))
+		return 0;
+	if (n != 2u && n != 4u && n != 8u && n != 10u)
+		return 0;
+	if (!mem_rd(e, ea, b, n))
+		return 0;
+	if (is_int) {
+		int64_t v = 0;
+		unsigned i;
+
+		for (i = 0; i < n; i++)
+			v |= (int64_t)((uint64_t)b[i] << (8u * i));
+		/* Sign extended from its own width, because that is what the
+		 * integer formats are - m16int, m32int, m64int. */
+		if (n < 8u && (b[n - 1u] & 0x80u))
+			v |= (int64_t)(~(uint64_t)0 << (8u * n));
+		*out = (double)v;
+		return 1;
+	}
+	if (n == 4u) {
+		uint32_t u = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+			     ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+		float f;
+
+		memcpy(&f, &u, 4);
+		*out = (double)f;
+		return 1;
+	}
+	if (n == 8u) {
+		double d;
+
+		memcpy(&d, b, 8);
+		*out = d;
+		return 1;
+	}
+	if (n == 10u) {
+		*out = f80_rd(b);
+		return 1;
+	}
+	return 0;
+}
+
+/* And one destination. Same rule about `is_int`. */
+static int fp_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+		 int is_int, double v)
+{
+	uint64_t ea;
+	uint8_t b[10];
+	unsigned n = op->Size, i;
+
+	if (op->Type == ND_OP_REG) {
+		if (op->Info.Register.Type != ND_REG_FPU)
+			return 0;
+		st_set(e, op->Info.Register.Reg, v);
+		return 1;
+	}
+	if (op->Type != ND_OP_MEM || !ea_of(e, ix, op, &ea))
+		return 0;
+	if (is_int) {
+		int64_t q;
+
+		if (n != 2u && n != 4u && n != 8u)
+			return 0;
+		/*
+		 * OUT OF RANGE IS THE "INDEFINITE" VALUE, which is what the
+		 * hardware stores rather than wrapping: the most negative
+		 * integer of the destination's width. A guest that stores a
+		 * huge float into a word gets that on a real CPU too.
+		 */
+		if (!(v >= -9.2233720368547758e18) || !(v <= 9.2233720368547758e18))
+			q = (int64_t)0x8000000000000000ull;
+		else
+			q = (int64_t)v;
+		for (i = 0; i < n; i++)
+			b[i] = (uint8_t)((uint64_t)q >> (8u * i));
+		return mem_wr(e, ea, b, n);
+	}
+	if (n == 4u) {
+		float f = (float)v;
+		uint32_t u;
+
+		memcpy(&u, &f, 4);
+		for (i = 0; i < 4u; i++)
+			b[i] = (uint8_t)(u >> (8u * i));
+		return mem_wr(e, ea, b, 4u);
+	}
+	if (n == 8u) {
+		memcpy(b, &v, 8);
+		return mem_wr(e, ea, b, 8u);
+	}
+	if (n == 10u) {
+		f80_wr(b, v);
+		return mem_wr(e, ea, b, 10u);
+	}
+	return 0;
+}
+
+/* The three condition codes a compare leaves in the status word. */
+static void fp_cmp_cc(struct kof_emu *e, double a, double b)
+{
+	e->fsw &= (uint16_t)~(FSW_C0 | FSW_C2 | FSW_C3);
+	if (isnan(a) || isnan(b))
+		e->fsw |= (uint16_t)(FSW_C0 | FSW_C2 | FSW_C3);
+	else if (a < b)
+		e->fsw |= FSW_C0;
+	else if (a == b)
+		e->fsw |= FSW_C3;
+}
+
 
 /*
  * THE SEGMENT SELECTORS A WINDOWS USER MODE THREAD ACTUALLY HAS.
@@ -1514,6 +2264,10 @@ static int vec_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 			if (op->Info.Register.Reg >= 16)
 				return 0;
 			memcpy(buf, e->xmm[op->Info.Register.Reg], n);
+		} else if (op->Info.Register.Type == ND_REG_MMX) {
+			if (op->Info.Register.Reg >= 8 || n > 8)
+				return 0;
+			memcpy(buf, e->mmx[op->Info.Register.Reg], n);
 		} else if (op->Info.Register.Type == ND_REG_GPR) {
 			uint64_t v = reg_rd(e, op->Info.Register.Reg,
 					    op->Info.Register.Size, 0);
@@ -1558,6 +2312,20 @@ static int vec_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 				return 0;
 			memset(e->xmm[op->Info.Register.Reg], 0, 16);
 			memcpy(e->xmm[op->Info.Register.Reg], buf, n);
+			return 1;
+		}
+		if (op->Info.Register.Type == ND_REG_MMX) {
+			/*
+			 * A 64-bit register, so a 4-byte MOVD clears the top
+			 * half rather than leaving what was there - which is
+			 * what the instruction does and what makes the pair
+			 * `movd mm, r32` / `movd r32, mm` a faithful round
+			 * trip.
+			 */
+			if (op->Info.Register.Reg >= 8 || n > 8)
+				return 0;
+			memset(e->mmx[op->Info.Register.Reg], 0, 8);
+			memcpy(e->mmx[op->Info.Register.Reg], buf, n);
 			return 1;
 		}
 		if (op->Info.Register.Type == ND_REG_GPR) {
@@ -3269,9 +4037,45 @@ static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 		uint64_t pr  = win_arg(e, 3);
 		unsigned prot = win_prot(pr);
 
+		if (getenv("KOF_WIN_TRACE"))
+			fprintf(stderr,
+				"[win]   VirtualAlloc(at=%#llx sz=%#llx type=%#llx prot=%#llx) rip=%#llx\n",
+				(unsigned long long)at, (unsigned long long)sz,
+				(unsigned long long)win_arg(e, 2),
+				(unsigned long long)pr,
+				(unsigned long long)e->rip);
 		if (!sz)
 			return 0;
 		if (at) {
+			/*
+			 * NOT OVER A LIBRARY'S IMAGE, BECAUSE WINDOWS REFUSES.
+			 *
+			 * VirtualAlloc with an explicit address inside a mapped
+			 * image fails there - the range is already committed as
+			 * part of the section view, and MEM_RESERVE over it
+			 * returns NULL. Succeeding is therefore an answer no
+			 * real machine gives, and a protector that asks is
+			 * usually asking precisely because of that.
+			 *
+			 * Measured on Themida: the loader calls
+			 * VirtualAlloc(kernel32 + 0x1000, 0x1000,
+			 * MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE) four
+			 * times over - the page holding this environment's own
+			 * export stubs - and carried on down a path whose
+			 * pointers were garbage within a few thousand
+			 * instructions.
+			 */
+			unsigned mi;
+
+			for (mi = 0; mi < KOF_EMU_WIN_MOD_COUNT; mi++) {
+				uint64_t mb = e->win_mod_base[mi];
+
+				if (mb && at >= mb && at - mb < KOF_EMU_WIN_MOD_SPAN) {
+					win_trace(e, "VirtualAlloc",
+						  "(over a module image)", 0);
+					return 0;
+				}
+			}
 			/* A guest asking for a specific address usually already
 			 * owns it - the Windows call succeeds on memory it has
 			 * reserved. Mapping over it is what MEM_COMMIT does. */
@@ -4826,10 +5630,14 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 {
 	e->stop = KOF_EMU_STOP_BUDGET;
 	e->detail[0] = 0;
+	e->running = 1;
 
 	while (e->insn < e->max_insn) {
 		uint8_t code[16];
-		INSTRUX ix;
+		INSTRUX ixbuf;
+		INSTRUX *ixp;
+		struct icache_ent *ent;
+		struct page *fpg;
 		NDSTATUS st;
 		uint64_t a = 0, b = 0, r = 0, next;
 		unsigned sz;
@@ -5053,6 +5861,61 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 						~(uint64_t)(KOF_EMU_PAGE - 1u);
 		}
 
+		/*
+		 * THE CACHE FIRST - see `ic`. A hit skips both the fetch and
+		 * the decode, which together are most of what an interpreted
+		 * instruction costs.
+		 */
+		ent = NULL;
+		fpg = e->ic ? page_lookup(e, e->rip) : NULL;
+		if (fpg) {
+			unsigned poff = (unsigned)(e->rip & (KOF_EMU_PAGE - 1u));
+
+			{
+				ent = &e->ic[((e->rip * 0x9e3779b97f4a7c15ull) >> 40) &
+					     (KOF_EMU_ICACHE - 1u)];
+				if (ent->valid && ent->va == e->rip &&
+				    ent->pg == fpg &&
+				    poff + ent->len <= KOF_EMU_PAGE &&
+				    !memcmp(fpg->data + poff, ent->bytes,
+					    ent->len)) {
+					/*
+					 * POINTED AT, NOT COPIED. An INSTRUX is
+					 * 480 bytes and this path runs tens of
+					 * millions of times - measured on one
+					 * Sality slice, 17.2 million hits, which
+					 * is 8.3 GB of memcpy for bytes that are
+					 * already in the right place.
+					 */
+					ixp = &ent->ix;
+					e->ic_hit++;
+					goto decoded;
+				}
+				e->ic_miss++;
+				if (!ent->valid)
+					e->m_empty++;
+				else if (ent->va != e->rip)
+					e->m_va++;
+				else if (ent->pg != fpg)
+					e->m_pg++;
+				else
+					e->m_bytes++;
+				ent->valid = 0;
+				ent->pg = fpg;
+				ent->va = e->rip;
+			}
+			/*
+			 * AND THE FETCH STRAIGHT OUT OF THE PAGE when the whole
+			 * of it lies inside one. mem_rd walks the page table
+			 * ONCE PER BYTE - sixteen lookups for every instruction
+			 * decoded - and the page is already in hand here.
+			 */
+			if (poff + sizeof code <= KOF_EMU_PAGE) {
+				memcpy(code, fpg->data + poff, sizeof code);
+				goto fetched;
+			}
+		}
+		e->in_fetch = 1;
 		if (!mem_rd(e, e->rip, code, sizeof code)) {
 			/* The tail of a mapping is a legitimate place to be: try
 			 * the shortest fetch that can still hold an instruction
@@ -5070,17 +5933,101 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			}
 			memset(code + got, 0, sizeof code - got);
 		}
-		st = NdDecodeEx(&ix, code, sizeof code,
+fetched:
+		e->in_fetch = 0;
+		/*
+		 * DECODED INTO THE CACHE SLOT ITSELF, so that filling it costs
+		 * nothing beyond the decode. The length is not known until
+		 * afterwards, so whether it may be KEPT is decided then - an
+		 * instruction straddling a page boundary depends on two pages
+		 * and this checks one.
+		 */
+		ixp = ent ? &ent->ix : &ixbuf;
+		st = NdDecodeEx(ixp, code, sizeof code,
 				e->bits == 32 ? ND_CODE_32 : ND_CODE_64,
 				e->bits == 32 ? ND_DATA_32 : ND_DATA_64);
 		if (!ND_SUCCESS(st)) { fail(e, KOF_EMU_STOP_DECODE, NULL); break; }
+		/* Kept only when it lies inside one page - see `ic`. */
+		if (ent && ((e->rip + ixp->Length - 1u) &
+			    ~(uint64_t)(KOF_EMU_PAGE - 1u))
+			   == (e->rip & ~(uint64_t)(KOF_EMU_PAGE - 1u))) {
+			memcpy(ent->bytes, code, ixp->Length);
+			ent->len = ixp->Length;
+			ent->inert = (uint8_t)nop_insn(ixp);
+			ent->valid = 1;
+		}
+decoded:
 
 		if (!e->sp0_set) {
 			e->sp0 = e->gpr[KOF_EMU_RSP];
 			e->sp0_set = 1;
 		}
 		at = e->rip;
-		at_len = ix.Length;
+		at_len = ixp->Length;
+		/*
+		 * PAUSED ON WHAT IS ABOUT TO RUN, BEFORE IT RUNS.
+		 *
+		 * Here and not after the execute, because the point is to see
+		 * the machine as the guest left it AT that instruction: for a
+		 * `ret`, the address it is about to return to is still on the
+		 * stack, and one instruction later it is not. See
+		 * kof_emu_watch_insn.
+		 *
+		 * The run is resumable from here - rip has not moved - so the
+		 * module reads what it wants and calls kof_emu_run again.
+		 */
+		if (iwatch_hit(e, at_b, at_len)) {
+			snprintf(e->detail, sizeof e->detail,
+				 "watched instruction at %#llx",
+				 (unsigned long long)e->rip);
+			e->stop = KOF_EMU_STOP_INSN;
+			goto done;
+		}
+		if (e->hot) {
+			uint32_t h = (uint32_t)((e->rip * 2654435761u) >> 8) &
+				     e->hot_mask;
+			uint32_t q;
+
+			for (q = 0; q < 8u; q++) {
+				uint32_t k = (h + q) & e->hot_mask;
+
+				if (!e->hot[k].n || e->hot[k].va == e->rip) {
+					e->hot[k].va = e->rip;
+					e->hot[k].n++;
+					break;
+				}
+			}
+		}
+		/*
+		 * AND HAS THE DECRYPTION STOPPED - see KOF_EMU_QUIET. Counted
+		 * per instruction here, reset by the write that completes a
+		 * read-write pair, and only ever consulted once the guest has
+		 * shown it decrypts at all.
+		 */
+		/*
+		 * OFF UNTIL IT IS RIGHT - see KOF_EMU_QUIET.
+		 *
+		 * The signal is measured and real; the THRESHOLD is not settled.
+		 * Measured on four Sality samples: three stop correctly and the
+		 * fourth stops 11,066 instructions in, having decrypted
+		 * nothing, because a handful of sequential writes before the
+		 * decryption starts arm the test. A stop rule that is right
+		 * three times in four is a rule that loses a detection, so it
+		 * stays behind a flag until the arming condition is measured
+		 * across more than one family.
+		 */
+		if (e->active_n)
+			e->since_active++;
+		if (e->quiet_on && e->active_n &&
+		    e->since_active > KOF_EMU_QUIET) {
+			snprintf(e->detail, sizeof e->detail,
+				 "%llu instructions since the last decryption "
+				 "write, after %llu of them",
+				 (unsigned long long)e->since_active,
+				 (unsigned long long)e->active_n);
+			e->stop = KOF_EMU_STOP_QUIET;
+			goto done;
+		}
 		e->trace[e->trace_n++ % KOF_EMU_TRACE] = e->rip;
 		if (e->itr && !e->itr_frozen &&
 		    ((e->itr_at && e->rip == e->itr_at) ||
@@ -5124,7 +6071,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			memcpy(it->gpr, e->gpr, sizeof it->gpr);
 			/* The registers are copied BEFORE the instruction runs,
 			 * which is the point: they are its inputs. */
-			if (ND_SUCCESS(NdToText(&ix, e->rip, sizeof t, t)))
+			if (ND_SUCCESS(NdToText(ixp, e->rip, sizeof t, t)))
 				while (q + 1u < sizeof it->txt && t[q]) {
 					it->txt[q] = t[q];
 					q++;
@@ -5171,11 +6118,33 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			e->stop = KOF_EMU_STOP_BUDGET;
 			break;
 		}
-		next = e->rip + ix.Length;
-		sz = ix.Operands[0].Size ? ix.Operands[0].Size : 8u;
+		next = e->rip + ixp->Length;
+		sz = ixp->Operands[0].Size ? ixp->Operands[0].Size : 8u;
 		e->insn++;
 
-		switch (ix.Instruction) {
+		/*
+		 * AN INSTRUCTION THAT CANNOT CHANGE ANYTHING IS STEPPED OVER -
+		 * see nop_insn, which decided this once when the entry was
+		 * decoded.
+		 *
+		 * AFTER ALL THE BOOKKEEPING AND BEFORE THE SWITCH, deliberately:
+		 * the instruction still counts, still enters the trace, still
+		 * satisfies a module's watch and still moves the deadline. The
+		 * only thing skipped is the work of executing something whose
+		 * result is the state it started from. A junk generator emits
+		 * these by the dozen - measured, eight of the 256 instructions
+		 * in one Sality decryption loop.
+		 *
+		 * ONLY FROM THE CACHE. Deciding it on a miss would cost the test
+		 * on every first sight of an instruction to save the execution
+		 * of a handful, and the miss path is already the expensive one.
+		 */
+		if (ent && ent->inert) {
+			e->rip = next;
+			continue;
+		}
+
+		switch (ixp->Instruction) {
 		/*
 		 * Nothing to do, for a reason rather than by omission. The
 		 * fences order accesses between threads and there is one
@@ -5191,88 +6160,395 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			break;
 
 		/*
-		 * X87 AS A WAY TO ASK "WHERE AM I", WHICH IS ALL IT IS USED FOR HERE.
+		 * ---- x87 ------------------------------------------------------
 		 *
-		 * A 32 bit shellcode encoder cannot say `lea eax, [rip]` - there is
-		 * no rip relative addressing in 32 bit mode - so it needs another way
-		 * to learn its own address. The classic answer, and the one every
-		 * Metasploit x86 encoder uses, is the FPU: execute any x87
-		 * instruction, then FNSTENV, which writes out an environment block
-		 * whose twelfth byte onward holds the address of that instruction.
-		 * Pop it and you have a pointer to your own code.
+		 * WHAT THIS USED TO BE, because the shape is still visible. Only
+		 * the instructions a GetPC sequence picks from were carried, and
+		 * they were carried as NO-OPS that set `fpu_rip` and nothing
+		 * else: a 32-bit shellcode encoder cannot say `lea eax, [rip]`,
+		 * so it executes any x87 instruction and then FNSTENV, whose
+		 * twelfth byte onward holds that instruction's address.
 		 *
 		 *     dd c3              ffree  st(3)      <- a marker, nothing else
 		 *     d9 74 24 f4        fnstenv [esp-0xc]
 		 *     5a                 pop    edx        <- edx = &ffree
 		 *
-		 * So what these need is the ADDRESS, not the arithmetic. The stack
-		 * is never read, no value is ever loaded, and the encoders here get
-		 * through their whole decryption loop without one floating point
-		 * operation. Implementing x87 registers to serve them would be a
-		 * numeric core written for callers that do no numerics.
+		 * Those encoders never read a value, so no value was kept, and
+		 * everything that COMPUTES was left to the unsupported path on
+		 * purpose - running on with a wrong st0 and not saying so is the
+		 * one failure an interpreter must not have.
 		 *
-		 * Listed one by one rather than as a range, because the ones that DO
-		 * compute have to keep reaching the unsupported path: an object that
-		 * really uses the FPU must stop and say so rather than run on with
-		 * every result silently wrong. These are the ones a GetPC sequence
-		 * picks from - they alter the register stack's tags and nothing a
-		 * decoder reads - and the arithmetic ones are deliberately absent.
+		 * NOW THE VALUES ARE KEPT - see `st` in struct kof_emu - so the
+		 * distinction is gone and these are executed for real. The GetPC
+		 * sequences are unaffected: `fpu_rip` is still set by every one
+		 * of them, and computing FFREE correctly is a superset of
+		 * ignoring it.
 		 *
-		 * Measured: two of the seven layer samples here stop on their first
-		 * instruction without this, one on FFREE and one on FCMOVBE.
+		 * WHAT IS STILL ABSENT is the transcendental set - FSIN, FCOS,
+		 * FPTAN, FYL2X and the rest - which keeps reaching the
+		 * unsupported path. Not because they are hard, but because
+		 * nothing measured has executed one, and an instruction nobody
+		 * has met is an instruction whose implementation nobody can
+		 * check.
 		 */
-		case ND_INS_FFREE:  case ND_INS_FFREEP:
 		case ND_INS_FNOP:
-		case ND_INS_FDECSTP: case ND_INS_FINCSTP:
-		case ND_INS_FXCH:
-		case ND_INS_FCMOVB:  case ND_INS_FCMOVBE: case ND_INS_FCMOVE:
-		case ND_INS_FCMOVNB: case ND_INS_FCMOVNBE: case ND_INS_FCMOVNE:
-		case ND_INS_FCMOVU:  case ND_INS_FCMOVNU:
-		case ND_INS_FLDZ: case ND_INS_FLD1:
-		case ND_INS_FABS: case ND_INS_FCHS:
+			e->fpu_rip = e->rip;
+			break;
+
+		case ND_INS_FFREE:
+		case ND_INS_FFREEP:
+			e->fpu_rip = e->rip;
+			if (ixp->OperandsCount &&
+			    ixp->Operands[0].Type == ND_OP_REG &&
+			    ixp->Operands[0].Info.Register.Type == ND_REG_FPU)
+				e->st_tag[(e->st_top +
+					   ixp->Operands[0].Info.Register.Reg) & 7u] = 0;
+			if (ixp->Instruction == ND_INS_FFREEP)
+				st_pop(e);
+			break;
+
+		case ND_INS_FDECSTP:
+			e->fpu_rip = e->rip;
+			e->st_top = (uint8_t)((e->st_top - 1u) & 7u);
+			break;
+		case ND_INS_FINCSTP:
+			e->fpu_rip = e->rip;
+			e->st_top = (uint8_t)((e->st_top + 1u) & 7u);
+			break;
+
+		case ND_INS_FXCH: {
+			double t;
+			unsigned i = 1u;
+
+			e->fpu_rip = e->rip;
+			if (ixp->OperandsCount > 1u &&
+			    ixp->Operands[1].Type == ND_OP_REG &&
+			    ixp->Operands[1].Info.Register.Type == ND_REG_FPU)
+				i = ixp->Operands[1].Info.Register.Reg;
+			t = st_get(e, 0);
+			st_set(e, 0, st_get(e, i));
+			st_set(e, i, t);
+			break;
+		}
+
 		/*
-		 * FXAM and the other flag-setters belong here too.
-		 *
-		 * They were missing and it cost a whole encoder family: the
-		 * Alpha2 stubs open with `fxam` before the fnstenv, so the run
-		 * stopped on its FIRST instruction with "unsupported: FXAM" -
-		 * measured on x86_alpha_mixed. What every instruction in this
-		 * group has in common is that the run does not need its
-		 * arithmetic, only the address it leaves behind for a later
-		 * fnstenv to report. FXAM examines st0 and sets the condition
-		 * codes; nothing here reads those, and a GetPC does not care.
+		 * The constants. FLDZ and FLD1 were already here as no-ops and
+		 * now push what they name; the other five never were, and they
+		 * are the same instruction with a different number.
 		 */
-		case ND_INS_FXAM: case ND_INS_FTST:
-		case ND_INS_FSQRT: case ND_INS_FRNDINT:
+		case ND_INS_FLDZ:   e->fpu_rip = e->rip; st_push(e, 0.0); break;
+		case ND_INS_FLD1:   e->fpu_rip = e->rip; st_push(e, 1.0); break;
+		case ND_INS_FLDPI:  e->fpu_rip = e->rip;
+			st_push(e, 3.14159265358979323846); break;
+		case ND_INS_FLDL2E: e->fpu_rip = e->rip;
+			st_push(e, 1.44269504088896340736); break;
+		case ND_INS_FLDL2T: e->fpu_rip = e->rip;
+			st_push(e, 3.32192809488736234787); break;
+		case ND_INS_FLDLG2: e->fpu_rip = e->rip;
+			st_push(e, 0.30102999566398119521); break;
+		case ND_INS_FLDLN2: e->fpu_rip = e->rip;
+			st_push(e, 0.69314718055994530942); break;
+
+		case ND_INS_FABS: e->fpu_rip = e->rip;
+			st_set(e, 0, fabs(st_get(e, 0))); break;
+		case ND_INS_FCHS: e->fpu_rip = e->rip;
+			st_set(e, 0, -st_get(e, 0)); break;
+		case ND_INS_FSQRT: e->fpu_rip = e->rip;
+			st_set(e, 0, sqrt(st_get(e, 0))); break;
+		case ND_INS_FRNDINT: e->fpu_rip = e->rip;
+			st_set(e, 0, nearbyint(st_get(e, 0))); break;
+
 		/*
-		 * The x87 COMPARES join the flag-setters, for the same reason.
+		 * FLD and FILD PUSH; they do not write their first operand.
+		 * bddisasm names st0 as that operand because that is where the
+		 * result ends up, but the register underneath it is a different
+		 * one after the push - so the source is read first and the push
+		 * is the whole of the write.
+		 */
+		case ND_INS_FLD:
+		case ND_INS_FILD: {
+			double v;
+
+			e->fpu_rip = e->rip;
+			if (ixp->OperandsCount < 2u ||
+			    !fp_rd(e, ixp, &ixp->Operands[1],
+				   ixp->Instruction == ND_INS_FILD, &v))
+				goto unsupported;
+			st_push(e, v);
+			break;
+		}
+
+		case ND_INS_FST:
+		case ND_INS_FSTP:
+		case ND_INS_FIST:
+		case ND_INS_FISTP:
+		case ND_INS_FISTTP: {
+			int is_int = ixp->Instruction != ND_INS_FST &&
+				     ixp->Instruction != ND_INS_FSTP;
+			double v = st_get(e, 0);
+
+			e->fpu_rip = e->rip;
+			/* FISTTP truncates toward zero whatever the rounding
+			 * mode says; the others follow it, and this rounds to
+			 * nearest, which is the mode a guest starts in. */
+			if (ixp->Instruction == ND_INS_FISTTP)
+				v = trunc(v);
+			else if (is_int)
+				v = nearbyint(v);
+			if (!ixp->OperandsCount ||
+			    !fp_wr(e, ixp, &ixp->Operands[0], is_int, v))
+				goto unsupported;
+			if (ixp->Instruction != ND_INS_FST &&
+			    ixp->Instruction != ND_INS_FIST)
+				st_pop(e);
+			break;
+		}
+
+		/*
+		 * THE ARITHMETIC, AS ONE CASE, because the only things that
+		 * differ between twenty-odd mnemonics are the operator, whether
+		 * the operands are swapped, whether the memory side is an
+		 * integer, and whether the stack is popped afterwards. Writing
+		 * them out separately is twenty chances to get one wrong.
 		 *
-		 * A GetPC that opens with a compare rather than an FXAM stopped
-		 * on it: x86_poly's stub reaches `fucomip` as its fifth
-		 * instruction and, without this, the run ends there with
-		 * "unsupported: FUCOMIP". Like FXAM these leave a condition
-		 * behind and no value - FCOMI/FUCOMIP into EFLAGS, the FCOM
-		 * family into the x87 status word - and a decoder reads neither;
-		 * it wants only the address the instruction records for a later
-		 * fnstenv or fxsave.
-		 *
-		 * NOT written as `Category == ND_CAT_X87_ALU`, though every one
-		 * of these carries that category: so does FADD, FMUL, FDIV, every
-		 * instruction that actually computes. bddisasm files arithmetic
-		 * and comparison under the one category, so testing it would let
-		 * the arithmetic through too - and an object that really adds
-		 * would then run on with a wrong st0 and never say so, which is
-		 * the whole thing the enumeration above exists to prevent. The
-		 * compares are safe because their output is a flag nothing reads,
-		 * not because of what category they share.
+		 * THE REVERSED FORMS ARE NOT A DETAIL. `FSUB` computes
+		 * dst - src and `FSUBR` computes src - dst; a guest that divides
+		 * with FDIVR and gets FDIV's answer has every later value wrong
+		 * and nothing says so.
+		 */
+		case ND_INS_FADD: case ND_INS_FADDP: case ND_INS_FIADD:
+		case ND_INS_FMUL: case ND_INS_FMULP: case ND_INS_FIMUL:
+		case ND_INS_FSUB: case ND_INS_FSUBP: case ND_INS_FISUB:
+		case ND_INS_FSUBR: case ND_INS_FSUBRP: case ND_INS_FISUBR:
+		case ND_INS_FDIV: case ND_INS_FDIVP: case ND_INS_FIDIV:
+		case ND_INS_FDIVR: case ND_INS_FDIVRP: case ND_INS_FIDIVR: {
+			double fa, fb, fr;
+			int is_int = 0, rev = 0, pop = 0;
+
+			e->fpu_rip = e->rip;
+			switch (ixp->Instruction) {
+			case ND_INS_FIADD: case ND_INS_FIMUL:
+			case ND_INS_FISUB: case ND_INS_FISUBR:
+			case ND_INS_FIDIV: case ND_INS_FIDIVR:
+				is_int = 1;
+				break;
+			default:
+				break;
+			}
+			switch (ixp->Instruction) {
+			case ND_INS_FSUBR: case ND_INS_FSUBRP: case ND_INS_FISUBR:
+			case ND_INS_FDIVR: case ND_INS_FDIVRP: case ND_INS_FIDIVR:
+				rev = 1;
+				break;
+			default:
+				break;
+			}
+			switch (ixp->Instruction) {
+			case ND_INS_FADDP: case ND_INS_FMULP:
+			case ND_INS_FSUBP: case ND_INS_FSUBRP:
+			case ND_INS_FDIVP: case ND_INS_FDIVRP:
+				pop = 1;
+				break;
+			default:
+				break;
+			}
+			if (ixp->OperandsCount < 2u ||
+			    !fp_rd(e, ixp, &ixp->Operands[0], 0, &fa) ||
+			    !fp_rd(e, ixp, &ixp->Operands[1], is_int, &fb))
+				goto unsupported;
+			if (rev) {
+				double t = fa;
+
+				fa = fb;
+				fb = t;
+			}
+			switch (ixp->Instruction) {
+			case ND_INS_FADD: case ND_INS_FADDP: case ND_INS_FIADD:
+				fr = fa + fb; break;
+			case ND_INS_FMUL: case ND_INS_FMULP: case ND_INS_FIMUL:
+				fr = fa * fb; break;
+			case ND_INS_FSUB: case ND_INS_FSUBP: case ND_INS_FISUB:
+			case ND_INS_FSUBR: case ND_INS_FSUBRP: case ND_INS_FISUBR:
+				fr = fa - fb; break;
+			default:
+				/*
+				 * DIVIDING BY ZERO IS A VALUE, NOT A FAULT.
+				 * Unmasked it would raise #DE; a guest that has
+				 * not unmasked it - which is every guest here,
+				 * since nothing writes the control word - gets
+				 * an infinity and carries on, and so does this.
+				 */
+				fr = fa / fb; break;
+			}
+			if (!fp_wr(e, ixp, &ixp->Operands[0], 0, fr))
+				goto unsupported;
+			if (pop)
+				st_pop(e);
+			break;
+		}
+
+		/*
+		 * THE COMPARES, which used to be here for their address alone.
+		 * Two families: the FCOM group leaves its answer in the status
+		 * word's condition codes, where a guest reads it with FNSTSW and
+		 * branches on AH; the FCOMI group puts it straight in EFLAGS.
 		 */
 		case ND_INS_FCOM:  case ND_INS_FCOMP:  case ND_INS_FCOMPP:
 		case ND_INS_FUCOM: case ND_INS_FUCOMP: case ND_INS_FUCOMPP:
-		case ND_INS_FCOMI: case ND_INS_FCOMIP:
-		case ND_INS_FUCOMI: case ND_INS_FUCOMIP:
 		case ND_INS_FICOM: case ND_INS_FICOMP:
+		case ND_INS_FTST: {
+			double fa = st_get(e, 0), fb = 0.0;
+			int is_int = ixp->Instruction == ND_INS_FICOM ||
+				     ixp->Instruction == ND_INS_FICOMP;
+
 			e->fpu_rip = e->rip;
+			if (ixp->Instruction != ND_INS_FTST) {
+				if (ixp->OperandsCount < 2u ||
+				    !fp_rd(e, ixp, &ixp->Operands[1], is_int, &fb))
+					goto unsupported;
+			}
+			fp_cmp_cc(e, fa, fb);
+			switch (ixp->Instruction) {
+			case ND_INS_FCOMP: case ND_INS_FUCOMP:
+			case ND_INS_FICOMP:
+				st_pop(e);
+				break;
+			case ND_INS_FCOMPP: case ND_INS_FUCOMPP:
+				st_pop(e);
+				st_pop(e);
+				break;
+			default:
+				break;
+			}
 			break;
+		}
+
+		case ND_INS_FCOMI: case ND_INS_FCOMIP:
+		case ND_INS_FUCOMI: case ND_INS_FUCOMIP: {
+			double fa = st_get(e, 0), fb;
+
+			e->fpu_rip = e->rip;
+			if (ixp->OperandsCount < 2u ||
+			    !fp_rd(e, ixp, &ixp->Operands[1], 0, &fb))
+				goto unsupported;
+			e->flags &= ~(uint64_t)(FL_ZF | FL_PF | FL_CF);
+			if (isnan(fa) || isnan(fb))
+				e->flags |= FL_ZF | FL_PF | FL_CF;
+			else if (fa < fb)
+				e->flags |= FL_CF;
+			else if (fa == fb)
+				e->flags |= FL_ZF;
+			if (ixp->Instruction == ND_INS_FCOMIP ||
+			    ixp->Instruction == ND_INS_FUCOMIP)
+				st_pop(e);
+			break;
+		}
+
+		/*
+		 * FXAM classifies st0 into C3/C2/C0. It was a no-op here and a
+		 * GetPC does not read it, but a guest that branches on "is this
+		 * zero" does, and the classification is three comparisons.
+		 */
+		case ND_INS_FXAM: {
+			double v = st_get(e, 0);
+
+			e->fpu_rip = e->rip;
+			e->fsw &= (uint16_t)~(FSW_C0 | FSW_C1 | FSW_C2 | FSW_C3);
+			if (signbit(v))
+				e->fsw |= FSW_C1;
+			if (!e->st_tag[e->st_top])
+				e->fsw |= (uint16_t)(FSW_C3 | FSW_C0);  /* empty */
+			else if (isnan(v))
+				e->fsw |= FSW_C0;
+			else if (isinf(v))
+				e->fsw |= (uint16_t)(FSW_C2 | FSW_C0);
+			else if (v == 0.0)
+				e->fsw |= FSW_C3;
+			else
+				e->fsw |= FSW_C2;                       /* normal */
+			break;
+		}
+
+		/*
+		 * The status word, which is how a guest reads a compare it made
+		 * with the FCOM family: `fnstsw ax` then `sahf` or `test ah`.
+		 * TOP sits in bits 11..13 and is part of what is reported.
+		 */
+		case ND_INS_FNSTSW: {
+			uint64_t v = (uint64_t)(e->fsw |
+					(uint16_t)((e->st_top & 7u) << 11));
+
+			e->fpu_rip = e->rip;
+			if (!ixp->OperandsCount ||
+			    !op_wr(e, ixp, &ixp->Operands[0], v))
+				goto unsupported;
+			break;
+		}
+
+		/*
+		 * The conditional moves. They were no-ops and the condition was
+		 * never looked at; now the value moves when EFLAGS says it
+		 * should, which is what a guest that used one is expecting.
+		 */
+		case ND_INS_FCMOVB:  case ND_INS_FCMOVBE: case ND_INS_FCMOVE:
+		case ND_INS_FCMOVNB: case ND_INS_FCMOVNBE: case ND_INS_FCMOVNE:
+		case ND_INS_FCMOVU:  case ND_INS_FCMOVNU: {
+			int cf = (e->flags & FL_CF) != 0;
+			int zf = (e->flags & FL_ZF) != 0;
+			int pf = (e->flags & FL_PF) != 0;
+			int take;
+			double v;
+
+			e->fpu_rip = e->rip;
+			switch (ixp->Instruction) {
+			case ND_INS_FCMOVB:   take = cf; break;
+			case ND_INS_FCMOVE:   take = zf; break;
+			case ND_INS_FCMOVBE:  take = cf || zf; break;
+			case ND_INS_FCMOVU:   take = pf; break;
+			case ND_INS_FCMOVNB:  take = !cf; break;
+			case ND_INS_FCMOVNE:  take = !zf; break;
+			case ND_INS_FCMOVNBE: take = !cf && !zf; break;
+			default:              take = !pf; break;
+			}
+			if (!take)
+				break;
+			if (ixp->OperandsCount < 2u ||
+			    !fp_rd(e, ixp, &ixp->Operands[1], 0, &v))
+				goto unsupported;
+			st_set(e, 0, v);
+			break;
+		}
+
+		/*
+		 * The control-word and state instructions that a guest issues to
+		 * put the FPU in a known state. Nothing here reads the control
+		 * word - rounding is always to nearest and every exception is
+		 * masked - so these are accepted and only FINIT has an effect
+		 * that anything can observe.
+		 */
+		case ND_INS_FLDCW:
+		case ND_INS_FNSTCW:
+		case ND_INS_FNCLEX:
+			e->fpu_rip = e->rip;
+			if (ixp->Instruction == ND_INS_FNSTCW && ixp->OperandsCount &&
+			    !op_wr(e, ixp, &ixp->Operands[0], 0x037fu))
+				goto unsupported;
+			if (ixp->Instruction == ND_INS_FNCLEX)
+				e->fsw = 0;
+			break;
+
+		case ND_INS_FNINIT: {
+			unsigned q;
+
+			e->fpu_rip = e->rip;
+			for (q = 0; q < 8u; q++) {
+				e->st[q] = 0.0;
+				e->st_tag[q] = 0;
+			}
+			e->st_top = 0;
+			e->fsw = 0;
+			break;
+		}
 
 		/*
 		 * The environment block, and the one field in it that matters.
@@ -5299,8 +6575,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			env[13] = (uint8_t)(e->fpu_rip >> 8);
 			env[14] = (uint8_t)(e->fpu_rip >> 16);
 			env[15] = (uint8_t)(e->fpu_rip >> 24);
-			if (ix.Operands[0].Type != ND_OP_MEM ||
-			    !ea_of(e, &ix, &ix.Operands[0], &ea))
+			if (ixp->Operands[0].Type != ND_OP_MEM ||
+			    !ea_of(e, ixp, &ixp->Operands[0], &ea))
 				goto unsupported;
 			if (!mem_wr(e, ea, env, sizeof env))
 				goto fault;
@@ -5334,7 +6610,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint64_t ea;         /* see FNSTENV above */
 
 			memset(area, 0, sizeof area);
-			if (ix.Instruction == ND_INS_FXSAVE64) {
+			if (ixp->Instruction == ND_INS_FXSAVE64) {
 				unsigned k;
 
 				for (k = 0; k < 8u; k++)
@@ -5346,8 +6622,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				area[10] = (uint8_t)(e->fpu_rip >> 16);
 				area[11] = (uint8_t)(e->fpu_rip >> 24);
 			}
-			if (ix.Operands[0].Type != ND_OP_MEM ||
-			    !ea_of(e, &ix, &ix.Operands[0], &ea))
+			if (ixp->Operands[0].Type != ND_OP_MEM ||
+			    !ea_of(e, ixp, &ixp->Operands[0], &ea))
 				goto unsupported;
 			if (!mem_wr(e, ea, area, sizeof area))
 				goto fault;
@@ -5364,7 +6640,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 
 			reg_wr(e, KOF_EMU_RAX, 4, 0, now & 0xffffffffu);
 			reg_wr(e, KOF_EMU_RDX, 4, 0, now >> 32);
-			if (ix.Instruction == ND_INS_RDTSCP)
+			if (ixp->Instruction == ND_INS_RDTSCP)
 				reg_wr(e, KOF_EMU_RCX, 4, 0, 0);
 			break;
 		}
@@ -5377,11 +6653,11 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * wrote, which is all any of them check.
 		 */
 		case ND_INS_STMXCSR:
-			if (!op_wr(e, &ix, &ix.Operands[0], e->mxcsr))
+			if (!op_wr(e, ixp, &ixp->Operands[0], e->mxcsr))
 				goto unsupported;
 			break;
 		case ND_INS_LDMXCSR:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
 			e->mxcsr = (uint32_t)a;
 			break;
@@ -5400,12 +6676,12 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_CMPXCHG: {
 			uint64_t dst, src, acc = reg_rd(e, KOF_EMU_RAX, sz, 0);
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &dst) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &src))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &dst) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &src))
 				goto unsupported;
 			fl_sub(e, acc, dst, 0, sz);
 			if (((acc ^ dst) & mask_of(sz)) == 0) {
-				if (!op_wr(e, &ix, &ix.Operands[0], src))
+				if (!op_wr(e, ixp, &ixp->Operands[0], src))
 					goto unsupported;
 			} else {
 				reg_wr(e, KOF_EMU_RAX, sz, 0, dst);
@@ -5416,12 +6692,12 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_XADD: {
 			uint64_t dst, src;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &dst) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &src))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &dst) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &src))
 				goto unsupported;
 			fl_add(e, dst, src, 0, sz);
-			if (!op_wr(e, &ix, &ix.Operands[1], dst) ||
-			    !op_wr(e, &ix, &ix.Operands[0], dst + src))
+			if (!op_wr(e, ixp, &ixp->Operands[1], dst) ||
+			    !op_wr(e, ixp, &ixp->Operands[0], dst + src))
 				goto unsupported;
 			break;
 		}
@@ -5435,7 +6711,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_MUL: {
 			uint64_t acc = reg_rd(e, KOF_EMU_RAX, sz, 0), hi;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
 			if (sz == 8) {
 				uint64_t al = acc & 0xffffffffu, ah = acc >> 32;
@@ -5469,13 +6745,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint64_t lo = reg_rd(e, KOF_EMU_RAX, sz, 0);
 			uint64_t hi = reg_rd(e, KOF_EMU_RDX, sz, 0);
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
 			a &= mask_of(sz);
 			if (!a || (sz == 8 && hi))
 				goto unsupported;
 			if (sz == 8) {
-				if (ix.Instruction == ND_INS_DIV) {
+				if (ixp->Instruction == ND_INS_DIV) {
 					reg_wr(e, KOF_EMU_RAX, 8, 0, lo / a);
 					reg_wr(e, KOF_EMU_RDX, 8, 0, lo % a);
 				} else {
@@ -5498,7 +6774,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			} else {
 				uint64_t n = (hi << (sz * 8u)) | (lo & mask_of(sz));
 
-				if (ix.Instruction == ND_INS_IDIV) {
+				if (ixp->Instruction == ND_INS_IDIV) {
 					int64_t sn = (int64_t)sext(n, sz * 2u);
 					int64_t sd = (int64_t)sext(a, sz);
 
@@ -5519,17 +6795,17 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint64_t bit, val;
 			unsigned w = sz * 8u;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &val) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &bit))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &val) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &bit))
 				goto unsupported;
 			bit &= w - 1u;
 			e->flags = (e->flags & ~FL_CF) |
 				   (((val >> bit) & 1u) ? FL_CF : 0u);
-			if (ix.Instruction == ND_INS_BTS)      val |=  (uint64_t)1 << bit;
-			else if (ix.Instruction == ND_INS_BTR) val &= ~((uint64_t)1 << bit);
-			else if (ix.Instruction == ND_INS_BTC) val ^=  (uint64_t)1 << bit;
-			if (ix.Instruction != ND_INS_BT &&
-			    !op_wr(e, &ix, &ix.Operands[0], val))
+			if (ixp->Instruction == ND_INS_BTS)      val |=  (uint64_t)1 << bit;
+			else if (ixp->Instruction == ND_INS_BTR) val &= ~((uint64_t)1 << bit);
+			else if (ixp->Instruction == ND_INS_BTC) val ^=  (uint64_t)1 << bit;
+			if (ixp->Instruction != ND_INS_BT &&
+			    !op_wr(e, ixp, &ixp->Operands[0], val))
 				goto unsupported;
 			break;
 		}
@@ -5540,30 +6816,30 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint64_t v, k;
 			unsigned w = sz * 8u;
 
-			if (!op_rd(e, &ix, &ix.Operands[1], &v))
+			if (!op_rd(e, ixp, &ixp->Operands[1], &v))
 				goto unsupported;
 			if (!v) {
 				e->flags |= FL_ZF;
-				if (ix.Instruction == ND_INS_TZCNT ||
-				    ix.Instruction == ND_INS_LZCNT) {
+				if (ixp->Instruction == ND_INS_TZCNT ||
+				    ixp->Instruction == ND_INS_LZCNT) {
 					e->flags |= FL_CF;
-					if (!op_wr(e, &ix, &ix.Operands[0], w))
+					if (!op_wr(e, ixp, &ixp->Operands[0], w))
 						goto unsupported;
 				}
 				break;
 			}
 			e->flags &= ~(uint64_t)(FL_ZF | FL_CF);
-			if (ix.Instruction == ND_INS_BSF ||
-			    ix.Instruction == ND_INS_TZCNT) {
+			if (ixp->Instruction == ND_INS_BSF ||
+			    ixp->Instruction == ND_INS_TZCNT) {
 				for (k = 0; !((v >> k) & 1u); k++)
 					;
 			} else {
 				for (k = w - 1u; !((v >> k) & 1u); k--)
 					;
-				if (ix.Instruction == ND_INS_LZCNT)
+				if (ixp->Instruction == ND_INS_LZCNT)
 					k = w - 1u - k;
 			}
-			if (!op_wr(e, &ix, &ix.Operands[0], k))
+			if (!op_wr(e, ixp, &ixp->Operands[0], k))
 				goto unsupported;
 			break;
 		}
@@ -5571,13 +6847,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_POPCNT: {
 			uint64_t v, n = 0;
 
-			if (!op_rd(e, &ix, &ix.Operands[1], &v))
+			if (!op_rd(e, ixp, &ixp->Operands[1], &v))
 				goto unsupported;
 			while (v) { n += v & 1u; v >>= 1; }
 			e->flags = (e->flags & ~(uint64_t)(FL_ZF | FL_CF | FL_OF |
 							   FL_SF | FL_PF | FL_AF)) |
 				   (n ? 0u : FL_ZF);
-			if (!op_wr(e, &ix, &ix.Operands[0], n))
+			if (!op_wr(e, ixp, &ixp->Operands[0], n))
 				goto unsupported;
 			break;
 		}
@@ -5598,8 +6874,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint8_t v[16];
 			unsigned n;
 
-			if (!vec_rd(e, &ix, &ix.Operands[1], v, &n) ||
-			    !vec_wr(e, &ix, &ix.Operands[0], v, n))
+			if (!vec_rd(e, ixp, &ixp->Operands[1], v, &n) ||
+			    !vec_wr(e, ixp, &ixp->Operands[0], v, n))
 				goto unsupported;
 			break;
 		}
@@ -5613,11 +6889,11 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint8_t x[16], y[16];
 			unsigned nx, ny, k;
 
-			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-			    !vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 				goto unsupported;
 			for (k = 0; k < 16; k++)
-				switch (ix.Instruction) {
+				switch (ixp->Instruction) {
 				case ND_INS_XORPS: case ND_INS_XORPD:
 				case ND_INS_PXOR:    x[k] ^= y[k]; break;
 				case ND_INS_POR:  case ND_INS_ORPS:
@@ -5629,7 +6905,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				case ND_INS_PSUBB:   x[k] = (uint8_t)(x[k] - y[k]); break;
 				default:             x[k] = x[k] == y[k] ? 0xffu : 0u; break;
 				}
-			if (!vec_wr(e, &ix, &ix.Operands[0], x, nx))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], x, nx))
 				goto unsupported;
 			break;
 		}
@@ -5650,22 +6926,22 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_DIVSS: {
 			uint8_t x[16], y[16];
 			unsigned nx, ny;
-			int dbl = ix.Instruction == ND_INS_ADDSD ||
-				  ix.Instruction == ND_INS_SUBSD ||
-				  ix.Instruction == ND_INS_MULSD ||
-				  ix.Instruction == ND_INS_DIVSD ||
-				  ix.Instruction == ND_INS_MAXSD ||
-				  ix.Instruction == ND_INS_MINSD ||
-				  ix.Instruction == ND_INS_SQRTSD;
+			int dbl = ixp->Instruction == ND_INS_ADDSD ||
+				  ixp->Instruction == ND_INS_SUBSD ||
+				  ixp->Instruction == ND_INS_MULSD ||
+				  ixp->Instruction == ND_INS_DIVSD ||
+				  ixp->Instruction == ND_INS_MAXSD ||
+				  ixp->Instruction == ND_INS_MINSD ||
+				  ixp->Instruction == ND_INS_SQRTSD;
 			double u, v, w;
 			float  fu, fv, fw;
 
-			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-			    !vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 				goto unsupported;
 			if (dbl) { memcpy(&u, x, 8); memcpy(&v, y, 8); }
 			else     { memcpy(&fu, x, 4); memcpy(&fv, y, 4); u = fu; v = fv; }
-			switch (ix.Instruction) {
+			switch (ixp->Instruction) {
 			case ND_INS_ADDSD: case ND_INS_ADDSS: w = u + v; break;
 			case ND_INS_SUBSD: case ND_INS_SUBSS: w = u - v; break;
 			case ND_INS_MULSD: case ND_INS_MULSS: w = u * v; break;
@@ -5676,7 +6952,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			}
 			if (dbl) { memcpy(x, &w, 8); }
 			else     { fw = (float)w; memcpy(x, &fw, 4); }
-			if (!vec_wr(e, &ix, &ix.Operands[0], x, nx))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], x, nx))
 				goto unsupported;
 			break;
 		}
@@ -5685,13 +6961,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_UCOMISS: case ND_INS_COMISS: {
 			uint8_t x[16], y[16];
 			unsigned nx, ny;
-			int dbl = ix.Instruction == ND_INS_UCOMISD ||
-				  ix.Instruction == ND_INS_COMISD;
+			int dbl = ixp->Instruction == ND_INS_UCOMISD ||
+				  ixp->Instruction == ND_INS_COMISD;
 			double u, v;
 			float fu, fv;
 
-			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-			    !vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 				goto unsupported;
 			if (dbl) { memcpy(&u, x, 8); memcpy(&v, y, 8); }
 			else     { memcpy(&fu, x, 4); memcpy(&fv, y, 4); u = fu; v = fv; }
@@ -5711,28 +6987,28 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			double d;
 			float f;
 
-			if (ix.Instruction == ND_INS_CVTSI2SD ||
-			    ix.Instruction == ND_INS_CVTSI2SS) {
-				if (!op_rd(e, &ix, &ix.Operands[1], &a))
+			if (ixp->Instruction == ND_INS_CVTSI2SD ||
+			    ixp->Instruction == ND_INS_CVTSI2SS) {
+				if (!op_rd(e, ixp, &ixp->Operands[1], &a))
 					goto unsupported;
 				d = (double)(int64_t)sext(a,
-					ix.Operands[1].Size ? ix.Operands[1].Size : 8u);
+					ixp->Operands[1].Size ? ixp->Operands[1].Size : 8u);
 			} else {
-				if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+				if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 					goto unsupported;
-				if (ix.Instruction == ND_INS_CVTSS2SD) {
+				if (ixp->Instruction == ND_INS_CVTSS2SD) {
 					memcpy(&f, y, 4); d = f;
 				} else {
 					memcpy(&d, y, 8);
 				}
 			}
-			if (ix.Instruction == ND_INS_CVTSI2SS ||
-			    ix.Instruction == ND_INS_CVTSD2SS) {
+			if (ixp->Instruction == ND_INS_CVTSI2SS ||
+			    ixp->Instruction == ND_INS_CVTSD2SS) {
 				f = (float)d; memcpy(x, &f, 4);
 			} else {
 				memcpy(x, &d, 8);
 			}
-			if (!vec_wr(e, &ix, &ix.Operands[0], x, 16))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], x, 16))
 				goto unsupported;
 			break;
 		}
@@ -5743,12 +7019,12 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			double d;
 			float f;
 
-			if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 				goto unsupported;
-			if (ix.Instruction == ND_INS_CVTTSD2SI)
+			if (ixp->Instruction == ND_INS_CVTTSD2SI)
 				memcpy(&d, y, 8);
 			else { memcpy(&f, y, 4); d = f; }
-			if (!op_wr(e, &ix, &ix.Operands[0], (uint64_t)(int64_t)d))
+			if (!op_wr(e, ixp, &ixp->Operands[0], (uint64_t)(int64_t)d))
 				goto unsupported;
 			break;
 		}
@@ -5764,18 +7040,18 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint8_t x[16], y[16];
 			unsigned nx, ny;
 
-			if (ix.Operands[0].Type == ND_OP_MEM) {
+			if (ixp->Operands[0].Type == ND_OP_MEM) {
 				/* store: the high half goes to memory */
-				if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+				if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 					goto unsupported;
-				if (!vec_wr(e, &ix, &ix.Operands[0], y + 8, 8))
+				if (!vec_wr(e, ixp, &ixp->Operands[0], y + 8, 8))
 					goto unsupported;
 			} else {
-				if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-				    !vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+				if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+				    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 					goto unsupported;
 				memcpy(x + 8, y, 8);
-				if (!vec_wr(e, &ix, &ix.Operands[0], x, 16))
+				if (!vec_wr(e, ixp, &ixp->Operands[0], x, 16))
 					goto unsupported;
 			}
 			break;
@@ -5786,13 +7062,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned nx;
 			uint64_t v, sel;
 
-			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &v) ||
-			    !op_rd(e, &ix, &ix.Operands[2], &sel))
+			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &v) ||
+			    !op_rd(e, ixp, &ixp->Operands[2], &sel))
 				goto unsupported;
 			x[(sel & 7u) * 2u]      = (uint8_t)v;
 			x[(sel & 7u) * 2u + 1u] = (uint8_t)(v >> 8);
-			if (!vec_wr(e, &ix, &ix.Operands[0], x, 16))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], x, 16))
 				goto unsupported;
 			break;
 		}
@@ -5802,10 +7078,10 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned ny;
 			uint64_t sel;
 
-			if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny) ||
-			    !op_rd(e, &ix, &ix.Operands[2], &sel))
+			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny) ||
+			    !op_rd(e, ixp, &ixp->Operands[2], &sel))
 				goto unsupported;
-			if (!op_wr(e, &ix, &ix.Operands[0],
+			if (!op_wr(e, ixp, &ixp->Operands[0],
 				   (uint64_t)y[(sel & 7u) * 2u] |
 				   ((uint64_t)y[(sel & 7u) * 2u + 1u] << 8)))
 				goto unsupported;
@@ -5817,11 +7093,11 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned ny, k;
 			uint64_t m = 0;
 
-			if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 				goto unsupported;
 			for (k = 0; k < 16; k++)
 				m |= (uint64_t)(y[k] >> 7) << k;
-			if (!op_wr(e, &ix, &ix.Operands[0], m))
+			if (!op_wr(e, ixp, &ixp->Operands[0], m))
 				goto unsupported;
 			break;
 		}
@@ -5831,17 +7107,17 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned nx, k;
 			uint64_t sh;
 
-			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &sh))
+			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &sh))
 				goto unsupported;
 			if (sh < 16)
 				for (k = 0; k < 16u - sh; k++) {
-					if (ix.Instruction == ND_INS_PSLLDQ)
+					if (ixp->Instruction == ND_INS_PSLLDQ)
 						q[k + sh] = x[k];
 					else
 						q[k] = x[k + sh];
 				}
-			if (!vec_wr(e, &ix, &ix.Operands[0], q, 16))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], q, 16))
 				goto unsupported;
 			break;
 		}
@@ -5850,14 +7126,14 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint8_t x[16], y[16], q[16];
 			unsigned nx, ny, k;
 
-			if (!vec_rd(e, &ix, &ix.Operands[0], x, &nx) ||
-			    !vec_rd(e, &ix, &ix.Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
 				goto unsupported;
 			for (k = 0; k < 8; k++) {
 				q[k * 2u]      = x[k];
 				q[k * 2u + 1u] = y[k];
 			}
-			if (!vec_wr(e, &ix, &ix.Operands[0], q, 16))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], q, 16))
 				goto unsupported;
 			break;
 		}
@@ -5867,32 +7143,32 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned ny, k;
 			uint64_t sel;
 
-			if (!vec_rd(e, &ix, &ix.Operands[1], y, &ny) ||
-			    !op_rd(e, &ix, &ix.Operands[2], &sel))
+			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny) ||
+			    !op_rd(e, ixp, &ixp->Operands[2], &sel))
 				goto unsupported;
 			for (k = 0; k < 4; k++)
 				memcpy(q + k * 4u, y + ((sel >> (k * 2u)) & 3u) * 4u, 4);
-			if (!vec_wr(e, &ix, &ix.Operands[0], q, 16))
+			if (!vec_wr(e, ixp, &ixp->Operands[0], q, 16))
 				goto unsupported;
 			break;
 		}
 
 		case ND_INS_MOV:
 		case ND_INS_MOVZX:
-			if (!op_rd(e, &ix, &ix.Operands[1], &b) ||
-			    !op_wr(e, &ix, &ix.Operands[0], b))
+			if (!op_rd(e, ixp, &ixp->Operands[1], &b) ||
+			    !op_wr(e, ixp, &ixp->Operands[0], b))
 				goto unsupported;
 			break;
 
 		case ND_INS_MOVSX:
 		case ND_INS_MOVSXD: {
-			unsigned sb = ix.Operands[1].Size ? ix.Operands[1].Size : 1u;
+			unsigned sb = ixp->Operands[1].Size ? ixp->Operands[1].Size : 1u;
 
-			if (!op_rd(e, &ix, &ix.Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[1], &b))
 				goto unsupported;
 			if (sb < 8 && (b >> (sb * 8u - 1u)) & 1u)
 				b |= ~mask_of(sb);
-			if (!op_wr(e, &ix, &ix.Operands[0], b))
+			if (!op_wr(e, ixp, &ixp->Operands[0], b))
 				goto unsupported;
 			break;
 		}
@@ -5900,17 +7176,17 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_LEA: {
 			uint64_t ea;
 
-			if (!ea_of(e, &ix, &ix.Operands[1], &ea) ||
-			    !op_wr(e, &ix, &ix.Operands[0], ea))
+			if (!ea_of(e, ixp, &ixp->Operands[1], &ea) ||
+			    !op_wr(e, ixp, &ixp->Operands[0], ea))
 				goto unsupported;
 			break;
 		}
 
 		case ND_INS_XCHG:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &b) ||
-			    !op_wr(e, &ix, &ix.Operands[0], b) ||
-			    !op_wr(e, &ix, &ix.Operands[1], a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &b) ||
+			    !op_wr(e, ixp, &ixp->Operands[0], b) ||
+			    !op_wr(e, ixp, &ixp->Operands[1], a))
 				goto unsupported;
 			break;
 
@@ -5920,13 +7196,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_TEST: {
 			uint64_t cin = 0;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &b))
 				goto unsupported;
-			if (ix.Instruction == ND_INS_ADC ||
-			    ix.Instruction == ND_INS_SBB)
+			if (ixp->Instruction == ND_INS_ADC ||
+			    ixp->Instruction == ND_INS_SBB)
 				cin = (e->flags & FL_CF) ? 1u : 0u;
-			switch (ix.Instruction) {
+			switch (ixp->Instruction) {
 			case ND_INS_ADD: case ND_INS_ADC:
 				r = a + b + cin; fl_add(e, a, b, cin, sz); break;
 			case ND_INS_SUB: case ND_INS_SBB: case ND_INS_CMP:
@@ -5938,9 +7214,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			default:
 				r = a ^ b; fl_logic(e, r, sz); break;
 			}
-			if (ix.Instruction != ND_INS_CMP &&
-			    ix.Instruction != ND_INS_TEST &&
-			    !op_wr(e, &ix, &ix.Operands[0], r))
+			if (ixp->Instruction != ND_INS_CMP &&
+			    ixp->Instruction != ND_INS_TEST &&
+			    !op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 		}
@@ -5948,9 +7224,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_INC: case ND_INS_DEC: {
 			uint64_t cf = e->flags & FL_CF;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
-			if (ix.Instruction == ND_INS_INC) {
+			if (ixp->Instruction == ND_INS_INC) {
 				r = a + 1u; fl_add(e, a, 1u, 0, sz);
 			} else {
 				r = a - 1u; fl_sub(e, a, 1u, 0, sz);
@@ -5959,23 +7235,23 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			 * them different from ADD/SUB by one, and the reason a
 			 * carry-chained loop written with them still works. */
 			e->flags = (e->flags & ~(uint64_t)FL_CF) | cf;
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 		}
 
 		case ND_INS_NEG:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
 			r = 0u - a;
 			fl_sub(e, 0, a, 0, sz);
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 
 		case ND_INS_NOT:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_wr(e, &ix, &ix.Operands[0], ~a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_wr(e, ixp, &ixp->Operands[0], ~a))
 				goto unsupported;
 			break;
 
@@ -5997,8 +7273,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned n, rc, w = sz * 8u, i;
 			uint64_t m = mask_of(sz), cf;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			/*
@@ -6019,7 +7295,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			 * the count is at most 64 and these run once.
 			 */
 			for (i = 0; i < rc; i++) {
-				if (ix.Instruction == ND_INS_RCL) {
+				if (ixp->Instruction == ND_INS_RCL) {
 					uint64_t top = (a >> (w - 1u)) & 1u;
 
 					a = ((a << 1) | cf) & m;
@@ -6038,7 +7314,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			/* OF is defined for a count of one alone, as above. */
 			if (n == 1) {
 				e->flags &= ~(uint64_t)FL_OF;
-				if (ix.Instruction == ND_INS_RCL) {
+				if (ixp->Instruction == ND_INS_RCL) {
 					if (((r >> (w - 1u)) & 1u) ^ (cf & 1u))
 						e->flags |= FL_OF;
 				} else {
@@ -6047,7 +7323,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 						e->flags |= FL_OF;
 				}
 			}
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 		}
@@ -6083,9 +7359,9 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned n, w = sz * 8u;
 			uint64_t m = mask_of(sz), src;
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &src) ||
-			    !op_rd(e, &ix, &ix.Operands[2], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &src) ||
+			    !op_rd(e, ixp, &ixp->Operands[2], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n)
@@ -6119,7 +7395,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					goto unsupported;
 				r = host_dshift16((uint16_t)a, (uint16_t)src,
 						  (uint8_t)n,
-						  ix.Instruction == ND_INS_SHLD,
+						  ixp->Instruction == ND_INS_SHLD,
 						  &hf);
 				/* The host's own flags, for the bits this
 				 * models - the guest reads them back with
@@ -6131,14 +7407,14 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					e->flags = (e->flags & ~keep) |
 						   (hf & keep);
 				}
-				if (!op_wr(e, &ix, &ix.Operands[0], r))
+				if (!op_wr(e, ixp, &ixp->Operands[0], r))
 					goto unsupported;
 				break;
 #else
 				goto unsupported;
 #endif
 			}
-			if (ix.Instruction == ND_INS_SHRD) {
+			if (ixp->Instruction == ND_INS_SHRD) {
 				r = ((a >> n) | (src << (w - n))) & m;
 				if ((a >> (n - 1u)) & 1u)
 					b = 1;
@@ -6160,7 +7436,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			 * above follow. */
 			if (n == 1u && ((r ^ a) >> (w - 1u)) & 1u)
 				e->flags |= FL_OF;
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 		}
@@ -6172,13 +7448,13 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned n, w = sz * 8u;
 			uint64_t m = mask_of(sz);
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n) break;                    /* no shift, no flags */
 			a &= m;
-			switch (ix.Instruction) {
+			switch (ixp->Instruction) {
 			case ND_INS_SAL:
 			case ND_INS_SHL: r = n >= w ? 0 : (a << n) & m; break;
 			case ND_INS_SHR: r = n >= w ? 0 : a >> n; break;
@@ -6194,11 +7470,11 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			e->flags |= FL_AF;
 			/* CF is the last bit shifted out, and zero once the count
 			 * has cleared the whole width. */
-			if (ix.Instruction == ND_INS_SHL ||
-			    ix.Instruction == ND_INS_SAL) {
+			if (ixp->Instruction == ND_INS_SHL ||
+			    ixp->Instruction == ND_INS_SAL) {
 				if (n <= w && (a >> (w - n)) & 1u)
 					e->flags |= FL_CF;
-			} else if (ix.Instruction == ND_INS_SHR) {
+			} else if (ixp->Instruction == ND_INS_SHR) {
 				if (n <= w && (a >> (n - 1u)) & 1u)
 					e->flags |= FL_CF;
 			} else {   /* SAR: bit n-1, or the sign once past the width */
@@ -6207,7 +7483,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				if ((a >> cb) & 1u)
 					e->flags |= FL_CF;
 			}
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 		}
@@ -6216,14 +7492,14 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned n, rc, w = sz * 8u;
 			uint64_t m = mask_of(sz);
 
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !op_rd(e, &ix, &ix.Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !op_rd(e, ixp, &ixp->Operands[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n) break;                    /* masked count 0: no flags */
 			a &= m;
 			rc = n % w;                       /* a rotate is modulo width */
-			if (ix.Instruction == ND_INS_ROL)
+			if (ixp->Instruction == ND_INS_ROL)
 				r = rc ? ((a << rc) | (a >> (w - rc))) & m : a;
 			else
 				r = rc ? ((a >> rc) | (a << (w - rc))) & m : a;
@@ -6234,7 +7510,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			 * of one alone and left as-is otherwise.
 			 */
 			e->flags &= ~(uint64_t)FL_CF;
-			if (ix.Instruction == ND_INS_ROL) {
+			if (ixp->Instruction == ND_INS_ROL) {
 				if (r & 1u)
 					e->flags |= FL_CF;          /* LSB of result */
 				if (n == 1) {
@@ -6252,20 +7528,20 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 						e->flags |= FL_OF;
 				}
 			}
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 		}
 
 		case ND_INS_PUSH:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-			    !push_w(e, a, ix.Operands[0].Size))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+			    !push_w(e, a, ixp->Operands[0].Size))
 				goto fault;
 			break;
 
 		case ND_INS_POP:
-			if (!pop_w(e, &a, ix.Operands[0].Size) ||
-			    !op_wr(e, &ix, &ix.Operands[0], a))
+			if (!pop_w(e, &a, ixp->Operands[0].Size) ||
+			    !op_wr(e, ixp, &ixp->Operands[0], a))
 				goto fault;
 			break;
 
@@ -6387,7 +7663,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			int adj = (al & 0x0fu) > 9u || (e->flags & FL_AF);
 
 			if (adj) {
-				if (ix.Instruction == ND_INS_AAA) {
+				if (ixp->Instruction == ND_INS_AAA) {
 					al = (al + 6u) & 0xffu;
 					ah = (ah + 1u) & 0xffu;
 				} else {
@@ -6410,7 +7686,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			unsigned al = (unsigned)(e->gpr[KOF_EMU_RAX] & 0xffu);
 			unsigned old = al;
 			int oldcf = (e->flags & FL_CF) != 0;
-			int sub = ix.Instruction == ND_INS_DAS;
+			int sub = ixp->Instruction == ND_INS_DAS;
 
 			e->flags &= ~(uint64_t)FL_CF;
 			if ((al & 0x0fu) > 9u || (e->flags & FL_AF)) {
@@ -6439,7 +7715,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 
 		case ND_INS_CALLNR:
 		case ND_INS_CALLNI:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a) || !push(e, next))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a) || !push(e, next))
 				goto fault;
 			e->rip = a; jumped = 1;
 			break;
@@ -6447,36 +7723,36 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_RETN:
 			if (!pop(e, &a))
 				goto fault;
-			if (ix.OperandsCount > 0 &&
-			    ix.Operands[0].Type == ND_OP_IMM)
-				e->gpr[KOF_EMU_RSP] += ix.Operands[0].Info.Immediate.Imm;
+			if (ixp->OperandsCount > 0 &&
+			    ixp->Operands[0].Type == ND_OP_IMM)
+				e->gpr[KOF_EMU_RSP] += ixp->Operands[0].Info.Immediate.Imm;
 			e->rip = a; jumped = 1;
 			break;
 
 		case ND_INS_JMPNR:
 		case ND_INS_JMPNI:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
 			e->rip = a; jumped = 1;
 			break;
 
 		case ND_INS_Jcc:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
-			if (cond_true(e, ix.Condition)) { e->rip = a; jumped = 1; }
+			if (cond_true(e, ixp->Condition)) { e->rip = a; jumped = 1; }
 			break;
 
 		case ND_INS_SETcc:
-			if (!op_wr(e, &ix, &ix.Operands[0],
-				   cond_true(e, ix.Condition) ? 1u : 0u))
+			if (!op_wr(e, ixp, &ixp->Operands[0],
+				   cond_true(e, ixp->Condition) ? 1u : 0u))
 				goto unsupported;
 			break;
 
 		case ND_INS_CMOVcc:
-			if (!op_rd(e, &ix, &ix.Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->Operands[1], &b))
 				goto unsupported;
-			if (cond_true(e, ix.Condition) &&
-			    !op_wr(e, &ix, &ix.Operands[0], b))
+			if (cond_true(e, ixp->Condition) &&
+			    !op_wr(e, ixp, &ixp->Operands[0], b))
 				goto unsupported;
 			break;
 
@@ -6487,7 +7763,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			break;
 		case ND_INS_CDQ: case ND_INS_CQO:
 			e->gpr[KOF_EMU_RDX] =
-				(ix.Instruction == ND_INS_CQO)
+				(ixp->Instruction == ND_INS_CQO)
 				? ((int64_t)e->gpr[KOF_EMU_RAX] < 0 ? ~(uint64_t)0 : 0)
 				: (uint64_t)(uint32_t)((int32_t)e->gpr[KOF_EMU_RAX] >> 31);
 			break;
@@ -6522,12 +7798,12 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		case ND_INS_JrCXZ: {
 			uint64_t cnt = e->gpr[KOF_EMU_RCX];
 
-			if (ix.AddrMode == ND_ADDR_32)
+			if (ixp->AddrMode == ND_ADDR_32)
 				cnt = (uint32_t)cnt;
-			else if (ix.AddrMode == ND_ADDR_16)
+			else if (ixp->AddrMode == ND_ADDR_16)
 				cnt = (uint16_t)cnt;
 			if (!cnt) {
-				if (!op_rd(e, &ix, &ix.Operands[0], &a))
+				if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 					goto unsupported;
 				next = a;
 			}
@@ -6540,12 +7816,12 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint64_t cnt = --e->gpr[KOF_EMU_RCX];
 			int take = cnt != 0;
 
-			if (ix.Instruction == ND_INS_LOOPZ)
+			if (ixp->Instruction == ND_INS_LOOPZ)
 				take = take && (e->flags & FL_ZF);
-			else if (ix.Instruction == ND_INS_LOOPNZ)
+			else if (ixp->Instruction == ND_INS_LOOPNZ)
 				take = take && !(e->flags & FL_ZF);
 			if (take) {
-				if (!op_rd(e, &ix, &ix.Operands[0], &a))
+				if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 					goto unsupported;
 				next = a;
 			}
@@ -6553,12 +7829,12 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		}
 
 		case ND_INS_BSWAP:
-			if (!op_rd(e, &ix, &ix.Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
 				goto unsupported;
 			r = 0;
 			for (unsigned i = 0; i < sz; i++)
 				r |= ((a >> (i * 8u)) & 0xffu) << ((sz - 1u - i) * 8u);
-			if (!op_wr(e, &ix, &ix.Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->Operands[0], r))
 				goto unsupported;
 			break;
 
@@ -6569,22 +7845,22 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 		 * the flags register as its multiplier.
 		 */
 		case ND_INS_IMUL:
-			if (ix.ExpOperandsCount >= 3) {
-				if (!op_rd(e, &ix, &ix.Operands[1], &a) ||
-				    !op_rd(e, &ix, &ix.Operands[2], &b) ||
-				    !op_wr(e, &ix, &ix.Operands[0], a * b))
+			if (ixp->ExpOperandsCount >= 3) {
+				if (!op_rd(e, ixp, &ixp->Operands[1], &a) ||
+				    !op_rd(e, ixp, &ixp->Operands[2], &b) ||
+				    !op_wr(e, ixp, &ixp->Operands[0], a * b))
 					goto unsupported;
-			} else if (ix.ExpOperandsCount == 2) {
-				if (!op_rd(e, &ix, &ix.Operands[0], &a) ||
-				    !op_rd(e, &ix, &ix.Operands[1], &b) ||
-				    !op_wr(e, &ix, &ix.Operands[0], a * b))
+			} else if (ixp->ExpOperandsCount == 2) {
+				if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
+				    !op_rd(e, ixp, &ixp->Operands[1], &b) ||
+				    !op_wr(e, ixp, &ixp->Operands[0], a * b))
 					goto unsupported;
 			} else {
 				/* One operand: the widening form, into RDX:RAX. */
 				uint64_t acc = reg_rd(e, KOF_EMU_RAX, sz, 0);
 				int64_t  x, y;
 
-				if (!op_rd(e, &ix, &ix.Operands[0], &b))
+				if (!op_rd(e, ixp, &ixp->Operands[0], &b))
 					goto unsupported;
 				x = (int64_t)sext(acc, sz);
 				y = (int64_t)sext(b, sz);
@@ -6626,6 +7902,19 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					    FL_CF)) | 2u);
 			break;
 
+		/*
+		 * SALC - `AL = CF ? 0xFF : 0`, one byte, opcode D6, and not in
+		 * any Intel manual. It exists because it is short and because a
+		 * disassembler that does not know it stops there, which is
+		 * exactly why a polymorphic generator emits it. Measured: a
+		 * Sality body reaches one 186 million instructions in and the
+		 * run ended on it.
+		 */
+		case ND_INS_SALC:
+			reg_wr(e, KOF_EMU_RAX, 1, 0,
+			       (e->flags & FL_CF) ? 0xffu : 0u);
+			break;
+
 		case ND_INS_LODS: case ND_INS_STOS:
 		case ND_INS_MOVS: case ND_INS_SCAS: case ND_INS_CMPS: {
 			/* WHAT THE GUEST IS MEASURING OR COMPARING, on request.
@@ -6654,11 +7943,11 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				if (q >= 5u && !c)
 					fprintf(stderr, "[str] %s\n", nm);
 			}
-			unsigned w = ix.Operands[0].Size ? ix.Operands[0].Size : 1u;
+			unsigned w = ixp->Operands[0].Size ? ixp->Operands[0].Size : 1u;
 			int64_t step = (e->flags & FL_DF) ? -(int64_t)w : (int64_t)w;
 			uint64_t iter = 1;
 
-			if (ix.IsRepeated) {
+			if (ixp->IsRepeated) {
 				iter = e->gpr[KOF_EMU_RCX];
 				if (!iter) break;
 				if (iter > e->max_insn - e->insn)
@@ -6667,7 +7956,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			while (iter--) {
 				uint64_t v = 0;
 
-				switch (ix.Instruction) {
+				switch (ixp->Instruction) {
 				case ND_INS_LODS:
 					if (!mem_rd(e, e->gpr[KOF_EMU_RSI], &v, w))
 						goto fault;
@@ -6706,17 +7995,17 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 					e->gpr[KOF_EMU_RDI] += (uint64_t)step;
 					break;
 				}
-				if (ix.IsRepeated) {
+				if (ixp->IsRepeated) {
 					e->gpr[KOF_EMU_RCX]--;
 					e->insn++;
 					/* REPZ/REPNZ on a compare stop on the flag
 					 * as well as on the count; REP on a move
 					 * only on the count. */
-					if (ix.Instruction == ND_INS_SCAS ||
-					    ix.Instruction == ND_INS_CMPS) {
+					if (ixp->Instruction == ND_INS_SCAS ||
+					    ixp->Instruction == ND_INS_CMPS) {
 						int z = (e->flags & FL_ZF) != 0;
 
-						if (ix.Rep == 0xF3 ? !z : z)
+						if (ixp->Rep == 0xF3 ? !z : z)
 							break;
 					}
 				}
@@ -6774,8 +8063,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 			uint64_t ret;
 			unsigned was = e->bits;
 
-			if (ix.Operands[0].Type != ND_OP_IMM ||
-			    ix.Operands[0].Info.Immediate.Imm != 0x80)
+			if (ixp->Operands[0].Type != ND_OP_IMM ||
+			    ixp->Operands[0].Info.Immediate.Imm != 0x80)
 				goto unsupported;
 			/* int 0x80 is the i386 convention whatever the mode. */
 			e->bits = 32;
@@ -6909,7 +8198,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				 * required, and it is still enough to drop the
 				 * intra-loader case above.
 				 */
-				if (tail && t && t->written &&
+				if (tail && t && t->gwritten &&
 				    (at < e->rip ||
 				     at < e->img_lo || at >= e->img_hi)) {
 					snprintf(e->detail, sizeof e->detail,
@@ -6939,7 +8228,7 @@ unsupported:
 		if (e->fault_kind[0] && win_exc_begin(e))
 			continue;
 		fail(e, e->fault_kind[0] ? KOF_EMU_STOP_FAULT
-					 : KOF_EMU_STOP_UNSUPPORTED, &ix);
+					 : KOF_EMU_STOP_UNSUPPORTED, ixp);
 		goto done;
 fault:
 		/*
@@ -6954,6 +8243,9 @@ fault:
 		goto done;
 	}
 done:
+	/* The host prepares and harvests around the run; its stores are not the
+	 * guest's - see `gwritten`. */
+	e->running = 0;
 	return e->stop;
 }
 

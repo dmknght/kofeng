@@ -35,6 +35,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <kofmod/infected.h>
+
 /* How strongly a finding is asserted. Mirrors enum kof_level on the module side; a
  * host must not have to include the module ABI to read a result. */
 #define KOF_LEVEL_SUSPECT 0
@@ -301,6 +303,38 @@ struct kof_repair {
 	uint64_t truncate;
 };
 
+/*
+ * ---- WHERE THE INFECTION IS ----------------------------------------------
+ *
+ * A MODULE THAT CAN CURE ALREADY KNOWS THIS, which is the whole argument for
+ * carrying it. Nothing can describe a repair without having located the
+ * damage first - the Sality module computes where the virus body begins and
+ * how many of the host's bytes it overwrote in order to put them back - and
+ * until now that knowledge went into `kof_repair` as a list of patches and
+ * was otherwise thrown away.
+ *
+ * A patch is not the same statement. "Write these 382 bytes at offset 0x1d9d"
+ * says how to undo the damage; it does not say that the 65 KB at the end of
+ * the file are the virus. A reader wants both, and a reader that only repairs
+ * wants the first while a reader that is looking at the file wants the second.
+ *
+ * TWO KINDS, BECAUSE THEY CALL FOR OPPOSITE ACTIONS. BODY is the malware's own
+ * bytes - what a removal would cut out. DAMAGE is the host's own bytes that
+ * were overwritten - what a repair puts back. Marking them the same colour
+ * would tell a reader to delete the program's entry point.
+ *
+ * DECLARED, NEVER INFERRED. The engine does not guess a range from a finding;
+ * a module says so or nothing is said.
+ */
+#define KOF_MAX_INFECTED 16u
+
+struct kof_infected {
+	uint64_t off;
+	uint64_t len;
+	uint32_t kind;       /* KOF_INF_* */
+	uint32_t _pad;
+};
+
 /* The most declared regions one object reports - see kof_result.region. Matched
  * to KOF_SRC_MAX_REGIONS, which is what a producer may declare. */
 #define KOF_MAX_REGIONS 16u
@@ -312,6 +346,10 @@ struct kof_result {
 
 	/* What a module offered to put back - see struct kof_repair. */
 	struct kof_repair repair;
+
+	/* And where it found the infection - see struct kof_infected. */
+	struct kof_infected infected[KOF_MAX_INFECTED];
+	uint32_t n_infected;
 
 	/*
 	 * The engine stopped before it had finished with this object, because a

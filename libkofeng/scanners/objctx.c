@@ -745,6 +745,10 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_image = 0;
 	sc->n_pend_imp = 0;
 	sc->imp_pool_n = 0;
+	/* Declared per object, like everything else here: a watch one module
+	 * named must not still be armed for the next one's run. */
+	sc->pend_n_iw = 0;
+	sc->pend_iw_len = 0;
 	sc->pend_imp_at = 0;
 	sc->pend_imp_set = 0;
 }
@@ -1257,6 +1261,29 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 */
 	if (sc->emu_live)
 		sc->emu_produced = 1;
+	/*
+	 * AND A CHILD BUILT OUT OF A RUN'S REGIONS IS DERIVED, exactly as one
+	 * built with `derive` is - see scan.c, which skips a module for an
+	 * object that module produced.
+	 *
+	 * Only `derive` used to say so, and every emulator-driven unpacker
+	 * builds its child the other way: declare sections, take the regions,
+	 * close. So the engine handed each of them its own output back and the
+	 * module ran the interpreter on it AGAIN. Measured on a Sality sample:
+	 * a second invocation, seventeen slices, sixty-eight million
+	 * instructions, a duplicate child, and no finding - roughly half the
+	 * file's scan time spent proving what the first run had proved.
+	 *
+	 * THE EXISTING ARGUMENT FOR OFFERING A REBUILT IMAGE TO EVERYONE STILL
+	 * HOLDS AND IS NOT TOUCHED. Every OTHER module still sees this child;
+	 * MPRESS under MPRESS is still unpacked twice, because that is a
+	 * different layer and the second pass is a different call. What stops
+	 * is a module meeting its own output, which for an interpreter is
+	 * never a second layer - the run already went through as many as it
+	 * was going to.
+	 */
+	if (sc->n_emu_rgn && !sc->pend_derived_by)
+		sc->pend_derived_by = sc->cur_mod;
 	if (sc->kid_derived_by)
 		sc->kid_derived_by[sc->n_kids] = sc->pend_derived_by;
 	sc->kids[sc->n_kids++] = kid;
@@ -1359,6 +1386,8 @@ static uint64_t c_emu_reg(const struct kof_obj_ctx *ctx, uint32_t gpr)
 
 	if (!sc || !sc->emu_live)
 		return 0;
+	if (gpr == KUNP_REG_IP)
+		return kof_emu_get_rip(sc->emu_live);
 	return kof_emu_get_reg(sc->emu_live, gpr);
 }
 
@@ -4027,6 +4056,121 @@ static int imp_intern(struct kof_scanner *sc, const char *s, uint32_t *off)
 	return 1;
 }
 
+/* Defined with kof_scan_emu_unpack, which is the other caller. */
+static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
+			   struct kof_scanner *sc, struct kof_emu *e,
+			   struct kof_emu_unp_report rep);
+
+/*
+ * The instructions a module wants the run paused on, and carrying on from a
+ * pause - see `emu_watch_insn` in kofsig.h.
+ */
+static void c_emu_watch_insn(const struct kof_obj_ctx *ctx,
+			     const uint8_t *bytes, uint32_t n, uint32_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc)
+		return;
+	/* No bytes disarms - see kof_emu_watch_insn. Applied to a LIVE machine
+	 * too, because that is when a module gives up on pausing and wants the
+	 * run to finish. */
+	if (!bytes || !n) {
+		sc->pend_n_iw = 0;
+		sc->pend_iw_len = 0;
+		if (sc->emu_live)
+			kof_emu_watch_insn(sc->emu_live, NULL, 0);
+		return;
+	}
+	if (n > sizeof sc->pend_iw[0].b ||
+	    sc->pend_n_iw >= KOF_EMU_INSN_WATCH)
+		return;
+	memcpy(sc->pend_iw[sc->pend_n_iw].b, bytes, n);
+	sc->pend_iw[sc->pend_n_iw].n = (uint8_t)n;
+	sc->pend_n_iw++;
+	sc->pend_iw_len = len;
+}
+
+/*
+ * End a paused run where it stands and gather what it left - see `emu_stop`
+ * in kofsig.h for the measurement that made this necessary.
+ *
+ * THE SAME HAND-OVER AS A FINISHED RUN. emu_gather takes ownership of the
+ * machine, so emu_live is cleared here exactly as c_emu_resume clears it; a
+ * module that stops is not holding anything afterwards that one which ran to
+ * the end would not be.
+ */
+/*
+ * How far a run may go before handing control back - see `emu_slice`.
+ * Recorded and not acted on here: the run itself reads it, because the
+ * ceiling has to be in place before the machine starts.
+ */
+static void c_emu_slice(const struct kof_obj_ctx *ctx, uint64_t insn)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (sc)
+		sc->emu_slice = insn;
+}
+
+static uint32_t c_emu_stop(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_emu *e;
+
+	if (!sc || !sc->emu_paused || !sc->emu_live || !sc->emu_rep_p)
+		return 0;
+	e = sc->emu_live;
+	sc->emu_rep_p->insn = kof_emu_insn_count(e);
+	sc->emu_paused = 0;
+	sc->emu_live = NULL;
+	return emu_gather(ctx, sc, e, *sc->emu_rep_p);
+}
+
+static uint32_t c_emu_resume(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_emu *e;
+	enum kof_emu_stop st;
+
+	if (!sc || !sc->emu_paused || !sc->emu_live || !sc->emu_rep_p)
+		return 0;
+	e = sc->emu_live;
+	/*
+	 * Another slice, if the module asked for slices - see `emu_slice`.
+	 *
+	 * AND THE WRITTEN PAGES ARE SNAPSHOTTED FIRST, which is not optional.
+	 * emu_unpack.c's own extension loop does exactly this between slices,
+	 * with the reason beside it: what a slice earned is kept before the
+	 * next one is risked. Resuming without it threw away everything the
+	 * previous slices had decrypted - measured, detection fell from three
+	 * samples of four to one.
+	 */
+	if (sc->emu_slice) {
+		uint64_t at = kof_emu_insn_count(e);
+		uint64_t to = at + sc->emu_slice;
+
+		kof_emu_snap_written(e);
+		kof_emu_set_max_insn(e, to < sc->emu_full ? to : sc->emu_full);
+	}
+	st = kof_emu_run(e);
+	if (st == KOF_EMU_STOP_BUDGET && sc->emu_slice &&
+	    kof_emu_insn_count(e) < sc->emu_full)
+		st = KOF_EMU_STOP_INSN;
+	sc->emu_rep_p->stop = st;
+	sc->emu_rep_p->insn = kof_emu_insn_count(e);
+	if (st == KOF_EMU_STOP_INSN)
+		return 0;               /* paused again */
+	/*
+	 * Finished. The machine goes to the gather, which takes ownership of it
+	 * exactly as it does on the path with no pause - so emu_live is cleared
+	 * here and set again there.
+	 */
+	sc->emu_paused = 0;
+	sc->emu_live = NULL;
+	return emu_gather(ctx, sc, e, *sc->emu_rep_p);
+}
+
 static int c_import(const struct kof_obj_ctx *ctx, const char *dll,
 		    const char *fn, uint32_t ordinal, uint64_t iat_rva)
 {
@@ -5247,6 +5391,67 @@ static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
 	return kof_pz_unmask(b.p + off, n, mask, key, out, cap);
 }
 
+
+/*
+ * ---- THE CODE READER'S THREE ENTRY POINTS --------------------------------
+ *
+ * All the work is in analyzers/disasm/kdis.c; these only hand it the object's
+ * bytes and the cursor that lives in the scanner. See kofmod/kdis.h.
+ *
+ * ANSWERED FOR A DETECTOR TOO, and that is the point of it. Reading code
+ * without running it is exactly what a detector should be able to do - it is
+ * the interpreter that a detector must not have.
+ */
+static int c_dis_seek(const struct kof_obj_ctx *ctx, uint64_t off, int keep)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b = mc(ctx)->data;
+
+	if (!sc || off >= b.n)
+		return 0;
+	return kof_kdis_seek(&sc->kdis, off, keep);
+}
+
+static int c_dis_next(const struct kof_obj_ctx *ctx, struct kdis_insn *out)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b = mc(ctx)->data;
+
+	if (!sc || !out || !b.p)
+		return 0;
+	return kof_kdis_next(&sc->kdis, ctx, b.p, b.n, out);
+}
+
+static int c_dis_reg(const struct kof_obj_ctx *ctx, uint8_t r, uint64_t *out)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	return sc ? kof_kdis_reg(&sc->kdis, r, out) : 0;
+}
+
+/*
+ * Where a module says the infection is - see `infected` in kofsig.h.
+ *
+ * BOUNDS-CHECKED AGAINST THE OBJECT, like every other range a module hands
+ * over: a mark past the end would point a reader at bytes that are not there.
+ * A zero length is refused too, because a range of nothing marks nothing.
+ */
+static void c_infected(const struct kof_obj_ctx *ctx, uint64_t off,
+		       uint64_t len, uint32_t kind)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b = mc(ctx)->data;
+
+	if (!sc || !len || off > b.n || b.n - off < len)
+		return;
+	if (sc->n_infect >= KOF_MAX_INFECTED)
+		return;
+	sc->infect[sc->n_infect].off = off;
+	sc->infect[sc->n_infect].len = len;
+	sc->infect[sc->n_infect].kind = kind;
+	sc->n_infect++;
+}
+
 /* See kof_content.cure_offer: the module located the damage and says so. */
 static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
 {
@@ -5764,6 +5969,13 @@ static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch);
 static int c_emu_region(const struct kof_obj_ctx *ctx, uint32_t i,
 			uint64_t *va, uint64_t *len, uint32_t *kind);
 static int c_emu_take(const struct kof_obj_ctx *ctx, uint32_t i);
+static uint32_t c_emu_region_read(const struct kof_obj_ctx *ctx, uint32_t i,
+				  uint64_t off, uint8_t *out, uint32_t n);
+static void c_emu_set_reg(const struct kof_obj_ctx *ctx, uint32_t gpr,
+			  uint64_t value);
+static void c_emu_set_ip(const struct kof_obj_ctx *ctx, uint64_t va);
+static uint32_t c_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
+			    const uint8_t *bytes, uint32_t n);
 static int c_opened_already(const struct kof_obj_ctx *ctx);
 
 static const struct kof_content kof_detect_vtable = {
@@ -5789,8 +6001,20 @@ static const struct kof_content kof_detect_vtable = {
 	/* emu_reg, emu_read - a detector drives no interpreter, so there is
 	 * never a machine of its own to read. */
 	NULL, NULL,
+	/* emu_watch_insn, emu_resume - nor one to pause. */
+	NULL, NULL,
 	/* import, import_bytes, import_at - a detector produces no child to
 	 * have imports. */
+	NULL, NULL, NULL,
+	/* emu_stop, emu_slice - a detector drives no run at all. */
+	NULL, NULL,
+	/* And the code reader, which a detector DOES get - see c_dis_seek. */
+	c_dis_seek, c_dis_next, c_dis_reg,
+	/* emu_region_read - no run, so no region to look into. */
+	NULL,
+	/* But a detector may mark what it found - see c_infected. */
+	c_infected,
+	/* And it drives no machine, so it changes none. */
 	NULL, NULL, NULL
 };
 
@@ -5810,7 +6034,12 @@ static const struct kof_content kof_unpack_vtable = {
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	c_supersede, c_as_format, c_packer_build, c_emu_reg, c_emu_read,
-	c_import, c_import_bytes, c_import_at
+	c_emu_watch_insn, c_emu_resume,
+	c_import, c_import_bytes, c_import_at,
+	c_emu_slice, c_emu_stop,
+	c_dis_seek, c_dis_next, c_dis_reg,
+	c_emu_region_read, c_infected,
+	c_emu_set_reg, c_emu_set_ip, c_emu_write
 };
 
 /*
@@ -6667,16 +6896,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	struct kof_emu_unp_report rep;
 	struct kof_emu *e;
 	kof_buf b;
-	uint32_t it;
-	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
-	/* What the run left behind, gathered rather than handed over one at a
-	 * time - see emu_one_child. */
-	const uint8_t *img_p = NULL;
-	uint64_t img_n = 0, img_va = 0;
-	struct emu_extra ex[EMU_EXTRA_MAX];
-	uint32_t n_ex = 0;
-	const uint8_t *bytes;
-	int any, built = 0, is_pe;
+	int is_pe;
 
 	if (!sc || !sc->cur_src || !ctx->file_header)
 		return 0;
@@ -6721,6 +6941,24 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				uint64_t idle = 0;
 
 				/*
+				 * AND A SLICE, WHEN THE MODULE ASKED FOR ONE -
+				 * see `emu_slice`. The real ceiling is kept so
+				 * that a stop at the slice can be told from a
+				 * stop at the budget, which are opposite
+				 * answers: one means "look and carry on", the
+				 * other means "this is all there will be".
+				 */
+				sc->emu_full = bi;
+				if (sc->emu_slice && sc->emu_slice < bi)
+					bi = sc->emu_slice;
+				if (getenv("KOF_EMU_TRACE"))
+					fprintf(stderr,
+						"[emu] budget full=%llu slice=%llu use=%llu\n",
+						(unsigned long long)sc->emu_full,
+						(unsigned long long)sc->emu_slice,
+						(unsigned long long)bi);
+
+				/*
 				 * A MODULE THAT ASKED FOR THE INTERPRETER GETS
 				 * A LONGER LEASH, and only it does.
 				 *
@@ -6760,7 +6998,12 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 					bp = 512ull * 1024ull;
 				}
 				e = kof_emu_unp_run_pe(b.p, b.n, info, bi, bp,
-						       idle, oep, sc->n_xw,
+						       idle,
+						       sc->emu_slice != 0,
+						       oep, sc->n_xw,
+						       sc->pend_iw,
+						       sc->pend_n_iw,
+						       sc->pend_iw_len,
 						       &rep);
 			}
 		}
@@ -6773,6 +7016,59 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 		e = kof_emu_unp_run(b.p, b.n, info, emu_insn(b.n),
 				    emu_pages(sc), &rep);
 	}
+	/*
+	 * A SLICE THAT EXPIRED IS A PAUSE, NOT AN END - see `emu_slice`. The
+	 * guest is mid-decryption and the module asked to be shown that; the
+	 * machine stays alive exactly as it does for an instruction watch.
+	 */
+	if (e && rep.stop == KOF_EMU_STOP_BUDGET && sc->emu_slice &&
+	    kof_emu_insn_count(e) < sc->emu_full)
+		rep.stop = KOF_EMU_STOP_INSN;
+	if (e && rep.stop == KOF_EMU_STOP_INSN) {
+		/*
+		 * PAUSED, NOT FINISHED. Nothing is gathered yet - the guest is
+		 * mid-stub and whatever it has written so far is a snapshot of
+		 * a decryptor at work. The module reads the machine, decides,
+		 * and resumes. See `emu_resume` in kofsig.h.
+		 */
+		sc->emu_live = e;
+		if (!sc->emu_rep_p)
+			sc->emu_rep_p = calloc(1, sizeof *sc->emu_rep_p);
+		if (sc->emu_rep_p)
+			*sc->emu_rep_p = rep;
+		sc->emu_paused = 1;
+		return 0;
+	}
+	return emu_gather(ctx, sc, e, rep);
+}
+
+/*
+ * WHAT A RUN LEFT, TURNED INTO REGIONS - the half of kof_scan_emu_unpack that
+ * happens AFTER the machine stops.
+ *
+ * Split out so that a PAUSED run can be resumed and gathered by the same code.
+ * A module that named an instruction to stop on - see kof_emu_watch_insn - gets
+ * control back with the machine intact, reads what it wanted, and asks for the
+ * run to continue; when it finally stops for good, what it left is gathered
+ * here exactly as it would have been without the pause. Two copies of this
+ * would be two answers to "what did the run produce".
+ */
+static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
+			   struct kof_scanner *sc, struct kof_emu *e,
+			   struct kof_emu_unp_report rep)
+{
+	kof_buf b;
+	uint32_t it;
+	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
+	const uint8_t *img_p = NULL;
+	uint64_t img_n = 0, img_va = 0;
+	struct emu_extra ex[EMU_EXTRA_MAX];
+	uint32_t n_ex = 0;
+	const uint8_t *bytes;
+	int any, built = 0, is_pe;
+
+	is_pe = ctx->format == KOF_FMT_PE;
+	b = kof_src_buf(sc->cur_src);
 	/*
 	 * WHERE THE RUN STOPPED, ON REQUEST.
 	 *
@@ -7380,6 +7676,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	 */
 	/* KEPT, not freed: the regions above point into it. */
 	sc->emu_live = e;
+	sc->emu_paused = 0;
 	return sc->n_emu_rgn;
 }
 
@@ -7503,6 +7800,67 @@ static int c_emu_region(const struct kof_obj_ctx *ctx, uint32_t i,
 			uint64_t *va, uint64_t *len, uint32_t *kind)
 {
 	return kof_scan_emu_region(kof_scan_of(ctx), i, va, len, kind);
+}
+
+/*
+ * The bytes of a gathered region, which are a SNAPSHOT - see
+ * `emu_region_read` in kofsig.h for why that is not the same as emu_read.
+ */
+static uint32_t c_emu_region_read(const struct kof_obj_ctx *ctx, uint32_t i,
+				  uint64_t off, uint8_t *out, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_emu_rgn *r;
+
+	if (!sc || !out || !n || i >= sc->n_emu_rgn)
+		return 0;
+	r = &sc->emu_rgn[i];
+	if (!r->p || off >= r->n)
+		return 0;
+	if ((uint64_t)n > r->n - off)
+		n = (uint32_t)(r->n - off);
+	memcpy(out, r->p + off, n);
+	return n;
+}
+
+/*
+ * ---- CHANGING A PAUSED MACHINE ------------------------------------------
+ *
+ * See `emu_set_reg` in kofsig.h for why a module needs this. All three refuse
+ * unless the run is PAUSED: a running machine belongs to the interpreter and a
+ * finished one has already gone to the gather.
+ */
+static void c_emu_set_reg(const struct kof_obj_ctx *ctx, uint32_t gpr,
+			  uint64_t value)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->emu_paused || !sc->emu_live)
+		return;
+	if (gpr == KUNP_REG_IP)
+		kof_emu_set_rip(sc->emu_live, value);
+	else
+		kof_emu_set_reg(sc->emu_live, gpr, value);
+}
+
+static void c_emu_set_ip(const struct kof_obj_ctx *ctx, uint64_t va)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (sc && sc->emu_paused && sc->emu_live)
+		kof_emu_set_rip(sc->emu_live, va);
+}
+
+static uint32_t c_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
+			    const uint8_t *bytes, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->emu_paused || !sc->emu_live || !bytes || !n)
+		return 0;
+	/* All or nothing, like every other span this engine hands a module: a
+	 * half-written patch is a machine nobody can reason about. */
+	return kof_emu_write(sc->emu_live, va, bytes, n) ? n : 0u;
 }
 
 /* One region into the child being built, at the cursor. */

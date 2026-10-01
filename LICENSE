@@ -37,15 +37,17 @@ bddisasm 3.0.1 - Apache License 2.0
 
 Copyright (c) Bitdefender. Licensed under the Apache License, Version 2.0.
 
-The instruction decoder the emulator is built on. The files are redistributed
-unmodified. The full licence text travels with them at
-`libkofemu/bddisasm/LICENSE`; the provenance and the exact subset taken are
-recorded in `libkofemu/bddisasm/README.kofeng.md`.
+The instruction decoder the emulator is built on. ONE FILE IS MODIFIED:
+`src/bdx86_decoder.c` carries a single-condition fix to the 16-bit addressing
+displacement guard, marked `KOFENG PATCH` at the site. Every other file is
+redistributed unmodified. The full licence text travels with them at
+`libkofemu/bddisasm/LICENSE`; the provenance, the exact subset taken and what
+the patch fixes are recorded in `libkofemu/bddisasm/README.kofeng.md`.
 
 Apache 2.0 requires that a copy of the licence travel with the code, that
 existing copyright and attribution notices are kept, and that modified files
-say they were modified. The first two are satisfied by the paths above; the
-third does not arise, because the files are not modified. See THIRD-PARTY.md.
+say they were modified. All three are satisfied: by the paths above, and by the
+marking at the patch site and in the two READMEs. See THIRD-PARTY.md.
 
 --------------------------------------------------------------------------------
 Files in this project under the Apache License 2.0

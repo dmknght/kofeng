@@ -1445,6 +1445,17 @@ struct object {
 	 * under the same parent. */
 	int               payload_of;
 	/*
+	 * WHERE A RULE SAID THE INFECTION IS - see struct kof_infected.
+	 *
+	 * Copied from the result rather than worked out here, and worked out
+	 * nowhere: a module that can describe a repair had to locate the damage
+	 * to do it, so this is a fact the scan already established. Nothing in
+	 * this file searches for it, and nothing here decides what counts as
+	 * infected.
+	 */
+	struct kof_infected infected[KOF_MAX_INFECTED];
+	uint32_t          n_infected;
+	/*
 	 * WHICH MAPPED FILE OF A PROCESS VIEW THIS ROW IS, plus one - zero
 	 * means it is not one. An index into view.seen_path, which holds the
 	 * full path; the object's own name carries the basename because that

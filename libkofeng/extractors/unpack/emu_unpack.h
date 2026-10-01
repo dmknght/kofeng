@@ -296,12 +296,40 @@ int kof_pe_image_from_run(struct kof_emu *e, const struct kof_pe_info *info,
 			  uint64_t base, uint64_t cap,
 			  uint8_t **out, uint64_t *out_len);
 
+/*
+ * AND THE INSTRUCTIONS A MODULE ASKED TO BE PAUSED ON.
+ *
+ * Passed in rather than set afterwards because the machine is built and
+ * started by one call: there is no moment between them for a caller to reach
+ * it. See kof_emu_watch_insn for what they are for.
+ */
+struct kof_emu_iwatch {
+	uint8_t  b[8];
+	uint8_t  n;
+};
+
 struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   const struct kof_pe_info *info,
 				   uint64_t max_insn, uint64_t max_pages,
 				   uint64_t idle,
+				   /*
+				    * NON-ZERO WHEN A MODULE WANTS CONTROL BACK
+				    * AFTER max_insn RATHER THAN AN EXTENSION.
+				    *
+				    * emu_run_while_producing keeps going past
+				    * the budget for as long as each slice
+				    * writes a new page - which is the right
+				    * policy for an object nobody is watching,
+				    * and the wrong one for a module that wants
+				    * to LOOK at what has been decrypted and
+				    * stop when it is enough. See `emu_slice`
+				    * in kofsig.h.
+				    */
+				   int hand_back,
 				   const struct kof_emu_oep *oep,
 				   unsigned n_oep,
+				   const struct kof_emu_iwatch *iw,
+				   unsigned n_iw, unsigned iw_len,
 				   struct kof_emu_unp_report *rep);
 
 #endif /* KOFENG_EMU_UNPACK_H */

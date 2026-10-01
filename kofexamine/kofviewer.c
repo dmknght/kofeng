@@ -2847,6 +2847,20 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		snprintf(o->packer, sizeof o->packer, "%s", res->packer_build);
 	/* Cleared as it is taken, whether or not anything reported one, so a
 	 * payload named on one object can never be shown against the next. */
+	/*
+	 * AND WHERE THE INFECTION IS, straight off the result - see
+	 * struct kof_infected. Unlike the payload above this has a channel of
+	 * its own, so nothing has to be remembered between callbacks and
+	 * pinned on whichever object arrives next.
+	 */
+	if (res && res->n_infected) {
+		uint32_t q;
+
+		o->n_infected = res->n_infected < KOF_MAX_INFECTED
+			      ? res->n_infected : KOF_MAX_INFECTED;
+		for (q = 0; q < o->n_infected; q++)
+			o->infected[q] = res->infected[q];
+	}
 	o->payload_at  = v->pend_payload;
 	o->payload_len = v->pend_paylen;
 	o->payload_bits = v->pend_paybits;
@@ -20618,6 +20632,21 @@ enum bar_item {
 	 */
 	BI_FINDSC,
 	/*
+	 * WHERE THE INFECTION IS, shown on demand and searched for by nobody.
+	 *
+	 * The same kind of item as BI_FINDSC and for the same reason: a module
+	 * that repairs an infected file had to locate the damage before it
+	 * could describe a patch, so the ranges are already in the result. This
+	 * displays them.
+	 *
+	 * IT IS NOT THE VERDICT AND NOT THE REPAIR. The verdict says what the
+	 * file has; the repair says how to undo it; this says WHERE, which is
+	 * the question a reader looking at the bytes is actually asking - and
+	 * the only account there is of the malware's own body, which a repair
+	 * deliberately leaves in place.
+	 */
+	BI_FINDINF,
+	/*
 	 * The decoder. Beside BI_FINDSC because it answers the same kind of
 	 * question - "what is in here that is not in plain sight" - and above
 	 * the rules that act, because it only looks.
@@ -20702,6 +20731,7 @@ static const struct {
 	{ "Symbols",           BM_ANALYSIS, -1, 0 },
 	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
 	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
+	{ "Find infected data",       BM_ANALYSIS, -1, 0 },
 	{ "Decode string",            BM_ANALYSIS, -1, 0 },
 	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
@@ -21206,6 +21236,7 @@ static int bar_shown(struct view *v, int i)
 		case BI_SYMS:
 		case BI_DISASM:
 		case BI_FINDSC:
+		case BI_FINDINF:
 		case BI_UNPACKER:
 		case BI_DUMP_STATIC:
 		case BI_DUMP_EMU:
@@ -21317,6 +21348,18 @@ static int bar_enabled(struct view *v, int i)
 	 * only reports what it said.
 	 */
 	case BI_FINDSC:    return 1;    /* shown only when there is one */
+	/*
+	 * GREYED WHEN THE SCAN FOUND NOTHING, which is the opposite of the row
+	 * above and deliberately so. BI_FINDSC forces an analysis - the reader
+	 * asking is the reason to look. This one cannot: the ranges come from a
+	 * module that had already located the damage, and there is no second
+	 * way to work them out. So the grey says "the scan looked and said
+	 * nothing", which is an answer, and clicking it could only repeat it.
+	 */
+	case BI_FINDINF:
+		return v->n_node &&
+		       v->node[v->sel_node].obj < v->n_obj &&
+		       v->obj[v->node[v->sel_node].obj].n_infected != 0;
 	case BI_SYMS:      return 1;    /* shown only when there are symbols */
 	/* Always: the text it decodes usually comes from outside the file, so
 	 * there is nothing about the object that could make it unavailable. */
@@ -25774,6 +25817,70 @@ static void bar_run(struct view *v, int i)
 		snprintf(v->act_msg, sizeof v->act_msg, "%s",
 			 sc_kind(v->obj[kid].buf.p,
 				 (uint32_t)v->obj[kid].buf.n));
+		v->act_ok = 1;
+		v->menu_open = 0;
+		return;
+	}
+	/*
+	 * WHERE THE INFECTION IS - see BI_FINDINF and struct kof_infected.
+	 *
+	 * NOTHING IS SEARCHED FOR HERE. The ranges were established during the
+	 * scan by a module that had to find them in order to describe a repair;
+	 * this selects the first one and says what all of them are. A viewer
+	 * that went looking again would be a second opinion about a question
+	 * the engine has already answered, and the two could disagree.
+	 *
+	 * THE BODY IS PREFERRED FOR THE JUMP. A file usually carries both - the
+	 * malware's own bytes and the host's that it overwrote - and the body
+	 * is the larger, the stranger and the one a reader opened the menu to
+	 * look at. The damage is a few hundred bytes at an entry point that the
+	 * repair has probably already put back.
+	 */
+	case BI_FINDINF: {
+		const struct object *ob = cur_obj(v);
+		uint32_t q, pick = 0;
+		size_t at = 0;
+
+		if (!ob || !ob->n_infected) {
+			snprintf(v->act_msg, sizeof v->act_msg, "%s",
+				 "Nothing here was reported as infected");
+			v->act_ok = 1;
+			v->menu_open = 0;
+			return;
+		}
+		for (q = 0; q < ob->n_infected; q++)
+			if (ob->infected[q].kind == KOF_INF_BODY) {
+				pick = q;
+				break;
+			}
+		view_show_in(v, v->node[v->sel_node].obj,
+			     v->node[v->sel_node].sym,
+			     ob->infected[pick].off, 0);
+		{
+			uint64_t a = view_unmap(v, ob->infected[pick].off);
+			uint64_t b = view_unmap(v, ob->infected[pick].off +
+						   ob->infected[pick].len - 1u);
+
+			if (a != KOF_BROKEN && b != KOF_BROKEN) {
+				v->sel_a = a;
+				v->sel_b = b;
+				v->sel_from_dis = 0;
+			}
+		}
+		/* Every range, not just the one jumped to: the counts are the
+		 * answer and a reader should not have to open the menu twice
+		 * to learn there were two. */
+		for (q = 0; q < ob->n_infected && at < sizeof v->act_msg; q++)
+			at += (size_t)snprintf(v->act_msg + at,
+					       sizeof v->act_msg - at,
+					       "%s%s 0x%llx +%llu",
+					       q ? ", " : "",
+					       ob->infected[q].kind == KOF_INF_BODY
+					       ? "body" : "damage",
+					       (unsigned long long)
+						       ob->infected[q].off,
+					       (unsigned long long)
+						       ob->infected[q].len);
 		v->act_ok = 1;
 		v->menu_open = 0;
 		return;

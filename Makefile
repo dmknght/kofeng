@@ -936,6 +936,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
            libkofeng/analyzers/disasm/xref.c \
            libkofeng/analyzers/disasm/flow.c \
+           libkofeng/analyzers/disasm/kdis.c \
            libkofeng/analyzers/parsers/binaries/pe_sym.c \
            libkofeng/analyzers/parsers/binaries/pe_parse.c \
            libkofeng/analyzers/parsers/binaries/clr_parse.c \
@@ -1136,6 +1137,8 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
 
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
+           $(SDK)/include/kofmod/kdis.h \
+           $(SDK)/include/kofmod/infected.h \
            $(SDK)/include/kofmod/kofcure.h \
            $(SDK)/include/kofmod/kofplague.h \
            $(SDK)/include/kofmod/kofoverlord.h \

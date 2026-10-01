@@ -290,6 +290,35 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (!kunp_rcstruct_image())
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 	kunp_rcstruct_entry(pe->entry_rva);
+	/*
+	 * AND THE DIRECTORIES THE PARENT DECLARED, WHICH THIS DOES NOT MOVE.
+	 *
+	 * Every section keeps its RVA here - the reconstruction differs from
+	 * the file only in that `.themida` now HAS its bytes - so the import,
+	 * IAT and resource directories point where they always did.
+	 *
+	 * WITHOUT THIS THE LOADER CANNOT CALL ANYTHING, and the failure is
+	 * silent and precise. The host binds a child's import thunks before
+	 * the run so the guest's calls resolve, and it finds them through the
+	 * import directory; a child with no directory gets `iat filled=0`, the
+	 * thunks keep the RVAs an unbound table holds, and the first call
+	 * through one jumps to that RVA as if it were an address. Measured on
+	 * three samples, the run ended at `.idata` RVA plus thirteen -
+	 * 0xfa00d, 0x7600d, 0x40e00d - which is a pointer to an import NAME
+	 * being executed.
+	 */
+	{
+		static const uint32_t carry[] = {
+			KOF_PE_DIR_IMPORT, KOF_PE_DIR_IAT, KOF_PE_DIR_RESOURCE
+		};
+		uint32_t d;
+
+		for (d = 0; d < sizeof carry / sizeof carry[0]; d++)
+			if (pe->dir[carry[d]].rva)
+				kunp_rcstruct_dir(carry[d],
+						  pe->dir[carry[d]].rva,
+						  pe->dir[carry[d]].size);
+	}
 
 	got = 0;
 	for (k = 0; k < pe->sec_count && k < KOF_PE_MAX_SECTIONS; k++) {
@@ -299,10 +328,17 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		if (!kunp_rcstruct_at(t->mem_rva))
 			kunp_rcstruct_broken(KOF_UNP_LIMIT);
 		if (k == i_themida) {
+			/*
+			 * The fourth argument is the SIZE HINT, and
+			 * KOF_FORM_RAW used to be a fifth: the form a
+			 * child took was a parameter, and it is now a
+			 * declaration - the sections above say what
+			 * this is. See `unpack` in kofsig.h.
+			 */
 			wrote = kunp_static_decode(
 				KOF_UNP_APLIB, stream,
 				boot->file_off + boot->file_size - stream,
-				want, KOF_FORM_RAW);
+				want);
 			got = wrote;
 		} else {
 			wrote = t->file_size;
@@ -356,7 +392,38 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * instructions, so this is the same request made tens of millions of
 	 * instructions cheaper.
 	 */
-	kunp_emu_want(KOF_ENG_USE_EMU, 2u);
+	/*
+	 * THE RUN IS NOT ASKED FOR, AND THAT IS A MEASUREMENT.
+	 *
+	 * The child was handed to the interpreter for a long time and the
+	 * numbers never justified it. Two real faults were found and fixed on
+	 * the way - this reconstruction had no import directory, so the host
+	 * could not bind a thunk and the first call jumped to an RVA; and
+	 * VirtualAlloc succeeded over a mapped library image, which Windows
+	 * refuses and which this protector probes for deliberately. Each fix
+	 * bought distance:
+	 *
+	 *     kiskis    378,361 -> 16,963,436 -> 25,842,536 instructions
+	 *     vdr       334,806 -> 14,914,139 -> 22,964,999
+	 *
+	 * and NOT ONE of them bought a byte of program. The run still ends in
+	 * the loader building a pointer out of a table it has not initialised,
+	 * every sample's code section stays at 8.00 bits, and what comes back
+	 * is one 8 KB page. Seventy times the instructions for the same
+	 * nothing: four seconds across the corpus, and the whole of a Themida
+	 * file's scan time.
+	 *
+	 * SO THE STATIC HALF STAYS AND THE RUN GOES. Decompressing `.themida`
+	 * recovers the loader, which is real content, costs nothing and is
+	 * worth searching - and the object is still reported as not fully
+	 * examined, which is the honest answer about the program beside it.
+	 *
+	 * WHAT WOULD BRING IT BACK is a run that produces a decrypted section.
+	 * The walls are recorded in the memory notes and in THIRD-PARTY.md;
+	 * the next one is the uninitialised table at rbp+0x21, reached at
+	 * rip 0x4b2cef. Until that is answered this is a capability test, not
+	 * a scanner feature.
+	 */
 
 	/*
 	 * AND WHERE THE PROGRAM WILL BE, FOR THE INTERPRETER.
@@ -376,10 +443,43 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * The idea of watching where the program will be, rather than
 	 * following what the loader does, is Unlicense's - see THIRD-PARTY.md.
 	 */
+	/*
+	 * AND NOT THE SECTIONS A LOADER ENTERS ON PURPOSE.
+	 *
+	 * "Everything that is not the protector's own two" was too much, and
+	 * the measurement says exactly how: on kiskis.exe the run ended after
+	 * 378,361 instructions, "handed over at 0x40e00d", which is thirteen
+	 * bytes into `.idata`. That is an import thunk. Themida's loader binds
+	 * imports and jumps through them long before it has finished
+	 * decrypting anything, so the watch fired on the loader doing its job
+	 * and the program was still ciphertext - measured, its 4 MB code
+	 * section sat at 8.00 bits.
+	 *
+	 * BY DIRECTORY AND NOT BY NAME. `.idata` and `.rsrc` are conventions;
+	 * the import, IAT and resource DIRECTORIES are what the file actually
+	 * declares, and a protector that renames a section does not move them.
+	 * A section holding any of the three is a section a loader reaches into
+	 * as a matter of course, so arriving there says nothing about the
+	 * program having started.
+	 */
 	for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
 		const struct kof_pe_sec *t = &pe->sec[i];
+		int is_loader_furniture = 0;
+		uint32_t d;
+		static const uint32_t furniture[] = {
+			KOF_PE_DIR_IMPORT, KOF_PE_DIR_IAT, KOF_PE_DIR_RESOURCE
+		};
 
 		if (i == i_themida || i == i_boot || !t->mem_size)
+			continue;
+		for (d = 0; d < sizeof furniture / sizeof furniture[0]; d++) {
+			uint64_t rva = pe->dir[furniture[d]].rva;
+
+			if (rva && rva >= t->mem_rva &&
+			    rva - t->mem_rva < t->mem_size)
+				is_loader_furniture = 1;
+		}
+		if (is_loader_furniture)
 			continue;
 		kunp_emu_oep_range(t->mem_rva, t->mem_size);
 	}

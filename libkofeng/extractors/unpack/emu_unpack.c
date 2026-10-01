@@ -680,7 +680,8 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
  * faulted. A real kernel32 is about this size, the extra pages are zero, and
  * kof_emu_map takes a mapped span larger than its contents for exactly this.
  */
-#define K32_SPAN       (256u * KOF_EMU_PAGE)
+/* The interpreter needs this number too - see KOF_EMU_WIN_MOD_SPAN. */
+#define K32_SPAN       KOF_EMU_WIN_MOD_SPAN
 
 /* How many functions one module image can export. Above the largest module in
  * the interpreter's table with room to grow - see the note where it bites. */
@@ -1443,7 +1444,7 @@ static uint64_t emu_nolimit_ms(void)
 }
 
 static enum kof_emu_stop emu_run_while_producing(struct kof_emu *e,
-						 uint64_t slice)
+						 uint64_t slice, int hand_back)
 {
 	enum kof_emu_stop st;
 	unsigned k = 0;
@@ -1462,6 +1463,9 @@ static enum kof_emu_stop emu_run_while_producing(struct kof_emu *e,
 
 		st = kof_emu_run(e);
 		if (st != KOF_EMU_STOP_BUDGET || !slice)
+			break;
+		/* A module asked to be shown each slice - see `hand_back`. */
+		if (hand_back)
 			break;
 		if (!emu_nolimit_ms()) {
 			if (k >= EMU_EXTEND_MAX)
@@ -1849,9 +1853,11 @@ enum kof_emu_unp_why kof_emu_unp_gate_pe(const struct kof_obj_ctx *ctx,
 struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   const struct kof_pe_info *info,
 				   uint64_t max_insn, uint64_t max_pages,
-				   uint64_t idle,
+				   uint64_t idle, int hand_back,
 				   const struct kof_emu_oep *oep,
 				   unsigned n_oep,
+				   const struct kof_emu_iwatch *iw,
+				   unsigned n_iw, unsigned iw_len,
 				   struct kof_emu_unp_report *rep)
 {
 	struct kof_emu_cfg cfg;
@@ -2075,7 +2081,16 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				kof_emu_free(e);
 				return NULL;
 			}
-		fill_iat_pe(e, info, file, n, base, cfg.bits);
+		{
+			unsigned nf = fill_iat_pe(e, info, file, n, base,
+						  cfg.bits);
+
+			if (getenv("KOF_EMU_TRACE"))
+				fprintf(stderr,
+					"[emu] iat filled=%u dir=%#llx\n", nf,
+					(unsigned long long)
+					info->dir[KOF_PE_DIR_IMPORT].rva);
+		}
 	}
 	/*
 	 * AND WHERE THE PROGRAM WILL BE WHEN THE LOADER IS DONE.
@@ -2255,8 +2270,21 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 			kof_emu_set_reg(e, seed[k], entry);
 	}
 
+	/*
+	 * AND WHAT A MODULE ASKED TO BE PAUSED ON, set last so that everything
+	 * the setup does is behind it - see kof_emu_watch_insn.
+	 */
 	{
-		enum kof_emu_stop st = emu_run_while_producing(e, max_insn);
+		unsigned k;
+
+		for (k = 0; k < n_iw; k++)
+			kof_emu_watch_insn(e, iw[k].b, iw[k].n);
+		if (n_iw)
+			kof_emu_watch_insn_len(e, iw_len);
+	}
+
+	{
+		enum kof_emu_stop st = emu_run_while_producing(e, max_insn, hand_back);
 		uint64_t xl = 0, xb = kof_emu_exc_scratch(e, &xl);
 		uint32_t it = 0, k = 0;
 		uint64_t va, len;

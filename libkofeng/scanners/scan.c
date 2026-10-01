@@ -171,6 +171,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->pend_syms);
 	free(sc->pend_sec);
 	free(sc->pend_imp);
+	free(sc->emu_rep_p);
 	free(sc->imp_pool);
 	free(sc->sym_ext[0]);
 	free(sc->sym_ext[1]);
@@ -1374,9 +1375,64 @@ static int unp_is_family(const struct kof_scanner *sc,
 	return fam && strcmp(fam, predict) == 0;
 }
 
+/*
+ * WHAT A MODULE OFFERED TO PUT BACK, out to the caller.
+ *
+ * The detector loop does this inline after calling a module's kof_cure(); an
+ * UNPACK module has no kof_cure() to call, because the facts a Sality repair
+ * needs - the host bytes the virus saved, and where its body begins - exist
+ * only while the interpreter that decrypted them is alive, and that is during
+ * kof_unpack and nowhere else. So an unpack module describes the repair where
+ * it can see it, and this takes the description.
+ *
+ * NOTHING IS WRITTEN HERE EITHER. Same contract as the detector's: the host
+ * bounds-checked every patch when the module asked for it, the file is still
+ * reported infected, and whether any of it is applied is the caller's.
+ *
+ * ONCE, for the first module that described one - see the same rule in the
+ * detector loop. Two modules repairing one object are two modules disagreeing
+ * about what it is.
+ */
+static void take_repair(struct kof_scanner *sc, struct kof_result *res)
+{
+	uint32_t q;
+
+	if (!res || !sc->cure_have || !sc->n_cure_fix)
+		return;
+	if (res->repair.n_fix || res->repair.truncate)
+		return;
+	for (q = 0; q < sc->n_cure_fix && q < KOF_MAX_FIX; q++) {
+		res->repair.fix[q].off = sc->cure_fix[q].off;
+		res->repair.fix[q].n = sc->cure_fix[q].n;
+		memcpy(res->repair.fix[q].b, sc->cure_fix[q].b,
+		       sc->cure_fix[q].n);
+	}
+	res->repair.n_fix = q;
+	res->repair.truncate = sc->cure_trunc_set ? sc->cure_trunc : 0u;
+}
+
+/*
+ * AND WHERE THE INFECTION IS, out to the caller - see `struct kof_infected`.
+ *
+ * SEPARATE FROM take_repair, because the two are different statements and a
+ * module may make either without the other: a rule that can locate a family's
+ * body but not put the host back marks the body and offers no repair, and that
+ * is a useful thing to be able to say.
+ */
+static void take_infected(struct kof_scanner *sc, struct kof_result *res)
+{
+	uint32_t q;
+
+	if (!res || !sc->n_infect || res->n_infected)
+		return;
+	for (q = 0; q < sc->n_infect && q < KOF_MAX_INFECTED; q++)
+		res->infected[q] = sc->infect[q];
+	res->n_infected = q;
+}
+
 static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt,
-			 const struct kof_result *res, uint32_t pdepth,
+			 struct kof_result *res, uint32_t pdepth,
 			 uint32_t want, const char *predict)
 {
 	uint32_t i;
@@ -1606,6 +1662,38 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 					sc->n_carved += sc->n_kids - k0;
 			}
 			sc->cur_mod = NULL;
+			/*
+			 * AND WHAT IT FOUND, WHICH WAS BEING THROWN AWAY.
+			 *
+			 * ctx->report is on the CONTEXT and not on the content
+			 * table, so an unpack module has always been able to
+			 * call it - and nothing here read the answer. Only the
+			 * detector loop did, so a family that can only be
+			 * named by RUNNING it had nowhere to say so: Sality's
+			 * decryptor is polymorphic, the name is earned when
+			 * the interpreter reaches the body, and the module
+			 * that reached it could produce a child but not a
+			 * verdict.
+			 *
+			 * Appended on the same terms the detector loop uses,
+			 * including the cap and the count of what the cap
+			 * dropped, because it is the same kind of statement
+			 * about the same object.
+			 */
+			if (sc->rep_valid && res) {
+				if (res->n < KOF_MAX_FINDINGS) {
+					struct kof_finding *f =
+						&res->v[res->n++];
+
+					f->level = sc->rep_level;
+					finding_str(sc, ctx, m, f);
+				} else {
+					res->dropped++;
+				}
+				take_repair(sc, res);
+				take_infected(sc, res);
+				sc->rep_valid = 0;
+			}
 			/* A build claimed by a module that opened nothing is
 			 * a guess about somebody else's file - see
 			 * kof_scanner.pend_build. */
@@ -1706,6 +1794,21 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				sc->n_carved += sc->n_kids - k0;
 		}
 		sc->cur_mod = NULL;
+		/* And what it found - see the same block in the family pass
+		 * above for why an unpack module may report at all. */
+		if (sc->rep_valid && res) {
+			if (res->n < KOF_MAX_FINDINGS) {
+				struct kof_finding *f = &res->v[res->n++];
+
+				f->level = sc->rep_level;
+				finding_str(sc, ctx, m, f);
+			} else {
+				res->dropped++;
+			}
+			take_repair(sc, res);
+			take_infected(sc, res);
+			sc->rep_valid = 0;
+		}
 		/* See the same two in the family pass above. */
 		sc->pend_build[0] = 0;
 		sc->pend_build_of = NULL;
@@ -3874,6 +3977,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->cure_at = 0;
 	sc->n_cure_fix = 0;
 	sc->cure_trunc_set = 0;
+	sc->n_infect = 0;
 	sc->ovl_asked = -1;
 	sc->ovl_pct = 0;
 	/* And the swept chains, for the same reason and at the same cost. */
@@ -3990,6 +4094,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 				out->repair.truncate = sc->cure_trunc_set
 						       ? sc->cure_trunc : 0u;
 			}
+			take_infected(sc, out);
 		}
 		sc->cur_mod   = NULL;
 

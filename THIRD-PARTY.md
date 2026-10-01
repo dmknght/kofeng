@@ -11,11 +11,23 @@ Copyright (c) Bitdefender. Licensed under the Apache License, Version 2.0.
 The full licence text is at `libkofemu/bddisasm/LICENSE`; provenance and the
 exact subset taken are recorded in `libkofemu/bddisasm/README.kofeng.md`.
 
-The files are unmodified. Apache 2.0 requires that a copy of the licence travel
-with the code, that existing copyright and attribution notices are kept, and
-that modified files be marked as changed - there are none, and the README says
-so explicitly so that a later reader does not have to diff a release to find
-out.
+ONE FILE IS MODIFIED and Apache 2.0 requires that it be marked as such. It is
+`src/bdx86_decoder.c`, and the change is a single condition in
+`NdFetchModrmAndDisplacement`; the site carries a `KOFENG PATCH` comment and
+`libkofemu/bddisasm/README.kofeng.md` records what it fixes and why.
+
+In short: the guard that decides whether an instruction carries a displacement
+compares the base register against `NDR_RBP` (5), which is correct for 32- and
+64-bit addressing. In **16-bit** addressing the mod=0 form carrying a bare
+displacement is rm=6, not rm=5 - the file's own `gDispsizemap16` says so - and
+`64 67 8B 1E 30 00`, which is `mov ebx, fs:[0x30]` written with an address-size
+prefix, therefore decoded as four bytes with no displacement instead of six.
+That is the instruction every Windows stub that resolves its own imports begins
+with. `tests/unit/insn_addr16.c` pins it.
+
+Every other file is unmodified. Apache 2.0 also requires that a copy of the
+licence travel with the code and that existing copyright and attribution
+notices are kept; both hold.
 
 This applies to any distribution of kofeng, source or binary.
 
@@ -55,12 +67,37 @@ length in front of them; write those bytes back at the file offset the entry
 maps to, set the entry point to the recovered value, and truncate the file to
 drop the virus.
 
-WHAT WAS TAKEN IS THE SHAPE, NOT THE CODE. Nothing here is reproduced - the
-Sality offsets are its author's work and this engine has no Sality module. What
-it showed is a gap in this one's ABI: every step after the stop is a read of a
-register or of guest memory, `kof_emu_get_reg` and `kof_emu_read` existed, and
-nothing carried them across to a module. `emu_reg` and `emu_read` are that
-crossing.
+WHAT IT SHOWED FIRST was a gap in this engine's ABI: every step after the stop
+is a read of a register or of guest memory, `kof_emu_get_reg` and
+`kof_emu_read` existed, and nothing carried them across to a module. `emu_reg`
+and `emu_read` are that crossing.
+
+THERE IS NOW A SALITY MODULE - `bases/unp/sality_pe.c` - and the debt has to be
+stated more precisely than "the shape". Four numbers in it are TinyAntivirus's
+measurements and not this project's: the displacements at which a Sality body
+keeps the flag, the length and the bytes of the host code it overwrote
+(`+0x1773`, `+0x1774`, `+0x1778`) and the distance back to the start of the
+virus body (`-0x1116`). They are reproduced as constants because they are facts
+about the virus rather than lines of a program; each is verified here before it
+is used - the entry point the module computes from them has to equal the entry
+the file's own header declares, on every sample, or no repair is described.
+
+AND TWO OF ITS DECISIONS WERE MEASURED AND REJECTED, which is the more useful
+half of reading it:
+
+  - ITS BYTE SIGNATURE NAMES ONE GENERATION. TinyAntivirus's README says it had
+    one Sality sample, and its two signature runs match exactly one of the four
+    here. Diffing all four decrypted bodies leaves a different 49-byte run -
+    the virus's own PEB walk, which is code it executes - and that matches all
+    four. The lesson is in the sources under "Polymorphic virus detection, read
+    only": a signature over bytes identifies a generation, not a family.
+  - ITS STOPPING RULE LOOKS IN THE WRONG PLACE. It pauses on every one-byte
+    `0xC3` and reads `[ESP]` for the body. Measured, the body turned up at
+    0x13116, 0x2316 and 0xb8716 in three runs and at no address any single
+    `ret` pointed at; a polymorphic stub has as many hand-overs as its
+    generator felt like emitting. What replaced it is periodic scanning - see
+    the Nachenberg entry below - which also removed the need for the body to
+    execute at all.
 
 ### OllyDbg unpacking scripts for PECompact 2.x/3.x — no licence stated
 
@@ -311,6 +348,226 @@ sources this engine took structure from, under the MIT terms above:
     XEmulUnpacker. Both are why `bases/unp/petite_pe.c` and
     `bases/unp/kkrunchy_pe.c` drive the interpreter instead of decoding, and
     both files say so.
+
+### Polymorphic virus detection, read only
+
+Four sources, read together because they answer one question - how a scanner
+recognises a family whose every copy is encoded differently - and because they
+agree with each other and disagreed with what this engine was doing.
+
+Nothing is reproduced from any of them. Two are published research, one is a
+vendor's blog post and one is an expired US patent, which is a public
+disclosure by design.
+
+**US 5,696,822 - "Polymorphic virus detection module", Carey Nachenberg,
+Symantec, filed 1995, granted 1997 (expired).** The control structure this
+engine now uses for Sality is its, in three parts:
+
+  - a STATIC EXCLUSION phase that rules candidates out from the file's gross
+    structure before any emulation, so that most files are never emulated at
+    all. Here that is `bases/heur/peinfect_00.c`.
+  - a bounded emulation - its figure is 1.5 MILLION instructions - during which
+    the scan may be entered PERIODICALLY, "to attempt to identify a virus that
+    has been partially decrypted". That sentence is the whole saving: this
+    engine was waiting for the decrypted body to finish AND to be given
+    control, which measured 186 million instructions and 40 seconds on one
+    file, where what a repair needs is in memory after about twenty million.
+    `emu_slice` in the module ABI is that periodic entry, and the same four
+    samples now finish in 0.3 to 4.6 seconds.
+  - PAGE TAGGING: scan the pages an instruction was fetched from or wrote to,
+    and only those. kofeng already had this - `page->written` and the region
+    gathering are the same idea - so nothing changed for it.
+
+ITS FOURTH PART IS NOT IMPLEMENTED AND THE REASON IS MEASURED. The patent's
+dynamic exclusion keeps a 256-bit INSTRUCTION USAGE PROFILE per mutation engine
+- one bit per first opcode byte - and delists a virus the moment an instruction
+appears that its engine never emits, stopping when the candidate list empties.
+That is an exclusion mechanism over MANY families; with one family it excludes
+nothing. Measured on the four decryptors here, the opcode histograms are
+dominated by MOV, TEST, CMP and JCC, which is every program ever compiled. It
+becomes worth building when there is a second and a third profile to narrow
+against.
+
+**"Bytecode signatures for polymorphic malware", Alberto Wu, ClamAV blog, 2011.**
+A worked example of detecting Xpaj - a polymorphic infector with entry-point
+obfuscation - with NO emulation: find a small static anchor, then walk the
+DISASSEMBLY, checking each instruction's opcode class and the KIND of its
+operands (a register from a set, a displacement inside the stack frame), eating
+the generator's junk because junk is itself a recognisable class of
+instruction, and following the relative `call`/`jmp` the chunks are chained
+with.
+
+`libkofeng/kofcore/kofmod/kdis.h` and `libkofeng/analyzers/disasm/kdis.c` are
+that mechanism made available to a module - decode without executing, keep a
+constant map over the registers, resolve a branch back to a file offset. The
+one thing its example makes explicit and this had to add is the modelled stack:
+their walker saves the return address when it follows a call, because
+`call $+5; pop reg` is how every position-independent decryptor learns where it
+is, and a walker without it loses the register at the first pop.
+
+IT DOES NOT CURRENTLY DETECT SALITY, and that is a measurement rather than an
+omission: the walk reaches the delta-get on three of the four samples and never
+reaches the decrypt loop within twenty thousand instructions. Xpaj's routine is
+near its entry and chained by unconditional jumps; Sality's is not that shape.
+
+**"Static analysis of executables to detect malicious patterns", Christodorescu
+and Jha, 12th USENIX Security Symposium, 2003.** The theory of why the above
+works: malicious-code detection as an obfuscation/deobfuscation game, and an
+abstract representation - a malicious-code automaton over UNINTERPRETED SYMBOLS
+- that survives the four transformations it names: dead-code insertion, code
+transposition, register reassignment and instruction substitution. The
+uninterpreted symbols are the answer to register reassignment, and in kdis that
+is left to the rule: a rule binds a register number in a local and requires the
+same one later, which is unification done by hand.
+
+ITS IMPLEMENTATION IS DELIBERATELY NOT FOLLOWED. SAFE builds control-flow
+graphs with IDA Pro and CodeSurfer and decides by language containment; the
+paper measures 1.4 to 9.1 seconds for the annotator and 0.5 to 1.6 for the
+detector, per file per automaton, and calls its own times on benign code
+"unacceptably large". What was taken is the vocabulary and the list of
+transformations a rule has to survive.
+
+**"Polymorphic shellcode engine using spectrum analysis", CLET team, Phrack 61
+phile 9, 2003.** The generator's side, read to know what the detector faces.
+Two things in it are load-bearing here:
+
+  - it explains a measurement that failed. An encryption that is a SINGLE XOR
+    with a FIXED-SIZE key leaves `C[i] xor C[i+N]` independent of the key, which
+    would be a signature on the encrypted body. Tried here at every stride from
+    1 to 16 across the four Sality bodies: 0.0% agreement at all of them. The
+    article says why - real engines vary the key AND the key size and use
+    several reversible operations - so the bodies genuinely share nothing, and
+    a byte rule on the encrypted half is not a gap in this project's research
+    but a thing that does not exist.
+  - its authors name their own weakness: "the main frame of our routine is
+    rather the same (this is maybe a weakness) but we use three registers...
+    chosen at random", and they note that junk which cancels out is "easily
+    recognizable by an IDS which would make code emulation". The invariant is
+    the frame and a small set of reversible operations, which is exactly what a
+    usage profile or a shape rule is written against.
+
+**"How do AV vendors create signatures for polymorphic viruses?", Reverse
+Engineering Stack Exchange, 2013.** Not a source of technique, and listed
+because one sentence in it is quoted in several places in this tree as the
+reason a whole approach was abandoned: a signature over a stream of bytes "or a
+stream of mnemonics" identifies one GENERATION of a generator rather than the
+malware, so vendors write detection CODE against the semantics. It also names
+the evidence for Sality and Virut that `peinfect_00.c` is built from.
+
+### Emulator design patents, read only
+
+Ten further patents, read as scans of the printed grants. They are expired or
+published disclosures; nothing is reproduced from any of them, and several are
+listed precisely because they were read and then NOT followed.
+
+**US 5,964,889 - "Examining the opcode for faults before emulating"
+(Nachenberg / Symantec, 1999).** A FAULT MANAGER between fetch and decode: the
+opcode is checked against a list of faulting instructions held in an UPDATABLE
+DATA FILE, and a match saves the machine's state and interrupts to a handler
+which may examine and CHANGE the virtual machine before resuming. Two details
+are worth recording even though the mechanism is not copied:
+
+  - its fault stack is deliberately NOT the guest's own SS:SP, because
+    polymorphic viruses keep temporary data below the stack pointer and a
+    scanner using that stack corrupts them - making the virus malfunction under
+    emulation and not on real hardware.
+  - its dummy-loop handler is loop acceleration done narrowly: fault on
+    E0/E1/E2/E3, and ONLY after 500 instructions so clean files never pay;
+    check the one shape whose meaning is certain - a loop back to an
+    immediately preceding ONE-BYTE instruction - and if it matches, zero CX and
+    step the instruction pointer past it. If it does not match, disable the
+    check for the rest of the file.
+
+WHAT WAS TAKEN IS THE CAPABILITY, NOT THE DESIGN. A module here could already
+stop a run on an instruction and READ the machine; it could not change one. The
+three accessors `emu_set_reg`, `emu_set_ip` and `emu_write` are that gap
+closed - a paused run can now be corrected and resumed, which is what every
+"circumvent the trick" technique in these patents rests on.
+
+AND THE DUMMY-LOOP HANDLER DOES NOT FIRE HERE. Disassembled, the Sality
+decryptor's junk contains no LOOP or JCXZ at all - the seven E0..E3 bytes in
+its loop body are operands. Its junk is meaningless `rep` prefixes on
+non-string instructions, which the hardware ignores and which cost a decode
+and nothing else.
+
+**US 6,971,019 - "Histogram-based virus detection" (Nachenberg / Symantec,
+2005).** The mature form of the 1995 usage profile: emulate while building a
+histogram of instruction characteristics named by a definition file, stop when
+"active instructions" stop appearing, then let interpreted P-code decide from
+the histogram - and let it ask for more emulation. An ACTIVE INSTRUCTION is
+defined as decryption-like memory behaviour: a read of an address followed by a
+write back to it, at addresses stepping through a buffer.
+
+THE IDEA IS RIGHT AND THAT DEFINITION DOES NOT FIT THIS FAMILY, measured. Of
+408,441 guest writes in one Sality run, 350,346 WERE writes back to something
+just read - and every one was the stack, push and pop touching the same slot.
+The decryption reads from one place and writes to another, so it never made the
+pattern once in twenty million instructions. What it does make is a sequential
+write stream: 58,076 writes landing within eight bytes of the one before,
+against 58,066 loop iterations counted independently, and every one of them
+inside the decrypted body.
+
+THE STOP RULE IS NOT SHIPPED, AND THE REASON IS A NUMBER. The signal is
+implemented and sound; the threshold is not. Measured across samples, the
+largest gap between two actives inside a decryption that had NOT finished runs
+from 335 to 1,209,199 instructions - three and a half orders of magnitude, with
+PECompact at the top. No single figure separates "finished" from "still
+working", so it sits behind a flag with the measurements written beside it.
+See KOF_EMU_QUIET.
+
+**US 9,740,864 - "Emulation of files using multiple images of the emulator
+state" (Kaspersky, 2017).** A tree of saved emulator states; termination is
+classed CORRECT (harmful behaviour seen, or a budget reached) or INCORRECT (a
+missing library, an unhandled exception); on an incorrect one, reload an
+earlier image and resume with the state CHANGED to get past the trick - a
+different branch at a conditional jump, a different return value, a reversal.
+
+NOT BUILT, AND THE EVIDENCE IS AGAINST IT HERE. By that taxonomy nearly every
+run on a Windows corpus ends incorrectly - 125 of 129 end in a fault - so the
+technique looks like it should pay. It was tested from the cheap end first: let
+the run survive the fault instead of rolling back to avoid it, by answering an
+unmapped data read with zero and by giving an unmapped write a page. Measured
+over 300 samples, that took the instructions executed from 135 million to 2,208
+million and produced THREE more objects and NOT ONE more detection, for seven
+times the scan time. A run that continues past its fault finds nothing, so a
+run that rolls back and avoids the fault would arrive at the same place. Both
+tolerances stay behind flags - KOF_EMU_SOFTREAD and KOF_EMU_SOFTWRITE - with
+those numbers recorded at the site.
+
+**US 8,473,931 - "Optimizing emulation" (IBM, 2013).** Recognise a long loop -
+by iteration count, execution count or elapsed time - hash its contents
+cheaply, look the hash up in a database of known long loops, and on a match
+confirm with a second, unique hash before substituting a known result for the
+loop.
+
+NOT APPLICABLE, TWICE. The lookup is byte-exact, and a polymorphic decryptor
+has a different body in every sample, so no database entry can match twice. For
+the case it does fit - a packer whose decompression loop is fixed - this engine
+already has a better answer: recognise the packer statically and decompress it
+with a decoder, emulating nothing at all.
+
+**US 7,603,713 and US 8,122,509 (Kaspersky) and US 8,943,596 - accelerating an
+emulator with real hardware.** All three run the suspect code, or its
+uninteresting parts, on the actual CPU with the state saved and restored around
+it. Out of scope by construction: this engine never executes a sample.
+
+**US 5,999,723 - "State-based cache for antivirus software" (Nachenberg /
+Symantec, 1999).** Emulate a fixed number of instructions, suspend, build a
+state record and compare it against a cache of records already seen; a match
+means this prefix has been emulated before and found clean. Nothing to gain
+here for a different reason: this engine starts 35 interpreter runs across
+4,712 files, so there is no repeated prefix to cache.
+
+**US 8,341,743 - "Detection of viral code using emulation of operating system"
+(Symantec).** An artificial memory region spanning operating-system components,
+and a monitor that detects the guest reaching into it. This engine already
+builds a synthetic PEB, LDR and module images and counts reads into them - see
+`count_mod_reads` in kofemu.c and the thread-block builder in emu_unpack.c.
+
+**US 6,907,396 - "Detecting computer viruses by patching" (Networks Associates,
+2005).** Emulator extensions - program instructions loaded INTO the emulator to
+help detection. That is what a module is here, so the idea arrives already
+implemented.
 
 ### The Themida and VMProtect research projects — read only
 

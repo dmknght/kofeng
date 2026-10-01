@@ -988,7 +988,12 @@ NdFetchModrmSibDisplacement(
     }
 
     // If needed, fetch displacement.
-    if ((Ictx->Instrux->ModRm.mod == 0 && base == NDR_RBP) ||
+    // KOFENG PATCH (see ../README.kofeng.md): in 16-bit addressing the mod=0
+    // form that carries a bare displacement is rm=6, not rm=5 - rm=5 is [di]
+    // and takes none. gDispsizemap16 below already says exactly this; the
+    // guard did not, so the disp16 was never fetched.
+    if ((Ictx->Instrux->ModRm.mod == 0 &&
+         base == (Ictx->Instrux->AddrMode == ND_ADDR_16 ? 6 : NDR_RBP)) ||
         (Ictx->Instrux->ModRm.mod == 1) ||
         (Ictx->Instrux->ModRm.mod == 2))
     {

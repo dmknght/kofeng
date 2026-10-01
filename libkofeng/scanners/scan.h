@@ -15,11 +15,13 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
+#include "../analyzers/disasm/kdis.h"
 #include "../extractors/unpack/pe_rebuild.h"
 #include "../kofeng.h"
 /* KOF_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
  * the number because it owns the list it is copied into. */
 #include "../../libkofemu/kofemu.h"
+#include "../extractors/unpack/emu_unpack.h"
 #include "../databases/dbloader.h"
 #include "../detectors/matchers/kofmatch.h"
 #include "../detectors/matchers/kofplague.h"
@@ -157,6 +159,15 @@ struct kof_scanner {
 	 * Cleared per object and published in kof_result.emu_unpacked. */
 	uint8_t              emu_produced;
 	const char          *res_why;
+	/* A run a module asked to be paused on, and the report it will be
+	 * gathered with when it finishes - see `emu_resume` in kofsig.h. */
+	struct kof_emu_unp_report *emu_rep_p;
+	int                  emu_paused;
+	/* Instruction patterns a module named before the run - see
+	 * `emu_watch_insn` in kofsig.h. */
+	struct kof_emu_iwatch pend_iw[KOF_EMU_INSN_WATCH];
+	uint32_t             pend_n_iw;
+	uint32_t             pend_iw_len;
 	/*
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.
@@ -215,6 +226,27 @@ struct kof_scanner {
 	uint32_t             n_cure_fix;
 	uint64_t             cure_trunc;
 	int                  cure_trunc_set;
+	/* Where a module said the infection is - see struct kof_infected. */
+	struct kof_infected  infect[KOF_MAX_INFECTED];
+	uint32_t             n_infect;
+	/*
+	 * HOW MANY INSTRUCTIONS A RUN MAY GO BEFORE HANDING CONTROL BACK.
+	 *
+	 * Zero means "as far as the host's ceiling allows", which is what
+	 * every run did before. A module that sets it gets the machine back,
+	 * alive and paused, every `emu_slice` instructions - so it can look at
+	 * what has been decrypted SO FAR and stop as soon as that is enough.
+	 *
+	 * This is the primitive periodic scanning needs. Measured on a Sality
+	 * sample: the data a cure needs is about 6 KB into a 65 KB body, so
+	 * roughly a tenth of the decryption is worth 186 million instructions
+	 * less than all of it.
+	 */
+	uint64_t             emu_slice;
+	uint64_t             emu_full;   /* the host's real ceiling */
+	/* The module-facing code reader's cursor - see analyzers/disasm/kdis.h.
+	 * One per object, because a module walks one run of code at a time. */
+	struct kof_kdis      kdis;
 	int                  ovl_asked;
 	uint32_t             ovl_pct;
 	/*

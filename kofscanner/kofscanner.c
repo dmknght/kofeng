@@ -805,6 +805,27 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	}
 
 	/*
+	 * AND WHERE THE INFECTION IS, when a rule said so - see
+	 * `struct kof_infected`.
+	 *
+	 * NOT UNDER THE REPAIR, and not conditional on one. A rule may locate a
+	 * family's body without being able to put the host back, and that is
+	 * exactly the case where a reader most wants to be told where it is.
+	 * Printed under -v for the same reason the repair's byte counts are:
+	 * it is for somebody checking a rule, not for a sweep.
+	 */
+	if (r->verbose && res->n_infected) {
+		uint32_t q;
+
+		for (q = 0; q < res->n_infected; q++)
+			printf("  %-9s %llu bytes at %llu\n",
+			       res->infected[q].kind == KOF_INF_BODY
+			       ? "Infection" : "Damage",
+			       (unsigned long long)res->infected[q].len,
+			       (unsigned long long)res->infected[q].off);
+	}
+
+	/*
 	 * BROKEN is secondary to a finding, not a second verdict beside it.
 	 *
 	 * A context-keyed encoder comes back both as a rule's Heur:Shellcode and,

@@ -218,6 +218,11 @@ do not attach to kofeng, is under "Read, not taken" in
 | [RetDec](https://github.com/avast/retdec) (MIT) | that MPRESS says which build wrote a file in the **dword at EP+8**, where its fix-up stub is and the three shapes it comes in, the import hint list it leaves in place of an import directory — so the original entry point and the imports are recoverable **without running anything** — and the LZMAT coding it used before LZMA |
 | [Unipacker](https://github.com/unipacker/unipacker) (GPL-2.0) | that a packed sample is dumped when execution first enters a section it has not run in before — and that the run should **continue** afterwards, so every stage is caught rather than the first. Also how a finished run is rebuilt into a *file*: the entry point is where execution got to rather than the one in the header, raw offsets equal RVAs, and memory the run allocated becomes sections of its own |
 | [Unpacker](https://github.com/anpa1200/Unpacker) (MIT) | named the rule above and pointed at where to read it |
+| [TinyAntivirus](https://github.com/develbranch/TinyAntivirus) (GPL-2.0) | where a Sality body keeps the host bytes it overwrote, and the length and flag in front of them — the four displacements `bases/unp/sality_pe.c` repairs from. Its byte signature and its `ret`/`[ESP]` stopping rule were both measured here and **rejected**: each names one generation of a polymorphic family |
+| [US 5,696,822](https://patents.google.com/patent/US5696822A/en), Nachenberg / Symantec (expired patent) | that a polymorphic family is found by excluding candidates from the file's gross structure **before** emulating, by scanning **periodically** during the decryption rather than waiting for it to finish, and by scanning only the pages the run touched. The periodic scan is `emu_slice` — it took one sample from 40 seconds to 4.6 |
+| [ClamAV bytecode signatures](https://blog.clamav.net/2011/11/bytecode-signatures-for-polymorphic.html) (GPL-2.0) | that a polymorphic decryptor can be recognised with **no emulation at all** — anchor, then walk the disassembly checking opcode classes and operand kinds, eat the junk, follow the relative branches. That mechanism is `kofmod/kdis.h` |
+| [SAFE](https://www.usenix.org/legacy/events/sec03/tech/christodorescu.html), Christodorescu & Jha, USENIX Security '03 | the four obfuscations such a rule must survive — dead code, code transposition, register reassignment, instruction substitution — and that register reassignment is answered by binding a register as a *variable* rather than naming it |
+| [Phrack 61:9](http://phrack.org/issues/61/9.html), CLET team | the generator's side: why a key-independent transform of the encrypted body does **not** exist for real engines, and that the invariant they leave is the *frame* plus a small set of reversible operations |
 | [Bitdefender bddisasm](https://github.com/bitdefender/bddisasm) (Apache-2.0) | the x86 decoder, which unlike the above **is** vendored — see the table below |
 
 
@@ -229,4 +234,4 @@ The code written for this project is under the **MIT License** — see
 | what | terms |
 |------|-------|
 | engine, tools, tests | MIT |
-| `libkofemu/bddisasm/` | Apache License 2.0, Bitdefender — see [THIRD-PARTY.md](THIRD-PARTY.md) |
+| `libkofemu/bddisasm/` | Apache License 2.0, Bitdefender — one file patched and marked, see [THIRD-PARTY.md](THIRD-PARTY.md) |
