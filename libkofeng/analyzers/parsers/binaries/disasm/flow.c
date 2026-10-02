@@ -1408,46 +1408,6 @@ static int tset_has(const struct tset *t, uint64_t va)
 	return 0;
 }
 
-/*
- * Decode only, and record where a direct branch can land.
- *
- * `ct` is the same thing narrowed to CALL targets. The two are kept apart
- * because the question they answer is different: `t` asks "can control arrive
- * here", which a join needs, while `ct` asks "did something arrive here with a
- * return address on the stack", which is the only reason a body that starts
- * with `pop reg` is reading its own address rather than cleaning up. A
- * conditional branch to a `pop` is an ordinary error path and must not be read
- * as one.
- */
-static void find_targets(struct tset *t, struct tset *ct, const uint8_t *code,
-			 uint32_t code_n, uint64_t code_va, unsigned bits)
-{
-	uint32_t at = 0;
-
-	while (at < code_n) {
-		INSTRUX ix;
-		uint64_t va = code_va + at, tg;
-
-		if (!ND_SUCCESS(NdDecodeEx(&ix, code + at, code_n - at,
-					   bits == 32 ? ND_CODE_32 : ND_CODE_64,
-					   bits == 32 ? ND_DATA_32
-						      : ND_DATA_64))) {
-			at++;
-			continue;
-		}
-		if (ix.Instruction == ND_INS_JMPNR ||
-		    ix.Instruction == ND_INS_CALLNR || is_cond_jump(&ix)) {
-			tg = branch_target(&ix, va + ix.Length);
-			if (tg >= code_va && tg < code_va + code_n) {
-				tset_put(t, tg);
-				if (ct && ix.Instruction == ND_INS_CALLNR)
-					tset_put(ct, tg);
-			}
-		}
-		at += ix.Length;
-	}
-}
-
 /* Open a block at `va`, closing whatever was open. */
 /*
  * THE RESOLVER'S ANSWER, BOUNDED - and this is the library's own ABI, not a
@@ -1497,13 +1457,15 @@ static int thunk_cmp(const void *a, const void *b)
  * two shapes recognised are the one above and the plain `jmp *[slot]` that a
  * non-relocatable build writes.
  */
-static void find_thunks(struct kof_flow *f, const uint8_t *code,
-			uint32_t code_n, uint64_t code_va, unsigned bits)
+static void prescan(struct kof_flow *f, struct tset *t, struct tset *ct,
+		    const uint8_t *code, uint32_t code_n, uint64_t code_va,
+		    unsigned bits)
 {
 	uint32_t at = 0, treg = NGPR;
 	uint64_t tval = 0, tfrom = 0;
+	int want_thunk = f && f->resolve;
 
-	if (!f || !f->resolve)
+	if (!t && !want_thunk)
 		return;
 	while (at < code_n) {
 		INSTRUX ix;
@@ -1519,7 +1481,31 @@ static void find_thunks(struct kof_flow *f, const uint8_t *code,
 			treg = NGPR;
 			continue;
 		}
-		if (ix.Instruction == ND_INS_JMPNI && ix.OperandsCount >= 1 &&
+		/*
+		 * WHERE A DIRECT BRANCH CAN LAND.
+		 *
+		 * `ct` is the same thing narrowed to CALL targets. The two are
+		 * kept apart because the question they answer is different:
+		 * `t` asks "can control arrive here", which a join needs,
+		 * while `ct` asks "did something arrive here with a return
+		 * address on the stack", which is the only reason a body that
+		 * starts with `pop reg` is reading its own address rather than
+		 * cleaning up. A conditional branch to a `pop` is an ordinary
+		 * error path and must not be read as one.
+		 */
+		if (t && (ix.Instruction == ND_INS_JMPNR ||
+			  ix.Instruction == ND_INS_CALLNR ||
+			  is_cond_jump(&ix))) {
+			uint64_t tg = branch_target(&ix, va + ix.Length);
+
+			if (tg >= code_va && tg < code_va + code_n) {
+				tset_put(t, tg);
+				if (ct && ix.Instruction == ND_INS_CALLNR)
+					tset_put(ct, tg);
+			}
+		}
+		if (want_thunk && ix.Instruction == ND_INS_JMPNI &&
+		    ix.OperandsCount >= 1 &&
 		    ix.Operands[0].Type == ND_OP_MEM) {
 			const ND_OPERAND *op = &ix.Operands[0];
 
@@ -1544,19 +1530,19 @@ static void find_thunks(struct kof_flow *f, const uint8_t *code,
 					uint32_t want = f->cap_thunk
 							? f->cap_thunk * 2u
 							: 64u;
-					struct thunkrow *t;
+					struct thunkrow *tr;
 
 					/* A ceiling only against a file made
 					 * of nothing but thunks. */
 					if (want > 65536u)
 						want = 65536u;
-					t = f->n_thunk < want
-					    ? (struct thunkrow *)
-					      realloc(f->thunk,
-						      want * sizeof *t)
-					    : NULL;
-					if (t) {
-						f->thunk = t;
+					tr = f->n_thunk < want
+					     ? (struct thunkrow *)
+					       realloc(f->thunk,
+						       want * sizeof *tr)
+					     : NULL;
+					if (tr) {
+						f->thunk = tr;
 						f->cap_thunk = want;
 					}
 				}
@@ -1585,7 +1571,7 @@ static void find_thunks(struct kof_flow *f, const uint8_t *code,
 		}
 		treg = NGPR;
 		tfrom = 0;
-		if (ix.Instruction == ND_INS_CALLNR) {
+		if (want_thunk && ix.Instruction == ND_INS_CALLNR) {
 			uint32_t r = NGPR;
 			uint64_t v = 0;
 
@@ -1599,7 +1585,7 @@ static void find_thunks(struct kof_flow *f, const uint8_t *code,
 		}
 		at += ix.Length;
 	}
-	if (f->n_thunk > 1u)
+	if (want_thunk && f->n_thunk > 1u)
 		qsort(f->thunk, f->n_thunk, sizeof *f->thunk, thunk_cmp);
 }
 
@@ -1976,11 +1962,20 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	cur_blk = f ? blk_open(f, code_va) : 0u;
 	t = (struct tset *)calloc(1, sizeof *t);
 	ct = (struct tset *)calloc(1, sizeof *ct);
-	if (t)
-		find_targets(t, ct, code, code_n, code_va, bits);
-	/* Before anything is resolved, so that a call site reached early in
-	 * the sweep sees a thunk defined later in the section. */
-	find_thunks(f, code, code_n, code_va, bits);
+	/*
+	 * ONE DECODE PASS BEFORE THE SWEEP, NOT TWO.
+	 *
+	 * Branch targets and PIC thunks were each found by their own walk of
+	 * the range, so the same bytes went through NdDecodeEx three times
+	 * per call - twice here and once in the sweep below. The two walks
+	 * ask different questions of the SAME instruction, so they are one
+	 * loop; neither reads what the other writes, and `treg` carries
+	 * across iterations exactly as it did alone.
+	 *
+	 * It runs before anything is resolved, so that a call site reached
+	 * early in the sweep sees a thunk defined later in the section.
+	 */
+	prescan(f, t, ct, code, code_n, code_va, bits);
 	/* Without it every fact still holds within a straight line; what is
 	 * lost is the clearing at a join, so the sweep is more credulous
 	 * rather than wrong in a new way. */
@@ -4375,28 +4370,6 @@ static int in_loop(const struct kof_flow *f, uint64_t va)
 	return 0;
 }
 
-/*
- * The innermost span that holds this address, as index plus one, or 0.
- *
- * INNERMOST, because two steps in the same inner loop are the same repeated
- * step while two in the same outer loop may be a sequence that happens to
- * run twice. The spans are intervals - see add_loop - so the shortest one
- * containing the address is the innermost.
- */
-static uint32_t loop_of(const struct kof_flow *f, uint64_t va)
-{
-	uint32_t i, best = 0;
-	uint64_t len = 0;
-
-	for (i = 0; i < f->n_loop; i++)
-		if (va >= f->loop[i].lo && va <= f->loop[i].hi) {
-			uint64_t l = f->loop[i].hi - f->loop[i].lo;
-
-			if (!best || l < len) { best = i + 1u; len = l; }
-		}
-	return best;
-}
-
 static int cmp_node(const void *a, const void *b)
 {
 	const struct kof_flow_node *x = a, *y = b;
@@ -4892,16 +4865,48 @@ static uint8_t rel_va(struct kof_flow *f, uint64_t a, uint64_t b);
  * one span containing every address between, and that is not a loop around
  * this step.
  */
-static uint8_t loop_depth(const struct kof_flow *f, uint64_t va,
-			  uint64_t fn_lo, uint64_t fn_hi)
+/*
+ * BOTH LOOP QUESTIONS IN ONE SCAN OF f->loop.
+ *
+ * Building a chain asked two things of every step: WHICH loop encloses it
+ * (loop_of, so two steps can be said to repeat together) and WHETHER one of
+ * the enclosing loops belongs to the step's own function (the nesting that
+ * goes into depth). Each walked the whole loop table, and the emit path
+ * asked the first one four times for the same address - five linear scans
+ * per step, over a table that on a statically linked binary has thousands of
+ * rows. Measured: it was the whole cost of opening such a file.
+ *
+ * The two answers come off the same walk, so there is one.
+ *
+ * `inner` is the innermost span holding the address, as index plus one, or
+ * 0 - innermost, because two steps in the same inner loop are the same step
+ * repeated while two in the same outer loop may be a sequence that happens
+ * to run twice. The spans are intervals - see add_loop - so the shortest one
+ * containing the address is the innermost.
+ *
+ * `own` is whether any of them lies wholly within [fn_lo, fn_hi).
+ */
+static void loop_at(const struct kof_flow *f, uint64_t va, uint64_t fn_lo,
+		    uint64_t fn_hi, uint32_t *inner, uint8_t *own)
 {
-	uint32_t i;
+	uint32_t i, best = 0;
+	uint64_t len = 0;
+	uint8_t mine = 0;
 
-	for (i = 0; i < f->n_loop; i++)
-		if (va >= f->loop[i].lo && va <= f->loop[i].hi &&
-		    f->loop[i].lo >= fn_lo && f->loop[i].hi < fn_hi)
-			return 1u;
-	return 0u;
+	for (i = 0; i < f->n_loop; i++) {
+		if (va < f->loop[i].lo || va > f->loop[i].hi)
+			continue;
+		if (f->loop[i].lo >= fn_lo && f->loop[i].hi < fn_hi)
+			mine = 1u;
+		if (!best || f->loop[i].hi - f->loop[i].lo < len) {
+			best = i + 1u;
+			len = f->loop[i].hi - f->loop[i].lo;
+		}
+	}
+	if (inner)
+		*inner = best;
+	if (own)
+		*own = mine;
 }
 
 /* State carried down the walk, so the recursion stays a few words wide. */
@@ -4943,6 +4948,37 @@ static int seen_take(struct chain *ch, uint32_t fi)
 	return 1;
 }
 
+/*
+ * The first edge leaving function `fi`, by SEARCH and not by scan.
+ *
+ * finish() sorts the edge table on (from_func, site) - see cmp_edge - so a
+ * function's edges are one run and its start is a lower bound. This used to
+ * walk the table from zero until it met the right from_func, which is fine
+ * for a shellcode with forty edges and is not fine for a statically linked
+ * program: chain_walk is entered once per function and again for every
+ * callee it follows, so an O(edges) step inside it is O(functions x edges)
+ * over the file. MEASURED on a 5.7 MB static ELF, that one loop was 84% of
+ * the samples taken while opening it - 21 of 25 - and the whole reason the
+ * file was slow to open; decoding, by comparison, was two.
+ *
+ * Returns n_edge when the function has none, which is what the callers'
+ * `e < n_edge && edge[e].from_func == fi` guards already expect.
+ */
+static uint32_t edge_first(const struct kof_flow *f, uint32_t fi)
+{
+	uint32_t lo = 0, hi = f->n_edge;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (f->edge[mid].from_func < fi)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
 static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 {
 	const uint8_t was_in = ch->in;
@@ -4968,11 +5004,14 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 	prev = fn->n ? ch->f->node[fn->first].step : 0u;
 
 	/* The edges of this function, already grouped and in address order. */
-	for (e = 0; e < ch->f->n_edge && ch->f->edge[e].from_func != fi; e++)
-		;
+	e = edge_first(ch->f, fi);
 
 	for (j = 0; j < fn->n && ch->n < ch->cap; j++) {
 		const struct kof_flow_node *nd = &ch->f->node[fn->first + j];
+		uint64_t fn_hi = fi + 1u < ch->f->n_func
+			       ? ch->f->func[fi + 1u].va : UINT64_MAX;
+		uint32_t cur_loop = 0;
+		uint8_t cur_own = 0;
 
 		/* A thunk nobody called, or whose callers disagreed - see
 		 * KOF_FLOW_SEL_PENDING. It is a syscall that happened; what
@@ -4988,6 +5027,11 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 		if (nd->cap == KOF_CAP_NAME_HASH &&
 		    !(nd->flags & KOF_FLOWF_LOOP))
 			continue;
+		/* After the skips, so a step that is dropped pays nothing,
+		 * and before the merge test, which is its first reader. */
+		loop_at(ch->f, nd->va, fn->va, fn_hi,
+			(nd->flags & KOF_FLOWF_LOOP) ? &cur_loop : NULL,
+			&cur_own);
 
 		/* Everything called BEFORE this node belongs before it. */
 		while (depth && e < ch->f->n_edge &&
@@ -5085,9 +5129,10 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 		    ch->out[ch->n - 1u].sel == nd->sel &&
 		    (!(nd->flags & KOF_FLOWF_LOOP) ||
 		     !(ch->out[ch->n - 1u].flags & KOF_FLOWF_LOOP) ||
-		     (loop_of(ch->f, nd->va) &&
-		      loop_of(ch->f, nd->va) ==
-		      loop_of(ch->f, ch->out[ch->n - 1u].va)))) {
+		     /* The previous step's enclosing loop is already on it:
+		      * .loop is set below from this same answer, and the test
+		      * above has established it carried the flag. */
+		     (cur_loop && cur_loop == ch->out[ch->n - 1u].loop))) {
 			if (ch->out[ch->n - 1u].repeat < 0xffffu)
 				ch->out[ch->n - 1u].repeat++;
 			prev = nd->step;
@@ -5101,8 +5146,7 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 		 * See kof_flow_node.loop: the flag says a step repeats, this
 		 * says whether two of them repeat together.
 		 */
-		ch->out[ch->n].loop = (nd->flags & KOF_FLOWF_LOOP)
-				      ? (uint16_t)loop_of(ch->f, nd->va) : 0u;
+		ch->out[ch->n].loop = (uint16_t)cur_loop;
 		ch->out[ch->n].step = ch->run;
 		ch->out[ch->n].entry = ch->in;
 		/*
@@ -5112,10 +5156,8 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 		 * call nesting.
 		 */
 		{
-			uint64_t hi = fi + 1u < ch->f->n_func
-				    ? ch->f->func[fi + 1u].va : UINT64_MAX;
-			uint32_t d = (ch->top > depth ? ch->top - depth : 0u) +
-				     loop_depth(ch->f, nd->va, fn->va, hi);
+			uint32_t d = (ch->top > depth ? ch->top - depth : 0u)
+				     + cur_own;
 
 			ch->out[ch->n].depth = d > 255u ? 255u : (uint8_t)d;
 		}
