@@ -4990,6 +4990,69 @@ enum kunp_rcstruct_broken {
  * direction as a table of its own, with a comment admitting it was a second
  * copy that could only fail loudly once someone hit it.
  */
+/*
+ * WHICH PART OF THE ENGINE ANSWERED.
+ *
+ * A verdict says what a file is; this says what looked. They are different
+ * questions and they were the same word for a long time - a finding carried
+ * "Heur" where its type goes, which told a reader the answer came from a
+ * rule and left no room to say what the file actually was.
+ *
+ * ANALYZER is the parse and what is read off it - a section that is writable
+ * and executable, a segment past the end of the file. The three matchers are
+ * named for themselves. A finding carries exactly one: whichever reached it.
+ *
+ * One list, so the word a verdict prints and the value the engine stores
+ * cannot drift - the reason every other enum here is written this way.
+ */
+#define KOF_ENGINE_LIST(X)                                                   \
+	X(KOF_ENGINE_NONE,     "None")                                       \
+	X(KOF_ENGINE_ANALYZER, "Analyzer")  /* the parse and its anomalies */\
+	X(KOF_ENGINE_PATTERN,  "Pattern")   /* declared bytes and strings   */\
+	X(KOF_ENGINE_PLAGUE,   "Plague")    /* block similarity             */\
+	X(KOF_ENGINE_PATHOGEN, "Pathogen")  /* capability chains            */
+
+enum kof_engine_id {
+#define KOF_ENGINE_X_ENUM(name, word) name,
+	KOF_ENGINE_LIST(KOF_ENGINE_X_ENUM)
+#undef KOF_ENGINE_X_ENUM
+	KOF_ENGINE_COUNT
+};
+
+static inline const char *kof_engine_name(uint32_t v)
+{
+#define KOF_ENGINE_X_NAME(name, word) if (v == (uint32_t)(name)) return word;
+	KOF_ENGINE_LIST(KOF_ENGINE_X_NAME)
+#undef KOF_ENGINE_X_NAME
+	return "none";
+}
+
+/*
+ * HOW SURE THE ENGINE IS, which is a different axis from what it found and
+ * from what looked. It is the first field of a verdict name for that reason:
+ * a reader scanning a log sorts by it before anything else.
+ */
+#define KOF_VERDICT_LIST(X)                                                  \
+	X(KOF_VERDICT_CLEAN,     "Clean")                                    \
+	X(KOF_VERDICT_HEUR,      "Heur")                                     \
+	X(KOF_VERDICT_SUSPECTED, "Suspected")                                \
+	X(KOF_VERDICT_INFECTED,  "Infected")
+
+enum kof_verdict_id {
+#define KOF_VERDICT_X_ENUM(name, word) name,
+	KOF_VERDICT_LIST(KOF_VERDICT_X_ENUM)
+#undef KOF_VERDICT_X_ENUM
+	KOF_VERDICT_COUNT
+};
+
+static inline const char *kof_verdict_word(uint32_t v)
+{
+#define KOF_VERDICT_X_NAME(name, word) if (v == (uint32_t)(name)) return word;
+	KOF_VERDICT_LIST(KOF_VERDICT_X_NAME)
+#undef KOF_VERDICT_X_NAME
+	return "clean";
+}
+
 #define KOF_MALTYPE_LIST(X)                                                  \
 	X(KOF_MALTYPE_VIRUS,    "Virus")                                     \
 	X(KOF_MALTYPE_TROJAN,   "Trojan")    /* covers spyware */            \
@@ -5000,7 +5063,16 @@ enum kunp_rcstruct_broken {
 	X(KOF_MALTYPE_ADWARE,   "Adware")                                    \
 	X(KOF_MALTYPE_EXPLOIT,  "Exploit")                                   \
 	X(KOF_MALTYPE_DROPPER,  "Dropper")   /* covers downloader */         \
-	X(KOF_MALTYPE_HACKTOOL, "Hacktool")
+	X(KOF_MALTYPE_HACKTOOL, "Hacktool")                                  \
+	/*
+	 * NOT A KIND OF MALWARE, which is why it is last and why no
+	 * signature should ever declare it: it is what the ANOMALY model
+	 * reports, and that model says a file's structure is odd, not that
+	 * the file does anything. It sits in this list because a verdict
+	 * needs a word where a type goes and "odd structure" is the honest
+	 * one - see kof_verdict_name.
+	 */                                                                  \
+	X(KOF_MALTYPE_ANOMALY,  "Anomalies")
 
 enum kof_maltype {
 #define KOF_MALTYPE_X_ENUM(name, word) name,
@@ -5051,6 +5123,41 @@ static inline int kof_maltype_from_name(const char *s, int *out)
 	if (kof_streq_(s, #name)) { *out = (int)(name); return 1; }
 	KOF_MALTYPE_LIST(KOF_MALTYPE_X_FROM)
 #undef KOF_MALTYPE_X_FROM
+	return 0;
+}
+
+/* Case-insensitive, ASCII only - this reads identifiers and file names. */
+static inline int kof_strieq_(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++) {
+		int x = *a, y = *b;
+
+		if (x >= 'A' && x <= 'Z') x += 32;
+		if (y >= 'A' && y <= 'Z') y += 32;
+		if (x != y)
+			return 0;
+	}
+	return *a == *b;
+}
+
+/*
+ * THE SAME ENUM FROM ITS DISPLAY WORD - "virus", "Trojan", "MINER".
+ *
+ * The sibling above reads the IDENTIFIER, which is what a signature source
+ * writes. This reads the WORD, which is what a file NAME carries: a
+ * signature is stored as <type>_<family>_<nn>.c, and the build derives the
+ * target from that rather than making the author write it twice in two
+ * spellings that can disagree.
+ *
+ * Over the same list, so adding a type adds it to both and to the name a
+ * finding prints, which is the whole reason KOF_MALTYPE_LIST exists.
+ */
+static inline int kof_maltype_from_word(const char *s, int *out)
+{
+#define KOF_MALTYPE_X_WORD(name, word)                                       \
+	if (kof_strieq_(s, word)) { *out = (int)(name); return 1; }
+	KOF_MALTYPE_LIST(KOF_MALTYPE_X_WORD)
+#undef KOF_MALTYPE_X_WORD
 	return 0;
 }
 

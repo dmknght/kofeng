@@ -223,6 +223,9 @@ struct kof_finding {
 	 * guesses the object is.
 	 */
 	struct kof_name_span target, maltype, family, variant, shape;
+	/* The optional tail of the formula: why, for a finding that has a
+	 * why to give. Empty for the ones that do not. */
+	struct kof_name_span reason;
 
 	/*
 	 * WHAT A SIMILARITY VERDICT MEASURED, AS A NUMBER.
@@ -245,6 +248,62 @@ struct kof_finding {
 	uint8_t  sim_pct;
 	uint8_t  sim_kind;          /* enum kof_sim_kind */
 	uint32_t sim_of;
+
+	/*
+	 * IS THIS THE SUBJECT'S VERDICT, or one of the things that led to it.
+	 *
+	 * A subject - a file, or one member of an archive - gets ONE verdict,
+	 * and the engine keeps it in one place; see kof_scanner.verdict. The
+	 * findings array still holds everything that fired, because an
+	 * examiner wants to see the working, and this bit says which of them
+	 * the scan is actually reporting.
+	 *
+	 * WHY IT IS A BIT AND NOT A FILTER. Dropping the others would make
+	 * the array lie about what matched, and the note above
+	 * KOF_MAX_FINDINGS is there because that has been tried: two families
+	 * can match one object and keeping only one silently loses the other.
+	 * Nothing is lost here - a reader that wants the verdict reads this,
+	 * a reader that wants the evidence reads the array.
+	 *
+	 * Set when the finding took the slot. A later, stronger finding takes
+	 * it in turn, and the earlier object has already been reported by
+	 * then - which is what streaming output means and not a defect in the
+	 * slot.
+	 */
+	uint8_t  is_verdict;
+
+	/*
+	 * ---- WHAT THE ENGINE STORES, AS VALUES ---------------------------
+	 *
+	 * The name above is a STRING, and a string is a decoded thing: it
+	 * has a word order, separators and spellings, and every one of those
+	 * is a presentation decision that does not belong in a result. These
+	 * are the facts behind it, each an enum, and kof_verdict_text is the
+	 * one place that turns them into the line a person reads.
+	 *
+	 * `name` is still here and still filled - by that same function, so
+	 * there is one spelling and not two. A reader that wants the line
+	 * takes it; a reader that wants to GROUP or FILTER takes these and
+	 * does not parse anything.
+	 *
+	 * `family`, `variant` and `reason` stay as spans into `name`. They
+	 * are not enums and cannot be: a family is a word a researcher
+	 * chose, and the anomaly model's and plague's are computed per
+	 * object. What is enumerable is enumerated.
+	 */
+	uint8_t  verdict;        /* enum kof_verdict_id - how sure      */
+	uint8_t  engine;         /* enum kof_engine_id  - what looked   */
+	uint8_t  type;           /* enum kof_maltype    - what it is    */
+	uint8_t  fmt;            /* enum kof_format     - of the object */
+	uint8_t  arch;           /* enum kof_arch                       */
+	/*
+	 * The type is not always one of enum kof_maltype: a rule that
+	 * recognised a shape has not established a class, and the anomaly
+	 * model never does. This says so, rather than a sentinel inside the
+	 * type - KOF_MALTYPE_VIRUS is 0 and "nothing declared" must not read
+	 * as "virus".
+	 */
+	uint8_t  type_known;
 };
 
 /* Which measure a finding's sim_pct came from. */
@@ -685,6 +744,31 @@ void kverdict_name(struct kof_finding *f, const char *target,
 		      const char *variant, const char *shape);
 
 /*
+ * GET THE VERDICT NAME: the one place the standard form is written.
+ *
+ *     <verdict>#<target>-<arch>/<Type>:<Family>.<variant>!<engine>?<reason>
+ *
+ *     Infected#PE-x86/Virus:Sality.01!Pattern
+ *     Heur#PE-x86/Anomalies:WriteExec!Analyzer
+ *
+ * EVERY FIELD IS OPTIONAL EXCEPT THE TYPE AND THE FAMILY, and an absent one
+ * takes its separator with it - a trailing `#` or a bare `?` would read as a
+ * field the engine failed to fill rather than one it had nothing to say in.
+ *
+ * WHY A FUNCTION AND NOT A CONVENTION. The order, the separators and the
+ * words were decided in five places in scan.c, each composing the string it
+ * needed; a sixth would have decided again. The engine now stores VALUES -
+ * see the enums on kof_finding - and this is the only code that knows how
+ * they are written down. Change the form here and every reader changes with
+ * it, including the ones in other programs.
+ *
+ * Writes into `f->name` and sets the spans, so a caller that wants a part
+ * rather than the line does not search for a separator this just placed.
+ */
+void kof_verdict_name(struct kof_finding *f, const char *family,
+		      const char *variant, const char *reason);
+
+/*
  * The target word a finding is scoped to: "ELF-x64", or "ELF" when the object
  * has no architecture to speak of.
  *
@@ -1096,6 +1180,31 @@ typedef int (*kof_on_object)(const char *name, const void *bytes, uint64_t len,
 			     const struct kof_result *res, void *user);
 
 /*
+ * A VERDICT WAS REACHED. Called once per verdict, with it already decoded.
+ *
+ * This exists because the alternative was every host walking the findings
+ * array and deciding which entries count - and that decision is the
+ * ENGINE'S. A scanner is an interface: it takes what the user asked for and
+ * shows what the engine answered. The moment it filters findings it is
+ * deciding what a scan reports, and the next tool decides differently.
+ *
+ * `verdict` is the composed line, through kof_verdict_name, so a host never
+ * assembles one and two hosts cannot assemble it differently. `f` is behind
+ * it for a host that wants the parts as values rather than as text - the
+ * enums on kof_finding - and `object` is where it was found, which is the
+ * object's name and not the file's.
+ *
+ * WHEN IT FIRES. Once per finding the engine is reporting: one per subject
+ * normally, and once per match when the caller asked for all of them. A
+ * finding that fired and was superseded does not reach here; it is still in
+ * kof_result for an examiner that wants to see the working.
+ */
+typedef void (*kof_on_event_detected)(const char *object,
+				      const char *verdict,
+				      const struct kof_finding *f,
+				      void *user);
+
+/*
  * How a scan is allowed to spread, and how thorough it has to be.
  *
  * Data, and passed per scan rather than set on the engine: a limit is the caller's
@@ -1133,6 +1242,13 @@ enum kof_emu_use {
 #define KOF_HEUR_LEVEL_MAX 2u
 
 struct kof_scan_option {
+	/*
+	 * Where a verdict goes when the engine reaches one - see
+	 * kof_on_event_detected. NULL for a caller that only wants the results.
+	 */
+	kof_on_event_detected on_event_detected;
+	void                 *event_user;
+
 	int      recurse_dirs;     /* descend into directories */
 	/*
 	 * HOW DEEP INTO DIRECTORIES, and that is now all it means.

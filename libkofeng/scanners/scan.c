@@ -877,6 +877,84 @@ void kverdict_name(struct kof_finding *f, const char *target,
 }
 
 /*
+ * GET THE VERDICT NAME - see kofeng.h for the form and why it lives here.
+ *
+ * Written once, forward, so every span falls out of the writing. The fields
+ * it reads are the enums on the finding; the three it is handed are the ones
+ * that cannot be enums - a family a researcher chose, a variant, and a
+ * reason some findings have and most do not.
+ */
+void kof_verdict_name(struct kof_finding *f, const char *family,
+		      const char *variant, const char *reason)
+{
+	char tgt[32];
+	size_t at = 0;
+
+	if (!f)
+		return;
+	f->target.at = f->target.n = 0;
+	f->maltype = f->family = f->variant = f->shape = f->reason = f->target;
+
+	/*
+	 * How sure, first, because that is what a reader sorts a log by. No
+	 * span: the word is kof_verdict_word(f->verdict) and a caller that
+	 * wants it has the value, so recording where it landed would be a
+	 * second copy of a fact that cannot drift from itself.
+	 */
+	span_put(f, &f->target, &at, kof_verdict_word(f->verdict));
+	f->target.at = f->target.n = 0;
+	/*
+	 * A HASH HERE AND A BANG LATER, and the reason is typographic
+	 * rather than semantic: '#' is the wider glyph, so it makes the
+	 * stronger break, and the strongest break in this name is between
+	 * how sure the engine is and everything else. What follows -
+	 * family, variant, engine - is one run about one thing, and the
+	 * narrow '!' keeps it reading as a run.
+	 */
+	sep_put(f, &at, '#');
+
+	kverdict_target(tgt, sizeof tgt, f->fmt, f->arch);
+	if (tgt[0]) {
+		span_put(f, &f->target, &at, tgt);
+		sep_put(f, &at, '/');
+	}
+
+	/*
+	 * WHAT IT IS. A rule that recognised a shape has not established a
+	 * class and says so - `type_known` is 0 - and then the word is the
+	 * one the vocabulary already has for "a rule, not a signature".
+	 * Writing a maltype there would be claiming something nobody did.
+	 */
+	span_put(f, &f->maltype, &at,
+		 f->type_known ? kof_maltype_name(f->type) : "Heur");
+	sep_put(f, &at, ':');
+	span_put(f, &f->family, &at, family);
+
+	if (variant && variant[0]) {
+		/*
+		 * A DOT, because a variant is part of the family's name and
+		 * not a mark against it: "Mirai.01" reads as one name with a
+		 * generation, where "Mirai!01" reads as two things stuck
+		 * together.
+		 */
+		sep_put(f, &at, '.');
+		span_put(f, &f->variant, &at, variant);
+	}
+	if (f->engine != (uint8_t)KOF_ENGINE_NONE) {
+		/* Attached, not separated: how it was found is an addition
+		 * to the name above it, not a new field of equal weight. */
+		sep_put(f, &at, '!');
+		span_put(f, &f->shape, &at, kof_engine_name(f->engine));
+	}
+	if (reason && reason[0]) {
+		sep_put(f, &at, '?');
+		span_put(f, &f->reason, &at, reason);
+	}
+	f->name[at] = 0;
+}
+
+
+/*
  * "ELF-x64", or "ELF" when there is no architecture to name.
  *
  * An object with no architecture - a script, or one nothing identified - gets
@@ -892,26 +970,106 @@ void kverdict_target(char *out, size_t cap, uint8_t format, uint8_t arch)
 		snprintf(out, cap, "%s-%s", fmt, kof_arch_name(arch));
 }
 
+/*
+ * TAKE A FINDING INTO THE FILE'S ONE VERDICT SLOT - see kof_scanner.verdict.
+ *
+ * Returns 1 when the slot now holds this finding, 0 when it was kept out by
+ * one that outranks it. The caller still has the finding in the object's own
+ * array either way: the array is how an EXAMINER sees everything that fired,
+ * and the slot is what a scan REPORTS. Two different questions, and losing
+ * the first to answer the second is what the note above KOF_MAX_FINDINGS
+ * warns against.
+ */
+static int verdict_take(struct kof_scanner *sc, const struct kof_finding *f,
+			int all_matches)
+{
+	int rank, have;
+
+	if (!sc || !f)
+		return 0;
+	rank = kverdict_level_rank(f->level);
+	have = sc->verdict_have ? kverdict_level_rank(sc->verdict_lvl) : -1;
+	/*
+	 * ALL MATCHES MEANS EVERY FINDING IS REPORTED, and the engine says
+	 * so here rather than leaving a host to work it out.
+	 *
+	 * The alternative was a host that skipped findings the engine had
+	 * not marked unless the user had passed a flag - which puts the
+	 * rule "what does a scan report" in the tool, where a second tool
+	 * will write it differently. A scanner takes what the user asked
+	 * for and prints what the engine answered; deciding which findings
+	 * count is not its question.
+	 *
+	 * The slot still tracks the strongest, because a FILE's verdict is
+	 * one thing even when every finding is listed.
+	 */
+	if (all_matches) {
+		if (have <= rank) {
+			sc->verdict      = *f;
+			sc->verdict_lvl  = f->level;
+			sc->verdict_have = 1;
+		}
+		return 1;
+	}
+	/* Equal rank keeps the first: whichever matcher the engine reached
+	 * first is the one that answered. */
+	if (have >= rank)
+		return 0;
+	sc->verdict      = *f;
+	sc->verdict_lvl  = f->level;
+	sc->verdict_have = 1;
+	return 1;
+}
+
+/*
+ * THE VALUES BEHIND A VERDICT, filled in one place so that no call site has
+ * to know the form - see kof_verdict_name.
+ *
+ * `cls` is the module's declared class, and `family_off` is what proves it
+ * was declared: KOF_MALTYPE_VIRUS is 0, so a module that said nothing has a
+ * maltype that reads as "Virus", and absence must not become a claim.
+ */
+static void verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx,
+			 const struct kof_module *m, uint32_t engine)
+{
+	f->fmt    = ctx ? ctx->format : 0u;
+	f->arch   = ctx ? ctx->arch : 0u;
+	f->engine = (uint8_t)engine;
+	f->verdict = (uint8_t)(f->level == KOF_LEVEL_INFECT
+			       ? KOF_VERDICT_INFECTED
+			       : f->level == KOF_LEVEL_SUSPECT
+				 ? KOF_VERDICT_SUSPECTED
+				 : KOF_VERDICT_HEUR);
+	f->type = 0;
+	f->type_known = 0;
+	if (m && m->kind == KOF_PACK_HEUR) {
+		/*
+		 * A RULE READS THE PARSE, whatever the caller was doing when
+		 * it fired, and the only thing it may claim is a TYPE - see
+		 * KOF_HEUR_SCAN_CLASS. It has no family of its own: the
+		 * build tool refuses KOF_TARGET_NAME on a rule, because a
+		 * shape many programs share cannot name one program.
+		 */
+		f->engine = (uint8_t)KOF_ENGINE_ANALYZER;
+		if (KOF_ENG_CLASS_OF(m->heur_want)) {
+			f->type = (uint8_t)(KOF_ENG_CLASS_OF(m->heur_want)
+					    - 1u);
+			f->type_known = 1;
+		}
+	} else if (m && m->family_off) {
+		f->type = (uint8_t)m->maltype;
+		f->type_known = 1;
+	}
+}
+
 static void finding_str(const struct kof_scanner *sc,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_module *m, struct kof_finding *f)
 {
 	const char *variant = kof_db_name(sc->eng, m, sc->rep_name_id);
 	const char *family  = kof_db_family(sc->eng, m);
-	/*
-	 * "Heur" where a maltype would be, for a rule.
-	 *
-	 * A maltype is a claim about what something DOES - trojan, rootkit,
-	 * miner - and a rule has not established one. Writing the word here
-	 * rather than adding it to the maltype enum keeps it out of the
-	 * vocabulary a signature chooses from, which is what stops a signature
-	 * from ever being able to claim it.
-	 */
-	const char *maltype = m->kind == KOF_PACK_HEUR
-			      ? "Heur" : kof_maltype_name(m->maltype);
-	char fmtarch[32];
-
-	kverdict_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
+	/* The target word, the type word and the order they go in are
+	 * kof_verdict_name's now - see the note there. */
 	/*
 	 * A SIMILARITY VERDICT CARRIES ITS SCORE AND SAYS WHAT IT IS.
 	 *
@@ -977,9 +1135,9 @@ static void finding_str(const struct kof_scanner *sc,
 		f->sim_of = kof_plague_name_of(sc->plague_blk,
 					       sc->n_plague_blk);
 		snprintf(sv, sizeof sv, "%08x", f->sim_of);
-		snprintf(shape, sizeof shape, "Plague?%u", pct);
-		kverdict_name(f, fmtarch, maltype,
-				 (family && family[0]) ? family : "unknown",
+		snprintf(shape, sizeof shape, "%u", pct);
+		verdict_vals(f, ctx, m, KOF_ENGINE_PLAGUE);
+		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
 				 sv, shape);
 		return;
 	}
@@ -1003,15 +1161,15 @@ static void finding_str(const struct kof_scanner *sc,
 		f->sim_pct = (uint8_t)(sc->ovl_pct > 100u ? 100u
 							  : sc->ovl_pct);
 		f->sim_kind = (uint8_t)KOF_SIM_OVERLORD;
-		snprintf(shape, sizeof shape, "Ovl?%u", sc->ovl_pct);
-		kverdict_name(f, fmtarch, maltype,
-				 (family && family[0]) ? family : "unknown",
-				 variant ? variant : "unknown", shape);
+		snprintf(shape, sizeof shape, "%u", sc->ovl_pct);
+		verdict_vals(f, ctx, m, KOF_ENGINE_PATHOGEN);
+		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
+				 variant, shape);
 		return;
 	}
-	kverdict_name(f, fmtarch, maltype,
-			 (family && family[0]) ? family : "unknown",
-			 variant ? variant : "unknown", NULL);
+	verdict_vals(f, ctx, m, KOF_ENGINE_PATTERN);
+	kof_verdict_name(f, (family && family[0]) ? family : "unknown",
+			 variant, NULL);
 }
 
 /* ---- identify -------------------------------------------------------------- */
@@ -1324,8 +1482,39 @@ static const struct kof_module *kof_scan_derived_by(const struct kof_scanner *sc
 static int unp_eligible(const struct kof_scanner *sc,
 			const struct kof_module *m,
 			const struct kof_obj_ctx *ctx,
-			const struct kof_scan_option *opt)
+			const struct kof_scan_option *opt,
+			uint32_t want)
 {
+	/*
+	 * A RULE SAID WHAT CLASS THIS IS, SO ONLY THE MODULES THAT KNOW THAT
+	 * CLASS ARE ASKED - see KOF_HEUR_SCAN_CLASS.
+	 *
+	 * The narrowing is here and not at the call sites because there are
+	 * two loops over the same modules and a test written twice is a test
+	 * that will disagree with itself.
+	 *
+	 * WHAT IS DROPPED IS A MODULE THAT NAMED A DIFFERENT CLASS, and
+	 * nothing else. The first version of this kept only the modules that
+	 * declared a virus family, and that threw out the PACKERS with
+	 * everything else - which is wrong, because an infected file is
+	 * routinely packed as well, and the body the virus modules are
+	 * looking for is underneath. A packer is generic machinery: it
+	 * declares no family, so it is not a competing answer to "which
+	 * malware is this" and there is nothing to narrow away.
+	 *
+	 * THE FAMILY IS THE TEST AND THE TYPE CANNOT BE.
+	 * KOF_MALTYPE_VIRUS is the first entry of its enum and therefore
+	 * zero, so a module that declared nothing has a maltype that reads
+	 * as "Virus". Keying on family_off makes "declared nothing" mean
+	 * exactly that - which is the distinction `Virus:unknown#unknown`
+	 * was printed for want of.
+	 */
+	{
+		uint32_t cls = KOF_ENG_CLASS_OF(want);
+
+		if (cls && m->family_off && m->maltype != cls - 1u)
+			return 0;
+	}
 	/*
 	 * KOF_EMU_ONLY replaces the packer modules and only those. A container
 	 * still has to be opened by the code that knows its format - there is
@@ -1644,7 +1833,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
 			const struct kof_module *m = &sc->eng->unp[i];
 
-			if (!unp_eligible(sc, m, ctx, opt) ||
+			if (!unp_eligible(sc, m, ctx, opt, want) ||
 			    !unp_is_family(sc, m, predict))
 				continue;
 			applies = 1;
@@ -1652,6 +1841,19 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				need_multi(sc, ctx);
 			if (m->n_block)
 				need_plague(sc, ctx);
+			/*
+			 * WHAT THIS MODULE REPORTED, AND NOT WHAT THE LAST
+			 * ONE DID.
+			 *
+			 * The detector loop clears this before every module
+			 * and says why; these two loops did not, so a report
+			 * left behind by an earlier module was composed with
+			 * the NEXT one's identity. Measured on 007 Spy.exe:
+			 * `PE-x86/Virus:unknown#unknown`, credited to
+			 * unp/aspack_pe.c - a module that contains no report
+			 * at all and declares no target name.
+			 */
+			sc->rep_valid = 0;
 			sc->cur_mod = m;
 			{
 				uint32_t k0 = sc->n_kids;
@@ -1689,6 +1891,9 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 					f->level = sc->rep_level;
 					finding_str(sc, ctx, m, f);
+					f->is_verdict = (uint8_t)
+						verdict_take(sc, f,
+							opt->all_matches);
 				} else {
 					res->dropped++;
 				}
@@ -1755,7 +1960,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 		if ((m->unp_kind == KOF_UNP_CARVE) != carve_round)
 			continue;
-		if (!unp_eligible(sc, m, ctx, opt))
+		if (!unp_eligible(sc, m, ctx, opt, want))
 			continue;
 		/* Skip what the family pass already tried. Guarded on `predict`
 		 * so the resolve-and-compare is not paid on the overwhelming
@@ -1787,6 +1992,8 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			need_multi(sc, ctx);
 		if (m->n_block)
 			need_plague(sc, ctx);
+		/* Same reset, same reason - see the loop above. */
+		sc->rep_valid = 0;
 		sc->cur_mod = m;
 		{
 			uint32_t k0 = sc->n_kids;
@@ -1804,6 +2011,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 				f->level = sc->rep_level;
 				finding_str(sc, ctx, m, f);
+				f->is_verdict = (uint8_t)verdict_take(sc, f, opt->all_matches);
 			} else {
 				res->dropped++;
 			}
@@ -2245,13 +2453,37 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	 * object scored either way. What is suppressed is the second verdict,
 	 * not the second fact.
 	 */
-	{
-		uint32_t k;
-
-		for (k = 0; k < out->n; k++)
-			if (out->v[k].level != KOF_LEVEL_HEUR)
-				return;
-	}
+	/*
+	 * AND IT YIELDS TO A RULE TOO, not only to a named detection.
+	 *
+	 * The test was "some finding at a level other than HEUR", written
+	 * when this model was the only thing producing a HEUR finding. A
+	 * rule in bases/heur reports at the same level, so the model did not
+	 * yield to one - and an object came back with both
+	 * `Heur:Infected`, which is a rule concluding the file is infected,
+	 * and `Anomaly:WriteExec`, which is the structural reason to suspect
+	 * it. The second is how you get to the first; printing both states
+	 * the evidence and the conclusion as two findings.
+	 *
+	 * So: anything that already named this object wins. This model
+	 * exists for the objects nothing else had a word for.
+	 */
+	if (out->n)
+		return;
+	/*
+	 * AND IT STAYS SILENT ON AN OBJECT THAT OPENED.
+	 *
+	 * The same condition the drop above uses, for the same reason: this
+	 * object is a wrapper and what is worth naming is what came out of
+	 * it. Without this the model filled the hole the drop had just made
+	 * - a rule fired on the parent, its finding MOVED to the child, and
+	 * the model then wrote its own structural note where the rule's
+	 * finding had been. 007 Spy.exe reported `Anomaly:WriteExec` on the
+	 * file and `Heur:Infected` on its child, which is the evidence and
+	 * the conclusion printed as two findings about one file.
+	 */
+	if (sc->n_kids > sc->n_views + sc->n_carved)
+		return;
 
 	{
 		struct kof_finding *fi = &out->v[out->n++];
@@ -2274,7 +2506,37 @@ static void heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		 */
 		kverdict_target(fmtarch, sizeof fmtarch, ctx->format, ctx->arch);
 		snprintf(sv, sizeof sv, "s%d", score);
-		kverdict_name(fi, fmtarch, "Heur", guess, sv, NULL);
+		/*
+		 * "Anomaly" AND NOT "Heur", because the two are not the same
+		 * kind of statement and shared a word.
+		 *
+		 * A rule in bases/heur recognises a BEHAVIOUR - this writes
+		 * and then executes, this loads shellcode - and `Heur` says
+		 * "a rule, not a signature". What reaches here is the
+		 * statistical model over PARSE ANOMALIES: a section that is
+		 * writable and executable, a segment past the end of the
+		 * file. That is a fact about the file's structure and a
+		 * reason to look, not a claim that the file does anything.
+		 *
+		 * Printed under one word they read as the same finding at the
+		 * same confidence, and `Heur:Truncated` - a file that is cut
+		 * short - sat beside `Heur:Infected`, which is a conclusion.
+		 * The LEVEL stays KOF_LEVEL_HEUR: how sure, which is the same
+		 * question for both. What differs is what is being claimed.
+		 */
+		/*
+		 * Anomalies is where a type goes because that is what this
+		 * found - a structure, not a behaviour. The family is which
+		 * anomaly weighed most; the engine is the parse.
+		 */
+		fi->type = (uint8_t)KOF_MALTYPE_ANOMALY;
+		fi->type_known = 1;
+		fi->fmt = ctx->format;
+		fi->arch = ctx->arch;
+		fi->engine = (uint8_t)KOF_ENGINE_ANALYZER;
+		fi->verdict = (uint8_t)KOF_VERDICT_HEUR;
+		kof_verdict_name(fi, guess, sv, NULL);
+		fi->is_verdict = (uint8_t)verdict_take(sc, fi, opt->all_matches);
 	}
 }
 
@@ -2440,12 +2702,24 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 				kverdict_target(fmtarch, sizeof fmtarch,
 						ctx->format, ctx->arch);
-				kverdict_name(f, fmtarch, "Heur", pf,
-						 variant ? variant : "unknown",
-						 shape);
+				verdict_vals(f, ctx, m, KOF_ENGINE_ANALYZER);
+				/*
+				 * A rule may predict the TYPE - see
+				 * KOF_HEUR_SCAN_CLASS - and that is the only
+				 * thing it may predict; the family it
+				 * recognised goes where a family goes.
+				 */
+				if (KOF_ENG_CLASS_OF(m->heur_want)) {
+					f->type = (uint8_t)
+						(KOF_ENG_CLASS_OF(m->heur_want)
+						 - 1u);
+					f->type_known = 1;
+				}
+				kof_verdict_name(f, pf, variant, shape);
 			} else {
 				finding_str(sc, ctx, m, f);
 			}
+			f->is_verdict = (uint8_t)verdict_take(sc, f, opt->all_matches);
 		} else {
 			out->dropped++;
 		}
@@ -3704,6 +3978,10 @@ struct analyze_arg {
 	 * which has no word for it yet. Until it does, only a detector counts.
 	 */
 	uint32_t                         det_n;
+	/* A rule said its finding is a conclusion - see KOF_ENG_CONCLUDE.
+	 * Kept apart from det_n because the two are different claims and the
+	 * note on det_n is a measurement about detectors only. */
+	int                              concluded;
 };
 
 static void step_open(struct analyze_arg *a)
@@ -3761,6 +4039,31 @@ static void analyze_object(struct analyze_arg *a)
 		 * finding has said that the first one is not the answer.
 		 */
 		if (a->det_n && !a->opt->all_matches)
+			return;
+		/*
+		 * A RULE THAT REACHED A VERDICT STOPS THE CHAIN, exactly as a
+		 * detector's verdict does above.
+		 *
+		 * This was scoped to the NORMZ step for one revision, on the
+		 * argument that a conclusion only makes RE-READING pointless
+		 * and unwrapping is still worth doing. That is a patch and
+		 * not a rule: the engine's flow is "a verdict ends the
+		 * search", and a finding that claims the file is malware
+		 * while the search continues produces a result that
+		 * contradicts the verdict it just gave.
+		 *
+		 * SO A RULE CHOOSES. One that has decided declares
+		 * KOF_ENG_CONCLUDE and interrupts; one that is surveying -
+		 * "this looks like a loader", "this has something appended" -
+		 * declares nothing and the chain runs on. The two are
+		 * different kinds of statement and the rule author is who
+		 * knows which one was made.
+		 *
+		 * all_matches overrides it, for the reason it overrides the
+		 * detector stop: that caller said the first answer is not the
+		 * answer.
+		 */
+		if (a->concluded && !a->opt->all_matches)
 			return;
 
 		analyze_steps[i].run(a);
@@ -4125,6 +4428,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			struct kof_finding *f = &out->v[out->n++];
 			f->level = sc->rep_level;
 			finding_str(sc, &ctx, m, f);
+			/* The subject's one verdict - see
+			 * kof_scanner.verdict. Every site that makes a
+			 * finding offers it; a site that forgets makes a
+			 * finding nothing reports, which is what this one
+			 * did to every signature detection. */
+			f->is_verdict = (uint8_t)verdict_take(sc, f,
+							opt->all_matches);
 		} else {
 			out->dropped++;
 		}
@@ -4184,6 +4494,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		a.buf = buf; a.pdepth = pdepth; a.want = want;
 		a.predict = predict;
 		a.det_n = det_n;
+		a.concluded = (want & (uint32_t)KOF_ENG_CONCLUDE) ? 1 : 0;
 		analyze_object(&a);
 	}
 	/*
@@ -4270,6 +4581,35 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			if (out->v[r].level != KOF_LEVEL_HEUR ||
 			    (keep & (1u << r)))
 				out->v[w++] = out->v[r];
+			else if (out->v[r].is_verdict && sc->verdict_have &&
+				 out->v[r].level == sc->verdict_lvl &&
+				 !strcmp(out->v[r].name, sc->verdict.name)) {
+				/*
+				 * AND THE SLOT GOES WITH IT - but only if it
+				 * is still the one in the slot.
+				 *
+				 * This finding MOVES to the leaf, and it had
+				 * already been taken into the subject's one
+				 * verdict slot; a slot holding a finding
+				 * nobody reports is a subject with no verdict
+				 * at all. Measured: 007 Spy.exe reported
+				 * nothing, because the rule fired on the
+				 * parent, took the slot, was dropped, and the
+				 * identical finding at the leaf was then
+				 * refused for equal rank.
+				 *
+				 * `is_verdict` SAYS IT TOOK THE SLOT ONCE,
+				 * NOT THAT IT STILL HOLDS IT. On the Sality
+				 * samples the rule takes it, the unpacker
+				 * then takes it with `Virus:Sality#Body`, and
+				 * clearing on the stale bit threw the named
+				 * verdict away - the file came back with the
+				 * shape that led to it instead. So the slot
+				 * is compared before it is given up.
+				 */
+				sc->verdict_have = 0;
+				sc->verdict_lvl  = 0;
+			}
 		out->n = w;
 	}
 
@@ -4528,6 +4868,11 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	char *name = kof_strdup_n(path, strlen(path));
 	uint32_t depth = 0, pdepth = 0;
 	int from_packer = 0;            /* the root came off the disk */
+
+	/* The root begins a scope - see the reset beside scan_object below,
+	 * which is where the rule is stated. */
+	w->sc->verdict_have = 0;
+	w->sc->verdict_lvl  = 0;
 	/* What the producer of the object in hand declared it needs. Zero for a
 	 * root, which nothing produced. */
 	uint32_t want_decl = 0, want_decl_level = 0;
@@ -4602,6 +4947,37 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 			w->sc->xw[q].len = xw_decl[q][1];
 		}
 		w->sc->cur_derived_by = derived_by;
+		/*
+		 * A NEW SUBJECT BEGINS A NEW VERDICT - see
+		 * kof_scanner.verdict.
+		 *
+		 * The slot holds one name for one subject, and the question
+		 * is where a subject ends. NOT at the file: an object that
+		 * came out of a PACKER is the same program decoded, and so
+		 * is the normalised view of that - representations, which is
+		 * why they share the parent's name rather than each earning
+		 * one.
+		 *
+		 * A CONTAINER'S MEMBER IS NOT A REPRESENTATION. Ten files in
+		 * an archive are ten subjects; carrying one member's verdict
+		 * into the next would name a clean file after the infected
+		 * one beside it, which is the worst thing this slot could do.
+		 *
+		 * `from_packer` draws most of that line - it is set for what
+		 * a packer produced and clear for a root and for a
+		 * container's members - but NOT ALL OF IT: a normalised view
+		 * has no packer behind it either, and it is the purest
+		 * representation there is, the same bytes re-laid-out so a
+		 * rule can read them. Clearing the slot for one let the view
+		 * take a verdict its own parent already held, which is the
+		 * duplicate this whole slot exists to remove.
+		 *
+		 * So: a root or a container's member, and not a view.
+		 */
+		if (!from_packer && !kof_src_is_view(src)) {
+			w->sc->verdict_have = 0;
+			w->sc->verdict_lvl  = 0;
+		}
 		scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
 			    from_packer, inherit, kof_src_fmt_of(src));
 		w->sc->cur_src = NULL;
@@ -4675,6 +5051,23 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 			 * and that is checked here rather than trusted to
 			 * every module.
 			 */
+			/*
+			 * THE VERDICTS FIRST, each already composed - see
+			 * kof_on_event_detected. The engine says which findings it
+			 * is reporting and hands them over decoded, so a
+			 * host never walks the array deciding for itself.
+			 */
+			if (w->opt->on_event_detected && name &&
+			    !(w->sc->superseded && depth)) {
+				uint32_t q;
+
+				for (q = 0; q < res.n; q++)
+					if (res.v[q].is_verdict)
+						w->opt->on_event_detected(name,
+							res.v[q].name,
+							&res.v[q],
+							w->opt->event_user);
+			}
 			if (w->cb && name && !(w->sc->superseded && depth) &&
 			    w->cb(name, ob.p, ob.n, &res, w->user) != 0)
 				w->aborted = 1;

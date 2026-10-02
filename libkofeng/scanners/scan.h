@@ -790,6 +790,35 @@ struct kof_scanner {
 	/* Whether the object being scanned is a rendering - see
 	 * kof_src_declare_view. */
 	uint8_t               cur_is_view;
+
+	/*
+	 * ---- THE ONE PLACE A FILE'S VERDICT IS KEPT ----------------------
+	 *
+	 * One file, one verdict. The findings array is per OBJECT, and a
+	 * file is many objects: itself, what unpacked out of it, the
+	 * normalised view of that. Those are REPRESENTATIONS of the same
+	 * bytes, not separate things that are infected, and printing one
+	 * line each said `Heur:Infected` twice for one program.
+	 *
+	 * So the name belongs to the file, and the representations share it
+	 * - which is also why the variant is the parent's: a child is the
+	 * same sample decoded, and naming it separately would be naming the
+	 * engine's own steps.
+	 *
+	 * HOW IT IS REPLACED. By rank, kverdict_level_rank: a named
+	 * detection beats a rule's guess, so `Virus:Sality#Body` takes the
+	 * slot a `Heur:Infected` was holding. EQUAL RANK KEEPS THE FIRST -
+	 * whichever matcher the engine happened to reach first is the one
+	 * that answered, and that is a question about call order rather
+	 * than about naming. Under all_matches there is no interrupt, so
+	 * the later one overwrites and the caller gets what it asked for.
+	 *
+	 * `verdict_lvl` of 0 means the slot is empty. Reset per FILE, in
+	 * scan_tree, because that is the scope it belongs to.
+	 */
+	struct kof_finding    verdict;
+	uint32_t              verdict_lvl;
+	uint8_t               verdict_have;
 	/* The language this object's producer declared, carried the same way
 	 * cur_rgn is - see kof_src_declare_lang. */
 	uint8_t               cur_subtype;

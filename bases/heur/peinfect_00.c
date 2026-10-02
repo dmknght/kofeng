@@ -95,7 +95,18 @@ KOF_TARGET_FORMAT(KOF_FMT_PE);
  * needs the object opened.
  */
 KOF_HEUR_PHASE(KOF_HEUR_EXAMINE);
-KOF_HEUR_NAME("Infected");
+/*
+ * "Patched" AND NOT "Infected", because the type already says it.
+ *
+ * The verdict reads <Type>:<Family>, so KOF_HEUR_NAME("Infected") under
+ * KOF_MALTYPE_VIRUS printed `Virus:Infected` - the same fact twice, with the
+ * family slot wasted saying what the type had said. The slot is for WHAT WAS
+ * RECOGNISED, and what this recognises is a program written into after it
+ * was linked: the entry section made writable, the last one made executable.
+ * `Virus:Patched` says which virus-shaped thing was seen.
+ */
+KOF_HEUR_NAME("Patched");
+
 
 /*
  * NO PREDICTION. The shape says a file infector modified this program; it does
@@ -103,7 +114,30 @@ KOF_HEUR_NAME("Infected");
  * of ONE family are the reason not to guess. Whatever the run recovers is what
  * gets named.
  */
+/*
+ * AND IT DOES NOT CONCLUDE - see KOF_ENG_CONCLUDE, and the measurement that
+ * settled it.
+ *
+ * "This PE was modified after it was linked" reads like a verdict and is not
+ * one: it is the SHAPE a file infector leaves, and which infector - and
+ * whether the host can be given back - is what the unpacker underneath
+ * answers. Declaring KOF_ENG_CONCLUDE here stopped the chain before that
+ * unpacker ran, and on the four Sality samples it turned three
+ * `Virus:Sality#Body` into three `Heur:Infected`: a named family and its
+ * repair traded for the shape that led to them. The fourth is the one this
+ * rule deliberately does not fire on.
+ *
+ * So this is a survey rule, and the verdict belongs to whatever comes out.
+ */
 KOF_HEUR_WANT(KOF_ENG_USE_EMU);
+
+/*
+ * AND WHICH KIND OF THING TO LOOK FOR NEXT. A file infector modified this
+ * program, so the modules worth asking are the ones that know viruses - see
+ * KOF_HEUR_SCAN_CLASS. The packers are still asked: an infected file is
+ * routinely packed too, and the body is underneath.
+ */
+KOF_HEUR_SCAN_CLASS(KOF_MALTYPE_VIRUS);
 
 KOF_DEFINE_HEUR
 {

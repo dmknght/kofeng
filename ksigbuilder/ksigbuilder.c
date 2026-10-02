@@ -365,6 +365,7 @@ enum decl_kind {
 	DECL_HEXSTR,
 	DECL_REGEX,
 	DECL_NAME,
+	DECL_HEUR_CLASS,
 	DECL_PLAGUE
 };
 
@@ -376,6 +377,7 @@ struct macro {
 static const struct macro macros[] = {
 	{ "KOF_TARGET_RANGE",  DECL_RANGE   },
 	{ "KOF_TARGET_NAME",   DECL_NAME    },
+	{ "KOF_HEUR_SCAN_CLASS", DECL_HEUR_CLASS },
 	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR  },
 	{ "KOF_DEFINE_REGEX",  DECL_REGEX   },
 	/* BEFORE KOF_DEFINE_STR, which is a prefix of it - see the note on the
@@ -406,6 +408,23 @@ static const struct macro macros[] = {
  */
 static char g_family[80];
 static int  g_maltype;
+/* The type the FILE NAME says, or -1 - see nameform_read. */
+static int  g_name_type = -1;
+/*
+ * The id at the end of the file name - "01" out of virus_sality_01.c - and
+ * empty when the name is of the old form.
+ *
+ * NOT USED YET, and that is deliberate. It is what a variant should be: a
+ * variant names the SAMPLE a signature was written from, and one sample may
+ * be matched three ways, so it cannot belong to a matcher. What a variant is
+ * today is __LINE__ through KOF_MALVAR_AUTO, which means ADDING A COMMENT
+ * CHANGES IT - measured in one session: u7f0z -> q4rmk -> dohf6 for one
+ * unchanged rule. Switching needs the id on the module record, which needs
+ * the pack format to change, which is a decision not yet taken. Parsed and
+ * carried in the meta until then, so the switch is a wiring change and not
+ * an archaeology exercise.
+ */
+static char g_name_id[16];
 static int  g_have_name;
 
 /*
@@ -416,8 +435,6 @@ static int  g_have_name;
  * "if (kof_find_str_x(...)) KOF_SCAN_INFECT(...);" shape every signature in this
  * tree already uses.
  */
-static int      g_have_find;
-static char     g_find_sig[600];
 /*
  * The same call RESOLVED to what it looks for - the pattern bytes of each
  * marker and the mask of each range, not the identifiers naming them. This is
@@ -426,31 +443,8 @@ static char     g_find_sig[600];
  * range `scan_range_code`, so the x86 and x64 meterpreter detections - wholly
  * different patterns - hashed to one variant. See hash_resolved_call.
  */
-static uint32_t g_find_hash;
 
-/*
- * WHAT A HEURISTIC RULE'S NAME HASHES: the traits it declares.
- *
- * A detector's KOF_MALVAR_AUTO hashes the find call it guards, because that is
- * what makes one detection in a family different from another. A rule guards no
- * find call - it reads fields of the parse - so what distinguishes it is the set
- * of declarations at the top of the file: what it applies to, when it runs, what
- * it asks for, and what it is called. Change any of those and it is a different
- * rule and gets a different name; rebuild without changing them and the name is
- * the one it had.
- */
-static char g_heur_sig[600];
 
-static void heur_sig_add(const char *line)
-{
-	size_t n = strlen(g_heur_sig), k = 0;
-
-	while (line[k] == ' ' || line[k] == '\t')
-		k++;
-	while (line[k] && line[k] != '\n' && n + 1 < sizeof g_heur_sig)
-		g_heur_sig[n++] = line[k++];
-	g_heur_sig[n] = 0;
-}
 
 /*
  * Find argument number `want` (1-based) of a macro invocation starting at p.
@@ -1154,334 +1148,14 @@ static int read_family(const char *p, int line, char *out, size_t cap)
 	return 1;
 }
 
-/*
- * Copy the argument text of a balanced-parenthesis call, starting right after
- * `open` (which points at the '(') up to but not including the matching ')'.
- * Quotes are honoured, same rule nth_arg applies when splitting arguments, so a
- * comma or paren inside a pattern literal does not end the capture early.
- */
-static size_t capture_balanced(const char *open, char *out, size_t cap)
-{
-	const char *p = open + 1;
-	int depth = 1;
-	size_t n = 0;
 
-	/*
-	 * The terminator below is written at `cap - 1` when the text did not
-	 * fit, and cap 0 makes that SIZE_MAX. The one caller passes
-	 * `sizeof args`, so this is unreachable now and is refused anyway -
-	 * the failure is a write nowhere near the buffer, which is the kind
-	 * that is found much later and somewhere else.
-	 */
-	if (!out || !cap)
-		return 0;
 
-	while (*p && depth > 0) {
-		if (*p == '"') {
-			if (n + 1 < cap) out[n++] = *p;
-			p++;
-			while (*p && *p != '"') {
-				if (*p == '\\' && p[1] && n + 1 < cap) {
-					out[n++] = *p++;
-				}
-				if (n + 1 < cap)
-					out[n++] = *p;
-				p++;
-			}
-			if (*p == '"') {
-				if (n + 1 < cap) out[n++] = *p;
-				p++;
-			}
-			continue;
-		}
-		if (*p == '(') {
-			depth++;
-		} else if (*p == ')') {
-			depth--;
-			if (depth == 0)
-				break;
-		}
-		if (n + 1 < cap)
-			out[n++] = *p;
-		p++;
-	}
-	out[n < cap ? n : cap - 1] = 0;
-	return n;
-}
 
-/* Collapse every run of whitespace to one space and trim both ends, so
- * "a,  b"  and "a,\n\tb" hash identically. What this does NOT do is resolve an
- * identifier to what it was declared as - renaming a KOF_DEFINE_STR changes this
- * text and therefore changes KOF_MALVAR_AUTO's hash. Documented at KOF_SCAN_INFECT
- * in kofsig.h; accepted here rather than solved, because solving it means resolving
- * every identifier against the pats[] table instead of just capturing text. */
-static void normalize_ws(char *s)
-{
-	char *r = s, *w = s;
-	int sp = 1;
 
-	for (; *r; r++) {
-		if (*r == ' ' || *r == '\t' || *r == '\n' || *r == '\r') {
-			if (!sp) {
-				*w++ = ' ';
-				sp = 1;
-			}
-		} else {
-			*w++ = *r;
-			sp = 0;
-		}
-	}
-	while (w > s && w[-1] == ' ')
-		w--;
-	*w = 0;
-}
 
-static uint32_t hash_text(uint32_t h, const char *s)
-{
-	for (; *s; s++)
-		h = kof_hash_step(h, (uint8_t)*s);
-	return h;
-}
-
-/*
- * Fold ONE argument of a guard call into the hash, as the thing it NAMES.
- *
- * A marker identifier becomes its compiled pattern - kind, the two literal
- * flags, then the bytes; a range identifier becomes its mask. That is what
- * makes the variant a property of what the call looks for rather than of how
- * the source spells it, so two detections that search different bytes differ
- * even when both call their marker `s0`. Anything the tables do not know - an
- * inline range macro, a numeric count - falls back to its text, which is the
- * old behaviour for exactly the tokens that cannot be resolved.
- *
- * Resolvable because a marker is declared before the kof_scan that uses it - C
- * requires the identifier in scope - so pats[]/rngs[] already hold it by the
- * time a guard line is read.
- */
-static uint32_t fold_arg(uint32_t h, const char *tok, size_t len)
-{
-	char name[80];
-	int i;
-
-	while (len && (tok[0] == ' ' || tok[0] == '\t')) { tok++; len--; }
-	while (len && (tok[len - 1] == ' ' || tok[len - 1] == '\t')) len--;
-	if (len >= sizeof name)
-		len = sizeof name - 1u;
-	memcpy(name, tok, len);
-	name[len] = 0;
-
-	for (i = 0; i < npats; i++)
-		if (strcmp(pats[i].name, name) == 0) {
-			uint32_t k;
-
-			h = kof_hash_step(h, 'S');
-			h = kof_hash_step(h, (uint8_t)pats[i].kind);
-			h = kof_hash_step(h, (uint8_t)pats[i].icase);
-			h = kof_hash_step(h, (uint8_t)pats[i].fullword);
-			for (k = 0; k < pats[i].len; k++)
-				h = kof_hash_step(h, pats[i].bytes[k]);
-			return h;
-		}
-	for (i = 0; i < nrngs; i++)
-		if (strcmp(rngs[i].name, name) == 0) {
-			uint32_t m = rngs[i].mask;
-
-			h = kof_hash_step(h, 'R');
-			h = kof_hash_step(h, (uint8_t)m);
-			h = kof_hash_step(h, (uint8_t)(m >> 8));
-			h = kof_hash_step(h, (uint8_t)(m >> 16));
-			h = kof_hash_step(h, (uint8_t)(m >> 24));
-			return h;
-		}
-	h = kof_hash_step(h, 'T');
-	return hash_text(h, name);
-}
-
-/*
- * Hash a guard call by its resolved content: the call kind, then each argument
- * as what it names (see fold_arg), then any ">= N" threshold. Splits on
- * top-level commas, skipping string literals and nested parens so an inline
- * pattern or range macro does not end an argument early.
- */
-static uint32_t hash_resolved_call(const char *kind, const char *args,
-				   const char *thresh)
-{
-	uint32_t h = hash_text(KOF_HASH_INIT, kind);
-	const char *tok = args, *p = args;
-	int depth = 0;
-
-	for (;;) {
-		char c = *p;
-
-		if (c == '"') {
-			p++;
-			while (*p && *p != '"') {
-				if (*p == '\\' && p[1])
-					p++;
-				p++;
-			}
-			if (*p)
-				p++;
-			continue;
-		}
-		if (c == '(') { depth++; p++; continue; }
-		if (c == ')') { if (depth) depth--; p++; continue; }
-		if (c == 0 || (c == ',' && depth == 0)) {
-			h = fold_arg(h, tok, (size_t)(p - tok));
-			if (c == 0)
-				break;
-			p++;
-			tok = p;
-			continue;
-		}
-		p++;
-	}
-	if (thresh && thresh[0])
-		h = hash_text(h, thresh);
-	return h;
-}
-
-/*
- * Look for kof_find_str_any/all/multi(...) on this line and, if found, remember its
- * region/pattern text and any trailing ">= N" threshold as g_find_sig - the input
- * KOF_MALVAR_AUTO hashes. Independent of the macros[] table: these are real,
- * compiled calls, not declarative macros that expand to nothing, so they are found
- * by their own scan rather than routed through scan_line's macro dispatch.
- */
-static void capture_find_call(const char *at)
-{
-	/*
-	 * kof_plague_score COUNTS AS A GUARD TOO.
-	 *
-	 * KOF_MALVAR_AUTO derives the variant from whatever the verdict is
-	 * guarded by, and a similarity rule is guarded by a block's score - so
-	 * a rule made of blocks could not use AUTO at all, while the panel that
-	 * writes those rules offered it like any other. What is hashed is the
-	 * call as written, which for a block is its name, and a block's name IS
-	 * the fold of its hashes: two rules over different blocks derive
-	 * different variants, which is the whole requirement.
-	 */
-	/*
-	 * AND SO DOES kof_plague_shape, for the same reason one step further out.
-	 *
-	 * A shape rule is guarded by how near the object is to a reference's
-	 * geometry, and it names that reference - so what is hashed is the
-	 * reference's identifier, and two rules over two samples derive two
-	 * variants. A rule made only of a shape could not use AUTO otherwise,
-	 * while the panel that writes those rules offers it like any other.
-	 */
-	/*
-	 * AND kof_pth_match, which names its reference the same way - what is
-	 * hashed is the identifier, so two rules over two samples' chains
-	 * derive two variants. Left out when the measure was added and the
-	 * build refused every chain rule's AUTO until it was put back.
-	 */
-	/*
-	 * AND THE TWO THAT SEARCH AT AN OFFSET THE MODULE WORKED OUT.
-	 *
-	 * kof_find_str_at and kof_find_str_in are search macros like the
-	 * three above; what differs is that one argument is an EXPRESSION
-	 * rather than a declared range - see the note beside them in
-	 * kofsig.h. That makes no difference to what AUTO needs: the pattern
-	 * still folds to its bytes, and the expression folds as the text it
-	 * is, which is as stable across rebuilds as a range name.
-	 *
-	 * Left out, they were the one way to ask "is this pattern AT the
-	 * entry point" and have the build refuse the variant for it - which
-	 * is the question that separates a host that was patched from a file
-	 * that merely carries the payload, so refusing it refused the
-	 * distinction.
-	 */
-	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
-					"kof_find_str_any", "kof_find_str_at",
-					"kof_find_str_in", "kof_plague_score",
-					"kof_plague_shape", "kof_plague_strings", "kof_plague_blocks",
-					"kof_pth_match",
-					NULL };
-	const char *best = NULL;
-	const char *best_kind = NULL;
-	const char *open, *after;
-	char args[500];
-	char thresh[16];
-	int k, depth;
-	size_t tn;
-
-	for (k = 0; kinds[k]; k++) {
-		const char *q = strstr(at, kinds[k]);
-		if (q && (!best || q < best)) {
-			best = q;
-			best_kind = kinds[k];
-		}
-	}
-	if (!best)
-		return;
-
-	open = strchr(best, '(');
-	if (!open)
-		return;
-	capture_balanced(open, args, sizeof args);
-	normalize_ws(args);
-
-	thresh[0] = 0;
-	depth = 0;
-	after = open;
-	while (*after) {
-		if (*after == '(') {
-			depth++;
-		} else if (*after == ')') {
-			depth--;
-			if (depth == 0) {
-				after++;
-				break;
-			}
-		}
-		after++;
-	}
-	while (*after == ' ' || *after == '\t')
-		after++;
-	tn = 0;
-	if (after[0] == '>' && after[1] == '=') {
-		after += 2;
-		while (*after == ' ' || *after == '\t')
-			after++;
-		while (*after >= '0' && *after <= '9' && tn + 1 < sizeof thresh)
-			thresh[tn++] = *after++;
-	}
-	thresh[tn] = 0;
-
-	snprintf(g_find_sig, sizeof g_find_sig, "%s(%s)%s%s", best_kind, args,
-		 thresh[0] ? ">=" : "", thresh);
-	g_find_hash = hash_resolved_call(best_kind, args, thresh);
-	g_have_find = 1;
-}
-
-/* Base36, fixed at 5 digits - long enough that a 4000 signature database has a
- * negligible chance of two AUTO variants in the same family colliding, short enough
- * to read as a tag rather than a hash dump. */
-static void suffix_from_hash(char out[6], uint32_t h)
-{
-	static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-	int i;
-
-	for (i = 4; i >= 0; i--) {
-		out[i] = digits[h % 36];
-		h /= 36;
-	}
-	out[5] = 0;
-}
 
 /* A heuristic rule hashes its declared traits as text - see g_heur_sig. */
-static void auto_suffix_of(char out[6], const char *sig)
-{
-	suffix_from_hash(out, kof_hash_bytes(sig, strlen(sig)));
-}
-
 /* A detector hashes the RESOLVED content of the call it guards, not the text. */
-static void auto_suffix(char out[6])
-{
-	suffix_from_hash(out, g_find_hash);
-}
-
 /*
  * Argument 1 of KOF_SCAN_INFECT/SUSPECT(variant): a quoted custom variant,
  * KOF_MALVAR_GENERIC, or KOF_MALVAR_AUTO. Composes the full detection name with the
@@ -1559,18 +1233,34 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
 			 * appending anything would make it stop meaning that. */
 			strcpy(raw, "Generic");
 		} else if (strcmp(raw, "KOF_MALVAR_AUTO") == 0) {
-			/* AUTO is the opposite of generic: a stable, SPECIFIC
-			 * identity for this exact pattern, distinguishable from
-			 * every other AUTO variant in the same family. Prefixing
-			 * it with "Generic-" said the opposite of what it is -
-			 * fixed after it was pointed out. The hash stands alone. */
-			if (!g_have_find) {
-				err(line, "KOF_MALVAR_AUTO must directly guard a "
-					  "single kof_find_str_any/all/multi(...) "
-					  "condition");
+			/*
+			 * AUTO IS THE FILE'S ID, and it used to be a hash of
+			 * the find call this verdict guarded.
+			 *
+			 * The hash was specific, which was the point, and it
+			 * was specific to the WRONG THING: a variant names
+			 * the SAMPLE a signature was written from, and one
+			 * sample can be matched by a pattern, by a block
+			 * similarity and by a capability chain. Tying the
+			 * name to one matcher's text meant the same sample
+			 * had three unrelated names, and meant that EDITING
+			 * THE PATTERN RENAMED THE FINDING.
+			 *
+			 * It was worse than that in practice: the hash was
+			 * taken over source text, so a comment moved the
+			 * line and the variant changed with it - measured in
+			 * one sitting, u7f0z then q4rmk then dohf6 for a
+			 * rule nobody had touched.
+			 *
+			 * The id in the file name is the sample's, it is
+			 * chosen once, and it costs nothing to compute.
+			 */
+			if (!g_name_id[0]) {
+				err(line, "KOF_MALVAR_AUTO needs the id at "
+					  "the end of the file name");
 				return 0;
 			}
-			auto_suffix(raw);
+			snprintf(raw, sizeof raw, "%s", g_name_id);
 		} else {
 			fprintf(stderr, "%s:%d: error: \"%s\" is not a verdict "
 				"argument: want a quoted name, "
@@ -2132,6 +1822,9 @@ static void resolve_heur(void)
 			g_heur_want |= KOF_ENG_OPEN_CARRIED;
 		if (names_ident(wt->arg, "KOF_ENG_KEEP_ON_OPEN"))
 			g_heur_want |= KOF_ENG_KEEP_ON_OPEN;
+		if (names_ident(wt->arg, "KOF_ENG_CONCLUDE"))
+			g_heur_want |= KOF_ENG_CONCLUDE;
+
 		if ((uint32_t)g_heur_want == before)
 			err(wt->line, "KOF_HEUR_WANT names nothing the engine "
 				      "offers");
@@ -2230,22 +1923,8 @@ static void scan_line(char *at, size_t line_len, int lineno)
 	 * blanked before this ran, so anything found here is code. */
 	at[line_len] = 0;
 
-	/* Independent of the dispatch below: a real, compiled call rather than a
-	 * declarative macro, so it is found by its own scan rather than routed
-	 * through it - see capture_find_call. Run on every line, whether or not the
-	 * line turns out to hold a macro this function also cares about. */
-	capture_find_call(at);
-
 	/* kof_debug names go in the same table and are keyed the same way: both use
 	 * __LINE__ as the id, so the host resolves either through one lookup. */
-	/* The declarations a rule's name hashes, gathered as they go past. Before
-	 * the dispatch below because KOF_TARGET_FORMAT is in the macros[] table
-	 * and would otherwise be consumed by it. */
-	if (strstr(at, "KOF_HEUR_PHASE(") || strstr(at, "KOF_HEUR_WANT(") ||
-	    strstr(at, "KOF_HEUR_LEVEL(") ||
-	    strstr(at, "KOF_HEUR_NAME(") || strstr(at, "KOF_TARGET_FORMAT("))
-		heur_sig_add(at);
-
 	p = strstr(at, "KOF_SCAN_INFECT");
 	if (!p)
 		p = strstr(at, "KOF_SCAN_SUSPECT");
@@ -2286,11 +1965,21 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		}
 		names[nnames].line = lineno;
 		if (is_heur_hit) {
-			/* No argument to read: a rule has one name and it is
-			 * declared, so what varies between two hits in one rule
-			 * is nothing - and the hash is of the rule, not of the
-			 * line. */
-			auto_suffix_of(names[nnames].text, g_heur_sig);
+			/*
+			 * A rule has one name and it is declared, so what
+			 * varies between two hits in one rule is nothing.
+			 * The id is the file's, like every other variant -
+			 * it used to be a hash of the rule's own source
+			 * text, which changed whenever the source was
+			 * touched.
+			 */
+			if (!g_name_id[0]) {
+				err(lineno, "a rule needs the id at the end "
+					    "of its file name");
+				return;
+			}
+			snprintf(names[nnames].text, sizeof names[nnames].text,
+				 "%s", g_name_id);
 		} else if (is_variant) {
 			if (!read_variant(p, lineno, names[nnames].text,
 					  sizeof names[nnames].text))
@@ -2326,8 +2015,31 @@ static void scan_line(char *at, size_t line_len, int lineno)
 			return;
 		if (!read_family(p, lineno, g_family, sizeof g_family))
 			return;
+		/* The file name said it too, so the two must agree - see
+		 * nameform_read. */
+		if (g_name_type >= 0 && g_name_type != type_idx) {
+			err(lineno, "KOF_TARGET_NAME disagrees with the type "
+				    "in the file name");
+			return;
+		}
 		g_maltype = type_idx;
 		g_have_name = 1;
+		return;
+	}
+
+	if (m->kind == DECL_HEUR_CLASS) {
+		int type_idx;
+
+		if (KOF_ENG_CLASS_OF((uint32_t)g_heur_want)) {
+			err(lineno, "KOF_HEUR_SCAN_CLASS declared more than "
+				    "once; a rule narrows to one class");
+			return;
+		}
+		if (!read_maltype(p, lineno, &type_idx))
+			return;
+		/* Into the high byte of the ask mask, plus one - see
+		 * KOF_HEUR_SCAN_CLASS in kofmod/heur.h. */
+		g_heur_want |= (int)KOF_ENG_CLASS_PUT(type_idx);
 		return;
 	}
 
@@ -4495,6 +4207,8 @@ static int extract_main(int argc, char **argv)
 	fprintf(out, "n_level=%d\n", g_decl[SD_HEUR_LEVEL].count);
 	fprintf(out, "family=%s\n", g_have_name ? g_family : "");
 	fprintf(out, "maltype=%d\n", g_have_name ? g_maltype : 0);
+	/* Carried, not yet consumed - see g_name_id. */
+	fprintf(out, "nameid=%s\n", g_name_id);
 	fclose(out);
 
 	/* The strings and ranges, for the packer to put in the pack. */
@@ -5940,13 +5654,111 @@ static void module_reset(void)
 	g_family[0] = 0;
 	g_maltype = 0;
 	g_have_name = 0;
-	g_find_sig[0] = 0;
-	g_find_hash = 0;
-	g_heur_sig[0] = 0;
 	g_scan_mask_out = 0;
 	g_nstr_out = 0;
 	g_src_text = NULL;
 	g_src_len = 0;
+}
+
+/*
+ * WHAT A SIGNATURE SOURCE'S NAME MAY LOOK LIKE, AND WHAT IT IS FOR.
+ *
+ * One row per form. The new one is
+ *
+ *     virus_sality_01.c      <type>_<family>_<id>.c, all lower case
+ *
+ * and it is a CROSS-CHECK, not a second place to declare things. The family
+ * a verdict prints still comes from KOF_TARGET_NAME in the source, where an
+ * author can spell it the way it should read; a file name cannot, because
+ * file names here are lower case and no rule about case tells an acronym
+ * from a word - deriving the family turned "RST" into "Rst".
+ *
+ * WHAT THE TYPE IS DOING THERE IS MAKING THE TREE READABLE. A directory of
+ * family names is a list nobody can review - they are arbitrary words, and
+ * nothing about `gafgyt_00.c` next to `camfrog_00.c` says which is a botnet
+ * and which is adware. With the type in front, the listing sorts into the
+ * kinds of thing it holds and a reviewer can see what is covered and what is
+ * not.
+ *
+ * So the name must AGREE with the source rather than replace it: the type in
+ * front is checked against the declared one, and a signature filed under
+ * virus_ that declares itself a trojan fails the build instead of sitting in
+ * the wrong group for ever. The id at the end is what makes two signatures
+ * over one sample distinct without anyone choosing a number by hand.
+ *
+ * The old form carries nothing and is accepted while the tree is moved over.
+ * Retiring it is deleting `legacy_ok` and the one test that reads it.
+ */
+static void nameform_read(const char *base)
+{
+	char word[32];
+	const char *u1, *u2, *p, *d;
+	size_t n;
+	int type_idx;
+
+	g_name_type = -1;
+	g_name_id[0] = 0;
+
+	/*
+	 * THE ID IS THE TRAILING NUMBER, AND EVERY NAME ALREADY HAS ONE.
+	 *
+	 * Both forms end in _<digits>.c - rst_01.c as much as
+	 * virus_sality_01.c - so the id does not wait on the rename. Tying
+	 * it to the new form was a mistake that would have held the variant
+	 * change hostage to a hundred and forty-one files being moved.
+	 */
+	d = strrchr(base, '_');
+	if (d) {
+		for (p = d + 1; *p && *p != '.'; p++)
+			if (*p < '0' || *p > '9')
+				break;
+		if (*p == '.' && p > d + 1 && !strcmp(p, ".c")) {
+			n = (size_t)(p - d - 1);
+			if (n < sizeof g_name_id) {
+				memcpy(g_name_id, d + 1, n);
+				g_name_id[n] = 0;
+			}
+		}
+	}
+
+	u1 = strchr(base, '_');
+	if (!u1)
+		return;
+	u2 = strchr(u1 + 1, '_');
+	if (!u2 || u2 == u1 + 1)
+		return;
+	/* The tail is digits and then ".c", which is what tells this form
+	 * from a legacy name that happens to have two words. */
+	for (p = u2 + 1; *p && *p != '.'; p++)
+		if (*p < '0' || *p > '9')
+			return;
+	if (p == u2 + 1 || strcmp(p, ".c") != 0)
+		return;
+
+
+	n = (size_t)(u1 - base);
+	if (n == 0 || n >= sizeof word)
+		return;
+	memcpy(word, base, n);
+	word[n] = 0;
+	if (!kof_maltype_from_word(word, &type_idx))
+		return;         /* two words, but not a type: a legacy name */
+
+	/*
+	 * LOWER CASE, ALWAYS. The name is read by people and by this parser
+	 * and sorted by the shell; one file in a different case is a file
+	 * that sorts somewhere else and matches nothing a reader greps for.
+	 */
+	for (p = base; *p; p++)
+		if (*p >= 'A' && *p <= 'Z') {
+			/* Named here rather than through err(), which wants a
+			 * line in a source that has not been opened yet. */
+			fprintf(stderr, "FAIL: %s: a signature file name is "
+					"lower case throughout\n", base);
+			errors++;
+			return;
+		}
+	g_name_type = type_idx;
 }
 
 static int module_main(int argc, char **argv)
@@ -6028,6 +5840,13 @@ static int module_main(int argc, char **argv)
 	snprintf(meta, sizeof meta, "%s/%s.meta", outdir, name);
 
 	module_reset();
+	/*
+	 * AFTER the reset, because the reset is what clears it, and BEFORE
+	 * the source is read, so a KOF_TARGET_NAME line in a file whose name
+	 * already gives the type and family is caught as the duplication it
+	 * is - see nameform_typed.
+	 */
+	nameform_read(kof_path_base(src));
 	printf("== %s\n", src);
 
 	/* The declarations, the patterns and the name table, in this process. */

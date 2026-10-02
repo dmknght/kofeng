@@ -136,8 +136,80 @@ enum kof_eng_want {
 	 * the wrapper of every packed sample it meets, which is the noise the
 	 * drop exists to remove.
 	 */
-	KOF_ENG_KEEP_ON_OPEN = 1u << 2
+	KOF_ENG_KEEP_ON_OPEN = 1u << 2,
+
+	/*
+	 * THIS RULE'S FINDING IS A CONCLUSION, SO STOP LOOKING.
+	 *
+	 * A heuristic is normally a reason to keep going: it says "I could
+	 * not identify this", and the steps after it - unpack, carve,
+	 * normalise - are how the thing gets identified. The chain already
+	 * stops for a DETECTOR's verdict, and the note on det_n in scan.c
+	 * has the measurement: of 858 normalised views that reported, 852
+	 * were repeating a name their parent already carried.
+	 *
+	 * SOME RULES ARE DETECTORS IN EVERYTHING BUT NAME. A rule that says
+	 * "this PE is infected" has concluded; building a normalised view of
+	 * it and running the same rule over the same bytes produces the same
+	 * sentence twice, and the second one is about a rendering rather
+	 * than about a file. That is what `007 Spy.exe` came back with.
+	 *
+	 * SO IT IS DECLARED, NOT INFERRED. The engine cannot tell a rule
+	 * that concluded from one that gave up - both are a heuristic
+	 * finding at the same level - and the difference is the rule
+	 * author's to state. Without this bit a rule behaves as before: it
+	 * reports, and the scan goes on.
+	 *
+	 * all_matches overrides it, exactly as it overrides the detector
+	 * stop: a caller that asked for every finding has said the first one
+	 * is not the answer.
+	 */
+	KOF_ENG_CONCLUDE = 1u << 3,
+
+	/*
+	 * THE LOW BITS ARE ASKS. THE HIGH BYTE IS A CLASS - see
+	 * KOF_HEUR_SCAN_CLASS below.
+	 */
+	KOF_ENG_CLASS_SHIFT = 8
 };
+
+/*
+ * NARROW THE SEARCH TO ONE CLASS OF MALWARE.
+ *
+ * A rule that has worked out WHAT KIND of thing it is looking at can say so,
+ * and the engine then stops asking modules about other kinds:
+ *
+ *   1. the shape says a virus wrote into this file     (the rule)
+ *   2. so ask the modules that know viruses, and only those
+ *   3. if none of them recognises it, the shape is the verdict
+ *
+ * NOT AN INTERRUPT, which is the mistake this replaced. Stopping at step 1
+ * was measured and is wrong in the direction that matters: on four Sality
+ * samples it turned three `Virus:Sality#Body` - a named family, with a
+ * repair behind it - into three `Heur:Infected`.
+ *
+ * A VALUE AND NOT A FLAG, which is the second mistake it replaced. The first
+ * version was a bit called KOF_ENG_VIRUS_SCAN, and a bit can only ever mean
+ * the one class somebody thought of: a rule that recognises a coin miner or
+ * a banking trojan has the same thing to say and no way to say it. The class
+ * is one of enum kof_maltype.
+ *
+ * WHAT IS NOT NARROWED AWAY: anything that declared no family. A packer
+ * names no malware, so it is not a competing answer to "which one is this" -
+ * and an infected file is routinely packed as well, with the body the class
+ * modules want sitting underneath. Dropping the packers was measured too,
+ * and it looked like a speed-up.
+ *
+ * STORED IN THE HIGH BYTE OF heur_want, as the class PLUS ONE so that zero
+ * means "the rule did not say". KOF_MALTYPE_VIRUS is the first entry of its
+ * enum and therefore zero; without the offset, every rule that said nothing
+ * would be asking for the virus routine. It belongs in a field of its own
+ * and will move to one when the pack format next changes; the rules do not
+ * change when it does.
+ */
+#define KOF_HEUR_SCAN_CLASS(t)
+#define KOF_ENG_CLASS_PUT(t)  (((uint32_t)(t) + 1u) << KOF_ENG_CLASS_SHIFT)
+#define KOF_ENG_CLASS_OF(w)   (((w) >> KOF_ENG_CLASS_SHIFT) & 0xffu)
 
 /*
  * All three expand to nothing: ksigbuilder reads them out of the source, the

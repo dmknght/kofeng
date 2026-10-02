@@ -588,6 +588,23 @@ static void say(struct run *r, const char *colour, const char *tag,
  * full where it was found, and an unexamined file is reported unconditionally
  * by the sweep at exit - see the note there for why "OK" would be a lie.
  */
+/*
+ * A VERDICT, FROM THE ENGINE, ALREADY COMPOSED - see kof_on_event_detected.
+ *
+ * All this tool does with it is put it on the screen. It does not choose
+ * which findings count, does not compose a name and does not know the form
+ * of one: the engine decided and decoded, and a second tool asking the same
+ * engine gets the same line.
+ */
+static void on_event_detected(const char *object, const char *verdict,
+		       const struct kof_finding *f, void *user)
+{
+	struct run *r = user;
+
+	if (r && object && verdict)
+		say(r, level_col(f ? f->level : 0u), verdict, object);
+}
+
 static void v_say_file(struct run *r, const char *file, size_t flen)
 {
 	struct fent *e;
@@ -727,7 +744,12 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	for (i = 0; i < res->n; i++) {
 		uint32_t lv = res->v[i].level;
 
-		say(r, level_col(lv), res->v[i].name, name);
+		/*
+		 * NOT PRINTED HERE ANY MORE - see on_event_detected below. The
+		 * engine composes a verdict and hands it over; this loop is
+		 * left with the file-level roll-up, which is a summary this
+		 * tool is presenting and not a decision about what counts.
+		 */
 		/*
 		 * Ranked, not compared as numbers: KOF_LEVEL_HEUR is 2 and INFECT
 		 * is 1, so ">" on the values alone would let a heuristic outrank a
@@ -1735,6 +1757,10 @@ int main(int argc, char **argv)
 
 	memset(&r, 0, sizeof r);
 	memset(&opt, 0, sizeof opt);
+	/* Where the engine sends a verdict - see kof_on_event_detected. This tool
+	 * registers it and prints; it decides nothing. */
+	opt.on_event_detected = on_event_detected;
+	opt.event_user        = &r;
 	/* Set once, for every scan this run makes - the file sweep and the
 	 * process sweep both. See scan_should_stop. */
 	opt.should_stop = scan_should_stop;

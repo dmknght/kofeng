@@ -25345,13 +25345,20 @@ body:
 			at += (size_t)snprintf(note + at, sizeof note - at,
 					       "%sx%u", at ? ", " : "",
 					       (unsigned)n[i].repeat);
-		if (n[i].flags & KOF_FLOWF_WX)
-			at += (size_t)snprintf(note + at, sizeof note - at,
-					       "%sW+X", at ? ", " : "");
-		if (n[i].flags & KOF_FLOWF_EXECUTED)
-			at += (size_t)snprintf(note + at, sizeof note - at,
-					       "%sjumped-into",
-					       at ? ", " : "");
+		/*
+		 * AND NOT WHAT THE PAGE ALREADY SHOWS.
+		 *
+		 * `W+X` was printed beside a call whose own arguments read
+		 * `READ|WRITE|EXEC`, and `jumped-into` beside a mapping that
+		 * a later row enters by name. Both are the page restating
+		 * itself, and a reader of this page knows what an executable
+		 * mapping that something jumps into amounts to.
+		 *
+		 * What stays is what nothing else carries: how many times a
+		 * step happened, that an import was reached through a
+		 * register rather than by name, and - only when a block was
+		 * folded away - the word that block would have been.
+		 */
 		/*
 		 * `via-register` SAYS NOTHING ON A WORD THAT IS ALREADY ABOUT
 		 * A REGISTER. It is worth saying of `alloc` - that one was
@@ -25365,9 +25372,8 @@ body:
 			at += (size_t)snprintf(note + at, sizeof note - at,
 					       "%svia-register",
 					       at ? ", " : "");
-		if (n[i].flags & KOF_FLOWF_DGRAM)
-			at += (size_t)snprintf(note + at, sizeof note - at,
-					       "%sdatagram", at ? ", " : "");
+		/* `datagram` is in the capability's own word now - see
+		 * chain_callee - so saying it again says nothing. */
 		/* And whatever a block would have said, had there been more
 		 * than one row to put inside it. */
 		if (inl[0])

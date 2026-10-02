@@ -665,6 +665,30 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 	}
 	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN)
 		kof_flow_entry(f, flow_va_of(ctx, ctx->entry_off));
+	/*
+	 * AND THE WHOLE RANGE, LIBRARY CODE INCLUDED - which was tried the
+	 * other way and measured badly.
+	 *
+	 * A statically linked bot is mostly libc, and sweeping it costs time
+	 * and fills the partition with the toolchain's own `open` and
+	 * `mmap`. The engine knows where the library is - kof_true_find runs
+	 * during the parse and the answer sits on the scanner as cur_lib, in
+	 * file offsets, ready to subtract.
+	 *
+	 * SUBTRACTING IT CUT THE AUTHOR'S CODE. Measured on one C++
+	 * ransomware: its nodes fell from 70 to 51 and its chains from 8 to
+	 * 4, and the chain that went was the one that mattered - `fopen,
+	 * open, fork, execlp, file-delete`. What was left was name
+	 * resolution and socket plumbing. The spans are recognised partly by
+	 * the file's OWN symbols attributing bytes to the implementation,
+	 * and in a C++ binary that attribution reaches code the author
+	 * wrote.
+	 *
+	 * So the cost stands. Anything that skips bytes here has to be
+	 * unable to skip the author's, and "it looked like the library" is
+	 * not that; marking nodes as library-origin and preferring the rest
+	 * would be, because nothing is lost when the guess is wrong.
+	 */
 	for (i = 0; i < nr; i++) {
 		kof_buf s2 = kof_slice(b, scratch[i].off, scratch[i].len);
 
