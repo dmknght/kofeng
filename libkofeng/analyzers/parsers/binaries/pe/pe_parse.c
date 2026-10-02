@@ -20,7 +20,7 @@
 
 #include "pe_parse.h"
 #include "clr_parse.h"
-#include "../../../kofcore/rangelist.h"
+#include "../../../../kofcore/rangelist.h"
 
 /* Offsets within the structures, so the reads below read as the spec does. */
 #define DOS_LFANEW      0x3c
@@ -960,4 +960,151 @@ const char *kof_pe_anomaly_name(unsigned index)
 	_Static_assert(sizeof n / sizeof n[0] == KOF_PE_ANOM_COUNT,
 		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
+}
+
+/*
+ * ---- THE IMPORT DIRECTORY, WALKED ON DEMAND -------------------------------
+ *
+ * See the note in pe_parse.h, and the longer one in elf_parse.h for why these
+ * walkers live with the parser at all. Nothing below knows what any name
+ * means.
+ *
+ * THERE USED TO BE TWO OF THESE. pe_sym.c walked the directory to build the
+ * KSYM block and the pathogen detector walked it again to find which slot
+ * carries which capability, and the two had drifted: one stopped after 64
+ * DLLs and the other after 256, one ended the table on two zero fields and
+ * the other on three, one reported imports by ordinal and the other dropped
+ * them. Neither disagreement was a decision. This is the walk, once, with
+ * the more tolerant reading of each.
+ */
+#define IMP_DESC_LEN   20u    /* one IMAGE_IMPORT_DESCRIPTOR                */
+#define IMP_ORIG_THUNK  0u    /* 4  OriginalFirstThunk - the name table     */
+#define IMP_DLL_NAME   12u    /* 4  RVA of the library's name               */
+#define IMP_FIRST_THUNK 16u   /* 4  FirstThunk - the IAT, the slots         */
+#define IMP_MAX_DLLS   256u
+#define IMP_MAX_THUNKS 4096u
+
+/* A NUL-terminated name at a file offset, into the caller's buffer. Zero when
+ * nothing could be read, so a caller can tell an empty name from a refused
+ * one. */
+static int imp_name_at(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
+{
+	uint32_t q;
+
+	if (at == KOF_BROKEN || !at)
+		return 0;
+	for (q = 0; q + 1u < dstn; q++) {
+		uint8_t c8 = 0;
+
+		if (!kof_rd_u8(f, at + q, &c8) || !c8)
+			break;
+		dst[q] = (char)c8;
+	}
+	dst[q] = 0;
+	return q != 0;
+}
+
+uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
+			kof_pe_import_fn fn, void *user)
+{
+	uint64_t d;
+	uint32_t w, k, n = 0;
+
+	if (!f.p || !p || !p->valid || !fn)
+		return 0;
+	if (!p->dir[KOF_PE_DIR_IMPORT].rva)
+		return 0;
+	d = kof_pe_rva_to_off(p, p->dir[KOF_PE_DIR_IMPORT].rva);
+	if (d == KOF_BROKEN || !d)
+		return 0;
+	w = p->pe32_plus ? 8u : 4u;
+
+	for (k = 0; k < IMP_MAX_DLLS; k++) {
+		uint64_t desc = d + (uint64_t)k * IMP_DESC_LEN, tbl;
+		uint32_t orig = 0, first = 0, dllrva = 0, t;
+		char dll[64];
+
+		if (desc + IMP_DESC_LEN > f.n)
+			break;
+		if (!kof_rd_u32(f, desc + IMP_ORIG_THUNK,  0, &orig) ||
+		    !kof_rd_u32(f, desc + IMP_DLL_NAME,    0, &dllrva) ||
+		    !kof_rd_u32(f, desc + IMP_FIRST_THUNK, 0, &first))
+			break;
+		/*
+		 * An all-zero descriptor ends the table - tested on the three
+		 * fields that matter rather than on the whole struct, because
+		 * a descriptor with only a timestamp left over is still the
+		 * end.
+		 */
+		if (!orig && !first && !dllrva)
+			break;
+		if (!imp_name_at(f, kof_pe_rva_to_off(p, dllrva), dll,
+				 sizeof dll))
+			dll[0] = 0;
+		/*
+		 * NO FirstThunk, NO SLOT ADDRESSES.
+		 *
+		 * The names can come from either table and OriginalFirstThunk
+		 * is preferred, but the ADDRESS reported is always
+		 * image_base + FirstThunk + t*w, because the slot a call goes
+		 * through is FirstThunk's. A descriptor naming only the other
+		 * one made that arithmetic image_base + 0 + t*w - addresses
+		 * in the DOS header - and every one of them would be handed
+		 * out as the slot of a real import, on a shape a file chooses
+		 * freely.
+		 */
+		if (!first)
+			continue;
+		tbl = kof_pe_rva_to_off(p, orig ? orig : first);
+		if (tbl == KOF_BROKEN || !tbl)
+			continue;
+		for (t = 0; t < IMP_MAX_THUNKS; t++) {
+			uint64_t te = tbl + (uint64_t)t * w, val = 0;
+			uint64_t slot = p->image_base + first +
+					(uint64_t)t * w;
+			uint32_t lo = 0;
+			char nm[64];
+
+			if (p->pe32_plus) {
+				if (!kof_rd_u64(f, te, 0, &val))
+					break;
+			} else {
+				if (!kof_rd_u32(f, te, 0, &lo))
+					break;
+				val = lo;
+			}
+			if (!val)
+				break;               /* end of this DLL */
+			/*
+			 * The top bit means "by ordinal", and the ordinal is
+			 * the low sixteen. Tested on the right bit for the
+			 * width: 0x80000000 for PE32 and
+			 * 0x8000000000000000 for PE32+, which is why the two
+			 * are not one test.
+			 */
+			if (val & (p->pe32_plus ? 0x8000000000000000ull
+						: 0x80000000ull)) {
+				fn(user, slot, dll, 0,
+				   (uint32_t)(val & 0xffffu));
+				n++;
+				continue;
+			}
+			/* An IMAGE_IMPORT_BY_NAME is a hint word and then the
+			 * string, so the name is two bytes in - and the two
+			 * are added to the OFFSET after it has been checked,
+			 * because KOF_BROKEN plus two is a number that looks
+			 * like an address. */
+			{
+				uint64_t ho = kof_pe_rva_to_off(p, val);
+
+				if (ho == KOF_BROKEN || !ho)
+					continue;
+				if (!imp_name_at(f, ho + 2u, nm, sizeof nm))
+					continue;
+			}
+			fn(user, slot, dll, nm, 0);
+			n++;
+		}
+	}
+	return n;
 }

@@ -18,8 +18,9 @@
  */
 
 #include "elf_parse.h"
-#include "../../../kofcore/rangelist.h"
+#include "../../../../kofcore/rangelist.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* e_ident indices */
@@ -55,6 +56,14 @@
 #define SHT_NULL	0
 #define SHT_NOBITS	8
 #define SHT_STRTAB	3
+
+/* The kinds the table walkers at the end of this file read: a symbol table
+ * and the relocations that name its entries. SHT_DYNSYM is the linked
+ * object's, SHT_SYMTAB the one a relocatable object keeps. */
+#define SHT_REL		9
+#define SHT_RELA	4
+#define SHT_SYMTAB	2
+#define SHT_DYNSYM	11
 
 /* Section flags. SHF_ALLOC is the one that decides whether a section becomes part
  * of the process image, which is what separates KOF_SCAN_ELF_NOLOAD from the rest:
@@ -921,4 +930,583 @@ const char *kof_elf_anomaly_name(unsigned index)
 	_Static_assert(sizeof n / sizeof n[0] == KOF_ELF_ANOM_COUNT,
 		       "anomaly name table and its count disagree");
 	return index < sizeof n / sizeof n[0] ? n[index] : 0;
+}
+
+/*
+ * ---- THE TABLES, WALKED ON DEMAND -----------------------------------------
+ *
+ * See elf_parse.h for why these are here and what the line is between what
+ * they answer and what a caller decides. Below this point nothing knows what
+ * any name MEANS.
+ */
+
+int kof_elf_symtab_of(kof_buf f, const struct kof_elf_info *p,
+		      enum kof_elf_symtab_want want,
+		      struct kof_elf_symtab *t)
+{
+	static const struct { uint32_t sht; const char *str; uint8_t origin; }
+	tab[2] = {
+		{ SHT_SYMTAB, ".strtab", 1u },   /* KOF_SYM_ORIGIN_SYMTAB */
+		{ SHT_DYNSYM, ".dynstr", 2u }    /* KOF_SYM_ORIGIN_DYNSYM */
+	};
+	uint32_t k, lo = want == KOF_ELF_SYMTAB_DYN ? 1u : 0u;
+	uint32_t hi = want == KOF_ELF_SYMTAB_FULL ? 0u : 1u;
+
+	if (!t)
+		return 0;
+	memset(t, 0, sizeof *t);
+	if (!f.p || !p || !p->valid)
+		return 0;
+	t->elf64 = p->elf_class == KOF_ELFCLASS_64;
+	t->be = p->elf_data == KOF_ELFDATA_BE;
+	t->recsize = t->elf64 ? 24u : 16u;
+
+	/*
+	 * .symtab first and .dynsym only when there is none - .symtab is the
+	 * whole table and .dynsym the part dynamic linking needs, so a
+	 * stripped file keeps the second and loses the first. A caller that
+	 * must have one or the other says so.
+	 *
+	 * A TABLE WITHOUT ITS STRINGS IS STILL A TABLE, and `strn` zero is
+	 * how that is said. The pairing is by name (.symtab with .strtab,
+	 * .dynsym with .dynstr) because sh_link is not in the parsed section
+	 * and the ABI fixes it either way - but a file that renamed or
+	 * dropped the string section still has addresses, sizes and types,
+	 * and a caller after function BOUNDARIES needs none of the names.
+	 *
+	 * It is still the weaker find, so a nameless .symtab does not beat a
+	 * complete .dynsym: the loop remembers it and only falls back to it
+	 * once nothing better turns up. Refusing it outright is what this
+	 * did for one revision, and it cost the function boundaries of every
+	 * object whose string section was gone.
+	 */
+	for (k = lo; k <= hi; k++) {
+		uint32_t i;
+		const struct kof_elf_sec *sym = 0, *str = 0;
+
+		for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+			if (p->sec[i].type == tab[k].sht && !sym)
+				sym = &p->sec[i];
+			else if (p->sec[i].type == SHT_STRTAB &&
+				 !strcmp(p->sec[i].name, tab[k].str))
+				str = &p->sec[i];
+		}
+		if (!sym)
+			continue;
+		if (!str && k < hi && !t->off) {
+			/* Remembered, in case the other table is no better. */
+			t->off = sym->file_off;
+			t->n_decl = sym->file_size / t->recsize;
+			t->n = kof_clip_len(f.n, sym->file_off,
+					    sym->file_size) / t->recsize;
+			t->origin = tab[k].origin;
+			continue;
+		}
+		t->off = sym->file_off;
+		t->n_decl = sym->file_size / t->recsize;
+		t->n = kof_clip_len(f.n, sym->file_off, sym->file_size) /
+		       t->recsize;
+		t->str = str ? str->file_off : 0;
+		t->strn = str ? str->file_size : 0;
+		t->origin = tab[k].origin;
+		return 1;
+	}
+	return t->off != 0;
+}
+
+int kof_elf_symbol_at(kof_buf f, const struct kof_elf_symtab *t, uint64_t i,
+		      struct kof_elf_symbol *s)
+{
+	uint64_t at;
+
+	if (!t || !s || !t->off)
+		return 0;
+	at = t->off + i * t->recsize;
+	memset(s, 0, sizeof *s);
+	/*
+	 * TWO ORDERS, NOT TWO WIDTHS. Elf64_Sym is name,info,other,shndx,
+	 * value,size; Elf32_Sym is name,value,size,info,other,shndx. The
+	 * fields are the same and only their places move, which is why this
+	 * is one function and not two files.
+	 */
+	if (t->elf64) {
+		if (!kof_rd_u32(f, at + 0u,  t->be, &s->nameoff) ||
+		    !kof_rd_u8 (f, at + 4u,         &s->info)    ||
+		    !kof_rd_u8 (f, at + 5u,         &s->other)   ||
+		    !kof_rd_u16(f, at + 6u,  t->be, &s->shndx)   ||
+		    !kof_rd_u64(f, at + 8u,  t->be, &s->value)   ||
+		    !kof_rd_u64(f, at + 16u, t->be, &s->size))
+			return 0;
+	} else {
+		uint32_t v32 = 0, s32 = 0;
+
+		if (!kof_rd_u32(f, at + 0u,  t->be, &s->nameoff) ||
+		    !kof_rd_u32(f, at + 4u,  t->be, &v32)        ||
+		    !kof_rd_u32(f, at + 8u,  t->be, &s32)        ||
+		    !kof_rd_u8 (f, at + 12u,        &s->info)    ||
+		    !kof_rd_u8 (f, at + 13u,        &s->other)   ||
+		    !kof_rd_u16(f, at + 14u, t->be, &s->shndx))
+			return 0;
+		s->value = v32;
+		s->size  = s32;
+	}
+	return 1;
+}
+
+/* A NUL-terminated name out of a string table, into the caller's buffer.
+ * Empty rather than absent on a read that is refused: a visitor is never
+ * handed a pointer that has not been written. */
+static void str_read(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
+{
+	uint32_t q;
+
+	for (q = 0; q + 1u < dstn; q++) {
+		uint8_t c8 = 0;
+
+		if (!kof_rd_u8(f, at + q, &c8) || !c8)
+			break;
+		dst[q] = (char)c8;
+	}
+	dst[q] = 0;
+}
+
+static void sym_name(kof_buf f, const struct kof_elf_symtab *t,
+		     const struct kof_elf_symbol *s, char *dst, uint32_t dstn)
+{
+	if (s->nameoff && s->nameoff < t->strn)
+		str_read(f, t->str + s->nameoff, dst, dstn);
+	else
+		dst[0] = 0;
+}
+
+/*
+ * One relocation, unpacked. r_info is the type in the low word and the symbol
+ * in the high one on 64-bit, and a byte of type under three of symbol on
+ * 32-bit - a different packing, not a narrower one.
+ */
+static int rel_at(kof_buf f, const struct kof_elf_symtab *t, uint64_t base,
+		  uint64_t *roff, uint32_t *rty, uint32_t *si)
+{
+	if (t->elf64) {
+		uint64_t info = 0;
+
+		if (!kof_rd_u64(f, base, t->be, roff) ||
+		    !kof_rd_u64(f, base + 8u, t->be, &info))
+			return 0;
+		*rty = (uint32_t)(info & 0xffffffffu);
+		*si = (uint32_t)(info >> 32);
+	} else {
+		uint32_t lo = 0, info = 0;
+
+		if (!kof_rd_u32(f, base, t->be, &lo) ||
+		    !kof_rd_u32(f, base + 4u, t->be, &info))
+			return 0;
+		*roff = lo;
+		*rty = info & 0xffu;
+		*si = info >> 8;
+	}
+	return 1;
+}
+
+#define REL_STEP(t, rela) ((rela) ? ((t)->elf64 ? 24u : 12u) \
+				  : ((t)->elf64 ? 16u : 8u))
+
+/*
+ * WHICH RELOCATION MEANS "THIS SLOT WILL HOLD THAT SYMBOL".
+ *
+ * GLOB_DAT and JUMP_SLOT, and EVERY ARCHITECTURE NUMBERS THEM DIFFERENTLY.
+ * The code here used to test 6 and 7 unconditionally with a comment saying
+ * that i386 and x86-64 agreeing was luck - which was true, and the
+ * conclusion drawn from it was wrong: those two agree with NOTHING ELSE.
+ * ARM is 21 and 22, PowerPC and SPARC and m68k are 20 and 21, AArch64 is
+ * 1025 and 1026.
+ *
+ * MEASURED: of 400 big-endian objects in the sample corpus, 37 carry a
+ * .dynsym and NOT ONE produced a named import. A PowerPC bot's JMP_SLOT is
+ * 21, which this read as "not 6, not 7" and dropped - so every dynamically
+ * linked non-x86 object had an empty import table and its chain was
+ * whatever the syscall decoder alone could find.
+ *
+ * SH IS NOT IN THIS TABLE. Its two values are not in any header on this
+ * machine, and a relocation number guessed from memory is a number that
+ * silently attributes capabilities to the wrong addresses.
+ *
+ * MIPS IS IN IT AND WILL USUALLY STILL FIND NOTHING. Classic o32 resolves
+ * through the GOT without a per-slot relocation at all; R_MIPS_JUMP_SLOT
+ * exists and is 127, so a build that emits one is read, and a build that
+ * does not is not.
+ */
+static void slot_rtypes(uint16_t machine, uint32_t *glob, uint32_t *jmp)
+{
+	switch (machine) {
+	case 3:    case 62:  *glob = 6u;    *jmp = 7u;    return; /* 386, x86-64 */
+	case 40:             *glob = 21u;   *jmp = 22u;   return; /* ARM         */
+	case 183:            *glob = 1025u; *jmp = 1026u; return; /* AArch64     */
+	case 20:   case 21:                                       /* PPC, PPC64  */
+	case 2:    case 18:  case 43:                             /* SPARC       */
+	case 4:              *glob = 20u;   *jmp = 21u;   return; /* m68k        */
+	case 8:              *glob = 51u;   *jmp = 127u;  return; /* MIPS        */
+	case 243:            *glob = 0u;    *jmp = 5u;    return; /* RISC-V      */
+	default:             *glob = 0u;    *jmp = 0u;    return;
+	}
+}
+
+/*
+ * WHICH SLOT HOLDS WHICH NAME, kept only long enough to answer the stub
+ * search below. The name is held as its string table offset rather than as a
+ * string: sixteen bytes an entry instead of eighty, and the table is read
+ * again on the few that are hit.
+ */
+#define SLOTMAP_MAX 8192u
+
+struct slotmap {
+	uint64_t slot;
+	uint32_t stroff;
+};
+
+static int slotmap_find(const struct slotmap *m, uint32_t n, uint64_t a,
+			uint32_t *stroff)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (m[i].slot == a) {
+			*stroff = m[i].stroff;
+			return 1;
+		}
+	return 0;
+}
+
+uint32_t kof_elf_imports(kof_buf f, const struct kof_elf_info *p,
+			 kof_elf_name_fn fn, void *user)
+{
+	struct kof_elf_symtab t;
+	struct slotmap *map;
+	uint32_t i, n_map = 0, n = 0, rglob = 0, rjmp = 0;
+	uint64_t gotplt = 0;
+
+	if (!f.p || !p || !fn)
+		return 0;
+	/* Names are the whole answer here, so a table without its strings is
+	 * no answer at all. */
+	if (!kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_DYN, &t) || !t.strn)
+		return 0;
+	slot_rtypes(p->e_machine, &rglob, &rjmp);
+	if (!rglob && !rjmp)
+		return 0;
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++)
+		if (!strcmp(p->sec[i].name, ".got.plt")) {
+			/*
+			 * WHERE A 32-BIT PIC STUB'S SLOTS START.
+			 *
+			 * A position-independent PLT on x86 jumps through
+			 * `jmp *disp(%ebx)` with ebx holding the GOT's
+			 * address, so the displacement alone names nothing -
+			 * the base has to come from the section table.
+			 * x86-64 needs none of this: its stubs are
+			 * rip-relative and carry the whole address.
+			 */
+			gotplt = p->sec[i].mem_addr;
+			break;
+		}
+
+	map = (struct slotmap *)malloc(SLOTMAP_MAX * sizeof *map);
+
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		int rela = p->sec[i].type == SHT_RELA;
+		uint64_t k, step, have;
+
+		if (!rela && p->sec[i].type != SHT_REL)
+			continue;
+		step = REL_STEP(&t, rela);
+		/*
+		 * THE BYTES THAT EXIST, not the size the file declares.
+		 * sh_size is recorded unclamped, so walking to it is walking
+		 * to a number the file chose: a section claiming 2^62 is 2^62
+		 * refused reads, nothing faulting and nothing ending.
+		 */
+		have = kof_clip_len(f.n, p->sec[i].file_off,
+				    p->sec[i].file_size);
+		for (k = 0; k + step <= have; k += step) {
+			struct kof_elf_symbol sy;
+			uint64_t roff = 0;
+			uint32_t rty = 0, si = 0;
+			char nm[KOF_SYMNAME_MAX];
+
+			if (!rel_at(f, &t, p->sec[i].file_off + k,
+				    &roff, &rty, &si))
+				break;
+			if ((rty != rglob && rty != rjmp) || !si || si >= t.n)
+				continue;
+			if (!kof_elf_symbol_at(f, &t, si, &sy) ||
+			    !sy.nameoff || sy.nameoff >= t.strn)
+				continue;
+			if (map && n_map < SLOTMAP_MAX) {
+				map[n_map].slot = roff;
+				map[n_map].stroff = sy.nameoff;
+				n_map++;
+			}
+			sym_name(f, &t, &sy, nm, sizeof nm);
+			fn(user, roff, nm);
+			n++;
+		}
+	}
+
+	/*
+	 * AND THE STUBS THAT JUMP THROUGH THEM, because a compiler calls the
+	 * stub and not the slot. Three spellings, and which one a build used
+	 * is not something a caller should have to know:
+	 *
+	 *     ff 25 <disp32>   x86-64, rip-relative: slot = next + disp
+	 *     ff 25 <abs32>    x86 without PIC: the displacement IS the slot
+	 *     ff a3 <disp32>   x86 with PIC: slot = the GOT's address + disp
+	 *
+	 * X86 ONLY, and deliberately so. Every architecture spells its stub
+	 * differently and most need their own decoder; what the slots above
+	 * give is correct everywhere, and this is the one case where the
+	 * ADDRESS A COMPILER CALLS is not the slot's.
+	 *
+	 * The search is over the buffer rather than through the accessor:
+	 * this was three bounds-checked calls PER BYTE of every executable
+	 * section, thirty million of them on an ordinary ten-megabyte binary
+	 * to find a few hundred stubs. memchr finds the only opcode that can
+	 * begin one.
+	 */
+	if (p->e_machine != 3u && p->e_machine != 62u) {
+		free(map);
+		return n;
+	}
+	for (i = 0; map && i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		const uint8_t *code;
+		uint64_t o = 0, have;
+
+		if (!(p->sec[i].flags & SHF_EXECINSTR))
+			continue;
+		have = kof_clip_len(f.n, p->sec[i].file_off,
+				    p->sec[i].file_size);
+		if (have < 6u)
+			continue;
+		code = f.p + p->sec[i].file_off;
+		for (; o + 6u <= have; o++) {
+			const uint8_t *hit = memchr(code + o, 0xff,
+						    (size_t)(have - 5u - o));
+			uint8_t b1;
+			uint32_t d32 = 0, so = 0;
+			uint64_t here, slot;
+			char nm[KOF_SYMNAME_MAX];
+
+			if (!hit)
+				break;
+			o = (uint64_t)(hit - code);
+			b1 = code[o + 1u];
+			if (b1 != 0x25u && b1 != 0xa3u)
+				continue;
+			if (b1 == 0xa3u && (t.elf64 || !gotplt))
+				continue;
+			if (!kof_rd_u32(f, p->sec[i].file_off + o + 2u, 0,
+					&d32))
+				continue;
+			here = p->sec[i].mem_addr + o;
+			if (b1 == 0xa3u)
+				slot = gotplt + (uint64_t)(int64_t)(int32_t)d32;
+			else if (t.elf64)
+				slot = here + 6u +
+				       (uint64_t)(int64_t)(int32_t)d32;
+			else
+				slot = d32;
+			if (!slotmap_find(map, n_map, slot, &so))
+				continue;
+			str_read(f, t.str + so, nm, sizeof nm);
+			/*
+			 * THE STUB'S ADDRESS, rounded down to where it
+			 * begins. A caller resolved a call to some byte of
+			 * the stub; which byte depends on how the build
+			 * spelled it - `ff 25` first, or `endbr64` and then
+			 * the jump - and the entries are sixteen bytes apart
+			 * either way.
+			 *
+			 * ROUNDED WITHIN THE SECTION, NOT IN THE ADDRESS
+			 * SPACE, and the difference is not academic. This
+			 * was `here & ~15`, which assumes .plt itself starts
+			 * on a sixteen-byte boundary. One C++ binary in the
+			 * corpus has it at 0x408ac8 with sh_addralign 4, so
+			 * every entry sits at 8 modulo 16 and every stub was
+			 * registered EIGHT BYTES BEFORE ITSELF. Nothing
+			 * failed: 42 imports were resolved, 1109 call sites
+			 * matched none of them, and the object reported that
+			 * its code "claims nothing worth a chain".
+			 */
+			fn(user, p->sec[i].mem_addr + (o & ~15ull), nm);
+			n++;
+		}
+	}
+	free(map);
+	return n;
+}
+
+/*
+ * WHICH SECTION A RELOCATION APPLIES TO comes from its NAME and not from
+ * sh_info, which the parse does not publish: `.rela.text` relocates `.text`.
+ * That is a convention rather than a guarantee, and it is the one every
+ * toolchain that produces these follows. Returns the target section's file
+ * offset, or zero when there is no executable section by that name.
+ */
+static uint64_t rel_target_sec(const struct kof_elf_info *p, const char *nm)
+{
+	uint32_t j;
+
+	if (!strncmp(nm, ".rela", 5u))
+		nm += 5;
+	else if (!strncmp(nm, ".rel", 4u))
+		nm += 4;
+	else
+		return 0;
+	if (!*nm)
+		return 0;
+	for (j = 0; j < p->sec_count && j < KOF_ELF_MAX_SECTIONS; j++)
+		if (!strcmp(p->sec[j].name, nm) &&
+		    (p->sec[j].flags & SHF_EXECINSTR))
+			return p->sec[j].file_off;
+	return 0;
+}
+
+uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
+			  kof_elf_relcall_fn fn, void *user)
+{
+	struct kof_elf_symtab t;
+	uint32_t i, n = 0;
+	uint64_t pcbias;
+
+	if (!f.p || !p || !fn || p->e_type != KOF_ELF_REL)
+		return 0;
+	/* An undefined symbol is known by its name alone - see pth_relcall. */
+	if (!kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_FULL, &t) || !t.strn)
+		return 0;
+	/*
+	 * THE RELOCATIONS A CALL COMPILES TO, and only on the architectures
+	 * whose displacement rule is written down below. Tested once, here,
+	 * rather than per relocation: the numbers are reused - type 2 is
+	 * R_386_PC32 and also R_PPC_ADDR32 - so a machine this does not know
+	 * is a machine where every match would be a coincidence.
+	 */
+	if (p->e_machine != 40u && p->e_machine != 3u && p->e_machine != 62u)
+		return 0;
+	/*
+	 * WHERE THE DECODER WILL THINK THE CALL GOES.
+	 *
+	 * An unlinked `call` is `e8 00000000`, so its target reads as the
+	 * next instruction, and the relocation sits on the four displacement
+	 * bytes - r_offset + 4. ARM reads PC as the instruction plus eight
+	 * and its relocations sit on the `bl` itself, so there it is
+	 * r_offset + 8.
+	 */
+	pcbias = p->e_machine == 40u ? 8u : 4u;      /* EM_ARM */
+
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		int rela = p->sec[i].type == SHT_RELA;
+		uint64_t k, step, have, tgt_off;
+
+		if (!rela && p->sec[i].type != SHT_REL)
+			continue;
+		tgt_off = rel_target_sec(p, p->sec[i].name);
+		if (!tgt_off)
+			continue;
+		step = REL_STEP(&t, rela);
+		have = kof_clip_len(f.n, p->sec[i].file_off,
+				    p->sec[i].file_size);
+		for (k = 0; k + step <= have; k += step) {
+			struct kof_elf_symbol sy;
+			uint64_t roff = 0, sv = 0;
+			uint32_t rty = 0, si = 0;
+			char nm[KOF_SYMNAME_MAX];
+
+			if (!rel_at(f, &t, p->sec[i].file_off + k,
+				    &roff, &rty, &si))
+				break;
+			/*
+			 * PC32 and PLT32 are 2 and 4 on both x86-64 and
+			 * i386; the agreement is luck, so it is written down
+			 * rather than relied on silently. ARM's PLT32, CALL
+			 * and JUMP24 are 27, 28 and 29.
+			 *
+			 * MIPS WILL NEVER BE HERE. R_MIPS_26 leaves a 26-bit
+			 * field of zero, so `jal 0` resolves to the same
+			 * address for every call site in the section - there
+			 * is no unique target to report, and the whole trick
+			 * this rests on does not hold.
+			 */
+			if (p->e_machine == 40u) {
+				if (rty != 27u && rty != 28u && rty != 29u)
+					continue;
+			} else if (rty != 2u && rty != 4u) {
+				continue;
+			}
+			if (!si || si >= t.n)
+				continue;
+			if (!kof_elf_symbol_at(f, &t, si, &sy) ||
+			    !sy.nameoff || sy.nameoff >= t.strn)
+				continue;
+			/*
+			 * A DEFINED SYMBOL IS THE OTHER HALF OF THE JOB: the
+			 * relocation says where an INTERNAL call goes, and
+			 * that is what a module's own call graph is made of.
+			 * The target is the symbol's section plus its value -
+			 * and an ET_REL section declares address zero, so a
+			 * caller resolving addresses gets the file offset for
+			 * all of them, which is the number used here.
+			 */
+			if (sy.shndx) {
+				if (sy.shndx >= p->sec_count ||
+				    sy.shndx >= KOF_ELF_MAX_SECTIONS)
+					continue;
+				if (!(p->sec[sy.shndx].flags & SHF_EXECINSTR))
+					continue;
+				sv = p->sec[sy.shndx].file_off + sy.value;
+			}
+			sym_name(f, &t, &sy, nm, sizeof nm);
+			fn(user, tgt_off + roff + pcbias, sv, nm);
+			n++;
+		}
+	}
+	return n;
+}
+
+uint32_t kof_elf_funcs(kof_buf f, const struct kof_elf_info *p,
+		       kof_elf_func_fn fn, void *user)
+{
+	struct kof_elf_symtab t;
+	uint64_t i;
+	uint32_t n = 0;
+
+	if (!f.p || !p || !fn)
+		return 0;
+	if (!kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_FULL, &t))
+		return 0;
+	for (i = 1; i < t.n && i < 65536u; i++) {
+		struct kof_elf_symbol sy;
+		char nm[KOF_SYMNAME_MAX];
+		uint64_t va;
+
+		if (!kof_elf_symbol_at(f, &t, i, &sy))
+			break;
+		if ((sy.info & 0xfu) != 2u)             /* STT_FUNC */
+			continue;
+		if (!sy.shndx || sy.shndx >= p->sec_count ||
+		    sy.shndx >= KOF_ELF_MAX_SECTIONS)
+			continue;
+		if (!(p->sec[sy.shndx].flags & SHF_EXECINSTR))
+			continue;
+		/*
+		 * THE ADDRESS SPACE THE OBJECT IS READ IN. An ET_REL section
+		 * declares address zero, so everything in it is named by file
+		 * offset; a linked object has real addresses and gets them.
+		 */
+		va = sy.value + (p->sec[sy.shndx].mem_addr
+				 ? p->sec[sy.shndx].mem_addr
+				 : p->sec[sy.shndx].file_off);
+		sym_name(f, &t, &sy, nm, sizeof nm);
+		fn(user, va, sy.size, nm);
+		n++;
+	}
+	return n;
 }

@@ -49,8 +49,8 @@
  * wanted one. What changed is that there are now two consumers of it in this
  * tree rather than one, so the reach lives here once instead of in each.
  */
-#include "../libkofeng/analyzers/parsers/binaries/elf_parse.h"
-#include "../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../libkofeng/analyzers/parsers/events/amsi_parse.h"
 
 /* ---- the formats, and how to get a view of one ---------------------------- */

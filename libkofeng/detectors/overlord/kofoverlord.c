@@ -8,7 +8,7 @@
 
 #include <kofmod/elf.h>
 #include <kofmod/kofplague.h>
-#include "../matchers/kofplague.h"
+#include "plague/kofplague.h"
 #include "../../kofcore/rangelist.h"
 
 #define PT_LOAD 1u
@@ -68,7 +68,7 @@ static uint16_t permille(uint64_t a, uint64_t b)
 	return (uint16_t)((lo * 1000u) / hi);
 }
 
-int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
+int kof_plague_desc_build(struct kof_plague_desc *d, kof_buf file,
 		  const struct kof_elf_info *e,
 		  const struct kof_range *lib_span, uint32_t lib_n)
 {
@@ -89,8 +89,8 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
 
 	for (si = 0; si < e->seg_count && si < KOF_ELF_MAX_SEGMENTS; si++) {
 		const struct kof_elf_seg *g = &e->seg[si];
-		struct kof_ovl_region *r;
-		struct kof_range keep[KOF_LIB_MAX_SPANS + 2];
+		struct kof_plague_region *r;
+		struct kof_range keep[KOF_TRUE_MAX_SPANS + 2];
 		struct kof_rlist kl;
 		uint64_t len;
 		uint32_t k;
@@ -99,7 +99,7 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
 			d->ptypes |= 1u << g->type;
 		if (g->type != PT_LOAD)
 			continue;
-		if (d->n_region >= KOF_OVL_MAX_REGIONS) {
+		if (d->n_region >= KOF_PLAGUE_MAX_REGIONS) {
 			d->truncated = 1;
 			break;
 		}
@@ -144,32 +144,32 @@ int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
  * size rank second because within one kind the largest is the same thing in
  * both objects.
  */
-static uint32_t pair_regions(const struct kof_ovl_desc *a,
-			     const struct kof_ovl_desc *b,
+static uint32_t pair_regions(const struct kof_plague_desc *a,
+			     const struct kof_plague_desc *b,
 			     uint8_t *ia, uint8_t *ib)
 {
 	uint32_t n = 0, pass;
 
 	for (pass = 0; pass < 2; pass++) {
 		uint8_t want = pass == 0;
-		uint8_t la[KOF_OVL_MAX_REGIONS], lb[KOF_OVL_MAX_REGIONS];
+		uint8_t la[KOF_PLAGUE_MAX_REGIONS], lb[KOF_PLAGUE_MAX_REGIONS];
 		uint32_t na = 0, nb = 0, i, j, k;
 
 		/*
 		 * n_region IS BOUNDED HERE TOO, not only where it is built.
 		 *
-		 * la[] and lb[] are KOF_OVL_MAX_REGIONS long and `na`/`nb`
+		 * la[] and lb[] are KOF_PLAGUE_MAX_REGIONS long and `na`/`nb`
 		 * count into them, so a desc whose n_region says more than the
-		 * region[] array holds would write past both. kof_ovl_build
+		 * region[] array holds would write past both. kof_plague_build
 		 * caps it, and the module-side twin in kofmod/kofoverlord.h
-		 * writes `i < s->n_region && i < KOF_OVL_MAX_REGIONS` for
+		 * writes `i < s->n_region && i < KOF_PLAGUE_MAX_REGIONS` for
 		 * exactly this reason - this side was the one that trusted the
 		 * count.
 		 */
-		for (i = 0; i < a->n_region && i < KOF_OVL_MAX_REGIONS; i++)
+		for (i = 0; i < a->n_region && i < KOF_PLAGUE_MAX_REGIONS; i++)
 			if (a->region[i].x == want)
 				la[na++] = (uint8_t)i;
-		for (i = 0; i < b->n_region && i < KOF_OVL_MAX_REGIONS; i++)
+		for (i = 0; i < b->n_region && i < KOF_PLAGUE_MAX_REGIONS; i++)
 			if (b->region[i].x == want)
 				lb[nb++] = (uint8_t)i;
 		/* descending by size - insertion, at most eight */
@@ -183,7 +183,7 @@ static uint32_t pair_regions(const struct kof_ovl_desc *a,
 					b->region[lb[j]].fsz; j--) {
 				uint8_t t = lb[j]; lb[j] = lb[j - 1]; lb[j - 1] = t;
 			}
-		for (k = 0; k < na && k < nb && n < KOF_OVL_MAX_REGIONS; k++) {
+		for (k = 0; k < na && k < nb && n < KOF_PLAGUE_MAX_REGIONS; k++) {
 			ia[n] = la[k];
 			ib[n] = lb[k];
 			n++;
@@ -208,10 +208,10 @@ static uint32_t popcount64(uint64_t x)
 	return n;
 }
 
-void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
+void kof_ovl_compare(const struct kof_plague_desc *a, const struct kof_plague_desc *b,
 		     struct kof_ovl_vec *v)
 {
-	uint8_t ia[KOF_OVL_MAX_REGIONS], ib[KOF_OVL_MAX_REGIONS];
+	uint8_t ia[KOF_PLAGUE_MAX_REGIONS], ib[KOF_PLAGUE_MAX_REGIONS];
 	uint32_t n, i;
 	uint16_t worst = 1000;
 
@@ -252,8 +252,8 @@ void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
 
 	n = pair_regions(a, b, ia, ib);
 	for (i = 0; i < n; i++) {
-		const struct kof_ovl_region *ra = &a->region[ia[i]];
-		const struct kof_ovl_region *rb = &b->region[ib[i]];
+		const struct kof_plague_region *ra = &a->region[ia[i]];
+		const struct kof_plague_region *rb = &b->region[ib[i]];
 		uint16_t s = permille(ra->fsz, rb->fsz);
 
 		if (s < worst)
@@ -322,38 +322,9 @@ uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v)
  *
  * CONTAINMENT AND NOT JACCARD, which is the part both callers must agree on:
  * how much of the REFERENCE is here, so a variant that added a string or grew
- * a function is still the same program. See kof_ovl_blocks_pct in the header
+ * a function is still the same program. See kof_plague_blocks_pct in the header
  * for why the other question is the wrong one.
  *
- * Both sides are sorted and deduplicated at build time - see kof_ovl_build -
+ * Both sides are sorted and deduplicated at build time - see kof_plague_build -
  * so this is a merge and not a set membership test.
  */
-static inline uint32_t contain_pct(const void *obj, uint32_t n_obj,
-				   const void *ref, uint32_t n_ref, int wide)
-{
-	const uint64_t *o8 = obj, *r8 = ref;
-	const uint32_t *o4 = obj, *r4 = ref;
-	uint32_t i = 0, j = 0, in = 0;
-
-	if (!obj || !ref || !n_obj || !n_ref)
-		return 0;
-	while (i < n_obj && j < n_ref) {
-		uint64_t a = wide ? o8[i] : o4[i];
-		uint64_t b = wide ? r8[j] : r4[j];
-
-		if (a == b) {
-			in++; i++; j++;
-		} else if (a < b) {
-			i++;
-		} else {
-			j++;
-		}
-	}
-	return (uint32_t)(((uint64_t)in * 100u) / n_ref);
-}
-
-uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
-			    const uint32_t *ref, uint32_t n_ref)
-{
-	return contain_pct(obj, n_obj, ref, n_ref, 0);
-}

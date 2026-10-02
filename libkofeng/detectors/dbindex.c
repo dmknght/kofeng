@@ -54,7 +54,7 @@
 #include <stdio.h>
 
 #include "../databases/dbloader.h"
-#include "matchers/kofplague.h"
+#include "overlord/plague/kofplague.h"
 #include "matchers/kofmultimatch.h"
 
 struct kof_engine *kof_db_load(const char *path)

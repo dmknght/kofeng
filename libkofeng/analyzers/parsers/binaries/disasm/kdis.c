@@ -28,7 +28,7 @@
 #include "kofmod/elf.h"
 #include "kofmod/kdis.h"
 #include "kdis.h"
-#include "../../disinfect/pzero.h"
+#include "../../../../disinfect/pzero.h"
 
 #include "bddisasm.h"
 

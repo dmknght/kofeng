@@ -46,7 +46,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-#include "../../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 
 struct tally {
 	uint64_t seen;          /* PE files parsed both ways */

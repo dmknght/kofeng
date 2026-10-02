@@ -8,8 +8,8 @@
  */
 
 #include <kofmod/kofsym.h>
-#include "elf_sym.h"
-#include "pe_sym.h"
+#include "elf/elf_sym.h"
+#include "pe/pe_sym.h"
 
 uint32_t kof_syms_build(uint32_t format, const uint8_t *data, uint64_t data_n,
 			const void *info, uint8_t *out, uint32_t cap)

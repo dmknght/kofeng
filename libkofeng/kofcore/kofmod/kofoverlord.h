@@ -27,7 +27,7 @@
  *
  * ONE PERCENTAGE, AND IT IS STILL A CONJUNCTION
  *
- * kof_ovl_shape_pct answers with the WORST-agreeing dimension, never an average
+ * kof_plague_shape_pct answers with the WORST-agreeing dimension, never an average
  * of them. So `>= 70` means EVERY dimension agrees to at least seventy percent,
  * which is exactly the rule that measured zero false positives; an average
  * would let a perfect match on one dimension pay for a total disagreement on
@@ -51,7 +51,7 @@
  * Loadable regions a shape holds. An ELF the linker produced has two to four;
  * the objects with more are not programs.
  */
-#define KOF_OVL_MAX_REGIONS 8u
+#define KOF_PLAGUE_MAX_REGIONS 8u
 
 /*
  * A reference object's shape, as a rule declares it.
@@ -59,15 +59,15 @@
  * Written by the generator in kofviewer, from a sample somebody identified.
  * Nobody types one: every field is read off that file.
  */
-struct kof_ovl_shape {
+struct kof_plague_shape {
 	uint64_t fsize;
-	uint64_t region_fsz[KOF_OVL_MAX_REGIONS];
+	uint64_t region_fsz[KOF_PLAGUE_MAX_REGIONS];
 	uint32_t ptypes;      /* bit per p_type value below 32 */
 	uint16_t etype;
 	uint8_t  cls;         /* KOF_ELFCLASS_*  */
 	uint8_t  end;         /* KOF_ELFDATA_*   */
 	uint8_t  n_region;
-	uint8_t  region_x[KOF_OVL_MAX_REGIONS];   /* executable? */
+	uint8_t  region_x[KOF_PLAGUE_MAX_REGIONS];   /* executable? */
 	/*
 	 * WHETHER THESE NUMBERS HAVE THE STATIC LIBRARY TAKEN OUT.
 	 *
@@ -86,7 +86,7 @@ struct kof_ovl_shape {
 	 * Zero is that case and it is what a designated initialiser leaves
 	 * behind, so every reference written so far keeps the meaning it had.
 	 *
-	 * The generator sets it. See kof_ovl_shape_of_cut.
+	 * The generator sets it. See kof_plague_shape_of_cut.
 	 */
 	uint8_t  lib_cut;
 };
@@ -95,7 +95,7 @@ struct kof_ovl_shape {
 #define KOF_OVL_PT_LOAD 1u
 
 /* Per cent of the smaller over the larger; zero when either side is empty. */
-static inline uint32_t kof_ovl_ratio_pct(uint64_t a, uint64_t b)
+static inline uint32_t kof_plague_ratio_pct(uint64_t a, uint64_t b)
 {
 	uint64_t lo, hi;
 
@@ -113,9 +113,9 @@ static inline uint32_t kof_ovl_ratio_pct(uint64_t a, uint64_t b)
  * it writes a reference down. Two spellings of "which regions does this object
  * have" would be a rule that measures something the generator never recorded.
  */
-static inline void kof_ovl_shape_of(const struct kof_elf_info *e,
+static inline void kof_plague_shape_of(const struct kof_elf_info *e,
 				    uint64_t file_size,
-				    struct kof_ovl_shape *s)
+				    struct kof_plague_shape *s)
 {
 	uint32_t i;
 
@@ -137,7 +137,7 @@ static inline void kof_ovl_shape_of(const struct kof_elf_info *e,
 			s->ptypes |= 1u << g->type;
 		if (g->type != KOF_OVL_PT_LOAD || !g->file_size)
 			continue;
-		if (s->n_region >= KOF_OVL_MAX_REGIONS ||
+		if (s->n_region >= KOF_PLAGUE_MAX_REGIONS ||
 		    g->file_off >= file_size)
 			continue;
 		len = file_size - g->file_off;
@@ -158,14 +158,14 @@ static inline void kof_ovl_shape_of(const struct kof_elf_info *e,
  * agreed" and is one a rule must not try to tell apart.
  */
 /*
- * Compare two shapes already built. Split out of kof_ovl_shape_pct so the
+ * Compare two shapes already built. Split out of kof_plague_shape_pct so the
  * engine can hand over an object shape it built with the library taken out -
- * see kof_ovl_shape_of_cut - without a second spelling of the comparison.
+ * see kof_plague_shape_of_cut - without a second spelling of the comparison.
  */
-static inline uint32_t kof_ovl_shape_cmp(const struct kof_ovl_shape *cur_in,
-					 const struct kof_ovl_shape *s)
+static inline uint32_t kof_plague_shape_cmp(const struct kof_plague_shape *cur_in,
+					 const struct kof_plague_shape *s)
 {
-	struct kof_ovl_shape cur;
+	struct kof_plague_shape cur;
 	uint32_t worst, i, j, pass, paired = 0;
 
 	if (!cur_in || !s || !s->n_region)
@@ -178,7 +178,7 @@ static inline uint32_t kof_ovl_shape_cmp(const struct kof_ovl_shape *cur_in,
 	if (cur.ptypes != s->ptypes)
 		return 0;
 
-	worst = kof_ovl_ratio_pct(cur.fsize, s->fsize);
+	worst = kof_plague_ratio_pct(cur.fsize, s->fsize);
 
 	/*
 	 * PAIRED BY EXECUTABILITY AND SIZE RANK, NEVER BY INDEX. Two builds of
@@ -188,13 +188,13 @@ static inline uint32_t kof_ovl_shape_cmp(const struct kof_ovl_shape *cur_in,
 	 */
 	for (pass = 0; pass < 2; pass++) {
 		unsigned char want = pass == 0;
-		unsigned char la[KOF_OVL_MAX_REGIONS], lb[KOF_OVL_MAX_REGIONS];
+		unsigned char la[KOF_PLAGUE_MAX_REGIONS], lb[KOF_PLAGUE_MAX_REGIONS];
 		uint32_t na = 0, nb = 0, k;
 
 		for (i = 0; i < cur.n_region; i++)
 			if (cur.region_x[i] == want)
 				la[na++] = (unsigned char)i;
-		for (i = 0; i < s->n_region && i < KOF_OVL_MAX_REGIONS; i++)
+		for (i = 0; i < s->n_region && i < KOF_PLAGUE_MAX_REGIONS; i++)
 			if (s->region_x[i] == want)
 				lb[nb++] = (unsigned char)i;
 		for (i = 1; i < na; i++)
@@ -210,7 +210,7 @@ static inline uint32_t kof_ovl_shape_cmp(const struct kof_ovl_shape *cur_in,
 				lb[j] = lb[j - 1]; lb[j - 1] = t;
 			}
 		for (k = 0; k < na && k < nb; k++) {
-			uint32_t p = kof_ovl_ratio_pct(cur.region_fsz[la[k]],
+			uint32_t p = kof_plague_ratio_pct(cur.region_fsz[la[k]],
 						       s->region_fsz[lb[k]]);
 
 			if (p < worst)
@@ -223,22 +223,22 @@ static inline uint32_t kof_ovl_shape_cmp(const struct kof_ovl_shape *cur_in,
 	return worst > 100u ? 100u : worst;
 }
 
-static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
-					 const struct kof_ovl_shape *s,
+static inline uint32_t kof_plague_shape_pct(const struct kof_elf_info *e,
+					 const struct kof_plague_shape *s,
 					 uint64_t file_size)
 {
-	struct kof_ovl_shape cur;
+	struct kof_plague_shape cur;
 
 	if (!e)
 		return 0;
-	kof_ovl_shape_of(e, file_size, &cur);
-	return kof_ovl_shape_cmp(&cur, s);
+	kof_plague_shape_of(e, file_size, &cur);
+	return kof_plague_shape_cmp(&cur, s);
 }
 
 /*
  * The rule-facing spelling, so a module reads like the plague one beside it:
  *
- *     if (kof_ovl_shape(ref_50d7781f) >= 70u)
+ *     if (kof_plague_shape(ref_50d7781f) >= 70u)
  *             KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);
  *
  * SUSPECT and not INFECT is the generator's default and the reason is in the
@@ -248,71 +248,18 @@ static inline uint32_t kof_ovl_shape_pct(const struct kof_elf_info *e,
  */
 /*
  * THE HOST ANSWERS IT WHEN IT CAN, because only the host knows where the static
- * library is - see kof_ovl_shape.lib_cut. The inline is the fallback and is
+ * library is - see kof_plague_shape.lib_cut. The inline is the fallback and is
  * what a reference that did not ask for the cut gets either way, so the two
  * paths agree on every reference written before the cut existed.
  */
-#define kof_ovl_shape(ref)                                                 \
+#define kof_plague_shape(ref)                                                 \
 	((ctx)->content->ovl_shape                                         \
 	 ? (ctx)->content->ovl_shape((ctx), &(ref))                        \
-	 : kof_ovl_shape_pct(kof_elf(ctx), &(ref), (ctx)->obj_size))
+	 : kof_plague_shape_pct(kof_elf(ctx), &(ref), (ctx)->obj_size))
 
-/*
- * A CALL CHAIN, AS SOMETHING A RULE CAN CARRY.
- *
- * What the code DOES: which capabilities it asks the system for, in order,
- * which of them carry a program-level flag, and which took an argument an
- * earlier one produced. See detectors/overlord/ovlflow.h for how one is read out of
- * code, and kof_ovl_chain in kofmod/kofsig.h for how a rule asks about one.
- *
- * NO ADDRESSES AND NO INDICES. kof_flow_node - the engine's working record -
- * holds a virtual address, a function number and a step count, and none of
- * those survives a rebuild or belongs in a signature. What survives is the
- * shape, and a stored chain is exactly the shape.
- *
- * Fixed and small, because a rule's reference lands in the module's .rodata
- * beside its strings and its block hashes, and a reference that needed an
- * allocation would be one somebody has to remember to free.
- */
-struct kof_ovlf_step {
-	uint8_t cap;    /* enum kof_flow_cap - analyzers/disasm/flow.h */
-	/*
-	 * The KOF_FLOWF_* bits that are about the PROGRAM: in a loop, the
-	 * value was later branched to, the import was called through a
-	 * register, the page is writable and executable at once. The bit that
-	 * says how confidently the selector was decoded is not one of them and
-	 * is never stored - that would be a rule about the decoder.
-	 */
-	uint8_t flags;
-	/*
-	 * THE LINK, as a distance and not an index.
-	 *
-	 * "Its buffer came from the step two before it" is the same claim in
-	 * every build; "its buffer came from node 674" is a fact about one
-	 * file. Only the first argument carrying one is kept: a rule that
-	 * pinned all four would be pinning the calling convention.
-	 *
-	 * AND IT IS THE ONLY THING THAT FIXES AN ORDER. A compiler may open
-	 * the socket before it maps the page or after, and both are the same
-	 * program - so the match is order-free EXCEPT where a step consumes
-	 * what an earlier one produced, which no layout can reverse. See
-	 * kof_ovlf_chain_pct.
-	 *
-	 * 0 means no link was seen, which is NOT the same as "there is none":
-	 * the sweep loses a pointer spilled to the stack, and on a PE that is
-	 * nearly all of them.
-	 */
-	uint8_t back;
-};
+/* The step and the symptom moved to kofmod/kofpathogen.h, beside the
+ * vocabulary they are made of. */
+#include <kofmod/kofpathogen.h>
 
-/* Long enough for every shape measured so far - the longest chain holding an
- * alloc-exec in 1500 PE samples was 19 steps - and short enough that the
- * alignment table stays a few hundred cells. */
-#define KOF_OVLF_CHAIN_MAX 24u
-
-struct kof_ovlf_chain {
-	struct kof_ovlf_step s[KOF_OVLF_CHAIN_MAX];
-	uint8_t n;
-};
 
 #endif /* KOFMOD_KOFOVERLORD_H */

@@ -40,7 +40,7 @@
 #include <kofmod/kofplague.h>
 #include <kofmod/kofoverlord.h>
 #include <kofeng.h>
-#include "../libkofeng/detectors/overlord/ovlflow.h"
+#include "../libkofeng/detectors/overlord/pathogen/diagnose.h"
 #include "kofinspect.h"
 
 
@@ -692,7 +692,7 @@ static inline int grp_is_at(int rule) { return rule == 3; }
 #define SIM_IT_BLOCK  0u
 /*
  * THE OBJECT'S GEOMETRY - size, how many loadable regions and how big each -
- * against a reference somebody identified: kof_ovl_shape. It reads no bytes,
+ * against a reference somebody identified: kof_plague_shape. It reads no bytes,
  * which is the whole reason it exists: it still answers when the payload is
  * ciphertext. See kofmod/kofoverlord.h.
  */
@@ -700,7 +700,7 @@ static inline int grp_is_at(int rule) { return rule == 3; }
 /*
  * THE BLOCK VECTOR - how alike the object is across the reference's WHOLE set
  * of selected windows, not how much of any one named run is here:
- * kof_ovl_blocks. Its own set, built by kof_ovl_build with the library cut
+ * kof_plague_blocks. Its own set, built by kof_plague_build with the library cut
  * out; the blocks a researcher ticked are the ones they meant individually.
  *
  * Measured: agreement across the set beat the best single block - 83.0%
@@ -708,26 +708,23 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * region is what a rebuild preserves and a coincidence does not.
  */
 /*
- * 2 IS NOT USED AND IS NOT A MISTAKE.
+ * 3 IS NOT USED EITHER, AND FOR THE SAME REASON AS 2.
  *
- * It was the string set - kof_ovl_strings - which measured which of a
- * reference's printable runs an object still held. It is gone: the runs are
- * hashed by their BYTES, so any encoding of the strings answers zero, and the
- * measure was therefore only ever correct on an object the normaliser had
- * already been through. Surveyed over real samples it was also the least
- * stable of the four across that transform - 62.8% of a parent's set survived
- * into its own normalised view on malware, 45.0% on clean objects - and on
- * large statically linked binaries it scored unrelated programs alike, because
- * what it was mostly comparing was printable byte sequences inside machine
- * code (12.11% of cross-family Go pairs reached 80%).
+ * It was the block vector - how alike an object was across a reference's
+ * WHOLE set of selected windows rather than how much of one named run it
+ * carried. The measurement was sound; the reach was not. Containment over a
+ * whole set is strict enough that it answered on very few objects, and the
+ * ones it did answer on were ones a named block already had, so a second
+ * set-shaped measure was cost without reach.
  *
- * The gap is left so that the ids of the measures that remain do not move.
+ * The id stays a gap for the reason 2's does: so the ids of the measures that
+ * remain do not move, and a draft written by an older build still reads.
  */
 #define SIM_IT_BLKSET 3u
 /*
  * THE OBJECT'S CALL CHAIN - which capabilities its code asks the system for,
  * in order, and which of them were handed something an earlier one produced:
- * kof_ovl_chain. See detectors/overlord/ovlflow.h.
+ * kof_pth_match. See detectors/overlord/pathogen/diagnose.h.
  *
  * IT READS CODE AND NOT BYTES, which is what puts it beside the other three
  * rather than inside them. The block measure is exact and dies on a recompile;
@@ -1016,7 +1013,7 @@ struct kof_draft {
 	 * object, and a second shape would be a second object's - which is a
 	 * second rule.
 	 */
-	struct kof_ovl_shape shp;
+	struct kof_plague_shape shp;
 	int          has_shp;
 	/*
 	 * AND ITS STRINGS, after the static library was subtracted.
@@ -1040,9 +1037,9 @@ struct kof_draft {
 	 * ONE, like the shape and unlike the two sets: a chain is a sequence,
 	 * a second chain is a second sequence, and two sequences in one rule
 	 * are two claims that want two matchers. Which one is "worthiest" is
-	 * kof_ovlf_worth's answer, which is the same gate the aligner applies.
+	 * kof_diag_worth's answer, which is the same gate the aligner applies.
 	 */
-	struct kof_ovlf_chain chain;
+	struct kof_pth_symptom chain;
 	int          has_chain;
 	/*
 	 * WHICH WHOLE-OBJECT MEASURES THE AUTHOR HAS CHOSEN, and which of them
@@ -1258,7 +1255,7 @@ struct object {
 	uint8_t   sym_declared;
 
 	/*
-	 * WHAT kof_ovl_build MADE OF THIS OBJECT, KEPT.
+	 * WHAT kof_plague_build MADE OF THIS OBJECT, KEPT.
 	 *
 	 * It reads every byte - the string set and the block vector are over
 	 * the whole thing - and the panel asked for it again every time the
@@ -1298,7 +1295,7 @@ struct object {
 	 * sim_chain_sweep. A property of the object like the other two, and
 	 * re-derived on every arrival for the same reason they were.
 	 */
-	struct kof_ovlf_chain chain;
+	struct kof_pth_symptom chain;
 	int                   has_chain;
 	uint8_t               chain_done;
 

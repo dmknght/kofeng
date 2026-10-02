@@ -1,10 +1,10 @@
 /*
- * koflib.c - the marker span.
+ * trueline.c - the marker span.
  *
  * ONE TIER, BECAUSE ONE TIER IS WHAT WAS MEASURED. See the note in koflib.h.
  */
 
-#include "koflib.h"
+#include "trueline.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -740,8 +740,8 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
  * every other unknown is resolved in here: what cannot be attributed stays with
  * the author, so a view never loses a record on a guess.
  */
-int kof_lib_has_addr(const struct kof_elf_info *e,
-		     const struct kof_lib_all *lib, uint64_t va, uint64_t size)
+int kof_true_has_addr(const struct kof_elf_info *e,
+		     const struct kof_true_all *lib, uint64_t va, uint64_t size)
 {
 	uint64_t off, end;
 	uint32_t i;
@@ -761,8 +761,8 @@ int kof_lib_has_addr(const struct kof_elf_info *e,
 	return 0;
 }
 
-void kof_lib_find(kof_buf file, const struct kof_elf_info *e,
-		  struct kof_lib_result *out)
+void kof_true_find(kof_buf file, const struct kof_elf_info *e,
+		  struct kof_true_result *out)
 {
 	struct kof_rlist l;
 	uint32_t s;
@@ -772,7 +772,7 @@ void kof_lib_find(kof_buf file, const struct kof_elf_info *e,
 	memset(out, 0, sizeof *out);
 	if (!file.p || !file.n || !e || !e->valid)
 		return;
-	kof_rl_init(&l, out->span, KOF_LIB_MAX_SPANS);
+	kof_rl_init(&l, out->span, KOF_TRUE_MAX_SPANS);
 
 	/* Per loadable segment, so a hit in one cannot cut another. */
 	for (s = 0; s < e->seg_count && s < KOF_ELF_MAX_SEGMENTS; s++) {
@@ -792,7 +792,7 @@ void kof_lib_find(kof_buf file, const struct kof_elf_info *e,
 }
 
 static void lib_find_tiered(kof_buf file, const struct kof_elf_info *e,
-			    struct kof_lib_all *out, int with_markers)
+			    struct kof_true_all *out, int with_markers)
 {
 	struct kof_rlist l;
 
@@ -800,9 +800,9 @@ static void lib_find_tiered(kof_buf file, const struct kof_elf_info *e,
 		return;
 	memset(out, 0, sizeof *out);
 	if (with_markers) {
-		struct kof_lib_result marks;
+		struct kof_true_result marks;
 
-		kof_lib_find(file, e, &marks);
+		kof_true_find(file, e, &marks);
 		memcpy(out->span, marks.span, marks.n * sizeof marks.span[0]);
 		out->n = marks.n;
 	}
@@ -814,7 +814,7 @@ static void lib_find_tiered(kof_buf file, const struct kof_elf_info *e,
 	 * symbol defined inside a marker run says which object file that run
 	 * came out of - and then adds its own beside them.
 	 */
-	kof_rl_init(&l, out->span, KOF_LIB_MAX_SPANS_ALL);
+	kof_rl_init(&l, out->span, KOF_TRUE_MAX_SPANS_ALL);
 	l.n = out->n;
 	{
 		/*
@@ -833,18 +833,18 @@ static void lib_find_tiered(kof_buf file, const struct kof_elf_info *e,
 		 * exact symbol extents are already in `l`.
 		 */
 		struct kof_range *mine_v =
-			malloc(KOF_LIB_MAX_SPANS_ALL * sizeof *mine_v);
+			malloc(KOF_TRUE_MAX_SPANS_ALL * sizeof *mine_v);
 		struct kof_rlist mine;
 
-		kof_rl_init(&mine, mine_v, mine_v ? KOF_LIB_MAX_SPANS_ALL : 0u);
+		kof_rl_init(&mine, mine_v, mine_v ? KOF_TRUE_MAX_SPANS_ALL : 0u);
 		symbol_spans(file, e, &l, &mine);
 		free(mine_v);
 	}
 	out->n = kof_rl_normalise(&l);
 }
 
-void kof_lib_find_all(kof_buf file, const struct kof_elf_info *e,
-		      struct kof_lib_all *out)
+void kof_true_find_all(kof_buf file, const struct kof_elf_info *e,
+		      struct kof_true_all *out)
 {
 	lib_find_tiered(file, e, out, 1);
 }
@@ -862,8 +862,8 @@ static int lib_object_is_static(const struct kof_elf_info *e)
 	return 1;
 }
 
-void kof_lib_find_object(kof_buf file, const struct kof_elf_info *e,
-			 struct kof_lib_all *out)
+void kof_true_find_object(kof_buf file, const struct kof_elf_info *e,
+			 struct kof_true_all *out)
 {
 	if (!out)
 		return;
@@ -871,13 +871,13 @@ void kof_lib_find_object(kof_buf file, const struct kof_elf_info *e,
 	if (!e || !file.p || !file.n)
 		return;
 	if (lib_object_is_static(e))
-		kof_lib_find_all(file, e, out);
+		kof_true_find_all(file, e, out);
 	else
-		kof_lib_find_syms(file, e, out);
+		kof_true_find_syms(file, e, out);
 }
 
-void kof_lib_find_syms(kof_buf file, const struct kof_elf_info *e,
-		       struct kof_lib_all *out)
+void kof_true_find_syms(kof_buf file, const struct kof_elf_info *e,
+		       struct kof_true_all *out)
 {
 	lib_find_tiered(file, e, out, 0);
 }

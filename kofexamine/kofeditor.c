@@ -1444,9 +1444,9 @@ void say_err(struct kof_editor *e, const char *fmt, ...)
 /* ---- what an object IS, worked out once ------------------------------------
  *
  * HERE RATHER THAN IN THE VIEWER, because these are facts about an object and
- * not about a screen: a digest, the sets kof_ovl_build makes of it, what the
+ * not about a screen: a digest, the sets kof_plague_build makes of it, what the
  * emulator's gate said. The panel was working each of them out for itself, and
- * more than once - kof_ovl_build ran twice per arrival at an object, once to
+ * more than once - kof_plague_build ran twice per arrival at an object, once to
  * seed the draft and once to score it - which is the duplication this file
  * exists to stop for everything else the two tools share.
  *
@@ -1495,7 +1495,7 @@ uint8_t obj_emu_why(const struct object *o)
  *
  * Two callers wanted them and each built its own: sim_recarve, to seed a draft
  * with the measures this object offers, and plg_sim_refresh, to score the
- * draft against it. Both called kof_ovl_build over the whole object, so every
+ * draft against it. Both called kof_plague_build over the whole object, so every
  * arrival at an object read it twice - 231ms and 230ms of one 0.7s keypress.
  * They ask this instead, and the second caller finds it already done.
  *
@@ -1505,8 +1505,8 @@ uint8_t obj_emu_why(const struct object *o)
  */
 int obj_ovl(struct object *o)
 {
-	struct kof_ovl_desc *d;
-	struct kof_lib_all   olib;
+	struct kof_plague_desc *d;
+	struct kof_true_all   olib;
 	uint32_t i, nb;
 
 	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
@@ -1520,9 +1520,9 @@ int obj_ovl(struct object *o)
 		return 0;
 	}
 	/* The spans this object's library owns, established here and handed
-	 * over rather than searched for inside - see kof_ovl_build. */
-	kof_lib_find_object(o->buf, (const struct kof_elf_info *)o->info, &olib);
-	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info,
+	 * over rather than searched for inside - see kof_plague_build. */
+	kof_true_find_object(o->buf, (const struct kof_elf_info *)o->info, &olib);
+	if (!kof_plague_desc_build(d, o->buf, (const struct kof_elf_info *)o->info,
 			   olib.span, olib.n)) {
 		free(d);
 		return 0;
@@ -4025,22 +4025,28 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 			 * a conjunction over all of them.
 			 */
 			case SIM_IT_SHAPE:
-				fprintf(f, "kof_ovl_shape(ref_shape) >= %uu",
+				fprintf(f, "kof_plague_shape(ref_shape) >= %uu",
 					q->pct);
 				break;
 			/*
 			 * AND THE CHAIN READS CODE WITHOUT READING ITS BYTES
-			 * AS BYTES - see kof_ovl_chain. The reference is the
+			 * AS BYTES - see kof_pth_match. The reference is the
 			 * module's own, like the two sets above it.
 			 */
 			case SIM_IT_CHAIN:
-				fprintf(f, "kof_ovl_chain(ref_chain) >= %uu",
+				fprintf(f, "kof_pth_match(ref_chain) >= %uu",
 					q->pct);
 				break;
+			/*
+			 * THE BLOCK VECTOR WAS THE DEFAULT AND IS GONE - see
+			 * the note on its slot in kofsig.h. Nothing can tick
+			 * it any more, so a measure that reaches here is one
+			 * this build does not know how to write; it is
+			 * skipped rather than emitted as a call that would
+			 * not compile.
+			 */
 			default:
-				fprintf(f, "kof_ovl_blocks(ref_blocks) >= %uu",
-					q->pct);
-				break;
+				continue;
 			}
 			wrote++;
 		}
@@ -6215,12 +6221,12 @@ have_path:
 	 * was read off the sample named in the header above; nobody types one.
 	 */
 	if (draft_uses_sim(e, SIM_IT_SHAPE)) {
-		const struct kof_ovl_shape *sh = &e->dr.shp;
+		const struct kof_plague_shape *sh = &e->dr.shp;
 		uint32_t ri;
 
 		fprintf(f, "\n/* The shape of the sample above: what the "
 			"builder produced, not what it says. */\n");
-		fprintf(f, "static const struct kof_ovl_shape ref_shape = {\n");
+		fprintf(f, "static const struct kof_plague_shape ref_shape = {\n");
 		fprintf(f, "\t.fsize    = %lluull,\n",
 			(unsigned long long)sh->fsize);
 		fprintf(f, "\t.ptypes   = 0x%08xu,\n", sh->ptypes);
@@ -6229,16 +6235,16 @@ have_path:
 		fprintf(f, "\t.end      = %uu,\n", sh->end);
 		fprintf(f, "\t.n_region = %uu,\n", sh->n_region);
 		/* What these numbers ARE, written down beside them - see
-		 * kof_ovl_shape.lib_cut. Without it the engine would compare a
+		 * kof_plague_shape.lib_cut. Without it the engine would compare a
 		 * library-free reference against a library-inclusive object. */
 		if (sh->lib_cut)
 			fprintf(f, "\t.lib_cut  = 1u,\n");
 		fprintf(f, "\t.region_fsz = {");
-		for (ri = 0; ri < sh->n_region && ri < KOF_OVL_MAX_REGIONS; ri++)
+		for (ri = 0; ri < sh->n_region && ri < KOF_PLAGUE_MAX_REGIONS; ri++)
 			fprintf(f, "%s %lluull", ri ? "," : "",
 				(unsigned long long)sh->region_fsz[ri]);
 		fprintf(f, " },\n\t.region_x   = {");
-		for (ri = 0; ri < sh->n_region && ri < KOF_OVL_MAX_REGIONS; ri++)
+		for (ri = 0; ri < sh->n_region && ri < KOF_PLAGUE_MAX_REGIONS; ri++)
 			fprintf(f, "%s %uu", ri ? "," : "", sh->region_x[ri]);
 		fprintf(f, " }\n};\n");
 	}
@@ -6273,20 +6279,37 @@ have_path:
 
 		fprintf(f, "\n/* What the sample above asks the system for, in "
 			"order. Read out of its\n * code by the sweep in "
-			"analyzers/disasm/flow.c - no bytes of it are kept. */\n");
-		fprintf(f, "static const struct kof_ovlf_chain ref_chain = {\n");
+			"analyzers/parsers/binaries/disasm/flow.c - no bytes of it are kept. */\n");
+		fprintf(f, "static const struct kof_pth_symptom ref_chain = {\n");
 		fprintf(f, "\t.n = %uu,\n\t.s = {\n", e->dr.chain.n);
 		for (ci = 0; ci < e->dr.chain.n &&
-			     ci < KOF_OVLF_CHAIN_MAX; ci++) {
-			const struct kof_ovlf_step *st = &e->dr.chain.s[ci];
+			     ci < KOF_PTH_SYMPTOM_MAX; ci++) {
+			const struct kof_pth_step *st = &e->dr.chain.s[ci];
 
 			/* The capability as a NUMBER with its word beside it:
-			 * enum kof_flow_cap lives in analyzers/disasm/flow.h, which
+			 * enum kof_flow_cap lives in analyzers/parsers/binaries/disasm/flow.h, which
 			 * is engine-side, and a rule is compiled against the
 			 * kofmod headers alone. */
-			fprintf(f, "\t\t{ %2uu, 0x%02xu, %uu },   /* %s%s */\n",
+			/*
+			 * THE NAME IS WRITTEN AS A COMMENT AND NOT AS A FIELD.
+			 *
+			 * A chain taken off one sample carries whichever name
+			 * that build happened to use, and a rule emitted with
+			 * it pinned would match that sample and its siblings
+			 * and nothing else. So the generated rule is about
+			 * CAPABILITIES, which is what travels, and the names
+			 * are written beside them for the researcher to pin by
+			 * hand where they decide the word is too wide - which
+			 * on the kernel side is measurable and on the libc
+			 * side is measurably the wrong move.
+			 */
+			fprintf(f, "\t\t{ %2uu, 0x%02xu, %uu },   /* %s%s%s%s */\n",
 				st->cap, st->flags, st->back,
 				kof_flow_cap_name(st->cap),
+				st->name && kof_flow_name_of(st->name)
+					? " = " : "",
+				st->name && kof_flow_name_of(st->name)
+					? kof_flow_name_of(st->name) : "",
 				st->back ? ", fed by an earlier step" : "");
 		}
 		fprintf(f, "\t}\n};\n");
@@ -6883,7 +6906,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 * counting commas - which is what lets a field be added to the
 		 * struct without this silently reading the next one.
 		 */
-		if (strstr(line, "struct kof_ovl_shape ref_shape")) {
+		if (strstr(line, "struct kof_plague_shape ref_shape")) {
 			in_shape = 1;
 			e->dr.has_shp = 1;
 			continue;
@@ -6893,7 +6916,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 * line, three numbers a line. See the emitter - the words in
 		 * the comments are for a reader and nothing parses them.
 		 */
-		if (strstr(line, "struct kof_ovlf_chain ref_chain")) {
+		if (strstr(line, "struct kof_pth_symptom ref_chain")) {
 			in_chain = 1;
 			e->dr.has_chain = 1;
 			e->dr.chain.n = 0;
@@ -6902,8 +6925,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		if (in_chain) {
 			const char *q = strchr(line, '{');
 
-			if (q && e->dr.chain.n < KOF_OVLF_CHAIN_MAX) {
-				struct kof_ovlf_step *st =
+			if (q && e->dr.chain.n < KOF_PTH_SYMPTOM_MAX) {
+				struct kof_pth_step *st =
 					&e->dr.chain.s[e->dr.chain.n];
 				char *end;
 
@@ -6941,7 +6964,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					strtoul(strchr(q, '=') + 1, NULL, 0);
 			/* Read back, so reopening a draft does not quietly turn
 			 * a library-free reference into a library-inclusive
-			 * one - see kof_ovl_shape.lib_cut. */
+			 * one - see kof_plague_shape.lib_cut. */
 			else if ((q = strstr(line, ".lib_cut")) != NULL)
 				e->dr.shp.lib_cut = (uint8_t)
 					strtoul(strchr(q, '=') + 1, NULL, 0);
@@ -6949,7 +6972,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				const char *r = strchr(q, '{');
 				uint32_t k;
 
-				for (k = 0; r && k < KOF_OVL_MAX_REGIONS; k++) {
+				for (k = 0; r && k < KOF_PLAGUE_MAX_REGIONS; k++) {
 					e->dr.shp.region_fsz[k] =
 						strtoull(r + 1, NULL, 0);
 					r = strchr(r + 1, ',');
@@ -6958,7 +6981,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				const char *r = strchr(q, '{');
 				uint32_t k;
 
-				for (k = 0; r && k < KOF_OVL_MAX_REGIONS; k++) {
+				for (k = 0; r && k < KOF_PLAGUE_MAX_REGIONS; k++) {
 					e->dr.shp.region_x[k] = (uint8_t)
 						strtoul(r + 1, NULL, 0);
 					r = strchr(r + 1, ',');
@@ -6985,7 +7008,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				in_blkv = 0;
 			continue;
 		}
-		if ((p = strstr(line, "kof_ovl_chain(")) != NULL) {
+		if ((p = strstr(line, "kof_pth_match(")) != NULL) {
 			const char *ge = strstr(p, ">=");
 
 			if (chain_pct)
@@ -6994,16 +7017,8 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					: GRP_PCT_DEFAULT;
 			pending |= 16u;
 		}
-		if ((p = strstr(line, "kof_ovl_blocks(")) != NULL) {
-			const char *ge = strstr(p, ">=");
-
-			if (blkv_pct)
-				*blkv_pct = ge
-					? (uint8_t)strtoul(ge + 2, NULL, 10)
-					: GRP_PCT_DEFAULT;
-			pending |= 8u;
-		}
-		if ((p = strstr(line, "kof_ovl_shape(")) != NULL) {
+		
+		if ((p = strstr(line, "kof_plague_shape(")) != NULL) {
 			const char *ge = strstr(p, ">=");
 
 			if (shp_pct)

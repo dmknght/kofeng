@@ -91,6 +91,24 @@ struct page {
 	 * instructions and hands a child back.
 	 */
 	int      gwritten;
+	/*
+	 * HOW FAR INTO THE PAGE A WRITE ACTUALLY REACHED, as one past the
+	 * last byte stored. Zero while nothing has been written.
+	 *
+	 * `written` says the page is part of what the stub produced; it does
+	 * not say how much of it is. A page is committed zero-filled, so a
+	 * stub that decrypts 1,900 bytes into a fresh page still hands back
+	 * 4,096 - and the 2,196 zeroes after the payload are not something
+	 * the program made, they are the page it was given. Measured on
+	 * samples/msfvenom-encr/poly: 4,096 bytes recovered of which about
+	 * half is the page.
+	 *
+	 * ONLY THE HIGH WATER MARK. A low one would let the region start
+	 * mid-page, which moves the address the region is reported at, and
+	 * every reader of that address would have to learn the new rule. The
+	 * tail is where the waste is.
+	 */
+	uint16_t wr_hi;
 	int      snapped;             /* and it has since been executed and taken */
 };
 
@@ -845,7 +863,14 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 				return 0;
 			}
 		}
-		p->data[(va + i) & (KOF_EMU_PAGE - 1u)] = s[i];
+		{
+			uint32_t po = (uint32_t)((va + i) &
+						 (KOF_EMU_PAGE - 1u));
+
+			p->data[po] = s[i];
+			if (po + 1u > p->wr_hi)
+				p->wr_hi = (uint16_t)(po + 1u);
+		}
 		/*
 		 * A WRITE BACK TO WHAT WAS JUST READ, near where the last one
 		 * was - see `last_read_va`. Eight bytes of slack, so a loop
@@ -8287,7 +8312,7 @@ int kof_emu_next_written(struct kof_emu *e, uint32_t *it, uint64_t *va,
 		uint32_t s = *it, n = 1;
 		struct page *p;
 		uint8_t *buf;
-		uint64_t k;
+		uint64_t k, trim;
 
 		while (s + n < e->n_sorted &&
 		       e->sorted[s + n] == e->sorted[s + n - 1u] + KOF_EMU_PAGE)
@@ -8299,13 +8324,23 @@ int kof_emu_next_written(struct kof_emu *e, uint32_t *it, uint64_t *va,
 			p = page_find(e, e->sorted[s + k]);
 			memcpy(buf + k * KOF_EMU_PAGE, p->data, KOF_EMU_PAGE);
 		}
+		/*
+		 * AND THE RUN ENDS WHERE THE WRITING DID - see page.wr_hi.
+		 * Only the LAST page of the run is trimmed: an interior page
+		 * is followed by another written page, so its tail is between
+		 * two things the stub made and cutting it would put a hole in
+		 * the middle of a payload.
+		 */
+		p = page_find(e, e->sorted[s + n - 1u]);
+		trim = (uint64_t)(n - 1u) * KOF_EMU_PAGE +
+		       (p && p->wr_hi ? p->wr_hi : KOF_EMU_PAGE);
 		/* Owned by the emulator, replaced on the next call. One live run
 		 * at a time is all a caller needs and all this has to track. */
 		free(e->run_buf);
 		e->run_buf = buf;
 		*va = e->sorted[s];
 		*bytes = buf;
-		*len = (uint64_t)n * KOF_EMU_PAGE;
+		*len = trim;
 		*it = s + n;
 		return 1;
 	}

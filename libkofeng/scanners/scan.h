@@ -15,7 +15,7 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
-#include "../analyzers/disasm/kdis.h"
+#include "../analyzers/parsers/binaries/disasm/kdis.h"
 #include "../extractors/unpack/pe_rebuild.h"
 #include "../kofeng.h"
 /* KOF_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
@@ -24,10 +24,12 @@
 #include "../extractors/unpack/emu_unpack.h"
 #include "../databases/dbloader.h"
 #include "../detectors/matchers/kofmatch.h"
-#include "../detectors/matchers/kofplague.h"
+#include "../detectors/overlord/plague/kofplague.h"
+/* KOF_CAP_COUNT, for the profile below. */
+#include "../analyzers/parsers/binaries/disasm/flow.h"
 #include "../detectors/overlord/kofoverlord.h"
-#include "../analyzers/parsers/binaries/elf_parse.h"
-#include "../analyzers/parsers/binaries/pe_parse.h"
+#include "../analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../extractors/unpack/pe_rebuild.h"
 #include "../analyzers/parsers/containers/gzip_parse.h"
 #include "../analyzers/parsers/containers/docole_parse.h"
@@ -55,7 +57,20 @@
  * 32MB presence table out of the per-file path: it belongs to the thread, is allocated
  * once, and is reused for every object.
  */
-struct kof_flow_set;   /* scanners/objctx.c - the swept call chains */
+/*
+ * THE SWEPT CALL CHAINS OF ONE OBJECT.
+ *
+ * Public because two callers own one: the scanner caches it per object, and
+ * kofviewer builds one to show - see kof_pth_chain_build. It was private to
+ * pathogen.c while the viewer had a sweep of its own, and that copy is what
+ * drifted.
+ */
+#define FLOW_SET_MAX 8u
+struct kof_flow_set {
+	struct kof_flow_node n[FLOW_SET_MAX][KOF_PTH_SYMPTOM_MAX];
+	uint8_t len[FLOW_SET_MAX];
+	uint8_t n_chain;
+};
 
 /*
  * "This child is raw, and I mean it" - see pend_fmt below. Out of the range of
@@ -90,14 +105,14 @@ struct kof_scanner {
 	 */
 	struct kof_plague_ctx plague;
 	/*
-	 * THIS OBJECT'S OWN OVERLORD DESCRIPTOR, for kof_ovl_blocks.
+	 * THIS OBJECT'S OWN OVERLORD DESCRIPTOR, for kof_plague_blocks.
 	 *
 	 * Built once per object in the same prepass the plague feed runs in,
 	 * and only when some loaded module could ask - see ovl_wanted. A
 	 * pointer because the descriptor carries a four-thousand entry pool and
 	 * a scanner that never meets an ELF should not hold one.
 	 */
-	struct kof_ovl_desc *ovl;
+	struct kof_plague_desc *ovl;
 	/*
 	 * AND THE OBJECT'S CALL CHAINS, swept once and shared by every rule
 	 * that asks - see kof_content.ovl_chain. A sweep costs a pass over the
@@ -107,6 +122,17 @@ struct kof_scanner {
 	struct kof_flow_set *fchain;
 	int                  ovl_ready;
 	int                  fchain_ready;
+	/*
+	 * THE OBJECT'S PROFILE - what it does, flattened.
+	 *
+	 * The chains answer "how near is this to that reference"; this answers
+	 * "does it do X" and "did X feed Y", which is what measured well. It
+	 * is derived from the chains and cached beside them for the same
+	 * reason: a rule asks several times and the answer does not change
+	 * within one object.
+	 */
+	struct kof_pth_profile *pth_prof;
+	int                     pth_prof_ready;
 
 	/*
 	 * AND THE TWO BATCHED PASSES, ON THE SAME TERMS AS THE TWO ABOVE.
@@ -174,7 +200,7 @@ struct kof_scanner {
 	 *
 	 * Kept here because the two most expensive similarity measures are
 	 * gated on it and the content hooks that answer them have no option
-	 * to read - see c_ovl_blocks and c_ovl_chain. Set once per object,
+	 * to read - see c_plague_blocks and c_pth_match. Set once per object,
 	 * beside the two ready flags and for the same reason.
 	 */
 	uint32_t             heur_lvl;
@@ -183,8 +209,8 @@ struct kof_scanner {
 	 *
 	 * The same pair of facts plague_asked and plague_hit are, for the
 	 * measures that carry a reference in the module's own rodata rather
-	 * than a declared block - kof_ovl_blocks, kof_ovl_chain,
-	 * kof_ovl_shape. A verdict reached through one of
+	 * than a declared block - kof_plague_blocks, kof_pth_match,
+	 * kof_plague_shape. A verdict reached through one of
 	 * those is named for it, exactly as a plague verdict is, so a reader
 	 * of the name knows what recognised the object.
 	 *
@@ -244,7 +270,7 @@ struct kof_scanner {
 	 */
 	uint64_t             emu_slice;
 	uint64_t             emu_full;   /* the host's real ceiling */
-	/* The module-facing code reader's cursor - see analyzers/disasm/kdis.h.
+	/* The module-facing code reader's cursor - see analyzers/parsers/binaries/disasm/kdis.h.
 	 * One per object, because a module walks one run of code at a time. */
 	struct kof_kdis      kdis;
 	int                  ovl_asked;
@@ -786,10 +812,10 @@ struct kof_scanner {
 	 * answer and know the others matched it.
 	 *
 	 * Empty for anything that is not an ELF, and for a VIEW, whose headers
-	 * describe the file its parent was: kof_lib_find reads segment offsets,
+	 * describe the file its parent was: kof_true_find reads segment offsets,
 	 * and on a view they point at bytes that have moved.
 	 */
-	struct kof_lib_all    cur_lib;
+	struct kof_true_all    cur_lib;
 	uint8_t               cur_lib_ok;
 
 	/* And what the NEXT child's regions are, spent by kid_push exactly as
@@ -1094,6 +1120,55 @@ void kof_scan_budget(struct kof_scanner *, uint64_t obj_size,
 
 /* Release anything a module left half-produced, and hand back what it finished. */
 void kof_scan_kids_reset(struct kof_scanner *);
+
+/*
+ * THE PROFILE, as a vector of capabilities and a matrix of links between them.
+ *
+ * SMALL ON PURPOSE AND NOT HASHED. The whole space is a couple of dozen
+ * capabilities and a few flags, so the profile fits in about a hundred bytes
+ * uncompressed - there is nothing to compress, and hashing it would cost the
+ * two things that make it useful: a rule could no longer match PART of it,
+ * and nobody could measure how common one term is on clean software.
+ */
+struct kof_pth_profile {
+	uint64_t cap_mask;                 /* 1ull << enum kof_flow_cap     */
+	uint8_t  flags[KOF_CAP_COUNT];     /* flags seen on that capability */
+	uint32_t edge[KOF_CAP_COUNT];      /* bit s: s fed this capability  */
+};
+
+const struct kof_pth_profile *kof_pth_profile_of(const struct kof_obj_ctx *);
+
+/* Build this object's swept call chain and print it, when the environment
+ * asks. A measurement hook, not a scan path - see objctx.c. */
+/* An object's symptoms, built once and cached on the scanner. In
+ * detectors/overlord/pathogen/pathogen.c - see the note there on why it
+ * is not in objctx.c any more. */
+const struct kof_flow_set *kof_pth_chain_of(const struct kof_obj_ctx *);
+
+/*
+ * The same build without the scanner, for a caller that has an object and no
+ * scan: the set and the scratch are the caller's. Returns how many chains it
+ * put in `out`. See the note on the definition for why this is shared rather
+ * than copied - a second copy is what kofviewer had, and it answered for two
+ * architectures while the engine read ten.
+ */
+/*
+ * `why`, when given, receives a one-line reason the set came back EMPTY, and
+ * NULL when it did not. The reasons are the gates this walks through and
+ * nothing else - the architecture, the bytes, the regions, the partition,
+ * the weight floor - and they used to go to stderr behind an environment
+ * variable, which is no use to somebody looking at a page that says nothing.
+ * The string is static.
+ */
+uint32_t kof_pth_chain_build(const struct kof_obj_ctx *ctx, kof_buf b,
+			     struct kof_range *scratch,
+			     struct kof_flow_set *out, const char **why);
+
+/* The best a stored symptom scores against this object, 0..100. */
+uint32_t kof_pth_best_pct(const struct kof_obj_ctx *,
+			  const struct kof_pth_symptom *);
+
+void kof_scan_fchain_probe(const struct kof_obj_ctx *);
 
 
 struct kof_scanner *kof_scan_new(const struct kof_engine *);

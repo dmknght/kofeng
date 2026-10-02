@@ -397,7 +397,7 @@ static inline int kof_sym_truncated(const uint8_t *b, uint32_t n)
 /*
  * THE BUILDER IS NOT DECLARED HERE, and that is the SDK boundary.
  *
- * This header is published to modules; analyzers/parsers/binaries/elf_sym.h is not.
+ * This header is published to modules; analyzers/parsers/binaries/elf/elf_sym.h is not.
  * A module has no business walking a symbol table itself - it asks the host
  * through kof_syms(), which hands back a block the engine already built - and
  * declaring the builder here would have dragged kofcore.h into the SDK to get

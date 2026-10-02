@@ -59,15 +59,11 @@
 #include <kofmod/kofsym.h>
 #include <kofmod/pe.h>
 #include "pe_sym.h"
+#include "pe_parse.h"
 
-/* The import descriptor, whose fields this walks by offset for the reason
- * elf_sym.c walks Elf64_Sym by offset: the struct is a file format, not a C
- * declaration, and reading it as one is what makes the endianness and the
- * packing somebody else's problem. */
-#define IMP_ORIG_THUNK   0u    /* 4  OriginalFirstThunk (the name table)   */
-#define IMP_NAME         12u   /* 4  RVA of the DLL name                   */
-#define IMP_FIRST_THUNK  16u   /* 4  FirstThunk (the IAT)                  */
-#define IMP_LEN          20u
+/* The import descriptor is walked by kof_pe_imports in pe_parse.c, which is
+ * the only place that knows its field offsets - see the note there. What is
+ * left here is how an import is SPELLED in a KSYM record. */
 
 #define EXP_N_FUNCS      20u   /* 4  NumberOfFunctions                     */
 #define EXP_N_NAMES      24u   /* 4  NumberOfNames                         */
@@ -76,13 +72,12 @@
 #define EXP_ORDS         36u   /* 4  AddressOfNameOrdinals                 */
 
 /*
- * How many descriptors and thunks one file may contribute.
+ * How many exported names one file may contribute.
  *
- * Bounded because both are NUL-terminated lists inside the file, so a hostile
- * or damaged one can be as long as the file is: the terminator is data. Nothing
- * here trusts a count it was given.
+ * Bounded because NumberOfNames is a field the file writes, and a hostile one
+ * can claim as many as it likes. Nothing here trusts a count it was given.
+ * The import side has its own bounds, in pe_parse.c, for the same reason.
  */
-#define MAX_DLLS   256u
 #define MAX_THUNKS 4096u
 
 static void put16(uint8_t *p, uint32_t v)
@@ -148,98 +143,64 @@ static void rec_put(uint8_t *rec, uint8_t flags, uint64_t value,
 		rec[KOF_SYM_R_NAME + i] = (uint8_t)name[i];
 }
 
-/* The imports, appended from `n` onward. Returns the new count. */
+/*
+ * THE IMPORTS, spelled as records.
+ *
+ * The directory is walked by kof_pe_imports and this is only what a KSYM
+ * record makes of each entry: "dll!func", or "dll!#ordinal" for the ones
+ * imported without a name, with the printable-only policy applied for the
+ * reason elf_sym.c gives.
+ *
+ * NO VALUE IS RECORDED. The walk knows the slot the import goes through,
+ * and a record keeps zero because that is what this block has always said
+ * and a rule written against it compares names. The slot is available to
+ * anyone who asks the parser directly, which is what pathogen does.
+ */
+struct imp_sink {
+	uint8_t  *out;
+	uint32_t want, n;
+};
+
+static void imp_rec(void *user, uint64_t slot, const char *dll,
+		    const char *name, uint32_t ordinal)
+{
+	struct imp_sink *k = (struct imp_sink *)user;
+	char sym[KOF_SYM_NAMELEN], clean[KOF_SYM_NAMELEN];
+	uint32_t i;
+
+	(void)slot;
+	if (k->n >= k->want)
+		return;
+	if (name) {
+		for (i = 0; i + 1u < sizeof clean && name[i]; i++)
+			clean[i] = (name[i] >= 0x20 && name[i] < 0x7f)
+				 ? name[i] : '?';
+		clean[i] = 0;
+		/* Both halves bounded explicitly rather than left to
+		 * snprintf: the truncation is INTENDED, and saying so in the
+		 * format is what tells a reader - and the compiler - that it
+		 * was chosen and not overlooked. */
+		snprintf(sym, sizeof sym, "%.*s!%.*s", DLL_ROOM, dll,
+			 (int)(sizeof sym - DLL_ROOM - 2u), clean);
+	} else {
+		snprintf(sym, sizeof sym, "%.*s!#%u", DLL_ROOM, dll,
+			 (unsigned)ordinal);
+	}
+	rec_put(k->out + KOF_SYM_HDRLEN + (uint64_t)k->n * KOF_SYM_RECLEN,
+		KOF_SYM_F_UNDEFINED, 0, sym);
+	k->n++;
+}
+
 static uint32_t do_imports(kof_buf f, const struct kof_pe_info *p,
 			   uint8_t *out, uint32_t want, uint32_t n)
 {
-	uint64_t desc = kof_pe_rva_to_off(p, p->dir[KOF_PE_DIR_IMPORT].rva);
-	uint32_t d;
+	struct imp_sink k;
 
-	if (!p->dir[KOF_PE_DIR_IMPORT].rva || !desc)
-		return n;
-	for (d = 0; d < MAX_DLLS && n < want; d++) {
-		uint64_t at = desc + (uint64_t)d * IMP_LEN, tbl;
-		uint32_t orig = 0, first = 0, nm = 0, t;
-		char dll[64], sym[KOF_SYM_NAMELEN];
-
-		if (at + IMP_LEN > f.n)
-			break;
-		if (!kof_rd_u32(f, at + IMP_ORIG_THUNK, 0, &orig) ||
-		    !kof_rd_u32(f, at + IMP_NAME, 0, &nm) ||
-		    !kof_rd_u32(f, at + IMP_FIRST_THUNK, 0, &first))
-			break;
-		/* An all-zero descriptor ends the table. Checked on the fields
-		 * that matter rather than on the whole struct, because a
-		 * descriptor with only a timestamp left over is still the end. */
-		if (!orig && !first && !nm)
-			break;
-		if (!name_at(f, kof_pe_rva_to_off(p, nm), dll, sizeof dll))
-			snprintf(dll, sizeof dll, "?");
-
-		/*
-		 * The NAME table if there is one, else the IAT.
-		 *
-		 * OriginalFirstThunk is the one that still holds names after
-		 * the loader has written addresses over FirstThunk. A file on
-		 * disk has both intact, but a MEMORY IMAGE dumped to disk - and
-		 * this engine is handed those - has only the names in the
-		 * original, so preferring it is what makes a dump readable.
-		 */
-		tbl = kof_pe_rva_to_off(p, orig ? orig : first);
-		if (!tbl)
-			continue;
-		for (t = 0; t < MAX_THUNKS && n < want; t++) {
-			uint64_t te = tbl + (uint64_t)t *
-					    (p->pe32_plus ? 8u : 4u);
-			uint64_t val = 0;
-			uint32_t lo = 0;
-
-			if (p->pe32_plus) {
-				if (!kof_rd_u64(f, te, 0, &val))
-					break;
-			} else {
-				if (!kof_rd_u32(f, te, 0, &lo))
-					break;
-				val = lo;
-			}
-			if (!val)
-				break;                  /* end of this DLL */
-			/*
-			 * The top bit means "by ordinal", and the ordinal is
-			 * the low sixteen. Tested on the right bit for the
-			 * width: 0x80000000 for PE32 and 0x8000000000000000
-			 * for PE32+, which is why the two are not one test.
-			 */
-			if (val & (p->pe32_plus ? 0x8000000000000000ull
-						: 0x80000000ull)) {
-				snprintf(sym, sizeof sym, "%.*s!#%u",
-					 DLL_ROOM, dll,
-					 (unsigned)(val & 0xffffu));
-			} else {
-				char fn[KOF_SYM_NAMELEN];
-				uint64_t ho = kof_pe_rva_to_off(p, val);
-
-				/* An IMAGE_IMPORT_BY_NAME is a hint word then
-				 * the string, so the name is two bytes in. */
-				if (!ho || !name_at(f, ho + 2u, fn, sizeof fn))
-					continue;
-				/* Both halves bounded explicitly rather than
-				 * left to snprintf: the truncation is
-				 * INTENDED, and saying so in the format is
-				 * what tells a reader - and the compiler -
-				 * that it was chosen and not overlooked. */
-				snprintf(sym, sizeof sym, "%.*s!%.*s",
-					 DLL_ROOM, dll,
-					 (int)(sizeof sym - DLL_ROOM - 2u),
-					 fn);
-			}
-			rec_put(out + KOF_SYM_HDRLEN +
-				(uint64_t)n * KOF_SYM_RECLEN,
-				KOF_SYM_F_UNDEFINED, 0, sym);
-			n++;
-		}
-	}
-	return n;
+	k.out = out;
+	k.want = want;
+	k.n = n;
+	kof_pe_imports(f, p, imp_rec, &k);
+	return k.n;
 }
 
 /* The exports, appended from `n` onward. Returns the new count. */

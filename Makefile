@@ -917,11 +917,11 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/databases/dbpacker.c \
            libkofeng/detectors/heur/kofheur.c \
            libkofeng/detectors/matchers/kofmatch.c \
-           libkofeng/detectors/matchers/kofplague.c \
+           libkofeng/detectors/overlord/plague/kofplague.c \
            libkofeng/detectors/matchers/kofmultimatch.c \
            libkofeng/detectors/matchers/hexcomp.c \
-           libkofeng/analyzers/parsers/binaries/elf_parse.c \
-           libkofeng/analyzers/parsers/binaries/elf_sym.c \
+           libkofeng/analyzers/parsers/binaries/elf/elf_parse.c \
+           libkofeng/analyzers/parsers/binaries/elf/elf_sym.c \
            libkofeng/analyzers/parsers/binaries/sym_any.c \
            libkofeng/analyzers/parsers/kofformat.c \
            libkofeng/analyzers/normalize/executables.c \
@@ -934,12 +934,13 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/scripts/script_norm.c \
            libkofeng/analyzers/parsers/events/amsi_parse.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
-           libkofeng/analyzers/disasm/xref.c \
-           libkofeng/analyzers/disasm/flow.c \
-           libkofeng/analyzers/disasm/kdis.c \
-           libkofeng/analyzers/parsers/binaries/pe_sym.c \
-           libkofeng/analyzers/parsers/binaries/pe_parse.c \
-           libkofeng/analyzers/parsers/binaries/clr_parse.c \
+           libkofeng/analyzers/parsers/binaries/disasm/xref.c \
+           libkofeng/analyzers/parsers/binaries/disasm/flow.c \
+           libkofeng/analyzers/parsers/binaries/disasm/vocab.c \
+           libkofeng/analyzers/parsers/binaries/disasm/kdis.c \
+           libkofeng/analyzers/parsers/binaries/pe/pe_sym.c \
+           libkofeng/analyzers/parsers/binaries/pe/pe_parse.c \
+           libkofeng/analyzers/parsers/binaries/pe/clr_parse.c \
            libkofeng/analyzers/parsers/containers/gzip_parse.c \
            libkofeng/analyzers/parsers/containers/docole_parse.c \
            libkofeng/analyzers/parsers/containers/zip_parse.c \
@@ -982,9 +983,10 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/scanners/objtree.c \
            libkofeng/scanners/objctx.c \
            libkofeng/scanners/objsrc.c \
-           libkofeng/detectors/overlord/koflib.c \
+           libkofeng/analyzers/trueline/trueline.c \
            libkofeng/detectors/overlord/kofoverlord.c \
-           libkofeng/detectors/overlord/ovlflow.c \
+           libkofeng/detectors/overlord/pathogen/diagnose.c \
+           libkofeng/detectors/overlord/pathogen/pathogen.c \
            libkofeng/disinfect/pzero.c \
            libkofeng/kofcore/kofhash.c
 
@@ -998,7 +1000,7 @@ $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
 # kofdisasm/ reads instructions, so it needs the decoder's headers. Only this
 # one directory does; the rest of the engine is kept away from them on purpose,
 # because a parser that can decode is a parser that will start to.
-$(INT)/lib_analyzers/disasm/%.o: libkofeng/analyzers/disasm/%.c $(STAMP) | $(INT)
+$(INT)/lib_analyzers/parsers/binaries/disasm/%.o: libkofeng/analyzers/parsers/binaries/disasm/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
@@ -1142,6 +1144,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofcure.h \
            $(SDK)/include/kofmod/kofplague.h \
            $(SDK)/include/kofmod/kofoverlord.h \
+           $(SDK)/include/kofmod/kofpathogen.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/aspack_tab.h \

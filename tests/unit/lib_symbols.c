@@ -22,8 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/detectors/overlord/koflib.h"
-#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/analyzers/trueline/trueline.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../libkofeng/kofcore/kofmod/elf.h"
 
 static int fails;
@@ -225,7 +225,7 @@ static uint8_t *build(uint64_t *out_n)
 	return b;
 }
 
-static int covers(const struct kof_lib_all *r, uint64_t off, uint64_t len)
+static int covers(const struct kof_true_all *r, uint64_t off, uint64_t len)
 {
 	uint32_t i;
 
@@ -236,7 +236,7 @@ static int covers(const struct kof_lib_all *r, uint64_t off, uint64_t len)
 	return 0;
 }
 
-static int touches(const struct kof_lib_all *r, uint64_t off, uint64_t len)
+static int touches(const struct kof_true_all *r, uint64_t off, uint64_t len)
 {
 	uint32_t i;
 
@@ -265,7 +265,7 @@ static void the_symbol_half_agrees_with_the_byte_half(void)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info e;
-	struct kof_lib_all lib;
+	struct kof_true_all lib;
 	uint8_t *b;
 	uint64_t n;
 
@@ -278,22 +278,22 @@ static void the_symbol_half_agrees_with_the_byte_half(void)
 		free(b);
 		return;
 	}
-	kof_lib_find_all(kof_buf_make(b, n), &e, &lib);
+	kof_true_find_all(kof_buf_make(b, n), &e, &lib);
 
 	/*
 	 * The three functions the fixture lays out, asked the way norm_syms
-	 * asks - by address, through kof_lib_has_addr, which is the one place
+	 * asks - by address, through kof_true_has_addr, which is the one place
 	 * the translation lives.
 	 */
-	if (kof_lib_has_addr(&e, &lib, VBASE + LIB_A_OFF, FN_LEN))
+	if (kof_true_has_addr(&e, &lib, VBASE + LIB_A_OFF, FN_LEN))
 		ok("syms: the library function's record would be dropped");
 	else
 		bad("syms: a cut function's record would have been kept");
-	if (kof_lib_has_addr(&e, &lib, VBASE + LIB_B_OFF, FN_LEN))
+	if (kof_true_has_addr(&e, &lib, VBASE + LIB_B_OFF, FN_LEN))
 		ok("syms: and so would its plainly named neighbour's");
 	else
 		bad("syms: a cut function's record would have been kept");
-	if (!kof_lib_has_addr(&e, &lib, VBASE + AUTHOR_OFF, FN_LEN))
+	if (!kof_true_has_addr(&e, &lib, VBASE + AUTHOR_OFF, FN_LEN))
 		ok("syms: the author's record is kept, as its bytes are");
 	else
 		bad("syms: the author's record would be dropped though its "
@@ -306,7 +306,7 @@ static void the_symbol_half_agrees_with_the_byte_half(void)
 	 * point at are still in the view. This is the case a name test got
 	 * wrong.
 	 */
-	if (!kof_lib_has_addr(&e, &lib, VBASE + LIB_A_OFF, 0))
+	if (!kof_true_has_addr(&e, &lib, VBASE + LIB_A_OFF, 0))
 		ok("syms: a size-less record is not claimed by any span");
 	else
 		bad("syms: a record covering no bytes was taken for the "
@@ -318,8 +318,8 @@ int main(void)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_elf_info e;
-	struct kof_lib_result lib;
-	struct kof_lib_all all;
+	struct kof_true_result lib;
+	struct kof_true_all all;
 	uint8_t *b;
 	uint64_t n;
 
@@ -343,13 +343,13 @@ int main(void)
 	 * the second one exists: this file has no library strings in it at all,
 	 * and every byte of its libc is code.
 	 */
-	kof_lib_find(kof_buf_make(b, n), &e, &lib);
+	kof_true_find(kof_buf_make(b, n), &e, &lib);
 	if (lib.n)
 		bad("the marker tier claimed a span with no markers present");
 	else
 		ok("markers alone find nothing - there is no library text here");
 
-	kof_lib_find_all(kof_buf_make(b, n), &e, &all);
+	kof_true_find_all(kof_buf_make(b, n), &e, &all);
 	if (!all.n) {
 		bad("the symbol tier found no library at all");
 		free(b);

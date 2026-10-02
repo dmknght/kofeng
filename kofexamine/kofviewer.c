@@ -63,8 +63,8 @@
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
-#include "../libkofeng/analyzers/parsers/binaries/elf_sym.h"
-#include "../libkofeng/analyzers/parsers/binaries/pe_sym.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf/elf_sym.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/script.h>
@@ -77,7 +77,7 @@
 #include "kofinspect.h"
 #include <kofmod/kofplague.h>
 #include "kofview.h"
-#include "../libkofeng/detectors/overlord/koflib.h"
+#include "../libkofeng/analyzers/trueline/trueline.h"
 #include "../libkofeng/detectors/overlord/kofoverlord.h"
 #include "../libkofeng/kofcore/rangelist.h"
 #include "kofwalk.h"
@@ -1211,10 +1211,29 @@ static int  sim_prepare(struct view *v, uint32_t what);
 static int  sim_have(const struct view *v, uint32_t what);
 static void sim_recarve(struct view *v);
 static void sim_take_out(struct view *v, uint32_t what, uint32_t blk);
+/*
+ * THE SIMILARITY TABLE IS HIDDEN, NOT DELETED.
+ *
+ * Its three measures are going to three different places - the file shape and
+ * the block vector onto the block table's own heading, where the thing they
+ * are about already is, and the chain into pathogen, which asks a different
+ * question in a different vocabulary. Until that lands the table would be
+ * three rows offering ticks that no longer lead anywhere.
+ *
+ * ONE SWITCH, READ BY BOTH THE DRAWER AND THE ROW MODEL. They are two walks
+ * over one table, and this file already carries the scar of them disagreeing:
+ * see the note in prow_build about a PE painting three rows the model had not
+ * counted, which put every row below them one out.
+ */
+static int sim_section_shown(void) { return 0; }
+
 static uint32_t sim_row_what(uint32_t i);
 static void sim_item_name(const struct view *v,
 			  const struct grp_sim_item *it, char *out,
 			  size_t cap);
+/* Open the pathogen dialog on its default tab - see pth_tab_set for the tab
+ * that costs an interpreter run. */
+static void pth_open(struct view *v);
 static uint32_t sim_chain_sweep(struct view *v, struct object *o,
 				struct kof_flow_node *out, uint32_t cap);
 static void sim_made_word(const struct view *v, uint32_t what, char *out,
@@ -2218,9 +2237,33 @@ struct view {
 	 * questions, and the second one had no answer at all before - the
 	 * table gave a count of capabilities and no way to see which.
 	 */
+	/*
+	 * THE PATHOGEN DIALOG, which is two views of one question and so is
+	 * one box with two tabs rather than two boxes.
+	 *
+	 * `pth_tab` is 0 for the call chain and 1 for the runtime trace. The
+	 * CHAIN IS THE DEFAULT because it is the one that always has an
+	 * answer: the sweep reads every architecture the engine knows, while
+	 * the interpreter is x86 only - opening on the trace would show an
+	 * empty box for every ARM and MIPS sample in the tree.
+	 */
 	int         chain_open;
+	uint8_t     pth_tab;
+	/* Where the two tab labels landed on the top rule, so a click on one
+	 * selects it - the same place the close control is recorded. */
+	int         pth_tab_y, pth_tab_x0[2], pth_tab_x1[2];
 	uint32_t    chain_off;
 	int         chain_y, chain_x0, chain_x1;
+	/*
+	 * THE EMULATED COUNTERPART OF THE PAGE ABOVE.
+	 *
+	 * Call chain is what the sweep READ; this is what a run DID. Two
+	 * answers to one question, and a reader comparing them is the whole
+	 * point - so the page is built the same way and kept beside it.
+	 */
+
+	uint32_t    rtr_off;
+	int         rtr_y, rtr_x0, rtr_x1;
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
 	/*
@@ -6829,9 +6872,9 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
  * Walking an extent with this splits it exactly where it crosses a boundary,
  * so each piece is carved on its own and no block ever straddles one.
  *
- * Linear in the number of spans, which koflib caps - see KOF_LIB_MAX_SPANS_ALL.
+ * Linear in the number of spans, which koflib caps - see KOF_TRUE_MAX_SPANS_ALL.
  */
-static uint64_t plg_side_run(const struct kof_lib_all *lib, uint64_t pos,
+static uint64_t plg_side_run(const struct kof_true_all *lib, uint64_t pos,
 			     uint64_t end, uint8_t *side)
 {
 	uint64_t next = end;
@@ -6867,7 +6910,7 @@ static uint64_t plg_side_run(const struct kof_lib_all *lib, uint64_t pos,
  * the program's own, and the symbol tier of everything.
  */
 
-static void obj_lib_find(const struct object *o, struct kof_lib_all *out)
+static void obj_lib_find(const struct object *o, struct kof_true_all *out)
 {
 	const struct kof_elf_info *e;
 
@@ -6877,8 +6920,8 @@ static void obj_lib_find(const struct object *o, struct kof_lib_all *out)
 	if (!o->buf.p || !o->buf.n)
 		return;
 	e = (const struct kof_elf_info *)o->info;
-	/* One place picks the tier - see kof_lib_find_object. */
-	kof_lib_find_object(o->buf, e, out);
+	/* One place picks the tier - see kof_true_find_object. */
+	kof_true_find_object(o->buf, e, out);
 }
 
 static void plg_segment(struct view *v)
@@ -6893,7 +6936,7 @@ static void plg_segment(struct view *v)
 	uint32_t rgn_mask[PLG_MAX_REGION], quota[PLG_MAX_REGION];
 	uint64_t rgn_bytes[PLG_MAX_REGION];
 	uint32_t n_reg, budget, used, left, cap_acc = 0;
-	struct kof_lib_all lib;
+	struct kof_true_all lib;
 
 	/*
 	 * TICKED BLOCKS ARE CARRIED, everything else is carved again.
@@ -7266,29 +7309,24 @@ static void plg_sim_refresh(struct view *v)
 	 * sit behind their ELF gate.
 	 */
 	if (v->ed.dr.has_chain) {
-		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
-		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_OVLF_CHAIN_MAX);
+		struct kof_flow_node tmp[KOF_PTH_SYMPTOM_MAX];
+		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_PTH_SYMPTOM_MAX);
 
 		if (m)
-			v->sim_chain = kof_ovlf_chain_pct(&v->ed.dr.chain,
+			v->sim_chain = kof_diag_pct(&v->ed.dr.chain,
 							  tmp, m);
 	}
 	if (o->ctx.format != KOF_FMT_ELF || !o->info)
 		return;
 	if (v->ed.dr.has_shp)
-		v->sim_shape = kof_ovl_shape_pct(
+		v->sim_shape = kof_plague_shape_pct(
 			(const struct kof_elf_info *)o->info,
 			&v->ed.dr.shp, o->buf.n);
-	if (v->ed.dr.n_blkv && obj_ovl(o))
-		/* The object's own set, built once - see obj_ovl. */
-		v->sim_blk = kof_ovl_blocks_pct(o->ovl_blk, o->n_ovl_blk,
-						v->ed.dr.blkv,
-						v->ed.dr.n_blkv);
 }
 
 static void plg_rescore(struct view *v)
 {
-	struct kof_lib_all slib;
+	struct kof_true_all slib;
 	struct kof_plague_block blk[PLG_MAX_BLOCK];
 	uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
 	struct kof_plague_set *set;
@@ -7347,7 +7385,7 @@ static void plg_rescore(struct view *v)
 	 * NOT ON A VIEW, and that is not caution - it is that the answer would
 	 * be wrong.
 	 *
-	 * kof_lib_find works from markers found INSIDE a loadable segment, and
+	 * kof_true_find works from markers found INSIDE a loadable segment, and
 	 * a view's segment offsets come from its parent's headers, which
 	 * describe the file before the padding came out. On a view those
 	 * offsets are stale wherever something collapsed ahead of them, so the
@@ -9114,6 +9152,17 @@ static void draft_show(struct view *v, uint32_t idx)
 		return;
 	draft_wipe(v);
 	v->sel_touch = idx;
+	/*
+	 * FOLDED IS THE DEFAULT, for every draft and not only for a loaded
+	 * rule that named no block.
+	 *
+	 * The table is as long as the object has areas - sixty rows on a large
+	 * binary - and a reader opening a draft is almost never there to read
+	 * all of them. Folded it is one line saying how many there are and how
+	 * many are ticked, with the handle in reach; a ticked block stays
+	 * visible either way, which is what blk_row_shown already does.
+	 */
+	v->blk_fold = 1;
 
 	/*
 	 * The source first, and the database only when there is no source.
@@ -9164,7 +9213,6 @@ static void draft_show(struct view *v, uint32_t idx)
 
 			for (gi = 0; gi < SIM_ROWS; gi++)
 				sim |= v->ed.dr.sim_use[sim_row_what(gi)] != 0;
-			v->blk_fold = 1;
 			v->sim_fold = !sim;
 		}
 
@@ -11593,7 +11641,7 @@ static void prow_build(struct view *v)
 	 * Two conditions describing one table is the shape this whole check
 	 * exists to catch, and it caught it.
 	 */
-	if (cur_obj(v) && (cur_obj(v)->ctx.format == KOF_FMT_ELF ||
+	if (sim_section_shown() && cur_obj(v) && (cur_obj(v)->ctx.format == KOF_FMT_ELF ||
 			   cur_obj(v)->ctx.format == KOF_FMT_PE)) {
 		uint32_t n_row = cur_obj(v)->ctx.format == KOF_FMT_ELF
 			       ? (uint32_t)SIM_ROWS : 1u;
@@ -15464,8 +15512,7 @@ static void hit_sim_name(struct view *v, uint32_t which)
 {
 	if (sim_row_what(which) != SIM_IT_CHAIN)
 		return;
-	v->chain_off = 0;
-	v->chain_open = 1;
+	pth_open(v);
 }
 
 static void hit_sim_tick(struct view *v, uint32_t which)
@@ -15570,7 +15617,7 @@ static void plg_wire(struct view *v, uint32_t g, int level)
  *
  * The same walk the engine does at scan time - see kof_content.ovl_chain - so
  * a chain generated here and a chain measured there are the same object read
- * the same way. Worth is kof_ovlf_worth's answer, which is the gate the
+ * the same way. Worth is kof_diag_worth's answer, which is the gate the
  * aligner applies, so a chain too thin to have meant anything is never
  * offered.
  *
@@ -15578,71 +15625,85 @@ static void plg_wire(struct view *v, uint32_t g, int level)
  * a packed sample, an architecture the decoder does not have, or a format
  * whose code regions nobody named.
  */
+/*
+ * THIS OBJECT'S CHAINS, FROM THE ENGINE, CACHED FOR AS LONG AS IT IS THE ONE
+ * IN FRONT OF THE READER.
+ *
+ * What was here was a sweep of kofviewer's own: it handled x86 and x86-64,
+ * resolved no imports, and knew none of the fixed-width architectures. It was
+ * right when it was written and the engine moved on without it - so a reader
+ * looking at an ARM bot was told there was no chain while the scanner was
+ * finding eight in the same file.
+ *
+ * One builder now, in the scan path, called from both - see
+ * kof_pth_chain_build.
+ */
+static struct kof_flow_set g_pth_set;
+static const void         *g_pth_for;
+/* Why the set came back empty, as the engine reported it - see
+ * kof_pth_chain_build. */
+static const char         *g_pth_why;
+
+/*
+ * BOTH PER-OBJECT CACHES, DROPPED WHEN THE OBJECTS DIE.
+ *
+ * g_pth_for and g_rtr_for remember which object the cached answer belongs to
+ * BY ITS ADDRESS, and file_close memsets v->obj[] and reuses the slots - so
+ * the next file's first object is the previous file's first object as far as
+ * a pointer comparison can tell. The cache then hit, and the page showed the
+ * OLD file's result: most visibly "No chain was read from this object" on a
+ * file whose chain the engine builds perfectly well, which is exactly the
+ * complaint that found this.
+ *
+ * Invalidated where the objects are freed rather than by making the key
+ * cleverer: the address is a fine key while the object exists, and the one
+ * moment it stops existing is the one place that has to say so.
+ */
+void kof_view_forget_object_caches(void);
+
+static const struct kof_flow_set *pth_set_of(struct view *v, struct object *o)
+{
+	if (!o || !o->buf.p || !o->buf.n || !v->ext2)
+		return NULL;
+	if (g_pth_for != (const void *)o) {
+		g_pth_for = (const void *)o;
+		g_pth_why = NULL;
+		kof_pth_chain_build(&o->ctx, o->buf, v->ext2, &g_pth_set,
+				    &g_pth_why);
+	}
+	return g_pth_set.n_chain ? &g_pth_set : NULL;
+}
+
+/* The heaviest of them, which is the one a rule would be written about. */
 static uint32_t sim_chain_sweep(struct view *v, struct object *o,
 				struct kof_flow_node *out, uint32_t cap)
 {
-	unsigned bits, abi;
-	uint32_t mask, nr, i, best_n = 0, best_w = 0;
-	struct kof_flow *f;
+	const struct kof_flow_set *set = pth_set_of(v, o);
+	uint32_t k, best = 0, bw = 0, n;
 
-	if (!o || !o->buf.p || !o->buf.n || !v->ext2 || !out)
+	if (!set || !out || !cap)
 		return 0;
-	if (o->ctx.arch == KOF_ARCH_X86_64)
-		bits = 64;
-	else if (o->ctx.arch == KOF_ARCH_X86)
-		bits = 32;
-	else
-		return 0;
-	if (o->ctx.format == KOF_FMT_PE) {
-		abi = KOF_FLOW_MS;
-		mask = KOF_SCAN_PE_CODE;
-	} else if (o->ctx.format == KOF_FMT_ELF) {
-		abi = KOF_FLOW_SYSV;
-		mask = KOF_SCAN_ELF_CODE;
-	} else {
-		return 0;
-	}
-	nr = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
-	if (!nr)
-		return 0;
-	f = kof_flow_new();
-	if (!f)
-		return 0;
-	if (o->ctx.entry_off != KOF_NA && o->ctx.entry_off != KOF_BROKEN)
-		kof_flow_entry(f, o->ctx.entry_off);
-	for (i = 0; i < nr; i++) {
-		if (v->ext2[i].off < o->buf.n &&
-		    v->ext2[i].len <= o->buf.n - v->ext2[i].off)
-			kof_flow_add(f, o->buf.p + v->ext2[i].off,
-				     (uint32_t)v->ext2[i].len,
-				     v->ext2[i].off, bits, abi);
-	}
-	for (i = 0; i < kof_flow_n_func(f); i++) {
-		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
-		uint32_t m = kof_flow_chain(f, i, 6u, tmp,
-					    cap < KOF_OVLF_CHAIN_MAX
-					    ? cap : KOF_OVLF_CHAIN_MAX, NULL);
-		uint32_t j, w = 0;
+	for (k = 0; k < set->n_chain; k++) {
+		uint32_t w = 0, q;
 
-		if (!kof_ovlf_worth(tmp, m))
-			continue;
-		for (j = 0; j < m; j++)
-			w += kof_ovlf_weight(tmp[j].cap);
-		if (w > best_w) {
-			best_w = w;
-			best_n = m;
-			memcpy(out, tmp, m * sizeof *tmp);
-		}
+		for (q = 0; q < set->len[k]; q++)
+			w += kof_diag_weight(set->n[k][q].cap);
+		if (w > bw) { bw = w; best = k; }
 	}
-	kof_flow_free(f);
-	return best_n;
+	n = set->len[best];
+	if (n > cap)
+		n = cap;
+	if (n > KOF_PTH_SYMPTOM_MAX)
+		n = KOF_PTH_SYMPTOM_MAX;
+	memcpy(out, set->n[best], n * sizeof *out);
+	return n;
 }
 
 static int sim_prepare(struct view *v, uint32_t what)
 {
 	struct object *o = cur_obj(v);
-	struct kof_ovl_desc *d;
-	struct kof_lib_all   dlib;
+	struct kof_plague_desc *d;
+	struct kof_true_all   dlib;
 	uint32_t i;
 
 	if (what == SIM_IT_BLOCK)
@@ -15653,11 +15714,11 @@ static int sim_prepare(struct view *v, uint32_t what)
 	 * SIM_IT_CHAIN.
 	 */
 	if (what == SIM_IT_CHAIN) {
-		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
-		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_OVLF_CHAIN_MAX);
+		struct kof_flow_node tmp[KOF_PTH_SYMPTOM_MAX];
+		uint32_t m = sim_chain_sweep(v, o, tmp, KOF_PTH_SYMPTOM_MAX);
 
 		v->ed.dr.has_chain = m &&
-			kof_ovlf_chain_of(tmp, m, &v->ed.dr.chain);
+			kof_diag_of(tmp, m, &v->ed.dr.chain);
 		if (!v->ed.dr.has_chain) {
 			snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
 				 "no chain worth naming: the code here asks "
@@ -15681,7 +15742,7 @@ static int sim_prepare(struct view *v, uint32_t what)
 	 */
 	if (what == SIM_IT_SHAPE) {
 		/*
-		 * WITH THE LIBRARY OUT - see kof_ovl_shape.lib_cut. A shape is
+		 * WITH THE LIBRARY OUT - see kof_plague_shape.lib_cut. A shape is
 		 * region sizes, and on a static build most of a region can be
 		 * somebody else's libc: two builds of one program that linked
 		 * different amounts of it disagree by that difference, and the
@@ -15690,10 +15751,10 @@ static int sim_prepare(struct view *v, uint32_t what)
 		 * written from this file is measured the same way it was
 		 * written.
 		 */
-		struct kof_lib_all slib;
+		struct kof_true_all slib;
 
 		obj_lib_find(o, &slib);
-		kof_ovl_shape_of_cut((const struct kof_elf_info *)o->info,
+		kof_plague_shape_of_cut((const struct kof_elf_info *)o->info,
 				     o->buf.n, slib.span, slib.n,
 				     &v->ed.dr.shp);
 		v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
@@ -15707,19 +15768,19 @@ static int sim_prepare(struct view *v, uint32_t what)
 		return 1;
 	}
 	/*
-	 * THE LIBRARY IS ALREADY OUT of both sets. kof_ovl_build subtracts the
-	 * spans it is handed - see koflib.h - so what lands in the draft is
+	 * THE LIBRARY IS ALREADY OUT of both sets. kof_plague_build subtracts the
+	 * spans it is handed - see trueline.h - so what lands in the draft is
 	 * what the author wrote and not what the linker did.
 	 *
 	 * Found HERE and handed over, because the search needs an object whose
 	 * headers describe its own bytes and only this side knows that - see
-	 * the note on kof_ovl_build.
+	 * the note on kof_plague_build.
 	 */
 	d = malloc(sizeof *d);
 	if (!d)
 		return 0;
 	obj_lib_find(o, &dlib);
-	if (!kof_ovl_build(d, o->buf, (const struct kof_elf_info *)o->info,
+	if (!kof_plague_desc_build(d, o->buf, (const struct kof_elf_info *)o->info,
 			   dlib.span, dlib.n) ||
 	    !d->n_blk) {
 		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
@@ -15863,12 +15924,12 @@ static uint32_t sim_offer(struct view *v, uint32_t g,
  * tick a thing to find out whether it was worth ticking.
  *
  * ONE BUILD FOR BOTH SETS, because they come out of the same pass over the
- * same bytes - see kof_ovl_build - and it is the one expensive thing here.
+ * same bytes - see kof_plague_build - and it is the one expensive thing here.
  */
 static void sim_recarve(struct view *v)
 {
 	struct object *o = cur_obj(v);
-	struct kof_ovl_desc *d;
+	struct kof_plague_desc *d;
 	uint32_t i;
 
 	for (i = 0; i < SIM_IT_COUNT; i++)
@@ -15887,14 +15948,14 @@ static void sim_recarve(struct view *v)
 	if (!v->ed.dr.sim_use[SIM_IT_CHAIN]) {
 		/* Once per object - see object.chain. */
 		if (o && !o->chain_done) {
-			struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
+			struct kof_flow_node tmp[KOF_PTH_SYMPTOM_MAX];
 			uint32_t m = sim_chain_sweep(v, o, tmp,
-						     KOF_OVLF_CHAIN_MAX);
+						     KOF_PTH_SYMPTOM_MAX);
 
 			o->chain_done = 1;
 			memset(&o->chain, 0, sizeof o->chain);
 			o->has_chain = m &&
-				kof_ovlf_chain_of(tmp, m, &o->chain);
+				kof_diag_of(tmp, m, &o->chain);
 		}
 		if (o) {
 			v->ed.dr.chain = o->chain;
@@ -15908,10 +15969,10 @@ static void sim_recarve(struct view *v)
 		memset(&v->ed.dr.shp, 0, sizeof v->ed.dr.shp);
 		v->ed.dr.has_shp = 0;
 		if (o && o->info && o->ctx.format == KOF_FMT_ELF) {
-			struct kof_lib_all slib;
+			struct kof_true_all slib;
 
 			obj_lib_find(o, &slib);
-			kof_ovl_shape_of_cut(
+			kof_plague_shape_of_cut(
 				(const struct kof_elf_info *)o->info,
 				o->buf.n, slib.span, slib.n, &v->ed.dr.shp);
 			v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
@@ -16321,7 +16382,7 @@ static void plg_sync(struct view *v)
  * in front of the reader, which is the question that decides between them.
  *
  * THE PERCENTAGE IS THE ONE THE RULE WILL SEE. Each is the same call the
- * generated module makes - kof_plague_score, kof_ovl_blocks, kof_ovl_shape -
+ * generated module makes - kof_plague_score, kof_plague_blocks, kof_plague_shape -
  * so a row reading 64 is not an estimate of what the rule will do. It reads 100
  * on the sample the draft was built from, and means something the moment the
  * reader opens the next one.
@@ -16345,7 +16406,8 @@ static void plg_sync(struct view *v)
  */
 static int decl_table_head(struct out *o, struct view *v, int r,
 			   const char *name, int folded, uint32_t which,
-			   const char *cols, const char *summary)
+			   const char *cols, const char *summary,
+			   int shape_on)
 {
 	if (PR_VIS(r))
 		sec_bar(o, v, PR(r), name);
@@ -16362,6 +16424,35 @@ static int decl_table_head(struct out *o, struct view *v, int r,
 		out_fmt(o, " %s[%c]" A_OFF, A_ID, folded ? '+' : '-');
 		hit_add(v, y, c0, (int)o->col_hint, hit_fold, which);
 		out_fmt(o, A_DIM "%s" A_OFF, folded ? summary : cols);
+		/*
+		 * THE FILE SHAPE RIDES ON THIS HEADING, at the right.
+		 *
+		 * It is one tick and it had a table of its own, which is three
+		 * rows of furniture for one boolean. It belongs here because
+		 * it is about the same thing the rows below are about - what
+		 * this object IS - and because a reader deciding whether a
+		 * block rule should also carry the shape is already looking at
+		 * this heading.
+		 *
+		 * `shape_on` is -1 where the measure cannot apply, and the
+		 * tick is then not drawn at all rather than drawn dead: a
+		 * control that is always there and never works teaches a
+		 * reader to stop believing controls.
+		 */
+		if (shape_on >= 0) {
+			static const char lbl[] = "file shape";
+			int want = g_cols - (int)sizeof lbl - 6;
+			int c1;
+
+			while ((int)o->col_hint < want)
+				out_str(o, " ");
+			c1 = 1 + (int)o->col_hint;
+			out_fmt(o, " %s[%c]" A_OFF, shape_on ? A_ID : A_DIM,
+				shape_on ? 'x' : ' ');
+			hit_add(v, y, c1, (int)o->col_hint, hit_sim_tick,
+				SIM_SHAPE);
+			out_fmt(o, " %s%s" A_OFF, shape_on ? A_ID : A_DIM, lbl);
+		}
 	}
 	return r + 1;
 }
@@ -16446,7 +16537,7 @@ static void sim_made_word(const struct view *v, uint32_t what, char *out,
 		uint32_t k, linked = 0;
 
 		for (k = 0; k < v->ed.dr.chain.n &&
-			    k < KOF_OVLF_CHAIN_MAX; k++)
+			    k < KOF_PTH_SYMPTOM_MAX; k++)
 			linked += v->ed.dr.chain.s[k].back != 0;
 		if (v->ed.dr.chain.n == 1u)
 			snprintf(out, cap, "1 step");
@@ -16475,6 +16566,9 @@ static int sim_have(const struct view *v, uint32_t what)
 
 static int draw_decl_sim(struct out *o, struct view *v, int r)
 {
+	if (!sim_section_shown())
+		return r;
+
 	struct object *ob = cur_obj(v);
 	uint32_t i, n_row;
 
@@ -16514,7 +16608,7 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		 */
 		r = decl_table_head(o, v, r, " Similarity", v->sim_fold, 1u,
 				    " use  measure           made of"
-				    "               match", sum);
+				    "               match", sum, -1);
 	}
 
 	for (i = 0; i < SIM_ROWS; i++) {
@@ -16647,7 +16741,13 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		snprintf(sum, sizeof sum, " %u block(s), %u ticked",
 			 v->ed.dr.n_blk, plg_n_picked(v));
 		snprintf(hdr, sizeof hdr, " Plague blocks");
-		r = decl_table_head(o, v, r, hdr, v->blk_fold, 0u, cols, sum);
+		/* The shape is an ELF answer - it is read off the program
+		 * headers - so the tick is offered only where it can be. */
+		r = decl_table_head(o, v, r, hdr, v->blk_fold, 0u, cols, sum,
+				    cur_obj(v) &&
+				    cur_obj(v)->ctx.format == KOF_FMT_ELF
+				    ? (v->ed.dr.sim_use[SIM_IT_SHAPE] != 0)
+				    : -1);
 	}
 
 
@@ -19561,6 +19661,25 @@ struct prop_line {
  */
 struct page {
 	const char       *title;
+	/*
+	 * A TAB STRIP IN THE TOP RULE, when the box is two views of one
+	 * question rather than one view.
+	 *
+	 * This existed once and was taken out, because the box was measured
+	 * against its content and the two tabs had different content, so it
+	 * changed width between the press and the release and left columns
+	 * on the screen. That reason is gone - the pages that use this are
+	 * `full`, so the width is the terminal's and does not depend on what
+	 * is in them - and what replaced it was worse: Tab swapped the whole
+	 * body and the title with nothing on screen saying there were two of
+	 * anything, so the key read as "go to some other dialog".
+	 *
+	 * `tab[]` names them, `tab_sel` is the one showing. The title is not
+	 * drawn when these are set; the tabs ARE the title.
+	 */
+	const char       *tab[2];
+	int               tab_n;
+	int               tab_sel;
 	struct prop_line *line;
 	uint32_t          n;
 	uint32_t         *off;          /* the caller's scroll; clamped by the draw */
@@ -19571,6 +19690,7 @@ struct page {
 
 	/* Written while drawing, read while clicking. */
 	int               btn_y, btn_x0, btn_x1;
+	int               tab_y, tab_x0[2], tab_x1[2];
 	int               top, left, w, h;
 	uint32_t          shown;
 };
@@ -19579,8 +19699,11 @@ static void page_draw(struct out *o, struct view *v, struct page *p);
 
 
 static void draw_prop(struct out *o, struct view *v);
-/* The call chain page, on the same renderer - see chain_build. */
-static void draw_chain(struct out *o, struct view *v);
+/*
+ * The pathogen dialog: the call chain the sweep read, and the runtime trace
+ * the interpreter produced, as two tabs of one box - see view.pth_tab.
+ */
+static void draw_pathogen(struct out *o, struct view *v);
 /* Defined with the rest of the dialog selection layer, below - the properties
  * page draws before it and records into it. */
 static void dlg_rec_begin(struct view *v, int y0, int x0);
@@ -19592,7 +19715,14 @@ static void dlg_paint_sel(struct out *o, struct view *v);
 static uint32_t prop_plain(const char *s, char *out, uint32_t cap);
 
 /* The properties page was up on the frame before this one. */
-static int g_prop_drawn;
+/*
+ * WHICH FULL-COVER DIALOG WAS DRAWN LAST FRAME, or 0.
+ *
+ * An id and not a flag, because switching from one dialog straight to another
+ * has to repaint the panes once: the box that is leaving is only erased by
+ * what was under it.
+ */
+static int g_modal_drawn;
 
 static void redraw(struct view *v)
 {
@@ -19755,8 +19885,36 @@ static void redraw(struct view *v)
 	 * it from, and nothing under a modal can change afterwards because the
 	 * modal has the keyboard.
 	 */
-	under = !v->prop_open || wiped || !g_prop_drawn;
-	g_prop_drawn = v->prop_open;
+	/*
+	 * THE PANES ARE NOT REPAINTED UNDER A DIALOG THAT COVERS THEM.
+	 *
+	 * Every frame used to paint the panes and then the box on top, and a
+	 * frame happens on every mouse motion - so dragging a selection
+	 * across a dialog repainted the whole screen behind it tens of times
+	 * a second. The box always won in the end, but the intermediate
+	 * state is a real state on a terminal that does not honour
+	 * synchronized output, and that flash of the pane underneath is what
+	 * a reader sees.
+	 *
+	 * The properties page has been exempt from this since it was
+	 * written; nothing else was, and nothing about the other dialogs
+	 * makes them different. What is under a modal cannot change while it
+	 * is up, so there is nothing to repaint.
+	 *
+	 * THE FIRST FRAME STILL PAINTS, and so does the frame after a
+	 * resize, and so does a switch from one dialog to another - the id
+	 * below is what makes the third case work, because the box that is
+	 * leaving is erased only by what was under it.
+	 */
+	{
+		int modal = v->prop_open   ? 1
+			  : v->chain_open  ? 2
+			  : v->sym_open    ? 3
+			  : v->help_open   ? 4 : 0;
+
+		under = !modal || wiped || g_modal_drawn != modal;
+		g_modal_drawn = modal;
+	}
 
 	/*
 	 * The panel's height, settled before anything is drawn because every
@@ -19973,7 +20131,7 @@ static void redraw(struct view *v)
 			draw_symbols(&o, v);
 	}
 	if (v->chain_open)
-		draw_chain(&o, v);
+		draw_pathogen(&o, v);
 	if (v->prop_open)
 		draw_prop(&o, v);
 	if (v->help_open)
@@ -20654,6 +20812,13 @@ enum bar_item {
 	BI_ENCSTR,
 	BI_UNPACKER,
 	/*
+	 * Beside BI_UNPACKER because it is the same machine doing the work -
+	 * one runs the object to RECOVER bytes, this one runs it to record
+	 * what it ASKED FOR. A reader who has just unpacked something is
+	 * exactly the reader who wants the second question answered.
+	 */
+	BI_RTRACE,
+	/*
 	 * TWO DUMPS, AND ONLY ONE OF THEM IS EVER DRAWN.
 	 *
 	 * BI_DUMP is the executable's: it opens a submenu because there are two
@@ -20734,6 +20899,7 @@ static const struct {
 	{ "Find infected data",       BM_ANALYSIS, -1, 0 },
 	{ "Decode string",            BM_ANALYSIS, -1, 0 },
 	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
+	{ "Pathogen",          BM_ANALYSIS, -1, 0 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
 	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP, 0 },
@@ -21125,6 +21291,23 @@ static int bar_shown(struct view *v, int i)
 		return !ob->fmt || ob->ctx.arch == KOF_ARCH_X86 ||
 		       ob->ctx.arch == KOF_ARCH_X86_64;
 	}
+	case BI_RTRACE: {
+		const struct object *ob = cur_obj(v);
+
+		/*
+		 * WHEREVER THERE IS AN OBJECT, because the dialog's default
+		 * tab is the CALL CHAIN and the sweep reads every
+		 * architecture the engine knows.
+		 *
+		 * The ELF-x86 restriction that used to be here belonged to
+		 * the runtime trace alone - the interpreter is x86 and the
+		 * Windows dispatch keeps no log - and it is still true of
+		 * that tab. It is stated on the tab now instead of hiding the
+		 * whole item, which is what made the chain unreachable for
+		 * every ARM and MIPS sample in the tree.
+		 */
+		return ob != NULL;
+	}
 	case BI_UNPACKER: {
 		const struct object *ob = cur_obj(v);
 
@@ -21295,6 +21478,14 @@ static int bar_enabled(struct view *v, int i)
 	/* And this one, for the same reason: it rebuilds, always. */
 	case BI_SEPARATE:
 		return v->path && v->path[0] && !draft_edited(&v->ed);
+	case BI_RTRACE: {
+		const struct object *ob = cur_obj(v);
+
+		/* Format and architecture are bar_shown's. What is left is
+		 * whether the bytes are here right now: a large child is
+		 * scanned and not kept, and that is a state. */
+		return ob && ob->buf.p && ob->buf.n && ob->info;
+	}
 	case BI_UNPACKER:
 		/* Whether it APPLIES is bar_shown's - emu_here acts on the
 		 * selected object. What is left here is the wait: an edited
@@ -24222,11 +24413,12 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 {
 	static const char close[] = "[ Close ]";
 	struct out_clip cl;
-	int room, inner, y, i;
+	int room, inner, y, i, title_used = 0;
 	uint32_t k;
 	char pos[48];
 
 	p->btn_y = -1;
+	p->tab_y = -1;
 	if (p->full) {
 		/*
 		 * FULL HEIGHT, BUT ONLY AS WIDE AS IT HAS ANYTHING TO SAY.
@@ -24316,10 +24508,38 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 	out_str(o, A_DIM);
 	out_glyph(o, G_TL);
 	out_glyph(o, G_H);
-	out_fmt(o, A_OFF A_BOLD " %s " A_OFF A_DIM, p->title);
+	/*
+	 * THE TABS, OR THE TITLE - never both. `used` counts what the title
+	 * row has spent so that the fill below is a subtraction of things
+	 * that were actually drawn, which is the same discipline the single
+	 * title uses and the reason that one is right.
+	 */
+	if (p->tab_n > 0) {
+		int ti;
+
+		p->tab_y = p->top;
+		for (ti = 0; ti < p->tab_n && ti < 2; ti++) {
+			int len = (int)strlen(p->tab[ti]);
+
+			if (ti) {
+				out_glyph(o, G_H);
+				title_used += 1;
+			}
+			p->tab_x0[ti] = p->left + 2 + title_used;
+			p->tab_x1[ti] = p->tab_x0[ti] + len + 1;
+			out_str(o, A_OFF);
+			out_str(o, ti == p->tab_sel ? "\033[7m" : A_DIM);
+			out_fmt(o, " %s ", p->tab[ti]);
+			out_str(o, A_OFF A_DIM);
+			title_used += len + 2;
+		}
+	} else {
+		out_fmt(o, A_OFF A_BOLD " %s " A_OFF A_DIM, p->title);
+		title_used = (int)strlen(p->title) + 2;
+	}
 	if (p->close) {
 		/* corner + rule + " title " + fill + " " + close + rule + corner */
-		int fill = p->w - 1 - 1 - ((int)strlen(p->title) + 2) -
+		int fill = p->w - 1 - 1 - title_used -
 			   (1 + (int)sizeof close - 1) - 1 - 1;
 
 		p->btn_y = p->top;
@@ -24335,7 +24555,7 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 		out_glyph(o, G_TR);
 		out_str(o, A_OFF);
 	} else {
-		int fill = p->w - 1 - 1 - ((int)strlen(p->title) + 2) - 1;
+		int fill = p->w - 1 - 1 - title_used - 1;
 
 		for (i = 0; i < fill; i++)
 			out_glyph(o, G_H);
@@ -24418,6 +24638,24 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 		out_glyph(o, G_V);
 		out_str(o, A_OFF);
 	}
+	/*
+	 * AND THE BOX CLAIMS ITS OWN RECTANGLE, the way every control here
+	 * claims its row.
+	 *
+	 * A page is drawn OVER the declaration panel, and a click on one of
+	 * its rows was reaching whatever the panel had at that column: the
+	 * panel changed height, the next frame laid the box out against the
+	 * new height, and what the old box had drawn outside the new one
+	 * stayed on the screen. That is the "row of the panel inside the
+	 * dialog" this looked like, and it was one click away at any time.
+	 *
+	 * hit_row_none is the declaration that does nothing: the rectangle is
+	 * registered LAST, so hit_at - which scans backwards - finds it before
+	 * the panel's rows, and hit_run stops the chain there. Both buttons,
+	 * because a right-click reaching a pane under a box is the same bug.
+	 */
+	hit_zone(v, p->top, p->left, p->top + p->h - 1, p->left + p->w - 1,
+		 (uint8_t)(HIT_L | HIT_R), hit_row_none, 0);
 	/* Last, so the selection is over everything the box drew. */
 	if (p->record)
 		dlg_paint_sel(o, v);
@@ -24454,95 +24692,1455 @@ static void chain_add(const char *fmt, ...)
 	g_n_chain++;
 }
 
-static void chain_build(struct view *v)
+/*
+ * WHOSE CHAIN THE TAB SHOWS, and it used to be the wrong one.
+ *
+ * This read the DRAFT's chain - v->ed.dr.chain - which is the one a rule
+ * being written carries. With no draft there was nothing, so a reader who
+ * opened the dialog on a sample was told "no chain was read from this object"
+ * while the scanner was finding eight of them in the same file.
+ *
+ * The draft still wins when there IS one: a rule being written is about the
+ * chain it carries and not about whatever else the object has. Otherwise the
+ * object's own heaviest chain is shown, and the rest are counted beside it
+ * rather than run together - eight chains concatenated would read as one body
+ * doing all of it, which is the one thing a chain must not say.
+ */
+/*
+ * ONE CHAIN AS CODE, because that is what it is a recovery of.
+ *
+ * A LIST SAID THINGS THE PROGRAM DOES NOT DO. "socket, connect, read, write,
+ * socket, bind, listen" reads as seven things one after another; what the
+ * code holds is a connect path and a listen path, a loop in the middle that
+ * goes round twenty times, and three of those steps sitting inside an `if`.
+ * A numbered table with an indented column says the same thing in a form
+ * nobody reads as a program - so this writes the program.
+ *
+ * WHAT EACH PIECE IS RECOVERED FROM, and none of it is guessed:
+ *
+ *   nesting        kof_flow_node.depth - one level per call followed, one
+ *                  for a loop around the step
+ *   `loop { }`     KOF_FLOWF_LOOP, with `repeat` as the trip count where the
+ *                  same step is the whole body
+ *   `if { }`       kof_flow_node.cond - the block is entered on a branch and
+ *                  the other arm cannot reach it
+ *   `} else {`     KOF_REL_EXCLUSIVE between two steps at the same level:
+ *                  no execution runs both in that order
+ *   `v3 = ...`     kof_flow_node.from - this step's argument is what that
+ *                  earlier step returned
+ *   arguments      kof_flow_node.arg, and only the ones arg_const marks as
+ *                  values the sweep actually followed - which is the ABI's
+ *                  argument REGISTERS and not the call's parameters. The
+ *                  sweep cannot know a function's arity, so `fork()` prints
+ *                  four of them and three are whatever was left in the
+ *                  registers. Shown anyway, and said plainly in the legend,
+ *                  because `socket(0x2, 0x1, 0x0)` is the protocol and the
+ *                  type, and dropping a real fact to tidy away an untidy
+ *                  one is the worse trade
+ *
+ * WHAT IS NOT WRITTEN IS AS DELIBERATE. There are no conditions in the `if`,
+ * no bounds on the `loop` and no statements between the calls: the sweep
+ * records what the program ASKS THE SYSTEM FOR and nothing else, and filling
+ * in the rest would be writing fiction in the shape of code. A reader seeing
+ * `if {` knows a branch decides it and knows this page cannot say which.
+ */
+#define CHAIN_MAX_INDENT 8u
+
+/* The arguments, as a call's parenthesis - a variable where an earlier step
+ * produced it, a number where the sweep followed one, and nothing at all
+ * where it could not. Trailing unknowns are dropped rather than printed as
+ * question marks: "read(v2)" is what is known, and "read(v2, ?, ?)" says the
+ * same thing while looking like a failure. */
+/*
+ * WHAT TO CALL THE VALUE A STEP PRODUCES.
+ *
+ * A noun for the KIND of thing, because that is the part a reader needs and
+ * the part that does not move: a mapping is memory, a socket is a socket.
+ * Two capabilities that differ already get different nouns - `mem` against
+ * `mem_x` - so the common case of one plain mapping and one executable one
+ * is told apart by what they ARE and not by a counter.
+ */
+#define CHAIN_NAME_MAX 14u
+
+/*
+ * WHICH ROW PRODUCED THE VALUE AN ARGUMENT CARRIES, by the edge's far end.
+ *
+ * `from_va` names the producing NODE; this finds the row that node became.
+ * Not `from[]`, which is the row's index and therefore a different number
+ * every time the chain is cut differently - see kof_flow_node.from_va.
+ */
+static uint32_t chain_src(const struct kof_flow_node *n, uint32_t len,
+			  uint32_t i, uint32_t q)
 {
-	const struct kof_ovlf_chain *c = &v->ed.dr.chain;
-	uint32_t i;
+	uint32_t j;
 
-	g_n_chain = 0;
-	if (!v->ed.dr.has_chain || !c->n) {
-		chain_add(A_DIM "No chain was read from this object." A_OFF);
-		chain_add("%s", "");
-		/* The three reasons, because "none" on its own reads as a
-		 * fault in the tool. */
-		chain_add("The code asks the system for too little to name,");
-		chain_add("or it is packed and there is nothing to read yet,");
-		chain_add("or the architecture is not one the decoder has.");
-		return;
-	}
-	chain_add(A_BOLD "%-3s %-12s %-22s %s" A_OFF, "#", "capability",
-		  "flags", "fed by");
-	for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++) {
-		const struct kof_ovlf_step *st = &c->s[i];
-		/*
-		 * BOUNDED, BECAUSE THE BUFFER ONLY JUST FITS.
-		 *
-		 * This was four strcat calls into fl[40]. All four labels set
-		 * is 37 bytes and a NUL, so it fits TODAY - by two bytes, with
-		 * nothing checking and nothing to fail if it stopped fitting.
-		 * A fifth capability, or one word lengthened, overflows a
-		 * static-sized stack buffer silently.
-		 *
-		 * One snprintf says the same thing and cannot: an empty label
-		 * contributes "" and a buffer that ran out truncates. The
-		 * "no flags at all" case still reads off fl[0], which is now
-		 * the empty string snprintf left rather than one strcat never
-		 * wrote to.
-		 */
-		char fl[64];
-		char fed[24];
+	if (!n[i].from_va[q])
+		return (uint32_t)-1;
+	for (j = 0; j < i && j < len; j++)
+		if (n[j].va == n[i].from_va[q])
+			return j;
+	return (uint32_t)-1;
+}
 
-		snprintf(fl, sizeof fl, "%s%s%s%s",
-			 (st->flags & KOF_FLOWF_WX)       ? "W+X " : "",
-			 (st->flags & KOF_FLOWF_EXECUTED) ? "jumped-into " : "",
-			 (st->flags & KOF_FLOWF_LOOP)     ? "in-loop " : "",
-			 (st->flags & KOF_FLOWF_VIA_REG)  ? "via-register " : "");
-		if (!fl[0])
-			snprintf(fl, sizeof fl, A_DIM "-" A_OFF);
-		if (st->back)
-			snprintf(fed, sizeof fed, "step %u", i - st->back);
-		else
-			snprintf(fed, sizeof fed, A_DIM "-" A_OFF);
-		chain_add("%-3u %-12s %-22s %s", i, kof_flow_cap_name(st->cap),
-			  fl, fed);
-	}
-	chain_add("%s", "");
+/*
+ * BIND A NAME TO EVERY VALUE THE CHAIN ACTUALLY USES.
+ *
+ * The link itself is stored as a back-distance - see kof_pth_step.back - and
+ * that is right for MATCHING, where the matcher maps a reference onto
+ * whichever step played the part. It is wrong for READING: nobody counts
+ * rows, and a distance moves whenever a step is inserted between the two
+ * ends. So the page binds a name at the producing row and spends it at the
+ * consuming one, which is how the reader's own language works.
+ *
+ * TWO RULES KEEP THE NAMES STILL:
+ *
+ * ONLY WHAT IS REFERENCED gets a name. A step nothing links to never takes
+ * one, so a chain gaining or losing an unlinked step renames nothing. This is
+ * what was wrong with `v1`, `v2`: one global counter over every step, where
+ * any change anywhere shifted every name after it.
+ *
+ * THE NOUN COMES FROM THE CAPABILITY, and a number is added only when two
+ * REFERENCED producers would otherwise collide - two plain mmaps, say. A
+ * mapping and an executable mapping do not collide, because they are
+ * different capabilities and so different nouns, and that is exactly the
+ * case where confusing them would matter: `exec-register(mem_x)` says which
+ * of the two mappings was entered, and it says it without a counter.
+ */
+static void chain_names(const struct kof_flow_node *n, uint32_t len,
+			char nm[][CHAIN_NAME_MAX])
+{
+	uint32_t i, q, j;
+
+	for (i = 0; i < len; i++)
+		nm[i][0] = '\0';
 	/*
-	 * AND WHAT THE MATCH WILL AND WILL NOT REQUIRE, because the table
-	 * above does not say it and the difference decides whether this chain
-	 * is worth a rule at all.
+	 * Marked first, named second, and the two passes are the point: the
+	 * numbers follow the order the rows APPEAR, not the order something
+	 * happened to reference them. Naming as they were found gave
+	 * `node_2 = alloc-exec` above `node_1 = net-open`, because the
+	 * socket is consumed one row earlier than the mapping is.
 	 */
-	chain_add(A_DIM "Order is required only where a step is fed by an"
-		  " earlier one." A_OFF);
-	chain_add(A_DIM "Everything else matches in any order, within four"
-		  " nodes." A_OFF);
-	{
-		uint32_t linked = 0;
+	for (i = 0; i < len; i++)
+		for (q = 0; q < KOF_FLOW_ARGS; q++) {
+			j = chain_src(n, len, i, q);
 
-		for (i = 0; i < c->n && i < KOF_OVLF_CHAIN_MAX; i++)
-			linked += c->s[i].back != 0;
-		if (!linked)
-			chain_add(A_WARN "No links here: this chain is a set of"
-				  " capabilities, not a sequence." A_OFF);
+			if (j != (uint32_t)-1)
+				nm[j][0] = '\1';   /* referenced; name below */
+		}
+	{
+		unsigned seq = 0;
+
+		for (i = 0; i < len; i++)
+			if (nm[i][0])
+				snprintf(nm[i], CHAIN_NAME_MAX, "node_%u",
+					 ++seq);
 	}
 }
 
-static void draw_chain(struct out *o, struct view *v)
+/*
+ * `links` selects what the argument list is FOR.
+ *
+ * The capability row wants only the edges - which earlier step fed this one -
+ * because that is the program's shape and it is the same shape in every
+ * build. The comment wants the whole call as it was written, constants and
+ * all, for a reader checking the finding against a disassembler.
+ */
+static void chain_args(const struct kof_flow_node *n, uint32_t i, char *out,
+		       size_t cap, char nm[][CHAIN_NAME_MAX], int links)
+{
+	uint32_t q, last = 0;
+	size_t at = 0;
+
+	for (q = 0; q < KOF_FLOW_ARGS; q++)
+		if (n[i].from_va[q] || n[i].from[q] ||
+		    (n[i].arg_const & (1u << q)))
+			last = q + 1u;
+	out[0] = 0;
+	for (q = 0; q < last && at + 56u < cap; q++) {
+		const char *sep = (links ? at != 0 : q != 0) ? ", " : "";
+		uint32_t src1 = chain_src(n, KOF_PTH_SYMPTOM_MAX, i, q);
+		uint16_t src = src1 == (uint32_t)-1 ? 0u
+						    : (uint16_t)(src1 + 1u);
+
+		/* Found by the edge rather than by the index - see
+		 * chain_src. */
+		if (src && src <= i) {
+			/*
+			 * THE PRODUCER, BY WHAT IT IS - not by where it is.
+			 *
+			 * This printed `v1` first and then `-4`, and both move
+			 * for reasons the program did not: a renumbered
+			 * variable when some other step gains a link, a
+			 * different distance when a step is inserted between
+			 * the two. The matcher does not use either - it maps
+			 * the reference's producer onto whichever step played
+			 * that part here and asks only whether this step is
+			 * fed BY THAT ONE, at any distance. See step_fits.
+			 *
+			 * So the page says the same thing the match does: the
+			 * identity of what fed it.
+			 */
+			const struct kof_flow_node *p = &n[src - 1u];
+			const char *who = p->name && kof_flow_name_of(p->name)
+					? kof_flow_name_of(p->name)
+					: kof_flow_cap_name(p->cap);
+
+			if (nm && nm[src - 1u][0])
+				at += (size_t)snprintf(out + at, cap - at,
+						       "%s%s", sep,
+						       nm[src - 1u]);
+			else
+				at += (size_t)snprintf(out + at, cap - at,
+						       "%sfrom %s", sep, who);
+		}
+		else if (!links && (n[i].arg_const & (1u << q))) {
+			/* The ABI's own word for the value where there is
+			 * one - see kof_flow_arg_name. `socket(0x2, 0x1)`
+			 * and `socket(AF_INET, SOCK_STREAM)` are the same
+			 * fact and only one of them can be read. */
+			char word[48];
+			const char *w = kof_flow_arg_name(n[i].name, n[i].cap,
+							  q, n[i].arg[q],
+							  word, sizeof word);
+
+			if (w)
+				at += (size_t)snprintf(out + at, cap - at,
+						       "%s%s", sep, w);
+			else
+				at += (size_t)snprintf(out + at, cap - at,
+						       "%s0x%llx", sep,
+						       (unsigned long long)
+							       n[i].arg[q]);
+		}
+		/*
+		 * AND NOTHING AT ALL for an argument this row is not about.
+		 *
+		 * The capability row carries the EDGES; a slot with no edge
+		 * has nothing to contribute to it, and `_` padding made
+		 * `alloc-exec(_, _, _, _)` - four placeholders saying that
+		 * the engine read four registers, which is a fact about the
+		 * engine. The comment still shows the call in full, where a
+		 * `_` means "this argument did not resolve" and is worth
+		 * seeing.
+		 */
+		else if (!links)
+			at += (size_t)snprintf(out + at, cap - at, "%s_", sep);
+	}
+}
+
+/* What to call the step in the code: the name the format gave it, else the
+ * syscall number, else the capability word - which is always something. */
+/*
+ * THE LINE SAYS THE CAPABILITY. THE COMMENT SAYS HOW IT WAS SPELLED.
+ *
+ * This had it the other way round: the row was `mmap(0x0, _, READ|WRITE|EXEC,
+ * PRIVATE|ANON)` and the capability was the annotation. That reads as a
+ * disassembly with extra words, and it is the wrong way up for what the page
+ * is for - `mmap` is one of a dozen ways to ask for executable memory, and
+ * the thing the program DID is the one word they all come to. The spelling
+ * still matters to a reader checking the finding, so it moves to where an
+ * explanation belongs.
+ */
+static void chain_callee(const struct kof_flow_node *n, char *out, size_t cap)
+{
+	/*
+	 * WHAT KIND OF SOCKET, from what the engine already recorded.
+	 *
+	 * A raw socket is its own capability and a datagram one is a flag -
+	 * see KOF_FLOWF_DGRAM - so the three kinds are already distinct in
+	 * the chain and a rule can ask for any of them. Spelling them out
+	 * here is READING that, not adding to it: two more capabilities
+	 * would say what the flag says and spend two of the twenty-two
+	 * places left in the mask.
+	 *
+	 * "stream" is the absence of both, which is what the engine knows.
+	 * It is not the same claim as "TCP" - AF_UNIX streams are streams
+	 * too - so the word stops where the evidence does.
+	 */
+	if (n->cap == KOF_CAP_NET_OPEN) {
+		snprintf(out, cap, "net-open-%s",
+			 (n->flags & KOF_FLOWF_DGRAM) ? "datagram"
+						      : "stream");
+		return;
+	}
+	snprintf(out, cap, "%s", kof_flow_cap_name(n->cap));
+}
+
+/* How it was actually written: the symbol, or the syscall number when the
+ * table had no name for it, with whatever arguments resolved. */
+static void chain_spelling(const struct kof_flow_node *n, const char *args,
+			   char *out, size_t cap)
+{
+	char who[48];
+
+	if (n->name && kof_flow_name_of(n->name))
+		snprintf(who, sizeof who, "%s", kof_flow_name_of(n->name));
+	else if (n->sel && n->sel != KOF_FLOW_SEL_PENDING)
+		snprintf(who, sizeof who, "syscall_%u", n->sel);
+	else
+		who[0] = '\0';
+	if (!who[0])
+		out[0] = '\0';
+	else
+		snprintf(out, cap, "%s(%s)", who, args);
+}
+
+static void chain_one(const struct kof_flow_node *n, uint32_t len)
+{
+	/*
+	 * WHICH OPEN LEVELS PRINTED A BRACE OF THEIR OWN.
+	 *
+	 * A run of calls with nothing between them is one step reached five
+	 * frames down, and printing `call { call { call { call { call {`
+	 * around a single line spends five rows saying "deeper". The run
+	 * gets one `call xN {` and one `}`, so `own[L]` records which
+	 * logical level owns a brace and `ind` is how many were printed.
+	 */
+	uint8_t own[CHAIN_MAX_INDENT + 3u];
+	/*
+	 * WHICH LEVELS A STEP ACTUALLY STOPS AT.
+	 *
+	 * A run of calls may only be folded into one line while nothing else
+	 * stands inside it: fold a level that a later step rests in and that
+	 * step gets drawn one frame too deep, under braces that cannot be
+	 * closed around it. Measured on a dropper - `clone()` sat four
+	 * frames above the `mmap()` beside it and the folded form put them
+	 * side by side, which says the program does something it does not.
+	 */
+	/* Which loop, if any, each open level IS - so a level can be closed
+	 * when its loop ends and not only when the depth drops. */
+	/* One per step, empty unless something links to that step. */
+	char nm[KOF_PTH_SYMPTOM_MAX][CHAIN_NAME_MAX];
+	uint16_t lvl_loop[CHAIN_MAX_INDENT + 3u] = { 0 };
+	/* And which branch, and which of its arms, an open `if` level is. */
+	uint32_t lvl_br[CHAIN_MAX_INDENT + 3u] = { 0 };
+	uint8_t  lvl_arm[CHAIN_MAX_INDENT + 3u] = { 0 };
+	uint32_t i;
+	unsigned open = 0;      /* logical levels open */
+	unsigned ind = 0;       /* braces actually printed */
+
+	if (len > KOF_PTH_SYMPTOM_MAX)
+		len = KOF_PTH_SYMPTOM_MAX;
+	chain_names(n, len, nm);
+
+	/*
+	 * NO VARIABLE NAMES, AND THEY WERE TRIED.
+	 *
+	 * A link printed as `v1 = mmap(...)` and `exec-register(v1)`, with
+	 * the numbers handed out in order of first use among the linked
+	 * steps. That counter moves for reasons the program did not: one
+	 * more step gaining a link renumbers everything after it, so two
+	 * builds of the same thing read differently and a reader comparing
+	 * them is comparing the renderer.
+	 *
+	 * The link is stored as a DISTANCE for exactly this reason - see
+	 * kof_pth_step.back: "its buffer came from the step two before it"
+	 * is the same claim in every build. The page spells it the same way,
+	 * so what is on the screen and what a rule carries are one fact.
+	 */
+	for (i = 0; i < len; i++) {
+		char call[48], args[160], note[320], line[560];
+		char vargs[160], spell[224], inl[40];
+		unsigned want = n[i].depth, cd = 0;
+		size_t at;
+
+		inl[0] = '\0';
+		if (want > CHAIN_MAX_INDENT)
+			want = CHAIN_MAX_INDENT;
+		/* How much of the depth is CALLS: all of it but the one level
+		 * a loop is allowed to add. */
+		cd = want - ((n[i].flags & KOF_FLOWF_LOOP) && want ? 1u : 0u);
+		/* The conditional is a level of its own, inside whatever the
+		 * depth already counted. */
+		if (n[i].cond)
+			want++;
+
+		/*
+		 * ALTERNATIVES ARE AN `else`, and only when the two steps
+		 * stand at the same place: one level deeper is a nested
+		 * branch and one shallower is the end of this one, and
+		 * neither is the other arm of anything.
+		 */
+		/*
+		 * THE OTHER ARM OF THE SAME BRANCH.
+		 *
+		 * Asked of the analyzer rather than guessed from adjacency:
+		 * `branch` names the conditional and `arm` the side, so this
+		 * is `else` exactly when the open level is the same branch
+		 * and this step is its other side. The old test was
+		 * `rel == EXCLUSIVE`, which says only that the two steps
+		 * cannot both run - true of two arms of ONE branch and also
+		 * of two steps in unrelated branches that happen to exclude
+		 * each other, and it printed `else` for both.
+		 */
+		if (i && open && ind && lvl_br[open - 1u] &&
+		    lvl_br[open - 1u] == n[i].branch &&
+		    lvl_arm[open - 1u] != n[i].arm) {
+			chain_add("%*s} else {", (int)(2u * (ind - 1u)), "");
+			lvl_arm[open - 1u] = n[i].arm;
+			goto body;
+		}
+		if (i && n[i].rel == KOF_REL_EXCLUSIVE && want == open &&
+		    open && ind && !n[i].branch) {
+			chain_add("%*s} else {", (int)(2u * (ind - 1u)), "");
+			goto body;
+		}
+		/*
+		 * AND A LOOP THAT IS OPEN BUT IS NOT THIS STEP'S LOOP HAS
+		 * ENDED, whatever the depth says. Closing on depth alone is
+		 * what let one brace span two loops.
+		 */
+		if (i && open && lvl_loop[open - 1u] &&
+		    lvl_loop[open - 1u] != n[i].loop) {
+			while (open && lvl_loop[open - 1u] &&
+			       lvl_loop[open - 1u] != n[i].loop) {
+				open--;
+				lvl_loop[open] = 0;
+				lvl_br[open] = 0;
+				if (own[open])
+					chain_add("%*s}",
+						  (int)(2u * --ind), "");
+			}
+		}
+		while (open > want) {
+			open--;
+			lvl_loop[open] = 0;
+			lvl_br[open] = 0;
+			if (own[open])
+				chain_add("%*s}", (int)(2u * --ind), "");
+		}
+		while (open < want) {
+			/*
+			 * WHICH KIND EACH LEVEL IS, AND IT IS NOT THE SAME
+			 * ANSWER FOR ALL OF THEM.
+			 *
+			 * `depth` is call nesting plus AT MOST ONE for a
+			 * loop - see kof_flow_node.depth, which says why it
+			 * cannot count loops higher honestly. So the levels
+			 * read from the outside in: calls, then the loop if
+			 * there is one, then the branch if there is one.
+			 *
+			 * Deciding per STEP instead of per LEVEL printed
+			 * `loop { loop { loop {` on a bot four calls deep
+			 * inside one loop - three loops the program does not
+			 * have, off a flag that says only "there is a loop
+			 * around this".
+			 */
+			const char *kind = "call";
+
+			if (open == cd && (n[i].flags & KOF_FLOWF_LOOP))
+				kind = "loop";
+			else if (open + 1u == want && n[i].cond)
+				kind = "if";
+			/*
+			 * A BLOCK AROUND ONE ROW GROUPS NOTHING.
+			 *
+			 * Two braces and an indent exist to say "these
+			 * belong together"; with one row inside there is no
+			 * "these". The fact itself still has to be said, so
+			 * it moves onto the row:
+			 *
+			 *   loop {              name_hash()  // in a loop
+			 *     name_hash()  ->   name_hash()  // in a loop
+			 *   }
+			 *
+			 * WHICH ALSO STOPS A FALSE CLAIM. The depth a node
+			 * carries counts AT MOST ONE loop and does not say
+			 * WHICH - so two steps in two different loops at the
+			 * same depth were drawn under one brace, which reads
+			 * as one loop doing both. Each on its own row says
+			 * only what is known: this step repeats.
+			 */
+			if (kind[0] != 'c') {
+				uint32_t j, bodyn = 0;
+
+				for (j = i; j < len; j++) {
+					unsigned wj = n[j].depth;
+
+					if (wj > CHAIN_MAX_INDENT)
+						wj = CHAIN_MAX_INDENT;
+					if (n[j].cond)
+						wj++;
+					if (wj <= open)
+						break;
+					/*
+					 * AND IT HAS TO BE THE SAME LOOP.
+					 *
+					 * Depth alone put two steps from two
+					 * different loops under one brace -
+					 * see kof_flow_node.loop. The run
+					 * ends where the identity changes,
+					 * so what the brace encloses is a
+					 * loop the program has.
+					 */
+					if (kind[0] == 'l' &&
+					    n[j].loop != n[i].loop)
+						break;
+					if (wj == open + 1u)
+						bodyn++;
+				}
+				/*
+				 * AND AN `if` WITH ONE ROW KEEPS ITS BLOCK
+				 * WHEN THE OTHER ARM FOLLOWS.
+				 *
+				 * Folding it onto the row would say "this may
+				 * not happen" twice and never say "exactly
+				 * one of these two happens", which is the
+				 * stronger and more useful claim - and the
+				 * only one an `else` can carry.
+				 */
+				if (kind[0] == 'i' && bodyn <= 1u &&
+				    n[i].branch && j < len &&
+				    n[j].branch == n[i].branch &&
+				    n[j].arm != n[i].arm)
+					bodyn = 2u;
+				if (bodyn <= 1u) {
+					size_t k = strlen(inl);
+
+					lvl_loop[open] = 0;
+
+					snprintf(inl + k, sizeof inl - k,
+						 "%s%s", k ? ", " : "",
+						 kind[0] == 'l' ? "in a loop"
+						 : kind[0] == 'i'
+						   ? "only on a branch"
+						   : "on a thread");
+					own[open] = 0;
+					open++;
+					continue;
+				}
+			}
+			if (kind[0] == 'c') {
+				/*
+				 * A FRAME THAT PRODUCES NO EVENT IS NOT PART
+				 * OF THE LOGIC.
+				 *
+				 * The chain follows calls to find events, and
+				 * most of the frames it passes through hold
+				 * none of their own - they are on the way.
+				 * Drawing them printed `call x4 {` around a
+				 * single line, and the only honest answer to
+				 * "what does that call do" was "nothing that
+				 * is recorded here".
+				 *
+				 * `rest[L]` is whether any step of this chain
+				 * stands directly inside level L. A call
+				 * level nothing stands in gets no brace and
+				 * no indent; one that holds an event gets
+				 * both, and then the braces group events by
+				 * the routine that makes them, which is the
+				 * thing worth drawing.
+				 */
+				/* `rest[]` used to be tested here. It was
+				 * never written, so this was always taken;
+				 * the array is gone and the branch says what
+				 * it does. A plain call gets no brace. */
+				if (1) {
+					own[open] = 0;
+					lvl_loop[open] = 0;
+					lvl_br[open] = 0;
+					open++;
+					continue;
+				}
+				/*
+				 * AND WHICH CALL, as the address of the body
+				 * it reached - see kof_flow_node.frame. The
+				 * name is not available: a chain carries the
+				 * steps, and what the author called the
+				 * routine around them is not one of them.
+				 * The address is where to look, which is the
+				 * question a reader actually has.
+				 */
+				/*
+				 * A PLAIN CALL GETS INDENTATION AND NO ROW.
+				 *
+				 * `loop`, `if` and `thread` each change what
+				 * the ORDER means - a step inside a loop
+				 * happens again, a step inside a branch may
+				 * not happen, a step inside a thread does not
+				 * happen before the ones after it. A call
+				 * changes nothing about the order: the body
+				 * runs where it is written. What it carries
+				 * is the GROUPING, and the indentation is
+				 * already that.
+				 *
+				 * So the two rows a brace pair costs buy a
+				 * fact the column already shows. On a bot
+				 * four frames deep that was eight rows of
+				 * punctuation around five steps.
+				 *
+				 * A THREAD BODY STILL GETS ITS WORD, and only
+				 * the innermost level knows: the node carries
+				 * how ITS body was entered and nothing about
+				 * the frames passed through on the way.
+				 */
+				if (open + 1u == cd &&
+				    n[i].entry == KOF_FLOW_IN_THREAD) {
+					chain_add("%*sthread {",
+						  (int)(2u * ind), "");
+					own[open] = 1;
+					ind++;
+				} else {
+					/*
+					 * AND NOT EVEN AN INDENT FOR A PLAIN
+					 * CALL.
+					 *
+					 * What this page is for is which
+					 * calls the program makes, in what
+					 * order, and where that order stops
+					 * being a sequence. A loop, a branch
+					 * and a thread each change what the
+					 * order MEANS. A call does not: the
+					 * body runs where the call is, and
+					 * the steps read the same whether
+					 * they were written there or one
+					 * frame down.
+					 *
+					 * So the column it was costing bought
+					 * nothing - a bot four frames deep
+					 * had eight spaces of left margin
+					 * saying "deeper" and no reader ever
+					 * needed to know. The level is still
+					 * walked and still ends where it
+					 * ends; it simply does not move the
+					 * text.
+					 */
+					own[open] = 0;
+				}
+				open++;
+				continue;
+			}
+			chain_add("%*s%s {", (int)(2u * ind), "", kind);
+			own[open] = 1;
+			lvl_loop[open] = kind[0] == 'l' ? n[i].loop : 0u;
+			lvl_br[open] = kind[0] == 'i' ? n[i].branch : 0u;
+			lvl_arm[open] = kind[0] == 'i' ? n[i].arm : 0u;
+			open++;
+			ind++;
+		}
+body:
+		chain_callee(&n[i], call, sizeof call);
+		chain_args(n, i, args, sizeof args, nm, 1);
+		chain_args(n, i, vargs, sizeof vargs, nm, 0);
+		chain_spelling(&n[i], vargs, spell, sizeof spell);
+
+		/*
+		 * THE CAPABILITY BESIDE THE CALL, because the word is what a
+		 * rule is written against and the name is what the author's
+		 * library happened to be called.
+		 *
+		 * AND NOT WHEN THE LINE ALREADY SAYS IT. For a step with no
+		 * symbol - a dispatcher call, a PEB read - chain_callee has
+		 * nothing to print but the capability, so the row came out
+		 * as `call-register()  // call-register` and the comment was
+		 * the line again. A comment that repeats its line is not a
+		 * comment; it is noise with a slash in front of it.
+		 */
+		at = 0;
+		note[0] = '\0';
+		/* How it was written, which is now the comment's job. */
+		if (spell[0])
+			at = (size_t)snprintf(note, sizeof note, "%s", spell);
+		if (n[i].repeat > 1u)
+			at += (size_t)snprintf(note + at, sizeof note - at,
+					       "%sx%u", at ? ", " : "",
+					       (unsigned)n[i].repeat);
+		if (n[i].flags & KOF_FLOWF_WX)
+			at += (size_t)snprintf(note + at, sizeof note - at,
+					       "%sW+X", at ? ", " : "");
+		if (n[i].flags & KOF_FLOWF_EXECUTED)
+			at += (size_t)snprintf(note + at, sizeof note - at,
+					       "%sjumped-into",
+					       at ? ", " : "");
+		/*
+		 * `via-register` SAYS NOTHING ON A WORD THAT IS ALREADY ABOUT
+		 * A REGISTER. It is worth saying of `alloc` - that one was
+		 * reached through a slot held in a register rather than
+		 * called by name - and it is a tautology on call-register and
+		 * exec-register.
+		 */
+		if ((n[i].flags & KOF_FLOWF_VIA_REG) &&
+		    n[i].cap != KOF_CAP_CALL_REG &&
+		    n[i].cap != KOF_CAP_EXEC_REG)
+			at += (size_t)snprintf(note + at, sizeof note - at,
+					       "%svia-register",
+					       at ? ", " : "");
+		if (n[i].flags & KOF_FLOWF_DGRAM)
+			at += (size_t)snprintf(note + at, sizeof note - at,
+					       "%sdatagram", at ? ", " : "");
+		/* And whatever a block would have said, had there been more
+		 * than one row to put inside it. */
+		if (inl[0])
+			(void)snprintf(note + at, sizeof note - at, "%s%s",
+				       at ? ", " : "", inl);
+
+		/* NO COLOUR IN A PADDED CELL: the escape counts against the
+		 * field width and nothing else does. */
+		/* A row something later links to introduces its name here, so
+		 * the reader meets the name before it is spent. */
+		if (nm[i][0])
+			snprintf(line, sizeof line, "%*s%s = %s(%s)",
+				 (int)(2u * ind), "", nm[i], call, args);
+		else
+			snprintf(line, sizeof line, "%*s%s(%s)",
+				 (int)(2u * ind), "", call, args);
+		/* A step with nothing left to add gets no comment column at
+		 * all, rather than an empty one after forty-four spaces. */
+		if (note[0])
+			chain_add("%-44s " A_DIM "// %s" A_OFF, line, note);
+		else
+			chain_add("%s", line);
+	}
+	while (open) {
+		open--;
+		if (own[open])
+			chain_add("%*s}", (int)(2u * --ind), "");
+	}
+}
+
+/*
+ * WHAT THE PAGE SHOWS, and it is EVERY chain the object has.
+ *
+ * It used to show the draft's chain - the one a rule being written carries -
+ * and nothing at all when there was no draft, so a reader opening this on a
+ * sample was told "no chain was read from this object" while the scanner was
+ * finding several in the same file.
+ *
+ * And then it showed one of them, the heaviest, with the rest counted in a
+ * footnote. That answered a question nobody asked: diamorphine does three
+ * separate things - it unprotects kernel text and patches it, it probes for a
+ * symbol it was not given, and it replaces credentials - and each is its own
+ * chain. Showing the heaviest showed one third of the module.
+ *
+ * One block per chain and never run together: a chain is one body's sequence,
+ * and concatenating them would say a single function did all of it.
+ */
+static void chain_build(struct view *v)
+{
+	const struct kof_flow_set *set;
+	uint32_t i, k, linked = 0, total = 0;
+
+	g_n_chain = 0;
+	/*
+	 * THE OBJECT'S CHAINS, AND THE DRAFT'S ONLY BESIDE THEM.
+	 *
+	 * "The draft wins when it has a chain" was wrong in practice and the
+	 * reason was that the viewer ALWAYS has a draft: sim_recarve puts the
+	 * heaviest chain into it as soon as an object is opened, so the rule
+	 * fired every time and the other seven were never shown. Nothing was
+	 * gained by it either - the draft's chain is the heaviest of this
+	 * same set, so it is already the first table on the page.
+	 */
+	/*
+	 * A NORMALISED VIEW IS NOT CODE ANY MORE, and pathogen must not be
+	 * asked to read it as code.
+	 *
+	 * Normalising collapses runs and rewrites encodings, which MOVES
+	 * every byte after each change. The instructions survive - a syscall
+	 * is still a syscall - but every relative call and jump in the view
+	 * now points somewhere else, and the function boundaries its header
+	 * describes point into the wrong bytes: measured on an 8 MB miner,
+	 * the parent declares 440 function starts and the view resolves 0.
+	 *
+	 * So a chain built here would be assembled from call targets that
+	 * are not call targets. The nodes are real and the SEQUENCE is
+	 * invented, which is the one thing this page must never do. The
+	 * object before normalisation is the one that answers.
+	 */
+	if (cur_obj(v) && cur_obj(v)->entry_kind == KOF_ENT_NORMALIZED) {
+		chain_add(A_DIM "Pathogen does not read a normalised view."
+			  A_OFF);
+		chain_add("%s", "");
+		chain_add("Normalising moves the bytes after every run it");
+		chain_add("collapses, so the call and jump displacements in");
+		chain_add("this view no longer point where they did.");
+		chain_add("%s", "");
+		chain_add("The object it was made from is the one to read.");
+		return;
+	}
+	if ((set = pth_set_of(v, cur_obj(v))) != NULL) {
+		for (k = 0; k < set->n_chain; k++) {
+			if (k)
+				chain_add("%s", "");
+			chain_add(A_BOLD "chain %u of %u" A_OFF,
+				  k + 1u, set->n_chain);
+			chain_one(set->n[k], set->len[k]);
+			for (i = 0; i < set->len[k]; i++)
+				linked += kof_flow_from_any(&set->n[k][i]) != 0;
+		}
+		total = set->n_chain;
+	}
+	if (!total) {
+		/*
+		 * THE REASON THE ENGINE GAVE, and not a list of the reasons
+		 * it might have had.
+		 *
+		 * This used to print all three guesses - too little, packed,
+		 * no decoder - which is what a page says when it does not
+		 * know. The engine knows: it walked the gates and one of them
+		 * stopped it. Asking for the answer and printing it is the
+		 * difference between a reader checking the right thing and a
+		 * reader checking all three.
+		 */
+		chain_add(A_DIM "No chain was read from this object." A_OFF);
+		chain_add("%s", "");
+		chain_add("%s.", g_pth_why ? g_pth_why
+					   : "the sweep gave no reason");
+		return;
+	}
+	chain_add("%s", "");
+	/*
+	 * AND NOTHING ELSE ON THE PAGE.
+	 *
+	 * Three lines used to follow the code - what a match requires, that
+	 * everything else aligns in any order within four nodes, and a
+	 * warning when no step feeds another. All three are about how a RULE
+	 * is compared, which is a different question from what this program
+	 * does, and a reader looking at recovered logic was being handed the
+	 * matcher's manual underneath it.
+	 *
+	 * What the page can show about links, it shows: `v3 = f()` where one
+	 * step feeds another, and nothing where none does.
+	 */
+	(void)linked;
+}
+
+
+/*
+ * ---- RUNTIME TRACE --------------------------------------------------------
+ *
+ * THE EMULATED COUNTERPART OF THE CALL CHAIN, AND THE DIFFERENCE IS THE POINT.
+ *
+ * "Call chain" is what the SWEEP READ out of the code without running it.
+ * This is what a RUN actually did. The two answer one question - what does
+ * this object ask the system for - by methods that go blind in different
+ * places: the sweep cannot see through a packer or a computed pointer, and
+ * the run cannot see a path it did not take.
+ *
+ * Neither is the truth. A reader comparing them learns which of the two this
+ * object defeated, and that comparison is what the page exists for.
+ *
+ * ELF ONLY, AND ON PURPOSE. The Windows API dispatch keeps no log - see
+ * winapi_do in libkofemu - so a PE run would have nothing to show, and an
+ * empty page is worse than an item that was never offered.
+ */
+#define RTR_MAX_LINE 192u
+static struct prop_line g_rtr[RTR_MAX_LINE];
+static uint32_t         g_n_rtr;
+
+/*
+ * WHAT THE LAST RUN LEFT, kept because the page is rebuilt on every redraw
+ * and the run is not. Running again on a scroll would be minutes of CPU to
+ * paint a line that already said the answer.
+ */
+static struct kof_emu_syscall    g_rtr_log[KOF_EMU_SYSLOG];
+static unsigned                  g_rtr_n;
+static uint32_t                  g_rtr_unk[KOF_EMU_UNKSYS];
+static unsigned                  g_rtr_n_unk;
+static struct kof_emu_unp_report g_rtr_rep;
+static int                       g_rtr_ran;   /* a run was attempted at all */
+static int                       g_rtr_named; /* the numbers are amd64 ones */
+static char                      g_rtr_err[128];
+
+static void rtr_add(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (g_n_rtr >= RTR_MAX_LINE)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(g_rtr[g_n_rtr].text, PROP_W, fmt, ap);
+	va_end(ap);
+	g_n_rtr++;
+}
+
+/*
+ * amd64 NUMBERS ONLY, and the page says so when they are not.
+ *
+ * do_syscall logs the number AS THE GUEST GAVE IT, so a 32-bit ELF logs i386
+ * numbers - where 90 is mmap and 9 is link. Naming those out of the amd64
+ * table would put a confident wrong word on the screen, which is worse than
+ * leaving the number bare.
+ *
+ * THE TABLE IS THE ENGINE'S, which is the whole of the change here. This
+ * file kept its own - amd64 only, limited to what the interpreter
+ * implements - beside the engine's seven, which answer the same question for
+ * every architecture the sweep reads. Two copies of a number-to-name map is
+ * one that gets a new syscall and one that does not.
+ */
+static const char *rtr_sys_name(uint64_t nr)
+{
+	if (!g_rtr_named || nr > 0xffffffffu)
+		return NULL;
+	return kof_flow_sys_name(KOF_FLOW_A_X86_64, (uint32_t)nr);
+}
+
+/*
+ * ---- NORMALISATION --------------------------------------------------------
+ *
+ * A RAW LOG IS NOT COMPARABLE, AND THE ADDRESSES ARE WHY.
+ *
+ * `mmap(0, 0x1000, ...) -> 0x7f0000000000` says where THIS run put a page.
+ * Another build of the same program puts it somewhere else, so a rule written
+ * over that number would be a rule about one run of one file. The syscall
+ * number is no better: 9 is mmap on x86-64 and `link` on i386.
+ *
+ * So the log is reduced to the form the rest of the engine already speaks -
+ * struct kof_pth_step: a capability, its flags, and WHICH EARLIER STEP FED
+ * IT. Nothing that survives is a value this run chose. The struct is REUSED
+ * and not copied, for the reason flow.h gives about its own tables: a second
+ * spelling of a vocabulary is a second thing to disagree - and the point of
+ * the page is that a reader can hold it beside Call chain.
+ *
+ * WHAT IS LOST, said here rather than found out later:
+ *
+ *   - A call the vocabulary does not name is DROPPED. If one of those was a
+ *     producer, the link through it goes with it - which is already what
+ *     kof_diag_step.back means: "no link was seen", not "there is none".
+ *   - EXECUTED is never set. Whether the program jumped into what it
+ *     allocated is a fact about CODE, and nothing here read any.
+ */
+static struct kof_pth_step g_rtr_step[KOF_EMU_SYSLOG];
+static uint8_t              g_rtr_raw[KOF_EMU_SYSLOG];  /* its raw log index */
+static uint8_t              g_rtr_cyc[KOF_EMU_SYSLOG];  /* inside a cycle?   */
+static uint8_t              g_rtr_turns[KOF_EMU_SYSLOG];/* on its first step */
+static unsigned             g_rtr_steps;
+static unsigned             g_rtr_dropped;   /* calls carrying no capability */
+
+/*
+ * A RETURN VALUE WORTH FOLLOWING.
+ *
+ * Linux answers an error with -errno, so the top 4095 values are failures and
+ * never a pointer or a descriptor. Zero is excluded too: it is the commonest
+ * success there is, and matching it would link half the table to whichever
+ * call happened to come first.
+ */
+static int rtr_ret_usable(uint64_t ret, int bits)
+{
+	if (!ret)
+		return 0;
+	if (bits == 32)
+		return (uint32_t)ret < 0xfffff001u;
+	return ret < 0xfffffffffffff001ull;
+}
+
+/*
+ * A LOOP IS A REPEATING CYCLE, NOT A REPEATED CALL.
+ *
+ * The first spelling of this marked a step when the one before it had the
+ * same capability, which finds `write write write` and misses the shape that
+ * actually matters: connect, send, recv, connect, send, recv - a beacon, and
+ * the thing a bot does. Three calls repeating is not three repeated calls.
+ *
+ * So the period is searched for: the longest stretch from here that is some
+ * block repeated end to end. Greedy and left to right, widest coverage wins,
+ * and the shortest period wins a tie - `a a a a` is `a` four times and not
+ * `a a` twice, because the shorter one is the claim that survives one extra
+ * iteration being cut off by the budget.
+ *
+ * AND THIS IS STILL NOT THE SWEEP'S LOOP. flow.c reads a backward branch out
+ * of the code and knows a loop that ran once; a log cannot. Where they
+ * disagree it is this one that is wrong, and the page says which it is.
+ */
+static unsigned rtr_cycle_at(const struct kof_pth_step *s, unsigned n,
+			     unsigned i, unsigned *period)
+{
+	unsigned p, best_p = 0, best_turns = 1;
+
+	for (p = 1u; i + 2u * p <= n; p++) {
+		unsigned turns = 1u, k;
+
+		for (;;) {
+			unsigned base = i + turns * p;
+
+			if (base + p > n)
+				break;
+			for (k = 0; k < p; k++)
+				if (s[i + k].cap != s[base + k].cap ||
+				    s[i + k].flags != s[base + k].flags)
+					break;
+			if (k < p)
+				break;
+			turns++;
+		}
+		if (turns >= 2u && turns * p > best_turns * best_p) {
+			best_p = p;
+			best_turns = turns;
+		}
+	}
+	*period = best_p;
+	return best_p ? best_turns : 0u;
+}
+
+static void rtr_normalise(int bits)
+{
+	struct kof_pth_step all[KOF_EMU_SYSLOG];
+	uint8_t raw[KOF_EMU_SYSLOG];
+	uint64_t ret[KOF_EMU_SYSLOG];
+	unsigned i, j, a, n = 0;
+
+	g_rtr_steps = 0;
+	g_rtr_dropped = 0;
+
+	/* 1. every call that the vocabulary names, in order. */
+	for (i = 0; i < g_rtr_n; i++) {
+		uint8_t fl = 0, cap;
+
+		cap = kof_flow_cap_of_syscall((unsigned)bits,
+					      (uint32_t)g_rtr_log[i].nr,
+					      g_rtr_log[i].arg, &fl);
+		if (cap == KOF_CAP_NONE) {
+			g_rtr_dropped++;
+			continue;
+		}
+		all[n].cap = cap;
+		all[n].flags = fl;
+		all[n].back = 0;
+		raw[n] = (uint8_t)i;
+		n++;
+	}
+
+	/*
+	 * 2. ONE ITERATION PER CYCLE, because a loop shown in full is not a
+	 * loop shown. Twelve turns of three calls is thirty-six rows that say
+	 * one thing, and the one thing is the row that is missing from them.
+	 */
+	for (i = 0; i < n; ) {
+		unsigned p = 0, turns = rtr_cycle_at(all, n, i, &p);
+		unsigned k, keep = turns ? p : 1u;
+
+		for (k = 0; k < keep; k++) {
+			g_rtr_step[g_rtr_steps + k] = all[i + k];
+			g_rtr_raw[g_rtr_steps + k] = raw[i + k];
+			g_rtr_cyc[g_rtr_steps + k] = turns ? 1u : 0u;
+			g_rtr_turns[g_rtr_steps + k] = 0;
+			if (turns)
+				g_rtr_step[g_rtr_steps + k].flags |=
+					KOF_FLOWF_LOOP;
+		}
+		if (turns)
+			g_rtr_turns[g_rtr_steps] =
+				turns > 255u ? 255u : (uint8_t)turns;
+		g_rtr_steps += keep;
+		i += turns ? p * turns : 1u;
+	}
+
+	/*
+	 * 3. THE LINK, over what is left - and it is the one thing a run can
+	 * say that a sweep often cannot: the sweep loses a pointer spilled to
+	 * the stack, and a log watches the value itself go back in.
+	 *
+	 * First argument carrying one only, the same rule the stored step
+	 * keeps and for the same reason: pinning all of them would be pinning
+	 * the calling convention.
+	 */
+	for (i = 0; i < g_rtr_steps; i++) {
+		const struct kof_emu_syscall *c = &g_rtr_log[g_rtr_raw[i]];
+
+		for (a = 0; a < 6u && !g_rtr_step[i].back; a++) {
+			if (!c->arg[a])
+				continue;
+			for (j = i; j-- > 0; )
+				if (ret[j] == c->arg[a]) {
+					g_rtr_step[i].back = (uint8_t)(i - j);
+					break;
+				}
+		}
+		ret[i] = rtr_ret_usable(c->ret, bits) ? c->ret : 0;
+	}
+}
+
+static void rtr_build(struct view *v)
+{
+	char fl[64], fed[24], turn[16];
+	unsigned i;
+
+	(void)v;
+	g_n_rtr = 0;
+	if (!g_rtr_ran) {
+		rtr_add(A_DIM "Nothing has been run yet." A_OFF);
+		return;
+	}
+	if (g_rtr_err[0]) {
+		rtr_add(A_WARN "%s" A_OFF, g_rtr_err);
+		return;
+	}
+
+	rtr_add("Ran %llu instructions; stopped: %s",
+		(unsigned long long)g_rtr_rep.insn,
+		kof_emu_stop_name(g_rtr_rep.stop));
+	if (g_rtr_rep.detail && g_rtr_rep.detail[0])
+		rtr_add(A_DIM "  %s" A_OFF, g_rtr_rep.detail);
+	rtr_add("%s", "");
+
+	if (!g_rtr_n) {
+		/*
+		 * A RUN THAT ASKED FOR NOTHING IS A FINDING, not an empty
+		 * page, and the three readings lead to three different moves.
+		 */
+		rtr_add(A_DIM "This run made no syscall." A_OFF);
+		rtr_add("%s", "");
+		rtr_add("The run ended before the stub reached one,");
+		rtr_add("or it does its work entirely in memory,");
+		rtr_add("or it was started from an entry point not its own.");
+		return;
+	}
+
+	if (!g_rtr_steps) {
+		rtr_add(A_DIM "%u call%s, none of them in the capability"
+			" vocabulary." A_OFF, g_rtr_n,
+			g_rtr_n == 1u ? "" : "s");
+		rtr_add("%s", "");
+		rtr_add("Nothing this run asked for is a thing a rule can name.");
+		rtr_add("The raw log is below.");
+	} else {
+		rtr_add(A_BOLD " %-3s %-14s %-14s %-10s %s" A_OFF,
+			"#", "capability", "flags", "fed by", "turns");
+		for (i = 0; i < g_rtr_steps; i++) {
+			const struct kof_pth_step *st = &g_rtr_step[i];
+
+			snprintf(fl, sizeof fl, "%s%s%s",
+				 (st->flags & KOF_FLOWF_WX)    ? "W+X " : "",
+				 (st->flags & KOF_FLOWF_DGRAM) ? "datagram " : "",
+				 (st->flags & KOF_FLOWF_LOCAL) ? "local " : "");
+			if (!fl[0])
+				snprintf(fl, sizeof fl, A_DIM "-" A_OFF);
+			if (st->back)
+				snprintf(fed, sizeof fed, "step %u",
+					 i - st->back);
+			else
+				snprintf(fed, sizeof fed, A_DIM "-" A_OFF);
+			/* The count on the row the cycle starts on; the rest
+			 * of its rows carry the gutter and nothing else, so
+			 * the number cannot read as being about one call. */
+			if (g_rtr_turns[i])
+				snprintf(turn, sizeof turn, "x%u",
+					 g_rtr_turns[i]);
+			else
+				turn[0] = 0;
+			rtr_add("%s%-3u %-14s %-14s %-10s %s",
+				g_rtr_cyc[i] ? "|" : " ", i,
+				kof_flow_cap_name(st->cap), fl, fed, turn);
+		}
+		rtr_add("%s", "");
+		rtr_add(A_DIM "Nothing above is a value this run chose: no"
+			" address, no descriptor, no number." A_OFF);
+		rtr_add(A_DIM "A '|' gutter is one turn of a cycle; the rest"
+			" of its turns are not listed." A_OFF);
+		if (g_rtr_dropped)
+			rtr_add(A_DIM "%u further call%s carried no capability"
+				" and %s not shown." A_OFF, g_rtr_dropped,
+				g_rtr_dropped == 1u ? "" : "s",
+				g_rtr_dropped == 1u ? "is" : "are");
+	}
+
+	if (g_rtr_n >= KOF_EMU_SYSLOG)
+		rtr_add(A_WARN "The log holds the LAST %u calls; earlier ones"
+			" are gone - a cycle may have started before it."
+			A_OFF, (unsigned)KOF_EMU_SYSLOG);
+
+	/*
+	 * WHAT WAS REFUSED, because a trace with no network in it may mean the
+	 * object asked for none - or that this build had no stub to answer
+	 * with and the object went down its failure path instead. Those are
+	 * different findings and only the first is about the file.
+	 */
+	if (g_rtr_n_unk) {
+		rtr_add("%s", "");
+		rtr_add(A_WARN "Refused (-ENOSYS), so what came after is not"
+			" what would have happened:" A_OFF);
+		for (i = 0; i < g_rtr_n_unk; i++) {
+			const char *n = rtr_sys_name(g_rtr_unk[i]);
+
+			rtr_add("  %llu%s%s", (unsigned long long)g_rtr_unk[i],
+				n ? "  " : "", n ? n : "");
+		}
+	}
+
+	/*
+	 * WHAT THE VOCABULARY DID NOT NAME, and nothing else.
+	 *
+	 * THE RAW LOG WAS HERE AND IS GONE. It printed every call with its
+	 * arguments, and the arguments are addresses: `arg0 = 0x7f0000000000`
+	 * is where THIS run put a page and means nothing to anybody. Printing
+	 * it invited a reader to look for sense in a number that has none -
+	 * the same fault as a table of block hashes, and the reason this page
+	 * exists is to not be that.
+	 *
+	 * What a reader does need is the one thing the normalised table cannot
+	 * say: which calls it threw away. Those are the map of what the
+	 * capability vocabulary is missing, exactly as kof_emu_unknown_syscalls
+	 * is the map of what the emulator is missing - and both are read the
+	 * same way, so they are printed the same way.
+	 */
+	if (g_rtr_dropped) {
+		unsigned seen[KOF_EMU_SYSLOG], cnt[KOF_EMU_SYSLOG], n = 0;
+
+		for (i = 0; i < g_rtr_n; i++) {
+			uint8_t dfl = 0;
+			unsigned k;
+
+			if (kof_flow_cap_of_syscall(g_rtr_named ? 64u : 32u,
+						    (uint32_t)g_rtr_log[i].nr,
+						    g_rtr_log[i].arg, &dfl)
+			    != KOF_CAP_NONE)
+				continue;
+			for (k = 0; k < n; k++)
+				if (seen[k] == (unsigned)g_rtr_log[i].nr)
+					break;
+			if (k == n) {
+				seen[n] = (unsigned)g_rtr_log[i].nr;
+				cnt[n] = 0;
+				n++;
+			}
+			cnt[k]++;
+		}
+		rtr_add("%s", "");
+		rtr_add(A_DIM "Called, but outside the capability vocabulary:"
+			A_OFF);
+		for (i = 0; i < n; i++) {
+			const char *nm = rtr_sys_name(seen[i]);
+			char times[16];
+
+			if (cnt[i] > 1u)
+				snprintf(times, sizeof times, "  x%u", cnt[i]);
+			else
+				times[0] = 0;
+			/* The name when there is one, the number when there
+			 * is not - never both, which printed a blank row
+			 * above every unnamed call. */
+			if (nm)
+				rtr_add(A_DIM "  %-18s%s" A_OFF, nm, times);
+			else
+				rtr_add(A_DIM "  %-18llu%s" A_OFF,
+					(unsigned long long)seen[i], times);
+		}
+		if (!g_rtr_named)
+			rtr_add(A_DIM "32-bit guest: i386 numbers, not named"
+				" here." A_OFF);
+	}
+}
+
+
+
+/*
+ * Run the object in the interpreter and keep what it asked the system for.
+ *
+ * THE RUN IS HERE AND NOT IN THE PAGE, for the reason the properties page
+ * learned: a build that happens on redraw happens on every scroll, and this
+ * one costs seconds.
+ */
+static void rtr_run(struct view *v)
+{
+	struct object *o = cur_obj(v);
+	struct kof_emu *e;
+
+	g_rtr_ran = 0;
+	g_rtr_n = 0;
+	g_rtr_n_unk = 0;
+	g_rtr_steps = 0;
+	g_rtr_dropped = 0;
+	g_rtr_err[0] = 0;
+	memset(&g_rtr_rep, 0, sizeof g_rtr_rep);
+	if (!o || !o->buf.p || !o->buf.n || !o->info) {
+		snprintf(v->act_msg, sizeof v->act_msg,
+			 "No ELF image here to run");
+		return;
+	}
+	/*
+	 * AND THE TWO THINGS THE INTERPRETER CANNOT DO, said here rather than
+	 * by hiding the dialog.
+	 *
+	 * The ARCHITECTURE, because libkofemu is bddisasm and bddisasm is
+	 * x86: an ARM image run through it is not a run of that program. The
+	 * FORMAT, because the Windows dispatch keeps no log, so a PE run
+	 * finishes with nothing to report.
+	 *
+	 * The call chain beside it has an answer for both, which is why the
+	 * dialog opens on that tab.
+	 */
+	if (o->ctx.arch != KOF_ARCH_X86 && o->ctx.arch != KOF_ARCH_X86_64) {
+		g_rtr_ran = 1;
+		snprintf(g_rtr_err, sizeof g_rtr_err,
+			 "The interpreter is x86; this object is %s.",
+			 kof_arch_name(o->ctx.arch));
+		return;
+	}
+	if (o->ctx.format != KOF_FMT_ELF) {
+		g_rtr_ran = 1;
+		snprintf(g_rtr_err, sizeof g_rtr_err,
+			 "%s", "The Windows dispatch keeps no log, so a PE "
+			 "run has nothing to report.");
+		return;
+	}
+	g_rtr_named = o->ctx.arch == KOF_ARCH_X86_64;
+
+	/* Said before it starts, straight to the status row - the loop does
+	 * not come back round until the run is over. Same as emu_here. */
+	{
+		char note[64];
+		int at;
+
+		snprintf(note, sizeof note, " Running... ");
+		at = g_cols - (int)strlen(note);
+		if (at < 1)
+			at = 1;
+		{
+			char seq[128];
+			int n = snprintf(seq, sizeof seq,
+					 "\033[%d;%dH" A_WARN "%s" A_OFF,
+					 mark_row(), at, note);
+
+			if (n > 0)
+				term_write_n(seq, (size_t)n);
+		}
+	}
+
+	e = kof_emu_unp_run(o->buf.p, o->buf.n, o->info, 0, 0, &g_rtr_rep);
+	g_rtr_ran = 1;
+	if (!e) {
+		snprintf(g_rtr_err, sizeof g_rtr_err, "%s",
+			 g_rtr_rep.refused ? g_rtr_rep.refused
+					   : "No image could be built from these bytes");
+	} else {
+		g_rtr_n = kof_emu_syscall_log(e, g_rtr_log, KOF_EMU_SYSLOG);
+		g_rtr_n_unk = kof_emu_unknown_syscalls(e, g_rtr_unk,
+						       KOF_EMU_UNKSYS);
+		kof_emu_free(e);
+		/* Once, here, and not in the build: a page is rebuilt on
+		 * every scroll and this answer does not change. */
+		rtr_normalise(g_rtr_named ? 64 : 32);
+	}
+	v->act_msg[0] = 0;
+	v->rtr_off = 0;
+}
+
+/*
+ * WHICH TAB, AND THE RUN THAT ONE OF THEM COSTS.
+ *
+ * The chain is read from the file and is free. The trace is an interpreter
+ * run and costs seconds, so it happens HERE - once, when a reader asks for
+ * that tab - and not in the draw, which happens again on every scroll.
+ *
+ * ONCE PER OBJECT, remembered by which object it was for: a reader who opens
+ * the trace, reads the chain, and comes back must not pay again, and a reader
+ * who moves to a different sample must not be shown the last one's run.
+ */
+static const void *g_rtr_for;
+
+void kof_view_forget_object_caches(void)
+{
+	g_pth_for = NULL;
+	g_pth_why = NULL;
+	g_rtr_for = NULL;
+}
+
+static void pth_tab_set(struct view *v, int t)
+{
+	const struct object *ob;
+
+	if (t == v->pth_tab)
+		return;
+	v->pth_tab = (uint8_t)(t ? 1 : 0);
+	if (!v->pth_tab)
+		return;
+	ob = cur_obj(v);
+	if (ob && g_rtr_for == (const void *)ob && g_rtr_ran)
+		return;
+	g_rtr_for = (const void *)ob;
+	rtr_run(v);
+}
+
+/* Open it on the chain, which is the tab that always has an answer. */
+static void pth_open(struct view *v)
+{
+	v->pth_tab = 0;
+	v->chain_off = 0;
+	v->rtr_off = 0;
+	v->chain_open = 1;
+}
+
+/*
+ * THE PATHOGEN DIALOG.
+ *
+ * Two readings of the same object: what the sweep READ out of the code, and
+ * what the interpreter DID when it ran it. They were two boxes reached two
+ * different ways - and one of those ways was a click inside the similarity
+ * section, which is hidden, so the call chain had no door at all.
+ *
+ * The run is NOT started here. A page is rebuilt on every scroll and that one
+ * costs seconds; it happens once, when the reader asks for the tab - see
+ * pth_tab_set.
+ */
+/* Wide enough for the chain table and the trace's longest ordinary line, and
+ * narrow enough to leave the panes either side readable. The height is stated
+ * for the same reason the width is - see page.exact_w - and both are clamped
+ * against the terminal by page_draw. */
+#define PATH_BOX_W    96
+#define PATH_BOX_ROWS 14u
+
+static void draw_pathogen(struct out *o, struct view *v)
 {
 	struct page pg;
 
-	chain_build(v);
+	/*
+	 * THE SAME RENDERER EVERY OTHER PAGE USES, AND NOTHING ADDED TO IT.
+	 *
+	 * This drew a tab row of its own for one revision - tabs in the title
+	 * bar, a stated width, a scroll bar - and every one of those was code
+	 * that already existed somewhere in this file. The width was the one
+	 * that bit: it was measured against the content, the runtime trace
+	 * has no content until the interpreter has run, and the run happens
+	 * while the click is being handled - so the box was one size for the
+	 * press and another for the release, and the larger one's columns
+	 * stayed on the screen.
+	 *
+	 * So: one title, page_draw, and the tab is a KEY - which is what the
+	 * symbol dialog's Tab does, on a renderer that was already right.
+	 */
 	memset(&pg, 0, sizeof pg);
-	pg.title = "Call chain";
-	pg.line = g_chain;
-	pg.n = g_n_chain;
-	pg.off = &v->chain_off;
+	if (v->pth_tab) {
+		rtr_build(v);
+		pg.title = "Runtime trace";
+		pg.line = g_rtr;
+		pg.n = g_n_rtr;
+		pg.off = &v->rtr_off;
+	} else {
+		chain_build(v);
+		/*
+		 * NOT "call chain" ANY MORE, because it stopped being one.
+		 * The page shows the shape the sweep recovered - what calls
+		 * what, what sits in a loop, what only runs on a branch -
+		 * and calling that a chain is what made it be drawn as a
+		 * list for as long as it was.
+		 */
+		pg.title = "Program logic";
+		pg.line = g_chain;
+		pg.n = g_n_chain;
+		pg.off = &v->chain_off;
+	}
+	/*
+	 * BOTH NAMES ON THE RULE, not just the one being shown. The key still
+	 * works; what changed is that the box now says it has two sides.
+	 */
+	pg.tab[0] = "Program logic";
+	pg.tab[1] = "Runtime trace";
+	pg.tab_n = 2;
+	pg.tab_sel = v->pth_tab;
+	pg.title = NULL;
+	pg.full = 1;
 	pg.close = 1;
 	pg.record = 1;
+	pg.foot = "Tab or click: the other view";
 	page_draw(o, v, &pg);
 	v->chain_y = pg.btn_y;
 	v->chain_x0 = pg.btn_x0;
 	v->chain_x1 = pg.btn_x1;
+	v->pth_tab_y = pg.tab_y;
+	v->pth_tab_x0[0] = pg.tab_x0[0];
+	v->pth_tab_x1[0] = pg.tab_x1[0];
+	v->pth_tab_x0[1] = pg.tab_x0[1];
+	v->pth_tab_x1[1] = pg.tab_x1[1];
 }
 
 static void draw_prop(struct out *o, struct view *v)
@@ -25897,6 +27495,7 @@ static void bar_run(struct view *v, int i)
 	case BI_DUMP_PLAIN:  dump_all(v, 0); break;
 	case BI_DUMP_EMU:    dump_all(v, 1); break;
 	case BI_UNPACKER: emu_here(v); break;
+	case BI_RTRACE:   pth_open(v); break;
 	case BI_DISASM:   dis_toggle(v, 0, KOF_BROKEN); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
@@ -30668,6 +32267,9 @@ static int handle_enc_key(struct view *v, int k)
 static int handle_chain_key(struct view *v, int k)
 {
 	int room = g_rows - 6;
+	/* Whichever tab is up owns the scroll: an offset is a position in the
+	 * lines being shown and means somewhere else in the other tab's. */
+	uint32_t *off = v->pth_tab ? &v->rtr_off : &v->chain_off;
 
 	if (!v->chain_open)
 		return -1;
@@ -30675,32 +32277,36 @@ static int handle_chain_key(struct view *v, int k)
 		room = 1;
 	switch (k) {
 	case K_UP:
-		if (v->chain_off)
-			v->chain_off--;
+		if (*off)
+			(*off)--;
 		return 1;
 	case K_DOWN:
-		v->chain_off++;
+		(*off)++;
 		return 1;
 	case K_WHEEL_UP:
-		v->chain_off = v->chain_off > 3u ? v->chain_off - 3u : 0u;
+		*off = *off > 3u ? *off - 3u : 0u;
 		return 1;
 	case K_WHEEL_DOWN:
-		v->chain_off += 3u;
+		*off += 3u;
 		return 1;
 	case K_PGUP:
-		v->chain_off = v->chain_off > (uint32_t)room
-			       ? v->chain_off - (uint32_t)room : 0u;
+		*off = *off > (uint32_t)room ? *off - (uint32_t)room : 0u;
 		return 1;
 	case K_PGDN:
-		v->chain_off += (uint32_t)room;
+		*off += (uint32_t)room;
 		return 1;
 	case K_HOME:
-		v->chain_off = 0;
+		*off = 0;
 		return 1;
 	case K_END:
 		/* Clamped where it is drawn, which is the only place that
 		 * knows how many lines there are. */
-		v->chain_off = 0xffffffu;
+		*off = 0xffffffu;
+		return 1;
+	case '\t':
+		/* The same key the symbol dialog switches on, and for the
+		 * same reason: two tabs, one hand. */
+		pth_tab_set(v, v->pth_tab ? 0 : 1);
 		return 1;
 	case 0x03:                      /* Ctrl+C */
 		dlg_copy(v);
@@ -30733,6 +32339,8 @@ static int handle_chain_key(struct view *v, int k)
 	}
 	return -1;
 }
+
+
 
 /*
  * handle_prop_key - a key while the dashboard is open.
@@ -32442,6 +34050,7 @@ static void file_close(struct view *v)
 		memset(o, 0, sizeof *o);
 	}
 	v->n_obj = 0;
+	kof_view_forget_object_caches();
 	/*
 	 * ONLY A MAPPING IS UNMAPPED. A process view's v->map is the process
 	 * RECORD - static storage in proc_open, not a file this ever mapped -

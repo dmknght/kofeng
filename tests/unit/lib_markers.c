@@ -26,8 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/detectors/overlord/koflib.h"
-#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/analyzers/trueline/trueline.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../libkofeng/kofcore/kofmod/elf.h"
 
 static int fails;
@@ -110,7 +110,7 @@ static void put_table(uint8_t *b, uint64_t at)
 	}
 }
 
-static uint32_t spans_of(uint8_t *b, struct kof_lib_result *out)
+static uint32_t spans_of(uint8_t *b, struct kof_true_result *out)
 {
 	static struct kof_elf_info e;
 	struct kof_obj_ctx ctx;
@@ -120,14 +120,14 @@ static uint32_t spans_of(uint8_t *b, struct kof_lib_result *out)
 	memset(&ctx, 0, sizeof ctx);
 	if (!kof_elf_parse(f, &e, &ctx))
 		return 0xffffffffu;
-	kof_lib_find(f, &e, out);
+	kof_true_find(f, &e, out);
 	return out->n;
 }
 
 /* A table on its own is what the tier was written for. */
 static void a_table_is_cut(void)
 {
-	struct kof_lib_result r;
+	struct kof_true_result r;
 	uint8_t *b = build();
 
 	if (!b)
@@ -148,7 +148,7 @@ static void a_table_is_cut(void)
  */
 static void a_stray_does_not_veto_a_table(void)
 {
-	struct kof_lib_result r;
+	struct kof_true_result r;
 	uint8_t *b = build();
 	uint32_t n;
 
@@ -185,7 +185,7 @@ static void a_stray_does_not_veto_a_table(void)
  */
 static void scattered_markers_are_refused(void)
 {
-	struct kof_lib_result r;
+	struct kof_true_result r;
 	uint8_t *b = build();
 	unsigned i;
 
@@ -201,7 +201,7 @@ static void scattered_markers_are_refused(void)
 /* Two hits are not a table either, however close they sit. */
 static void two_markers_are_not_a_table(void)
 {
-	struct kof_lib_result r;
+	struct kof_true_result r;
 	uint8_t *b = build();
 
 	if (!b)

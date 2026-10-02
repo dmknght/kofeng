@@ -29,10 +29,10 @@
 #include <kofmod/kofsym.h>
 #include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
 #include "../kofcore/kofplatform.h"   /* kof_write_all - the spill file below */
-#include "../analyzers/parsers/binaries/elf_sym.h"
-#include "../analyzers/parsers/binaries/pe_sym.h"
-#include "../analyzers/disasm/xref.h"
-#include "../detectors/overlord/ovlflow.h"
+#include "../analyzers/parsers/binaries/elf/elf_sym.h"
+#include "../analyzers/parsers/binaries/pe/pe_sym.h"
+#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../detectors/overlord/pathogen/diagnose.h"
 #include "../disinfect/pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
@@ -5148,70 +5148,6 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
  * which is the same answer as "none of it was there": a rule cannot tell those
  * apart and must not try.
  */
-/*
- * THE OBJECT'S OWN SETS, built on the first ask and shared by both measures.
- *
- * One pass over the loadable regions yields the strings and the block hashes
- * together - they are cut from the same bytes, with the same library already
- * out - so asking for either builds both and asking for the second costs
- * nothing. Returns NULL for anything this cannot describe.
- */
-static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-
-	if (!sc)
-		return 0;
-	if (!sc->ovl_ready) {
-		sc->ovl_ready = 1;
-		if (ctx->format == KOF_FMT_ELF && ctx->file_header) {
-			if (!sc->ovl)
-				sc->ovl = malloc(sizeof *sc->ovl);
-			/*
-			 * THE SPANS THE SCANNER ESTABLISHED, not a search of
-			 * our own - see kof_ovl_build. cur_lib_ok is false
-			 * exactly when nothing could be established, and zero
-			 * spans is the honest argument for that case.
-			 */
-			if (sc->ovl &&
-			    !kof_ovl_build(sc->ovl, mc(ctx)->data,
-					   kof_elf(ctx),
-					   sc->cur_lib_ok ? sc->cur_lib.span
-							  : NULL,
-					   sc->cur_lib_ok ? sc->cur_lib.n
-							  : 0u)) {
-				/* Nothing describable: leave it built and
-				 * empty rather than rebuilding on every ask. */
-				sc->ovl->n_blk = 0;
-			}
-		} else if (sc->ovl) {
-			/*
-			 * AND EMPTIED FOR AN OBJECT IT CANNOT DESCRIBE, which
-			 * is the half that was missing.
-			 *
-			 * The buffer is the scanner's and survives the object;
-			 * only the ready flag is cleared between them - see
-			 * the note beside that reset in scan.c, which says in
-			 * so many words that every kof_ovl_blocks rule would
-			 * otherwise measure the wrong file. It achieved that
-			 * for an ELF, which rebuilds. For anything else this
-			 * returned WITHOUT REBUILDING and handed back the
-			 * previous ELF's strings and block hashes, so
-			 * a rule asking about a PE, a script or an archive
-			 * entry that happened to follow an ELF was answered
-			 * about the ELF - and ovl_note recorded the percentage
-			 * against the wrong object.
-			 *
-			 * Emptied rather than freed: the allocation is reused
-			 * for the next ELF, and an empty descriptor is the
-			 * same answer a describable object with nothing in it
-			 * gives, which is what the header promises.
-			 */
-			sc->ovl->n_blk = 0;
-		}
-	}
-	return sc->ovl;
-}
 
 /*
  * THE OBJECT'S CALL CHAINS, swept on the first ask.
@@ -5219,83 +5155,13 @@ static const struct kof_ovl_desc *ovl_of(const struct kof_obj_ctx *ctx)
  * WHY SEVERAL AND NOT ONE. A file is a set of regions and a chain belongs to
  * one of them; a loader inside a large trojan is one chain among many, and a
  * measure taken over the whole file would drown it. So the sweep keeps the
- * WORTHIEST few - kof_ovlf_worth is the same gate the aligner applies - and a
+ * WORTHIEST few - kof_diag_worth is the same gate the aligner applies - and a
  * reference is compared against each, best answer winning.
  *
  * EIGHT, because the alignment is run once per chain per asking rule and the
  * table is nodes by nodes: eight chains of at most twenty-four steps is a few
  * thousand cells, which is affordable per object and would not be per region.
  */
-#define FLOW_SET_MAX 8u
-
-struct kof_flow_set {
-	struct kof_flow_node n[FLOW_SET_MAX][KOF_OVLF_CHAIN_MAX];
-	uint8_t len[FLOW_SET_MAX];
-	uint8_t n_chain;
-};
-
-/* How the decoder should be told to read this object's code. Anything that is
- * not one of the two architectures bddisasm has is refused rather than guessed
- * at - see analyzers/disasm/flow.h. */
-static int flow_mode(const struct kof_obj_ctx *ctx, unsigned *bits,
-		     unsigned *abi, uint32_t *mask)
-{
-	if (ctx->arch == KOF_ARCH_X86_64)
-		*bits = 64;
-	else if (ctx->arch == KOF_ARCH_X86)
-		*bits = 32;
-	else
-		return 0;
-	if (ctx->format == KOF_FMT_PE) {
-		*abi = KOF_FLOW_MS;
-		*mask = KOF_SCAN_PE_CODE;
-	} else if (ctx->format == KOF_FMT_ELF) {
-		*abi = KOF_FLOW_SYSV;
-		*mask = KOF_SCAN_ELF_CODE;
-	} else {
-		return 0;
-	}
-	return 1;
-}
-
-/* Keep this chain if it is worth more than the weakest one held. */
-static void flow_set_offer(struct kof_flow_set *fs,
-			   const struct kof_flow_node *v, uint32_t n)
-{
-	uint32_t i, worst = 0, worst_w = 0xffffffffu;
-
-	/* Clamped BEFORE anything reads the array, not after: kof_ovlf_worth
-	 * walks all n of them, so the bound has to be in place first. It is
-	 * the caller's cap that keeps this honest today, which is the sort of
-	 * thing that stays true until a second caller appears. */
-	if (n > KOF_OVLF_CHAIN_MAX)
-		n = KOF_OVLF_CHAIN_MAX;
-	if (!kof_ovlf_worth(v, n))
-		return;
-	if (fs->n_chain < FLOW_SET_MAX) {
-		memcpy(fs->n[fs->n_chain], v, n * sizeof *v);
-		fs->len[fs->n_chain] = (uint8_t)n;
-		fs->n_chain++;
-		return;
-	}
-	for (i = 0; i < FLOW_SET_MAX; i++) {
-		uint32_t j, w = 0;
-
-		for (j = 0; j < fs->len[i]; j++)
-			w += kof_ovlf_weight(fs->n[i][j].cap);
-		if (w < worst_w) { worst_w = w; worst = i; }
-	}
-	{
-		uint32_t j, w = 0;
-
-		for (j = 0; j < n; j++)
-			w += kof_ovlf_weight(v[j].cap);
-		if (w <= worst_w)
-			return;
-	}
-	memcpy(fs->n[worst], v, n * sizeof *v);
-	fs->len[worst] = (uint8_t)n;
-}
 
 /* Remember what a similarity measure answered, for the name - see
  * kof_scanner.ovl_asked. The highest of them, because a rule may ask twice
@@ -5395,7 +5261,7 @@ static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
 /*
  * ---- THE CODE READER'S THREE ENTRY POINTS --------------------------------
  *
- * All the work is in analyzers/disasm/kdis.c; these only hand it the object's
+ * All the work is in analyzers/parsers/binaries/disasm/kdis.c; these only hand it the object's
  * bytes and the cursor that lives in the scanner. See kofmod/kdis.h.
  *
  * ANSWERED FOR A DETECTOR TOO, and that is the point of it. Reading code
@@ -5479,8 +5345,8 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * rule that could tell them apart would start reporting on the scanner's
  * settings rather than on the object.
  */
-#define OVL_BLOCKS_LEVEL 1u
-#define OVL_CHAIN_LEVEL  2u
+#define PLAGUE_BLOCKS_LEVEL 1u
+#define PTH_CHAIN_LEVEL  2u
 
 static int ovl_level_ok(const struct kof_obj_ctx *ctx, uint32_t need)
 {
@@ -5501,448 +5367,49 @@ static int ovl_level_ok(const struct kof_obj_ctx *ctx, uint32_t need)
  * once per call instruction, and a sorted lookup would be a second thing to
  * get right for an object whose whole sweep is already bounded.
  */
-#define FLOW_IMP_MAX 512u
-
-struct flow_imp {
-	uint64_t addr[FLOW_IMP_MAX];
-	uint8_t  cap[FLOW_IMP_MAX];
-	uint32_t n;
-};
-
-static void imp_add(struct flow_imp *im, uint64_t addr, uint8_t cap)
-{
-	if (cap != KOF_CAP_NONE && im->n < FLOW_IMP_MAX) {
-		im->addr[im->n] = addr;
-		im->cap[im->n] = cap;
-		im->n++;
-	}
-}
-
-static uint8_t imp_lookup(uint64_t a, void *user)
-{
-	const struct flow_imp *im = (const struct flow_imp *)user;
-	uint32_t i;
-
-	for (i = 0; i < im->n; i++)
-		if (im->addr[i] == a)
-			return im->cap[i];
-	return KOF_CAP_NONE;
-}
-
-/* The import directory, as slot address to capability. The names come from
- * OriginalFirstThunk when there is one - a memory image has only those - and
- * the addresses from FirstThunk, which is the slot a call goes through. */
-static void flow_imports_pe(kof_buf f, const struct kof_pe_info *p,
-			    struct flow_imp *im)
-{
-	uint64_t d = kof_pe_rva_to_off(p, p->dir[KOF_PE_DIR_IMPORT].rva);
-	uint32_t w = p->pe32_plus ? 8u : 4u, k;
-
-	if (!p->dir[KOF_PE_DIR_IMPORT].rva || d == KOF_BROKEN)
-		return;
-	for (k = 0; k < 64u; k++) {
-		uint64_t desc = d + (uint64_t)k * 20u, tbl;
-		uint32_t orig = 0, first = 0, t;
-
-		if (!kof_rd_u32(f, desc, 0, &orig) ||
-		    !kof_rd_u32(f, desc + 16u, 0, &first))
-			return;
-		if (!orig && !first)
-			return;
-		/*
-		 * NO FirstThunk, NO SLOT ADDRESSES.
-		 *
-		 * The names can come from either table and OriginalFirstThunk
-		 * is preferred, but the ADDRESS recorded is always
-		 * image_base + FirstThunk + t*w, because the slot a call goes
-		 * through is FirstThunk's. A descriptor naming only the other
-		 * one made that arithmetic image_base + 0 + t*w - addresses in
-		 * the DOS header - and every one of them was then recorded as
-		 * carrying the capability of an import. The sweep asks
-		 * imp_lookup about the target of each indirect call, so the
-		 * cost is a capability attributed to a call that reaches
-		 * nothing of the sort, on a shape a file chooses freely.
-		 */
-		if (!first)
-			continue;
-		tbl = kof_pe_rva_to_off(p, orig ? orig : first);
-		if (tbl == KOF_BROKEN)
-			continue;
-		for (t = 0; t < 4096u && im->n < FLOW_IMP_MAX; t++) {
-			uint64_t te = tbl + (uint64_t)t * w, val = 0, ho;
-			uint32_t lo = 0;
-			char nm[64];
-			uint32_t q;
-
-			if (p->pe32_plus) {
-				if (!kof_rd_u64(f, te, 0, &val))
-					break;
-			} else {
-				if (!kof_rd_u32(f, te, 0, &lo))
-					break;
-				val = lo;
-			}
-			if (!val)
-				break;
-			/* By ordinal: no name, so nothing to recognise. */
-			if (val & (p->pe32_plus ? 0x8000000000000000ull
-						: 0x80000000ull))
-				continue;
-			ho = kof_pe_rva_to_off(p, val + 2u);
-			if (ho == KOF_BROKEN)
-				continue;
-			for (q = 0; q + 1u < sizeof nm; q++) {
-				uint8_t c8 = 0;
-
-				if (!kof_rd_u8(f, ho + q, &c8) || !c8)
-					break;
-				nm[q] = (char)c8;
-			}
-			nm[q] = 0;
-			imp_add(im, p->image_base + first + (uint64_t)t * w,
-				kof_flow_cap_of_name(nm));
-		}
-	}
-}
-
 /*
- * THE SAME TABLE FOR AN ELF, out of the relocations that name the slots.
+ * ONE FACT ABOUT THE OBJECT, bounds checked and gated like its neighbour.
  *
- * A JUMP_SLOT or GLOB_DAT relocation says "this address will hold that
- * symbol", which is exactly the question the sweep asks about a `call [GOT]`.
- * Nothing needs the dynamic linker to have run: the relocation is the promise,
- * and the promise is what the code was compiled against.
- *
- * AND THEN THE PLT STUBS, because a compiler calls the STUB and not the slot.
- * Every stub is a `jmp *disp(%rip)` through its own slot, so decoding those
- * two bytes wherever they appear in an executable section gives the stub's
- * address the capability of the slot it goes through - without needing to know
- * the stub's size, which differs between lazy PLT, -z now and IBT builds.
+ * Same level gate as c_pth_match: both answer out of the same sweep, and a
+ * scan that did not pay for it must not get one of them for free.
  */
-static void flow_imports_elf(kof_buf f, const struct kof_elf_info *p,
-			     struct flow_imp *im)
+static int c_pth_has(const struct kof_obj_ctx *ctx, uint8_t cap, uint8_t flags)
 {
-	uint64_t dsym = 0, dsymn = 0, dstr = 0, dstrn = 0, gotplt = 0;
-	uint32_t i, elf64, symsz, relsz, relasz;
+	const struct kof_pth_profile *pr;
 
-	if (!p || !p->valid)
-		return;
-	elf64 = p->elf_class == KOF_ELFCLASS_64;
-	symsz = elf64 ? 24u : 16u;
-	relsz = elf64 ? 16u : 8u;    /* SHT_REL  - no addend  */
-	relasz = elf64 ? 24u : 12u;  /* SHT_RELA - with one   */
-
-	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		if (p->sec[i].type == 11u && !dsym) {      /* SHT_DYNSYM */
-			dsym = p->sec[i].file_off;
-			/* How many records are THERE, so a symbol index is
-			 * checked against the table the object holds rather
-			 * than against the one it claims. */
-			dsymn = kof_clip_len(f.n, p->sec[i].file_off,
-					     p->sec[i].file_size) / symsz;
-		} else if (p->sec[i].type == 3u &&         /* SHT_STRTAB */
-			   !strcmp(p->sec[i].name, ".dynstr")) {
-			dstr = p->sec[i].file_off;
-			dstrn = p->sec[i].file_size;
-		} else if (!strcmp(p->sec[i].name, ".got.plt")) {
-			/*
-			 * WHERE A 32-BIT PIC STUB'S SLOTS START.
-			 *
-			 * A position-independent PLT on x86 jumps through
-			 * `jmp *disp(%ebx)` with ebx holding the GOT's
-			 * address, so the displacement alone names nothing -
-			 * the base has to come from the section table. x86-64
-			 * needs none of this: its stubs are rip-relative and
-			 * carry the whole address.
-			 */
-			gotplt = p->sec[i].mem_addr;
-		}
-	}
-	if (!dsym || !dstr)
-		return;
-
-	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		uint64_t k, step, have;
-		int rela = p->sec[i].type == 4u;   /* SHT_RELA */
-
-		if (!rela && p->sec[i].type != 9u)  /* SHT_REL */
-			continue;
-		step = rela ? relasz : relsz;
-		/* Clipped for the reason the stub search below is: the loop
-		 * bound is otherwise a number the file declares. This one
-		 * breaks on the first refused read rather than continuing, so
-		 * it terminates either way - but a walk that runs to the
-		 * object and one that runs to a claim and then gives up on it
-		 * are not the same walk, and only the first can be read at a
-		 * glance as bounded. */
-		have = kof_clip_len(f.n, p->sec[i].file_off,
-				    p->sec[i].file_size);
-		for (k = 0; k + step <= have; k += step) {
-			uint64_t roff = 0, base = p->sec[i].file_off + k;
-			uint64_t info = 0;
-			uint32_t rt, si, so = 0, lo = 0;
-			char nm[64];
-			uint32_t q;
-
-			if (elf64) {
-				if (!kof_rd_u64(f, base, 0, &roff) ||
-				    !kof_rd_u64(f, base + 8u, 0, &info))
-					break;
-				/* r_info is type in the low word, symbol in
-				 * the high one. */
-				rt = (uint32_t)(info & 0xffffffffu);
-				si = (uint32_t)(info >> 32);
-			} else {
-				if (!kof_rd_u32(f, base, 0, &lo) ||
-				    !kof_rd_u32(f, base + 4u, 0, &so))
-					break;
-				roff = lo;
-				/* And on 32-bit it is a byte of type and
-				 * three of symbol - a different packing, not
-				 * a narrower one. */
-				rt = so & 0xffu;
-				si = so >> 8;
-				so = 0;
-			}
-			/*
-			 * GLOB_DAT and JUMP_SLOT. The two architectures number
-			 * them the same - R_386_GLOB_DAT and R_X86_64_GLOB_DAT
-			 * are both 6 - which is luck rather than design, so it
-			 * is written down here rather than relied on silently.
-			 */
-			if ((rt != 6u && rt != 7u) || !si || si >= dsymn)
-				continue;
-			if (!kof_rd_u32(f, dsym + (uint64_t)si * symsz, 0,
-					&so) || so >= dstrn)
-				continue;
-			for (q = 0; q + 1u < sizeof nm; q++) {
-				uint8_t c8 = 0;
-
-				if (!kof_rd_u8(f, dstr + so + q, &c8) || !c8)
-					break;
-				nm[q] = (char)c8;
-			}
-			nm[q] = 0;
-			imp_add(im, roff, kof_flow_cap_of_name(nm));
-		}
-	}
-
-	/*
-	 * AND THE STUBS THAT JUMP THROUGH THEM, because a compiler calls the
-	 * stub and not the slot. Three spellings, and which one a build used
-	 * is not something a caller should have to know:
-	 *
-	 *     ff 25 <disp32>   x86-64, rip-relative: slot = next + disp
-	 *     ff 25 <abs32>    x86 without PIC: the displacement IS the slot
-	 *     ff a3 <disp32>   x86 with PIC: slot = the GOT's address + disp
-	 *
-	 * Decoding the two opcode bytes wherever they appear costs nothing and
-	 * needs no knowledge of the stub's SIZE, which differs between a lazy
-	 * PLT, a -z now one and an IBT build.
-	 */
-	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		/*
-		 * THE BYTES THE OBJECT HOLDS, and the walk is over THEM.
-		 *
-		 * sh_size is a 64-bit field the file writes and the parser
-		 * records unclamped, so running the search to it is running it
-		 * to a number the file chose: a section declaring 2^62 makes
-		 * this loop read past the end 2^62 times, each read refused
-		 * and each refusal a `continue`. Nothing faults and nothing is
-		 * reported - the sweep simply never ends.
-		 *
-		 * And having clipped it, the search is over the buffer rather
-		 * than through the accessor: this was three bounds-checked
-		 * calls PER BYTE of every executable section, which on an
-		 * ordinary ten-megabyte binary is thirty million of them to
-		 * find a few hundred stubs. memchr finds the only opcode that
-		 * can begin one.
-		 */
-		const uint8_t *code;
-		uint64_t o = 0, have;
-
-		if (!(p->sec[i].flags & 4u))
-			continue;                     /* SHF_EXECINSTR */
-		have = kof_clip_len(f.n, p->sec[i].file_off,
-				    p->sec[i].file_size);
-		if (have < 6u)
-			continue;
-		code = f.p + p->sec[i].file_off;
-		for (; o + 6u <= have; o++) {
-			uint8_t b1;
-			uint32_t d32 = 0;
-			uint64_t here, slot;
-			uint8_t k;
-
-			{
-				const uint8_t *hit = memchr(code + o, 0xff,
-							    (size_t)(have - 5u
-								     - o));
-
-				if (!hit)
-					break;
-				o = (uint64_t)(hit - code);
-			}
-			b1 = code[o + 1u];
-			if (b1 != 0x25u && b1 != 0xa3u)
-				continue;
-			if (b1 == 0xa3u && (elf64 || !gotplt))
-				continue;
-			if (!kof_rd_u32(f, p->sec[i].file_off + o + 2u, 0,
-					&d32))
-				continue;
-			here = p->sec[i].mem_addr + o;
-			if (b1 == 0xa3u)
-				slot = gotplt + (uint64_t)(int64_t)(int32_t)d32;
-			else if (elf64)
-				slot = here + 6u +
-				       (uint64_t)(int64_t)(int32_t)d32;
-			else
-				slot = d32;
-			k = imp_lookup(slot, im);
-			if (k != KOF_CAP_NONE)
-				imp_add(im, here & ~15ull, k);
-		}
-	}
-}
-
-/* Where these file bytes live once the image is mapped. The sweep needs the
- * virtual address and not the offset: a rip-relative operand names a slot in
- * that space, and an import resolved in offset space resolves to nothing. */
-static uint64_t flow_va_of(const struct kof_obj_ctx *ctx, uint64_t off)
-{
-	const struct kof_pe_info *p;
-	uint32_t i;
-
-	if (ctx->format == KOF_FMT_ELF) {
-		const struct kof_elf_info *e = kof_elf(ctx);
-		uint32_t k;
-
-		if (!e || !e->valid)
-			return off;
-		for (k = 0; k < e->sec_count; k++)
-			if (e->sec[k].mem_addr && off >= e->sec[k].file_off &&
-			    off - e->sec[k].file_off < e->sec[k].file_size)
-				return e->sec[k].mem_addr +
-				       (off - e->sec[k].file_off);
-		return off;
-	}
-	if (ctx->format != KOF_FMT_PE)
-		return off;
-	p = kof_pe(ctx);
-	if (!p || !p->valid)
-		return off;
-	if (p->layout == KOF_PE_LAYOUT_MAPPED)
-		return p->image_base + off;
-	for (i = 0; i < p->sec_count; i++)
-		if (off >= p->sec[i].file_off &&
-		    off - p->sec[i].file_off < p->sec[i].file_size)
-			return p->image_base + p->sec[i].mem_rva +
-			       (off - p->sec[i].file_off);
-	return off;
-}
-
-static const struct kof_flow_set *fchain_of(const struct kof_obj_ctx *ctx)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	unsigned bits = 0, abi = 0;
-	uint32_t mask = 0, nr, i;
-	struct kof_flow *f;
-	struct flow_imp *im = NULL;
-	kof_buf b;
-
-	if (!sc)
-		return NULL;
-	if (sc->fchain_ready)
-		return sc->fchain;
-	sc->fchain_ready = 1;
-	if (!flow_mode(ctx, &bits, &abi, &mask))
-		return NULL;
-	b = mc(ctx)->data;
-	if (!b.p || !b.n)
-		return NULL;
-	nr = kof_scan_resolve_range(ctx, mask, sc->ext_gather);
-	if (!nr)
-		return NULL;
-	f = kof_flow_new();
-	if (!f)
-		return NULL;
-	im = (struct flow_imp *)calloc(1, sizeof *im);
-	if (im) {
-		if (ctx->format == KOF_FMT_PE && kof_pe(ctx))
-			flow_imports_pe(b, kof_pe(ctx), im);
-		else if (ctx->format == KOF_FMT_ELF && kof_elf(ctx))
-			flow_imports_elf(b, kof_elf(ctx), im);
-		kof_flow_resolver(f, imp_lookup, im);
-	}
-	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN)
-		kof_flow_entry(f, flow_va_of(ctx, ctx->entry_off));
-	for (i = 0; i < nr; i++) {
-		kof_buf s2 = kof_slice(b, sc->ext_gather[i].off,
-				       sc->ext_gather[i].len);
-
-		if (s2.p && s2.n)
-			kof_flow_add(f, s2.p, (uint32_t)s2.n,
-				     flow_va_of(ctx, sc->ext_gather[i].off),
-				     bits, abi);
-	}
-	if (!sc->fchain)
-		sc->fchain = calloc(1, sizeof *sc->fchain);
-	if (sc->fchain) {
-		struct kof_flow_node tmp[KOF_OVLF_CHAIN_MAX];
-
-		memset(sc->fchain, 0, sizeof *sc->fchain);
-		for (i = 0; i < kof_flow_n_func(f); i++) {
-			uint32_t m = kof_flow_chain(f, i, 6u, tmp,
-						    KOF_OVLF_CHAIN_MAX, NULL);
-
-			if (m)
-				flow_set_offer(sc->fchain, tmp, m);
-		}
-	}
-	kof_flow_free(f);
-	free(im);
-	return sc->fchain;
-}
-
-static uint32_t c_ovl_chain(const struct kof_obj_ctx *ctx,
-			    const struct kof_ovlf_chain *ref)
-{
-	const struct kof_flow_set *fs;
-	uint32_t i, best = 0;
-
-	if (!ref || !ref->n || !ovl_level_ok(ctx, OVL_CHAIN_LEVEL))
+	if (!cap || cap >= KOF_CAP_COUNT ||
+	    !ovl_level_ok(ctx, PTH_CHAIN_LEVEL))
 		return 0;
-	fs = fchain_of(ctx);
-	if (!fs)
+	pr = kof_pth_profile_of(ctx);
+	if (!pr || !(pr->cap_mask & (1ull << cap)))
 		return 0;
-	for (i = 0; i < fs->n_chain; i++) {
-		uint32_t p = kof_ovlf_chain_pct(ref, fs->n[i], fs->len[i]);
+	return (pr->flags[cap] & flags) == flags;
+}
 
-		if (p > best)
-			best = p;
-	}
-	return ovl_note(ctx, best);
+static int c_pth_feeds(const struct kof_obj_ctx *ctx, uint8_t src, uint8_t dst)
+{
+	const struct kof_pth_profile *pr;
+
+	if (!src || !dst || src >= KOF_CAP_COUNT || dst >= KOF_CAP_COUNT ||
+	    !ovl_level_ok(ctx, PTH_CHAIN_LEVEL))
+		return 0;
+	pr = kof_pth_profile_of(ctx);
+	return pr && (pr->edge[dst] & (1u << src)) != 0;
+}
+
+static uint32_t c_pth_match(const struct kof_obj_ctx *ctx,
+			    const struct kof_pth_symptom *ref)
+{
+	if (!ref || !ref->n || !ovl_level_ok(ctx, PTH_CHAIN_LEVEL))
+		return 0;
+	return ovl_note(ctx, kof_pth_best_pct(ctx, ref));
 }
 
 /* Containment over the object's block set, against a reference's own. */
-static uint32_t c_ovl_blocks(const struct kof_obj_ctx *ctx,
-			     const uint32_t *ref, uint32_t n_ref)
-{
-	const struct kof_ovl_desc *d;
-
-	if (!ref || !n_ref || !ovl_level_ok(ctx, OVL_BLOCKS_LEVEL))
-		return 0;
-	d = ovl_of(ctx);
-	if (!d || !d->n_blk)
-		return 0;
-	return ovl_note(ctx, kof_ovl_blocks_pct(d->blk, d->n_blk, ref,
-							n_ref));
-}
 
 /*
  * THE STRUCTURE TRACK, with the library out of both sides when the reference
- * asked for it - see kof_ovl_shape.lib_cut.
+ * asked for it - see kof_plague_shape.lib_cut.
  *
  * The spans are the ones the scanner already established for this object, so
  * this is not a fourth walk of the same bytes - see kof_scanner.cur_lib. A
@@ -5950,19 +5417,19 @@ static uint32_t c_ovl_blocks(const struct kof_obj_ctx *ctx,
  * which is what keeps every reference written before the cut existed meaning
  * what it meant.
  */
-static uint32_t c_ovl_shape(const struct kof_obj_ctx *ctx,
-			    const struct kof_ovl_shape *ref)
+static uint32_t c_plague_shape(const struct kof_obj_ctx *ctx,
+			    const struct kof_plague_shape *ref)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_ovl_shape cur;
+	struct kof_plague_shape cur;
 
 	if (!ref || !kof_elf(ctx))
 		return 0;
 	if (!ref->lib_cut || !sc || !sc->cur_lib_ok)
-		return kof_ovl_shape_pct(kof_elf(ctx), ref, ctx->obj_size);
-	kof_ovl_shape_of_cut(kof_elf(ctx), ctx->obj_size,
+		return kof_plague_shape_pct(kof_elf(ctx), ref, ctx->obj_size);
+	kof_plague_shape_of_cut(kof_elf(ctx), ctx->obj_size,
 			     sc->cur_lib.span, sc->cur_lib.n, &cur);
-	return kof_ovl_shape_cmp(&cur, ref);
+	return kof_plague_shape_cmp(&cur, ref);
 }
 
 static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch);
@@ -5989,7 +5456,9 @@ static const struct kof_content kof_detect_vtable = {
 	 * not about who is asking, and a rule that wants to know whether its
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
-	c_plague_score, c_ovl_blocks, c_ovl_chain, c_ovl_shape,
+	/* The block vector is gone - see the note in kofsig.h. The SLOT
+	 * stays so no other entry moves, exactly as ovl_strings' did. */
+	c_plague_score, NULL, c_pth_match, c_plague_shape,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	/* supersede - a detector produces nothing to be superseded by. */
@@ -6015,7 +5484,11 @@ static const struct kof_content kof_detect_vtable = {
 	/* But a detector may mark what it found - see c_infected. */
 	c_infected,
 	/* And it drives no machine, so it changes none. */
-	NULL, NULL, NULL
+	NULL, NULL, NULL,
+	/* The profile's two questions - see kofsig.h. Both surfaces carry
+	 * them for the same reason both carry c_pth_match: they are reads of
+	 * the object in front of the module, not of what it is producing. */
+	c_pth_has, c_pth_feeds
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -6030,7 +5503,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_emu_run, c_emu_region, c_emu_take, c_opened_already, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_plague_score,
-	c_ovl_blocks, c_ovl_chain, c_ovl_shape, c_cure_offer, c_cure_patch,
+	NULL, c_pth_match, c_plague_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	c_supersede, c_as_format, c_packer_build, c_emu_reg, c_emu_read,
@@ -6039,7 +5512,9 @@ static const struct kof_content kof_unpack_vtable = {
 	c_emu_slice, c_emu_stop,
 	c_dis_seek, c_dis_next, c_dis_reg,
 	c_emu_region_read, c_infected,
-	c_emu_set_reg, c_emu_set_ip, c_emu_write
+	c_emu_set_reg, c_emu_set_ip, c_emu_write,
+	/* The profile's two questions - see kofsig.h. */
+	c_pth_has, c_pth_feeds
 };
 
 /*

@@ -102,8 +102,8 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 #include <kofmod/kofsym.h>
-#include "../libkofeng/analyzers/parsers/binaries/elf_sym.h"
-#include "../libkofeng/analyzers/parsers/binaries/pe_sym.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf/elf_sym.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe/pe_sym.h"
 #include <kofmod/pe.h>
 #include <kofmod/gzip.h>
 #include <kofmod/docole.h>
@@ -121,8 +121,8 @@
 #include <kofmod/reg.h>
 #include <kofmod/rtf.h>
 
-#include "../libkofeng/analyzers/parsers/binaries/elf_parse.h"
-#include "../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/zip_parse.h"

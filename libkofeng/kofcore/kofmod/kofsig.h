@@ -26,6 +26,8 @@
 #define KOFENG_KOFSIG_H
 
 #include <stdint.h>
+/* The capability vocabulary a rule names - see kof_pth_has. */
+#include <kofmod/kofpathogen.h>
 
 /* The code reader's vocabulary - see kdis.h for what it is for. */
 #include "kdis.h"
@@ -79,9 +81,9 @@
  * call ovl_blocks where it meant ovl_strings.
  *
  * The view structs moved too, which would have been reason enough on its own:
- * struct kof_ovl_desc lost its string pool, struct kof_ovl_region lost the
+ * struct kof_plague_desc lost its string pool, struct kof_plague_region lost the
  * slice that indexed it, struct kof_ovl_vec lost the two string dimensions,
- * and struct kof_ovl_shape gained lib_cut.
+ * and struct kof_plague_shape gained lib_cut.
  *
  * WHY THE MEASURE WENT is recorded where a researcher will look for it - see
  * the note beside SIM_IT_BLKSET in kofexamine/kofeditor.h, which carries the
@@ -1119,8 +1121,8 @@ struct kof_region_shape {
 	uint32_t reserved;
 };
 
-struct kof_ovlf_chain;   /* detectors/overlord/ovlflow.h - see ovl_chain */
-struct kof_ovl_shape;    /* kofmod/kofoverlord.h      - see ovl_shape */
+struct kof_pth_symptom;   /* detectors/overlord/pathogen/diagnose.h - see ovl_chain */
+struct kof_plague_shape;    /* kofmod/kofoverlord.h      - see ovl_shape */
 
 struct kof_content {
 	uint8_t  (*rd8) (const struct kof_obj_ctx *, uint64_t off);
@@ -1874,7 +1876,7 @@ struct kof_content {
 
 	
 	/*
-	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_ovl_blocks.
+	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_plague_blocks.
 	 *
 	 * Beside plague_score and not instead of it: that one asks how much of
 	 * ONE declared run of bytes is here and is anchored to the region the
@@ -1906,23 +1908,23 @@ struct kof_content {
 	 * one fact about this object, exactly as with plague_score.
 	 */
 	uint32_t (*ovl_chain)(const struct kof_obj_ctx *,
-			      const struct kof_ovlf_chain *ref);
+			      const struct kof_pth_symptom *ref);
 
 	/*
 	 * THE STRUCTURE TRACK, WITH THE LIBRARY THE ENGINE ALREADY FOUND.
 	 *
 	 * A shape comparison is arithmetic over the ELF header and needs
-	 * nothing from the host - kof_ovl_shape_pct does it inline, and that
+	 * nothing from the host - kof_plague_shape_pct does it inline, and that
 	 * is still what runs when this is absent. What the host has and the
 	 * rule does not is WHERE THE STATIC LIBRARY IS, which a reference may
-	 * ask to have taken out of both sides. See kof_ovl_shape.lib_cut for
+	 * ask to have taken out of both sides. See kof_plague_shape.lib_cut for
 	 * why that is the reference's declaration and not the engine's choice.
 	 *
 	 * Last in this struct, so a module built against the older shape of it
 	 * finds every field it knew where it left it.
 	 */
 	uint32_t (*ovl_shape)(const struct kof_obj_ctx *,
-			      const struct kof_ovl_shape *ref);
+			      const struct kof_plague_shape *ref);
 
 	/*
 	 * THE MODULE CAN UNDO WHAT IT FOUND, AND HERE IS WHERE THE DAMAGE
@@ -2321,6 +2323,51 @@ struct kof_content {
 	void (*emu_set_ip)(const struct kof_obj_ctx *, uint64_t va);
 	uint32_t (*emu_write)(const struct kof_obj_ctx *, uint64_t va,
 			      const uint8_t *bytes, uint32_t n);
+
+	/*
+	 * ---- THE OBJECT'S PROFILE, ASKED ONE FACT AT A TIME ---------------
+	 *
+	 * ovl_chain answers "how near is this object to that reference", which
+	 * needs a reference - a chain somebody took off a sample they already
+	 * had. That is the only question the chain vocabulary could be asked
+	 * until now, and it is not the question that measured well.
+	 *
+	 * Measured over 3655 malware and 1225 clean objects, what separated
+	 * them was not nearness to a sample but the PRESENCE of single facts
+	 * and of single links between them:
+	 *
+	 *     alloc-exec with W+X          31.2% of malware, 0 of clean
+	 *     socket opened as a datagram  33.0%             0
+	 *     a write fed by a write       12.8%             0
+	 *     a spawn fed by a spawn       35.9%             0
+	 *
+	 * None of those is expressible as "resembles this reference", and all
+	 * of them are one comparison. So they get their own two calls.
+	 *
+	 * AT THE END OF THE TABLE, so every entry before them keeps its offset
+	 * and a module built against an older header is unaffected.
+	 */
+	/*
+	 * DOES THIS OBJECT ASK FOR THIS CAPABILITY, with at least these flags.
+	 *
+	 * `flags` of zero means "with any flags, or none" - it is a REQUIREMENT
+	 * and not a pattern, so a node carrying more than was asked for still
+	 * answers yes. The flags a rule may ask for are the ones a stored step
+	 * keeps: see KOF_PTH_FLAG_KEEP.
+	 */
+	int (*pth_has)(const struct kof_obj_ctx *, uint8_t cap, uint8_t flags);
+	/*
+	 * DID AN ARGUMENT OF `dst` COME FROM WHAT `src` RETURNED.
+	 *
+	 * The link, which is what makes a set of capabilities a shape: "opened
+	 * a socket" and "read from the socket it opened" are different claims
+	 * and only the second one is about this program's structure.
+	 *
+	 * ZERO IS "NO LINK WAS SEEN", never "there is none" - the sweep loses
+	 * a pointer spilled to the stack, and on a PE that is nearly all of
+	 * them. A rule that needs certainty of absence cannot have it here.
+	 */
+	int (*pth_feeds)(const struct kof_obj_ctx *, uint8_t src, uint8_t dst);
 };
 
 /*
@@ -3572,6 +3619,7 @@ enum kof_analyze {
 #define KOF_UNP_CARVE     2
 #define KOF_UNPACK_KIND(k)
 
+
 /*
  * One search, normalised to 0 or 1.
  *
@@ -3642,17 +3690,17 @@ enum kof_analyze {
  * is listed below with the DATA it needs - which is what decides when a rule
  * may ask it - and what it measured on the cases that break the others.
  *
- *   kof_ovl_shape    STRUCTURE. The ELF header and the object's size, nothing
+ *   kof_plague_shape    STRUCTURE. The ELF header and the object's size, nothing
  *                    read. The cheapest of the five by a wide margin: no pass
  *                    over the bytes at all.
  *
  *   kof_plague_score BLOCK. Selected rolling-hash windows of ONE declared run,
  *                    anchored to the region it was cut from.
  *
- *   kof_ovl_blocks   BLOCK SET. The same windows over the WHOLE object against
+ *   kof_plague_blocks   BLOCK SET. The same windows over the WHOLE object against
  *                    a reference's whole set, anchored to nothing.
  *
- *   kof_ovl_chain    CALL CHAIN. What the code asks the system for, in order.
+ *   kof_pth_match    CALL CHAIN. What the code asks the system for, in order.
  *                    Needs a disassembly sweep, so it is the dearest.
  *
  *
@@ -3721,7 +3769,7 @@ enum kof_analyze {
  *
  *     static const uint32_t ref_blocks[] = { 0x..., 0x..., };
  *
- *     if (kof_ovl_blocks(ref_blocks) >= 60u)
+ *     if (kof_plague_blocks(ref_blocks) >= 60u)
  *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
  *
  * The hashes are the selected windows of the reference's loadable regions after
@@ -3733,23 +3781,56 @@ enum kof_analyze {
  * of those is anchored to the region its block came from and each can fire on
  * its own. This is one set, one containment, one threshold.
  */
-#define kof_ovl_blocks(ref)                                                \
-	((ctx)->content->ovl_blocks                                        \
-	 ? (ctx)->content->ovl_blocks((ctx), (ref),                        \
-		(uint32_t)(sizeof (ref) / sizeof (ref)[0]))                \
-	 : 0u)
+/*
+ * THE BLOCK VECTOR IS GONE, and the vtable slot behind it stays NULL.
+ *
+ * It asked how alike an object was across a reference's WHOLE set of selected
+ * windows rather than how much of one named run it carried. The measurement
+ * was sound and the gate it needed was not: containment over a whole set is
+ * strict enough that it answered on very few objects, and the ones it did
+ * answer on were ones a named block already had. Carrying a second set-shaped
+ * measure for that is cost without reach.
+ *
+ * The slot is left where it is for the reason ovl_strings' was - see the note
+ * at the head of this file - so that no entry after it moves and a module
+ * built against an older header cannot call the wrong one.
+ */
+
+/*
+ * DOES THIS OBJECT DO THIS - one fact, one comparison.
+ *
+ *     if (kof_pth_has(KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX) &&
+ *         kof_pth_feeds(KOF_CAP_WRITE, KOF_CAP_WRITE))
+ *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *
+ * NEITHER IS A VERDICT ON ITS OWN and the measurements say so plainly: the
+ * strongest single fact here reached a third of a malware corpus and none of
+ * a clean one, which is a term in a rule and not a rule. See the note on the
+ * two vtable entries.
+ */
+#define kof_pth_has(cap, flags)                                            \
+	((ctx)->content->pth_has                                           \
+	 ? (ctx)->content->pth_has((ctx), (uint8_t)(cap),                  \
+				   (uint8_t)(flags))                       \
+	 : 0)
+
+#define kof_pth_feeds(src, dst)                                            \
+	((ctx)->content->pth_feeds                                         \
+	 ? (ctx)->content->pth_feeds((ctx), (uint8_t)(src),                \
+				     (uint8_t)(dst))                       \
+	 : 0)
 
 /*
  * HOW MUCH OF A REFERENCE'S CALL CHAIN THIS OBJECT CARRIES.
  *
- *     static const struct kof_ovlf_chain ref_chain = { ... };
+ *     static const struct kof_pth_symptom ref_chain = { ... };
  *
- *     if (kof_ovl_chain(ref_chain) >= 80u)
+ *     if (kof_pth_match(ref_chain) >= 80u)
  *             KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);
  *
  * The chain is the capabilities the reference's code asks the system for, in
  * order, with the links between them - written out by the generator in
- * kofviewer, never typed. See detectors/overlord/ovlflow.h for what a step holds and
+ * kofviewer, never typed. See detectors/overlord/pathogen/diagnose.h for what a step holds and
  * why an address is not one of the things it holds.
  *
  * SUSPECT RATHER THAN INFECT is the generator's default, for the reason the
@@ -3758,7 +3839,7 @@ enum kof_analyze {
  * them is in the flags on the steps, and a rule that wants that separation
  * asks for it there.
  */
-#define kof_ovl_chain(ref)                                                 \
+#define kof_pth_match(ref)                                                 \
 	((ctx)->content->ovl_chain ? (ctx)->content->ovl_chain((ctx), &(ref)) \
 				   : 0u)
 
@@ -3934,7 +4015,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * KOF_XREF_CALL, and neither needs a line changed here.
  *
  * A RANGE, because a blob is not referred to at its first byte - see
- * kof_xref_in in analyzers/disasm/xref.h for the three-load measurement that says so.
+ * kof_xref_in in analyzers/parsers/binaries/disasm/xref.h for the three-load measurement that says so.
  * Pass the variable's own size; 0 asks about the one address.
  *
  * Zero for a range nothing referred to, and zero for an object with no code to
@@ -5211,7 +5292,7 @@ enum kof_str_word {
  * and "these samples share their author's code" are different claims, and a
  * number that mixed them would be measuring the toolchain.
  *
- * kof_lib_find is what names the spans, and it finds none in 86% of stripped
+ * kof_true_find is what names the spans, and it finds none in 86% of stripped
  * static builds - so on those every block is an ordinary one and this macro has
  * nothing to describe.
  */

@@ -97,8 +97,8 @@
 /* The region lists, one per format: rgn_names[] below is generated from them
  * rather than restating them. */
 #include "../libkofeng/kofcore/kofplatform.h"
-#include "../libkofeng/analyzers/parsers/binaries/elf_parse.h"
-#include "../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/zip_parse.h"
@@ -1362,7 +1362,7 @@ static void capture_find_call(const char *at)
 	 * different variants, which is the whole requirement.
 	 */
 	/*
-	 * AND SO DOES kof_ovl_shape, for the same reason one step further out.
+	 * AND SO DOES kof_plague_shape, for the same reason one step further out.
 	 *
 	 * A shape rule is guarded by how near the object is to a reference's
 	 * geometry, and it names that reference - so what is hashed is the
@@ -1371,7 +1371,7 @@ static void capture_find_call(const char *at)
 	 * while the panel that writes those rules offers it like any other.
 	 */
 	/*
-	 * AND kof_ovl_chain, which names its reference the same way - what is
+	 * AND kof_pth_match, which names its reference the same way - what is
 	 * hashed is the identifier, so two rules over two samples' chains
 	 * derive two variants. Left out when the measure was added and the
 	 * build refused every chain rule's AUTO until it was put back.
@@ -1395,8 +1395,8 @@ static void capture_find_call(const char *at)
 	static const char *kinds[] = { "kof_find_str_multi", "kof_find_str_all",
 					"kof_find_str_any", "kof_find_str_at",
 					"kof_find_str_in", "kof_plague_score",
-					"kof_ovl_shape", "kof_ovl_strings", "kof_ovl_blocks",
-					"kof_ovl_chain",
+					"kof_plague_shape", "kof_plague_strings", "kof_plague_blocks",
+					"kof_pth_match",
 					NULL };
 	const char *best = NULL;
 	const char *best_kind = NULL;

@@ -20,7 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../libkofeng/analyzers/disasm/xref.h"
+#include "../../libkofeng/analyzers/parsers/binaries/disasm/xref.h"
 
 static int fails;
 

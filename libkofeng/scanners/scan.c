@@ -43,8 +43,8 @@
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
-#include "../analyzers/disasm/xref.h"
-#include "../detectors/overlord/koflib.h"
+#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../analyzers/trueline/trueline.h"
 #include "../kofcore/kofmod/elf.h"
 
 #include <stdio.h>
@@ -165,6 +165,8 @@ void kof_scan_free(struct kof_scanner *sc)
 	kof_plague_ctx_done(&sc->plague);
 	free(sc->ovl);
 	free(sc->fchain);
+	/* And the profile derived from them. */
+	free(sc->pth_prof);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
@@ -430,7 +432,7 @@ static void plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 *
 	 * The view is declared as its parent's format, so it parses - but its
 	 * headers describe the file before the padding came out, and
-	 * kof_lib_find works from markers found inside a loadable SEGMENT.
+	 * kof_true_find works from markers found inside a loadable SEGMENT.
 	 * Given stale offsets it would name spans over the wrong bytes and put
 	 * blocks on the wrong side of enum kof_plague_side.
 	 *
@@ -440,7 +442,7 @@ static void plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	/*
 	 * INHERITED FROM THE PARSE - see kof_scanner.cur_lib and lib_facts.
 	 *
-	 * This used to call kof_lib_find for itself, with its own gate: not on
+	 * This used to call kof_true_find for itself, with its own gate: not on
 	 * an object carrying a declared region table, because that is a view
 	 * and a view's segment offsets are its parent's. The gate moved into
 	 * lib_facts with the answer, where it is stated once and where the
@@ -983,7 +985,7 @@ static void finding_str(const struct kof_scanner *sc,
 	}
 	/*
 	 * AND THE SAME FOR A SIMILARITY MEASURE THAT CARRIES ITS OWN
-	 * REFERENCE - kof_ovl_blocks, kof_ovl_chain, kof_ovl_shape.
+	 * REFERENCE - kof_plague_blocks, kof_pth_match, kof_plague_shape.
 	 *
 	 * The mark goes BEHIND the variant, where every other method's does,
 	 * and not in front of it. It was a prefix on the variant for one
@@ -2660,7 +2662,7 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 *
 		 * The bytes are in it - moved to the end under SLIB_CODE and
 		 * SLIB_DATA, see KOF_SCAN_ELF_SLIB_CODE - and nothing here can
-		 * work them out a second time: kof_lib_find reads segment
+		 * work them out a second time: kof_true_find reads segment
 		 * offsets, and a view's headers describe the file before the
 		 * transform. The declared table is the answer, and it came from
 		 * this same field one object ago.
@@ -2676,7 +2678,7 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		uint32_t i;
 
 		for (i = 0; i < sc->n_cur_rgn &&
-			    sc->cur_lib.n < KOF_LIB_MAX_SPANS_ALL; i++) {
+			    sc->cur_lib.n < KOF_TRUE_MAX_SPANS_ALL; i++) {
 			if (!(sc->cur_rgn[i].mask &
 			      (KOF_SCAN_ELF_SLIB_CODE |
 			       KOF_SCAN_ELF_SLIB_DATA)))
@@ -2697,8 +2699,8 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (!buf.p || !buf.n)
 		return;
 	/* Which tier the object needs is the object's question, answered in one
-	 * place - see kof_lib_find_object. */
-	kof_lib_find_object(buf, kof_elf(ctx), &sc->cur_lib);
+	 * place - see kof_true_find_object. */
+	kof_true_find_object(buf, kof_elf(ctx), &sc->cur_lib);
 	sc->cur_lib_ok = 1;
 }
 
@@ -2719,7 +2721,7 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  *
  * THE SAME CLASSIFICATION AND NOT A SECOND ONE. A record is dropped when the
  * address it covers falls in the library spans lib_facts already worked out -
- * see kof_lib_has_addr. Nothing here decides what the library is.
+ * see kof_true_has_addr. Nothing here decides what the library is.
  *
  * `_start` GOES WITH IT, and the header's index of it is cleared rather than
  * left pointing at whatever record now sits there: crt is the toolchain's, so
@@ -2792,7 +2794,7 @@ static uint32_t norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			va |= (uint64_t)r[KOF_SYM_R_VALUE + k] << (8u * k);
 			sz |= (uint64_t)r[KOF_SYM_R_SIZE + k] << (8u * k);
 		}
-		if (kof_lib_has_addr(e, &sc->cur_lib, va, sz))
+		if (kof_true_has_addr(e, &sc->cur_lib, va, sz))
 			continue;
 		/*
 		 * AND NOTHING ELSE DECIDES THIS.
@@ -2952,7 +2954,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
 	uint8_t *out, *tmp, *keep, *drop;
-	const struct kof_lib_all *lib;
+	const struct kof_true_all *lib;
 	uint64_t n, sent = 0;
 	int changed;
 	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
@@ -3150,7 +3152,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * Jaccard of 0.99 through nothing but a shared libc. A view of what the
 	 * object actually carries is a view without them.
 	 *
-	 * FOUND ON THE PARENT, WHERE THE PARSE IS TRUE. kof_lib_find works from
+	 * FOUND ON THE PARENT, WHERE THE PARSE IS TRUE. kof_true_find works from
 	 * markers inside a loadable segment, so it needs segment offsets that
 	 * describe the bytes it is reading - which is the case here and is not
 	 * the case on a view, whose headers still describe the file before the
@@ -3351,7 +3353,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * region table describing none of them, and handing one over would put
 	 * an object into the tree that says it is an executable and contains
 	 * nothing. It takes a library covering the whole object, header
-	 * included, which is not something kof_lib_find can currently produce -
+	 * included, which is not something kof_true_find can currently produce -
 	 * the test is here so that the day it can, this says no rather than
 	 * building a copy of the parent and calling it a view.
 	 */
@@ -3551,6 +3553,19 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	/* What this object IS, said rather than inferred - see
 	 * kof_src_declare_view. */
 	sc->pend_view = 1;
+	/*
+	 * AND WHAT IT IS, in the enum every consumer already reads.
+	 *
+	 * `pend_view` is the engine's own guard against normalising a view
+	 * again; it says nothing to anybody outside. KOF_ENT_NORMALIZED is
+	 * the published fact, the one kof_result.entry_kind carries to a
+	 * caller - and without it the viewer saw a child of unknown kind and
+	 * had nothing to go on but its label.
+	 *
+	 * The script normaliser in objctx.c has declared this from the start;
+	 * this one did not, and the two produce the same kind of thing.
+	 */
+	sc->pend_kind = KOF_ENT_NORMALIZED;
 	{
 		uint32_t a;
 
@@ -3968,7 +3983,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 *
 	 * Here and not inside plague_feed, which returns early when no pack
 	 * carried a block: a database with no plague rules would then have left
-	 * the previous object's descriptor in place, and every kof_ovl_blocks
+	 * the previous object's descriptor in place, and every kof_plague_blocks
 	 * rule would have measured the wrong file. Built on the first ask - see
 	 * ovl_of - so this costs a store.
 	 */
@@ -3982,6 +3997,8 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->ovl_pct = 0;
 	/* And the swept chains, for the same reason and at the same cost. */
 	sc->fchain_ready = 0;
+	/* And the profile derived from them, for the same reason. */
+	sc->pth_prof_ready = 0;
 	/* What the two gated measures compare themselves against - see
 	 * kof_scanner.heur_lvl. Unstated is level 1, exactly as heur_object
 	 * reads it, so the two cannot drift. */
@@ -4272,6 +4289,9 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * is skipped, because the layout belongs to the parent and the parent
 	 * is scanned too.
 	 */
+	/* Every object, including a region view - a measurement wants them
+	 * all, and it is off unless the environment asks. */
+	kof_scan_fchain_probe(&ctx);
 	if (!sc->n_cur_rgn)
 		heur_object(sc, &ctx, opt, pdepth,
 			    out->broken == KOF_BROKEN_DAMAGED, out);

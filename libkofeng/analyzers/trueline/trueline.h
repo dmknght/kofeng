@@ -1,5 +1,5 @@
 /*
- * koflib.h - which bytes of an object belong to the STATIC LIBRARY, and not to
+ * trueline.h - which bytes of an object belong to the STATIC LIBRARY, and not to
  * whoever wrote the program.
  *
  * WHY THE ENGINE NEEDS THIS AT ALL, and not just the similarity matcher: two
@@ -24,8 +24,8 @@
  * the same libc. The first fails quietly and the second fails loudly.
  */
 
-#ifndef KOFENG_KOFLIB_H
-#define KOFENG_KOFLIB_H
+#ifndef KOFENG_TRUELINE_H
+#define KOFENG_TRUELINE_H
 
 #include <stdint.h>
 #include <kofcore.h>
@@ -48,16 +48,16 @@ struct kof_elf_info;
  * span - kofoverlord, the block builder - is not made to carry 32KB of array it
  * cannot fill.
  */
-#define KOF_LIB_MAX_SPANS     16u
-#define KOF_LIB_MAX_SPANS_ALL 2048u
+#define KOF_TRUE_MAX_SPANS     16u
+#define KOF_TRUE_MAX_SPANS_ALL 2048u
 
-struct kof_lib_result {
-	struct kof_range span[KOF_LIB_MAX_SPANS];
+struct kof_true_result {
+	struct kof_range span[KOF_TRUE_MAX_SPANS];
 	uint32_t n;
 };
 
-struct kof_lib_all {
-	struct kof_range span[KOF_LIB_MAX_SPANS_ALL];
+struct kof_true_all {
+	struct kof_range span[KOF_TRUE_MAX_SPANS_ALL];
 	uint32_t n;
 };
 
@@ -71,21 +71,21 @@ struct kof_lib_all {
  * all, because a stripped static uclibc build carries none of the text this
  * recognises.
  */
-void kof_lib_find(kof_buf file, const struct kof_elf_info *e,
-		  struct kof_lib_result *out);
+void kof_true_find(kof_buf file, const struct kof_elf_info *e,
+		  struct kof_true_result *out);
 
 /*
  * The same, plus the symbol tier: every byte the file's own symbols attribute
  * to the implementation, exactly, in whatever region it lies.
  *
- * TWO ENTRY POINTS AND NOT A COMPLETER kof_lib_find, WHICH IS A MEASUREMENT
+ * TWO ENTRY POINTS AND NOT A COMPLETER kof_true_find, WHICH IS A MEASUREMENT
  * DECISION RATHER THAN A TASTE ONE.
  *
  * The similarity matcher and kofoverlord were calibrated against the marker
  * span - the note at the top of this file says so - and the thresholds they
  * carry are numbers about THAT set of bytes. Switching them to a wider cut does
  * not improve them, it makes their numbers about something else: measured when
- * kof_lib_find itself was widened, a malware corpus moved 57 files from
+ * kof_true_find itself was widened, a malware corpus moved 57 files from
  * infected to suspected, because the blocks those verdicts rest on no longer
  * covered the same bytes.
  *
@@ -94,8 +94,8 @@ void kof_lib_find(kof_buf file, const struct kof_elf_info *e,
  * own content and nobody else's. Moving the other two across is a
  * re-measurement, not an edit.
  */
-void kof_lib_find_all(kof_buf file, const struct kof_elf_info *e,
-		      struct kof_lib_all *out);
+void kof_true_find_all(kof_buf file, const struct kof_elf_info *e,
+		      struct kof_true_all *out);
 
 /*
  * The symbol tier ALONE, for an object where the marker span cannot be trusted.
@@ -112,8 +112,8 @@ void kof_lib_find_all(kof_buf file, const struct kof_elf_info *e,
  * where it finds the handful of crt and loader pieces the linker put in - as of
  * a static one.
  */
-void kof_lib_find_syms(kof_buf file, const struct kof_elf_info *e,
-		       struct kof_lib_all *out);
+void kof_true_find_syms(kof_buf file, const struct kof_elf_info *e,
+		       struct kof_true_all *out);
 
 /*
  * THE CHOICE BETWEEN THE TWO ABOVE, MADE ONCE.
@@ -121,7 +121,7 @@ void kof_lib_find_syms(kof_buf file, const struct kof_elf_info *e,
  * Which tier is right is a property of the OBJECT and not of the caller: the
  * marker span runs from a segment's first library string to its last, which is
  * one run in a static build and, in a dynamic one, a seven-megabyte "library"
- * across a program's own code - the failure kof_lib_find_syms exists for. So
+ * across a program's own code - the failure kof_true_find_syms exists for. So
  * the test is PT_INTERP and the answer follows from it.
  *
  * It was written out three times - the scanner, the viewer and the draft
@@ -131,8 +131,8 @@ void kof_lib_find_syms(kof_buf file, const struct kof_elf_info *e,
  * here; the two entry points above remain for a caller that has already decided,
  * which is what the reference generator and the tests are.
  */
-void kof_lib_find_object(kof_buf file, const struct kof_elf_info *e,
-			 struct kof_lib_all *out);
+void kof_true_find_object(kof_buf file, const struct kof_elf_info *e,
+			 struct kof_true_all *out);
 
 /*
  * Whether the [va, va+size) a SYMBOL covers falls in what was found.
@@ -142,7 +142,7 @@ void kof_lib_find_object(kof_buf file, const struct kof_elf_info *e,
  * translation the spans themselves were built with. What the segments cannot
  * place is not the library's - see the note on the definition.
  */
-int kof_lib_has_addr(const struct kof_elf_info *e,
-		     const struct kof_lib_all *lib, uint64_t va, uint64_t size);
+int kof_true_has_addr(const struct kof_elf_info *e,
+		     const struct kof_true_all *lib, uint64_t va, uint64_t size);
 
-#endif /* KOFENG_KOFLIB_H */
+#endif /* KOFENG_TRUELINE_H */

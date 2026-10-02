@@ -1,8 +1,8 @@
 /* The parser list. See kofformat.h for why there is only one of it. */
 
 #include "kofformat.h"
-#include "binaries/elf_parse.h"
-#include "binaries/pe_parse.h"
+#include "binaries/elf/elf_parse.h"
+#include "binaries/pe/pe_parse.h"
 #include "containers/gzip_parse.h"
 #include "containers/docole_parse.h"
 #include "containers/zip_parse.h"

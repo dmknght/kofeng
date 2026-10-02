@@ -727,7 +727,7 @@ void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm
 			 *
 			 * pl_in_lib walks the library spans, and the symbol
 			 * tier produces one per library function - up to
-			 * KOF_LIB_MAX_SPANS_ALL of them. Paid per selected
+			 * KOF_TRUE_MAX_SPANS_ALL of them. Paid per selected
 			 * window on a three-megabyte object that is ninety
 			 * thousand walks of a list answering nothing the
 			 * verdict uses.

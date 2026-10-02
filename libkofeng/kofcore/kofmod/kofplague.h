@@ -416,7 +416,7 @@ static inline int kof_plague_flat(const uint8_t *p, uint64_t at, uint32_t norm)
  */
 enum kof_plague_side {
 	KOF_PLAGUE_SIDE_USER = 0,   /* everything the static library is not */
-	KOF_PLAGUE_SIDE_LIB         /* inside a span kof_lib_find named */
+	KOF_PLAGUE_SIDE_LIB         /* inside a span kof_true_find named */
 };
 
 struct kof_plague_block {

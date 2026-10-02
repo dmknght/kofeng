@@ -17,7 +17,7 @@
 #include <kofmod/kofsig.h>
 /* For CLR_REGIONS, which PE_REGIONS below splices into its own list. */
 #include <kofmod/clr.h>
-#include "../../../kofcore/kofcore.h"
+#include "../../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if the object is PE at all - MZ and PE\0\0 both matched.
@@ -33,6 +33,29 @@
  */
 int kof_pe_parse(kof_buf file, struct kof_pe_info *info,
 		 struct kof_obj_ctx *ctx);
+
+/*
+ * THE IMPORT DIRECTORY, walked on demand - see the note in elf_parse.h for
+ * why this is pulled rather than carried in the view, why it reports to a
+ * visitor rather than filling an array, and why it answers with names rather
+ * than with meanings.
+ *
+ * `slot` is the address a call goes THROUGH, taken from FirstThunk, because
+ * that is the one the loader writes and the one an indirect call names. The
+ * NAME comes from OriginalFirstThunk where there is one: a file on disk has
+ * both tables, a memory image dumped to disk has only the first, and the
+ * original is the one that still holds names after the loader has written
+ * addresses over the other.
+ *
+ * AN IMPORT BY ORDINAL has no name. It is still reported, with `name` NULL
+ * and `ordinal` set - the slot is real and a caller that only matches names
+ * can ignore it, which is not the same as not being told.
+ */
+typedef void (*kof_pe_import_fn)(void *user, uint64_t slot, const char *dll,
+				 const char *name, uint32_t ordinal);
+
+uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
+			kof_pe_import_fn fn, void *user);
 
 /*
  * Does this object look like PE at all?

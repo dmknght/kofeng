@@ -34,7 +34,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-#include "../../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../../libkofeng/extractors/unpack/pe_unmap.h"
 
 #define DELTA 0x13370000ull

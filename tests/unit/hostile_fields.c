@@ -50,8 +50,8 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
-#include "../../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../../libkofeng/analyzers/parsers/containers/gzip_parse.h"
 #include "../../libkofeng/analyzers/parsers/containers/docole_parse.h"
 #include "../../libkofeng/analyzers/parsers/containers/zip_parse.h"

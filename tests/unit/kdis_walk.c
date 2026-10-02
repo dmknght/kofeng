@@ -34,7 +34,7 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/pe.h"
-#include "../../libkofeng/analyzers/disasm/kdis.h"
+#include "../../libkofeng/analyzers/parsers/binaries/disasm/kdis.h"
 
 static int failures;
 

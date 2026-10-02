@@ -26,10 +26,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/detectors/overlord/koflib.h"
+#include "../../libkofeng/analyzers/trueline/trueline.h"
 #include "../../libkofeng/detectors/overlord/kofoverlord.h"
-#include "../../libkofeng/analyzers/parsers/binaries/elf_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../libkofeng/kofcore/kofmod/elf.h"
+
+/*
+ * SET CONTAINMENT, HERE AND NOT IN THE ENGINE.
+ *
+ * These three checks are about the LIBRARY CUT: that trueline takes the
+ * library out and does not take the author's half with it. They used to ask
+ * through kof_plague_blocks_pct, which the engine no longer carries - see the
+ * note on its vtable slot in kofsig.h.
+ *
+ * The measure is gone; what it was testing is not, so the arithmetic moves
+ * into the test rather than the test being deleted along with it. Both arrays
+ * are sorted and deduplicated by kof_plague_desc_build.
+ */
+static uint32_t blk_contain_pct(const uint32_t *obj, uint32_t n_obj,
+				const uint32_t *ref, uint32_t n_ref)
+{
+	uint32_t i = 0, j = 0, hit = 0;
+
+	if (!n_ref)
+		return 0;
+	while (i < n_obj && j < n_ref) {
+		if (obj[i] == ref[j]) { hit++; i++; j++; }
+		else if (obj[i] < ref[j]) i++;
+		else j++;
+	}
+	return (uint32_t)((uint64_t)hit * 100u / n_ref);
+}
 
 static int fails;
 
@@ -165,22 +192,22 @@ static int parse_of(uint8_t *b, uint64_t n, struct kof_elf_info *e)
 
 /*
  * Build a descriptor the way the engine does: the library spans are the
- * caller's to establish, and they are THIS object's - see kof_ovl_build.
+ * caller's to establish, and they are THIS object's - see kof_plague_build.
  */
-static int ovl_build_of(struct kof_ovl_desc *d, uint8_t *p, uint64_t n,
+static int ovl_build_of(struct kof_plague_desc *d, uint8_t *p, uint64_t n,
 			const struct kof_elf_info *e)
 {
-	struct kof_lib_result l;
+	struct kof_true_result l;
 
-	kof_lib_find(kof_buf_make(p, n), e, &l);
-	return kof_ovl_build(d, kof_buf_make(p, n), e, l.span, l.n);
+	kof_true_find(kof_buf_make(p, n), e, &l);
+	return kof_plague_desc_build(d, kof_buf_make(p, n), e, l.span, l.n);
 }
 
 int main(void)
 {
 	struct kof_elf_info e1, e2;
-	struct kof_lib_result lib;
-	struct kof_ovl_desc *d1, *d2;
+	struct kof_true_result lib;
+	struct kof_plague_desc *d1, *d2;
 	struct kof_ovl_vec v;
 	uint8_t *a, *b;
 	uint64_t na, nb;
@@ -196,7 +223,7 @@ int main(void)
 		bad("the synthetic ELF did not parse");
 		return 1;
 	}
-	kof_lib_find(kof_buf_make(a, na), &e1, &lib);
+	kof_true_find(kof_buf_make(a, na), &e1, &lib);
 	if (!lib.n)
 		bad("three markers did not produce a span");
 	else
@@ -209,7 +236,7 @@ int main(void)
 
 	a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 0);
 	parse_of(a, na, &e1);
-	kof_lib_find(kof_buf_make(a, na), &e1, &lib);
+	kof_true_find(kof_buf_make(a, na), &e1, &lib);
 	if (lib.n)
 		bad("a single marker still produced a span");
 	else
@@ -228,7 +255,7 @@ int main(void)
 	 * string track is gone: two objects that share only their library must
 	 * not share the content the library was taken out of.
 	 */
-	if (kof_ovl_blocks_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
+	if (blk_contain_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
 		bad("a shared library alone matched on blocks - the cut is "
 		    "not taking it out");
 	else
@@ -245,7 +272,7 @@ int main(void)
 	/* The author's half is shared, so its blocks must be - and this is the
 	 * other side of the check above: the cut must not take so much that
 	 * two objects with the same content stop agreeing. */
-	if (kof_ovl_blocks_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) < 50u)
+	if (blk_contain_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) < 50u)
 		bad("a shared author half did not match on blocks");
 	else
 		ok("a shared author half matches (blocks)");
@@ -262,7 +289,7 @@ int main(void)
 		bad("identical shape did not fire the structure track");
 	else
 		ok("identical shape matches with no content in common");
-	if (kof_ovl_blocks_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
+	if (blk_contain_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
 		bad("unrelated content matched on blocks");
 	else
 		ok("and the content measure correctly stays quiet");
@@ -291,7 +318,7 @@ int main(void)
 	/* swap the two regions in the copy: an index pairing would now compare
 	 * the executable region against the writable one and agree with nothing */
 	{
-		struct kof_ovl_region t = d2->region[0];
+		struct kof_plague_region t = d2->region[0];
 
 		d2->region[0] = d2->region[1];
 		d2->region[1] = t;
@@ -342,13 +369,13 @@ int main(void)
 	 */
 	printf("\nmarkers thrown to the ends of a region:\n");
 	{
-		struct kof_lib_result sp;
+		struct kof_true_result sp;
 
 		a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 2);
 		if (!a || !parse_of(a, na, &e1)) {
 			bad("the synthetic ELF did not parse");
 		} else {
-			kof_lib_find(kof_buf_make(a, na), &e1, &sp);
+			kof_true_find(kof_buf_make(a, na), &e1, &sp);
 			if (sp.n)
 				bad("three scattered markers cut a span - a "
 				    "planted marker was read as a library");
@@ -359,7 +386,7 @@ int main(void)
 		/* and the packed ones still do, which is the other half */
 		a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 1);
 		if (a && parse_of(a, na, &e1)) {
-			kof_lib_find(kof_buf_make(a, na), &e1, &sp);
+			kof_true_find(kof_buf_make(a, na), &e1, &sp);
 			if (!sp.n)
 				bad("packed markers stopped cutting - the "
 				    "density rule is too strict");
@@ -371,16 +398,16 @@ int main(void)
 
 	printf("\nthe structure track, with and without the library:\n");
 	{
-		struct kof_lib_result slib;
-		struct kof_ovl_shape raw, cut;
+		struct kof_true_result slib;
+		struct kof_plague_shape raw, cut;
 
 		a = build_elf(&na, 62, 0, 0x1111u, 0x2222u, 1);
 		if (!a || !parse_of(a, na, &e1)) {
 			bad("the synthetic ELF did not parse");
 		} else {
-			kof_lib_find(kof_buf_make(a, na), &e1, &slib);
-			kof_ovl_shape_of(&e1, na, &raw);
-			kof_ovl_shape_of_cut(&e1, na, slib.span, slib.n, &cut);
+			kof_true_find(kof_buf_make(a, na), &e1, &slib);
+			kof_plague_shape_of(&e1, na, &raw);
+			kof_plague_shape_of_cut(&e1, na, slib.span, slib.n, &cut);
 
 			if (raw.lib_cut)
 				bad("an uncut shape claimed the library was out");
@@ -403,11 +430,11 @@ int main(void)
 				ok("the file size is the author's bytes");
 			/* Same object, same question: an uncut reference must
 			 * answer exactly what it always did. */
-			if (kof_ovl_shape_cmp(&raw, &raw) != 100u)
+			if (kof_plague_shape_cmp(&raw, &raw) != 100u)
 				bad("an object did not match its own uncut shape");
 			else
 				ok("an uncut reference is measured as before");
-			if (kof_ovl_shape_cmp(&cut, &cut) != 100u)
+			if (kof_plague_shape_cmp(&cut, &cut) != 100u)
 				bad("an object did not match its own cut shape");
 			else
 				ok("a cut reference matches a cut object");

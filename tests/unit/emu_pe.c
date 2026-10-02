@@ -30,7 +30,7 @@
 
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
-#include "../../libkofeng/analyzers/parsers/binaries/pe_parse.h"
+#include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../../libkofeng/extractors/unpack/emu_unpack.h"
 #include "../../libkofeng/kofeng.h"
 

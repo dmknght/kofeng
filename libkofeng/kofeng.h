@@ -894,7 +894,7 @@ int         kmatch_tables(const kof_engine *, uint64_t *bytes,
  * to 16005 ms, with the same 1341 files detected and byte-identical output on
  * 954 system binaries.
  *
- * AND ONE MEASURE IS GONE. The string set - kof_ovl_strings - was removed from
+ * AND ONE MEASURE IS GONE. The string set - kof_plague_strings - was removed from
  * the engine, the generator and the signature base. That is a module ABI break
  * and is gated there, by KOFSIG_ABI_MIN; this number does not gate it and does
  * not pretend to.

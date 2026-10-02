@@ -104,7 +104,7 @@
  *
  * The other two rewrite bytes; this one takes them away, and what to take is
  * not something this file can work out - it is a list of spans the caller
- * found with kof_lib_find. So the caller passes the spans and this reports
+ * found with kof_true_find. So the caller passes the spans and this reports
  * that it used them.
  *
  * WHY IT IS WORTH A VIEW ON ITS OWN. Measured over 226 Linux malware samples,

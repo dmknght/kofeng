@@ -27,7 +27,7 @@
  *               that must be asked of a NORMALISED object, because a run is
  *               hashed by its bytes: measured, a base64 or hex re-encoding of
  *               the same program scores 0 and a widened one is not collected
- *               at all. See kof_ovl_blocks in kofmod/kofsig.h.
+ *               at all. See kof_plague_blocks in kofmod/kofsig.h.
  *
  * They overlap but neither contains the other: across independent collections,
  * 41 objects were caught only by strings and 9 only by structure. So the
@@ -69,7 +69,7 @@
 #include <kofcore.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofoverlord.h>
-#include "koflib.h"
+#include "../../analyzers/trueline/trueline.h"
 
 struct kof_elf_info;
 
@@ -78,7 +78,7 @@ struct kof_elf_info;
  * four; the objects with more are not programs, and one that fills this says so
  * rather than silently comparing a prefix.
  */
-#define KOF_OVL_MAX_REGIONS 8u
+#define KOF_PLAGUE_MAX_REGIONS 8u
 
 /*
  * Block hashes one descriptor keeps.
@@ -93,13 +93,13 @@ struct kof_elf_info;
  */
 #define KOF_OVL_MAX_BLOCKS 8192u
 
-struct kof_ovl_region {
+struct kof_plague_region {
 	uint64_t fsz;        /* the region's bytes on disk, before subtraction */
 	uint8_t  x;          /* executable: what the pairing keys on           */
 	uint8_t  pad[3];
 };
 
-struct kof_ovl_desc {
+struct kof_plague_desc {
 	uint64_t fsize;
 	uint64_t anomalies;       /* the parse's complaints: shared damage is an
 				   * anchor, not noise - broken headers are 18
@@ -113,7 +113,7 @@ struct kof_ovl_desc {
 	uint8_t  n_region;
 	uint8_t  truncated;       /* a cap stopped the build                    */
 	uint8_t  pad[2];
-	struct kof_ovl_region region[KOF_OVL_MAX_REGIONS];
+	struct kof_plague_region region[KOF_PLAGUE_MAX_REGIONS];
 	uint32_t n_blk;
 	uint32_t blk[KOF_OVL_MAX_BLOCKS];    /* sorted, deduplicated             */
 };
@@ -164,18 +164,18 @@ struct kof_ovl_vec {
  * The caller establishes the spans - see koflib.h on which tier an object needs
  * - because this header is a rule's, and a rule has no file to search.
  */
-static inline void kof_ovl_shape_of_cut(const struct kof_elf_info *e,
+static inline void kof_plague_shape_of_cut(const struct kof_elf_info *e,
 					uint64_t file_size,
 					const struct kof_range *lib,
 					uint32_t lib_n,
-					struct kof_ovl_shape *s)
+					struct kof_plague_shape *s)
 {
-	uint64_t seg_off[KOF_OVL_MAX_REGIONS];
+	uint64_t seg_off[KOF_PLAGUE_MAX_REGIONS];
 	uint32_t i, k, n = 0;
 
 	if (!s)
 		return;
-	kof_ovl_shape_of(e, file_size, s);
+	kof_plague_shape_of(e, file_size, s);
 	s->lib_cut = 1;
 	if (!lib_n || !e)
 		return;
@@ -190,7 +190,7 @@ static inline void kof_ovl_shape_of_cut(const struct kof_elf_info *e,
 			continue;
 		seg_off[n++] = g->file_off;
 	}
-	for (i = 0; i < n && i < KOF_OVL_MAX_REGIONS; i++) {
+	for (i = 0; i < n && i < KOF_PLAGUE_MAX_REGIONS; i++) {
 		uint64_t beg = seg_off[i], end = beg + s->region_fsz[i];
 		uint64_t cut = 0;
 
@@ -216,7 +216,7 @@ static inline void kof_ovl_shape_of_cut(const struct kof_elf_info *e,
  * THE LIBRARY SPANS COME FROM THE CALLER, and this is the third and last place
  * that used to work them out for itself.
  *
- * It called kof_lib_find here. That is correct for an object whose headers
+ * It called kof_true_find here. That is correct for an object whose headers
  * describe its own bytes and WRONG for the one case the scanner most often
  * hands over: a NORMALISED VIEW, whose header is the file its parent was, so
  * the segment offsets the search walks point at bytes that have moved. The
@@ -233,13 +233,19 @@ static inline void kof_ovl_shape_of_cut(const struct kof_elf_info *e,
  * spans must pass zero rather than a guess: "no library was found" and "there
  * is no library" are the same argument here and a wrong span is not.
  */
-int kof_ovl_build(struct kof_ovl_desc *d, kof_buf file,
+int kof_plague_desc_build(struct kof_plague_desc *d, kof_buf file,
 		  const struct kof_elf_info *e,
 		  const struct kof_range *lib_span, uint32_t lib_n);
 
 /* Compare two descriptors. Symmetric; neither argument is privileged. */
-void kof_ovl_compare(const struct kof_ovl_desc *a, const struct kof_ovl_desc *b,
+void kof_ovl_compare(const struct kof_plague_desc *a, const struct kof_plague_desc *b,
 		     struct kof_ovl_vec *v);
+
+/*
+ * The vector reduced to one answer: the worst-agreeing dimension that had an
+ * answer at all, never an average of them. See the note on struct kof_ovl_vec.
+ */
+uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v);
 
 /*
  * Which track, if any, fires.
@@ -254,17 +260,6 @@ enum kof_ovl_track {
 	KOF_OVL_ANCHOR    = 1u << 2    /* shared header damage plus shape       */
 };
 
-uint32_t kof_ovl_verdict(const struct kof_ovl_vec *v);
-
-
-/*
- * THE SAME MEASUREMENT OVER BLOCK HASHES.
- *
- * Containment again - how much of the reference's set is here - and for the
- * same reason: a variant that grew a function is still the same program.
- */
-uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
-			    const uint32_t *ref, uint32_t n_ref);
 
 /*
  * A SHAPE A RULE CAN DECLARE, and the one number it is asked about.
@@ -275,7 +270,7 @@ uint32_t kof_ovl_blocks_pct(const uint32_t *obj, uint32_t n_obj,
  * shape rather than a whole descriptor: no string pool, a hundred-odd bytes,
  * and the comparison costs a handful of divisions.
  *
- * ONE PERCENTAGE, AND IT IS STILL A CONJUNCTION. kof_ovl_shape_pct answers with
+ * ONE PERCENTAGE, AND IT IS STILL A CONJUNCTION. kof_plague_shape_pct answers with
  * the WORST-agreeing dimension, not an average of them, so `>= 70` means every
  * dimension agrees to at least seventy percent - which is exactly the rule that
  * measured zero false positives on 3870 clean objects. An average would let a
