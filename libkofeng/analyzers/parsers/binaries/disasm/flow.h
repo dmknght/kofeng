@@ -204,6 +204,22 @@ struct kof_flow_node {
 	 * that sweep's spans and nothing else.
 	 */
 	uint16_t loop;
+	/*
+	 * AND WHETHER THAT LOOP IS THIS STEP'S OWN FUNCTION'S.
+	 *
+	 * A step inside a loop written where the step is nests one level
+	 * deeper than one whose enclosing loop belongs to a caller - that
+	 * is the difference between `loop { read() }` and a `read()` the
+	 * caller happens to run repeatedly, and only the first is nesting
+	 * the page should draw.
+	 *
+	 * Decided by finish(), where the spans and the function bounds are
+	 * both in hand, rather than by whoever builds a chain. It used to
+	 * be a scan of the whole span table per step per chain - see the
+	 * note on loop_at - which is work that does not depend on the chain
+	 * and so had no business being repeated for every one of them.
+	 */
+	uint8_t  loop_own;
 
 	/*
 	 * WHICH CONDITIONAL THIS STEP IS AN ARM OF, and which arm.
@@ -495,7 +511,7 @@ uint8_t kof_flow_relation(struct kof_flow *f, uint32_t a, uint32_t b);
  * bound: a caller can check it before committing, and an object whose code is
  * larger than this is one nothing here can answer about cheaply.
  */
-#define KOF_FLOW_MAX_CODE (4u * 1024u * 1024u)
+#define KOF_FLOW_MAX_CODE (64u * 1024u * 1024u)
 
 struct kof_flow;
 
@@ -707,6 +723,30 @@ void kof_flow_retargeter(struct kof_flow *f, kof_flow_retarget_fn fn,
  * Before the first kof_flow_add; after that the partition is settled.
  */
 void kof_flow_head(struct kof_flow *f, uint64_t va, uint64_t size);
+
+/*
+ * WHICH BYTES ARE INSTRUCTIONS UNTIL PROVED OTHERWISE - [va, va+size).
+ *
+ * THE RANGE HANDED TO kof_flow_add IS NOT ALL CODE, and on a real program
+ * most of it is not. KOF_SCAN_ELF_CODE is the loadable segment with PF_X,
+ * and a linker puts the symbol tables, the relocations, .rodata and the
+ * unwind tables in there beside .text. MEASURED on one 8 MB static ELF:
+ * the segment is 7.79 MB, .text is 4.75 MB, and the 3.04 MB either side of
+ * it - .dynsym, .dynstr, .gnu.hash, .rela.*, .rodata, .eh_frame - was being
+ * decoded as instructions, 39% of the sweep spent inventing basic blocks
+ * and loop spans out of string tables.
+ *
+ * So the caller says which parts the FORMAT calls executable, and the sweep
+ * treats the rest as RetDec's "alternative" ranges: never walked from end to
+ * end, and read only where something actually branches into them. A packer
+ * that jumps into its own data is still followed; a string table that
+ * nothing calls is no longer disassembled.
+ *
+ * DECLARING NOTHING MEANS THE WHOLE RANGE, which is what a stripped object
+ * with no section table gets. It cannot tell its instructions from its
+ * strings, guessing would lose code, and the old behaviour is the safe one.
+ */
+void kof_flow_primary(struct kof_flow *f, uint64_t va, uint64_t size);
 
 /*
  * Sweep one run of code. ONE CALL PER EXECUTABLE SECTION, and the caller makes

@@ -28,6 +28,8 @@
 #include "../libkofeng/databases/dbloader.h"
 #include "../libkofeng/analyzers/parsers/kofformat.h"
 #include "../libkoforbit/evt/kofevt.h"
+#include "../libkofeng/analyzers/parsers/binaries/disasm/flow.h"
+#include <kofmod/kofpathogen.h>
 #include "../libkoforbit/evt/kofevtfmt.h"
 #include "../libkoforbit/evt/kofevtlog.h"
 
@@ -953,5 +955,42 @@ uint32_t kof_inspect_plague(const struct kof_scanner *sc,
 uint32_t kof_declared_regions(const struct kof_scan_region *rgn, uint32_t n_rgn,
 			      uint32_t scan_mask, struct kof_range *out,
 			      uint32_t max_out);
+
+/*
+ * ONE CHAIN, WRITTEN OUT AS CODE.
+ *
+ * HERE AND NOT IN THE VIEWER, because turning a chain into something a
+ * person reads is not a terminal's business and both tools want it. It was
+ * seven hundred lines in the middle of kofviewer.c, reachable only from the
+ * pathogen dialog, so the examiner printed its own flat list of the same
+ * steps - two spellings of one chain, and the flat one was the wrong one.
+ *
+ * AND NOT IN THE ENGINE EITHER. Nothing here decides anything: it reads
+ * kof_flow_node and writes English. The engine's job ends at the node.
+ *
+ * NO COLOUR AND NO WIDTH. A row's note comes back beside its line rather
+ * than appended to it, because how a note is set off from the code - dimmed,
+ * bracketed, in a column of its own - is the caller's to choose, and an
+ * escape sequence baked in here would count against every caller's field
+ * width.
+ */
+struct kof_chain_line {
+	/*
+	 * THE SAME WIDTHS THE RENDERER BUILDS WITH, and not a width chosen
+	 * here. It composes into a 560-byte line and a 320-byte note, so
+	 * anything narrower would truncate the longest rows - and a line cut
+	 * short still looks like a line, which is the one failure a reader
+	 * cannot see is a failure. The compiler says so too: a narrower
+	 * `text` draws -Wformat-truncation on the copy.
+	 */
+	char text[560];         /* the statement, already indented */
+	char note[320];         /* how it was spelled; "" when it adds nothing */
+};
+
+/* Two rows of punctuation per step at the very most, plus the closing run. */
+#define KOF_CHAIN_LINES (3u * KOF_PTH_SYMPTOM_MAX + 8u)
+
+uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
+			  struct kof_chain_line *out, uint32_t cap);
 
 #endif /* KOFENG_KOFINSPECT_H */

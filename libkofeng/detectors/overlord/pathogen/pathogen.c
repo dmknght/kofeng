@@ -666,6 +666,43 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN)
 		kof_flow_entry(f, flow_va_of(ctx, ctx->entry_off));
 	/*
+	 * AND WHICH PARTS OF THE REGION ARE INSTRUCTIONS - see
+	 * kof_flow_primary.
+	 *
+	 * The region below is the loadable segment with PF_X, which holds
+	 * far more than code: on one 8 MB static ELF the segment is 7.79 MB
+	 * and .text is 4.75 MB, the rest being .dynsym, .dynstr, .gnu.hash,
+	 * the relocation tables, .rodata and the unwind tables. All of it
+	 * was being disassembled.
+	 *
+	 * Saying which sections the FORMAT calls executable does not skip
+	 * the others - a branch into .rodata is still followed, which is how
+	 * a packer that jumps into its own data stays visible. It only stops
+	 * the sweep walking them end to end when nothing points there.
+	 *
+	 * Declaring nothing leaves the whole region in play, which is what a
+	 * stripped object gets and is the old behaviour.
+	 */
+	if (ctx->format == KOF_FMT_ELF && kof_elf(ctx)) {
+		const struct kof_elf_info *e = kof_elf(ctx);
+
+		for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++)
+			if ((e->sec[i].flags & 0x4u) &&     /* SHF_EXECINSTR */
+			    e->sec[i].file_size)
+				kof_flow_primary(f,
+					flow_va_of(ctx, e->sec[i].file_off),
+					e->sec[i].file_size);
+	} else if (ctx->format == KOF_FMT_PE && kof_pe(ctx)) {
+		const struct kof_pe_info *pe = kof_pe(ctx);
+
+		for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++)
+			if ((pe->sec[i].perm & KOF_PE_PERM_X) &&
+			    pe->sec[i].file_size)
+				kof_flow_primary(f,
+					flow_va_of(ctx, pe->sec[i].file_off),
+					pe->sec[i].file_size);
+	}
+	/*
 	 * AND THE WHOLE RANGE, LIBRARY CODE INCLUDED - which was tried the
 	 * other way and measured badly.
 	 *

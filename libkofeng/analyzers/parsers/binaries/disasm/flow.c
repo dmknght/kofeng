@@ -678,7 +678,12 @@ static uint8_t prot_cap(const struct cmap *c, unsigned abi, unsigned bits,
  * it buys is that nothing has to be reachable to be seen.
  */
 
-#define MAX_LOOP 4096u
+/*
+ * The ceiling, and it is a DoS bound rather than a working limit - see
+ * add_loop, which grows into it. KOF_FLOW_MAX_CODE is 4 MB and a backward
+ * branch needs at least two bytes, so nothing honest comes near this.
+ */
+#define MAX_LOOP (1u << 18)
 
 struct loopspan { uint64_t lo, hi; };
 
@@ -697,8 +702,18 @@ struct kof_flow {
 	struct kof_flow_func *func;
 	uint32_t n_func;
 
-	struct loopspan loop[MAX_LOOP];
-	uint32_t n_loop;
+	/*
+	 * GROWN, NOT FIXED, because a ceiling here deleted evidence rather
+	 * than bounding cost. It was a 4096-entry array, and a 7.7 MB
+	 * static ELF filled it exactly - measured - after which every
+	 * further back edge was dropped AND `full` was set, which in turn
+	 * made prune_loops return at its first line and mark_arms give up.
+	 * The page for that file then had no `loop {`, no `if {` and no
+	 * `} else {` anywhere: one array's size had silently turned three
+	 * kinds of reasoning off.
+	 */
+	struct loopspan *loop;
+	uint32_t n_loop, cap_loop;
 
 	/*
 	 * THE BLOCK GRAPH, which is what turns "A is at a lower address than B"
@@ -825,6 +840,10 @@ struct kof_flow {
 
 	/* What a caller declared with kof_flow_head - see add_head_derived. */
 	struct { uint64_t lo, hi; } *decl;
+	/* And which of the range is executable by the format's own account -
+	 * see kof_flow_primary. Empty means "all of it". */
+	struct { uint64_t lo, hi; } *prim;
+	uint32_t n_prim, cap_prim;
 	uint32_t cap_func;
 	uint32_t n_decl;
 
@@ -881,6 +900,7 @@ struct kof_flow *kof_flow_new(void)
 			free(f->head);
 			free(f->func);
 			free(f->decl);
+		free(f->prim);
 			free(f);
 			return 0;
 		}
@@ -893,6 +913,7 @@ void kof_flow_free(struct kof_flow *f)
 {
 	if (f) {
 		free(f->edge);
+		free(f->loop);
 		free(f->blk);
 		free(f->blk_seen);
 		free(f->blk_q);
@@ -1148,6 +1169,27 @@ static void add_head(struct kof_flow *f, uint64_t va)
 	}
 }
 
+void kof_flow_primary(struct kof_flow *f, uint64_t va, uint64_t size)
+{
+	if (!f || f->finished || !size)
+		return;
+	if (f->n_prim >= f->cap_prim) {
+		uint32_t want = f->cap_prim ? f->cap_prim * 2u : 16u;
+		void *a;
+
+		if (want > 4096u)
+			return;
+		a = realloc(f->prim, (size_t)want * sizeof *f->prim);
+		if (!a)
+			return;
+		f->prim = a;
+		f->cap_prim = want;
+	}
+	f->prim[f->n_prim].lo = va;
+	f->prim[f->n_prim].hi = va + size;
+	f->n_prim++;
+}
+
 void kof_flow_head(struct kof_flow *f, uint64_t va, uint64_t size)
 {
 	if (!f || f->finished)
@@ -1178,13 +1220,31 @@ static void add_head_derived(struct kof_flow *f, uint64_t va)
 
 static void add_loop(struct kof_flow *f, uint64_t lo, uint64_t hi)
 {
-	if (f->n_loop < MAX_LOOP) {
-		f->loop[f->n_loop].lo = lo;
-		f->loop[f->n_loop].hi = hi;
-		f->n_loop++;
-	} else {
-		f->full = 1;
+	if (f->n_loop >= f->cap_loop) {
+		uint32_t want = f->cap_loop ? f->cap_loop * 2u : 1024u;
+		struct loopspan *a;
+
+		/* A real ceiling, against a file that is nothing but backward
+		 * branches - not a working limit. One span per 32 bytes of
+		 * the largest code range this reads is already far more than
+		 * any compiler emits. */
+		if (f->cap_loop >= MAX_LOOP) {
+			f->full = 1;
+			return;
+		}
+		if (want > MAX_LOOP)
+			want = MAX_LOOP;
+		a = (struct loopspan *)realloc(f->loop, (size_t)want * sizeof *a);
+		if (!a) {
+			f->full = 1;
+			return;
+		}
+		f->loop = a;
+		f->cap_loop = want;
 	}
+	f->loop[f->n_loop].lo = lo;
+	f->loop[f->n_loop].hi = hi;
+	f->n_loop++;
 }
 
 /*
@@ -1437,6 +1497,224 @@ static int thunk_cmp(const void *a, const void *b)
 }
 
 /*
+ * HOW THE SWEEP GETS AROUND THE CODE, and it is not a walk from one end to
+ * the other any more.
+ *
+ * IT USED TO BE. `at` started at 0 and ran to code_n, decoding every byte
+ * in the range whether or not anything could reach it - so a literal pool,
+ * a jump table, a page of zero padding and a section of real code all cost
+ * the same. That is why the range had to be capped at KOF_FLOW_MAX_CODE,
+ * and why a 7.7 MB program had half of itself thrown away with `full` set,
+ * which in turn switched off loop pruning, arm marking and exclusivity.
+ *
+ * NOW IT IS RETDEC'S: a worklist of places control is known to reach, and a
+ * record of which bytes have already been read.
+ *
+ *   - the worklist is seeded with the entry and whatever the caller
+ *     declared, and grows as branches and calls are decoded;
+ *   - decoding runs forward from a target until the block ENDS - a return,
+ *     an unconditional transfer, a call that does not come back - and then
+ *     the next target is pulled;
+ *   - every byte decoded is marked, so nothing is decoded twice and a
+ *     target already covered is dropped at once;
+ *   - only when the worklist is empty does the sweep fall back to the first
+ *     byte nothing reached, which is the one case that is still a linear
+ *     scan and is what RetDec calls LEFTOVER.
+ *
+ * AND LONG RUNS OF ZERO ARE STRUCK OUT BEFORE ANY OF IT, because they are
+ * alignment and never code - on x86 they decode as a stream of
+ * `add [rax], al`, each of which used to count as an instruction and so
+ * stretched the distance between two real steps across the padding between
+ * them.
+ *
+ * The mark array doubles as the step numbering, which is why it holds a
+ * code and not a bit - see SWEPT_*.
+ */
+#define SWEPT_NO    0u          /* not read */
+#define SWEPT_MORE  1u          /* inside an instruction already read */
+#define SWEPT_INSN  2u          /* an instruction starts here */
+#define SWEPT_NOP   3u          /* ...and it is a nop: no step of its own */
+#define SWEPT_PUSH  4u          /* ...and it is a push: a run counts once */
+
+static int cmp_stepwant(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+
+	return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+struct worklist {
+	uint32_t *at;
+	uint32_t  n, cap;
+	/*
+	 * ALREADY WAITING, as a mark per byte rather than a search of the
+	 * list. A loop body is branched to from every one of its tails, so
+	 * the same target is offered again and again; scanning the pending
+	 * list for each one was quadratic and measured 0.57s -> 1.08s on a
+	 * 7.7 MB program, which is the whole saving of not decoding the
+	 * file twice spent on bookkeeping.
+	 */
+	uint8_t  *queued;
+	/* Whether the last pop came from the list or from the leftover
+	 * scan - a guess is checked before it is believed. */
+	int       took_target;
+};
+
+static void wl_push(struct worklist *w, const uint8_t *swept, uint32_t off,
+		    uint32_t code_n)
+{
+	if (off >= code_n || swept[off] != SWEPT_NO)
+		return;
+	if (w->queued) {
+		if (w->queued[off])
+			return;
+		w->queued[off] = 1u;
+	}
+	if (w->n >= w->cap) {
+		uint32_t want = w->cap ? w->cap * 2u : 256u;
+		uint32_t *a;
+
+		if (want > (1u << 20))
+			return;         /* a bound on the pending list only */
+		a = (uint32_t *)realloc(w->at, (size_t)want * sizeof *a);
+		if (!a)
+			return;
+		w->at = a;
+		w->cap = want;
+	}
+	w->at[w->n++] = off;
+}
+
+/*
+ * LAST IN FIRST OUT, which is RetDec's priority without the queue.
+ *
+ * Its JumpTarget types rank control-flow discoveries above every other
+ * source and LEFTOVER below all of them - see jump_targets.h. Seeds are
+ * pushed before the sweep starts and discoveries during it, so taking the
+ * most recent gives the same order: the branch just read is followed before
+ * the symbol table's next entry, and the leftovers are reached only when
+ * nothing is pending.
+ */
+/*
+ * Is this byte one the format calls executable? With nothing declared the
+ * answer is yes for the whole range - see kof_flow_primary.
+ */
+static int in_primary(const struct kof_flow *f, uint64_t va)
+{
+	uint32_t i;
+
+	if (!f || !f->n_prim)
+		return 1;
+	for (i = 0; i < f->n_prim; i++)
+		if (va >= f->prim[i].lo && va < f->prim[i].hi)
+			return 1;
+	return 0;
+}
+
+/*
+ * WHERE A RUN STARTED AT `off` HAS TO STOP, which is the end of whatever
+ * the format called that byte.
+ *
+ * A straight line of instructions does not cross from .text into .rodata:
+ * the last instruction of a section is followed by data, and letting the
+ * decoder walk on turns the first bytes of a string table into opcodes and
+ * the section boundary into a basic block that spans both. RetDec bounds
+ * every run by its range's end for the same reason.
+ *
+ * With nothing declared the bound is the whole region, which is what a
+ * stripped object gets - see kof_flow_primary.
+ */
+static uint32_t run_end(const struct kof_flow *f, uint64_t code_va,
+			uint32_t code_n, uint32_t off)
+{
+	uint64_t va = code_va + off;
+	uint32_t i;
+
+	if (!f || !f->n_prim)
+		return code_n;
+	for (i = 0; i < f->n_prim; i++)
+		if (va >= f->prim[i].lo && va < f->prim[i].hi) {
+			uint64_t e = f->prim[i].hi - code_va;
+
+			return e < code_n ? (uint32_t)e : code_n;
+		}
+	/*
+	 * Outside everything the format called code - an "alternative"
+	 * range, reached only because something branched here. There is no
+	 * stated end, so the next declared section start is the bound.
+	 */
+	{
+		uint64_t best = code_va + code_n;
+
+		for (i = 0; i < f->n_prim; i++)
+			if (f->prim[i].lo > va && f->prim[i].lo < best)
+				best = f->prim[i].lo;
+		return (uint32_t)(best - code_va);
+	}
+}
+
+static int wl_pop(struct worklist *w, const uint8_t *swept, uint32_t code_n,
+		  uint32_t *scan, uint32_t *out, const struct kof_flow *f,
+		  uint64_t code_va)
+{
+	while (w->n) {
+		uint32_t off = w->at[--w->n];
+
+		if (w->queued && off < code_n)
+			w->queued[off] = 0;
+		if (off < code_n && swept[off] == SWEPT_NO) {
+			*out = off;
+			w->took_target = 1;
+			return 1;
+		}
+	}
+	/*
+	 * LEFTOVER: the first byte nothing reached - AND ONLY INSIDE WHAT
+	 * THE FORMAT CALLS CODE.
+	 *
+	 * This is RetDec's primary/alternative split, and it is the whole
+	 * reason the fallback is affordable. A target that lands in
+	 * .rodata is still followed, because something branched there; a
+	 * string table nobody branches into is never walked.
+	 *
+	 * `scan` only moves forward, so finding them all costs one pass
+	 * over the range in total rather than one per target.
+	 */
+	while (*scan < code_n &&
+	       (swept[*scan] != SWEPT_NO ||
+		!in_primary(f, code_va + *scan)))
+		(*scan)++;
+	if (*scan >= code_n)
+		return 0;
+	*out = *scan;
+	w->took_target = 0;
+	return 1;
+}
+
+/* Alignment, not code - see the note above. */
+static void strike_zero_runs(uint8_t *swept, const uint8_t *code,
+			     uint32_t code_n)
+{
+	uint32_t i = 0, run = 0;
+
+	for (i = 0; i <= code_n; i++) {
+		if (i < code_n && !code[i]) {
+			run++;
+			continue;
+		}
+		/* RetDec uses 0x50 and leaves a few bytes at each end, which
+		 * may belong to the instructions either side of the run. */
+		if (run >= 0x50u) {
+			uint32_t lo = i - run + 8u, hi = i > 8u ? i - 8u : 0u;
+
+			while (lo < hi)
+				swept[lo++] = SWEPT_MORE;
+		}
+		run = 0;
+	}
+}
+
+/*
  * EVERY BODY THAT IS NOTHING BUT A JUMP TO AN IMPORT, BY ITS ENTRY ADDRESS.
  *
  * The resolver is given the SLOT an import lives in, which is the right key
@@ -1457,29 +1735,138 @@ static int thunk_cmp(const void *a, const void *b)
  * two shapes recognised are the one above and the plain `jmp *[slot]` that a
  * non-relocatable build writes.
  */
-static void prescan(struct kof_flow *f, struct tset *t, struct tset *ct,
-		    const uint8_t *code, uint32_t code_n, uint64_t code_va,
-		    unsigned bits)
+/*
+ * IS THERE CODE AT ALL AT `off`, asked before anything is committed.
+ *
+ * A LEFTOVER target is a guess: nothing branched there, it is simply the
+ * next byte in a code section that the worklist did not reach. Most of the
+ * time it is a function nothing calls; sometimes it is a jump table, an
+ * alignment pattern or a literal pool, and disassembling that invents basic
+ * blocks and backward branches that become loops the program does not have.
+ *
+ * So the bytes are read once WITHOUT recording anything, and the run is
+ * taken only if it looks like a run. RetDec does the same and calls it a
+ * dry run; what counts as "looks like" is its own, and this is kofeng's:
+ *
+ *   - it has to END somewhere, in a return or a transfer. A straight line
+ *     that decodes to the section boundary and never branches is what data
+ *     does;
+ *   - it may not open with undecodable bytes;
+ *   - a run of nops at the start is alignment, and the code begins after
+ *     them rather than at them.
+ *
+ * Returns how many bytes to give up on: 0 to accept the target, or the
+ * length of the stretch that is not worth decoding.
+ */
+#define DRY_MAX_INSN 64u
+
+static uint32_t dry_run(const uint8_t *code, uint32_t at, uint32_t stop,
+			unsigned bits)
 {
-	uint32_t at = 0, treg = NGPR;
+	uint32_t p = at, nops = 0, seen = 0;
+
+	while (p < stop && seen < DRY_MAX_INSN) {
+		INSTRUX ix;
+
+		if (!ND_SUCCESS(NdDecodeEx(&ix, code + p, stop - p,
+					   bits == 32 ? ND_CODE_32
+						      : ND_CODE_64,
+					   bits == 32 ? ND_DATA_32
+						      : ND_DATA_64)))
+			return p > at ? p - at : 1u;
+		/* Alignment at the front: the code starts after it. */
+		if (!seen || nops) {
+			if (is_nop(&ix)) {
+				nops += ix.Length;
+				p += ix.Length;
+				seen++;
+				continue;
+			}
+			if (nops)
+				return nops;
+		}
+		if (ix.Instruction == ND_INS_RETN ||
+		    ix.Instruction == ND_INS_RETF ||
+		    ix.Instruction == ND_INS_JMPNR ||
+		    ix.Instruction == ND_INS_JMPNI ||
+		    ix.Instruction == ND_INS_CALLNR ||
+		    is_cond_jump(&ix))
+			return 0;               /* it goes somewhere: real */
+		p += ix.Length;
+		seen++;
+	}
+	/* Ran to the bound without ever leaving: not a body. */
+	return p > at ? p - at : 1u;
+}
+
+static void discover(struct kof_flow *f, struct tset *t, struct tset *ct,
+		     uint8_t *swept, const uint8_t *code, uint32_t code_n,
+		     uint64_t code_va, unsigned bits)
+{
+	uint32_t at = 0, treg = NGPR, scan = 0, i, stop = 0;
 	uint64_t tval = 0, tfrom = 0;
 	int want_thunk = f && f->resolve;
+	struct worklist wl;
 
-	if (!t && !want_thunk)
-		return;
-	while (at < code_n) {
+	memset(&wl, 0, sizeof wl);
+	wl.queued = (uint8_t *)calloc(code_n ? code_n : 1u, 1u);
+	strike_zero_runs(swept, code, code_n);
+	/* Lowest priority first, because the list is a stack - see wl_pop.
+	 * What the caller declared are the function starts the format gave
+	 * us, which is where RetDec takes its symbol seeds from. */
+	if (f)
+		for (i = 0; i < f->n_decl; i++)
+			if (f->decl[i].lo >= code_va &&
+			    f->decl[i].lo < code_va + code_n)
+				wl_push(&wl, swept,
+					(uint32_t)(f->decl[i].lo - code_va),
+					code_n);
+	wl_push(&wl, swept, 0, code_n);
+	while (wl_pop(&wl, swept, code_n, &scan, &at, f, code_va)) {
+	  treg = NGPR;
+	  tfrom = 0;
+	  stop = run_end(f, code_va, code_n, at);
+	  /*
+	   * ONLY A GUESS NEEDS CHECKING. A target something branched to is
+	   * code because the program says so; a leftover is the sweep's own
+	   * idea and has to earn it - see dry_run.
+	   */
+	  if (!wl.took_target) {
+		uint32_t skip = dry_run(code, at, stop, bits);
+
+		if (skip) {
+			uint32_t e = at + skip > stop ? stop : at + skip;
+
+			while (at < e)
+				swept[at++] = SWEPT_MORE;
+			continue;
+		}
+	  }
+	  while (at < stop && swept[at] == SWEPT_NO) {
 		INSTRUX ix;
 		uint64_t va = code_va + at, slot = 0;
 		uint32_t ans;
 
-		if (!ND_SUCCESS(NdDecodeEx(&ix, code + at, code_n - at,
+		if (!ND_SUCCESS(NdDecodeEx(&ix, code + at, stop - at,
 					   bits == 32 ? ND_CODE_32
 						      : ND_CODE_64,
 					   bits == 32 ? ND_DATA_32
 						      : ND_DATA_64))) {
+			swept[at] = SWEPT_MORE;
 			at++;
 			treg = NGPR;
 			continue;
+		}
+		{
+			uint32_t b, len = ix.Length;
+
+			if (len > code_n - at)
+				len = code_n - at;
+			swept[at] = is_nop(&ix) ? SWEPT_NOP
+				  : ix.Instruction == ND_INS_PUSH ? SWEPT_PUSH
+				  : SWEPT_INSN;
+			for (b = 1u; b < len; b++)
+				swept[at + b] = SWEPT_MORE;
 		}
 		/*
 		 * WHERE A DIRECT BRANCH CAN LAND.
@@ -1493,15 +1880,39 @@ static void prescan(struct kof_flow *f, struct tset *t, struct tset *ct,
 		 * cleaning up. A conditional branch to a `pop` is an ordinary
 		 * error path and must not be read as one.
 		 */
-		if (t && (ix.Instruction == ND_INS_JMPNR ||
-			  ix.Instruction == ND_INS_CALLNR ||
-			  is_cond_jump(&ix))) {
+		if (ix.Instruction == ND_INS_JMPNR ||
+		    ix.Instruction == ND_INS_CALLNR || is_cond_jump(&ix)) {
 			uint64_t tg = branch_target(&ix, va + ix.Length);
+			uint64_t nx = va + ix.Length;
 
+			/*
+			 * A CALL TO THE NEXT INSTRUCTION IS NOT A CALL.
+			 *
+			 * `call $+5 ; pop ebx` is how position-independent
+			 * code reads its own address - the call exists to
+			 * push the return address and the body it "reaches"
+			 * is the instruction after it, which the fall-through
+			 * already covers. Treating the target as a function
+			 * head declares a body at an address that is in the
+			 * middle of the one being decoded. A call landing
+			 * INSIDE itself is the same trick written the other
+			 * way round and is not a head either. Both are
+			 * RetDec's test - see getJumpTargetsFromInstruction.
+			 *
+			 * The idiom still matters and is still read: pc_thunk
+			 * and selfp recognise it where it means something.
+			 */
+			if (ix.Instruction == ND_INS_CALLNR &&
+			    (tg == nx || (tg > va && tg < nx)))
+				tg = 0;
 			if (tg >= code_va && tg < code_va + code_n) {
-				tset_put(t, tg);
+				if (t)
+					tset_put(t, tg);
 				if (ct && ix.Instruction == ND_INS_CALLNR)
 					tset_put(ct, tg);
+				/* Control reaches there, so this does. */
+				wl_push(&wl, swept,
+					(uint32_t)(tg - code_va), code_n);
 			}
 		}
 		if (want_thunk && ix.Instruction == ND_INS_JMPNI &&
@@ -1584,7 +1995,30 @@ static void prescan(struct kof_flow *f, struct tset *t, struct tset *ct,
 			}
 		}
 		at += ix.Length;
+		/*
+		 * AND THE RUN ENDS WHERE CONTROL LEAVES IT.
+		 *
+		 * A return or an unconditional transfer means the next
+		 * ADDRESS is not the next INSTRUCTION EXECUTED - whatever
+		 * follows may be a literal pool, another function's
+		 * prologue or nothing at all. A direct jump already pushed
+		 * where it goes; an indirect one goes somewhere this cannot
+		 * know, and guessing it is the next byte is how a linear
+		 * sweep walks into data. A conditional jump and a call both
+		 * continue, so neither ends the run.
+		 */
+		if (ix.Instruction == ND_INS_RETN ||
+		    ix.Instruction == ND_INS_RETF ||
+		    ix.Instruction == ND_INS_JMPNR ||
+		    ix.Instruction == ND_INS_JMPNI ||
+		    ix.Instruction == ND_INS_JMPFI ||
+		    ix.Instruction == ND_INS_IRET ||
+		    ix.Instruction == ND_INS_UD2)
+			break;
+	  }
 	}
+	free(wl.at);
+	free(wl.queued);
 	if (want_thunk && f->n_thunk > 1u)
 		qsort(f->thunk, f->n_thunk, sizeof *f->thunk, thunk_cmp);
 }
@@ -1636,7 +2070,7 @@ static uint32_t resolve_cap(struct kof_flow *f, uint64_t target)
  * Grown instead of sized, like the edges: small objects pay nothing.
  */
 #define FLOW_BLK_START 4096u
-#define FLOW_BLK_MAX   (1u << 17)
+#define FLOW_BLK_MAX   (1u << 20)
 
 static int blk_grow(struct kof_flow *f)
 {
@@ -1957,6 +2391,9 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	uint32_t n_jst = 0, cap_jst = 0;
 	int no_fall = 0;        /* the instruction just read cannot continue */
 	static int oldhash = -1;
+	/* Which bytes discover() found to be instructions, and what each one
+	 * was - see the note above wl_push. */
+	uint8_t *swept = NULL;
 
 	memset(&c, 0, sizeof c);
 	cur_blk = f ? blk_open(f, code_va) : 0u;
@@ -1975,12 +2412,45 @@ static uint32_t sweep(struct kof_flow *f, const uint8_t *code, uint32_t code_n,
 	 * It runs before anything is resolved, so that a call site reached
 	 * early in the sweep sees a thunk defined later in the section.
 	 */
-	prescan(f, t, ct, code, code_n, code_va, bits);
+	swept = (uint8_t *)calloc(code_n ? code_n : 1u, 1u);
+	if (!swept) {
+		free(t);
+		free(ct);
+		if (f)
+			f->full = 1;
+		return 0;
+	}
+	/*
+	 * STRUCTURE FIRST, MEANING SECOND, AND EACH BYTE READ ONCE IN EACH.
+	 *
+	 * discover() walks the code the way control does - see the note
+	 * above wl_push - and leaves behind which bytes are instructions,
+	 * where the branches land and which bodies are thunks. This pass
+	 * then walks those instructions IN ADDRESS ORDER and does the work
+	 * that needs meaning: the constant map, the provenance, the nodes.
+	 *
+	 * The two cannot be one pass, and the reason is `t`: a step needs to
+	 * know whether anything can JUMP to it before it decides what its
+	 * registers hold, and whether anything jumps to it is only settled
+	 * once every branch has been seen. That is the same reason RetDec
+	 * decodes before it analyses.
+	 *
+	 * What they are NOT is the old arrangement, which walked the whole
+	 * range twice before this loop walked it a third time.
+	 */
+	discover(f, t, ct, swept, code, code_n, code_va, bits);
 	/* Without it every fact still holds within a straight line; what is
 	 * lost is the clearing at a join, so the sweep is more credulous
 	 * rather than wrong in a new way. */
 
-	while (at < code_n && n < cap) {
+	while (n < cap) {
+		/* To the next byte discover() found an instruction at. The
+		 * gaps are what nothing reached, and they are not code. */
+		while (at < code_n && swept[at] != SWEPT_INSN &&
+		       swept[at] != SWEPT_NOP && swept[at] != SWEPT_PUSH)
+			at++;
+		if (at >= code_n)
+			break;
 		pflags = 0;
 		INSTRUX ix;
 		uint32_t i, dst = NGPR;
@@ -3430,10 +3900,96 @@ no_import:
 				forget(&c, gpr_of(&ix.Operands[i]));
 		at += ix.Length;
 	}
+	/*
+	 * AND THE STEP NUMBERS ARE TAKEN IN ADDRESS ORDER, NOT IN THE ORDER
+	 * THE SWEEP HAPPENED TO READ.
+	 *
+	 * `step` is a distance, and rules are written against it - how many
+	 * instructions lie between two capabilities. While the sweep ran
+	 * from one end of the range to the other the two orders were the
+	 * same thing, so counting as it went was free. A worklist reads a
+	 * called body before the instruction after the call, so counting as
+	 * it goes would make the distance depend on the TRAVERSAL, which is
+	 * the engine's business and not the program's.
+	 *
+	 * So the count is redone here over the marks the sweep left - which
+	 * record what each instruction was, exactly so this pass can apply
+	 * the same normalisation the sweep did: a nop is not a step, and a
+	 * run of pushes is one.
+	 *
+	 * Bytes nothing read are not counted at all, which is the other
+	 * half of the correction: a page of padding used to decode as a
+	 * stream of instructions and push the two steps either side of it
+	 * hundreds apart.
+	 */
+	{
+		/*
+		 * The addresses that want a number - this run's nodes and
+		 * the call sites inside it - gathered and sorted, so the
+		 * numbering is one walk of the range and not one per
+		 * address.
+		 */
+		uint32_t m = 0, k, cnt = n + (f ? f->n_edge : 0u);
+		struct stepwant { uint32_t off; uint32_t node; } *want;
+
+		want = cnt ? (struct stepwant *)malloc(cnt * sizeof *want)
+			   : NULL;
+		if (want) {
+			for (k = 0; k < n; k++)
+				if (out[k].va >= code_va &&
+				    out[k].va - code_va < code_n) {
+					want[m].off = (uint32_t)(out[k].va -
+								 code_va);
+					want[m].node = k;
+					m++;
+				}
+			if (f)
+				for (k = 0; k < f->n_edge; k++)
+					if (f->edge[k].site >= code_va &&
+					    f->edge[k].site - code_va < code_n) {
+						want[m].off = (uint32_t)
+						    (f->edge[k].site - code_va);
+						want[m].node = n + k;
+						m++;
+					}
+			qsort(want, m, sizeof *want, cmp_stepwant);
+		}
+		if (want) {
+			uint32_t off, st = 0, w = 0, push_run = 0;
+
+			for (off = 0; off < code_n && w < m; off++) {
+				if (swept[off] == SWEPT_NO ||
+				    swept[off] == SWEPT_MORE)
+					continue;
+				if (swept[off] == SWEPT_NOP) {
+					push_run = 0;
+				} else if (swept[off] == SWEPT_PUSH) {
+					if (!push_run)
+						st++;
+					push_run = 1;
+				} else {
+					st++;
+					push_run = 0;
+				}
+				while (w < m && want[w].off < off)
+					w++;
+				while (w < m && want[w].off == off) {
+					if (want[w].node < n)
+						out[want[w].node].step = st;
+					else if (f)
+						f->edge[want[w].node - n]
+							.site_step = st;
+					w++;
+				}
+			}
+			free(want);
+		}
+	}
 	free(t);
 	free(ct);
 	free(ok_at);
 	free(jst);
+	free(swept);
 	if (n >= cap)
 		if (f)
 			f->full = 1;
@@ -4360,14 +4916,111 @@ static uint32_t func_of(const struct kof_flow *f, uint64_t va)
 	return lo ? lo - 1u : 0u;
 }
 
-static int in_loop(const struct kof_flow *f, uint64_t va)
+static int cmp_loopspan(const void *a, const void *b)
 {
-	uint32_t i;
+	const struct loopspan *x = (const struct loopspan *)a;
+	const struct loopspan *y = (const struct loopspan *)b;
 
-	for (i = 0; i < f->n_loop; i++)
-		if (va >= f->loop[i].lo && va <= f->loop[i].hi)
-			return 1;
-	return 0;
+	if (x->lo != y->lo)
+		return x->lo < y->lo ? -1 : 1;
+	/* Outer before inner at the same start, so a stack of them nests. */
+	return x->hi > y->hi ? -1 : (x->hi < y->hi ? 1 : 0);
+}
+
+/*
+ * WHICH LOOP EACH STEP IS IN, ONCE, FOR THE WHOLE OBJECT.
+ *
+ * Three questions used to be asked of the span table per step: is this step
+ * in a loop at all (in_loop, from finish), which loop is it in (loop_of) and
+ * is one of them the step's own function's (loop_depth) - the last two once
+ * per step PER CHAIN, and every one of them a walk of the whole table. On a
+ * statically linked program that table has tens of thousands of rows and a
+ * chain is built for every function, so the same answer was recomputed
+ * thousands of times.
+ *
+ * None of it depends on the chain. It is a property of the step, so it is
+ * decided here and stored - see kof_flow_node.loop and .loop_own.
+ *
+ * A SWEEP RATHER THAN A SEARCH. The spans are sorted by start and the steps
+ * are walked in address order, so a span enters the active set when its
+ * start is passed and leaves when its end is. The active set is the nesting
+ * at that address, which is small, and the innermost is the shortest of
+ * them - the same rule the old loop_of used, because what identifies a step
+ * is the loop it is actually in and not whatever outer one also holds it.
+ */
+static void assign_loops(struct kof_flow *f)
+{
+	uint32_t *ord = NULL, *act = NULL;
+	uint32_t i, j, n_act = 0, k = 0;
+
+	for (i = 0; i < f->n_node; i++) {
+		f->node[i].loop = 0;
+		f->node[i].loop_own = 0;
+	}
+	if (!f->n_loop || !f->n_node)
+		return;
+	qsort(f->loop, f->n_loop, sizeof f->loop[0], cmp_loopspan);
+	ord = (uint32_t *)malloc((size_t)f->n_node * sizeof *ord);
+	act = (uint32_t *)malloc((size_t)f->n_loop * sizeof *act);
+	if (!ord || !act) {
+		/* Nothing is claimed rather than something guessed - every
+		 * step keeps loop 0, which reads as "not known to be in one". */
+		free(ord);
+		free(act);
+		f->full = 1;
+		return;
+	}
+	for (i = 0; i < f->n_node; i++)
+		ord[i] = i;
+	/* The nodes are not in address order yet - finish() sorts them by
+	 * function below - so the sweep walks an index instead of moving
+	 * them. Insertion order is nearly sorted already, which is why the
+	 * simple sort is the right one here. */
+	for (i = 1; i < f->n_node; i++) {
+		uint32_t t = ord[i];
+
+		for (j = i; j && f->node[ord[j - 1u]].va > f->node[t].va; j--)
+			ord[j] = ord[j - 1u];
+		ord[j] = t;
+	}
+	for (i = 0; i < f->n_node; i++) {
+		struct kof_flow_node *nd = &f->node[ord[i]];
+		uint64_t fn_lo = 0, fn_hi = UINT64_MAX;
+		uint32_t best = 0, w = 0;
+		uint64_t len = 0;
+
+		while (k < f->n_loop && f->loop[k].lo <= nd->va)
+			act[n_act++] = k++;
+		/* Whatever ended before this address is no longer nesting. */
+		for (j = 0; j < n_act; j++)
+			if (f->loop[act[j]].hi >= nd->va)
+				act[w++] = act[j];
+		n_act = w;
+		if (!n_act)
+			continue;
+		if (nd->func < f->n_func) {
+			fn_lo = f->func[nd->func].va;
+			fn_hi = nd->func + 1u < f->n_func
+			      ? f->func[nd->func + 1u].va : UINT64_MAX;
+		}
+		for (j = 0; j < n_act; j++) {
+			const struct loopspan *sp = &f->loop[act[j]];
+
+			if (sp->lo >= fn_lo && sp->hi < fn_hi)
+				nd->loop_own = 1u;
+			if (!best || sp->hi - sp->lo < len) {
+				best = act[j] + 1u;
+				len = sp->hi - sp->lo;
+			}
+		}
+		nd->flags |= KOF_FLOWF_LOOP;
+		/* The identity is an index into this object's spans; a file
+		 * with more than 65535 of them loses the identity and keeps
+		 * the flag, which is the weaker claim and not a wrong one. */
+		nd->loop = best <= 0xffffu ? (uint16_t)best : 0u;
+	}
+	free(ord);
+	free(act);
 }
 
 static int cmp_node(const void *a, const void *b)
@@ -4749,10 +5402,11 @@ static void finish(struct kof_flow *f)
 
 	for (i = 0; i < f->n_node; i++) {
 		f->node[i].func = func_of(f, f->node[i].va);
-		if (in_loop(f, f->node[i].va))
-			f->node[i].flags |= KOF_FLOWF_LOOP;
 		f->node[i].repeat = 1u;
 	}
+	/* After func_of, because whether a loop is the step's OWN wants the
+	 * function it belongs to. */
+	assign_loops(f);
 	/* Grouped so a region is a slice and not a search. */
 	qsort(f->node, f->n_node, sizeof f->node[0], cmp_node);
 	for (i = 0; i < f->n_node; i = k) {
@@ -4865,49 +5519,6 @@ static uint8_t rel_va(struct kof_flow *f, uint64_t a, uint64_t b);
  * one span containing every address between, and that is not a loop around
  * this step.
  */
-/*
- * BOTH LOOP QUESTIONS IN ONE SCAN OF f->loop.
- *
- * Building a chain asked two things of every step: WHICH loop encloses it
- * (loop_of, so two steps can be said to repeat together) and WHETHER one of
- * the enclosing loops belongs to the step's own function (the nesting that
- * goes into depth). Each walked the whole loop table, and the emit path
- * asked the first one four times for the same address - five linear scans
- * per step, over a table that on a statically linked binary has thousands of
- * rows. Measured: it was the whole cost of opening such a file.
- *
- * The two answers come off the same walk, so there is one.
- *
- * `inner` is the innermost span holding the address, as index plus one, or
- * 0 - innermost, because two steps in the same inner loop are the same step
- * repeated while two in the same outer loop may be a sequence that happens
- * to run twice. The spans are intervals - see add_loop - so the shortest one
- * containing the address is the innermost.
- *
- * `own` is whether any of them lies wholly within [fn_lo, fn_hi).
- */
-static void loop_at(const struct kof_flow *f, uint64_t va, uint64_t fn_lo,
-		    uint64_t fn_hi, uint32_t *inner, uint8_t *own)
-{
-	uint32_t i, best = 0;
-	uint64_t len = 0;
-	uint8_t mine = 0;
-
-	for (i = 0; i < f->n_loop; i++) {
-		if (va < f->loop[i].lo || va > f->loop[i].hi)
-			continue;
-		if (f->loop[i].lo >= fn_lo && f->loop[i].hi < fn_hi)
-			mine = 1u;
-		if (!best || f->loop[i].hi - f->loop[i].lo < len) {
-			best = i + 1u;
-			len = f->loop[i].hi - f->loop[i].lo;
-		}
-	}
-	if (inner)
-		*inner = best;
-	if (own)
-		*own = mine;
-}
 
 /* State carried down the walk, so the recursion stays a few words wide. */
 struct chain {
@@ -5008,10 +5619,9 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 
 	for (j = 0; j < fn->n && ch->n < ch->cap; j++) {
 		const struct kof_flow_node *nd = &ch->f->node[fn->first + j];
-		uint64_t fn_hi = fi + 1u < ch->f->n_func
-			       ? ch->f->func[fi + 1u].va : UINT64_MAX;
-		uint32_t cur_loop = 0;
-		uint8_t cur_own = 0;
+		/* Both decided when the node was made - see assign_loops. */
+		uint32_t cur_loop = nd->loop;
+		uint8_t cur_own = nd->loop_own;
 
 		/* A thunk nobody called, or whose callers disagreed - see
 		 * KOF_FLOW_SEL_PENDING. It is a syscall that happened; what
@@ -5027,12 +5637,6 @@ static void chain_walk(struct chain *ch, uint32_t fi, uint32_t depth)
 		if (nd->cap == KOF_CAP_NAME_HASH &&
 		    !(nd->flags & KOF_FLOWF_LOOP))
 			continue;
-		/* After the skips, so a step that is dropped pays nothing,
-		 * and before the merge test, which is its first reader. */
-		loop_at(ch->f, nd->va, fn->va, fn_hi,
-			(nd->flags & KOF_FLOWF_LOOP) ? &cur_loop : NULL,
-			&cur_own);
-
 		/* Everything called BEFORE this node belongs before it. */
 		while (depth && e < ch->f->n_edge &&
 		       ch->f->edge[e].from_func == fi &&

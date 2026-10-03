@@ -143,9 +143,9 @@ const struct sysrow kof_sys32[] = {
  * key nothing else uses. */
 const struct sysrow kof_sockcall[] = {
 	{  1, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket" },
-	{  2, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind" },
+	{  2, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind" },
 	{  3, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect" },
-	{  4, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen" },
+	{  4, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen" },
 	{  5, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept" },
 	{  9, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send" },
 	{ 10, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recv" },
@@ -208,8 +208,8 @@ names[] = {
 	{ "connect",        KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "accept",         KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
 	{ "accept4",        KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
-	{ "bind",           KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "listen",         KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "bind",           KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE },
+	{ "listen",         KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE },
 	{ "recv",           KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
 	{ "recvfrom",       KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
 	{ "recvmsg",        KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
@@ -319,14 +319,14 @@ names[] = {
 	{ "ResumeThread",   KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	/* The loader pair, which is what a program has INSTEAD of an import
 	 * table entry - see KOF_CAP_RESOLVE. */
-	{ "LoadLibraryA",   KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "LoadLibraryW",   KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "LoadLibraryExA", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "LoadLibraryExW", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryA",   KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryW",   KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryExA", KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryExW", KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "GetProcAddress", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "LdrLoadDll",     KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "LdrLoadDll",     KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "LdrGetProcedureAddress", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "dlopen",         KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "dlopen",         KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "dlsym",          KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
 	/* Writes only; a program reading its own configuration is every
 	 * program - see KOF_CAP_REG_SET. */
@@ -355,10 +355,10 @@ names[] = {
 	{ "inet_pton",      KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
 	{ "inet_ntoa",      KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
 	{ "inet_network",   KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "gethostbyname",  KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "getaddrinfo",    KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "gethostbyname",  KOF_CAP_DNS, KOF_FLOW_ROLE_NONE },
+	{ "getaddrinfo",    KOF_CAP_DNS, KOF_FLOW_ROLE_NONE },
 	{ "prctl",          KOF_CAP_SELF_HIDE, KOF_FLOW_ROLE_NONE },
-	{ "setsid",         KOF_CAP_SELF_HIDE, KOF_FLOW_ROLE_NONE },
+	{ "setsid",         KOF_CAP_BACKGROUND, KOF_FLOW_ROLE_NONE },
 
 	/*
 	 * THE KERNEL, which is the same kind of table and a different side of
@@ -825,6 +825,8 @@ const char *kof_flow_cap_name(uint8_t cap)
 	case KOF_CAP_NET_OPEN:     return "net-open";
 	case KOF_CAP_NET_CONNECT:  return "net-connect";
 	case KOF_CAP_NET_ACCEPT:   return "net-accept";
+	case KOF_CAP_NET_BIND:     return "net-bind";
+	case KOF_CAP_NET_LISTEN:   return "net-listen";
 	case KOF_CAP_READ:         return "read";
 	case KOF_CAP_WRITE:        return "write";
 	case KOF_CAP_FILE_OPEN:    return "file-open";
@@ -837,7 +839,9 @@ const char *kof_flow_cap_name(uint8_t cap)
 	case KOF_CAP_PTRACE:       return "ptrace";
 	case KOF_CAP_PROC_MEM:     return "proc-mem";
 	case KOF_CAP_PROC_EXEC:    return "proc-exec";
-	case KOF_CAP_RESOLVE:      return "resolve";
+	case KOF_CAP_RESOLVE:      return "lib-resolve";
+	case KOF_CAP_LIB_OPEN:     return "lib-open";
+	case KOF_CAP_DNS:          return "dns";
 	case KOF_CAP_REG_SET:      return "reg-set";
 	case KOF_CAP_CRED_SET:     return "cred-set";
 	case KOF_CAP_HOOK:         return "hook";
@@ -845,6 +849,7 @@ const char *kof_flow_cap_name(uint8_t cap)
 	case KOF_CAP_PROT_OFF:     return "prot-off";
 	case KOF_CAP_NET_ADDR:     return "net-addr";
 	case KOF_CAP_SELF_HIDE:    return "self-hide";
+	case KOF_CAP_BACKGROUND:   return "run-background";
 	default:                   return "?";
 	}
 }
@@ -862,8 +867,8 @@ const struct sysrow kof_sys_a64[] = {
 	{ 101, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
 	{ 117, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
 	{ 198, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 200, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 201, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 200, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 201, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
 	{ 202, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
 	{ 203, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
 	{ 206, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
@@ -900,9 +905,9 @@ const struct sysrow kof_sys_arm[] = {
 	{ 190, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "vfork"  },
 	{ 192, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap2"  },
 	{ 281, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 282, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 282, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
 	{ 283, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 284, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 284, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
 	{ 285, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
 	{ 289, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
 	{ 290, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
@@ -933,9 +938,9 @@ const struct sysrow kof_sys_mips[] = {
 	{ 4125, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
 	{ 4166, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
 	{ 4168, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 4169, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 4169, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
 	{ 4170, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 4174, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 4174, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
 	{ 4175, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
 	{ 4176, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
 	{ 4178, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
@@ -962,9 +967,9 @@ const struct sysrow kof_sys_mips[] = {
  */
 const struct sysrow kof_sys_ppc[] = {
 	{ 326, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 327, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 327, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
 	{ 328, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 329, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 329, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
 	{ 330, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
 	{ 334, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
 	{ 335, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
@@ -994,9 +999,9 @@ const struct sysrow kof_sys_sparc[] = {
 	{ 207, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
 	{ 232, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
 	{ 233, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{ 234, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 234, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
 	{ 235, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 240, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 240, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
 	{ 284, KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE, "clone"  }
 };
 
@@ -1030,8 +1035,8 @@ const struct sysrow kof_sys_mips64[] = {
 	{ 5041, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
 	{ 5042, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
 	{ 5293, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept4"  },
-	{ 5048, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 5049, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 5048, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 5049, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
 	{ 5043, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
 	{ 5044, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
 	{ 5045, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendmsg"  },

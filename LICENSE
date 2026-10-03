@@ -94,7 +94,21 @@ should be able to find where it came from.
     ClamAV (GPL-2.0)                the NRV2B/D/E codings
     Unlicense (GPL-3.0)             what an import table rebuild has to do
     Unipacker (GPL-2.0)             section hopping and write-then-execute
-    RetDec (MIT)                    MPRESS's build table and fix stub
+    RetDec (MIT)                    MPRESS's build table and fix stub, and
+                                    separately its DECODER: candidate bytes
+                                    tiered by section, a worklist of jump
+                                    targets, each byte read once, a dry run
+                                    before a guessed target is believed, and
+                                    bounding the input instead of capping the
+                                    results
+    Capstone (BSD-3-Clause, with    evaluated as a replacement for this
+      LLVM-derived files under      engine's fixed-width decoders and NOT
+      the NCSA licence)             used: +31 MB of binary against 2.8 MB
+                                    today, its DIET build strips the very
+                                    detail that made it worth having, and it
+                                    does not cover MicroBlaze, CRIS or
+                                    OpenRISC so the hand-written path stays
+                                    either way
     Unpacker (MIT)                  the routing rule that named the above
     VMPStatic (MIT)                 VMProtect's PACKER_INFO and key schedule
     XVolkolak / XEmulUnpacker (MIT) nSpDelta, and the per-packer hand-over tails

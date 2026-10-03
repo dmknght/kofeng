@@ -41,6 +41,38 @@ enum kof_flow_cap {
 	KOF_CAP_NET_OPEN,     /* socket */
 	KOF_CAP_NET_CONNECT,
 	KOF_CAP_NET_ACCEPT,
+	/*
+	 * TAKING AN ADDRESS ON THIS MACHINE - bind.
+	 *
+	 * SPLIT OUT OF KOF_CAP_NET_OPEN, which said `net-open` over
+	 * `bind()` and meant nothing of the sort. Opening a socket makes an
+	 * endpoint; binding one chooses WHERE ON THIS HOST it answers.
+	 */
+	KOF_CAP_NET_BIND,
+	/*
+	 * AND WAITING TO BE CALLED - listen.
+	 *
+	 * SEPARATE FROM BIND, and the signatures are the argument:
+	 *
+	 *     bind(fd, struct sockaddr *addr, socklen_t len)
+	 *     listen(fd, int backlog)
+	 *
+	 * bind carries an ADDRESS and listen carries only how deep the
+	 * queue is. A bind on its own is a datagram socket picking its
+	 * source port, or a client choosing which interface it goes out of
+	 * - neither of them a service. listen is the one that says this
+	 * program is waiting to be reached, and that is the fact worth its
+	 * own word: a bot that connects out and a bot that waits are two
+	 * shapes, and `net-open, net-bind, net-listen, net-accept` says
+	 * which one this is at every step.
+	 *
+	 * They were ONE word here for a revision, on the argument that a
+	 * listen always follows a bind so the pair is one act. The
+	 * arguments say otherwise - the reverse does not hold, and the
+	 * half that does not hold is exactly the one a rule needs to tell
+	 * apart.
+	 */
+	KOF_CAP_NET_LISTEN,
 	KOF_CAP_READ,         /* read/recvfrom */
 	KOF_CAP_WRITE,        /* write/sendto */
 	KOF_CAP_FILE_OPEN,
@@ -104,6 +136,35 @@ enum kof_flow_cap {
 	 * this tree turned out to need.
 	 */
 	KOF_CAP_RESOLVE,
+	/*
+	 * LOADING A LIBRARY - LoadLibrary, LdrLoadDll, dlopen.
+	 *
+	 * SPLIT OUT OF KOF_CAP_RESOLVE, which covered both halves of the
+	 * same two-step and could say neither. Loading a library BRINGS CODE
+	 * IN; resolving a symbol finds an address in code already there.
+	 * They are ordered - the load comes first and the lookup needs it -
+	 * and a chain that writes them with one word cannot show the order
+	 * or the link between them. `lib-open` then `lib-resolve`, with the
+	 * handle carrying the edge, is what the program did.
+	 */
+	KOF_CAP_LIB_OPEN,
+	/*
+	 * TURNING A NAME INTO AN ADDRESS ON THE NETWORK - gethostbyname,
+	 * getaddrinfo.
+	 *
+	 * ALSO SPLIT OUT OF KOF_CAP_RESOLVE, and this one was the worst of
+	 * the three: a DNS lookup and a GetProcAddress have nothing in
+	 * common but the English word, and the chain printed `resolve` in
+	 * the middle of a socket sequence where it meant a domain name.
+	 *
+	 * AND IT IS NOT KOF_CAP_NET_ADDR either, which is the family it sits
+	 * in. NET_ADDR is a program BUILDING an address it already knows -
+	 * inet_addr, htons - and this is a program ASKING for one it does
+	 * not. That is the difference between a hardcoded C2 and a domain,
+	 * which is the difference between a sample that dies with its IP and
+	 * one whose operator can move it.
+	 */
+	KOF_CAP_DNS,
 	/*
 	 * WRITING TO THE REGISTRY - RegSetValueEx and the key creation that
 	 * precedes it. Reads are deliberately not here: a program reading its
@@ -208,15 +269,47 @@ enum kof_flow_cap {
 	 */
 	KOF_CAP_NET_ADDR,
 	/*
-	 * A PROCESS CHANGING WHAT IT LOOKS LIKE - prctl, setsid.
+	 * A PROCESS CHANGING WHAT IT LOOKS LIKE - prctl.
 	 *
-	 * 15.4% of ELF malware against 1.20% of clean, which is 13x and the
-	 * best of the non-network rows. prctl(PR_SET_NAME) is how a bot
-	 * renames itself in the process table; setsid is how it leaves the
-	 * terminal that started it. Both are things ordinary daemons also do,
-	 * which the rate says plainly - this is a term and not a verdict.
+	 * prctl(PR_SET_NAME) is how a bot renames itself in the process
+	 * table. Ordinary software does it too, which is why this is a term
+	 * and not a verdict.
+	 *
+	 * setsid USED TO BE HERE AND IS NOT A DISGUISE. It leaves the
+	 * controlling terminal, which is the first thing in every daemon
+	 * ever written - the word claimed an intent the call does not carry.
+	 * It is KOF_CAP_BACKGROUND now.
+	 *
+	 * AND THE RATE THAT WAS QUOTED HERE WAS FOR BOTH OF THEM: 15.4% of
+	 * ELF malware against 1.20% of clean, measured over the pair. It is
+	 * not this row's rate and is not repeated as one - neither half has
+	 * been measured alone, and the weight both carry is the parent's
+	 * until one is. Same rule the THREAD/NET_RAW split kept.
+	 *
+	 * NOT REFINED BY THE OPTION, which is this row's real weakness. A
+	 * name resolves to a capability before any argument is read - see
+	 * the resolver in pathogen.c - so PR_SET_NAME and PR_SET_DUMPABLE
+	 * and PR_CAPBSET_DROP all arrive as the same word. Reported rather
+	 * than guessed at.
 	 */
 	KOF_CAP_SELF_HIDE,
+	/*
+	 * A PROCESS PUTTING ITSELF IN THE BACKGROUND - setsid.
+	 *
+	 * SPLIT OUT OF KOF_CAP_SELF_HIDE, where it was the wrong word.
+	 * setsid leaves the controlling terminal, so the program keeps
+	 * running when the shell or the ssh session that started it closes.
+	 * That is what every daemon does and what a payload does when it
+	 * means to still be there tomorrow. It is not a disguise, and
+	 * "self-hide" put an intent in the chain that the evidence does not
+	 * hold.
+	 *
+	 * NEAR fork, NOT near prctl - see family() in diagnose.c. Forking
+	 * and detaching are the same move for a program that wants to go on
+	 * running without the thing that started it, which is why a variant
+	 * that does one where another did the other is the same program.
+	 */
+	KOF_CAP_BACKGROUND,
 	/*
 	 * CONTROL LEAVING THROUGH A REGISTER, INTO MEMORY THIS PROGRAM MADE
 	 * EXECUTABLE.

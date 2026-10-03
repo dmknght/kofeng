@@ -237,6 +237,75 @@ the declared size is what ends the decode.
 No code is reproduced: the decoder is C against this engine's interface, and
 the bounds are its own.
 
+AND SEPARATELY, ITS DECODER - which is a debt of a different size, because it
+is not one format's details but the shape of how this engine reads code at
+all. `src/bin2llvmir/optimizations/decoder/`.
+
+The sweep used to run from one end of a region to the other, decoding every
+byte whether or not anything could reach it. RetDec does not, and the five
+things it does instead are now what kofeng does:
+
+  - CANDIDATE BYTES COME FROM SECTIONS, IN TWO TIERS. Executable sections are
+    "primary" and everything else in the segment is "alternative": the second
+    is read only where control actually branches into it, never walked end to
+    end. Measured here on an 8 MB static ELF: the PF_X segment is 7.79 MB and
+    `.text` is 4.75 MB, so 3.04 MB of symbol tables, relocations, `.rodata`
+    and unwind data was being disassembled - 39% of the work, producing
+    nothing but phantom blocks and loop spans. See `kof_flow_primary`.
+  - A WORKLIST OF JUMP TARGETS, not a cursor. Seeded from the entry and the
+    function starts the format declares, grown as branches are decoded, and
+    control-flow discoveries taken before anything else - RetDec ranks them
+    that way in `JumpTarget::eType` and a stack gives the same order.
+  - EVERY BYTE READ ONCE. A decoded stretch is struck off the pending set, so
+    a target already covered is dropped at once and the linear scan is the
+    LAST resort rather than the method - what RetDec calls LEFTOVER, and it
+    only ever covers primary ranges.
+  - A DRY RUN BEFORE A GUESS IS BELIEVED. A leftover target is the sweep's own
+    idea, so the bytes are read once recording nothing and the run is taken
+    only if it ends in a return or a transfer. What counts as plausible is
+    kofeng's own - RetDec's x86 test is built around `mov eax,1; int 0x80`
+    and this engine already answers that question better with
+    `kof_sys_noreturn`.
+  - RUNS OF ZERO STRUCK OUT FIRST. Alignment is not code, and on x86 it
+    decodes to a stream of `add [rax], al` - each of which counted as an
+    instruction and so stretched the distance between the two real steps
+    either side of it.
+
+AND THE BOUNDS ARE THE POINT OF IT. RetDec's decoder has no MAX_BLOCK, no
+MAX_NODE, no MAX_LOOP and no cap on the code size; what it bounds is WHICH
+BYTES ARE CANDIDATES, and the results then grow to fit. kofeng had it the
+other way round - every byte a candidate, every result capped - and the
+measured cost of that was a 4096-entry loop table that a single file filled
+exactly, throwing away 11806 further loops and setting the flag that switches
+off loop pruning and branch-arm marking for the whole object.
+
+No code is reproduced from any of it. The traversal is C against this
+engine's own structures, the per-architecture decoding is unchanged, and
+where RetDec's rules are about producing a decompilation rather than reading
+capabilities they are deliberately not followed.
+
+### Capstone — BSD-3-Clause, with LLVM-derived files under the NCSA licence
+
+`github.com/capstone-engine/capstone`. EVALUATED AND NOT USED, recorded here
+because the evaluation is a decision a reader will otherwise re-make.
+
+It answers exactly the three questions this engine's hand-written fixed-width
+decoders answer - `CS_GRP_JUMP`/`CALL`/`RET` for the branch class,
+`cs_regs_access()` for the registers an instruction touches, and the operand
+detail for the immediate - and it does so for ten architectures where kofeng
+has 624 lines of its own. Capstone 6 also covers ARC and Xtensa, two of the
+five this engine still cannot read.
+
+Measured against it: linking the ten non-x86 architectures costs 31 MB of
+binary, where kofscanner is 2.8 MB today. `CAPSTONE_DIET` brings that to
+240 KB and was tested - it strips the detail, so groups come back empty and
+`cs_regs_access` fails, which removes the whole reason to want it. It also
+does not cover MicroBlaze, CRIS or OpenRISC, so it would not retire the
+hand-written path.
+
+So: no dependency, and the gaps are closed by completing this engine's own
+decoders. Nothing is reproduced from Capstone.
+
 ### Unpacker — MIT
 
 `github.com/anpa1200/Unpacker` is a detection and routing front end that

@@ -18,6 +18,10 @@ uint8_t kof_diag_weight(uint8_t cap)
 	case KOF_CAP_SPAWN:                            /*  6.19% */
 	case KOF_CAP_ALLOC:                            /*  5.29% */
 	case KOF_CAP_NET_OPEN:                         /*  3.52% */
+	/* Split out of NET_OPEN, keeping its weight until measured - the
+	 * same rule THREAD and NET_RAW were split under. */
+	case KOF_CAP_NET_BIND:                         /*  not measured */
+	case KOF_CAP_NET_LISTEN:                       /*  not measured */
 	case KOF_CAP_PTRACE:                           /*  2.38% */
 	case KOF_CAP_NET_CONNECT:                      /*  1.76% */
 	case KOF_CAP_NET_ACCEPT:                       /*  1.07% */
@@ -49,6 +53,9 @@ uint8_t kof_diag_weight(uint8_t cap)
 	case KOF_CAP_PROC_MEM:                         /*  not measured */
 	case KOF_CAP_PROC_EXEC:                        /*  not measured */
 	case KOF_CAP_RESOLVE:                          /*  not measured */
+	/* Split out of RESOLVE and carrying its weight - see the note on
+	 * KOF_CAP_LIB_OPEN. Neither half has a rate of its own yet. */
+	case KOF_CAP_LIB_OPEN:                         /*  not measured */
 	case KOF_CAP_REG_SET:                          /*  not measured */
 	/*
 	 * AND THE THREE READ FROM INSTRUCTIONS RATHER THAN FROM NAMES, which
@@ -179,7 +186,14 @@ uint8_t kof_diag_weight(uint8_t cap)
 	case KOF_CAP_NET_READ:                         /*  not measured */
 	case KOF_CAP_NET_WRITE:                        /*  not measured */
 	case KOF_CAP_NET_ADDR:                         /* 14.0% of 1260 */
-	case KOF_CAP_SELF_HIDE:                        /* 18.7% of 1260 */
+	/* The 18.7% below was measured over prctl AND setsid together, so
+	 * it is the pair's rate and not either one's - see the note on
+	 * KOF_CAP_BACKGROUND. Both keep it until one of them is measured. */
+	case KOF_CAP_SELF_HIDE:                        /* 18.7%, of the pair */
+	case KOF_CAP_BACKGROUND:                       /* 18.7%, of the pair */
+	/* Asking for an address rather than building one - split out of
+	 * RESOLVE, which was never measured either. */
+	case KOF_CAP_DNS:                              /*  not measured */
 		return KOF_DIAG_W_ORDINARY;
 	default:
 		return 0;
@@ -213,6 +227,11 @@ static uint8_t family(uint8_t cap)
 	case KOF_CAP_NET_OPEN:
 	case KOF_CAP_NET_CONNECT:
 	case KOF_CAP_NET_ACCEPT:
+	/* Waiting to be reached instead of reaching out is the same program
+	 * with its direction reversed - a bind/listen bot and a connect-back
+	 * bot are variants of one another, which is what this family is for.
+	 * They are still DIFFERENT WORDS, so a rule that cares can insist. */
+	case KOF_CAP_NET_LISTEN:
 	/* A raw socket is still a socket: a variant that opens one where
 	 * another opened a stream is doing the same thing one step rougher. */
 	case KOF_CAP_NET_RAW:
@@ -220,6 +239,9 @@ static uint8_t family(uint8_t cap)
 	 * and a variant that hardcodes where another resolved is the same
 	 * move - so it belongs with the network family. */
 	case KOF_CAP_NET_ADDR:
+	/* Asking a resolver for the address and writing it in by hand are
+	 * the same step done two ways - see KOF_CAP_DNS. */
+	case KOF_CAP_DNS:
 		return 2;
 	case KOF_CAP_READ:
 	case KOF_CAP_WRITE:
@@ -241,6 +263,10 @@ static uint8_t family(uint8_t cap)
 	 * move for a program that wants a second thing running. */
 	case KOF_CAP_SPAWN:
 	case KOF_CAP_THREAD:
+	/* And going into the background is the third way of saying it: the
+	 * program means to go on running without whatever started it - see
+	 * KOF_CAP_BACKGROUND. */
+	case KOF_CAP_BACKGROUND:
 		return 4;
 	/* A fifth: the three ways of reaching into another process are each
 	 * other's near neighbours, and a variant that queues an APC where
