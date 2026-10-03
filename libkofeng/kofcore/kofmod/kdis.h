@@ -96,8 +96,45 @@ enum kdis_op_class {
 	KDIS_INT, KDIS_CMOV, KDIS_SETCC,
 	KDIS_FPU,               /* any x87 - junk engines are fond of them */
 	KDIS_STRING,            /* MOVS/STOS/LODS/SCAS/CMPS */
-	KDIS_PRIV               /* something a user mode program should not run */
+	KDIS_PRIV,              /* something a user mode program should not run */
+
+	/*
+	 * ADDED WHEN THIS BECAME THE ENGINE'S ONE INTERNAL FORM.
+	 *
+	 * The sweep used to read a decoder's own structure - bddisasm's
+	 * INSTRUX on x86, hand-written bit tests everywhere else - so the
+	 * same question was answered four times in four spellings and a
+	 * new architecture meant another copy. These are the classes it
+	 * distinguishes that the list above did not carry.
+	 *
+	 * AT THE END, because a stored rule carries these numbers.
+	 */
+	KDIS_SYSCALL,           /* syscall/sysenter; INT stays its own */
+	KDIS_WIDEN,             /* CBW/CWDE/CDQE and the like: same value */
+	KDIS_MOV_SPECIAL,       /* a control or system register */
+	KDIS_IRET,
+	KDIS_UD,                /* an instruction that is defined to fault */
+	KDIS_OP_COUNT
 };
+
+/* ---- WHAT A DECODER COULD NOT SAY -------------------------------------- */
+/*
+ * `kdis_insn.flags`
+ *
+ * FAR separates `retf` from `ret` and `jmp far` from `jmp`, which matters
+ * because a far branch leaves the model the sweep is keeping.
+ */
+#define KDIS_F_FAR      (1u << 0)
+/* The branch is indirect: through a register or through memory. */
+#define KDIS_F_INDIRECT (1u << 1)
+/* A repeated string operation. */
+#define KDIS_F_REP      (1u << 2)
+
+/* `kdis_operand.flags` */
+#define KDIS_OF_WRITE   (1u << 0)
+#define KDIS_OF_READ    (1u << 1)
+/* The memory operand is relative to the instruction pointer. */
+#define KDIS_OF_RIPREL  (1u << 2)
 
 /* ---- OPERAND KINDS ------------------------------------------------------ */
 enum kdis_op_kind {
@@ -129,7 +166,9 @@ struct kdis_operand {
 	uint8_t  index;         /* MEM index, or KDIS_REG_NONE */
 	uint8_t  scale;         /* 1, 2, 4, 8 */
 	uint8_t  size;          /* access width in bytes */
-	uint8_t  _pad[3];
+	uint8_t  flags;         /* KDIS_OF_* */
+	uint8_t  seg;           /* segment register, or KDIS_REG_NONE */
+	uint8_t  _pad;
 	int64_t  disp;          /* MEM displacement */
 	uint64_t imm;           /* IMM value, zero extended */
 };
@@ -147,7 +186,23 @@ struct kdis_insn {
 	uint8_t  len;
 	uint8_t  n_op;
 	uint8_t  cond;          /* the condition code of a JCC/CMOV/SETCC */
-	uint32_t _pad;
+	uint8_t  flags;         /* KDIS_F_* */
+	uint8_t  _pad[3];
+	/*
+	 * EVERY REGISTER THIS INSTRUCTION WRITES, one bit each.
+	 *
+	 * Including the ones it does not name: `mul` writes the pair
+	 * above its operand, `push` moves the stack pointer, a string
+	 * operation walks its own index registers. A consumer that had to
+	 * find those by walking operands would be reading the decoder's
+	 * idea of which operands are worth reporting - and bddisasm
+	 * reports them while a hand-written ARM decoder does not, which
+	 * is exactly the kind of difference this form exists to remove.
+	 *
+	 * It is also what the sweep does most often: forget what it knew
+	 * about everything this instruction touched.
+	 */
+	uint64_t wmask;
 	uint64_t at;            /* the offset it was decoded at */
 	uint64_t at_va;         /* and the address it would run at */
 	/*

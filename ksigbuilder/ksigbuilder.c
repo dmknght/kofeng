@@ -3680,6 +3680,69 @@ static int check_size_body(void)
 	return 1;
 }
 
+/*
+ * THE TOOLCHAIN AND THE PATHS, AS ARGUMENTS AND NOT AS ENVIRONMENT.
+ *
+ * These were read with getenv, and the Makefile exported them because
+ * `VAR=value command` is sh's way of setting one and PowerShell has no
+ * equivalent. A command and its arguments is the shape both shells agree
+ * on - which is what the Makefile's own note says - so they are options.
+ *
+ * It also means a build cannot be changed by what happens to be in the
+ * environment it was started from, which is the same reason the engine
+ * carries no getenv at all - see libkofeng/kofcore/kofdebug.h.
+ */
+static const char *g_opt_cc;
+static const char *g_opt_ld;
+static const char *g_opt_include;
+static const char *g_opt_ldscript;
+static const char *g_opt_basedir;
+static const char *g_opt_triple;
+static const char *g_opt_tmpdir;
+static int         g_opt_keep_work;
+
+/* Consumes the options this tool takes wherever they appear, and leaves
+ * the rest of argv in place for the caller to read positionally. */
+static int opt_take(int *argc, char **argv)
+{
+	static const struct { const char *name; const char **at; } s_str[] = {
+		{ "--cc",       &g_opt_cc       },
+		{ "--ld",       &g_opt_ld       },
+		{ "--include",  &g_opt_include  },
+		{ "--ldscript", &g_opt_ldscript },
+		{ "--basedir",  &g_opt_basedir  },
+		{ "--triple",   &g_opt_triple   },
+		{ "--tmpdir",   &g_opt_tmpdir   }
+	};
+	int i = 1, w = 1, n = *argc;
+
+	for (; i < n; i++) {
+		size_t k;
+		int hit = 0;
+
+		if (strcmp(argv[i], "--keep-work") == 0) {
+			g_opt_keep_work = 1;
+			continue;
+		}
+		for (k = 0; k < sizeof s_str / sizeof s_str[0]; k++)
+			if (strcmp(argv[i], s_str[k].name) == 0) {
+				if (i + 1 >= n) {
+					fprintf(stderr, "ksigbuilder: %s needs"
+						" a value\n", argv[i]);
+					return 0;
+				}
+				*s_str[k].at = argv[++i];
+				hit = 1;
+				break;
+			}
+		if (!hit)
+			argv[w++] = argv[i];
+	}
+	argv[w] = NULL;
+	*argc = w;
+	return 1;
+}
+
 static char g_entry_kept[32];
 /* And where kof_cure() landed, 0 when the module has none - see
  * img_facts.cure_off. */
@@ -3782,9 +3845,9 @@ static int do_build(const char *src, const char *pat, const char *obj,
 		    const char *img, const char *raw, const char *lds,
 		    const char **entry_out)
 {
-	const char *cc = getenv("CC");
-	const char *ld = getenv("LD");
-	const char *incdir = getenv("KOF_INCLUDE");
+	const char *cc = g_opt_cc;
+	const char *ld = g_opt_ld;
+	const char *incdir = g_opt_include;
 	struct img_facts f;
 	char inc[1024];
 	int rc;
@@ -3817,7 +3880,7 @@ static int do_build(const char *src, const char *pat, const char *obj,
 	 * build and is what the Linux side uses.
 	 */
 	{
-		const char *triple = getenv("KOF_TARGET_TRIPLE");
+		const char *triple = g_opt_triple;
 		char targ[256];
 		const char *flags[] = {
 			"-std=c11", "-Os",
@@ -5765,8 +5828,8 @@ static int module_main(int argc, char **argv)
 {
 	const char *src = argc > 2 ? argv[2] : NULL;
 	const char *outdir = argc > 3 ? argv[3] : NULL;
-	const char *basedir = getenv("KOF_BASEDIR");
-	const char *lds = getenv("KOF_LDSCRIPT");
+	const char *basedir = g_opt_basedir;
+	const char *lds = g_opt_ldscript;
 	char work[512], name[200], label[128];
 	char pat[800], namefile[800], pre[800], strs[800];
 	char obj[800], img[800], raw[800], blob[800], meta[800];
@@ -5964,7 +6027,7 @@ static int module_main(int argc, char **argv)
 	 * the source again, which is what anyone debugging a module does
 	 * anyway. KOF_KEEP_WORK keeps them for exactly that.
 	 */
-	if (!getenv("KOF_KEEP_WORK")) {
+	if (!g_opt_keep_work) {
 		remove(pat);
 		remove(pre);
 		remove(obj);
@@ -6272,7 +6335,7 @@ static int tree_build(char **argv, char (*srcs)[TREE_SRC_MAX], uint32_t n,
 
 	if (jobs > 1u && n > 1u) {
 		static struct tree_job job[TREE_MAX_JOBS];
-		const char *tmp = getenv("TMPDIR");
+		const char *tmp = g_opt_tmpdir;
 		uint32_t next = 0, live = 0, slot = 0, win;
 		int bad = 0;
 
@@ -7056,6 +7119,10 @@ int main(int argc, char **argv)
 	/* Before either mode reads argv - see kof_utf8_init. A signature source
 	 * tree under a path with a non-codepage character was unreachable. */
 	kof_utf8_init(&argc, &argv);
+	/* The toolchain and the paths, taken out of argv wherever they sit,
+	 * so each mode below still reads its own arguments positionally. */
+	if (!opt_take(&argc, argv))
+		return 2;
 
 	if (argc > 1 && strcmp(argv[1], "--tree") == 0)
 		return tree_main(argc, argv);

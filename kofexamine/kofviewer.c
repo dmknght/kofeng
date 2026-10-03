@@ -15617,9 +15617,9 @@ static void plg_wire(struct view *v, uint32_t g, int level)
  *
  * The same walk the engine does at scan time - see kof_content.ovl_chain - so
  * a chain generated here and a chain measured there are the same object read
- * the same way. Worth is kof_diag_worth's answer, which is the gate the
- * aligner applies, so a chain too thin to have meant anything is never
- * offered.
+ * the same way. Which of them is offered is the one saying the most
+ * different things - there is no weight bar any more, see the note in
+ * diagnose.h.
  *
  * Returns how many nodes were written, 0 when there is no code this can read:
  * a packed sample, an architecture the decoder does not have, or a format
@@ -15683,11 +15683,19 @@ static uint32_t sim_chain_sweep(struct view *v, struct object *o,
 
 	if (!set || !out || !cap)
 		return 0;
+	/* The one that says the most DIFFERENT things. It used to sum a
+	 * measured weight per capability; that ladder is gone - see the
+	 * note on the bar in diagnose.h - and counting distinct
+	 * capabilities asks the question the picker actually has. */
 	for (k = 0; k < set->n_chain; k++) {
+		uint64_t seen = 0;
 		uint32_t w = 0, q;
 
 		for (q = 0; q < set->len[k]; q++)
-			w += kof_diag_weight(set->n[k][q].cap);
+			if (set->n[k][q].cap < 64u)
+				seen |= 1ull << set->n[k][q].cap;
+		for (; seen; seen >>= 1)
+			w += (uint32_t)(seen & 1u);
 		if (w > bw) { bw = w; best = k; }
 	}
 	n = set->len[best];
@@ -20122,7 +20130,6 @@ static void redraw(struct view *v)
 		}
 		if (v->menu_open)
 			draw_menu(&o, v);
-		draw_bar(&o, v);
 		if (v->find_open)
 			draw_find(&o, v);
 		if (v->goto_open)
@@ -20130,6 +20137,19 @@ static void redraw(struct view *v)
 		if (v->sym_open)
 			draw_symbols(&o, v);
 	}
+	/*
+	 * THE BAR IS DRAWN ON EVERY FRAME, modal or not.
+	 *
+	 * It sat inside the block above, so once a full-screen page was up
+	 * nothing repainted that row - and whatever stood there when the
+	 * page opened stayed on the screen underneath it. A message from
+	 * just before, "switched file" and the like, then read as part of
+	 * the page's bottom border.
+	 *
+	 * The reason the panes are skipped does not reach it: they are 15 KB
+	 * of a 16 KB frame and this is one line.
+	 */
+	draw_bar(&o, v);
 	if (v->chain_open)
 		draw_pathogen(&o, v);
 	if (v->prop_open)
@@ -24762,6 +24782,11 @@ static void chain_build(struct view *v)
 		return;
 	}
 	if ((set = pth_set_of(v, cur_obj(v))) != NULL) {
+		/* One numbering for the whole object, so a link is the same
+		 * link on every chain of this file - see kof_chain_links. */
+		struct kof_chain_links lreg;
+
+		memset(&lreg, 0, sizeof lreg);
 		for (k = 0; k < set->n_chain; k++) {
 			if (k)
 				chain_add("%s", "");
@@ -24777,7 +24802,7 @@ static void chain_build(struct view *v)
 					ln[KOF_CHAIN_LINES];
 				uint32_t q, nl = kof_chain_render(set->n[k],
 						set->len[k], ln,
-						KOF_CHAIN_LINES);
+						KOF_CHAIN_LINES, &lreg);
 
 				for (q = 0; q < nl; q++)
 					if (ln[q].note[0])
@@ -25424,7 +25449,6 @@ static void draw_pathogen(struct out *o, struct view *v)
 	memset(&pg, 0, sizeof pg);
 	if (v->pth_tab) {
 		rtr_build(v);
-		pg.title = "Runtime trace";
 		pg.line = g_rtr;
 		pg.n = g_n_rtr;
 		pg.off = &v->rtr_off;
@@ -25437,7 +25461,6 @@ static void draw_pathogen(struct out *o, struct view *v)
 		 * and calling that a chain is what made it be drawn as a
 		 * list for as long as it was.
 		 */
-		pg.title = "Program logic";
 		pg.line = g_chain;
 		pg.n = g_n_chain;
 		pg.off = &v->chain_off;
@@ -25450,11 +25473,12 @@ static void draw_pathogen(struct out *o, struct view *v)
 	pg.tab[1] = "Runtime trace";
 	pg.tab_n = 2;
 	pg.tab_sel = v->pth_tab;
+	/* The tabs carry the names, so the title bar has nothing left to
+	 * say - see page_draw, which draws one or the other. */
 	pg.title = NULL;
 	pg.full = 1;
 	pg.close = 1;
 	pg.record = 1;
-	pg.foot = "Tab or click: the other view";
 	page_draw(o, v, &pg);
 	v->chain_y = pg.btn_y;
 	v->chain_x0 = pg.btn_x0;

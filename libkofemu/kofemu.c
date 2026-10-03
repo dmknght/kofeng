@@ -32,6 +32,7 @@
 #define _POSIX_C_SOURCE 199309L
 
 #include <stdio.h>
+#include "../libkofeng/kofcore/kofdebug.h"
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
@@ -991,16 +992,9 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 	 * is not fatal: the cache is an optimisation and the loop checks for
 	 * it - see `ic`. */
 	e->ic = calloc(KOF_EMU_ICACHE, sizeof *e->ic);
-	e->quiet_on = getenv("KOF_EMU_QUIET") != NULL;
-	e->softread = getenv("KOF_EMU_SOFTREAD") != NULL;
-	e->softwrite = getenv("KOF_EMU_SOFTWRITE") != NULL;
-	if (getenv("KOF_EMU_HOT")) {
-		e->hot_mask = (1u << 16) - 1u;
-		e->hot = calloc(e->hot_mask + 1u, sizeof *e->hot);
-	}
 	/* Off on demand, so the cache's worth can be measured rather than
 	 * asserted - the same shape as KOF_EMU_TRACE and KOF_EMU_NOLIMIT. */
-	if (e->ic && getenv("KOF_EMU_NOCACHE")) {
+	if (KOF_TRACING && e->ic) {
 		free(e->ic);
 		e->ic = NULL;
 	}
@@ -3971,7 +3965,7 @@ static void win_trace(struct kof_emu *e, const char *api, const char *arg,
 
 	(void)e;
 	if (on < 0)
-		on = getenv("KOF_WIN_TRACE") ? 1 : 0;
+		on = KOF_TRACING;
 	if (on)
 		fprintf(stderr, "[win] %-24s %-32s -> %#llx\n", api,
 			arg ? arg : "", (unsigned long long)ret);
@@ -4062,9 +4056,7 @@ static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 		uint64_t pr  = win_arg(e, 3);
 		unsigned prot = win_prot(pr);
 
-		if (getenv("KOF_WIN_TRACE"))
-			fprintf(stderr,
-				"[win]   VirtualAlloc(at=%#llx sz=%#llx type=%#llx prot=%#llx) rip=%#llx\n",
+		KOF_TRACE("[win]   VirtualAlloc(at=%#llx sz=%#llx type=%#llx prot=%#llx) rip=%#llx\n",
 				(unsigned long long)at, (unsigned long long)sz,
 				(unsigned long long)win_arg(e, 2),
 				(unsigned long long)pr,
@@ -6057,35 +6049,12 @@ decoded:
 		if (e->itr && !e->itr_frozen &&
 		    ((e->itr_at && e->rip == e->itr_at) ||
 		     (e->itr_until && e->insn >= e->itr_until))) {
-			const char *pk = getenv("KOF_EMU_PEEK");
 
 			e->itr_frozen = 1;
 			/* And what memory looked like AT THE FREEZE, which is
 			 * the only moment a key a guest is comparing against
 			 * is still where it was put. Reading it when the run
 			 * stops is far too late. */
-			while (pk && *pk) {
-				/* Named apart from the instruction address
-				 * `at` this shadows - see where that one is
-				 * declared, and what the handover test below
-				 * reads it for. */
-				uint64_t keyat = (uint64_t)strtoull(pk, NULL, 0);
-				uint8_t bf[128];
-				unsigned q;
-
-				if (mem_rd(e, keyat, bf, sizeof bf)) {
-					fprintf(stderr, "[frz] %#llx ",
-						(unsigned long long)keyat);
-					for (q = 0; q < sizeof bf; q++)
-						fputc(bf[q] >= 32 &&
-						      bf[q] < 127
-						      ? bf[q] : '.', stderr);
-					fputc('\n', stderr);
-				}
-				pk = strchr(pk, ',');
-				if (pk)
-					pk++;
-			}
 		}
 		if (e->itr && !e->itr_frozen) {
 			struct itrace *it = &e->itr[e->itr_n++ % e->itr_cap];
@@ -7950,7 +7919,7 @@ decoded:
 			static int str_on = -1;
 
 			if (str_on < 0)
-				str_on = getenv("KOF_STR_TRACE") ? 1 : 0;
+				str_on = KOF_TRACING;
 			if (str_on) {
 				char nm[64];
 				uint64_t c = 0;

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "../../kofcore/kofplatform.h"   /* kof_memmem */
+#include "../../kofcore/kofdebug.h"
 #include "emu_unpack.h"
 #include "../../kofeng.h"
 
@@ -1025,8 +1026,8 @@ static int build_module_pe(struct kof_emu *e, unsigned bits, unsigned mi)
 	 * what an MPRESS stub does, and with the cap at 64 against 81 kernel32
 	 * entries its search ran off the end of the list and resolved to zero.
 	 */
-	if (n == K32_MAX_EXPORTS && getenv("KOF_WIN_TRACE"))
-		fprintf(stderr, "[mod] %s: export list capped at %u\n",
+	if (n == K32_MAX_EXPORTS)
+		KOF_TRACE("[mod] %s: export list capped at %u\n",
 			kof_emu_win_mod_name(mi), n);
 	memset(img, 0, sizeof img);
 
@@ -1292,8 +1293,7 @@ static unsigned fill_iat_pe(struct kof_emu *e, const struct kof_pe_info *info,
 				 * the only thing that says what to add to it:
 				 * an unfilled thunk and a thunk nobody asked
 				 * about are the same zero. */
-				if (getenv("KOF_WIN_TRACE"))
-					fprintf(stderr, "[iat] miss %s\n", nm);
+				KOF_TRACE("[iat] miss %s\n", nm);
 				continue;
 			}
 			thunk = base + ft + (uint64_t)k * w;
@@ -1421,27 +1421,6 @@ static unsigned perm_of_pe(uint32_t p)
 #define EMU_EXTEND_MAX   8u
 #define EMU_EXTEND_TOTAL (2048ull << 20)   /* the sum of every slice */
 
-/*
- * THE EXPERIMENT SWITCH, and it is only that.
- *
- * KOF_EMU_NOLIMIT=<seconds> lifts every bound that counts work - the
- * instruction budget, the extension count, the stall ceiling and the guest's
- * page allowance - and puts ONE bound back: a wall clock. It exists to answer
- * "how far would this guest get if nothing stopped it", which no amount of
- * reasoning about the defaults can answer.
- *
- * It is not a setting to ship with. The defaults are what keep a scan bounded
- * per file, and a run that needs minutes is not a run a scanner can afford
- * whatever it eventually produces.
- */
-static uint64_t emu_nolimit_ms(void)
-{
-	const char *v = getenv("KOF_EMU_NOLIMIT");
-
-	if (!v || !*v)
-		return 0;
-	return (uint64_t)strtoull(v, NULL, 0) * 1000ull;
-}
 
 static enum kof_emu_stop emu_run_while_producing(struct kof_emu *e,
 						 uint64_t slice, int hand_back)
@@ -1467,14 +1446,14 @@ static enum kof_emu_stop emu_run_while_producing(struct kof_emu *e,
 		/* A module asked to be shown each slice - see `hand_back`. */
 		if (hand_back)
 			break;
-		if (!emu_nolimit_ms()) {
+		{
 			if (k >= EMU_EXTEND_MAX)
 				break;          /* the count, which bounds this */
 			if (kof_emu_last_write(e) <= before)
 				break;          /* the slice produced nothing */
 		}
 		next = kof_emu_insn_count(e) + slice;
-		if (!emu_nolimit_ms() && next > EMU_EXTEND_TOTAL)
+		if (next > EMU_EXTEND_TOTAL)
 			break;                  /* the absolute ceiling */
 		/* Keep what this slice earned before risking the next one -
 		 * see kof_emu_snap_written. */
@@ -1682,8 +1661,7 @@ int kof_pe_image_from_run(struct kof_emu *e, const struct kof_pe_info *info,
 		kof_emu_last_hop(e, &last, &hops);
 		if (last >= base && last - base < total)
 			oep = last;
-		if (getenv("KOF_EMU_TRACE"))
-			fprintf(stderr, "[oep] hops=%u first=%#llx last=%#llx\n",
+		KOF_TRACE("[oep] hops=%u first=%#llx last=%#llx\n",
 				hops, (unsigned long long)oep,
 				(unsigned long long)last);
 	}
@@ -2085,9 +2063,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 			unsigned nf = fill_iat_pe(e, info, file, n, base,
 						  cfg.bits);
 
-			if (getenv("KOF_EMU_TRACE"))
-				fprintf(stderr,
-					"[emu] iat filled=%u dir=%#llx\n", nf,
+			KOF_TRACE("[emu] iat filled=%u dir=%#llx\n", nf,
 					(unsigned long long)
 					info->dir[KOF_PE_DIR_IMPORT].rva);
 		}
@@ -2172,38 +2148,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 	kof_emu_set_self(e, file, n);
 	if (idle)
 		kof_emu_set_idle(e, idle);
-	{
-		uint64_t ms = emu_nolimit_ms();
-
-		if (ms) {
-			kof_emu_set_idle(e, ~(uint64_t)0);
-			kof_emu_set_max_insn(e, ~(uint64_t)0 >> 1);
-			kof_emu_set_deadline(e, ms);
-		}
-	}
-	if (getenv("KOF_WIN_TRACE"))
-		kof_emu_count_mod_reads(e, 1);
-	/* The instruction trace, when a diagnosis needs it - see
-	 * kof_emu_itrace. The number is how many instructions to keep. */
-	{
-		const char *it = getenv("KOF_EMU_ITRACE");
-
-		if (it && *it) {
-			const char *at = strchr(it, '@');
-
-			const char *un = strchr(it, '#');
-
-			kof_emu_itrace(e, (unsigned)strtoul(it, NULL, 0));
-			if (at)
-				kof_emu_itrace_at(e, (uint64_t)
-						  strtoull(at + 1, NULL, 0));
-			if (un)
-				kof_emu_itrace_until(e, (uint64_t)
-						     strtoull(un + 1, NULL, 0));
-			if (strchr(it, '!'))
-				kof_emu_itrace_on_null(e, 1);
-		}
-	}
+	kof_emu_count_mod_reads(e, 1);
 	/* The stub's own section, so a jump it makes inside itself is not read
 	 * as a handover - see kof_emu_set_stub_range. */
 	if (info->entry_sec < info->sec_count) {

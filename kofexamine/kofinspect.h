@@ -990,7 +990,26 @@ struct kof_chain_line {
 /* Two rows of punctuation per step at the very most, plus the closing run. */
 #define KOF_CHAIN_LINES (3u * KOF_PTH_SYMPTOM_MAX + 8u)
 
+/*
+ * WHICH LINKS THIS OBJECT HAS ALREADY NAMED.
+ *
+ * A link is numbered by the step that PRODUCED it, and the chains of one
+ * object overlap - the same socket is in six of them. Numbering within a
+ * chain made `link_1` a socket on one page and a file handle on the next,
+ * with nothing saying they were different things. Carry one of these
+ * across every chain of an object and `link_1` is one thing in that file.
+ *
+ * Zero it when the object changes. NULL to kof_chain_render numbers
+ * within the single chain, which is what a caller rendering one chain on
+ * its own wants.
+ */
+struct kof_chain_links {
+	uint64_t va[KOF_PTH_SYMPTOM_MAX];
+	uint32_t n;
+};
+
 uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
-			  struct kof_chain_line *out, uint32_t cap);
+			  struct kof_chain_line *out, uint32_t cap,
+			  struct kof_chain_links *reg);
 
 #endif /* KOFENG_KOFINSPECT_H */

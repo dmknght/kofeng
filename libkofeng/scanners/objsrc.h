@@ -152,8 +152,6 @@ struct kof_src_region {
  * that test called it content - and the appendix of such a file came out twice,
  * once from the file and once from its view.
  */
-void     kof_src_declare_view(struct kof_objsrc *);
-int      kof_src_is_view(const struct kof_objsrc *);
 
 void     kof_src_declare_regions(struct kof_objsrc *, uint8_t fmt,
 				 const struct kof_src_region *, uint32_t n);

@@ -28,7 +28,8 @@
 
 #include <kofmod/kofsym.h>
 #include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
-#include "../kofcore/kofplatform.h"   /* kof_write_all - the spill file below */
+#include "../kofcore/kofplatform.h"
+#include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../analyzers/parsers/binaries/disasm/xref.h"
@@ -731,7 +732,6 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_subtype = sc->pend_subfam = 0;
 	sc->n_pend_rgn = 0;
 	sc->pend_rgn_fmt = 0;
-	sc->pend_view = 0;
 	sc->n_pend_syms = 0;
 	sc->pend_derived_by = NULL;
 	sc->pend_as_fmt = 0;
@@ -957,55 +957,28 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		 * had already drifted: one said "FONT Calibri-Bold" and the
 		 * other "Calibri-Bold".
 		 */
-		char both[KOF_SRC_LABEL_MAX];
-		const char *kn = sc->pend_kind
-			       ? kof_entry_kind_name(sc->pend_kind) : NULL;
-		uint32_t w = 0;
-
-		/* Copied rather than formatted: this file does not include
-		 * stdio, and pulling it in for one concatenation would put a
-		 * locale-aware formatter on the path every produced child
-		 * takes. Bounded by the buffer at every step. */
-		if (kn) {
-			uint32_t i;
-
-			for (i = 0; kn[i] && w + 1u < sizeof both; i++)
-				both[w++] = kn[i];
-			if (w + 1u < sizeof both)
-				both[w++] = ' ';
-			for (i = 0; i < sc->pend_label_len &&
-				    w + 1u < sizeof both; i++)
-				both[w++] = sc->pend_label[i];
-			kof_src_label(kid, (const uint8_t *)both, w);
-		} else {
-			kof_src_label(kid, (const uint8_t *)sc->pend_label,
-				      sc->pend_label_len);
-		}
+		/*
+		 * THE PRODUCER'S NAME, AND ONLY THAT.
+		 *
+		 * The kind word used to be glued in front of it - "FONT
+		 * Calibri-Bold" - so an entry table and a dump would read
+		 * alike. They should, and this was the wrong place: the kind
+		 * already travels on the object as entry_kind, so writing it
+		 * into the NAME makes a second copy that can disagree with
+		 * the first. It did - norm_emit labels its view "norm" and
+		 * declares the kind NORMALIZED, and the two together came
+		 * out as `//0:NORMALIZED norm`.
+		 */
+		kof_src_label(kid, (const uint8_t *)sc->pend_label,
+			      sc->pend_label_len);
 		sc->pend_label[0] = 0;
 		sc->pend_label_len = 0;
-	} else if (sc->pend_kind) {
-		/*
-		 * NOTHING IN THE FILE NAMED IT, SO SAY WHAT IT IS.
-		 *
-		 * A name from the file is better and wins above - it is what
-		 * the author called this thing. But most of what a container
-		 * carries has no name in it, and an unnamed child is a row that
-		 * a reader cannot tell from the row above it. The kind is not a
-		 * name and does not pretend to be one; it is the honest answer
-		 * to a different question, and it is better than a blank.
-		 *
-		 * UNKNOWN is deliberately excluded by the test: "the parser
-		 * found a thing and will not say what it is" is exactly the
-		 * case where a label would be noise, and a blank is the honest
-		 * rendering of it.
-		 */
-		const char *w = kof_entry_kind_name(sc->pend_kind);
-
-		kof_src_label(kid, (const uint8_t *)w, strlen(w));
 	}
-	/* The kind travels on as well as naming the child above - a host needs
-	 * it to decide what to offer for an object whose format is unknown,
-	 * which is nearly all decoded content. */
+	/*
+	 * AND THE KIND TRAVELS ON ITS OWN - the only carrier of that fact,
+	 * so a row with no name of its own is drawn from it rather than
+	 * having it copied into the name.
+	 */
 	kof_src_declare_kind(kid, sc->pend_kind);
 	sc->pend_kind = 0;
 	/* Spent whatever happened to the child, and reset to the sentinel
@@ -1059,10 +1032,6 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 					sc->n_pend_rgn);
 		sc->n_pend_rgn = 0;
 		sc->pend_rgn_fmt = 0;
-	}
-	if (sc->pend_view) {
-		kof_src_declare_view(kid);
-		sc->pend_view = 0;
 	}
 	if (sc->n_pend_syms) {
 		kof_src_declare_syms(kid, sc->pend_syms, sc->n_pend_syms);
@@ -1307,10 +1276,6 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 static void scan_release(struct kof_scanner *sc, uint64_t produced)
 {
 	sc->resident = produced < sc->resident ? sc->resident - produced : 0;
-	if (getenv("KOF_RES_TRACE"))
-		fprintf(stderr, "[res] -%.2f -> %.2f MB\n",
-			(double)produced / 1048576.0,
-			(double)sc->resident / 1048576.0);
 }
 
 static void scan_release_cb(void *sc, uint64_t produced)
@@ -1345,11 +1310,6 @@ static void scan_charge_(struct kof_scanner *sc, uint64_t n);
 static void scan_charge_(struct kof_scanner *sc, uint64_t n)
 {
 	sc->resident += n;
-	if (getenv("KOF_RES_TRACE"))
-		fprintf(stderr, "[res] +%.2f -> %.2f MB  (%s)\n",
-			(double)n / 1048576.0,
-			(double)sc->resident / 1048576.0,
-			sc->res_why ? sc->res_why : "?");
 	if (sc->resident > sc->st.peak_resident)
 		sc->st.peak_resident = sc->resident;
 }
@@ -5892,7 +5852,7 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	/* And the other normaliser's mark, for the reason norm_emit's copy of
 	 * this note gives: the two were blind to each other and each ran on
 	 * what the other produced. */
-	if (kof_src_is_view(sc->cur_src))
+	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
 		return 0;
 	si = (const struct kof_script_info *)ctx->file_header;
 	*plx = kof_lex_for(si->kind);
@@ -6405,8 +6365,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				oep[k].rva = sc->xw[k].rva;
 				oep[k].len = sc->xw[k].len;
 			}
-			if (getenv("KOF_EMU_TRACE"))
-				fprintf(stderr, "[emu] oep ranges=%u\n", sc->n_xw);
+			KOF_TRACE("[emu] oep ranges=%u\n", sc->n_xw);
 			{
 				/* See emu_nolimit_ms in emu_unpack.c: the
 				 * experiment switch, which replaces every work
@@ -6426,9 +6385,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				sc->emu_full = bi;
 				if (sc->emu_slice && sc->emu_slice < bi)
 					bi = sc->emu_slice;
-				if (getenv("KOF_EMU_TRACE"))
-					fprintf(stderr,
-						"[emu] budget full=%llu slice=%llu use=%llu\n",
+				KOF_TRACE("[emu] budget full=%llu slice=%llu use=%llu\n",
 						(unsigned long long)sc->emu_full,
 						(unsigned long long)sc->emu_slice,
 						(unsigned long long)bi);
@@ -6468,10 +6425,6 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				 */
 				if (force)
 					idle = EMU_IDLE_DECLARED;
-				if (getenv("KOF_EMU_NOLIMIT")) {
-					bi = ~(uint64_t)0 >> 1;
-					bp = 512ull * 1024ull;
-				}
 				e = kof_emu_unp_run_pe(b.p, b.n, info, bi, bp,
 						       idle,
 						       sc->emu_slice != 0,
@@ -6559,18 +6512,16 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 	 * million instructions of real work, and the thread block, which they
 	 * reached immediately after.
 	 *
-	 * Off unless asked for, and the getenv is per RUN - runs are rare and
-	 * cost millions of instructions each, so the lookup is not measurable
-	 * beside one.
+	 * Off unless the build asked for it - see kofdebug.h.
 	 */
-	if (getenv("KOF_EMU_TRACE") && e) {
+	if (KOF_TRACING && e) {
 		uint32_t xr = 0, xt = 0, xv = 0;
 
 		uint64_t tr[256];
 		unsigned nt, ti;
 
 		kof_emu_exc_counts(e, &xr, &xt, &xv);
-		if (getenv("KOF_WIN_TRACE")) {
+		if (KOF_TRACING) {
 			unsigned mi;
 
 			fprintf(stderr, "[emu] module reads:");
@@ -6624,32 +6575,6 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 			(unsigned long long)kof_emu_idle_max(e),
 			kof_emu_write_seen(e));
 	}
-	{
-		/* A guest address to look at when the run stops - the thing a
-		 * fault never tells you is what the code was reading. */
-		const char *pk = getenv("KOF_EMU_PEEK");
-
-		while (pk && *pk && e) {
-			uint64_t at = (uint64_t)strtoull(pk, NULL, 0);
-			uint8_t bf[64];
-			unsigned q;
-
-			if (kof_emu_read(e, at, bf, sizeof bf)) {
-				fprintf(stderr, "[peek] %#llx ",
-					(unsigned long long)at);
-				for (q = 0; q < sizeof bf; q++)
-					fputc(bf[q] >= 32 && bf[q] < 127
-					      ? bf[q] : '.', stderr);
-				fputc('\n', stderr);
-			} else {
-				fprintf(stderr, "[peek] %#llx unreadable\n",
-					(unsigned long long)at);
-			}
-			pk = strchr(pk, ',');
-			if (pk)
-				pk++;
-		}
-	}
 	if (e && kof_emu_itrace_count(e)) {
 		static const char *const rn[16] = {
 			"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
@@ -6672,8 +6597,7 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 			fprintf(stderr, "\n");
 		}
 	}
-	if (getenv("KOF_EMU_TRACE"))
-		fprintf(stderr, "[emu] why=%d stop=%d insn=%llu entry=%#llx "
+	KOF_TRACE("[emu] why=%d stop=%d insn=%llu entry=%#llx "
 			"images=%u written=%u returned=%d improvised=%d "
 			"detail=%s refused=%s\n",
 			(int)rep.why, (int)rep.stop,
@@ -6796,9 +6720,7 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 						diff++;
 			}
 			changed = seen && diff * IMG_DIFF_DEN > seen;
-			if (getenv("KOF_EMU_TRACE"))
-				fprintf(stderr,
-					"[img] len=%llu diff=%llu/%llu "
+			KOF_TRACE("[img] len=%llu diff=%llu/%llu "
 					"changed=%d\n",
 					(unsigned long long)wlen,
 					(unsigned long long)diff,
@@ -7121,7 +7043,7 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 		}
 	}
 	sc->emu_stage = 0;
-	if (getenv("KOF_EMU_TRACE")) {
+	if (KOF_TRACING) {
 		uint32_t q;
 
 		for (q = 0; q < sc->n_emu_rgn; q++)
@@ -7217,9 +7139,8 @@ static uint32_t c_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	 * stop-reason trace further down.
 	 */
 	vouched = sc && vouch && sc->heur_lvl >= vouch;
-	if (sc && getenv("KOF_EMU_TRACE"))
-		fprintf(stderr,
-			"[emu] ask: vouched=%d live=%d banned=%d packed=%d only=%d ask=%d dflt=%d spent=%llu\n",
+	if (sc)
+		KOF_TRACE("[emu] ask: vouched=%d live=%d banned=%d packed=%d only=%d ask=%d dflt=%d spent=%llu\n",
 			vouched, sc->emu_live ? 1 : 0, sc->emu_banned,
 			sc->packed_here, sc->emu_only, sc->emu_ask,
 			sc->emu_default_ok,

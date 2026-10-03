@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../../kofcore/kofdebug.h"
 
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
@@ -118,6 +119,89 @@ static int flow_mode(const struct kof_obj_ctx *ctx, unsigned *bits,
 
 /* Keep this chain if it is worth more than the weakest one held. */
 /*
+ * HOW MANY DIFFERENT THINGS A CHAIN SAYS - distinct capabilities in it.
+ *
+ * The vocabulary is under 64 words, so the set is one word and the count is
+ * a popcount - see enum kof_flow_cap.
+ */
+
+
+/*
+ * COPY WHAT `src` JOINED INTO `dst`, where dst has nothing - see the note
+ * at the subsumption below. Matched by the step's own address, which is
+ * the one identity neither cut of the chain can move.
+ */
+static void chain_keep_links(struct kof_flow_node *dst, uint32_t nd,
+			     const struct kof_flow_node *src, uint32_t ns)
+{
+	uint32_t i, j, q;
+
+	for (i = 0; i < ns; i++)
+		for (q = 0; q < KOF_FLOW_ARGS; q++) {
+			if (!src[i].from_va[q])
+				continue;
+			for (j = 0; j < nd; j++) {
+				uint32_t k, at = nd;
+
+				if (dst[j].va != src[i].va ||
+				    dst[j].from_va[q])
+					continue;
+				/*
+				 * THE PRODUCER'S ROW FIRST, AND BOTH FIELDS
+				 * OR NEITHER.
+				 *
+				 * Two ways this went wrong when it wrote the
+				 * address and then went looking. A producer
+				 * that is not in this cut of the chain left
+				 * `from_va` set with `from` at zero - half a
+				 * link, which every reader of one field
+				 * disagrees with the other about. And a row
+				 * found AFTER the consumer made a link that
+				 * runs backwards in time: row 0 holding what
+				 * row 1 produced. MEASURED over 254 objects:
+				 * 40 backwards and 2 half.
+				 */
+				for (k = 0; k < j; k++)
+					if (dst[k].va == src[i].from_va[q]) {
+						at = k;
+						break;
+					}
+				if (at == nd)
+					break;      /* not in this chain */
+				dst[j].from[q] = (uint16_t)(at + 1u);
+				dst[j].from_va[q] = src[i].from_va[q];
+				break;
+			}
+		}
+}
+
+/* How many of its steps are joined to another - see chain_says, which
+ * counts the words, and the note where the two are added. */
+static uint32_t chain_joins(const struct kof_flow_node *v, uint32_t n)
+{
+	uint32_t i, q, k = 0;
+
+	for (i = 0; i < n; i++)
+		for (q = 0; q < KOF_FLOW_ARGS; q++)
+			if (v[i].from[q])
+				k++;
+	return k;
+}
+
+static uint32_t chain_says(const struct kof_flow_node *v, uint32_t n)
+{
+	uint64_t seen = 0;
+	uint32_t i, k = 0;
+
+	for (i = 0; i < n; i++)
+		if (v[i].cap < 64u)
+			seen |= 1ull << v[i].cap;
+	for (; seen; seen >>= 1)
+		k += (uint32_t)(seen & 1u);
+	return k;
+}
+
+/*
  * IS `b` THE SAME RUN OF STEPS AS SOMEWHERE INSIDE `a`.
  *
  * Compared on what a step SAYS - the capability, the name and the selector -
@@ -145,18 +229,25 @@ static int chain_inside(const struct kof_flow_node *a, uint32_t na,
 	return 0;
 }
 
+/*
+ * `v` IS NOT CONST, and saying so is the honest spelling: a chain being
+ * swallowed hands its links to the keeper, and a keeper being replaced
+ * hands its own to the newcomer - see chain_keep_links. The caller's
+ * buffer is scratch it reuses for the next function either way.
+ */
 static void flow_set_offer(struct kof_flow_set *fs,
-			   const struct kof_flow_node *v, uint32_t n)
+			   struct kof_flow_node *v, uint32_t n)
 {
 	uint32_t i, worst = 0, worst_w = 0xffffffffu;
 
-	/* Clamped BEFORE anything reads the array, not after: kof_diag_worth
-	 * walks all n of them, so the bound has to be in place first. It is
+	/* Clamped BEFORE anything reads the array, not after: everything
+	 * below walks all n of them, so the bound has to be in place
+	 * first. It is
 	 * the caller's cap that keeps this honest today, which is the sort of
 	 * thing that stays true until a second caller appears. */
 	if (n > KOF_PTH_SYMPTOM_MAX)
 		n = KOF_PTH_SYMPTOM_MAX;
-	if (!kof_diag_worth(v, n))
+	if (n < KOF_DIAG_MIN_STEPS)
 		return;
 	/*
 	 * AND NOT THE SAME SEQUENCE TWICE, which is what rooting a chain at
@@ -172,11 +263,31 @@ static void flow_set_offer(struct kof_flow_set *fs,
 	 * The longer one wins because it is the one with context: the same
 	 * two steps mean more under the function that reached them.
 	 */
+	/*
+	 * AND THE LINKS OF THE ONE BEING SWALLOWED GO WITH IT.
+	 *
+	 * The longer chain wins because it has the context. But a step is
+	 * linked PER TRAVERSAL - the walk resolves an argument against the
+	 * call it came through - so the same step is joined in one chain
+	 * and bare in another, and the longer chain is often the bare one:
+	 * it reached the body as its own root, where there is no caller to
+	 * ask. MEASURED on a bot: `pipe` and `dup2` sat next to each other
+	 * in a fourteen-step chain with nothing between them, while the
+	 * five-step chain that joined them had been dropped as contained.
+	 *
+	 * A link names its producer by ADDRESS - see kof_flow_node.from_va
+	 * - so it carries from one cut of the chain to another without
+	 * meaning anything different. Only into an EMPTY slot: the keeper's
+	 * own answer is first-hand for its own traversal.
+	 */
 	for (i = 0; i < fs->n_chain; i++)
-		if (chain_inside(fs->n[i], fs->len[i], v, n))
+		if (chain_inside(fs->n[i], fs->len[i], v, n)) {
+			chain_keep_links(fs->n[i], fs->len[i], v, n);
 			return;
+		}
 	for (i = 0; i < fs->n_chain; i++)
 		if (chain_inside(v, n, fs->n[i], fs->len[i])) {
+			chain_keep_links(v, n, fs->n[i], fs->len[i]);
 			memcpy(fs->n[i], v, n * sizeof *v);
 			fs->len[i] = (uint8_t)n;
 			/* And whatever else it swallowed goes with it. */
@@ -205,21 +316,39 @@ static void flow_set_offer(struct kof_flow_set *fs,
 		fs->n_chain++;
 		return;
 	}
+	/*
+	 * WHICH CHAIN TO DROP WHEN THERE IS NO ROOM, and it is HOW MANY
+	 * DIFFERENT THINGS it says.
+	 *
+	 * This summed a measured weight per capability. That ladder is gone
+	 * - see the note on the bar in diagnose.h - and summing it was the
+	 * wrong question anyway: a chain that opens a file, maps executable
+	 * memory and jumps into it says three things, and one that resolves
+	 * forty-six symbols says one. Counting distinct capabilities says
+	 * that directly, with no table to go stale against a corpus.
+	 */
+	/*
+	 * AND A LINK IS A THING IT SAYS, counted beside the words.
+	 *
+	 * `chain_says` counts DISTINCT capabilities, which is why a chain
+	 * that resolves forty-six symbols scores one. But `pipe` and
+	 * `dup2` next to each other say far less than `dup2` ON the pipe,
+	 * and the second is the whole of a redirected shell - so a chain
+	 * that joins its steps states more than one that lists them.
+	 *
+	 * MEASURED on a bot: the five-step chain that joined them lost its
+	 * place to a fourteen-step one that had the same two steps side by
+	 * side and nothing between them, because fourteen loose words beat
+	 * five on a count of words alone.
+	 */
 	for (i = 0; i < FLOW_SET_MAX; i++) {
-		uint32_t j, w = 0;
+		uint32_t w = chain_says(fs->n[i], fs->len[i]) +
+			     chain_joins(fs->n[i], fs->len[i]);
 
-		for (j = 0; j < fs->len[i]; j++)
-			w += kof_diag_weight(fs->n[i][j].cap);
 		if (w < worst_w) { worst_w = w; worst = i; }
 	}
-	{
-		uint32_t j, w = 0;
-
-		for (j = 0; j < n; j++)
-			w += kof_diag_weight(v[j].cap);
-		if (w <= worst_w)
-			return;
-	}
+	if (chain_says(v, n) + chain_joins(v, n) <= worst_w)
+		return;
 	memcpy(fs->n[worst], v, n * sizeof *v);
 	fs->len[worst] = (uint8_t)n;
 }
@@ -496,10 +625,111 @@ static void pth_relcall(void *user, uint64_t at, uint64_t target,
  * is not wanted: a boundary is a fact about the code, and what the author
  * called it is his to choose.
  */
+/*
+ * AND IN A STATICALLY LINKED OBJECT THE NAME IS AN ABI NAME.
+ *
+ * pth_import's argument, applied where it also holds: `open` in a static
+ * glibc is the same fact as `open` in a PLT entry - the author did not
+ * choose it, the C library did, and a program that renames it does not
+ * link. The dynamic table is simply empty here, so the only place that
+ * fact is written down is the symbol table.
+ *
+ * MEASURED on a gcc -static build of a program with nine links written
+ * into the source: two were found, and the seven missing were all in
+ * `main`, which calls __libc_open and __socket directly. The symbol table
+ * carries `open` and `socket` at exactly those addresses - imp_add drops
+ * the aliases the vocabulary does not know and keeps the one it does.
+ *
+ * WHAT IT COSTS, stated rather than discovered: a program may define its
+ * own `open`, and a call to it is then read as the C library's. Every node
+ * this produces is marked KOF_FLOWF_BY_NAME, which is exactly the flag
+ * that says the step was read from a name and not from an instruction.
+ */
+struct pth_funcsink { struct kof_flow *f; struct flow_imp *im; };
+
 static void pth_func(void *user, uint64_t va, uint64_t size, const char *name)
 {
-	(void)name;
-	kof_flow_head((struct kof_flow *)user, va, size);
+	struct pth_funcsink *s = (struct pth_funcsink *)user;
+
+	kof_flow_head(s->f, va, size);
+	if (s->im && name)
+		pth_import(s->im, va, name);
+}
+
+/*
+ * THE STRING AN ARGUMENT POINTS AT, read out of the object.
+ *
+ * The inverse of flow_va_of, and it has to be: the sweep reports
+ * addresses in whatever space that function chose, so looking the bytes
+ * up by section alone would miss every object whose section headers are
+ * gone - see the segment fallback there.
+ *
+ * TEXT OR NOTHING. A path is printable and NUL-terminated; anything else
+ * at that address is a pointer the sweep followed wrongly, and printing
+ * it as a string would dress a mistake up as a fact.
+ */
+static void flow_text_of(const struct kof_obj_ctx *ctx, kof_buf b,
+			 uint64_t va, char *out, size_t cap)
+{
+	uint64_t off = (uint64_t)-1;
+	size_t k;
+
+	out[0] = '\0';
+	if (!va || !b.p)
+		return;
+	if (ctx->format == KOF_FMT_ELF && kof_elf(ctx)) {
+		const struct kof_elf_info *e = kof_elf(ctx);
+		uint32_t i;
+
+		for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++)
+			if (e->sec[i].mem_addr && va >= e->sec[i].mem_addr &&
+			    va - e->sec[i].mem_addr < e->sec[i].file_size) {
+				off = e->sec[i].file_off +
+				      (va - e->sec[i].mem_addr);
+				break;
+			}
+		if (off == (uint64_t)-1)
+			for (i = 0; i < e->seg_count &&
+				    i < KOF_ELF_MAX_SEGMENTS; i++)
+				if (e->seg[i].mem_addr &&
+				    va >= e->seg[i].mem_addr &&
+				    va - e->seg[i].mem_addr <
+					    e->seg[i].file_size) {
+					off = e->seg[i].file_off +
+					      (va - e->seg[i].mem_addr);
+					break;
+				}
+	} else if (ctx->format == KOF_FMT_PE && kof_pe(ctx)) {
+		const struct kof_pe_info *p = kof_pe(ctx);
+		uint32_t i;
+
+		if (va < p->image_base)
+			return;
+		for (i = 0; i < p->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
+			uint64_t rva = va - p->image_base;
+
+			if (rva >= p->sec[i].mem_rva &&
+			    rva - p->sec[i].mem_rva < p->sec[i].file_size) {
+				off = p->sec[i].file_off +
+				      (rva - p->sec[i].mem_rva);
+				break;
+			}
+		}
+	}
+	if (off == (uint64_t)-1 || off >= b.n)
+		return;
+	for (k = 0; k + 1u < cap && off + k < b.n; k++) {
+		unsigned char ch = ((const unsigned char *)b.p)[off + k];
+
+		if (!ch)
+			break;
+		if (ch < 0x20u || ch > 0x7eu)
+			return;         /* not text - say nothing */
+		out[k] = (char)ch;
+	}
+	if (!k)
+		return;
+	out[k] = '\0';
 }
 
 /* Where these file bytes live once the image is mapped. The sweep needs the
@@ -516,11 +746,45 @@ static uint64_t flow_va_of(const struct kof_obj_ctx *ctx, uint64_t off)
 
 		if (!e || !e->valid)
 			return off;
-		for (k = 0; k < e->sec_count; k++)
+		for (k = 0; k < e->sec_count &&
+			    k < KOF_ELF_MAX_SECTIONS; k++)
 			if (e->sec[k].mem_addr && off >= e->sec[k].file_off &&
 			    off - e->sec[k].file_off < e->sec[k].file_size)
 				return e->sec[k].mem_addr +
 				       (off - e->sec[k].file_off);
+		/*
+		 * AND THE SEGMENTS WHEN THE SECTIONS CANNOT ANSWER.
+		 *
+		 * A stripped object has no section headers at all, and a
+		 * bot usually is one. Falling through to the raw offset
+		 * then puts every step at a FILE OFFSET while the symbols,
+		 * the declared ranges and anything a reader compares
+		 * against are virtual addresses - MEASURED over 21 non-x86
+		 * samples: 17 of 127 steps came out in offset space, and
+		 * four files entirely, one ARM bot reporting @c32c for code
+		 * the loader maps at 0x5c32c.
+		 *
+		 * The segments are what the loader itself reads, so they
+		 * answer where the sections are gone. EXECUTABLE ONES
+		 * FIRST: this file has two LOADs claiming file offset 0,
+		 * one of them the data segment, and the first match would
+		 * be the wrong space again.
+		 */
+		for (k = 0; k < e->seg_count &&
+			    k < KOF_ELF_MAX_SEGMENTS; k++)
+			if ((e->seg[k].perm & KOF_PERM_X) &&
+			    e->seg[k].mem_addr &&
+			    off >= e->seg[k].file_off &&
+			    off - e->seg[k].file_off < e->seg[k].file_size)
+				return e->seg[k].mem_addr +
+				       (off - e->seg[k].file_off);
+		for (k = 0; k < e->seg_count &&
+			    k < KOF_ELF_MAX_SEGMENTS; k++)
+			if (e->seg[k].mem_addr &&
+			    off >= e->seg[k].file_off &&
+			    off - e->seg[k].file_off < e->seg[k].file_size)
+				return e->seg[k].mem_addr +
+				       (off - e->seg[k].file_off);
 		return off;
 	}
 	if (ctx->format != KOF_FMT_PE)
@@ -566,6 +830,8 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 				   struct kof_range *scratch,
 				   struct kof_flow_set *out, const char **why);
 
+static const char *g_pth_last_why;
+
 uint32_t kof_pth_chain_build(const struct kof_obj_ctx *ctx, kof_buf b,
 			     struct kof_range *scratch,
 			     struct kof_flow_set *out, const char **why)
@@ -573,28 +839,6 @@ uint32_t kof_pth_chain_build(const struct kof_obj_ctx *ctx, kof_buf b,
 	const char *w = NULL;
 	uint32_t n = pth_chain_build_in(ctx, b, scratch, out, &w);
 
-	if (getenv("KOF_PTH_SURVEY")) {
-		unsigned sb = 0, sa = 0, sf = 0;
-		uint32_t sm = 0;
-		const struct kof_scanner *ss = ctx ? kof_scan_of(ctx) : NULL;
-
-		if (!ctx || !flow_mode(ctx, &sb, &sa, &sm, &sf))
-			sb = sa = 0;
-		/*
-		 * FORMAT AND ARCHITECTURE BELONG IN THE LINE, and the region
-		 * flag with them. Without the flag the first run of this read
-		 * 75% of objects as "no decoder for this format and
-		 * architecture" - which was true of each one and said nothing,
-		 * because four of every five objects is a REGION VIEW of a
-		 * file that was itself decoded fine. A survey that counts
-		 * those is measuring its own hook.
-		 */
-		fprintf(stderr, "[psurvey] f%u a%u r%u %u %u %u %s\n",
-			ctx ? (unsigned)ctx->format : 0u,
-			ctx ? (unsigned)ctx->arch : 0u,
-			(ss && ss->n_cur_rgn) ? 1u : 0u,
-			sb, sa, n, w ? w : "-");
-	}
 	if (why)
 		*why = w;
 	return n;
@@ -613,25 +857,25 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 	if (why)
 		*why = NULL;
 	if (!ctx || !out || !scratch) {
+		g_pth_last_why = "nothing was handed to the sweep";
 		if (why)
-			*why = "nothing was handed to the sweep";
+			*why = g_pth_last_why;
 		return 0;
 	}
 	memset(out, 0, sizeof *out);
 	if (!flow_mode(ctx, &bits, &abi, &mask, &fixed))
-		{ if (getenv("KOF_FCHAIN_DUMP")) fprintf(stderr,"[fchain] skip: %s\n","flow_mode");
-		  if (why) *why = "no decoder for this format and architecture";
+		{ g_pth_last_why = "no decoder for this format and architecture";
+		  if (why) *why = g_pth_last_why;
 		  return 0; }
 	if (!b.p || !b.n)
-		{ if (getenv("KOF_FCHAIN_DUMP")) fprintf(stderr,"[fchain] skip: %s\n","nobytes");
-		  if (why) *why = "the object's bytes are not here to read";
+		{ g_pth_last_why = "the object's bytes are not here to read";
+		  if (why) *why = g_pth_last_why;
 		  return 0; }
 	nr = kof_scan_resolve_range(ctx, mask, scratch);
 	if (!nr) {
-		if (getenv("KOF_FCHAIN_DUMP"))
-			fprintf(stderr, "[fchain] skip: norange\n");
+		g_pth_last_why = "no code region resolved in this object";
 		if (why)
-			*why = "no code region resolved in this object";
+			*why = g_pth_last_why;
 		return 0;
 	}
 	f = kof_flow_new();
@@ -659,49 +903,18 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 			/* And the boundaries the object states itself, which
 			 * the sweep cannot derive for a function nothing
 			 * calls - see pth_func. */
-			kof_elf_funcs(b, kof_elf(ctx), pth_func, f);
+			{
+				struct pth_funcsink fs;
+
+				fs.f = f;
+				fs.im = im;
+				kof_elf_funcs(b, kof_elf(ctx), pth_func, &fs);
+			}
 		}
 		kof_flow_resolver(f, imp_lookup, im);
 	}
 	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN)
 		kof_flow_entry(f, flow_va_of(ctx, ctx->entry_off));
-	/*
-	 * AND WHICH PARTS OF THE REGION ARE INSTRUCTIONS - see
-	 * kof_flow_primary.
-	 *
-	 * The region below is the loadable segment with PF_X, which holds
-	 * far more than code: on one 8 MB static ELF the segment is 7.79 MB
-	 * and .text is 4.75 MB, the rest being .dynsym, .dynstr, .gnu.hash,
-	 * the relocation tables, .rodata and the unwind tables. All of it
-	 * was being disassembled.
-	 *
-	 * Saying which sections the FORMAT calls executable does not skip
-	 * the others - a branch into .rodata is still followed, which is how
-	 * a packer that jumps into its own data stays visible. It only stops
-	 * the sweep walking them end to end when nothing points there.
-	 *
-	 * Declaring nothing leaves the whole region in play, which is what a
-	 * stripped object gets and is the old behaviour.
-	 */
-	if (ctx->format == KOF_FMT_ELF && kof_elf(ctx)) {
-		const struct kof_elf_info *e = kof_elf(ctx);
-
-		for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++)
-			if ((e->sec[i].flags & 0x4u) &&     /* SHF_EXECINSTR */
-			    e->sec[i].file_size)
-				kof_flow_primary(f,
-					flow_va_of(ctx, e->sec[i].file_off),
-					e->sec[i].file_size);
-	} else if (ctx->format == KOF_FMT_PE && kof_pe(ctx)) {
-		const struct kof_pe_info *pe = kof_pe(ctx);
-
-		for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++)
-			if ((pe->sec[i].perm & KOF_PE_PERM_X) &&
-			    pe->sec[i].file_size)
-				kof_flow_primary(f,
-					flow_va_of(ctx, pe->sec[i].file_off),
-					pe->sec[i].file_size);
-	}
 	/*
 	 * AND THE WHOLE RANGE, LIBRARY CODE INCLUDED - which was tried the
 	 * other way and measured badly.
@@ -731,6 +944,109 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 
 		if (!s2.p || !s2.n)
 			continue;
+		/*
+		 * WHICH PARTS OF THIS REGION ARE INSTRUCTIONS - see
+		 * kof_flow_primary.
+		 *
+		 * The region is the loadable segment with PF_X, which holds
+		 * far more than code: a linker puts the symbol tables, the
+		 * relocations, .rodata and the unwind tables in there beside
+		 * .text. MEASURED on one 8 MB static ELF: the segment is
+		 * 7.79 MB and .text is 4.75 MB, so 3.04 MB of string tables
+		 * and unwind data was being disassembled.
+		 *
+		 * IN THE REGION'S OWN COORDINATES, and that is not a detail.
+		 * flow_va_of answers with a virtual address when it can map
+		 * the offset and with the OFFSET ITSELF when it cannot, so a
+		 * region whose start falls outside every mapped section gets
+		 * a "va" that is really a file offset. Declaring the sections
+		 * in true virtual addresses then compared two different
+		 * spaces: measured on a 3 MB Go binary, the region came in at
+		 * va 0x190 while .text was declared at 0x401000, nothing was
+		 * ever inside a primary range, and the object went from four
+		 * chains to none. Deriving both from the same base cannot
+		 * disagree with itself.
+		 */
+		if (ctx->format == KOF_FMT_ELF && kof_elf(ctx)) {
+			const struct kof_elf_info *e2 = kof_elf(ctx);
+			uint64_t base = flow_va_of(ctx, scratch[i].off);
+			uint32_t k;
+
+			for (k = 0; k < e2->sec_count &&
+				    k < KOF_ELF_MAX_SECTIONS; k++) {
+				const struct kof_elf_sec *sc = &e2->sec[k];
+
+				if (!(sc->flags & 0x4u) || !sc->file_size)
+					continue;       /* SHF_EXECINSTR */
+				/*
+				 * THE LINKAGE TABLES ARE NOT PRIMARY, even
+				 * though .plt carries SHF_EXECINSTR.
+				 *
+				 * Every entry in .plt is an indirect jump
+				 * through a slot, and a static read of one
+				 * tells us nothing the import table has not
+				 * already said. Left primary, the leftover
+				 * scan reaches every entry nothing calls and
+				 * declares each a function of its own - so
+				 * the function count carries one body per
+				 * import, and none of them is a body the
+				 * program has. .got and .got.plt are data
+				 * that some linkers mark executable.
+				 *
+				 * They stay REACHABLE: a `call` into a stub
+				 * is followed like any other branch target,
+				 * which is RetDec's alternative range - see
+				 * initAllowedRangesWithSegments, which names
+				 * these same three sections.
+				 */
+				if (!strcmp(sc->name, ".plt") ||
+				    !strcmp(sc->name, ".got") ||
+				    !strcmp(sc->name, ".got.plt"))
+					continue;
+				if (sc->file_off < scratch[i].off ||
+				    sc->file_off - scratch[i].off >=
+					    scratch[i].len)
+					continue;
+				kof_flow_primary(f,
+					base + (sc->file_off - scratch[i].off),
+					sc->file_size);
+			}
+		} else if (ctx->format == KOF_FMT_PE && kof_pe(ctx)) {
+			const struct kof_pe_info *pe = kof_pe(ctx);
+			uint64_t base = flow_va_of(ctx, scratch[i].off);
+			uint32_t k;
+
+			for (k = 0; k < pe->sec_count &&
+				    k < KOF_PE_MAX_SECTIONS; k++) {
+				const struct kof_pe_sec *sc = &pe->sec[k];
+
+				if (!(sc->perm & KOF_PE_PERM_X) ||
+				    !sc->file_size)
+					continue;
+				/*
+				 * A DISCARDABLE SECTION IS NOT PRIMARY. It
+				 * holds the relocations and the driver init
+				 * code the loader drops once the image is
+				 * mapped, so at run time those bytes are not
+				 * code at all. RetDec skips them by the same
+				 * test and makes the one exception that
+				 * matters: an entry point inside one means
+				 * the flag is a lie and the section is where
+				 * the program starts. 0x02000000 is
+				 * IMAGE_SCN_MEM_DISCARDABLE.
+				 */
+				if ((sc->characteristics & 0x02000000u) &&
+				    k != pe->entry_sec)
+					continue;
+				if (sc->file_off < scratch[i].off ||
+				    sc->file_off - scratch[i].off >=
+					    scratch[i].len)
+					continue;
+				kof_flow_primary(f,
+					base + (sc->file_off - scratch[i].off),
+					sc->file_size);
+			}
+		}
 		if (fixed)
 			kof_flow_add_fixed(f, s2.p, (uint32_t)s2.n,
 					   flow_va_of(ctx, scratch[i].off),
@@ -758,29 +1074,11 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 	 * that "the sweep did not find it" and "the set did not keep it" can
 	 * be told apart from outside. See KOF_FCHAIN_DUMP for the chains.
 	 */
-	if (getenv("KOF_FNODE_DUMP")) {
-		uint32_t q;
-
-		for (q = 0; q < kof_flow_n_node(f); q++) {
-			const struct kof_flow_node *nd = kof_flow_node_at(f, q);
-
-			if (!nd)
-				continue;
-			fprintf(stderr, "[fnode] @%llx:%u f%u d%u L%u %s=%s\n",
-				(unsigned long long)nd->va, nd->func,
-				(unsigned)nd->flags,
-				(unsigned)nd->depth, (unsigned)nd->loop,
-				kof_flow_cap_name(nd->cap),
-				nd->name && kof_flow_name_of(nd->name)
-					? kof_flow_name_of(nd->name) : "-");
-		}
-	}
 	if (kof_flow_heads_full(f)) {
-		if (getenv("KOF_FCHAIN_DUMP"))
-			fprintf(stderr, "[fchain] skip: heads-full\n");
-		if (why)
-			*why = "more functions than the partition holds, so "
+		g_pth_last_why = "more functions than the partition holds, so "
 			       "a chain would read two bodies as one";
+		if (why)
+			*why = g_pth_last_why;
 		kof_flow_free(f);
 		imp_free(im);
 		ret_free(rt);
@@ -795,9 +1093,8 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 		 * trueline is plague's tool: two static binaries share their libc
 		 * and that shared half swamps a CONTENT comparison. A capability
 		 * chain is not swamped the same way - a libc wrapper holds one
-		 * node, and kof_diag_worth already refuses a chain under two steps
-		 * and under its weight floor, so the library's own chains never
-		 * reach the set.
+		 * node, and a chain under two steps is refused, so the
+		 * library's own single-node chains never reach the set.
 		 *
 		 * Measured: dropping chains rooted in a trueline span moved the
 		 * malware corpus from 3624 objects with a chain to 3619, left the
@@ -813,24 +1110,200 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 				flow_set_offer(out, tmp, m);
 		}
 	}
+	/* And the paths and programs, read out of the object - see
+	 * flow_text_of. Done on the chosen set, because that is what is
+	 * drawn and the string is for a reader. */
+	if (out)
+		for (i = 0; i < out->n_chain; i++) {
+			uint32_t z;
+
+			for (z = 0; z < out->len[i]; z++) {
+				struct kof_flow_node *nd = &out->n[i][z];
+				uint8_t j = kof_flow_text_arg(nd->cap,
+							      nd->name);
+
+				if (!j || j > KOF_FLOW_ARGS ||
+				    !(nd->arg_const & (1u << (j - 1u))))
+					continue;
+				flow_text_of(ctx, b, nd->arg[j - 1u],
+					     nd->text, sizeof nd->text);
+			}
+		}
+	/*
+	 * AND A MAPPING NOBODY USES IS NOT A STEP.
+	 *
+	 * `mmap(0, n, READ|WRITE, PRIVATE|ANON)` is how a program declares
+	 * a buffer. Every program does it, and on a chain where no later
+	 * step is handed that mapping it says nothing about this one: it
+	 * pushes a real step off the end and puts a row on the page a
+	 * reader has to skip.
+	 *
+	 * ONLY THE PLAIN ONE, AND ONLY UNUSED. An executable mapping is a
+	 * finding by itself, and so is one asked for write AND execute -
+	 * see KOF_FLOWF_WX - because what matters there is that it was
+	 * asked for. A mapping some step is handed stays: that link is the
+	 * whole reason it is interesting.
+	 *
+	 * AFTER THE SET IS CHOSEN, not inside the chain builder. Done
+	 * there it shortened the chains before they were scored and
+	 * subsumed, so a different set survived - MEASURED over 254 ELF
+	 * objects: 547 links became 538 and four files lost theirs
+	 * entirely, with no step of the program changing. What a chain IS
+	 * decides which chains are kept; what is worth drawing is a
+	 * separate question and belongs after.
+	 */
+	if (out) {
+		uint32_t ci;
+
+		for (ci = 0; ci < out->n_chain; ci++) {
+			struct kof_flow_node *v = out->n[ci];
+			uint32_t n = out->len[ci], k = 0, z, q;
+			uint16_t map[KOF_PTH_SYMPTOM_MAX];
+			int again = 1;
+
+
+			/*
+			 * UNTIL NOTHING MORE FALLS OUT.
+			 *
+			 * One pass is not enough, because dropping a
+			 * producer can leave another one with no consumer:
+			 * a socket handed to an `accept` whose result
+			 * nobody takes is a socket nobody uses, and the
+			 * first pass removes the accept while the second
+			 * removes the socket. A chain is short, so this
+			 * settles in two or three turns.
+			 *
+			 * THE LINK IS THE RESULT AND THE NODE CARRIES IT.
+			 * A step that makes something and hands it to
+			 * nobody states nothing the chain is about, and it
+			 * costs a row that a step which does would have
+			 * had.
+			 */
+			while (again) {
+				again = 0;
+				k = 0;
+				for (z = 0; z < n &&
+					    z < KOF_PTH_SYMPTOM_MAX; z++) {
+					int used = 0;
+					uint32_t y;
+
+					/*
+					 * THE UNIT IS THE LINK, AND A NODE
+					 * EXISTS BECAUSE IT IS AN END OF
+					 * ONE.
+					 *
+					 * A step nothing is joined to and
+					 * that is joined to nothing is
+					 * SILENT: it says the program did a
+					 * thing, which is a list, and a
+					 * list is what this was built to
+					 * stop producing. `fork` beside
+					 * `sleep` beside `write` is three
+					 * words that fit almost any
+					 * program; `write` ON the socket
+					 * that `connect` opened is one.
+					 *
+					 * TWO EXCEPTIONS, both findings on
+					 * their own rather than ends of a
+					 * link: a mapping asked for EXECUTE
+					 * and one asked for write AND
+					 * execute. What matters there is
+					 * that it was asked for at all.
+					 */
+					if (v[z].cap == KOF_CAP_ALLOC_EXEC ||
+					    (v[z].flags & KOF_FLOWF_WX))
+						used = 1;
+					for (q = 0; q < KOF_FLOW_ARGS && !used;
+					     q++)
+						if (v[z].from[q])
+							used = 1;   /* takes */
+					for (y = 0; y < n && !used; y++)
+						for (q = 0; q < KOF_FLOW_ARGS;
+						     q++)
+							if (v[y].from[q] ==
+							    z + 1u) {
+								used = 1;
+								break;
+							}
+					map[z] = used ? (uint16_t)(++k) : 0u;
+					if (!used)
+						again = 1;
+				}
+				if (!again)
+					break;
+				k = 0;
+				for (z = 0; z < n &&
+					    z < KOF_PTH_SYMPTOM_MAX; z++)
+					if (map[z]) {
+						if (k != z)
+							v[k] = v[z];
+						k++;
+					}
+				for (z = 0; z < k; z++)
+					for (q = 0; q < KOF_FLOW_ARGS; q++) {
+						uint16_t w = v[z].from[q];
+
+						if (!w || w > n)
+							continue;
+						v[z].from[q] = map[w - 1u];
+						if (!v[z].from[q])
+							v[z].from_va[q] = 0;
+					}
+				n = k;
+			}
+			out->len[ci] = (uint8_t)n;
+		}
+		/*
+		 * AND A CHAIN THAT IS NOW ONE STEP IS NOT A CHAIN.
+		 *
+		 * Two steps is the floor the whole set is built on: one
+		 * step is a thing the program does, and what this exists
+		 * to say is what it does NEXT. Dropping an unused mapping
+		 * can take a two-step chain under that floor, and those
+		 * reached the page as single rows - MEASURED: 83 of them
+		 * on one corpus, 5 on another.
+		 */
+		{
+			uint32_t keep = 0;
+
+			for (ci = 0; ci < out->n_chain; ci++) {
+				if (out->len[ci] < 2u)
+					continue;
+				if (keep != ci) {
+					memcpy(out->n[keep], out->n[ci],
+					       (size_t)out->len[ci] *
+					       sizeof out->n[0][0]);
+					out->len[keep] = out->len[ci];
+				}
+				keep++;
+			}
+			out->n_chain = (uint8_t)keep;
+		}
+	}
+	if (out)
+		out->n_seen = kof_flow_n_node(f);
 	kof_flow_free(f);
 	imp_free(im);
 	ret_free(rt);
 	/*
-	 * THE SWEPT CHAIN, ON DEMAND, FOR A CORPUS RUN.
-	 *
-	 * Behind an environment variable and off by default. A rule reaches
-	 * this through kof_pth_match, which answers a percentage against a
-	 * reference somebody already wrote - and there is no way to ask what
-	 * the object's OWN chain is without writing a rule first. Measuring a
-	 * corpus needs exactly that, and a researcher choosing what a rule
-	 * should say needs it before there is a rule to write.
+	 * AND THE LAST GATE, which is the one that turns a sweep that found
+	 * things into a page that shows nothing: every chain the object has
+	 * was offered and none of them was two steps long. Saying "the
+	 * code asks for too little" when the sweep in fact read nothing at
+	 * all, or was refused a region, sends a reader looking in the wrong
+	 * place - so the four cases are told apart.
 	 */
-	if (out && getenv("KOF_FCHAIN_DUMP")) {
+	if (!out->n_chain) {
+		g_pth_last_why = "the sweep read code here, but no run of it "
+				 "claims enough to be worth a chain";
+		if (why)
+			*why = g_pth_last_why;
+	}
+	if (KOF_TRACING && out) {
 		unsigned ci, k;
 
 		for (ci = 0; ci < out->n_chain; ci++) {
-			fprintf(stderr, "[fchain] ");
+			KOF_TRACE("[fchain] ");
 			for (k = 0; k < out->len[ci]; k++) {
 				const struct kof_flow_node *nd =
 					&out->n[ci][k];
@@ -845,8 +1318,7 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 				/* And the NAME it was read from, when there
 				 * was one: a measurement run and a reader
 				 * want the same thing here. */
-				if (getenv("KOF_FCHAIN_VA"))
-					fprintf(stderr, "@%llx:%u ",
+					KOF_TRACE("@%llx:%u ",
 						(unsigned long long)nd->va,
 						(unsigned)nd->func);
 				{
@@ -855,16 +1327,14 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 					for (aq = 0; aq < KOF_FLOW_ARGS; aq++)
 						if (nd->arg_const &
 						    (1u << aq))
-							fprintf(stderr,
-								"a%u=%llx ",
+							KOF_TRACE("a%u=%llx ",
 								aq,
 								(unsigned long long)
 								nd->arg[aq]);
 				}
 				if (nd->from_va[0] || nd->from_va[1] ||
 				    nd->from_va[2] || nd->from_va[3])
-					fprintf(stderr,
-						"<-%llx,%llx,%llx,%llx ",
+					KOF_TRACE("<-%llx,%llx,%llx,%llx ",
 						(unsigned long long)
 							nd->from_va[0],
 						(unsigned long long)
@@ -874,7 +1344,7 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 						(unsigned long long)
 							nd->from_va[3]);
 				if (nd->name && kof_flow_name_of(nd->name))
-					fprintf(stderr, "%s=%s/%u/%u/d%uL%u ",
+					KOF_TRACE("%s=%s/%u/%u/d%uL%u ",
 						kof_flow_cap_name(nd->cap),
 						kof_flow_name_of(nd->name),
 						(unsigned)(nd->flags &
@@ -883,7 +1353,7 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 						(unsigned)nd->depth,
 						(unsigned)nd->loop);
 				else
-				fprintf(stderr, "%s/%u/%u/d%uL%u ",
+				KOF_TRACE("%s/%u/%u/d%uL%u ",
 					kof_flow_cap_name(nd->cap),
 					(unsigned)(nd->flags &
 						   KOF_PTH_FLAG_KEEP),
@@ -897,63 +1367,6 @@ static uint32_t pth_chain_build_in(const struct kof_obj_ctx *ctx, kof_buf b,
 			fputc('\n', stderr);
 		}
 	}
-	/*
-	 * AND THE SAME CHAINS AS A SHAPE, which is what they are.
-	 *
-	 * The flat dump above is the stored form - one line, comparable,
-	 * what a rule carries. This one is the program: a step is indented
-	 * by how many calls and loops enclose it, a loop says how many times
-	 * it went round, and a step that CANNOT follow the one before it
-	 * gets a bar rather than a line, because the two are alternatives
-	 * and printing them one under the other asserts an order no
-	 * execution takes.
-	 *
-	 * The dialog draws the same thing - see draw_pathogen. This exists
-	 * so the shape can be read and measured over a corpus without one.
-	 */
-	if (out && getenv("KOF_FCHAIN_TREE")) {
-		unsigned ci, k;
-
-		for (ci = 0; ci < out->n_chain; ci++) {
-			fprintf(stderr, "[ftree] chain %u\n", ci);
-			for (k = 0; k < out->len[ci]; k++) {
-				const struct kof_flow_node *nd =
-					&out->n[ci][k];
-				unsigned d = nd->depth;
-
-				if (k && nd->rel == KOF_REL_EXCLUSIVE)
-					fprintf(stderr, "[ftree] %*s-- or --\n",
-						(int)(2u * (d + nd->cond)) + 2,
-						"");
-				/* Nothing for UNKNOWN - see the note in
-				 * chain_one: it is the state of most pairs
-				 * and saying it every time reads as the
-				 * dump having given up. */
-				fprintf(stderr, "[ftree] %*s%s%s",
-					(int)(2u * (d + nd->cond)) + 2, "",
-					nd->cond ? "? " : "",
-					kof_flow_cap_name(nd->cap));
-				if (nd->name && kof_flow_name_of(nd->name))
-					fprintf(stderr, " %s",
-						kof_flow_name_of(nd->name));
-				if (nd->repeat > 1u)
-					fprintf(stderr, " x%u",
-						(unsigned)nd->repeat);
-				fputc('\n', stderr);
-			}
-		}
-	}
-	/*
-	 * AND THE LAST GATE, which is the one that turns a sweep that found
-	 * things into a page that shows nothing: every chain the object has
-	 * was offered and none of them cleared kof_diag_worth. Saying "the
-	 * code asks for too little" when the sweep in fact read nothing at
-	 * all, or was refused a region, sends a reader looking in the wrong
-	 * place - so the four cases are told apart.
-	 */
-	if (why && !out->n_chain)
-		*why = "the sweep read code here, but no run of it claims "
-		       "enough to be worth a chain";
 	return out->n_chain;
 }
 
@@ -966,8 +1379,6 @@ const struct kof_flow_set *kof_pth_chain_of(const struct kof_obj_ctx *ctx)
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
 	if (!sc) {
-		if (getenv("KOF_FCHAIN_DUMP"))
-			fprintf(stderr, "[fchain] skip: %s\n", "nosc");
 		return NULL;
 	}
 	if (sc->fchain_ready)
@@ -995,8 +1406,25 @@ const struct kof_flow_set *kof_pth_chain_of(const struct kof_obj_ctx *ctx)
  */
 void kof_scan_fchain_probe(const struct kof_obj_ctx *ctx)
 {
-	if (getenv("KOF_FCHAIN_DUMP") || getenv("KOF_PTH_SURVEY"))
-		(void)kof_pth_chain_of(ctx);
+	/*
+	 * A DEBUG BUILD BUILDS THE CHAIN FOR EVERY OBJECT, so there is
+	 * something to look at. A release build does not: the sweep runs
+	 * when a rule asks for it and not otherwise, which is what keeps a
+	 * scan's cost where it belongs.
+	 */
+	if (KOF_TRACING) {
+		const struct kof_flow_set *set = kof_pth_chain_of(ctx);
+
+		/* The engine knows why it declined - see the `why` strings
+		 * in kof_pth_chain_build - so a run that produced nothing
+		 * says which gate stopped it rather than nothing at all. */
+		if (!set || !set->n_chain)
+			KOF_TRACE("[fchain] none: %s\n",
+				  g_pth_last_why ? g_pth_last_why
+						 : "no reason recorded");
+	} else {
+		(void)ctx;
+	}
 }
 
 

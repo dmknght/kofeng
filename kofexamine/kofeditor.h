@@ -1036,8 +1036,8 @@ struct kof_draft {
 	 *
 	 * ONE, like the shape and unlike the two sets: a chain is a sequence,
 	 * a second chain is a second sequence, and two sequences in one rule
-	 * are two claims that want two matchers. Which one is "worthiest" is
-	 * kof_diag_worth's answer, which is the same gate the aligner applies.
+	 * are two claims that want two matchers. Which one is taken is the
+	 * one saying the most different things - see chain_says.
 	 */
 	struct kof_pth_symptom chain;
 	int          has_chain;

@@ -59,6 +59,10 @@
 #include <kofmod/kofpathogen.h>
 
 
+/* How much of a path or a command a step carries - see
+ * kof_flow_node.text. */
+#define KOF_FLOW_TEXT 40u
+
 struct kof_flow_node {
 	uint64_t va;      /* where the syscall instruction is */
 	uint32_t step;    /* the NORMALISED instruction index - see below */
@@ -335,6 +339,23 @@ struct kof_flow_node {
 	 * inside it, and that difference is a fact about the program.
 	 */
 	uint8_t  entry;
+	/*
+	 * THE STRING AN ARGUMENT POINTED AT, when it pointed at one.
+	 *
+	 * `open` takes a path and `execve` takes a program, and the
+	 * constant is an ADDRESS - so the page said `open(0x4a8c84)`,
+	 * which tells a reader nothing and sends them to a hex editor.
+	 * The bytes are in the object and the engine has them, so the
+	 * engine reads them: see kof_flow_text_arg for which argument of
+	 * which word is one, and the filler in pathogen.
+	 *
+	 * Empty when the argument was not a constant, pointed outside the
+	 * object, or the bytes there are not text. Cut with no ellipsis at
+	 * KOF_FLOW_TEXT - a path longer than this is still recognisable
+	 * from its start, and a row that grows with the file is a row
+	 * that stops lining up.
+	 */
+	char     text[KOF_FLOW_TEXT];
 };
 
 enum {
@@ -504,6 +525,7 @@ uint8_t kof_flow_relation(struct kof_flow *f, uint32_t a, uint32_t b);
 #define KOF_FLOW_MAX_BLOCK 8192u
 
 #define KOF_FLOW_MAX_NODE 2048u
+
 #define KOF_FLOW_MAX_FUNC 4096u
 
 /*
@@ -511,7 +533,7 @@ uint8_t kof_flow_relation(struct kof_flow *f, uint32_t a, uint32_t b);
  * bound: a caller can check it before committing, and an object whose code is
  * larger than this is one nothing here can answer about cheaply.
  */
-#define KOF_FLOW_MAX_CODE (64u * 1024u * 1024u)
+#define KOF_FLOW_MAX_CODE (8u * 1024u * 1024u)
 
 struct kof_flow;
 

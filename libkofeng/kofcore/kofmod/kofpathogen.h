@@ -73,11 +73,22 @@ enum kof_flow_cap {
 	 * apart.
 	 */
 	KOF_CAP_NET_LISTEN,
-	KOF_CAP_READ,         /* read/recvfrom */
-	KOF_CAP_WRITE,        /* write/sendto */
+	/*
+	 * READING AND WRITING A DESCRIPTOR - the words are `file-read` and
+	 * `file-write`, beside `file-open`. They read as plain `read` and
+	 * `write` for a while, which said the verb and left out what it was
+	 * done to; the socket half has its own pair - see KOF_CAP_NET_READ.
+	 */
+	KOF_CAP_READ,
+	KOF_CAP_WRITE,
 	KOF_CAP_FILE_OPEN,
 	KOF_CAP_MEMFD,        /* a file that never touches a filesystem */
-	KOF_CAP_EXEC_IMAGE,   /* execve/execveat */
+	/*
+	 * RUNNING A FILE - execve, execveat. The word is `exec-file`, which
+	 * pairs with `exec-register` for running memory; `exec-image` named
+	 * neither half of that distinction.
+	 */
+	KOF_CAP_EXEC_IMAGE,
 	KOF_CAP_SPAWN,        /* fork/vfork/clone - a separate ADDRESS SPACE */
 	/*
 	 * A THREAD, WHICH IS NOT A SMALLER PROCESS.
@@ -263,7 +274,7 @@ enum kof_flow_cap {
 	 * within the objects that HAVE names, and malware here is statically
 	 * linked while clean software is not - so per object the order
 	 * reverses, 29 of 2416 botnet against 176 of 1260 clean. See
-	 * kof_diag_weight, which weighs it by the second number. The word is
+	 * the measured share below. The word is
 	 * still worth having: it says something true that nothing else said,
 	 * and what it is worth is a measurement and not a hope.
 	 */
@@ -582,8 +593,76 @@ enum kof_flow_cap {
 	 * A `read` whose descriptor cannot be followed stays KOF_CAP_READ.
 	 * The absence of an edge is not evidence of a file.
 	 */
+	/*
+	 * The words are `net-recv` and `net-send`, after the calls they
+	 * come from - recvfrom and sendto. They read as `net-read` and
+	 * `net-write` for a while, which named the direction twice and the
+	 * act not at all.
+	 */
 	KOF_CAP_NET_READ,
 	KOF_CAP_NET_WRITE,
+	/*
+	 * AN ANONYMOUS PIPE, AND IT IS NOT A FINDING.
+	 *
+	 * KOF_CAP_PIPE says so where it is defined: every shell pipeline
+	 * is one, and a word that fires on all of them says nothing. That
+	 * reasoning stands and this does not contradict it.
+	 *
+	 * It exists because `pipe(fds)` MAKES TWO DESCRIPTORS, and the
+	 * thing that matters is what is done with them: `pipe` then
+	 * `dup2` onto stdout then `execve` is a shell whose output goes
+	 * somewhere, which is the shape of every remote shell there is.
+	 * The `dup2` can only say that if there is something to point at.
+	 *
+	 * So this is a step that exists to be the HEAD OF A LINK. A chain
+	 * that does not use it drops it, by the same rule that drops an
+	 * unused mapping, so the shell pipeline the reasoning above warns
+	 * about never reaches a page.
+	 */
+	KOF_CAP_PIPE_OPEN,
+	/*
+	 * MOVING A FILE OUT FROM UNDER ITS NAME.
+	 *
+	 * Split from KOF_CAP_FILE_DELETE, which used to carry it. The
+	 * classification was right - a dropper that renames the installer
+	 * away and one that unlinks it are doing the same thing to the
+	 * same file - but the WORD was not: the page said `file-delete`
+	 * with `rename()` written beside it, which is the engine
+	 * contradicting itself in one line.
+	 *
+	 * Kept apart rather than renamed, because the two are not the
+	 * same to a reader: ransomware renames what it encrypted and
+	 * keeps it, a wiper does not.
+	 */
+	KOF_CAP_FILE_RENAME,
+	/*
+	 * A HEAP BUFFER, AND IT IS NOT A FINDING EITHER.
+	 *
+	 * Every C program calls malloc, so the word on its own says
+	 * nothing - the same objection the list below makes to `pipe`,
+	 * and it is answered the same way: this exists to be the HEAD OF
+	 * A LINK and nothing else.
+	 *
+	 * `buf = malloc(n)` then `read(fd, buf, n)` then `write(1, buf,
+	 * k)` is one buffer carrying a file's contents out, and the two
+	 * transfers can only be joined if the buffer has a name. A stack
+	 * buffer gets one from its frame slot - see cmap.pk - and a
+	 * heap one had none at all, so the second half of every
+	 * read-then-send was a step with `_` where the link should be.
+	 * MEASURED on a gcc -O0 build with eight links written into the
+	 * source: seven were found and this was the one missing.
+	 *
+	 * NOT KOF_CAP_ALLOC, although both hand back memory. That word
+	 * goes through prot_cap, which reads an argument as an mmap
+	 * protection - and malloc's first argument is a SIZE, so
+	 * `malloc(7)` would have been reported as `alloc-exec`. Heap
+	 * memory is not executable without an mprotect, which already
+	 * has its own word.
+	 *
+	 * Dropped by the same rule as the pipe when nothing consumes it,
+	 * so a program that merely allocates never reaches a page.
+	 */
+	KOF_CAP_HEAP,
 	/*
 	 * ================= AND WHAT WAS LEFT OUT, WITH WHY =================
 	 *
@@ -639,6 +718,26 @@ enum kof_flow_cap {
 typedef char kof_cap_fits_in_mask[(KOF_CAP_COUNT <= 64) ? 1 : -1];
 
 const char *kof_flow_cap_name(uint8_t cap);
+
+/* What to call the thing this capability PRODUCES, when a later step is
+ * handed it - "sock", "mem", "lib". NULL for a step that makes nothing.
+ * See kof_flow_cap_makes, which is the same set. */
+const char *kof_flow_cap_noun(uint8_t cap);
+
+/* Which argument of this step is a string - index plus one, or 0. The
+ * name matters: `openat` takes the path second. */
+uint8_t kof_flow_text_arg(uint8_t cap, uint16_t name);
+
+/* Which argument this step writes its result through - index plus one,
+ * or 0. See the note in vocab.c. */
+uint8_t kof_flow_out_arg(uint8_t cap);
+
+/*
+ * WHETHER THIS WORD NAMES A STEP THAT MAKES SOMETHING, so that a later step
+ * can hold it. A link is a variable - see the note in vocab.c - and its head
+ * has to be a word that produces one.
+ */
+int kof_flow_cap_makes(uint8_t cap);
 
 /* The selector was known only in its low 8 bits - "mov al, 3" with the rest of
  * eax never set in this sweep. Accepted because a syscall number under 256 is

@@ -1,6 +1,12 @@
 kofeng QUALITY CHECKLIST
 Tick each box, or write the finding beside it. "N/A" needs a reason.
 
+THE RULES THAT APPLY TO EVERY CHANGE are in
+CLAUDE.md, which every session loads - no getenv, use the API instead
+of writing the logic twice, one carrier per fact, a cap bounds cost and never
+deletes evidence, decide once and look it up, measure and name the gate.
+Read that first; this file is the part that depends on WHAT you are building.
+
 
 ################################################################################
 PART I - WHAT EACH KIND OF COMPONENT MUST SATISFY

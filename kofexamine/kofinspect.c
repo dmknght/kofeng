@@ -2731,7 +2731,8 @@ static uint32_t chain_src(const struct kof_flow_node *n, uint32_t len,
  * of the two mappings was entered, and it says it without a counter.
  */
 static void chain_names(const struct kof_flow_node *n, uint32_t len,
-			char nm[][CHAIN_NAME_MAX])
+			char nm[][CHAIN_NAME_MAX],
+			struct kof_chain_links *reg)
 {
 	uint32_t i, q, j;
 
@@ -2751,13 +2752,39 @@ static void chain_names(const struct kof_flow_node *n, uint32_t len,
 			if (j != (uint32_t)-1)
 				nm[j][0] = '\1';   /* referenced; name below */
 		}
-	{
-		unsigned seq = 0;
+	/*
+	 * NUMBERED BY THE STEP THAT MADE THE VALUE, across the whole
+	 * object when the caller keeps a registry - see kof_chain_links.
+	 *
+	 * The number used to restart at every chain, so `link_1` was a
+	 * socket on one page of a file and a file handle on the next.
+	 * Keyed on the producer's address, one socket is one `link_1`
+	 * wherever it appears, and two chains that share it say so.
+	 */
+	for (i = 0; i < len; i++) {
+		uint32_t k, got = 0;
 
-		for (i = 0; i < len; i++)
-			if (nm[i][0])
-				snprintf(nm[i], CHAIN_NAME_MAX, "node_%u",
-					 ++seq);
+		if (!nm[i][0])
+			continue;
+		if (reg) {
+			for (k = 0; k < reg->n; k++)
+				if (reg->va[k] == n[i].va) {
+					got = k + 1u;
+					break;
+				}
+			if (!got && reg->n < KOF_PTH_SYMPTOM_MAX)
+				reg->va[reg->n] = n[i].va, got = ++reg->n;
+		}
+		if (!got) {
+			/* No registry, or it is full: number within the
+			 * chain, which is still unambiguous on the page a
+			 * reader is looking at. */
+			got = 0;
+			for (k = 0; k <= i; k++)
+				if (nm[k][0])
+					got++;
+		}
+		snprintf(nm[i], CHAIN_NAME_MAX, "link_%u", got);
 	}
 }
 
@@ -2781,6 +2808,27 @@ static void chain_args(const struct kof_flow_node *n, uint32_t i, char *out,
 			last = q + 1u;
 	out[0] = 0;
 	for (q = 0; q < last && at + 56u < cap; q++) {
+		/*
+		 * THE STRING, WHERE THE ENGINE READ ONE - see
+		 * kof_flow_node.text. `open("/proc/net/route")` is the
+		 * note a reader wanted; `open(0x4a8c84)` is the one they
+		 * got.
+		 *
+		 * IN THE NOTE AND NOT IN THE STATEMENT. The statement is
+		 * what the program DID and carries the links; the path is
+		 * how it was spelled, which is the note's business - and
+		 * a row that grows by a path stops lining up with the
+		 * rows around it.
+		 */
+		if (!links && n[i].text[0] &&
+		    kof_flow_text_arg(n[i].cap, n[i].name) == q + 1u) {
+			const char *sep2 = (links ? at != 0 : q != 0)
+					   ? ", " : "";
+
+			at += (size_t)snprintf(out + at, cap - at, "%s\"%s\"",
+					       sep2, n[i].text);
+			continue;
+		}
 		const char *sep = (links ? at != 0 : q != 0) ? ", " : "";
 		uint32_t src1 = chain_src(n, KOF_PTH_SYMPTOM_MAX, i, q);
 		uint16_t src = src1 == (uint32_t)-1 ? 0u
@@ -2929,7 +2977,8 @@ static void chain_add(struct chain_sink *k, const char *fmt, ...)
 }
 
 uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
-			  struct kof_chain_line *out, uint32_t cap)
+			  struct kof_chain_line *out, uint32_t cap,
+			  struct kof_chain_links *reg)
 {
 	struct chain_sink sk;
 
@@ -2970,7 +3019,7 @@ uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
 	sk.n = 0;
 	if (len > KOF_PTH_SYMPTOM_MAX)
 		len = KOF_PTH_SYMPTOM_MAX;
-	chain_names(n, len, nm);
+	chain_names(n, len, nm, reg);
 
 	/*
 	 * NO VARIABLE NAMES, AND THEY WERE TRIED.
@@ -2989,11 +3038,10 @@ uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
 	 */
 	for (i = 0; i < len; i++) {
 		char call[48], args[160], note[320], line[560];
-		char vargs[160], spell[224], inl[40];
+		char vargs[160], spell[224];
 		unsigned want = n[i].depth, cd = 0;
 		size_t at;
 
-		inl[0] = '\0';
 		if (want > CHAIN_MAX_INDENT)
 			want = CHAIN_MAX_INDENT;
 		/* How much of the depth is CALLS: all of it but the one level
@@ -3086,11 +3134,10 @@ uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
 			 *
 			 * Two braces and an indent exist to say "these
 			 * belong together"; with one row inside there is no
-			 * "these". The fact itself still has to be said, so
-			 * it moves onto the row:
+			 * "these", so the block is not drawn:
 			 *
-			 *   loop {              name_hash()  // in a loop
-			 *     name_hash()  ->   name_hash()  // in a loop
+			 *   loop {              name_hash()
+			 *     name_hash()  ->
 			 *   }
 			 *
 			 * WHICH ALSO STOPS A FALSE CLAIM. The depth a node
@@ -3143,17 +3190,47 @@ uint32_t kof_chain_render(const struct kof_flow_node *n, uint32_t len,
 				    n[j].branch == n[i].branch &&
 				    n[j].arm != n[i].arm)
 					bodyn = 2u;
+				/*
+				 * AND A LOOP WITH ONE ROW KEEPS ITS BLOCK.
+				 *
+				 * "Groups nothing" is the right rule for a
+				 * call - one step inside a call is just
+				 * that step. A loop is not grouping: it is
+				 * saying the step RUNS AGAIN, which is a
+				 * fact about that one row and the whole
+				 * difference between reading a socket once
+				 * and beaconing on it.
+				 *
+				 * It was folded away because two steps in
+				 * two different loops used to land under
+				 * one brace - and the loop identity test
+				 * above now stops that at its source, so
+				 * the fold is no longer paying for
+				 * anything. MEASURED after the chains were
+				 * cut down to their links: 7 of 254 objects
+				 * drew a loop, while the engine had marked
+				 * 1954 steps as repeating - the bodies had
+				 * one surviving row each.
+				 */
+				if (kind[0] == 'l')
+					bodyn = 2u;
 				if (bodyn <= 1u) {
-					size_t k = strlen(inl);
-
+					/*
+					 * AND THE FOLDED BLOCK SAYS NOTHING
+					 * IN THE COMMENT COLUMN.
+					 *
+					 * It used to add "in a loop", "only
+					 * on a branch" or "on a thread"
+					 * there. Inside a block the page has
+					 * already drawn, that is the page
+					 * restating itself - a row sitting
+					 * under an `if {` does not need a
+					 * comment saying it is conditional -
+					 * and a comment that repeats what
+					 * the reader can see is noise with a
+					 * slash in front of it.
+					 */
 					lvl_loop[open] = 0;
-
-					snprintf(inl + k, sizeof inl - k,
-						 "%s%s", k ? ", " : "",
-						 kind[0] == 'l' ? "in a loop"
-						 : kind[0] == 'i'
-						   ? "only on a branch"
-						   : "on a thread");
 					own[open] = 0;
 					open++;
 					continue;
@@ -3308,26 +3385,8 @@ body:
 		 * register rather than by name, and - only when a block was
 		 * folded away - the word that block would have been.
 		 */
-		/*
-		 * `via-register` SAYS NOTHING ON A WORD THAT IS ALREADY ABOUT
-		 * A REGISTER. It is worth saying of `alloc` - that one was
-		 * reached through a slot held in a register rather than
-		 * called by name - and it is a tautology on call-register and
-		 * exec-register.
-		 */
-		if ((n[i].flags & KOF_FLOWF_VIA_REG) &&
-		    n[i].cap != KOF_CAP_CALL_REG &&
-		    n[i].cap != KOF_CAP_EXEC_REG)
-			at += (size_t)snprintf(note + at, sizeof note - at,
-					       "%svia-register",
-					       at ? ", " : "");
 		/* `datagram` is in the capability's own word now - see
 		 * chain_callee - so saying it again says nothing. */
-		/* And whatever a block would have said, had there been more
-		 * than one row to put inside it. */
-		if (inl[0])
-			(void)snprintf(note + at, sizeof note - at, "%s%s",
-				       at ? ", " : "", inl);
 
 		/* NO COLOUR IN A PADDED CELL: the escape counts against the
 		 * field width and nothing else does. */

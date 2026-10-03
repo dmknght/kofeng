@@ -1497,13 +1497,26 @@ uint32_t kof_elf_funcs(kof_buf f, const struct kof_elf_info *p,
 		if (!(p->sec[sy.shndx].flags & SHF_EXECINSTR))
 			continue;
 		/*
-		 * THE ADDRESS SPACE THE OBJECT IS READ IN. An ET_REL section
-		 * declares address zero, so everything in it is named by file
-		 * offset; a linked object has real addresses and gets them.
+		 * THE ADDRESS SPACE THE OBJECT IS READ IN.
+		 *
+		 * In a LINKED object st_value is already the virtual address
+		 * and nothing is added to it. In an ET_REL it is an offset
+		 * from the start of its section, which declares address
+		 * zero, so the section's place in the file is what names it.
+		 *
+		 * The section's address used to be added in BOTH cases, so
+		 * every linked object got each function at twice its
+		 * address. MEASURED on a static Mirai: 419 declared starts,
+		 * every one of them outside the code range the sweep was
+		 * given (0x8001d0..0x81b6f5 against 0x4000e8..0x4116d8), so
+		 * discover() discarded all 419 seeds and is_decl_head never
+		 * matched. The one thing this exists for - a function
+		 * nothing calls - therefore worked only on ET_REL, which is
+		 * what the .ko it was written against happens to be.
 		 */
-		va = sy.value + (p->sec[sy.shndx].mem_addr
-				 ? p->sec[sy.shndx].mem_addr
-				 : p->sec[sy.shndx].file_off);
+		va = p->sec[sy.shndx].mem_addr
+		     ? sy.value
+		     : sy.value + p->sec[sy.shndx].file_off;
 		sym_name(f, &t, &sy, nm, sizeof nm);
 		fn(user, va, sy.size, nm);
 		n++;

@@ -65,11 +65,43 @@
  * pathogen.c while the viewer had a sweep of its own, and that copy is what
  * drifted.
  */
-#define FLOW_SET_MAX 8u
+/*
+ * HOW MANY CHAINS ONE OBJECT MAY KEEP.
+ *
+ * Eight, and that was a cap on the RESULT - the one thing a limit here
+ * is never allowed to be. A bot has more than eight things it does, so
+ * the ninth evicted the weakest by a count of distinct words, and what
+ * it threw away was evidence: MEASURED on one, the chain joining `pipe`
+ * to the `dup2` on it - the whole of a redirected shell - was stored
+ * and then evicted by a longer chain that listed more words and joined
+ * none of them.
+ *
+ * Twenty-four bounds the memory, which is what a limit is for: the set
+ * is one allocation of about sixty kilobytes, reused per object. The
+ * eviction rule stays, because a file CAN have more shapes than any
+ * number, and it now counts links beside words - see flow_set_offer.
+ */
+#define FLOW_SET_MAX 24u
 struct kof_flow_set {
 	struct kof_flow_node n[FLOW_SET_MAX][KOF_PTH_SYMPTOM_MAX];
 	uint8_t len[FLOW_SET_MAX];
 	uint8_t n_chain;
+	/*
+	 * HOW MANY CALLS THE SWEEP SAW, before any of this was pruned.
+	 *
+	 * The chains alone cannot tell "this object makes no system calls"
+	 * from "it makes forty and not one of them hands anything to
+	 * another" - a link is the unit kept, so a step in no link is
+	 * dropped and both faults arrive here as n_chain == 0. They have
+	 * different fixes: the first is a region or a decoder, the second
+	 * is provenance.
+	 *
+	 * MEASURED over 254 ELF: 26 of the 47 dynamically linked objects
+	 * reported no chain, and this is the field that says which of the
+	 * two it was. See kof_flow_node_at, which makes the same
+	 * distinction one node at a time.
+	 */
+	uint32_t n_seen;
 };
 
 /*
@@ -787,9 +819,6 @@ struct kof_scanner {
 	struct kof_src_region cur_rgn[KOF_SRC_MAX_REGIONS];
 	uint32_t              n_cur_rgn;
 	uint8_t               cur_rgn_fmt;
-	/* Whether the object being scanned is a rendering - see
-	 * kof_src_declare_view. */
-	uint8_t               cur_is_view;
 
 	/*
 	 * ---- THE ONE PLACE A FILE'S VERDICT IS KEPT ----------------------
@@ -853,7 +882,6 @@ struct kof_scanner {
 	uint32_t              n_pend_rgn;
 	uint8_t               pend_rgn_fmt;
 	/* And whether the next child is one. Spent by kid_push like the rest. */
-	uint8_t               pend_view;
 
 	/*
 	 * AND THE SYMBOL RECORDS THE NEXT CHILD IS TO BE READ WITH.

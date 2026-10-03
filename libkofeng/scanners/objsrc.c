@@ -86,7 +86,6 @@ struct kof_objsrc {
 	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
 	uint32_t              n_rgn;
 	uint8_t               rgn_fmt;   /* whose vocabulary rgn[].mask uses */
-	uint8_t               is_view;   /* a rendering - see kof_src_declare_view */
 
 	/*
 	 * THE SYMBOLS THIS OBJECT IS TO BE READ WITH, when its own bytes cannot
@@ -170,16 +169,6 @@ int kof_src_lang_of(const struct kof_objsrc *s, uint8_t *subtype,
 	return 1;
 }
 
-void kof_src_declare_view(struct kof_objsrc *s)
-{
-	if (s)
-		s->is_view = 1;
-}
-
-int kof_src_is_view(const struct kof_objsrc *s)
-{
-	return s && s->is_view;
-}
 
 uint8_t kof_src_region_fmt_of(const struct kof_objsrc *s)
 {

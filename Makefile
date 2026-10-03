@@ -795,7 +795,9 @@ INT   := $(BUILD)/temp
 TEST  := $(BUILD)/test
 SDK   := $(OUT)
 
-all: sdk tools databases
+# check-rules first, so a rule a grep can see cannot reach a build - see
+# CLAUDE.md. It is a grep over the tree and costs nothing beside the compile.
+all: check-rules sdk tools databases
 
 # ------------------------------------------------------- building one tool
 #
@@ -934,6 +936,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/scripts/script_norm.c \
            libkofeng/analyzers/parsers/events/amsi_parse.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
+           libkofeng/analyzers/parsers/binaries/disasm/decode_x86.c \
+           libkofeng/analyzers/parsers/binaries/disasm/decode_mips.c \
            libkofeng/analyzers/parsers/binaries/disasm/xref.c \
            libkofeng/analyzers/parsers/binaries/disasm/flow.c \
            libkofeng/analyzers/parsers/binaries/disasm/vocab.c \
@@ -1037,6 +1041,12 @@ KOF_BUILD_STAMP := $(shell $(NOW_UTC))
 # the same make run; the names stay apart because the two things they describe
 # can be shipped separately - an engine binary and a database built a week later
 # are the ordinary case, and then the numbers differ on their own.
+# THE DIAGNOSTIC OUTPUT IS A BUILD CHOICE - see libkofeng/kofcore/kofdebug.h.
+# `make` ships without it; `make DEBUG=1` compiles it in. It replaced a set of
+# getenv() switches, which put an environment lookup on hot paths and let a
+# shipped binary be talked into printing.
+DEBUG ?= 0
+override CFLAGS += -DKOF_DEBUG=$(DEBUG)
 override CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
 override CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 
@@ -1842,11 +1852,17 @@ DB        ?= $(strip $(if $(filter bases,$(BASESET)),$(OUT)/databases,\
 # every ksigbuilder invocation are put in the environment here instead. make
 # does that identically on both platforms, and the recipe below is then a
 # command and its arguments - which is the only shape both shells agree on.
-export KOF_INCLUDE       := $(abspath $(OUT)/include)
-export KOF_LDSCRIPT      := $(abspath ksigbuilder/module.ld)
-export KOF_TARGET_TRIPLE
-export LD                := $(LD_FOR_SIGS)
-export CC
+# THEY ARE ARGUMENTS NOW, not exported variables - see opt_take in
+# ksigbuilder.c. A command and its arguments is the shape both sh and
+# PowerShell agree on, which is what the note above was reaching for, and it
+# keeps the build from depending on what is in the environment it started in.
+KSB_OPTS = --include $(abspath $(OUT)/include) \
+           --ldscript $(abspath ksigbuilder/module.ld) \
+           --basedir $(abspath $(BASEDIR)) \
+           --cc $(CC) --ld $(LD_FOR_SIGS)
+ifneq ($(KOF_TARGET_TRIPLE),)
+KSB_OPTS += --triple $(KOF_TARGET_TRIPLE)
+endif
 
 #
 # One process for the whole tree - see ksigbuilder's --tree - which builds the
@@ -1868,7 +1884,7 @@ databases: $(OUT)/bin/ksigbuilder$(EXE) $(SDK_HDR)
 	@$(call RMRF,$(DB))
 	@$(call MKDIR,$(ARTEFACTS))
 	@$(call MKDIR,$(DB))
-	@$(call EXEC,$(OUT)/bin/ksigbuilder$(EXE)) --tree $(BASEDIR) $(ARTEFACTS) $(DB) --jobs $(JOBS)
+	@$(call EXEC,$(OUT)/bin/ksigbuilder$(EXE)) --tree $(BASEDIR) $(ARTEFACTS) $(DB) --jobs $(JOBS) $(KSB_OPTS)
 	$(info $(SP)   scan with: $(OUT)/bin/kofscanner$(EXE) --db $(DB) --scan-files <path>)
 
 # Kept as a name because it is in muscle memory and in scripts; the artefacts
@@ -2670,3 +2686,27 @@ $(TEST)/antarc_dump$(EXE): tests/tools/antarc_dump.c $(ANTARC_SRC) \
                            $(KOFEVT_SRC) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $(ANTARC_INC) tests/tools/antarc_dump.c \
 	      $(ANTARC_SRC) $(KOFEVT_SRC) -o $@ $(LDFLAGS)
+
+#
+# THE RULES THAT A GREP CAN CHECK - see CLAUDE.md for the ones it cannot.
+#
+# A written rule is a hope; this one is a build failure. getenv() kept coming
+# back - as a trace switch, as a limit, as a path - and each time it put an
+# environment lookup on a hot path and let a shipped binary be talked into
+# behaving differently. kofmontrace is the one stated exception: it reproduces
+# execvp's search and has to look where the exec will look.
+#
+.PHONY: check-rules
+check-rules:
+	@bad=`grep -rn 'getenv *(' --include=*.c --include=*.h \
+	        libkofeng libkofemu libkoforbit kofexamine kofscanner \
+	        kofwatcher ksigbuilder 2>/dev/null \
+	      | grep -v 'kofcore/kofdebug.h' \
+	      | grep -v 'kofwatcher/kofmontrace.c' \
+	      | grep -v '^[^:]*:[0-9]*: *\*'` ; \
+	if [ -n "$$bad" ]; then \
+	  echo 'getenv() is not allowed in the engine - see CLAUDE.md:' ; \
+	  echo "$$bad" ; \
+	  exit 1 ; \
+	fi ; \
+	echo 'check-rules: no getenv in the engine'

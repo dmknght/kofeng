@@ -1803,7 +1803,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * view and every rule searches them, which is what the view is for; it
 	 * is the structure that is not recovered.
 	 */
-	if (sc->cur_is_view)
+	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
 		return 0;
 
 	kof_mod_unpack_mode(ctx, 1);
@@ -2930,7 +2930,7 @@ static void lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 {
 	sc->cur_lib.n = 0;
 	sc->cur_lib_ok = 0;
-	if (sc->cur_is_view) {
+	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED) {
 		/*
 		 * A VIEW KNOWS WHERE ITS LIBRARY IS BECAUSE IT WAS TOLD.
 		 *
@@ -3266,7 +3266,7 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * table", which every view has EXCEPT one made from an object whose
 	 * regions could not be resolved, and that exception was a real one.
 	 */
-	if (sc->cur_is_view)
+	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
 		return;
 	/*
 	 * AND NOT A FORM SOMEBODY ELSE ALREADY MADE.
@@ -3824,14 +3824,11 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->pend_subfam  = ctx->subfamily;
 		sc->pend_lang    = 1;
 	}
-	/* What this object IS, said rather than inferred - see
-	 * kof_src_declare_view. */
-	sc->pend_view = 1;
 	/*
 	 * AND WHAT IT IS, in the enum every consumer already reads.
 	 *
-	 * `pend_view` is the engine's own guard against normalising a view
-	 * again; it says nothing to anybody outside. KOF_ENT_NORMALIZED is
+	 * KOF_ENT_NORMALIZED is the one carrier: it is both the engine's
+	 * own guard against normalising a view twice and
 	 * the published fact, the one kof_result.entry_kind carries to a
 	 * caller - and without it the viewer saw a child of unknown kind and
 	 * had nothing to go on but its label.
@@ -4128,24 +4125,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 			uint32_t pdepth, int from_packer,
 			const char *inherit_predict, uint8_t as_fmt)
 {
-	if (getenv("KOF_OBJ_DUMP")) {
-		static unsigned q; char nm[256]; FILE *f;
-		snprintf(nm,sizeof nm,"%s/o%03u.bin",getenv("KOF_OBJ_DUMP"),q++);
-		f=fopen(nm,"wb"); if(f){fwrite(buf.p,1,(size_t)buf.n,f);fclose(f);}
-	}
-
-	if (getenv("KOF_OBJ_DUMP")) {
-		static unsigned q; char nm[256]; FILE *f;
-		snprintf(nm,sizeof nm,"%s/o%03u.bin",getenv("KOF_OBJ_DUMP"),q++);
-		f=fopen(nm,"wb"); if(f){fwrite(buf.p,1,(size_t)buf.n,f);fclose(f);}
-	}
-
-	if (getenv("KOF_OBJ_DUMP")) {
-		static unsigned q; char nm[256]; FILE *f;
-		snprintf(nm,sizeof nm,"%s/o%03u.bin",getenv("KOF_OBJ_DUMP"),q++);
-		f=fopen(nm,"wb"); if(f){fwrite(buf.p,1,(size_t)buf.n,f);fclose(f);}
-	}
-
 	struct kof_obj_ctx ctx;
 	uint32_t present, want, det_n;
 	const char *predict = NULL;
@@ -4933,7 +4912,6 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 				w->sc->cur_rgn[g] = r[g];
 			w->sc->n_cur_rgn = nr;
 			w->sc->cur_rgn_fmt = kof_src_region_fmt_of(src);
-			w->sc->cur_is_view = (uint8_t)kof_src_is_view(src);
 		}
 		w->sc->cur_lang = (uint8_t)kof_src_lang_of(src,
 						&w->sc->cur_subtype,
@@ -4974,7 +4952,8 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		 *
 		 * So: a root or a container's member, and not a view.
 		 */
-		if (!from_packer && !kof_src_is_view(src)) {
+		if (!from_packer &&
+		    kof_src_kind_of(src) != KOF_ENT_NORMALIZED) {
 			w->sc->verdict_have = 0;
 			w->sc->verdict_lvl  = 0;
 		}

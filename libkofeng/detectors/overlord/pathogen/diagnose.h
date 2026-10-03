@@ -67,40 +67,28 @@
  * the whole point of measuring rather than assigning - it would have been easy
  * to give reading a file the same standing as mapping executable memory.
  */
-#define KOF_DIAG_W_COMMON  1u   /* over 50%   */
-#define KOF_DIAG_W_ORDINARY 2u  /* 10 - 50%   */
-#define KOF_DIAG_W_NOTABLE 4u   /* 1 - 10%    */
-#define KOF_DIAG_W_RARE    8u   /* under 1%   */
-
-uint8_t kof_diag_weight(uint8_t cap);
-
-/*
- * IS THIS SEQUENCE WORTH COMPARING AT ALL - the gate, and it is most of the
- * cost saving.
- *
- * Two nodes of "read then write" is every program ever written, and aligning
- * it against anything produces a match that means nothing. So a sequence has
- * to be long enough to say something AND hold something that is not everywhere.
- * On /usr/bin that leaves well under one percent of regions as candidates
- * before a single cell of the table is filled.
- */
 #define KOF_DIAG_MIN_STEPS 2u
 /*
- * AND THE BAR IS THE SUM OF THE WEIGHTS, not the presence of a rare one.
+ * AND THERE IS NO WEIGHT BAR ANY MORE.
  *
- * "Contains something rare" was the first rule here and MEASUREMENT REFUSED
- * IT. It passed zero of 76510 clean regions, which read as a triumph until the
- * same gate was run against the things it is for: the meterpreter x64 stager
- * holds connect and sleep - 1.76% and 6.74%, neither of them rare - and was
- * rejected too. A gate that turns away every sample it exists to catch is not
- * selective, it is broken.
+ * There was one: every capability carried a weight from a four-band ladder
+ * measured over one corpus, a chain's weights were summed, and anything
+ * under twelve was thrown away before a reader or a rule ever saw it.
  *
- * Twelve, which is three NOTABLE capabilities, or one RARE beside one NOTABLE.
- * It says the same thing the first rule meant - "this region claims more than
- * every program claims" - without making it hang on one band.
+ * MEASURED, IT DELETED THE EVIDENCE IT WAS MEANT TO RANK. The sum is taken
+ * over a chain's STEPS, and adjacent identical steps merge into one with a
+ * count - so a function that resolves forty-six symbols in a row collapses
+ * to a single `lib-resolve`, scores four, and the whole chain is dropped.
+ * Forty-six nodes of a loader's import stub cost the node budget and
+ * produced nothing. The bar could not see the difference between a program
+ * doing one thing once and a program doing it forty-six times, because
+ * merging had already thrown that away before the sum was taken.
+ *
+ * A BAR BELONGS WHERE THE CLAIM IS MADE, NOT WHERE THE EVIDENCE IS BUILT. A
+ * rule that wants three notable capabilities can say so; the analyser's job
+ * is to report what is there. So every chain the sweep builds is kept, and
+ * what to do with it is the reader's decision.
  */
-#define KOF_DIAG_MIN_WEIGHT 12u
-int kof_diag_worth(const struct kof_flow_node *v, uint32_t n);
 
 /*
  * WHAT LINED UP. Every field is a count, and a rule reads them together.
@@ -111,7 +99,6 @@ struct kof_diag_hit {
 	uint8_t  mismatch;   /* aligned against something else            */
 	uint8_t  gaps;       /* how many runs of insertion or deletion    */
 	uint8_t  gap_len;    /* how long they are in total                */
-	uint8_t  rare;       /* how many of the matches were rare         */
 	uint8_t  chained;    /* matched nodes carrying `from` or EXECUTED */
 	uint8_t  a_first, a_last;   /* the segment of A that lined up     */
 	uint8_t  b_first, b_last;

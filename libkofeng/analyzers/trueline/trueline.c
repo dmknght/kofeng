@@ -426,8 +426,16 @@ static int sym_extent(kof_buf file, const struct kof_elf_info *e, int be,
 static void lib_add(struct kof_rlist *l, uint64_t obj, uint64_t off,
 		    uint64_t n)
 {
-	if (l->n >= l->cap)
+	/*
+	 * ONCE, NOT ONCE PER ADD. The merge is here to make room, and
+	 * when it found none the list cannot have changed since - see
+	 * kof_rlist.packed, which is cleared by the next add that lands.
+	 */
+	if (l->n >= l->cap) {
+		if (l->packed)
+			return;
 		kof_rl_normalise(l);
+	}
 	kof_rl_add(l, obj, off, n);
 }
 
