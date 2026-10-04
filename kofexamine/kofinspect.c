@@ -34,7 +34,7 @@
 
 #include "kofinspect.h"
 #include "../libkofeng/kofcore/kofplatform.h"
-#include "../libkofeng/detectors/matchers/kofmatch.h"
+#include "../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../libkofeng/scanners/scan.h"
 #include <kofmod/script.h>
 /* KOF_PROC_OS_LIST: the platform a process record is from, which is its

@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../libkofeng/databases/hexprog.h"
-#include "../../libkofeng/detectors/matchers/kofmatch.h"
+#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../../libkofeng/databases/dbcore.h"
 
 int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len);

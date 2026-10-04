@@ -188,7 +188,7 @@
 
 #include <stdint.h>
 #include <kofmod/kofsig.h>   /* struct kof_range */
-#include "../../kofcore/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 #include "kofmatch.h"
 
 struct kof_engine;

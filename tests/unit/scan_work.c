@@ -39,7 +39,7 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/databases/dbloader.h"
 #include "../../libkofeng/databases/dbpacker.h"
-#include "../../libkofeng/detectors/matchers/kofmatch.h"
+#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../../libkofeng/kofeng.h"
 
 static int failures;

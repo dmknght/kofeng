@@ -64,7 +64,7 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detectors/matchers/kofmultimatch.h"
+#include "../detectors/overlord/matchers/kofmultimatch.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

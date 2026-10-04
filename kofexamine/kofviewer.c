@@ -94,7 +94,7 @@
 #include "../libkofeng/scanners/scan.h"
 #include "../libkofeng/scanners/objsrc.h"
 #include "../libkofeng/extractors/unpack/emu_unpack.h"
-#include "../libkofeng/detectors/matchers/kofmatch.h"
+#include "../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../libkofeng/databases/hexprog.h"
 #include "../libkofeng/databases/dbcore.h"
 #include "../libkofeng/databases/dbloader.h"

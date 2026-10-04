@@ -22,10 +22,10 @@
  * kofplatform.h for what it is and why the Windows side of it does not need this. */
 #define _GNU_SOURCE
 
-#include "../../kofcore/kofcore.h"
+#include "../../../kofcore/kofcore.h"
 #include "kofmatch.h"
-#include "../../databases/dbcore.h"   /* KOF_STR_* */
-#include "../../kofcore/kofplatform.h"
+#include "../../../databases/dbcore.h"   /* KOF_STR_* */
+#include "../../../kofcore/kofplatform.h"
 
 #include <stdlib.h>
 #include <string.h>

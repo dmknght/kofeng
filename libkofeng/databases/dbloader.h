@@ -484,7 +484,7 @@ struct kof_engine {
 	uint32_t                 n_blk;
 	uint32_t                *blk_pool;
 	uint32_t                 n_blk_pool;
-	/* The index built over the two above - see detectors/matchers/kofplague.h. NULL
+	/* The index built over the two above - see detectors/overlord/matchers/kofplague.h. NULL
 	 * when there are no blocks. */
 	struct kof_plague_set   *plague;
 

@@ -369,7 +369,7 @@ enum kof_pack_sec_id {
 	 * two: a block is a fixed record and the hashes are a variable run, and
 	 * a reader walks the first without touching the second.
 	 *
-	 * Empty in every pack outside bases/plague, and empty costs a section
+	 * Empty in every pack that carries no block rule, and empty costs a section
 	 * table row - which is why they are here rather than being a pack kind
 	 * of their own. A plague rule is an ordinary detector that happens to
 	 * measure a block; giving it a separate pipeline would mean it could not

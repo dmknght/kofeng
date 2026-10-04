@@ -40,7 +40,7 @@
 
 #include "kofeditor.h"
 #include "../libkofeng/databases/hexprog.h"
-#include "../libkofeng/detectors/matchers/kofmatch.h"
+#include "../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../libkofeng/kofcore/kofplatform.h"
 
 
@@ -5261,13 +5261,26 @@ shc_done:
  * gen_path_num, which is the other half and is kept separate so a name that
  * does not parse simply is not this family rather than being half of it.
  */
-static int path_is_family(const char *path, const char *fname)
+/*
+ * DOES THIS PATH ALREADY CARRY THIS RULE'S NAME - <type>_<family>_<id>.c.
+ *
+ * `stem` is the type word and the family joined, because BOTH are part of
+ * the name now and either one changing has to rename the file. Reading only
+ * the family would leave a rule reclassified from botnet to trojan sitting
+ * in a file that still says botnet, which is the thing the naming exists to
+ * prevent.
+ *
+ * A file written before the type prefix answers NO, and that is the
+ * migration: open an old rule, save it, and it is written under the new
+ * name while the old one goes - the same path a renamed family takes.
+ */
+static int path_is_family(const char *path, const char *stem)
 {
 	const char *b = strrchr(path, '/');
-	size_t n = strlen(fname);
+	size_t n = strlen(stem);
 
 	b = b ? b + 1 : path;
-	if (strncmp(b, fname, n) || b[n] != '_')
+	if (strncmp(b, stem, n) || b[n] != '_')
 		return 0;
 	for (b += n + 1; *b && *b != '.'; b++)
 		if (*b < '0' || *b > '9')
@@ -5553,7 +5566,7 @@ void generate(struct kof_editor *e, int as_new)
 		 */
 	}
 	struct object *ob = &e->obj[e->dr.decl[0].obj];
-	char path[400], safe[48], fname[48];
+	char path[400], safe[48], fname[48], stem[80];
 	/* The file this Save is replacing because the family was renamed, or
 	 * empty - removed only after the new one is written whole. */
 	char rename_from[400] = { 0 };
@@ -5606,6 +5619,21 @@ void generate(struct kof_editor *e, int as_new)
 		return;
 
 	/*
+	 * THE FILE NAME LEADS WITH THE TYPE: <type>_<family>_<id>.c.
+	 *
+	 * ksigbuilder reads it back and refuses a file whose prefix
+	 * disagrees with KOF_TARGET_NAME, so the name is checked rather
+	 * than merely conventional - see nameform_read. The id stays the
+	 * TRAILING number, which is what the detection variant is made of,
+	 * so adding the prefix renames no finding.
+	 */
+	snprintf(stem, sizeof stem, "%s_%s",
+		 e->dr.maltype < MALTYPE_N ? maltype_word[e->dr.maltype]
+					   : maltype_word[0], fname);
+	for (i = 0; stem[i]; i++)
+		stem[i] = (char)tolower((unsigned char)stem[i]);
+
+	/*
 	 * One directory serves as both the source tree and the output, because
 	 * they are the same thing: what this writes IS a signature source.
 	 *
@@ -5629,13 +5657,22 @@ void generate(struct kof_editor *e, int as_new)
 			return;
 		}
 		/*
-		 * A RULE THAT USES A SIMILARITY BLOCK LIVES IN bases/plague.
+		 * A SIMILARITY BLOCK NO LONGER PICKS A DIRECTORY.
 		 *
-		 * The packer names its database after the distinction and the
-		 * source tree makes it too - a block rule is a different kind
-		 * of content whatever else it also carries, so one block is
-		 * enough to decide. A rule with none goes where rules have
-		 * always gone.
+		 * Block rules had bases/plague to themselves, on the argument
+		 * that one block made a rule a different kind of content.
+		 * That argument does not survive reading the files: a plague
+		 * rule declares KOF_TARGET_FORMAT and KOF_TARGET_NAME and
+		 * KOF_SCAN_INFECT like any other, names a family like any
+		 * other, and most of them carry ordinary strings beside the
+		 * block. It is a detection that happens to measure a block,
+		 * which is what dbcore.h says about why the blocks are a
+		 * section and not a pack kind.
+		 *
+		 * The split also cost something real: two directories meant
+		 * two files could be called gafgyt_00.c, and the number in
+		 * the name IS the variant - so the database shipped two rules
+		 * both saying Gafgyt.00. Eleven such pairs.
 		 */
 		/*
 		 * A RULE ABOUT A COLLECTED RECORD LIVES IN bases/evts.
@@ -5652,9 +5689,7 @@ void generate(struct kof_editor *e, int as_new)
 		 * submission is a rule about files as well, and it goes where
 		 * file rules go.
 		 */
-		if (draft_uses_blocks(e)) {
-			snprintf(dir, sizeof dir, "%s/plague", e->basedir);
-		} else if (draft_all_events(e)) {
+		if (draft_all_events(e)) {
 			snprintf(dir, sizeof dir, "%s/evts", e->basedir);
 		} else {
 			snprintf(dir, sizeof dir, "%s/signatures", e->basedir);
@@ -5707,7 +5742,7 @@ void generate(struct kof_editor *e, int as_new)
 		 */
 		if (!as_new && e->dr.gen_path[0] &&
 		    !strncmp(e->dr.gen_path, dir, strlen(dir)) &&
-		    !path_is_family(e->dr.gen_path, fname)) {
+		    !path_is_family(e->dr.gen_path, stem)) {
 			char num[16];
 			struct stat es;
 
@@ -5721,7 +5756,7 @@ void generate(struct kof_editor *e, int as_new)
 			gen_path_num(e->dr.gen_path, num, sizeof num);
 			if (num[0]) {
 				snprintf(path, sizeof path, "%s/%s_%s.c", dir,
-					 fname, num);
+					 stem, num);
 				if (stat(path, &es) != 0)
 					goto have_path;
 			}
@@ -5757,7 +5792,7 @@ void generate(struct kof_editor *e, int as_new)
 					struct stat es;
 
 					snprintf(path, sizeof path,
-						 "%s/%s_%0*u.c", dir, fname,
+						 "%s/%s_%0*u.c", dir, stem,
 						 (int)wide[w], n);
 					if (stat(path, &es) != 0) {
 						free_one = 1;
@@ -5767,7 +5802,7 @@ void generate(struct kof_editor *e, int as_new)
 			}
 			if (!free_one) {
 				say_err(e, "%.40s_00 to _99999 are all taken",
-					fname);
+					stem);
 				return;
 			}
 		}
@@ -6966,7 +7001,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 *
 		 * - gave the first block its threshold and left the second at
 		 * the default the declaration parser writes, which is 50.
-		 * Reopening bases/plague/billgates_00.c showed its second
+		 * Reopening billgates_00.c showed its second
 		 * matcher at 50 where the file says 70, and saving wrote that
 		 * back: a rule quietly loosened by having been looked at.
 		 *

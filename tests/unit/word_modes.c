@@ -31,7 +31,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofcore/kofcore.h"
-#include "../../libkofeng/detectors/matchers/kofmatch.h"
+#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../../libkofeng/databases/dbcore.h"
 
 static int fails;

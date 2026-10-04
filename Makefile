@@ -918,10 +918,10 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/detectors/dbindex.c \
            libkofeng/databases/dbpacker.c \
            libkofeng/detectors/heur/kofheur.c \
-           libkofeng/detectors/matchers/kofmatch.c \
+           libkofeng/detectors/overlord/matchers/kofmatch.c \
            libkofeng/detectors/overlord/plague/kofplague.c \
-           libkofeng/detectors/matchers/kofmultimatch.c \
-           libkofeng/detectors/matchers/hexcomp.c \
+           libkofeng/detectors/overlord/matchers/kofmultimatch.c \
+           libkofeng/detectors/overlord/matchers/hexcomp.c \
            libkofeng/analyzers/parsers/binaries/elf/elf_parse.c \
            libkofeng/analyzers/parsers/binaries/elf/elf_sym.c \
            libkofeng/analyzers/parsers/binaries/sym_any.c \
@@ -1773,17 +1773,20 @@ endif
 # flag in a C program would be a second implementation of one shell word.
 
 # bases/ is the content tree: everything that compiles to a module and ships in a
-# database. Three kinds, one directory each, because they differ in what they do
-# and in how often they change rather than merely in name:
+# database. The directories differ in what the module DOES, not merely in name:
 #
-#   bases/signatures/  detections. Name a family. Change weekly.
+#   bases/signatures/  detections about a FILE. Name a family. Change weekly.
+#   bases/evts/        detections about a collected RECORD - a process start, a
+#                      submission. Not about a file at all, prefiltered apart by
+#                      the target byte and packed apart by ksigbuilder.
+#   bases/heur/        the heuristic modules.
 #   bases/decomp/      the CONTAINER unpackers - gzip, zip, tar, rar, 7z, xz,
 #                      docole, rtf, overlay. A file that carried other files.
 #   bases/unp/         the PACKER unpackers - UPX, Ezuri, midgetpack, the msf
 #                      encoders. A file that IS the payload, transformed.
 #
-# The directory is the module's KOF_UNPACK_KIND and nothing else, so the split
-# is checkable in one line rather than remembered:
+# For the unpackers the directory is the module's KOF_UNPACK_KIND and nothing
+# else, so that split is checkable in one line rather than remembered:
 #
 #   grep -L KOF_UNP_CONTAINER bases/decomp/*.c   # must print nothing
 #   grep -L KOF_UNP_PACKER    bases/unp/*.c      # must print nothing
@@ -1792,6 +1795,16 @@ endif
 # tar" - and eight of the nine containers had drifted into bases/unp/ while zip
 # and tar, named here as decomp, were among them. A split described by examples
 # is a split nothing checks.
+#
+# bases/plague/ WAS A SIXTH, for rules carrying a similarity block, and it is
+# gone. A block rule declares the same macros, names a family the same way and
+# is packed by the same builder; it is a detection that happens to measure a
+# block, which is what dbcore.h already says about keeping the blocks a section
+# rather than a pack kind. And the split cost something a comment cannot argue
+# away: two directories let two files be called gafgyt_00.c, the number in the
+# name IS the variant, so the database shipped two rules both saying
+# Gafgyt.00. Eleven such pairs. The plague ones were renumbered upward when
+# they merged - see the note on variants in ksigbuilder.
 #
 # decomp and unp compile to the same pack kind and the engine does not tell them
 # apart - the split is for the people who maintain them. The decompression

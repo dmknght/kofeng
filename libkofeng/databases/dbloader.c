@@ -53,7 +53,7 @@
 
 #include "dbloader.h"
 #include "hexprog.h"
-#include "../detectors/matchers/kofmultimatch.h"
+#include "../detectors/overlord/matchers/kofmultimatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>

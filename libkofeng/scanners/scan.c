@@ -35,7 +35,7 @@
 
 #include "scan.h"
 #include "objtree.h"
-#include "../detectors/matchers/kofmultimatch.h"
+#include "../detectors/overlord/matchers/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
  * engine-side model next door is a different file with a similar name - see the

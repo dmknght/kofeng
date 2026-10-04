@@ -23,7 +23,7 @@
 #include "../../libkofemu/kofemu.h"
 #include "../extractors/unpack/emu_unpack.h"
 #include "../databases/dbloader.h"
-#include "../detectors/matchers/kofmatch.h"
+#include "../detectors/overlord/matchers/kofmatch.h"
 #include "../detectors/overlord/plague/kofplague.h"
 /* KOF_CAP_COUNT, for the profile below. */
 #include "../detectors/overlord/kofoverlord.h"

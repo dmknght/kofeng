@@ -17,7 +17,7 @@
 #include <string.h>
 #include <kofcore.h>
 
-#include "../../databases/hexprog.h"
+#include "../../../databases/hexprog.h"
 
 /* ============================================================================
  * HEX PATTERNS

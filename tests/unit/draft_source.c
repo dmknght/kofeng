@@ -364,7 +364,7 @@ static void at_place_is_kept(void)
 /*
  * TWO BLOCKS ASKED ABOUT ON ONE LINE, which is a shape bases/ actually holds.
  *
- * bases/plague/billgates_00.c is written
+ * bases/signatures/billgates_00.c is written
  *
  *   if (kof_plague_score(a) >= 75u || kof_plague_score(b) >= 70u)
  *
@@ -509,7 +509,7 @@ static void mixed_join_one_line(void)
 /*
  * NO TEST HERE PINS THE CONTENT OF A SHIPPED RULE, and one did.
  *
- * The two-calls-on-one-line fault was found in bases/plague/billgates_00.c,
+ * The two-calls-on-one-line fault was found in billgates_00.c,
  * so a test was written that read that file and asserted its two blocks and
  * their thresholds. It passed, and then it failed - because the rule was
  * re-cut, which is a thing that happens to rules and is nobody's mistake.

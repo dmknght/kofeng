@@ -17,8 +17,8 @@
 
 #include <stdint.h>
 #include <kofmod/kofsig.h>   /* struct kof_range */
-#include "../../kofcore/kofcore.h"
-#include "../../databases/hexprog.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../databases/hexprog.h"
 
 /*
  * HOW MANY DISTINCT RANGES ONE OBJECT IS ASKED ABOUT.

@@ -30,7 +30,7 @@
 #include <stdint.h>
 
 #include "../../libkofeng/kofcore/kofcore.h"
-#include "../../libkofeng/detectors/matchers/kofmatch.h"
+#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
 #include "../../libkofeng/databases/hexprog.h"
 #include "../../libkofeng/databases/dbcore.h"
 

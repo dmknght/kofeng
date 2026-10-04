@@ -11,7 +11,7 @@
 
 #include "kofeng.h"
 #include "databases/dbloader.h"
-#include "detectors/matchers/kofmultimatch.h"
+#include "detectors/overlord/matchers/kofmultimatch.h"
 #include "scanners/scan.h"
 
 kof_engine *keng_open(const char *db_path)

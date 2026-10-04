@@ -6,8 +6,8 @@
  */
 
 #include "kofmultimatch.h"
-#include "../../databases/hexprog.h"
-#include "../../databases/dbloader.h"
+#include "../../../databases/hexprog.h"
+#include "../../../databases/dbloader.h"
 
 #include <stdlib.h>
 #include <string.h>

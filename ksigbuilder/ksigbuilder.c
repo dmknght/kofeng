@@ -4346,8 +4346,8 @@ struct artefact {
 	uint32_t            n_names;
 
 	/* The similarity blocks this module declared, and the hashes they are
-	 * slices of. Empty for every module that declared none, which is all of
-	 * them outside bases/plague. */
+	 * slices of. Empty for every module that declared none, which is most
+	 * of them. */
 	struct kof_plague_block *blk;
 	uint32_t                 n_blk;
 	uint32_t                *pool;
@@ -5248,16 +5248,19 @@ static uint64_t target_set_of(const struct artefact *a)
 struct group {
 	uint32_t  kind, arch_mask;
 	/*
-	 * Whether the members measure a similarity block.
+	 * A `plague` FLAG STOOD HERE and split the groups, so a rule carrying
+	 * a similarity block packed into plague-elf.ksig instead of
+	 * sigs-elf.ksig. The reason given was the person reading a directory
+	 * listing, and its own words conceded the rest: "a detector by kind -
+	 * it runs in the same loop, reports the same way".
 	 *
-	 * Part of the grouping key and not just of the name. A plague rule is a
-	 * detector by kind - it runs in the same loop, reports the same way -
-	 * but what it carries is a hash pool and what it answers is a
-	 * percentage, and a reader of a directory listing should not have to
-	 * open a pack to find that out. So they group apart and the file says
-	 * so: plague-raw.ksig, not sigs-raw.ksig.
+	 * It went with bases/plague. The engine never read it - selection is
+	 * per module, and the only pack-level fields are the unioned target
+	 * and arch masks, which no prefilter consults yet; see the note at the
+	 * grouping loop for why a wider union costs sweeps and never a
+	 * detection. What the split did cost was real: two source directories
+	 * meant two rules could both be called Gafgyt.00.
 	 */
-	int       plague;
 	uint64_t  target_set;            /* see target_set_of */
 	int       bucket;                /* enum pack_bucket, or BUCKET_NONE */
 	uint32_t *member;                /* indices into the artefact array */
@@ -5487,12 +5490,11 @@ static const char *kind_name(uint32_t k)
 	       k == KOF_PACK_HEUR   ? "heur" : "sigs";
 }
 
-/* The word a pack's filename starts with. Everything is its kind except a
- * similarity pack, which is a detector by kind and a different thing to a
- * reader - see struct group. */
+/* The word a pack's filename starts with, which is its kind and nothing
+ * else. A similarity pack used to be spelled apart - see struct group. */
 static const char *group_name(const struct group *g)
 {
-	return g->plague ? "plague" : kind_name(g->kind);
+	return kind_name(g->kind);
 }
 
 /*
@@ -6852,7 +6854,6 @@ static int pack_main(int argc, char **argv)
 		 */
 		for (j = 0; j < n_groups; j++)
 			if (groups[j].kind == arts[a].kind &&
-			    groups[j].plague == (arts[a].n_blk != 0) &&
 			    ((ab != BUCKET_NONE && groups[j].bucket == ab) ||
 			     (ab == BUCKET_NONE &&
 			      groups[j].bucket == BUCKET_NONE &&
@@ -6876,7 +6877,6 @@ static int pack_main(int argc, char **argv)
 			g->bucket      = ab;
 			g->target_set  = target_set_of(&arts[a]);
 			g->arch_mask   = arts[a].arch_mask;
-			g->plague      = (arts[a].n_blk != 0);
 		} else {
 			/*
 			 * The union, for the name. arch_mask 0 means ANY, so
