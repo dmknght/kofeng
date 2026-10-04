@@ -267,7 +267,7 @@ bases/unp/      static unpackers          <- one per family
 bases/emu/      emulation policy          <- one per family, NEW
 bases/heur/     heuristics
 bases/signatures/
-bases/plague/
+bases/signatures/   (gom ca rule co similarity block)
 ```
 
 This is the shape XVolkolak uses and it is worth copying deliberately:
