@@ -26,7 +26,6 @@
 #include "../detectors/matchers/kofmatch.h"
 #include "../detectors/overlord/plague/kofplague.h"
 /* KOF_CAP_COUNT, for the profile below. */
-#include "../analyzers/parsers/binaries/disasm/flow.h"
 #include "../detectors/overlord/kofoverlord.h"
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../analyzers/parsers/binaries/pe/pe_parse.h"
@@ -82,42 +81,12 @@
  * number, and it now counts links beside words - see flow_set_offer.
  */
 /*
- * HOW MANY CHAINS ONE OBJECT MAY REPORT.
- *
- * It was 24, and 24 was not a bound on cost - it was a bound on RESULTS, and
- * it threw them away silently. MEASURED on a UPX-unpacked x86-64 bot: the
- * object has 53 chains and 24 of them were kept, so the page said "chain 6
- * of 24" while 29 chains had been dropped by a score. The distinct link
- * pairs happened to survive on that sample - the dropped chains repeated
- * what the kept ones said - but nothing in the mechanism promises that, and
- * a reader cannot tell a complete page from a truncated one.
- *
- * 64 at 24 steps of 160 bytes is 240KB, against 90KB at 24. That is the
- * whole price, it is paid once per scanner, and chain_add's score now
- * decides between chains far less often.
+ * The chain set that stood here is gone with the pathogen backend. What
+ * replaces it is a store of NODES AND TYPED EDGES - see the note on the
+ * removed macros in kofmod/kofsig.h for why the chain could not hold a
+ * producer with several consumers, a step joined by control, or a rule that
+ * an inserted instruction cannot shift.
  */
-#define FLOW_SET_MAX 64u
-struct kof_flow_set {
-	struct kof_flow_node n[FLOW_SET_MAX][KOF_PTH_SYMPTOM_MAX];
-	uint8_t len[FLOW_SET_MAX];
-	uint8_t n_chain;
-	/*
-	 * HOW MANY CALLS THE SWEEP SAW, before any of this was pruned.
-	 *
-	 * The chains alone cannot tell "this object makes no system calls"
-	 * from "it makes forty and not one of them hands anything to
-	 * another" - a link is the unit kept, so a step in no link is
-	 * dropped and both faults arrive here as n_chain == 0. They have
-	 * different fixes: the first is a region or a decoder, the second
-	 * is provenance.
-	 *
-	 * MEASURED over 254 ELF: 26 of the 47 dynamically linked objects
-	 * reported no chain, and this is the field that says which of the
-	 * two it was. See kof_flow_node_at, which makes the same
-	 * distinction one node at a time.
-	 */
-	uint32_t n_seen;
-};
 
 /*
  * "This child is raw, and I mean it" - see pend_fmt below. Out of the range of
@@ -166,9 +135,7 @@ struct kof_scanner {
 	 * code regions with a decoder, so the first ask pays for it and the
 	 * rest do not.
 	 */
-	struct kof_flow_set *fchain;
 	int                  ovl_ready;
-	int                  fchain_ready;
 	/*
 	 * THE OBJECT'S PROFILE - what it does, flattened.
 	 *
@@ -178,7 +145,6 @@ struct kof_scanner {
 	 * reason: a rule asks several times and the answer does not change
 	 * within one object.
 	 */
-	struct kof_pth_profile *pth_prof;
 	int                     pth_prof_ready;
 
 	/*
@@ -256,7 +222,7 @@ struct kof_scanner {
 	 *
 	 * The same pair of facts plague_asked and plague_hit are, for the
 	 * measures that carry a reference in the module's own rodata rather
-	 * than a declared block - kof_plague_blocks, kof_pth_match,
+	 * than a declared block - kof_plague_blocks,
 	 * kof_plague_shape. A verdict reached through one of
 	 * those is named for it, exactly as a plague verdict is, so a reader
 	 * of the name knows what recognised the object.
@@ -1193,29 +1159,13 @@ void kof_scan_budget(struct kof_scanner *, uint64_t obj_size,
 /* Release anything a module left half-produced, and hand back what it finished. */
 void kof_scan_kids_reset(struct kof_scanner *);
 
-/*
- * THE PROFILE, as a vector of capabilities and a matrix of links between them.
- *
- * SMALL ON PURPOSE AND NOT HASHED. The whole space is a couple of dozen
- * capabilities and a few flags, so the profile fits in about a hundred bytes
- * uncompressed - there is nothing to compress, and hashing it would cost the
- * two things that make it useful: a rule could no longer match PART of it,
- * and nobody could measure how common one term is on clean software.
- */
-struct kof_pth_profile {
-	uint64_t cap_mask;                 /* 1ull << enum kof_flow_cap     */
-	uint8_t  flags[KOF_CAP_COUNT];     /* flags seen on that capability */
-	uint32_t edge[KOF_CAP_COUNT];      /* bit s: s fed this capability  */
-};
 
-const struct kof_pth_profile *kof_pth_profile_of(const struct kof_obj_ctx *);
 
 /* Build this object's swept call chain and print it, when the environment
  * asks. A measurement hook, not a scan path - see objctx.c. */
 /* An object's symptoms, built once and cached on the scanner. In
  * detectors/overlord/pathogen/pathogen.c - see the note there on why it
  * is not in objctx.c any more. */
-const struct kof_flow_set *kof_pth_chain_of(const struct kof_obj_ctx *);
 
 /*
  * The same build without the scanner, for a caller that has an object and no
@@ -1232,15 +1182,9 @@ const struct kof_flow_set *kof_pth_chain_of(const struct kof_obj_ctx *);
  * variable, which is no use to somebody looking at a page that says nothing.
  * The string is static.
  */
-uint32_t kof_pth_chain_build(const struct kof_obj_ctx *ctx, kof_buf b,
-			     struct kof_range *scratch,
-			     struct kof_flow_set *out, const char **why);
 
 /* The best a stored symptom scores against this object, 0..100. */
-uint32_t kof_pth_best_pct(const struct kof_obj_ctx *,
-			  const struct kof_pth_symptom *);
 
-void kof_scan_fchain_probe(const struct kof_obj_ctx *);
 
 
 struct kof_scanner *kof_scan_new(const struct kof_engine *);

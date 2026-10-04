@@ -1,7 +1,6 @@
-/* See vocab.h. */
+/* See nucleo.h. */
 
-#include "flow.h"   /* KOF_FLOW_A_*: which ABI a table belongs to */
-#include "vocab.h"
+#include "nucleo.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -60,8 +59,8 @@ const struct sysrow kof_sys64[] = {
 	{  82, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
 	{  87, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
 	{ 263, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
-	{ 264, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "renameat"  },
-	{ 316, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "renameat2"  },
+	{ 264, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
+	{ 316, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
 	{  90, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
 	{  91, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
 	{ 268, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
@@ -111,8 +110,8 @@ const struct sysrow kof_sys32[] = {
 	{  10, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
 	{  38, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
 	{ 301, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
-	{ 302, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "renameat"  },
-	{ 353, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "renameat2"  },
+	{ 302, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
+	{ 353, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
 	{  15, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
 	{  94, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
 	{ 306, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
@@ -157,7 +156,7 @@ const struct sysrow kof_sockcall[] = {
 };
 
 
-uint8_t kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr)
+uint16_t kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr)
 {
 	uint32_t i;
 
@@ -200,7 +199,7 @@ uint8_t kof_sys_look_role(const struct sysrow *t, uint32_t n, uint32_t nr)
  * one thing that can be shared between the two platforms - see the note on
  * enum kof_flow_cap.
  */
-static const struct { const char *name; uint8_t cap; uint8_t role; }
+static const struct { const char *name; uint16_t cap; uint8_t role; }
 names[] = {
 	/* POSIX */
 	{ "mmap",           KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
@@ -316,6 +315,20 @@ names[] = {
 	{ "HttpOpenRequestW", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "URLDownloadToFileA", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "URLDownloadToFileW", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
+	/*
+	 * THE WINDOWS SPELLING OF A REDIRECTED SHELL, which the table had
+	 * only the POSIX half of.
+	 *
+	 * `pipe` then `dup2` then `execve` is the shape KOF_CAP_PIPE_OPEN
+	 * exists for; on Windows it is `CreatePipe` then `SetStdHandle` or
+	 * a STARTUPINFO, then `CreateProcess` - and CreateProcess was the
+	 * only one of the three in this table. The producer and the
+	 * redirect are what make it a sentence rather than three words.
+	 */
+	{ "CreatePipe",     KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "SetStdHandle",   KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
+	{ "DuplicateHandle", KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpOpen",    KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "WinHttpConnect", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "WinHttpOpenRequest", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "WinHttpSendRequest", KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
@@ -334,15 +347,28 @@ names[] = {
 	 * three capabilities in flow.h. */
 	{ "OpenProcess",    KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
 	{ "DebugActiveProcess", KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
+	/* A thread handle is the same kind of hold on another execution
+	 * context, and it is what SetThreadContext and ResumeThread are
+	 * handed - they were modelled and the handle they take was not. */
+	{ "OpenThread",     KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
 	{ "WriteProcessMemory", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
 	{ "ReadProcessMemory", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
 	{ "NtWriteVirtualMemory", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	/* Reading another thread's registers, and emptying another image
+	 * out of its address space: the two legs of hollowing whose other
+	 * halves - SetThreadContext and WriteProcessMemory - were already
+	 * here. */
+	{ "GetThreadContext", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "NtUnmapViewOfSection", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "ZwUnmapViewOfSection", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
 	{ "CreateRemoteThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	{ "CreateRemoteThreadEx", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	{ "NtQueueApcThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	{ "QueueUserAPC",   KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	{ "SetThreadContext", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	{ "NtResumeThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "SuspendThread",  KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "NtSuspendThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	{ "ResumeThread",   KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	/* The loader pair, which is what a program has INSTEAD of an import
 	 * table entry - see KOF_CAP_RESOLVE. */
@@ -357,6 +383,22 @@ names[] = {
 	{ "dlsym",          KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
 	/* Writes only; a program reading its own configuration is every
 	 * program - see KOF_CAP_REG_SET. */
+	/* And where the handle they are given comes from - see
+	 * KOF_CAP_REG_OPEN. Not a finding; the head of a link. */
+	/* Windows' spelling of rename - the word already existed for the
+	 * POSIX one, see KOF_CAP_FILE_RENAME, and only the name was
+	 * missing. 16 of the 128 measured PE import MoveFileW. */
+	{ "MoveFileA",      KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileW",      KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileExA",    KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileExW",    KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileWithProgressW", KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyExA",  KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyExW",  KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyA",    KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyW",    KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "NtOpenKey",      KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "NtOpenKeyEx",    KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "RegSetValueExA", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
 	{ "RegSetValueExW", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
 	{ "RegCreateKeyExA", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
@@ -614,8 +656,11 @@ names[] = {
 	/* Removing a file. */
 	{ "DeleteFileA",    KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
 	{ "DeleteFileW",    KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	{ "MoveFileExA",    KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	{ "MoveFileExW",    KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
+	/* MoveFileEx* used to be here as a DELETE. When KOF_CAP_FILE_RENAME
+	 * was split out of KOF_CAP_FILE_DELETE the POSIX `rename` moved and
+	 * these two did not, so the page went on saying `file-delete` with
+	 * MoveFileExW beside it - the exact contradiction that split was
+	 * made to end. They are with the other MoveFile rows now. */
 	{ "unlink",         KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
 	{ "unlinkat",       KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
 	{ "remove",         KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
@@ -703,10 +748,10 @@ names[] = {
  * The syscall half of the vocabulary, for a caller that has a RUN rather than
  * code. See the note in flow.h for why this is exported instead of copied.
  */
-uint8_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
+uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 				const uint64_t *arg, uint8_t *flags)
 {
-	uint8_t cap;
+	uint16_t cap;
 
 	if (flags)
 		*flags = 0;
@@ -765,7 +810,7 @@ uint8_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 	return cap;
 }
 
-uint8_t kof_flow_cap_of_name(const char *sym)
+uint16_t kof_flow_cap_of_name(const char *sym)
 {
 	size_t i;
 
@@ -843,7 +888,7 @@ const char *kof_flow_name_of(uint16_t id)
  * head is not stored. It is the same question kof_flow_role_of_name answers
  * for sockets, asked of every word.
  */
-int kof_flow_cap_makes(uint8_t cap)
+int kof_flow_cap_makes(uint16_t cap)
 {
 	switch (cap) {
 	case KOF_CAP_ALLOC:        /* a mapping                        */
@@ -856,6 +901,7 @@ int kof_flow_cap_makes(uint8_t cap)
 	case KOF_CAP_PIPE_OPEN:
 	case KOF_CAP_PIPE:
 	case KOF_CAP_HEAP:        /* a buffer - see KOF_CAP_HEAP   */
+	case KOF_CAP_REG_OPEN:    /* a key handle                  */
 	case KOF_CAP_LIB_OPEN:     /* a module handle                  */
 	case KOF_CAP_RESOLVE:      /* an address - see lib-resolve     */
 	case KOF_CAP_PTRACE:       /* a handle on another process      */
@@ -913,7 +959,7 @@ int kof_flow_cap_makes(uint8_t cap)
  * second - the directory handle is first - and `open` puts it first. One
  * word, two shapes, and guessing either way is wrong half the time.
  */
-uint8_t kof_flow_text_arg(uint8_t cap, uint16_t name)
+uint8_t kof_flow_text_arg(uint16_t cap, uint16_t name)
 {
 	const char *nm = kof_flow_name_of(name);
 
@@ -944,7 +990,7 @@ uint8_t kof_flow_text_arg(uint8_t cap, uint16_t name)
  * comes back is a description of a file rather than a thing the program
  * then uses.
  */
-uint8_t kof_flow_out_arg(uint8_t cap)
+uint8_t kof_flow_out_arg(uint16_t cap)
 {
 	switch (cap) {
 	case KOF_CAP_PIPE_OPEN:  return 1u;   /* the pair of descriptors */
@@ -954,7 +1000,7 @@ uint8_t kof_flow_out_arg(uint8_t cap)
 	}
 }
 
-const char *kof_flow_cap_noun(uint8_t cap)
+const char *kof_flow_cap_noun(uint16_t cap)
 {
 	switch (cap) {
 	case KOF_CAP_ALLOC:        return "mem";
@@ -967,6 +1013,7 @@ const char *kof_flow_cap_noun(uint8_t cap)
 	case KOF_CAP_PIPE:         return "pipe";
 	case KOF_CAP_PIPE_OPEN:    return "pipe";
 	case KOF_CAP_HEAP:         return "buf";
+	case KOF_CAP_REG_OPEN:     return "key";
 	/*
 	 * AND A TRANSFER MAKES BYTES, which this table said it did not.
 	 *
@@ -989,34 +1036,35 @@ const char *kof_flow_cap_noun(uint8_t cap)
 	}
 }
 
-const char *kof_flow_cap_name(uint8_t cap)
+const char *kof_flow_cap_name(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_ALLOC:        return "alloc";
-	case KOF_CAP_ALLOC_EXEC:   return "alloc-exec";
-	case KOF_CAP_HEAP:         return "heap-alloc";
+	case KOF_CAP_ALLOC:        return "mem-alloc";
+	case KOF_CAP_ALLOC_EXEC:   return "mem-alloc-exec";
+	case KOF_CAP_HEAP:         return "mem-alloc-heap";
+	case KOF_CAP_REG_OPEN:     return "reg-open";
 	/* "exec-memory" and not "exec-register": the register is how the
 	 * branch was spelled, the memory is what was entered. The sibling
 	 * KOF_CAP_CALL_REG keeps `call-register`, because there the register
 	 * IS the fact - it holds the program's own code. */
 	case KOF_CAP_EXEC_REG:     return "exec-memory";
-	case KOF_CAP_SELF_RESOLVE: return "self-resolve";
-	case KOF_CAP_NAME_HASH:    return "name-hash";
+	case KOF_CAP_SELF_RESOLVE: return "lib-peb-walk";
+	case KOF_CAP_NAME_HASH:    return "lib-name-hash";
 	case KOF_CAP_CALL_REG:     return "call-register";
 	case KOF_CAP_CRYPTO:       return "crypto";
-	case KOF_CAP_CAPTURE:      return "capture";
+	case KOF_CAP_CAPTURE:      return "input-capture";
 	case KOF_CAP_SVC_INSTALL:  return "service-install";
-	case KOF_CAP_MOD_LOAD:     return "module-load";
-	case KOF_CAP_PIPE:         return "named-pipe";
-	case KOF_CAP_PIPE_OPEN:    return "pipe";
+	case KOF_CAP_MOD_LOAD:     return "kmodule-load";
+	case KOF_CAP_PIPE:         return "pipe-named-create";
+	case KOF_CAP_PIPE_OPEN:    return "pipe-create";
 	case KOF_CAP_FILE_DELETE:  return "file-delete";
 	case KOF_CAP_FILE_RENAME:  return "file-rename";
-	case KOF_CAP_PERM_SET:     return "perm-set";
+	case KOF_CAP_PERM_SET:     return "file-perm-set";
 	case KOF_CAP_ANTI_DEBUG:   return "anti-debug";
-	case KOF_CAP_JAIL:         return "jail";
+	case KOF_CAP_JAIL:         return "namespace-change";
 	case KOF_CAP_FD_REDIR:     return "fd-redirect";
-	case KOF_CAP_TIMESTOMP:    return "timestomp";
-	case KOF_CAP_PROC_LIST:    return "process-list";
+	case KOF_CAP_TIMESTOMP:    return "file-timestamp-set";
+	case KOF_CAP_PROC_LIST:    return "proc-enum";
 	case KOF_CAP_NET_READ:     return "net-recv";
 	case KOF_CAP_NET_WRITE:    return "net-send";
 	case KOF_CAP_NET_OPEN:     return "net-open";
@@ -1027,26 +1075,26 @@ const char *kof_flow_cap_name(uint8_t cap)
 	case KOF_CAP_READ:         return "file-read";
 	case KOF_CAP_WRITE:        return "file-write";
 	case KOF_CAP_FILE_OPEN:    return "file-open";
-	case KOF_CAP_MEMFD:        return "memfd";
-	case KOF_CAP_EXEC_IMAGE:   return "exec-file";
-	case KOF_CAP_SPAWN:        return "spawn";
-	case KOF_CAP_THREAD:       return "thread";
+	case KOF_CAP_MEMFD:        return "memfd-create";
+	case KOF_CAP_EXEC_IMAGE:   return "proc-start";
+	case KOF_CAP_SPAWN:        return "proc-fork";
+	case KOF_CAP_THREAD:       return "thread-create";
 	case KOF_CAP_NET_RAW:      return "net-raw";
 	case KOF_CAP_SLEEP:        return "sleep";
-	case KOF_CAP_PTRACE:       return "ptrace";
-	case KOF_CAP_PROC_MEM:     return "proc-mem";
-	case KOF_CAP_PROC_EXEC:    return "proc-exec";
-	case KOF_CAP_RESOLVE:      return "lib-resolve";
-	case KOF_CAP_LIB_OPEN:     return "lib-open";
-	case KOF_CAP_DNS:          return "dns";
+	case KOF_CAP_PTRACE:       return "proc-open";
+	case KOF_CAP_PROC_MEM:     return "proc-mem-access";
+	case KOF_CAP_PROC_EXEC:    return "proc-control";
+	case KOF_CAP_RESOLVE:      return "lib-api-resolve";
+	case KOF_CAP_LIB_OPEN:     return "lib-load";
+	case KOF_CAP_DNS:          return "net-getaddr";
 	case KOF_CAP_REG_SET:      return "reg-set";
-	case KOF_CAP_CRED_SET:     return "set-id";
-	case KOF_CAP_HOOK:         return "hook";
-	case KOF_CAP_LIST_HIDE:    return "list-hide";
-	case KOF_CAP_PROT_OFF:     return "prot-off";
+	case KOF_CAP_CRED_SET:     return "cred-modify";
+	case KOF_CAP_HOOK:         return "kmodule-hook";
+	case KOF_CAP_LIST_HIDE:    return "kmodule-list-edit";
+	case KOF_CAP_PROT_OFF:     return "kmodule-cr-write";
 	case KOF_CAP_NET_ADDR:     return "net-addr";
 	case KOF_CAP_SELF_HIDE:    return "self-hide";
-	case KOF_CAP_BACKGROUND:   return "run-background";
+	case KOF_CAP_BACKGROUND:   return "proc-background";
 	default:                   return "?";
 	}
 }
@@ -1244,8 +1292,8 @@ const struct sysrow kof_sys_mips64[] = {
 	{ 5085, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
 	{ 5253, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
 	{ 5080, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
-	{ 5254, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "renameat"  },
-	{ 5311, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "renameat2"  },
+	{ 5254, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
+	{ 5311, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
 	{ 5088, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
 	{ 5089, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
 	{ 5258, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
@@ -1286,7 +1334,7 @@ static uint32_t bits_join(uint64_t v, const char *const *nm,
 	return at;
 }
 
-const char *kof_flow_arg_name(uint16_t name, uint8_t cap, uint32_t idx,
+const char *kof_flow_arg_name(uint16_t name, uint16_t cap, uint32_t idx,
 			      uint64_t v, char *out, uint32_t n)
 {
 	static uint16_t id_socket, id_mmap, id_mprotect, id_open, id_openat;

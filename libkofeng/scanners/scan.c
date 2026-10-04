@@ -164,9 +164,6 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->lzx);
 	kof_plague_ctx_done(&sc->plague);
 	free(sc->ovl);
-	free(sc->fchain);
-	/* And the profile derived from them. */
-	free(sc->pth_prof);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
@@ -1143,7 +1140,7 @@ static void finding_str(const struct kof_scanner *sc,
 	}
 	/*
 	 * AND THE SAME FOR A SIMILARITY MEASURE THAT CARRIES ITS OWN
-	 * REFERENCE - kof_plague_blocks, kof_pth_match, kof_plague_shape.
+	 * REFERENCE - kof_plague_blocks, kof_plague_shape.
 	 *
 	 * The mark goes BEHIND the variant, where every other method's does,
 	 * and not in front of it. It was a prefix on the variant for one
@@ -4277,10 +4274,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	sc->n_infect = 0;
 	sc->ovl_asked = -1;
 	sc->ovl_pct = 0;
-	/* And the swept chains, for the same reason and at the same cost. */
-	sc->fchain_ready = 0;
-	/* And the profile derived from them, for the same reason. */
-	sc->pth_prof_ready = 0;
 	/* What the two gated measures compare themselves against - see
 	 * kof_scanner.heur_lvl. Unstated is level 1, exactly as heur_object
 	 * reads it, so the two cannot drift. */
@@ -4608,9 +4601,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * is skipped, because the layout belongs to the parent and the parent
 	 * is scanned too.
 	 */
-	/* Every object, including a region view - a measurement wants them
-	 * all, and it is off unless the environment asks. */
-	kof_scan_fchain_probe(&ctx);
 	if (!sc->n_cur_rgn)
 		heur_object(sc, &ctx, opt, pdepth,
 			    out->broken == KOF_BROKEN_DAMAGED, out);

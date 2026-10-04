@@ -6266,54 +6266,6 @@ have_path:
 				bi + 1u == e->dr.n_blkv ? "\n};\n"
 				: bi % 4u == 3u ? ",\n" : ",");
 	}
-	/*
-	 * THE REFERENCE'S CALL CHAIN, if any matcher asks about it.
-	 *
-	 * One line per step and the capability spelled by name, because this
-	 * is the one reference in the file a reader can actually read: the
-	 * strings and the blocks are hashes and say nothing, and this says
-	 * what the sample's code does.
-	 */
-	if (draft_uses_sim(e, SIM_IT_CHAIN) && e->dr.chain.n) {
-		uint32_t ci;
-
-		fprintf(f, "\n/* What the sample above asks the system for, in "
-			"order. Read out of its\n * code by the sweep in "
-			"analyzers/parsers/binaries/disasm/flow.c - no bytes of it are kept. */\n");
-		fprintf(f, "static const struct kof_pth_symptom ref_chain = {\n");
-		fprintf(f, "\t.n = %uu,\n\t.s = {\n", e->dr.chain.n);
-		for (ci = 0; ci < e->dr.chain.n &&
-			     ci < KOF_PTH_SYMPTOM_MAX; ci++) {
-			const struct kof_pth_step *st = &e->dr.chain.s[ci];
-
-			/* The capability as a NUMBER with its word beside it:
-			 * enum kof_flow_cap lives in analyzers/parsers/binaries/disasm/flow.h, which
-			 * is engine-side, and a rule is compiled against the
-			 * kofmod headers alone. */
-			/*
-			 * THE NAME IS WRITTEN AS A COMMENT AND NOT AS A FIELD.
-			 *
-			 * A chain taken off one sample carries whichever name
-			 * that build happened to use, and a rule emitted with
-			 * it pinned would match that sample and its siblings
-			 * and nothing else. So the generated rule is about
-			 * CAPABILITIES, which is what travels, and the names
-			 * are written beside them for the researcher to pin by
-			 * hand where they decide the word is too wide - which
-			 * on the kernel side is measurable and on the libc
-			 * side is measurably the wrong move.
-			 */
-			fprintf(f, "\t\t{ %2uu, 0x%02xu, %uu },   /* %s%s%s%s */\n",
-				st->cap, st->flags, st->back,
-				kof_flow_cap_name(st->cap),
-				st->name && kof_flow_name_of(st->name)
-					? " = " : "",
-				st->name && kof_flow_name_of(st->name)
-					? kof_flow_name_of(st->name) : "",
-				st->back ? ", fed by an earlier step" : "");
-		}
-		fprintf(f, "\t}\n};\n");
-	}
 	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
@@ -6790,8 +6742,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		*chain_pct = 0;
 	if (chain_level)
 		*chain_level = LV_SUSPECT;
-	e->dr.chain.n = 0;
-	e->dr.has_chain = 0;
 	e->dr.n_blkv = 0;
 	memset(&e->dr.shp, 0, sizeof e->dr.shp);
 	e->dr.has_shp = 0;
@@ -6909,36 +6859,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		if (strstr(line, "struct kof_plague_shape ref_shape")) {
 			in_shape = 1;
 			e->dr.has_shp = 1;
-			continue;
-		}
-		/*
-		 * THE CHAIN, read back the way it was written: one step per
-		 * line, three numbers a line. See the emitter - the words in
-		 * the comments are for a reader and nothing parses them.
-		 */
-		if (strstr(line, "struct kof_pth_symptom ref_chain")) {
-			in_chain = 1;
-			e->dr.has_chain = 1;
-			e->dr.chain.n = 0;
-			continue;
-		}
-		if (in_chain) {
-			const char *q = strchr(line, '{');
-
-			if (q && e->dr.chain.n < KOF_PTH_SYMPTOM_MAX) {
-				struct kof_pth_step *st =
-					&e->dr.chain.s[e->dr.chain.n];
-				char *end;
-
-				st->cap = (uint8_t)strtoul(q + 1, &end, 0);
-				st->flags = end && *end == ',' ? (uint8_t)
-					strtoul(end + 1, &end, 0) : 0u;
-				st->back = end && *end == ',' ? (uint8_t)
-					strtoul(end + 1, NULL, 0) : 0u;
-				e->dr.chain.n++;
-			}
-			if (strchr(line, '}') && strchr(line, ';'))
-				in_chain = 0;
 			continue;
 		}
 		if (in_shape) {

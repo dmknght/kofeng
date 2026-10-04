@@ -33,7 +33,6 @@
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../analyzers/parsers/binaries/disasm/xref.h"
-#include "../detectors/overlord/pathogen/diagnose.h"
 #include "../disinfect/pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
@@ -5126,18 +5125,6 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 /* Remember what a similarity measure answered, for the name - see
  * kof_scanner.ovl_asked. The highest of them, because a rule may ask twice
  * and the reader wants the measurement the verdict could have rested on. */
-static uint32_t ovl_note(const struct kof_obj_ctx *ctx, uint32_t pct)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-
-	if (sc) {
-		if (sc->ovl_asked < 0)
-			sc->ovl_asked = 1;
-		if (pct > sc->ovl_pct)
-			sc->ovl_pct = pct;
-	}
-	return pct;
-}
 
 /*
  * The two halves of a described repair - see kof_content.cure_patch.
@@ -5305,15 +5292,12 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * rule that could tell them apart would start reporting on the scanner's
  * settings rather than on the object.
  */
-#define PLAGUE_BLOCKS_LEVEL 1u
-#define PTH_CHAIN_LEVEL  2u
-
-static int ovl_level_ok(const struct kof_obj_ctx *ctx, uint32_t need)
-{
-	const struct kof_scanner *sc = kof_scan_of(ctx);
-
-	return sc && sc->heur_lvl >= need;
-}
+/*
+ * The overlord LEVEL GATE went with the pathogen surface: ovl_level_ok and
+ * ovl_note had no other caller. The idea is still needed - a scan and a
+ * researcher opening one sample must not pay the same price - and comes back
+ * with the replacement, which is where the two modes are decided.
+ */
 
 /*
  * WHICH ADDRESS MEANS WHICH CAPABILITY IN THIS OBJECT.
@@ -5328,42 +5312,25 @@ static int ovl_level_ok(const struct kof_obj_ctx *ctx, uint32_t need)
  * get right for an object whose whole sweep is already bounded.
  */
 /*
- * ONE FACT ABOUT THE OBJECT, bounds checked and gated like its neighbour.
+ * THE PATHOGEN SURFACE IS UNPLUGGED, and the backend is not.
  *
- * Same level gate as c_pth_match: both answer out of the same sweep, and a
- * scan that did not pay for it must not get one of them for free.
+ * c_pth_has, c_pth_feeds and c_pth_match used to sit in both vtables, and
+ * they were the only way a scan reached the chain builder: a rule asked, the
+ * sweep ran. The chain is being replaced - the shape it produced is a WALK
+ * flattened into a sequence, and three things it cannot express are the ones
+ * that matter: a producer with several consumers is a tree and not a list, a
+ * step joined by control rather than by a value has nowhere to live, and a
+ * distance in a sequence is broken by inserting one instruction between two
+ * steps. The 64-slot set in front of it chose between chains by how much
+ * each said, which is a bias against the short decisive shapes - MEASURED on
+ * one bot: the engine found `pipe, vfork, dup2, dup2, execl("/bin/sh")` and
+ * put only `pipe -> dup2` on the page.
+ *
+ * So the entry points are gone from the vtables and nothing in a scan calls
+ * pathogen. Everything behind them - the sweep, the vocabulary, the
+ * partition, kof_pth_chain_build - is untouched and still reachable from
+ * kofviewer, which is where the replacement will be tried first.
  */
-static int c_pth_has(const struct kof_obj_ctx *ctx, uint8_t cap, uint8_t flags)
-{
-	const struct kof_pth_profile *pr;
-
-	if (!cap || cap >= KOF_CAP_COUNT ||
-	    !ovl_level_ok(ctx, PTH_CHAIN_LEVEL))
-		return 0;
-	pr = kof_pth_profile_of(ctx);
-	if (!pr || !(pr->cap_mask & (1ull << cap)))
-		return 0;
-	return (pr->flags[cap] & flags) == flags;
-}
-
-static int c_pth_feeds(const struct kof_obj_ctx *ctx, uint8_t src, uint8_t dst)
-{
-	const struct kof_pth_profile *pr;
-
-	if (!src || !dst || src >= KOF_CAP_COUNT || dst >= KOF_CAP_COUNT ||
-	    !ovl_level_ok(ctx, PTH_CHAIN_LEVEL))
-		return 0;
-	pr = kof_pth_profile_of(ctx);
-	return pr && (pr->edge[dst] & (1u << src)) != 0;
-}
-
-static uint32_t c_pth_match(const struct kof_obj_ctx *ctx,
-			    const struct kof_pth_symptom *ref)
-{
-	if (!ref || !ref->n || !ovl_level_ok(ctx, PTH_CHAIN_LEVEL))
-		return 0;
-	return ovl_note(ctx, kof_pth_best_pct(ctx, ref));
-}
 
 /* Containment over the object's block set, against a reference's own. */
 
@@ -5418,7 +5385,7 @@ static const struct kof_content kof_detect_vtable = {
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
 	/* The block vector is gone - see the note in kofsig.h. The SLOT
 	 * stays so no other entry moves, exactly as ovl_strings' did. */
-	c_plague_score, NULL, c_pth_match, c_plague_shape,
+	c_plague_score, NULL, NULL /* was c_pth_match */, c_plague_shape,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	/* supersede - a detector produces nothing to be superseded by. */
@@ -5445,10 +5412,8 @@ static const struct kof_content kof_detect_vtable = {
 	c_infected,
 	/* And it drives no machine, so it changes none. */
 	NULL, NULL, NULL,
-	/* The profile's two questions - see kofsig.h. Both surfaces carry
-	 * them for the same reason both carry c_pth_match: they are reads of
-	 * the object in front of the module, not of what it is producing. */
-	c_pth_has, c_pth_feeds
+	/* The profile's two questions - unplugged, see above. */
+	NULL, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -5463,7 +5428,7 @@ static const struct kof_content kof_unpack_vtable = {
 	c_emu_run, c_emu_region, c_emu_take, c_opened_already, c_incomplete,
 	c_unpack_entry, c_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_plague_score,
-	NULL, c_pth_match, c_plague_shape, c_cure_offer, c_cure_patch,
+	NULL, NULL /* was c_pth_match */, c_plague_shape, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	c_supersede, c_as_format, c_packer_build, c_emu_reg, c_emu_read,
@@ -5473,8 +5438,8 @@ static const struct kof_content kof_unpack_vtable = {
 	c_dis_seek, c_dis_next, c_dis_reg,
 	c_emu_region_read, c_infected,
 	c_emu_set_reg, c_emu_set_ip, c_emu_write,
-	/* The profile's two questions - see kofsig.h. */
-	c_pth_has, c_pth_feeds
+	/* The profile's two questions - unplugged, see above. */
+	NULL, NULL
 };
 
 /*

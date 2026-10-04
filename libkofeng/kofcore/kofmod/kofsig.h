@@ -26,7 +26,7 @@
 #define KOFENG_KOFSIG_H
 
 #include <stdint.h>
-/* The capability vocabulary a rule names - see kof_pth_has. */
+/* The capability vocabulary - see nucleo.c. No rule names one yet. */
 #include <kofmod/kofpathogen.h>
 
 /* The code reader's vocabulary - see kdis.h for what it is for. */
@@ -1121,7 +1121,6 @@ struct kof_region_shape {
 	uint32_t reserved;
 };
 
-struct kof_pth_symptom;   /* detectors/overlord/pathogen/diagnose.h - see ovl_chain */
 struct kof_plague_shape;    /* kofmod/kofoverlord.h      - see ovl_shape */
 
 struct kof_content {
@@ -1907,8 +1906,9 @@ struct kof_content {
 	 * that apart from "none of the chain is here" and must not try; it is
 	 * one fact about this object, exactly as with plague_score.
 	 */
-	uint32_t (*ovl_chain)(const struct kof_obj_ctx *,
-			      const struct kof_pth_symptom *ref);
+	/* was ovl_chain - see "THE PATHOGEN MACROS ARE GONE". The SLOT stays
+	 * so no entry after it moves. */
+	void *ovl_chain_unused;
 
 	/*
 	 * THE STRUCTURE TRACK, WITH THE LIBRARY THE ENGINE ALREADY FOUND.
@@ -2355,7 +2355,8 @@ struct kof_content {
 	 * answers yes. The flags a rule may ask for are the ones a stored step
 	 * keeps: see KOF_PTH_FLAG_KEEP.
 	 */
-	int (*pth_has)(const struct kof_obj_ctx *, uint8_t cap, uint8_t flags);
+	/* was pth_has - see "THE PATHOGEN MACROS ARE GONE". */
+	void *pth_has_unused;
 	/*
 	 * DID AN ARGUMENT OF `dst` COME FROM WHAT `src` RETURNED.
 	 *
@@ -2367,7 +2368,8 @@ struct kof_content {
 	 * a pointer spilled to the stack, and on a PE that is nearly all of
 	 * them. A rule that needs certainty of absence cannot have it here.
 	 */
-	int (*pth_feeds)(const struct kof_obj_ctx *, uint8_t src, uint8_t dst);
+	/* was pth_feeds - same. */
+	void *pth_feeds_unused;
 };
 
 /*
@@ -3700,8 +3702,7 @@ enum kof_analyze {
  *   kof_plague_blocks   BLOCK SET. The same windows over the WHOLE object against
  *                    a reference's whole set, anchored to nothing.
  *
- *   kof_pth_match    CALL CHAIN. What the code asks the system for, in order.
- *                    Needs a disassembly sweep, so it is the dearest.
+ *   (the behaviour track is unplugged - see "THE PATHOGEN MACROS ARE GONE")
  *
  *
  * WHAT EACH SURVIVES, MEASURED. One object against transformations of itself,
@@ -3797,51 +3798,25 @@ enum kof_analyze {
  */
 
 /*
- * DOES THIS OBJECT DO THIS - one fact, one comparison.
+ * THE PATHOGEN MACROS ARE GONE, and the backend behind them is not.
  *
- *     if (kof_pth_has(KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX) &&
- *         kof_pth_feeds(KOF_CAP_WRITE, KOF_CAP_WRITE))
- *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ * kof_pth_has, kof_pth_feeds and kof_pth_match were the whole of what a rule
+ * could ask about behaviour, and all three are shaped by the chain: a
+ * sequence of steps with a distance back to the one that fed each. Three
+ * things that shape cannot hold, and each of them is the ordinary case:
  *
- * NEITHER IS A VERDICT ON ITS OWN and the measurements say so plainly: the
- * strongest single fact here reached a third of a malware corpus and none of
- * a clean one, which is a term in a rule and not a rule. See the note on the
- * two vtable entries.
+ *   - one producer with several consumers is a TREE, not a list;
+ *   - a step joined to another by CONTROL rather than by a value has no
+ *     place in it at all, which is why `vfork` then `execl("/bin/sh")` was
+ *     dropped off a page that had already found both;
+ *   - a distance in a sequence is broken by inserting one step between two,
+ *     which makes it the one part of a rule an author can evade on purpose.
+ *
+ * They will come back against a store of NODES AND TYPED EDGES rather than
+ * chains. Removed rather than left in place because a module written against
+ * them now would have to be rewritten, and bases/ has none yet - which is the
+ * only moment this costs nothing.
  */
-#define kof_pth_has(cap, flags)                                            \
-	((ctx)->content->pth_has                                           \
-	 ? (ctx)->content->pth_has((ctx), (uint8_t)(cap),                  \
-				   (uint8_t)(flags))                       \
-	 : 0)
-
-#define kof_pth_feeds(src, dst)                                            \
-	((ctx)->content->pth_feeds                                         \
-	 ? (ctx)->content->pth_feeds((ctx), (uint8_t)(src),                \
-				     (uint8_t)(dst))                       \
-	 : 0)
-
-/*
- * HOW MUCH OF A REFERENCE'S CALL CHAIN THIS OBJECT CARRIES.
- *
- *     static const struct kof_pth_symptom ref_chain = { ... };
- *
- *     if (kof_pth_match(ref_chain) >= 80u)
- *             KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);
- *
- * The chain is the capabilities the reference's code asks the system for, in
- * order, with the links between them - written out by the generator in
- * kofviewer, never typed. See detectors/overlord/pathogen/diagnose.h for what a step holds and
- * why an address is not one of the things it holds.
- *
- * SUSPECT RATHER THAN INFECT is the generator's default, for the reason the
- * shape measure gives: a chain says the code does the same SEQUENCE OF THINGS,
- * and a JIT and a loader can agree on a great deal of that. What separates
- * them is in the flags on the steps, and a rule that wants that separation
- * asks for it there.
- */
-#define kof_pth_match(ref)                                                 \
-	((ctx)->content->ovl_chain ? (ctx)->content->ovl_chain((ctx), &(ref)) \
-				   : 0u)
 
 /*
  * AT AN OFFSET THE MODULE WORKED OUT

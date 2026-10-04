@@ -1,5 +1,9 @@
 /*
- * vocab.h - WHAT A NUMBER OR A NAME MEANS, and nothing about how code is read.
+ * nucleo.h - WHAT A NUMBER OR A NAME MEANS, and nothing about how code is
+ * read.
+ *
+ * Named for the nucleotide, the unit a gene is built from: one row here is
+ * one base of what pathogen later reads as a sequence. It was vocab.h.
  *
  * This is the normalisation layer: syscall number -> capability, imported
  * name -> capability, and the words a reader sees for either. It was 1200
@@ -37,6 +41,68 @@
  * WHICH ARGUMENT A CALL DECIDES ITSELF BY, or KOF_FLOW_ROLE_NONE. Here
  * rather than in flow.h because every user of it is a row in a table below.
  */
+/*
+ * WHICH ABI A SYSCALL TABLE BELONGS TO. Moved here from flow.h when the
+ * chain backend was removed: the tables below are the only thing that ever
+ * read it, and a vocabulary that needs a sweep to compile is a vocabulary
+ * tied to one way of sweeping.
+ */
+enum kof_flow_arch {
+	KOF_FLOW_A_MIPS32 = 1,
+	/*
+	 * AND MIPS64, WHICH IS A DIFFERENT ABI AND NOT A WIDER MIPS32.
+	 *
+	 * The instructions are the same - `li $v0,N` then `syscall` - so one
+	 * decoder reads both. The NUMBERS are not: o32 bases its syscalls at
+	 * 4000 and n64 at 5000, and they are not an offset apart either, so
+	 * one table cannot serve. Reading an n64 object against the o32
+	 * table resolves nothing at all: measured, 40 of 40 MIPS64 objects
+	 * in the corpus produced ZERO capabilities while the sweep ran
+	 * happily over every instruction.
+	 *
+	 * Corroborated before the table was written: every `li $v0`
+	 * constant found across those 40 objects is >= 5000, and 5040,
+	 * 5041, 5043 and 5044 - socket, connect, sendto, recvfrom - are the
+	 * ones that recur, which is the profile of a network client and not
+	 * of a mis-numbered table.
+	 */
+	KOF_FLOW_A_MIPS64,
+	KOF_FLOW_A_ARM32,
+	KOF_FLOW_A_ARM64,
+	/*
+	 * AND THE REST OF WHAT AN IoT BUILDER SHIPS. Measured over 20075
+	 * executable objects of one Bazaar collection plus the lab here:
+	 * 601 PowerPC, 349 SuperH, 345 m68k, 281 SPARC, 42 RISC-V - 8.8% of
+	 * the corpus, and every one of them refused by the sweep before these
+	 * existed. A botnet's build matrix is not a list of the architectures
+	 * anyone develops on.
+	 */
+	KOF_FLOW_A_PPC32,
+	KOF_FLOW_A_PPC64,
+	KOF_FLOW_A_SPARC32,
+	KOF_FLOW_A_RISCV,
+	/*
+	 * The two that are not four bytes wide. SuperH is two, and m68k is
+	 * two to ten - so neither is swept by the word loop the four above
+	 * share, and both get a reader of their own that reads HALFWORDS.
+	 * Named here anyway, because what a caller has to say is still only
+	 * "this is the architecture" - see kof_flow_add_fixed.
+	 */
+	KOF_FLOW_A_SH,
+	KOF_FLOW_A_M68K,
+	/*
+	 * AND THE TWO THE VARIABLE-LENGTH SWEEP HANDLES ITSELF.
+	 *
+	 * x86 and x86-64 never needed an entry here because kof_flow_add
+	 * takes `bits` and picks its own table. kof_flow_sys_name is asked
+	 * from OUTSIDE the sweep, by something holding an object's
+	 * architecture and a number, and "the architectures the fixed-width
+	 * sweep knows" is not the question it is asking.
+	 */
+	KOF_FLOW_A_X86,
+	KOF_FLOW_A_X86_64
+};
+
 #define KOF_FLOW_ROLE_NONE  0u
 #define KOF_FLOW_ROLE_MMAP  1u   /* prot is argument 2    */
 #define KOF_FLOW_ROLE_CLONE 2u   /* flags is argument 0   */
@@ -49,7 +115,7 @@
 /* CLONE_THREAD: the bit that makes a clone a thread and not a process. */
 #define FLOW_CLONE_THREAD  0x00010000u
 
-struct sysrow { uint16_t nr; uint8_t cap; uint8_t role; const char *name; };
+struct sysrow { uint16_t nr; uint16_t cap; uint8_t role; const char *name; };
 
 /*
  * The tables, one per ABI, with their lengths beside them.
@@ -137,7 +203,7 @@ uint8_t kof_sys_argc(const char *name);
  * instruction after `exit` is not its successor. */
 int kof_sys_noreturn(unsigned bits, uint32_t nr);
 
-uint8_t     kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr);
+uint16_t    kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr);
 const char *kof_sys_look_name(const struct sysrow *t, uint32_t n, uint32_t nr);
 uint8_t     kof_sys_look_role(const struct sysrow *t, uint32_t n, uint32_t nr);
 

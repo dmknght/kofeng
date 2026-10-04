@@ -939,8 +939,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/binaries/disasm/decode_x86.c \
            libkofeng/analyzers/parsers/binaries/disasm/decode_mips.c \
            libkofeng/analyzers/parsers/binaries/disasm/xref.c \
-           libkofeng/analyzers/parsers/binaries/disasm/flow.c \
-           libkofeng/analyzers/parsers/binaries/disasm/vocab.c \
+           libkofeng/analyzers/parsers/binaries/disasm/nucleo.c \
            libkofeng/analyzers/parsers/binaries/disasm/kdis.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_sym.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_parse.c \
@@ -989,8 +988,6 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/scanners/objsrc.c \
            libkofeng/analyzers/trueline/trueline.c \
            libkofeng/detectors/overlord/kofoverlord.c \
-           libkofeng/detectors/overlord/pathogen/diagnose.c \
-           libkofeng/detectors/overlord/pathogen/pathogen.c \
            libkofeng/disinfect/pzero.c \
            libkofeng/kofcore/kofhash.c
 

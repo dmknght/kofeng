@@ -40,7 +40,6 @@
 #include <kofmod/kofplague.h>
 #include <kofmod/kofoverlord.h>
 #include <kofeng.h>
-#include "../libkofeng/detectors/overlord/pathogen/diagnose.h"
 #include "kofinspect.h"
 
 
@@ -1039,8 +1038,6 @@ struct kof_draft {
 	 * are two claims that want two matchers. Which one is taken is the
 	 * one saying the most different things - see chain_says.
 	 */
-	struct kof_pth_symptom chain;
-	int          has_chain;
 	/*
 	 * WHICH WHOLE-OBJECT MEASURES THE AUTHOR HAS CHOSEN, and which of them
 	 * are carried - indexed by SIM_IT_*, with the block slot unused
@@ -1295,9 +1292,6 @@ struct object {
 	 * sim_chain_sweep. A property of the object like the other two, and
 	 * re-derived on every arrival for the same reason they were.
 	 */
-	struct kof_pth_symptom chain;
-	int                   has_chain;
-	uint8_t               chain_done;
 
 	uint8_t  *own;              /* the copy, NULL for the mapped top level */
 	void     *mapped;           /* or a spill file, mapped instead of copied */
