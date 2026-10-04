@@ -53,7 +53,7 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
  * so they are walked when somebody asks, and each entry is handed to a
  * visitor rather than written into an array the caller had to size.
  *
- * WHY THEY LIVE HERE AT ALL. They were in the pathogen detector for several
+ * WHY THEY LIVE HERE AT ALL. They were in the chain detector for several
  * revisions: five hundred lines of directory walking, r_info unpacking and
  * string reading, sitting next to the vocabulary that interprets the result -
  * and calling back into this file for section bounds while it did. kofexamine
@@ -64,7 +64,7 @@ int kof_elf_parse(kof_buf file, struct kof_elf_info *info,
  * whoever is detecting; a parser that knew about capabilities would be a
  * parser nobody else could call.
  *
- * WHY A VISITOR AND NOT AN OUT ARRAY. The caller filters - pathogen keeps the
+ * WHY A VISITOR AND NOT AN OUT ARRAY. The caller filters - the sweep kept the
  * one import in fifty it has a word for - so an array would have to be sized
  * for every entry in the file to deliver the few that matter, and an array
  * that fills up drops entries by position in the file rather than by what the

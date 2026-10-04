@@ -1159,7 +1159,7 @@ static void finding_str(const struct kof_scanner *sc,
 							  : sc->ovl_pct);
 		f->sim_kind = (uint8_t)KOF_SIM_OVERLORD;
 		snprintf(shape, sizeof shape, "%u", sc->ovl_pct);
-		verdict_vals(f, ctx, m, KOF_ENGINE_PATHOGEN);
+		verdict_vals(f, ctx, m, KOF_ENGINE_OVERLORD);
 		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
 				 variant, shape);
 		return;

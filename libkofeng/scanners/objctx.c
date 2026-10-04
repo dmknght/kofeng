@@ -5293,7 +5293,7 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * settings rather than on the object.
  */
 /*
- * The overlord LEVEL GATE went with the pathogen surface: ovl_level_ok and
+ * The overlord LEVEL GATE went with the chain surface: ovl_level_ok and
  * ovl_note had no other caller. The idea is still needed - a scan and a
  * researcher opening one sample must not pay the same price - and comes back
  * with the replacement, which is where the two modes are decided.
@@ -5312,7 +5312,7 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * get right for an object whose whole sweep is already bounded.
  */
 /*
- * THE PATHOGEN SURFACE IS UNPLUGGED, and the backend is not.
+ * THE CHAIN SURFACE IS UNPLUGGED, and so is what it reached.
  *
  * c_pth_has, c_pth_feeds and c_pth_match used to sit in both vtables, and
  * they were the only way a scan reached the chain builder: a rule asked, the
@@ -5326,10 +5326,11 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * one bot: the engine found `pipe, vfork, dup2, dup2, execl("/bin/sh")` and
  * put only `pipe -> dup2` on the page.
  *
- * So the entry points are gone from the vtables and nothing in a scan calls
- * pathogen. Everything behind them - the sweep, the vocabulary, the
- * partition, kof_pth_chain_build - is untouched and still reachable from
- * kofviewer, which is where the replacement will be tried first.
+ * So the entry points are gone from the vtables, and so is what was behind
+ * them: the sweep, the chain set and the function partition. The VOCABULARY
+ * is what was kept - kofmod/kofcap.h and the tables in nucleo.c - because
+ * which capability a name or a syscall number means is the part that was
+ * right. The replacement reads the same words into a different shape.
  */
 
 /* Containment over the object's block set, against a reference's own. */

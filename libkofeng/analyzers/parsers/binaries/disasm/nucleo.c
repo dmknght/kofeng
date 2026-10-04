@@ -14,9 +14,9 @@
  * reader, not a strace.
  */
 /*
- * The roles are flow.h's - see KOF_FLOW_ROLE_NONE. Naming them in the table
- * rather than re-listing the numbers in the pass that needs them is what
- * keeps "4183 is socket" written down exactly once.
+ * The roles are nucleo.h's - see KOF_FLOW_ROLE_NONE. Naming them in the
+ * table rather than re-listing the numbers in the pass that needs them is
+ * what keeps "4183 is socket" written down exactly once.
  */
 /*
  * ONE ROW PER SYSCALL THE VOCABULARY HAS A WORD FOR.
@@ -344,7 +344,7 @@ names[] = {
 	{ "MapViewOfFile",  KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
 	{ "MapViewOfFileEx", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
 	/* The handle, the memory and the execution - see the note on the
-	 * three capabilities in flow.h. */
+	 * three capabilities in kofmod/kofcap.h. */
 	{ "OpenProcess",    KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
 	{ "DebugActiveProcess", KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
 	/* A thread handle is the same kind of hold on another execution
@@ -558,7 +558,7 @@ names[] = {
 	 * ===== THE WORDS ADDED WITH THE NINE CAPABILITIES AT THE END OF
 	 * enum kof_flow_cap. Each entry point here exists to do ONE thing;
 	 * that is the bar, and the names that did not clear it are listed in
-	 * kofpathogen.h beside the capabilities rather than here.
+	 * kofcap.h beside the capabilities rather than here.
 	 */
 	/* Encryption. Windows has two generations of the same API and both are
 	 * still shipped, so both are here. */
@@ -745,8 +745,9 @@ names[] = {
 };
 
 /*
- * The syscall half of the vocabulary, for a caller that has a RUN rather than
- * code. See the note in flow.h for why this is exported instead of copied.
+ * The syscall half of the vocabulary, for a caller that has a RUN rather
+ * than code. Exported rather than copied for the reason at the head of
+ * nucleo.h: a second table is a second thing to keep right.
  */
 uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 				const uint64_t *arg, uint8_t *flags)
@@ -953,7 +954,7 @@ int kof_flow_cap_makes(uint16_t cap)
  * A path and a program name are the two things a reader most wants off
  * this page and the two it could least get: the value is an ADDRESS, so
  * the row said `open(0x4a8c84)` and the reader went to a hex editor. The
- * bytes are in the object; see the filler in pathogen, which reads them.
+ * bytes are in the object; this says WHICH argument to go and read.
  *
  * BY THE NAME AND NOT ONLY THE WORD, because `openat` puts the path
  * second - the directory handle is first - and `open` puts it first. One

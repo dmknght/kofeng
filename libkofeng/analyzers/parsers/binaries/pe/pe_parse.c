@@ -970,7 +970,7 @@ const char *kof_pe_anomaly_name(unsigned index)
  * means.
  *
  * THERE USED TO BE TWO OF THESE. pe_sym.c walked the directory to build the
- * KSYM block and the pathogen detector walked it again to find which slot
+ * KSYM block and the chain detector walked it again to find which slot
  * carries which capability, and the two had drifted: one stopped after 64
  * DLLs and the other after 256, one ended the table on two zero fields and
  * the other on three, one reported imports by ordinal and the other dropped

@@ -257,9 +257,9 @@ static inline uint32_t kof_plague_shape_pct(const struct kof_elf_info *e,
 	 ? (ctx)->content->ovl_shape((ctx), &(ref))                        \
 	 : kof_plague_shape_pct(kof_elf(ctx), &(ref), (ctx)->obj_size))
 
-/* The step and the symptom moved to kofmod/kofpathogen.h, beside the
- * vocabulary they are made of. */
-#include <kofmod/kofpathogen.h>
+/* The capability vocabulary. The step and the symptom that were spelled
+ * here are gone with the chain matcher; see the note in kofcap.h. */
+#include <kofmod/kofcap.h>
 
 
 #endif /* KOFMOD_KOFOVERLORD_H */

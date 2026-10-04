@@ -1214,15 +1214,15 @@ static void sim_take_out(struct view *v, uint32_t what, uint32_t blk);
 /*
  * THE SIMILARITY TABLE IS HIDDEN, NOT DELETED.
  *
- * Its three measures are going to three different places - the file shape and
- * the block vector onto the block table's own heading, where the thing they
- * are about already is, and the chain into pathogen, which asks a different
- * question in a different vocabulary. Until that lands the table would be
- * three rows offering ticks that no longer lead anywhere.
+ * Its measures are going to the block table's own heading, where the thing
+ * they are about already is. The third, the call chain, went with the chain
+ * matcher - it asked a different question in a different vocabulary, and the
+ * shape it asked it in was wrong. Until the move lands the table would be
+ * rows offering ticks that no longer lead anywhere.
  *
  * ONE SWITCH, READ BY BOTH THE DRAWER AND THE ROW MODEL. They are two walks
  * over one table, and this file already carries the scar of them disagreeing:
- * see the note in prow_build about a PE painting three rows the model had not
+ * see the note in prow_build about a PE painting rows the model had not
  * counted, which put every row below them one out.
  */
 static int sim_section_shown(void) { return 0; }
@@ -1231,15 +1231,12 @@ static uint32_t sim_row_what(uint32_t i);
 static void sim_item_name(const struct view *v,
 			  const struct grp_sim_item *it, char *out,
 			  size_t cap);
-static uint32_t sim_chain_sweep(struct view *v, struct object *o,
-				struct kof_flow_node *out, uint32_t cap);
 static void sim_made_word(const struct view *v, uint32_t what, char *out,
 			  size_t cap);
 static uint32_t sim_offer(struct view *v, uint32_t g,
 			  struct grp_sim_item *out, uint32_t cap);
 static void hit_sim_item_del(struct view *v, uint32_t pk);
 static void hit_sim_tick(struct view *v, uint32_t which);
-static void hit_sim_name(struct view *v, uint32_t which);
 static int  blk_row_shown(const struct view *v, uint32_t i);
 static int  sim_row_shown(const struct view *v, uint32_t i);
 static void hit_fold(struct view *v, uint32_t which);
@@ -1256,12 +1253,12 @@ static void hit_optbtn(struct view *v, uint32_t arg);
 #define PLG_MAX_REGION 32u
 
 /* The two generator buttons on the Plague blocks heading, as drawn. */
-/* The three measures the similarity table lists, in the order it lists them:
- * most of the object read first. */
+/* The measures the similarity table lists, in the order it lists them: most
+ * of the object read first. A third row, the call chain, stood after these
+ * two and went with the chain matcher. */
 #define SIM_BLOCKS 0u
 #define SIM_SHAPE  1u
-#define SIM_CHAIN  2u
-#define SIM_ROWS   3u
+#define SIM_ROWS   2u
 
 
 struct view {
@@ -1316,7 +1313,7 @@ struct view {
 	 * another sample - which is the whole use of the column: it says how
 	 * alike the NEXT file is.
 	 */
-	uint32_t         sim_shape, sim_blk, sim_chain;
+	uint32_t         sim_shape, sim_blk;
 	/*
 	 * FOLDED TABLES.
 	 *
@@ -2227,40 +2224,12 @@ struct view {
 	int         enc_txt_y, enc_txt_x, enc_txt_w, enc_txt_h;
 	int         prop_open;      /* the properties page is up */
 	/*
-	 * THE CALL CHAIN PAGE, opened by clicking the measure's NAME.
-	 *
-	 * The tick beside it says the rule is about the chain; the name says
-	 * "show me the chain". Two controls on one row because they are two
-	 * questions, and the second one had no answer at all before - the
-	 * table gave a count of capabilities and no way to see which.
+	 * A SECOND MODAL PAGE STOOD HERE - the call chain the sweep read and
+	 * the trace the interpreter produced, as two tabs of one box. Both
+	 * went with the chain matcher. The fields are gone rather than left
+	 * at zero, because a dialog's state that nothing ever sets is a
+	 * dialog the modal id below still counts.
 	 */
-	/*
-	 * THE PATHOGEN DIALOG, which is two views of one question and so is
-	 * one box with two tabs rather than two boxes.
-	 *
-	 * `pth_tab` is 0 for the call chain and 1 for the runtime trace. The
-	 * CHAIN IS THE DEFAULT because it is the one that always has an
-	 * answer: the sweep reads every architecture the engine knows, while
-	 * the interpreter is x86 only - opening on the trace would show an
-	 * empty box for every ARM and MIPS sample in the tree.
-	 */
-	int         chain_open;
-	uint8_t     pth_tab;
-	/* Where the two tab labels landed on the top rule, so a click on one
-	 * selects it - the same place the close control is recorded. */
-	int         pth_tab_y, pth_tab_x0[2], pth_tab_x1[2];
-	uint32_t    chain_off;
-	int         chain_y, chain_x0, chain_x1;
-	/*
-	 * THE EMULATED COUNTERPART OF THE PAGE ABOVE.
-	 *
-	 * Call chain is what the sweep READ; this is what a run DID. Two
-	 * answers to one question, and a reader comparing them is the whole
-	 * point - so the page is built the same way and kept beside it.
-	 */
-
-	uint32_t    rtr_off;
-	int         rtr_y, rtr_x0, rtr_x1;
 	uint32_t    prop_off;       /* the first of its lines on screen */
 	int         prop_x0, prop_x1, prop_y;   /* its close control */
 	/*
@@ -7295,7 +7264,7 @@ static void plg_sim_refresh(struct view *v)
 	struct object *o = cur_obj(v);
 	uint32_t i, n = 0, sum = 0;
 
-	v->sim_shape = v->sim_blk = v->sim_chain = 0;
+	v->sim_shape = v->sim_blk = 0;
 	if (!o || !o->buf.p)
 		return;
 
@@ -8875,8 +8844,6 @@ static int plg_load_rule(struct view *v, const char *path)
 	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
 	int shp_level = LV_SUSPECT, str_level = LV_INFECT;
 	int blkv_level = LV_INFECT;
-	uint8_t chain_pct = 0;
-	int chain_level = LV_SUSPECT;
 	struct kof_plague_decl d[PLG_MAX_BLOCK];
 	/* Which condition each block matcher belongs to, by matcher index -
 	 * see kof_plague_decl.cnd. */
@@ -8889,8 +8856,7 @@ static int plg_load_rule(struct view *v, const char *path)
 	if (!plague_from_source(&v->ed, path, d, PLG_MAX_BLOCK, &n, pool,
 				(uint32_t)(sizeof pool / sizeof pool[0]),
 				&verdict, &shp_pct, &shp_level,
-				&str_pct, &str_level, &blkv_pct, &blkv_level,
-				&chain_pct, &chain_level))
+				&str_pct, &str_level, &blkv_pct, &blkv_level))
 		return 0;
 
 	v->ed.dr.n_blk = 0;
@@ -11614,29 +11580,22 @@ static void prow_build(struct view *v)
 	 * a reader moving between samples needs to see.
 	 */
 	/*
-	 * THE SAME TWO TESTS draw_decl_sim MAKES, and in the same order.
+	 * THE SAME TEST draw_decl_sim MAKES, and in the same order.
 	 *
-	 * This asked for ELF and the drawer asks for ELF OR PE - a PE is
-	 * offered the one measure that can answer for it, the flow chain -
-	 * so on a PE the panel painted three rows the model had not counted.
-	 * Every row below them was then one out: the clamp stopped short of
-	 * the last, and a click landed on the row above what it pointed at.
-	 * Two conditions describing one table is the shape this whole check
-	 * exists to catch, and it caught it.
+	 * These two must agree or every row below the table is one out: one
+	 * of them once asked for ELF while the other asked for ELF OR PE, so
+	 * on a PE the panel painted rows the model had not counted - the
+	 * clamp stopped short of the last, and a click landed on the row
+	 * above what it pointed at. Two conditions describing one table is
+	 * the shape this whole check exists to catch, and it caught it.
 	 */
-	if (sim_section_shown() && cur_obj(v) && (cur_obj(v)->ctx.format == KOF_FMT_ELF ||
-			   cur_obj(v)->ctx.format == KOF_FMT_PE)) {
-		uint32_t n_row = cur_obj(v)->ctx.format == KOF_FMT_ELF
-			       ? (uint32_t)SIM_ROWS : 1u;
-
+	if (sim_section_shown() && cur_obj(v) &&
+	    cur_obj(v)->ctx.format == KOF_FMT_ELF) {
 		prow_add(v, RW_SIMHDR, 0);
 		prow_add(v, RW_SIMCOL, 0);
-		for (i = 0; i < SIM_ROWS; i++) {
-			if (n_row == 1u && i != SIM_CHAIN)
-				continue;
+		for (i = 0; i < SIM_ROWS; i++)
 			if (sim_row_shown(v, i))
 				prow_add(v, RW_SIM, i);
-		}
 	}
 	/*
 	 * THE ADD BUTTON AFTER THE THINGS IT ADDS TO, not before them.
@@ -15399,9 +15358,7 @@ static int blk_section_shown(struct view *v)
  */
 static uint32_t sim_row_what(uint32_t i)
 {
-	return i == SIM_BLOCKS ? SIM_IT_BLKSET
-	     : i == SIM_SHAPE  ? SIM_IT_SHAPE
-			       : SIM_IT_CHAIN;
+	return i == SIM_BLOCKS ? SIM_IT_BLKSET : SIM_IT_SHAPE;
 }
 
 static int sim_row_shown(const struct view *v, uint32_t i)
@@ -15467,11 +15424,6 @@ static void sim_say_resolution(struct view *v, uint32_t what)
 	/* Not a fault: a small set is a fact about the object, and the author
 	 * may know it is the right one. */
 	v->ed.dr.warn_bad = 0;
-}
-
-static void hit_sim_name(struct view *v, uint32_t which)
-{
-	(void)v; (void)which;   /* the chain row it opened is gone */
 }
 
 static void hit_sim_tick(struct view *v, uint32_t which)
@@ -15571,40 +15523,6 @@ static void plg_wire(struct view *v, uint32_t g, int level)
  * Zero with dr.warn set, which is what the panel shows. A block needs nothing
  * prepared - the carve already found it - so it answers yes.
  */
-/*
- * SWEEP THIS OBJECT'S CODE AND HAND BACK THE WORTHIEST CHAIN IT HOLDS.
- *
- * The same walk the engine does at scan time - see kof_content.ovl_chain - so
- * a chain generated here and a chain measured there are the same object read
- * the same way. Which of them is offered is the one saying the most
- * different things - there is no weight bar any more, see the note in
- * diagnose.h.
- *
- * Returns how many nodes were written, 0 when there is no code this can read:
- * a packed sample, an architecture the decoder does not have, or a format
- * whose code regions nobody named.
- */
-/*
- * THIS OBJECT'S CHAINS, FROM THE ENGINE, CACHED FOR AS LONG AS IT IS THE ONE
- * IN FRONT OF THE READER.
- *
- * What was here was a sweep of kofviewer's own: it handled x86 and x86-64,
- * resolved no imports, and knew none of the fixed-width architectures. It was
- * right when it was written and the engine moved on without it - so a reader
- * looking at an ARM bot was told there was no chain while the scanner was
- * finding eight in the same file.
- *
- * One builder now, in the scan path, called from both - see
- * kof_pth_chain_build.
- */
-static const void         *g_pth_for;
-/* Why the set came back empty, as the engine reported it - see
- * kof_pth_chain_build. */
-static const char         *g_pth_why;
-
-
-
-
 static int sim_prepare(struct view *v, uint32_t what)
 {
 	struct object *o = cur_obj(v);
@@ -16393,22 +16311,18 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		return r;
 
 	struct object *ob = cur_obj(v);
-	uint32_t i, n_row;
+	uint32_t i, n_row = SIM_ROWS;
 
 	/*
-	 * THE TABLE OPENS ON PE TOO, and it did not before.
+	 * ELF ONLY, AND IT OPENED ON PE FOR A WHILE.
 	 *
-	 * The first three measures are ELF answers by construction - the shape
-	 * is read off the program headers, and both set measures depend on the
-	 * static-library subtraction, which is koflib's ELF answer. The chain
-	 * is not: a sweep of code needs no library and no program header. So
-	 * the gate moved from the table onto the ROWS, and a PE object is
-	 * offered the one measure that can answer for it rather than none.
+	 * Every measure left here is an ELF answer by construction - the
+	 * shape is read off the program headers, and both set measures depend
+	 * on the static-library subtraction, which is koflib's ELF answer.
+	 * The one that was not, the call chain, is gone, and the gate came
+	 * back onto the table with it.
 	 */
-	if (!ob)
-		return r;
-	n_row = ob->ctx.format == KOF_FMT_ELF ? SIM_ROWS : 1u;
-	if (ob->ctx.format != KOF_FMT_ELF && ob->ctx.format != KOF_FMT_PE)
+	if (!ob || ob->ctx.format != KOF_FMT_ELF)
 		return r;
 	{
 		char sum[48];
@@ -16437,9 +16351,6 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 	for (i = 0; i < SIM_ROWS; i++) {
 		char made[32], mt[8];
 
-		/* On PE only the chain row is drawn - see above. */
-		if (n_row == 1u && i != SIM_CHAIN)
-			continue;
 		uint32_t what = sim_row_what(i), pct;
 		int on, y, c0;
 
@@ -16449,8 +16360,7 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 			r++;
 			continue;
 		}
-		pct = i == SIM_BLOCKS ? v->sim_blk
-		    : i == SIM_SHAPE  ? v->sim_shape : v->sim_chain;
+		pct = i == SIM_BLOCKS ? v->sim_blk : v->sim_shape;
 		sim_made_word(v, what, made, sizeof made);
 		/*
 		 * A PERCENTAGE ONLY ONCE THERE IS SOMETHING TO COMPARE
@@ -16488,27 +16398,14 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		out_str(o, " ");
 		out_fmt(o, " %s%-18s" A_OFF, on ? A_ID : A_DIM,
 			sim_it_word(what));
-		{
-			int c1 = 2 + (int)o->col_hint;
-
-			out_fmt(o, A_DIM "%-22s" A_OFF, made);
-			/*
-			 * AND THIS CELL IS A CONTROL, on the chain row only.
-			 *
-			 * The cell already says what the measure is compared
-			 * over; clicking it asks to see that thing, which is
-			 * the shortest distance between the question and the
-			 * answer. The NAME is not the control - a name is what
-			 * a row is, not a thing to open - and the other three
-			 * measures have nothing to open anyway: a shape, a set
-			 * of string hashes and a set of block hashes are
-			 * numbers with no text behind them. A chain is the one
-			 * measure made of words.
-			 */
-			if (what == SIM_IT_CHAIN)
-				hit_add(v, y, c1, (int)o->col_hint,
-					hit_sim_name, i);
-		}
+		/*
+		 * THIS CELL WAS A CONTROL on the chain row: clicking what the
+		 * measure is compared over asked to see that thing. The rows
+		 * left have nothing to open - a shape, a set of string hashes
+		 * and a set of block hashes are numbers with no text behind
+		 * them - so the cell is a cell again.
+		 */
+		out_fmt(o, A_DIM "%-22s" A_OFF, made);
 		out_fmt(o, "%s%5s" A_OFF,
 			!v->ed.dr.sim_kept[what] ? A_DIM
 			: pct >= 50u ? A_WARN : A_DIM, mt);
@@ -19726,7 +19623,6 @@ static void redraw(struct view *v)
 	 */
 	{
 		int modal = v->prop_open   ? 1
-			  : v->chain_open  ? 2
 			  : v->sym_open    ? 3
 			  : v->help_open   ? 4 : 0;
 
@@ -20726,7 +20622,6 @@ static const struct {
 	{ "Find infected data",       BM_ANALYSIS, -1, 0 },
 	{ "Decode string",            BM_ANALYSIS, -1, 0 },
 	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
-	{ "Pathogen",          BM_ANALYSIS, -1, 0 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Static unpacker",   BM_ANALYSIS, BI_DUMP, 0 },
 	{ "Emu unpacker",      BM_ANALYSIS, BI_DUMP, 0 },
@@ -24464,81 +24359,6 @@ static void page_draw(struct out *o, struct view *v, struct page *p)
 	out_clip_restore(o, cl);
 }
 
-/*
- * WHAT THE CHAIN IN THE DRAFT ACTUALLY IS.
- *
- * The similarity row can only say how many capabilities it holds, which is the
- * one thing about a chain that does not matter - "5 capabilities" describes a
- * stager and a JIT equally. This says WHICH, in order, with the flags the rule
- * will require and the links it will check, because those are what a chain
- * rule is made of and a researcher about to tick one should be able to read it
- * first.
- *
- * Built into the shared page renderer - see struct page - so it scrolls,
- * selects and copies the way the properties page does without any of that
- * being written again.
- */
-#define CHAIN_MAX_LINE 64u
-static struct prop_line g_chain[CHAIN_MAX_LINE];
-static uint32_t         g_n_chain;
-
-static void chain_add(const char *fmt, ...)
-{
-	va_list ap;
-
-	if (g_n_chain >= CHAIN_MAX_LINE)
-		return;
-	va_start(ap, fmt);
-	vsnprintf(g_chain[g_n_chain].text, PROP_W, fmt, ap);
-	va_end(ap);
-	g_n_chain++;
-}
-
-/*
- * WHOSE CHAIN THE TAB SHOWS, and it used to be the wrong one.
- *
- * This read the DRAFT's chain - v->ed.dr.chain - which is the one a rule
- * being written carries. With no draft there was nothing, so a reader who
- * opened the dialog on a sample was told "no chain was read from this object"
- * while the scanner was finding eight of them in the same file.
- *
- * The draft still wins when there IS one: a rule being written is about the
- * chain it carries and not about whatever else the object has. Otherwise the
- * object's own heaviest chain is shown, and the rest are counted beside it
- * rather than run together - eight chains concatenated would read as one body
- * doing all of it, which is the one thing a chain must not say.
- */
-
-
-
-/*
- * The runtime-trace page stood here, and the swept call chain beside it as
- * the other tab of one box. Both are gone: the chain with the pathogen
- * backend, and the trace with the dialog that was its only door. The
- * interpreter still logs its syscalls - see kof_emu_syscall - so this comes
- * back whenever something wants to draw them.
- */
-
-/*
- * THE PATHOGEN DIALOG.
- *
- * Two readings of the same object: what the sweep READ out of the code, and
- * what the interpreter DID when it ran it. They were two boxes reached two
- * different ways - and one of those ways was a click inside the similarity
- * section, which is hidden, so the call chain had no door at all.
- *
- * The run is NOT started here. A page is rebuilt on every scroll and that one
- * costs seconds; it happens once, when the reader asks for the tab - see
- * pth_tab_set.
- */
-/* Wide enough for the chain table and the trace's longest ordinary line, and
- * narrow enough to leave the panes either side readable. The height is stated
- * for the same reason the width is - see page.exact_w - and both are clamped
- * against the terminal by page_draw. */
-#define PATH_BOX_W    96
-#define PATH_BOX_ROWS 14u
-
-
 static void draw_prop(struct out *o, struct view *v)
 {
 	struct page pg;
@@ -27025,7 +26845,6 @@ static void dlg_close(struct view *v)
 	if (v->edit == ED_SYMFILT)
 		v->edit = 0;
 	v->sym_open = 0;
-	v->chain_open = 0;
 	v->dlg_have = 0;
 	v->dlg_drag = 0;
 }
@@ -29787,7 +29606,7 @@ static void click(struct view *v, int rclick)
 	 * the symbol table already asked this layer. One recording, one
 	 * selection, one Ctrl+C.
 	 */
-	if (v->sym_open || v->prop_open || v->chain_open) {
+	if (v->sym_open || v->prop_open) {
 		int r, c;
 
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
@@ -30647,90 +30466,6 @@ static int handle_enc_key(struct view *v, int k)
 		return field_key(v, v->enc_in, sizeof v->enc_in, k, NULL);
 	}
 }
-
-/*
- * A key while the call chain page is open.
- *
- * ITS OWN HANDLER AND NOT A BRANCH OF THE DASHBOARD'S, although they share a
- * renderer: that one carries tables with their own windows, a wheel that has
- * to decide between the table under the pointer and the page, and horizontal
- * scroll for paths. None of that exists here, and folding this into it would
- * mean teaching every one of those cases about a page that has none.
- *
- * Returns 1 when the key was taken, -1 when the page is not up.
- */
-static int handle_chain_key(struct view *v, int k)
-{
-	int room = g_rows - 6;
-	/* Whichever tab is up owns the scroll: an offset is a position in the
-	 * lines being shown and means somewhere else in the other tab's. */
-	uint32_t *off = v->pth_tab ? &v->rtr_off : &v->chain_off;
-
-	if (!v->chain_open)
-		return -1;
-	if (room < 1)
-		room = 1;
-	switch (k) {
-	case K_UP:
-		if (*off)
-			(*off)--;
-		return 1;
-	case K_DOWN:
-		(*off)++;
-		return 1;
-	case K_WHEEL_UP:
-		*off = *off > 3u ? *off - 3u : 0u;
-		return 1;
-	case K_WHEEL_DOWN:
-		*off += 3u;
-		return 1;
-	case K_PGUP:
-		*off = *off > (uint32_t)room ? *off - (uint32_t)room : 0u;
-		return 1;
-	case K_PGDN:
-		*off += (uint32_t)room;
-		return 1;
-	case K_HOME:
-		*off = 0;
-		return 1;
-	case K_END:
-		/* Clamped where it is drawn, which is the only place that
-		 * knows how many lines there are. */
-		*off = 0xffffffu;
-		return 1;
-	case 0x03:                      /* Ctrl+C */
-		dlg_copy(v);
-		return 1;
-	case 27:
-	case '\r':
-	case '\n':
-	case 'q':
-		v->chain_open = 0;
-		dlg_close(v);
-		return 1;
-	case K_CLICK:
-	case K_RCLICK:
-		/* Only the close control closes it - see the note on the
-		 * dashboard's click, which is the same rule. */
-		if (g_my == v->chain_y && g_mx >= v->chain_x0 &&
-		    g_mx <= v->chain_x1) {
-			v->chain_open = 0;
-			dlg_close(v);
-			return 1;
-		}
-		return -1;
-	default:
-		/*
-		 * EVERYTHING ELSE FALLS THROUGH, the dashboard's rule and for
-		 * its reasons: a drag has to reach the selection layer, and a
-		 * mode that takes the keyboard must not take the mouse.
-		 */
-		break;
-	}
-	return -1;
-}
-
-
 
 /*
  * handle_prop_key - a key while the dashboard is open.
@@ -31880,12 +31615,6 @@ static int handle(struct view *v, int k)
 	}
 	{
 		int r = handle_symd_key(v, k);
-
-		if (r >= 0)
-			return r;
-	}
-	{
-		int r = handle_chain_key(v, k);
 
 		if (r >= 0)
 			return r;

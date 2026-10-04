@@ -2632,7 +2632,7 @@ uint32_t kof_inspect_plague(const struct kof_scanner *sc,
 
 /*
  * The chain page stood here - ~780 lines that drew one WALK as indented
- * pseudo code. It goes with the pathogen backend: a walk is the wrong unit
+ * pseudo code. It goes with the chain matcher: a walk is the wrong unit
  * to draw, because a producer with several consumers is a tree and a step
  * joined by control has no row in a sequence. What replaces it draws a
  * store of nodes and typed edges.

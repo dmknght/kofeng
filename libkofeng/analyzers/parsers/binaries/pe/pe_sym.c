@@ -154,7 +154,7 @@ static void rec_put(uint8_t *rec, uint8_t flags, uint64_t value,
  * NO VALUE IS RECORDED. The walk knows the slot the import goes through,
  * and a record keeps zero because that is what this block has always said
  * and a rule written against it compares names. The slot is available to
- * anyone who asks the parser directly, which is what pathogen does.
+ * anyone who asks the parser directly, which is what the sweep did.
  */
 struct imp_sink {
 	uint8_t  *out;

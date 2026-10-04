@@ -1,13 +1,17 @@
 /*
- * kofmod/kofpathogen.h - THE CAPABILITY VOCABULARY, and the shapes made of it.
+ * kofmod/kofcap.h - THE CAPABILITY VOCABULARY, and the shapes made of it.
  *
  * WHY IT IS A MODULE HEADER AND NOT AN ENGINE ONE.
  *
  * A rule used to reach this vocabulary only through a reference chain the
  * generator wrote for it - the words were the engine's and a rule carried
- * numbers. Now a rule NAMES them: kof_pth_has(KOF_CAP_ALLOC_EXEC,
- * KOF_FLOWF_WX) is a sentence a researcher writes, so the words have to be
- * where a researcher's file can see them.
+ * numbers. The words are a rule's own now, so they have to be where a
+ * researcher's file can see them.
+ *
+ * NO RULE NAMES ONE YET. The macros that spent them - kof_pth_has and
+ * kof_pth_feeds - went with the chain matcher, because a sequence with
+ * distances could not hold the shapes they were asked about. The vocabulary
+ * is what was kept; what reads it is being built again.
  *
  * It is the gene vocabulary in ESET's sense of the word: the features a
  * sample is reduced to before anything is compared. What a profile made of
@@ -16,8 +20,8 @@
  * NOTHING IN THIS FILE READS AN OBJECT. It is names and widths only, so it
  * costs a rule nothing to include and carries no dependency but <stdint.h>.
  */
-#ifndef KOFMOD_KOFPATHOGEN_H
-#define KOFMOD_KOFPATHOGEN_H
+#ifndef KOFMOD_KOFCAP_H
+#define KOFMOD_KOFCAP_H
 
 #include <stdint.h>
 
@@ -368,7 +372,7 @@ enum kof_flow_cap {
 	 *
 	 * NOT REFINED BY THE OPTION, which is this row's real weakness. A
 	 * name resolves to a capability before any argument is read - see
-	 * the resolver in pathogen.c - so PR_SET_NAME and PR_SET_DUMPABLE
+	 * the resolver in nucleo.c - so PR_SET_NAME and PR_SET_DUMPABLE
 	 * and PR_CAPBSET_DROP all arrive as the same word. Reported rather
 	 * than guessed at.
 	 */
@@ -995,4 +999,4 @@ int kof_flow_cap_makes(uint16_t cap);
  */
 
 
-#endif /* KOFMOD_KOFPATHOGEN_H */
+#endif /* KOFMOD_KOFCAP_H */

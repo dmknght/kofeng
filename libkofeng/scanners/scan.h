@@ -57,35 +57,20 @@
  * once, and is reused for every object.
  */
 /*
- * THE SWEPT CALL CHAINS OF ONE OBJECT.
- *
- * Public because two callers own one: the scanner caches it per object, and
- * kofviewer builds one to show - see kof_pth_chain_build. It was private to
- * pathogen.c while the viewer had a sweep of its own, and that copy is what
- * drifted.
- */
-/*
- * HOW MANY CHAINS ONE OBJECT MAY KEEP.
- *
- * Eight, and that was a cap on the RESULT - the one thing a limit here
- * is never allowed to be. A bot has more than eight things it does, so
- * the ninth evicted the weakest by a count of distinct words, and what
- * it threw away was evidence: MEASURED on one, the chain joining `pipe`
- * to the `dup2` on it - the whole of a redirected shell - was stored
- * and then evicted by a longer chain that listed more words and joined
- * none of them.
- *
- * Twenty-four bounds the memory, which is what a limit is for: the set
- * is one allocation of about sixty kilobytes, reused per object. The
- * eviction rule stays, because a file CAN have more shapes than any
- * number, and it now counts links beside words - see flow_set_offer.
- */
-/*
- * The chain set that stood here is gone with the pathogen backend. What
- * replaces it is a store of NODES AND TYPED EDGES - see the note on the
- * removed macros in kofmod/kofsig.h for why the chain could not hold a
+ * THE SWEPT CALL CHAINS OF ONE OBJECT STOOD HERE, and the set that held
+ * them, and the sweep that filled it. All of it is gone - see the note on
+ * the removed macros in kofmod/kofsig.h for why a chain could not hold a
  * producer with several consumers, a step joined by control, or a rule that
  * an inserted instruction cannot shift.
+ *
+ * TWO THINGS THE SET GOT WRONG ARE WORTH KEEPING, because the replacement
+ * has to not repeat them. It capped the RESULT at eight chains and evicted
+ * the weakest by a count of distinct words - MEASURED on one bot, the chain
+ * joining `pipe` to the `dup2` on it, the whole of a redirected shell, was
+ * stored and then thrown away for a longer chain that listed more words and
+ * joined none of them. And choosing between shapes at all is a selection the
+ * engine has no business making: what replaces this stores NODES AND TYPED
+ * EDGES and offers all of them.
  */
 
 /*
@@ -1161,30 +1146,19 @@ void kof_scan_kids_reset(struct kof_scanner *);
 
 
 
-/* Build this object's swept call chain and print it, when the environment
- * asks. A measurement hook, not a scan path - see objctx.c. */
-/* An object's symptoms, built once and cached on the scanner. In
- * detectors/overlord/pathogen/pathogen.c - see the note there on why it
- * is not in objctx.c any more. */
-
 /*
- * The same build without the scanner, for a caller that has an object and no
- * scan: the set and the scratch are the caller's. Returns how many chains it
- * put in `out`. See the note on the definition for why this is shared rather
- * than copied - a second copy is what kofviewer had, and it answered for two
- * architectures while the engine read ten.
+ * THE CHAIN BUILDERS STOOD HERE - one on the scanner and one for a caller
+ * that had an object and no scan, so the viewer and the engine read an object
+ * the same way. They are gone with the chain. What is kept from them is the
+ * rule that made them one function: a second copy is what kofviewer had, and
+ * it answered for two architectures while the engine read ten.
+ *
+ * AND THAT AN EMPTY ANSWER NEEDS A REASON. The builder returned one line
+ * saying which gate it stopped at - the architecture, the bytes, the
+ * regions, the partition - because a page that just says nothing tells a
+ * reader nothing. Before that the reasons went to stderr behind an
+ * environment variable, which is worse than nothing and is also rule 1.
  */
-/*
- * `why`, when given, receives a one-line reason the set came back EMPTY, and
- * NULL when it did not. The reasons are the gates this walks through and
- * nothing else - the architecture, the bytes, the regions, the partition,
- * the weight floor - and they used to go to stderr behind an environment
- * variable, which is no use to somebody looking at a page that says nothing.
- * The string is static.
- */
-
-/* The best a stored symptom scores against this object, 0..100. */
-
 
 
 struct kof_scanner *kof_scan_new(const struct kof_engine *);

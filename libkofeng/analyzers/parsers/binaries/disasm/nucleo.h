@@ -3,7 +3,7 @@
  * read.
  *
  * Named for the nucleotide, the unit a gene is built from: one row here is
- * one base of what pathogen later reads as a sequence. It was vocab.h.
+ * one base of what a detector later reads as a shape. It was vocab.h.
  *
  * This is the normalisation layer: syscall number -> capability, imported
  * name -> capability, and the words a reader sees for either. It was 1200
@@ -11,9 +11,9 @@
  * do with each other - one knows how an instruction is spelled, the other
  * knows what `41` means on x86-64 and that it means something else on i386.
  *
- * WHY IT IS HERE AND NOT BESIDE pathogen, which is what consumes it: the
- * sweep reads these tables WHILE DECODING, so putting them a layer up would
- * have the decoder calling into its own caller. Keeping them beside it costs
+ * WHY IT IS HERE AND NOT BESIDE THE DETECTOR that consumes it: whatever
+ * reads these tables reads them WHILE DECODING, so putting them a layer up
+ * would have the decoder calling into its own caller. Keeping them beside it costs
  * one include; inverting the dependency costs a callback on the hot path and
  * a reader who cannot tell which way the arrows go.
  *
@@ -39,7 +39,8 @@
  */
 /*
  * WHICH ARGUMENT A CALL DECIDES ITSELF BY, or KOF_FLOW_ROLE_NONE. Here
- * rather than in flow.h because every user of it is a row in a table below.
+ * rather than with the decoder because every user of it is a row in a table
+ * below.
  */
 /*
  * WHICH ABI A SYSCALL TABLE BELONGS TO. Moved here from flow.h when the
@@ -206,5 +207,44 @@ int kof_sys_noreturn(unsigned bits, uint32_t nr);
 uint16_t    kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr);
 const char *kof_sys_look_name(const struct sysrow *t, uint32_t n, uint32_t nr);
 uint8_t     kof_sys_look_role(const struct sysrow *t, uint32_t n, uint32_t nr);
+
+/*
+ * THE LOOKUPS THEMSELVES, declared here because flow.h is gone.
+ *
+ * They were prototyped in the decoder's header, which was the only caller.
+ * With that file deleted the definitions had no declaration at all and the
+ * build said so six times over - a definition no header names is one every
+ * new caller has to spell for itself, and two spellings of one signature is
+ * how an argument type drifts.
+ */
+
+/* Syscall number -> capability, for a caller that has a RUN rather than
+ * code. `arg` may be NULL; `flags`, when given, receives the flow flags the
+ * arguments imply (a WX mapping, an exec'able allocation). */
+uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
+				 const uint64_t *arg, uint8_t *flags);
+
+/* Imported or exported name -> capability, and KOF_CAP_NONE when the name is
+ * not one of the words. An `@` ends the comparison, so "socket@GLIBC_2.4"
+ * reads as "socket". */
+uint16_t kof_flow_cap_of_name(const char *sym);
+
+/* What that name does with its arguments - KOF_FLOW_ROLE_*. */
+uint8_t kof_flow_role_of_name(const char *sym);
+
+/* The name's index in the table, 1-based, or 0. Carried instead of the
+ * string so a node is fixed width. */
+uint16_t kof_flow_name_id(const char *sym);
+
+/* And back: the word for an id, or NULL. */
+const char *kof_flow_name_of(uint16_t id);
+
+/*
+ * HOW ONE ARGUMENT OF ONE CALL SHOULD READ - "PROT_READ|PROT_EXEC" rather
+ * than 5, "AF_INET" rather than 2. Always composes into `out` and returns
+ * it, or NULL when this argument of this call has no spelling.
+ */
+const char *kof_flow_arg_name(uint16_t name, uint16_t cap, uint32_t idx,
+			      uint64_t v, char *out, uint32_t n);
 
 #endif

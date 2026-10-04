@@ -15,7 +15,7 @@
  * at all: one layout out, whatever came in.
  *
  * AND THE READING OF IT IS NOT HERE. kof_elf_symtab_of and kof_elf_symbol_at
- * in elf_parse.c do that, because by the time pathogen needed function
+ * in elf_parse.c do that, because by the time the sweep needed function
  * boundaries and relocation symbols the same twelve-way unpacking had been
  * written out three times. What is left here is the ENCODING - the KSYM
  * record, the flags that say what the fields only imply, the printable-only

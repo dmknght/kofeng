@@ -1151,7 +1151,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofcure.h \
            $(SDK)/include/kofmod/kofplague.h \
            $(SDK)/include/kofmod/kofoverlord.h \
-           $(SDK)/include/kofmod/kofpathogen.h \
+           $(SDK)/include/kofmod/kofcap.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/aspack_tab.h \

@@ -28,7 +28,6 @@
 #include "../libkofeng/databases/dbloader.h"
 #include "../libkofeng/analyzers/parsers/kofformat.h"
 #include "../libkoforbit/evt/kofevt.h"
-#include <kofmod/kofpathogen.h>
 #include "../libkoforbit/evt/kofevtfmt.h"
 #include "../libkoforbit/evt/kofevtlog.h"
 
@@ -956,41 +955,20 @@ uint32_t kof_declared_regions(const struct kof_scan_region *rgn, uint32_t n_rgn,
 			      uint32_t max_out);
 
 /*
- * ONE CHAIN, WRITTEN OUT AS CODE.
+ * THE CHAIN RENDERER AND ITS LINE STOOD HERE, and they are gone with the
+ * chain matcher: it drew a SEQUENCE, and what replaces the chain is a store
+ * of nodes and typed edges, which is not a line per step.
  *
- * HERE AND NOT IN THE VIEWER, because turning a chain into something a
- * person reads is not a terminal's business and both tools want it. It was
- * seven hundred lines in the middle of kofviewer.c, reachable only from the
- * pathogen dialog, so the examiner printed its own flat list of the same
- * steps - two spellings of one chain, and the flat one was the wrong one.
- *
- * AND NOT IN THE ENGINE EITHER. Nothing here decides anything: it reads
- * kof_flow_node and writes English. The engine's job ends at the node.
- *
- * NO COLOUR AND NO WIDTH. A row's note comes back beside its line rather
- * than appended to it, because how a note is set off from the code - dimmed,
- * bracketed, in a column of its own - is the caller's to choose, and an
- * escape sequence baked in here would count against every caller's field
- * width.
- */
-struct kof_chain_line {
-	/*
-	 * THE SAME WIDTHS THE RENDERER BUILDS WITH, and not a width chosen
-	 * here. It composes into a 560-byte line and a 320-byte note, so
-	 * anything narrower would truncate the longest rows - and a line cut
-	 * short still looks like a line, which is the one failure a reader
-	 * cannot see is a failure. The compiler says so too: a narrower
-	 * `text` draws -Wformat-truncation on the copy.
-	 */
-	char text[560];         /* the statement, already indented */
-	char note[320];         /* how it was spelled; "" when it adds nothing */
-};
-
-
-/*
- * The chain renderer stood here. It is gone with the pathogen backend: it
- * drew a SEQUENCE, and what replaces the chain is a store of nodes and typed
- * edges. Whatever draws that will not be a line-per-step renderer.
+ * TWO THINGS ABOUT IT WERE RIGHT and belong to whatever draws the
+ * replacement. It lived HERE rather than in the viewer, because turning
+ * engine output into something a person reads is not a terminal's business
+ * and both tools want it - it was seven hundred lines inside kofviewer.c
+ * and the examiner printed its own flat list of the same steps, two
+ * spellings of one thing and the flat one wrong. And it carried NO COLOUR
+ * AND NO WIDTH: a row's note came back beside its line rather than appended
+ * to it, because how a note is set off - dimmed, bracketed, in a column of
+ * its own - is the caller's to choose, and an escape sequence baked in here
+ * counts against every caller's field width.
  */
 
 #endif /* KOFENG_KOFINSPECT_H */

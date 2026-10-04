@@ -2913,14 +2913,12 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * AND A RULE MADE OF A SHAPE OR A STRING SET DECLARES NEITHER.
 	 *
 	 * Same reasoning one step further out: what the demand is really about
-	 * is that the rule be written from SOMETHING, and there are now five
-	 * things it can be written from. A shape rule reads no content at all
-	 * and is still a whole rule - that is the point of it, and a chain
-	 * rule reads code without reading any of its bytes as bytes.
+	 * is that the rule be written from SOMETHING, and there is more than
+	 * one thing it can be written from. A shape rule reads no content at
+	 * all and is still a whole rule - that is the point of it.
 	 */
 	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
-	    !draft_uses_sim(e, SIM_IT_BLKSET) &&
-	    !draft_uses_sim(e, SIM_IT_CHAIN))
+	    !draft_uses_sim(e, SIM_IT_BLKSET))
 		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
@@ -3764,7 +3762,6 @@ const char *sim_it_word(uint32_t what)
 	switch (what) {
 	case SIM_IT_SHAPE:  return "file structure";
 	case SIM_IT_BLKSET: return "smart blocks";
-	case SIM_IT_CHAIN:  return "call chain";
 	default:            return "block";
 	}
 }
@@ -4029,16 +4026,7 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 					q->pct);
 				break;
 			/*
-			 * AND THE CHAIN READS CODE WITHOUT READING ITS BYTES
-			 * AS BYTES - see kof_pth_match. The reference is the
-			 * module's own, like the two sets above it.
-			 */
-			case SIM_IT_CHAIN:
-				fprintf(f, "kof_pth_match(ref_chain) >= %uu",
-					q->pct);
-				break;
-			/*
-			 * THE BLOCK VECTOR WAS THE DEFAULT AND IS GONE - see
+			 * THE BLOCK VECTOR AND THE CALL CHAIN ARE GONE - see
 			 * the note on its slot in kofsig.h. Nothing can tick
 			 * it any more, so a measure that reaches here is one
 			 * this build does not know how to write; it is
@@ -6689,8 +6677,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_verdict_decl *verdict,
 		       uint8_t *shp_pct, int *shp_level,
 		       uint8_t *str_pct, int *str_level,
-		       uint8_t *blkv_pct, int *blkv_level,
-		       uint8_t *chain_pct, int *chain_level)
+		       uint8_t *blkv_pct, int *blkv_level)
 {
 	FILE *f;
 	char line[1024];
@@ -6717,12 +6704,11 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	 * the second - and the rule opened in the panel missing a matcher the
 	 * file plainly had.
 	 */
-	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set
-				 * 16 call chain */
+	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set */
 	/* Conditions as the other reader counts them - see
 	 * kof_plague_decl.cnd. */
 	unsigned n_if = 0;
-	int in_shape = 0, in_blkv = 0, in_chain = 0;
+	int in_shape = 0, in_blkv = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
@@ -6738,10 +6724,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		*blkv_pct = 0;
 	if (blkv_level)
 		*blkv_level = LV_INFECT;
-	if (chain_pct)
-		*chain_pct = 0;
-	if (chain_level)
-		*chain_level = LV_SUSPECT;
 	e->dr.n_blkv = 0;
 	memset(&e->dr.shp, 0, sizeof e->dr.shp);
 	e->dr.has_shp = 0;
@@ -6928,16 +6910,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				in_blkv = 0;
 			continue;
 		}
-		if ((p = strstr(line, "kof_pth_match(")) != NULL) {
-			const char *ge = strstr(p, ">=");
-
-			if (chain_pct)
-				*chain_pct = ge
-					? (uint8_t)strtoul(ge + 2, NULL, 10)
-					: GRP_PCT_DEFAULT;
-			pending |= 16u;
-		}
-		
 		if ((p = strstr(line, "kof_plague_shape(")) != NULL) {
 			const char *ge = strstr(p, ">=");
 
@@ -6964,10 +6936,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			if (pending & 8u) {
 				if (blkv_level)
 					*blkv_level = lvl;
-			}
-			if (pending & 16u) {
-				if (chain_level)
-					*chain_level = lvl;
 			}
 			if (pending & ~1u) {
 				pending = 0;

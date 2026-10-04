@@ -721,29 +721,30 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  */
 #define SIM_IT_BLKSET 3u
 /*
- * THE OBJECT'S CALL CHAIN - which capabilities its code asks the system for,
- * in order, and which of them were handed something an earlier one produced:
- * kof_pth_match. See detectors/overlord/pathogen/diagnose.h.
+ * 4 IS A GAP TOO, AND NOT FOR 2 AND 3'S REASON.
  *
- * IT READS CODE AND NOT BYTES, which is what puts it beside the other three
- * rather than inside them. The block measure is exact and dies on a recompile;
- * the string set survives a recompile and dies on a packer that ships no
- * strings; this survives both and dies when there is no code to read. They
- * fail in different places, which is the only reason to carry more than one.
+ * It was the object's CALL CHAIN - which capabilities the code asks the
+ * system for, in order, and which of them were handed something an earlier
+ * one produced. What it measured was worth measuring; the shape it measured
+ * it in was wrong. A sequence with distances cannot hold a branch, cannot
+ * hold two capabilities joined by control rather than by data, and a single
+ * inserted call moves every distance after it - so the matcher behind this
+ * id was removed rather than tuned. The vocabulary it was made of stayed:
+ * kofmod/kofcap.h.
  *
- * AVAILABLE ON PE AS WELL AS ELF, unlike the three above - the shape measure
- * is an ELF answer by construction and the two set measures depend on a
- * library subtraction that is also an ELF answer. A sweep of code needs
- * neither.
+ * The id stays a gap for the reason 2's and 3's do: the ids of the measures
+ * that remain must not move, or a draft written by an older build reads as a
+ * different rule.
  */
-#define SIM_IT_CHAIN  4u
 
 /* How many whole-object measures there are, which is what sim_use and
- * sim_kept are indexed by. Named because three separate loops were bounded by
- * a literal 4 and adding the chain left every one of them one short - the tick
- * was not hashed into the draft's change stamp, the validator never saw a
- * ticked chain with no matcher, and sim_recarve never marked it carried, so
- * its percentage stayed a dash for ever. */
+ * sim_kept are indexed by. It counts the GAPS as well, because the ids index
+ * those arrays directly - lowering it when a measure is retired would make an
+ * older draft's tick land in another measure's slot. Named because three
+ * separate loops were bounded by a literal 4 and a fifth id left every one of
+ * them one short - the tick was not hashed into the draft's change stamp, the
+ * validator never saw it, and sim_recarve never marked it carried, so its
+ * percentage stayed a dash for ever. */
 #define SIM_IT_COUNT  5u
 
 /* How many measures one similarity matcher can hold. Four kinds and, at most,
@@ -1826,8 +1827,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_verdict_decl *verdict,
 		       uint8_t *shp_pct, int *shp_level,
 		       uint8_t *str_pct, int *str_level,
-		       uint8_t *blkv_pct, int *blkv_level,
-		       uint8_t *chain_pct, int *chain_level);
+		       uint8_t *blkv_pct, int *blkv_level);
 
 
 /*

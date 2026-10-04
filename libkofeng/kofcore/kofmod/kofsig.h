@@ -27,7 +27,7 @@
 
 #include <stdint.h>
 /* The capability vocabulary - see nucleo.c. No rule names one yet. */
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofcap.h>
 
 /* The code reader's vocabulary - see kdis.h for what it is for. */
 #include "kdis.h"
@@ -1906,7 +1906,7 @@ struct kof_content {
 	 * that apart from "none of the chain is here" and must not try; it is
 	 * one fact about this object, exactly as with plague_score.
 	 */
-	/* was ovl_chain - see "THE PATHOGEN MACROS ARE GONE". The SLOT stays
+	/* was ovl_chain - see "THE BEHAVIOUR MACROS ARE GONE". The SLOT stays
 	 * so no entry after it moves. */
 	void *ovl_chain_unused;
 
@@ -2355,7 +2355,7 @@ struct kof_content {
 	 * answers yes. The flags a rule may ask for are the ones a stored step
 	 * keeps: see KOF_PTH_FLAG_KEEP.
 	 */
-	/* was pth_has - see "THE PATHOGEN MACROS ARE GONE". */
+	/* was pth_has - see "THE BEHAVIOUR MACROS ARE GONE". */
 	void *pth_has_unused;
 	/*
 	 * DID AN ARGUMENT OF `dst` COME FROM WHAT `src` RETURNED.
@@ -3702,7 +3702,7 @@ enum kof_analyze {
  *   kof_plague_blocks   BLOCK SET. The same windows over the WHOLE object against
  *                    a reference's whole set, anchored to nothing.
  *
- *   (the behaviour track is unplugged - see "THE PATHOGEN MACROS ARE GONE")
+ *   (the behaviour track is unplugged - see "THE BEHAVIOUR MACROS ARE GONE")
  *
  *
  * WHAT EACH SURVIVES, MEASURED. One object against transformations of itself,
@@ -3798,7 +3798,7 @@ enum kof_analyze {
  */
 
 /*
- * THE PATHOGEN MACROS ARE GONE, and the backend behind them is not.
+ * THE BEHAVIOUR MACROS ARE GONE, and so is the chain they were shaped by.
  *
  * kof_pth_has, kof_pth_feeds and kof_pth_match were the whole of what a rule
  * could ask about behaviour, and all three are shaped by the chain: a
@@ -3813,9 +3813,11 @@ enum kof_analyze {
  *     which makes it the one part of a rule an author can evade on purpose.
  *
  * They will come back against a store of NODES AND TYPED EDGES rather than
- * chains. Removed rather than left in place because a module written against
- * them now would have to be rewritten, and bases/ has none yet - which is the
- * only moment this costs nothing.
+ * chains. What was kept is the VOCABULARY they spent - kofmod/kofcap.h -
+ * because which capability a name or a syscall number means is the part that
+ * was right. Removed rather than left in place because a module written
+ * against them now would have to be rewritten, and bases/ has none yet -
+ * which is the only moment this costs nothing.
  */
 
 /*
@@ -4979,13 +4981,18 @@ enum kunp_rcstruct_broken {
  *
  * One list, so the word a verdict prints and the value the engine stores
  * cannot drift - the reason every other enum here is written this way.
+ *
+ * OVERLORD WAS CALLED PATHOGEN and printed "Pathogen", which named the
+ * capability-chain work. No chain ever reached it: the one caller is the
+ * overlord's shape percentage in scan.c. The VALUE is unchanged, so a stored
+ * verdict still reads back as itself.
  */
 #define KOF_ENGINE_LIST(X)                                                   \
 	X(KOF_ENGINE_NONE,     "None")                                       \
 	X(KOF_ENGINE_ANALYZER, "Analyzer")  /* the parse and its anomalies */\
 	X(KOF_ENGINE_PATTERN,  "Pattern")   /* declared bytes and strings   */\
 	X(KOF_ENGINE_PLAGUE,   "Plague")    /* block similarity             */\
-	X(KOF_ENGINE_PATHOGEN, "Pathogen")  /* capability chains            */
+	X(KOF_ENGINE_OVERLORD, "Overlord")  /* shape similarity             */
 
 enum kof_engine_id {
 #define KOF_ENGINE_X_ENUM(name, word) name,
