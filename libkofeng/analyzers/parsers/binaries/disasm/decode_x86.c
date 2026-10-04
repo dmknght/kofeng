@@ -19,6 +19,7 @@
  * instructions whose CLASS is all anyone downstream needs, and KDIS_OTHER
  * with a correct wmask is a complete answer for them.
  */
+
 static uint8_t class_slow(const INSTRUX *ix)
 {
 	switch (ix->Instruction) {
@@ -232,7 +233,7 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 		if (o->Access.Write && o->Type == ND_OP_REG &&
 		    o->Info.Register.Type == ND_REG_GPR &&
 		    o->Info.Register.Reg < 64u)
-			out->wmask |= 1ull << o->Info.Register.Reg;
+			out->wmask |= 1ull << gpr_of(o);
 
 		/* Only the explicit ones become operands - see kdis_insn. */
 		if (o->Flags.IsDefault || k >= 3u)
@@ -247,13 +248,16 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 		d->imm = 0;
 		d->size = (uint8_t)o->Size;
 		d->flags = (uint8_t)((o->Access.Write ? KDIS_OF_WRITE : 0u) |
-				     (o->Access.Read ? KDIS_OF_READ : 0u));
+				     (o->Access.Read ? KDIS_OF_READ : 0u) |
+				     ((o->Type == ND_OP_REG &&
+				       o->Info.Register.IsHigh8) ?
+				      KDIS_OF_HIGH8 : 0u));
 		switch (o->Type) {
 		case ND_OP_REG:
 			if (o->Info.Register.Type != ND_REG_GPR)
 				continue;       /* not one the sweep tracks */
 			d->kind = KDIS_O_REG;
-			d->reg = (uint8_t)o->Info.Register.Reg;
+			d->reg = (uint8_t)gpr_of(o);
 			break;
 		case ND_OP_IMM:
 			d->kind = KDIS_O_IMM;

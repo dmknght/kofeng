@@ -24,11 +24,35 @@
 /* x86-64 has sixteen, and the sixteenth index is the sentinel - see above. */
 #define NGPR 16u
 
+/*
+ * AH, CH, DH AND BH FOLD ONTO rax, rcx, rdx AND rbx.
+ *
+ * bddisasm numbers the legacy byte registers by their ENCODING, so those
+ * four come back as 4, 5, 6 and 7 - the slots that at every other width
+ * mean rsp, rbp, rsi and rdi. Returning that number does not lose
+ * information, it INVENTS it: `mov dh, 0x10` reads as a write to rsi, and a
+ * caller tracking rsi across it is handed a value the program never put
+ * there.
+ *
+ * MEASURED: msfvenom's x86-64 stager builds its mmap length with
+ * `cdq; mov dh,0x10`. The constant map had rdx untouched and rsi clobbered,
+ * so the length came back unknown and the register that would hold the
+ * mapped address came back zero.
+ *
+ * The CALLER still has to know it was a partial write - the operand's
+ * `size` says so, and writing one byte over an unknown register leaves it
+ * unknown. This answers only WHICH register, which is the question here.
+ */
 static inline uint32_t gpr_of(const ND_OPERAND *op)
 {
+	uint32_t r;
+
 	if (op->Type != ND_OP_REG || op->Info.Register.Type != ND_REG_GPR)
 		return NGPR;
-	return op->Info.Register.Reg < NGPR ? op->Info.Register.Reg : NGPR;
+	r = op->Info.Register.Reg;
+	if (op->Info.Register.IsHigh8 && r >= 4u && r < 8u)
+		r -= 4u;
+	return r < NGPR ? r : NGPR;
 }
 
 #endif /* KOFENG_DISASM_GPR_H */

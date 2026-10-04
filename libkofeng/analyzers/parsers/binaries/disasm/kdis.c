@@ -31,126 +31,9 @@
 #include "../../../../disinfect/pzero.h"
 
 #include "bddisasm.h"
+#include "decode.h"
 
-/* ---- translation ---------------------------------------------------------
- *
- * bddisasm's instruction id to an opcode class. Everything not named here is
- * KDIS_OTHER, which is an answer and not a failure - see the header.
- */
-static uint8_t kdis_class(const INSTRUX *ix)
-{
-	switch (ix->Instruction) {
-	case ND_INS_NOP:    return KDIS_NOP;
-	case ND_INS_MOV:    return KDIS_MOV;
-	case ND_INS_MOVZX:  return KDIS_MOVZX;
-	case ND_INS_MOVSX: case ND_INS_MOVSXD: return KDIS_MOVSX;
-	case ND_INS_LEA:    return KDIS_LEA;
-	case ND_INS_XCHG:   return KDIS_XCHG;
-	case ND_INS_PUSH: case ND_INS_PUSHA: case ND_INS_PUSHF:
-		return KDIS_PUSH;
-	case ND_INS_POP: case ND_INS_POPA: case ND_INS_POPF:
-		return KDIS_POP;
-	case ND_INS_ADD:    return KDIS_ADD;
-	case ND_INS_SUB:    return KDIS_SUB;
-	case ND_INS_ADC:    return KDIS_ADC;
-	case ND_INS_SBB:    return KDIS_SBB;
-	case ND_INS_AND:    return KDIS_AND;
-	case ND_INS_OR:     return KDIS_OR;
-	case ND_INS_XOR:    return KDIS_XOR;
-	case ND_INS_NOT:    return KDIS_NOT;
-	case ND_INS_NEG:    return KDIS_NEG;
-	case ND_INS_INC:    return KDIS_INC;
-	case ND_INS_DEC:    return KDIS_DEC;
-	case ND_INS_CMP:    return KDIS_CMP;
-	case ND_INS_TEST:   return KDIS_TEST;
-	case ND_INS_SHL:    return KDIS_SHL;
-	case ND_INS_SHR:    return KDIS_SHR;
-	case ND_INS_SAR:    return KDIS_SAR;
-	case ND_INS_ROL:    return KDIS_ROL;
-	case ND_INS_ROR:    return KDIS_ROR;
-	case ND_INS_RCL:    return KDIS_RCL;
-	case ND_INS_RCR:    return KDIS_RCR;
-	case ND_INS_MUL:    return KDIS_MUL;
-	case ND_INS_IMUL:   return KDIS_IMUL;
-	case ND_INS_DIV:    return KDIS_DIV;
-	case ND_INS_IDIV:   return KDIS_IDIV;
-	case ND_INS_CALLNR: case ND_INS_CALLNI:
-	case ND_INS_CALLFD: case ND_INS_CALLFI:
-		return KDIS_CALL;
-	case ND_INS_JMPNR: case ND_INS_JMPNI:
-	case ND_INS_JMPFD: case ND_INS_JMPFI:
-		return KDIS_JMP;
-	case ND_INS_Jcc:    return KDIS_JCC;
-	case ND_INS_LOOP: case ND_INS_LOOPZ: case ND_INS_LOOPNZ:
-	case ND_INS_JrCXZ:
-		return KDIS_LOOP;
-	case ND_INS_RETN: case ND_INS_RETF:
-		return KDIS_RET;
-	case ND_INS_INT: case ND_INS_INT1: case ND_INS_INT3: case ND_INS_INTO:
-		return KDIS_INT;
-	case ND_INS_CMOVcc: return KDIS_CMOV;
-	case ND_INS_SETcc:  return KDIS_SETCC;
-	default:
-		break;
-	}
-	/*
-	 * BY CATEGORY FOR THE TWO GROUPS A RULE ASKS ABOUT WHOLESALE. A junk
-	 * engine emits x87 by the dozen and a rule walking through junk wants
-	 * to say "any FPU instruction" rather than name forty of them; string
-	 * operations are the same kind of ask.
-	 */
-	if (ix->Category == ND_CAT_X87_ALU)
-		return KDIS_FPU;
-	if (ix->Category == ND_CAT_STRINGOP)
-		return KDIS_STRING;
-	if (ix->Category == ND_CAT_SYSTEM || ix->Category == ND_CAT_IO)
-		return KDIS_PRIV;
-	return KDIS_OTHER;
-}
 
-/*
- * One operand. Answers 0 for an operand this does not describe - a vector
- * register, a segment - which the caller reports as KDIS_O_NONE rather than
- * pretending it was absent.
- */
-static int kdis_operand(const ND_OPERAND *in, struct kdis_operand *out)
-{
-	memset(out, 0, sizeof *out);
-	out->reg = KDIS_REG_NONE;
-	out->index = KDIS_REG_NONE;
-	out->size = (uint8_t)(in->Size > 255u ? 255u : in->Size);
-
-	switch (in->Type) {
-	case ND_OP_REG:
-		if (in->Info.Register.Type != ND_REG_GPR)
-			return 0;
-		out->kind = KDIS_O_REG;
-		out->reg = (uint8_t)in->Info.Register.Reg;
-		return 1;
-	case ND_OP_MEM:
-		out->kind = KDIS_O_MEM;
-		if (in->Info.Memory.HasBase)
-			out->reg = (uint8_t)in->Info.Memory.Base;
-		if (in->Info.Memory.HasIndex) {
-			out->index = (uint8_t)in->Info.Memory.Index;
-			out->scale = in->Info.Memory.Scale
-				   ? (uint8_t)in->Info.Memory.Scale : 1u;
-		}
-		if (in->Info.Memory.HasDisp)
-			out->disp = (int64_t)in->Info.Memory.Disp;
-		return 1;
-	case ND_OP_IMM:
-		out->kind = KDIS_O_IMM;
-		out->imm = in->Info.Immediate.Imm;
-		return 1;
-	case ND_OP_OFFS:
-		out->kind = KDIS_O_REL;
-		out->disp = (int64_t)in->Info.RelativeOffset.Rel;
-		return 1;
-	default:
-		return 0;
-	}
-}
 
 /* ---- offsets and addresses ----------------------------------------------
  *
@@ -245,6 +128,68 @@ static int stk_pop(struct kof_kdis *k, uint64_t *out)
 	return got;
 }
 
+/*
+ * FORGET EVERY REGISTER THIS INSTRUCTION WRITES, except the one the caller
+ * has just worked out for itself.
+ *
+ * The decoder reports the implicit writes in `wmask` - see kdis_insn - and
+ * for a while nothing read it: the map cleared the FIRST OPERAND instead.
+ * That is wrong in both directions at once, and `mul ebx` shows both:
+ * the operand is READ, not written, so a known ebx was thrown away, while
+ * eax and edx - which the instruction really does write - kept whatever
+ * they held. MEASURED: msfvenom's i386 payloads set their socketcall
+ * operation with `xor ebx,ebx; mul ebx; inc ebx`, so every one of them
+ * lost its whole network half.
+ */
+static void kdis_forget_written(struct kof_kdis *k, const struct kdis_insn *in,
+				int keep_reg)
+{
+	uint8_t r;
+
+	for (r = 0; r < 16u; r++) {
+		if (!(in->wmask & (1ull << r)) || (int)r == keep_reg)
+			continue;
+		k->known &= (uint16_t)~(1u << r);
+	}
+}
+
+/*
+ * WRITE A VALUE OF `size` BYTES INTO A REGISTER, which is not the same as
+ * writing the register.
+ *
+ * Eight and four bytes replace it - a 32-bit write clears the top half on
+ * x86-64 and there is no top half anywhere else, so one case covers both.
+ * One and two bytes REPLACE A PART and leave the rest, which means the rest
+ * has to be known or the answer is not. Writing the narrow value as if it
+ * were the whole register is the one outcome that must not happen: it is a
+ * number, it looks like an answer, and it is wrong.
+ */
+static void kdis_put(struct kof_kdis *k, uint8_t d, const struct kdis_operand *o,
+		     uint64_t v)
+{
+	uint64_t old;
+
+	if (d >= 16u)
+		return;
+	if (o->size >= 4u || o->size == 0u) {
+		k->reg[d] = v;
+		k->known |= (uint16_t)(1u << d);
+		return;
+	}
+	if (!(k->known & (1u << d))) {
+		k->known &= (uint16_t)~(1u << d);
+		return;
+	}
+	old = k->reg[d];
+	if (o->size == 2u)
+		k->reg[d] = (old & ~(uint64_t)0xffff) | (v & 0xffffu);
+	else if (o->flags & KDIS_OF_HIGH8)
+		k->reg[d] = (old & ~(uint64_t)0xff00) | ((v & 0xffu) << 8);
+	else
+		k->reg[d] = (old & ~(uint64_t)0xff) | (v & 0xffu);
+	k->known |= (uint16_t)(1u << d);
+}
+
 /* ---- the constant map ----------------------------------------------------
  *
  * Updated from the instruction just decoded, and the rule is simple: a
@@ -308,11 +253,48 @@ static void kdis_track(struct kof_kdis *k, const struct kdis_insn *in)
 		break;
 	}
 
-	if (!in->n_op || in->o[0].kind != KDIS_O_REG)
+	/*
+	 * CDQ AND CQO NAME NO OPERAND AT ALL, so they have to be answered
+	 * before the test below sends everything operand-less away. They fill
+	 * the second register with the sign bit of the first, which makes it
+	 * exactly zero for any non-negative value - how a payload writes a
+	 * zero argument without spending an instruction on it. A value with
+	 * the sign bit set is left unknown rather than extended, because the
+	 * width that was extended is not recorded here.
+	 */
+	if (in->op == KDIS_WIDEN) {
+		if ((in->wmask & (1ull << KDIS_REG_DX)) &&
+		    (k->known & (1u << KDIS_REG_AX)) &&
+		    k->reg[KDIS_REG_AX] < 0x80000000u) {
+			k->reg[KDIS_REG_DX] = 0;
+			k->known |= (uint16_t)(1u << KDIS_REG_DX);
+			return;
+		}
+		kdis_forget_written(k, in, -1);
 		return;
+	}
+
+	/*
+	 * AN INSTRUCTION WHOSE FIRST OPERAND IS NOT A REGISTER CAN STILL
+	 * WRITE ONE - a string operation walks rsi and rdi while naming
+	 * memory. Returning without forgetting those is how a stale value
+	 * outlives the instruction that destroyed it.
+	 */
+	if (!in->n_op || in->o[0].kind != KDIS_O_REG ||
+	    in->o[0].reg >= 16u) {
+		kdis_forget_written(k, in, -1);
+		return;
+	}
 	d = in->o[0].reg;
-	if (d >= 16u)
-		return;
+
+	/*
+	 * EVERYTHING ELSE THIS INSTRUCTION WRITES IS NOW UNKNOWN, except the
+	 * destination - the arms below are about to work that one out, and
+	 * clearing it here would take away the value they read. That is not
+	 * hypothetical: it cost `inc ebx` the zero that `xor ebx,ebx` had
+	 * just put there.
+	 */
+	kdis_forget_written(k, in, (int)d);
 
 	/* One source, and only three kinds of it can be a number. */
 	have_b = 0;
@@ -332,17 +314,57 @@ static void kdis_track(struct kof_kdis *k, const struct kdis_insn *in)
 
 	switch (in->op) {
 	case KDIS_MOV:
-		if (have_b) {
-			k->reg[d] = b;
-			k->known |= (uint16_t)(1u << d);
+		if (have_b)
+			kdis_put(k, d, &in->o[0], b);
+		else
+			k->known &= (uint16_t)~(1u << d);
+		kdis_forget_written(k, in, d);
+		return;
+	case KDIS_XCHG:
+		/*
+		 * TWO DESTINATIONS, and the old code had none: XCHG fell to
+		 * the default arm, which cleared the first operand and left
+		 * the second holding a value the swap had just moved away.
+		 * That is a wrong number rather than an unknown one.
+		 * msfvenom's x86-64 stager parks its socket descriptor with
+		 * `xchg rdi, rax`.
+		 */
+		if (in->n_op > 1u && in->o[1].kind == KDIS_O_REG &&
+		    in->o[1].reg < 16u) {
+			uint8_t e = in->o[1].reg;
+			uint64_t va = k->reg[d], ve = k->reg[e];
+			uint16_t ka = (uint16_t)(k->known & (1u << d));
+			uint16_t ke = (uint16_t)(k->known & (1u << e));
+
+			k->reg[d] = ve; k->reg[e] = va;
+			k->known = (uint16_t)(k->known & ~((1u << d) | (1u << e)));
+			if (ke) k->known |= (uint16_t)(1u << d);
+			if (ka) k->known |= (uint16_t)(1u << e);
 		} else {
 			k->known &= (uint16_t)~(1u << d);
+			kdis_forget_written(k, in, -1);
 		}
 		return;
-	case KDIS_ADD: case KDIS_SUB: case KDIS_AND:
-	case KDIS_OR:  case KDIS_XOR:
+	case KDIS_SUB: case KDIS_XOR:
+		/*
+		 * A REGISTER AGAINST ITSELF IS ZERO whatever it held, and
+		 * this used to answer "unknown" for it because it demanded a
+		 * known input. It is the ordinary way to write a zero -
+		 * msfvenom opens with `xor edi,edi` - so the map started
+		 * blind at the first instruction.
+		 */
+		if (in->n_op > 1u && in->o[1].kind == KDIS_O_REG &&
+		    in->o[1].reg == d) {
+			k->reg[d] = 0;
+			k->known |= (uint16_t)(1u << d);
+			kdis_forget_written(k, in, d);
+			return;
+		}
+		/* fall through */
+	case KDIS_ADD: case KDIS_AND: case KDIS_OR:
 		if (!have_b || !(k->known & (1u << d))) {
 			k->known &= (uint16_t)~(1u << d);
+			kdis_forget_written(k, in, d);
 			return;
 		}
 		switch (in->op) {
@@ -352,31 +374,58 @@ static void kdis_track(struct kof_kdis *k, const struct kdis_insn *in)
 		case KDIS_OR:  k->reg[d] = a | b; break;
 		default:       k->reg[d] = a ^ b; break;
 		}
+		kdis_forget_written(k, in, d);
 		return;
 	case KDIS_INC: case KDIS_DEC:
-		if (!(k->known & (1u << d)))
-			return;
-		k->reg[d] = in->op == KDIS_INC ? a + 1u : a - 1u;
+		if (k->known & (1u << d))
+			k->reg[d] = in->op == KDIS_INC ? a + 1u : a - 1u;
+		kdis_forget_written(k, in, d);
 		return;
 	case KDIS_NOT:
 		if (k->known & (1u << d))
 			k->reg[d] = ~a;
+		kdis_forget_written(k, in, d);
 		return;
 	case KDIS_NEG:
 		if (k->known & (1u << d))
 			k->reg[d] = (uint64_t)0 - a;
+		kdis_forget_written(k, in, d);
+		return;
+	case KDIS_MUL:
+		/*
+		 * MULTIPLYING BY A KNOWN ZERO GIVES ZERO whatever the other
+		 * half held, and that is not a corner case here: `xor
+		 * ebx,ebx; mul ebx` is the two-byte way to clear eax AND edx
+		 * at once, which is why msfvenom's i386 payloads open with
+		 * it. Answering "unknown" for both loses the syscall number
+		 * that the next instruction writes a byte into.
+		 */
+		if (in->n_op && in->o[0].kind == KDIS_O_REG &&
+		    in->o[0].reg < 16u && (k->known & (1u << in->o[0].reg)) &&
+		    k->reg[in->o[0].reg] == 0) {
+			k->reg[KDIS_REG_AX] = 0;
+			k->reg[KDIS_REG_DX] = 0;
+			k->known |= (uint16_t)((1u << KDIS_REG_AX) |
+					       (1u << KDIS_REG_DX));
+			return;
+		}
+		kdis_forget_written(k, in, -1);
 		return;
 	case KDIS_CMP: case KDIS_TEST: case KDIS_PUSH:
 		return;                         /* no destination written */
 	default:
 		/*
-		 * EVERYTHING ELSE CLEARS IT, including the loads. `mov eax,
-		 * [esi]` is a KDIS_MOV whose source is memory and falls out of
-		 * the MOV arm above with have_b clear; anything that reaches
-		 * here wrote the register in a way this did not follow, and the
-		 * only safe record of that is "unknown".
+		 * EVERYTHING ELSE FORGETS WHAT THE INSTRUCTION WROTE, which
+		 * is `wmask` and not the first operand. The two differ
+		 * exactly where it matters: `mul ebx` READS ebx and writes
+		 * eax and edx, `cdq` names no operand at all and writes edx,
+		 * and a string operation walks index registers it never
+		 * mentions. Clearing the operand instead threw away a value
+		 * that survived and kept two that did not.
 		 */
-		k->known &= (uint16_t)~(1u << d);
+		kdis_forget_written(k, in, -1);
+		if (in->o[0].flags & KDIS_OF_WRITE)
+			k->known &= (uint16_t)~(1u << d);
 		return;
 	}
 }
@@ -409,10 +458,8 @@ int kof_kdis_reg(const struct kof_kdis *k, uint8_t r, uint64_t *out)
 int kof_kdis_next(struct kof_kdis *k, const struct kof_obj_ctx *ctx,
 		  const uint8_t *base, uint64_t size, struct kdis_insn *out)
 {
-	INSTRUX ix;
 	uint64_t left;
-	unsigned i, n = 0;
-	uint8_t code, data;
+	uint32_t n;
 
 	if (!k || !k->open || !ctx || !base || !out || k->at >= size)
 		return 0;
@@ -421,64 +468,32 @@ int kof_kdis_next(struct kof_kdis *k, const struct kof_obj_ctx *ctx,
 		left = 16u;             /* the longest an instruction can be */
 
 	/*
-	 * THE WIDTH IS THE OBJECT'S, not a guess. A 32-bit body decoded as
-	 * 64-bit reads its REX-looking bytes as prefixes and every length
-	 * after that is wrong - which is not a wrong answer, it is a wrong
-	 * walk.
+	 * THE DECODER IS kof_decode_x86 AND THERE IS NO SECOND ONE.
+	 *
+	 * This used to call NdDecodeEx itself, classify with a switch of its
+	 * own and build its own operands - a complete copy of decode_x86.c
+	 * standing beside it. The copy was written first and never caught
+	 * up: when the enum gained KDIS_SYSCALL and KDIS_WIDEN and the
+	 * decoder gained `wmask`, only one of the two learned them.
+	 *
+	 * MEASURED, and it is not a small drift: a `syscall` instruction came
+	 * back as KDIS_OTHER, so nothing reading an object through this
+	 * cursor could see a Linux system call AT ALL - on a static binary
+	 * that is every capability the program has. `cdq` was the same, and
+	 * `wmask` was zero for every instruction, which is what the constant
+	 * map needs to know which registers an instruction destroys.
+	 *
+	 * One decoder now. Rule 10.
 	 */
-	if (ctx->arch == KOF_ARCH_X86_64) {
-		code = ND_CODE_64;
-		data = ND_DATA_64;
-	} else {
-		code = ND_CODE_32;
-		data = ND_DATA_32;
-	}
-	if (!ND_SUCCESS(NdDecodeEx(&ix, (const ND_UINT8 *)(base + k->at),
-				   (ND_SIZET)left, code, data)))
+	n = kof_decode_x86(base + k->at, (uint32_t)left,
+			   kdis_off_to_va(ctx, k->at),
+			   ctx->arch == KOF_ARCH_X86_64 ? 64u : 32u, out);
+	if (!n)
 		return 0;
-
-	memset(out, 0, sizeof *out);
-	out->op = kdis_class(&ix);
-	out->len = ix.Length;
 	out->at = k->at;
-	out->at_va = kdis_off_to_va(ctx, k->at);
-	out->target = KOF_BROKEN;
-	out->target_va = KOF_BROKEN;
-	if (out->op == KDIS_JCC || out->op == KDIS_CMOV ||
-	    out->op == KDIS_SETCC)
-		out->cond = (uint8_t)ix.Condition;
-
-	for (i = 0; i < ix.OperandsCount && n < 3u; i++) {
-		/*
-		 * THE IMPLICIT ONES ARE DROPPED. bddisasm reports the flags
-		 * register, the stack pointer behind a push and the
-		 * instruction pointer behind a branch; a rule that had to skip
-		 * those would be written against the decoder. Flags.IsDefault
-		 * is exactly the decoder saying "the encoding did not name
-		 * this".
-		 */
-		if (ix.Operands[i].Flags.IsDefault)
-			continue;
-		if (!kdis_operand(&ix.Operands[i], &out->o[n]))
-			out->o[n].kind = KDIS_O_NONE;
-		n++;
-	}
-	out->n_op = (uint8_t)n;
-
-	/*
-	 * WHERE A BRANCH GOES, resolved here because it is arithmetic on an
-	 * address and a module works in offsets. An indirect branch keeps
-	 * KOF_BROKEN: `jmp eax` has a target, and this is not the thing that
-	 * can know it.
-	 */
-	if ((out->op == KDIS_JMP || out->op == KDIS_CALL ||
-	     out->op == KDIS_JCC || out->op == KDIS_LOOP) &&
-	    n && out->o[0].kind == KDIS_O_REL &&
-	    out->at_va != KOF_BROKEN) {
-		out->target_va = out->at_va + out->len +
-				 (uint64_t)out->o[0].disp;
+	n = out->n_op;
+	if (out->target_va != KOF_BROKEN)
 		out->target = kof_pz_addr_to_off(ctx, out->target_va);
-	}
 
 	/*
 	 * AND AN INDIRECT BRANCH RESOLVED FROM WHAT IS KNOWN, which is the

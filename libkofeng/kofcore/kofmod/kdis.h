@@ -135,6 +135,16 @@ enum kdis_op_class {
 #define KDIS_OF_READ    (1u << 1)
 /* The memory operand is relative to the instruction pointer. */
 #define KDIS_OF_RIPREL  (1u << 2)
+/*
+ * AH, CH, DH OR BH - the byte ABOVE the low one, in a register the operand
+ * otherwise names the same way as AL/CL/DL/BL.
+ *
+ * Without this a consumer folding `mov dh, 0x10` into its constant map writes
+ * 0x10 where the program put 0x1000, which is not an unknown value but a
+ * WRONG one. MEASURED: msfvenom's x86-64 stager sets its mmap length exactly
+ * that way, so the map had the allocation at 16 bytes.
+ */
+#define KDIS_OF_HIGH8   (1u << 3)
 
 /* ---- OPERAND KINDS ------------------------------------------------------ */
 enum kdis_op_kind {
