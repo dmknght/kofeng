@@ -4430,16 +4430,16 @@ no_import:
 		 * KOF_CAP_SELF_RESOLVE for why the hash loop beside it is not
 		 * what this tests.
 		 *
-		 * The segment override byte is the whole test: bddisasm
-		 * reports the last one on the instruction, 0x64 for FS and
-		 * 0x65 for GS.
+		 * The segment register is the whole test - see KDIS_SEG_FS,
+		 * which also records what this used to compare against and
+		 * why nothing matched.
 		 */
 		if (ir.n_op >= 2 &&
 		    ir.o[1].kind == KDIS_O_MEM &&
 		    ir.o[1].disp &&
-		    ((ir.o[1].seg == 0x64u && bits == 32 &&
+		    ((ir.o[1].seg == KDIS_SEG_FS && bits == 32 &&
 		      ir.o[1].disp == 0x30) ||
-		     (ir.o[1].seg == 0x65u && bits == 64 &&
+		     (ir.o[1].seg == KDIS_SEG_GS && bits == 64 &&
 		      ir.o[1].disp == 0x60)) &&
 		    n < cap) {
 			static uint16_t peb_name;
@@ -4480,11 +4480,41 @@ no_import:
 		 * THE SYSCALL ITSELF. `syscall` on x86-64, `int 0x80` on i386,
 		 * and sysenter is deliberately absent - no sample in this tree
 		 * uses it and a row nothing exercises is a row nothing checks.
+		 *
+		 * AND `call *%gs:0x10` ON i386, WHICH IS ALSO ONE.
+		 *
+		 * The kernel publishes an entry stub in the vDSO and glibc
+		 * puts its address at offset 0x10 of the thread control
+		 * block, so the whole of a modern i386 libc reaches the
+		 * kernel by CALLING THROUGH THAT SLOT - it is what lets one
+		 * binary use sysenter on a CPU that has it and int 0x80 on
+		 * one that does not. The number is in eax exactly as it is
+		 * for the interrupt, and everything below reads it the same
+		 * way; only the instruction is spelled differently.
+		 *
+		 * The offset is the ABI's and cannot be moved: it is
+		 * `sysinfo` in glibc's `tcbhead_t`, the same kind of fact as
+		 * fs:[0x30] holding the PEB on Windows.
+		 *
+		 * MEASURED on a 935KB i386 Mirai: SIXTEEN `int 0x80` in the
+		 * whole file, all of them in the startup before the TCB is
+		 * set up, against ONE HUNDRED AND SIXTY-EIGHT calls through
+		 * the slot. The sweep saw 10 steps and joined none; the 168
+		 * the program actually makes were read as ordinary indirect
+		 * calls. Over the 241 i386 objects in the measured corpus,
+		 * 193 produced no link at all.
 		 */
 		if (ir.op == KDIS_SYSCALL ||
 		    (ir.op == KDIS_INT && ir.n_op >= 1 &&
 		     ir.o[0].kind == KDIS_O_IMM &&
-		     ir.o[0].imm == 0x80)) {
+		     ir.o[0].imm == 0x80) ||
+		    (bits == 32 && ir.op == KDIS_CALL &&
+		     (ir.flags & KDIS_F_INDIRECT) && ir.n_op >= 1 &&
+		     ir.o[0].kind == KDIS_O_MEM &&
+		     ir.o[0].seg == KDIS_SEG_GS &&
+		     ir.o[0].reg == KDIS_REG_NONE &&
+		     ir.o[0].index == KDIS_REG_NONE &&
+		     ir.o[0].disp == 0x10)) {
 			uint8_t k = KOF_CAP_NONE;
 			uint16_t sel = 0;
 

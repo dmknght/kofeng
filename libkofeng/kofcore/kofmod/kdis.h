@@ -160,6 +160,25 @@ enum kdis_op_kind {
 #define KDIS_REG_DI   7u
 #define KDIS_REG_NONE 0xffu
 
+/*
+ * SEGMENT REGISTERS, AS AN INDEX AND NOT AS A PREFIX BYTE.
+ *
+ * `seg` below carries the decoder's segment register NUMBER - the x86
+ * encoding order, ES CS SS DS FS GS - and not the 0x64/0x65 override bytes
+ * that appear in the instruction stream. The two were confused once and the
+ * cost was silent: every test comparing `seg` against 0x64 or 0x65 was a
+ * condition that could not be true, so `fs:[0x30]` - the PEB fetch at the
+ * top of every Windows import-resolving stub - was never recognised, and
+ * neither was the i386 vDSO syscall entry at `gs:[0x10]`. Named here so the
+ * next reader does not have to know which of the two a number is.
+ */
+#define KDIS_SEG_ES 0u
+#define KDIS_SEG_CS 1u
+#define KDIS_SEG_SS 2u
+#define KDIS_SEG_DS 3u
+#define KDIS_SEG_FS 4u
+#define KDIS_SEG_GS 5u
+
 struct kdis_operand {
 	uint8_t  kind;          /* enum kdis_op_kind */
 	uint8_t  reg;           /* REG, or a MEM base; KDIS_REG_NONE if absent */

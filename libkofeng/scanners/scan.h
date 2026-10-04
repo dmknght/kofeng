@@ -81,7 +81,22 @@
  * eviction rule stays, because a file CAN have more shapes than any
  * number, and it now counts links beside words - see flow_set_offer.
  */
-#define FLOW_SET_MAX 24u
+/*
+ * HOW MANY CHAINS ONE OBJECT MAY REPORT.
+ *
+ * It was 24, and 24 was not a bound on cost - it was a bound on RESULTS, and
+ * it threw them away silently. MEASURED on a UPX-unpacked x86-64 bot: the
+ * object has 53 chains and 24 of them were kept, so the page said "chain 6
+ * of 24" while 29 chains had been dropped by a score. The distinct link
+ * pairs happened to survive on that sample - the dropped chains repeated
+ * what the kept ones said - but nothing in the mechanism promises that, and
+ * a reader cannot tell a complete page from a truncated one.
+ *
+ * 64 at 24 steps of 160 bytes is 240KB, against 90KB at 24. That is the
+ * whole price, it is paid once per scanner, and chain_add's score now
+ * decides between chains far less often.
+ */
+#define FLOW_SET_MAX 64u
 struct kof_flow_set {
 	struct kof_flow_node n[FLOW_SET_MAX][KOF_PTH_SYMPTOM_MAX];
 	uint8_t len[FLOW_SET_MAX];
