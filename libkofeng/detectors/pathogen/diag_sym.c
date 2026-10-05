@@ -282,10 +282,13 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 
 					if (role == KOF_DIAG_ROLE_NONE)
 						continue;
+					/* the origin map holds only what a
+					 * call RETURNED - this route states
+					 * provenance and nothing else. */
 					kof_diag_note_in(h,
 						kof_diag_org_of(&w,
 								kof_diag_sysv_arg[a]),
-						role);
+						role, KOF_DIAG_KIND_PRODUCED);
 				}
 				break;
 			}

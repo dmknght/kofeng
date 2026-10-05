@@ -3,7 +3,10 @@
  * assumed.
  *
  * WHAT A LINK IS IDENTIFIED BY. A link says "this input of the child came
- * from that parent", and the model identifies it by the pair (parent, role).
+ * from that parent", and the model identifies it by (parent, role, kind) -
+ * see enum kof_diag_kind for the third field, which says WHICH relation it
+ * is. The role is the part a capability's table controls, and the part that
+ * can be got wrong by hand.
  * kof_diag_note_in refuses one it already holds, because a run that goes
  * round a loop arrives at the same call with the same value from the same
  * producer, and that is one relation seen twice rather than two relations.
@@ -22,6 +25,10 @@
  * the same link and one of them vanished. The repair was a second word
  * (KOF_DIAG_ROLE_SOURCE) - and the lesson is that a table a human maintains
  * will drift back unless something fails when it does.
+ *
+ * THE KIND DOES NOT RESCUE THIS. Two arguments of one call wearing one role
+ * are the same kind as each other - both are what the caller was handed - so
+ * they still collapse. See tests/unit/diag_kind.c for the other half.
  *
  * SO THIS WALKS THE WHOLE CAPABILITY SPACE. Not the capabilities that have
  * roles today: every value a capability can take, so a word added next year

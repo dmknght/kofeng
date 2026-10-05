@@ -44,7 +44,8 @@ struct kof_diag_hit *kof_diag_hit_of(struct kof_diag_scan *s, uint32_t i);
 /* Record that one of `h`'s inputs came from node `from`, in `role`. A link
  * already recorded is not recorded twice - a loop that arrives at the same
  * call again has not found a second link. */
-void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role);
+void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role,
+		      uint8_t kind);
 
 /*
  * ---- THE ORIGIN MAP, WHICH EVERY STATIC ROUTINE NEEDS --------------------

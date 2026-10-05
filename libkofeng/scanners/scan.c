@@ -41,6 +41,7 @@
  * engine-side model next door is a different file with a similar name - see the
  * note at the top of kofmod/heur.h. */
 #include "../kofcore/kofmod/heur.h"
+#include "../kofcore/kofdebug.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include "../analyzers/parsers/binaries/disasm/xref.h"
@@ -1705,6 +1706,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * the next object's rules had asked for anything.
 	 */
 	sc->raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
+	sc->diag_ask = (want & KOF_ENG_USE_PATHOGEN) != 0;
 
 	/*
 	 * AND WHETHER ANYBODY SPOKE FOR THE INTERPRETER ON THIS OBJECT.
@@ -1854,7 +1856,9 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			{
 				uint32_t k0 = sc->n_kids;
 
-				m->fn(ctx);
+				KOF_TIME_BEGIN(KOF_T_UNPACK);
+			m->fn(ctx);
+			KOF_TIME_END(KOF_T_UNPACK);
 				/* What a carve produced does not make its host
 				 * a wrapper - see KOF_UNP_CARVE. */
 				if (m->unp_kind == KOF_UNP_CARVE &&
@@ -1994,7 +1998,9 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		{
 			uint32_t k0 = sc->n_kids;
 
+			KOF_TIME_BEGIN(KOF_T_UNPACK);
 			m->fn(ctx);
+			KOF_TIME_END(KOF_T_UNPACK);
 			if (m->unp_kind == KOF_UNP_CARVE && sc->n_kids > k0)
 				sc->n_carved += sc->n_kids - k0;
 		}
@@ -2611,7 +2617,9 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->plague_best = 0;
 		sc->str_hit = 0;
 		sc->cur_mod   = m;
-		m->fn(ctx);
+		KOF_TIME_BEGIN(KOF_T_UNPACK);
+			m->fn(ctx);
+			KOF_TIME_END(KOF_T_UNPACK);
 		sc->cur_mod   = NULL;
 
 		if (!sc->rep_valid)
@@ -4636,7 +4644,25 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * two answers, and the second one wrong on every architecture the
 	 * copy had not learned.
 	 */
-	if (opt && opt->want_diag)
+	/*
+	 * ---- AND THE PATHOGEN ANALYSIS RUNS, IF ANYTHING ASKED -----------
+	 *
+	 * Two askers and they are the same ask. A tool reporting rather than
+	 * scanning says so through want_diag; a rule that recognised the
+	 * object says so through KOF_ENG_USE_PATHOGEN, and sc->diag_ask
+	 * carries that from this object's EXAMINE pass.
+	 *
+	 * WHY IT IS RUN HERE RATHER THAN WAITED FOR. The analysis used to
+	 * happen only when a signature asked a question that needed it, which
+	 * means an object nobody questioned was never analysed at all - and
+	 * the findings are wanted by the verdict layer, which has not been
+	 * written yet and so asks nothing. A rule's ask is the decision; this
+	 * is where the decision is acted on.
+	 *
+	 * The latch inside makes it once per object however many times it is
+	 * reached, and an object nobody asked about still does no work.
+	 */
+	if ((opt && opt->want_diag) || sc->diag_ask)
 		kof_scan_diag_force(&ctx);
 	if (sc->diag_ready && sc->eng && out) {
 		uint32_t q;

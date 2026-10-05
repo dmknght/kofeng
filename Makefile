@@ -992,7 +992,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/detectors/pathogen/diag_emu.c \
            libkofeng/detectors/pathogen/diag_sym.c \
            libkofeng/disinfect/pzero.c \
-           libkofeng/kofcore/kofhash.c
+           libkofeng/kofcore/kofhash.c \
+           libkofeng/kofcore/kofdebug.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
 LIB     := $(SDK)/lib/libkofeng.a

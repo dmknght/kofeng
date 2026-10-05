@@ -47,10 +47,42 @@
  */
 #define KOF_DIAG_FROM_STACK 0xfffeu
 
+/*
+ * WHICH OF TWO RELATIONS A LINK IS.
+ *
+ * The model had one: the parent returned the value the child's input holds.
+ * That is provenance, and it is not the only way two calls are related.
+ *
+ *   PRODUCED  kzalloc hands back a buffer and copy_from_user is given it;
+ *             prepare_creds hands back credentials and commit_creds
+ *             installs them. The child holds what the parent MADE.
+ *   SHARED    both halves of the kprobe pair are handed the same struct
+ *             kprobe. Neither made it - it is a module global - and what
+ *             relates them is that it is the SAME OBJECT. The same is true
+ *             of the two copies in a hooked getdents: the listing is read
+ *             into a buffer and the same buffer is written back out, and
+ *             the editing in between is the whole of the hook.
+ *
+ * WITH ONE KIND FOR BOTH they collide. A buffer produced once and received
+ * twice put three nodes in the table, and an argument came back with two
+ * parents wearing one role - so the code picked one, which meant recording
+ * a RECEIVER as the producer of a buffer something else had produced. That
+ * was tidying the output, not describing the program.
+ *
+ * Kept apart, both are said: copy_to_user holds what kzalloc produced AND
+ * holds the same object copy_from_user filled, and neither statement has to
+ * be dropped for the other.
+ */
+enum kof_diag_kind {
+	KOF_DIAG_KIND_PRODUCED = 0,
+	KOF_DIAG_KIND_SHARED
+};
+
 struct kof_diag_in {
 	uint16_t from;          /* index of the origin node, or the two above */
 	uint8_t  role;          /* enum kof_diag_role                         */
 	uint8_t  how;           /* enum kof_diag_link                         */
+	uint8_t  kind;          /* enum kof_diag_kind                         */
 };
 
 /* Bits in kof_diag_hit.bits. */
@@ -116,6 +148,31 @@ struct kof_diag_in {
 
 struct kof_diag_hit {
 	uint64_t at;            /* where, as an offset into the object      */
+	/*
+	 * THE CONSTANT THAT NAMES WHICH PART OF AN OBJECT, and 0 when the
+	 * node is not about one.
+	 *
+	 * A node used to be able to say "something was read out of the thing
+	 * that call produced" and no more. The number is the whole of the
+	 * meaning in every case measured here:
+	 *
+	 *   cred + 8, +0x10, +0x18, +0x20   the uid and gid fields - the
+	 *                                   difference between copying
+	 *                                   credentials and taking root
+	 *   kp + 0x2d                       the probe's resolved address -
+	 *                                   the reason the probe exists
+	 *   dirent + 0x10                   d_reclen, the record length a
+	 *                                   rootkit edits to splice an entry
+	 *                                   out of a directory listing
+	 *   table + 0x270, 0x6c8, 0x1f0     which syscall is being hooked
+	 *
+	 * It is a VALUE and not a class, which kofdiag.h's note on attributes
+	 * says belongs in a report rather than in matching - and that note is
+	 * about a value the AUTHOR chose, like a path or an address. A
+	 * structure offset is chosen by the kernel's ABI and is as fixed as a
+	 * syscall number.
+	 */
+	uint64_t attr;
 	uint16_t cap;           /* enum kof_flow_cap, or KOF_CAP_NONE       */
 	uint16_t flags;         /* KOF_FLOWF_* observed at this site        */
 	uint8_t  bits;          /* KOF_DIAG_H_*                             */

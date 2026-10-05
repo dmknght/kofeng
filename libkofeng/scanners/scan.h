@@ -1010,6 +1010,13 @@ struct kof_scanner {
 	 * cannot leave the previous object's answer standing.
 	 */
 	int      raise_carried;
+	/*
+	 * DID ANYTHING ASK FOR THE PATHOGEN ANALYSIS on this object - see
+	 * KOF_ENG_USE_PATHOGEN. Per object and recomputed, like emu_ask: an
+	 * ask that survived into the next object would be the leak the
+	 * declaration exists to prevent.
+	 */
+	int      diag_ask;
 
 	/*
 	 * WHETHER SOMEBODY ALREADY SPOKE FOR THE INTERPRETER ON THIS OBJECT,

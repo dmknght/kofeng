@@ -60,7 +60,21 @@ KOF_HEUR_NAME("Shellcode");
  * signature names it, that name wins; if nothing does, the question mark stands.
  */
 KOF_HEUR_PREDICT("Meterp");
-KOF_HEUR_WANT(KOF_ENG_USE_EMU);
+/*
+ * AND THE PATHOGEN ANALYSIS, on this object only.
+ *
+ * This rule has already decided the object is a msfvenom-shaped payload -
+ * a few hundred bytes of code with no imports and no symbol table. That is
+ * exactly what the analysis is cheap on and exactly where its answer is
+ * worth having: the links between the allocation, the socket, the read and
+ * the jump are what the shape IS, and no byte pattern survives the encoder
+ * that produced it.
+ *
+ * It is asked HERE rather than left on by default because the cost is
+ * proportional to the object - see KOF_ENG_USE_PATHOGEN. A rule that has
+ * recognised something pays; a 40 MB binary nobody asked about does not.
+ */
+KOF_HEUR_WANT(KOF_ENG_USE_EMU | KOF_ENG_USE_PATHOGEN);
 
 /*
  * No architecture is declared. The shape is a property of the ELF layout and

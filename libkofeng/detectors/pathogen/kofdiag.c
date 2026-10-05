@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "kofdiag.h"
+#include "../../kofcore/kofdebug.h"
 #include "diag_int.h"
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/kofdiag.h"
@@ -256,8 +257,8 @@ static int arg_regs(const struct kof_obj_ctx *ctx, const uint8_t **out)
  *
  * AND THE ROLES OF ONE CALL MUST BE DISTINCT, which is not a style rule but
  * the invariant kof_diag_note_in rests on. That function refuses a link whose
- * (parent, role) it already holds, because a loop arriving at the same site
- * again has not found a second relation. If two arguments of one call wear
+ * (parent, role, kind) it already holds, because a loop arriving at the same
+ * site again has not found a second relation. If two arguments of one call wear
  * the same word, two DIFFERENT relations become indistinguishable and the
  * second is silently dropped - MEASURED on a hooked getdents, where
  * copy_to_user's kernel source and userspace destination were both called
@@ -316,7 +317,8 @@ struct kof_diag_hit *kof_diag_hit_of(struct kof_diag_scan *s, uint32_t i)
 	return (s && i < s->n_hit) ? &s->hit[i] : 0;
 }
 
-void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role)
+void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role,
+		      uint8_t kind)
 {
 	uint8_t i;
 
@@ -332,12 +334,19 @@ void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role)
 	 * MEASURED before this was here: meter1_x86's retry loop produced ten
 	 * copies of one link.
 	 */
+	/*
+	 * THE SAME LINK IS (parent, role, KIND). Two relations between one
+	 * pair of nodes are two links - see enum kof_diag_kind - and only a
+	 * repeat of all three is the loop arriving again.
+	 */
 	for (i = 0; i < h->n_in; i++)
-		if (h->in[i].from == from && h->in[i].role == role)
+		if (h->in[i].from == from && h->in[i].role == role &&
+		    h->in[i].kind == kind)
 			return;
 	h->in[h->n_in].from = from;
 	h->in[h->n_in].role = role;
 	h->in[h->n_in].how  = KOF_DIAG_LINK_PROVEN;
+	h->in[h->n_in].kind = kind;
 	h->n_in++;
 }
 
@@ -456,12 +465,15 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	    (!strcmp(nm, "read") || !strcmp(nm, "recv") ||
 	     !strcmp(nm, "recvfrom") || !strcmp(nm, "write") ||
 	     !strcmp(nm, "send"))) {
-		kof_diag_note_in(h, kof_diag_org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER);
-		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
+		kof_diag_note_in(h, kof_diag_org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER,
+					 KOF_DIAG_KIND_PRODUCED);
+		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD,
+					 KOF_DIAG_KIND_PRODUCED);
 	} else if (n_ar >= 1 && nm &&
 		   (!strcmp(nm, "connect") || !strcmp(nm, "close") ||
 		    !strcmp(nm, "dup2"))) {
-		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
+		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD,
+					 KOF_DIAG_KIND_PRODUCED);
 	}
 
 	/*
@@ -735,7 +747,8 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 					struct kof_diag_hit *h =
 						kof_diag_hit_add(s, in.at, KOF_CAP_EXEC_REG, 0);
 
-					kof_diag_note_in(h, t, KOF_DIAG_ROLE_TARGET);
+					kof_diag_note_in(h, t, KOF_DIAG_ROLE_TARGET,
+					 KOF_DIAG_KIND_PRODUCED);
 				}
 			}
 			if (in.wmask & (1ull << KDIS_REG_AX))
@@ -822,6 +835,9 @@ typedef void (*diag_fn)(struct kof_diag_scan *, const struct kof_obj_ctx *,
 			const uint8_t *, uint64_t);
 
 struct diag_scenario {
+	/* which row of the timing report this routine's cost lands in -
+	 * is not an answer anybody can act on. */
+	enum kof_time_slot slot;
 	unsigned    bit;
 	const char *name;
 	diag_fn     fn;
@@ -843,9 +859,12 @@ void kof_diag_run_syscall(struct kof_diag_scan *s,
 }
 
 static const struct diag_scenario diag_scenarios[] = {
-	{ KOF_DIAG_RUN_SYSCALL, "syscall", kof_diag_run_syscall },
-	{ KOF_DIAG_RUN_SYMBOL,  "symbol",  kof_diag_run_symbol },
-	{ KOF_DIAG_RUN_EMULATE, "emulate", kof_diag_run_emulate }
+	{ KOF_T_DIAG_SYSCALL, KOF_DIAG_RUN_SYSCALL, "syscall",
+	  kof_diag_run_syscall },
+	{ KOF_T_DIAG_SYMBOL,  KOF_DIAG_RUN_SYMBOL,  "symbol",
+	  kof_diag_run_symbol },
+	{ KOF_T_DIAG_EMULATE, KOF_DIAG_RUN_EMULATE, "emulate",
+	  kof_diag_run_emulate }
 };
 
 struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
@@ -867,7 +886,9 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 
 		if (!(run & d->bit) || !d->fn)
 			continue;
+		KOF_TIME_BEGIN(d->slot);
 		d->fn(s, ctx, base, size);
+		KOF_TIME_END(d->slot);
 		s->ran |= d->bit;
 		if (s->full)
 			break;
@@ -969,13 +990,29 @@ static int spec_ok(const struct kof_diag_hit *h,
  * accepts either.
  */
 static int linked(const struct kof_diag_hit *child, uint16_t parent_idx,
-		  const struct kof_diag_hit *parent, uint8_t role)
+		  const struct kof_diag_hit *parent, uint8_t role,
+		  uint8_t want)
 {
 	uint8_t i;
+
+	/*
+	 * AND OF WHICH KIND, where the diagnose says - see KOF_DIAG_B_SHARED.
+	 * Neither bit is "either", which is what a diagnose written before
+	 * the kinds existed asked for and still asks for.
+	 */
+	want &= (uint8_t)(KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED);
 
 	for (i = 0; i < child->n_in; i++) {
 		if (child->in[i].role != role)
 			continue;
+		if (want) {
+			uint8_t is = child->in[i].kind == KOF_DIAG_KIND_SHARED
+				     ? (uint8_t)KOF_DIAG_B_SHARED
+				     : (uint8_t)KOF_DIAG_B_PRODUCED;
+
+			if (!(want & is))
+				continue;
+		}
 		if (child->in[i].from == parent_idx)
 			return 1;
 		if (child->in[i].from == KOF_DIAG_FROM_STACK &&
@@ -1000,7 +1037,7 @@ static int bind_from(const struct kof_diag_scan *s, const struct kof_diag *d,
 			if (!spec_ok(&s->hit[i], &d->node[c]))
 				continue;
 			if (!linked(&s->hit[i], bound[k], &s->hit[bound[k]],
-				    d->node[c].role))
+				    d->node[c].role, d->node[c].bits))
 				continue;
 			bound[c] = (uint16_t)i;
 			if (bind_from(s, d, c, bound))

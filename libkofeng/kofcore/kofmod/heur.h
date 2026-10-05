@@ -167,6 +167,28 @@ enum kof_eng_want {
 	KOF_ENG_CONCLUDE = 1u << 3,
 
 	/*
+	 * WORK OUT WHAT THIS OBJECT'S CODE DOES - the pathogen analysis.
+	 *
+	 * It sweeps for the places the code enters the kernel or calls an
+	 * import, then resolves which of those are linked by a value, and the
+	 * cost of that is proportional to the OBJECT. On a stager it is
+	 * nothing - measured, 7.4 us for a cleartext one - and on a 40 MB
+	 * binary it is a sweep of 40 MB.
+	 *
+	 * SO A RULE ASKS. Today it runs on every x86 object whenever the
+	 * database carries any diagnose at all, which is the right default
+	 * for a database of two and the wrong one for a database of two
+	 * hundred. A rule that has recognised something worth asking about
+	 * says so, and nothing else pays.
+	 *
+	 * The three reasons at the top of this enum hold here unchanged: it
+	 * is greppable, it is fixed at build time so a hostile object cannot
+	 * turn the analysis on by what it contains, and there is no state, so
+	 * one object's ask cannot become the next object's.
+	 */
+	KOF_ENG_USE_PATHOGEN = 1u << 4,
+
+	/*
 	 * THE LOW BITS ARE ASKS. THE HIGH BYTE IS A CLASS - see
 	 * KOF_HEUR_SCAN_CLASS below.
 	 */

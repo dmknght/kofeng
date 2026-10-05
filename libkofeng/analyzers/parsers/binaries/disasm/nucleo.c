@@ -496,6 +496,44 @@ names[] = {
 	 * have separate words. See KOF_CAP_CRED_PREPARE. */
 	{ "prepare_creds",  KOF_CAP_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
 	{ "prepare_kernel_cred", KOF_CAP_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
+	/*
+	 * ---- THE KERNEL'S ALLOCATORS ---------------------------------------
+	 *
+	 * Missing, and the gap showed up as a chain resting on nothing. A
+	 * hooked getdents is
+	 *
+	 *     kdirent = kzalloc(n);  copy_from_user(kdirent, dirent, n);
+	 *     <edit kdirent>;        copy_to_user(dirent, kdirent, n);
+	 *
+	 * and kdirent is the object the whole hook turns on. With no word for
+	 * the allocation it was an anonymous stand-in - good enough to carry
+	 * the link between the two copies, and unable to BE one end of it.
+	 * The buffer that the listing is edited in should be a node.
+	 *
+	 * COMMON, as an allocator is: __kmalloc_noprof is in 177 of 900 clean
+	 * kernel modules on this machine and kfree in 428. A term, never a
+	 * verdict - what is said is not that a module allocates but what it
+	 * then does with what it allocated.
+	 *
+	 * BOTH SPELLINGS of the kernel's recent renames, for the reason the
+	 * list-surgery row gives: a table that knows only the old name is a
+	 * table about one kernel version.
+	 */
+	{ "__kmalloc",      KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "__kmalloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmalloc",        KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmalloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmalloc_trace",  KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kvmalloc_node",  KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kvmalloc_node_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "krealloc",       KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "krealloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmem_cache_alloc", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmem_cache_alloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "vmalloc",        KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "vmalloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "__vmalloc",      KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "__vmalloc_node_range", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
 	{ "commit_creds",   KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
 	{ "set_current_groups", KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
 	/*
@@ -560,6 +598,55 @@ names[] = {
 	 * the kernel knows - and the one a rootkit wants, sys_call_table, is
 	 * exported to nobody. See KOF_CAP_KSYM_LOOKUP.
 	 */
+	/*
+	 * ---- A CALL THROUGH A POINTER, WHICH IS AN IMPORT ON A RETPOLINE
+	 * KERNEL ------------------------------------------------------------
+	 *
+	 * WHY THIS IS HERE AT ALL. A module that resolves a symbol at runtime
+	 * does not call it by name - it stores the address in a variable and
+	 * calls through that. Diamorphine's kallsyms_lookup_name_ is
+	 * `uint64_t kallsyms_lookup_name_ = 0x0` in .bss, filled from kp.addr
+	 * and then called. There is no symbol for that call, and the single
+	 * most important call in the module was invisible.
+	 *
+	 * EXCEPT THAT ON A RETPOLINE BUILD THERE IS. The compiler does not
+	 * emit `call *%rax`; it emits `call __x86_indirect_thunk_rax`, an
+	 * UNDEFINED SYMBOL, which the relocation table lists like any other -
+	 * and whose name states the register the target was in. So the site,
+	 * the fact that it is indirect, and which register held the pointer
+	 * all arrive without decoding anything.
+	 *
+	 * COMMON, AND THAT IS THE POINT OF SAYING SO: 359 of 900 clean kernel
+	 * modules from this machine import one. It is a term and never a
+	 * verdict - what matters is not that a module calls through a pointer
+	 * but WHERE the pointer came from, which is a link.
+	 *
+	 * The register spellings are written out rather than matched by
+	 * prefix: a prefix match would also take __x86_return_thunk, which is
+	 * a return and not a call.
+	 */
+	{ "__x86_indirect_thunk_rax", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rbx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rcx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rdx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rsi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rdi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rbp", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r8", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r9", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r10", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r11", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r12", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r13", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r14", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r15", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_eax", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_ebx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_ecx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_edx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_esi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_edi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_ebp", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
 	{ "kallsyms_lookup_name", KOF_CAP_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
 	{ "kallsyms_lookup_name_t", KOF_CAP_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
 	{ "__symbol_get",   KOF_CAP_SYMBOL_GET, KOF_FLOW_ROLE_NONE },
@@ -1146,15 +1233,31 @@ const char *kof_flow_cap_name(uint16_t cap)
 	case KOF_CAP_ALLOC:        return "mem-alloc";
 	case KOF_CAP_ALLOC_EXEC:   return "mem-alloc-exec";
 	case KOF_CAP_HEAP:         return "mem-alloc-heap";
+	case KOF_CAP_FIELD_READ:   return "mem-field-read";
+	case KOF_CAP_FIELD_WRITE:  return "mem-field-write";
 	case KOF_CAP_REG_OPEN:     return "reg-open";
 	/* "exec-memory" and not "exec-register": the register is how the
-	 * branch was spelled, the memory is what was entered. The sibling
-	 * KOF_CAP_CALL_REG keeps `call-register`, because there the register
-	 * IS the fact - it holds the program's own code. */
+	 * branch was spelled, the memory is what was entered. */
 	case KOF_CAP_EXEC_REG:     return "exec-memory";
 	case KOF_CAP_SELF_RESOLVE: return "lib-peb-walk";
 	case KOF_CAP_NAME_HASH:    return "lib-name-hash";
-	case KOF_CAP_CALL_REG:     return "call-register";
+	/*
+	 * "lib-call-indirect", AND IT USED TO BE "call-register".
+	 *
+	 * Two things were wrong with the old spelling. It was the only word
+	 * in KOF_CG_LIB without the group's prefix - lib-api-resolve,
+	 * lib-peb-walk, lib-name-hash - so a reader could not tell what
+	 * family it belonged to. And it named the register, which is the way
+	 * the instruction was WRITTEN, after the line directly above it had
+	 * just refused to do that for exec-memory on the ground that the
+	 * spelling is not the fact.
+	 *
+	 * What the fact is: a call whose target is not named at the call. The
+	 * target was decided earlier, wherever the pointer was stored, and
+	 * that is the whole difficulty - see the note on retpoline thunks in
+	 * the table above.
+	 */
+	case KOF_CAP_CALL_REG:     return "lib-call-indirect";
 	case KOF_CAP_CRYPTO:       return "crypto";
 	case KOF_CAP_CAPTURE:      return "input-capture";
 	case KOF_CAP_SVC_INSTALL:  return "service-install";

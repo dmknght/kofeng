@@ -1825,6 +1825,8 @@ static void resolve_heur(void)
 			g_heur_want |= KOF_ENG_KEEP_ON_OPEN;
 		if (names_ident(wt->arg, "KOF_ENG_CONCLUDE"))
 			g_heur_want |= KOF_ENG_CONCLUDE;
+		if (names_ident(wt->arg, "KOF_ENG_USE_PATHOGEN"))
+			g_heur_want |= KOF_ENG_USE_PATHOGEN;
 
 		if ((uint32_t)g_heur_want == before)
 			err(wt->line, "KOF_HEUR_WANT names nothing the engine "
@@ -7191,6 +7193,7 @@ struct dnode {
 	uint16_t flags;
 	uint8_t  role;
 	uint8_t  touch;
+	uint8_t  bits;          /* KOF_DIAG_B_PRODUCED / _SHARED, if demanded */
 };
 
 /* Written in front of the nodes. Little endian, like every other number
@@ -7246,6 +7249,10 @@ static int diag_role_of(const char *w, uint8_t *out)
 	static const struct { const char *w; uint8_t v; } r[] = {
 		{ "KOF_DIAG_ROLE_NONE",   KOF_DIAG_ROLE_NONE   },
 		{ "KOF_DIAG_ROLE_BUFFER", KOF_DIAG_ROLE_BUFFER },
+		/* SOURCE was added to the engine and not here, so a diagnose
+		 * naming it was refused as "not a role" - the word existed on
+		 * one side of the build only. */
+		{ "KOF_DIAG_ROLE_SOURCE", KOF_DIAG_ROLE_SOURCE },
 		{ "KOF_DIAG_ROLE_TARGET", KOF_DIAG_ROLE_TARGET },
 		{ "KOF_DIAG_ROLE_FD",     KOF_DIAG_ROLE_FD     },
 		{ "KOF_DIAG_ROLE_PATH",   KOF_DIAG_ROLE_PATH   },
@@ -7257,6 +7264,21 @@ static int diag_role_of(const char *w, uint8_t *out)
 			*out = r[i].v;
 			return 1;
 		}
+	return 0;
+}
+
+/* Which kind of edge a node demands, when it says. Absent is not an error:
+ * see KOF_DIAG_B_PRODUCED - a diagnose that does not care accepts either. */
+static int diag_kind_of(const char *w, uint8_t *out)
+{
+	if (strcmp(w, "KOF_DIAG_B_PRODUCED") == 0) {
+		*out = KOF_DIAG_B_PRODUCED;
+		return 1;
+	}
+	if (strcmp(w, "KOF_DIAG_B_SHARED") == 0) {
+		*out = KOF_DIAG_B_SHARED;
+		return 1;
+	}
 	return 0;
 }
 
@@ -7313,7 +7335,7 @@ static int diagnose_main(int argc, char **argv)
 	const char *src = argc > 2 ? argv[2] : NULL;
 	const char *out = argc > 3 ? argv[3] : NULL;
 	struct dnode nd[64];
-	char name[64] = "", line[1024], a[4][96];
+	char name[64] = "", line[1024], a[5][96];
 	int n_nd = 0, lineno = 0, i;
 	unsigned via = 0;
 	FILE *f, *o;
@@ -7403,6 +7425,18 @@ static int diagnose_main(int argc, char **argv)
 				err(lineno, "not a capability");
 			if (!diag_role_of(a[3], &d->role))
 				err(lineno, "not a role");
+			/* the optional kind - absent means either */
+			if (diag_arg(p, 4, a[4], sizeof a[4])) {
+				uint8_t kb;
+
+				if (!diag_kind_of(a[4], &kb))
+					err(lineno,
+					    "not a link kind: want "
+					    "KOF_DIAG_B_PRODUCED or "
+					    "KOF_DIAG_B_SHARED");
+				else
+					d->bits |= kb;
+			}
 			n_nd++;
 		} else if ((p = strstr(line, "KOF_DIAG_TOUCH(")) != NULL) {
 			if (!diag_arg(p, 0, a[0], sizeof a[0]))
@@ -7472,7 +7506,8 @@ static int diagnose_main(int argc, char **argv)
 		blob[at + 3] = (unsigned char)(nd[i].flags >> 8);
 		blob[at + 4] = (unsigned char)par;
 		blob[at + 5] = nd[i].role;
-		blob[at + 6] = nd[i].touch ? KOF_DIAG_B_TOUCH : 0u;
+		blob[at + 6] = (uint8_t)(nd[i].bits |
+					 (nd[i].touch ? KOF_DIAG_B_TOUCH : 0u));
 		blob[at + 7] = 0;               /* attr_len */
 		at += 8;
 	}

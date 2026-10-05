@@ -121,6 +121,7 @@ enum kof_cap_group {
 
 /* The action, numbered inside its own group and nowhere else. */
 enum { KOF_CA_BARE_SLEEP = 1, KOF_CA_BARE_ANTI_DEBUG };
+enum { KOF_CA_MEM_FIELD_READ = 90, KOF_CA_MEM_FIELD_WRITE = 91 };
 enum { KOF_CA_MEM_ALLOC = 1, KOF_CA_MEM_ALLOC_EXEC, KOF_CA_MEM_ALLOC_HEAP, KOF_CA_MEM_EXEC, KOF_CA_MEM_MEMFD_CREATE };
 enum { KOF_CA_FILE_OPEN = 1, KOF_CA_FILE_READ, KOF_CA_FILE_WRITE, KOF_CA_FILE_DELETE, KOF_CA_FILE_RENAME, KOF_CA_FILE_PERM_SET, KOF_CA_FILE_TIMESTAMP_SET };
 enum { KOF_CA_NET_OPEN = 1, KOF_CA_NET_OPEN_RAW, KOF_CA_NET_CONNECT, KOF_CA_NET_BIND, KOF_CA_NET_LISTEN, KOF_CA_NET_ACCEPT, KOF_CA_NET_SEND, KOF_CA_NET_RECV, KOF_CA_NET_GETADDR, KOF_CA_NET_ADDR,
@@ -916,6 +917,34 @@ enum kof_flow_cap {
 	 * so a program that merely allocates never reaches a page.
 	 */
 	KOF_CAP_HEAP = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC_HEAP),
+	/*
+	 * A FIELD OF AN OBJECT ANOTHER NODE PRODUCED, READ OR WRITTEN.
+	 *
+	 * NOT A SYSTEM ACT, which is why it took so long to admit. Every
+	 * other word here names something the kernel or a library does for
+	 * the program; this names the program's own arithmetic. The model
+	 * excluded it on purpose - and MEASURED on two rootkits, the step
+	 * that carries the meaning is always exactly this one:
+	 *
+	 *   prepare_creds -> commit_creds        is harmless without the
+	 *                                        memset of cred+8
+	 *   register_kprobe -> unregister_kprobe is pointless without the
+	 *                                        read of kp+0x2d
+	 *   copy_from_user -> copy_to_user       is an ioctl handler without
+	 *                                        the write to dirent+0x10
+	 *
+	 * The engine could see all three brackets and none of the contents,
+	 * so it described the shape of a rootkit and an ordinary driver
+	 * identically. `mov cr0` was admitted for the same reason: evidence
+	 * with no other carrier.
+	 *
+	 * WHICH field is in kof_diag_hit.attr. Without the number the word
+	 * says only "touched something", which no rule can use.
+	 */
+	KOF_CAP_FIELD_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM,
+					KOF_CA_MEM_FIELD_READ),
+	KOF_CAP_FIELD_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM,
+					 KOF_CA_MEM_FIELD_WRITE),
 	/*
 	 * AN OPEN REGISTRY KEY, AND IT IS NOT A FINDING.
 	 *

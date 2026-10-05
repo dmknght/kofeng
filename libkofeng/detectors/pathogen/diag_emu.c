@@ -239,6 +239,19 @@ static enum force_kind cap_force_kind(uint16_t cap)
 	case KOF_CAP_NET_BIND:
 	case KOF_CAP_NET_LISTEN:
 	case KOF_CAP_FD_REDIR:
+	/*
+	 * AND THE KERNEL COPIES, WHOSE SUCCESS VALUE IS ZERO AND NOT A COUNT.
+	 * copy_from_user and copy_to_user return the number of bytes they
+	 * could NOT move, so every caller reads `if (err) goto out`.
+	 *
+	 * MEASURED: given a non-zero result these two were read as having
+	 * failed, and Diamorphine's hooked getdents went straight from the
+	 * first copy to its error path - freeing the buffer and leaving - so
+	 * the second copy, which is the whole of the hiding, was never on the
+	 * path the run took.
+	 */
+	case KOF_CAP_COPY_FROM_USER:
+	case KOF_CAP_COPY_TO_USER:
 		return FORCE_ZERO;
 	case KOF_CAP_NET_OPEN:
 	case KOF_CAP_NET_RAW:
@@ -554,6 +567,74 @@ static struct kof_emu *build_rel_image(const struct kof_obj_ctx *ctx,
  * registers are intact when it arrives.
  */
 #define DIAG_REL_STEPS 4096u
+
+/*
+ * HOW OFTEN ONE BACKWARD BRANCH MAY BE TAKEN before the run is made to leave
+ * the loop. Two full passes: the first covers every site in the body, the
+ * second lets a value that is carried between iterations settle. A third
+ * cannot produce a node that is not already there, because a node is a site.
+ */
+#define DIAG_REL_SPINS 2u
+
+/*
+ * HOW MANY FAULTS ON SYNTHETIC MEMORY ONE SPAN MAY STEP OVER. A DoS bound and
+ * nothing else: a span faulting on every other instruction is not being
+ * walked, it is being guessed at, and it should end.
+ */
+#define DIAG_REL_FAULTS 32u
+
+/*
+ * ---- WHEN THE RUN IS MOVED ON, AND WHY IT IS NOT RUN AGAIN --------------
+ *
+ * THIS ROUTINE DOES NOT EXECUTE THE PROGRAM. It resolves whether the value a
+ * known node produced is the value another known node receives, and the only
+ * reason it steps instructions at all is that the arithmetic in between -
+ * a move, an add, a spill and reload - is easier to RUN than to model. The
+ * sites themselves are not discovered by running: the relocation table names
+ * every one of them before a single instruction is stepped.
+ *
+ * SO CONTROL FLOW IS NAVIGATION, NOT EVIDENCE. A loop adds nothing after its
+ * first pass, and a conditional branch out of the function leads nowhere this
+ * span can use - both are obstacles between one site and the next, and the
+ * run exists to step AROUND them.
+ *
+ * WHEN THE RUN STALLS - it leaves the function, faults on memory that was
+ * stated rather than read, or spends its budget - the span MOVES TO THE NEXT
+ * SITE and carries on. One pass, each site seated at most once.
+ *
+ * AND NOT BY RUNNING THE SPAN AGAIN. That was tried and it was the wrong
+ * shape: six runs of one function, each following a different arbitrary path,
+ * to collect what one pass over the known sites collects directly. It cost
+ * 3.5x on 900 kernel modules and it is the thing this design exists to avoid.
+ *
+ * WHAT IT ASSUMES, SAID PLAINLY: after a re-seat the registers are the ones
+ * the previous stretch left. That is a claim about DATA, not about a path -
+ * the same claim the whole routine makes when it states a skipped call's
+ * result - and a link is still only recorded when a register actually holds
+ * a token some node produced.
+ */
+#define DIAG_REL_SEATS 64u
+
+/*
+ * HOW MANY INSTRUCTIONS ONE GAP MAY TAKE.
+ *
+ * THE BUDGET BELONGS TO THE GAP, NOT TO THE SPAN. A span-wide budget is spent
+ * by whichever stretch is slowest, and everything after it is never looked at
+ * - MEASURED: diamondxe's filtering loop used all 4096 instructions and its
+ * copy_to_user, a site the relocation table had named before the run started,
+ * was never once seated. The symptom is indistinguishable from "that call has
+ * no link", which is the worst shape a fault can have.
+ *
+ * A gap is a stretch between two calls. 512 is far past any of them: the
+ * longest in either Diamorphine build is under 80 instructions, and a stretch
+ * that needs more than 512 is looping, which is the thing to step around.
+ */
+#define DIAG_REL_GAP 512u
+
+/* How far into an object a displacement may reach and still be a field of
+ * it. A struct kprobe is 0x58 bytes; nothing this routine looks at is near
+ * a page. A bound on what counts as one object, not on results. */
+#define DIAG_OBJ_SPAN 0x200u
 #define DIAG_REL_TOKEN 0x5A6E0000DEAD0000ull
 
 /*
@@ -703,9 +784,36 @@ static int worth_remembering(uint64_t v, uint64_t size)
  */
 #define DIAG_REL_PASSES 4u
 
+/*
+ * A VALUE, THE NODE IT BELONGS TO, AND WHICH OF TWO RELATIONS THAT IS.
+ *
+ * They are not the same relation and one table recorded them as if they
+ * were:
+ *
+ *   PRODUCED  the node RETURNED this value. kzalloc hands back the buffer;
+ *             prepare_creds hands back the credentials. A later call holding
+ *             it is holding what this call made - that is provenance, and it
+ *             is what a link means.
+ *   RECEIVED  the node was HANDED this value and made nothing. Both halves
+ *             of the kprobe pair are given the same struct kprobe; neither
+ *             produced it. Two receivers share an object, which is a real
+ *             relation and a different one.
+ *
+ * WITH ONE FLAG FOR BOTH, a value that was produced once and received twice
+ * put three nodes in the table and a later argument linked to all of them -
+ * so copy_to_user, which has exactly one source, came back with two parents
+ * both wearing `source`. Overwriting the earlier entry made the output
+ * tidy and the answer wrong: it recorded copy_from_user as the producer of
+ * a buffer kzalloc had produced.
+ *
+ * So the kind is kept, and a link prefers the producer. Where there is none -
+ * the kprobe struct, which is a module global nobody returned - the earliest
+ * receiver stands for the object, which is what makes the pair one idiom.
+ */
 struct seenval {
 	uint64_t val;
 	uint16_t node;
+	uint8_t  produced;
 };
 
 /*
@@ -780,11 +888,17 @@ static uint16_t callee_node(const struct kof_diag_scan *s,
 		for (i = 0; i < n; i++) {
 			const struct kof_diag_hit *p = kof_diag_scan_at(s, i);
 
-			if (p && p->at >= fns[j].va &&
-			    p->at < fns[j].va + fns[j].size) {
-				only = (uint16_t)i;
-				cnt++;
-			}
+			if (!p || p->at < fns[j].va ||
+			    p->at >= fns[j].va + fns[j].size)
+				continue;
+			/* A promoted wrapper IS the function - see
+			 * promote_wrappers - so it answers for it however
+			 * many nodes are inside. */
+			if (p->at == fns[j].va &&
+			    p->cap == KOF_CAP_KSYM_LOOKUP)
+				return (uint16_t)i;
+			only = (uint16_t)i;
+			cnt++;
 		}
 		return cnt == 1u ? only : 0xffffu;
 	}
@@ -815,6 +929,107 @@ static int has_cr_write(const uint8_t *p, uint64_t n)
 	return 0;
 }
 
+/*
+ * ---- A FUNCTION THAT IS ONE ACT BECOMES ONE NODE ------------------------
+ *
+ * findmyinterest is three calls - register_kprobe, an indirect call, and
+ * unregister_kprobe - and it is not three acts. It is ONE: resolve a name to
+ * an address. The module calls it the way it would call a syscall, and its
+ * caller cares about the address that comes back and nothing else.
+ *
+ * THE INDIRECT CALL IN THE MIDDLE IS NOT LINKED TO THE OTHER TWO, and must
+ * not be. Its target was decided wherever the pointer was stored, not by
+ * either probe call; what relates the three is that they are IN ONE
+ * FUNCTION, which is co-location and not provenance. Forcing a link there
+ * would be asserting a derivation the program does not have.
+ *
+ * SO THE SHAPE IS RECOGNISED, NOT FOLLOWED. A function whose capability
+ * nodes are exactly the probe pair - put one on, take it off - is a symbol
+ * lookup whatever happens between them, because that is the only reason to
+ * do it. The node is emitted at the function's own offset, and callers then
+ * see one act with a word, the same way they would see dup2.
+ *
+ * WHY IT MATTERS BEYOND THE NAME: a caller's `table = findmyinterest()` is
+ * the start of the hook chain, and until the callee had a capability its
+ * result was an anonymous token - a value belonging to no node, which no
+ * link can end at. One node here gives the whole chain somewhere to begin.
+ */
+static void promote_wrappers(struct kof_diag_scan *s,
+			     const struct funcspan *fns, uint32_t n_fn)
+{
+	uint32_t i, n = kof_diag_scan_count(s);
+
+	/*
+	 * ---- THE HOOK-DECLARATION BLOCK IS FOUND FIRST, AND AS A BLOCK ----
+	 *
+	 * Since 5.7 the kernel stopped exporting kallsyms_lookup_name, and the
+	 * way round it is to register a kprobe on the name, read kp.addr and
+	 * unregister. That PAIR is the lookup. It is one act, and until it is
+	 * recognised as one the analysis is looking at two unrelated calls
+	 * with an address appearing between them for no reason - the read of
+	 * kp.addr links to NEITHER of them, because nothing in the kernel's
+	 * symbol design connects them by a value.
+	 *
+	 * IT IS A BLOCK, NOT A FUNCTION. This used to require that the
+	 * function contain the pair AND NOTHING ELSE, which only catches an
+	 * author who wrote a tidy little wrapper. What identifies it is the
+	 * ORDER - a register, then an unregister, with no other capability
+	 * between them - and that holds wherever the two sit.
+	 *
+	 * AND IT IS DONE BEFORE ANY SPAN RUNS, so that when a caller is
+	 * walked, the call into this function is already known to hand back a
+	 * resolved symbol rather than being one more opaque call.
+	 */
+	for (i = 0; i < n; i++) {
+		const struct kof_diag_hit *p = kof_diag_scan_at(s, i);
+		uint32_t t, j;
+		uint64_t reg_at, unreg_at = 0;
+		int paired = 0;
+
+		if (!p || p->cap != KOF_CAP_KPROBE_REG)
+			continue;
+		reg_at = p->at;
+
+		/*
+		 * THE NEAREST UNREGISTER AFTER IT, and WHATEVER LIES BETWEEN.
+		 *
+		 * Requiring nothing in between was wrong and it was wrong in
+		 * the obvious way: the thing between them is the POINT - the
+		 * read of kp.addr, which is the resolved symbol the whole
+		 * manoeuvre exists to get. Author code puts more there too.
+		 * What identifies the block is the pair, not the gap being
+		 * empty.
+		 */
+		for (t = 0; t < n; t++) {
+			const struct kof_diag_hit *q = kof_diag_scan_at(s, t);
+
+			if (!q || q->at <= reg_at ||
+			    q->cap != KOF_CAP_KPROBE_UNREG)
+				continue;
+			if (!unreg_at || q->at < unreg_at) {
+				unreg_at = q->at;
+				paired = 1;
+			}
+		}
+		if (!paired)
+			continue;
+
+		/*
+		 * THE NODE GOES AT THE FUNCTION THAT HOLDS THE BLOCK, because
+		 * that is the address a caller's `call` names - which is what
+		 * lets the caller be told it is getting a resolved symbol.
+		 * With no function covering it, the block stands where the
+		 * register does.
+		 */
+		for (j = 0; j < n_fn; j++)
+			if (reg_at >= fns[j].va &&
+			    unreg_at < fns[j].va + fns[j].size)
+				break;
+		kof_diag_hit_add(s, j < n_fn ? fns[j].va : reg_at,
+				 KOF_CAP_KSYM_LOOKUP, 0);
+	}
+}
+
 static void run_rel_gaps(struct kof_diag_scan *s,
 			 const struct kof_obj_ctx *ctx,
 			 const struct kof_elf_info *ei,
@@ -823,6 +1038,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 	static struct skipsite skips[DIAG_REL_SKIPS];
 	static struct funcspan fns[DIAG_REL_FUNCS];
 	static uint16_t ret[DIAG_REL_FUNCS];
+	static uint8_t dirty[DIAG_REL_FUNCS], next_dirty[DIAG_REL_FUNCS];
 	struct skipgather sg;
 	struct funcgather fg;
 	kof_buf f;
@@ -843,8 +1059,12 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 	kof_elf_funcs(f, ei, gather_fn, &fg);
 	if (!sg.n || !fg.n)
 		return;
+	promote_wrappers(s, fns, fg.n);
 	for (j = 0; j < fg.n; j++)
 		ret[j] = 0xffffu;
+
+	for (j = 0; j < fg.n; j++)
+		dirty[j] = 1;           /* the first pass walks everything */
 
 	for (pass = 0; pass < DIAG_REL_PASSES; pass++) {
 	int changed = 0;
@@ -869,9 +1089,37 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 		 * known without running anything. That is where list_del and
 		 * list_add belong, not here.
 		 */
+		/*
+		 * ---- A LATER PASS WALKS ONLY WHAT COULD HAVE MOVED -------
+		 *
+		 * The passes exist so that a caller learns what an internal
+		 * call returns, which is only known once the callee has been
+		 * walked. If no callee of this function reported anything new,
+		 * walking it again cannot produce anything new either.
+		 *
+		 * MEASURED: a second pass over EVERYTHING produced exactly the
+		 * same 19327 nodes and 488 chains on 900 clean kernel modules
+		 * and on both Diamorphine builds - it was a confirmation pass
+		 * that cost a complete re-run.
+		 */
+		if (!dirty[j])
+			continue;
+
 		struct seenval seen[DIAG_REL_SEEN];
 		struct kof_emu *em;
 		uint32_t n_seen = 0, step, anon = DIAG_TOK_SPAN - 1u;
+		uint64_t n_fd = 0;
+		/* Which sites this span has already been seated at, so one
+		 * pass cannot circle. */
+		static uint8_t vis[DIAG_REL_SKIPS];
+		uint32_t n_seat = 0, gap_steps = 0;
+		uint64_t run_lo, run_hi;
+		uint64_t last_in;
+		/* Which backward branches this span has arrived at, and how
+		 * often. Per span: a loop in one function says nothing about
+		 * a loop in the next. */
+		struct { uint64_t at; uint32_t n; } latch[32];
+		uint32_t n_latch = 0, n_fault = 0;
 		uint64_t lo = fns[j].va, hi;
 
 		if (lo >= size)
@@ -941,18 +1189,84 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			}
 		}
 
+		memset(vis, 0, sizeof vis);
+
+		/*
+		 * ---- CAN THIS FUNCTION CARRY A LINK AT ALL -----------------
+		 *
+		 * Answered before a single instruction is stepped, from the
+		 * site list the relocation table already gave us. It is a
+		 * precondition, not a budget: if it holds, the WHOLE function
+		 * is walked.
+		 *
+		 *   a site that HANDS SOMETHING ON, or
+		 *   two sites that TAKE AN ARGUMENT - a shared relation has no
+		 *   producer at all; both halves of a kprobe pair are merely
+		 *   handed the same struct.
+		 *
+		 * With neither, nothing in this function can be linked to
+		 * anything: a field access needs a token in a register, and a
+		 * token only exists because some call produced one.
+		 *
+		 * AND THE STRETCH IS NOT CUT SHORT. Trimming it at the last
+		 * CALL site was tried and it deleted evidence - 405 chains on
+		 * 900 clean modules, nearly all of them
+		 * `mem-alloc-heap -> mem-field-write`. A token can be
+		 * dereferenced anywhere after it is produced, field accesses
+		 * are not in the relocation table, and so there is no sound
+		 * place to stop early. Cost belongs to the loop bounds below,
+		 * not to a gate on how much of the function is looked at.
+		 */
+		{
+			uint32_t t, takers = 0;
+			int producer = 0;
+
+			for (t = 0; t < sg.n; t++) {
+				uint64_t a = skips[t].call_at;
+				unsigned k;
+
+				if (a < lo || a >= hi)
+					continue;
+				if (kof_diag_sym_hands_on(skips[t].cap) ||
+				    (skips[t].callee &&
+				     callee_node(s, fns, fg.n,
+						 skips[t].callee) != 0xffffu))
+					producer = 1;
+				for (k = 0; k < 6u; k++)
+					if (kof_diag_role_of_arg(skips[t].cap, k)
+					    != KOF_DIAG_ROLE_NONE) {
+						takers++;
+						break;
+					}
+			}
+			if (!producer && takers < 2u &&
+			    !(hi <= size && has_cr_write(base + lo, hi - lo)))
+				continue;
+			run_lo = lo;
+			run_hi = hi;
+		}
+
 		em = build_rel_image(ctx, ei, base, size);
 		if (!em)
 			return;
-		kof_emu_set_rip(em, DIAG_REL_BASE + lo);
+		kof_emu_set_rip(em, DIAG_REL_BASE + run_lo);
+		last_in = run_lo;
 
 		for (step = 0; step < DIAG_REL_STEPS; step++) {
 			uint64_t rip = kof_emu_get_rip(em) - DIAG_REL_BASE;
 			enum kof_emu_stop st;
-			int skipped = 0;
+			int skipped = 0, ended = 0;
 
-			if (rip < lo || rip >= hi)
-				break;          /* left the function */
+			if (rip < run_lo || rip >= run_hi)
+				goto stalled;   /* left the stretch */
+			/*
+			 * AND A GAP THAT WILL NOT FINISH IS ONE TO STEP
+			 * AROUND - see DIAG_REL_GAP. Spinning here is not a
+			 * finding, and the sites after it are still listed.
+			 */
+			if (gap_steps++ > DIAG_REL_GAP)
+				goto stalled;
+			last_in = rip;
 
 			for (q = 0; q < sg.n; q++) {
 				uint16_t node = 0xffffu;
@@ -960,6 +1274,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 
 				if (skips[q].call_at != rip)
 					continue;
+				vis[q] = 1;
 
 				for (i = 0; i < n; i++) {
 					const struct kof_diag_hit *p =
@@ -985,18 +1300,105 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 
 						if (role == KOF_DIAG_ROLE_NONE)
 							continue;
-						for (t = 0; t < n_seen; t++)
-							if (seen[t].val == v &&
-							    seen[t].node != node)
-								kof_diag_note_in(
+						/*
+						 * EVERY EARLIER HOLDER OF THIS
+						 * VALUE IS A RELATION, and each
+						 * one is said in its own words:
+						 * the node that RETURNED it is
+						 * where it came from, a node
+						 * that was merely handed it
+						 * shares the object. See enum
+						 * kof_diag_kind - collapsing
+						 * the two left one argument
+						 * with two parents under one
+						 * role, and the engine then
+						 * had to choose, which is how
+						 * a receiver came to be
+						 * recorded as a producer.
+						 */
+						for (t = 0; t < n_seen; t++) {
+							const struct kof_diag_hit *o;
+
+							if (seen[t].val != v ||
+							    seen[t].node == node)
+								continue;
+							/*
+							 * A SHARED EDGE IS
+							 * RECORDED ONCE, FROM
+							 * THE LATER SITE TO THE
+							 * EARLIER ONE.
+							 *
+							 * Sharing an object is
+							 * symmetric, but what
+							 * carries the meaning is
+							 * the ORDER - a buffer
+							 * is filled and then
+							 * written back out, and
+							 * that is the hook.
+							 * Recorded both ways it
+							 * is a cycle: each
+							 * kprobe call became the
+							 * other's parent, no
+							 * node was a root, and
+							 * the pair stopped
+							 * appearing as a chain
+							 * at all while both
+							 * links were in the
+							 * data.
+							 *
+							 * Provenance needs no
+							 * such rule: a producer
+							 * is earlier by
+							 * construction.
+							 */
+							o = kof_diag_scan_at(s,
+								seen[t].node);
+							if (!seen[t].produced &&
+							    o && o->at >= h->at)
+								continue;
+							kof_diag_note_in(
 								  h,
 								  seen[t].node,
-								  role);
-						if (worth_remembering(v, size) &&
-						    n_seen < DIAG_REL_SEEN) {
-							seen[n_seen].val = v;
-							seen[n_seen].node = node;
-							n_seen++;
+								  role,
+								  seen[t].produced
+								  ? KOF_DIAG_KIND_PRODUCED
+								  : KOF_DIAG_KIND_SHARED);
+						}
+						/*
+						 * AND THIS NODE NOW HOLDS IT
+						 * TOO. Recorded even where a
+						 * producer entry already
+						 * stands for the value: that
+						 * entry answers where the
+						 * object came from and this
+						 * one answers who has touched
+						 * it, and the next holder
+						 * needs both. A buffer
+						 * kzalloc made, filled by
+						 * copy_from_user and written
+						 * back by copy_to_user is
+						 * three entries and the third
+						 * call links to the other two
+						 * - the ordering IS the hook.
+						 *
+						 * One entry per (value, node),
+						 * so a loop round the same
+						 * call adds nothing.
+						 */
+						if (worth_remembering(v, size)) {
+							uint32_t e;
+
+							for (e = 0; e < n_seen; e++)
+								if (seen[e].val == v &&
+								    seen[e].node == node)
+									break;
+							if (e == n_seen &&
+							    n_seen < DIAG_REL_SEEN) {
+								seen[e].val = v;
+								seen[e].node = node;
+								seen[e].produced = 0;
+								n_seen++;
+							}
 						}
 					}
 				}
@@ -1048,8 +1450,40 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 						if (n_seen < DIAG_REL_SEEN) {
 							seen[n_seen].val = tok;
 							seen[n_seen].node = src;
+							seen[n_seen].produced = 1;
 							n_seen++;
 						}
+					} else if (cap_force_kind(skips[q].cap)
+						   != FORCE_NONE) {
+						/*
+						 * WHAT THIS CALL HANDS BACK IS
+						 * ALREADY WRITTEN DOWN, once,
+						 * in cap_force_kind - and this
+						 * routine used to ignore it and
+						 * give every call the same
+						 * anonymous page. For a call
+						 * whose success is ZERO that
+						 * said the opposite of what was
+						 * meant.
+						 */
+						uint64_t r = 0;
+
+						switch (cap_force_kind(
+								skips[q].cap)) {
+						case FORCE_HANDLE:
+							r = DIAG_EMU_FD0 +
+							    n_fd++;
+							break;
+						case FORCE_COUNT:
+							r = kof_emu_get_reg(em,
+							  kof_diag_sysv_arg[2]);
+							break;
+						default:
+							r = 0;  /* FORCE_ZERO */
+							break;
+						}
+						kof_emu_set_reg(em,
+								KOF_EMU_RAX, r);
 					} else if (anon) {
 						/*
 						 * A CALL WHOSE RESULT NOTHING
@@ -1085,9 +1519,63 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 							KOF_EMU_PAGE);
 					}
 				}
+				/*
+				 * ---- AND A TAIL JUMP IS AN EXIT ----------
+				 *
+				 * The relocation table lists `jmp foo` beside
+				 * `call foo` and nothing in it says which. A
+				 * call's `resume` is where the callee comes
+				 * back to; a JUMP never comes back, so the
+				 * bytes after it are not a continuation of
+				 * anything - they belong to whatever block
+				 * the compiler laid there next.
+				 *
+				 * MEASURED, and it is why Diamorphine's
+				 * hacked_getdents had no link at all. The
+				 * function ends
+				 *
+				 *     mov %rbx,%rax ; add $0x10,%rsp
+				 *     pop %rbx,%rbp,%r12,%r13,%r14,%r15
+				 *     jmp <reloc>            <- the exit
+				 *     cmp %r13,0x12(%rbx)    <- loop body
+				 *     jne  ...
+				 *
+				 * Resuming after the jump walked into the
+				 * loop body with every callee-saved register
+				 * just popped off a stack this run never
+				 * built - so the kernel buffer was 0 - and
+				 * the loop then ran until the step budget
+				 * ended it, 11 bytes short of the
+				 * copy_to_user the span was opened for.
+				 *
+				 * THE LINKS ARE NOTED FIRST, above. A tail
+				 * call IS a call to that import and its
+				 * arguments are set up in the usual way -
+				 * god_mode ends `jmp commit_creds` - so the
+				 * node and its links are real. Only the
+				 * resumption is not.
+				 *
+				 * Asked of the decoder, not of a byte: an
+				 * encoding list is the thing this engine
+				 * does not keep twice.
+				 */
+				if (rip < size) {
+					struct kdis_insn ji;
+					uint32_t jl = kof_decode_x86(base + rip,
+						(uint32_t)(size - rip > 16u
+							   ? 16u : size - rip),
+						rip, 64u, &ji);
+
+					if (jl && ji.op == KDIS_JMP) {
+						ended = 1;
+						break;
+					}
+				}
 				skipped = 1;
 				break;
 			}
+			if (ended)
+				goto stalled;   /* the function returned */
 			if (skipped)
 				continue;
 
@@ -1117,10 +1605,35 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			 */
 			if (rip < size) {
 				struct kdis_insn ci;
-				uint32_t clen = kof_decode_x86(base + rip,
-					(uint32_t)(size - rip > 16u ? 16u
-						   : size - rip),
-					rip, 64u, &ci);
+				/*
+				 * ---- DECODED FROM WHAT ACTUALLY RUNS ------
+				 *
+				 * The file's bytes are NOT what this run
+				 * executes. A relocatable object leaves every
+				 * branch displacement as a hole and
+				 * build_rel_image fills them IN THE
+				 * EMULATOR'S MEMORY, so decoding `base + rip`
+				 * reads zeros where the target is and answers
+				 * "it jumps to the next instruction".
+				 *
+				 * MEASURED on diamondxe, and it defeated two
+				 * repairs before it was found: the filtering
+				 * loop ends `jbe <hole>` and the file says
+				 * that branch stays in the function, while the
+				 * run jumped 0xa8b bytes away into a cold
+				 * block and left the span. Every test below
+				 * that looks at a TARGET was being answered
+				 * from the wrong bytes.
+				 */
+				uint8_t ib[16];
+				uint32_t ilen = (uint32_t)(size - rip > 16u
+							   ? 16u : size - rip);
+				uint32_t clen;
+
+				if (!kof_emu_read(em, DIAG_REL_BASE + rip,
+						  ib, ilen))
+					memcpy(ib, base + rip, ilen);
+				clen = kof_decode_x86(ib, ilen, rip, 64u, &ci);
 
 				/*
 				 * AND OVER AN INDIRECT CALL. `call *(pv_ops+k)`
@@ -1133,12 +1646,423 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 				 * it is a call through memory; no list of
 				 * encodings is involved.
 				 */
-				if (clen && ci.op == KDIS_CALL && ci.n_op &&
-				    ci.o[0].kind != KDIS_O_REL) {
+				/*
+				 * ---- A LOOP IS LET ROUND, NOT RUN OUT -----
+				 *
+				 * THE BUDGET WAS THE WRONG BOUND. A span had
+				 * 4096 instructions and a loop ate all of
+				 * them, so the span died INSIDE the loop and
+				 * everything after it was lost - MEASURED on
+				 * Diamorphine's hacked_getdents, which filters
+				 * a directory listing and then copies it back:
+				 * the run stopped 11 bytes short of that copy,
+				 * and the hiding behaviour read as absent.
+				 *
+				 * WHY THE LOOP DOES NOT END BY ITSELF. It is
+				 * bounded by the byte count the original
+				 * syscall returned, and that call is skipped -
+				 * so the count is a stated value, not a real
+				 * one. No stated value is both a plausible
+				 * pointer and a small number of iterations.
+				 *
+				 * SO BOUND THE ITERATIONS, WHICH IS THE INPUT,
+				 * and let what comes after be whatever it is.
+				 * A loop body is fully covered by its first
+				 * pass - a node is a SITE, and a link already
+				 * refuses a repeat - so a third arrival at the
+				 * same backward branch has nothing left to
+				 * show. Taking the fall-through there is the
+				 * loop's own exit, not a path invented for it.
+				 *
+				 * A FORWARD branch is not touched: it is a
+				 * choice between two paths, not a repetition,
+				 * and forcing one would be inventing a run.
+				 */
+				/*
+				 * ---- AND A CONDITIONAL BRANCH OUT OF THE SPAN --
+				 *
+				 * A span covers ONE function and asks which of its
+				 * sites are linked. An arm that leaves the function
+				 * cannot reach any of them, so following it answers
+				 * nothing and ends the walk; the arm that stays is
+				 * the only one with anything to say.
+				 *
+				 * THIS IS NOT A CLAIM ABOUT WHICH WAY THE PROGRAM
+				 * GOES. The condition is computed from values this
+				 * run STATED - a count from a skipped call, a page
+				 * from an arena - so neither arm was demonstrated
+				 * and choosing the one that can carry evidence
+				 * asserts nothing the other way.
+				 *
+				 * MEASURED on diamondxe: its filtering loop ends
+				 * `jbe <reloc>` into a cold block at 0xd0b, and the
+				 * synthetic comparison took it - the span left the
+				 * function with the copy back still ahead of it.
+				 * diamorphine, built from the same source, keeps
+				 * that block inline and never showed the fault.
+				 */
+				if (clen && (ci.op == KDIS_JCC ||
+					     ci.op == KDIS_LOOP) &&
+				    ci.target != KOF_BROKEN &&
+				    (ci.target < run_lo ||
+				     ci.target >= run_hi)) {
 					kof_emu_set_rip(em, DIAG_REL_BASE +
 							rip + ci.len);
 					continue;
 				}
+				if (clen && (ci.op == KDIS_JCC ||
+					     ci.op == KDIS_LOOP ||
+					     ci.op == KDIS_JMP) &&
+				    ci.target != KOF_BROKEN &&
+				    ci.target < rip) {
+					uint32_t t;
+
+					for (t = 0; t < n_latch; t++)
+						if (latch[t].at == rip)
+							break;
+					if (t == n_latch && n_latch <
+					    (uint32_t)(sizeof latch /
+						       sizeof latch[0])) {
+						latch[t].at = rip;
+						latch[t].n = 0;
+						n_latch++;
+					}
+					/*
+					 * EVERY BACKWARD TRANSFER, not only the
+					 * conditional ones: a loop whose latch
+					 * is `jmp` was not counted at all and
+					 * ran until something else stopped it.
+					 *
+					 * AND IT STALLS RATHER THAN FALLING
+					 * THROUGH. Falling through is a path
+					 * this run did not take; stalling hands
+					 * the span to the seat logic, which
+					 * moves to the next site - the same
+					 * answer the routine gives for every
+					 * other obstacle, and the reason the
+					 * gap budget almost never has to.
+					 */
+					if (t < n_latch &&
+					    ++latch[t].n > DIAG_REL_SPINS)
+						goto stalled;
+				}
+				/*
+				 * ---- A DIRECT CALL THE TABLE DID NOT LIST ----
+				 *
+				 * EVERY call in a span is skipped - that is the
+				 * design above - and the relocation table was only
+				 * how they were FOUND. It does not list them all: a
+				 * call to a static function in the same section is
+				 * resolved by the assembler, so there is no
+				 * relocation and nothing put it in the skip list.
+				 *
+				 * Such a call was therefore EXECUTED, and execution
+				 * leaves the function - which ends the span, because
+				 * a span is one function. MEASURED on diamondxe: its
+				 * filtering loop calls a local helper and the walk
+				 * left at 0xd0b, two sites short of the copy back.
+				 *
+				 * The result is stated the same way as any other
+				 * skipped call - see the note on the arena page.
+				 */
+				if (clen && ci.op == KDIS_CALL && ci.n_op &&
+				    ci.o[0].kind == KDIS_O_REL) {
+					if (anon)
+						kof_emu_set_reg(em, KOF_EMU_RAX,
+							DIAG_TOK_BASE +
+							(uint64_t)(--anon) *
+							KOF_EMU_PAGE);
+					kof_emu_set_rip(em, DIAG_REL_BASE +
+							rip + ci.len);
+					continue;
+				}
+				if (clen && ci.op == KDIS_CALL && ci.n_op &&
+				    ci.o[0].kind != KDIS_O_REL) {
+					/*
+					 * AND IT HANDS SOMETHING BACK. Stepping
+					 * over a call while leaving the result
+					 * register alone states nothing - it
+					 * leaves whatever happened to be there,
+					 * and the program then tests THAT.
+					 *
+					 * MEASURED: Diamorphine's hooked
+					 * getdents calls the original through
+					 * the syscall table, keeps the result
+					 * as a byte count and checks
+					 * `count > 0x7fffffff`. A stale
+					 * register held an address, the check
+					 * failed, and the run took the error
+					 * path - freeing the buffer and
+					 * leaving - so the copy the hook
+					 * exists for was never on the path at
+					 * all.
+					 *
+					 * An arena page is the same answer the
+					 * named skip gives and for the same
+					 * reasons: non-zero, so a failure test
+					 * goes the other way; mapped, so a
+					 * dereference does not fault; below
+					 * 2^31, so it is plausible where the
+					 * program treats it as a size; and
+					 * owned by no node, so it can never be
+					 * mistaken for a link.
+					 */
+					if (anon)
+						kof_emu_set_reg(em, KOF_EMU_RAX,
+							DIAG_TOK_BASE +
+							(uint64_t)(--anon) *
+							KOF_EMU_PAGE);
+					kof_emu_set_rip(em, DIAG_REL_BASE +
+							rip + ci.len);
+					continue;
+				}
+				/*
+				 * ---- A VALUE READ OUT OF AN OBJECT A NODE
+				 * PRODUCED --------------------------------
+				 *
+				 * THE STEP THAT CARRIES THE MEANING, and the
+				 * one the model had no place for. Between
+				 * two calls the program does something to
+				 * the object the first returned, and that
+				 * something is what the pair is FOR:
+				 *
+				 *   kallsyms_lookup_name_ = *(kp + 0x2d)
+				 *       the probe's resolved address, which
+				 *       is why the probe was registered
+				 *   pure_getdents = *(table + 0x270)
+				 *       the syscall entry about to be hooked
+				 *
+				 * A load through a register holding a token
+				 * yields a value that still belongs to that
+				 * node - it came OUT of its object - so the
+				 * destination inherits the token and a later
+				 * call holding it links back.
+				 *
+				 * THE OFFSET IS NOT KEPT YET. 0x2d and 0x270
+				 * are what name WHICH field and WHICH
+				 * syscall, and they belong in the node's
+				 * attribute run, which nothing writes. The
+				 * link is the half that can be had now.
+				 */
+				/*
+				 * EITHER DIRECTION: a field read out of the
+				 * object, or written into it. The write is
+				 * the one that matters most - it is what a
+				 * rootkit does to the listing it intercepted
+				 * - and it is the one a model built around
+				 * calls had no way to see at all.
+				 */
+				if (clen && ci.op == KDIS_MOV && ci.n_op > 1u) {
+					unsigned mi = ci.o[0].kind ==
+						      KDIS_O_MEM ? 0u : 1u;
+
+					/*
+					 * ---- A GLOBAL STRUCT, REACHED WITHOUT
+					 * A BASE REGISTER -------------------
+					 *
+					 * `kp` is a module global, so the read
+					 * of kp.addr is
+					 *
+					 *     mov 0x0(%rip),%rbx
+					 *
+					 * with the displacement filled by a
+					 * relocation. There is no base register
+					 * at all, and the test below wanted one
+					 * - so the one access that CONFIRMS a
+					 * kprobe pair, the resolved symbol
+					 * being collected between the register
+					 * and the unregister, was invisible.
+					 *
+					 * The object's address is known: it is
+					 * what register_kprobe was handed, and
+					 * seen[] is holding it. An absolute
+					 * target that lands inside that object
+					 * is a field of it.
+					 */
+					if (ci.o[mi].kind == KDIS_O_MEM &&
+					    ci.o[mi].reg == KDIS_REG_NONE &&
+					    ci.o[mi].index == KDIS_REG_NONE) {
+						uint64_t tg = rip + ci.len +
+							(uint64_t)ci.o[mi].disp +
+							DIAG_REL_BASE;
+						uint32_t z;
+
+						for (z = 0; z < n_seen; z++)
+							if (tg >= seen[z].val &&
+							    tg - seen[z].val <
+							    DIAG_OBJ_SPAN)
+								break;
+						if (z < n_seen) {
+							struct kof_diag_hit *fh;
+							uint32_t t2, lv =
+							  kof_diag_scan_count(s);
+							int dup2 = 0;
+
+							for (t2 = 0; t2 < lv; t2++) {
+								const struct kof_diag_hit *e =
+								  kof_diag_scan_at(s, t2);
+								/* ONLY ANOTHER FIELD
+								 * NODE COUNTS. A node's
+								 * `at` is a call's RESUME
+								 * address, which is the
+								 * very next instruction -
+								 * and in diamorphine that
+								 * instruction IS the read
+								 * of kp.addr, so the two
+								 * collided and the read
+								 * was dropped. */
+								if (e && e->at == rip &&
+								    (e->cap == KOF_CAP_FIELD_READ ||
+								     e->cap == KOF_CAP_FIELD_WRITE))
+									dup2 = 1;
+							}
+							fh = dup2 ? NULL
+							   : kof_diag_hit_add(s, rip,
+								mi == 0u
+								? KOF_CAP_FIELD_WRITE
+								: KOF_CAP_FIELD_READ, 0);
+							if (fh) {
+								fh->attr = tg -
+								  seen[z].val;
+								kof_diag_note_in(fh,
+								  seen[z].node,
+								  mi == 0u
+								  ? KOF_DIAG_ROLE_BUFFER
+								  : KOF_DIAG_ROLE_SOURCE,
+								  seen[z].produced
+								  ? KOF_DIAG_KIND_PRODUCED
+								  : KOF_DIAG_KIND_SHARED);
+							}
+						}
+					}
+					if (ci.o[mi].kind == KDIS_O_MEM &&
+					    ci.o[mi].reg != KDIS_REG_NONE &&
+					    ci.o[mi].index == KDIS_REG_NONE) {
+						uint64_t b = kof_emu_get_reg(em,
+							ci.o[mi].reg);
+
+						/*
+						 * ---- A FIELD OF AN OBJECT A
+						 * NODE WAS HANDED --------------
+						 *
+						 * A token stands for something a
+						 * call RETURNED. The kprobe
+						 * struct is not that: it is a
+						 * module global, its address is a
+						 * relocation into .bss, and it
+						 * reaches register_kprobe as an
+						 * argument. So the read of
+						 * kp.addr between the register
+						 * and the unregister - which is
+						 * the whole reason the pair
+						 * exists, the resolved symbol
+						 * being collected - matched
+						 * nothing and was invisible.
+						 *
+						 * ANY ADDRESS A NODE HAS BEEN
+						 * SEEN HOLDING counts. That is
+						 * what seen[] already is, and it
+						 * is what confirms the block:
+						 * register and unregister share
+						 * an object, and in between
+						 * something READS a field of it.
+						 */
+						if (b < DIAG_TOK_BASE ||
+						    b >= DIAG_TOK_BASE +
+							(uint64_t)DIAG_TOK_SPAN *
+							KOF_EMU_PAGE) {
+							uint32_t z;
+
+							for (z = 0; z < n_seen; z++)
+								if (seen[z].val == b)
+									break;
+							if (z < n_seen) {
+								struct kof_diag_hit *fh;
+								uint32_t t2,
+								  lv = kof_diag_scan_count(s);
+								int dup2 = 0;
+
+								for (t2 = 0; t2 < lv; t2++) {
+									const struct kof_diag_hit *e =
+									  kof_diag_scan_at(s, t2);
+									if (e && e->at == rip)
+										dup2 = 1;
+								}
+								fh = dup2 ? NULL
+								   : kof_diag_hit_add(s, rip,
+									mi == 0u
+									? KOF_CAP_FIELD_WRITE
+									: KOF_CAP_FIELD_READ,
+									0);
+								if (fh) {
+									fh->attr = (uint64_t)
+									  ci.o[mi].disp;
+									kof_diag_note_in(fh,
+									  seen[z].node,
+									  mi == 0u
+									  ? KOF_DIAG_ROLE_BUFFER
+									  : KOF_DIAG_ROLE_SOURCE,
+									  seen[z].produced
+									  ? KOF_DIAG_KIND_PRODUCED
+									  : KOF_DIAG_KIND_SHARED);
+								}
+							}
+						}
+						if (b >= DIAG_TOK_BASE &&
+						    b < DIAG_TOK_BASE +
+							(uint64_t)DIAG_TOK_SPAN *
+							KOF_EMU_PAGE) {
+							uint64_t page = b -
+							  (b - DIAG_TOK_BASE) %
+							  KOF_EMU_PAGE;
+							uint32_t own =
+							  (uint32_t)((page -
+							   DIAG_TOK_BASE) /
+							   KOF_EMU_PAGE);
+							uint32_t t, live =
+							  kof_diag_scan_count(s);
+							int dup = 0;
+
+							for (t = 0; t < live; t++) {
+								const struct kof_diag_hit *e =
+								  kof_diag_scan_at(s, t);
+								if (e && e->at == rip)
+									dup = 1;
+							}
+							if (!dup) {
+								struct kof_diag_hit *fh =
+								  kof_diag_hit_add(s, rip,
+								    mi == 0u
+								    ? KOF_CAP_FIELD_WRITE
+								    : KOF_CAP_FIELD_READ,
+								    0);
+								if (fh) {
+									fh->attr =
+									  (uint64_t)
+									  ci.o[mi].disp;
+									if (own < live)
+										kof_diag_note_in(fh,
+										  (uint16_t)own,
+										  mi == 0u
+										  ? KOF_DIAG_ROLE_BUFFER
+										  : KOF_DIAG_ROLE_SOURCE,
+										  KOF_DIAG_KIND_PRODUCED);
+								}
+							}
+							/* a load still hands
+							 * the object on */
+							if (mi == 1u &&
+							    ci.o[0].kind ==
+							    KDIS_O_REG) {
+								kof_emu_step(em);
+								kof_emu_set_reg(em,
+								  ci.o[0].reg, page);
+								continue;
+							}
+						}
+					}
+				}
+
 				/*
 				 * ONE OPERAND, NOT TWO. decode_x86 keeps only
 				 * the operands a sweep tracks, and a control
@@ -1209,10 +2133,229 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			 * than a wrong one.
 			 */
 			st = kof_emu_step(em);
-			if (st == KOF_EMU_STOP_FAULT ||
-			    st == KOF_EMU_STOP_DECODE ||
-			    st == KOF_EMU_STOP_UNSUPPORTED)
-				break;
+			/*
+			 * ---- A FAULT ON SYNTHETIC MEMORY IS NOT A FACT -----
+			 *
+			 * The data this run works on was STATED, not read: a
+			 * skipped allocator hands back one arena page, and a
+			 * skipped call hands back a count nobody measured. So a
+			 * loop that walks "the buffer" runs off the end of the
+			 * only page there is and the emulator faults - on an
+			 * address the PROGRAM never computes, because in the
+			 * program the buffer is as long as the count says.
+			 *
+			 * THAT FAULT IS ABOUT THE SYNTHESIS AND THE SPAN MUST NOT
+			 * DIE OF IT. MEASURED on diamondxe: once the copies were
+			 * given their true success value the run took the REAL
+			 * path for the first time, walked the listing, faulted,
+			 * and the copy back - the whole of the hiding - was never
+			 * reached. It had only ever been reached before by taking
+			 * the ERROR path, which is the right answer for the wrong
+			 * reason.
+			 *
+			 * STEPPING OVER IT IS SOUND because what the instruction
+			 * would have loaded is not known either way. The registers
+			 * it writes are CLEARED rather than left: a stale value
+			 * could still equal a token and would then read as a link
+			 * the run never demonstrated. Zero belongs to no node and
+			 * worth_remembering refuses it.
+			 *
+			 * A DECODE OR UNSUPPORTED INSTRUCTION STILL ENDS THE SPAN:
+			 * there the engine does not know what the instruction
+			 * DOES, so everything after it would be a guess.
+			 */
+			if (st == KOF_EMU_STOP_FAULT &&
+			    n_fault < DIAG_REL_FAULTS && rip < size) {
+				struct kdis_insn fi;
+				uint32_t fl = kof_decode_x86(base + rip,
+					(uint32_t)(size - rip > 16u ? 16u
+						   : size - rip),
+					rip, 64u, &fi);
+
+				if (fl) {
+					unsigned z;
+
+					for (z = 0; z < fi.n_op; z++)
+						if (fi.o[z].kind == KDIS_O_REG &&
+						    (fi.o[z].flags & KDIS_OF_WRITE))
+							kof_emu_set_reg(em,
+								fi.o[z].reg, 0);
+					kof_emu_set_rip(em, DIAG_REL_BASE +
+							rip + fl);
+					n_fault++;
+					continue;
+				}
+			}
+			if (st != KOF_EMU_STOP_FAULT &&
+			    st != KOF_EMU_STOP_DECODE &&
+			    st != KOF_EMU_STOP_UNSUPPORTED)
+				continue;
+stalled:
+			/*
+			 * ---- ON TO THE NEXT SITE ---------------------------
+			 *
+			 * The run has stopped being able to walk - it left the
+			 * function, it returned, or it met an instruction this
+			 * build does not carry. None of that is a finding; the
+			 * sites it has not reached yet are still listed in the
+			 * relocation table, and the span's job is to arrive at
+			 * them.
+			 *
+			 * STRICTLY FORWARD, so one pass cannot circle: the next
+			 * seat is the lowest site above the last address the
+			 * run was really at. That is also why no "already
+			 * seated" flag is needed.
+			 */
+			{
+				uint32_t w, bq = sg.n, pv = sg.n;
+				uint64_t seat;
+
+				/*
+				 * THE NEXT SITE IS THE NEXT ONE NOT YET
+				 * LOOKED AT - not the next one by address.
+				 *
+				 * Seating strictly forwards was tried and it
+				 * abandons sites silently: a branch that
+				 * carries the run from 0x2d0 to 0x380 puts
+				 * every site between them permanently behind
+				 * it. MEASURED on diamondxe, whose
+				 * copy_to_user at 0x365 was jumped over and
+				 * then never seated - and a site that is
+				 * never looked at reads exactly like a call
+				 * with no link.
+				 *
+				 * vis[] is what makes this terminate: a site
+				 * is marked when it is REACHED and when it is
+				 * SEATED, so each one is tried at most once
+				 * and the pass is still finite.
+				 */
+				/*
+				 * FORWARD FIRST, STRAGGLERS AFTER.
+				 *
+				 * The next site AHEAD of where the run really
+				 * got to is the one whose arguments the code
+				 * just walked was setting up, so it is tried
+				 * first - taking the lowest unvisited site
+				 * instead put diamorphine's copy_to_user in a
+				 * gap that never loaded its buffer.
+				 *
+				 * ONLY WHEN NOTHING IS AHEAD does the span go
+				 * back for what it jumped over. Seating
+				 * strictly forwards abandons those silently -
+				 * MEASURED on diamondxe, whose copy_to_user at
+				 * 0x365 was branched over and never seated,
+				 * which reads exactly like a call with no
+				 * link.
+				 *
+				 * vis[] is marked both when a site is REACHED
+				 * and when it is SEATED, so each is tried at
+				 * most once and the pass stays finite.
+				 */
+				/*
+				 * ---- THE SEATS ARE THE NODES, NOT THE CALLS
+				 *
+				 * What the span is trying to do is VERIFY A
+				 * NODE: a position that matched the
+				 * vocabulary, whose arguments are the thing a
+				 * link is made of. A call to something the
+				 * dictionary has no word for is not a node,
+				 * cannot carry a link, and is worth stepping
+				 * over when it turns up - never worth moving
+				 * the run to.
+				 *
+				 * THAT WAS THE HOLE. The seat list was every
+				 * call site, so "where to go next" was decided
+				 * by address arithmetic over a list that is
+				 * mostly noise, and the order it produced was
+				 * tuned by hand against one sample at a time -
+				 * each adjustment resolving one Diamorphine
+				 * build and breaking the other. The routine
+				 * did not know which node it still had to
+				 * verify.
+				 */
+				for (w = 0; w < sg.n; w++) {
+					if (vis[w] ||
+					    skips[w].cap == KOF_CAP_NONE ||
+					    skips[w].call_at <= last_in ||
+					    skips[w].call_at < run_lo ||
+					    skips[w].call_at >= run_hi)
+						continue;
+					if (bq == sg.n ||
+					    skips[w].call_at < skips[bq].call_at)
+						bq = w;
+				}
+				if (bq == sg.n)
+					for (w = 0; w < sg.n; w++) {
+						if (vis[w] ||
+						    skips[w].cap ==
+						    KOF_CAP_NONE ||
+						    skips[w].call_at < run_lo ||
+						    skips[w].call_at >= run_hi)
+							continue;
+						if (bq == sg.n ||
+						    skips[w].call_at <
+						    skips[bq].call_at)
+							bq = w;
+					}
+				if (bq == sg.n || n_seat >= DIAG_REL_SEATS)
+					break;
+				/*
+				 * SEATED AT THE START OF THE GAP, NOT AT THE
+				 * CALL.
+				 *
+				 * Landing on the call itself skips the very
+				 * instructions that put its arguments in
+				 * place - MEASURED: diamondxe's copy_to_user
+				 * was reached and its kernel buffer register
+				 * was empty, because `mov %r14,%rsi` is three
+				 * instructions before the call and the seat
+				 * jumped over it.
+				 *
+				 * The stretch between two sites is exactly
+				 * what this routine was built to emulate, and
+				 * the previous site's RESUME is a known
+				 * instruction boundary - it is a return
+				 * address - so no search for one is needed.
+				 */
+				for (w = 0; w < sg.n; w++) {
+					if (skips[w].resume >= run_lo &&
+					    skips[w].resume <=
+					    skips[bq].call_at &&
+					    (pv == sg.n ||
+					     skips[w].resume >
+					     skips[pv].resume))
+						pv = w;
+				}
+				seat = pv == sg.n ? skips[bq].call_at
+						  : skips[pv].resume;
+				/*
+				 * AND THE ARGUMENT REGISTERS ARE CLEARED.
+				 *
+				 * The run did not walk here; it was placed
+				 * here. Whatever a volatile register held
+				 * belongs to the stretch that stalled, and
+				 * keeping it lets a value from one call be
+				 * read as the argument of another - MEASURED:
+				 * diamorphine's list_del was recorded taking
+				 * the struct prepare_creds returned, which
+				 * nothing in the program does.
+				 *
+				 * Only the volatile ones. rbx, rbp and r12-r15
+				 * are where a function keeps what it carries
+				 * across calls - the hooked getdents holds its
+				 * buffer in r14 - and clearing those would
+				 * throw away the links this span exists for.
+				 */
+				for (w = 0; w < 6u; w++)
+					kof_emu_set_reg(em,
+						kof_diag_sysv_arg[w], 0);
+				kof_emu_set_reg(em, KOF_EMU_RAX, 0);
+				vis[bq] = 1;
+				n_seat++;
+				gap_steps = 0;
+				last_in = seat;
+				kof_emu_set_rip(em, DIAG_REL_BASE + seat);
+			}
 		}
 		/*
 		 * AND WHAT THIS FUNCTION HANDS BACK, for whoever calls it:
@@ -1229,13 +2372,33 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 				 (uint64_t)DIAG_TOK_SPAN * KOF_EMU_PAGE)
 				ret[j] = (uint16_t)((rv - DIAG_TOK_BASE) /
 						    KOF_EMU_PAGE);
-			if (ret[j] != was)
+			if (ret[j] != was) {
+				uint32_t w;
+
 				changed = 1;
+				/* whoever calls this function may now see a
+				 * different value come back */
+				for (w = 0; w < sg.n; w++)
+					if (skips[w].callee == fns[j].va) {
+						uint32_t g;
+
+						for (g = 0; g < fg.n; g++)
+							if (skips[w].call_at >=
+							    fns[g].va &&
+							    skips[w].call_at <
+							    fns[g].va +
+							    fns[g].size)
+								next_dirty[g] = 1;
+					}
+			}
 		}
 		kof_emu_free(em);
+
 	}
 	if (!changed)
 		break;
+	memcpy(dirty, next_dirty, sizeof dirty);
+	memset(next_dirty, 0, sizeof next_dirty);
 	}
 }
 
@@ -1423,7 +2586,8 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 				continue;
 			for (i = n_made; i-- > 0; )
 				if (made[i].val == arg[k]) {
-					kof_diag_note_in(h, made[i].node, role);
+					kof_diag_note_in(h, made[i].node, role,
+							 KOF_DIAG_KIND_PRODUCED);
 					break;
 				}
 		}
@@ -1573,7 +2737,8 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 						     KOF_CAP_EXEC_REG, 0);
 				if (h)
 					kof_diag_note_in(h, made[i].node,
-							 KOF_DIAG_ROLE_TARGET);
+							 KOF_DIAG_ROLE_TARGET,
+							 KOF_DIAG_KIND_PRODUCED);
 				break;
 			}
 		}

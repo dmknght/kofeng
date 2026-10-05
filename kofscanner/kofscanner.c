@@ -39,6 +39,7 @@
 #include <signal.h>
 
 #include "../libkofeng/kofeng.h"
+#include "../libkofeng/kofcore/kofdebug.h"
 #include "../libkofeng/kofcore/kofplatform.h"
 /* kof_hash_bytes - the engine's one FNV, see kofcore.h. */
 #include "../libkofeng/kofcore/kofcore.h"
@@ -2000,7 +2001,9 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	KOF_TIME_BEGIN(KOF_T_DB_LOAD);
 	eng = keng_open(db);
+	KOF_TIME_END(KOF_T_DB_LOAD);
 	if (!eng) {
 		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
 		return 2;
@@ -2644,6 +2647,14 @@ int main(int argc, char **argv)
 	 * A detection outranks an error: if something was found, that is the answer,
 	 * whatever else was skipped alongside it.
 	 */
+	/*
+	 * AND WHERE THE TIME WENT, in a debug build only - printed before the
+	 * exit code is decided, because every one of those paths leaves main.
+	 * The tool asks for it; the engine never decides to print, see
+	 */
+	fflush(stdout);
+	KOF_TIME_REPORT();
+
 	if (inf_f || sus_f)
 		return 1;
 	/* "Could not finish" belongs with "could not look", not with "found

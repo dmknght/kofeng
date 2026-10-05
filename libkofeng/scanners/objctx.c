@@ -4113,7 +4113,9 @@ static uint32_t c_emu_resume(const struct kof_obj_ctx *ctx)
 		kof_emu_snap_written(e);
 		kof_emu_set_max_insn(e, to < sc->emu_full ? to : sc->emu_full);
 	}
+	KOF_TIME_BEGIN(KOF_T_EMU);
 	st = kof_emu_run(e);
+	KOF_TIME_END(KOF_T_EMU);
 	if (st == KOF_EMU_STOP_BUDGET && sc->emu_slice &&
 	    kof_emu_insn_count(e) < sc->emu_full)
 		st = KOF_EMU_STOP_INSN;
@@ -5381,6 +5383,21 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 
 	if (sc->diag_ready)
 		return;
+	/*
+	 * NOBODY ASKED, SO NOBODY PAYS - see KOF_ENG_USE_PATHOGEN. The sweep
+	 * is proportional to the object and this is the one place that can
+	 * decline it; a rule that recognised something turns it on for the
+	 * object it fired on, and a tool reporting rather than scanning turns
+	 * it on through kof_scan_diag_force.
+	 *
+	 * The latch is still taken: asked and declined is answered once, not
+	 * reconsidered by every ask that follows.
+	 */
+	if (!sc->diag_ask) {
+		sc->diag_ready = 1;
+		memset(sc->diag_hit, 0, sizeof sc->diag_hit);
+		return;
+	}
 	sc->diag_ready = 1;
 	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
 	if (!sc->eng || !sc->eng->n_diag)
@@ -5388,12 +5405,39 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	b = mc(ctx)->data;
 	if (!b.p || !b.n)
 		return;
-	ds = kof_diag_scan(ctx, b.p, b.n);
+	/*
+	 * ---- ONLY THE ROUTES THE LOADED DIAGNOSES ASK FOR ----------------
+	 *
+	 * KOF_DIAG_VIA was being parsed, stored and never read: every scan ran
+	 * every route whatever the database wanted. A diagnose about raw
+	 * shellcode has no imports to read and one about LoadLibrary has no
+	 * syscall to find, so the other route is work with nowhere to put its
+	 * answer.
+	 *
+	 * THE UNION, because the database decides together. One diagnose
+	 * asking for the symbol route is enough reason to run it; no diagnose
+	 * asking is the only reason not to.
+	 */
+	{
+		unsigned run = 0;
+
+		for (i = 0; i < sc->eng->n_diag; i++) {
+			if (sc->eng->diag[i].via & KOF_DIAG_VIA_SYSCALL)
+				run |= KOF_DIAG_RUN_SYSCALL;
+			if (sc->eng->diag[i].via & KOF_DIAG_VIA_SYMBOL)
+				run |= KOF_DIAG_RUN_SYMBOL;
+		}
+		if (!run)
+			return;
+		ds = kof_diag_scan_with(ctx, b.p, b.n, run);
+	}
 	if (!ds)
 		return;
+	KOF_TIME_BEGIN(KOF_T_DIAG_MATCH);
 	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++)
 		if (kof_diag_match(ds, &sc->eng->diag[i], NULL, NULL))
 			sc->diag_hit[i >> 3] |= (uint8_t)(1u << (i & 7u));
+	KOF_TIME_END(KOF_T_DIAG_MATCH);
 	kof_diag_scan_free(ds);
 }
 
@@ -5406,8 +5450,12 @@ void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (sc)
-		diag_ready(sc, ctx);
+	if (!sc)
+		return;
+	/* The caller IS the asker here - see KOF_ENG_USE_PATHOGEN. Setting it
+	 * rather than bypassing the test keeps one gate on this work. */
+	sc->diag_ask = 1;
+	diag_ready(sc, ctx);
 }
 
 static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)

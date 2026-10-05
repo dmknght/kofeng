@@ -130,6 +130,24 @@ enum kof_diag_role {
 #define KOF_DIAG_B_TOUCH (1u << 0)
 
 /*
+ * WHICH KIND OF EDGE THE DIAGNOSE WILL ACCEPT - see enum kof_diag_kind.
+ *
+ * NEITHER BIT SET MEANS EITHER, and that is the default on purpose: most
+ * relations are provenance, a diagnose that does not care should not have to
+ * say so, and every pack built before these bits existed carries zero here
+ * and goes on meaning what it meant.
+ *
+ * SAYING IT MATTERS WHERE THE ORDER IS THE BEHAVIOUR. A module that fills a
+ * buffer from userspace and writes one back has two edges to the allocation
+ * and both are provenance; what makes it a hooked syscall rather than an
+ * ioctl handler is that the second copy holds the SAME object the first one
+ * filled. That is the shared edge, and a diagnose that cannot demand it
+ * cannot tell the two apart.
+ */
+#define KOF_DIAG_B_PRODUCED (1u << 1)
+#define KOF_DIAG_B_SHARED   (1u << 2)
+
+/*
  * ONE NODE. Eight bytes and then its attributes.
  *
  * `cap` IS A NUCLEO GROUP ID AND NEVER A SYSCALL NUMBER OR A NAME. That is
@@ -244,7 +262,17 @@ enum kof_diag_link {
 #define KOF_DIAG_NAME(id)
 #define KOF_DIAG_VIA(mask)
 #define KOF_DIAG_ANCHOR(label, cap, flags)
-#define KOF_DIAG_FROM(label, parent, cap, role)
+/*
+ * KOF_DIAG_FROM takes an OPTIONAL FIFTH ARGUMENT, a kind:
+ *
+ *     KOF_DIAG_FROM(t, f, KOF_CAP_COPY_TO_USER, KOF_DIAG_ROLE_SOURCE,
+ *                   KOF_DIAG_B_SHARED);
+ *
+ * Left out, the edge may be either kind - which is what every diagnose
+ * written before this meant and still means. The macro expands to nothing,
+ * so both arities are legal C and ksigbuilder reads whichever is written.
+ */
+#define KOF_DIAG_FROM(...)
 #define KOF_DIAG_TOUCH(label)
 
 #endif /* KOFMOD_KOFDIAG_H */
