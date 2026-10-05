@@ -42,6 +42,7 @@
  * note at the top of kofmod/heur.h. */
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
+#include "../detectors/pathogen/kofdiag.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include "../analyzers/parsers/binaries/disasm/xref.h"
@@ -133,6 +134,12 @@ void kof_scan_free(struct kof_scanner *sc)
 		return;
 	kof_match_state_free(&sc->m);
 	kof_match_state_free(&sc->msym);
+	/* The last object's graph, which the per-object reset never reached
+	 * because there was no next object - see diag_graph. */
+	if (sc->diag_graph) {
+		kof_diag_scan_free(sc->diag_graph);
+		sc->diag_graph = NULL;
+	}
 	free(sc->live);
 	free(sc->found);
 	free(sc->mask_ok);
@@ -4190,6 +4197,13 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 */
 	sc->diag_ready = 0;
 	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
+	/* and the graph of the object that has just finished - see
+	 * diag_graph. Held until here so anything reporting on that object
+	 * could still read it. */
+	if (sc->diag_graph) {
+		kof_diag_scan_free(sc->diag_graph);
+		sc->diag_graph = NULL;
+	}
 
 	/*
 	 * THE CHILD'S OWN DECLARATION FIRST, then the caller's.

@@ -542,8 +542,8 @@ static void scenarios_are_separable(void)
 
 	all  = kof_diag_scan(&ctx, x64, sizeof x64);
 	one  = kof_diag_scan_with(&ctx, x64, sizeof x64,
-				  KOF_DIAG_RUN_SYSCALL);
-	none = kof_diag_scan_with(&ctx, x64, sizeof x64, 0u);
+				  KOF_DIAG_RUN_SYSCALL, NULL, 0u);
+	none = kof_diag_scan_with(&ctx, x64, sizeof x64, 0u, NULL, 0u);
 
 	CK(all != NULL);
 	CK(one != NULL);

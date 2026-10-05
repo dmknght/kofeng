@@ -27,6 +27,10 @@ struct kof_diag_scan {
 	/* Which analysis routines actually ran - see KOF_DIAG_RUN_* and the
 	 * scenario table. Asked for and not written counts as not run. */
 	unsigned             ran;
+	/* Which capabilities a node may carry - see kof_diag_scan_with.
+	 * NULL or empty means every one. */
+	const uint16_t      *want;
+	uint32_t             n_want;
 };
 
 /*

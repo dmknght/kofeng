@@ -181,6 +181,53 @@ static int hit_room(struct kof_diag_scan *s)
 	return 1;
 }
 
+/*
+ * IS THIS A CAPABILITY ANYBODY ASKED FOR - see kof_diag_scan_with.
+ *
+ * ASKED AFTER THE SWEEP AND NOT DURING IT. A node is created with what the
+ * sweep knows at that instruction and REFINED later: the syscall route adds
+ * it as KOF_CAP_NONE before the number is resolved, and an mmap is ALLOC
+ * until its third argument is read. Judging it at creation refuses nodes
+ * before the word they were going to carry exists - and worse, a routine
+ * reading the NULL as "the scan is full" stopped sweeping at the first
+ * refusal and lost everything after it. Measured: the stager fixture lost
+ * every node past its first socket call.
+ *
+ * A diagnose naming a GENERIC word accepts the specific ones under it: one
+ * asking for mem-read is answered by net-read, and refusing to record the
+ * specific one because the generic was declared would break exactly the
+ * rules that were written to cover both.
+ */
+static int cap_wanted(const struct kof_diag_scan *s, uint16_t cap)
+{
+	uint16_t gen;
+	uint32_t i;
+
+	if (!s->want || !s->n_want)
+		return 1;
+	gen = kof_flow_cap_generic(cap);
+	for (i = 0; i < s->n_want; i++) {
+		if (s->want[i] == cap)
+			return 1;
+		/* the rule named the generic word, this node is a specific
+		 * one under it: mem-read answered by net-read */
+		if (gen != KOF_CAP_NONE && s->want[i] == gen)
+			return 1;
+		/*
+		 * AND THE OTHER DIRECTION, which is not symmetry for its own
+		 * sake: a node is created with what the sweep knows at the
+		 * call and REFINED afterwards - an mmap is KOF_CAP_ALLOC
+		 * until its third argument is read and it becomes
+		 * ALLOC_EXEC. Judging the cap at creation would refuse the
+		 * node before the word it was going to carry existed.
+		 * Measured: rwx_exec stopped matching its own fixture.
+		 */
+		if (kof_flow_cap_generic(s->want[i]) == cap)
+			return 1;
+	}
+	return 0;
+}
+
 struct kof_diag_hit *kof_diag_hit_add(struct kof_diag_scan *s, uint64_t at,
 				    uint16_t cap, uint16_t flags)
 {
@@ -867,9 +914,71 @@ static const struct diag_scenario diag_scenarios[] = {
 	  kof_diag_run_emulate }
 };
 
+/*
+ * ---- DROP THE NODES NOBODY ASKED ABOUT ----------------------------------
+ *
+ * Run once, after every routine has finished and every cap is final.
+ *
+ * WHAT IT IS FOR, said plainly, because it is NOT what it first looks like:
+ * it does not make the sweep cheaper. The sweep has to decode an instruction
+ * to learn what it is, so the work is done before the word exists to judge.
+ * The cost of analysing an object nobody asked about is removed by not
+ * asking - KOF_ENG_USE_PATHOGEN - and that was measured at 419 ms over 287 MB
+ * of ordinary binaries.
+ *
+ * THIS KEEPS THE GRAPH SMALL. The graph outlives the sweep and is what the
+ * verdict layer reads, so a node no rule can name is a node carried for the
+ * life of the object for nothing.
+ *
+ * A LINK TO A DROPPED NODE GOES WITH IT, and that loses no statement: the
+ * only thing that could have read it is a diagnose naming that capability,
+ * and none does. Links to the region sentinels are kept - they name no node.
+ */
+static void prune_unwanted(struct kof_diag_scan *s)
+{
+	static uint16_t map[DIAG_MAX_NODE];
+	uint32_t i, n = 0;
+
+	if (!s->want || !s->n_want || s->n_hit > DIAG_MAX_NODE)
+		return;
+	for (i = 0; i < s->n_hit; i++) {
+		if (!cap_wanted(s, s->hit[i].cap)) {
+			map[i] = 0xffffu;
+			continue;
+		}
+		map[i] = (uint16_t)n;
+		if (n != i)
+			s->hit[n] = s->hit[i];
+		n++;
+	}
+	if (n == s->n_hit)
+		return;
+	s->n_hit = n;
+	for (i = 0; i < n; i++) {
+		struct kof_diag_hit *h = &s->hit[i];
+		uint8_t k, m = 0;
+
+		for (k = 0; k < h->n_in; k++) {
+			uint16_t f = h->in[k].from;
+
+			if (f < KOF_DIAG_FROM_STACK) {
+				if (f >= DIAG_MAX_NODE ||
+				    map[f] == 0xffffu)
+					continue;   /* its parent is gone */
+				h->in[k].from = map[f];
+			}
+			if (m != k)
+				h->in[m] = h->in[k];
+			m++;
+		}
+		h->n_in = m;
+	}
+}
+
 struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 					 const uint8_t *base, uint64_t size,
-					 unsigned run)
+					 unsigned run, const uint16_t *want,
+					 uint32_t n_want)
 {
 	struct kof_diag_scan *s;
 	unsigned i;
@@ -881,6 +990,8 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 	s = calloc(1, sizeof *s);
 	if (!s)
 		return NULL;
+	s->want = want;
+	s->n_want = n_want;
 	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
 		const struct diag_scenario *d = &diag_scenarios[i];
 
@@ -893,13 +1004,15 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 		if (s->full)
 			break;
 	}
+	prune_unwanted(s);
 	return s;
 }
 
 struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 				    const uint8_t *base, uint64_t size)
 {
-	return kof_diag_scan_with(ctx, base, size, KOF_DIAG_RUN_DEFAULT);
+	return kof_diag_scan_with(ctx, base, size, KOF_DIAG_RUN_DEFAULT,
+				  NULL, 0u);
 }
 
 unsigned kof_diag_scan_ran(const struct kof_diag_scan *s)

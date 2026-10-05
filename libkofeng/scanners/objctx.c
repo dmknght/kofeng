@@ -5390,14 +5390,18 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	 * object it fired on, and a tool reporting rather than scanning turns
 	 * it on through kof_scan_diag_force.
 	 *
-	 * The latch is still taken: asked and declined is answered once, not
-	 * reconsidered by every ask that follows.
+	 * THE LATCH IS NOT TAKEN ON A REFUSAL. It marks work that was DONE,
+	 * and taking it here would mean the first question asked before
+	 * anything asked for the analysis settles the object for good - a
+	 * tool that then turns the analysis on through want_diag is refused
+	 * by a latch recording that nobody had asked yet. Measured: the
+	 * database test lost rwx_exec exactly that way.
+	 *
+	 * Re-deciding costs one test of a flag, which is less than the memset
+	 * the refusal would otherwise do.
 	 */
-	if (!sc->diag_ask) {
-		sc->diag_ready = 1;
-		memset(sc->diag_hit, 0, sizeof sc->diag_hit);
+	if (!sc->diag_ask)
 		return;
-	}
 	sc->diag_ready = 1;
 	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
 	if (!sc->eng || !sc->eng->n_diag)
@@ -5429,7 +5433,47 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		}
 		if (!run)
 			return;
-		ds = kof_diag_scan_with(ctx, b.p, b.n, run);
+		/*
+		 * ---- AND ONLY THE CAPABILITIES SOMETHING ASKED FOR -------
+		 *
+		 * Derived from the diagnoses, never declared beside them: the
+		 * caps are already in the node records, and a second list is
+		 * one that can disagree with the trees it describes.
+		 *
+		 * IF IT DOES NOT FIT, RECORD EVERYTHING. An overflowing set
+		 * must degrade towards more evidence and not less - the cost
+		 * of a full sweep is a timing, the cost of a missing node is
+		 * a wrong answer.
+		 */
+		{
+			static uint16_t want[256];
+			uint32_t n_want = 0, k;
+			int full = 0;
+
+			for (i = 0; i < sc->eng->n_diag && !full; i++) {
+				const struct kof_diag *d = &sc->eng->diag[i];
+				uint8_t j;
+
+				for (j = 0; j < d->n_node; j++) {
+					uint16_t c = d->node[j].cap;
+
+					for (k = 0; k < n_want; k++)
+						if (want[k] == c)
+							break;
+					if (k < n_want)
+						continue;
+					if (n_want == sizeof want /
+							sizeof want[0]) {
+						full = 1;
+						break;
+					}
+					want[n_want++] = c;
+				}
+			}
+			ds = kof_diag_scan_with(ctx, b.p, b.n, run,
+						full ? NULL : want,
+						full ? 0u : n_want);
+		}
 	}
 	if (!ds)
 		return;
@@ -5438,7 +5482,12 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		if (kof_diag_match(ds, &sc->eng->diag[i], NULL, NULL))
 			sc->diag_hit[i >> 3] |= (uint8_t)(1u << (i & 7u));
 	KOF_TIME_END(KOF_T_DIAG_MATCH);
-	kof_diag_scan_free(ds);
+	/*
+	 * AND THE GRAPH STAYS - see kof_scanner.diag_graph. It is what the
+	 * verdict layer reads; freeing it here would make every reader pay
+	 * for the analysis again.
+	 */
+	sc->diag_graph = ds;
 }
 
 /*

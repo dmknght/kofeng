@@ -125,6 +125,24 @@ struct kof_scanner {
 	uint8_t  diag_hit[32];          /* one bit per diagnose id          */
 	/* see kof_scan_option.want_diag */
 	int      diag_ready;
+	/*
+	 * THE GRAPH ITSELF, kept for as long as the object is.
+	 *
+	 * A diagnose is a definition of WHAT TO LOOK FOR; what the analysis
+	 * produces is a graph of nodes and the relations between them, and
+	 * that graph - not a yes or no - is what a verdict matches on. Freed
+	 * the moment matching finished, every later reader would have to ask
+	 * for the whole analysis again.
+	 *
+	 * It is pruned to the capabilities some loaded diagnose named before
+	 * it gets here, so what is held is bounded by the DATABASE and not by
+	 * the object: measured, a stager's six nodes become three.
+	 *
+	 * Per object, and released with the other per-object state - a graph
+	 * that outlived its object would answer the next one's questions
+	 * about the wrong bytes.
+	 */
+	struct kof_diag_scan *diag_graph;
 
 	/*
 	 * THREE FIELDS STOOD HERE and all three went with the chain: the

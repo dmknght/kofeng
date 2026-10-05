@@ -167,7 +167,7 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 			 * from a run would be a different question counted
 			 * in the same total. */
 			return kof_diag_scan_with(ctx, b, n,
-						  KOF_DIAG_RUN_SYSCALL);
+						  KOF_DIAG_RUN_SYSCALL, NULL, 0u);
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;

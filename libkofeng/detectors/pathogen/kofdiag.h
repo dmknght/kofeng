@@ -237,9 +237,30 @@ struct kof_diag_scan;
  */
 struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 				    const uint8_t *base, uint64_t size);
+/*
+ * ---- AND WHICH CAPABILITIES ARE WORTH RECORDING -------------------------
+ *
+ * `want` is the set of capabilities some loaded diagnose actually named,
+ * derived from the diagnoses themselves - not declared a second time, which
+ * is a list that can disagree with the trees it describes.
+ *
+ * A node for a capability nobody asked about cannot end a link, because the
+ * only thing that could consume it is a diagnose and none mentions it. It is
+ * not an intermediate the chain passes THROUGH either: the span runner steps
+ * over calls it has no word for and resolves links by the value, not by the
+ * call. So declining to record it loses no edge - which is what makes this a
+ * precondition and not a cap that deletes evidence.
+ *
+ * MEASURED, and the reason it exists: 1056 ordinary binaries, 287 MB, cost
+ * 503 us per object with everything recorded. A stager costs 7.
+ *
+ * n_want == 0 means RECORD EVERYTHING. That is what a survey tool wants, and
+ * what the engine does when the database asks for nothing in particular.
+ */
 struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 					 const uint8_t *base, uint64_t size,
-					 unsigned run);
+					 unsigned run, const uint16_t *want,
+					 uint32_t n_want);
 
 /* Which routines actually ran on this object - a caller asking "is this
  * capability absent" must know whether the routine that would have found it
