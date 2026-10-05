@@ -163,7 +163,6 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->bz);
 	free(sc->lzx);
 	kof_plague_ctx_done(&sc->plague);
-	free(sc->ovl);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
 	free(sc->sym);
@@ -4165,6 +4164,24 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	kof_xref_free(sc->use);
 	sc->use = NULL;
 	sc->use_done = 0;
+	/*
+	 * AND THE DIAGNOSES, which are a fact about THIS object's code.
+	 *
+	 * `diag_ready` is a latch: it says the walk has run, so a second rule
+	 * asking the same question does not pay for it twice. Not cleared
+	 * here, the latch survives into the next object and every object after
+	 * the first reports the FIRST one's diagnoses - MEASURED on
+	 * /mnt/games/kofscratch/msf, where a zip container, a PE header region
+	 * and a PE data region all came back carrying rwx_exec because an ELF
+	 * stager earlier in the walk did.
+	 *
+	 * The bitmap is cleared where it is filled, which is correct but only
+	 * runs when the walk runs - and the whole point of the latch is that
+	 * it stops the walk running. The reset belongs with the other
+	 * per-object state, here, for the same reason they are all here.
+	 */
+	sc->diag_ready = 0;
+	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
 
 	/*
 	 * THE CHILD'S OWN DECLARATION FIRST, then the caller's.
@@ -4266,7 +4283,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * rule would have measured the wrong file. Built on the first ask - see
 	 * ovl_of - so this costs a store.
 	 */
-	sc->ovl_ready = 0;
 	sc->cure_have = 0;
 	sc->cure_at = 0;
 	sc->n_cure_fix = 0;
@@ -4604,6 +4620,32 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	if (!sc->n_cur_rgn)
 		heur_object(sc, &ctx, opt, pdepth,
 			    out->broken == KOF_BROKEN_DAMAGED, out);
+
+	/*
+	 * AND WHAT THIS OBJECT'S CODE DOES, out to the caller.
+	 *
+	 * ONLY WHAT WAS ALREADY WORKED OUT. The walk behind this is demand
+	 * driven - a rule naming a diagnose pays for it and nothing else
+	 * does - so publishing here costs a copy of a bitmap and never a
+	 * decode. An object no rule asked about reports none, which is not
+	 * the same as carrying none and is why `diag_ready` is read rather
+	 * than forced.
+	 *
+	 * HERE AND NOT IN THE TOOL, because a tool that worked this out for
+	 * itself would be the viewer's own sweep again - one question with
+	 * two answers, and the second one wrong on every architecture the
+	 * copy had not learned.
+	 */
+	if (opt && opt->want_diag)
+		kof_scan_diag_force(&ctx);
+	if (sc->diag_ready && sc->eng && out) {
+		uint32_t q;
+
+		for (q = 0; q < sc->eng->n_diag &&
+			    out->n_diag < KOF_MAX_DIAG_HIT; q++)
+			if (sc->diag_hit[q >> 3] & (1u << (q & 7u)))
+				out->diag[out->n_diag++] = (uint16_t)(q + 1u);
+	}
 }
 
 /*

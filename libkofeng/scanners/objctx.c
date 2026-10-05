@@ -65,6 +65,7 @@
 #include <kofmod/sevenzip.h>
 
 #include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pathogen/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -5108,20 +5109,6 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
  * apart and must not try.
  */
 
-/*
- * THE OBJECT'S CALL CHAINS, swept on the first ask.
- *
- * WHY SEVERAL AND NOT ONE. A file is a set of regions and a chain belongs to
- * one of them; a loader inside a large trojan is one chain among many, and a
- * measure taken over the whole file would drown it. So the sweep keeps the
- * WORTHIEST few - kof_diag_worth is the same gate the aligner applies - and a
- * reference is compared against each, best answer winning.
- *
- * EIGHT, because the alignment is run once per chain per asking rule and the
- * table is nodes by nodes: eight chains of at most twenty-four steps is a few
- * thousand cells, which is affordable per object and would not be per region.
- */
-
 /* Remember what a similarity measure answered, for the name - see
  * kof_scanner.ovl_asked. The highest of them, because a rule may ask twice
  * and the reader wants the measurement the verdict could have rested on. */
@@ -5373,6 +5360,73 @@ static uint32_t c_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
 			    const uint8_t *bytes, uint32_t n);
 static int c_opened_already(const struct kof_obj_ctx *ctx);
 
+/*
+ * WHICH DIAGNOSES THIS OBJECT CARRIES - read once, on the first ask.
+ *
+ * The walk over the code regions is the expensive half and it happens
+ * here, behind the same demand gate the overlord descriptor and the
+ * multi-pattern sweep sit behind: an object whose verdict comes from a
+ * rule naming no diagnose does not pay for it.
+ *
+ * A DATABASE WITH NO DIAGNOSES COSTS NOTHING, which is the state this
+ * ships in - the flag is set, the walk is skipped, and every ask answers
+ * no. That is also the honest answer for an architecture the value model
+ * does not have.
+ */
+static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
+{
+	struct kof_diag_scan *ds;
+	kof_buf b;
+	uint32_t i;
+
+	if (sc->diag_ready)
+		return;
+	sc->diag_ready = 1;
+	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
+	if (!sc->eng || !sc->eng->n_diag)
+		return;
+	b = mc(ctx)->data;
+	if (!b.p || !b.n)
+		return;
+	ds = kof_diag_scan(ctx, b.p, b.n);
+	if (!ds)
+		return;
+	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++)
+		if (kof_diag_match(ds, &sc->eng->diag[i], NULL, NULL))
+			sc->diag_hit[i >> 3] |= (uint8_t)(1u << (i & 7u));
+	kof_diag_scan_free(ds);
+}
+
+/*
+ * ASK FOR ALL OF THEM, for a caller that is reporting rather than scanning
+ * - see kof_scan_option.want_diag. Same work the first rule to ask would
+ * have paid for, done once and at a moment the caller chose.
+ */
+void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (sc)
+		diag_ready(sc, ctx);
+}
+
+static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t i;
+
+	/* Ids are one based, because zero is what an uninitialised field
+	 * holds and a rule that asked for diagnose zero by accident would
+	 * otherwise be asking a real question. */
+	if (!sc || !id)
+		return 0;
+	diag_ready(sc, ctx);
+	i = (uint32_t)id - 1u;
+	if (i >= sc->eng->n_diag || i >= sizeof sc->diag_hit * 8u)
+		return 0;
+	return (sc->diag_hit[i >> 3] >> (i & 7u)) & 1u;
+}
+
 static const struct kof_content kof_detect_vtable = {
 	c_rd8, c_rd16, c_rd32, c_rd64, c_memeq, c_find_str, c_find_str_at,
 	c_find_str_in, c_csum, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -5414,7 +5468,7 @@ static const struct kof_content kof_detect_vtable = {
 	/* And it drives no machine, so it changes none. */
 	NULL, NULL, NULL,
 	/* The profile's two questions - unplugged, see above. */
-	NULL, NULL
+	c_diag, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {

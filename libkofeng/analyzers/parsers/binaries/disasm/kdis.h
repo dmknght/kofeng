@@ -43,7 +43,33 @@ struct kof_kdis {
 	uint16_t stk_known;     /* bit i: stk[i] is a derived constant */
 	uint8_t  stk_n;
 	uint8_t  open;
-	uint8_t  _pad[4];
+	uint8_t  map_ok;        /* the window below has been established */
+	uint8_t  _pad[3];
+	/*
+	 * THE MAPPING WINDOW THE CURSOR IS CURRENTLY INSIDE.
+	 *
+	 * Every instruction needs its own address, because that is what a
+	 * relative branch is computed from - so the offset-to-address
+	 * conversion runs once per instruction, and in the segment table it
+	 * is a linear walk. MEASURED over a 12 MB subset: 1.3 million walks
+	 * for 1.3 million instructions, all but a handful of them finding
+	 * the same segment as the walk before.
+	 *
+	 * A segment is contiguous in both spaces, so inside one the
+	 * conversion is a single addition. `map_lo`/`map_hi` are the file
+	 * offsets the window covers and `map_delta` is address minus offset
+	 * across it; the walk only runs when the cursor leaves the window,
+	 * which for a sweep is once per segment.
+	 *
+	 * INVALIDATED BY kof_kdis_seek AND NOT BY COMPARING THE CONTEXT.
+	 * A kof_obj_ctx is a local in scan_object, so the NEXT object's
+	 * context is very often at the same address as this one's - a
+	 * pointer compare would say "same object" about a different file.
+	 * Every walk starts with a seek, so clearing it there is both
+	 * sufficient and impossible to get wrong.
+	 */
+	uint64_t map_lo, map_hi;
+	int64_t  map_delta;
 };
 
 int kof_kdis_seek(struct kof_kdis *k, uint64_t off, int keep);

@@ -54,6 +54,7 @@
 #include "dbloader.h"
 #include "hexprog.h"
 #include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pathogen/kofdiag.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -623,6 +624,70 @@ static int pack_cmp(const void *a, const void *b)
  * the same database could disagree, and a rebuild could change a verdict with no
  * change to anything anybody wrote.
  */
+/*
+ * THE DIAGNOSES BESIDE THE PACKS.
+ *
+ * One file each, read whole, and a file that does not parse is SKIPPED
+ * WITH A WORD rather than failing the load: a database is a directory
+ * somebody assembled, and one bad file in it must not take the other two
+ * hundred with it. Silence would be worse than either - a diagnose that
+ * quietly is not there reads, from every rule that names it, as an object
+ * that does not do the thing.
+ */
+static void load_diagnoses(struct kof_engine *e, const char *dir)
+{
+	static const char ext[] = ".kdig";
+	DIR *d = opendir(dir);
+	struct dirent *de;
+
+	if (!d)
+		return;
+	e->diag = calloc(KOF_DB_MAX_DIAG, sizeof *e->diag);
+	e->diag_node = calloc((size_t)KOF_DB_MAX_DIAG * KOF_DB_MAX_DIAG_NODE,
+			      sizeof *e->diag_node);
+	e->diag_name = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NAME);
+	if (!e->diag || !e->diag_node || !e->diag_name) {
+		closedir(d);
+		return;
+	}
+	while ((de = readdir(d)) != NULL) {
+		char p[4096];
+		uint8_t buf[4096];
+		size_t l = strlen(de->d_name), got;
+		FILE *f;
+
+		if (l < sizeof ext ||
+		    strcmp(de->d_name + l - (sizeof ext - 1), ext) != 0)
+			continue;
+		if (e->n_diag >= KOF_DB_MAX_DIAG) {
+			e->diag_full = 1;
+			break;
+		}
+		if ((size_t)snprintf(p, sizeof p, "%s/%s", dir,
+				     de->d_name) >= sizeof p)
+			continue;
+		f = fopen(p, "rb");
+		if (!f)
+			continue;
+		got = fread(buf, 1, sizeof buf, f);
+		fclose(f);
+		if (!kof_diag_load(buf, got, &e->diag[e->n_diag],
+				   e->diag_node + (size_t)e->n_diag *
+						  KOF_DB_MAX_DIAG_NODE,
+				   KOF_DB_MAX_DIAG_NODE,
+				   e->diag_name + (size_t)e->n_diag *
+						  KOF_DB_DIAG_NAME,
+				   KOF_DB_DIAG_NAME)) {
+			fprintf(stderr, "dbloader: %s is not a diagnose this "
+				"build can read\n", de->d_name);
+			continue;
+		}
+		e->diag[e->n_diag].id = (uint16_t)(e->n_diag + 1u);
+		e->n_diag++;
+	}
+	closedir(d);
+}
+
 static const char **collect_packs(const char *dir, uint32_t *out_n)
 {
 	static const char ext[] = ".ksig";
@@ -1066,11 +1131,13 @@ struct kof_engine *kof_db_load_tables(const char *path)
 	uint64_t n_blk = 0, n_pool = 0;
 	size_t at = 0;
 	int owned = 0;
+	const char *dir_for_diag = NULL;
 
 	if (!path)
 		return NULL;
 
 	if (stat(path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+		dir_for_diag = path;
 		paths = collect_packs(path, &n_paths);
 		owned = 1;
 		if (!paths || n_paths == 0) {
@@ -1539,6 +1606,13 @@ struct kof_engine *kof_db_load_tables(const char *path)
 			for (j = 0; j < e->n_heur; j++)
 				any_target_add(&e->any_target, &e->heur[j]);
 		}
+		/*
+		 * AND THE DIAGNOSES, from the same directory. A database
+		 * with none is an ordinary database - they are new, and
+		 * nothing yet depends on there being any.
+		 */
+		if (dir_for_diag)
+			load_diagnoses(e, dir_for_diag);
 	}
 out:
 	if (mp) {
@@ -1567,6 +1641,9 @@ void kof_db_free_tables(struct kof_engine *e)
 	free(e->rng_uid);
 	free(e->blk_tab);
 	free(e->blk_pool);
+	free(e->diag);
+	free(e->diag_node);
+	free(e->diag_name);
 	if (e->packs) {
 		uint32_t i;
 

@@ -89,6 +89,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/kofplague.h>
+#include <kofmod/kofdiag.h>
 #include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
@@ -6423,6 +6424,8 @@ static int tree_src_add(char (**srcs)[TREE_SRC_MAX], uint32_t *n, uint32_t *cap,
 	return 1;
 }
 
+static int diagnose_main(int argc, char **argv);
+
 static int tree_main(int argc, char **argv)
 {
 	const char *base = argc > 2 ? argv[2] : NULL;
@@ -6504,9 +6507,20 @@ static int tree_main(int argc, char **argv)
 		}
 		/* One level down, which is where the kind directories are. */
 		{
-			DIR *sd = opendir(path);
+			DIR *sd;
 			struct dirent *se;
 
+			/*
+			 * DIAGNOSES ARE NOT MODULES and must not reach the
+			 * module path: they declare no target, no verdict and
+			 * no code, so the first thing it would ask them for -
+			 * KOF_TARGET_FORMAT - is a thing they correctly do
+			 * not have. They are built below, by name, into a
+			 * file of their own.
+			 */
+			if (strcmp(e->d_name, "diagnoses") == 0)
+				continue;
+			sd = opendir(path);
 			if (!sd)
 				continue;
 			while ((se = readdir(sd)) != NULL) {
@@ -6545,6 +6559,46 @@ static int tree_main(int argc, char **argv)
 		return 2;
 	}
 	printf("   %d source(s) from %s -> %s\n", built, base, artefacts);
+
+	/*
+	 * AND THE DIAGNOSES, which went nowhere near the loop above.
+	 *
+	 * They are written STRAIGHT TO THE DATABASE DIRECTORY rather than to
+	 * the artefact directory, because there is no pack step for them to
+	 * go through: a .kdig is already its final form. The loader picks them
+	 * up from the same directory it takes the packs from.
+	 */
+	{
+		char dpath[4200];
+		DIR *dd;
+		struct dirent *de;
+
+		snprintf(dpath, sizeof dpath, "%s/diagnoses", base);
+		dd = opendir(dpath);
+		while (dd && (de = readdir(dd)) != NULL) {
+			char in[4300], out[4320], *dot;
+			char *da[4];
+
+			if (de->d_name[0] == '.' || !is_c_source(de->d_name))
+				continue;
+			snprintf(in, sizeof in, "%s/%s", dpath, de->d_name);
+			snprintf(out, sizeof out, "%s/diag-%s", db,
+				 de->d_name);
+			dot = strrchr(out, '.');
+			if (dot)
+				memcpy(dot, ".kdig", 6u);
+			da[0] = argv[0];
+			da[1] = (char *)(size_t)"--diagnose";
+			da[2] = in;
+			da[3] = out;
+			if (diagnose_main(4, da) != 0) {
+				closedir(dd);
+				return 1;
+			}
+		}
+		if (dd)
+			closedir(dd);
+	}
 
 	/* And pack, which is what this program did before it did anything
 	 * else. */
@@ -7114,6 +7168,327 @@ done:
 	free(taken);
 	return rc;
 }
+
+/* ---- diagnoses ------------------------------------------------------------
+ *
+ * A DIAGNOSE IS NOT A MODULE, so it does not go down the path above: there
+ * is no code to compile, no blob to link and no vtable to call. It is a
+ * tree of nucleo groups - see kofmod/kofdiag.h - and what the build does
+ * with it is read the declarations and write the records out.
+ *
+ * SO IT IS NOT IN A .ksig PACK EITHER. The pack header carries a
+ * FIXED-SIZE section table, so one more section is a format change that
+ * every database in existence has to be rebuilt for. Diagnoses are a
+ * different kind of content with no module, no pattern and no blob in
+ * them, so they get a file of their own beside the packs and the loader
+ * picks them up from the same directory.
+ */
+
+struct dnode {
+	char     label[32];
+	char     parent[32];
+	uint16_t cap;
+	uint16_t flags;
+	uint8_t  role;
+	uint8_t  touch;
+};
+
+/* Written in front of the nodes. Little endian, like every other number
+ * this program writes - see the note at the pack header. */
+struct dhdr {
+	uint16_t n_node;
+	uint8_t  via;
+	uint8_t  name_len;
+};
+
+/*
+ * A NAME TO A NUMBER, through the one table that defines both.
+ *
+ * The source says KOF_CAP_ALLOC_EXEC and the record holds its value, and
+ * the two must be the same thing or a rule means something other than what
+ * it says. Reading the enum through the X-macro list rather than keeping a
+ * copy here is what makes that true by construction - a copy is a second
+ * place for the vocabulary to drift, which is the fault kofcap.h was split
+ * out to stop.
+ */
+static int diag_cap_of(const char *w, uint16_t *out)
+{
+	unsigned c;
+	size_t n;
+
+	/* The source writes the word in quotes - "alloc-exec" - and this
+	 * walks the capability space asking the one name table what each
+	 * value is called. Four thousand comparisons at build time, and no
+	 * second spelling of the vocabulary anywhere. */
+	n = strlen(w);
+	if (n < 3u || w[0] != '"' || w[n - 1u] != '"')
+		return 0;
+	for (c = 1u; c < 0x10000u; c++) {
+		const char *nm;
+
+		if (!KOF_CAP_VALID(c))
+			continue;
+		nm = kof_flow_cap_name((uint16_t)c);
+		if (nm && strlen(nm) == n - 2u &&
+		    memcmp(nm, w + 1, n - 2u) == 0) {
+			*out = (uint16_t)c;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* The role words, spelled as the header spells them - a closed set of
+ * five, so a table here is the whole of it rather than a copy of part of
+ * something bigger. */
+static int diag_role_of(const char *w, uint8_t *out)
+{
+	static const struct { const char *w; uint8_t v; } r[] = {
+		{ "KOF_DIAG_ROLE_NONE",   KOF_DIAG_ROLE_NONE   },
+		{ "KOF_DIAG_ROLE_BUFFER", KOF_DIAG_ROLE_BUFFER },
+		{ "KOF_DIAG_ROLE_TARGET", KOF_DIAG_ROLE_TARGET },
+		{ "KOF_DIAG_ROLE_FD",     KOF_DIAG_ROLE_FD     },
+		{ "KOF_DIAG_ROLE_PATH",   KOF_DIAG_ROLE_PATH   },
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof r / sizeof r[0]; i++)
+		if (strcmp(w, r[i].w) == 0) {
+			*out = r[i].v;
+			return 1;
+		}
+	return 0;
+}
+
+/* The flags a node may demand. Small and closed; a word not here is an
+ * error rather than a zero, because a demanded flag silently dropped is a
+ * diagnose that matches more than it says. */
+static int diag_flag_of(const char *w, uint16_t *out)
+{
+	if (strcmp(w, "0") == 0)             { *out = 0; return 1; }
+	if (strcmp(w, "KOF_FLOWF_WX") == 0)  { *out = KOF_FLOWF_WX; return 1; }
+	return 0;
+}
+
+/* Pull the i-th comma separated argument out of "MACRO(a, b, c)". */
+static int diag_arg(const char *p, int i, char *out, size_t cap)
+{
+	const char *q = strchr(p, '(');
+	int depth = 0, n = 0;
+
+	if (!q)
+		return 0;
+	q++;
+	while (*q && i > 0) {
+		if (*q == '(') depth++;
+		else if (*q == ')') { if (!depth) return 0; depth--; }
+		else if (*q == ',' && !depth) i--;
+		q++;
+	}
+	while (*q == ' ' || *q == '\t')
+		q++;
+	while (*q && *q != ',' && *q != ')' && (size_t)n + 1 < cap) {
+		if (*q == '(') depth++;
+		if (*q == ')') { if (!depth) break; depth--; }
+		out[n++] = *q++;
+	}
+	while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t'))
+		n--;
+	out[n] = 0;
+	return n > 0;
+}
+
+static int diag_label_idx(const struct dnode *nd, int n, const char *l)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+		if (strcmp(nd[i].label, l) == 0)
+			return i;
+	return -1;
+}
+
+static int diagnose_main(int argc, char **argv)
+{
+	const char *src = argc > 2 ? argv[2] : NULL;
+	const char *out = argc > 3 ? argv[3] : NULL;
+	struct dnode nd[64];
+	char name[64] = "", line[1024], a[4][96];
+	int n_nd = 0, lineno = 0, i;
+	unsigned via = 0;
+	FILE *f, *o;
+	unsigned char *blob;
+	size_t at, need;
+
+	if (argc != 4 || !src || !out) {
+		fprintf(stderr, "usage: %s --diagnose <src.c> <out.kdig>\n",
+			argv[0]);
+		return 2;
+	}
+	f = fopen(src, "r");
+	if (!f) {
+		fprintf(stderr, "FAIL: cannot open %s\n", src);
+		return 1;
+	}
+	src_name = src;
+	while (fgets(line, sizeof line, f)) {
+		char *p;
+
+		lineno++;
+		if ((p = strstr(line, "KOF_DIAG_NAME(")) != NULL) {
+			if (!diag_arg(p, 0, name, sizeof name))
+				err(lineno, "KOF_DIAG_NAME wants a name");
+		} else if ((p = strstr(line, "KOF_DIAG_VIA(")) != NULL) {
+			if (strstr(p, "KOF_DIAG_VIA_SYSCALL"))
+				via |= KOF_DIAG_VIA_SYSCALL;
+			if (strstr(p, "KOF_DIAG_VIA_SYMBOL"))
+				via |= KOF_DIAG_VIA_SYMBOL;
+			if (!via)
+				err(lineno, "KOF_DIAG_VIA names no route");
+		} else if ((p = strstr(line, "KOF_DIAG_ANCHOR(")) != NULL) {
+			if (n_nd) {
+				err(lineno, "a diagnose has one anchor");
+				continue;
+			}
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
+			    !diag_arg(p, 2, a[2], sizeof a[2])) {
+				err(lineno, "KOF_DIAG_ANCHOR(label, cap, flags)");
+				continue;
+			}
+			memset(&nd[0], 0, sizeof nd[0]);
+			if (strlen(a[0]) >= sizeof nd[0].label) {
+				err(lineno, "a node label is too long");
+				continue;
+			}
+			memcpy(nd[0].label, a[0], strlen(a[0]) + 1u);
+			nd[0].parent[0] = 0;
+			if (!diag_cap_of(a[1], &nd[0].cap))
+				err(lineno, "not a capability");
+			if (!diag_flag_of(a[2], &nd[0].flags))
+				err(lineno, "not a node flag");
+			n_nd = 1;
+		} else if ((p = strstr(line, "KOF_DIAG_FROM(")) != NULL) {
+			struct dnode *d;
+
+			if (n_nd >= (int)(sizeof nd / sizeof nd[0])) {
+				err(lineno, "too many nodes in one diagnose");
+				continue;
+			}
+			if (!n_nd) {
+				err(lineno, "KOF_DIAG_FROM before the anchor");
+				continue;
+			}
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
+			    !diag_arg(p, 2, a[2], sizeof a[2]) ||
+			    !diag_arg(p, 3, a[3], sizeof a[3])) {
+				err(lineno,
+				    "KOF_DIAG_FROM(label, parent, cap, role)");
+				continue;
+			}
+			d = &nd[n_nd];
+			memset(d, 0, sizeof *d);
+			/* A label longer than the slot is refused rather than
+			 * cut: two labels that differ past the cut would read
+			 * as one, and the link would go to the wrong node. */
+			if (strlen(a[0]) >= sizeof d->label ||
+			    strlen(a[1]) >= sizeof d->parent) {
+				err(lineno, "a node label is too long");
+				continue;
+			}
+			memcpy(d->label, a[0], strlen(a[0]) + 1u);
+			memcpy(d->parent, a[1], strlen(a[1]) + 1u);
+			if (!diag_cap_of(a[2], &d->cap))
+				err(lineno, "not a capability");
+			if (!diag_role_of(a[3], &d->role))
+				err(lineno, "not a role");
+			n_nd++;
+		} else if ((p = strstr(line, "KOF_DIAG_TOUCH(")) != NULL) {
+			if (!diag_arg(p, 0, a[0], sizeof a[0]))
+				err(lineno, "KOF_DIAG_TOUCH wants a label");
+			else {
+				i = diag_label_idx(nd, n_nd, a[0]);
+				if (i < 0)
+					err(lineno, "no node with that label");
+				else
+					nd[i].touch = 1;
+			}
+		}
+	}
+	fclose(f);
+
+	if (!name[0])
+		err(lineno, "a diagnose needs KOF_DIAG_NAME");
+	if (!via)
+		err(lineno, "a diagnose needs KOF_DIAG_VIA");
+	if (!n_nd)
+		err(lineno, "a diagnose needs an anchor");
+	/*
+	 * A LABEL THAT NAMES NOTHING IS A TYPO, and the one place it can be
+	 * caught is here: the engine would see a parent index it cannot
+	 * resolve and have to pick between refusing the diagnose and
+	 * ignoring the link, which are both worse than not shipping it.
+	 */
+	for (i = 1; i < n_nd; i++)
+		if (diag_label_idx(nd, n_nd, nd[i].parent) < 0)
+			fprintf(stderr, "%s: error: \"%s\" is not a node in "
+				"this diagnose\n", src, nd[i].parent),
+				errors++;
+	/*
+	 * AND THE ANCHOR MUST BE RARE, which is a cost statement and not a
+	 * correctness one - see the note on anchors in kofmod/kofdiag.h.
+	 * Matching starts by trying every node that could be the root, so a
+	 * root of READ costs one descent per read in the object; one 1.1 MB
+	 * sample here holds 447 indirect calls.
+	 */
+	if (n_nd && (nd[0].cap == KOF_CAP_READ || nd[0].cap == KOF_CAP_WRITE ||
+		     nd[0].cap == KOF_CAP_EXEC_REG))
+		fprintf(stderr, "%s: warning: anchoring on a common "
+			"capability - every one in the object starts a "
+			"descent\n", src);
+	if (errors)
+		return 1;
+
+	need = sizeof(struct dhdr) + strlen(name) + (size_t)n_nd * 8u;
+	blob = calloc(1, need);
+	if (!blob)
+		return 1;
+	blob[0] = (unsigned char)n_nd;
+	blob[1] = (unsigned char)(n_nd >> 8);
+	blob[2] = (unsigned char)via;
+	blob[3] = (unsigned char)strlen(name);
+	at = 4;
+	memcpy(blob + at, name, strlen(name));
+	at += strlen(name);
+	for (i = 0; i < n_nd; i++) {
+		unsigned par = i ? (unsigned)diag_label_idx(nd, n_nd,
+							    nd[i].parent)
+				 : (unsigned)KOF_DIAG_NO_PARENT;
+
+		blob[at + 0] = (unsigned char)nd[i].cap;
+		blob[at + 1] = (unsigned char)(nd[i].cap >> 8);
+		blob[at + 2] = (unsigned char)nd[i].flags;
+		blob[at + 3] = (unsigned char)(nd[i].flags >> 8);
+		blob[at + 4] = (unsigned char)par;
+		blob[at + 5] = nd[i].role;
+		blob[at + 6] = nd[i].touch ? KOF_DIAG_B_TOUCH : 0u;
+		blob[at + 7] = 0;               /* attr_len */
+		at += 8;
+	}
+	o = fopen(out, "wb");
+	if (!o || fwrite(blob, 1, need, o) != need) {
+		fprintf(stderr, "FAIL: cannot write %s\n", out);
+		if (o) fclose(o);
+		free(blob);
+		return 1;
+	}
+	fclose(o);
+	printf("== %s  %s  %d node, %zu bytes\n", src, name, n_nd, need);
+	free(blob);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	/* Before either mode reads argv - see kof_utf8_init. A signature source
@@ -7126,5 +7501,7 @@ int main(int argc, char **argv)
 
 	if (argc > 1 && strcmp(argv[1], "--tree") == 0)
 		return tree_main(argc, argv);
+	if (argc > 1 && strcmp(argv[1], "--diagnose") == 0)
+		return diagnose_main(argc, argv);
 	return pack_main(argc, argv);
 }

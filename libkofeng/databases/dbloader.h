@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include <kofmod/kofsig.h>
+#include <kofmod/kofdiag.h>
 #include <kofmod/kofplague.h>
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */
@@ -351,9 +352,30 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
  * The code arena is deliberately never unmapped: the module table holds function
  * pointers into it for the life of the engine.
  */
+/* How many diagnoses one engine holds, and how many nodes one of them may
+ * have. A bound on COST, and a database over it is reported rather than
+ * silently truncated - see kof_db_diag_full. */
+#define KOF_DB_MAX_DIAG       256u
+#define KOF_DB_MAX_DIAG_NODE   32u
+#define KOF_DB_DIAG_NAME       48u
+
 struct kof_engine {
 	uint8_t *code;        /* arena base, mapped read + execute */
 	size_t   code_cap;
+
+	/*
+	 * THE DIAGNOSES, read from the .kdig files beside the packs.
+	 *
+	 * Not in a pack: the pack header carries a fixed-size section table,
+	 * so one more section is a format change every database has to be
+	 * rebuilt for - and a diagnose has no module, no pattern and no blob
+	 * in it, which is all a pack exists to carry.
+	 */
+	struct kof_diag      *diag;
+	struct kof_diag_node *diag_node;
+	char                 *diag_name;
+	uint32_t              n_diag;
+	int                   diag_full;
 
 	/*
 	 * Detectors and unpackers, in separate arrays.

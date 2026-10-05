@@ -1032,14 +1032,6 @@ struct kof_draft {
 	uint32_t     blkv[DRAFT_MAX_BLKV];
 	uint32_t     n_blkv;
 	/*
-	 * AND ITS CALL CHAIN - the worthiest one its code holds.
-	 *
-	 * ONE, like the shape and unlike the two sets: a chain is a sequence,
-	 * a second chain is a second sequence, and two sequences in one rule
-	 * are two claims that want two matchers. Which one is taken is the
-	 * one saying the most different things - see chain_says.
-	 */
-	/*
 	 * WHICH WHOLE-OBJECT MEASURES THE AUTHOR HAS CHOSEN, and which of them
 	 * are carried - indexed by SIM_IT_*, with the block slot unused
 	 * because a block's tick lives on the block.
@@ -1287,12 +1279,6 @@ struct object {
 	struct plg_block *carve;
 	uint32_t          n_carve;
 	uint8_t           carve_done;
-
-	/*
-	 * AND THE CALL CHAIN, which reads the object's CODE to find it - see
-	 * sim_chain_sweep. A property of the object like the other two, and
-	 * re-derived on every arrival for the same reason they were.
-	 */
 
 	uint8_t  *own;              /* the copy, NULL for the mapped top level */
 	void     *mapped;           /* or a spill file, mapped instead of copied */

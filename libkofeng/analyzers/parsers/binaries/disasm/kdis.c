@@ -40,8 +40,13 @@
  * The cursor is an offset; a branch is computed in addresses. Both directions
  * are needed and only one of them already existed.
  */
-static uint64_t kdis_off_to_va(const struct kof_obj_ctx *ctx, uint64_t off)
+static uint64_t kdis_off_to_va(struct kof_kdis *k,
+			       const struct kof_obj_ctx *ctx, uint64_t off)
 {
+	/* Inside the window the last call established, it is one addition -
+	 * see the note on map_lo in kdis.h for why that is almost always. */
+	if (k->map_ok && off >= k->map_lo && off < k->map_hi)
+		return (uint64_t)((int64_t)off + k->map_delta);
 	if (!ctx || !ctx->file_header)
 		return KOF_BROKEN;
 	if (ctx->format == KOF_FMT_PE) {
@@ -54,13 +59,25 @@ static uint64_t kdis_off_to_va(const struct kof_obj_ctx *ctx, uint64_t off)
 			const struct kof_pe_sec *s = &p->sec[i];
 
 			if (s->file_size && off >= s->file_off &&
-			    off - s->file_off < s->file_size)
+			    off - s->file_off < s->file_size) {
+				k->map_lo = s->file_off;
+				k->map_hi = s->file_off + s->file_size;
+				k->map_delta = (int64_t)(p->image_base +
+							 s->mem_rva) -
+					       (int64_t)s->file_off;
+				k->map_ok = 1;
 				return p->image_base + s->mem_rva +
 				       (off - s->file_off);
+			}
 		}
 		/* The headers map at the image base, one to one. */
-		if (p->sec_count && off < p->sec[0].file_off)
+		if (p->sec_count && off < p->sec[0].file_off) {
+			k->map_lo = 0;
+			k->map_hi = p->sec[0].file_off;
+			k->map_delta = (int64_t)p->image_base;
+			k->map_ok = 1;
 			return p->image_base + off;
+		}
 		return KOF_BROKEN;
 	}
 	if (ctx->format == KOF_FMT_ELF) {
@@ -73,11 +90,40 @@ static uint64_t kdis_off_to_va(const struct kof_obj_ctx *ctx, uint64_t off)
 			if (s->type != 1u || !s->file_size)   /* PT_LOAD */
 				continue;
 			if (off >= s->file_off &&
-			    off - s->file_off < s->file_size)
+			    off - s->file_off < s->file_size) {
+				k->map_lo = s->file_off;
+				k->map_hi = s->file_off + s->file_size;
+				k->map_delta = (int64_t)s->mem_addr -
+					       (int64_t)s->file_off;
+				k->map_ok = 1;
 				return s->mem_addr + (off - s->file_off);
+			}
 		}
 	}
 	return KOF_BROKEN;
+}
+
+/*
+ * AND THE WAY BACK, FOR A BRANCH THAT STAYS IN THE SAME SEGMENT.
+ *
+ * Which nearly every branch does: a relative displacement cannot leave the
+ * image and a compiler does not emit one that leaves the section. The
+ * window established above is a mapping in both directions, so the inverse
+ * is the same single subtraction - and when the target IS somewhere else,
+ * this falls through to the engine's one resolver rather than growing a
+ * second copy of it.
+ */
+static uint64_t kdis_va_to_off(const struct kof_kdis *k,
+			       const struct kof_obj_ctx *ctx, uint64_t va)
+{
+	if (k->map_ok) {
+		uint64_t lo = (uint64_t)((int64_t)k->map_lo + k->map_delta);
+		uint64_t hi = (uint64_t)((int64_t)k->map_hi + k->map_delta);
+
+		if (va >= lo && va < hi)
+			return (uint64_t)((int64_t)va - k->map_delta);
+	}
+	return kof_pz_addr_to_off(ctx, va);
 }
 
 /* ---- the modelled stack -------------------------------------------------
@@ -438,6 +484,9 @@ int kof_kdis_seek(struct kof_kdis *k, uint64_t off, int keep)
 		return 0;
 	k->at = off;
 	k->open = 1;
+	/* A new walk may be a new object at the same context address - see
+	 * the note on map_lo in kdis.h. */
+	k->map_ok = 0;
 	if (!keep) {
 		memset(k->reg, 0, sizeof k->reg);
 		k->known = 0;
@@ -486,14 +535,14 @@ int kof_kdis_next(struct kof_kdis *k, const struct kof_obj_ctx *ctx,
 	 * One decoder now. Rule 10.
 	 */
 	n = kof_decode_x86(base + k->at, (uint32_t)left,
-			   kdis_off_to_va(ctx, k->at),
+			   kdis_off_to_va(k, ctx, k->at),
 			   ctx->arch == KOF_ARCH_X86_64 ? 64u : 32u, out);
 	if (!n)
 		return 0;
 	out->at = k->at;
 	n = out->n_op;
 	if (out->target_va != KOF_BROKEN)
-		out->target = kof_pz_addr_to_off(ctx, out->target_va);
+		out->target = kdis_va_to_off(k, ctx, out->target_va);
 
 	/*
 	 * AND AN INDIRECT BRANCH RESOLVED FROM WHAT IS KNOWN, which is the
@@ -519,7 +568,7 @@ int kof_kdis_next(struct kof_kdis *k, const struct kof_obj_ctx *ctx,
 			have = kof_kdis_reg(k, out->o[0].reg, &v);
 		if (have) {
 			out->target_va = v;
-			out->target = kof_pz_addr_to_off(ctx, v);
+			out->target = kdis_va_to_off(k, ctx, v);
 		}
 	}
 

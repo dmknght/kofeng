@@ -811,6 +811,12 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 	return cap;
 }
 
+const char *kof_sys_name(unsigned bits, uint32_t nr)
+{
+	return bits == 64 ? kof_sys_look_name(kof_sys64, kof_sys64_n, nr)
+			  : kof_sys_look_name(kof_sys32, kof_sys32_n, nr);
+}
+
 uint16_t kof_flow_cap_of_name(const char *sym)
 {
 	size_t i;

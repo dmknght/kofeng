@@ -204,6 +204,15 @@ uint8_t kof_sys_argc(const char *name);
  * instruction after `exit` is not its successor. */
 int kof_sys_noreturn(unsigned bits, uint32_t nr);
 
+/*
+ * THE NAME OF A SYSCALL NUMBER ON x86, or NULL.
+ *
+ * Here rather than at the one caller because the caller would need the
+ * table, and handing a table out is handing out the thing that must not be
+ * copied - see kof_sys_look_name, which this is the x86 shorthand for.
+ */
+const char *kof_sys_name(unsigned bits, uint32_t nr);
+
 uint16_t    kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr);
 const char *kof_sys_look_name(const struct sysrow *t, uint32_t n, uint32_t nr);
 uint8_t     kof_sys_look_role(const struct sysrow *t, uint32_t n, uint32_t nr);

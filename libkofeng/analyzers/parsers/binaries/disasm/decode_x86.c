@@ -9,6 +9,8 @@
  */
 #include <string.h>
 
+/* KOF_BROKEN - the sentinel kdis.h names for a target there is not. */
+#include "kofmod/kofsig.h"
 #include "decode.h"
 #include "gpr.h"
 
@@ -210,8 +212,25 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 		out->cond = ix.Instruction == ND_INS_MOV_CR ? KDIS_SR_CR
 			  : ix.Instruction == ND_INS_MOV_DR ? KDIS_SR_DR
 							    : KDIS_SR_TR;
-	out->target = (uint64_t)-1;
-	out->target_va = (uint64_t)-1;
+	/*
+	 * KOF_BROKEN AND NOT (uint64_t)-1, WHICH IS A DIFFERENT NUMBER.
+	 *
+	 * kdis.h says "no target" is KOF_BROKEN, and KOF_BROKEN is
+	 * UINT64_MAX - 1. Writing UINT64_MAX here meant every reader's
+	 * `target_va != KOF_BROKEN` was true for EVERY instruction, branch
+	 * or not. MEASURED: kof_kdis_next then called kof_pz_addr_to_off -
+	 * a linear walk of the segment table - 1,327,512 times over a 12 MB
+	 * subset where only 273,617 instructions have a relative target,
+	 * and that one wasted call was 6.2% of the whole scan.
+	 *
+	 * It did not produce a wrong answer, which is why it survived: the
+	 * walk found no segment holding UINT64_MAX and returned KOF_BROKEN,
+	 * so `target` came out right by the long way round. `target_va` did
+	 * not - it kept UINT64_MAX, and a reader testing IT against
+	 * KOF_BROKEN still sees a target that is not there.
+	 */
+	out->target = KOF_BROKEN;
+	out->target_va = KOF_BROKEN;
 	if (is_far(&ix))
 		out->flags |= KDIS_F_FAR;
 	if (is_indirect(&ix))

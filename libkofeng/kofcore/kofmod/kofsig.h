@@ -1887,27 +1887,20 @@ struct kof_content {
 			       const uint32_t *ref, uint32_t n_ref);
 
 	/*
-	 * HOW MUCH OF A REFERENCE'S CALL CHAIN THIS OBJECT CARRIES, 0..100.
+	 * A THIRD SIMILARITY MEASURE STOOD HERE, over what the code DOES
+	 * rather than over bytes: how much of a reference's sequence of
+	 * capabilities this object carries. The idea holds - a variant
+	 * recompiled for another target shares none of the byte measures and
+	 * all of the behaviour - but a PERCENTAGE OVER A SEQUENCE was the
+	 * wrong shape for it, for the reasons under "THE BEHAVIOUR MACROS
+	 * ARE GONE".
 	 *
-	 * NOT BYTES AT ALL, which is why it sits beside the other two rather
-	 * than inside them. A block is a run of bytes; this is what the code
-	 * DOES - which capabilities it asks the
-	 * system for, in which order, and which of them were handed something
-	 * an earlier one produced. A variant recompiled for another target
-	 * shares none of the first two and all of this.
+	 * What behaviour is measured with now is nodes and the proven links
+	 * between them; it is not a percentage and does not belong in this
+	 * row of three.
 	 *
-	 * THE REFERENCE IS THE MODULE'S OWN, like the string and block sets,
-	 * and for the same reason: it is a couple of dozen bytes of .rodata,
-	 * and an id would mean a section in the pack and a second place for
-	 * the two to disagree.
-	 *
-	 * ZERO WHEN THERE IS NO CODE THE SWEEP COULD READ - packed, ciphertext
-	 * or an architecture the decoder does not have. A rule cannot tell
-	 * that apart from "none of the chain is here" and must not try; it is
-	 * one fact about this object, exactly as with plague_score.
+	 * The SLOT stays so no entry after it moves.
 	 */
-	/* was ovl_chain - see "THE BEHAVIOUR MACROS ARE GONE". The SLOT stays
-	 * so no entry after it moves. */
 	void *ovl_chain_unused;
 
 	/*
@@ -2327,10 +2320,11 @@ struct kof_content {
 	/*
 	 * ---- THE OBJECT'S PROFILE, ASKED ONE FACT AT A TIME ---------------
 	 *
-	 * ovl_chain answers "how near is this object to that reference", which
-	 * needs a reference - a chain somebody took off a sample they already
-	 * had. That is the only question the chain vocabulary could be asked
-	 * until now, and it is not the question that measured well.
+	 * The measure that stood in the row above asked "how near is this
+	 * object to that reference", which needs a reference - a sequence
+	 * somebody took off a sample they already had. That was the only
+	 * question the behaviour vocabulary could be asked, and it is not the
+	 * question that measured well.
 	 *
 	 * Measured over 3655 malware and 1225 clean objects, what separated
 	 * them was not nearness to a sample but the PRESENCE of single facts
@@ -2355,8 +2349,28 @@ struct kof_content {
 	 * answers yes. The flags a rule may ask for are the ones a stored step
 	 * keeps: see KOF_PTH_FLAG_KEEP.
 	 */
-	/* was pth_has - see "THE BEHAVIOUR MACROS ARE GONE". */
-	void *pth_has_unused;
+	/*
+	 * DOES THIS OBJECT CARRY DIAGNOSE `id`.
+	 *
+	 * A diagnose is a shape the code has - a region allocated writable
+	 * and executable, filled, and jumped into - and it carries NO
+	 * verdict of its own. This is how a rule reads one: the engine has
+	 * already decided, per object, which of them are there, and a
+	 * signature asks for the answer the way it asks whether an object
+	 * came out of a packer. See kofmod/kofdiag.h for what a diagnose
+	 * is, and bases/diagnoses/ for the ones that exist.
+	 *
+	 * THE SLOT WAS pth_has, which asked a question about a sequence of
+	 * capabilities with distances between them. The question is close
+	 * enough that reusing the slot is honest; what it could not hold is
+	 * written up under "THE BEHAVIOUR MACROS ARE GONE".
+	 *
+	 * ZERO IS "NOT FOUND", never "not there". A packed object has no
+	 * code to read until it is unpacked, and an architecture the value
+	 * model does not have answers zero for everything. A rule needing
+	 * certainty of absence cannot have it here.
+	 */
+	int (*diag)(const struct kof_obj_ctx *, uint16_t id);
 	/*
 	 * DID AN ARGUMENT OF `dst` COME FROM WHAT `src` RETURNED.
 	 *
@@ -3796,6 +3810,27 @@ enum kof_analyze {
  * at the head of this file - so that no entry after it moves and a module
  * built against an older header cannot call the wrong one.
  */
+
+/*
+ * DOES THIS OBJECT CARRY A DIAGNOSE.
+ *
+ *     if (kof_diag(DIAG_RWX_EXEC))
+ *             KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
+ *
+ * A diagnose describes WHAT THE CODE DOES and names no family; the rule
+ * that reads it is where the verdict and the name live. That split is the
+ * whole point of the two: the shape of a self-unpacking loader has not
+ * changed in twenty years, and a family name changes weekly.
+ *
+ * ONE DIAGNOSE IS A GENERIC DETECTION. Several named together is a
+ * narrower one, and no new mechanism is needed for either - `&&` is the
+ * same `&&` every other rule uses.
+ *
+ * The id comes from the build, which sees the rule and the diagnoses in
+ * one pass. Zero always answers no.
+ */
+#define kof_diag(id) \
+	((ctx)->content->diag ? (ctx)->content->diag((ctx), (uint16_t)(id)) : 0)
 
 /*
  * THE BEHAVIOUR MACROS ARE GONE, and so is the chain they were shaped by.

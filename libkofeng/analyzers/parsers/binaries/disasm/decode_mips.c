@@ -22,6 +22,8 @@
  */
 #include <string.h>
 
+/* KOF_BROKEN - the sentinel kdis.h names for a target there is not. */
+#include "kofmod/kofsig.h"
 #include "decode.h"
 
 /* The six-bit primary opcode. */
@@ -107,8 +109,14 @@ uint32_t kof_decode_mips(const uint8_t *p, uint32_t n, uint64_t va,
 	out->len = 4u;
 	out->at = va;
 	out->at_va = va;
-	out->target = (uint64_t)-1;
-	out->target_va = (uint64_t)-1;
+	/*
+	 * KOF_BROKEN AND NOT (uint64_t)-1, WHICH IS A DIFFERENT NUMBER -
+	 * see the same correction in decode_x86.c, where it was measured.
+	 * kdis.h says "no target" is KOF_BROKEN; a decoder that writes
+	 * UINT64_MAX makes every reader's test for it true.
+	 */
+	out->target = KOF_BROKEN;
+	out->target_va = KOF_BROKEN;
 	out->o[0].reg = out->o[0].index = out->o[0].seg = KDIS_REG_NONE;
 	out->o[1].reg = out->o[1].index = out->o[1].seg = KDIS_REG_NONE;
 	out->o[2].reg = out->o[2].index = out->o[2].seg = KDIS_REG_NONE;

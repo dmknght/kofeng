@@ -113,24 +113,27 @@ struct kof_scanner {
 	 * pointer because the descriptor carries a four-thousand entry pool and
 	 * a scanner that never meets an ELF should not hold one.
 	 */
-	struct kof_plague_desc *ovl;
 	/*
-	 * AND THE OBJECT'S CALL CHAINS, swept once and shared by every rule
-	 * that asks - see kof_content.ovl_chain. A sweep costs a pass over the
-	 * code regions with a decoder, so the first ask pays for it and the
-	 * rest do not.
-	 */
-	int                  ovl_ready;
-	/*
-	 * THE OBJECT'S PROFILE - what it does, flattened.
+	 * WHICH DIAGNOSES THIS OBJECT CARRIES, worked out once.
 	 *
-	 * The chains answer "how near is this to that reference"; this answers
-	 * "does it do X" and "did X feed Y", which is what measured well. It
-	 * is derived from the chains and cached beside them for the same
-	 * reason: a rule asks several times and the answer does not change
-	 * within one object.
+	 * DEMAND DRIVEN, on the same terms as everything else here: reading
+	 * the nodes out of an object costs a decode of its code regions, and
+	 * an object whose verdict comes from a rule that names no diagnose
+	 * must not pay for it. The first rule that asks pays; the rest read
+	 * the answer.
 	 */
-	int                     pth_prof_ready;
+	uint8_t  diag_hit[32];          /* one bit per diagnose id          */
+	/* see kof_scan_option.want_diag */
+	int      diag_ready;
+
+	/*
+	 * THREE FIELDS STOOD HERE and all three went with the chain: the
+	 * swept reference, the flag saying the sweep had run, and the
+	 * flattened profile derived from it. By the end none of them was
+	 * read - one was only freed, two were only written - which is what a
+	 * removed subsystem leaves behind when the state outlives the code
+	 * that filled it.
+	 */
 
 	/*
 	 * AND THE TWO BATCHED PASSES, ON THE SAME TERMS AS THE TWO ABOVE.
@@ -142,8 +145,7 @@ struct kof_scanner {
 	 * end the scan of an object early, because the most expensive work was
 	 * already done by then and no verdict could ever avoid it.
 	 *
-	 * So they are demand-driven now, like the overlord descriptor and the
-	 * call chains: the first module that DECLARES markers pays for the
+	 * So they are demand-driven now: the first module that DECLARES markers pays for the
 	 * sweep, the first that declares blocks pays for the feed, and an
 	 * object whose verdict came from a module declaring neither pays for
 	 * neither. Measured on 5248 real ELF samples, 167 objects reached the
@@ -1255,3 +1257,4 @@ int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
 		     const struct kof_scan_option *, kof_on_object cb, void *user);
 
 #endif /* KOFENG_SCAN_H */
+void kof_scan_diag_force(const struct kof_obj_ctx *);

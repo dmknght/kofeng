@@ -40,6 +40,29 @@ uint32_t kmatch_rules(const kof_engine *e)
 {
 	return e ? e->n_heur : 0;
 }
+
+/*
+ * THE NAME OF A DIAGNOSE, FROM ITS ID.
+ *
+ * An id and not an index, because that is what kof_result.diag carries and a
+ * caller must never have to know that the database happens to number them
+ * from one. The off-by-one lives here, once, rather than in each tool.
+ *
+ * The string is the engine's and lives as long as the engine does: it is read
+ * out of the loaded .kdig and is not composed, so there is nothing to free
+ * and nothing that can be stale while the engine is open.
+ */
+const char *kdb_diag_name(const kof_engine *e, uint16_t id)
+{
+	if (!e || !e->diag_name || !id || id > e->n_diag)
+		return NULL;
+	return e->diag_name + (size_t)(id - 1u) * KOF_DB_DIAG_NAME;
+}
+
+uint32_t kdb_diagnoses(const kof_engine *e)
+{
+	return e ? e->n_diag : 0;
+}
 int kmatch_tables(const kof_engine *e, uint64_t *bytes,
 			  uint32_t *max_chain)
 {

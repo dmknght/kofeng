@@ -398,6 +398,12 @@ struct kof_infected {
  * to KOF_SRC_MAX_REGIONS, which is what a producer may declare. */
 #define KOF_MAX_REGIONS 16u
 
+/* How many diagnoses one object reports. A bound on the REPORT and not on
+ * the matching: more than this were found is not a state that has been
+ * seen, and if it is, the ones past it are missing from the listing and
+ * not from the scan. */
+#define KOF_MAX_DIAG_HIT 32u
+
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
@@ -409,6 +415,26 @@ struct kof_result {
 	/* And where it found the infection - see struct kof_infected. */
 	struct kof_infected infected[KOF_MAX_INFECTED];
 	uint32_t n_infected;
+
+	/*
+	 * WHICH DIAGNOSES THIS OBJECT CARRIES - what its code DOES, named.
+	 *
+	 * NOT FINDINGS, which is why they are not in `v`: a diagnose carries
+	 * no verdict and names no family. "A region was allocated writable
+	 * and executable, filled, and jumped into" is a true statement about
+	 * a packer and about a stager alike; the rule that reads it is where
+	 * the verdict lives - see kof_diag in kofmod/kofsig.h.
+	 *
+	 * HERE SO A TOOL DOES NOT HAVE TO ASK AGAIN. The engine has already
+	 * worked this out for any object a rule asked about, and a tool that
+	 * re-derived it would be a second answer to one question - the thing
+	 * the viewer's own sweep was deleted for.
+	 *
+	 * Ids are the database's, one based. Empty is the ordinary case: an
+	 * object nothing matched, or a database with no diagnoses in it.
+	 */
+	uint16_t diag[KOF_MAX_DIAG_HIT];
+	uint32_t n_diag;
 
 	/*
 	 * The engine stopped before it had finished with this object, because a
@@ -900,6 +926,19 @@ uint32_t    kdb_unpackers(const kof_engine *);
  * neither a record nor an unpacker, and a database whose rules were invisible in
  * the banner is one nobody checks the loading of. */
 uint32_t    kmatch_rules(const kof_engine *);
+/*
+ * THE DIAGNOSES: how many the database holds, and what one is called.
+ *
+ * `kdb_diag_name` takes the id a scan reports in kof_result.diag, not an
+ * index, and returns NULL for an id the database does not hold - which is
+ * what a result produced against a different database looks like. The string
+ * is the engine's; it is valid until keng_close and must not be freed.
+ *
+ * A name is for a person to read. Nothing selects on it: a rule names a
+ * diagnose through its id, which is why the id is what travels.
+ */
+uint32_t    kdb_diagnoses(const kof_engine *);
+const char *kdb_diag_name(const kof_engine *, uint16_t id);
 
 /*
  * WHAT THE MULTI-PATTERN TABLES COST, AND HOW BAD THEIR WORST BUCKET IS.
@@ -1248,6 +1287,20 @@ struct kof_scan_option {
 	 */
 	kof_on_event_detected on_event_detected;
 	void                 *event_user;
+
+	/*
+	 * WORK OUT EVERY DIAGNOSE, whether or not a rule asked.
+	 *
+	 * Off by default and it must stay off by default: reading an
+	 * object's nodes costs a decode of its code regions, and the whole
+	 * point of the demand gate is that an object whose verdict comes
+	 * from a rule naming no diagnose does not pay it.
+	 *
+	 * On, it is a REPORTING mode - a person asking what a file does,
+	 * rather than a scan asking whether it is known. The answer lands in
+	 * kof_result.diag.
+	 */
+	int      want_diag;
 
 	int      recurse_dirs;     /* descend into directories */
 	/*
