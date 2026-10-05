@@ -445,27 +445,40 @@ names[] = {
 	 * userspace program exporting a function of the same name, and this
 	 * table is consulted for both. Each row below is a name a userspace
 	 * libc does not have, which is the only thing keeping the two apart.
+	 *
+	 * MEASURED, because a hazard without a number is a guess: across 1038
+	 * objects from a frozen copy of /usr/bin, ZERO declare any of
+	 * prepare_creds, commit_creds, prepare_kernel_cred, register_kprobe,
+	 * kallsyms_lookup_name, kernel_read, kernel_write, filp_open,
+	 * vfs_read, vfs_write, list_del, text_poke or sock_create. The hazard
+	 * is real and it does not bite on real userspace - which is a fact
+	 * about today's libraries, not a property of the design, so the rule
+	 * for a new row stands: add a name only if userspace does not have it.
 	 */
-	/* Credentials replaced - "give me root", compiled. */
+	/* Credentials BUILT, then credentials INSTALLED - "give me root" is
+	 * the value passing from the first to the second, so the two halves
+	 * have separate words. See KOF_CAP_CRED_PREPARE. */
+	{ "prepare_creds",  KOF_CAP_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
+	{ "prepare_kernel_cred", KOF_CAP_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
 	{ "commit_creds",   KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "prepare_creds",  KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "prepare_kernel_cred", KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
 	{ "set_current_groups", KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	/* Code of one's own put in the path of somebody else's. */
-	{ "register_kprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "register_kprobes", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "register_kretprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
 	/*
-	 * THE UNREGISTER SIDE TOO, and it is not symmetry for its own sake:
-	 * the modern way to find an unexported kernel symbol is to put a
-	 * kprobe on it, read the address and take the probe away again - so
-	 * the pair is the IDIOM, and a module that registers one and never
-	 * removes it is doing something else. Measured at 5 of 6 rootkits and
-	 * 0 of 898 clean modules, the same as the register side.
+	 * A KPROBE PUT ON AND A KPROBE TAKEN OFF - two words, and neither of
+	 * them is "hook". See KOF_CAP_KPROBE_REG for why this row has now
+	 * been wrong twice. The pair is the IDIOM: put a probe on a name,
+	 * read kp.addr, take the probe away again, all in one function - and
+	 * an idiom made of two calls needs two words to be written down.
+	 * Measured at 0 of 900 clean modules on each side.
 	 */
-	{ "unregister_kprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "unregister_kprobes", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "register_kprobe", KOF_CAP_KPROBE_REG, KOF_FLOW_ROLE_NONE },
+	{ "register_kprobes", KOF_CAP_KPROBE_REG, KOF_FLOW_ROLE_NONE },
+	{ "unregister_kprobe", KOF_CAP_KPROBE_UNREG, KOF_FLOW_ROLE_NONE },
+	{ "unregister_kprobes", KOF_CAP_KPROBE_UNREG, KOF_FLOW_ROLE_NONE },
+	/* A RETURN probe cannot read an address and leave; it exists to run
+	 * code on somebody else's return, so it stays hooking. */
+	{ "register_kretprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
 	{ "unregister_kretprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
+	/* Code of one's own put in the path of somebody else's. */
 	{ "unregister_ftrace_function", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
 	{ "write_cr0",      KOF_CAP_PROT_OFF, KOF_FLOW_ROLE_NONE },
 	{ "write_cr4",      KOF_CAP_PROT_OFF, KOF_FLOW_ROLE_NONE },
@@ -504,17 +517,25 @@ names[] = {
 	  KOF_FLOW_ROLE_NONE },
 	{ "list_del",       KOF_CAP_LIST_HIDE, KOF_FLOW_ROLE_NONE },
 	/*
-	 * AND THE WORDS THE VOCABULARY ALREADY HAD, in the kernel's spelling.
-	 * kallsyms_lookup_name is dlsym with a different name - it is how a
-	 * module reaches a symbol the kernel did not export to it, and it
-	 * needs no new word to say so.
+	 * AND THE WORDS THE KERNEL NEEDS OF ITS OWN.
+	 *
+	 * kallsyms_lookup_name was called dlsym with a different name. It is
+	 * not: dlsym returns what a library exported, this returns ANY symbol
+	 * the kernel knows - and the one a rootkit wants, sys_call_table, is
+	 * exported to nobody. See KOF_CAP_KSYM_LOOKUP.
 	 */
-	{ "kallsyms_lookup_name", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "__symbol_get",   KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "_copy_from_user", KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
-	{ "copy_from_user", KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
-	{ "_copy_to_user",  KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "copy_to_user",   KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "kallsyms_lookup_name", KOF_CAP_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
+	{ "kallsyms_lookup_name_t", KOF_CAP_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
+	{ "__symbol_get",   KOF_CAP_SYMBOL_GET, KOF_FLOW_ROLE_NONE },
+	/* ACROSS THE USER/KERNEL BOUNDARY, which is not a file - see
+	 * KOF_CAP_COPY_FROM_USER. The rows under this one take a struct file
+	 * and really are file I/O. */
+	{ "_copy_from_user", KOF_CAP_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
+	{ "copy_from_user", KOF_CAP_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
+	{ "__copy_from_user", KOF_CAP_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
+	{ "_copy_to_user",  KOF_CAP_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
+	{ "copy_to_user",   KOF_CAP_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
+	{ "__copy_to_user", KOF_CAP_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
 	{ "kernel_read",    KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
 	{ "kernel_write",   KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
 	{ "vfs_read",       KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
@@ -1097,6 +1118,13 @@ const char *kof_flow_cap_name(uint16_t cap)
 	case KOF_CAP_REG_SET:      return "reg-set";
 	case KOF_CAP_CRED_SET:     return "cred-modify";
 	case KOF_CAP_HOOK:         return "kmodule-hook";
+	case KOF_CAP_KPROBE_REG:   return "kmodule-kprobe-register";
+	case KOF_CAP_KPROBE_UNREG: return "kmodule-kprobe-unregister";
+	case KOF_CAP_COPY_FROM_USER: return "kmodule-copy-from-user";
+	case KOF_CAP_COPY_TO_USER: return "kmodule-copy-to-user";
+	case KOF_CAP_KSYM_LOOKUP:  return "kmodule-ksym-lookup";
+	case KOF_CAP_SYMBOL_GET:   return "kmodule-symbol-get";
+	case KOF_CAP_CRED_PREPARE: return "cred-prepare";
 	case KOF_CAP_LIST_HIDE:    return "kmodule-list-edit";
 	case KOF_CAP_PROT_OFF:     return "kmodule-cr-write";
 	case KOF_CAP_NET_ADDR:     return "net-addr";

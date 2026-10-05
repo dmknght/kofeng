@@ -338,6 +338,7 @@ struct kof_emu {
 	/* The thread pointer, as arch_prctl set it - or, for a Windows guest,
 	 * as emu_unpack.c's thread block builder set it. */
 	uint64_t fs_base, gs_base;
+	int      iw_skip;       /* suppress the instruction watch once */
 
 	/*
 	 * The Windows environment's three addresses and its error word. Zero
@@ -1236,6 +1237,38 @@ void kof_emu_set_deadline(struct kof_emu *e, uint64_t ms)
 	e->started_ms = ms ? now_ms() : 0;
 }
 
+/*
+ * EXECUTE EXACTLY THE INSTRUCTION THE RUN IS STOPPED ON, watch and all.
+ *
+ * WHY IT HAS TO EXIST. kof_emu_watch_insn pauses BEFORE the instruction and
+ * leaves rip on it, which is what makes the pause useful - a `ret` still has
+ * its return address on the stack. But it also means kof_emu_run cannot get
+ * past it: the next call pauses on the same bytes at the same address, and a
+ * caller that wants to see what the instruction DID has no way to let it run.
+ *
+ * MEASURED, because the symptom is silent: the diagnose walk stopped at every
+ * syscall, resumed, and read a result register that still held the syscall
+ * NUMBER - mmap came back as 9 and socket as 41, so every value it linked on
+ * afterwards was the number rather than the mapping or the descriptor.
+ *
+ * One instruction, then the budget and the watch are exactly as they were.
+ */
+enum kof_emu_stop kof_emu_step(struct kof_emu *e)
+{
+	uint64_t keep;
+	enum kof_emu_stop st;
+
+	if (!e)
+		return KOF_EMU_STOP_FAULT;
+	keep = e->max_insn;
+	e->iw_skip = 1;
+	e->max_insn = e->insn + 1u;
+	st = kof_emu_run(e);
+	e->iw_skip = 0;
+	e->max_insn = keep;
+	return st;
+}
+
 void kof_emu_set_max_insn(struct kof_emu *e, uint64_t n)
 {
 	if (e && n > e->max_insn)
@@ -1431,6 +1464,12 @@ static int iwatch_hit(const struct kof_emu *e, const uint8_t *b, unsigned len)
 	uint32_t i;
 
 	if (!e->n_iw)
+		return 0;
+	/* The one instruction a caller asked to get PAST - see kof_emu_step.
+	 * Without this a watched instruction can be stopped at and never
+	 * executed: rip does not move at the pause, so resuming pauses on it
+	 * again, forever. */
+	if (e->iw_skip)
 		return 0;
 	if (e->iw_len && len != e->iw_len)
 		return 0;

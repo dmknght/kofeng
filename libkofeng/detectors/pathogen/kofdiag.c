@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "kofdiag.h"
+#include "diag_int.h"
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/kofdiag.h"
 #include "../../kofcore/kofmod/elf.h"
@@ -56,12 +57,6 @@
  * gets the same file twice.
  */
 
-struct kof_diag_scan {
-	struct kof_diag_hit *hit;
-	uint32_t             n_hit;
-	uint32_t             cap_hit;
-	int                  full;      /* the bound above was reached */
-};
 
 static int hit_room(struct kof_diag_scan *s)
 {
@@ -87,7 +82,7 @@ static int hit_room(struct kof_diag_scan *s)
 	return 1;
 }
 
-static struct kof_diag_hit *hit_add(struct kof_diag_scan *s, uint64_t at,
+struct kof_diag_hit *kof_diag_hit_add(struct kof_diag_scan *s, uint64_t at,
 				    uint16_t cap, uint16_t flags)
 {
 	struct kof_diag_hit *h;
@@ -304,10 +299,30 @@ static int arg_regs(const struct kof_obj_ctx *ctx, const uint8_t **out)
  * site dropped because its number could not be read is a site that makes
  * two different programs look alike.
  */
-static void note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role)
+struct kof_diag_hit *kof_diag_hit_of(struct kof_diag_scan *s, uint32_t i)
 {
+	return (s && i < s->n_hit) ? &s->hit[i] : 0;
+}
+
+void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role)
+{
+	uint8_t i;
+
 	if (!h || from == ORG_NONE || h->n_in >= 4u)
 		return;
+	/*
+	 * THE SAME LINK TWICE IS ONE LINK.
+	 *
+	 * A run that goes round a loop arrives at the same call with the same
+	 * value from the same producer; a sweep can reach one site from two
+	 * windows. Neither has found a second relation. Recording it again
+	 * would fill the four slots with copies and push out a real one -
+	 * MEASURED before this was here: meter1_x86's retry loop produced ten
+	 * copies of one link.
+	 */
+	for (i = 0; i < h->n_in; i++)
+		if (h->in[i].from == from && h->in[i].role == role)
+			return;
 	h->in[h->n_in].from = from;
 	h->in[h->n_in].role = role;
 	h->in[h->n_in].how  = KOF_DIAG_LINK_PROVEN;
@@ -358,7 +373,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 		int got = !w->ax_stale &&
 			  kof_kdis_reg(k, KDIS_REG_AX, &nr) && nr <= 0xffffu;
 
-		h = hit_add(s, at, KOF_CAP_NONE, 0);
+		h = kof_diag_hit_add(s, at, KOF_CAP_NONE, 0);
 		if (h)
 			h->bits |= got ? KOF_DIAG_H_RAW_SYSCALL
 				       : KOF_DIAG_H_OPAQUE;
@@ -377,7 +392,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 			nr = 0;
 			w->carry_live = 0;
 		} else {
-			h = hit_add(s, at, KOF_CAP_NONE, 0);
+			h = kof_diag_hit_add(s, at, KOF_CAP_NONE, 0);
 			if (h)
 				h->bits |= KOF_DIAG_H_OPAQUE;
 			return;
@@ -405,7 +420,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	nm  = kof_sys_name((unsigned)bits, (uint32_t)nr);
 	if (cap == KOF_CAP_NONE)
 		return;                 /* a syscall the vocabulary has no word for */
-	h = hit_add(s, at, cap, fl);
+	h = kof_diag_hit_add(s, at, cap, fl);
 	if (!h)
 		return;
 	/*
@@ -429,12 +444,12 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	    (!strcmp(nm, "read") || !strcmp(nm, "recv") ||
 	     !strcmp(nm, "recvfrom") || !strcmp(nm, "write") ||
 	     !strcmp(nm, "send"))) {
-		note_in(h, org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER);
-		note_in(h, org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
+		kof_diag_note_in(h, org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER);
+		kof_diag_note_in(h, org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
 	} else if (n_ar >= 1 && nm &&
 		   (!strcmp(nm, "connect") || !strcmp(nm, "close") ||
 		    !strcmp(nm, "dup2"))) {
-		note_in(h, org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
+		kof_diag_note_in(h, org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
 	}
 
 	/*
@@ -706,9 +721,9 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 
 				if (t != ORG_NONE) {
 					struct kof_diag_hit *h =
-						hit_add(s, in.at, KOF_CAP_EXEC_REG, 0);
+						kof_diag_hit_add(s, in.at, KOF_CAP_EXEC_REG, 0);
 
-					note_in(h, t, KOF_DIAG_ROLE_TARGET);
+					kof_diag_note_in(h, t, KOF_DIAG_ROLE_TARGET);
 				}
 			}
 			if (in.wmask & (1ull << KDIS_REG_AX))
@@ -777,10 +792,58 @@ static void sweep_elf(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 
 /* ---- the surface --------------------------------------------------------- */
 
-struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
-				    const uint8_t *base, uint64_t size)
+/*
+ * ---- THE SCENARIO TABLE ---------------------------------------------------
+ *
+ * One row per analysis routine - see KOF_DIAG_RUN_* in the header for why
+ * they are separate at all. A row says which bit turns it on, what it is
+ * called, and what it declines to run on; `fn` is then called with an object
+ * it has already agreed applies to it.
+ *
+ * A TABLE AND NOT A CHAIN OF ifs, for the reason rule 5 gives everywhere
+ * else: the next routine is a row, and nothing above has to be edited to add
+ * it. The two that do not exist yet are listed with a null `fn` rather than
+ * left out, so the names are in one place and `ran` can report honestly that
+ * a routine was asked for and had nothing to run.
+ */
+typedef void (*diag_fn)(struct kof_diag_scan *, const struct kof_obj_ctx *,
+			const uint8_t *, uint64_t);
+
+struct diag_scenario {
+	unsigned    bit;
+	const char *name;
+	diag_fn     fn;
+};
+
+void kof_diag_run_syscall(struct kof_diag_scan *s,
+			  const struct kof_obj_ctx *ctx,
+			  const uint8_t *base, uint64_t size)
+{
+	/*
+	 * THE EXECUTABLE SEGMENTS WHEN THERE ARE ANY, the whole object when
+	 * there are not. A payload lifted out of a variable has no program
+	 * header and is still code.
+	 */
+	if (ctx->format == KOF_FMT_ELF)
+		sweep_elf(s, ctx, base, size);
+	else
+		sweep_region(s, ctx, base, size, 0, size);
+}
+
+static const struct diag_scenario diag_scenarios[] = {
+	{ KOF_DIAG_RUN_SYSCALL, "syscall", kof_diag_run_syscall },
+	/* Not written yet. Named here so that asking for it is not silently
+	 * the same as asking for nothing - see kof_diag_scan_ran. */
+	{ KOF_DIAG_RUN_SYMBOL,  "symbol",  NULL },
+	{ KOF_DIAG_RUN_EMULATE, "emulate", kof_diag_run_emulate }
+};
+
+struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
+					 const uint8_t *base, uint64_t size,
+					 unsigned run)
 {
 	struct kof_diag_scan *s;
+	unsigned i;
 
 	if (!ctx || !base || !size)
 		return NULL;
@@ -789,11 +852,28 @@ struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 	s = calloc(1, sizeof *s);
 	if (!s)
 		return NULL;
-	if (ctx->format == KOF_FMT_ELF)
-		sweep_elf(s, ctx, base, size);
-	else
-		sweep_region(s, ctx, base, size, 0, size);
+	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
+		const struct diag_scenario *d = &diag_scenarios[i];
+
+		if (!(run & d->bit) || !d->fn)
+			continue;
+		d->fn(s, ctx, base, size);
+		s->ran |= d->bit;
+		if (s->full)
+			break;
+	}
 	return s;
+}
+
+struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
+				    const uint8_t *base, uint64_t size)
+{
+	return kof_diag_scan_with(ctx, base, size, KOF_DIAG_RUN_DEFAULT);
+}
+
+unsigned kof_diag_scan_ran(const struct kof_diag_scan *s)
+{
+	return s ? s->ran : 0u;
 }
 
 uint32_t kof_diag_scan_count(const struct kof_diag_scan *s)

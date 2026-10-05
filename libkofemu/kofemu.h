@@ -432,6 +432,16 @@ uint64_t kof_emu_last_write(const struct kof_emu *e);
 void     kof_emu_set_max_insn(struct kof_emu *e, uint64_t n);
 
 /*
+ * RUN THE ONE INSTRUCTION THE MACHINE IS STOPPED ON, even when it is watched.
+ *
+ * A pause from kof_emu_watch_insn leaves rip ON the instruction, so resuming
+ * pauses on it again and a caller can never see what it did. This executes
+ * exactly it and restores the budget and the watch. Returns why the step
+ * ended - KOF_EMU_STOP_BUDGET when it simply finished.
+ */
+enum kof_emu_stop kof_emu_step(struct kof_emu *e);
+
+/*
  * THE TWO BOUNDS THAT ARE NOT AN INSTRUCTION COUNT.
  *
  * kof_emu_set_idle replaces KOF_EMU_IDLE for this run: how many instructions

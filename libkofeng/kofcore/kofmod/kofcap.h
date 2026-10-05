@@ -91,8 +91,12 @@ enum { KOF_CA_PIPE_CREATE = 1, KOF_CA_PIPE_NAMED_CREATE };
 enum { KOF_CA_PROC_START = 1, KOF_CA_PROC_FORK, KOF_CA_PROC_BACKGROUND, KOF_CA_PROC_ENUM, KOF_CA_PROC_OPEN, KOF_CA_PROC_MEM_ACCESS, KOF_CA_PROC_CONTROL, KOF_CA_PROC_THREAD_CREATE, KOF_CA_PROC_FD_REDIRECT, KOF_CA_PROC_SELF_NAME };
 enum { KOF_CA_LIB_LOAD = 1, KOF_CA_LIB_API_RESOLVE, KOF_CA_LIB_NAME_HASH, KOF_CA_LIB_PEB_WALK, KOF_CA_LIB_CALL_REGISTER };
 enum { KOF_CA_REG_OPEN = 1, KOF_CA_REG_SET };
-enum { KOF_CA_CRED_MODIFY = 1 };
-enum { KOF_CA_KMOD_LOAD = 1, KOF_CA_KMOD_HOOK, KOF_CA_KMOD_LIST_EDIT, KOF_CA_KMOD_CR_WRITE };
+enum { KOF_CA_CRED_MODIFY = 1, KOF_CA_CRED_PREPARE };
+enum { KOF_CA_KMOD_LOAD = 1, KOF_CA_KMOD_HOOK, KOF_CA_KMOD_LIST_EDIT,
+       KOF_CA_KMOD_CR_WRITE, KOF_CA_KMOD_KPROBE_REG,
+       KOF_CA_KMOD_KPROBE_UNREG, KOF_CA_KMOD_COPY_FROM_USER,
+       KOF_CA_KMOD_COPY_TO_USER, KOF_CA_KMOD_KSYM_LOOKUP,
+       KOF_CA_KMOD_SYMBOL_GET };
 enum { KOF_CA_CRYPTO_ANY = 1 };
 enum { KOF_CA_INPUT_CAPTURE = 1 };
 enum { KOF_CA_NS_CHANGE = 1 };
@@ -270,6 +274,7 @@ enum kof_flow_cap {
 	 *
 	 *     prepare_creds -> commit_creds        5 of 6     0 of 1497
 	 *     register_kprobe                      5 of 6     0 of 1497
+	 *         (the word it got was wrong twice - see KOF_CAP_KPROBE_REG)
 	 *     list surgery, old spelling           2 of 6     0 of 1497
 	 *     list surgery, _or_report spelling       -     255 of 1497
 	 *
@@ -283,12 +288,114 @@ enum kof_flow_cap {
 	 * WHAT THIS MEASUREMENT IS NOT: six samples, of three lineages. It is
 	 * enough to choose the words with; it is not a corpus.
 	 */
-	/* prepare_creds / prepare_kernel_cred / commit_creds - a process's
-	 * credentials REPLACED, which is what "give me root" compiles to. */
+	/*
+	 * CREDENTIALS PREPARED, AND CREDENTIALS INSTALLED. TWO WORDS.
+	 *
+	 * prepare_creds and prepare_kernel_cred BUILD a credential struct and
+	 * hand it back; nothing has changed when they return, and a module
+	 * that calls one and drops the result has escalated nothing.
+	 * commit_creds is the moment it takes effect.
+	 *
+	 * ONE WORD FOR BOTH COULD NOT SAY THE THING THAT MATTERS. "give me
+	 * root" is prepare -> edit -> commit, a VALUE passing from the first
+	 * to the last; under a single `cred-modify` that tree is two nodes of
+	 * the same word and says no more than "credentials twice". The link is
+	 * the evidence, and a link needs two ends that can be told apart.
+	 *
+	 * Measured: 0 of 900 clean kernel modules on either side, and 1 of 900
+	 * for prepare_kernel_cred.
+	 */
+	KOF_CAP_CRED_PREPARE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_CRED,
+					  KOF_CA_CRED_PREPARE),
+	/* commit_creds / set_current_groups - the moment the new credentials
+	 * become the process's own. */
 	KOF_CAP_CRED_SET = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_CRED, KOF_CA_CRED_MODIFY),
-	/* register_kprobe, the ftrace filter calls, text_poke, set_memory_rw -
-	 * putting code of one's own in the path of somebody else's. */
+	/* The ftrace filter calls, register_kretprobe, text_poke,
+	 * set_memory_rw - putting code of one's own in the path of somebody
+	 * else's. NOT register_kprobe; see KOF_CAP_KSYM_RESOLVE. */
 	KOF_CAP_HOOK = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_HOOK),
+	/*
+	 * A KPROBE PUT ON, AND A KPROBE TAKEN OFF. TWO WORDS, NOT ONE.
+	 *
+	 * The first word written here was `kmodule-resolver`, because in
+	 * Diamorphine the pair IS a symbol lookup:
+	 *
+	 *     register_kprobe(&kp);     // kp.symbol_name = "..."
+	 *     fn = kp.addr;             // the address is the point
+	 *     unregister_kprobe(&kp);   // and the probe goes away again
+	 *
+	 * That was still the old mistake in a new spelling. "Resolver" is
+	 * what the pair is FOR; register is what the call DOES. A kprobe whose
+	 * pre_handler rewrites registers calls the same function and is a
+	 * hook, so a word that says "resolver" asserts a purpose the import
+	 * table cannot know.
+	 *
+	 * AND ONE WORD FOR BOTH HALVES MAKES THE PAIR UNSAYABLE. A diagnose
+	 * links a parent to a child by capability; with register and
+	 * unregister under one word, "registered and then removed" and
+	 * "registered twice" are the same tree. The IDIOM is the evidence, so
+	 * the idiom has to be expressible, so the halves need different words.
+	 *
+	 * Measured on 900 clean kernel modules from this machine: 0 of 900 on
+	 * each side.
+	 */
+	KOF_CAP_KPROBE_REG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+					KOF_CA_KMOD_KPROBE_REG),
+	KOF_CAP_KPROBE_UNREG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+					  KOF_CA_KMOD_KPROBE_UNREG),
+	/*
+	 * A COPY ACROSS THE USER/KERNEL BOUNDARY, WHICH IS NOT FILE I/O.
+	 *
+	 * copy_from_user and copy_to_user were mapped to file-read and
+	 * file-write. Nothing about them touches a file: they move bytes
+	 * between kernel memory and a userspace address, with the access
+	 * checks that crossing needs. The sibling rows are the ones that
+	 * really are file I/O - kernel_read, vfs_read, kernel_write, vfs_write
+	 * all take a struct file - and keeping those apart from these is the
+	 * whole reason to have separate words.
+	 *
+	 * IT MATTERS FOR WHAT A RULE CAN SAY. A hooked getdents copies a
+	 * directory listing OUT to userspace after editing it, which is the
+	 * rootkit; a driver copying an ioctl argument IN is not. Under
+	 * file-read/file-write both read as ordinary file traffic and the
+	 * distinction cannot be written down.
+	 *
+	 * COMMON, and the numbers say so: 65 and 68 of 900 clean modules, so
+	 * roughly one in thirteen. A term, never a verdict.
+	 */
+	KOF_CAP_COPY_FROM_USER = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+					    KOF_CA_KMOD_COPY_FROM_USER),
+	KOF_CAP_COPY_TO_USER = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+					  KOF_CA_KMOD_COPY_TO_USER),
+	/*
+	 * A KERNEL SYMBOL FOUND BY NAME - AND IT IS NOT dlsym.
+	 *
+	 * kallsyms_lookup_name shared KOF_CAP_RESOLVE with dlsym and
+	 * GetProcAddress on the reasoning that both turn a name into an
+	 * address. They do, and the reach is not the same: dlsym can only
+	 * return what a library EXPORTED, while kallsyms_lookup_name returns
+	 * ANY symbol the kernel knows, exported or not. sys_call_table is not
+	 * exported to anybody, and that is precisely the one a rootkit asks
+	 * for. A word that cannot tell "looked up an export" from "looked up
+	 * something nobody exported" has lost the fact that matters.
+	 *
+	 * __symbol_get GETS ITS OWN WORD FOR THE SAME REASON, the other way
+	 * round: it reaches only what another module exported, and it takes a
+	 * reference on that module while it does. It CANNOT reach
+	 * sys_call_table. Measured, the rarity follows the reach:
+	 * kallsyms_lookup_name 0 of 900 clean modules, __symbol_get 12 of 900.
+	 *
+	 * AND NEITHER IS REACHABLE BY SYMBOL IN THE SAMPLE THAT MOTIVATED
+	 * THEM. Since 5.7 the kernel stopped exporting kallsyms_lookup_name,
+	 * so Diamorphine gets its address through a kprobe and the name
+	 * survives only as a DATA STRING. These words are for the modules
+	 * that still import it - the pre-5.7 lineage - and for the code route
+	 * when there is one. See KOF_CAP_KPROBE_REG for what replaced it.
+	 */
+	KOF_CAP_KSYM_LOOKUP = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+					 KOF_CA_KMOD_KSYM_LOOKUP),
+	KOF_CAP_SYMBOL_GET = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+					KOF_CA_KMOD_SYMBOL_GET),
 	/* Taking an entry out of a kernel list: the module list, the task
 	 * list, a directory's. Ordinary code does it too - see the measurement
 	 * above - so this is a term and never a verdict. */

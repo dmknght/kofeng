@@ -201,6 +201,17 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 				struct kof_emu_unp_report *rep);
 
 /*
+ * The same image, STOPPED AT ITS ENTRY. For a caller that has to arm the
+ * machine before the first instruction - instruction watches, a chosen
+ * register - and then drive kof_emu_run itself. `rep` gets what the build
+ * knows; the fields the run fills stay zero until the caller runs.
+ */
+struct kof_emu *kof_emu_unp_build(const uint8_t *file, uint64_t n,
+				  const struct kof_elf_info *info,
+				  uint64_t max_insn, uint64_t max_pages,
+				  struct kof_emu_unp_report *rep);
+
+/*
  * ---- THE SAME TWO JOBS, FOR A PE -----------------------------------------
  *
  * WHY THIS EXISTS AT ALL, GIVEN WHAT kofemu.h SAYS

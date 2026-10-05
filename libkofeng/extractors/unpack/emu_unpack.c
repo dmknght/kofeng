@@ -313,10 +313,23 @@ static unsigned perm_of(uint32_t p)
 	return r ? r : KOF_EMU_R;
 }
 
-struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
-				const struct kof_elf_info *info,
-				uint64_t max_insn, uint64_t max_pages,
-				struct kof_emu_unp_report *rep)
+/*
+ * BUILDING THE IMAGE AND RUNNING IT ARE TWO JOBS, AND A SECOND CALLER WANTED
+ * ONLY THE FIRST.
+ *
+ * The diagnose walk's emulate routine has to set instruction watches BEFORE
+ * the first instruction executes - it stops at every syscall, reads the site
+ * and chooses what the call returns - and a function that builds and runs in
+ * one breath gives it nowhere to do that. The alternative was a second ELF
+ * image builder beside this one, which is the thing rule 10 exists to stop.
+ *
+ * So the build is here and the run is in kof_emu_unp_run, which is this plus
+ * kof_emu_run and the harvest. Nothing else moved.
+ */
+struct kof_emu *kof_emu_unp_build(const uint8_t *file, uint64_t n,
+				  const struct kof_elf_info *info,
+				  uint64_t max_insn, uint64_t max_pages,
+				  struct kof_emu_unp_report *rep)
 {
 	struct kof_emu_cfg cfg;
 	struct kof_emu *e;
@@ -543,6 +556,26 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 			kof_emu_set_reg(e, seed[k], entry);
 	}
 
+	/* WHAT THE BUILD KNOWS, published before it returns - the run half is
+	 * a separate call now and cannot see these locals. */
+	if (rep) {
+		rep->entry = entry;
+		rep->improvised = improvised;
+	}
+	return e;
+}
+
+struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
+				const struct kof_elf_info *info,
+				uint64_t max_insn, uint64_t max_pages,
+				struct kof_emu_unp_report *rep)
+{
+	struct kof_emu *e = kof_emu_unp_build(file, n, info, max_insn,
+					      max_pages, rep);
+
+	if (!e)
+		return NULL;
+
 	{
 		enum kof_emu_stop st = kof_emu_run(e);
 		uint64_t xl = 0, xb = kof_emu_exc_scratch(e, &xl);
@@ -557,8 +590,7 @@ struct kof_emu *kof_emu_unp_run(const uint8_t *file, uint64_t n,
 			rep->exc_lo = xb;
 			rep->exc_hi = xb ? xb + xl : 0;
 			rep->insn = kof_emu_insn_count(e);
-			rep->entry = entry;
-			rep->improvised = improvised;
+			/* entry and improvised were set by the build. */
 			rep->detail = kof_emu_stop_detail(e);
 			for (it = 0; kof_emu_next_snapshot(e, &it, &va, &bytes,
 							   &len); )

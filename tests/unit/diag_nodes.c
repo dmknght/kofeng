@@ -505,6 +505,71 @@ static void deep_in_a_big_segment(void)
 	kof_diag_scan_free(s);
 }
 
+
+/*
+ * EACH ANALYSIS ROUTINE CAN BE TURNED OFF ON ITS OWN.
+ *
+ * Not a style property. Three routines are going to share this walk - sweep
+ * for syscalls, read the imports, run the gaps - and the only way to measure
+ * one is to compare the walk with it against the walk without it. A routine
+ * that cannot be switched off has nothing to be compared against, and a
+ * regression in it is indistinguishable from a regression anywhere else.
+ *
+ * So: asking for everything and asking for the one routine that exists must
+ * give the SAME nodes, asking for none must give none without failing, and
+ * `ran` must report what actually ran rather than what was requested - a
+ * routine that is named but not written yet is not a routine that ran.
+ */
+static void scenarios_are_separable(void)
+{
+	static unsigned char view[1u << 20];
+	struct kof_obj_ctx ctx;
+	struct kof_diag_scan *all, *one, *none;
+	uint32_t n_all, n_one;
+
+	build_x64();
+	memset(view, 0, sizeof view);
+	if (!parse(x64, sizeof x64, &ctx, view)) {
+		printf("  FAIL scenarios: the engine did not parse it\n");
+		fails++;
+		return;
+	}
+
+	all  = kof_diag_scan(&ctx, x64, sizeof x64);
+	one  = kof_diag_scan_with(&ctx, x64, sizeof x64,
+				  KOF_DIAG_RUN_SYSCALL);
+	none = kof_diag_scan_with(&ctx, x64, sizeof x64, 0u);
+
+	CK(all != NULL);
+	CK(one != NULL);
+	CK(none != NULL);
+	if (!all || !one || !none)
+		goto out;
+
+	n_all = kof_diag_scan_count(all);
+	n_one = kof_diag_scan_count(one);
+	/* The stager is found by the syscall routine, so the two must agree
+	 * exactly - if they differ, something else is contributing nodes
+	 * under a bit nobody asked about. */
+	CK(n_all == n_one);
+	CK(n_all > 0u);
+	/* And nothing at all when nothing is asked for. An empty scan is a
+	 * valid answer and must not be a crash or a NULL. */
+	CK(kof_diag_scan_count(none) == 0u);
+
+	/* `ran` is what HAPPENED. The syscall routine exists and ran; the
+	 * other two were requested by RUN_ALL and are not written, so they
+	 * must not be claimed. */
+	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYSCALL) != 0u);
+	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYMBOL) == 0u);
+	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_EMULATE) == 0u);
+	CK(kof_diag_scan_ran(none) == 0u);
+out:
+	kof_diag_scan_free(all);
+	kof_diag_scan_free(one);
+	kof_diag_scan_free(none);
+}
+
 int main(void)
 {
 	build_x64();
@@ -517,9 +582,11 @@ int main(void)
 	unlinked_does_not_match();
 	unreadable_prot_is_not_zero();
 	deep_in_a_big_segment();
+	scenarios_are_separable();
 
 	printf("diagnose nodes: entry point, int 0x80, stale rax, unread "
 	       "argument, value and region links, one tree for two "
-	       "architectures, a payload deep in a big segment%s\n", fails ? "" : " - ok");
+	       "architectures, a payload deep in a big segment, one\n"
+	       "analysis routine at a time%s\n", fails ? "" : " - ok");
 	return fails != 0;
 }

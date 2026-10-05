@@ -126,13 +126,68 @@ struct kof_diag_hit {
 struct kof_diag_scan;
 
 /*
+ * ---- THE ANALYSIS ROUTINES, ONE BIT EACH ----------------------------------
+ *
+ * Reading an object's nodes is not one algorithm and should never have been
+ * written as one. A userspace stager is found by sweeping for syscalls; a
+ * kernel module makes none and is found by its imports; a value that passes
+ * through memory is found by neither and needs the interpreter. The three
+ * cost different amounts, apply to different objects, and break in different
+ * ways.
+ *
+ * SO THEY ARE SEPARATE ROUTINES BEHIND SEPARATE BITS, and the reason is not
+ * tidiness: it is that one of them must be switchable off without the others
+ * changing their answer. A scenario that cannot be disabled cannot be
+ * measured - there is nothing to compare its output against - and a bug in it
+ * is a bug in the whole walk.
+ *
+ * The bits are the same question KOF_DIAG_VIA_* asks of a diagnose, from the
+ * other side: via says which routine COULD satisfy a rule, this says which
+ * one a caller is willing to pay for.
+ */
+#define KOF_DIAG_RUN_SYSCALL (1u << 0)  /* sweep code for syscall sites   */
+#define KOF_DIAG_RUN_SYMBOL  (1u << 1)  /* imports and their call sites   */
+#define KOF_DIAG_RUN_EMULATE (1u << 2)  /* run the gaps, to link nodes    */
+#define KOF_DIAG_RUN_ALL     (KOF_DIAG_RUN_SYSCALL | KOF_DIAG_RUN_SYMBOL | \
+			      KOF_DIAG_RUN_EMULATE)
+/*
+ * WHAT kof_diag_scan RUNS, WHICH IS NOT EVERYTHING THAT EXISTS.
+ *
+ * EMULATE is written and is NOT in here, for two reasons that are both
+ * measured and both about to be fixed rather than argued with:
+ *
+ *   IT DOUBLES THE NODES. It reports what a RUN called, in call order; the
+ *   syscall routine reports what the CODE contains, at file offsets. The two
+ *   describe the same mmap and have no way yet to say so, so a scan with both
+ *   on returns it twice.
+ *   IT REPEATS A LOOP. meter1_x86 retries connect ten times and the run logs
+ *   all ten - thirty nodes where the file has three sites.
+ *
+ * Until a node from a run and a node from a sweep can be recognised as one,
+ * turning this on by default would make every count wrong. It is reachable
+ * through kof_diag_scan_with, which is what it was built switchable for.
+ */
+#define KOF_DIAG_RUN_DEFAULT (KOF_DIAG_RUN_SYSCALL | KOF_DIAG_RUN_SYMBOL)
+
+/*
  * READ AN OBJECT'S NODES. NULL when there is nothing this can read - a
  * format with no code regions, or an architecture the value model does not
  * have. That is NOT the same as an object with no nodes, and a caller must
  * not treat it as such.
+ *
+ * kof_diag_scan runs every routine that applies. kof_diag_scan_with runs the
+ * ones named, and is how a measurement isolates one.
  */
 struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 				    const uint8_t *base, uint64_t size);
+struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
+					 const uint8_t *base, uint64_t size,
+					 unsigned run);
+
+/* Which routines actually ran on this object - a caller asking "is this
+ * capability absent" must know whether the routine that would have found it
+ * was among them. */
+unsigned kof_diag_scan_ran(const struct kof_diag_scan *);
 
 uint32_t kof_diag_scan_count(const struct kof_diag_scan *);
 const struct kof_diag_hit *kof_diag_scan_at(const struct kof_diag_scan *,

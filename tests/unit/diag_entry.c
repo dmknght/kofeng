@@ -161,7 +161,13 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 	for (i = 0; i < np; i++)
 		if (pl[i].sniff && pl[i].sniff(buf) &&
 		    pl[i].parse && pl[i].parse(buf, view, ctx))
-			return kof_diag_scan(ctx, b, n);
+			/* THE SYSCALL ROUTINE AND ONLY IT. These cases are
+			 * about which byte sequences count as a way into
+			 * the kernel, which is that routine's rule; a node
+			 * from a run would be a different question counted
+			 * in the same total. */
+			return kof_diag_scan_with(ctx, b, n,
+						  KOF_DIAG_RUN_SYSCALL);
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;
