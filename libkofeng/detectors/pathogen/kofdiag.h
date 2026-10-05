@@ -93,6 +93,26 @@ struct kof_diag_in {
  * nothing would have been right; saying "no execute permission" was not.
  */
 #define KOF_DIAG_H_ARG_UNKNOWN (1u << 3)
+/*
+ * A DIRECT SYSTEM CALL WHOSE NUMBER WAS READ AND WHOSE VOCABULARY DOES NOT
+ * APPLY - which today means a `syscall` in a PE.
+ *
+ * NOT THE SAME AS OPAQUE, and keeping them apart is the whole point. Opaque
+ * says the number could not be read; this says it could, and that the
+ * engine refuses to name it because the number space is not the one the
+ * vocabulary knows. A Windows service number resolved through the Linux
+ * table does not fail, it ANSWERS - measured, a Hell's Gate shaped stub
+ * with `mov eax,0x3b` came back as proc-start, because 0x3b is execve on
+ * Linux x86-64.
+ *
+ * AND A READ NUMBER IS ITSELF THE SIGNAL on Windows. A program that reaches
+ * the kernel without going through ntdll is doing the thing hook-evading
+ * loaders do; a `0f 05` sitting in packed data is not. Folded into OPAQUE
+ * the two are one answer, and the interesting one is lost in the noise -
+ * MEASURED on 300 PE samples, where every site was opaque, so a real
+ * direct call would have had nothing to stand out against.
+ */
+#define KOF_DIAG_H_RAW_SYSCALL (1u << 4)
 
 struct kof_diag_hit {
 	uint64_t at;            /* where, as an offset into the object      */

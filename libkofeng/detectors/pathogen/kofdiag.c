@@ -329,6 +329,42 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 
 	bits = ctx->arch == KOF_ARCH_X86_64 ? 64 : 32;
 	n_ar = arg_regs(ctx, &ar);
+
+	/*
+	 * THE SYSCALL VOCABULARY IS LINUX'S, SO IT IS ONLY ASKED ABOUT LINUX.
+	 *
+	 * A `syscall` instruction in a PE carries a WINDOWS service number,
+	 * and the number spaces have nothing to do with each other.
+	 * kof_flow_cap_of_syscall only knows the Linux table, so handing it a
+	 * Windows number does not fail - it ANSWERS, with the wrong word.
+	 *
+	 * MEASURED, and this is why the check is here rather than in a
+	 * comment: a Hell's Gate shaped stub, `mov r10,rcx; mov eax,0x3b;
+	 * syscall`, came back as `proc-start`, because 0x3b is execve on
+	 * Linux x86-64. Nothing about that program starts a process. A second
+	 * stub with 0x18 produced no node at all, because 0x18 is sched_yield
+	 * and the vocabulary has no word for it - silence where there is a
+	 * direct system call, which on Windows is the notable part.
+	 *
+	 * SO THE NODE IS STILL EMITTED, AND THE TWO CASES ARE KEPT APART.
+	 * A number that WAS read is KOF_DIAG_H_RAW_SYSCALL - a program
+	 * reaching the kernel without going through ntdll, which is what the
+	 * hook-evading loaders do and the one thing this walk can say about a
+	 * PE that the import table cannot. A number that was not read is
+	 * OPAQUE, which is what `0f 05` in packed data looks like. Reporting
+	 * both as opaque would bury the first in the second.
+	 */
+	if (ctx->format != KOF_FMT_ELF) {
+		int got = !w->ax_stale &&
+			  kof_kdis_reg(k, KDIS_REG_AX, &nr) && nr <= 0xffffu;
+
+		h = hit_add(s, at, KOF_CAP_NONE, 0);
+		if (h)
+			h->bits |= got ? KOF_DIAG_H_RAW_SYSCALL
+				       : KOF_DIAG_H_OPAQUE;
+		return;
+	}
+
 	if (w->ax_stale || !kof_kdis_reg(k, KDIS_REG_AX, &nr) ||
 	    nr > 0xffffu) {
 		/*
@@ -487,6 +523,44 @@ static uint64_t cand_at(const uint8_t *p, uint64_t from, uint64_t n)
 }
 
 /*
+ * IS THIS INSTRUCTION A WAY INTO THE KERNEL ON *THIS* OBJECT.
+ *
+ * The three encodings are not interchangeable, and treating them as one set
+ * accepts things that cannot execute:
+ *
+ *   0f 05  syscall    64-bit mode only. In a 32-bit image it is not a way
+ *                     into the kernel on any system this engine targets.
+ *   0f 34  sysenter   32-bit. Windows x86 uses it, but only inside ntdll;
+ *                     Linux i386 reaches it through the vDSO.
+ *   cd 80  int 0x80   LINUX's i386 entry, and nothing else's. On a PE it is
+ *                     an interrupt into a vector Windows does not serve.
+ *
+ * MEASURED on 300 PE samples: the only three sites whose syscall number the
+ * walk could read were a `cd 80` and an `0f 05` in a 32-bit image, and an
+ * `0f 34` outside ntdll - all three coincidental bytes inside packed data,
+ * and all three accepted because the test looked at the bytes and not at
+ * what the object is. None of them can run.
+ *
+ * THIS IS NOT THE DIRECT-SYSCALL TEST, and must not be mistaken for one. A
+ * Hell's Gate stub is `mov r10,rcx; mov eax,SSN; syscall` in a 64-bit PE,
+ * which this accepts - as it should - along with every stray `0f 05` in a
+ * 64-bit packed section. Telling those apart needs the r10 shape, and that
+ * is a separate piece of work.
+ */
+static int kernel_entry(const struct kof_obj_ctx *ctx,
+			const struct kdis_insn *in, const uint8_t *p)
+{
+	int bits64 = ctx->arch == KOF_ARCH_X86_64;
+
+	if (in->op == KDIS_SYSCALL)
+		return p[0] == 0x0fu && p[1] == 0x05u ? bits64 : !bits64;
+	if (in->op == KDIS_INT && in->n_op &&
+	    in->o[0].kind == KDIS_O_IMM && in->o[0].imm == 0x80u)
+		return ctx->format == KOF_FMT_ELF;
+	return 0;
+}
+
+/*
  * HOW MUCH CODE AROUND A CANDIDATE IS DECODED.
  *
  * LEAD is the run before it, and it exists to read the arguments: a syscall's
@@ -598,9 +672,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 			 * KDIS_SYSCALL found ZERO nodes in every 32-bit payload here -
 			 * msfvenom's i386 stagers are entirely `int 0x80`.
 			 */
-			if (in.op == KDIS_SYSCALL ||
-			    (in.op == KDIS_INT && in.n_op &&
-			     in.o[0].kind == KDIS_O_IMM && in.o[0].imm == 0x80u)) {
+			if (kernel_entry(ctx, &in, base + in.at)) {
 				at_syscall(s, &k, &w, ctx, in.at);
 				w.ax_stale = 1;
 			} else if (in.op == KDIS_JCC) {
