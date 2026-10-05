@@ -243,6 +243,74 @@ static int arg_regs(const struct kof_obj_ctx *ctx, const uint8_t **out)
  * site dropped because its number could not be read is a site that makes
  * two different programs look alike.
  */
+
+/*
+ * ---- WHICH INPUT OF A CALL EACH ARGUMENT IS ------------------------------
+ *
+ * ONE TABLE. There were two - one in the routine that reads syscalls, one in
+ * the routine that reads imports - because each grew the words it happened to
+ * need. They agreed, today, by luck: nothing made them, and the question they
+ * answer is the same question. A capability is what a syscall and the import
+ * that means the same thing both resolve to, so the role is a property of the
+ * capability and belongs with it, once.
+ *
+ * AND THE ROLES OF ONE CALL MUST BE DISTINCT, which is not a style rule but
+ * the invariant kof_diag_note_in rests on. That function refuses a link whose
+ * (parent, role) it already holds, because a loop arriving at the same site
+ * again has not found a second relation. If two arguments of one call wear
+ * the same word, two DIFFERENT relations become indistinguishable and the
+ * second is silently dropped - MEASURED on a hooked getdents, where
+ * copy_to_user's kernel source and userspace destination were both called
+ * `buffer` and one of them vanished.
+ *
+ * The invariant is checked rather than hoped for: see tests/unit/diag_roles.c,
+ * which walks the whole capability space and fails if any capability assigns
+ * one role twice.
+ */
+uint8_t kof_diag_role_of_arg(uint16_t cap, unsigned i)
+{
+	switch (cap) {
+	/* Bytes through a descriptor: what is filled, and from where. */
+	case KOF_CAP_MEM_READ:
+	case KOF_CAP_READ:
+	case KOF_CAP_NET_READ:
+		return i == 1u ? KOF_DIAG_ROLE_BUFFER
+		     : i == 0u ? KOF_DIAG_ROLE_FD
+			       : KOF_DIAG_ROLE_NONE;
+	case KOF_CAP_MEM_WRITE:
+	case KOF_CAP_WRITE:
+	case KOF_CAP_NET_WRITE:
+		return i == 1u ? KOF_DIAG_ROLE_SOURCE
+		     : i == 0u ? KOF_DIAG_ROLE_FD
+			       : KOF_DIAG_ROLE_NONE;
+	/* Across the user/kernel boundary: one buffer each way, and they are
+	 * different objects - see KOF_DIAG_ROLE_SOURCE. */
+	case KOF_CAP_COPY_FROM_USER:
+	case KOF_CAP_COPY_TO_USER:
+		return i == 0u ? KOF_DIAG_ROLE_BUFFER
+		     : i == 1u ? KOF_DIAG_ROLE_SOURCE
+			       : KOF_DIAG_ROLE_NONE;
+	case KOF_CAP_NET_CONNECT:
+	case KOF_CAP_NET_BIND:
+	case KOF_CAP_NET_LISTEN:
+	case KOF_CAP_NET_ACCEPT:
+	case KOF_CAP_FD_REDIR:
+		return i == 0u ? KOF_DIAG_ROLE_FD : KOF_DIAG_ROLE_NONE;
+	case KOF_CAP_EXEC_IMAGE:
+		return i == 0u ? KOF_DIAG_ROLE_PATH : KOF_DIAG_ROLE_NONE;
+	/* The credentials being installed are the ones that were built. */
+	case KOF_CAP_CRED_SET:
+	/* Both halves of the probe take the same struct kprobe. */
+	case KOF_CAP_KPROBE_REG:
+	case KOF_CAP_KPROBE_UNREG:
+	/* The list entry being taken out or put back. */
+	case KOF_CAP_LIST_HIDE:
+		return i == 0u ? KOF_DIAG_ROLE_BUFFER : KOF_DIAG_ROLE_NONE;
+	default:
+		return KOF_DIAG_ROLE_NONE;
+	}
+}
+
 struct kof_diag_hit *kof_diag_hit_of(struct kof_diag_scan *s, uint32_t i)
 {
 	return (s && i < s->n_hit) ? &s->hit[i] : 0;

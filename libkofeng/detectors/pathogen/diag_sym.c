@@ -80,54 +80,6 @@ struct relgather {
 	int             full;
 };
 
-/*
- * WHICH INPUT OF THE CALLEE EACH ARGUMENT REGISTER IS.
- *
- * By capability, exactly as the emulate routine does it, because the role is
- * a property of what the call MEANS and not of the ABI slot it arrived in.
- * The kernel words are the ones a module actually reaches:
- *
- *   cred-modify    commit_creds(new) - the credentials being installed are
- *                  the ones cred-prepare built, and that single link is the
- *                  whole of "give me root".
- *   kmodule-*      the probe, the list entry, the user buffer.
- */
-uint8_t kof_diag_sym_role_of_arg(uint16_t cap, unsigned i)
-{
-	switch (cap) {
-	case KOF_CAP_CRED_SET:
-		return i == 0u ? KOF_DIAG_ROLE_BUFFER : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_KPROBE_UNREG:
-	case KOF_CAP_KPROBE_REG:
-		/* Both halves take the SAME struct kprobe. That shared
-		 * argument is what makes register-then-unregister one idiom
-		 * rather than two unrelated calls. */
-		return i == 0u ? KOF_DIAG_ROLE_BUFFER : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_COPY_FROM_USER:
-	case KOF_CAP_COPY_TO_USER:
-		return i == 0u ? KOF_DIAG_ROLE_BUFFER
-		     : i == 1u ? KOF_DIAG_ROLE_FD
-			       : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_LIST_HIDE:
-		return i == 0u ? KOF_DIAG_ROLE_BUFFER : KOF_DIAG_ROLE_NONE;
-	/* The generic descriptor calls AND the file-specific ones: the role
-	 * an argument plays is the same whatever the descriptor turns out to
-	 * be, and the word is corrected later - see diag_refine. Listing only
-	 * the file spelling is how the links vanished when read(2) was moved
-	 * out of KOF_CG_FILE. */
-	case KOF_CAP_MEM_READ:
-	case KOF_CAP_MEM_WRITE:
-	case KOF_CAP_READ:
-	case KOF_CAP_WRITE:
-		return i == 1u ? KOF_DIAG_ROLE_BUFFER
-		     : i == 0u ? KOF_DIAG_ROLE_FD
-			       : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_EXEC_IMAGE:
-		return i == 0u ? KOF_DIAG_ROLE_PATH : KOF_DIAG_ROLE_NONE;
-	default:
-		return KOF_DIAG_ROLE_NONE;
-	}
-}
 
 /* Does this call hand something on that a later one could be holding. */
 int kof_diag_sym_hands_on(uint16_t cap)
@@ -165,7 +117,7 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	g->site[g->n].at = at;
 	g->site[g->n].cap = cap;
 	for (i = 0; i < 6u; i++)
-		g->site[g->n].argrole[i] = kof_diag_sym_role_of_arg(cap, i);
+		g->site[g->n].argrole[i] = kof_diag_role_of_arg(cap, i);
 	g->n++;
 }
 

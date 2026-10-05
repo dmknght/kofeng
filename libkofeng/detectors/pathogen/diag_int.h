@@ -76,10 +76,14 @@ uint16_t kof_diag_org_of(const struct walk *w, uint8_t r);
 void     kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node);
 void     kof_diag_org_step(struct walk *w, const struct kdis_insn *in);
 
-/* What the symbol routine knows about a call, which the emulate routine needs
- * too: the role each SysV argument plays, and whether the call hands a value
- * on. One statement of it, in diag_sym.c. */
-uint8_t kof_diag_sym_role_of_arg(uint16_t cap, unsigned i);
+/*
+ * Which input of a call each argument is - ONE statement of it, in kofdiag.c,
+ * because the question is the same whichever routine is asking. The roles of
+ * one capability are distinct, and tests/unit/diag_roles.c fails the build
+ * if they stop being: kof_diag_note_in's refusal of a repeated (parent, role)
+ * is only correct while they are.
+ */
+uint8_t kof_diag_role_of_arg(uint16_t cap, unsigned i);
 int     kof_diag_sym_hands_on(uint16_t cap);
 extern const uint8_t kof_diag_sysv_arg[6];
 

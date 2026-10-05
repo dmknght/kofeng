@@ -98,6 +98,7 @@
 #include "../../kofcore/kofmod/kofcap.h"
 #include "../../kofcore/kofmod/elf.h"
 #include "../../analyzers/parsers/binaries/disasm/nucleo.h"
+#include "../../analyzers/parsers/binaries/disasm/decode.h"
 #include "../../disinfect/pzero.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../extractors/unpack/emu_unpack.h"
@@ -125,6 +126,8 @@
 /* Room past the file for .bss and anything else that is declared but not
  * stored. */
 #define DIAG_REL_SLACK 0x40000ull
+/* Where %gs points: the per-cpu area and the stack guard. */
+#define DIAG_REL_PERCPU 0x30000000ull
 /* Where the file image sits. Offset zero is the null page and cannot be
  * mapped; the bias is private to this file. */
 #define DIAG_REL_BASE  0x100000ull
@@ -192,41 +195,6 @@ static int cap_hands_on_value(uint16_t cap)
 	}
 }
 
-/*
- * WHICH INPUT OF THE CHILD THIS ARGUMENT IS.
- *
- * By capability and argument index: the role is a property of what the call
- * MEANS, the index is where the ABI happens to put it.
- */
-static uint8_t role_of_arg(uint16_t cap, unsigned i)
-{
-	switch (cap) {
-	/* The generic descriptor calls AND the file-specific ones: the role
-	 * an argument plays is the same whatever the descriptor turns out to
-	 * be, and the word is corrected later - see diag_refine. Listing only
-	 * the file spelling is how the links vanished when read(2) was moved
-	 * out of KOF_CG_FILE. */
-	case KOF_CAP_MEM_READ:
-	case KOF_CAP_MEM_WRITE:
-	case KOF_CAP_READ:
-	case KOF_CAP_WRITE:
-	case KOF_CAP_NET_READ:
-	case KOF_CAP_NET_WRITE:
-		return i == 1u ? KOF_DIAG_ROLE_BUFFER
-		     : i == 0u ? KOF_DIAG_ROLE_FD
-			       : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_NET_CONNECT:
-	case KOF_CAP_NET_BIND:
-	case KOF_CAP_NET_LISTEN:
-	case KOF_CAP_NET_ACCEPT:
-	case KOF_CAP_FD_REDIR:
-		return i == 0u ? KOF_DIAG_ROLE_FD : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_EXEC_IMAGE:
-		return i == 0u ? KOF_DIAG_ROLE_PATH : KOF_DIAG_ROLE_NONE;
-	default:
-		return KOF_DIAG_ROLE_NONE;
-	}
-}
 
 /*
  * ---- EVERY CALL MUST BRANCH THE SUCCESSFUL WAY ----------------------------
@@ -525,6 +493,25 @@ static struct kof_emu *build_rel_image(const struct kof_obj_ctx *ctx,
 	kof_emu_set_reg(em, KOF_EMU_RSP, DIAG_REL_STACK - 0x8000u);
 	kof_emu_set_reg(em, KOF_EMU_RBP, DIAG_REL_STACK - 0x8000u);
 
+	/*
+	 * AND SOMEWHERE FOR %gs TO POINT, which kernel code reads in its
+	 * third instruction.
+	 *
+	 * Every function compiled with the stack protector begins
+	 * `mov %gs:0x0(%rip),%rdi`, and the per-cpu area lives there too.
+	 * With the base left at zero that is a read of address zero and the
+	 * span dies before it has done anything - MEASURED, Diamorphine's
+	 * init_module got three instructions in, 157 bytes short of the
+	 * `mov cr0` the walk had been opened for.
+	 *
+	 * The page is scratch and its contents are not read as the program's:
+	 * what comes back is a guard value the code only ever compares
+	 * against itself.
+	 */
+	if (kof_emu_map(em, DIAG_REL_PERCPU, 0, 0, KOF_EMU_PAGE * 16u,
+			KOF_EMU_R | KOF_EMU_W))
+		kof_emu_set_seg_base(em, 5u, DIAG_REL_PERCPU);
+
 	{
 		struct relapply ra;
 		kof_buf f;
@@ -651,6 +638,26 @@ static void gather_fn(void *user, uint64_t va, uint64_t sz, const char *nm)
  */
 static int worth_remembering(uint64_t v, uint64_t size)
 {
+	/*
+	 * AN ANONYMOUS TOKEN COUNTS, BUT ONLY INSIDE ITS OWN SPAN.
+	 *
+	 * It stands for a call nothing here explains - kzalloc, say - and two
+	 * calls in the same function receiving it ARE holding one object:
+	 * copy_from_user(buf, ubuf, n) then copy_to_user(ubuf, buf, n) is the
+	 * hooked getdents, and the buffer is exactly such a token.
+	 *
+	 * ACROSS SPANS IT IS MEANINGLESS. The pages are handed out from the
+	 * top of the arena downwards starting fresh each time, so the first
+	 * anonymous page of one function is the same address as the first of
+	 * the next. MEASURED when the table was made to persist:
+	 * hacked_getdents' buffer linked to hacked_getdents64's, two
+	 * unrelated buffers in two unrelated functions, and the spurious
+	 * matches pushed real links out of the four slots a node has.
+	 *
+	 * The table is per span, which is what keeps this sound. Anything
+	 * that wants to relate two FUNCTIONS has to rest on a fixed address -
+	 * a relocation - and that is known without running at all.
+	 */
 	if (v >= DIAG_TOK_BASE &&
 	    v < DIAG_TOK_BASE + (uint64_t)DIAG_TOK_SPAN * KOF_EMU_PAGE)
 		return 1;
@@ -784,6 +791,30 @@ static uint16_t callee_node(const struct kof_diag_scan *s,
 	return 0xffffu;
 }
 
+/*
+ * DOES THIS FUNCTION CONTAIN A CONTROL-REGISTER WRITE.
+ *
+ * The node count alone is the wrong gate, and it threw away the one function
+ * that mattered: Diamorphine's init_module calls no import this vocabulary
+ * has a word for, so it held zero nodes and was refused - while containing
+ * the `mov cr0` that is the centre of the rootkit. A bound on cost must not
+ * delete evidence.
+ *
+ * BYTES TO DECIDE WHETHER TO LOOK, THE DECODER TO DECIDE WHAT IT IS. `0f 22`
+ * in a displacement answers yes and costs one walk; an instruction that is
+ * not in the bytes cannot be decoded out of them. The same over-approximation
+ * the syscall routine uses for `0f 05`, for the same reason.
+ */
+static int has_cr_write(const uint8_t *p, uint64_t n)
+{
+	uint64_t i;
+
+	for (i = 0; i + 1u < n; i++)
+		if (p[i] == 0x0fu && p[i + 1u] == 0x22u)
+			return 1;
+	return 0;
+}
+
 static void run_rel_gaps(struct kof_diag_scan *s,
 			 const struct kof_obj_ctx *ctx,
 			 const struct kof_elf_info *ei,
@@ -819,9 +850,28 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 	int changed = 0;
 
 	for (j = 0; j < fg.n; j++) {
+		/*
+		 * RESET AT EVERY FUNCTION, and this was tried the other way.
+		 *
+		 * An address looks like it should survive the function it was
+		 * seen in - module_hide and module_show hand the same
+		 * THIS_MODULE->list to list_del and list_add, and that
+		 * relation is real. But each span BUILDS ITS OWN IMAGE, so a
+		 * local in one function lands at the same emulated address as
+		 * an unrelated local in the next. MEASURED: hacked_getdents'
+		 * buffer linked to hacked_getdents64's, two different
+		 * functions and two different buffers, and the spurious
+		 * matches pushed the kprobe pairs out of the four slots a
+		 * node has.
+		 *
+		 * A relation between functions is real only for an object
+		 * with a fixed address, and a fixed address is a RELOCATION -
+		 * known without running anything. That is where list_del and
+		 * list_add belong, not here.
+		 */
 		struct seenval seen[DIAG_REL_SEEN];
 		struct kof_emu *em;
-		uint32_t n_seen = 0, step;
+		uint32_t n_seen = 0, step, anon = DIAG_TOK_SPAN - 1u;
 		uint64_t lo = fns[j].va, hi;
 
 		if (lo >= size)
@@ -882,7 +932,11 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 					     0xffffu))
 						reach++;
 				}
-				if (reach < 2u)
+				/* AND A FUNCTION THAT TOUCHES cr0 IS WALKED
+				 * WHATEVER ELSE IS IN IT - see has_cr_write. */
+				if (reach < 2u &&
+				    !(hi <= size &&
+				      has_cr_write(base + lo, hi - lo)))
 					continue;
 			}
 		}
@@ -923,7 +977,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 
 					for (k = 0; k < 6u && h; k++) {
 						uint8_t role =
-						  kof_diag_sym_role_of_arg(
+						  kof_diag_role_of_arg(
 							h->cap, k);
 						uint64_t v = kof_emu_get_reg(em,
 						  kof_diag_sysv_arg[k]);
@@ -996,6 +1050,39 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 							seen[n_seen].node = src;
 							n_seen++;
 						}
+					} else if (anon) {
+						/*
+						 * A CALL WHOSE RESULT NOTHING
+						 * HERE EXPLAINS STILL HAS TO
+						 * LOOK LIKE SUCCESS.
+						 *
+						 * Clearing the register leaves
+						 * zero, and zero is what every
+						 * caller tests for failure.
+						 * MEASURED: Diamorphine's
+						 * init_module calls
+						 * findmyinterest, reads zero
+						 * back, decides the lookup
+						 * failed and jumps to its
+						 * error return - nine
+						 * instructions in, past
+						 * nothing, 110 bytes short of
+						 * the cr0 write the walk was
+						 * opened for.
+						 *
+						 * An anonymous page from the
+						 * arena is non-zero so the
+						 * branch goes the other way,
+						 * mapped so dereferencing it
+						 * does not fault, and belongs
+						 * to no node so it can never
+						 * be mistaken for a link.
+						 */
+						kof_emu_set_reg(em,
+							KOF_EMU_RAX,
+							DIAG_TOK_BASE +
+							(uint64_t)(--anon) *
+							KOF_EMU_PAGE);
 					}
 				}
 				skipped = 1;
@@ -1003,6 +1090,116 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			}
 			if (skipped)
 				continue;
+
+			/*
+			 * ---- A PROTECTION TURNED OFF, WHICH HAS NO NAME ---
+			 *
+			 * `mov cr0, reg` is how a kernel rootkit makes the
+			 * kernel's own text writable before it patches a
+			 * syscall table. It is INLINE ASSEMBLY: no symbol, no
+			 * relocation, no call, so nothing the relocation
+			 * table lists ever stops on it and the centre of the
+			 * rootkit was invisible.
+			 *
+			 * RECOGNISED THROUGH THE ENGINE'S DECODER, not a list
+			 * of bytes. kof_decode_x86 already classifies a
+			 * control-register move as KDIS_MOV_SPECIAL with
+			 * KDIS_SR_CR; asking it is asking the one thing in
+			 * the tree that knows x86 encodings. The vocabulary
+			 * has had a row for this since it was written -
+			 * mov_cr0 -> kmodule-cr-write - and nothing had ever
+			 * reached it.
+			 *
+			 * ONE NODE PER SITE, as everywhere else: Diamorphine
+			 * clears the bit and puts it back, and a loop that
+			 * hooks and unhooks arrives at the same two
+			 * instructions each time.
+			 */
+			if (rip < size) {
+				struct kdis_insn ci;
+				uint32_t clen = kof_decode_x86(base + rip,
+					(uint32_t)(size - rip > 16u ? 16u
+						   : size - rip),
+					rip, 64u, &ci);
+
+				/*
+				 * AND OVER AN INDIRECT CALL. `call *(pv_ops+k)`
+				 * goes through a pointer the loader fills; the
+				 * symbol is undefined here so the slot is zero
+				 * and stepping it calls address zero. Diamorphine
+				 * reads cr0 that way, two instructions before it
+				 * writes it, so the span died before reaching
+				 * the thing it was opened for. The decoder says
+				 * it is a call through memory; no list of
+				 * encodings is involved.
+				 */
+				if (clen && ci.op == KDIS_CALL && ci.n_op &&
+				    ci.o[0].kind != KDIS_O_REL) {
+					kof_emu_set_rip(em, DIAG_REL_BASE +
+							rip + ci.len);
+					continue;
+				}
+				/*
+				 * ONE OPERAND, NOT TWO. decode_x86 keeps only
+				 * the operands a sweep tracks, and a control
+				 * register is not one - so `mov cr0,rax`
+				 * arrives with the GPR in o[0] and nothing
+				 * else. Requiring two was why this never
+				 * fired although the walk reached the
+				 * instruction.
+				 *
+				 * The GPR being READ is what makes it a write
+				 * TO cr0 rather than a read of it.
+				 */
+				if (clen && ci.op == KDIS_MOV_SPECIAL &&
+				    ci.cond == KDIS_SR_CR && ci.n_op &&
+				    ci.o[0].kind == KDIS_O_REG &&
+				    (ci.o[0].flags & KDIS_OF_READ)) {
+					uint32_t t, live = kof_diag_scan_count(s);
+					int seen_site = 0;
+
+					/* LIVE COUNT, not the one taken
+					 * before the walk: a node added by
+					 * this very loop has to be visible
+					 * to it, or the same site is added
+					 * again on the next pass. A node is
+					 * a site, however many times the
+					 * walk arrives. */
+					for (t = 0; t < live; t++) {
+						const struct kof_diag_hit *p =
+						  kof_diag_scan_at(s, t);
+
+						if (p && p->at == rip &&
+						    p->cap == KOF_CAP_PROT_OFF)
+							seen_site = 1;
+					}
+					if (!seen_site)
+						kof_diag_hit_add(s, rip,
+							KOF_CAP_PROT_OFF, 0);
+					/*
+					 * AND STEP OVER IT. The interpreter
+					 * answers UNSUPPORTED for a control
+					 * register move - correctly, it does
+					 * not model one - and that ends the
+					 * span at the exact instruction the
+					 * span was opened for. Everything
+					 * after it is the hook itself: the
+					 * stores into the table and the
+					 * second write that puts the
+					 * protection back.
+					 *
+					 * Skipping is sound here because
+					 * nothing downstream depends on
+					 * cr0's value. The guest never reads
+					 * it back for anything but restoring
+					 * it, and no link is ever carried
+					 * through a control register.
+					 */
+					kof_emu_set_rip(em, DIAG_REL_BASE +
+							rip + ci.len);
+					continue;
+				}
+			}
 
 			/*
 			 * A SPAN THAT CANNOT BE WALKED ENDS QUIETLY. An
@@ -1220,7 +1417,7 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 		 * records the link once.
 		 */
 		for (k = 0; k < 6u && h; k++) {
-			uint8_t role = role_of_arg(cap, k);
+			uint8_t role = kof_diag_role_of_arg(cap, k);
 
 			if (role == KOF_DIAG_ROLE_NONE)
 				continue;

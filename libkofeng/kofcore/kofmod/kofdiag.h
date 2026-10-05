@@ -95,6 +95,23 @@ enum kof_diag_role {
 	KOF_DIAG_ROLE_TARGET,    /* an indirect jump or call: where it goes */
 	KOF_DIAG_ROLE_FD,        /* read/connect/close: the descriptor    */
 	KOF_DIAG_ROLE_PATH,      /* open/exec: the name                   */
+	/*
+	 * THE MEMORY READ FROM, as against BUFFER which is the memory
+	 * WRITTEN. A call with one of each needs both words.
+	 *
+	 * copy_to_user(to, from, n) is the case, and it is not a corner one:
+	 * a hooked getdents reads a directory listing in, edits it, and
+	 * writes it back, so the pair shares TWO objects - the kernel buffer
+	 * it edits in and the userspace buffer the caller asked it to fill.
+	 * With one word for both, the two relations collapse: kof_diag_note_in
+	 * refuses the second as a repeat of the first, and the one it keeps is
+	 * whichever came first.
+	 *
+	 * That refusal is right for a LOOP - the same site reached twice has
+	 * not found a second relation - and it was hiding this. A role has to
+	 * be precise enough that no call has two inputs wearing one.
+	 */
+	KOF_DIAG_ROLE_SOURCE,
 	KOF_DIAG_ROLE_COUNT
 };
 
