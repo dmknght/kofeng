@@ -84,6 +84,32 @@ static uint64_t kdis_off_to_va(struct kof_kdis *k,
 		const struct kof_elf_info *e = kof_elf(ctx);
 		uint32_t i;
 
+		/*
+		 * A RELOCATABLE OBJECT HAS NO LOAD ADDRESS, AND THE FILE IS
+		 * THE ONLY COHERENT ADDRESS SPACE IT HAS.
+		 *
+		 * A .ko carries no program header at all - readelf says so in
+		 * as many words - so the loop below finds nothing and every
+		 * instruction is decoded with an address of KOF_BROKEN. The
+		 * consequence is silent and total: a relative branch is
+		 * computed from that address, so `target` is broken for every
+		 * call in the object, and anything matching a call against a
+		 * relocation table compares two numbers that can never be
+		 * equal. MEASURED - Diamorphine yielded 0 nodes from the
+		 * symbol routine for this and no other reason.
+		 *
+		 * The identity is not a guess: a section's sh_addr in an
+		 * ET_REL is zero, the linker has not placed anything yet, and
+		 * kof_elf_relcalls already reports its sites as file offsets.
+		 * Both sides then speak the same numbers.
+		 */
+		if (!e->seg_count) {
+			k->map_lo = 0;
+			k->map_hi = (uint64_t)-1;
+			k->map_delta = 0;
+			k->map_ok = 1;
+			return off;
+		}
 		for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
 			const struct kof_elf_seg *s = &e->seg[i];
 

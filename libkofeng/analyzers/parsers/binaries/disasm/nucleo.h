@@ -237,6 +237,10 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
  * not one of the words. An `@` ends the comparison, so "socket@GLIBC_2.4"
  * reads as "socket". */
 uint16_t kof_flow_cap_of_name(const char *sym);
+/* The capability this one is a special case of, or KOF_CAP_NONE. See the
+ * note at the definition: a rule names the level it means, and the matcher
+ * accepts anything more specific. */
+uint16_t kof_flow_cap_generic(uint16_t cap);
 
 /* What that name does with its arguments - KOF_FLOW_ROLE_*. */
 uint8_t kof_flow_role_of_name(const char *sym);

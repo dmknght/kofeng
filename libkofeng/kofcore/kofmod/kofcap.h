@@ -79,6 +79,43 @@ enum kof_cap_group {
 	KOF_CG_NS,
 	KOF_CG_SERVICE,
 	KOF_CG_DATA,
+	/*
+	 * READ AND WRITE THROUGH A DESCRIPTOR, SOURCE NOT DETERMINED.
+	 *
+	 * `read(2)` was in KOF_CG_FILE and called file-read. It is not a file
+	 * operation: it takes a descriptor, and what the descriptor IS - a
+	 * file, a socket, a pipe, a terminal - the syscall number cannot say.
+	 * MEASURED on msfvenom's x86-64 stager, which reads its second stage
+	 * from a socket: the engine reported file-read while holding, as a
+	 * proven link, the fact that the descriptor came from socket().
+	 *
+	 * So the generic calls move here and the word says only what is known:
+	 * bytes moved through a descriptor, into or out of a buffer.
+	 *
+	 * AND IT IS NOT RENAMED WHEN THE DESCRIPTOR IS IDENTIFIED. That was
+	 * tried: a link proving the fd came from socket() rewrote the node to
+	 * net-recv. It is wrong twice over.
+	 *
+	 * The LINK ALREADY SAYS IT. An fd-role link pointing at a net-open IS
+	 * the statement "this descriptor is a socket"; putting it on the node
+	 * as well is one fact with two carriers, and the two can disagree.
+	 *
+	 * And the node has MORE THAN ONE LINK. meterpreter's call is
+	 * read(socket-fd, alloc-exec-buffer, n) - bytes moving from a socket
+	 * into executable memory. Naming the node after its fd throws the
+	 * buffer link's meaning away, and no single word carries both: the
+	 * fact is the pair of links. MEASURED, the rename also broke every
+	 * rule that named the generic word and forced a specialisation
+	 * mechanism into the matcher to undo its own damage.
+	 *
+	 * The calls that really are file operations because they take a FILE
+	 * and not a descriptor - vfs_read, kernel_read, ReadFile, ZwReadFile -
+	 * stay where they were.
+	 *
+	 * ADDED AT THE END. The groups are part of every capability id and a
+	 * renumbering breaks every rule that named one.
+	 */
+	KOF_CG_IO,
 	KOF_CG_COUNT
 };
 
@@ -86,7 +123,12 @@ enum kof_cap_group {
 enum { KOF_CA_BARE_SLEEP = 1, KOF_CA_BARE_ANTI_DEBUG };
 enum { KOF_CA_MEM_ALLOC = 1, KOF_CA_MEM_ALLOC_EXEC, KOF_CA_MEM_ALLOC_HEAP, KOF_CA_MEM_EXEC, KOF_CA_MEM_MEMFD_CREATE };
 enum { KOF_CA_FILE_OPEN = 1, KOF_CA_FILE_READ, KOF_CA_FILE_WRITE, KOF_CA_FILE_DELETE, KOF_CA_FILE_RENAME, KOF_CA_FILE_PERM_SET, KOF_CA_FILE_TIMESTAMP_SET };
-enum { KOF_CA_NET_OPEN = 1, KOF_CA_NET_OPEN_RAW, KOF_CA_NET_CONNECT, KOF_CA_NET_BIND, KOF_CA_NET_LISTEN, KOF_CA_NET_ACCEPT, KOF_CA_NET_SEND, KOF_CA_NET_RECV, KOF_CA_NET_GETADDR, KOF_CA_NET_ADDR };
+enum { KOF_CA_NET_OPEN = 1, KOF_CA_NET_OPEN_RAW, KOF_CA_NET_CONNECT, KOF_CA_NET_BIND, KOF_CA_NET_LISTEN, KOF_CA_NET_ACCEPT, KOF_CA_NET_SEND, KOF_CA_NET_RECV, KOF_CA_NET_GETADDR, KOF_CA_NET_ADDR,
+       /* HTTP is a layer above, not a spelling of the same thing - see
+	* KOF_CAP_HTTP_SEND. Appended, because renumbering breaks every rule
+	* that named one of the words before it. */
+       KOF_CA_NET_HTTP_OPEN, KOF_CA_NET_HTTP_CONNECT, KOF_CA_NET_HTTP_SEND,
+       KOF_CA_NET_HTTP_RECV, KOF_CA_NET_HTTP_FETCH };
 enum { KOF_CA_PIPE_CREATE = 1, KOF_CA_PIPE_NAMED_CREATE };
 enum { KOF_CA_PROC_START = 1, KOF_CA_PROC_FORK, KOF_CA_PROC_BACKGROUND, KOF_CA_PROC_ENUM, KOF_CA_PROC_OPEN, KOF_CA_PROC_MEM_ACCESS, KOF_CA_PROC_CONTROL, KOF_CA_PROC_THREAD_CREATE, KOF_CA_PROC_FD_REDIRECT, KOF_CA_PROC_SELF_NAME };
 enum { KOF_CA_LIB_LOAD = 1, KOF_CA_LIB_API_RESOLVE, KOF_CA_LIB_NAME_HASH, KOF_CA_LIB_PEB_WALK, KOF_CA_LIB_CALL_REGISTER };
@@ -158,6 +200,9 @@ enum kof_flow_cap {
 	 */
 	KOF_CAP_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_READ),
 	KOF_CAP_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_WRITE),
+	/* Through a descriptor, source unknown - see KOF_CG_IO. */
+	KOF_CAP_MEM_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_IO, 1u),
+	KOF_CAP_MEM_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_IO, 2u),
 	KOF_CAP_FILE_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_OPEN),
 	KOF_CAP_MEMFD = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_MEMFD_CREATE),        /* a file that never touches a filesystem */
 	/*
@@ -781,6 +826,34 @@ enum kof_flow_cap {
 	 */
 	KOF_CAP_NET_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_RECV),
 	KOF_CAP_NET_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_SEND),
+	/*
+	 * HTTP IS NOT A SOCKET SEND, AND FLATTENING IT ONTO ONE LOSES THE
+	 * LAYER.
+	 *
+	 * WinHttpSendRequest and send(2) were both net-send. They are not the
+	 * same act: one hands a request to a stack that will open the
+	 * connection, speak the protocol and follow the redirect; the other
+	 * puts bytes on a descriptor the program already owns. A rule about
+	 * raw socket traffic - a bot speaking its own protocol on a port -
+	 * matched every HTTP client on the machine, and a rule about HTTP
+	 * could not be written at all.
+	 *
+	 * AND URLDownloadToFile IS NOT A CONNECT. It fetches a URL and writes
+	 * it to a file, in one call: the whole of a dropper's network half.
+	 * Calling it net-connect reports the least interesting thing about it.
+	 * It gets its own word, http-fetch, because no pair of the others
+	 * composes to it - there is no send and no recv to link.
+	 */
+	KOF_CAP_HTTP_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+				       KOF_CA_NET_HTTP_OPEN),
+	KOF_CAP_HTTP_CONNECT = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+					  KOF_CA_NET_HTTP_CONNECT),
+	KOF_CAP_HTTP_SEND = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+				       KOF_CA_NET_HTTP_SEND),
+	KOF_CAP_HTTP_RECV = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+				       KOF_CA_NET_HTTP_RECV),
+	KOF_CAP_HTTP_FETCH = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+					KOF_CA_NET_HTTP_FETCH),
 	/*
 	 * AN ANONYMOUS PIPE, AND IT IS NOT A FINDING.
 	 *

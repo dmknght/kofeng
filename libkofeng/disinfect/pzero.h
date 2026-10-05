@@ -101,6 +101,8 @@ int kof_pz_is_code(const struct kof_obj_ctx *ctx, uint64_t off);
  * KOF_BROKEN when no region of the file is mapped there.
  */
 uint64_t kof_pz_addr_to_off(const struct kof_obj_ctx *ctx, uint64_t addr);
+/* And back - KOF_BROKEN for an offset in no mapped region. */
+uint64_t kof_pz_off_to_addr(const struct kof_obj_ctx *ctx, uint64_t off);
 
 /*
  * THE MASK A VIRUS PUT OVER THE BYTES IT SAVED.

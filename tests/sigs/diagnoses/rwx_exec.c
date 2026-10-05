@@ -63,7 +63,14 @@ KOF_DIAG_ANCHOR(a, "mem-alloc-exec", KOF_FLOWF_WX);
  * pointer from `a`. Read as a sequence, a node inserted between the two would
  * break the match, and it must not.
  */
-KOF_DIAG_FROM(r, a, "file-read", KOF_DIAG_ROLE_BUFFER);
+/*
+ * "mem-read" AND NOT "net-recv", though this sample's read is on a socket.
+ * The diagnose is true of a loader filling the region from a file and of a
+ * stager filling it from the network; naming the specific word would fit this
+ * one sample and refuse the other. The matcher accepts anything more specific
+ * - see kof_flow_cap_generic.
+ */
+KOF_DIAG_FROM(r, a, "mem-read", KOF_DIAG_ROLE_BUFFER);
 KOF_DIAG_FROM(x, a, "exec-memory", KOF_DIAG_ROLE_TARGET);
 
 /*

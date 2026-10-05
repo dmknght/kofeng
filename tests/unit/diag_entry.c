@@ -203,7 +203,10 @@ int main(void)
 		s = scan(b, n, &ctx, "i386 ELF int 0x80");
 		CK(count(s) == 1u);
 		if (s && count(s) == 1u)
-			CK(kof_diag_scan_at(s, 0)->cap == KOF_CAP_WRITE);
+			/* mem-write, not file-write: write(2) takes a
+			 * descriptor and nothing here says what it is. See
+			 * KOF_CG_IO. */
+			CK(kof_diag_scan_at(s, 0)->cap == KOF_CAP_MEM_WRITE);
 		kof_diag_scan_free(s);
 	}
 

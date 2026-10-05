@@ -16,6 +16,8 @@
 #include <stdint.h>
 
 #include "kofdiag.h"
+#include "../../analyzers/parsers/binaries/disasm/kdis.h"
+#include "../../kofcore/kofmod/kdis.h"
 
 struct kof_diag_scan {
 	struct kof_diag_hit *hit;
@@ -44,10 +46,50 @@ struct kof_diag_hit *kof_diag_hit_of(struct kof_diag_scan *s, uint32_t i);
  * call again has not found a second link. */
 void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role);
 
+/*
+ * ---- THE ORIGIN MAP, WHICH EVERY STATIC ROUTINE NEEDS --------------------
+ *
+ * Which earlier node, if any, a register is carrying the value of. It is the
+ * whole of the static link model, and it is here rather than in one routine
+ * because the second routine - imported calls instead of syscalls - needs
+ * exactly the same answer about exactly the same registers. Two copies would
+ * be two things to keep right against one corpus.
+ */
+#define ORG_NONE  0xffffu
+#define ORG_STACK 0xfffeu
+#define ORG_STK   32u
+
+struct org {
+	uint16_t node;          /* index, ORG_NONE, or ORG_STACK */
+};
+
+struct walk {
+	struct org reg[16];
+	struct org stk[ORG_STK];
+	uint32_t   n_stk;
+	uint64_t   carry_to;
+	uint8_t    carry_armed, carry_live, ax_stale;
+};
+
+void     kof_diag_org_clear(struct walk *w, uint8_t r);
+uint16_t kof_diag_org_of(const struct walk *w, uint8_t r);
+void     kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node);
+void     kof_diag_org_step(struct walk *w, const struct kdis_insn *in);
+
+/* What the symbol routine knows about a call, which the emulate routine needs
+ * too: the role each SysV argument plays, and whether the call hands a value
+ * on. One statement of it, in diag_sym.c. */
+uint8_t kof_diag_sym_role_of_arg(uint16_t cap, unsigned i);
+int     kof_diag_sym_hands_on(uint16_t cap);
+extern const uint8_t kof_diag_sysv_arg[6];
+
 /* The routines. One per KOF_DIAG_RUN_* bit, each in its own file. */
 void kof_diag_run_syscall(struct kof_diag_scan *s,
 			  const struct kof_obj_ctx *ctx,
 			  const uint8_t *base, uint64_t size);
+void kof_diag_run_symbol(struct kof_diag_scan *s,
+			 const struct kof_obj_ctx *ctx,
+			 const uint8_t *base, uint64_t size);
 void kof_diag_run_emulate(struct kof_diag_scan *s,
 			  const struct kof_obj_ctx *ctx,
 			  const uint8_t *base, uint64_t size);

@@ -48,6 +48,104 @@
  * has needed more than three. */
 #define DIAG_MAX_IN 4u
 
+void kof_diag_org_clear(struct walk *w, uint8_t r)
+{
+	if (r < 16u)
+		w->reg[r].node = ORG_NONE;
+}
+
+uint16_t kof_diag_org_of(const struct walk *w, uint8_t r)
+{
+	return r < 16u ? w->reg[r].node : ORG_NONE;
+}
+
+void kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node)
+{
+	if (r < 16u)
+		w->reg[r].node = node;
+}
+
+/*
+ * FORGET WHAT EVERY REGISTER THIS INSTRUCTION WRITES CAME FROM, then put
+ * back the one case this follows.
+ *
+ * `wmask` and not the first operand, for the reason kdis_track records: an
+ * instruction writes registers it does not name, and names registers it
+ * only reads. Getting that backwards on `mul` cost the i386 samples their
+ * whole network half.
+ */
+void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
+{
+	uint8_t r, d, e;
+
+	if (in->op == KDIS_PUSH) {
+		uint16_t v = ORG_NONE;
+
+		if (in->n_op && in->o[0].kind == KDIS_O_REG)
+			v = kof_diag_org_of(w, in->o[0].reg);
+		if (w->n_stk < ORG_STK)
+			w->stk[w->n_stk].node = v;
+		w->n_stk++;
+		return;
+	}
+	if (in->op == KDIS_POP) {
+		uint16_t v = ORG_NONE;
+
+		if (w->n_stk) {
+			w->n_stk--;
+			if (w->n_stk < ORG_STK)
+				v = w->stk[w->n_stk].node;
+		}
+		if (in->n_op && in->o[0].kind == KDIS_O_REG)
+			kof_diag_org_set(w, in->o[0].reg, v);
+		return;
+	}
+	if (in->op == KDIS_XCHG && in->n_op > 1u &&
+	    in->o[0].kind == KDIS_O_REG && in->o[1].kind == KDIS_O_REG) {
+		uint16_t a;
+
+		d = in->o[0].reg; e = in->o[1].reg;
+		a = kof_diag_org_of(w, d);
+		kof_diag_org_set(w, d, kof_diag_org_of(w, e));
+		kof_diag_org_set(w, e, a);
+		return;
+	}
+	if (in->op == KDIS_MOV && in->n_op > 1u &&
+	    in->o[0].kind == KDIS_O_REG && in->o[0].size >= 4u) {
+		if (in->o[1].kind == KDIS_O_REG) {
+			/*
+			 * A VALUE TAKEN FROM THE STACK POINTER IS A STACK
+			 * ADDRESS, and that is a provenance of its own.
+			 * msfvenom's i386 stager makes the stack executable
+			 * and jumps into it; mprotect returns 0, so there is
+			 * no pointer to follow from the allocation to the
+			 * jump and the only thing that links them is that
+			 * both addresses came off esp.
+			 */
+			kof_diag_org_set(w, in->o[0].reg,
+				in->o[1].reg == KDIS_REG_SP ? ORG_STACK
+				: kof_diag_org_of(w, in->o[1].reg));
+			return;
+		}
+		kof_diag_org_clear(w, in->o[0].reg);
+		return;
+	}
+	/*
+	 * AND/SHR/SHL OVER A STACK ADDRESS IS STILL A STACK ADDRESS. The
+	 * i386 stager rounds esp down to a page with `shr 0xc; shl 0xc`
+	 * before handing it to mprotect; killing the provenance there breaks
+	 * the only link that sample has.
+	 */
+	if ((in->op == KDIS_AND || in->op == KDIS_SHR || in->op == KDIS_SHL) &&
+	    in->n_op && in->o[0].kind == KDIS_O_REG &&
+	    kof_diag_org_of(w, in->o[0].reg) == ORG_STACK)
+		return;
+
+	for (r = 0; r < 16u; r++)
+		if (in->wmask & (1ull << r))
+			kof_diag_org_clear(w, r);
+}
+
 /* ---- the object's nodes --------------------------------------------------
  *
  * Flat and in the order the walk produced them, which for a linear sweep is
@@ -106,160 +204,6 @@ struct kof_diag_hit *kof_diag_hit_add(struct kof_diag_scan *s, uint64_t at,
  * knows its address, and a number can be known while coming from nowhere.
  */
 
-#define ORG_NONE  0xffffu
-#define ORG_STACK 0xfffeu
-
-struct org {
-	uint16_t node;          /* index, ORG_NONE, or ORG_STACK */
-};
-
-/* Small, because what travels this way is a handful of pointers across a
- * few dozen instructions. A deeper stack than this in a region that matters
- * has not been seen; overflowing it loses provenance, which degrades a link
- * to unknown rather than making one up. */
-#define ORG_STK 32u
-
-struct walk {
-	struct org reg[16];
-	struct org stk[ORG_STK];
-	uint32_t   n_stk;
-	/*
-	 * THE ONE SLOT THAT CARRIES A SYSCALL NUMBER ACROSS A BRANCH.
-	 *
-	 * msfvenom writes `connect; jns L` and then a bare `syscall` at L
-	 * with rax still holding connect's zero - which on x86-64 is `read`,
-	 * because read is syscall 0 there. Reading straight down the
-	 * addresses loses it: the FAILURE arm sits in between and clobbers
-	 * rax. See kof_sys_zero_on_success, which nucleo.h already documents
-	 * with this very sample.
-	 *
-	 * ONE SLOT, WRITTEN ONCE. Three shapes were measured. A full
-	 * register snapshot at every branch target costs ~150 bytes per
-	 * branch, is unbounded, and REMOVING IT LOST NOTHING - 9 of 9
-	 * samples still matched. A table of carry flags by target works but
-	 * is still a table. One slot that is OVERWRITTEN fails, because the
-	 * `je` of the retry counter follows the `jns` and takes it. One slot
-	 * WRITTEN ONCE and cleared when consumed matches all nine - and a
-	 * dispatcher with two hundred arms still costs one slot, because the
-	 * second branch does not overwrite.
-	 */
-	uint64_t   carry_to;
-	int        carry_armed;         /* a target is waiting to be reached */
-	int        carry_live;          /* the walk has arrived at it       */
-	/*
-	 * THE RESULT REGISTER HOLDS A RESULT, AND NOBODY KNOWS WHAT IT IS.
-	 *
-	 * kdis's constant map cannot know this: a `syscall` instruction does
-	 * not WRITE rax as far as the decoder is concerned - the number goes
-	 * in, and the kernel puts the answer back. That is an ABI fact and
-	 * the decoder has no business holding one. So the map keeps whatever
-	 * number went IN, and a later site reads it as if it were its own.
-	 *
-	 * MEASURED: reading straight down msfvenom's x86-64 stager, the
-	 * `exit` on the failure arm leaves 0x3c in the map, and the `read`
-	 * two instructions later came back as exit. Not missing - WRONG,
-	 * which is the worse of the two.
-	 */
-	int        ax_stale;
-};
-
-static void org_clear(struct walk *w, uint8_t r)
-{
-	if (r < 16u)
-		w->reg[r].node = ORG_NONE;
-}
-
-static uint16_t org_of(const struct walk *w, uint8_t r)
-{
-	return r < 16u ? w->reg[r].node : ORG_NONE;
-}
-
-static void org_set(struct walk *w, uint8_t r, uint16_t node)
-{
-	if (r < 16u)
-		w->reg[r].node = node;
-}
-
-/*
- * FORGET WHAT EVERY REGISTER THIS INSTRUCTION WRITES CAME FROM, then put
- * back the one case this follows.
- *
- * `wmask` and not the first operand, for the reason kdis_track records: an
- * instruction writes registers it does not name, and names registers it
- * only reads. Getting that backwards on `mul` cost the i386 samples their
- * whole network half.
- */
-static void org_step(struct walk *w, const struct kdis_insn *in)
-{
-	uint8_t r, d, e;
-
-	if (in->op == KDIS_PUSH) {
-		uint16_t v = ORG_NONE;
-
-		if (in->n_op && in->o[0].kind == KDIS_O_REG)
-			v = org_of(w, in->o[0].reg);
-		if (w->n_stk < ORG_STK)
-			w->stk[w->n_stk].node = v;
-		w->n_stk++;
-		return;
-	}
-	if (in->op == KDIS_POP) {
-		uint16_t v = ORG_NONE;
-
-		if (w->n_stk) {
-			w->n_stk--;
-			if (w->n_stk < ORG_STK)
-				v = w->stk[w->n_stk].node;
-		}
-		if (in->n_op && in->o[0].kind == KDIS_O_REG)
-			org_set(w, in->o[0].reg, v);
-		return;
-	}
-	if (in->op == KDIS_XCHG && in->n_op > 1u &&
-	    in->o[0].kind == KDIS_O_REG && in->o[1].kind == KDIS_O_REG) {
-		uint16_t a;
-
-		d = in->o[0].reg; e = in->o[1].reg;
-		a = org_of(w, d);
-		org_set(w, d, org_of(w, e));
-		org_set(w, e, a);
-		return;
-	}
-	if (in->op == KDIS_MOV && in->n_op > 1u &&
-	    in->o[0].kind == KDIS_O_REG && in->o[0].size >= 4u) {
-		if (in->o[1].kind == KDIS_O_REG) {
-			/*
-			 * A VALUE TAKEN FROM THE STACK POINTER IS A STACK
-			 * ADDRESS, and that is a provenance of its own.
-			 * msfvenom's i386 stager makes the stack executable
-			 * and jumps into it; mprotect returns 0, so there is
-			 * no pointer to follow from the allocation to the
-			 * jump and the only thing that links them is that
-			 * both addresses came off esp.
-			 */
-			org_set(w, in->o[0].reg,
-				in->o[1].reg == KDIS_REG_SP ? ORG_STACK
-				: org_of(w, in->o[1].reg));
-			return;
-		}
-		org_clear(w, in->o[0].reg);
-		return;
-	}
-	/*
-	 * AND/SHR/SHL OVER A STACK ADDRESS IS STILL A STACK ADDRESS. The
-	 * i386 stager rounds esp down to a page with `shr 0xc; shl 0xc`
-	 * before handing it to mprotect; killing the provenance there breaks
-	 * the only link that sample has.
-	 */
-	if ((in->op == KDIS_AND || in->op == KDIS_SHR || in->op == KDIS_SHL) &&
-	    in->n_op && in->o[0].kind == KDIS_O_REG &&
-	    org_of(w, in->o[0].reg) == ORG_STACK)
-		return;
-
-	for (r = 0; r < 16u; r++)
-		if (in->wmask & (1ull << r))
-			org_clear(w, r);
-}
 
 /* ---- the walk ------------------------------------------------------------ */
 
@@ -444,12 +388,12 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	    (!strcmp(nm, "read") || !strcmp(nm, "recv") ||
 	     !strcmp(nm, "recvfrom") || !strcmp(nm, "write") ||
 	     !strcmp(nm, "send"))) {
-		kof_diag_note_in(h, org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER);
-		kof_diag_note_in(h, org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
+		kof_diag_note_in(h, kof_diag_org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER);
+		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
 	} else if (n_ar >= 1 && nm &&
 		   (!strcmp(nm, "connect") || !strcmp(nm, "close") ||
 		    !strcmp(nm, "dup2"))) {
-		kof_diag_note_in(h, org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
+		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD);
 	}
 
 	/*
@@ -460,16 +404,16 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	 */
 	if (nm && (!strcmp(nm, "mmap") || !strcmp(nm, "mmap2") ||
 		   !strcmp(nm, "old_mmap")))
-		org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
+		kof_diag_org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
 	else if (nm && !strcmp(nm, "mprotect")) {
-		if (n_ar >= 1 && org_of(w, ar[0]) == ORG_STACK)
+		if (n_ar >= 1 && kof_diag_org_of(w, ar[0]) == ORG_STACK)
 			h->bits |= KOF_DIAG_H_REGION_STACK;
-		org_clear(w, KDIS_REG_AX);
+		kof_diag_org_clear(w, KDIS_REG_AX);
 	} else if (cap == KOF_CAP_NET_OPEN || cap == KOF_CAP_FILE_OPEN ||
 		   cap == KOF_CAP_MEMFD)
-		org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
+		kof_diag_org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
 	else
-		org_clear(w, KDIS_REG_AX);
+		kof_diag_org_clear(w, KDIS_REG_AX);
 
 	/* Arm the carry for the next conditional branch - see walk.carry_to. */
 	if (bits == 64 && nm && kof_sys_zero_on_success(nm))
@@ -717,7 +661,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 				 * A branch into a region an earlier node established
 				 * is a different statement entirely.
 				 */
-				uint16_t t = org_of(&w, in.o[0].reg);
+				uint16_t t = kof_diag_org_of(&w, in.o[0].reg);
 
 				if (t != ORG_NONE) {
 					struct kof_diag_hit *h =
@@ -728,7 +672,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 			}
 			if (in.wmask & (1ull << KDIS_REG_AX))
 				w.ax_stale = 0; /* something wrote it since */
-			org_step(&w, &in);
+			kof_diag_org_step(&w, &in);
 			if (s->full)
 				return;
 		}
@@ -832,9 +776,7 @@ void kof_diag_run_syscall(struct kof_diag_scan *s,
 
 static const struct diag_scenario diag_scenarios[] = {
 	{ KOF_DIAG_RUN_SYSCALL, "syscall", kof_diag_run_syscall },
-	/* Not written yet. Named here so that asking for it is not silently
-	 * the same as asking for nothing - see kof_diag_scan_ran. */
-	{ KOF_DIAG_RUN_SYMBOL,  "symbol",  NULL },
+	{ KOF_DIAG_RUN_SYMBOL,  "symbol",  kof_diag_run_symbol },
 	{ KOF_DIAG_RUN_EMULATE, "emulate", kof_diag_run_emulate }
 };
 
@@ -924,8 +866,22 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
 static int spec_ok(const struct kof_diag_hit *h,
 		   const struct kof_diag_node *sp)
 {
-	if (h->cap != sp->cap)
-		return 0;
+	/*
+	 * THE WORD THE RULE NAMED, OR ANY KIND OF IT. A rule saying mem-read
+	 * is satisfied by net-recv, because net-recv IS a mem-read whose
+	 * descriptor turned out to be a socket - see kof_flow_cap_generic.
+	 * Comparing for equality made a rule stop matching whenever the
+	 * engine learned something more about the program it described.
+	 */
+	if (h->cap != sp->cap) {
+		uint16_t g = h->cap;
+		int kind = 0;
+
+		while ((g = kof_flow_cap_generic(g)) != KOF_CAP_NONE)
+			if (g == sp->cap) { kind = 1; break; }
+		if (!kind)
+			return 0;
+	}
 	if ((h->flags & sp->flags) != sp->flags)
 		return 0;
 	if (h->bits & KOF_DIAG_H_ARG_UNKNOWN)

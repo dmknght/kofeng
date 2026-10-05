@@ -173,6 +173,20 @@ typedef void (*kof_elf_relcall_fn)(void *user, uint64_t at, uint64_t target,
 uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
 			  kof_elf_relcall_fn fn, void *user);
 
+/*
+ * AND EVERY RELOCATION, for a caller that has to make the object runnable.
+ *
+ * `where` is the file offset of the bytes to patch, `sym` the file offset the
+ * symbol resolves to and `defined` whether it resolves here at all. RELA
+ * only: a REL section carries no addend, and a caller applying a relocation
+ * needs one.
+ */
+typedef void (*kof_elf_reloc_fn)(void *user, uint64_t where, uint32_t type,
+				 uint64_t sym, int defined, int64_t addend);
+
+uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
+			kof_elf_reloc_fn fn, void *user);
+
 /* Where each function begins and how long it is, as the symbol table states
  * it. A function nothing calls can be found no other way. */
 typedef void (*kof_elf_func_fn)(void *user, uint64_t va, uint64_t size,

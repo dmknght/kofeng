@@ -245,8 +245,13 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	}
 
 	/* The read that fills it, and the branch that runs it. Both linked
-	 * to the allocation and not merely present beside it. */
-	r = find(s, KOF_CAP_READ, NULL);
+	 * to the allocation and not merely present beside it.
+	 *
+	 * mem-read: read(2) takes a descriptor and the walk has not been
+	 * told what this one is - see KOF_CG_IO. A run that proves it came
+	 * from a socket corrects the word to net-recv, and the diagnose below
+	 * still matches because a rule names the level it means. */
+	r = find(s, KOF_CAP_MEM_READ, NULL);
 	x = find(s, KOF_CAP_EXEC_REG, NULL);
 	CK(r != NULL);
 	CK(x != NULL);
@@ -267,7 +272,7 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 		static const struct kof_diag_node nd[] = {
 			{ KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
 			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_CAP_READ, 0, 0, KOF_DIAG_ROLE_BUFFER,
+			{ KOF_CAP_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER,
 			  KOF_DIAG_B_TOUCH, 0 },
 			{ KOF_CAP_EXEC_REG, 0, 0, KOF_DIAG_ROLE_TARGET, 0, 0 },
 		};
@@ -299,7 +304,7 @@ static void unlinked_does_not_match(void)
 	static const struct kof_diag_node nd[] = {
 		{ KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
 		  KOF_DIAG_ROLE_NONE, 0, 0 },
-		{ KOF_CAP_READ, 0, 0, KOF_DIAG_ROLE_BUFFER, 0, 0 },
+		{ KOF_CAP_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER, 0, 0 },
 	};
 	static const struct kof_diag dg = {
 		1, KOF_DIAG_VIA_SYSCALL, 2, "needs_a_link", nd
@@ -349,7 +354,7 @@ static void unlinked_does_not_match(void)
 		return;
 	/* Both capabilities are there... */
 	CK(find(s, KOF_CAP_ALLOC_EXEC, NULL) != NULL);
-	CK(find(s, KOF_CAP_READ, NULL) != NULL);
+	CK(find(s, KOF_CAP_MEM_READ, NULL) != NULL);
 	/* ...and the diagnose still must not match, because nothing joins
 	 * them. */
 	CK(kof_diag_match(s, &dg, NULL, NULL) == 0);
@@ -492,7 +497,7 @@ static void deep_in_a_big_segment(void)
 	if (!s)
 		return;
 	a = find(s, KOF_CAP_ALLOC_EXEC, &ia);
-	r = find(s, KOF_CAP_READ, NULL);
+	r = find(s, KOF_CAP_MEM_READ, NULL);
 	x = find(s, KOF_CAP_EXEC_REG, NULL);
 	CK(a != NULL);
 	CK(r != NULL);
@@ -557,11 +562,16 @@ static void scenarios_are_separable(void)
 	 * valid answer and must not be a crash or a NULL. */
 	CK(kof_diag_scan_count(none) == 0u);
 
-	/* `ran` is what HAPPENED. The syscall routine exists and ran; the
-	 * other two were requested by RUN_ALL and are not written, so they
-	 * must not be claimed. */
+	/*
+	 * `ran` is what HAPPENED, which is not what was asked for. The two
+	 * static routines are in KOF_DIAG_RUN_DEFAULT and both run, even
+	 * though the symbol routine finds nothing in a payload with no
+	 * imports - running and finding nothing is a different answer from
+	 * not running, and that difference is the whole reason for this
+	 * field. EMULATE is not in the default set, so it must not appear.
+	 */
 	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYSCALL) != 0u);
-	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYMBOL) == 0u);
+	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYMBOL) != 0u);
 	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_EMULATE) == 0u);
 	CK(kof_diag_scan_ran(none) == 0u);
 out:

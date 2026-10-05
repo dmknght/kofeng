@@ -69,6 +69,55 @@ int kof_pz_is_code(const struct kof_obj_ctx *ctx, uint64_t off)
 	return 0;
 }
 
+/*
+ * THE WAY BACK, AND IT HAD NO PUBLIC SPELLING.
+ *
+ * kof_pz_addr_to_off has existed since the cures needed it: a rule knows an
+ * address and has to reach the bytes. The opposite question - a caller that
+ * knows a FILE OFFSET and has to put a machine at it - had only a static
+ * copy inside the decoder, so the first caller outside it had nowhere to ask.
+ *
+ * KOF_BROKEN when the offset is in no mapped region, which is a fact about
+ * the file rather than a failure: a .ko has no segments at all, and an
+ * offset in an ELF's section headers is in no PT_LOAD.
+ */
+uint64_t kof_pz_off_to_addr(const struct kof_obj_ctx *ctx, uint64_t off)
+{
+	if (!ctx || !ctx->file_header)
+		return KOF_BROKEN;
+	if (ctx->format == KOF_FMT_PE) {
+		const struct kof_pe_info *p = kof_pe(ctx);
+		uint32_t i;
+
+		if (!p->valid)
+			return KOF_BROKEN;
+		for (i = 0; i < p->sec_count; i++) {
+			const struct kof_pe_sec *s = &p->sec[i];
+
+			if (s->file_size && off >= s->file_off &&
+			    off - s->file_off < s->file_size)
+				return p->image_base + s->mem_rva +
+				       (off - s->file_off);
+		}
+		return KOF_BROKEN;
+	}
+	if (ctx->format == KOF_FMT_ELF) {
+		const struct kof_elf_info *e = kof_elf(ctx);
+		uint32_t i;
+
+		for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
+			const struct kof_elf_seg *s = &e->seg[i];
+
+			if (s->type != KOF_ELF_PT_LOAD || !s->file_size)
+				continue;
+			if (off >= s->file_off &&
+			    off - s->file_off < s->file_size)
+				return s->mem_addr + (off - s->file_off);
+		}
+	}
+	return KOF_BROKEN;
+}
+
 uint64_t kof_pz_addr_to_off(const struct kof_obj_ctx *ctx, uint64_t addr)
 {
 	if (!ctx || !ctx->file_header)

@@ -31,8 +31,34 @@
 
 /* Linux x86-64. */
 const struct sysrow kof_sys64[] = {
-	{     0, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     1, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     0, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     1, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	/*
+	 * THE REST OF THE READ AND WRITE FAMILY, which was simply absent.
+	 *
+	 * A table holding read and write and not readv or pread describes a
+	 * program nobody writes: the vectored and positional forms are what a
+	 * runtime actually emits, and a stager that uses one was invisible -
+	 * not misclassified, invisible. They take a descriptor like read does
+	 * and say no more about it than read does, so they take the same word.
+	 *
+	 * sendfile and splice move bytes between TWO descriptors without the
+	 * program seeing them. Read as mem-read because that is what is known;
+	 * the second descriptor is an argument, and an argument is where that
+	 * belongs rather than in a word.
+	 */
+	{    17, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "pread64"  },
+	{    18, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwrite64"  },
+	{    19, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "readv"  },
+	{    20, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "writev"  },
+	{    40, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile"  },
+	{   275, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "splice"  },
+	{   295, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv"  },
+	{   296, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev"  },
+	{   327, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv2"  },
+	{   328, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev2"  },
+	{    46, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendmsg"  },
+	{    47, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvmsg"  },
 	{     2, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
 	{   9, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see prot_cap */
 	{  10, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
@@ -92,8 +118,18 @@ const struct sysrow kof_sys64[] = {
 /* Linux i386. */
 const struct sysrow kof_sys32[] = {
 	{     2, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{     3, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     4, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     3, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	/* The same family on i386 - see the note in the amd64 table. */
+	{   180, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "pread64"  },
+	{   181, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwrite64"  },
+	{   145, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "readv"  },
+	{   146, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "writev"  },
+	{   187, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile"  },
+	{   239, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile64"  },
+	{   313, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "splice"  },
+	{   333, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv"  },
+	{   334, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev"  },
+	{     4, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	{     5, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
 	{   11, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
 	{  90, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
@@ -233,11 +269,11 @@ names[] = {
 	{ "recv",           KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
 	{ "recvfrom",       KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
 	{ "recvmsg",        KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
-	{ "read",           KOF_CAP_READ, KOF_FLOW_ROLE_NONE },
+	{ "read",           KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE },
 	{ "send",           KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
 	{ "sendto",         KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
 	{ "sendmsg",        KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "write",          KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "write",          KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE },
 	{ "open",           KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "open64",         KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "openat",         KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
@@ -275,15 +311,15 @@ names[] = {
 	{ "CoTaskMemAlloc", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
 	{ "WSASocketA",     KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK },
 	{ "WSASocketW",     KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK },
-	{ "InternetOpenA",  KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "InternetOpenW",  KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenA",  KOF_CAP_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenW",  KOF_CAP_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "WSAConnect",     KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "InternetConnectA", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "InternetConnectW", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "InternetConnectA", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "InternetConnectW", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "CreateFileA",    KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "CreateFileW",    KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "WriteFile",      KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "ReadFile",       KOF_CAP_READ, KOF_FLOW_ROLE_NONE },
+	{ "WriteFile",      KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "ReadFile",       KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE },
 	{ "CreateProcessA", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
 	{ "CreateProcessW", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
 	{ "WinExec",        KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
@@ -306,15 +342,15 @@ names[] = {
 	{ "WSASend",        KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
 	{ "WSAAccept",      KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
 	{ "closesocket",    KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "InternetOpenUrlA", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "InternetOpenUrlW", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "InternetReadFile", KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
-	{ "HttpSendRequestA", KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "HttpSendRequestW", KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "HttpOpenRequestA", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "HttpOpenRequestW", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "URLDownloadToFileA", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "URLDownloadToFileW", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenUrlA", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenUrlW", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "InternetReadFile", KOF_CAP_HTTP_RECV, KOF_FLOW_ROLE_NONE },
+	{ "HttpSendRequestA", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "HttpSendRequestW", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "HttpOpenRequestA", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "HttpOpenRequestW", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "URLDownloadToFileA", KOF_CAP_HTTP_FETCH, KOF_FLOW_ROLE_NONE },
+	{ "URLDownloadToFileW", KOF_CAP_HTTP_FETCH, KOF_FLOW_ROLE_NONE },
 	/*
 	 * THE WINDOWS SPELLING OF A REDIRECTED SHELL, which the table had
 	 * only the POSIX half of.
@@ -328,11 +364,11 @@ names[] = {
 	{ "CreatePipe",     KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "SetStdHandle",   KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
 	{ "DuplicateHandle", KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpOpen",    KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpConnect", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpOpenRequest", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpSendRequest", KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpReadData", KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpOpen",    KOF_CAP_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpConnect", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpOpenRequest", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpSendRequest", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpReadData", KOF_CAP_HTTP_RECV, KOF_FLOW_ROLE_NONE },
 	/* A mapping is a mapping, whichever name asks for it. */
 	{ "VirtualProtectEx", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
 	{ "NtAllocateVirtualMemory", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
@@ -552,16 +588,16 @@ names[] = {
 	{ "sock_create_kern", KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "kernel_connect", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
 	{ "kernel_accept",  KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
-	{ "kernel_sendmsg", KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "kernel_recvmsg", KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
+	{ "kernel_sendmsg", KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "kernel_recvmsg", KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE WINDOWS KERNEL, which reaches this table the way every other
 	 * PE import does - the mechanism needs nothing new, only the words.
 	 */
 	{ "ZwCreateFile",   KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
 	{ "ZwOpenFile",     KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "ZwReadFile",     KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
-	{ "ZwWriteFile",    KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "ZwReadFile",     KOF_CAP_MEM_READ,  KOF_FLOW_ROLE_NONE },
+	{ "ZwWriteFile",    KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE },
 	{ "MmGetSystemRoutineAddress", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
 	{ "MmMapLockedPagesSpecifyCache", KOF_CAP_PROC_MEM,
 	  KOF_FLOW_ROLE_NONE },
@@ -1064,6 +1100,46 @@ const char *kof_flow_cap_noun(uint16_t cap)
 	}
 }
 
+/*
+ * THE WORD THIS ONE IS A SPECIAL CASE OF, or KOF_CAP_NONE.
+ *
+ * WHY A VOCABULARY NEEDS THIS AT ALL. Some capabilities are the same act
+ * with a fact added:
+ *
+ *     net-recv, file-read   are mem-read with the descriptor identified
+ *     net-send, file-write  are mem-write, likewise
+ *     mem-alloc-exec        is mem-alloc with PROT_EXEC in its argument
+ *
+ * A rule names the level it MEANS. "A region was allocated writable and
+ * executable" has to say mem-alloc-exec, because mem-alloc would match every
+ * malloc on the machine. "Something filled it" has to say mem-read, because
+ * the diagnose is true whether the bytes came off a socket or out of a file -
+ * and MEASURED, naming the specific word instead is how rwx_exec stopped
+ * matching the moment the engine learned to tell a socket read from a file
+ * read. The rule had not changed and the program had not changed; only the
+ * precision of the word had.
+ *
+ * SO THE MATCHER ASKS "IS THIS THAT, OR A KIND OF THAT", and the relation
+ * lives here with the names rather than in the matcher, because it is a fact
+ * about the vocabulary. One level is enough today; the walk is written as a
+ * loop so a second does not need a second mechanism.
+ *
+ * IT IS NOT A GROUP. net-recv is in KOF_CG_NET and mem-read in KOF_CG_IO,
+ * which is right - they answer different questions - so the encoding cannot
+ * carry this and a table must.
+ */
+uint16_t kof_flow_cap_generic(uint16_t cap)
+{
+	switch (cap) {
+	case KOF_CAP_NET_READ:
+	case KOF_CAP_READ:         return KOF_CAP_MEM_READ;
+	case KOF_CAP_NET_WRITE:
+	case KOF_CAP_WRITE:        return KOF_CAP_MEM_WRITE;
+	case KOF_CAP_ALLOC_EXEC:   return KOF_CAP_ALLOC;
+	default:                   return KOF_CAP_NONE;
+	}
+}
+
 const char *kof_flow_cap_name(uint16_t cap)
 {
 	switch (cap) {
@@ -1095,11 +1171,18 @@ const char *kof_flow_cap_name(uint16_t cap)
 	case KOF_CAP_PROC_LIST:    return "proc-enum";
 	case KOF_CAP_NET_READ:     return "net-recv";
 	case KOF_CAP_NET_WRITE:    return "net-send";
+	case KOF_CAP_HTTP_OPEN:    return "http-open";
+	case KOF_CAP_HTTP_CONNECT: return "http-connect";
+	case KOF_CAP_HTTP_SEND:    return "http-send";
+	case KOF_CAP_HTTP_RECV:    return "http-recv";
+	case KOF_CAP_HTTP_FETCH:   return "http-fetch";
 	case KOF_CAP_NET_OPEN:     return "net-open";
 	case KOF_CAP_NET_CONNECT:  return "net-connect";
 	case KOF_CAP_NET_ACCEPT:   return "net-accept";
 	case KOF_CAP_NET_BIND:     return "net-bind";
 	case KOF_CAP_NET_LISTEN:   return "net-listen";
+	case KOF_CAP_MEM_READ:      return "mem-read";
+	case KOF_CAP_MEM_WRITE:     return "mem-write";
 	case KOF_CAP_READ:         return "file-read";
 	case KOF_CAP_WRITE:        return "file-write";
 	case KOF_CAP_FILE_OPEN:    return "file-open";
@@ -1142,8 +1225,8 @@ const char *kof_flow_cap_name(uint16_t cap)
  */
 const struct sysrow kof_sys_a64[] = {
 	{   56, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{   63, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{   64, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{   63, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{   64, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	{ 101, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
 	{ 117, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
 	{ 198, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
@@ -1174,8 +1257,8 @@ const struct sysrow kof_sys_a64[] = {
  */
 const struct sysrow kof_sys_arm[] = {
 	{     2, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{     3, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     4, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     3, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     4, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	{     5, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
 	{   11, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
 	{   26, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
@@ -1208,8 +1291,8 @@ const struct sysrow kof_sys_arm[] = {
  */
 const struct sysrow kof_sys_mips[] = {
 	{ 4002, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{ 4003, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{ 4004, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{ 4003, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{ 4004, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	{ 4005, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
 	{ 4011, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
 	{ 4026, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
@@ -1268,8 +1351,8 @@ const struct sysrow kof_sys_ppc[] = {
 const struct sysrow kof_sys_sparc[] = {
 	{     1, KOF_CAP_NONE, KOF_FLOW_ROLE_NONE, "exit"  },
 	{     2, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{     3, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     4, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     3, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     4, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	{     5, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
 	{   26, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
 	{   59, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
@@ -1301,8 +1384,8 @@ const struct sysrow kof_sys_sparc[] = {
  * would be confidently wrong.
  */
 const struct sysrow kof_sys_mips64[] = {
-	{ 5000, KOF_CAP_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{ 5001, KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{ 5000, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{ 5001, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	{ 5002, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
 	{ 5247, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
 	{ 5009, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },

@@ -1370,6 +1370,78 @@ static uint64_t rel_target_sec(const struct kof_elf_info *p, const char *nm)
 	return 0;
 }
 
+/*
+ * EVERY DATA RELOCATION IN A RELOCATABLE OBJECT, AS FILE OFFSETS.
+ *
+ * kof_elf_relcalls reports the CALLS, because a call's target is what a call
+ * graph is made of. This reports the rest: the places where an address of
+ * something in this object is written into it. A caller that wants to RUN a
+ * .ko needs them, because without them every pointer the code loads is the
+ * hole the linker was supposed to fill -
+ *
+ *     48 c7 c7 00 00 00 00   mov $0x0,%rdi
+ *                 R_X86_64_32S  .rodata+0x1f
+ *
+ * - so two calls handed the same object both receive zero, and nothing can
+ * tell they were handed the same thing.
+ *
+ * FILE OFFSETS ON BOTH SIDES. An ET_REL has sh_addr of zero everywhere; the
+ * linker has not placed anything. The file is the only address space it has,
+ * which is the same reading kof_elf_relcalls takes for its sites.
+ *
+ * `sym` is the file offset the symbol resolves to, and `defined` says whether
+ * it resolves at all - an undefined symbol is a promise to the loader and
+ * there is nothing here to point at.
+ */
+uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
+			kof_elf_reloc_fn fn, void *user)
+{
+	struct kof_elf_symtab t;
+	uint32_t i, n = 0;
+
+	if (!p || !p->valid || !fn || !kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_FULL, &t))
+		return 0;
+
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		int rela = p->sec[i].type == SHT_RELA;
+		uint64_t k, step, have, tgt_off;
+
+		if (!rela)
+			continue;       /* REL has no addend to report */
+		tgt_off = rel_target_sec(p, p->sec[i].name);
+		if (!tgt_off)
+			continue;
+		step = REL_STEP(&t, rela);
+		have = kof_clip_len(f.n, p->sec[i].file_off,
+				    p->sec[i].file_size);
+		for (k = 0; k + step <= have; k += step) {
+			struct kof_elf_symbol sy;
+			uint64_t roff = 0, add = 0, sv = 0;
+			uint32_t rty = 0, si = 0;
+			int defined = 0;
+
+			if (!rel_at(f, &t, p->sec[i].file_off + k,
+				    &roff, &rty, &si))
+				break;
+			if (t.elf64) {
+				if (!kof_rd_u64(f, p->sec[i].file_off + k + 16u,
+						t.be, &add))
+					break;
+			}
+			if (kof_elf_symbol_at(f, &t, si, &sy) && sy.shndx &&
+			    sy.shndx < p->sec_count &&
+			    sy.shndx < KOF_ELF_MAX_SECTIONS) {
+				sv = p->sec[sy.shndx].file_off + sy.value;
+				defined = 1;
+			}
+			fn(user, tgt_off + roff, rty, sv, defined,
+			   (int64_t)add);
+			n++;
+		}
+	}
+	return n;
+}
+
 uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
 			  kof_elf_relcall_fn fn, void *user)
 {
