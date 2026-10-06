@@ -2403,6 +2403,14 @@ struct kof_content {
 	 * shipped. */
 	int (*diag_share)(const struct kof_obj_ctx *, uint16_t cap,
 			  uint16_t a, uint16_t b);
+
+	/*
+	 * Did this diagnose match AND does it carry every one of these names -
+	 * see kof_diag_has_str. Appended, like every slot added since this
+	 * vtable shipped.
+	 */
+	int (*diag_has_str)(const struct kof_obj_ctx *, uint16_t diag,
+			    const char *const *strs, uint32_t n);
 };
 
 /*
@@ -3906,6 +3914,48 @@ static inline uint16_t kof_diag_id_(const char *s)
  * file can carry a packer and a downloader without the packer's region
  * being what the downloader filled.
  */
+/*
+ * DOES THIS DIAGNOSE CARRY THESE NAMES.
+ *
+ *     if (kof_diag_has_str(DIAG_LKM_KPROBERESOLVE, "kallsyms_lookup_name"))
+ *             KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
+ *
+ *     kof_diag_has_str(DIAG_X, "a", "b") || kof_diag_has_str(DIAG_X, "c", "d")
+ *
+ * EVERY name in ONE call must be present - that is the AND - and calls joined
+ * by `||` are the alternatives. Written this way because one call is one
+ * statement a rule editor can show as a block: "this diagnose, with these
+ * names", and the alternatives are blocks in an or.
+ *
+ * THE NAMES BELONG TO THE DIAGNOSE, not to a capability. They are the ones the
+ * analysis read out of the emulator's memory at the calls the diagnose's nodes
+ * stand for, and kept in the engine; a module asks, it does not go and look.
+ * See kof_flow_name_arg for which capabilities are handed a name and where,
+ * and kof_diag_str_add for why a name is a copy and not an offset into the
+ * file.
+ *
+ * IT IS FALSE UNLESS THE DIAGNOSE MATCHED. A name only means anything beside
+ * the behaviour it was handed to, and a call that asks for the names of a
+ * diagnose that did not fire has asked for nothing - so there is no need to
+ * write kof_diag() beside it and no way to get the order wrong.
+ *
+ * FALSE IS "NOT FOUND", NEVER "NOT THERE", and the difference is not small.
+ * The names come from calls the span runner REACHED. One it could not reach -
+ * hcrootkit's register_kprobe sits behind a 50-iteration initialisation loop
+ * the run will not execute - leaves no name at all, and a verdict that reads
+ * that as "the module never named it" has drawn a conclusion from silence.
+ *
+ * THE NAMES ARE LITERALS, which live in the blob like any other: the engine
+ * hashes each and then compares the bytes, so a hash collision cannot make a
+ * name appear. At most KOF_DIAG_HAS_STR_MAX are taken in one call.
+ */
+#define KOF_DIAG_HAS_STR_MAX 8u
+#define kof_diag_has_str(diag, ...) ((ctx)->content->diag_has_str ? \
+	(ctx)->content->diag_has_str((ctx), kof_diag_id_(#diag), \
+		(const char *const[]){ __VA_ARGS__ }, \
+		(uint32_t)(sizeof((const char *const[]){ __VA_ARGS__ }) / \
+			   sizeof(const char *))) : 0)
+
 #define kof_diag_share(cap, a, b) ((ctx)->content->diag_share ? \
 				   (ctx)->content->diag_share((ctx), \
 							      (uint16_t)(cap), \

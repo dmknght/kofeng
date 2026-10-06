@@ -265,6 +265,33 @@ uint8_t kof_flow_role_of_name(const char *sym);
  */
 int kof_flow_hands_on(uint16_t cap, const char *nm);
 
+/*
+ * DOES A CALL OF THIS CAPABILITY BE GIVEN A NAME, and in which argument.
+ *
+ * The name of a kernel symbol the call is about - "sys_call_table",
+ * "do_exit" - which is the one part of a hook that says WHAT is being
+ * reached for and survives every change of how it is reached. The
+ * vocabulary says only WHERE the name is carried:
+ *
+ *   KOF_NAME_DIRECT   the argument IS a C string
+ *   KOF_NAME_OBJECT   the argument points at an OBJECT, and the name is a
+ *                     C string some pointer inside it points at
+ *
+ * AND NEVER WHICH FIELD. struct kprobe keeps its symbol_name at an offset
+ * that is a fact about one kernel build - the layout moves with the version
+ * and the configuration, and a kretprobe embeds the probe at a different
+ * place - so a table naming the offset would be a table about one kernel,
+ * and exactly the kind of source-code representation a rename or a rebuild
+ * changes. The walk reads the object's words and asks which of them are
+ * names; the layout never enters.
+ *
+ * Returns the kind, or 0 for a capability that carries no name. `*arg` is
+ * the argument's index.
+ */
+#define KOF_NAME_DIRECT 1u
+#define KOF_NAME_OBJECT 2u
+unsigned kof_flow_name_arg(uint16_t cap, unsigned *arg);
+
 /* The name's index in the table, 1-based, or 0. Carried instead of the
  * string so a node is fixed width. */
 uint16_t kof_flow_name_id(const char *sym);

@@ -124,6 +124,18 @@ struct kof_scanner {
 	 */
 	uint8_t  diag_hit[32];          /* one bit per diagnose id          */
 	/*
+	 * WHICH DIAGNOSES' GATES THIS OBJECT PASSES, one bit each, worked out
+	 * ONCE per object for all of them - see diag_gates.
+	 *
+	 * It was asked per diagnose, at two places, and each ask that carried
+	 * a symbol sign walked the object's whole symbol table for that one
+	 * diagnose: N diagnoses cost 2N walks of the same table. The answer to
+	 * "which of these objects' signs are present" is one fact about the
+	 * object, so it is one walk and one bitmap.
+	 */
+	uint8_t  diag_gate[32];
+	int      diag_gate_done;
+	/*
 	 * WHICH NODE EACH DIAGNOSE BOUND EACH OF ITS OWN NODES TO - see
 	 * kof_diag_share.
 	 *

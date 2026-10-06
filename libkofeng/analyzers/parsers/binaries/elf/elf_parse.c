@@ -1345,13 +1345,18 @@ uint32_t kof_elf_imports(kof_buf f, const struct kof_elf_info *p,
 }
 
 /*
- * WHICH SECTION A RELOCATION APPLIES TO comes from its NAME and not from
- * sh_info, which the parse does not publish: `.rela.text` relocates `.text`.
- * That is a convention rather than a guarantee, and it is the one every
- * toolchain that produces these follows. Returns the target section's file
- * offset, or zero when there is no executable section by that name.
+ * WHICH SECTION A RELOCATION SECTION APPLIES TO comes from its NAME and not
+ * from sh_info, which the parse does not publish: `.rela.text` relocates
+ * `.text`. That is a convention rather than a guarantee, and it is the one
+ * every toolchain that produces these follows.
+ *
+ * Returns the target's FILE OFFSET and says whether it holds code, so a
+ * caller picks its own reading - a call graph wants code only, an image that
+ * must run wants the tables too. A target with no bytes in the file (.bss) is
+ * refused: there is nothing to patch at a file offset that does not exist.
  */
-static uint64_t rel_target_sec(const struct kof_elf_info *p, const char *nm)
+static uint64_t rel_target(const struct kof_elf_info *p, const char *nm,
+			   int *is_code)
 {
 	uint32_t j;
 
@@ -1364,14 +1369,17 @@ static uint64_t rel_target_sec(const struct kof_elf_info *p, const char *nm)
 	if (!*nm)
 		return 0;
 	for (j = 0; j < p->sec_count && j < KOF_ELF_MAX_SECTIONS; j++)
-		if (!strcmp(p->sec[j].name, nm) &&
-		    (p->sec[j].flags & SHF_EXECINSTR))
+		if (!strcmp(p->sec[j].name, nm)) {
+			if (p->sec[j].type == SHT_NOBITS)
+				return 0;
+			*is_code = (p->sec[j].flags & SHF_EXECINSTR) != 0;
 			return p->sec[j].file_off;
+		}
 	return 0;
 }
 
 /*
- * EVERY DATA RELOCATION IN A RELOCATABLE OBJECT, AS FILE OFFSETS.
+ * EVERY RELOCATION IN A RELOCATABLE OBJECT, AS FILE OFFSETS.
  *
  * kof_elf_relcalls reports the CALLS, because a call's target is what a call
  * graph is made of. This reports the rest: the places where an address of
@@ -1394,7 +1402,7 @@ static uint64_t rel_target_sec(const struct kof_elf_info *p, const char *nm)
  * there is nothing here to point at.
  */
 uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
-			kof_elf_reloc_fn fn, void *user)
+			unsigned want, kof_elf_reloc_fn fn, void *user)
 {
 	struct kof_elf_symtab t;
 	uint32_t i, n = 0;
@@ -1405,11 +1413,15 @@ uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
 	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
 		int rela = p->sec[i].type == SHT_RELA;
 		uint64_t k, step, have, tgt_off;
+		int is_code = 0;
 
 		if (!rela)
 			continue;       /* REL has no addend to report */
-		tgt_off = rel_target_sec(p, p->sec[i].name);
+		tgt_off = rel_target(p, p->sec[i].name, &is_code);
 		if (!tgt_off)
+			continue;
+		if (!(want & (is_code ? KOF_ELF_RELOC_CODE
+				      : KOF_ELF_RELOC_DATA)))
 			continue;
 		step = REL_STEP(&t, rela);
 		have = kof_clip_len(f.n, p->sec[i].file_off,
@@ -1487,8 +1499,10 @@ uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
 
 		if (!rela && p->sec[i].type != SHT_REL)
 			continue;
-		tgt_off = rel_target_sec(p, p->sec[i].name);
-		if (!tgt_off)
+		int is_code = 0;
+
+		tgt_off = rel_target(p, p->sec[i].name, &is_code);
+		if (!tgt_off || !is_code)
 			continue;
 		step = REL_STEP(&t, rela);
 		have = kof_clip_len(f.n, p->sec[i].file_off,

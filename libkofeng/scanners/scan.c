@@ -4226,6 +4226,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * per-object state, here, for the same reason they are all here.
 	 */
 	sc->diag_ready = 0;
+	sc->diag_gate_done = 0;
 	/*
 	 * AND THE ASK ITSELF - see KOF_ENG_USE_PATHOGEN, which says the
 	 * property out loud: "there is no state to set, so one object's ask

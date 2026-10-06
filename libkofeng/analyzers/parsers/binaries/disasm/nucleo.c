@@ -1353,6 +1353,28 @@ const char *kof_flow_cap_name(uint16_t cap)
 	}
 }
 
+/* See the note in nucleo.h. */
+unsigned kof_flow_name_arg(uint16_t cap, unsigned *arg)
+{
+	if (arg)
+		*arg = 0u;
+	switch (cap) {
+	/* A resolver is handed the word it is to find. */
+	case KOF_NUCLEO_KSYM_LOOKUP:
+	case KOF_NUCLEO_SYMBOL_GET:
+		return KOF_NAME_DIRECT;
+	/*
+	 * A probe is handed an OBJECT, and the name it is to be placed on is
+	 * one of the pointers in it - see the note in nucleo.h for why this
+	 * does not say which.
+	 */
+	case KOF_NUCLEO_KPROBE_REG:
+		return KOF_NAME_OBJECT;
+	default:
+		return 0u;
+	}
+}
+
 /* See the note in nucleo.h - this is the vocabulary's own answer, and the
  * only one. */
 int kof_flow_hands_on(uint16_t cap, const char *nm)

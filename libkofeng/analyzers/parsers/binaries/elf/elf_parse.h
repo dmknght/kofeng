@@ -184,7 +184,7 @@ uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
  * `nameoff` IS THE FILE OFFSET OF THE SYMBOL'S NAME, or zero when it has
  * none. An offset and not the string, because the string is already in the
  * buffer the caller handed in and copying it would mean deciding how much
- * of it to keep - the same carrier a capture uses, see KOF_DIAG_H_ATTR_STR.
+ * of it to keep.
  *
  * WHAT IT IS FOR. A relocation says which SYMBOL an instruction's operand
  * really names, which is the only way to know that `mov rdi, 0x0` is
@@ -202,8 +202,24 @@ typedef int (*kof_elf_reloc_fn)(void *user, uint64_t where, uint32_t type,
 				uint64_t sym, int defined, int64_t addend,
 				uint64_t nameoff);
 
+/*
+ * WHICH RELOCATIONS. A relocation patches either an INSTRUCTION - a call, a
+ * load of an address - or a DATA word - a function pointer in a table, the
+ * name a probe object carries. The two are different questions: a caller
+ * looking for what an instruction's operand names wants the first and would
+ * be handed thousands of table entries it cannot use by the second, and a
+ * caller making the object RUNNABLE needs both.
+ *
+ * It used to be one filter, silently, and the filter was "the target is
+ * executable". That made every pointer in .data and .rodata vanish from an
+ * emulated image: a struct kprobe the object fills in statically read back
+ * as zeros, and the name inside it with it.
+ */
+#define KOF_ELF_RELOC_CODE 1u
+#define KOF_ELF_RELOC_DATA 2u
+
 uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
-			kof_elf_reloc_fn fn, void *user);
+			unsigned want, kof_elf_reloc_fn fn, void *user);
 
 /* Where each function begins and how long it is, as the symbol table states
  * it. A function nothing calls can be found no other way. */

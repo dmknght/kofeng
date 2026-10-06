@@ -6251,6 +6251,97 @@ static int job_wait(struct tree_job *j)
 }
 
 /*
+ * ---- WHICH SIGNATURE READS WHICH DIAGNOSE --------------------------------
+ *
+ * Worked out from the sources, never declared. A verdict names a diagnose in
+ * exactly one place, the call - kof_diag(NAME) or kof_diag_share(cap, A, B) -
+ * and that is also the only statement of it that cannot be wrong about what
+ * the verdict does. This reads those calls out of every module source in the
+ * tree and keeps (diagnose, signature) pairs; the diagnoses are written with
+ * the signatures that read them, and the engine runs only the ones somebody
+ * does.
+ *
+ * COMMENTS ARE STRIPPED FIRST. These sources explain themselves at length and
+ * more than one of them writes the call out in a comment as an example; a
+ * scan that counted those would call a diagnose used by a verdict that only
+ * mentions it.
+ */
+#define DIAG_USE_MAX 512u
+#define DIAG_USER_LEN 40u
+struct diag_use {
+	char diag[64];
+	char user[DIAG_USER_LEN];
+};
+static struct diag_use g_uses[DIAG_USE_MAX];
+static unsigned        g_n_uses;
+static int             g_uses_known;    /* only a tree build knows them all */
+static char            g_built[64][64];
+static unsigned        g_n_built;
+
+
+/* Defined with the other argument helpers, below. */
+static int diag_arg(const char *p, int i, char *out, size_t cap);
+
+static void uses_add(const char *diag, const char *user)
+{
+	unsigned i;
+
+	for (i = 0; i < g_n_uses; i++)
+		if (!strcmp(g_uses[i].diag, diag) &&
+		    !strcmp(g_uses[i].user, user))
+			return;
+	if (g_n_uses >= DIAG_USE_MAX) {
+		fprintf(stderr, "ksigbuilder: more than %u diagnose uses - "
+			"the rest are not recorded\n", DIAG_USE_MAX);
+		return;
+	}
+	snprintf(g_uses[g_n_uses].diag, sizeof g_uses[0].diag, "%s", diag);
+	snprintf(g_uses[g_n_uses].user, sizeof g_uses[0].user, "%s", user);
+	g_n_uses++;
+}
+
+/* Every kof_diag / kof_diag_share call in one source, as (diagnose, user). */
+static void uses_scan(const char *path)
+{
+	size_t n = 0;
+	char *t = slurp(path, &n), *p, user[DIAG_USER_LEN], a[64];
+	const char *base = strrchr(path, '/'), *dot;
+
+	if (!t)
+		return;
+	base = base ? base + 1 : path;
+	snprintf(user, sizeof user, "%s", base);
+	dot = strrchr(user, '.');
+	if (dot)
+		user[dot - user] = 0;
+	strip_comments(t, n);
+	for (p = t; (p = strstr(p, "kof_diag")) != NULL; p++) {
+		int share;
+
+		if (p > t && (isalnum((unsigned char)p[-1]) || p[-1] == '_'))
+			continue;
+		if (!strncmp(p, "kof_diag(", 9))
+			share = 0;
+		else if (!strncmp(p, "kof_diag_has_str(", 17))
+			share = 0;      /* its first argument is the diagnose */
+		else if (!strncmp(p, "kof_diag_share(", 15))
+			share = 1;
+		else
+			continue;
+		if (!share) {
+			if (diag_arg(p, 0, a, sizeof a))
+				uses_add(a, user);
+		} else {
+			if (diag_arg(p, 1, a, sizeof a))
+				uses_add(a, user);
+			if (diag_arg(p, 2, a, sizeof a))
+				uses_add(a, user);
+		}
+	}
+	free(t);
+}
+
+/*
  * The list the walk collects. GROWN, AND IT USED TO BE CAPPED AT 4096.
  *
  * The cap was argued from the shipping tree being 84 sources, and as a number
@@ -6539,6 +6630,19 @@ static int tree_main(int argc, char **argv)
 		return 1;
 	}
 
+	/*
+	 * WHICH SIGNATURE READS WHICH DIAGNOSE, before the sources are let go.
+	 * See the note on struct diag_use: worked out from the calls, never
+	 * declared, so it cannot disagree with what a verdict does.
+	 */
+	g_n_uses = 0;
+	{
+		uint32_t q;
+
+		for (q = 0; q < n_srcs; q++)
+			uses_scan(srcs[q]);
+		g_uses_known = 1;
+	}
 	free(srcs);
 	srcs = NULL;
 	if (!built) {
@@ -6585,6 +6689,48 @@ static int tree_main(int argc, char **argv)
 		}
 		if (dd)
 			closedir(dd);
+	}
+
+	/*
+	 * THE TWO WAYS A CALL AND A DIAGNOSE CAN DISAGREE, checked in both
+	 * directions because both are mistakes an author cannot see.
+	 *
+	 * A call to a diagnose that does not exist answers no, always and
+	 * silently - kof_diag returns zero for a name nobody carries - so a
+	 * verdict that misspells one is a verdict that never fires, and nothing
+	 * would say so. That is an ERROR.
+	 *
+	 * A diagnose nothing calls is not a mistake in the build but is one in
+	 * the tree: the engine will not run it, which is the point, but whoever
+	 * wrote it should be told it does nothing yet.
+	 */
+	{
+		unsigned q, z;
+		int dangling = 0;
+
+		for (q = 0; q < g_n_uses; q++) {
+			for (z = 0; z < g_n_built; z++)
+				if (!strcmp(g_built[z], g_uses[q].diag))
+					break;
+			if (z == g_n_built) {
+				fprintf(stderr, "ksigbuilder: %s reads diagnose "
+					"\"%s\", which no source in %s/diagnoses "
+					"declares\n", g_uses[q].user,
+					g_uses[q].diag, base);
+				dangling = 1;
+			}
+		}
+		for (z = 0; z < g_n_built; z++) {
+			for (q = 0; q < g_n_uses; q++)
+				if (!strcmp(g_built[z], g_uses[q].diag))
+					break;
+			if (q == g_n_uses)
+				fprintf(stderr, "ksigbuilder: warning: diagnose "
+					"%s is read by no verdict, so the engine "
+					"will not run it\n", g_built[z]);
+		}
+		if (dangling)
+			return 1;
 	}
 
 	/* And pack, which is what this program did before it did anything
@@ -7426,14 +7572,23 @@ static int diag_arg(const char *p, int i, char *out, size_t cap)
 		else if (*q == ',' && !depth) i--;
 		q++;
 	}
-	while (*q == ' ' || *q == '\t')
+	/*
+	 * ANY WHITESPACE, NEWLINE INCLUDED. This was written for a diagnose
+	 * declaration, one call to a line, and a space and a tab were all that
+	 * could precede an argument. A verdict's call is wrapped like any other
+	 * C - kof_diag_share(CAP, A,\n\t\t\t   B) - and the argument after the
+	 * break began with a newline that was kept as part of the name, so the
+	 * name never matched anything.
+	 */
+	while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
 		q++;
 	while (*q && *q != ',' && *q != ')' && (size_t)n + 1 < cap) {
 		if (*q == '(') depth++;
 		if (*q == ')') { if (!depth) break; depth--; }
 		out[n++] = *q++;
 	}
-	while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t'))
+	while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t' ||
+			 out[n - 1] == '\n' || out[n - 1] == '\r'))
 		n--;
 	out[n] = 0;
 	return n > 0;
@@ -7456,8 +7611,10 @@ static int diagnose_main(int argc, char **argv)
 	struct dnode nd[64];
 	char name[64] = "", line[1024], a[5][96];
 	char need_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
+	char ref_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
 	struct kof_diag_when when_tbl[KOF_DIAG_MAX_WHEN];
-	int n_need = 0, n_when = 0;
+	unsigned n_users = 0, users_len = 0;
+	int n_need = 0, n_when = 0, n_ref = 0;
 	int n_nd = 0, lineno = 0, i;
 	unsigned via = 0;
 	FILE *f, *o;
@@ -7610,6 +7767,29 @@ static int diagnose_main(int argc, char **argv)
 			memcpy(nd[i].sym, a[1] + 1, L - 2u);
 			nd[i].sym[L - 2u] = 0;
 			nd[i].bits |= KOF_DIAG_B_FIELD_OF;
+		} else if ((p = strstr(line, "KOF_DIAG_REFS(")) != NULL) {
+			int k;
+
+			/* Every quoted word on the line is one symbol, as NEEDS. */
+			for (k = 0; diag_arg(p, k, a[0], sizeof a[0]); k++) {
+				size_t L = strlen(a[0]);
+
+				if (L < 3u || a[0][0] != '"' ||
+				    a[0][L - 1u] != '"') {
+					err(lineno, "KOF_DIAG_REFS wants quoted "
+						    "symbol names");
+					break;
+				}
+				if (n_ref >= (int)KOF_DIAG_MAX_NEED ||
+				    L - 2u >= KOF_DIAG_NEED_LEN) {
+					err(lineno, "too many symbols, or one "
+						    "is too long");
+					break;
+				}
+				memcpy(ref_tbl[n_ref], a[0] + 1, L - 2u);
+				ref_tbl[n_ref][L - 2u] = 0;
+				n_ref++;
+			}
 		} else if ((p = strstr(line, "KOF_DIAG_WHEN(")) != NULL) {
 			uint64_t fv = 0, vv = 0;
 
@@ -7711,13 +7891,43 @@ static int diagnose_main(int argc, char **argv)
 	 * because the tagged sections below sit after it and a reader that
 	 * skipped it would take a tag for a count.
 	 */
-	if (n_need || n_when) {
+	/*
+	 * THE USERS, if this is a tree build that read every signature. A
+	 * stand-alone --diagnose cannot know, and writes nothing: absent means
+	 * unknown, and unknown keeps running.
+	 */
+	{
+		unsigned q;
+
+		n_users = 0;
+		users_len = 0;
+		if (g_uses_known) {
+			for (q = 0; q < g_n_uses; q++)
+				if (!strcmp(g_uses[q].diag, name)) {
+					n_users++;
+					if (users_len + 1u +
+					    strlen(g_uses[q].user) < 250u)
+						users_len += 1u +
+						    (unsigned)strlen(g_uses[q].user);
+				}
+		}
+	}
+	if (n_need || n_when || n_ref || g_uses_known) {
 		int k;
 
 		need += 1u;                     /* how many */
 		for (k = 0; k < n_need; k++)
 			need += 1u + strlen(need_tbl[k]);
 	}
+	if (n_ref) {
+		int k;
+
+		need += 2u + 1u;                /* tag, length, count */
+		for (k = 0; k < n_ref; k++)
+			need += 1u + strlen(ref_tbl[k]);
+	}
+	if (g_uses_known)
+		need += 2u + 1u + users_len;
 	/*
 	 * TAGGED TRAILING SECTIONS, tag and length each one byte. The signs
 	 * above are not tagged - they predate this - so anything added after
@@ -7771,7 +7981,7 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (n_need || n_when) {
+	if (n_need || n_when || n_ref || g_uses_known) {
 		int k;
 
 		blob[at++] = (unsigned char)n_need;
@@ -7798,6 +8008,47 @@ static int diagnose_main(int argc, char **argv)
 					     (when_tbl[k].val >> (q * 8u));
 		}
 	}
+	if (n_ref) {
+		int k;
+		size_t body = 1u;
+
+		for (k = 0; k < n_ref; k++)
+			body += 1u + strlen(ref_tbl[k]);
+		blob[at++] = KDIG_SEC_REFS;
+		blob[at++] = (unsigned char)body;
+		blob[at++] = (unsigned char)n_ref;
+		for (k = 0; k < n_ref; k++) {
+			size_t L = strlen(ref_tbl[k]);
+
+			blob[at++] = (unsigned char)L;
+			memcpy(blob + at, ref_tbl[k], L);
+			at += L;
+		}
+	}
+	if (g_uses_known) {
+		unsigned q, left = users_len;
+
+		blob[at++] = KDIG_SEC_USERS;
+		blob[at++] = (unsigned char)(1u + users_len);
+		blob[at++] = (unsigned char)(n_users > 255u ? 255u : n_users);
+		for (q = 0; q < g_n_uses; q++) {
+			size_t L;
+
+			if (strcmp(g_uses[q].diag, name))
+				continue;
+			L = strlen(g_uses[q].user);
+			if (1u + L > left)
+				continue;
+			blob[at++] = (unsigned char)L;
+			memcpy(blob + at, g_uses[q].user, L);
+			at += L;
+			left -= 1u + (unsigned)L;
+		}
+	}
+	/* Remembered so the tree build can check that every call names a
+	 * diagnose that exists - see the end of tree_main. */
+	if (g_n_built < 64u)
+		snprintf(g_built[g_n_built++], sizeof g_built[0], "%s", name);
 	o = fopen(out, "wb");
 	if (!o || fwrite(blob, 1, need, o) != need) {
 		fprintf(stderr, "FAIL: cannot write %s\n", out);
@@ -7806,8 +8057,8 @@ static int diagnose_main(int argc, char **argv)
 		return 1;
 	}
 	fclose(o);
-	printf("== %s  %s  %d node, %d sign(s), %d condition(s), %zu bytes\n",
-	       src, name, n_nd, n_need, n_when, need);
+	printf("== %s  %s  %d node, %d sign(s), %d ref(s), %d condition(s), %zu bytes\n",
+	       src, name, n_nd, n_need, n_ref, n_when, need);
 	free(blob);
 	return 0;
 }

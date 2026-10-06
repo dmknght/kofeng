@@ -147,22 +147,15 @@ struct kof_diag_in {
 #define KOF_DIAG_H_RAW_SYSCALL (1u << 4)
 
 /*
- * `attr` IS WHERE A STRING IS, NOT A STRUCTURE OFFSET.
+ * BIT 5 WAS KOF_DIAG_H_ATTR_STR - `attr` held the OFFSET IN THE FILE of a name
+ * a call was handed. It is gone, and the number is left unused rather than
+ * reused so nothing built against it reads a different bit.
  *
- * The same field carries two kinds of evidence and this says which. For a
- * field access it is a displacement - see the note on attr. For a call that
- * was handed a name, it is the OFFSET IN THE OBJECT of that name, and the
- * bytes stay where they are: the engine reports where the evidence is rather
- * than copying it, so nothing has to own a string and no length has to be
- * guessed at twice.
- *
- * WHY THE NAME MATTERS HERE. A kprobe pair resolves A symbol, and which one
- * is the difference between a tracing module and a rootkit: Diamorphine asks
- * for "sys_call_table", and everything it does afterwards is indexing what
- * came back. The links alone say "something was looked up and then indexed";
- * with the name they say what was looked up.
+ * A name cannot be an offset into the file: one built at run time is not in
+ * the file, and one that is there may be encoded until the code in front of
+ * the call has run over it. Names are now copies read out of the emulator's
+ * memory and kept in the scan - see kof_diag_str_at.
  */
-#define KOF_DIAG_H_ATTR_STR (1u << 5)
 
 /*
  * `val` HOLDS THE VALUE THIS NODE WROTE, and it was a constant in the
@@ -323,6 +316,31 @@ unsigned kof_diag_scan_ran(const struct kof_diag_scan *);
 uint32_t kof_diag_scan_count(const struct kof_diag_scan *);
 const struct kof_diag_hit *kof_diag_scan_at(const struct kof_diag_scan *,
 					    uint32_t i);
+
+/*
+ * THE NAMES CALLS OF `cap` WERE GIVEN, in the order they were first seen.
+ * `i` runs from zero; NULL past the end. The string is the scan's and lives
+ * until kof_diag_scan_free.
+ */
+const char *kof_diag_str_at(const struct kof_diag_scan *, uint16_t cap,
+			    uint32_t i);
+uint32_t    kof_diag_str_count(const struct kof_diag_scan *, uint16_t cap);
+/*
+ * DOES THIS DIAGNOSE CARRY EVERY ONE OF THESE NAMES - the names read at the
+ * call sites its tree BOUND, across every place the tree matched, and no
+ * others.
+ *
+ * ACROSS INSTANCES, not within one: a module that places a probe on two
+ * symbols has two matches of the same tree with a name each, and "carries
+ * both" means both were seen, not that one call was handed both. A diagnose
+ * that did not match at all carries nothing.
+ *
+ * kof_diag_str_at and _count are the ones that walk the list by capability,
+ * for a caller that wants the list itself; THIS is the one a verdict reaches.
+ */
+int         kof_diag_scan_names(const struct kof_diag_scan *,
+				const struct kof_diag *,
+				const char *const *strs, uint32_t n);
 
 /* Non-zero when the walk stopped at its bound. A caller asking "is this
  * capability absent" must read this and answer "cannot say" instead. */

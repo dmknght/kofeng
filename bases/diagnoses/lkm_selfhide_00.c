@@ -61,6 +61,29 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL);
 KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
 
 /*
+ * ---- THE SYMBOL IS WHAT IS LOOKED FOR FIRST -----------------------------
+ *
+ * The analysis starts only for an object whose code refers INTO
+ * __this_module, at an offset other than zero. That is a question about the
+ * relocation table and decodes no instruction, and it is the cheap fact the
+ * rest of this diagnose is a consequence of: a module cannot take the address
+ * of a field of its own struct module without a relocation against that
+ * symbol saying so.
+ *
+ * IT WAS NOT DECLARED, and the cost showed. With no sign at all this
+ * diagnose passed its gate on every kernel module, so a verdict reading it
+ * started the whole symbol route on all 900 clean ones: the kernel-module
+ * corpus went from 1.45 s to 2.65 s for a question nearly none of them could
+ * answer yes to. Declared, the route runs on the one clean module that
+ * reaches a field - qlcnic.ko, which reads its own name - and on the
+ * rootkits.
+ *
+ * A DECLARATION AND NOT SOMETHING THE ENGINE KNOWS: it has no idea that
+ * __this_module matters. See KOF_DIAG_REFS for the one question it answers.
+ */
+KOF_DIAG_REFS("__this_module");
+
+/*
  * ONE NODE AND NO LINK, because there is no second call to link to: the
  * removal is one operation on one object, and what makes it a statement is
  * WHOSE object it is. A tree would have nothing to say here that this does

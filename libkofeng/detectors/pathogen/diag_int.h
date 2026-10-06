@@ -50,10 +50,77 @@ struct kof_diag_scan {
 	 * for why a BUFFER edge runs the opposite way from an FD edge. Built
 	 * lazily because only a scan a verdict joins on ever needs it.
 	 */
+	/*
+	 * ---- THE NAMES A CALL WAS GIVEN, KEPT IN THE ENGINE ------------
+	 *
+	 * COPIES, read out of the guest's memory, and tagged with the
+	 * capability of the call that was handed them. A module asking what
+	 * was declared to the kernel asks THIS and does not look in the object.
+	 *
+	 * IT WAS AN OFFSET INTO THE FILE BEFORE - a hit's attr, flagged
+	 * ATTR_STR - and that is the one thing a name cannot be. A name an
+	 * object builds at run time is decoded into a buffer that is not in
+	 * the file at all; and a name sitting in the file may be encoded
+	 * there and only meaningful after the code has run over it. Both are
+	 * only ever right in the emulator's memory, so that is where they are
+	 * read and a copy is what is kept.
+	 *
+	 * DEDUPLICATED per (capability, name): four calls handing the same
+	 * resolver the same word are one statement.
+	 */
+	struct kof_diag_str *str;
+	uint32_t             n_str, cap_str;
+	/*
+	 * AN OPEN-ADDRESSING TABLE OVER THE ENTRIES, of 1-based indices (zero is
+	 * empty), twice the entry capacity and always a power of two. Kept for
+	 * the two questions that are asked of the whole list - "is this name
+	 * already here" on every insert, and "is this name here" from a verdict
+	 * - which were a scan of every entry and are now one probe.
+	 *
+	 * AT THE SIZES A REAL MODULE REACHES (0 to ~25 names) IT IS NO FASTER:
+	 * measured, a linear scan and the table are both ~20 ns there, and below
+	 * about a dozen the scan wins. It earns its place at the BOUND - 1024
+	 * names, which only a hostile object feeds the store - where the scan
+	 * costs 470 to 890 ns a query and the table 27 to 29, and where the
+	 * duplicate check on insert would otherwise make filling it quadratic.
+	 * Entries stay in an array, in the order they were first seen, because a
+	 * caller walking the list wants that order.
+	 */
+	uint16_t            *str_tab;
+	uint32_t             str_tmask;
 	uint32_t            *adj_head;  /* n_hit + 1 offsets, or NULL       */
 	uint16_t            *adj_edge;  /* flattened successors             */
 	int                  adj_built;
 };
+
+/* A name longer than this is not a symbol; the walk refuses it before it is
+ * stored, so this is a bound on the record and not on what is kept. */
+#define DIAG_STR_MAX 64u
+
+struct kof_diag_str {
+	uint16_t cap;                   /* the call that was handed it      */
+	/*
+	 * THE NODE OF THAT CALL, which is what makes a name FOLLOW a diagnose.
+	 *
+	 * A name used to be tagged with the capability alone, and a diagnose's
+	 * names were "the ones handed to calls of the capabilities my nodes
+	 * name". Two diagnoses with a node of the same capability then shared
+	 * every name, including those from calls the other had never matched -
+	 * a verdict asking what ONE of them carried was answered from both.
+	 *
+	 * With the node, a diagnose owns the names read at the call sites its
+	 * tree actually BOUND, and nothing else. 0xffff means the call has no
+	 * node, which is kept so the list stays whole and is owned by no one.
+	 */
+	uint16_t node;
+	uint32_t hash;                  /* of (cap, node, name) - see str_hash */
+	char     s[DIAG_STR_MAX + 1u];
+};
+
+/* Keep a name for `cap`. Returns 1 when it was new. The scan is marked full
+ * when the store cannot grow, never silently - see kof_diag_scan_full. */
+int kof_diag_str_add(struct kof_diag_scan *s, uint16_t cap, uint16_t node,
+		     const char *name);
 
 /*
  * Add a node, or NULL when the scan is full. `at` is an offset into the

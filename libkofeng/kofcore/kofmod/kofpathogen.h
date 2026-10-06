@@ -409,6 +409,18 @@ struct kof_diag {
 	 */
 	uint8_t               n_when;
 	struct kof_diag_when  when[KOF_DIAG_MAX_WHEN];
+	/*
+	 * HOW MANY VERDICTS READ IT, when the build said - see KDIG_SEC_USERS.
+	 * `users_known` distinguishes "none" from "nobody wrote it down".
+	 */
+	uint8_t               users_known;
+	uint8_t               n_users;
+	/*
+	 * SYMBOLS THE CODE MUST REFER INTO, at a non-zero offset - see
+	 * KOF_DIAG_REFS. Strings live in the same store as `need`.
+	 */
+	uint8_t               n_ref;
+	const char           *ref[KOF_DIAG_MAX_NEED];
 };
 
 /*
@@ -477,6 +489,28 @@ enum kof_diag_link {
  */
 #define KOF_DIAG_NEEDS(...)
 /*
+ * KOF_DIAG_REFS("__this_module") - the object's code must contain an
+ * instruction whose operand is a relocation against this symbol at an
+ * OFFSET OTHER THAN ZERO: it takes the address of something INSIDE it, not
+ * the symbol itself. A sign like KOF_DIAG_NEEDS, and for the same reason - a
+ * file-level condition, answered from a table, that decides whether the
+ * expensive analysis starts at all - but about a different table: NEEDS asks
+ * what the object IMPORTS, this asks what its instructions REFER TO.
+ *
+ * WHY IT IS A DECLARATION AND NOT SOMETHING THE ENGINE KNOWS. The engine has
+ * no idea that __this_module matters; it has one question it can answer -
+ * does a code relocation name this symbol at a non-zero addend - and the
+ * diagnose says which symbol. The same question serves any symbol whose
+ * fields, rather than whose address, are the interesting thing.
+ *
+ * A symbol with no OFFSET to speak of is a different question and this does
+ * not answer it: a reference at offset zero is the handle, and a module
+ * hands THIS_MODULE to the kernel constantly.
+ *
+ * ONE LINE PER CALL, as KOF_DIAG_NEEDS and KOF_DIAG_WHEN.
+ */
+#define KOF_DIAG_REFS(...)
+/*
  * KOF_DIAG_WROTE(label, 0) - the node must have written this value.
  *
  * Only for a node that writes. See KOF_DIAG_B_VAL for why a value may be
@@ -517,6 +551,30 @@ enum kof_diag_link {
  * does know.
  */
 #define KDIG_SEC_WHEN  2u      /* (fact u16, value u64) pairs */
+/*
+ * WHICH VERDICTS READ THIS DIAGNOSE. A count, then the names of the
+ * signatures that call it (a length byte and the bytes, as many as fit).
+ *
+ * WRITTEN BY THE BUILD AND NEVER BY AN AUTHOR. A signature already says
+ * which diagnose it reads, in the one place that cannot drift from what it
+ * does - the call - so a second statement of it, in the verdict or beside the
+ * diagnose, would be a fact with two carriers. The build reads the calls out
+ * of the signature sources and records the result here.
+ *
+ * WHAT THE ENGINE DOES WITH IT: a diagnose no verdict reads is not run. It
+ * still gates and still starts the analysis, otherwise - measured, three
+ * diagnoses nothing called cost the kernel-module corpus 1.05 s on a
+ * baseline of 1.48 s, to compute answers nobody asked for.
+ *
+ * ABSENT MEANS UNKNOWN, NOT NONE. A .kdig written before this existed has no
+ * section and must keep running; only a count of ZERO says nobody reads it.
+ */
+#define KDIG_SEC_USERS 3u
+/*
+ * SYMBOLS THE OBJECT'S CODE MUST REFER INTO - a count, then each name as a
+ * length byte and the bytes. See KOF_DIAG_REFS.
+ */
+#define KDIG_SEC_REFS  4u
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,
@@ -567,13 +625,13 @@ enum kof_diag_link {
  * A NODE. `at` is an offset into the object, and KOF_DIAG_BROKEN_AT means the
  * site is not in the file at all - code the run produced.
  *
- * `attr` is the one field with two meanings and KOF_GR_B_ATTR_STR says which:
- * a structure displacement, or the offset of a NUL-terminated name. The name
- * is left where it is; the record points at it.
+ * `attr` is a structure displacement. It used to be the offset of a name as
+ * well, flagged by a bit in the byte below; names are kept in the engine now
+ * and read through kof_diag_str, so the field means one thing.
  */
 #define KOF_GR_RECLEN   32u
 #define KOF_GR_R_AT      0u     /* 8  offset of the site                    */
-#define KOF_GR_R_ATTR    8u     /* 8  displacement, or offset of a name     */
+#define KOF_GR_R_ATTR    8u     /* 8  displacement                          */
 #define KOF_GR_R_CAP    16u     /* 2  enum kof_flow_cap                     */
 #define KOF_GR_R_FLAGS  18u     /* 2  KOF_FLOWF_* seen here                 */
 #define KOF_GR_R_BITS   20u     /* 1  KOF_GR_B_*                            */
@@ -589,8 +647,8 @@ enum kof_diag_link {
 #define KOF_GR_FROM_NONE  0xffffu
 #define KOF_GR_FROM_STACK 0xfffeu
 
-/* bits */
-#define KOF_GR_B_ATTR_STR (1u << 0)   /* attr is where a name is            */
+/* The bits byte is reserved and zero. Bit 0 was KOF_GR_B_ATTR_STR; the
+ * number is left unused so nothing built against it reads another meaning. */
 
 
 static inline uint32_t kof_gr_count(const uint8_t *b, uint32_t n)

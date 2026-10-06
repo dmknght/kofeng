@@ -387,6 +387,111 @@ static const unsigned arg_reg32[6] = {
  */
 struct relapply { struct kof_emu *em; uint64_t size; };
 
+/*
+ * IS THERE A PRINTABLE, NUL-TERMINATED NAME AT THIS OFFSET.
+ *
+ * A symbol name, not a string in general: short, printable, and ending. The
+ * bound is what the kernel's own symbol table allows, and the floor keeps a
+ * stray byte that happens to be followed by a NUL from being read as a name.
+ */
+#define DIAG_NAME_MIN 3u
+#define DIAG_NAME_MAX 64u
+
+/*
+ * ---- A C STRING OUT OF THE GUEST'S MEMORY ---------------------------------
+ *
+ * Read from the emulator, and never from the file. A name an object hands a
+ * kernel resolver may be built at run time, or sit in the file encoded and be
+ * decoded in place before the call - and in both cases the bytes that matter
+ * exist only in the guest, after the code in front of the call has run. The
+ * file's copy is the encoding, or nothing.
+ *
+ * ONE BYTE AT A TIME because a name may end a page short of an unmapped one,
+ * and a read of a fixed length that crosses it fails whole - see the note on
+ * kof_emu_read. The bound is a symbol's length, so the cost is a few reads per
+ * candidate and this runs at a handful of call sites.
+ *
+ * Returns the length, or 0 when what is there is not a symbol name - the same
+ * charset the file-side check used: letters, digits, underscore, and the dot
+ * and dollar the kernel and the linker really use. A compiler version string
+ * lands on a register by accident and is not accepted for it.
+ */
+static unsigned guest_name(struct kof_emu *em, uint64_t va, char *out)
+{
+	unsigned i;
+
+	if (!va)
+		return 0;
+	for (i = 0; i <= DIAG_STR_MAX; i++) {
+		uint8_t c;
+
+		if (!kof_emu_read(em, va + i, &c, 1u))
+			return 0;
+		if (!c) {
+			out[i] = 0;
+			return i >= DIAG_NAME_MIN ? i : 0;
+		}
+		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		      (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+		      c == '$'))
+			return 0;
+		if (i < DIAG_STR_MAX)
+			out[i] = (char)c;
+	}
+	return 0;               /* too long to be a symbol */
+}
+
+/*
+ * HOW MANY WORDS OF AN OBJECT ARE LOOKED AT for a pointer to a name. This is
+ * a bound on COST and it is deliberately far past any probe or resolver
+ * argument that exists - struct kprobe is about 0x70 bytes - because the
+ * layout is a fact about a kernel build and the bound must not be what
+ * decides whether a name is found.
+ */
+#define DIAG_NAME_OBJ_WORDS 32u
+
+/*
+ * THE NAMES A CALL WAS GIVEN, kept in the scan. See kof_flow_name_arg for
+ * where the vocabulary says to look; this does the looking.
+ *
+ * An OBJECT is read word by word and every word that points at a symbol name
+ * is kept - never one particular field. The probe's own link pointers, its
+ * handlers and its resolved address are pointers too, and none of them point
+ * at a run of identifier characters ending in a zero.
+ */
+static void capture_names(struct kof_diag_scan *s, struct kof_emu *em,
+			  uint16_t cap, uint16_t node)
+{
+	unsigned arg, kind = kof_flow_name_arg(cap, &arg);
+	uint64_t a;
+	char nm[DIAG_STR_MAX + 1u];
+
+	if (!kind)
+		return;
+	a = kof_emu_get_reg(em, kof_diag_sysv_arg[arg]);
+	if (kind == KOF_NAME_DIRECT) {
+		if (guest_name(em, a, nm))
+			kof_diag_str_add(s, cap, node, nm);
+		return;
+	}
+	{
+		unsigned w;
+
+		for (w = 0; w < DIAG_NAME_OBJ_WORDS; w++) {
+			uint8_t q[8];
+			uint64_t p = 0;
+			unsigned b;
+
+			if (!kof_emu_read(em, a + (uint64_t)w * 8u, q, 8u))
+				break;
+			for (b = 0; b < 8u; b++)
+				p |= (uint64_t)q[b] << (8u * b);
+			if (guest_name(em, p, nm))
+				kof_diag_str_add(s, cap, node, nm);
+		}
+	}
+}
+
 static int apply_reloc(void *user, uint64_t where, uint32_t type,
 		       uint64_t sym, int defined, int64_t addend,
 		       uint64_t nameoff)
@@ -526,7 +631,10 @@ static struct kof_emu *build_rel_image(const struct kof_obj_ctx *ctx,
 		f.n = size;
 		ra.em = em;
 		ra.size = size;
-		kof_elf_relocs(f, ei, apply_reloc, &ra);
+		/* BOTH: an image is made runnable by its code AND by the pointers its
+		 * data holds - see KOF_ELF_RELOC_DATA. */
+		kof_elf_relocs(f, ei, KOF_ELF_RELOC_CODE | KOF_ELF_RELOC_DATA,
+			       apply_reloc, &ra);
 	}
 	return em;
 }
@@ -1024,43 +1132,8 @@ static void promote_wrappers(struct kof_diag_scan *s,
 }
 
 
-/*
- * IS THERE A PRINTABLE, NUL-TERMINATED NAME AT THIS OFFSET.
- *
- * A symbol name, not a string in general: short, printable, and ending. The
- * bound is what the kernel's own symbol table allows, and the floor keeps a
- * stray byte that happens to be followed by a NUL from being read as a name.
- */
-#define DIAG_NAME_MIN 3u
-#define DIAG_NAME_MAX 64u
 
-static int name_at(const uint8_t *base, uint64_t size, uint64_t off)
-{
-	uint64_t i;
 
-	if (off >= size)
-		return 0;
-	for (i = 0; i < DIAG_NAME_MAX && off + i < size; i++) {
-		uint8_t c = base[off + i];
-
-		if (!c)
-			return i >= DIAG_NAME_MIN;
-		/*
-		 * A SYMBOL NAME, NOT ANY PRINTABLE RUN. Accepting every
-		 * printable byte caught a compiler version string -
-		 * ".2.0-19) 14.2.0" - on a clean module, because a register
-		 * happened to point at it. A C identifier is letters, digits
-		 * and underscore; the dot and dollar are there because the
-		 * kernel and the linker both use them in real names, and a
-		 * space or a bracket ends it.
-		 */
-		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-		      (c >= '0' && c <= '9') || c == '_' || c == '.' ||
-		      c == '$'))
-			return 0;
-	}
-	return 0;
-}
 
 /*
  * WHAT A STORE PUT THERE, when the instruction carries it - see
@@ -1351,9 +1424,30 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 				 * promote_wrappers - and that is the node a
 				 * caller means when it calls into it.
 				 *
-				 * Recorded as the OFFSET of the bytes, never
-				 * a copy: see KOF_DIAG_H_ATTR_STR.
+				 * KEPT IN THE ENGINE, READ FROM THE GUEST'S
+				 * MEMORY: see capture_names. The name used to
+				 * be an offset into the file on the node, which
+				 * cannot hold a name built or decoded at run
+				 * time.
 				 */
+				/*
+				 * THE NODE THIS CALL BECAME, found FIRST: a name
+				 * is kept with the node of the call it was read
+				 * at, and that is what lets a diagnose own the
+				 * names of the sites its tree bound and no
+				 * others. It used to be looked up after the
+				 * capture, when there was nothing to attach it
+				 * to.
+				 */
+				for (i = 0; i < n; i++) {
+					const struct kof_diag_hit *p =
+						kof_diag_scan_at(s, i);
+
+					if (p && p->at == skips[q].resume) {
+						node = (uint16_t)i;
+						break;
+					}
+				}
 				if (skips[q].call_at == rip) {
 					uint16_t cn = skips[q].callee
 						? callee_node(s, fns, fg.n,
@@ -1362,6 +1456,15 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 					struct kof_diag_hit *ch;
 					uint64_t a0 = kof_emu_get_reg(em,
 						kof_diag_sysv_arg[0]);
+					char nm[DIAG_STR_MAX + 1u];
+
+					/*
+					 * THE NAMES THE CALL ITSELF CARRIES, by
+					 * what the vocabulary says its
+					 * capability is handed - a probe's
+					 * object, a resolver's string.
+					 */
+					capture_names(s, em, skips[q].cap, node);
 
 					/*
 					 * TWO PLACES THE SAME NAME CAN BE, and
@@ -1389,21 +1492,15 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 						cn = callee_node(s, fns, fg.n, lo);
 					ch = cn == 0xffffu ? 0
 							   : kof_diag_hit_of(s, cn);
-					if (ch && !ch->attr && a0 > DIAG_REL_BASE &&
-					    name_at(base, size, a0 - DIAG_REL_BASE)) {
-						ch->attr = a0 - DIAG_REL_BASE;
-						ch->bits |= KOF_DIAG_H_ATTR_STR;
-					}
-				}
-
-				for (i = 0; i < n; i++) {
-					const struct kof_diag_hit *p =
-						kof_diag_scan_at(s, i);
-
-					if (p && p->at == skips[q].resume) {
-						node = (uint16_t)i;
-						break;
-					}
+					/*
+					 * THE NAME AN INLINED RESOLVER WAS
+					 * HANDED, kept under the node that was
+					 * promoted over this block. Deduplicated
+					 * with the line above, so a call that
+					 * answers to both is one name.
+					 */
+					if (ch && guest_name(em, a0, nm))
+						kof_diag_str_add(s, ch->cap, cn, nm);
 				}
 
 				if (node != 0xffffu) {

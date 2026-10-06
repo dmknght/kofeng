@@ -316,7 +316,10 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	rg.r = refs;
 	rg.n = 0;
 	rg.cap = DIAG_SYM_REFS;
-	kof_elf_relocs(f, ei, take_ref, &rg);
+	/* CODE ONLY: what is wanted is the symbol an INSTRUCTION's operand names.
+	 * The data relocations are table entries nothing here can use, and
+	 * they would spend the bound on them. */
+	kof_elf_relocs(f, ei, KOF_ELF_RELOC_CODE, take_ref, &rg);
 
 	for (j = 0; j < fg.n; j++) {
 		struct kof_kdis k;

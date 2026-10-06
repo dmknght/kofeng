@@ -1060,6 +1060,39 @@ static void merge_sites(struct kof_diag_scan *s)
 					 s->hit[i].in[k].role,
 					 s->hit[i].in[k].kind);
 	}
+	/*
+	 * 3b. THE NAMES FOLLOW THE NODES. Each kept name carries the index of
+	 * the node of the call it was read at, and that index was the one
+	 * before folding. Left alone, a name read at a node that was folded
+	 * into another would point at whatever now sits in its old slot - a
+	 * different call, or none - and nothing would say so: the name would
+	 * simply stop belonging to the diagnose that matched its site.
+	 *
+	 * Rebuilt through kof_diag_str_add rather than patched in place, so two
+	 * entries that become the same (capability, node, name) after the fold
+	 * are one, which is the same rule the store keeps everywhere else.
+	 */
+	if (s->n_str) {
+		struct kof_diag_str *old_str = malloc((size_t)s->n_str *
+						      sizeof *old_str);
+		uint32_t old_n = s->n_str, z;
+
+		if (old_str) {
+			memcpy(old_str, s->str, (size_t)old_n * sizeof *old_str);
+			s->n_str = 0;
+			memset(s->str_tab, 0,
+			       ((size_t)s->str_tmask + 1u) * sizeof *s->str_tab);
+			for (z = 0; z < old_n; z++) {
+				uint16_t nd = old_str[z].node;
+
+				if (nd < s->n_hit)
+					nd = map[nd];
+				kof_diag_str_add(s, old_str[z].cap, nd,
+						 old_str[z].s);
+			}
+			free(old_str);
+		}
+	}
 	/* 4. close the gaps */
 	for (j = 0; j < n; j++)
 		if (rep[j] != j)
@@ -1130,10 +1163,162 @@ int kof_diag_scan_full(const struct kof_diag_scan *s)
 	return s ? s->full : 0;
 }
 
+/*
+ * A BOUND ON COST, and a loud one: 1024 distinct names is far past anything
+ * a module declares, and an object that reaches it is feeding the store
+ * rather than using it. It is a limit on the work, not on what a verdict can
+ * conclude - the scan is marked full, which a caller reading a list must
+ * check before it says "none".
+ */
+#define DIAG_STR_LIMIT 1024u
+
+/*
+ * FNV-1a over the name, with the capability AND THE NODE mixed into the seed
+ * so the same word handed to two different calls - or read at two different
+ * places - is two different keys. 32 bits is enough
+ * because every probe that matches on it then compares the bytes: a collision
+ * costs one strcmp and cannot make a name appear.
+ */
+static uint32_t str_hash(uint16_t cap, uint16_t node, const char *s)
+{
+	uint32_t h = 2166136261u ^ ((uint32_t)cap * 0x9e3779b1u) ^
+		     ((uint32_t)node * 0x85ebca6bu);
+
+	while (*s) {
+		h ^= (uint8_t)*s++;
+		h *= 16777619u;
+	}
+	return h;
+}
+
+/* (Re)build the table for the current entry capacity. Failure leaves the old
+ * one in place and the caller marks the scan full. */
+static int str_table_build(struct kof_diag_scan *s)
+{
+	uint32_t sz = 2u * s->cap_str, i;
+	uint16_t *t = calloc(sz, sizeof *t);
+
+	if (!t)
+		return 0;
+	for (i = 0; i < s->n_str; i++) {
+		uint32_t p = s->str[i].hash & (sz - 1u);
+
+		while (t[p])
+			p = (p + 1u) & (sz - 1u);
+		t[p] = (uint16_t)(i + 1u);
+	}
+	free(s->str_tab);
+	s->str_tab = t;
+	s->str_tmask = sz - 1u;
+	return 1;
+}
+
+int kof_diag_str_add(struct kof_diag_scan *s, uint16_t cap, uint16_t node,
+		     const char *name)
+{
+	uint32_t h, p;
+	size_t n;
+
+	if (!s || !name || !*name)
+		return 0;
+	n = strlen(name);
+	if (n > DIAG_STR_MAX)
+		return 0;
+	h = str_hash(cap, node, name);
+	/* ALREADY HERE? One probe, where this was a strcmp against every entry. */
+	if (s->str_tab)
+		for (p = h & s->str_tmask; s->str_tab[p];
+		     p = (p + 1u) & s->str_tmask) {
+			const struct kof_diag_str *e =
+				&s->str[s->str_tab[p] - 1u];
+
+			if (e->hash == h && e->cap == cap && e->node == node &&
+			    !strcmp(e->s, name))
+				return 0;
+		}
+	if (s->n_str >= DIAG_STR_LIMIT) {
+		s->full = 1;
+		return 0;
+	}
+	if (s->n_str == s->cap_str) {
+		uint32_t nc = s->cap_str ? s->cap_str * 2u : 16u;
+		struct kof_diag_str *nv = realloc(s->str, nc * sizeof *nv);
+		uint32_t old = s->cap_str;
+
+		if (!nv) {
+			s->full = 1;
+			return 0;
+		}
+		s->str = nv;
+		s->cap_str = nc;
+		if (!str_table_build(s)) {
+			s->cap_str = old;       /* the entries are fine; the
+						 * new slot is not offered */
+			s->full = 1;
+			return 0;
+		}
+	}
+	s->str[s->n_str].cap = cap;
+	s->str[s->n_str].node = node;
+	s->str[s->n_str].hash = h;
+	memcpy(s->str[s->n_str].s, name, n + 1u);
+	s->n_str++;
+	for (p = h & s->str_tmask; s->str_tab[p]; p = (p + 1u) & s->str_tmask)
+		;
+	s->str_tab[p] = (uint16_t)s->n_str;
+	return 1;
+}
+
+/* Was `name` read at THIS node, by a call of THIS capability. One probe. */
+static int str_at_node(const struct kof_diag_scan *s, uint16_t cap,
+		       uint16_t node, const char *name)
+{
+	uint32_t h, p;
+
+	if (!s->str_tab)
+		return 0;
+	h = str_hash(cap, node, name);
+	for (p = h & s->str_tmask; s->str_tab[p]; p = (p + 1u) & s->str_tmask) {
+		const struct kof_diag_str *e = &s->str[s->str_tab[p] - 1u];
+
+		if (e->hash == h && e->cap == cap && e->node == node &&
+		    !strcmp(e->s, name))
+			return 1;
+	}
+	return 0;
+}
+
+const char *kof_diag_str_at(const struct kof_diag_scan *s, uint16_t cap,
+			    uint32_t i)
+{
+	uint32_t k;
+
+	if (!s)
+		return NULL;
+	for (k = 0; k < s->n_str; k++)
+		if (s->str[k].cap == cap && i-- == 0u)
+			return s->str[k].s;
+	return NULL;
+}
+
+uint32_t kof_diag_str_count(const struct kof_diag_scan *s, uint16_t cap)
+{
+	uint32_t k, n = 0;
+
+	if (!s)
+		return 0;
+	for (k = 0; k < s->n_str; k++)
+		if (s->str[k].cap == cap)
+			n++;
+	return n;
+}
+
 void kof_diag_scan_free(struct kof_diag_scan *s)
 {
 	if (!s)
 		return;
+	free(s->str_tab);
+	free(s->str);
 	free(s->adj_head);
 	free(s->adj_edge);
 	free(s->hit);
@@ -1466,25 +1651,36 @@ int kof_diag_flow_join(struct kof_diag_scan *s, uint16_t cap,
 	return hit;
 }
 
-int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
-		   uint16_t *bind_out, uint8_t *n_bind)
+/*
+ * EVERY PLACE A TREE MATCHES, one call of `fn` for each, with the node each of
+ * the diagnose's own nodes was bound to. `fn` returns zero to stop.
+ *
+ * THIS IS THE MATCHER; kof_diag_match is the first-instance reading of it.
+ * It stopped at the first root that satisfied the tree and every later
+ * question - the names a diagnose carries, in particular - was answered from
+ * that one place. A module with two probes on two symbols has two matches of
+ * the same tree, and a diagnose "carrying" a name from the second was a
+ * diagnose the engine had never looked at.
+ */
+typedef int (*diag_inst_fn)(void *user, const uint16_t *bound, uint8_t n_node);
+
+static void match_each(const struct kof_diag_scan *s, const struct kof_diag *d,
+		       diag_inst_fn fn, void *user)
 {
 	uint16_t bound[256];
 	uint32_t i;
-	uint8_t root, k, n = 0;
+	uint8_t root;
 
-	if (n_bind)
-		*n_bind = 0;
 	/* n_node is a uint8_t, so 255 is its ceiling already - the bound that
 	 * matters is `bound[]` below holding one slot per node, and 256 is
 	 * more than a uint8_t can index past. */
 	if (!s || !d || !d->n_node)
-		return 0;
+		return;
 	for (root = 0; root < d->n_node; root++)
 		if (d->node[root].parent == KOF_DIAG_NO_PARENT)
 			break;
 	if (root == d->n_node)
-		return 0;               /* no root: not a tree */
+		return;                 /* no root: not a tree */
 
 	for (i = 0; i < s->n_hit; i++) {
 		if (!spec_ok(s, &s->hit[i], &d->node[root]))
@@ -1493,25 +1689,99 @@ int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
 		bound[root] = (uint16_t)i;
 		if (!bind_from(s, d, root, bound))
 			continue;
-		/*
-		 * EVERY BOUND NODE COMES BACK, not a declared subset.
-		 *
-		 * The diagnose used to mark the ones it offered as join
-		 * points, and only those were returned. That put a fact
-		 * about TWO behaviours inside the declaration of ONE - the
-		 * author of the stager's read had to know the socket
-		 * diagnose existed - and it silently lost the join whenever
-		 * the mark was on the wrong node. The verdict names the
-		 * capability it wants the two to meet at instead, so the
-		 * engine has to hand back everything they bound.
-		 */
-		for (k = 0; k < d->n_node && bind_out; k++)
-			bind_out[n++] = bound[k];
-		if (n_bind)
-			*n_bind = n;
-		return 1;
+		if (!fn(user, bound, d->n_node))
+			return;
 	}
-	return 0;
+}
+
+struct first_match {
+	uint16_t *out;
+	uint8_t  *n_out;
+	int       found;
+};
+
+static int first_cb(void *user, const uint16_t *bound, uint8_t n_node)
+{
+	struct first_match *f = user;
+	uint8_t k, n = 0;
+
+	/*
+	 * EVERY BOUND NODE COMES BACK, not a declared subset.
+	 *
+	 * The diagnose used to mark the ones it offered as join points, and
+	 * only those were returned. That put a fact about TWO behaviours
+	 * inside the declaration of ONE - the author of the stager's read had
+	 * to know the socket diagnose existed - and it silently lost the join
+	 * whenever the mark was on the wrong node. The verdict names the
+	 * capability it wants the two to meet at instead, so the engine has to
+	 * hand back everything they bound.
+	 */
+	for (k = 0; k < n_node && f->out; k++)
+		f->out[n++] = bound[k];
+	if (f->n_out)
+		*f->n_out = n;
+	f->found = 1;
+	return 0;                       /* the first instance is the answer */
+}
+
+int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
+		   uint16_t *bind_out, uint8_t *n_bind)
+{
+	struct first_match f;
+
+	if (n_bind)
+		*n_bind = 0;
+	f.out = bind_out;
+	f.n_out = n_bind;
+	f.found = 0;
+	match_each(s, d, first_cb, &f);
+	return f.found;
+}
+
+struct name_probe {
+	const struct kof_diag_scan *s;
+	const char *name;
+	int         found;
+};
+
+/* Was the name read at ANY node this instance bound. */
+static int name_cb(void *user, const uint16_t *bound, uint8_t n_node)
+{
+	struct name_probe *np = user;
+	uint8_t k;
+
+	for (k = 0; k < n_node; k++) {
+		uint16_t b = bound[k];
+
+		if (b < np->s->n_hit &&
+		    str_at_node(np->s, np->s->hit[b].cap, b, np->name)) {
+			np->found = 1;
+			return 0;
+		}
+	}
+	return 1;
+}
+
+int kof_diag_scan_names(const struct kof_diag_scan *s, const struct kof_diag *d,
+			const char *const *strs, uint32_t n)
+{
+	uint32_t k;
+
+	if (!s || !d || !strs || !n)
+		return 0;
+	for (k = 0; k < n; k++) {
+		struct name_probe np;
+
+		if (!strs[k])
+			return 0;
+		np.s = s;
+		np.name = strs[k];
+		np.found = 0;
+		match_each(s, d, name_cb, &np);
+		if (!np.found)
+			return 0;
+	}
+	return 1;
 }
 
 /* ---- loading -------------------------------------------------------------
@@ -1682,6 +1952,41 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			 * that runs on the files its author excluded, and it
 			 * would do so quietly.
 			 */
+			if (tag == KDIG_SEC_USERS && len >= 1u) {
+				out->users_known = 1;
+				out->n_users = b[at];
+			}
+			/*
+			 * THE SYMBOLS THE CODE MUST REFER INTO - see
+			 * KOF_DIAG_REFS. Same shape and the same string store as
+			 * the signs, and refused whole on anything that does not
+			 * add up, for the same reason: a diagnose with half its
+			 * references read would be gated by a condition nobody
+			 * wrote.
+			 */
+			if (tag == KDIG_SEC_REFS && len >= 1u && needs && needs_cap) {
+				uint32_t cnt2 = b[at], z, p2 = at + 1u;
+
+				if (cnt2 > KOF_DIAG_MAX_NEED)
+					return 0;
+				for (z = 0; z < cnt2; z++) {
+					uint32_t L2;
+
+					if (p2 >= at + len)
+						return 0;
+					L2 = b[p2++];
+					if (!L2 || L2 >= KOF_DIAG_NEED_LEN ||
+					    p2 + L2 > at + len ||
+					    used + L2 + 1u > needs_cap)
+						return 0;
+					memcpy(needs + used, b + p2, L2);
+					needs[used + L2] = 0;
+					out->ref[z] = needs + used;
+					used += L2 + 1u;
+					p2 += L2;
+				}
+				out->n_ref = (uint8_t)cnt2;
+			}
 			if (tag == KDIG_SEC_WHEN) {
 				uint32_t q;
 
@@ -1762,10 +2067,10 @@ uint32_t kof_diag_graph_build(const struct kof_diag_scan *s, uint8_t *out,
 		gr_u64(r + KOF_GR_R_ATTR, h->attr);
 		gr_u16(r + KOF_GR_R_CAP, h->cap);
 		gr_u16(r + KOF_GR_R_FLAGS, h->flags);
-		/* only the bits a rule is told about; the rest are the
-		 * engine's working state and are not part of this format */
-		r[KOF_GR_R_BITS] = (uint8_t)((h->bits & KOF_DIAG_H_ATTR_STR)
-					     ? KOF_GR_B_ATTR_STR : 0u);
+		/* No bit is told to a rule yet: the one there was said `attr`
+		 * is a name's offset, and names are no longer carried that
+		 * way. The byte stays in the format at zero. */
+		r[KOF_GR_R_BITS] = 0u;
 		r[KOF_GR_R_NIN] = nin;
 		for (k = 0; k < nin; k++) {
 			uint8_t *p = r + KOF_GR_R_IN + k * KOF_GR_IN_STRIDE;
