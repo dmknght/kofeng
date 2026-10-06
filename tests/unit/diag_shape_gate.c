@@ -1,40 +1,53 @@
 /*
- * heur_shellcode - the shape that says "this file is nothing but code".
+ * diag_shape_gate - the file attributes that route an object into the
+ * pathogen analysis.
  *
- * The term this exercises is the one number in the heuristic table that was
- * CHOSEN rather than measured - it is set so the shape reaches the bar with the
- * missing section table it implies, and nothing else. That makes it the term
- * most likely to stop working silently: a parser that starts reporting one more
- * anomaly on these files, or a table whose other weights move, changes the sum
- * without changing anything a reader would look at. So the assertion here is on
- * the REPORT, through the public scan API, and not on the predicate.
+ * A diagnose declares the shape it is worth running on - see KOF_DIAG_SH_*
+ * in kofmod/kofpathogen.h - and the engine reads that declaration and routes
+ * on it. The two stager diagnoses declare the msfvenom shape: one segment
+ * that IS the file, writable and executable, and no section table.
+ *
+ * WHY THE ASSERTION IS ON THE ENGINE'S BEHAVIOUR AND NOT ON THE PREDICATE.
+ * The gate decides what the most expensive thing the engine does is spent
+ * on. Both ways of being wrong are silent: a gate that stopped firing would
+ * lose every encrypted stager without a single test going red, and one that
+ * fired too widely would cost a factor of two on an ordinary scan and look
+ * exactly like a slow machine. So this watches kof_stats.heur_emu, which is
+ * the engine's own count of objects interpreted because something asked.
+ *
+ * THIS WAS A HEURISTIC RULE, bases/heur/shellcode_00.c, which carried the
+ * same shape test and asked on the diagnose's behalf. It had to publish a
+ * verdict to be allowed to ask - Heur:Meterp?Shellcode on every object it
+ * fired on, saying only that the engine had decided to look - and the test
+ * lived in a different module from the declaration it was gating.
  *
  *
  * WHAT IS ASSERTED
  *
- *   FIRES        A single-segment executable ELF with no section table is
- *                reported as Heur:Shellcode. This is the whole point of the
- *                term, and it is the assertion that fails if the sum drifts
- *                below the bar by one centinat.
+ *   FIRES        A single-segment RWX ELF with no section table is
+ *                interpreted. This is the whole point of the declaration.
  *
  *   NOT A SIZE   A four kilobyte object of the same shape fires too. Size was
  *                tried as the discriminator and rejected on the measurement -
  *                the largest malware object with this shape is 1266 bytes and
- *                the smallest clean ELF on the machine is 1192 - so a size bound
- *                creeping back in has to fail something.
+ *                the smallest clean ELF on the machine is 1192 - so a size
+ *                bound creeping back in has to fail something.
+ *
+ *   NOT RWX      The same single segment as R|X, which is what a toolchain
+ *                emits, is silent. That bit is what separates a file whose
+ *                author meant to write code at runtime from one that did not.
  *
  *   TWO SEGMENTS An ELF with a data segment beside its code is silent, section
  *                table or not. Every binary a toolchain produces has one, so
- *                this is the case that decides whether the term can be let near
- *                a real filesystem.
+ *                this is the case that decides whether the gate can be let
+ *                near a real filesystem.
  *
- *   SECTION TAB  An ELF that keeps its section header table is silent. Stripping
- *                is common in clean software and worth 2.75 nats on its own;
- *                what is rare is stripping AND having nothing but one code
- *                segment.
+ *   SECTION TAB  An ELF that keeps its section header table is silent.
+ *                Stripping is common in clean software; what is rare is
+ *                stripping AND having nothing but one code segment.
  *
- * The ELFs are built in memory and written to one temporary file, because a scan
- * needs a path.
+ * The ELFs are built in memory and written to one temporary file, because a
+ * scan needs a path.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -76,7 +89,8 @@ static const uint8_t code[] = {
  *   body_n  how many bytes of code to lay down, `code` repeating, so the same
  *           shape can be built at two sizes.
  */
-static uint64_t build(uint8_t *f, unsigned segs, int sectab, uint64_t body_n)
+static uint64_t build(uint8_t *f, unsigned segs, int sectab, uint64_t body_n,
+		      int wx)
 {
 	const uint64_t base = 0x400000, off = 0x78;
 	uint64_t len = off + body_n, shoff = 0;
@@ -101,7 +115,11 @@ static uint64_t build(uint8_t *f, unsigned segs, int sectab, uint64_t body_n)
 		uint64_t va = base + s * 0x200000;
 
 		p[0] = 1;                             /* PT_LOAD   */
-		p[4] = s == 0 ? 5 : 6;                /* R|X, then R|W */
+		/* RWE, which is what msfvenom's template emits and what
+		 * KOF_DIAG_SH_ENTRY_WX is about; then R|W for a second
+		 * segment, as a toolchain would. `wx` turns the first one
+		 * back into a toolchain's R|X for the negative case. */
+		p[4] = s == 0 ? (wx ? 7 : 5) : 6;
 		for (i = 0; i < 8; i++) {
 			p[0x10 + i] = (uint8_t)(va >> (i * 8));
 			p[0x18 + i] = (uint8_t)(va >> (i * 8));
@@ -165,9 +183,24 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
  * one here, Meterp) and right after "Heur:" when there is not. Both are a Heur
  * finding carrying the word Shellcode, which is what this asks.
  */
-static int shellcode_said(kof_scanner *sc, const char *path,
+/*
+ * WHAT THE RULE DOES IS ASK, SO THAT IS WHAT THIS WATCHES.
+ *
+ * It used to look for "Heur:...Shellcode" in the verdict. The rule now
+ * fires with KOF_HEUR_ACT - the shape is a reason to LOOK and not a thing
+ * to conclude - so there is no verdict to look for, and a test that kept
+ * looking for one would have reported the rule as broken for doing exactly
+ * what it was changed to do.
+ *
+ * kof_stats.heur_emu is the engine's own count of objects interpreted
+ * because a rule asked, which is this rule's entire effect.
+ */
+static int shape_asked(kof_scanner *sc, const char *path,
 			  const uint8_t *f, uint64_t n)
 {
+	const struct kof_stats *st;
+	uint64_t emu_before;
+
 	struct kof_scan_option opt;
 	FILE *fp = fopen(path, "wb");
 
@@ -183,11 +216,14 @@ static int shellcode_said(kof_scanner *sc, const char *path,
 	opt.max_resident_bytes = 16u << 20;
 	opt.max_object_bytes   = 1u << 20;
 	seen[0] = '\0';
+	st = kscan_stats(sc);
+	emu_before = st ? st->heur_emu : 0u;
 	if (kscan_path(sc, path, &opt, on_object, NULL) < 0) {
 		fail("the scan could not run");
 		return 0;
 	}
-	return strstr(seen, "Heur:") != NULL && strstr(seen, "Shellcode") != NULL;
+	st = kscan_stats(sc);
+	return st && st->heur_emu > emu_before;
 }
 
 int main(int argc, char **argv)
@@ -201,7 +237,7 @@ int main(int argc, char **argv)
 
 	eng = keng_open(db);
 	if (!eng) {
-		printf("heur shellcode: cannot open %s\n", db);
+		printf("diag shape gate: cannot open %s\n", db);
 		return 2;
 	}
 	sc = kscan_new(eng);
@@ -210,35 +246,42 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	n = build(f, 1, 0, sizeof code);
+	n = build(f, 1, 0, sizeof code, 1);
 	printf("  1 segment, không section table, %llu B -> %s\n",
-	       (unsigned long long)n, shellcode_said(sc, path, f, n)
-	       ? "Heur:Shellcode" : "IM LẶNG");
-	if (!shellcode_said(sc, path, f, n))
-		fail("the shape the term exists for was not reported");
+	       (unsigned long long)n, shape_asked(sc, path, f, n)
+	       ? "asked for the interpreter" : "IM LẶNG");
+	if (!shape_asked(sc, path, f, n))
+		fail("the shape the term exists for did not ask");
 
-	n = build(f, 1, 0, 4096);
+	n = build(f, 1, 0, 4096, 1);
 	printf("  cùng shape nhưng %llu B      -> %s\n",
-	       (unsigned long long)n, shellcode_said(sc, path, f, n)
-	       ? "Heur:Shellcode" : "IM LẶNG");
-	if (!shellcode_said(sc, path, f, n))
+	       (unsigned long long)n, shape_asked(sc, path, f, n)
+	       ? "asked for the interpreter" : "IM LẶNG");
+	if (!shape_asked(sc, path, f, n))
 		fail("a size bound has crept back into the term");
 
-	n = build(f, 2, 0, sizeof code);
-	printf("  2 segment, không section table -> %s\n",
-	       shellcode_said(sc, path, f, n) ? "Heur:Shellcode" : "im lặng");
-	if (shellcode_said(sc, path, f, n))
-		fail("an ELF with a data segment was reported");
+	n = build(f, 1, 0, sizeof code, 0);
+	printf("  cùng shape nhưng R|X           -> %s\n",
+	       shape_asked(sc, path, f, n) ? "asked for the interpreter"
+					   : "im lặng");
+	if (shape_asked(sc, path, f, n))
+		fail("a toolchain's R|X code segment asked");
 
-	n = build(f, 1, 1, sizeof code);
+	n = build(f, 2, 0, sizeof code, 1);
+	printf("  2 segment, không section table -> %s\n",
+	       shape_asked(sc, path, f, n) ? "asked for the interpreter" : "im lặng");
+	if (shape_asked(sc, path, f, n))
+		fail("an ELF with a data segment asked");
+
+	n = build(f, 1, 1, sizeof code, 1);
 	printf("  1 segment, CÓ section table    -> %s\n",
-	       shellcode_said(sc, path, f, n) ? "Heur:Shellcode" : "im lặng");
-	if (shellcode_said(sc, path, f, n))
-		fail("an ELF that kept its section table was reported");
+	       shape_asked(sc, path, f, n) ? "asked for the interpreter" : "im lặng");
+	if (shape_asked(sc, path, f, n))
+		fail("an ELF that kept its section table asked");
 
 	remove(path);
 	kscan_free(sc);
 	keng_close(eng);
-	printf("heur shellcode: %s\n", failures ? "FAILED" : "ok");
+	printf("diag shape gate: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

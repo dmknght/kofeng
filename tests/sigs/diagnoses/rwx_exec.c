@@ -1,4 +1,4 @@
-#include <kofmod/kofdiag.h>
+#include <kofmod/kofpathogen.h>
 
 /*
  * tests/sigs/diagnoses/rwx_exec.c
@@ -54,7 +54,7 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_SYMBOL);
  * that was just fetched has to run somewhere executable, and there is no way
  * around that.
  */
-KOF_DIAG_ANCHOR(a, "mem-alloc-exec", KOF_FLOWF_WX);
+KOF_DIAG_ANCHOR(a, KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
 
 /*
  * `a` IS THE PARENT OF BOTH. `r` is not the parent of `x`.
@@ -70,15 +70,5 @@ KOF_DIAG_ANCHOR(a, "mem-alloc-exec", KOF_FLOWF_WX);
  * one sample and refuse the other. The matcher accepts anything more specific
  * - see kof_flow_cap_generic.
  */
-KOF_DIAG_FROM(r, a, "mem-read", KOF_DIAG_ROLE_BUFFER);
-KOF_DIAG_FROM(x, a, "exec-memory", KOF_DIAG_ROLE_TARGET);
-
-/*
- * `r` IS OFFERED AS A JOIN POINT. A signature may ask that this node BE the
- * net-read node of another diagnose - and at that point it is a stager rather
- * than something unpacking itself.
- *
- * `a` and `x` invite nobody, so changing their internals later breaks no
- * signature.
- */
-KOF_DIAG_TOUCH(r);
+KOF_DIAG_FROM(r, a, KOF_NUCLEO_MEM_READ, KOF_DIAG_ROLE_BUFFER);
+KOF_DIAG_FROM(x, a, KOF_NUCLEO_EXEC_REG, KOF_DIAG_ROLE_TARGET);

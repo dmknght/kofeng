@@ -85,12 +85,12 @@ struct relgather {
 int kof_diag_sym_hands_on(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_CRED_PREPARE:   /* a struct cred * to edit then commit  */
-	case KOF_CAP_KSYM_LOOKUP:    /* the address of whatever was named    */
-	case KOF_CAP_SYMBOL_GET:
-	case KOF_CAP_ALLOC:
-	case KOF_CAP_HEAP:
-	case KOF_CAP_FILE_OPEN:
+	case KOF_NUCLEO_CRED_PREPARE:   /* a struct cred * to edit then commit  */
+	case KOF_NUCLEO_KSYM_LOOKUP:    /* the address of whatever was named    */
+	case KOF_NUCLEO_SYMBOL_GET:
+	case KOF_NUCLEO_ALLOC:
+	case KOF_NUCLEO_HEAP:
+	case KOF_NUCLEO_FILE_OPEN:
 		return 1;
 	default:
 		return 0;
@@ -108,7 +108,7 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	if (target || !name)
 		return;
 	cap = kof_flow_cap_of_name(name);
-	if (cap == KOF_CAP_NONE)
+	if (cap == KOF_NUCLEO_NONE)
 		return;
 	if (g->n >= g->cap_n) {
 		g->full = 1;

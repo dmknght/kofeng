@@ -27,7 +27,6 @@
 #include "../../kofcore/kofdebug.h"
 #include "diag_int.h"
 #include "../../kofcore/kofcore.h"
-#include "../../kofcore/kofmod/kofdiag.h"
 #include "../../kofcore/kofmod/elf.h"
 #include "../../analyzers/parsers/binaries/disasm/kdis.h"
 #include "../../analyzers/parsers/binaries/disasm/nucleo.h"
@@ -151,7 +150,7 @@ void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
  *
  * Flat and in the order the walk produced them, which for a linear sweep is
  * address order. Nothing depends on that order - see the note in
- * kofmod/kofdiag.h about why a provenance tree is not a sequence - but it
+ * kofmod/kofpathogen.h about why a provenance tree is not a sequence - but it
  * makes a dump readable, and a reader comparing two runs of the same object
  * gets the same file twice.
  */
@@ -179,53 +178,6 @@ static int hit_room(struct kof_diag_scan *s)
 	s->hit = nv;
 	s->cap_hit = nc;
 	return 1;
-}
-
-/*
- * IS THIS A CAPABILITY ANYBODY ASKED FOR - see kof_diag_scan_with.
- *
- * ASKED AFTER THE SWEEP AND NOT DURING IT. A node is created with what the
- * sweep knows at that instruction and REFINED later: the syscall route adds
- * it as KOF_CAP_NONE before the number is resolved, and an mmap is ALLOC
- * until its third argument is read. Judging it at creation refuses nodes
- * before the word they were going to carry exists - and worse, a routine
- * reading the NULL as "the scan is full" stopped sweeping at the first
- * refusal and lost everything after it. Measured: the stager fixture lost
- * every node past its first socket call.
- *
- * A diagnose naming a GENERIC word accepts the specific ones under it: one
- * asking for mem-read is answered by net-read, and refusing to record the
- * specific one because the generic was declared would break exactly the
- * rules that were written to cover both.
- */
-static int cap_wanted(const struct kof_diag_scan *s, uint16_t cap)
-{
-	uint16_t gen;
-	uint32_t i;
-
-	if (!s->want || !s->n_want)
-		return 1;
-	gen = kof_flow_cap_generic(cap);
-	for (i = 0; i < s->n_want; i++) {
-		if (s->want[i] == cap)
-			return 1;
-		/* the rule named the generic word, this node is a specific
-		 * one under it: mem-read answered by net-read */
-		if (gen != KOF_CAP_NONE && s->want[i] == gen)
-			return 1;
-		/*
-		 * AND THE OTHER DIRECTION, which is not symmetry for its own
-		 * sake: a node is created with what the sweep knows at the
-		 * call and REFINED afterwards - an mmap is KOF_CAP_ALLOC
-		 * until its third argument is read and it becomes
-		 * ALLOC_EXEC. Judging the cap at creation would refuse the
-		 * node before the word it was going to carry existed.
-		 * Measured: rwx_exec stopped matching its own fixture.
-		 */
-		if (kof_flow_cap_generic(s->want[i]) == cap)
-			return 1;
-	}
-	return 0;
 }
 
 struct kof_diag_hit *kof_diag_hit_add(struct kof_diag_scan *s, uint64_t at,
@@ -287,7 +239,7 @@ static int arg_regs(const struct kof_obj_ctx *ctx, const uint8_t **out)
  *
  * The number comes out of the constant map, which is why this file needs
  * kdis at all. When it is not there the node is still emitted, as
- * KOF_CAP_NONE with KOF_DIAG_H_OPAQUE set - see the note on that flag. A
+ * KOF_NUCLEO_NONE with KOF_DIAG_H_OPAQUE set - see the note on that flag. A
  * site dropped because its number could not be read is a site that makes
  * two different programs look alike.
  */
@@ -319,40 +271,40 @@ uint8_t kof_diag_role_of_arg(uint16_t cap, unsigned i)
 {
 	switch (cap) {
 	/* Bytes through a descriptor: what is filled, and from where. */
-	case KOF_CAP_MEM_READ:
-	case KOF_CAP_READ:
-	case KOF_CAP_NET_READ:
+	case KOF_NUCLEO_MEM_READ:
+	case KOF_NUCLEO_READ:
+	case KOF_NUCLEO_NET_READ:
 		return i == 1u ? KOF_DIAG_ROLE_BUFFER
 		     : i == 0u ? KOF_DIAG_ROLE_FD
 			       : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_MEM_WRITE:
-	case KOF_CAP_WRITE:
-	case KOF_CAP_NET_WRITE:
+	case KOF_NUCLEO_MEM_WRITE:
+	case KOF_NUCLEO_WRITE:
+	case KOF_NUCLEO_NET_WRITE:
 		return i == 1u ? KOF_DIAG_ROLE_SOURCE
 		     : i == 0u ? KOF_DIAG_ROLE_FD
 			       : KOF_DIAG_ROLE_NONE;
 	/* Across the user/kernel boundary: one buffer each way, and they are
 	 * different objects - see KOF_DIAG_ROLE_SOURCE. */
-	case KOF_CAP_COPY_FROM_USER:
-	case KOF_CAP_COPY_TO_USER:
+	case KOF_NUCLEO_COPY_FROM_USER:
+	case KOF_NUCLEO_COPY_TO_USER:
 		return i == 0u ? KOF_DIAG_ROLE_BUFFER
 		     : i == 1u ? KOF_DIAG_ROLE_SOURCE
 			       : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_NET_CONNECT:
-	case KOF_CAP_NET_BIND:
-	case KOF_CAP_NET_LISTEN:
-	case KOF_CAP_NET_ACCEPT:
-	case KOF_CAP_FD_REDIR:
+	case KOF_NUCLEO_NET_CONNECT:
+	case KOF_NUCLEO_NET_BIND:
+	case KOF_NUCLEO_NET_LISTEN:
+	case KOF_NUCLEO_NET_ACCEPT:
+	case KOF_NUCLEO_FD_REDIR:
 		return i == 0u ? KOF_DIAG_ROLE_FD : KOF_DIAG_ROLE_NONE;
-	case KOF_CAP_EXEC_IMAGE:
+	case KOF_NUCLEO_EXEC_IMAGE:
 		return i == 0u ? KOF_DIAG_ROLE_PATH : KOF_DIAG_ROLE_NONE;
 	/* The credentials being installed are the ones that were built. */
-	case KOF_CAP_CRED_SET:
+	case KOF_NUCLEO_CRED_SET:
 	/* Both halves of the probe take the same struct kprobe. */
-	case KOF_CAP_KPROBE_REG:
-	case KOF_CAP_KPROBE_UNREG:
+	case KOF_NUCLEO_KPROBE_REG:
+	case KOF_NUCLEO_KPROBE_UNREG:
 	/* The list entry being taken out or put back. */
-	case KOF_CAP_LIST_HIDE:
+	case KOF_NUCLEO_LIST_HIDE:
 		return i == 0u ? KOF_DIAG_ROLE_BUFFER : KOF_DIAG_ROLE_NONE;
 	default:
 		return KOF_DIAG_ROLE_NONE;
@@ -441,7 +393,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 		int got = !w->ax_stale &&
 			  kof_kdis_reg(k, KDIS_REG_AX, &nr) && nr <= 0xffffu;
 
-		h = kof_diag_hit_add(s, at, KOF_CAP_NONE, 0);
+		h = kof_diag_hit_add(s, at, KOF_NUCLEO_NONE, 0);
 		if (h)
 			h->bits |= got ? KOF_DIAG_H_RAW_SYSCALL
 				       : KOF_DIAG_H_OPAQUE;
@@ -460,7 +412,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 			nr = 0;
 			w->carry_live = 0;
 		} else {
-			h = kof_diag_hit_add(s, at, KOF_CAP_NONE, 0);
+			h = kof_diag_hit_add(s, at, KOF_NUCLEO_NONE, 0);
 			if (h)
 				h->bits |= KOF_DIAG_H_OPAQUE;
 			return;
@@ -486,7 +438,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 
 	cap = kof_flow_cap_of_syscall((unsigned)bits, (uint32_t)nr, arg, &fl);
 	nm  = kof_sys_name((unsigned)bits, (uint32_t)nr);
-	if (cap == KOF_CAP_NONE)
+	if (cap == KOF_NUCLEO_NONE)
 		return;                 /* a syscall the vocabulary has no word for */
 	h = kof_diag_hit_add(s, at, cap, fl);
 	if (!h)
@@ -497,8 +449,8 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	 * Unread, the node says so rather than carrying the answer those
 	 * bits would have given if they had been zero.
 	 */
-	if ((cap == KOF_CAP_ALLOC && !(have & (1u << 2))) ||
-	    (cap == KOF_CAP_NET_OPEN && (have & 3u) != 3u))
+	if ((cap == KOF_NUCLEO_ALLOC && !(have & (1u << 2))) ||
+	    (cap == KOF_NUCLEO_NET_OPEN && (have & 3u) != 3u))
 		h->bits |= KOF_DIAG_H_ARG_UNKNOWN;
 
 	/*
@@ -536,8 +488,8 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 		if (n_ar >= 1 && kof_diag_org_of(w, ar[0]) == ORG_STACK)
 			h->bits |= KOF_DIAG_H_REGION_STACK;
 		kof_diag_org_clear(w, KDIS_REG_AX);
-	} else if (cap == KOF_CAP_NET_OPEN || cap == KOF_CAP_FILE_OPEN ||
-		   cap == KOF_CAP_MEMFD)
+	} else if (cap == KOF_NUCLEO_NET_OPEN || cap == KOF_NUCLEO_FILE_OPEN ||
+		   cap == KOF_NUCLEO_MEMFD)
 		kof_diag_org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
 	else
 		kof_diag_org_clear(w, KDIS_REG_AX);
@@ -792,7 +744,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 
 				if (t != ORG_NONE) {
 					struct kof_diag_hit *h =
-						kof_diag_hit_add(s, in.at, KOF_CAP_EXEC_REG, 0);
+						kof_diag_hit_add(s, in.at, KOF_NUCLEO_EXEC_REG, 0);
 
 					kof_diag_note_in(h, t, KOF_DIAG_ROLE_TARGET,
 					 KOF_DIAG_KIND_PRODUCED);
@@ -915,70 +867,148 @@ static const struct diag_scenario diag_scenarios[] = {
 };
 
 /*
- * ---- DROP THE NODES NOBODY ASKED ABOUT ----------------------------------
+ * ---- THE PRUNE THAT USED TO BE HERE, AND WHY IT IS NOT ------------------
  *
- * Run once, after every routine has finished and every cap is final.
+ * It dropped every node whose capability no loaded diagnose had named, and
+ * the argument was sound while it held: a node nobody asked about cannot
+ * end a link, so carrying it for the life of the object buys nothing. It
+ * halved the graph - measured, 1200 nodes to 600 over 200 stagers.
  *
- * WHAT IT IS FOR, said plainly, because it is NOT what it first looks like:
- * it does not make the sweep cheaper. The sweep has to decode an instruction
- * to learn what it is, so the work is done before the word exists to judge.
- * The cost of analysing an object nobody asked about is removed by not
- * asking - KOF_ENG_USE_PATHOGEN - and that was measured at 419 ms over 287 MB
- * of ordinary binaries.
+ * THE ARGUMENT DIED WHEN A VERDICT STARTED READING THE GRAPH. A verdict is
+ * an algorithm, not a tree: it counts, it asks whether something is merely
+ * PRESENT, and the things it asks about are exactly the ones no diagnose
+ * names. Measured twice, both times as a detection quietly disappearing -
+ * the cr0 write a syscall-table verdict needs is nobody's child so no tree
+ * can name it, and the socket a stager verdict needs belongs to no
+ * diagnose either. The second cost 28 detections across three corpora
+ * before it was found.
  *
- * THIS KEEPS THE GRAPH SMALL. The graph outlives the sweep and is what the
- * verdict layer reads, so a node no rule can name is a node carried for the
- * life of the object for nothing.
- *
- * A LINK TO A DROPPED NODE GOES WITH IT, and that loses no statement: the
- * only thing that could have read it is a diagnose naming that capability,
- * and none does. Links to the region sentinels are kept - they name no node.
+ * SO THE GRAPH IS KEPT WHOLE. What bounds it is the analysis not running -
+ * see KOF_ENG_USE_PATHOGEN and the signs on a diagnose - and not what is
+ * thrown away afterwards.
  */
-static void prune_unwanted(struct kof_diag_scan *s)
+
+/*
+ * ONE SITE, ONE NODE - run after the routes, because only then is the whole
+ * set of answers in.
+ *
+ * THE ROUTES OVERLAP AND THAT IS THE DESIGN. The syscall sweep reads every
+ * `syscall` instruction in the executable segments; the emulator reaches
+ * the ones a run arrives at, with the values it resolved. The same call is
+ * therefore found twice, and each copy carries the edges ITS route could
+ * prove - measured on meter1, where the swept copy of the read has the
+ * buffer edge and the emulated copy has the buffer edge AND the descriptor
+ * edge.
+ *
+ * LEAVING THE COPIES IN LOSES THE JOIN, which is the whole reason this is
+ * here. A diagnose binds the first node that satisfies its tree, so the
+ * memory tree bound the swept read and the socket tree bound the emulated
+ * one - two records of ONE call at 0xf1, so a verdict asking whether the
+ * two behaviours meet at the read got no, on a sample where they plainly
+ * do.
+ *
+ * NOT MERGED BY `at` ALONE: a site the run produced rather than read has
+ * at == KOF_BROKEN, and every one of those would fold into one node.
+ */
+/*
+ * The bits that say a route did NOT know something, as against the ones
+ * that say it saw something. See the fold below.
+ */
+#define DOUBT ((uint8_t)(KOF_DIAG_H_ARG_UNKNOWN | KOF_DIAG_H_OPAQUE))
+
+static void merge_sites(struct kof_diag_scan *s)
 {
-	static uint16_t map[DIAG_MAX_NODE];
-	uint32_t i, n = 0;
+	uint16_t *map, *rep;
+	uint32_t i, j, n = 0;
+	uint8_t k;
 
-	if (!s->want || !s->n_want || s->n_hit > DIAG_MAX_NODE)
+	if (!s || s->n_hit < 2u)
 		return;
+	map = malloc((size_t)s->n_hit * sizeof *map);
+	rep = malloc((size_t)s->n_hit * sizeof *rep);
+	if (!map || !rep) {
+		free(map);
+		free(rep);
+		return;                 /* duplicates are worse, not fatal */
+	}
+	/* 1. which node each one becomes, and which old node speaks for it */
 	for (i = 0; i < s->n_hit; i++) {
-		if (!cap_wanted(s, s->hit[i].cap)) {
-			map[i] = 0xffffu;
-			continue;
-		}
-		map[i] = (uint16_t)n;
-		if (n != i)
-			s->hit[n] = s->hit[i];
-		n++;
+		for (j = 0; j < n; j++)
+			if (s->hit[i].at != KOF_BROKEN &&
+			    s->hit[rep[j]].at == s->hit[i].at &&
+			    s->hit[rep[j]].cap == s->hit[i].cap)
+				break;
+		map[i] = (uint16_t)j;
+		if (j == n)
+			rep[n++] = (uint16_t)i;
 	}
-	if (n == s->n_hit)
+	if (n == s->n_hit) {            /* nothing to fold - the common case */
+		free(map);
+		free(rep);
 		return;
-	s->n_hit = n;
-	for (i = 0; i < n; i++) {
-		struct kof_diag_hit *h = &s->hit[i];
-		uint8_t k, m = 0;
-
-		for (k = 0; k < h->n_in; k++) {
-			uint16_t f = h->in[k].from;
-
-			if (f < KOF_DIAG_FROM_STACK) {
-				if (f >= DIAG_MAX_NODE ||
-				    map[f] == 0xffffu)
-					continue;   /* its parent is gone */
-				h->in[k].from = map[f];
-			}
-			if (m != k)
-				h->in[m] = h->in[k];
-			m++;
-		}
-		h->n_in = m;
 	}
+	/*
+	 * 2. RENUMBER BEFORE FOLDING, not after.
+	 *
+	 * kof_diag_note_in refuses an edge whose (parent, role, kind) it
+	 * already holds, and that test is only true when both sides are
+	 * numbered the same way. Folding first and renumbering afterwards
+	 * turned "from 1" and "from 7" into two copies of "from 1" - the
+	 * dedup had already run and could not see them.
+	 */
+	for (i = 0; i < s->n_hit; i++)
+		for (k = 0; k < s->hit[i].n_in; k++) {
+			uint16_t f = s->hit[i].in[k].from;
+
+			if (f < s->n_hit)
+				s->hit[i].in[k].from = map[f];
+		}
+	/*
+	 * 3. THE UNION OF WHAT THE ROUTES SAW. Flags and bits are
+	 * observations, so either route seeing one is enough; the attribute
+	 * is a value, so the first one that resolved it stands rather than
+	 * being overwritten by a zero.
+	 */
+	for (i = 0; i < s->n_hit; i++) {
+		struct kof_diag_hit *h = &s->hit[rep[map[i]]];
+
+		if (rep[map[i]] == i)
+			continue;
+		h->flags |= s->hit[i].flags;
+		/*
+		 * NOT EVERY BIT IS AN OBSERVATION. OR-ing them all made a
+		 * resolved node unresolved: the sweep cannot read a call's
+		 * arguments and says so with ARG_UNKNOWN, the emulator reads
+		 * them, and the union of "I could not tell" with "it is a
+		 * socket" came out as "I could not tell" - spec_ok then
+		 * refused the node as an anchor and the whole socket tree
+		 * stopped matching on every i386 stager here.
+		 *
+		 * A DOUBT SURVIVES ONLY IF EVERY ROUTE HELD IT.
+		 */
+		h->bits = (uint8_t)(((h->bits | s->hit[i].bits) & ~DOUBT) |
+				    (h->bits & s->hit[i].bits & DOUBT));
+		if (!h->attr)
+			h->attr = s->hit[i].attr;
+		for (k = 0; k < s->hit[i].n_in; k++)
+			kof_diag_note_in(h, s->hit[i].in[k].from,
+					 s->hit[i].in[k].role,
+					 s->hit[i].in[k].kind);
+	}
+	/* 4. close the gaps */
+	for (j = 0; j < n; j++)
+		if (rep[j] != j)
+			s->hit[j] = s->hit[rep[j]];
+	s->n_hit = n;
+	free(map);
+	free(rep);
 }
+
+#undef DOUBT
 
 struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 					 const uint8_t *base, uint64_t size,
-					 unsigned run, const uint16_t *want,
-					 uint32_t n_want)
+					 unsigned run)
 {
 	struct kof_diag_scan *s;
 	unsigned i;
@@ -990,8 +1020,6 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 	s = calloc(1, sizeof *s);
 	if (!s)
 		return NULL;
-	s->want = want;
-	s->n_want = n_want;
 	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
 		const struct diag_scenario *d = &diag_scenarios[i];
 
@@ -1004,15 +1032,14 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 		if (s->full)
 			break;
 	}
-	prune_unwanted(s);
+	merge_sites(s);
 	return s;
 }
 
 struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 				    const uint8_t *base, uint64_t size)
 {
-	return kof_diag_scan_with(ctx, base, size, KOF_DIAG_RUN_DEFAULT,
-				  NULL, 0u);
+	return kof_diag_scan_with(ctx, base, size, KOF_DIAG_RUN_DEFAULT);
 }
 
 unsigned kof_diag_scan_ran(const struct kof_diag_scan *s)
@@ -1058,7 +1085,7 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
  * its capability - it is looked for among the nodes that point AT THE
  * PARENT ALREADY BOUND, which is usually none or one. The walk is then the
  * size of the diagnose, once per candidate root, and the root is the rarest
- * node by construction - see the note on anchors in kofmod/kofdiag.h.
+ * node by construction - see the note on anchors in kofmod/kofpathogen.h.
  */
 
 /* A node satisfies a spec when it has the capability, carries every flag the
@@ -1079,7 +1106,7 @@ static int spec_ok(const struct kof_diag_hit *h,
 		uint16_t g = h->cap;
 		int kind = 0;
 
-		while ((g = kof_flow_cap_generic(g)) != KOF_CAP_NONE)
+		while ((g = kof_flow_cap_generic(g)) != KOF_NUCLEO_NONE)
 			if (g == sp->cap) { kind = 1; break; }
 		if (!kind)
 			return 0;
@@ -1191,15 +1218,19 @@ int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
 		if (!bind_from(s, d, root, bound))
 			continue;
 		/*
-		 * ONLY THE NODES THE DIAGNOSE OFFERED AS TOUCH POINTS come
-		 * back. A diagnose that offers none answers in one bit, which
-		 * is what nearly all of them do - see the note on the touch
-		 * bit in kofmod/kofdiag.h. The cost of an answer is the size
-		 * of the question.
+		 * EVERY BOUND NODE COMES BACK, not a declared subset.
+		 *
+		 * The diagnose used to mark the ones it offered as join
+		 * points, and only those were returned. That put a fact
+		 * about TWO behaviours inside the declaration of ONE - the
+		 * author of the stager's read had to know the socket
+		 * diagnose existed - and it silently lost the join whenever
+		 * the mark was on the wrong node. The verdict names the
+		 * capability it wants the two to meet at instead, so the
+		 * engine has to hand back everything they bound.
 		 */
 		for (k = 0; k < d->n_node && bind_out; k++)
-			if (d->node[k].bits & KOF_DIAG_B_TOUCH)
-				bind_out[n++] = bound[k];
+			bind_out[n++] = bound[k];
 		if (n_bind)
 			*n_bind = n;
 		return 1;
@@ -1223,7 +1254,8 @@ int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
 
 int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 		  struct kof_diag_node *node, uint8_t max_node,
-		  char *name, uint32_t name_cap)
+		  char *name, uint32_t name_cap,
+		  char *needs, uint32_t needs_cap)
 {
 	uint32_t n_node, nlen, i;
 	uint64_t at;
@@ -1274,6 +1306,57 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 		if (node[i].role >= KOF_DIAG_ROLE_COUNT)
 			return 0;
 	}
+	/*
+	 * ---- THE SIGNS, IF THE PACK CARRIES ANY -------------------------
+	 *
+	 * A trailing section, so a pack written before they existed simply
+	 * ends after its nodes and answers none. Refused WHOLE on anything
+	 * that does not add up, like the rest of the record: a diagnose with
+	 * half its signs read would be filtered by a condition nobody wrote.
+	 */
+	if (needs && needs_cap && at < n) {
+		uint32_t cnt = b[at++], k, used = 0;
+
+		if (cnt > KOF_DIAG_MAX_NEED)
+			return 0;
+		for (k = 0; k < cnt; k++) {
+			uint32_t L;
+
+			if (at >= n)
+				return 0;
+			L = b[at++];
+			if (!L || L >= KOF_DIAG_NEED_LEN || at + L > n ||
+			    used + L + 1u > needs_cap)
+				return 0;
+			memcpy(needs + used, b + at, L);
+			needs[used + L] = 0;
+			out->need[k] = needs + used;
+			used += L + 1u;
+			at += L;
+		}
+		out->n_need = (uint8_t)cnt;
+		/*
+		 * ---- AND THE TAGGED SECTIONS AFTER THEM ----------------
+		 *
+		 * An unknown tag is SKIPPED and not refused: the length is
+		 * there so a later build can add a section without every
+		 * reader having to be taught it first. A length that runs
+		 * past the end is a different matter and refuses the whole
+		 * record, like everything else here.
+		 */
+		while (at + 2u <= n) {
+			uint32_t tag = b[at], len = b[at + 1u];
+
+			at += 2u;
+			if (at + len > n)
+				return 0;
+			if (tag == KDIG_SEC_SHAPE && len == 2u)
+				out->shape = (uint16_t)(b[at] |
+							(b[at + 1u] << 8));
+			at += len;
+		}
+	}
+
 	/* Exactly one root, because the matcher descends from one. */
 	{
 		uint32_t roots = 0;
@@ -1286,3 +1369,61 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 	}
 	return 1;
 }
+
+static void gr_u64(uint8_t *p, uint64_t v)
+{
+	unsigned i;
+
+	for (i = 0; i < 8u; i++)
+		p[i] = (uint8_t)(v >> (i * 8u));
+}
+
+static void gr_u16(uint8_t *p, uint16_t v)
+{
+	p[0] = (uint8_t)v;
+	p[1] = (uint8_t)(v >> 8);
+}
+
+uint32_t kof_diag_graph_build(const struct kof_diag_scan *s, uint8_t *out,
+			      uint32_t cap)
+{
+	uint32_t i, need;
+
+	if (!s || !out || !s->n_hit)
+		return 0;
+	need = KOF_GR_HDRLEN + s->n_hit * KOF_GR_RECLEN;
+	if (need > cap)
+		return 0;       /* refused whole - a half graph answers wrong */
+	memset(out, 0, need);
+	out[KOF_GR_H_COUNT]      = (uint8_t)s->n_hit;
+	out[KOF_GR_H_COUNT + 1u] = (uint8_t)(s->n_hit >> 8);
+	out[KOF_GR_H_COUNT + 2u] = (uint8_t)(s->n_hit >> 16);
+	out[KOF_GR_H_COUNT + 3u] = (uint8_t)(s->n_hit >> 24);
+	for (i = 0; i < s->n_hit; i++) {
+		const struct kof_diag_hit *h = &s->hit[i];
+		uint8_t *r = out + KOF_GR_HDRLEN + i * KOF_GR_RECLEN;
+		uint8_t k, nin = h->n_in > KOF_GR_IN_MAX
+			       ? (uint8_t)KOF_GR_IN_MAX : h->n_in;
+
+		gr_u64(r + KOF_GR_R_AT, h->at);
+		gr_u64(r + KOF_GR_R_ATTR, h->attr);
+		gr_u16(r + KOF_GR_R_CAP, h->cap);
+		gr_u16(r + KOF_GR_R_FLAGS, h->flags);
+		/* only the bits a rule is told about; the rest are the
+		 * engine's working state and are not part of this format */
+		r[KOF_GR_R_BITS] = (uint8_t)((h->bits & KOF_DIAG_H_ATTR_STR)
+					     ? KOF_GR_B_ATTR_STR : 0u);
+		r[KOF_GR_R_NIN] = nin;
+		for (k = 0; k < nin; k++) {
+			uint8_t *p = r + KOF_GR_R_IN + k * KOF_GR_IN_STRIDE;
+
+			gr_u16(p, h->in[k].from);
+			p[2] = h->in[k].role;
+			p[3] = h->in[k].kind == KOF_DIAG_KIND_SHARED
+			     ? (uint8_t)KOF_DIAG_KIND_SHARED
+			     : (uint8_t)KOF_DIAG_KIND_PRODUCED;
+		}
+	}
+	return need;
+}
+

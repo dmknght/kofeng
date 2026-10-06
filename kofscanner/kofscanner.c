@@ -774,39 +774,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		}
 	}
 
-	/*
-	 * WHAT THE OBJECT'S CODE DOES, under --diag, before any verdict line.
-	 *
-	 * NOT A FINDING AND NOT COLOURED LIKE ONE. A diagnose says a shape is
-	 * present - a region allocated writable-and-executable, filled, and
-	 * jumped into - and says nothing about whether that is malicious; a
-	 * JIT and a stager carry the same one. Printing it in the verdict's
-	 * colour would make the tool assert something the engine did not.
-	 *
-	 * Printed for every object that carries one, clean or not, because the
-	 * reason to ask for it is to see what the engine saw on files it did
-	 * NOT detect. A diagnose on a clean object is the interesting case.
-	 *
-	 * The id is translated through the engine - see kdb_diag_name. An id
-	 * the database does not hold prints as its number rather than being
-	 * dropped: that is a result from another database, and silence would
-	 * hide it.
-	 */
-	if (res->n_diag) {
-		char line[256];
-
-		for (i = 0; i < res->n_diag; i++) {
-			const char *dn = kdb_diag_name(r->eng, res->diag[i]);
-
-			if (dn)
-				snprintf(line, sizeof line, "%s: %s",
-					 name, dn);
-			else
-				snprintf(line, sizeof line, "%s: diag#%u",
-					 name, (unsigned)res->diag[i]);
-			say(r, C_DIM, "  diag", line);
-		}
-	}
 
 	/*
 	 * AND THE REPAIR, WHICH IS NOT A SEPARATE DECISION.
@@ -1090,10 +1057,6 @@ static void usage(const char *argv0)
 		"                    2 also interpret what no unpacker opened\n"
 		"  --emu MODE        never | auto | only; overrides what --heur chose\n"
 		"  --all-matches     keep scanning an object after the first finding\n"
-		"  --diag            also name what an object's code DOES - the\n"
-		"                    diagnoses it carries, verdict or not. A debug\n"
-		"                    switch while the shapes are being written;\n"
-		"                    the scan will run them by itself.\n"
 		"  --max-depth N     directory depth limit\n"
 		"  --object-depth N  how deep to descend INSIDE a file\n"
 		"  --follow-links    follow symbolic links (off by default)\n"
@@ -1844,8 +1807,7 @@ int main(int argc, char **argv)
 			opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)
 			opt.all_matches = 1;
-		else if (strcmp(argv[i], "--diag") == 0)
-			opt.want_diag = 1;
+
 		/*
 		 * One number, because the three settings are a ladder and an
 		 * operator picking a rung should not have to work out which of

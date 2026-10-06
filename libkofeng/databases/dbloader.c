@@ -646,7 +646,8 @@ static void load_diagnoses(struct kof_engine *e, const char *dir)
 	e->diag_node = calloc((size_t)KOF_DB_MAX_DIAG * KOF_DB_MAX_DIAG_NODE,
 			      sizeof *e->diag_node);
 	e->diag_name = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NAME);
-	if (!e->diag || !e->diag_node || !e->diag_name) {
+	e->diag_needs = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NEEDS);
+	if (!e->diag || !e->diag_node || !e->diag_name || !e->diag_needs) {
 		closedir(d);
 		return;
 	}
@@ -677,12 +678,37 @@ static void load_diagnoses(struct kof_engine *e, const char *dir)
 				   KOF_DB_MAX_DIAG_NODE,
 				   e->diag_name + (size_t)e->n_diag *
 						  KOF_DB_DIAG_NAME,
-				   KOF_DB_DIAG_NAME)) {
+				   KOF_DB_DIAG_NAME,
+				   e->diag_needs + (size_t)e->n_diag *
+						   KOF_DB_DIAG_NEEDS,
+				   KOF_DB_DIAG_NEEDS)) {
 			fprintf(stderr, "dbloader: %s is not a diagnose this "
 				"build can read\n", de->d_name);
 			continue;
 		}
-		e->diag[e->n_diag].id = (uint16_t)(e->n_diag + 1u);
+		/*
+		 * THE ID IS THE NAME'S HASH - see KOF_DIAG_ID. It was the
+		 * load position, which is readdir order: adding a file
+		 * renumbered every diagnose after it, and a rule naming one
+		 * had nothing stable to name.
+		 */
+		e->diag[e->n_diag].id =
+			kof_diag_id_(e->diag[e->n_diag].name);
+		{
+			uint32_t q;
+
+			for (q = 0; q < e->n_diag; q++)
+				if (e->diag[q].id == e->diag[e->n_diag].id) {
+					fprintf(stderr, "dbloader: %s and %s "
+						"hash to one diagnose id - "
+						"rename one\n",
+						e->diag[q].name,
+						e->diag[e->n_diag].name);
+					break;
+				}
+			if (q < e->n_diag)
+				continue;
+		}
 		e->n_diag++;
 	}
 	closedir(d);
@@ -1646,6 +1672,7 @@ void kof_db_free_tables(struct kof_engine *e)
 	free(e->diag);
 	free(e->diag_node);
 	free(e->diag_name);
+	free(e->diag_needs);
 	if (e->packs) {
 		uint32_t i;
 

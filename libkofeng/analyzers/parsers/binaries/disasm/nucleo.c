@@ -31,8 +31,8 @@
 
 /* Linux x86-64. */
 const struct sysrow kof_sys64[] = {
-	{     0, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     1, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     0, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     1, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
 	/*
 	 * THE REST OF THE READ AND WRITE FAMILY, which was simply absent.
 	 *
@@ -47,34 +47,34 @@ const struct sysrow kof_sys64[] = {
 	 * the second descriptor is an argument, and an argument is where that
 	 * belongs rather than in a word.
 	 */
-	{    17, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "pread64"  },
-	{    18, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwrite64"  },
-	{    19, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "readv"  },
-	{    20, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "writev"  },
-	{    40, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile"  },
-	{   275, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "splice"  },
-	{   295, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv"  },
-	{   296, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev"  },
-	{   327, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv2"  },
-	{   328, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev2"  },
-	{    46, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendmsg"  },
-	{    47, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvmsg"  },
-	{     2, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
-	{   9, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see prot_cap */
-	{  10, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
-	{   35, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
-	{  41, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{   42, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{   43, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{   44, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{   45, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{  56, KOF_CAP_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
-	{   57, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{   58, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "vfork"  },
-	{   59, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{ 257, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{ 319, KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  },
-	{ 322, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execveat"  },
+	{    17, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "pread64"  },
+	{    18, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwrite64"  },
+	{    19, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "readv"  },
+	{    20, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "writev"  },
+	{    40, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile"  },
+	{   275, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "splice"  },
+	{   295, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv"  },
+	{   296, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev"  },
+	{   327, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv2"  },
+	{   328, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev2"  },
+	{    46, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendmsg"  },
+	{    47, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvmsg"  },
+	{     2, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
+	{   9, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see prot_cap */
+	{  10, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
+	{   35, KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
+	{  41, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{   42, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{   43, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{   44, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{   45, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
+	{  56, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
+	{   57, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
+	{   58, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "vfork"  },
+	{   59, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{ 257, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
+	{ 319, KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  },
+	{ 322, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execveat"  },
 	/*
 	 * AND THE REST OF WHAT A PROGRAM CAN ASK FOR. Numbers read out of
 	 * /usr/include/x86_64-linux-gnu/asm/unistd_64.h on this machine
@@ -82,97 +82,97 @@ const struct sysrow kof_sys64[] = {
 	 * detection - it is a confident wrong name on whatever syscall does
 	 * hold the number.
 	 */
-	{  82, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
-	{  87, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
-	{ 263, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
-	{ 264, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
-	{ 316, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
-	{  90, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
-	{  91, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
-	{ 268, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
-	{ 105, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setuid"  },
-	{ 106, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setgid"  },
-	{ 113, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setreuid"  },
-	{ 117, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setresuid"  },
-	{ 310, KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_readv"  },
-	{ 311, KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_writev"  },
-	{ 175, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "init_module"  },
-	{ 176, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "delete_module"  },
-	{ 313, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "finit_module"  },
-	{ 321, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "bpf"  },
-	{ 161, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "chroot"  },
-	{ 155, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "pivot_root"  },
-	{ 308, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "setns"  },
-	{ 272, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "unshare"  },
-	{ 101, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{  22, KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE, "pipe"  },
-	{  33, KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup2"  },
-	{  53, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE, "socketpair"  },
-	{ 292, KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup3"  },
-	{ 132, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utime"  },
-	{ 235, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimes"  },
-	{ 261, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "futimesat"  },
-	{ 280, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimensat"  }
+	{  82, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
+	{  87, KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
+	{ 263, KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
+	{ 264, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
+	{ 316, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
+	{  90, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
+	{  91, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
+	{ 268, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
+	{ 105, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setuid"  },
+	{ 106, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setgid"  },
+	{ 113, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setreuid"  },
+	{ 117, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setresuid"  },
+	{ 310, KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_readv"  },
+	{ 311, KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_writev"  },
+	{ 175, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "init_module"  },
+	{ 176, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "delete_module"  },
+	{ 313, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "finit_module"  },
+	{ 321, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "bpf"  },
+	{ 161, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "chroot"  },
+	{ 155, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "pivot_root"  },
+	{ 308, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "setns"  },
+	{ 272, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "unshare"  },
+	{ 101, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{  22, KOF_NUCLEO_PIPE_OPEN, KOF_FLOW_ROLE_NONE, "pipe"  },
+	{  33, KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup2"  },
+	{  53, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_NONE, "socketpair"  },
+	{ 292, KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup3"  },
+	{ 132, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utime"  },
+	{ 235, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimes"  },
+	{ 261, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "futimesat"  },
+	{ 280, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimensat"  }
 };
 
 /* Linux i386. */
 const struct sysrow kof_sys32[] = {
-	{     2, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{     3, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     2, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
+	{     3, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
 	/* The same family on i386 - see the note in the amd64 table. */
-	{   180, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "pread64"  },
-	{   181, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwrite64"  },
-	{   145, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "readv"  },
-	{   146, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "writev"  },
-	{   187, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile"  },
-	{   239, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile64"  },
-	{   313, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "splice"  },
-	{   333, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv"  },
-	{   334, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev"  },
-	{     4, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
-	{     5, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
-	{   11, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{  90, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
-	{ 102, KOF_CAP_NONE, KOF_FLOW_ROLE_NONE, "socketcall"  },         /* socketcall - the sub-call is in ebx */
-	{ 120, KOF_CAP_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
-	{ 125, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
-	{ 162, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
-	{ 192, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap2"  },
-	{ 295, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{ 356, KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  },
-	{ 358, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execveat"  },
+	{   180, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "pread64"  },
+	{   181, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwrite64"  },
+	{   145, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "readv"  },
+	{   146, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "writev"  },
+	{   187, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile"  },
+	{   239, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "sendfile64"  },
+	{   313, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "splice"  },
+	{   333, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "preadv"  },
+	{   334, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "pwritev"  },
+	{     4, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     5, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
+	{   11, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{  90, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
+	{ 102, KOF_NUCLEO_NONE, KOF_FLOW_ROLE_NONE, "socketcall"  },         /* socketcall - the sub-call is in ebx */
+	{ 120, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
+	{ 125, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
+	{ 162, KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
+	{ 192, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap2"  },
+	{ 295, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
+	{ 356, KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  },
+	{ 358, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execveat"  },
 	/* The same list on i386, from asm/unistd_32.h and NOT by subtracting
 	 * anything from the table above - the two numberings are unrelated. */
-	{  10, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
-	{  38, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
-	{ 301, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
-	{ 302, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
-	{ 353, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
-	{  15, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
-	{  94, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
-	{ 306, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
-	{  23, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setuid"  },
-	{  46, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setgid"  },
-	{  70, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setreuid"  },
-	{ 164, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setresuid"  },
-	{ 347, KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_readv"  },
-	{ 348, KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_writev"  },
-	{ 128, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "init_module"  },
-	{ 129, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "delete_module"  },
-	{ 350, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "finit_module"  },
-	{ 357, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "bpf"  },
-	{  61, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "chroot"  },
-	{ 217, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "pivot_root"  },
-	{ 346, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "setns"  },
-	{ 310, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "unshare"  },
-	{  26, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{  42, KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE, "pipe"  },
-	{  63, KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup2"  },
-	{ 330, KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup3"  },
-	{  30, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utime"  },
-	{ 271, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimes"  },
-	{ 299, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "futimesat"  },
-	{ 320, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimensat"  }
+	{  10, KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
+	{  38, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
+	{ 301, KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
+	{ 302, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
+	{ 353, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
+	{  15, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
+	{  94, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
+	{ 306, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
+	{  23, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setuid"  },
+	{  46, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setgid"  },
+	{  70, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setreuid"  },
+	{ 164, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setresuid"  },
+	{ 347, KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_readv"  },
+	{ 348, KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_writev"  },
+	{ 128, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "init_module"  },
+	{ 129, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "delete_module"  },
+	{ 350, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "finit_module"  },
+	{ 357, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "bpf"  },
+	{  61, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "chroot"  },
+	{ 217, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "pivot_root"  },
+	{ 346, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "setns"  },
+	{ 310, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "unshare"  },
+	{  26, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{  42, KOF_NUCLEO_PIPE_OPEN, KOF_FLOW_ROLE_NONE, "pipe"  },
+	{  63, KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup2"  },
+	{ 330, KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup3"  },
+	{  30, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utime"  },
+	{ 271, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimes"  },
+	{ 299, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "futimesat"  },
+	{ 320, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimensat"  }
 };
 
 /* i386 multiplexes every socket operation through socketcall, with the
@@ -180,15 +180,15 @@ const struct sysrow kof_sys32[] = {
  * above, because it is a different axis and merging them would need a second
  * key nothing else uses. */
 const struct sysrow kof_sockcall[] = {
-	{  1, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket" },
-	{  2, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind" },
-	{  3, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect" },
-	{  4, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen" },
-	{  5, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept" },
-	{  9, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send" },
-	{ 10, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recv" },
-	{ 11, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto" },
-	{ 12, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom" }
+	{  1, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket" },
+	{  2, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind" },
+	{  3, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect" },
+	{  4, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen" },
+	{  5, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept" },
+	{  9, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "send" },
+	{ 10, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recv" },
+	{ 11, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto" },
+	{ 12, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom" }
 };
 
 
@@ -199,7 +199,7 @@ uint16_t kof_sys_look(const struct sysrow *t, uint32_t n, uint32_t nr)
 	for (i = 0; i < n; i++)
 		if (t[i].nr == nr)
 			return t[i].cap;
-	return KOF_CAP_NONE;
+	return KOF_NUCLEO_NONE;
 }
 
 /* The kernel's own name for the call, or NULL - see the note on sysrow. */
@@ -238,94 +238,94 @@ uint8_t kof_sys_look_role(const struct sysrow *t, uint32_t n, uint32_t nr)
 static const struct { const char *name; uint16_t cap; uint8_t role; }
 names[] = {
 	/* POSIX */
-	{ "mmap",           KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "mmap64",         KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "mprotect",       KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	/* Not a finding on its own - see KOF_CAP_HEAP - and here so that a
+	{ "mmap",           KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "mmap64",         KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "mprotect",       KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	/* Not a finding on its own - see KOF_NUCLEO_HEAP - and here so that a
 	 * buffer two transfers share has a name. posix_memalign is left
 	 * out: it hands the pointer back THROUGH one, and until
 	 * kof_flow_out_arg carries it the step would make something
 	 * nothing could hold. */
-	{ "malloc",         KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "calloc",         KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "realloc",        KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "reallocarray",   KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "aligned_alloc",  KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "memalign",       KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "_Znwm",          KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },  /* new    */
-	{ "_Znam",          KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },  /* new[]  */
-	{ "socket",         KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK },
-	{ "socketpair",     KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	/* Not a finding on its own - see KOF_CAP_PIPE_OPEN - and here so
+	{ "malloc",         KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "calloc",         KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "realloc",        KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "reallocarray",   KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "aligned_alloc",  KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "memalign",       KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "_Znwm",          KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },  /* new    */
+	{ "_Znam",          KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },  /* new[]  */
+	{ "socket",         KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK },
+	{ "socketpair",     KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_NONE },
+	/* Not a finding on its own - see KOF_NUCLEO_PIPE_OPEN - and here so
 	 * the step has a name and so a dynamically linked object calling
 	 * pipe@plt reaches the same word as a static one. */
-	{ "pipe",           KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "pipe2",          KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "connect",        KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "accept",         KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
-	{ "accept4",        KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
-	{ "bind",           KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE },
-	{ "listen",         KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE },
-	{ "recv",           KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
-	{ "recvfrom",       KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
-	{ "recvmsg",        KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
-	{ "read",           KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE },
-	{ "send",           KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "sendto",         KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "sendmsg",        KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "write",          KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "open",           KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "open64",         KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "openat",         KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "fopen",          KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "memfd_create",   KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE },
-	{ "execve",         KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "execv",          KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "execl",          KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "execlp",         KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "execvp",         KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "system",         KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "popen",          KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "fork",           KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE },
-	{ "vfork",          KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE },
+	{ "pipe",           KOF_NUCLEO_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "pipe2",          KOF_NUCLEO_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "connect",        KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "accept",         KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
+	{ "accept4",        KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
+	{ "bind",           KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE },
+	{ "listen",         KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE },
+	{ "recv",           KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE },
+	{ "recvfrom",       KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE },
+	{ "recvmsg",        KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE },
+	{ "read",           KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE },
+	{ "send",           KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "sendto",         KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "sendmsg",        KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "write",          KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "open",           KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "open64",         KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "openat",         KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "fopen",          KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "memfd_create",   KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE },
+	{ "execve",         KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "execv",          KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "execl",          KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "execlp",         KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "execvp",         KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "system",         KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "popen",          KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "fork",           KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE },
+	{ "vfork",          KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE },
 	/* The libc wrapper, whose flags are its THIRD argument rather than its
 	 * first - a different convention from the syscall, and past what is
 	 * refined here. It stays the weaker claim. */
-	{ "clone",          KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE },
+	{ "clone",          KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE },
 	/* No flags to read and no ambiguity: the name IS the claim. */
-	{ "pthread_create", KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE },
-	{ "daemon",         KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE },
-	{ "sleep",          KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE },
-	{ "usleep",         KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE },
-	{ "nanosleep",      KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE },
-	{ "ptrace",         KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
+	{ "pthread_create", KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE },
+	{ "daemon",         KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE },
+	{ "sleep",          KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE },
+	{ "usleep",         KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE },
+	{ "nanosleep",      KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE },
+	{ "ptrace",         KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE },
 	/* Windows, for the same words */
-	{ "VirtualAlloc",   KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "VirtualAllocEx", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "VirtualProtect", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "HeapAlloc",      KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "HeapReAlloc",    KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "RtlAllocateHeap", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "LocalAlloc",     KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "GlobalAlloc",    KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "CoTaskMemAlloc", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "WSASocketA",     KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK },
-	{ "WSASocketW",     KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK },
-	{ "InternetOpenA",  KOF_CAP_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "InternetOpenW",  KOF_CAP_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "WSAConnect",     KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "InternetConnectA", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "InternetConnectW", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "CreateFileA",    KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "CreateFileW",    KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "WriteFile",      KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "ReadFile",       KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE },
-	{ "CreateProcessA", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "CreateProcessW", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "WinExec",        KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "ShellExecuteA",  KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "ShellExecuteW",  KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "CreateThread",   KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE },
+	{ "VirtualAlloc",   KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "VirtualAllocEx", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "VirtualProtect", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "HeapAlloc",      KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "HeapReAlloc",    KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "RtlAllocateHeap", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "LocalAlloc",     KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "GlobalAlloc",    KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "CoTaskMemAlloc", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "WSASocketA",     KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK },
+	{ "WSASocketW",     KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK },
+	{ "InternetOpenA",  KOF_NUCLEO_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenW",  KOF_NUCLEO_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "WSAConnect",     KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "InternetConnectA", KOF_NUCLEO_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "InternetConnectW", KOF_NUCLEO_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "CreateFileA",    KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "CreateFileW",    KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "WriteFile",      KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "ReadFile",       KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE },
+	{ "CreateProcessA", KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "CreateProcessW", KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "WinExec",        KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "ShellExecuteA",  KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "ShellExecuteW",  KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "CreateThread",   KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE },
 	/*
 	 * THE REST OF THE WINDOWS SURFACE, and it was not a short list.
 	 *
@@ -338,132 +338,132 @@ names[] = {
 	 */
 	/* ws2_32 exports these under their POSIX spellings, which the rows
 	 * above already carry; what is listed here is only what it adds. */
-	{ "WSARecv",        KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
-	{ "WSASend",        KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "WSAAccept",      KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
-	{ "closesocket",    KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "InternetOpenUrlA", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
-	{ "InternetOpenUrlW", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
-	{ "InternetReadFile", KOF_CAP_HTTP_RECV, KOF_FLOW_ROLE_NONE },
-	{ "HttpSendRequestA", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
-	{ "HttpSendRequestW", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
-	{ "HttpOpenRequestA", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "HttpOpenRequestW", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "URLDownloadToFileA", KOF_CAP_HTTP_FETCH, KOF_FLOW_ROLE_NONE },
-	{ "URLDownloadToFileW", KOF_CAP_HTTP_FETCH, KOF_FLOW_ROLE_NONE },
+	{ "WSARecv",        KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE },
+	{ "WSASend",        KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "WSAAccept",      KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
+	{ "closesocket",    KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenUrlA", KOF_NUCLEO_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "InternetOpenUrlW", KOF_NUCLEO_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "InternetReadFile", KOF_NUCLEO_HTTP_RECV, KOF_FLOW_ROLE_NONE },
+	{ "HttpSendRequestA", KOF_NUCLEO_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "HttpSendRequestW", KOF_NUCLEO_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "HttpOpenRequestA", KOF_NUCLEO_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "HttpOpenRequestW", KOF_NUCLEO_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "URLDownloadToFileA", KOF_NUCLEO_HTTP_FETCH, KOF_FLOW_ROLE_NONE },
+	{ "URLDownloadToFileW", KOF_NUCLEO_HTTP_FETCH, KOF_FLOW_ROLE_NONE },
 	/*
 	 * THE WINDOWS SPELLING OF A REDIRECTED SHELL, which the table had
 	 * only the POSIX half of.
 	 *
-	 * `pipe` then `dup2` then `execve` is the shape KOF_CAP_PIPE_OPEN
+	 * `pipe` then `dup2` then `execve` is the shape KOF_NUCLEO_PIPE_OPEN
 	 * exists for; on Windows it is `CreatePipe` then `SetStdHandle` or
 	 * a STARTUPINFO, then `CreateProcess` - and CreateProcess was the
 	 * only one of the three in this table. The producer and the
 	 * redirect are what make it a sentence rather than three words.
 	 */
-	{ "CreatePipe",     KOF_CAP_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "SetStdHandle",   KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
-	{ "DuplicateHandle", KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpOpen",    KOF_CAP_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpConnect", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpOpenRequest", KOF_CAP_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpSendRequest", KOF_CAP_HTTP_SEND, KOF_FLOW_ROLE_NONE },
-	{ "WinHttpReadData", KOF_CAP_HTTP_RECV, KOF_FLOW_ROLE_NONE },
+	{ "CreatePipe",     KOF_NUCLEO_PIPE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "SetStdHandle",   KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE },
+	{ "DuplicateHandle", KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpOpen",    KOF_NUCLEO_HTTP_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpConnect", KOF_NUCLEO_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpOpenRequest", KOF_NUCLEO_HTTP_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpSendRequest", KOF_NUCLEO_HTTP_SEND, KOF_FLOW_ROLE_NONE },
+	{ "WinHttpReadData", KOF_NUCLEO_HTTP_RECV, KOF_FLOW_ROLE_NONE },
 	/* A mapping is a mapping, whichever name asks for it. */
-	{ "VirtualProtectEx", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "NtAllocateVirtualMemory", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "NtProtectVirtualMemory", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "ZwAllocateVirtualMemory", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "ZwProtectVirtualMemory", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "CreateFileMappingA", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "CreateFileMappingW", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "MapViewOfFile",  KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "MapViewOfFileEx", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "VirtualProtectEx", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "NtAllocateVirtualMemory", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "NtProtectVirtualMemory", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "ZwAllocateVirtualMemory", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "ZwProtectVirtualMemory", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "CreateFileMappingA", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "CreateFileMappingW", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "MapViewOfFile",  KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "MapViewOfFileEx", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
 	/* The handle, the memory and the execution - see the note on the
 	 * three capabilities in kofmod/kofcap.h. */
-	{ "OpenProcess",    KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
-	{ "DebugActiveProcess", KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
+	{ "OpenProcess",    KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE },
+	{ "DebugActiveProcess", KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE },
 	/* A thread handle is the same kind of hold on another execution
 	 * context, and it is what SetThreadContext and ResumeThread are
 	 * handed - they were modelled and the handle they take was not. */
-	{ "OpenThread",     KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
-	{ "WriteProcessMemory", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "ReadProcessMemory", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "NtWriteVirtualMemory", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "OpenThread",     KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE },
+	{ "WriteProcessMemory", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "ReadProcessMemory", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "NtWriteVirtualMemory", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
 	/* Reading another thread's registers, and emptying another image
 	 * out of its address space: the two legs of hollowing whose other
 	 * halves - SetThreadContext and WriteProcessMemory - were already
 	 * here. */
-	{ "GetThreadContext", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "NtUnmapViewOfSection", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "ZwUnmapViewOfSection", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "CreateRemoteThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "CreateRemoteThreadEx", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "NtQueueApcThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "QueueUserAPC",   KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "SetThreadContext", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "NtResumeThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "SuspendThread",  KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "NtSuspendThread", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
-	{ "ResumeThread",   KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "GetThreadContext", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "NtUnmapViewOfSection", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "ZwUnmapViewOfSection", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "CreateRemoteThread", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "CreateRemoteThreadEx", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "NtQueueApcThread", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "QueueUserAPC",   KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "SetThreadContext", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "NtResumeThread", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "SuspendThread",  KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "NtSuspendThread", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "ResumeThread",   KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	/* The loader pair, which is what a program has INSTEAD of an import
-	 * table entry - see KOF_CAP_RESOLVE. */
-	{ "LoadLibraryA",   KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "LoadLibraryW",   KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "LoadLibraryExA", KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "LoadLibraryExW", KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "GetProcAddress", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "LdrLoadDll",     KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "LdrGetProcedureAddress", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "dlopen",         KOF_CAP_LIB_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "dlsym",          KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
+	 * table entry - see KOF_NUCLEO_RESOLVE. */
+	{ "LoadLibraryA",   KOF_NUCLEO_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryW",   KOF_NUCLEO_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryExA", KOF_NUCLEO_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LoadLibraryExW", KOF_NUCLEO_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "GetProcAddress", KOF_NUCLEO_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "LdrLoadDll",     KOF_NUCLEO_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "LdrGetProcedureAddress", KOF_NUCLEO_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "dlopen",         KOF_NUCLEO_LIB_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "dlsym",          KOF_NUCLEO_RESOLVE, KOF_FLOW_ROLE_NONE },
 	/* Writes only; a program reading its own configuration is every
-	 * program - see KOF_CAP_REG_SET. */
+	 * program - see KOF_NUCLEO_REG_SET. */
 	/* And where the handle they are given comes from - see
-	 * KOF_CAP_REG_OPEN. Not a finding; the head of a link. */
+	 * KOF_NUCLEO_REG_OPEN. Not a finding; the head of a link. */
 	/* Windows' spelling of rename - the word already existed for the
-	 * POSIX one, see KOF_CAP_FILE_RENAME, and only the name was
+	 * POSIX one, see KOF_NUCLEO_FILE_RENAME, and only the name was
 	 * missing. 16 of the 128 measured PE import MoveFileW. */
-	{ "MoveFileA",      KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
-	{ "MoveFileW",      KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
-	{ "MoveFileExA",    KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
-	{ "MoveFileExW",    KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
-	{ "MoveFileWithProgressW", KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
-	{ "RegOpenKeyExA",  KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "RegOpenKeyExW",  KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "RegOpenKeyA",    KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "RegOpenKeyW",    KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "NtOpenKey",      KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "NtOpenKeyEx",    KOF_CAP_REG_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "RegSetValueExA", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegSetValueExW", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegCreateKeyExA", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegCreateKeyExW", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegDeleteValueA", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegDeleteValueW", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "NtSetValueKey",  KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "Sleep",          KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileA",      KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileW",      KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileExA",    KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileExW",    KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "MoveFileWithProgressW", KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyExA",  KOF_NUCLEO_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyExW",  KOF_NUCLEO_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyA",    KOF_NUCLEO_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegOpenKeyW",    KOF_NUCLEO_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "NtOpenKey",      KOF_NUCLEO_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "NtOpenKeyEx",    KOF_NUCLEO_REG_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "RegSetValueExA", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegSetValueExW", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegCreateKeyExA", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegCreateKeyExW", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegDeleteValueA", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegDeleteValueW", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "NtSetValueKey",  KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "Sleep",          KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE },
 
 	/*
 	 * THE ROWS THE RANKING CHOSE. Measured over the whole corpus here -
 	 * 1772 ELF malware objects against 20347 Linux binaries - and kept
 	 * because of what the numbers said, not because they sounded right.
-	 * See KOF_CAP_NET_ADDR for the rates and for what the ranking
+	 * See KOF_NUCLEO_NET_ADDR for the rates and for what the ranking
 	 * rejected.
 	 */
-	{ "htons",          KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "htonl",          KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "ntohs",          KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "ntohl",          KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "inet_addr",      KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "inet_aton",      KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "inet_pton",      KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "inet_ntoa",      KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "inet_network",   KOF_CAP_NET_ADDR, KOF_FLOW_ROLE_NONE },
-	{ "gethostbyname",  KOF_CAP_DNS, KOF_FLOW_ROLE_NONE },
-	{ "getaddrinfo",    KOF_CAP_DNS, KOF_FLOW_ROLE_NONE },
-	{ "prctl",          KOF_CAP_SELF_HIDE, KOF_FLOW_ROLE_NONE },
-	{ "setsid",         KOF_CAP_BACKGROUND, KOF_FLOW_ROLE_NONE },
+	{ "htons",          KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "htonl",          KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "ntohs",          KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "ntohl",          KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "inet_addr",      KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "inet_aton",      KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "inet_pton",      KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "inet_ntoa",      KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "inet_network",   KOF_NUCLEO_NET_ADDR, KOF_FLOW_ROLE_NONE },
+	{ "gethostbyname",  KOF_NUCLEO_DNS, KOF_FLOW_ROLE_NONE },
+	{ "getaddrinfo",    KOF_NUCLEO_DNS, KOF_FLOW_ROLE_NONE },
+	{ "prctl",          KOF_NUCLEO_SELF_HIDE, KOF_FLOW_ROLE_NONE },
+	{ "setsid",         KOF_NUCLEO_BACKGROUND, KOF_FLOW_ROLE_NONE },
 
 	/*
 	 * THE KERNEL, which is the same kind of table and a different side of
@@ -473,7 +473,7 @@ names[] = {
 	 * vocabulary above is silent on one. What it has instead is a list of
 	 * UNDEFINED symbols, which is the same declaration a PE import table
 	 * is: the names it was compiled against, fixed, and not the module's
-	 * to choose. See KOF_CAP_CRED_SET for the measurement that picked
+	 * to choose. See KOF_NUCLEO_CRED_SET for the measurement that picked
 	 * these.
 	 *
 	 * THE LINUX ONES HAVE NO PREFIX AND THAT IS A HAZARD worth stating:
@@ -493,9 +493,9 @@ names[] = {
 	 */
 	/* Credentials BUILT, then credentials INSTALLED - "give me root" is
 	 * the value passing from the first to the second, so the two halves
-	 * have separate words. See KOF_CAP_CRED_PREPARE. */
-	{ "prepare_creds",  KOF_CAP_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
-	{ "prepare_kernel_cred", KOF_CAP_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
+	 * have separate words. See KOF_NUCLEO_CRED_PREPARE. */
+	{ "prepare_creds",  KOF_NUCLEO_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
+	{ "prepare_kernel_cred", KOF_NUCLEO_CRED_PREPARE, KOF_FLOW_ROLE_NONE },
 	/*
 	 * ---- THE KERNEL'S ALLOCATORS ---------------------------------------
 	 *
@@ -519,43 +519,43 @@ names[] = {
 	 * list-surgery row gives: a table that knows only the old name is a
 	 * table about one kernel version.
 	 */
-	{ "__kmalloc",      KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "__kmalloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kmalloc",        KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kmalloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kmalloc_trace",  KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kvmalloc_node",  KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kvmalloc_node_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "krealloc",       KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "krealloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kmem_cache_alloc", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "kmem_cache_alloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "vmalloc",        KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "vmalloc_noprof", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "__vmalloc",      KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "__vmalloc_node_range", KOF_CAP_HEAP, KOF_FLOW_ROLE_NONE },
-	{ "commit_creds",   KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "set_current_groups", KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "__kmalloc",      KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "__kmalloc_noprof", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmalloc",        KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmalloc_noprof", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmalloc_trace",  KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kvmalloc_node",  KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kvmalloc_node_noprof", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "krealloc",       KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "krealloc_noprof", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmem_cache_alloc", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "kmem_cache_alloc_noprof", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "vmalloc",        KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "vmalloc_noprof", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "__vmalloc",      KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "__vmalloc_node_range", KOF_NUCLEO_HEAP, KOF_FLOW_ROLE_NONE },
+	{ "commit_creds",   KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "set_current_groups", KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
 	/*
 	 * A KPROBE PUT ON AND A KPROBE TAKEN OFF - two words, and neither of
-	 * them is "hook". See KOF_CAP_KPROBE_REG for why this row has now
+	 * them is "hook". See KOF_NUCLEO_KPROBE_REG for why this row has now
 	 * been wrong twice. The pair is the IDIOM: put a probe on a name,
 	 * read kp.addr, take the probe away again, all in one function - and
 	 * an idiom made of two calls needs two words to be written down.
 	 * Measured at 0 of 900 clean modules on each side.
 	 */
-	{ "register_kprobe", KOF_CAP_KPROBE_REG, KOF_FLOW_ROLE_NONE },
-	{ "register_kprobes", KOF_CAP_KPROBE_REG, KOF_FLOW_ROLE_NONE },
-	{ "unregister_kprobe", KOF_CAP_KPROBE_UNREG, KOF_FLOW_ROLE_NONE },
-	{ "unregister_kprobes", KOF_CAP_KPROBE_UNREG, KOF_FLOW_ROLE_NONE },
+	{ "register_kprobe", KOF_NUCLEO_KPROBE_REG, KOF_FLOW_ROLE_NONE },
+	{ "register_kprobes", KOF_NUCLEO_KPROBE_REG, KOF_FLOW_ROLE_NONE },
+	{ "unregister_kprobe", KOF_NUCLEO_KPROBE_UNREG, KOF_FLOW_ROLE_NONE },
+	{ "unregister_kprobes", KOF_NUCLEO_KPROBE_UNREG, KOF_FLOW_ROLE_NONE },
 	/* A RETURN probe cannot read an address and leave; it exists to run
 	 * code on somebody else's return, so it stays hooking. */
-	{ "register_kretprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "unregister_kretprobe", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "register_kretprobe", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "unregister_kretprobe", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	/* Code of one's own put in the path of somebody else's. */
-	{ "unregister_ftrace_function", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "write_cr0",      KOF_CAP_PROT_OFF, KOF_FLOW_ROLE_NONE },
-	{ "write_cr4",      KOF_CAP_PROT_OFF, KOF_FLOW_ROLE_NONE },
+	{ "unregister_ftrace_function", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "write_cr0",      KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE },
+	{ "write_cr4",      KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE INSTRUCTION ITSELF, AS A NAME.
 	 *
@@ -567,36 +567,36 @@ names[] = {
 	 * can match this row by accident; it is reachable only by the sweep
 	 * naming it directly.
 	 */
-	{ "peb_ldr",        KOF_CAP_SELF_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "name_hash",      KOF_CAP_NAME_HASH, KOF_FLOW_ROLE_NONE },
-	{ "mov_cr0",        KOF_CAP_PROT_OFF, KOF_FLOW_ROLE_NONE },
-	{ "register_ftrace_function", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "ftrace_set_filter_ip", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "register_ftrace_direct", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "text_poke",      KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "text_poke_kgdb", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "set_memory_rw",  KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "set_memory_x",   KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "peb_ldr",        KOF_NUCLEO_SELF_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "name_hash",      KOF_NUCLEO_NAME_HASH, KOF_FLOW_ROLE_NONE },
+	{ "mov_cr0",        KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE },
+	{ "register_ftrace_function", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "ftrace_set_filter_ip", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "register_ftrace_direct", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "text_poke",      KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "text_poke_kgdb", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "set_memory_rw",  KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "set_memory_x",   KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	/*
 	 * An entry taken out of a kernel list. BOTH SPELLINGS, because the
 	 * kernel renamed the check and a table that knew only the old one
-	 * would be a table about one kernel version - see KOF_CAP_LIST_HIDE,
+	 * would be a table about one kernel version - see KOF_NUCLEO_LIST_HIDE,
 	 * where the 17% that makes this a term and not a verdict is measured.
 	 */
-	{ "__list_del_entry_valid", KOF_CAP_LIST_HIDE, KOF_FLOW_ROLE_NONE },
-	{ "__list_del_entry_valid_or_report", KOF_CAP_LIST_HIDE,
+	{ "__list_del_entry_valid", KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
+	{ "__list_del_entry_valid_or_report", KOF_NUCLEO_LIST_HIDE,
 	  KOF_FLOW_ROLE_NONE },
-	{ "__list_add_valid", KOF_CAP_LIST_HIDE, KOF_FLOW_ROLE_NONE },
-	{ "__list_add_valid_or_report", KOF_CAP_LIST_HIDE,
+	{ "__list_add_valid", KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
+	{ "__list_add_valid_or_report", KOF_NUCLEO_LIST_HIDE,
 	  KOF_FLOW_ROLE_NONE },
-	{ "list_del",       KOF_CAP_LIST_HIDE, KOF_FLOW_ROLE_NONE },
+	{ "list_del",       KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE WORDS THE KERNEL NEEDS OF ITS OWN.
 	 *
 	 * kallsyms_lookup_name was called dlsym with a different name. It is
 	 * not: dlsym returns what a library exported, this returns ANY symbol
 	 * the kernel knows - and the one a rootkit wants, sys_call_table, is
-	 * exported to nobody. See KOF_CAP_KSYM_LOOKUP.
+	 * exported to nobody. See KOF_NUCLEO_KSYM_LOOKUP.
 	 */
 	/*
 	 * ---- A CALL THROUGH A POINTER, WHICH IS AN IMPORT ON A RETPOLINE
@@ -625,79 +625,79 @@ names[] = {
 	 * prefix: a prefix match would also take __x86_return_thunk, which is
 	 * a return and not a call.
 	 */
-	{ "__x86_indirect_thunk_rax", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_rbx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_rcx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_rdx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_rsi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_rdi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_rbp", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r8", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r9", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r10", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r11", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r12", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r13", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r14", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_r15", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_eax", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_ebx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_ecx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_edx", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_esi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_edi", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "__x86_indirect_thunk_ebp", KOF_CAP_CALL_REG, KOF_FLOW_ROLE_NONE },
-	{ "kallsyms_lookup_name", KOF_CAP_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
-	{ "kallsyms_lookup_name_t", KOF_CAP_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
-	{ "__symbol_get",   KOF_CAP_SYMBOL_GET, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rax", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rbx", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rcx", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rdx", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rsi", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rdi", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_rbp", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r8", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r9", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r10", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r11", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r12", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r13", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r14", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_r15", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_eax", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_ebx", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_ecx", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_edx", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_esi", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_edi", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "__x86_indirect_thunk_ebp", KOF_NUCLEO_CALL_REG, KOF_FLOW_ROLE_NONE },
+	{ "kallsyms_lookup_name", KOF_NUCLEO_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
+	{ "kallsyms_lookup_name_t", KOF_NUCLEO_KSYM_LOOKUP, KOF_FLOW_ROLE_NONE },
+	{ "__symbol_get",   KOF_NUCLEO_SYMBOL_GET, KOF_FLOW_ROLE_NONE },
 	/* ACROSS THE USER/KERNEL BOUNDARY, which is not a file - see
-	 * KOF_CAP_COPY_FROM_USER. The rows under this one take a struct file
+	 * KOF_NUCLEO_COPY_FROM_USER. The rows under this one take a struct file
 	 * and really are file I/O. */
-	{ "_copy_from_user", KOF_CAP_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
-	{ "copy_from_user", KOF_CAP_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
-	{ "__copy_from_user", KOF_CAP_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
-	{ "_copy_to_user",  KOF_CAP_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
-	{ "copy_to_user",   KOF_CAP_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
-	{ "__copy_to_user", KOF_CAP_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
-	{ "kernel_read",    KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
-	{ "kernel_write",   KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "vfs_read",       KOF_CAP_READ,  KOF_FLOW_ROLE_NONE },
-	{ "vfs_write",      KOF_CAP_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "filp_open",      KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "filp_close",     KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "call_usermodehelper", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "call_usermodehelper_exec", KOF_CAP_EXEC_IMAGE,
+	{ "_copy_from_user", KOF_NUCLEO_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
+	{ "copy_from_user", KOF_NUCLEO_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
+	{ "__copy_from_user", KOF_NUCLEO_COPY_FROM_USER, KOF_FLOW_ROLE_NONE },
+	{ "_copy_to_user",  KOF_NUCLEO_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
+	{ "copy_to_user",   KOF_NUCLEO_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
+	{ "__copy_to_user", KOF_NUCLEO_COPY_TO_USER, KOF_FLOW_ROLE_NONE },
+	{ "kernel_read",    KOF_NUCLEO_READ,  KOF_FLOW_ROLE_NONE },
+	{ "kernel_write",   KOF_NUCLEO_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "vfs_read",       KOF_NUCLEO_READ,  KOF_FLOW_ROLE_NONE },
+	{ "vfs_write",      KOF_NUCLEO_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "filp_open",      KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "filp_close",     KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "call_usermodehelper", KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "call_usermodehelper_exec", KOF_NUCLEO_EXEC_IMAGE,
 	  KOF_FLOW_ROLE_NONE },
-	{ "kthread_create_on_node", KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE },
-	{ "kthread_run",    KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE },
-	{ "wake_up_process", KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE },
-	{ "sock_create",    KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "sock_create_kern", KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "kernel_connect", KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE },
-	{ "kernel_accept",  KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
-	{ "kernel_sendmsg", KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "kernel_recvmsg", KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE },
+	{ "kthread_create_on_node", KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE },
+	{ "kthread_run",    KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE },
+	{ "wake_up_process", KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE },
+	{ "sock_create",    KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "sock_create_kern", KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "kernel_connect", KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE },
+	{ "kernel_accept",  KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE },
+	{ "kernel_sendmsg", KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "kernel_recvmsg", KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE WINDOWS KERNEL, which reaches this table the way every other
 	 * PE import does - the mechanism needs nothing new, only the words.
 	 */
-	{ "ZwCreateFile",   KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "ZwOpenFile",     KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE },
-	{ "ZwReadFile",     KOF_CAP_MEM_READ,  KOF_FLOW_ROLE_NONE },
-	{ "ZwWriteFile",    KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE },
-	{ "MmGetSystemRoutineAddress", KOF_CAP_RESOLVE, KOF_FLOW_ROLE_NONE },
-	{ "MmMapLockedPagesSpecifyCache", KOF_CAP_PROC_MEM,
+	{ "ZwCreateFile",   KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "ZwOpenFile",     KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE },
+	{ "ZwReadFile",     KOF_NUCLEO_MEM_READ,  KOF_FLOW_ROLE_NONE },
+	{ "ZwWriteFile",    KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE },
+	{ "MmGetSystemRoutineAddress", KOF_NUCLEO_RESOLVE, KOF_FLOW_ROLE_NONE },
+	{ "MmMapLockedPagesSpecifyCache", KOF_NUCLEO_PROC_MEM,
 	  KOF_FLOW_ROLE_NONE },
-	{ "MmMapLockedPages", KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "PsLookupProcessByProcessId", KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE },
-	{ "PsSetCreateProcessNotifyRoutine", KOF_CAP_HOOK,
+	{ "MmMapLockedPages", KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "PsLookupProcessByProcessId", KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE },
+	{ "PsSetCreateProcessNotifyRoutine", KOF_NUCLEO_HOOK,
 	  KOF_FLOW_ROLE_NONE },
-	{ "PsSetCreateProcessNotifyRoutineEx", KOF_CAP_HOOK,
+	{ "PsSetCreateProcessNotifyRoutineEx", KOF_NUCLEO_HOOK,
 	  KOF_FLOW_ROLE_NONE },
-	{ "PsSetLoadImageNotifyRoutine", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "ObRegisterCallbacks", KOF_CAP_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "PsCreateSystemThread", KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE },
-	{ "ZwTerminateProcess", KOF_CAP_PROC_EXEC, KOF_FLOW_ROLE_NONE },
+	{ "PsSetLoadImageNotifyRoutine", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "ObRegisterCallbacks", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
+	{ "PsCreateSystemThread", KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE },
+	{ "ZwTerminateProcess", KOF_NUCLEO_PROC_EXEC, KOF_FLOW_ROLE_NONE },
 	/*
 	 * ===== THE WORDS ADDED WITH THE NINE CAPABILITIES AT THE END OF
 	 * enum kof_flow_cap. Each entry point here exists to do ONE thing;
@@ -706,58 +706,58 @@ names[] = {
 	 */
 	/* Encryption. Windows has two generations of the same API and both are
 	 * still shipped, so both are here. */
-	{ "CryptEncrypt",   KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "CryptDecrypt",   KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "CryptAcquireContextA", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "CryptAcquireContextW", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "CryptGenKey",    KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "CryptDeriveKey", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "CryptImportKey", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "BCryptEncrypt",  KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "BCryptDecrypt",  KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "BCryptGenerateSymmetricKey", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "BCryptImportKeyPair", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptEncrypt",   KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptDecrypt",   KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptAcquireContextA", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptAcquireContextW", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptGenKey",    KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptDeriveKey", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "CryptImportKey", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "BCryptEncrypt",  KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "BCryptDecrypt",  KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "BCryptGenerateSymmetricKey", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "BCryptImportKeyPair", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
 	/* And the Linux side, which is OpenSSL in practice. The EVP names are
 	 * the ones a program links; the AES_ ones are the older direct calls
 	 * that statically linked malware still carries. */
-	{ "EVP_EncryptInit_ex", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "EVP_EncryptUpdate",  KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "EVP_DecryptInit_ex", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "EVP_DecryptUpdate",  KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "EVP_CipherInit_ex",  KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "AES_set_encrypt_key", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "AES_cbc_encrypt",     KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "AES_encrypt",         KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "RSA_public_encrypt",  KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "RSA_private_decrypt", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
-	{ "crypto_secretbox_easy", KOF_CAP_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "EVP_EncryptInit_ex", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "EVP_EncryptUpdate",  KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "EVP_DecryptInit_ex", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "EVP_DecryptUpdate",  KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "EVP_CipherInit_ex",  KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "AES_set_encrypt_key", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "AES_cbc_encrypt",     KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "AES_encrypt",         KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "RSA_public_encrypt",  KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "RSA_private_decrypt", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
+	{ "crypto_secretbox_easy", KOF_NUCLEO_CRYPTO, KOF_FLOW_ROLE_NONE },
 	/* Taking what the user is doing. */
-	{ "SetWindowsHookExA", KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "SetWindowsHookExW", KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "GetAsyncKeyState",  KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "GetKeyboardState",  KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "GetRawInputData",   KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "RegisterRawInputDevices", KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "GetClipboardData",  KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "SetClipboardData",  KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "XQueryKeymap",      KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
-	{ "XGrabKeyboard",     KOF_CAP_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "SetWindowsHookExA", KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "SetWindowsHookExW", KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "GetAsyncKeyState",  KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "GetKeyboardState",  KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "GetRawInputData",   KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "RegisterRawInputDevices", KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "GetClipboardData",  KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "SetClipboardData",  KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "XQueryKeymap",      KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
+	{ "XGrabKeyboard",     KOF_NUCLEO_CAPTURE, KOF_FLOW_ROLE_NONE },
 	/* Installing itself as a service. */
-	{ "OpenSCManagerA",  KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "OpenSCManagerW",  KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "CreateServiceA",  KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "CreateServiceW",  KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "StartServiceA",   KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "StartServiceW",   KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "ChangeServiceConfigA", KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
-	{ "ChangeServiceConfigW", KOF_CAP_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "OpenSCManagerA",  KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "OpenSCManagerW",  KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "CreateServiceA",  KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "CreateServiceW",  KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "StartServiceA",   KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "StartServiceW",   KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "ChangeServiceConfigA", KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
+	{ "ChangeServiceConfigW", KOF_NUCLEO_SVC_INSTALL, KOF_FLOW_ROLE_NONE },
 	/* Code into the kernel. */
-	{ "init_module",    KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "finit_module",   KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "delete_module",  KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf",            KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_load_program", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_prog_load",  KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "init_module",    KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "finit_module",   KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "delete_module",  KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf",            KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_load_program", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_prog_load",  KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE NAMES libbpf ACTUALLY EXPORTS, which are not the syscall's.
 	 *
@@ -774,58 +774,58 @@ names[] = {
 	 * every eBPF program uses them, so they say nothing about whether
 	 * this process put code in the kernel.
 	 */
-	{ "bpf_object__load", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_object__load_skeleton", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_object__attach_skeleton", KOF_CAP_MOD_LOAD,
+	{ "bpf_object__load", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_object__load_skeleton", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_object__attach_skeleton", KOF_NUCLEO_MOD_LOAD,
 	  KOF_FLOW_ROLE_NONE },
-	{ "bpf_program__attach", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_program__attach_kprobe", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_program__attach_uprobe", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_program__attach_tracepoint", KOF_CAP_MOD_LOAD,
+	{ "bpf_program__attach", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_program__attach_kprobe", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_program__attach_uprobe", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_program__attach_tracepoint", KOF_NUCLEO_MOD_LOAD,
 	  KOF_FLOW_ROLE_NONE },
-	{ "bpf_program__attach_xdp", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_prog_attach", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_set_link_xdp_fd", KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "bpf_tc_attach",  KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "NtLoadDriver",   KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
-	{ "ZwLoadDriver",   KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_program__attach_xdp", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_prog_attach", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_set_link_xdp_fd", KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "bpf_tc_attach",  KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "NtLoadDriver",   KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
+	{ "ZwLoadDriver",   KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE },
 	/* A named pipe, and only a named one. */
-	{ "CreateNamedPipeA", KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
-	{ "CreateNamedPipeW", KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
-	{ "ConnectNamedPipe", KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
-	{ "CallNamedPipeA",   KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
-	{ "CallNamedPipeW",   KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
-	{ "mkfifo",           KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
-	{ "mkfifoat",         KOF_CAP_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "CreateNamedPipeA", KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "CreateNamedPipeW", KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "ConnectNamedPipe", KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "CallNamedPipeA",   KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "CallNamedPipeW",   KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "mkfifo",           KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
+	{ "mkfifoat",         KOF_NUCLEO_PIPE, KOF_FLOW_ROLE_NONE },
 	/* Removing a file. */
-	{ "DeleteFileA",    KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	{ "DeleteFileW",    KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	/* MoveFileEx* used to be here as a DELETE. When KOF_CAP_FILE_RENAME
-	 * was split out of KOF_CAP_FILE_DELETE the POSIX `rename` moved and
+	{ "DeleteFileA",    KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE },
+	{ "DeleteFileW",    KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE },
+	/* MoveFileEx* used to be here as a DELETE. When KOF_NUCLEO_FILE_RENAME
+	 * was split out of KOF_NUCLEO_FILE_DELETE the POSIX `rename` moved and
 	 * these two did not, so the page went on saying `file-delete` with
 	 * MoveFileExW beside it - the exact contradiction that split was
 	 * made to end. They are with the other MoveFile rows now. */
-	{ "unlink",         KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	{ "unlinkat",       KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	{ "remove",         KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE },
-	{ "rename",         KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
-	{ "renameat",       KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "unlink",         KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE },
+	{ "unlinkat",       KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE },
+	{ "remove",         KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE },
+	{ "rename",         KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
+	{ "renameat",       KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE },
 	/* Making a dropped file runnable. */
-	{ "chmod",          KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE },
-	{ "fchmod",         KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE },
-	{ "fchmodat",       KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE },
-	{ "SetFileAttributesA", KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE },
-	{ "SetFileAttributesW", KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE },
+	{ "chmod",          KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE },
+	{ "fchmod",         KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE },
+	{ "fchmodat",       KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE },
+	{ "SetFileAttributesA", KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE },
+	{ "SetFileAttributesW", KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE },
 	/* Asking whether it is watched. */
-	{ "IsDebuggerPresent", KOF_CAP_ANTI_DEBUG, KOF_FLOW_ROLE_NONE },
-	{ "CheckRemoteDebuggerPresent", KOF_CAP_ANTI_DEBUG,
+	{ "IsDebuggerPresent", KOF_NUCLEO_ANTI_DEBUG, KOF_FLOW_ROLE_NONE },
+	{ "CheckRemoteDebuggerPresent", KOF_NUCLEO_ANTI_DEBUG,
 	  KOF_FLOW_ROLE_NONE },
-	{ "NtSetInformationThread", KOF_CAP_ANTI_DEBUG, KOF_FLOW_ROLE_NONE },
+	{ "NtSetInformationThread", KOF_NUCLEO_ANTI_DEBUG, KOF_FLOW_ROLE_NONE },
 	/* Moving the boundary of what it can see. */
-	{ "chroot",         KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE },
-	{ "pivot_root",     KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE },
-	{ "setns",          KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE },
-	{ "unshare",        KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE },
+	{ "chroot",         KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE },
+	{ "pivot_root",     KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE },
+	{ "setns",          KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE },
+	{ "unshare",        KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND WORDS FOR CAPABILITIES THAT ALREADY EXISTED, where only the
 	 * spelling was missing. Changing one's own privileges is CRED_SET
@@ -833,58 +833,58 @@ names[] = {
 	 * setuid; reaching into another process is PROC_MEM whether it is
 	 * WriteProcessMemory or process_vm_writev.
 	 */
-	{ "setuid",         KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "setgid",         KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "seteuid",        KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "setreuid",       KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "setresuid",      KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "AdjustTokenPrivileges", KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "OpenProcessToken",      KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "DuplicateTokenEx",      KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "ImpersonateLoggedOnUser", KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "SetThreadToken",        KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE },
-	{ "process_vm_readv",      KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "process_vm_writev",     KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE },
-	{ "posix_spawn",           KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "CreateProcessAsUserA",  KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "CreateProcessAsUserW",  KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "CreateProcessWithTokenW", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "CreateProcessWithLogonW", KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "ShellExecuteExA",       KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
-	{ "ShellExecuteExW",       KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "setuid",         KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "setgid",         KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "seteuid",        KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "setreuid",       KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "setresuid",      KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "AdjustTokenPrivileges", KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "OpenProcessToken",      KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "DuplicateTokenEx",      KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "ImpersonateLoggedOnUser", KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "SetThreadToken",        KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE },
+	{ "process_vm_readv",      KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "process_vm_writev",     KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE },
+	{ "posix_spawn",           KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "CreateProcessAsUserA",  KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "CreateProcessAsUserW",  KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "CreateProcessWithTokenW", KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "CreateProcessWithLogonW", KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "ShellExecuteExA",       KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
+	{ "ShellExecuteExW",       KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE },
 	/* The three measured ones. */
-	{ "dup2",           KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
-	{ "dup3",           KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE },
-	{ "utime",          KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE },
-	{ "utimes",         KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE },
-	{ "utimensat",      KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE },
-	{ "futimens",       KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE },
-	{ "SetFileTime",    KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE },
-	{ "CreateToolhelp32Snapshot", KOF_CAP_PROC_LIST,
+	{ "dup2",           KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE },
+	{ "dup3",           KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE },
+	{ "utime",          KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE },
+	{ "utimes",         KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE },
+	{ "utimensat",      KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE },
+	{ "futimens",       KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE },
+	{ "SetFileTime",    KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE },
+	{ "CreateToolhelp32Snapshot", KOF_NUCLEO_PROC_LIST,
 	  KOF_FLOW_ROLE_NONE },
-	{ "Process32First", KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Process32FirstW", KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Process32Next",  KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Process32NextW", KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Module32First",  KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Module32Next",   KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Thread32First",  KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "Thread32Next",   KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
-	{ "EnumProcesses",  KOF_CAP_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Process32First", KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Process32FirstW", KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Process32Next",  KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Process32NextW", KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Module32First",  KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Module32Next",   KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Thread32First",  KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "Thread32Next",   KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
+	{ "EnumProcesses",  KOF_NUCLEO_PROC_LIST, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE GAPS THE SAME MEASUREMENT FOUND IN WORDS THAT ALREADY
 	 * EXISTED - each one a spelling nobody had written down.
 	 */
-	{ "BCryptOpenAlgorithmProvider", KOF_CAP_CRYPTO,
+	{ "BCryptOpenAlgorithmProvider", KOF_NUCLEO_CRYPTO,
 	  KOF_FLOW_ROLE_NONE },
-	{ "RegDeleteKeyA",  KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegDeleteKeyW",  KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegDeleteKeyExA", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
-	{ "RegDeleteKeyExW", KOF_CAP_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegDeleteKeyA",  KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegDeleteKeyW",  KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegDeleteKeyExA", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
+	{ "RegDeleteKeyExW", KOF_NUCLEO_REG_SET, KOF_FLOW_ROLE_NONE },
 	/* An allocation, and incidentally one that fails in some sandboxes -
 	 * which is why a loader picks it. The capability is the allocation. */
-	{ "VirtualAllocExNuma", KOF_CAP_ALLOC, KOF_FLOW_ROLE_NONE },
-	{ "NtQueryInformationProcess", KOF_CAP_ANTI_DEBUG,
+	{ "VirtualAllocExNuma", KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_NONE },
+	{ "NtQueryInformationProcess", KOF_NUCLEO_ANTI_DEBUG,
 	  KOF_FLOW_ROLE_NONE }
 };
 
@@ -905,7 +905,7 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 		 * and without it the number says only "something network". */
 		if (nr == 102u) {
 			if (!arg)
-				return KOF_CAP_NONE;
+				return KOF_NUCLEO_NONE;
 			return kof_sys_look(kof_sockcall,
 				    kof_sockcall_n,
 				    (uint32_t)arg[0]);
@@ -922,20 +922,20 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 	 */
 	/* The same two refinements the sweep makes, from the arguments a run
 	 * recorded instead of from a constant map. One rule, two readers. */
-	if (arg && cap == KOF_CAP_SPAWN &&
+	if (arg && cap == KOF_NUCLEO_SPAWN &&
 	    (bits == 32 ? nr == 120u : nr == 56u))
-		return (arg[0] & FLOW_CLONE_THREAD) ? KOF_CAP_THREAD
-						    : KOF_CAP_SPAWN;
-	if (arg && cap == KOF_CAP_NET_OPEN && bits != 32 && nr == 41u) {
+		return (arg[0] & FLOW_CLONE_THREAD) ? KOF_NUCLEO_THREAD
+						    : KOF_NUCLEO_SPAWN;
+	if (arg && cap == KOF_NUCLEO_NET_OPEN && bits != 32 && nr == 41u) {
 		if ((arg[0] & 0xffu) == FLOW_AF_UNIX && flags)
 			*flags |= KOF_FLOWF_LOCAL;
 		if ((arg[1] & 0xfu) == FLOW_SOCK_RAW)
-			return KOF_CAP_NET_RAW;
+			return KOF_NUCLEO_NET_RAW;
 		if ((arg[1] & 0xfu) == FLOW_SOCK_DGRAM && flags)
 			*flags |= KOF_FLOWF_DGRAM;
-		return KOF_CAP_NET_OPEN;
+		return KOF_NUCLEO_NET_OPEN;
 	}
-	if (cap == KOF_CAP_ALLOC && arg) {
+	if (cap == KOF_NUCLEO_ALLOC && arg) {
 		int is_map = bits == 32 ? (nr == 90u || nr == 125u || nr == 192u)
 					: (nr == 9u || nr == 10u);
 
@@ -949,7 +949,7 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 			 */
 			if (flags && (arg[2] & 2u))    /* PROT_WRITE too */
 				*flags = KOF_FLOWF_WX;
-			return KOF_CAP_ALLOC_EXEC;
+			return KOF_NUCLEO_ALLOC_EXEC;
 		}
 	}
 	return cap;
@@ -966,7 +966,7 @@ uint16_t kof_flow_cap_of_name(const char *sym)
 	size_t i;
 
 	if (!sym || !*sym)
-		return KOF_CAP_NONE;
+		return KOF_NUCLEO_NONE;
 	/* An ELF import may carry a version suffix - "open64@@GLIBC_2.2.5" is
 	 * the same function as "open64", and the caller should not have to
 	 * know that this file cares. */
@@ -977,7 +977,7 @@ uint16_t kof_flow_cap_of_name(const char *sym)
 		if (!*a && (!*b || *b == '@'))
 			return names[i].cap;
 	}
-	return KOF_CAP_NONE;
+	return KOF_NUCLEO_NONE;
 }
 
 uint8_t kof_flow_role_of_name(const char *sym)
@@ -1042,24 +1042,24 @@ const char *kof_flow_name_of(uint16_t id)
 int kof_flow_cap_makes(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_ALLOC:        /* a mapping                        */
-	case KOF_CAP_ALLOC_EXEC:
-	case KOF_CAP_NET_OPEN:     /* a descriptor                     */
-	case KOF_CAP_NET_RAW:
-	case KOF_CAP_NET_ACCEPT:
-	case KOF_CAP_FILE_OPEN:
-	case KOF_CAP_MEMFD:
-	case KOF_CAP_PIPE_OPEN:
-	case KOF_CAP_PIPE:
-	case KOF_CAP_HEAP:        /* a buffer - see KOF_CAP_HEAP   */
-	case KOF_CAP_REG_OPEN:    /* a key handle                  */
-	case KOF_CAP_LIB_OPEN:     /* a module handle                  */
-	case KOF_CAP_RESOLVE:      /* an address - see lib-resolve     */
-	case KOF_CAP_PTRACE:       /* a handle on another process      */
-	case KOF_CAP_SELF_RESOLVE:
-	case KOF_CAP_PROC_LIST:    /* a snapshot handle to walk        */
-	case KOF_CAP_NET_ADDR:     /* an address built for a connect   */
-	case KOF_CAP_DNS:
+	case KOF_NUCLEO_ALLOC:        /* a mapping                        */
+	case KOF_NUCLEO_ALLOC_EXEC:
+	case KOF_NUCLEO_NET_OPEN:     /* a descriptor                     */
+	case KOF_NUCLEO_NET_RAW:
+	case KOF_NUCLEO_NET_ACCEPT:
+	case KOF_NUCLEO_FILE_OPEN:
+	case KOF_NUCLEO_MEMFD:
+	case KOF_NUCLEO_PIPE_OPEN:
+	case KOF_NUCLEO_PIPE:
+	case KOF_NUCLEO_HEAP:        /* a buffer - see KOF_NUCLEO_HEAP   */
+	case KOF_NUCLEO_REG_OPEN:    /* a key handle                  */
+	case KOF_NUCLEO_LIB_OPEN:     /* a module handle                  */
+	case KOF_NUCLEO_RESOLVE:      /* an address - see lib-resolve     */
+	case KOF_NUCLEO_PTRACE:       /* a handle on another process      */
+	case KOF_NUCLEO_SELF_RESOLVE:
+	case KOF_NUCLEO_PROC_LIST:    /* a snapshot handle to walk        */
+	case KOF_NUCLEO_NET_ADDR:     /* an address built for a connect   */
+	case KOF_NUCLEO_DNS:
 	/*
 	 * AND A TRANSFER MAKES THE BYTES IT WROTE.
 	 *
@@ -1072,8 +1072,8 @@ int kof_flow_cap_makes(uint16_t cap)
 	 * carried, and then dropped by the one pass that asks this
 	 * question. A stager is exactly that edge.
 	 */
-	case KOF_CAP_READ:
-	case KOF_CAP_NET_READ:
+	case KOF_NUCLEO_READ:
+	case KOF_NUCLEO_NET_READ:
 		return 1;
 	default:
 		return 0;
@@ -1115,11 +1115,11 @@ uint8_t kof_flow_text_arg(uint16_t cap, uint16_t name)
 	const char *nm = kof_flow_name_of(name);
 
 	switch (cap) {
-	case KOF_CAP_FILE_OPEN:
+	case KOF_NUCLEO_FILE_OPEN:
 		if (nm && (!strcmp(nm, "openat") || !strcmp(nm, "openat2")))
 			return 2u;
 		return 1u;
-	case KOF_CAP_EXEC_IMAGE:
+	case KOF_NUCLEO_EXEC_IMAGE:
 		return 1u;
 	default:
 		return 0u;
@@ -1144,9 +1144,9 @@ uint8_t kof_flow_text_arg(uint16_t cap, uint16_t name)
 uint8_t kof_flow_out_arg(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_PIPE_OPEN:  return 1u;   /* the pair of descriptors */
-	case KOF_CAP_READ:
-	case KOF_CAP_NET_READ:   return 2u;   /* the bytes */
+	case KOF_NUCLEO_PIPE_OPEN:  return 1u;   /* the pair of descriptors */
+	case KOF_NUCLEO_READ:
+	case KOF_NUCLEO_NET_READ:   return 2u;   /* the bytes */
 	default:                 return 0u;
 	}
 }
@@ -1154,17 +1154,17 @@ uint8_t kof_flow_out_arg(uint16_t cap)
 const char *kof_flow_cap_noun(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_ALLOC:        return "mem";
-	case KOF_CAP_ALLOC_EXEC:   return "mem_x";
-	case KOF_CAP_NET_OPEN:     return "sock";
-	case KOF_CAP_NET_RAW:      return "sock_raw";
-	case KOF_CAP_NET_ACCEPT:   return "conn";
-	case KOF_CAP_FILE_OPEN:    return "file";
-	case KOF_CAP_MEMFD:        return "memfd";
-	case KOF_CAP_PIPE:         return "pipe";
-	case KOF_CAP_PIPE_OPEN:    return "pipe";
-	case KOF_CAP_HEAP:         return "buf";
-	case KOF_CAP_REG_OPEN:     return "key";
+	case KOF_NUCLEO_ALLOC:        return "mem";
+	case KOF_NUCLEO_ALLOC_EXEC:   return "mem_x";
+	case KOF_NUCLEO_NET_OPEN:     return "sock";
+	case KOF_NUCLEO_NET_RAW:      return "sock_raw";
+	case KOF_NUCLEO_NET_ACCEPT:   return "conn";
+	case KOF_NUCLEO_FILE_OPEN:    return "file";
+	case KOF_NUCLEO_MEMFD:        return "memfd";
+	case KOF_NUCLEO_PIPE:         return "pipe";
+	case KOF_NUCLEO_PIPE_OPEN:    return "pipe";
+	case KOF_NUCLEO_HEAP:         return "buf";
+	case KOF_NUCLEO_REG_OPEN:     return "key";
 	/*
 	 * AND A TRANSFER MAKES BYTES, which this table said it did not.
 	 *
@@ -1174,21 +1174,21 @@ const char *kof_flow_cap_noun(uint16_t cap)
 	 * produced. Checked by walking both tables over every word, which
 	 * found these two and nothing else.
 	 */
-	case KOF_CAP_READ:
-	case KOF_CAP_NET_READ:     return "bytes";
-	case KOF_CAP_LIB_OPEN:     return "lib";
-	case KOF_CAP_RESOLVE:      return "sym";
-	case KOF_CAP_SELF_RESOLVE: return "sym";
-	case KOF_CAP_PTRACE:       return "proc";
-	case KOF_CAP_PROC_LIST:    return "snap";
-	case KOF_CAP_NET_ADDR:     return "addr";
-	case KOF_CAP_DNS:          return "addr";
+	case KOF_NUCLEO_READ:
+	case KOF_NUCLEO_NET_READ:     return "bytes";
+	case KOF_NUCLEO_LIB_OPEN:     return "lib";
+	case KOF_NUCLEO_RESOLVE:      return "sym";
+	case KOF_NUCLEO_SELF_RESOLVE: return "sym";
+	case KOF_NUCLEO_PTRACE:       return "proc";
+	case KOF_NUCLEO_PROC_LIST:    return "snap";
+	case KOF_NUCLEO_NET_ADDR:     return "addr";
+	case KOF_NUCLEO_DNS:          return "addr";
 	default:                   return NULL;
 	}
 }
 
 /*
- * THE WORD THIS ONE IS A SPECIAL CASE OF, or KOF_CAP_NONE.
+ * THE WORD THIS ONE IS A SPECIAL CASE OF, or KOF_NUCLEO_NONE.
  *
  * WHY A VOCABULARY NEEDS THIS AT ALL. Some capabilities are the same act
  * with a fact added:
@@ -1218,29 +1218,29 @@ const char *kof_flow_cap_noun(uint16_t cap)
 uint16_t kof_flow_cap_generic(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_NET_READ:
-	case KOF_CAP_READ:         return KOF_CAP_MEM_READ;
-	case KOF_CAP_NET_WRITE:
-	case KOF_CAP_WRITE:        return KOF_CAP_MEM_WRITE;
-	case KOF_CAP_ALLOC_EXEC:   return KOF_CAP_ALLOC;
-	default:                   return KOF_CAP_NONE;
+	case KOF_NUCLEO_NET_READ:
+	case KOF_NUCLEO_READ:         return KOF_NUCLEO_MEM_READ;
+	case KOF_NUCLEO_NET_WRITE:
+	case KOF_NUCLEO_WRITE:        return KOF_NUCLEO_MEM_WRITE;
+	case KOF_NUCLEO_ALLOC_EXEC:   return KOF_NUCLEO_ALLOC;
+	default:                   return KOF_NUCLEO_NONE;
 	}
 }
 
 const char *kof_flow_cap_name(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_ALLOC:        return "mem-alloc";
-	case KOF_CAP_ALLOC_EXEC:   return "mem-alloc-exec";
-	case KOF_CAP_HEAP:         return "mem-alloc-heap";
-	case KOF_CAP_FIELD_READ:   return "mem-field-read";
-	case KOF_CAP_FIELD_WRITE:  return "mem-field-write";
-	case KOF_CAP_REG_OPEN:     return "reg-open";
+	case KOF_NUCLEO_ALLOC:        return "mem-alloc";
+	case KOF_NUCLEO_ALLOC_EXEC:   return "mem-alloc-exec";
+	case KOF_NUCLEO_HEAP:         return "mem-alloc-heap";
+	case KOF_NUCLEO_FIELD_READ:   return "mem-field-read";
+	case KOF_NUCLEO_FIELD_WRITE:  return "mem-field-write";
+	case KOF_NUCLEO_REG_OPEN:     return "reg-open";
 	/* "exec-memory" and not "exec-register": the register is how the
 	 * branch was spelled, the memory is what was entered. */
-	case KOF_CAP_EXEC_REG:     return "exec-memory";
-	case KOF_CAP_SELF_RESOLVE: return "lib-peb-walk";
-	case KOF_CAP_NAME_HASH:    return "lib-name-hash";
+	case KOF_NUCLEO_EXEC_REG:     return "exec-memory";
+	case KOF_NUCLEO_SELF_RESOLVE: return "lib-peb-walk";
+	case KOF_NUCLEO_NAME_HASH:    return "lib-name-hash";
 	/*
 	 * "lib-call-indirect", AND IT USED TO BE "call-register".
 	 *
@@ -1257,65 +1257,65 @@ const char *kof_flow_cap_name(uint16_t cap)
 	 * that is the whole difficulty - see the note on retpoline thunks in
 	 * the table above.
 	 */
-	case KOF_CAP_CALL_REG:     return "lib-call-indirect";
-	case KOF_CAP_CRYPTO:       return "crypto";
-	case KOF_CAP_CAPTURE:      return "input-capture";
-	case KOF_CAP_SVC_INSTALL:  return "service-install";
-	case KOF_CAP_MOD_LOAD:     return "kmodule-load";
-	case KOF_CAP_PIPE:         return "pipe-named-create";
-	case KOF_CAP_PIPE_OPEN:    return "pipe-create";
-	case KOF_CAP_FILE_DELETE:  return "file-delete";
-	case KOF_CAP_FILE_RENAME:  return "file-rename";
-	case KOF_CAP_PERM_SET:     return "file-perm-set";
-	case KOF_CAP_ANTI_DEBUG:   return "anti-debug";
-	case KOF_CAP_JAIL:         return "namespace-change";
-	case KOF_CAP_FD_REDIR:     return "fd-redirect";
-	case KOF_CAP_TIMESTOMP:    return "file-timestamp-set";
-	case KOF_CAP_PROC_LIST:    return "proc-enum";
-	case KOF_CAP_NET_READ:     return "net-recv";
-	case KOF_CAP_NET_WRITE:    return "net-send";
-	case KOF_CAP_HTTP_OPEN:    return "http-open";
-	case KOF_CAP_HTTP_CONNECT: return "http-connect";
-	case KOF_CAP_HTTP_SEND:    return "http-send";
-	case KOF_CAP_HTTP_RECV:    return "http-recv";
-	case KOF_CAP_HTTP_FETCH:   return "http-fetch";
-	case KOF_CAP_NET_OPEN:     return "net-open";
-	case KOF_CAP_NET_CONNECT:  return "net-connect";
-	case KOF_CAP_NET_ACCEPT:   return "net-accept";
-	case KOF_CAP_NET_BIND:     return "net-bind";
-	case KOF_CAP_NET_LISTEN:   return "net-listen";
-	case KOF_CAP_MEM_READ:      return "mem-read";
-	case KOF_CAP_MEM_WRITE:     return "mem-write";
-	case KOF_CAP_READ:         return "file-read";
-	case KOF_CAP_WRITE:        return "file-write";
-	case KOF_CAP_FILE_OPEN:    return "file-open";
-	case KOF_CAP_MEMFD:        return "memfd-create";
-	case KOF_CAP_EXEC_IMAGE:   return "proc-start";
-	case KOF_CAP_SPAWN:        return "proc-fork";
-	case KOF_CAP_THREAD:       return "thread-create";
-	case KOF_CAP_NET_RAW:      return "net-raw";
-	case KOF_CAP_SLEEP:        return "sleep";
-	case KOF_CAP_PTRACE:       return "proc-open";
-	case KOF_CAP_PROC_MEM:     return "proc-mem-access";
-	case KOF_CAP_PROC_EXEC:    return "proc-control";
-	case KOF_CAP_RESOLVE:      return "lib-api-resolve";
-	case KOF_CAP_LIB_OPEN:     return "lib-load";
-	case KOF_CAP_DNS:          return "net-getaddr";
-	case KOF_CAP_REG_SET:      return "reg-set";
-	case KOF_CAP_CRED_SET:     return "cred-modify";
-	case KOF_CAP_HOOK:         return "kmodule-hook";
-	case KOF_CAP_KPROBE_REG:   return "kmodule-kprobe-register";
-	case KOF_CAP_KPROBE_UNREG: return "kmodule-kprobe-unregister";
-	case KOF_CAP_COPY_FROM_USER: return "kmodule-copy-from-user";
-	case KOF_CAP_COPY_TO_USER: return "kmodule-copy-to-user";
-	case KOF_CAP_KSYM_LOOKUP:  return "kmodule-ksym-lookup";
-	case KOF_CAP_SYMBOL_GET:   return "kmodule-symbol-get";
-	case KOF_CAP_CRED_PREPARE: return "cred-prepare";
-	case KOF_CAP_LIST_HIDE:    return "kmodule-list-edit";
-	case KOF_CAP_PROT_OFF:     return "kmodule-cr-write";
-	case KOF_CAP_NET_ADDR:     return "net-addr";
-	case KOF_CAP_SELF_HIDE:    return "self-hide";
-	case KOF_CAP_BACKGROUND:   return "proc-background";
+	case KOF_NUCLEO_CALL_REG:     return "lib-call-indirect";
+	case KOF_NUCLEO_CRYPTO:       return "crypto";
+	case KOF_NUCLEO_CAPTURE:      return "input-capture";
+	case KOF_NUCLEO_SVC_INSTALL:  return "service-install";
+	case KOF_NUCLEO_MOD_LOAD:     return "kmodule-load";
+	case KOF_NUCLEO_PIPE:         return "pipe-named-create";
+	case KOF_NUCLEO_PIPE_OPEN:    return "pipe-create";
+	case KOF_NUCLEO_FILE_DELETE:  return "file-delete";
+	case KOF_NUCLEO_FILE_RENAME:  return "file-rename";
+	case KOF_NUCLEO_PERM_SET:     return "file-perm-set";
+	case KOF_NUCLEO_ANTI_DEBUG:   return "anti-debug";
+	case KOF_NUCLEO_JAIL:         return "namespace-change";
+	case KOF_NUCLEO_FD_REDIR:     return "fd-redirect";
+	case KOF_NUCLEO_TIMESTOMP:    return "file-timestamp-set";
+	case KOF_NUCLEO_PROC_LIST:    return "proc-enum";
+	case KOF_NUCLEO_NET_READ:     return "net-recv";
+	case KOF_NUCLEO_NET_WRITE:    return "net-send";
+	case KOF_NUCLEO_HTTP_OPEN:    return "http-open";
+	case KOF_NUCLEO_HTTP_CONNECT: return "http-connect";
+	case KOF_NUCLEO_HTTP_SEND:    return "http-send";
+	case KOF_NUCLEO_HTTP_RECV:    return "http-recv";
+	case KOF_NUCLEO_HTTP_FETCH:   return "http-fetch";
+	case KOF_NUCLEO_NET_OPEN:     return "net-open";
+	case KOF_NUCLEO_NET_CONNECT:  return "net-connect";
+	case KOF_NUCLEO_NET_ACCEPT:   return "net-accept";
+	case KOF_NUCLEO_NET_BIND:     return "net-bind";
+	case KOF_NUCLEO_NET_LISTEN:   return "net-listen";
+	case KOF_NUCLEO_MEM_READ:      return "mem-read";
+	case KOF_NUCLEO_MEM_WRITE:     return "mem-write";
+	case KOF_NUCLEO_READ:         return "file-read";
+	case KOF_NUCLEO_WRITE:        return "file-write";
+	case KOF_NUCLEO_FILE_OPEN:    return "file-open";
+	case KOF_NUCLEO_MEMFD:        return "memfd-create";
+	case KOF_NUCLEO_EXEC_IMAGE:   return "proc-start";
+	case KOF_NUCLEO_SPAWN:        return "proc-fork";
+	case KOF_NUCLEO_THREAD:       return "thread-create";
+	case KOF_NUCLEO_NET_RAW:      return "net-raw";
+	case KOF_NUCLEO_SLEEP:        return "sleep";
+	case KOF_NUCLEO_PTRACE:       return "proc-open";
+	case KOF_NUCLEO_PROC_MEM:     return "proc-mem-access";
+	case KOF_NUCLEO_PROC_EXEC:    return "proc-control";
+	case KOF_NUCLEO_RESOLVE:      return "lib-api-resolve";
+	case KOF_NUCLEO_LIB_OPEN:     return "lib-load";
+	case KOF_NUCLEO_DNS:          return "net-getaddr";
+	case KOF_NUCLEO_REG_SET:      return "reg-set";
+	case KOF_NUCLEO_CRED_SET:     return "cred-modify";
+	case KOF_NUCLEO_HOOK:         return "kmodule-hook";
+	case KOF_NUCLEO_KPROBE_REG:   return "kmodule-kprobe-register";
+	case KOF_NUCLEO_KPROBE_UNREG: return "kmodule-kprobe-unregister";
+	case KOF_NUCLEO_COPY_FROM_USER: return "kmodule-copy-from-user";
+	case KOF_NUCLEO_COPY_TO_USER: return "kmodule-copy-to-user";
+	case KOF_NUCLEO_KSYM_LOOKUP:  return "kmodule-ksym-lookup";
+	case KOF_NUCLEO_SYMBOL_GET:   return "kmodule-symbol-get";
+	case KOF_NUCLEO_CRED_PREPARE: return "cred-prepare";
+	case KOF_NUCLEO_LIST_HIDE:    return "kmodule-list-edit";
+	case KOF_NUCLEO_PROT_OFF:     return "kmodule-cr-write";
+	case KOF_NUCLEO_NET_ADDR:     return "net-addr";
+	case KOF_NUCLEO_SELF_HIDE:    return "self-hide";
+	case KOF_NUCLEO_BACKGROUND:   return "proc-background";
 	default:                   return "?";
 	}
 }
@@ -1327,23 +1327,23 @@ const char *kof_flow_cap_name(uint16_t cap)
  * /usr/include/asm-generic/unistd.h; mmap is __NR3264_mmap, which is 222.
  */
 const struct sysrow kof_sys_a64[] = {
-	{   56, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{   63, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{   64, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
-	{ 101, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
-	{ 117, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{ 198, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 200, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 201, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
-	{ 202, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 203, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 206, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{ 207, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{ 220, KOF_CAP_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
-	{ 221, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{ 222, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see fixed_prot */
-	{ 226, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
-	{ 279, KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  }
+	{   56, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
+	{   63, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{   64, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{ 101, KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
+	{ 117, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{ 198, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{ 200, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 201, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 202, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{ 203, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{ 206, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{ 207, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
+	{ 220, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
+	{ 221, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{ 222, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see fixed_prot */
+	{ 226, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
+	{ 279, KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  }
 };
 
 /*
@@ -1359,28 +1359,28 @@ const struct sysrow kof_sys_a64[] = {
  * had any of these wrong would not produce counts that track each other.
  */
 const struct sysrow kof_sys_arm[] = {
-	{     2, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{     3, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     4, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
-	{     5, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
-	{   11, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{   26, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{ 120, KOF_CAP_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
-	{ 125, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
-	{ 162, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
-	{ 190, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "vfork"  },
-	{ 192, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap2"  },
-	{ 281, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 282, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 283, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 284, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
-	{ 285, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 289, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
-	{ 290, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{ 291, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
-	{ 292, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{ 322, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{ 385, KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  }
+	{     2, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
+	{     3, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     4, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     5, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
+	{   11, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{   26, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{ 120, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
+	{ 125, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
+	{ 162, KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
+	{ 190, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "vfork"  },
+	{ 192, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap2"  },
+	{ 281, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{ 282, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 283, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{ 284, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 285, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{ 289, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
+	{ 290, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{ 291, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
+	{ 292, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
+	{ 322, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
+	{ 385, KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  }
 };
 
 /*
@@ -1393,27 +1393,27 @@ const struct sysrow kof_sys_arm[] = {
  * it is not a profile a mis-numbered table produces.
  */
 const struct sysrow kof_sys_mips[] = {
-	{ 4002, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{ 4003, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{ 4004, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
-	{ 4005, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
-	{ 4011, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{ 4026, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{ 4090, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
-	{ 4120, KOF_CAP_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
-	{ 4125, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
-	{ 4166, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
-	{ 4168, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 4169, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 4170, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 4174, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
-	{ 4175, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
-	{ 4176, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{ 4178, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
-	{ 4180, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{ 4183, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 4288, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{ 4354, KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  }
+	{ 4002, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
+	{ 4003, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{ 4004, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{ 4005, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
+	{ 4011, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{ 4026, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{ 4090, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
+	{ 4120, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
+	{ 4125, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
+	{ 4166, KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
+	{ 4168, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{ 4169, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 4170, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{ 4174, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 4175, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
+	{ 4176, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
+	{ 4178, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
+	{ 4180, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{ 4183, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{ 4288, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
+	{ 4354, KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  }
 };
 
 /*
@@ -1432,15 +1432,15 @@ const struct sysrow kof_sys_mips[] = {
  * corpus contains both.
  */
 const struct sysrow kof_sys_ppc[] = {
-	{ 326, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 327, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 328, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 329, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
-	{ 330, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 334, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
-	{ 335, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{ 336, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
-	{ 337, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  }
+	{ 326, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{ 327, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 328, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{ 329, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 330, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{ 334, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "send"  },
+	{ 335, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{ 336, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recv"  },
+	{ 337, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  }
 };
 
 /*
@@ -1452,23 +1452,23 @@ const struct sysrow kof_sys_ppc[] = {
  * evidence, because a mis-numbered table does not produce counts that track.
  */
 const struct sysrow kof_sys_sparc[] = {
-	{     1, KOF_CAP_NONE, KOF_FLOW_ROLE_NONE, "exit"  },
-	{     2, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{     3, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{     4, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
-	{     5, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
-	{   26, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{   59, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{   71, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
-	{   74, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
-	{ 206, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 207, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 232, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{ 233, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{ 234, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 235, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 240, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
-	{ 284, KOF_CAP_THREAD, KOF_FLOW_ROLE_NONE, "clone"  }
+	{     1, KOF_NUCLEO_NONE, KOF_FLOW_ROLE_NONE, "exit"  },
+	{     2, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
+	{     3, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{     4, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{     5, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
+	{   26, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{   59, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{   71, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
+	{   74, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
+	{ 206, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{ 207, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{ 232, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{ 233, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
+	{ 234, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 235, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{ 240, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 284, KOF_NUCLEO_THREAD, KOF_FLOW_ROLE_NONE, "clone"  }
 };
 
 
@@ -1487,57 +1487,57 @@ const struct sysrow kof_sys_sparc[] = {
  * would be confidently wrong.
  */
 const struct sysrow kof_sys_mips64[] = {
-	{ 5000, KOF_CAP_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
-	{ 5001, KOF_CAP_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
-	{ 5002, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
-	{ 5247, KOF_CAP_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
-	{ 5009, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
-	{ 5010, KOF_CAP_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
-	{ 5055, KOF_CAP_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
-	{ 5056, KOF_CAP_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
-	{ 5057, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
-	{ 5316, KOF_CAP_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execveat"  },
-	{ 5040, KOF_CAP_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
-	{ 5041, KOF_CAP_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
-	{ 5042, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
-	{ 5293, KOF_CAP_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept4"  },
-	{ 5048, KOF_CAP_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
-	{ 5049, KOF_CAP_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
-	{ 5043, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
-	{ 5044, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
-	{ 5045, KOF_CAP_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendmsg"  },
-	{ 5046, KOF_CAP_NET_READ, KOF_FLOW_ROLE_NONE, "recvmsg"  },
-	{ 5034, KOF_CAP_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
-	{ 5099, KOF_CAP_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
-	{ 5314, KOF_CAP_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  },
-	{ 5085, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
-	{ 5253, KOF_CAP_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
-	{ 5080, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
-	{ 5254, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
-	{ 5311, KOF_CAP_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
-	{ 5088, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
-	{ 5089, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
-	{ 5258, KOF_CAP_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
-	{ 5103, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setuid"  },
-	{ 5104, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setgid"  },
-	{ 5111, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setreuid"  },
-	{ 5115, KOF_CAP_CRED_SET, KOF_FLOW_ROLE_NONE, "setresuid"  },
-	{ 5304, KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_readv"  },
-	{ 5305, KOF_CAP_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_writev"  },
-	{ 5168, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "init_module"  },
-	{ 5169, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "delete_module"  },
-	{ 5307, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "finit_module"  },
-	{ 5315, KOF_CAP_MOD_LOAD, KOF_FLOW_ROLE_NONE, "bpf"  },
-	{ 5156, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "chroot"  },
-	{ 5151, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "pivot_root"  },
-	{ 5303, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "setns"  },
-	{ 5262, KOF_CAP_JAIL, KOF_FLOW_ROLE_NONE, "unshare"  },
-	{ 5032, KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup2"  },
-	{ 5286, KOF_CAP_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup3"  },
-	{ 5130, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utime"  },
-	{ 5226, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimes"  },
-	{ 5251, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "futimesat"  },
-	{ 5275, KOF_CAP_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimensat"  }
+	{ 5000, KOF_NUCLEO_MEM_READ, KOF_FLOW_ROLE_NONE, "read"  },
+	{ 5001, KOF_NUCLEO_MEM_WRITE, KOF_FLOW_ROLE_NONE, "write"  },
+	{ 5002, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "open"  },
+	{ 5247, KOF_NUCLEO_FILE_OPEN, KOF_FLOW_ROLE_NONE, "openat"  },
+	{ 5009, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mmap"  },
+	{ 5010, KOF_NUCLEO_ALLOC, KOF_FLOW_ROLE_MMAP, "mprotect"  },
+	{ 5055, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_CLONE, "clone"  },
+	{ 5056, KOF_NUCLEO_SPAWN, KOF_FLOW_ROLE_NONE, "fork"  },
+	{ 5057, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execve"  },
+	{ 5316, KOF_NUCLEO_EXEC_IMAGE, KOF_FLOW_ROLE_NONE, "execveat"  },
+	{ 5040, KOF_NUCLEO_NET_OPEN, KOF_FLOW_ROLE_SOCK, "socket"  },
+	{ 5041, KOF_NUCLEO_NET_CONNECT, KOF_FLOW_ROLE_NONE, "connect"  },
+	{ 5042, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept"  },
+	{ 5293, KOF_NUCLEO_NET_ACCEPT, KOF_FLOW_ROLE_NONE, "accept4"  },
+	{ 5048, KOF_NUCLEO_NET_BIND, KOF_FLOW_ROLE_NONE, "bind"  },
+	{ 5049, KOF_NUCLEO_NET_LISTEN, KOF_FLOW_ROLE_NONE, "listen"  },
+	{ 5043, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendto"  },
+	{ 5044, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvfrom"  },
+	{ 5045, KOF_NUCLEO_NET_WRITE, KOF_FLOW_ROLE_NONE, "sendmsg"  },
+	{ 5046, KOF_NUCLEO_NET_READ, KOF_FLOW_ROLE_NONE, "recvmsg"  },
+	{ 5034, KOF_NUCLEO_SLEEP, KOF_FLOW_ROLE_NONE, "nanosleep"  },
+	{ 5099, KOF_NUCLEO_PTRACE, KOF_FLOW_ROLE_NONE, "ptrace"  },
+	{ 5314, KOF_NUCLEO_MEMFD, KOF_FLOW_ROLE_NONE, "memfd_create"  },
+	{ 5085, KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlink"  },
+	{ 5253, KOF_NUCLEO_FILE_DELETE, KOF_FLOW_ROLE_NONE, "unlinkat"  },
+	{ 5080, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "rename"  },
+	{ 5254, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat"  },
+	{ 5311, KOF_NUCLEO_FILE_RENAME, KOF_FLOW_ROLE_NONE, "renameat2"  },
+	{ 5088, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "chmod"  },
+	{ 5089, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmod"  },
+	{ 5258, KOF_NUCLEO_PERM_SET, KOF_FLOW_ROLE_NONE, "fchmodat"  },
+	{ 5103, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setuid"  },
+	{ 5104, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setgid"  },
+	{ 5111, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setreuid"  },
+	{ 5115, KOF_NUCLEO_CRED_SET, KOF_FLOW_ROLE_NONE, "setresuid"  },
+	{ 5304, KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_readv"  },
+	{ 5305, KOF_NUCLEO_PROC_MEM, KOF_FLOW_ROLE_NONE, "process_vm_writev"  },
+	{ 5168, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "init_module"  },
+	{ 5169, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "delete_module"  },
+	{ 5307, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "finit_module"  },
+	{ 5315, KOF_NUCLEO_MOD_LOAD, KOF_FLOW_ROLE_NONE, "bpf"  },
+	{ 5156, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "chroot"  },
+	{ 5151, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "pivot_root"  },
+	{ 5303, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "setns"  },
+	{ 5262, KOF_NUCLEO_JAIL, KOF_FLOW_ROLE_NONE, "unshare"  },
+	{ 5032, KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup2"  },
+	{ 5286, KOF_NUCLEO_FD_REDIR, KOF_FLOW_ROLE_NONE, "dup3"  },
+	{ 5130, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utime"  },
+	{ 5226, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimes"  },
+	{ 5251, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "futimesat"  },
+	{ 5275, KOF_NUCLEO_TIMESTOMP, KOF_FLOW_ROLE_NONE, "utimensat"  }
 };
 
 /* `v` against a table of single bits, joined with '|'. Returns how much was

@@ -140,6 +140,7 @@ void kof_scan_free(struct kof_scanner *sc)
 		kof_diag_scan_free(sc->diag_graph);
 		sc->diag_graph = NULL;
 	}
+	free(sc->gr);
 	free(sc->live);
 	free(sc->found);
 	free(sc->mask_ok);
@@ -1054,7 +1055,19 @@ static void verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx,
 		 * build tool refuses KOF_TARGET_NAME on a rule, because a
 		 * shape many programs share cannot name one program.
 		 */
-		f->engine = (uint8_t)KOF_ENGINE_ANALYZER;
+		/*
+		 * THE PARSE, UNLESS IT READ THE GRAPH. A rule that reached
+		 * its conclusion through kof_diag did not reach it through
+		 * the parse, and the method word is the one field that says
+		 * which - same test as the detector path below, same scope.
+		 */
+		{
+			const struct kof_scanner *sc = kof_scan_of(ctx);
+
+			f->engine = (uint8_t)(sc && sc->diag_read
+					      ? KOF_ENGINE_PATHOGEN
+					      : KOF_ENGINE_ANALYZER);
+		}
 		if (KOF_ENG_CLASS_OF(m->heur_want)) {
 			f->type = (uint8_t)(KOF_ENG_CLASS_OF(m->heur_want)
 					    - 1u);
@@ -1169,6 +1182,20 @@ static void finding_str(const struct kof_scanner *sc,
 		verdict_vals(f, ctx, m, KOF_ENGINE_OVERLORD);
 		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
 				 variant, shape);
+		return;
+	}
+	/*
+	 * AND A FINDING THAT CAME OFF THE NODE GRAPH SAYS SO.
+	 *
+	 * Same test as the two measures above: asked, answered, and no
+	 * pattern of its own matched. A rule that matched bytes AND read the
+	 * graph is a pattern finding - the bytes are what reached it, and
+	 * naming the expensive half would send a reader to the wrong place.
+	 */
+	if (sc->diag_read && !sc->str_hit) {
+		verdict_vals(f, ctx, m, KOF_ENGINE_PATHOGEN);
+		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
+				 variant, NULL);
 		return;
 	}
 	verdict_vals(f, ctx, m, KOF_ENGINE_PATTERN);
@@ -2625,6 +2652,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->plague_tot = 0;
 		sc->plague_best = 0;
 		sc->str_hit = 0;
+		sc->diag_read = 0;
 		sc->cur_mod   = m;
 		KOF_TIME_BEGIN(KOF_T_HEUR);
 		m->fn(ctx);
@@ -4412,6 +4440,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		sc->plague_tot = 0;
 		sc->plague_best = 0;
 		sc->str_hit = 0;
+		sc->diag_read = 0;
 		sc->cur_mod   = m;
 		sc->cure_have = 0;
 		sc->cure_at   = 0;
@@ -4533,6 +4562,30 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 */
 	sc->diag_ask |= (want & KOF_ENG_USE_PATHOGEN) != 0;
 	/*
+	 * ---- AND A DIAGNOSE'S OWN DECLARATION IS AN ASK -------------------
+	 *
+	 * A diagnose states which files it is worth running on; this is where
+	 * the engine reads that and routes. Two things follow from a match and
+	 * both are the same decision:
+	 *
+	 *   the analysis runs on this object, and
+	 *   the object is INTERPRETED, because the shape that qualifies a
+	 *   msfvenom payload also says the payload is probably encrypted -
+	 *   six of the seven samples here are - and the walk over a ciphertext
+	 *   finds nothing. Measured: without it, x86_alpha_upper's decoded
+	 *   child is never produced and the one detection on that file goes.
+	 *
+	 * THIS REPLACED A HEURISTIC RULE that carried the shape test and asked
+	 * on the diagnose's behalf. It had to publish a verdict to be allowed
+	 * to ask - 12 Heur lines across the msfvenom corpus saying only that
+	 * the engine had decided to look - and the test lived in a different
+	 * module from the declaration it was gating.
+	 */
+	if (kof_scan_diag_sign_asks(&ctx)) {
+		sc->diag_ask = 1;
+		want |= KOF_ENG_USE_EMU;
+	}
+	/*
 	 * A rule's own guess wins; the inherited one is the fallback.
 	 *
 	 * A heuristic firing on THIS object knows more about it than its parent
@@ -4567,6 +4620,46 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		out->broken = sc->broken;
 
 	/* VERDICT: how it was reached, which only exists once it has been. */
+	/*
+	 * ---- AND THE PATHOGEN ANALYSIS RUNS, IF ANYTHING ASKED -----------
+	 *
+	 * ONE ASKER, AND IT IS THE DATABASE. A diagnose declares the symbols
+	 * or the file attributes that make an object worth the walk and the
+	 * EXAMINE pass sets sc->diag_ask from that; a rule reaching for a
+	 * diagnose or the graph sets it too, at the moment it asks.
+	 *
+	 * There was a second asker - a caller's want_diag, which turned the
+	 * analysis on for every object so a tool could list what it found.
+	 * It is gone with the listing: a switch that makes the engine do its
+	 * most expensive work on files nothing recognised is not a reporting
+	 * mode, it is the gate turned off.
+	 *
+	 * WHY IT IS RUN HERE RATHER THAN WAITED FOR. The analysis used to
+	 * happen only when a signature asked a question that needed it, which
+	 * means an object nobody questioned was never analysed at all - and
+	 * the findings are wanted by the verdict layer, which has not been
+	 * written yet and so asks nothing. A rule's ask is the decision; this
+	 * is where the decision is acted on.
+	 *
+	 * The latch inside makes it once per object however many times it is
+	 * reached, and an object nobody asked about still does no work.
+	 *
+	 * BETWEEN THE TWO HEURISTIC PHASES, which is the only place it can
+	 * be. EXAMINE is where a rule ASKS; VERDICT is where a rule reads
+	 * what the analysis found and concludes. Run after VERDICT - which
+	 * is where it was - the graph existed only once nothing was left to
+	 * read it, and a rule asking kof_diag_graph() got nothing at all.
+	 *
+	 * A SIGNATURE DOES NOT HAVE TO WAIT FOR THIS. It runs before this
+	 * point, and reaching for a diagnose or the graph runs the analysis
+	 * there and then - see diag_ready. This is for the object whose
+	 * analysis was asked for by a DECLARATION rather than by a question:
+	 * nothing would otherwise read it until the VERDICT phase, and a
+	 * rule there would find a graph that had never been built.
+	 */
+	if (sc->diag_ask)
+		kof_scan_diag_force(&ctx);
+
 	(void)heur_run(sc, &ctx, opt, out, KOF_HEUR_VERDICT, present, NULL);
 
 	/*
@@ -4692,49 +4785,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		heur_object(sc, &ctx, opt, pdepth,
 			    out->broken == KOF_BROKEN_DAMAGED, out);
 
-	/*
-	 * AND WHAT THIS OBJECT'S CODE DOES, out to the caller.
-	 *
-	 * ONLY WHAT WAS ALREADY WORKED OUT. The walk behind this is demand
-	 * driven - a rule naming a diagnose pays for it and nothing else
-	 * does - so publishing here costs a copy of a bitmap and never a
-	 * decode. An object no rule asked about reports none, which is not
-	 * the same as carrying none and is why `diag_ready` is read rather
-	 * than forced.
-	 *
-	 * HERE AND NOT IN THE TOOL, because a tool that worked this out for
-	 * itself would be the viewer's own sweep again - one question with
-	 * two answers, and the second one wrong on every architecture the
-	 * copy had not learned.
-	 */
-	/*
-	 * ---- AND THE PATHOGEN ANALYSIS RUNS, IF ANYTHING ASKED -----------
-	 *
-	 * Two askers and they are the same ask. A tool reporting rather than
-	 * scanning says so through want_diag; a rule that recognised the
-	 * object says so through KOF_ENG_USE_PATHOGEN, and sc->diag_ask
-	 * carries that from this object's EXAMINE pass.
-	 *
-	 * WHY IT IS RUN HERE RATHER THAN WAITED FOR. The analysis used to
-	 * happen only when a signature asked a question that needed it, which
-	 * means an object nobody questioned was never analysed at all - and
-	 * the findings are wanted by the verdict layer, which has not been
-	 * written yet and so asks nothing. A rule's ask is the decision; this
-	 * is where the decision is acted on.
-	 *
-	 * The latch inside makes it once per object however many times it is
-	 * reached, and an object nobody asked about still does no work.
-	 */
-	if ((opt && opt->want_diag) || sc->diag_ask)
-		kof_scan_diag_force(&ctx);
-	if (sc->diag_ready && sc->eng && out) {
-		uint32_t q;
-
-		for (q = 0; q < sc->eng->n_diag &&
-			    out->n_diag < KOF_MAX_DIAG_HIT; q++)
-			if (sc->diag_hit[q >> 3] & (1u << (q & 7u)))
-				out->diag[out->n_diag++] = (uint16_t)(q + 1u);
-	}
 }
 
 /*

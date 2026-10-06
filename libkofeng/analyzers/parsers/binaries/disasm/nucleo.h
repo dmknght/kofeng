@@ -233,11 +233,11 @@ uint8_t     kof_sys_look_role(const struct sysrow *t, uint32_t n, uint32_t nr);
 uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 				 const uint64_t *arg, uint8_t *flags);
 
-/* Imported or exported name -> capability, and KOF_CAP_NONE when the name is
+/* Imported or exported name -> capability, and KOF_NUCLEO_NONE when the name is
  * not one of the words. An `@` ends the comparison, so "socket@GLIBC_2.4"
  * reads as "socket". */
 uint16_t kof_flow_cap_of_name(const char *sym);
-/* The capability this one is a special case of, or KOF_CAP_NONE. See the
+/* The capability this one is a special case of, or KOF_NUCLEO_NONE. See the
  * note at the definition: a rule names the level it means, and the matcher
  * accepts anything more specific. */
 uint16_t kof_flow_cap_generic(uint16_t cap);

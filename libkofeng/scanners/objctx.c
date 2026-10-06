@@ -31,6 +31,7 @@
 #include "../kofcore/kofplatform.h"
 #include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
+#include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../analyzers/parsers/binaries/disasm/xref.h"
 #include "../disinfect/pzero.h"
@@ -177,6 +178,9 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
  * parse: turning a named range into extents.
  */
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
+/* Declared here because c_graph needs it and it is defined further down,
+ * beside the other per-object latches. */
+static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			    uint64_t size);
 /* Declared here for the same reason the two above are: the search below has a
@@ -4800,6 +4804,51 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
  * answer a stripped ELF gives. The buffer is the scanner's and outlives the
  * module call; it is NOT rebuilt per ask, so ten rules asking cost one walk.
  */
+/*
+ * THE PATHOGEN GRAPH A RULE READS - see kofmod/kofpathogen.h.
+ *
+ * Serialised once per object from the analysis that already ran, and NULL
+ * when none did. Reading it cannot make it run: that is what
+ * KOF_ENG_USE_PATHOGEN is for, and an object nobody asked about has no graph
+ * to hand over.
+ */
+static const uint8_t *c_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (nbytes)
+		*nbytes = 0;
+	if (!sc)
+		return NULL;
+	/*
+	 * READING THE GRAPH IS ASKING FOR IT - the same rule c_diag follows.
+	 * A verdict is an algorithm over the graph, so a rule that reaches
+	 * for it is the demand; without this it read the answer of an
+	 * analysis that had not happened and got nothing. Measured as twelve
+	 * detections disappearing the moment the rule stopped naming a
+	 * diagnose and started reading nodes.
+	 */
+	sc->diag_ask = 1;
+	sc->diag_read = 1;
+	diag_ready(sc, ctx);
+	if (!sc->diag_graph)
+		return NULL;
+	if (!sc->gr_done) {
+		sc->gr_done = 1;
+		if (!sc->gr)
+			sc->gr = malloc(KOF_GR_MAX_BYTES);
+		sc->gr_n = sc->gr ? kof_diag_graph_build(sc->diag_graph,
+							 sc->gr,
+							 KOF_GR_MAX_BYTES)
+				  : 0;
+	}
+	if (!sc->gr_n)
+		return NULL;
+	if (nbytes)
+		*nbytes = sc->gr_n;
+	return sc->gr;
+}
+
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -5375,6 +5424,159 @@ static int c_opened_already(const struct kof_obj_ctx *ctx);
  * no. That is also the honest answer for an architecture the value model
  * does not have.
  */
+/*
+ * DOES THIS OBJECT CARRY THE SIGNS THIS DIAGNOSE ASKED FOR - see
+ * struct kof_diag.need.
+ *
+ * AN ANCHOR, NOT A VERDICT. It decides where to spend the analysis, so a
+ * false one costs time and nothing else; demanding that it be clean is
+ * asking the cheap test to do the expensive test's job. A diagnose naming
+ * no sign is tried wherever its route can run.
+ *
+ * UNDEFINED SYMBOLS ONLY. A defined one is a name the author chose and can
+ * change or strip; an undefined one is resolved by the loader against the
+ * kernel's export table by exact name, so it is there or the object does
+ * not work.
+ */
+/*
+ * DOES THE FILE HAVE THE ATTRIBUTES A DIAGNOSE DECLARED - see KOF_DIAG_SH_*.
+ *
+ * ALL OF THEM, because a diagnose names the shape it is worth running on and
+ * a shape is one statement, not a menu.
+ */
+static int diag_shape_met(const struct kof_obj_ctx *ctx, uint16_t shape)
+{
+	const struct kof_elf_info *ei = NULL;
+
+	if (!ctx)
+		return 0;
+	if (ctx->format == KOF_FMT_ELF) {
+		ei = kof_elf(ctx);
+		if (!ei || !ei->valid)
+			return 0;
+	}
+
+	if (shape & KOF_DIAG_SH_ENTRY_WX) {
+		/*
+		 * EACH FORMAT'S OWN WORD FOR IT. The two enums happen to
+		 * agree bit for bit and that is not something to rely on -
+		 * see KOF_PERM_X and KOF_PE_PERM_X, declared apart on
+		 * purpose.
+		 */
+		if (ei) {
+			if ((ei->entry_perm & (KOF_PERM_W | KOF_PERM_X)) !=
+			    (KOF_PERM_W | KOF_PERM_X))
+				return 0;
+		} else if (ctx->format == KOF_FMT_PE) {
+			const struct kof_pe_info *pi = kof_pe(ctx);
+
+			if (!pi ||
+			    (pi->entry_perm & (KOF_PE_PERM_W | KOF_PE_PERM_X))
+			    != (KOF_PE_PERM_W | KOF_PE_PERM_X))
+				return 0;
+		} else {
+			return 0;   /* no answer is not a yes */
+		}
+	}
+	if (shape & KOF_DIAG_SH_NO_SECTIONS) {
+		if (!ei || ei->shoff != 0u)
+			return 0;
+	}
+	if (shape & KOF_DIAG_SH_ONE_LOAD) {
+		const struct kof_elf_seg *g;
+
+		/*
+		 * ONE PROGRAM HEADER AND IT IS THE FILE. Checked rather than
+		 * assumed: a single segment that maps only part of the file
+		 * leaves the rest unaccounted for, and that is a different
+		 * object.
+		 */
+		if (!ei || ei->phnum != 1u || ei->seg_count != 1u)
+			return 0;
+		g = &ei->seg[0];
+		if (g->type != 1u || g->file_off != 0u ||
+		    g->file_size < ctx->obj_size)
+			return 0;
+	}
+	return 1;
+}
+
+/*
+ * A DIAGNOSE WHOSE DECLARED SIGNS THIS OBJECT CARRIES IS ITSELF THE ASK.
+ *
+ * THE DECLARATION IS THE GATE, which is what a sign is for: a diagnose says
+ * which files are worth the walk and the engine routes on it. A heuristic
+ * rule used to carry the same shape test and ask on the diagnose's behalf -
+ * one decision in two modules, and the rule had to publish a verdict nobody
+ * wanted to say it had fired.
+ *
+ * ONLY A DIAGNOSE THAT DECLARED SOMETHING COUNTS. One with no sign at all
+ * is not making a claim about which files it suits, so it is not a reason to
+ * start the analysis; it still runs once something else has.
+ */
+static int diag_signs_met(const struct kof_obj_ctx *ctx,
+			  const struct kof_diag *d);
+
+int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t i;
+
+	if (!sc || !sc->eng)
+		return 0;
+	for (i = 0; i < sc->eng->n_diag; i++) {
+		const struct kof_diag *d = &sc->eng->diag[i];
+
+		if (!d->shape && !d->n_need)
+			continue;
+		if (diag_signs_met(ctx, d))
+			return 1;
+	}
+	return 0;
+}
+
+static int diag_signs_met(const struct kof_obj_ctx *ctx,
+			  const struct kof_diag *d)
+{
+	uint32_t sn = 0, i, total;
+	const uint8_t *sb;
+	uint8_t k;
+	uint8_t hit[KOF_DIAG_MAX_NEED];
+	uint8_t found = 0;
+
+	memset(hit, 0, sizeof hit);
+
+	/*
+	 * ---- THE SHAPE FIRST, because it is header fields the parser has
+	 * already read and the symbol walk below is a pass over a table.
+	 */
+	if (d->shape && !diag_shape_met(ctx, d->shape))
+		return 0;
+
+	if (!d->n_need)
+		return 1;
+	sb = c_syms(ctx, &sn);
+	total = kof_sym_count(sb, sn);
+	for (i = 0; i < total && found < d->n_need; i++) {
+		const uint8_t *r = kof_sym_rec(sb, sn, i);
+		const char *nm;
+
+		if (!r || !(r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
+			continue;
+		nm = (const char *)(r + KOF_SYM_R_NAME);
+		for (k = 0; k < d->n_need; k++)
+			if (d->need[k] && !hit[k] &&
+			    kof_streq_(nm, d->need[k])) {
+				/* each sign counts once, however many
+				 * records spell it */
+				hit[k] = 1;
+				found++;
+				break;
+			}
+	}
+	return found >= d->n_need;
+}
+
 static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 {
 	struct kof_diag_scan *ds;
@@ -5426,61 +5628,42 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		unsigned run = 0;
 
 		for (i = 0; i < sc->eng->n_diag; i++) {
+			/* a diagnose whose signs are absent asks for no
+			 * route - see diag_signs_met */
+			if (!diag_signs_met(ctx, &sc->eng->diag[i]))
+				continue;
 			if (sc->eng->diag[i].via & KOF_DIAG_VIA_SYSCALL)
 				run |= KOF_DIAG_RUN_SYSCALL;
 			if (sc->eng->diag[i].via & KOF_DIAG_VIA_SYMBOL)
 				run |= KOF_DIAG_RUN_SYMBOL;
+			if (sc->eng->diag[i].via & KOF_DIAG_VIA_EMULATE)
+				run |= KOF_DIAG_RUN_EMULATE;
 		}
 		if (!run)
 			return;
 		/*
-		 * ---- AND ONLY THE CAPABILITIES SOMETHING ASKED FOR -------
-		 *
-		 * Derived from the diagnoses, never declared beside them: the
-		 * caps are already in the node records, and a second list is
-		 * one that can disagree with the trees it describes.
-		 *
-		 * IF IT DOES NOT FIT, RECORD EVERYTHING. An overflowing set
-		 * must degrade towards more evidence and not less - the cost
-		 * of a full sweep is a timing, the cost of a missing node is
-		 * a wrong answer.
+		 * NOTHING NARROWS WHICH CAPABILITIES ARE RECORDED, and a loop
+		 * that built such a set per object was removed with the
+		 * parameter that ignored it - see kof_diag_scan_with. The set
+		 * cannot be derived: a verdict reads nodes no diagnose names.
 		 */
-		{
-			static uint16_t want[256];
-			uint32_t n_want = 0, k;
-			int full = 0;
-
-			for (i = 0; i < sc->eng->n_diag && !full; i++) {
-				const struct kof_diag *d = &sc->eng->diag[i];
-				uint8_t j;
-
-				for (j = 0; j < d->n_node; j++) {
-					uint16_t c = d->node[j].cap;
-
-					for (k = 0; k < n_want; k++)
-						if (want[k] == c)
-							break;
-					if (k < n_want)
-						continue;
-					if (n_want == sizeof want /
-							sizeof want[0]) {
-						full = 1;
-						break;
-					}
-					want[n_want++] = c;
-				}
-			}
-			ds = kof_diag_scan_with(ctx, b.p, b.n, run,
-						full ? NULL : want,
-						full ? 0u : n_want);
-		}
+		ds = kof_diag_scan_with(ctx, b.p, b.n, run);
 	}
 	if (!ds)
 		return;
 	KOF_TIME_BEGIN(KOF_T_DIAG_MATCH);
-	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++)
-		if (kof_diag_match(ds, &sc->eng->diag[i], NULL, NULL))
+	memset(sc->diag_n_bind, 0, sizeof sc->diag_n_bind);
+	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++) {
+		uint8_t nb = 0;
+
+		/* every node it bound comes back - see kof_scanner.diag_bind */
+		if (kof_diag_match(ds, &sc->eng->diag[i],
+				   sc->diag_bind[i], &nb)) {
 			sc->diag_hit[i >> 3] |= (uint8_t)(1u << (i & 7u));
+			sc->diag_n_bind[i] = nb > KOF_DB_MAX_DIAG_NODE
+					   ? (uint8_t)KOF_DB_MAX_DIAG_NODE : nb;
+		}
+	}
 	KOF_TIME_END(KOF_T_DIAG_MATCH);
 	/*
 	 * AND THE GRAPH STAYS - see kof_scanner.diag_graph. It is what the
@@ -5507,6 +5690,59 @@ void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
 	diag_ready(sc, ctx);
 }
 
+/*
+ * DO TWO DIAGNOSES MEET AT A NODE OF THIS CAPABILITY - see kof_diag_share.
+ *
+ * THE CAPABILITY IS PART OF THE QUESTION and not a filter bolted on. "The
+ * stager's read and the socket's read are the same read" is the claim; "the
+ * two have some node in common" is a weaker one that a shared allocation or
+ * a shared resolve would also satisfy, and those are what a packed binary is
+ * full of. Naming the node makes the verdict say which shape it means, and
+ * it is the reason a diagnose no longer declares its own join points: the
+ * pair is known at the verdict, never at the declaration.
+ */
+static int c_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
+			uint16_t a, uint16_t b)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t ia, ib, i;
+	uint8_t x, y;
+
+	if (!sc || !cap || !a || !b)
+		return 0;
+	/* ASKING IS THE DEMAND, exactly as in c_diag - this is the same
+	 * question about two diagnoses, and it used to call diag_ready
+	 * without setting the flag it is gated on, so a rule whose ONLY
+	 * pathogen call was this one read an analysis that never ran. */
+	sc->diag_ask = 1;
+	sc->diag_read = 1;
+	diag_ready(sc, ctx);
+	ia = ib = sc->eng->n_diag;
+	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++) {
+		if (sc->eng->diag[i].id == a)
+			ia = i;
+		if (sc->eng->diag[i].id == b)
+			ib = i;
+	}
+	if (ia >= sc->eng->n_diag || ib >= sc->eng->n_diag)
+		return 0;
+	if (!((sc->diag_hit[ia >> 3] >> (ia & 7u)) & 1u) ||
+	    !((sc->diag_hit[ib >> 3] >> (ib & 7u)) & 1u))
+		return 0;
+	for (x = 0; x < sc->diag_n_bind[ia]; x++) {
+		const struct kof_diag_hit *h;
+		uint16_t n = sc->diag_bind[ia][x];
+
+		h = kof_diag_scan_at(sc->diag_graph, n);
+		if (!h || h->cap != cap)
+			continue;
+		for (y = 0; y < sc->diag_n_bind[ib]; y++)
+			if (sc->diag_bind[ib][y] == n)
+				return 1;
+	}
+	return 0;
+}
+
 static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -5517,11 +5753,24 @@ static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)
 	 * otherwise be asking a real question. */
 	if (!sc || !id)
 		return 0;
+	/*
+	 * THE RULE ASKING IS THE ASKER - see KOF_ENG_USE_PATHOGEN.
+	 *
+	 * A signature runs before any heuristic does, so a rule reading a
+	 * diagnose cannot wait for one to turn the analysis on: it would
+	 * read the answer of an analysis that has not happened and get no.
+	 * Naming a diagnose in a rule IS the demand, and it is as scoped as
+	 * the rule - a rule targeting ELF asks on ELF and nowhere else.
+	 */
+	sc->diag_ask = 1;
+	sc->diag_read = 1;
 	diag_ready(sc, ctx);
-	i = (uint32_t)id - 1u;
-	if (i >= sc->eng->n_diag || i >= sizeof sc->diag_hit * 8u)
-		return 0;
-	return (sc->diag_hit[i >> 3] >> (i & 7u)) & 1u;
+	/* The id is the name's hash now, not a position - see KOF_DIAG_ID.
+	 * The bit is still the diagnose's slot, which is its position. */
+	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++)
+		if (sc->eng->diag[i].id == id)
+			return (sc->diag_hit[i >> 3] >> (i & 7u)) & 1u;
+	return 0;
 }
 
 static const struct kof_content kof_detect_vtable = {
@@ -5565,7 +5814,11 @@ static const struct kof_content kof_detect_vtable = {
 	/* And it drives no machine, so it changes none. */
 	NULL, NULL, NULL,
 	/* The profile's two questions - unplugged, see above. */
-	c_diag, NULL
+	c_diag, NULL,
+	/* the graph that diagnose produced, as records - see kofpathogen.h */
+	c_graph,
+	/* two diagnoses meeting at a named node - see kof_diag_share */
+	c_diag_share
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -5591,7 +5844,9 @@ static const struct kof_content kof_unpack_vtable = {
 	c_emu_region_read, c_infected,
 	c_emu_set_reg, c_emu_set_ip, c_emu_write,
 	/* The profile's two questions - unplugged, see above. */
-	NULL, NULL
+	NULL, NULL,
+	c_graph,
+	c_diag_share
 };
 
 /*

@@ -2357,7 +2357,7 @@ struct kof_content {
 	 * verdict of its own. This is how a rule reads one: the engine has
 	 * already decided, per object, which of them are there, and a
 	 * signature asks for the answer the way it asks whether an object
-	 * came out of a packer. See kofmod/kofdiag.h for what a diagnose
+	 * came out of a packer. See kofmod/kofpathogen.h for what a diagnose
 	 * is, and bases/diagnoses/ for the ones that exist.
 	 *
 	 * THE SLOT WAS pth_has, which asked a question about a sequence of
@@ -2384,6 +2384,25 @@ struct kof_content {
 	 */
 	/* was pth_feeds - same. */
 	void *pth_feeds_unused;
+
+	/*
+	 * THE PATHOGEN GRAPH, AS RECORDS - see kofmod/kofpathogen.h.
+	 *
+	 * APPENDED, like every slot added since this vtable shipped, so that
+	 * nothing above it moves and a module built against an older header
+	 * cannot reach it and cannot call the wrong one.
+	 *
+	 * Built at most once per object from the analysis that already ran,
+	 * and NULL with zero bytes when none did - which is the normal answer
+	 * for an object no rule asked about.
+	 */
+	const uint8_t *(*graph)(const struct kof_obj_ctx *, uint32_t *nbytes);
+
+	/* Do two diagnoses meet at a node of this capability - see
+	 * kof_diag_share. Appended, like every slot added since this vtable
+	 * shipped. */
+	int (*diag_share)(const struct kof_obj_ctx *, uint16_t cap,
+			  uint16_t a, uint16_t b);
 };
 
 /*
@@ -3826,11 +3845,73 @@ enum kof_analyze {
  * narrower one, and no new mechanism is needed for either - `&&` is the
  * same `&&` every other rule uses.
  *
- * The id comes from the build, which sees the rule and the diagnoses in
- * one pass. Zero always answers no.
+ * THE NAME IS WRITTEN AS AN IDENTIFIER, not as a string: the macro
+ * stringifies it and hashes it the same way the loader hashed the
+ * diagnose's own KOF_DIAG_NAME. Spelling it the way a C constant is spelt
+ * is what makes a rule read as naming a THING rather than quoting a label,
+ * and it is the same spelling the diagnose file uses.
+ *
+ * Zero always answers no - a name no diagnose carries, a database with
+ * none loaded, a format the analysis does not run on.
  */
-#define kof_diag(id) \
-	((ctx)->content->diag ? (ctx)->content->diag((ctx), (uint16_t)(id)) : 0)
+#define kof_diag(name) \
+	((ctx)->content->diag ? (ctx)->content->diag((ctx), \
+						     kof_diag_id_(#name)) : 0)
+
+/*
+ * THE ID OF A DIAGNOSE, FROM ITS NAME.
+ *
+ *     if (kof_diag(KOF_DIAG_ID("trojan_meterp_00")))
+ *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *
+ * A HASH AND NOT A REGISTRY, which is the convention this tree already
+ * settled on for heuristic variants: "stable across rebuilds without a
+ * registry". The id used to be the diagnose's position in the load order,
+ * which is readdir order - it changed when a file was added, and no rule
+ * could name one at all.
+ *
+ * SIXTEEN BITS, and the loader refuses a database where two diagnoses
+ * collide rather than letting one answer for the other.
+ */
+static inline uint16_t kof_diag_id_(const char *s)
+{
+	uint32_t h = 2166136261u;
+
+	while (*s) {
+		h ^= (uint8_t)*s++;
+		h *= 16777619u;
+	}
+	h = (h ^ (h >> 16)) & 0xffffu;
+	return (uint16_t)(h ? h : 1u);   /* zero means "no diagnose" */
+}
+
+#define KOF_DIAG_ID(name) kof_diag_id_(name)
+
+/*
+ * DO TWO DIAGNOSES MEET AT A NODE OF THIS CAPABILITY.
+ *
+ *     if (kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_SYSCALL_MEMEXEC,
+ *                        DIAG_SYSCALL_NETRECV))
+ *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *
+ * Both matched AND one node of capability `cap` was bound by both.
+ *
+ * THE CAPABILITY IS NAMED BECAUSE THE SHAPE IS. A W+X region filled by a
+ * read, and a socket whose descriptor that same read uses, is a stager -
+ * and what makes it one is that the READ is the same read. "They have some
+ * node in common" would also be true of two behaviours sharing an
+ * allocation or a resolve, which a packed binary is full of.
+ *
+ * `kof_diag(a) && kof_diag(b)` is weaker still and a different question: a
+ * file can carry a packer and a downloader without the packer's region
+ * being what the downloader filled.
+ */
+#define kof_diag_share(cap, a, b) ((ctx)->content->diag_share ? \
+				   (ctx)->content->diag_share((ctx), \
+							      (uint16_t)(cap), \
+							      kof_diag_id_(#a), \
+							      kof_diag_id_(#b)) \
+				 : 0)
 
 /*
  * THE BEHAVIOUR MACROS ARE GONE, and so is the chain they were shaped by.
@@ -4006,6 +4087,24 @@ static inline uint32_t kof_bswap32(uint32_t v)
  */
 #define kof_syms(np) ((ctx)->content->syms ? \
 		      (ctx)->content->syms((ctx), (np)) : 0)
+
+/*
+ * The pathogen graph's records, and how many bytes of them - see
+ * kofmod/kofpathogen.h for the layout and for why this is a block rather than
+ * the engine's own struct.
+ *
+ *     uint32_t n; const uint8_t *g = kof_diag_graph(&n), *r;
+ *     for (i = 0; (r = kof_gr_rec(g, n, i)); i++)
+ *             if (kof_gr_u16(r, KOF_GR_R_CAP) == KOF_NUCLEO_FIELD_WRITE)
+ *                     ...
+ *
+ * NULL and zero when the analysis did not run on this object, which is a
+ * normal answer and stops the loop on its first test. Reading this cannot
+ * make it run: a rule that wants the analysis says so with
+ * KOF_HEUR_WANT(KOF_ENG_USE_PATHOGEN).
+ */
+#define kof_diag_graph(np) ((ctx)->content->graph ? \
+			    (ctx)->content->graph((ctx), (np)) : 0)
 
 /*
  * WHICH CODE REFERS TO THE DATA AT `va`, AND HOW.
@@ -5021,13 +5120,20 @@ enum kunp_rcstruct_broken {
  * capability-chain work. No chain ever reached it: the one caller is the
  * overlord's shape percentage in scan.c. The VALUE is unchanged, so a stored
  * verdict still reads back as itself.
+ *
+ * AND PATHOGEN IS BACK, as a value of its own at the end of the list, because
+ * now something does reach it: a rule whose finding came from the node graph
+ * rather than from bytes. It is a different claim from Pattern and has to
+ * read as one - the bytes of a shikata build are new every time and the rule
+ * never looked at them.
  */
 #define KOF_ENGINE_LIST(X)                                                   \
 	X(KOF_ENGINE_NONE,     "None")                                       \
 	X(KOF_ENGINE_ANALYZER, "Analyzer")  /* the parse and its anomalies */\
 	X(KOF_ENGINE_PATTERN,  "Pattern")   /* declared bytes and strings   */\
 	X(KOF_ENGINE_PLAGUE,   "Plague")    /* block similarity             */\
-	X(KOF_ENGINE_OVERLORD, "Overlord")  /* shape similarity             */
+	X(KOF_ENGINE_OVERLORD, "Overlord")  /* shape similarity             */\
+	X(KOF_ENGINE_PATHOGEN, "Pathogen")  /* what the code does, as a graph */
 
 enum kof_engine_id {
 #define KOF_ENGINE_X_ENUM(name, word) name,

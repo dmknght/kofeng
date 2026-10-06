@@ -33,7 +33,7 @@
 
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
-#include "../../libkofeng/kofcore/kofmod/kofdiag.h"
+#include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
 #include "../../libkofeng/detectors/pathogen/kofdiag.h"
 #include "../../libkofeng/detectors/pathogen/diag_int.h"
 
@@ -56,9 +56,9 @@ int main(void)
 
 	/* the three nodes of a hooked getdents, built by hand so the test
 	 * states the shape rather than depending on a sample to contain it */
-	CK(kof_diag_hit_add(&s, 0x10, KOF_CAP_HEAP, 0) != NULL);
-	CK(kof_diag_hit_add(&s, 0x20, KOF_CAP_COPY_FROM_USER, 0) != NULL);
-	CK(kof_diag_hit_add(&s, 0x30, KOF_CAP_COPY_TO_USER, 0) != NULL);
+	CK(kof_diag_hit_add(&s, 0x10, KOF_NUCLEO_HEAP, 0) != NULL);
+	CK(kof_diag_hit_add(&s, 0x20, KOF_NUCLEO_COPY_FROM_USER, 0) != NULL);
+	CK(kof_diag_hit_add(&s, 0x30, KOF_NUCLEO_COPY_TO_USER, 0) != NULL);
 	CK(s.n_hit == 3u);
 
 	h = kof_diag_hit_of(&s, 1u);
@@ -101,9 +101,9 @@ int main(void)
 	 */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KOF_CAP_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
+			{ KOF_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
 			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_CAP_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
 			  0, 0 },
 		};
 		static const struct kof_diag dg = {
@@ -124,15 +124,15 @@ int main(void)
 	 */
 	{
 		static const struct kof_diag_node yes[] = {
-			{ KOF_CAP_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
+			{ KOF_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
 			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_CAP_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
 			  KOF_DIAG_B_SHARED, 0 },
 		};
 		static const struct kof_diag_node no[] = {
-			{ KOF_CAP_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
+			{ KOF_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
 			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_CAP_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
 			  KOF_DIAG_B_PRODUCED, 0 },
 		};
 		static const struct kof_diag dyes = {
@@ -149,9 +149,9 @@ int main(void)
 	/* and the allocation's edge is provenance, from the other side */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KOF_CAP_HEAP, 0, KOF_DIAG_NO_PARENT,
+			{ KOF_NUCLEO_HEAP, 0, KOF_DIAG_NO_PARENT,
 			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_CAP_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
 			  KOF_DIAG_B_PRODUCED, 0 },
 		};
 		static const struct kof_diag dg = {

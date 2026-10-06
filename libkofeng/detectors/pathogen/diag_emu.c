@@ -180,15 +180,15 @@ static int ret_is_carryable(uint64_t ret)
 static int cap_hands_on_value(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_ALLOC:
-	case KOF_CAP_ALLOC_EXEC:
-	case KOF_CAP_HEAP:
-	case KOF_CAP_NET_OPEN:
-	case KOF_CAP_NET_RAW:
-	case KOF_CAP_NET_ACCEPT:
-	case KOF_CAP_FILE_OPEN:
-	case KOF_CAP_MEMFD:
-	case KOF_CAP_PIPE_OPEN:
+	case KOF_NUCLEO_ALLOC:
+	case KOF_NUCLEO_ALLOC_EXEC:
+	case KOF_NUCLEO_HEAP:
+	case KOF_NUCLEO_NET_OPEN:
+	case KOF_NUCLEO_NET_RAW:
+	case KOF_NUCLEO_NET_ACCEPT:
+	case KOF_NUCLEO_FILE_OPEN:
+	case KOF_NUCLEO_MEMFD:
+	case KOF_NUCLEO_PIPE_OPEN:
 		return 1;
 	default:
 		return 0;
@@ -226,7 +226,7 @@ static int cap_hands_on_value(uint16_t cap)
  *               then be written, and only the emulator's own implementation
  *               can hand one out; a fabricated address would fault at the
  *               first store into it. mprotect is here too and for a worse
- *               reason: it shares KOF_CAP_ALLOC with mmap, so the capability
+ *               reason: it shares KOF_NUCLEO_ALLOC with mmap, so the capability
  *               alone cannot say whether 0 or a pointer is the success. That
  *               is a thing to fix in the vocabulary, not to guess at here.
  */
@@ -235,10 +235,10 @@ enum force_kind { FORCE_NONE = 0, FORCE_ZERO, FORCE_HANDLE, FORCE_COUNT };
 static enum force_kind cap_force_kind(uint16_t cap)
 {
 	switch (cap) {
-	case KOF_CAP_NET_CONNECT:
-	case KOF_CAP_NET_BIND:
-	case KOF_CAP_NET_LISTEN:
-	case KOF_CAP_FD_REDIR:
+	case KOF_NUCLEO_NET_CONNECT:
+	case KOF_NUCLEO_NET_BIND:
+	case KOF_NUCLEO_NET_LISTEN:
+	case KOF_NUCLEO_FD_REDIR:
 	/*
 	 * AND THE KERNEL COPIES, WHOSE SUCCESS VALUE IS ZERO AND NOT A COUNT.
 	 * copy_from_user and copy_to_user return the number of bytes they
@@ -250,27 +250,27 @@ static enum force_kind cap_force_kind(uint16_t cap)
 	 * the second copy, which is the whole of the hiding, was never on the
 	 * path the run took.
 	 */
-	case KOF_CAP_COPY_FROM_USER:
-	case KOF_CAP_COPY_TO_USER:
+	case KOF_NUCLEO_COPY_FROM_USER:
+	case KOF_NUCLEO_COPY_TO_USER:
 		return FORCE_ZERO;
-	case KOF_CAP_NET_OPEN:
-	case KOF_CAP_NET_RAW:
-	case KOF_CAP_NET_ACCEPT:
-	case KOF_CAP_FILE_OPEN:
-	case KOF_CAP_MEMFD:
-	case KOF_CAP_PIPE_OPEN:
+	case KOF_NUCLEO_NET_OPEN:
+	case KOF_NUCLEO_NET_RAW:
+	case KOF_NUCLEO_NET_ACCEPT:
+	case KOF_NUCLEO_FILE_OPEN:
+	case KOF_NUCLEO_MEMFD:
+	case KOF_NUCLEO_PIPE_OPEN:
 		return FORCE_HANDLE;
 	/* The generic descriptor calls AND the file-specific ones: the role
 	 * an argument plays is the same whatever the descriptor turns out to
 	 * be, and the word is corrected later - see diag_refine. Listing only
 	 * the file spelling is how the links vanished when read(2) was moved
 	 * out of KOF_CG_FILE. */
-	case KOF_CAP_MEM_READ:
-	case KOF_CAP_MEM_WRITE:
-	case KOF_CAP_READ:
-	case KOF_CAP_WRITE:
-	case KOF_CAP_NET_READ:
-	case KOF_CAP_NET_WRITE:
+	case KOF_NUCLEO_MEM_READ:
+	case KOF_NUCLEO_MEM_WRITE:
+	case KOF_NUCLEO_READ:
+	case KOF_NUCLEO_WRITE:
+	case KOF_NUCLEO_NET_READ:
+	case KOF_NUCLEO_NET_WRITE:
 		return FORCE_COUNT;
 	default:
 		return FORCE_NONE;
@@ -665,7 +665,7 @@ struct skipsite {
 	uint64_t call_at;       /* where the call instruction begins */
 	uint64_t resume;        /* and where control continues       */
 	uint64_t callee;        /* an INTERNAL call's target, else 0 */
-	uint16_t cap;           /* KOF_CAP_NONE for an internal call */
+	uint16_t cap;           /* KOF_NUCLEO_NONE for an internal call */
 };
 
 struct skipgather {
@@ -685,9 +685,9 @@ static void gather_skip(void *user, uint64_t at, uint64_t target,
 	g->site[g->n].callee = target;
 	/* An internal call names a capability only by accident; it is here to
 	 * be skipped, not to be a node. */
-	g->site[g->n].cap = target ? KOF_CAP_NONE
+	g->site[g->n].cap = target ? KOF_NUCLEO_NONE
 				   : (name ? kof_flow_cap_of_name(name)
-					   : KOF_CAP_NONE);
+					   : KOF_NUCLEO_NONE);
 	g->n++;
 }
 
@@ -895,7 +895,7 @@ static uint16_t callee_node(const struct kof_diag_scan *s,
 			 * promote_wrappers - so it answers for it however
 			 * many nodes are inside. */
 			if (p->at == fns[j].va &&
-			    p->cap == KOF_CAP_KSYM_LOOKUP)
+			    p->cap == KOF_NUCLEO_KSYM_LOOKUP)
 				return (uint16_t)i;
 			only = (uint16_t)i;
 			cnt++;
@@ -986,7 +986,7 @@ static void promote_wrappers(struct kof_diag_scan *s,
 		uint64_t reg_at, unreg_at = 0;
 		int paired = 0;
 
-		if (!p || p->cap != KOF_CAP_KPROBE_REG)
+		if (!p || p->cap != KOF_NUCLEO_KPROBE_REG)
 			continue;
 		reg_at = p->at;
 
@@ -1004,7 +1004,7 @@ static void promote_wrappers(struct kof_diag_scan *s,
 			const struct kof_diag_hit *q = kof_diag_scan_at(s, t);
 
 			if (!q || q->at <= reg_at ||
-			    q->cap != KOF_CAP_KPROBE_UNREG)
+			    q->cap != KOF_NUCLEO_KPROBE_UNREG)
 				continue;
 			if (!unreg_at || q->at < unreg_at) {
 				unreg_at = q->at;
@@ -1026,8 +1026,47 @@ static void promote_wrappers(struct kof_diag_scan *s,
 			    unreg_at < fns[j].va + fns[j].size)
 				break;
 		kof_diag_hit_add(s, j < n_fn ? fns[j].va : reg_at,
-				 KOF_CAP_KSYM_LOOKUP, 0);
+				 KOF_NUCLEO_KSYM_LOOKUP, 0);
 	}
+}
+
+
+/*
+ * IS THERE A PRINTABLE, NUL-TERMINATED NAME AT THIS OFFSET.
+ *
+ * A symbol name, not a string in general: short, printable, and ending. The
+ * bound is what the kernel's own symbol table allows, and the floor keeps a
+ * stray byte that happens to be followed by a NUL from being read as a name.
+ */
+#define DIAG_NAME_MIN 3u
+#define DIAG_NAME_MAX 64u
+
+static int name_at(const uint8_t *base, uint64_t size, uint64_t off)
+{
+	uint64_t i;
+
+	if (off >= size)
+		return 0;
+	for (i = 0; i < DIAG_NAME_MAX && off + i < size; i++) {
+		uint8_t c = base[off + i];
+
+		if (!c)
+			return i >= DIAG_NAME_MIN;
+		/*
+		 * A SYMBOL NAME, NOT ANY PRINTABLE RUN. Accepting every
+		 * printable byte caught a compiler version string -
+		 * ".2.0-19) 14.2.0" - on a clean module, because a register
+		 * happened to point at it. A C identifier is letters, digits
+		 * and underscore; the dot and dollar are there because the
+		 * kernel and the linker both use them in real names, and a
+		 * space or a bracket ends it.
+		 */
+		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		      (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+		      c == '$'))
+			return 0;
+	}
+	return 0;
 }
 
 static void run_rel_gaps(struct kof_diag_scan *s,
@@ -1173,7 +1212,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 					if (skips[w].call_at < lo ||
 					    skips[w].call_at >= hi)
 						continue;
-					if (skips[w].cap != KOF_CAP_NONE ||
+					if (skips[w].cap != KOF_NUCLEO_NONE ||
 					    (skips[w].callee &&
 					     callee_node(s, fns, fg.n,
 							 skips[w].callee) !=
@@ -1275,6 +1314,67 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 				if (skips[q].call_at != rip)
 					continue;
 				vis[q] = 1;
+				/*
+				 * ---- THE NAME THIS CALL WAS GIVEN ---------
+				 *
+				 * Artifact rather than relation. The links
+				 * already say a lookup happened and that what
+				 * came back was indexed; this says WHAT was
+				 * looked up, which is the difference between
+				 * a tracing module and one reaching for the
+				 * syscall table.
+				 *
+				 * ON THE CALLEE'S NODE, not the one at the
+				 * return address. A hook-declaration block is
+				 * promoted to a single node sitting at the
+				 * function it occupies - see
+				 * promote_wrappers - and that is the node a
+				 * caller means when it calls into it.
+				 *
+				 * Recorded as the OFFSET of the bytes, never
+				 * a copy: see KOF_DIAG_H_ATTR_STR.
+				 */
+				if (skips[q].call_at == rip) {
+					uint16_t cn = skips[q].callee
+						? callee_node(s, fns, fg.n,
+							      skips[q].callee)
+						: 0xffffu;
+					struct kof_diag_hit *ch;
+					uint64_t a0 = kof_emu_get_reg(em,
+						kof_diag_sysv_arg[0]);
+
+					/*
+					 * TWO PLACES THE SAME NAME CAN BE, and
+					 * the two Diamorphine builds have one
+					 * each.
+					 *
+					 * diamondxe keeps findmyinterest as a
+					 * function, so the caller hands the
+					 * name IN and the name belongs to the
+					 * callee's node.
+					 *
+					 * diamorphine inlined it, so the block
+					 * itself loads the name and passes it
+					 * ON - here through a retpoline thunk,
+					 * which is an import and names no
+					 * callee at all. The name then belongs
+					 * to the node promoted over THIS
+					 * function.
+					 *
+					 * Both are the same statement: this
+					 * hook-declaration block was reaching
+					 * for that symbol.
+					 */
+					if (cn == 0xffffu)
+						cn = callee_node(s, fns, fg.n, lo);
+					ch = cn == 0xffffu ? 0
+							   : kof_diag_hit_of(s, cn);
+					if (ch && !ch->attr && a0 > DIAG_REL_BASE &&
+					    name_at(base, size, a0 - DIAG_REL_BASE)) {
+						ch->attr = a0 - DIAG_REL_BASE;
+						ch->bits |= KOF_DIAG_H_ATTR_STR;
+					}
+				}
 
 				for (i = 0; i < n; i++) {
 					const struct kof_diag_hit *p =
@@ -1912,15 +2012,15 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 								 * collided and the read
 								 * was dropped. */
 								if (e && e->at == rip &&
-								    (e->cap == KOF_CAP_FIELD_READ ||
-								     e->cap == KOF_CAP_FIELD_WRITE))
+								    (e->cap == KOF_NUCLEO_FIELD_READ ||
+								     e->cap == KOF_NUCLEO_FIELD_WRITE))
 									dup2 = 1;
 							}
 							fh = dup2 ? NULL
 							   : kof_diag_hit_add(s, rip,
 								mi == 0u
-								? KOF_CAP_FIELD_WRITE
-								: KOF_CAP_FIELD_READ, 0);
+								? KOF_NUCLEO_FIELD_WRITE
+								: KOF_NUCLEO_FIELD_READ, 0);
 							if (fh) {
 								fh->attr = tg -
 								  seen[z].val;
@@ -1991,8 +2091,8 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 								fh = dup2 ? NULL
 								   : kof_diag_hit_add(s, rip,
 									mi == 0u
-									? KOF_CAP_FIELD_WRITE
-									: KOF_CAP_FIELD_READ,
+									? KOF_NUCLEO_FIELD_WRITE
+									: KOF_NUCLEO_FIELD_READ,
 									0);
 								if (fh) {
 									fh->attr = (uint64_t)
@@ -2033,8 +2133,8 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 								struct kof_diag_hit *fh =
 								  kof_diag_hit_add(s, rip,
 								    mi == 0u
-								    ? KOF_CAP_FIELD_WRITE
-								    : KOF_CAP_FIELD_READ,
+								    ? KOF_NUCLEO_FIELD_WRITE
+								    : KOF_NUCLEO_FIELD_READ,
 								    0);
 								if (fh) {
 									fh->attr =
@@ -2094,12 +2194,12 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 						  kof_diag_scan_at(s, t);
 
 						if (p && p->at == rip &&
-						    p->cap == KOF_CAP_PROT_OFF)
+						    p->cap == KOF_NUCLEO_PROT_OFF)
 							seen_site = 1;
 					}
 					if (!seen_site)
 						kof_diag_hit_add(s, rip,
-							KOF_CAP_PROT_OFF, 0);
+							KOF_NUCLEO_PROT_OFF, 0);
 					/*
 					 * AND STEP OVER IT. The interpreter
 					 * answers UNSUPPORTED for a control
@@ -2275,7 +2375,7 @@ stalled:
 				 */
 				for (w = 0; w < sg.n; w++) {
 					if (vis[w] ||
-					    skips[w].cap == KOF_CAP_NONE ||
+					    skips[w].cap == KOF_NUCLEO_NONE ||
 					    skips[w].call_at <= last_in ||
 					    skips[w].call_at < run_lo ||
 					    skips[w].call_at >= run_hi)
@@ -2288,7 +2388,7 @@ stalled:
 					for (w = 0; w < sg.n; w++) {
 						if (vis[w] ||
 						    skips[w].cap ==
-						    KOF_CAP_NONE ||
+						    KOF_NUCLEO_NONE ||
 						    skips[w].call_at < run_lo ||
 						    skips[w].call_at >= run_hi)
 							continue;
@@ -2532,6 +2632,7 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 		for (i = 0; i < 6u; i++)
 			arg[i] = kof_emu_get_reg(em, areg[i]);
 
+
 		/*
 		 * LET THE EMULATOR MAKE THE CALL. Stepping rather than
 		 * inventing a result: mmap has to return a mapping the
@@ -2545,6 +2646,39 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 
 		cap = kof_flow_cap_of_syscall(bits, (uint32_t)nr, arg, &fl);
 
+		/*
+		 * ---- i386's socketcall KEEPS ITS ARGUMENTS IN MEMORY ------
+		 *
+		 * Every socket operation on i386 goes through one syscall,
+		 * 102, with the operation in ebx and A POINTER TO THE REAL
+		 * ARGUMENTS in ecx. Reading registers gives that demux pair
+		 * and nothing else, so a connect has no descriptor and the
+		 * network half of an i386 stager has nodes and no edges -
+		 * measured on meter1_x86, where every node is present and
+		 * net-connect has no parent.
+		 *
+		 * AFTER THE DEMUX, NOT BEFORE. The first attempt overwrote
+		 * arg[] where it stood, which is where kof_flow_cap_of_syscall
+		 * reads arg[0] to learn WHICH socket call this is - so the
+		 * operation was gone before it was used.
+		 */
+		if (bits == 32u && nr == 102u) {
+			uint64_t vec = arg[1];
+			unsigned ai;
+
+			for (ai = 0; ai < 6u; ai++) {
+				uint8_t w[4];
+
+				if (!kof_emu_read(em, vec + ai * 4u, w,
+						  sizeof w))
+					break;
+				arg[ai] = (uint64_t)w[0] |
+					  ((uint64_t)w[1] << 8) |
+					  ((uint64_t)w[2] << 16) |
+					  ((uint64_t)w[3] << 24);
+			}
+		}
+
 
 		/*
 		 * THE SAME SITE IS THE SAME NODE, however many times the run
@@ -2557,7 +2691,7 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 				break;
 			}
 		if (node == 0xffffu) {
-			if (cap == KOF_CAP_NONE)
+			if (cap == KOF_NUCLEO_NONE)
 				continue;   /* no word for it; not a node */
 			h = kof_diag_hit_add(s, off, cap, fl);
 			if (!h)
@@ -2653,16 +2787,16 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 				 * targets. A handle has no extent and gets
 				 * zero, which is what keeps a descriptor
 				 * from "containing" an address. */
-				made[i].len = (cap == KOF_CAP_ALLOC ||
-					       cap == KOF_CAP_ALLOC_EXEC ||
-					       cap == KOF_CAP_HEAP)
+				made[i].len = (cap == KOF_NUCLEO_ALLOC ||
+					       cap == KOF_NUCLEO_ALLOC_EXEC ||
+					       cap == KOF_NUCLEO_HEAP)
 					      ? arg[1] : 0u;
 				made[i].node = node;
 				/*
 				 * AND ASK THE INTERPRETER TO NOTICE IF
 				 * CONTROL EVER ARRIVES HERE.
 				 *
-				 * This is what makes KOF_CAP_EXEC_REG
+				 * This is what makes KOF_NUCLEO_EXEC_REG
 				 * findable by a run: the jump into a mapping
 				 * is not a syscall and nothing else would
 				 * stop on it. The range is declared the
@@ -2684,7 +2818,7 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 	 * The jump into the mapping is not a syscall, so nothing above sees
 	 * it. The interpreter records a HOP whenever control enters a page
 	 * the run wrote, and a hop that lands inside a region one of these
-	 * calls produced is the whole of KOF_CAP_EXEC_REG: code that was
+	 * calls produced is the whole of KOF_NUCLEO_EXEC_REG: code that was
 	 * fetched, written, and then entered.
 	 *
 	 * ATTRIBUTED BY RANGE AND NOT BY GUESS. base+k belongs to the call
@@ -2734,7 +2868,7 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 				 */
 				off = kof_pz_addr_to_off(ctx, hop[q]);
 				h = kof_diag_hit_add(s, off,
-						     KOF_CAP_EXEC_REG, 0);
+						     KOF_NUCLEO_EXEC_REG, 0);
 				if (h)
 					kof_diag_note_in(h, made[i].node,
 							 KOF_DIAG_ROLE_TARGET,

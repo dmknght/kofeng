@@ -25,7 +25,7 @@
 #include "../databases/dbloader.h"
 #include "../detectors/overlord/matchers/kofmatch.h"
 #include "../detectors/overlord/plague/kofplague.h"
-/* KOF_CAP_COUNT, for the profile below. */
+/* KOF_NUCLEO_COUNT, for the profile below. */
 #include "../detectors/overlord/kofoverlord.h"
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../analyzers/parsers/binaries/pe/pe_parse.h"
@@ -123,6 +123,25 @@ struct kof_scanner {
 	 * the answer.
 	 */
 	uint8_t  diag_hit[32];          /* one bit per diagnose id          */
+	/*
+	 * WHICH NODE EACH DIAGNOSE BOUND EACH OF ITS OWN NODES TO - see
+	 * kof_diag_share.
+	 *
+	 * A match used to be a bit and nothing else, so "both of these
+	 * happened" was all a rule could ask. Two diagnoses are a SHAPE only
+	 * when they meet: a W+X region filled by a read, and a socket whose
+	 * descriptor that same read uses, are a stager - and the same two
+	 * findings about two different reads are a packer and a downloader
+	 * in one file. Only the node index tells them apart.
+	 *
+	 * ALL OF THEM, not the ones a diagnose marked. The mark was a fact
+	 * about a pair of behaviours written into the declaration of one of
+	 * them; the verdict asks for the join now, so the engine has to be
+	 * able to answer about any node. 16 KB, once per scanner, bounded by
+	 * the database and not by the object.
+	 */
+	uint16_t diag_bind[KOF_DB_MAX_DIAG][KOF_DB_MAX_DIAG_NODE];
+	uint8_t  diag_n_bind[KOF_DB_MAX_DIAG];
 	/* see kof_scan_option.want_diag */
 	int      diag_ready;
 	/*
@@ -143,6 +162,14 @@ struct kof_scanner {
 	 * about the wrong bytes.
 	 */
 	struct kof_diag_scan *diag_graph;
+	/*
+	 * And the same graph as the RECORD BLOCK a rule reads - see
+	 * kofmod/kofpathogen.h. Serialised on the first ask and kept until the
+	 * object ends, because every later ask reads the same bytes.
+	 */
+	uint8_t  *gr;
+	uint32_t  gr_n;
+	int       gr_done;
 
 	/*
 	 * THREE FIELDS STOOD HERE and all three went with the chain: the
@@ -369,6 +396,20 @@ struct kof_scanner {
 	 * Reset per module beside the plague fields and for the same reason.
 	 */
 	int str_hit;
+	/*
+	 * THIS MODULE READ THE NODE GRAPH - see KOF_ENGINE_PATHOGEN.
+	 *
+	 * Beside str_hit and reset with it, because it answers the same
+	 * question about the same scope: what did THIS module use to reach
+	 * its finding. The verdict's method word is that answer, and a
+	 * finding reached through kof_diag printed as !Pattern sends a
+	 * reader looking for bytes that were never matched.
+	 *
+	 * PER MODULE AND NOT PER OBJECT. Kept beside ovl_asked at first,
+	 * which is per object - so one rule reading the graph relabelled
+	 * another rule's byte match on the same file.
+	 */
+	int diag_read;
 	/*
 	 * AND THE BEST ANY ONE OF THEM SCORED, which is what the verdict
 	 * reports.
@@ -1280,6 +1321,13 @@ int kof_scan_walk(struct kof_scanner *, const char *path,
  */
 int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
 		     const struct kof_scan_option *, kof_on_object cb, void *user);
+
+/*
+ * A LOADED DIAGNOSE DECLARED SIGNS THIS OBJECT CARRIES - see KOF_DIAG_SH_*
+ * and KOF_DIAG_NEEDS. Non-zero means the analysis is worth starting on this
+ * object, which is the routing a heuristic rule used to do by hand.
+ */
+int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
 
 #endif /* KOFENG_SCAN_H */
 void kof_scan_diag_force(const struct kof_obj_ctx *);

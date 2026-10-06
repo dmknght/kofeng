@@ -742,7 +742,7 @@ static void shipped_rules_are_all_modelled(void)
 {
 	static const char *dirs[] = { "bases/signatures", "bases/heur" };
 	unsigned d;
-	int read = 0, foreign = 0, cured = 0;
+	int read = 0, foreign = 0, cured = 0, graphed = 0;
 
 	for (d = 0; d < sizeof dirs / sizeof dirs[0]; d++) {
 		DIR *dp = opendir(dirs[d]);
@@ -763,9 +763,23 @@ static void shipped_rules_are_all_modelled(void)
 			lend(&e);
 			if (draft_from_source(&e, path)) {
 				int cures = src_has(path, "void kof_cure");
+				/*
+				 * A VERDICT OVER THE PATHOGEN GRAPH is the
+				 * second thing the panel has no section
+				 * for. It is an ALGORITHM - asks whether two
+				 * diagnoses met at a node, counts entries of
+				 * a table - and the panel holds patterns and
+				 * the conditions over them. Exempted the
+				 * same way a cure is, and counted
+				 * separately so the gap stays visible rather
+				 * than becoming the normal case.
+				 */
+				int graphs = src_has(path, "kof_diag");
 
 				read++;
-				if (g_foreign_w && !cures) {
+				if (graphs)
+					graphed++;
+				if (g_foreign_w && !cures && !graphs) {
 					printf("  FAIL %s - %u unmodelled "
 					       "line(s), and it has no cure "
 					       "to explain them\n",
@@ -785,7 +799,8 @@ static void shipped_rules_are_all_modelled(void)
 	}
 	CK(foreign == 0);
 	printf("  %d shipped rule(s) read, %d carry a hand-written cure, "
-	       "%d refused without one\n", read, cured, foreign);
+	       "%d read the pathogen graph, %d refused without either\n",
+	       read, cured, graphed, foreign);
 }
 
 /*

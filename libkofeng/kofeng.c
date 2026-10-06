@@ -52,12 +52,6 @@ uint32_t kmatch_rules(const kof_engine *e)
  * out of the loaded .kdig and is not composed, so there is nothing to free
  * and nothing that can be stale while the engine is open.
  */
-const char *kdb_diag_name(const kof_engine *e, uint16_t id)
-{
-	if (!e || !e->diag_name || !id || id > e->n_diag)
-		return NULL;
-	return e->diag_name + (size_t)(id - 1u) * KOF_DB_DIAG_NAME;
-}
 
 uint32_t kdb_diagnoses(const kof_engine *e)
 {

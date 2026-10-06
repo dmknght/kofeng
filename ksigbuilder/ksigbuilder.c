@@ -89,7 +89,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/kofplague.h>
-#include <kofmod/kofdiag.h>
+#include <kofmod/kofpathogen.h>
 #include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
@@ -7160,7 +7160,7 @@ done:
  *
  * A DIAGNOSE IS NOT A MODULE, so it does not go down the path above: there
  * is no code to compile, no blob to link and no vtable to call. It is a
- * tree of nucleo groups - see kofmod/kofdiag.h - and what the build does
+ * tree of nucleo groups - see kofmod/kofpathogen.h - and what the build does
  * with it is read the declarations and write the records out.
  *
  * SO IT IS NOT IN A .ksig PACK EITHER. The pack header carries a
@@ -7177,7 +7177,6 @@ struct dnode {
 	uint16_t cap;
 	uint16_t flags;
 	uint8_t  role;
-	uint8_t  touch;
 	uint8_t  bits;          /* KOF_DIAG_B_PRODUCED / _SHARED, if demanded */
 };
 
@@ -7192,37 +7191,100 @@ struct dhdr {
 /*
  * A NAME TO A NUMBER, through the one table that defines both.
  *
- * The source says KOF_CAP_ALLOC_EXEC and the record holds its value, and
+ * The source says KOF_NUCLEO_ALLOC_EXEC and the record holds its value, and
  * the two must be the same thing or a rule means something other than what
  * it says. Reading the enum through the X-macro list rather than keeping a
  * copy here is what makes that true by construction - a copy is a second
  * place for the vocabulary to drift, which is the fault kofcap.h was split
  * out to stop.
+ *
+ * THE VALUES ARE NOT WRITTEN DOWN. Each entry expands to { "X", X }, so the
+ * number comes from kofcap.h through the compiler and renumbering a group
+ * cannot leave this behind. What CAN go stale is a cap missing from the
+ * list, and diag_cap_table_check() below refuses the build when one is -
+ * diag_role_of learnt that lesson the expensive way, see its note.
  */
-static int diag_cap_of(const char *w, uint16_t *out)
-{
-	unsigned c;
-	size_t n;
+#define KOF_NUCLEO_IDENTS(X) \
+	X(KOF_NUCLEO_ANTI_DEBUG) X(KOF_NUCLEO_CRED_SET) X(KOF_NUCLEO_CRED_PREPARE) \
+	X(KOF_NUCLEO_CRYPTO) X(KOF_NUCLEO_EXEC_REG) X(KOF_NUCLEO_FD_REDIR) \
+	X(KOF_NUCLEO_FILE_DELETE) X(KOF_NUCLEO_FILE_OPEN) X(KOF_NUCLEO_PERM_SET) \
+	X(KOF_NUCLEO_READ) X(KOF_NUCLEO_FILE_RENAME) X(KOF_NUCLEO_TIMESTOMP) \
+	X(KOF_NUCLEO_WRITE) X(KOF_NUCLEO_HTTP_CONNECT) X(KOF_NUCLEO_HTTP_FETCH) \
+	X(KOF_NUCLEO_HTTP_OPEN) X(KOF_NUCLEO_HTTP_RECV) X(KOF_NUCLEO_HTTP_SEND) \
+	X(KOF_NUCLEO_CAPTURE) X(KOF_NUCLEO_COPY_FROM_USER) X(KOF_NUCLEO_COPY_TO_USER) \
+	X(KOF_NUCLEO_PROT_OFF) X(KOF_NUCLEO_HOOK) X(KOF_NUCLEO_KPROBE_REG) \
+	X(KOF_NUCLEO_KPROBE_UNREG) X(KOF_NUCLEO_KSYM_LOOKUP) X(KOF_NUCLEO_LIST_HIDE) \
+	X(KOF_NUCLEO_MOD_LOAD) X(KOF_NUCLEO_SYMBOL_GET) X(KOF_NUCLEO_RESOLVE) \
+	X(KOF_NUCLEO_CALL_REG) X(KOF_NUCLEO_LIB_OPEN) X(KOF_NUCLEO_NAME_HASH) \
+	X(KOF_NUCLEO_SELF_RESOLVE) X(KOF_NUCLEO_ALLOC_EXEC) X(KOF_NUCLEO_HEAP) \
+	X(KOF_NUCLEO_ALLOC) X(KOF_NUCLEO_MEMFD) X(KOF_NUCLEO_FIELD_READ) \
+	X(KOF_NUCLEO_FIELD_WRITE) X(KOF_NUCLEO_MEM_READ) X(KOF_NUCLEO_MEM_WRITE) \
+	X(KOF_NUCLEO_JAIL) X(KOF_NUCLEO_NET_ACCEPT) X(KOF_NUCLEO_NET_ADDR) \
+	X(KOF_NUCLEO_NET_BIND) X(KOF_NUCLEO_NET_CONNECT) X(KOF_NUCLEO_DNS) \
+	X(KOF_NUCLEO_NET_LISTEN) X(KOF_NUCLEO_NET_OPEN) X(KOF_NUCLEO_NET_RAW) \
+	X(KOF_NUCLEO_NET_READ) X(KOF_NUCLEO_NET_WRITE) X(KOF_NUCLEO_PIPE_OPEN) \
+	X(KOF_NUCLEO_PIPE) X(KOF_NUCLEO_BACKGROUND) X(KOF_NUCLEO_PROC_EXEC) \
+	X(KOF_NUCLEO_PROC_LIST) X(KOF_NUCLEO_SPAWN) X(KOF_NUCLEO_PROC_MEM) \
+	X(KOF_NUCLEO_PTRACE) X(KOF_NUCLEO_EXEC_IMAGE) X(KOF_NUCLEO_REG_OPEN) \
+	X(KOF_NUCLEO_REG_SET) X(KOF_NUCLEO_SELF_HIDE) X(KOF_NUCLEO_SVC_INSTALL) \
+	X(KOF_NUCLEO_SLEEP) X(KOF_NUCLEO_THREAD)
 
-	/* The source writes the word in quotes - "alloc-exec" - and this
-	 * walks the capability space asking the one name table what each
-	 * value is called. Four thousand comparisons at build time, and no
-	 * second spelling of the vocabulary anywhere. */
-	n = strlen(w);
-	if (n < 3u || w[0] != '"' || w[n - 1u] != '"')
-		return 0;
+static const struct { const char *w; uint16_t v; } cap_ident[] = {
+#define KSB_CAP_ROW(id) { #id, (uint16_t)(id) },
+	KOF_NUCLEO_IDENTS(KSB_CAP_ROW)
+#undef KSB_CAP_ROW
+};
+
+/*
+ * A CAP THE VOCABULARY HAS AND THIS LIST DOES NOT is a diagnose that cannot
+ * name it, so it is a build failure and not a warning. Walking the whole
+ * capability space costs a few thousand comparisons once per build.
+ */
+static int diag_cap_table_check(void)
+{
+	unsigned c, bad = 0;
+	size_t i;
+
 	for (c = 1u; c < 0x10000u; c++) {
 		const char *nm;
 
-		if (!KOF_CAP_VALID(c))
+		if (!KOF_NUCLEO_VALID(c))
 			continue;
+		/* "?" is what the name table answers for a value inside a
+		 * group's range that no capability uses - KOF_NUCLEO_VALID is a
+		 * range test and the groups are not full. */
 		nm = kof_flow_cap_name((uint16_t)c);
-		if (nm && strlen(nm) == n - 2u &&
-		    memcmp(nm, w + 1, n - 2u) == 0) {
-			*out = (uint16_t)c;
-			return 1;
+		if (!nm || strcmp(nm, "?") == 0)
+			continue;
+		for (i = 0; i < sizeof cap_ident / sizeof cap_ident[0]; i++)
+			if (cap_ident[i].v == (uint16_t)c)
+				break;
+		if (i == sizeof cap_ident / sizeof cap_ident[0]) {
+			fprintf(stderr, "FAIL: capability \"%s\" (0x%04x) is "
+					"missing from KOF_NUCLEO_IDENTS - no "
+					"diagnose can name it\n", nm, c);
+			bad = 1;
 		}
 	}
+	return !bad;
+}
+
+/*
+ * The source writes the ENUMERATOR, so this is a lookup and not a search.
+ * It used to take the display name in quotes and walk the capability space
+ * asking kof_flow_cap_name what each value was called; the display name is
+ * what a report prints, and spelling a rule in it meant the vocabulary was
+ * written two ways for two audiences.
+ */
+static int diag_cap_of(const char *w, uint16_t *out)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof cap_ident / sizeof cap_ident[0]; i++)
+		if (strcmp(w, cap_ident[i].w) == 0) {
+			*out = cap_ident[i].v;
+			return 1;
+		}
 	return 0;
 }
 
@@ -7321,8 +7383,10 @@ static int diagnose_main(int argc, char **argv)
 	const char *out = argc > 3 ? argv[3] : NULL;
 	struct dnode nd[64];
 	char name[64] = "", line[1024], a[5][96];
+	char need_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
+	int n_need = 0;
 	int n_nd = 0, lineno = 0, i;
-	unsigned via = 0;
+	unsigned via = 0, shape = 0;
 	FILE *f, *o;
 	unsigned char *blob;
 	size_t at, need;
@@ -7332,6 +7396,8 @@ static int diagnose_main(int argc, char **argv)
 			argv[0]);
 		return 2;
 	}
+	if (!diag_cap_table_check())
+		return 1;
 	f = fopen(src, "r");
 	if (!f) {
 		fprintf(stderr, "FAIL: cannot open %s\n", src);
@@ -7350,6 +7416,8 @@ static int diagnose_main(int argc, char **argv)
 				via |= KOF_DIAG_VIA_SYSCALL;
 			if (strstr(p, "KOF_DIAG_VIA_SYMBOL"))
 				via |= KOF_DIAG_VIA_SYMBOL;
+			if (strstr(p, "KOF_DIAG_VIA_EMULATE"))
+				via |= KOF_DIAG_VIA_EMULATE;
 			if (!via)
 				err(lineno, "KOF_DIAG_VIA names no route");
 		} else if ((p = strstr(line, "KOF_DIAG_ANCHOR(")) != NULL) {
@@ -7423,15 +7491,37 @@ static int diagnose_main(int argc, char **argv)
 					d->bits |= kb;
 			}
 			n_nd++;
-		} else if ((p = strstr(line, "KOF_DIAG_TOUCH(")) != NULL) {
-			if (!diag_arg(p, 0, a[0], sizeof a[0]))
-				err(lineno, "KOF_DIAG_TOUCH wants a label");
-			else {
-				i = diag_label_idx(nd, n_nd, a[0]);
-				if (i < 0)
-					err(lineno, "no node with that label");
-				else
-					nd[i].touch = 1;
+		} else if ((p = strstr(line, "KOF_DIAG_SHAPE(")) != NULL) {
+			if (strstr(p, "KOF_DIAG_SH_ENTRY_WX"))
+				shape |= KOF_DIAG_SH_ENTRY_WX;
+			if (strstr(p, "KOF_DIAG_SH_NO_SECTIONS"))
+				shape |= KOF_DIAG_SH_NO_SECTIONS;
+			if (strstr(p, "KOF_DIAG_SH_ONE_LOAD"))
+				shape |= KOF_DIAG_SH_ONE_LOAD;
+			if (!shape)
+				err(lineno, "KOF_DIAG_SHAPE names no sign");
+		} else if ((p = strstr(line, "KOF_DIAG_NEEDS(")) != NULL) {
+			int k;
+
+			/* Every quoted word on the line is one sign. */
+			for (k = 0; diag_arg(p, k, a[0], sizeof a[0]); k++) {
+				size_t L = strlen(a[0]);
+
+				if (L < 3u || a[0][0] != '"' ||
+				    a[0][L - 1u] != '"') {
+					err(lineno, "KOF_DIAG_NEEDS wants "
+						    "quoted symbol names");
+					break;
+				}
+				if (n_need >= (int)KOF_DIAG_MAX_NEED ||
+				    L - 2u >= KOF_DIAG_NEED_LEN) {
+					err(lineno, "too many signs, or one "
+						    "is too long");
+					break;
+				}
+				memcpy(need_tbl[n_need], a[0] + 1, L - 2u);
+				need_tbl[n_need][L - 2u] = 0;
+				n_need++;
 			}
 		}
 	}
@@ -7456,13 +7546,13 @@ static int diagnose_main(int argc, char **argv)
 				errors++;
 	/*
 	 * AND THE ANCHOR MUST BE RARE, which is a cost statement and not a
-	 * correctness one - see the note on anchors in kofmod/kofdiag.h.
+	 * correctness one - see the note on anchors in kofmod/kofpathogen.h.
 	 * Matching starts by trying every node that could be the root, so a
 	 * root of READ costs one descent per read in the object; one 1.1 MB
 	 * sample here holds 447 indirect calls.
 	 */
-	if (n_nd && (nd[0].cap == KOF_CAP_READ || nd[0].cap == KOF_CAP_WRITE ||
-		     nd[0].cap == KOF_CAP_EXEC_REG))
+	if (n_nd && (nd[0].cap == KOF_NUCLEO_READ || nd[0].cap == KOF_NUCLEO_WRITE ||
+		     nd[0].cap == KOF_NUCLEO_EXEC_REG))
 		fprintf(stderr, "%s: warning: anchoring on a common "
 			"capability - every one in the object starts a "
 			"descent\n", src);
@@ -7470,6 +7560,31 @@ static int diagnose_main(int argc, char **argv)
 		return 1;
 
 	need = sizeof(struct dhdr) + strlen(name) + (size_t)n_nd * 8u;
+	/*
+	 * AND THE SIGNS, AS A TRAILING SECTION. After the nodes so a reader
+	 * built before they existed stops where it always stopped: the node
+	 * loop ends on its own count and what follows is simply not read.
+	 */
+	/*
+	 * The count byte is written whenever ANYTHING follows the nodes,
+	 * because the tagged sections below sit after it and a reader that
+	 * skipped it would take a tag for a count.
+	 */
+	if (n_need || shape) {
+		int k;
+
+		need += 1u;                     /* how many */
+		for (k = 0; k < n_need; k++)
+			need += 1u + strlen(need_tbl[k]);
+	}
+	/*
+	 * TAGGED TRAILING SECTIONS, tag and length each one byte. The signs
+	 * above are not tagged - they predate this - so anything added after
+	 * them has to be skippable by a reader that does not know it, which
+	 * a length is and a bare field is not.
+	 */
+	if (shape)
+		need += 2u + 2u;
 	blob = calloc(1, need);
 	if (!blob)
 		return 1;
@@ -7491,10 +7606,27 @@ static int diagnose_main(int argc, char **argv)
 		blob[at + 3] = (unsigned char)(nd[i].flags >> 8);
 		blob[at + 4] = (unsigned char)par;
 		blob[at + 5] = nd[i].role;
-		blob[at + 6] = (uint8_t)(nd[i].bits |
-					 (nd[i].touch ? KOF_DIAG_B_TOUCH : 0u));
+		blob[at + 6] = nd[i].bits;
 		blob[at + 7] = 0;               /* attr_len */
 		at += 8;
+	}
+	if (n_need || shape) {
+		int k;
+
+		blob[at++] = (unsigned char)n_need;
+		for (k = 0; k < n_need; k++) {
+			size_t L = strlen(need_tbl[k]);
+
+			blob[at++] = (unsigned char)L;
+			memcpy(blob + at, need_tbl[k], L);
+			at += L;
+		}
+	}
+	if (shape) {
+		blob[at++] = KDIG_SEC_SHAPE;
+		blob[at++] = 2u;
+		blob[at++] = (unsigned char)shape;
+		blob[at++] = (unsigned char)(shape >> 8);
 	}
 	o = fopen(out, "wb");
 	if (!o || fwrite(blob, 1, need, o) != need) {
@@ -7504,7 +7636,8 @@ static int diagnose_main(int argc, char **argv)
 		return 1;
 	}
 	fclose(o);
-	printf("== %s  %s  %d node, %zu bytes\n", src, name, n_nd, need);
+	printf("== %s  %s  %d node, %d sign(s), shape 0x%x, %zu bytes\n",
+	       src, name, n_nd, n_need, shape, need);
 	free(blob);
 	return 0;
 }

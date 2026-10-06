@@ -1,4 +1,4 @@
-#include <kofmod/kofdiag.h>
+#include <kofmod/kofpathogen.h>
 
 /*
  * tests/sigs/diagnoses/kmod_give_root.c
@@ -42,7 +42,7 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL);
  * prepare_creds produced, and a tree rooted the other way round would have
  * to search backwards from every install.
  */
-KOF_DIAG_ANCHOR(p, "cred-prepare", 0);
+KOF_DIAG_ANCHOR(p, KOF_NUCLEO_CRED_PREPARE, 0);
 
 /*
  * AND THE LINK IS THE EVIDENCE, not the pair being present.
@@ -51,11 +51,5 @@ KOF_DIAG_ANCHOR(p, "cred-prepare", 0);
  * prepare_creds returned. Two unrelated calls in one module would satisfy a
  * rule that only counted them.
  */
-KOF_DIAG_FROM(c, p, "cred-modify", KOF_DIAG_ROLE_BUFFER);
+KOF_DIAG_FROM(c, p, KOF_NUCLEO_CRED_SET, KOF_DIAG_ROLE_BUFFER);
 
-/*
- * The install is offered as the join point: a signature wanting "this module
- * escalates AND hides itself" binds here and asks whether the same module
- * carries the other diagnose.
- */
-KOF_DIAG_TOUCH(c);

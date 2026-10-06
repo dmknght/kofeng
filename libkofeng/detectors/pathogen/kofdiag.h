@@ -2,7 +2,7 @@
  * detectors/pathogen/kofdiag.h - the engine side of a diagnose.
  *
  * The FORMAT a diagnose is stored in is module ABI and lives in
- * kofmod/kofdiag.h, beside the vocabulary it is made of. What is here is
+ * kofmod/kofpathogen.h, beside the vocabulary it is made of. What is here is
  * what reads an object: the nodes found in it, and the matcher that walks
  * a diagnose tree over them.
  *
@@ -21,7 +21,7 @@
 
 #include "../../kofeng.h"
 #include "../../kofcore/kofmod/kofsig.h"   /* struct kof_obj_ctx */
-#include "../../kofcore/kofmod/kofdiag.h"
+#include "../../kofcore/kofmod/kofpathogen.h"
 
 /*
  * ONE NODE FOUND IN AN OBJECT.
@@ -146,6 +146,24 @@ struct kof_diag_in {
  */
 #define KOF_DIAG_H_RAW_SYSCALL (1u << 4)
 
+/*
+ * `attr` IS WHERE A STRING IS, NOT A STRUCTURE OFFSET.
+ *
+ * The same field carries two kinds of evidence and this says which. For a
+ * field access it is a displacement - see the note on attr. For a call that
+ * was handed a name, it is the OFFSET IN THE OBJECT of that name, and the
+ * bytes stay where they are: the engine reports where the evidence is rather
+ * than copying it, so nothing has to own a string and no length has to be
+ * guessed at twice.
+ *
+ * WHY THE NAME MATTERS HERE. A kprobe pair resolves A symbol, and which one
+ * is the difference between a tracing module and a rootkit: Diamorphine asks
+ * for "sys_call_table", and everything it does afterwards is indexing what
+ * came back. The links alone say "something was looked up and then indexed";
+ * with the name they say what was looked up.
+ */
+#define KOF_DIAG_H_ATTR_STR (1u << 5)
+
 struct kof_diag_hit {
 	uint64_t at;            /* where, as an offset into the object      */
 	/*
@@ -173,7 +191,7 @@ struct kof_diag_hit {
 	 * syscall number.
 	 */
 	uint64_t attr;
-	uint16_t cap;           /* enum kof_flow_cap, or KOF_CAP_NONE       */
+	uint16_t cap;           /* enum kof_flow_cap, or KOF_NUCLEO_NONE       */
 	uint16_t flags;         /* KOF_FLOWF_* observed at this site        */
 	uint8_t  bits;          /* KOF_DIAG_H_*                             */
 	uint8_t  n_in;
@@ -238,29 +256,30 @@ struct kof_diag_scan;
 struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 				    const uint8_t *base, uint64_t size);
 /*
- * ---- AND WHICH CAPABILITIES ARE WORTH RECORDING -------------------------
+ * ---- THERE IS NO CAPABILITY FILTER, AND THERE CANNOT BE ONE -------------
  *
- * `want` is the set of capabilities some loaded diagnose actually named,
- * derived from the diagnoses themselves - not declared a second time, which
- * is a list that can disagree with the trees it describes.
+ * This took a `want` set - the capabilities some loaded diagnose named -
+ * on the argument that a node nobody asked about cannot end a link. The
+ * argument is the retired prune's argument word for word, and it died the
+ * same way: A VERDICT IS NOT A TREE. It counts, it asks whether something
+ * is merely present, and the things it asks about are exactly the ones no
+ * diagnose names - the cr0 write a syscall-table verdict needs is nobody's
+ * child, so no diagnose can mention it, and filtering it out takes the
+ * detection with it.
  *
- * A node for a capability nobody asked about cannot end a link, because the
- * only thing that could consume it is a diagnose and none mentions it. It is
- * not an intermediate the chain passes THROUGH either: the span runner steps
- * over calls it has no word for and resolves links by the value, not by the
- * call. So declining to record it loses no edge - which is what makes this a
- * precondition and not a cap that deletes evidence.
+ * The parameter survived the prune's removal, was stored on the scan and
+ * READ BY NOTHING, while three comments went on describing a graph that
+ * had been filtered. A scanner was still paying a loop per object to build
+ * the set.
  *
- * MEASURED, and the reason it exists: 1056 ordinary binaries, 287 MB, cost
- * 503 us per object with everything recorded. A stager costs 7.
- *
- * n_want == 0 means RECORD EVERYTHING. That is what a survey tool wants, and
- * what the engine does when the database asks for nothing in particular.
+ * WHAT BOUNDS THE COST IS THE DEMAND GATE - see KOF_ENG_USE_PATHOGEN. An
+ * object no rule asks about pays nothing at all, which is a bigger saving
+ * than any filter inside the walk, and it is the only one that cannot cost
+ * a detection.
  */
 struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 					 const uint8_t *base, uint64_t size,
-					 unsigned run, const uint16_t *want,
-					 uint32_t n_want);
+					 unsigned run);
 
 /* Which routines actually ran on this object - a caller asking "is this
  * capability absent" must know whether the routine that would have found it
@@ -278,17 +297,29 @@ int kof_diag_scan_full(const struct kof_diag_scan *);
 void kof_diag_scan_free(struct kof_diag_scan *);
 
 /*
- * DOES THIS OBJECT CARRY THIS DIAGNOSE. 1 or 0, and on 1 the nodes bound to
- * the diagnose's TOUCH POINTS are written to `bind_out` in the order the
- * diagnose declares them - that is what a signature joins two diagnoses on,
- * see the note on kof_diag_share. A diagnose offering no touch point costs
- * one bit to answer.
+ * DOES THIS OBJECT CARRY THIS DIAGNOSE. 1 or 0, and on 1 the node each of
+ * the diagnose's nodes bound to is written to `bind_out`, in the order the
+ * diagnose declares them. That is what a signature joins two diagnoses on -
+ * see the note on kof_diag_share, which asks for a node of a given
+ * capability that both of them bound.
  *
  * `bind_out` must have room for the diagnose's node count; NULL asks for the
- * bit alone.
+ * bit alone, which is what kof_diag() costs.
  */
 int kof_diag_match(const struct kof_diag_scan *, const struct kof_diag *,
 		   uint16_t *bind_out, uint8_t *n_bind);
+
+/*
+ * SERIALISE THE GRAPH INTO THE RECORD BLOCK A RULE READS - see
+ * kofmod/kofpathogen.h. Returns the bytes written, or 0.
+ *
+ * A COPY, and deliberately: the engine's node array is its own working state
+ * and grows while the analysis runs, while a rule reads a block that does not
+ * move under it. The cost is bounded by the DATABASE rather than the object -
+ * the graph has already been pruned to the capabilities some diagnose named.
+ */
+uint32_t kof_diag_graph_build(const struct kof_diag_scan *s, uint8_t *out,
+			      uint32_t cap);
 
 /*
  * READ ONE .kdig FILE. 1 on success, 0 when the bytes do not add up - and a
@@ -298,6 +329,7 @@ int kof_diag_match(const struct kof_diag_scan *, const struct kof_diag *,
  */
 int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 		  struct kof_diag_node *node, uint8_t max_node,
-		  char *name, uint32_t name_cap);
+		  char *name, uint32_t name_cap,
+		  char *needs, uint32_t needs_cap);
 
 #endif /* KOFENG_PATHOGEN_KOFDIAG_H */

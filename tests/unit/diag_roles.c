@@ -41,7 +41,7 @@
 
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
-#include "../../libkofeng/kofcore/kofmod/kofdiag.h"
+#include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
 #include "../../libkofeng/analyzers/parsers/binaries/disasm/nucleo.h"
 #include "../../libkofeng/detectors/pathogen/diag_int.h"
 
@@ -60,7 +60,7 @@ int main(void)
 		uint8_t seen[KOF_DIAG_ROLE_COUNT];
 		unsigned i, any = 0;
 
-		if (!KOF_CAP_VALID(c))
+		if (!KOF_NUCLEO_VALID(c))
 			continue;
 		checked++;
 		memset(seen, 0, sizeof seen);

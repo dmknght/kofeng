@@ -121,12 +121,24 @@ enum kof_cap_group {
 
 /* The action, numbered inside its own group and nowhere else. */
 enum { KOF_CA_BARE_SLEEP = 1, KOF_CA_BARE_ANTI_DEBUG };
-enum { KOF_CA_MEM_FIELD_READ = 90, KOF_CA_MEM_FIELD_WRITE = 91 };
-enum { KOF_CA_MEM_ALLOC = 1, KOF_CA_MEM_ALLOC_EXEC, KOF_CA_MEM_ALLOC_HEAP, KOF_CA_MEM_EXEC, KOF_CA_MEM_MEMFD_CREATE };
+enum { KOF_CA_MEM_ALLOC = 1, KOF_CA_MEM_ALLOC_EXEC, KOF_CA_MEM_ALLOC_HEAP,
+       KOF_CA_MEM_EXEC, KOF_CA_MEM_MEMFD_CREATE,
+       /*
+        * IN THE GROUP'S OWN NUMBERING, which is not decoration: an action
+        * is one of KOF_NUCLEO_ACT_MAX per group, because KOF_NUCLEO_DENSE maps
+        * (group, action) onto a flat slot with that stride. These two were
+        * added at 90 and 91 in an enum of their own, which put them past
+        * the stride - so KOF_NUCLEO_VALID answered NO for both, and that is
+        * not a cosmetic refusal: diag_cap_of walks the capability space
+        * asking which values are valid, so a diagnose naming
+        * "mem-field-write" was rejected as "not a capability", and
+        * tests/unit/diag_roles.c skipped them for the same reason.
+        */
+       KOF_CA_MEM_FIELD_READ, KOF_CA_MEM_FIELD_WRITE };
 enum { KOF_CA_FILE_OPEN = 1, KOF_CA_FILE_READ, KOF_CA_FILE_WRITE, KOF_CA_FILE_DELETE, KOF_CA_FILE_RENAME, KOF_CA_FILE_PERM_SET, KOF_CA_FILE_TIMESTAMP_SET };
 enum { KOF_CA_NET_OPEN = 1, KOF_CA_NET_OPEN_RAW, KOF_CA_NET_CONNECT, KOF_CA_NET_BIND, KOF_CA_NET_LISTEN, KOF_CA_NET_ACCEPT, KOF_CA_NET_SEND, KOF_CA_NET_RECV, KOF_CA_NET_GETADDR, KOF_CA_NET_ADDR,
        /* HTTP is a layer above, not a spelling of the same thing - see
-	* KOF_CAP_HTTP_SEND. Appended, because renumbering breaks every rule
+	* KOF_NUCLEO_HTTP_SEND. Appended, because renumbering breaks every rule
 	* that named one of the words before it. */
        KOF_CA_NET_HTTP_OPEN, KOF_CA_NET_HTTP_CONNECT, KOF_CA_NET_HTTP_SEND,
        KOF_CA_NET_HTTP_RECV, KOF_CA_NET_HTTP_FETCH };
@@ -145,30 +157,30 @@ enum { KOF_CA_INPUT_CAPTURE = 1 };
 enum { KOF_CA_NS_CHANGE = 1 };
 enum { KOF_CA_SERVICE_INSTALL = 1 };
 
-#define KOF_CAP_MK(ctx, grp, act) \
+#define KOF_NUCLEO_MK(ctx, grp, act) \
 	((uint16_t)(((uint16_t)(ctx) << 12) | ((uint16_t)(grp) << 8) | (uint16_t)(act)))
-#define KOF_CAP_GROUP(c) ((unsigned)(((c) >> 8) & 0xfu))
-#define KOF_CAP_ACT(c)   ((unsigned)((c) & 0xffu))
-#define KOF_CAP_CTX(c)   ((unsigned)(((c) >> 12) & 0xfu))
+#define KOF_NUCLEO_GROUP(c) ((unsigned)(((c) >> 8) & 0xfu))
+#define KOF_NUCLEO_ACT(c)   ((unsigned)((c) & 0xffu))
+#define KOF_NUCLEO_CTX(c)   ((unsigned)(((c) >> 12) & 0xfu))
 /* The user-context capability this one is the kernel twin of, and back. */
-#define KOF_CAP_AS_KERNEL(c) ((uint16_t)((c) | (KOF_CCTX_KERNEL << 12)))
-#define KOF_CAP_BASE(c)      ((uint16_t)((c) & 0x0fffu))
+#define KOF_NUCLEO_AS_KERNEL(c) ((uint16_t)((c) | (KOF_CCTX_KERNEL << 12)))
+#define KOF_NUCLEO_BASE(c)      ((uint16_t)((c) & 0x0fffu))
 
 enum kof_flow_cap {
-	KOF_CAP_NONE = 0,
-	KOF_CAP_ALLOC = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC),        /* a mapping, without execute permission */
-	KOF_CAP_ALLOC_EXEC = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC_EXEC),   /* ... with it - mmap/mprotect and PROT_EXEC */
-	KOF_CAP_NET_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_OPEN),     /* socket */
-	KOF_CAP_NET_CONNECT = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_CONNECT),
-	KOF_CAP_NET_ACCEPT = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_ACCEPT),
+	KOF_NUCLEO_NONE = 0,
+	KOF_NUCLEO_ALLOC = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC),        /* a mapping, without execute permission */
+	KOF_NUCLEO_ALLOC_EXEC = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC_EXEC),   /* ... with it - mmap/mprotect and PROT_EXEC */
+	KOF_NUCLEO_NET_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_OPEN),     /* socket */
+	KOF_NUCLEO_NET_CONNECT = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_CONNECT),
+	KOF_NUCLEO_NET_ACCEPT = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_ACCEPT),
 	/*
 	 * TAKING AN ADDRESS ON THIS MACHINE - bind.
 	 *
-	 * SPLIT OUT OF KOF_CAP_NET_OPEN, which said `net-open` over
+	 * SPLIT OUT OF KOF_NUCLEO_NET_OPEN, which said `net-open` over
 	 * `bind()` and meant nothing of the sort. Opening a socket makes an
 	 * endpoint; binding one chooses WHERE ON THIS HOST it answers.
 	 */
-	KOF_CAP_NET_BIND = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_BIND),
+	KOF_NUCLEO_NET_BIND = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_BIND),
 	/*
 	 * AND WAITING TO BE CALLED - listen.
 	 *
@@ -192,27 +204,27 @@ enum kof_flow_cap {
 	 * half that does not hold is exactly the one a rule needs to tell
 	 * apart.
 	 */
-	KOF_CAP_NET_LISTEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_LISTEN),
+	KOF_NUCLEO_NET_LISTEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_LISTEN),
 	/*
 	 * READING AND WRITING A DESCRIPTOR - the words are `file-read` and
 	 * `file-write`, beside `file-open`. They read as plain `read` and
 	 * `write` for a while, which said the verb and left out what it was
-	 * done to; the socket half has its own pair - see KOF_CAP_NET_READ.
+	 * done to; the socket half has its own pair - see KOF_NUCLEO_NET_READ.
 	 */
-	KOF_CAP_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_READ),
-	KOF_CAP_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_WRITE),
+	KOF_NUCLEO_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_READ),
+	KOF_NUCLEO_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_WRITE),
 	/* Through a descriptor, source unknown - see KOF_CG_IO. */
-	KOF_CAP_MEM_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_IO, 1u),
-	KOF_CAP_MEM_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_IO, 2u),
-	KOF_CAP_FILE_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_OPEN),
-	KOF_CAP_MEMFD = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_MEMFD_CREATE),        /* a file that never touches a filesystem */
+	KOF_NUCLEO_MEM_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_IO, 1u),
+	KOF_NUCLEO_MEM_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_IO, 2u),
+	KOF_NUCLEO_FILE_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_OPEN),
+	KOF_NUCLEO_MEMFD = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_MEMFD_CREATE),        /* a file that never touches a filesystem */
 	/*
 	 * RUNNING A FILE - execve, execveat. The word is `exec-file`, which
 	 * pairs with `exec-register` for running memory; `exec-image` named
 	 * neither half of that distinction.
 	 */
-	KOF_CAP_EXEC_IMAGE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_START),
-	KOF_CAP_SPAWN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_FORK),        /* fork/vfork/clone - a separate ADDRESS SPACE */
+	KOF_NUCLEO_EXEC_IMAGE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_START),
+	KOF_NUCLEO_SPAWN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_FORK),        /* fork/vfork/clone - a separate ADDRESS SPACE */
 	/*
 	 * A THREAD, WHICH IS NOT A SMALLER PROCESS.
 	 *
@@ -226,7 +238,7 @@ enum kof_flow_cap {
 	 * A thread created by a syscall is clone with the flag; one created
 	 * through libc is a name. Both land here.
 	 */
-	KOF_CAP_THREAD = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_THREAD_CREATE),
+	KOF_NUCLEO_THREAD = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_THREAD_CREATE),
 	/*
 	 * A RAW SOCKET - socket(.., SOCK_RAW, ..).
 	 *
@@ -237,8 +249,8 @@ enum kof_flow_cap {
 	 * would not - a SYN flood, a spoofed source, a scan. Ordinary software
 	 * asks for one about as often as it asks for ptrace.
 	 */
-	KOF_CAP_NET_RAW = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_OPEN_RAW),
-	KOF_CAP_SLEEP = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_BARE, KOF_CA_BARE_SLEEP),
+	KOF_NUCLEO_NET_RAW = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_OPEN_RAW),
+	KOF_NUCLEO_SLEEP = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_BARE, KOF_CA_BARE_SLEEP),
 	/*
 	 * REACHING INTO ANOTHER PROCESS - and the three of these are the
 	 * Windows half of what ptrace is on Linux, split because the three
@@ -251,9 +263,9 @@ enum kof_flow_cap {
 	 * manager do; "opened a handle, wrote its memory and made it run" is
 	 * not, and the vocabulary has to be able to say the difference.
 	 */
-	KOF_CAP_PTRACE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_OPEN),
-	KOF_CAP_PROC_MEM = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_MEM_ACCESS),
-	KOF_CAP_PROC_EXEC = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_CONTROL),
+	KOF_NUCLEO_PTRACE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_OPEN),
+	KOF_NUCLEO_PROC_MEM = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_MEM_ACCESS),
+	KOF_NUCLEO_PROC_EXEC = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_CONTROL),
 	/*
 	 * RESOLVING AN IMPORT AT RUN TIME - GetProcAddress, dlsym.
 	 *
@@ -269,11 +281,11 @@ enum kof_flow_cap {
 	 * be ONE term among several, which is what every measured rule in
 	 * this tree turned out to need.
 	 */
-	KOF_CAP_RESOLVE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_API_RESOLVE),
+	KOF_NUCLEO_RESOLVE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_API_RESOLVE),
 	/*
 	 * LOADING A LIBRARY - LoadLibrary, LdrLoadDll, dlopen.
 	 *
-	 * SPLIT OUT OF KOF_CAP_RESOLVE, which covered both halves of the
+	 * SPLIT OUT OF KOF_NUCLEO_RESOLVE, which covered both halves of the
 	 * same two-step and could say neither. Loading a library BRINGS CODE
 	 * IN; resolving a symbol finds an address in code already there.
 	 * They are ordered - the load comes first and the lookup needs it -
@@ -281,30 +293,30 @@ enum kof_flow_cap {
 	 * or the link between them. `lib-open` then `lib-resolve`, with the
 	 * handle carrying the edge, is what the program did.
 	 */
-	KOF_CAP_LIB_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_LOAD),
+	KOF_NUCLEO_LIB_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_LOAD),
 	/*
 	 * TURNING A NAME INTO AN ADDRESS ON THE NETWORK - gethostbyname,
 	 * getaddrinfo.
 	 *
-	 * ALSO SPLIT OUT OF KOF_CAP_RESOLVE, and this one was the worst of
+	 * ALSO SPLIT OUT OF KOF_NUCLEO_RESOLVE, and this one was the worst of
 	 * the three: a DNS lookup and a GetProcAddress have nothing in
 	 * common but the English word, and the chain printed `resolve` in
 	 * the middle of a socket sequence where it meant a domain name.
 	 *
-	 * AND IT IS NOT KOF_CAP_NET_ADDR either, which is the family it sits
+	 * AND IT IS NOT KOF_NUCLEO_NET_ADDR either, which is the family it sits
 	 * in. NET_ADDR is a program BUILDING an address it already knows -
 	 * inet_addr, htons - and this is a program ASKING for one it does
 	 * not. That is the difference between a hardcoded C2 and a domain,
 	 * which is the difference between a sample that dies with its IP and
 	 * one whose operator can move it.
 	 */
-	KOF_CAP_DNS = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_GETADDR),
+	KOF_NUCLEO_DNS = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_GETADDR),
 	/*
 	 * WRITING TO THE REGISTRY - RegSetValueEx and the key creation that
 	 * precedes it. Reads are deliberately not here: a program reading its
 	 * own configuration is every program.
 	 */
-	KOF_CAP_REG_SET = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_REG, KOF_CA_REG_SET),
+	KOF_NUCLEO_REG_SET = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_REG, KOF_CA_REG_SET),
 	/*
 	 * AND THREE WORDS THE KERNEL SIDE NEEDS, because a loadable module
 	 * makes no syscalls at all - it IS the other side of them.
@@ -320,7 +332,7 @@ enum kof_flow_cap {
 	 *
 	 *     prepare_creds -> commit_creds        5 of 6     0 of 1497
 	 *     register_kprobe                      5 of 6     0 of 1497
-	 *         (the word it got was wrong twice - see KOF_CAP_KPROBE_REG)
+	 *         (the word it got was wrong twice - see KOF_NUCLEO_KPROBE_REG)
 	 *     list surgery, old spelling           2 of 6     0 of 1497
 	 *     list surgery, _or_report spelling       -     255 of 1497
 	 *
@@ -351,15 +363,15 @@ enum kof_flow_cap {
 	 * Measured: 0 of 900 clean kernel modules on either side, and 1 of 900
 	 * for prepare_kernel_cred.
 	 */
-	KOF_CAP_CRED_PREPARE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_CRED,
+	KOF_NUCLEO_CRED_PREPARE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_CRED,
 					  KOF_CA_CRED_PREPARE),
 	/* commit_creds / set_current_groups - the moment the new credentials
 	 * become the process's own. */
-	KOF_CAP_CRED_SET = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_CRED, KOF_CA_CRED_MODIFY),
+	KOF_NUCLEO_CRED_SET = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_CRED, KOF_CA_CRED_MODIFY),
 	/* The ftrace filter calls, register_kretprobe, text_poke,
 	 * set_memory_rw - putting code of one's own in the path of somebody
-	 * else's. NOT register_kprobe; see KOF_CAP_KSYM_RESOLVE. */
-	KOF_CAP_HOOK = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_HOOK),
+	 * else's. NOT register_kprobe; see KOF_NUCLEO_KSYM_RESOLVE. */
+	KOF_NUCLEO_HOOK = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_HOOK),
 	/*
 	 * A KPROBE PUT ON, AND A KPROBE TAKEN OFF. TWO WORDS, NOT ONE.
 	 *
@@ -385,9 +397,9 @@ enum kof_flow_cap {
 	 * Measured on 900 clean kernel modules from this machine: 0 of 900 on
 	 * each side.
 	 */
-	KOF_CAP_KPROBE_REG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+	KOF_NUCLEO_KPROBE_REG = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD,
 					KOF_CA_KMOD_KPROBE_REG),
-	KOF_CAP_KPROBE_UNREG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+	KOF_NUCLEO_KPROBE_UNREG = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD,
 					  KOF_CA_KMOD_KPROBE_UNREG),
 	/*
 	 * A COPY ACROSS THE USER/KERNEL BOUNDARY, WHICH IS NOT FILE I/O.
@@ -409,14 +421,14 @@ enum kof_flow_cap {
 	 * COMMON, and the numbers say so: 65 and 68 of 900 clean modules, so
 	 * roughly one in thirteen. A term, never a verdict.
 	 */
-	KOF_CAP_COPY_FROM_USER = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+	KOF_NUCLEO_COPY_FROM_USER = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD,
 					    KOF_CA_KMOD_COPY_FROM_USER),
-	KOF_CAP_COPY_TO_USER = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+	KOF_NUCLEO_COPY_TO_USER = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD,
 					  KOF_CA_KMOD_COPY_TO_USER),
 	/*
 	 * A KERNEL SYMBOL FOUND BY NAME - AND IT IS NOT dlsym.
 	 *
-	 * kallsyms_lookup_name shared KOF_CAP_RESOLVE with dlsym and
+	 * kallsyms_lookup_name shared KOF_NUCLEO_RESOLVE with dlsym and
 	 * GetProcAddress on the reasoning that both turn a name into an
 	 * address. They do, and the reach is not the same: dlsym can only
 	 * return what a library EXPORTED, while kallsyms_lookup_name returns
@@ -436,16 +448,16 @@ enum kof_flow_cap {
 	 * so Diamorphine gets its address through a kprobe and the name
 	 * survives only as a DATA STRING. These words are for the modules
 	 * that still import it - the pre-5.7 lineage - and for the code route
-	 * when there is one. See KOF_CAP_KPROBE_REG for what replaced it.
+	 * when there is one. See KOF_NUCLEO_KPROBE_REG for what replaced it.
 	 */
-	KOF_CAP_KSYM_LOOKUP = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+	KOF_NUCLEO_KSYM_LOOKUP = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD,
 					 KOF_CA_KMOD_KSYM_LOOKUP),
-	KOF_CAP_SYMBOL_GET = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD,
+	KOF_NUCLEO_SYMBOL_GET = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD,
 					KOF_CA_KMOD_SYMBOL_GET),
 	/* Taking an entry out of a kernel list: the module list, the task
 	 * list, a directory's. Ordinary code does it too - see the measurement
 	 * above - so this is a term and never a verdict. */
-	KOF_CAP_LIST_HIDE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_LIST_EDIT),
+	KOF_NUCLEO_LIST_HIDE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_LIST_EDIT),
 	/*
 	 * A PROTECTION TURNED OFF, AND IT HAS NO NAME TO MATCH.
 	 *
@@ -466,7 +478,7 @@ enum kof_flow_cap {
 	 * an ordinary module does neither, but they are two acts and a chain
 	 * that can say both is worth more than one that says "hook" twice.
 	 */
-	KOF_CAP_PROT_OFF = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_CR_WRITE),
+	KOF_NUCLEO_PROT_OFF = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_CR_WRITE),
 	/*
 	 * AN ADDRESS OR A PORT BUILT BY HAND.
 	 *
@@ -504,7 +516,7 @@ enum kof_flow_cap {
 	 * still worth having: it says something true that nothing else said,
 	 * and what it is worth is a measurement and not a hope.
 	 */
-	KOF_CAP_NET_ADDR = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_ADDR),
+	KOF_NUCLEO_NET_ADDR = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_ADDR),
 	/*
 	 * A PROCESS CHANGING WHAT IT LOOKS LIKE - prctl.
 	 *
@@ -515,7 +527,7 @@ enum kof_flow_cap {
 	 * setsid USED TO BE HERE AND IS NOT A DISGUISE. It leaves the
 	 * controlling terminal, which is the first thing in every daemon
 	 * ever written - the word claimed an intent the call does not carry.
-	 * It is KOF_CAP_BACKGROUND now.
+	 * It is KOF_NUCLEO_BACKGROUND now.
 	 *
 	 * AND THE RATE THAT WAS QUOTED HERE WAS FOR BOTH OF THEM: 15.4% of
 	 * ELF malware against 1.20% of clean, measured over the pair. It is
@@ -529,11 +541,11 @@ enum kof_flow_cap {
 	 * and PR_CAPBSET_DROP all arrive as the same word. Reported rather
 	 * than guessed at.
 	 */
-	KOF_CAP_SELF_HIDE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_SELF_NAME),
+	KOF_NUCLEO_SELF_HIDE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_SELF_NAME),
 	/*
 	 * A PROCESS PUTTING ITSELF IN THE BACKGROUND - setsid.
 	 *
-	 * SPLIT OUT OF KOF_CAP_SELF_HIDE, where it was the wrong word.
+	 * SPLIT OUT OF KOF_NUCLEO_SELF_HIDE, where it was the wrong word.
 	 * setsid leaves the controlling terminal, so the program keeps
 	 * running when the shell or the ssh session that started it closes.
 	 * That is what every daemon does and what a payload does when it
@@ -546,7 +558,7 @@ enum kof_flow_cap {
 	 * running without the thing that started it, which is why a variant
 	 * that does one where another did the other is the same program.
 	 */
-	KOF_CAP_BACKGROUND = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_BACKGROUND),
+	KOF_NUCLEO_BACKGROUND = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_BACKGROUND),
 	/*
 	 * CONTROL LEAVING THROUGH A REGISTER, INTO MEMORY THIS PROGRAM MADE
 	 * EXECUTABLE.
@@ -573,7 +585,7 @@ enum kof_flow_cap {
 	 * kof_flow_node.from - so a reader sees `jump v1` and a rule can ask
 	 * for the pair rather than for either half.
 	 */
-	KOF_CAP_EXEC_REG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_EXEC),
+	KOF_NUCLEO_EXEC_REG = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_EXEC),
 	/*
 	 * FINDING THE LIBRARIES WITHOUT ASKING THE LOADER.
 	 *
@@ -600,11 +612,11 @@ enum kof_flow_cap {
 	 * loader does this, and so does a little legitimate code that reads
 	 * PEB->BeingDebugged. The combination is a rule's to ask for.
 	 */
-	KOF_CAP_SELF_RESOLVE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_PEB_WALK),
+	KOF_NUCLEO_SELF_RESOLVE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_PEB_WALK),
 	/*
 	 * A STRING BEING FOLDED INTO A NUMBER INSIDE A LOOP.
 	 *
-	 * The companion of KOF_CAP_SELF_RESOLVE and the reason the pair is
+	 * The companion of KOF_NUCLEO_SELF_RESOLVE and the reason the pair is
 	 * worth more than either: having found the module list by hand, a
 	 * payload matches each export by hashing its name, so no API name
 	 * is anywhere in the file.
@@ -619,7 +631,7 @@ enum kof_flow_cap {
 	 * why this is an atom and not a verdict, and why the loop is part of
 	 * the test rather than the rotate alone.
 	 */
-	KOF_CAP_NAME_HASH = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_NAME_HASH),
+	KOF_NUCLEO_NAME_HASH = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_NAME_HASH),
 	/*
 	 * A CALL THROUGH A REGISTER THAT HOLDS THIS OBJECT'S OWN CODE.
 	 *
@@ -648,11 +660,11 @@ enum kof_flow_cap {
 	 * can move the seed but not the fact that he has to reach his own
 	 * code without being told where it is.
 	 *
-	 * NOT THE SAME AS KOF_CAP_EXEC_REG, which is a branch into memory an
+	 * NOT THE SAME AS KOF_NUCLEO_EXEC_REG, which is a branch into memory an
 	 * earlier step produced. This one is a branch into memory that was
 	 * already there, and the two want different rules.
 	 */
-	KOF_CAP_CALL_REG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_CALL_REGISTER),
+	KOF_NUCLEO_CALL_REG = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_LIB, KOF_CA_LIB_CALL_REGISTER),
 	/*
 	 * ================= EVENTS THE VOCABULARY HAD NO WORD FOR =========
 	 *
@@ -675,7 +687,7 @@ enum kof_flow_cap {
 	 * encrypts. Read against open-read-write-delete over a directory walk
 	 * it is something else, and that reading is a rule's to make.
 	 */
-	KOF_CAP_CRYPTO = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_CRYPTO, KOF_CA_CRYPTO_ANY),
+	KOF_NUCLEO_CRYPTO = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_CRYPTO, KOF_CA_CRYPTO_ANY),
 	/*
 	 * TAKING WHAT THE USER IS DOING - keystrokes, the clipboard, the
 	 * screen.
@@ -690,7 +702,7 @@ enum kof_flow_cap {
 	 * be told from a repaint by the name, and putting them here would
 	 * have made this word mean "has a window".
 	 */
-	KOF_CAP_CAPTURE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_INPUT, KOF_CA_INPUT_CAPTURE),
+	KOF_NUCLEO_CAPTURE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_INPUT, KOF_CA_INPUT_CAPTURE),
 	/*
 	 * INSTALLING ITSELF AS A SERVICE.
 	 *
@@ -698,7 +710,7 @@ enum kof_flow_cap {
 	 * is the only way to ask for it. Installers do this too, which is why
 	 * it is an atom; what it is NOT is ambiguous about what happened.
 	 */
-	KOF_CAP_SVC_INSTALL = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_SERVICE, KOF_CA_SERVICE_INSTALL),
+	KOF_NUCLEO_SVC_INSTALL = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_SERVICE, KOF_CA_SERVICE_INSTALL),
 	/*
 	 * PUTTING CODE IN THE KERNEL FROM USERLAND.
 	 *
@@ -711,7 +723,7 @@ enum kof_flow_cap {
 	 * delete_module is the same word: taking a module out is how one
 	 * rootkit unloads a monitor.
 	 */
-	KOF_CAP_MOD_LOAD = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_LOAD),
+	KOF_NUCLEO_MOD_LOAD = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_KMOD, KOF_CA_KMOD_LOAD),
 	/*
 	 * A NAMED PIPE OR FIFO.
 	 *
@@ -720,7 +732,7 @@ enum kof_flow_cap {
 	 * `mkfifo` and two redirections. An anonymous pipe is NOT this word:
 	 * every shell pipeline is one.
 	 */
-	KOF_CAP_PIPE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PIPE, KOF_CA_PIPE_NAMED_CREATE),
+	KOF_NUCLEO_PIPE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PIPE, KOF_CA_PIPE_NAMED_CREATE),
 	/*
 	 * REMOVING A FILE, OR MOVING IT OUT FROM UNDER ITS NAME.
 	 *
@@ -729,7 +741,7 @@ enum kof_flow_cap {
 	 * unlinks temporary files constantly, so this is COMMON company - it
 	 * is here so that a chain can SAY it, not so that it can decide.
 	 */
-	KOF_CAP_FILE_DELETE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_DELETE),
+	KOF_NUCLEO_FILE_DELETE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_DELETE),
 	/*
 	 * CHANGING A FILE'S PERMISSIONS.
 	 *
@@ -737,7 +749,7 @@ enum kof_flow_cap {
 	 * runnable. `write` then `chmod` on the same path is a shape, and
 	 * without this word the second half was invisible.
 	 */
-	KOF_CAP_PERM_SET = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_PERM_SET),
+	KOF_NUCLEO_PERM_SET = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_PERM_SET),
 	/*
 	 * ASKING WHETHER IT IS BEING DEBUGGED.
 	 *
@@ -746,7 +758,7 @@ enum kof_flow_cap {
 	 * from the debugger. The timing tricks are NOT here: GetTickCount and
 	 * QueryPerformanceCounter are how every program measures anything.
 	 */
-	KOF_CAP_ANTI_DEBUG = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_BARE, KOF_CA_BARE_ANTI_DEBUG),
+	KOF_NUCLEO_ANTI_DEBUG = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_BARE, KOF_CA_BARE_ANTI_DEBUG),
 	/*
 	 * CHANGING WHAT THE PROCESS CAN SEE - chroot, pivot_root, setns,
 	 * unshare.
@@ -756,7 +768,7 @@ enum kof_flow_cap {
 	 * depends on the direction and on what the process did next, so the
 	 * word records that the boundary moved and leaves the rest to a rule.
 	 */
-	KOF_CAP_JAIL = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NS, KOF_CA_NS_CHANGE),
+	KOF_NUCLEO_JAIL = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NS, KOF_CA_NS_CHANGE),
 	/*
 	 * ===== AND THREE MORE, FOUND BY MEASUREMENT RATHER THAN BY READING
 	 * A HEADER. Every imported name in 10243 objects of two corpora was
@@ -776,7 +788,7 @@ enum kof_flow_cap {
 	 * A shell does this too, for every pipeline it builds. What a shell
 	 * does not do is reach the descriptor from a socket.
 	 */
-	KOF_CAP_FD_REDIR = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_FD_REDIRECT),
+	KOF_NUCLEO_FD_REDIR = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_FD_REDIRECT),
 	/*
 	 * SETTING A FILE'S TIMESTAMPS.
 	 *
@@ -784,7 +796,7 @@ enum kof_flow_cap {
 	 * file, and it is so that the file does not look new. An archiver
 	 * restoring an mtime is the honest use and it is a narrow one.
 	 */
-	KOF_CAP_TIMESTOMP = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_TIMESTAMP_SET),
+	KOF_NUCLEO_TIMESTOMP = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_TIMESTAMP_SET),
 	/*
 	 * READING THE LIST OF RUNNING PROCESSES.
 	 *
@@ -798,7 +810,7 @@ enum kof_flow_cap {
 	 * WHAT IT IS FOR, either way: finding a process to inject into, or
 	 * finding the one that would notice.
 	 */
-	KOF_CAP_PROC_LIST = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_ENUM),
+	KOF_NUCLEO_PROC_LIST = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PROC, KOF_CA_PROC_ENUM),
 	/*
 	 * READING FROM, AND WRITING TO, A SOCKET.
 	 *
@@ -816,7 +828,7 @@ enum kof_flow_cap {
 	 * net-accept or net-raw. That is the same link the chain already
 	 * carries, read for what it means instead of only displayed.
 	 *
-	 * A `read` whose descriptor cannot be followed stays KOF_CAP_READ.
+	 * A `read` whose descriptor cannot be followed stays KOF_NUCLEO_READ.
 	 * The absence of an edge is not evidence of a file.
 	 */
 	/*
@@ -825,8 +837,8 @@ enum kof_flow_cap {
 	 * `net-write` for a while, which named the direction twice and the
 	 * act not at all.
 	 */
-	KOF_CAP_NET_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_RECV),
-	KOF_CAP_NET_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_SEND),
+	KOF_NUCLEO_NET_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_RECV),
+	KOF_NUCLEO_NET_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_SEND),
 	/*
 	 * HTTP IS NOT A SOCKET SEND, AND FLATTENING IT ONTO ONE LOSES THE
 	 * LAYER.
@@ -845,20 +857,20 @@ enum kof_flow_cap {
 	 * It gets its own word, http-fetch, because no pair of the others
 	 * composes to it - there is no send and no recv to link.
 	 */
-	KOF_CAP_HTTP_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+	KOF_NUCLEO_HTTP_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET,
 				       KOF_CA_NET_HTTP_OPEN),
-	KOF_CAP_HTTP_CONNECT = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+	KOF_NUCLEO_HTTP_CONNECT = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET,
 					  KOF_CA_NET_HTTP_CONNECT),
-	KOF_CAP_HTTP_SEND = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+	KOF_NUCLEO_HTTP_SEND = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET,
 				       KOF_CA_NET_HTTP_SEND),
-	KOF_CAP_HTTP_RECV = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+	KOF_NUCLEO_HTTP_RECV = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET,
 				       KOF_CA_NET_HTTP_RECV),
-	KOF_CAP_HTTP_FETCH = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_NET,
+	KOF_NUCLEO_HTTP_FETCH = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET,
 					KOF_CA_NET_HTTP_FETCH),
 	/*
 	 * AN ANONYMOUS PIPE, AND IT IS NOT A FINDING.
 	 *
-	 * KOF_CAP_PIPE says so where it is defined: every shell pipeline
+	 * KOF_NUCLEO_PIPE says so where it is defined: every shell pipeline
 	 * is one, and a word that fires on all of them says nothing. That
 	 * reasoning stands and this does not contradict it.
 	 *
@@ -873,11 +885,11 @@ enum kof_flow_cap {
 	 * unused mapping, so the shell pipeline the reasoning above warns
 	 * about never reaches a page.
 	 */
-	KOF_CAP_PIPE_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_PIPE, KOF_CA_PIPE_CREATE),
+	KOF_NUCLEO_PIPE_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_PIPE, KOF_CA_PIPE_CREATE),
 	/*
 	 * MOVING A FILE OUT FROM UNDER ITS NAME.
 	 *
-	 * Split from KOF_CAP_FILE_DELETE, which used to carry it. The
+	 * Split from KOF_NUCLEO_FILE_DELETE, which used to carry it. The
 	 * classification was right - a dropper that renames the installer
 	 * away and one that unlinks it are doing the same thing to the
 	 * same file - but the WORD was not: the page said `file-delete`
@@ -888,7 +900,7 @@ enum kof_flow_cap {
 	 * same to a reader: ransomware renames what it encrypted and
 	 * keeps it, a wiper does not.
 	 */
-	KOF_CAP_FILE_RENAME = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_RENAME),
+	KOF_NUCLEO_FILE_RENAME = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_RENAME),
 	/*
 	 * A HEAP BUFFER, AND IT IS NOT A FINDING EITHER.
 	 *
@@ -906,7 +918,7 @@ enum kof_flow_cap {
 	 * MEASURED on a gcc -O0 build with eight links written into the
 	 * source: seven were found and this was the one missing.
 	 *
-	 * NOT KOF_CAP_ALLOC, although both hand back memory. That word
+	 * NOT KOF_NUCLEO_ALLOC, although both hand back memory. That word
 	 * goes through prot_cap, which reads an argument as an mmap
 	 * protection - and malloc's first argument is a SIZE, so
 	 * `malloc(7)` would have been reported as `alloc-exec`. Heap
@@ -916,7 +928,7 @@ enum kof_flow_cap {
 	 * Dropped by the same rule as the pipe when nothing consumes it,
 	 * so a program that merely allocates never reaches a page.
 	 */
-	KOF_CAP_HEAP = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC_HEAP),
+	KOF_NUCLEO_HEAP = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_ALLOC_HEAP),
 	/*
 	 * A FIELD OF AN OBJECT ANOTHER NODE PRODUCED, READ OR WRITTEN.
 	 *
@@ -941,19 +953,19 @@ enum kof_flow_cap {
 	 * WHICH field is in kof_diag_hit.attr. Without the number the word
 	 * says only "touched something", which no rule can use.
 	 */
-	KOF_CAP_FIELD_READ = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM,
+	KOF_NUCLEO_FIELD_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM,
 					KOF_CA_MEM_FIELD_READ),
-	KOF_CAP_FIELD_WRITE = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_MEM,
+	KOF_NUCLEO_FIELD_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM,
 					 KOF_CA_MEM_FIELD_WRITE),
 	/*
 	 * AN OPEN REGISTRY KEY, AND IT IS NOT A FINDING.
 	 *
-	 * The row above KOF_CAP_REG_SET says the vocabulary takes registry
+	 * The row above KOF_NUCLEO_REG_SET says the vocabulary takes registry
 	 * WRITES only, because a program reading its own configuration is
 	 * every program. That still holds and this does not contradict it:
 	 * `RegOpenKeyEx` is not the read, it is where the HANDLE comes from,
 	 * and `RegSetValueEx(hKey, "Run", ...)` had nothing to point at
-	 * without it. The same shape as KOF_CAP_PIPE_OPEN, answered the same
+	 * without it. The same shape as KOF_NUCLEO_PIPE_OPEN, answered the same
 	 * way - a step that exists to be the head of a link, dropped by the
 	 * prune when nothing consumes it.
 	 *
@@ -962,7 +974,7 @@ enum kof_flow_cap {
 	 * RegSetValueExW's own count - every one of those writes was a step
 	 * with `_` where the key should be.
 	 */
-	KOF_CAP_REG_OPEN = KOF_CAP_MK(KOF_CCTX_USER, KOF_CG_REG, KOF_CA_REG_OPEN),
+	KOF_NUCLEO_REG_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_REG, KOF_CA_REG_OPEN),
 	/*
 	 * ================= AND WHAT WAS LEFT OUT, WITH WHY =================
 	 *
@@ -973,7 +985,7 @@ enum kof_flow_cap {
 	 *   directory enumeration   FindFirstFile, readdir, getdents - every
 	 *                           archiver, backup tool and indexer. The
 	 *                           PROCESS list is a different question and
-	 *                           has a word; see KOF_CAP_PROC_LIST.
+	 *                           has a word; see KOF_NUCLEO_PROC_LIST.
 	 *   file probing            access, stat, lstat - 253, 109 and 20 of
 	 *                           the measured objects, and every one of
 	 *                           them is "does this exist".
@@ -989,7 +1001,7 @@ enum kof_flow_cap {
 	 *                           GetSystemInfo - every installer.
 	 *   single instance         CreateMutex - every desktop application.
 	 *   COM and WMI             CoCreateInstance - all of Windows.
-	 *   screen drawing          BitBlt, GetDC - see KOF_CAP_CAPTURE.
+	 *   screen drawing          BitBlt, GetDC - see KOF_NUCLEO_CAPTURE.
 	 *   signals                 kill, sigaction - every supervisor.
 	 *   anonymous pipes         pipe, pipe2 - every shell pipeline.
 	 *
@@ -1000,7 +1012,7 @@ enum kof_flow_cap {
 	 */
 	/* Not a count any more - the values are sparse. Kept as the end
 	 * marker the enum needs and nothing indexes by it. */
-	KOF_CAP_LAST
+	KOF_NUCLEO_LAST
 };
 
 /*
@@ -1020,7 +1032,7 @@ enum kof_flow_cap {
 /*
  * THE CEILING, NOW OVER GROUPS AND NOT OVER WORDS.
  *
- * `1ull << cap` is gone: the mask is `1ull << KOF_CAP_GROUP(cap)` and there
+ * `1ull << cap` is gone: the mask is `1ull << KOF_NUCLEO_GROUP(cap)` and there
  * are sixteen groups, so the vocabulary can grow a word whenever the thing
  * it names is real. What is bounded is the number of ACTIONS inside one
  * group, because the dense index below multiplies by a fixed stride - and
@@ -1036,17 +1048,17 @@ typedef char kof_cap_groups_fit[(KOF_CG_COUNT <= 64) ? 1 : -1];
  * kof_pth_profile indexes two arrays by capability. This maps it to a dense
  * slot. The stride is the real limit on actions per group; the assert above
  * does not catch that, so every table that fills a group is written against
- * it and KOF_CAP_ACT_MAX says so out loud.
+ * it and KOF_NUCLEO_ACT_MAX says so out loud.
  */
-#define KOF_CAP_ACT_MAX   16u
-#define KOF_CAP_DENSE(c)  ((unsigned)(KOF_CAP_GROUP(c) * KOF_CAP_ACT_MAX \
-			   + KOF_CAP_ACT(c)))
-#define KOF_CAP_DENSE_MAX ((unsigned)(KOF_CG_COUNT * KOF_CAP_ACT_MAX))
-/* A value that could have come from KOF_CAP_MK and nothing else. Replaces
- * `cap < KOF_CAP_COUNT`, which stopped meaning anything when the values
+#define KOF_NUCLEO_ACT_MAX   16u
+#define KOF_NUCLEO_DENSE(c)  ((unsigned)(KOF_NUCLEO_GROUP(c) * KOF_NUCLEO_ACT_MAX \
+			   + KOF_NUCLEO_ACT(c)))
+#define KOF_NUCLEO_DENSE_MAX ((unsigned)(KOF_CG_COUNT * KOF_NUCLEO_ACT_MAX))
+/* A value that could have come from KOF_NUCLEO_MK and nothing else. Replaces
+ * `cap < KOF_NUCLEO_COUNT`, which stopped meaning anything when the values
  * stopped being consecutive. */
-#define KOF_CAP_VALID(c) ((c) && KOF_CAP_GROUP(c) < KOF_CG_COUNT && \
-			  KOF_CAP_ACT(c) && KOF_CAP_ACT(c) < KOF_CAP_ACT_MAX)
+#define KOF_NUCLEO_VALID(c) ((c) && KOF_NUCLEO_GROUP(c) < KOF_CG_COUNT && \
+			  KOF_NUCLEO_ACT(c) && KOF_NUCLEO_ACT(c) < KOF_NUCLEO_ACT_MAX)
 
 const char *kof_flow_cap_name(uint16_t cap);
 

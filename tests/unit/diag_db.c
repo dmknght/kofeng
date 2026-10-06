@@ -9,8 +9,8 @@
  *   ksigbuilder   reads the KOF_DIAG_* macros as text and writes a .kdig
  *   kof_diag_load reads that .kdig back
  *   the loader    puts it in the engine and gives it an id
- *   the scanner   runs the walk on demand and publishes the ids it matched
- *   kof_result    carries them out to a caller
+ *   the scanner   runs the walk when a rule asks for it
+ *   kof_diag()    hashes the name the rule wrote and finds that id again
  *
  * Every one of those is a place where a capability id, a parent index or an
  * off-by-one in the id numbering turns a working diagnose into silence - and
@@ -19,9 +19,15 @@
  * matched 0 of 34 samples once for precisely that reason: the writer and the
  * reader numbered the capability groups differently.
  *
- * SO THE TEST ASKS FOR BOTH ANSWERS. A payload that must report rwx_exec,
- * and a payload that must report nothing. One of them alone passes against
- * an engine that is broken in the other direction.
+ * SO THE TEST ASKS FOR BOTH ANSWERS. A payload that must match rwx_exec,
+ * and a payload that must not. One of them alone passes against an engine
+ * that is broken in the other direction.
+ *
+ * WHAT IT WATCHES IS A VERDICT, because that is the only way a diagnose
+ * reaches a caller: tests/sigs/sig_diag_rwx_00.c reads the fixture and infects
+ * on it. There was a listing of matched diagnoses on kof_result and it was
+ * removed - a diagnose is a step, not an answer - which also removed the
+ * other way of asking.
  *
  * IT USES THE TEST DATABASE, which is where rwx_exec lives - see
  * tests/sigs/diagnoses/rwx_exec.c for why it is a fixture and not a shipped
@@ -98,13 +104,9 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	(void)bytes;
 	(void)len;
 	g->n_obj++;
-	for (i = 0; i < res->n_diag; i++) {
-		const char *nm = kdb_diag_name(g->eng, res->diag[i]);
-
-		g->n_diag++;
-		if (nm && strcmp(nm, "rwx_exec") == 0)
+	for (i = 0; i < res->n; i++)
+		if (strstr(res->v[i].name, "DiagRwxTest"))
 			g->saw_rwx = 1;
-	}
 	return 0;
 }
 
@@ -115,10 +117,6 @@ static void run(kof_scanner *sc, const kof_engine *eng, const uint8_t *b,
 	struct got g;
 
 	memset(&opt, 0, sizeof opt);
-	/* The reporting mode a tool opts into - see kof_scan_option.want_diag.
-	 * Without it the walk is demand driven and no rule here asks, so the
-	 * result would correctly carry nothing and the test would prove it. */
-	opt.want_diag = 1;
 	memset(&g, 0, sizeof g);
 	g.eng = eng;
 
@@ -130,7 +128,8 @@ static void run(kof_scanner *sc, const kof_engine *eng, const uint8_t *b,
 	}
 	if (g.saw_rwx != want) {
 		printf("  FAIL %s: rwx_exec %s\n", what,
-		       want ? "was not reported" : "was reported and must not be");
+		       want ? "did not reach a verdict"
+			    : "reached a verdict and must not have");
 		fails++;
 	}
 }

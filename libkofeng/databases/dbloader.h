@@ -24,7 +24,7 @@
 #include <stdint.h>
 
 #include <kofmod/kofsig.h>
-#include <kofmod/kofdiag.h>
+#include <kofmod/kofpathogen.h>
 #include <kofmod/kofplague.h>
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */
@@ -358,6 +358,8 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
 #define KOF_DB_MAX_DIAG       256u
 #define KOF_DB_MAX_DIAG_NODE   32u
 #define KOF_DB_DIAG_NAME       48u
+/* Room for one diagnose's signs - see struct kof_diag.need. */
+#define KOF_DB_DIAG_NEEDS      (KOF_DIAG_MAX_NEED * KOF_DIAG_NEED_LEN)
 
 struct kof_engine {
 	uint8_t *code;        /* arena base, mapped read + execute */
@@ -374,6 +376,7 @@ struct kof_engine {
 	struct kof_diag      *diag;
 	struct kof_diag_node *diag_node;
 	char                 *diag_name;
+	char                 *diag_needs;
 	uint32_t              n_diag;
 	int                   diag_full;
 

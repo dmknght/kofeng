@@ -236,7 +236,7 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	 * so W AND X IN ONE CALL is what separates the two. Measured, no
 	 * clean binary in 846 of /usr/bin does it.
 	 */
-	a = find(s, KOF_CAP_ALLOC_EXEC, &ia);
+	a = find(s, KOF_NUCLEO_ALLOC_EXEC, &ia);
 	CK(a != NULL);
 	if (a) {
 		CK((a->flags & KOF_FLOWF_WX) != 0);
@@ -251,8 +251,8 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	 * told what this one is - see KOF_CG_IO. A run that proves it came
 	 * from a socket corrects the word to net-recv, and the diagnose below
 	 * still matches because a rule names the level it means. */
-	r = find(s, KOF_CAP_MEM_READ, NULL);
-	x = find(s, KOF_CAP_EXEC_REG, NULL);
+	r = find(s, KOF_NUCLEO_MEM_READ, NULL);
+	x = find(s, KOF_NUCLEO_EXEC_REG, NULL);
 	CK(r != NULL);
 	CK(x != NULL);
 	if (a && r && x) {
@@ -270,11 +270,11 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	 */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
+			{ KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
 			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_CAP_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER,
-			  KOF_DIAG_B_TOUCH, 0 },
-			{ KOF_CAP_EXEC_REG, 0, 0, KOF_DIAG_ROLE_TARGET, 0, 0 },
+			{ KOF_NUCLEO_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER,
+			  0, 0 },
+			{ KOF_NUCLEO_EXEC_REG, 0, 0, KOF_DIAG_ROLE_TARGET, 0, 0 },
 		};
 		static const struct kof_diag dg = {
 			1, KOF_DIAG_VIA_SYSCALL, 3, "rwx_exec", nd
@@ -283,9 +283,16 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 		uint8_t nb = 0;
 
 		CK(kof_diag_match(s, &dg, bind, &nb) == 1);
-		/* One touch point was offered, so exactly one comes back -
-		 * the cost of an answer is the size of the question. */
-		CK(nb == 1);
+		/*
+		 * ONE SLOT PER DECLARED NODE, in declaration order. A
+		 * diagnose no longer marks which of them may be joined on,
+		 * so a verdict asking kof_diag_share for a node of a given
+		 * capability has to be able to see all three.
+		 */
+		CK(nb == 3);
+		CK(kof_diag_scan_at(s, bind[0])->cap == KOF_NUCLEO_ALLOC_EXEC);
+		CK(kof_diag_scan_at(s, bind[1])->cap == KOF_NUCLEO_MEM_READ);
+		CK(kof_diag_scan_at(s, bind[2])->cap == KOF_NUCLEO_EXEC_REG);
 	}
 	kof_diag_scan_free(s);
 }
@@ -302,9 +309,9 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 static void unlinked_does_not_match(void)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		{ KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
 		  KOF_DIAG_ROLE_NONE, 0, 0 },
-		{ KOF_CAP_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER, 0, 0 },
+		{ KOF_NUCLEO_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER, 0, 0 },
 	};
 	static const struct kof_diag dg = {
 		1, KOF_DIAG_VIA_SYSCALL, 2, "needs_a_link", nd
@@ -353,8 +360,8 @@ static void unlinked_does_not_match(void)
 	if (!s)
 		return;
 	/* Both capabilities are there... */
-	CK(find(s, KOF_CAP_ALLOC_EXEC, NULL) != NULL);
-	CK(find(s, KOF_CAP_MEM_READ, NULL) != NULL);
+	CK(find(s, KOF_NUCLEO_ALLOC_EXEC, NULL) != NULL);
+	CK(find(s, KOF_NUCLEO_MEM_READ, NULL) != NULL);
 	/* ...and the diagnose still must not match, because nothing joins
 	 * them. */
 	CK(kof_diag_match(s, &dg, NULL, NULL) == 0);
@@ -379,7 +386,7 @@ static void unlinked_does_not_match(void)
 static void unreadable_prot_is_not_zero(void)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KOF_CAP_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		{ KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
 		  KOF_DIAG_ROLE_NONE, 0, 0 },
 	};
 	static const struct kof_diag dg = {
@@ -423,12 +430,12 @@ static void unreadable_prot_is_not_zero(void)
 	if (!s)
 		return;
 	/* The node is there - dropping it would lose the site entirely. */
-	h = find(s, KOF_CAP_ALLOC, NULL);
+	h = find(s, KOF_NUCLEO_ALLOC, NULL);
 	CK(h != NULL);
 	/* ...and it says the argument that decides its meaning was unread. */
 	CK(h && (h->bits & KOF_DIAG_H_ARG_UNKNOWN));
 	/* It is NOT reported as an executable allocation... */
-	CK(find(s, KOF_CAP_ALLOC_EXEC, NULL) == NULL);
+	CK(find(s, KOF_NUCLEO_ALLOC_EXEC, NULL) == NULL);
 	/* ...and a diagnose that demands one does not match it. */
 	CK(kof_diag_match(s, &dg, NULL, NULL) == 0);
 	kof_diag_scan_free(s);
@@ -496,9 +503,9 @@ static void deep_in_a_big_segment(void)
 	CK(s != NULL);
 	if (!s)
 		return;
-	a = find(s, KOF_CAP_ALLOC_EXEC, &ia);
-	r = find(s, KOF_CAP_MEM_READ, NULL);
-	x = find(s, KOF_CAP_EXEC_REG, NULL);
+	a = find(s, KOF_NUCLEO_ALLOC_EXEC, &ia);
+	r = find(s, KOF_NUCLEO_MEM_READ, NULL);
+	x = find(s, KOF_NUCLEO_EXEC_REG, NULL);
 	CK(a != NULL);
 	CK(r != NULL);
 	CK(x != NULL);
@@ -542,8 +549,8 @@ static void scenarios_are_separable(void)
 
 	all  = kof_diag_scan(&ctx, x64, sizeof x64);
 	one  = kof_diag_scan_with(&ctx, x64, sizeof x64,
-				  KOF_DIAG_RUN_SYSCALL, NULL, 0u);
-	none = kof_diag_scan_with(&ctx, x64, sizeof x64, 0u, NULL, 0u);
+				  KOF_DIAG_RUN_SYSCALL);
+	none = kof_diag_scan_with(&ctx, x64, sizeof x64, 0u);
 
 	CK(all != NULL);
 	CK(one != NULL);

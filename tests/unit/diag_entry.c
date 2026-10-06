@@ -167,7 +167,7 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 			 * from a run would be a different question counted
 			 * in the same total. */
 			return kof_diag_scan_with(ctx, b, n,
-						  KOF_DIAG_RUN_SYSCALL, NULL, 0u);
+						  KOF_DIAG_RUN_SYSCALL);
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;
@@ -206,7 +206,7 @@ int main(void)
 			/* mem-write, not file-write: write(2) takes a
 			 * descriptor and nothing here says what it is. See
 			 * KOF_CG_IO. */
-			CK(kof_diag_scan_at(s, 0)->cap == KOF_CAP_MEM_WRITE);
+			CK(kof_diag_scan_at(s, 0)->cap == KOF_NUCLEO_MEM_WRITE);
 		kof_diag_scan_free(s);
 	}
 
@@ -266,7 +266,7 @@ int main(void)
 		if (s && count(s) == 1u) {
 			h = kof_diag_scan_at(s, 0);
 			/* Not proc-start. Not anything. */
-			CK(h->cap == KOF_CAP_NONE);
+			CK(h->cap == KOF_NUCLEO_NONE);
 			/* And said to be a read number rather than an
 			 * unreadable one - the two are different states and
 			 * only one of them is interesting. */
