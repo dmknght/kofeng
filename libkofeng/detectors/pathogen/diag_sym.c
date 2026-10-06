@@ -68,6 +68,89 @@
  * The same 256 bytes the syscall routine uses and for the same reason. */
 #define DIAG_SYM_LEAD 256u
 
+/*
+ * ---- WHICH SYMBOL AN INSTRUCTION'S OPERAND REALLY NAMES ------------------
+ *
+ * A relocatable object's operands are HOLES: `&__this_module->list` assembles
+ * as `48 c7 c7 00 00 00 00`, and the symbol and the offset are in the
+ * relocation beside the instruction rather than in it. Without this the walk
+ * reads a register loaded with zero and the whole statement disappears.
+ *
+ * ONLY THE ONES A WALK CAN USE. Calls are already handled - they come through
+ * kof_elf_relcalls and become sites - so what is gathered here is the rest:
+ * an operand that names a symbol. The two kinds are kept apart because a call
+ * relocation's `where` points at a displacement the decoder already resolves,
+ * and treating it as an operand would set a register from a branch target.
+ */
+#define DIAG_SYM_REFS 512u
+
+struct symref {
+	uint64_t where;         /* file offset of the bytes the link patches */
+	uint64_t nameoff;       /* file offset of the symbol's name          */
+	int64_t  add;
+};
+
+struct refgather {
+	struct symref *r;
+	uint32_t       n, cap;
+};
+
+static int take_ref(void *user, uint64_t where, uint32_t type, uint64_t sym,
+		    int defined, int64_t addend, uint64_t nameoff)
+{
+	struct refgather *g = user;
+
+	(void)type;
+	(void)sym;
+	(void)defined;
+	if (g->n >= g->cap)
+		return 0;               /* full - see kof_elf_reloc_fn */
+	if (!nameoff)
+		return 1;
+	g->r[g->n].where = where;
+	g->r[g->n].nameoff = nameoff;
+	g->r[g->n].add = addend;
+	g->n++;
+	return 1;
+}
+
+/* The relocation whose patched bytes lie inside this instruction, or NULL. */
+static const struct symref *ref_in(const struct refgather *g, uint64_t at,
+				   uint8_t len)
+{
+	uint32_t i;
+
+	for (i = 0; i < g->n; i++)
+		if (g->r[i].where >= at && g->r[i].where < at + (uint64_t)len)
+			return &g->r[i];
+	return NULL;
+}
+
+/*
+ * A register written by an instruction whose operand a relocation names now
+ * carries that symbol - see struct org.
+ *
+ * AFTER kof_diag_org_step AND NOT BEFORE, because the step clears every
+ * register the instruction wrote, and this is what the instruction wrote.
+ *
+ * A REGISTER DESTINATION ONLY. A call's own relocation patches the
+ * displacement inside the branch, which is a KDIS_O_REL operand, so the test
+ * below is what keeps a branch target from being read as a loaded address.
+ */
+static void note_symref(struct walk *w, const struct refgather *g,
+			const struct kdis_insn *in)
+{
+	const struct symref *r;
+
+	if (in->n_op < 1u || in->o[0].kind != KDIS_O_REG)
+		return;
+	r = ref_in(g, in->at, in->len);
+	if (!r)
+		return;
+	kof_diag_org_set_sym(w, in->o[0].reg, (uint32_t)r->nameoff,
+			     (int32_t)r->add);
+}
+
 struct relsite {
 	uint64_t at;            /* what a decoder computes as the target */
 	uint16_t cap;
@@ -155,6 +238,8 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	static struct relsite  sites[DIAG_SYM_MAX];
 	static struct funcrange fns[DIAG_SYM_FUNCS];
 	static uint16_t        node_of[DIAG_SYM_MAX];
+	static struct symref   refs[DIAG_SYM_REFS];
+	struct refgather rg;
 	struct relgather g;
 	struct funcgather fg;
 	const struct kof_elf_info *ei;
@@ -227,6 +312,12 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	 * and ends, so this costs no search; and it bounds the walk, which a
 	 * sweep of the section would not.
 	 */
+	/* The operand relocations, once for the object - see struct symref. */
+	rg.r = refs;
+	rg.n = 0;
+	rg.cap = DIAG_SYM_REFS;
+	kof_elf_relocs(f, ei, take_ref, &rg);
+
 	for (j = 0; j < fg.n; j++) {
 		struct kof_kdis k;
 		struct kdis_insn in;
@@ -261,6 +352,7 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 */
 			if (in.op != KDIS_CALL && in.op != KDIS_JMP) {
 				kof_diag_org_step(&w, &in);
+				note_symref(&w, &rg, &in);
 				continue;
 			}
 			tva = in.target;        /* an offset, both sides */
@@ -284,6 +376,27 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 						kof_diag_org_of(&w,
 								kof_diag_sysv_arg[a]),
 						role, KOF_DIAG_KIND_PRODUCED);
+					/*
+					 * AND WHICH SYMBOL IT NAMED, if the
+					 * relocation table said - see
+					 * KOF_DIAG_H_SYMREF. The first such
+					 * argument stands: a call takes one
+					 * object, and a second would be a
+					 * different relation wearing the
+					 * same word.
+					 */
+					if (!(h->bits & KOF_DIAG_H_SYMREF)) {
+						int32_t ad = 0;
+						uint32_t so =
+						  kof_diag_org_sym(&w,
+						    kof_diag_sysv_arg[a], &ad);
+
+						if (so) {
+							h->symref = so;
+							h->symadd = ad;
+							h->bits |= KOF_DIAG_H_SYMREF;
+						}
+					}
 				}
 				break;
 			}

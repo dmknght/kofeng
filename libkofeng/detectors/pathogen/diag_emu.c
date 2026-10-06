@@ -387,9 +387,12 @@ static const unsigned arg_reg32[6] = {
  */
 struct relapply { struct kof_emu *em; uint64_t size; };
 
-static void apply_reloc(void *user, uint64_t where, uint32_t type,
-			uint64_t sym, int defined, int64_t addend)
+static int apply_reloc(void *user, uint64_t where, uint32_t type,
+		       uint64_t sym, int defined, int64_t addend,
+		       uint64_t nameoff)
 {
+	(void)nameoff;          /* this one is making the image runnable */
+
 	struct relapply *a = user;
 	uint64_t p = DIAG_REL_BASE + where;
 	uint64_t s = DIAG_REL_BASE + sym;
@@ -398,7 +401,7 @@ static void apply_reloc(void *user, uint64_t where, uint32_t type,
 	uint64_t v = 0;
 
 	if (!defined || where + 4u > a->size)
-		return;
+		return 1;
 	switch (type) {
 	case 1u:                                /* R_X86_64_64   S + A      */
 		v = s + (uint64_t)addend; n = 8u; break;
@@ -408,13 +411,14 @@ static void apply_reloc(void *user, uint64_t where, uint32_t type,
 	case 11u:                               /* R_X86_64_32S  S + A      */
 		v = s + (uint64_t)addend; n = 4u; break;
 	default:
-		return;
+		return 1;
 	}
 	if (where + n > a->size)
-		return;
+		return 1;
 	for (i = 0; i < n; i++)
 		b[i] = (uint8_t)(v >> (8u * i));
 	kof_emu_write(a->em, p, b, n);
+	return 1;             /* an image needs every one of them */
 }
 
 static struct kof_emu *build_rel_image(const struct kof_obj_ctx *ctx,

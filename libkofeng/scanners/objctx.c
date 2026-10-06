@@ -5727,7 +5727,6 @@ static int c_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	uint32_t ia, ib, i;
-	uint8_t x, y;
 
 	if (!sc || !cap || !a || !b)
 		return 0;
@@ -5750,18 +5749,17 @@ static int c_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 	if (!((sc->diag_hit[ia >> 3] >> (ia & 7u)) & 1u) ||
 	    !((sc->diag_hit[ib >> 3] >> (ib & 7u)) & 1u))
 		return 0;
-	for (x = 0; x < sc->diag_n_bind[ia]; x++) {
-		const struct kof_diag_hit *h;
-		uint16_t n = sc->diag_bind[ia][x];
-
-		h = kof_diag_scan_at(sc->diag_graph, n);
-		if (!h || h->cap != cap)
-			continue;
-		for (y = 0; y < sc->diag_n_bind[ib]; y++)
-			if (sc->diag_bind[ib][y] == n)
-				return 1;
-	}
-	return 0;
+	/*
+	 * REACHABILITY, not a shared node - see kof_diag_flow_join. The byte
+	 * a socket read produced (a node of `cap` that NETRECV `b` bound)
+	 * must flow into the region MEMEXEC `a` is about, and a scratch
+	 * buffer between the read and the region is links in the middle that
+	 * still link, not a break. The old test here asked only whether one
+	 * node was bound by both, which a scratch buffer steps around.
+	 */
+	return kof_diag_flow_join(sc->diag_graph, cap,
+				  sc->diag_bind[ia], sc->diag_n_bind[ia],
+				  sc->diag_bind[ib], sc->diag_n_bind[ib]);
 }
 
 static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)

@@ -50,8 +50,15 @@
 
 void kof_diag_org_clear(struct walk *w, uint8_t r)
 {
-	if (r < 16u)
+	if (r < 16u) {
 		w->reg[r].node = ORG_NONE;
+		/* The symbol goes with it: all three fields answer the same
+		 * question - where did this value come from - and leaving one
+		 * behind would have a register naming a symbol it no longer
+		 * holds. */
+		w->reg[r].symoff = 0;
+		w->reg[r].symadd = 0;
+	}
 }
 
 uint16_t kof_diag_org_of(const struct walk *w, uint8_t r)
@@ -61,8 +68,13 @@ uint16_t kof_diag_org_of(const struct walk *w, uint8_t r)
 
 void kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node)
 {
-	if (r < 16u)
-		w->reg[r].node = node;
+	if (r >= 16u)
+		return;
+	w->reg[r].node = node;
+	/* One question, three fields - see struct org. A register that now
+	 * holds what a node produced is no longer naming a symbol. */
+	w->reg[r].symoff = 0;
+	w->reg[r].symadd = 0;
 }
 
 /*
@@ -74,6 +86,25 @@ void kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node)
  * only reads. Getting that backwards on `mul` cost the i386 samples their
  * whole network half.
  */
+void kof_diag_org_set_sym(struct walk *w, uint8_t r, uint32_t symoff,
+			  int32_t symadd)
+{
+	if (!w || r >= 16u)
+		return;
+	w->reg[r].node = ORG_NONE;
+	w->reg[r].symoff = symoff;
+	w->reg[r].symadd = symadd;
+}
+
+uint32_t kof_diag_org_sym(const struct walk *w, uint8_t r, int32_t *add)
+{
+	if (!w || r >= 16u)
+		return 0;
+	if (add)
+		*add = w->reg[r].symadd;
+	return w->reg[r].symoff;
+}
+
 void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
 {
 	uint8_t r, d, e;
@@ -1003,8 +1034,27 @@ static void merge_sites(struct kof_diag_scan *s)
 		 */
 		h->bits = (uint8_t)(((h->bits | s->hit[i].bits) & ~DOUBT) |
 				    (h->bits & s->hit[i].bits & DOUBT));
+		/*
+		 * AND EVERY FIELD A BIT SPEAKS FOR, or the bit outlives what
+		 * it refers to. MEASURED: the symbol route reads an operand's
+		 * relocation and the emulator does not, so folding only the
+		 * bits left a node saying "an argument named a symbol" with
+		 * the offset of that name still zero - and a diagnose about
+		 * __this_module matched one rootkit and missed another for a
+		 * reason that was not about either of them.
+		 *
+		 * First one that knows wins, as with the attribute: a route
+		 * that resolved something is not corrected by one that did
+		 * not.
+		 */
 		if (!h->attr)
 			h->attr = s->hit[i].attr;
+		if (!h->val)
+			h->val = s->hit[i].val;
+		if (!h->symref) {
+			h->symref = s->hit[i].symref;
+			h->symadd = s->hit[i].symadd;
+		}
 		for (k = 0; k < s->hit[i].n_in; k++)
 			kof_diag_note_in(h, s->hit[i].in[k].from,
 					 s->hit[i].in[k].role,
@@ -1035,6 +1085,8 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 	s = calloc(1, sizeof *s);
 	if (!s)
 		return NULL;
+	s->base = base;
+	s->size = size;
 	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
 		const struct diag_scenario *d = &diag_scenarios[i];
 
@@ -1082,6 +1134,8 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
 {
 	if (!s)
 		return;
+	free(s->adj_head);
+	free(s->adj_edge);
 	free(s->hit);
 	free(s);
 }
@@ -1107,7 +1161,24 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
  * spec demands, and is not one whose meaning the walk could not read. The
  * last is the point of KOF_DIAG_H_ARG_UNKNOWN: a `mmap` whose prot could not
  * be followed is not evidence of a buffer OR of a code region. */
-static int spec_ok(const struct kof_diag_hit *h,
+/* The NUL-terminated name a hit pointed at, or NULL. */
+static const char *hit_sym(const struct kof_diag_scan *s,
+			   const struct kof_diag_hit *h)
+{
+	uint64_t i;
+
+	if (!s || !s->base || !(h->bits & KOF_DIAG_H_SYMREF) ||
+	    h->symref >= s->size)
+		return NULL;
+	/* Terminated inside the object, or it is not a name. */
+	for (i = h->symref; i < s->size; i++)
+		if (!s->base[i])
+			return (const char *)(s->base + h->symref);
+	return NULL;
+}
+
+static int spec_ok(const struct kof_diag_scan *s,
+		   const struct kof_diag_hit *h,
 		   const struct kof_diag_node *sp)
 {
 	/*
@@ -1140,6 +1211,18 @@ static int spec_ok(const struct kof_diag_hit *h,
 	 */
 	if (sp->bits & KOF_DIAG_B_VAL) {
 		if (!(h->bits & KOF_DIAG_H_VAL) || h->val != sp->val)
+			return 0;
+	}
+	/*
+	 * AND A FIELD OF THE NAMED SYMBOL - see KOF_DIAG_B_FIELD_OF. A FIELD,
+	 * so offset zero does not count: that is the handle itself, which a
+	 * module passes to the kernel all day.
+	 */
+	if (sp->bits & KOF_DIAG_B_FIELD_OF) {
+		const char *nm = hit_sym(s, h);
+
+		if (!nm || !sp->sym || !h->symadd ||
+		    !kof_streq_(nm, sp->sym))
 			return 0;
 	}
 	return 1;
@@ -1201,7 +1284,7 @@ static int bind_from(const struct kof_diag_scan *s, const struct kof_diag *d,
 		if (d->node[c].parent != k)
 			continue;
 		for (i = 0; i < s->n_hit; i++) {
-			if (!spec_ok(&s->hit[i], &d->node[c]))
+			if (!spec_ok(s, &s->hit[i], &d->node[c]))
 				continue;
 			if (!linked(&s->hit[i], bound[k], &s->hit[bound[k]],
 				    d->node[c].role, d->node[c].bits))
@@ -1215,6 +1298,172 @@ next:
 		;
 	}
 	return 1;
+}
+
+/*
+ * ---- THE VALUE-FLOW GRAPH, AND REACHING ACROSS IT -----------------------
+ *
+ * A hit records its edges as "where each of my inputs came from", tagged
+ * with a role. A join needs the transitive question - does the value a
+ * socket read produced reach the region that was executed - and the bytes
+ * do not have to arrive in one step: a stager may read into a scratch
+ * buffer and copy that into the executable region, so the read and the
+ * region are two hops apart with the copy between them. The old join asked
+ * only whether one node was bound by both diagnoses, which is the zero-hop
+ * case and the one a scratch buffer steps around.
+ *
+ * SO THE EDGES ARE TURNED INTO A DIRECTED GRAPH, once, and the join is a
+ * walk. The direction is VALUE FLOW, which the role decides and which is
+ * not the same as the in[] relation:
+ *
+ *   FD / SOURCE   the parent PRODUCED this value - it flows parent -> here
+ *   TARGET        control goes to the parent region - its bytes are what
+ *                 runs, so parent -> here (the region's value becomes the
+ *                 execution)
+ *   BUFFER        this call WRITES INTO the parent - the value flows the
+ *                 other way, here -> parent (what we read/built lands in
+ *                 that region)
+ *
+ * On a plain stager this makes net-open -> read -> region -> exec one
+ * directed chain, and a read whose buffer is a scratch page instead of the
+ * region extends it by exactly the copy node in between.
+ */
+static int diag_flow_build(struct kof_diag_scan *s)
+{
+	uint32_t i, e = 0;
+	uint8_t k;
+
+	if (s->adj_built)
+		return s->adj_head != NULL;
+	s->adj_built = 1;
+	if (!s->n_hit)
+		return 0;
+	s->adj_head = calloc((size_t)s->n_hit + 1u, sizeof *s->adj_head);
+	/* At most four edges a node, and the stack/none sentinels are not
+	 * edges. */
+	s->adj_edge = malloc((size_t)s->n_hit * 4u * sizeof *s->adj_edge);
+	if (!s->adj_head || !s->adj_edge) {
+		free(s->adj_head); free(s->adj_edge);
+		s->adj_head = NULL; s->adj_edge = NULL;
+		return 0;
+	}
+	/* Two passes: count per source, then fill. The source of an edge is
+	 * not always `from` - a BUFFER edge runs from the writing node. */
+	for (i = 0; i < s->n_hit; i++)
+		for (k = 0; k < s->hit[i].n_in; k++) {
+			uint16_t p = s->hit[i].in[k].from;
+			uint8_t  ro = s->hit[i].in[k].role;
+
+			if (p >= s->n_hit)
+				continue;       /* NONE / STACK, not a node */
+			if (ro == KOF_DIAG_ROLE_BUFFER)
+				s->adj_head[i + 1u]++;      /* i -> p */
+			else
+				s->adj_head[p + 1u]++;      /* p -> i */
+		}
+	for (i = 0; i < s->n_hit; i++)
+		s->adj_head[i + 1u] += s->adj_head[i];
+	e = s->adj_head[s->n_hit];
+	{
+		uint32_t *cur = calloc((size_t)s->n_hit, sizeof *cur);
+
+		if (!cur) {
+			free(s->adj_head); free(s->adj_edge);
+			s->adj_head = NULL; s->adj_edge = NULL;
+			return 0;
+		}
+		for (i = 0; i < s->n_hit; i++)
+			for (k = 0; k < s->hit[i].n_in; k++) {
+				uint16_t p = s->hit[i].in[k].from;
+				uint8_t  ro = s->hit[i].in[k].role;
+				uint16_t from, to;
+
+				if (p >= s->n_hit)
+					continue;
+				if (ro == KOF_DIAG_ROLE_BUFFER) {
+					from = (uint16_t)i; to = p;
+				} else {
+					from = p; to = (uint16_t)i;
+				}
+				s->adj_edge[s->adj_head[from] + cur[from]++] = to;
+			}
+		free(cur);
+	}
+	(void)e;
+	return 1;
+}
+
+/*
+ * Does the value at `start` reach any node whose bit is set in `tgt`,
+ * following value-flow edges. One O(V+E) walk over a reused frontier - the
+ * visited set means a node is expanded once however many starts share it.
+ */
+static int diag_flow_reach(struct kof_diag_scan *s, uint16_t start,
+			   const uint8_t *tgt, uint8_t *seen, uint16_t *stk)
+{
+	uint32_t sp = 0;
+
+	if (start >= s->n_hit || (seen[start >> 3] & (1u << (start & 7u))))
+		return 0;
+	if (tgt[start >> 3] & (1u << (start & 7u)))
+		return 1;
+	seen[start >> 3] |= (uint8_t)(1u << (start & 7u));
+	stk[sp++] = start;
+	while (sp) {
+		uint16_t u = stk[--sp];
+		uint32_t j;
+
+		for (j = s->adj_head[u]; j < s->adj_head[u + 1u]; j++) {
+			uint16_t v = s->adj_edge[j];
+
+			if (seen[v >> 3] & (1u << (v & 7u)))
+				continue;
+			if (tgt[v >> 3] & (1u << (v & 7u)))
+				return 1;
+			seen[v >> 3] |= (uint8_t)(1u << (v & 7u));
+			stk[sp++] = v;
+		}
+	}
+	return 0;
+}
+
+/*
+ * DOES A NODE OF `cap` BOUND BY `b` REACH ANY NODE BOUND BY `a`.
+ *
+ * The join a verdict asks, as reachability rather than a shared node: the
+ * bytes a socket read produced (a node of `cap`, bound by the net diagnose
+ * `b`) flow - directly or through a copy - into the region the exec
+ * diagnose `a` is about. `a_bind`/`b_bind` are the node sets the match
+ * returned for each.
+ */
+int kof_diag_flow_join(struct kof_diag_scan *s, uint16_t cap,
+		       const uint16_t *a_bind, uint8_t na,
+		       const uint16_t *b_bind, uint8_t nb)
+{
+	uint8_t tgt[(DIAG_MAX_NODE + 7u) / 8u];
+	uint8_t seen[(DIAG_MAX_NODE + 7u) / 8u];
+	uint16_t *stk;
+	uint8_t x;
+	int hit = 0;
+
+	if (!s || !diag_flow_build(s) || !a_bind || !b_bind)
+		return 0;
+	memset(tgt, 0, sizeof tgt);
+	memset(seen, 0, sizeof seen);
+	for (x = 0; x < na; x++)
+		if (a_bind[x] < s->n_hit)
+			tgt[a_bind[x] >> 3] |= (uint8_t)(1u << (a_bind[x] & 7u));
+	stk = malloc((size_t)s->n_hit * sizeof *stk);
+	if (!stk)
+		return 0;
+	for (x = 0; x < nb && !hit; x++) {
+		const struct kof_diag_hit *h = kof_diag_scan_at(s, b_bind[x]);
+
+		if (h && h->cap == cap)
+			hit = diag_flow_reach(s, b_bind[x], tgt, seen, stk);
+	}
+	free(stk);
+	return hit;
 }
 
 int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
@@ -1238,7 +1487,7 @@ int kof_diag_match(const struct kof_diag_scan *s, const struct kof_diag *d,
 		return 0;               /* no root: not a tree */
 
 	for (i = 0; i < s->n_hit; i++) {
-		if (!spec_ok(&s->hit[i], &d->node[root]))
+		if (!spec_ok(s, &s->hit[i], &d->node[root]))
 			continue;
 		memset(bound, 0xff, sizeof bound);
 		bound[root] = (uint16_t)i;
@@ -1285,6 +1534,10 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 		  char *needs, uint32_t needs_cap)
 {
 	uint32_t n_node, nlen, i;
+	/* How much of the string store a node attribute has taken - the
+	 * signs below continue from here, because both are words this
+	 * diagnose carries and one buffer is one thing to bound. */
+	uint32_t nused = 0;
 	uint64_t at;
 
 	if (!b || !out || !node || !name || n < 4u)
@@ -1337,6 +1590,22 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 				k += 2u;
 				if (k + klen > alen)
 					return 0;
+				/*
+				 * THE NAME GOES IN THE DIAGNOSE'S OWN
+				 * STRING STORE, beside the signs - it is the
+				 * same kind of thing, a word this diagnose
+				 * carries, and a second buffer would be a
+				 * second thing to bound.
+				 */
+				if (kind == KDIG_ATTR_SYM && klen &&
+				    needs && needs_cap) {
+					if (nused + klen + 1u > needs_cap)
+						return 0;
+					memcpy(needs + nused, b + at + k, klen);
+					needs[nused + klen] = 0;
+					node[i].sym = needs + nused;
+					nused += klen + 1u;
+				}
 				if (kind == KDIG_ATTR_VALUE && klen == 8u) {
 					uint64_t v = 0;
 					unsigned q;
@@ -1371,7 +1640,7 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 	 * half its signs read would be filtered by a condition nobody wrote.
 	 */
 	if (needs && needs_cap && at < n) {
-		uint32_t cnt = b[at++], k, used = 0;
+		uint32_t cnt = b[at++], k, used = nused;
 
 		if (cnt > KOF_DIAG_MAX_NEED)
 			return 0;

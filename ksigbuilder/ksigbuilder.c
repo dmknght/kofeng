@@ -7179,6 +7179,7 @@ struct dnode {
 	uint8_t  role;
 	uint8_t  bits;          /* KOF_DIAG_B_PRODUCED / _SHARED, if demanded */
 	uint64_t val;           /* KOF_DIAG_WROTE, when KOF_DIAG_B_VAL is set */
+	char     sym[64];       /* KOF_DIAG_FIELD_OF, when B_FIELD_OF is set  */
 };
 
 /* Written in front of the nodes. Little endian, like every other number
@@ -7586,6 +7587,29 @@ static int diagnose_main(int argc, char **argv)
 				nd[i].val = (uint64_t)v;
 				nd[i].bits |= KOF_DIAG_B_VAL;
 			}
+		} else if ((p = strstr(line, "KOF_DIAG_FIELD_OF(")) != NULL) {
+			size_t L;
+
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1])) {
+				err(lineno, "KOF_DIAG_FIELD_OF(label, \"sym\")");
+				continue;
+			}
+			i = diag_label_idx(nd, n_nd, a[0]);
+			if (i < 0) {
+				err(lineno, "no node with that label");
+				continue;
+			}
+			L = strlen(a[1]);
+			if (L < 3u || a[1][0] != '"' || a[1][L - 1u] != '"' ||
+			    L - 2u >= sizeof nd[0].sym) {
+				err(lineno, "KOF_DIAG_FIELD_OF wants a quoted "
+					    "symbol name");
+				continue;
+			}
+			memcpy(nd[i].sym, a[1] + 1, L - 2u);
+			nd[i].sym[L - 2u] = 0;
+			nd[i].bits |= KOF_DIAG_B_FIELD_OF;
 		} else if ((p = strstr(line, "KOF_DIAG_WHEN(")) != NULL) {
 			uint64_t fv = 0, vv = 0;
 
@@ -7671,9 +7695,12 @@ static int diagnose_main(int argc, char **argv)
 		return 1;
 
 	need = sizeof(struct dhdr) + strlen(name) + (size_t)n_nd * 8u;
-	for (i = 0; i < n_nd; i++)
+	for (i = 0; i < n_nd; i++) {
 		if (nd[i].bits & KOF_DIAG_B_VAL)
 			need += 2u + 8u;        /* kind, length, the value */
+		if (nd[i].bits & KOF_DIAG_B_FIELD_OF)
+			need += 2u + strlen(nd[i].sym);
+	}
 	/*
 	 * AND THE SIGNS, AS A TRAILING SECTION. After the nodes so a reader
 	 * built before they existed stops where it always stopped: the node
@@ -7721,8 +7748,10 @@ static int diagnose_main(int argc, char **argv)
 		blob[at + 4] = (unsigned char)par;
 		blob[at + 5] = nd[i].role;
 		blob[at + 6] = nd[i].bits;
-		blob[at + 7] = (unsigned char)((nd[i].bits & KOF_DIAG_B_VAL)
-					       ? 10u : 0u);
+		blob[at + 7] = (unsigned char)
+			(((nd[i].bits & KOF_DIAG_B_VAL) ? 10u : 0u) +
+			 ((nd[i].bits & KOF_DIAG_B_FIELD_OF)
+			  ? 2u + strlen(nd[i].sym) : 0u));
 		at += 8;
 		if (nd[i].bits & KOF_DIAG_B_VAL) {
 			unsigned q;
@@ -7732,6 +7761,14 @@ static int diagnose_main(int argc, char **argv)
 			for (q = 0; q < 8u; q++)
 				blob[at++] = (unsigned char)
 					     (nd[i].val >> (q * 8u));
+		}
+		if (nd[i].bits & KOF_DIAG_B_FIELD_OF) {
+			size_t L = strlen(nd[i].sym);
+
+			blob[at++] = KDIG_ATTR_SYM;
+			blob[at++] = (unsigned char)L;
+			memcpy(blob + at, nd[i].sym, L);
+			at += L;
 		}
 	}
 	if (n_need || n_when) {

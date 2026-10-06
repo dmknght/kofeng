@@ -188,6 +188,27 @@ enum kof_diag_role {
 #define KOF_DIAG_B_VAL      (1u << 3)
 
 /*
+ * THE NODE'S OBJECT IS A FIELD OF A NAMED SYMBOL - see KOF_DIAG_FIELD_OF.
+ *
+ * A FIELD, which is the whole of the claim, not the symbol. A kernel module
+ * hands THIS_MODULE to the kernel constantly - it is the handle every
+ * registration takes - and that is an opaque pointer passed on. Reaching
+ * INTO it is a different act: the fields of a module's own struct module are
+ * the kernel's bookkeeping about it, and editing them is editing what the
+ * kernel believes.
+ *
+ * MEASURED on 900 clean kernel modules from this machine: 2699 references to
+ * __this_module and 2698 of them are offset zero, the handle. One driver
+ * reads +0x18, its own name. No clean module reaches any other field. Both
+ * Diamorphine builds and both hcrootkit builds do.
+ *
+ * It needs the relocation table, so it is answerable on a RELOCATABLE object
+ * and nowhere else - an operand naming a symbol is a hole in a .ko, and the
+ * name is in the relocation beside it.
+ */
+#define KOF_DIAG_B_FIELD_OF (1u << 4)
+
+/*
  * ONE NODE. Eight bytes and then its attributes.
  *
  * `cap` IS A NUCLEO GROUP ID AND NEVER A SYSCALL NUMBER OR A NAME. That is
@@ -221,6 +242,8 @@ struct kof_diag_node {
 	 * the whole reason the run carries one.
 	 */
 	uint64_t val;            /* KDIG_ATTR_VALUE, when KOF_DIAG_B_VAL    */
+	/* KDIG_ATTR_SYM, when KOF_DIAG_B_FIELD_OF. The engine's storage. */
+	const char *sym;
 };
 
 /*
@@ -462,6 +485,12 @@ enum kof_diag_link {
  */
 #define KOF_DIAG_WROTE(label, value)
 /*
+ * KOF_DIAG_FIELD_OF(d, "__this_module") - an argument of this node is the
+ * address of a FIELD of that symbol, not the symbol itself. See
+ * KOF_DIAG_B_FIELD_OF.
+ */
+#define KOF_DIAG_FIELD_OF(label, name)
+/*
  * KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0) - a condition on what the file IS,
  * which is what decides whether the analysis runs on it at all. The engine
  * publishes the facts - see enum kof_diag_fact - and this is where a
@@ -495,6 +524,7 @@ enum kof_diag_link {
  * sections above.
  */
 #define KDIG_ATTR_VALUE 1u      /* 8 bytes LE - the value the node wrote */
+#define KDIG_ATTR_SYM   2u      /* a symbol name, not terminated         */
 
 
 /*

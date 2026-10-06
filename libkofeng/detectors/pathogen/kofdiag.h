@@ -177,6 +177,21 @@ struct kof_diag_in {
  */
 #define KOF_DIAG_H_VAL (1u << 6)
 
+/*
+ * AN ARGUMENT OF THIS CALL NAMED A SYMBOL - `symref` is the file offset of
+ * that symbol's name and `symadd` how far into it the address pointed.
+ *
+ * THE ONLY WAY TO READ A RELOCATABLE OBJECT'S OPERANDS, and the reason is in
+ * the file format: a .ko is unlinked, so an operand naming a symbol is a
+ * hole, and the name is in the relocation beside the instruction. See
+ * struct org.
+ *
+ * WHY THE OFFSET INTO THE SYMBOL IS KEPT SEPARATELY. It is the whole of the
+ * claim in the case this was written for: a module hands THIS_MODULE to the
+ * kernel all day long, and reaching into a FIELD of it is a different act.
+ */
+#define KOF_DIAG_H_SYMREF (1u << 7)
+
 struct kof_diag_hit {
 	uint64_t at;            /* where, as an offset into the object      */
 	/*
@@ -206,6 +221,10 @@ struct kof_diag_hit {
 	uint64_t attr;
 	/* The constant this node wrote - see KOF_DIAG_H_VAL. */
 	uint64_t val;
+	/* The symbol an argument named, and how far into it - see
+	 * KOF_DIAG_H_SYMREF. */
+	uint64_t symref;
+	int32_t  symadd;
 	uint16_t cap;           /* enum kof_flow_cap, or KOF_NUCLEO_NONE       */
 	uint16_t flags;         /* KOF_FLOWF_* observed at this site        */
 	uint8_t  bits;          /* KOF_DIAG_H_*                             */
@@ -321,6 +340,15 @@ void kof_diag_scan_free(struct kof_diag_scan *);
  * `bind_out` must have room for the diagnose's node count; NULL asks for the
  * bit alone, which is what kof_diag() costs.
  */
+/*
+ * DOES A NODE OF `cap` BOUND BY `b` REACH ANY NODE BOUND BY `a`, following
+ * value-flow links - the transitive join a verdict asks. See the note in
+ * kofdiag.c. The bind arrays are what kof_diag_match returned.
+ */
+int kof_diag_flow_join(struct kof_diag_scan *, uint16_t cap,
+		       const uint16_t *a_bind, uint8_t na,
+		       const uint16_t *b_bind, uint8_t nb);
+
 int kof_diag_match(const struct kof_diag_scan *, const struct kof_diag *,
 		   uint16_t *bind_out, uint8_t *n_bind);
 

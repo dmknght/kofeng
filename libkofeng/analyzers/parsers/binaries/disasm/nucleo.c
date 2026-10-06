@@ -597,11 +597,22 @@ names[] = {
 	{ "set_memory_rw",  KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	{ "set_memory_x",   KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	/*
-	 * An entry taken out of a kernel list. BOTH SPELLINGS, because the
-	 * kernel renamed the check and a table that knew only the old one
-	 * would be a table about one kernel version - see KOF_NUCLEO_LIST_HIDE,
-	 * where the 17% that makes this a term and not a verdict is measured.
+	 * An entry taken out of a kernel list, or put into one. EVERY
+	 * SPELLING, because the kernel renamed the check twice and a table
+	 * that knows two of the three eras is still a table about kernel
+	 * versions - see KOF_NUCLEO_LIST_HIDE, where the 17% that makes this
+	 * a term and not a verdict is measured.
+	 *
+	 *   __list_del_entry              before the validator, pre-4.x
+	 *   __list_del_entry_valid        4.x
+	 *   __list_del_entry_valid_or_report  6.x
+	 *
+	 * MEASURED: the bare one was missing and hcrootkit - built for a 3.x
+	 * kernel - produced no list node at all, so a diagnose about module
+	 * self-removal matched Diamorphine and missed it, for no reason to do
+	 * with what either of them does.
 	 */
+	{ "__list_del_entry", KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
 	{ "__list_del_entry_valid", KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
 	{ "__list_del_entry_valid_or_report", KOF_NUCLEO_LIST_HIDE,
 	  KOF_FLOW_ROLE_NONE },
@@ -609,6 +620,7 @@ names[] = {
 	{ "__list_add_valid_or_report", KOF_NUCLEO_LIST_HIDE,
 	  KOF_FLOW_ROLE_NONE },
 	{ "list_del",       KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
+	{ "list_add",       KOF_NUCLEO_LIST_HIDE, KOF_FLOW_ROLE_NONE },
 	/*
 	 * AND THE WORDS THE KERNEL NEEDS OF ITS OWN.
 	 *

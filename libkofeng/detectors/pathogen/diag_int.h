@@ -27,6 +27,32 @@ struct kof_diag_scan {
 	/* Which analysis routines actually ran - see KOF_DIAG_RUN_* and the
 	 * scenario table. Asked for and not written counts as not run. */
 	unsigned             ran;
+	/*
+	 * THE OBJECT THE SCAN WAS MADE FROM, so a matcher can read a name a
+	 * node pointed at - see KOF_DIAG_H_SYMREF. Carried rather than
+	 * copied: the bytes are the caller's and outlive the scan, which is
+	 * the same contract every other offset in a hit is under.
+	 */
+	const uint8_t       *base;
+	uint64_t             size;
+	/*
+	 * ---- THE LINKS AS A GRAPH, BUILT ONCE --------------------------
+	 *
+	 * The hits carry their edges as kof_diag_in[] - up to four parents
+	 * each, with a role. That is enough to ask "where did THIS node come
+	 * from", but a join asks the other question, "does this node's value
+	 * REACH that one", and answering it by rescanning every hit per step
+	 * is quadratic. So the value-flow edges are turned once into a
+	 * forward adjacency (CSR: head[node] .. head[node+1] index into
+	 * edge[]) and every reachability query is then one O(V+E) walk.
+	 *
+	 * DIRECTED BY VALUE, not by the in[] relation - see diag_flow_build
+	 * for why a BUFFER edge runs the opposite way from an FD edge. Built
+	 * lazily because only a scan a verdict joins on ever needs it.
+	 */
+	uint32_t            *adj_head;  /* n_hit + 1 offsets, or NULL       */
+	uint16_t            *adj_edge;  /* flattened successors             */
+	int                  adj_built;
 };
 
 /*
@@ -62,6 +88,25 @@ void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role,
 
 struct org {
 	uint16_t node;          /* index, ORG_NONE, or ORG_STACK */
+	/*
+	 * ---- OR THE REGISTER NAMES A SYMBOL ----------------------------
+	 *
+	 * A THIRD KIND OF PROVENANCE, beside "a node made this" and "this
+	 * came off the stack": the value is the address of a symbol the
+	 * relocation table named, at `symadd` bytes into it.
+	 *
+	 * IT IS THE ONLY WAY TO READ A RELOCATABLE OBJECT'S OPERANDS. A .ko
+	 * is unlinked, so `mov rdi, &__this_module->list` assembles as
+	 * `48 c7 c7 00 00 00 00` - the operand is a HOLE, and the symbol and
+	 * the offset live in the relocation beside it. Without this the walk
+	 * sees a register loaded with zero.
+	 *
+	 * `symoff` is the file offset of the symbol's NAME, zero for none -
+	 * the same carrier a string capture uses, and for the same reason:
+	 * the bytes are already in the buffer.
+	 */
+	uint32_t symoff;
+	int32_t  symadd;
 };
 
 struct walk {
@@ -75,6 +120,10 @@ struct walk {
 void     kof_diag_org_clear(struct walk *w, uint8_t r);
 uint16_t kof_diag_org_of(const struct walk *w, uint8_t r);
 void     kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node);
+/* The register holds the address of a named symbol - see struct org. */
+void     kof_diag_org_set_sym(struct walk *w, uint8_t r, uint32_t symoff,
+			      int32_t symadd);
+uint32_t kof_diag_org_sym(const struct walk *w, uint8_t r, int32_t *add);
 void     kof_diag_org_step(struct walk *w, const struct kdis_insn *in);
 
 /*

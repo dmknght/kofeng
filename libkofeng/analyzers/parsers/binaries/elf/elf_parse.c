@@ -1418,6 +1418,7 @@ uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
 			struct kof_elf_symbol sy;
 			uint64_t roff = 0, add = 0, sv = 0;
 			uint32_t rty = 0, si = 0;
+			uint64_t nmoff = 0;
 			int defined = 0;
 
 			if (!rel_at(f, &t, p->sec[i].file_off + k,
@@ -1428,15 +1429,21 @@ uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
 						t.be, &add))
 					break;
 			}
-			if (kof_elf_symbol_at(f, &t, si, &sy) && sy.shndx &&
-			    sy.shndx < p->sec_count &&
-			    sy.shndx < KOF_ELF_MAX_SECTIONS) {
-				sv = p->sec[sy.shndx].file_off + sy.value;
-				defined = 1;
+			if (kof_elf_symbol_at(f, &t, si, &sy)) {
+				if (sy.nameoff && sy.nameoff < t.strn)
+					nmoff = t.str + sy.nameoff;
+				if (sy.shndx &&
+				    sy.shndx < p->sec_count &&
+				    sy.shndx < KOF_ELF_MAX_SECTIONS) {
+					sv = p->sec[sy.shndx].file_off +
+					     sy.value;
+					defined = 1;
+				}
 			}
-			fn(user, tgt_off + roff, rty, sv, defined,
-			   (int64_t)add);
 			n++;
+			if (!fn(user, tgt_off + roff, rty, sv, defined,
+				(int64_t)add, nmoff))
+				return n;
 		}
 	}
 	return n;

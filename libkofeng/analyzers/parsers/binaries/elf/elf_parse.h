@@ -180,9 +180,27 @@ uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
  * symbol resolves to and `defined` whether it resolves here at all. RELA
  * only: a REL section carries no addend, and a caller applying a relocation
  * needs one.
+ *
+ * `nameoff` IS THE FILE OFFSET OF THE SYMBOL'S NAME, or zero when it has
+ * none. An offset and not the string, because the string is already in the
+ * buffer the caller handed in and copying it would mean deciding how much
+ * of it to keep - the same carrier a capture uses, see KOF_DIAG_H_ATTR_STR.
+ *
+ * WHAT IT IS FOR. A relocation says which SYMBOL an instruction's operand
+ * really names, which is the only way to know that `mov rdi, 0x0` is
+ * `&__this_module->list`: the bytes in the file are a hole, and the name is
+ * in the relocation beside them.
+ *
+ * IT RETURNS WHETHER TO CARRY ON - zero stops the walk. A caller that is
+ * COLLECTING has a bound and reaches it; without this it went on being
+ * called 1.67 million times for a table that filled at 512, and the two
+ * nvidia modules in the clean corpus cost 0.8 s between them for answers
+ * nobody kept. A caller applying relocations returns non-zero always,
+ * because it needs every one.
  */
-typedef void (*kof_elf_reloc_fn)(void *user, uint64_t where, uint32_t type,
-				 uint64_t sym, int defined, int64_t addend);
+typedef int (*kof_elf_reloc_fn)(void *user, uint64_t where, uint32_t type,
+				uint64_t sym, int defined, int64_t addend,
+				uint64_t nameoff);
 
 uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
 			kof_elf_reloc_fn fn, void *user);
