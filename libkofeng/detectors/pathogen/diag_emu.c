@@ -1069,6 +1069,28 @@ static int name_at(const uint8_t *base, uint64_t size, uint64_t off)
 	return 0;
 }
 
+/*
+ * WHAT A STORE PUT THERE, when the instruction carries it - see
+ * KOF_DIAG_H_VAL.
+ *
+ * ONE PLACE, because three branches below make a field node - a
+ * RIP-relative object, a base register holding one, and the token region -
+ * and a value recorded at two of the three is a diagnose that matches on
+ * some builds of the same program.
+ *
+ * `mi` is the operand that is the memory: 0 for a store, and only a store
+ * writes anything. The source has to be an IMMEDIATE; a register source is
+ * a value the model may have lost, and a lost value reads as zero.
+ */
+static void field_value(struct kof_diag_hit *fh, const struct kdis_insn *ci,
+			unsigned mi)
+{
+	if (!fh || mi != 0u || ci->n_op < 2u || ci->o[1].kind != KDIS_O_IMM)
+		return;
+	fh->val = ci->o[1].imm;
+	fh->bits |= KOF_DIAG_H_VAL;
+}
+
 static void run_rel_gaps(struct kof_diag_scan *s,
 			 const struct kof_obj_ctx *ctx,
 			 const struct kof_elf_info *ei,
@@ -2024,6 +2046,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 							if (fh) {
 								fh->attr = tg -
 								  seen[z].val;
+								field_value(fh, &ci, mi);
 								kof_diag_note_in(fh,
 								  seen[z].node,
 								  mi == 0u
@@ -2097,6 +2120,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 								if (fh) {
 									fh->attr = (uint64_t)
 									  ci.o[mi].disp;
+									field_value(fh, &ci, mi);
 									kof_diag_note_in(fh,
 									  seen[z].node,
 									  mi == 0u
@@ -2140,6 +2164,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 									fh->attr =
 									  (uint64_t)
 									  ci.o[mi].disp;
+									field_value(fh, &ci, mi);
 									if (own < live)
 										kof_diag_note_in(fh,
 										  (uint16_t)own,

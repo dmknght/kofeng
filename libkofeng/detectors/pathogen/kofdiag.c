@@ -1115,6 +1115,18 @@ static int spec_ok(const struct kof_diag_hit *h,
 		return 0;
 	if (h->bits & KOF_DIAG_H_ARG_UNKNOWN)
 		return 0;
+	/*
+	 * AND THE VALUE, WHEN THE DIAGNOSE NAMED ONE - see KOF_DIAG_B_VAL.
+	 *
+	 * The node must have written a LITERAL and it must be that one. A
+	 * node whose value the model never learnt does not match: "we could
+	 * not tell" is not the same answer as "it wrote zero", and folding
+	 * them would let an author who can lose the model write anything.
+	 */
+	if (sp->bits & KOF_DIAG_B_VAL) {
+		if (!(h->bits & KOF_DIAG_H_VAL) || h->val != sp->val)
+			return 0;
+	}
 	return 1;
 }
 
@@ -1291,9 +1303,38 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 		node[i].bits   = r[6];
 		node[i].attr_len = r[7];
 		alen = r[7];
-		at += 8u + alen;
-		if (at > n)
+		at += 8u;
+		if (at + alen > n)
 			return 0;
+		/*
+		 * (kind, length, payload)*, and an unknown kind is skipped by
+		 * its length rather than refused - that is what the length is
+		 * for. A length that runs past the run refuses the record,
+		 * like everything else here.
+		 */
+		{
+			uint32_t k = 0;
+
+			while (k + 2u <= alen) {
+				uint32_t kind = b[at + k];
+				uint32_t klen = b[at + k + 1u];
+
+				k += 2u;
+				if (k + klen > alen)
+					return 0;
+				if (kind == KDIG_ATTR_VALUE && klen == 8u) {
+					uint64_t v = 0;
+					unsigned q;
+
+					for (q = 0; q < 8u; q++)
+						v |= (uint64_t)b[at + k + q]
+						     << (q * 8u);
+					node[i].val = v;
+				}
+				k += klen;
+			}
+		}
+		at += alen;
 		/*
 		 * A PARENT THAT IS NOT A NODE HERE, or a node that is its own
 		 * parent, is a file this build did not write. Refuse rather

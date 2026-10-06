@@ -5482,6 +5482,10 @@ static int diag_shape_met(const struct kof_obj_ctx *ctx, uint16_t shape)
 		if (!ei || ei->shoff != 0u)
 			return 0;
 	}
+	if (shape & KOF_DIAG_SH_ELF_REL) {
+		if (!ei || ei->e_type != KOF_ELF_REL)
+			return 0;
+	}
 	if (shape & KOF_DIAG_SH_ONE_LOAD) {
 		const struct kof_elf_seg *g;
 

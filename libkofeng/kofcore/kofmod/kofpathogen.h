@@ -168,6 +168,26 @@ enum kof_diag_role {
 #define KOF_DIAG_B_SHARED   (1u << 2)
 
 /*
+ * THE NODE DEMANDS THE VALUE IT WROTE - see KOF_DIAG_WROTE and `val` below.
+ *
+ * A VALUE, WHICH THE NOTE ON ATTRIBUTES SAYS DOES NOT BELONG IN MATCHING -
+ * and that note is about a value the AUTHOR chose, a path or an address. A
+ * value the OPERATING SYSTEM fixes is the other thing entirely, and the
+ * vocabulary already matches on one: a syscall number. Zero written into a
+ * credential is root, on every architecture and every kernel, because that
+ * is what uid 0 MEANS; it is not a constant anybody picked.
+ *
+ * WHY IT IS NEEDED AT ALL. Without it a credential diagnose can say "the
+ * object prepare_creds returned was written into and then installed", and
+ * nfsd does exactly that - it builds credentials to act for a remote user.
+ * What separates the two is not the shape and not how rare the symbols are:
+ * it is that one writes the remote user's ids and the other writes zero.
+ * Matching on rarity proves a file resembles no clean file; matching on the
+ * value proves what the file DOES.
+ */
+#define KOF_DIAG_B_VAL      (1u << 3)
+
+/*
  * ONE NODE. Eight bytes and then its attributes.
  *
  * `cap` IS A NUCLEO GROUP ID AND NEVER A SYSCALL NUMBER OR A NAME. That is
@@ -193,7 +213,14 @@ struct kof_diag_node {
 	uint8_t  role;           /* enum kof_diag_role - which input        */
 	uint8_t  bits;           /* KOF_DIAG_B_*                            */
 	uint8_t  attr_len;       /* bytes of attribute following            */
-	/* attr[attr_len] follows, see the note on attributes below */
+	/*
+	 * attr[attr_len] follows ON THE WIRE, see the note on attributes
+	 * below. It is a run of (kind, length, payload), and this build
+	 * decodes the kinds it knows into the fields after this point - a
+	 * reader that does not know a kind skips it by its length, which is
+	 * the whole reason the run carries one.
+	 */
+	uint64_t val;            /* KDIG_ATTR_VALUE, when KOF_DIAG_B_VAL    */
 };
 
 /*
@@ -277,6 +304,18 @@ struct kof_diag_node {
  */
 #define KOF_DIAG_SH_NO_SECTIONS (1u << 1)
 #define KOF_DIAG_SH_ONE_LOAD    (1u << 2)
+
+/*
+ * A RELOCATABLE OBJECT - ET_REL, which on Linux means a loadable kernel
+ * module and on nothing else that ships.
+ *
+ * Declared rather than left to the symbols: an ordinary program can import
+ * a name that happens to match, and the routes differ too - a .ko has no
+ * PT_LOAD, so the span runner takes an entirely different path through it.
+ * A diagnose about kernel behaviour that did not say so would be offered
+ * objects no part of it can describe.
+ */
+#define KOF_DIAG_SH_ELF_REL     (1u << 3)
 
 /*
  * HOW MANY SIGNS A DIAGNOSE MAY DECLARE, and how long one may be. A sign is
@@ -392,6 +431,14 @@ enum kof_diag_link {
  * file's header instead of its symbol table, for a behaviour that carries
  * no symbol. See KOF_DIAG_SH_ENTRY_WX.
  */
+/*
+ * KOF_DIAG_WROTE(label, 0) - the node must have written this value.
+ *
+ * Only for a node that writes. See KOF_DIAG_B_VAL for why a value may be
+ * matched on at all, and for the one kind that may: a value the operating
+ * system fixes the meaning of.
+ */
+#define KOF_DIAG_WROTE(label, value)
 #define KOF_DIAG_SHAPE(mask)
 /*
  * ONE LINE PER CALL, and repeat the macro for more than fits. The build
@@ -414,6 +461,13 @@ enum kof_diag_link {
  * does know.
  */
 #define KDIG_SEC_SHAPE 1u
+
+/*
+ * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,
+ * then one length byte, then the payload. Same shape and same reason as the
+ * sections above.
+ */
+#define KDIG_ATTR_VALUE 1u      /* 8 bytes LE - the value the node wrote */
 
 
 /*

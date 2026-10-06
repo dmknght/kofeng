@@ -164,6 +164,19 @@ struct kof_diag_in {
  */
 #define KOF_DIAG_H_ATTR_STR (1u << 5)
 
+/*
+ * `val` HOLDS THE VALUE THIS NODE WROTE, and it was a constant in the
+ * instruction rather than something the run worked out.
+ *
+ * ONLY A LITERAL COUNTS. A value that arrived in a register is one the
+ * model may have lost track of, and "zero because we could not tell" and
+ * "zero because the program wrote zero" are the same bit pattern - the
+ * second is evidence and the first is the absence of it. What Diamorphine
+ * needs is `mov QWORD PTR [rax+0x4],0x0`, where the zero is four bytes of
+ * the instruction.
+ */
+#define KOF_DIAG_H_VAL (1u << 6)
+
 struct kof_diag_hit {
 	uint64_t at;            /* where, as an offset into the object      */
 	/*
@@ -191,6 +204,8 @@ struct kof_diag_hit {
 	 * syscall number.
 	 */
 	uint64_t attr;
+	/* The constant this node wrote - see KOF_DIAG_H_VAL. */
+	uint64_t val;
 	uint16_t cap;           /* enum kof_flow_cap, or KOF_NUCLEO_NONE       */
 	uint16_t flags;         /* KOF_FLOWF_* observed at this site        */
 	uint8_t  bits;          /* KOF_DIAG_H_*                             */
