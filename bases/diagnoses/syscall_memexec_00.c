@@ -54,19 +54,39 @@ KOF_DIAG_NAME(DIAG_SYSCALL_MEMEXEC);
 KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_EMULATE);
 
 /*
- * ---- AND THE SIGN THAT SAYS THIS FILE IS WORTH THE ANALYSIS ------------
+ * ---- AND THE ATTRIBUTES THAT SAY THIS FILE IS WORTH THE ANALYSIS -------
  *
- * One region, writable and executable, holding the entry point. A stager
- * has nothing else to recognise it by - no imports, no symbols, a few
- * hundred bytes of shellcode - and this is the shape its loader was handed.
+ * The engine publishes what it read out of the header; this is where the
+ * diagnose says what it wants those to be - see KOF_DIAG_WHEN.
  *
- * WITHOUT IT THE RULE ABOVE TURNS THE ANALYSIS ON FOR EVERY ELF: measured,
- * 954 binaries from /usr/bin went from 1.94 s to 3.45 s for a question none
- * of them could have answered yes to. Not one of them has an RWE PT_LOAD;
- * every msfvenom stager here has exactly one.
+ * A MAPPING THAT IS WRITABLE AND EXECUTABLE, and no section table. A
+ * stager has nothing else to recognise it by - no imports, no symbols, a
+ * few hundred bytes of shellcode - and this is the shape its loader was
+ * handed. Counted on this machine: 0 of 1056 binaries under /usr/bin
+ * declare a W+X mapping of any kind; 9 of 254 malware objects do.
+ *
+ * SOME mapping and not the one holding the entry, which is the narrower
+ * question and the wrong one here: a payload does not have to START in the
+ * region it will write code into.
+ *
+ * WITHOUT A CONDITION THE RULE TURNS THE ANALYSIS ON FOR EVERY ELF -
+ * measured, those 954 binaries went from 1.94 s to 3.45 s for a question
+ * none of them could have answered yes to.
+ *
+ * NOT "one program header", which an earlier version also demanded. That
+ * is not about what the file may DO: it is the msfvenom RAW template
+ * having exactly one, and the same payload written into a full ELF
+ * template carries six - x64_rev_http_clear here is that build. A
+ * CONDITION HERE DECIDES WHAT GETS LOOKED AT, so one narrower than it
+ * needs to be is a detection in disguise whose misses nobody can see.
+ *
+ * THE MISSING SECTION TABLE STAYS, because the W+X population is the one
+ * that will grow: as more malware ships such a mapping that attribute
+ * alone stops separating, and having stripped the section table as well is
+ * the half that still does.
  */
-KOF_DIAG_SHAPE(KOF_DIAG_SH_ENTRY_WX | KOF_DIAG_SH_NO_SECTIONS);
-KOF_DIAG_SHAPE(KOF_DIAG_SH_ONE_LOAD);
+KOF_DIAG_WHEN(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
+KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0);
 
 /*
  * THE ROOT IS RARE AND UNAVOIDABLE. Rare: no clean program asks for W+X in

@@ -81,7 +81,8 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
 /*
  * ---- THE SIGNS THAT SAY THIS OBJECT IS WORTH THE WALK -------------------
  *
- * A RELOCATABLE OBJECT, which on Linux is a loadable kernel module. Said
+ * A RELOCATABLE OBJECT, which on Linux is a loadable kernel module. The
+ * engine publishes the object kind; this registers the condition. Said
  * explicitly rather than inferred from the symbols: an ordinary program can
  * import a name that matches, and a .ko has no PT_LOAD, so the walk takes
  * an entirely different path through it.
@@ -90,7 +91,7 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
  * be wrong and cost only the analysis - but these two are also what the
  * tree below is about, so an object missing either cannot match anyway.
  */
-KOF_DIAG_SHAPE(KOF_DIAG_SH_ELF_REL);
+KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
 KOF_DIAG_NEEDS("prepare_creds", "commit_creds");
 
 /*

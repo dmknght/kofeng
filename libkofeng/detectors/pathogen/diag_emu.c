@@ -177,22 +177,11 @@ static int ret_is_carryable(uint64_t ret)
  * between a syscall and the import that means the same thing. The capability
  * is what both resolve to, which is the whole reason it exists.
  */
-static int cap_hands_on_value(uint16_t cap)
+static int cap_hands_on_value(uint16_t cap, const char *nm)
 {
-	switch (cap) {
-	case KOF_NUCLEO_ALLOC:
-	case KOF_NUCLEO_ALLOC_EXEC:
-	case KOF_NUCLEO_HEAP:
-	case KOF_NUCLEO_NET_OPEN:
-	case KOF_NUCLEO_NET_RAW:
-	case KOF_NUCLEO_NET_ACCEPT:
-	case KOF_NUCLEO_FILE_OPEN:
-	case KOF_NUCLEO_MEMFD:
-	case KOF_NUCLEO_PIPE_OPEN:
-		return 1;
-	default:
-		return 0;
-	}
+	/* The vocabulary's answer, not a second copy - see
+	 * kof_flow_hands_on. */
+	return kof_flow_hands_on(cap, nm);
 }
 
 
@@ -1288,7 +1277,12 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 
 				if (a < lo || a >= hi)
 					continue;
-				if (kof_diag_sym_hands_on(skips[t].cap) ||
+				/* The vocabulary's answer - see
+				 * kof_flow_hands_on. No name here: this is
+				 * a call the span stepped over, and what it
+				 * is asking is only whether SOMETHING in the
+				 * gap could have produced a value. */
+				if (kof_flow_hands_on(skips[t].cap, NULL) ||
 				    (skips[t].callee &&
 				     callee_node(s, fns, fg.n,
 						 skips[t].callee) != 0xffffu))
@@ -1539,7 +1533,8 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 					uint16_t src = 0xffffu;
 
 					if (node != 0xffffu &&
-					    kof_diag_sym_hands_on(skips[q].cap))
+					    kof_flow_hands_on(skips[q].cap,
+							      NULL))
 						src = node;
 					else if (skips[q].callee) {
 						uint32_t t;
@@ -2214,17 +2209,19 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 					 * again on the next pass. A node is
 					 * a site, however many times the
 					 * walk arrives. */
-					for (t = 0; t < live; t++) {
-						const struct kof_diag_hit *p =
-						  kof_diag_scan_at(s, t);
-
-						if (p && p->at == rip &&
-						    p->cap == KOF_NUCLEO_PROT_OFF)
-							seen_site = 1;
-					}
-					if (!seen_site)
-						kof_diag_hit_add(s, rip,
-							KOF_NUCLEO_PROT_OFF, 0);
+					/*
+					 * NO NODE FOR IT WHILE THE WORD IS
+					 * OUT OF SERVICE - see the note on
+					 * write_cr0 in nucleo.c. The move is
+					 * still STEPPED OVER below, which is
+					 * what the span needs; what is
+					 * suspended is calling it a
+					 * capability, because the word today
+					 * means an x86 instruction rather
+					 * than the behaviour.
+					 */
+					(void)seen_site;
+					(void)live;
 					/*
 					 * AND STEP OVER IT. The interpreter
 					 * answers UNSUPPORTED for a control
@@ -2799,7 +2796,14 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 				kof_emu_set_reg(em, DIAG_EMU_RET, ret);
 		}
 
-		if (cap_hands_on_value(cap) && ret_is_carryable(ret)) {
+		/*
+		 * THE NAME, because mmap and mprotect are one capability and
+		 * only the first hands a mapping back - see kof_flow_hands_on.
+		 * Without it this route linked everything after an mprotect
+		 * to its status value.
+		 */
+		if (cap_hands_on_value(cap, kof_sys_name(bits, (uint32_t)nr)) &&
+		    ret_is_carryable(ret)) {
 			for (i = 0; i < n_made; i++)
 				if (made[i].node == node)
 					break;

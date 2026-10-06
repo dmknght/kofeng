@@ -1323,7 +1323,7 @@ int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
 		     const struct kof_scan_option *, kof_on_object cb, void *user);
 
 /*
- * A LOADED DIAGNOSE DECLARED SIGNS THIS OBJECT CARRIES - see KOF_DIAG_SH_*
+ * A LOADED DIAGNOSE DECLARED SIGNS THIS OBJECT CARRIES - see KOF_DIAG_WHEN
  * and KOF_DIAG_NEEDS. Non-zero means the analysis is worth starting on this
  * object, which is the routing a heuristic rule used to do by hand.
  */

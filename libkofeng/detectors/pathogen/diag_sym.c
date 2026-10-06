@@ -71,6 +71,14 @@
 struct relsite {
 	uint64_t at;            /* what a decoder computes as the target */
 	uint16_t cap;
+	/*
+	 * The vocabulary's id for the name, not the string - see
+	 * kof_flow_name_id. Carried because one capability can cover two
+	 * calls that differ in whether the object comes back: mmap and
+	 * mprotect are both an executable mapping and only the first hands
+	 * one back. See kof_flow_hands_on.
+	 */
+	uint16_t name;
 	uint8_t  argrole[6];    /* which input each argument register is */
 };
 
@@ -82,20 +90,6 @@ struct relgather {
 
 
 /* Does this call hand something on that a later one could be holding. */
-int kof_diag_sym_hands_on(uint16_t cap)
-{
-	switch (cap) {
-	case KOF_NUCLEO_CRED_PREPARE:   /* a struct cred * to edit then commit  */
-	case KOF_NUCLEO_KSYM_LOOKUP:    /* the address of whatever was named    */
-	case KOF_NUCLEO_SYMBOL_GET:
-	case KOF_NUCLEO_ALLOC:
-	case KOF_NUCLEO_HEAP:
-	case KOF_NUCLEO_FILE_OPEN:
-		return 1;
-	default:
-		return 0;
-	}
-}
 
 static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 {
@@ -116,6 +110,7 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	}
 	g->site[g->n].at = at;
 	g->site[g->n].cap = cap;
+	g->site[g->n].name = kof_flow_name_id(name);
 	for (i = 0; i < 6u; i++)
 		g->site[g->n].argrole[i] = kof_diag_role_of_arg(cap, i);
 	g->n++;
@@ -300,7 +295,9 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 * second is how both facts are kept.
 			 */
 			if (i < g.n && node_of[i] != 0xffffu) {
-				if (kof_diag_sym_hands_on(sites[i].cap))
+				if (kof_flow_hands_on(sites[i].cap,
+						      kof_flow_name_of(
+							      sites[i].name)))
 					kof_diag_org_set(&w, KDIS_REG_AX,
 							 node_of[i]);
 				else

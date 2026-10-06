@@ -85,7 +85,6 @@ void     kof_diag_org_step(struct walk *w, const struct kdis_insn *in);
  * is only correct while they are.
  */
 uint8_t kof_diag_role_of_arg(uint16_t cap, unsigned i);
-int     kof_diag_sym_hands_on(uint16_t cap);
 extern const uint8_t kof_diag_sysv_arg[6];
 
 /* The routines. One per KOF_DIAG_RUN_* bit, each in its own file. */

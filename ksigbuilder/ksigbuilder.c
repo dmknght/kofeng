@@ -7230,6 +7230,76 @@ struct dhdr {
 	X(KOF_NUCLEO_REG_SET) X(KOF_NUCLEO_SELF_HIDE) X(KOF_NUCLEO_SVC_INSTALL) \
 	X(KOF_NUCLEO_SLEEP) X(KOF_NUCLEO_THREAD)
 
+/*
+ * THE WORDS A CONDITION MAY BE WRITTEN IN - the facts the engine publishes
+ * and the values they are compared against.
+ *
+ * Both halves are read out of the real enums through the X-macro, for the
+ * reason the capability table above gives: the number comes from the header
+ * through the compiler, so nothing here can drift from what the engine
+ * means. A word missing from the list is a loud failure at build time; a
+ * word with the wrong number is not possible.
+ */
+#define KOF_FACT_IDENTS(X) \
+	X(KOF_FACT_ENTRY_PERM) X(KOF_FACT_MAP_PERM) \
+	X(KOF_FACT_SECTIONS)   X(KOF_FACT_OBJ_KIND)
+
+#define KOF_WHEN_VALUES(X) \
+	X(KOF_PERM_R) X(KOF_PERM_W) X(KOF_PERM_X) \
+	X(KOF_PE_PERM_R) X(KOF_PE_PERM_W) X(KOF_PE_PERM_X) \
+	X(KOF_ELF_REL) X(KOF_ELF_EXEC) X(KOF_ELF_DYN) X(KOF_ELF_CORE)
+
+static const struct { const char *w; uint64_t v; } when_word[] = {
+#define KSB_WHEN_ROW(id) { #id, (uint64_t)(id) },
+	KOF_FACT_IDENTS(KSB_WHEN_ROW)
+	KOF_WHEN_VALUES(KSB_WHEN_ROW)
+#undef KSB_WHEN_ROW
+};
+
+/*
+ * A word, or a plain number. `|` joins them, because a permission is a
+ * mask and writing it any other way would mean the source could not say
+ * "writable and executable" in the engine's own words.
+ */
+static int when_value(const char *w, uint64_t *out)
+{
+	char tmp[128];
+	size_t n = strlen(w), i;
+	char *tok, *save = NULL;
+	uint64_t v = 0;
+
+	if (n >= sizeof tmp)
+		return 0;
+	memcpy(tmp, w, n + 1u);
+	*out = 0;
+	for (tok = strtok_r(tmp, "|", &save); tok;
+	     tok = strtok_r(NULL, "|", &save)) {
+		char *e = NULL;
+		unsigned long long num;
+
+		while (*tok == ' ' || *tok == '\t')
+			tok++;
+		for (i = strlen(tok); i && (tok[i - 1u] == ' ' ||
+					    tok[i - 1u] == '\t'); i--)
+			tok[i - 1u] = 0;
+		if (!*tok)
+			return 0;
+		for (i = 0; i < sizeof when_word / sizeof when_word[0]; i++)
+			if (strcmp(tok, when_word[i].w) == 0)
+				break;
+		if (i < sizeof when_word / sizeof when_word[0]) {
+			v |= when_word[i].v;
+			continue;
+		}
+		num = strtoull(tok, &e, 0);
+		if (!e || *e)
+			return 0;
+		v |= (uint64_t)num;
+	}
+	*out = v;
+	return 1;
+}
+
 static const struct { const char *w; uint16_t v; } cap_ident[] = {
 #define KSB_CAP_ROW(id) { #id, (uint16_t)(id) },
 	KOF_NUCLEO_IDENTS(KSB_CAP_ROW)
@@ -7385,9 +7455,10 @@ static int diagnose_main(int argc, char **argv)
 	struct dnode nd[64];
 	char name[64] = "", line[1024], a[5][96];
 	char need_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
-	int n_need = 0;
+	struct kof_diag_when when_tbl[KOF_DIAG_MAX_WHEN];
+	int n_need = 0, n_when = 0;
 	int n_nd = 0, lineno = 0, i;
-	unsigned via = 0, shape = 0;
+	unsigned via = 0;
 	FILE *f, *o;
 	unsigned char *blob;
 	size_t at, need;
@@ -7515,17 +7586,31 @@ static int diagnose_main(int argc, char **argv)
 				nd[i].val = (uint64_t)v;
 				nd[i].bits |= KOF_DIAG_B_VAL;
 			}
-		} else if ((p = strstr(line, "KOF_DIAG_SHAPE(")) != NULL) {
-			if (strstr(p, "KOF_DIAG_SH_ENTRY_WX"))
-				shape |= KOF_DIAG_SH_ENTRY_WX;
-			if (strstr(p, "KOF_DIAG_SH_NO_SECTIONS"))
-				shape |= KOF_DIAG_SH_NO_SECTIONS;
-			if (strstr(p, "KOF_DIAG_SH_ONE_LOAD"))
-				shape |= KOF_DIAG_SH_ONE_LOAD;
-			if (strstr(p, "KOF_DIAG_SH_ELF_REL"))
-				shape |= KOF_DIAG_SH_ELF_REL;
-			if (!shape)
-				err(lineno, "KOF_DIAG_SHAPE names no sign");
+		} else if ((p = strstr(line, "KOF_DIAG_WHEN(")) != NULL) {
+			uint64_t fv = 0, vv = 0;
+
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1])) {
+				err(lineno, "KOF_DIAG_WHEN(fact, value)");
+				continue;
+			}
+			if (!when_value(a[0], &fv) || !fv ||
+			    fv >= (uint64_t)KOF_FACT_COUNT) {
+				err(lineno, "not a fact the engine publishes");
+				continue;
+			}
+			if (!when_value(a[1], &vv)) {
+				err(lineno, "KOF_DIAG_WHEN wants a constant "
+					    "or words joined by |");
+				continue;
+			}
+			if (n_when >= (int)KOF_DIAG_MAX_WHEN) {
+				err(lineno, "too many conditions");
+				continue;
+			}
+			when_tbl[n_when].fact = (uint16_t)fv;
+			when_tbl[n_when].val = vv;
+			n_when++;
 		} else if ((p = strstr(line, "KOF_DIAG_NEEDS(")) != NULL) {
 			int k;
 
@@ -7599,7 +7684,7 @@ static int diagnose_main(int argc, char **argv)
 	 * because the tagged sections below sit after it and a reader that
 	 * skipped it would take a tag for a count.
 	 */
-	if (n_need || shape) {
+	if (n_need || n_when) {
 		int k;
 
 		need += 1u;                     /* how many */
@@ -7612,8 +7697,8 @@ static int diagnose_main(int argc, char **argv)
 	 * them has to be skippable by a reader that does not know it, which
 	 * a length is and a bare field is not.
 	 */
-	if (shape)
-		need += 2u + 2u;
+	if (n_when)
+		need += 2u + (size_t)n_when * 10u;
 	blob = calloc(1, need);
 	if (!blob)
 		return 1;
@@ -7649,7 +7734,7 @@ static int diagnose_main(int argc, char **argv)
 					     (nd[i].val >> (q * 8u));
 		}
 	}
-	if (n_need || shape) {
+	if (n_need || n_when) {
 		int k;
 
 		blob[at++] = (unsigned char)n_need;
@@ -7661,11 +7746,20 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (shape) {
-		blob[at++] = KDIG_SEC_SHAPE;
-		blob[at++] = 2u;
-		blob[at++] = (unsigned char)shape;
-		blob[at++] = (unsigned char)(shape >> 8);
+	if (n_when) {
+		int k;
+
+		blob[at++] = KDIG_SEC_WHEN;
+		blob[at++] = (unsigned char)(n_when * 10);
+		for (k = 0; k < n_when; k++) {
+			unsigned q;
+
+			blob[at++] = (unsigned char)when_tbl[k].fact;
+			blob[at++] = (unsigned char)(when_tbl[k].fact >> 8);
+			for (q = 0; q < 8u; q++)
+				blob[at++] = (unsigned char)
+					     (when_tbl[k].val >> (q * 8u));
+		}
 	}
 	o = fopen(out, "wb");
 	if (!o || fwrite(blob, 1, need, o) != need) {
@@ -7675,8 +7769,8 @@ static int diagnose_main(int argc, char **argv)
 		return 1;
 	}
 	fclose(o);
-	printf("== %s  %s  %d node, %d sign(s), shape 0x%x, %zu bytes\n",
-	       src, name, n_nd, n_need, shape, need);
+	printf("== %s  %s  %d node, %d sign(s), %d condition(s), %zu bytes\n",
+	       src, name, n_nd, n_need, n_when, need);
 	free(blob);
 	return 0;
 }

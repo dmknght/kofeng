@@ -460,19 +460,31 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	 * between the syscall and the import that mean the same thing, and
 	 * nothing above this should have to know which route it came by.
 	 */
-	if (n_ar >= 2 && nm &&
-	    (!strcmp(nm, "read") || !strcmp(nm, "recv") ||
-	     !strcmp(nm, "recvfrom") || !strcmp(nm, "write") ||
-	     !strcmp(nm, "send"))) {
-		kof_diag_note_in(h, kof_diag_org_of(w, ar[1]), KOF_DIAG_ROLE_BUFFER,
-					 KOF_DIAG_KIND_PRODUCED);
-		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD,
-					 KOF_DIAG_KIND_PRODUCED);
-	} else if (n_ar >= 1 && nm &&
-		   (!strcmp(nm, "connect") || !strcmp(nm, "close") ||
-		    !strcmp(nm, "dup2"))) {
-		kof_diag_note_in(h, kof_diag_org_of(w, ar[0]), KOF_DIAG_ROLE_FD,
-					 KOF_DIAG_KIND_PRODUCED);
+	{
+		unsigned k;
+
+		/*
+		 * FROM kof_diag_role_of_arg AND NOT FROM A LIST OF NAMES.
+		 *
+		 * This was eight hardcoded names - read, recv, recvfrom,
+		 * write, send, connect, close, dup2 - which is a second
+		 * spelling of that function, and the narrower one: it answers
+		 * by CAPABILITY, so every alias the vocabulary learns is
+		 * covered the moment it is added, while a name list has to be
+		 * edited too and silently makes no link until it is. The
+		 * comment above this code already said the question is about
+		 * the role and not the index.
+		 *
+		 * `close` was in that list and is not a capability at all, so
+		 * no node was ever made for it and the branch could not fire.
+		 */
+		for (k = 0; k < (unsigned)n_ar && k < 6u; k++) {
+			uint8_t role = kof_diag_role_of_arg(cap, k);
+
+			if (role != KOF_DIAG_ROLE_NONE)
+				kof_diag_note_in(h, kof_diag_org_of(w, ar[k]),
+						 role, KOF_DIAG_KIND_PRODUCED);
+		}
 	}
 
 	/*
@@ -481,18 +493,21 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	 * region in its first argument instead, which is why the two are
 	 * not one case.
 	 */
-	if (nm && (!strcmp(nm, "mmap") || !strcmp(nm, "mmap2") ||
-		   !strcmp(nm, "old_mmap")))
+	if (kof_flow_hands_on(cap, nm)) {
 		kof_diag_org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
-	else if (nm && !strcmp(nm, "mprotect")) {
-		if (n_ar >= 1 && kof_diag_org_of(w, ar[0]) == ORG_STACK)
+	} else {
+		/*
+		 * mprotect is the capability that does NOT hand one back,
+		 * and the one case where the region it was GIVEN still
+		 * matters: a stack mapping made executable is a payload
+		 * about to run off the stack.
+		 */
+		if ((cap == KOF_NUCLEO_ALLOC || cap == KOF_NUCLEO_ALLOC_EXEC ||
+		     cap == KOF_NUCLEO_HEAP) && n_ar >= 1 &&
+		    kof_diag_org_of(w, ar[0]) == ORG_STACK)
 			h->bits |= KOF_DIAG_H_REGION_STACK;
 		kof_diag_org_clear(w, KDIS_REG_AX);
-	} else if (cap == KOF_NUCLEO_NET_OPEN || cap == KOF_NUCLEO_FILE_OPEN ||
-		   cap == KOF_NUCLEO_MEMFD)
-		kof_diag_org_set(w, KDIS_REG_AX, (uint16_t)(s->n_hit - 1u));
-	else
-		kof_diag_org_clear(w, KDIS_REG_AX);
+	}
 
 	/* Arm the carry for the next conditional branch - see walk.carry_to. */
 	if (bits == 64 && nm && kof_sys_zero_on_success(nm))
@@ -1391,9 +1406,37 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			at += 2u;
 			if (at + len > n)
 				return 0;
-			if (tag == KDIG_SEC_SHAPE && len == 2u)
-				out->shape = (uint16_t)(b[at] |
-							(b[at + 1u] << 8));
+			/*
+			 * (fact u16, value u64) pairs - see KOF_DIAG_WHEN.
+			 * A FACT THIS BUILD DOES NOT KNOW REFUSES THE WHOLE
+			 * RECORD: a condition silently dropped is a diagnose
+			 * that runs on the files its author excluded, and it
+			 * would do so quietly.
+			 */
+			if (tag == KDIG_SEC_WHEN) {
+				uint32_t q;
+
+				if (len % 10u)
+					return 0;
+				if (len / 10u > KOF_DIAG_MAX_WHEN)
+					return 0;
+				for (q = 0; q + 10u <= len; q += 10u) {
+					const uint8_t *w = b + at + q;
+					uint64_t v = 0;
+					unsigned t;
+					uint16_t fc = (uint16_t)(w[0] |
+							 (w[1] << 8));
+
+					if (!fc || fc >= KOF_FACT_COUNT)
+						return 0;
+					for (t = 0; t < 8u; t++)
+						v |= (uint64_t)w[2 + t]
+						     << (t * 8u);
+					out->when[out->n_when].fact = fc;
+					out->when[out->n_when].val = v;
+					out->n_when++;
+				}
+			}
 			at += len;
 		}
 	}

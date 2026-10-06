@@ -554,8 +554,26 @@ names[] = {
 	{ "unregister_kretprobe", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	/* Code of one's own put in the path of somebody else's. */
 	{ "unregister_ftrace_function", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
-	{ "write_cr0",      KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE },
-	{ "write_cr4",      KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE },
+	/*
+	 * ---- write_cr0 / write_cr4 / mov_cr0 ARE OFF, ON PURPOSE --------
+	 *
+	 * The word is KOF_NUCLEO_PROT_OFF - "the module took write access to
+	 * memory the kernel protects" - and these three are the only members
+	 * it has. All three are x86, and two of them are the instruction
+	 * rather than the behaviour, which is the one thing a nucleo word
+	 * must never be: arm64 has no CR0 at all, and reaches the same end
+	 * through update_mapping_prot, set_memory_rw or
+	 * aarch64_insn_patch_text. A word that covers one architecture's
+	 * mechanism makes rules that stop working on the next port, and
+	 * leaving it half-populated is worse than leaving it empty, because
+	 * a rule written against it would read as architecture-neutral.
+	 *
+	 * There is no LKM sample for any other architecture on this machine,
+	 * so the membership cannot be measured yet. The value stays declared
+	 * and nothing produces it until it can be.
+	 */
+	/* { "write_cr0",   KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE }, */
+	/* { "write_cr4",   KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE }, */
 	/*
 	 * AND THE INSTRUCTION ITSELF, AS A NAME.
 	 *
@@ -569,7 +587,8 @@ names[] = {
 	 */
 	{ "peb_ldr",        KOF_NUCLEO_SELF_RESOLVE, KOF_FLOW_ROLE_NONE },
 	{ "name_hash",      KOF_NUCLEO_NAME_HASH, KOF_FLOW_ROLE_NONE },
-	{ "mov_cr0",        KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE },
+	/* off with the other two - see the note above them */
+	/* { "mov_cr0",     KOF_NUCLEO_PROT_OFF, KOF_FLOW_ROLE_NONE }, */
 	{ "register_ftrace_function", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	{ "ftrace_set_filter_ip", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
 	{ "register_ftrace_direct", KOF_NUCLEO_HOOK, KOF_FLOW_ROLE_NONE },
@@ -1312,11 +1331,44 @@ const char *kof_flow_cap_name(uint16_t cap)
 	case KOF_NUCLEO_SYMBOL_GET:   return "kmodule-symbol-get";
 	case KOF_NUCLEO_CRED_PREPARE: return "cred-prepare";
 	case KOF_NUCLEO_LIST_HIDE:    return "kmodule-list-edit";
-	case KOF_NUCLEO_PROT_OFF:     return "kmodule-cr-write";
+	/* Named for the x86 instruction, which is the fault that took the
+	 * word out of service - see the note in the import table. */
+	case KOF_NUCLEO_PROT_OFF:     return "kmodule-write-protect-off";
 	case KOF_NUCLEO_NET_ADDR:     return "net-addr";
 	case KOF_NUCLEO_SELF_HIDE:    return "self-hide";
 	case KOF_NUCLEO_BACKGROUND:   return "proc-background";
 	default:                   return "?";
+	}
+}
+
+/* See the note in nucleo.h - this is the vocabulary's own answer, and the
+ * only one. */
+int kof_flow_hands_on(uint16_t cap, const char *nm)
+{
+	switch (cap) {
+	case KOF_NUCLEO_ALLOC:
+	case KOF_NUCLEO_ALLOC_EXEC:
+	case KOF_NUCLEO_HEAP:
+		/*
+		 * mprotect shares the word with mmap and is not a
+		 * constructor: it is handed a mapping and returns a status.
+		 */
+		return !(nm && (!strcmp(nm, "mprotect") ||
+				!strcmp(nm, "mprotect64")));
+	case KOF_NUCLEO_NET_OPEN:
+	case KOF_NUCLEO_NET_RAW:
+	case KOF_NUCLEO_NET_ACCEPT:
+	case KOF_NUCLEO_FILE_OPEN:
+	case KOF_NUCLEO_MEMFD:
+	case KOF_NUCLEO_PIPE_OPEN:
+	/* The kernel side: a credential to edit and commit, and the address
+	 * of whatever was looked up. */
+	case KOF_NUCLEO_CRED_PREPARE:
+	case KOF_NUCLEO_KSYM_LOOKUP:
+	case KOF_NUCLEO_SYMBOL_GET:
+		return 1;
+	default:
+		return 0;
 	}
 }
 

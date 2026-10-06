@@ -5439,14 +5439,31 @@ static int c_opened_already(const struct kof_obj_ctx *ctx);
  * not work.
  */
 /*
- * DOES THE FILE HAVE THE ATTRIBUTES A DIAGNOSE DECLARED - see KOF_DIAG_SH_*.
+ * ---- THE FACTS THE ENGINE PUBLISHES ABOUT AN OBJECT ---------------------
  *
- * ALL OF THEM, because a diagnose names the shape it is worth running on and
- * a shape is one statement, not a menu.
+ * One question each, answered off the parse, and nothing here knows what
+ * any of them is FOR. A diagnose states the condition - see
+ * KOF_DIAG_WHEN and enum kof_diag_fact - and this only fetches.
+ *
+ * IT USED TO BE THE OTHER WAY ROUND: a handful of named bits, each one's
+ * meaning a few lines of C in this file, and a diagnose could only ask what
+ * somebody had already written. One of them, ONE_LOAD, was a compound of
+ * three clauses under a single name, so what a diagnose using it actually
+ * demanded could not be read off the diagnose - and when one clause turned
+ * out to be a build detail rather than a behaviour, nothing in the
+ * declaration showed it.
+ *
+ * A FACT THIS BUILD DOES NOT KNOW ANSWERS NO. The loader refuses a
+ * diagnose naming one, so reaching here with an unknown fact means the two
+ * ends of the database disagree, and the safe answer to "should the
+ * expensive analysis run" is no.
  */
-static int diag_shape_met(const struct kof_obj_ctx *ctx, uint16_t shape)
+static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
+		      uint64_t want)
 {
 	const struct kof_elf_info *ei = NULL;
+	const struct kof_pe_info *pi = NULL;
+	uint32_t i;
 
 	if (!ctx)
 		return 0;
@@ -5454,70 +5471,70 @@ static int diag_shape_met(const struct kof_obj_ctx *ctx, uint16_t shape)
 		ei = kof_elf(ctx);
 		if (!ei || !ei->valid)
 			return 0;
+	} else if (ctx->format == KOF_FMT_PE) {
+		pi = kof_pe(ctx);
+		if (!pi)
+			return 0;
 	}
 
-	if (shape & KOF_DIAG_SH_ENTRY_WX) {
+	switch (fact) {
+	case KOF_FACT_ENTRY_PERM:
 		/*
-		 * EACH FORMAT'S OWN WORD FOR IT. The two enums happen to
-		 * agree bit for bit and that is not something to rely on -
-		 * see KOF_PERM_X and KOF_PE_PERM_X, declared apart on
-		 * purpose.
+		 * EACH FORMAT'S OWN WORD FOR IT. The two permission enums
+		 * happen to agree bit for bit and that is not something to
+		 * rely on - KOF_PERM_X and KOF_PE_PERM_X are declared apart
+		 * on purpose.
 		 */
+		if (ei)
+			return ((uint64_t)ei->entry_perm & want) == want;
+		if (pi)
+			return ((uint64_t)pi->entry_perm & want) == want;
+		return 0;               /* no answer is not a yes */
+	case KOF_FACT_MAP_PERM:
 		if (ei) {
-			if ((ei->entry_perm & (KOF_PERM_W | KOF_PERM_X)) !=
-			    (KOF_PERM_W | KOF_PERM_X))
-				return 0;
-		} else if (ctx->format == KOF_FMT_PE) {
-			const struct kof_pe_info *pi = kof_pe(ctx);
-
-			if (!pi ||
-			    (pi->entry_perm & (KOF_PE_PERM_W | KOF_PE_PERM_X))
-			    != (KOF_PE_PERM_W | KOF_PE_PERM_X))
-				return 0;
-		} else {
-			return 0;   /* no answer is not a yes */
+			for (i = 0; i < ei->seg_count &&
+				    i < KOF_ELF_MAX_SEGMENTS; i++)
+				if (ei->seg[i].type == 1u &&      /* PT_LOAD */
+				    ((uint64_t)ei->seg[i].perm & want) == want)
+					return 1;
+			return 0;
 		}
-	}
-	if (shape & KOF_DIAG_SH_NO_SECTIONS) {
-		if (!ei || ei->shoff != 0u)
+		if (pi) {
+			/* A section, which is where PE declares the same
+			 * thing about a mapping. */
+			for (i = 0; i < pi->sec_count; i++)
+				if (((uint64_t)pi->sec[i].perm & want) == want)
+					return 1;
 			return 0;
+		}
+		return 0;
+	case KOF_FACT_SECTIONS:
+		if (ei)
+			return (uint64_t)ei->shnum == want;
+		if (pi)
+			return (uint64_t)pi->sec_count == want;
+		return 0;
+	case KOF_FACT_OBJ_KIND:
+		if (ei)
+			return (uint64_t)ei->e_type == want;
+		return 0;
+	default:
+		return 0;
 	}
-	if (shape & KOF_DIAG_SH_ELF_REL) {
-		if (!ei || ei->e_type != KOF_ELF_REL)
-			return 0;
-	}
-	if (shape & KOF_DIAG_SH_ONE_LOAD) {
-		const struct kof_elf_seg *g;
+}
 
-		/*
-		 * ONE PROGRAM HEADER AND IT IS THE FILE. Checked rather than
-		 * assumed: a single segment that maps only part of the file
-		 * leaves the rest unaccounted for, and that is a different
-		 * object.
-		 */
-		if (!ei || ei->phnum != 1u || ei->seg_count != 1u)
+/* Every condition a diagnose stated - see KOF_DIAG_WHEN. */
+static int diag_when_met(const struct kof_obj_ctx *ctx,
+			 const struct kof_diag *d)
+{
+	uint8_t i;
+
+	for (i = 0; i < d->n_when; i++)
+		if (!fact_holds(ctx, d->when[i].fact, d->when[i].val))
 			return 0;
-		g = &ei->seg[0];
-		if (g->type != 1u || g->file_off != 0u ||
-		    g->file_size < ctx->obj_size)
-			return 0;
-	}
 	return 1;
 }
 
-/*
- * A DIAGNOSE WHOSE DECLARED SIGNS THIS OBJECT CARRIES IS ITSELF THE ASK.
- *
- * THE DECLARATION IS THE GATE, which is what a sign is for: a diagnose says
- * which files are worth the walk and the engine routes on it. A heuristic
- * rule used to carry the same shape test and ask on the diagnose's behalf -
- * one decision in two modules, and the rule had to publish a verdict nobody
- * wanted to say it had fired.
- *
- * ONLY A DIAGNOSE THAT DECLARED SOMETHING COUNTS. One with no sign at all
- * is not making a claim about which files it suits, so it is not a reason to
- * start the analysis; it still runs once something else has.
- */
 static int diag_signs_met(const struct kof_obj_ctx *ctx,
 			  const struct kof_diag *d);
 
@@ -5531,7 +5548,7 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 	for (i = 0; i < sc->eng->n_diag; i++) {
 		const struct kof_diag *d = &sc->eng->diag[i];
 
-		if (!d->shape && !d->n_need)
+		if (!d->n_when && !d->n_need)
 			continue;
 		if (diag_signs_met(ctx, d))
 			return 1;
@@ -5554,7 +5571,7 @@ static int diag_signs_met(const struct kof_obj_ctx *ctx,
 	 * ---- THE SHAPE FIRST, because it is header fields the parser has
 	 * already read and the symbol walk below is a pass over a table.
 	 */
-	if (d->shape && !diag_shape_met(ctx, d->shape))
+	if (!diag_when_met(ctx, d))
 		return 0;
 
 	if (!d->n_need)

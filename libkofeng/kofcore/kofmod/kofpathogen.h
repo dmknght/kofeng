@@ -255,67 +255,93 @@ struct kof_diag_node {
  */
 
 /*
- * ---- THE OTHER KIND OF SIGN: THE SHAPE OF THE FILE ----------------------
+ * ---- THE OTHER KIND OF SIGN: WHAT THE FILE IS ---------------------------
  *
  * A symbol name is a sign an object carries in a table. Some behaviours
  * leave no symbol at all - a msfvenom stager is a few hundred bytes of
- * shellcode with no imports - and for those the sign is the shape the
- * loader was given.
+ * shellcode with no imports - and for those the sign is what the loader was
+ * handed: the file's own declarations about itself.
  *
- * WHY IT HAS TO EXIST. A diagnose with no sign is tried on every object its
- * route applies to, so one stager rule turned the analysis on for every ELF
- * in the scan: measured, 954 ordinary binaries went from 1.94 s to 3.45 s.
+ * WHY A SIGN HAS TO EXIST AT ALL. A diagnose with none is tried on every
+ * object its route applies to, so one stager rule turned the analysis on
+ * for every ELF in the scan: measured, 954 binaries from /usr/bin went from
+ * 1.94 s to 3.45 s for a question none of them could have answered yes to.
  * The demand gate only bounds cost if the demand itself is cheap to answer,
  * and these are header fields the parser has already read.
  *
- * ENTRY_WX - the region holding the entry point is writable AND executable.
- * A compiler and a linker never produce it: the text is R+X and the data is
- * R+W, in separate segments, because that is what a page table is for. One
- * segment carrying both is a file whose author wanted to write code at
- * runtime and run it. Measured: every msfvenom ELF stager here has exactly
- * one RWE PT_LOAD holding the entry; /usr/bin has none in 954 files.
+ *
+ * ---- THE ENGINE SUPPLIES THE FACT, THE DIAGNOSE STATES THE CONDITION ----
+ *
+ * These were a set of named bits - ENTRY_WX, NO_SECTIONS, ONE_LOAD - and
+ * each one's MEANING was a few lines of C inside the engine. That put the
+ * condition in the wrong place twice over: a diagnose could only ask what
+ * somebody had already implemented, and asking anything new meant editing
+ * the scanner. Worse, a bit like ONE_LOAD was a whole compound predicate
+ * under one name, so what it actually demanded could not be read off the
+ * diagnose that used it - and when one of its clauses turned out to be a
+ * build detail rather than a behaviour, nothing in the declaration showed
+ * that.
+ *
+ * So the engine publishes FACTS, each one a single question with a single
+ * answer, and a diagnose writes the CONDITION:
+ *
+ *     KOF_DIAG_WHEN(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
+ *     KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0);
+ *
+ * ALL OF THEM MUST HOLD. A diagnose names the shape it is worth running
+ * on, and a shape is one statement rather than a menu.
+ *
+ * A FACT THIS BUILD DOES NOT KNOW IS A REFUSAL, not an ignored line: a
+ * condition silently dropped is a diagnose that runs on files its author
+ * excluded.
  */
-#define KOF_DIAG_SH_ENTRY_WX (1u << 0)
+enum kof_diag_fact {
+	KOF_FACT_NONE = 0,
+	/*
+	 * THE MAPPING THAT HOLDS THE ENTRY POINT has all of these
+	 * permissions - KOF_PERM_*, and KOF_PE_PERM_* on a PE, which is the
+	 * same three bits under that format's own names.
+	 */
+	KOF_FACT_ENTRY_PERM,
+	/*
+	 * SOME MAPPING has all of them, whether or not the entry is in it.
+	 *
+	 * The broader question and usually the right one: a payload does not
+	 * have to START in the region it will write code into - a loader can
+	 * enter at an ordinary R+X segment and keep the writable-executable
+	 * one for what it decrypts. Counted here: 0 of 1056 binaries under
+	 * /usr/bin declare a W+X mapping of any kind; 9 of 254 malware
+	 * objects do. On PE the mapping is a section, which is where that
+	 * format puts the same fact.
+	 */
+	KOF_FACT_MAP_PERM,
+	/*
+	 * HOW MANY SECTION HEADERS THE FILE DECLARES, so zero means a file
+	 * with no section table at all.
+	 *
+	 * It survives as a sign because the W+X population is the one that
+	 * will grow: as more malware ships a writable-executable mapping that
+	 * fact alone stops separating, and having stripped the section table
+	 * as well is the half that still does.
+	 */
+	KOF_FACT_SECTIONS,
+	/*
+	 * WHAT KIND OF OBJECT IT IS - KOF_ELF_REL and the rest. On Linux a
+	 * relocatable object is a loadable kernel module and nothing else
+	 * that ships, and the walk takes an entirely different path through
+	 * one, because it has no PT_LOAD.
+	 */
+	KOF_FACT_OBJ_KIND,
+	KOF_FACT_COUNT
+};
 
-/*
- * NO SECTION TABLE, and EXACTLY ONE PROGRAM HEADER, a PT_LOAD that starts at
- * offset zero and covers the whole object.
- *
- * Together with ENTRY_WX these are the shape of a file that was not built by
- * a toolchain: anything a compiler and linker produce has a second segment
- * for the program's data, and usually a PT_PHDR, a PT_GNU_STACK and a
- * dynamic section besides. One segment that IS the file is what a tool that
- * pastes shellcode into a fixed template produces, and msfvenom is one.
- *
- * MEASURED, when this was a heuristic rule rather than a declaration:
- *   0 of 3252   ELF under /usr/{bin,sbin,lib,libexec}
- *   0 of 2000   objects from CLEAN binaries packed with upx, ezuri, pakkero,
- *               midgetpack, ward and gzexe, children included - the
- *               adversarial half, since a packed clean binary is the thing
- *               most likely to look hand-built
- *   7 of 7      the msfvenom samples on hand
- *
- * SIZE IS NOT PART OF IT and was tried as one: the largest object with this
- * shape is 1266 bytes and the smallest clean ELF 1192, so the two
- * populations overlap on size and separate on structure.
- *
- * ELF WORDS. A format with no answer to one of these cannot satisfy a
- * diagnose that demands it - see the note on ENTRY_WX.
- */
-#define KOF_DIAG_SH_NO_SECTIONS (1u << 1)
-#define KOF_DIAG_SH_ONE_LOAD    (1u << 2)
+/* How many conditions one diagnose may state. */
+#define KOF_DIAG_MAX_WHEN 8u
 
-/*
- * A RELOCATABLE OBJECT - ET_REL, which on Linux means a loadable kernel
- * module and on nothing else that ships.
- *
- * Declared rather than left to the symbols: an ordinary program can import
- * a name that happens to match, and the routes differ too - a .ko has no
- * PT_LOAD, so the span runner takes an entirely different path through it.
- * A diagnose about kernel behaviour that did not say so would be offered
- * objects no part of it can describe.
- */
-#define KOF_DIAG_SH_ELF_REL     (1u << 3)
+struct kof_diag_when {
+	uint16_t fact;          /* enum kof_diag_fact */
+	uint64_t val;
+};
 
 /*
  * HOW MANY SIGNS A DIAGNOSE MAY DECLARE, and how long one may be. A sign is
@@ -353,12 +379,13 @@ struct kof_diag {
 	const char           *need[KOF_DIAG_MAX_NEED];
 
 	/*
-	 * KOF_DIAG_SH_*, and zero means the shape says nothing. ANDED with
-	 * the symbols above rather than ORed: both kinds of sign are
+	 * THE CONDITIONS ON WHAT THE FILE IS - see enum kof_diag_fact. ANDED
+	 * with the symbols above rather than ORed: both kinds of sign are
 	 * necessary conditions for the analysis being worth its cost, and a
 	 * diagnose that wanted either would be two diagnoses.
 	 */
-	uint16_t              shape;
+	uint8_t               n_when;
+	struct kof_diag_when  when[KOF_DIAG_MAX_WHEN];
 };
 
 /*
@@ -427,11 +454,6 @@ enum kof_diag_link {
  */
 #define KOF_DIAG_NEEDS(...)
 /*
- * KOF_DIAG_SHAPE(KOF_DIAG_SH_ENTRY_WX) - the same question asked of the
- * file's header instead of its symbol table, for a behaviour that carries
- * no symbol. See KOF_DIAG_SH_ENTRY_WX.
- */
-/*
  * KOF_DIAG_WROTE(label, 0) - the node must have written this value.
  *
  * Only for a node that writes. See KOF_DIAG_B_VAL for why a value may be
@@ -439,14 +461,19 @@ enum kof_diag_link {
  * system fixes the meaning of.
  */
 #define KOF_DIAG_WROTE(label, value)
-#define KOF_DIAG_SHAPE(mask)
 /*
- * ONE LINE PER CALL, and repeat the macro for more than fits. The build
- * reads these declarations a LINE at a time, so a mask wrapped onto a
- * second line loses everything after the break - silently, because what is
- * left is still a legal mask. KOF_DIAG_NEEDS is written the same way for
- * the same reason.
+ * KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0) - a condition on what the file IS,
+ * which is what decides whether the analysis runs on it at all. The engine
+ * publishes the facts - see enum kof_diag_fact - and this is where a
+ * diagnose states what it wants them to be.
+ *
+ * ONE LINE PER CALL, and repeat the macro for more than one condition. The
+ * build reads these declarations a LINE at a time, so a value wrapped onto
+ * a second line loses everything after the break - silently, because what
+ * is left is still legal. KOF_DIAG_NEEDS is written the same way for the
+ * same reason.
  */
+#define KOF_DIAG_WHEN(fact, value)
 
 /*
  * A TAGGED TRAILING SECTION OF A .kdig, tag then one length byte.
@@ -460,7 +487,7 @@ enum kof_diag_link {
  * section exists skips it instead of mistaking it for the next thing it
  * does know.
  */
-#define KDIG_SEC_SHAPE 1u
+#define KDIG_SEC_WHEN  2u      /* (fact u16, value u64) pairs */
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,

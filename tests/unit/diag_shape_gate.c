@@ -2,10 +2,11 @@
  * diag_shape_gate - the file attributes that route an object into the
  * pathogen analysis.
  *
- * A diagnose declares the shape it is worth running on - see KOF_DIAG_SH_*
- * in kofmod/kofpathogen.h - and the engine reads that declaration and routes
- * on it. The two stager diagnoses declare the msfvenom shape: one segment
- * that IS the file, writable and executable, and no section table.
+ * The engine publishes what it read out of the header - see enum
+ * kof_diag_fact - and a diagnose registers the conditions it wants those to
+ * meet, with KOF_DIAG_WHEN. The engine routes on that. The two stager
+ * diagnoses register two: a mapping that is writable and executable, and no
+ * section table.
  *
  * WHY THE ASSERTION IS ON THE ENGINE'S BEHAVIOUR AND NOT ON THE PREDICATE.
  * The gate decides what the most expensive thing the engine does is spent
@@ -37,14 +38,21 @@
  *                emits, is silent. That bit is what separates a file whose
  *                author meant to write code at runtime from one that did not.
  *
- *   TWO SEGMENTS An ELF with a data segment beside its code is silent, section
- *                table or not. Every binary a toolchain produces has one, so
- *                this is the case that decides whether the gate can be let
- *                near a real filesystem.
+ *   TWO SEGMENTS An ELF with a data segment beside its RWE code STILL ASKS,
+ *                and that is asserted on purpose. The declaration used to
+ *                demand one program header as well - the msfvenom raw
+ *                template's layout - which is a build detail and not a
+ *                behaviour: the same payload in a full ELF template carries
+ *                six. A condition narrower than it needs to be is a
+ *                detection in disguise, and its misses are the kind nobody
+ *                sees. This case is what keeps that one from coming back.
  *
- *   SECTION TAB  An ELF that keeps its section header table is silent.
- *                Stripping is common in clean software; what is rare is
- *                stripping AND having nothing but one code segment.
+ *   SECTION TAB  An ELF that kept its section header table is silent, which
+ *                is KOF_FACT_SECTIONS doing its job. It stays because the
+ *                W+X population is the one that will grow: as more malware
+ *                ships such a mapping that attribute alone stops
+ *                separating, and the stripped section table is the half
+ *                that still does.
  *
  * The ELFs are built in memory and written to one temporary file, because a
  * scan needs a path.
@@ -267,17 +275,29 @@ int main(int argc, char **argv)
 	if (shape_asked(sc, path, f, n))
 		fail("a toolchain's R|X code segment asked");
 
+	/*
+	 * AND THE TWO THE GATE DELIBERATELY DOES NOT EXCLUDE.
+	 *
+	 * The declaration also demanded a missing section table and a single
+	 * PT_LOAD covering the file - the whole msfvenom template shape -
+	 * and dropping those was measured to change nothing: same time, same
+	 * files found. They were asserted here as SILENT, so these two cases
+	 * are what would quietly re-tighten the gate if somebody put them
+	 * back. A gate is the cheapest necessary condition; precision is the
+	 * tree's job and the verdict's, and a gate narrower than it needs to
+	 * be fails in the one direction nobody can see.
+	 */
 	n = build(f, 2, 0, sizeof code, 1);
-	printf("  2 segment, không section table -> %s\n",
+	printf("  2 segment, entry RWE           -> %s\n",
 	       shape_asked(sc, path, f, n) ? "asked for the interpreter" : "im lặng");
-	if (shape_asked(sc, path, f, n))
-		fail("an ELF with a data segment asked");
+	if (!shape_asked(sc, path, f, n))
+		fail("a data segment beside the code closed the gate");
 
 	n = build(f, 1, 1, sizeof code, 1);
-	printf("  1 segment, CÓ section table    -> %s\n",
+	printf("  CÓ section table, entry RWE    -> %s\n",
 	       shape_asked(sc, path, f, n) ? "asked for the interpreter" : "im lặng");
 	if (shape_asked(sc, path, f, n))
-		fail("an ELF that kept its section table asked");
+		fail("a file that kept its section table asked");
 
 	remove(path);
 	kscan_free(sc);

@@ -245,6 +245,26 @@ uint16_t kof_flow_cap_generic(uint16_t cap);
 /* What that name does with its arguments - KOF_FLOW_ROLE_*. */
 uint8_t kof_flow_role_of_name(const char *sym);
 
+/*
+ * DOES A CALL OF THIS CAPABILITY HAND BACK THE OBJECT IT MADE, so a later
+ * call using that value is linked to it.
+ *
+ * ONE STATEMENT OF IT, HERE, because the question is the vocabulary's and
+ * not any one walk's. It was answered in three places and they disagreed:
+ * the symbol route said a credential constructor and a symbol lookup hand
+ * one back and a W+X mapping does not, the emulator said the opposite, and
+ * the syscall sweep asked by NAME with a third list again. Which link could
+ * form then depended on which route had run rather than on the program.
+ *
+ * `nm` IS THE ONE PLACE A NAME STILL DECIDES, and it is needed: mmap and
+ * mprotect are one capability - an executable mapping - and only the first
+ * is a constructor. mprotect is HANDED a mapping and returns a status, so
+ * recording its return value as the object would link everything after it
+ * to a zero. NULL means the caller has no name, and the common case for a
+ * capability that constructs is that it constructs.
+ */
+int kof_flow_hands_on(uint16_t cap, const char *nm);
+
 /* The name's index in the table, 1-based, or 0. Carried instead of the
  * string so a node is fixed width. */
 uint16_t kof_flow_name_id(const char *sym);
