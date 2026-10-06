@@ -1713,7 +1713,9 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * the next object's rules had asked for anything.
 	 */
 	sc->raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
-	sc->diag_ask = (want & KOF_ENG_USE_PATHOGEN) != 0;
+	/* OR, NOT ASSIGN: two passes can ask on one object and neither may
+	 * silence the other - see the note where the EXAMINE pass sets it. */
+	sc->diag_ask |= (want & KOF_ENG_USE_PATHOGEN) != 0;
 
 	/*
 	 * AND WHETHER ANYBODY SPOKE FOR THE INTERPRETER ON THIS OBJECT.
@@ -1863,7 +1865,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			{
 				uint32_t k0 = sc->n_kids;
 
-				KOF_TIME_BEGIN(KOF_T_UNPACK);
+			KOF_TIME_BEGIN(KOF_T_UNPACK);
 			m->fn(ctx);
 			KOF_TIME_END(KOF_T_UNPACK);
 				/* What a carve produced does not make its host
@@ -2624,9 +2626,9 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		sc->plague_best = 0;
 		sc->str_hit = 0;
 		sc->cur_mod   = m;
-		KOF_TIME_BEGIN(KOF_T_UNPACK);
-			m->fn(ctx);
-			KOF_TIME_END(KOF_T_UNPACK);
+		KOF_TIME_BEGIN(KOF_T_HEUR);
+		m->fn(ctx);
+		KOF_TIME_END(KOF_T_HEUR);
 		sc->cur_mod   = NULL;
 
 		if (!sc->rep_valid)
@@ -4196,7 +4198,30 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * per-object state, here, for the same reason they are all here.
 	 */
 	sc->diag_ready = 0;
+	/*
+	 * AND THE ASK ITSELF - see KOF_ENG_USE_PATHOGEN, which says the
+	 * property out loud: "there is no state to set, so one object's ask
+	 * cannot become the next object's". It was being OR-ed in two places
+	 * and cleared in none, so the first module to ask turned the
+	 * analysis on for every object after it in the same scan.
+	 */
+	sc->diag_ask = 0;
 	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
+	/*
+	 * AND THE SLICE A MODULE ASKED FOR, for the same reason.
+	 *
+	 * `emu_slice` has one writer - a module calling kunp_emu_slice - and
+	 * had no reader that ever cleared it, so the first module to ask ran
+	 * every later object in slices as well. Its own note says zero is the
+	 * default and "what every run did before", which is exactly the state
+	 * the next object is entitled to.
+	 *
+	 * NOT DEMONSTRATED ON A SAMPLE: the only shipped module that sets it
+	 * is the Sality unpacker and no Sality sample is in the corpora here.
+	 * The leak is read off the code - one write, no clear, and emu_gather
+	 * branching on the value - not off a run.
+	 */
+	sc->emu_slice = 0;
 	/* and the graph of the object that has just finished - see
 	 * diag_graph. Held until here so anything reporting on that object
 	 * could still read it. */
@@ -4265,8 +4290,19 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		out->region_fmt = sc->cur_rgn_fmt;
 	}
 
-	present = regions_present(&ctx, sc->eng->scan_mask);
-	present |= sym_halves_present(&ctx, sc->eng->scan_mask);
+	/*
+	 * BOTH UNIONS, because a region has to be RESOLVED for whoever is
+	 * going to read it - see kof_engine.heur_scan_mask. The detector
+	 * union alone left a heuristic scoped to a region reading "absent"
+	 * on every object, which is the worst shape a fault can have: the
+	 * rule is loaded, it runs, and it answers no.
+	 */
+	{
+		uint32_t resolve = sc->eng->scan_mask | sc->eng->heur_scan_mask;
+
+		present = regions_present(&ctx, resolve);
+		present |= sym_halves_present(&ctx, resolve);
+	}
 	sc->st.objects++;
 	sc->st.object_bytes += buf.n;
 
@@ -4483,6 +4519,19 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * asks for can still change what happens to the object.
 	 */
 	want = heur_run(sc, &ctx, opt, out, KOF_HEUR_EXAMINE, present, &predict);
+	/*
+	 * ---- AND AN ASK FROM THIS PASS COUNTS -----------------------------
+	 *
+	 * KOF_ENG_USE_PATHOGEN was being read in unpack_object and nowhere
+	 * else, so an object that is not unpacked never saw it. MEASURED:
+	 * the msf stager asked and was analysed because a decoder produced a
+	 * child; a kernel module - which no unpacker touches - asked through
+	 * the same declaration and was never analysed at all.
+	 *
+	 * The two are OR-ed rather than assigned: a producer's ask and this
+	 * object's own are both asks, and neither may cancel the other.
+	 */
+	sc->diag_ask |= (want & KOF_ENG_USE_PATHOGEN) != 0;
 	/*
 	 * A rule's own guess wins; the inherited one is the fallback.
 	 *

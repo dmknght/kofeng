@@ -68,6 +68,7 @@ enum kof_time_slot {
 	KOF_T_DB_LOAD = 0,      /* reading the database in               */
 	KOF_T_PARSE,            /* working out what an object IS         */
 	KOF_T_UNPACK,           /* an unpacker module, static or emulated */
+	KOF_T_HEUR,             /* a heuristic module                    */
 	KOF_T_EMU,              /* the interpreter itself                */
 	KOF_T_MATCH,            /* the pattern and string engines        */
 	KOF_T_DIAG_SYSCALL,     /* the syscall sweep                     */

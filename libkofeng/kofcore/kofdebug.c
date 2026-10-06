@@ -17,7 +17,7 @@
 #include <time.h>
 
 static const char *const slot_name[KOF_T_COUNT] = {
-	"db load", "parse", "unpack", "emulate", "match",
+	"db load", "parse", "unpack", "heur", "emulate", "match",
 	"diag syscall", "diag symbol", "diag emulate", "diag match"
 };
 

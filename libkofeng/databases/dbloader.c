@@ -875,6 +875,8 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		 */
 		if (!unpack && !heur)
 			e->scan_mask |= m->scan_mask;
+		else if (heur)
+			e->heur_scan_mask |= m->scan_mask;
 	}
 }
 

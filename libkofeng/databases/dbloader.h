@@ -587,6 +587,23 @@ struct kof_engine {
 	 * of cost that hides because it is spread evenly.
 	 */
 	uint32_t scan_mask;
+
+	/*
+	 * THE SAME QUESTION FOR HEURISTICS, kept apart from the union above.
+	 *
+	 * scan_mask is a DETECTOR union and two things read it: which regions
+	 * to resolve, and which objects a module can be skipped on. A
+	 * heuristic belongs in the first and not the second - it runs after
+	 * the searching, so it must not widen the prefilter - and folding it
+	 * into one field would do both.
+	 *
+	 * Without this a heuristic naming a region got nothing at all:
+	 * sym_halves_present returns early unless the region was asked for,
+	 * so a rule scoped to KOF_SCAN_SYM_IMP was answered "absent" on every
+	 * object. MEASURED: a signature scoped that way matched both
+	 * Diamorphine builds and the identical heuristic matched neither.
+	 */
+	uint32_t heur_scan_mask;
 };
 
 /*
