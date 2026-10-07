@@ -8,9 +8,11 @@
  * takes (objctx_child.c); this file decides only what the text becomes.
  *
  * NOT YET PIPELINE-CLEAN, and said so rather than hidden: the fold and the form
- * are two normalisers with their own thresholds, tuned on webshell corpora, and
- * declare the child's language in different ways. See the audit note in
- * DESIGN-objctx.md before changing a number here.
+ * are two normalisers with their own thresholds, tuned on webshell corpora
+ * (`n < 64`, `n*3 < b.n`, `raw - n < 16`). Both now declare the child's language
+ * the same way (script_declare). A change to a threshold needs the Shell.Agent
+ * corpus and the named shells, detections identical before and after - only 149
+ * webshell samples were available when this was last measured.
  */
 
 /* Before any include, and _GNU_SOURCE rather than _POSIX_C_SOURCE, for the
@@ -96,11 +98,6 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	 */
 	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
 		return 0;
-	/* And the other normaliser's mark, for the reason norm_emit's copy of
-	 * this note gives: the two were blind to each other and each ran on
-	 * what the other produced. */
-	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
-		return 0;
 	si = (const struct kof_script_info *)ctx->file_header;
 	*plx = kof_lex_for(si->kind);
 	if (!*plx)
@@ -111,6 +108,26 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 		return 0;
 	*psc = sc;
 	return 1;
+}
+
+/*
+ * WHAT THE CHILD OF A SCRIPT IS, DECLARED - not left to be sniffed.
+ *
+ * Both outputs of this unit (the fold and the form) are scripts in the language
+ * of the object they came from, and both declare it the same way. The form did,
+ * from the measurement that 625 Backdoor.Shell.Agent samples stopped being
+ * detected when a view with no declared subtype replaced the one norm_emit made
+ * (KOF_TARGET_SUBTYPE(KOF_SCRIPT_SHELL) declines on an object that never said);
+ * the fold relied on a re-injected tag and a newline for the sniff to recognise
+ * it, which carries the FORMAT and not the subtype. One function, so the next
+ * output of this kind cannot forget.
+ */
+static void script_declare(struct kof_scanner *sc,
+			   const struct kof_obj_ctx *ctx)
+{
+	sc->pend_subtype = ctx->subtype;
+	sc->pend_subfam  = ctx->subfamily;
+	sc->pend_lang    = 1;
 }
 
 /*
@@ -480,6 +497,7 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		/* Said plainly, like the formed view below - see the call
 		 * there for why the decode belongs to this pass. */
 		kof_exe_decode(out, n);
+		script_declare(sc, ctx);
 		if (!script_head_emit(ctx) || !oc_emit_exact(ctx, out, n))
 			n = 0;
 		else
@@ -560,9 +578,7 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * used to make. norm_emit declares the language for exactly
 		 * this reason; so does this.
 		 */
-		sc->pend_subtype = ctx->subtype;
-		sc->pend_subfam  = ctx->subfamily;
-		sc->pend_lang    = 1;
+		script_declare(sc, ctx);
 		if (oc_emit_exact(ctx, out, n))
 			oc_child(ctx);
 		else

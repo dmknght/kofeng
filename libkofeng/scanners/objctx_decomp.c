@@ -7,9 +7,8 @@
  * a bounded transform from bytes to bytes with a reported outcome: nothing in it
  * decides what the result is, and nothing in it is a verdict.
  *
- * THE OPEN ITEM OF THE AUDIT (DESIGN-objctx.md): the expansion clamp is applied
- * to three codings and not to the cabinet and VBA paths; the bound belongs to
- * the sink, not to the coding.
+ * OPEN: the expansion clamp is applied to RAR3, RAR5 and LZMA2 and not to the
+ * cabinet and VBA paths; the bound belongs to the sink, not to the coding.
  */
 
 #define _GNU_SOURCE

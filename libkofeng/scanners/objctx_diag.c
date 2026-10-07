@@ -6,9 +6,12 @@
  * what a serving diagnose resolved), and the routing that decides whether the
  * analysis runs on an object at all (the facts, the gates, the demand).
  *
- * THE OPEN ITEMS OF THE AUDIT live in DESIGN-objctx.md: the relocation-bias
- * constants in ref_note and the "reading is asking" inference are policy that the
- * diagnose declaration should carry, not this file.
+ * OPEN: "reading is asking" (diag_demand) infers the demand for the analysis
+ * from which accessor a rule called. A rule that touches the pathogen surface
+ * should declare it (KOF_ENG_USE_PATHOGEN) and the loader refuse one that does
+ * not; removing the inference first makes every such rule read an empty analysis
+ * (twelve detections, measured). The relocation bias in ref_note is x86's and is
+ * applied only to x86 machines.
  */
 
 /* ------------------------------------------------------------ */
@@ -508,6 +511,7 @@ struct refscan {
 	uint8_t       *rleft;               /* refs still unmet, per diagnose */
 	uint8_t      (*rhit)[KOF_DIAG_MAX_NEED];
 	uint32_t       pending;             /* diagnoses with refs unmet */
+	int            x86;                 /* the relocation types below are this machine's */
 };
 
 /* The name at a file offset equals `want`, without reading past the object. */
@@ -564,10 +568,21 @@ static const struct kof_elf_relocs *sc_relocs(struct kof_scanner *sc,
 
 static void ref_note(struct refscan *rs, const struct kof_elf_reloc *r)
 {
-	int64_t eff = r->addend + ((r->type == KOF_RELOC_PC32 ||
-				    r->type == KOF_RELOC_PLT32) ? 4 : 0);
+	int64_t eff;
 	uint32_t i;
 
+	/*
+	 * THE TYPE NUMBERS AND THE +4 ARE x86's AND x86-64'S: R_X86_64_PC32 and
+	 * R_386_PC32 are 2, PLT32 is 4, and the CPU adds the displacement to the
+	 * address of the NEXT instruction, so the addend of a handle is -4. On any
+	 * other machine those numbers mean other relocations and the correction
+	 * would turn an ordinary reference into a "field" - so for them there is no
+	 * claim to make, and a diagnose demanding one is not answered yes.
+	 */
+	if (!rs->x86)
+		return;
+	eff = r->addend + ((r->type == KOF_RELOC_PC32 ||
+			    r->type == KOF_RELOC_PLT32) ? 4 : 0);
 	/* an instruction's operand, with a name, reaching into the symbol */
 	if (!r->code || !r->nameoff || eff <= 0)
 		return;
@@ -713,6 +728,7 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		rs.rleft = rleft;
 		rs.rhit = rhit;
 		rs.pending = rpending;
+		rs.x86 = ctx->arch == KOF_ARCH_X86 || ctx->arch == KOF_ARCH_X86_64;
 		/* A format with no relocation table cannot satisfy a diagnose that
 		 * demands one: no answer is not a yes. Stops once nothing is left to
 		 * find, which is a saving on the READ and not a bound on the table. */

@@ -13,8 +13,8 @@
  * would declare, it would reach sideways for all of that and be less cohesive, not
  * more. The headers are the contract; this is the scanner honouring it.
  *
- * One of a family of units, divided by what they serve - see objctx_int.h and
- * DESIGN-objctx.md. THIS one is the boundary itself: the byte readers, string
+ * One of a family of units, divided by what they serve - see objctx_int.h.
+ * THIS one is the boundary itself: the byte readers, string
  * search, reports and debug facts, the region/entropy/similarity/repair/code
  * accessors, the code-use map, the vtable and the attach. Child production, the
  * decoders, the interpreter, the pathogen analysis and the script forms are

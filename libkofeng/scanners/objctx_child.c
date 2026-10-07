@@ -597,8 +597,7 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		}
 	}
 	sc->kid_packer[sc->n_kids] =
-		(uint8_t)(sc->emu_stage ||
-			  (sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER));
+		(uint8_t)(sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER);
 	if (sc->kid_packer[sc->n_kids])
 		sc->packed_here = 1;
 	/*
@@ -687,7 +686,7 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * the two gates that read it were no-ops, so an object whose payload a
 	 * run had already recovered could still be handed to a second one.
 	 */
-	if (sc->emu_live)
+	if (sc->emu_run_by && sc->emu_run_by == sc->cur_mod)
 		sc->emu_produced = 1;
 	/*
 	 * AND A CHILD BUILT OUT OF A RUN'S REGIONS IS DERIVED, exactly as one
@@ -710,7 +709,8 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * never a second layer - the run already went through as many as it
 	 * was going to.
 	 */
-	if (sc->n_emu_rgn && !sc->pend_derived_by)
+	if (sc->emu_run_by && sc->emu_run_by == sc->cur_mod &&
+	    !sc->pend_derived_by)
 		sc->pend_derived_by = sc->cur_mod;
 	if (sc->kid_derived_by)
 		sc->kid_derived_by[sc->n_kids] = sc->pend_derived_by;
@@ -1748,8 +1748,23 @@ uint64_t oc_layout_of_produced(const struct kof_obj_ctx *ctx)
 		uint64_t end = sc->pend_sec[n - 1u].rva +
 			       sc->pend_sec[n - 1u].vsize;
 
-		if (end && end < sc->sink_len)
-			sc->sink_len = (size_t)end;
+		/*
+		 * ONLY PADDING IS DROPPED. The bytes past the last section were
+		 * cut whatever they held, on the strength of one UPX child whose
+		 * 3233 were zeros the container's declared size had left behind.
+		 * A tail with a non-zero byte in it is not that: it is something
+		 * the image carries after its sections, the partition will call it
+		 * an overlay, and a rule scoped to OVERLAY is entitled to see it.
+		 */
+		if (end && end < sc->sink_len) {
+			size_t z;
+
+			for (z = (size_t)end; z < sc->sink_len; z++)
+				if (sc->sink_mem[z])
+					break;
+			if (z == sc->sink_len)
+				sc->sink_len = (size_t)end;
+		}
 		sc->n_pend_sec = n;
 		sc->pend_entry_rva = entry;
 		sc->pend_entry_set = entry ? 1 : 0;

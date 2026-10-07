@@ -8,9 +8,17 @@
  * produced into regions, and answers the module's questions about the machine
  * (registers, memory, resume, take).
  *
- * THE OPEN ITEMS OF THE AUDIT live in DESIGN-objctx.md: the image-diff filter,
- * the written-memory fallback and the family-measured constants in here are
- * policy that belongs in a declared driver, not in the engine.
+ * OPEN, with what was measured so it is not re-derived:
+ *  - the PE image-diff filter (IMG_DIFF_DEN) and the written-memory fallback
+ *    (`any = built`, the stop-reason list) are family policy that belongs in a
+ *    declared driver. On pe300, 27 image builds: 18 identical to the parent (the
+ *    drop is exact), 9 changed 64..61043 bytes, none past the filter. Handing
+ *    over only the changed spans was tried: +6 objects and the parent's
+ *    Heur:WriteExec on pe300/005 vanished, because scan.c drops a parent's
+ *    heuristic findings whenever it has a produced child (n_kids > n_views +
+ *    n_carved) and a formatless region says nothing. Fix that rule first.
+ *  - EMU_IDLE_DECLARED and EMU_INSN_PER_BYTE carry MPRESS/Themida/UPX numbers in
+ *    generic constants.
  */
 
 /* Before any include, and _GNU_SOURCE rather than _POSIX_C_SOURCE, for the
@@ -610,7 +618,6 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	 * emitting them again would hand the same bytes over twice, once with
 	 * structure and once without.
 	 */
-	sc->emu_stage = 1;
 	/*
 	 * THE WHOLE IMAGE FIRST, when the run put sections back where they
 	 * belong. See kof_pe_image_from_run: a region that starts exactly at a
@@ -819,7 +826,6 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 					 * produces; a second header found in
 					 * its data is not a second program */
 	}
-	sc->emu_stage = 0;
 
 	/*
 	 * Snapshots first, and the written pages only if there were none.
@@ -833,7 +839,6 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	 * When a packer never calls mprotect there are no snapshots, and then
 	 * the written pages are all there is.
 	 */
-	sc->emu_stage = 1;
 	for (any = built, it = 0;
 	     kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
 		if (va >= built_lo && va < built_hi)
@@ -1023,7 +1028,6 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 			sc->n_emu_rgn++;
 		}
 	}
-	sc->emu_stage = 0;
 	if (KOF_TRACING) {
 		uint32_t q;
 
@@ -1160,6 +1164,7 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 		return 0;
 	sc->st.heur_emu++;
 	sc->emu_ran = 1;
+	sc->emu_run_by = sc->cur_mod;   /* the one carrier: see kid_push */
 	/*
 	 * VOUCHED BY THE MODULE, OR SPOKEN FOR BY THE DATABASE.
 	 *

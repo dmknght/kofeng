@@ -1666,6 +1666,7 @@ static void mod_begin(struct kof_scanner *sc, const struct kof_module *m)
 	sc->cure_have = 0;
 	sc->cure_at = 0;
 	sc->cur_mod = m;
+	sc->emu_run_by = NULL;
 	/* A sink the previous module left open is not this one's. */
 	kof_scan_sink_discard(sc);
 }
@@ -4037,6 +4038,7 @@ static void obj_begin(struct kof_scanner *sc)
 	sc->packed_here = 0;
 	sc->emu_produced = 0;
 	sc->emu_ran = 0;
+	sc->emu_run_by = NULL;
 	sc->superseded = 0;
 
 	/* A fresh attempt for every object. Hitting a limit while unpacking one

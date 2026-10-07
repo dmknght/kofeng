@@ -711,6 +711,15 @@ struct kof_scanner {
 	 */
 	int                       emu_ran;
 	/*
+	 * THE MODULE THAT RAN THE INTERPRETER ON THIS OBJECT, for its own turn.
+	 * The one carrier for "a run produced what this module is about to push":
+	 * kid_push marks such a child derived (a module is not offered its own
+	 * output) and sets emu_produced, where it used to read emu_live for the
+	 * second and the length of the region table for the first - two predicates
+	 * for one fact, which disagreed after a resumed run. Cleared in mod_begin.
+	 */
+	const struct kof_module  *emu_run_by;
+	/*
 	 * WHETHER A MODULE SAID THIS OBJECT IS ONLY A WRAPPER - see `supersede`
 	 * in kofsig.h. Per object, cleared in obj_begin; read where the walk
 	 * reports an object, and ignored at the top level.
@@ -811,7 +820,7 @@ struct kof_scanner {
 	 * module made it, so the usual test on `cur_mod` would file it as a
 	 * container entry and lose the distinction downstream.
 	 */
-	int                 emu_stage;
+
 
 	/*
 	 * What the next child produced should be called, already sanitised.
