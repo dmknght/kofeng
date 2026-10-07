@@ -743,17 +743,17 @@ counted:;
  */
 static void need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
-	if (sc->multi_ready)
+	if (sc->latch[KOF_OL_MULTI])
 		return;
-	sc->multi_ready = 1;
+	sc->latch[KOF_OL_MULTI] = 1;
 	multi_prepass(sc, ctx, sc->cur_present);
 }
 
 static void need_plague(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
-	if (sc->plague_ready)
+	if (sc->latch[KOF_OL_PLAGUE])
 		return;
-	sc->plague_ready = 1;
+	sc->latch[KOF_OL_PLAGUE] = 1;
 	plague_feed(sc, ctx, sc->cur_present, sc->cur_from_packer);
 }
 
@@ -1642,6 +1642,35 @@ static void take_repair(struct kof_scanner *sc, struct kof_result *res)
 }
 
 /*
+ * ---- WHAT BELONGS TO ONE MODULE'S TURN, cleared before every module --------
+ *
+ * What a module reported, what it asked of the plague and pattern sets, whether
+ * it read the graph, what repair it offered. These were cleared in two of the
+ * four loops that run modules - detectors and heuristics - and not in the two
+ * unpackers' loops, whose reports go through the same finding_str that reads
+ * them: an unpacker's finding could be labelled by the previous module's
+ * Pathogen read or carry its similarity block. One function, called by all four,
+ * so a new loop cannot forget one.
+ */
+static void mod_begin(struct kof_scanner *sc, const struct kof_module *m)
+{
+	sc->rep_valid = 0;
+	/* Nothing asked yet - see scan.h. */
+	sc->plague_asked = -1;
+	sc->n_plague_blk = 0;
+	sc->plague_hit = 0;
+	sc->plague_tot = 0;
+	sc->plague_best = 0;
+	sc->str_hit = 0;
+	sc->diag_read = 0;
+	sc->cure_have = 0;
+	sc->cure_at = 0;
+	sc->cur_mod = m;
+	/* A sink the previous module left open is not this one's. */
+	kof_scan_sink_discard(sc);
+}
+
+/*
  * AND WHERE THE INFECTION IS, out to the caller - see `struct kof_infected`.
  *
  * SEPARATE FROM take_repair, because the two are different statements and a
@@ -1704,35 +1733,6 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * Sticky exhaustion looked harmless and quietly halved the engine: the
 	 * first container to reach the ceiling stopped every container after it.
 	 */
-	sc->broken = 0;
-	/* Per object, like sc->broken: which module opened the LAST one says
-	 * nothing about this one. See kof_result.opened_by. */
-	sc->opened_by[0] = 0;
-	/* And the build of the packer that opened it - see packer_build. */
-	sc->packer_build[0] = 0;
-	sc->pend_build[0] = 0;
-	sc->pend_build_of = NULL;
-	/* Per object, like sc->broken: whether a packer opened the LAST object
-	 * says nothing about this one. */
-	sc->packed_here = 0;
-	sc->emu_produced = 0;
-	/* One interpreter run per object - see emu_ran. */
-	sc->emu_ran = 0;
-	/* And whether a module says this object is only a wrapper. */
-	sc->superseded = 0;
-	/* The OEP ranges are NOT cleared here. They belong to the object about
-	 * to be scanned and are set from its producer's declaration in
-	 * scan_tree, which runs before this - clearing them here is what made
-	 * every module's kunp_emu_oep_range a no-op. */
-	/*
-	 * Cleared with it, and per OBJECT rather than per file.
-	 *
-	 * The two are set together and have to be cleared together: a ceiling that
-	 * stopped one object must not stop the next, because the next is scanned
-	 * after this one has been released and the room it held is back. Clearing
-	 * only at the root made one limit anywhere in a tree end the tree.
-	 */
-	sc->stop = 0;
 
 	/*
 	 * AND WHETHER A RULE ASKED FOR WHAT THIS OBJECT CARRIES.
@@ -1895,8 +1895,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 * unp/aspack_pe.c - a module that contains no report
 			 * at all and declares no target name.
 			 */
-			sc->rep_valid = 0;
-			sc->cur_mod = m;
+			mod_begin(sc, m);
 			{
 				uint32_t k0 = sc->n_kids;
 
@@ -2037,8 +2036,7 @@ static uint32_t unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (m->n_block)
 			need_plague(sc, ctx);
 		/* Same reset, same reason - see the loop above. */
-		sc->rep_valid = 0;
-		sc->cur_mod = m;
+		mod_begin(sc, m);
 		{
 			uint32_t k0 = sc->n_kids;
 
@@ -2650,18 +2648,7 @@ static uint32_t heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (m->n_block)
 			need_plague(sc, ctx);
 
-		sc->rep_valid = 0;
-		/* Nothing asked yet - see scan.h. Reset beside rep_valid
-		 * because it is the same kind of thing: what THIS module
-		 * reported about this object. */
-		sc->plague_asked = -1;
-		sc->n_plague_blk = 0;
-		sc->plague_hit = 0;
-		sc->plague_tot = 0;
-		sc->plague_best = 0;
-		sc->str_hit = 0;
-		sc->diag_read = 0;
-		sc->cur_mod   = m;
+		mod_begin(sc, m);
 		KOF_TIME_BEGIN(KOF_T_HEUR);
 		m->fn(ctx);
 		KOF_TIME_END(KOF_T_HEUR);
@@ -3969,6 +3956,104 @@ static void norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 }
 
 /*
+ * ---- THE START OF AN OBJECT: EVERYTHING THAT IS ABOUT ONE OBJECT ------------
+ *
+ * ONE FUNCTION, called once, first, for every object that enters scan_object -
+ * and the only place per-object state is cleared. It was cleared at seven
+ * places in two functions, and the second of them, unpack_object, is not reached
+ * by an object that already has a finding of its own unless all_matches is on.
+ * So a decoded child with its own verdict went on carrying its parent's
+ * `superseded` (its report was dropped as "a wrapper"), `opened_by` and
+ * `packer_build` (its result named its parent's packer), `packed_here` and
+ * `emu_produced` (a heuristic read them), and `broken` (script_forms refused
+ * to fold it because a sibling had hit a limit). Reset where the object BEGINS
+ * and none of that depends on which steps the object happens to reach.
+ *
+ * WHAT IS NOT HERE, on purpose:
+ *   - what belongs to ONE MODULE's turn: mod_begin.
+ *   - what is declared for the NEXT child (the pend_* set): pend_clear, which is
+ *     spent by the child it was written for and not by the object.
+ *   - the verdict slot, which is per SUBJECT - see scan_tree.
+ *   - `budget`, which is per tree and never reset: the bomb defence.
+ */
+static void obj_begin(struct kof_scanner *sc)
+{
+	/* Computed-once results: one array, one clear - see enum kof_obj_latch. */
+	memset(sc->latch, 0, sizeof sc->latch);
+	/* ...and what those latches guarded. Freed and not kept the way `sym` is:
+	 * `sym` has a fixed cap and is reused, these are sized by what a sweep
+	 * found, and reusing them would mean carrying the largest met so far. */
+	kof_xref_free(sc->use);
+	sc->use = NULL;
+	if (sc->relocs) {
+		kof_elf_reloc_table_free(sc->relocs);
+		free(sc->relocs);
+		sc->relocs = NULL;
+	}
+	kof_apihash_free(sc->apihash);
+	sc->apihash = NULL;
+	/* The graph of the object that has just finished: held until here so
+	 * anything reporting on it could still read it. */
+	if (sc->diag_graph) {
+		kof_diag_scan_free(sc->diag_graph);
+		sc->diag_graph = NULL;
+	}
+	sc->gr_n = 0;                   /* the serialised copy of that graph */
+
+	/* The pathogen demand. See KOF_ENG_USE_PATHOGEN: there is no state to set,
+	 * so one object's ask cannot become the next object's. */
+	sc->diag_ask = 0;
+	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
+
+	/* The symbol block is rebuilt on first use. */
+	sc->sym_served = 0;
+	sc->sym_n = 0;
+	sc->msym_bound = 0;
+	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
+
+	/* What a module asked of the interpreter. `emu_slice` has one writer and
+	 * used to have no reader that cleared it, so the first module to ask ran
+	 * every later object in slices as well. [Read off the code, not measured
+	 * on a sample: the only shipped module that sets it is the Sality one.] */
+	sc->emu_slice = 0;
+
+	/* What was found, and what was claimed: the sentinel and not zero, because
+	 * zero is entry 0. And no finding of the last object's is protected from
+	 * this one's drop - the bits are slot numbers in a result about to be
+	 * refilled. */
+	sc->pend_entry = KOF_ENTRY_NONE;
+	sc->heur_keep = 0;
+
+	/* How this object came to exist and whether it is only a wrapper: which
+	 * module opened the LAST one says nothing about this one. */
+	sc->opened_by[0] = 0;
+	sc->packer_build[0] = 0;
+	sc->pend_build[0] = 0;
+	sc->pend_build_of = NULL;
+	sc->mod_tag[0] = 0;
+	sc->mod_tag_of = NULL;
+	sc->packed_here = 0;
+	sc->emu_produced = 0;
+	sc->emu_ran = 0;
+	sc->superseded = 0;
+
+	/* A fresh attempt for every object. Hitting a limit while unpacking one
+	 * container does not mean the tree is finished: the room it held is back
+	 * by the time the next is scanned. Only `budget` is cumulative. */
+	sc->broken = 0;
+	sc->stop = 0;
+
+	/* What a repair or an infection note refers to. */
+	sc->cure_have = 0;
+	sc->cure_at = 0;
+	sc->n_cure_fix = 0;
+	sc->cure_trunc_set = 0;
+	sc->n_infect = 0;
+	sc->ovl_asked = -1;
+	sc->ovl_pct = 0;
+}
+
+/*
  * OPENING AN OBJECT, IN ORDER.
  *
  * The steps of enum kof_analyze, each one a runner, tried from the top until
@@ -4184,16 +4269,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	out->from_packer = (uint8_t)(from_packer != 0);
 	memset(&ctx, 0, sizeof ctx);
 	kof_mod_attach(&ctx, sc);
-	/*
-	 * WHETHER A MODULE SAYS THIS OBJECT IS ONLY A WRAPPER belongs to THIS
-	 * object, so it is cleared where the object begins. It was cleared inside
-	 * unpack_object, which an object with a finding of its own never reaches
-	 * unless all_matches is on: the decoded child of a stager kept the flag its
-	 * parent's module had set, and on_event_detected skips a superseded object
-	 * below the top - so the child's verdict vanished from the report, and came
-	 * back when the same scan was run with --all-matches.
-	 */
-	sc->superseded = 0;
+	obj_begin(sc);
 
 	/*
 	 * How big the object is, before anything tries to identify it.
@@ -4209,86 +4285,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	ctx.obj_size = buf.n;
 
 	kof_match_begin(&sc->m, buf);
-	/* A new object: whatever block the last one had is not this one's, and
-	 * neither is the matcher bound to it. */
-	/* The sentinel and not zero: zero is entry 0. Reset per object, like
-	 * every other pending declaration, so one object's claim cannot be
-	 * worn by the next. */
-	sc->pend_entry = KOF_ENTRY_NONE;
-	/* And no finding of the last object's is protected from this one's
-	 * drop: the bits are slot numbers in a result about to be refilled, so
-	 * a stale one would shelter whatever lands in that slot next. */
-	sc->heur_keep = 0;
-	sc->sym_done = 0;
-	sc->sym_served = 0;
-	sc->sym_n = 0;
-	sc->msym_bound = 0;
-	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
-	/* And whatever the last object's code did with its addresses. Freed
-	 * rather than kept the way `sym` is: the block has a fixed cap and is
-	 * reused, this is sized by what a sweep found and reusing it would mean
-	 * carrying the largest one met so far for the rest of the walk. */
-	kof_xref_free(sc->use);
-	sc->use = NULL;
-	sc->use_done = 0;
-	/*
-	 * AND THE DIAGNOSES, which are a fact about THIS object's code.
-	 *
-	 * `diag_ready` is a latch: it says the walk has run, so a second rule
-	 * asking the same question does not pay for it twice. Not cleared
-	 * here, the latch survives into the next object and every object after
-	 * the first reports the FIRST one's diagnoses - MEASURED on
-	 * /mnt/games/kofscratch/msf, where a zip container, a PE header region
-	 * and a PE data region all came back carrying rwx_exec because an ELF
-	 * stager earlier in the walk did.
-	 *
-	 * The bitmap is cleared where it is filled, which is correct but only
-	 * runs when the walk runs - and the whole point of the latch is that
-	 * it stops the walk running. The reset belongs with the other
-	 * per-object state, here, for the same reason they are all here.
-	 */
-	sc->diag_ready = 0;
-	sc->diag_gate_done = 0;
-	if (sc->relocs) {
-		kof_elf_reloc_table_free(sc->relocs);
-		free(sc->relocs);
-		sc->relocs = NULL;
-	}
-	kof_apihash_free(sc->apihash);
-	sc->apihash = NULL;
-	sc->relocs_ready = 0;
-	sc->apihash_ready = 0;
-	/*
-	 * AND THE ASK ITSELF - see KOF_ENG_USE_PATHOGEN, which says the
-	 * property out loud: "there is no state to set, so one object's ask
-	 * cannot become the next object's". It was being OR-ed in two places
-	 * and cleared in none, so the first module to ask turned the
-	 * analysis on for every object after it in the same scan.
-	 */
-	sc->diag_ask = 0;
-	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
-	/*
-	 * AND THE SLICE A MODULE ASKED FOR, for the same reason.
-	 *
-	 * `emu_slice` has one writer - a module calling kunp_emu_slice - and
-	 * had no reader that ever cleared it, so the first module to ask ran
-	 * every later object in slices as well. Its own note says zero is the
-	 * default and "what every run did before", which is exactly the state
-	 * the next object is entitled to.
-	 *
-	 * NOT DEMONSTRATED ON A SAMPLE: the only shipped module that sets it
-	 * is the Sality unpacker and no Sality sample is in the corpora here.
-	 * The leak is read off the code - one write, no clear, and emu_gather
-	 * branching on the value - not off a run.
-	 */
-	sc->emu_slice = 0;
-	/* and the graph of the object that has just finished - see
-	 * diag_graph. Held until here so anything reporting on that object
-	 * could still read it. */
-	if (sc->diag_graph) {
-		kof_diag_scan_free(sc->diag_graph);
-		sc->diag_graph = NULL;
-	}
 
 	/*
 	 * THE CHILD'S OWN DECLARATION FIRST, then the caller's.
@@ -4371,8 +4367,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * it, and one that ends the object without declaring any never does.
 	 * See kof_scanner.multi_ready for why, and need_multi for how.
 	 */
-	sc->multi_ready  = 0;
-	sc->plague_ready = 0;
 	sc->cur_present  = present;
 	sc->cur_from_packer = (uint8_t)(from_packer != 0);
 
@@ -4401,13 +4395,6 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * rule would have measured the wrong file. Built on the first ask - see
 	 * ovl_of - so this costs a store.
 	 */
-	sc->cure_have = 0;
-	sc->cure_at = 0;
-	sc->n_cure_fix = 0;
-	sc->cure_trunc_set = 0;
-	sc->n_infect = 0;
-	sc->ovl_asked = -1;
-	sc->ovl_pct = 0;
 	/* What the two gated measures compare themselves against - see
 	 * kof_scanner.heur_lvl. Unstated is level 1, exactly as heur_object
 	 * reads it, so the two cannot drift. */
@@ -4462,20 +4449,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 		if (m->n_block)
 			need_plague(sc, &ctx);
 
-		sc->rep_valid = 0;
-		/* Nothing asked yet - see scan.h. Reset beside rep_valid
-		 * because it is the same kind of thing: what THIS module
-		 * reported about this object. */
-		sc->plague_asked = -1;
-		sc->n_plague_blk = 0;
-		sc->plague_hit = 0;
-		sc->plague_tot = 0;
-		sc->plague_best = 0;
-		sc->str_hit = 0;
-		sc->diag_read = 0;
-		sc->cur_mod   = m;
-		sc->cure_have = 0;
-		sc->cure_at   = 0;
+		mod_begin(sc, m);
 		m->fn(&ctx);
 
 		/*

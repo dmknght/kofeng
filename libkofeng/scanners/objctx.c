@@ -184,6 +184,22 @@ static const struct kof_apihash *sc_apihash(struct kof_scanner *sc,
 					    const struct kof_obj_ctx *ctx);
 static int diag_when_met(const struct kof_obj_ctx *ctx,
 			 const struct kof_diag *d);
+
+/*
+ * READING THE PATHOGEN SURFACE IS ASKING FOR IT. A rule that names a diagnose,
+ * asks which two meet, reads a name a diagnose carries, or reaches for the graph
+ * is the demand for the analysis, and the engine says so in ONE place. Four
+ * accessors each wrote the two stores out themselves, one bug at a time - "twelve
+ * detections disappearing the moment the rule stopped naming a diagnose and
+ * started reading nodes", "a rule whose only pathogen call was this one read an
+ * analysis that never ran" - and each fix added one more copy. `diag_read` is
+ * also what labels the finding Pathogen rather than Pattern.
+ */
+static void diag_demand(struct kof_scanner *sc)
+{
+	sc->diag_ask = 1;
+	sc->diag_read = 1;
+}
 /* Declared here because c_graph needs it and it is defined further down,
  * beside the other per-object latches. */
 static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
@@ -744,6 +760,7 @@ static void pend_clear(struct kof_scanner *sc)
 	sc->pend_rgn_fmt = 0;
 	sc->n_pend_syms = 0;
 	sc->pend_derived_by = NULL;
+	sc->pend_superseded = 0;
 	sc->pend_as_fmt = 0;
 	sc->pend_as_arch = 0;
 	sc->pend_as_base = 0;
@@ -1103,21 +1120,27 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 			sc->kid_want = nw;
 		if (nw)
 			nl = realloc(sc->kid_want_level, nc * sizeof *nl);
-		if (nl)
+		/* EACH POINTER IS TAKEN THE MOMENT ITS realloc SUCCEEDS, like the
+		 * ones above. This one and kid_xw were taken only after every
+		 * allocation had worked, so a failure part way returned with
+		 * `kid_want_level` still holding a block realloc had already freed. */
+		if (nl) {
+			sc->kid_want_level = nl;
 			nx = realloc(sc->kid_n_xw, nc * sizeof *nx);
+		}
 		if (nx)
 			sc->kid_n_xw = nx;
 		if (nx)
 			nr = realloc(sc->kid_xw,
 				     (size_t)nc * KOF_EMU_EXEC_WATCH * 2u *
 				     sizeof *nr);
+		if (nr)
+			sc->kid_xw = nr;
 		if (!nl || !nx || !nr) {
 			scan_broken(sc, KOF_BROKEN_LIMIT);
 			kof_src_unref(kid);
 			return 0;
 		}
-		sc->kid_want_level = nl;
-		sc->kid_xw = nr;
 		sc->cap_kids = nc;
 	}
 	/*
@@ -1267,6 +1290,21 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		sc->kid_derived_by[sc->n_kids] = sc->pend_derived_by;
 	sc->kids[sc->n_kids++] = kid;
 	sc->kids_left--;
+	/*
+	 * EVERYTHING DECLARED FOR THIS CHILD IS SPENT WITH IT. The label, kind,
+	 * entry, language, format, regions and symbols were cleared one by one
+	 * above, and the rest - what to do to it (want, xw), who derived it, the
+	 * image it becomes (as_*, sections, directories, imports), the watch an
+	 * interpreter was armed with - were copied and left standing, against what
+	 * the comment on the copy says ("spent here the same way every other pending
+	 * claim is"). A second module producing a child in the same turn inherited
+	 * the first's emulator request and its `derived_by`, and so was hidden from
+	 * the module that should have been offered it. pend_clear is the one list of
+	 * what a pending claim is.
+	 */
+	if (sc->pend_superseded)
+		sc->superseded = 1;
+	pend_clear(sc);
 	return 1;
 }
 
@@ -1407,7 +1445,7 @@ static void c_supersede(const struct kof_obj_ctx *ctx)
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
 	if (sc)
-		sc->superseded = 1;
+		sc->pend_superseded = 1;        /* committed by kid_push */
 }
 
 static void c_child_want(const struct kof_obj_ctx *ctx, uint32_t want,
@@ -2224,8 +2262,13 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		unsigned lc, lp, pb, cto = lzma_cto_bits(method);
 
 		if (!lzma_props_of(method, &lc, &lp, &pb)) {
-			scan_release(sc, want);
-			free(buf);
+			/* Only a buffer the engine allocated is the engine's to free
+			 * and to give back: on the in-place path `buf` points into the
+			 * sink, and nothing was charged. */
+			if (own) {
+				scan_release(sc, want);
+				free(buf);
+			}
 			scan_broken(sc, KOF_BROKEN_DAMAGED);
 			return 0;
 		}
@@ -4192,6 +4235,23 @@ static uint64_t c_import_bytes(const struct kof_obj_ctx *ctx)
 }
 
 /*
+ * A SECTION NAME, EIGHT BYTES AT MOST, taken from whatever the module passed.
+ * The loop it replaces read `name[w]` for w up to seven whatever the string's
+ * length, so a short name was read past its terminator at the one boundary this
+ * file exists to harden - and the bytes after it were copied into the table.
+ */
+static void sec_name_copy(char dst[9], const char *name)
+{
+	unsigned w = 0;
+
+	if (name)
+		for (; w < 8u && name[w]; w++)
+			dst[w] = name[w];
+	for (; w < 9u; w++)
+		dst[w] = 0;
+}
+
+/*
  * WHERE THE TABLE GOES, AND THE ROOM FOR IT, WHICH IS ONE ACT AND NOT TWO.
  *
  * A module says "put it here" and the engine writes it when the child closes -
@@ -4299,9 +4359,8 @@ static int c_section(const struct kof_obj_ctx *ctx, const char *name,
 			if (k + 1u < sc->n_pend_sec &&
 			    rva + vsize > sc->pend_sec[k + 1u].rva)
 				return -1;
-			for (w = 0; w < 8u; w++)
-				e->name[w] = name && name[w] ? name[w] : 0;
-			e->name[8] = 0;
+			(void)w;
+			sec_name_copy(e->name, name);
 			e->vsize = vsize;
 			e->perm = perm;
 			e->flags = flags;
@@ -4310,9 +4369,8 @@ static int c_section(const struct kof_obj_ctx *ctx, const char *name,
 	if (sc->n_pend_sec >= DECL_SEC_MAX)
 		return -1;
 	d = &sc->pend_sec[sc->n_pend_sec];
-	for (q = 0; q < 8u; q++)
-		d->name[q] = name && name[q] ? name[q] : 0;
-	d->name[8] = 0;
+	(void)q;
+	sec_name_copy(d->name, name);
 	d->rva = rva;
 	d->vsize = vsize;
 	d->perm = perm;
@@ -4595,11 +4653,11 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	uint32_t f;
 
-	if (!sc->use_done) {
+	if (!sc->latch[KOF_OL_USE]) {
 		const struct kof_elf_info *e = ctx->file_header;
 		uint32_t i;
 
-		sc->use_done = 1;
+		sc->latch[KOF_OL_USE] = 1;
 		/*
 		 * NOTHING KNOWN IS NOT THE SAME AS NOTHING FOUND.
 		 *
@@ -4834,13 +4892,12 @@ static const uint8_t *c_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 	 * detections disappearing the moment the rule stopped naming a
 	 * diagnose and started reading nodes.
 	 */
-	sc->diag_ask = 1;
-	sc->diag_read = 1;
+	diag_demand(sc);
 	diag_ready(sc, ctx);
 	if (!sc->diag_graph)
 		return NULL;
-	if (!sc->gr_done) {
-		sc->gr_done = 1;
+	if (!sc->latch[KOF_OL_GRAPH_BLOCK]) {
+		sc->latch[KOF_OL_GRAPH_BLOCK] = 1;
 		if (!sc->gr)
 			sc->gr = malloc(KOF_GR_MAX_BYTES);
 		sc->gr_n = sc->gr ? kof_diag_graph_build(sc->diag_graph,
@@ -4994,8 +5051,8 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		}
 	}
 
-	if (!sc->sym_done) {
-		sc->sym_done = 1;
+	if (!sc->latch[KOF_OL_SYM]) {
+		sc->latch[KOF_OL_SYM] = 1;
 		sc->sym_n = 0;
 		if (ctx->file_header &&
 		    (ctx->format == KOF_FMT_ELF ||
@@ -5759,10 +5816,10 @@ static int name_is(const struct refscan *rs, uint64_t off, const char *want)
 static const struct kof_apihash *sc_apihash(struct kof_scanner *sc,
 					    const struct kof_obj_ctx *ctx)
 {
-	if (!sc->apihash_ready) {
+	if (!sc->latch[KOF_OL_APIHASH]) {
 		kof_buf b = mc(ctx)->data;
 
-		sc->apihash_ready = 1;
+		sc->latch[KOF_OL_APIHASH] = 1;
 		if (ctx->format == KOF_FMT_PE && b.p && b.n)
 			sc->apihash = kof_apihash_run(ctx, b.p, b.n);
 	}
@@ -5777,12 +5834,12 @@ static const struct kof_apihash *sc_apihash(struct kof_scanner *sc,
 static const struct kof_elf_relocs *sc_relocs(struct kof_scanner *sc,
 					      const struct kof_obj_ctx *ctx)
 {
-	if (!sc->relocs_ready) {
+	if (!sc->latch[KOF_OL_RELOCS]) {
 		const struct kof_elf_info *ei = ctx->format == KOF_FMT_ELF
 						? kof_elf(ctx) : NULL;
 		kof_buf b = mc(ctx)->data;
 
-		sc->relocs_ready = 1;
+		sc->latch[KOF_OL_RELOCS] = 1;
 		if (ei && ei->valid && b.p) {
 			sc->relocs = calloc(1, sizeof *sc->relocs);
 			if (sc->relocs)
@@ -5844,9 +5901,9 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	uint32_t n, i, pending = 0, rpending = 0, sn = 0, total, r;
 	const uint8_t *sb;
 
-	if (sc->diag_gate_done)
+	if (sc->latch[KOF_OL_DIAG_GATE])
 		return;
-	sc->diag_gate_done = 1;
+	sc->latch[KOF_OL_DIAG_GATE] = 1;
 	memset(sc->diag_gate, 0, sizeof sc->diag_gate);
 	memset(unmet, 0, sizeof unmet);
 	memset(ok, 0, sizeof ok);
@@ -5971,7 +6028,7 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	kof_buf b;
 	uint32_t i;
 
-	if (sc->diag_ready)
+	if (sc->latch[KOF_OL_DIAG])
 		return;
 	/*
 	 * NOBODY ASKED, SO NOBODY PAYS - see KOF_ENG_USE_PATHOGEN. The sweep
@@ -5992,7 +6049,7 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	 */
 	if (!sc->diag_ask)
 		return;
-	sc->diag_ready = 1;
+	sc->latch[KOF_OL_DIAG] = 1;
 	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
 	if (!sc->eng || !sc->eng->n_diag)
 		return;
@@ -6115,8 +6172,7 @@ static int c_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 	 * question about two diagnoses, and it used to call diag_ready
 	 * without setting the flag it is gated on, so a rule whose ONLY
 	 * pathogen call was this one read an analysis that never ran. */
-	sc->diag_ask = 1;
-	sc->diag_read = 1;
+	diag_demand(sc);
 	diag_ready(sc, ctx);
 	ia = ib = sc->eng->n_diag;
 	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++) {
@@ -6164,8 +6220,7 @@ static int c_diag_str(const struct kof_obj_ctx *ctx, uint16_t id,
 
 	if (!sc || !sc->eng || !id || !name)
 		return 0;
-	sc->diag_ask = 1;
-	sc->diag_read = 1;
+	diag_demand(sc);
 	diag_ready(sc, ctx);
 	for (i = 0; i < sc->eng->n_diag && i < sizeof sc->diag_hit * 8u; i++)
 		if (sc->eng->diag[i].id == id)
@@ -6207,8 +6262,7 @@ static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)
 	 * Naming a diagnose in a rule IS the demand, and it is as scoped as
 	 * the rule - a rule targeting ELF asks on ELF and nowhere else.
 	 */
-	sc->diag_ask = 1;
-	sc->diag_read = 1;
+	diag_demand(sc);
 	diag_ready(sc, ctx);
 	/* The id is the name's hash now, not a position - see KOF_DIAG_ID.
 	 * The bit is still the diagnose's slot, which is its position. */
@@ -6376,8 +6430,19 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
 	sc->n_views = 0;        /* counted out of n_kids - see scan.h */
 	sc->n_carved = 0;
 
-	/* Whatever a module emitted and never closed is not an object, and the
-	 * memory it was holding stops being resident. */
+	kof_scan_sink_discard(sc);
+}
+
+/*
+ * WHATEVER A MODULE EMITTED AND NEVER CLOSED IS NOT AN OBJECT, and the memory it
+ * was holding stops being resident. Also the cursor: `sink_fixed` and `sink_at`
+ * were cleared only when a close SUCCEEDED, so a derived or image sink left open
+ * by a module whose close was refused kept its cursor into the next module, whose
+ * emits then went through the fixed-size arm to a stale position. Called at the
+ * start of every object and of every module's turn.
+ */
+void kof_scan_sink_discard(struct kof_scanner *sc)
+{
 	scan_release(sc, sc->sink_len + sc->sink_spilled);
 	free(sc->sink_mem);
 	sc->sink_mem = NULL;
@@ -6386,6 +6451,8 @@ void kof_scan_kids_reset(struct kof_scanner *sc)
 		close(sc->sink_fd);
 	sc->sink_fd = -1;
 	sc->sink_spilled = 0;
+	sc->sink_fixed = 0;
+	sc->sink_at = 0;
 }
 
 /*
@@ -7394,7 +7461,8 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 			(unsigned long long)kof_emu_idle_max(e),
 			kof_emu_write_seen(e));
 	}
-	if (e && kof_emu_itrace_count(e)) {
+	/* A diagnostic: a build choice, like the block above - see CLAUDE.md 1. */
+	if (KOF_TRACING && e && kof_emu_itrace_count(e)) {
 		static const char *const rn[16] = {
 			"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
 			"r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
@@ -7702,6 +7770,13 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 			ex[n_ex].va = va;
 			ex[n_ex].code = 1;
 			n_ex++;
+		} else if (n_ex >= EMU_EXTRA_MAX &&
+			   !emu_dup(ex, n_ex, va, bytes, len)) {
+			/* A bound on what one run may hand over. It stays a bound,
+			 * and it SAYS it was reached: dropped without a word, a
+			 * region past the thirty-second was evidence that simply
+			 * was not there. */
+			scan_capped(sc, KOF_BROKEN_LIMIT);
 		}
 	}
 	/*
@@ -7821,6 +7896,9 @@ static uint32_t emu_gather(const struct kof_obj_ctx *ctx,
 				ex[n_ex].va = va;
 				ex[n_ex].code = 0;
 				n_ex++;
+			} else if (n_ex >= EMU_EXTRA_MAX &&
+				   !emu_dup(ex, n_ex, va, bytes, len)) {
+				scan_capped(sc, KOF_BROKEN_LIMIT);     /* said, not dropped */
 			}
 		}
 

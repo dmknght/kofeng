@@ -93,7 +93,36 @@
 #define KOF_EMU_RGN_EXEC    1u  /* memory it wrote and then made executable */
 #define KOF_EMU_RGN_WRITTEN 2u  /* memory it merely wrote */
 
+/*
+ * ---- WHAT IS COMPUTED AT MOST ONCE FOR ONE OBJECT -------------------------
+ *
+ * Each is a result the scanner derives from the object's bytes the first time
+ * something asks and then keeps, so a second rule asking the same question does
+ * not pay for it twice. They used to be nine fields, each with its own spelling
+ * (`_done`, `_ready`) and each cleared at a place of its own; one was never
+ * cleared at all (the serialised graph, so every object after the first read the
+ * FIRST object's graph block). One array, one `memset` in obj_begin, and a new
+ * latch that is not listed here cannot exist - which is the point.
+ *
+ * A latch says "has been computed for THIS object". What it guards - a buffer, a
+ * table - is released by obj_begin as well, and that is the only place.
+ */
+enum kof_obj_latch {
+	KOF_OL_SYM,             /* the symbol block                         */
+	KOF_OL_USE,             /* the address-use map of the code          */
+	KOF_OL_DIAG_GATE,       /* which diagnoses' signs are present       */
+	KOF_OL_DIAG,            /* the pathogen walk has run                */
+	KOF_OL_RELOCS,          /* the relocation table                     */
+	KOF_OL_APIHASH,         /* what a PE resolves for itself            */
+	KOF_OL_GRAPH_BLOCK,     /* the graph serialised for a rule          */
+	KOF_OL_MULTI,           /* the multi-pattern set is bound           */
+	KOF_OL_PLAGUE,          /* the similarity set is bound              */
+	KOF_OL_COUNT
+};
+
 struct kof_scanner {
+	/* See enum kof_obj_latch. Cleared for every object, in obj_begin. */
+	uint8_t  latch[KOF_OL_COUNT];
 	const struct kof_engine *eng;
 
 	struct kof_match_ctx m;
@@ -135,7 +164,6 @@ struct kof_scanner {
 	 * object, so it is one walk and one bitmap.
 	 */
 	uint8_t  diag_gate[32];
-	int      diag_gate_done;
 	/*
 	 * THE OBJECT'S RELOCATIONS, derived once - see struct kof_elf_relocs. The
 	 * gate reads them for KOF_DIAG_REFS and the diag routes read the same table
@@ -143,7 +171,6 @@ struct kof_scanner {
 	 * sections themselves. Built on first need, freed with the object.
 	 */
 	struct kof_elf_relocs *relocs;
-	int      relocs_ready;
 	/* A serving diagnose added names to sym - see sym_serve. Per object. */
 	int      sym_served;
 	/*
@@ -153,7 +180,6 @@ struct kof_scanner {
 	 * object, like the relocations.
 	 */
 	struct kof_apihash *apihash;
-	int      apihash_ready;
 	/*
 	 * WHICH NODE EACH DIAGNOSE BOUND EACH OF ITS OWN NODES TO - see
 	 * kof_diag_share.
@@ -174,7 +200,6 @@ struct kof_scanner {
 	uint16_t diag_bind[KOF_DB_MAX_DIAG][KOF_DB_MAX_DIAG_NODE];
 	uint8_t  diag_n_bind[KOF_DB_MAX_DIAG];
 	/* see kof_scan_option.want_diag */
-	int      diag_ready;
 	/*
 	 * THE GRAPH ITSELF, kept for as long as the object is.
 	 *
@@ -200,7 +225,6 @@ struct kof_scanner {
 	 */
 	uint8_t  *gr;
 	uint32_t  gr_n;
-	int       gr_done;
 
 	/*
 	 * THREE FIELDS STOOD HERE and all three went with the chain: the
@@ -240,8 +264,6 @@ struct kof_scanner {
 	 * leaving it eager is what keeps a block from reading the last object's
 	 * answer when this object never fed anything.
 	 */
-	int                  multi_ready;
-	int                  plague_ready;
 	/* What regions this object has, worked out once in scan_object and kept
 	 * because the deferred passes above need it at a point where only the
 	 * scanner is still in scope. */
@@ -687,10 +709,16 @@ struct kof_scanner {
 	int                       emu_ran;
 	/*
 	 * WHETHER A MODULE SAID THIS OBJECT IS ONLY A WRAPPER - see `supersede`
-	 * in kofsig.h. Per object, cleared beside packed_here; read where the
-	 * walk reports an object, and ignored at the top level.
+	 * in kofsig.h. Per object, cleared in obj_begin; read where the walk
+	 * reports an object, and ignored at the top level.
+	 *
+	 * SET ONLY WHEN A CHILD IS ACTUALLY PUSHED, from `pend_superseded` below:
+	 * the module says "what I am about to produce is me", and a module whose
+	 * child was then refused (the child cap, a failed close) produced nothing, so
+	 * its object is still the thing to report.
 	 */
 	int                       superseded;
+	int                       pend_superseded;   /* said, not yet spent */
 	/*
 	 * WHAT THE DECLARED IMAGE IS TO BE WRITTEN AS - see `as_format` in
 	 * kofsig.h. Pending like every other declaration: set before the child
@@ -1159,7 +1187,6 @@ struct kof_scanner {
 	 */
 	uint8_t  *sym;
 	uint32_t  sym_n;
-	uint8_t   sym_done;
 	/*
 	 * WHAT THE CODE DOES WITH EACH DATA ADDRESS, swept once for the same
 	 * reason the symbol block is built once: the sweep costs a decode per
@@ -1168,7 +1195,6 @@ struct kof_scanner {
 	 * swept yet", exactly as sym_done does.
 	 */
 	struct kof_xref *use;
-	uint8_t            use_done;
 	/*
 	 * A SECOND MATCHER, BOUND TO THAT BLOCK.
 	 *
@@ -1242,6 +1268,7 @@ void kof_scan_budget(struct kof_scanner *, uint64_t obj_size,
 
 /* Release anything a module left half-produced, and hand back what it finished. */
 void kof_scan_kids_reset(struct kof_scanner *);
+void kof_scan_sink_discard(struct kof_scanner *);
 
 
 
