@@ -23,6 +23,12 @@ struct kof_diag_scan {
 	struct kof_diag_hit *hit;
 	uint32_t             n_hit;
 	uint32_t             cap_hit;
+	/*
+	 * SYSCALLS WHOSE ARGUMENT IS THE CALLER'S, found by the sweep and
+	 * answered after it - see resolve_wrap. File offsets of the `int 0x80`.
+	 */
+	uint64_t            *wrap;
+	uint32_t             n_wrap, cap_wrap;
 	int                  full;      /* the bound was reached */
 	/* Which analysis routines actually ran - see KOF_DIAG_RUN_* and the
 	 * scenario table. Asked for and not written counts as not run. */

@@ -380,6 +380,30 @@ void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role,
 	h->n_in++;
 }
 
+/*
+ * A SYSCALL WHOSE ARGUMENT THE WALK COULD NOT READ BECAUSE IT IS THE CALLER'S.
+ * Kept as file offsets; the list grows with the input and is bounded by it,
+ * since there cannot be more of these than there are `int 0x80` in the object.
+ */
+static void wrap_note(struct kof_diag_scan *s, uint64_t at)
+{
+	uint32_t i;
+
+	for (i = 0; i < s->n_wrap; i++)
+		if (s->wrap[i] == at)
+			return;
+	if (s->n_wrap == s->cap_wrap) {
+		uint32_t nc = s->cap_wrap ? s->cap_wrap * 2u : 8u;
+		uint64_t *nw = realloc(s->wrap, (size_t)nc * sizeof *nw);
+
+		if (!nw)
+			return;
+		s->wrap = nw;
+		s->cap_wrap = nc;
+	}
+	s->wrap[s->n_wrap++] = at;
+}
+
 static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 		       struct walk *w, const struct kof_obj_ctx *ctx,
 		       uint64_t at)
@@ -469,8 +493,22 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 
 	cap = kof_flow_cap_of_syscall((unsigned)bits, (uint32_t)nr, arg, &fl);
 	nm  = kof_sys_name((unsigned)bits, (uint32_t)nr);
-	if (cap == KOF_NUCLEO_NONE)
+	if (cap == KOF_NUCLEO_NONE) {
+		/*
+		 * i386's socketcall IS A MULTIPLEXER: the sub-call that says
+		 * socket from connect from send is in ebx, and a libc that
+		 * wraps it (uClibc, in the static IoT builds) loads ebx from
+		 * its own PARAMETER - `mov edx,[esp+0x10]; xchg ebx,edx` - so
+		 * at this instruction it is the caller's value and not the
+		 * walk's. This used to return here without a word: MEASURED, 27
+		 * of 30 static i386 bots had the instruction and not one net
+		 * node. Remember the site; resolve_wrap reads what every caller
+		 * pushed.
+		 */
+		if (bits == 32 && nr == 102u && !(have & 1u))
+			wrap_note(s, at);
 		return;                 /* a syscall the vocabulary has no word for */
+	}
 	h = kof_diag_hit_add(s, at, cap, fl);
 	if (!h)
 		return;
@@ -817,6 +855,47 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
  * nothing out of every one of them. The program header is what the loader
  * itself reads, so it is what is here.
  */
+/*
+ * THE BYTES OF EXECUTABLE SEGMENT `i` THAT ARE CODE, or zero. One statement of
+ * it, because the sweep and the wrapper resolution must agree on where code
+ * begins - see the note on the entry point below.
+ */
+static uint64_t code_range(const struct kof_obj_ctx *ctx,
+			   const struct kof_elf_info *e, uint32_t i,
+			   uint64_t size, uint64_t *at)
+{
+	const struct kof_elf_seg *g = &e->seg[i];
+	uint64_t have;
+
+	if (g->type != 1u || !(g->perm & KOF_PERM_X))
+		return 0;               /* PT_LOAD, executable */
+	have = kof_clip_len(size, g->file_off, g->file_size);
+	if (!have)
+		return 0;
+	*at = g->file_off;
+	/*
+	 * START AT THE ENTRY POINT WHEN IT IS IN THIS SEGMENT.
+	 *
+	 * An executable segment usually begins at file offset zero
+	 * and therefore CONTAINS THE ELF HEADER - so reading it from
+	 * the front decodes `7f E L F 02 01 01 ...` as instructions
+	 * and carries whatever that desync produces into the real
+	 * code. MEASURED on msfvenom's x86-64 stager: the mmap at
+	 * +0x8d came back with its number unreadable, because the
+	 * push that sets it had been swallowed by an instruction
+	 * decoded across the header boundary.
+	 *
+	 * The entry is the one offset in a headerless object that is
+	 * certainly the first byte of an instruction.
+	 */
+	if (ctx->entry_off >= g->file_off &&
+	    ctx->entry_off < g->file_off + have) {
+		have -= ctx->entry_off - g->file_off;
+		*at = ctx->entry_off;
+	}
+	return have;
+}
+
 static void sweep_elf(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		      const uint8_t *base, uint64_t size)
 {
@@ -826,38 +905,176 @@ static void sweep_elf(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 	if (!e || !e->valid)
 		return;
 	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
-		const struct kof_elf_seg *g = &e->seg[i];
-		uint64_t have, at = g->file_off;
+		uint64_t at, have = code_range(ctx, e, i, size, &at);
 
-		if (g->type != 1u || !(g->perm & KOF_PERM_X))
-			continue;               /* PT_LOAD, executable */
-		have = kof_clip_len(size, g->file_off, g->file_size);
 		if (!have)
 			continue;
-		/*
-		 * START AT THE ENTRY POINT WHEN IT IS IN THIS SEGMENT.
-		 *
-		 * An executable segment usually begins at file offset zero
-		 * and therefore CONTAINS THE ELF HEADER - so reading it from
-		 * the front decodes `7f E L F 02 01 01 ...` as instructions
-		 * and carries whatever that desync produces into the real
-		 * code. MEASURED on msfvenom's x86-64 stager: the mmap at
-		 * +0x8d came back with its number unreadable, because the
-		 * push that sets it had been swallowed by an instruction
-		 * decoded across the header boundary.
-		 *
-		 * The entry is the one offset in a headerless object that is
-		 * certainly the first byte of an instruction.
-		 */
-		if (ctx->entry_off >= g->file_off &&
-		    ctx->entry_off < g->file_off + have) {
-			have -= ctx->entry_off - g->file_off;
-			at = ctx->entry_off;
-		}
 		sweep_region(s, ctx, base, size, at, have);
 		if (s->full)
 			return;
 	}
+}
+
+/*
+ * ---- A SYSCALL THAT IS THE CALLER'S, ANSWERED AT THE CALLERS -----------
+ *
+ * uClibc's socketcall wrapper is
+ *
+ *     __socketcall(int call, unsigned long *args)
+ *         mov edx,[esp+0x10]     ; call
+ *         xchg ebx,edx
+ *         mov eax,0x66
+ *         int 0x80
+ *
+ * and socket(), connect(), send() and the rest are each `push args; push N;
+ * call __socketcall`. The sub-call is a constant at EVERY call site and an
+ * unknown at the one `int 0x80`, so the nodes belong at the call sites:
+ * that is where the program says what it is doing, and one function that
+ * is called nine ways is nine acts, not one.
+ *
+ * `call` is the first argument of socketcall by the system call's own
+ * definition, so it is the wrapper's first parameter and, under cdecl, the
+ * LAST value pushed before the call. No stack is tracked inside the wrapper:
+ * the question asked is only "what did each caller hand over as that value".
+ *
+ * THE WRAPPER'S ENTRY is the nearest direct-call target at or before the
+ * site. A stripped binary has no symbol to say where the function begins, and
+ * a function nothing calls directly has nobody to resolve the value for in
+ * any case. DIAG_WRAP_SPAN bounds how far back that entry may be: MEASURED on
+ * 27 sites in 25 static i386 bots, the site is 33 bytes or fewer from its
+ * entry. A distance cap says "a different function is more likely", which is
+ * a cost bound on a guess and not evidence being thrown away.
+ *
+ * ONLY WHEN THE SWEEP FOUND ONE. The whole code range is decoded here, which
+ * is worth doing for a binary that has the problem and not for the rest.
+ */
+#define DIAG_WRAP_SPAN 256u
+
+struct wcall {
+	uint64_t at, target, p0;
+	uint8_t  known;
+};
+
+static int wcall_by_target(const void *a, const void *b)
+{
+	const struct wcall *x = a, *y = b;
+
+	return x->target < y->target ? -1 : x->target > y->target;
+}
+
+static int gather_calls(const struct kof_obj_ctx *ctx, const uint8_t *base,
+			uint64_t size, uint64_t off, uint64_t n,
+			struct wcall **v, uint32_t *nv, uint32_t *cv)
+{
+	struct kof_kdis k;
+	struct kdis_insn in;
+	uint32_t since_push = 99u;
+
+	memset(&k, 0, sizeof k);
+	if (!kof_kdis_seek(&k, off, 0))
+		return 0;
+	while (k.at < off + n && kof_kdis_next(&k, ctx, base, size, &in)) {
+		if (in.op == KDIS_PUSH)
+			since_push = 0;
+		else if (since_push < 99u)
+			since_push++;
+		if (in.op == KDIS_CALL && !(in.flags & KDIS_F_INDIRECT) &&
+		    in.target != KOF_BROKEN) {
+			struct wcall *c;
+
+			if (*nv == *cv) {
+				uint32_t nc = *cv ? *cv * 2u : 256u;
+				struct wcall *nw = realloc(*v, (size_t)nc * sizeof **v);
+
+				if (!nw)
+					return 0;
+				*v = nw;
+				*cv = nc;
+			}
+			c = &(*v)[(*nv)++];
+			c->at = in.at;
+			c->target = in.target;
+			/*
+			 * kdis has already pushed the return address, so the
+			 * value handed over is the slot under it. And it has to
+			 * be RECENT: a stack that is only a few slots deep still
+			 * holds whatever was pushed last, so a call with no
+			 * arguments would otherwise read a stale one.
+			 */
+			c->known = k.stk_n >= 2u && since_push <= 4u &&
+				   ((k.stk_known >> (k.stk_n - 2u)) & 1u);
+			c->p0 = c->known ? k.stk[k.stk_n - 2u] : 0;
+		}
+		if (in.op == KDIS_CALL || in.op == KDIS_RET || in.op == KDIS_JMP)
+			since_push = 99u;
+	}
+	return 1;
+}
+
+static void resolve_wrap(struct kof_diag_scan *s,
+			 const struct kof_obj_ctx *ctx,
+			 const uint8_t *base, uint64_t size)
+{
+	const struct kof_elf_info *e = kof_elf(ctx);
+	struct wcall *v = NULL;
+	uint32_t nv = 0, cv = 0, i, w;
+
+	if (!s->n_wrap || !e || !e->valid)
+		return;
+	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
+		uint64_t at, have = code_range(ctx, e, i, size, &at);
+
+		if (have && !gather_calls(ctx, base, size, at, have, &v, &nv, &cv))
+			break;
+	}
+	qsort(v, nv, sizeof *v, wcall_by_target);
+
+	for (w = 0; w < s->n_wrap; w++) {
+		uint64_t site = s->wrap[w], entry = 0;
+		uint32_t lo = 0, hi = nv, found = 0;
+		struct kof_diag_hit *h;
+
+		/* the last call target at or before the site */
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+
+			if (v[mid].target <= site)
+				lo = mid + 1u;
+			else
+				hi = mid;
+		}
+		if (lo && site - v[lo - 1u].target <= DIAG_WRAP_SPAN)
+			entry = v[lo - 1u].target;
+		for (i = lo; entry && i-- > 0 && v[i].target == entry; ) {
+			uint64_t arg0 = v[i].p0;
+			uint16_t cap;
+			uint8_t fl = 0;
+
+			if (!v[i].known)
+				continue;
+			cap = kof_flow_cap_of_syscall(32u, 102u, &arg0, &fl);
+			if (cap == KOF_NUCLEO_NONE)
+				continue;
+			h = kof_diag_hit_add(s, v[i].at, cap, fl);
+			if (!h)
+				continue;
+			/* socket(domain, type, protocol) sits in the caller's
+			 * argument array and is not read here - say so rather
+			 * than carry the answer zeros would give. */
+			if (cap == KOF_NUCLEO_NET_OPEN)
+				h->bits |= KOF_DIAG_H_ARG_UNKNOWN;
+			found++;
+		}
+		if (!found) {
+			/* nobody called it with a value this could read: the
+			 * site is a socketcall of an unknown kind, which is a
+			 * different statement from no socketcall at all. */
+			h = kof_diag_hit_add(s, site, KOF_NUCLEO_NONE, 0);
+			if (h)
+				h->bits |= KOF_DIAG_H_OPAQUE;
+		}
+	}
+	free(v);
 }
 
 /* ---- the surface --------------------------------------------------------- */
@@ -897,9 +1114,10 @@ void kof_diag_run_syscall(struct kof_diag_scan *s,
 	 * there are not. A payload lifted out of a variable has no program
 	 * header and is still code.
 	 */
-	if (ctx->format == KOF_FMT_ELF)
+	if (ctx->format == KOF_FMT_ELF) {
 		sweep_elf(s, ctx, base, size);
-	else
+		resolve_wrap(s, ctx, base, size);
+	} else
 		sweep_region(s, ctx, base, size, 0, size);
 }
 
@@ -1321,6 +1539,7 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
 	free(s->str);
 	free(s->adj_head);
 	free(s->adj_edge);
+	free(s->wrap);
 	free(s->hit);
 	free(s);
 }
