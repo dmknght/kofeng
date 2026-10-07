@@ -4184,6 +4184,16 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	out->from_packer = (uint8_t)(from_packer != 0);
 	memset(&ctx, 0, sizeof ctx);
 	kof_mod_attach(&ctx, sc);
+	/*
+	 * WHETHER A MODULE SAYS THIS OBJECT IS ONLY A WRAPPER belongs to THIS
+	 * object, so it is cleared where the object begins. It was cleared inside
+	 * unpack_object, which an object with a finding of its own never reaches
+	 * unless all_matches is on: the decoded child of a stager kept the flag its
+	 * parent's module had set, and on_event_detected skips a superseded object
+	 * below the top - so the child's verdict vanished from the report, and came
+	 * back when the same scan was run with --all-matches.
+	 */
+	sc->superseded = 0;
 
 	/*
 	 * How big the object is, before anything tries to identify it.

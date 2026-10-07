@@ -235,6 +235,7 @@ struct seen_syms {
 	uint32_t       n;
 	uint8_t        copy[KOF_SYM_MAX_BYTES];
 	int            views;
+	int            convicted;       /* findings naming Meterp on any object */
 };
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
@@ -244,6 +245,13 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 
 	(void)bytes;
 	(void)len;
+	{
+		uint32_t f;
+
+		for (f = 0; f < res->n; f++)
+			if (strstr(res->v[f].name, "Meterp"))
+				k->convicted++;
+	}
 	if (strstr(name, ":norm") && res->syms && res->n_syms &&
 	    res->n_syms <= sizeof k->copy) {
 		memcpy(k->copy, res->syms, res->n_syms);
@@ -512,6 +520,7 @@ int main(int argc, char **argv)
 
 		memcpy(b2, b, n);
 		put16(b2, 0x86, 2);                          /* two sections */
+
 		put32(b2, o + 56, 0x3000);                   /* SizeOfImage  */
 		memcpy(b2 + sec2, ".data\0\0\0", 8);
 		put32(b2, sec2 + 8, 0x1000);
@@ -527,6 +536,9 @@ int main(int argc, char **argv)
 		if (sc) {
 			memset(&opt, 0, sizeof opt);
 			opt.heur_level = 2;
+			/* the stager IS convicted by the graph verdict, and an object the
+			 * scan stopped at is not normalised; this asks about the view */
+			opt.all_matches = 1;
 			{
 				/* a scan needs a path to give a view its name */
 				FILE *tf = fopen("build/test/pe_serves.tmp", "wb");
@@ -540,6 +552,10 @@ int main(int argc, char **argv)
 					remove("build/test/pe_serves.tmp");
 				}
 			}
+			/* THE VERDICT: the stager is read off the graph - the byte
+			 * rules for PE x86 and x64 are gone, and the synthetic code
+			 * contains no byte any other rule knows. */
+			CK(seen.convicted >= 1);
 			CK(seen.views >= 1);
 			CK(has_sym(&seen, "ws2_32.dll!connect"));
 			CK(has_sym(&seen, "kernel32.dll!VirtualAlloc"));
