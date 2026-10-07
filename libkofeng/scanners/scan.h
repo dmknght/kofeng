@@ -367,7 +367,10 @@ struct kof_scanner {
 	 * less than all of it.
 	 */
 	uint64_t             emu_slice;
-	uint64_t             emu_full;   /* the host's real ceiling */
+	uint64_t             emu_full;   /* the host's real ceiling; per object */
+	/* The code-use sweep stopped at its byte budget with code unswept - see
+	 * oc_data_xref. Per object, cleared in obj_begin. */
+	uint8_t              use_cut;
 	/* The module-facing code reader's cursor - see analyzers/parsers/binaries/disasm/kdis.h.
 	 * One per object, because a module walks one run of code at a time. */
 	struct kof_kdis      kdis;
@@ -1390,5 +1393,6 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
  * nothing - see kof_result.syms. */
 const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n);
 
-#endif /* KOFENG_SCAN_H */
 void kof_scan_diag_force(const struct kof_obj_ctx *);
+
+#endif /* KOFENG_SCAN_H */

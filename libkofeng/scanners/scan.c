@@ -3999,6 +3999,8 @@ static void obj_begin(struct kof_scanner *sc)
 		sc->diag_graph = NULL;
 	}
 	sc->gr_n = 0;                   /* the serialised copy of that graph */
+	sc->use_cut = 0;
+	sc->emu_full = 0;               /* only the PE branch of a run sets it */
 
 	/* The pathogen demand. See KOF_ENG_USE_PATHOGEN: there is no state to set,
 	 * so one object's ask cannot become the next object's. */

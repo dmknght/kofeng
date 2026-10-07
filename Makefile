@@ -985,6 +985,11 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/scanners/scan.c \
            libkofeng/scanners/objtree.c \
            libkofeng/scanners/objctx.c \
+           libkofeng/scanners/objctx_script.c \
+           libkofeng/scanners/objctx_emu.c \
+           libkofeng/scanners/objctx_diag.c \
+           libkofeng/scanners/objctx_decomp.c \
+           libkofeng/scanners/objctx_child.c \
            libkofeng/scanners/objsrc.c \
            libkofeng/analyzers/trueline/trueline.c \
            libkofeng/detectors/overlord/kofoverlord.c \
