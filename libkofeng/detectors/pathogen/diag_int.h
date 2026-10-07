@@ -30,6 +30,9 @@ struct kof_diag_scan {
 	 */
 	uint64_t            *wrap;
 	uint32_t             n_wrap, cap_wrap;
+	/* Syscall sites whose first argument was not a constant the sweep could
+	 * read - the candidates for a wrapper. See kof_diag_run_wrappers. */
+	uint32_t             n_unread;
 	/*
 	 * THE RELOCATIONS OF THIS OBJECT, one table for every route - see
 	 * struct kof_elf_relocs. Borrowed when the caller built it for the object
@@ -157,6 +160,9 @@ struct kof_diag_hit *kof_diag_hit_of(struct kof_diag_scan *s, uint32_t i);
 /* Record that one of `h`'s inputs came from node `from`, in `role`. A link
  * already recorded is not recorded twice - a loop that arrives at the same
  * call again has not found a second link. */
+/* The second node a socket call makes when its type says SOCK_NONBLOCK: a
+ * non-blocking mark on descriptor `open_idx`, at the same instruction. */
+void kof_diag_hit_nonblock(struct kof_diag_scan *s, uint64_t at, uint16_t open_idx);
 void kof_diag_note_in(struct kof_diag_hit *h, uint16_t from, uint8_t role,
 		      uint8_t kind);
 
@@ -237,6 +243,10 @@ const struct kof_elf_relocs *kof_diag_relocs(struct kof_diag_scan *s,
 					     unsigned kind);
 
 /* The symbol route's PE half: calls through the import address table. */
+/* Syscall wrappers of a static libc: nodes at their callers, linked - see
+ * diag_wrap.c. */
+void kof_diag_run_wrappers(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
+			   const uint8_t *base, uint64_t size);
 void kof_diag_run_apihash(struct kof_diag_scan *s,
 			  const struct kof_obj_ctx *ctx,
 			  const uint8_t *base, uint64_t size);

@@ -168,6 +168,12 @@ struct kof_diag_in {
  * needs is `mov QWORD PTR [rax+0x4],0x0`, where the zero is four bytes of
  * the instruction.
  */
+/*
+ * THE NODE AT A WRAPPER'S OWN SYSCALL, once its callers have nodes of their own.
+ * One node there spoke for every caller at once and for none of them; it stays
+ * in the list (a dump should show what the sweep saw) and is not matched.
+ */
+#define KOF_DIAG_H_SUPERSEDED (1u << 5)
 #define KOF_DIAG_H_VAL (1u << 6)
 
 /*

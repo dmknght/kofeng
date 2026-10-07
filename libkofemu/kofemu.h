@@ -432,6 +432,9 @@ int      kof_emu_win_event_at(const struct kof_emu *e, uint32_t i,
 			      struct kof_emu_win_event *out);
 
 uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name);
+/* The same, but a plausible name the table lacks gets a miss thunk instead of
+ * 0 - see the definition. For a resolver (GetProcAddress, the IAT fill). */
+uint64_t kof_emu_win_resolve(struct kof_emu *e, const char *name);
 
 void     kof_emu_set_rip(struct kof_emu *e, uint64_t rip);
 void     kof_emu_set_reg(struct kof_emu *e, unsigned gpr, uint64_t v);

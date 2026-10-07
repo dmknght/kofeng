@@ -942,6 +942,71 @@ static uint16_t sock_kind(const uint64_t *arg, uint8_t *flags)
 }
 
 /*
+ * fcntl(fd, F_SETFL, ... | O_NONBLOCK) and setsockopt(fd, IPPROTO_IP,
+ * IP_HDRINCL, ..): the two option calls whose arguments are a claim.
+ * O_NONBLOCK is 04000 on Linux for x86 and x86-64 alike; F_SETFL is 4;
+ * IPPROTO_IP is 0 and IP_HDRINCL is 3. The number of the call is the only
+ * thing that differs between the two machines: x86-64 fcntl 72 and setsockopt
+ * 54; i386 fcntl 55, fcntl64 221 and, on kernels that have it, a direct
+ * setsockopt 366 (older ones go through socketcall, whose arguments are in
+ * memory and are not read here).
+ */
+#define FLOW_F_SETFL      4u
+#define FLOW_O_NONBLOCK   0x800u
+#define FLOW_IPPROTO_IP   0u
+#define FLOW_IP_HDRINCL   3u
+
+/*
+ * AN ARGUMENT THAT IS A SET OF FLAGS, where knowing that one bit is SET is the
+ * whole claim: F_SETFL's third argument is `flags | O_NONBLOCK`, and the
+ * `flags` half is what F_GETFL returned, which no static walk knows. A caller
+ * that tracks "these bits are set, the rest unknown" may hand that value to
+ * kof_flow_cap_of_syscall for these arguments and no others: for a length or a
+ * protection a partly-known number is a wrong number.
+ */
+int kof_flow_arg_is_flags(unsigned bits, uint32_t nr, unsigned idx)
+{
+	int is_fcntl = bits == 32 ? (nr == 55u || nr == 221u) : nr == 72u;
+
+	return is_fcntl && idx == 2u;
+}
+
+/*
+ * A SOCKET THAT IS MADE NON-BLOCKING IN THE CALL THAT MAKES IT: the type
+ * argument carries SOCK_NONBLOCK (04000, the same bit as O_NONBLOCK). It says
+ * the same thing as an fcntl afterwards, and a program that uses it never calls
+ * fcntl, so the vocabulary cannot ask only for the fcntl - MEASURED, 50 of 400
+ * x86 and 73 of 388 x86-64 Bazaar files had a connect and a non-blocking socket
+ * and no fcntl node to say so. The caller makes a second node for it.
+ */
+int kof_flow_sock_nonblock(unsigned bits, uint32_t nr, const uint64_t *arg,
+			   unsigned have)
+{
+	int is_socket = bits == 32 ? nr == 359u : nr == 41u;
+
+	return is_socket && (have & 2u) && (arg[1] & FLOW_O_NONBLOCK);
+}
+
+int kof_flow_sockcall_nonblock(uint32_t sub, const uint64_t *arg, unsigned have)
+{
+	return sub == 1u && (have & 2u) && (arg[1] & FLOW_O_NONBLOCK);
+}
+
+static uint16_t flow_opt_cap(unsigned bits, uint32_t nr, const uint64_t *arg)
+{
+	int is_fcntl = bits == 32 ? (nr == 55u || nr == 221u) : nr == 72u;
+	int is_setsockopt = bits == 32 ? nr == 366u : nr == 54u;
+
+	if (is_fcntl && (arg[1] & 0xffffffffu) == FLOW_F_SETFL &&
+	    (arg[2] & FLOW_O_NONBLOCK))
+		return KOF_NUCLEO_FD_NONBLOCK;
+	if (is_setsockopt && (arg[1] & 0xffffffffu) == FLOW_IPPROTO_IP &&
+	    (arg[2] & 0xffffffffu) == FLOW_IP_HDRINCL)
+		return KOF_NUCLEO_NET_HDRINCL;
+	return KOF_NUCLEO_NONE;
+}
+
+/*
  * A NAMED CALL, REFINED BY THE ARGUMENTS IT WAS MADE WITH - the same job
  * kof_flow_cap_of_syscall does for a system call, for code that reached an API
  * by name or was observed calling one.
@@ -989,6 +1054,30 @@ uint16_t kof_flow_cap_of_call(const char *name, const uint64_t *arg,
 	return cap;
 }
 
+/*
+ * THE CAPABILITY OF ONE OPERATION OF i386's socketcall, with the arguments that
+ * were found in the array its second argument points at. `have` says which of
+ * them were: a socket whose domain and type were not read is a socket of an
+ * unknown kind and must not be refined from zeros.
+ */
+uint16_t kof_flow_cap_of_sockcall(uint32_t sub, const uint64_t *arg,
+				  unsigned have, uint8_t *flags)
+{
+	uint16_t cap = kof_sys_look(kof_sockcall, kof_sockcall_n, sub);
+
+	if (flags)
+		*flags = 0;
+	if (cap == KOF_NUCLEO_NET_OPEN && sub == 1u && arg && (have & 3u) == 3u)
+		return sock_kind(arg, flags);
+	/* setsockopt(fd, level, optname, ...): the operation whose arguments are a
+	 * claim - see flow_opt_cap for the numbers. */
+	if (sub == 14u && arg && (have & 6u) == 6u &&
+	    (arg[1] & 0xffffffffu) == FLOW_IPPROTO_IP &&
+	    (arg[2] & 0xffffffffu) == FLOW_IP_HDRINCL)
+		return KOF_NUCLEO_NET_HDRINCL;
+	return cap;
+}
+
 uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 				const uint64_t *arg, uint8_t *flags)
 {
@@ -1024,6 +1113,16 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 						    : KOF_NUCLEO_SPAWN;
 	if (arg && cap == KOF_NUCLEO_NET_OPEN && bits != 32 && nr == 41u)
 		return sock_kind(arg, flags);
+	/*
+	 * fcntl AND setsockopt ARE NOT WORDS HERE, only the two things they can
+	 * say that a rule is entitled to build on - and only when the arguments
+	 * that say it were read. A call whose cmd or level was not followed is
+	 * not a node at all, which is the honest state: a node reading as
+	 * "something with a descriptor" would be matched by nothing and mean
+	 * nothing.
+	 */
+	if (arg && cap == KOF_NUCLEO_NONE)
+		return flow_opt_cap(bits, nr, arg);
 	if (cap == KOF_NUCLEO_ALLOC && arg) {
 		int is_map = bits == 32 ? (nr == 90u || nr == 125u || nr == 192u)
 					: (nr == 9u || nr == 10u);
@@ -1363,6 +1462,8 @@ const char *kof_flow_cap_name(uint16_t cap)
 	case KOF_NUCLEO_PROC_LIST:    return "proc-enum";
 	case KOF_NUCLEO_NET_READ:     return "net-recv";
 	case KOF_NUCLEO_NET_WRITE:    return "net-send";
+	case KOF_NUCLEO_FD_NONBLOCK:  return "fd-nonblock";
+	case KOF_NUCLEO_NET_HDRINCL:  return "net-hdrincl";
 	case KOF_NUCLEO_HTTP_OPEN:    return "http-open";
 	case KOF_NUCLEO_HTTP_CONNECT: return "http-connect";
 	case KOF_NUCLEO_HTTP_SEND:    return "http-send";

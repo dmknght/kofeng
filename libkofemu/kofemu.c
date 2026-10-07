@@ -37,6 +37,7 @@
 #include <math.h>
 #include <time.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "kofemu.h"
 #include "bddisasm.h"
@@ -48,6 +49,25 @@
 /* How many unresolved imports a run may call before the answers stop being
  * plausible - see the null page check in the loop. */
 #define EMU_NULL_CALLS 256u
+
+/* Instructions a candidate handover must go unchallenged - see oep_cand. */
+#define OEP_QUIET (1ull << 20)
+
+/*
+ * HOW LARGE WHAT A CANDIDATE ENTERS HAS TO BE, in pages the guest wrote around
+ * the target. Measured: every UPX / ASPack-class candidate on the corpus enters
+ * 24 pages or more (24, 29, 62, 82, 171, 175, 202, 329, 496, 654, 660), and a
+ * Themida loader makes over a hundred candidate transfers into runs of 1, 3
+ * and 7 pages - its own stages - before the one that matters. Without this a
+ * quiet window of a million instructions inside the loader read as "the
+ * program" and stopped the run at 1.3 million instead of 22.6 million. The
+ * cost is an image smaller than 64 KB, which is not recognised this way.
+ */
+#define OEP_MIN_PAGES 16u
+
+/* Stores to new lines that may each postpone the stall verdict - see mem_wr.
+ * A bound on COST, not on evidence: past it the stall test is the old one. */
+#define IDLE_CREDIT_MAX (1u << 20)
 
 /* How many exceptions a run may raise with nothing to catch them before it is
  * no longer unpacking - see WIN_RaiseException. */
@@ -370,6 +390,8 @@ struct kof_emu {
 	uint64_t sp0;              /* RSP as the run started - see the OEP test */
 	int      sp0_set;
 	int      oep_watch;        /* the handover test above is armed */
+	int      oep_cand;         /* a transfer from file code into written code, waiting out OEP_QUIET */
+	uint64_t oep_cand_insn, oep_cand_rip;
 	int      img_dumped;
 	uint64_t stack_lo, stack_hi;
 	struct { uint64_t lo, hi; uint8_t seen; } hop[KOF_EMU_EXEC_WATCH];
@@ -377,6 +399,9 @@ struct kof_emu {
 	uint64_t hop_first_insn, hop_first_rip;
 	uint64_t fetch_page;   /* never a page base until one is set */
 	uint32_t null_calls;   /* imports this environment did not have */
+	uint32_t win_miss;     /* names answered with a miss thunk - see kof_emu_win_resolve */
+	char     win_fake[16][32]; /* libraries handed a handle with no image - see win_fake_lib */
+	uint32_t n_win_fake;
 	uint64_t cmdline[2];   /* [0] ANSI, [1] UTF-16; 0 until asked for */
 	uint64_t hop_last_rip;
 	uint32_t hop_count;
@@ -495,6 +520,8 @@ struct kof_emu {
 	/* When a page was last written to for the first time - the clock the
 	 * idle test below runs on. */
 	uint64_t last_new_page;
+	uint64_t last_wr_line;     /* the cache line of the last store that earned an idle credit */
+	uint32_t idle_credit;      /* credits earned since the last new page - see mem_wr */
 
 	/*
 	 * ---- IS THE GUEST DECRYPTING RIGHT NOW --------------------------
@@ -565,7 +592,7 @@ struct kof_emu {
 	uint64_t watch_rip[KOF_EMU_WATCH_MAX], watch_val[KOF_EMU_WATCH_MAX];
 	unsigned watch_n;
 	enum kof_emu_stop stop;
-	char     detail[48];
+	char     detail[96];
 
 	/* Sorted page list, built on demand by kof_emu_next_written, and the
 	 * one run handed out at a time - freed when the next is asked for, so a
@@ -962,8 +989,40 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 		/* The first write to a page is the unit of progress: see
 		 * KOF_EMU_IDLE. Recorded here, where it happens, so nothing
 		 * else has to remember to. */
-		if (!p->written)
+		if (!p->written) {
 			e->last_new_page = e->insn;
+			e->idle_credit = 0;
+		} else if (e->running && e->idle_credit < IDLE_CREDIT_MAX) {
+			/*
+			 * A STORE TO A NEW CACHE LINE OF A PAGE ALREADY WRITTEN
+			 * IS PROGRESS TOO, within a credit.
+			 *
+			 * "No new page for KOF_EMU_IDLE instructions" cut a
+			 * stub that was still working: the call-operand
+			 * unfilter that ends a UPX 5 x64 stub sweeps 2.6 MB of
+			 * the decompressed code, reading all of it and
+			 * patching a few bytes per call site - all on pages
+			 * the decompressor had already written. Measured on
+			 * four such samples: stalled at 18-25 million
+			 * instructions with the jump to the entry point still
+			 * to come.
+			 *
+			 * A spin loop touches one line and so earns one credit,
+			 * the stack is not counted, and credits are bounded and
+			 * restored only by a genuinely new page, so a guest
+			 * that sweeps a buffer for ever is still stopped - by
+			 * the credit and then by the same ceiling as before.
+			 */
+			uint64_t sp = e->gpr[KOF_EMU_RSP];
+			uint64_t dsp = va > sp ? va - sp : sp - va;
+			uint64_t line = va >> 6;
+
+			if (dsp > (64u << 10) && line != e->last_wr_line) {
+				e->last_wr_line = line;
+				e->idle_credit++;
+				e->last_new_page = e->insn;
+			}
+		}
 		p->written = 1;
 		/* Only while the guest is the one running - see `gwritten`. */
 		if (e->running)
@@ -1676,6 +1735,33 @@ static void snap_take(struct kof_emu *e, uint64_t va, uint64_t len)
 	s->len = n;
 	e->snap_bytes += n;
 	e->n_snap++;
+}
+
+/*
+ * HOW MUCH OF THE GUEST'S OWN WRITING SURROUNDS AN ADDRESS, in pages.
+ *
+ * Contiguous pages the guest wrote, counted both ways from `va` and bounded
+ * by `cap` so a guest that wrote everything costs `cap` lookups, once per
+ * candidate transfer. It is the "large and coherent" half of the question
+ * "is this the program": a decompressed image is one unbroken run, a stage
+ * of a loader's own bookkeeping is a page or two.
+ */
+static unsigned written_run_pages(struct kof_emu *e, uint64_t va, unsigned cap)
+{
+	uint64_t lo = va & ~(uint64_t)(KOF_EMU_PAGE - 1u), hi = lo + KOF_EMU_PAGE;
+	unsigned run = 1;
+	struct page *q;
+
+	while (run < cap && lo >= KOF_EMU_PAGE &&
+	       (q = page_lookup(e, lo - KOF_EMU_PAGE)) && q->gwritten) {
+		lo -= KOF_EMU_PAGE;
+		run++;
+	}
+	while (run < cap && (q = page_lookup(e, hi)) && q->gwritten) {
+		hi += KOF_EMU_PAGE;
+		run++;
+	}
+	return run;
 }
 
 void kof_emu_snap_written(struct kof_emu *e)
@@ -3502,6 +3588,108 @@ uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name)
 	return 0;
 }
 
+/*
+ * AN EXPORT THIS ENVIRONMENT LACKS IS NOT AN EXPORT THAT DOES NOT EXIST.
+ *
+ * The libraries here carry eighty-odd of kernel32's fifteen hundred names, so
+ * GetProcAddress answering 0 for the rest tells the guest that DeleteFileW is
+ * missing from Windows - and a stub that checks its result takes its failure
+ * path. Measured on the PE corpus with a static reference to score against:
+ * UPX's import resolver aborts through ExitProcess at the first name outside
+ * the table, ahead of the jump to the original entry point, so the run never
+ * reaches the one transition an unpacker is waiting for.
+ *
+ * The answer for a plausible name the table lacks is therefore an address in
+ * the unmapped null page, which the call0 policy in the interpreter already
+ * turns into "return 0 and carry on" when somebody does call it. The resolver
+ * stores it and moves on, which is all a resolver does with it.
+ *
+ * A plausible name only: identifier characters, 3 to 64 of them. A guest
+ * probing with a name no library has will still be told so by the name check
+ * failing here, but a garbage name made of identifier characters cannot be
+ * told from a real one, so a stub whose anti-emulation test is exactly
+ * "resolve a nonsense name and expect 0" is not defeated by this - it is
+ * fooled, and that is a cost of the policy, stated rather than hidden.
+ */
+/* 16 bytes apart so two misses are two addresses, and inside the first page
+ * so the null-call policy owns them. */
+static uint64_t win_miss_thunk(struct kof_emu *e)
+{
+	return 0x10u + 0x10u * (e->win_miss++ % 0xfeu);
+}
+
+uint64_t kof_emu_win_resolve(struct kof_emu *e, const char *name)
+{
+	uint64_t a = kof_emu_win_addr_of(e, name);
+	size_t i, n = strlen(name);
+
+	if (a)
+		return a;
+	if (n < 3u || n > 64u || !(isalpha((unsigned char)name[0]) || name[0] == '_'))
+		return 0;
+	for (i = 0; i < n; i++)
+		if (!isalnum((unsigned char)name[i]) && name[i] != '_' &&
+		    name[i] != '@' && name[i] != '?' && name[i] != '$')
+			return 0;
+	return win_miss_thunk(e);
+}
+
+#define WIN_FAKE_BASE 0x7b000000ull
+#define WIN_FAKE_STEP 0x10000ull
+
+/*
+ * A LIBRARY WE HAVE NO IMAGE FOR STILL EXISTS ON A REAL MACHINE.
+ *
+ * This used to fail the load, on the argument that a handle with nothing
+ * behind it invites a guest to resolve a name against nothing and call what
+ * comes back. kof_emu_win_resolve answers that: what comes back is a miss
+ * thunk, and calling one returns 0. What failing the load did instead was end
+ * the run - UPX's resolver, after the first library outside the table
+ * (comctl32), stops there and calls ExitProcess before the jump to the
+ * original entry point.
+ *
+ * NOT FOR A LIBRARY WHOSE ABSENCE IS THE POINT. An analysis environment is
+ * recognised by what it has loaded, and a stub that asks for one of those
+ * expects a failure; those names still fail.
+ */
+static uint64_t win_fake_lib(struct kof_emu *e, const char *name)
+{
+	static const char *const deny[] = {
+		"sbiedll", "snxhk", "cmdvrt", "api_log", "dir_watch", "pstorec",
+		"vmcheck", "wpespy", "dbghelp_wine", "vboxhook", "vboxmrxnp"
+	};
+	size_t i, n = strlen(name);
+	char low[32];
+
+	if (n < 3u || n >= sizeof low)
+		return 0;
+	for (i = 0; i < n; i++) {
+		unsigned char c = (unsigned char)name[i];
+
+		if (!isalnum(c) && c != '_' && c != '.' && c != '-')
+			return 0;
+		low[i] = (char)tolower(c);
+	}
+	low[n] = 0;
+	for (i = 0; i < sizeof deny / sizeof deny[0]; i++)
+		if (strstr(low, deny[i]))
+			return 0;
+	for (i = 0; i < e->n_win_fake; i++)
+		if (!strcmp(e->win_fake[i], low))
+			return WIN_FAKE_BASE + (uint64_t)i * WIN_FAKE_STEP;
+	if (e->n_win_fake >= 16u)
+		return 0;
+	memcpy(e->win_fake[e->n_win_fake], low, n + 1u);
+	return WIN_FAKE_BASE + (uint64_t)e->n_win_fake++ * WIN_FAKE_STEP;
+}
+
+static int win_is_fake(const struct kof_emu *e, uint64_t h)
+{
+	return h >= WIN_FAKE_BASE &&
+	       h < WIN_FAKE_BASE + (uint64_t)e->n_win_fake * WIN_FAKE_STEP &&
+	       !((h - WIN_FAKE_BASE) % WIN_FAKE_STEP);
+}
+
 /* A module handle by name, which is what GetModuleHandle and LoadLibrary both
  * come down to. */
 static uint64_t win_mod_of(struct kof_emu *e, const char *name)
@@ -4380,14 +4568,9 @@ static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 		{
 			uint64_t h = win_mod_of(e, name);
 
+			if (!h)
+				h = win_fake_lib(e, name);
 			win_trace(e, "LoadLibrary", name, h);
-			/*
-			 * A library this has no image for fails rather than
-			 * returning a plausible handle. A handle that cannot
-			 * be backed with an export directory is worse than
-			 * none: the guest would take it, resolve a name
-			 * against nothing, and call whatever came back.
-			 */
 			return h;
 		}
 	}
@@ -4401,6 +4584,20 @@ static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 			for (mi = 0; mi < KOF_EMU_WIN_MOD_COUNT; mi++)
 				if (h && h == e->win_mod_base[mi])
 					known = 1;
+			if (!known && win_is_fake(e, h)) {
+				uint64_t a;
+
+				if (p >= 0x10000u) {
+					win_str(e, p, name, sizeof name, 0);
+					a = kof_emu_win_resolve(e, name);
+				} else {
+					/* An ordinal into a library with no image:
+					 * there is no table to look it up in. */
+					a = win_miss_thunk(e);
+				}
+				win_trace(e, "GetProcAddress", p >= 0x10000u ? name : "(by ordinal)", a);
+				return a;
+			}
 			if (!known) {
 				/* A handle this environment did not hand out.
 				 * Silent until now, and a zero from here is
@@ -4417,7 +4614,7 @@ static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 		}
 		win_str(e, p, name, sizeof name, 0);
 		{
-			uint64_t a = kof_emu_win_addr_of(e, name);
+			uint64_t a = kof_emu_win_resolve(e, name);
 
 			win_trace(e, "GetProcAddress", name, a);
 			return a;
@@ -8522,6 +8719,25 @@ decoded:
 			 * a packer ends with. Without this the balanced-stack
 			 * test alone fires on ordinary returns inside the stub.
 			 */
+			/*
+			 * THE CANDIDATE HELD. Nothing has been handed over by
+			 * a later transfer for OEP_QUIET instructions, so the
+			 * code the candidate entered is not a stage of a loader
+			 * - a stage is followed by the next stage - and it is
+			 * the program.
+			 */
+			if (e->oep_cand &&
+			    e->insn - e->oep_cand_insn > OEP_QUIET) {
+				snprintf(e->detail, sizeof e->detail,
+					 "handover to %#llx, unchallenged for "
+					 "%llu instructions",
+					 (unsigned long long)e->oep_cand_rip,
+					 (unsigned long long)(e->insn -
+							      e->oep_cand_insn));
+				e->stop = KOF_EMU_STOP_HANDOFF;
+				goto done;
+			}
+
 			if (e->oep_watch && e->sp0_set &&
 			    e->gpr[KOF_EMU_RSP] == e->sp0 &&
 			    e->img_hi > e->img_lo &&
@@ -8568,15 +8784,51 @@ decoded:
 				 * required, and it is still enough to drop the
 				 * intra-loader case above.
 				 */
+				/*
+				 * A CANDIDATE, NOT A VERDICT: the transfer leaves
+				 * code the FILE supplied for code the RUN produced.
+				 * The source page was never written by the guest, so
+				 * it is the stub as shipped; the target page was.
+				 * With no direction in it this is what a UPX stub
+				 * does - it sits in the last section and jumps BACK
+				 * to the entry point, which the direction test below
+				 * reads as a loader moving within itself - and it is
+				 * also what a protector does between its stages. The
+				 * two differ in what comes next, so this arms a
+				 * timer rather than stopping: see oep_cand.
+				 *
+				 * NOT INTO THE STUB'S OWN SECTION: a stub that
+				 * expands inside the section it runs from, or
+				 * relocates a piece of itself there, is code moving
+				 * within the loader.
+				 */
+				struct page *sp = page_find(e, at);
+				int from_file = sp && !sp->gwritten &&
+						!(e->stub_hi &&
+						  e->rip >= e->stub_lo &&
+						  e->rip < e->stub_hi);
+
 				if (tail && t && t->gwritten &&
 				    (at < e->rip ||
 				     at < e->img_lo || at >= e->img_hi)) {
 					snprintf(e->detail, sizeof e->detail,
 						 "handover to %#llx, stack "
-						 "balanced", 
-						 (unsigned long long)e->rip);
+						 "balanced, %u pages written",
+						 (unsigned long long)e->rip,
+						 written_run_pages(e, e->rip, 65536u));
 					e->stop = KOF_EMU_STOP_HANDOFF;
 					goto done;
+				}
+				if (tail && t && t->gwritten && from_file &&
+				    written_run_pages(e, e->rip, OEP_MIN_PAGES) >=
+					    OEP_MIN_PAGES) {
+					e->oep_cand_insn = e->insn;
+					e->oep_cand_rip = e->rip;
+					e->oep_cand = 1;
+					KOF_TRACE("[oep] candidate insn=%llu to=%#llx pages=%u\n",
+						  (unsigned long long)e->insn,
+						  (unsigned long long)e->rip,
+						  written_run_pages(e, e->rip, 65536u));
 				}
 			}
 		}

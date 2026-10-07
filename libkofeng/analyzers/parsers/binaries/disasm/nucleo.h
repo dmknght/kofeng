@@ -192,6 +192,16 @@ const struct fxabi *kof_fx_abi_of(unsigned arch);
  * branch in flow.c.
  */
 int kof_sys_zero_on_success(const char *name);
+/* Whether argument `idx` is a flag set for which "this bit is set" is enough
+ * to refine the call - see the note at its definition. */
+int kof_flow_arg_is_flags(unsigned bits, uint32_t nr, unsigned idx);
+/* Whether a socket call asks for SOCK_NONBLOCK in its type - see the definition. */
+int kof_flow_sock_nonblock(unsigned bits, uint32_t nr, const uint64_t *arg,
+			   unsigned have);
+int kof_flow_sockcall_nonblock(uint32_t sub, const uint64_t *arg, unsigned have);
+/* One operation of i386's socketcall, from the arguments found in its array. */
+uint16_t kof_flow_cap_of_sockcall(uint32_t sub, const uint64_t *arg,
+				  unsigned have, uint8_t *flags);
 
 /*
  * How many arguments the call takes, or 0 when it is not written down. The

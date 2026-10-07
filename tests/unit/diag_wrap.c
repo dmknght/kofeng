@@ -68,6 +68,36 @@ static uint64_t elf32(uint8_t *b, uint64_t cap, const uint8_t *code, uint64_t n)
 	return 0x54u + n;
 }
 
+static void put64(uint8_t *b, unsigned at, uint64_t v)
+{
+	unsigned i;
+
+	for (i = 0; i < 8u; i++)
+		b[at + i] = (uint8_t)(v >> (8u * i));
+}
+
+/* An x86-64 ELF with one RWX PT_LOAD from offset zero, entry at +0x78. */
+static uint64_t elf64(uint8_t *b, uint64_t cap, const uint8_t *code, uint64_t n)
+{
+	memset(b, 0, (size_t)cap);
+	memcpy(b, "\177ELF\2\1\1", 7);
+	put16(b, 16, 2);
+	put16(b, 18, 0x3e);
+	put32(b, 20, 1);
+	put64(b, 24, 0x400078u);
+	put64(b, 32, 64);
+	put16(b, 52, 64);
+	put16(b, 54, 56);
+	put16(b, 56, 1);
+	put32(b, 64, 1);
+	put32(b, 68, 7);
+	put64(b, 80, 0x400000u);
+	put64(b, 96, 0x78u + n);
+	put64(b, 104, 0x78u + n);
+	memcpy(b + 0x78, code, (size_t)n);
+	return 0x78u + n;
+}
+
 static unsigned char view[1u << 21];
 
 static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
@@ -219,7 +249,288 @@ int main(void)
 		kof_diag_scan_free(s);
 	}
 
-	printf("diag wrap: the caller's constant, a call with none, the unknown site%s\n",
+	/*
+	 * 4. A STUB THAT ONLY JUMPS. musl keeps one generic syscall function and
+	 *    gives each cancellable wrapper a stub, `jmp generic`, so the function
+	 *    that holds the syscall is reached by a jump and never by a call, and
+	 *    the jump goes BACKWARD. Without the stub being read as a way in, the
+	 *    syscall belonged to no function and every send of an x86-64 bot was
+	 *    lost. The node must sit on the call that pushed 3.
+	 */
+	{
+		int found = 0, bad = 0;
+
+		memset(code, 0x90, sizeof code);
+		memcpy(code, wrapper, sizeof wrapper);              /* 0..28 */
+		code[29] = 0xe9;                                    /* jmp wrapper */
+		put32(code, 30, (uint32_t)(0u - 34u));
+		code[34] = 0x6a; code[35] = 0x03;                   /* push 3 */
+		callrel(code, 36, 29);                              /* call the stub */
+		code[41] = 0x83; code[42] = 0xc4; code[43] = 0x04;
+		code[44] = 0xc3;
+		n = elf32(b, sizeof b, code, 45);
+		s = scan(b, n, &ctx, "jump stub");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 36u;
+			bad += h->at != 0x54u + 36u && h->cap == KOF_NUCLEO_NET_CONNECT;
+		}
+		CK(found == 1);
+		CK(bad == 0);
+		kof_diag_scan_free(s);
+	}
+
+	/*
+	 * 5. A PARAMETER READ THROUGH A POINTER INTO THE FRAME, the way a variadic
+	 *    function fetches its third argument: lea eax,[esp]; add eax,4;
+	 *    mov ebx,[eax]. A register that holds a stack address names a slot like
+	 *    esp does; if it does not, the sub-call is unknown and the site stays
+	 *    opaque.
+	 */
+	{
+		static const uint8_t viaptr[] = {
+			0x8d, 0x04, 0x24,             /* lea eax,[esp]      */
+			0x83, 0xc0, 0x04,             /* add eax,4          */
+			0x8b, 0x18,                   /* mov ebx,[eax]      */
+			0xb8, 0x66, 0x00, 0x00, 0x00, /* mov eax,0x66       */
+			0xcd, 0x80,                   /* int 0x80           */
+			0xc3
+		};
+		int found = 0;
+
+		memset(code, 0x90, sizeof code);
+		code[0] = 0x6a; code[1] = 0x03;                     /* push 3 */
+		callrel(code, 2, 16);
+		code[7] = 0x83; code[8] = 0xc4; code[9] = 0x04;
+		code[10] = 0xc3;
+		memcpy(code + 16, viaptr, sizeof viaptr);
+		n = elf32(b, sizeof b, code, 16u + sizeof viaptr);
+		s = scan(b, n, &ctx, "parameter through a stack pointer");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 2u;
+		}
+		CK(found == 1);
+		kof_diag_scan_free(s);
+	}
+
+	/*
+	 * 6. A CALL TO SOMETHING THAT IS NOT A WRAPPER IN THE MIDDLE OF ONE:
+	 *    uClibc's fcntl brackets its real call with pthread_setcancelstate.
+	 *    That call clobbers the scratch registers and leaves the frame alone, so
+	 *    the walk goes on past it.
+	 */
+	{
+		static const uint8_t bracketed[] = {
+			0x53,                         /* push ebx            */
+			0xe8, 0x0f, 0x00, 0x00, 0x00, /* call helper (+15)   */
+			0x8b, 0x5c, 0x24, 0x08,       /* mov ebx,[esp+8]     */
+			0xb8, 0x66, 0x00, 0x00, 0x00, /* mov eax,0x66        */
+			0xcd, 0x80,                   /* int 0x80            */
+			0x5b,                         /* pop ebx             */
+			0xc3,                         /* ret                 */
+			0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+			0xc3                          /* helper: ret         */
+		};
+		int found = 0;
+
+		memset(code, 0x90, sizeof code);
+		code[0] = 0x6a; code[1] = 0x03;
+		callrel(code, 2, 16);
+		code[7] = 0x83; code[8] = 0xc4; code[9] = 0x04;
+		code[10] = 0xc3;
+		memcpy(code + 16, bracketed, sizeof bracketed);
+		n = elf32(b, sizeof b, code, 16u + sizeof bracketed);
+		s = scan(b, n, &ctx, "bracketed by another call");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 2u;
+		}
+		CK(found == 1);
+		kof_diag_scan_free(s);
+	}
+
+	/*
+	 * 7. THE NUMBER AND THE ARGUMENT IN REGISTERS. An i386 libc is free to pass
+	 *    what it likes to its own helper; musl's takes the number in eax and
+	 *    the first argument in edx. The wrapper moves edx to ebx and enters the
+	 *    kernel, and the call that loads 0x66 and 3 must get the connect node.
+	 */
+	{
+		static const uint8_t regs[] = {
+			0x89, 0xd3,                   /* mov ebx,edx        */
+			0xcd, 0x80,                   /* int 0x80           */
+			0xc3
+		};
+		int found = 0;
+
+		/* The helper comes FIRST, so the linear walk meets it with nothing
+		 * left in eax by a caller above it - which is how a real libc lays
+		 * out a helper that sits before the code that uses it. */
+		memset(code, 0x90, sizeof code);
+		memcpy(code, regs, sizeof regs);
+		code[8] = 0xb8; put32(code, 9, 0x66);               /* mov eax,0x66 */
+		code[13] = 0xba; put32(code, 14, 3);                /* mov edx,3    */
+		callrel(code, 18, 0);
+		code[23] = 0xc3;
+		n = elf32(b, sizeof b, code, 24);
+		s = scan(b, n, &ctx, "arguments in registers");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 18u;
+		}
+		CK(found == 1);
+		kof_diag_scan_free(s);
+	}
+
+	/*
+	 * 8. TWO PATHS THAT DO DIFFERENT THINGS TO THE STACK. musl's i386 syscall
+	 *    helper branches on whether a fast entry exists: one path pushes and
+	 *    returns, the other loads its parameters and enters the kernel. The
+	 *    path that enters has to be evaluated with the stack as it was at the
+	 *    branch, not as the other path left it; evaluated on the table's own
+	 *    entry, the number came out unknown and 31 x86 files lost every
+	 *    socket node.
+	 */
+	{
+		static const uint8_t twopath[] = {
+			0x85, 0xc0,                   /* test eax,eax        */
+			0x74, 0x02,                   /* je +2               */
+			0x50,                         /* push eax            */
+			0xc3,                         /* ret                 */
+			0x8b, 0x44, 0x24, 0x04,       /* mov eax,[esp+4]     */
+			0x8b, 0x5c, 0x24, 0x08,       /* mov ebx,[esp+8]     */
+			0xcd, 0x80,                   /* int 0x80            */
+			0xc3
+		};
+		int found = 0;
+
+		memset(code, 0x90, sizeof code);
+		memcpy(code, twopath, sizeof twopath);              /* 0..16 */
+		code[20] = 0x6a; code[21] = 0x03;                   /* push 3    */
+		code[22] = 0x6a; code[23] = 0x66;                   /* push 0x66 */
+		callrel(code, 24, 0);
+		code[29] = 0x83; code[30] = 0xc4; code[31] = 0x08;
+		code[32] = 0xc3;
+		n = elf32(b, sizeof b, code, 33);
+		s = scan(b, n, &ctx, "two paths");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 24u;
+		}
+		CK(found == 1);
+		kof_diag_scan_free(s);
+	}
+
+	/*
+	 * 9. A HELPER THAT HANDS BACK WHAT IT MADE. Mirai opens its raw sockets in
+	 *    a helper and sends on the result somewhere else, so the descriptor a
+	 *    send names was produced in another function. The read after the call
+	 *    has to be linked to the open INSIDE the helper; a helper with no
+	 *    parameters is not a wrapper, so nothing else carries the descriptor out.
+	 */
+	{
+		static const uint8_t gen[] = {
+			0x8b, 0x44, 0x24, 0x04,       /* mov eax,[esp+4]    */
+			0x8b, 0x5c, 0x24, 0x08,       /* mov ebx,[esp+8]    */
+			0xcd, 0x80,                   /* int 0x80           */
+			0xc3
+		};
+		const struct kof_diag_hit *rd = NULL;
+		int opened = -1;
+
+		memset(code, 0x90, sizeof code);
+		memcpy(code, gen, sizeof gen);                      /* W at 0      */
+		code[12] = 0x6a; code[13] = 0x00;                   /* F: push 0   */
+		code[14] = 0x6a; code[15] = 0x05;                   /*    push 5   */
+		callrel(code, 16, 0);                               /*    call W   */
+		code[21] = 0x83; code[22] = 0xc4; code[23] = 0x08;
+		code[24] = 0xc3;
+		callrel(code, 32, 12);                              /* C: call F   */
+		code[37] = 0x50;                                    /*    push eax */
+		code[38] = 0x6a; code[39] = 0x03;                   /*    push 3   */
+		callrel(code, 40, 0);                               /*    call W   */
+		code[45] = 0x83; code[46] = 0xc4; code[47] = 0x08;
+		code[48] = 0xc3;
+		n = elf32(b, sizeof b, code, 49);
+		s = scan(b, n, &ctx, "returned descriptor");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			if (h->cap == KOF_NUCLEO_FILE_OPEN && h->at == 0x54u + 16u &&
+			    !(h->bits & KOF_DIAG_H_SUPERSEDED))
+				opened = (int)i;
+			if (h->cap == KOF_NUCLEO_MEM_READ && h->at == 0x54u + 40u)
+				rd = h;
+		}
+		CK(opened >= 0);
+		CK(rd != NULL);
+		{
+			int linked = 0;
+			unsigned k;
+
+			for (k = 0; rd && k < rd->n_in; k++)
+				linked += opened >= 0 && rd->in[k].from == (uint16_t)opened;
+			CK(linked >= 1);
+		}
+		kof_diag_scan_free(s);
+	}
+
+	/*
+	 * 10. A SOCKET MADE NON-BLOCKING BY ITS TYPE. socket(AF_INET,
+	 *     SOCK_STREAM|SOCK_NONBLOCK, 0) is the same statement as an fcntl
+	 *     afterwards, and a program that writes it this way has no fcntl for
+	 *     anything to see. The call makes the open and a second node, linked.
+	 *     The same call without the flag makes only the open.
+	 */
+	{
+		static const uint8_t with[] = {
+			0xbf, 0x02, 0x00, 0x00, 0x00, /* mov edi,2             */
+			0xbe, 0x01, 0x08, 0x00, 0x00, /* mov esi,0x801         */
+			0x31, 0xd2,                   /* xor edx,edx           */
+			0xb8, 0x29, 0x00, 0x00, 0x00, /* mov eax,41 (socket)   */
+			0x0f, 0x05                    /* syscall               */
+		};
+		uint8_t without[sizeof with];
+		int nb = 0, open = -1, linked = 0;
+
+		n = elf64(b, sizeof b, with, sizeof with);
+		s = scan(b, n, &ctx, "socket with SOCK_NONBLOCK");
+		for (i = 0; s && i < count(s); i++) {
+			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+
+			if (h->cap == KOF_NUCLEO_NET_OPEN)
+				open = (int)i;
+			if (h->cap == KOF_NUCLEO_FD_NONBLOCK) {
+				unsigned k;
+
+				nb++;
+				for (k = 0; k < h->n_in; k++)
+					linked += open >= 0 && h->in[k].from == (uint16_t)open;
+			}
+		}
+		CK(open >= 0);
+		CK(nb == 1);
+		CK(linked == 1);
+		kof_diag_scan_free(s);
+
+		memcpy(without, with, sizeof with);
+		without[7] = 0x00;                      /* type 1: no flag */
+		n = elf64(b, sizeof b, without, sizeof without);
+		s = scan(b, n, &ctx, "socket without it");
+		nb = 0;
+		for (i = 0; s && i < count(s); i++)
+			nb += kof_diag_scan_at(s, i)->cap == KOF_NUCLEO_FD_NONBLOCK;
+		CK(nb == 0);
+		kof_diag_scan_free(s);
+	}
+
+	printf("diag wrap: the caller's constant, a call with none, the unknown site, a jump stub, a stack pointer, a bracketing call, register parameters, two paths, a returned descriptor, a non-blocking socket type%s\n",
 	       fails ? " - FAILED" : " - ok");
 	return fails != 0;
 }

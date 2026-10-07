@@ -226,6 +226,8 @@ static enum force_kind cap_force_kind(uint16_t cap)
 	case KOF_NUCLEO_NET_BIND:
 	case KOF_NUCLEO_NET_LISTEN:
 	case KOF_NUCLEO_FD_REDIR:
+	case KOF_NUCLEO_FD_NONBLOCK:
+	case KOF_NUCLEO_NET_HDRINCL:
 	/*
 	 * AND THE KERNEL COPIES, WHOSE SUCCESS VALUE IS ZERO AND NOT A COUNT.
 	 * copy_from_user and copy_to_user return the number of bytes they

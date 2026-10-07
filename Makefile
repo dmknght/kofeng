@@ -997,6 +997,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/detectors/pathogen/diag_emu.c \
            libkofeng/detectors/pathogen/diag_sym.c \
            libkofeng/detectors/pathogen/diag_pe.c \
+           libkofeng/detectors/pathogen/diag_wrap.c \
            libkofeng/detectors/pathogen/diag_apihash.c \
            libkofeng/disinfect/pzero.c \
            libkofeng/kofcore/kofhash.c \

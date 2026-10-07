@@ -141,7 +141,10 @@ enum { KOF_CA_NET_OPEN = 1, KOF_CA_NET_OPEN_RAW, KOF_CA_NET_CONNECT, KOF_CA_NET_
 	* KOF_NUCLEO_HTTP_SEND. Appended, because renumbering breaks every rule
 	* that named one of the words before it. */
        KOF_CA_NET_HTTP_OPEN, KOF_CA_NET_HTTP_CONNECT, KOF_CA_NET_HTTP_SEND,
-       KOF_CA_NET_HTTP_RECV, KOF_CA_NET_HTTP_FETCH };
+       KOF_CA_NET_HTTP_RECV, KOF_CA_NET_HTTP_FETCH,
+       /* The sender builds its own IP header - setsockopt(IP_HDRINCL). Appended
+	* with the rest: renumbering breaks every rule that named a word. */
+       KOF_CA_NET_HDRINCL };
 enum { KOF_CA_PIPE_CREATE = 1, KOF_CA_PIPE_NAMED_CREATE };
 enum { KOF_CA_PROC_START = 1, KOF_CA_PROC_FORK, KOF_CA_PROC_BACKGROUND, KOF_CA_PROC_ENUM, KOF_CA_PROC_OPEN, KOF_CA_PROC_MEM_ACCESS, KOF_CA_PROC_CONTROL, KOF_CA_PROC_THREAD_CREATE, KOF_CA_PROC_FD_REDIRECT, KOF_CA_PROC_SELF_NAME };
 enum { KOF_CA_LIB_LOAD = 1, KOF_CA_LIB_API_RESOLVE, KOF_CA_LIB_NAME_HASH, KOF_CA_LIB_PEB_WALK, KOF_CA_LIB_CALL_REGISTER };
@@ -216,6 +219,25 @@ enum kof_flow_cap {
 	/* Through a descriptor, source unknown - see KOF_CG_IO. */
 	KOF_NUCLEO_MEM_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_IO, 1u),
 	KOF_NUCLEO_MEM_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_IO, 2u),
+	/*
+	 * THE DESCRIPTOR WILL NOT BLOCK - fcntl(fd, F_SETFL, flags | O_NONBLOCK).
+	 *
+	 * A refinement by argument, the way ALLOC_EXEC refines ALLOC: fcntl is
+	 * not a word of its own here, only the one thing it can say that matters
+	 * is. A program that connects a socket it has made non-blocking is one
+	 * that goes on to do something else while the connection completes - a
+	 * select loop, a scanner with thousands of sockets, a bot polling for
+	 * its master. Alone it is every event loop; as a step between a socket
+	 * and its connect it is how Mirai dials out.
+	 */
+	KOF_NUCLEO_FD_NONBLOCK = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_IO, 3u),
+	/*
+	 * THE SENDER BUILDS ITS OWN IP HEADER - setsockopt(fd, IPPROTO_IP,
+	 * IP_HDRINCL, 1). On a raw socket this is what turns "send a protocol" into
+	 * "send any packet": the program writes the version, the length, the
+	 * source address. A refinement by argument like FD_NONBLOCK above.
+	 */
+	KOF_NUCLEO_NET_HDRINCL = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_NET, KOF_CA_NET_HDRINCL),
 	KOF_NUCLEO_FILE_OPEN = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_FILE, KOF_CA_FILE_OPEN),
 	KOF_NUCLEO_MEMFD = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM, KOF_CA_MEM_MEMFD_CREATE),        /* a file that never touches a filesystem */
 	/*
