@@ -3,7 +3,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * trojan_meterp_08.c - a stager, read off the graph instead of off bytes.
+ * trojan_meterp_00.c - a stager, read off the graph instead of off bytes.
  *
 
  * THE EVIDENCE IT USES CANNOT BE EDITED AWAY. shikata_ga_nai builds a
@@ -12,7 +12,7 @@
  * once decoded is not.
  *
  * IT REPLACED TWO BYTE PATTERNS, and that is the point of it rather than a
- * side effect: trojan_meterp_00 and _02 matched the x64 and x86 stagers by
+ * side effect: the first two byte-pattern rules matched the x64 and x86 stagers by
  * their bytes, which is the one thing a per-build encoder changes.
  *
  * IT READS THE GRAPH AND NAMES NO OTHER RULE. The engine answers what the
