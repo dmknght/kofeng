@@ -1127,7 +1127,9 @@ static const struct diag_scenario diag_scenarios[] = {
 	{ KOF_T_DIAG_SYMBOL,  KOF_DIAG_RUN_SYMBOL,  "symbol",
 	  kof_diag_run_symbol },
 	{ KOF_T_DIAG_EMULATE, KOF_DIAG_RUN_EMULATE, "emulate",
-	  kof_diag_run_emulate }
+	  kof_diag_run_emulate },
+	{ KOF_T_DIAG_APIHASH, KOF_DIAG_RUN_APIHASH, "apihash",
+	  kof_diag_run_apihash }
 };
 
 /*
@@ -1322,9 +1324,10 @@ static void merge_sites(struct kof_diag_scan *s)
 
 #undef DOUBT
 
-struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
-					 const uint8_t *base, uint64_t size,
-					 unsigned run)
+struct kof_diag_scan *kof_diag_scan_with_inputs(const struct kof_obj_ctx *ctx,
+						const uint8_t *base,
+						uint64_t size, unsigned run,
+						const struct kof_diag_inputs *in)
 {
 	struct kof_diag_scan *s;
 	unsigned i;
@@ -1338,6 +1341,8 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 		return NULL;
 	s->base = base;
 	s->size = size;
+	s->relocs = in ? in->relocs : NULL;
+	s->apihash = in ? in->apihash : NULL;
 	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
 		const struct diag_scenario *d = &diag_scenarios[i];
 
@@ -1352,6 +1357,54 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 	}
 	merge_sites(s);
 	return s;
+}
+
+struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
+					 const uint8_t *base, uint64_t size,
+					 unsigned run)
+{
+	return kof_diag_scan_with_inputs(ctx, base, size, run, NULL);
+}
+
+const struct kof_apihash *kof_diag_apihash(struct kof_diag_scan *s,
+					   const struct kof_obj_ctx *ctx)
+{
+	if (!s->apihash && !s->apihash_done) {
+		s->own_apihash = kof_apihash_run(ctx, s->base, s->size);
+		s->apihash = s->own_apihash;
+		/* NULL is an answer too - not asked for again */
+		s->apihash_done = 1;
+	}
+	return s->apihash;
+}
+
+const struct kof_elf_relocs *kof_diag_relocs(struct kof_diag_scan *s,
+					     const struct kof_obj_ctx *ctx,
+					     unsigned kind)
+{
+	const struct kof_elf_info *ei = ctx && ctx->format == KOF_FMT_ELF
+					? kof_elf(ctx) : NULL;
+	kof_buf f;
+
+	f.p = s->base;
+	f.n = s->size;
+	if (kind == KOF_ELF_RELOC_DATA) {
+		if (!s->data_ready) {
+			if (ei && ei->valid)
+				(void)kof_elf_reloc_table(f, ei, KOF_ELF_RELOC_DATA,
+							  &s->data_relocs);
+			s->data_ready = 1;
+		}
+		return &s->data_relocs;
+	}
+	if (!s->relocs) {
+		if (ei && ei->valid)
+			(void)kof_elf_reloc_table(f, ei, KOF_ELF_RELOC_CODE,
+						  &s->own_relocs);
+		/* an empty table is still the answer, and is not asked for again */
+		s->relocs = &s->own_relocs;
+	}
+	return s->relocs;
 }
 
 struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
@@ -1540,6 +1593,9 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
 	free(s->adj_head);
 	free(s->adj_edge);
 	free(s->wrap);
+	kof_apihash_free(s->own_apihash);
+	kof_elf_reloc_table_free(&s->own_relocs);
+	kof_elf_reloc_table_free(&s->data_relocs);
 	free(s->hit);
 	free(s);
 }
@@ -2163,6 +2219,8 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			 * that runs on the files its author excluded, and it
 			 * would do so quietly.
 			 */
+			if (tag == KDIG_SEC_SERVES && len == 1u)
+				out->serves = b[at];
 			if (tag == KDIG_SEC_USERS && len >= 1u) {
 				out->users_known = 1;
 				out->n_users = b[at];

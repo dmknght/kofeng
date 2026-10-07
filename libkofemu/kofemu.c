@@ -111,6 +111,9 @@ struct page {
 	 */
 	uint16_t wr_hi;
 	int      snapped;             /* and it has since been executed and taken */
+	/* `data` belongs to the emulator this one was forked from - see
+	 * kof_emu_fork. Copied on the first store, never freed here. */
+	int      shared;
 };
 
 struct kof_emu {
@@ -379,6 +382,20 @@ struct kof_emu {
 	uint32_t hop_count;
 
 	uint64_t win_image_base, win_k32_base, win_heap;
+	/* The CALL instruction that most recently ran: the site of the API call a
+	 * stub is about to answer. */
+	uint64_t last_call_at;
+	/* The instruction that last TRANSFERRED control (jmp, call, ret, a taken
+	 * jcc): where a run that ends by jumping somewhere left from. */
+	uint64_t last_branch_at;
+	/* What the guest called - see struct kof_emu_win_event. An open-addressed
+	 * table of 1-based indices over the log, sized to twice its capacity. */
+	struct kof_emu_win_event *wev;
+	uint32_t n_wev, cap_wev, *wev_tab, wev_mask;
+	/* The scripted peer's sockets: the next handle, and the handles that have
+	 * already been read from once. */
+	uint32_t win_sock_next, n_sock_seen;
+	uint64_t sock_seen[16];
 	uint64_t mod_reads[KOF_EMU_WIN_MOD_COUNT];
 	uint8_t  count_mod_reads;
 	uint64_t win_mod_base[KOF_EMU_WIN_MOD_COUNT];
@@ -571,6 +588,22 @@ static uint32_t page_hash(uint64_t pn)
 	pn ^= pn >> 33; pn *= 0xff51afd7ed558ccdull;
 	pn ^= pn >> 29; pn *= 0xc4ceb9fe1a85ec53ull;
 	return (uint32_t)(pn ^ (pn >> 32));
+}
+
+/* The first store to a page forked from a template takes its own copy. */
+static int page_own(struct page *p)
+{
+	uint8_t *d;
+
+	if (!p->shared)
+		return 1;
+	d = malloc(KOF_EMU_PAGE);
+	if (!d)
+		return 0;
+	memcpy(d, p->data, KOF_EMU_PAGE);
+	p->data = d;
+	p->shared = 0;
+	return 1;
 }
 
 static struct page *vma_commit(struct kof_emu *e, uint64_t base);
@@ -869,6 +902,11 @@ static int mem_wr(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 			uint32_t po = (uint32_t)((va + i) &
 						 (KOF_EMU_PAGE - 1u));
 
+			if (p->shared && !page_own(p)) {
+				e->fault_va = va + i;
+				memcpy(e->fault_kind, "write", 6);
+				return 0;
+			}
 			p->data[po] = s[i];
 			if (po + 1u > p->wr_hi)
 				p->wr_hi = (uint16_t)(po + 1u);
@@ -1057,6 +1095,8 @@ void kof_emu_free(struct kof_emu *e)
 
 	if (!e)
 		return;
+	free(e->wev);
+	free(e->wev_tab);
 	if (e->hot) {
 		uint64_t tot = 0, top = 0, best;
 		uint32_t q, n_used = 0, j, k, bi;
@@ -1100,7 +1140,8 @@ void kof_emu_free(struct kof_emu *e)
 	free(e->hot);
 	free(e->ic);
 	for (i = 0; i <= e->tab_mask; i++)
-		free(e->tab[i].data);
+		if (!e->tab[i].shared)
+			free(e->tab[i].data);
 	free(e->tab);
 	free(e->sorted);
 	free(e->run_buf);
@@ -1109,6 +1150,66 @@ void kof_emu_free(struct kof_emu *e)
 		free(e->snap[i].bytes);
 	free(e->snap);
 	free(e);
+}
+
+/*
+ * A SECOND EMULATOR WITH THE SAME MEMORY AND REGISTERS, for a caller that
+ * builds one image and runs many short spans on it.
+ *
+ * WHY IT IS HERE AND NOT A RESET. Undoing a run means knowing every field a
+ * run can touch, and this struct has a hundred of them; a copy of a PRISTINE
+ * image has nothing to undo. So the rule is the narrow one: a template that
+ * has never run. Anything a run leaves behind - a trace ring, an event log,
+ * a hot histogram, a snapshot, the run buffer - makes this refuse, which is
+ * an honest "not a template" rather than a copy that carries half a run.
+ *
+ * What it owns is copied (pages, table, mappings); what it borrows is shared
+ * (the caller's `self` bytes, which a backed mapping reads from) and so are
+ * the pages' bytes, until a fork stores to one. THE TEMPLATE MUST OUTLIVE
+ * EVERY FORK and must not be run itself.
+ */
+struct kof_emu *kof_emu_fork(const struct kof_emu *t)
+{
+	struct kof_emu *e;
+	uint32_t i;
+
+	if (!t || t->insn || t->itr || t->wev || t->hot || t->run_buf ||
+	    t->snap || t->n_snap)
+		return NULL;
+	e = malloc(sizeof *e);
+	if (!e)
+		return NULL;
+	memcpy(e, t, sizeof *e);
+	e->cache_base = 0;
+	e->cache_page = NULL;
+	e->sorted = NULL;
+	e->vma = NULL;
+	e->max_vma = 0;
+	e->ic = t->ic ? calloc(KOF_EMU_ICACHE, sizeof *e->ic) : NULL;
+	e->tab = calloc((size_t)t->tab_mask + 1u, sizeof *e->tab);
+	if (!e->tab)
+		goto bad;
+	memcpy(e->tab, t->tab, ((size_t)t->tab_mask + 1u) * sizeof *e->tab);
+	/* PAGES ARE SHARED, NOT COPIED: a span writes a stack page and a few
+	 * others, and copying the whole file per span was 1.4 of 7.6 billion
+	 * instructions. The template must outlive its forks. */
+	for (i = 0; i <= t->tab_mask; i++)
+		if (e->tab[i].data)
+			e->tab[i].shared = 1;
+	if (t->n_vma) {
+		e->vma = malloc((size_t)t->n_vma * sizeof *e->vma);
+		if (!e->vma)
+			goto bad;
+		memcpy(e->vma, t->vma, (size_t)t->n_vma * sizeof *e->vma);
+		e->max_vma = t->n_vma;
+	}
+	return e;
+bad:
+	free(e->tab);
+	free(e->ic);
+	free(e->vma);
+	free(e);
+	return NULL;
 }
 
 int kof_emu_map(struct kof_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
@@ -1132,12 +1233,27 @@ int kof_emu_map(struct kof_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
 	 * loading an image is not the stub writing, and marking these pages
 	 * dirty would hand the whole file back as "what the stub produced".
 	 */
-	for (off = 0; off < n; off++) {
+	/*
+	 * A PAGE AT A TIME. This was a byte at a time with a page lookup per byte:
+	 * MEASURED on 100 kernel modules, 20.5 million lookups and 15.7% of the
+	 * whole scan for the four modules that reached the emulator at all - every
+	 * function it ran rebuilt the image, and each rebuild looked up the same
+	 * page once per byte of it. One lookup per page copies the same bytes.
+	 */
+	for (off = 0; off < n; ) {
 		struct page *p = page_find(e, va + off);
+		uint64_t in = (va + off) & (KOF_EMU_PAGE - 1u);
+		uint64_t chunk = KOF_EMU_PAGE - in;
 
-		if (!p)
+		if (chunk > n - off)
+			chunk = n - off;
+		if (!p || !page_own(p))
 			return 0;
-		p->data[(va + off) & (KOF_EMU_PAGE - 1u)] = src ? src[off] : 0;
+		if (src)
+			memcpy(p->data + in, src + off, (size_t)chunk);
+		else
+			memset(p->data + in, 0, (size_t)chunk);
+		off += chunk;
 	}
 	return 1;
 }
@@ -2960,6 +3076,24 @@ enum {
 	WIN_SHGetFolderPathA,
 	WIN_CoInitialize,
 	WIN_CoUninitialize,
+	/* ws2_32. The environment is a SCRIPTED PEER - see winapi_do. */
+	WIN_WSAStartup,
+	WIN_WSACleanup,
+	WIN_WSASocketA,
+	WIN_WSASocketW,
+	WIN_socket,
+	WIN_connect,
+	WIN_recv,
+	WIN_send,
+	WIN_sendto,
+	WIN_recvfrom,
+	WIN_closesocket,
+	WIN_bind,
+	WIN_listen,
+	WIN_accept,
+	WIN_shutdown,
+	WIN_setsockopt,
+	WIN_ioctlsocket,
 	/*
 	 * THE COUNT COMES FROM THE ENUM AND THE ENUM IS CHECKED AGAINST THE
 	 * TABLE, because writing it by hand is how this broke.
@@ -3117,6 +3251,23 @@ static const struct {
 	{ KOF_EMU_WIN_MOD_SHELL32, "SHGetFolderPathA",    5 },
 	{ KOF_EMU_WIN_MOD_OLE32, "CoInitialize",          1 },
 	{ KOF_EMU_WIN_MOD_OLE32, "CoUninitialize",        0 },
+	{ KOF_EMU_WIN_MOD_WS2, "WSAStartup",              2 },
+	{ KOF_EMU_WIN_MOD_WS2, "WSACleanup",              0 },
+	{ KOF_EMU_WIN_MOD_WS2, "WSASocketA",              6 },
+	{ KOF_EMU_WIN_MOD_WS2, "WSASocketW",              6 },
+	{ KOF_EMU_WIN_MOD_WS2, "socket",                  3 },
+	{ KOF_EMU_WIN_MOD_WS2, "connect",                 3 },
+	{ KOF_EMU_WIN_MOD_WS2, "recv",                    4 },
+	{ KOF_EMU_WIN_MOD_WS2, "send",                    4 },
+	{ KOF_EMU_WIN_MOD_WS2, "sendto",                  6 },
+	{ KOF_EMU_WIN_MOD_WS2, "recvfrom",                6 },
+	{ KOF_EMU_WIN_MOD_WS2, "closesocket",             1 },
+	{ KOF_EMU_WIN_MOD_WS2, "bind",                    3 },
+	{ KOF_EMU_WIN_MOD_WS2, "listen",                  2 },
+	{ KOF_EMU_WIN_MOD_WS2, "accept",                  3 },
+	{ KOF_EMU_WIN_MOD_WS2, "shutdown",                2 },
+	{ KOF_EMU_WIN_MOD_WS2, "setsockopt",              5 },
+	{ KOF_EMU_WIN_MOD_WS2, "ioctlsocket",             3 },
 };
 
 /*
@@ -3152,7 +3303,8 @@ static const struct {
 	{ "shlwapi.dll",  0x0000000185000000ull, 0x72000000ull },
 	{ "msvcrt.dll",   0x0000000186000000ull, 0x71000000ull },
 	{ "ole32.dll",    0x0000000187000000ull, 0x70000000ull },
-	{ "kernelbase.dll", 0x0000000188000000ull, 0x6f000000ull }
+	{ "kernelbase.dll", 0x0000000188000000ull, 0x6f000000ull },
+	{ "ws2_32.dll",   0x0000000189000000ull, 0x6e000000ull }
 };
 
 _Static_assert(sizeof win_api / sizeof win_api[0] == (size_t)WIN_API__LAST,
@@ -4010,6 +4162,125 @@ static void win_trace(struct kof_emu *e, const char *api, const char *arg,
 			arg ? arg : "", (unsigned long long)ret);
 }
 
+/*
+ * ---- WHAT THE GUEST CALLED ------------------------------------------------
+ *
+ * One record per distinct (call site, API), with a count - see
+ * struct kof_emu_win_event for why and for what the fields are. Not capped:
+ * the log grows with the number of places the program calls from, which is
+ * bounded by its code, and a cap would be a place where a call that happened
+ * went unrecorded.
+ */
+static uint32_t wev_hash(uint64_t site, unsigned api)
+{
+	return (uint32_t)(((site ^ ((uint64_t)api << 56)) *
+			   0x9e3779b97f4a7c15ull) >> 32);
+}
+
+static void wev_insert(struct kof_emu *e, uint32_t idx)
+{
+	const struct kof_emu_win_event *w = &e->wev[idx];
+	uint32_t i = wev_hash(w->site, w->api) & e->wev_mask;
+
+	while (e->wev_tab[i])
+		i = (i + 1u) & e->wev_mask;
+	e->wev_tab[i] = idx + 1u;
+}
+
+static void win_event_note(struct kof_emu *e, unsigned api, uint64_t ret)
+{
+	struct kof_emu_win_event *w;
+	uint32_t i;
+
+	if (e->wev_tab) {
+		for (i = wev_hash(e->last_call_at, api) & e->wev_mask;
+		     e->wev_tab[i]; i = (i + 1u) & e->wev_mask) {
+			w = &e->wev[e->wev_tab[i] - 1u];
+			if (w->site == e->last_call_at && w->api == api) {
+				if (w->count != 0xffffffffu)
+					w->count++;
+				w->ret = ret;
+				return;
+			}
+		}
+	}
+	if (e->n_wev == e->cap_wev) {
+		uint32_t nc = e->cap_wev ? e->cap_wev * 2u : 64u, k;
+		struct kof_emu_win_event *nw = realloc(e->wev, (size_t)nc * sizeof *nw);
+		uint32_t *nt;
+
+		if (!nw)
+			return;
+		e->wev = nw;
+		nt = calloc((size_t)nc * 2u, sizeof *nt);
+		if (!nt)
+			return;
+		free(e->wev_tab);
+		e->wev_tab = nt;
+		e->wev_mask = nc * 2u - 1u;
+		e->cap_wev = nc;
+		for (k = 0; k < e->n_wev; k++)
+			wev_insert(e, k);
+	}
+	w = &e->wev[e->n_wev];
+	memset(w, 0, sizeof *w);
+	w->site = e->last_call_at;
+	w->api = api;
+	w->count = 1;
+	for (i = 0; i < 4u; i++)
+		w->arg[i] = win_arg(e, i);
+	w->ret = ret;
+	wev_insert(e, e->n_wev);
+	e->n_wev++;
+}
+
+uint64_t kof_emu_last_branch_at(const struct kof_emu *e)
+{
+	return e ? e->last_branch_at : 0;
+}
+
+uint32_t kof_emu_win_event_count(const struct kof_emu *e)
+{
+	return e ? e->n_wev : 0;
+}
+
+int kof_emu_win_event_at(const struct kof_emu *e, uint32_t i,
+			 struct kof_emu_win_event *out)
+{
+	if (!e || !out || i >= e->n_wev)
+		return 0;
+	*out = e->wev[i];
+	return 1;
+}
+
+/* A handle for a socket the guest asked for. Values a program can hold and
+ * compare, and that are never INVALID_SOCKET. */
+static uint64_t win_sock_new(struct kof_emu *e)
+{
+	uint64_t h;
+
+	if (!e->win_sock_next)
+		e->win_sock_next = 0x100u;
+	h = e->win_sock_next;
+	e->win_sock_next += 4u;
+	return h;
+}
+
+static int win_sock_first_read(struct kof_emu *e, uint64_t s)
+{
+	uint32_t i;
+
+	for (i = 0; i < e->n_sock_seen; i++)
+		if (e->sock_seen[i] == s)
+			return 0;
+	/* More than sixteen sockets read from: the rest are treated as already
+	 * read, which only means they are not given the length prefix. */
+	if (e->n_sock_seen >= 16u)
+		return 0;
+	e->sock_seen[e->n_sock_seen++] = s;
+	return 1;
+}
+
 static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 {
 	char name[128];
@@ -4017,6 +4288,68 @@ static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 	*stop_out = 0;
 	win_trace(e, kof_emu_win_api_name(id), "(call)", 0);
 	switch (id) {
+	/*
+	 * ---- ws2_32: A SCRIPTED PEER ------------------------------------
+	 *
+	 * Nothing is on the other end and nothing is opened. The calls answer
+	 * the way a connected peer would, so that a program run through here
+	 * goes on to do what it does AFTER the network - which is the part an
+	 * analysis wants to see - and no further than that:
+	 *
+	 *   socket, WSASocket*, accept   a fresh handle
+	 *   connect, bind, listen, ...   success
+	 *   send, sendto                 all of it was sent
+	 *   recv, recvfrom               the FIRST read on a socket returns a
+	 *                                four-byte length, 0x1000; every later
+	 *                                read returns what was asked for and
+	 *                                writes NOTHING.
+	 *
+	 * The length prefix is the Metasploit stager protocol - read four bytes,
+	 * allocate that much, read it all - and is what lets one run through to the
+	 * allocation and the jump. WRITES NOTHING after it, deliberately: the
+	 * bytes a peer would have sent are not known, and a buffer filled with
+	 * invented ones would come back out of the harvest as a payload the
+	 * program never received.
+	 */
+	case WIN_WSAStartup: {
+		uint64_t d = win_arg(e, 1);
+		uint16_t ver = 0x0202u;
+
+		if (d)
+			(void)mem_wr(e, d, &ver, 2u);
+		return 0;
+	}
+	case WIN_WSACleanup:
+	case WIN_connect:
+	case WIN_bind:
+	case WIN_listen:
+	case WIN_shutdown:
+	case WIN_setsockopt:
+	case WIN_ioctlsocket:
+	case WIN_closesocket:
+		return 0;
+	case WIN_WSASocketA:
+	case WIN_WSASocketW:
+	case WIN_socket:
+	case WIN_accept:
+		return win_sock_new(e);
+	case WIN_send:
+	case WIN_sendto:
+		return win_arg(e, 2) & 0xffffffffu;
+	case WIN_recv:
+	case WIN_recvfrom: {
+		uint64_t s = win_arg(e, 0), buf = win_arg(e, 1);
+		uint64_t len = win_arg(e, 2) & 0xffffffffu;
+
+		if (len && win_sock_first_read(e, s)) {
+			uint32_t sz = 0x1000u;
+			unsigned m = len < 4u ? (unsigned)len : 4u;
+
+			(void)mem_wr(e, buf, &sz, m);
+			return m;
+		}
+		return len;
+	}
 	case WIN_GetModuleHandleA:
 	case WIN_GetModuleHandleW: {
 		uint64_t p = win_arg(e, 0);
@@ -4909,6 +5242,8 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 			{
 				unsigned wid = raw - WIN_API_BASE;
 				uint64_t r = winapi_do(e, wid, stop_out);
+
+				win_event_note(e, wid, r);
 
 				/* The ANSWER, not just the question. A call
 				 * that was made and a call that was answered
@@ -7750,6 +8085,7 @@ decoded:
 		case ND_INS_CALLNI:
 			if (!op_rd(e, ixp, &ixp->Operands[0], &a) || !push(e, next))
 				goto fault;
+			e->last_call_at = e->rip;
 			e->rip = a; jumped = 1;
 			break;
 
@@ -8124,6 +8460,7 @@ decoded:
 		if (!jumped)
 			e->rip = next;
 		else {
+			e->last_branch_at = at;
 			/*
 			 * A jump into a page the run wrote LOOKS like the
 			 * handoff, and often is not - see

@@ -242,12 +242,17 @@ struct kof_emu *kof_emu_unp_build(const uint8_t *file, uint64_t n,
  * the shape most custom packers have, and the shape a static unpacker cannot
  * follow because nobody wrote a module for that one packer.
  *
- * Does not reach: anything whose decode is driven THROUGH the API - a stub
- * that allocates first and decodes into what it got back stops at the
- * allocation with nothing written. Nor anything resolving imports by walking
- * the PEB, which faults on the first read. Those need the PEB/LDR and the
- * handful of memory APIs, and that is a separate decision to make on evidence
- * this produces rather than ahead of it.
+ * Does not reach: anything whose decode is driven THROUGH an API this
+ * environment does not model - a stub that allocates first and decodes into
+ * what it got back stops at the allocation with nothing written if the
+ * allocator is not one of the modelled calls.
+ *
+ * (This note used to add "nor anything resolving imports by walking the PEB,
+ * which faults on the first read". It no longer does: the environment builds a
+ * TEB, a PEB and a module list with an export directory for every library it
+ * models, and a resolver that walks them - whatever hash it uses - arrives at
+ * the stub of the function it meant. kof_emu_win_event_at says which. Measured
+ * on a Metasploit stager and three rebuilds of it that change the hash.)
  *
  * x86 AND x86-64 ONLY, because bddisasm decodes those. An ARM64 PE is refused
  * by the gate rather than started and left to fault on its first instruction.

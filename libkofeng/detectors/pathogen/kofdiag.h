@@ -250,8 +250,9 @@ struct kof_diag_scan;
 #define KOF_DIAG_RUN_SYSCALL (1u << 0)  /* sweep code for syscall sites   */
 #define KOF_DIAG_RUN_SYMBOL  (1u << 1)  /* imports and their call sites   */
 #define KOF_DIAG_RUN_EMULATE (1u << 2)  /* run the gaps, to link nodes    */
+#define KOF_DIAG_RUN_APIHASH (1u << 3)  /* name what a PE resolves itself */
 #define KOF_DIAG_RUN_ALL     (KOF_DIAG_RUN_SYSCALL | KOF_DIAG_RUN_SYMBOL | \
-			      KOF_DIAG_RUN_EMULATE)
+			      KOF_DIAG_RUN_EMULATE | KOF_DIAG_RUN_APIHASH)
 /*
  * WHAT kof_diag_scan RUNS, WHICH IS NOT EVERYTHING THAT EXISTS.
  *
@@ -307,6 +308,76 @@ struct kof_diag_scan *kof_diag_scan(const struct kof_obj_ctx *ctx,
 struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
 					 const uint8_t *base, uint64_t size,
 					 unsigned run);
+
+/*
+ * ---- WHAT A CALLER MAY HAND OVER, BECAUSE IT HAS IT ALREADY ---------------
+ *
+ * Each is an input the routes would otherwise derive, and each is BORROWED and
+ * must outlive the scan. NULL is the ordinary answer: the first route that needs
+ * one builds it, and the scan owns what it built.
+ *
+ *   relocs  - the object's relocation table; the scanner builds it for its gate
+ *             and every route reads the same one.
+ *   apihash - what a PE resolves for itself - see struct kof_apihash. An
+ *             ANALYSIS RESULT, computed once per object and read by the graph
+ *             and by the object's symbols alike.
+ */
+struct kof_elf_relocs;
+struct kof_diag_inputs {
+	const struct kof_elf_relocs *relocs;
+	const struct kof_apihash    *apihash;
+};
+struct kof_diag_scan *kof_diag_scan_with_inputs(const struct kof_obj_ctx *ctx,
+						const uint8_t *base,
+						uint64_t size, unsigned run,
+						const struct kof_diag_inputs *in);
+
+/*
+ * ---- THE APIS A PE RESOLVES FOR ITSELF - see diag_apihash.c ---------------
+ *
+ * The product of an analysis and not of a route: the calls a program makes
+ * through a resolver of its own, found by running that resolver against the
+ * modelled loader, so no hash, seed or rotation appears here.
+ */
+struct kof_apihash_call {
+	uint64_t site;          /* the address of the call, in the image  */
+	uint64_t arg[4];
+	uint64_t ret;
+	char     api[40];       /* "VirtualAlloc"                          */
+	char     dll[16];       /* "kernel32.dll"                          */
+};
+
+struct kof_apihash {
+	uint64_t *peb;          /* file offsets of the reads that led to it */
+	uint32_t  n_peb, cap_peb;
+	uint32_t  n_ldr;        /* ...of which a load of PEB.Ldr followed   */
+	struct kof_apihash_call *call;
+	uint32_t  n_call;
+	uint64_t  end_rip;      /* where the run ended, and the instruction */
+	uint64_t  end_from;     /* that last transferred control            */
+	int       budget;       /* the run was stopped while still going: the
+			 * list may be short - read by the graph (scan
+			 * is not full) and by the symbols (truncated) */
+};
+
+/*
+ * Analyse a PE. NULL for anything that is not one or on allocation failure;
+ * otherwise a product whose n_call may be zero - a program that does not read
+ * the loader data costs a decode and is never run.
+ */
+struct kof_apihash *kof_apihash_run(const struct kof_obj_ctx *ctx,
+				    const uint8_t *base, uint64_t size);
+void kof_apihash_free(struct kof_apihash *a);
+/*
+ * The names a product holds, as imports of the KSYM block `blk` - see
+ * kof_pe_syms_add_imports. Returns the new length in bytes.
+ */
+uint32_t kof_apihash_syms(const struct kof_apihash *a, uint8_t *blk,
+			  uint32_t n_bytes, uint32_t cap);
+/* The product the scan reads: handed over by the caller, else built once and
+ * owned by the scan. NULL for a non-PE. */
+const struct kof_apihash *kof_diag_apihash(struct kof_diag_scan *s,
+					   const struct kof_obj_ctx *ctx);
 
 /* Which routines actually ran on this object - a caller asking "is this
  * capability absent" must know whether the routine that would have found it

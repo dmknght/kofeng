@@ -18,6 +18,7 @@
 #include "kofdiag.h"
 #include "../../analyzers/parsers/binaries/disasm/kdis.h"
 #include "../../kofcore/kofmod/kdis.h"
+#include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 
 struct kof_diag_scan {
 	struct kof_diag_hit *hit;
@@ -29,6 +30,19 @@ struct kof_diag_scan {
 	 */
 	uint64_t            *wrap;
 	uint32_t             n_wrap, cap_wrap;
+	/*
+	 * THE RELOCATIONS OF THIS OBJECT, one table for every route - see
+	 * struct kof_elf_relocs. Borrowed when the caller built it for the object
+	 * already (the scanner does, for its gate), built here on first use and
+	 * owned otherwise.
+	 */
+	const struct kof_apihash    *apihash;           /* see kof_diag_apihash */
+	struct kof_apihash          *own_apihash;
+	int                          apihash_done;
+	const struct kof_elf_relocs *relocs;            /* CODE relocations */
+	struct kof_elf_relocs        own_relocs;
+	struct kof_elf_relocs        data_relocs;       /* DATA: the image builder's alone */
+	int                          data_ready;
 	int                  full;      /* the bound was reached */
 	/* Which analysis routines actually ran - see KOF_DIAG_RUN_* and the
 	 * scenario table. Asked for and not written counts as not run. */
@@ -216,6 +230,19 @@ void kof_diag_run_syscall(struct kof_diag_scan *s,
 void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 const struct kof_obj_ctx *ctx,
 			 const uint8_t *base, uint64_t size);
+/* The object's relocation table of one kind (KOF_ELF_RELOC_*): for CODE the
+ * borrowed one, else built on first use; DATA is built on first use. */
+const struct kof_elf_relocs *kof_diag_relocs(struct kof_diag_scan *s,
+					     const struct kof_obj_ctx *ctx,
+					     unsigned kind);
+
+/* The symbol route's PE half: calls through the import address table. */
+void kof_diag_run_apihash(struct kof_diag_scan *s,
+			  const struct kof_obj_ctx *ctx,
+			  const uint8_t *base, uint64_t size);
+void kof_diag_run_pe_symbol(struct kof_diag_scan *s,
+			    const struct kof_obj_ctx *ctx,
+			    const uint8_t *base, uint64_t size);
 void kof_diag_run_emulate(struct kof_diag_scan *s,
 			  const struct kof_obj_ctx *ctx,
 			  const uint8_t *base, uint64_t size);

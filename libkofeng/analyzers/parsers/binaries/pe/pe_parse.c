@@ -1063,6 +1063,7 @@ uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
 			uint64_t slot = p->image_base + first +
 					(uint64_t)t * w;
 			uint32_t lo = 0;
+			uint64_t noff = 0;
 			char nm[64];
 
 			if (p->pe32_plus) {
@@ -1085,7 +1086,7 @@ uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
 			if (val & (p->pe32_plus ? 0x8000000000000000ull
 						: 0x80000000ull)) {
 				fn(user, slot, dll, 0,
-				   (uint32_t)(val & 0xffffu));
+				   (uint32_t)(val & 0xffffu), 0);
 				n++;
 				continue;
 			}
@@ -1101,8 +1102,9 @@ uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
 					continue;
 				if (!imp_name_at(f, ho + 2u, nm, sizeof nm))
 					continue;
+				noff = ho + 2u;
 			}
-			fn(user, slot, dll, nm, 0);
+			fn(user, slot, dll, nm, 0, noff);
 			n++;
 		}
 	}

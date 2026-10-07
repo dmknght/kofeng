@@ -18,7 +18,8 @@
 
 static const char *const slot_name[KOF_T_COUNT] = {
 	"db load", "parse", "unpack", "heur", "emulate", "match",
-	"diag syscall", "diag symbol", "diag emulate", "diag match"
+	"diag syscall", "diag symbol", "diag emulate", "diag apihash",
+	"diag match"
 };
 
 struct slot {

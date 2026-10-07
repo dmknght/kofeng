@@ -848,9 +848,21 @@ static int build_teb_pe(struct kof_emu *e, unsigned bits, uint64_t image_base,
 	 * function table and has nothing to do with load order.
 	 */
 	{
+		/*
+		 * EVERY MODULE, ONCE. This listed eight into an array of nine, so
+		 * the ninth slot was zero - kernel32 again, appended to the list a
+		 * second time - and kernelbase, which has an image of its own, was
+		 * never in the list at all. ws2_32 is here from the start although
+		 * Windows only lists it after LoadLibrary: a resolver walks the
+		 * list, and the environment has no loader to add to it later.
+		 */
 		static const unsigned load_order[KOF_EMU_WIN_MOD_COUNT] = {
 			KOF_EMU_WIN_MOD_NTDLL, KOF_EMU_WIN_MOD_K32,
-			2u, 3u, 4u, 5u, 6u, 7u
+			KOF_EMU_WIN_MOD_KBASE,
+			KOF_EMU_WIN_MOD_USER32, KOF_EMU_WIN_MOD_ADVAPI32,
+			KOF_EMU_WIN_MOD_SHELL32, KOF_EMU_WIN_MOD_SHLWAPI,
+			KOF_EMU_WIN_MOD_MSVCRT, KOF_EMU_WIN_MOD_OLE32,
+			KOF_EMU_WIN_MOD_WS2
 		};
 		unsigned esz  = bits == 32u ? 0x40u : 0x70u;
 		unsigned dllb = bits == 32u ? 0x18u : 0x30u;
@@ -868,6 +880,40 @@ static int build_teb_pe(struct kof_emu *e, unsigned bits, uint64_t image_base,
 		ent[n_ent++] = LDR_ENTRIES_OFF;
 		put_w(l + LDR_ENTRIES_OFF + dllb, bits, image_base);
 		put_w(l + LDR_ENTRIES_OFF + szof, bits, 0);
+		/*
+		 * A NAME, BECAUSE A ZERO-LENGTH ONE IS A TRAP FOR THE WALKER THAT
+		 * IS MOST LIKELY TO BE HERE. The loop that hashes a module's name
+		 * is `movzx rcx,[Length] ... loop`, and `loop` with rcx == 0 does
+		 * not run zero times - it wraps and runs 2^64. MEASURED on a
+		 * Metasploit stager: the first entry is the program's own image,
+		 * its length was zero, and the resolver spent its whole run
+		 * hashing from a null buffer until it read off the end of memory,
+		 * so every API the stager asked for was "not found". Windows names
+		 * the image (its path); this does not know the path, so it says
+		 * what it does know and nothing that a stub would take for a real
+		 * module.
+		 */
+		{
+			static const char imgname[] = "IMAGE.EXE";
+			unsigned ilen = (unsigned)sizeof imgname - 1u, c;
+			unsigned ioff = LDR_ENTRIES_OFF;
+
+			for (c = 0; c < ilen; c++) {
+				l[ni + 2u * c]      = (uint8_t)imgname[c];
+				l[ni + 2u * c + 1u] = 0;
+			}
+			l[ioff + fulln] = (uint8_t)(2u * ilen);
+			l[ioff + fulln + 1u] = (uint8_t)((2u * ilen) >> 8);
+			l[ioff + fulln + 2u] = (uint8_t)(2u * ilen + 2u);
+			l[ioff + fulln + 3u] = (uint8_t)((2u * ilen + 2u) >> 8);
+			put_w(l + ioff + fulln + nptr, bits, ldr + ni);
+			l[ioff + basen] = (uint8_t)(2u * ilen);
+			l[ioff + basen + 1u] = (uint8_t)((2u * ilen) >> 8);
+			l[ioff + basen + 2u] = (uint8_t)(2u * ilen + 2u);
+			l[ioff + basen + 3u] = (uint8_t)((2u * ilen + 2u) >> 8);
+			put_w(l + ioff + basen + nptr, bits, ldr + ni);
+			ni += 2u * (ilen + 1u);
+		}
 
 		for (m = 0; m < KOF_EMU_WIN_MOD_COUNT; m++) {
 			unsigned mi = load_order[m];

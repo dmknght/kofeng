@@ -47,12 +47,19 @@ int kof_pe_parse(kof_buf file, struct kof_pe_info *info,
  * original is the one that still holds names after the loader has written
  * addresses over the other.
  *
+ * `nameoff` IS WHERE THE NAME IS IN THE FILE, and zero when there is none. The
+ * `name` pointer is a copy - the walk reads it into a buffer of its own - so it
+ * cannot be turned into a position, and a node that has to say which import it
+ * stands for needs one. A position and not the string, as kof_elf_relocs
+ * reports it, because the string is already in the buffer the caller handed in.
+ *
  * AN IMPORT BY ORDINAL has no name. It is still reported, with `name` NULL
  * and `ordinal` set - the slot is real and a caller that only matches names
  * can ignore it, which is not the same as not being told.
  */
 typedef void (*kof_pe_import_fn)(void *user, uint64_t slot, const char *dll,
-				 const char *name, uint32_t ordinal);
+				 const char *name, uint32_t ordinal,
+				 uint64_t nameoff);
 
 uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
 			kof_pe_import_fn fn, void *user);

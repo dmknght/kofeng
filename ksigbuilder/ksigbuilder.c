@@ -6277,6 +6277,7 @@ static unsigned        g_n_uses;
 static int             g_uses_known;    /* only a tree build knows them all */
 static char            g_built[64][64];
 static unsigned        g_n_built;
+static unsigned char   g_built_serves[64];   /* the engine reads it itself */
 
 
 /* Defined with the other argument helpers, below. */
@@ -6725,7 +6726,7 @@ static int tree_main(int argc, char **argv)
 			for (q = 0; q < g_n_uses; q++)
 				if (!strcmp(g_built[z], g_uses[q].diag))
 					break;
-			if (q == g_n_uses)
+			if (q == g_n_uses && !g_built_serves[z])
 				fprintf(stderr, "ksigbuilder: warning: diagnose "
 					"%s is read by no verdict, so the engine "
 					"will not run it\n", g_built[z]);
@@ -7390,12 +7391,14 @@ struct dhdr {
  */
 #define KOF_FACT_IDENTS(X) \
 	X(KOF_FACT_ENTRY_PERM) X(KOF_FACT_MAP_PERM) \
-	X(KOF_FACT_SECTIONS)   X(KOF_FACT_OBJ_KIND)
+	X(KOF_FACT_SECTIONS)   X(KOF_FACT_OBJ_KIND) \
+	X(KOF_FACT_FORMAT)
 
 #define KOF_WHEN_VALUES(X) \
 	X(KOF_PERM_R) X(KOF_PERM_W) X(KOF_PERM_X) \
 	X(KOF_PE_PERM_R) X(KOF_PE_PERM_W) X(KOF_PE_PERM_X) \
-	X(KOF_ELF_REL) X(KOF_ELF_EXEC) X(KOF_ELF_DYN) X(KOF_ELF_CORE)
+	X(KOF_ELF_REL) X(KOF_ELF_EXEC) X(KOF_ELF_DYN) X(KOF_ELF_CORE) \
+	X(KOF_FMT_ELF) X(KOF_FMT_PE)
 
 static const struct { const char *w; uint64_t v; } when_word[] = {
 #define KSB_WHEN_ROW(id) { #id, (uint64_t)(id) },
@@ -7617,7 +7620,7 @@ static int diagnose_main(int argc, char **argv)
 	unsigned n_users = 0, users_len = 0;
 	int n_need = 0, n_when = 0, n_ref = 0;
 	int n_nd = 0, lineno = 0, i;
-	unsigned via = 0;
+	unsigned via = 0, serves = 0;
 	FILE *f, *o;
 	unsigned char *blob;
 	size_t at, need;
@@ -7649,6 +7652,8 @@ static int diagnose_main(int argc, char **argv)
 				via |= KOF_DIAG_VIA_SYMBOL;
 			if (strstr(p, "KOF_DIAG_VIA_EMULATE"))
 				via |= KOF_DIAG_VIA_EMULATE;
+			if (strstr(p, "KOF_DIAG_VIA_APIHASH"))
+				via |= KOF_DIAG_VIA_APIHASH;
 			if (!via)
 				err(lineno, "KOF_DIAG_VIA names no route");
 		} else if ((p = strstr(line, "KOF_DIAG_ANCHOR(")) != NULL) {
@@ -7768,6 +7773,12 @@ static int diagnose_main(int argc, char **argv)
 			memcpy(nd[i].sym, a[1] + 1, L - 2u);
 			nd[i].sym[L - 2u] = 0;
 			nd[i].bits |= KOF_DIAG_B_FIELD_OF;
+		} else if ((p = strstr(line, "KOF_DIAG_SERVES(")) != NULL) {
+			if (strstr(p, "KOF_SERVE_PE_SYMBOLS"))
+				serves |= KOF_SERVE_PE_SYMBOLS;
+			if (!serves)
+				err(lineno, "KOF_DIAG_SERVES names nothing the "
+					    "engine uses");
 		} else if ((p = strstr(line, "KOF_DIAG_REFS(")) != NULL) {
 			int k;
 
@@ -7913,7 +7924,12 @@ static int diagnose_main(int argc, char **argv)
 				}
 		}
 	}
-	if (n_need || n_when || n_ref || g_uses_known) {
+	/* A diagnose that serves the engine's use of an analysis has to ask for
+	 * that analysis: the declaration says what the result is FOR, the route
+	 * says that it is computed, and one without the other is dead text. */
+	if ((serves & KOF_SERVE_PE_SYMBOLS) && !(via & KOF_DIAG_VIA_APIHASH))
+		err(lineno, "KOF_SERVE_PE_SYMBOLS needs KOF_DIAG_VIA_APIHASH");
+	if (n_need || n_when || n_ref || serves || g_uses_known) {
 		int k;
 
 		need += 1u;                     /* how many */
@@ -7929,6 +7945,8 @@ static int diagnose_main(int argc, char **argv)
 	}
 	if (g_uses_known)
 		need += 2u + 1u + users_len;
+	if (serves)
+		need += 2u + 1u;
 	/*
 	 * TAGGED TRAILING SECTIONS, tag and length each one byte. The signs
 	 * above are not tagged - they predate this - so anything added after
@@ -7982,7 +8000,7 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (n_need || n_when || n_ref || g_uses_known) {
+	if (n_need || n_when || n_ref || serves || g_uses_known) {
 		int k;
 
 		blob[at++] = (unsigned char)n_need;
@@ -8026,6 +8044,11 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
+	if (serves) {
+		blob[at++] = KDIG_SEC_SERVES;
+		blob[at++] = 1u;
+		blob[at++] = (unsigned char)serves;
+	}
 	if (g_uses_known) {
 		unsigned q, left = users_len;
 
@@ -8048,8 +8071,10 @@ static int diagnose_main(int argc, char **argv)
 	}
 	/* Remembered so the tree build can check that every call names a
 	 * diagnose that exists - see the end of tree_main. */
-	if (g_n_built < 64u)
+	if (g_n_built < 64u) {
+		g_built_serves[g_n_built] = (unsigned char)serves;
 		snprintf(g_built[g_n_built++], sizeof g_built[0], "%s", name);
+	}
 	o = fopen(out, "wb");
 	if (!o || fwrite(blob, 1, need, o) != need) {
 		fprintf(stderr, "FAIL: cannot write %s\n", out);

@@ -924,6 +924,71 @@ names[] = {
  * than code. Exported rather than copied for the reason at the head of
  * nucleo.h: a second table is a second thing to keep right.
  */
+/*
+ * WHAT KIND OF SOCKET `socket(domain, type, ...)` MADE, from the first two
+ * arguments. One statement of it, read by the syscall and by the named call
+ * (kof_flow_cap_of_call): the Windows socket()/WSASocket* take the same two
+ * values in the same order, and AF_UNIX and SOCK_RAW are the same numbers.
+ */
+static uint16_t sock_kind(const uint64_t *arg, uint8_t *flags)
+{
+	if ((arg[0] & 0xffu) == FLOW_AF_UNIX && flags)
+		*flags |= KOF_FLOWF_LOCAL;
+	if ((arg[1] & 0xfu) == FLOW_SOCK_RAW)
+		return KOF_NUCLEO_NET_RAW;
+	if ((arg[1] & 0xfu) == FLOW_SOCK_DGRAM && flags)
+		*flags |= KOF_FLOWF_DGRAM;
+	return KOF_NUCLEO_NET_OPEN;
+}
+
+/*
+ * A NAMED CALL, REFINED BY THE ARGUMENTS IT WAS MADE WITH - the same job
+ * kof_flow_cap_of_syscall does for a system call, for code that reached an API
+ * by name or was observed calling one.
+ *
+ * VirtualAlloc and VirtualProtect become an executable allocation when the
+ * protection asks for execute (PAGE_EXECUTE 0x10, _READ 0x20, _READWRITE 0x40,
+ * _WRITECOPY 0x80), and W+X when it also asks for write: the Windows words for
+ * what mmap and mprotect say with PROT_EXEC. Measured, the Metasploit stager
+ * asks for 0x40.
+ *
+ * `arg` holds the first four arguments, which is what is carried; a call whose
+ * protection is a later argument is left as it was named rather than guessed.
+ */
+uint16_t kof_flow_cap_of_call(const char *name, const uint64_t *arg,
+			      uint8_t *flags)
+{
+	uint16_t cap = kof_flow_cap_of_name(name);
+
+	if (flags)
+		*flags = 0;
+	if (!arg || cap == KOF_NUCLEO_NONE)
+		return cap;
+	if (cap == KOF_NUCLEO_ALLOC) {
+		uint64_t prot = 0;
+		int have = 0;
+
+		if (!strcmp(name, "VirtualAlloc")) {
+			prot = arg[3];
+			have = 1;
+		} else if (!strcmp(name, "VirtualProtect")) {
+			prot = arg[2];
+			have = 1;
+		}
+		if (have && (prot & 0xf0u)) {
+			if (flags && (prot & 0xc0u))    /* ..._READWRITE, ..._WRITECOPY */
+				*flags = KOF_FLOWF_WX;
+			return KOF_NUCLEO_ALLOC_EXEC;
+		}
+		return cap;
+	}
+	if (cap == KOF_NUCLEO_NET_OPEN &&
+	    (!strcmp(name, "socket") || !strcmp(name, "WSASocketA") ||
+	     !strcmp(name, "WSASocketW")))
+		return sock_kind(arg, flags);
+	return cap;
+}
+
 uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 				const uint64_t *arg, uint8_t *flags)
 {
@@ -957,15 +1022,8 @@ uint16_t kof_flow_cap_of_syscall(unsigned bits, uint32_t nr,
 	    (bits == 32 ? nr == 120u : nr == 56u))
 		return (arg[0] & FLOW_CLONE_THREAD) ? KOF_NUCLEO_THREAD
 						    : KOF_NUCLEO_SPAWN;
-	if (arg && cap == KOF_NUCLEO_NET_OPEN && bits != 32 && nr == 41u) {
-		if ((arg[0] & 0xffu) == FLOW_AF_UNIX && flags)
-			*flags |= KOF_FLOWF_LOCAL;
-		if ((arg[1] & 0xfu) == FLOW_SOCK_RAW)
-			return KOF_NUCLEO_NET_RAW;
-		if ((arg[1] & 0xfu) == FLOW_SOCK_DGRAM && flags)
-			*flags |= KOF_FLOWF_DGRAM;
-		return KOF_NUCLEO_NET_OPEN;
-	}
+	if (arg && cap == KOF_NUCLEO_NET_OPEN && bits != 32 && nr == 41u)
+		return sock_kind(arg, flags);
 	if (cap == KOF_NUCLEO_ALLOC && arg) {
 		int is_map = bits == 32 ? (nr == 90u || nr == 125u || nr == 192u)
 					: (nr == 9u || nr == 10u);

@@ -16,6 +16,7 @@
 
 #include "objsrc.h"
 #include "../analyzers/parsers/binaries/disasm/kdis.h"
+#include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../extractors/unpack/pe_rebuild.h"
 #include "../kofeng.h"
 /* KOF_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
@@ -135,6 +136,24 @@ struct kof_scanner {
 	 */
 	uint8_t  diag_gate[32];
 	int      diag_gate_done;
+	/*
+	 * THE OBJECT'S RELOCATIONS, derived once - see struct kof_elf_relocs. The
+	 * gate reads them for KOF_DIAG_REFS and the diag routes read the same table
+	 * through kof_diag_scan_with_inputs; both used to walk the relocation
+	 * sections themselves. Built on first need, freed with the object.
+	 */
+	struct kof_elf_relocs *relocs;
+	int      relocs_ready;
+	/* A serving diagnose added names to sym - see sym_serve. Per object. */
+	int      sym_served;
+	/*
+	 * WHAT THE PE RESOLVES FOR ITSELF - see struct kof_apihash. An analysis
+	 * result and not a diag-route detail: the graph reads it and so does the
+	 * normaliser, and whichever asks first pays for it once. Freed with the
+	 * object, like the relocations.
+	 */
+	struct kof_apihash *apihash;
+	int      apihash_ready;
 	/*
 	 * WHICH NODE EACH DIAGNOSE BOUND EACH OF ITS OWN NODES TO - see
 	 * kof_diag_share.
@@ -1340,6 +1359,9 @@ int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
  * object, which is the routing a heuristic rule used to do by hand.
  */
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
+/* The symbol block the engine completed for this object, or NULL when it added
+ * nothing - see kof_result.syms. */
+const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n);
 
 #endif /* KOFENG_SCAN_H */
 void kof_scan_diag_force(const struct kof_obj_ctx *);

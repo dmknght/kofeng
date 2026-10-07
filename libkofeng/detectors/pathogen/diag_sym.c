@@ -43,6 +43,7 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "kofdiag.h"
@@ -54,15 +55,6 @@
 #include "../../analyzers/parsers/binaries/disasm/nucleo.h"
 #include "../../disinfect/pzero.h"
 
-/*
- * HOW MANY IMPORTED CALL SITES ONE OBJECT MAY HAVE.
- *
- * A bound on the input, not on the results - rule 4. Diamorphine's larger
- * build has 24 undefined symbols and 94 call sites between them; 512 is far
- * past anything a module reaches, and a .ko over it is reported through
- * kof_diag_scan_full rather than quietly truncated.
- */
-#define DIAG_SYM_MAX 512u
 
 /* How far back the walk reads before a call, to see its arguments set up.
  * The same 256 bytes the syscall routine uses and for the same reason. */
@@ -77,55 +69,11 @@
  * reads a register loaded with zero and the whole statement disappears.
  *
  * ONLY THE ONES A WALK CAN USE. Calls are already handled - they come through
- * kof_elf_relcalls and become sites - so what is gathered here is the rest:
+ * kof_elf_relcalls and become sites - so what is read here is the rest:
  * an operand that names a symbol. The two kinds are kept apart because a call
  * relocation's `where` points at a displacement the decoder already resolves,
  * and treating it as an operand would set a register from a branch target.
  */
-#define DIAG_SYM_REFS 512u
-
-struct symref {
-	uint64_t where;         /* file offset of the bytes the link patches */
-	uint64_t nameoff;       /* file offset of the symbol's name          */
-	int64_t  add;
-};
-
-struct refgather {
-	struct symref *r;
-	uint32_t       n, cap;
-};
-
-static int take_ref(void *user, uint64_t where, uint32_t type, uint64_t sym,
-		    int defined, int64_t addend, uint64_t nameoff)
-{
-	struct refgather *g = user;
-
-	(void)type;
-	(void)sym;
-	(void)defined;
-	if (g->n >= g->cap)
-		return 0;               /* full - see kof_elf_reloc_fn */
-	if (!nameoff)
-		return 1;
-	g->r[g->n].where = where;
-	g->r[g->n].nameoff = nameoff;
-	g->r[g->n].add = addend;
-	g->n++;
-	return 1;
-}
-
-/* The relocation whose patched bytes lie inside this instruction, or NULL. */
-static const struct symref *ref_in(const struct refgather *g, uint64_t at,
-				   uint8_t len)
-{
-	uint32_t i;
-
-	for (i = 0; i < g->n; i++)
-		if (g->r[i].where >= at && g->r[i].where < at + (uint64_t)len)
-			return &g->r[i];
-	return NULL;
-}
-
 /*
  * A register written by an instruction whose operand a relocation names now
  * carries that symbol - see struct org.
@@ -137,18 +85,18 @@ static const struct symref *ref_in(const struct refgather *g, uint64_t at,
  * displacement inside the branch, which is a KDIS_O_REL operand, so the test
  * below is what keeps a branch target from being read as a loaded address.
  */
-static void note_symref(struct walk *w, const struct refgather *g,
+static void note_symref(struct walk *w, const struct kof_elf_relocs *t,
 			const struct kdis_insn *in)
 {
-	const struct symref *r;
+	const struct kof_elf_reloc *r;
 
 	if (in->n_op < 1u || in->o[0].kind != KDIS_O_REG)
 		return;
-	r = ref_in(g, in->at, in->len);
+	r = kof_elf_reloc_in(t, in->at, in->len);
 	if (!r)
 		return;
 	kof_diag_org_set_sym(w, in->o[0].reg, (uint32_t)r->nameoff,
-			     (int32_t)r->add);
+			     (int32_t)r->addend);
 }
 
 struct relsite {
@@ -165,10 +113,17 @@ struct relsite {
 	uint8_t  argrole[6];    /* which input each argument register is */
 };
 
+/*
+ * THE SITES GROW WITH THE OBJECT. They were a static array of 512 - a bound on
+ * a RESULT, silently dropping every import call after it, and shared by every
+ * thread that scanned a module at once. The sites an object has are the sites
+ * its relocation table lists, which its own size bounds; `oom` is the one
+ * honest way to run out, and it is reported on the scan.
+ */
 struct relgather {
 	struct relsite *site;
 	uint32_t        n, cap_n;
-	int             full;
+	int             oom;
 };
 
 
@@ -187,9 +142,16 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	cap = kof_flow_cap_of_name(name);
 	if (cap == KOF_NUCLEO_NONE)
 		return;
-	if (g->n >= g->cap_n) {
-		g->full = 1;
-		return;
+	if (g->n == g->cap_n) {
+		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
+		struct relsite *ns = realloc(g->site, (size_t)nc * sizeof *ns);
+
+		if (!ns) {
+			g->oom = 1;
+			return;
+		}
+		g->site = ns;
+		g->cap_n = nc;
 	}
 	g->site[g->n].at = at;
 	g->site[g->n].cap = cap;
@@ -222,29 +184,61 @@ static void gather_fn(void *user, uint64_t va, uint64_t size, const char *name)
 	struct funcgather *g = user;
 
 	(void)name;
-	if (!size || g->n >= g->cap_n)
+	if (!size)
 		return;
+	if (g->n == g->cap_n) {
+		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
+		struct funcrange *nf = realloc(g->fn, (size_t)nc * sizeof *nf);
+
+		if (!nf)
+			return;
+		g->fn = nf;
+		g->cap_n = nc;
+	}
 	g->fn[g->n].va = va;
 	g->fn[g->n].size = size;
 	g->n++;
 }
 
-#define DIAG_SYM_FUNCS 512u
+/* A site's decoder address and where it is in the gather order, so a call can
+ * be matched to its site by binary search - the walk used to scan every site
+ * for every call instruction. Ordered by address THEN index, so among sites
+ * that share one the lowest-numbered wins, which is what the scan chose. */
+struct site_at {
+	uint64_t at;
+	uint32_t idx;
+};
+
+static int site_at_cmp(const void *x, const void *y)
+{
+	const struct site_at *a = x, *b = y;
+
+	if (a->at != b->at)
+		return a->at < b->at ? -1 : 1;
+	return a->idx < b->idx ? -1 : a->idx > b->idx;
+}
 
 void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 const struct kof_obj_ctx *ctx,
 			 const uint8_t *base, uint64_t size)
 {
-	static struct relsite  sites[DIAG_SYM_MAX];
-	static struct funcrange fns[DIAG_SYM_FUNCS];
-	static uint16_t        node_of[DIAG_SYM_MAX];
-	static struct symref   refs[DIAG_SYM_REFS];
-	struct refgather rg;
+	struct relsite  *sites;
+	struct funcrange *fns = NULL;
+	uint16_t        *node_of = NULL;
+	struct site_at  *by_at = NULL;
+	const struct kof_elf_relocs *rt;
 	struct relgather g;
 	struct funcgather fg;
 	const struct kof_elf_info *ei;
 	kof_buf f;
 	uint32_t i, j;
+
+	/* A PE has an import table and not a relocation table; its half of this
+	 * route is in diag_pe.c. */
+	if (ctx && ctx->format == KOF_FMT_PE) {
+		kof_diag_run_pe_symbol(s, ctx, base, size);
+		return;
+	}
 
 	/*
 	 * x86-64 ONLY, and said here rather than left to fail quietly: the
@@ -261,13 +255,19 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	f.p = base;
 	f.n = size;
 	memset(&g, 0, sizeof g);
-	g.site = sites;
-	g.cap_n = DIAG_SYM_MAX;
+	memset(&fg, 0, sizeof fg);
 	kof_elf_relcalls(f, ei, gather, &g);
-	if (g.full)
+	sites = g.site;
+	if (g.oom)
 		s->full = 1;
 	if (!g.n)
-		return;
+		goto out;
+	node_of = malloc((size_t)g.n * sizeof *node_of);
+	by_at = malloc((size_t)g.n * sizeof *by_at);
+	if (!node_of || !by_at) {
+		s->full = 1;
+		goto out;
+	}
 
 	/*
 	 * EVERY SITE BECOMES A NODE BEFORE ANY WALK STARTS.
@@ -293,11 +293,14 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			break;
 		node_of[i] = (uint16_t)(s->n_hit - 1u);
 	}
+	for (i = 0; i < g.n; i++) {
+		by_at[i].at = sites[i].at;
+		by_at[i].idx = i;
+	}
+	qsort(by_at, g.n, sizeof *by_at, site_at_cmp);
 
-	memset(&fg, 0, sizeof fg);
-	fg.fn = fns;
-	fg.cap_n = DIAG_SYM_FUNCS;
 	kof_elf_funcs(f, ei, gather_fn, &fg);
+	fns = fg.fn;
 
 	/*
 	 * ---- ONE WALK PER FUNCTION ---------------------------------------
@@ -312,14 +315,10 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	 * and ends, so this costs no search; and it bounds the walk, which a
 	 * sweep of the section would not.
 	 */
-	/* The operand relocations, once for the object - see struct symref. */
-	rg.r = refs;
-	rg.n = 0;
-	rg.cap = DIAG_SYM_REFS;
-	/* CODE ONLY: what is wanted is the symbol an INSTRUCTION's operand names.
-	 * The data relocations are table entries nothing here can use, and
-	 * they would spend the bound on them. */
-	kof_elf_relocs(f, ei, KOF_ELF_RELOC_CODE, take_ref, &rg);
+	/* The object's relocations - one table, read by every route - see
+	 * struct kof_elf_relocs. kof_elf_reloc_in answers only for a CODE
+	 * relocation with a name, which is what an operand can stand for. */
+	rt = kof_diag_relocs(s, ctx, KOF_ELF_RELOC_CODE);
 
 	for (j = 0; j < fg.n; j++) {
 		struct kof_kdis k;
@@ -355,17 +354,33 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 */
 			if (in.op != KDIS_CALL && in.op != KDIS_JMP) {
 				kof_diag_org_step(&w, &in);
-				note_symref(&w, &rg, &in);
+				note_symref(&w, rt, &in);
 				continue;
 			}
 			tva = in.target;        /* an offset, both sides */
-			for (i = 0; i < g.n; i++) {
+			{
+				/* the first site at this address that has a node */
+				uint32_t a0 = 0, a1 = g.n;
+
+				while (a0 < a1) {
+					uint32_t mid = a0 + (a1 - a0) / 2u;
+
+					if (by_at[mid].at < tva)
+						a0 = mid + 1u;
+					else
+						a1 = mid;
+				}
+				i = g.n;
+				for (; a0 < g.n && by_at[a0].at == tva; a0++)
+					if (node_of[by_at[a0].idx] != 0xffffu) {
+						i = by_at[a0].idx;
+						break;
+					}
+			}
+			if (i < g.n) {
 				struct kof_diag_hit *h;
 				unsigned a;
 
-				if (sites[i].at != tva ||
-				    node_of[i] == 0xffffu)
-					continue;
 				h = kof_diag_hit_of(s, node_of[i]);
 				for (a = 0; a < 6u && h; a++) {
 					uint8_t role = sites[i].argrole[a];
@@ -401,7 +416,6 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 						}
 					}
 				}
-				break;
 			}
 			kof_diag_org_step(&w, &in);
 			/*
@@ -421,4 +435,9 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			}
 		}
 	}
+out:
+	free(sites);
+	free(fns);
+	free(node_of);
+	free(by_at);
 }

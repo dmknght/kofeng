@@ -644,7 +644,14 @@ static void print_pe(const void *view, const struct kof_obj_ctx *ctx,
 	}
 	/* The imports and exports, in the same block and printed by the same
 	 * function an ELF's symbols are - see print_syms. */
-	{
+	if (g_decl_syms && g_decl_syms_n) {
+		/* What the engine handed over with a normalised view: the view's own
+		 * headers describe the file before the transform, so rebuilding from
+		 * them printed "none" for a view whose parent has records - and says
+		 * nothing of the APIs the program resolved for itself. The tool shows
+		 * what the engine returned. */
+		print_syms(g_decl_syms, g_decl_syms_n);
+	} else {
 		static uint8_t blk[KOF_SYM_MAX_BYTES];
 
 		print_syms(blk, kof_pe_syms(buf, p, blk, sizeof blk));

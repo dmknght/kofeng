@@ -43,6 +43,7 @@
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
 #include "../detectors/pathogen/kofdiag.h"
+#include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include "../analyzers/parsers/binaries/disasm/xref.h"
@@ -140,6 +141,13 @@ void kof_scan_free(struct kof_scanner *sc)
 		kof_diag_scan_free(sc->diag_graph);
 		sc->diag_graph = NULL;
 	}
+	if (sc->relocs) {
+		kof_elf_reloc_table_free(sc->relocs);
+		free(sc->relocs);
+		sc->relocs = NULL;
+	}
+	kof_apihash_free(sc->apihash);
+	sc->apihash = NULL;
 	free(sc->gr);
 	free(sc->live);
 	free(sc->found);
@@ -3077,6 +3085,9 @@ static uint32_t norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * travel from the parent.
 	 */
 	if (ctx->format == KOF_FMT_PE) {
+		/* THE RESOLVED IMPORTS ARE ALREADY IN THIS BLOCK: c_syms completes
+		 * a PE's symbols from the analysis product, and the view carries
+		 * what the object says. One source, one copy. */
 		in = ctx->content->syms(ctx, &n_in);
 		if (!in || !n_in || n_in > cap)
 			return 0;
@@ -4199,6 +4210,7 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 * a stale one would shelter whatever lands in that slot next. */
 	sc->heur_keep = 0;
 	sc->sym_done = 0;
+	sc->sym_served = 0;
 	sc->sym_n = 0;
 	sc->msym_bound = 0;
 	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
@@ -4227,6 +4239,15 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 */
 	sc->diag_ready = 0;
 	sc->diag_gate_done = 0;
+	if (sc->relocs) {
+		kof_elf_reloc_table_free(sc->relocs);
+		free(sc->relocs);
+		sc->relocs = NULL;
+	}
+	kof_apihash_free(sc->apihash);
+	sc->apihash = NULL;
+	sc->relocs_ready = 0;
+	sc->apihash_ready = 0;
 	/*
 	 * AND THE ASK ITSELF - see KOF_ENG_USE_PATHOGEN, which says the
 	 * property out loud: "there is no state to set, so one object's ask
@@ -4619,6 +4640,20 @@ static void scan_object(struct kof_scanner *sc, kof_buf buf,
 	 */
 	if (script_forms(sc, &ctx, opt, pdepth) && sc->broken)
 		out->broken = sc->broken;
+
+	/*
+	 * WHAT THE ENGINE COMPLETED IS DECLARED ON THE OBJECT, so the result
+	 * carries it like any producer's - see kof_result.syms. A tool then shows
+	 * what the engine returned for a stager's symbols instead of reading the
+	 * file's table itself and printing a different answer.
+	 */
+	{
+		uint32_t ns = 0;
+		const uint8_t *sb = kof_scan_served_syms(&ctx, &ns);
+
+		if (sb && sc->cur_src)
+			kof_src_declare_syms(sc->cur_src, sb, ns);
+	}
 
 	/* VERDICT: how it was reached, which only exists once it has been. */
 	/*

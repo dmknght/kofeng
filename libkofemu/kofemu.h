@@ -217,6 +217,8 @@ struct kof_emu_cfg {
 
 struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg);
 void            kof_emu_free(struct kof_emu *e);
+/* A copy of an emulator that has never run; NULL when it has, or on OOM. */
+struct kof_emu *kof_emu_fork(const struct kof_emu *t);
 
 /*
  * Map `n` bytes of `src` at `va`, in a region `memsz` long - the tail past `n`
@@ -297,7 +299,17 @@ void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
  * directory. Its own image costs a mapping and keeps the two apart.
  */
 #define KOF_EMU_WIN_MOD_KBASE    8u
-#define KOF_EMU_WIN_MOD_COUNT 9u
+/*
+ * WS2_32, AND WHY IT IS HERE. A Windows stager has no import table to speak of:
+ * it LoadLibrary's ws2_32 and walks its exports for socket, connect and recv.
+ * With no such module the resolver searched every library it was shown, found
+ * nothing, and ran off the end of the list - MEASURED on a plain Metasploit
+ * stager, which stopped at its second lookup (WSAStartup) after resolving
+ * LoadLibraryA by itself. The module is what lets the stager's OWN resolver run
+ * to the end, whatever hash it uses.
+ */
+#define KOF_EMU_WIN_MOD_WS2      9u
+#define KOF_EMU_WIN_MOD_COUNT 10u
 
 /*
  * How much address space one synthetic library occupies. The builder in
@@ -389,6 +401,36 @@ void kof_emu_win_setup(struct kof_emu *e, uint64_t image_base);
  * for a name this environment does not carry, which is a thunk to leave as the
  * file wrote it - see fill_iat_pe in emu_unpack.c for why that is better than
  * a stub that shrugs. */
+/*
+ * WHAT THE GUEST CALLED, as a record the caller can read back.
+ *
+ * One entry per DISTINCT (call site, API): a stager that calls recv from the
+ * same place a thousand times is one fact with a count of a thousand, so the
+ * log grows with the program's code and not with how long it ran. `site` is
+ * the address of the CALL instruction that entered the API stub - what the
+ * program says it is doing, and where an analysis wants its node - and is zero
+ * when the stub was entered some other way (a jump).
+ *
+ * The first four arguments are the ones the Windows APIs a stager uses carry
+ * their meaning in; `ret` is what the environment answered.
+ */
+struct kof_emu_win_event {
+	uint64_t site;
+	uint32_t api;           /* an index for kof_emu_win_api_name */
+	uint32_t count;
+	uint64_t arg[4];
+	uint64_t ret;
+};
+
+uint32_t kof_emu_win_event_count(const struct kof_emu *e);
+/* The address of the instruction that last transferred control. With the final
+ * rip it says where a run LEFT from, which is the jump into a buffer the
+ * program allocated and filled - the `jmp r15` at the end of a stager. */
+uint64_t kof_emu_last_branch_at(const struct kof_emu *e);
+
+int      kof_emu_win_event_at(const struct kof_emu *e, uint32_t i,
+			      struct kof_emu_win_event *out);
+
 uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name);
 
 void     kof_emu_set_rip(struct kof_emu *e, uint64_t rip);

@@ -174,52 +174,84 @@ uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
 			  kof_elf_relcall_fn fn, void *user);
 
 /*
- * AND EVERY RELOCATION, for a caller that has to make the object runnable.
+ * EVERY RELOCATION OF A RELOCATABLE OBJECT, DERIVED ONCE AND KEPT.
+ *
+ * A relocation says which SYMBOL an instruction's operand really names, which
+ * is the only way to know that `mov rdi, 0x0` is `&__this_module->list`: the
+ * bytes in the file are a hole, and the name is in the relocation beside them.
+ * It also says what to patch into an image that has to RUN. Three readers need
+ * it - the gate that asks whether the code refers into a symbol, the walk that
+ * gives a register the name its operand stood for, and the builder of an
+ * emulated image - and they used to walk the relocation sections of the same
+ * object one each, with a bound of their own in two of them. The table is the
+ * one derivation; it is built once per object and read by all of them.
+ *
+ * SORTED BY `where`, so "the relocation inside this instruction" is a binary
+ * search and not a scan of every record per decoded instruction.
+ *
+ * NOT CAPPED. The table is as long as the object's relocation sections are,
+ * which the file's own size bounds; a limit on the RESULT is a limit on
+ * evidence. (One of the consumers carried a 512-record limit and quietly
+ * dropped every relocation after that - the clean corpus has modules with
+ * hundreds of thousands.)
  *
  * `where` is the file offset of the bytes to patch, `sym` the file offset the
- * symbol resolves to and `defined` whether it resolves here at all. RELA
- * only: a REL section carries no addend, and a caller applying a relocation
- * needs one.
- *
- * `nameoff` IS THE FILE OFFSET OF THE SYMBOL'S NAME, or zero when it has
- * none. An offset and not the string, because the string is already in the
- * buffer the caller handed in and copying it would mean deciding how much
- * of it to keep.
- *
- * WHAT IT IS FOR. A relocation says which SYMBOL an instruction's operand
- * really names, which is the only way to know that `mov rdi, 0x0` is
- * `&__this_module->list`: the bytes in the file are a hole, and the name is
- * in the relocation beside them.
- *
- * IT RETURNS WHETHER TO CARRY ON - zero stops the walk. A caller that is
- * COLLECTING has a bound and reaches it; without this it went on being
- * called 1.67 million times for a table that filled at 512, and the two
- * nvidia modules in the clean corpus cost 0.8 s between them for answers
- * nobody kept. A caller applying relocations returns non-zero always,
- * because it needs every one.
- */
-typedef int (*kof_elf_reloc_fn)(void *user, uint64_t where, uint32_t type,
-				uint64_t sym, int defined, int64_t addend,
-				uint64_t nameoff);
-
-/*
- * WHICH RELOCATIONS. A relocation patches either an INSTRUCTION - a call, a
- * load of an address - or a DATA word - a function pointer in a table, the
- * name a probe object carries. The two are different questions: a caller
- * looking for what an instruction's operand names wants the first and would
- * be handed thousands of table entries it cannot use by the second, and a
- * caller making the object RUNNABLE needs both.
+ * symbol resolves to and `defined` whether it resolves here at all. `nameoff`
+ * is the file offset of the symbol's NAME, or zero when it has none - an
+ * offset and not the string, because the string is already in the buffer the
+ * caller handed in. `code` says whether the section patched holds code: a call
+ * or a load of an address, as against a function pointer in a table or the name
+ * a probe object carries. RELA only: a REL section carries no addend, and a
+ * caller applying a relocation needs one.
  *
  * It used to be one filter, silently, and the filter was "the target is
  * executable". That made every pointer in .data and .rodata vanish from an
- * emulated image: a struct kprobe the object fills in statically read back
- * as zeros, and the name inside it with it.
+ * emulated image: a struct kprobe the object fills in statically read back as
+ * zeros, and the name inside it with it. Both kinds are kept and say which
+ * they are; a reader takes the kind it wants.
+ */
+struct kof_elf_reloc {
+	uint64_t where;
+	uint64_t sym;
+	uint64_t nameoff;
+	int64_t  addend;
+	uint32_t type;
+	uint8_t  defined;
+	uint8_t  code;
+};
+
+struct kof_elf_relocs {
+	struct kof_elf_reloc *v;
+	uint32_t              n;
+};
+
+/*
+ * WHICH KINDS. A reader that wants the symbol an INSTRUCTION's operand names
+ * wants the first and would be handed, and would sort, thousands of table
+ * entries it cannot use by the second; a builder of a runnable image needs
+ * both. MEASURED on 100 kernel modules, building both kinds for every object
+ * put 9.6% on the whole scan, nearly all of it data relocations that the gate
+ * and the symbol walk never read. So the kinds are asked for, and each is built
+ * by the first reader that needs it and by no one else.
  */
 #define KOF_ELF_RELOC_CODE 1u
 #define KOF_ELF_RELOC_DATA 2u
 
-uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
-			unsigned want, kof_elf_reloc_fn fn, void *user);
+/* Build the table for `p`, of the kinds in `want`. Returns the record count;
+ * zero with `out` empty when the object has no RELA relocations of those kinds
+ * or no symbol table to name them by. */
+uint32_t kof_elf_reloc_table(kof_buf f, const struct kof_elf_info *p,
+			     unsigned want, struct kof_elf_relocs *out);
+void     kof_elf_reloc_table_free(struct kof_elf_relocs *t);
+
+/*
+ * The CODE relocation, with a name, whose patched bytes lie inside the
+ * instruction at [at, at+len) - or NULL. A call's own relocation patches the
+ * displacement inside the branch and is found like any other; a caller that
+ * does not want a branch target read as a loaded address looks at the operand.
+ */
+const struct kof_elf_reloc *kof_elf_reloc_in(const struct kof_elf_relocs *t,
+					     uint64_t at, uint8_t len);
 
 /* Where each function begins and how long it is, as the symbol table states
  * it. A function nothing calls can be found no other way. */

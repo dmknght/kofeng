@@ -1379,59 +1379,79 @@ static uint64_t rel_target(const struct kof_elf_info *p, const char *nm,
 }
 
 /*
- * EVERY RELOCATION IN A RELOCATABLE OBJECT, AS FILE OFFSETS.
- *
- * kof_elf_relcalls reports the CALLS, because a call's target is what a call
- * graph is made of. This reports the rest: the places where an address of
- * something in this object is written into it. A caller that wants to RUN a
- * .ko needs them, because without them every pointer the code loads is the
- * hole the linker was supposed to fill -
- *
- *     48 c7 c7 00 00 00 00   mov $0x0,%rdi
- *                 R_X86_64_32S  .rodata+0x1f
- *
- * - so two calls handed the same object both receive zero, and nothing can
- * tell they were handed the same thing.
+ * THE RELOCATION TABLE - see struct kof_elf_relocs for what it is and why it is
+ * one table and not a walk per reader.
  *
  * FILE OFFSETS ON BOTH SIDES. An ET_REL has sh_addr of zero everywhere; the
  * linker has not placed anything. The file is the only address space it has,
- * which is the same reading kof_elf_relcalls takes for its sites.
+ * which is the same reading kof_elf_relcalls takes for its sites. `sym` is the
+ * file offset the symbol resolves to, and `defined` says whether it resolves at
+ * all - an undefined symbol is a promise to the loader and there is nothing
+ * here to point at.
  *
- * `sym` is the file offset the symbol resolves to, and `defined` says whether
- * it resolves at all - an undefined symbol is a promise to the loader and
- * there is nothing here to point at.
+ * TWO PASSES OVER THE SECTION TABLE AND NOT A GROWING ARRAY: the first only
+ * counts, so the allocation is exact and one record is never moved.
  */
-uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
-			unsigned want, kof_elf_reloc_fn fn, void *user)
+static int reloc_section(const struct kof_elf_info *p, uint32_t i,
+			 unsigned want, uint64_t *tgt_off, int *is_code)
+{
+	*is_code = 0;
+	if (p->sec[i].type != SHT_RELA)
+		return 0;               /* REL has no addend to report */
+	*tgt_off = rel_target(p, p->sec[i].name, is_code);
+	if (!*tgt_off)
+		return 0;
+	return (want & (*is_code ? KOF_ELF_RELOC_CODE : KOF_ELF_RELOC_DATA)) != 0;
+}
+
+static int reloc_by_where(const void *x, const void *y)
+{
+	const struct kof_elf_reloc *a = x, *b = y;
+
+	return a->where < b->where ? -1 : a->where > b->where;
+}
+
+uint32_t kof_elf_reloc_table(kof_buf f, const struct kof_elf_info *p,
+			     unsigned want, struct kof_elf_relocs *out)
 {
 	struct kof_elf_symtab t;
-	uint32_t i, n = 0;
+	uint32_t i, total = 0, n = 0;
 
-	if (!p || !p->valid || !fn || !kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_FULL, &t))
+	out->v = NULL;
+	out->n = 0;
+	if (!p || !p->valid || !kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_FULL, &t))
 		return 0;
 
 	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		int rela = p->sec[i].type == SHT_RELA;
-		uint64_t k, step, have, tgt_off;
-		int is_code = 0;
+		uint64_t tgt_off;
+		int is_code;
 
-		if (!rela)
-			continue;       /* REL has no addend to report */
-		tgt_off = rel_target(p, p->sec[i].name, &is_code);
-		if (!tgt_off)
+		if (!reloc_section(p, i, want, &tgt_off, &is_code))
 			continue;
-		if (!(want & (is_code ? KOF_ELF_RELOC_CODE
-				      : KOF_ELF_RELOC_DATA)))
+		total += (uint32_t)(kof_clip_len(f.n, p->sec[i].file_off,
+						 p->sec[i].file_size) /
+				    REL_STEP(&t, 1));
+	}
+	if (!total)
+		return 0;
+	out->v = malloc((size_t)total * sizeof *out->v);
+	if (!out->v)
+		return 0;
+
+	for (i = 0; i < p->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		uint64_t k, step, have, tgt_off;
+		int is_code;
+
+		if (!reloc_section(p, i, want, &tgt_off, &is_code))
 			continue;
-		step = REL_STEP(&t, rela);
+		step = REL_STEP(&t, 1);
 		have = kof_clip_len(f.n, p->sec[i].file_off,
 				    p->sec[i].file_size);
-		for (k = 0; k + step <= have; k += step) {
+		for (k = 0; k + step <= have && n < total; k += step) {
 			struct kof_elf_symbol sy;
-			uint64_t roff = 0, add = 0, sv = 0;
+			struct kof_elf_reloc *r = &out->v[n];
+			uint64_t roff = 0, add = 0;
 			uint32_t rty = 0, si = 0;
-			uint64_t nmoff = 0;
-			int defined = 0;
 
 			if (!rel_at(f, &t, p->sec[i].file_off + k,
 				    &roff, &rty, &si))
@@ -1441,24 +1461,62 @@ uint32_t kof_elf_relocs(kof_buf f, const struct kof_elf_info *p,
 						t.be, &add))
 					break;
 			}
+			r->where = tgt_off + roff;
+			r->type = rty;
+			r->addend = (int64_t)add;
+			r->sym = 0;
+			r->nameoff = 0;
+			r->defined = 0;
+			r->code = (uint8_t)(is_code != 0);
 			if (kof_elf_symbol_at(f, &t, si, &sy)) {
 				if (sy.nameoff && sy.nameoff < t.strn)
-					nmoff = t.str + sy.nameoff;
+					r->nameoff = t.str + sy.nameoff;
 				if (sy.shndx &&
 				    sy.shndx < p->sec_count &&
 				    sy.shndx < KOF_ELF_MAX_SECTIONS) {
-					sv = p->sec[sy.shndx].file_off +
-					     sy.value;
-					defined = 1;
+					r->sym = p->sec[sy.shndx].file_off +
+						 sy.value;
+					r->defined = 1;
 				}
 			}
 			n++;
-			if (!fn(user, tgt_off + roff, rty, sv, defined,
-				(int64_t)add, nmoff))
-				return n;
 		}
 	}
+	out->n = n;
+	if (n > 1u)
+		qsort(out->v, n, sizeof *out->v, reloc_by_where);
 	return n;
+}
+
+void kof_elf_reloc_table_free(struct kof_elf_relocs *t)
+{
+	if (!t)
+		return;
+	free(t->v);
+	t->v = NULL;
+	t->n = 0;
+}
+
+const struct kof_elf_reloc *kof_elf_reloc_in(const struct kof_elf_relocs *t,
+					     uint64_t at, uint8_t len)
+{
+	uint32_t lo = 0, hi;
+
+	if (!t || !t->n)
+		return NULL;
+	hi = t->n;
+	while (lo < hi) {                       /* first record with where >= at */
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (t->v[mid].where < at)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	for (; lo < t->n && t->v[lo].where < at + (uint64_t)len; lo++)
+		if (t->v[lo].code && t->v[lo].nameoff)
+			return &t->v[lo];
+	return NULL;
 }
 
 uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,

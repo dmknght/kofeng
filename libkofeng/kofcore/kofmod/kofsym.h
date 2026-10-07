@@ -169,7 +169,13 @@ enum kof_sym_origin {
 	 * import, DEFINED is an export. A second origin would say the same
 	 * thing twice and let the two disagree.
 	 */
-	KOF_SYM_ORIGIN_PE_DIR = 3
+	KOF_SYM_ORIGIN_PE_DIR = 3,
+	/*
+	 * The directories PLUS names the program resolved for itself - see
+	 * KOF_DIAG_SERVES. Said apart from PE_DIR because a reader who takes
+	 * "directory" literally is told something false about those records.
+	 */
+	KOF_SYM_ORIGIN_PE_RESOLVED = 4
 };
 
 /*

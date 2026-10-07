@@ -154,8 +154,6 @@ struct made {
 	uint16_t node;
 };
 
-#define DIAG_EMU_SITES 64u
-#define DIAG_EMU_MADE  64u
 
 /*
  * IS THIS RETURN VALUE SOMETHING A LATER CALL COULD CARRY.
@@ -526,8 +524,8 @@ static int apply_reloc(void *user, uint64_t where, uint32_t type,
 	return 1;             /* an image needs every one of them */
 }
 
-static struct kof_emu *build_rel_image(const struct kof_obj_ctx *ctx,
-				       const struct kof_elf_info *ei,
+static struct kof_emu *build_rel_image(struct kof_diag_scan *s,
+				       const struct kof_obj_ctx *ctx,
 				       const uint8_t *base, uint64_t size)
 {
 	struct kof_emu_cfg cfg;
@@ -625,16 +623,23 @@ static struct kof_emu *build_rel_image(const struct kof_obj_ctx *ctx,
 
 	{
 		struct relapply ra;
-		kof_buf f;
+		unsigned kind;
 
-		f.p = base;
-		f.n = size;
 		ra.em = em;
 		ra.size = size;
-		/* BOTH: an image is made runnable by its code AND by the pointers its
-		 * data holds - see KOF_ELF_RELOC_DATA. */
-		kof_elf_relocs(f, ei, KOF_ELF_RELOC_CODE | KOF_ELF_RELOC_DATA,
-			       apply_reloc, &ra);
+		/* BOTH KINDS: an image is made runnable by its code AND by the
+		 * pointers its data holds - see struct kof_elf_reloc. The code table
+		 * is the one the other routes read; the data table is built here and
+		 * for nothing else. */
+		for (kind = KOF_ELF_RELOC_CODE; kind <= KOF_ELF_RELOC_DATA; kind <<= 1) {
+			const struct kof_elf_relocs *t = kof_diag_relocs(s, ctx, kind);
+			uint32_t i;
+
+			for (i = 0; i < t->n; i++)
+				(void)apply_reloc(&ra, t->v[i].where, t->v[i].type,
+						  t->v[i].sym, t->v[i].defined,
+						  t->v[i].addend, t->v[i].nameoff);
+		}
 	}
 	return em;
 }
@@ -769,9 +774,13 @@ struct skipsite {
 	uint16_t cap;           /* KOF_NUCLEO_NONE for an internal call */
 };
 
+/* GROWN WITH THE OBJECT, and not a static array of 1024: a bound on a result
+ * drops every call after it without a word, and a static is shared by every
+ * thread scanning a module at once. */
 struct skipgather {
 	struct skipsite *site;
 	uint32_t         n, cap_n;
+	int              oom;
 };
 
 static void gather_skip(void *user, uint64_t at, uint64_t target,
@@ -779,8 +788,19 @@ static void gather_skip(void *user, uint64_t at, uint64_t target,
 {
 	struct skipgather *g = user;
 
-	if (g->n >= g->cap_n || at < DIAG_REL_CALLLEN)
+	if (at < DIAG_REL_CALLLEN)
 		return;
+	if (g->n == g->cap_n) {
+		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
+		struct skipsite *ns = realloc(g->site, (size_t)nc * sizeof *ns);
+
+		if (!ns) {
+			g->oom = 1;
+			return;
+		}
+		g->site = ns;
+		g->cap_n = nc;
+	}
 	g->site[g->n].call_at = at - DIAG_REL_CALLLEN;
 	g->site[g->n].resume = at;
 	g->site[g->n].callee = target;
@@ -792,19 +812,54 @@ static void gather_skip(void *user, uint64_t at, uint64_t target,
 	g->n++;
 }
 
-#define DIAG_REL_SKIPS 1024u
-#define DIAG_REL_FUNCS 512u
-
 struct funcspan { uint64_t va, size; };
-struct funcgather { struct funcspan *fn; uint32_t n, cap_n; };
+static int skip_cmp(const void *a, const void *b)
+{
+	const struct skipsite *x = a, *y = b;
+
+	if (x->call_at != y->call_at)
+		return x->call_at < y->call_at ? -1 : 1;
+	if (x->callee != y->callee)
+		return x->callee < y->callee ? -1 : 1;
+	return (x->cap > y->cap) - (x->cap < y->cap);
+}
+
+/* First site whose call begins at or after `at`; sites are sorted by it. */
+static uint32_t skip_first(const struct skipsite *v, uint32_t n, uint64_t at)
+{
+	uint32_t lo = 0, hi = n;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (v[mid].call_at < at)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo;
+}
+
+struct funcgather { struct funcspan *fn; uint32_t n, cap_n; int oom; };
 
 static void gather_fn(void *user, uint64_t va, uint64_t sz, const char *nm)
 {
 	struct funcgather *g = user;
 
 	(void)nm;
-	if (!sz || g->n >= g->cap_n)
+	if (!sz)
 		return;
+	if (g->n == g->cap_n) {
+		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
+		struct funcspan *nf = realloc(g->fn, (size_t)nc * sizeof *nf);
+
+		if (!nf) {
+			g->oom = 1;
+			return;
+		}
+		g->fn = nf;
+		g->cap_n = nc;
+	}
 	g->fn[g->n].va = va;
 	g->fn[g->n].size = sz;
 	g->n++;
@@ -1157,35 +1212,23 @@ static void field_value(struct kof_diag_hit *fh, const struct kdis_insn *ci,
 	fh->bits |= KOF_DIAG_H_VAL;
 }
 
-static void run_rel_gaps(struct kof_diag_scan *s,
-			 const struct kof_obj_ctx *ctx,
-			 const struct kof_elf_info *ei,
-			 const uint8_t *base, uint64_t size)
+static void run_rel_gaps_in(struct kof_diag_scan *s,
+			    const struct kof_obj_ctx *ctx,
+			    const struct kof_elf_info *ei,
+			    const uint8_t *base, uint64_t size,
+			    const struct skipgather *sgp,
+			    const struct funcgather *fgp,
+			    uint16_t *ret, uint8_t *dirty,
+			    uint8_t *next_dirty, uint8_t *vis,
+			    struct kof_emu **tmpl)
 {
-	static struct skipsite skips[DIAG_REL_SKIPS];
-	static struct funcspan fns[DIAG_REL_FUNCS];
-	static uint16_t ret[DIAG_REL_FUNCS];
-	static uint8_t dirty[DIAG_REL_FUNCS], next_dirty[DIAG_REL_FUNCS];
-	struct skipgather sg;
-	struct funcgather fg;
-	kof_buf f;
+	struct skipsite *skips = sgp->site;
+	struct funcspan *fns = fgp->fn;
+	const struct skipgather sg = *sgp;
+	const struct funcgather fg = *fgp;
 	uint32_t n = kof_diag_scan_count(s), q, j, pass;
 
-	if (ctx->arch != KOF_ARCH_X86_64 || !n)
-		return;
-
-	f.p = base;
-	f.n = size;
-	memset(&sg, 0, sizeof sg);
-	sg.site = skips;
-	sg.cap_n = DIAG_REL_SKIPS;
-	kof_elf_relcalls(f, ei, gather_skip, &sg);
-	memset(&fg, 0, sizeof fg);
-	fg.fn = fns;
-	fg.cap_n = DIAG_REL_FUNCS;
-	kof_elf_funcs(f, ei, gather_fn, &fg);
-	if (!sg.n || !fg.n)
-		return;
+	(void)ei;
 	promote_wrappers(s, fns, fg.n);
 	for (j = 0; j < fg.n; j++)
 		ret[j] = 0xffffu;
@@ -1238,7 +1281,6 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 		uint64_t n_fd = 0;
 		/* Which sites this span has already been seated at, so one
 		 * pass cannot circle. */
-		static uint8_t vis[DIAG_REL_SKIPS];
 		uint32_t n_seat = 0, gap_steps = 0;
 		uint64_t run_lo, run_hi;
 		uint64_t last_in;
@@ -1316,7 +1358,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			}
 		}
 
-		memset(vis, 0, sizeof vis);
+		memset(vis, 0, sg.n);
 
 		/*
 		 * ---- CAN THIS FUNCTION CARRY A LINK AT ALL -----------------
@@ -1378,9 +1420,19 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			run_hi = hi;
 		}
 
-		em = build_rel_image(ctx, ei, base, size);
-		if (!em)
+		/* ONE IMAGE PER OBJECT, FORKED PER SPAN. Applying the relocation
+		 * tables is the cost of an image, and it was paid again for
+		 * every span: callgrind on a 3000-site module put 52% of the
+		 * scan in the byte writes of that loop. */
+		if (!*tmpl)
+			*tmpl = build_rel_image(s, ctx, base, size);
+		if (!*tmpl)
 			return;
+		em = kof_emu_fork(*tmpl);
+		if (!em) {
+			s->full = 1;
+			return;
+		}
 		kof_emu_set_rip(em, DIAG_REL_BASE + run_lo);
 		last_in = run_lo;
 
@@ -1400,12 +1452,15 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 				goto stalled;
 			last_in = rip;
 
-			for (q = 0; q < sg.n; q++) {
+			/* A STEP IS AT ONE ADDRESS, so the sites there are found
+			 * by search and not by reading all of them: the scan
+			 * of every site per step was 5.1 of the 6.9 billion
+			 * instructions on a module with 20000 call sites. */
+			for (q = skip_first(skips, sg.n, rip);
+			     q < sg.n && skips[q].call_at == rip; q++) {
 				uint16_t node = 0xffffu;
 				unsigned k, i;
 
-				if (skips[q].call_at != rip)
-					continue;
 				vis[q] = 1;
 				/*
 				 * ---- THE NAME THIS CALL WAS GIVEN ---------
@@ -2300,7 +2355,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 				    ci.cond == KDIS_SR_CR && ci.n_op &&
 				    ci.o[0].kind == KDIS_O_REG &&
 				    (ci.o[0].flags & KDIS_OF_READ)) {
-					uint32_t t, live = kof_diag_scan_count(s);
+					uint32_t live = kof_diag_scan_count(s);
 					int seen_site = 0;
 
 					/* LIVE COUNT, not the one taken
@@ -2620,9 +2675,56 @@ stalled:
 	}
 	if (!changed)
 		break;
-	memcpy(dirty, next_dirty, sizeof dirty);
-	memset(next_dirty, 0, sizeof next_dirty);
+	memcpy(dirty, next_dirty, fg.n);
+	memset(next_dirty, 0, fg.n);
 	}
+}
+
+/*
+ * Gathers what the body walks, SIZED BY THE OBJECT: a program with 3000 call
+ * sites is walked at all 3000, where a fixed 1024 dropped the rest unseen.
+ * An allocation that fails is reported as the scan being incomplete.
+ */
+static void run_rel_gaps(struct kof_diag_scan *s,
+			 const struct kof_obj_ctx *ctx,
+			 const struct kof_elf_info *ei,
+			 const uint8_t *base, uint64_t size)
+{
+	struct skipgather sg;
+	struct funcgather fg;
+	uint16_t *ret = NULL;
+	uint8_t *flags = NULL;
+	struct kof_emu *tmpl = NULL;
+	kof_buf f;
+
+	if (ctx->arch != KOF_ARCH_X86_64 || !kof_diag_scan_count(s))
+		return;
+
+	f.p = base;
+	f.n = size;
+	memset(&sg, 0, sizeof sg);
+	kof_elf_relcalls(f, ei, gather_skip, &sg);
+	memset(&fg, 0, sizeof fg);
+	kof_elf_funcs(f, ei, gather_fn, &fg);
+	if (sg.n > 1u)
+		qsort(sg.site, sg.n, sizeof *sg.site, skip_cmp);
+	if (sg.oom || fg.oom)
+		s->full = 1;
+	if (sg.n && fg.n) {
+		ret = malloc((size_t)fg.n * sizeof *ret);
+		flags = malloc((size_t)fg.n * 3u + sg.n);
+		if (ret && flags)
+			run_rel_gaps_in(s, ctx, ei, base, size, &sg, &fg, ret,
+					flags, flags + fg.n, flags + 2u * fg.n,
+					&tmpl);
+		else
+			s->full = 1;
+	}
+	kof_emu_free(tmpl);
+	free(ret);
+	free(flags);
+	free(sg.site);
+	free(fg.fn);
 }
 
 void kof_diag_run_emulate(struct kof_diag_scan *s,
@@ -2634,8 +2736,11 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 	const struct kof_elf_info *ei;
 	struct kof_emu_unp_report rep;
 	struct kof_emu *em;
-	struct site sites[DIAG_EMU_SITES];
-	struct made made[DIAG_EMU_MADE];
+	/* GROWN WITH THE RUN. Fixed at 64 each, a program that made a 65th
+	 * distinct call lost it from the table and its links with it. */
+	struct site *sites = NULL;
+	struct made *made = NULL;
+	unsigned cap_site = 0, cap_made = 0;
 	const unsigned *areg;
 	unsigned n_site = 0, n_made = 0, stops = 0, n_fd = 0, bits;
 
@@ -2820,11 +2925,20 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 			if (!h)
 				break;
 			node = (uint16_t)(s->n_hit - 1u);
-			if (n_site < DIAG_EMU_SITES) {
-				sites[n_site].off = off;
-				sites[n_site].node = node;
-				n_site++;
+			if (n_site == cap_site) {
+				unsigned nc = cap_site ? cap_site * 2u : 64u;
+				struct site *ns = realloc(sites, nc * sizeof *ns);
+
+				if (!ns) {
+					s->full = 1;
+					break;
+				}
+				sites = ns;
+				cap_site = nc;
 			}
+			sites[n_site].off = off;
+			sites[n_site].node = node;
+			n_site++;
 		} else {
 			h = kof_diag_hit_of(s, node);
 		}
@@ -2908,9 +3022,20 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 			for (i = 0; i < n_made; i++)
 				if (made[i].node == node)
 					break;
-			if (i == n_made && n_made < DIAG_EMU_MADE)
+			if (i == n_made && n_made == cap_made) {
+				unsigned nc = cap_made ? cap_made * 2u : 64u;
+				struct made *nm = realloc(made, nc * sizeof *nm);
+
+				if (nm) {
+					made = nm;
+					cap_made = nc;
+				} else {
+					s->full = 1;
+				}
+			}
+			if (i == n_made && n_made < cap_made)
 				n_made++;
-			if (i < DIAG_EMU_MADE) {
+			if (i < n_made) {
 				made[i].val = ret;
 				/* An allocation's second argument is its
 				 * length on every spelling of mmap this
@@ -3009,4 +3134,6 @@ void kof_diag_run_emulate(struct kof_diag_scan *s,
 	}
 
 	kof_emu_free(em);
+	free(sites);
+	free(made);
 }

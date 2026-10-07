@@ -296,6 +296,11 @@ unsigned kof_flow_name_arg(uint16_t cap, unsigned *arg);
  * string so a node is fixed width. */
 uint16_t kof_flow_name_id(const char *sym);
 
+/* A named call refined by its first four arguments - see the .c. */
+uint16_t kof_flow_cap_of_call(const char *name, const uint64_t *arg,
+			      uint8_t *flags);
+
+
 /* And back: the word for an id, or NULL. */
 const char *kof_flow_name_of(uint16_t id);
 

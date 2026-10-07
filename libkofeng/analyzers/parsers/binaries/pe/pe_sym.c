@@ -162,13 +162,14 @@ struct imp_sink {
 };
 
 static void imp_rec(void *user, uint64_t slot, const char *dll,
-		    const char *name, uint32_t ordinal)
+		    const char *name, uint32_t ordinal, uint64_t nameoff)
 {
 	struct imp_sink *k = (struct imp_sink *)user;
 	char sym[KOF_SYM_NAMELEN], clean[KOF_SYM_NAMELEN];
 	uint32_t i;
 
 	(void)slot;
+	(void)nameoff;
 	if (k->n >= k->want)
 		return;
 	if (name) {
@@ -329,4 +330,90 @@ uint32_t kof_pe_syms(kof_buf file, const struct kof_pe_info *p,
 	if (n && n == want)
 		out[KOF_SYM_H_TRUNC] = 1;
 	return KOF_SYM_HDRLEN + n * KOF_SYM_RECLEN;
+}
+
+/*
+ * IMPORTS THE PROGRAM FOUND FOR ITSELF, put where imports go.
+ *
+ * The block is imports first and exports after, and that order is the
+ * contract (see kof_pe_syms), so a record is INSERTED after the last import
+ * and the exports move up - appending would leave a resolved import below the
+ * exports, in the half a reader takes for "what the file offers".
+ *
+ * A NAME THE DIRECTORY ALREADY LISTS IS NOT ADDED AGAIN: a program that
+ * imports VirtualAlloc and also resolves it has said one thing twice, and the
+ * block is a set of what the file uses. Compared without regard to case,
+ * because the directory spells the module the way the linker did and the
+ * resolver spells it the way the loader model does.
+ *
+ * `cap` bounds the block exactly as it does in kof_pe_syms, and a record that
+ * does not fit is dropped with the header's truncated byte set - never
+ * silently.
+ */
+static int same_name(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++) {
+		char x = *a, y = *b;
+
+		if (x >= 'A' && x <= 'Z')
+			x = (char)(x - 'A' + 'a');
+		if (y >= 'A' && y <= 'Z')
+			y = (char)(y - 'A' + 'a');
+		if (x != y)
+			return 0;
+	}
+	return *a == *b;
+}
+
+uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
+				 const char *const *dll, const char *const *name,
+				 uint32_t n)
+{
+	uint32_t count, at, i, added = 0;
+
+	if (!blk || n_bytes < KOF_SYM_HDRLEN || n_bytes > cap)
+		return n_bytes;
+	count = (uint32_t)blk[KOF_SYM_H_COUNT] |
+		((uint32_t)blk[KOF_SYM_H_COUNT + 1] << 8) |
+		((uint32_t)blk[KOF_SYM_H_COUNT + 2] << 16) |
+		((uint32_t)blk[KOF_SYM_H_COUNT + 3] << 24);
+	if (KOF_SYM_HDRLEN + (uint64_t)count * KOF_SYM_RECLEN > n_bytes)
+		return n_bytes;
+	/* The first record that is not an import: where the new ones go. */
+	for (at = 0; at < count; at++)
+		if (!(blk[KOF_SYM_HDRLEN + (uint64_t)at * KOF_SYM_RECLEN +
+			  KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
+			break;
+	for (i = 0; i < n; i++) {
+		char sym[KOF_SYM_NAMELEN];
+		uint32_t k;
+		uint8_t *rec;
+
+		snprintf(sym, sizeof sym, "%.*s!%.*s", DLL_ROOM, dll[i],
+			 (int)(sizeof sym - DLL_ROOM - 2u), name[i]);
+		for (k = 0; k < count; k++)
+			if (same_name(sym, (const char *)blk + KOF_SYM_HDRLEN +
+					   (uint64_t)k * KOF_SYM_RECLEN +
+					   KOF_SYM_R_NAME))
+				break;
+		if (k < count)
+			continue;
+		if (KOF_SYM_HDRLEN + (uint64_t)(count + 1u) * KOF_SYM_RECLEN >
+		    cap) {
+			blk[KOF_SYM_H_TRUNC] = 1;
+			break;
+		}
+		rec = blk + KOF_SYM_HDRLEN + (uint64_t)at * KOF_SYM_RECLEN;
+		memmove(rec + KOF_SYM_RECLEN, rec,
+			(uint64_t)(count - at) * KOF_SYM_RECLEN);
+		rec_put(rec, KOF_SYM_F_UNDEFINED, 0, sym);
+		count++;
+		at++;
+		added++;
+	}
+	if (added) {
+		put32(blk + KOF_SYM_H_COUNT, count);
+		blk[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_PE_RESOLVED;
+	}
+	return KOF_SYM_HDRLEN + count * KOF_SYM_RECLEN;
 }

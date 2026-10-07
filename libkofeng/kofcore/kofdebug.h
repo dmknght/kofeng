@@ -74,6 +74,7 @@ enum kof_time_slot {
 	KOF_T_DIAG_SYSCALL,     /* the syscall sweep                     */
 	KOF_T_DIAG_SYMBOL,      /* the import walk                       */
 	KOF_T_DIAG_EMULATE,     /* the span runner                       */
+	KOF_T_DIAG_APIHASH,     /* naming what a PE resolves itself      */
 	KOF_T_DIAG_MATCH,       /* fitting diagnoses to what was found   */
 	KOF_T_COUNT
 };

@@ -178,6 +178,12 @@ static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t i
  * parse: turning a named range into extents.
  */
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
+/* Declared here: c_syms completes a PE's symbols from the analysis product and
+ * from the diagnoses' declarations, both defined with the diagnose code below. */
+static const struct kof_apihash *sc_apihash(struct kof_scanner *sc,
+					    const struct kof_obj_ctx *ctx);
+static int diag_when_met(const struct kof_obj_ctx *ctx,
+			 const struct kof_diag *d);
 /* Declared here because c_graph needs it and it is defined further down,
  * beside the other per-object latches. */
 static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
@@ -4849,6 +4855,114 @@ static const uint8_t *c_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 	return sc->gr;
 }
 
+/*
+ * ---- WHAT AN OBJECT'S SYMBOLS ARE COMPLETED FROM -------------------------
+ *
+ * The symbol block is read out of the object's own tables, and for some
+ * objects those tables cannot say what the program uses: a PE that finds its
+ * APIs by walking the loader data lists nothing it calls. A diagnose that
+ * resolves them DECLARES so - KOF_DIAG_SERVES - and the engine then takes the
+ * resolved names as the object's imports: the analysis result REPLACES the
+ * table's emptiness in the object description, for everything that reads it.
+ *
+ * ONE TABLE, so a new kind of resolution is a row and not another branch in
+ * c_syms: the serve bit a diagnose declares, the format it applies to, the
+ * analysis product (computed once per object, shared with the graph - the
+ * diagnose reads the same result later), and how the product is merged into
+ * the block. NORMALISE IS NOT ASKED TO DO THIS ITSELF and cannot skip it: its
+ * symbols are this block, so it gets the completed one or, when nothing could
+ * be resolved - the usual case - the table's own.
+ */
+struct sym_serve {
+	uint8_t     bit;                /* KOF_SERVE_*                          */
+	uint8_t     format;             /* KOF_FMT_* the product is made for    */
+	const void *(*product)(struct kof_scanner *, const struct kof_obj_ctx *);
+	uint32_t    (*merge)(const void *product, uint8_t *blk, uint32_t n,
+			     uint32_t cap);
+};
+
+static const void *serve_apihash(struct kof_scanner *sc,
+				 const struct kof_obj_ctx *ctx)
+{
+	return sc_apihash(sc, ctx);
+}
+
+static uint32_t merge_apihash(const void *p, uint8_t *blk, uint32_t n,
+			      uint32_t cap)
+{
+	const struct kof_apihash *a = p;
+
+	if (!a || !a->n_call)
+		return n;
+	if (n < KOF_SYM_HDRLEN)         /* no directory records at all */
+		n = kof_pe_syms((kof_buf){ NULL, 0 }, NULL, blk, cap);
+	return kof_apihash_syms(a, blk, n, cap);
+}
+
+static const struct sym_serve sym_serves[] = {
+	{ KOF_SERVE_PE_SYMBOLS, KOF_FMT_PE, serve_apihash, merge_apihash },
+};
+
+/*
+ * THE SYMBOLS THE ENGINE COMPLETED, for the result. A tool shows what the
+ * engine returned and does not rebuild it from the file - and for an object
+ * whose table cannot say what it uses, what the engine returned is the
+ * completed block. NULL when nothing was added: the object's own table is then
+ * the answer and the tool's reading of it is the same one.
+ */
+const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t nb = 0;
+
+	if (n)
+		*n = 0;
+	if (!sc || ctx->format != KOF_FMT_PE)
+		return NULL;
+	(void)c_syms(ctx, &nb);
+	if (!sc->sym_served || !nb)
+		return NULL;
+	if (n)
+		*n = nb;
+	return sc->sym;
+}
+
+/* Does a diagnose in the database declare this, with its conditions holding
+ * for this object. Nothing declared, nothing run. */
+static int sc_serves(const struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		     uint8_t bit)
+{
+	uint32_t i;
+
+	if (!sc->eng)
+		return 0;
+	for (i = 0; i < sc->eng->n_diag; i++) {
+		const struct kof_diag *d = &sc->eng->diag[i];
+
+		if ((d->serves & bit) && diag_when_met(ctx, d))
+			return 1;
+	}
+	return 0;
+}
+
+static void sym_serve(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
+{
+	size_t k;
+
+	for (k = 0; k < sizeof sym_serves / sizeof sym_serves[0]; k++) {
+		const struct sym_serve *r = &sym_serves[k];
+
+		if (ctx->format != r->format || !sc_serves(sc, ctx, r->bit))
+			continue;
+		uint32_t before = sc->sym_n;
+
+		sc->sym_n = r->merge(r->product(sc, ctx), sc->sym, sc->sym_n,
+				     KOF_SYM_MAX_BYTES);
+		if (sc->sym_n != before)
+			sc->sym_served = 1;
+	}
+}
+
 static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -4897,6 +5011,8 @@ static const uint8_t *c_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 							   ctx->file_header,
 							   sc->sym,
 							   KOF_SYM_MAX_BYTES);
+			if (sc->sym)
+				sym_serve(sc, ctx);
 		}
 	}
 	/* A header with no records is not worth handing back: every reader
@@ -5518,6 +5634,8 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
 		if (ei)
 			return (uint64_t)ei->e_type == want;
 		return 0;
+	case KOF_FACT_FORMAT:
+		return (uint64_t)ctx->format == want;
 	default:
 		return 0;
 	}
@@ -5538,6 +5656,20 @@ static int diag_when_met(const struct kof_obj_ctx *ctx,
 static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			  uint32_t i);
 
+/* Does a VERDICT read this diagnose. Only a verdict ASKS: asking means the
+ * object is worth the analysis and worth interpreting. Unknown counts as yes. */
+static int diag_read_by_verdict(const struct kof_diag *d)
+{
+	return !d->users_known || d->n_users != 0u;
+}
+
+/* Is it RUN: read by a verdict, or serving the engine itself - see
+ * KOF_DIAG_SERVES, which no verdict has to name. */
+static int diag_used(const struct kof_diag *d)
+{
+	return diag_read_by_verdict(d) || d->serves != 0u;
+}
+
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -5550,6 +5682,19 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 
 		if (!d->n_when && !d->n_need)
 			continue;
+		/*
+		 * A DIAGNOSE NO VERDICT READS DOES NOT ASK. Asking means "this
+		 * object is worth the analysis AND worth interpreting" - see the
+		 * caller - and a diagnose that exists to SERVE the engine
+		 * (KOF_DIAG_SERVES) is answered by the step it serves, not by
+		 * emulating every object its conditions admit. MEASURED when it
+		 * did: the PE diagnose, whose only condition is the format, put the
+		 * whole PE corpus through the emulating unpackers - 10.9 s to 26.6 s,
+		 * and two .NET assemblies reported damaged by an unpacker that had
+		 * no business running on them.
+		 */
+		if (!diag_read_by_verdict(d))
+			continue;
 		if (diag_gate_open(sc, ctx, i))
 			return 1;
 	}
@@ -5558,10 +5703,6 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 
 /* Does any verdict read this diagnose. Unknown counts as yes - see
  * KDIG_SEC_USERS. */
-static int diag_used(const struct kof_diag *d)
-{
-	return !d->users_known || d->n_users != 0u;
-}
 
 /*
  * ---- DOES THE CODE REFER INTO THIS SYMBOL - see KOF_DIAG_REFS ---------------
@@ -5610,19 +5751,57 @@ static int name_is(const struct refscan *rs, uint64_t off, const char *want)
 	return memcmp(rs->file + off, want, L + 1u) == 0;
 }
 
-static int ref_cb(void *user, uint64_t where, uint32_t type, uint64_t sym,
-		  int defined, int64_t addend, uint64_t nameoff)
+/*
+ * What the PE resolves for itself, built the first time anything asks and kept
+ * until the object is done with - see kof_scanner.apihash. NULL for anything
+ * that is not a PE, and for a PE the analysis could not run on.
+ */
+static const struct kof_apihash *sc_apihash(struct kof_scanner *sc,
+					    const struct kof_obj_ctx *ctx)
 {
-	struct refscan *rs = user;
-	int64_t eff = addend + ((type == KOF_RELOC_PC32 ||
-				 type == KOF_RELOC_PLT32) ? 4 : 0);
+	if (!sc->apihash_ready) {
+		kof_buf b = mc(ctx)->data;
+
+		sc->apihash_ready = 1;
+		if (ctx->format == KOF_FMT_PE && b.p && b.n)
+			sc->apihash = kof_apihash_run(ctx, b.p, b.n);
+	}
+	return sc->apihash;
+}
+
+/*
+ * The object's relocation table, built the first time anything asks and kept
+ * until the object is done with - see kof_scanner.relocs. NULL for an object
+ * that is not a relocatable ELF, which the callers read as "no relocations".
+ */
+static const struct kof_elf_relocs *sc_relocs(struct kof_scanner *sc,
+					      const struct kof_obj_ctx *ctx)
+{
+	if (!sc->relocs_ready) {
+		const struct kof_elf_info *ei = ctx->format == KOF_FMT_ELF
+						? kof_elf(ctx) : NULL;
+		kof_buf b = mc(ctx)->data;
+
+		sc->relocs_ready = 1;
+		if (ei && ei->valid && b.p) {
+			sc->relocs = calloc(1, sizeof *sc->relocs);
+			if (sc->relocs)
+				(void)kof_elf_reloc_table(b, ei, KOF_ELF_RELOC_CODE,
+						  sc->relocs);
+		}
+	}
+	return sc->relocs;
+}
+
+static void ref_note(struct refscan *rs, const struct kof_elf_reloc *r)
+{
+	int64_t eff = r->addend + ((r->type == KOF_RELOC_PC32 ||
+				    r->type == KOF_RELOC_PLT32) ? 4 : 0);
 	uint32_t i;
 
-	(void)where;
-	(void)sym;
-	(void)defined;
-	if (!nameoff || eff <= 0)
-		return 1;
+	/* an instruction's operand, with a name, reaching into the symbol */
+	if (!r->code || !r->nameoff || eff <= 0)
+		return;
 	for (i = 0; i < rs->n; i++) {
 		const struct kof_diag *d = &rs->sc->eng->diag[i];
 		uint8_t k;
@@ -5630,14 +5809,14 @@ static int ref_cb(void *user, uint64_t where, uint32_t type, uint64_t sym,
 		if (!rs->rleft[i])
 			continue;
 		for (k = 0; k < d->n_ref; k++)
-			if (!rs->rhit[i][k] && name_is(rs, nameoff, d->ref[k])) {
+			if (!rs->rhit[i][k] &&
+			    name_is(rs, r->nameoff, d->ref[k])) {
 				rs->rhit[i][k] = 1;
 				if (!--rs->rleft[i])
 					rs->pending--;
 				break;
 			}
 	}
-	return rs->pending != 0u;       /* stop once nothing is left to find */
 }
 
 /*
@@ -5753,10 +5932,10 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		rpending++;
 	}
 	if (rpending) {
-		const struct kof_elf_info *ei = ctx->format == KOF_FMT_ELF
-						? kof_elf(ctx) : NULL;
+		const struct kof_elf_relocs *t = sc_relocs(sc, ctx);
 		kof_buf b = mc(ctx)->data;
 		struct refscan rs;
+		uint32_t q;
 
 		rs.sc = sc;
 		rs.file = b.p;
@@ -5766,9 +5945,10 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		rs.rhit = rhit;
 		rs.pending = rpending;
 		/* A format with no relocation table cannot satisfy a diagnose that
-		 * demands one: no answer is not a yes. */
-		if (ei && ei->valid && b.p)
-			kof_elf_relocs(b, ei, KOF_ELF_RELOC_CODE, ref_cb, &rs);
+		 * demands one: no answer is not a yes. Stops once nothing is left to
+		 * find, which is a saving on the READ and not a bound on the table. */
+		for (q = 0; t && q < t->n && rs.pending; q++)
+			ref_note(&rs, &t->v[q]);
 	}
 
 	for (i = 0; i < n; i++)
@@ -5846,6 +6026,8 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 				run |= KOF_DIAG_RUN_SYMBOL;
 			if (sc->eng->diag[i].via & KOF_DIAG_VIA_EMULATE)
 				run |= KOF_DIAG_RUN_EMULATE;
+			if (sc->eng->diag[i].via & KOF_DIAG_VIA_APIHASH)
+				run |= KOF_DIAG_RUN_APIHASH;
 		}
 		if (!run)
 			return;
@@ -5855,7 +6037,15 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		 * parameter that ignored it - see kof_diag_scan_with. The set
 		 * cannot be derived: a verdict reads nodes no diagnose names.
 		 */
-		ds = kof_diag_scan_with(ctx, b.p, b.n, run);
+		struct kof_diag_inputs in;
+
+		in.relocs = sc_relocs(sc, ctx);
+		/* The analysis result, from the latch: the normaliser may have
+		 * asked already, and whichever asks first pays once. Only
+		 * computed here when the database wants the route. */
+		in.apihash = (run & KOF_DIAG_RUN_APIHASH)
+			     ? sc_apihash(sc, ctx) : NULL;
+		ds = kof_diag_scan_with_inputs(ctx, b.p, b.n, run, &in);
 	}
 	if (!ds)
 		return;

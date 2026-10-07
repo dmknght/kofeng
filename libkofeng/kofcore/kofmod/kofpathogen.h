@@ -87,6 +87,35 @@
  * which is what every KOF_DIAG_VIA is for.
  */
 #define KOF_DIAG_VIA_EMULATE (1u << 2)
+/*
+ * RESOLVE THE APIS THE PROGRAM FINDS FOR ITSELF. A PE that walks the loader
+ * data has none of what it calls in its import table, and what stands for an
+ * API in its code is a number only the program understands. This route is
+ * the ANALYSIS that turns the number into a name, once per object, by letting
+ * the program's own resolver run against the modelled loader - see
+ * diag_apihash.c. It is asked for rather than assumed, like the others, and
+ * it is the only route whose product is ALSO read by something that is not a
+ * diagnose: see KOF_DIAG_SERVES.
+ */
+#define KOF_DIAG_VIA_APIHASH (1u << 3)
+
+/*
+ * ---- WHAT AN ANALYSIS RESULT IS USED FOR, BEYOND A VERDICT --------------
+ *
+ * A diagnose is read by verdicts, and a diagnose no verdict reads is not run -
+ * see KDIG_SEC_USERS. An analysis whose answer is wanted by the ENGINE itself
+ * has no verdict to name it, and without a declaration the first rule would
+ * silently switch it off. KOF_DIAG_SERVES is that declaration: it says which
+ * part of the object description this diagnose's route is there to complete.
+ *
+ *     KOF_DIAG_SERVES(KOF_SERVE_PE_SYMBOLS);
+ *
+ * KOF_SERVE_PE_SYMBOLS - the APIs a PE resolves for itself are added to its
+ * symbol block as imports, so that everything that reads imports (a rule on
+ * SYM_IMP, a KOF_DIAG_NEEDS sign, a similarity over symbols) sees the program
+ * the way it would if the author had used the import table.
+ */
+#define KOF_SERVE_PE_SYMBOLS (1u << 0)
 
 /*
  * WHICH INPUT OF THE CHILD CAME FROM THE PARENT.
@@ -355,6 +384,12 @@ enum kof_diag_fact {
 	 * one, because it has no PT_LOAD.
 	 */
 	KOF_FACT_OBJ_KIND,
+	/*
+	 * THE FORMAT, as KOF_FMT_*. A route that exists for one format - the
+	 * analysis that names what a PE resolves for itself - says so here rather
+	 * than being started on every object and returning at once.
+	 */
+	KOF_FACT_FORMAT,
 	KOF_FACT_COUNT
 };
 
@@ -421,6 +456,12 @@ struct kof_diag {
 	 */
 	uint8_t               n_ref;
 	const char           *ref[KOF_DIAG_MAX_NEED];
+	/*
+	 * WHAT THE ENGINE ITSELF USES THIS DIAGNOSE'S ROUTE FOR, as
+	 * KOF_SERVE_* - see KOF_DIAG_SERVES. Non-zero keeps the diagnose
+	 * running when no verdict reads it.
+	 */
+	uint8_t               serves;
 };
 
 /*
@@ -537,6 +578,8 @@ enum kof_diag_link {
  * same reason.
  */
 #define KOF_DIAG_WHEN(fact, value)
+/* KOF_DIAG_SERVES(KOF_SERVE_PE_SYMBOLS) - see the block above KOF_SERVE_*. */
+#define KOF_DIAG_SERVES(mask)
 
 /*
  * A TAGGED TRAILING SECTION OF A .kdig, tag then one length byte.
@@ -575,6 +618,8 @@ enum kof_diag_link {
  * length byte and the bytes. See KOF_DIAG_REFS.
  */
 #define KDIG_SEC_REFS  4u
+/* KOF_SERVE_* - one byte. See KOF_DIAG_SERVES. */
+#define KDIG_SEC_SERVES 5u
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,
