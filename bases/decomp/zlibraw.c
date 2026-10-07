@@ -36,7 +36,7 @@
  */
 #include <kofmod/kofsig.h>
 
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 /*
  * UNIDENTIFIED OBJECTS ONLY. A zlib stream inside a format the engine knows is

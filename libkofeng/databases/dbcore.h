@@ -650,7 +650,7 @@ struct kof_pack_mod {
 	uint32_t maltype;         /* enum kof_maltype */
 
 	/*
-	 * KOF_UNP_CONTAINER or KOF_UNP_PACKER, for an unpack-kind module.
+	 * enum kof_analyze, for an unpack-kind module.
 	 *
 	 * Zero and unread on a detector, the same way family_off and maltype are
 	 * zero and unread on an unpacker. Carried per MODULE rather than per pack
@@ -658,12 +658,12 @@ struct kof_pack_mod {
 	 * can be different kinds - unpack-elf holds UPX and Ezuri today, and both
 	 * happen to be packers only by accident of what has been written.
 	 */
-	uint32_t unp_kind;
+	uint32_t step;
 
 	/*
 	 * WHEN a heuristic rule runs, and WHAT it asks the engine for.
 	 *
-	 * Their own fields rather than a second meaning for unp_kind and
+	 * Their own fields rather than a second meaning for step and
 	 * maltype, which are the two that happen to be spare on a heur module.
 	 * Overloading them would work and would be a trap: the day something
 	 * prints a module's maltype for diagnostics, a rule's want-mask reads

@@ -17,7 +17,7 @@
  *
  * A CONTAINER, AND THE WORD IS EXACT. The header IS the table: it declares
  * where the member starts and how long it is, which is the whole of what
- * KOF_UNP_CONTAINER means. Nothing here is carved, searched for or guessed at.
+ * KOF_ANALYZE_UNWRAP means. Nothing here is carved, searched for or guessed at.
  *
  * WHAT MAKES IT SAFE IS ARITHMETIC, NOT A MAGIC NUMBER. `C` followed by four
  * octal digits is a shape a text file could reach by accident; a declared
@@ -36,7 +36,7 @@
 
 #include <kofmod/kofsig.h>
 
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 /* Nothing declared this file's format, which is the point - it is the shape
  * that makes an object unreadable. */

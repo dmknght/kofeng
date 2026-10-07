@@ -3587,7 +3587,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  *                           file's real data out in the first place.
  *
  * THE MEMBERS ARE VERBS, and that is deliberate: they name what the ANALYSER
- * does, not what a module is. KOF_UNP_PACKER named the module and five
+ * does, not what a module is. The old kind PACKER named the module and five
  * different jobs ended up wearing it - UPX, an AES decryptor, three shellcode
  * decoders and a payload finder - because it was the only label there was.
  *
@@ -3606,61 +3606,40 @@ enum kof_analyze {
 };
 
 /*
- * WHAT SORT OF UNPACKER THIS IS.
+ * WHICH STEP OF OPENING AN OBJECT AN UNPACK MODULE IS - declared, and the only
+ * thing it declares about its kind.
  *
- *     KOF_UNPACK_KIND(KOF_UNP_PACKER);      - UPX, Ezuri: it hid a program
- *     KOF_UNPACK_KIND(KOF_UNP_CONTAINER);   - zip, tar, rar: it carried files
+ *     KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);    - UPX, Ezuri: it hid a program
+ *     KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);    - zip, tar, rar: it carried files
  *
- * BEING REPLACED BY enum kof_analyze ABOVE, and still the only spelling any
- * module uses. The two values map onto the first two steps - CONTAINER to
- * UNWRAP, PACKER to UNPACK - so nothing changes until a module is moved, and
- * a module is moved when somebody has decided which step it is really in.
- * ezuri and the msf decoders are the obvious first four.
+ * Required of every unpack module and meaningless on a detector or a rule. One
+ * word replaces two: there was a KOF_UNPACK_KIND with PACKER, CONTAINER and
+ * CARVE beside the step enum above, saying the same thing in a coarser
+ * vocabulary, and a module that moved had to be changed in both. The step is
+ * what the engine runs by - the steps are tried in enum order, each over exactly
+ * the modules that declared it - and the three facts the old kind carried are
+ * read off it:
  *
- * Required of every unpack module and meaningless on a detector.
+ *   it hid a program (UNPACK, DECRYPT)   a layer of packing, which a heuristic
+ *                                        may weigh; a container is not one
+ *   it searched (CARVE)                  the host is still the subject
+ *   it read a table (UNWRAP)             the members are the subject
  *
- * The distinction is not tidiness, it is EVIDENCE. A file that was wrapped in an
- * executable packer is saying something about itself: the wrapping exists to stop
- * the file being read, and a heuristic that weighs "this was packed" is weighing
- * that. A file that arrived inside a zip is saying nothing at all - archives are
- * how software is shipped - and counting a zip as a layer of packing is how a
- * heuristic ends up scoring an installer like a dropper.
+ * The distinction is EVIDENCE, not tidiness. A file wrapped in an executable
+ * packer is saying something about itself: the wrapping exists to stop the file
+ * being read, and a heuristic that weighs "this was packed" is weighing that. A
+ * file that arrived inside a zip is saying nothing - archives are how software
+ * is shipped - and counting a zip as a layer of packing is how a heuristic ends
+ * up scoring an installer like a dropper. DECLARED rather than guessed, and the
+ * guesses were tried: naming children looked like it separated packers from
+ * containers and does not (xz and overlay name nothing either).
  *
- * It also decides what "two layers deep" means. Depth through packers is a thing
- * worth multiplying by; depth through containers is a directory tree.
- *
- * DECLARED RATHER THAN GUESSED, and the guesses were tried. Naming children looked
- * like it separated the two - packers do not name what they produce - and it does
- * not: xz and overlay are containers by any reading and name nothing either. A
- * property that happens to correlate on today's eleven modules is a property that
- * misclassifies the twelfth silently, and this one feeds a score.
+ * A CARVE is found by looking, not by reading a table, so what it carves out is
+ * not a replacement for its host: an 8.6 MB ELF with 4.2 MB appended had the
+ * appendix extracted and then no normalised view of itself at all, because the
+ * chain stopped at the first step that produced a child.
  */
-#define KOF_UNP_CONTAINER 0
-#define KOF_UNP_PACKER    1
-/*
- * FOUND BY LOOKING, NOT BY READING A TABLE - and the difference decides
- * whether the object it came out of is still worth examining.
- *
- * A CONTAINER's members are declared: the archive says where they are and the
- * module fetches them, so the container's own bytes are the table and nothing
- * else. A PACKER's output IS the object, transformed. In both cases what came
- * out is the thing worth looking at and the wrapper is not.
- *
- * A CARVE is neither. Nothing declared that an ELF has a file glued past its
- * last segment - appended_00.c finds it by searching - so the host is not a
- * wrapper around it. It is a complete program that happens to be carrying
- * something, and it deserves the same examination it would have had if it were
- * carrying nothing.
- *
- * THAT IS WHY IT IS A KIND AND NOT A COMMENT. The analysis steps stop at the
- * first one that produces a child, on the reading that the child replaces its
- * parent as the subject. For a carve that reading is wrong, and it cost a real
- * one: an 8.6 MB ELF with 4.2 MB appended had the appendix extracted and then
- * no normalised view of itself at all - the 4.4 MB of code and data that is the
- * actual program, with a static library inside it, was never rendered.
- */
-#define KOF_UNP_CARVE     2
-#define KOF_UNPACK_KIND(k)
+#define KOF_ANALYZE_STEP(step)
 
 
 /*
@@ -5196,7 +5175,8 @@ enum kunp_rcstruct_broken {
 	X(KOF_ENGINE_PATTERN,  "Pattern")   /* declared bytes and strings   */\
 	X(KOF_ENGINE_PLAGUE,   "Plague")    /* block similarity             */\
 	X(KOF_ENGINE_OVERLORD, "Overlord")  /* shape similarity             */\
-	X(KOF_ENGINE_PATHOGEN, "Pathogen")  /* what the code does, as a graph */
+	X(KOF_ENGINE_PATHOGEN, "Pathogen")  /* what the code does, as a graph */\
+	X(KOF_ENGINE_UNPACKER, "Unpacker")  /* a module that opens containers */
 
 enum kof_engine_id {
 #define KOF_ENGINE_X_ENUM(name, word) name,
@@ -5250,6 +5230,12 @@ static inline const char *kof_verdict_word(uint32_t v)
 	X(KOF_MALTYPE_EXPLOIT,  "Exploit")                                   \
 	X(KOF_MALTYPE_DROPPER,  "Dropper")   /* covers downloader */         \
 	X(KOF_MALTYPE_HACKTOOL, "Hacktool")                                  \
+	/*                                                                   \
+	 * A WRAPPER THAT WAS RECOGNISED, not malware: an unpacker that names \
+	 * a packer it cannot open reports under this word, so the finding    \
+	 * reads `Packer:MidgetPack` and no one mistakes it for a family.     \
+	 */                                                                  \
+	X(KOF_MALTYPE_PACKER,   "Packer")                                    \
 	/*
 	 * NOT A KIND OF MALWARE, which is why it is last and why no
 	 * signature should ever declare it: it is what the ANOMALY model

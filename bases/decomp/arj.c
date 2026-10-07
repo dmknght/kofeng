@@ -25,7 +25,7 @@ KOF_TARGET_FORMAT(KOF_FMT_ARJ);
  * there. Depth through it is a directory tree rather than a layer of packing,
  * and a heuristic that weighs "this was packed" must not weigh this.
  */
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

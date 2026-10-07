@@ -81,9 +81,9 @@
  * where its entries are - and an ELF declares nothing about a file glued past
  * its last segment; this module finds it by searching. The kind is what tells
  * the analysis steps that the host is still worth examining afterwards, which a
- * container's host is not. See KOF_UNP_CARVE.
+ * container's host is not. See KOF_ANALYZE_CARVE.
  */
-KOF_UNPACK_KIND(KOF_UNP_CARVE);
+KOF_ANALYZE_STEP(KOF_ANALYZE_CARVE);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 

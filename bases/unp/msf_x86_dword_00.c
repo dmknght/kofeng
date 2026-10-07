@@ -62,7 +62,7 @@
 #include <kofmod/kofsig.h>
 #include <kofanalyze/msf_elf32.h>
 
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 /*
  * ELF and the formatless children both, for the reason msf_xor_00.c gives: a

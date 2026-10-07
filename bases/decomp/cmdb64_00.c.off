@@ -99,7 +99,7 @@ KOF_TARGET_FORMAT(KOF_FMT_ELF);
  * a file. A heuristic that weighs "this object was packed" must not weigh this,
  * or every dropper-shaped string turns into evidence of packing.
  */
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 /*
  * The spellings of the decoder that actually appear. Each is its own declared

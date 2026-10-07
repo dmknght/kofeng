@@ -84,7 +84,7 @@
 #include <kofanalyze/msf_pe.h>
 #include <kofanalyze/msf_elf64.h>
 
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 /*
  * ELF AND FORMATLESS, because the second layer has no header.

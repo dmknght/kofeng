@@ -983,6 +983,16 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/extractors/decomp/lzma.c \
            libkofeng/extractors/decomp/nrv2.c \
            libkofeng/scanners/scan.c \
+           libkofeng/scanners/scan_mt.c \
+           libkofeng/scanners/scan_walk.c \
+           libkofeng/scanners/scan_verdict.c \
+           libkofeng/scanners/scan_norm_text.c \
+           libkofeng/scanners/scan_norm_syms.c \
+           libkofeng/scanners/scan_norm.c \
+           libkofeng/scanners/scan_feed.c \
+           libkofeng/scanners/scan_facts.c \
+           libkofeng/scanners/scan_unpack.c \
+           libkofeng/scanners/scan_heur.c \
            libkofeng/scanners/objtree.c \
            libkofeng/scanners/objctx.c \
            libkofeng/scanners/objctx_script.c \

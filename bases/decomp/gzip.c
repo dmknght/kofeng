@@ -40,7 +40,7 @@ KOF_TARGET_FORMAT(KOF_FMT_GZIP);
  * still a kind nobody declared; see the note on KOF_UNPACK_KIND in kofsig.h for
  * why this one is declared rather than guessed.
  */
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

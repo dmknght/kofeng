@@ -47,7 +47,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/rar.h>
 
-KOF_UNPACK_KIND(KOF_UNP_CONTAINER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 KOF_TARGET_FORMAT(KOF_FMT_RAR);
 

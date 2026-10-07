@@ -880,7 +880,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->n_names   = pm[i].n_names;
 		m->family_off = pm[i].family_off;
 		m->maltype    = pm[i].maltype;
-		m->unp_kind   = pm[i].unp_kind;
+		m->step       = pm[i].step;
 		m->heur_phase = pm[i].heur_phase;
 		/* Zero means unstated - a pack written before the field
 		 * existed - and unstated is level 1, which is what every rule

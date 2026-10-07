@@ -47,7 +47,7 @@
 
 #include <kofmod/kofsig.h>
 
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 /*
  * ELF and the formatless children, like the decoders beside it: a

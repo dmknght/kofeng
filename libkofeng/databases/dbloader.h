@@ -205,9 +205,9 @@ struct kof_module {
 	uint32_t family_off;
 	uint32_t maltype;     /* enum kof_maltype */
 
-	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; see KOF_UNPACK_KIND in kofsig.h.
+	/* enum kof_analyze; see KOF_ANALYZE_STEP in kofsig.h.
 	 * Meaningless and unread for a detector. */
-	uint32_t unp_kind;
+	uint32_t step;
 
 	/* For a heuristic rule: which phase it runs in, and what it asks the
 	 * engine to do with an object it fires on. See kofmod/heur.h. */

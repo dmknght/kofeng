@@ -120,6 +120,54 @@ enum kof_obj_latch {
 	KOF_OL_COUNT
 };
 
+/*
+ * WHAT A STEP SAYS ABOUT THE EVIDENCE, read off the declared step and kept
+ * nowhere else: an UNPACK or DECRYPT module took a wrapper off a program that
+ * was hidden, which is a layer of packing a heuristic may weigh. A container's
+ * members, and what a carve found, are not.
+ */
+static inline int kof_step_hides_program(uint32_t step)
+{
+	return step == KOF_ANALYZE_UNPACK || step == KOF_ANALYZE_DECRYPT;
+}
+
+/*
+ * What the interpreter may do on the object in front of the unpack stage. The
+ * values are ORDERED BY WHAT THEY PERMIT and the question each one answers is
+ * the one oc_emu_run asks:
+ *
+ *   BANNED       --emu never, or this is a payload of a payload (the packer-depth
+ *                ceiling). No vouch talks past it and it is not a budget.
+ *   NOBODY       not banned, and nobody spoke for the run: only a module that
+ *                vouches may start it. What --heur 1 leaves behind.
+ *   GUESS        the generic receiver may try an object nothing recognised:
+ *                emu_use above NEVER.
+ *   ASKED        a rule that fired on this object, or the producer that made it,
+ *                asked for the interpreter. The run is forced - the entropy gate
+ *                is an estimate about objects nobody spoke for.
+ *   ONLY         --emu only: the interpreter stands in for the packer modules, so
+ *                a static unpacker having opened the object is not a refusal.
+ *   ONLY_ASKED   both.
+ */
+enum kof_emu_stance {
+	KOF_EMU_STANCE_BANNED = 0,
+	KOF_EMU_STANCE_NOBODY,
+	KOF_EMU_STANCE_GUESS,
+	KOF_EMU_STANCE_ASKED,
+	KOF_EMU_STANCE_ONLY,
+	KOF_EMU_STANCE_ONLY_ASKED
+};
+
+static inline int kof_emu_stance_asked(enum kof_emu_stance s)
+{
+	return s == KOF_EMU_STANCE_ASKED || s == KOF_EMU_STANCE_ONLY_ASKED;
+}
+
+static inline int kof_emu_stance_only(enum kof_emu_stance s)
+{
+	return s == KOF_EMU_STANCE_ONLY || s == KOF_EMU_STANCE_ONLY_ASKED;
+}
+
 struct kof_scanner {
 	/* See enum kof_obj_latch. Cleared for every object, in obj_begin. */
 	uint8_t  latch[KOF_OL_COUNT];
@@ -545,6 +593,11 @@ struct kof_scanner {
 	 * has to land here. */
 	uint32_t rep_level, rep_name_id;
 	int      rep_valid;
+	/* The last reason the running module recorded for an object it could not
+	 * finish (KOF_BROKEN_*), 0 for none. An unpacker that names a packer it
+	 * cannot open reports and records in either order, and the finding has
+	 * to say WHY - see finding_str. Cleared with the report by mod_begin. */
+	uint32_t rep_reason;
 
 	/*
 	 * PRODUCING CHILDREN
@@ -902,7 +955,7 @@ struct kof_scanner {
 	 * does not: nothing declared that an ELF is carrying a file, so the
 	 * host is a whole program that happens to have something glued to it
 	 * and is still worth every later step. Counted out for the same reason
-	 * n_views is - see KOF_UNP_CARVE.
+	 * n_views is - see KOF_ANALYZE_CARVE.
 	 */
 	uint32_t n_carved;
 
@@ -1142,46 +1195,23 @@ struct kof_scanner {
 	int      raise_carried;
 	/*
 	 * DID ANYTHING ASK FOR THE PATHOGEN ANALYSIS on this object - see
-	 * KOF_ENG_USE_PATHOGEN. Per object and recomputed, like emu_ask: an
+	 * KOF_ENG_USE_PATHOGEN. Per object and recomputed, like emu_stance: an
 	 * ask that survived into the next object would be the leak the
 	 * declaration exists to prevent.
 	 */
 	int      diag_ask;
 
 	/*
-	 * WHETHER SOMEBODY ALREADY SPOKE FOR THE INTERPRETER ON THIS OBJECT,
-	 * AND WHETHER IT IS ALLOWED AT ALL.
+	 * WHAT THE INTERPRETER MAY DO ON THIS OBJECT, as ONE value.
 	 *
-	 * A module asks for a run with kunp_emu_run and may VOUCH for it - a
-	 * family module that recognised its packer knows the run is worth
-	 * paying for. The generic receiver cannot vouch, because it is on the
-	 * object nobody recognised; what speaks for that object is the
-	 * DATABASE, through a heuristic rule that declared KOF_ENG_USE_EMU, or
-	 * through the producer that made the object and said its output needs
-	 * running.
-	 *
-	 * Both of those are the host's knowledge and neither is reachable from
-	 * a module, so they are resolved here, once, and or-ed into the
-	 * module's vouch inside c_emu_run. Without this the ask was collected
-	 * in unpack_object and then dropped: the entropy gate refuses a
-	 * meterpreter payload for being smaller than its estimate needs, which
-	 * is exactly the object the rule fires on.
-	 *
-	 * `emu_banned` is the other direction and is not a budget: --emu never,
-	 * and the packer-depth ceiling, which no vouch may talk past.
-	 *
-	 * PER OBJECT, set in the same block as raise_carried and for the same
-	 * reason.
+	 * It was four ints - ask, banned, default_ok, only - every one of them
+	 * recomputed per object in unpack_object and combined again in oc_emu_run,
+	 * which is the same fact in two places and a way for the two to disagree.
+	 * Set once by unpack_object, read by oc_emu_run, reset to BANNED by obj_begin
+	 * so an object that never reached unpack_object cannot run on the previous
+	 * one's answer. A module cannot see it: a module asks, the host answers.
 	 */
-	int      emu_ask;
-	int      emu_banned;
-	/* Whether a run nobody asked for is permitted at all - emu_use above
-	 * KOF_EMU_NEVER. It gates the AUTO case and the producer's ask; a
-	 * rule's ask does not read it, for the reason unpack_object gives. */
-	int      emu_default_ok;
-	/* KOF_EMU_ONLY - the interpreter REPLACES the packer modules, so a
-	 * static unpacker having opened this object is not a refusal. */
-	int      emu_only;
+	enum kof_emu_stance emu_stance;
 
 	/*
 	 * THE OBJECT'S SYMBOL RECORDS, built at most once per object.

@@ -37,7 +37,7 @@
 #include <kofmod/kofsig.h>
 #include <kofanalyze/msf_pe.h>
 
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 /*
  * The wrapper is always a Windows EXE - the module hands what Metasm encoded

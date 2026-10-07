@@ -135,7 +135,7 @@ static int zlib_header(const struct kof_obj_ctx *ctx, uint64_t at)
  * the subject and the wrapper is not. An overlay is the opposite: nothing
  * declares it, it is bytes past everything the file claimed, and the PE around
  * it is a complete program that happens to be carrying something. That is
- * exactly what KOF_UNP_CARVE is for, and bases/decomp/appended_00.c - the same
+ * exactly what KOF_ANALYZE_CARVE is for, and bases/decomp/appended_00.c - the same
  * job on an ELF's unclaimed tail - has always said so.
  *
  * WHAT THE WRONG KIND COST, both of it invisible:
@@ -148,7 +148,7 @@ static int zlib_header(const struct kof_obj_ctx *ctx, uint64_t at)
  *   child, so a heuristic verdict about the PE was discarded because the PE
  *   had an overlay.
  */
-KOF_UNPACK_KIND(KOF_UNP_CARVE);
+KOF_ANALYZE_STEP(KOF_ANALYZE_CARVE);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 

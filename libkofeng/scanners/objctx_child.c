@@ -597,7 +597,7 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 		}
 	}
 	sc->kid_packer[sc->n_kids] =
-		(uint8_t)(sc->cur_mod && sc->cur_mod->unp_kind == KOF_UNP_PACKER);
+		(uint8_t)(sc->cur_mod && kof_step_hides_program(sc->cur_mod->step));
 	if (sc->kid_packer[sc->n_kids])
 		sc->packed_here = 1;
 	/*

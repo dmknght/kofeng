@@ -1125,11 +1125,9 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	 */
 	vouched = sc && vouch && sc->heur_lvl >= vouch;
 	if (sc)
-		KOF_TRACE("[emu] ask: vouched=%d live=%d banned=%d packed=%d only=%d ask=%d dflt=%d spent=%llu\n",
-			vouched, sc->emu_live ? 1 : 0, sc->emu_banned,
-			sc->packed_here, sc->emu_only, sc->emu_ask,
-			sc->emu_default_ok,
-			(unsigned long long)sc->st.heur_emu);
+		KOF_TRACE("[emu] ask: vouched=%d live=%d stance=%d packed=%d spent=%llu\n",
+			vouched, sc->emu_live ? 1 : 0, (int)sc->emu_stance,
+			sc->packed_here, (unsigned long long)sc->st.heur_emu);
 	if (!sc || sc->emu_live)
 		return 0;               /* one run at a time */
 	/*
@@ -1141,14 +1139,14 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	if (sc->emu_ran)
 		return 0;
 	/* --emu never, and the packer-depth ceiling. Neither is a budget and
-	 * neither yields to a vouch - see emu_banned in scan.h. */
-	if (sc->emu_banned)
+	 * neither yields to a vouch - see emu_stance in scan.h. */
+	if (sc->emu_stance == KOF_EMU_STANCE_BANNED)
 		return 0;
 	/* A packer already opened this, so the payload is in hand and running
 	 * it as well is peeling it and then running it anyway. Under
 	 * KOF_EMU_ONLY the interpreter stands in for the packer modules, so
 	 * that is not a refusal. */
-	if (sc->packed_here && !sc->emu_only)
+	if (sc->packed_here && !kof_emu_stance_only(sc->emu_stance))
 		return 0;
 	/*
 	 * NOBODY SPOKE FOR IT AND UNASKED RUNS ARE OFF. A module that vouches
@@ -1156,7 +1154,7 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	 * generic receiver guessing, in a mode whose caller wants no
 	 * interpreter unless something argued for one.
 	 */
-	if (!vouched && !sc->emu_ask && !sc->emu_default_ok)
+	if (!vouched && sc->emu_stance == KOF_EMU_STANCE_NOBODY)
 		return 0;
 	/* The scan's own ceiling on how many runs it will spend - see
 	 * KOF_SCAN_EMU_MAX. */
@@ -1175,7 +1173,7 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 	 * module. Either way `force` means the same thing to the run: skip the
 	 * entropy gate, which is an estimate about objects nobody spoke for.
 	 */
-	return kof_scan_emu_unpack(ctx, vouched || sc->emu_ask);
+	return kof_scan_emu_unpack(ctx, vouched || kof_emu_stance_asked(sc->emu_stance));
 }
 
 int oc_emu_region(const struct kof_obj_ctx *ctx, uint32_t i,

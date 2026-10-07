@@ -396,7 +396,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 				goto out;
 		}
 		o->maltype = m->maltype;
-		o->unp_kind = m->unp_kind;
+		o->step = m->step;
 		o->heur_phase = m->heur_phase;
 		o->heur_level = m->heur_level;
 		o->cure_off   = m->cure_off;

@@ -113,7 +113,7 @@
 /*
  * A PACKER, AND THE CHILD IS WHERE THE INTERPRETER SHOULD START.
  *
- * This was KOF_UNP_CARVE for a while, and the reason was real: a packer's
+ * This was KOF_ANALYZE_CARVE for a while, and the reason was real: a packer's
  * output sets `packed_here`, the emulator's fallback yields to it, and
  * recovering the loader statically then SUPPRESSED the interpreter on the
  * object it is the only way into.
@@ -137,7 +137,7 @@
  * interpreter is asked for on the child instead, with kunp_emu_want. That is
  * the arrangement bases/unp/mpress_pe.c already uses and for the same reason.
  */
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 

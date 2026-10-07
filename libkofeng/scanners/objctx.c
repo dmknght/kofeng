@@ -568,6 +568,7 @@ void oc_incomplete(const struct kof_obj_ctx *ctx, uint32_t reason)
 	if (reason != KOF_BROKEN_UNSUPPORTED && reason != KOF_BROKEN_DAMAGED &&
 	    reason != KOF_BROKEN_ENCRYPTED)
 		reason = KOF_BROKEN_LIMIT;
+	kof_scan_of(ctx)->rep_reason = reason;
 	oc_scan_broken(kof_scan_of(ctx), reason);
 }
 

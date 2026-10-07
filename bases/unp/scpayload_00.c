@@ -69,7 +69,7 @@
  * produces one object out of one, which is what a packer does, and it is what
  * makes the child count as a layer of packing for the depth limit.
  */
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 
 KOF_DEFINE_UNPACK

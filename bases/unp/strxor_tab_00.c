@@ -80,7 +80,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 

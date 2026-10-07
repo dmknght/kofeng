@@ -1318,7 +1318,7 @@ struct simple_decl {
 };
 
 enum {
-	SD_FORMAT = 0, SD_ARCH, SD_SUBTYPE, SD_SIZE_MIN, SD_UNPACK_KIND,
+	SD_FORMAT = 0, SD_ARCH, SD_SUBTYPE, SD_SIZE_MIN, SD_ANALYZE_STEP,
 	SD_HEUR_PHASE, SD_HEUR_LEVEL, SD_HEUR_WANT,
 	SD_HEUR_NAME, SD_HEUR_PREDICT, SD_COUNT
 };
@@ -1328,7 +1328,7 @@ static struct simple_decl g_decl[SD_COUNT] = {
 	{ "KOF_TARGET_ARCH",    NULL, 0, 0, { 0 } },
 	{ "KOF_TARGET_SUBTYPE", NULL, 0, 0, { 0 } },
 	{ "KOF_TARGET_SIZE_MIN",NULL, 0, 0, { 0 } },
-	{ "KOF_UNPACK_KIND",    NULL, 0, 0, { 0 } },
+	{ "KOF_ANALYZE_STEP",    NULL, 0, 0, { 0 } },
 	{ "KOF_HEUR_PHASE",     NULL, 0, 0, { 0 } },
 	{ "KOF_HEUR_LEVEL",     NULL, 0, 0, { 0 } },
 	{ "KOF_HEUR_WANT",      NULL, 0, 0, { 0 } },
@@ -1436,7 +1436,7 @@ static void decl_collect(const char *at, int lineno)
 static uint8_t  g_target[KOF_TARGET_LIST_MAX];
 static uint32_t g_arch_mask, g_subtype_mask;
 static uint64_t g_size_min;
-static int      g_unp_kind, g_heur_phase, g_heur_level, g_heur_want;
+static int      g_step, g_heur_phase, g_heur_level, g_heur_want;
 static int      g_n_targets;
 /* KOF_FMT_ANY was written out, as opposed to nothing being written at all -
  * both are an empty list, and only one of them is a module saying so. */
@@ -1735,27 +1735,28 @@ static void resolve_size_min(void)
 		err(d->line, "KOF_TARGET_SIZE_MIN(0) constrains nothing; omit it");
 }
 
-static void resolve_unpack_kind(void)
+static void resolve_analyze_step(void)
 {
-	const struct simple_decl *d = &g_decl[SD_UNPACK_KIND];
+	const struct simple_decl *d = &g_decl[SD_ANALYZE_STEP];
 
 	if (!d->count)
 		return;
 	if (d->count > 1) {
-		err(d->line, "more than one KOF_UNPACK_KIND; a module is one "
-			     "kind");
+		err(d->line, "more than one KOF_ANALYZE_STEP; a module is one step");
 		return;
 	}
-	if (names_ident(d->arg, "KOF_UNP_PACKER"))
-		g_unp_kind = KOF_UNP_PACKER;
-	else if (names_ident(d->arg, "KOF_UNP_CONTAINER"))
-		g_unp_kind = KOF_UNP_CONTAINER;
-	else if (names_ident(d->arg, "KOF_UNP_CARVE"))
-		g_unp_kind = KOF_UNP_CARVE;
+	if (names_ident(d->arg, "KOF_ANALYZE_UNWRAP"))
+		g_step = KOF_ANALYZE_UNWRAP;
+	else if (names_ident(d->arg, "KOF_ANALYZE_UNPACK"))
+		g_step = KOF_ANALYZE_UNPACK;
+	else if (names_ident(d->arg, "KOF_ANALYZE_DECRYPT"))
+		g_step = KOF_ANALYZE_DECRYPT;
+	else if (names_ident(d->arg, "KOF_ANALYZE_CARVE"))
+		g_step = KOF_ANALYZE_CARVE;
 	else
-		err(d->line, "KOF_UNPACK_KIND names no known kind; use "
-			     "KOF_UNP_PACKER, KOF_UNP_CONTAINER or "
-			     "KOF_UNP_CARVE");
+		err(d->line, "KOF_ANALYZE_STEP names no step a module may declare; "
+			     "use KOF_ANALYZE_UNWRAP, _UNPACK, _DECRYPT or _CARVE "
+			     "(NORMZ is the host's own)");
 }
 
 static void resolve_heur(void)
@@ -1850,7 +1851,7 @@ static void resolve_decls(void)
 	resolve_arch();
 	resolve_subtype();
 	resolve_size_min();
-	resolve_unpack_kind();
+	resolve_analyze_step();
 	resolve_heur();
 }
 
@@ -3577,7 +3578,7 @@ static int check_format_headers(void)
 static int kind_checks(int kind)
 {
 	int n_phase = g_decl[SD_HEUR_PHASE].count;
-	int n_kind = g_decl[SD_UNPACK_KIND].count;
+	int n_kind = g_decl[SD_ANALYZE_STEP].count;
 
 	if (kind == 0) {                        /* detector */
 		if (n_phase || g_heur_name[0] || g_heur_want) {
@@ -3587,7 +3588,7 @@ static int kind_checks(int kind)
 			return 0;
 		}
 		if (n_kind) {
-			fprintf(stderr, "FAIL: KOF_UNPACK_KIND on a detector; "
+			fprintf(stderr, "FAIL: KOF_ANALYZE_STEP on a detector; "
 					"it describes an unpacker\n");
 			return 0;
 		}
@@ -3596,10 +3597,10 @@ static int kind_checks(int kind)
 	if (kind == 1) {                        /* unpacker */
 		if (!n_kind) {
 			fprintf(stderr, "FAIL: an unpack module must declare "
-				"KOF_UNPACK_KIND\n"
-				"      KOF_UNPACK_KIND(KOF_UNP_PACKER)    - it "
+				"KOF_ANALYZE_STEP\n"
+				"      KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK)  - it "
 				"hid a program\n"
-				"      KOF_UNPACK_KIND(KOF_UNP_CONTAINER) - it "
+				"      KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP)   - it "
 				"carried files\n");
 			return 0;
 		}
@@ -3642,7 +3643,7 @@ static int kind_checks(int kind)
 		return 0;
 	}
 	if (n_kind) {
-		fprintf(stderr, "FAIL: KOF_UNPACK_KIND on a heuristic rule\n");
+		fprintf(stderr, "FAIL: KOF_ANALYZE_STEP on a heuristic rule\n");
 		return 0;
 	}
 	return 1;
@@ -4242,7 +4243,7 @@ static int extract_main(int argc, char **argv)
 	fprintf(out, "arch_mask=%u\n", g_arch_mask);
 	fprintf(out, "subtype_mask=%u\n", g_subtype_mask);
 	fprintf(out, "size_min=%llu\n", (unsigned long long)g_size_min);
-	fprintf(out, "unp_kind=%d\n", g_unp_kind);
+	fprintf(out, "step=%d\n", g_step);
 	fprintf(out, "heur_phase=%d\n", g_heur_phase);
 	fprintf(out, "heur_level=%d\n", g_heur_level);
 	fprintf(out, "heur_want=%d\n", g_heur_want);
@@ -4254,7 +4255,7 @@ static int extract_main(int argc, char **argv)
 	 * this. A heuristic with no KOF_HEUR_PHASE and one that declares
 	 * EXAMINE both resolve to 0. */
 	fprintf(out, "n_phase=%d\n", g_decl[SD_HEUR_PHASE].count);
-	fprintf(out, "n_kind=%d\n", g_decl[SD_UNPACK_KIND].count);
+	fprintf(out, "n_kind=%d\n", g_decl[SD_ANALYZE_STEP].count);
 	fprintf(out, "n_level=%d\n", g_decl[SD_HEUR_LEVEL].count);
 	fprintf(out, "family=%s\n", g_have_name ? g_family : "");
 	fprintf(out, "maltype=%d\n", g_have_name ? g_maltype : 0);
@@ -4304,7 +4305,7 @@ struct artefact {
 	uint8_t  target[KOF_TARGET_LIST_MAX];
 	uint8_t  n_target;
 	int      any_target;
-	uint32_t scan_mask, arch_mask, subtype_mask, unp_kind;
+	uint32_t scan_mask, arch_mask, subtype_mask, step;
 	uint32_t heur_phase, heur_want, heur_level;
 	/* Where kof_cure() sits inside the blob, 0 when there is none. Known
 	 * only once the image is linked, so it travels in the metadata file
@@ -4490,8 +4491,8 @@ static int meta_load(struct artefact *a)
 			a->arch_mask = (uint32_t)strtoul(line + 10, 0, 10);
 		} else if (strncmp(line, "subtype_mask=", 13) == 0) {
 			a->subtype_mask = (uint32_t)strtoul(line + 13, 0, 10);
-		} else if (strncmp(line, "unp_kind=", 9) == 0) {
-			a->unp_kind = (uint32_t)strtoul(line + 9, 0, 10);
+		} else if (strncmp(line, "step=", 5) == 0) {
+			a->step = (uint32_t)strtoul(line + 5, 0, 10);
 		} else if (strncmp(line, "heur_phase=", 11) == 0) {
 			a->heur_phase = (uint32_t)strtoul(line + 11, 0, 10);
 		} else if (strncmp(line, "heur_want=", 10) == 0) {
@@ -5701,7 +5702,7 @@ static void module_reset(void)
 	g_n_targets = g_any_target = 0;
 	memset(g_target, 0, sizeof g_target);
 	g_size_min = 0;
-	g_unp_kind = g_heur_phase = g_heur_level = g_heur_want = 0;
+	g_step = g_heur_phase = g_heur_level = g_heur_want = 0;
 	g_n_targets = 0;
 	g_heur_name[0] = g_heur_predict[0] = 0;
 	g_family[0] = 0;
@@ -5977,7 +5978,7 @@ static int module_main(int argc, char **argv)
 	fprintf(f, "size_min=%llu\n", (unsigned long long)g_size_min);
 	fprintf(f, "arch_mask=%u\n", g_arch_mask);
 	fprintf(f, "subtype_mask=%u\n", g_subtype_mask);
-	fprintf(f, "unp_kind=%d\n", g_unp_kind);
+	fprintf(f, "step=%d\n", g_step);
 	fprintf(f, "heur_phase=%d\n", g_heur_phase);
 	fprintf(f, "heur_want=%d\n", g_heur_want);
 	fprintf(f, "heur_level=%d\n", g_heur_level);
@@ -7129,7 +7130,7 @@ static int pack_main(int argc, char **argv)
 			pm[a].scan_mask   = s->scan_mask;
 			pm[a].arch_mask   = s->arch_mask;
 			pm[a].subtype_mask = s->subtype_mask;
-			pm[a].unp_kind     = s->unp_kind;
+			pm[a].step         = s->step;
 			pm[a].heur_phase   = s->heur_phase;
 			pm[a].heur_want    = s->heur_want;
 			pm[a].heur_level   = s->heur_level;

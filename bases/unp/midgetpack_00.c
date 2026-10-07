@@ -60,9 +60,13 @@
  */
 
 #include <kofmod/kofsig.h>
+#include <kofmod/heur.h>
 #include <kofmod/elf.h>
 
-KOF_UNPACK_KIND(KOF_UNP_PACKER);
+KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
+
+/* What the finding is called: a packer, by its own name. Not malware. */
+KOF_TARGET_NAME(KOF_MALTYPE_PACKER, "MidgetPack");
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 
@@ -148,15 +152,18 @@ KOF_DEFINE_UNPACK
 	 */
 	kof_debug("Midgetpack.segments", x_seen);
 
+	kof_debug("Midgetpack.segments", x_seen);
+
 	/*
-	 * And that is the end of it: the reason, and no bytes.
+	 * And that is the end of it: the reason, the name, and no bytes. The
+	 * reason is recorded first because the finding reads it - see
+	 * finding_str, which writes `?Encrypted` from it.
 	 *
 	 * Emitting the payload segment as a child was considered and rejected.
 	 * It is ciphertext with no key, so every module downstream would be run
 	 * against noise and the object panel would carry an entry that can never
 	 * say anything - the same trap ezuri.c describes for a wrong tail offset.
-	 * A named packer and a recorded reason is the whole of what this file
-	 * supports.
 	 */
-	KUNP_RCSTRUCT_BROKEN(KOF_UNP_ENCRYPTED);
+	kunp_rcstruct_broken(KOF_UNP_ENCRYPTED);
+	KOF_HEUR_HIT();
 }

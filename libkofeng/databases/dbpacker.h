@@ -71,8 +71,8 @@ struct kof_pw_mod {
 	uint32_t arch_mask;
 	uint32_t subtype_mask;
 	uint64_t size_min;
-	/* KOF_UNP_CONTAINER or KOF_UNP_PACKER; unread for a detector. */
-	uint32_t unp_kind;
+	/* enum kof_analyze, for an unpack-kind module; unread for a detector. */
+	uint32_t step;
 	/* A heuristic rule's phase and its declared engine request; see
 	 * kofmod/heur.h. Zero on every other kind. */
 	uint32_t heur_phase;
