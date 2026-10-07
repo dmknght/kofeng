@@ -2405,12 +2405,12 @@ struct kof_content {
 			  uint16_t a, uint16_t b);
 
 	/*
-	 * Did this diagnose match AND does it carry every one of these names -
-	 * see kof_diag_has_str. Appended, like every slot added since this
-	 * vtable shipped.
+	 * Did this diagnose match AND does it carry this name - see
+	 * kof_diag_str_any and kof_diag_str_all. Appended, like
+	 * every slot added since this vtable shipped.
 	 */
-	int (*diag_has_str)(const struct kof_obj_ctx *, uint16_t diag,
-			    const char *const *strs, uint32_t n);
+	int (*diag_str)(const struct kof_obj_ctx *, uint16_t diag,
+			     const char *name);
 };
 
 /*
@@ -3917,15 +3917,19 @@ static inline uint16_t kof_diag_id_(const char *s)
 /*
  * DOES THIS DIAGNOSE CARRY THESE NAMES.
  *
- *     if (kof_diag_has_str(DIAG_LKM_KPROBERESOLVE, "kallsyms_lookup_name"))
+ *     if (kof_diag_str_any(DIAG_LKM_KPROBERESOLVE, "sys_call_table"))
  *             KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
  *
- *     kof_diag_has_str(DIAG_X, "a", "b") || kof_diag_has_str(DIAG_X, "c", "d")
+ *     kof_diag_str_all(DIAG_X, "a", "b")
  *
- * EVERY name in ONE call must be present - that is the AND - and calls joined
- * by `||` are the alternatives. Written this way because one call is one
- * statement a rule editor can show as a block: "this diagnose, with these
- * names", and the alternatives are blocks in an or.
+ * The first argument is the diagnose, spelled as the enum the diagnose itself
+ * declares with KOF_DIAG_NAME - the same word kof_diag() takes. The rest are
+ * names.
+ *
+ * The same pair as kof_find_str_any and kof_find_str_all, with a diagnose
+ * where the range was: `any` is true when ONE of the names is present, `all`
+ * when EVERY one is. Each is one statement a rule editor can show as a block
+ * - "this diagnose, with these names" - and they compose with && and ||.
  *
  * THE NAMES BELONG TO THE DIAGNOSE, not to a capability. They are the ones the
  * analysis read out of the emulator's memory at the calls the diagnose's nodes
@@ -3947,14 +3951,23 @@ static inline uint16_t kof_diag_id_(const char *s)
  *
  * THE NAMES ARE LITERALS, which live in the blob like any other: the engine
  * hashes each and then compares the bytes, so a hash collision cannot make a
- * name appear. At most KOF_DIAG_HAS_STR_MAX are taken in one call.
+ * name appear. At most KOF_DIAG_STR_MAX are taken in one call.
  */
-#define KOF_DIAG_HAS_STR_MAX 8u
-#define kof_diag_has_str(diag, ...) ((ctx)->content->diag_has_str ? \
-	(ctx)->content->diag_has_str((ctx), kof_diag_id_(#diag), \
-		(const char *const[]){ __VA_ARGS__ }, \
-		(uint32_t)(sizeof((const char *const[]){ __VA_ARGS__ }) / \
-			   sizeof(const char *))) : 0)
+#define KOF_DIAG_STR_MAX 8u
+#define kof_diag_str_one(diag, name) ((ctx)->content->diag_str ? \
+	(ctx)->content->diag_str((ctx), kof_diag_id_(#diag), (name)) : 0)
+#define KOF_DFS_1(op, d, a)       kof_diag_str_one(d, a)
+#define KOF_DFS_2(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_1(op, d, __VA_ARGS__))
+#define KOF_DFS_3(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_2(op, d, __VA_ARGS__))
+#define KOF_DFS_4(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_3(op, d, __VA_ARGS__))
+#define KOF_DFS_5(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_4(op, d, __VA_ARGS__))
+#define KOF_DFS_6(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_5(op, d, __VA_ARGS__))
+#define KOF_DFS_7(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_6(op, d, __VA_ARGS__))
+#define KOF_DFS_8(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_7(op, d, __VA_ARGS__))
+#define KOF_DFS_FOLD(op, d, ...) \
+	KOF_PASTE(KOF_DFS_, KOF_NARG(__VA_ARGS__))(op, d, __VA_ARGS__)
+#define kof_diag_str_any(diag, ...) KOF_DFS_FOLD(||, diag, __VA_ARGS__)
+#define kof_diag_str_all(diag, ...) KOF_DFS_FOLD(&&, diag, __VA_ARGS__)
 
 #define kof_diag_share(cap, a, b) ((ctx)->content->diag_share ? \
 				   (ctx)->content->diag_share((ctx), \

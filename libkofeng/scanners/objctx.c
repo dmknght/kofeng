@@ -5954,8 +5954,8 @@ static int c_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 }
 
 /*
- * DOES THIS DIAGNOSE MATCH, AND DOES IT CARRY EVERY ONE OF THESE NAMES - see
- * kof_diag_has_str in kofsig.h for what the answer means, and why false is
+ * DOES THIS DIAGNOSE MATCH, AND DOES IT CARRY THESE NAMES - see
+ * kof_diag_str_any and _all in kofsig.h for what the answer means, and why false is
  * not the same as "no".
  *
  * A diagnose's names are the ones the analysis read at the call sites its
@@ -5965,15 +5965,14 @@ static int c_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
  * ASKING IS THE DEMAND, as in every other call that reads the analysis, and
  * it is also what labels the finding Pathogen, so the flag is set here.
  */
-static int c_diag_has_str(const struct kof_obj_ctx *ctx, uint16_t id,
-			  const char *const *strs, uint32_t n)
+static int c_diag_str(const struct kof_obj_ctx *ctx, uint16_t id,
+			   const char *name)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_diag *d = NULL;
-	uint32_t i, k;
-	uint8_t j;
+	uint32_t i;
 
-	if (!sc || !sc->eng || !id || !strs || !n)
+	if (!sc || !sc->eng || !id || !name)
 		return 0;
 	sc->diag_ask = 1;
 	sc->diag_read = 1;
@@ -5988,17 +5987,15 @@ static int c_diag_has_str(const struct kof_obj_ctx *ctx, uint16_t id,
 	if (!((sc->diag_hit[i >> 3] >> (i & 7u)) & 1u) || !sc->diag_graph)
 		return 0;
 	d = &sc->eng->diag[i];
-	if (n > KOF_DIAG_HAS_STR_MAX)
-		n = KOF_DIAG_HAS_STR_MAX;
 	/*
 	 * THE NAMES THIS DIAGNOSE CARRIES are the ones read at the call sites
-	 * its tree bound - see kof_diag_scan_names - and not the ones handed to
+	 * its tree bound - see kof_diag_scan_name - and not the ones handed to
 	 * any call of the same capability. It used to be the second: a
 	 * diagnose's names were those tagged with a capability one of its
 	 * nodes named, so two diagnoses with a node of the same capability
 	 * saw each other's.
 	 */
-	return kof_diag_scan_names(sc->diag_graph, d, strs, n);
+	return kof_diag_scan_name(sc->diag_graph, d, name);
 }
 
 static int c_diag(const struct kof_obj_ctx *ctx, uint16_t id)
@@ -6077,7 +6074,7 @@ static const struct kof_content kof_detect_vtable = {
 	c_graph,
 	/* two diagnoses meeting at a named node - see kof_diag_share */
 	c_diag_share,
-	c_diag_has_str
+	c_diag_str
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -6106,7 +6103,7 @@ static const struct kof_content kof_unpack_vtable = {
 	NULL, NULL,
 	c_graph,
 	c_diag_share,
-	c_diag_has_str
+	c_diag_str
 };
 
 /*

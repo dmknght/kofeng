@@ -1762,26 +1762,18 @@ static int name_cb(void *user, const uint16_t *bound, uint8_t n_node)
 	return 1;
 }
 
-int kof_diag_scan_names(const struct kof_diag_scan *s, const struct kof_diag *d,
-			const char *const *strs, uint32_t n)
+int kof_diag_scan_name(const struct kof_diag_scan *s, const struct kof_diag *d,
+		       const char *name)
 {
-	uint32_t k;
+	struct name_probe np;
 
-	if (!s || !d || !strs || !n)
+	if (!s || !d || !name)
 		return 0;
-	for (k = 0; k < n; k++) {
-		struct name_probe np;
-
-		if (!strs[k])
-			return 0;
-		np.s = s;
-		np.name = strs[k];
-		np.found = 0;
-		match_each(s, d, name_cb, &np);
-		if (!np.found)
-			return 0;
-	}
-	return 1;
+	np.s = s;
+	np.name = name;
+	np.found = 0;
+	match_each(s, d, name_cb, &np);
+	return np.found;
 }
 
 /* ---- loading -------------------------------------------------------------

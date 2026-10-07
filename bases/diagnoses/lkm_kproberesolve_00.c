@@ -16,14 +16,18 @@
  * KOF_NUCLEO_KPROBE_REG for why the two words were split.
  *
  *
- * ---- WHAT THIS SAYS AND WHAT IT LEAVES TO THE NEXT STEP -----------------
+ * ---- WHAT THIS SAYS ----------------------------------------------------
  *
- * It says ONE thing: the module calls register_kprobe, with its pair
- * imported. That is the proof that the resolver is CALLED. It does not say
- * which name the module asked the kernel for, and it does not say what was
- * done with the address - the first is the list of strings handed to the
- * resolver, which is where the evidence about WHAT IS BEING HOOKED lives;
- * the second is a separate behaviour. Neither is read here.
+ * The module ASKS THE KERNEL FOR A SYMBOL BY NAME through a probe: the node is
+ * the resolver call, and the name handed to it is what a verdict reads with
+ * kof_diag_str_any - `sys_call_table`, `x64_sys_call`. THAT is the evidence
+ * about what is being reached.
+ *
+ * `kallsyms_lookup_name` is NOT that evidence. It is the probe's own
+ * `symbol_name` - the variable that makes the kernel hand back an address -
+ * and it is the same string in every build that uses the trick, so it says
+ * "a probe resolver" and nothing about the target. It was asked for once, and
+ * was the wrong question.
  *
  * WHY NO LINK BETWEEN THE CALLS. The first version asked for the shape
  * register -> read the address -> unregister, and it fit Diamorphine and
@@ -45,9 +49,9 @@ KOF_DIAG_NAME(DIAG_LKM_KPROBERESOLVE);
 /*
  * BOTH ROUTES. SYMBOL finds the call; EMULATE is what reads the NAME the
  * probe was placed on out of the guest's memory and keeps it in the engine -
- * see capture_names. The name is not part of this diagnose's tree, but it is
- * part of what a verdict reading this diagnose asks next (kof_diag_str_has),
- * and the analysis runs only the routes the diagnoses it is serving declare.
+ * see capture_names. The names are read at the resolver node this diagnose
+ * binds, and the analysis runs only the routes the diagnoses it is serving
+ * declare.
  *
  * THIS WAS SYMBOL ALONE, on the reasoning that the call is all this claims.
  * Measured when a verdict first asked for the name: every condition was true
@@ -69,8 +73,9 @@ KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
 KOF_DIAG_NEEDS("register_kprobe", "unregister_kprobe");
 
 /*
- * THE CALL IS THE ANCHOR. A kernel symbol imported by name is the narrowest
- * place there is to start from: the relocation table lists every site, so
- * finding the block to look at costs a table read and no decoding.
+ * THE RESOLVER CALL IS THE ANCHOR. The engine places it where the
+ * register/unregister pair lives (see the kprobe block in diag_emu.c), so it
+ * exists only for a module that imports the pair - the NEEDS above is the
+ * gate, and the node is what carries the names the caller passes.
  */
-KOF_DIAG_ANCHOR(r, KOF_NUCLEO_KPROBE_REG, 0);
+KOF_DIAG_ANCHOR(l, KOF_NUCLEO_KSYM_LOOKUP, 0);

@@ -326,21 +326,24 @@ const char *kof_diag_str_at(const struct kof_diag_scan *, uint16_t cap,
 			    uint32_t i);
 uint32_t    kof_diag_str_count(const struct kof_diag_scan *, uint16_t cap);
 /*
- * DOES THIS DIAGNOSE CARRY EVERY ONE OF THESE NAMES - the names read at the
- * call sites its tree BOUND, across every place the tree matched, and no
- * others.
+ * DOES THIS DIAGNOSE CARRY THIS NAME - read at a call site its tree BOUND,
+ * across every place the tree matched, and at no other.
  *
- * ACROSS INSTANCES, not within one: a module that places a probe on two
- * symbols has two matches of the same tree with a name each, and "carries
- * both" means both were seen, not that one call was handed both. A diagnose
- * that did not match at all carries nothing.
+ * ONE NAME, because a list is the module's to compose: any is `||` and all is
+ * `&&` over this, as kof_find_str_any and _all are over kof_find_str, and a
+ * list passed across the module boundary is an array of pointers that a
+ * position-independent module cannot keep out of writable data (measured: five
+ * names put 40 bytes in .data and the builder refused the module).
+ *
+ * A name is a place a name was SEEN: a module that places a probe on two
+ * symbols has two matches of the same tree with a name each, and both names
+ * are carried. A diagnose that did not match at all carries nothing.
  *
  * kof_diag_str_at and _count are the ones that walk the list by capability,
  * for a caller that wants the list itself; THIS is the one a verdict reaches.
  */
-int         kof_diag_scan_names(const struct kof_diag_scan *,
-				const struct kof_diag *,
-				const char *const *strs, uint32_t n);
+int         kof_diag_scan_name(const struct kof_diag_scan *,
+			       const struct kof_diag *, const char *name);
 
 /* Non-zero when the walk stopped at its bound. A caller asking "is this
  * capability absent" must read this and answer "cannot say" instead. */

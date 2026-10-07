@@ -6322,7 +6322,8 @@ static void uses_scan(const char *path)
 			continue;
 		if (!strncmp(p, "kof_diag(", 9))
 			share = 0;
-		else if (!strncmp(p, "kof_diag_has_str(", 17))
+		else if (!strncmp(p, "kof_diag_str_any(", 17) ||
+			 !strncmp(p, "kof_diag_str_all(", 17))
 			share = 0;      /* its first argument is the diagnose */
 		else if (!strncmp(p, "kof_diag_share(", 15))
 			share = 1;

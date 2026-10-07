@@ -35,6 +35,34 @@
 #include "../../libkofeng/detectors/pathogen/diag_int.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 
+/* any and all over the ONE-name call a module reaches: `||` and `&&`, which is
+ * what kof_diag_str_any and _all expand to. */
+static int names_all(const struct kof_diag_scan *s, const struct kof_diag *d,
+		     const char *const *v, uint32_t n)
+{
+	uint32_t i;
+
+	if (!v || !n)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (!kof_diag_scan_name(s, d, v[i]))
+			return 0;
+	return 1;
+}
+
+static int names_any(const struct kof_diag_scan *s, const struct kof_diag *d,
+		     const char *const *v, uint32_t n)
+{
+	uint32_t i;
+
+	if (!v || !n)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (kof_diag_scan_name(s, d, v[i]))
+			return 1;
+	return 0;
+}
+
 static int fails;
 #define CK(c) do { if (!(c)) { printf("  FAIL %s:%d  %s\n", __FILE__, \
 	__LINE__, #c); fails++; } } while (0)
@@ -163,32 +191,39 @@ int main(void)
 		d_one.node = n_one;
 
 		/* the one that matches both calls carries both names */
-		CK(kof_diag_scan_names(&t, &d_any, x, 1) == 1);
-		CK(kof_diag_scan_names(&t, &d_any, y, 1) == 1);
-		CK(kof_diag_scan_names(&t, &d_any, both, 2) == 1);
+		CK(names_all(&t, &d_any, x, 1) == 1);
+		CK(names_all(&t, &d_any, y, 1) == 1);
+		CK(names_all(&t, &d_any, both, 2) == 1);
 
 		/* the one that matches the second call carries ITS name ... */
-		CK(kof_diag_scan_names(&t, &d_one, y, 1) == 1);
+		CK(names_all(&t, &d_one, y, 1) == 1);
 		/* ... and NOT the first call's, though it names the same
 		 * capability. This is the assertion the capability-keyed store
 		 * failed. */
-		CK(kof_diag_scan_names(&t, &d_one, x, 1) == 0);
-		CK(kof_diag_scan_names(&t, &d_one, both, 2) == 0);
+		CK(names_all(&t, &d_one, x, 1) == 0);
+		CK(names_all(&t, &d_one, both, 2) == 0);
 
 		/* AND over the list: one missing name is a miss. */
-		CK(kof_diag_scan_names(&t, &d_any, miss, 1) == 0);
-		CK(kof_diag_scan_names(&t, &d_any, mixed, 2) == 0);
+		CK(names_all(&t, &d_any, miss, 1) == 0);
+		CK(names_all(&t, &d_any, mixed, 2) == 0);
+		/* ANY is the other half of the pair: one name present is enough,
+		 * none is not, and it is the same walk with the opposite stop. */
+		CK(names_any(&t, &d_any, mixed, 2) == 1);
+		CK(names_any(&t, &d_any, miss, 1) == 0);
+		CK(names_any(&t, &d_any, both, 2) == 1);
+		CK(names_any(&t, &d_one, both, 2) == 1);   /* y is there */
+		CK(names_any(&t, &d_one, x, 1) == 0);
 
 		/* A diagnose that does not match carries nothing. */
 		n_one[1].role = KOF_DIAG_ROLE_FD;
-		CK(kof_diag_scan_names(&t, &d_one, y, 1) == 0);
+		CK(names_all(&t, &d_one, y, 1) == 0);
 		n_one[1].role = KOF_DIAG_ROLE_SOURCE;
 
 		/* Degenerate calls are a plain no. */
-		CK(kof_diag_scan_names(&t, &d_any, NULL, 1) == 0);
-		CK(kof_diag_scan_names(&t, &d_any, y, 0) == 0);
-		CK(kof_diag_scan_names(NULL, &d_any, y, 1) == 0);
-		CK(kof_diag_scan_names(&t, NULL, y, 1) == 0);
+		CK(names_all(&t, &d_any, NULL, 1) == 0);
+		CK(names_all(&t, &d_any, y, 0) == 0);
+		CK(names_all(NULL, &d_any, y, 1) == 0);
+		CK(names_all(&t, NULL, y, 1) == 0);
 
 		free(t.str);
 		free(t.str_tab);
