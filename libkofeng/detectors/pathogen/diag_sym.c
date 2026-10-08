@@ -54,7 +54,7 @@
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../analyzers/nucleo/nucleo.h"
 #include "../../disinfect/pzero.h"
-#include "../../analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 
 /* How far back the walk reads before a call, to see its arguments set up.

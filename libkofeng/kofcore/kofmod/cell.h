@@ -68,6 +68,10 @@
 #ifndef KOFENG_CELL_H
 #define KOFENG_CELL_H
 
+#include <stdint.h>
+
+#include "basic.h"
+
 /*
  * ---- OPCODE CLASSES -------------------------------------------------------
  *

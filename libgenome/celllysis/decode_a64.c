@@ -77,7 +77,7 @@
 #include <string.h>
 
 /* KOF_BROKEN - the sentinel cell.h names for a target there is not. */
-#include "kofmod/kofsig.h"
+#include "kofmod/cell.h"
 #include "decode.h"
 
 #define NOREG CELL_REG_NONE

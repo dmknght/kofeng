@@ -57,7 +57,7 @@
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 #include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
-#include "../../analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 /* How far before a syscall its function may begin. MEASURED on 27 sites in 25
  * static i386 bots, 33 bytes; glibc's wrappers with a cancellation check are

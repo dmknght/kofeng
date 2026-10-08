@@ -36,9 +36,8 @@
 
 #include <stdint.h>
 
-/* KOF_BROKEN and KOF_ARCH_* live with the module vocabulary; kofsig.h brings
- * kofmod/cell.h with it. */
-#include "kofmod/kofsig.h"
+/* The vocabulary, and with it KOF_BROKEN and KOF_ARCH_*. */
+#include "kofmod/cell.h"
 #include "cell_state.h"
 #include "decode.h"
 

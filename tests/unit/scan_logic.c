@@ -165,8 +165,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	sc = kscan_new(e);
-	if (!sc)
+	if (!sc) {
+		keng_close(e);
 		return 1;
+	}
 
 	/* ---- 1. the repair belongs to the finding it is reported under ---- */
 	memset(&opt, 0, sizeof opt);
@@ -266,6 +268,8 @@ int main(int argc, char **argv)
 		   in(dropped, n_dropped, "m_multi"));
 	}
 
+	kscan_free(sc);
+	keng_close(e);
 	printf("scan_logic: %s\n", fails ? "FAILED" : "ok");
 	return fails != 0;
 }

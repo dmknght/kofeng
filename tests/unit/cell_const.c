@@ -43,7 +43,7 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include <celllysis/celllysis.h>
-#include "../../libkofeng/analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 /* The cursor takes an address space; the engine builds one from the object. */
 static int nx(struct kof_cell_cur *k, const struct kof_obj_ctx *ctx,

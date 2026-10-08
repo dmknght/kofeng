@@ -936,7 +936,6 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/events/amsi_parse.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
            libkofeng/analyzers/nucleo/nucleo.c \
-           libkofeng/analyzers/nucleo/space.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_sym.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_parse.c \
            libkofeng/analyzers/parsers/binaries/pe/clr_parse.c \
@@ -1066,7 +1065,7 @@ $(INT)/gt_%.o: libgenome/genotype/%.c $(STAMP) | $(INT)
 # celllysis: reading code without running it, on top of what genotype decodes.
 # Public API is libgenome/celllysis/celllysis.h; the engine reaches it through
 # -Ilibgenome (`<celllysis/celllysis.h>`) and supplies the object's address space
-# itself (libkofeng/analyzers/nucleo/space.c), so nothing here includes a parser.
+# itself (libgenome/celllysis/space.c), the one file here that knows an object.
 CL_SRC := $(wildcard libgenome/celllysis/*.c)
 CL_OBJ := $(patsubst libgenome/celllysis/%.c,$(INT)/cl_%.o,$(CL_SRC))
 
@@ -1150,6 +1149,7 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ) $(CL_OBJ)
 
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
+           $(SDK)/include/kofmod/basic.h \
            $(SDK)/include/kofmod/cell.h \
            $(SDK)/include/kofmod/infected.h \
            $(SDK)/include/kofmod/kofcure.h \

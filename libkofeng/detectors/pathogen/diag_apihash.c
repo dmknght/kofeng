@@ -42,7 +42,7 @@
 #include "../../disinfect/pzero.h"
 #include "../../extractors/unpack/emu_unpack.h"
 #include "../../../libgenome/phenotype/kofemu.h"
-#include "../../analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 /*
  * ---- DOES THE PROGRAM READ THE LOADER DATA ---------------------------------

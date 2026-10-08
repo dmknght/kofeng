@@ -77,7 +77,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include "../analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx)
 {

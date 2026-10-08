@@ -30,7 +30,7 @@
 #include "../../kofcore/kofmod/elf.h"
 #include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
-#include "../../analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 /*
  * HOW MANY NODES ONE OBJECT MAY HOLD.

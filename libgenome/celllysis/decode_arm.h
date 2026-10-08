@@ -111,7 +111,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "kofmod/kofsig.h"
+#include "kofmod/cell.h"
 #include "decode.h"
 
 #define ARM_SH_NONE 0u

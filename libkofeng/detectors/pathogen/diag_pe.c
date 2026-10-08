@@ -45,7 +45,7 @@
 #include "../../analyzers/parsers/binaries/pe/pe_parse.h"
 #include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
-#include "../../analyzers/nucleo/space.h"
+#include <celllysis/space.h>
 
 struct pe_imp {
 	uint64_t slot;          /* the address a call goes through            */

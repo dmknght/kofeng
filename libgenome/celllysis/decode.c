@@ -11,7 +11,7 @@
  * caller that is only handed bytes. Thumb is decoded (cell_decode_t32) for the
  * caller that knows; the cursor does not yet.
  */
-#include "kofmod/kofsig.h"
+#include "kofmod/cell.h"
 #include "decode.h"
 
 uint32_t cell_decode(unsigned arch, int be, const uint8_t *p, uint32_t n,

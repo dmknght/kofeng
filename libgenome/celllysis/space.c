@@ -12,7 +12,7 @@
 #include "kofmod/kofsig.h"
 #include "kofmod/pe.h"
 #include "kofmod/elf.h"
-#include "../../disinfect/pzero.h"
+#include "../../libkofeng/disinfect/pzero.h"
 #include "space.h"
 
 static int pe_seg(const struct kof_obj_ctx *ctx, uint64_t off,

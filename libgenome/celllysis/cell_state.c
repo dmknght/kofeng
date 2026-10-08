@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "kofmod/kofsig.h"
+#include "kofmod/cell.h"
 #include "kofmod/cell.h"
 #include "cell_state.h"
 
