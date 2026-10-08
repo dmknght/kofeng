@@ -2200,6 +2200,12 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 	if (needs && needs_cap && at < n) {
 		uint32_t cnt = b[at++], k, used = nused;
 
+		/*
+		 * THE NAMES AN OLDER PACK WROTE HERE ARE SKIPPED, not read: the
+		 * sign is now a capability (KDIG_SEC_NEEDS), and a diagnose
+		 * built before that simply has no sign, which is the cheaper
+		 * kind of wrong - it runs where it could have been spared.
+		 */
 		if (cnt > KOF_DIAG_MAX_NEED)
 			return 0;
 		for (k = 0; k < cnt; k++) {
@@ -2208,16 +2214,10 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			if (at >= n)
 				return 0;
 			L = b[at++];
-			if (!L || L >= KOF_DIAG_NEED_LEN || at + L > n ||
-			    used + L + 1u > needs_cap)
+			if (!L || L >= KOF_DIAG_NEED_LEN || at + L > n)
 				return 0;
-			memcpy(needs + used, b + at, L);
-			needs[used + L] = 0;
-			out->need[k] = needs + used;
-			used += L + 1u;
 			at += L;
 		}
-		out->n_need = (uint8_t)cnt;
 		/*
 		 * ---- AND THE TAGGED SECTIONS AFTER THEM ----------------
 		 *
@@ -2242,6 +2242,17 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			 */
 			if (tag == KDIG_SEC_SERVES && len == 1u)
 				out->serves = b[at];
+			/* The capabilities the object must import - u16 each. */
+			if (tag == KDIG_SEC_NEEDS) {
+				uint32_t q;
+
+				if ((len & 1u) || len / 2u > KOF_DIAG_MAX_NEED)
+					return 0;
+				for (q = 0; q < len / 2u; q++)
+					out->needcap[q] = (uint16_t)(b[at + 2u * q] |
+							(b[at + 2u * q + 1u] << 8));
+				out->n_needcap = (uint8_t)(len / 2u);
+			}
 			if (tag == KDIG_SEC_USERS && len >= 1u) {
 				out->users_known = 1;
 				out->n_users = b[at];

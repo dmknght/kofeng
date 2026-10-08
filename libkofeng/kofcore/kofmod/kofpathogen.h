@@ -436,8 +436,11 @@ struct kof_diag {
 	/*
 	 * ---- THE SIGN THAT SAYS THIS OBJECT IS WORTH THE ANALYSIS -------
 	 *
-	 * Undefined symbols the object must import before the analysis is
-	 * run for this diagnose at all. Not a verdict and not evidence: an
+	 * Capabilities the object must IMPORT before the analysis is run for
+	 * this diagnose at all: a name the object imports counts when nucleo
+	 * says that name is this capability (prepare_creds is
+	 * KOF_NUCLEO_CRED_PREPARE, and so is prepare_kernel_cred). The names live
+	 * in nucleo's one table, not in the diagnose. Not a verdict and not evidence: an
 	 * ANCHOR, which is a place to start looking from. It does not need
 	 * to be clean - a false one costs the analysis and nothing else -
 	 * and demanding that it be clean is asking the cheap test to do the
@@ -451,8 +454,8 @@ struct kof_diag {
 	 * Empty means no sign: the diagnose is tried wherever its route can
 	 * run, which is what every diagnose written before this did.
 	 */
-	uint8_t               n_need;
-	const char           *need[KOF_DIAG_MAX_NEED];
+	uint8_t               n_needcap;
+	uint16_t              needcap[KOF_DIAG_MAX_NEED];
 
 	/*
 	 * THE CONDITIONS ON WHAT THE FILE IS - see enum kof_diag_fact. ANDED
@@ -543,8 +546,15 @@ enum kof_diag_link {
  */
 #define KOF_DIAG_FROM(...)
 /*
- * KOF_DIAG_NEEDS("prepare_creds", "commit_creds") - the imports an object
- * must carry before this diagnose is worth running. See struct kof_diag.
+ * KOF_DIAG_NEEDS(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_CRED_SET) - the
+ * capabilities an object must import before this diagnose is worth running.
+ * See struct kof_diag.
+ *
+ * CAPABILITIES AND NOT NAMES, because the names are nucleo's: the table that
+ * says prepare_creds is KOF_NUCLEO_CRED_PREPARE is the one the analysis reads
+ * the call with, so a second spelling of it in a diagnose is a copy that can
+ * disagree. A cap with no name in that table can never be satisfied, and the
+ * build refuses it.
  */
 #define KOF_DIAG_NEEDS(...)
 /*
@@ -638,6 +648,10 @@ enum kof_diag_link {
 #define KDIG_SEC_REFS  4u
 /* KOF_SERVE_* - one byte. See KOF_DIAG_SERVES. */
 #define KDIG_SEC_SERVES 5u
+/* The capabilities the object must import: u16 each, little endian. They
+ * replaced a list of symbol NAMES in the record's first byte, which an older
+ * pack still writes and this build skips. */
+#define KDIG_SEC_NEEDS  6u
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,

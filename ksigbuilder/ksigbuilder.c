@@ -90,6 +90,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofplague.h>
 #include <kofmod/kofpathogen.h>
+#include "../libkofeng/analyzers/nucleo/nucleo.h"
 #include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
@@ -7838,7 +7839,7 @@ static int diagnose_main(int argc, char **argv)
 	const char *out = argc > 3 ? argv[3] : NULL;
 	struct dnode nd[64];
 	char name[64] = "", line[1024], a[5][96];
-	char need_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
+	uint16_t need_tbl[KOF_DIAG_MAX_NEED];
 	char ref_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
 	struct kof_diag_when when_tbl[KOF_DIAG_MAX_WHEN];
 	unsigned n_users = 0, users_len = 0;
@@ -8054,25 +8055,27 @@ static int diagnose_main(int argc, char **argv)
 		} else if ((p = strstr(line, "KOF_DIAG_NEEDS(")) != NULL) {
 			int k;
 
-			/* Every quoted word on the line is one sign. */
+			/* Every word on the line is one capability: what the object
+			 * must import, said in nucleo's own vocabulary. */
 			for (k = 0; diag_arg(p, k, a[0], sizeof a[0]); k++) {
-				size_t L = strlen(a[0]);
+				uint16_t cap;
 
-				if (L < 3u || a[0][0] != '"' ||
-				    a[0][L - 1u] != '"') {
+				if (!diag_cap_of(a[0], &cap)) {
 					err(lineno, "KOF_DIAG_NEEDS wants "
-						    "quoted symbol names");
+						    "KOF_NUCLEO_* capabilities");
 					break;
 				}
-				if (n_need >= (int)KOF_DIAG_MAX_NEED ||
-				    L - 2u >= KOF_DIAG_NEED_LEN) {
-					err(lineno, "too many signs, or one "
-						    "is too long");
+				if (!kof_flow_cap_named(cap)) {
+					err(lineno, "no imported name is that "
+						    "capability, so it can "
+						    "never be satisfied");
 					break;
 				}
-				memcpy(need_tbl[n_need], a[0] + 1, L - 2u);
-				need_tbl[n_need][L - 2u] = 0;
-				n_need++;
+				if (n_need >= (int)KOF_DIAG_MAX_NEED) {
+					err(lineno, "too many signs");
+					break;
+				}
+				need_tbl[n_need++] = cap;
 			}
 		}
 	}
@@ -8156,10 +8159,10 @@ static int diagnose_main(int argc, char **argv)
 	if (n_need || n_when || n_ref || serves || g_uses_known) {
 		int k;
 
-		need += 1u;                     /* how many */
-		for (k = 0; k < n_need; k++)
-			need += 1u + strlen(need_tbl[k]);
+		need += 1u;                     /* the legacy name count: 0 */
 	}
+	if (n_need)
+		need += 2u + 2u * (size_t)n_need;   /* tag, length, caps */
 	if (n_ref) {
 		int k;
 
@@ -8227,13 +8230,16 @@ static int diagnose_main(int argc, char **argv)
 	if (n_need || n_when || n_ref || serves || g_uses_known) {
 		int k;
 
-		blob[at++] = (unsigned char)n_need;
-		for (k = 0; k < n_need; k++) {
-			size_t L = strlen(need_tbl[k]);
+		blob[at++] = 0;                 /* no names: see KDIG_SEC_NEEDS */
+	}
+	if (n_need) {
+		int k;
 
-			blob[at++] = (unsigned char)L;
-			memcpy(blob + at, need_tbl[k], L);
-			at += L;
+		blob[at++] = KDIG_SEC_NEEDS;
+		blob[at++] = (unsigned char)(2 * n_need);
+		for (k = 0; k < n_need; k++) {
+			blob[at++] = (unsigned char)need_tbl[k];
+			blob[at++] = (unsigned char)(need_tbl[k] >> 8);
 		}
 	}
 	if (n_when) {

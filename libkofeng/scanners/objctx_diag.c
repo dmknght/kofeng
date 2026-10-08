@@ -26,6 +26,7 @@
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/xref.h>
 #include "../disinfect/pzero.h"
+#include "../analyzers/nucleo/nucleo.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include <kofmod/elf.h>
@@ -470,7 +471,7 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 		 * R|X binary then started the analysis.
 		 */
 		{
-			uint32_t signs = d->n_need;
+			uint32_t signs = d->n_needcap;
 			uint8_t w;
 
 			for (w = 0; w < d->n_when; w++)
@@ -682,11 +683,11 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			continue;
 		if (!diag_when_met(ctx, d))
 			continue;               /* the file is not the shape */
-		if (!d->n_need) {
+		if (!d->n_needcap) {
 			ok[i] = 1;
 			continue;
 		}
-		unmet[i] = d->n_need;
+		unmet[i] = d->n_needcap;
 		memset(hit[i], 0, sizeof hit[i]);
 		pending++;
 	}
@@ -695,20 +696,26 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		total = kof_sym_count(sb, sn);
 		for (r = 0; r < total && pending; r++) {
 			const uint8_t *rec = kof_sym_rec(sb, sn, r);
-			const char *nm;
+			uint16_t cap;
 
 			if (!rec || !(rec[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
 				continue;
-			nm = (const char *)(rec + KOF_SYM_R_NAME);
+			/* WHICH CAPABILITY THIS IMPORT IS, said once by nucleo's one
+			 * name table - a diagnose names the capability, never the
+			 * spelling. */
+			cap = kof_flow_cap_of_name((const char *)(rec + KOF_SYM_R_NAME));
+			if (cap == KOF_NUCLEO_NONE)
+				continue;
 			for (i = 0; i < n; i++) {
 				const struct kof_diag *d = &sc->eng->diag[i];
 				uint8_t k;
 
 				if (!unmet[i])
 					continue;
-				for (k = 0; k < d->n_need; k++)
-					if (d->need[k] && !hit[i][k] &&
-					    kof_streq_(nm, d->need[k])) {
+				for (k = 0; k < d->n_needcap; k++)
+					if (!hit[i][k] &&
+					    (d->needcap[k] == cap ||
+					     d->needcap[k] == kof_flow_cap_generic(cap))) {
 						/* each sign counts once,
 						 * however many records spell
 						 * it */

@@ -1236,6 +1236,18 @@ uint16_t kof_flow_cap_of_name(const char *sym)
 	return KOF_NUCLEO_NONE;
 }
 
+int kof_flow_cap_named(uint16_t cap)
+{
+	size_t i;
+
+	if (cap == KOF_NUCLEO_NONE)
+		return 0;
+	for (i = 0; i < sizeof names / sizeof names[0]; i++)
+		if (names[i].cap == cap || kof_flow_cap_generic(names[i].cap) == cap)
+			return 1;
+	return 0;
+}
+
 uint8_t kof_flow_role_of_name(const char *sym)
 {
 	size_t i;

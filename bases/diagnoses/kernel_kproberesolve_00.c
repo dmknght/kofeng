@@ -70,7 +70,7 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
  * module - measured once already, +47% on that corpus.
  */
 KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
-KOF_DIAG_NEEDS("register_kprobe", "unregister_kprobe");
+KOF_DIAG_NEEDS(KOF_NUCLEO_KPROBE_REG, KOF_NUCLEO_KPROBE_UNREG);
 
 /*
  * THE RESOLVER CALL IS THE ANCHOR. The engine places it where the

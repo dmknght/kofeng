@@ -92,7 +92,7 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
  * tree below is about, so an object missing either cannot match anyway.
  */
 KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
-KOF_DIAG_NEEDS("prepare_creds", "commit_creds");
+KOF_DIAG_NEEDS(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_CRED_SET);
 
 /*
  * THE ANCHOR IS prepare_creds AND NOT commit_creds, although commit is the
