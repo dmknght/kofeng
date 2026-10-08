@@ -65,7 +65,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
 
-KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
+KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 

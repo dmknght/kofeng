@@ -3594,6 +3594,7 @@ static int kind_checks(int kind)
 		}
 		return 1;
 	}
+
 	if (kind == 1) {                        /* unpacker */
 		if (!n_kind) {
 			fprintf(stderr, "FAIL: an unpack module must declare "

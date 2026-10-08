@@ -984,6 +984,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/extractors/decomp/nrv2.c \
            libkofeng/scanners/scan.c \
            libkofeng/scanners/scan_mt.c \
+           libkofeng/scanners/scan_pipeline.c \
            libkofeng/scanners/scan_walk.c \
            libkofeng/scanners/scan_verdict.c \
            libkofeng/scanners/scan_norm_text.c \

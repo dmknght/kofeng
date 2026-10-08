@@ -51,7 +51,7 @@
 #include <kofmod/kofsig.h>
 #include <kofanalyze/msf_elf32.h>
 
-KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
+KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
 
 /*
  * ELF and the formatless children, for the reason msf_xor_00.c gives: the layers

@@ -122,14 +122,94 @@ int sx_unp_is_family(const struct kof_scanner *sc,
 	return fam && strcmp(fam, predict) == 0;
 }
 
-uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-			 const struct kof_scan_option *opt,
-			 struct kof_result *res, uint32_t pdepth,
-			 uint32_t want, const char *predict)
+/*
+ * ONE UNPACK MODULE'S TURN: what it needs, what it is cleared of, the call, and
+ * what comes of it.
+ *
+ * The family pass and the general pass each spelled this out and had drifted
+ * (one of them lost a reset and a finding was credited to a module that contains
+ * no report at all - measured on 007 Spy.exe, below). It is the detector loop's
+ * turn too, in sx_mod_report's terms: a module runs, and what it reported becomes
+ * a finding in one place.
+ */
+static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			const struct kof_scan_option *opt,
+			struct kof_result *res, const struct kof_module *m)
 {
-	uint32_t i;
-	int applies = 0, family_opened = 0;
+	if (m->n_str)
+		sx_need_multi(sc, ctx);
+	if (m->n_block)
+		sx_need_plague(sc, ctx);
+	/*
+	 * WHAT THIS MODULE REPORTED, AND NOT WHAT THE LAST
+	 * ONE DID.
+	 *
+	 * The detector loop clears this before every module
+	 * and says why; these two loops did not, so a report
+	 * left behind by an earlier module was composed with
+	 * the NEXT one's identity. Measured on 007 Spy.exe:
+	 * `PE-x86/Virus:unknown#unknown`, credited to
+	 * unp/aspack_pe.c - a module that contains no report
+	 * at all and declares no target name.
+	 */
+	sx_mod_begin(sc, m);
+	{
+		uint32_t k0 = sc->n_kids;
 
+	KOF_TIME_BEGIN(KOF_T_UNPACK);
+	m->fn(ctx);
+	KOF_TIME_END(KOF_T_UNPACK);
+		/* What a carve produced does not make its host
+		 * a wrapper - see KOF_ANALYZE_CARVE. */
+		if (m->step == KOF_ANALYZE_CARVE &&
+		    sc->n_kids > k0)
+			sc->n_carved += sc->n_kids - k0;
+	}
+	sc->cur_mod = NULL;
+	/*
+	 * AND WHAT IT FOUND, WHICH WAS BEING THROWN AWAY.
+	 *
+	 * ctx->report is on the CONTEXT and not on the content
+	 * table, so an unpack module has always been able to
+	 * call it - and nothing here read the answer. Only the
+	 * detector loop did, so a family that can only be
+	 * named by RUNNING it had nowhere to say so: Sality's
+	 * decryptor is polymorphic, the name is earned when
+	 * the interpreter reaches the body, and the module
+	 * that reached it could produce a child but not a
+	 * verdict.
+	 *
+	 * Appended on the same terms the detector loop uses,
+	 * including the cap and the count of what the cap
+	 * dropped, because it is the same kind of statement
+	 * about the same object.
+	 */
+	if (sc->rep_valid && res)
+		(void)sx_mod_report(sc, ctx, opt, res, m,
+				    sc->rep_level);
+	/* A build claimed by a module that opened nothing is
+	 * a guess about somebody else's file - see
+	 * kof_scanner.pend_build. */
+	sc->pend_build[0] = 0;
+	sc->pend_build_of = NULL;
+	/* The machine, if this module asked for one. Its
+	 * regions point into the machine's own memory and the
+	 * module has returned, so nothing may read them
+	 * again - see kof_scanner.emu_live. */
+	kof_scan_emu_release(sc);
+}
+
+/*
+ * THE OPEN STAGE'S GATE: whether this object is to be opened at all, decided once.
+ *
+ * Every early return is a refusal that must still leave the per-object state
+ * clean - the notes inside say why they sit where they do - and the emulator's
+ * stance is set here, in one value, for oc_emu_run to read.
+ */
+static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		     const struct kof_scan_option *opt,
+		     struct kof_result *res, uint32_t pdepth, uint32_t want)
+{
 	if (sc->eng->n_unp == 0)
 		return 0;
 	/*
@@ -291,6 +371,8 @@ uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return 0;
 
 	kof_mod_unpack_mode(ctx, 1);
+	return 1;
+}
 
 	/*
 	 * FAMILY FIRST, when a rule predicted one.
@@ -310,94 +392,40 @@ uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * it" is answered, because producing a child is the only thing an
 	 * unpacker does that the next pass would want to know about.
 	 */
-	if (predict) {
-		uint32_t kids0 = sc->n_kids;
-		uint32_t carved0 = sc->n_carved;
+static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		       const struct kof_scan_option *opt,
+		       struct kof_result *res, uint32_t want,
+		       const char *predict, int *applies)
+{
+	uint32_t i;
+	uint32_t kids0 = sc->n_kids;
+	uint32_t carved0 = sc->n_carved;
 
-		for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
-			const struct kof_module *m = &sc->eng->unp[i];
+	for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
+		const struct kof_module *m = &sc->eng->unp[i];
 
-			if (!sx_unp_eligible(sc, m, ctx, opt, want) ||
-			    !sx_unp_is_family(sc, m, predict))
-				continue;
-			applies = 1;
-			if (m->n_str)
-				sx_need_multi(sc, ctx);
-			if (m->n_block)
-				sx_need_plague(sc, ctx);
-			/*
-			 * WHAT THIS MODULE REPORTED, AND NOT WHAT THE LAST
-			 * ONE DID.
-			 *
-			 * The detector loop clears this before every module
-			 * and says why; these two loops did not, so a report
-			 * left behind by an earlier module was composed with
-			 * the NEXT one's identity. Measured on 007 Spy.exe:
-			 * `PE-x86/Virus:unknown#unknown`, credited to
-			 * unp/aspack_pe.c - a module that contains no report
-			 * at all and declares no target name.
-			 */
-			sx_mod_begin(sc, m);
-			{
-				uint32_t k0 = sc->n_kids;
-
-			KOF_TIME_BEGIN(KOF_T_UNPACK);
-			m->fn(ctx);
-			KOF_TIME_END(KOF_T_UNPACK);
-				/* What a carve produced does not make its host
-				 * a wrapper - see KOF_ANALYZE_CARVE. */
-				if (m->step == KOF_ANALYZE_CARVE &&
-				    sc->n_kids > k0)
-					sc->n_carved += sc->n_kids - k0;
-			}
-			sc->cur_mod = NULL;
-			/*
-			 * AND WHAT IT FOUND, WHICH WAS BEING THROWN AWAY.
-			 *
-			 * ctx->report is on the CONTEXT and not on the content
-			 * table, so an unpack module has always been able to
-			 * call it - and nothing here read the answer. Only the
-			 * detector loop did, so a family that can only be
-			 * named by RUNNING it had nowhere to say so: Sality's
-			 * decryptor is polymorphic, the name is earned when
-			 * the interpreter reaches the body, and the module
-			 * that reached it could produce a child but not a
-			 * verdict.
-			 *
-			 * Appended on the same terms the detector loop uses,
-			 * including the cap and the count of what the cap
-			 * dropped, because it is the same kind of statement
-			 * about the same object.
-			 */
-			if (sc->rep_valid && res)
-				(void)sx_mod_report(sc, ctx, opt, res, m,
-						    sc->rep_level);
-			/* A build claimed by a module that opened nothing is
-			 * a guess about somebody else's file - see
-			 * kof_scanner.pend_build. */
-			sc->pend_build[0] = 0;
-			sc->pend_build_of = NULL;
-			/* The machine, if this module asked for one. Its
-			 * regions point into the machine's own memory and the
-			 * module has returned, so nothing may read them
-			 * again - see kof_scanner.emu_live. */
-			kof_scan_emu_release(sc);
-		}
-		/*
-		 * OPENED, AND A CARVE DID NOT OPEN ANYTHING - the same rule
-		 * analyze_object applies one level up, and for the same
-		 * reason: a carved child is a file that was glued on, so the
-		 * host is still an unopened object and the general pass below
-		 * is still owed to it. Counted as an opening, one family's
-		 * carver would stand in for every other unpacker in the
-		 * database.
-		 *
-		 * Both counters are the whole object's, so both marks are
-		 * this pass's - see the note on the same subtraction in
-		 * analyze_object.
-		 */
-		family_opened = sc->n_kids - kids0 > sc->n_carved - carved0;
+		if (!sx_unp_eligible(sc, m, ctx, opt, want) ||
+		    !sx_unp_is_family(sc, m, predict))
+			continue;
+		*applies = 1;
+		unpack_turn(sc, ctx, opt, res, m);
 	}
+	/*
+	 * OPENED, AND A CARVE DID NOT OPEN ANYTHING - the same rule
+	 * analyze_object applies one level up, and for the same
+	 * reason: a carved child is a file that was glued on, so the
+	 * host is still an unopened object and the general pass below
+	 * is still owed to it. Counted as an opening, one family's
+	 * carver would stand in for every other unpacker in the
+	 * database.
+	 *
+	 * Both counters are the whole object's, so both marks are
+	 * this pass's - see the note on the same subtraction in
+	 * analyze_object.
+	 */
+
+	return sc->n_kids - kids0 > sc->n_carved - carved0;
+}
 
 	/*
 	 * The general pass, unless the predicted family already opened it.
@@ -425,11 +453,19 @@ uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * A carve that finds something a packer already explained still costs
 	 * nothing but the ask - it declines and the loop moves on.
 	 */
-	for (i = 0; !family_opened && i < sc->eng->n_unp * 2u; i++) {
-		const struct kof_module *m = &sc->eng->unp[i % sc->eng->n_unp];
-		int carve_round = i >= sc->eng->n_unp;
+/* One STEP of the general pass: the modules that declared it, in database
+ * order. Returns 0 when the tree's budget is gone and the caller must not go on. */
+static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		     const struct kof_scan_option *opt,
+		     struct kof_result *res, uint32_t want,
+		     const char *predict, enum kof_analyze step, int *applies)
+{
+	uint32_t i;
 
-		if ((m->step == KOF_ANALYZE_CARVE) != carve_round)
+	for (i = 0; i < sc->eng->n_unp; i++) {
+		const struct kof_module *m = &sc->eng->unp[i];
+
+		if (m->step != (uint32_t)step)
 			continue;
 		if (!sx_unp_eligible(sc, m, ctx, opt, want))
 			continue;
@@ -439,7 +475,7 @@ uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (predict && sx_unp_is_family(sc, m, predict))
 			continue;
 
-		applies = 1;
+		*applies = 1;
 		/*
 		 * NARROWED TO THE LIMIT, for the reason spelled out where the
 		 * interpreter's gate was narrowed the same way: `broken` was
@@ -457,33 +493,55 @@ uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * and it is the only thing this now stops for.
 		 */
 		if (sc->broken == KOF_BROKEN_LIMIT)
-			break;          /* nothing left to spend on this tree */
-
-		if (m->n_str)
-			sx_need_multi(sc, ctx);
-		if (m->n_block)
-			sx_need_plague(sc, ctx);
-		/* Same reset, same reason - see the loop above. */
-		sx_mod_begin(sc, m);
-		{
-			uint32_t k0 = sc->n_kids;
-
-			KOF_TIME_BEGIN(KOF_T_UNPACK);
-			m->fn(ctx);
-			KOF_TIME_END(KOF_T_UNPACK);
-			if (m->step == KOF_ANALYZE_CARVE && sc->n_kids > k0)
-				sc->n_carved += sc->n_kids - k0;
-		}
-		sc->cur_mod = NULL;
-		/* And what it found - see the same block in the family pass
-		 * above for why an unpack module may report at all. */
-		if (sc->rep_valid && res)
-			(void)sx_mod_report(sc, ctx, opt, res, m, sc->rep_level);
-		/* See the same two in the family pass above. */
-		sc->pend_build[0] = 0;
-		sc->pend_build_of = NULL;
-		kof_scan_emu_release(sc);
+			return 0;       /* nothing left to spend on this tree */
+		unpack_turn(sc, ctx, opt, res, m);
 	}
+	return 1;
+}
+
+/*
+ * ONE STEP OF OPENING AN OBJECT: the modules that declared `step`, and before
+ * the first of them the gate and the predicted family.
+ *
+ * Called once per row of analyze_steps, in enum order, so the order the steps
+ * were designed in (see enum kof_analyze) is the order modules run in - a
+ * container's table is read before a packer is asked about the same bytes, and
+ * a carve, which searches, comes last. `o` is the object's own record of where
+ * the stage is: the gate is decided on the first call, a refusal or an opening
+ * by the predicted family answers every later call without work.
+ */
+void sx_open_step(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		  const struct kof_scan_option *opt, struct kof_result *res,
+		  uint32_t pdepth, uint32_t want, const char *predict,
+		  enum kof_analyze step, struct kof_open *o)
+{
+	if (o->state == KOF_OPEN_FRESH) {
+		o->state = open_gate(sc, ctx, opt, res, pdepth, want)
+			   ? KOF_OPEN_ACTIVE : KOF_OPEN_REFUSED;
+		if (o->state == KOF_OPEN_ACTIVE && predict &&
+		    open_family(sc, ctx, opt, res, want, predict, &o->applies))
+			o->state = KOF_OPEN_FAMILY;
+	}
+	if (o->state != KOF_OPEN_ACTIVE)
+		return;
+	(void)open_pass(sc, ctx, opt, res, want, predict, step, &o->applies);
+}
+
+/*
+ * THE END OF THE OPEN STAGE, whichever row it ended on: the declared carried
+ * files, the ciphertext check, and the answer - how much of the tree's budget
+ * the object ate, or 0 when nothing wanted to open it. Called once, and only
+ * for an object whose gate let it in.
+ */
+uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		     const struct kof_scan_option *opt, struct kof_open *o)
+{
+	int applies = o->applies;
+
+	if (o->state == KOF_OPEN_FRESH || o->state == KOF_OPEN_REFUSED ||
+	    o->state == KOF_OPEN_DONE)
+		return 0;
+	o->state = KOF_OPEN_DONE;
 	/*
 	 * A COMPLETE FILE SITTING AT AN OFFSET IS NOT AN UNPACKING PROBLEM -
 	 * AND IT IS NOT THE ENGINE'S SEARCH EITHER, ANY MORE.

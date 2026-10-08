@@ -224,7 +224,31 @@ void sx_need_plague(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
 uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	 const struct kof_scan_option *opt, 	 struct kof_result *out, uint32_t phase, 	 uint32_t present, const char **predict);
 int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, 	const struct kof_scan_option *opt, uint32_t pdepth);
 void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, 	const struct kof_scan_option *opt, uint32_t pdepth, 	uint32_t partial, struct kof_result *out);
-uint32_t sx_unpack_object(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	 const struct kof_scan_option *opt, 	 struct kof_result *res, uint32_t pdepth, 	 uint32_t want, const char *predict);
+/*
+ * WHERE THE OPEN STAGE IS FOR ONE OBJECT. One value, not a flag per question:
+ * FRESH until the first step asks, then REFUSED (the gate said no), ACTIVE
+ * (modules are being asked), FAMILY (the predicted family opened it, so the
+ * general steps are skipped) or DONE (sx_open_end has run).
+ */
+enum kof_open_state {
+	KOF_OPEN_FRESH = 0,
+	KOF_OPEN_REFUSED,
+	KOF_OPEN_ACTIVE,
+	KOF_OPEN_FAMILY,
+	KOF_OPEN_DONE
+};
+
+struct kof_open {
+	enum kof_open_state state;
+	int                 applies;    /* something wanted to open this object */
+};
+
+void sx_open_step(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		  const struct kof_scan_option *opt, struct kof_result *res,
+		  uint32_t pdepth, uint32_t want, const char *predict,
+		  enum kof_analyze step, struct kof_open *o);
+uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		     const struct kof_scan_option *opt, struct kof_open *o);
 void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,      uint8_t as_format, const void *as_view, uint32_t as_view_len);
 void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,       kof_buf buf);
 uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx, 		      uint32_t scan_mask, struct kof_range *out, 		      uint32_t max_out);
@@ -293,5 +317,91 @@ int sx_unp_is_family(const struct kof_scanner *sc, 	 const struct kof_module *m,
  * then is to stop interpreting, not to keep going.
  */
 #define HEUR_EMU_MAX KOF_SCAN_EMU_MAX
+
+/* ---- the pipeline (scan_pipeline.c) ------------------------------------------- */
+/*
+ * THE STAGES OF ONE OBJECT, in the order they run. Each is a row of the pipeline
+ * table in scan_pipeline.c with a function that takes the object's kof_pipeline.
+ *
+ * The opening steps are the module ABI's own (enum kof_analyze) and keep its
+ * order; what is new is that the rest of the object's life has names too, so a
+ * module can say WHERE it runs instead of the engine deciding by which loop
+ * happened to call it. Detectors are not all at the end: a detector that is
+ * about what an unpacker produced runs between steps, and the table is what lets
+ * that be a declaration and not another loop.
+ */
+enum kof_stage {
+	KOF_STAGE_FACTS = 0,    /* identify, regions, library facts - the host    */
+	KOF_STAGE_DETECT,       /* detectors on the object as it arrived          */
+	KOF_STAGE_EXAMINE,      /* rules about what it IS, before it is opened    */
+	KOF_STAGE_UNWRAP,       /* the opening steps, in enum kof_analyze order   */
+	KOF_STAGE_UNPACK,
+	KOF_STAGE_DECRYPT,
+	KOF_STAGE_CARVE,
+	KOF_STAGE_NORMZ,        /* the object said plainly - the host's own      */
+	KOF_STAGE_SCRIPT,       /* the second form of a script                    */
+	KOF_STAGE_SERVE,        /* what the engine completed, declared            */
+	KOF_STAGE_VERDICT,      /* rules about what the stages above produced     */
+	KOF_STAGE_RECONCILE,    /* a parent's guesses against its children        */
+	KOF_STAGE_MODEL,        /* the scored model                               */
+	KOF_STAGE_COUNT
+};
+
+/*
+ * EVERYTHING ONE OBJECT'S STAGES HAND EACH OTHER, in one record that lives for
+ * the object and no longer. It replaces the locals of what was one function of
+ * five hundred lines and the loose scanner fields that carried the same facts
+ * between the parts of it: a stage reads what it needs from here and writes what
+ * the next one needs here, and the table in scan_pipeline.c is the only thing that
+ * says which stage follows which.
+ */
+struct kof_pipeline {
+	/* inputs, fixed for the object */
+	struct kof_scanner              *sc;
+	const struct kof_scan_option    *opt;
+	struct kof_result               *out;
+	kof_buf                          buf;
+	uint32_t                         pdepth;
+	int                              from_packer;
+	const char                      *inherit_predict;
+	uint8_t                          as_fmt;
+	/* the object's context, built by FACTS */
+	struct kof_obj_ctx               ctx;
+	uint32_t                         present;   /* regions and symbol halves that exist */
+	/* what EXAMINE collected */
+	uint32_t                         want;
+	const char                      *predict;
+	/*
+	 * HOW MANY OF out->v A DETECTOR PUT THERE, counted before the
+	 * heuristics ran.
+	 *
+	 * Not out->n, and the difference is the whole reason this field exists.
+	 * By the time this struct is filled the rule heuristics have appended
+	 * their own findings, and a rule heuristic is not a verdict that the
+	 * object has been identified - it is usually the opposite, "I could not
+	 * sx_identify this", which is exactly the object whose remaining steps
+	 * matter most. Stopping on one measured six samples where the parent
+	 * said Heur:Truncated and the payload one layer down said Botnet:Mirai:
+	 * the chain would have ended on the weaker of the two statements and
+	 * deleted the stronger.
+	 *
+	 * Whether a heuristic MAY stop the chain is a question for the rule
+	 * that wrote it rather than for the engine - see enum kof_eng_want,
+	 * which has no word for it yet. Until it does, only a detector counts.
+	 */
+	uint32_t                         det_n;
+	/* A rule said its finding is a conclusion - see KOF_ENG_CONCLUDE.
+	 * Kept apart from det_n because the two are different claims and the
+	 * note on det_n is a measurement about detectors only. */
+	int                              concluded;
+	/* where the pipeline is, and where the OPEN stage is for this object */
+	enum kof_stage                   stage;
+	enum kof_analyze                 step;
+	struct kof_open                  open;
+};
+
+/* One object through every stage. */
+void sx_pipeline_run(struct kof_pipeline *p);
+void sx_obj_begin(struct kof_scanner *sc);
 
 #endif /* KOF_SCAN_INT_H */
