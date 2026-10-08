@@ -517,8 +517,12 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		kof_src_unref(src);
 		free(name);
 
-		if (w->aborted || n == 0)
+		if (w->aborted || n == 0) {
+			/* Children still waiting are children nobody looked at. */
+			if (n > 0)
+				w->incomplete = 1;
 			break;
+		}
 		n--;
 		src = stack[n].src;
 		name = stack[n].name;
@@ -673,12 +677,25 @@ static void scan_one(struct walk *w, const char *path)
 
 	src = kof_src_file(path, &err);
 	if (!src) {
-		w->sc->st.unreadable++;
+		sx_note_unreadable(w);
 		return;
 	}
 	before = w->found;
+	w->incomplete = 0;
 	scan_tree(w, src, path);
 	kof_src_unref(src);
+	/*
+	 * A STOP THAT ARRIVED DURING THE SCAN. should_stop is asked between modules
+	 * and between children, where the callback cannot reach, and when it says
+	 * yes the object ends there with whatever it had found so far - which for a
+	 * file the detectors had not yet reached is nothing. Nothing found is what
+	 * the cache is told to remember, so a cancelled scan wrote the file down as
+	 * clean and the next run skipped it for good (tests/unit/scan_logic.c).
+	 * Asked again here: a stop that came after the file finished costs one cache
+	 * miss, which is cheap beside a detection that is never made.
+	 */
+	if (w->opt->should_stop && w->opt->should_stop(w->opt->stop_user))
+		w->incomplete = 1;
 
 	/*
 	 * KEPT ONLY WHEN NOTHING WAS FOUND, and that is the whole rule.
@@ -693,7 +710,7 @@ static void scan_one(struct walk *w, const char *path)
 	 * again next time and reported in full, which is also what makes the
 	 * stored set a set - present or absent, no verdict to go stale.
 	 */
-	if (w->opt->cache_keep && w->found == before)
+	if (w->opt->cache_keep && w->found == before && !w->incomplete)
 		w->opt->cache_keep(w->opt->cache_user, path);
 	/*
 	 * AND A FINDING IS TOLD TO THE CACHE TOO, which is not the same
@@ -710,6 +727,16 @@ static void scan_one(struct walk *w, const char *path)
 		w->opt->cache_drop(w->opt->cache_user, path);
 }
 
+/* A name the walk could not read, counted so that a subtree that silently
+ * vanishes does not read as a subtree with nothing in it. */
+void sx_note_unreadable(struct walk *w)
+{
+	if (w->q)
+		w->unreadable++;
+	else
+		w->sc->st.unreadable++;
+}
+
 void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
 {
 	size_t dir_len = strlen(dir);
@@ -720,7 +747,7 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
 	if (!d) {
 		/* Unreadable, or a path the system would not accept. Counted, because a
 		 * subtree that silently vanishes reads as a subtree with nothing in it. */
-		w->sc->st.unreadable++;
+		sx_note_unreadable(w);
 		return;
 	}
 	while (!w->aborted && !w->out_of_memory && (de = readdir(d)) != NULL) {
@@ -741,7 +768,7 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
 		/* lstat, not stat: a symlink is not followed unless asked for, so a link
 		 * pointing at an ancestor cannot turn this into a loop. */
 		if ((w->opt->follow_symlinks ? stat : kof_lstat)(w->path_buf, &sb) != 0) {
-			w->sc->st.unreadable++;
+			sx_note_unreadable(w);
 			continue;
 		}
 

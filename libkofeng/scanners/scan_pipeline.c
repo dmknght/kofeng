@@ -234,6 +234,7 @@ static void st_detect(struct kof_pipeline *p)
 
 	for (k = lo; k < hi; k++) {
 		const struct kof_module *m = &e->mods[ix ? ix[k] : k];
+		struct kof_finding *f;
 
 		/*
 		 * BETWEEN MODULES, WHICH IS WHERE A SLOW OBJECT CAN BE LEFT.
@@ -291,17 +292,22 @@ static void st_detect(struct kof_pipeline *p)
 		/* Accumulate. Keeping only the last would drop a finding whenever two
 		 * families match one object, and the cap is counted rather than
 		 * silently applied. */
-		(void)sx_mod_report(sc, &p->ctx, opt, out, m, sc->rep_level);
+		f = sx_mod_report(sc, &p->ctx, opt, out, m, sc->rep_level);
 
 		/*
-		 * Stop unless the caller asked for everything. The remaining modules
-		 * can only lengthen a list that already says the object is not clean,
-		 * and on a database of any size that is most of the work.
+		 * Stop unless the caller asked for everything - AND ONLY AT AN
+		 * INFECTION. The remaining modules can only lengthen a list that
+		 * already says the object is not clean, and on a database of any size
+		 * that is most of the work; but a SUSPECTED is not that answer, it is a
+		 * weaker one, and stopping on it hid the INFECTED further down the
+		 * database: an object carrying both was reported as merely suspected
+		 * because the weaker rule sorted first (tests/unit/scan_logic.c). A
+		 * result with no room left for another finding is also the end.
 		 *
 		 * It saves nothing on a clean object, which is nearly every object -
 		 * this is a bound on the worst case, not a throughput win.
 		 */
-		if (!opt->all_matches)
+		if (!opt->all_matches && (!f || f->level == KOF_LEVEL_INFECT))
 			break;
 	}
 	}
@@ -564,7 +570,8 @@ static void st_reconcile(struct kof_pipeline *p)
 	 * a deleted finding, which would have needed every future rule to
 	 * remember it.
 	 */
-	if (sc->n_kids > sc->n_views + sc->n_carved && out->n > 0) {
+	_Static_assert(KOF_MAX_FINDINGS <= 32, "heur_keep is a 32-bit mask of finding slots");
+	if (p->yielded && out->n > 0) {
 		uint32_t r, w = 0, keep = sc->heur_keep;
 
 		for (r = 0; r < out->n; r++)
@@ -642,10 +649,19 @@ static void st_open(struct kof_pipeline *p)
 
 /* The end of the OPEN stage, once, if it began. A refusal answers 0, which is
  * what the object's `broken` is then set to - nothing wanted to open it. */
+/* Whether the rows of the current group produced a child that is not a carve:
+ * a carve is a file glued on, so the host is still the subject - see
+ * KOF_ANALYZE_CARVE. The one place this is asked. */
+static int group_yielded(const struct kof_pipeline *p)
+{
+	return p->sc->n_kids - p->kids0 != p->sc->n_carved - p->carved0;
+}
+
 static void open_finish(struct kof_pipeline *p)
 {
 	if (p->open.state == KOF_OPEN_FRESH || p->open.state == KOF_OPEN_DONE)
 		return;
+	p->yielded = group_yielded(p);
 	p->out->broken = sx_open_end(p->sc, &p->ctx, p->opt, &p->open);
 }
 
@@ -693,7 +709,7 @@ void sx_pipeline_run(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
 	const struct kof_scan_option *opt = p->opt;
-	uint32_t i, kids0 = 0, carved0 = 0;
+	uint32_t i;
 	int chain_begun = 0, chain_over = 0;
 
 	for (i = 0; i < sizeof pipeline / sizeof pipeline[0]; i++) {
@@ -710,8 +726,8 @@ void sx_pipeline_run(struct kof_pipeline *p)
 		if (!chain_begun) {
 			/* What the current GROUP of rows has produced is measured
 			 * from where it began. */
-			kids0 = sc->n_kids;
-			carved0 = sc->n_carved;
+			p->kids0 = sc->n_kids;
+			p->carved0 = sc->n_carved;
 			chain_begun = 1;
 		}
 		/*
@@ -820,13 +836,13 @@ void sx_pipeline_run(struct kof_pipeline *p)
 		 * kind of accident that stops being true when a step is added.
 		 */
 		if (r->flags & ROW_GROUP_END) {
-			if (sc->n_kids - kids0 != sc->n_carved - carved0) {
+			if (group_yielded(p)) {
 				chain_over = 1;
 				open_finish(p);
 				continue;
 			}
-			kids0 = sc->n_kids;
-			carved0 = sc->n_carved;
+			p->kids0 = sc->n_kids;
+			p->carved0 = sc->n_carved;
 		}
 		/*
 		 * And between steps, because a step is the unit of work that

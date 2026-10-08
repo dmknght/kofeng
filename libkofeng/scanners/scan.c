@@ -19,21 +19,26 @@
  * the untrusted boundary a module reads through (objctx*.c), and how a search is
  * answered (the matcher).
  *
- * OPEN, found by reading and not yet changed (each to be verified against the
- * three-mode corpus snapshot before the next):
- *   - sx_scan_object is one function of ~540 lines whose stages pass state through
- *     loose scanner fields (cur_*, pend_*, diag_*, packed_here ...). It should take
- *     an explicit per-object state and return a stage outcome; the OPEN stage
- *     already does (struct kof_open) and is the pattern to follow.
- *   - the detector, EXAMINE, VERDICT and MODEL stages are not rows of a table yet:
- *     only the opening steps and NORMZ are (analyze_steps). A detector or a rule
- *     should declare its stage the way an unpack module declares its step.
- *   - the yield rule is now one (the opening GROUP produced something) but the
- *     post-hoc drop of a parent's heuristic findings still counts it a second way
- *     (kids over views plus carved, totals).
- *   - out->n_region, the repair offered by a second module, and a should_stop break
- *     leave no trace in the result.
- *   - from_packer has three carriers (argument, out, scanner).
+ * DONE in the rewrite (each verified against the three-mode corpus snapshot): the
+ * stages are rows of one table (scan_pipeline.c), the opening steps are declared
+ * by the modules (KOF_ANALYZE_STEP), "was the object opened" is one predicate
+ * (group_yielded), the four copies of "report to finding" are sx_mod_report, the
+ * interpreter's permission is one enum (kof_emu_stance), and the parallel walk's
+ * leaks and its producer race are gone, the repair that goes out belongs to the
+ * finding the object is reported under, the detector loop stops at an infection
+ * and not at the first report, and a file cut short is never cached as clean (all
+ * three by tests/unit/scan_logic.c).
+ *
+ * OPEN, found by reading and not yet changed:
+ *   - detectors and rules are not placed in the table by a declaration: every
+ *     detector runs at DETECT. Placing one between opening steps, under a
+ *     condition, needs two fields in the pack's module record, which is a
+ *     format decision and not this file's to take.
+ *   - the scanner still carries `cur_present` and `cur_from_packer` for the
+ *     lazily built feeds beside the same facts in kof_pipeline; they are set once,
+ *     by FACTS, and read by sx_need_plague, which is not given the pipeline.
+ *   - the per-object `sx_scan_object` reset (sx_obj_begin) still clears ~45 scanner
+ *     fields by hand; the OPEN stage's kof_open is the pattern to follow.
  */
 
 /* lstat and the dirent walk are POSIX and the tree builds as strict ISO C11, so the
@@ -429,14 +434,29 @@ const struct kof_module *sx_kof_scan_derived_by(const struct kof_scanner *sc)
  * detector loop. Two modules repairing one object are two modules disagreeing
  * about what it is.
  */
-void sx_take_repair(struct kof_scanner *sc, struct kof_result *res)
+void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int owner)
 {
 	uint32_t q;
 
 	if (!res || !sc->cure_have)
 		return;
-	if (res->repair.n_fix || res->repair.truncate)
+	/*
+	 * WHOSE REPAIR, when more than one module describes one.
+	 *
+	 * The object is reported under ONE finding - the verdict - and the repair
+	 * that goes out has to be the repair for THAT: first-come meant the first
+	 * detector in database order won whatever it had found, so an object
+	 * reported as infected by one family came with the patches of another
+	 * family's weaker guess (tests/unit/scan_logic.c). So the module whose
+	 * finding owns the verdict replaces what an earlier, lesser one offered,
+	 * and a module that does not own it only fills an empty place - an object
+	 * whose verdict has no repair still gets the repair of a finding that has
+	 * one, rather than none.
+	 */
+	if (!owner && (res->repair.n_fix || res->repair.truncate))
 		return;
+	res->repair.n_fix = 0;
+	res->repair.truncate = 0;
 	for (q = 0; q < sc->n_cure_fix && q < KOF_MAX_FIX; q++) {
 		res->repair.fix[q].off = sc->cure_fix[q].off;
 		res->repair.fix[q].n = sc->cure_fix[q].n;
@@ -483,8 +503,8 @@ struct kof_finding *sx_mod_report(struct kof_scanner *sc,
 	} else {
 		res->dropped++;
 	}
-	sx_take_repair(sc, res);
-	sx_take_infected(sc, res);
+	sx_take_repair(sc, res, f && f->is_verdict);
+	sx_take_infected(sc, res, f && f->is_verdict);
 	sc->rep_valid = 0;
 	return f;
 }
@@ -512,8 +532,19 @@ void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m)
 	sc->plague_best = 0;
 	sc->str_hit = 0;
 	sc->diag_read = 0;
+	/*
+	 * WHAT THIS MODULE DESCRIBES, and only it. The patches, the cut and the
+	 * infected spans were cleared once per OBJECT, so the second module to
+	 * describe a repair appended its patches after the first's: the repair of an
+	 * object two detectors reported was the two of them, in database order,
+	 * and neither was the one that matches the verdict
+	 * (tests/unit/scan_logic.c).
+	 */
 	sc->cure_have = 0;
 	sc->cure_at = 0;
+	sc->n_cure_fix = 0;
+	sc->cure_trunc_set = 0;
+	sc->n_infect = 0;
 	sc->cur_mod = m;
 	sc->emu_run_by = NULL;
 	/* A sink the previous module left open is not this one's. */
@@ -528,11 +559,14 @@ void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m)
  * body but not put the host back marks the body and offers no repair, and that
  * is a useful thing to be able to say.
  */
-void sx_take_infected(struct kof_scanner *sc, struct kof_result *res)
+void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner)
 {
 	uint32_t q;
 
-	if (!res || !sc->n_infect || res->n_infected)
+	if (!res || !sc->n_infect)
+		return;
+	/* The same rule as the repair: the spans that go out are the verdict's. */
+	if (!owner && res->n_infected)
 		return;
 	for (q = 0; q < sc->n_infect && q < KOF_MAX_INFECTED; q++)
 		res->infected[q] = sc->infect[q];
@@ -649,12 +683,8 @@ void sx_obj_begin(struct kof_scanner *sc)
 	sc->broken = 0;
 	sc->stop = 0;
 
-	/* What a repair or an infection note refers to. */
-	sc->cure_have = 0;
-	sc->cure_at = 0;
-	sc->n_cure_fix = 0;
-	sc->cure_trunc_set = 0;
-	sc->n_infect = 0;
+	/* What a repair or an infection note refers to is cleared with the module's
+	 * turn - see sx_mod_begin - and not here: a module describes its OWN. */
 	sc->ovl_asked = -1;
 	sc->ovl_pct = 0;
 }

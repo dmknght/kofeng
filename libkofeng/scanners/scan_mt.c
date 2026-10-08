@@ -257,7 +257,16 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	for (i = 0; i < started; i++) {
 		pthread_join(wk[i].id, NULL);
 		total += wk[i].w.objects;
+		/* A worker's own walk allocated a path buffer and a directory
+		 * stack, and nothing freed them. */
+		while (wk[i].w.n > 0)
+			free(wk[i].w.stack[--wk[i].w.n].path);
+		free(wk[i].w.stack);
+		free(wk[i].w.path_buf);
 	}
+	/* The producer's count goes onto the first scanner now that no worker is
+	 * using it. */
+	scs[0]->st.unreadable += prod.unreadable;
 
 	/* Whatever a stopped run left in the ring. */
 	while (q.n > 0) {

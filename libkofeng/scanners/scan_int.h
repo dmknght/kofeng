@@ -73,6 +73,16 @@ struct walk {
 	int      aborted;
 	int      out_of_memory;
 	uint64_t objects;
+	/* Unreadable names the PRODUCER of a parallel walk met. It may not write a
+	 * worker's scanner while that worker is scanning with it, so it counts here
+	 * and the total is added to scs[0] once the workers have joined. Zero and
+	 * unused in a single threaded walk, which counts straight into the scanner
+	 * - see sx_note_unreadable. */
+	uint64_t unreadable;
+	/* Set when the walk abandoned part of the file it was in the middle of: the
+	 * children still waiting when the callback asked to abort. Such a file was
+	 * not examined, so it is not offered to the cache as clean. */
+	int      incomplete;
 	/* Objects that reported something, or that the scan could not finish.
 	 * Read across one file by scan_file - see the note there on why a file
 	 * with either is never remembered. */
@@ -86,6 +96,7 @@ struct walk {
 
 /* ---- the walk (scan_walk.c, for now scan.c) ------------------------------- */
 int  sx_push_dir(struct walk *w, const char *path, size_t len, uint32_t depth);
+void sx_note_unreadable(struct walk *w);
 void sx_read_dir(struct walk *w, const char *dir, uint32_t depth);
 void sx_scan_file(struct walk *w, const char *path);
 
@@ -258,8 +269,8 @@ void sx_dense_code_unread(struct kof_scanner *sc, 	      const struct kof_obj_ct
 void sx_plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	   uint32_t present, int from_packer);
 void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	  uint32_t present);
 void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m);
-void sx_take_repair(struct kof_scanner *sc, struct kof_result *res);
-void sx_take_infected(struct kof_scanner *sc, struct kof_result *res);
+void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int owner);
+void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner);
 const struct kof_module *sx_kof_scan_derived_by(const struct kof_scanner *sc);
 int sx_unp_eligible(const struct kof_scanner *sc, 	const struct kof_module *m, 	const struct kof_obj_ctx *ctx, 	const struct kof_scan_option *opt, 	uint32_t want);
 int sx_unp_is_family(const struct kof_scanner *sc, 	 const struct kof_module *m, const char *predict);
@@ -398,6 +409,12 @@ struct kof_pipeline {
 	enum kof_stage                   stage;
 	enum kof_analyze                 step;
 	struct kof_open                  open;
+	/* What the current GROUP of chain rows has produced is measured from these,
+	 * and `yielded` is the group's answer, decided once when the OPEN stage
+	 * ends: the object was opened into children that are not carves. RECONCILE
+	 * reads it - there is no second way to ask. */
+	uint32_t                         kids0, carved0;
+	int                              yielded;
 };
 
 /* One object through every stage. */

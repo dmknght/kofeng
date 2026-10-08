@@ -1564,6 +1564,10 @@ struct kof_scan_option {
 	 * detection, the stale entry survives it, and the NEXT ordinary run
 	 * skips the file in silence.
 	 *
+	 * IN A PARALLEL WALK these are called from the worker threads, several at
+	 * once, and unlike the object callback they are NOT serialised: a host
+	 * whose cache is not safe to share has to lock it itself.
+	 *
 	 * All NULL - the default - and nothing is cached and nothing is asked.
 	 */
 	int  (*cache_seen)(void *user, const char *path);
@@ -1591,6 +1595,10 @@ struct kof_scan_option {
 	 * and may be called from several threads at once; reading a flag is
 	 * what it is for. It must not print, allocate or take a lock that the
 	 * caller's own callback also takes.
+	 *
+	 * AN OBJECT STOPPED THIS WAY is reported with what it had found so far, and
+	 * is never offered to cache_keep - it was not fully examined, and a cache
+	 * that remembered it as clean would skip the file for good.
 	 *
 	 * NULL - the default - is never asked, and nothing changes for a host
 	 * that does not want this.
