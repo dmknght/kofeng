@@ -42,7 +42,7 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
-#include "../../libkofeng/analyzers/parsers/binaries/disasm/kdis.h"
+#include "../../libkofeng/analyzers/nucleo/kdis.h"
 
 static int fails;
 

@@ -19,7 +19,7 @@
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
-#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../../libgenome/genotype/analysis/xref.h"
 #include "../analyzers/trueline/trueline.h"
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>

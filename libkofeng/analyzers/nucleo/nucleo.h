@@ -27,7 +27,7 @@
 
 #include <stdint.h>
 
-#include "../../../../kofcore/kofmod/kofsig.h"
+#include "kofmod/kofsig.h"
 
 /*
  * ONE ROW PER SYSCALL THE VOCABULARY HAS A WORD FOR.

@@ -38,7 +38,7 @@
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../../libgenome/genotype/analysis/xref.h"
 #include "../disinfect/pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
@@ -1222,7 +1222,7 @@ static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
 /*
  * ---- THE CODE READER'S THREE ENTRY POINTS --------------------------------
  *
- * All the work is in analyzers/parsers/binaries/disasm/kdis.c; these only hand it the object's
+ * All the work is in libkofeng/analyzers/nucleo/kdis.c; these only hand it the object's
  * bytes and the cursor that lives in the scanner. See kofmod/kdis.h.
  *
  * ANSWERED FOR A DETECTOR TOO, and that is the point of it. Reading code

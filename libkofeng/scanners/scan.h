@@ -15,7 +15,7 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
-#include "../analyzers/parsers/binaries/disasm/kdis.h"
+#include "../analyzers/nucleo/kdis.h"
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../extractors/unpack/pe_rebuild.h"
 #include "../kofeng.h"
@@ -418,7 +418,7 @@ struct kof_scanner {
 	/* The code-use sweep stopped at its byte budget with code unswept - see
 	 * oc_data_xref. Per object, cleared in obj_begin. */
 	uint8_t              use_cut;
-	/* The module-facing code reader's cursor - see analyzers/parsers/binaries/disasm/kdis.h.
+	/* The module-facing code reader's cursor - see libkofeng/analyzers/nucleo/kdis.h.
 	 * One per object, because a module walks one run of code at a time. */
 	struct kof_kdis      kdis;
 	int                  ovl_asked;

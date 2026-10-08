@@ -28,8 +28,8 @@
 #include "diag_int.h"
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/elf.h"
-#include "../../analyzers/parsers/binaries/disasm/kdis.h"
-#include "../../analyzers/parsers/binaries/disasm/nucleo.h"
+#include "../../analyzers/nucleo/kdis.h"
+#include "../../analyzers/nucleo/nucleo.h"
 
 /*
  * HOW MANY NODES ONE OBJECT MAY HOLD.

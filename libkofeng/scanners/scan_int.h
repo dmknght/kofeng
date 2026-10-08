@@ -133,7 +133,7 @@ void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx, 	 con
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
-#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../../libgenome/genotype/analysis/xref.h"
 #include "../analyzers/trueline/trueline.h"
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
@@ -285,7 +285,7 @@ int sx_unp_is_family(const struct kof_scanner *sc, 	 const struct kof_module *m,
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
-#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../../libgenome/genotype/analysis/xref.h"
 #include "../analyzers/trueline/trueline.h"
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>

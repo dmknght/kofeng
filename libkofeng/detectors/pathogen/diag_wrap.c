@@ -55,8 +55,8 @@
 #include "../../kofcore/kofmod/kofcap.h"
 #include "../../kofcore/kofmod/kdis.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../../analyzers/parsers/binaries/disasm/kdis.h"
-#include "../../analyzers/parsers/binaries/disasm/nucleo.h"
+#include "../../analyzers/nucleo/kdis.h"
+#include "../../analyzers/nucleo/nucleo.h"
 
 /* How far before a syscall its function may begin. MEASURED on 27 sites in 25
  * static i386 bots, 33 bytes; glibc's wrappers with a cancellation check are

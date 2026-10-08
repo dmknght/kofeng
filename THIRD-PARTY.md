@@ -469,7 +469,7 @@ the generator's junk because junk is itself a recognisable class of
 instruction, and following the relative `call`/`jmp` the chunks are chained
 with.
 
-`libkofeng/kofcore/kofmod/kdis.h` and `libkofeng/analyzers/disasm/kdis.c` are
+`libkofeng/kofcore/kofmod/kdis.h` and `libkofeng/analyzers/nucleo/kdis.c` are
 that mechanism made available to a module - decode without executing, keep a
 constant map over the registers, resolve a branch back to a file offset. The
 one thing its example makes explicit and this had to add is the modelled stack:

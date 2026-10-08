@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #include "kofdiag.h"
-#include "../../analyzers/parsers/binaries/disasm/kdis.h"
+#include "../../analyzers/nucleo/kdis.h"
 #include "../../kofcore/kofmod/kdis.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 

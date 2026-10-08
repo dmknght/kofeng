@@ -4201,7 +4201,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * KOF_XREF_CALL, and neither needs a line changed here.
  *
  * A RANGE, because a blob is not referred to at its first byte - see
- * kof_xref_in in analyzers/parsers/binaries/disasm/xref.h for the three-load measurement that says so.
+ * kof_xref_in in libgenome/genotype/analysis/xref.h for the three-load measurement that says so.
  * Pass the variable's own size; 0 asks about the one address.
  *
  * Zero for a range nothing referred to, and zero for an object with no code to

@@ -935,11 +935,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/scripts/script_norm.c \
            libkofeng/analyzers/parsers/events/amsi_parse.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
-           libkofeng/analyzers/parsers/binaries/disasm/decode_x86.c \
-           libkofeng/analyzers/parsers/binaries/disasm/decode_mips.c \
-           libkofeng/analyzers/parsers/binaries/disasm/xref.c \
-           libkofeng/analyzers/parsers/binaries/disasm/nucleo.c \
-           libkofeng/analyzers/parsers/binaries/disasm/kdis.c \
+           libkofeng/analyzers/nucleo/nucleo.c \
+           libkofeng/analyzers/nucleo/kdis.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_sym.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_parse.c \
            libkofeng/analyzers/parsers/binaries/pe/clr_parse.c \
@@ -1020,13 +1017,6 @@ $(INT)/lib_%.o: libkofeng/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# kofdisasm/ reads instructions, so it needs the decoder's headers. Only this
-# one directory does; the rest of the engine is kept away from them on purpose,
-# because a parser that can decode is a parser that will start to.
-$(INT)/lib_analyzers/parsers/binaries/disasm/%.o: libkofeng/analyzers/parsers/binaries/disasm/%.c $(STAMP) | $(INT)
-	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
-
 # ---- libgenome: the decoders (genotype) and the emulator (phenotype) -------
 #
 # Everything in libgenome is kofeng's own and compiles under kofeng's warning
@@ -1070,7 +1060,7 @@ GT_OBJ := $(patsubst libgenome/genotype/%.c,$(INT)/gt_%.o,$(GT_SRC))
 
 $(INT)/gt_%.o: libgenome/genotype/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
 # THE REFERENCE DECODER IS NOT IN THIS TREE. The x86 tables were produced by
 # running tools/genotype/x86_gen.c against a reference decoder, and the checked-in

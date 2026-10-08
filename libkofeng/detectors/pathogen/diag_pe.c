@@ -43,8 +43,8 @@
 #include "../../kofcore/kofmod/pe.h"
 #include "../../kofcore/kofmod/kdis.h"
 #include "../../analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../analyzers/parsers/binaries/disasm/kdis.h"
-#include "../../analyzers/parsers/binaries/disasm/nucleo.h"
+#include "../../analyzers/nucleo/kdis.h"
+#include "../../analyzers/nucleo/nucleo.h"
 
 struct pe_imp {
 	uint64_t slot;          /* the address a call goes through            */

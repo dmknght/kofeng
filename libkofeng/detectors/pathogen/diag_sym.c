@@ -52,7 +52,7 @@
 #include "../../kofcore/kofmod/kofcap.h"
 #include "../../kofcore/kofmod/elf.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../../analyzers/parsers/binaries/disasm/nucleo.h"
+#include "../../analyzers/nucleo/nucleo.h"
 #include "../../disinfect/pzero.h"
 
 

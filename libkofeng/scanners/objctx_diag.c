@@ -24,7 +24,7 @@
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../analyzers/parsers/binaries/disasm/xref.h"
+#include "../../libgenome/genotype/analysis/xref.h"
 #include "../disinfect/pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
