@@ -137,7 +137,7 @@ static void atoms_in(struct kof_apihash *a, const struct kof_obj_ctx *ctx,
 		pos = (uint64_t)(hit - base) + 1u;
 		memset(&k, 0, sizeof k);
 		if (!kof_cell_seek(&k, (uint64_t)(hit - base), 0) ||
-		    !kof_cell_next(&k, &sp, &in) ||
+		    !kof_cell_step(&k, &sp, &in) ||
 		    !is_peb_read(&in, wide))
 			continue;
 		/* THE LOADER DATA ITSELF, a few instructions later: a load through
@@ -150,7 +150,7 @@ static void atoms_in(struct kof_apihash *a, const struct kof_obj_ctx *ctx,
 			for (ttl = 0; ttl < PEB_TTL && k.at < end; ttl++) {
 				unsigned q;
 
-				if (!kof_cell_next(&k, &sp, &in))
+				if (!kof_cell_step(&k, &sp, &in))
 					break;
 				for (q = 0; q < in.n_op; q++) {
 					const struct cell_operand *o = &in.o[q];

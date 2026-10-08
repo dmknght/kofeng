@@ -182,7 +182,7 @@ static void walk_code(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 	while (k.at < off + n) {
 		/*
 		 * A BYTE THE DECODER CANNOT READ IS STEPPED OVER, NOT THE END.
-		 * kof_cell_next answers zero and leaves the cursor where it was, so
+		 * kof_cell_step answers zero and leaves the cursor where it was, so
 		 * a loop that treats zero as "finished" stops at the first piece of
 		 * data inside the code: MEASURED on a 180 KB MSVC .text, it stopped
 		 * at offset 0x583c, a switch jump table of 32-bit offsets, with
@@ -192,7 +192,7 @@ static void walk_code(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		 * wrong decode costs nothing here: a node needs the operand to be
 		 * the address of an import slot, exactly.
 		 */
-		if (!kof_cell_next(&k, &sp, &in)) {
+		if (!kof_cell_step(&k, &sp, &in)) {
 			k.at++;
 			continue;
 		}

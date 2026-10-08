@@ -344,7 +344,7 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 		if (!kof_cell_seek(&k, lo, 0))
 			continue;
 
-		while (k.at < hi && kof_cell_next(&k, &sp, &in)) {
+		while (k.at < hi && kof_cell_step(&k, &sp, &in)) {
 			uint64_t tva;
 
 			/*

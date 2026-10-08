@@ -122,8 +122,8 @@ static void resolve_literal(const struct kof_cell_cur *k,
 	in->o[1].flags = CELL_OF_READ;
 }
 
-int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
-		  struct cell_insn *out)
+static int cell_fetch(struct kof_cell_cur *k, const struct cell_space *sp,
+		      struct cell_insn *out)
 {
 	uint64_t left;
 	uint32_t n;
@@ -158,6 +158,26 @@ int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
 	n = out->n_op;
 	if (out->target_va != KOF_BROKEN)
 		out->target = va_to_off(k, sp, out->target_va);
+	return 1;
+}
+
+int kof_cell_step(struct kof_cell_cur *k, const struct cell_space *sp,
+		  struct cell_insn *out)
+{
+	if (!cell_fetch(k, sp, out))
+		return 0;
+	k->at += out->len;
+	return 1;
+}
+
+int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
+		  struct cell_insn *out)
+{
+	uint32_t n;
+
+	if (!cell_fetch(k, sp, out))
+		return 0;
+	n = out->n_op;
 
 	/*
 	 * AND AN INDIRECT BRANCH RESOLVED FROM WHAT IS KNOWN - see

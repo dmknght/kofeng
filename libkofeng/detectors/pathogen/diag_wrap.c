@@ -98,6 +98,12 @@ struct fstate {
 	uint32_t  n_slot, next;
 };
 
+/* 4096 bits: a function-pointer table's worth of distinct globals read before
+ * they are written is the realistic ceiling, and a full table only means the
+ * second round runs, as it always did. */
+#define GMISS_WORDS 64u
+#define GMISS_BIT(a) ((unsigned)(((a) * 0x9e3779b97f4a7c15ull) >> 52) & 4095u)
+
 /* One global that holds the result of a node. */
 struct glob {
 	uint64_t addr;
@@ -137,12 +143,34 @@ struct wctx {
 	uint64_t *site;                 /* syscall instruction offsets */
 	uint32_t n_site, cap_site;
 	uint32_t *fret;                 /* per call target: the node + 1 its AX holds at ret */
+	uint8_t  *fmiss;                /* per call target: a call asked before it was set */
+	/*
+	 * THE CODE, DECODED ONCE. pass_a reads every instruction of every
+	 * executable segment to find the call targets and the syscall sites, and
+	 * pass_b then reads the same instructions again - twice, when a global
+	 * is read before it is written. Each read was a full decode, so the same
+	 * bytes were decoded up to three times per scan. The first one keeps what
+	 * it saw and the others walk that. See struct isrc.
+	 */
+	struct cell_insn *tr;
+	uint32_t n_tr, cap_tr;
+	struct { uint32_t first, n; uint8_t ok; } tseg[KOF_ELF_MAX_SEGMENTS];
 	uint64_t *open;                 /* sites whose NUMBER the sweep could not read */
 	uint32_t n_open, cap_open;
 	struct wsum *ws;                /* the wrappers, by entry */
 	uint32_t n_ws, cap_ws;
 	struct glob *glob;
 	uint32_t n_glob, cap_glob;
+	/*
+	 * WHETHER A SECOND WALK CAN SEE ANYTHING THE FIRST DID NOT - see the note
+	 * at the two rounds in kof_diag_run_wrappers. A global read before the
+	 * walk had put anything there sets its bit in `gmiss` (hashed, so a
+	 * collision costs a needless second round and never a missed one); a
+	 * global entry CREATED while its bit is set is the one case in which the
+	 * second round differs.
+	 */
+	uint64_t gmiss[GMISS_WORDS];
+	int      need_round2;
 };
 
 /* ---- the symbolic state ------------------------------------------------- */
@@ -209,6 +237,8 @@ static void glob_put(struct wctx *c, uint64_t addr, struct sv v)
 	}
 	if (v.t != V_NODE)
 		return;                 /* only a produced value is worth a global */
+	if (c->gmiss[GMISS_BIT(addr) >> 6] & (1ull << (GMISS_BIT(addr) & 63u)))
+		c->need_round2 = 1;     /* it was read before it existed */
 	if (c->n_glob == c->cap_glob) {
 		uint32_t nc = c->cap_glob ? c->cap_glob * 2u : 64u;
 		struct glob *ng = realloc(c->glob, (size_t)nc * sizeof *ng);
@@ -293,6 +323,9 @@ static struct sv load(struct wctx *c, struct fstate *f,
 		case LOC_GLOBAL: {
 			struct glob *g = glob_find(c, (uint64_t)key);
 
+			if (!g)
+				c->gmiss[GMISS_BIT((uint64_t)key) >> 6] |=
+					1ull << (GMISS_BIT((uint64_t)key) & 63u);
 			return g ? g->v : UNK;
 		}
 		default:
@@ -574,7 +607,87 @@ static int is_kernel_entry(const struct wctx *c, const struct cell_insn *in)
 	return 0;
 }
 
-static int pass_a(struct wctx *c, uint64_t off, uint64_t n)
+/*
+ * ---- ONE STREAM OF INSTRUCTIONS, WHEREVER IT COMES FROM ----------------------
+ *
+ * A segment's instructions are either walked out of the trace the first pass
+ * kept or decoded as before, and the caller cannot tell which: it asks for the
+ * next one. THE TRACE IS A CACHE, NOT A SECOND WALK - it holds exactly what
+ * decoding would have returned, in the same order, resynchronising over the same
+ * bytes, so a segment whose trace is complete is read from memory and one whose
+ * trace is not (it outgrew W_TRACE_MAX) is decoded again, with the same result.
+ *
+ * THE BOUND IS ON MEMORY, NOT ON WHAT IS FOUND. An instruction is a hundred and
+ * twenty bytes, so W_TRACE_MAX of them is a fixed ~30 MB however large the image;
+ * past it nothing is dropped from the analysis, only from the cache.
+ */
+#define W_TRACE_MAX 262144u
+
+struct isrc {
+	struct wctx *c;
+	const struct cell_insn *tr;     /* the cached stream, or NULL */
+	uint32_t i, n;
+	struct kof_cell_cur k;
+	uint64_t end;
+};
+
+static int isrc_open(struct isrc *it, struct wctx *c, unsigned seg,
+		     uint64_t off, uint64_t n)
+{
+	memset(it, 0, sizeof *it);
+	it->c = c;
+	it->end = off + n;
+	if (c->tseg[seg].ok) {
+		it->tr = c->tr + c->tseg[seg].first;
+		it->n = c->tseg[seg].n;
+		return 1;
+	}
+	return kof_cell_seek(&it->k, off, 0);
+}
+
+static int isrc_next(struct isrc *it, struct cell_insn *in)
+{
+	if (it->tr) {
+		if (it->i >= it->n)
+			return 0;
+		*in = it->tr[it->i++];
+		return 1;
+	}
+	while (it->k.at < it->end) {
+		if (kof_cell_step(&it->k, &it->c->sp, in))
+			return 1;
+		it->k.at++;                     /* data in the code: step over it */
+	}
+	return 0;
+}
+
+/* Keep what pass_a saw. Once the cache is full it stays full: a segment that
+ * did not fit whole is not cached at all, so a trace is never a prefix. */
+static void trace_add(struct wctx *c, unsigned seg, const struct cell_insn *in)
+{
+	if (!c->tseg[seg].first && !c->tseg[seg].n)
+		c->tseg[seg].first = c->n_tr;
+	if (c->tseg[seg].ok == 2u)              /* already given up */
+		return;
+	if (c->n_tr == c->cap_tr) {
+		uint32_t nc = c->cap_tr ? c->cap_tr * 2u : 4096u;
+		struct cell_insn *nt;
+
+		if (nc > W_TRACE_MAX)
+			nc = W_TRACE_MAX;
+		if (c->n_tr >= nc ||
+		    !(nt = realloc(c->tr, (size_t)nc * sizeof *nt))) {
+			c->tseg[seg].ok = 2u;
+			return;
+		}
+		c->tr = nt;
+		c->cap_tr = nc;
+	}
+	c->tr[c->n_tr++] = *in;
+	c->tseg[seg].n++;
+}
+
+static int pass_a(struct wctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
 	struct kof_cell_cur k;
 	struct cell_insn in;
@@ -586,10 +699,11 @@ static int pass_a(struct wctx *c, uint64_t off, uint64_t n)
 	if (!kof_cell_seek(&k, off, 0))
 		return 1;
 	while (k.at < off + n) {
-		if (!kof_cell_next(&k, &c->sp, &in)) {
+		if (!kof_cell_step(&k, &c->sp, &in)) {
 			k.at++;                 /* data in the code: step over it */
 			continue;
 		}
+		trace_add(c, seg, &in);
 		if (in.op == CELL_CALL && !(in.flags & CELL_F_INDIRECT) &&
 		    in.target != KOF_BROKEN) {
 			if (!push_u64(&c->tgt, &c->n_tgt, &c->cap_tgt, in.target))
@@ -615,6 +729,8 @@ static int pass_a(struct wctx *c, uint64_t off, uint64_t n)
 		boundary = in.op == CELL_RET || in.op == CELL_JMP ||
 			   in.op == CELL_NOP;
 	}
+	/* Complete only if nothing was refused on the way. */
+	c->tseg[seg].ok = c->tseg[seg].ok == 2u ? 0u : 1u;
 	return 1;
 }
 
@@ -807,7 +923,7 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 
 			if (++n_insn > W_BODY)
 				break;
-			if (!kof_cell_next(&k, &c->sp, &in))
+			if (!kof_cell_step(&k, &c->sp, &in))
 				break;
 			/* A direct jump to a function already summarised is a TAIL
 			 * CALL: the same question as a call that is followed by ret. */
@@ -1134,24 +1250,19 @@ static int is_entry(const struct wctx *c, uint64_t at)
 	return lo < c->n_tgt && c->tgt[lo] == at;
 }
 
-static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
+static void pass_b(struct wctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
-	struct kof_cell_cur k;
+	struct isrc it;
 	struct cell_insn in;
 	struct fstate f;
 	int cur = -1;                   /* the call target this code belongs to */
 
 	st_reset(&f);
-	memset(&k, 0, sizeof k);
-	if (!kof_cell_seek(&k, off, 0))
+	if (!isrc_open(&it, c, seg, off, n))
 		return;
-	while (k.at < off + n && !c->s->full) {
+	while (!c->s->full && isrc_next(&it, &in)) {
 		struct wsum *ws;
 
-		if (!kof_cell_next(&k, &c->sp, &in)) {
-			k.at++;
-			continue;
-		}
 		if (is_entry(c, in.at)) {
 			st_reset(&f);
 			cur = tgt_index(c, in.at);
@@ -1164,8 +1275,11 @@ static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
 		 * node; the callers, in the second walk, take it from there.
 		 */
 		if (in.op == CELL_RET && cur >= 0 && c->fret &&
-		    f.reg[CELL_REG_AX].t == V_NODE)
+		    f.reg[CELL_REG_AX].t == V_NODE) {
+			if (!c->fret[cur] && c->fmiss && c->fmiss[cur])
+				c->need_round2 = 1;     /* a caller above asked too early */
 			c->fret[cur] = (uint32_t)f.reg[CELL_REG_AX].node + 1u;
+		}
 		if (in.op == CELL_CALL) {
 			ws = (!(in.flags & CELL_F_INDIRECT) && in.target != KOF_BROKEN)
 			     ? wsum_of(c, in.target) : NULL;
@@ -1202,6 +1316,8 @@ static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
 					if (ti >= 0 && c->fret[ti]) {
 						ret.t = V_NODE;
 						ret.node = (uint16_t)(c->fret[ti] - 1u);
+					} else if (ti >= 0 && c->fmiss) {
+						c->fmiss[ti] = 1;
 					}
 				}
 				f.reg[CELL_REG_AX] = ret;
@@ -1261,7 +1377,7 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
 		uint64_t at, have = seg_range(ctx, e, i, size, &at);
 
-		if (have && !pass_a(&c, at, have))
+		if (have && !pass_a(&c, i, at, have))
 			goto out;
 	}
 	if (!c.n_site)
@@ -1285,7 +1401,8 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 		c.n_tgt = w;
 	}
 	c.fret = calloc(c.n_tgt ? c.n_tgt : 1u, sizeof *c.fret);
-	if (!c.fret)
+	c.fmiss = calloc(c.n_tgt ? c.n_tgt : 1u, sizeof *c.fmiss);
+	if (!c.fret || !c.fmiss)
 		goto out;
 	/*
 	 * LEVEL 0: the functions that hold a syscall. LEVELS 1 AND 2: the functions
@@ -1347,13 +1464,25 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 	{
 		unsigned round;
 
-		for (round = 0; round < 2u; round++)
+		/*
+		 * THE SECOND ROUND ONLY WHEN IT CAN DIFFER. It starts with the
+		 * globals the first produced, so it changes the result exactly
+		 * when some global was read before the first round had written it
+		 * (need_round2) or a call asked for what a helper returns before the
+		 * walk had reached the helper. Otherwise it would decode the whole image again
+		 * to arrive at the same nodes: MEASURED, pass_b is a full linear
+		 * decode and this was the third of three over the same bytes.
+		 */
+		for (round = 0; round < 2u; round++) {
+			if (round && !c.need_round2)
+				break;
 			for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
 				uint64_t at, have = seg_range(ctx, e, i, size, &at);
 
 				if (have)
-					pass_b(&c, at, have);
+					pass_b(&c, i, at, have);
 			}
+		}
 	}
 	/* A wrapper some caller made a node for is answered at its callers; the
 	 * node the sweep made at the syscall inside it spoke for every caller at
@@ -1392,6 +1521,8 @@ out:
 	free(c.site);
 	free(c.open);
 	free(c.fret);
+	free(c.tr);
+	free(c.fmiss);
 	free(c.ws);
 	free(c.glob);
 }

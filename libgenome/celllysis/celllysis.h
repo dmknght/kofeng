@@ -122,6 +122,16 @@ int kof_cell_seek(struct kof_cell_cur *k, uint64_t off, int keep);
 int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
 		  struct cell_insn *out);
 
+/*
+ * THE SAME WITHOUT THE MAP: decode at the cursor, translate, resolve a direct
+ * target, advance - and nothing is learned from the instruction. For a caller
+ * that keeps a state of its own (a function summary, a walk over the call graph)
+ * and asks neither kof_cell_reg nor for an indirect branch's target, the map is
+ * work it throws away: MEASURED, tracking was a third of the cost of a step.
+ */
+int kof_cell_step(struct kof_cell_cur *k, const struct cell_space *sp,
+		  struct cell_insn *out);
+
 /* A register's constant, or 0 for "not knowable here" - a real answer. */
 int kof_cell_reg(const struct kof_cell_cur *k, uint8_t r, uint64_t *out);
 
