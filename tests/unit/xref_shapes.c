@@ -20,7 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../libgenome/genotype/analysis/xref.h"
+#include <celllysis/xref.h>
 
 static int fails;
 

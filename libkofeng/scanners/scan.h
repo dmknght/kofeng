@@ -15,7 +15,7 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
-#include "../analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../extractors/unpack/pe_rebuild.h"
 #include "../kofeng.h"
@@ -418,9 +418,9 @@ struct kof_scanner {
 	/* The code-use sweep stopped at its byte budget with code unswept - see
 	 * oc_data_xref. Per object, cleared in obj_begin. */
 	uint8_t              use_cut;
-	/* The module-facing code reader's cursor - see libkofeng/analyzers/nucleo/kdis.h.
+	/* The module-facing code reader's cursor - see libgenome/celllysis/celllysis.h.
 	 * One per object, because a module walks one run of code at a time. */
-	struct kof_kdis      kdis;
+	struct kof_cell_cur      cell;
 	int                  ovl_asked;
 	uint32_t             ovl_pct;
 	/*

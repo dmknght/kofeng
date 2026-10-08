@@ -29,8 +29,8 @@
 /* The capability vocabulary - see nucleo.c. No rule names one yet. */
 #include <kofmod/kofcap.h>
 
-/* The code reader's vocabulary - see kdis.h for what it is for. */
-#include "kdis.h"
+/* The code reader's vocabulary - see cell.h for what it is for. */
+#include "cell.h"
 
 /* The two kinds of range kof_mark_infected takes. */
 #include "infected.h"
@@ -2190,7 +2190,7 @@ struct kof_content {
 	/*
 	 * ---- READING CODE WITHOUT RUNNING IT -------------------------------
 	 *
-	 * See kofmod/kdis.h, which holds the vocabulary and the argument for
+	 * See kofmod/cell.h, which holds the vocabulary and the argument for
 	 * why a module needs this at all. In short: a byte signature over a
 	 * polymorphic decryptor names one GENERATION of it, so a rule has to
 	 * be written against what the instructions MEAN - and until now a
@@ -2204,7 +2204,7 @@ struct kof_content {
 	 * Answers 0 at the end of the object or on bytes that do not decode.
 	 *
 	 * dis_reg answers a register's constant, or 0 for "not knowable
-	 * here" - which is a real answer and not an error. kdis.c says what
+	 * here" - which is a real answer and not an error. cursor.c says what
 	 * the map follows and what it deliberately does not.
 	 */
 	/*
@@ -2245,7 +2245,7 @@ struct kof_content {
 	uint32_t (*emu_stop)(const struct kof_obj_ctx *);
 
 	int (*dis_seek)(const struct kof_obj_ctx *, uint64_t off, int keep);
-	int (*dis_next)(const struct kof_obj_ctx *, struct kdis_insn *out);
+	int (*dis_next)(const struct kof_obj_ctx *, struct cell_insn *out);
 	int (*dis_reg)(const struct kof_obj_ctx *, uint8_t r, uint64_t *out);
 
 	/*
@@ -4201,7 +4201,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  * KOF_XREF_CALL, and neither needs a line changed here.
  *
  * A RANGE, because a blob is not referred to at its first byte - see
- * kof_xref_in in libgenome/genotype/analysis/xref.h for the three-load measurement that says so.
+ * kof_xref_in in libgenome/celllysis/xref.h for the three-load measurement that says so.
  * Pass the variable's own size; 0 asks about the one address.
  *
  * Zero for a range nothing referred to, and zero for an object with no code to
@@ -4976,28 +4976,28 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	 ? (ctx)->content->emu_take((ctx), (uint32_t)(i)) : 0)
 
 /*
- * ---- THE CODE READER - see kofmod/kdis.h ---------------------------------
+ * ---- THE CODE READER - see kofmod/cell.h ---------------------------------
  *
- *     struct kdis_insn in;
+ *     struct cell_insn in;
  *
- *     kdis_seek(ctx->entry_off, 0);
- *     while (kdis_next(&in)) {
- *             if (in.op == KDIS_JMP && in.target != KOF_BROKEN) {
- *                     kdis_seek(in.target, 1);      // step through junk
+ *     cell_seek(ctx->entry_off, 0);
+ *     while (cell_next(&in)) {
+ *             if (in.op == CELL_JMP && in.target != KOF_BROKEN) {
+ *                     cell_seek(in.target, 1);      // step through junk
  *                     continue;
  *             }
- *             if (in.op == KDIS_XOR && in.o[0].kind == KDIS_O_MEM)
+ *             if (in.op == CELL_XOR && in.o[0].kind == CELL_O_MEM)
  *                     ...                           // a decrypt loop
  *     }
  */
-#define kdis_seek(off, keep)                                               \
+#define cell_seek(off, keep)                                               \
 	((ctx)->content->dis_seek                                          \
 	 ? (ctx)->content->dis_seek((ctx), (uint64_t)(off), (keep)) : 0)
 
-#define kdis_next(out)                                                     \
+#define cell_next(out)                                                     \
 	((ctx)->content->dis_next ? (ctx)->content->dis_next((ctx), (out)) : 0)
 
-#define kdis_reg(r, out)                                                   \
+#define cell_reg(r, out)                                                   \
 	((ctx)->content->dis_reg                                           \
 	 ? (ctx)->content->dis_reg((ctx), (uint8_t)(r), (out)) : 0)
 

@@ -26,8 +26,8 @@
  *                     carries the desync into the real code - the mmap came
  *                     back with its number unreadable.
  *   int 0x80          i386 reaches the kernel through a software interrupt,
- *                     which the decoder classes as KDIS_INT and not
- *                     KDIS_SYSCALL. Reading only the latter found ZERO
+ *                     which the decoder classes as CELL_INT and not
+ *                     CELL_SYSCALL. Reading only the latter found ZERO
  *                     nodes in every 32-bit payload.
  *   stale rax         A `syscall` does not WRITE rax as far as the decoder
  *                     is concerned, so the constant map keeps the number

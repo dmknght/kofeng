@@ -54,6 +54,7 @@
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../analyzers/nucleo/nucleo.h"
 #include "../../disinfect/pzero.h"
+#include "../../analyzers/nucleo/space.h"
 
 
 /* How far back the walk reads before a call, to see its arguments set up.
@@ -82,15 +83,15 @@
  * register the instruction wrote, and this is what the instruction wrote.
  *
  * A REGISTER DESTINATION ONLY. A call's own relocation patches the
- * displacement inside the branch, which is a KDIS_O_REL operand, so the test
+ * displacement inside the branch, which is a CELL_O_REL operand, so the test
  * below is what keeps a branch target from being read as a loaded address.
  */
 static void note_symref(struct walk *w, const struct kof_elf_relocs *t,
-			const struct kdis_insn *in)
+			const struct cell_insn *in)
 {
 	const struct kof_elf_reloc *r;
 
-	if (in->n_op < 1u || in->o[0].kind != KDIS_O_REG)
+	if (in->n_op < 1u || in->o[0].kind != CELL_O_REG)
 		return;
 	r = kof_elf_reloc_in(t, in->at, in->len);
 	if (!r)
@@ -166,8 +167,8 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
  * r10. The two tables differ in exactly that slot and the difference is the
  * reason this one is written out rather than borrowed. */
 const uint8_t kof_diag_sysv_arg[6] = {
-	KDIS_REG_DI, KDIS_REG_SI, KDIS_REG_DX,
-	KDIS_REG_CX, 8u, 9u
+	CELL_REG_DI, CELL_REG_SI, CELL_REG_DX,
+	CELL_REG_CX, 8u, 9u
 };
 
 struct funcrange {
@@ -227,6 +228,7 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	uint16_t        *node_of = NULL;
 	struct site_at  *by_at = NULL;
 	const struct kof_elf_relocs *rt;
+	struct cell_space sp;
 	struct relgather g;
 	struct funcgather fg;
 	const struct kof_elf_info *ei;
@@ -320,9 +322,10 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	 * relocation with a name, which is what an operand can stand for. */
 	rt = kof_diag_relocs(s, ctx, KOF_ELF_RELOC_CODE);
 
+	kof_cell_space_init(&sp, ctx, base, size);
 	for (j = 0; j < fg.n; j++) {
-		struct kof_kdis k;
-		struct kdis_insn in;
+		struct kof_cell_cur k;
+		struct cell_insn in;
 		struct walk w;
 		uint64_t lo, hi;
 		uint32_t r;
@@ -338,10 +341,10 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 		memset(&w, 0, sizeof w);
 		for (r = 0; r < 16u; r++)
 			w.reg[r].node = ORG_NONE;
-		if (!kof_kdis_seek(&k, lo, 0))
+		if (!kof_cell_seek(&k, lo, 0))
 			continue;
 
-		while (k.at < hi && kof_kdis_next(&k, ctx, base, size, &in)) {
+		while (k.at < hi && kof_cell_next(&k, &sp, &in)) {
 			uint64_t tva;
 
 			/*
@@ -352,7 +355,7 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 * reports, which is how the two are compared without
 			 * either knowing the encoding.
 			 */
-			if (in.op != KDIS_CALL && in.op != KDIS_JMP) {
+			if (in.op != CELL_CALL && in.op != CELL_JMP) {
 				kof_diag_org_step(&w, &in);
 				note_symref(&w, rt, &in);
 				continue;
@@ -428,10 +431,10 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 				if (kof_flow_hands_on(sites[i].cap,
 						      kof_flow_name_of(
 							      sites[i].name)))
-					kof_diag_org_set(&w, KDIS_REG_AX,
+					kof_diag_org_set(&w, CELL_REG_AX,
 							 node_of[i]);
 				else
-					kof_diag_org_clear(&w, KDIS_REG_AX);
+					kof_diag_org_clear(&w, CELL_REG_AX);
 			}
 		}
 	}

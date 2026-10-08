@@ -171,6 +171,12 @@ struct fxabi {
 
 const struct fxabi *kof_fx_abi_of(unsigned arch);
 
+/* The same two answers as kof_flow_cap_of_syscall and kof_sys_name, for a port
+ * described by its fxabi. `arg` indexes from the port's first argument. */
+uint16_t kof_flow_cap_of_syscall_abi(const struct fxabi *fx, uint32_t nr,
+				     const uint64_t *arg, uint8_t *flags);
+const char *kof_sys_name_abi(const struct fxabi *fx, uint32_t nr);
+
 /* Linear, because the tables are tens of rows and a binary search would need
  * them sorted - which is a rule the next person adding a row would break
  * without the build saying so. */

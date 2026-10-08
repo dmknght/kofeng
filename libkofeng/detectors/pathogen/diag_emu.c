@@ -98,7 +98,7 @@
 #include "../../kofcore/kofmod/kofcap.h"
 #include "../../kofcore/kofmod/elf.h"
 #include "../../analyzers/nucleo/nucleo.h"
-#include "../../../libgenome/genotype/analysis/decode.h"
+#include <celllysis/celllysis.h>
 #include "../../disinfect/pzero.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../extractors/unpack/emu_unpack.h"
@@ -355,7 +355,7 @@ static const unsigned arg_reg32[6] = {
  * coherent reading. sh_addr in an ET_REL is zero - the linker has not placed
  * anything - and kof_elf_relcalls reports its sites as file offsets, so the
  * decoder, the relocation table and this mapping all speak the same numbers.
- * kdis_off_to_va makes the same choice for the same reason.
+ * cell_off_to_va makes the same choice for the same reason.
  *
  * RELOCATIONS ARE NOT APPLIED, and that is the boundary of what this can do.
  * A call to an import is `e8 00 00 00 00`, so it is never EXECUTED here - the
@@ -553,7 +553,7 @@ static struct kof_emu *build_rel_image(struct kof_diag_scan *s,
 	 *
 	 * Mapping the file whole is also the honest shape. The address space
 	 * of a relocatable object IS its file - sh_addr is zero, the
-	 * relocation table reports file offsets, and kdis_off_to_va makes the
+	 * relocation table reports file offsets, and cell_off_to_va makes the
 	 * same identity. One region keeps all three agreeing, and a section
 	 * table that disagrees with itself cannot send a step somewhere the
 	 * file does not reach.
@@ -1205,10 +1205,10 @@ static void promote_wrappers(struct kof_diag_scan *s,
  * writes anything. The source has to be an IMMEDIATE; a register source is
  * a value the model may have lost, and a lost value reads as zero.
  */
-static void field_value(struct kof_diag_hit *fh, const struct kdis_insn *ci,
+static void field_value(struct kof_diag_hit *fh, const struct cell_insn *ci,
 			unsigned mi)
 {
-	if (!fh || mi != 0u || ci->n_op < 2u || ci->o[1].kind != KDIS_O_IMM)
+	if (!fh || mi != 0u || ci->n_op < 2u || ci->o[1].kind != CELL_O_IMM)
 		return;
 	fh->val = ci->o[1].imm;
 	fh->bits |= KOF_DIAG_H_VAL;
@@ -1835,13 +1835,13 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 				 * does not keep twice.
 				 */
 				if (rip < size) {
-					struct kdis_insn ji;
-					uint32_t jl = kof_decode_x86(base + rip,
+					struct cell_insn ji;
+					uint32_t jl = cell_decode_x86(base + rip,
 						(uint32_t)(size - rip > 16u
 							   ? 16u : size - rip),
 						rip, 64u, &ji);
 
-					if (jl && ji.op == KDIS_JMP) {
+					if (jl && ji.op == CELL_JMP) {
 						ended = 1;
 						break;
 					}
@@ -1865,9 +1865,9 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 			 * rootkit was invisible.
 			 *
 			 * RECOGNISED THROUGH THE ENGINE'S DECODER, not a list
-			 * of bytes. kof_decode_x86 already classifies a
-			 * control-register move as KDIS_MOV_SPECIAL with
-			 * KDIS_SR_CR; asking it is asking the one thing in
+			 * of bytes. cell_decode_x86 already classifies a
+			 * control-register move as CELL_MOV_SPECIAL with
+			 * CELL_SR_CR; asking it is asking the one thing in
 			 * the tree that knows x86 encodings. The vocabulary
 			 * has had a row for this since it was written -
 			 * mov_cr0 -> kmodule-cr-write - and nothing had ever
@@ -1879,7 +1879,7 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 			 * instructions each time.
 			 */
 			if (rip < size) {
-				struct kdis_insn ci;
+				struct cell_insn ci;
 				/*
 				 * ---- DECODED FROM WHAT ACTUALLY RUNS ------
 				 *
@@ -1908,7 +1908,7 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 				if (!kof_emu_read(em, DIAG_REL_BASE + rip,
 						  ib, ilen))
 					memcpy(ib, base + rip, ilen);
-				clen = kof_decode_x86(ib, ilen, rip, 64u, &ci);
+				clen = cell_decode_x86(ib, ilen, rip, 64u, &ci);
 
 				/*
 				 * AND OVER AN INDIRECT CALL. `call *(pv_ops+k)`
@@ -1976,8 +1976,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 				 * diamorphine, built from the same source, keeps
 				 * that block inline and never showed the fault.
 				 */
-				if (clen && (ci.op == KDIS_JCC ||
-					     ci.op == KDIS_LOOP) &&
+				if (clen && (ci.op == CELL_JCC ||
+					     ci.op == CELL_LOOP) &&
 				    ci.target != KOF_BROKEN &&
 				    (ci.target < run_lo ||
 				     ci.target >= run_hi)) {
@@ -1985,9 +1985,9 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 							rip + ci.len);
 					continue;
 				}
-				if (clen && (ci.op == KDIS_JCC ||
-					     ci.op == KDIS_LOOP ||
-					     ci.op == KDIS_JMP) &&
+				if (clen && (ci.op == CELL_JCC ||
+					     ci.op == CELL_LOOP ||
+					     ci.op == CELL_JMP) &&
 				    ci.target != KOF_BROKEN &&
 				    ci.target < rip) {
 					uint32_t t;
@@ -2040,8 +2040,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 				 * The result is stated the same way as any other
 				 * skipped call - see the note on the arena page.
 				 */
-				if (clen && ci.op == KDIS_CALL && ci.n_op &&
-				    ci.o[0].kind == KDIS_O_REL) {
+				if (clen && ci.op == CELL_CALL && ci.n_op &&
+				    ci.o[0].kind == CELL_O_REL) {
 					if (anon)
 						kof_emu_set_reg(em, KOF_EMU_RAX,
 							DIAG_TOK_BASE +
@@ -2051,8 +2051,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 							rip + ci.len);
 					continue;
 				}
-				if (clen && ci.op == KDIS_CALL && ci.n_op &&
-				    ci.o[0].kind != KDIS_O_REL) {
+				if (clen && ci.op == CELL_CALL && ci.n_op &&
+				    ci.o[0].kind != CELL_O_REL) {
 					/*
 					 * AND IT HANDS SOMETHING BACK. Stepping
 					 * over a call while leaving the result
@@ -2127,9 +2127,9 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 				 * - and it is the one a model built around
 				 * calls had no way to see at all.
 				 */
-				if (clen && ci.op == KDIS_MOV && ci.n_op > 1u) {
+				if (clen && ci.op == CELL_MOV && ci.n_op > 1u) {
 					unsigned mi = ci.o[0].kind ==
-						      KDIS_O_MEM ? 0u : 1u;
+						      CELL_O_MEM ? 0u : 1u;
 
 					/*
 					 * ---- A GLOBAL STRUCT, REACHED WITHOUT
@@ -2154,9 +2154,9 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 					 * target that lands inside that object
 					 * is a field of it.
 					 */
-					if (ci.o[mi].kind == KDIS_O_MEM &&
-					    ci.o[mi].reg == KDIS_REG_NONE &&
-					    ci.o[mi].index == KDIS_REG_NONE) {
+					if (ci.o[mi].kind == CELL_O_MEM &&
+					    ci.o[mi].reg == CELL_REG_NONE &&
+					    ci.o[mi].index == CELL_REG_NONE) {
 						uint64_t tg = rip + ci.len +
 							(uint64_t)ci.o[mi].disp +
 							DIAG_REL_BASE;
@@ -2211,9 +2211,9 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 							}
 						}
 					}
-					if (ci.o[mi].kind == KDIS_O_MEM &&
-					    ci.o[mi].reg != KDIS_REG_NONE &&
-					    ci.o[mi].index == KDIS_REG_NONE) {
+					if (ci.o[mi].kind == CELL_O_MEM &&
+					    ci.o[mi].reg != CELL_REG_NONE &&
+					    ci.o[mi].index == CELL_REG_NONE) {
 						uint64_t b = kof_emu_get_reg(em,
 							ci.o[mi].reg);
 
@@ -2331,7 +2331,7 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 							 * the object on */
 							if (mi == 1u &&
 							    ci.o[0].kind ==
-							    KDIS_O_REG) {
+							    CELL_O_REG) {
 								kof_emu_step(em);
 								kof_emu_set_reg(em,
 								  ci.o[0].reg, page);
@@ -2353,10 +2353,10 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 				 * The GPR being READ is what makes it a write
 				 * TO cr0 rather than a read of it.
 				 */
-				if (clen && ci.op == KDIS_MOV_SPECIAL &&
-				    ci.cond == KDIS_SR_CR && ci.n_op &&
-				    ci.o[0].kind == KDIS_O_REG &&
-				    (ci.o[0].flags & KDIS_OF_READ)) {
+				if (clen && ci.op == CELL_MOV_SPECIAL &&
+				    ci.cond == CELL_SR_CR && ci.n_op &&
+				    ci.o[0].kind == CELL_O_REG &&
+				    (ci.o[0].flags & CELL_OF_READ)) {
 					uint32_t live = kof_diag_scan_count(s);
 					int seen_site = 0;
 
@@ -2446,8 +2446,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 			 */
 			if (st == KOF_EMU_STOP_FAULT &&
 			    n_fault < DIAG_REL_FAULTS && rip < size) {
-				struct kdis_insn fi;
-				uint32_t fl = kof_decode_x86(base + rip,
+				struct cell_insn fi;
+				uint32_t fl = cell_decode_x86(base + rip,
 					(uint32_t)(size - rip > 16u ? 16u
 						   : size - rip),
 					rip, 64u, &fi);
@@ -2456,8 +2456,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 					unsigned z;
 
 					for (z = 0; z < fi.n_op; z++)
-						if (fi.o[z].kind == KDIS_O_REG &&
-						    (fi.o[z].flags & KDIS_OF_WRITE))
+						if (fi.o[z].kind == CELL_O_REG &&
+						    (fi.o[z].flags & CELL_OF_WRITE))
 							kof_emu_set_reg(em,
 								fi.o[z].reg, 0);
 					kof_emu_set_rip(em, DIAG_REL_BASE +

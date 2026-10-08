@@ -303,11 +303,15 @@ linking the ten non-x86 architectures costs 31 MB of binary where kofscanner is
 2.8 MB, and `CAPSTONE_DIET` (240 KB) strips the detail - groups come back empty and
 `cs_regs_access` fails - which removes the reason to want it.
 
-It is used OFFLINE, on a developer machine: the ARM decoders under
-`libgenome/genotype/` are being derived by enumerating encodings, asking
-Capstone what each one is, and reducing the answers to tables - the method used
-for x86. What is checked in is the table and the code that reads it; no Capstone
-source is reproduced.
+It is used OFFLINE, on a developer machine, as an ORACLE for the ARM and AArch64
+decoders in `libgenome/celllysis/` (`decode_a32.c`, `decode_t32.c`,
+`decode_a64.c`): those are written from the architecture's encoding structure,
+and `tools/celllysis/arm_diff.c` / `a64_diff.c` run them against Capstone over
+random, systematic and real-binary input (`make celllysis-arm-diff`,
+`celllysis-a64-diff`; the library is passed in, never shipped). Where the two
+disagree the decision is made from the architecture, not by the oracle, and the
+decoders say which disagreements are by design. Nothing is reproduced from
+Capstone: no table, no code.
 
 ### Unpacker — MIT
 
@@ -469,7 +473,7 @@ the generator's junk because junk is itself a recognisable class of
 instruction, and following the relative `call`/`jmp` the chunks are chained
 with.
 
-`libkofeng/kofcore/kofmod/kdis.h` and `libkofeng/analyzers/nucleo/kdis.c` are
+`libkofeng/kofcore/kofmod/cell.h` and `libgenome/celllysis/cursor.c` are
 that mechanism made available to a module - decode without executing, keep a
 constant map over the registers, resolve a branch back to a file offset. The
 one thing its example makes explicit and this had to add is the modelled stack:
@@ -488,7 +492,7 @@ works: malicious-code detection as an obfuscation/deobfuscation game, and an
 abstract representation - a malicious-code automaton over UNINTERPRETED SYMBOLS
 - that survives the four transformations it names: dead-code insertion, code
 transposition, register reassignment and instruction substitution. The
-uninterpreted symbols are the answer to register reassignment, and in kdis that
+uninterpreted symbols are the answer to register reassignment, and in celllysis that
 is left to the rule: a rule binds a register number in a local and requires the
 same one later, which is unification done by hand.
 

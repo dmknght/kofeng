@@ -16,8 +16,8 @@
 #include <stdint.h>
 
 #include "kofdiag.h"
-#include "../../analyzers/nucleo/kdis.h"
-#include "../../kofcore/kofmod/kdis.h"
+#include <celllysis/celllysis.h>
+#include "../../kofcore/kofmod/cell.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 
 struct kof_diag_scan {
@@ -208,6 +208,16 @@ struct walk {
 	uint32_t   n_stk;
 	uint64_t   carry_to;
 	uint8_t    carry_armed, carry_live, ax_stale;
+	/*
+	 * WHICH REGISTER IS THE STACK POINTER, when it is not x86's, or 0.
+	 *
+	 * Zero means "the default", CELL_REG_SP, so a walk that was only ever
+	 * zero-initialised by an x86 routine keeps meaning what it meant. Register
+	 * 4 is rsp on x86 and r4 - an ordinary callee-saved register - on ARM:
+	 * reading it as the stack made every `mov r0, r4` a stack address, and
+	 * the descriptors those calls take came back linked to the stack.
+	 */
+	uint8_t    sp;
 };
 
 void     kof_diag_org_clear(struct walk *w, uint8_t r);
@@ -217,7 +227,7 @@ void     kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node);
 void     kof_diag_org_set_sym(struct walk *w, uint8_t r, uint32_t symoff,
 			      int32_t symadd);
 uint32_t kof_diag_org_sym(const struct walk *w, uint8_t r, int32_t *add);
-void     kof_diag_org_step(struct walk *w, const struct kdis_insn *in);
+void     kof_diag_org_step(struct walk *w, const struct cell_insn *in);
 
 /*
  * Which input of a call each argument is - ONE statement of it, in kofdiag.c,

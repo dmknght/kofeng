@@ -1,5 +1,5 @@
 /*
- * kdis_const - the constant map against code that writes constants the hard
+ * cell_const - the constant map against code that writes constants the hard
  * way.
  *
  * The property under test: at every `syscall`, the map holds the number and
@@ -31,7 +31,7 @@
  *                      moved away
  *   `mul ebx`          READS its operand and writes eax:edx. Clearing the
  *                      operand instead threw away a value that survives,
- *                      and kept two that do not - see kdis_forget_written
+ *                      and kept two that do not - see cell_forget_written
  *
  * The file is 130 bytes and runs anywhere; nothing here touches the disk.
  */
@@ -42,7 +42,18 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
-#include "../../libkofeng/analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
+#include "../../libkofeng/analyzers/nucleo/space.h"
+
+/* The cursor takes an address space; the engine builds one from the object. */
+static int nx(struct kof_cell_cur *k, const struct kof_obj_ctx *ctx,
+	      const uint8_t *buf, uint64_t n, struct cell_insn *in)
+{
+	struct cell_space sp;
+
+	kof_cell_space_init(&sp, ctx, buf, n);
+	return kof_cell_next(k, &sp, in);
+}
 
 static int fails;
 
@@ -55,7 +66,7 @@ static int fails;
 
 #define EQV(reg, want) do { \
 	uint64_t got_ = 0; \
-	if (!kof_kdis_reg(&k, (reg), &got_)) { \
+	if (!kof_cell_reg(&k, (reg), &got_)) { \
 		printf("  FAIL %s:%d  reg %u unknown, wanted 0x%llx\n", \
 		       __FILE__, __LINE__, (unsigned)(reg), \
 		       (unsigned long long)(want)); \
@@ -112,14 +123,14 @@ static const uint8_t mulseq[] = {
 
 /* Step until the n-th syscall has just been decoded. Returns 0 if the walk
  * ran out first, which is a failure of the DECODER and is reported as one. */
-static int to_syscall(struct kof_kdis *k, const struct kof_obj_ctx *ctx,
+static int to_syscall(struct kof_cell_cur *k, const struct kof_obj_ctx *ctx,
 		      const uint8_t *buf, uint64_t n, unsigned nth)
 {
-	struct kdis_insn in;
+	struct cell_insn in;
 	unsigned seen = 0;
 
-	while (kof_kdis_next(k, ctx, buf, n, &in)) {
-		if (in.op == KDIS_SYSCALL && ++seen == nth)
+	while (nx(k, ctx, buf, n, &in)) {
+		if (in.op == CELL_SYSCALL && ++seen == nth)
 			return 1;
 	}
 	return 0;
@@ -144,20 +155,20 @@ static void ctx_x64(struct kof_obj_ctx *ctx, uint64_t n)
 static void mmap_args(void)
 {
 	struct kof_obj_ctx ctx;
-	struct kof_kdis k;
+	struct kof_cell_cur k;
 
 	ctx_x64(&ctx, sizeof stager);
 	memset(&k, 0, sizeof k);
-	CK(kof_kdis_seek(&k, 0, 0));
+	CK(kof_cell_seek(&k, 0, 0));
 	if (!to_syscall(&k, &ctx, stager, sizeof stager, 1)) {
 		printf("  FAIL no first syscall decoded\n");
 		fails++;
 		return;
 	}
-	EQV(KDIS_REG_AX, 9);            /* mmap                      */
-	EQV(KDIS_REG_DI, 0);            /* addr - xor edi,edi        */
-	EQV(KDIS_REG_SI, 0x1000);       /* len  - cdq + mov dh,0x10  */
-	EQV(KDIS_REG_DX, 7);            /* prot - PROT_W and PROT_X  */
+	EQV(CELL_REG_AX, 9);            /* mmap                      */
+	EQV(CELL_REG_DI, 0);            /* addr - xor edi,edi        */
+	EQV(CELL_REG_SI, 0x1000);       /* len  - cdq + mov dh,0x10  */
+	EQV(CELL_REG_DX, 7);            /* prot - PROT_W and PROT_X  */
 	EQV(10, 0x22);                  /* flags - MAP_PRIVATE|ANON  */
 	EQV(9, 0);                      /* offset - xor r9,r9        */
 }
@@ -166,22 +177,22 @@ static void mmap_args(void)
 static void socket_args(void)
 {
 	struct kof_obj_ctx ctx;
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_insn in;
 	uint64_t v = 0;
 
 	ctx_x64(&ctx, sizeof stager);
 	memset(&k, 0, sizeof k);
-	CK(kof_kdis_seek(&k, 0, 0));
+	CK(kof_cell_seek(&k, 0, 0));
 	if (!to_syscall(&k, &ctx, stager, sizeof stager, 2)) {
 		printf("  FAIL no second syscall decoded\n");
 		fails++;
 		return;
 	}
-	EQV(KDIS_REG_AX, 0x29);         /* socket   */
-	EQV(KDIS_REG_DI, 2);            /* AF_INET  */
-	EQV(KDIS_REG_SI, 1);            /* SOCK_STREAM */
-	EQV(KDIS_REG_DX, 0);            /* protocol - cdq */
+	EQV(CELL_REG_AX, 0x29);         /* socket   */
+	EQV(CELL_REG_DI, 2);            /* AF_INET  */
+	EQV(CELL_REG_SI, 1);            /* SOCK_STREAM */
+	EQV(CELL_REG_DX, 0);            /* protocol - cdq */
 
 	/*
 	 * `xchg rdi,rax` is the next instruction that touches either. rax
@@ -189,29 +200,29 @@ static void socket_args(void)
 	 * NEITHER may keep its old value. The fault this guards against left
 	 * rax reading 0x29 after the swap had moved it to rdi.
 	 */
-	while (kof_kdis_next(&k, &ctx, stager, sizeof stager, &in))
-		if (in.op == KDIS_XCHG)
+	while (nx(&k, &ctx, stager, sizeof stager, &in))
+		if (in.op == CELL_XCHG)
 			break;
-	CK(in.op == KDIS_XCHG);
-	CK(!kof_kdis_reg(&k, KDIS_REG_AX, &v) || v != 0x29u);
+	CK(in.op == CELL_XCHG);
+	CK(!kof_cell_reg(&k, CELL_REG_AX, &v) || v != 0x29u);
 }
 
 /* connect(fd, &sockaddr, 16) - the length is a push/pop. */
 static void connect_args(void)
 {
 	struct kof_obj_ctx ctx;
-	struct kof_kdis k;
+	struct kof_cell_cur k;
 
 	ctx_x64(&ctx, sizeof stager);
 	memset(&k, 0, sizeof k);
-	CK(kof_kdis_seek(&k, 0, 0));
+	CK(kof_cell_seek(&k, 0, 0));
 	if (!to_syscall(&k, &ctx, stager, sizeof stager, 3)) {
 		printf("  FAIL no third syscall decoded\n");
 		fails++;
 		return;
 	}
-	EQV(KDIS_REG_AX, 0x2a);         /* connect */
-	EQV(KDIS_REG_DX, 0x10);         /* addrlen */
+	EQV(CELL_REG_AX, 0x2a);         /* connect */
+	EQV(CELL_REG_DX, 0x10);         /* addrlen */
 }
 
 /*
@@ -223,8 +234,8 @@ static void connect_args(void)
 static void mul_reads_its_operand(void)
 {
 	struct kof_obj_ctx ctx;
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_insn in;
 	uint64_t v = 0;
 	int n = 0;
 
@@ -233,13 +244,13 @@ static void mul_reads_its_operand(void)
 	ctx.arch = KOF_ARCH_X86;
 	ctx.obj_size = sizeof mulseq;
 	memset(&k, 0, sizeof k);
-	CK(kof_kdis_seek(&k, 0, 0));
-	while (kof_kdis_next(&k, &ctx, mulseq, sizeof mulseq, &in))
+	CK(kof_cell_seek(&k, 0, 0));
+	while (nx(&k, &ctx, mulseq, sizeof mulseq, &in))
 		n++;
 	CK(n == 4);
-	EQV(KDIS_REG_BX, 1);            /* read by mul, not written  */
-	EQV(KDIS_REG_AX, 0x66);         /* mul by zero, then mov al  */
-	EQV(KDIS_REG_DX, 0);            /* edx:eax = eax * 0 */
+	EQV(CELL_REG_BX, 1);            /* read by mul, not written  */
+	EQV(CELL_REG_AX, 0x66);         /* mul by zero, then mov al  */
+	EQV(CELL_REG_DX, 0);            /* edx:eax = eax * 0 */
 	(void)v;
 }
 
@@ -258,8 +269,8 @@ static void narrow_write_needs_a_base(void)
 		0xb4, 0x10                  /* mov ah,0x10               */
 	};
 	struct kof_obj_ctx ctx;
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_insn in;
 	uint64_t v = 0;
 
 	memset(&ctx, 0, sizeof ctx);
@@ -267,10 +278,10 @@ static void narrow_write_needs_a_base(void)
 	ctx.arch = KOF_ARCH_X86;
 	ctx.obj_size = sizeof seq;
 	memset(&k, 0, sizeof k);
-	CK(kof_kdis_seek(&k, 0, 0));
-	while (kof_kdis_next(&k, &ctx, seq, sizeof seq, &in))
+	CK(kof_cell_seek(&k, 0, 0));
+	while (nx(&k, &ctx, seq, sizeof seq, &in))
 		;
-	CK(!kof_kdis_reg(&k, KDIS_REG_AX, &v));
+	CK(!kof_cell_reg(&k, CELL_REG_AX, &v));
 }
 
 int main(void)
@@ -281,7 +292,7 @@ int main(void)
 	mul_reads_its_operand();
 	narrow_write_needs_a_base();
 
-	printf("kdis constants: push/pop, xor-self, cdq, byte-into-register, "
+	printf("cell constants: push/pop, xor-self, cdq, byte-into-register, "
 	       "xchg, mul reads its operand%s\n", fails ? "" : " - ok");
 	return fails != 0;
 }

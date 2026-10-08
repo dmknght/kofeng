@@ -53,10 +53,11 @@
 #include "diag_int.h"
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/kofcap.h"
-#include "../../kofcore/kofmod/kdis.h"
+#include "../../kofcore/kofmod/cell.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../../analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
+#include "../../analyzers/nucleo/space.h"
 
 /* How far before a syscall its function may begin. MEASURED on 27 sites in 25
  * static i386 bots, 33 bytes; glibc's wrappers with a cancellation check are
@@ -128,6 +129,7 @@ struct wctx {
 	const struct kof_obj_ctx *ctx;
 	const uint8_t *base;
 	uint64_t size;
+	struct cell_space sp;           /* the object's code, as celllysis reads it */
 	int wide;                       /* x86-64 */
 	int w;                          /* the machine word, 4 or 8 */
 	uint64_t *tgt;                  /* sorted unique direct-call targets */
@@ -226,29 +228,29 @@ static void glob_put(struct wctx *c, uint64_t addr, struct sv v)
 enum { LOC_NONE = 0, LOC_STACK, LOC_GLOBAL };
 
 static int mem_loc(const struct wctx *c, const struct fstate *f,
-		   const struct kdis_insn *in, const struct kdis_operand *o,
+		   const struct cell_insn *in, const struct cell_operand *o,
 		   int64_t *key)
 {
-	if (o->kind != KDIS_O_MEM || o->index != KDIS_REG_NONE)
+	if (o->kind != CELL_O_MEM || o->index != CELL_REG_NONE)
 		return LOC_NONE;
-	if (o->seg != KDIS_REG_NONE && o->seg != KDIS_SEG_DS &&
-	    o->seg != KDIS_SEG_SS)
+	if (o->seg != CELL_REG_NONE && o->seg != CELL_SEG_DS &&
+	    o->seg != CELL_SEG_SS)
 		return LOC_NONE;        /* fs: and gs: are thread data */
-	if (o->flags & KDIS_OF_RIPREL) {
+	if (o->flags & CELL_OF_RIPREL) {
 		if (in->at_va == KOF_BROKEN)
 			return LOC_NONE;
 		*key = (int64_t)(in->at_va + in->len) + o->disp;
 		return LOC_GLOBAL;
 	}
-	if (o->reg == KDIS_REG_NONE) {
+	if (o->reg == CELL_REG_NONE) {
 		*key = o->disp & (c->wide ? -1ll : 0xffffffffll);
 		return LOC_GLOBAL;
 	}
-	if (o->reg == KDIS_REG_SP) {
+	if (o->reg == CELL_REG_SP) {
 		*key = -(int64_t)f->sp + o->disp;
 		return LOC_STACK;
 	}
-	if (o->reg == KDIS_REG_BP && f->bp_known) {
+	if (o->reg == CELL_REG_BP && f->bp_known) {
 		*key = (int64_t)f->bp_off + o->disp;
 		return LOC_STACK;
 	}
@@ -268,21 +270,21 @@ static int mem_loc(const struct wctx *c, const struct fstate *f,
 }
 
 static struct sv load(struct wctx *c, struct fstate *f,
-		      const struct kdis_insn *in, const struct kdis_operand *o)
+		      const struct cell_insn *in, const struct cell_operand *o)
 {
 	int64_t key;
 
 	switch (o->kind) {
-	case KDIS_O_REG:
+	case CELL_O_REG:
 		if (o->reg >= 16u || o->size < 4u)
 			return UNK;
 		return f->reg[o->reg];
-	case KDIS_O_IMM: {
+	case CELL_O_IMM: {
 		struct sv v = { V_CONST, 0, (int64_t)o->imm };
 
 		return v;
 	}
-	case KDIS_O_MEM:
+	case CELL_O_MEM:
 		if (o->size < 4u)
 			return UNK;
 		switch (mem_loc(c, f, in, o, &key)) {
@@ -301,17 +303,17 @@ static struct sv load(struct wctx *c, struct fstate *f,
 	}
 }
 
-static void store(struct wctx *c, struct fstate *f, const struct kdis_insn *in,
-		  const struct kdis_operand *o, struct sv v)
+static void store(struct wctx *c, struct fstate *f, const struct cell_insn *in,
+		  const struct cell_operand *o, struct sv v)
 {
 	int64_t key;
 
-	if (o->kind == KDIS_O_REG) {
+	if (o->kind == CELL_O_REG) {
 		if (o->reg < 16u)
 			f->reg[o->reg] = o->size >= 4u ? v : UNK;
 		return;
 	}
-	if (o->kind != KDIS_O_MEM)
+	if (o->kind != CELL_O_MEM)
 		return;
 	if (o->size < 4u)
 		v = UNK;
@@ -335,31 +337,31 @@ static void store(struct wctx *c, struct fstate *f, const struct kdis_insn *in,
  * pointer - and everything else forgets what it writes, which is the honest
  * default: a register that was rewritten holds nothing this walk can name.
  */
-static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in)
+static void st_step(struct wctx *c, struct fstate *f, const struct cell_insn *in)
 {
-	const struct kdis_operand *d = &in->o[0], *s = &in->o[1];
+	const struct cell_operand *d = &in->o[0], *s = &in->o[1];
 	int w = c->w;
 	uint32_t r;
 
 	switch (in->op) {
-	case KDIS_NOP:
+	case CELL_NOP:
 		return;
-	case KDIS_MOV:
+	case CELL_MOV:
 		if (in->n_op >= 2u) {
 			struct sv v = load(c, f, in, s);
 
 			/* mov bp,sp: the frame pointer now names this frame. */
-			if (d->kind == KDIS_O_REG && d->reg == KDIS_REG_BP &&
-			    s->kind == KDIS_O_REG && s->reg == KDIS_REG_SP) {
+			if (d->kind == CELL_O_REG && d->reg == CELL_REG_BP &&
+			    s->kind == CELL_O_REG && s->reg == CELL_REG_SP) {
 				f->bp_known = 1;
 				f->bp_off = -f->sp;
-				f->reg[KDIS_REG_BP].t = V_SADDR;
-				f->reg[KDIS_REG_BP].v = -f->sp;
+				f->reg[CELL_REG_BP].t = V_SADDR;
+				f->reg[CELL_REG_BP].v = -f->sp;
 				return;
 			}
 			/* A copy of the stack pointer is a stack ADDRESS. */
-			if (d->kind == KDIS_O_REG && s->kind == KDIS_O_REG &&
-			    s->reg == KDIS_REG_SP && d->size >= 4u && d->reg < 16u) {
+			if (d->kind == CELL_O_REG && s->kind == CELL_O_REG &&
+			    s->reg == CELL_REG_SP && d->size >= 4u && d->reg < 16u) {
 				f->reg[d->reg].t = V_SADDR;
 				f->reg[d->reg].v = -f->sp;
 				f->reg[d->reg].node = 0;
@@ -369,23 +371,23 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 			return;
 		}
 		break;
-	case KDIS_MOVSX:
-	case KDIS_MOVZX:
-	case KDIS_WIDEN:
+	case CELL_MOVSX:
+	case CELL_MOVZX:
+	case CELL_WIDEN:
 		/* A 32-bit value widened to 64 is the same value as far as a
 		 * handle or a parameter is concerned (movslq edx,rdx). */
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG &&
-		    s->kind == KDIS_O_REG && s->size >= 4u && d->reg < 16u &&
+		if (in->n_op >= 2u && d->kind == CELL_O_REG &&
+		    s->kind == CELL_O_REG && s->size >= 4u && d->reg < 16u &&
 		    s->reg < 16u) {
 			f->reg[d->reg] = f->reg[s->reg];
 			return;
 		}
-		if (in->op == KDIS_WIDEN)
+		if (in->op == CELL_WIDEN)
 			return;         /* cdqe in place */
 		break;
-	case KDIS_XCHG:
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG &&
-		    s->kind == KDIS_O_REG && d->reg < 16u && s->reg < 16u) {
+	case CELL_XCHG:
+		if (in->n_op >= 2u && d->kind == CELL_O_REG &&
+		    s->kind == CELL_O_REG && d->reg < 16u && s->reg < 16u) {
 			struct sv t = f->reg[d->reg];
 
 			f->reg[d->reg] = f->reg[s->reg];
@@ -393,21 +395,21 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 			return;
 		}
 		break;
-	case KDIS_LEA:
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG && d->reg < 16u &&
-		    s->kind == KDIS_O_MEM && s->index == KDIS_REG_NONE &&
-		    !(s->flags & KDIS_OF_RIPREL)) {
-			if (s->reg == KDIS_REG_SP) {
+	case CELL_LEA:
+		if (in->n_op >= 2u && d->kind == CELL_O_REG && d->reg < 16u &&
+		    s->kind == CELL_O_MEM && s->index == CELL_REG_NONE &&
+		    !(s->flags & CELL_OF_RIPREL)) {
+			if (s->reg == CELL_REG_SP) {
 				f->reg[d->reg].t = V_SADDR;
 				f->reg[d->reg].v = -(int64_t)f->sp + s->disp;
 				f->reg[d->reg].node = 0;
-				if (d->reg == KDIS_REG_BP) {
+				if (d->reg == CELL_REG_BP) {
 					f->bp_known = 1;
 					f->bp_off = (int32_t)f->reg[d->reg].v;
 				}
 				return;
 			}
-			if (s->reg == KDIS_REG_BP && f->bp_known) {
+			if (s->reg == CELL_REG_BP && f->bp_known) {
 				f->reg[d->reg].t = V_SADDR;
 				f->reg[d->reg].v = (int64_t)f->bp_off + s->disp;
 				f->reg[d->reg].node = 0;
@@ -415,8 +417,8 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 			}
 		}
 		break;
-	case KDIS_XOR:
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG && s->kind == KDIS_O_REG &&
+	case CELL_XOR:
+		if (in->n_op >= 2u && d->kind == CELL_O_REG && s->kind == CELL_O_REG &&
 		    d->reg == s->reg && d->reg < 16u) {
 			f->reg[d->reg].t = V_CONST;
 			f->reg[d->reg].v = 0;
@@ -424,7 +426,7 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 			return;
 		}
 		break;
-	case KDIS_PUSH:
+	case CELL_PUSH:
 		if (in->n_op >= 1u) {
 			struct sv v = load(c, f, in, d);
 
@@ -432,29 +434,29 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 			slot_put(f, -f->sp, v);
 		}
 		return;
-	case KDIS_POP:
-		if (in->n_op >= 1u && d->kind == KDIS_O_REG && d->reg < 16u)
+	case CELL_POP:
+		if (in->n_op >= 1u && d->kind == CELL_O_REG && d->reg < 16u)
 			f->reg[d->reg] = slot_get(f, -f->sp);
 		f->sp -= w;
 		return;
-	case KDIS_ADD:
-	case KDIS_SUB:
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG &&
-		    d->reg == KDIS_REG_SP && s->kind == KDIS_O_IMM) {
-			f->sp += in->op == KDIS_SUB ? (int32_t)s->imm
+	case CELL_ADD:
+	case CELL_SUB:
+		if (in->n_op >= 2u && d->kind == CELL_O_REG &&
+		    d->reg == CELL_REG_SP && s->kind == CELL_O_IMM) {
+			f->sp += in->op == CELL_SUB ? (int32_t)s->imm
 						    : -(int32_t)s->imm;
 			return;
 		}
 		/* A stack address moved by a constant is another stack address. */
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG && d->reg < 16u &&
-		    d->size >= 4u && s->kind == KDIS_O_IMM &&
+		if (in->n_op >= 2u && d->kind == CELL_O_REG && d->reg < 16u &&
+		    d->size >= 4u && s->kind == CELL_O_IMM &&
 		    f->reg[d->reg].t == V_SADDR) {
-			f->reg[d->reg].v += in->op == KDIS_SUB ? -(int64_t)(int32_t)s->imm
+			f->reg[d->reg].v += in->op == CELL_SUB ? -(int64_t)(int32_t)s->imm
 							       : (int64_t)(int32_t)s->imm;
 			return;
 		}
 		break;
-	case KDIS_OR:
+	case CELL_OR:
 		/*
 		 * `flags | O_NONBLOCK`, where flags is whatever F_GETFL returned.
 		 * The result is not a number, but it is a number with a bit that is
@@ -464,14 +466,14 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 		 * use that form, which a model that reads only 4-byte operands
 		 * never sees.
 		 */
-		if (in->n_op >= 2u && d->kind == KDIS_O_REG && d->reg < 16u &&
-		    s->kind == KDIS_O_IMM && d->size != 2u) {
+		if (in->n_op >= 2u && d->kind == CELL_O_REG && d->reg < 16u &&
+		    s->kind == CELL_O_IMM && d->size != 2u) {
 			uint64_t bit = (uint64_t)s->imm;
 			struct sv *rv = &f->reg[d->reg];
 
 			if (d->size == 1u) {
 				bit &= 0xffu;
-				if (d->flags & KDIS_OF_HIGH8)
+				if (d->flags & CELL_OF_HIGH8)
 					bit <<= 8;
 			}
 			if (rv->t == V_CONST) {
@@ -486,13 +488,13 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 			return;
 		}
 		break;
-	case KDIS_RET:
+	case CELL_RET:
 		st_reset(f);
 		return;
-	case KDIS_CMP:
-	case KDIS_TEST:
-	case KDIS_JCC:
-	case KDIS_JMP:
+	case CELL_CMP:
+	case CELL_TEST:
+	case CELL_JCC:
+	case CELL_JMP:
 		return;                 /* nothing written; the walk is linear */
 	default:
 		break;
@@ -500,15 +502,15 @@ static void st_step(struct wctx *c, struct fstate *f, const struct kdis_insn *in
 	/* Anything else forgets what it wrote. */
 	for (r = 0; r < 16u; r++)
 		if (in->wmask & (1ull << r)) {
-			if (r == KDIS_REG_SP)
+			if (r == CELL_REG_SP)
 				continue;
 			f->reg[r] = UNK;
 		}
 	{
 		int64_t key;
 
-		if (in->n_op && in->o[0].kind == KDIS_O_MEM &&
-		    (in->o[0].flags & KDIS_OF_WRITE)) {
+		if (in->n_op && in->o[0].kind == CELL_O_MEM &&
+		    (in->o[0].flags & CELL_OF_WRITE)) {
 			switch (mem_loc(c, f, in, &in->o[0], &key)) {
 			case LOC_STACK:
 				slot_put(f, (int32_t)key, UNK);
@@ -560,13 +562,13 @@ static int push_u64(uint64_t **v, uint32_t *n, uint32_t *cap, uint64_t x)
 	return 1;
 }
 
-static int is_kernel_entry(const struct wctx *c, const struct kdis_insn *in)
+static int is_kernel_entry(const struct wctx *c, const struct cell_insn *in)
 {
 	const uint8_t *p = c->base + in->at;
 
-	if (in->op == KDIS_SYSCALL)
+	if (in->op == CELL_SYSCALL)
 		return p[0] == 0x0fu && p[1] == 0x05u ? c->wide : !c->wide;
-	if (in->op == KDIS_INT && in->n_op && in->o[0].kind == KDIS_O_IMM &&
+	if (in->op == CELL_INT && in->n_op && in->o[0].kind == CELL_O_IMM &&
 	    in->o[0].imm == 0x80u)
 		return 1;
 	return 0;
@@ -574,25 +576,25 @@ static int is_kernel_entry(const struct wctx *c, const struct kdis_insn *in)
 
 static int pass_a(struct wctx *c, uint64_t off, uint64_t n)
 {
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_insn in;
 
 	/* Whether the instruction before ended a function's straight line. */
 	int boundary = 1;
 
 	memset(&k, 0, sizeof k);
-	if (!kof_kdis_seek(&k, off, 0))
+	if (!kof_cell_seek(&k, off, 0))
 		return 1;
 	while (k.at < off + n) {
-		if (!kof_kdis_next(&k, c->ctx, c->base, c->size, &in)) {
+		if (!kof_cell_next(&k, &c->sp, &in)) {
 			k.at++;                 /* data in the code: step over it */
 			continue;
 		}
-		if (in.op == KDIS_CALL && !(in.flags & KDIS_F_INDIRECT) &&
+		if (in.op == CELL_CALL && !(in.flags & CELL_F_INDIRECT) &&
 		    in.target != KOF_BROKEN) {
 			if (!push_u64(&c->tgt, &c->n_tgt, &c->cap_tgt, in.target))
 				return 0;
-		} else if (in.op == KDIS_JMP && !(in.flags & KDIS_F_INDIRECT) &&
+		} else if (in.op == CELL_JMP && !(in.flags & CELL_F_INDIRECT) &&
 			   in.target != KOF_BROKEN && boundary) {
 			/*
 			 * A THUNK: `jmp X` as the first instruction of a function
@@ -610,8 +612,8 @@ static int pass_a(struct wctx *c, uint64_t off, uint64_t n)
 			if (!push_u64(&c->site, &c->n_site, &c->cap_site, in.at))
 				return 0;
 		}
-		boundary = in.op == KDIS_RET || in.op == KDIS_JMP ||
-			   in.op == KDIS_NOP;
+		boundary = in.op == CELL_RET || in.op == CELL_JMP ||
+			   in.op == CELL_NOP;
 	}
 	return 1;
 }
@@ -646,13 +648,13 @@ static int site_open(const struct wctx *c, uint64_t at)
 /* One path through a wrapper that ended in a syscall or a call to a wrapper,
  * turned into a summary. 1 when it says something about the parameters. */
 static int summarise_end(struct wctx *c, struct fstate *f, uint64_t entry,
-			 const struct kdis_insn *in, struct wsum *callee,
+			 const struct cell_insn *in, struct wsum *callee,
 			 struct wsum *out)
 {
-	static const uint8_t k64[] = { KDIS_REG_DI, KDIS_REG_SI, KDIS_REG_DX,
+	static const uint8_t k64[] = { CELL_REG_DI, CELL_REG_SI, CELL_REG_DX,
 				       10u, 8u, 9u };
-	static const uint8_t k32[] = { KDIS_REG_BX, KDIS_REG_CX, KDIS_REG_DX,
-				       KDIS_REG_SI, KDIS_REG_DI, KDIS_REG_BP };
+	static const uint8_t k32[] = { CELL_REG_BX, CELL_REG_CX, CELL_REG_DX,
+				       CELL_REG_SI, CELL_REG_DI, CELL_REG_BP };
 	const uint8_t *kr = c->wide ? k64 : k32;
 	int any_param = 0;
 	unsigned i;
@@ -661,7 +663,7 @@ static int summarise_end(struct wctx *c, struct fstate *f, uint64_t entry,
 	out->entry = entry;
 	out->site = in->at;
 	if (!callee) {
-		out->nr = f->reg[KDIS_REG_AX];
+		out->nr = f->reg[CELL_REG_AX];
 		for (i = 0; i < 6; i++) {
 			out->arg[i] = f->reg[kr[i]];
 			if (out->arg[i].t != V_CONST && out->arg[i].t != V_PARAM &&
@@ -738,11 +740,11 @@ static int summarise_end(struct wctx *c, struct fstate *f, uint64_t entry,
  */
 static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 {
-	static const uint8_t p64[] = { KDIS_REG_DI, KDIS_REG_SI, KDIS_REG_DX,
-				       KDIS_REG_CX, 8u, 9u };
-	static const uint8_t pr32[] = { KDIS_REG_AX, KDIS_REG_CX, KDIS_REG_DX,
-					KDIS_REG_BX, KDIS_REG_SI, KDIS_REG_DI,
-					KDIS_REG_BP };
+	static const uint8_t p64[] = { CELL_REG_DI, CELL_REG_SI, CELL_REG_DX,
+				       CELL_REG_CX, 8u, 9u };
+	static const uint8_t pr32[] = { CELL_REG_AX, CELL_REG_CX, CELL_REG_DX,
+					CELL_REG_BX, CELL_REG_SI, CELL_REG_DI,
+					CELL_REG_BP };
 	struct pend { struct fstate f; uint64_t at; unsigned n; } *pend;
 	unsigned n_pend = 0, n_out = 0, i;
 
@@ -781,8 +783,8 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 	n_pend = 1;
 	while (n_pend && n_out < W_VARIANTS) {
 		struct pend *p = &pend[--n_pend];
-		struct kof_kdis k;
-		struct kdis_insn in;
+		struct kof_cell_cur k;
+		struct cell_insn in;
 		/*
 		 * A COPY, not the table's own entry. The entry that was just taken is
 		 * the very slot the next forward branch queues its taken path into, so
@@ -796,7 +798,7 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 		unsigned n_insn = p->n;
 
 		memset(&k, 0, sizeof k);
-		if (!kof_kdis_seek(&k, p->at, 0))
+		if (!kof_cell_seek(&k, p->at, 0))
 			continue;
 		for (;;) {
 			struct wsum *callee = NULL;
@@ -805,12 +807,12 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 
 			if (++n_insn > W_BODY)
 				break;
-			if (!kof_kdis_next(&k, c->ctx, c->base, c->size, &in))
+			if (!kof_cell_next(&k, &c->sp, &in))
 				break;
 			/* A direct jump to a function already summarised is a TAIL
 			 * CALL: the same question as a call that is followed by ret. */
-			if ((in.op == KDIS_CALL || in.op == KDIS_JMP) &&
-			    !(in.flags & KDIS_F_INDIRECT) && in.target != KOF_BROKEN)
+			if ((in.op == CELL_CALL || in.op == CELL_JMP) &&
+			    !(in.flags & CELL_F_INDIRECT) && in.target != KOF_BROKEN)
 				callee = wsum_of(c, in.target);
 			if (is_kernel_entry(c, &in)) {
 				if (summarise_end(c, f, entry, &in, NULL, &out[n_out]))
@@ -823,7 +825,7 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 				/* A jump leaves the return address where it was, so on a
 				 * stack-passed ABI the callee's arguments are one word
 				 * further up than they are for a call. */
-				if (in.op == KDIS_JMP && !c->wide)
+				if (in.op == CELL_JMP && !c->wide)
 					f->sp -= c->w;
 
 				for (v = base; v < c->n_ws && n_out < W_VARIANTS &&
@@ -843,11 +845,11 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 			 * first of them summarised no fcntl at all - 84 of 86 x86 Bazaar
 			 * files that set O_NONBLOCK produced no node for it.
 			 */
-			if (in.op == KDIS_CALL) {
+			if (in.op == CELL_CALL) {
 				st_call_unknown(c, f);
 				continue;
 			}
-			if (in.op == KDIS_JCC && in.target != KOF_BROKEN &&
+			if (in.op == CELL_JCC && in.target != KOF_BROKEN &&
 			    in.target > in.at && in.target - entry <= W_SPAN &&
 			    n_pend < W_PENDING) {
 				/* the taken path, later; this one carries on */
@@ -857,16 +859,16 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 				n_pend++;
 				continue;
 			}
-			if (in.op == KDIS_JMP && !(in.flags & KDIS_F_INDIRECT) &&
+			if (in.op == CELL_JMP && !(in.flags & CELL_F_INDIRECT) &&
 			    in.target != KOF_BROKEN && in.target > in.at &&
 			    in.target - entry <= W_SPAN) {
-				if (!kof_kdis_seek(&k, in.target, 0))
+				if (!kof_cell_seek(&k, in.target, 0))
 					break;
 				continue;
 			}
 			/* a call to something else, a return, a jump out: not this path */
-			if (in.op == KDIS_CALL || in.op == KDIS_JMP || in.op == KDIS_JCC ||
-			    in.op == KDIS_RET || in.op == KDIS_LOOP)
+			if (in.op == CELL_CALL || in.op == CELL_JMP || in.op == CELL_JCC ||
+			    in.op == CELL_RET || in.op == CELL_LOOP)
 				break;
 			st_step(c, f, &in);
 		}
@@ -943,8 +945,8 @@ static int entry_of(const struct wctx *c, uint64_t site, uint64_t *entry)
 /* The i-th integer parameter of a call, as the caller holds it. */
 static struct sv call_param(const struct wctx *c, struct fstate *f, unsigned i)
 {
-	static const uint8_t p64[] = { KDIS_REG_DI, KDIS_REG_SI, KDIS_REG_DX,
-				       KDIS_REG_CX, 8u, 9u };
+	static const uint8_t p64[] = { CELL_REG_DI, CELL_REG_SI, CELL_REG_DX,
+				       CELL_REG_CX, 8u, 9u };
 
 	if (i >= W_REG_PARAM)
 		return i - W_REG_PARAM < 16u ? f->reg[i - W_REG_PARAM] : UNK;
@@ -996,7 +998,7 @@ static void eval_call(const struct wctx *c, struct fstate *f,
 }
 
 static struct sv emit_call_node(struct wctx *c, struct fstate *f, struct wsum *ws,
-				const struct kdis_insn *in)
+				const struct cell_insn *in)
 {
 	struct kof_diag_scan *s = c->s;
 	struct ev e;
@@ -1134,19 +1136,19 @@ static int is_entry(const struct wctx *c, uint64_t at)
 
 static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
 {
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_insn in;
 	struct fstate f;
 	int cur = -1;                   /* the call target this code belongs to */
 
 	st_reset(&f);
 	memset(&k, 0, sizeof k);
-	if (!kof_kdis_seek(&k, off, 0))
+	if (!kof_cell_seek(&k, off, 0))
 		return;
 	while (k.at < off + n && !c->s->full) {
 		struct wsum *ws;
 
-		if (!kof_kdis_next(&k, c->ctx, c->base, c->size, &in)) {
+		if (!kof_cell_next(&k, &c->sp, &in)) {
 			k.at++;
 			continue;
 		}
@@ -1161,11 +1163,11 @@ static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
 		 * is produced in another function. The helper's return value is the
 		 * node; the callers, in the second walk, take it from there.
 		 */
-		if (in.op == KDIS_RET && cur >= 0 && c->fret &&
-		    f.reg[KDIS_REG_AX].t == V_NODE)
-			c->fret[cur] = (uint32_t)f.reg[KDIS_REG_AX].node + 1u;
-		if (in.op == KDIS_CALL) {
-			ws = (!(in.flags & KDIS_F_INDIRECT) && in.target != KOF_BROKEN)
+		if (in.op == CELL_RET && cur >= 0 && c->fret &&
+		    f.reg[CELL_REG_AX].t == V_NODE)
+			c->fret[cur] = (uint32_t)f.reg[CELL_REG_AX].node + 1u;
+		if (in.op == CELL_CALL) {
+			ws = (!(in.flags & CELL_F_INDIRECT) && in.target != KOF_BROKEN)
 			     ? wsum_of(c, in.target) : NULL;
 			{
 				/* The arguments are read BEFORE the callee's clobbers are
@@ -1193,7 +1195,7 @@ static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
 				 * helper's later links, and a send on it could never reach the
 				 * IP_HDRINCL that made the socket raw-with-header.
 				 */
-				if (c->fret && !(in.flags & KDIS_F_INDIRECT) &&
+				if (c->fret && !(in.flags & CELL_F_INDIRECT) &&
 				    in.target != KOF_BROKEN) {
 					int ti = tgt_index(c, in.target);
 
@@ -1202,7 +1204,7 @@ static void pass_b(struct wctx *c, uint64_t off, uint64_t n)
 						ret.node = (uint16_t)(c->fret[ti] - 1u);
 					}
 				}
-				f.reg[KDIS_REG_AX] = ret;
+				f.reg[CELL_REG_AX] = ret;
 			}
 			continue;
 		}
@@ -1251,6 +1253,7 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 	c.s = s;
 	c.ctx = ctx;
 	c.base = base;
+	kof_cell_space_init(&c.sp, ctx, base, size);
 	c.size = size;
 	c.wide = ctx->arch == KOF_ARCH_X86_64;
 	c.w = c.wide ? 8 : 4;
@@ -1268,8 +1271,11 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 		    (s->hit[i].bits & KOF_DIAG_H_OPAQUE) &&
 		    !push_u64(&c.open, &c.n_open, &c.cap_open, s->hit[i].at))
 			goto out;
-	qsort(c.open, c.n_open, sizeof *c.open, u64_cmp);
-	qsort(c.tgt, c.n_tgt, sizeof *c.tgt, u64_cmp);
+	/* qsort's base is declared nonnull, and with no elements it is NULL. */
+	if (c.n_open)
+		qsort(c.open, c.n_open, sizeof *c.open, u64_cmp);
+	if (c.n_tgt)
+		qsort(c.tgt, c.n_tgt, sizeof *c.tgt, u64_cmp);
 	{
 		uint32_t w = 0;
 

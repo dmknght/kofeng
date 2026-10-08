@@ -38,7 +38,7 @@
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../../libgenome/genotype/analysis/xref.h"
+#include <celllysis/xref.h>
 #include "../disinfect/pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
@@ -77,6 +77,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include "../analyzers/nucleo/space.h"
 
 struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx)
 {
@@ -1222,8 +1223,8 @@ static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
 /*
  * ---- THE CODE READER'S THREE ENTRY POINTS --------------------------------
  *
- * All the work is in libkofeng/analyzers/nucleo/kdis.c; these only hand it the object's
- * bytes and the cursor that lives in the scanner. See kofmod/kdis.h.
+ * All the work is in libgenome/celllysis/cursor.c; these only hand it the object's
+ * bytes and the cursor that lives in the scanner. See kofmod/cell.h.
  *
  * ANSWERED FOR A DETECTOR TOO, and that is the point of it. Reading code
  * without running it is exactly what a detector should be able to do - it is
@@ -1236,24 +1237,27 @@ static int c_dis_seek(const struct kof_obj_ctx *ctx, uint64_t off, int keep)
 
 	if (!sc || off >= b.n)
 		return 0;
-	return kof_kdis_seek(&sc->kdis, off, keep);
+	return kof_cell_seek(&sc->cell, off, keep);
 }
 
-static int c_dis_next(const struct kof_obj_ctx *ctx, struct kdis_insn *out)
+static int c_dis_next(const struct kof_obj_ctx *ctx, struct cell_insn *out)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	kof_buf b = oc_mc(ctx)->data;
 
+	struct cell_space sp;
+
 	if (!sc || !out || !b.p)
 		return 0;
-	return kof_kdis_next(&sc->kdis, ctx, b.p, b.n, out);
+	kof_cell_space_init(&sp, ctx, b.p, b.n);
+	return kof_cell_next(&sc->cell, &sp, out);
 }
 
 static int c_dis_reg(const struct kof_obj_ctx *ctx, uint8_t r, uint64_t *out)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	return sc ? kof_kdis_reg(&sc->kdis, r, out) : 0;
+	return sc ? kof_cell_reg(&sc->cell, r, out) : 0;
 }
 
 /*

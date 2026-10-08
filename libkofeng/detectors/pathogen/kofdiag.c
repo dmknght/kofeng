@@ -13,7 +13,7 @@
  * two questions above are what a diagnose is written against, and nothing
  * else here has a caller.
  *
- * WHY A VALUE MODEL AT ALL, when kdis already keeps a constant map. The
+ * WHY A VALUE MODEL AT ALL, when celllysis already keeps a constant map. The
  * constant map answers "what number is in this register"; this needs
  * "which NODE did this value come from", which is a different question and
  * survives where the first does not: a pointer stays a pointer through a
@@ -28,8 +28,9 @@
 #include "diag_int.h"
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/elf.h"
-#include "../../analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
+#include "../../analyzers/nucleo/space.h"
 
 /*
  * HOW MANY NODES ONE OBJECT MAY HOLD.
@@ -81,7 +82,7 @@ void kof_diag_org_set(struct walk *w, uint8_t r, uint16_t node)
  * FORGET WHAT EVERY REGISTER THIS INSTRUCTION WRITES CAME FROM, then put
  * back the one case this follows.
  *
- * `wmask` and not the first operand, for the reason kdis_track records: an
+ * `wmask` and not the first operand, for the reason cell_track records: an
  * instruction writes registers it does not name, and names registers it
  * only reads. Getting that backwards on `mul` cost the i386 samples their
  * whole network half.
@@ -105,21 +106,21 @@ uint32_t kof_diag_org_sym(const struct walk *w, uint8_t r, int32_t *add)
 	return w->reg[r].symoff;
 }
 
-void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
+void kof_diag_org_step(struct walk *w, const struct cell_insn *in)
 {
 	uint8_t r, d, e;
 
-	if (in->op == KDIS_PUSH) {
+	if (in->op == CELL_PUSH) {
 		uint16_t v = ORG_NONE;
 
-		if (in->n_op && in->o[0].kind == KDIS_O_REG)
+		if (in->n_op && in->o[0].kind == CELL_O_REG)
 			v = kof_diag_org_of(w, in->o[0].reg);
 		if (w->n_stk < ORG_STK)
 			w->stk[w->n_stk].node = v;
 		w->n_stk++;
 		return;
 	}
-	if (in->op == KDIS_POP) {
+	if (in->op == CELL_POP) {
 		uint16_t v = ORG_NONE;
 
 		if (w->n_stk) {
@@ -127,12 +128,16 @@ void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
 			if (w->n_stk < ORG_STK)
 				v = w->stk[w->n_stk].node;
 		}
-		if (in->n_op && in->o[0].kind == KDIS_O_REG)
+		/* A popped LIST names no operand; wmask has them all. */
+		for (r = 0; r < 16u; r++)
+			if (in->wmask & (1ull << r))
+				kof_diag_org_clear(w, r);
+		if (in->n_op && in->o[0].kind == CELL_O_REG)
 			kof_diag_org_set(w, in->o[0].reg, v);
 		return;
 	}
-	if (in->op == KDIS_XCHG && in->n_op > 1u &&
-	    in->o[0].kind == KDIS_O_REG && in->o[1].kind == KDIS_O_REG) {
+	if (in->op == CELL_XCHG && in->n_op > 1u &&
+	    in->o[0].kind == CELL_O_REG && in->o[1].kind == CELL_O_REG) {
 		uint16_t a;
 
 		d = in->o[0].reg; e = in->o[1].reg;
@@ -141,9 +146,9 @@ void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
 		kof_diag_org_set(w, e, a);
 		return;
 	}
-	if (in->op == KDIS_MOV && in->n_op > 1u &&
-	    in->o[0].kind == KDIS_O_REG && in->o[0].size >= 4u) {
-		if (in->o[1].kind == KDIS_O_REG) {
+	if (in->op == CELL_MOV && in->n_op > 1u &&
+	    in->o[0].kind == CELL_O_REG && in->o[0].size >= 4u) {
+		if (in->o[1].kind == CELL_O_REG) {
 			/*
 			 * A VALUE TAKEN FROM THE STACK POINTER IS A STACK
 			 * ADDRESS, and that is a provenance of its own.
@@ -154,7 +159,7 @@ void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
 			 * both addresses came off esp.
 			 */
 			kof_diag_org_set(w, in->o[0].reg,
-				in->o[1].reg == KDIS_REG_SP ? ORG_STACK
+				in->o[1].reg == (w->sp ? w->sp : CELL_REG_SP) ? ORG_STACK
 				: kof_diag_org_of(w, in->o[1].reg));
 			return;
 		}
@@ -167,8 +172,8 @@ void kof_diag_org_step(struct walk *w, const struct kdis_insn *in)
 	 * before handing it to mprotect; killing the provenance there breaks
 	 * the only link that sample has.
 	 */
-	if ((in->op == KDIS_AND || in->op == KDIS_SHR || in->op == KDIS_SHL) &&
-	    in->n_op && in->o[0].kind == KDIS_O_REG &&
+	if ((in->op == CELL_AND || in->op == CELL_SHR || in->op == CELL_SHL) &&
+	    in->n_op && in->o[0].kind == CELL_O_REG &&
 	    kof_diag_org_of(w, in->o[0].reg) == ORG_STACK)
 		return;
 
@@ -236,7 +241,7 @@ void kof_diag_hit_nonblock(struct kof_diag_scan *s, uint64_t at, uint16_t open_i
 
 /* ---- where a value came from ---------------------------------------------
  *
- * A SHADOW BESIDE kdis's CONSTANT MAP, not a replacement for it. The two
+ * A SHADOW BESIDE celllysis's CONSTANT MAP, not a replacement for it. The two
  * answer different questions and neither covers the other: the constant map
  * says WHAT NUMBER a register holds, this says WHICH NODE it came out of. A
  * pointer stays a pointer through a push and a pop whether or not anyone
@@ -256,10 +261,10 @@ void kof_diag_hit_nonblock(struct kof_diag_scan *s, uint64_t at, uint16_t open_i
  */
 static int arg_regs(const struct kof_obj_ctx *ctx, const uint8_t **out)
 {
-	static const uint8_t x64[] = { KDIS_REG_DI, KDIS_REG_SI, KDIS_REG_DX,
+	static const uint8_t x64[] = { CELL_REG_DI, CELL_REG_SI, CELL_REG_DX,
 				       10u, 8u, 9u };
-	static const uint8_t x86[] = { KDIS_REG_BX, KDIS_REG_CX, KDIS_REG_DX,
-				       KDIS_REG_SI, KDIS_REG_DI, KDIS_REG_BP };
+	static const uint8_t x86[] = { CELL_REG_BX, CELL_REG_CX, CELL_REG_DX,
+				       CELL_REG_SI, CELL_REG_DI, CELL_REG_BP };
 
 	if (ctx->arch == KOF_ARCH_X86_64) {
 		*out = x64;
@@ -277,7 +282,7 @@ static int arg_regs(const struct kof_obj_ctx *ctx, const uint8_t **out)
  * ONE SYSCALL SITE.
  *
  * The number comes out of the constant map, which is why this file needs
- * kdis at all. When it is not there the node is still emitted, as
+ * celllysis at all. When it is not there the node is still emitted, as
  * KOF_NUCLEO_NONE with KOF_DIAG_H_OPAQUE set - see the note on that flag. A
  * site dropped because its number could not be read is a site that makes
  * two different programs look alike.
@@ -414,117 +419,24 @@ static void wrap_note(struct kof_diag_scan *s, uint64_t at)
 	s->wrap[s->n_wrap++] = at;
 }
 
-static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
-		       struct walk *w, const struct kof_obj_ctx *ctx,
-		       uint64_t at)
+/*
+ * THE NODE A SYSCALL SITE BECOMES, once the number and arguments have been read
+ * - which is the part that differs per architecture and stays with the caller.
+ * What follows is the same everywhere: which inputs came from earlier nodes,
+ * what the call hands back, and what that makes of the registers.
+ *
+ * `ar`/`n_ar` are the argument registers in order, `ret_reg` the register the
+ * result comes back in, `nonblock` whether the socket was made non-blocking
+ * and `carry` whether this architecture can leave a zero for the next call
+ * to use (x86-64 only - see walk.carry_to).
+ */
+static void note_node(struct kof_diag_scan *s, struct walk *w, uint64_t at,
+		      uint16_t cap, uint8_t fl, const char *nm,
+		      const uint8_t *ar, int n_ar, unsigned have,
+		      uint8_t ret_reg, int nonblock, int carry)
 {
-	const uint8_t *ar;
-	uint64_t nr = 0, arg[6];
 	struct kof_diag_hit *h;
-	const char *nm;
-	uint16_t cap;
-	uint8_t fl = 0;
-	int n_ar, i, bits;
-	unsigned have = 0;          /* which of arg[] came from a known register */
 
-	bits = ctx->arch == KOF_ARCH_X86_64 ? 64 : 32;
-	n_ar = arg_regs(ctx, &ar);
-
-	/*
-	 * THE SYSCALL VOCABULARY IS LINUX'S, SO IT IS ONLY ASKED ABOUT LINUX.
-	 *
-	 * A `syscall` instruction in a PE carries a WINDOWS service number,
-	 * and the number spaces have nothing to do with each other.
-	 * kof_flow_cap_of_syscall only knows the Linux table, so handing it a
-	 * Windows number does not fail - it ANSWERS, with the wrong word.
-	 *
-	 * MEASURED, and this is why the check is here rather than in a
-	 * comment: a Hell's Gate shaped stub, `mov r10,rcx; mov eax,0x3b;
-	 * syscall`, came back as `proc-start`, because 0x3b is execve on
-	 * Linux x86-64. Nothing about that program starts a process. A second
-	 * stub with 0x18 produced no node at all, because 0x18 is sched_yield
-	 * and the vocabulary has no word for it - silence where there is a
-	 * direct system call, which on Windows is the notable part.
-	 *
-	 * SO THE NODE IS STILL EMITTED, AND THE TWO CASES ARE KEPT APART.
-	 * A number that WAS read is KOF_DIAG_H_RAW_SYSCALL - a program
-	 * reaching the kernel without going through ntdll, which is what the
-	 * hook-evading loaders do and the one thing this walk can say about a
-	 * PE that the import table cannot. A number that was not read is
-	 * OPAQUE, which is what `0f 05` in packed data looks like. Reporting
-	 * both as opaque would bury the first in the second.
-	 */
-	if (ctx->format != KOF_FMT_ELF) {
-		int got = !w->ax_stale &&
-			  kof_kdis_reg(k, KDIS_REG_AX, &nr) && nr <= 0xffffu;
-
-		h = kof_diag_hit_add(s, at, KOF_NUCLEO_NONE, 0);
-		if (h)
-			h->bits |= got ? KOF_DIAG_H_RAW_SYSCALL
-				       : KOF_DIAG_H_OPAQUE;
-		return;
-	}
-
-	if (w->ax_stale || !kof_kdis_reg(k, KDIS_REG_AX, &nr) ||
-	    nr > 0xffffu) {
-		/*
-		 * THE NUMBER MAY STILL BE THERE, left by the syscall before
-		 * it - see walk.carry_to. Only on x86-64, where `read` is
-		 * zero and a zero-on-success return therefore IS a syscall
-		 * number; on i386 read is 3 and the trick does not exist.
-		 */
-		if (bits == 64 && w->carry_live) {
-			nr = 0;
-			w->carry_live = 0;
-		} else {
-			/* The number is the CALLER'S too (a libc helper that takes
-			 * it in a register or on the stack): a candidate wrapper,
-			 * exactly as an argument that was not read is. */
-			s->n_unread++;
-			h = kof_diag_hit_add(s, at, KOF_NUCLEO_NONE, 0);
-			if (h)
-				h->bits |= KOF_DIAG_H_OPAQUE;
-			return;
-		}
-	}
-	/*
-	 * WHICH ARGUMENTS WERE ACTUALLY READ, as a mask beside the values.
-	 *
-	 * Handing a zero for one that was not read is not a neutral default:
-	 * nucleo refines a capability by testing bits in an argument, so an
-	 * unread prot reads as "no PROT_EXEC" and an allocation about to
-	 * hold code is recorded as an ordinary buffer. The mask is what lets
-	 * the node say it does not know instead.
-	 */
-	for (i = 0; i < n_ar && i < 6; i++) {
-		if (kof_kdis_reg(k, ar[i], &arg[i]))
-			have |= 1u << i;
-		else
-			arg[i] = 0;
-	}
-	for (; i < 6; i++)
-		arg[i] = 0;
-
-	if (!(have & 1u))
-		s->n_unread++;          /* a candidate wrapper - see diag_wrap.c */
-	cap = kof_flow_cap_of_syscall((unsigned)bits, (uint32_t)nr, arg, &fl);
-	nm  = kof_sys_name((unsigned)bits, (uint32_t)nr);
-	if (cap == KOF_NUCLEO_NONE) {
-		/*
-		 * i386's socketcall IS A MULTIPLEXER: the sub-call that says
-		 * socket from connect from send is in ebx, and a libc that
-		 * wraps it (uClibc, in the static IoT builds) loads ebx from
-		 * its own PARAMETER - `mov edx,[esp+0x10]; xchg ebx,edx` - so
-		 * at this instruction it is the caller's value and not the
-		 * walk's. This used to return here without a word: MEASURED, 27
-		 * of 30 static i386 bots had the instruction and not one net
-		 * node. Remember the site; kof_diag_run_wrappers reads what every caller
-		 * pushed.
-		 */
-		if (bits == 32 && nr == 102u && !(have & 1u))
-			wrap_note(s, at);
-		return;                 /* a syscall the vocabulary has no word for */
-	}
 	h = kof_diag_hit_add(s, at, cap, fl);
 	if (!h)
 		return;
@@ -581,9 +493,9 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 	if (kof_flow_hands_on(cap, nm)) {
 		uint16_t made = (uint16_t)(s->n_hit - 1u);
 
-		kof_diag_org_set(w, KDIS_REG_AX, made);
+		kof_diag_org_set(w, ret_reg, made);
 		if ((cap == KOF_NUCLEO_NET_OPEN || cap == KOF_NUCLEO_NET_RAW) &&
-		    kof_flow_sock_nonblock((unsigned)bits, (uint32_t)nr, arg, have))
+		    nonblock)
 			kof_diag_hit_nonblock(s, at, made);
 	} else {
 		/*
@@ -596,12 +508,199 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
 		     cap == KOF_NUCLEO_HEAP) && n_ar >= 1 &&
 		    kof_diag_org_of(w, ar[0]) == ORG_STACK)
 			h->bits |= KOF_DIAG_H_REGION_STACK;
-		kof_diag_org_clear(w, KDIS_REG_AX);
+		kof_diag_org_clear(w, ret_reg);
 	}
 
 	/* Arm the carry for the next conditional branch - see walk.carry_to. */
-	if (bits == 64 && nm && kof_sys_zero_on_success(nm))
+	if (carry && nm && kof_sys_zero_on_success(nm))
 		h->bits |= KOF_DIAG_H_ZERO_OK;
+}
+
+/*
+ * ---- THE FIXED-WIDTH PORTS ------------------------------------------------
+ *
+ * ARM and AArch64 reach the kernel through one instruction, `svc`, with the
+ * number in a register the ABI names (r7, x8) and the arguments in the first
+ * six. All of that is nucleo's fxabi - the same row the old whole-image sweep
+ * read - so this is only the reading of it: no byte pattern to search for, no
+ * second syscall encoding to tell apart, and none of the x86 special cases
+ * (socketcall, the zero-on-success carry) because ARM has neither.
+ *
+ * OLD ARM ABI: `svc 0x9000NN` carries the number in the instruction itself and
+ * r7 is not read. Both are seen in the static IoT builds, so both are handled.
+ */
+static int fixed_arch(const struct kof_obj_ctx *ctx)
+{
+	return ctx->arch == KOF_ARCH_ARM || ctx->arch == KOF_ARCH_ARM64;
+}
+
+#define ARM_OABI_BASE 0x900000u
+
+static void at_syscall_fixed(struct kof_diag_scan *s, struct kof_cell_cur *k,
+			     struct walk *w, const struct kof_obj_ctx *ctx,
+			     const struct cell_insn *in)
+{
+	const struct fxabi *fx = kof_fx_abi_of(ctx->arch == KOF_ARCH_ARM
+					       ? KOF_FLOW_A_ARM32
+					       : KOF_FLOW_A_ARM64);
+	uint8_t ar[6];
+	uint64_t nr = 0, arg[6];
+	struct kof_diag_hit *h;
+	const char *nm;
+	uint16_t cap;
+	uint8_t fl = 0;
+	unsigned have = 0;
+	int i, n_ar = fx->n_arg < 6 ? fx->n_arg : 6;
+	uint64_t imm = in->n_op && in->o[0].kind == CELL_O_IMM ? in->o[0].imm : 0;
+
+	if (ctx->arch == KOF_ARCH_ARM && imm >= ARM_OABI_BASE &&
+	    imm < ARM_OABI_BASE + 0x10000u) {
+		nr = imm - ARM_OABI_BASE;
+	} else if (!kof_cell_reg(k, fx->sel, &nr) || nr > 0xffffu) {
+		/* The number is the caller's: a candidate wrapper, as on x86. */
+		s->n_unread++;
+		h = kof_diag_hit_add(s, in->at, KOF_NUCLEO_NONE, 0);
+		if (h)
+			h->bits |= KOF_DIAG_H_OPAQUE;
+		return;
+	}
+	for (i = 0; i < n_ar; i++) {
+		ar[i] = (uint8_t)(fx->arg0 + i);
+		if (kof_cell_reg(k, ar[i], &arg[i]))
+			have |= 1u << i;
+		else
+			arg[i] = 0;
+	}
+	if (!(have & 1u))
+		s->n_unread++;
+	cap = kof_flow_cap_of_syscall_abi(fx, (uint32_t)nr, arg, &fl);
+	nm = kof_sys_name_abi(fx, (uint32_t)nr);
+	if (cap == KOF_NUCLEO_NONE)
+		return;
+	note_node(s, w, in->at, cap, fl, nm, ar, n_ar, have, fx->ret,
+		  (have & 2u) && (arg[1] & 0x800u) /* SOCK_NONBLOCK */, 0);
+}
+
+static void at_syscall(struct kof_diag_scan *s, struct kof_cell_cur *k,
+		       struct walk *w, const struct kof_obj_ctx *ctx,
+		       const struct cell_insn *in)
+{
+	const uint64_t at = in->at;
+
+	const uint8_t *ar;
+	uint64_t nr = 0, arg[6];
+	struct kof_diag_hit *h;
+	const char *nm;
+	uint16_t cap;
+	uint8_t fl = 0;
+	int n_ar, i, bits;
+	unsigned have = 0;          /* which of arg[] came from a known register */
+
+	if (fixed_arch(ctx)) {
+		at_syscall_fixed(s, k, w, ctx, in);
+		return;
+	}
+	bits = ctx->arch == KOF_ARCH_X86_64 ? 64 : 32;
+	n_ar = arg_regs(ctx, &ar);
+
+	/*
+	 * THE SYSCALL VOCABULARY IS LINUX'S, SO IT IS ONLY ASKED ABOUT LINUX.
+	 *
+	 * A `syscall` instruction in a PE carries a WINDOWS service number,
+	 * and the number spaces have nothing to do with each other.
+	 * kof_flow_cap_of_syscall only knows the Linux table, so handing it a
+	 * Windows number does not fail - it ANSWERS, with the wrong word.
+	 *
+	 * MEASURED, and this is why the check is here rather than in a
+	 * comment: a Hell's Gate shaped stub, `mov r10,rcx; mov eax,0x3b;
+	 * syscall`, came back as `proc-start`, because 0x3b is execve on
+	 * Linux x86-64. Nothing about that program starts a process. A second
+	 * stub with 0x18 produced no node at all, because 0x18 is sched_yield
+	 * and the vocabulary has no word for it - silence where there is a
+	 * direct system call, which on Windows is the notable part.
+	 *
+	 * SO THE NODE IS STILL EMITTED, AND THE TWO CASES ARE KEPT APART.
+	 * A number that WAS read is KOF_DIAG_H_RAW_SYSCALL - a program
+	 * reaching the kernel without going through ntdll, which is what the
+	 * hook-evading loaders do and the one thing this walk can say about a
+	 * PE that the import table cannot. A number that was not read is
+	 * OPAQUE, which is what `0f 05` in packed data looks like. Reporting
+	 * both as opaque would bury the first in the second.
+	 */
+	if (ctx->format != KOF_FMT_ELF) {
+		int got = !w->ax_stale &&
+			  kof_cell_reg(k, CELL_REG_AX, &nr) && nr <= 0xffffu;
+
+		h = kof_diag_hit_add(s, at, KOF_NUCLEO_NONE, 0);
+		if (h)
+			h->bits |= got ? KOF_DIAG_H_RAW_SYSCALL
+				       : KOF_DIAG_H_OPAQUE;
+		return;
+	}
+
+	if (w->ax_stale || !kof_cell_reg(k, CELL_REG_AX, &nr) ||
+	    nr > 0xffffu) {
+		/*
+		 * THE NUMBER MAY STILL BE THERE, left by the syscall before
+		 * it - see walk.carry_to. Only on x86-64, where `read` is
+		 * zero and a zero-on-success return therefore IS a syscall
+		 * number; on i386 read is 3 and the trick does not exist.
+		 */
+		if (bits == 64 && w->carry_live) {
+			nr = 0;
+			w->carry_live = 0;
+		} else {
+			/* The number is the CALLER'S too (a libc helper that takes
+			 * it in a register or on the stack): a candidate wrapper,
+			 * exactly as an argument that was not read is. */
+			s->n_unread++;
+			h = kof_diag_hit_add(s, at, KOF_NUCLEO_NONE, 0);
+			if (h)
+				h->bits |= KOF_DIAG_H_OPAQUE;
+			return;
+		}
+	}
+	/*
+	 * WHICH ARGUMENTS WERE ACTUALLY READ, as a mask beside the values.
+	 *
+	 * Handing a zero for one that was not read is not a neutral default:
+	 * nucleo refines a capability by testing bits in an argument, so an
+	 * unread prot reads as "no PROT_EXEC" and an allocation about to
+	 * hold code is recorded as an ordinary buffer. The mask is what lets
+	 * the node say it does not know instead.
+	 */
+	for (i = 0; i < n_ar && i < 6; i++) {
+		if (kof_cell_reg(k, ar[i], &arg[i]))
+			have |= 1u << i;
+		else
+			arg[i] = 0;
+	}
+	for (; i < 6; i++)
+		arg[i] = 0;
+
+	if (!(have & 1u))
+		s->n_unread++;          /* a candidate wrapper - see diag_wrap.c */
+	cap = kof_flow_cap_of_syscall((unsigned)bits, (uint32_t)nr, arg, &fl);
+	nm  = kof_sys_name((unsigned)bits, (uint32_t)nr);
+	if (cap == KOF_NUCLEO_NONE) {
+		/*
+		 * i386's socketcall IS A MULTIPLEXER: the sub-call that says
+		 * socket from connect from send is in ebx, and a libc that
+		 * wraps it (uClibc, in the static IoT builds) loads ebx from
+		 * its own PARAMETER - `mov edx,[esp+0x10]; xchg ebx,edx` - so
+		 * at this instruction it is the caller's value and not the
+		 * walk's. This used to return here without a word: MEASURED, 27
+		 * of 30 static i386 bots had the instruction and not one net
+		 * node. Remember the site; kof_diag_run_wrappers reads what every caller
+		 * pushed.
+		 */
+		if (bits == 32 && nr == 102u && !(have & 1u))
+			wrap_note(s, at);
+		return;                 /* a syscall the vocabulary has no word for */
+	}
+	note_node(s, w, at, cap, fl, nm, ar, n_ar, have, CELL_REG_AX,
+		  kof_flow_sock_nonblock((unsigned)bits, (uint32_t)nr, arg, have),
+		  bits == 64);
 }
 
 /*
@@ -624,7 +723,7 @@ static void at_syscall(struct kof_diag_scan *s, struct kof_kdis *k,
  * So an instruction with no syscall anywhere near it cannot contribute.
  *
  * The three encodings are the whole set this walk acts on - `0f 05` syscall,
- * `0f 34` sysenter, `cd 80` int 0x80 - see the KDIS_SYSCALL arm of class_of
+ * `0f 34` sysenter, `cd 80` int 0x80 - see the CELL_SYSCALL arm of class_of
  * and the int-0x80 test in the loop.
  *
  * A BYTE THAT IS NOT AN INSTRUCTION STILL COUNTS, and must. `0f 05` inside a
@@ -666,6 +765,52 @@ static uint64_t cand_at(const uint8_t *p, uint64_t from, uint64_t n)
 }
 
 /*
+ * A32 `svc` AS LINUX USES IT, and not every word the instruction set allows.
+ *
+ * The bare mask (cond:1111 imm24) matched 159 words in one 190 KB Mirai
+ * build, nearly all of them literal-pool data after a `bx lr` - 0x7f807f81 is
+ * `svcvc 0x807f81` and is a pair of halfwords, not a call. Real code is
+ * always-execute: EABI is `svc 0`, the old ABI is `svc 0x9000nn`, and the
+ * ARM-private calls (cacheflush) are `svc 0x0f000n`. Anything else is data.
+ */
+static int svc_a32(uint32_t x)
+{
+	uint32_t imm = x & 0xffffffu;
+
+	if ((x >> 24) != 0xefu)         /* cond AL, 1111 */
+		return 0;
+	return imm == 0 || (imm >> 16) == 0x90u || (imm >> 16) == 0x0fu;
+}
+
+/*
+ * THE FIXED-WIDTH CANDIDATE: an aligned word that is an `svc`.
+ *
+ * No byte search: instructions sit on 4-byte boundaries, so every word is
+ * looked at once. A64 `svc #0` is the one word 0xd4000001 - Linux passes no
+ * immediate, and the 65536 other `svc` words are data far more often than code.
+ * `off` is where `p` sits in the file, because alignment is the file's and not
+ * the slice's.
+ */
+static uint64_t cand_fixed(const struct kof_obj_ctx *ctx, const uint8_t *p,
+			   uint64_t off, uint64_t from, uint64_t n)
+{
+	uint64_t i = from + ((4u - ((off + from) & 3u)) & 3u);
+	int be = ctx->arch == KOF_ARCH_ARM && ctx->format == KOF_FMT_ELF &&
+		 ctx->file_header && ((const uint8_t *)ctx->file_header)[5] == 2u;
+
+	for (; i + 4u <= n; i += 4u) {
+		uint32_t x = be ? ((uint32_t)p[i] << 24 | (uint32_t)p[i + 1] << 16 |
+				   (uint32_t)p[i + 2] << 8 | p[i + 3])
+				: ((uint32_t)p[i + 3] << 24 | (uint32_t)p[i + 2] << 16 |
+				   (uint32_t)p[i + 1] << 8 | p[i]);
+
+		if (ctx->arch == KOF_ARCH_ARM ? svc_a32(x) : x == 0xd4000001u)
+			return i;
+	}
+	return n;
+}
+
+/*
  * IS THIS INSTRUCTION A WAY INTO THE KERNEL ON *THIS* OBJECT.
  *
  * The three encodings are not interchangeable, and treating them as one set
@@ -691,14 +836,16 @@ static uint64_t cand_at(const uint8_t *p, uint64_t from, uint64_t n)
  * is a separate piece of work.
  */
 static int kernel_entry(const struct kof_obj_ctx *ctx,
-			const struct kdis_insn *in, const uint8_t *p)
+			const struct cell_insn *in, const uint8_t *p)
 {
 	int bits64 = ctx->arch == KOF_ARCH_X86_64;
 
-	if (in->op == KDIS_SYSCALL)
+	if (fixed_arch(ctx))
+		return in->op == CELL_SYSCALL;
+	if (in->op == CELL_SYSCALL)
 		return p[0] == 0x0fu && p[1] == 0x05u ? bits64 : !bits64;
-	if (in->op == KDIS_INT && in->n_op &&
-	    in->o[0].kind == KDIS_O_IMM && in->o[0].imm == 0x80u)
+	if (in->op == CELL_INT && in->n_op &&
+	    in->o[0].kind == CELL_O_IMM && in->o[0].imm == 0x80u)
 		return ctx->format == KOF_FMT_ELF;
 	return 0;
 }
@@ -747,8 +894,9 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 			 const uint8_t *base, uint64_t size, uint64_t off,
 			 uint64_t n)
 {
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_space sp;
+	struct cell_insn in;
 	struct walk w;
 	uint64_t c, done = 0;
 	uint32_t r;
@@ -757,6 +905,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		return;
 	if (off + n > size)
 		n = size - off;
+	kof_cell_space_init(&sp, ctx, base, size);
 
 	/*
 	 * ONE WINDOW PER CANDIDATE, AND THE NEXT ONE STARTS WHERE THIS ONE
@@ -765,8 +914,9 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 	 * window, which is also the only way the second one sees what the
 	 * first produced.
 	 */
-	for (c = cand_at(base + off, 0, n); c < n;
-	     c = cand_at(base + off, c + 1u, n)) {
+#define CAND(from) (fixed_arch(ctx) ? cand_fixed(ctx, base + off, off, (from), n) \
+				    : cand_at(base + off, (from), n))
+	for (c = CAND(0); c < n; c = CAND(c + 1u)) {
 		uint64_t at = c > DIAG_LEAD ? c - DIAG_LEAD : 0;
 		uint32_t idle = 0;
 
@@ -779,10 +929,11 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		memset(&w, 0, sizeof w);
 		for (r = 0; r < 16u; r++)
 			w.reg[r].node = ORG_NONE;
-		if (!kof_kdis_seek(&k, off + at, 0))
+		w.sp = ctx->arch == KOF_ARCH_ARM ? 13u : 0u;
+		if (!kof_cell_seek(&k, off + at, 0))
 			return;
 		while (k.at < off + n &&
-		       kof_kdis_next(&k, ctx, base, size, &in)) {
+		       kof_cell_next(&k, &sp, &in)) {
 			/*
 			 * PAST THE CANDIDATE, THE WALK RUNS ON WHAT IT IS
 			 * STILL CARRYING - see the note on DIAG_IDLE.
@@ -809,16 +960,16 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 			/*
 			 * `int 0x80` IS A SYSCALL AND THE DECODER DOES NOT SAY SO.
 			 *
-			 * KDIS_SYSCALL is the `syscall` and `sysenter` instructions;
+			 * CELL_SYSCALL is the `syscall` and `sysenter` instructions;
 			 * i386 reaches the kernel through a software interrupt, which
-			 * is KDIS_INT and could be any vector. Reading only
-			 * KDIS_SYSCALL found ZERO nodes in every 32-bit payload here -
+			 * is CELL_INT and could be any vector. Reading only
+			 * CELL_SYSCALL found ZERO nodes in every 32-bit payload here -
 			 * msfvenom's i386 stagers are entirely `int 0x80`.
 			 */
 			if (kernel_entry(ctx, &in, base + in.at)) {
-				at_syscall(s, &k, &w, ctx, in.at);
+				at_syscall(s, &k, &w, ctx, &in);
 				w.ax_stale = 1;
-			} else if (in.op == KDIS_JCC) {
+			} else if (in.op == CELL_JCC) {
 				/*
 				 * ARM THE CARRY AT THE FIRST BRANCH AFTER A
 				 * ZERO-ON-SUCCESS CALL, and do not let a later one
@@ -831,8 +982,8 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 					w.carry_to = in.target;
 					w.carry_armed = 1;
 				}
-			} else if ((in.op == KDIS_JMP || in.op == KDIS_CALL) &&
-				   in.n_op && in.o[0].kind == KDIS_O_REG) {
+			} else if ((in.op == CELL_JMP || in.op == CELL_CALL) &&
+				   in.n_op && in.o[0].kind == CELL_O_REG) {
 				/*
 				 * AN INDIRECT BRANCH IS ONLY INTERESTING WHEN IT GOES
 				 * SOMEWHERE THIS WALK WATCHED BEING MADE.
@@ -855,7 +1006,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 					 KOF_DIAG_KIND_PRODUCED);
 				}
 			}
-			if (in.wmask & (1ull << KDIS_REG_AX))
+			if (in.wmask & (1ull << CELL_REG_AX))
 				w.ax_stale = 0; /* something wrote it since */
 			kof_diag_org_step(&w, &in);
 			if (s->full)
@@ -863,6 +1014,7 @@ static void sweep_region(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		}
 		done = k.at > off ? k.at - off : 0;
 	}
+#undef CAND
 }
 
 /* ---- what counts as code ------------------------------------------------- */
@@ -976,7 +1128,8 @@ void kof_diag_run_syscall(struct kof_diag_scan *s,
 	 */
 	if (ctx->format == KOF_FMT_ELF) {
 		sweep_elf(s, ctx, base, size);
-		if (s->n_wrap || s->n_unread)
+		/* The wrapper resolution reads x86 call sites and pushes. */
+		if (!fixed_arch(ctx) && (s->n_wrap || s->n_unread))
 			kof_diag_run_wrappers(s, ctx, base, size);
 	} else
 		sweep_region(s, ctx, base, size, 0, size);
@@ -1195,8 +1348,15 @@ struct kof_diag_scan *kof_diag_scan_with_inputs(const struct kof_obj_ctx *ctx,
 
 	if (!ctx || !base || !size)
 		return NULL;
-	if (ctx->arch != KOF_ARCH_X86 && ctx->arch != KOF_ARCH_X86_64)
-		return NULL;            /* the value model is x86 only so far */
+	if (ctx->arch != KOF_ARCH_X86 && ctx->arch != KOF_ARCH_X86_64) {
+		/*
+		 * The value model reads x86 outside the syscall route; the
+		 * fixed-width ports have that one only, so it is the one run.
+		 */
+		if (!fixed_arch(ctx))
+			return NULL;
+		run &= KOF_DIAG_RUN_SYSCALL;
+	}
 	s = calloc(1, sizeof *s);
 	if (!s)
 		return NULL;

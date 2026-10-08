@@ -1149,6 +1149,74 @@ const char *kof_sys_name(unsigned bits, uint32_t nr)
 			  : kof_sys_look_name(kof_sys32, kof_sys32_n, nr);
 }
 
+/*
+ * THE SAME TWO QUESTIONS FOR A PORT THAT HAS ITS OWN TABLE.
+ *
+ * kof_flow_cap_of_syscall above is x86's: `bits` picks between two tables and
+ * the refinements test x86 numbers. A fixed-width port is described by its
+ * fxabi instead - table, and which argument holds prot - and the refinements
+ * are keyed by the ROW's role, which is what the role column is for: a row
+ * that says it is mmap is asked about PROT_EXEC whatever number it has.
+ *
+ * Only the rows the port's table has. A number with no row is NONE, which the
+ * caller records as a syscall the vocabulary has no word for.
+ */
+static uint16_t fx_look(const struct fxabi *fx, uint32_t nr, uint8_t *role,
+			const char **name)
+{
+	uint32_t i;
+
+	for (i = 0; i < fx->n_tab; i++) {
+		if (fx->tab[i].nr != nr)
+			continue;
+		*role = fx->tab[i].role;
+		*name = fx->tab[i].name;
+		return fx->tab[i].cap;
+	}
+	for (i = 0; i < fx->n_tab2; i++) {
+		if (fx->tab2[i].nr != nr)
+			continue;
+		*role = fx->tab2[i].role;
+		*name = fx->tab2[i].name;
+		return fx->tab2[i].cap;
+	}
+	*role = KOF_FLOW_ROLE_NONE;
+	*name = NULL;
+	return KOF_NUCLEO_NONE;
+}
+
+uint16_t kof_flow_cap_of_syscall_abi(const struct fxabi *fx, uint32_t nr,
+				     const uint64_t *arg, uint8_t *flags)
+{
+	const char *nm;
+	uint8_t role;
+	uint16_t cap = fx_look(fx, nr, &role, &nm);
+
+	if (flags)
+		*flags = 0;
+	if (arg && cap == KOF_NUCLEO_SPAWN && role == KOF_FLOW_ROLE_CLONE)
+		return (arg[0] & FLOW_CLONE_THREAD) ? KOF_NUCLEO_THREAD
+						    : KOF_NUCLEO_SPAWN;
+	if (arg && cap == KOF_NUCLEO_NET_OPEN && role == KOF_FLOW_ROLE_SOCK)
+		return sock_kind(arg, flags);
+	if (arg && cap == KOF_NUCLEO_ALLOC && role == KOF_FLOW_ROLE_MMAP &&
+	    (arg[fx->prot_arg] & 4u)) {         /* PROT_EXEC */
+		if (flags && (arg[fx->prot_arg] & 2u))
+			*flags = KOF_FLOWF_WX;
+		return KOF_NUCLEO_ALLOC_EXEC;
+	}
+	return cap;
+}
+
+const char *kof_sys_name_abi(const struct fxabi *fx, uint32_t nr)
+{
+	const char *nm;
+	uint8_t role;
+
+	fx_look(fx, nr, &role, &nm);
+	return nm;
+}
+
 uint16_t kof_flow_cap_of_name(const char *sym)
 {
 	size_t i;
@@ -1941,10 +2009,10 @@ static const struct fxabi FX_MIPS64 = {
 	FXN(sys_mips64), NULL, 0, 0, 2, 2, 4, 4, 2
 };
 static const struct fxabi FX_ARM = {
-	FXN(sys_arm),  NULL, 0, 0, 7, 0, 0, 7, 2
+	FXN(sys_arm),  NULL, 0, 0, 7, 0, 0, 6, 2
 };
 static const struct fxabi FX_A64 = {
-	FXN(sys_a64),  NULL, 0, 0, 8, 0, 0, 8, 2
+	FXN(sys_a64),  NULL, 0, 0, 8, 0, 0, 6, 2
 };
 /*
  * PowerPC: r0 carries the number, r3 the result and the first argument -

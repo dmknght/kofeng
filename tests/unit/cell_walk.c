@@ -1,6 +1,6 @@
 /*
- * kdis_walk - decoding code without running it, which is what a rule against a
- * polymorphic decryptor has to be written on. See kofmod/kdis.h.
+ * cell_walk - decoding code without running it, which is what a rule against a
+ * polymorphic decryptor has to be written on. See kofmod/cell.h.
  *
  * WHAT IS ASSERTED, and each is something such a rule depends on:
  *
@@ -34,7 +34,18 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/pe.h"
-#include "../../libkofeng/analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
+#include "../../libkofeng/analyzers/nucleo/space.h"
+
+/* The cursor takes an address space; the engine builds one from the object. */
+static int nx(struct kof_cell_cur *k, const struct kof_obj_ctx *ctx,
+	      const uint8_t *buf, uint64_t n, struct cell_insn *in)
+{
+	struct cell_space sp;
+
+	kof_cell_space_init(&sp, ctx, buf, n);
+	return kof_cell_next(k, &sp, in);
+}
 
 static int failures;
 
@@ -64,15 +75,15 @@ int main(void)
 		0xC3                             /* ret                1 */
 	};
 	static const struct { uint8_t op; uint8_t len; } want[] = {
-		{ KDIS_CALL, 5 }, { KDIS_POP, 1 }, { KDIS_SUB, 6 },
-		{ KDIS_MOV, 5 },  { KDIS_ADD, 6 }, { KDIS_MOV, 2 },
-		{ KDIS_XOR, 3 },  { KDIS_JMP, 2 }
+		{ CELL_CALL, 5 }, { CELL_POP, 1 }, { CELL_SUB, 6 },
+		{ CELL_MOV, 5 },  { CELL_ADD, 6 }, { CELL_MOV, 2 },
+		{ CELL_XOR, 3 },  { CELL_JMP, 2 }
 	};
 	uint8_t buf[0x800];
 	struct kof_pe_info pe;
 	struct kof_obj_ctx ctx;
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_insn in;
 	uint64_t v;
 	unsigned i;
 
@@ -96,11 +107,11 @@ int main(void)
 	ctx.obj_size = sizeof buf;
 
 	memset(&k, 0, sizeof k);
-	if (!kof_kdis_seek(&k, CODE_OFF, 0))
+	if (!kof_cell_seek(&k, CODE_OFF, 0))
 		fail("seek");
 
 	for (i = 0; i < sizeof want / sizeof want[0]; i++) {
-		if (!kof_kdis_next(&k, &ctx, buf, sizeof buf, &in)) {
+		if (!nx(&k, &ctx, buf, sizeof buf, &in)) {
 			fail("the walk stopped early");
 			break;
 		}
@@ -119,29 +130,29 @@ int main(void)
 				fail("call $+5 did not resolve its address");
 			break;
 		case 2:
-			if (in.n_op != 2u || in.o[0].kind != KDIS_O_REG ||
-			    in.o[0].reg != KDIS_REG_BP ||
-			    in.o[1].kind != KDIS_O_IMM ||
+			if (in.n_op != 2u || in.o[0].kind != CELL_O_REG ||
+			    in.o[0].reg != CELL_REG_BP ||
+			    in.o[1].kind != CELL_O_IMM ||
 			    in.o[1].imm != 0x401005u)
 				fail("sub ebp, 0x401005 came apart wrongly");
 			break;
 		case 4:
 			/* mov edi,0x20c then add edi,0x100 - the whole point
 			 * of the map is that the second is still known. */
-			if (!kof_kdis_reg(&k, KDIS_REG_DI, &v) || v != 0x30cu)
+			if (!kof_cell_reg(&k, CELL_REG_DI, &v) || v != 0x30cu)
 				fail("edi was not tracked through the add");
 			break;
 		case 5:
-			if (kof_kdis_reg(&k, KDIS_REG_AX, &v))
+			if (kof_cell_reg(&k, CELL_REG_AX, &v))
 				fail("eax was claimed known after a load from memory");
 			break;
 		case 6:
-			if (in.o[0].kind != KDIS_O_MEM ||
-			    in.o[0].reg != KDIS_REG_SI ||
-			    in.o[0].index != KDIS_REG_CX ||
+			if (in.o[0].kind != CELL_O_MEM ||
+			    in.o[0].reg != CELL_REG_SI ||
+			    in.o[0].index != CELL_REG_CX ||
 			    in.o[0].scale != 4u ||
-			    in.o[1].kind != KDIS_O_REG ||
-			    in.o[1].reg != KDIS_REG_BX)
+			    in.o[1].kind != CELL_O_REG ||
+			    in.o[1].reg != CELL_REG_BX)
 				fail("xor [esi+ecx*4], ebx came apart wrongly");
 			break;
 		case 7:
@@ -158,24 +169,24 @@ int main(void)
 	 * makes to step over a generator's junk, and edi has to survive it -
 	 * that is what `keep` is for.
 	 */
-	if (!kof_kdis_seek(&k, CODE_OFF + 32u, 1))
+	if (!kof_cell_seek(&k, CODE_OFF + 32u, 1))
 		fail("seek to the branch target");
-	if (!kof_kdis_reg(&k, KDIS_REG_DI, &v) || v != 0x30cu)
+	if (!kof_cell_reg(&k, CELL_REG_DI, &v) || v != 0x30cu)
 		fail("the constant map was lost across a kept seek");
-	if (!kof_kdis_next(&k, &ctx, buf, sizeof buf, &in) || in.op != KDIS_JMP)
+	if (!nx(&k, &ctx, buf, sizeof buf, &in) || in.op != CELL_JMP)
 		fail("the instruction at the branch target is not the jmp");
 	else if (in.target != KOF_BROKEN)
 		fail("jmp eax was given a target it cannot have");
-	if (!kof_kdis_next(&k, &ctx, buf, sizeof buf, &in) || in.op != KDIS_RET)
+	if (!nx(&k, &ctx, buf, sizeof buf, &in) || in.op != CELL_RET)
 		fail("ret");
 
 	/* And a seek that does NOT keep clears it. */
-	if (!kof_kdis_seek(&k, CODE_OFF, 0))
+	if (!kof_cell_seek(&k, CODE_OFF, 0))
 		fail("reseek");
-	if (kof_kdis_reg(&k, KDIS_REG_DI, &v))
+	if (kof_cell_reg(&k, CELL_REG_DI, &v))
 		fail("a fresh walk started with a register already known");
 
-	printf("kdis walk: lengths, classes, operands, a resolved branch, an"
+	printf("cell walk: lengths, classes, operands, a resolved branch, an"
 	       " unresolved one, the constant map - %s\n",
 	       failures ? "FAILED" : "ok");
 	return failures != 0;

@@ -152,7 +152,7 @@ LDFLAGS += -pthread -lm
 # rather than to keep getting away with.
 override CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
-           -fno-common -Ilibkofeng/kofcore
+           -fno-common -Ilibkofeng/kofcore -Ilibgenome
 
 # A second tier of warnings, probed rather than assumed.
 #
@@ -936,7 +936,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/events/amsi_parse.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
            libkofeng/analyzers/nucleo/nucleo.c \
-           libkofeng/analyzers/nucleo/kdis.c \
+           libkofeng/analyzers/nucleo/space.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_sym.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_parse.c \
            libkofeng/analyzers/parsers/binaries/pe/clr_parse.c \
@@ -1062,6 +1062,34 @@ $(INT)/gt_%.o: libgenome/genotype/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
+#
+# celllysis: reading code without running it, on top of what genotype decodes.
+# Public API is libgenome/celllysis/celllysis.h; the engine reaches it through
+# -Ilibgenome (`<celllysis/celllysis.h>`) and supplies the object's address space
+# itself (libkofeng/analyzers/nucleo/space.c), so nothing here includes a parser.
+CL_SRC := $(wildcard libgenome/celllysis/*.c)
+CL_OBJ := $(patsubst libgenome/celllysis/%.c,$(INT)/cl_%.o,$(CL_SRC))
+
+$(INT)/cl_%.o: libgenome/celllysis/%.c $(STAMP) | $(INT)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
+
+# THE ORACLE FOR THE ARM DECODERS IS NOT IN THIS TREE EITHER: Capstone, used on a
+# developer's machine to check libgenome/celllysis/decode_{a32,t32,a64}.c. Pass
+# the header directory and the static library; match the two (a v5 header with a
+# v6 library crashes).
+uc = $(shell echo $(1) | tr a-z A-Z)
+CS_INC ?=
+CS_LIB ?=
+CS_ARM_SRC := libgenome/celllysis/decode_a32.c libgenome/celllysis/decode_t32.c \
+              libgenome/celllysis/decode_arm_common.c
+CS_A64_SRC := libgenome/celllysis/decode_a64.c
+.PHONY: celllysis-arm-diff celllysis-a64-diff
+celllysis-arm-diff celllysis-a64-diff: celllysis-%-diff:
+	@test -n "$(CS_INC)" -a -n "$(CS_LIB)" || { echo "pass CS_INC=<capstone include dir> CS_LIB=<libcapstone.a>"; exit 1; }
+	@$(call MKDIR,$(TEST))
+	$(CC) -O2 -std=gnu11 -pthread -Ilibkofeng/kofcore -Ilibgenome -I$(CS_INC) tools/celllysis/$*_diff.c $(CS_$(call uc,$*)_SRC) $(CS_LIB) -o $(TEST)/$*_diff$(EXE)
+
 # THE REFERENCE DECODER IS NOT IN THIS TREE. The x86 tables were produced by
 # running tools/genotype/x86_gen.c against a reference decoder, and the checked-in
 # tables are the product; nothing here links the reference. Re-running the
@@ -1103,7 +1131,7 @@ $(INT)/emu_%.o: libgenome/phenotype/%.c $(STAMP) | $(INT)
 # built from empty every time. It costs one unlink; ar then writes the same
 # members it was going to write anyway.
 #
-$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ)
+$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ) $(CL_OBJ)
 	@$(call MKDIR,$(dir $@))
 	@$(call RM,$@)
 	$(AR) rcs $@ $^
@@ -1122,7 +1150,7 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ)
 
 SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/kofsig.h \
-           $(SDK)/include/kofmod/kdis.h \
+           $(SDK)/include/kofmod/cell.h \
            $(SDK)/include/kofmod/infected.h \
            $(SDK)/include/kofmod/kofcure.h \
            $(SDK)/include/kofmod/kofplague.h \
@@ -2526,7 +2554,7 @@ $(BUILD)/%.d: ;
 # a shell glob would need a shell that globs - which PowerShell, for a native
 # command, does not.
 asan_obj = $(TEST)/asan-obj/$(subst /,_,$(1:.c=.o))
-ASAN_OBJ := $(foreach f,$(LIB_SRC) $(EMU_SRC) $(GT_SRC),$(call asan_obj,$(f)))
+ASAN_OBJ := $(foreach f,$(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC),$(call asan_obj,$(f)))
 
 # A literal newline, so $(foreach) can put each command on its own recipe line
 # - which is what makes make run them one at a time and stop at the first that
@@ -2542,7 +2570,7 @@ endef
 # payload snapshots - so leaving it out would exempt exactly what most needs
 # checking.
 #
-$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(SDK_HDR) | $(TEST)
+$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC) $(SDK_HDR) | $(TEST)
 	@$(call RMRF,$(TEST)/asan-obj)
 	@$(call MKDIR,$(TEST)/asan-obj)
 	@# EMU_INC on every loop: libkofeng's own sources include the decoder's
@@ -2552,6 +2580,8 @@ $(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(SDK_HDR) | $(TEST)
 	@$(foreach f,$(EMU_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(GT_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
+		-c $(f) -o $(call asan_obj,$(f))$(NL))
+	@$(foreach f,$(CL_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(call RM,$@)
 	@$(AR) rcs $@ $(ASAN_OBJ)

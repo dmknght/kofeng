@@ -11,7 +11,7 @@
  * against the same corpus. A fifth architecture meant a fifth copy of the
  * sweep, not a fifth decoder.
  *
- * The form itself is kofmod/kdis.h's, which a signature module already
+ * The form itself is kofmod/cell.h's, which a signature module already
  * reads. One form, not two: a rule and the engine see the same instruction
  * the same way, and nothing has to be translated between them.
  *
@@ -21,18 +21,19 @@
  * Text belongs to whatever draws a screen, and drawing is not what this
  * layer is for.
  *
- * WHAT A DECODER PROMISES. `op` is never left at KDIS_OTHER when the class
+ * WHAT A DECODER PROMISES. `op` is never left at CELL_OTHER when the class
  * is one the vocabulary has, `len` is the real length, `wmask` names EVERY
  * register the instruction writes including the ones it does not spell, and
- * an operand that is absent is KDIS_O_NONE rather than zeroed. A decoder
+ * an operand that is absent is CELL_O_NONE rather than zeroed. A decoder
  * that cannot answer says so by returning 0 - it does not guess a length.
  */
 #ifndef KOFENG_DISASM_DECODE_H
 #define KOFENG_DISASM_DECODE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
-#include <kofmod/kdis.h>
+#include <kofmod/cell.h>
 
 /*
  * REGISTERS ARE AN INDEX AND THE ARCHITECTURE SAYS WHAT IT MEANS.
@@ -43,12 +44,12 @@
  * compare two operands, so what matters is that one decoder is consistent
  * with itself, not that two architectures agree.
  */
-#define KDIS_NREG 32u
+#define CELL_NREG 32u
 
-/* Which special register a KDIS_MOV_SPECIAL touches, carried in `cond`. */
-#define KDIS_SR_CR 0u
-#define KDIS_SR_DR 1u
-#define KDIS_SR_TR 2u
+/* Which special register a CELL_MOV_SPECIAL touches, carried in `cond`. */
+#define CELL_SR_CR 0u
+#define CELL_SR_DR 1u
+#define CELL_SR_TR 2u
 
 /*
  * THE LAST FEW INSTRUCTIONS, KEPT.
@@ -73,30 +74,30 @@
  * further away than any compiler puts it. The sweep fills it as it goes,
  * so nothing is decoded twice.
  */
-#define KDIS_WINDOW 8u
+#define CELL_WINDOW 8u
 
-struct kdis_window {
-	struct kdis_insn in[KDIS_WINDOW];
-	uint32_t n;             /* how many are valid, at most KDIS_WINDOW */
+struct cell_window {
+	struct cell_insn in[CELL_WINDOW];
+	uint32_t n;             /* how many are valid, at most CELL_WINDOW */
 	uint32_t head;          /* where the NEXT one goes */
 };
 
-static inline void kdis_window_put(struct kdis_window *w,
-				   const struct kdis_insn *ins)
+static inline void cell_window_put(struct cell_window *w,
+				   const struct cell_insn *ins)
 {
 	w->in[w->head] = *ins;
-	w->head = (w->head + 1u) % KDIS_WINDOW;
-	if (w->n < KDIS_WINDOW)
+	w->head = (w->head + 1u) % CELL_WINDOW;
+	if (w->n < CELL_WINDOW)
 		w->n++;
 }
 
 /* The i-th most recent, 0 being the one just put in. NULL past the end. */
-static inline const struct kdis_insn *kdis_window_back(
-			const struct kdis_window *w, uint32_t i)
+static inline const struct cell_insn *cell_window_back(
+			const struct cell_window *w, uint32_t i)
 {
 	if (i >= w->n)
 		return NULL;
-	return &w->in[(w->head + KDIS_WINDOW - 1u - i) % KDIS_WINDOW];
+	return &w->in[(w->head + CELL_WINDOW - 1u - i) % CELL_WINDOW];
 }
 
 /*
@@ -106,15 +107,15 @@ static inline const struct kdis_insn *kdis_window_back(
  * has to read the answer: a `mov reg, imm` gives the value outright, a
  * `mov reg, reg` only moves the question along.
  */
-static inline const struct kdis_insn *kdis_window_wrote(
-			const struct kdis_window *w, uint32_t reg)
+static inline const struct cell_insn *cell_window_wrote(
+			const struct cell_window *w, uint32_t reg)
 {
 	uint32_t i;
 
 	if (reg >= 64u)
 		return NULL;
 	for (i = 0; i < w->n; i++) {
-		const struct kdis_insn *k = kdis_window_back(w, i);
+		const struct cell_insn *k = cell_window_back(w, i);
 
 		if (k->wmask & (1ull << reg))
 			return k;
@@ -128,11 +129,38 @@ static inline const struct kdis_insn *kdis_window_wrote(
  * `va` is the address the instruction would run at, which the decoder needs
  * for a relative branch and for rip-relative addressing.
  */
-uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
-			unsigned bits, struct kdis_insn *out);
+uint32_t cell_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
+			unsigned bits, struct cell_insn *out);
 
+/*
+ * THE ONE WAY IN: the decoder for `arch` (KOF_ARCH_*), chosen here and nowhere
+ * else. `be` is big-endian code and `va` the address the instruction runs at.
+ * 0 when the bytes are not an instruction or `n` is too short.
+ */
+uint32_t cell_decode(unsigned arch, int be, const uint8_t *p, uint32_t n,
+		     uint64_t va, struct cell_insn *out);
+
+/* The decoders themselves, for a caller that already knows which it wants
+ * (tests, tools, and the ISA a cursor cannot tell: Thumb). */
 /* `be` is big-endian; MIPS ships both ways and bots use both. */
-uint32_t kof_decode_mips(const uint8_t *p, uint32_t n, uint64_t va,
-			 int be, struct kdis_insn *out);
+uint32_t cell_decode_mips(const uint8_t *p, uint32_t n, uint64_t va,
+			 int be, struct cell_insn *out);
+
+/*
+ * ARM. Registers are r0..r15 as 0..15 (sp 13, lr 14, pc 15) in wmask.
+ *
+ * `be` is big-endian: ARM-BE bots exist. cell_decode_a32 reads one 4-byte A32
+ * word; cell_decode_t32 reads Thumb and returns 2 or 4, the real length of the
+ * instruction at p (the caller knows from the ELF mapping symbols or the
+ * low bit of a branch target that the code is Thumb).
+ */
+uint32_t cell_decode_a32(const uint8_t *p, uint32_t n, uint64_t va,
+			int be, struct cell_insn *out);
+uint32_t cell_decode_t32(const uint8_t *p, uint32_t n, uint64_t va,
+			int be, struct cell_insn *out);
+
+/* AArch64: x0..x30 as 0..30, sp as 31 (wmask bit 31). Always little-endian. */
+uint32_t cell_decode_a64(const uint8_t *p, uint32_t n, uint64_t va,
+			struct cell_insn *out);
 
 #endif /* KOFENG_DISASM_DECODE_H */

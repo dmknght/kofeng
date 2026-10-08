@@ -34,14 +34,15 @@
 #include "../../kofcore/kofmod/kofcap.h"
 #include "../../kofcore/kofmod/kofsym.h"
 #include "../../kofcore/kofmod/pe.h"
-#include "../../kofcore/kofmod/kdis.h"
+#include "../../kofcore/kofmod/cell.h"
 #include "../../analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../../analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
 #include "../../disinfect/pzero.h"
 #include "../../extractors/unpack/emu_unpack.h"
 #include "../../../libgenome/phenotype/kofemu.h"
+#include "../../analyzers/nucleo/space.h"
 
 /*
  * ---- DOES THE PROGRAM READ THE LOADER DATA ---------------------------------
@@ -101,15 +102,15 @@ static void note_peb(struct kof_apihash *a, uint64_t at)
  * follows another legacy prefix (`66 65 ..`, `67 65 ..`) starts at the other
  * prefix and is decoded from the override, which loses the first.
  */
-static int is_peb_read(const struct kdis_insn *in, int wide)
+static int is_peb_read(const struct cell_insn *in, int wide)
 {
 	unsigned q;
 
 	for (q = 0; q < in->n_op; q++) {
-		const struct kdis_operand *o = &in->o[q];
+		const struct cell_operand *o = &in->o[q];
 
-		if (o->kind == KDIS_O_MEM &&
-		    o->seg == (wide ? KDIS_SEG_GS : KDIS_SEG_FS) &&
+		if (o->kind == CELL_O_MEM &&
+		    o->seg == (wide ? CELL_SEG_GS : CELL_SEG_FS) &&
 		    o->disp == (wide ? 0x60 : 0x30))
 			return 1;
 	}
@@ -122,23 +123,26 @@ static void atoms_in(struct kof_apihash *a, const struct kof_obj_ctx *ctx,
 {
 	const uint8_t seg = wide ? 0x65u : 0x64u;
 	uint64_t pos = off, end = off + n;
+	struct cell_space sp;
+
+	kof_cell_space_init(&sp, ctx, base, size);
 
 	while (pos < end) {
 		const uint8_t *hit = memchr(base + pos, seg, end - pos);
-		struct kof_kdis k;
-		struct kdis_insn in;
+		struct kof_cell_cur k;
+		struct cell_insn in;
 
 		if (!hit)
 			break;
 		pos = (uint64_t)(hit - base) + 1u;
 		memset(&k, 0, sizeof k);
-		if (!kof_kdis_seek(&k, (uint64_t)(hit - base), 0) ||
-		    !kof_kdis_next(&k, ctx, base, size, &in) ||
+		if (!kof_cell_seek(&k, (uint64_t)(hit - base), 0) ||
+		    !kof_cell_next(&k, &sp, &in) ||
 		    !is_peb_read(&in, wide))
 			continue;
 		/* THE LOADER DATA ITSELF, a few instructions later: a load through
 		 * the register the PEB went to, at the offset of PEB.Ldr. */
-		if (in.n_op && in.o[0].kind == KDIS_O_REG) {
+		if (in.n_op && in.o[0].kind == CELL_O_REG) {
 			int reg = in.o[0].reg;
 			uint64_t at = in.at;
 			unsigned ttl;
@@ -146,12 +150,12 @@ static void atoms_in(struct kof_apihash *a, const struct kof_obj_ctx *ctx,
 			for (ttl = 0; ttl < PEB_TTL && k.at < end; ttl++) {
 				unsigned q;
 
-				if (!kof_kdis_next(&k, ctx, base, size, &in))
+				if (!kof_cell_next(&k, &sp, &in))
 					break;
 				for (q = 0; q < in.n_op; q++) {
-					const struct kdis_operand *o = &in.o[q];
+					const struct cell_operand *o = &in.o[q];
 
-					if (o->kind == KDIS_O_MEM &&
+					if (o->kind == CELL_O_MEM &&
 					    (int)o->reg == reg &&
 					    o->disp == (wide ? 0x18 : 0x0c)) {
 						a->n_ldr++;

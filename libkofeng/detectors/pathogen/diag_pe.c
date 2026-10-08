@@ -41,10 +41,11 @@
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/kofcap.h"
 #include "../../kofcore/kofmod/pe.h"
-#include "../../kofcore/kofmod/kdis.h"
+#include "../../kofcore/kofmod/cell.h"
 #include "../../analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../analyzers/nucleo/kdis.h"
+#include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
+#include "../../analyzers/nucleo/space.h"
 
 struct pe_imp {
 	uint64_t slot;          /* the address a call goes through            */
@@ -105,6 +106,8 @@ static const struct pe_imp *imp_find(const struct pe_acc *a, uint64_t slot)
 {
 	struct pe_imp key;
 
+	if (!a->n)              /* bsearch's base is nonnull, and here it is NULL */
+		return NULL;
 	key.slot = slot;
 	return bsearch(&key, a->v, a->n, sizeof *a->v, imp_by_slot);
 }
@@ -115,16 +118,16 @@ static const struct pe_imp *imp_find(const struct pe_acc *a, uint64_t slot)
  * Anything with a base or index register is a table lookup or a vtable call and
  * is not an import.
  */
-static uint64_t slot_of(const struct kdis_insn *in, int wide)
+static uint64_t slot_of(const struct cell_insn *in, int wide)
 {
-	const struct kdis_operand *o = &in->o[0];
+	const struct cell_operand *o = &in->o[0];
 
-	if (o->flags & KDIS_OF_RIPREL) {
+	if (o->flags & CELL_OF_RIPREL) {
 		if (in->at_va == KOF_BROKEN)
 			return KOF_BROKEN;
 		return in->at_va + in->len + (uint64_t)o->disp;
 	}
-	if (o->reg == KDIS_REG_NONE && o->index == KDIS_REG_NONE)
+	if (o->reg == CELL_REG_NONE && o->index == CELL_REG_NONE)
 		return wide ? (uint64_t)o->disp : (uint64_t)o->disp & 0xffffffffu;
 	return KOF_BROKEN;
 }
@@ -168,16 +171,18 @@ static void walk_code(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		      const uint8_t *base, uint64_t size, uint64_t off,
 		      uint64_t n, int wide, struct pe_walk *w)
 {
-	struct kof_kdis k;
-	struct kdis_insn in;
+	struct kof_cell_cur k;
+	struct cell_space sp;
+	struct cell_insn in;
 
+	kof_cell_space_init(&sp, ctx, base, size);
 	memset(&k, 0, sizeof k);
-	if (!kof_kdis_seek(&k, off, 0))
+	if (!kof_cell_seek(&k, off, 0))
 		return;
 	while (k.at < off + n) {
 		/*
 		 * A BYTE THE DECODER CANNOT READ IS STEPPED OVER, NOT THE END.
-		 * kof_kdis_next answers zero and leaves the cursor where it was, so
+		 * kof_cell_next answers zero and leaves the cursor where it was, so
 		 * a loop that treats zero as "finished" stops at the first piece of
 		 * data inside the code: MEASURED on a 180 KB MSVC .text, it stopped
 		 * at offset 0x583c, a switch jump table of 32-bit offsets, with
@@ -187,13 +192,13 @@ static void walk_code(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 		 * wrong decode costs nothing here: a node needs the operand to be
 		 * the address of an import slot, exactly.
 		 */
-		if (!kof_kdis_next(&k, ctx, base, size, &in)) {
+		if (!kof_cell_next(&k, &sp, &in)) {
 			k.at++;
 			continue;
 		}
-		if ((in.op == KDIS_CALL || in.op == KDIS_JMP) &&
-		    (in.flags & KDIS_F_INDIRECT) && in.n_op &&
-		    in.o[0].kind == KDIS_O_MEM) {
+		if ((in.op == CELL_CALL || in.op == CELL_JMP) &&
+		    (in.flags & CELL_F_INDIRECT) && in.n_op &&
+		    in.o[0].kind == CELL_O_MEM) {
 			uint64_t slot = slot_of(&in, wide);
 			const struct pe_imp *im;
 
@@ -202,7 +207,7 @@ static void walk_code(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 			im = imp_find(&w->imp, slot);
 			if (!im)
 				continue;
-			if (in.op == KDIS_CALL) {
+			if (in.op == CELL_CALL) {
 				add_node(s, in.at, im);
 			} else if (in.at_va != KOF_BROKEN &&
 				   grow((void **)&w->thunk, &w->cap_thunk,
@@ -212,7 +217,7 @@ static void walk_code(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 				*t = *im;
 				t->slot = in.at_va;     /* the stub's own address */
 			}
-		} else if (in.op == KDIS_CALL && !(in.flags & KDIS_F_INDIRECT) &&
+		} else if (in.op == CELL_CALL && !(in.flags & CELL_F_INDIRECT) &&
 			   in.target_va != KOF_BROKEN &&
 			   grow((void **)&w->call, &w->cap_call, w->n_call,
 				sizeof *w->call)) {
