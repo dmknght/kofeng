@@ -309,7 +309,9 @@ static inline enum gt_status decode_core(struct gt_x86_insn *I, const uint8_t *p
 						return GT_INVALID;
 					sp = SPACE_XOP;
 				} else {
-					if (map < 1 || map > 3)
+					/* Map 5 is the AMX tile instructions; the table
+					 * has them for 64-bit mode only. */
+					if (map < 1 || (map > 3 && map != 5))
 						return GT_INVALID;
 					sp = SPACE_VEX;
 				}
@@ -361,8 +363,8 @@ ext_done:
 		asel = ((flags & GF_X86_67) ? 1u : 0u) | ((rex & 1u) ? 2u : 0u);
 		rmap = map;
 	} else {
-		rmap = sp == SPACE_VEX ? 4u + map - 1u : sp == SPACE_XOP ? 7u + map - 8u
-								      : 10u + map - 1u;
+		rmap = sp == SPACE_VEX ? (map == 5u ? 17u : 4u + map - 1u)
+		     : sp == SPACE_XOP ? 7u + map - 8u : 10u + map - 1u;
 	}
 	I->mo = (uint8_t)i;
 

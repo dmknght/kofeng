@@ -1,12 +1,12 @@
 /*
- * decode_a64 - the AArch64 decoder, against what the instruction set says.
+ * decode_arm64 - the AArch64 decoder, against what the instruction set says.
  *
  * Every encoding below was assembled by hand from the A64 encoding diagrams
  * (the field layout is written beside it) or is the well-known compiler
  * output for that instruction, and says what it IS. Nothing here is a
  * transcript of another decoder's answer: the second check - a differential
  * run over random, systematic and real code against a reference decoder - lives
- * in tools/celllysis/a64_diff.c, needs that reference, and cannot catch a bug
+ * in tools/celllysis/arm64_diff.c, needs that reference, and cannot catch a bug
  * both decoders share. This can.
  *
  * What is asserted for each: the class, every register written (wmask - the
@@ -37,7 +37,7 @@ static uint32_t dec(uint32_t w, uint64_t va, struct cell_insn *k)
 	uint8_t b[4] = { (uint8_t)w, (uint8_t)(w >> 8), (uint8_t)(w >> 16),
 			 (uint8_t)(w >> 24) };
 
-	return cell_decode_a64(b, 4, va, k);
+	return cell_decode_arm64(b, 4, va, k);
 }
 
 struct tc {
@@ -485,17 +485,17 @@ static void lengths(void)
 	static const uint8_t b[8] = { 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5 };
 
 	printf("lengths:\n");
-	ok("fewer than four bytes is 0", cell_decode_a64(b, 3, 0, &k) == 0);
-	ok("no bytes is 0", cell_decode_a64(b, 0, 0, &k) == 0);
-	ok("a null pointer is 0", cell_decode_a64(NULL, 4, 0, &k) == 0);
-	ok("four bytes is 4", cell_decode_a64(b, 4, 0, &k) == 4);
-	ok("more than four bytes still decodes one instruction of 4", cell_decode_a64(b, 8, 0, &k) == 4 && k.len == 4);
-	ok("at and at_va are the address given", (cell_decode_a64(b, 4, 0x1234, &k), k.at == 0x1234 && k.at_va == 0x1234));
+	ok("fewer than four bytes is 0", cell_decode_arm64(b, 3, 0, &k) == 0);
+	ok("no bytes is 0", cell_decode_arm64(b, 0, 0, &k) == 0);
+	ok("a null pointer is 0", cell_decode_arm64(NULL, 4, 0, &k) == 0);
+	ok("four bytes is 4", cell_decode_arm64(b, 4, 0, &k) == 4);
+	ok("more than four bytes still decodes one instruction of 4", cell_decode_arm64(b, 8, 0, &k) == 4 && k.len == 4);
+	ok("at and at_va are the address given", (cell_decode_arm64(b, 4, 0x1234, &k), k.at == 0x1234 && k.at_va == 0x1234));
 }
 
 int main(void)
 {
-	printf("decode a64:\n");
+	printf("decode arm64:\n");
 	table();
 	movs();
 	addresses();
@@ -505,6 +505,6 @@ int main(void)
 	system();
 	sve();
 	lengths();
-	printf("decode a64: %s\n", failures ? "FAILED" : "ok");
+	printf("decode arm64: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

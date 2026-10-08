@@ -1,16 +1,24 @@
 /*
- * arm_diff - the ARM decoders (cell_decode_a32, cell_decode_t32) against an oracle.
+ * arm32_diff - the ARM state and Thumb state decoders (cell_decode_arm32, cell_decode_thumb) against
+ * an oracle.
  *
  * A DEV TOOL, NOT A TEST: the oracle is Capstone, which this tree does not
- * ship. Built with
+ * ship. Built by hand, until the Makefile's celllysis-arm-diff names the new
+ * file set (the decoders are now genotype's tables plus the celllysis adapters):
  *
- *   make celllysis-arm-diff CS_INC=<capstone include dir> CS_LIB=<libcapstone.a>
+ *   gcc -O2 -std=gnu11 -pthread -Ilibkofeng/kofcore -Ilibgenome -Ilibgenome/genotype \
+ *       -I<capstone include dir> tools/celllysis/arm32_diff.c \
+ *       libgenome/celllysis/decode_arm32.c libgenome/celllysis/decode_thumb.c \
+ *       libgenome/celllysis/decode_arm32_common.c \
+ *       libgenome/genotype/arm32/arm32_rows.c libgenome/genotype/arm32/thumb_rows.c \
+ *       libgenome/genotype/arm32/arm32_index.c \
+ *       <libcapstone.a> -o arm32_diff
  *
- *   arm_diff a32|t32 rand <millions> [seed]     uniformly random words
- *   arm_diff a32|t32 sys  [fills]               systematic: every opcode field
- *   arm_diff a32|t32 elf  <file>...             every aligned word / halfword
+ *   arm32_diff arm32|thumb rand <millions> [seed]     uniformly random words
+ *   arm32_diff arm32|thumb sys  [fills]               systematic: every opcode field
+ *   arm32_diff arm32|thumb elf  <file>...             every aligned word / halfword
  *                                               of the executable code
- *   arm_diff a32|t32 bench <file>...            decode speed, no oracle: ns per
+ *   arm32_diff arm32|thumb bench <file>...            decode speed, no oracle: ns per
  *                                               instruction over .text, walked the
  *                                               way a sweep walks it (Thumb steps
  *                                               by the length it was told)
@@ -352,7 +360,7 @@ static int wgap(const cs_insn *in, uint32_t ow, uint32_t cw)
 
 	if (in->id == ARM_INS_SVC)
 		return !extra && miss == (1u << 14);
-	/* Thumb branches carry no pc in the oracle's list; A32's do */
+	/* Thumb branches carry no pc in the oracle's list; ARM state's do */
 	if ((in->id == ARM_INS_B || in->id == ARM_INS_BL || in->id == ARM_INS_BLX ||
 	     in->id == ARM_INS_BX || in->id == ARM_INS_BXJ || in->id == ARM_INS_CBZ ||
 	     in->id == ARM_INS_CBNZ || in->id == ARM_INS_BXNS ||
@@ -485,7 +493,7 @@ static unsigned acc_size(unsigned id)
 /*
  * Does the oracle accept this word once the fields the manual says "should be
  * zero" / "should be one" hold those values? Four nibbles are tried, each as
- * it is, 0 and 0xF: A32 bits 3:0, 11:8, 15:12 and 19:16; Thumb-2 the second
+ * it is, 0 and 0xF: ARM state bits 3:0, 11:8, 15:12 and 19:16; Thumb-2 the second
  * halfword's 3:0, 11:8 and 15:12 and the first's 3:0. A word the oracle refuses
  * only because such a field is wrong is UNPREDICTABLE in the ARM ARM, not
  * undefined, and is counted apart.
@@ -494,12 +502,12 @@ static int sbz_fixable(struct th *t, uint32_t w0, uint32_t w1, uint64_t va,
 		       unsigned our_op)
 {
 	/*
-	 * The nibbles tried. A32's bits 7:4 are opcode bits and are left alone;
+	 * The nibbles tried. ARM state's bits 7:4 are opcode bits and are left alone;
 	 * Thumb's second-halfword 7:4 and first-halfword 7:4 are not.
 	 */
-	static const unsigned a32_sh[4] = { 0, 8, 12, 16 };
-	static const unsigned t32_sh[7] = { 0, 4, 8, 12, 16, 20, 24 };
-	const unsigned *sh = t->thumb ? t32_sh : a32_sh;
+	static const unsigned arm32_sh[4] = { 0, 8, 12, 16 };
+	static const unsigned thumb_sh[7] = { 0, 4, 8, 12, 16, 20, 24 };
+	const unsigned *sh = t->thumb ? thumb_sh : arm32_sh;
 	unsigned nsh = t->thumb ? 7u : 4u, total = 1, c, f, v;
 	uint32_t word = t->thumb ? ((w0 & 0xffffu) << 16 | (w1 & 0xffffu)) : w0;
 
@@ -536,11 +544,11 @@ static int sbz_fixable(struct th *t, uint32_t w0, uint32_t w1, uint64_t va,
 		if (t->thumb) {
 			b[0] = (uint8_t)(x >> 16); b[1] = (uint8_t)(x >> 24);
 			b[2] = (uint8_t)x; b[3] = (uint8_t)(x >> 8);
-			(void)cell_decode_t32(b, 4, va, 0, &k);
+			(void)cell_decode_thumb(b, 4, va, 0, &k);
 		} else {
 			b[0] = (uint8_t)x; b[1] = (uint8_t)(x >> 8);
 			b[2] = (uint8_t)(x >> 16); b[3] = (uint8_t)(x >> 24);
-			(void)cell_decode_a32(b, 4, va, 0, &k);
+			(void)cell_decode_arm32(b, 4, va, 0, &k);
 		}
 		/* the same instruction, not a neighbour that happens to decode */
 		if (k.op != our_op)
@@ -576,8 +584,8 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 		buf[2] = (uint8_t)w1; buf[3] = (uint8_t)(w1 >> 8);
 	}
 	s->total++;
-	n = t->thumb ? cell_decode_t32(buf, 4, va, 0, &k)
-		     : cell_decode_a32(buf, 4, va, 0, &k);
+	n = t->thumb ? cell_decode_thumb(buf, 4, va, 0, &k)
+		     : cell_decode_arm32(buf, 4, va, 0, &k);
 	ok = cs_disasm_iter(t->h, &cp, &sz, &addr, t->in) ? 1 : 0;
 	if (ok) {
 		snprintf(txt, sizeof txt, "%s %s", in->mnemonic, in->op_str);
@@ -590,7 +598,7 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 		int us_ud = (k.op == CELL_UD) || n == 0;
 		/*
 		 * WHERE THE WORD IS, so a category is a region of the encoding
-		 * space and not one example: A32 is cond==F, bits 27..20 and
+		 * space and not one example: ARM state is cond==F, bits 27..20 and
 		 * bits 7..4; Thumb is the first halfword's top twelve bits and
 		 * (for a 32-bit encoding) the second's top four.
 		 */
@@ -1028,11 +1036,12 @@ int main(int argc, char **argv)
 	int mode;
 
 	if (argc < 3) {
-		fprintf(stderr, "usage: arm_diff a32|t32 rand <M> [seed] | sys [fills] | elf <file>...\n");
+		fprintf(stderr, "usage: arm32_diff arm32|thumb rand <M> [seed] | sys [fills] | elf <file>...\n");
 		return 2;
 	}
-	thumb = !strncmp(argv[1], "t32", 3);
-	g_v8 = strlen(argv[1]) > 3 && !strcmp(argv[1] + 3, "v8");
+	thumb = !strncmp(argv[1], "thumb", 5);
+	/* "arm32v8" and "thumbv8" ask the oracle for ARMv8 */
+	g_v8 = strstr(argv[1], "v8") != NULL;
 	mode = !strcmp(argv[2], "rand") ? 0 : !strcmp(argv[2], "sys") ? 1 : 2;
 	if (!strcmp(argv[2], "bench")) {
 		int a;
@@ -1053,8 +1062,8 @@ int main(int argc, char **argv)
 			for (rep = 0; rep < 200; rep++) {
 				for (off = 0; off + 4 <= cn;) {
 					uint32_t n = thumb
-						? cell_decode_t32(code + off, 4, va + off, 0, &k)
-						: cell_decode_a32(code + off, 4, va + off, 0, &k);
+						? cell_decode_thumb(code + off, 4, va + off, 0, &k)
+						: cell_decode_arm32(code + off, 4, va + off, 0, &k);
 
 					sink += k.op + k.wmask + k.target_va;
 					insns++;
@@ -1067,7 +1076,7 @@ int main(int argc, char **argv)
 			free(code);
 		}
 		printf("%s: %" PRIu64 " instructions, %.3f s, %.2f ns/instruction (checksum %" PRIx64 ")\n",
-		       thumb ? "t32" : "a32", insns, secs, secs * 1e9 / (double)insns, sink);
+		       thumb ? "thumb" : "arm32", insns, secs, secs * 1e9 / (double)insns, sink);
 		return 0;
 	}
 	reg_init();

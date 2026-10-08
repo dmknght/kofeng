@@ -1,9 +1,15 @@
 /*
- * decode_arm.h - what cell_decode_a32 and cell_decode_t32 agree on.
+ * decode_arm32.h - what cell_decode_arm32 and cell_decode_thumb agree on.
  *
- * Two decoders, one convention. A consumer reads an A32 instruction and a
- * Thumb one the same way, so the way an operand is spelled lives here once and
- * not in two files that would drift (CLAUDE.md rule 2).
+ * THESE ARE ADAPTERS. Which instruction a word or a pair of halfwords IS, is
+ * genotype's (libgenome/genotype/arm32: gt_arm32_decode, gt_thumb_decode); the
+ * two decoders here turn its answer - an instruction name and the raw fields -
+ * into struct cell_insn: the class, the registers written, the operands in the
+ * convention below.
+ *
+ * Two adapters, one convention. A consumer reads an ARM state instruction and a
+ * Thumb state one the same way, so the way an operand is spelled lives here once
+ * and not in two files that would drift (CLAUDE.md rule 2).
  *
  * ---- THE CONVENTION, which a consumer has to know ------------------------
  *
@@ -12,7 +18,7 @@
  * compares write it and the mask does not say so.
  *
  * `cond` is the ARM condition field of the instruction as written, 0..14.
- * 0xE means "always" and is also what the unconditional space (A32 cond=0xF)
+ * 0xE means "always" and is also what the unconditional space (ARM state cond=0xF)
  * and every Thumb instruction that carries no condition report. A JCC has the
  * condition it branches on (cbz is EQ, cbnz is NE). A NON-branch with
  * cond != 0xE still decodes with its normal class and its normal wmask: its
@@ -24,10 +30,10 @@
  * decoder is stateless, and a caller that wants the condition of an
  * instruction inside the block has to carry the IT state itself.
  *
- * THE PC. Branch targets use the architectural rule - A32 pc+8, Thumb pc+4 -
+ * THE PC. Branch targets use the architectural rule - ARM state pc+8, Thumb state pc+4 -
  * and are stored in `target_va` AND `target` (the engine resolves `target`
  * to a file offset afterwards, as it does for MIPS). A target that is Thumb
- * code reached from A32 (blx imm) or A32 reached from Thumb (blx imm) is
+ * code reached from ARM state (blx imm) or ARM state reached from Thumb state (blx imm) is
  * stored with bit 0 CLEAR - the address of the instruction, not the
  * interworking address. An indirect branch has target = target_va = KOF_BROKEN
  * and CELL_F_INDIRECT.
@@ -38,7 +44,7 @@
  *
  *        literal address = at_va + disp
  *
- * so a consumer needs no knowledge of the pc+8 / Align(pc,4)+4 rules. For A32
+ * so a consumer needs no knowledge of the pc+8 / Align(pc,4)+4 rules. For ARM state
  * disp = 8 +/- imm12; for Thumb disp = (Align(at_va + 4, 4) - at_va) +/- imm,
  * which is 4 or 2 plus the offset. (x86's RIPREL disp is measured from the
  * NEXT instruction; this one is measured from this one - a consumer shared
@@ -104,8 +110,8 @@
  * checked: the coprocessor, VFP and Advanced SIMD spaces are not validity-
  * checked - they are always OTHER with the right length and the right wmask.
  */
-#ifndef KOFENG_GENOTYPE_ARM_INT_H
-#define KOFENG_GENOTYPE_ARM_INT_H
+#ifndef KOFENG_CELLLYSIS_DECODE_ARM32_H
+#define KOFENG_CELLLYSIS_DECODE_ARM32_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -149,7 +155,7 @@ static inline uint32_t arm_w(const uint8_t *p, int be)
  * FIELD BY FIELD, and not memset or a struct copy: gcc turns either of those
  * (120 bytes) into `rep stos` / `rep movs`, whose start-up cost was the better
  * part of a decode. MEASURED, on the .text of the 21 Mirai ARM binaries
- * (110.5M A32 and 203.8M Thumb decodes, one pinned core, machine under load):
+ * (110.5M ARM state and 203.8M Thumb state decodes, one pinned core, machine under load):
  * memset 28.4 / 26.9 ns per instruction, field by field 18.3 / 15.0.
  */
 static inline void arm_begin(struct cell_insn *o, uint64_t va, uint32_t len)
@@ -202,14 +208,29 @@ static inline void arm_mem(struct cell_operand *d, uint32_t base, int64_t disp,
 			   unsigned size, unsigned fl)
 {
 	/* every field, so an operand built on the stack carries no garbage */
-	memset(d, 0, sizeof *d);
-	d->index = d->seg = CELL_REG_NONE;
-	d->kind = CELL_O_MEM;
-	d->reg = (uint8_t)base;
-	d->disp = disp;
-	d->scale = 1u;
-	d->size = (uint8_t)size;
-	d->flags = (uint8_t)fl;
+	*d = (struct cell_operand){ .kind = CELL_O_MEM, .reg = (uint8_t)base,
+				    .index = CELL_REG_NONE, .scale = 1u,
+				    .size = (uint8_t)size, .flags = (uint8_t)fl,
+				    .seg = CELL_REG_NONE, .disp = disp };
+}
+
+/*
+ * A whole operand in one expression, for the ones built outside the instruction
+ * (a source operand data processing takes by pointer): every field is written, in
+ * three stores, where a memset and the fields after it were nine.
+ */
+static inline void arm_op_reg(struct cell_operand *d, uint32_t r, unsigned fl)
+{
+	*d = (struct cell_operand){ .kind = CELL_O_REG, .reg = (uint8_t)r,
+				    .index = CELL_REG_NONE, .size = 4u,
+				    .flags = (uint8_t)fl, .seg = CELL_REG_NONE };
+}
+
+static inline void arm_op_imm(struct cell_operand *d, uint64_t v)
+{
+	*d = (struct cell_operand){ .kind = CELL_O_IMM, .reg = CELL_REG_NONE,
+				    .index = CELL_REG_NONE, .size = 4u,
+				    .seg = CELL_REG_NONE, .imm = v };
 }
 
 /* The shift a source operand carries; see the convention above. */
@@ -220,12 +241,6 @@ static inline void arm_shift(struct cell_operand *d, unsigned kind,
 	d->disp = (int64_t)amount;
 	if (kind != ARM_SH_NONE && rs != 0xffu)
 		d->index = (uint8_t)rs;
-}
-
-static inline uint32_t arm_ror32(uint32_t v, uint32_t n)
-{
-	n &= 31u;
-	return n ? (v >> n) | (v << (32u - n)) : v;
 }
 
 static inline unsigned arm_popcount16(uint32_t v)
@@ -250,15 +265,6 @@ static inline unsigned arm_lowest(uint32_t v)
 		i++;
 	}
 	return i;
-}
-
-/* Sign-extend the low `bits` of v. */
-static inline int64_t arm_sext(uint32_t v, unsigned bits)
-{
-	uint32_t m = 1u << (bits - 1u);
-
-	v &= (bits >= 32u) ? 0xffffffffu : ((1u << bits) - 1u);
-	return (int64_t)(v ^ m) - (int64_t)m;
 }
 
 /*
@@ -290,17 +296,49 @@ static inline void arm_pushpop(struct cell_insn *o, int pop, uint32_t list)
 	}
 }
 
-/* arm_common.c */
+/* decode_arm32_common.c */
 void kof_arm_clr(struct cell_insn *o);
 void kof_arm_ud(struct cell_insn *o);
 void kof_arm_other(struct cell_insn *o, uint64_t mask);
 /*
- * The data-processing family, from the A32 opcode (0..15; 16 is Thumb-2's orn),
+ * THE REGISTERS A WRITE NAMES BUT DOES NOT SPELL, as a recipe the id table
+ * carries: one flag per register field of the instruction word (ARM state's, or
+ * Thumb state's 32-bit one as first halfword << 16 | second - the fields sit at
+ * the same bit positions in both). arm_wm turns a recipe and a word into a mask.
+ */
+#define ARM_WM_F0   0x01u       /* the register in bits 3:0 */
+#define ARM_WM_F8   0x02u       /* bits 11:8 */
+#define ARM_WM_F12  0x04u       /* bits 15:12 */
+#define ARM_WM_F16  0x08u       /* bits 19:16 */
+#define ARM_WM_F12N 0x10u       /* the register after bits 15:12, modulo 16 (ldrexd) */
+#define ARM_WM_PC   0x20u       /* pc: the instruction branches */
+
+static inline uint64_t arm_wm(unsigned recipe, uint32_t w)
+{
+	uint64_t m = 0;
+
+	if (recipe & ARM_WM_F0)
+		m |= ARM_R(w & 15u);
+	if (recipe & ARM_WM_F8)
+		m |= ARM_R((w >> 8) & 15u);
+	if (recipe & ARM_WM_F12)
+		m |= ARM_R((w >> 12) & 15u);
+	if (recipe & ARM_WM_F16)
+		m |= ARM_R((w >> 16) & 15u);
+	if (recipe & ARM_WM_F12N)
+		m |= ARM_R((((w >> 12) & 15u) + 1u) & 15u);
+	if (recipe & ARM_WM_PC)
+		m |= ARM_R(ARM_PC);
+	return m;
+}
+
+/*
+ * The data-processing family, from the ARM state opcode (0..15; 16 is Thumb-2's orn),
  * the S bit, the registers and the second operand `src` - an IMM, or a REG
  * carrying its shift. `pc_off` is where pc-relative reads are measured from
- * (8 for A32); 0 turns off the `add rd, pc, #imm` -> LEA reading.
+ * (8 for ARM state); 0 turns off the `add rd, pc, #imm` -> LEA reading.
  */
 void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 		unsigned rd, const struct cell_operand *src, int64_t pc_off);
 
-#endif /* KOFENG_GENOTYPE_ARM_INT_H */
+#endif /* KOFENG_CELLLYSIS_DECODE_ARM32_H */

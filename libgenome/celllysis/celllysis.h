@@ -5,11 +5,11 @@
  * values registers hold between them, the addresses that reach them - and
  * answers questions about those parts. It does not run anything: that is
  * phenotype's (libgenome/phenotype), which expresses the code in an environment.
- * What it reads is what genotype sequences: libgenome/genotype is the full
- * decoder (x86 today) and celllysis turns its instructions into facts. The
- * fixed-width architectures (ARM, AArch64, MIPS) have no genotype yet: their
- * decoders are written straight into celllysis's form, recognising what the
- * analysis asks about and nothing more, and sit here beside the adapters.
+ * What it reads is what genotype sequences: libgenome/genotype holds the decode
+ * TABLES (x86 and x86-64, ARM32 in ARM and Thumb state, ARM64) and celllysis
+ * turns what they find into facts. MIPS is the exception: its decoder is still
+ * written straight into celllysis's form (decode_mips.c), recognising what the
+ * analysis asks about and nothing more, and has no table of its own yet.
  *
  *     bytes -> genotype (decode) -> celllysis (translate, track, walk)
  *           -> the engine (nucleo: what a number or a name MEANS)

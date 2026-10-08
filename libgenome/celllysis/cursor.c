@@ -95,7 +95,7 @@ int kof_cell_reg(const struct kof_cell_cur *k, uint8_t r, uint64_t *out)
  *
  * Only an unsigned load of the whole word; a sign-extending or narrow load is
  * left as the memory read it is. Literal address = at_va + disp, the decoders'
- * convention (see decode_arm.h).
+ * convention (see decode_arm32.h).
  */
 static void resolve_literal(const struct kof_cell_cur *k,
 			    const struct cell_space *sp, struct cell_insn *in)

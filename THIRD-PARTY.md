@@ -304,11 +304,13 @@ linking the ten non-x86 architectures costs 31 MB of binary where kofscanner is
 `cs_regs_access` fails - which removes the reason to want it.
 
 It is used OFFLINE, on a developer machine, as an ORACLE for the ARM and AArch64
-decoders in `libgenome/celllysis/` (`decode_a32.c`, `decode_t32.c`,
-`decode_a64.c`): those are written from the architecture's encoding structure,
-and `tools/celllysis/arm_diff.c` / `a64_diff.c` run them against Capstone over
-random, systematic and real-binary input (`make celllysis-arm-diff`,
-`celllysis-a64-diff`; the library is passed in, never shipped). Where the two
+decoders: the decode tables in `libgenome/genotype/arm32/` (ARM and Thumb state)
+and `libgenome/genotype/arm64/`, and the adapters over them in
+`libgenome/celllysis/` (`decode_arm32.c`, `decode_thumb.c`, `decode_arm64.c`).
+Those are written from the architecture's encoding structure, and
+`tools/celllysis/arm32_diff.c` / `arm64_diff.c` run them against Capstone over
+random, systematic and real-binary input (`make celllysis-arm32-diff`,
+`celllysis-arm64-diff`; the library is passed in, never shipped). Where the two
 disagree the decision is made from the architecture, not by the oracle, and the
 decoders say which disagreements are by design. Nothing is reproduced from
 Capstone: no table, no code.

@@ -1,7 +1,7 @@
 /*
- * decode_a32 - the ARM decoders (A32 and Thumb), on encodings with a known meaning.
+ * decode_arm32 - the ARM state and Thumb state decoders, on encodings with a known meaning.
  *
- * Every A32 encoding below is a real instruction from the Mirai ARM binaries
+ * Every ARM state encoding below is a real instruction from the Mirai ARM binaries
  * in the corpus (file and address in the comment), taken out of .text and
  * written down with what it IS. Where the corpus has no instance - movw/movt
  * (no ARMv7-only builds), blx immediate, udf, and ALL of Thumb (the corpus
@@ -13,8 +13,8 @@
  *
  * WHAT IS CHECKED is what a consumer of struct cell_insn reads: class,
  * length, condition, flags, the written-register mask, the branch target and
- * the operands, in the convention decode_arm.h documents. tools/genotype/
- * arm_diff.c is the other half - random encodings against the oracle.
+ * the operands, in the convention decode_arm32.h documents. tools/celllysis/
+ * arm32_diff.c is the other half - random encodings against the oracle.
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -22,7 +22,7 @@
 
 #include "kofmod/kofsig.h"
 #include <celllysis/celllysis.h>
-#include "../../libgenome/celllysis/decode_arm.h"
+#include "../../libgenome/celllysis/decode_arm32.h"
 
 static int failures;
 static int checks;
@@ -80,7 +80,7 @@ struct tc {
 #define AL 0xe
 
 static const struct tc C[] = {
-	/* ---- A32, from the Mirai ARM binaries ------------------------------ */
+	/* ---- ARM state, from the Mirai ARM binaries ------------------------------ */
 	{ "skid.arm7.1 @8634  mov r7,#1  (a syscall number)", 0, 0, 0xe3a07001, 4, 0x8634,
 	  CELL_MOV, 4, 2, AL, 0, R(7), B, { RG(7), IM(1) } },
 	{ "skid.arm7.1 @10068  mov r7,#0xdd", 0, 0, 0xe3a070dd, 4, 0x10068,
@@ -151,7 +151,7 @@ static const struct tc C[] = {
 	  CELL_MOV, 4, 2, AL, 0, R(7), B, { RG(7), RG(0) } },
 	{ "skid.arm7.1 @82fc  orr r3,r3,r0,lsr #8  (a shifted source: three operands, the shift on o2)", 0, 0, 0xe1833420, 4, 0x82fc,
 	  CELL_OR, 4, 3, AL, 0, R(3), B, { RG(3), RG(3), SH(0, ARM_SH_LSR, 8) } },
-	/* ---- A32, written from the ARM ARM: nothing like it in the corpus ---- */
+	/* ---- ARM state, written from the ARM ARM: nothing like it in the corpus - */
 	{ "movw r0,#0x1234", 0, 0, 0xe3010234, 4, 0x8000,
 	  CELL_MOV, 4, 2, AL, 0, R(0), B, { RG(0), IM(0x1234) } },
 	{ "movt r0,#0xabcd  (an OR of the high half, exact after a movw)", 0, 0, 0xe34a0bcd, 4, 0x8000,
@@ -290,8 +290,8 @@ static void curated(void)
 		int good;
 
 		put(b, t);
-		n = t->thumb ? cell_decode_t32(b, 4, t->va, t->be, &k)
-			     : cell_decode_a32(b, 4, t->va, t->be, &k);
+		n = t->thumb ? cell_decode_thumb(b, 4, t->va, t->be, &k)
+			     : cell_decode_arm32(b, 4, t->va, t->be, &k);
 		good = n == t->len && k.len == t->len && k.op == t->op &&
 		       k.n_op == t->n_op && k.cond == t->cond &&
 		       k.flags == t->flags && k.wmask == t->wmask &&
@@ -319,22 +319,22 @@ static void curated(void)
 static void edges(void)
 {
 	static const uint8_t svc0[4] = { 0, 0, 0, 0xef };
-	static const uint8_t t32[4] = { 0x00, 0xf0, 0x02, 0xf8 };      /* bl */
+	static const uint8_t thumb_bl[4] = { 0x00, 0xf0, 0x02, 0xf8 };      /* bl */
 	static const uint8_t ud[4] = { 0xf0, 0x00, 0xf0, 0xe7 };       /* udf */
 	struct cell_insn k;
 	unsigned q;
 
 	printf("edges:\n");
-	ok("A32 with 3 bytes is 0", cell_decode_a32(svc0, 3, 0, 0, &k) == 0);
-	ok("A32 with 0 bytes is 0", cell_decode_a32(svc0, 0, 0, 0, &k) == 0);
-	ok("Thumb with 1 byte is 0", cell_decode_t32(t32, 1, 0, 0, &k) == 0);
-	ok("Thumb 32-bit with 2 bytes is 0", cell_decode_t32(t32, 2, 0, 0, &k) == 0);
-	ok("Thumb 32-bit with 4 bytes is 4", cell_decode_t32(t32, 4, 0, 0, &k) == 4);
-	ok("Thumb 16-bit with 2 bytes is 2", cell_decode_t32(svc0, 2, 0, 0, &k) == 2);
-	ok("a null buffer is 0", cell_decode_a32(NULL, 4, 0, 0, &k) == 0);
-	ok("undefined is length 4 and CELL_UD", cell_decode_a32(ud, 4, 0, 0, &k) == 4 &&
+	ok("ARM state with 3 bytes is 0", cell_decode_arm32(svc0, 3, 0, 0, &k) == 0);
+	ok("ARM state with 0 bytes is 0", cell_decode_arm32(svc0, 0, 0, 0, &k) == 0);
+	ok("Thumb with 1 byte is 0", cell_decode_thumb(thumb_bl, 1, 0, 0, &k) == 0);
+	ok("Thumb 32-bit with 2 bytes is 0", cell_decode_thumb(thumb_bl, 2, 0, 0, &k) == 0);
+	ok("Thumb 32-bit with 4 bytes is 4", cell_decode_thumb(thumb_bl, 4, 0, 0, &k) == 4);
+	ok("Thumb 16-bit with 2 bytes is 2", cell_decode_thumb(svc0, 2, 0, 0, &k) == 2);
+	ok("a null buffer is 0", cell_decode_arm32(NULL, 4, 0, 0, &k) == 0);
+	ok("undefined is length 4 and CELL_UD", cell_decode_arm32(ud, 4, 0, 0, &k) == 4 &&
 	   k.op == CELL_UD && k.wmask == 0);
-	cell_decode_a32(svc0, 4, 0x1234, 0, &k);
+	cell_decode_arm32(svc0, 4, 0x1234, 0, &k);
 	for (q = 1; q < 3; q++)
 		ok("an absent operand is CELL_O_NONE with no register",
 		   k.o[q].kind == CELL_O_NONE && k.o[q].reg == CELL_REG_NONE);
@@ -344,9 +344,9 @@ static void edges(void)
 
 int main(void)
 {
-	printf("decode a32/t32:\n");
+	printf("decode arm32/thumb:\n");
 	curated();
 	edges();
-	printf("decode a32/t32: %d checks, %s\n", checks, failures ? "FAILED" : "ok");
+	printf("decode arm32/thumb: %d checks, %s\n", checks, failures ? "FAILED" : "ok");
 	return failures != 0;
 }

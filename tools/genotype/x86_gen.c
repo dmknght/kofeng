@@ -1027,7 +1027,7 @@ static uint16_t build_tree(const int *fix)
 }
 
 
-#define N_RMAPS 17
+#define N_RMAPS 18
 static unsigned mapnodes[4][16];
 static uint16_t ROOT[2][N_RMAPS][256];
 
@@ -1373,14 +1373,14 @@ static void emit(const char *dir)
 		}
 		fprintf(f, "const uint16_t *const gt_x86_space_nodes[%u] = { nodes_0, nodes_1, nodes_2, nodes_3 };\n\n",
 			N_SPACES);
-		fprintf(f, "const uint16_t gt_x86_root[2][17][256] = {\n");
+		fprintf(f, "const uint16_t gt_x86_root[2][18][256] = {\n");
 		{
 			int m, mp;
 
 			for (m = 0; m < 2; m++) {
 				fprintf(f, "\t{\n");
 				for (mp = 0; mp < N_RMAPS; mp++) {
-					const unsigned spc = mp < 4 ? 0u : mp < 7 ? 1u : mp < 10 ? 2u : 3u;
+					const unsigned spc = mp < 4 ? 0u : mp < 7 || mp == 17 ? 1u : mp < 10 ? 2u : 3u;
 
 					fprintf(f, "\t\t{");
 					for (i = 0; i < 256; i++) {
@@ -1493,12 +1493,13 @@ static void heal_collisions(void)
 }
 
 /* The root-map index of an encoding space's map: legacy 0-3, VEX 4-6 (maps
- * 1-3), XOP 7-9 (maps 8-10), EVEX 10-16 (maps 1-7). */
+ * 1-3), XOP 7-9 (maps 8-10), EVEX 10-16 (maps 1-7), and VEX map 5 - the AMX
+ * FP8 / TF32 tile instructions, 64-bit mode only - at 17. */
 static int rmap_of(int sp, int map)
 {
 	switch (sp) {
 	case SP_LEGACY: return map;
-	case SP_VEX:    return 4 + map - 1;
+	case SP_VEX:    return map == 5 ? 17 : 4 + map - 1;
 	case SP_XOP:    return 7 + map - 8;
 	}
 	return 10 + map - 1;
@@ -1509,7 +1510,7 @@ int main(int argc, char **argv)
 	int mode, sp;
 	unsigned long n_valid = 0, n_total = 0;
 	static const struct { int first, last, nosz, nasz; } space[N_SPACES] = {
-		{ 0, 3, 4, 4 }, { 1, 3, 4, 2 }, { 8, 10, 4, 2 }, { 1, 7, 8, 16 }
+		{ 0, 3, 4, 4 }, { 1, 5, 4, 2 }, { 8, 10, 4, 2 }, { 1, 7, 8, 16 }
 	};
 
 	unsigned want = 0xfu;           /* bit per encoding space                   */

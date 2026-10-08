@@ -149,18 +149,18 @@ uint32_t cell_decode_mips(const uint8_t *p, uint32_t n, uint64_t va,
 /*
  * ARM. Registers are r0..r15 as 0..15 (sp 13, lr 14, pc 15) in wmask.
  *
- * `be` is big-endian: ARM-BE bots exist. cell_decode_a32 reads one 4-byte A32
- * word; cell_decode_t32 reads Thumb and returns 2 or 4, the real length of the
+ * `be` is big-endian: ARM-BE bots exist. cell_decode_arm32 reads one 4-byte ARM state
+ * word; cell_decode_thumb reads Thumb state and returns 2 or 4, the real length of the
  * instruction at p (the caller knows from the ELF mapping symbols or the
  * low bit of a branch target that the code is Thumb).
  */
-uint32_t cell_decode_a32(const uint8_t *p, uint32_t n, uint64_t va,
+uint32_t cell_decode_arm32(const uint8_t *p, uint32_t n, uint64_t va,
 			int be, struct cell_insn *out);
-uint32_t cell_decode_t32(const uint8_t *p, uint32_t n, uint64_t va,
+uint32_t cell_decode_thumb(const uint8_t *p, uint32_t n, uint64_t va,
 			int be, struct cell_insn *out);
 
 /* AArch64: x0..x30 as 0..30, sp as 31 (wmask bit 31). Always little-endian. */
-uint32_t cell_decode_a64(const uint8_t *p, uint32_t n, uint64_t va,
+uint32_t cell_decode_arm64(const uint8_t *p, uint32_t n, uint64_t va,
 			struct cell_insn *out);
 
 #endif /* KOFENG_DISASM_DECODE_H */

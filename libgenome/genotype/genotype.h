@@ -11,6 +11,9 @@
  * instruction structure, and this header is only what they have in common.
  *
  *   x86/    x86 and x86-64; tables generated from a reference decoder.
+ *   arm32/  32-bit ARM: ARM state and Thumb state; hand-written rows with the
+ *           bit pattern beside each, and an index the code derives from them.
+ *   arm64/  AArch64; a decode tree held as data, with a derived first-level index.
  *
  * An architecture is added by adding a directory. Nothing outside it changes,
  * which is the test of whether the split is real.

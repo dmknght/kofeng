@@ -79,6 +79,6 @@ extern const uint16_t           gt_x86_mnk[][8];
 extern const uint8_t            gt_x86_fix[][8];
 extern const uint8_t            gt_x86_vmask[][16];
 extern const uint16_t *const     gt_x86_space_nodes[4];
-extern const uint16_t           gt_x86_root[2][17][256];
+extern const uint16_t           gt_x86_root[2][18][256];
 
 #endif

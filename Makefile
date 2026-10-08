@@ -1074,20 +1074,23 @@ $(INT)/cl_%.o: libgenome/celllysis/%.c $(STAMP) | $(INT)
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
 # THE ORACLE FOR THE ARM DECODERS IS NOT IN THIS TREE EITHER: Capstone, used on a
-# developer's machine to check libgenome/celllysis/decode_{a32,t32,a64}.c. Pass
-# the header directory and the static library; match the two (a v5 header with a
-# v6 library crashes).
-uc = $(shell echo $(1) | tr a-z A-Z)
+# developer's machine to check the ARM32 (ARM and Thumb state) and ARM64 decoders -
+# the genotype tables under libgenome/genotype/arm32 and arm64 and the celllysis
+# adapters that turn them into cell_insn. Pass the header directory and the
+# static library; match the two (a v5 header with a v6 library crashes).
 CS_INC ?=
 CS_LIB ?=
-CS_ARM_SRC := libgenome/celllysis/decode_a32.c libgenome/celllysis/decode_t32.c \
-              libgenome/celllysis/decode_arm_common.c
-CS_A64_SRC := libgenome/celllysis/decode_a64.c
-.PHONY: celllysis-arm-diff celllysis-a64-diff
-celllysis-arm-diff celllysis-a64-diff: celllysis-%-diff:
+CS_ARM32_SRC := libgenome/celllysis/decode_arm32.c libgenome/celllysis/decode_thumb.c \
+                libgenome/celllysis/decode_arm32_common.c \
+                $(wildcard libgenome/genotype/arm32/*.c)
+CS_ARM64_SRC := libgenome/celllysis/decode_arm64.c $(wildcard libgenome/genotype/arm64/*.c)
+.PHONY: celllysis-arm32-diff celllysis-arm64-diff
+celllysis-arm32-diff: CS_SRC = $(CS_ARM32_SRC)
+celllysis-arm64-diff: CS_SRC = $(CS_ARM64_SRC)
+celllysis-arm32-diff celllysis-arm64-diff: celllysis-%-diff:
 	@test -n "$(CS_INC)" -a -n "$(CS_LIB)" || { echo "pass CS_INC=<capstone include dir> CS_LIB=<libcapstone.a>"; exit 1; }
 	@$(call MKDIR,$(TEST))
-	$(CC) -O2 -std=gnu11 -pthread -Ilibkofeng/kofcore -Ilibgenome -I$(CS_INC) tools/celllysis/$*_diff.c $(CS_$(call uc,$*)_SRC) $(CS_LIB) -o $(TEST)/$*_diff$(EXE)
+	$(CC) -O2 -std=gnu11 -pthread -Ilibkofeng/kofcore -Ilibgenome -Ilibgenome/genotype -I$(CS_INC) tools/celllysis/$*_diff.c $(CS_SRC) $(CS_LIB) -o $(TEST)/$*_diff$(EXE)
 
 # THE REFERENCE DECODER IS NOT IN THIS TREE. The x86 tables were produced by
 # running tools/genotype/x86_gen.c against a reference decoder, and the checked-in
@@ -1096,19 +1099,20 @@ celllysis-arm-diff celllysis-a64-diff: celllysis-%-diff:
 # the directory holding inc/ and src/. See THIRD-PARTY.md.
 REF ?=
 REF_SRC = $(wildcard $(REF)/src/*.c)
-REF_FLAGS = -O2 -w -std=gnu11 -D_LIB -DAMD64 -I$(REF)/inc -I$(REF)/src -I$(REF)/src/include
+REF_FLAGS = -O2 -w -std=gnu11 -fno-common -Wno-incompatible-pointer-types -D_LIB -DAMD64 -I$(REF)/inc -I$(REF)/src -I$(REF)/src/include
+X86_SRC = $(wildcard libgenome/genotype/x86/*.c)
 
 .PHONY: genotype-x86 genotype-x86-diff
 genotype-x86:
 	@test -n "$(REF)" || { echo "genotype-x86: pass REF=<reference decoder checkout>"; exit 1; }
 	@$(call MKDIR,$(TEST))
-	$(CC) $(REF_FLAGS) tools/genotype/x86_gen.c $(REF_SRC) $(GT_SRC) -Ilibgenome/genotype -o $(TEST)/x86_gen$(EXE)
+	$(CC) $(REF_FLAGS) tools/genotype/x86_gen.c tools/genotype/ref_shim.c $(REF_SRC) $(X86_SRC) -Ilibgenome/genotype -o $(TEST)/x86_gen$(EXE)
 	$(TEST)/x86_gen$(EXE) $(REF)/inc/bdx86_constants.h libgenome/genotype/x86
 
 genotype-x86-diff:
 	@test -n "$(REF)" || { echo "genotype-x86-diff: pass REF=<reference decoder checkout>"; exit 1; }
 	@$(call MKDIR,$(TEST))
-	$(CC) $(REF_FLAGS) tools/genotype/x86_diff.c $(REF_SRC) $(GT_SRC) -Ilibgenome/genotype -o $(TEST)/x86_diff$(EXE)
+	$(CC) $(REF_FLAGS) tools/genotype/x86_diff.c tools/genotype/ref_shim.c $(REF_SRC) $(X86_SRC) -Ilibgenome/genotype -o $(TEST)/x86_diff$(EXE)
 	$(TEST)/x86_diff$(EXE)
 
 $(INT)/emu_%.o: libgenome/phenotype/%.c $(STAMP) | $(INT)

@@ -1,15 +1,15 @@
 /*
- * arm_common.c - what the A32 and Thumb decoders say the same way.
+ * decode_arm32_common.c - what the ARM state and Thumb state adapters say the same way.
  *
- * The data-processing family is one instruction set with two spellings: A32
+ * The data-processing family is one instruction set with two spellings: ARM state
  * has the four-bit opcode in the word, Thumb-2 has it in a different place and
  * Thumb-1 has its own forms of it. What the instruction MEANS - which class, which
  * operands, which registers it writes, what it is when the destination is pc -
- * is decided once, here, from the A32 opcode numbering, and both decoders
+ * is decided once, here, from the ARM state opcode numbering, and both decoders
  * call it. Two copies of this were the first thing the plan was to avoid
  * (CLAUDE.md rule 2): the next fix lands in both or in neither.
  */
-#include "decode_arm.h"
+#include "decode_arm32.h"
 
 void kof_arm_clr(struct cell_insn *o)
 {
@@ -55,8 +55,9 @@ static const uint8_t g_shcls[5] = {
 void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 		unsigned rd, const struct cell_operand *srcp, int64_t pc_off)
 {
-	struct cell_operand t = *srcp;
-	int is_imm = t.kind == CELL_O_IMM;
+	/* the source is only read, and never aliases `o`: no copy of it */
+	const struct cell_operand *const tp = srcp;
+	int is_imm = tp->kind == CELL_O_IMM;
 
 	o->op = g_dpcls[opc];
 
@@ -64,7 +65,7 @@ void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 		/* a comparison: reads rn, writes the flags and no register */
 		o->n_op = 2;
 		arm_reg(&o->o[0], rn, CELL_OF_READ);
-		o->o[1] = t;
+		o->o[1] = *tp;
 		return;
 	}
 
@@ -74,43 +75,43 @@ void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 	if (opc == 13u) {                       /* mov, and the shifts */
 		if (is_imm) {
 			o->n_op = 2;
-			o->o[1] = t;
-		} else if (t.scale == ARM_SH_NONE) {
+			o->o[1] = *tp;
+		} else if (tp->scale == ARM_SH_NONE) {
 			o->n_op = 2;
-			o->o[1] = t;
-			if (!s && rd == 0 && t.reg == 0)
+			o->o[1] = *tp;
+			if (!s && rd == 0 && tp->reg == 0)
 				o->op = CELL_NOP;       /* mov r0, r0 */
-		} else if (t.scale == ARM_SH_RRX) {
+		} else if (tp->scale == ARM_SH_RRX) {
 			o->op = CELL_OTHER;
 			o->n_op = 2;
-			o->o[1] = t;
+			o->o[1] = *tp;
 		} else {
 			/* mov rd, rm, lsl #n  IS lsl rd, rm, #n */
-			o->op = g_shcls[t.scale - 1u];
+			o->op = g_shcls[tp->scale - 1u];
 			o->n_op = 3;
-			arm_reg(&o->o[1], t.reg, CELL_OF_READ);
-			if (t.index != CELL_REG_NONE)
-				arm_reg(&o->o[2], t.index, CELL_OF_READ);
+			arm_reg(&o->o[1], tp->reg, CELL_OF_READ);
+			if (tp->index != CELL_REG_NONE)
+				arm_reg(&o->o[2], tp->index, CELL_OF_READ);
 			else
-				arm_imm(&o->o[2], (uint64_t)t.disp);
+				arm_imm(&o->o[2], (uint64_t)tp->disp);
 		}
 	} else if (opc == 15u) {                /* mvn */
 		o->n_op = 2;
 		if (is_imm) {
 			o->op = CELL_MOV;
-			arm_imm(&o->o[1], (~t.imm) & 0xffffffffu);
+			arm_imm(&o->o[1], (~tp->imm) & 0xffffffffu);
 		} else {
-			o->o[1] = t;
+			o->o[1] = *tp;
 			/*
 			 * NOT IS ONE-OPERAND in cell_state (`d = ~d`), so it is
 			 * only that when the register is its own source and
 			 * nothing is shifted; anything else is a value the map
 			 * could not compute and must not be told it can.
 			 */
-			if (t.reg != rd || t.scale != ARM_SH_NONE)
+			if (tp->reg != rd || tp->scale != ARM_SH_NONE)
 				o->op = CELL_OTHER;
 		}
-	} else if (opc == 3u && is_imm && t.imm == 0) {
+	} else if (opc == 3u && is_imm && tp->imm == 0) {
 		/* rsb rd, rn, #0 is a negate; NEG is `d = -d` to cell_state */
 		o->n_op = 2;
 		arm_reg(&o->o[1], rn, CELL_OF_READ);
@@ -120,10 +121,10 @@ void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 		/* add/sub rd, pc, #imm - the address, and `adr` is its name */
 		o->op = CELL_LEA;
 		o->n_op = 2;
-		arm_mem(&o->o[1], ARM_PC, opc == 4u ? pc_off + (int64_t)t.imm
-						    : pc_off - (int64_t)t.imm,
+		arm_mem(&o->o[1], ARM_PC, opc == 4u ? pc_off + (int64_t)tp->imm
+						    : pc_off - (int64_t)tp->imm,
 			0, CELL_OF_RIPREL);
-	} else if (rn == rd && (is_imm || t.scale == ARM_SH_NONE) &&
+	} else if (rn == rd && (is_imm || tp->scale == ARM_SH_NONE) &&
 		   (o->op == CELL_ADD || o->op == CELL_SUB || o->op == CELL_AND ||
 		    o->op == CELL_OR || o->op == CELL_XOR || o->op == CELL_ADC ||
 		    o->op == CELL_SBB)) {
@@ -136,11 +137,11 @@ void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 		 * zero" arm and answers 0. Both measured, both silent.
 		 */
 		o->n_op = 2;
-		o->o[1] = t;
+		o->o[1] = *tp;
 	} else {
 		o->n_op = 3;
 		arm_reg(&o->o[1], rn, CELL_OF_READ);
-		o->o[2] = t;
+		o->o[2] = *tp;
 	}
 
 	if (rd != ARM_PC)
@@ -153,11 +154,11 @@ void kof_arm_dp(struct cell_insn *o, unsigned opc, unsigned s, unsigned rn,
 		return;
 	}
 	o->flags |= CELL_F_INDIRECT;
-	if (opc == 13u && !is_imm && t.scale == ARM_SH_NONE) {
-		o->op = t.reg == ARM_LR ? CELL_RET : CELL_JMP;
+	if (opc == 13u && !is_imm && tp->scale == ARM_SH_NONE) {
+		o->op = tp->reg == ARM_LR ? CELL_RET : CELL_JMP;
 		kof_arm_clr(o);
 		o->n_op = 1;
-		arm_reg(&o->o[0], t.reg, CELL_OF_READ);
+		arm_reg(&o->o[0], tp->reg, CELL_OF_READ);
 	} else {
 		o->op = CELL_JMP;
 		kof_arm_clr(o);

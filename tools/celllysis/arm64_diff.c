@@ -1,18 +1,25 @@
 /*
- * a64_diff - the AArch64 decoder against a reference decoder.
+ * arm64_diff - the AArch64 decoder against a reference decoder.
  *
  * A DEV TOOL, NOT A TEST: it needs Capstone's header and library, which are not
  * in this tree. Build by hand, e.g.
  *
- *   make celllysis-a64-diff CS_INC=<capstone include dir> CS_LIB=<libcapstone.a>
+ *   gcc -O2 -std=gnu11 -pthread -Ilibkofeng/kofcore -Ilibgenome \
+ *       -Ilibgenome/genotype -I<capstone include dir> tools/celllysis/arm64_diff.c \
+ *       libgenome/celllysis/decode_arm64.c libgenome/genotype/arm64/arm64.c \
+ *       libgenome/genotype/arm64/arm64_tab.c \
+ *       <libcapstone.a> -o arm64_diff
+ *
+ * The decoder under test is the genotype table (libgenome/genotype/arm64) with
+ * the celllysis adapter (decode_arm64.c) on top; both are linked.
  *
  * WHAT IT CAN AND CANNOT SAY. Capstone is an ORACLE: where this decoder and it
  * disagree one of them is wrong, and which is decided from the architecture
  * reference, not by the oracle. A disagreement that is a decision (this decoder
  * leaves vector words undecided, reports an immediate-less `add` as a move) is
- * recorded in a64.c and counted here under its own heading so it cannot hide a
+ * recorded in decode_arm64.c and counted here under its own heading so it cannot hide a
  * real one. Agreement proves nothing about a bug both share, which is why
- * tests/unit/decode_a64.c holds encodings written from the manual.
+ * tests/unit/decode_arm64.c holds encodings written from the manual.
  *
  * WHAT IS COMPARED, per word: validity; the class (Capstone's mnemonic is
  * mapped to the set of classes this decoder may legitimately give it); the
@@ -566,8 +573,8 @@ static void check(struct tctx *c, uint32_t w, uint64_t va)
 
 	st->words++;
 	cv = cs_disasm_iter(c->h, &p, &sz, &addr, c->in);
-	if (cell_decode_a64(bytes, 4, va, &k) != 4) {
-		fprintf(stderr, "a64_diff: decoder returned a length other than 4\n");
+	if (cell_decode_arm64(bytes, 4, va, &k) != 4) {
+		fprintf(stderr, "arm64_diff: decoder returned a length other than 4\n");
 		exit(2);
 	}
 	/* `udf` is defined and faults; Capstone calls it valid, we call it UD. */
@@ -988,14 +995,14 @@ static void speed(const char *elf_list)
 	while (n < N) {
 		uint32_t x = (uint32_t)splitmix(&s);
 
-		if (cell_decode_a64((const uint8_t *)&x, 4, 0, &k) == 4 && k.op != CELL_UD)
+		if (cell_decode_arm64((const uint8_t *)&x, 4, 0, &k) == 4 && k.op != CELL_UD)
 			w[n++] = x;
 	}
 	memcpy(buf, w, (size_t)N * 4);
 	t0 = now();
 	for (rep = 0; rep < 20; rep++)
 		for (i = 0; i < N; i++) {
-			cell_decode_a64(buf + i * 4, 4, 0x400000 + i * 4, &k);
+			cell_decode_arm64(buf + i * 4, 4, 0x400000 + i * 4, &k);
 			sink += k.wmask + k.op;
 		}
 	t1 = now();
@@ -1010,7 +1017,7 @@ static void speed(const char *elf_list)
 	t0 = now();
 	for (rep = 0; rep < 20; rep++)
 		for (i = 0; i < N; i++) {
-			cell_decode_a64(buf + i * 4, 4, 0x400000 + i * 4, &k);
+			cell_decode_arm64(buf + i * 4, 4, 0x400000 + i * 4, &k);
 			sink += k.wmask + k.op;
 		}
 	t1 = now();
@@ -1068,7 +1075,7 @@ static void speed(const char *elf_list)
 			t0 = now();
 			for (rep = 0; rep < reps; rep++)
 				for (i = 0; i < cnt; i++) {
-					cell_decode_a64(code + i * 4, 4, 0x400000 + i * 4, &k);
+					cell_decode_arm64(code + i * 4, 4, 0x400000 + i * 4, &k);
 					sink += k.wmask + k.op;
 				}
 			t1 = now();
@@ -1125,7 +1132,7 @@ int main(int argc, char **argv)
 		} else {
 			printf("\n");
 		}
-		cell_decode_a64(b, 4, 0x400000, &k);
+		cell_decode_arm64(b, 4, 0x400000, &k);
 		printf("ours: op=%s n_op=%u cond=%u flags=%x wmask=%llx target=%llx\n", kname(k.op),
 		       k.n_op, k.cond, k.flags, (unsigned long long)k.wmask,
 		       (unsigned long long)k.target_va);
