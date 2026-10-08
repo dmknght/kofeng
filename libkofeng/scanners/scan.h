@@ -1388,8 +1388,19 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep);
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
 				struct kof_range *ext);
 
-/* Recover the scanner from a context handed to a module. */
-struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *);
+/*
+ * Recover the scanner from a context handed to a module.
+ *
+ * INLINE, BECAUSE EVERY ACCESSOR A MODULE CALLS BEGINS WITH IT. A signature
+ * module reads the object a byte at a time through the content vtable, and the
+ * lookup was a call in front of each of those: MEASURED, one module's whole-file
+ * scan made 5.63 M c_rd8 calls and the call into kof_scan_of plus the one into
+ * oc_mc were about 10 of the 24 instructions each cost.
+ */
+static inline struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
+{
+	return (struct kof_scanner *)(void *)(uintptr_t)ctx->priv;
+}
 
 /*
  * Scan whatever a path names. Returns the number of objects scanned or a KOF_ERR_*.

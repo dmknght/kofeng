@@ -141,6 +141,7 @@ struct gt_x86_insn {
 	uint8_t  mo;                    /* offset of the byte after the opcode    */
 	uint8_t  dsz;                   /* displacement bytes                     */
 	uint8_t  osz;                   /* size selector (see gt_x86_osz)         */
+	uint8_t  asz;                   /* address size in bytes: 2, 4 or 8 (see gt_x86_asz) */
 	uint8_t  sp;                    /* encoding: 0 legacy, 1 VEX, 2 XOP, 3 EVEX */
 	uint8_t  vexv;                  /* VEX/EVEX register in vvvv, un-inverted, V' as bit 4 */
 	uint8_t  xr;                    /* EVEX R'                                */
@@ -183,5 +184,91 @@ void gt_x86_operand(const struct gt_x86_insn *in, unsigned k, struct gt_x86_op *
 
 /* All of them: for a caller that reads most operands anyway. */
 void gt_x86_operands(const struct gt_x86_insn *in, struct gt_x86_op *out);
+
+/*
+ * WHICH GENERAL REGISTER an operand names, as the sweeps number them: x86-64 has
+ * sixteen, and the sixteenth index is the sentinel for "none".
+ *
+ * AH, CH, DH AND BH FOLD ONTO rax, rcx, rdx AND rbx. The decoder numbers the
+ * legacy byte registers by their ENCODING, so those four come back as 4, 5, 6 and
+ * 7 - the slots that at every other width mean rsp, rbp, rsi and rdi. Returning that
+ * number does not lose information, it INVENTS it: `mov dh, 0x10` reads as a write
+ * to rsi. MEASURED: msfvenom's x86-64 stager builds its mmap length with
+ * `cdq; mov dh,0x10`; the constant map had rdx untouched and rsi clobbered. The
+ * caller still has to know it was a partial write - the operand's size says so.
+ */
+#define GT_X86_NGPR 16u
+
+static inline uint32_t gt_x86_gpr_of(const struct gt_x86_op *op)
+{
+	uint32_t r;
+
+	if (op->type != GT_X86_OP_REG || op->rtype != GT_X86_REG_GPR)
+		return GT_X86_NGPR;
+	r = op->reg;
+	if (op->high8 && r >= 4u && r < 8u)
+		r -= 4u;
+	return r < GT_X86_NGPR ? r : GT_X86_NGPR;
+}
+
+/*
+ * THE SWEEP'S VIEW: decode and the explicit operands in the form a sweep reads
+ * them, in one call. For a caller that wants exactly this - the celllysis adapter -
+ * and nothing implicit: it is gt_x86_decode, then the first `nexp` operands of
+ * gt_x86_operands narrowed to what is kept, built by the same code, with no decoded
+ * struct left behind and no copy of the instruction's bytes.
+ *
+ * KEPT: a general register, a memory operand, an immediate, a relative offset; the
+ * first three. Anything else (a vector or segment register, a far address, a
+ * constant) takes no slot. `wmask` has a bit for every general register the leaf
+ * writes without naming (gt_x86_wgpr) and for every one a named operand writes, kept
+ * or not. An operand not present is GT_X86_SOP_NONE.
+ *
+ * THE LAYOUT OF gt_x86_sop AND THE NUMBERS OF GT_X86_SK_* / GT_X86_SF_* ARE
+ * celllysis's struct cell_operand AND ITS enum cell_op_kind / CELL_OF_* flags,
+ * which decode_x86.c asserts at compile time: the adapter copies the three
+ * operands as they stand. genotype does not include celllysis; it agrees with it.
+ */
+#define GT_X86_SK_NONE  0u
+#define GT_X86_SK_REG   1u
+#define GT_X86_SK_MEM   2u
+#define GT_X86_SK_IMM   3u
+#define GT_X86_SK_REL   4u
+
+#define GT_X86_SF_WRITE  0x01u
+#define GT_X86_SF_READ   0x02u
+#define GT_X86_SF_RIPREL 0x04u
+#define GT_X86_SF_HIGH8  0x08u
+
+#define GT_X86_SREG_NONE 0xffu
+
+struct gt_x86_sop {
+	uint8_t  kind;          /* GT_X86_SK_*                                  */
+	uint8_t  reg;           /* a register, or a memory base; _SREG_NONE if none */
+	uint8_t  index;         /* a memory index, or _SREG_NONE                */
+	uint8_t  scale;
+	uint8_t  size;          /* the size genotype gives the operand, as one byte */
+	uint8_t  flags;         /* GT_X86_SF_*                                  */
+	uint8_t  seg;           /* a memory operand's segment, or _SREG_NONE    */
+	uint8_t  _pad;
+	int64_t  disp;          /* a memory operand's displacement              */
+	uint64_t imm;           /* an immediate, or a relative offset sign-extended */
+};
+
+#define GT_X86_SOP_NONE { GT_X86_SK_NONE, GT_X86_SREG_NONE, GT_X86_SREG_NONE, 0, 0, 0, \
+			  GT_X86_SREG_NONE, 0, 0, 0 }
+
+struct gt_x86_sweep {
+	uint16_t id;            /* enum gt_x86_id                               */
+	uint16_t cat;           /* gt_x86_cat                                   */
+	uint8_t  len;
+	uint8_t  rep;           /* last F2 / F3 byte, 0 if none                 */
+	uint8_t  cond;          /* gt_x86_cond                                  */
+	uint8_t  n;             /* operands kept, 0 to 3                        */
+	uint64_t wmask;         /* general registers written, a bit per register 0-15 */
+	struct gt_x86_sop op[3];
+};
+
+enum gt_status gt_x86_sweep(struct gt_x86_sweep *out, const uint8_t *p, size_t n, int mode);
 
 #endif /* KOF_GENOTYPE_X86_H */

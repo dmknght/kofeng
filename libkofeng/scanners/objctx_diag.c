@@ -408,6 +408,15 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
 		return 0;
 	case KOF_FACT_FORMAT:
 		return (uint64_t)ctx->format == want;
+	case KOF_FACT_INTERP:
+		/* PT_INTERP, from the program headers - the loader's own test for
+		 * "this needs a dynamic linker". Only an ELF has the question. */
+		if (!ei)
+			return 0;
+		for (i = 0; i < ei->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++)
+			if (ei->seg[i].type == 3u)
+				return want == 1u;
+		return want == 0u;
 	default:
 		return 0;
 	}
@@ -452,8 +461,24 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 	for (i = 0; i < sc->eng->n_diag; i++) {
 		const struct kof_diag *d = &sc->eng->diag[i];
 
-		if (!d->n_when && !d->n_need)
-			continue;
+		/*
+		 * A SIGN IS WHAT MAKES AN OBJECT WORTH ANALYSING; a condition
+		 * that only says where the route can run is not one. KOF_FACT_INTERP
+		 * is of the second kind: a static ELF is not a reason to look, it is
+		 * the only place the system call sweep has anything to find. Counting
+		 * it as a sign made every static ELF ask - and a toolchain's ordinary
+		 * R|X binary then started the analysis.
+		 */
+		{
+			uint32_t signs = d->n_need;
+			uint8_t w;
+
+			for (w = 0; w < d->n_when; w++)
+				if (d->when[w].fact != KOF_FACT_INTERP)
+					signs++;
+			if (!signs)
+				continue;
+		}
 		/*
 		 * A DIAGNOSE NO VERDICT READS DOES NOT ASK. Asking means "this
 		 * object is worth the analysis AND worth interpreting" - see the

@@ -79,7 +79,10 @@ int oc_diag_str(const struct kof_obj_ctx *ctx, uint16_t id,
 			   const char *name);
 
 /* ---- the boundary (objctx.c) ---- */
-struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx);
+static inline struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx)
+{
+	return &kof_scan_of(ctx)->m;
+}
 
 /* ---- decoders (objctx_decomp.c) ---- */
 uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,

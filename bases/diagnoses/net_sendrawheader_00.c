@@ -21,6 +21,17 @@ KOF_DIAG_NAME(DIAG_NET_SENDRAWHEADER);
 
 KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_EMULATE);
 
+/*
+ * THE GATE: A STATIC ELF. The route is a sweep of the code for system calls, and
+ * a binary linked against a shared libc has none to find - it reaches the kernel
+ * through the import table and a library this file does not carry. Without this
+ * the route ran on every ELF a rule reached, and was most of the cost of the
+ * whole scan. It narrows where the route runs and is NOT a sign that the object
+ * is worth analysing, so it does not make this diagnose ask - see
+ * kof_scan_diag_sign_asks.
+ */
+KOF_DIAG_WHEN(KOF_FACT_INTERP, 0);
+
 KOF_DIAG_ANCHOR(s, KOF_NUCLEO_NET_RAW, 0);
 KOF_DIAG_FROM(h, s, KOF_NUCLEO_NET_HDRINCL, KOF_DIAG_ROLE_FD);
 KOF_DIAG_FROM(w, s, KOF_NUCLEO_NET_WRITE, KOF_DIAG_ROLE_FD);

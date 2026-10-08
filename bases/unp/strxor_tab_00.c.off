@@ -1,4 +1,19 @@
 /*
+ * strxor_tab_00.c - DISABLED. Not built: ksigbuilder packs a directory and takes
+ * only *.c, so the suffix is what turns a module off. Put the ".c" back to
+ * build it again.
+ *
+ * WHY. It runs on EVERY PE and anchors itself with a scan of the WHOLE FILE, one
+ * kof_u8 call per byte (sx_routine and the record loop look for 0xe8). MEASURED
+ * on a 5.6 MB PE: 5.63 million accessor calls, about 103 M of the 249 M
+ * instructions a scan of that file cost - 41% - for a shape that belongs to one
+ * family. Turned off until it can anchor cheaply: either a bulk byte search in
+ * the module ABI, a scan limited to executable sections, or a cheap precondition
+ * that rules a file out before the loop.
+ *
+ * ---------------------------------------------------------------------------
+ */
+/*
  * A STRING TABLE READ THE WAY THE PROGRAM READS IT - FROM ITS OWN CALL SITES.
  *
  * WHAT IS HIDDEN. Every string this family uses is stored exclusive-ored with

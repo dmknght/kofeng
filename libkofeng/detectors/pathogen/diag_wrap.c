@@ -130,6 +130,19 @@ struct ev {
 	struct sv arr[6];
 };
 
+/* What this file reads of an instruction. */
+struct wop {
+	uint8_t kind, reg, index, scale, size, flags, seg;
+	int64_t v;              /* the immediate (IMM, REL) or the displacement (MEM) */
+};
+
+struct winsn {
+	uint64_t at, at_va, target;
+	uint16_t wmask;
+	uint8_t  op, len, n_op, flags;
+	struct wop o[3];
+};
+
 struct wctx {
 	struct kof_diag_scan *s;
 	const struct kof_obj_ctx *ctx;
@@ -145,16 +158,24 @@ struct wctx {
 	uint32_t *fret;                 /* per call target: the node + 1 its AX holds at ret */
 	uint8_t  *fmiss;                /* per call target: a call asked before it was set */
 	/*
-	 * THE CODE, DECODED ONCE. pass_a reads every instruction of every
-	 * executable segment to find the call targets and the syscall sites, and
-	 * pass_b then reads the same instructions again - twice, when a global
-	 * is read before it is written. Each read was a full decode, so the same
-	 * bytes were decoded up to three times per scan. The first one keeps what
-	 * it saw and the others walk that. See struct isrc.
+	 * THE CODE, DECODED ONCE. See "THE DECODE, ONCE" below: pass_a keeps the
+	 * instructions it decodes, packed, and every later read of an offset they
+	 * cover is served from them.
 	 */
-	struct cell_insn *tr;
+	uint8_t *tr;                    /* the record stream */
 	uint32_t n_tr, cap_tr;
-	struct { uint32_t first, n; uint8_t ok; } tseg[KOF_ELF_MAX_SEGMENTS];
+	struct widx { uint32_t at, pos; } *ix;  /* every W_TRACE_EVERY-th record */
+	uint32_t n_ix, cap_ix;
+	struct wseg {
+		uint64_t lo, hi;        /* the range pass_a walked */
+		uint32_t pos, end;      /* its records: [pos, end) of the stream */
+		uint32_t ix, n_ix;      /* and its index entries */
+		uint32_t n;             /* records */
+		uint8_t  complete;      /* the trace holds every instruction of it */
+		uint8_t  given_up;      /* the stream is a prefix of the walk */
+	} tseg[KOF_ELF_MAX_SEGMENTS];
+	uint64_t pk_end, pk_delta;      /* the packer's: where the last record ended */
+	int      tr_on;                 /* offsets fit the record */
 	uint64_t *open;                 /* sites whose NUMBER the sweep could not read */
 	uint32_t n_open, cap_open;
 	struct wsum *ws;                /* the wrappers, by entry */
@@ -258,7 +279,7 @@ static void glob_put(struct wctx *c, uint64_t addr, struct sv v)
 enum { LOC_NONE = 0, LOC_STACK, LOC_GLOBAL };
 
 static int mem_loc(const struct wctx *c, const struct fstate *f,
-		   const struct cell_insn *in, const struct cell_operand *o,
+		   const struct winsn *in, const struct wop *o,
 		   int64_t *key)
 {
 	if (o->kind != CELL_O_MEM || o->index != CELL_REG_NONE)
@@ -269,19 +290,19 @@ static int mem_loc(const struct wctx *c, const struct fstate *f,
 	if (o->flags & CELL_OF_RIPREL) {
 		if (in->at_va == KOF_BROKEN)
 			return LOC_NONE;
-		*key = (int64_t)(in->at_va + in->len) + o->disp;
+		*key = (int64_t)(in->at_va + in->len) + o->v;
 		return LOC_GLOBAL;
 	}
 	if (o->reg == CELL_REG_NONE) {
-		*key = o->disp & (c->wide ? -1ll : 0xffffffffll);
+		*key = o->v & (c->wide ? -1ll : 0xffffffffll);
 		return LOC_GLOBAL;
 	}
 	if (o->reg == CELL_REG_SP) {
-		*key = -(int64_t)f->sp + o->disp;
+		*key = -(int64_t)f->sp + o->v;
 		return LOC_STACK;
 	}
 	if (o->reg == CELL_REG_BP && f->bp_known) {
-		*key = (int64_t)f->bp_off + o->disp;
+		*key = (int64_t)f->bp_off + o->v;
 		return LOC_STACK;
 	}
 	/*
@@ -293,14 +314,14 @@ static int mem_loc(const struct wctx *c, const struct fstate *f,
 	 * read from "somewhere else", and no fcntl node on x86-64 carried a flag.
 	 */
 	if (o->reg < 16u && f->reg[o->reg].t == V_SADDR) {
-		*key = f->reg[o->reg].v + o->disp;
+		*key = f->reg[o->reg].v + o->v;
 		return LOC_STACK;
 	}
 	return LOC_NONE;
 }
 
 static struct sv load(struct wctx *c, struct fstate *f,
-		      const struct cell_insn *in, const struct cell_operand *o)
+		      const struct winsn *in, const struct wop *o)
 {
 	int64_t key;
 
@@ -310,7 +331,7 @@ static struct sv load(struct wctx *c, struct fstate *f,
 			return UNK;
 		return f->reg[o->reg];
 	case CELL_O_IMM: {
-		struct sv v = { V_CONST, 0, (int64_t)o->imm };
+		struct sv v = { V_CONST, 0, (int64_t)o->v };
 
 		return v;
 	}
@@ -336,8 +357,8 @@ static struct sv load(struct wctx *c, struct fstate *f,
 	}
 }
 
-static void store(struct wctx *c, struct fstate *f, const struct cell_insn *in,
-		  const struct cell_operand *o, struct sv v)
+static void store(struct wctx *c, struct fstate *f, const struct winsn *in,
+		  const struct wop *o, struct sv v)
 {
 	int64_t key;
 
@@ -370,9 +391,9 @@ static void store(struct wctx *c, struct fstate *f, const struct cell_insn *in,
  * pointer - and everything else forgets what it writes, which is the honest
  * default: a register that was rewritten holds nothing this walk can name.
  */
-static void st_step(struct wctx *c, struct fstate *f, const struct cell_insn *in)
+static void st_step(struct wctx *c, struct fstate *f, const struct winsn *in)
 {
-	const struct cell_operand *d = &in->o[0], *s = &in->o[1];
+	const struct wop *d = &in->o[0], *s = &in->o[1];
 	int w = c->w;
 	uint32_t r;
 
@@ -434,7 +455,7 @@ static void st_step(struct wctx *c, struct fstate *f, const struct cell_insn *in
 		    !(s->flags & CELL_OF_RIPREL)) {
 			if (s->reg == CELL_REG_SP) {
 				f->reg[d->reg].t = V_SADDR;
-				f->reg[d->reg].v = -(int64_t)f->sp + s->disp;
+				f->reg[d->reg].v = -(int64_t)f->sp + s->v;
 				f->reg[d->reg].node = 0;
 				if (d->reg == CELL_REG_BP) {
 					f->bp_known = 1;
@@ -444,7 +465,7 @@ static void st_step(struct wctx *c, struct fstate *f, const struct cell_insn *in
 			}
 			if (s->reg == CELL_REG_BP && f->bp_known) {
 				f->reg[d->reg].t = V_SADDR;
-				f->reg[d->reg].v = (int64_t)f->bp_off + s->disp;
+				f->reg[d->reg].v = (int64_t)f->bp_off + s->v;
 				f->reg[d->reg].node = 0;
 				return;
 			}
@@ -476,16 +497,16 @@ static void st_step(struct wctx *c, struct fstate *f, const struct cell_insn *in
 	case CELL_SUB:
 		if (in->n_op >= 2u && d->kind == CELL_O_REG &&
 		    d->reg == CELL_REG_SP && s->kind == CELL_O_IMM) {
-			f->sp += in->op == CELL_SUB ? (int32_t)s->imm
-						    : -(int32_t)s->imm;
+			f->sp += in->op == CELL_SUB ? (int32_t)s->v
+						    : -(int32_t)s->v;
 			return;
 		}
 		/* A stack address moved by a constant is another stack address. */
 		if (in->n_op >= 2u && d->kind == CELL_O_REG && d->reg < 16u &&
 		    d->size >= 4u && s->kind == CELL_O_IMM &&
 		    f->reg[d->reg].t == V_SADDR) {
-			f->reg[d->reg].v += in->op == CELL_SUB ? -(int64_t)(int32_t)s->imm
-							       : (int64_t)(int32_t)s->imm;
+			f->reg[d->reg].v += in->op == CELL_SUB ? -(int64_t)(int32_t)s->v
+							       : (int64_t)(int32_t)s->v;
 			return;
 		}
 		break;
@@ -501,7 +522,7 @@ static void st_step(struct wctx *c, struct fstate *f, const struct cell_insn *in
 		 */
 		if (in->n_op >= 2u && d->kind == CELL_O_REG && d->reg < 16u &&
 		    s->kind == CELL_O_IMM && d->size != 2u) {
-			uint64_t bit = (uint64_t)s->imm;
+			uint64_t bit = (uint64_t)s->v;
 			struct sv *rv = &f->reg[d->reg];
 
 			if (d->size == 1u) {
@@ -595,115 +616,514 @@ static int push_u64(uint64_t **v, uint32_t *n, uint32_t *cap, uint64_t x)
 	return 1;
 }
 
-static int is_kernel_entry(const struct wctx *c, const struct cell_insn *in)
+static int is_kernel_entry(const struct wctx *c, const struct winsn *in)
 {
 	const uint8_t *p = c->base + in->at;
 
 	if (in->op == CELL_SYSCALL)
 		return p[0] == 0x0fu && p[1] == 0x05u ? c->wide : !c->wide;
 	if (in->op == CELL_INT && in->n_op && in->o[0].kind == CELL_O_IMM &&
-	    in->o[0].imm == 0x80u)
+	    in->o[0].v == 0x80u)
 		return 1;
 	return 0;
 }
 
 /*
- * ---- ONE STREAM OF INSTRUCTIONS, WHEREVER IT COMES FROM ----------------------
+ * ---- THE DECODE, ONCE ------------------------------------------------------
  *
- * A segment's instructions are either walked out of the trace the first pass
- * kept or decoded as before, and the caller cannot tell which: it asks for the
- * next one. THE TRACE IS A CACHE, NOT A SECOND WALK - it holds exactly what
- * decoding would have returned, in the same order, resynchronising over the same
- * bytes, so a segment whose trace is complete is read from memory and one whose
- * trace is not (it outgrew W_TRACE_MAX) is decoded again, with the same result.
+ * A decode is a pure function of the bytes at an offset: the same offset in the
+ * same space gives the same instruction however it is reached. pass_a decodes
+ * every instruction of every executable segment, pass_b reads the same ones
+ * again (twice, when a global is read before it is written) and `summarise`
+ * walks function bodies that pass_a has already decoded - MEASURED on a 7.2 MB
+ * static x86 ELF, 3.25 M + 0.39 M decodes of a ~1.6 M instruction image, and a
+ * decode is ~800 Ir against ~100 for reading one back. So the first decode is
+ * kept and every later read of an offset the trace holds is served from it.
  *
- * THE BOUND IS ON MEMORY, NOT ON WHAT IS FOUND. An instruction is a hundred and
- * twenty bytes, so W_TRACE_MAX of them is a fixed ~30 MB however large the image;
- * past it nothing is dropped from the analysis, only from the cache.
+ * THE TRACE IS A CACHE, NOT A SECOND WALK. Nothing is read from it that decoding
+ * would not have returned: a record is a struct winsn - what this file reads of
+ * an instruction, and the only form of one it sees - packed, and unpacking gives
+ * back that struct field for field. Checked end to end: the node dump of 1119
+ * files is byte for byte the one decoding every time, and so it is with the
+ * stream cut to 4 KiB, 150 KiB, 2 MiB and 8 MiB, which makes the prefix, the
+ * seek-into-the-middle and the decode-after-the-end paths carry most of it. An
+ * offset the trace does not hold is decoded exactly as before. The code below has
+ * ONE decoder entry, wdecode(), for both.
+ *
+ * WHAT A winsn LEAVES OUT of struct cell_insn: `cond` and `target_va`, which
+ * nothing here reads, `wmask` above bit 15 (only the sixteen general registers
+ * are tracked), and the displacement/immediate that the operand's kind makes
+ * meaningless. Leaving them out is what lets it be packed; reading one would
+ * not compile.
+ *
+ * THE BOUND IS ON MEMORY, NOT ON WHAT IS FOUND. The record stream is limited to
+ * W_TRACE_BYTES and its index (one entry per W_TRACE_EVERY records, 8 bytes, at
+ * most 1/14 of the stream) comes on top. MEASURED on a 7.2 MB static ELF, 1,025,877
+ * instructions pack to 22,795,487 bytes - 22.2 each against the 120 of a
+ * cell_insn - so the same 32 MiB that held 262144 instructions as cell_insns
+ * holds about 1.5 M.
+ * Past it the stream stops growing and the rest of the image is decoded again:
+ * a trace is a prefix of its segment's walk, and the walk continues from where
+ * the prefix ends, so nothing is dropped from the analysis, only from the cache.
+ * Rule 4.
  */
-#define W_TRACE_MAX 262144u
+#define W_TRACE_BYTES  (32u << 20)
+#define W_TRACE_EVERY  16u
+#define W_REC_MAX      80u
 
-struct isrc {
-	struct wctx *c;
-	const struct cell_insn *tr;     /* the cached stream, or NULL */
-	uint32_t i, n;
-	struct kof_cell_cur k;
-	uint64_t end;
-};
-
-static int isrc_open(struct isrc *it, struct wctx *c, unsigned seg,
-		     uint64_t off, uint64_t n)
+static void winsn_of(struct winsn *w, const struct cell_insn *in)
 {
-	memset(it, 0, sizeof *it);
-	it->c = c;
-	it->end = off + n;
-	if (c->tseg[seg].ok) {
-		it->tr = c->tr + c->tseg[seg].first;
-		it->n = c->tseg[seg].n;
-		return 1;
+	unsigned i, n = in->n_op < 3u ? in->n_op : 3u;
+
+	w->at = in->at;
+	w->at_va = in->at_va;
+	w->target = in->target;
+	w->wmask = (uint16_t)in->wmask;
+	w->op = in->op;
+	w->len = in->len;
+	w->n_op = (uint8_t)n;
+	w->flags = in->flags;
+	for (i = 0; i < 3u; i++) {
+		struct wop *d = &w->o[i];
+
+		if (i >= n) {           /* absent: say so, as the decoder does */
+			d->kind = CELL_O_NONE;
+			d->reg = d->index = d->seg = CELL_REG_NONE;
+			d->scale = d->size = d->flags = 0;
+			d->v = 0;
+			continue;
+		}
+		d->kind = in->o[i].kind;
+		d->reg = in->o[i].reg;
+		d->index = in->o[i].index;
+		d->scale = in->o[i].scale;
+		d->size = in->o[i].size;
+		d->flags = in->o[i].flags;
+		d->seg = in->o[i].seg;
+		d->v = d->kind == CELL_O_MEM ? in->o[i].disp
+		     : d->kind == CELL_O_IMM || d->kind == CELL_O_REL
+		       ? (int64_t)in->o[i].imm : 0;
 	}
-	return kof_cell_seek(&it->k, off, 0);
 }
 
-static int isrc_next(struct isrc *it, struct cell_insn *in)
+/* The one place an instruction is decoded in this file. */
+static int wdecode(const struct wctx *c, struct kof_cell_cur *k, struct winsn *w)
 {
-	if (it->tr) {
-		if (it->i >= it->n)
-			return 0;
-		*in = it->tr[it->i++];
-		return 1;
+	struct cell_insn ci;
+
+	if (!kof_cell_step(k, &c->sp, &ci))
+		return 0;
+	winsn_of(w, &ci);
+	return 1;
+}
+
+/*
+ * ---- the record --------------------------------------------------------------
+ *
+ *   rlen ctl op len flags wmask(2)  [at(4)] [delta(8)] [target(4)]  operand*
+ *
+ * `at` is the end of the record before unless ctl says otherwise (a walk that
+ * stepped over bytes that did not decode, and every WT_EVERY-th record, which
+ * must be readable alone because the index points at it). `delta` is
+ * at_va - at, repeated from the record before unless ctl says otherwise; an
+ * operand is its seven bytes and its value, zigzag-varint.
+ */
+#define WT_HAS_AT    0x01u
+#define WT_HAS_DELTA 0x02u
+#define WT_HAS_TGT   0x04u
+#define WT_NOP_SHIFT 4u
+
+static uint8_t *put_vz(uint8_t *p, int64_t v)
+{
+	uint64_t z = ((uint64_t)v << 1) ^ (uint64_t)(v >> 63);
+
+	while (z >= 0x80u) {
+		*p++ = (uint8_t)(z | 0x80u);
+		z >>= 7;
 	}
-	while (it->k.at < it->end) {
-		if (kof_cell_step(&it->k, &it->c->sp, in))
+	*p++ = (uint8_t)z;
+	return p;
+}
+
+static int64_t get_vz(const uint8_t **pp)
+{
+	const uint8_t *p = *pp;
+	uint64_t z = 0;
+	unsigned sh = 0;
+
+	for (;;) {
+		uint8_t b = *p++;
+
+		z |= (uint64_t)(b & 0x7fu) << sh;
+		if (!(b & 0x80u))
+			break;
+		sh += 7u;
+	}
+	*pp = p;
+	return (int64_t)(z >> 1) ^ -(int64_t)(z & 1u);
+}
+
+static void trace_give_up(struct wseg *g)
+{
+	g->complete = 0;
+	g->given_up = 1;
+}
+
+/* Keep what pass_a saw. Once a segment has been given up it stays given up: a
+ * trace is a prefix of the walk and never has a hole in it. */
+static void trace_put(struct wctx *c, unsigned seg, const struct winsn *w)
+{
+	struct wseg *g = &c->tseg[seg];
+	uint8_t rec[W_REC_MAX], *p = rec + 7;
+	uint64_t delta = w->at_va - w->at;
+	unsigned ctl = 0, i;
+	int first;
+
+	if (g->given_up)
+		return;
+	first = !(g->n % W_TRACE_EVERY);
+	/* An offset or a target that does not fit 32 bits: the image is not one
+	 * this record can hold (size is checked at open, a target is not). */
+	if (w->at > 0xffffffffu ||
+	    (w->target != KOF_BROKEN && w->target > 0xffffffffu)) {
+		trace_give_up(g);
+		return;
+	}
+	if (first || w->at != c->pk_end) {
+		ctl |= WT_HAS_AT;
+		memcpy(p, &(uint32_t){ (uint32_t)w->at }, 4);
+		p += 4;
+	}
+	if (first || delta != c->pk_delta) {
+		ctl |= WT_HAS_DELTA;
+		memcpy(p, &delta, 8);
+		p += 8;
+	}
+	if (w->target != KOF_BROKEN) {
+		ctl |= WT_HAS_TGT;
+		memcpy(p, &(uint32_t){ (uint32_t)w->target }, 4);
+		p += 4;
+	}
+	ctl |= (unsigned)w->n_op << WT_NOP_SHIFT;
+	for (i = 0; i < w->n_op; i++) {
+		const struct wop *o = &w->o[i];
+
+		p[0] = o->kind; p[1] = o->reg; p[2] = o->index; p[3] = o->scale;
+		p[4] = o->size; p[5] = o->flags; p[6] = o->seg;
+		p = put_vz(p + 7, o->v);
+	}
+	rec[0] = (uint8_t)(p - rec);
+	rec[1] = (uint8_t)ctl;
+	rec[2] = w->op;
+	rec[3] = w->len;
+	rec[4] = w->flags;
+	rec[5] = (uint8_t)w->wmask;
+	rec[6] = (uint8_t)(w->wmask >> 8);
+
+	if (c->n_tr + rec[0] > c->cap_tr) {
+		size_t nc = c->cap_tr ? (size_t)c->cap_tr * 2u : 1u << 16;
+		uint8_t *nt;
+
+		if (nc > W_TRACE_BYTES)
+			nc = W_TRACE_BYTES;
+		if (c->n_tr + rec[0] > nc ||
+		    !(nt = realloc(c->tr, nc))) {
+			trace_give_up(g);
+			return;
+		}
+		c->tr = nt;
+		c->cap_tr = (uint32_t)nc;
+	}
+	if (first) {
+		if (c->n_ix == c->cap_ix) {
+			uint32_t nc = c->cap_ix ? c->cap_ix * 2u : 1024u;
+			struct widx *nx = realloc(c->ix, (size_t)nc * sizeof *nx);
+
+			if (!nx) {
+				trace_give_up(g);
+				return;
+			}
+			c->ix = nx;
+			c->cap_ix = nc;
+		}
+		c->ix[c->n_ix].at = (uint32_t)w->at;
+		c->ix[c->n_ix].pos = c->n_tr;
+		c->n_ix++;
+		g->n_ix++;
+	}
+	memcpy(c->tr + c->n_tr, rec, rec[0]);
+	c->n_tr += rec[0];
+	g->end = c->n_tr;
+	g->n++;
+	c->pk_end = w->at + w->len;
+	c->pk_delta = delta;
+}
+
+/* A record read back. `at` and `delta` are the reader's, because a record that
+ * does not carry them takes them from the one before. */
+struct wrd {
+	const uint8_t *p;
+	uint64_t at, delta;
+};
+
+static void trace_get(struct wrd *r, struct winsn *w)
+{
+	const uint8_t *p = r->p, *q = p + 7;
+	unsigned ctl = p[1], n = (ctl >> WT_NOP_SHIFT) & 3u, i;
+
+	w->op = p[2];
+	w->len = p[3];
+	w->flags = p[4];
+	w->wmask = (uint16_t)(p[5] | (unsigned)p[6] << 8);
+	if (ctl & WT_HAS_AT) {
+		uint32_t a;
+
+		memcpy(&a, q, 4);
+		r->at = a;
+		q += 4;
+	}
+	if (ctl & WT_HAS_DELTA) {
+		memcpy(&r->delta, q, 8);
+		q += 8;
+	}
+	w->at = r->at;
+	w->at_va = r->at + r->delta;
+	if (ctl & WT_HAS_TGT) {
+		uint32_t t;
+
+		memcpy(&t, q, 4);
+		w->target = t;
+		q += 4;
+	} else {
+		w->target = KOF_BROKEN;
+	}
+	w->n_op = (uint8_t)n;
+	for (i = 0; i < n; i++) {
+		struct wop *o = &w->o[i];
+
+		o->kind = q[0]; o->reg = q[1]; o->index = q[2]; o->scale = q[3];
+		o->size = q[4]; o->flags = q[5]; o->seg = q[6];
+		q += 7;
+		o->v = get_vz(&q);
+	}
+	for (; i < 3u; i++) {
+		struct wop *o = &w->o[i];
+
+		o->kind = CELL_O_NONE;
+		o->reg = o->index = o->seg = CELL_REG_NONE;
+		o->scale = o->size = o->flags = 0;
+		o->v = 0;
+	}
+	r->at += w->len;
+	r->p = p + p[0];
+}
+
+/* The record the trace of segment `g` holds AT `off`, if it holds one. The index
+ * gets within W_TRACE_EVERY records of it and the rest is a walk over record
+ * headers, which carry their own length. */
+static int trace_find(const struct wctx *c, const struct wseg *g, uint64_t off,
+		      struct wrd *r)
+{
+	uint32_t lo = 0, hi = g->n_ix;
+	const uint8_t *p, *pend = c->tr + g->end;
+	uint64_t at = 0, delta = 0;
+
+	if (off < g->lo || off >= g->hi || !g->n_ix)
+		return 0;
+	while (lo < hi) {               /* the last entry at or before `off` */
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (c->ix[g->ix + mid].at <= off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	if (!lo)
+		return 0;
+	p = c->tr + c->ix[g->ix + lo - 1u].pos;
+	while (p < pend) {
+		unsigned ctl = p[1];
+		const uint8_t *q = p + 7;
+
+		if (ctl & WT_HAS_AT) {
+			uint32_t a;
+
+			memcpy(&a, q, 4);
+			at = a;
+			q += 4;
+		}
+		if (ctl & WT_HAS_DELTA)
+			memcpy(&delta, q, 8);
+		if (at == off) {
+			r->p = p;
+			r->at = at;
+			r->delta = delta;
 			return 1;
-		it->k.at++;                     /* data in the code: step over it */
+		}
+		if (at > off)
+			return 0;
+		at += p[3];
+		p += p[0];
 	}
 	return 0;
 }
 
-/* Keep what pass_a saw. Once the cache is full it stays full: a segment that
- * did not fit whole is not cached at all, so a trace is never a prefix. */
-static void trace_add(struct wctx *c, unsigned seg, const struct cell_insn *in)
-{
-	if (!c->tseg[seg].first && !c->tseg[seg].n)
-		c->tseg[seg].first = c->n_tr;
-	if (c->tseg[seg].ok == 2u)              /* already given up */
-		return;
-	if (c->n_tr == c->cap_tr) {
-		uint32_t nc = c->cap_tr ? c->cap_tr * 2u : 4096u;
-		struct cell_insn *nt;
+/*
+ * ---- ONE STREAM OF INSTRUCTIONS, WHEREVER IT COMES FROM ------------------------
+ *
+ * Two ways to read, and the caller cannot tell where an instruction came from:
+ *
+ *   SCAN, for a linear sweep of a segment (pass_b): reads the trace of that
+ *     segment from its first record, and decodes the rest if the trace is a
+ *     prefix. Bytes that do not decode are stepped over - in the trace they are
+ *     the gap before the next record, which is the walk pass_a made.
+ *   WALK, for following a function body (summarise): starts at any offset and
+ *     goes on from there; an instruction that does not decode ends the walk.
+ *     Seeking to an offset the trace holds replays from it; to one it does not,
+ *     decodes. The walk leaves the trace when the next record is not the
+ *     instruction at its offset and decodes from there.
+ */
+struct isrc {
+	struct wctx *c;
+	uint64_t at;                    /* where the next instruction is read */
+	uint64_t end;                   /* a scan stops at or after this */
+	struct wrd rd;
+	const uint8_t *rend;            /* the trace being replayed, or NULL */
+	int scan;
+	int whole;                      /* the trace holds the whole of the range */
+	struct kof_cell_cur k;
+	int kat;                        /* `k` is positioned at `at` */
+};
 
-		if (nc > W_TRACE_MAX)
-			nc = W_TRACE_MAX;
-		if (c->n_tr >= nc ||
-		    !(nt = realloc(c->tr, (size_t)nc * sizeof *nt))) {
-			c->tseg[seg].ok = 2u;
-			return;
-		}
-		c->tr = nt;
-		c->cap_tr = nc;
+static void isrc_scan(struct isrc *it, struct wctx *c, unsigned seg,
+		      uint64_t off, uint64_t n)
+{
+	const struct wseg *g = &c->tseg[seg];
+
+	memset(it, 0, sizeof *it);
+	it->c = c;
+	it->at = off;
+	it->end = off + n;
+	it->scan = 1;
+	if (g->n) {
+		it->rd.p = c->tr + g->pos;
+		it->rend = c->tr + g->end;
+		it->whole = g->complete;
 	}
-	c->tr[c->n_tr++] = *in;
-	c->tseg[seg].n++;
 }
 
+static void isrc_seek(struct isrc *it, uint64_t off)
+{
+	struct wctx *c = it->c;
+	unsigned i;
+
+	it->at = off;
+	it->kat = 0;
+	it->rend = NULL;
+	for (i = 0; i < KOF_ELF_MAX_SEGMENTS; i++)
+		if (trace_find(c, &c->tseg[i], off, &it->rd)) {
+			it->rend = c->tr + c->tseg[i].end;
+			return;
+		}
+}
+
+static void isrc_walk(struct isrc *it, struct wctx *c, uint64_t off)
+{
+	memset(it, 0, sizeof *it);
+	it->c = c;
+	it->end = UINT64_MAX;
+	isrc_seek(it, off);
+}
+
+static int isrc_next(struct isrc *it, struct winsn *w)
+{
+	if (it->rend) {
+		if (it->rd.p < it->rend) {
+			struct wrd t = it->rd;
+
+			trace_get(&t, w);
+			/* A scan takes the next record wherever it is - the bytes
+			 * before it did not decode. A walk takes it only where it
+			 * is. */
+			if (it->scan || w->at == it->at) {
+				it->rd = t;
+				it->at = w->at + w->len;
+				return 1;
+			}
+		} else if (it->whole) {
+			return 0;
+		} else {
+			it->at = it->rd.at;     /* where the prefix ends */
+		}
+		it->rend = NULL;
+		it->kat = 0;
+	}
+	for (;;) {
+		if (it->at >= it->end)
+			return 0;
+		if (!it->kat) {
+			kof_cell_seek(&it->k, it->at, 0);
+			it->kat = 1;
+		}
+		if (wdecode(it->c, &it->k, w)) {
+			it->at = it->k.at;
+			return 1;
+		}
+		if (!it->scan)
+			return 0;
+		it->k.at++;                     /* data in the code: step over it */
+		it->at = it->k.at;
+	}
+}
+
+/*
+ * WHY THE WHOLE IMAGE IS DECODED HERE, and not only the windows around syscall
+ * sites and around the callers of a wrapper found by searching the bytes for
+ * `e8 rel32` that lands on it. Tried, and measured against this pass:
+ *
+ *   - THE CALL TARGETS a byte search names are not the ones decoding finds. Over
+ *     255 ELF files: 299,857 decoded, 304,425 by bytes, 20,166 of the decoded ones
+ *     missing (the `jmp` thunks a function starts with, which need to know the
+ *     instruction before them is a ret/jmp/nop, and calls behind a prefix) and
+ *     24,734 invented (an `e8` inside an immediate or a displacement whose bytes
+ *     happen to land in the image). Putting the byte-found set in place of this
+ *     pass's changes the node dump of 79 of 1119 files (one lost 218 of 394
+ *     nodes) with `e8` alone, and 248 with a heuristic for the `e9` thunks.
+ *   - THE SYSCALL SITES a byte search names are a superset (18,915 decoded,
+ *     20,649 by bytes, none missing) and the extra ones are harmless: a site only
+ *     selects an entry, and summarise decodes forward from that entry, so a site
+ *     in the middle of an instruction is never reached. Replacing this pass's
+ *     sites with the byte-found ones changes no file of the 1119.
+ *
+ * So the sites could come from bytes; the call targets cannot - an entry is a
+ * fact about alignment and alignment is a decode. Hence one decode of the image,
+ * kept (see THE DECODE, ONCE) and read from there.
+ */
 static int pass_a(struct wctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
 	struct kof_cell_cur k;
-	struct cell_insn in;
+	struct winsn in;
+	struct wseg *g = &c->tseg[seg];
 
 	/* Whether the instruction before ended a function's straight line. */
 	int boundary = 1;
 
 	memset(&k, 0, sizeof k);
+	g->lo = off;
+	g->hi = off + n;
+	g->pos = c->n_tr;
+	g->end = c->n_tr;
+	g->ix = c->n_ix;
+	g->complete = c->tr_on != 0;
+	g->given_up = !c->tr_on;
 	if (!kof_cell_seek(&k, off, 0))
 		return 1;
 	while (k.at < off + n) {
-		if (!kof_cell_step(&k, &c->sp, &in)) {
+		if (!wdecode(c, &k, &in)) {
 			k.at++;                 /* data in the code: step over it */
 			continue;
 		}
-		trace_add(c, seg, &in);
+		trace_put(c, seg, &in);
 		if (in.op == CELL_CALL && !(in.flags & CELL_F_INDIRECT) &&
 		    in.target != KOF_BROKEN) {
 			if (!push_u64(&c->tgt, &c->n_tgt, &c->cap_tgt, in.target))
@@ -729,8 +1149,6 @@ static int pass_a(struct wctx *c, unsigned seg, uint64_t off, uint64_t n)
 		boundary = in.op == CELL_RET || in.op == CELL_JMP ||
 			   in.op == CELL_NOP;
 	}
-	/* Complete only if nothing was refused on the way. */
-	c->tseg[seg].ok = c->tseg[seg].ok == 2u ? 0u : 1u;
 	return 1;
 }
 
@@ -764,7 +1182,7 @@ static int site_open(const struct wctx *c, uint64_t at)
 /* One path through a wrapper that ended in a syscall or a call to a wrapper,
  * turned into a summary. 1 when it says something about the parameters. */
 static int summarise_end(struct wctx *c, struct fstate *f, uint64_t entry,
-			 const struct cell_insn *in, struct wsum *callee,
+			 const struct winsn *in, struct wsum *callee,
 			 struct wsum *out)
 {
 	static const uint8_t k64[] = { CELL_REG_DI, CELL_REG_SI, CELL_REG_DX,
@@ -899,8 +1317,8 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 	n_pend = 1;
 	while (n_pend && n_out < W_VARIANTS) {
 		struct pend *p = &pend[--n_pend];
-		struct kof_cell_cur k;
-		struct cell_insn in;
+		struct isrc it;
+		struct winsn in;
 		/*
 		 * A COPY, not the table's own entry. The entry that was just taken is
 		 * the very slot the next forward branch queues its taken path into, so
@@ -913,9 +1331,7 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 		struct fstate *f = &fcur;
 		unsigned n_insn = p->n;
 
-		memset(&k, 0, sizeof k);
-		if (!kof_cell_seek(&k, p->at, 0))
-			continue;
+		isrc_walk(&it, c, p->at);
 		for (;;) {
 			struct wsum *callee = NULL;
 			uint32_t v;
@@ -923,7 +1339,7 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 
 			if (++n_insn > W_BODY)
 				break;
-			if (!kof_cell_step(&k, &c->sp, &in))
+			if (!isrc_next(&it, &in))
 				break;
 			/* A direct jump to a function already summarised is a TAIL
 			 * CALL: the same question as a call that is followed by ret. */
@@ -978,8 +1394,7 @@ static unsigned summarise(struct wctx *c, uint64_t entry, struct wsum *out)
 			if (in.op == CELL_JMP && !(in.flags & CELL_F_INDIRECT) &&
 			    in.target != KOF_BROKEN && in.target > in.at &&
 			    in.target - entry <= W_SPAN) {
-				if (!kof_cell_seek(&k, in.target, 0))
-					break;
+				isrc_seek(&it, in.target);
 				continue;
 			}
 			/* a call to something else, a return, a jump out: not this path */
@@ -1114,7 +1529,7 @@ static void eval_call(const struct wctx *c, struct fstate *f,
 }
 
 static struct sv emit_call_node(struct wctx *c, struct fstate *f, struct wsum *ws,
-				const struct cell_insn *in)
+				const struct winsn *in)
 {
 	struct kof_diag_scan *s = c->s;
 	struct ev e;
@@ -1235,37 +1650,43 @@ static int tgt_index(const struct wctx *c, uint64_t at)
 	return lo < c->n_tgt && c->tgt[lo] == at ? (int)lo : -1;
 }
 
-static int is_entry(const struct wctx *c, uint64_t at)
-{
-	uint32_t lo = 0, hi = c->n_tgt;
-
-	while (lo < hi) {
-		uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (c->tgt[mid] < at)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
-	return lo < c->n_tgt && c->tgt[lo] == at;
-}
-
 static void pass_b(struct wctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
 	struct isrc it;
-	struct cell_insn in;
+	struct winsn in;
 	struct fstate f;
 	int cur = -1;                   /* the call target this code belongs to */
+	uint32_t ei;                    /* the first call target not before the code */
 
 	st_reset(&f);
-	if (!isrc_open(&it, c, seg, off, n))
-		return;
+	isrc_scan(&it, c, seg, off, n);
+	/*
+	 * THE ENTRY TEST IS A MERGE, NOT A SEARCH. The instructions of one scan come
+	 * in increasing offset and the targets are sorted, so a position that only
+	 * moves forward answers "is this an entry" - a binary search per
+	 * instruction was ~90 Ir of a pass that costs ~300 per instruction.
+	 */
+	{
+		uint32_t lo = 0, hi = c->n_tgt;
+
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+
+			if (c->tgt[mid] < off)
+				lo = mid + 1u;
+			else
+				hi = mid;
+		}
+		ei = lo;
+	}
 	while (!c->s->full && isrc_next(&it, &in)) {
 		struct wsum *ws;
 
-		if (is_entry(c, in.at)) {
+		while (ei < c->n_tgt && c->tgt[ei] < in.at)
+			ei++;
+		if (ei < c->n_tgt && c->tgt[ei] == in.at) {
 			st_reset(&f);
-			cur = tgt_index(c, in.at);
+			cur = (int)ei;
 		}
 		/*
 		 * A FUNCTION THAT HANDS BACK WHAT IT MADE. Mirai builds its raw sockets
@@ -1373,6 +1794,7 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 	c.size = size;
 	c.wide = ctx->arch == KOF_ARCH_X86_64;
 	c.w = c.wide ? 8 : 4;
+	c.tr_on = size <= 0xffffffffu;
 
 	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
 		uint64_t at, have = seg_range(ctx, e, i, size, &at);
@@ -1522,6 +1944,7 @@ out:
 	free(c.open);
 	free(c.fret);
 	free(c.tr);
+	free(c.ix);
 	free(c.fmiss);
 	free(c.ws);
 	free(c.glob);

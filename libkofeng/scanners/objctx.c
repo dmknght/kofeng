@@ -79,11 +79,6 @@
 #include <unistd.h>
 #include <celllysis/space.h>
 
-struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx)
-{
-	return &kof_scan_of(ctx)->m;
-}
-
 static uint8_t c_rd8(const struct kof_obj_ctx *ctx, uint64_t off)
 {
 	uint8_t v = 0;

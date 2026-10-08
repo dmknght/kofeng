@@ -390,6 +390,24 @@ enum kof_diag_fact {
 	 * than being started on every object and returning at once.
 	 */
 	KOF_FACT_FORMAT,
+	/*
+	 * WHETHER AN ELF NAMES A DYNAMIC LINKER - a PT_INTERP program header,
+	 * value 1, or none, value 0.
+	 *
+	 * What it separates is where the program's system calls ARE. A binary
+	 * linked against a shared libc contains none: it calls `socket` through
+	 * the import table and the `syscall` instruction lives in a library this
+	 * file does not carry, so reading its code for system calls finds
+	 * nothing. A static one carries its libc, and every system call it can
+	 * make is in the file with no symbol to resolve it by - which is the
+	 * only case where sweeping the code is the way to read it.
+	 *
+	 * MEASURED, and the reason this exists: a diagnose with no condition
+	 * runs on every object that reaches a rule reading it, and the system
+	 * call route was 66% of the instructions a scan of 40 mixed files
+	 * executed. A format with no program headers (PE, script) answers no.
+	 */
+	KOF_FACT_INTERP,
 	KOF_FACT_COUNT
 };
 

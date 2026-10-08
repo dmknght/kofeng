@@ -86,11 +86,6 @@
 #include "../kofcore/kofplatform.h"
 #include "../analyzers/normalize/executables.h"
 
-struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
-{
-	return (struct kof_scanner *)(void *)(uintptr_t)ctx->priv;
-}
-
 struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 {
 	struct kof_scanner *sc = calloc(1, sizeof *sc);
