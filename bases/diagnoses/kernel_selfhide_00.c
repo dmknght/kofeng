@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * lkm_selfhide_00.c - a kernel module unlinking itself from the kernel's
+ * kernel_selfhide_00.c - a kernel module unlinking itself from the kernel's
  * list of loaded modules.
  *
  *     list_del(&THIS_MODULE->list);

@@ -1914,16 +1914,16 @@ int kof_diag_scan_name(const struct kof_diag_scan *s, const struct kof_diag *d,
 
 /* ---- loading -------------------------------------------------------------
  *
- * A .kdig FILE IS ONE DIAGNOSE and nothing else - no module, no pattern, no
- * blob. That is why it is a file beside the packs rather than a section
- * inside one: the pack header carries a fixed-size section table, so one
- * more section is a format change every database in existence has to be
+ * A RECORD IS ONE DIAGNOSE and nothing else - no module, no pattern, no blob.
+ * The records of a database are carried in diag-<kind>.kdig packs (see
+ * load_diagnoses in dbloader.c), which is a file beside the packs rather than a
+ * section inside one: the pack header carries a fixed-size section table, so
+ * one more section is a format change every database in existence has to be
  * rebuilt for, and none of what a pack exists to carry applies here.
  *
- * EVERYTHING IS BOUNDS CHECKED AGAINST THE FILE'S OWN LENGTH, and a file
- * that does not add up is refused whole rather than loaded in part. A
- * diagnose half read is a diagnose that matches something its author did
- * not write.
+ * EVERYTHING IS BOUNDS CHECKED AGAINST THE RECORD'S OWN LENGTH, and a record
+ * that does not add up is refused whole rather than loaded in part. A diagnose
+ * half read is a diagnose that matches something its author did not write.
  */
 
 int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,

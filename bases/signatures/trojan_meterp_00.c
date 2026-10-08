@@ -27,8 +27,8 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	/*
 	 * ONE READ, DOING BOTH JOBS.
 	 *
-	 * DIAG_SYSCALL_MEMEXEC is a W+X region that a read fills and a call
-	 * enters. DIAG_SYSCALL_NETRECV is a connected socket whose
+	 * DIAG_MEM_EXECSYSCALL is a W+X region that a read fills and a call
+	 * enters. DIAG_NET_RECVSYSCALL is a connected socket whose
 	 * descriptor a read uses. Each on its own is ordinary - the first is
 	 * every self-unpacking loader, the second is every downloader - and
 	 * what makes the pair a stager is that THE READ IS THE SAME READ:
@@ -45,9 +45,9 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * satisfied by a shared allocation or a shared resolve, which a
 	 * packed binary is full of.
 	 */
-	if (kof_diag(DIAG_SYSCALL_MEMEXEC) &&
-	    kof_diag(DIAG_SYSCALL_NETRECV) &&
-	    kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_SYSCALL_MEMEXEC,
-			   DIAG_SYSCALL_NETRECV))
+	if (kof_diag(DIAG_MEM_EXECSYSCALL) &&
+	    kof_diag(DIAG_NET_RECVSYSCALL) &&
+	    kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_MEM_EXECSYSCALL,
+			   DIAG_NET_RECVSYSCALL))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }

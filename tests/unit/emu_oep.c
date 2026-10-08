@@ -171,7 +171,7 @@ static enum kof_emu_stop run(unsigned long dst, enum how how, unsigned plen,
 		ck(0, "the fixture did not build or parse");
 		goto out;
 	}
-	e = kof_emu_unp_run_pe(f, len, info, BUDGET, 0, 0, 0, NULL, 0, NULL, 0, 0,
+	e = kof_emu_unp_run_pe(f, len, info, BUDGET, 0, 0, 0, NULL, 0, NULL,
 			       &rep);
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image");
@@ -207,7 +207,7 @@ static void resolves(void)
 	if (f && info && ctx && kof_pe_parse(kof_buf_make(f, len), info, ctx) &&
 	    info->valid)
 		e = kof_emu_unp_run_pe(f, len, info, 1000, 0, 0, 0, NULL, 0, NULL,
-				       0, 0, &rep);
+				       &rep);
 	if (!e) {
 		ck(0, "no machine to resolve against");
 	} else {

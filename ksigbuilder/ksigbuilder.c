@@ -6508,6 +6508,193 @@ static int tree_src_add(char (**srcs)[TREE_SRC_MAX], uint32_t *n, uint32_t *cap,
 
 static int diagnose_main(int argc, char **argv);
 
+/*
+ * THE DIAGNOSES OF A DATABASE, in packs by KIND: diag-<kind>.kdig.
+ *
+ *     "KDGP"   magic
+ *     u8       version, 1
+ *     u8       0
+ *     u16      count
+ *     count x  { u32 offset, u32 length }       from the start of the file
+ *     the records, each exactly what diagnose_main wrote - one diagnose
+ *
+ * The kind is the first word of the source's name - net_, pe_, syscall_,
+ * kernel_ - the same type_family_NN.c convention the signatures follow, so a
+ * pack is named for what its diagnoses are about the way sigs-elf and heur-pe
+ * are named for theirs: diag-net.kdig, diag-syscall.kdig. One file per diagnose
+ * made the set a database held depend on a directory listing; one file for all
+ * of them made a change to one diagnose a change to every pack consumer's file.
+ *
+ * A file of their own and not a section of a .ksig: the pack header carries a
+ * fixed section table, so one more section there is a change to the format of
+ * every database in existence, and none of what a pack exists to carry applies
+ * to a diagnose. Records are sorted by NAME before they are written, so the same
+ * sources give the same bytes whatever order the directory listed them in.
+ */
+static char *dup_n(const char *p, size_t n)
+{
+	char *o = malloc(n + 1u);
+
+	if (o) {
+		memcpy(o, p, n);
+		o[n] = 0;
+	}
+	return o;
+}
+
+struct diag_rec {
+	unsigned char *b;
+	size_t         n;
+	char          *kind;            /* the pack it goes in */
+};
+
+static int diag_rec_cmp(const void *x, const void *y)
+{
+	const struct diag_rec *a = x, *c = y;
+	size_t la = a->b[3], lc = c->b[3];
+	int r = memcmp(a->b + 4, c->b + 4, la < lc ? la : lc);
+
+	if (r)
+		return r;
+	return la < lc ? -1 : la > lc;
+}
+
+/* What an earlier build wrote - one diag-NAME.kdig each, or one diagnoses.kdig -
+ * is removed first, so a database directory cannot hold two generations. */
+static void clear_diag_packs(const char *db)
+{
+	char path[4200];
+	DIR *dd = opendir(db);
+	struct dirent *de;
+
+	while (dd && (de = readdir(dd)) != NULL) {
+		size_t l = strlen(de->d_name);
+
+		if ((l > 10u && !strncmp(de->d_name, "diag-", 5u) &&
+		     !strcmp(de->d_name + l - 5u, ".kdig")) ||
+		    !strcmp(de->d_name, "diagnoses.kdig")) {
+			snprintf(path, sizeof path, "%s/%s", db, de->d_name);
+			(void)remove(path);
+		}
+	}
+	if (dd)
+		closedir(dd);
+}
+
+/* One pack: the records of `r[0..n)` that belong to `kind`. */
+static int write_one_diag_pack(const char *db, const char *kind,
+			       struct diag_rec *r, size_t n_all)
+{
+	char path[4200];
+	unsigned char *out;
+	size_t i, n = 0, total, at;
+	FILE *f;
+
+	for (i = 0; i < n_all; i++)
+		if (!strcmp(r[i].kind, kind))
+			n++;
+	if (!n)
+		return 1;
+	if (n > 0xffffu) {
+		fprintf(stderr, "ksigbuilder: more diagnoses than a pack holds\n");
+		return 0;
+	}
+	total = 8u + n * 8u;
+	for (i = 0; i < n_all; i++)
+		if (!strcmp(r[i].kind, kind))
+			total += r[i].n;
+	if (total > 0xffffffffu)
+		return 0;
+	out = calloc(1, total);
+	if (!out)
+		return 0;
+	memcpy(out, "KDGP", 4);
+	out[4] = 1;
+	out[6] = (unsigned char)n;
+	out[7] = (unsigned char)(n >> 8);
+	at = 8u + n * 8u;
+	n = 0;
+	for (i = 0; i < n_all; i++) {
+		unsigned char *e;
+		uint32_t off = (uint32_t)at, len = (uint32_t)r[i].n;
+
+		if (strcmp(r[i].kind, kind))
+			continue;
+		e = out + 8u + n * 8u;
+		e[0] = (unsigned char)off; e[1] = (unsigned char)(off >> 8);
+		e[2] = (unsigned char)(off >> 16); e[3] = (unsigned char)(off >> 24);
+		e[4] = (unsigned char)len; e[5] = (unsigned char)(len >> 8);
+		e[6] = (unsigned char)(len >> 16); e[7] = (unsigned char)(len >> 24);
+		memcpy(out + at, r[i].b, r[i].n);
+		at += r[i].n;
+		n++;
+	}
+	snprintf(path, sizeof path, "%s/diag-%s.kdig", db, kind);
+	f = fopen(path, "wb");
+	if (!f || fwrite(out, 1, total, f) != total) {
+		fprintf(stderr, "FAIL: cannot write %s\n", path);
+		if (f) fclose(f);
+		free(out);
+		return 0;
+	}
+	fclose(f);
+	free(out);
+	printf("== %s  %zu diagnose(s), %zu bytes\n", path, n, total);
+	return 1;
+}
+
+/* All the packs. `recs[i]` is a record file and `kinds[i]` the kind of the
+ * source it was built from. */
+static int write_diag_packs(const char *db, char **recs, char **kinds,
+			    size_t n_recs)
+{
+	struct diag_rec *r;
+	size_t i, j;
+	int rc = 1;
+
+	clear_diag_packs(db);
+	if (!n_recs)
+		return 1;
+	r = calloc(n_recs, sizeof *r);
+	if (!r)
+		return 0;
+	for (i = 0; i < n_recs && rc; i++) {
+		FILE *in = fopen(recs[i], "rb");
+		long len;
+
+		r[i].kind = kinds[i];
+		if (!in || fseek(in, 0, SEEK_END) != 0 ||
+		    (len = ftell(in)) < 4 || fseek(in, 0, SEEK_SET) != 0) {
+			fprintf(stderr, "ksigbuilder: cannot read %s\n", recs[i]);
+			if (in) fclose(in);
+			rc = 0;
+			break;
+		}
+		r[i].n = (size_t)len;
+		r[i].b = malloc(r[i].n);
+		if (!r[i].b || fread(r[i].b, 1, r[i].n, in) != r[i].n) {
+			fprintf(stderr, "ksigbuilder: cannot read %s\n", recs[i]);
+			rc = 0;
+		}
+		fclose(in);
+	}
+	if (rc) {
+		qsort(r, n_recs, sizeof *r, diag_rec_cmp);
+		/* One pack per kind, each once, in the sorted order. */
+		for (i = 0; i < n_recs && rc; i++) {
+			for (j = 0; j < i; j++)
+				if (!strcmp(r[j].kind, r[i].kind))
+					break;
+			if (j == i)
+				rc = write_one_diag_pack(db, r[i].kind, r, n_recs);
+		}
+	}
+	for (i = 0; i < n_recs; i++)
+		free(r[i].b);
+	free(r);
+	return rc;
+}
+
 static int tree_main(int argc, char **argv)
 {
 	const char *base = argc > 2 ? argv[2] : NULL;
@@ -6656,32 +6843,45 @@ static int tree_main(int argc, char **argv)
 	printf("   %d source(s) from %s -> %s\n", built, base, artefacts);
 
 	/*
-	 * AND THE DIAGNOSES, which went nowhere near the loop above.
+	 * AND THE DIAGNOSES, which go through a step of their own.
 	 *
-	 * They are written STRAIGHT TO THE DATABASE DIRECTORY rather than to
-	 * the artefact directory, because there is no pack step for them to
-	 * go through: a .kdig is already its final form. The loader picks them
-	 * up from the same directory it takes the packs from.
+	 * Each is built to a RECORD in the artefact directory, the way a signature
+	 * is built to a blob, and the records are then written into one pack per
+	 * KIND - see write_diag_packs. They used to be one file each in the
+	 * database directory, which made the database a pack plus however many
+	 * loose files a build happened to produce.
 	 */
 	{
 		char dpath[4200];
 		DIR *dd;
 		struct dirent *de;
+		char **recs = NULL, **kinds = NULL;
+		size_t n_recs = 0;
 
 		snprintf(dpath, sizeof dpath, "%s/diagnoses", base);
 		dd = opendir(dpath);
 		while (dd && (de = readdir(dd)) != NULL) {
-			char in[4300], out[4320], *dot;
-			char *da[4];
+			char in[4300], out[4320], *dot, **grown, **kgrown;
+			char *da[4], *us;
 
 			if (de->d_name[0] == '.' || !is_c_source(de->d_name))
 				continue;
+			/* The kind is the first word: net_cncnonblock_00.c is a net
+			 * diagnose. A name with no kind cannot be put in a pack. */
+			us = strchr(de->d_name, '_');
+			if (!us || us == de->d_name) {
+				fprintf(stderr, "ksigbuilder: %s names no kind; a "
+					"diagnose is <kind>_<name>_NN.c\n",
+					de->d_name);
+				closedir(dd);
+				return 1;
+			}
 			snprintf(in, sizeof in, "%s/%s", dpath, de->d_name);
-			snprintf(out, sizeof out, "%s/diag-%s", db,
+			snprintf(out, sizeof out, "%s/diag-%s", artefacts,
 				 de->d_name);
 			dot = strrchr(out, '.');
 			if (dot)
-				memcpy(dot, ".kdig", 6u);
+				memcpy(dot, ".rec", 5u);
 			da[0] = argv[0];
 			da[1] = (char *)(size_t)"--diagnose";
 			da[2] = in;
@@ -6690,9 +6890,30 @@ static int tree_main(int argc, char **argv)
 				closedir(dd);
 				return 1;
 			}
+			grown = realloc(recs, (n_recs + 1u) * sizeof *recs);
+			if (grown)
+				recs = grown;
+			kgrown = realloc(kinds, (n_recs + 1u) * sizeof *kinds);
+			if (kgrown)
+				kinds = kgrown;
+			if (!grown || !kgrown || !(recs[n_recs] = strdup(out)) ||
+			    !(kinds[n_recs] = dup_n(de->d_name, (size_t)(us - de->d_name)))) {
+				fprintf(stderr, "ksigbuilder: out of memory\n");
+				closedir(dd);
+				return 1;
+			}
+			n_recs++;
 		}
 		if (dd)
 			closedir(dd);
+		if (!write_diag_packs(db, recs, kinds, n_recs))
+			return 1;
+		while (n_recs > 0) {
+			free(recs[--n_recs]);
+			free(kinds[n_recs]);
+		}
+		free(recs);
+		free(kinds);
 	}
 
 	/*

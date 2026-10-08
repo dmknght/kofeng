@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * syscall_memexec_00.c - memory asked for as executable, filled, and entered.
+ * mem_execsyscall_00.c - memory asked for as executable, filled, and entered.
  *
  * IT NAMES NO FAMILY, and the name it used to carry was a mistake: this file
  * was trojan_meterp_00 and described a shape that is not Meterpreter's. A
@@ -30,7 +30,7 @@
  *     exec-memory     0x222   <- the same region
  */
 
-KOF_DIAG_NAME(DIAG_SYSCALL_MEMEXEC);
+KOF_DIAG_NAME(DIAG_MEM_EXECSYSCALL);
 
 /*
  * SYSCALL ONLY, AND THAT IS A STATEMENT ABOUT THE OBJECT.

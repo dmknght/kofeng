@@ -1439,7 +1439,9 @@ static const struct kof_content kof_detect_vtable = {
 	oc_graph,
 	/* two diagnoses meeting at a named node - see kof_diag_share */
 	oc_diag_share,
-	oc_diag_str
+	oc_diag_str,
+	/* emu_api_returns, emu_patch - a detector drives no run. */
+	NULL, NULL
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -1468,7 +1470,8 @@ static const struct kof_content kof_unpack_vtable = {
 	NULL, NULL,
 	oc_graph,
 	oc_diag_share,
-	oc_diag_str
+	oc_diag_str,
+	oc_emu_api_returns, oc_emu_patch
 };
 
 /*

@@ -366,7 +366,7 @@ struct kof_engine {
 	size_t   code_cap;
 
 	/*
-	 * THE DIAGNOSES, read from the .kdig files beside the packs.
+	 * THE DIAGNOSES, read from the diag-<kind>.kdig packs beside the signature packs.
 	 *
 	 * Not in a pack: the pack header carries a fixed-size section table,
 	 * so one more section is a format change every database has to be

@@ -48,6 +48,10 @@ uint32_t oc_emu_region_read(const struct kof_obj_ctx *ctx, uint32_t i,
 void oc_emu_set_reg(const struct kof_obj_ctx *ctx, uint32_t gpr,
 			  uint64_t value);
 void oc_emu_set_ip(const struct kof_obj_ctx *ctx, uint64_t va);
+uint32_t oc_emu_api_returns(const struct kof_obj_ctx *ctx, const char *name,
+			    uint64_t ret);
+uint32_t oc_emu_patch(const struct kof_obj_ctx *ctx, const uint8_t *find,
+		      const uint8_t *rep, uint32_t n);
 uint32_t oc_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
 			    const uint8_t *bytes, uint32_t n);
 int oc_emu_take(const struct kof_obj_ctx *ctx, uint32_t i);

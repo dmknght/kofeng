@@ -625,54 +625,74 @@ static int pack_cmp(const void *a, const void *b)
  * change to anything anybody wrote.
  */
 /*
- * THE DIAGNOSES BESIDE THE PACKS.
+ * THE DIAGNOSES: packs named diag-<kind>.kdig, beside the signature packs.
  *
- * One file each, read whole, and a file that does not parse is SKIPPED
- * WITH A WORD rather than failing the load: a database is a directory
- * somebody assembled, and one bad file in it must not take the other two
- * hundred with it. Silence would be worse than either - a diagnose that
- * quietly is not there reads, from every rule that names it, as an object
- * that does not do the thing.
+ * "KDGP", a version byte, a count and a table of (offset, length), then the
+ * records - the layout is written beside write_diag_packs in ksigbuilder. One
+ * file per diagnose made the set a database held depend on a directory
+ * listing; here the packs are read in NAME order, so the load order and nothing
+ * that depends on it varies with the filesystem.
+ *
+ * Every number in a pack is checked against the file's own length, and a RECORD
+ * that does not parse is SKIPPED WITH A WORD rather than failing the load: one
+ * bad diagnose must not take the others with it, and silence would be worse than
+ * either - a diagnose that quietly is not there reads, from every rule that
+ * names it, as an object that does not do the thing. A header that does not add
+ * up refuses the whole pack, because then no record in it can be trusted to
+ * start where the table says.
  */
-static void load_diagnoses(struct kof_engine *e, const char *dir)
-{
-	static const char ext[] = ".kdig";
-	DIR *d = opendir(dir);
-	struct dirent *de;
+#define KOF_DIAG_PACK_MAX (4u << 20)
+#define KOF_DIAG_PACKS_MAX 64u
 
-	if (!d)
+static void load_diag_pack(struct kof_engine *e, const char *p)
+{
+	uint8_t *buf;
+	size_t got, n_rec, i;
+	long len;
+	FILE *f;
+
+	f = fopen(p, "rb");
+	if (!f)
 		return;
-	e->diag = calloc(KOF_DB_MAX_DIAG, sizeof *e->diag);
-	e->diag_node = calloc((size_t)KOF_DB_MAX_DIAG * KOF_DB_MAX_DIAG_NODE,
-			      sizeof *e->diag_node);
-	e->diag_name = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NAME);
-	e->diag_needs = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NEEDS);
-	if (!e->diag || !e->diag_node || !e->diag_name || !e->diag_needs) {
-		closedir(d);
+	if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) < 8 ||
+	    (unsigned long)len > KOF_DIAG_PACK_MAX || fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		fprintf(stderr, "dbloader: %s is not a diagnose pack\n", p);
 		return;
 	}
-	while ((de = readdir(d)) != NULL) {
-		char p[4096];
-		uint8_t buf[4096];
-		size_t l = strlen(de->d_name), got;
-		FILE *f;
+	buf = malloc((size_t)len);
+	got = buf ? fread(buf, 1, (size_t)len, f) : 0;
+	fclose(f);
+	if (!buf || got != (size_t)len || memcmp(buf, "KDGP", 4) != 0 ||
+	    buf[4] != 1u) {
+		free(buf);
+		fprintf(stderr, "dbloader: %s is not a diagnose pack this build "
+			"can read\n", p);
+		return;
+	}
+	n_rec = (size_t)buf[6] | ((size_t)buf[7] << 8);
+	if (8u + n_rec * 8u > got) {
+		free(buf);
+		fprintf(stderr, "dbloader: %s has a table longer than the file\n", p);
+		return;
+	}
+	for (i = 0; i < n_rec; i++) {
+		const uint8_t *t = buf + 8u + i * 8u;
+		uint64_t off = (uint64_t)t[0] | ((uint64_t)t[1] << 8) |
+			       ((uint64_t)t[2] << 16) | ((uint64_t)t[3] << 24);
+		uint64_t rl = (uint64_t)t[4] | ((uint64_t)t[5] << 8) |
+			      ((uint64_t)t[6] << 16) | ((uint64_t)t[7] << 24);
 
-		if (l < sizeof ext ||
-		    strcmp(de->d_name + l - (sizeof ext - 1), ext) != 0)
-			continue;
 		if (e->n_diag >= KOF_DB_MAX_DIAG) {
 			e->diag_full = 1;
 			break;
 		}
-		if ((size_t)snprintf(p, sizeof p, "%s/%s", dir,
-				     de->d_name) >= sizeof p)
+		if (off > got || rl > got - off) {
+			fprintf(stderr, "dbloader: diagnose %zu runs past the end "
+				"of %s\n", i, p);
 			continue;
-		f = fopen(p, "rb");
-		if (!f)
-			continue;
-		got = fread(buf, 1, sizeof buf, f);
-		fclose(f);
-		if (!kof_diag_load(buf, got, &e->diag[e->n_diag],
+		}
+		if (!kof_diag_load(buf + off, rl, &e->diag[e->n_diag],
 				   e->diag_node + (size_t)e->n_diag *
 						  KOF_DB_MAX_DIAG_NODE,
 				   KOF_DB_MAX_DIAG_NODE,
@@ -682,15 +702,14 @@ static void load_diagnoses(struct kof_engine *e, const char *dir)
 				   e->diag_needs + (size_t)e->n_diag *
 						   KOF_DB_DIAG_NEEDS,
 				   KOF_DB_DIAG_NEEDS)) {
-			fprintf(stderr, "dbloader: %s is not a diagnose this "
-				"build can read\n", de->d_name);
+			fprintf(stderr, "dbloader: diagnose %zu of %s is not one "
+				"this build can read\n", i, p);
 			continue;
 		}
 		/*
-		 * THE ID IS THE NAME'S HASH - see KOF_DIAG_ID. It was the
-		 * load position, which is readdir order: adding a file
-		 * renumbered every diagnose after it, and a rule naming one
-		 * had nothing stable to name.
+		 * THE ID IS THE NAME'S HASH - see KOF_DIAG_ID. It was the load
+		 * position: adding a record renumbered every diagnose after it,
+		 * and a rule naming one had nothing stable to name.
 		 */
 		e->diag[e->n_diag].id =
 			kof_diag_id_(e->diag[e->n_diag].name);
@@ -711,7 +730,49 @@ static void load_diagnoses(struct kof_engine *e, const char *dir)
 		}
 		e->n_diag++;
 	}
+	free(buf);
+}
+
+static int name_cmp(const void *x, const void *y)
+{
+	return strcmp(*(char *const *)x, *(char *const *)y);
+}
+
+static void load_diagnoses(struct kof_engine *e, const char *dir)
+{
+	DIR *d = opendir(dir);
+	struct dirent *de;
+	char *names[KOF_DIAG_PACKS_MAX];
+	uint32_t n = 0, i;
+
+	if (!d)
+		return;
+	while ((de = readdir(d)) != NULL && n < KOF_DIAG_PACKS_MAX) {
+		size_t l = strlen(de->d_name);
+
+		if (l > 10u && !strncmp(de->d_name, "diag-", 5u) &&
+		    !strcmp(de->d_name + l - 5u, ".kdig") &&
+		    (names[n] = strdup(de->d_name)) != NULL)
+			n++;
+	}
 	closedir(d);
+	if (!n)
+		return;
+	e->diag = calloc(KOF_DB_MAX_DIAG, sizeof *e->diag);
+	e->diag_node = calloc((size_t)KOF_DB_MAX_DIAG * KOF_DB_MAX_DIAG_NODE,
+			      sizeof *e->diag_node);
+	e->diag_name = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NAME);
+	e->diag_needs = calloc(KOF_DB_MAX_DIAG, KOF_DB_DIAG_NEEDS);
+	qsort(names, n, sizeof names[0], name_cmp);
+	for (i = 0; i < n; i++) {
+		char p[4096];
+
+		if (e->diag && e->diag_node && e->diag_name && e->diag_needs &&
+		    (size_t)snprintf(p, sizeof p, "%s/%s", dir, names[i]) <
+			    sizeof p)
+			load_diag_pack(e, p);
+		free(names[i]);
+	}
 }
 
 static const char **collect_packs(const char *dir, uint32_t *out_n)

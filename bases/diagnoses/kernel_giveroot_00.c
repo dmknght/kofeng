@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * lkm_giveroot_00.c - a kernel module taking root for the running task.
+ * kernel_giveroot_00.c - a kernel module taking root for the running task.
  *
  * "Give me root", as a C compiler emits it:
  *

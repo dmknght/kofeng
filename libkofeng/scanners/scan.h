@@ -335,11 +335,10 @@ struct kof_scanner {
 	 * gathered with when it finishes - see `emu_resume` in kofsig.h. */
 	struct kof_emu_unp_report *emu_rep_p;
 	int                  emu_paused;
-	/* Instruction patterns a module named before the run - see
-	 * `emu_watch_insn` in kofsig.h. */
-	struct kof_emu_iwatch pend_iw[KOF_EMU_INSN_WATCH];
-	uint32_t             pend_n_iw;
-	uint32_t             pend_iw_len;
+	/* What a module declared before the run - instruction patterns
+	 * (`emu_watch_insn`), API return values (`emu_api_returns`) and image
+	 * patches (`emu_patch`), all in kofsig.h. */
+	struct kof_emu_decl  pend_decl;
 	/*
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.

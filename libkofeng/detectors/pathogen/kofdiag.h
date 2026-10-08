@@ -463,7 +463,7 @@ uint32_t kof_diag_graph_build(const struct kof_diag_scan *s, uint8_t *out,
 			      uint32_t cap);
 
 /*
- * READ ONE .kdig FILE. 1 on success, 0 when the bytes do not add up - and a
+ * READ ONE DIAGNOSE RECORD, as carried in a diag-<kind>.kdig pack. 1 on success, 0 when the bytes do not add up - and a
  * file that does not add up is refused WHOLE. The caller owns `node` and
  * `name`; nothing here allocates, so a load cannot fail halfway and leave
  * something to free.

@@ -39,9 +39,9 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * was meant - the bytes of THIS connection flow into the region that is
 	 * entered - and is indifferent to how many reads carried them.
 	 */
-	if (kof_diag(DIAG_PE_MEMEXEC) &&
-	    kof_diag(DIAG_PE_NETRECV) &&
-	    kof_diag_share(KOF_NUCLEO_NET_OPEN, DIAG_PE_MEMEXEC,
-			   DIAG_PE_NETRECV))
+	if (kof_diag(DIAG_MEM_EXECAPIHASH) &&
+	    kof_diag(DIAG_NET_RECVAPIHASH) &&
+	    kof_diag_share(KOF_NUCLEO_NET_OPEN, DIAG_MEM_EXECAPIHASH,
+			   DIAG_NET_RECVAPIHASH))
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 }

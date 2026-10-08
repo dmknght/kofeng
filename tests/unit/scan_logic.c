@@ -70,6 +70,20 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	return 0;
 }
 
+static int abort_at = -1;
+
+/* Counts objects and asks the walk to stop when the abort_at-th one is reported
+ * (0 is the file itself, 1.. its children), -1 never. */
+static int on_object_abort(const char *name, const void *bytes, uint64_t len,
+			   const struct kof_result *res, void *user)
+{
+	int idx = n_obj;
+
+	(void)name; (void)bytes; (void)len; (void)res; (void)user;
+	n_obj++;
+	return idx == abort_at;
+}
+
 static int has_named(const struct kof_result *r, const char *word)
 {
 	uint32_t i;
@@ -210,6 +224,47 @@ int main(int argc, char **argv)
 	   stop_calls >= 2);
 	ok("an object cut short is NOT handed to the cache as clean",
 	   !in(kept, n_kept, "a_detected"));
+
+
+	/* ---- 5. told to stop with children still waiting ------------------ */
+	{
+		char pm[256];
+		uint8_t multi[56];
+
+		snprintf(pm, sizeof pm, "%s/m_multi.bin", dir);
+		memset(multi, 0x70, sizeof multi);
+		memcpy(multi, "KOFMULTI", 8);
+		/* The LAST child is the one with something in it. */
+		memcpy(multi + 40, "KOFCURETEST!", 12);
+		write_file(pm, multi, sizeof multi);
+
+		memset(&opt, 0, sizeof opt);
+		opt.cache_seen = cb_seen; opt.cache_keep = cb_keep;
+		opt.cache_drop = cb_drop;
+
+		/* the control: every object is scanned, the detection is found */
+		n_kept = n_dropped = 0; n_obj = 0; abort_at = -1;
+		(void)kscan_path(sc, pm, &opt, on_object_abort, NULL);
+		ok("the container yields its three children and itself",
+		   n_obj == 4);
+		ok("the payload in the last one is found, so the file is not kept",
+		   !in(kept, n_kept, "m_multi") && in(dropped, n_dropped, "m_multi"));
+
+		/* the host says abandon at the FIRST object: children are waiting */
+		n_kept = n_dropped = 0; n_obj = 0; abort_at = 0;
+		(void)kscan_path(sc, pm, &opt, on_object_abort, NULL);
+		ok("the walk stopped with children unexamined", n_obj < 4);
+		ok("a file with children nobody looked at is NOT remembered as clean",
+		   !in(kept, n_kept, "m_multi"));
+
+		/* the host says abandon at the LAST object: nothing was left over */
+		n_kept = n_dropped = 0; n_obj = 0; abort_at = 3;
+		(void)kscan_path(sc, pm, &opt, on_object_abort, NULL);
+		ok("abandoning at the last object leaves nothing unexamined",
+		   n_obj == 4);
+		ok("and that outcome is the control's: the finding still reaches the cache",
+		   in(dropped, n_dropped, "m_multi"));
+	}
 
 	printf("scan_logic: %s\n", fails ? "FAILED" : "ok");
 	return fails != 0;

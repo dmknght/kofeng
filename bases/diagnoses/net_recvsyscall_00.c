@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * syscall_netrecv_00.c - the other half of a stager: where the bytes come
+ * net_recvsyscall_00.c - the other half of a stager: where the bytes come
  * from.
  *
  * TWO DIAGNOSES, ONE SHAPE. trojan_meterp_00 states the loader half - a
@@ -18,13 +18,13 @@
  *
  * MEASURED, after the engine learned to read i386's socketcall arguments:
  * all four stagers checked - meter1, meter1_x86, meter3_encoded and the
- * shikata-encoded x86_poly - match this and DIAG_SYSCALL_MEMEXEC together,
+ * shikata-encoded x86_poly - match this and DIAG_MEM_EXECSYSCALL together,
  * on both architectures. Before that fix the i386 ones had every node and
  * none of these edges, because socketcall keeps its arguments in a
  * structure on the stack rather than in registers.
  */
 
-KOF_DIAG_NAME(DIAG_SYSCALL_NETRECV);
+KOF_DIAG_NAME(DIAG_NET_RECVSYSCALL);
 
 /*
  * SYSCALL ONLY, like the loader half: a stager has no imports and no symbol
@@ -86,7 +86,7 @@ KOF_DIAG_FROM(c, s, KOF_NUCLEO_NET_CONNECT, KOF_DIAG_ROLE_FD);
 /*
  * AND THE READ TAKES ITS DESCRIPTOR FROM THAT SOCKET.
  *
- * This is the node that matters: it is also a node of DIAG_SYSCALL_MEMEXEC,
+ * This is the node that matters: it is also a node of DIAG_MEM_EXECSYSCALL,
  * whose read fills the executable region. Two diagnoses naming one node is
  * the whole statement - the bytes that were executed are the bytes that came
  * off the wire - and kof_diag_share is how a verdict asks it.

@@ -196,8 +196,7 @@ void oc_pend_clear(struct kof_scanner *sc)
 	sc->imp_pool_n = 0;
 	/* Declared per object, like everything else here: a watch one module
 	 * named must not still be armed for the next one's run. */
-	sc->pend_n_iw = 0;
-	sc->pend_iw_len = 0;
+	memset(&sc->pend_decl, 0, sizeof sc->pend_decl);
 	sc->pend_imp_at = 0;
 	sc->pend_imp_set = 0;
 }

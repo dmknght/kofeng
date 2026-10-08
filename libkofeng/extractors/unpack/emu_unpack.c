@@ -1906,17 +1906,66 @@ enum kof_emu_unp_why kof_emu_unp_gate_pe(const struct kof_obj_ctx *ctx,
 	return KOF_EMU_UNP_NO;
 }
 
+/*
+ * The image with the declared patches applied, as a private copy - or NULL when
+ * there is nothing to apply or no memory for a copy, in which case the run goes
+ * ahead on the unpatched bytes rather than not at all. Every occurrence inside
+ * a section's file bytes is replaced (a pattern that matches twice is two
+ * places the same check lives), in section order, and a pattern is looked for
+ * only INSIDE a section: a match straddling two is not code.
+ */
+static uint8_t *apply_patches(const uint8_t *file, uint64_t n,
+			      const struct kof_pe_info *info,
+			      const struct kof_emu_decl *decl)
+{
+	uint8_t *c = malloc((size_t)n);
+	uint32_t k, i;
+	int hit = 0;
+
+	if (!c)
+		return NULL;
+	memcpy(c, file, (size_t)n);
+	for (i = 0; i < info->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
+		const struct kof_pe_sec *s = &info->sec[i];
+		uint64_t off = s->file_off, len = s->file_size, at;
+
+		if (off >= n)
+			continue;
+		if (len > n - off)
+			len = n - off;
+		for (k = 0; k < decl->n_patch && k < KOF_EMU_PATCH_MAX; k++) {
+			const struct kof_emu_patch *p = &decl->patch[k];
+
+			if (!p->n || p->n > KOF_EMU_PATCH_LEN || len < p->n)
+				continue;
+			for (at = 0; at + p->n <= len; at++)
+				if (c[off + at] == p->find[0] &&
+				    !memcmp(c + off + at, p->find, p->n)) {
+					memcpy(c + off + at, p->rep, p->n);
+					at += p->n - 1u;
+					hit = 1;
+				}
+		}
+	}
+	if (!hit) {
+		free(c);
+		return NULL;
+	}
+	return c;
+}
+
 struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   const struct kof_pe_info *info,
 				   uint64_t max_insn, uint64_t max_pages,
 				   uint64_t idle, int hand_back,
 				   const struct kof_emu_oep *oep,
 				   unsigned n_oep,
-				   const struct kof_emu_iwatch *iw,
-				   unsigned n_iw, unsigned iw_len,
+				   const struct kof_emu_decl *decl,
 				   struct kof_emu_unp_report *rep)
 {
 	struct kof_emu_cfg cfg;
+	uint8_t *patched = NULL;
+	const uint8_t *img;
 	struct kof_emu *e;
 	uint64_t base, entry = 0, lowest_x = 0, base_lo = ~0ull;
 	uint64_t back_lo[KOF_PE_MAX_SECTIONS + 1];
@@ -1942,6 +1991,13 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 	if (!e)
 		return NULL;
 
+	img = file;
+	if (decl && decl->n_patch) {
+		patched = apply_patches(file, n, info, decl);
+		if (patched)
+			img = patched;
+	}
+
 	base = info->image_base ? info->image_base
 			        : (cfg.bits == 64 ? PE_BASE_64 : PE_BASE_32);
 
@@ -1959,7 +2015,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 	if (info->size_of_headers && info->size_of_headers <= n) {
 		uint64_t hl = info->size_of_headers;
 
-		if (kof_emu_map(e, base, file, hl, hl, KOF_EMU_R)) {
+		if (kof_emu_map(e, base, img, hl, hl, KOF_EMU_R)) {
 			mapped++;
 			back_lo[n_back] = base;
 			back_hi[n_back] = base + hl;
@@ -2008,7 +2064,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 		 * library images, whose headers a guest reaches only by
 		 * resolving an export this build does not have.
 		 */
-		if (!kof_emu_map(e, va, fsz ? file + off : NULL, fsz, msz,
+		if (!kof_emu_map(e, va, fsz ? img + off : NULL, fsz, msz,
 				 perm_of_pe(s->perm) | KOF_EMU_X))
 			continue;
 		mapped++;
@@ -2030,8 +2086,9 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 	 * finds itself - which is exactly what a flat map preserves.
 	 */
 	if (!mapped) {
-		if (!kof_emu_map(e, base, file, n, n,
+		if (!kof_emu_map(e, base, img, n, n,
 				 KOF_EMU_R | KOF_EMU_W | KOF_EMU_X)) {
+			free(patched);
 			kof_emu_free(e);
 			return NULL;
 		}
@@ -2042,6 +2099,10 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 		back_hi[0] = base + n;
 		n_back     = 1;
 	}
+
+	/* The pages own their bytes now; the patched copy has done its job. */
+	free(patched);
+	patched = NULL;
 
 	if (info->entry_rva)
 		entry = base + info->entry_rva;
@@ -2300,10 +2361,16 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 	{
 		unsigned k;
 
-		for (k = 0; k < n_iw; k++)
-			kof_emu_watch_insn(e, iw[k].b, iw[k].n);
-		if (n_iw)
-			kof_emu_watch_insn_len(e, iw_len);
+		if (decl) {
+			for (k = 0; k < decl->n_iw; k++)
+				kof_emu_watch_insn(e, decl->iw[k].b,
+						   decl->iw[k].n);
+			if (decl->n_iw)
+				kof_emu_watch_insn_len(e, decl->iw_len);
+			for (k = 0; k < decl->n_shim; k++)
+				(void)kof_emu_shim_api(e, decl->shim[k].name,
+						       decl->shim[k].ret);
+		}
 	}
 
 	{

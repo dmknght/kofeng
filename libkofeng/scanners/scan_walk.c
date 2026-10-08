@@ -435,6 +435,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 								   nc * sizeof *nv);
 					if (!nv) {
 						w->out_of_memory = 1;
+						w->incomplete = 1;
 						break;
 					}
 					stack = nv;
@@ -507,6 +508,17 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 					? w->sc->kid_derived_by[i] : NULL;
 				n++;
 			}
+		} else if ((w->aborted || w->out_of_memory) && w->sc->n_kids > 0) {
+			/*
+			 * THE CHILDREN THIS OBJECT PRODUCED ARE NOT WALKED, because the
+			 * walk was asked to stop (or ran out of memory) - so the file
+			 * has parts nobody examined. That is not the policy of a caller
+			 * who asked not to descend (heur_off, max_object_depth: "off
+			 * means do not descend, never do not look"); it is an
+			 * interruption, and a file that was interrupted is not clean -
+			 * see sx_scan_file.
+			 */
+			w->incomplete = 1;
 		}
 		kof_scan_kids_reset(w->sc);
 

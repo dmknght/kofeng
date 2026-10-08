@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * pe_apihash_00.c - a Windows program that finds the functions it calls by
+ * lib_resolve-apihash_00.c - a Windows program that finds the functions it calls by
  * walking the loader's module list instead of importing them.
  *
  *     mov rax, gs:[0x60]         ; the PEB
@@ -30,7 +30,7 @@
  * its normalised view says nothing about what it does.
  */
 
-KOF_DIAG_NAME(DIAG_PE_APIHASH);
+KOF_DIAG_NAME(DIAG_LIB_RESOLVE_APIHASH);
 
 KOF_DIAG_VIA(KOF_DIAG_VIA_APIHASH);
 

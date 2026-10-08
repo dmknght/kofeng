@@ -407,9 +407,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 						       idle,
 						       sc->emu_slice != 0,
 						       oep, sc->n_xw,
-						       sc->pend_iw,
-						       sc->pend_n_iw,
-						       sc->pend_iw_len,
+						       &sc->pend_decl,
 						       &rep);
 			}
 		}
@@ -1348,19 +1346,73 @@ void oc_emu_watch_insn(const struct kof_obj_ctx *ctx,
 	 * too, because that is when a module gives up on pausing and wants the
 	 * run to finish. */
 	if (!bytes || !n) {
-		sc->pend_n_iw = 0;
-		sc->pend_iw_len = 0;
+		sc->pend_decl.n_iw = 0;
+		sc->pend_decl.iw_len = 0;
 		if (sc->emu_live)
 			kof_emu_watch_insn(sc->emu_live, NULL, 0);
 		return;
 	}
-	if (n > sizeof sc->pend_iw[0].b ||
-	    sc->pend_n_iw >= KOF_EMU_INSN_WATCH)
+	if (n > sizeof sc->pend_decl.iw[0].b ||
+	    sc->pend_decl.n_iw >= KOF_EMU_INSN_WATCH)
 		return;
-	memcpy(sc->pend_iw[sc->pend_n_iw].b, bytes, n);
-	sc->pend_iw[sc->pend_n_iw].n = (uint8_t)n;
-	sc->pend_n_iw++;
-	sc->pend_iw_len = len;
+	memcpy(sc->pend_decl.iw[sc->pend_decl.n_iw].b, bytes, n);
+	sc->pend_decl.iw[sc->pend_decl.n_iw].n = (uint8_t)n;
+	sc->pend_decl.n_iw++;
+	sc->pend_decl.iw_len = len;
+}
+
+/*
+ * WHAT THE MACHINE IS TOLD BEFORE IT STARTS - see `emu_api_returns` and
+ * `emu_patch` in kofsig.h. Both only record: the run has not been built yet,
+ * and the declaration travels to it in sc->pend_decl. Both answer 0 when the
+ * declaration was not kept (full, or malformed) so a module can tell.
+ */
+uint32_t oc_emu_api_returns(const struct kof_obj_ctx *ctx, const char *name,
+			    uint64_t ret)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_emu_decl *d;
+	size_t l;
+
+	if (!sc || !name)
+		return 0;
+	d = &sc->pend_decl;
+	l = strlen(name);
+	if (!l || l >= KOF_EMU_SHIM_NAME)
+		return 0;
+	{
+		uint32_t k;
+
+		for (k = 0; k < d->n_shim; k++)
+			if (!strcmp(d->shim[k].name, name)) {
+				d->shim[k].ret = ret;
+				return 1;
+			}
+	}
+	if (d->n_shim >= KOF_EMU_SHIM_MAX)
+		return 0;
+	memcpy(d->shim[d->n_shim].name, name, l + 1u);
+	d->shim[d->n_shim].ret = ret;
+	d->n_shim++;
+	return 1;
+}
+
+uint32_t oc_emu_patch(const struct kof_obj_ctx *ctx, const uint8_t *find,
+		      const uint8_t *rep, uint32_t n)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_emu_decl *d;
+
+	if (!sc || !find || !rep || !n || n > KOF_EMU_PATCH_LEN)
+		return 0;
+	d = &sc->pend_decl;
+	if (d->n_patch >= KOF_EMU_PATCH_MAX)
+		return 0;
+	memcpy(d->patch[d->n_patch].find, find, n);
+	memcpy(d->patch[d->n_patch].rep, rep, n);
+	d->patch[d->n_patch].n = (uint8_t)n;
+	d->n_patch++;
+	return 1;
 }
 
 /*

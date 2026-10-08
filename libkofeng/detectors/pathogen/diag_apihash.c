@@ -222,7 +222,7 @@ static void run_resolver(struct kof_apihash *a, const struct kof_obj_ctx *ctx,
 
 	memset(&rep, 0, sizeof rep);
 	em = kof_emu_unp_run_pe(base, size, kof_pe(ctx), DIAG_PE_SLICE, 0, 0, 1,
-				NULL, 0, NULL, 0, 0, &rep);
+				NULL, 0, NULL, &rep);
 	if (!em)
 		return;
 	{

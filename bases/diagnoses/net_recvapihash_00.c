@@ -1,24 +1,24 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * pe_netrecv_00.c - a Windows program that opens a socket, connects it, and
+ * net_recvapihash_00.c - a Windows program that opens a socket, connects it, and
  * reads from it.
  *
  *     s = WSASocketA(...);
  *     connect(s, ...);
  *     recv(s, buf, n, 0);
  *
- * THE SAME SHAPE AS syscall_netrecv_00 ON LINUX, and for the same reason it is
- * a separate diagnose from pe_memexec_00: each is ordinary alone (a downloader
+ * THE SAME SHAPE AS net_recvsyscall_00 ON LINUX, and for the same reason it is
+ * a separate diagnose from mem_execapihash_00: each is ordinary alone (a downloader
  * is this, a self-unpacking loader is the other) and a verdict joins them at the
  * read - see kof_diag_share.
  *
- * ONLY THE APIHASH ROUTE, as pe_memexec_00 and gated the same way: the calls of
+ * ONLY THE APIHASH ROUTE, as mem_execapihash_00 and gated the same way: the calls of
  * a stager are not in its import table, and the W+X section is what keeps the
  * analysis off the programs that have nothing like one.
  */
 
-KOF_DIAG_NAME(DIAG_PE_NETRECV);
+KOF_DIAG_NAME(DIAG_NET_RECVAPIHASH);
 
 KOF_DIAG_VIA(KOF_DIAG_VIA_APIHASH);
 

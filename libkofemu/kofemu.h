@@ -529,6 +529,15 @@ void     kof_emu_set_deadline(struct kof_emu *e, uint64_t ms);
  */
 void     kof_emu_snap_written(struct kof_emu *e);
 
+/*
+ * Make a Windows API of this environment return `ret`, whatever it would have
+ * computed. Returns 1 when `name` is one of this environment's APIs and the
+ * declaration was kept, 0 when it is not (a name the table lacks is answered by
+ * the null-call policy and has no handler to replace) or the table is full.
+ * Later declarations of the same name replace earlier ones.
+ */
+int      kof_emu_shim_api(struct kof_emu *e, const char *name, uint64_t ret);
+
 /* How many instructions were retired, and where it stopped. For deciding
  * whether a dump is worth taking and for reporting what a build cannot do. */
 uint64_t    kof_emu_insn_count(const struct kof_emu *e);
@@ -637,6 +646,9 @@ void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi);
  * `n` is 1 to KOF_EMU_INSN_WATCH_LEN bytes. Up to KOF_EMU_INSN_WATCH patterns.
  */
 #define KOF_EMU_INSN_WATCH     8u
+/* Declared API return values per run - a bound on a module's declaration, not
+ * on anything the file supplies. */
+#define KOF_EMU_SHIM_MAX       16u
 #define KOF_EMU_INSN_WATCH_LEN 8u
 
 void kof_emu_watch_insn(struct kof_emu *e, const uint8_t *bytes, unsigned n);

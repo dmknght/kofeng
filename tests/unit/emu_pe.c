@@ -196,7 +196,7 @@ static void decodes(void)
 	ck(info->entry_rva == TEXT_RVA, "the entry point survived the parse");
 	ck(info->sec_count == 2, "both sections were read");
 
-	e = kof_emu_unp_run_pe(f, len, info, 0, 0, 0, 0, NULL, 0, NULL, 0, 0,
+	e = kof_emu_unp_run_pe(f, len, info, 0, 0, 0, 0, NULL, 0, NULL,
 			       &rep);
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image could be built");

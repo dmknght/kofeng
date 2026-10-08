@@ -324,6 +324,53 @@ struct kof_emu_iwatch {
 	uint8_t  n;
 };
 
+/*
+ * EVERYTHING A MODULE DECLARED BEFORE THE RUN, in one record.
+ *
+ * What differs between packers is mostly data - which instruction to pause on,
+ * what a particular anti-emulation test must be told, which bytes in the image
+ * must not be executed as written - and none of it is worth a case inside the
+ * interpreter. The interpreter keeps the mechanism; the module supplies the
+ * facts.
+ *
+ *   iw      instruction patterns to pause on - see kof_emu_watch_insn
+ *   shim    a return value for a Windows API - see kof_emu_shim_api
+ *   patch   bytes to replace in the image before it is mapped
+ *
+ * THE PATCH IS APPLIED TO THE COPY THAT GETS MAPPED, never to the file and not
+ * to the bytes the guest reads back as itself (kof_emu_set_self): a stub that
+ * checksums its own file must see the file. It is applied before the guest
+ * exists, so it is not a write the guest made and never counts as something the
+ * stub produced. What it costs: the dump of an image that ran carries the
+ * patched bytes, so a patch belongs where the program being unpacked does not
+ * live - a packer's stub, a header.
+ *
+ * Bounds are on the DECLARATION. Nothing here grows with the file.
+ */
+#define KOF_EMU_SHIM_NAME  48u
+#define KOF_EMU_PATCH_LEN  16u
+#define KOF_EMU_PATCH_MAX  16u
+
+struct kof_emu_shim {
+	char     name[KOF_EMU_SHIM_NAME];
+	uint64_t ret;
+};
+
+struct kof_emu_patch {
+	uint8_t  find[KOF_EMU_PATCH_LEN];
+	uint8_t  rep[KOF_EMU_PATCH_LEN];
+	uint8_t  n;                     /* both are n bytes: nothing moves */
+};
+
+struct kof_emu_decl {
+	struct kof_emu_iwatch iw[KOF_EMU_INSN_WATCH];
+	uint32_t              n_iw, iw_len;
+	struct kof_emu_shim   shim[KOF_EMU_SHIM_MAX];
+	uint32_t              n_shim;
+	struct kof_emu_patch  patch[KOF_EMU_PATCH_MAX];
+	uint32_t              n_patch;
+};
+
 struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   const struct kof_pe_info *info,
 				   uint64_t max_insn, uint64_t max_pages,
@@ -344,8 +391,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   int hand_back,
 				   const struct kof_emu_oep *oep,
 				   unsigned n_oep,
-				   const struct kof_emu_iwatch *iw,
-				   unsigned n_iw, unsigned iw_len,
+				   const struct kof_emu_decl *decl,
 				   struct kof_emu_unp_report *rep);
 
 #endif /* KOFENG_EMU_UNPACK_H */

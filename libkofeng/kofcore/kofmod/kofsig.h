@@ -2411,6 +2411,39 @@ struct kof_content {
 	 */
 	int (*diag_str)(const struct kof_obj_ctx *, uint16_t diag,
 			     const char *name);
+
+	/*
+	 * ---- TELLING THE MACHINE, BEFORE IT STARTS -----------------------
+	 *
+	 * Two facts a packer module knows and the interpreter cannot: what one
+	 * of its anti-emulation tests must be answered, and which bytes of the
+	 * image must not be run as written. Declared like emu_watch_insn - once,
+	 * before kunp_emu_run, and gone when the module returns - so neither is a
+	 * case in the interpreter and neither costs anything for a file no module
+	 * claimed.
+	 *
+	 * emu_api_returns  make the Windows API `name` return `ret`. The call is
+	 *                  still logged as that call and the guest still pops its
+	 *                  own arguments; only the VALUE is replaced. Answers 0
+	 *                  when the declaration was not kept: a full table, or a
+	 *                  name of 48 characters or more. A name this environment
+	 *                  has no handler for is not an error here and does nothing
+	 *                  later - the null-call policy already answers it.
+	 *
+	 * emu_patch        replace `n` bytes (1..16) wherever `find` occurs inside
+	 *                  a section of the PE, in the copy that is mapped. The
+	 *                  file, and the bytes the guest reads back as itself, are
+	 *                  not touched. The dump of a run carries the patched
+	 *                  bytes, so patch a stub, not the program. Answers 0 when
+	 *                  the table is full or `n` is out of range.
+	 *
+	 * PE only today: an ELF run ignores both. AT THE END OF THE TABLE, so a
+	 * module built against an older header is unaffected.
+	 */
+	uint32_t (*emu_api_returns)(const struct kof_obj_ctx *, const char *name,
+				    uint64_t ret);
+	uint32_t (*emu_patch)(const struct kof_obj_ctx *, const uint8_t *find,
+			      const uint8_t *rep, uint32_t n);
 };
 
 /*
@@ -3877,8 +3910,8 @@ static inline uint16_t kof_diag_id_(const char *s)
 /*
  * DO TWO DIAGNOSES MEET AT A NODE OF THIS CAPABILITY.
  *
- *     if (kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_SYSCALL_MEMEXEC,
- *                        DIAG_SYSCALL_NETRECV))
+ *     if (kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_MEM_EXECSYSCALL,
+ *                        DIAG_NET_RECVSYSCALL))
  *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
  *
  * Both matched AND one node of capability `cap` was bound by both.
@@ -4735,6 +4768,21 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 #define kunp_emu_resume()                                                  \
 	((ctx)->content->emu_resume ? (ctx)->content->emu_resume((ctx)) : 0u)
+
+/*
+ * Declare, before kunp_emu_run - see `emu_api_returns` and `emu_patch`.
+ *
+ *     kunp_emu_api_returns("IsDebuggerPresent", 0);
+ *     kunp_emu_patch(check, nop, 2u);        // `check` and `nop` are 2 bytes
+ *     n = kunp_emu_run(2);
+ */
+#define kunp_emu_api_returns(name, ret)                                    \
+	((ctx)->content->emu_api_returns                                   \
+	 ? (ctx)->content->emu_api_returns((ctx), (name), (uint64_t)(ret)) : 0u)
+
+#define kunp_emu_patch(find, rep, n)                                       \
+	((ctx)->content->emu_patch                                         \
+	 ? (ctx)->content->emu_patch((ctx), (find), (rep), (uint32_t)(n)) : 0u)
 
 #define kunp_emu_region(i, va, len, kind)                               \
 	((ctx)->content->emu_region                                        \

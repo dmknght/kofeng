@@ -400,6 +400,8 @@ struct kof_emu {
 	uint64_t fetch_page;   /* never a page base until one is set */
 	uint32_t null_calls;   /* imports this environment did not have */
 	uint32_t win_miss;     /* names answered with a miss thunk - see kof_emu_win_resolve */
+	struct { uint32_t id; uint64_t ret; } shim[KOF_EMU_SHIM_MAX]; /* see kof_emu_shim_api */
+	uint32_t n_shim;
 	char     win_fake[16][32]; /* libraries handed a handle with no image - see win_fake_lib */
 	uint32_t n_win_fake;
 	uint64_t cmdline[2];   /* [0] ANSI, [1] UTF-16; 0 until asked for */
@@ -4469,12 +4471,55 @@ static int win_sock_first_read(struct kof_emu *e, uint64_t s)
 	return 1;
 }
 
+/*
+ * A RETURN VALUE A MODULE DECLARED FOR AN API, in place of the one the switch
+ * below computes. Declared data rather than a case in this file: the answer a
+ * particular packer's anti-emulation test wants is that packer's fact, and it
+ * belongs with the module that knows the packer. Only the VALUE is replaced -
+ * the stub still pops its own arguments, and the call is still logged as a call
+ * of that API, so what a program asked is not hidden by what it was told.
+ */
+int kof_emu_shim_api(struct kof_emu *e, const char *name, uint64_t ret)
+{
+	unsigned i, n = kof_emu_win_api_count();
+
+	if (!e || !name)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (!strcmp(kof_emu_win_api_name(i), name))
+			break;
+	if (i == n)
+		return 0;
+	{
+		uint32_t k;
+
+		for (k = 0; k < e->n_shim; k++)
+			if (e->shim[k].id == i) {
+				e->shim[k].ret = ret;
+				return 1;
+			}
+	}
+	if (e->n_shim >= KOF_EMU_SHIM_MAX)
+		return 0;
+	e->shim[e->n_shim].id = i;
+	e->shim[e->n_shim].ret = ret;
+	e->n_shim++;
+	return 1;
+}
+
 static uint64_t winapi_do(struct kof_emu *e, unsigned id, int *stop_out)
 {
 	char name[128];
 
 	*stop_out = 0;
 	win_trace(e, kof_emu_win_api_name(id), "(call)", 0);
+	{
+		uint32_t k;
+
+		for (k = 0; k < e->n_shim; k++)
+			if (e->shim[k].id == id)
+				return e->shim[k].ret;
+	}
 	switch (id) {
 	/*
 	 * ---- ws2_32: A SCRIPTED PEER ------------------------------------

@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * lkm_kproberesolve_00.c - a kernel module obtaining the address of a kernel
+ * kernel_kproberesolve_00.c - a kernel module obtaining the address of a kernel
  * symbol the kernel does not export, by planting a kprobe on it and reading
  * back where it landed.
  *
