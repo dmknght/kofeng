@@ -37,13 +37,13 @@ KOF_DIAG_NAME(DIAG_NET_RECVSYSCALL);
  * the runner. A diagnose naming one route is a diagnose that misses
  * whichever samples the other one sees.
  */
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_EMULATE);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_EMULATE);
 
 /*
  * ---- AND THE ATTRIBUTES THAT SAY THIS FILE IS WORTH THE ANALYSIS -------
  *
  * The engine publishes what it read out of the header; this is where the
- * diagnose says what it wants those to be - see KOF_DIAG_WHEN.
+ * diagnose says what it wants those to be - see KOF_DIAG_HAS_ATTRB.
  *
  * A MAPPING THAT IS WRITABLE AND EXECUTABLE, and no section table. A
  * stager has nothing else to recognise it by - no imports, no symbols, a
@@ -71,17 +71,17 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_EMULATE);
  * alone stops separating, and having stripped the section table as well is
  * the half that still does.
  */
-KOF_DIAG_WHEN(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
-KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0);
+KOF_DIAG_HAS_ATTRB(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
+KOF_DIAG_HAS_ATTRB(KOF_FACT_SECTIONS, 0);
 
 /*
  * THE SOCKET IS THE ROOT. It is what the descriptor comes from, and a
  * descriptor is the only thing that ties a read to where it reads from.
  */
-KOF_DIAG_ANCHOR(s, KOF_NUCLEO_NET_OPEN, 0);
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_NET_OPEN, 0);
 
 /* The connect proves the socket is an outbound one rather than a listener. */
-KOF_DIAG_FROM(c, s, KOF_NUCLEO_NET_CONNECT, KOF_DIAG_ROLE_FD);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_NET_CONNECT);
 
 /*
  * AND THE READ TAKES ITS DESCRIPTOR FROM THAT SOCKET.
@@ -95,4 +95,4 @@ KOF_DIAG_FROM(c, s, KOF_NUCLEO_NET_CONNECT, KOF_DIAG_ROLE_FD);
  * what it is, and whether it was a socket read is said by THIS edge rather
  * than by the word.
  */
-KOF_DIAG_FROM(r, s, KOF_NUCLEO_MEM_READ, KOF_DIAG_ROLE_FD);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);

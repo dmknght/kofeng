@@ -52,13 +52,14 @@ KOF_DIAG_NAME(DIAG_LKM_SELFHIDE);
  * THE SYMBOL ROUTE ALONE. Everything here comes off the relocation table and
  * the instruction stream of one function; nothing has to be run.
  */
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL);
 
 /*
  * A RELOCATABLE OBJECT, which on Linux is a loadable kernel module - and the
  * only kind of object whose operands carry relocations to read.
  */
-KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
+KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_SUBTYPE(KOF_ELF_REL);
 
 /*
  * ---- THE SYMBOL IS WHAT IS LOOKED FOR FIRST -----------------------------
@@ -79,9 +80,9 @@ KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
  * rootkits.
  *
  * A DECLARATION AND NOT SOMETHING THE ENGINE KNOWS: it has no idea that
- * __this_module matters. See KOF_DIAG_REFS for the one question it answers.
+ * __this_module matters. See KOF_DIAG_DECLARE_SYMBOL for the one question it answers.
  */
-KOF_DIAG_REFS("__this_module");
+KOF_DIAG_DECLARE_SYMBOL(m, "__this_module");
 
 /*
  * ONE NODE AND NO LINK, because there is no second call to link to: the
@@ -93,5 +94,5 @@ KOF_DIAG_REFS("__this_module");
  * a list, because a linked list is how the kernel holds everything. The
  * argument is the entire discriminator.
  */
-KOF_DIAG_ANCHOR(d, KOF_NUCLEO_LIST_HIDE, 0);
-KOF_DIAG_FIELD_OF(d, "__this_module");
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_LIST_HIDE, 0);
+KOF_DIAG_HAS_FIELD(KOF_NUCLEO_LIST_HIDE, m);

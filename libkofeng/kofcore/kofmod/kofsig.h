@@ -3830,7 +3830,7 @@ static inline uint16_t kof_diag_id_(const char *s)
 /*
  * DOES THIS DIAGNOSE CARRY THESE NAMES.
  *
- *     if (kof_diag_str_any(DIAG_LKM_KPROBERESOLVE, "sys_call_table"))
+ *     if (kof_diag_str_any(DIAG_LKM_KPROBE_RESOLVE, "sys_call_table"))
  *             KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
  *
  *     kof_diag_str_all(DIAG_X, "a", "b")
@@ -4071,7 +4071,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  *
  *     uint32_t n; const uint8_t *g = kof_diag_graph(&n), *r;
  *     for (i = 0; (r = kof_gr_rec(g, n, i)); i++)
- *             if (kof_gr_u16(r, KOF_GR_R_CAP) == KOF_NUCLEO_FIELD_WRITE)
+ *             if (kof_gr_u16(r, KOF_GR_R_CAP) == KOF_NUCLEO_ACTION_WRITE)
  *                     ...
  *
  * NULL and zero when the analysis did not run on this object, which is a

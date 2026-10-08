@@ -46,7 +46,7 @@ KOF_DIAG_NAME(rwx_exec);
  *
  * A SET AND NOT A VALUE. This shape lives in both worlds.
  */
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_SYMBOL);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_SYMBOL);
 
 /*
  * THE ROOT IS RARE AND UNAVOIDABLE. Rare because no clean program allocates
@@ -54,13 +54,13 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_SYMBOL);
  * that was just fetched has to run somewhere executable, and there is no way
  * around that.
  */
-KOF_DIAG_ANCHOR(a, KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
 
 /*
- * `a` IS THE PARENT OF BOTH. `r` is not the parent of `x`.
+ * THE HEAD IS THE PARENT OF BOTH. The read is not the parent of the exec.
  *
  * This is a PROVENANCE tree and not an order of execution: both take their
- * pointer from `a`. Read as a sequence, a node inserted between the two would
+ * pointer from the head. Read as a sequence, a node inserted between the two would
  * break the match, and it must not.
  */
 /*
@@ -70,5 +70,5 @@ KOF_DIAG_ANCHOR(a, KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
  * one sample and refuse the other. The matcher accepts anything more specific
  * - see kof_flow_cap_generic.
  */
-KOF_DIAG_FROM(r, a, KOF_NUCLEO_MEM_READ, KOF_DIAG_ROLE_BUFFER);
-KOF_DIAG_FROM(x, a, KOF_NUCLEO_EXEC_REG, KOF_DIAG_ROLE_TARGET);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_EXEC_REG);

@@ -332,7 +332,7 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
  *
  * One question each, answered off the parse, and nothing here knows what
  * any of them is FOR. A diagnose states the condition - see
- * KOF_DIAG_WHEN and enum kof_diag_fact - and this only fetches.
+ * KOF_DIAG_HAS_ATTRB and enum kof_diag_fact - and this only fetches.
  *
  * IT USED TO BE THE OTHER WAY ROUND: a handful of named bits, each one's
  * meaning a few lines of C in this file, and a diagnose could only ask what
@@ -423,7 +423,7 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
 	}
 }
 
-/* Every condition a diagnose stated - see KOF_DIAG_WHEN. */
+/* Every condition a diagnose stated - see KOF_DIAG_HAS_ATTRB. */
 static int diag_when_met(const struct kof_obj_ctx *ctx,
 			 const struct kof_diag *d)
 {
@@ -503,7 +503,7 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
  * KDIG_SEC_USERS. */
 
 /*
- * ---- DOES THE CODE REFER INTO THIS SYMBOL - see KOF_DIAG_REFS ---------------
+ * ---- DOES THE CODE REFER INTO THIS SYMBOL - see KOF_DIAG_DECLARE_SYMBOL ---------------
  *
  * ONE QUESTION, answered for every diagnose that declared one in a single
  * walk of the object's code relocations. The engine does not know which
@@ -632,8 +632,8 @@ static void ref_note(struct refscan *rs, const struct kof_elf_reloc *r)
 /*
  * WHICH DIAGNOSES THIS OBJECT PASSES THE GATE OF - all of them, in one walk.
  *
- * A gate is two kinds of sign. What the file IS (KOF_DIAG_WHEN) is a few
- * header fields the parser has already read. What it IMPORTS (KOF_DIAG_NEEDS)
+ * A gate is two kinds of sign. What the file IS (KOF_DIAG_HAS_ATTRB) is a few
+ * header fields the parser has already read. What it IMPORTS (the sequence a diagnose declares, or its head and tails)
  * is in the symbol table, and that is the part that cost something: it used
  * to be answered diagnose by diagnose, each one a pass over the whole table,
  * and asked twice - once to decide whether to start the analysis and once to
@@ -819,7 +819,7 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	/*
 	 * ---- ONLY THE ROUTES THE LOADED DIAGNOSES ASK FOR ----------------
 	 *
-	 * KOF_DIAG_VIA was being parsed, stored and never read: every scan ran
+	 * KOF_DIAG_ANALYSIS was being parsed, stored and never read: every scan ran
 	 * every route whatever the database wanted. A diagnose about raw
 	 * shellcode has no imports to read and one about LoadLibrary has no
 	 * syscall to find, so the other route is work with nowhere to put its
@@ -831,19 +831,29 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	 */
 	{
 		unsigned run = 0;
+		struct kof_diag_seq seqv[KOF_DB_MAX_DIAG];
+		uint32_t n_seq = 0;
 
 		for (i = 0; i < sc->eng->n_diag; i++) {
 			/* a diagnose whose signs are absent asks for no
 			 * route - see diag_gates */
 			if (!diag_gate_open(sc, ctx, i))
 				continue;
-			if (sc->eng->diag[i].via & KOF_DIAG_VIA_SYSCALL)
+			/* A head built from two calls is built for the diagnose
+			 * that declared it, and for it alone. */
+			if (sc->eng->diag[i].seq_first && n_seq < KOF_DB_MAX_DIAG) {
+				seqv[n_seq].made = sc->eng->diag[i].node[0].cap;
+				seqv[n_seq].first = sc->eng->diag[i].seq_first;
+				seqv[n_seq].then = sc->eng->diag[i].seq_then;
+				n_seq++;
+			}
+			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_SYSCALL)
 				run |= KOF_DIAG_RUN_SYSCALL;
-			if (sc->eng->diag[i].via & KOF_DIAG_VIA_SYMBOL)
+			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_SYMBOL)
 				run |= KOF_DIAG_RUN_SYMBOL;
-			if (sc->eng->diag[i].via & KOF_DIAG_VIA_EMULATE)
+			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_EMULATE)
 				run |= KOF_DIAG_RUN_EMULATE;
-			if (sc->eng->diag[i].via & KOF_DIAG_VIA_APIHASH)
+			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_APIHASH)
 				run |= KOF_DIAG_RUN_APIHASH;
 		}
 		if (!run)
@@ -857,6 +867,8 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		struct kof_diag_inputs in;
 
 		in.relocs = sc_relocs(sc, ctx);
+		in.seq = seqv;
+		in.n_seq = n_seq;
 		/* The analysis result, from the latch: the normaliser may have
 		 * asked already, and whichever asks first pays once. Only
 		 * computed here when the database wants the route. */

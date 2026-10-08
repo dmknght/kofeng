@@ -17,7 +17,7 @@
  * object and kept by whoever asked first; neither reader runs the program.
  * Written twice, the two would disagree about which calls were made.
  *
- * ASKED FOR, never assumed - KOF_DIAG_VIA_APIHASH, and KOF_DIAG_SERVES when the
+ * ASKED FOR, never assumed - KOF_DIAG_ANALYSIS_APIHASH, and KOF_DIAG_SERVES when the
  * engine wants the names for the object description. A program that does not
  * read the loader data costs a decode and nothing else; one that does costs a
  * run.

@@ -974,6 +974,17 @@ struct seenval {
 	uint8_t  produced;
 };
 
+/* Is this capability a head some diagnose asked to have built. */
+static int is_made(const struct kof_diag_scan *s, uint16_t cap)
+{
+	uint32_t k;
+
+	for (k = 0; k < s->n_seq; k++)
+		if (s->seq[k].made == cap)
+			return 1;
+	return 0;
+}
+
 /*
  * A CALLEE THIS MODULE DEFINES: PART OF THIS CHAIN, OR A FUNCTION OF ITS OWN.
  *
@@ -1052,8 +1063,7 @@ static uint16_t callee_node(const struct kof_diag_scan *s,
 			/* A promoted wrapper IS the function - see
 			 * promote_wrappers - so it answers for it however
 			 * many nodes are inside. */
-			if (p->at == fns[j].va &&
-			    p->cap == KOF_NUCLEO_KSYM_LOOKUP)
+			if (p->at == fns[j].va && is_made(s, p->cap))
 				return (uint16_t)i;
 			only = (uint16_t)i;
 			cnt++;
@@ -1112,8 +1122,9 @@ static int has_cr_write(const uint8_t *p, uint64_t n)
  * result was an anonymous token - a value belonging to no node, which no
  * link can end at. One node here gives the whole chain somewhere to begin.
  */
-static void promote_wrappers(struct kof_diag_scan *s,
-			     const struct funcspan *fns, uint32_t n_fn)
+static void promote_sequence(struct kof_diag_scan *s,
+			     const struct funcspan *fns, uint32_t n_fn,
+			     const struct kof_diag_seq *sq)
 {
 	uint32_t i, n = kof_diag_scan_count(s);
 
@@ -1144,7 +1155,7 @@ static void promote_wrappers(struct kof_diag_scan *s,
 		uint64_t reg_at, unreg_at = 0;
 		int paired = 0;
 
-		if (!p || p->cap != KOF_NUCLEO_KPROBE_REG)
+		if (!p || p->cap != sq->first)
 			continue;
 		reg_at = p->at;
 
@@ -1162,7 +1173,7 @@ static void promote_wrappers(struct kof_diag_scan *s,
 			const struct kof_diag_hit *q = kof_diag_scan_at(s, t);
 
 			if (!q || q->at <= reg_at ||
-			    q->cap != KOF_NUCLEO_KPROBE_UNREG)
+			    q->cap != sq->then)
 				continue;
 			if (!unreg_at || q->at < unreg_at) {
 				unreg_at = q->at;
@@ -1184,8 +1195,19 @@ static void promote_wrappers(struct kof_diag_scan *s,
 			    unreg_at < fns[j].va + fns[j].size)
 				break;
 		kof_diag_hit_add(s, j < n_fn ? fns[j].va : reg_at,
-				 KOF_NUCLEO_KSYM_LOOKUP, 0);
+				 sq->made, 0);
 	}
+}
+
+/* Every head a loaded diagnose asked the engine to build - see
+ * KOF_DIAG_DECLARE_SEQUENCE. None asked, none built. */
+static void promote_wrappers(struct kof_diag_scan *s,
+			     const struct funcspan *fns, uint32_t n_fn)
+{
+	uint32_t k;
+
+	for (k = 0; k < s->n_seq; k++)
+		promote_sequence(s, fns, n_fn, &s->seq[k]);
 }
 
 
@@ -1382,7 +1404,7 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 		 * AND THE STRETCH IS NOT CUT SHORT. Trimming it at the last
 		 * CALL site was tried and it deleted evidence - 405 chains on
 		 * 900 clean modules, nearly all of them
-		 * `mem-alloc-heap -> mem-field-write`. A token can be
+		 * `mem-alloc-heap -> mem-action-write`. A token can be
 		 * dereferenced anywhere after it is produced, field accesses
 		 * are not in the relocation table, and so there is no sound
 		 * place to stop early. Cost belongs to the loop bounds below,
@@ -2187,15 +2209,15 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 								 * collided and the read
 								 * was dropped. */
 								if (e && e->at == rip &&
-								    (e->cap == KOF_NUCLEO_FIELD_READ ||
-								     e->cap == KOF_NUCLEO_FIELD_WRITE))
+								    (e->cap == KOF_NUCLEO_ACTION_READ ||
+								     e->cap == KOF_NUCLEO_ACTION_WRITE))
 									dup2 = 1;
 							}
 							fh = dup2 ? NULL
 							   : kof_diag_hit_add(s, rip,
 								mi == 0u
-								? KOF_NUCLEO_FIELD_WRITE
-								: KOF_NUCLEO_FIELD_READ, 0);
+								? KOF_NUCLEO_ACTION_WRITE
+								: KOF_NUCLEO_ACTION_READ, 0);
 							if (fh) {
 								fh->attr = tg -
 								  seen[z].val;
@@ -2267,8 +2289,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 								fh = dup2 ? NULL
 								   : kof_diag_hit_add(s, rip,
 									mi == 0u
-									? KOF_NUCLEO_FIELD_WRITE
-									: KOF_NUCLEO_FIELD_READ,
+									? KOF_NUCLEO_ACTION_WRITE
+									: KOF_NUCLEO_ACTION_READ,
 									0);
 								if (fh) {
 									fh->attr = (uint64_t)
@@ -2310,8 +2332,8 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 								struct kof_diag_hit *fh =
 								  kof_diag_hit_add(s, rip,
 								    mi == 0u
-								    ? KOF_NUCLEO_FIELD_WRITE
-								    : KOF_NUCLEO_FIELD_READ,
+								    ? KOF_NUCLEO_ACTION_WRITE
+								    : KOF_NUCLEO_ACTION_READ,
 								    0);
 								if (fh) {
 									fh->attr =

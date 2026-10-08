@@ -31,7 +31,7 @@
  */
 
 KOF_DIAG_NAME(kmod_give_root);
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL);
 
 /*
  * THE ANCHOR IS prepare_creds AND NOT commit_creds, although commit is the
@@ -42,7 +42,7 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL);
  * prepare_creds produced, and a tree rooted the other way round would have
  * to search backwards from every install.
  */
-KOF_DIAG_ANCHOR(p, KOF_NUCLEO_CRED_PREPARE, 0);
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_CRED_PREPARE, 0);
 
 /*
  * AND THE LINK IS THE EVIDENCE, not the pair being present.
@@ -51,5 +51,5 @@ KOF_DIAG_ANCHOR(p, KOF_NUCLEO_CRED_PREPARE, 0);
  * prepare_creds returned. Two unrelated calls in one module would satisfy a
  * rule that only counted them.
  */
-KOF_DIAG_FROM(c, p, KOF_NUCLEO_CRED_SET, KOF_DIAG_ROLE_BUFFER);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_CRED_SET);
 

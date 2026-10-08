@@ -76,7 +76,7 @@ KOF_DIAG_NAME(DIAG_LKM_GIVEROOT);
  * placed. A diagnose that asked for EMULATE alone would match nothing and
  * say nothing about why.
  */
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL | KOF_DIAG_ANALYSIS_EMULATE);
 
 /*
  * ---- THE SIGNS THAT SAY THIS OBJECT IS WORTH THE WALK -------------------
@@ -87,12 +87,12 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
  * import a name that matches, and a .ko has no PT_LOAD, so the walk takes
  * an entirely different path through it.
  *
- * AND BOTH HALVES OF THE PAIR. A sign is a filter and not evidence - it may
- * be wrong and cost only the analysis - but these two are also what the
- * tree below is about, so an object missing either cannot match anyway.
+ * THE IMPORTS THE GATE LOOKS FOR ARE THE HEAD AND THE TAIL, which the build
+ * derives from them: this diagnose runs on names alone, so an object missing
+ * either cannot match anyway.
  */
-KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
-KOF_DIAG_NEEDS(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_CRED_SET);
+KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_SUBTYPE(KOF_ELF_REL);
 
 /*
  * THE ANCHOR IS prepare_creds AND NOT commit_creds, although commit is the
@@ -103,17 +103,16 @@ KOF_DIAG_NEEDS(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_CRED_SET);
  * prepare_creds produced, and a tree rooted the other way round would have
  * to search backwards from every install.
  */
-KOF_DIAG_ANCHOR(p, KOF_NUCLEO_CRED_PREPARE, 0);
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_CRED_PREPARE, 0);
 
 /*
- * THE CREDENTIAL WAS ZEROED. role BUFFER: the memory written IS the object
+ * THE CREDENTIAL WAS ZEROED. The memory written IS the object
  * prepare_creds returned.
  */
-KOF_DIAG_FROM(z, p, KOF_NUCLEO_FIELD_WRITE, KOF_DIAG_ROLE_BUFFER);
-KOF_DIAG_WROTE(z, 0);
+KOF_DIAG_ACTION(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_ACTION_WRITE, 0);
 
 /*
  * AND THEN INSTALLED. Two unrelated calls in one module would satisfy a
  * rule that only counted them; the link is what makes it one statement.
  */
-KOF_DIAG_FROM(c, p, KOF_NUCLEO_CRED_SET, KOF_DIAG_ROLE_BUFFER);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_CRED_SET);

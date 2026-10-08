@@ -167,7 +167,7 @@ int main(void)
 		t.cap_hit = 4u;
 		(void)hit(&t, A);
 		(void)hit(&t, A);
-		(void)hit(&t, KOF_NUCLEO_FIELD_READ);
+		(void)hit(&t, KOF_NUCLEO_ACTION_READ);
 		kof_diag_note_in(kof_diag_hit_of(&t, 2u), 1u,
 				 KOF_DIAG_ROLE_SOURCE, KOF_DIAG_KIND_PRODUCED);
 		CK(kof_diag_str_add(&t, A, 0, "kallsyms_lookup_name") == 1);
@@ -184,7 +184,7 @@ int main(void)
 		memset(n_one, 0, sizeof n_one);
 		n_one[0].cap = A;
 		n_one[0].parent = KOF_DIAG_NO_PARENT;
-		n_one[1].cap = KOF_NUCLEO_FIELD_READ;
+		n_one[1].cap = KOF_NUCLEO_ACTION_READ;
 		n_one[1].parent = 0;
 		n_one[1].role = KOF_DIAG_ROLE_SOURCE;
 		d_one.n_node = 2;

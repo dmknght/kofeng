@@ -107,7 +107,7 @@ int main(void)
 			  0, 0 },
 		};
 		static const struct kof_diag dg = {
-			1, KOF_DIAG_VIA_SYMBOL, 2, "either", nd
+			1, KOF_DIAG_ANALYSIS_SYMBOL, 2, "either", nd
 		};
 
 		CK(kof_diag_match(&s, &dg, NULL, NULL) == 1);
@@ -136,10 +136,10 @@ int main(void)
 			  KOF_DIAG_B_PRODUCED, 0 },
 		};
 		static const struct kof_diag dyes = {
-			1, KOF_DIAG_VIA_SYMBOL, 2, "shared", yes
+			1, KOF_DIAG_ANALYSIS_SYMBOL, 2, "shared", yes
 		};
 		static const struct kof_diag dno = {
-			1, KOF_DIAG_VIA_SYMBOL, 2, "produced", no
+			1, KOF_DIAG_ANALYSIS_SYMBOL, 2, "produced", no
 		};
 
 		CK(kof_diag_match(&s, &dyes, NULL, NULL) == 1);
@@ -155,7 +155,7 @@ int main(void)
 			  KOF_DIAG_B_PRODUCED, 0 },
 		};
 		static const struct kof_diag dg = {
-			1, KOF_DIAG_VIA_SYMBOL, 2, "from-alloc", nd
+			1, KOF_DIAG_ANALYSIS_SYMBOL, 2, "from-alloc", nd
 		};
 
 		CK(kof_diag_match(&s, &dg, NULL, NULL) == 1);

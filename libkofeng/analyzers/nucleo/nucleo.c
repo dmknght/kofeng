@@ -1501,8 +1501,8 @@ const char *kof_flow_cap_name(uint16_t cap)
 	case KOF_NUCLEO_ALLOC:        return "mem-alloc";
 	case KOF_NUCLEO_ALLOC_EXEC:   return "mem-alloc-exec";
 	case KOF_NUCLEO_HEAP:         return "mem-alloc-heap";
-	case KOF_NUCLEO_FIELD_READ:   return "mem-field-read";
-	case KOF_NUCLEO_FIELD_WRITE:  return "mem-field-write";
+	case KOF_NUCLEO_ACTION_READ:   return "mem-action-read";
+	case KOF_NUCLEO_ACTION_WRITE:  return "mem-action-write";
 	case KOF_NUCLEO_REG_OPEN:     return "reg-open";
 	/* "exec-memory" and not "exec-register": the register is how the
 	 * branch was spelled, the memory is what was entered. */

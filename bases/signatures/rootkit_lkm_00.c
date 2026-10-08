@@ -25,7 +25,7 @@
  *
  *   DIAG_LKM_SELFHIDE         removes itself from the list of loaded modules.
  *                             0 of 900 clean kernel modules.
- *   DIAG_LKM_KPROBERESOLVE    the resolver call, with register_kprobe and
+ *   DIAG_LKM_KPROBE_RESOLVE    the resolver call, with register_kprobe and
  *                             unregister_kprobe imported. 0 of 900 clean.
  *   the name                  what the resolver is asked for - the evidence
  *                             about what is being reached, read from the
@@ -67,7 +67,7 @@ KOF_TARGET_NAME(KOF_MALTYPE_ROOTKIT, "LKM");
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	if (kof_diag(DIAG_LKM_SELFHIDE) &&
-	    kof_diag_str_any(DIAG_LKM_KPROBERESOLVE, "sys_call_table",
+	    kof_diag_str_any(DIAG_LKM_KPROBE_RESOLVE, "sys_call_table",
 			     "x64_sys_call", "update_mapping_prot"))
 		KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
 }

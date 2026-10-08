@@ -74,8 +74,8 @@
  * only the syscall route. Declaring it both bounds the work and says what
  * the diagnose is about.
  */
-#define KOF_DIAG_VIA_SYSCALL (1u << 0)
-#define KOF_DIAG_VIA_SYMBOL  (1u << 1)
+#define KOF_DIAG_ANALYSIS_SYSCALL (1u << 0)
+#define KOF_DIAG_ANALYSIS_SYMBOL  (1u << 1)
 /*
  * RUN THE SPAN BETWEEN KNOWN SITES. The only route that resolves a value
  * through arithmetic the other two cannot follow, and the only one that sees
@@ -84,9 +84,9 @@
  * entirely made of those, so a diagnose about it has no other route.
  *
  * IT COSTS MORE THAN THE OTHER TWO and is asked for rather than assumed -
- * which is what every KOF_DIAG_VIA is for.
+ * which is what every KOF_DIAG_ANALYSIS is for.
  */
-#define KOF_DIAG_VIA_EMULATE (1u << 2)
+#define KOF_DIAG_ANALYSIS_EMULATE (1u << 2)
 /*
  * RESOLVE THE APIS THE PROGRAM FINDS FOR ITSELF. A PE that walks the loader
  * data has none of what it calls in its import table, and what stands for an
@@ -97,7 +97,7 @@
  * it is the only route whose product is ALSO read by something that is not a
  * diagnose: see KOF_DIAG_SERVES.
  */
-#define KOF_DIAG_VIA_APIHASH (1u << 3)
+#define KOF_DIAG_ANALYSIS_APIHASH (1u << 3)
 
 /*
  * ---- WHAT AN ANALYSIS RESULT IS USED FOR, BEYOND A VERDICT --------------
@@ -112,7 +112,7 @@
  *
  * KOF_SERVE_PE_SYMBOLS - the APIs a PE resolves for itself are added to its
  * symbol block as imports, so that everything that reads imports (a rule on
- * SYM_IMP, a KOF_DIAG_NEEDS sign, a similarity over symbols) sees the program
+ * SYM_IMP, a KOF_DIAG_DECLARE_SEQUENCE sign, a similarity over symbols) sees the program
  * the way it would if the author had used the import table.
  */
 #define KOF_SERVE_PE_SYMBOLS (1u << 0)
@@ -159,7 +159,7 @@ enum kof_diag_role {
  * THE `parent` OF THE ROOT. One tree, one root, and the root is the node
  * the engine starts from - see the note on the anchor below.
  *
- * NOT CALLED KOF_DIAG_ANCHOR, although that is what it marks: the word is
+ * NOT CALLED KOF_DIAG_DECLARE_HEAD, although that is what it marks: the word is
  * already the authoring macro a few screens down, and two meanings on one
  * name in one header is a compile error on the good day and a wrong value
  * on the bad one.
@@ -197,7 +197,7 @@ enum kof_diag_role {
 #define KOF_DIAG_B_SHARED   (1u << 2)
 
 /*
- * THE NODE DEMANDS THE VALUE IT WROTE - see KOF_DIAG_WROTE and `val` below.
+ * THE NODE DEMANDS THE VALUE IT WROTE - see KOF_DIAG_ACTION and `val` below.
  *
  * A VALUE, WHICH THE NOTE ON ATTRIBUTES SAYS DOES NOT BELONG IN MATCHING -
  * and that note is about a value the AUTHOR chose, a path or an address. A
@@ -217,7 +217,7 @@ enum kof_diag_role {
 #define KOF_DIAG_B_VAL      (1u << 3)
 
 /*
- * THE NODE'S OBJECT IS A FIELD OF A NAMED SYMBOL - see KOF_DIAG_FIELD_OF.
+ * THE NODE'S OBJECT IS A FIELD OF A NAMED SYMBOL - see KOF_DIAG_HAS_FIELD.
  *
  * A FIELD, which is the whole of the claim, not the symbol. A kernel module
  * hands THIS_MODULE to the kernel constantly - it is the handle every
@@ -337,8 +337,8 @@ struct kof_diag_node {
  * So the engine publishes FACTS, each one a single question with a single
  * answer, and a diagnose writes the CONDITION:
  *
- *     KOF_DIAG_WHEN(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
- *     KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0);
+ *     KOF_DIAG_HAS_ATTRB(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
+ *     KOF_DIAG_HAS_ATTRB(KOF_FACT_SECTIONS, 0);
  *
  * ALL OF THEM MUST HOLD. A diagnose names the shape it is worth running
  * on, and a shape is one statement rather than a menu.
@@ -428,7 +428,7 @@ struct kof_diag_when {
 
 struct kof_diag {
 	uint16_t              id;       /* assigned by the build            */
-	uint8_t               via;      /* KOF_DIAG_VIA_*                   */
+	uint8_t               via;      /* KOF_DIAG_ANALYSIS_*                   */
 	uint8_t               n_node;
 	const char           *name;     /* for a person, never matched on   */
 	const struct kof_diag_node *node;
@@ -456,6 +456,13 @@ struct kof_diag {
 	 */
 	uint8_t               n_needcap;
 	uint16_t              needcap[KOF_DIAG_MAX_NEED];
+	/*
+	 * THE TWO CALLS THE HEAD IS BUILT FROM, when it is built and not found -
+	 * see KOF_DIAG_DECLARE_SEQUENCE. Zero in both is "the head is a call
+	 * of its own".
+	 */
+	uint16_t              seq_first;
+	uint16_t              seq_then;
 
 	/*
 	 * THE CONDITIONS ON WHAT THE FILE IS - see enum kof_diag_fact. ANDED
@@ -473,7 +480,7 @@ struct kof_diag {
 	uint8_t               n_users;
 	/*
 	 * SYMBOLS THE CODE MUST REFER INTO, at a non-zero offset - see
-	 * KOF_DIAG_REFS. Strings live in the same store as `need`.
+	 * KOF_DIAG_DECLARE_SYMBOL. Strings live in the same store as `need`.
 	 */
 	uint8_t               n_ref;
 	const char           *ref[KOF_DIAG_MAX_NEED];
@@ -510,11 +517,11 @@ enum kof_diag_link {
  * while the thing that reads them is ksigbuilder.
  *
  *     KOF_DIAG_NAME(rwx_exec);
- *     KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_SYMBOL);
+ *     KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_SYMBOL);
  *
- *     KOF_DIAG_ANCHOR(a, KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
- *     KOF_DIAG_FROM(r, a, KOF_NUCLEO_READ,     KOF_DIAG_ROLE_BUFFER);
- *     KOF_DIAG_FROM(x, a, KOF_NUCLEO_EXEC_REG, KOF_DIAG_ROLE_TARGET);
+ *     KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
+ *     KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);
+ *     KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_EXEC_REG);
  *
  * THE CAPABILITY IS THE ENUMERATOR, never the display name in quotes.
  * KOF_NUCLEO_EXEC_REG is what kofcap.h declares and what the engine, the
@@ -523,78 +530,98 @@ enum kof_diag_link {
  * two vocabularies, one per audience, and the build now refuses the quoted
  * form rather than keeping both readable.
  *
- * KOF_DIAG_FROM NAMES THE PARENT RATHER THAN NESTING, because C has no
- * shape that nests and still reads as a tree - and a parent written out is
- * a parent a reader can see without counting braces. `a` is the parent of
- * both, which is the provenance tree and not the order they run in.
+ * THE HEAD IS THE PARENT OF EVERY TAIL. A block is a star: one head and the
+ * calls that receive what it produced, which is the provenance tree and not
+ * the order they run in. Nothing is named, so there is nothing to misspell:
+ * a tail is a capability, and the engine finds the argument that takes the
+ * head's result (kof_diag_role_of_arg) rather than being told which.
  *
  * THERE IS NO KOF_DIAG_TOUCH. A diagnose does not declare where it may be
  * joined to another - see the note on kof_diag_node.bits.
  */
 #define KOF_DIAG_NAME(id)
-#define KOF_DIAG_VIA(mask)
-#define KOF_DIAG_ANCHOR(label, cap, flags)
+#define KOF_DIAG_ANALYSIS(mask)
+#define KOF_DIAG_DECLARE_HEAD(cap, flags)
 /*
- * KOF_DIAG_FROM takes an OPTIONAL FIFTH ARGUMENT, a kind:
+ * KOF_DIAG_DECLARE_TAIL takes an OPTIONAL SECOND ARGUMENT, a kind:
  *
- *     KOF_DIAG_FROM(t, f, KOF_NUCLEO_COPY_TO_USER, KOF_DIAG_ROLE_SOURCE,
- *                   KOF_DIAG_B_SHARED);
+ *     KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_COPY_TO_USER, KOF_DIAG_B_SHARED);
  *
  * Left out, the edge may be either kind - which is what every diagnose
  * written before this meant and still means. The macro expands to nothing,
  * so both arities are legal C and ksigbuilder reads whichever is written.
  */
-#define KOF_DIAG_FROM(...)
+#define KOF_DIAG_DECLARE_TAIL(...)
 /*
- * KOF_DIAG_NEEDS(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_CRED_SET) - the
- * capabilities an object must import before this diagnose is worth running.
- * See struct kof_diag.
+ * KOF_DIAG_DECLARE_SEQUENCE(KOF_NUCLEO_KPROBE_REG, KOF_NUCLEO_KPROBE_UNREG) -
+ * the head is not a call of its own: it is what two calls are when one comes
+ * after the other in the SAME FUNCTION.
+ *
+ *     KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_KSYM_LOOKUP, 0);
+ *     KOF_DIAG_DECLARE_SEQUENCE(KOF_NUCLEO_KPROBE_REG, KOF_NUCLEO_KPROBE_UNREG);
+ *
+ * A RELATIONSHIP AND NOT TWO PRESENCES. Both being imported would be a gate;
+ * this says how they stand to each other: first, then, in one function, with
+ * whatever lies between them and NO LINK - the second call does not take the
+ * first's result, and a diagnose that demanded it would miss the author who
+ * takes the probe down before reading the address. The engine puts the head
+ * at the function that holds the pair, which is the address a caller's call
+ * names, so the caller learns it is getting a resolved symbol.
+ *
+ * THE GATE IS DERIVED FROM IT: an object must import both, and the head's own
+ * capability is not what it imports, so it is not asked for.
  *
  * CAPABILITIES AND NOT NAMES, because the names are nucleo's: the table that
- * says prepare_creds is KOF_NUCLEO_CRED_PREPARE is the one the analysis reads
- * the call with, so a second spelling of it in a diagnose is a copy that can
- * disagree. A cap with no name in that table can never be satisfied, and the
- * build refuses it.
+ * says register_kprobe is KOF_NUCLEO_KPROBE_REG is the one the analysis reads
+ * the call with. A cap with no name in that table can never be imported, and
+ * the build refuses it.
  */
-#define KOF_DIAG_NEEDS(...)
+#define KOF_DIAG_DECLARE_SEQUENCE(first, then)
 /*
- * KOF_DIAG_REFS("__this_module") - the object's code must contain an
- * instruction whose operand is a relocation against this symbol at an
- * OFFSET OTHER THAN ZERO: it takes the address of something INSIDE it, not
- * the symbol itself. A sign like KOF_DIAG_NEEDS, and for the same reason - a
- * file-level condition, answered from a table, that decides whether the
- * expensive analysis starts at all - but about a different table: NEEDS asks
- * what the object IMPORTS, this asks what its instructions REFER TO.
+ * KOF_DIAG_DECLARE_SYMBOL(s, "__this_module") and
+ * KOF_DIAG_HAS_FIELD(KOF_NUCLEO_LIST_HIDE, s) - an argument of that node is
+ * the address of a FIELD of the symbol, not the symbol itself.
  *
- * WHY IT IS A DECLARATION AND NOT SOMETHING THE ENGINE KNOWS. The engine has
- * no idea that __this_module matters; it has one question it can answer -
- * does a code relocation name this symbol at a non-zero addend - and the
- * diagnose says which symbol. The same question serves any symbol whose
- * fields, rather than whose address, are the interesting thing.
+ * THE SYMBOL IS A STRING AND THE ENGINE CANNOT KNOW IT BEFOREHAND, which is
+ * why it alone is declared with a label and every capability is not: the
+ * relation names the node by its capability and the symbol by its label.
+ * Naming a capability twice in one diagnose makes the relation ambiguous and
+ * the build refuses it.
  *
- * A symbol with no OFFSET to speak of is a different question and this does
- * not answer it: a reference at offset zero is the handle, and a module
- * hands THIS_MODULE to the kernel constantly.
+ * ONE DECLARATION IS BOTH THE MATCH AND THE GATE. The object's code must
+ * contain an instruction whose operand is a relocation against the symbol at
+ * an OFFSET OTHER THAN ZERO - the address of something INSIDE it - and that
+ * is answered from a table, before the expensive analysis starts at all. A
+ * reference at offset zero is the handle, and a module hands THIS_MODULE to
+ * the kernel constantly, so it does not count.
  *
- * ONE LINE PER CALL, as KOF_DIAG_NEEDS and KOF_DIAG_WHEN.
+ * WHY THE GATE IS NOT SOMETHING THE ENGINE KNOWS. It has no idea that
+ * __this_module matters; the diagnose says which symbol.
  */
-#define KOF_DIAG_REFS(...)
+#define KOF_DIAG_DECLARE_SYMBOL(label, name)
+#define KOF_DIAG_HAS_FIELD(cap, label)
 /*
- * KOF_DIAG_WROTE(label, 0) - the node must have written this value.
+ * KOF_DIAG_ACTION(KOF_NUCLEO_CRED_PREPARE, KOF_NUCLEO_ACTION_WRITE, 0) -
+ * inside the block of that head, the action wrote this value.
  *
- * Only for a node that writes. See KOF_DIAG_B_VAL for why a value may be
- * matched on at all, and for the one kind that may: a value the operating
- * system fixes the meaning of.
+ * The first word restates the head so the line reads on its own; the build
+ * refuses one that is not the head this diagnose declared. See
+ * KOF_DIAG_B_VAL for why a value may be matched on at all, and for the one
+ * kind that may: a value the operating system fixes the meaning of.
  */
-#define KOF_DIAG_WROTE(label, value)
+#define KOF_DIAG_ACTION(head, action, value)
 /*
- * KOF_DIAG_FIELD_OF(d, "__this_module") - an argument of this node is the
- * address of a FIELD of that symbol, not the symbol itself. See
- * KOF_DIAG_B_FIELD_OF.
- */
-#define KOF_DIAG_FIELD_OF(label, name)
-/*
- * KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0) - a condition on what the file IS,
+ * WHAT KIND OF FILE IS DECLARED AS A SIGNATURE DECLARES IT:
+ *
+ *     KOF_TARGET_FORMAT(KOF_FMT_ELF);
+ *     KOF_TARGET_SUBTYPE(KOF_ELF_REL);
+ *
+ * The same two words kofsig.h defines, read by the same build, so "what
+ * kind of file is this for" has one spelling. KOF_DIAG_HAS_ATTRB below is for the
+ * facts a signature's target has no word for yet: the permissions a region is
+ * mapped with, whether there are sections, whether there is an interpreter.
+ *
+ * KOF_DIAG_HAS_ATTRB(KOF_FACT_SECTIONS, 0) - a condition on what the file IS,
  * which is what decides whether the analysis runs on it at all. The engine
  * publishes the facts - see enum kof_diag_fact - and this is where a
  * diagnose states what it wants them to be.
@@ -602,10 +629,10 @@ enum kof_diag_link {
  * ONE LINE PER CALL, and repeat the macro for more than one condition. The
  * build reads these declarations a LINE at a time, so a value wrapped onto
  * a second line loses everything after the break - silently, because what
- * is left is still legal. KOF_DIAG_NEEDS is written the same way for the
+ * is left is still legal. KOF_DIAG_DECLARE_SEQUENCE is written the same way for the
  * same reason.
  */
-#define KOF_DIAG_WHEN(fact, value)
+#define KOF_DIAG_HAS_ATTRB(fact, value)
 /* KOF_DIAG_SERVES(KOF_SERVE_PE_SYMBOLS) - see the block above KOF_SERVE_*. */
 #define KOF_DIAG_SERVES(mask)
 
@@ -643,7 +670,7 @@ enum kof_diag_link {
 #define KDIG_SEC_USERS 3u
 /*
  * SYMBOLS THE OBJECT'S CODE MUST REFER INTO - a count, then each name as a
- * length byte and the bytes. See KOF_DIAG_REFS.
+ * length byte and the bytes. See KOF_DIAG_DECLARE_SYMBOL.
  */
 #define KDIG_SEC_REFS  4u
 /* KOF_SERVE_* - one byte. See KOF_DIAG_SERVES. */
@@ -652,6 +679,9 @@ enum kof_diag_link {
  * replaced a list of symbol NAMES in the record's first byte, which an older
  * pack still writes and this build skips. */
 #define KDIG_SEC_NEEDS  6u
+/* The capabilities of a head the engine builds from two calls: first u16,
+ * then u16, little endian. See KOF_DIAG_DECLARE_SEQUENCE. */
+#define KDIG_SEC_SEQUENCE 7u
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,

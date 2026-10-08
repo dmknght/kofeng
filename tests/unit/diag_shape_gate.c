@@ -4,7 +4,7 @@
  *
  * The engine publishes what it read out of the header - see enum
  * kof_diag_fact - and a diagnose registers the conditions it wants those to
- * meet, with KOF_DIAG_WHEN. The engine routes on that. The two stager
+ * meet, with KOF_DIAG_HAS_ATTRB. The engine routes on that. The two stager
  * diagnoses register two: a mapping that is writable and executable, and no
  * section table.
  *

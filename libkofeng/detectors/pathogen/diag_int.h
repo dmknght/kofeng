@@ -42,6 +42,8 @@ struct kof_diag_scan {
 	const struct kof_apihash    *apihash;           /* see kof_diag_apihash */
 	struct kof_apihash          *own_apihash;
 	int                          apihash_done;
+	const struct kof_diag_seq   *seq;               /* see kof_diag_inputs */
+	uint32_t                     n_seq;
 	const struct kof_elf_relocs *relocs;            /* CODE relocations */
 	struct kof_elf_relocs        own_relocs;
 	struct kof_elf_relocs        data_relocs;       /* DATA: the image builder's alone */

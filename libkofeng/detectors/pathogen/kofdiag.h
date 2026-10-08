@@ -249,7 +249,7 @@ struct kof_diag_scan;
  * measured - there is nothing to compare its output against - and a bug in it
  * is a bug in the whole walk.
  *
- * The bits are the same question KOF_DIAG_VIA_* asks of a diagnose, from the
+ * The bits are the same question KOF_DIAG_ANALYSIS_* asks of a diagnose, from the
  * other side: via says which routine COULD satisfy a rule, this says which
  * one a caller is willing to pay for.
  */
@@ -329,9 +329,22 @@ struct kof_diag_scan *kof_diag_scan_with(const struct kof_obj_ctx *ctx,
  *             and by the object's symbols alike.
  */
 struct kof_elf_relocs;
+/* A head, and the two calls it is made of - see KOF_DIAG_DECLARE_SEQUENCE. */
+struct kof_diag_seq {
+	uint16_t made;
+	uint16_t first;
+	uint16_t then;
+};
 struct kof_diag_inputs {
 	const struct kof_elf_relocs *relocs;
 	const struct kof_apihash    *apihash;
+	/*
+	 * THE HEADS THE ENGINE BUILDS OUT OF TWO CALLS - one per diagnose that
+	 * declared a sequence and whose gate is open. Without one, no such node
+	 * is made: it exists because something asked for it.
+	 */
+	const struct kof_diag_seq   *seq;
+	uint32_t                     n_seq;
 };
 struct kof_diag_scan *kof_diag_scan_with_inputs(const struct kof_obj_ctx *ctx,
 						const uint8_t *base,

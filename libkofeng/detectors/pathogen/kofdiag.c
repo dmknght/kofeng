@@ -1364,6 +1364,8 @@ struct kof_diag_scan *kof_diag_scan_with_inputs(const struct kof_obj_ctx *ctx,
 	s->size = size;
 	s->relocs = in ? in->relocs : NULL;
 	s->apihash = in ? in->apihash : NULL;
+	s->seq = in ? in->seq : NULL;
+	s->n_seq = in ? in->n_seq : 0;
 	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
 		const struct diag_scenario *d = &diag_scenarios[i];
 
@@ -1734,7 +1736,11 @@ static int linked(const struct kof_diag_hit *child, uint16_t parent_idx,
 	want &= (uint8_t)(KOF_DIAG_B_PRODUCED | KOF_DIAG_B_SHARED);
 
 	for (i = 0; i < child->n_in; i++) {
-		if (child->in[i].role != role)
+		/* A node that names no role takes the link whatever the role: the
+		 * role is the child's own argument, which the engine derived from
+		 * the capability (kof_diag_role_of_arg) and the diagnose need not
+		 * restate. */
+		if (role != KOF_DIAG_ROLE_NONE && child->in[i].role != role)
 			continue;
 		if (want) {
 			uint8_t is = child->in[i].kind == KOF_DIAG_KIND_SHARED
@@ -2234,7 +2240,7 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			if (at + len > n)
 				return 0;
 			/*
-			 * (fact u16, value u64) pairs - see KOF_DIAG_WHEN.
+			 * (fact u16, value u64) pairs - see KOF_DIAG_HAS_ATTRB.
 			 * A FACT THIS BUILD DOES NOT KNOW REFUSES THE WHOLE
 			 * RECORD: a condition silently dropped is a diagnose
 			 * that runs on the files its author excluded, and it
@@ -2253,13 +2259,25 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 							(b[at + 2u * q + 1u] << 8));
 				out->n_needcap = (uint8_t)(len / 2u);
 			}
+			/* The two calls the head is built from - see
+			 * KOF_DIAG_DECLARE_SEQUENCE. A length that is not two caps
+			 * refuses the record: half a sequence would be a head built
+			 * from something nobody wrote. */
+			if (tag == KDIG_SEC_SEQUENCE) {
+				if (len != 4u)
+					return 0;
+				out->seq_first = (uint16_t)(b[at] | (b[at + 1] << 8));
+				out->seq_then  = (uint16_t)(b[at + 2] | (b[at + 3] << 8));
+				if (!out->seq_first || !out->seq_then)
+					return 0;
+			}
 			if (tag == KDIG_SEC_USERS && len >= 1u) {
 				out->users_known = 1;
 				out->n_users = b[at];
 			}
 			/*
 			 * THE SYMBOLS THE CODE MUST REFER INTO - see
-			 * KOF_DIAG_REFS. Same shape and the same string store as
+			 * KOF_DIAG_DECLARE_SYMBOL. Same shape and the same string store as
 			 * the signs, and refused whole on anything that does not
 			 * add up, for the same reason: a diagnose with half its
 			 * references read would be gated by a condition nobody

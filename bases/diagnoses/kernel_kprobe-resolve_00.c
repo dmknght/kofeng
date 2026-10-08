@@ -1,7 +1,7 @@
 #include <kofmod/kofpathogen.h>
 
 /*
- * kernel_kproberesolve_00.c - a kernel module obtaining the address of a kernel
+ * kernel_kprobe-resolve_00.c - a kernel module obtaining the address of a kernel
  * symbol the kernel does not export, by planting a kprobe on it and reading
  * back where it landed.
  *
@@ -44,7 +44,7 @@
  * this machine.
  */
 
-KOF_DIAG_NAME(DIAG_LKM_KPROBERESOLVE);
+KOF_DIAG_NAME(DIAG_LKM_KPROBE_RESOLVE);
 
 /*
  * BOTH ROUTES. SYMBOL finds the call; EMULATE is what reads the NAME the
@@ -60,7 +60,7 @@ KOF_DIAG_NAME(DIAG_LKM_KPROBERESOLVE);
  * store was empty and an empty store answers "not found". The cost is bounded
  * by the gate below - 0 of 900 clean modules import register_kprobe.
  */
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL | KOF_DIAG_ANALYSIS_EMULATE);
 
 /*
  * ---- THE GATE: A RELOCATABLE OBJECT THAT IMPORTS THE PAIR ---------------
@@ -69,13 +69,23 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYMBOL | KOF_DIAG_VIA_EMULATE);
  * never starts on one. Without a sign a diagnose runs on every kernel
  * module - measured once already, +47% on that corpus.
  */
-KOF_DIAG_WHEN(KOF_FACT_OBJ_KIND, KOF_ELF_REL);
-KOF_DIAG_NEEDS(KOF_NUCLEO_KPROBE_REG, KOF_NUCLEO_KPROBE_UNREG);
+KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_SUBTYPE(KOF_ELF_REL);
 
 /*
- * THE RESOLVER CALL IS THE ANCHOR. The engine places it where the
+ * THE RESOLVER CALL IS THE HEAD. The engine places it where the
  * register/unregister pair lives (see the kprobe block in diag_emu.c), so it
- * exists only for a module that imports the pair - the NEEDS above is the
- * gate, and the node is what carries the names the caller passes.
+ * exists only for a module that imports the pair - the sequence declared
+ * below is what the head is made of, and the node is what carries the names
+ * the caller passes.
  */
-KOF_DIAG_ANCHOR(l, KOF_NUCLEO_KSYM_LOOKUP, 0);
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_KSYM_LOOKUP, 0);
+
+/*
+ * AND WHAT IT IS MADE OF: a probe put on, then taken off, in one function.
+ * Said as a relationship because that is what it is - both being imported is
+ * only the gate, and the gate is derived from this. No link between the two,
+ * on purpose: hcrootkit takes the first probe down BEFORE it reads the
+ * address, and a link would lose it.
+ */
+KOF_DIAG_DECLARE_SEQUENCE(KOF_NUCLEO_KPROBE_REG, KOF_NUCLEO_KPROBE_UNREG);

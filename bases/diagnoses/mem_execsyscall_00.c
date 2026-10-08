@@ -51,13 +51,13 @@ KOF_DIAG_NAME(DIAG_MEM_EXECSYSCALL);
  * the runner. A diagnose naming one route is a diagnose that misses
  * whichever samples the other one sees.
  */
-KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_EMULATE);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_EMULATE);
 
 /*
  * ---- AND THE ATTRIBUTES THAT SAY THIS FILE IS WORTH THE ANALYSIS -------
  *
  * The engine publishes what it read out of the header; this is where the
- * diagnose says what it wants those to be - see KOF_DIAG_WHEN.
+ * diagnose says what it wants those to be - see KOF_DIAG_HAS_ATTRB.
  *
  * A MAPPING THAT IS WRITABLE AND EXECUTABLE, and no section table. A
  * stager has nothing else to recognise it by - no imports, no symbols, a
@@ -85,15 +85,15 @@ KOF_DIAG_VIA(KOF_DIAG_VIA_SYSCALL | KOF_DIAG_VIA_EMULATE);
  * alone stops separating, and having stripped the section table as well is
  * the half that still does.
  */
-KOF_DIAG_WHEN(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
-KOF_DIAG_WHEN(KOF_FACT_SECTIONS, 0);
+KOF_DIAG_HAS_ATTRB(KOF_FACT_MAP_PERM, KOF_PERM_W | KOF_PERM_X);
+KOF_DIAG_HAS_ATTRB(KOF_FACT_SECTIONS, 0);
 
 /*
  * THE ROOT IS RARE AND UNAVOIDABLE. Rare: no clean program asks for W+X in
  * one call - 0 of 846 in /usr/bin. Unavoidable: code that was just fetched
  * has to run somewhere executable.
  */
-KOF_DIAG_ANCHOR(a, KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
+KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
 
 /*
  * BOTH TAKE THEIR POINTER FROM `a`, and this is a provenance tree rather than
@@ -109,5 +109,5 @@ KOF_DIAG_ANCHOR(a, KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
  * the statement is true of a loader filling the region from a file as well,
  * and the matcher accepts anything more specific.
  */
-KOF_DIAG_FROM(r, a, KOF_NUCLEO_MEM_READ, KOF_DIAG_ROLE_BUFFER);
-KOF_DIAG_FROM(x, a, KOF_NUCLEO_EXEC_REG, KOF_DIAG_ROLE_TARGET);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);
+KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_EXEC_REG);

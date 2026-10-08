@@ -131,10 +131,10 @@ enum { KOF_CA_MEM_ALLOC = 1, KOF_CA_MEM_ALLOC_EXEC, KOF_CA_MEM_ALLOC_HEAP,
         * the stride - so KOF_NUCLEO_VALID answered NO for both, and that is
         * not a cosmetic refusal: diag_cap_of walks the capability space
         * asking which values are valid, so a diagnose naming
-        * "mem-field-write" was rejected as "not a capability", and
+        * "mem-action-write" was rejected as "not a capability", and
         * tests/unit/diag_roles.c skipped them for the same reason.
         */
-       KOF_CA_MEM_FIELD_READ, KOF_CA_MEM_FIELD_WRITE };
+       KOF_CA_MEM_ACTION_READ, KOF_CA_MEM_ACTION_WRITE };
 enum { KOF_CA_FILE_OPEN = 1, KOF_CA_FILE_READ, KOF_CA_FILE_WRITE, KOF_CA_FILE_DELETE, KOF_CA_FILE_RENAME, KOF_CA_FILE_PERM_SET, KOF_CA_FILE_TIMESTAMP_SET };
 enum { KOF_CA_NET_OPEN = 1, KOF_CA_NET_OPEN_RAW, KOF_CA_NET_CONNECT, KOF_CA_NET_BIND, KOF_CA_NET_LISTEN, KOF_CA_NET_ACCEPT, KOF_CA_NET_SEND, KOF_CA_NET_RECV, KOF_CA_NET_GETADDR, KOF_CA_NET_ADDR,
        /* HTTP is a layer above, not a spelling of the same thing - see
@@ -975,10 +975,10 @@ enum kof_flow_cap {
 	 * WHICH field is in kof_diag_hit.attr. Without the number the word
 	 * says only "touched something", which no rule can use.
 	 */
-	KOF_NUCLEO_FIELD_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM,
-					KOF_CA_MEM_FIELD_READ),
-	KOF_NUCLEO_FIELD_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM,
-					 KOF_CA_MEM_FIELD_WRITE),
+	KOF_NUCLEO_ACTION_READ = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM,
+					KOF_CA_MEM_ACTION_READ),
+	KOF_NUCLEO_ACTION_WRITE = KOF_NUCLEO_MK(KOF_CCTX_USER, KOF_CG_MEM,
+					 KOF_CA_MEM_ACTION_WRITE),
 	/*
 	 * AN OPEN REGISTRY KEY, AND IT IS NOT A FINDING.
 	 *

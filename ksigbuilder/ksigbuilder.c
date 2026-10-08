@@ -7544,13 +7544,11 @@ done:
  */
 
 struct dnode {
-	char     label[32];
-	char     parent[32];
 	uint16_t cap;
 	uint16_t flags;
 	uint8_t  role;
 	uint8_t  bits;          /* KOF_DIAG_B_PRODUCED / _SHARED, if demanded */
-	uint64_t val;           /* KOF_DIAG_WROTE, when KOF_DIAG_B_VAL is set */
+	uint64_t val;           /* KOF_DIAG_ACTION, when KOF_DIAG_B_VAL is set */
 	char     sym[64];       /* KOF_DIAG_FIELD_OF, when B_FIELD_OF is set  */
 };
 
@@ -7576,7 +7574,7 @@ struct dhdr {
  * number comes from kofcap.h through the compiler and renumbering a group
  * cannot leave this behind. What CAN go stale is a cap missing from the
  * list, and diag_cap_table_check() below refuses the build when one is -
- * diag_role_of learnt that lesson the expensive way, see its note.
+ * the role table learnt that lesson the expensive way.
  */
 #define KOF_NUCLEO_IDENTS(X) \
 	X(KOF_NUCLEO_ANTI_DEBUG) X(KOF_NUCLEO_CRED_SET) X(KOF_NUCLEO_CRED_PREPARE) \
@@ -7592,8 +7590,8 @@ struct dhdr {
 	X(KOF_NUCLEO_MOD_LOAD) X(KOF_NUCLEO_SYMBOL_GET) X(KOF_NUCLEO_RESOLVE) \
 	X(KOF_NUCLEO_CALL_REG) X(KOF_NUCLEO_LIB_OPEN) X(KOF_NUCLEO_NAME_HASH) \
 	X(KOF_NUCLEO_SELF_RESOLVE) X(KOF_NUCLEO_ALLOC_EXEC) X(KOF_NUCLEO_HEAP) \
-	X(KOF_NUCLEO_ALLOC) X(KOF_NUCLEO_MEMFD) X(KOF_NUCLEO_FIELD_READ) \
-	X(KOF_NUCLEO_FIELD_WRITE) X(KOF_NUCLEO_MEM_READ) X(KOF_NUCLEO_MEM_WRITE) \
+	X(KOF_NUCLEO_ALLOC) X(KOF_NUCLEO_MEMFD) X(KOF_NUCLEO_ACTION_READ) \
+	X(KOF_NUCLEO_ACTION_WRITE) X(KOF_NUCLEO_MEM_READ) X(KOF_NUCLEO_MEM_WRITE) \
 	X(KOF_NUCLEO_JAIL) X(KOF_NUCLEO_NET_ACCEPT) X(KOF_NUCLEO_NET_ADDR) \
 	X(KOF_NUCLEO_NET_BIND) X(KOF_NUCLEO_NET_CONNECT) X(KOF_NUCLEO_DNS) \
 	X(KOF_NUCLEO_NET_LISTEN) X(KOF_NUCLEO_NET_OPEN) X(KOF_NUCLEO_NET_RAW) \
@@ -7735,32 +7733,6 @@ static int diag_cap_of(const char *w, uint16_t *out)
 	return 0;
 }
 
-/* The role words, spelled as the header spells them - a closed set of
- * five, so a table here is the whole of it rather than a copy of part of
- * something bigger. */
-static int diag_role_of(const char *w, uint8_t *out)
-{
-	static const struct { const char *w; uint8_t v; } r[] = {
-		{ "KOF_DIAG_ROLE_NONE",   KOF_DIAG_ROLE_NONE   },
-		{ "KOF_DIAG_ROLE_BUFFER", KOF_DIAG_ROLE_BUFFER },
-		/* SOURCE was added to the engine and not here, so a diagnose
-		 * naming it was refused as "not a role" - the word existed on
-		 * one side of the build only. */
-		{ "KOF_DIAG_ROLE_SOURCE", KOF_DIAG_ROLE_SOURCE },
-		{ "KOF_DIAG_ROLE_TARGET", KOF_DIAG_ROLE_TARGET },
-		{ "KOF_DIAG_ROLE_FD",     KOF_DIAG_ROLE_FD     },
-		{ "KOF_DIAG_ROLE_PATH",   KOF_DIAG_ROLE_PATH   },
-	};
-	size_t i;
-
-	for (i = 0; i < sizeof r / sizeof r[0]; i++)
-		if (strcmp(w, r[i].w) == 0) {
-			*out = r[i].v;
-			return 1;
-		}
-	return 0;
-}
-
 /* Which kind of edge a node demands, when it says. Absent is not an error:
  * see KOF_DIAG_B_PRODUCED - a diagnose that does not care accepts either. */
 static int diag_kind_of(const char *w, uint8_t *out)
@@ -7823,16 +7795,6 @@ static int diag_arg(const char *p, int i, char *out, size_t cap)
 	return n > 0;
 }
 
-static int diag_label_idx(const struct dnode *nd, int n, const char *l)
-{
-	int i;
-
-	for (i = 0; i < n; i++)
-		if (strcmp(nd[i].label, l) == 0)
-			return i;
-	return -1;
-}
-
 static int diagnose_main(int argc, char **argv)
 {
 	const char *src = argc > 2 ? argv[2] : NULL;
@@ -7843,7 +7805,9 @@ static int diagnose_main(int argc, char **argv)
 	char ref_tbl[KOF_DIAG_MAX_NEED][KOF_DIAG_NEED_LEN];
 	struct kof_diag_when when_tbl[KOF_DIAG_MAX_WHEN];
 	unsigned n_users = 0, users_len = 0;
-	int n_need = 0, n_when = 0, n_ref = 0;
+	int n_need = 0, has_seq = 0, n_when = 0, n_ref = 0, n_sym = 0;
+	uint16_t seq_first = 0, seq_then = 0;
+	struct { char label[32]; char name[64]; int used; } sy[8];
 	int n_nd = 0, lineno = 0, i;
 	unsigned via = 0, serves = 0;
 	FILE *f, *o;
@@ -7870,41 +7834,34 @@ static int diagnose_main(int argc, char **argv)
 		if ((p = strstr(line, "KOF_DIAG_NAME(")) != NULL) {
 			if (!diag_arg(p, 0, name, sizeof name))
 				err(lineno, "KOF_DIAG_NAME wants a name");
-		} else if ((p = strstr(line, "KOF_DIAG_VIA(")) != NULL) {
-			if (strstr(p, "KOF_DIAG_VIA_SYSCALL"))
-				via |= KOF_DIAG_VIA_SYSCALL;
-			if (strstr(p, "KOF_DIAG_VIA_SYMBOL"))
-				via |= KOF_DIAG_VIA_SYMBOL;
-			if (strstr(p, "KOF_DIAG_VIA_EMULATE"))
-				via |= KOF_DIAG_VIA_EMULATE;
-			if (strstr(p, "KOF_DIAG_VIA_APIHASH"))
-				via |= KOF_DIAG_VIA_APIHASH;
+		} else if ((p = strstr(line, "KOF_DIAG_ANALYSIS(")) != NULL) {
+			if (strstr(p, "KOF_DIAG_ANALYSIS_SYSCALL"))
+				via |= KOF_DIAG_ANALYSIS_SYSCALL;
+			if (strstr(p, "KOF_DIAG_ANALYSIS_SYMBOL"))
+				via |= KOF_DIAG_ANALYSIS_SYMBOL;
+			if (strstr(p, "KOF_DIAG_ANALYSIS_EMULATE"))
+				via |= KOF_DIAG_ANALYSIS_EMULATE;
+			if (strstr(p, "KOF_DIAG_ANALYSIS_APIHASH"))
+				via |= KOF_DIAG_ANALYSIS_APIHASH;
 			if (!via)
-				err(lineno, "KOF_DIAG_VIA names no route");
-		} else if ((p = strstr(line, "KOF_DIAG_ANCHOR(")) != NULL) {
+				err(lineno, "KOF_DIAG_ANALYSIS names no route");
+		} else if ((p = strstr(line, "KOF_DIAG_DECLARE_HEAD(")) != NULL) {
 			if (n_nd) {
-				err(lineno, "a diagnose has one anchor");
+				err(lineno, "a diagnose has one head");
 				continue;
 			}
 			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
-			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
-			    !diag_arg(p, 2, a[2], sizeof a[2])) {
-				err(lineno, "KOF_DIAG_ANCHOR(label, cap, flags)");
+			    !diag_arg(p, 1, a[1], sizeof a[1])) {
+				err(lineno, "KOF_DIAG_DECLARE_HEAD(cap, flags)");
 				continue;
 			}
 			memset(&nd[0], 0, sizeof nd[0]);
-			if (strlen(a[0]) >= sizeof nd[0].label) {
-				err(lineno, "a node label is too long");
-				continue;
-			}
-			memcpy(nd[0].label, a[0], strlen(a[0]) + 1u);
-			nd[0].parent[0] = 0;
-			if (!diag_cap_of(a[1], &nd[0].cap))
+			if (!diag_cap_of(a[0], &nd[0].cap))
 				err(lineno, "not a capability");
-			if (!diag_flag_of(a[2], &nd[0].flags))
+			if (!diag_flag_of(a[1], &nd[0].flags))
 				err(lineno, "not a node flag");
 			n_nd = 1;
-		} else if ((p = strstr(line, "KOF_DIAG_FROM(")) != NULL) {
+		} else if ((p = strstr(line, "KOF_DIAG_DECLARE_TAIL(")) != NULL) {
 			struct dnode *d;
 
 			if (n_nd >= (int)(sizeof nd / sizeof nd[0])) {
@@ -7912,38 +7869,22 @@ static int diagnose_main(int argc, char **argv)
 				continue;
 			}
 			if (!n_nd) {
-				err(lineno, "KOF_DIAG_FROM before the anchor");
+				err(lineno, "KOF_DIAG_DECLARE_TAIL before the head");
 				continue;
 			}
-			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
-			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
-			    !diag_arg(p, 2, a[2], sizeof a[2]) ||
-			    !diag_arg(p, 3, a[3], sizeof a[3])) {
-				err(lineno,
-				    "KOF_DIAG_FROM(label, parent, cap, role)");
+			if (!diag_arg(p, 0, a[0], sizeof a[0])) {
+				err(lineno, "KOF_DIAG_DECLARE_TAIL(cap[, kind])");
 				continue;
 			}
 			d = &nd[n_nd];
 			memset(d, 0, sizeof *d);
-			/* A label longer than the slot is refused rather than
-			 * cut: two labels that differ past the cut would read
-			 * as one, and the link would go to the wrong node. */
-			if (strlen(a[0]) >= sizeof d->label ||
-			    strlen(a[1]) >= sizeof d->parent) {
-				err(lineno, "a node label is too long");
-				continue;
-			}
-			memcpy(d->label, a[0], strlen(a[0]) + 1u);
-			memcpy(d->parent, a[1], strlen(a[1]) + 1u);
-			if (!diag_cap_of(a[2], &d->cap))
+			if (!diag_cap_of(a[0], &d->cap))
 				err(lineno, "not a capability");
-			if (!diag_role_of(a[3], &d->role))
-				err(lineno, "not a role");
 			/* the optional kind - absent means either */
-			if (diag_arg(p, 4, a[4], sizeof a[4])) {
+			if (diag_arg(p, 1, a[1], sizeof a[1])) {
 				uint8_t kb;
 
-				if (!diag_kind_of(a[4], &kb))
+				if (!diag_kind_of(a[1], &kb))
 					err(lineno,
 					    "not a link kind: want "
 					    "KOF_DIAG_B_PRODUCED or "
@@ -7952,87 +7893,158 @@ static int diagnose_main(int argc, char **argv)
 					d->bits |= kb;
 			}
 			n_nd++;
-		} else if ((p = strstr(line, "KOF_DIAG_WROTE(")) != NULL) {
-			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
-			    !diag_arg(p, 1, a[1], sizeof a[1])) {
-				err(lineno, "KOF_DIAG_WROTE(label, value)");
-				continue;
-			}
-			i = diag_label_idx(nd, n_nd, a[0]);
-			if (i < 0) {
-				err(lineno, "no node with that label");
-				continue;
-			}
-			{
-				char *end = NULL;
-				unsigned long long v = strtoull(a[1], &end, 0);
+		} else if ((p = strstr(line, "KOF_DIAG_ACTION(")) != NULL) {
+			struct dnode *d;
+			char *end = NULL;
+			unsigned long long v;
 
-				if (!end || *end) {
-					err(lineno, "KOF_DIAG_WROTE wants a "
-						    "constant");
-					continue;
-				}
-				nd[i].val = (uint64_t)v;
-				nd[i].bits |= KOF_DIAG_B_VAL;
+			if (n_nd >= (int)(sizeof nd / sizeof nd[0])) {
+				err(lineno, "too many nodes in one diagnose");
+				continue;
 			}
-		} else if ((p = strstr(line, "KOF_DIAG_FIELD_OF(")) != NULL) {
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
+			    !diag_arg(p, 2, a[2], sizeof a[2])) {
+				err(lineno, "KOF_DIAG_ACTION(head, action, value)");
+				continue;
+			}
+			/* The first word restates the head, so the line reads on
+			 * its own; it must be the head this diagnose declared. */
+			if (!n_nd || !diag_cap_of(a[0], &nd[n_nd].cap) ||
+			    nd[n_nd].cap != nd[0].cap) {
+				err(lineno, "KOF_DIAG_ACTION names a block that "
+					    "is not this diagnose's head");
+				continue;
+			}
+			d = &nd[n_nd];
+			memset(d, 0, sizeof *d);
+			if (!diag_cap_of(a[1], &d->cap))
+				err(lineno, "not a capability");
+			v = strtoull(a[2], &end, 0);
+			if (!end || *end) {
+				err(lineno, "KOF_DIAG_ACTION wants a constant");
+				continue;
+			}
+			d->val = (uint64_t)v;
+			d->bits |= KOF_DIAG_B_VAL;
+			n_nd++;
+		} else if ((p = strstr(line, "KOF_DIAG_DECLARE_SYMBOL(")) != NULL) {
 			size_t L;
 
+			/* A symbol is named by a string the engine cannot know in
+			 * advance, so it is the one declaration that carries a
+			 * label: the relation below refers to it by that. */
 			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
 			    !diag_arg(p, 1, a[1], sizeof a[1])) {
-				err(lineno, "KOF_DIAG_FIELD_OF(label, \"sym\")");
-				continue;
-			}
-			i = diag_label_idx(nd, n_nd, a[0]);
-			if (i < 0) {
-				err(lineno, "no node with that label");
+				err(lineno, "KOF_DIAG_DECLARE_SYMBOL(label, \"name\")");
 				continue;
 			}
 			L = strlen(a[1]);
 			if (L < 3u || a[1][0] != '"' || a[1][L - 1u] != '"' ||
-			    L - 2u >= sizeof nd[0].sym) {
-				err(lineno, "KOF_DIAG_FIELD_OF wants a quoted "
-					    "symbol name");
+			    L - 2u >= sizeof sy[0].name ||
+			    strlen(a[0]) >= sizeof sy[0].label ||
+			    L - 2u >= KOF_DIAG_NEED_LEN) {
+				err(lineno, "KOF_DIAG_DECLARE_SYMBOL wants a short "
+					    "label and a quoted symbol name");
 				continue;
 			}
-			memcpy(nd[i].sym, a[1] + 1, L - 2u);
-			nd[i].sym[L - 2u] = 0;
-			nd[i].bits |= KOF_DIAG_B_FIELD_OF;
+			if (n_sym >= (int)(sizeof sy / sizeof sy[0])) {
+				err(lineno, "too many symbols");
+				continue;
+			}
+			memcpy(sy[n_sym].label, a[0], strlen(a[0]) + 1u);
+			memcpy(sy[n_sym].name, a[1] + 1, L - 2u);
+			sy[n_sym].name[L - 2u] = 0;
+			sy[n_sym].used = 0;
+			n_sym++;
+		} else if ((p = strstr(line, "KOF_DIAG_HAS_FIELD(")) != NULL) {
+			int k, hit = -1, hits = 0, si = -1;
+			uint16_t cap;
+
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
+			    !diag_cap_of(a[0], &cap)) {
+				err(lineno, "KOF_DIAG_HAS_FIELD(capability, symbol)");
+				continue;
+			}
+			for (k = 0; k < n_sym; k++)
+				if (!strcmp(sy[k].label, a[1]))
+					si = k;
+			if (si < 0) {
+				err(lineno, "no symbol declared with that label");
+				continue;
+			}
+			for (k = 0; k < n_nd; k++)
+				if (nd[k].cap == cap) {
+					hit = k;
+					hits++;
+				}
+			if (hits != 1) {
+				err(lineno, hits ? "that capability is in this "
+						   "diagnose more than once"
+						 : "no node of that capability");
+				continue;
+			}
+			memcpy(nd[hit].sym, sy[si].name, strlen(sy[si].name) + 1u);
+			nd[hit].bits |= KOF_DIAG_B_FIELD_OF;
+			sy[si].used = 1;
+			/* and it is what the object must refer to, or the analysis
+			 * has nothing to find: the gate is the symbol table. */
+			for (k = 0; k < n_ref; k++)
+				if (!strcmp(ref_tbl[k], sy[si].name))
+					break;
+			if (k == n_ref) {
+				if (n_ref >= (int)KOF_DIAG_MAX_NEED) {
+					err(lineno, "too many symbols");
+					continue;
+				}
+				memcpy(ref_tbl[n_ref], sy[si].name,
+				       strlen(sy[si].name) + 1u);
+				n_ref++;
+			}
 		} else if ((p = strstr(line, "KOF_DIAG_SERVES(")) != NULL) {
 			if (strstr(p, "KOF_SERVE_PE_SYMBOLS"))
 				serves |= KOF_SERVE_PE_SYMBOLS;
 			if (!serves)
 				err(lineno, "KOF_DIAG_SERVES names nothing the "
 					    "engine uses");
-		} else if ((p = strstr(line, "KOF_DIAG_REFS(")) != NULL) {
-			int k;
+		} else if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL ||
+			   (p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
+			/* THE TARGET OF A DIAGNOSE IS DECLARED AS A SIGNATURE'S IS:
+			 * the same two words, read here into the same conditions the
+			 * engine already evaluates before it starts. One vocabulary
+			 * for "what kind of file", two readers of it. */
+			int is_fmt = strstr(line, "KOF_TARGET_FORMAT(") != NULL;
+			uint64_t vv = 0;
 
-			/* Every quoted word on the line is one symbol, as NEEDS. */
-			for (k = 0; diag_arg(p, k, a[0], sizeof a[0]); k++) {
-				size_t L = strlen(a[0]);
-
-				if (L < 3u || a[0][0] != '"' ||
-				    a[0][L - 1u] != '"') {
-					err(lineno, "KOF_DIAG_REFS wants quoted "
-						    "symbol names");
-					break;
-				}
-				if (n_ref >= (int)KOF_DIAG_MAX_NEED ||
-				    L - 2u >= KOF_DIAG_NEED_LEN) {
-					err(lineno, "too many symbols, or one "
-						    "is too long");
-					break;
-				}
-				memcpy(ref_tbl[n_ref], a[0] + 1, L - 2u);
-				ref_tbl[n_ref][L - 2u] = 0;
-				n_ref++;
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !when_value(a[0], &vv)) {
+				err(lineno, "KOF_TARGET_FORMAT / KOF_TARGET_SUBTYPE "
+					    "want a constant or words joined by |");
+				continue;
 			}
-		} else if ((p = strstr(line, "KOF_DIAG_WHEN(")) != NULL) {
+			if (n_when >= (int)KOF_DIAG_MAX_WHEN) {
+				err(lineno, "too many conditions");
+				continue;
+			}
+			{
+				uint16_t fact = is_fmt ? (uint16_t)KOF_FACT_FORMAT
+						       : (uint16_t)KOF_FACT_OBJ_KIND;
+				int k;
+
+				for (k = 0; k < n_when; k++)
+					if (when_tbl[k].fact == fact)
+						err(lineno, "declared twice");
+				when_tbl[n_when].fact = fact;
+				when_tbl[n_when].val = vv;
+				n_when++;
+			}
+		} else if ((p = strstr(line, "KOF_DIAG_HAS_ATTRB(")) != NULL) {
 			uint64_t fv = 0, vv = 0;
 
 			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
 			    !diag_arg(p, 1, a[1], sizeof a[1])) {
-				err(lineno, "KOF_DIAG_WHEN(fact, value)");
+				err(lineno, "KOF_DIAG_HAS_ATTRB(fact, value)");
 				continue;
 			}
 			if (!when_value(a[0], &fv) || !fv ||
@@ -8041,7 +8053,7 @@ static int diagnose_main(int argc, char **argv)
 				continue;
 			}
 			if (!when_value(a[1], &vv)) {
-				err(lineno, "KOF_DIAG_WHEN wants a constant "
+				err(lineno, "KOF_DIAG_HAS_ATTRB wants a constant "
 					    "or words joined by |");
 				continue;
 			}
@@ -8052,30 +8064,40 @@ static int diagnose_main(int argc, char **argv)
 			when_tbl[n_when].fact = (uint16_t)fv;
 			when_tbl[n_when].val = vv;
 			n_when++;
-		} else if ((p = strstr(line, "KOF_DIAG_NEEDS(")) != NULL) {
+		} else if ((p = strstr(line, "KOF_DIAG_DECLARE_SEQUENCE(")) != NULL) {
 			int k;
+			uint16_t cap[2];
 
-			/* Every word on the line is one capability: what the object
-			 * must import, said in nucleo's own vocabulary. */
-			for (k = 0; diag_arg(p, k, a[0], sizeof a[0]); k++) {
-				uint16_t cap;
-
-				if (!diag_cap_of(a[0], &cap)) {
-					err(lineno, "KOF_DIAG_NEEDS wants "
-						    "KOF_NUCLEO_* capabilities");
-					break;
-				}
-				if (!kof_flow_cap_named(cap)) {
-					err(lineno, "no imported name is that "
-						    "capability, so it can "
-						    "never be satisfied");
-					break;
-				}
+			if (has_seq || !n_nd) {
+				err(lineno, has_seq ? "a diagnose has one sequence"
+						    : "KOF_DIAG_DECLARE_SEQUENCE comes after "
+						      "the head it makes");
+				continue;
+			}
+			if (!diag_arg(p, 0, a[0], sizeof a[0]) ||
+			    !diag_arg(p, 1, a[1], sizeof a[1]) ||
+			    !diag_cap_of(a[0], &cap[0]) ||
+			    !diag_cap_of(a[1], &cap[1])) {
+				err(lineno, "KOF_DIAG_DECLARE_SEQUENCE(first, then) "
+					    "wants two KOF_NUCLEO_* capabilities");
+				continue;
+			}
+			/* What the object must import, so each has to be a name that
+			 * can be imported - or the sequence can never be found. */
+			if (!kof_flow_cap_named(cap[0]) || !kof_flow_cap_named(cap[1])) {
+				err(lineno, "no imported name is that capability, so "
+					    "the sequence can never be found");
+				continue;
+			}
+			seq_first = cap[0];
+			seq_then = cap[1];
+			has_seq = 1;
+			for (k = 0; k < 2; k++) {
 				if (n_need >= (int)KOF_DIAG_MAX_NEED) {
 					err(lineno, "too many signs");
 					break;
 				}
-				need_tbl[n_need++] = cap;
+				need_tbl[n_need++] = cap[k];
 			}
 		}
 	}
@@ -8084,20 +8106,9 @@ static int diagnose_main(int argc, char **argv)
 	if (!name[0])
 		err(lineno, "a diagnose needs KOF_DIAG_NAME");
 	if (!via)
-		err(lineno, "a diagnose needs KOF_DIAG_VIA");
+		err(lineno, "a diagnose needs KOF_DIAG_ANALYSIS");
 	if (!n_nd)
-		err(lineno, "a diagnose needs an anchor");
-	/*
-	 * A LABEL THAT NAMES NOTHING IS A TYPO, and the one place it can be
-	 * caught is here: the engine would see a parent index it cannot
-	 * resolve and have to pick between refusing the diagnose and
-	 * ignoring the link, which are both worse than not shipping it.
-	 */
-	for (i = 1; i < n_nd; i++)
-		if (diag_label_idx(nd, n_nd, nd[i].parent) < 0)
-			fprintf(stderr, "%s: error: \"%s\" is not a node in "
-				"this diagnose\n", src, nd[i].parent),
-				errors++;
+		err(lineno, "a diagnose needs a head");
 	/*
 	 * AND THE ANCHOR MUST BE RARE, which is a cost statement and not a
 	 * correctness one - see the note on anchors in kofmod/kofpathogen.h.
@@ -8110,6 +8121,41 @@ static int diagnose_main(int argc, char **argv)
 		fprintf(stderr, "%s: warning: anchoring on a common "
 			"capability - every one in the object starts a "
 			"descent\n", src);
+	for (i = 0; i < n_sym; i++)
+		if (!sy[i].used)
+			err(lineno, "a declared symbol is attached to nothing");
+	/*
+	 * THE GATE IS DERIVED FROM THE HEAD AND THE TAILS, for a diagnose that
+	 * only names can satisfy: with no syscall or hash route there is no
+	 * other way for its capabilities to appear, so an object that imports
+	 * none of them is not worth the analysis. A diagnose that DOES have such
+	 * a route is not gated by imports - a stripped static binary imports
+	 * nothing - and one whose head is built from a declared sequence is gated
+	 * by the two calls it is built from, because the head's own capability is
+	 * not what the object imports.
+	 */
+	if (!has_seq && !(via & (KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_APIHASH)))
+		for (i = 0; i < n_nd; i++) {
+			int k;
+
+			if (!kof_flow_cap_named(nd[i].cap))
+				continue;       /* an action has no import name */
+			for (k = 0; k < n_need && need_tbl[k] != nd[i].cap; k++)
+				;
+			if (k < n_need)
+				continue;
+			if (n_need >= (int)KOF_DIAG_MAX_NEED) {
+				err(lineno, "too many signs");
+				break;
+			}
+			need_tbl[n_need++] = nd[i].cap;
+		}
+	/* A head the engine builds out of a declared sequence is not bare: the
+	 * two calls are what it is made of. */
+	if (n_nd == 1 && !has_seq &&
+	    !(nd[0].bits & (KOF_DIAG_B_VAL | KOF_DIAG_B_FIELD_OF)))
+		fprintf(stderr, "%s: warning: a head with no tail, action or "
+			"symbol says only that a call exists\n", src);
 	if (errors)
 		return 1;
 
@@ -8154,8 +8200,8 @@ static int diagnose_main(int argc, char **argv)
 	/* A diagnose that serves the engine's use of an analysis has to ask for
 	 * that analysis: the declaration says what the result is FOR, the route
 	 * says that it is computed, and one without the other is dead text. */
-	if ((serves & KOF_SERVE_PE_SYMBOLS) && !(via & KOF_DIAG_VIA_APIHASH))
-		err(lineno, "KOF_SERVE_PE_SYMBOLS needs KOF_DIAG_VIA_APIHASH");
+	if ((serves & KOF_SERVE_PE_SYMBOLS) && !(via & KOF_DIAG_ANALYSIS_APIHASH))
+		err(lineno, "KOF_SERVE_PE_SYMBOLS needs KOF_DIAG_ANALYSIS_APIHASH");
 	if (n_need || n_when || n_ref || serves || g_uses_known) {
 		int k;
 
@@ -8163,6 +8209,8 @@ static int diagnose_main(int argc, char **argv)
 	}
 	if (n_need)
 		need += 2u + 2u * (size_t)n_need;   /* tag, length, caps */
+	if (has_seq)
+		need += 2u + 4u;                    /* tag, length, two caps */
 	if (n_ref) {
 		int k;
 
@@ -8193,9 +8241,8 @@ static int diagnose_main(int argc, char **argv)
 	memcpy(blob + at, name, strlen(name));
 	at += strlen(name);
 	for (i = 0; i < n_nd; i++) {
-		unsigned par = i ? (unsigned)diag_label_idx(nd, n_nd,
-							    nd[i].parent)
-				 : (unsigned)KOF_DIAG_NO_PARENT;
+		/* a tail's parent is the head: the block is a star */
+		unsigned par = i ? 0u : (unsigned)KOF_DIAG_NO_PARENT;
 
 		blob[at + 0] = (unsigned char)nd[i].cap;
 		blob[at + 1] = (unsigned char)(nd[i].cap >> 8);
@@ -8241,6 +8288,14 @@ static int diagnose_main(int argc, char **argv)
 			blob[at++] = (unsigned char)need_tbl[k];
 			blob[at++] = (unsigned char)(need_tbl[k] >> 8);
 		}
+	}
+	if (has_seq) {
+		blob[at++] = KDIG_SEC_SEQUENCE;
+		blob[at++] = 4;
+		blob[at++] = (unsigned char)seq_first;
+		blob[at++] = (unsigned char)(seq_first >> 8);
+		blob[at++] = (unsigned char)seq_then;
+		blob[at++] = (unsigned char)(seq_then >> 8);
 	}
 	if (n_when) {
 		int k;

@@ -53,7 +53,7 @@ static size_t rec(uint8_t *b, const char *name)
 	uint16_t cap = (uint16_t)KOF_NUCLEO_NET_OPEN;
 
 	b[at++] = 1; b[at++] = 0;                 /* one node          */
-	b[at++] = KOF_DIAG_VIA_SYSCALL;
+	b[at++] = KOF_DIAG_ANALYSIS_SYSCALL;
 	b[at++] = (uint8_t)nl;
 	memcpy(b + at, name, nl); at += nl;
 	b[at++] = (uint8_t)cap; b[at++] = (uint8_t)(cap >> 8);

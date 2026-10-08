@@ -277,7 +277,7 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 			{ KOF_NUCLEO_EXEC_REG, 0, 0, KOF_DIAG_ROLE_TARGET, 0, 0 },
 		};
 		static const struct kof_diag dg = {
-			1, KOF_DIAG_VIA_SYSCALL, 3, "rwx_exec", nd
+			1, KOF_DIAG_ANALYSIS_SYSCALL, 3, "rwx_exec", nd
 		};
 		uint16_t bind[4];
 		uint8_t nb = 0;
@@ -314,7 +314,7 @@ static void unlinked_does_not_match(void)
 		{ KOF_NUCLEO_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER, 0, 0 },
 	};
 	static const struct kof_diag dg = {
-		1, KOF_DIAG_VIA_SYSCALL, 2, "needs_a_link", nd
+		1, KOF_DIAG_ANALYSIS_SYSCALL, 2, "needs_a_link", nd
 	};
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
@@ -390,7 +390,7 @@ static void unreadable_prot_is_not_zero(void)
 		  KOF_DIAG_ROLE_NONE, 0, 0 },
 	};
 	static const struct kof_diag dg = {
-		1, KOF_DIAG_VIA_SYSCALL, 1, "needs_wx", nd
+		1, KOF_DIAG_ANALYSIS_SYSCALL, 1, "needs_wx", nd
 	};
 	/* mmap with prot loaded from memory - a value this does not follow. */
 	static const uint8_t code[] = {
