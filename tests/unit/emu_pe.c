@@ -246,7 +246,7 @@ out:
 }
 
 /*
- * An ARM64 PE is refused by the gate rather than run, because bddisasm cannot
+ * An ARM64 PE is refused by the gate rather than run, because the decoder cannot
  * decode one and a run would spend its whole budget faulting.
  */
 static void refuses_arm64(void)

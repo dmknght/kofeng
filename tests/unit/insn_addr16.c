@@ -2,9 +2,8 @@
  * insn_addr16 - the address-size prefix, which is how a Windows stub reads the
  * PEB.
  *
- * WHY THIS IS A TEST AND NOT A COMMENT. The decoder is vendored, this engine
- * carries one patch to it (see libkofemu/bddisasm/README.kofeng.md), and the
- * next upgrade is a copy that would silently drop the patch. What it fixes has
+ * WHY THIS IS A TEST AND NOT A COMMENT. A decoder rewrite that dropped the rule
+ * would pass every test that only checks lengths of common code. What it covers has
  * no symptom worth the name: the instruction decodes, the run continues, and
  * the guest simply believes it is not on Windows NT. Measured on a Sality
  * sample, that cost twenty-five instructions of virus body instead of seven
@@ -13,8 +12,8 @@
  * WHAT IS ASSERTED. `64 67 8B 1E 30 00` is six bytes and reads fs:0x30. That is
  * `mov ebx, fs:[0x30]` written with the 0x67 prefix, so the ModRM is decoded in
  * 16-bit addressing, where mod=0/rm=6 is a bare disp16. objdump and ndisasm
- * both agree on six bytes; bddisasm 3.0.1 gave four and dropped the
- * displacement.
+ * both agree on six bytes; a decoder that ignores the prefix for ModRM gives
+ * four and drops the displacement.
  *
  * AND THE VALUE, not only the decode. The length being right means the NEXT
  * instruction is found; the displacement being right means the segment base is
@@ -26,7 +25,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libkofemu/kofemu.h"
+#include "../../libgenome/phenotype/kofemu.h"
 
 static int failures;
 
@@ -64,7 +63,7 @@ static uint64_t peb_read(const uint8_t *code, unsigned n, int *reached)
 	kof_emu_map(e, CODE_VA, code, n, 0x1000, KOF_EMU_R | KOF_EMU_X);
 	kof_emu_map(e, TEB_VA, teb, sizeof teb, 0x2000, KOF_EMU_R | KOF_EMU_W);
 	kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W);
-	/* bddisasm's segment ids: ES, CS, SS, DS, FS, GS - FS is 4, which is
+	/* the decoder's segment ids: ES, CS, SS, DS, FS, GS - FS is 4, which is
 	 * where a 32-bit Windows thread keeps its TEB. */
 	kof_emu_set_seg_base(e, 4, TEB_VA);
 	kof_emu_set_rip(e, CODE_VA);

@@ -19,7 +19,7 @@
 
 #include <stdint.h>
 
-#include "bddisasm.h"
+#include <x86/x86.h>
 
 /* x86-64 has sixteen, and the sixteenth index is the sentinel - see above. */
 #define NGPR 16u
@@ -27,7 +27,7 @@
 /*
  * AH, CH, DH AND BH FOLD ONTO rax, rcx, rdx AND rbx.
  *
- * bddisasm numbers the legacy byte registers by their ENCODING, so those
+ * the decoder numbers the legacy byte registers by their ENCODING, so those
  * four come back as 4, 5, 6 and 7 - the slots that at every other width
  * mean rsp, rbp, rsi and rdi. Returning that number does not lose
  * information, it INVENTS it: `mov dh, 0x10` reads as a write to rsi, and a
@@ -43,14 +43,14 @@
  * `size` says so, and writing one byte over an unknown register leaves it
  * unknown. This answers only WHICH register, which is the question here.
  */
-static inline uint32_t gpr_of(const ND_OPERAND *op)
+static inline uint32_t gpr_of(const struct gt_x86_op *op)
 {
 	uint32_t r;
 
-	if (op->Type != ND_OP_REG || op->Info.Register.Type != ND_REG_GPR)
+	if (op->type != GT_X86_OP_REG || op->rtype != GT_X86_REG_GPR)
 		return NGPR;
-	r = op->Info.Register.Reg;
-	if (op->Info.Register.IsHigh8 && r >= 4u && r < 8u)
+	r = op->reg;
+	if (op->high8 && r >= 4u && r < 8u)
 		r -= 4u;
 	return r < NGPR ? r : NGPR;
 }

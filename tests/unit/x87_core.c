@@ -23,7 +23,7 @@
 #include <stdint.h>
 #include <math.h>
 
-#include "../../libkofemu/kofemu.h"
+#include "../../libgenome/phenotype/kofemu.h"
 
 static int failures;
 

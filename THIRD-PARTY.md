@@ -3,33 +3,44 @@
 The project's own terms are MIT; see [LICENSE](LICENSE), which also carries the
 summary of everything below. This file is the detail.
 
-## bddisasm 3.0.1 — Apache License 2.0
+## Previously used: bddisasm 3.0.1 — Apache License 2.0
 
-    libkofemu/bddisasm/
+Nothing of it remains in the repository. Earlier versions vendored it under
+`libgenome/genotype/bddisasm/` as the x86 and x86-64 decoder beneath the emulator, with one
+patched file (a 16-bit addressing displacement guard, marked `KOFENG PATCH`). The
+tree was removed when `libgenome/genotype/x86/` replaced it.
 
-Copyright (c) Bitdefender. Licensed under the Apache License, Version 2.0.
-The full licence text is at `libkofemu/bddisasm/LICENSE`; provenance and the
-exact subset taken are recorded in `libkofemu/bddisasm/README.kofeng.md`.
+Copyright (c) Bitdefender. Licensed under the Apache License, Version 2.0; the
+licence text is kept at `LICENSES/Apache-2.0.txt`.
 
-ONE FILE IS MODIFIED and Apache 2.0 requires that it be marked as such. It is
-`src/bdx86_decoder.c`, and the change is a single condition in
-`NdFetchModrmAndDisplacement`; the site carries a `KOFENG PATCH` comment and
-`libkofemu/bddisasm/README.kofeng.md` records what it fixes and why.
+**The replacement is a complete rewrite**: table format, runtime decoder, lazy
+operand builder and text formatter are this project's own, and no bddisasm source
+file is in the tree. What is NOT code but did come from it:
 
-In short: the guard that decides whether an instruction carries a displacement
-compares the base register against `NDR_RBP` (5), which is correct for 32- and
-64-bit addressing. In **16-bit** addressing the mod=0 form carrying a bare
-displacement is rm=6, not rm=5 - the file's own `gDispsizemap16` says so - and
-`64 67 8B 1E 30 00`, which is `mov ebx, fs:[0x30]` written with an address-size
-prefix, therefore decoded as four bytes with no displacement instead of six.
-That is the instruction every Windows stub that resolves its own imports begins
-with. `tests/unit/insn_addr16.c` pins it.
+- `x86_tab.c` and `x86_ids.h` (one table set for both 32- and 64-bit mode) are written by `tools/genotype/x86_gen.c`, which
+  decodes enumerated encodings with bddisasm and records the answers - opcode
+  structure, operand shapes, instruction identities, and the id numbering.
+- The text formatter's conventions (prefix order, column, size keywords) were
+  learned from bddisasm's output and implemented independently.
+- `tools/genotype/x86_diff.c` compares the two decoders on random encodings.
 
-Every other file is unmodified. Apache 2.0 also requires that a copy of the
-licence travel with the code and that existing copyright and attribution
-notices are kept; both hold.
+[Unverified] Whether data of that kind is subject to Apache 2.0 is a legal
+question this project has not had answered. The conservative reading is
+followed: the attribution is kept, and so is the licence text.
 
-This applies to any distribution of kofeng, source or binary.
+The patch that was carried is now a rule in the generator's data and is pinned by
+`tests/unit/insn_addr16.c`, which stays as the regression test.
+
+Re-running the generator or the comparison needs a bddisasm checkout, which is
+not shipped: `make genotype-x86 REF=<dir>`, `make genotype-x86-diff REF=<dir>`.
+
+## Previously consulted: iced — MIT, and yaxpeax-x86 — 0BSD
+
+`github.com/icedland/iced` and `github.com/iximeow/yaxpeax-x86`. Read for how a
+fast decoder is organised: indexing by opcode map and prefix, operand building
+kept apart from length decoding, validity carried by the table. Nothing is
+copied from either - no code, table or text - and neither is a dependency of the
+build or of the binaries.
 
 ## Read, not taken
 
@@ -286,25 +297,17 @@ capabilities they are deliberately not followed.
 
 ### Capstone — BSD-3-Clause, with LLVM-derived files under the NCSA licence
 
-`github.com/capstone-engine/capstone`. EVALUATED AND NOT USED, recorded here
-because the evaluation is a decision a reader will otherwise re-make.
+`github.com/capstone-engine/capstone`. NOT LINKED, and not shipped. It was
+evaluated as a replacement for this engine's fixed-width decoders and rejected:
+linking the ten non-x86 architectures costs 31 MB of binary where kofscanner is
+2.8 MB, and `CAPSTONE_DIET` (240 KB) strips the detail - groups come back empty and
+`cs_regs_access` fails - which removes the reason to want it.
 
-It answers exactly the three questions this engine's hand-written fixed-width
-decoders answer - `CS_GRP_JUMP`/`CALL`/`RET` for the branch class,
-`cs_regs_access()` for the registers an instruction touches, and the operand
-detail for the immediate - and it does so for ten architectures where kofeng
-has 624 lines of its own. Capstone 6 also covers ARC and Xtensa, two of the
-five this engine still cannot read.
-
-Measured against it: linking the ten non-x86 architectures costs 31 MB of
-binary, where kofscanner is 2.8 MB today. `CAPSTONE_DIET` brings that to
-240 KB and was tested - it strips the detail, so groups come back empty and
-`cs_regs_access` fails, which removes the whole reason to want it. It also
-does not cover MicroBlaze, CRIS or OpenRISC, so it would not retire the
-hand-written path.
-
-So: no dependency, and the gaps are closed by completing this engine's own
-decoders. Nothing is reproduced from Capstone.
+It is used OFFLINE, on a developer machine: the ARM decoders under
+`libgenome/genotype/` are being derived by enumerating encodings, asking
+Capstone what each one is, and reducing the answers to tables - the method used
+for x86. What is checked in is the table and the code that reads it; no Capstone
+source is reproduced.
 
 ### Unpacker — MIT
 
@@ -357,7 +360,7 @@ program, which is `OEP_CONTEXT` in `dep/XEmulUnpacker/`:
   - `nSpDelta`, the stack pointer measured against where it was at the entry
     point, and the rule that a real hand-over happens with it BALANCED. That
     is the single most useful thing in the file and it is what
-    `libkofemu/kofemu.c` now tests;
+    `libgenome/phenotype/kofemu.c` now tests;
   - the per-packer tails: PECompact hands over with `ret` (1.00-1.10),
     `ret 4` (1.50-1.76) or `jmp eax` (2.40), and 0.90 does it with a `ret`
     from a heap buffer into the image;

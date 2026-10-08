@@ -25,47 +25,54 @@ SOFTWARE.
 THIRD-PARTY COMPONENTS UNDER OTHER TERMS
 ================================================================================
 
-The MIT terms above cover the code written for this project. This repository
-also redistributes third-party code, which keeps its own licence. Nothing above
-replaces or weakens those terms, and nothing below applies to anything except
-the paths it names.
+The MIT terms above cover the code written for this project, and since the x86
+decoder was rewritten there is no third-party code in this repository. What
+follows records what it was built from and with, because some of that is a debt
+even where no licence attaches.
 
 --------------------------------------------------------------------------------
-bddisasm 3.0.1 - Apache License 2.0
-    libkofemu/bddisasm/
+Previously used: bddisasm 3.0.1 - Apache License 2.0
+    nothing of it remains in this repository
 --------------------------------------------------------------------------------
 
 Copyright (c) Bitdefender. Licensed under the Apache License, Version 2.0.
 
-The instruction decoder the emulator is built on. ONE FILE IS MODIFIED:
-`src/bdx86_decoder.c` carries a single-condition fix to the 16-bit addressing
-displacement guard, marked `KOFENG PATCH` at the site. Every other file is
-redistributed unmodified. The full licence text travels with them at
-`libkofemu/bddisasm/LICENSE`; the provenance, the exact subset taken and what
-the patch fixes are recorded in `libkofemu/bddisasm/README.kofeng.md`.
+Earlier versions of this project vendored bddisasm as the x86 and x86-64 decoder under the
+emulator. It has been removed from the tree, and the decoder that replaced it,
+`libgenome/genotype/x86/`, is a complete rewrite: a table-driven decoder with its
+own format, its own runtime and its own text formatter, none of it derived from
+bddisasm's source.
 
-Apache 2.0 requires that a copy of the licence travel with the code, that
-existing copyright and attribution notices are kept, and that modified files
-say they were modified. All three are satisfied: by the paths above, and by the
-marking at the patch site and in the two READMEs. See THIRD-PARTY.md.
+[Unverified] What this repository still holds that came from running bddisasm:
+`libgenome/genotype/x86/x86_tab.c` and `x86_ids.h` are data written by
+`tools/genotype/x86_gen.c`, which was run against bddisasm and recorded what it
+answered - the opcode map, operand shapes and instruction identities, including
+the numbering of the instruction ids. No bddisasm source file is in the tree and
+the generator does not include one. Whether facts of that kind carry the source
+licence is a legal question this file does not answer; it is recorded so that a
+reader can decide, and the safe reading - that Apache 2.0's attribution applies -
+is the one honoured here: the copyright above is kept and the licence text is at
+`LICENSES/Apache-2.0.txt`. Reproducing the tables needs a checkout of bddisasm
+passed as `make genotype-x86 REF=<dir>`; it is not shipped.
 
 --------------------------------------------------------------------------------
-Files in this project under the Apache License 2.0
+Previously consulted: iced (MIT) and yaxpeax-x86 (0BSD)
 --------------------------------------------------------------------------------
 
-Copyright (c) 2026 DmKnght. Licensed under the Apache License, Version 2.0.
+Two Rust x86 decoders were read for how a fast decoder is organised - table
+indexing by opcode map and prefix, decoding and operand building as separate
+steps, validity decided by the table rather than by checks in the decoder. No
+code, table or text from either is in this repository, and neither is a build
+or run-time dependency. Their terms are recorded because the reading was real.
 
-    libkofeng/kofparsers/kofformat.c
-    libkofeng/kofparsers/kofformat.h
-    libkofeng/kofdisasm/xref.c
-    libkofeng/kofdisasm/xref.h
+--------------------------------------------------------------------------------
+Capstone - BSD-3-Clause (some files NCSA): offline reference only
+--------------------------------------------------------------------------------
 
-These four carry their own SPDX line and it is the one that governs them. Every
-other file written for this project is under the MIT terms above; where a file
-carries an SPDX identifier, that identifier wins.
-
-The full Apache 2.0 text is at `libkofemu/bddisasm/LICENSE`, which is the copy
-this repository already ships.
+Capstone is used on a developer's machine as the reference the ARM decoders'
+tables are derived from, the way bddisasm was for x86. It is not distributed
+with, linked into or required to build kofeng, and no Capstone source is
+reproduced here. Its terms are noted for the same reason as above.
 
 --------------------------------------------------------------------------------
 Signature sources - bases/
@@ -101,14 +108,11 @@ should be able to find where it came from.
                                     before a guessed target is believed, and
                                     bounding the input instead of capping the
                                     results
-    Capstone (BSD-3-Clause, with    evaluated as a replacement for this
-      LLVM-derived files under      engine's fixed-width decoders and NOT
-      the NCSA licence)             used: +31 MB of binary against 2.8 MB
-                                    today, its DIET build strips the very
-                                    detail that made it worth having, and it
-                                    does not cover MicroBlaze, CRIS or
-                                    OpenRISC so the hand-written path stays
-                                    either way
+    Capstone (BSD-3-Clause, with    not linked: 31 MB of binary against
+      LLVM-derived files under      2.8 MB today, and its DIET build strips
+      the NCSA licence)             the detail that made it worth having.
+                                    Used offline as the reference the ARM
+                                    decoders' tables are derived from
     Unpacker (MIT)                  the routing rule that named the above
     VMPStatic (MIT)                 VMProtect's PACKER_INFO and key schedule
     XVolkolak / XEmulUnpacker (MIT) nSpDelta, and the per-packer hand-over tails

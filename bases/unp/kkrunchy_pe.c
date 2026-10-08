@@ -16,7 +16,7 @@
  * detail=JECXZ 0x3f2a3a`. kkrunchy's inner decode loop is built on JECXZ -
  * branch on the counter being zero WITHOUT decrementing it, the one member of
  * the LOOP family that reads RCX and leaves it alone - and every one of the
- * five samples here produced nothing at all. With it added to libkofemu, all
+ * five samples here produced nothing at all. With it added to libgenome/phenotype, all
  * five hand over with the stack balanced:
  *
  *     00, 04  8,191,416 insn   handover 0x3e4184

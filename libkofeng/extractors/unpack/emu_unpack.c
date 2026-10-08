@@ -200,7 +200,7 @@ enum kof_emu_unp_why kof_emu_unp_gate(const struct kof_obj_ctx *ctx,
 	 * payloads and asks for the emulator on them, and until now the ask
 	 * arrived here and was refused.
 	 *
-	 * Everything else is still refused: bddisasm decodes these two and an
+	 * Everything else is still refused: the decoder decodes these two and an
 	 * ARM object would be started and stopped on its first instruction,
 	 * which costs a page table and teaches nothing.
 	 */
@@ -986,7 +986,7 @@ static int build_teb_pe(struct kof_emu *e, unsigned bits, uint64_t image_base,
 		return 0;
 	/*
 	 * 64-bit Windows addresses the TEB through GS and 32-bit through FS.
-	 * The numbers are bddisasm's segment ids, which is what the
+	 * The numbers are the decoder's segment ids, which is what the
 	 * interpreter's address arithmetic uses.
 	 */
 	kof_emu_set_seg_base(e, bits == 32u ? 4u : 5u, teb);
@@ -1852,7 +1852,7 @@ enum kof_emu_unp_why kof_emu_unp_gate_pe(const struct kof_obj_ctx *ctx,
 	if (!ctx || !info || !info->valid || !file)
 		return KOF_EMU_UNP_NO;
 	/*
-	 * bddisasm decodes x86 and x86-64 and nothing else, so an ARM64 PE is
+	 * the decoder decodes x86 and x86-64 and nothing else, so an ARM64 PE is
 	 * refused HERE rather than started and left to fault on its first
 	 * instruction - which would spend a budget to learn something the
 	 * machine field said for free.

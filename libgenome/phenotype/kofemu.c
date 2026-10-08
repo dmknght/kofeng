@@ -4,7 +4,7 @@
  *
  * HOW AN INSTRUCTION IS CARRIED OUT
  *
- * Not as one switch over several hundred mnemonics. bddisasm hands back a
+ * Not as one switch over several hundred mnemonics. the decoder hands back a
  * decoded operand list - for each operand: is it a register, a memory
  * reference or an immediate, how wide, and is it read, written or both. So the
  * shape here is
@@ -32,7 +32,7 @@
 #define _POSIX_C_SOURCE 199309L
 
 #include <stdio.h>
-#include "../libkofeng/kofcore/kofdebug.h"
+#include "../../libkofeng/kofcore/kofdebug.h"
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
@@ -40,7 +40,20 @@
 #include <ctype.h>
 
 #include "kofemu.h"
-#include "bddisasm.h"
+#include <x86/x86.h>
+
+/*
+ * A DECODED INSTRUCTION WITH ITS OPERANDS BUILT, which is what the interpreter
+ * executes and what the instruction cache keeps. genotype builds operands on
+ * request; the interpreter asks for all of them once, at decode, so that the
+ * execute switch reads plain fields and a cached instruction costs nothing to
+ * run again.
+ */
+struct emu_insn {
+	struct gt_x86_insn h;
+	unsigned           n;               /* operands built, implicit ones included */
+	struct gt_x86_op   op[GT_X86_MAX_OPS];
+};
 
 #define DEF_MAX_INSN   (2u * 1000u * 1000u)
 #define VSYSCALL_BASE  0xffffffffff600000ull
@@ -227,7 +240,7 @@ struct kof_emu {
 		 * stepped over without entering the execute switch at all.
 		 */
 		uint8_t           inert;
-		INSTRUX           ix;
+		struct emu_insn   ix;
 	}       *ic;
 
 	/* A hot-address histogram, built only under KOF_EMU_HOT. It answers one
@@ -345,7 +358,7 @@ struct kof_emu {
 	 * through whatever the guest chose - it is only the register that is
 	 * narrower.
 	 *
-	 * ST(i) IS st[(top + i) & 7]. bddisasm reports an x87 operand's `Reg`
+	 * ST(i) IS st[(top + i) & 7]. the decoder reports an x87 operand's `Reg`
 	 * as that relative index already, so a case here never computes it.
 	 */
 	double   st[8];
@@ -2123,66 +2136,65 @@ static int cond_true(const struct kof_emu *e, unsigned cc)
  *
  * A PREFIX DOES NOT MAKE IT ACTIVE. The same generator writes `rep` on
  * instructions that are not string operations, where the architecture ignores
- * it - eight more in the same loop. bddisasm reports the instruction it
+ * it - eight more in the same loop. the decoder reports the instruction it
  * really is, so those arrive here already stripped.
  */
-static int nop_insn(const INSTRUX *ix)
+static int nop_insn(const struct emu_insn *ix)
 {
-	const ND_OPERAND *a, *b;
+	const struct gt_x86_op *a, *b;
 
-	if (ix->Instruction == ND_INS_NOP)
+	if (ix->h.id == GT_X86_I_NOP)
 		return 1;
-	if (ix->Instruction != ND_INS_MOV && ix->Instruction != ND_INS_XCHG)
+	if (ix->h.id != GT_X86_I_MOV && ix->h.id != GT_X86_I_XCHG)
 		return 0;
-	if (ix->OperandsCount < 2u)
+	if (ix->n < 2u)
 		return 0;
-	a = &ix->Operands[0];
-	b = &ix->Operands[1];
+	a = &ix->op[0];
+	b = &ix->op[1];
 	/*
 	 * BOTH THE SAME GENERAL REGISTER, AT THE SAME WIDTH AND THE SAME HALF.
 	 * `mov ah, al` is two different registers inside one; `mov eax, ax`
 	 * is not even the same width. Neither is inert and neither is spelled
 	 * differently from one that is.
 	 */
-	if (a->Type != ND_OP_REG || b->Type != ND_OP_REG)
+	if (a->type != GT_X86_OP_REG || b->type != GT_X86_OP_REG)
 		return 0;
-	if (a->Info.Register.Type != ND_REG_GPR ||
-	    b->Info.Register.Type != ND_REG_GPR)
+	if (a->rtype != GT_X86_REG_GPR ||
+	    b->rtype != GT_X86_REG_GPR)
 		return 0;
-	if (a->Info.Register.Reg != b->Info.Register.Reg)
+	if (a->reg != b->reg)
 		return 0;
-	if (a->Info.Register.Size != b->Info.Register.Size)
+	if (a->rsize != b->rsize)
 		return 0;
-	if (a->Info.Register.IsHigh8 != b->Info.Register.IsHigh8)
+	if (a->high8 != b->high8)
 		return 0;
 	/*
 	 * AND NOT A 32-BIT WRITE IN 64-BIT MODE. `mov eax, eax` zeroes the top
 	 * half of RAX on x86-64 - it is the shortest way to truncate a
 	 * register, and treating it as a no-op loses half of a value.
 	 */
-	if (ix->DefCode == ND_CODE_64 && a->Info.Register.Size == 4u)
+	if (ix->h.mode == 64 && a->rsize == 4u)
 		return 0;
 	return 1;
 }
 
 /* ---- operands -------------------------------------------------------------- */
 
-static int ea_of(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int ea_of(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		 uint64_t *out)
 {
-	const ND_OPDESC_MEMORY *m = &op->Info.Memory;
 	uint64_t a = 0;
 
-	if (m->IsRipRel) {
-		*out = e->rip + ix->Length + m->Disp;
+	if (op->mf & GT_X86_M_RIPREL) {
+		*out = e->rip + ix->h.len + (uint64_t)op->v;
 		return 1;
 	}
-	if (m->HasBase)
-		a += reg_rd(e, m->Base, m->BaseSize, 0);
-	if (m->HasIndex)
-		a += reg_rd(e, m->Index, m->IndexSize, 0) * (m->Scale ? m->Scale : 1u);
-	if (m->HasDisp)
-		a += m->Disp;
+	if (op->mf & GT_X86_M_BASE)
+		a += reg_rd(e, op->base, op->bsz, 0);
+	if (op->mf & GT_X86_M_INDEX)
+		a += reg_rd(e, op->index, op->isz, 0) * (op->scale ? op->scale : 1u);
+	if (op->mf & GT_X86_M_DISP)
+		a += (uint64_t)op->v;
 	/*
 	 * FS AND GS ARE A BASE, NOT A REFUSAL.
 	 *
@@ -2192,10 +2204,10 @@ static int ea_of(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 	 * own deliberate trap. There is one thread here, so one base each is all
 	 * a segment means.
 	 */
-	if (m->HasSeg) {
-		if (m->Seg == 4)
+	if (op->mf & GT_X86_M_SEG) {
+		if (op->seg == 4)
 			a += e->fs_base;
-		else if (m->Seg == 5)
+		else if (op->seg == 5)
 			a += e->gs_base;
 	}
 	/*
@@ -2312,20 +2324,20 @@ static void st_pop(struct kof_emu *e)
  * read - the instruction says which, not the operand: FILD's m32 and FLD's m32
  * are the same four bytes and mean different numbers.
  */
-static int fp_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int fp_rd(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		 int is_int, double *out)
 {
 	uint64_t ea;
 	uint8_t b[10];
-	unsigned n = op->Size;
+	unsigned n = op->size;
 
-	if (op->Type == ND_OP_REG) {
-		if (op->Info.Register.Type != ND_REG_FPU)
+	if (op->type == GT_X86_OP_REG) {
+		if (op->rtype != GT_X86_REG_FPU)
 			return 0;
-		*out = st_get(e, op->Info.Register.Reg);
+		*out = st_get(e, op->reg);
 		return 1;
 	}
-	if (op->Type != ND_OP_MEM || !ea_of(e, ix, op, &ea))
+	if (op->type != GT_X86_OP_MEM || !ea_of(e, ix, op, &ea))
 		return 0;
 	if (n != 2u && n != 4u && n != 8u && n != 10u)
 		return 0;
@@ -2368,20 +2380,20 @@ static int fp_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 }
 
 /* And one destination. Same rule about `is_int`. */
-static int fp_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int fp_wr(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		 int is_int, double v)
 {
 	uint64_t ea;
 	uint8_t b[10];
-	unsigned n = op->Size, i;
+	unsigned n = op->size, i;
 
-	if (op->Type == ND_OP_REG) {
-		if (op->Info.Register.Type != ND_REG_FPU)
+	if (op->type == GT_X86_OP_REG) {
+		if (op->rtype != GT_X86_REG_FPU)
 			return 0;
-		st_set(e, op->Info.Register.Reg, v);
+		st_set(e, op->reg, v);
 		return 1;
 	}
-	if (op->Type != ND_OP_MEM || !ea_of(e, ix, op, &ea))
+	if (op->type != GT_X86_OP_MEM || !ea_of(e, ix, op, &ea))
 		return 0;
 	if (is_int) {
 		int64_t q;
@@ -2448,7 +2460,7 @@ static void fp_cmp_cc(struct kof_emu *e, double a, double b)
  * on 64-bit point at the TEB through kof_emu_set_seg_base, and everything else
  * is flat. This returns the SELECTOR, which is the number the guest sees.
  *
- * bddisasm numbers them ES, CS, SS, DS, FS, GS - the same order
+ * the decoder numbers them ES, CS, SS, DS, FS, GS - the same order
  * kof_emu_set_seg_base is called with.
  */
 static uint64_t seg_selector(const struct kof_emu *e, unsigned r)
@@ -2465,32 +2477,32 @@ static uint64_t seg_selector(const struct kof_emu *e, unsigned r)
 	return e->bits == 32 ? sel32[r] : sel64[r];
 }
 
-static int op_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int op_rd(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		 uint64_t *out)
 {
-	unsigned sz = op->Size ? op->Size : 8u;
+	unsigned sz = op->size ? op->size : 8u;
 
-	switch (op->Type) {
-	case ND_OP_REG:
-		if (op->Info.Register.Type == ND_REG_SEG) {
-			*out = seg_selector(e, op->Info.Register.Reg);
+	switch (op->type) {
+	case GT_X86_OP_REG:
+		if (op->rtype == GT_X86_REG_SEG) {
+			*out = seg_selector(e, op->reg);
 			return 1;
 		}
-		if (op->Info.Register.Type != ND_REG_GPR)
+		if (op->rtype != GT_X86_REG_GPR)
 			return 0;
-		*out = reg_rd(e, op->Info.Register.Reg, op->Info.Register.Size,
-			      op->Info.Register.IsHigh8);
+		*out = reg_rd(e, op->reg, op->rsize,
+			      op->high8);
 		return 1;
-	case ND_OP_IMM:
-		*out = op->Info.Immediate.Imm;
+	case GT_X86_OP_IMM:
+		*out = (uint64_t)op->v;
 		return 1;
-	case ND_OP_CONST:
-		*out = op->Info.Constant.Const;
+	case GT_X86_OP_CONST:
+		*out = (uint64_t)op->v;
 		return 1;
-	case ND_OP_OFFS:
-		*out = e->rip + ix->Length + op->Info.RelativeOffset.Rel;
+	case GT_X86_OP_REL:
+		*out = e->rip + ix->h.len + (uint64_t)op->v;
 		return 1;
-	case ND_OP_MEM: {
+	case GT_X86_OP_MEM: {
 		uint64_t ea, v = 0;
 
 		if (!ea_of(e, ix, op, &ea))
@@ -2512,27 +2524,27 @@ static int op_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
  * operand wider than 16 is a YMM/ZMM this does not keep, and is refused rather
  * than silently truncated to its low half.
  */
-static int vec_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int vec_rd(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		  uint8_t *buf, unsigned *sz)
 {
-	unsigned n = op->Size ? op->Size : 16u;
+	unsigned n = op->size ? op->size : 16u;
 
 	if (n > 16)
 		return 0;
 	memset(buf, 0, 16);
-	switch (op->Type) {
-	case ND_OP_REG:
-		if (op->Info.Register.Type == ND_REG_SSE) {
-			if (op->Info.Register.Reg >= 16)
+	switch (op->type) {
+	case GT_X86_OP_REG:
+		if (op->rtype == GT_X86_REG_SSE) {
+			if (op->reg >= 16)
 				return 0;
-			memcpy(buf, e->xmm[op->Info.Register.Reg], n);
-		} else if (op->Info.Register.Type == ND_REG_MMX) {
-			if (op->Info.Register.Reg >= 8 || n > 8)
+			memcpy(buf, e->xmm[op->reg], n);
+		} else if (op->rtype == GT_X86_REG_MMX) {
+			if (op->reg >= 8 || n > 8)
 				return 0;
-			memcpy(buf, e->mmx[op->Info.Register.Reg], n);
-		} else if (op->Info.Register.Type == ND_REG_GPR) {
-			uint64_t v = reg_rd(e, op->Info.Register.Reg,
-					    op->Info.Register.Size, 0);
+			memcpy(buf, e->mmx[op->reg], n);
+		} else if (op->rtype == GT_X86_REG_GPR) {
+			uint64_t v = reg_rd(e, op->reg,
+					    op->rsize, 0);
 
 			memcpy(buf, &v, n > 8 ? 8u : n);
 		} else {
@@ -2540,7 +2552,7 @@ static int vec_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 		}
 		*sz = n;
 		return 1;
-	case ND_OP_MEM: {
+	case GT_X86_OP_MEM: {
 		uint64_t ea;
 
 		if (!ea_of(e, ix, op, &ea) || !mem_rd(e, ea, buf, n))
@@ -2558,25 +2570,25 @@ static int vec_rd(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
  * the bytes written, which is what the non-VEX encodings do for the 128-bit
  * register this keeps.
  */
-static int vec_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int vec_wr(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		  const uint8_t *buf, unsigned sz)
 {
-	unsigned n = op->Size ? op->Size : 16u;
+	unsigned n = op->size ? op->size : 16u;
 
 	if (n > 16 || sz > 16)
 		return 0;
 	if (n > sz)
 		n = sz;
-	switch (op->Type) {
-	case ND_OP_REG:
-		if (op->Info.Register.Type == ND_REG_SSE) {
-			if (op->Info.Register.Reg >= 16)
+	switch (op->type) {
+	case GT_X86_OP_REG:
+		if (op->rtype == GT_X86_REG_SSE) {
+			if (op->reg >= 16)
 				return 0;
-			memset(e->xmm[op->Info.Register.Reg], 0, 16);
-			memcpy(e->xmm[op->Info.Register.Reg], buf, n);
+			memset(e->xmm[op->reg], 0, 16);
+			memcpy(e->xmm[op->reg], buf, n);
 			return 1;
 		}
-		if (op->Info.Register.Type == ND_REG_MMX) {
+		if (op->rtype == GT_X86_REG_MMX) {
 			/*
 			 * A 64-bit register, so a 4-byte MOVD clears the top
 			 * half rather than leaving what was there - which is
@@ -2584,22 +2596,22 @@ static int vec_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 			 * `movd mm, r32` / `movd r32, mm` a faithful round
 			 * trip.
 			 */
-			if (op->Info.Register.Reg >= 8 || n > 8)
+			if (op->reg >= 8 || n > 8)
 				return 0;
-			memset(e->mmx[op->Info.Register.Reg], 0, 8);
-			memcpy(e->mmx[op->Info.Register.Reg], buf, n);
+			memset(e->mmx[op->reg], 0, 8);
+			memcpy(e->mmx[op->reg], buf, n);
 			return 1;
 		}
-		if (op->Info.Register.Type == ND_REG_GPR) {
+		if (op->rtype == GT_X86_REG_GPR) {
 			uint64_t v = 0;
 
 			memcpy(&v, buf, n > 8 ? 8u : n);
-			reg_wr(e, op->Info.Register.Reg,
-			       op->Info.Register.Size, 0, v);
+			reg_wr(e, op->reg,
+			       op->rsize, 0, v);
 			return 1;
 		}
 		return 0;
-	case ND_OP_MEM: {
+	case GT_X86_OP_MEM: {
 		uint64_t ea;
 
 		if (!ea_of(e, ix, op, &ea))
@@ -2611,19 +2623,19 @@ static int vec_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
 	}
 }
 
-static int op_wr(struct kof_emu *e, const INSTRUX *ix, const ND_OPERAND *op,
+static int op_wr(struct kof_emu *e, const struct emu_insn *ix, const struct gt_x86_op *op,
 		 uint64_t v)
 {
-	unsigned sz = op->Size ? op->Size : 8u;
+	unsigned sz = op->size ? op->size : 8u;
 
-	switch (op->Type) {
-	case ND_OP_REG:
-		if (op->Info.Register.Type != ND_REG_GPR)
+	switch (op->type) {
+	case GT_X86_OP_REG:
+		if (op->rtype != GT_X86_REG_GPR)
 			return 0;
-		reg_wr(e, op->Info.Register.Reg, op->Info.Register.Size,
-		       op->Info.Register.IsHigh8, v);
+		reg_wr(e, op->reg, op->rsize,
+		       op->high8, v);
 		return 1;
-	case ND_OP_MEM: {
+	case GT_X86_OP_MEM: {
 		uint64_t ea;
 
 		if (!ea_of(e, ix, op, &ea))
@@ -6227,7 +6239,17 @@ static uint64_t syscall_do(struct kof_emu *e, int *stop_out)
 
 /* ---- the loop -------------------------------------------------------------- */
 
-static void fail(struct kof_emu *e, enum kof_emu_stop s, const INSTRUX *ix)
+/*
+ * THE TEXT OF AN INSTRUCTION, for the messages that name one: a refusal and a
+ * trace. genotype formats it from the decode it already holds, so there is no
+ * second decode and nothing to keep in step.
+ */
+static int insn_text(const struct emu_insn *ix, uint64_t rip, char *buf, size_t n)
+{
+	return gt_x86_format(&ix->h, rip, buf, n) != 0;
+}
+
+static void fail(struct kof_emu *e, enum kof_emu_stop s, const struct emu_insn *ix)
 {
 	e->stop = s;
 	if (s == KOF_EMU_STOP_FAULT) {
@@ -6238,9 +6260,9 @@ static void fail(struct kof_emu *e, enum kof_emu_stop s, const INSTRUX *ix)
 		return;
 	}
 	if (ix && s == KOF_EMU_STOP_UNSUPPORTED) {
-		char t[ND_MIN_BUF_SIZE];
+		char t[GT_X86_TEXT];
 
-		if (ND_SUCCESS(NdToText(ix, e->rip, sizeof t, t))) {
+		if (insn_text(ix, e->rip, t, sizeof t)) {
 			/*
 			 * The WHOLE text. "MOV" is not a thing to go and
 			 * implement - every build already has MOV - whereas
@@ -6267,11 +6289,10 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 
 	while (e->insn < e->max_insn) {
 		uint8_t code[16];
-		INSTRUX ixbuf;
-		INSTRUX *ixp;
+		struct emu_insn ixbuf;
+		struct emu_insn *ixp;
 		struct icache_ent *ent;
 		struct page *fpg;
-		NDSTATUS st;
 		uint64_t a = 0, b = 0, r = 0, next;
 		unsigned sz;
 		int jumped = 0;
@@ -6513,7 +6534,7 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				    !memcmp(fpg->data + poff, ent->bytes,
 					    ent->len)) {
 					/*
-					 * POINTED AT, NOT COPIED. An INSTRUX is
+					 * POINTED AT, NOT COPIED. An struct emu_insn is
 					 * 480 bytes and this path runs tens of
 					 * millions of times - measured on one
 					 * Sality slice, 17.2 million hits, which
@@ -6576,16 +6597,18 @@ fetched:
 		 * and this checks one.
 		 */
 		ixp = ent ? &ent->ix : &ixbuf;
-		st = NdDecodeEx(ixp, code, sizeof code,
-				e->bits == 32 ? ND_CODE_32 : ND_CODE_64,
-				e->bits == 32 ? ND_DATA_32 : ND_DATA_64);
-		if (!ND_SUCCESS(st)) { fail(e, KOF_EMU_STOP_DECODE, NULL); break; }
+		if (gt_x86_decode(&ixp->h, code, sizeof code, e->bits == 32 ? 32 : 64) != GT_OK) {
+			fail(e, KOF_EMU_STOP_DECODE, NULL);
+			break;
+		}
+		ixp->n = gt_x86_nops(&ixp->h);
+		gt_x86_operands(&ixp->h, ixp->op);
 		/* Kept only when it lies inside one page - see `ic`. */
-		if (ent && ((e->rip + ixp->Length - 1u) &
+		if (ent && ((e->rip + ixp->h.len - 1u) &
 			    ~(uint64_t)(KOF_EMU_PAGE - 1u))
 			   == (e->rip & ~(uint64_t)(KOF_EMU_PAGE - 1u))) {
-			memcpy(ent->bytes, code, ixp->Length);
-			ent->len = ixp->Length;
+			memcpy(ent->bytes, code, ixp->h.len);
+			ent->len = ixp->h.len;
 			ent->inert = (uint8_t)nop_insn(ixp);
 			ent->valid = 1;
 		}
@@ -6596,7 +6619,7 @@ decoded:
 			e->sp0_set = 1;
 		}
 		at = e->rip;
-		at_len = ixp->Length;
+		at_len = ixp->h.len;
 		/*
 		 * PAUSED ON WHAT IS ABOUT TO RUN, BEFORE IT RUNS.
 		 *
@@ -6674,14 +6697,14 @@ decoded:
 		}
 		if (e->itr && !e->itr_frozen) {
 			struct itrace *it = &e->itr[e->itr_n++ % e->itr_cap];
-			char t[ND_MIN_BUF_SIZE];
+			char t[GT_X86_TEXT];
 			unsigned q = 0;
 
 			it->rip = e->rip;
 			memcpy(it->gpr, e->gpr, sizeof it->gpr);
 			/* The registers are copied BEFORE the instruction runs,
 			 * which is the point: they are its inputs. */
-			if (ND_SUCCESS(NdToText(ixp, e->rip, sizeof t, t)))
+			if (insn_text(ixp, e->rip, t, sizeof t))
 				while (q + 1u < sizeof it->txt && t[q]) {
 					it->txt[q] = t[q];
 					q++;
@@ -6728,8 +6751,8 @@ decoded:
 			e->stop = KOF_EMU_STOP_BUDGET;
 			break;
 		}
-		next = e->rip + ixp->Length;
-		sz = ixp->Operands[0].Size ? ixp->Operands[0].Size : 8u;
+		next = e->rip + ixp->h.len;
+		sz = ixp->op[0].size ? ixp->op[0].size : 8u;
 		e->insn++;
 
 		/*
@@ -6754,19 +6777,19 @@ decoded:
 			continue;
 		}
 
-		switch (ixp->Instruction) {
+		switch (ixp->h.id) {
 		/*
 		 * Nothing to do, for a reason rather than by omission. The
 		 * fences order accesses between threads and there is one
 		 * thread; PAUSE hints at a spin loop; the prefetches move no
 		 * architectural state; ENDBR is a landing pad.
 		 */
-		case ND_INS_NOP:
-		case ND_INS_LFENCE: case ND_INS_SFENCE: case ND_INS_MFENCE:
-		case ND_INS_PAUSE:  case ND_INS_ENDBR:
-		case ND_INS_PREFETCHT0: case ND_INS_PREFETCHT1:
-		case ND_INS_PREFETCHT2: case ND_INS_PREFETCHNTA:
-		case ND_INS_PREFETCHW:
+		case GT_X86_I_NOP:
+		case GT_X86_I_LFENCE: case GT_X86_I_SFENCE: case GT_X86_I_MFENCE:
+		case GT_X86_I_PAUSE:  case GT_X86_I_ENDBR:
+		case GT_X86_I_PREFETCHT0: case GT_X86_I_PREFETCHT1:
+		case GT_X86_I_PREFETCHT2: case GT_X86_I_PREFETCHNTA:
+		case GT_X86_I_PREFETCHW:
 			break;
 
 		/*
@@ -6801,40 +6824,40 @@ decoded:
 		 * has met is an instruction whose implementation nobody can
 		 * check.
 		 */
-		case ND_INS_FNOP:
+		case GT_X86_I_FNOP:
 			e->fpu_rip = e->rip;
 			break;
 
-		case ND_INS_FFREE:
-		case ND_INS_FFREEP:
+		case GT_X86_I_FFREE:
+		case GT_X86_I_FFREEP:
 			e->fpu_rip = e->rip;
-			if (ixp->OperandsCount &&
-			    ixp->Operands[0].Type == ND_OP_REG &&
-			    ixp->Operands[0].Info.Register.Type == ND_REG_FPU)
+			if (ixp->n &&
+			    ixp->op[0].type == GT_X86_OP_REG &&
+			    ixp->op[0].rtype == GT_X86_REG_FPU)
 				e->st_tag[(e->st_top +
-					   ixp->Operands[0].Info.Register.Reg) & 7u] = 0;
-			if (ixp->Instruction == ND_INS_FFREEP)
+					   ixp->op[0].reg) & 7u] = 0;
+			if (ixp->h.id == GT_X86_I_FFREEP)
 				st_pop(e);
 			break;
 
-		case ND_INS_FDECSTP:
+		case GT_X86_I_FDECSTP:
 			e->fpu_rip = e->rip;
 			e->st_top = (uint8_t)((e->st_top - 1u) & 7u);
 			break;
-		case ND_INS_FINCSTP:
+		case GT_X86_I_FINCSTP:
 			e->fpu_rip = e->rip;
 			e->st_top = (uint8_t)((e->st_top + 1u) & 7u);
 			break;
 
-		case ND_INS_FXCH: {
+		case GT_X86_I_FXCH: {
 			double t;
 			unsigned i = 1u;
 
 			e->fpu_rip = e->rip;
-			if (ixp->OperandsCount > 1u &&
-			    ixp->Operands[1].Type == ND_OP_REG &&
-			    ixp->Operands[1].Info.Register.Type == ND_REG_FPU)
-				i = ixp->Operands[1].Info.Register.Reg;
+			if (ixp->n > 1u &&
+			    ixp->op[1].type == GT_X86_OP_REG &&
+			    ixp->op[1].rtype == GT_X86_REG_FPU)
+				i = ixp->op[1].reg;
 			t = st_get(e, 0);
 			st_set(e, 0, st_get(e, i));
 			st_set(e, i, t);
@@ -6846,70 +6869,70 @@ decoded:
 		 * now push what they name; the other five never were, and they
 		 * are the same instruction with a different number.
 		 */
-		case ND_INS_FLDZ:   e->fpu_rip = e->rip; st_push(e, 0.0); break;
-		case ND_INS_FLD1:   e->fpu_rip = e->rip; st_push(e, 1.0); break;
-		case ND_INS_FLDPI:  e->fpu_rip = e->rip;
+		case GT_X86_I_FLDZ:   e->fpu_rip = e->rip; st_push(e, 0.0); break;
+		case GT_X86_I_FLD1:   e->fpu_rip = e->rip; st_push(e, 1.0); break;
+		case GT_X86_I_FLDPI:  e->fpu_rip = e->rip;
 			st_push(e, 3.14159265358979323846); break;
-		case ND_INS_FLDL2E: e->fpu_rip = e->rip;
+		case GT_X86_I_FLDL2E: e->fpu_rip = e->rip;
 			st_push(e, 1.44269504088896340736); break;
-		case ND_INS_FLDL2T: e->fpu_rip = e->rip;
+		case GT_X86_I_FLDL2T: e->fpu_rip = e->rip;
 			st_push(e, 3.32192809488736234787); break;
-		case ND_INS_FLDLG2: e->fpu_rip = e->rip;
+		case GT_X86_I_FLDLG2: e->fpu_rip = e->rip;
 			st_push(e, 0.30102999566398119521); break;
-		case ND_INS_FLDLN2: e->fpu_rip = e->rip;
+		case GT_X86_I_FLDLN2: e->fpu_rip = e->rip;
 			st_push(e, 0.69314718055994530942); break;
 
-		case ND_INS_FABS: e->fpu_rip = e->rip;
+		case GT_X86_I_FABS: e->fpu_rip = e->rip;
 			st_set(e, 0, fabs(st_get(e, 0))); break;
-		case ND_INS_FCHS: e->fpu_rip = e->rip;
+		case GT_X86_I_FCHS: e->fpu_rip = e->rip;
 			st_set(e, 0, -st_get(e, 0)); break;
-		case ND_INS_FSQRT: e->fpu_rip = e->rip;
+		case GT_X86_I_FSQRT: e->fpu_rip = e->rip;
 			st_set(e, 0, sqrt(st_get(e, 0))); break;
-		case ND_INS_FRNDINT: e->fpu_rip = e->rip;
+		case GT_X86_I_FRNDINT: e->fpu_rip = e->rip;
 			st_set(e, 0, nearbyint(st_get(e, 0))); break;
 
 		/*
 		 * FLD and FILD PUSH; they do not write their first operand.
-		 * bddisasm names st0 as that operand because that is where the
+		 * the decoder names st0 as that operand because that is where the
 		 * result ends up, but the register underneath it is a different
 		 * one after the push - so the source is read first and the push
 		 * is the whole of the write.
 		 */
-		case ND_INS_FLD:
-		case ND_INS_FILD: {
+		case GT_X86_I_FLD:
+		case GT_X86_I_FILD: {
 			double v;
 
 			e->fpu_rip = e->rip;
-			if (ixp->OperandsCount < 2u ||
-			    !fp_rd(e, ixp, &ixp->Operands[1],
-				   ixp->Instruction == ND_INS_FILD, &v))
+			if (ixp->n < 2u ||
+			    !fp_rd(e, ixp, &ixp->op[1],
+				   ixp->h.id == GT_X86_I_FILD, &v))
 				goto unsupported;
 			st_push(e, v);
 			break;
 		}
 
-		case ND_INS_FST:
-		case ND_INS_FSTP:
-		case ND_INS_FIST:
-		case ND_INS_FISTP:
-		case ND_INS_FISTTP: {
-			int is_int = ixp->Instruction != ND_INS_FST &&
-				     ixp->Instruction != ND_INS_FSTP;
+		case GT_X86_I_FST:
+		case GT_X86_I_FSTP:
+		case GT_X86_I_FIST:
+		case GT_X86_I_FISTP:
+		case GT_X86_I_FISTTP: {
+			int is_int = ixp->h.id != GT_X86_I_FST &&
+				     ixp->h.id != GT_X86_I_FSTP;
 			double v = st_get(e, 0);
 
 			e->fpu_rip = e->rip;
 			/* FISTTP truncates toward zero whatever the rounding
 			 * mode says; the others follow it, and this rounds to
 			 * nearest, which is the mode a guest starts in. */
-			if (ixp->Instruction == ND_INS_FISTTP)
+			if (ixp->h.id == GT_X86_I_FISTTP)
 				v = trunc(v);
 			else if (is_int)
 				v = nearbyint(v);
-			if (!ixp->OperandsCount ||
-			    !fp_wr(e, ixp, &ixp->Operands[0], is_int, v))
+			if (!ixp->n ||
+			    !fp_wr(e, ixp, &ixp->op[0], is_int, v))
 				goto unsupported;
-			if (ixp->Instruction != ND_INS_FST &&
-			    ixp->Instruction != ND_INS_FIST)
+			if (ixp->h.id != GT_X86_I_FST &&
+			    ixp->h.id != GT_X86_I_FIST)
 				st_pop(e);
 			break;
 		}
@@ -6926,45 +6949,45 @@ decoded:
 		 * with FDIVR and gets FDIV's answer has every later value wrong
 		 * and nothing says so.
 		 */
-		case ND_INS_FADD: case ND_INS_FADDP: case ND_INS_FIADD:
-		case ND_INS_FMUL: case ND_INS_FMULP: case ND_INS_FIMUL:
-		case ND_INS_FSUB: case ND_INS_FSUBP: case ND_INS_FISUB:
-		case ND_INS_FSUBR: case ND_INS_FSUBRP: case ND_INS_FISUBR:
-		case ND_INS_FDIV: case ND_INS_FDIVP: case ND_INS_FIDIV:
-		case ND_INS_FDIVR: case ND_INS_FDIVRP: case ND_INS_FIDIVR: {
+		case GT_X86_I_FADD: case GT_X86_I_FADDP: case GT_X86_I_FIADD:
+		case GT_X86_I_FMUL: case GT_X86_I_FMULP: case GT_X86_I_FIMUL:
+		case GT_X86_I_FSUB: case GT_X86_I_FSUBP: case GT_X86_I_FISUB:
+		case GT_X86_I_FSUBR: case GT_X86_I_FSUBRP: case GT_X86_I_FISUBR:
+		case GT_X86_I_FDIV: case GT_X86_I_FDIVP: case GT_X86_I_FIDIV:
+		case GT_X86_I_FDIVR: case GT_X86_I_FDIVRP: case GT_X86_I_FIDIVR: {
 			double fa, fb, fr;
 			int is_int = 0, rev = 0, pop = 0;
 
 			e->fpu_rip = e->rip;
-			switch (ixp->Instruction) {
-			case ND_INS_FIADD: case ND_INS_FIMUL:
-			case ND_INS_FISUB: case ND_INS_FISUBR:
-			case ND_INS_FIDIV: case ND_INS_FIDIVR:
+			switch (ixp->h.id) {
+			case GT_X86_I_FIADD: case GT_X86_I_FIMUL:
+			case GT_X86_I_FISUB: case GT_X86_I_FISUBR:
+			case GT_X86_I_FIDIV: case GT_X86_I_FIDIVR:
 				is_int = 1;
 				break;
 			default:
 				break;
 			}
-			switch (ixp->Instruction) {
-			case ND_INS_FSUBR: case ND_INS_FSUBRP: case ND_INS_FISUBR:
-			case ND_INS_FDIVR: case ND_INS_FDIVRP: case ND_INS_FIDIVR:
+			switch (ixp->h.id) {
+			case GT_X86_I_FSUBR: case GT_X86_I_FSUBRP: case GT_X86_I_FISUBR:
+			case GT_X86_I_FDIVR: case GT_X86_I_FDIVRP: case GT_X86_I_FIDIVR:
 				rev = 1;
 				break;
 			default:
 				break;
 			}
-			switch (ixp->Instruction) {
-			case ND_INS_FADDP: case ND_INS_FMULP:
-			case ND_INS_FSUBP: case ND_INS_FSUBRP:
-			case ND_INS_FDIVP: case ND_INS_FDIVRP:
+			switch (ixp->h.id) {
+			case GT_X86_I_FADDP: case GT_X86_I_FMULP:
+			case GT_X86_I_FSUBP: case GT_X86_I_FSUBRP:
+			case GT_X86_I_FDIVP: case GT_X86_I_FDIVRP:
 				pop = 1;
 				break;
 			default:
 				break;
 			}
-			if (ixp->OperandsCount < 2u ||
-			    !fp_rd(e, ixp, &ixp->Operands[0], 0, &fa) ||
-			    !fp_rd(e, ixp, &ixp->Operands[1], is_int, &fb))
+			if (ixp->n < 2u ||
+			    !fp_rd(e, ixp, &ixp->op[0], 0, &fa) ||
+			    !fp_rd(e, ixp, &ixp->op[1], is_int, &fb))
 				goto unsupported;
 			if (rev) {
 				double t = fa;
@@ -6972,13 +6995,13 @@ decoded:
 				fa = fb;
 				fb = t;
 			}
-			switch (ixp->Instruction) {
-			case ND_INS_FADD: case ND_INS_FADDP: case ND_INS_FIADD:
+			switch (ixp->h.id) {
+			case GT_X86_I_FADD: case GT_X86_I_FADDP: case GT_X86_I_FIADD:
 				fr = fa + fb; break;
-			case ND_INS_FMUL: case ND_INS_FMULP: case ND_INS_FIMUL:
+			case GT_X86_I_FMUL: case GT_X86_I_FMULP: case GT_X86_I_FIMUL:
 				fr = fa * fb; break;
-			case ND_INS_FSUB: case ND_INS_FSUBP: case ND_INS_FISUB:
-			case ND_INS_FSUBR: case ND_INS_FSUBRP: case ND_INS_FISUBR:
+			case GT_X86_I_FSUB: case GT_X86_I_FSUBP: case GT_X86_I_FISUB:
+			case GT_X86_I_FSUBR: case GT_X86_I_FSUBRP: case GT_X86_I_FISUBR:
 				fr = fa - fb; break;
 			default:
 				/*
@@ -6990,7 +7013,7 @@ decoded:
 				 */
 				fr = fa / fb; break;
 			}
-			if (!fp_wr(e, ixp, &ixp->Operands[0], 0, fr))
+			if (!fp_wr(e, ixp, &ixp->op[0], 0, fr))
 				goto unsupported;
 			if (pop)
 				st_pop(e);
@@ -7003,27 +7026,27 @@ decoded:
 		 * word's condition codes, where a guest reads it with FNSTSW and
 		 * branches on AH; the FCOMI group puts it straight in EFLAGS.
 		 */
-		case ND_INS_FCOM:  case ND_INS_FCOMP:  case ND_INS_FCOMPP:
-		case ND_INS_FUCOM: case ND_INS_FUCOMP: case ND_INS_FUCOMPP:
-		case ND_INS_FICOM: case ND_INS_FICOMP:
-		case ND_INS_FTST: {
+		case GT_X86_I_FCOM:  case GT_X86_I_FCOMP:  case GT_X86_I_FCOMPP:
+		case GT_X86_I_FUCOM: case GT_X86_I_FUCOMP: case GT_X86_I_FUCOMPP:
+		case GT_X86_I_FICOM: case GT_X86_I_FICOMP:
+		case GT_X86_I_FTST: {
 			double fa = st_get(e, 0), fb = 0.0;
-			int is_int = ixp->Instruction == ND_INS_FICOM ||
-				     ixp->Instruction == ND_INS_FICOMP;
+			int is_int = ixp->h.id == GT_X86_I_FICOM ||
+				     ixp->h.id == GT_X86_I_FICOMP;
 
 			e->fpu_rip = e->rip;
-			if (ixp->Instruction != ND_INS_FTST) {
-				if (ixp->OperandsCount < 2u ||
-				    !fp_rd(e, ixp, &ixp->Operands[1], is_int, &fb))
+			if (ixp->h.id != GT_X86_I_FTST) {
+				if (ixp->n < 2u ||
+				    !fp_rd(e, ixp, &ixp->op[1], is_int, &fb))
 					goto unsupported;
 			}
 			fp_cmp_cc(e, fa, fb);
-			switch (ixp->Instruction) {
-			case ND_INS_FCOMP: case ND_INS_FUCOMP:
-			case ND_INS_FICOMP:
+			switch (ixp->h.id) {
+			case GT_X86_I_FCOMP: case GT_X86_I_FUCOMP:
+			case GT_X86_I_FICOMP:
 				st_pop(e);
 				break;
-			case ND_INS_FCOMPP: case ND_INS_FUCOMPP:
+			case GT_X86_I_FCOMPP: case GT_X86_I_FUCOMPP:
 				st_pop(e);
 				st_pop(e);
 				break;
@@ -7033,13 +7056,13 @@ decoded:
 			break;
 		}
 
-		case ND_INS_FCOMI: case ND_INS_FCOMIP:
-		case ND_INS_FUCOMI: case ND_INS_FUCOMIP: {
+		case GT_X86_I_FCOMI: case GT_X86_I_FCOMIP:
+		case GT_X86_I_FUCOMI: case GT_X86_I_FUCOMIP: {
 			double fa = st_get(e, 0), fb;
 
 			e->fpu_rip = e->rip;
-			if (ixp->OperandsCount < 2u ||
-			    !fp_rd(e, ixp, &ixp->Operands[1], 0, &fb))
+			if (ixp->n < 2u ||
+			    !fp_rd(e, ixp, &ixp->op[1], 0, &fb))
 				goto unsupported;
 			e->flags &= ~(uint64_t)(FL_ZF | FL_PF | FL_CF);
 			if (isnan(fa) || isnan(fb))
@@ -7048,8 +7071,8 @@ decoded:
 				e->flags |= FL_CF;
 			else if (fa == fb)
 				e->flags |= FL_ZF;
-			if (ixp->Instruction == ND_INS_FCOMIP ||
-			    ixp->Instruction == ND_INS_FUCOMIP)
+			if (ixp->h.id == GT_X86_I_FCOMIP ||
+			    ixp->h.id == GT_X86_I_FUCOMIP)
 				st_pop(e);
 			break;
 		}
@@ -7059,7 +7082,7 @@ decoded:
 		 * GetPC does not read it, but a guest that branches on "is this
 		 * zero" does, and the classification is three comparisons.
 		 */
-		case ND_INS_FXAM: {
+		case GT_X86_I_FXAM: {
 			double v = st_get(e, 0);
 
 			e->fpu_rip = e->rip;
@@ -7084,13 +7107,13 @@ decoded:
 		 * with the FCOM family: `fnstsw ax` then `sahf` or `test ah`.
 		 * TOP sits in bits 11..13 and is part of what is reported.
 		 */
-		case ND_INS_FNSTSW: {
+		case GT_X86_I_FNSTSW: {
 			uint64_t v = (uint64_t)(e->fsw |
 					(uint16_t)((e->st_top & 7u) << 11));
 
 			e->fpu_rip = e->rip;
-			if (!ixp->OperandsCount ||
-			    !op_wr(e, ixp, &ixp->Operands[0], v))
+			if (!ixp->n ||
+			    !op_wr(e, ixp, &ixp->op[0], v))
 				goto unsupported;
 			break;
 		}
@@ -7100,9 +7123,9 @@ decoded:
 		 * never looked at; now the value moves when EFLAGS says it
 		 * should, which is what a guest that used one is expecting.
 		 */
-		case ND_INS_FCMOVB:  case ND_INS_FCMOVBE: case ND_INS_FCMOVE:
-		case ND_INS_FCMOVNB: case ND_INS_FCMOVNBE: case ND_INS_FCMOVNE:
-		case ND_INS_FCMOVU:  case ND_INS_FCMOVNU: {
+		case GT_X86_I_FCMOVB:  case GT_X86_I_FCMOVBE: case GT_X86_I_FCMOVE:
+		case GT_X86_I_FCMOVNB: case GT_X86_I_FCMOVNBE: case GT_X86_I_FCMOVNE:
+		case GT_X86_I_FCMOVU:  case GT_X86_I_FCMOVNU: {
 			int cf = (e->flags & FL_CF) != 0;
 			int zf = (e->flags & FL_ZF) != 0;
 			int pf = (e->flags & FL_PF) != 0;
@@ -7110,20 +7133,20 @@ decoded:
 			double v;
 
 			e->fpu_rip = e->rip;
-			switch (ixp->Instruction) {
-			case ND_INS_FCMOVB:   take = cf; break;
-			case ND_INS_FCMOVE:   take = zf; break;
-			case ND_INS_FCMOVBE:  take = cf || zf; break;
-			case ND_INS_FCMOVU:   take = pf; break;
-			case ND_INS_FCMOVNB:  take = !cf; break;
-			case ND_INS_FCMOVNE:  take = !zf; break;
-			case ND_INS_FCMOVNBE: take = !cf && !zf; break;
+			switch (ixp->h.id) {
+			case GT_X86_I_FCMOVB:   take = cf; break;
+			case GT_X86_I_FCMOVE:   take = zf; break;
+			case GT_X86_I_FCMOVBE:  take = cf || zf; break;
+			case GT_X86_I_FCMOVU:   take = pf; break;
+			case GT_X86_I_FCMOVNB:  take = !cf; break;
+			case GT_X86_I_FCMOVNE:  take = !zf; break;
+			case GT_X86_I_FCMOVNBE: take = !cf && !zf; break;
 			default:              take = !pf; break;
 			}
 			if (!take)
 				break;
-			if (ixp->OperandsCount < 2u ||
-			    !fp_rd(e, ixp, &ixp->Operands[1], 0, &v))
+			if (ixp->n < 2u ||
+			    !fp_rd(e, ixp, &ixp->op[1], 0, &v))
 				goto unsupported;
 			st_set(e, 0, v);
 			break;
@@ -7136,18 +7159,18 @@ decoded:
 		 * masked - so these are accepted and only FINIT has an effect
 		 * that anything can observe.
 		 */
-		case ND_INS_FLDCW:
-		case ND_INS_FNSTCW:
-		case ND_INS_FNCLEX:
+		case GT_X86_I_FLDCW:
+		case GT_X86_I_FNSTCW:
+		case GT_X86_I_FNCLEX:
 			e->fpu_rip = e->rip;
-			if (ixp->Instruction == ND_INS_FNSTCW && ixp->OperandsCount &&
-			    !op_wr(e, ixp, &ixp->Operands[0], 0x037fu))
+			if (ixp->h.id == GT_X86_I_FNSTCW && ixp->n &&
+			    !op_wr(e, ixp, &ixp->op[0], 0x037fu))
 				goto unsupported;
-			if (ixp->Instruction == ND_INS_FNCLEX)
+			if (ixp->h.id == GT_X86_I_FNCLEX)
 				e->fsw = 0;
 			break;
 
-		case ND_INS_FNINIT: {
+		case GT_X86_I_FNINIT: {
 			unsigned q;
 
 			e->fpu_rip = e->rip;
@@ -7173,7 +7196,7 @@ decoded:
 		 * encoders use it rather than FSTENV, and why nothing is checked
 		 * here either.
 		 */
-		case ND_INS_FNSTENV: {
+		case GT_X86_I_FNSTENV: {
 			uint8_t env[28];
 			/* The operand's effective address. Named apart from
 			 * `at`, the instruction address the handover test
@@ -7185,8 +7208,8 @@ decoded:
 			env[13] = (uint8_t)(e->fpu_rip >> 8);
 			env[14] = (uint8_t)(e->fpu_rip >> 16);
 			env[15] = (uint8_t)(e->fpu_rip >> 24);
-			if (ixp->Operands[0].Type != ND_OP_MEM ||
-			    !ea_of(e, ixp, &ixp->Operands[0], &ea))
+			if (ixp->op[0].type != GT_X86_OP_MEM ||
+			    !ea_of(e, ixp, &ixp->op[0], &ea))
 				goto unsupported;
 			if (!mem_wr(e, ea, env, sizeof env))
 				goto fault;
@@ -7214,13 +7237,13 @@ decoded:
 		 * does - and a wrong answer there would be visible, not silent,
 		 * because the stub would fetch from the wrong address.
 		 */
-		case ND_INS_FXSAVE:
-		case ND_INS_FXSAVE64: {
+		case GT_X86_I_FXSAVE:
+		case GT_X86_I_FXSAVE64: {
 			uint8_t area[512];
 			uint64_t ea;         /* see FNSTENV above */
 
 			memset(area, 0, sizeof area);
-			if (ixp->Instruction == ND_INS_FXSAVE64) {
+			if (ixp->h.id == GT_X86_I_FXSAVE64) {
 				unsigned k;
 
 				for (k = 0; k < 8u; k++)
@@ -7232,8 +7255,8 @@ decoded:
 				area[10] = (uint8_t)(e->fpu_rip >> 16);
 				area[11] = (uint8_t)(e->fpu_rip >> 24);
 			}
-			if (ixp->Operands[0].Type != ND_OP_MEM ||
-			    !ea_of(e, ixp, &ixp->Operands[0], &ea))
+			if (ixp->op[0].type != GT_X86_OP_MEM ||
+			    !ea_of(e, ixp, &ixp->op[0], &ea))
 				goto unsupported;
 			if (!mem_wr(e, ea, area, sizeof area))
 				goto fault;
@@ -7245,12 +7268,12 @@ decoded:
 		 * unreproducible, and a stub that times itself is looking for a
 		 * debugger - a steady tick reads as an ordinary machine.
 		 */
-		case ND_INS_RDTSC: case ND_INS_RDTSCP: {
+		case GT_X86_I_RDTSC: case GT_X86_I_RDTSCP: {
 			uint64_t now = tsc_read(e);
 
 			reg_wr(e, KOF_EMU_RAX, 4, 0, now & 0xffffffffu);
 			reg_wr(e, KOF_EMU_RDX, 4, 0, now >> 32);
-			if (ixp->Instruction == ND_INS_RDTSCP)
+			if (ixp->h.id == GT_X86_I_RDTSCP)
 				reg_wr(e, KOF_EMU_RCX, 4, 0, 0);
 			break;
 		}
@@ -7262,19 +7285,19 @@ decoded:
 		 * that a caller which saves it and restores it sees what it
 		 * wrote, which is all any of them check.
 		 */
-		case ND_INS_STMXCSR:
-			if (!op_wr(e, ixp, &ixp->Operands[0], e->mxcsr))
+		case GT_X86_I_STMXCSR:
+			if (!op_wr(e, ixp, &ixp->op[0], e->mxcsr))
 				goto unsupported;
 			break;
-		case ND_INS_LDMXCSR:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+		case GT_X86_I_LDMXCSR:
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
 			e->mxcsr = (uint32_t)a;
 			break;
 
 		/* XCR0: x87 and SSE enabled, nothing wider - which is the truth
 		 * about this machine, and keeps a runtime off the AVX paths. */
-		case ND_INS_XGETBV:
+		case GT_X86_I_XGETBV:
 			reg_wr(e, KOF_EMU_RAX, 4, 0, 3);
 			reg_wr(e, KOF_EMU_RDX, 4, 0, 0);
 			break;
@@ -7283,15 +7306,15 @@ decoded:
 		 * The atomics a runtime starts on. LOCK is a no-op here - one
 		 * thread, so the read-modify-write is already indivisible.
 		 */
-		case ND_INS_CMPXCHG: {
+		case GT_X86_I_CMPXCHG: {
 			uint64_t dst, src, acc = reg_rd(e, KOF_EMU_RAX, sz, 0);
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &dst) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &src))
+			if (!op_rd(e, ixp, &ixp->op[0], &dst) ||
+			    !op_rd(e, ixp, &ixp->op[1], &src))
 				goto unsupported;
 			fl_sub(e, acc, dst, 0, sz);
 			if (((acc ^ dst) & mask_of(sz)) == 0) {
-				if (!op_wr(e, ixp, &ixp->Operands[0], src))
+				if (!op_wr(e, ixp, &ixp->op[0], src))
 					goto unsupported;
 			} else {
 				reg_wr(e, KOF_EMU_RAX, sz, 0, dst);
@@ -7299,15 +7322,15 @@ decoded:
 			break;
 		}
 
-		case ND_INS_XADD: {
+		case GT_X86_I_XADD: {
 			uint64_t dst, src;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &dst) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &src))
+			if (!op_rd(e, ixp, &ixp->op[0], &dst) ||
+			    !op_rd(e, ixp, &ixp->op[1], &src))
 				goto unsupported;
 			fl_add(e, dst, src, 0, sz);
-			if (!op_wr(e, ixp, &ixp->Operands[1], dst) ||
-			    !op_wr(e, ixp, &ixp->Operands[0], dst + src))
+			if (!op_wr(e, ixp, &ixp->op[1], dst) ||
+			    !op_wr(e, ixp, &ixp->op[0], dst + src))
 				goto unsupported;
 			break;
 		}
@@ -7318,10 +7341,10 @@ decoded:
 		 * case stops rather than returning a wrong quotient - and a
 		 * divide by zero stops too, since there is no #DE to raise.
 		 */
-		case ND_INS_MUL: {
+		case GT_X86_I_MUL: {
 			uint64_t acc = reg_rd(e, KOF_EMU_RAX, sz, 0), hi;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
 			if (sz == 8) {
 				uint64_t al = acc & 0xffffffffu, ah = acc >> 32;
@@ -7351,17 +7374,17 @@ decoded:
 			break;
 		}
 
-		case ND_INS_DIV: case ND_INS_IDIV: {
+		case GT_X86_I_DIV: case GT_X86_I_IDIV: {
 			uint64_t lo = reg_rd(e, KOF_EMU_RAX, sz, 0);
 			uint64_t hi = reg_rd(e, KOF_EMU_RDX, sz, 0);
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
 			a &= mask_of(sz);
 			if (!a || (sz == 8 && hi))
 				goto unsupported;
 			if (sz == 8) {
-				if (ixp->Instruction == ND_INS_DIV) {
+				if (ixp->h.id == GT_X86_I_DIV) {
 					reg_wr(e, KOF_EMU_RAX, 8, 0, lo / a);
 					reg_wr(e, KOF_EMU_RDX, 8, 0, lo % a);
 				} else {
@@ -7384,7 +7407,7 @@ decoded:
 			} else {
 				uint64_t n = (hi << (sz * 8u)) | (lo & mask_of(sz));
 
-				if (ixp->Instruction == ND_INS_IDIV) {
+				if (ixp->h.id == GT_X86_I_IDIV) {
 					int64_t sn = (int64_t)sext(n, sz * 2u);
 					int64_t sd = (int64_t)sext(a, sz);
 
@@ -7401,69 +7424,69 @@ decoded:
 		}
 
 		/* Bit test and set/reset/complement: CPU feature bitmaps. */
-		case ND_INS_BT: case ND_INS_BTS: case ND_INS_BTR: case ND_INS_BTC: {
+		case GT_X86_I_BT: case GT_X86_I_BTS: case GT_X86_I_BTR: case GT_X86_I_BTC: {
 			uint64_t bit, val;
 			unsigned w = sz * 8u;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &val) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &bit))
+			if (!op_rd(e, ixp, &ixp->op[0], &val) ||
+			    !op_rd(e, ixp, &ixp->op[1], &bit))
 				goto unsupported;
 			bit &= w - 1u;
 			e->flags = (e->flags & ~FL_CF) |
 				   (((val >> bit) & 1u) ? FL_CF : 0u);
-			if (ixp->Instruction == ND_INS_BTS)      val |=  (uint64_t)1 << bit;
-			else if (ixp->Instruction == ND_INS_BTR) val &= ~((uint64_t)1 << bit);
-			else if (ixp->Instruction == ND_INS_BTC) val ^=  (uint64_t)1 << bit;
-			if (ixp->Instruction != ND_INS_BT &&
-			    !op_wr(e, ixp, &ixp->Operands[0], val))
+			if (ixp->h.id == GT_X86_I_BTS)      val |=  (uint64_t)1 << bit;
+			else if (ixp->h.id == GT_X86_I_BTR) val &= ~((uint64_t)1 << bit);
+			else if (ixp->h.id == GT_X86_I_BTC) val ^=  (uint64_t)1 << bit;
+			if (ixp->h.id != GT_X86_I_BT &&
+			    !op_wr(e, ixp, &ixp->op[0], val))
 				goto unsupported;
 			break;
 		}
 
 		/* Scan for the first or last set bit; ZF says there was none. */
-		case ND_INS_BSF: case ND_INS_BSR:
-		case ND_INS_TZCNT: case ND_INS_LZCNT: {
+		case GT_X86_I_BSF: case GT_X86_I_BSR:
+		case GT_X86_I_TZCNT: case GT_X86_I_LZCNT: {
 			uint64_t v, k;
 			unsigned w = sz * 8u;
 
-			if (!op_rd(e, ixp, &ixp->Operands[1], &v))
+			if (!op_rd(e, ixp, &ixp->op[1], &v))
 				goto unsupported;
 			if (!v) {
 				e->flags |= FL_ZF;
-				if (ixp->Instruction == ND_INS_TZCNT ||
-				    ixp->Instruction == ND_INS_LZCNT) {
+				if (ixp->h.id == GT_X86_I_TZCNT ||
+				    ixp->h.id == GT_X86_I_LZCNT) {
 					e->flags |= FL_CF;
-					if (!op_wr(e, ixp, &ixp->Operands[0], w))
+					if (!op_wr(e, ixp, &ixp->op[0], w))
 						goto unsupported;
 				}
 				break;
 			}
 			e->flags &= ~(uint64_t)(FL_ZF | FL_CF);
-			if (ixp->Instruction == ND_INS_BSF ||
-			    ixp->Instruction == ND_INS_TZCNT) {
+			if (ixp->h.id == GT_X86_I_BSF ||
+			    ixp->h.id == GT_X86_I_TZCNT) {
 				for (k = 0; !((v >> k) & 1u); k++)
 					;
 			} else {
 				for (k = w - 1u; !((v >> k) & 1u); k--)
 					;
-				if (ixp->Instruction == ND_INS_LZCNT)
+				if (ixp->h.id == GT_X86_I_LZCNT)
 					k = w - 1u - k;
 			}
-			if (!op_wr(e, ixp, &ixp->Operands[0], k))
+			if (!op_wr(e, ixp, &ixp->op[0], k))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_POPCNT: {
+		case GT_X86_I_POPCNT: {
 			uint64_t v, n = 0;
 
-			if (!op_rd(e, ixp, &ixp->Operands[1], &v))
+			if (!op_rd(e, ixp, &ixp->op[1], &v))
 				goto unsupported;
 			while (v) { n += v & 1u; v >>= 1; }
 			e->flags = (e->flags & ~(uint64_t)(FL_ZF | FL_CF | FL_OF |
 							   FL_SF | FL_PF | FL_AF)) |
 				   (n ? 0u : FL_ZF);
-			if (!op_wr(e, ixp, &ixp->Operands[0], n))
+			if (!op_wr(e, ixp, &ixp->op[0], n))
 				goto unsupported;
 			break;
 		}
@@ -7474,48 +7497,48 @@ decoded:
 		 * payload needs it, and guessing at it would produce wrong
 		 * bytes instead of an honest stop.
 		 */
-		case ND_INS_MOVUPS: case ND_INS_MOVAPS:
-		case ND_INS_MOVUPD: case ND_INS_MOVAPD:
-		case ND_INS_MOVDQU: case ND_INS_MOVDQA:
-		case ND_INS_MOVSS:  case ND_INS_MOVSD:
-		case ND_INS_MOVD:   case ND_INS_MOVQ:
+		case GT_X86_I_MOVUPS: case GT_X86_I_MOVAPS:
+		case GT_X86_I_MOVUPD: case GT_X86_I_MOVAPD:
+		case GT_X86_I_MOVDQU: case GT_X86_I_MOVDQA:
+		case GT_X86_I_MOVSS:  case GT_X86_I_MOVSD:
+		case GT_X86_I_MOVD:   case GT_X86_I_MOVQ:
 		/* The half-register loads and stores a memcpy is built from. */
-		case ND_INS_MOVLPS: case ND_INS_MOVLPD: {
+		case GT_X86_I_MOVLPS: case GT_X86_I_MOVLPD: {
 			uint8_t v[16];
 			unsigned n;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[1], v, &n) ||
-			    !vec_wr(e, ixp, &ixp->Operands[0], v, n))
+			if (!vec_rd(e, ixp, &ixp->op[1], v, &n) ||
+			    !vec_wr(e, ixp, &ixp->op[0], v, n))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_XORPS: case ND_INS_XORPD: case ND_INS_PXOR:
-		case ND_INS_POR:   case ND_INS_PAND:  case ND_INS_PANDN:
-		case ND_INS_ORPS:  case ND_INS_ORPD:
-		case ND_INS_ANDPS: case ND_INS_ANDPD:
-		case ND_INS_ANDNPS: case ND_INS_ANDNPD:
-		case ND_INS_PCMPEQB: case ND_INS_PSUBB: {
+		case GT_X86_I_XORPS: case GT_X86_I_XORPD: case GT_X86_I_PXOR:
+		case GT_X86_I_POR:   case GT_X86_I_PAND:  case GT_X86_I_PANDN:
+		case GT_X86_I_ORPS:  case GT_X86_I_ORPD:
+		case GT_X86_I_ANDPS: case GT_X86_I_ANDPD:
+		case GT_X86_I_ANDNPS: case GT_X86_I_ANDNPD:
+		case GT_X86_I_PCMPEQB: case GT_X86_I_PSUBB: {
 			uint8_t x[16], y[16];
 			unsigned nx, ny, k;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->op[1], y, &ny))
 				goto unsupported;
 			for (k = 0; k < 16; k++)
-				switch (ixp->Instruction) {
-				case ND_INS_XORPS: case ND_INS_XORPD:
-				case ND_INS_PXOR:    x[k] ^= y[k]; break;
-				case ND_INS_POR:  case ND_INS_ORPS:
-				case ND_INS_ORPD:    x[k] |= y[k]; break;
-				case ND_INS_PAND: case ND_INS_ANDPS:
-				case ND_INS_ANDPD:   x[k] &= y[k]; break;
-				case ND_INS_PANDN: case ND_INS_ANDNPS:
-				case ND_INS_ANDNPD:  x[k] = (uint8_t)(~x[k] & y[k]); break;
-				case ND_INS_PSUBB:   x[k] = (uint8_t)(x[k] - y[k]); break;
+				switch (ixp->h.id) {
+				case GT_X86_I_XORPS: case GT_X86_I_XORPD:
+				case GT_X86_I_PXOR:    x[k] ^= y[k]; break;
+				case GT_X86_I_POR:  case GT_X86_I_ORPS:
+				case GT_X86_I_ORPD:    x[k] |= y[k]; break;
+				case GT_X86_I_PAND: case GT_X86_I_ANDPS:
+				case GT_X86_I_ANDPD:   x[k] &= y[k]; break;
+				case GT_X86_I_PANDN: case GT_X86_I_ANDNPS:
+				case GT_X86_I_ANDNPD:  x[k] = (uint8_t)(~x[k] & y[k]); break;
+				case GT_X86_I_PSUBB:   x[k] = (uint8_t)(x[k] - y[k]); break;
 				default:             x[k] = x[k] == y[k] ? 0xffu : 0u; break;
 				}
-			if (!vec_wr(e, ixp, &ixp->Operands[0], x, nx))
+			if (!vec_wr(e, ixp, &ixp->op[0], x, nx))
 				goto unsupported;
 			break;
 		}
@@ -7529,55 +7552,55 @@ decoded:
 		 * reaches its payload without these. The host is IEEE754 and
 		 * so is the guest, so the host's own double does the work.
 		 */
-		case ND_INS_ADDSD: case ND_INS_SUBSD: case ND_INS_MULSD:
-		case ND_INS_DIVSD: case ND_INS_MAXSD: case ND_INS_MINSD:
-		case ND_INS_SQRTSD:
-		case ND_INS_ADDSS: case ND_INS_SUBSS: case ND_INS_MULSS:
-		case ND_INS_DIVSS: {
+		case GT_X86_I_ADDSD: case GT_X86_I_SUBSD: case GT_X86_I_MULSD:
+		case GT_X86_I_DIVSD: case GT_X86_I_MAXSD: case GT_X86_I_MINSD:
+		case GT_X86_I_SQRTSD:
+		case GT_X86_I_ADDSS: case GT_X86_I_SUBSS: case GT_X86_I_MULSS:
+		case GT_X86_I_DIVSS: {
 			uint8_t x[16], y[16];
 			unsigned nx, ny;
-			int dbl = ixp->Instruction == ND_INS_ADDSD ||
-				  ixp->Instruction == ND_INS_SUBSD ||
-				  ixp->Instruction == ND_INS_MULSD ||
-				  ixp->Instruction == ND_INS_DIVSD ||
-				  ixp->Instruction == ND_INS_MAXSD ||
-				  ixp->Instruction == ND_INS_MINSD ||
-				  ixp->Instruction == ND_INS_SQRTSD;
+			int dbl = ixp->h.id == GT_X86_I_ADDSD ||
+				  ixp->h.id == GT_X86_I_SUBSD ||
+				  ixp->h.id == GT_X86_I_MULSD ||
+				  ixp->h.id == GT_X86_I_DIVSD ||
+				  ixp->h.id == GT_X86_I_MAXSD ||
+				  ixp->h.id == GT_X86_I_MINSD ||
+				  ixp->h.id == GT_X86_I_SQRTSD;
 			double u, v, w;
 			float  fu, fv, fw;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->op[1], y, &ny))
 				goto unsupported;
 			if (dbl) { memcpy(&u, x, 8); memcpy(&v, y, 8); }
 			else     { memcpy(&fu, x, 4); memcpy(&fv, y, 4); u = fu; v = fv; }
-			switch (ixp->Instruction) {
-			case ND_INS_ADDSD: case ND_INS_ADDSS: w = u + v; break;
-			case ND_INS_SUBSD: case ND_INS_SUBSS: w = u - v; break;
-			case ND_INS_MULSD: case ND_INS_MULSS: w = u * v; break;
-			case ND_INS_DIVSD: case ND_INS_DIVSS: w = u / v; break;
-			case ND_INS_MAXSD: w = v > u ? v : u; break;
-			case ND_INS_MINSD: w = v < u ? v : u; break;
+			switch (ixp->h.id) {
+			case GT_X86_I_ADDSD: case GT_X86_I_ADDSS: w = u + v; break;
+			case GT_X86_I_SUBSD: case GT_X86_I_SUBSS: w = u - v; break;
+			case GT_X86_I_MULSD: case GT_X86_I_MULSS: w = u * v; break;
+			case GT_X86_I_DIVSD: case GT_X86_I_DIVSS: w = u / v; break;
+			case GT_X86_I_MAXSD: w = v > u ? v : u; break;
+			case GT_X86_I_MINSD: w = v < u ? v : u; break;
 			default:           w = v >= 0 ? sqrt(v) : (v - v) / (v - v); break;
 			}
 			if (dbl) { memcpy(x, &w, 8); }
 			else     { fw = (float)w; memcpy(x, &fw, 4); }
-			if (!vec_wr(e, ixp, &ixp->Operands[0], x, nx))
+			if (!vec_wr(e, ixp, &ixp->op[0], x, nx))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_UCOMISD: case ND_INS_COMISD:
-		case ND_INS_UCOMISS: case ND_INS_COMISS: {
+		case GT_X86_I_UCOMISD: case GT_X86_I_COMISD:
+		case GT_X86_I_UCOMISS: case GT_X86_I_COMISS: {
 			uint8_t x[16], y[16];
 			unsigned nx, ny;
-			int dbl = ixp->Instruction == ND_INS_UCOMISD ||
-				  ixp->Instruction == ND_INS_COMISD;
+			int dbl = ixp->h.id == GT_X86_I_UCOMISD ||
+				  ixp->h.id == GT_X86_I_COMISD;
 			double u, v;
 			float fu, fv;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->op[1], y, &ny))
 				goto unsupported;
 			if (dbl) { memcpy(&u, x, 8); memcpy(&v, y, 8); }
 			else     { memcpy(&fu, x, 4); memcpy(&fv, y, 4); u = fu; v = fv; }
@@ -7590,51 +7613,51 @@ decoded:
 			break;
 		}
 
-		case ND_INS_CVTSI2SD: case ND_INS_CVTSI2SS:
-		case ND_INS_CVTSD2SS: case ND_INS_CVTSS2SD: {
+		case GT_X86_I_CVTSI2SD: case GT_X86_I_CVTSI2SS:
+		case GT_X86_I_CVTSD2SS: case GT_X86_I_CVTSS2SD: {
 			uint8_t x[16] = { 0 }, y[16];
 			unsigned ny;
 			double d;
 			float f;
 
-			if (ixp->Instruction == ND_INS_CVTSI2SD ||
-			    ixp->Instruction == ND_INS_CVTSI2SS) {
-				if (!op_rd(e, ixp, &ixp->Operands[1], &a))
+			if (ixp->h.id == GT_X86_I_CVTSI2SD ||
+			    ixp->h.id == GT_X86_I_CVTSI2SS) {
+				if (!op_rd(e, ixp, &ixp->op[1], &a))
 					goto unsupported;
 				d = (double)(int64_t)sext(a,
-					ixp->Operands[1].Size ? ixp->Operands[1].Size : 8u);
+					ixp->op[1].size ? ixp->op[1].size : 8u);
 			} else {
-				if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+				if (!vec_rd(e, ixp, &ixp->op[1], y, &ny))
 					goto unsupported;
-				if (ixp->Instruction == ND_INS_CVTSS2SD) {
+				if (ixp->h.id == GT_X86_I_CVTSS2SD) {
 					memcpy(&f, y, 4); d = f;
 				} else {
 					memcpy(&d, y, 8);
 				}
 			}
-			if (ixp->Instruction == ND_INS_CVTSI2SS ||
-			    ixp->Instruction == ND_INS_CVTSD2SS) {
+			if (ixp->h.id == GT_X86_I_CVTSI2SS ||
+			    ixp->h.id == GT_X86_I_CVTSD2SS) {
 				f = (float)d; memcpy(x, &f, 4);
 			} else {
 				memcpy(x, &d, 8);
 			}
-			if (!vec_wr(e, ixp, &ixp->Operands[0], x, 16))
+			if (!vec_wr(e, ixp, &ixp->op[0], x, 16))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_CVTTSD2SI: case ND_INS_CVTTSS2SI: {
+		case GT_X86_I_CVTTSD2SI: case GT_X86_I_CVTTSS2SI: {
 			uint8_t y[16];
 			unsigned ny;
 			double d;
 			float f;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->op[1], y, &ny))
 				goto unsupported;
-			if (ixp->Instruction == ND_INS_CVTTSD2SI)
+			if (ixp->h.id == GT_X86_I_CVTTSD2SI)
 				memcpy(&d, y, 8);
 			else { memcpy(&f, y, 4); d = f; }
-			if (!op_wr(e, ixp, &ixp->Operands[0], (uint64_t)(int64_t)d))
+			if (!op_wr(e, ixp, &ixp->op[0], (uint64_t)(int64_t)d))
 				goto unsupported;
 			break;
 		}
@@ -7646,197 +7669,197 @@ decoded:
 		 * unimplemented opcode ends a run that had otherwise reached
 		 * its payload.
 		 */
-		case ND_INS_MOVHPS: case ND_INS_MOVHPD: {
+		case GT_X86_I_MOVHPS: case GT_X86_I_MOVHPD: {
 			uint8_t x[16], y[16];
 			unsigned nx, ny;
 
-			if (ixp->Operands[0].Type == ND_OP_MEM) {
+			if (ixp->op[0].type == GT_X86_OP_MEM) {
 				/* store: the high half goes to memory */
-				if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+				if (!vec_rd(e, ixp, &ixp->op[1], y, &ny))
 					goto unsupported;
-				if (!vec_wr(e, ixp, &ixp->Operands[0], y + 8, 8))
+				if (!vec_wr(e, ixp, &ixp->op[0], y + 8, 8))
 					goto unsupported;
 			} else {
-				if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-				    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+				if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+				    !vec_rd(e, ixp, &ixp->op[1], y, &ny))
 					goto unsupported;
 				memcpy(x + 8, y, 8);
-				if (!vec_wr(e, ixp, &ixp->Operands[0], x, 16))
+				if (!vec_wr(e, ixp, &ixp->op[0], x, 16))
 					goto unsupported;
 			}
 			break;
 		}
 
-		case ND_INS_PINSRW: {
+		case GT_X86_I_PINSRW: {
 			uint8_t x[16];
 			unsigned nx;
 			uint64_t v, sel;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &v) ||
-			    !op_rd(e, ixp, &ixp->Operands[2], &sel))
+			if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+			    !op_rd(e, ixp, &ixp->op[1], &v) ||
+			    !op_rd(e, ixp, &ixp->op[2], &sel))
 				goto unsupported;
 			x[(sel & 7u) * 2u]      = (uint8_t)v;
 			x[(sel & 7u) * 2u + 1u] = (uint8_t)(v >> 8);
-			if (!vec_wr(e, ixp, &ixp->Operands[0], x, 16))
+			if (!vec_wr(e, ixp, &ixp->op[0], x, 16))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_PEXTRW: {
+		case GT_X86_I_PEXTRW: {
 			uint8_t y[16];
 			unsigned ny;
 			uint64_t sel;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny) ||
-			    !op_rd(e, ixp, &ixp->Operands[2], &sel))
+			if (!vec_rd(e, ixp, &ixp->op[1], y, &ny) ||
+			    !op_rd(e, ixp, &ixp->op[2], &sel))
 				goto unsupported;
-			if (!op_wr(e, ixp, &ixp->Operands[0],
+			if (!op_wr(e, ixp, &ixp->op[0],
 				   (uint64_t)y[(sel & 7u) * 2u] |
 				   ((uint64_t)y[(sel & 7u) * 2u + 1u] << 8)))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_PMOVMSKB: {
+		case GT_X86_I_PMOVMSKB: {
 			uint8_t y[16];
 			unsigned ny, k;
 			uint64_t m = 0;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->op[1], y, &ny))
 				goto unsupported;
 			for (k = 0; k < 16; k++)
 				m |= (uint64_t)(y[k] >> 7) << k;
-			if (!op_wr(e, ixp, &ixp->Operands[0], m))
+			if (!op_wr(e, ixp, &ixp->op[0], m))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_PSLLDQ: case ND_INS_PSRLDQ: {
+		case GT_X86_I_PSLLDQ: case GT_X86_I_PSRLDQ: {
 			uint8_t x[16], q[16] = { 0 };
 			unsigned nx, k;
 			uint64_t sh;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &sh))
+			if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+			    !op_rd(e, ixp, &ixp->op[1], &sh))
 				goto unsupported;
 			if (sh < 16)
 				for (k = 0; k < 16u - sh; k++) {
-					if (ixp->Instruction == ND_INS_PSLLDQ)
+					if (ixp->h.id == GT_X86_I_PSLLDQ)
 						q[k + sh] = x[k];
 					else
 						q[k] = x[k + sh];
 				}
-			if (!vec_wr(e, ixp, &ixp->Operands[0], q, 16))
+			if (!vec_wr(e, ixp, &ixp->op[0], q, 16))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_PUNPCKLBW: {
+		case GT_X86_I_PUNPCKLBW: {
 			uint8_t x[16], y[16], q[16];
 			unsigned nx, ny, k;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[0], x, &nx) ||
-			    !vec_rd(e, ixp, &ixp->Operands[1], y, &ny))
+			if (!vec_rd(e, ixp, &ixp->op[0], x, &nx) ||
+			    !vec_rd(e, ixp, &ixp->op[1], y, &ny))
 				goto unsupported;
 			for (k = 0; k < 8; k++) {
 				q[k * 2u]      = x[k];
 				q[k * 2u + 1u] = y[k];
 			}
-			if (!vec_wr(e, ixp, &ixp->Operands[0], q, 16))
+			if (!vec_wr(e, ixp, &ixp->op[0], q, 16))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_PSHUFD: {
+		case GT_X86_I_PSHUFD: {
 			uint8_t y[16], q[16];
 			unsigned ny, k;
 			uint64_t sel;
 
-			if (!vec_rd(e, ixp, &ixp->Operands[1], y, &ny) ||
-			    !op_rd(e, ixp, &ixp->Operands[2], &sel))
+			if (!vec_rd(e, ixp, &ixp->op[1], y, &ny) ||
+			    !op_rd(e, ixp, &ixp->op[2], &sel))
 				goto unsupported;
 			for (k = 0; k < 4; k++)
 				memcpy(q + k * 4u, y + ((sel >> (k * 2u)) & 3u) * 4u, 4);
-			if (!vec_wr(e, ixp, &ixp->Operands[0], q, 16))
+			if (!vec_wr(e, ixp, &ixp->op[0], q, 16))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_MOV:
-		case ND_INS_MOVZX:
-			if (!op_rd(e, ixp, &ixp->Operands[1], &b) ||
-			    !op_wr(e, ixp, &ixp->Operands[0], b))
+		case GT_X86_I_MOV:
+		case GT_X86_I_MOVZX:
+			if (!op_rd(e, ixp, &ixp->op[1], &b) ||
+			    !op_wr(e, ixp, &ixp->op[0], b))
 				goto unsupported;
 			break;
 
-		case ND_INS_MOVSX:
-		case ND_INS_MOVSXD: {
-			unsigned sb = ixp->Operands[1].Size ? ixp->Operands[1].Size : 1u;
+		case GT_X86_I_MOVSX:
+		case GT_X86_I_MOVSXD: {
+			unsigned sb = ixp->op[1].size ? ixp->op[1].size : 1u;
 
-			if (!op_rd(e, ixp, &ixp->Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
 			if (sb < 8 && (b >> (sb * 8u - 1u)) & 1u)
 				b |= ~mask_of(sb);
-			if (!op_wr(e, ixp, &ixp->Operands[0], b))
+			if (!op_wr(e, ixp, &ixp->op[0], b))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_LEA: {
+		case GT_X86_I_LEA: {
 			uint64_t ea;
 
-			if (!ea_of(e, ixp, &ixp->Operands[1], &ea) ||
-			    !op_wr(e, ixp, &ixp->Operands[0], ea))
+			if (!ea_of(e, ixp, &ixp->op[1], &ea) ||
+			    !op_wr(e, ixp, &ixp->op[0], ea))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_XCHG:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &b) ||
-			    !op_wr(e, ixp, &ixp->Operands[0], b) ||
-			    !op_wr(e, ixp, &ixp->Operands[1], a))
+		case GT_X86_I_XCHG:
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_rd(e, ixp, &ixp->op[1], &b) ||
+			    !op_wr(e, ixp, &ixp->op[0], b) ||
+			    !op_wr(e, ixp, &ixp->op[1], a))
 				goto unsupported;
 			break;
 
-		case ND_INS_ADD: case ND_INS_ADC:
-		case ND_INS_SUB: case ND_INS_SBB: case ND_INS_CMP:
-		case ND_INS_AND: case ND_INS_OR:  case ND_INS_XOR:
-		case ND_INS_TEST: {
+		case GT_X86_I_ADD: case GT_X86_I_ADC:
+		case GT_X86_I_SUB: case GT_X86_I_SBB: case GT_X86_I_CMP:
+		case GT_X86_I_AND: case GT_X86_I_OR:  case GT_X86_I_XOR:
+		case GT_X86_I_TEST: {
 			uint64_t cin = 0;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
-			if (ixp->Instruction == ND_INS_ADC ||
-			    ixp->Instruction == ND_INS_SBB)
+			if (ixp->h.id == GT_X86_I_ADC ||
+			    ixp->h.id == GT_X86_I_SBB)
 				cin = (e->flags & FL_CF) ? 1u : 0u;
-			switch (ixp->Instruction) {
-			case ND_INS_ADD: case ND_INS_ADC:
+			switch (ixp->h.id) {
+			case GT_X86_I_ADD: case GT_X86_I_ADC:
 				r = a + b + cin; fl_add(e, a, b, cin, sz); break;
-			case ND_INS_SUB: case ND_INS_SBB: case ND_INS_CMP:
+			case GT_X86_I_SUB: case GT_X86_I_SBB: case GT_X86_I_CMP:
 				r = a - b - cin; fl_sub(e, a, b, cin, sz); break;
-			case ND_INS_AND: case ND_INS_TEST:
+			case GT_X86_I_AND: case GT_X86_I_TEST:
 				r = a & b; fl_logic(e, r, sz); break;
-			case ND_INS_OR:
+			case GT_X86_I_OR:
 				r = a | b; fl_logic(e, r, sz); break;
 			default:
 				r = a ^ b; fl_logic(e, r, sz); break;
 			}
-			if (ixp->Instruction != ND_INS_CMP &&
-			    ixp->Instruction != ND_INS_TEST &&
-			    !op_wr(e, ixp, &ixp->Operands[0], r))
+			if (ixp->h.id != GT_X86_I_CMP &&
+			    ixp->h.id != GT_X86_I_TEST &&
+			    !op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_INC: case ND_INS_DEC: {
+		case GT_X86_I_INC: case GT_X86_I_DEC: {
 			uint64_t cf = e->flags & FL_CF;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
-			if (ixp->Instruction == ND_INS_INC) {
+			if (ixp->h.id == GT_X86_I_INC) {
 				r = a + 1u; fl_add(e, a, 1u, 0, sz);
 			} else {
 				r = a - 1u; fl_sub(e, a, 1u, 0, sz);
@@ -7845,23 +7868,23 @@ decoded:
 			 * them different from ADD/SUB by one, and the reason a
 			 * carry-chained loop written with them still works. */
 			e->flags = (e->flags & ~(uint64_t)FL_CF) | cf;
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_NEG:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+		case GT_X86_I_NEG:
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
 			r = 0u - a;
 			fl_sub(e, 0, a, 0, sz);
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 
-		case ND_INS_NOT:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_wr(e, ixp, &ixp->Operands[0], ~a))
+		case GT_X86_I_NOT:
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_wr(e, ixp, &ixp->op[0], ~a))
 				goto unsupported;
 			break;
 
@@ -7879,12 +7902,12 @@ decoded:
 		 * with "unsupported: RCR ax, 1", having run 25.9 and 26.7
 		 * million instructions to reach it.
 		 */
-		case ND_INS_RCL: case ND_INS_RCR: {
+		case GT_X86_I_RCL: case GT_X86_I_RCR: {
 			unsigned n, rc, w = sz * 8u, i;
 			uint64_t m = mask_of(sz), cf;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			/*
@@ -7905,7 +7928,7 @@ decoded:
 			 * the count is at most 64 and these run once.
 			 */
 			for (i = 0; i < rc; i++) {
-				if (ixp->Instruction == ND_INS_RCL) {
+				if (ixp->h.id == GT_X86_I_RCL) {
 					uint64_t top = (a >> (w - 1u)) & 1u;
 
 					a = ((a << 1) | cf) & m;
@@ -7924,7 +7947,7 @@ decoded:
 			/* OF is defined for a count of one alone, as above. */
 			if (n == 1) {
 				e->flags &= ~(uint64_t)FL_OF;
-				if (ixp->Instruction == ND_INS_RCL) {
+				if (ixp->h.id == GT_X86_I_RCL) {
 					if (((r >> (w - 1u)) & 1u) ^ (cf & 1u))
 						e->flags |= FL_OF;
 				} else {
@@ -7933,7 +7956,7 @@ decoded:
 						e->flags |= FL_OF;
 				}
 			}
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 		}
@@ -7965,13 +7988,13 @@ decoded:
 		 * UNDEFINED on the hardware, so it is refused rather than
 		 * invented.
 		 */
-		case ND_INS_SHRD: case ND_INS_SHLD: {
+		case GT_X86_I_SHRD: case GT_X86_I_SHLD: {
 			unsigned n, w = sz * 8u;
 			uint64_t m = mask_of(sz), src;
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &src) ||
-			    !op_rd(e, ixp, &ixp->Operands[2], &b))
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_rd(e, ixp, &ixp->op[1], &src) ||
+			    !op_rd(e, ixp, &ixp->op[2], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n)
@@ -8005,7 +8028,7 @@ decoded:
 					goto unsupported;
 				r = host_dshift16((uint16_t)a, (uint16_t)src,
 						  (uint8_t)n,
-						  ixp->Instruction == ND_INS_SHLD,
+						  ixp->h.id == GT_X86_I_SHLD,
 						  &hf);
 				/* The host's own flags, for the bits this
 				 * models - the guest reads them back with
@@ -8017,14 +8040,14 @@ decoded:
 					e->flags = (e->flags & ~keep) |
 						   (hf & keep);
 				}
-				if (!op_wr(e, ixp, &ixp->Operands[0], r))
+				if (!op_wr(e, ixp, &ixp->op[0], r))
 					goto unsupported;
 				break;
 #else
 				goto unsupported;
 #endif
 			}
-			if (ixp->Instruction == ND_INS_SHRD) {
+			if (ixp->h.id == GT_X86_I_SHRD) {
 				r = ((a >> n) | (src << (w - n))) & m;
 				if ((a >> (n - 1u)) & 1u)
 					b = 1;
@@ -8046,28 +8069,28 @@ decoded:
 			 * above follow. */
 			if (n == 1u && ((r ^ a) >> (w - 1u)) & 1u)
 				e->flags |= FL_OF;
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 		}
 
 		/* SAL is SHL under another name - the encoding is the same and
-		 * bddisasm reports both. */
-		case ND_INS_SAL:
-		case ND_INS_SHL: case ND_INS_SHR: case ND_INS_SAR: {
+		 * the decoder reports both. */
+		case GT_X86_I_SAL:
+		case GT_X86_I_SHL: case GT_X86_I_SHR: case GT_X86_I_SAR: {
 			unsigned n, w = sz * 8u;
 			uint64_t m = mask_of(sz);
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n) break;                    /* no shift, no flags */
 			a &= m;
-			switch (ixp->Instruction) {
-			case ND_INS_SAL:
-			case ND_INS_SHL: r = n >= w ? 0 : (a << n) & m; break;
-			case ND_INS_SHR: r = n >= w ? 0 : a >> n; break;
+			switch (ixp->h.id) {
+			case GT_X86_I_SAL:
+			case GT_X86_I_SHL: r = n >= w ? 0 : (a << n) & m; break;
+			case GT_X86_I_SHR: r = n >= w ? 0 : a >> n; break;
 			default: /* SAR: sign-extend, then an arithmetic right shift
 				  * capped at w-1 so it saturates to all sign bits. */
 				r = (uint64_t)(((int64_t)sext(a, sz)) >>
@@ -8080,11 +8103,11 @@ decoded:
 			e->flags |= FL_AF;
 			/* CF is the last bit shifted out, and zero once the count
 			 * has cleared the whole width. */
-			if (ixp->Instruction == ND_INS_SHL ||
-			    ixp->Instruction == ND_INS_SAL) {
+			if (ixp->h.id == GT_X86_I_SHL ||
+			    ixp->h.id == GT_X86_I_SAL) {
 				if (n <= w && (a >> (w - n)) & 1u)
 					e->flags |= FL_CF;
-			} else if (ixp->Instruction == ND_INS_SHR) {
+			} else if (ixp->h.id == GT_X86_I_SHR) {
 				if (n <= w && (a >> (n - 1u)) & 1u)
 					e->flags |= FL_CF;
 			} else {   /* SAR: bit n-1, or the sign once past the width */
@@ -8093,23 +8116,23 @@ decoded:
 				if ((a >> cb) & 1u)
 					e->flags |= FL_CF;
 			}
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_ROL: case ND_INS_ROR: {
+		case GT_X86_I_ROL: case GT_X86_I_ROR: {
 			unsigned n, rc, w = sz * 8u;
 			uint64_t m = mask_of(sz);
 
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !op_rd(e, ixp, &ixp->Operands[1], &b))
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
 			if (!n) break;                    /* masked count 0: no flags */
 			a &= m;
 			rc = n % w;                       /* a rotate is modulo width */
-			if (ixp->Instruction == ND_INS_ROL)
+			if (ixp->h.id == GT_X86_I_ROL)
 				r = rc ? ((a << rc) | (a >> (w - rc))) & m : a;
 			else
 				r = rc ? ((a >> rc) | (a << (w - rc))) & m : a;
@@ -8120,7 +8143,7 @@ decoded:
 			 * of one alone and left as-is otherwise.
 			 */
 			e->flags &= ~(uint64_t)FL_CF;
-			if (ixp->Instruction == ND_INS_ROL) {
+			if (ixp->h.id == GT_X86_I_ROL) {
 				if (r & 1u)
 					e->flags |= FL_CF;          /* LSB of result */
 				if (n == 1) {
@@ -8138,20 +8161,20 @@ decoded:
 						e->flags |= FL_OF;
 				}
 			}
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 		}
 
-		case ND_INS_PUSH:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-			    !push_w(e, a, ixp->Operands[0].Size))
+		case GT_X86_I_PUSH:
+			if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+			    !push_w(e, a, ixp->op[0].size))
 				goto fault;
 			break;
 
-		case ND_INS_POP:
-			if (!pop_w(e, &a, ixp->Operands[0].Size) ||
-			    !op_wr(e, ixp, &ixp->Operands[0], a))
+		case GT_X86_I_POP:
+			if (!pop_w(e, &a, ixp->op[0].size) ||
+			    !op_wr(e, ixp, &ixp->op[0], a))
 				goto fault;
 			break;
 
@@ -8189,12 +8212,12 @@ decoded:
 #define FL_ALWAYS_1 (1u << 1)
 #define FL_IF       (1u << 9)
 
-		case ND_INS_PUSHF:
+		case GT_X86_I_PUSHF:
 			if (!push(e, e->flags | FL_ALWAYS_1 | FL_IF))
 				goto fault;
 			break;
 
-		case ND_INS_POPF:
+		case GT_X86_I_POPF:
 			if (!pop(e, &a))
 				goto fault;
 			e->flags = (e->flags & ~(uint64_t)FL_MODELLED) |
@@ -8215,8 +8238,8 @@ decoded:
 		 * them in reverse and DISCARDS the saved esp - the stack pointer
 		 * is where the pops left it, not what was written.
 		 */
-		case ND_INS_PUSHA:
-		case ND_INS_PUSHAD: {
+		case GT_X86_I_PUSHA:
+		case GT_X86_I_PUSHAD: {
 			static const unsigned ord[8] = {
 				KOF_EMU_RAX, KOF_EMU_RCX, KOF_EMU_RDX,
 				KOF_EMU_RBX, KOF_EMU_RSP, KOF_EMU_RBP,
@@ -8232,8 +8255,8 @@ decoded:
 			break;
 		}
 
-		case ND_INS_POPA:
-		case ND_INS_POPAD: {
+		case GT_X86_I_POPA:
+		case GT_X86_I_POPAD: {
 			static const unsigned ord[8] = {
 				KOF_EMU_RDI, KOF_EMU_RSI, KOF_EMU_RBP,
 				KOF_EMU_RSP, KOF_EMU_RBX, KOF_EMU_RDX,
@@ -8266,14 +8289,14 @@ decoded:
 		 *
 		 * 32-bit only, like PUSHAD - amd64 removed them.
 		 */
-		case ND_INS_AAA:
-		case ND_INS_AAS: {
+		case GT_X86_I_AAA:
+		case GT_X86_I_AAS: {
 			uint32_t ax = (uint32_t)(e->gpr[KOF_EMU_RAX] & 0xffffu);
 			unsigned al = ax & 0xffu, ah = (ax >> 8) & 0xffu;
 			int adj = (al & 0x0fu) > 9u || (e->flags & FL_AF);
 
 			if (adj) {
-				if (ixp->Instruction == ND_INS_AAA) {
+				if (ixp->h.id == GT_X86_I_AAA) {
 					al = (al + 6u) & 0xffu;
 					ah = (ah + 1u) & 0xffu;
 				} else {
@@ -8291,12 +8314,12 @@ decoded:
 			break;
 		}
 
-		case ND_INS_DAA:
-		case ND_INS_DAS: {
+		case GT_X86_I_DAA:
+		case GT_X86_I_DAS: {
 			unsigned al = (unsigned)(e->gpr[KOF_EMU_RAX] & 0xffu);
 			unsigned old = al;
 			int oldcf = (e->flags & FL_CF) != 0;
-			int sub = ixp->Instruction == ND_INS_DAS;
+			int sub = ixp->h.id == GT_X86_I_DAS;
 
 			e->flags &= ~(uint64_t)FL_CF;
 			if ((al & 0x0fu) > 9u || (e->flags & FL_AF)) {
@@ -8317,78 +8340,78 @@ decoded:
 			break;
 		}
 
-		case ND_INS_LEAVE:
+		case GT_X86_I_LEAVE:
 			e->gpr[KOF_EMU_RSP] = e->gpr[KOF_EMU_RBP];
 			if (!pop(e, &e->gpr[KOF_EMU_RBP]))
 				goto fault;
 			break;
 
-		case ND_INS_CALLNR:
-		case ND_INS_CALLNI:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a) || !push(e, next))
+		case GT_X86_I_CALLNR:
+		case GT_X86_I_CALLNI:
+			if (!op_rd(e, ixp, &ixp->op[0], &a) || !push(e, next))
 				goto fault;
 			e->last_call_at = e->rip;
 			e->rip = a; jumped = 1;
 			break;
 
-		case ND_INS_RETN:
+		case GT_X86_I_RETN:
 			if (!pop(e, &a))
 				goto fault;
-			if (ixp->OperandsCount > 0 &&
-			    ixp->Operands[0].Type == ND_OP_IMM)
-				e->gpr[KOF_EMU_RSP] += ixp->Operands[0].Info.Immediate.Imm;
+			if (ixp->n > 0 &&
+			    ixp->op[0].type == GT_X86_OP_IMM)
+				e->gpr[KOF_EMU_RSP] += (uint64_t)ixp->op[0].v;
 			e->rip = a; jumped = 1;
 			break;
 
-		case ND_INS_JMPNR:
-		case ND_INS_JMPNI:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+		case GT_X86_I_JMPNR:
+		case GT_X86_I_JMPNI:
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
 			e->rip = a; jumped = 1;
 			break;
 
-		case ND_INS_Jcc:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+		case GT_X86_I_Jcc:
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
-			if (cond_true(e, ixp->Condition)) { e->rip = a; jumped = 1; }
+			if (cond_true(e, gt_x86_cond(&ixp->h))) { e->rip = a; jumped = 1; }
 			break;
 
-		case ND_INS_SETcc:
-			if (!op_wr(e, ixp, &ixp->Operands[0],
-				   cond_true(e, ixp->Condition) ? 1u : 0u))
+		case GT_X86_I_SETcc:
+			if (!op_wr(e, ixp, &ixp->op[0],
+				   cond_true(e, gt_x86_cond(&ixp->h)) ? 1u : 0u))
 				goto unsupported;
 			break;
 
-		case ND_INS_CMOVcc:
-			if (!op_rd(e, ixp, &ixp->Operands[1], &b))
+		case GT_X86_I_CMOVcc:
+			if (!op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
-			if (cond_true(e, ixp->Condition) &&
-			    !op_wr(e, ixp, &ixp->Operands[0], b))
+			if (cond_true(e, gt_x86_cond(&ixp->h)) &&
+			    !op_wr(e, ixp, &ixp->op[0], b))
 				goto unsupported;
 			break;
 
 		/* Sign of the accumulator into the whole of RDX/DX. */
-		case ND_INS_CWD:
+		case GT_X86_I_CWD:
 			reg_wr(e, KOF_EMU_RDX, 2, 0,
 			       (int16_t)e->gpr[KOF_EMU_RAX] < 0 ? 0xffffu : 0u);
 			break;
-		case ND_INS_CDQ: case ND_INS_CQO:
+		case GT_X86_I_CDQ: case GT_X86_I_CQO:
 			e->gpr[KOF_EMU_RDX] =
-				(ixp->Instruction == ND_INS_CQO)
+				(ixp->h.id == GT_X86_I_CQO)
 				? ((int64_t)e->gpr[KOF_EMU_RAX] < 0 ? ~(uint64_t)0 : 0)
 				: (uint64_t)(uint32_t)((int32_t)e->gpr[KOF_EMU_RAX] >> 31);
 			break;
 
 		/* Widen the accumulator in place. */
-		case ND_INS_CBW:
+		case GT_X86_I_CBW:
 			reg_wr(e, KOF_EMU_RAX, 2, 0,
 			       (uint64_t)(uint16_t)(int16_t)(int8_t)e->gpr[KOF_EMU_RAX]);
 			break;
-		case ND_INS_CWDE:
+		case GT_X86_I_CWDE:
 			e->gpr[KOF_EMU_RAX] =
 				(uint64_t)(uint32_t)(int32_t)(int16_t)e->gpr[KOF_EMU_RAX];
 			break;
-		case ND_INS_CDQE:
+		case GT_X86_I_CDQE:
 			e->gpr[KOF_EMU_RAX] = (uint64_t)(int64_t)(int32_t)e->gpr[KOF_EMU_RAX];
 			break;
 
@@ -8404,17 +8427,17 @@ decoded:
 		 * The operand size that matters is the ADDRESS size, not the
 		 * data size: the same encoding reads CX, ECX or RCX depending
 		 * on the address-size prefix and the mode, which is what
-		 * bddisasm reports in AddrMode.
+		 * the decoder reports in AddrMode.
 		 */
-		case ND_INS_JrCXZ: {
+		case GT_X86_I_JrCXZ: {
 			uint64_t cnt = e->gpr[KOF_EMU_RCX];
 
-			if (ixp->AddrMode == ND_ADDR_32)
+			if (gt_x86_asz(&ixp->h) == 4u)
 				cnt = (uint32_t)cnt;
-			else if (ixp->AddrMode == ND_ADDR_16)
+			else if (gt_x86_asz(&ixp->h) == 2u)
 				cnt = (uint16_t)cnt;
 			if (!cnt) {
-				if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+				if (!op_rd(e, ixp, &ixp->op[0], &a))
 					goto unsupported;
 				next = a;
 			}
@@ -8423,29 +8446,29 @@ decoded:
 
 		/* The count-and-branch forms. RCX is the counter and is NOT a
 		 * flag setter - only the branch decision reads ZF. */
-		case ND_INS_LOOP: case ND_INS_LOOPZ: case ND_INS_LOOPNZ: {
+		case GT_X86_I_LOOP: case GT_X86_I_LOOPZ: case GT_X86_I_LOOPNZ: {
 			uint64_t cnt = --e->gpr[KOF_EMU_RCX];
 			int take = cnt != 0;
 
-			if (ixp->Instruction == ND_INS_LOOPZ)
+			if (ixp->h.id == GT_X86_I_LOOPZ)
 				take = take && (e->flags & FL_ZF);
-			else if (ixp->Instruction == ND_INS_LOOPNZ)
+			else if (ixp->h.id == GT_X86_I_LOOPNZ)
 				take = take && !(e->flags & FL_ZF);
 			if (take) {
-				if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+				if (!op_rd(e, ixp, &ixp->op[0], &a))
 					goto unsupported;
 				next = a;
 			}
 			break;
 		}
 
-		case ND_INS_BSWAP:
-			if (!op_rd(e, ixp, &ixp->Operands[0], &a))
+		case GT_X86_I_BSWAP:
+			if (!op_rd(e, ixp, &ixp->op[0], &a))
 				goto unsupported;
 			r = 0;
 			for (unsigned i = 0; i < sz; i++)
 				r |= ((a >> (i * 8u)) & 0xffu) << ((sz - 1u - i) * 8u);
-			if (!op_wr(e, ixp, &ixp->Operands[0], r))
+			if (!op_wr(e, ixp, &ixp->op[0], r))
 				goto unsupported;
 			break;
 
@@ -8455,23 +8478,23 @@ decoded:
 		 * "IMUL rdx, rdi" looked like the three-operand form and read
 		 * the flags register as its multiplier.
 		 */
-		case ND_INS_IMUL:
-			if (ixp->ExpOperandsCount >= 3) {
-				if (!op_rd(e, ixp, &ixp->Operands[1], &a) ||
-				    !op_rd(e, ixp, &ixp->Operands[2], &b) ||
-				    !op_wr(e, ixp, &ixp->Operands[0], a * b))
+		case GT_X86_I_IMUL:
+			if (gt_x86_nform(&ixp->h) >= 3) {
+				if (!op_rd(e, ixp, &ixp->op[1], &a) ||
+				    !op_rd(e, ixp, &ixp->op[2], &b) ||
+				    !op_wr(e, ixp, &ixp->op[0], a * b))
 					goto unsupported;
-			} else if (ixp->ExpOperandsCount == 2) {
-				if (!op_rd(e, ixp, &ixp->Operands[0], &a) ||
-				    !op_rd(e, ixp, &ixp->Operands[1], &b) ||
-				    !op_wr(e, ixp, &ixp->Operands[0], a * b))
+			} else if (gt_x86_nform(&ixp->h) == 2) {
+				if (!op_rd(e, ixp, &ixp->op[0], &a) ||
+				    !op_rd(e, ixp, &ixp->op[1], &b) ||
+				    !op_wr(e, ixp, &ixp->op[0], a * b))
 					goto unsupported;
 			} else {
 				/* One operand: the widening form, into RDX:RAX. */
 				uint64_t acc = reg_rd(e, KOF_EMU_RAX, sz, 0);
 				int64_t  x, y;
 
-				if (!op_rd(e, ixp, &ixp->Operands[0], &b))
+				if (!op_rd(e, ixp, &ixp->op[0], &b))
 					goto unsupported;
 				x = (int64_t)sext(acc, sz);
 				y = (int64_t)sext(b, sz);
@@ -8498,16 +8521,16 @@ decoded:
 		 */
 		/* The flag instructions, which cost a line each and stop real
 		 * samples when they are missing. */
-		case ND_INS_STC: e->flags |= FL_CF;  break;
-		case ND_INS_CLC: e->flags &= ~(uint64_t)FL_CF; break;
-		case ND_INS_CMC: e->flags ^= FL_CF;  break;
-		case ND_INS_SAHF:
+		case GT_X86_I_STC: e->flags |= FL_CF;  break;
+		case GT_X86_I_CLC: e->flags &= ~(uint64_t)FL_CF; break;
+		case GT_X86_I_CMC: e->flags ^= FL_CF;  break;
+		case GT_X86_I_SAHF:
 			e->flags = (e->flags & ~(uint64_t)(FL_SF | FL_ZF | FL_AF |
 							   FL_PF | FL_CF)) |
 				   (reg_rd(e, KOF_EMU_RAX, 2, 0) >> 8 &
 				    (FL_SF | FL_ZF | FL_AF | FL_PF | FL_CF));
 			break;
-		case ND_INS_LAHF:
+		case GT_X86_I_LAHF:
 			reg_wr(e, KOF_EMU_RAX, 1, 1,
 			       (e->flags & (FL_SF | FL_ZF | FL_AF | FL_PF |
 					    FL_CF)) | 2u);
@@ -8521,13 +8544,13 @@ decoded:
 		 * Sality body reaches one 186 million instructions in and the
 		 * run ended on it.
 		 */
-		case ND_INS_SALC:
+		case GT_X86_I_SALC:
 			reg_wr(e, KOF_EMU_RAX, 1, 0,
 			       (e->flags & FL_CF) ? 0xffu : 0u);
 			break;
 
-		case ND_INS_LODS: case ND_INS_STOS:
-		case ND_INS_MOVS: case ND_INS_SCAS: case ND_INS_CMPS: {
+		case GT_X86_I_LODS: case GT_X86_I_STOS:
+		case GT_X86_I_MOVS: case GT_X86_I_SCAS: case GT_X86_I_CMPS: {
 			/* WHAT THE GUEST IS MEASURING OR COMPARING, on request.
 			 * A stub that resolves its own imports runs strlen
 			 * over the name it wants before it looks for it, and
@@ -8554,11 +8577,11 @@ decoded:
 				if (q >= 5u && !c)
 					fprintf(stderr, "[str] %s\n", nm);
 			}
-			unsigned w = ixp->Operands[0].Size ? ixp->Operands[0].Size : 1u;
+			unsigned w = ixp->op[0].size ? ixp->op[0].size : 1u;
 			int64_t step = (e->flags & FL_DF) ? -(int64_t)w : (int64_t)w;
 			uint64_t iter = 1;
 
-			if (ixp->IsRepeated) {
+			if (gt_x86_repeated(&ixp->h)) {
 				iter = e->gpr[KOF_EMU_RCX];
 				if (!iter) break;
 				if (iter > e->max_insn - e->insn)
@@ -8567,27 +8590,27 @@ decoded:
 			while (iter--) {
 				uint64_t v = 0;
 
-				switch (ixp->Instruction) {
-				case ND_INS_LODS:
+				switch (ixp->h.id) {
+				case GT_X86_I_LODS:
 					if (!mem_rd(e, e->gpr[KOF_EMU_RSI], &v, w))
 						goto fault;
 					reg_wr(e, KOF_EMU_RAX, w, 0, v);
 					e->gpr[KOF_EMU_RSI] += (uint64_t)step;
 					break;
-				case ND_INS_STOS:
+				case GT_X86_I_STOS:
 					v = reg_rd(e, KOF_EMU_RAX, w, 0);
 					if (!mem_wr(e, e->gpr[KOF_EMU_RDI], &v, w))
 						goto fault;
 					e->gpr[KOF_EMU_RDI] += (uint64_t)step;
 					break;
-				case ND_INS_MOVS:
+				case GT_X86_I_MOVS:
 					if (!mem_rd(e, e->gpr[KOF_EMU_RSI], &v, w) ||
 					    !mem_wr(e, e->gpr[KOF_EMU_RDI], &v, w))
 						goto fault;
 					e->gpr[KOF_EMU_RSI] += (uint64_t)step;
 					e->gpr[KOF_EMU_RDI] += (uint64_t)step;
 					break;
-				case ND_INS_CMPS: {
+				case GT_X86_I_CMPS: {
 					uint64_t rhs;
 
 					if (!mem_rd(e, e->gpr[KOF_EMU_RSI], &a, w) ||
@@ -8606,17 +8629,17 @@ decoded:
 					e->gpr[KOF_EMU_RDI] += (uint64_t)step;
 					break;
 				}
-				if (ixp->IsRepeated) {
+				if (gt_x86_repeated(&ixp->h)) {
 					e->gpr[KOF_EMU_RCX]--;
 					e->insn++;
 					/* REPZ/REPNZ on a compare stop on the flag
 					 * as well as on the count; REP on a move
 					 * only on the count. */
-					if (ixp->Instruction == ND_INS_SCAS ||
-					    ixp->Instruction == ND_INS_CMPS) {
+					if (ixp->h.id == GT_X86_I_SCAS ||
+					    ixp->h.id == GT_X86_I_CMPS) {
 						int z = (e->flags & FL_ZF) != 0;
 
-						if (ixp->Rep == 0xF3 ? !z : z)
+						if (ixp->h.rep == 0xF3 ? !z : z)
 							break;
 					}
 				}
@@ -8624,8 +8647,8 @@ decoded:
 			break;
 		}
 
-		case ND_INS_CLD: e->flags &= ~(uint64_t)FL_DF; break;
-		case ND_INS_STD: e->flags |=  (uint64_t)FL_DF; break;
+		case GT_X86_I_CLD: e->flags &= ~(uint64_t)FL_DF; break;
+		case GT_X86_I_STD: e->flags |=  (uint64_t)FL_DF; break;
 
 		/*
 		 * CPUID, answered rather than refused.
@@ -8636,7 +8659,7 @@ decoded:
 		 * has the best chance of carrying. Refusing instead would stop
 		 * the run at the first sample that merely wanted to know.
 		 */
-		case ND_INS_CPUID: {
+		case GT_X86_I_CPUID: {
 			uint32_t leaf = (uint32_t)e->gpr[KOF_EMU_RAX];
 
 			e->gpr[KOF_EMU_RAX] = e->gpr[KOF_EMU_RBX] =
@@ -8669,13 +8692,13 @@ decoded:
 		 * uses it there is doing something real, and refusing it would
 		 * be this emulator disagreeing with the kernel.
 		 */
-		case ND_INS_INT: {
+		case GT_X86_I_INT: {
 			int s = 0;
 			uint64_t ret;
 			unsigned was = e->bits;
 
-			if (ixp->Operands[0].Type != ND_OP_IMM ||
-			    ixp->Operands[0].Info.Immediate.Imm != 0x80)
+			if (ixp->op[0].type != GT_X86_OP_IMM ||
+			    (uint64_t)ixp->op[0].v != 0x80)
 				goto unsupported;
 			/* int 0x80 is the i386 convention whatever the mode. */
 			e->bits = 32;
@@ -8686,7 +8709,7 @@ decoded:
 			break;
 		}
 
-		case ND_INS_SYSCALL: {
+		case GT_X86_I_SYSCALL: {
 			int s = 0;
 			uint64_t ret = do_syscall(e, &s);
 

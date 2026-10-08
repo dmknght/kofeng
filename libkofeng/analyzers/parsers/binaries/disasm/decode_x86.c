@@ -1,11 +1,18 @@
 /*
  * decode_x86.c - x86 and x86-64 into the engine's one instruction form.
  *
- * The decoding itself is bddisasm's; this is the translation, and it is the
- * ONLY place in the engine that reads an INSTRUX. Everything downstream
- * reads struct kdis_insn, so a decoder upgrade that renames an instruction
- * class is applied here and nowhere else - see decode.h for why that
- * mattered enough to write this.
+ * The decoding itself is genotype's (libgenome/genotype/x86); this is the
+ * translation, and it is the ONLY place in the engine that reads one of its
+ * instructions. Everything downstream reads struct kdis_insn, so a decoder
+ * that renames an instruction class is applied here and nowhere else - see
+ * decode.h for why that mattered enough to write this.
+ *
+ * ONLY WHAT THE SWEEP READS IS BUILT. genotype finds the instruction first and
+ * builds operands when asked; the sweep asks for the explicit ones (at most
+ * three are kept) and takes the registers an instruction writes WITHOUT naming
+ * them from a mask the decoder keeps per opcode, so the stack pointer a push
+ * moves or the rdx a mul fills is never built as an operand at all. MEASURED
+ * over 44.7 M instructions, building every operand was 15 of the 41 ns.
  */
 #include <string.h>
 
@@ -13,79 +20,80 @@
 #include "kofmod/kofsig.h"
 #include "decode.h"
 #include "gpr.h"
+#include <x86/x86.h>
 
 /* ---- THE CLASS ---------------------------------------------------------- */
 /*
- * bddisasm names roughly sixteen hundred instructions and the sweep asks
+ * the decoder names roughly sixteen hundred instructions and the sweep asks
  * about thirty-eight of them. The rest are not "unknown": they are
  * instructions whose CLASS is all anyone downstream needs, and KDIS_OTHER
  * with a correct wmask is a complete answer for them.
  */
 
-static uint8_t class_slow(const INSTRUX *ix)
+static uint8_t class_slow(unsigned id)
 {
-	switch (ix->Instruction) {
-	case ND_INS_NOP:      return KDIS_NOP;
-	case ND_INS_MOV:      return KDIS_MOV;
-	case ND_INS_MOVZX:    return KDIS_MOVZX;
-	case ND_INS_MOVSX:
-	case ND_INS_MOVSXD:   return KDIS_MOVSX;
-	case ND_INS_LEA:      return KDIS_LEA;
-	case ND_INS_XCHG:     return KDIS_XCHG;
-	case ND_INS_PUSH:     return KDIS_PUSH;
-	case ND_INS_POP:      return KDIS_POP;
-	case ND_INS_ADD:      return KDIS_ADD;
-	case ND_INS_SUB:      return KDIS_SUB;
-	case ND_INS_ADC:      return KDIS_ADC;
-	case ND_INS_SBB:      return KDIS_SBB;
-	case ND_INS_AND:      return KDIS_AND;
-	case ND_INS_OR:       return KDIS_OR;
-	case ND_INS_XOR:      return KDIS_XOR;
-	case ND_INS_NOT:      return KDIS_NOT;
-	case ND_INS_NEG:      return KDIS_NEG;
-	case ND_INS_INC:      return KDIS_INC;
-	case ND_INS_DEC:      return KDIS_DEC;
-	case ND_INS_CMP:      return KDIS_CMP;
-	case ND_INS_TEST:     return KDIS_TEST;
-	case ND_INS_SHL:      return KDIS_SHL;
-	case ND_INS_SHR:      return KDIS_SHR;
-	case ND_INS_SAR:      return KDIS_SAR;
-	case ND_INS_ROL:      return KDIS_ROL;
-	case ND_INS_ROR:      return KDIS_ROR;
-	case ND_INS_RCL:      return KDIS_RCL;
-	case ND_INS_RCR:      return KDIS_RCR;
-	case ND_INS_MUL:      return KDIS_MUL;
-	case ND_INS_IMUL:     return KDIS_IMUL;
-	case ND_INS_DIV:      return KDIS_DIV;
-	case ND_INS_IDIV:     return KDIS_IDIV;
-	case ND_INS_CALLNR:
-	case ND_INS_CALLNI:
-	case ND_INS_CALLFI:
-	case ND_INS_CALLFD:   return KDIS_CALL;
-	case ND_INS_JMPNR:
-	case ND_INS_JMPNI:
-	case ND_INS_JMPFI:
-	case ND_INS_JMPFD:    return KDIS_JMP;
-	case ND_INS_Jcc:      return KDIS_JCC;
-	case ND_INS_LOOP:
-	case ND_INS_LOOPNZ:
-	case ND_INS_LOOPZ:    return KDIS_LOOP;
-	case ND_INS_RETN:
-	case ND_INS_RETF:     return KDIS_RET;
-	case ND_INS_INT:
-	case ND_INS_INT1:
-	case ND_INS_INT3:
-	case ND_INS_INTO:     return KDIS_INT;
-	case ND_INS_SYSCALL:
-	case ND_INS_SYSENTER: return KDIS_SYSCALL;
-	case ND_INS_CMOVcc:   return KDIS_CMOV;
-	case ND_INS_SETcc:    return KDIS_SETCC;
-	case ND_INS_CBW:
-	case ND_INS_CWDE:
-	case ND_INS_CDQE:
-	case ND_INS_CWD:
-	case ND_INS_CDQ:
-	case ND_INS_CQO:      return KDIS_WIDEN;
+	switch (id) {
+	case GT_X86_I_NOP:      return KDIS_NOP;
+	case GT_X86_I_MOV:      return KDIS_MOV;
+	case GT_X86_I_MOVZX:    return KDIS_MOVZX;
+	case GT_X86_I_MOVSX:
+	case GT_X86_I_MOVSXD:   return KDIS_MOVSX;
+	case GT_X86_I_LEA:      return KDIS_LEA;
+	case GT_X86_I_XCHG:     return KDIS_XCHG;
+	case GT_X86_I_PUSH:     return KDIS_PUSH;
+	case GT_X86_I_POP:      return KDIS_POP;
+	case GT_X86_I_ADD:      return KDIS_ADD;
+	case GT_X86_I_SUB:      return KDIS_SUB;
+	case GT_X86_I_ADC:      return KDIS_ADC;
+	case GT_X86_I_SBB:      return KDIS_SBB;
+	case GT_X86_I_AND:      return KDIS_AND;
+	case GT_X86_I_OR:       return KDIS_OR;
+	case GT_X86_I_XOR:      return KDIS_XOR;
+	case GT_X86_I_NOT:      return KDIS_NOT;
+	case GT_X86_I_NEG:      return KDIS_NEG;
+	case GT_X86_I_INC:      return KDIS_INC;
+	case GT_X86_I_DEC:      return KDIS_DEC;
+	case GT_X86_I_CMP:      return KDIS_CMP;
+	case GT_X86_I_TEST:     return KDIS_TEST;
+	case GT_X86_I_SHL:      return KDIS_SHL;
+	case GT_X86_I_SHR:      return KDIS_SHR;
+	case GT_X86_I_SAR:      return KDIS_SAR;
+	case GT_X86_I_ROL:      return KDIS_ROL;
+	case GT_X86_I_ROR:      return KDIS_ROR;
+	case GT_X86_I_RCL:      return KDIS_RCL;
+	case GT_X86_I_RCR:      return KDIS_RCR;
+	case GT_X86_I_MUL:      return KDIS_MUL;
+	case GT_X86_I_IMUL:     return KDIS_IMUL;
+	case GT_X86_I_DIV:      return KDIS_DIV;
+	case GT_X86_I_IDIV:     return KDIS_IDIV;
+	case GT_X86_I_CALLNR:
+	case GT_X86_I_CALLNI:
+	case GT_X86_I_CALLFI:
+	case GT_X86_I_CALLFD:   return KDIS_CALL;
+	case GT_X86_I_JMPNR:
+	case GT_X86_I_JMPNI:
+	case GT_X86_I_JMPFI:
+	case GT_X86_I_JMPFD:    return KDIS_JMP;
+	case GT_X86_I_Jcc:      return KDIS_JCC;
+	case GT_X86_I_LOOP:
+	case GT_X86_I_LOOPNZ:
+	case GT_X86_I_LOOPZ:    return KDIS_LOOP;
+	case GT_X86_I_RETN:
+	case GT_X86_I_RETF:     return KDIS_RET;
+	case GT_X86_I_INT:
+	case GT_X86_I_INT1:
+	case GT_X86_I_INT3:
+	case GT_X86_I_INTO:     return KDIS_INT;
+	case GT_X86_I_SYSCALL:
+	case GT_X86_I_SYSENTER: return KDIS_SYSCALL;
+	case GT_X86_I_CMOVcc:   return KDIS_CMOV;
+	case GT_X86_I_SETcc:    return KDIS_SETCC;
+	case GT_X86_I_CBW:
+	case GT_X86_I_CWDE:
+	case GT_X86_I_CDQE:
+	case GT_X86_I_CWD:
+	case GT_X86_I_CDQ:
+	case GT_X86_I_CQO:      return KDIS_WIDEN;
 	/*
 	 * WHICH special register, in `cond` - the field is the condition
 	 * code of a JCC and a MOV has none, so it is free here. A module
@@ -93,18 +101,18 @@ static uint8_t class_slow(const INSTRUX *ix)
 	 * touching a debug register is doing something else entirely, and
 	 * the class alone cannot tell them apart.
 	 */
-	case ND_INS_MOV_CR:
-	case ND_INS_MOV_DR:
-	case ND_INS_MOV_TR:   return KDIS_MOV_SPECIAL;
-	case ND_INS_IRET:     return KDIS_IRET;
-	case ND_INS_UD0:
-	case ND_INS_UD1:
-	case ND_INS_UD2:      return KDIS_UD;
-	case ND_INS_MOVS:
-	case ND_INS_STOS:
-	case ND_INS_LODS:
-	case ND_INS_SCAS:
-	case ND_INS_CMPS:     return KDIS_STRING;
+	case GT_X86_I_MOV_CR:
+	case GT_X86_I_MOV_DR:
+	case GT_X86_I_MOV_TR:   return KDIS_MOV_SPECIAL;
+	case GT_X86_I_IRET:     return KDIS_IRET;
+	case GT_X86_I_UD0:
+	case GT_X86_I_UD1:
+	case GT_X86_I_UD2:      return KDIS_UD;
+	case GT_X86_I_MOVS:
+	case GT_X86_I_STOS:
+	case GT_X86_I_LODS:
+	case GT_X86_I_SCAS:
+	case GT_X86_I_CMPS:     return KDIS_STRING;
 	default:              break;
 	}
 	return KDIS_OTHER;
@@ -116,7 +124,7 @@ static uint8_t class_slow(const INSTRUX *ix)
  * The switch above is sixty cases over values scattered through sixteen
  * hundred, so the compiler builds a chain of comparisons and the cost of
  * recognising an instruction depends on where its case was written. That
- * is the one thing bddisasm's own decoder refuses to do - it indexes a
+ * is the one thing the decoder's own decoder refuses to do - it indexes a
  * table by the opcode and walks tables from there - and on a path this
  * hot the same rule applies to us.
  *
@@ -124,29 +132,24 @@ static uint8_t class_slow(const INSTRUX *ix)
  * what each instruction is. Two threads racing here would compute the
  * same bytes.
  */
-static uint8_t g_cls[ND_INS_XTEST + 1u];
+static uint8_t g_cls[GT_X86_I__COUNT];
 static int g_cls_ready;
 
-static uint8_t class_of(const INSTRUX *ix)
+static uint8_t class_of(unsigned id, unsigned cat)
 {
 	if (!g_cls_ready) {
-		INSTRUX t;
 		uint32_t i;
 
-		memset(&t, 0, sizeof t);
-		for (i = 0; i <= (uint32_t)ND_INS_XTEST; i++) {
-			t.Instruction = (ND_INS_CLASS)i;
-			g_cls[i] = class_slow(&t);
-		}
+		for (i = 0; i < (uint32_t)GT_X86_I__COUNT; i++)
+			g_cls[i] = class_slow(i);
 		g_cls_ready = 1;
 	}
-	if ((uint32_t)ix->Instruction > (uint32_t)ND_INS_XTEST)
+	if (id >= (unsigned)GT_X86_I__COUNT)
 		return KDIS_OTHER;
 	/* The x87 test needs the category, which the table cannot hold. */
-	if (g_cls[ix->Instruction] == KDIS_OTHER &&
-	    ix->Category == ND_CAT_X87_ALU)
+	if (g_cls[id] == KDIS_OTHER && cat == GT_X86_C_X87_ALU)
 		return KDIS_FPU;
-	return g_cls[ix->Instruction];
+	return g_cls[id];
 }
 
 /*
@@ -154,22 +157,22 @@ static uint8_t class_of(const INSTRUX *ix)
  * difference between `call printf` and `call *%eax`, and the sweep turns on
  * it everywhere.
  */
-static int is_indirect(const INSTRUX *ix)
+static int is_indirect(unsigned id)
 {
-	switch (ix->Instruction) {
-	case ND_INS_CALLNI: case ND_INS_CALLFI:
-	case ND_INS_JMPNI:  case ND_INS_JMPFI:
+	switch (id) {
+	case GT_X86_I_CALLNI: case GT_X86_I_CALLFI:
+	case GT_X86_I_JMPNI:  case GT_X86_I_JMPFI:
 		return 1;
 	default:
 		return 0;
 	}
 }
 
-static int is_far(const INSTRUX *ix)
+static int is_far(unsigned id)
 {
-	switch (ix->Instruction) {
-	case ND_INS_RETF: case ND_INS_JMPFI: case ND_INS_JMPFD:
-	case ND_INS_CALLFI: case ND_INS_CALLFD:
+	switch (id) {
+	case GT_X86_I_RETF: case GT_X86_I_JMPFI: case GT_X86_I_JMPFD:
+	case GT_X86_I_CALLFI: case GT_X86_I_CALLFD:
 		return 1;
 	default:
 		return 0;
@@ -179,14 +182,12 @@ static int is_far(const INSTRUX *ix)
 uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 			unsigned bits, struct kdis_insn *out)
 {
-	INSTRUX ix;
-	uint32_t i, k = 0;
+	struct gt_x86_insn ix;
+	uint32_t i, nexp, k = 0;
 
 	if (!p || !n || !out)
 		return 0;
-	if (!ND_SUCCESS(NdDecodeEx(&ix, p, n,
-				   bits == 32 ? ND_CODE_32 : ND_CODE_64,
-				   bits == 32 ? ND_DATA_32 : ND_DATA_64)))
+	if (gt_x86_decode(&ix, p, n, bits == 32 ? 32 : 64) != GT_OK)
 		return 0;
 
 	/*
@@ -200,18 +201,18 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 	 * are reached, and the ones past the end are marked absent at the
 	 * foot, so nothing is written twice and nothing is left stale.
 	 */
-	out->op = class_of(&ix);
-	out->len = (uint8_t)ix.Length;
+	out->op = class_of(ix.id, gt_x86_cat(&ix));
+	out->len = ix.len;
 	out->n_op = 0;
 	out->flags = 0;
 	out->wmask = 0;
 	out->at_va = va;
 	out->at = va;
-	out->cond = (uint8_t)ix.Condition;
+	out->cond = (uint8_t)gt_x86_cond(&ix);
 	if (out->op == KDIS_MOV_SPECIAL)
-		out->cond = ix.Instruction == ND_INS_MOV_CR ? KDIS_SR_CR
-			  : ix.Instruction == ND_INS_MOV_DR ? KDIS_SR_DR
-							    : KDIS_SR_TR;
+		out->cond = ix.id == GT_X86_I_MOV_CR ? KDIS_SR_CR
+			  : ix.id == GT_X86_I_MOV_DR ? KDIS_SR_DR
+						     : KDIS_SR_TR;
 	/*
 	 * KOF_BROKEN AND NOT (uint64_t)-1, WHICH IS A DIFFERENT NUMBER.
 	 *
@@ -231,31 +232,35 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 	 */
 	out->target = KOF_BROKEN;
 	out->target_va = KOF_BROKEN;
-	if (is_far(&ix))
+	if (is_far(ix.id))
 		out->flags |= KDIS_F_FAR;
-	if (is_indirect(&ix))
+	if (is_indirect(ix.id))
 		out->flags |= KDIS_F_INDIRECT;
-	if (ix.Rep)
+	if (ix.rep)
 		out->flags |= KDIS_F_REP;
+	/* The registers it writes without naming: from the opcode, not the operands. */
+	out->wmask = gt_x86_wgpr(&ix);
 
-	for (i = 0; i < ix.OperandsCount; i++) {
-		const ND_OPERAND *o = &ix.Operands[i];
+	nexp = gt_x86_nexp(&ix);
+	for (i = 0; i < nexp; i++) {
+		struct gt_x86_op o;
 		struct kdis_operand *d;
 
+		gt_x86_operand(&ix, i, &o);
 		/*
 		 * EVERY WRITTEN REGISTER GOES IN THE MASK, named or not -
 		 * see kdis_insn.wmask. This is the whole reason the mask
-		 * exists: bddisasm reports the implicit ones and a
+		 * exists: the decoder reports the implicit ones and a
 		 * hand-written decoder does not, so the consumer must not
-		 * have to care which.
+		 * have to care which. The implicit ones are already in
+		 * (gt_x86_wgpr); these are the ones the instruction names.
 		 */
-		if (o->Access.Write && o->Type == ND_OP_REG &&
-		    o->Info.Register.Type == ND_REG_GPR &&
-		    o->Info.Register.Reg < 64u)
-			out->wmask |= 1ull << gpr_of(o);
+		if ((o.acc & GT_X86_ACC_W) && o.type == GT_X86_OP_REG &&
+		    o.rtype == GT_X86_REG_GPR && o.reg < 64u)
+			out->wmask |= 1ull << gpr_of(&o);
 
-		/* Only the explicit ones become operands - see kdis_insn. */
-		if (o->Flags.IsDefault || k >= 3u)
+		/* Only the first three become operands - see kdis_insn. */
+		if (k >= 3u)
 			continue;
 		d = &out->o[k];
 		d->kind = KDIS_O_NONE;
@@ -265,45 +270,43 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 		d->scale = 0;
 		d->disp = 0;
 		d->imm = 0;
-		d->size = (uint8_t)o->Size;
-		d->flags = (uint8_t)((o->Access.Write ? KDIS_OF_WRITE : 0u) |
-				     (o->Access.Read ? KDIS_OF_READ : 0u) |
-				     ((o->Type == ND_OP_REG &&
-				       o->Info.Register.IsHigh8) ?
+		d->size = (uint8_t)o.size;
+		d->flags = (uint8_t)(((o.acc & GT_X86_ACC_W) ? KDIS_OF_WRITE : 0u) |
+				     ((o.acc & GT_X86_ACC_R) ? KDIS_OF_READ : 0u) |
+				     ((o.type == GT_X86_OP_REG && o.high8) ?
 				      KDIS_OF_HIGH8 : 0u));
-		switch (o->Type) {
-		case ND_OP_REG:
-			if (o->Info.Register.Type != ND_REG_GPR)
+		switch (o.type) {
+		case GT_X86_OP_REG:
+			if (o.rtype != GT_X86_REG_GPR)
 				continue;       /* not one the sweep tracks */
 			d->kind = KDIS_O_REG;
-			d->reg = (uint8_t)gpr_of(o);
+			d->reg = (uint8_t)gpr_of(&o);
 			break;
-		case ND_OP_IMM:
+		case GT_X86_OP_IMM:
 			d->kind = KDIS_O_IMM;
-			d->imm = o->Info.Immediate.Imm;
+			d->imm = (uint64_t)o.v;
 			break;
-		case ND_OP_OFFS:
+		case GT_X86_OP_REL:
 			d->kind = KDIS_O_REL;
-			d->imm = o->Info.RelativeOffset.Rel;
-			out->target_va = va + ix.Length +
-					 (uint64_t)(int64_t)
-					 (int32_t)o->Info.RelativeOffset.Rel;
+			d->imm = (uint64_t)o.v;
+			out->target_va = va + ix.len +
+					 (uint64_t)(int64_t)(int32_t)o.v;
 			out->target = out->target_va;
 			break;
-		case ND_OP_MEM:
+		case GT_X86_OP_MEM:
 			d->kind = KDIS_O_MEM;
-			if (o->Info.Memory.HasBase)
-				d->reg = (uint8_t)o->Info.Memory.Base;
-			if (o->Info.Memory.HasIndex) {
-				d->index = (uint8_t)o->Info.Memory.Index;
-				d->scale = (uint8_t)o->Info.Memory.Scale;
+			if (o.mf & GT_X86_M_BASE)
+				d->reg = o.base;
+			if (o.mf & GT_X86_M_INDEX) {
+				d->index = o.index;
+				d->scale = o.scale;
 			}
-			if (o->Info.Memory.HasDisp)
-				d->disp = (int64_t)o->Info.Memory.Disp;
-			if (o->Info.Memory.IsRipRel)
+			if (o.mf & GT_X86_M_DISP)
+				d->disp = o.v;
+			if (o.mf & GT_X86_M_RIPREL)
 				d->flags |= KDIS_OF_RIPREL;
-			if (o->Info.Memory.HasSeg)
-				d->seg = (uint8_t)o->Info.Memory.Seg;
+			if (o.mf & GT_X86_M_SEG)
+				d->seg = o.seg;
 			break;
 		default:
 			continue;
@@ -322,5 +325,5 @@ uint32_t kof_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 		out->o[k].disp = 0;
 		k++;
 	}
-	return ix.Length;
+	return ix.len;
 }

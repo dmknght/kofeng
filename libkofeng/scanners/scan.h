@@ -21,7 +21,7 @@
 #include "../kofeng.h"
 /* KOF_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
  * the number because it owns the list it is copied into. */
-#include "../../libkofemu/kofemu.h"
+#include "../../libgenome/phenotype/kofemu.h"
 #include "../extractors/unpack/emu_unpack.h"
 #include "../databases/dbloader.h"
 #include "../detectors/overlord/matchers/kofmatch.h"

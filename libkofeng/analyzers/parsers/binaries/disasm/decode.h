@@ -4,7 +4,7 @@
  * WHY THIS EXISTS.
  *
  * The sweep used to read whatever the decoder in front of it produced:
- * bddisasm's INSTRUX on x86, hand-written bit tests for ARM, two more for
+ * the decoder's INSTRUX on x86, hand-written bit tests for ARM, two more for
  * Thumb and the half-word encodings. So the same question - does this write
  * a register, where does this branch go, is this a call - was answered four
  * times in four spellings, and every one of them had to be kept correct

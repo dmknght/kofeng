@@ -1,7 +1,7 @@
 /*
  * decode_mips.c - MIPS32 and MIPS64 into the engine's one instruction form.
  *
- * DISPATCH BY TABLE, NOT BY CHAIN - which is bddisasm's method and the one
+ * DISPATCH BY TABLE, NOT BY CHAIN - which is the decoder's method and the one
  * measurable thing a hand-written decoder can take from it. It indexes a
  * table by the opcode byte and walks a chain of tables from there, so the
  * cost of recognising an instruction does not depend on where it sits in
@@ -11,7 +11,7 @@
  * MIPS makes that easy: the primary opcode is the top six bits, so the
  * table is sixty-four entries and the lookup is one index. SPECIAL (op 0)
  * and REGIMM (op 1) are second-level tables on the function field, exactly
- * the chain bddisasm walks.
+ * the chain the decoder walks.
  *
  * WHAT IT DOES NOT DO. It recognises the instructions the sweep asks
  * about - what loads a constant, what calls, what returns, what writes a

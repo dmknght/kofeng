@@ -102,7 +102,7 @@
 #include "../../disinfect/pzero.h"
 #include "../../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../extractors/unpack/emu_unpack.h"
-#include "../../../libkofemu/kofemu.h"
+#include "../../../libgenome/phenotype/kofemu.h"
 
 /*
  * WHAT THE RUN IS ALLOWED TO COST.

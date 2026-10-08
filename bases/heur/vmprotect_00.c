@@ -30,7 +30,7 @@
  * executes four million instructions before it has written a new page, which is
  * the ceiling an unasked-for run gets. It also runs straight into VMProtect's
  * anti-emulation - a 16 bit SHRD with a count past the operand width, whose
- * result is architecturally undefined - which is handled in libkofemu and is
+ * result is architecturally undefined - which is handled in libgenome/phenotype and is
  * the reason this shape is worth naming at all.
  */
 

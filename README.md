@@ -217,7 +217,7 @@ do not attach to kofeng, is under "Read, not taken" in
 | [Unlicense](https://github.com/ergrelet/unlicense) (GPL-3.0) | that a packer's handover is found by watching **where the program will be**, not by following what the loader does — this engine's `kof_emu_watch_exec`. Also that `.themida` or `.winlice` marks Themida/WinLicense 3.x, and that a dump is finished by naming its sections from the entry point and the resource directory and truncating to the last section |
 | [RetDec](https://github.com/avast/retdec) (MIT) | that MPRESS says which build wrote a file in the **dword at EP+8**, where its fix-up stub is and the three shapes it comes in, the import hint list it leaves in place of an import directory — so the original entry point and the imports are recoverable **without running anything** — and the LZMAT coding it used before LZMA |
 | [RetDec](https://github.com/avast/retdec) (MIT), its decoder | that code is read the way **control reaches it** — candidate bytes tiered by section, a worklist of jump targets, every byte read once, a dry run before a guessed target is believed. And that a decoder bounds **which bytes are candidates** rather than capping its results |
-| [Capstone](https://github.com/capstone-engine/capstone) (BSD-3-Clause; some files NCSA) | evaluated as a replacement for this engine's fixed-width decoders and **not used** — 31 MB of binary against 2.8 MB today, and its DIET build strips the detail that made it worth having |
+| [Capstone](https://github.com/capstone-engine/capstone) (BSD-3-Clause; some files NCSA) | **not linked.** Rejected as a library (31 MB against 2.8 MB, and DIET strips the detail), used offline as the reference the ARM decoders' tables are derived from |
 | [Unipacker](https://github.com/unipacker/unipacker) (GPL-2.0) | that a packed sample is dumped when execution first enters a section it has not run in before — and that the run should **continue** afterwards, so every stage is caught rather than the first. Also how a finished run is rebuilt into a *file*: the entry point is where execution got to rather than the one in the header, raw offsets equal RVAs, and memory the run allocated becomes sections of its own |
 | [Unpacker](https://github.com/anpa1200/Unpacker) (MIT) | named the rule above and pointed at where to read it |
 | [TinyAntivirus](https://github.com/develbranch/TinyAntivirus) (GPL-2.0) | where a Sality body keeps the host bytes it overwrote, and the length and flag in front of them — the four displacements `bases/unp/sality_pe.c` repairs from. Its byte signature and its `ret`/`[ESP]` stopping rule were both measured here and **rejected**: each names one generation of a polymorphic family |
@@ -225,7 +225,8 @@ do not attach to kofeng, is under "Read, not taken" in
 | [ClamAV bytecode signatures](https://blog.clamav.net/2011/11/bytecode-signatures-for-polymorphic.html) (GPL-2.0) | that a polymorphic decryptor can be recognised with **no emulation at all** — anchor, then walk the disassembly checking opcode classes and operand kinds, eat the junk, follow the relative branches. That mechanism is `kofmod/kdis.h` |
 | [SAFE](https://www.usenix.org/legacy/events/sec03/tech/christodorescu.html), Christodorescu & Jha, USENIX Security '03 | the four obfuscations such a rule must survive — dead code, code transposition, register reassignment, instruction substitution — and that register reassignment is answered by binding a register as a *variable* rather than naming it |
 | [Phrack 61:9](http://phrack.org/issues/61/9.html), CLET team | the generator's side: why a key-independent transform of the encrypted body does **not** exist for real engines, and that the invariant they leave is the *frame* plus a small set of reversible operations |
-| [Bitdefender bddisasm](https://github.com/bitdefender/bddisasm) (Apache-2.0) | the x86 decoder, which unlike the above **is** vendored — see the table below |
+| [Bitdefender bddisasm](https://github.com/bitdefender/bddisasm) (Apache-2.0) | **previously used**, now removed. The x86 and x86-64 decoder was vendored until `libgenome/genotype/x86/` replaced it; that decoder is a rewrite, and its tables were produced by running a generator against bddisasm — see [THIRD-PARTY.md](THIRD-PARTY.md) |
+| [iced](https://github.com/icedland/iced) (MIT), [yaxpeax-x86](https://github.com/iximeow/yaxpeax-x86) (0BSD) | **previously consulted** for how a fast x86 decoder is organised; nothing copied |
 
 
 ## Licence
@@ -236,4 +237,4 @@ The code written for this project is under the **MIT License** — see
 | what | terms |
 |------|-------|
 | engine, tools, tests | MIT |
-| `libkofemu/bddisasm/` | Apache License 2.0, Bitdefender — one file patched and marked, see [THIRD-PARTY.md](THIRD-PARTY.md) |
+| everything else in the tree | none: no third-party code is redistributed. `LICENSES/Apache-2.0.txt` is kept for the attribution recorded in [THIRD-PARTY.md](THIRD-PARTY.md) |

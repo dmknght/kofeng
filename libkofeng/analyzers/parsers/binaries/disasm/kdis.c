@@ -4,7 +4,7 @@
  *
  * THREE JOBS AND THEY ARE DELIBERATELY SEPARATE.
  *
- *   DECODE is bddisasm's, and it is the only part of this file that names it.
+ *   DECODE is genotype's, reached through decode.h; this file does not name it.
  *   TRANSLATE turns one decoded instruction into this engine's vocabulary, so
  *     that a module never sees the decoder and does not change when it does.
  *   THE CONSTANT MAP is the "pseudo" in pseudo-emulation: what a register
@@ -30,7 +30,6 @@
 #include "kdis.h"
 #include "../../../../disinfect/pzero.h"
 
-#include "bddisasm.h"
 #include "decode.h"
 
 

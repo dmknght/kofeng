@@ -41,7 +41,7 @@
 #include "../../analyzers/parsers/binaries/disasm/nucleo.h"
 #include "../../disinfect/pzero.h"
 #include "../../extractors/unpack/emu_unpack.h"
-#include "../../../libkofemu/kofemu.h"
+#include "../../../libgenome/phenotype/kofemu.h"
 
 /*
  * ---- DOES THE PROGRAM READ THE LOADER DATA ---------------------------------

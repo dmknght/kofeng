@@ -89,7 +89,7 @@
 
 /* The disassembler the emulator already carries: the viewer links the same
  * library, so this costs an include path and nothing else. */
-#include "bddisasm.h"
+#include <x86/x86.h>
 #include "../libkofeng/detectors/heur/kofheur.h"
 #include "../libkofeng/scanners/scan.h"
 #include "../libkofeng/scanners/objsrc.h"
@@ -271,7 +271,7 @@ static const char *byte_colour(uint8_t c)
 /*
  * Which colour a token of the operand text gets.
  *
- * A classifier and not a parser. bddisasm's text is regular enough that the
+ * A classifier and not a parser. genotype's text is regular enough that the
  * first character decides nearly everything - a digit starts an immediate, a
  * letter starts either a register or one of a dozen grammar words - and a real
  * operand parser here would be a second disassembler to disagree with the
@@ -298,7 +298,7 @@ static const char *dis_token_colour(const char *t, size_t n)
 /*
  * SHORTEN THE IMMEDIATES, IN PLACE.
  *
- * bddisasm prints them at the operand's full width, so a push of 34 comes out
+ * genotype prints them at the operand's full width, so a push of 34 comes out
  * as 0x0000000000000022 - eighteen characters of which two carry the value. On a
  * row that also holds an offset and seven bytes of hex that is most of the line
  * spent on zeroes, and the number a reader is looking for is the hardest thing
@@ -11979,7 +11979,7 @@ static int heur_reports(const struct object *ob, int32_t *score,
  *
  * WHAT IT DECODES, AND THE ONE THING IT CANNOT KNOW.
  *
- * bddisasm needs to be told 32 or 64 bit, and the bytes never say. For an
+ * The decoder needs to be told 32 or 64 bit, and the bytes never say. For an
  * object with a header the collector already worked it out and the panel starts
  * there. For raw bytes - a payload unwrapped out of an encoder, which is the
  * case this is most useful for - there is no header and no answer, so the
@@ -12519,8 +12519,8 @@ static unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 			   int *ok_out, char *text_out, size_t text_cap)
 {
 	uint8_t buf[DIS_MAX_INSN];
-	INSTRUX ix;
-	char text[ND_MIN_BUF_SIZE];
+	struct gt_x86_insn ix;
+	char text[GT_X86_TEXT];
 	unsigned got, j, w;
 
 	if (ix_len_out)
@@ -12534,29 +12534,27 @@ static unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 		memcpy(bytes_out, buf, DIS_MAX_INSN);
 	w = (unsigned)snprintf(line, cap, "%08llx  ",
 			       (unsigned long long)view_map(v, *at, 0));
-	if (!ND_SUCCESS(NdDecodeEx(&ix, buf, got,
-				   v->dis_bits == 32 ? ND_CODE_32 : ND_CODE_64,
-				   v->dis_bits == 32 ? ND_DATA_32
-						     : ND_DATA_64))) {
+	if (gt_x86_decode(&ix, buf, got, v->dis_bits == 32 ? 32 : 64) != GT_OK) {
 		snprintf(line + w, cap - w, "%02x%*s (data)", buf[0], 19, "");
 		(*at)++;
 		return 1;
 	}
 	if (ix_len_out)
-		*ix_len_out = ix.Length < 7u ? ix.Length : 7u;
+		*ix_len_out = ix.len < 7u ? ix.len : 7u;
 	if (ok_out)
 		*ok_out = 1;
-	for (j = 0; j < ix.Length && j < 7u && w + 3 < cap; j++)
+	for (j = 0; j < ix.len && j < 7u && w + 3 < cap; j++)
 		w += (unsigned)snprintf(line + w, cap - w, "%02x ", buf[j]);
 	for (; j < 7u && w + 3 < cap; j++)
 		w += (unsigned)snprintf(line + w, cap - w, "   ");
-	NdToText(&ix, view_map(v, *at, 0), sizeof text, text);
+	if (!gt_x86_format(&ix, view_map(v, *at, 0), text, sizeof text))
+		text[0] = 0;
 	dis_shorten(text);
 	snprintf(line + w, cap - w, "%s", text);
 	if (text_out)
 		snprintf(text_out, text_cap, "%s", text);
-	*at += ix.Length;
-	return ix.Length;
+	*at += ix.len;
+	return ix.len;
 }
 
 static uint64_t dis_sync(struct view *v, uint64_t want)
@@ -12570,18 +12568,14 @@ static uint64_t dis_sync(struct view *v, uint64_t want)
 
 	for (guard = 0; at < want && guard < DIS_RESYNC; guard++) {
 		uint8_t buf[DIS_MAX_INSN];
-		INSTRUX ix;
+		struct gt_x86_insn ix;
 		unsigned got = dis_gather(v, at, buf, DIS_MAX_INSN);
 
 		if (!got)
 			return want;            /* nothing to read: leave it */
-		if (ND_SUCCESS(NdDecodeEx(&ix, buf, got,
-					  v->dis_bits == 32 ? ND_CODE_32
-							    : ND_CODE_64,
-					  v->dis_bits == 32 ? ND_DATA_32
-							    : ND_DATA_64)) &&
-		    ix.Length)
-			at += ix.Length;
+		if (gt_x86_decode(&ix, buf, got, v->dis_bits == 32 ? 32 : 64) == GT_OK &&
+		    ix.len)
+			at += ix.len;
 		else
 			at += 1u;               /* data: one byte, as the panel does */
 	}
@@ -12939,7 +12933,7 @@ static void draw_disasm(struct out *o, struct view *v)
 	v->dis_lines = 0;
 	for (row = dis_top(); row <= hex_bot(); row++) {
 		uint8_t buf[DIS_MAX_INSN];
-		char text[ND_MIN_BUF_SIZE];
+		char text[GT_X86_TEXT];
 		char line[120];
 		uint64_t at0 = at;              /* before the length is added */
 		int from, to, len;
@@ -21189,7 +21183,7 @@ case BI_UNPACKER:
 		 * draft, or nothing open. */
 		return v->path && v->path[0] && !draft_edited(&v->ed);
 	/*
-	 * x86 only, because bddisasm decodes x86 and nothing else - offering it
+	 * x86 only, because the decoder in here is x86 - offering it
 	 * on an ARM object would print an answer that is wrong in a way a reader
 	 * cannot see. An object with no format at all IS offered: raw bytes out
 	 * of an encoder are exactly what this is for, and the mode is then the
@@ -21805,22 +21799,9 @@ static void about_build(struct view *v)
 		}
 	}
 	abt("");
-	/*
-	 * WHO WROTE IT, AND UNDER WHAT TERMS - and the terms are not one answer.
-	 *
-	 * The repository is MIT in the main and is not single-licensed: a
-	 * vendored decoder is Apache-2.0 and so are a few files of its own. A
-	 * lone "MIT" row would be true about most of what somebody is reading
-	 * and wrong about the binary they are running, so the row says so and
-	 * the next one names the dependency that is not MIT. Which exact FILES
-	 * differ is LICENSE's job - an About box that enumerated paths would be
-	 * a licence file with a worse layout.
-	 */
 	abt(A_ID "Project" A_OFF);
 	abt("  " A_DIM "Author       " A_OFF " DmKnght");
-	abt("  " A_DIM "License      " A_OFF " MIT, some parts under Apache-2.0");
-	abt("  " A_DIM "Third parties" A_OFF " bddisasm 3.0.1 by Bitdefender "
-	    A_DIM "- Apache-2.0" A_OFF);
+	abt("  " A_DIM "License      " A_OFF " MIT");
 }
 
 /*

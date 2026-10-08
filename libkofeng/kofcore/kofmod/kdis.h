@@ -38,7 +38,7 @@
  * unknown again - so a module can ask "what is in this register here" and get
  * either an answer or an honest no.
  *
- * That is the difference from libkofemu, and it is not a smaller version of
+ * That is the difference from libgenome's emulator (phenotype), and it is not a smaller version of
  * it. The interpreter runs hostile code and costs millions of instructions;
  * this reads a few dozen and cannot run anything. A module wanting to know
  * what a decryptor DOES uses this. A module wanting the bytes the decryptor
@@ -49,7 +49,7 @@
  *
  * THE VOCABULARY IS THIS ENGINE'S, NOT THE DECODER'S.
  *
- * Nothing here names bddisasm, and a module never includes it. The opcode
+ * Nothing here names the decoder, and a module never includes it. The opcode
  * CLASS is what a rule is written against - `KDIS_XOR` covers every encoding
  * of xor, which is the whole point when the generator picks encodings - and
  * the operand kinds are the four a rule asks about. A module written against
@@ -101,7 +101,7 @@ enum kdis_op_class {
 	/*
 	 * ADDED WHEN THIS BECAME THE ENGINE'S ONE INTERNAL FORM.
 	 *
-	 * The sweep used to read a decoder's own structure - bddisasm's
+	 * The sweep used to read a decoder's own structure - the decoder's
 	 * INSTRUX on x86, hand-written bit tests everywhere else - so the
 	 * same question was answered four times in four spellings and a
 	 * new architecture meant another copy. These are the classes it
@@ -156,7 +156,7 @@ enum kdis_op_kind {
 };
 
 /*
- * Registers, in the decoder's own numbering, which is also libkofemu's - so a
+ * Registers, in the decoder's own numbering, which is also the emulator's - so a
  * module that reads a register here and one that reads one from a paused run
  * spell it the same way.
  */
@@ -224,7 +224,7 @@ struct kdis_insn {
 	 * above its operand, `push` moves the stack pointer, a string
 	 * operation walks its own index registers. A consumer that had to
 	 * find those by walking operands would be reading the decoder's
-	 * idea of which operands are worth reporting - and bddisasm
+	 * idea of which operands are worth reporting - and the decoder
 	 * reports them while a hand-written ARM decoder does not, which
 	 * is exactly the kind of difference this form exists to remove.
 	 *

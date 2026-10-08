@@ -1,8 +1,8 @@
 /*
  * emu_unpack.h - the bridge between what the ELF collector already worked out
- * and the interpreter in libkofemu.
+ * and the interpreter in libgenome/phenotype.
  *
- * libkofemu knows nothing about ELF and must not: it maps memory, runs
+ * The emulator knows nothing about ELF and must not: it maps memory, runs
  * instructions and reports what got written. Everything about the file - where
  * the segments are, whether the header can be believed, whether the object even
  * looks packed - has already been established by the collector, and asking a
@@ -27,7 +27,7 @@
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
-#include "../../../libkofemu/kofemu.h"
+#include "../../../libgenome/phenotype/kofemu.h"
 
 /*
  * Why this object is worth emulating - and the answer is never "because it
@@ -254,7 +254,7 @@ struct kof_emu *kof_emu_unp_build(const uint8_t *file, uint64_t n,
  * the stub of the function it meant. kof_emu_win_event_at says which. Measured
  * on a Metasploit stager and three rebuilds of it that change the hash.)
  *
- * x86 AND x86-64 ONLY, because bddisasm decodes those. An ARM64 PE is refused
+ * x86 AND x86-64 ONLY, because the decoder decodes those. An ARM64 PE is refused
  * by the gate rather than started and left to fault on its first instruction.
  *
  * TWO REASONS, NOT THREE. The gate answers DENSE or BROKEN and never LOADER:

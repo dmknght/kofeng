@@ -17,7 +17,7 @@
  *
  * WHY IT IS SAFE
  *
- * Nothing is executed. Every instruction is decoded by bddisasm and applied to
+ * Nothing is executed. Every instruction is decoded by the decoder and applied to
  * registers and memory this module owns, so there is no privilege to escape
  * from - which is a stronger property than a virtual machine has, not a weaker
  * one. `rip` is an index into a page table kept here; a jump to a wild address
@@ -48,7 +48,7 @@ struct kof_emu;
  * of what is being emulated and the ELF images it loads. */
 #define KOF_EMU_PAGE      4096u
 
-/* General purpose registers, in bddisasm's encoding order so a decoded operand
+/* General purpose registers, in the decoder's encoding order so a decoded operand
  * indexes this array directly rather than through a translation nobody would
  * keep in step. */
 enum {
@@ -68,7 +68,7 @@ enum kof_emu_stop {
 	KOF_EMU_STOP_HANDOFF,      /* execve, or a jump into a page it wrote */
 	KOF_EMU_STOP_FAULT,        /* read, wrote or fetched an unmapped address */
 	KOF_EMU_STOP_UNSUPPORTED,  /* an instruction this build does not carry */
-	KOF_EMU_STOP_DECODE,       /* bddisasm refused the bytes */
+	KOF_EMU_STOP_DECODE,       /* the decoder refused the bytes */
 	/*
 	 * Waiting for something that is never going to happen. There is one
 	 * instruction pointer here, so a guest blocking on another thread is
@@ -199,11 +199,11 @@ struct kof_emu_cfg {
 	 * 32 or 64, and 0 means 64 - so a caller written before this existed
 	 * still asks for what it used to get.
 	 *
-	 * WHAT IT CHANGES, and it is less than it looks: how bddisasm is asked
+	 * WHAT IT CHANGES, and it is less than it looks: how the decoder is asked
 	 * to decode, how wide a push and a pop are, and which syscall
 	 * convention `int 0x80` and `syscall` name. The instruction handlers
 	 * are already width-agnostic because they work from the operand sizes
-	 * bddisasm reports rather than from a machine word, and the loader
+	 * the decoder reports rather than from a machine word, and the loader
 	 * reads the parser's normalised segment list, which is the same shape
 	 * for an ELF32 and an ELF64.
 	 */
@@ -252,7 +252,7 @@ void     kof_emu_set_self(struct kof_emu *e, const uint8_t *bytes, uint64_t n);
  * instructions and then faulted reading gs:[0x30], which is the TEB's pointer
  * to itself.
  *
- * `seg` is 4 for FS and 5 for GS, which is bddisasm's numbering and the only
+ * `seg` is 4 for FS and 5 for GS, which is the decoder's numbering and the only
  * numbering this interpreter uses for segments anywhere.
  */
 void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);

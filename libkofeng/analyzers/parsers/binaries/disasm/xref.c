@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bddisasm.h"
 #include "gpr.h"
 
 /*
@@ -79,6 +78,10 @@
  * displacement that does not fit evicts the oldest, which loses a finding
  * rather than inventing one.
  */
+/* The two registers whose stack slots are followed, by the decoder's numbering. */
+#define GPR_RSP 4u
+#define GPR_RBP 5u
+
 #define NSLOT 8u
 
 struct slot {
@@ -181,20 +184,20 @@ static void note(struct kof_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
  * The stack slot a memory operand names, or NSLOT when it names none this
  * sweep will follow. rbp and rsp only - see the note on NSLOT.
  */
-static uint32_t slot_of(struct slot *slot, const ND_OPERAND *op, int make,
+static uint32_t slot_of(struct slot *slot, const struct gt_x86_op *op, int make,
 			uint32_t *next)
 {
 	uint32_t i;
 	uint32_t base;
 	int64_t  disp;
 
-	if (op->Type != ND_OP_MEM || !op->Info.Memory.HasBase ||
-	    op->Info.Memory.HasIndex || op->Info.Memory.IsRipRel)
+	if (op->type != GT_X86_OP_MEM || !(op->mf & GT_X86_M_BASE) ||
+	    (op->mf & (GT_X86_M_INDEX | GT_X86_M_RIPREL)))
 		return NSLOT;
-	base = op->Info.Memory.Base;
-	if (base != NDR_RBP && base != NDR_RSP)
+	base = op->base;
+	if (base != GPR_RBP && base != GPR_RSP)
 		return NSLOT;
-	disp = op->Info.Memory.HasDisp ? (int64_t)op->Info.Memory.Disp : 0;
+	disp = (op->mf & GT_X86_M_DISP) ? op->v : 0;
 	for (i = 0; i < NSLOT; i++)
 		if (slot[i].base == base && slot[i].disp == disp)
 			return i;
@@ -216,13 +219,14 @@ static uint32_t slot_of(struct slot *slot, const ND_OPERAND *op, int make,
  * is rare enough to be noise, and a base register would need the dataflow this
  * file has already said it does not do.
  */
-static uint64_t mem_va(const INSTRUX *ix, const ND_OPERAND *op, uint64_t rip)
+static uint64_t mem_va(const struct gt_x86_insn *ix, const struct gt_x86_op *op,
+		       uint64_t rip)
 {
-	if (op->Type != ND_OP_MEM || !op->Info.Memory.HasDisp)
+	if (op->type != GT_X86_OP_MEM || !(op->mf & GT_X86_M_DISP))
 		return 0;
-	if (!op->Info.Memory.IsRipRel)
+	if (!(op->mf & GT_X86_M_RIPREL))
 		return 0;
-	return rip + ix->Length + op->Info.Memory.Disp;
+	return rip + ix->len + (uint64_t)op->v;
 }
 
 struct kof_xref *kof_xref_new(void)
@@ -249,14 +253,15 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 	memset(reg, 0, sizeof reg);
 
 	while (at < code_n) {
-		INSTRUX ix;
+		struct gt_x86_insn ix;
+		struct gt_x86_op ops[GT_X86_MAX_OPS];
+		unsigned nops;
 		uint32_t i, dst = NGPR;
 		uint64_t rip = code_va + at;
 		uint64_t formed = 0;
 
-		if (!ND_SUCCESS(NdDecodeEx(&ix, code + at, code_n - at,
-					   bits == 32 ? ND_CODE_32 : ND_CODE_64,
-					   bits == 32 ? ND_DATA_32 : ND_DATA_64))) {
+		if (gt_x86_decode(&ix, code + at, code_n - at,
+				  bits == 32 ? 32 : 64) != GT_OK) {
 			/*
 			 * One byte on rather than giving up.
 			 *
@@ -270,6 +275,9 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 			memset(reg, 0, sizeof reg);
 			continue;
 		}
+
+		nops = gt_x86_nops(&ix);
+		gt_x86_operands(&ix, ops);
 
 		/*
 		 * AN INDIRECT CALL OR JUMP, FIRST, because it reads the map
@@ -287,18 +295,18 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 		 * instruction encoded it; whether that address is a variable is
 		 * the caller's question, not this sweep's.
 		 */
-		if (ix.Instruction == ND_INS_CALLNR ||
-		    ix.Instruction == ND_INS_JMPNR) {
-			uint32_t k = ix.Instruction == ND_INS_CALLNR
+		if (ix.id == GT_X86_I_CALLNR ||
+		    ix.id == GT_X86_I_JMPNR) {
+			uint32_t k = ix.id == GT_X86_I_CALLNR
 				   ? KOF_XREF_CALL : KOF_XREF_JUMP;
 
-			for (i = 0; i < ix.OperandsCount; i++) {
+			for (i = 0; i < nops; i++) {
 				uint64_t t;
 
-				if (ix.Operands[i].Type != ND_OP_OFFS)
+				if (ops[i].type != GT_X86_OP_REL)
 					continue;
-				t = rip + ix.Length +
-				    ix.Operands[i].Info.RelativeOffset.Rel;
+				t = rip + ix.len +
+				    (uint64_t)ops[i].v;
 				note(u, t, KOF_XREF_READ | k, rgn);
 				/*
 				 * AND REMEMBER WHO CALLS WHOM.
@@ -307,7 +315,7 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 				 * lands in is not known until the sweep reaches
 				 * it, so the address is kept and resolved after.
 				 */
-				if (ix.Instruction == ND_INS_CALLNR &&
+				if (ix.id == GT_X86_I_CALLNR &&
 				    u->n_edge < USE_RGN) {
 					u->edge_from[u->n_edge] = (uint8_t)rgn;
 					u->edge_to[u->n_edge] = t;
@@ -315,15 +323,15 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 				}
 			}
 		}
-		if (ix.Instruction == ND_INS_CALLNI)
+		if (ix.id == GT_X86_I_CALLNI)
 			u->rgn_flag[rgn] |= KOF_XREF_RGN_ICALL;
-		if (ix.Instruction == ND_INS_CALLNI ||
-		    ix.Instruction == ND_INS_JMPNI) {
-			uint32_t k = ix.Instruction == ND_INS_CALLNI
+		if (ix.id == GT_X86_I_CALLNI ||
+		    ix.id == GT_X86_I_JMPNI) {
+			uint32_t k = ix.id == GT_X86_I_CALLNI
 				   ? KOF_XREF_CALL : KOF_XREF_JUMP;
 
-			for (i = 0; i < ix.OperandsCount; i++) {
-				const ND_OPERAND *op = &ix.Operands[i];
+			for (i = 0; i < nops; i++) {
+				const struct gt_x86_op *op = &ops[i];
 				uint32_t r = gpr_of(op);
 				uint64_t m;
 
@@ -348,8 +356,8 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 		 * fact; whether that means it was passed is the caller's
 		 * question, and a rule that wants certainty has CALL for that.
 		 */
-		if (ix.Instruction == ND_INS_CALLNR ||
-		    ix.Instruction == ND_INS_CALLNI) {
+		if (ix.id == GT_X86_I_CALLNR ||
+		    ix.id == GT_X86_I_CALLNI) {
 			uint32_t r;
 
 			for (r = 0; r < NGPR; r++)
@@ -367,11 +375,11 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 		 * is the conservative direction: a forgotten register loses a
 		 * finding, a remembered stale one invents evidence.
 		 */
-		for (i = 0; i < ix.OperandsCount; i++) {
-			const ND_OPERAND *op = &ix.Operands[i];
+		for (i = 0; i < nops; i++) {
+			const struct gt_x86_op *op = &ops[i];
 			uint64_t m;
 
-			if (op->Access.Write) {
+			if ((op->acc & GT_X86_ACC_W)) {
 				uint32_t r = gpr_of(op);
 				uint64_t w = mem_va(&ix, op, rip);
 
@@ -380,12 +388,12 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 				if (w)
 					note(u, w, KOF_XREF_WRITE, rgn);
 			}
-			if (op->Access.Read) {
+			if ((op->acc & GT_X86_ACC_R)) {
 				m = mem_va(&ix, op, rip);
 				if (m) {
 					note(u, m, KOF_XREF_READ, rgn);
 					formed = m;
-				} else if (ix.Instruction == ND_INS_MOV) {
+				} else if (ix.id == GT_X86_I_MOV) {
 					uint32_t r = gpr_of(op);
 					uint32_t sl;
 
@@ -397,11 +405,11 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 				}
 			}
 		}
-		if (ix.Instruction == ND_INS_LEA) {
+		if (ix.id == GT_X86_I_LEA) {
 			/* LEA's memory operand is an address generation and is
 			 * not read, so the loop above never saw it. */
-			for (i = 0; i < ix.OperandsCount; i++) {
-				uint64_t m = mem_va(&ix, &ix.Operands[i], rip);
+			for (i = 0; i < nops; i++) {
+				uint64_t m = mem_va(&ix, &ops[i], rip);
 
 				if (m) {
 					note(u, m, KOF_XREF_READ, rgn);
@@ -410,20 +418,20 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 			}
 		}
 		if (dst < NGPR)
-			reg[dst] = (ix.Instruction == ND_INS_LEA ||
-				    ix.Instruction == ND_INS_MOV) ? formed : 0;
+			reg[dst] = (ix.id == GT_X86_I_LEA ||
+				    ix.id == GT_X86_I_MOV) ? formed : 0;
 		/*
 		 * A store of a tracked address into a local. Only for MOV, and
 		 * only when something was tracked: a store of anything else
 		 * ends what the slot held, for the same reason a register write
 		 * does.
 		 */
-		if (ix.Instruction == ND_INS_MOV)
-			for (i = 0; i < ix.OperandsCount; i++) {
-				const ND_OPERAND *op = &ix.Operands[i];
+		if (ix.id == GT_X86_I_MOV)
+			for (i = 0; i < nops; i++) {
+				const struct gt_x86_op *op = &ops[i];
 				uint32_t sl;
 
-				if (!op->Access.Write)
+				if (!(op->acc & GT_X86_ACC_W))
 					continue;
 				sl = slot_of(slot, op, formed != 0, &next_slot);
 				if (sl < NSLOT)
@@ -436,15 +444,15 @@ void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
 		 * the function that just returned says nothing about the one
 		 * that follows it.
 		 */
-		if (ix.Instruction == ND_INS_RETN || ix.Instruction == ND_INS_RETF) {
+		if (ix.id == GT_X86_I_RETN || ix.id == GT_X86_I_RETF) {
 			rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
 			if (rgn < USE_RGN)
-				u->rgn_at[rgn] = rip + ix.Length;
+				u->rgn_at[rgn] = rip + ix.len;
 			memset(reg, 0, sizeof reg);
 			for (i = 0; i < NSLOT; i++)
 				slot[i].base = NGPR;
 		}
-		at += ix.Length;
+		at += ix.len;
 	}
 }
 

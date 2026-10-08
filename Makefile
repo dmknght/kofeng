@@ -114,8 +114,8 @@ AR      ?= ar
 #
 # What is left is not libc - nothing here links it statically; `ldd` shows libc
 # and ld-linux and nothing else. It is libkofeng.a, which is this project's own
-# code, and half of THAT is bddisasm's decode tables: in the stripped binary
-# .rodata is 712KB against .text's 477KB.
+# code. Its biggest single table is the x86 decoder's (genotype/x86/x86_tab.c),
+# which is data by design.
 #
 # THE SANITISED BUILDS KEEP IT. A sanitiser report without file and line is a
 # stack of addresses, which is the difference between "there is a leak" and
@@ -511,13 +511,12 @@ LDFLAGS     += -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
 # adds no cross-compile flags at all.
 #
 # Captured in its own variable, KOF_CROSS_FLAGS, rather than appended to
-# CFLAGS alone - VENDOR_CFLAGS below (the vendored bddisasm decoder) is a
-# deliberately separate flag list that does not inherit CFLAGS at all, and it
-# still has to end up targeting the same machine as everything else. Missing
-# on the first pass of this: on a build host whose native compiler target
-# does not match the one being forced (this ARM64 box building the x86_64
-# default, or the reverse cross direction for KOF_HOST_MACH=arm64), the
-# vendored decoder silently compiled for whatever the compiler's own default
+# CFLAGS alone - WIN_CFLAGS below is a separate flag list that does not inherit
+# CFLAGS, and it still has to end up targeting the same machine as everything
+# else. Missing on the first pass of this: on a build host whose native compiler
+# target does not match the one being forced (this ARM64 box building the x86_64
+# default, or the reverse cross direction for KOF_HOST_MACH=arm64), a separate
+# list silently compiled for whatever the compiler's own default
 # was, landing wrong-machine objects in libkofeng.a next to correctly forced
 # ones - which does not fail at compile time, only at final link, and not
 # even with a machine-mismatch error for the files actually at fault: lld's
@@ -724,7 +723,7 @@ endif
 #                                  to stay off. It is still counted, because
 #                                  a NEW one is worth seeing and a count is
 #                                  the only way to notice the number moved.
-#                                  kofemu_crt.c, ksigbuilder.c, kofviewer.c
+#                                  ksigbuilder.c, kofviewer.c
 #   -Wmissing-format-attribute 9   printf wrappers with no format attribute,
 #                                  which is the one of the three that a caller
 #                                  can be hurt by: without it the compiler
@@ -890,9 +889,9 @@ $(BUILD) $(OUT) $(INT) $(TEST):
 # flags rather than a second tree of objects, so FLAGSIG below picks it up and
 # every object rebuilds when it changes. Nobody has to remember to clean.
 #
-# VENDOR_CFLAGS and WIN_CFLAGS are `:=` and are set HUNDREDS OF LINES BELOW, so
-# appending to them here appends to nothing and the later assignment throws it
-# away. The flag is carried in a variable those two paste in themselves.
+# WIN_CFLAGS is `:=` and is set HUNDREDS OF LINES BELOW, so appending to it
+# here appends to nothing and the later assignment throws it away. The flag is
+# carried in a variable it pastes in itself.
 KOF_DEBUG_CFLAGS :=
 ifeq ($(DEBUG),1)
 KOF_DEBUG_CFLAGS  := -g
@@ -1028,26 +1027,12 @@ $(INT)/lib_analyzers/parsers/binaries/disasm/%.o: libkofeng/analyzers/parsers/bi
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
-# ---- libkofemu: the emulator, and the decoder it stands on -----------------
+# ---- libgenome: the decoders (genotype) and the emulator (phenotype) -------
 #
-# TWO FLAG SETS, ON PURPOSE.
-#
-# libkofemu/*.c is kofeng's own and compiles under kofeng's warning policy like
-# everything else. libkofemu/bddisasm/ is vendored and does not: bdx86_decoder.c
-# alone raises 53 findings under -Wconversion and -Wsign-conversion, none of
-# them bugs and all of them a house style it was never written to. Forcing it
-# through would mean patching a third-party tree, and a patched tree turns every
-# future upgrade from a copy into a merge - see libkofemu/bddisasm/README.kofeng.md.
-#
-# So the vendored files get their own set: upstream's own disable list, plus
-# -Wno-error=incompatible-pointer-types because GCC 14 promoted that to an error
-# and bddisasm 3.0.1 predates the change.
-#
-# What they do NOT get excused from is the sanitizers. This code decodes bytes
-# an attacker chose, which is exactly the ground ASAN and UBSan exist to cover,
-# so SAN_CFLAGS is threaded through here as well.
-EMU_INC := -Ilibkofemu/bddisasm/inc -Ilibkofemu/bddisasm/src \
-           -Ilibkofemu/bddisasm/src/include
+# Everything in libgenome is kofeng's own and compiles under kofeng's warning
+# policy and the sanitizers like the rest of the tree. EMU_INC is what the
+# phenotype and the tools that disassemble need to find the decoder's headers.
+EMU_INC := -Ilibgenome/genotype
 
 # WHEN THIS DATABASE WAS BUILT, as YYYYMMDDHH in UTC - see KOF_PACK_BUILD.
 #
@@ -1070,70 +1055,48 @@ override CFLAGS += -DKOF_DEBUG=$(DEBUG)
 override CFLAGS += -DKOF_PACK_BUILD=$(KOF_BUILD_STAMP)u
 override CFLAGS += -DKOFENG_BUILD=$(KOF_BUILD_STAMP)u
 
-#
-# A CLANG-ONLY WARNING IN VENDORED CODE, SILENCED FOR VENDORED CODE ONLY.
-#
-# clang reports, on by default and not via -Wall:
-#
-#   bdx86_decoder.c:2656: passing 'PND_IDBE *' to parameter of type
-#   'const ND_IDBE **' discards qualifiers in nested pointer types
-#
-# It is upstream's and it is real: NdDecodeInstruction takes
-# `const ND_IDBE **InsDef`, the caller's local is a plain `PND_IDBE pIns`, and
-# C does not let a T** become a const T** without a cast. It is also harmless
-# in fact - every use of pIns after that line reads a field and nothing ever
-# writes through it - so upstream could have declared the local const and the
-# whole thing would disappear.
-#
-# WE DO NOT PATCH IT, and that is the point of this comment rather than a
-# one-line edit to the file. THIRD-PARTY.md states that the bddisasm files are
-# unmodified, and says so specifically "so that a later reader does not have to
-# diff a release to find out"; Apache 2.0 requires modified files be marked as
-# changed. A patch here would cost that claim, would have to be re-applied at
-# every version bump, and this tree has already removed one patch to vendored
-# code for exactly that reason.
-#
-# So it is suppressed HERE, in the vendor flag set, which is what this variable
-# is for and which already carries four suppressions of the same kind. The
-# tree's own code is untouched by it and stays on the full warning tier.
-#
-# BOTH SPELLINGS OF THE SAME UPSTREAM ISSUE ARE SILENCED.
-#
-# clang calls it -Wincompatible-pointer-types-discards-qualifiers and reports
-# it on by default; gcc reports the same call as -Wincompatible-pointer-types.
-# The second was at -Wno-error= in VENDOR_CFLAGS, which demotes it to a warning
-# that then prints on every build of a file this tree does not own. Silenced
-# rather than demoted, for the vendor set only.
-#
-# PROBED VIA THE POSITIVE FORM, deliberately. Both compilers accept an unknown
-# -Wno-<anything> in silence, so probing the negative form would prove nothing
-# and would leave GCC carrying a flag it does not know. The positive spelling is
-# rejected by a compiler that has never heard of the warning, which is the
-# question actually being asked.
-VENDOR_WNO_QUAL := $(if $(call kof_probe,-Wincompatible-pointer-types-discards-qualifiers),\
-                        -Wno-incompatible-pointer-types-discards-qualifiers)
+EMU_SRC    := $(wildcard libgenome/phenotype/*.c)
 
-VENDOR_CFLAGS := -O2 $(KOF_DEBUG_CFLAGS) -std=c11 -fno-common -D_LIB -DAMD64 \
-                 -Wall -Wextra \
-                 -Wno-missing-field-initializers -Wno-missing-braces \
-                 -Wno-unused-function \
-                 -Wno-incompatible-pointer-types \
-                 $(VENDOR_WNO_QUAL) \
-                 $(SAN_CFLAGS) $(KOF_CROSS_FLAGS)
+EMU_OBJ    := $(patsubst libgenome/phenotype/%.c,$(INT)/emu_%.o,$(EMU_SRC))
 
-EMU_SRC    := $(wildcard libkofemu/*.c)
-VENDOR_SRC := $(wildcard libkofemu/bddisasm/src/*.c)
+#
+# genotype: the instruction decoders, one directory per architecture. Each
+# architecture's *_gen.c is the tool that wrote its generated tables (it links the
+# reference decoder and has a main), so it is not part of the library; the tables
+# it wrote are checked in. See `make genotype-x86` for re-running it.
+#
+GT_SRC := $(filter-out %_gen.c,$(wildcard libgenome/genotype/*/*.c))
+GT_OBJ := $(patsubst libgenome/genotype/%.c,$(INT)/gt_%.o,$(GT_SRC))
 
-EMU_OBJ    := $(patsubst libkofemu/%.c,$(INT)/emu_%.o,$(EMU_SRC))
-VENDOR_OBJ := $(patsubst libkofemu/bddisasm/src/%.c,$(INT)/bdd_%.o,$(VENDOR_SRC))
+$(INT)/gt_%.o: libgenome/genotype/%.c $(STAMP) | $(INT)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(INT)/emu_%.o: libkofemu/%.c $(STAMP) | $(INT)
+# THE REFERENCE DECODER IS NOT IN THIS TREE. The x86 tables were produced by
+# running tools/genotype/x86_gen.c against a reference decoder, and the checked-in
+# tables are the product; nothing here links the reference. Re-running the
+# generator, or the differential check, needs it on disk: REF=<its checkout>,
+# the directory holding inc/ and src/. See THIRD-PARTY.md.
+REF ?=
+REF_SRC = $(wildcard $(REF)/src/*.c)
+REF_FLAGS = -O2 -w -std=gnu11 -D_LIB -DAMD64 -I$(REF)/inc -I$(REF)/src -I$(REF)/src/include
+
+.PHONY: genotype-x86 genotype-x86-diff
+genotype-x86:
+	@test -n "$(REF)" || { echo "genotype-x86: pass REF=<reference decoder checkout>"; exit 1; }
+	@$(call MKDIR,$(TEST))
+	$(CC) $(REF_FLAGS) tools/genotype/x86_gen.c $(REF_SRC) $(GT_SRC) -Ilibgenome/genotype -o $(TEST)/x86_gen$(EXE)
+	$(TEST)/x86_gen$(EXE) $(REF)/inc/bdx86_constants.h libgenome/genotype/x86
+
+genotype-x86-diff:
+	@test -n "$(REF)" || { echo "genotype-x86-diff: pass REF=<reference decoder checkout>"; exit 1; }
+	@$(call MKDIR,$(TEST))
+	$(CC) $(REF_FLAGS) tools/genotype/x86_diff.c $(REF_SRC) $(GT_SRC) -Ilibgenome/genotype -o $(TEST)/x86_diff$(EXE)
+	$(TEST)/x86_diff$(EXE)
+
+$(INT)/emu_%.o: libgenome/phenotype/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
-
-$(INT)/bdd_%.o: libkofemu/bddisasm/src/%.c $(STAMP) | $(INT)
-	@$(call MKDIR,$(dir $@))
-	$(CC) $(VENDOR_CFLAGS) $(EMU_INC) -c $< -o $@
 
 #
 # THE ARCHIVE IS REMOVED FIRST, AND THAT IS A FIX RATHER THAN TIDINESS.
@@ -1150,7 +1113,7 @@ $(INT)/bdd_%.o: libkofemu/bddisasm/src/%.c $(STAMP) | $(INT)
 # built from empty every time. It costs one unlink; ar then writes the same
 # members it was going to write anyway.
 #
-$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(VENDOR_OBJ)
+$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ)
 	@$(call MKDIR,$(dir $@))
 	@$(call RM,$@)
 	$(AR) rcs $@ $^
@@ -1446,9 +1409,8 @@ VIEWER_PROC_INC += -Ilibkoforbit/walk -Ilibkoforbit/proc \
 
 VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c $(VIEWER_PROC)
 
-# EMU_INC because the viewer disassembles: bddisasm's definitions are already
-# inside $(LIB) - the emulator put them there - so what is missing is only the
-# header, and linking a second copy of the decoder would be the alternative.
+# EMU_INC because the viewer disassembles: the decoder is already inside $(LIB),
+# so what is missing is only the header.
 #
 # kofevt is linked in because the viewer BROWSES an event log: it reads the
 # header, counts the records, and asks where each one is so a hex pane can be
@@ -2574,7 +2536,7 @@ $(BUILD)/%.d: ;
 # a shell glob would need a shell that globs - which PowerShell, for a native
 # command, does not.
 asan_obj = $(TEST)/asan-obj/$(subst /,_,$(1:.c=.o))
-ASAN_OBJ := $(foreach f,$(LIB_SRC) $(EMU_SRC) $(VENDOR_SRC),$(call asan_obj,$(f)))
+ASAN_OBJ := $(foreach f,$(LIB_SRC) $(EMU_SRC) $(GT_SRC),$(call asan_obj,$(f)))
 
 # A literal newline, so $(foreach) can put each command on its own recipe line
 # - which is what makes make run them one at a time and stop at the first that
@@ -2588,25 +2550,18 @@ endef
 # The emulator goes in too. It is the newest code here and the one that owns the
 # most raw memory - a sparse page table, lazily committed mappings and the
 # payload snapshots - so leaving it out would exempt exactly what most needs
-# checking. bddisasm comes along because the emulator cannot link without it,
-# but with the vendor's own warning flags: it is not ours to fix.
+# checking.
 #
-$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(VENDOR_SRC) $(SDK_HDR) | $(TEST)
+$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(SDK_HDR) | $(TEST)
 	@$(call RMRF,$(TEST)/asan-obj)
 	@$(call MKDIR,$(TEST)/asan-obj)
-	@# EMU_INC here as well as on the two loops below: libkofeng itself now
-	@# contains a file that includes bddisasm - kofdisasm/xref.c - so the
-	@# library's own sources need the decoder's include path. The release
-	@# build gives it that through a per-directory rule; this loop has no
-	@# per-directory anything, and without the flag it stopped building
-	@# entirely ("fatal error: bddisasm.h: No such file or directory"), which
-	@# is how the sanitizer target came to be broken while make unit stayed
-	@# green. Two compiles of one library are two things to keep in step.
+	@# EMU_INC on every loop: libkofeng's own sources include the decoder's
+	@# header, and this target has no per-directory rules to supply the path.
 	@$(foreach f,$(LIB_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(EMU_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
-	@$(foreach f,$(VENDOR_SRC),$(CC) $(VENDOR_CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
+	@$(foreach f,$(GT_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(call RM,$@)
 	@$(AR) rcs $@ $(ASAN_OBJ)
@@ -2733,7 +2688,7 @@ $(TEST)/antarc_dump$(EXE): tests/tools/antarc_dump.c $(ANTARC_SRC) \
 .PHONY: check-rules
 check-rules:
 	@bad=`grep -rn 'getenv *(' --include=*.c --include=*.h \
-	        libkofeng libkofemu libkoforbit kofexamine kofscanner \
+	        libkofeng libgenome libkoforbit kofexamine kofscanner \
 	        kofwatcher ksigbuilder 2>/dev/null \
 	      | grep -v 'kofcore/kofdebug.h' \
 	      | grep -v 'kofwatcher/kofmontrace.c' \
