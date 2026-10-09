@@ -406,6 +406,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				e = kof_emu_unp_run_pe(b.p, b.n, info, bi, bp,
 						       idle,
 						       sc->emu_slice != 0,
+						       force ? KOF_EMU_EXTEND_MAX : 0u,
 						       oep, sc->n_xw,
 						       &sc->pend_decl,
 						       &rep);

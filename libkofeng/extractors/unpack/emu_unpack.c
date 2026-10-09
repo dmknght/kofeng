@@ -1482,7 +1482,7 @@ static unsigned perm_of_pe(uint32_t p)
  *
  * THREE BOUNDS, AND THE FIRST ONE ALONE MAKES A LOOP IMPOSSIBLE.
  *
- *   1. AT MOST EMU_EXTEND_MAX EXTENSIONS. A count, not a condition. Whatever
+ *   1. AT MOST `extensions` EXTENSIONS (KOF_EMU_EXTEND_MAX for a run somebody asked for). A count, not a condition. Whatever
  *      the guest does, this returns after at most that many more slices - so
  *      no behaviour, crafted or otherwise, can keep it here.
  *   2. PROGRESS MUST HAVE ADVANCED. Not "recently" but STRICTLY since the last
@@ -1496,12 +1496,12 @@ static unsigned perm_of_pe(uint32_t p)
  * long run holds no more than a short one; what grows is time, and time is
  * what bounds 1 and 3 are for.
  */
-#define EMU_EXTEND_MAX   8u
 #define EMU_EXTEND_TOTAL (2048ull << 20)   /* the sum of every slice */
 
 
 static enum kof_emu_stop emu_run_while_producing(struct kof_emu *e,
-						 uint64_t slice, int hand_back)
+						 uint64_t slice, int hand_back,
+						 unsigned extensions)
 {
 	enum kof_emu_stop st;
 	unsigned k = 0;
@@ -1525,7 +1525,7 @@ static enum kof_emu_stop emu_run_while_producing(struct kof_emu *e,
 		if (hand_back)
 			break;
 		{
-			if (k >= EMU_EXTEND_MAX)
+			if (k >= extensions)
 				break;          /* the count, which bounds this */
 			if (kof_emu_last_write(e) <= before)
 				break;          /* the slice produced nothing */
@@ -1958,6 +1958,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   const struct kof_pe_info *info,
 				   uint64_t max_insn, uint64_t max_pages,
 				   uint64_t idle, int hand_back,
+				   unsigned extensions,
 				   const struct kof_emu_oep *oep,
 				   unsigned n_oep,
 				   const struct kof_emu_decl *decl,
@@ -2374,7 +2375,7 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 	}
 
 	{
-		enum kof_emu_stop st = emu_run_while_producing(e, max_insn, hand_back);
+		enum kof_emu_stop st = emu_run_while_producing(e, max_insn, hand_back, extensions);
 		uint64_t xl = 0, xb = kof_emu_exc_scratch(e, &xl);
 		uint32_t it = 0, k = 0;
 		uint64_t va, len;

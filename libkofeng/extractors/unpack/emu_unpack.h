@@ -371,6 +371,8 @@ struct kof_emu_decl {
 	uint32_t              n_patch;
 };
 
+#define KOF_EMU_EXTEND_MAX 8u
+
 struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				   const struct kof_pe_info *info,
 				   uint64_t max_insn, uint64_t max_pages,
@@ -389,6 +391,19 @@ struct kof_emu *kof_emu_unp_run_pe(const uint8_t *file, uint64_t n,
 				    * in kofsig.h.
 				    */
 				   int hand_back,
+				   /*
+				    * HOW MANY TIMES THE BUDGET MAY BE EXTENDED
+				    * while the guest keeps writing new pages -
+				    * KOF_EMU_EXTEND_MAX for a run somebody
+				    * asked for, ZERO for the engine's own
+				    * guess at an object nothing recognised.
+				    * The budget is a bound only when this is
+				    * zero: with the maximum it is the first
+				    * of nine slices, and an object that keeps
+				    * touching fresh pages is run for all of
+				    * them.
+				    */
+				   unsigned extensions,
 				   const struct kof_emu_oep *oep,
 				   unsigned n_oep,
 				   const struct kof_emu_decl *decl,

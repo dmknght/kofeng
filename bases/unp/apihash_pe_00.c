@@ -37,7 +37,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_RECOVER);
 
 /* The loader data is a Windows thing, and so is the table it replaces. */
 KOF_TARGET_FORMAT(KOF_FMT_PE);
-KOF_TARGET_CONTENT("API hash");
+KOF_TARGET_CONTENT("API-Hash");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

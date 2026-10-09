@@ -71,15 +71,16 @@
  *   APIHASH  the APIs a PE resolves for itself have no name in its import table;
  *            its own resolver is run against the modelled loader.
  *
- * THE FILE DECIDES WHETHER THE DECLARATION APPLIES. A dynamically linked ELF
- * contains no system call - it calls `socket` through the import table and the
- * instruction is in a library this file does not carry - so a diagnose written
- * for system calls has nothing to find in it, and sweeping its code anyway was
- * most of the cost of the whole scan. What the file offers is read off it by the
- * engine (diag_evidence in scanners/objctx_diag.c) and a diagnose whose analysis
- * the file does not offer is not run. That replaced a second statement of the
- * same fact in the diagnose, a condition on the interpreter, which had to be
- * kept in step with what the file was.
+ * THE FILE DECIDES WHETHER THE DECLARATION APPLIES, and SYSCALL IS THE LAST
+ * RESORT: it is offered only to a file in which no symbol could be found - no
+ * symbol table, no section table to keep one in, no loader - because sweeping
+ * the code for system calls was 90% of the time of a scan of 254 ELF files when
+ * every static one was offered it. A file that names what it calls is read by its
+ * names. What the file offers is read off it by the engine (diag_evidence in
+ * scanners/objctx_diag.c) and a diagnose whose analysis the file does not offer
+ * is not run. That replaced a second statement of the same fact in the diagnose,
+ * a condition on the interpreter, which had to be kept in step with what the
+ * file was.
  */
 #define KOF_DIAG_ANALYSIS_SYSCALL (1u << 0)
 #define KOF_DIAG_ANALYSIS_SYMBOL  (1u << 1)

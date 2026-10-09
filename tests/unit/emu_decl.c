@@ -126,7 +126,7 @@ static struct kof_emu *run(unsigned char *f, size_t len,
 	memset(&ctx, 0, sizeof ctx);
 	if (!kof_pe_parse(kof_buf_make(f, len), &info, &ctx) || !info.valid)
 		return NULL;
-	return kof_emu_unp_run_pe(f, len, &info, 0, 0, 0, 0, NULL, 0, decl, &rep);
+	return kof_emu_unp_run_pe(f, len, &info, 0, 0, 0, 0, KOF_EMU_EXTEND_MAX, NULL, 0, decl, &rep);
 }
 
 /*

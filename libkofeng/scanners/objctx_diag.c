@@ -464,19 +464,21 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
  * offers that analysis:
  *
  *   an object file (a kernel module)  its names - SYMBOL
- *   a dynamically linked ELF          its names - SYMBOL. It contains no system
- *                                     call: it calls `socket` through the import
- *                                     table and the instruction is in a library
- *                                     this file does not carry.
- *   a static ELF                      SYSCALL as well. It carries its libc and
- *                                     every call it can make is in the file with
- *                                     no symbol to resolve it by - the only case
- *                                     where sweeping the code is the way to read
- *                                     it. MEASURED, and why a diagnose written for
- *                                     system calls swept every ELF until a second
- *                                     condition kept it off the dynamic ones: the
- *                                     sweep was 66% of the instructions a scan of
- *                                     40 mixed files executed.
+ *   an ELF that carries names         its names - SYMBOL. Whatever else it holds,
+ *                                     a program with symbols says what it calls
+ *                                     by name, and the call sites in its own code
+ *                                     carry the arguments.
+ *   an ELF with NO symbol and NO      SYSCALL. Nothing in the file names a
+ *   section table, and no loader      function, so the only thing left to read
+ *                                     is the instruction that enters the kernel,
+ *                                     found by sweeping the code. The last
+ *                                     resort, and MEASURED to be the cost of the
+ *                                     scan: 90% of the time on 254 ELF files,
+ *                                     when every static one was offered it. A
+ *                                     section table counts because it is where a
+ *                                     symbol table would be - a file that has one
+ *                                     is stripped, a file that has none was built
+ *                                     without.
  *   a PE                              its names, and what it resolves for itself
  *                                     - APIHASH
  *
@@ -488,16 +490,19 @@ static unsigned diag_evidence(const struct kof_obj_ctx *ctx)
 		return KOF_DIAG_RUN_SYMBOL | KOF_DIAG_RUN_APIHASH;
 	if (ctx->format == KOF_FMT_ELF) {
 		const struct kof_elf_info *ei = kof_elf(ctx);
-		uint32_t i;
+		uint32_t i, sn = 0;
 
 		if (!ei || !ei->valid)
 			return 0;
 		if (ei->e_type == KOF_ELF_REL)
 			return KOF_DIAG_RUN_SYMBOL;
-		/* PT_INTERP: the loader's own test for "this needs a dynamic linker" */
+		/* PT_INTERP: the loader's own test for "this needs a dynamic
+		 * linker" - its calls are imports, and it contains no system call. */
 		for (i = 0; i < ei->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++)
 			if (ei->seg[i].type == 3u)
 				return KOF_DIAG_RUN_SYMBOL;
+		if (ei->shnum || kof_sym_count(oc_syms(ctx, &sn), sn))
+			return KOF_DIAG_RUN_SYMBOL;
 		return KOF_DIAG_RUN_SYMBOL | KOF_DIAG_RUN_SYSCALL;
 	}
 	return 0;
