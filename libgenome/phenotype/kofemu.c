@@ -1115,12 +1115,6 @@ struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg)
 	 * is not fatal: the cache is an optimisation and the loop checks for
 	 * it - see `ic`. */
 	e->ic = calloc(KOF_EMU_ICACHE, sizeof *e->ic);
-	/* Off on demand, so the cache's worth can be measured rather than
-	 * asserted - the same shape as KOF_EMU_TRACE and KOF_EMU_NOLIMIT. */
-	if (KOF_TRACING && e->ic) {
-		free(e->ic);
-		e->ic = NULL;
-	}
 	/* Twice the budget, so the table never passes half full and the probe
 	 * chains stay short whatever the addresses look like. */
 	e->tab_mask = pow2_at_least((uint32_t)pages * 2u) - 1u;
@@ -6676,6 +6670,13 @@ fetched:
 		}
 		ixp->n = gt_x86_nops(&ixp->h);
 		gt_x86_operands(&ixp->h, ixp->op);
+		/* The slot now holds THIS instruction whether or not it is kept
+		 * below, so what it said about the previous occupant is void. An
+		 * instruction straddling a page is decoded here and not kept; its
+		 * slot's inert flag would otherwise be read as its own, and a real
+		 * instruction stepped over. */
+		if (ent)
+			ent->inert = 0;
 		/* Kept only when it lies inside one page - see `ic`. */
 		if (ent && ((e->rip + ixp->h.len - 1u) &
 			    ~(uint64_t)(KOF_EMU_PAGE - 1u))
