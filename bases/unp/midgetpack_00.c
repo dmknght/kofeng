@@ -69,6 +69,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 KOF_TARGET_NAME(KOF_MALTYPE_PACKER, "MidgetPack");
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_CONTENT("MidgetPack");
 
 /* The stub is amd64, and unlike msf_xor_00.c this module never runs on a
  * formatless child - it produces none - so declaring it costs nothing. */
@@ -150,8 +151,6 @@ KOF_DEFINE_UNPACK
 	 * module spoke last. The value is the segment count, which is the one
 	 * number here that would change if the packer's template did.
 	 */
-	kof_debug("Midgetpack.segments", x_seen);
-
 	kof_debug("Midgetpack.segments", x_seen);
 
 	/*

@@ -29,6 +29,7 @@
 #include <kofmod/gzip.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_GZIP);
+KOF_TARGET_CONTENT("Deflate");
 /*
  * A CONTAINER, not a packer: a gzip carries a file that was separately there,
  * the way a zip or a tar does. It hid nothing, so depth through it is a

@@ -49,10 +49,14 @@
 KOF_DIAG_NAME(DIAG_LKM_SELFHIDE);
 
 /*
- * THE SYMBOL ROUTE ALONE. Everything here comes off the relocation table and
- * the instruction stream of one function; nothing has to be run.
+ * SYMBOL. Everything here comes off the relocation table and the instruction
+ * stream of one function.
  */
 KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL);
+/*
+ * NO EMULATOR. Everything here comes off the relocation table and the
+ * instruction stream of one function; nothing has to be run.
+ */
 
 /*
  * A RELOCATABLE OBJECT, which on Linux is a loadable kernel module - and the

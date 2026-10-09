@@ -289,56 +289,6 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 }
 
 /*
- * THE MODULE'S NAME WHEN THE MODULE NEVER SAID ONE.
- *
- * `kof_db_source` answers where a module's source lives inside the bases tree -
- * "unp/emu_generic_00.c", "decomp/zlibraw.c" - and that was handed to readers
- * as the name of whatever opened an object. It is not a name. It is this
- * project's directory layout on somebody else's screen, and kofviewer showed it
- * in the packer column beside rows that read "MPRESS.PE" and "UPX.PE".
- *
- * A module names itself by the prefix of its first kof_debug note, which is
- * what every module with something to report already does. Eight produce
- * children while reporting nothing - the generic interpreter receiver, the
- * shellcode carver, appended data, bzip2, gzip, the overlay carver, rcpfile
- * and raw zlib - and for those the source stem IS the only name the database
- * carries. So it is reduced to one: the last path component, without its
- * extension and without the "_00" that numbers a module within its family.
- *
- * The result is still derived from a file name, and that is honest - it says
- * the module did not name itself - but it is bounded to a name-shaped word and
- * can never carry a directory.
- */
-static void mod_name_of(const char *src, char *out, size_t cap)
-{
-	const char *b;
-	size_t n;
-
-	if (!out || !cap)
-		return;
-	out[0] = 0;
-	if (!src || !*src)
-		return;
-	for (b = src; *src; src++)
-		if (*src == '/' || *src == '\\')
-			b = src + 1;
-	n = strlen(b);
-	if (n > 2u && b[n - 2u] == '.' && b[n - 1u] == 'c')
-		n -= 2u;
-	/* "_00", "_01": which member of a family, not part of the name. */
-	while (n > 1u && b[n - 1u] >= '0' && b[n - 1u] <= '9')
-		n--;
-	if (n > 1u && b[n - 1u] == '_')
-		n--;
-	if (!n)
-		return;
-	if (n >= cap)
-		n = cap - 1u;
-	memcpy(out, b, n);
-	out[n] = 0;
-}
-
-/*
  * HOW WIDE THE CHILD IS, which decides the size of a lookup entry and of a
  * thunk - see kof_pe_write_imports.
  *
@@ -361,7 +311,53 @@ static int child_is64(const struct kof_obj_ctx *ctx)
 	return tmpl && tmpl->valid && tmpl->pe32_plus;
 }
 
-static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
+/*
+ * THE NAME OF A MODULE THAT TAKES A WRAPPER OFF OR CARVES SOMETHING OUT: the
+ * step it is, the format of what it ran on, and what it took out -
+ * "Unwrap:Gzip?Deflate", "Unwrap:DocZip", "Unwrap:Raw?Zlib", "Carve:PE?Overlay".
+ *
+ * Every part is a value the engine already holds. The step is the one the module
+ * declared (KOF_ANALYZE_STEP). The format is the NAME OF THE FORMAT of the object
+ * it is running on - which tells a .docx from a .zip where the module's own
+ * target list, Zip and DocZip, cannot, and which is "Raw" for an object with no
+ * format of its own. The content is what the module declared with
+ * KOF_TARGET_CONTENT, when it has something to add.
+ *
+ * UNPACK and DECRYPT modules are named this way too once they declare their
+ * content - "Decrypt:ELF?XOR", "Unpack:PE?Themida" - unless they name a build
+ * themselves, which carries a version this cannot know.
+ */
+static int unwrap_name(const struct kof_scanner *sc,
+		       const struct kof_obj_ctx *ctx, char *out, size_t cap)
+{
+	const struct kof_module *m = sc->cur_mod;
+	const char *step, *content;
+	int n;
+
+	if (!m)
+		return 0;
+	content = kof_db_content(sc->eng, m);
+	/*
+	 * A module that unwraps or carves is always named this way. One that
+	 * unpacks or decrypts is named this way when it declared what it takes out
+	 * and did not name a build of its own: a packer that reads its version
+	 * out of the file says "PE:UPX 3.95", which this cannot, and keeps saying
+	 * it.
+	 */
+	if (m->step != (uint32_t)KOF_ANALYZE_UNWRAP &&
+	    m->step != (uint32_t)KOF_ANALYZE_CARVE &&
+	    (!content || (sc->pend_build[0] && sc->pend_build_of == m)))
+		return 0;
+	step = kof_analyze_word(m->step);
+	n = snprintf(out, cap, "%s:%s", step, kof_format_name(ctx->format));
+	/* Cut at the buffer, never past it. */
+	if (content && n > 0 && (size_t)n + 1u < cap)
+		snprintf(out + n, cap - (size_t)n, "?%s", content);
+	return 1;
+}
+
+static int kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		    struct kof_objsrc *kid)
 {
 	if (!kid) {
 		/*
@@ -621,7 +617,13 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 	 * being scanned. See kof_result.opened_by for why it is the parent
 	 * that carries the name and not the child.
 	 */
-	if (sc->cur_mod && !sc->opened_by[0]) {
+	if (sc->cur_mod && !sc->opened_by[0] &&
+	    unwrap_name(sc, ctx, sc->opened_by, sizeof sc->opened_by)) {
+		/* One answer and not two - see below: what is shown is the same
+		 * name the object was opened by. */
+		snprintf(sc->packer_build, sizeof sc->packer_build, "%s",
+			 sc->opened_by);
+	} else if (sc->cur_mod && !sc->opened_by[0]) {
 		if (sc->mod_tag_of == sc->cur_mod && sc->mod_tag[0]) {
 			size_t q = strlen(sc->mod_tag);
 
@@ -629,10 +631,15 @@ static int kid_push(struct kof_scanner *sc, struct kof_objsrc *kid)
 				q = KOF_MOD_TAG - 1u;
 			memcpy(sc->opened_by, sc->mod_tag, q);
 			sc->opened_by[q] = 0;
-		} else {
-			mod_name_of(kof_db_source(sc->eng, sc->cur_mod),
-				    sc->opened_by, sizeof sc->opened_by);
 		}
+		/*
+		 * NO NAME FROM THE FILE'S NAME. A module that produces a child says
+		 * what it is - kunp_rcstruct_build, or the prefix of its first
+		 * kof_debug note - and one that does not is not named after the
+		 * directory layout of this project, which is what its source path
+		 * used to be turned into. `make check-rules` refuses a module that
+		 * produces a child and says neither.
+		 */
 		/*
 		 * AND THE BUILD, WHICH IS ONE ANSWER AND NOT TWO.
 		 *
@@ -838,7 +845,7 @@ int oc_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 
 	if (!oc_can_produce(sc))
 		return 0;
-	return kid_push(sc, kof_src_window(sc->cur_src, off, len));
+	return kid_push(sc, ctx, kof_src_window(sc->cur_src, off, len));
 }
 
 /* Move whatever is in memory out to the descriptor, and keep writing there. */
@@ -1255,7 +1262,7 @@ int oc_child(const struct kof_obj_ctx *ctx)
 		return 0;
 	}
 	kof_src_on_free(kid, scan_release_cb, sc);
-	return kid_push(sc, kid);
+	return kid_push(sc, ctx, kid);
 }
 
 /*

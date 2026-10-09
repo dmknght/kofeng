@@ -1803,7 +1803,11 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 			 * to look for the zero. It is a structural detection -
 			 * scalars, not searches - and saying so is shorter and
 			 * true. */
-			if (!t->n_str)
+			const char *method = kof_touch_method(t);
+
+			if (method)
+				snprintf(head, sizeof head, "%s", method);
+			else if (!t->n_str)
 				snprintf(head, sizeof head, "structural");
 			else
 				snprintf(head, sizeof head, "%s (%u/%u)",

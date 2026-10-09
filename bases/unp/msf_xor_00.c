@@ -102,6 +102,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
  * this needs - the format and the entry offset - are on the context itself.
  */
 KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
+KOF_TARGET_CONTENT("XOR");
 
 /*
  * THE FAMILY THIS DECODES, so the engine can try it first.

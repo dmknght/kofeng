@@ -641,6 +641,11 @@ static void st_model(struct kof_pipeline *p)
 			    out->broken == KOF_BROKEN_DAMAGED, out);
 }
 
+static void st_recover(struct kof_pipeline *p)
+{
+	sx_recover(p->sc, &p->ctx, p->opt, p->out, p->want);
+}
+
 static void st_open(struct kof_pipeline *p)
 {
 	sx_open_step(p->sc, &p->ctx, p->opt, p->out, p->pdepth, p->want,
@@ -691,6 +696,7 @@ static const struct stage_row {
 	void            (*run)(struct kof_pipeline *);
 } pipeline[] = {
 	{ KOF_STAGE_FACTS,     KOF_ANALYZE_UNWRAP,  0,                              st_facts },
+	{ KOF_STAGE_RECOVER,   KOF_ANALYZE_RECOVER, 0,                              st_recover },
 	{ KOF_STAGE_DETECT,    KOF_ANALYZE_UNWRAP,  0,                              st_detect },
 	{ KOF_STAGE_EXAMINE,   KOF_ANALYZE_UNWRAP,  0,                              st_examine },
 	{ KOF_STAGE_UNWRAP,    KOF_ANALYZE_UNWRAP,  ROW_CHAIN,                      st_open },

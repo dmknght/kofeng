@@ -56,6 +56,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("Petite");
 
 /*
  * 0.15 seconds and 1.6 million instructions, so it is worth paying on an

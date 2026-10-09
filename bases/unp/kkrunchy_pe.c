@@ -53,6 +53,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("kkrunchy");
 
 /*
  * 0.73 seconds and 8.2 million instructions on the largest sample here, which

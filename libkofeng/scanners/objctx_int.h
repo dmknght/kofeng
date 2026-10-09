@@ -56,6 +56,11 @@ uint32_t oc_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
 			    const uint8_t *bytes, uint32_t n);
 int oc_emu_take(const struct kof_obj_ctx *ctx, uint32_t i);
 int oc_opened_already(const struct kof_obj_ctx *ctx);
+uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
+			 char *dll, uint32_t dll_cap, char *fn,
+			 uint32_t fn_cap);
+uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
+		       const char *fn);
 uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 			   struct kof_scanner *sc, struct kof_emu *e,
 			   struct kof_emu_unp_report rep);

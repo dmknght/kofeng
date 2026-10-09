@@ -16,8 +16,8 @@
  *
  * A SEPARATE DIAGNOSE AND NOT THE ELF ONE WITH A WIDER WHEN, because it asks
  * for a different analysis: the calls of a program that finds its own APIs are
- * named by the apihash route (diag_apihash.c), which the ELF diagnoses have no
- * business running, and it is gated by a W+X section, which is where a stager
+ * named by the apihash analysis (diag_apihash.c), which the ELF diagnoses have
+ * no business running, and it is gated by a W+X section, which is where a stager
  * PE keeps what it decodes into.
  *
  * THE GATE IS A MEASURED ONE. A diagnose a verdict reads ASKS, and an ask makes
@@ -28,8 +28,11 @@
 
 KOF_DIAG_NAME(DIAG_MEM_EXECAPIHASH);
 
+/*
+ * APIHASH: the calls of a program that finds its own APIs are named by running
+ * its resolver against the modelled loader - see diag_apihash.c.
+ */
 KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_APIHASH);
-
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 KOF_DIAG_HAS_ATTRB(KOF_FACT_MAP_PERM, KOF_PE_PERM_W | KOF_PE_PERM_X);
 

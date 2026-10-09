@@ -75,6 +75,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
 /* ELF and the formatless children, for the reason msf_xor_00.c gives: these can
  * sit under another encoder, and the layer below has no header. */
 KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
+KOF_TARGET_CONTENT("Sub");
 
 /* The family, so a Meterp prediction routes here first. */
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");

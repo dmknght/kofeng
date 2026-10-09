@@ -410,6 +410,13 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 					 &o->heur_predict_off, &predict_uid))
 				goto out;
 		}
+		if (m->content && m->content[0]) {
+			uint32_t content_uid;
+
+			if (!name_intern(&dn, &b->name_pool, m->content,
+					 &o->content_off, &content_uid))
+				goto out;
+		}
 		if (m->src && m->src[0]) {
 			uint32_t src_uid;
 

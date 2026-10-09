@@ -86,6 +86,8 @@
 #include "../kofcore/kofplatform.h"
 #include "../analyzers/normalize/executables.h"
 
+static void sym_decl_free(struct kof_scanner *sc);
+
 struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 {
 	struct kof_scanner *sc = calloc(1, sizeof *sc);
@@ -201,6 +203,8 @@ void kof_scan_free(struct kof_scanner *sc)
 	kof_plague_ctx_done(&sc->plague);
 	free(sc->lzh);
 	kof_xref_free(sc->use);
+	sym_decl_free(sc);
+	free(sc->sym_decl);
 	free(sc->sym);
 	free(sc->pend_syms);
 	free(sc->pend_sec);
@@ -586,6 +590,18 @@ void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner)
 
 
 
+/* The imports a module reported for the object that has just finished. */
+static void sym_decl_free(struct kof_scanner *sc)
+{
+	uint32_t i;
+
+	for (i = 0; i < sc->n_sym_decl; i++) {
+		free(sc->sym_decl[i].dll);
+		free(sc->sym_decl[i].fn);
+	}
+	sc->n_sym_decl = 0;
+}
+
 /*
  * ---- THE START OF AN OBJECT: EVERYTHING THAT IS ABOUT ONE OBJECT ------------
  *
@@ -640,6 +656,7 @@ void sx_obj_begin(struct kof_scanner *sc)
 
 	/* The symbol block is rebuilt on first use. */
 	sc->sym_served = 0;
+	sym_decl_free(sc);
 	sc->sym_n = 0;
 	sc->msym_bound = 0;
 	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;

@@ -781,6 +781,23 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 		      const char *variant, const char *reason);
 
 /*
+ * WHAT TO CALL AN OBJECT, from the state the engine holds about it.
+ *
+ * One answer, crafted here, so a tool shows it and does not compose it:
+ *
+ *   "Unwrap:Gzip?Deflate"  the module that opened it, when one did - what the
+ *                          engine said in kof_result.packer_build
+ *   "Norm"                 a normalised view of another object
+ *   "PHP"                  a script, by its language
+ *   "PE", "ELF"            anything else, by the name of its format
+ *
+ * `packer` may be NULL or empty. `subtype` is the format's own vocabulary and
+ * is read only for a script. Cut at `cap`, never past it.
+ */
+void kof_object_label(uint32_t entry_kind, const char *packer, uint8_t format,
+		      uint8_t subtype, char *out, size_t cap);
+
+/*
  * The target word a finding is scoped to: "ELF-x64", or "ELF" when the object
  * has no architecture to speak of.
  *

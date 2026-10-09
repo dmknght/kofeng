@@ -25,6 +25,7 @@
 #include <kofmod/bz2.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_BZIP2);
+KOF_TARGET_CONTENT("BWT");
 /*
  * A CONTAINER, not a packer: a .bz2 carries a file that was separately there,
  * the way a gzip or a tar does. It hid nothing, so depth through it is a

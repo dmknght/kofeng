@@ -168,6 +168,12 @@ static inline int kof_emu_stance_only(enum kof_emu_stance s)
 	return s == KOF_EMU_STANCE_ONLY || s == KOF_EMU_STANCE_ONLY_ASKED;
 }
 
+/* One import a module reported: both strings owned by the scanner. */
+struct kof_sym_decl {
+	char *dll;
+	char *fn;
+};
+
 struct kof_scanner {
 	/* See enum kof_obj_latch. Cleared for every object, in obj_begin. */
 	uint8_t  latch[KOF_OL_COUNT];
@@ -219,8 +225,15 @@ struct kof_scanner {
 	 * sections themselves. Built on first need, freed with the object.
 	 */
 	struct kof_elf_relocs *relocs;
-	/* A serving diagnose added names to sym - see sym_serve. Per object. */
+	/* A decrypt step added names to sym - see sym_declared. Per object. */
 	int      sym_served;
+	/*
+	 * THE IMPORTS A MODULE REPORTED for this object - see sym_import in
+	 * struct kof_content. Owned strings; merged into the symbol block when
+	 * it is built, and per object like the block they complete.
+	 */
+	struct kof_sym_decl *sym_decl;
+	uint32_t n_sym_decl, cap_sym_decl;
 	/*
 	 * WHAT THE PE RESOLVES FOR ITSELF - see struct kof_apihash. An analysis
 	 * result and not a diag-route detail: the graph reads it and so does the

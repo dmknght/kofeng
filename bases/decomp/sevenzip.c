@@ -32,6 +32,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 KOF_TARGET_FORMAT(KOF_FMT_7Z);
+KOF_TARGET_CONTENT("LZMA");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
@@ -131,6 +132,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * every one of them is LZMA2; the rest chain a filter in front of the coder,
 	 * which is still named rather than guessed at.
 	 */
+	kof_debug("SevenZip.folders", z->n_folders);
 	for (i = 0; i < z->n_folders; i++) {
 		const struct kof_7z_folder *fo = &z->folder[i];
 
@@ -220,7 +222,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		opened++;
 	}
 
-	kof_debug("SevenZip.folders", z->n_folders);
 	kof_debug("SevenZip.opened", opened);
 
 	/*

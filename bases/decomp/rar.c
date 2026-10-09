@@ -50,6 +50,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 KOF_TARGET_FORMAT(KOF_FMT_RAR);
+KOF_TARGET_CONTENT("RAR3/RAR5");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

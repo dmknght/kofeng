@@ -575,6 +575,14 @@ static void quote_verdict(struct kof_touch *t, const struct kof_finding *f)
 	if (f->target.n && skip < sizeof f->name && p[skip] == '/')
 		p += skip + 1u;
 	snprintf(t->fired_verdict, sizeof t->fired_verdict, "%s", p);
+	t->fired_engine = f->engine;
+}
+
+const char *kof_touch_method(const struct kof_touch *t)
+{
+	if (!t->fired || t->fired_engine != (uint32_t)KOF_ENGINE_PATHOGEN)
+		return NULL;
+	return kof_engine_name(t->fired_engine);
 }
 
 static const char *fired_as(struct kof_touch *t,

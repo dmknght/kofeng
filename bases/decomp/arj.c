@@ -20,6 +20,7 @@
 #include <kofmod/arj.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ARJ);
+KOF_TARGET_CONTENT("LZHUF");
 /*
  * A CONTAINER, not a packer: an archive carries files that were separately
  * there. Depth through it is a directory tree rather than a layer of packing,
@@ -34,6 +35,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (!a->valid)
 		return;
+
+	/* What the parse says, before the logic acts on it. Everything the
+	 * archive holds behind a coding, including what is opened below: a
+	 * reader asking "how much of this is compressed" means that, not "how
+	 * much was left". */
+	kof_debug("Arj.coded", a->n_coded);
 
 	for (i = 0; i < a->n_entries; i++) {
 		const struct kof_entry *e = &a->entry[i];
@@ -58,8 +65,4 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 
 	kof_debug("Arj.decoded", opened);
-	/* Everything the archive holds behind a coding, including what was
-	 * opened above: a reader asking "how much of this is compressed" means
-	 * that, not "how much was left". */
-	kof_debug("Arj.coded", a->n_coded);
 }

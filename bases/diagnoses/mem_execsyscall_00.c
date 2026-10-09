@@ -35,23 +35,27 @@ KOF_DIAG_NAME(DIAG_MEM_EXECSYSCALL);
 /*
  * SYSCALL ONLY, AND THAT IS A STATEMENT ABOUT THE OBJECT.
  *
- * This payload has no imports and no symbol table - it IS a block of
- * shellcode that enters the kernel directly, so the symbol route has nothing
- * to read and the emulate route has nothing to resolve. MEASURED on the child
- * above: syscall 6 nodes, emulate 0.
+ * This payload has no imports and no symbol table - it IS a block of shellcode
+ * that enters the kernel directly, so the symbol analysis has nothing to read.
+ * MEASURED on the child above: syscall 6 nodes, symbols 0.
  *
- * Declaring it is not a hint. A route that no loaded diagnose asks for is a
- * route the scan does not pay for, and on this object the symbol route would
- * walk a relocation table that does not exist.
+ * Declaring it is not a hint. The engine runs only what an open diagnose
+ * declared, and only where the file offers it: on this object the symbol
+ * analysis would walk a relocation table that does not exist.
  */
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);
 /*
- * BOTH ROUTES, because neither contains the other. MEASURED on the stagers
- * here: meter3_encoded yields 0 nodes to the syscall sweep and 5 to the
- * span runner; the elf255 sample 4b060ab4 yields 5 to the sweep and 0 to
- * the runner. A diagnose naming one route is a diagnose that misses
- * whichever samples the other one sees.
+ * THE EMULATOR, because neither route contains the other. MEASURED on the
+ * stagers here: meter3_encoded yields 0 nodes to the syscall sweep and 5 to the
+ * span runner; the elf255 sample 4b060ab4 yields 5 to the sweep and 0 to the
+ * runner. A diagnose that left the runner out is a diagnose that misses whichever
+ * samples only it sees.
+ *
+ * WHERE THE NODES ARE FOUND IS NOT SAID HERE. This payload has no imports and no
+ * symbol table - it IS a block of shellcode that enters the kernel directly - and
+ * the engine reads that off the file, so the symbol route is not paid for on it.
  */
-KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_EMULATE);
+KOF_DIAG_USE_EMU();
 
 /*
  * ---- AND THE ATTRIBUTES THAT SAY THIS FILE IS WORTH THE ANALYSIS -------

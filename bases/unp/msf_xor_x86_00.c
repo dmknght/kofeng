@@ -59,6 +59,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
  * peeled one layer of a sample wrapped three times.
  */
 KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
+KOF_TARGET_CONTENT("XOR");
 
 /* The family this decodes, so a heuristic that predicts Meterp routes here
  * first. See the same declaration in msf_xor_00.c. */

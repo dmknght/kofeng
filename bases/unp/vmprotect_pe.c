@@ -58,6 +58,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("VMProtect");
 
 /* The family a VMProtect heuristic predicts, so this is entered ahead of the
  * general pass - see KOF_HEUR_PREDICT in bases/heur/vmprotect_00.c. */

@@ -1440,6 +1440,8 @@ static const struct kof_content kof_detect_vtable = {
 	oc_diag_share,
 	oc_diag_str,
 	/* emu_api_returns, emu_patch - a detector drives no run. */
+	NULL, NULL,
+	/* api_resolved, sym_import - a detector reports nothing about the object. */
 	NULL, NULL
 };
 
@@ -1470,7 +1472,8 @@ static const struct kof_content kof_unpack_vtable = {
 	oc_graph,
 	oc_diag_share,
 	oc_diag_str,
-	oc_emu_api_returns, oc_emu_patch
+	oc_emu_api_returns, oc_emu_patch,
+	oc_api_resolved, oc_sym_import
 };
 
 /*

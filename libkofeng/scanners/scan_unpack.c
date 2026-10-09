@@ -500,6 +500,31 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 }
 
 /*
+ * THE RECOVERING MODULES - see KOF_ANALYZE_RECOVER.
+ *
+ * Every one of them, on every object: open_gate answers whether an object is
+ * worth OPENING, and that is not the question here. An object that already has a
+ * named finding is refused by the gate and is the one whose symbols a tool
+ * shows most readily. Nothing chains from a recovery either - it produces no
+ * child, so there is nothing for a later step to be spared.
+ */
+void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		const struct kof_scan_option *opt, struct kof_result *res,
+		uint32_t want)
+{
+	int applies = 0;
+
+	if (!sc->eng || sc->eng->n_unp == 0)
+		return;
+	/* The producing surface for the length of the step, and not after: the
+	 * gate that turns it on for the opening steps is the one this skips. */
+	kof_mod_unpack_mode(ctx, 1);
+	(void)open_pass(sc, ctx, opt, res, want, NULL, KOF_ANALYZE_RECOVER,
+			&applies);
+	kof_mod_unpack_mode(ctx, 0);
+}
+
+/*
  * ONE STEP OF OPENING AN OBJECT: the modules that declared `step`, and before
  * the first of them the gate and the predicted family.
  *

@@ -45,6 +45,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
  * formatless layer underneath to also target.
  */
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("RC4");
 KOF_TARGET_ARCH(KOF_ARCH_X86);
 
 /* What comes out of it, so a heuristic that predicts Meterp routes here first.

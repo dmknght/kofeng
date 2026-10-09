@@ -2723,3 +2723,10 @@ check-rules:
 	  exit 1 ; \
 	fi ; \
 	echo 'check-rules: no getenv in the engine'
+	@bad=`grep -L KOF_TARGET_CONTENT bases/unp/*.c bases/decomp/*.c` ; \
+	if [ -n "$$bad" ]; then \
+	  echo 'a module must declare what it takes out (KOF_TARGET_CONTENT) - see CLAUDE.md:' ; \
+	  echo "$$bad" ; \
+	  exit 1 ; \
+	fi ; \
+	echo 'check-rules: every unpack and unwrap module declares its content'

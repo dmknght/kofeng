@@ -64,19 +64,22 @@
 KOF_DIAG_NAME(DIAG_LKM_GIVEROOT);
 
 /*
- * BOTH ROUTES, AND NEITHER IS OPTIONAL.
- *
- * SYMBOL finds the two calls: in a .ko a call is `e8 00 00 00 00` and the
- * target lives in the relocation table, so nothing else can see them.
- *
- * EMULATE is what reads a store's displacement and its immediate off the
- * instruction. It CANNOT run alone on a relocatable object - measured, the
- * emulate route by itself produces zero nodes on diamorphine.ko, because
- * there is no entry point and it navigates between sites the symbol route
- * placed. A diagnose that asked for EMULATE alone would match nothing and
- * say nothing about why.
+ * SYMBOL: the two calls are found from the relocation table - in a .ko a call is
+ * `e8 00 00 00 00` and the target lives there.
  */
-KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL | KOF_DIAG_ANALYSIS_EMULATE);
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL);
+/*
+ * THE EMULATOR IS NOT OPTIONAL. The two calls are found from the relocation
+ * table - in a .ko a call is `e8 00 00 00 00` and the target lives there, so
+ * nothing else can see them - and the emulator is what reads a store's
+ * displacement and its immediate off the instruction. It CANNOT run alone on a
+ * relocatable object - measured, the emulate route by itself produces zero nodes
+ * on diamorphine.ko, because there is no entry point and it navigates between
+ * sites the names placed. A diagnose that asked for the emulator ALONE would
+ * match nothing and say nothing about why, which is why SYMBOL is declared
+ * beside it.
+ */
+KOF_DIAG_USE_EMU();
 
 /*
  * ---- THE SIGNS THAT SAY THIS OBJECT IS WORTH THE WALK -------------------

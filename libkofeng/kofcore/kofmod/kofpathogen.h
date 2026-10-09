@@ -56,23 +56,30 @@
 #include "kofcap.h"
 
 /*
- * WHICH ANALYSIS ROUTINE CAN SATISFY THIS DIAGNOSE, as a set.
+ * WHICH ANALYSIS THIS DIAGNOSE USES TO FIND ITS NODES, as a set.
  *
- * The two differ by a whole order of cost, so the engine must know which to
- * run before it runs anything:
+ * DECLARED, because the engine has routines and no way to tell from a
+ * diagnose's capabilities which of them it is about. KOF_NUCLEO_ALLOC_EXEC is
+ * reachable BOTH ways - `mmap` in a static ELF, `VirtualAlloc` in a PE - while a
+ * diagnose about LoadLibrary followed by GetProcAddress has only names and one
+ * about raw shellcode has only system calls. What the diagnose says is which
+ * analysis it is written for.
  *
- *   SYMBOL   read the imports and compare names. NOT ONE INSTRUCTION is
- *            decoded.
- *   SYSCALL  a syscall is not in any symbol table. The code has to be
- *            scanned for the instruction, then decoded, then the number
- *            resolved out of a register.
+ *   SYMBOL   read the imports and compare names. NOT ONE INSTRUCTION is decoded.
+ *   SYSCALL  a system call is in no symbol table. The code is scanned for the
+ *            instruction, decoded, and the number resolved out of a register.
+ *   APIHASH  the APIs a PE resolves for itself have no name in its import table;
+ *            its own resolver is run against the modelled loader.
  *
- * NOT DERIVABLE from the capabilities alone, which is why it is declared.
- * KOF_NUCLEO_ALLOC_EXEC is reachable BOTH ways - `mmap` on a static ELF,
- * `VirtualAlloc` on a PE - while a diagnose about LoadLibrary followed by
- * GetProcAddress has only the symbol route and one about raw shellcode has
- * only the syscall route. Declaring it both bounds the work and says what
- * the diagnose is about.
+ * THE FILE DECIDES WHETHER THE DECLARATION APPLIES. A dynamically linked ELF
+ * contains no system call - it calls `socket` through the import table and the
+ * instruction is in a library this file does not carry - so a diagnose written
+ * for system calls has nothing to find in it, and sweeping its code anyway was
+ * most of the cost of the whole scan. What the file offers is read off it by the
+ * engine (diag_evidence in scanners/objctx_diag.c) and a diagnose whose analysis
+ * the file does not offer is not run. That replaced a second statement of the
+ * same fact in the diagnose, a condition on the interpreter, which had to be
+ * kept in step with what the file was.
  */
 #define KOF_DIAG_ANALYSIS_SYSCALL (1u << 0)
 #define KOF_DIAG_ANALYSIS_SYMBOL  (1u << 1)
@@ -83,39 +90,13 @@
  * into one, a control-register move. Diamorphine's syscall table patch is
  * entirely made of those, so a diagnose about it has no other route.
  *
- * IT COSTS MORE THAN THE OTHER TWO and is asked for rather than assumed -
- * which is what every KOF_DIAG_ANALYSIS is for.
+ * IT COSTS MORE THAN THE OTHER TWO and is asked for rather than assumed. It
+ * enriches the nodes the analyses above found - links resolved, names read - so
+ * it is not one of them and is declared on its own, as KOF_DIAG_USE_EMU(). This
+ * is only the bit it sets in the record, beside the three analyses.
  */
-#define KOF_DIAG_ANALYSIS_EMULATE (1u << 2)
-/*
- * RESOLVE THE APIS THE PROGRAM FINDS FOR ITSELF. A PE that walks the loader
- * data has none of what it calls in its import table, and what stands for an
- * API in its code is a number only the program understands. This route is
- * the ANALYSIS that turns the number into a name, once per object, by letting
- * the program's own resolver run against the modelled loader - see
- * diag_apihash.c. It is asked for rather than assumed, like the others, and
- * it is the only route whose product is ALSO read by something that is not a
- * diagnose: see KOF_DIAG_SERVES.
- */
+#define KOF_DIAG_USES_EMU (1u << 2)
 #define KOF_DIAG_ANALYSIS_APIHASH (1u << 3)
-
-/*
- * ---- WHAT AN ANALYSIS RESULT IS USED FOR, BEYOND A VERDICT --------------
- *
- * A diagnose is read by verdicts, and a diagnose no verdict reads is not run -
- * see KDIG_SEC_USERS. An analysis whose answer is wanted by the ENGINE itself
- * has no verdict to name it, and without a declaration the first rule would
- * silently switch it off. KOF_DIAG_SERVES is that declaration: it says which
- * part of the object description this diagnose's route is there to complete.
- *
- *     KOF_DIAG_SERVES(KOF_SERVE_PE_SYMBOLS);
- *
- * KOF_SERVE_PE_SYMBOLS - the APIs a PE resolves for itself are added to its
- * symbol block as imports, so that everything that reads imports (a rule on
- * SYM_IMP, a KOF_DIAG_DECLARE_SEQUENCE sign, a similarity over symbols) sees the program
- * the way it would if the author had used the import table.
- */
-#define KOF_SERVE_PE_SYMBOLS (1u << 0)
 
 /*
  * WHICH INPUT OF THE CHILD CAME FROM THE PARENT.
@@ -390,24 +371,6 @@ enum kof_diag_fact {
 	 * than being started on every object and returning at once.
 	 */
 	KOF_FACT_FORMAT,
-	/*
-	 * WHETHER AN ELF NAMES A DYNAMIC LINKER - a PT_INTERP program header,
-	 * value 1, or none, value 0.
-	 *
-	 * What it separates is where the program's system calls ARE. A binary
-	 * linked against a shared libc contains none: it calls `socket` through
-	 * the import table and the `syscall` instruction lives in a library this
-	 * file does not carry, so reading its code for system calls finds
-	 * nothing. A static one carries its libc, and every system call it can
-	 * make is in the file with no symbol to resolve it by - which is the
-	 * only case where sweeping the code is the way to read it.
-	 *
-	 * MEASURED, and the reason this exists: a diagnose with no condition
-	 * runs on every object that reaches a rule reading it, and the system
-	 * call route was 66% of the instructions a scan of 40 mixed files
-	 * executed. A format with no program headers (PE, script) answers no.
-	 */
-	KOF_FACT_INTERP,
 	KOF_FACT_COUNT
 };
 
@@ -428,7 +391,7 @@ struct kof_diag_when {
 
 struct kof_diag {
 	uint16_t              id;       /* assigned by the build            */
-	uint8_t               via;      /* KOF_DIAG_ANALYSIS_*                   */
+	uint8_t               analysis; /* KOF_DIAG_ANALYSIS_*, KOF_DIAG_USES_EMU */
 	uint8_t               n_node;
 	const char           *name;     /* for a person, never matched on   */
 	const struct kof_diag_node *node;
@@ -484,12 +447,6 @@ struct kof_diag {
 	 */
 	uint8_t               n_ref;
 	const char           *ref[KOF_DIAG_MAX_NEED];
-	/*
-	 * WHAT THE ENGINE ITSELF USES THIS DIAGNOSE'S ROUTE FOR, as
-	 * KOF_SERVE_* - see KOF_DIAG_SERVES. Non-zero keeps the diagnose
-	 * running when no verdict reads it.
-	 */
-	uint8_t               serves;
 };
 
 /*
@@ -517,8 +474,6 @@ enum kof_diag_link {
  * while the thing that reads them is ksigbuilder.
  *
  *     KOF_DIAG_NAME(rwx_exec);
- *     KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_SYMBOL);
- *
  *     KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
  *     KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);
  *     KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_EXEC_REG);
@@ -541,6 +496,13 @@ enum kof_diag_link {
  */
 #define KOF_DIAG_NAME(id)
 #define KOF_DIAG_ANALYSIS(mask)
+/*
+ * KOF_DIAG_USE_EMU() - run the emulator for this diagnose. Written, it is
+ * true; left out, false. No argument: there is one emulator and the only
+ * question is whether this diagnose needs it, which is what the nodes'
+ * links and the names handed to calls are read with.
+ */
+#define KOF_DIAG_USE_EMU()
 #define KOF_DIAG_DECLARE_HEAD(cap, flags)
 /*
  * KOF_DIAG_DECLARE_TAIL takes an OPTIONAL SECOND ARGUMENT, a kind:
@@ -633,8 +595,6 @@ enum kof_diag_link {
  * same reason.
  */
 #define KOF_DIAG_HAS_ATTRB(fact, value)
-/* KOF_DIAG_SERVES(KOF_SERVE_PE_SYMBOLS) - see the block above KOF_SERVE_*. */
-#define KOF_DIAG_SERVES(mask)
 
 /*
  * A TAGGED TRAILING SECTION OF A .kdig, tag then one length byte.
@@ -673,8 +633,8 @@ enum kof_diag_link {
  * length byte and the bytes. See KOF_DIAG_DECLARE_SYMBOL.
  */
 #define KDIG_SEC_REFS  4u
-/* KOF_SERVE_* - one byte. See KOF_DIAG_SERVES. */
-#define KDIG_SEC_SERVES 5u
+/* 5 was a diagnose serving the engine; that work moved out of the diagnose,
+ * and a record that still carries the tag is skipped by its length. */
 /* The capabilities the object must import: u16 each, little endian. They
  * replaced a list of symbol NAMES in the record's first byte, which an older
  * pack still writes and this build skips. */

@@ -735,6 +735,15 @@ struct kof_pack_mod {
 	 * module's KIND from which entry it exports.
 	 */
 	uint32_t cure_off;
+
+	/*
+	 * WHAT KIND OF CONTENT THIS MODULE TAKES OUT, into KOF_SEC_NAME_POOL like
+	 * the family, or zero when it declared none. See KOF_TARGET_CONTENT in
+	 * kofmod/kofsig.h. Its own field and not the family's: on an unpacker the
+	 * family slot holds the packer's name for a verdict, and a word that names
+	 * a kind of content is a different claim.
+	 */
+	uint32_t content_off;
 };
 
 /*
@@ -962,7 +971,7 @@ _Static_assert(sizeof(struct kof_pack_sec)  == 16,  "pack section entry grew pad
  * n_blk, the module's slice of the similarity sections. The number moves only
  * with KOF_PACK_MAJOR or KOF_PACK_MINOR - if it moves without one, the edit is
  * the bug. */
-_Static_assert(sizeof(struct kof_pack_mod)  == 76,  "pack module record grew padding");
+_Static_assert(sizeof(struct kof_pack_mod)  == 80,  "pack module record grew padding");
 _Static_assert(sizeof(struct kof_pack_str)  == 12,  "pack string descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_name) == 8,   "pack name descriptor grew padding");
 _Static_assert(sizeof(struct kof_pack_idx)  == 8,   "pack index slot grew padding");

@@ -17,8 +17,8 @@
  * object and kept by whoever asked first; neither reader runs the program.
  * Written twice, the two would disagree about which calls were made.
  *
- * ASKED FOR, never assumed - KOF_DIAG_ANALYSIS_APIHASH, and KOF_DIAG_SERVES when the
- * engine wants the names for the object description. A program that does not
+ * ASKED FOR, never assumed - KOF_DIAG_ANALYSIS_APIHASH for the graph, and by the engine's
+ * decrypt step when it wants the names for the object description. A program that does not
  * read the loader data costs a decode and nothing else; one that does costs a
  * run.
  */
@@ -441,21 +441,13 @@ out:
 	free(rlen);
 }
 
-uint32_t kof_apihash_syms(const struct kof_apihash *a, uint8_t *blk,
-			  uint32_t n_bytes, uint32_t cap)
+uint32_t kof_apihash_distinct(const struct kof_apihash *a, const char **dll,
+			      const char **name)
 {
-	const char **dll, **name;
 	uint32_t i, n = 0;
 
-	if (!a || !a->n_call)
-		return n_bytes;
-	dll = malloc((size_t)a->n_call * sizeof *dll);
-	name = malloc((size_t)a->n_call * sizeof *name);
-	if (!dll || !name) {
-		free(dll);
-		free(name);
-		return n_bytes;
-	}
+	if (!a)
+		return 0;
 	for (i = 0; i < a->n_call; i++) {
 		uint32_t k;
 
@@ -471,6 +463,25 @@ uint32_t kof_apihash_syms(const struct kof_apihash *a, uint8_t *blk,
 		name[n] = a->call[i].api;
 		n++;
 	}
+	return n;
+}
+
+uint32_t kof_apihash_syms(const struct kof_apihash *a, uint8_t *blk,
+			  uint32_t n_bytes, uint32_t cap)
+{
+	const char **dll, **name;
+	uint32_t n;
+
+	if (!a || !a->n_call)
+		return n_bytes;
+	dll = malloc((size_t)a->n_call * sizeof *dll);
+	name = malloc((size_t)a->n_call * sizeof *name);
+	if (!dll || !name) {
+		free(dll);
+		free(name);
+		return n_bytes;
+	}
+	n = kof_apihash_distinct(a, dll, name);
 	n_bytes = kof_pe_syms_add_imports(blk, n_bytes, cap, dll, name, n);
 	/* The list may be short, and the block's own byte says so. */
 	if (a->budget && n_bytes >= KOF_SYM_HDRLEN)

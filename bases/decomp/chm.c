@@ -26,6 +26,7 @@
 #include <kofmod/chm.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_CHM);
+KOF_TARGET_CONTENT("LZX");
 /*
  * A CONTAINER, not a packer: a help file carries pages that were separately
  * written. Depth through it is a directory tree rather than a layer of packing,
@@ -51,6 +52,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (!c->valid || !c->lzx_window_bits)
 		return;
+
+	/* Everything the section holds, and the part of it no restart point
+	 * reaches. Facts and not damage - see the note at the top. Said before
+	 * the logic acts on them. */
+	kof_debug("Chm.coded", c->n_compressed);
+	kof_debug("Chm.unreachable", c->n_unreachable);
 
 	for (i = 0; i < c->n_entries; i++) {
 		const struct kof_entry *e = &c->entry[i];
@@ -80,9 +87,5 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 
 	kof_debug("Chm.pages", opened);
-	/* Everything the section holds, and the part of it no restart point
-	 * reaches. Facts and not damage - see the note at the top. */
-	kof_debug("Chm.coded", c->n_compressed);
-	kof_debug("Chm.unreachable", c->n_unreachable);
 	kof_debug("Chm.skipped", skipped);
 }

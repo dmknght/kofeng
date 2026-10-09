@@ -391,6 +391,14 @@ void kof_apihash_free(struct kof_apihash *a);
  * The names a product holds, as imports of the KSYM block `blk` - see
  * kof_pe_syms_add_imports. Returns the new length in bytes.
  */
+/*
+ * The DISTINCT APIs of a product - once each however many places call it - as
+ * parallel arrays the caller sized to a->n_call. Returns how many. The one
+ * place that decides what "the same API" means, read by the symbols and by a
+ * module that reports them.
+ */
+uint32_t kof_apihash_distinct(const struct kof_apihash *a, const char **dll,
+			      const char **name);
 uint32_t kof_apihash_syms(const struct kof_apihash *a, uint8_t *blk,
 			  uint32_t n_bytes, uint32_t cap);
 /* The product the scan reads: handed over by the caller, else built once and

@@ -47,20 +47,23 @@
 KOF_DIAG_NAME(DIAG_LKM_KPROBE_RESOLVE);
 
 /*
- * BOTH ROUTES. SYMBOL finds the call; EMULATE is what reads the NAME the
- * probe was placed on out of the guest's memory and keeps it in the engine -
- * see capture_names. The names are read at the resolver node this diagnose
- * binds, and the analysis runs only the routes the diagnoses it is serving
- * declare.
+ * SYMBOL: the register and unregister are imports of a kernel module, found by
+ * name.
+ */
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL);
+/*
+ * THE EMULATOR. The names find the call; the emulator is what reads the NAME the
+ * probe was placed on out of the guest's memory and keeps it in the engine - see
+ * capture_names. The names are read at the resolver node this diagnose binds.
  *
- * THIS WAS SYMBOL ALONE, on the reasoning that the call is all this claims.
+ * THIS DID NOT ASK FOR IT, on the reasoning that the call is all this claims.
  * Measured when a verdict first asked for the name: every condition was true
  * when forced through the engine's own calls and the verdict still did not
  * fire, because nothing had asked for the route that captures names, so the
  * store was empty and an empty store answers "not found". The cost is bounded
  * by the gate below - 0 of 900 clean modules import register_kprobe.
  */
-KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYMBOL | KOF_DIAG_ANALYSIS_EMULATE);
+KOF_DIAG_USE_EMU();
 
 /*
  * ---- THE GATE: A RELOCATABLE OBJECT THAT IMPORTS THE PAIR ---------------

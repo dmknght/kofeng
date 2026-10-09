@@ -2117,7 +2117,7 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 	memcpy(name, b + 4, nlen);
 	name[nlen] = 0;
 	memset(out, 0, sizeof *out);
-	out->via = b[2];
+	out->analysis = b[2];
 	out->n_node = (uint8_t)n_node;
 	out->name = name;
 	out->node = node;
@@ -2246,8 +2246,6 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			 * that runs on the files its author excluded, and it
 			 * would do so quietly.
 			 */
-			if (tag == KDIG_SEC_SERVES && len == 1u)
-				out->serves = b[at];
 			/* The capabilities the object must import - u16 each. */
 			if (tag == KDIG_SEC_NEEDS) {
 				uint32_t q;

@@ -68,6 +68,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_CONTENT("Ezuri");
 
 /*
  * The stub's own symbol, and the reason this module runs at all.

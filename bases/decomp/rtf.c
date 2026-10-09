@@ -17,6 +17,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 KOF_TARGET_FORMAT(KOF_FMT_RTF);
+KOF_TARGET_CONTENT("Hex text");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

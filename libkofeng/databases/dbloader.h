@@ -219,6 +219,10 @@ struct kof_module {
 	 * kof_db_heur_predict(). */
 	uint32_t heur_predict_off;
 
+	/* The kind of content the module takes out, into the pack's name pool, or
+	 * 0. Read with kof_db_content(). */
+	uint32_t content_off;
+
 	/*
 	 * enum kof_pack_kind, from the pack this came out of.
 	 *
@@ -702,6 +706,10 @@ const char *kof_db_family(const struct kof_engine *, const struct kof_module *);
 /* The family a heuristic rule predicts, or NULL. See KOF_HEUR_PREDICT. */
 const char *kof_db_heur_predict(const struct kof_engine *,
 				const struct kof_module *);
+
+/* The kind of content a module takes out, or NULL. See KOF_TARGET_CONTENT. */
+const char *kof_db_content(const struct kof_engine *,
+			   const struct kof_module *);
 
 /*
  * Where this module's source lives inside the bases tree, or NULL.

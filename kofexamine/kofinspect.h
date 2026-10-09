@@ -385,6 +385,15 @@ struct kof_touch {
 	 * `fired`.
 	 */
 	uint32_t                fired_level;
+	/*
+	 * WHAT LOOKED, as the engine says it - enum kof_engine_id of the finding
+	 * that matched. Only meaningful when `fired`. A panel that has to say how
+	 * a module reached its verdict asks this and does not guess it from the
+	 * module's shape: a rule that declares no markers and no blocks is
+	 * "structural" only when the parse decided - one that read the node graph
+	 * is a different statement, and the two were printed the same.
+	 */
+	uint32_t                fired_engine;
 
 	/* Set only for KOF_TOUCH_INELIGIBLE: the precondition that ruled it out,
 	 * as the word a reader needs rather than as a mask to decode. */
@@ -627,6 +636,13 @@ const char *kof_touch_kind_name(enum kof_touch_kind);
  * concluded. Without a verdict the family is the whole of what can be said.
  */
 void kof_touch_name(const struct kof_touch *t, char *out, size_t cap);
+/*
+ * HOW A MODULE THAT FIRED REACHED ITS VERDICT, when the engine says it was not
+ * by the parse or by bytes: the engine's own word for it ("Pathogen" - the node
+ * graph). NULL when it did not fire, or when the ordinary descriptions of a rule
+ * - marker counts, "structural" - are the true ones.
+ */
+const char *kof_touch_method(const struct kof_touch *t);
 
 /* ---- the string codings ----------------------------------------------------
  *

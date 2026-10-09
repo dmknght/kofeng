@@ -1321,7 +1321,7 @@ struct simple_decl {
 enum {
 	SD_FORMAT = 0, SD_ARCH, SD_SUBTYPE, SD_SIZE_MIN, SD_ANALYZE_STEP,
 	SD_HEUR_PHASE, SD_HEUR_LEVEL, SD_HEUR_WANT,
-	SD_HEUR_NAME, SD_HEUR_PREDICT, SD_COUNT
+	SD_HEUR_NAME, SD_HEUR_PREDICT, SD_CONTENT, SD_COUNT
 };
 
 static struct simple_decl g_decl[SD_COUNT] = {
@@ -1334,11 +1334,14 @@ static struct simple_decl g_decl[SD_COUNT] = {
 	{ "KOF_HEUR_LEVEL",     NULL, 0, 0, { 0 } },
 	{ "KOF_HEUR_WANT",      NULL, 0, 0, { 0 } },
 	{ "KOF_HEUR_NAME",      NULL, 0, 0, { 0 } },
-	{ "KOF_HEUR_PREDICT",   NULL, 0, 0, { 0 } }
+	{ "KOF_HEUR_PREDICT",   NULL, 0, 0, { 0 } },
+	{ "KOF_TARGET_CONTENT", NULL, 0, 0, { 0 } }
 };
 
 /*
- * The text between the parentheses, with whitespace squeezed out.
+ * The text between the parentheses, with whitespace squeezed out - except inside
+ * a string literal, which is a word the author wrote and "Generic emulation" is
+ * two.
  *
  * Nesting is counted rather than stopping at the first ')', so an argument that
  * is itself a call - KOF_TARGET_SIZE_MIN(sizeof(x)) - is read whole instead of
@@ -1346,7 +1349,7 @@ static struct simple_decl g_decl[SD_COUNT] = {
  */
 static int decl_arg(const char *at, char *out, size_t cap)
 {
-	int depth = 0;
+	int depth = 0, in_str = 0;
 	size_t n = 0;
 
 	while (*at && *at != '(')
@@ -1354,16 +1357,21 @@ static int decl_arg(const char *at, char *out, size_t cap)
 	if (!*at)
 		return 0;
 	for (; *at; at++) {
-		if (*at == '(') {
-			depth++;
-			if (depth == 1)
-				continue;
-		} else if (*at == ')') {
-			depth--;
-			if (!depth)
-				break;
+		/* A parenthesis inside a literal is text, not nesting. */
+		if (!in_str) {
+			if (*at == '(') {
+				depth++;
+				if (depth == 1)
+					continue;
+			} else if (*at == ')') {
+				depth--;
+				if (!depth)
+					break;
+			}
 		}
-		if (depth >= 1 && !isspace((unsigned char)*at)) {
+		if (depth >= 1 && *at == '"' && at[-1] != '\\')
+			in_str = !in_str;
+		if (depth >= 1 && (in_str || !isspace((unsigned char)*at))) {
 			if (n + 1u >= cap)
 				return 0;
 			out[n++] = *at;
@@ -1754,10 +1762,12 @@ static void resolve_analyze_step(void)
 		g_step = KOF_ANALYZE_DECRYPT;
 	else if (names_ident(d->arg, "KOF_ANALYZE_CARVE"))
 		g_step = KOF_ANALYZE_CARVE;
+	else if (names_ident(d->arg, "KOF_ANALYZE_RECOVER"))
+		g_step = KOF_ANALYZE_RECOVER;
 	else
 		err(d->line, "KOF_ANALYZE_STEP names no step a module may declare; "
-			     "use KOF_ANALYZE_UNWRAP, _UNPACK, _DECRYPT or _CARVE "
-			     "(NORMZ is the host's own)");
+			     "use KOF_ANALYZE_UNWRAP, _UNPACK, _DECRYPT, _CARVE or "
+			     "_RECOVER (NORMZ is the host's own)");
 }
 
 static void resolve_heur(void)
@@ -1837,7 +1847,7 @@ static void decl_text(const struct simple_decl *d, char *out, size_t cap)
 	out[n] = 0;
 }
 
-static char g_heur_name[64], g_heur_predict[64];
+static char g_heur_name[64], g_heur_predict[64], g_content[48];
 
 /* What the module mode needs from the extract pass, which computes them. */
 static unsigned long g_scan_mask_out;
@@ -1848,6 +1858,7 @@ static void resolve_decls(void)
 	decl_text(&g_decl[SD_HEUR_NAME], g_heur_name, sizeof g_heur_name);
 	decl_text(&g_decl[SD_HEUR_PREDICT], g_heur_predict,
 		  sizeof g_heur_predict);
+	decl_text(&g_decl[SD_CONTENT], g_content, sizeof g_content);
 	resolve_format();
 	resolve_arch();
 	resolve_subtype();
@@ -4251,6 +4262,7 @@ static int extract_main(int argc, char **argv)
 	fprintf(out, "heur_want=%d\n", g_heur_want);
 	fprintf(out, "heur_name=%s\n", g_heur_name);
 	fprintf(out, "heur_predict=%s\n", g_heur_predict);
+	fprintf(out, "content=%s\n", g_content);
 	/* The COUNTS as well as the values, because whether a declaration is
 	 * present is a different question from what it says - and the checks
 	 * that ask it run after the entry point is known, which is later than
@@ -4322,6 +4334,8 @@ struct artefact {
 
 	/* What KOF_HEUR_PREDICT declared, or NULL. Only a rule has one. */
 	char    *heur_predict;
+	/* What KOF_TARGET_CONTENT declared, or NULL. */
+	char    *content;
 
 	/* What this module fires on: preconditions plus the exact pattern/region
 	 * set, order independent. See artefact_fingerprint. Not a security hash and
@@ -4356,6 +4370,7 @@ static void artefact_free(struct artefact *a)
 	free(a->srcpath);
 	free(a->family);
 	free(a->heur_predict);
+	free(a->content);
 	free(a->code);
 	free(a->str);
 	free(a->rng);
@@ -4547,6 +4562,19 @@ static int meta_load(struct artefact *a)
 			}
 		} else if (strncmp(line, "maltype=", 8) == 0) {
 			a->maltype = (uint32_t)strtoul(line + 8, 0, 10);
+		} else if (strncmp(line, "content=", 8) == 0) {
+			char *nl = strchr(line + 8, '\n');
+
+			if (nl)
+				*nl = 0;
+			free(a->content);
+			/* Empty stays NULL, as heur_predict does: nothing declared
+			 * must not intern a zero-length word. */
+			a->content = line[8] ? strdup(line + 8) : NULL;
+			if (line[8] && !a->content) {
+				fclose(f);
+				goto out;
+			}
 		} else if (strncmp(line, "heur_predict=", 13) == 0) {
 			char *nl = strchr(line + 13, '\n');
 
@@ -5706,7 +5734,7 @@ static void module_reset(void)
 	g_size_min = 0;
 	g_step = g_heur_phase = g_heur_level = g_heur_want = 0;
 	g_n_targets = 0;
-	g_heur_name[0] = g_heur_predict[0] = 0;
+	g_heur_name[0] = g_heur_predict[0] = g_content[0] = 0;
 	g_family[0] = 0;
 	g_maltype = 0;
 	g_have_name = 0;
@@ -5986,6 +6014,7 @@ static int module_main(int argc, char **argv)
 	fprintf(f, "heur_level=%d\n", g_heur_level);
 	fprintf(f, "cure_off=%llu\n", (unsigned long long)g_cure_kept);
 	fprintf(f, "heur_predict=%s\n", g_heur_predict);
+	fprintf(f, "content=%s\n", g_content);
 	/* A heuristic rule has no family; its word goes in the same slot, and
 	 * the engine writes "Heur" where a maltype would be. */
 	fprintf(f, "family=%s\n", kind == 2 ? g_heur_name
@@ -6280,7 +6309,6 @@ static unsigned        g_n_uses;
 static int             g_uses_known;    /* only a tree build knows them all */
 static char            g_built[64][64];
 static unsigned        g_n_built;
-static unsigned char   g_built_serves[64];   /* the engine reads it itself */
 
 
 /* Defined with the other argument helpers, below. */
@@ -6950,7 +6978,7 @@ static int tree_main(int argc, char **argv)
 			for (q = 0; q < g_n_uses; q++)
 				if (!strcmp(g_built[z], g_uses[q].diag))
 					break;
-			if (q == g_n_uses && !g_built_serves[z])
+			if (q == g_n_uses)
 				fprintf(stderr, "ksigbuilder: warning: diagnose "
 					"%s is read by no verdict, so the engine "
 					"will not run it\n", g_built[z]);
@@ -7373,6 +7401,7 @@ static int pack_main(int argc, char **argv)
 			pm[a].family      = s->family;
 			pm[a].maltype     = s->maltype;
 			pm[a].heur_predict = s->heur_predict;
+			pm[a].content = s->content;
 		}
 
 		img = kof_pack_build(g->kind, pm, g->n, &img_len);
@@ -7556,7 +7585,7 @@ struct dnode {
  * this program writes - see the note at the pack header. */
 struct dhdr {
 	uint16_t n_node;
-	uint8_t  via;
+	uint8_t  analysis;
 	uint8_t  name_len;
 };
 
@@ -7615,7 +7644,7 @@ struct dhdr {
 #define KOF_FACT_IDENTS(X) \
 	X(KOF_FACT_ENTRY_PERM) X(KOF_FACT_MAP_PERM) \
 	X(KOF_FACT_SECTIONS)   X(KOF_FACT_OBJ_KIND) \
-	X(KOF_FACT_FORMAT)     X(KOF_FACT_INTERP)
+	X(KOF_FACT_FORMAT)
 
 #define KOF_WHEN_VALUES(X) \
 	X(KOF_PERM_R) X(KOF_PERM_W) X(KOF_PERM_X) \
@@ -7809,7 +7838,7 @@ static int diagnose_main(int argc, char **argv)
 	uint16_t seq_first = 0, seq_then = 0;
 	struct { char label[32]; char name[64]; int used; } sy[8];
 	int n_nd = 0, lineno = 0, i;
-	unsigned via = 0, serves = 0;
+	unsigned analysis = 0;
 	FILE *f, *o;
 	unsigned char *blob;
 	size_t at, need;
@@ -7834,17 +7863,22 @@ static int diagnose_main(int argc, char **argv)
 		if ((p = strstr(line, "KOF_DIAG_NAME(")) != NULL) {
 			if (!diag_arg(p, 0, name, sizeof name))
 				err(lineno, "KOF_DIAG_NAME wants a name");
+		} else if (strstr(line, "KOF_DIAG_USE_EMU(") != NULL) {
+			analysis |= KOF_DIAG_USES_EMU;
 		} else if ((p = strstr(line, "KOF_DIAG_ANALYSIS(")) != NULL) {
 			if (strstr(p, "KOF_DIAG_ANALYSIS_SYSCALL"))
-				via |= KOF_DIAG_ANALYSIS_SYSCALL;
+				analysis |= KOF_DIAG_ANALYSIS_SYSCALL;
 			if (strstr(p, "KOF_DIAG_ANALYSIS_SYMBOL"))
-				via |= KOF_DIAG_ANALYSIS_SYMBOL;
+				analysis |= KOF_DIAG_ANALYSIS_SYMBOL;
 			if (strstr(p, "KOF_DIAG_ANALYSIS_EMULATE"))
-				via |= KOF_DIAG_ANALYSIS_EMULATE;
+				err(lineno, "the emulator is not a way to find "
+					    "nodes: write KOF_DIAG_USE_EMU()");
 			if (strstr(p, "KOF_DIAG_ANALYSIS_APIHASH"))
-				via |= KOF_DIAG_ANALYSIS_APIHASH;
-			if (!via)
-				err(lineno, "KOF_DIAG_ANALYSIS names no route");
+				analysis |= KOF_DIAG_ANALYSIS_APIHASH;
+			if (!(analysis & (KOF_DIAG_ANALYSIS_SYSCALL |
+					  KOF_DIAG_ANALYSIS_SYMBOL |
+					  KOF_DIAG_ANALYSIS_APIHASH)))
+				err(lineno, "KOF_DIAG_ANALYSIS names no analysis");
 		} else if ((p = strstr(line, "KOF_DIAG_DECLARE_HEAD(")) != NULL) {
 			if (n_nd) {
 				err(lineno, "a diagnose has one head");
@@ -8002,12 +8036,6 @@ static int diagnose_main(int argc, char **argv)
 				       strlen(sy[si].name) + 1u);
 				n_ref++;
 			}
-		} else if ((p = strstr(line, "KOF_DIAG_SERVES(")) != NULL) {
-			if (strstr(p, "KOF_SERVE_PE_SYMBOLS"))
-				serves |= KOF_SERVE_PE_SYMBOLS;
-			if (!serves)
-				err(lineno, "KOF_DIAG_SERVES names nothing the "
-					    "engine uses");
 		} else if ((p = strstr(line, "KOF_TARGET_FORMAT(")) != NULL ||
 			   (p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
 			/* THE TARGET OF A DIAGNOSE IS DECLARED AS A SIGNATURE'S IS:
@@ -8105,7 +8133,8 @@ static int diagnose_main(int argc, char **argv)
 
 	if (!name[0])
 		err(lineno, "a diagnose needs KOF_DIAG_NAME");
-	if (!via)
+	if (!(analysis & (KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_SYMBOL |
+			  KOF_DIAG_ANALYSIS_APIHASH)))
 		err(lineno, "a diagnose needs KOF_DIAG_ANALYSIS");
 	if (!n_nd)
 		err(lineno, "a diagnose needs a head");
@@ -8125,16 +8154,17 @@ static int diagnose_main(int argc, char **argv)
 		if (!sy[i].used)
 			err(lineno, "a declared symbol is attached to nothing");
 	/*
-	 * THE GATE IS DERIVED FROM THE HEAD AND THE TAILS, for a diagnose that
-	 * only names can satisfy: with no syscall or hash route there is no
-	 * other way for its capabilities to appear, so an object that imports
-	 * none of them is not worth the analysis. A diagnose that DOES have such
-	 * a route is not gated by imports - a stripped static binary imports
-	 * nothing - and one whose head is built from a declared sequence is gated
-	 * by the two calls it is built from, because the head's own capability is
-	 * not what the object imports.
+	 * THE GATE IS DERIVED FROM THE HEAD AND THE TAILS, for a diagnose that only
+	 * names can satisfy: with no syscall or hash analysis there is no other way
+	 * for its capabilities to appear, so an object that imports none of them is
+	 * not worth the analysis. A diagnose that DOES have such an analysis is not
+	 * gated by imports - a stripped static binary imports nothing - and one
+	 * whose head is built from a declared sequence is gated by the two calls it
+	 * is built from, because the head's own capability is not what the object
+	 * imports.
 	 */
-	if (!has_seq && !(via & (KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_APIHASH)))
+	if (!has_seq && !(analysis & (KOF_DIAG_ANALYSIS_SYSCALL |
+				      KOF_DIAG_ANALYSIS_APIHASH)))
 		for (i = 0; i < n_nd; i++) {
 			int k;
 
@@ -8197,16 +8227,8 @@ static int diagnose_main(int argc, char **argv)
 				}
 		}
 	}
-	/* A diagnose that serves the engine's use of an analysis has to ask for
-	 * that analysis: the declaration says what the result is FOR, the route
-	 * says that it is computed, and one without the other is dead text. */
-	if ((serves & KOF_SERVE_PE_SYMBOLS) && !(via & KOF_DIAG_ANALYSIS_APIHASH))
-		err(lineno, "KOF_SERVE_PE_SYMBOLS needs KOF_DIAG_ANALYSIS_APIHASH");
-	if (n_need || n_when || n_ref || serves || g_uses_known) {
-		int k;
-
+	if (n_need || n_when || n_ref || g_uses_known)
 		need += 1u;                     /* the legacy name count: 0 */
-	}
 	if (n_need)
 		need += 2u + 2u * (size_t)n_need;   /* tag, length, caps */
 	if (has_seq)
@@ -8220,8 +8242,6 @@ static int diagnose_main(int argc, char **argv)
 	}
 	if (g_uses_known)
 		need += 2u + 1u + users_len;
-	if (serves)
-		need += 2u + 1u;
 	/*
 	 * TAGGED TRAILING SECTIONS, tag and length each one byte. The signs
 	 * above are not tagged - they predate this - so anything added after
@@ -8235,7 +8255,7 @@ static int diagnose_main(int argc, char **argv)
 		return 1;
 	blob[0] = (unsigned char)n_nd;
 	blob[1] = (unsigned char)(n_nd >> 8);
-	blob[2] = (unsigned char)via;
+	blob[2] = (unsigned char)analysis;
 	blob[3] = (unsigned char)strlen(name);
 	at = 4;
 	memcpy(blob + at, name, strlen(name));
@@ -8274,11 +8294,8 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (n_need || n_when || n_ref || serves || g_uses_known) {
-		int k;
-
+	if (n_need || n_when || n_ref || g_uses_known)
 		blob[at++] = 0;                 /* no names: see KDIG_SEC_NEEDS */
-	}
 	if (n_need) {
 		int k;
 
@@ -8329,11 +8346,6 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (serves) {
-		blob[at++] = KDIG_SEC_SERVES;
-		blob[at++] = 1u;
-		blob[at++] = (unsigned char)serves;
-	}
 	if (g_uses_known) {
 		unsigned q, left = users_len;
 
@@ -8357,7 +8369,6 @@ static int diagnose_main(int argc, char **argv)
 	/* Remembered so the tree build can check that every call names a
 	 * diagnose that exists - see the end of tree_main. */
 	if (g_n_built < 64u) {
-		g_built_serves[g_n_built] = (unsigned char)serves;
 		snprintf(g_built[g_n_built++], sizeof g_built[0], "%s", name);
 	}
 	o = fopen(out, "wb");

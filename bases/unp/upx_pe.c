@@ -89,6 +89,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("UPX");
 
 /*
  * The PackHeader's magic. Declared, so the host searches with the machinery it

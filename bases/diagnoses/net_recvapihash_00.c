@@ -13,15 +13,16 @@
  * is this, a self-unpacking loader is the other) and a verdict joins them at the
  * read - see kof_diag_share.
  *
- * ONLY THE APIHASH ROUTE, as mem_execapihash_00 and gated the same way: the calls of
- * a stager are not in its import table, and the W+X section is what keeps the
- * analysis off the programs that have nothing like one.
  */
 
 KOF_DIAG_NAME(DIAG_NET_RECVAPIHASH);
 
+/*
+ * APIHASH, as mem_execapihash_00 and gated the same way: the calls of a stager
+ * are not in its import table, and the W+X section is what keeps the analysis off
+ * the programs that have nothing like one.
+ */
 KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_APIHASH);
-
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 KOF_DIAG_HAS_ATTRB(KOF_FACT_MAP_PERM, KOF_PE_PERM_W | KOF_PE_PERM_X);
 

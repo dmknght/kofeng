@@ -41,6 +41,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 /* Nothing declared this file's format, which is the point - it is the shape
  * that makes an object unreadable. */
 KOF_TARGET_FORMAT(KOF_FMT_UNKNOWN);
+KOF_TARGET_CONTENT("RCP");
 
 /* "C0000 1 x\n" is nine; below that there is no record. */
 #define RCP_MIN      9u

@@ -54,6 +54,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 KOF_TARGET_FORMAT(KOF_FMT_ZIP | KOF_FMT_DOCZIP);
+KOF_TARGET_CONTENT("Deflate");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

@@ -140,6 +140,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("Themida");
 
 /* Where the stream is, measured from the entry point, by stub width. */
 #define TH_OFF_64   0x1d4u

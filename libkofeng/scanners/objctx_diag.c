@@ -141,52 +141,129 @@ const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 }
 
 /*
- * ---- WHAT AN OBJECT'S SYMBOLS ARE COMPLETED FROM -------------------------
+ * ---- WHAT A MODULE REPORTED IS MERGED WHEN THE BLOCK IS BUILT ------------
  *
  * The symbol block is read out of the object's own tables, and for some
  * objects those tables cannot say what the program uses: a PE that finds its
- * APIs by walking the loader data lists nothing it calls. A diagnose that
- * resolves them DECLARES so - KOF_DIAG_SERVES - and the engine then takes the
- * resolved names as the object's imports: the analysis result REPLACES the
- * table's emptiness in the object description, for everything that reads it.
+ * APIs by walking the loader data lists nothing it calls. Recovering them is
+ * the same kind of work as recovering any other thing a program hides from a
+ * static reader, so it is a decrypt module's job - it asks the engine for the
+ * APIs the program resolves (oc_api_resolved) and reports them (oc_sym_import).
+ * A diagnose reads what the object does; it does not complete the description
+ * of the object.
  *
- * ONE TABLE, so a new kind of resolution is a row and not another branch in
- * oc_syms: the serve bit a diagnose declares, the format it applies to, the
- * analysis product (computed once per object, shared with the graph - the
- * diagnose reads the same result later), and how the product is merged into
- * the block. NORMALISE IS NOT ASKED TO DO THIS ITSELF and cannot skip it: its
- * symbols are this block, so it gets the completed one or, when nothing could
- * be resolved - the usual case - the table's own.
+ * THE REPORT REPLACES THE TABLE'S EMPTINESS in the object description, for
+ * everything that reads it. NORMALISE IS NOT ASKED TO DO THIS ITSELF and
+ * cannot skip it: its symbols are this block, so it gets the completed one or,
+ * when nothing was reported - the usual case - the table's own.
  */
-struct sym_serve {
-	uint8_t     bit;                /* KOF_SERVE_*                          */
-	uint8_t     format;             /* KOF_FMT_* the product is made for    */
-	const void *(*product)(struct kof_scanner *, const struct kof_obj_ctx *);
-	uint32_t    (*merge)(const void *product, uint8_t *blk, uint32_t n,
-			     uint32_t cap);
-};
-
-static const void *serve_apihash(struct kof_scanner *sc,
-				 const struct kof_obj_ctx *ctx)
+static void sym_declared(struct kof_scanner *sc)
 {
-	return sc_apihash(sc, ctx);
+	const char **dll, **name;
+	uint32_t i, before = sc->sym_n;
+
+	if (!sc->n_sym_decl)
+		return;
+	dll = malloc((size_t)sc->n_sym_decl * sizeof *dll);
+	name = malloc((size_t)sc->n_sym_decl * sizeof *name);
+	if (!dll || !name) {
+		free(dll);
+		free(name);
+		return;
+	}
+	for (i = 0; i < sc->n_sym_decl; i++) {
+		dll[i] = sc->sym_decl[i].dll;
+		name[i] = sc->sym_decl[i].fn;
+	}
+	if (sc->sym_n < KOF_SYM_HDRLEN)         /* no directory records at all */
+		sc->sym_n = kof_pe_syms((kof_buf){ NULL, 0 }, NULL, sc->sym,
+					KOF_SYM_MAX_BYTES);
+	sc->sym_n = kof_pe_syms_add_imports(sc->sym, sc->sym_n,
+					    KOF_SYM_MAX_BYTES, dll, name,
+					    sc->n_sym_decl);
+	/* The list the module reported may be short, and the block's own byte
+	 * says so: the run it came from was stopped while still going. */
+	if (sc->apihash && sc->apihash->budget && sc->sym_n >= KOF_SYM_HDRLEN)
+		sc->sym[KOF_SYM_H_TRUNC] = 1;
+	if (sc->sym_n != before)
+		sc->sym_served = 1;
+	free(dll);
+	free(name);
 }
 
-static uint32_t merge_apihash(const void *p, uint8_t *blk, uint32_t n,
-			      uint32_t cap)
+/* The i-th distinct API this PE resolves for itself - see api_resolved in
+ * struct kof_content. */
+uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
+			 char *dll, uint32_t dll_cap, char *fn,
+			 uint32_t fn_cap)
 {
-	const struct kof_apihash *a = p;
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_apihash *a;
+	const char **d, **nm;
+	uint32_t n;
 
+	if (!sc || !dll || !fn || !dll_cap || !fn_cap)
+		return 0;
+	a = sc_apihash(sc, ctx);
 	if (!a || !a->n_call)
-		return n;
-	if (n < KOF_SYM_HDRLEN)         /* no directory records at all */
-		n = kof_pe_syms((kof_buf){ NULL, 0 }, NULL, blk, cap);
-	return kof_apihash_syms(a, blk, n, cap);
+		return 0;
+	d = malloc((size_t)a->n_call * sizeof *d);
+	nm = malloc((size_t)a->n_call * sizeof *nm);
+	if (!d || !nm) {
+		free(d);
+		free(nm);
+		return 0;
+	}
+	n = kof_apihash_distinct(a, d, nm);
+	if (i < n) {
+		snprintf(dll, dll_cap, "%s", d[i]);
+		snprintf(fn, fn_cap, "%s", nm[i]);
+	}
+	free(d);
+	free(nm);
+	return i < n;
 }
 
-static const struct sym_serve sym_serves[] = {
-	{ KOF_SERVE_PE_SYMBOLS, KOF_FMT_PE, serve_apihash, merge_apihash },
-};
+/* Report one import of this object - see sym_import in struct kof_content.
+ * The block is rebuilt on its next read so the report is in it. */
+uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
+		       const char *fn)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	struct kof_sym_decl *d;
+	uint32_t i;
+
+	if (!sc || !dll || !fn || !dll[0] || !fn[0] || ctx->format != KOF_FMT_PE)
+		return 0;
+	for (i = 0; i < sc->n_sym_decl; i++)
+		if (!strcmp(sc->sym_decl[i].dll, dll) &&
+		    !strcmp(sc->sym_decl[i].fn, fn))
+			return 1;               /* kept once */
+	if (sc->n_sym_decl == sc->cap_sym_decl) {
+		uint32_t nc = sc->cap_sym_decl ? sc->cap_sym_decl * 2u : 32u;
+		struct kof_sym_decl *nv = realloc(sc->sym_decl, (size_t)nc * sizeof *nv);
+
+		if (!nv)
+			return 0;
+		sc->sym_decl = nv;
+		sc->cap_sym_decl = nc;
+	}
+	d = &sc->sym_decl[sc->n_sym_decl];
+	d->dll = strdup(dll);
+	d->fn = strdup(fn);
+	if (!d->dll || !d->fn) {
+		free(d->dll);
+		free(d->fn);
+		return 0;
+	}
+	sc->n_sym_decl++;
+	/* What was built from the block as it stood is stale. */
+	sc->latch[KOF_OL_SYM] = 0;
+	sc->sym_served = 0;
+	sc->msym_bound = 0;
+	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
+	return 1;
+}
 
 /*
  * THE SYMBOLS THE ENGINE COMPLETED, for the result. A tool shows what the
@@ -210,42 +287,6 @@ const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n)
 	if (n)
 		*n = nb;
 	return sc->sym;
-}
-
-/* Does a diagnose in the database declare this, with its conditions holding
- * for this object. Nothing declared, nothing run. */
-static int sc_serves(const struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
-		     uint8_t bit)
-{
-	uint32_t i;
-
-	if (!sc->eng)
-		return 0;
-	for (i = 0; i < sc->eng->n_diag; i++) {
-		const struct kof_diag *d = &sc->eng->diag[i];
-
-		if ((d->serves & bit) && diag_when_met(ctx, d))
-			return 1;
-	}
-	return 0;
-}
-
-static void sym_serve(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
-{
-	size_t k;
-
-	for (k = 0; k < sizeof sym_serves / sizeof sym_serves[0]; k++) {
-		const struct sym_serve *r = &sym_serves[k];
-
-		if (ctx->format != r->format || !sc_serves(sc, ctx, r->bit))
-			continue;
-		uint32_t before = sc->sym_n;
-
-		sc->sym_n = r->merge(r->product(sc, ctx), sc->sym, sc->sym_n,
-				     KOF_SYM_MAX_BYTES);
-		if (sc->sym_n != before)
-			sc->sym_served = 1;
-	}
 }
 
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
@@ -297,7 +338,7 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 							   sc->sym,
 							   KOF_SYM_MAX_BYTES);
 			if (sc->sym)
-				sym_serve(sc, ctx);
+				sym_declared(sc);
 		}
 	}
 	/* A header with no records is not worth handing back: every reader
@@ -409,18 +450,79 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
 		return 0;
 	case KOF_FACT_FORMAT:
 		return (uint64_t)ctx->format == want;
-	case KOF_FACT_INTERP:
-		/* PT_INTERP, from the program headers - the loader's own test for
-		 * "this needs a dynamic linker". Only an ELF has the question. */
-		if (!ei)
-			return 0;
-		for (i = 0; i < ei->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++)
-			if (ei->seg[i].type == 3u)
-				return want == 1u;
-		return want == 0u;
 	default:
 		return 0;
 	}
+}
+
+/*
+ * WHICH ANALYSES THIS FILE OFFERS, read off the file.
+ *
+ * The analyses differ by an order of cost and by what each can see, and which
+ * ones apply is a property of the object. A diagnose says which analysis it is
+ * written for (KOF_DIAG_ANALYSIS) and the engine runs it only where the file
+ * offers that analysis:
+ *
+ *   an object file (a kernel module)  its names - SYMBOL
+ *   a dynamically linked ELF          its names - SYMBOL. It contains no system
+ *                                     call: it calls `socket` through the import
+ *                                     table and the instruction is in a library
+ *                                     this file does not carry.
+ *   a static ELF                      SYSCALL as well. It carries its libc and
+ *                                     every call it can make is in the file with
+ *                                     no symbol to resolve it by - the only case
+ *                                     where sweeping the code is the way to read
+ *                                     it. MEASURED, and why a diagnose written for
+ *                                     system calls swept every ELF until a second
+ *                                     condition kept it off the dynamic ones: the
+ *                                     sweep was 66% of the instructions a scan of
+ *                                     40 mixed files executed.
+ *   a PE                              its names, and what it resolves for itself
+ *                                     - APIHASH
+ *
+ * Anything else offers none, so no diagnose is asked.
+ */
+static unsigned diag_evidence(const struct kof_obj_ctx *ctx)
+{
+	if (ctx->format == KOF_FMT_PE)
+		return KOF_DIAG_RUN_SYMBOL | KOF_DIAG_RUN_APIHASH;
+	if (ctx->format == KOF_FMT_ELF) {
+		const struct kof_elf_info *ei = kof_elf(ctx);
+		uint32_t i;
+
+		if (!ei || !ei->valid)
+			return 0;
+		if (ei->e_type == KOF_ELF_REL)
+			return KOF_DIAG_RUN_SYMBOL;
+		/* PT_INTERP: the loader's own test for "this needs a dynamic linker" */
+		for (i = 0; i < ei->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++)
+			if (ei->seg[i].type == 3u)
+				return KOF_DIAG_RUN_SYMBOL;
+		return KOF_DIAG_RUN_SYMBOL | KOF_DIAG_RUN_SYSCALL;
+	}
+	return 0;
+}
+
+/* The analyses a diagnose DECLARED, as the routines the scan runs. */
+static unsigned analysis_runs(unsigned analysis)
+{
+	unsigned r = 0;
+
+	if (analysis & KOF_DIAG_ANALYSIS_SYSCALL)
+		r |= KOF_DIAG_RUN_SYSCALL;
+	if (analysis & KOF_DIAG_ANALYSIS_SYMBOL)
+		r |= KOF_DIAG_RUN_SYMBOL;
+	if (analysis & KOF_DIAG_ANALYSIS_APIHASH)
+		r |= KOF_DIAG_RUN_APIHASH;
+	return r;
+}
+
+/* The routines to run for diagnose `d` on this file: what it declared, where the
+ * file offers it. Zero means the file has nothing for this diagnose. */
+static unsigned diag_routes(const struct kof_diag *d,
+			    const struct kof_obj_ctx *ctx)
+{
+	return analysis_runs(d->analysis) & diag_evidence(ctx);
 }
 
 /* Every condition a diagnose stated - see KOF_DIAG_HAS_ATTRB. */
@@ -445,11 +547,10 @@ static int diag_read_by_verdict(const struct kof_diag *d)
 	return !d->users_known || d->n_users != 0u;
 }
 
-/* Is it RUN: read by a verdict, or serving the engine itself - see
- * KOF_DIAG_SERVES, which no verdict has to name. */
+/* Is it RUN: only when a verdict reads it. */
 static int diag_used(const struct kof_diag *d)
 {
-	return diag_read_by_verdict(d) || d->serves != 0u;
+	return diag_read_by_verdict(d);
 }
 
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
@@ -463,33 +564,22 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 		const struct kof_diag *d = &sc->eng->diag[i];
 
 		/*
-		 * A SIGN IS WHAT MAKES AN OBJECT WORTH ANALYSING; a condition
-		 * that only says where the route can run is not one. KOF_FACT_INTERP
-		 * is of the second kind: a static ELF is not a reason to look, it is
-		 * the only place the system call sweep has anything to find. Counting
-		 * it as a sign made every static ELF ask - and a toolchain's ordinary
-		 * R|X binary then started the analysis.
+		 * A SIGN IS WHAT MAKES AN OBJECT WORTH ANALYSING: a condition on what
+		 * the file is, or an import the diagnose needs. That the file offers
+		 * the diagnose's analysis at all is not one - a static ELF is not a
+		 * reason to look, it is the only place the system call sweep has
+		 * anything to find - and counting it made every static ELF ask, so a
+		 * toolchain's ordinary R|X binary started the analysis.
 		 */
-		{
-			uint32_t signs = d->n_needcap;
-			uint8_t w;
-
-			for (w = 0; w < d->n_when; w++)
-				if (d->when[w].fact != KOF_FACT_INTERP)
-					signs++;
-			if (!signs)
-				continue;
-		}
+		if (!d->n_needcap && !d->n_when)
+			continue;
 		/*
 		 * A DIAGNOSE NO VERDICT READS DOES NOT ASK. Asking means "this
 		 * object is worth the analysis AND worth interpreting" - see the
-		 * caller - and a diagnose that exists to SERVE the engine
-		 * (KOF_DIAG_SERVES) is answered by the step it serves, not by
-		 * emulating every object its conditions admit. MEASURED when it
-		 * did: the PE diagnose, whose only condition is the format, put the
-		 * whole PE corpus through the emulating unpackers - 10.9 s to 26.6 s,
-		 * and two .NET assemblies reported damaged by an unpacker that had
-		 * no business running on them.
+		 * caller. MEASURED when a diagnose whose only condition was the
+		 * format asked: it put the whole PE corpus through the emulating
+		 * unpackers - 10.9 s to 26.6 s, and two .NET assemblies reported
+		 * damaged by an unpacker that had no business running on them.
 		 */
 		if (!diag_read_by_verdict(d))
 			continue;
@@ -683,6 +773,10 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			continue;
 		if (!diag_when_met(ctx, d))
 			continue;               /* the file is not the shape */
+		/* The analysis this diagnose is written for is not one the file
+		 * offers, so there is nothing for it to find. */
+		if (!diag_routes(d, ctx))
+			continue;
 		if (!d->n_needcap) {
 			ok[i] = 1;
 			continue;
@@ -817,17 +911,15 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	if (!b.p || !b.n)
 		return;
 	/*
-	 * ---- ONLY THE ROUTES THE LOADED DIAGNOSES ASK FOR ----------------
+	 * ---- ONLY THE ROUTES AN OPEN DIAGNOSE DECLARED, WHERE THE FILE OFFERS THEM --
 	 *
-	 * KOF_DIAG_ANALYSIS was being parsed, stored and never read: every scan ran
-	 * every route whatever the database wanted. A diagnose about raw
-	 * shellcode has no imports to read and one about LoadLibrary has no
-	 * syscall to find, so the other route is work with nowhere to put its
-	 * answer.
+	 * Every scan once ran every route whatever the database wanted: a PE has
+	 * no syscall to find and a dynamically linked ELF has none either, so the
+	 * other route was work with nowhere to put its answer.
 	 *
-	 * THE UNION, because the database decides together. One diagnose
-	 * asking for the symbol route is enough reason to run it; no diagnose
-	 * asking is the only reason not to.
+	 * THE UNION, because the database decides together. One diagnose asking for
+	 * the symbol route is enough reason to run it; no diagnose asking is the only
+	 * reason not to.
 	 */
 	{
 		unsigned run = 0;
@@ -847,14 +939,10 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 				seqv[n_seq].then = sc->eng->diag[i].seq_then;
 				n_seq++;
 			}
-			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_SYSCALL)
-				run |= KOF_DIAG_RUN_SYSCALL;
-			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_SYMBOL)
-				run |= KOF_DIAG_RUN_SYMBOL;
-			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_EMULATE)
+			/* what it declared, where the file offers it */
+			run |= diag_routes(&sc->eng->diag[i], ctx);
+			if (sc->eng->diag[i].analysis & KOF_DIAG_USES_EMU)
 				run |= KOF_DIAG_RUN_EMULATE;
-			if (sc->eng->diag[i].via & KOF_DIAG_ANALYSIS_APIHASH)
-				run |= KOF_DIAG_RUN_APIHASH;
 		}
 		if (!run)
 			return;

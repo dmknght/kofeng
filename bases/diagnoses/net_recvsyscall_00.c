@@ -30,14 +30,13 @@ KOF_DIAG_NAME(DIAG_NET_RECVSYSCALL);
  * SYSCALL ONLY, like the loader half: a stager has no imports and no symbol
  * table - it is a block of shellcode that enters the kernel directly.
  */
+KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);
 /*
- * BOTH ROUTES, because neither contains the other. MEASURED on the stagers
- * here: meter3_encoded yields 0 nodes to the syscall sweep and 5 to the
- * span runner; the elf255 sample 4b060ab4 yields 5 to the sweep and 0 to
- * the runner. A diagnose naming one route is a diagnose that misses
- * whichever samples the other one sees.
+ * THE EMULATOR, because neither route contains the other - see
+ * mem_execsyscall_00.c for the measurement. A stager has no imports and no
+ * symbol table, and the engine reads which route that leaves off the file.
  */
-KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_EMULATE);
+KOF_DIAG_USE_EMU();
 
 /*
  * ---- AND THE ATTRIBUTES THAT SAY THIS FILE IS WORTH THE ANALYSIS -------

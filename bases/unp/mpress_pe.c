@@ -130,6 +130,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("MPRESS");
 
 #define MP_HDR       8u         /* six bytes of sizes, two of properties */
 #define MP_UNIT      12u        /* the uncompressed size is in 4096s */

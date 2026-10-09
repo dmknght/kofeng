@@ -151,6 +151,7 @@ static int zlib_header(const struct kof_obj_ctx *ctx, uint64_t at)
 KOF_ANALYZE_STEP(KOF_ANALYZE_CARVE);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("Overlay");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

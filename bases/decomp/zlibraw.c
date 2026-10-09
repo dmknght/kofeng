@@ -45,6 +45,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
  * arrived as nothing: an overlay, a carved run, a decoded blob.
  */
 KOF_TARGET_FORMAT(KOF_FMT_UNKNOWN);
+KOF_TARGET_CONTENT("Zlib");
 
 /* Below this there is no room for a header and a stream worth opening. */
 #define MIN_LEN 64u

@@ -17,6 +17,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 
 KOF_TARGET_FORMAT(KOF_FMT_XZ);
+KOF_TARGET_CONTENT("LZMA2");
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {

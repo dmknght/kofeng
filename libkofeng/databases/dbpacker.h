@@ -83,6 +83,9 @@ struct kof_pw_mod {
 	uint32_t heur_want;
 	/* The family this rule predicts, or NULL. See KOF_HEUR_PREDICT. */
 	const char *heur_predict;
+	/* The kind of content this module takes out, or NULL. See
+	 * KOF_TARGET_CONTENT. */
+	const char *content;
 	/* Where the source lives inside the bases tree; NULL or empty when it
 	 * was compiled from outside one. */
 	const char *src;

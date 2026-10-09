@@ -254,6 +254,11 @@ struct kof_open {
 	int                 applies;    /* something wanted to open this object */
 };
 
+/* The recovering modules, on every object: no gate, no chain, nothing produced.
+ * See KOF_ANALYZE_RECOVER. */
+void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		const struct kof_scan_option *opt, struct kof_result *res,
+		uint32_t want);
 void sx_open_step(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		  const struct kof_scan_option *opt, struct kof_result *res,
 		  uint32_t pdepth, uint32_t want, const char *predict,
@@ -343,6 +348,7 @@ int sx_unp_is_family(const struct kof_scanner *sc, 	 const struct kof_module *m,
  */
 enum kof_stage {
 	KOF_STAGE_FACTS = 0,    /* identify, regions, library facts - the host    */
+	KOF_STAGE_RECOVER,      /* what the object hides about itself - reported  */
 	KOF_STAGE_DETECT,       /* detectors on the object as it arrived          */
 	KOF_STAGE_EXAMINE,      /* rules about what it IS, before it is opened    */
 	KOF_STAGE_UNWRAP,       /* the opening steps, in enum kof_analyze order   */

@@ -24,6 +24,7 @@
 #include <celllysis/xref.h>
 #include "../analyzers/trueline/trueline.h"
 #include "../kofcore/kofmod/elf.h"
+#include "../kofcore/kofmod/script.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -494,4 +495,29 @@ void sx_finding_str(const struct kof_scanner *sc,
 	sx_verdict_vals(f, ctx, m, KOF_ENGINE_PATTERN);
 	kof_verdict_name(f, (family && family[0]) ? family : "unknown",
 			 variant, NULL);
+}
+
+/*
+ * WHAT TO CALL AN OBJECT - see kof_object_label in kofeng.h.
+ *
+ * The order is the order of how much each answer says: the module that opened
+ * the object says the most, a normalised view says what it is a view of, a
+ * script says its language, and the format's name is what is left.
+ */
+void kof_object_label(uint32_t entry_kind, const char *packer, uint8_t format,
+		      uint8_t subtype, char *out, size_t cap)
+{
+	const char *w;
+
+	if (!out || !cap)
+		return;
+	if (packer && packer[0])
+		w = packer;
+	else if (entry_kind == KOF_ENT_NORMALIZED)
+		w = "Norm";
+	else if (format == KOF_FMT_SCRIPT && subtype != KOF_SCRIPT_ANY)
+		w = kof_script_type_name(subtype);
+	else
+		w = kof_format_name(format);
+	snprintf(out, cap, "%s", w);
 }

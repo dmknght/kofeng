@@ -70,6 +70,7 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
  * first has no header for a format target to match.
  */
 KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_PE | KOF_FMT_UNKNOWN);
+KOF_TARGET_CONTENT("Dword");
 
 /* The family this decodes, so a heuristic predicting Meterp routes here first. */
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Meterp");

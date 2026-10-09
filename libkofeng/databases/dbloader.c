@@ -949,6 +949,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->heur_level = pm[i].heur_level ? pm[i].heur_level : 1u;
 		m->heur_want  = pm[i].heur_want;
 		m->heur_predict_off = pm[i].heur_predict_off;
+		m->content_off = pm[i].content_off;
 		m->kind       = (uint8_t)h->kind;
 		m->src_off    = pm[i].src_off;
 
@@ -1168,6 +1169,15 @@ const char *kof_db_heur_predict(const struct kof_engine *e,
 	if (!m || !m->heur_predict_off)
 		return NULL;
 	return db_pool_str(e, m, m->heur_predict_off);
+}
+
+/* Zero is "none declared", for the same reason as above. */
+const char *kof_db_content(const struct kof_engine *e,
+			   const struct kof_module *m)
+{
+	if (!m || !m->content_off)
+		return NULL;
+	return db_pool_str(e, m, m->content_off);
 }
 
 /*

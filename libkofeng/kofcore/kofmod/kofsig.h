@@ -2345,6 +2345,33 @@ struct kof_content {
 				    uint64_t ret);
 	uint32_t (*emu_patch)(const struct kof_obj_ctx *, const uint8_t *find,
 			      const uint8_t *rep, uint32_t n);
+	/*
+	 * api_resolved   the i-th API the program finds for itself, read out of
+	 *                the loader data instead of its import table: the engine
+	 *                runs the program's own resolver against the modelled
+	 *                loader and keeps the names it arrives at. Copies the
+	 *                DLL and the function name into the caller's buffers and
+	 *                answers 1; 0 when there is no i-th, so a loop on it ends.
+	 *                One entry per distinct API however many places call it.
+	 *                A program that does not read the loader data answers 0
+	 *                at once - it costs a decode and nothing else.
+	 * sym_import     report one import of THIS object that its tables do not
+	 *                list, so that everything which reads the object's
+	 *                symbols - a rule on imports, a similarity, the result a
+	 *                tool shows - sees the program as it would if the author
+	 *                had used the import table. PE only. A name reported is
+	 *                kept once. Answers 1 when it was taken.
+	 *
+	 * AT THE END OF THE TABLE, so a module built against an older header is
+	 * unaffected. Together they are how a decrypt step reports symbols: the
+	 * same kind of work as recovering a string the program hides, with the
+	 * result going to the object's description.
+	 */
+	uint32_t (*api_resolved)(const struct kof_obj_ctx *, uint32_t i,
+				 char *dll, uint32_t dll_cap,
+				 char *fn, uint32_t fn_cap);
+	uint32_t (*sym_import)(const struct kof_obj_ctx *, const char *dll,
+			       const char *fn);
 };
 
 /*
@@ -3514,6 +3541,26 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  *                           there is no table to read - so it is found by
  *                           looking. That is the line between this and DECOMP.
  *
+ *     KOF_ANALYZE_RECOVER   bases/unp/     the APIs a PE resolves for itself
+ *                           Produces NOTHING. It recovers what a program hides
+ *                           about ITSELF - the names behind the hashes it calls
+ *                           through - and reports it on the object, with
+ *                           kunp_sym_import.
+ *
+ *                           A STEP OF ITS OWN BECAUSE IT IS NOT AN OPENING STEP.
+ *                           The four above open an object, and an object that
+ *                           already has a name - a rule fired on it before any
+ *                           of them ran - is not opened: asking them about it
+ *                           would be digging out what is already known. This
+ *                           is the other way round. A convicted program is
+ *                           exactly the one whose description is worth
+ *                           completing, and a decrypt module that produced a
+ *                           child has not made it any less true that the
+ *                           parent calls what it calls. So it runs FIRST, on
+ *                           every object, before any rule reads the symbols it
+ *                           completes, and the opening steps never stand in
+ *                           front of it.
+ *
  *     KOF_ANALYZE_NORMZ     the host itself
  *                           The same object said plainly - see norm_emit in
  *                           scan.c. Last, because it is about the data INSIDE a
@@ -3536,8 +3583,27 @@ enum kof_analyze {
 	KOF_ANALYZE_DECRYPT,
 	KOF_ANALYZE_CARVE,
 	KOF_ANALYZE_NORMZ,
+	/*
+	 * Last in the enum so no stored step moves; the pipeline's own table, and
+	 * not this order, says it runs FIRST - see KOF_ANALYZE_RECOVER above.
+	 */
+	KOF_ANALYZE_RECOVER,
 	KOF_ANALYZE_COUNT
 };
+
+/* The word for a step, as a name carries it: "Unwrap:LHA". */
+static inline const char *kof_analyze_word(uint32_t step)
+{
+	switch (step) {
+	case KOF_ANALYZE_UNWRAP:  return "Unwrap";
+	case KOF_ANALYZE_UNPACK:  return "Unpack";
+	case KOF_ANALYZE_DECRYPT: return "Decrypt";
+	case KOF_ANALYZE_CARVE:   return "Carve";
+	case KOF_ANALYZE_NORMZ:   return "Normalize";
+	case KOF_ANALYZE_RECOVER: return "Recover";
+	}
+	return "";
+}
 
 /*
  * WHICH STEP OF OPENING AN OBJECT AN UNPACK MODULE IS - declared, and the only
@@ -4916,6 +4982,23 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	((ctx)->content->opened_already                                    \
 	 ? (ctx)->content->opened_already((ctx)) : 0)
 
+/*
+ * Recover and report the APIs a PE resolves for itself - see `api_resolved`
+ * and `sym_import` in struct kof_content.
+ *
+ *     for (i = 0; kunp_api_resolved(i, dll, sizeof dll, fn, sizeof fn); i++)
+ *             kunp_sym_import(dll, fn);
+ */
+#define kunp_api_resolved(i, dll, dll_cap, fn, fn_cap)                     \
+	((ctx)->content->api_resolved                                      \
+	 ? (ctx)->content->api_resolved((ctx), (uint32_t)(i), (dll),       \
+					(uint32_t)(dll_cap), (fn),         \
+					(uint32_t)(fn_cap)) : 0u)
+
+#define kunp_sym_import(dll, fn)                                           \
+	((ctx)->content->sym_import                                        \
+	 ? (ctx)->content->sym_import((ctx), (dll), (fn)) : 0u)
+
 #define kunp_rcstruct_layout_of_image()                                       \
 	((ctx)->content->layout_of_produced                                \
 	 ? (ctx)->content->layout_of_produced((ctx)) : (uint64_t)0)
@@ -5390,6 +5473,25 @@ static inline int kof_maltype_from_word(const char *s, int *out)
  */
 #define KOF_TARGET_SIZE_MIN(min)
 #define KOF_TARGET_ARCH(mask)
+
+/*
+ * WHAT KIND OF CONTENT a module takes out - a word, not a format.
+ *
+ *     KOF_TARGET_FORMAT(KOF_FMT_GZIP);
+ *     KOF_TARGET_CONTENT("Deflate");
+ *
+ * Optional, and for a module that unwraps or carves. The engine names such a
+ * module from values it already holds - its step, and the format of the object
+ * it ran on - and this adds the one thing neither says: what it took out of it.
+ * "Unwrap:Gzip/Deflate", "Unwrap:Raw/Zlib", "Carve:PE/Overlay". A module with
+ * nothing to add leaves it out and is named "Unwrap:Tar".
+ *
+ * A DECLARATION AND NOT A CALL, because it is a property of the module and not of
+ * one run of it: a call has to be reached to say anything, and a name a module
+ * only gives itself on the path that produces something is a name that is empty
+ * on every path that does not.
+ */
+#define KOF_TARGET_CONTENT(word)
 
 /*
  * How a declared string is compared.

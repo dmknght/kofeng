@@ -45,6 +45,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_CONTENT("UPX");
 
 /*
  * The anchor. Declared rather than compared byte by byte, so the host searches

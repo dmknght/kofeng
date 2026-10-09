@@ -64,6 +64,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_PE);
+KOF_TARGET_CONTENT("Hollow");
 
 #define HP_MIN_HOLLOW   3u          /* sections with a size and no bytes */
 #define HP_MIN_VSZ      0x1000u     /* below this a VirtualSize says little */

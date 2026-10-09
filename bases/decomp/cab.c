@@ -26,6 +26,7 @@
 #include <kofmod/cab.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_CAB);
+KOF_TARGET_CONTENT("MSZIP/LZX");
 /*
  * A CONTAINER, not a packer: a cabinet carries files that were separately
  * there. Depth through it is a directory tree rather than a layer of packing,
@@ -51,6 +52,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (!c->valid)
 		return;
+
+	/* What the parse could not describe: files in a coded folder, and
+	 * pieces that did not fit the pool. Reported as facts and not as
+	 * damage - see the note at the top. Said before the logic acts. */
+	kof_debug("Cab.coded", c->n_coded);
+	kof_debug("Cab.split", c->n_split);
 
 	for (i = 0; i < c->n_entries; i++) {
 		const struct kof_entry *e = &c->entry[i];
@@ -97,11 +104,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 
 	kof_debug("Cab.joined", opened);
-	/* What the parse could not describe: files in a coded folder, and
-	 * pieces that did not fit the pool. Reported as facts and not as
-	 * damage - see the note at the top. */
-	kof_debug("Cab.coded", c->n_coded);
-	kof_debug("Cab.split", c->n_split);
 	/* Coded files past the cap above: present, describable, and not opened
 	 * by this pass. */
 	kof_debug("Cab.skipped", skipped);

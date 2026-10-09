@@ -21,6 +21,7 @@
 #include <kofmod/lha.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_LHA);
+KOF_TARGET_CONTENT("LZHUF");
 /*
  * A CONTAINER, not a packer: an archive carries files that were separately
  * there. Depth through it is a directory tree rather than a layer of packing,
@@ -35,6 +36,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (!l->valid)
 		return;
+
+	/* What the parse says, before the logic acts on it. Everything the
+	 * archive holds behind a coding, including what is opened below: a
+	 * reader asking "how much of this is compressed" means that, not "how
+	 * much was left". */
+	kof_debug("Lha.coded", l->n_coded);
 
 	for (i = 0; i < l->n_entries; i++) {
 		const struct kof_entry *e = &l->entry[i];
@@ -59,8 +66,4 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 
 	kof_debug("Lha.decoded", opened);
-	/* Everything the archive holds behind a coding, including what was
-	 * opened above: a reader asking "how much of this is compressed" means
-	 * that, not "how much was left". */
-	kof_debug("Lha.coded", l->n_coded);
 }

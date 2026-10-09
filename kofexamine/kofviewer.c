@@ -8722,7 +8722,13 @@ static void touch_head(const struct kof_touch *t, char *out, size_t cap)
 	 * The word is still right for a rule that declares neither markers nor
 	 * blocks, which is what it was written for.
 	 */
-	if (t->mod && t->mod->n_block)
+	const char *method = kof_touch_method(t);
+
+	/* A rule that read the node graph declares no markers either, and
+	 * "structural" would send a reader looking at the parse. */
+	if (method)
+		snprintf(out, cap, "%s", method);
+	else if (t->mod && t->mod->n_block)
 		out[0] = 0;
 	else if (!t->n_str)
 		snprintf(out, cap, "structural");
@@ -16787,7 +16793,7 @@ static void draw_marker_line(struct out *o, struct view *v)
 	struct object *ob = cur_obj(v);
 	/* Wide enough for the action slot, which is the longest thing that lands
 	 * here: a dump reports counts, a byte total and a directory name. */
-	char name[80], head[24], right[200];
+	char name[80], right[200];
 	/* The right hand text is not always a readout: while the draft has the
 	 * focus it can be a complaint, and a complaint in the colour of a
 	 * readout is one people scroll past. */
@@ -16858,6 +16864,20 @@ static void draw_marker_line(struct out *o, struct view *v)
 		/* One field - see where it is filled. */
 		out_fmt(o, "%s%s" A_OFF, pcol, ob->packer);
 		out_str(o, A_DIM "  |  " A_OFF);
+	} else if (!emu_why_tag(obj_emu_why(ob))) {
+		/*
+		 * NO MODULE OPENED IT, so the object is named by what the engine
+		 * says it is - "Norm" for a normalised view, the language of a
+		 * script, the format otherwise. Crafted by kof_object_label from
+		 * the object's own state; nothing is worked out here.
+		 */
+		char label[48];
+
+		kof_object_label(ob->entry_kind, NULL, ob->ctx.format,
+				 ob->ctx.subtype, label, sizeof label);
+		out_fmt(o, "%s%s" A_OFF, ob->entry_kind == KOF_ENT_NORMALIZED
+					? A_ID : "", label);
+		out_str(o, A_DIM "  |  " A_OFF);
 	} else if (emu_why_tag(obj_emu_why(ob))) {
 		/*
 		 * NO MODULE NAMED IT, AND IT STILL LOOKS PACKED.
@@ -16923,10 +16943,8 @@ static void draw_marker_line(struct out *o, struct view *v)
 		 */
 		if (v->sel_touch < ob->n_touch) {
 			kof_touch_name(&ob->touch[v->sel_touch], name, sizeof name);
-			touch_head(&ob->touch[v->sel_touch], head, sizeof head);
 		} else {
 			snprintf(name, sizeof name, "no marker selected");
-			head[0] = '\0';
 		}
 
 		/*
@@ -16944,21 +16962,29 @@ static void draw_marker_line(struct out *o, struct view *v)
 		snprintf(hits, sizeof hits, "Matched %u", hit);
 		snprintf(skips, sizeof skips, "Skipped %u", ob->n_touch - hit);
 
+		/*
+		 * <Object> | <Verdict name> | <verdict info>: the name of the
+		 * selected rule first, then how many matched and were skipped.
+		 * They were the other way round, with the name last and followed
+		 * by a count of the rule's markers - which the dashboard and the
+		 * markers list already say, and which crowded the line.
+		 */
 		c = 1 + (int)o->col_hint;
+		v->name_c0 = c;
+		v->name_c1 = c + (int)strlen(name) - 1;
+		c += (int)strlen(name) + 5;
 		v->hit_c0 = c;
 		v->hit_c1 = c + (int)strlen(hits) - 1;
 		c += (int)strlen(hits) + 2;
 		v->skip_c0 = c;
 		v->skip_c1 = c + (int)strlen(skips) - 1;
-		c += (int)strlen(skips) + 5;
-		v->name_c0 = c;
-		v->name_c1 = c + (int)strlen(name) - 1;
 
-		out_fmt(o, "%s%s" A_OFF A_DIM "  %s  |  " A_OFF "%s%s %s" A_OFF,
-			hit ? A_BAD : A_DIM, hits, skips,
+		out_fmt(o, "%s%s" A_OFF A_DIM "  |  " A_OFF,
 			v->sel_touch < ob->n_touch
 			? touch_colour(&ob->touch[v->sel_touch]) : A_DIM,
-			name, head);
+			name);
+		out_fmt(o, "%s%s" A_OFF A_DIM "  %s" A_OFF,
+			hit ? A_BAD : A_DIM, hits, skips);
 	}
 
 	/*

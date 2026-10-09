@@ -86,6 +86,7 @@
 KOF_ANALYZE_STEP(KOF_ANALYZE_CARVE);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
+KOF_TARGET_CONTENT("Appended");
 
 /* The bound the heur rule argues for: alignment padding cannot reach a page. */
 #define PAGE 4096u
