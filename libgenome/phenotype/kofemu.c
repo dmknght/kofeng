@@ -409,6 +409,16 @@ struct kof_emu {
 	uint64_t stack_lo, stack_hi;
 	struct { uint64_t lo, hi; uint8_t seen; } hop[KOF_EMU_EXEC_WATCH];
 	uint32_t n_hop;
+	/*
+	 * THE SPAN OF THE HOPS NOT YET ENTERED, so the per-instruction test is one
+	 * range compare and not a walk of the table. MEASURED on a 5.5 MB PE with
+	 * twenty-odd images: the walk was 21% of every instruction the interpreter
+	 * ran, to answer "is rip in a region nothing has run in" - which is false
+	 * for nearly all of them. hop_unseen is how many remain; the bounds are
+	 * meaningful only while it is non-zero.
+	 */
+	uint32_t hop_unseen;
+	uint64_t hop_lo, hop_hi;
 	uint64_t hop_first_insn, hop_first_rip;
 	uint64_t fetch_page;   /* never a page base until one is set */
 	uint32_t null_calls;   /* imports this environment did not have */
@@ -1543,6 +1553,25 @@ int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n)
 }
 
 
+/* Recompute the span of the unseen hops - after one is added or entered. */
+static void hop_bounds(struct kof_emu *e)
+{
+	uint32_t i;
+
+	e->hop_unseen = 0;
+	e->hop_lo = ~(uint64_t)0;
+	e->hop_hi = 0;
+	for (i = 0; i < e->n_hop; i++) {
+		if (e->hop[i].seen)
+			continue;
+		e->hop_unseen++;
+		if (e->hop[i].lo < e->hop_lo)
+			e->hop_lo = e->hop[i].lo;
+		if (e->hop[i].hi > e->hop_hi)
+			e->hop_hi = e->hop[i].hi;
+	}
+}
+
 void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen)
 {
 	if (!e || hi <= lo || e->n_hop >= KOF_EMU_EXEC_WATCH)
@@ -1551,6 +1580,7 @@ void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen)
 	e->hop[e->n_hop].hi = hi;
 	e->hop[e->n_hop].seen = (uint8_t)(seen != 0);
 	e->n_hop++;
+	hop_bounds(e);
 }
 
 /* The first instruction executed in a region nothing has run in yet. Returns
@@ -1559,10 +1589,13 @@ static int hop_first(struct kof_emu *e, uint64_t rip)
 {
 	uint32_t i;
 
+	if (!e->hop_unseen || rip < e->hop_lo || rip >= e->hop_hi)
+		return -1;
 	for (i = 0; i < e->n_hop; i++)
 		if (!e->hop[i].seen && rip >= e->hop[i].lo &&
 		    rip < e->hop[i].hi) {
 			e->hop[i].seen = 1;
+			hop_bounds(e);
 			return (int)i;
 		}
 	return -1;
@@ -2006,10 +2039,14 @@ static void reg_wr(struct kof_emu *e, unsigned r, unsigned bytes, int high8,
 
 static int parity8(uint64_t v)
 {
-	unsigned x = (unsigned)(v & 0xffu), c = 0;
+	unsigned x = (unsigned)(v & 0xffu);
 
-	while (x) { c ^= 1u; x &= x - 1u; }
-	return !c;                                /* PF is set when EVEN */
+	/* PF is set when the low byte has an EVEN number of set bits. Folded
+	 * rather than looped: this runs for every ALU instruction. */
+	x ^= x >> 4;
+	x ^= x >> 2;
+	x ^= x >> 1;
+	return !(x & 1u);
 }
 
 /*
@@ -6281,6 +6318,42 @@ static void fail(struct kof_emu *e, enum kof_emu_stop s, const struct emu_insn *
 	}
 }
 
+/*
+ * THE CACHED INSTRUCTION STILL READS THE SAME BYTES. At most fifteen, compared
+ * here in one or two word loads where a library call was made for each of the
+ * hundreds of millions of instructions a long run executes - 4.5% of the whole
+ * profile in the call alone. Same answer as memcmp(a, b, n) == 0.
+ */
+static inline int bytes_eq(const uint8_t *a, const uint8_t *b, unsigned n)
+{
+	uint64_t x, y;
+
+	if (n >= 8u) {
+		memcpy(&x, a, 8);
+		memcpy(&y, b, 8);
+		if (x != y)
+			return 0;
+		memcpy(&x, a + n - 8u, 8);
+		memcpy(&y, b + n - 8u, 8);
+		return x == y;
+	}
+	if (n >= 4u) {
+		uint32_t p, q;
+
+		memcpy(&p, a, 4);
+		memcpy(&q, b, 4);
+		if (p != q)
+			return 0;
+		memcpy(&p, a + n - 4u, 4);
+		memcpy(&q, b + n - 4u, 4);
+		return p == q;
+	}
+	while (n--)
+		if (*a++ != *b++)
+			return 0;
+	return 1;
+}
+
 enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 {
 	e->stop = KOF_EMU_STOP_BUDGET;
@@ -6531,8 +6604,8 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e)
 				if (ent->valid && ent->va == e->rip &&
 				    ent->pg == fpg &&
 				    poff + ent->len <= KOF_EMU_PAGE &&
-				    !memcmp(fpg->data + poff, ent->bytes,
-					    ent->len)) {
+				    bytes_eq(fpg->data + poff, ent->bytes,
+					     ent->len)) {
 					/*
 					 * POINTED AT, NOT COPIED. An struct emu_insn is
 					 * 480 bytes and this path runs tens of
