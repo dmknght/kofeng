@@ -169,6 +169,7 @@ void kof_scan_free(struct kof_scanner *sc)
 	}
 	kof_apihash_free(sc->apihash);
 	sc->apihash = NULL;
+	free(sc->diag_rep);
 	free(sc->gr);
 	free(sc->live);
 	free(sc->found);
@@ -652,6 +653,7 @@ void sx_obj_begin(struct kof_scanner *sc)
 	/* The pathogen demand. See KOF_ENG_USE_PATHOGEN: there is no state to set,
 	 * so one object's ask cannot become the next object's. */
 	sc->diag_ask = 0;
+	sc->diag_all = 0;
 	memset(sc->diag_hit, 0, sizeof sc->diag_hit);
 
 	/* The symbol block is rebuilt on first use. */

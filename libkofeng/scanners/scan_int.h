@@ -361,6 +361,7 @@ enum kof_stage {
 	KOF_STAGE_VERDICT,      /* rules about what the stages above produced     */
 	KOF_STAGE_RECONCILE,    /* a parent's guesses against its children        */
 	KOF_STAGE_MODEL,        /* the scored model                               */
+	KOF_STAGE_REPORT,       /* what each diagnose made of it - on request     */
 	KOF_STAGE_COUNT
 };
 

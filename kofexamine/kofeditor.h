@@ -41,6 +41,7 @@
 #include <kofmod/kofoverlord.h>
 #include <kofeng.h>
 #include "kofinspect.h"
+#include "../libkofeng/databases/diagsrc.h"
 
 
 #define MAX_DECL  32
@@ -678,6 +679,15 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * `rule`, `thresh`, `at_off` and `mask` mean nothing to one.
  */
 #define GRP_KIND_SIM    1u
+/*
+ * A TERM OF A VERDICT THAT READS DIAGNOSES - kof_diag(A), kof_diag_share(...),
+ * kof_diag_str_any(...) - as a matcher, so it is listed under Matchers and
+ * combined under Conditions like any other, by the same expression over matcher
+ * numbers. It carries the term as diagsrc read it. `rule`, `thresh`, `at_off`,
+ * `mask` and the rest mean nothing to one, and nothing here writes one back: a
+ * verdict of this kind is shown, not edited - see draft_missing_of.
+ */
+#define GRP_KIND_DIAG   2u
 
 /*
  * THE MEASURES AN ITEM CAN NAME. Each is computed by the engine, and which
@@ -832,6 +842,7 @@ struct group {
 	 * puts something in it, the same way a fresh string matcher holds no
 	 * markers.
 	 */
+	struct kof_dsrc_term term;  /* GRP_KIND_DIAG only */
 	struct grp_sim_item sim[GRP_SIM_MAX];
 	uint8_t  n_sim;
 	uint8_t  pct;               /* how much of each the rule demands */
@@ -1080,6 +1091,16 @@ struct kof_draft {
 	int         opt_auto[OPT_COUNT];
 	char        family[64];
 	uint32_t    maltype;
+	/*
+	 * A VERDICT THAT READS DIAGNOSES, as diagsrc read it, and the text it came
+	 * from. NULL for every other rule. Kept whole - not copied into fields -
+	 * because writing it back is a patch of THIS text by THIS list: whatever the
+	 * panel does not model stays exactly as the author wrote it. See
+	 * draft_from_source.
+	 */
+	struct kof_dsrc *vd;
+	char        *vtext;
+	size_t       vtext_n;
 	/*
 	 * WHICH OBJECT FORMATS THE RULE APPLIES TO, as a bit per format.
 	 *
@@ -1381,6 +1402,13 @@ struct object {
 	uint32_t          broken;
 	struct kof_touch *touch;
 	uint32_t          n_touch;
+	/*
+	 * WHAT EACH DIAGNOSE MADE OF THIS OBJECT - an owned copy of
+	 * kof_result.diag, which the engine lends only for the callback. Empty
+	 * when the scan did not ask. See draw_decl_diag.
+	 */
+	struct kof_diag_report *diag;
+	uint32_t                n_diag;
 
 	/*
 	 * The object's symbol records, in the KSYM layout kofsym.h fixes.

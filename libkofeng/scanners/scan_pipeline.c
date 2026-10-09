@@ -71,6 +71,14 @@ static void st_facts(struct kof_pipeline *p)
 	memset(&p->ctx, 0, sizeof p->ctx);
 	kof_mod_attach(&p->ctx, sc);
 	sx_obj_begin(sc);
+	/*
+	 * A CALLER THAT WANTS THE REPORT WANTS EVERY DIAGNOSE COMPUTED IN THE ONE
+	 * ANALYSIS, so it is said at the start of the object and not discovered
+	 * at the end. Decided late, the scan that had already run without the
+	 * diagnoses no verdict reads would have to be thrown away and run again -
+	 * the same object analysed twice for one answer.
+	 */
+	sc->diag_all = opt->report_diag != 0;
 
 	/*
 	 * How big the object is, before anything tries to sx_identify it.
@@ -641,6 +649,37 @@ static void st_model(struct kof_pipeline *p)
 			    out->broken == KOF_BROKEN_DAMAGED, out);
 }
 
+/*
+ * REPORT: what each diagnose made of this object, for a caller that asked.
+ *
+ * LAST, after every verdict is final, because asking runs the diagnoses no
+ * verdict reads and rebuilds the graph with them: whatever it changes is not
+ * something a verdict can have read.
+ */
+static void st_report(struct kof_pipeline *p)
+{
+	struct kof_scanner *sc = p->sc;
+	uint32_t n, i, k = 0;
+
+	if (!p->opt->report_diag)
+		return;
+	n = kof_scan_diag_count(&p->ctx);
+	if (!n)
+		return;
+	/* One buffer for the scanner's life, lent to the caller for its callback
+	 * - see kof_result.diag. */
+	if (!sc->diag_rep) {
+		sc->diag_rep = calloc(KOF_DB_MAX_DIAG, sizeof *sc->diag_rep);
+		if (!sc->diag_rep)
+			return;
+	}
+	for (i = 0; i < n; i++)
+		if (kof_scan_diag_report(&p->ctx, i, &sc->diag_rep[k]))
+			k++;
+	p->out->diag = sc->diag_rep;
+	p->out->n_diag = k;
+}
+
 static void st_recover(struct kof_pipeline *p)
 {
 	sx_recover(p->sc, &p->ctx, p->opt, p->out, p->want);
@@ -708,7 +747,8 @@ static const struct stage_row {
 	{ KOF_STAGE_SERVE,     KOF_ANALYZE_UNWRAP,  0,                              st_serve },
 	{ KOF_STAGE_VERDICT,   KOF_ANALYZE_UNWRAP,  0,                              st_verdict },
 	{ KOF_STAGE_RECONCILE, KOF_ANALYZE_UNWRAP,  0,                              st_reconcile },
-	{ KOF_STAGE_MODEL,     KOF_ANALYZE_UNWRAP,  0,                              st_model }
+	{ KOF_STAGE_MODEL,     KOF_ANALYZE_UNWRAP,  0,                              st_model },
+	{ KOF_STAGE_REPORT,    KOF_ANALYZE_UNWRAP,  0,                              st_report }
 };
 
 void sx_pipeline_run(struct kof_pipeline *p)

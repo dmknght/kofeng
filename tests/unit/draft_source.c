@@ -981,6 +981,49 @@ static void seeded_target_is_not_an_edit(void)
 	CK(draft_hash(&e) != empty);
 }
 
+/*
+ * A VERDICT THAT READS DIAGNOSES opens through diagsrc and not the line scan:
+ * the header lands in the same draft fields a pattern rule's does, the condition
+ * is kept whole for the panel, and Save says why it is refused - in a sentence,
+ * not as a thing to declare first.
+ */
+static void diagnose_verdict(void)
+{
+	static const char src[] =
+		"#include <kofmod/kofsig.h>\n"
+		"/* kof_diag(NOT_A_TERM) is a comment */\n"
+		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
+		"KOF_TARGET_SUBTYPE(KOF_ELF_REL);\n"
+		"KOF_TARGET_NAME(KOF_MALTYPE_ROOTKIT, \"Diamo\");\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
+		"{\n"
+		"\tif (kof_diag(DIAG_A) && kof_diag(DIAG_B))\n"
+		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
+		"}\n";
+	struct kof_editor e;
+	const char *path = write_tmp(src), *why;
+
+	if (!path)
+		return;
+	lend(&e);
+	CK(draft_from_source(&e, path) != 0);
+	CK(e.dr.vd != NULL && e.dr.vd->has_cond && e.dr.vd->cond.n == 2);
+	EQ(e.dr.family, "Diamo");
+	CK((e.dr.fmt_mask & (1u << KOF_FMT_ELF)) != 0);
+	CK(e.dr.opt_on[OPT_SUBTYPE] != 0);
+	/* Each term is a matcher and the `if` one condition over them, in the
+	 * panel's own vocabulary - nothing is drawn for a verdict that a rule of
+	 * strings does not already have. */
+	CK(e.dr.n_decl == 0 && e.dr.n_grp == 2 && e.dr.n_cnd == 1);
+	CK(e.dr.grp[0].kind == GRP_KIND_DIAG && e.dr.grp[1].kind == GRP_KIND_DIAG);
+	EQ(e.dr.grp[1].term.a, "DIAG_B");
+	EQ(e.dr.cnd[0].expr, "1&2");
+	why = draft_missing_of(&e, 0);
+	CK(why != NULL && why[strlen(why) - 1u] == '.');
+	draft_clear(&e);
+	CK(e.dr.vd == NULL && e.dr.vtext == NULL);
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -998,6 +1041,7 @@ int main(void)
 	block_order_is_not_an_edit();
 	block_note_is_not_a_matcher_note();
 	seeded_target_is_not_an_edit();
+	diagnose_verdict();
 
 	if (fails) {
 		printf("draft source: %d check(s) failed\n", fails);

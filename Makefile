@@ -916,6 +916,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/databases/dbloader.c \
            libkofeng/detectors/dbindex.c \
            libkofeng/databases/dbpacker.c \
+           libkofeng/databases/diagsrc.c \
            libkofeng/detectors/heur/kofheur.c \
            libkofeng/detectors/overlord/matchers/kofmatch.c \
            libkofeng/detectors/overlord/plague/kofplague.c \

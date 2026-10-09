@@ -1212,6 +1212,17 @@ struct kof_scanner {
 	 * declaration exists to prevent.
 	 */
 	int      diag_ask;
+	/*
+	 * A TOOL ASKED ABOUT EVERY DIAGNOSE on this object, read by a verdict or
+	 * not - see kof_scan_diag_report. Per object, like diag_ask: a scan
+	 * normally runs only what a verdict reads (KDIG_SEC_USERS), and a
+	 * researcher looking at a file wants the answer for a diagnose nothing
+	 * reads yet, which is exactly the one that is being written.
+	 */
+	int      diag_all;
+	/* The report for the object being finished, built by sx_diag_report and
+	 * lent to the caller for the length of its callback. */
+	struct kof_diag_report *diag_rep;
 
 	/*
 	 * WHAT THE INTERPRETER MAY DO ON THIS OBJECT, as ONE value.
@@ -1456,5 +1467,33 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
 const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n);
 
 void kof_scan_diag_force(const struct kof_obj_ctx *);
+
+/*
+ * WHAT EACH LOADED DIAGNOSE MAKES OF THIS OBJECT, for a tool that reports.
+ *
+ * ONE STATE PER DIAGNOSE, in the order the checks run - the first that fails is
+ * the reason, so a state also says how far the diagnose got:
+ *
+ *   SHAPE     the file is not the kind this diagnose is about (its conditions)
+ *   NO_ROUTE  the analysis it is written for is not one this file offers
+ *   SIGNS     the file lacks an import or a symbol reference the diagnose needs
+ *   SEEN      the file carries the signs and the analysis ran, but the nodes
+ *             did not form the diagnose's tree
+ *   MATCH     the tree was found; `at` says where each node is
+ *
+ * SEEN is the interesting one for a person writing a rule: the file looks like
+ * what the diagnose describes and it still did not match.
+ *
+ * ASKING RUNS THE ANALYSIS for all of them, read by a verdict or not, once per
+ * object. The cost is the scan's own - a normal scan skips a diagnose no verdict
+ * reads, and this is the one caller that must not.
+ *
+ * The types are in kofeng.h: a caller receives them in kof_result.diag.
+ */
+uint32_t kof_scan_diag_count(const struct kof_obj_ctx *ctx);
+/* 1 and `out` filled, or 0 for an index past the end or an object with nothing
+ * to analyse. */
+int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
+			 struct kof_diag_report *out);
 
 #endif /* KOFENG_SCAN_H */

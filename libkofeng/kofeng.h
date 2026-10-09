@@ -398,6 +398,44 @@ struct kof_infected {
  * to KOF_SRC_MAX_REGIONS, which is what a producer may declare. */
 #define KOF_MAX_REGIONS 16u
 
+/*
+ * WHAT EACH LOADED DIAGNOSE MAKES OF AN OBJECT - delivered in kof_result.diag
+ * to a caller that asked for it with kof_scan_option.report_diag.
+ *
+ * ONE STATE PER DIAGNOSE, in the order the checks run - the first that fails is
+ * the reason, so a state also says how far the diagnose got:
+ *
+ *   SHAPE     the file is not the kind this diagnose is about (its conditions)
+ *   NO_ROUTE  the analysis it is written for is not one this file offers
+ *   SIGNS     the file lacks an import or a symbol reference the diagnose needs
+ *   SEEN      the gate is open and the analysis ran, but the nodes did not
+ *             form the diagnose's tree. It says NOTHING about how close: a
+ *             diagnose that declares only an analysis has its gate open on
+ *             every file that offers it (measured: 122 of 255 ELF)
+ *   MATCH     the tree was found; `at` says where each node is
+ *
+ */
+#define KOF_DIAG_REPORT_NODES 32u
+
+enum kof_diag_state {
+	KOF_DIAG_ST_SHAPE = 1,
+	KOF_DIAG_ST_NO_ROUTE,
+	KOF_DIAG_ST_SIGNS,
+	KOF_DIAG_ST_SEEN,
+	KOF_DIAG_ST_MATCH
+};
+
+struct kof_diag_report {
+	const char *name;
+	uint16_t    id;
+	uint8_t     state;                  /* enum kof_diag_state */
+	uint8_t     n_node;                 /* nodes the diagnose declares */
+	uint8_t     n_bound;                /* nodes found: n_node on MATCH, else 0 */
+	uint16_t    cap[KOF_DIAG_REPORT_NODES];  /* what node k is */
+	uint64_t    at[KOF_DIAG_REPORT_NODES];   /* where, as an offset into the object */
+};
+
+
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
@@ -624,6 +662,25 @@ struct kof_result {
 	 */
 	const uint8_t *syms;
 	uint32_t n_syms;
+
+	/*
+	 * WHAT EACH DIAGNOSE MADE OF THIS OBJECT, when the caller asked - see
+	 * kof_scan_option.report_diag. NULL and 0 otherwise.
+	 *
+	 * THIS IS NOT THE LISTING THAT WAS REMOVED, and it is not a way to ask what
+	 * a file does: a diagnose is a step and the verdict is the answer. It is for
+	 * a tool that helps someone WRITE a rule, which has to see the step to build
+	 * on it. Opt-in for that reason, and costed as the scan's own analysis: it
+	 * runs the diagnoses no verdict reads, so it is not free and no scan asks
+	 * for it by default.
+	 *
+	 * BORROWED FOR THE CALL, like syms: valid until the callback returns - the
+	 * array and what it holds. The one exception is each `name`, which is the
+	 * database's own string and lives as long as the engine does, so a host that
+	 * copies the array keeps names that are still good.
+	 */
+	const struct kof_diag_report *diag;
+	uint32_t n_diag;
 
 	/*
 	 * REGIONS THE PRODUCER DECLARED, when nothing could parse them out.
@@ -1289,15 +1346,21 @@ struct kof_scan_option {
 	void                 *event_user;
 
 	/*
-	 * THERE IS NO want_diag. A caller could once turn the analysis on
-	 * for every object and read back which diagnoses matched; what
-	 * decides it now is the DATABASE - a diagnose declares the symbols
-	 * or the file attributes that make an object worth the walk, and the
-	 * engine routes on that declaration. A switch beside it was a second
-	 * way to make the same decision, and the one that could not be
-	 * measured: it turned the most expensive thing the engine does on
-	 * for files nothing had recognised.
+	 * WHETHER A SCAN DECIDES TO ANALYSE IS THE DATABASE'S: a diagnose
+	 * declares the symbols or the file attributes that make an object worth
+	 * the walk, and the engine routes on that declaration. There is no switch
+	 * that turns the analysis on for every object, because a switch beside the
+	 * declaration was a second way to make one decision, and the one that
+	 * could not be measured - it ran the most expensive thing the engine does
+	 * on files nothing had recognised.
+	 *
+	 * report_diag IS A DIFFERENT QUESTION: not "should this object be
+	 * analysed" but "tell me what each diagnose made of it", asked by a tool
+	 * for the one object a person is looking at. It is not a verdict and it
+	 * changes none: the report is built after every verdict is final. See
+	 * kof_result.diag.
 	 */
+	int      report_diag;
 
 	int      recurse_dirs;     /* descend into directories */
 	/*

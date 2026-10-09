@@ -552,10 +552,11 @@ static int diag_read_by_verdict(const struct kof_diag *d)
 	return !d->users_known || d->n_users != 0u;
 }
 
-/* Is it RUN: only when a verdict reads it. */
-static int diag_used(const struct kof_diag *d)
+/* Is it RUN: only when a verdict reads it - or when a tool asked about all of
+ * them, see kof_scan_diag_report. */
+static int diag_used(const struct kof_scanner *sc, const struct kof_diag *d)
 {
-	return diag_read_by_verdict(d);
+	return sc->diag_all || diag_read_by_verdict(d);
 }
 
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
@@ -774,7 +775,7 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		 * as ZERO closes it; a diagnose whose users were never written
 		 * down is unknown and keeps running.
 		 */
-		if (!diag_used(d))
+		if (!diag_used(sc, d))
 			continue;
 		if (!diag_when_met(ctx, d))
 			continue;               /* the file is not the shape */
@@ -978,7 +979,7 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 
 		/* An unread diagnose is not matched: nobody collects the answer,
 		 * and the shared graph is still there for the ones that are. */
-		if (!diag_used(&sc->eng->diag[i]))
+		if (!diag_used(sc, &sc->eng->diag[i]))
 			continue;
 		/* every node it bound comes back - see kof_scanner.diag_bind */
 		if (kof_diag_match(ds, &sc->eng->diag[i],
@@ -1012,6 +1013,72 @@ void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
 	 * rather than bypassing the test keeps one gate on this work. */
 	sc->diag_ask = 1;
 	diag_ready(sc, ctx);
+}
+
+_Static_assert(KOF_DIAG_REPORT_NODES >= KOF_DB_MAX_DIAG_NODE,
+	       "a report must hold every node a diagnose may bind");
+
+uint32_t kof_scan_diag_count(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	if (!sc || !sc->eng)
+		return 0;
+	return sc->eng->n_diag < sizeof sc->diag_hit * 8u
+	       ? sc->eng->n_diag : (uint32_t)(sizeof sc->diag_hit * 8u);
+}
+
+int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
+			 struct kof_diag_report *out)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const struct kof_diag *d;
+
+	if (!sc || !sc->eng || !out || i >= kof_scan_diag_count(ctx))
+		return 0;
+	/*
+	 * ONLY WHAT THE SCAN ALREADY COMPUTED. diag_all was set when the object
+	 * began - see st_facts - so the one analysis covered every diagnose and
+	 * this reads its answer; a caller that did not ask has nothing here, and
+	 * running the analysis now would be a second pass over the object.
+	 */
+	if (!sc->diag_all)
+		return 0;
+	/* The analysis itself, if no rule had asked for it yet: the one run. */
+	kof_scan_diag_force(ctx);
+
+	d = &sc->eng->diag[i];
+	memset(out, 0, sizeof *out);
+	out->name = d->name;
+	out->id = d->id;
+	out->n_node = d->n_node > KOF_DB_MAX_DIAG_NODE
+		      ? (uint8_t)KOF_DB_MAX_DIAG_NODE : d->n_node;
+	/* The order the gate applies them in - see diag_gates. */
+	if (!diag_when_met(ctx, d)) {
+		out->state = KOF_DIAG_ST_SHAPE;
+	} else if (!diag_routes(d, ctx)) {
+		out->state = KOF_DIAG_ST_NO_ROUTE;
+	} else if (!diag_gate_open(sc, ctx, i)) {
+		out->state = KOF_DIAG_ST_SIGNS;
+	} else if (!((sc->diag_hit[i >> 3] >> (i & 7u)) & 1u) ||
+		   !sc->diag_graph) {
+		out->state = KOF_DIAG_ST_SEEN;
+	} else {
+		uint8_t k, nb = sc->diag_n_bind[i];
+
+		out->state = KOF_DIAG_ST_MATCH;
+		for (k = 0; k < nb && k < out->n_node; k++) {
+			uint16_t b = sc->diag_bind[i][k];
+			const struct kof_diag_hit *h =
+				b < kof_diag_scan_count(sc->diag_graph)
+				? kof_diag_scan_at(sc->diag_graph, b) : NULL;
+
+			out->cap[k] = d->node[k].cap;
+			out->at[k] = h ? h->at : 0;
+			out->n_bound++;
+		}
+	}
+	return 1;
 }
 
 /*
@@ -1136,4 +1203,3 @@ int oc_diag(const struct kof_obj_ctx *ctx, uint16_t id)
 			return (sc->diag_hit[i >> 3] >> (i & 7u)) & 1u;
 	return 0;
 }
-

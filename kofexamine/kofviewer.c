@@ -1328,7 +1328,7 @@ struct view {
 	 * what carries the control, and a table whose handle vanished when it
 	 * was folded could not be opened again.
 	 */
-	int              blk_fold, sim_fold;
+	int              blk_fold, sim_fold, diag_fold;
 	/* Which object the table was carved from, so moving to another one
 	 * carves that one instead of showing the last one's blocks. */
 	uint32_t         plg_seg_obj;
@@ -2717,6 +2717,30 @@ static struct object *cur_obj(struct view *v)
 
 /* ---- collecting the objects ------------------------------------------------ */
 
+/*
+ * THE ENGINE'S REPORT OF WHAT EACH DIAGNOSE MADE OF THIS OBJECT, copied: it is
+ * lent for the callback and the table under Strings is drawn long after. The
+ * names inside belong to the database, which outlives every object here.
+ *
+ * `heur` is a shallow copy of the whole result, so its pointer is cleared - a
+ * borrowed pointer left in a record that is kept is a use after the callback.
+ */
+static void diag_keep(struct object *o, const struct kof_result *res)
+{
+	free(o->diag);
+	o->diag = NULL;
+	o->n_diag = 0;
+	o->heur.diag = NULL;
+	o->heur.n_diag = 0;
+	if (!res->diag || !res->n_diag)
+		return;
+	o->diag = malloc(res->n_diag * sizeof *o->diag);
+	if (!o->diag)
+		return;
+	memcpy(o->diag, res->diag, res->n_diag * sizeof *o->diag);
+	o->n_diag = res->n_diag;
+}
+
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
@@ -2790,6 +2814,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		o->finding = NULL;
 		o->n_finding = 0;
 		o->heur = *res;
+		diag_keep(o, res);
 		o->broken = res->broken;
 		o->emu_done |= res->emu_unpacked;
 		for (i = 0; i < res->n; i++) {
@@ -2809,6 +2834,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * one owns. */
 	free(o->ovl_blk);
 	free(o->carve);
+	free(o->diag);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->broken = res->broken;
@@ -2826,6 +2852,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	 * packer from a container.
 	 */
 	o->heur = *res;
+	diag_keep(o, res);
 	/*
 	 * WHICH MODULE MADE THIS, FROM THE ENGINE - see kof_result.produced_by.
 	 *
@@ -3388,6 +3415,8 @@ static void objects_collect(struct view *v, kof_engine *eng)
 
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	/* The table under Strings - see draw_decl_diag. */
+	opt.report_diag = 1;
 	/*
 	 * LEVEL 2, and this is only expressible because the level and the
 	 * emulator became separate fields.
@@ -6242,6 +6271,7 @@ static void evt_load(struct view *v)
 
 					memset(&so, 0, sizeof so);
 					so.all_matches = 1;
+					so.report_diag = 1;
 					so.heur_level = KOF_HEUR_LEVEL_MAX;
 					sc2 = kscan_new(v->eng);
 					if (sc2) {
@@ -11460,6 +11490,8 @@ static void cnd_seq(struct view *v)
  * predicates; declared here because prow_build counts those rows and runs
  * first. */
 static int blk_section_shown(struct view *v);
+/* Same reason, for the diagnose table: prow_build counts its rows. */
+static uint32_t diag_shown_n(struct view *v);
 
 /* Defined with the other field openers, far below; the matcher row's hit test
  * runs first. */
@@ -11477,6 +11509,8 @@ enum prow_kind {
 	 * rows - one per measure. See draw_decl_sim.
 	 */
 	RW_SIMHDR, RW_SIMCOL, RW_SIM,
+	/* THE DIAGNOSES this file carries - see draw_decl_diag. */
+	RW_DIAGHDR, RW_DIAGCOL, RW_DIAG,
 	/* The format row and the [+ Options] button - see prow_build. */
 	RW_FMTS, RW_OPTBTN
 };
@@ -11562,6 +11596,22 @@ static void prow_build(struct view *v)
 	for (i = 0; i < v->ed.dr.n_decl; i++)
 		prow_add(v, RW_STR, i);
 	prow_add(v, RW_ADDS, 0);
+	/*
+	 * THE DIAGNOSES THIS FILE CARRIES, under the strings: both are things
+	 * the rule is written from, and a researcher choosing what to match on
+	 * looks at the two together. Same count draw_decl_diag emits.
+	 */
+	if (diag_shown_n(v)) {
+		prow_add(v, RW_DIAGHDR, 0);
+		prow_add(v, RW_DIAGCOL, 0);
+		if (!v->diag_fold) {
+			struct object *dob = cur_obj(v);
+
+			for (i = 0; i < dob->n_diag; i++)
+				if (dob->diag[i].state == KOF_DIAG_ST_MATCH)
+					prow_add(v, RW_DIAG, i);
+		}
+	}
 	/*
 	 * THE BLOCKS THE ENGINE OFFERS, between the markers and the matchers.
 	 *
@@ -14528,6 +14578,74 @@ static void ghead_tail(struct out *o, struct view *v, int y, uint32_t g)
  * scope and could reach each other's locals; `r` is the panel's running row
  * number and it is now passed in and handed back rather than shared.
  */
+/* Did this file match the diagnose a verdict spells by `name`. */
+static int diag_name_matched(struct view *v, const char *name)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t i;
+
+	if (ob)
+		for (i = 0; i < ob->n_diag; i++)
+			if (ob->diag[i].state == KOF_DIAG_ST_MATCH &&
+			    ob->diag[i].name && !strcmp(ob->diag[i].name, name))
+				return 1;
+	return 0;
+}
+
+/*
+ * A TERM OF A VERDICT THAT READS DIAGNOSES, as a matcher: two rows like every
+ * other - what it IS, and what it is about - with nothing on either to click,
+ * because it is shown and not edited.
+ *
+ * WHAT IS SAID ABOUT IT IS THE DIAGNOSE'S, NOT THE TERM'S. The engine reports
+ * which diagnoses matched; whether a join holds, or a string was among the
+ * names, is the verdict's own test and not something this tool re-derives, so
+ * the row says "diagnose matched" and no more.
+ */
+static int draw_diag_matcher(struct out *o, struct view *v, uint32_t g, int r)
+{
+	const struct kof_dsrc_term *t = &v->ed.dr.grp[g].term;
+	int ok = diag_name_matched(v, t->a) &&
+		 (t->kind != KVT_SHARE || diag_name_matched(v, t->b));
+	const char *what = t->kind == KVT_SHARE ? "diag_share" :
+			   t->kind == KVT_STR_ANY ? "diag_str_any" :
+			   t->kind == KVT_STR_ALL ? "diag_str_all" : "diag";
+	const char *cw;
+	char lead[16];
+	uint32_t k;
+
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		snprintf(lead, sizeof lead, "  %u.", g + 1u);
+		out_fmt(o, "%s%-6.6s" A_OFF,
+			g == v->ed.dr.cur_grp ? A_SEL : A_DIM, lead);
+		out_fmt(o, "%s%s %s%s" A_OFF, A_WARN, what, A_ID, t->a);
+		if (t->kind == KVT_SHARE)
+			out_fmt(o, A_DIM " and " A_OFF "%s%s" A_OFF, A_ID,
+				t->b);
+		out_fmt(o, "  %s%s" A_OFF, ok ? A_HIT1 : A_DIM,
+			ok ? "diagnose matched" : "diagnose not matched");
+	}
+	r++;
+	if (!PR_VIS(r))
+		return r + 1;
+	row_start(o, PR(r), 1);
+	out_str(o, "      ");
+	if (t->kind == KVT_SHARE) {
+		cw = kof_dsrc_cap_word(t->cap);
+		out_fmt(o, A_DIM "Meeting at " A_OFF "%s%s" A_OFF, A_ID,
+			cw ? cw : "?");
+	} else if (t->kind == KVT_DIAG) {
+		out_str(o, A_DIM "A diagnose the verdict asks for" A_OFF);
+	} else {
+		out_str(o, A_DIM "Names: " A_OFF);
+		for (k = 0; k < t->n_str; k++)
+			out_fmt(o, "%s%s\"%s\"" A_OFF, k ? " " : "", A_ID,
+				t->str[k]);
+	}
+	return r + 1;
+}
+
 static int draw_decl_matchers(struct out *o, struct view *v, int r)
 {
 	/*
@@ -14595,6 +14713,17 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		 * measure meant a fifth copy, and none of them read like the
 		 * search matcher they sit among.
 		 */
+		/* A term of a verdict that reads diagnoses - see draw_diag_matcher. */
+		if (q->kind == GRP_KIND_DIAG) {
+			v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+			v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+			v->grp_of[g][0] = v->grp_of[g][1] = -1;
+			v->grp_th[g][0] = v->grp_th[g][1] = -1;
+			v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
+			r = draw_diag_matcher(o, v, g, r);
+			continue;
+		}
 		if (q->kind == GRP_KIND_SIM) {
 			if (PR_VIS(r)) {
 				int y = PR(r), c0;
@@ -15230,12 +15359,14 @@ ids_done:
  */
 /*
  * The fold handle, on the column row of each table. `which` is 0 for the block
- * table and 1 for the similarity one - two tables, one control, because they
- * fold for the same reason and a reader should not learn two gestures.
+ * table, 1 for the similarity one and 2 for the diagnoses - one control, because
+ * they fold for the same reason and a reader should not learn two gestures.
  */
 static void hit_fold(struct view *v, uint32_t which)
 {
-	if (which)
+	if (which == 2u)
+		v->diag_fold = !v->diag_fold;
+	else if (which)
 		v->sim_fold = !v->sim_fold;
 	else
 		v->blk_fold = !v->blk_fold;
@@ -15806,6 +15937,21 @@ static void hit_plg_goto(struct view *v, uint32_t i)
 		return;
 	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym,
 		     v->ed.dr.blk[i].off, 0);
+}
+
+/*
+ * GO TO THE DIAGNOSE'S HEAD. Only a match has a place: a diagnose that was seen
+ * and did not match found no node to point at, and a jump to 0 would be a lie.
+ */
+static void hit_diag_goto(struct view *v, uint32_t i)
+{
+	struct object *ob = cur_obj(v);
+
+	if (!ob || i >= ob->n_diag || ob->diag[i].state != KOF_DIAG_ST_MATCH ||
+	    !ob->diag[i].n_bound)
+		return;
+	view_show_in(v, v->node[v->sel_node].obj, v->node[v->sel_node].sym,
+		     ob->diag[i].at[0], 0);
 }
 
 static void hit_plg_light(struct view *v, uint32_t i)
@@ -16414,6 +16560,68 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 	return r;
 }
 
+/*
+ * HOW MANY DIAGNOSES MATCHED THIS FILE - the rows of the table, and nothing
+ * else is one. What the engine says about the diagnoses that did not match is
+ * shown where it belongs; here a row is a diagnose the file carries.
+ */
+static uint32_t diag_shown_n(struct view *v)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t i, n = 0;
+
+	if (ob)
+		for (i = 0; i < ob->n_diag; i++)
+			n += ob->diag[i].state == KOF_DIAG_ST_MATCH;
+	return n;
+}
+
+/*
+ * THE DIAGNOSES THIS FILE MATCHES, under the strings it is also written from.
+ * Each row says how many of its nodes were found and where its head is -
+ * clicking goes there. All of it is the engine's answer, read from the scan
+ * that produced the verdict: nothing here analyses the object again.
+ */
+static int draw_decl_diag(struct out *o, struct view *v, int r)
+{
+	struct object *ob = cur_obj(v);
+	uint32_t i, n = diag_shown_n(v);
+	char sum[64];
+
+	if (!n)
+		return r;
+	snprintf(sum, sizeof sum, " %u matched", n);
+	r = decl_table_head(o, v, r, " Diagnoses", v->diag_fold, 2u,
+			    "         diagnose                  nodes  head",
+			    sum, -1);
+	if (v->diag_fold)
+		return r;
+	for (i = 0; i < ob->n_diag; i++) {
+		const struct kof_diag_report *d = &ob->diag[i];
+		int y, c0;
+
+		if (d->state != KOF_DIAG_ST_MATCH)
+			continue;
+		if (!PR_VIS(r)) {
+			r++;
+			continue;
+		}
+		y = PR(r);
+		row_start(o, y, 1);
+		/* Past the fold gutter - see decl_table_head. */
+		out_str(o, "    ");
+		c0 = 2 + (int)o->col_hint;
+		out_fmt(o, " %s%-28.28s" A_OFF, A_HIT1,
+			d->name ? d->name : "?");
+		hit_add(v, y, c0, (int)o->col_hint, hit_diag_goto, i);
+		out_fmt(o, A_DIM " %2u/%-2u " A_OFF, d->n_bound, d->n_node);
+		out_fmt(o, "%s0x%llx" A_OFF, A_WARN,
+			(unsigned long long)d->at[0]);
+		r++;
+	}
+	return r;
+}
+
 static int draw_decl_blocks(struct out *o, struct view *v, int r)
 {
 	uint32_t i;
@@ -16697,6 +16905,7 @@ static void draw_decl(struct out *o, struct view *v)
 	r = draw_decl_optbtn(o, v, r);
 	r = draw_decl_opts(o, v, r);
 	r = draw_decl_strings(o, v, r);
+	r = draw_decl_diag(o, v, r);
 	r = draw_decl_blocks(o, v, r);
 	r = draw_decl_sim(o, v, r);
 	r = draw_decl_matchers(o, v, r);
@@ -24534,6 +24743,7 @@ static void emu_here(struct view *v)
 	}
 	memset(&opt, 0, sizeof opt);
 	opt.all_matches = 1;
+	opt.report_diag = 1;
 	/* The same level as the ordinary collect - see the note there. A node
 	 * re-examined through the interpreter must not lose the heuristics the
 	 * first pass would have run on it. */
@@ -32165,6 +32375,7 @@ static void file_close(struct view *v)
 		struct object *o = &v->obj[i];
 
 		kof_touch_free(o->touch, o->n_touch);
+		free(o->diag);
 		free(o->finding);
 		free(o->info);
 		free(o->sym);

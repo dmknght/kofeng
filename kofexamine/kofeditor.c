@@ -2805,6 +2805,15 @@ int draft_started(struct kof_editor *e)
  */
 const char *draft_missing_of(struct kof_editor *e, int as_new)
 {
+	/*
+	 * A VERDICT THAT READS DIAGNOSES CAN BE OPENED AND SHOWN, NOT YET CHANGED:
+	 * what Save would write is built from strings, blocks and matchers, none of
+	 * which this verdict has, and the generic refusal below would send the
+	 * author looking for a string to declare.
+	 */
+	if (e->dr.vd)
+		return "This verdict reads diagnoses; its condition cannot be "
+		       "edited here yet.";
 	uint32_t i;
 
 	/*
@@ -4472,6 +4481,160 @@ static int comment_blank(const char *line)
 	return 1;
 }
 
+/*
+ * THE FORMATS A TARGET LINE NAMES, into the draft's mask. `p` is the words of
+ * the declaration - the argument of KOF_TARGET_FORMAT, however the reader got
+ * hold of it - and this is the one place that turns them into bits, for the
+ * pattern reader and the verdict reader alike.
+ */
+static void draft_set_format(struct kof_editor *e, const char *p)
+{
+	uint32_t fi;
+
+	for (fi = 0; fi < FMT_WORD_N; fi++)
+		if (src_word_in(p, fmt_word(fi)))
+			e->dr.fmt_mask |= 1u << fi;
+}
+
+/*
+ * THE SUBTYPE A TARGET LINE NAMES.
+ *
+ * EVERY FORMAT THAT HAS A SUBTYPE, from the same table the writer uses.
+ *
+ * This knew KOF_ELF_ and KOF_PE_ and was written when those were the only
+ * two. KOF_SCRIPT_ was added to the WRITER and not here, so a rule saved with a
+ * script subtype reopened without one - the field was simply gone from the
+ * panel, and saving again dropped it from the file. A reader that knows a
+ * smaller vocabulary than the writer loses exactly what the writer was added
+ * for.
+ */
+static void draft_set_subtype(struct kof_editor *e, const char *p)
+{
+	char w[32];
+	uint32_t n = 0, k, fi;
+
+	for (fi = 0; fi < KOF_FMT_COUNT; fi++) {
+		const char *pre;
+		const char *const *tab = sub_vocab((uint8_t)fi, &pre, &n);
+		const char *sub;
+
+		if (!tab)
+			continue;
+		sub = strstr(p, pre);
+		if (!sub)
+			continue;
+		src_ident(sub + strlen(pre), w, sizeof w);
+		for (k = 0; k < n; k++)
+			if (!strcmp(tab[k], w)) {
+				e->dr.opt_on[OPT_SUBTYPE] = 1;
+				e->dr.opt_val[OPT_SUBTYPE] = k;
+				break;
+			}
+		if (e->dr.opt_on[OPT_SUBTYPE])
+			break;
+	}
+}
+
+/* The whole of an open file, NUL terminated, or NULL. The caller keeps it. */
+static char *src_read_all(FILE *f, size_t *n_out)
+{
+	long n;
+	char *b;
+
+	if (fseek(f, 0, SEEK_END) || (n = ftell(f)) < 0)
+		return NULL;
+	rewind(f);
+	b = malloc((size_t)n + 1u);
+	if (!b || fread(b, 1, (size_t)n, f) != (size_t)n) {
+		free(b);
+		return NULL;
+	}
+	b[n] = 0;
+	*n_out = (size_t)n;
+	return b;
+}
+
+/* The type and family a KOF_TARGET_NAME declares, into the draft. */
+static void draft_set_name(struct kof_editor *e, const char *ident,
+			   const char *family)
+{
+	uint32_t k;
+
+	for (k = 0; k < MALTYPE_N; k++) {
+		char t[48];
+
+		snprintf(t, sizeof t, "KOF_MALTYPE_%s", maltype_word[k]);
+		if (!strcasecmp(t, ident))
+			e->dr.maltype = k;
+	}
+	snprintf(e->dr.family, sizeof e->dr.family, "%s", family);
+}
+
+/*
+ * A VERDICT THAT READS DIAGNOSES - read by diagsrc, the one reader of that
+ * source, and not by the line scan below, which knows patterns and brace depth
+ * and nothing about kof_diag. The declarations go into the draft through the
+ * same helpers the pattern reader uses; the condition is not copied anywhere,
+ * it stays in `vd` for the panel to show and for a later patch to write.
+ */
+static void draft_from_verdict(struct kof_editor *e, char *text, size_t n,
+			       struct kof_dsrc *d)
+{
+	uint32_t i;
+
+	free(e->dr.vtext);
+	free(e->dr.vd);
+	e->dr.vtext = text;
+	e->dr.vtext_n = n;
+	e->dr.vd = d;
+	for (i = 0; i < d->n; i++) {
+		const struct kof_dsrc_item *it = &d->item[i];
+
+		switch (it->kind) {
+		case KDS_FORMAT:
+			draft_set_format(e, it->s1);
+			break;
+		case KDS_SUBTYPE:
+			draft_set_subtype(e, it->s1);
+			break;
+		case KDS_VNAME:
+			draft_set_name(e, it->s1, it->s2);
+			break;
+		default:
+			break;
+		}
+	}
+	/*
+	 * THE CONDITION IS THE PANEL'S OWN: each term a matcher, the `if` one
+	 * condition over their numbers - "1&2&3" - exactly as a rule of strings
+	 * says it. Nothing new is drawn for it; the matchers and conditions the
+	 * panel already has show it.
+	 */
+	e->dr.n_grp = 0;
+	memset(&e->dr.cnd[0], 0, sizeof e->dr.cnd[0]);
+	for (i = 0; i < d->cond.n &&
+	     e->dr.n_grp < sizeof e->dr.grp / sizeof e->dr.grp[0]; i++) {
+		struct group *q = &e->dr.grp[e->dr.n_grp++];
+		size_t l = strlen(e->dr.cnd[0].expr);
+
+		memset(q, 0, sizeof *q);
+		q->kind = GRP_KIND_DIAG;
+		q->term = d->cond.t[i];
+		snprintf(e->dr.cnd[0].expr + l, sizeof e->dr.cnd[0].expr - l,
+			 "%s%u", i ? "&" : "", i + 1u);
+	}
+	if (e->dr.n_grp) {
+		struct cond *c = &e->dr.cnd[0];
+
+		c->op = 0;
+		c->parent = -1;
+		c->level = LV_INFECT;
+		c->var_kind = !strcmp(d->cond.infect, "KOF_MALVAR_GENERIC") ? 1 : 0;
+		e->dr.n_cnd = 1;
+		e->dr.cur_grp = e->dr.cur_cnd = 0;
+	}
+}
+
 int draft_from_source(struct kof_editor *e, const char *path)
 {
 	FILE *f = fopen(path, "r");
@@ -4522,6 +4685,26 @@ int draft_from_source(struct kof_editor *e, const char *path)
 
 	if (!f)
 		return 0;
+	/*
+	 * A VERDICT THAT READS DIAGNOSES IS NOT A PATTERN RULE, and the reader
+	 * below would take its name and its format and then call the body custom
+	 * logic. The one reader of that source says first whether this is one.
+	 */
+	{
+		size_t tn = 0;
+		char *text = src_read_all(f, &tn);
+		struct kof_dsrc *d = calloc(1, sizeof *d);
+
+		if (d && text && kof_dsrc_parse(text, tn, d, NULL) == 0 &&
+		    d->has_cond) {
+			draft_from_verdict(e, text, tn, d);
+			fclose(f);
+			return 1;
+		}
+		free(text);
+		free(d);
+		rewind(f);
+	}
 	/* Before anything else is read, because every region name in the file
 	 * is read against it - see src_rule_fmt. */
 	fmt = src_rule_fmt(f, &decl_fmt);
@@ -4688,19 +4871,11 @@ no_head:
 			pend[0] = 0;
 
 		if ((p = strstr(line, "KOF_TARGET_NAME(")) != NULL) {
-			char w[48];
-			uint32_t k;
+			char w[48], fam[sizeof e->dr.family];
 
 			src_ident(p + 16, w, sizeof w);
-			for (k = 0; k < MALTYPE_N; k++) {
-				char t[48];
-
-				snprintf(t, sizeof t, "KOF_MALTYPE_%s",
-					 maltype_word[k]);
-				if (!strcasecmp(t, w))
-					e->dr.maltype = k;
-			}
-			src_quoted(p, e->dr.family, sizeof e->dr.family);
+			src_quoted(p, fam, sizeof fam);
+			draft_set_name(e, w, fam);
 			continue;
 		}
 		if ((p = strstr(line, "KOF_TARGET_RANGE(")) != NULL &&
@@ -4751,51 +4926,11 @@ no_head:
 		 * is what the line is - see the note over the writer.
 		 */
 		if ((p = src_target_line(line)) != NULL) {
-			uint32_t fi;
-
-			for (fi = 0; fi < FMT_WORD_N; fi++)
-				if (src_word_in(p, fmt_word(fi)))
-					e->dr.fmt_mask |= 1u << fi;
+			draft_set_format(e, p);
 			continue;
 		}
 		if ((p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
-			char w[32];
-			uint32_t n = 0, k, fi;
-
-			/*
-			 * EVERY FORMAT THAT HAS A SUBTYPE, from the same table
-			 * the writer uses.
-			 *
-			 * This knew KOF_ELF_ and KOF_PE_ and was written when
-			 * those were the only two. KOF_SCRIPT_ was added to the
-			 * WRITER and not here, so a rule saved with a script
-			 * subtype reopened without one - the field was simply
-			 * gone from the panel, and saving again dropped it from
-			 * the file. A reader that knows a smaller vocabulary
-			 * than the writer loses exactly what the writer was
-			 * added for.
-			 */
-			for (fi = 0; fi < KOF_FMT_COUNT; fi++) {
-				const char *pre;
-				const char *const *tab =
-					sub_vocab((uint8_t)fi, &pre, &n);
-				const char *sub;
-
-				if (!tab)
-					continue;
-				sub = strstr(p, pre);
-				if (!sub)
-					continue;
-				src_ident(sub + strlen(pre), w, sizeof w);
-				for (k = 0; k < n; k++)
-					if (!strcmp(tab[k], w)) {
-						e->dr.opt_on[OPT_SUBTYPE] = 1;
-						e->dr.opt_val[OPT_SUBTYPE] = k;
-						break;
-					}
-				if (e->dr.opt_on[OPT_SUBTYPE])
-					break;
-			}
+			draft_set_subtype(e, p);
 			continue;
 		}
 		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
@@ -5544,7 +5679,12 @@ void generate(struct kof_editor *e, int as_new)
 		const char *dup;
 
 		if (why) {
-			say_err(e, "%s first", why);
+			/* A reason is a thing still to do and takes "first"; one that
+			 * ends in a full stop is a whole sentence - a refusal, not a
+			 * to-do - and is shown as it stands. */
+			size_t wl = strlen(why);
+
+			say_err(e, wl && why[wl - 1u] == '.' ? "%s" : "%s first", why);
 			return;
 		}
 		dup = draft_dup(e, &near_miss);
@@ -6475,6 +6615,11 @@ void draft_clear(struct kof_editor *e)
 	memset(e->dr.opt_val, 0, sizeof e->dr.opt_val);
 	memset(e->dr.opt_auto, 0, sizeof e->dr.opt_auto);
 	e->dr.n_decl = e->dr.n_grp = e->dr.n_cnd = 0;
+	free(e->dr.vd);
+	free(e->dr.vtext);
+	e->dr.vd = NULL;
+	e->dr.vtext = NULL;
+	e->dr.vtext_n = 0;
 	/*
 	 * THE TICKS GO WITH THE MATCHERS THAT USED THEM.
 	 *
