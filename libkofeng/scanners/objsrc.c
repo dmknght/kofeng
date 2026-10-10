@@ -17,6 +17,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "objsrc.h"
+#include "../analyzers/parsers/binaries/funcs.h"
 #include "../kofeng.h"
 
 #include <stdio.h>
@@ -94,6 +95,10 @@ struct kof_objsrc {
 	 */
 	uint8_t              *syms;
 	uint32_t              n_syms;
+	/* THE FUNCTIONS OF A VIEW, in its own offsets - see kof_funcs_remap and
+	 * kof_src_declare_funcs. Owned, freed with the source. */
+	struct kof_func      *funcs;
+	uint32_t              n_funcs;
 };
 
 /*
@@ -462,6 +467,29 @@ void kof_src_declare_syms(struct kof_objsrc *s, const uint8_t *b, uint32_t n)
 	s->n_syms = n;
 }
 
+void kof_src_declare_funcs(struct kof_objsrc *s, const struct kof_func *v,
+			   uint32_t n)
+{
+	struct kof_func *own;
+
+	if (!s || !v || !n)
+		return;
+	own = malloc(n * sizeof *own);
+	if (!own)
+		return;         /* the view simply arrives without them */
+	memcpy(own, v, n * sizeof *own);
+	free(s->funcs);
+	s->funcs = own;
+	s->n_funcs = n;
+}
+
+const struct kof_func *kof_src_funcs_of(const struct kof_objsrc *s, uint32_t *n)
+{
+	if (n)
+		*n = s ? s->n_funcs : 0u;
+	return s ? s->funcs : NULL;
+}
+
 const uint8_t *kof_src_syms_of(const struct kof_objsrc *s, uint32_t *n)
 {
 	if (n)
@@ -480,6 +508,7 @@ void kof_src_unref(struct kof_objsrc *s)
 		kof_unmap_file(s->map, s->map_len);
 		free(s->heap);
 		free(s->syms);
+		free(s->funcs);
 		free(s);
 		/* After the free, not before: the account should reflect memory
 		 * that has already been handed back. */

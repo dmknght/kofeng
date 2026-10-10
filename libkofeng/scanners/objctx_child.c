@@ -181,6 +181,7 @@ void oc_pend_clear(struct kof_scanner *sc)
 	sc->n_pend_rgn = 0;
 	sc->pend_rgn_fmt = 0;
 	sc->n_pend_syms = 0;
+	kof_funcs_free(&sc->pend_funcs);
 	sc->pend_derived_by = NULL;
 	sc->pend_superseded = 0;
 	sc->pend_as_fmt = 0;
@@ -484,6 +485,10 @@ static int kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	if (sc->n_pend_syms) {
 		kof_src_declare_syms(kid, sc->pend_syms, sc->n_pend_syms);
 		sc->n_pend_syms = 0;
+	}
+	if (sc->pend_funcs.n) {
+		kof_src_declare_funcs(kid, sc->pend_funcs.v, sc->pend_funcs.n);
+		kof_funcs_free(&sc->pend_funcs);
 	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than

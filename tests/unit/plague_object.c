@@ -34,7 +34,9 @@ static void fail(const char *what, const char *why)
 	failures++;
 }
 
-#define BLK 4096u
+/* ONE UNIT: the scanner cuts an object of this kind into pieces of at least
+ * 2048 bytes, so a block this long is exactly the piece it is looked for in. */
+#define BLK 2048u
 
 static uint32_t rnd(uint32_t *s)
 {
@@ -150,7 +152,7 @@ int main(int argc, char **argv)
 	/* The TEST signature tree, not the shipped one: this rule exists to
 	 * prove the path and has no business in bases/ - see tests/sigs. */
 	const char *db = argc > 1 ? argv[1] : "build/test/databases-sigs";
-	static uint8_t blk[BLK], hay[BLK * 3];
+	static uint8_t blk[BLK], hay[BLK];
 	struct kof_engine *eng;
 	int r;
 
@@ -164,8 +166,7 @@ int main(int argc, char **argv)
 	}
 
 	/* whole */
-	memset(hay, 0xA5, sizeof hay);
-	memcpy(hay + BLK, blk, BLK);
+	memcpy(hay, blk, BLK);
 	r = scan_it(eng, hay, sizeof hay);
 	if (r < 0)
 		fail("scan", "the object was not scanned at all");
@@ -181,9 +182,8 @@ int main(int argc, char **argv)
 	 * computed but not read; one where this fails and the whole case
 	 * passes would mean the rule is an exact match wearing a percentage.
 	 */
-	memset(hay, 0xA5, sizeof hay);
-	memcpy(hay + BLK, blk, BLK);
-	memset(hay + BLK, 0x00, BLK / 4u);
+	memcpy(hay, blk, BLK);
+	memset(hay, 0x00, BLK / 4u);
 	if (scan_it(eng, hay, sizeof hay) == 0)
 		fail("damaged block", "a quarter overwritten and the rule went "
 		     "silent, though it asks for half");

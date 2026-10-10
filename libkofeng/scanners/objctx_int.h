@@ -77,6 +77,8 @@ void oc_scan_broken(struct kof_scanner *sc, uint32_t reason);
 /* ---- the pathogen analysis and symbols (objctx_diag.c) ---- */
 const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
+/* The functions of the object, built once - see funcs.h. Never NULL. */
+const struct kof_func_set *oc_funcs(const struct kof_obj_ctx *ctx);
 int oc_diag(const struct kof_obj_ctx *ctx, uint16_t id);
 int oc_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 			uint16_t a, uint16_t b);

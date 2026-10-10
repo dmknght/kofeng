@@ -48,6 +48,13 @@ struct kof_diag_scan {
 	struct kof_elf_relocs        own_relocs;
 	struct kof_elf_relocs        data_relocs;       /* DATA: the image builder's alone */
 	int                          data_ready;
+	/*
+	 * THE OBJECT'S FUNCTIONS, one set for every route - see kof_diag_funcs.
+	 * Borrowed from the scanner's product when it passed one, built here on
+	 * first use and owned otherwise, exactly as the relocations beside it.
+	 */
+	const struct kof_func_set   *funcs;
+	struct kof_func_set          own_funcs;
 	int                  full;      /* the bound was reached */
 	/* Which analysis routines actually ran - see KOF_DIAG_RUN_* and the
 	 * scenario table. Asked for and not written counts as not run. */
@@ -250,6 +257,8 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 const uint8_t *base, uint64_t size);
 /* The object's relocation table of one kind (KOF_ELF_RELOC_*): for CODE the
  * borrowed one, else built on first use; DATA is built on first use. */
+const struct kof_func_set *kof_diag_funcs(struct kof_diag_scan *s,
+					  const struct kof_obj_ctx *ctx);
 const struct kof_elf_relocs *kof_diag_relocs(struct kof_diag_scan *s,
 					     const struct kof_obj_ctx *ctx,
 					     unsigned kind);
@@ -257,6 +266,8 @@ const struct kof_elf_relocs *kof_diag_relocs(struct kof_diag_scan *s,
 /* The symbol route's PE half: calls through the import address table. */
 /* Syscall wrappers of a static libc: nodes at their callers, linked - see
  * diag_wrap.c. */
+uint32_t kof_diag_entries_of(const struct kof_obj_ctx *ctx, const uint8_t *base,
+			     uint64_t size, uint64_t **out);
 void kof_diag_run_wrappers(struct kof_diag_scan *s, const struct kof_obj_ctx *ctx,
 			   const uint8_t *base, uint64_t size);
 void kof_diag_run_apihash(struct kof_diag_scan *s,

@@ -814,7 +814,6 @@ static void gather_skip(void *user, uint64_t at, uint64_t target,
 	g->n++;
 }
 
-struct funcspan { uint64_t va, size; };
 static int skip_cmp(const void *a, const void *b)
 {
 	const struct skipsite *x = a, *y = b;
@@ -840,31 +839,6 @@ static uint32_t skip_first(const struct skipsite *v, uint32_t n, uint64_t at)
 			hi = mid;
 	}
 	return lo;
-}
-
-struct funcgather { struct funcspan *fn; uint32_t n, cap_n; int oom; };
-
-static void gather_fn(void *user, uint64_t va, uint64_t sz, const char *nm)
-{
-	struct funcgather *g = user;
-
-	(void)nm;
-	if (!sz)
-		return;
-	if (g->n == g->cap_n) {
-		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
-		struct funcspan *nf = realloc(g->fn, (size_t)nc * sizeof *nf);
-
-		if (!nf) {
-			g->oom = 1;
-			return;
-		}
-		g->fn = nf;
-		g->cap_n = nc;
-	}
-	g->fn[g->n].va = va;
-	g->fn[g->n].size = sz;
-	g->n++;
 }
 
 /*
@@ -1043,7 +1017,7 @@ static int is_made(const struct kof_diag_scan *s, uint16_t cap)
  * caller is in hand and the wrapper is what makes the attribution sound.
  */
 static uint16_t callee_node(const struct kof_diag_scan *s,
-			    const struct funcspan *fns, uint32_t n_fn,
+			    const struct kof_func *fns, uint32_t n_fn,
 			    uint64_t callee)
 {
 	uint32_t j, i, n = kof_diag_scan_count(s);
@@ -1052,18 +1026,18 @@ static uint16_t callee_node(const struct kof_diag_scan *s,
 		uint16_t only = 0xffffu;
 		uint32_t cnt = 0;
 
-		if (fns[j].va != callee)
+		if (fns[j].off != callee)
 			continue;
 		for (i = 0; i < n; i++) {
 			const struct kof_diag_hit *p = kof_diag_scan_at(s, i);
 
-			if (!p || p->at < fns[j].va ||
-			    p->at >= fns[j].va + fns[j].size)
+			if (!p || p->at < fns[j].off ||
+			    p->at >= fns[j].off + fns[j].len)
 				continue;
 			/* A promoted wrapper IS the function - see
 			 * promote_wrappers - so it answers for it however
 			 * many nodes are inside. */
-			if (p->at == fns[j].va && is_made(s, p->cap))
+			if (p->at == fns[j].off && is_made(s, p->cap))
 				return (uint16_t)i;
 			only = (uint16_t)i;
 			cnt++;
@@ -1123,7 +1097,7 @@ static int has_cr_write(const uint8_t *p, uint64_t n)
  * link can end at. One node here gives the whole chain somewhere to begin.
  */
 static void promote_sequence(struct kof_diag_scan *s,
-			     const struct funcspan *fns, uint32_t n_fn,
+			     const struct kof_func *fns, uint32_t n_fn,
 			     const struct kof_diag_seq *sq)
 {
 	uint32_t i, n = kof_diag_scan_count(s);
@@ -1191,10 +1165,10 @@ static void promote_sequence(struct kof_diag_scan *s,
 		 * register does.
 		 */
 		for (j = 0; j < n_fn; j++)
-			if (reg_at >= fns[j].va &&
-			    unreg_at < fns[j].va + fns[j].size)
+			if (reg_at >= fns[j].off &&
+			    unreg_at < fns[j].off + fns[j].len)
 				break;
-		kof_diag_hit_add(s, j < n_fn ? fns[j].va : reg_at,
+		kof_diag_hit_add(s, j < n_fn ? fns[j].off : reg_at,
 				 sq->made, 0);
 	}
 }
@@ -1202,7 +1176,7 @@ static void promote_sequence(struct kof_diag_scan *s,
 /* Every head a loaded diagnose asked the engine to build - see
  * KOF_DIAG_DECLARE_SEQUENCE. None asked, none built. */
 static void promote_wrappers(struct kof_diag_scan *s,
-			     const struct funcspan *fns, uint32_t n_fn)
+			     const struct kof_func *fns, uint32_t n_fn)
 {
 	uint32_t k;
 
@@ -1241,15 +1215,15 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 			    const struct kof_elf_info *ei,
 			    const uint8_t *base, uint64_t size,
 			    const struct skipgather *sgp,
-			    const struct funcgather *fgp,
+			    const struct kof_func_set *fgp,
 			    uint16_t *ret, uint8_t *dirty,
 			    uint8_t *next_dirty, uint8_t *vis,
 			    struct kof_emu **tmpl)
 {
 	struct skipsite *skips = sgp->site;
-	struct funcspan *fns = fgp->fn;
+	const struct kof_func *fns = fgp->v;
 	const struct skipgather sg = *sgp;
-	const struct funcgather fg = *fgp;
+	const struct kof_func_set fg = *fgp;
 	uint32_t n = kof_diag_scan_count(s), q, j, pass;
 
 	(void)ei;
@@ -1313,11 +1287,11 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 		 * a loop in the next. */
 		struct { uint64_t at; uint32_t n; } latch[32];
 		uint32_t n_latch = 0, n_fault = 0;
-		uint64_t lo = fns[j].va, hi;
+		uint64_t lo = fns[j].off, hi;
 
 		if (lo >= size)
 			continue;
-		hi = lo + fns[j].size;
+		hi = lo + fns[j].len;
 
 		/*
 		 * A FUNCTION WITH FEWER THAN TWO NODES IN IT CANNOT HOLD A
@@ -1726,7 +1700,7 @@ static void run_rel_gaps_in(struct kof_diag_scan *s,
 						 * been measured yet. */
 						src = 0xffffu;
 						for (t = 0; t < fg.n; t++)
-							if (fns[t].va ==
+							if (fns[t].off ==
 							    skips[q].callee) {
 								src = ret[t];
 								break;
@@ -2681,15 +2655,15 @@ stalled:
 				/* whoever calls this function may now see a
 				 * different value come back */
 				for (w = 0; w < sg.n; w++)
-					if (skips[w].callee == fns[j].va) {
+					if (skips[w].callee == fns[j].off) {
 						uint32_t g;
 
 						for (g = 0; g < fg.n; g++)
 							if (skips[w].call_at >=
-							    fns[g].va &&
+							    fns[g].off &&
 							    skips[w].call_at <
-							    fns[g].va +
-							    fns[g].size)
+							    fns[g].off +
+							    fns[g].len)
 								next_dirty[g] = 1;
 					}
 			}
@@ -2715,7 +2689,7 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 			 const uint8_t *base, uint64_t size)
 {
 	struct skipgather sg;
-	struct funcgather fg;
+	const struct kof_func_set *fgp;
 	uint16_t *ret = NULL;
 	uint8_t *flags = NULL;
 	struct kof_emu *tmpl = NULL;
@@ -2728,19 +2702,18 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 	f.n = size;
 	memset(&sg, 0, sizeof sg);
 	kof_elf_relcalls(f, ei, gather_skip, &sg);
-	memset(&fg, 0, sizeof fg);
-	kof_elf_funcs(f, ei, gather_fn, &fg);
+	fgp = kof_diag_funcs(s, ctx);
 	if (sg.n > 1u)
 		qsort(sg.site, sg.n, sizeof *sg.site, skip_cmp);
-	if (sg.oom || fg.oom)
+	if (sg.oom || fgp->oom)
 		s->full = 1;
-	if (sg.n && fg.n) {
-		ret = malloc((size_t)fg.n * sizeof *ret);
-		flags = malloc((size_t)fg.n * 3u + sg.n);
+	if (sg.n && fgp->n) {
+		ret = malloc((size_t)fgp->n * sizeof *ret);
+		flags = calloc((size_t)fgp->n * 3u + sg.n, 1);
 		if (ret && flags)
-			run_rel_gaps_in(s, ctx, ei, base, size, &sg, &fg, ret,
-					flags, flags + fg.n, flags + 2u * fg.n,
-					&tmpl);
+			run_rel_gaps_in(s, ctx, ei, base, size, &sg, fgp, ret,
+					flags, flags + fgp->n,
+					flags + 2u * fgp->n, &tmpl);
 		else
 			s->full = 1;
 	}
@@ -2748,7 +2721,6 @@ static void run_rel_gaps(struct kof_diag_scan *s,
 	free(ret);
 	free(flags);
 	free(sg.site);
-	free(fg.fn);
 }
 
 void kof_diag_run_emulate(struct kof_diag_scan *s,

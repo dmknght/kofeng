@@ -30,32 +30,6 @@
 #define OVL_DAMAGE (~(uint64_t)(KOF_ELF_ANOM_SECTAB_MISSING | \
 			        KOF_ELF_ANOM_SECNAME_TRUNC))
 
-/* FNV-1a, 64 bit. A string is kept as its hash: the sets are compared and
- * never read back, and sixty-four bits over a few hundred strings makes a
- * collision a thing that does not happen in practice. */
-static void sort_u32(uint32_t *v, uint32_t n)
-{
-	uint32_t i, j;
-
-	for (i = 1; i < n; i++) {
-		uint32_t k = v[i];
-
-		for (j = i; j && v[j - 1] > k; j--)
-			v[j] = v[j - 1];
-		v[j] = k;
-	}
-}
-
-static uint32_t dedup_u32(uint32_t *v, uint32_t n)
-{
-	uint32_t i, w = 0;
-
-	for (i = 0; i < n; i++)
-		if (!w || v[w - 1] != v[i])
-			v[w++] = v[i];
-	return w;
-}
-
 /* Per-mille, saturating, and never dividing by zero. */
 static uint16_t permille(uint64_t a, uint64_t b)
 {
@@ -69,8 +43,7 @@ static uint16_t permille(uint64_t a, uint64_t b)
 }
 
 int kof_plague_desc_build(struct kof_plague_desc *d, kof_buf file,
-		  const struct kof_elf_info *e,
-		  const struct kof_range *lib_span, uint32_t lib_n)
+			  const struct kof_elf_info *e)
 {
 	uint32_t si;
 
@@ -90,10 +63,7 @@ int kof_plague_desc_build(struct kof_plague_desc *d, kof_buf file,
 	for (si = 0; si < e->seg_count && si < KOF_ELF_MAX_SEGMENTS; si++) {
 		const struct kof_elf_seg *g = &e->seg[si];
 		struct kof_plague_region *r;
-		struct kof_range keep[KOF_TRUE_MAX_SPANS + 2];
-		struct kof_rlist kl;
 		uint64_t len;
-		uint32_t k;
 
 		if (g->type < 32u)
 			d->ptypes |= 1u << g->type;
@@ -113,24 +83,8 @@ int kof_plague_desc_build(struct kof_plague_desc *d, kof_buf file,
 		r->fsz = len;
 		r->x   = (g->perm & KOF_PERM_X) != 0;
 
-		/* The region, minus whatever the library owns of it. */
-		kof_rl_init(&kl, keep, (uint32_t)(sizeof keep / sizeof keep[0]));
-		kof_rl_add(&kl, file.n, g->file_off, len);
-		if (lib_n)
-			kof_rl_subtract(&kl, lib_span, lib_n);
-		kof_rl_normalise(&kl);
-
-		/* The block hashes of the span the library is already out of. */
-		for (k = 0; k < kl.n; k++)
-			if (d->n_blk < KOF_OVL_MAX_BLOCKS)
-				d->n_blk += kof_plague_hash_span(
-					file.p + keep[k].off, keep[k].len,
-					KOF_PLAGUE_RAW, d->blk + d->n_blk,
-					KOF_OVL_MAX_BLOCKS - d->n_blk);
 		d->n_region++;
 	}
-	sort_u32(d->blk, d->n_blk);
-	d->n_blk = dedup_u32(d->blk, d->n_blk);
 	return d->n_region ? 1 : 0;
 }
 

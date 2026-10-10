@@ -30,32 +30,79 @@
 #include "../../libkofeng/detectors/overlord/kofoverlord.h"
 #include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../libkofeng/kofcore/kofmod/elf.h"
+#include "../../libkofeng/kofcore/rangelist.h"
+#include "../../libkofeng/detectors/overlord/plague/kofplague.h"
 
 /*
- * SET CONTAINMENT, HERE AND NOT IN THE ENGINE.
+ * THE LIBRARY CUT, MEASURED ON MINHASHES.
  *
- * These three checks are about the LIBRARY CUT: that trueline takes the
- * library out and does not take the author's half with it. They used to ask
- * through kof_plague_blocks_pct, which the engine no longer carries - see the
- * note on its vtable slot in kofsig.h.
- *
- * The measure is gone; what it was testing is not, so the arithmetic moves
- * into the test rather than the test being deleted along with it. Both arrays
- * are sorted and deduplicated by kof_plague_desc_build.
+ * These checks are about the cut: that trueline takes the library out and does
+ * not take the author's half with it. The descriptor no longer carries a hash
+ * set, so the test builds what the engine's blocks are made of - the sketch of
+ * every piece of a loadable segment the library does not own - and asks how
+ * much of one object's set the other holds.
  */
-static uint32_t blk_contain_pct(const uint32_t *obj, uint32_t n_obj,
-				const uint32_t *ref, uint32_t n_ref)
-{
-	uint32_t i = 0, j = 0, hit = 0;
+struct kept {
+	uint32_t h[1024];
+	uint32_t n;
+};
 
-	if (!n_ref)
-		return 0;
-	while (i < n_obj && j < n_ref) {
-		if (obj[i] == ref[j]) { hit++; i++; j++; }
-		else if (obj[i] < ref[j]) i++;
-		else j++;
+static int cmp_u32(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+static void kept_set(const uint8_t *p, uint64_t n, const struct kof_elf_info *e,
+		     struct kept *k)
+{
+	struct kof_true_result l;
+	uint32_t si;
+
+	k->n = 0;
+	kof_true_find(kof_buf_make(p, n), e, &l);
+	for (si = 0; si < e->seg_count; si++) {
+		const struct kof_elf_seg *g = &e->seg[si];
+		struct kof_range keep[KOF_TRUE_MAX_SPANS + 2];
+		struct kof_rlist kl;
+		uint32_t i;
+
+		if (g->type != 1u || g->file_off >= n)
+			continue;
+		kof_rl_init(&kl, keep, (uint32_t)(sizeof keep / sizeof keep[0]));
+		kof_rl_add(&kl, n, g->file_off,
+			   g->file_size < n - g->file_off ? g->file_size
+							  : n - g->file_off);
+		if (l.n)
+			kof_rl_subtract(&kl, l.span, l.n);
+		kof_rl_normalise(&kl);
+		for (i = 0; i < kl.n; i++) {
+			uint32_t t[KOF_PLAGUE_MINHASH_K], m, j;
+
+			m = kof_plague_minhash(p + keep[i].off, keep[i].len,
+					       KOF_PLAGUE_RAW, t);
+			for (j = 0; j < m && k->n < 1024u; j++)
+				k->h[k->n++] = t[j];
+		}
 	}
-	return (uint32_t)((uint64_t)hit * 100u / n_ref);
+	qsort(k->h, k->n, sizeof k->h[0], cmp_u32);
+}
+
+/* The share of `ref`'s hashes that `obj` holds. */
+static uint32_t blk_contain_pct(const struct kept *obj, const struct kept *ref)
+{
+	uint32_t i, j, hit = 0;
+
+	if (!ref->n)
+		return 0;
+	for (i = 0; i < ref->n; i++)
+		for (j = 0; j < obj->n; j++)
+			if (obj->h[j] == ref->h[i]) {
+				hit++;
+				break;
+			}
+	return (uint32_t)((uint64_t)hit * 100u / ref->n);
 }
 
 static int fails;
@@ -190,21 +237,15 @@ static int parse_of(uint8_t *b, uint64_t n, struct kof_elf_info *e)
 	return kof_elf_parse(kof_buf_make(b, n), e, &ctx);
 }
 
-/*
- * Build a descriptor the way the engine does: the library spans are the
- * caller's to establish, and they are THIS object's - see kof_plague_build.
- */
 static int ovl_build_of(struct kof_plague_desc *d, uint8_t *p, uint64_t n,
 			const struct kof_elf_info *e)
 {
-	struct kof_true_result l;
-
-	kof_true_find(kof_buf_make(p, n), e, &l);
-	return kof_plague_desc_build(d, kof_buf_make(p, n), e, l.span, l.n);
+	return kof_plague_desc_build(d, kof_buf_make(p, n), e);
 }
 
 int main(void)
 {
+	struct kept k1, k2;
 	struct kof_elf_info e1, e2;
 	struct kof_true_result lib;
 	struct kof_plague_desc *d1, *d2;
@@ -255,7 +296,9 @@ int main(void)
 	 * string track is gone: two objects that share only their library must
 	 * not share the content the library was taken out of.
 	 */
-	if (blk_contain_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
+	kept_set(a, na, &e1, &k1);
+	kept_set(b, nb, &e2, &k2);
+	if (blk_contain_pct(&k1, &k2) >= 50u)
 		bad("a shared library alone matched on blocks - the cut is "
 		    "not taking it out");
 	else
@@ -272,7 +315,9 @@ int main(void)
 	/* The author's half is shared, so its blocks must be - and this is the
 	 * other side of the check above: the cut must not take so much that
 	 * two objects with the same content stop agreeing. */
-	if (blk_contain_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) < 50u)
+	kept_set(a, na, &e1, &k1);
+	kept_set(b, nb, &e2, &k2);
+	if (blk_contain_pct(&k1, &k2) < 50u)
 		bad("a shared author half did not match on blocks");
 	else
 		ok("a shared author half matches (blocks)");
@@ -289,7 +334,9 @@ int main(void)
 		bad("identical shape did not fire the structure track");
 	else
 		ok("identical shape matches with no content in common");
-	if (blk_contain_pct(d1->blk, d1->n_blk, d2->blk, d2->n_blk) >= 50u)
+	kept_set(a, na, &e1, &k1);
+	kept_set(b, nb, &e2, &k2);
+	if (blk_contain_pct(&k1, &k2) >= 50u)
 		bad("unrelated content matched on blocks");
 	else
 		ok("and the content measure correctly stays quiet");

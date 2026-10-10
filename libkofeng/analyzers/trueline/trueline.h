@@ -142,6 +142,14 @@ void kof_true_find_object(kof_buf file, const struct kof_elf_info *e,
  * translation the spans themselves were built with. What the segments cannot
  * place is not the library's - see the note on the definition.
  */
+/*
+ * Does [off, off+len) touch any span - ANY overlap, not a majority: a piece of
+ * the library is still something every binary built against it can produce.
+ * File offsets; the one test, shared by the address form below and by whoever
+ * holds offsets already.
+ */
+int kof_true_touches(const struct kof_true_all *lib, uint64_t off, uint64_t len);
+
 int kof_true_has_addr(const struct kof_elf_info *e,
 		     const struct kof_true_all *lib, uint64_t va, uint64_t size);
 

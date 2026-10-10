@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "../../libkofeng/analyzers/trueline/trueline.h"
+#include "../../libkofeng/analyzers/parsers/binaries/funcs.h"
 #include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../../libkofeng/kofcore/kofmod/elf.h"
 
@@ -377,6 +378,81 @@ int main(void)
 		bad("the author's own function was cut with the library");
 	else
 		ok("the author's function is untouched between the two");
+
+	/*
+	 * THE FUNCTIONS THE SYMBOLS NAME, one extent each, in file order. Which of
+	 * them are the library's is the caller's to say with the spans above; the
+	 * list itself is the object's.
+	 */
+	{
+		struct kof_func_set fs;
+
+		kof_funcs_build(KOF_FMT_ELF, b, n, &e, &fs);
+		if (fs.n == 3 && fs.v && fs.v[0].off == LIB_A_OFF &&
+		    fs.v[1].off == AUTHOR_OFF && fs.v[1].len == FN_LEN &&
+		    fs.v[2].off == LIB_B_OFF)
+			ok("all three functions, whole, in file order");
+		else
+			bad("the function list is not the three the table names");
+		kof_funcs_free(&fs);
+	}
+
+	/*
+	 * TWO NAMES FOR ONE ADDRESS ARE ONE FUNCTION - memcpy and __memcpy - and
+	 * the longer extent stands; a label wholly inside another body is not a
+	 * function. Built by editing the table in place: the library's second
+	 * function becomes an alias of the author's, half as long, and the
+	 * first becomes a label inside it.
+	 */
+	{
+		struct kof_func_set fs;
+		uint8_t *c = malloc((size_t)n);
+		uint8_t *t;
+
+		if (c) {
+			memcpy(c, b, (size_t)n);
+			t = c + SYM_OFF;
+			put64(t + SYM_ENT * 3u + 8u, VBASE + AUTHOR_OFF);
+			put64(t + SYM_ENT * 3u + 16u, FN_LEN / 2u);
+			put64(t + SYM_ENT * 2u + 8u, VBASE + AUTHOR_OFF + 16u);
+			put64(t + SYM_ENT * 2u + 16u, 32u);
+			kof_funcs_build(KOF_FMT_ELF, c, n, &e, &fs);
+			if (fs.n == 1 && fs.v && fs.v[0].off == AUTHOR_OFF &&
+			    fs.v[0].len == FN_LEN)
+				ok("an alias and an inner label fold into the one function");
+			else
+				bad("an alias or a label survived as a function");
+			kof_funcs_free(&fs);
+			free(c);
+		}
+	}
+
+	/* A stripped object has no functions to offer, and says so by offering
+	 * none. */
+	{
+		struct kof_func_set fs;
+		uint8_t *c = malloc((size_t)n);
+
+		if (c) {
+			struct kof_elf_info e2;
+			struct kof_obj_ctx c2;
+
+			memcpy(c, b, (size_t)n);
+			/* .symtab becomes a section of another type */
+			put32(c + SH_OFF + 64u * 2u + 4u, 1u);
+			memset(&e2, 0, sizeof e2);
+			memset(&c2, 0, sizeof c2);
+			if (kof_elf_parse(kof_buf_make(c, n), &e2, &c2)) {
+				kof_funcs_build(KOF_FMT_ELF, c, n, &e2, &fs);
+				if (!fs.n && !fs.v)
+					ok("no symbol table, no functions");
+				else
+					bad("functions were offered with no symbol table");
+				kof_funcs_free(&fs);
+			}
+			free(c);
+		}
+	}
 
 	free(b);
 

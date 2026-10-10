@@ -1622,55 +1622,22 @@ uint32_t kof_elf_relcalls(kof_buf f, const struct kof_elf_info *p,
 	return n;
 }
 
-uint32_t kof_elf_funcs(kof_buf f, const struct kof_elf_info *p,
-		       kof_elf_func_fn fn, void *user)
+int kof_elf_va_to_off(const struct kof_elf_info *e, uint64_t va, uint64_t sz,
+		      uint64_t *off)
 {
-	struct kof_elf_symtab t;
-	uint64_t i;
-	uint32_t n = 0;
+	uint32_t s;
 
-	if (!f.p || !p || !fn)
-		return 0;
-	if (!kof_elf_symtab_of(f, p, KOF_ELF_SYMTAB_FULL, &t))
-		return 0;
-	for (i = 1; i < t.n && i < 65536u; i++) {
-		struct kof_elf_symbol sy;
-		char nm[KOF_SYMNAME_MAX];
-		uint64_t va;
+	for (s = 0; s < e->seg_count && s < KOF_ELF_MAX_SEGMENTS; s++) {
+		const struct kof_elf_seg *g = &e->seg[s];
 
-		if (!kof_elf_symbol_at(f, &t, i, &sy))
-			break;
-		if ((sy.info & 0xfu) != 2u)             /* STT_FUNC */
+		if (g->type != 1u /* PT_LOAD */ || !g->file_size)
 			continue;
-		if (!sy.shndx || sy.shndx >= p->sec_count ||
-		    sy.shndx >= KOF_ELF_MAX_SECTIONS)
+		if (va < g->mem_addr || va - g->mem_addr >= g->file_size)
 			continue;
-		if (!(p->sec[sy.shndx].flags & SHF_EXECINSTR))
-			continue;
-		/*
-		 * THE ADDRESS SPACE THE OBJECT IS READ IN.
-		 *
-		 * In a LINKED object st_value is already the virtual address
-		 * and nothing is added to it. In an ET_REL it is an offset
-		 * from the start of its section, which declares address
-		 * zero, so the section's place in the file is what names it.
-		 *
-		 * The section's address used to be added in BOTH cases, so
-		 * every linked object got each function at twice its
-		 * address. MEASURED on a static Mirai: 419 declared starts,
-		 * every one of them outside the code range the sweep was
-		 * given (0x8001d0..0x81b6f5 against 0x4000e8..0x4116d8), so
-		 * discover() discarded all 419 seeds and is_decl_head never
-		 * matched. The one thing this exists for - a function
-		 * nothing calls - therefore worked only on ET_REL, which is
-		 * what the .ko it was written against happens to be.
-		 */
-		va = p->sec[sy.shndx].mem_addr
-		     ? sy.value
-		     : sy.value + p->sec[sy.shndx].file_off;
-		sym_name(f, &t, &sy, nm, sizeof nm);
-		fn(user, va, sy.size, nm);
-		n++;
+		if (sz > g->file_size - (va - g->mem_addr))
+			return 0;       /* it runs past the file half */
+		*off = g->file_off + (va - g->mem_addr);
+		return 1;
 	}
-	return n;
+	return 0;
 }

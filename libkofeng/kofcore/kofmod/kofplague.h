@@ -59,20 +59,17 @@
 #include <stdint.h>
 
 /*
- * THE WINDOW, AND THE SAMPLING RATE - shared by everything that produces or
+ * THE WINDOW - shared by everything that produces or
  * consumes these hashes, because a disagreement about either produces two sets
  * that never intersect and no error anywhere.
  *
  * Eight bytes is wide enough that a window is not a coincidence and narrow
  * enough that an edit only disturbs the eight windows that cover it.
  *
- * One in thirty-two is what makes the scan affordable: a 150KB region has about
- * 150000 windows and yields about 4700 hashes to look up. Lower and a small
- * block stops producing enough hashes to score with; higher and the lookup
- * count grows without buying accuracy.
+ * A block keeps the smallest KOF_PLAGUE_MINHASH_K of ALL its windows - see
+ * kofplague.h in the plague engine.
  */
 #define KOF_PLAGUE_NG        8u
-#define KOF_PLAGUE_SEL_BITS  5u     /* keep 1 window in 2^SEL_BITS */
 
 /* Below this many hashes a block cannot be scored: the percentage would move in
  * steps too coarse to mean anything, and a handful of common windows would
@@ -132,69 +129,19 @@ static inline uint32_t kof_plague_drop_weight(void)
 	return w;
 }
 
-/*
- * THE MIX IN TWO HALVES, BECAUSE THE SELECTOR CANNOT SEE THE SECOND ONE.
- *
- * kof_plague_mix is `h *= MIX; h ^= h >> 15`, and the rolling walk runs it on
- * EVERY BYTE of every region fed - then throws the answer away for the
- * thirty-one windows in thirty-two that the selector rejects.
- *
- * The xor-shift is provably invisible to that test. `x >> 15` takes bit i of
- * the result from bit i + 15 of x, so for i >= 17 it takes it from a bit that
- * does not exist and the result is zero: THE TOP 17 BITS OF `x >> 15` ARE
- * ALWAYS ZERO. The selector reads the top SEL_BITS, and 32 - SEL_BITS is 27,
- * which is inside that zero range - so those bits of `x ^ (x >> 15)` are
- * exactly those bits of `x`, and the selection is decided by the multiply
- * alone.
- *
- * So the multiply is done per byte, the test is made on it, and the xor-shift
- * is paid only where the value is going to be used. The answer is bit for bit
- * what it always was; the static assert below is what keeps it that way if
- * SEL_BITS ever moves.
- */
-_Static_assert(32u - KOF_PLAGUE_SEL_BITS >= 17u,
-	       "the selector must read only bits that x >> 15 leaves zero, "
-	       "or kof_plague_selects_pre stops agreeing with the full mix");
-
-/* The half the selector needs. */
-static inline uint32_t kof_plague_premix(uint32_t h)
-{
-	return h * KOF_PLAGUE_MIX;
-}
-
-/* And the half only a kept window needs. */
-static inline uint32_t kof_plague_mix_from(uint32_t pre)
-{
-	return pre ^ (pre >> 15);
-}
-
-/* Mix a window value into the form that is stored and selected on. */
+/* Mix a window value into the form that is stored: `h *= MIX; h ^= h >> 15`. */
 static inline uint32_t kof_plague_mix(uint32_t h)
 {
-	return kof_plague_mix_from(kof_plague_premix(h));
-}
-
-/* Is this window one of the ones kept? Tested on the MIXED value, for the
- * reason the note above gives. */
-static inline int kof_plague_selects(uint32_t mixed)
-{
-	return (mixed >> (32u - KOF_PLAGUE_SEL_BITS)) == 0u;
-}
-
-/* The same question asked of the premixed value - see the note above for why
- * the two cannot disagree. */
-static inline int kof_plague_selects_pre(uint32_t pre)
-{
-	return (pre >> (32u - KOF_PLAGUE_SEL_BITS)) == 0u;
+	h *= KOF_PLAGUE_MIX;
+	return h ^ (h >> 15);
 }
 
 /*
  * A WINDOW OF ONE REPEATED BYTE IS NOT CONTENT, AND IS NEVER KEPT.
  *
  * The all-zero window is the case that shows why. Its rolling value is zero,
- * kof_plague_mix leaves it zero, and zero passes kof_plague_selects for any
- * number of bits - so it is selected in every object that has eight zero bytes
- * anywhere, which is every object with an alignment gap. Worse, zero is the
+ * kof_plague_mix leaves it zero, and so it is a window of every object that has eight zero bytes anywhere, which is
+ * every object with an alignment gap. Worse, zero is the
  * SMALLEST value a window can have, so the k smallest are guaranteed to keep
  * it: every block cut from a span containing padding carries it, and every file
  * containing padding matches it. A hash that everything has and everything
@@ -208,8 +155,8 @@ static inline int kof_plague_selects_pre(uint32_t pre)
  * long the run is, and it says nothing about the object beyond "there is
  * padding here" - so the test is on the bytes and not on the value.
  *
- * Tested AFTER selection on both sides, because a window that was not selected
- * costs nothing to skip and this costs eight comparisons.
+ * Tested after the cheaper comparison on both sides, because a window that
+ * would not have been kept costs nothing to skip and this costs eight.
  */
 /* One byte of the stream a normalizer presents: the byte itself, or the
  * difference between it and its neighbour. */
@@ -358,6 +305,11 @@ static inline int kof_plague_region_excluded(const char *enum_name)
 		    p[4] == 'D')
 			return 1;
 		if (p[0] == '_' && p[1] == 'S' && p[2] == 'Y' && p[3] == 'M')
+			return 1;
+		/* The static library a normalised view carries on its tail: it
+		 * is somebody else's code, and what is offered is the author's. */
+		if (p[0] == '_' && p[1] == 'S' && p[2] == 'L' && p[3] == 'I' &&
+		    p[4] == 'B')
 			return 1;
 	}
 	return 0;

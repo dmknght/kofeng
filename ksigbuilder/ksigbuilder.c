@@ -1287,7 +1287,7 @@ static int read_variant(const char *p, int line, char *out, size_t cap)
  *
  * These were read by the shell, with grep and sed, against C source. That was
  * wrong in a way this file is already equipped to avoid: the scan below runs on
- * a buffer strip_comments has been over, so a macro NAMED IN A COMMENT is not a
+ * a buffer kof_dsrc_blank_comments has been over, so a macro NAMED IN A COMMENT is not a
  * declaration. The shell had no such notion and counted it - a signature whose
  * header block explained that it "used to be KOF_TARGET_FORMAT(KOF_FMT_PE)" was
  * refused with "2 KOF_TARGET_FORMAT declarations", which names nothing a reader
@@ -2384,55 +2384,6 @@ static void emit_blk_record(FILE *out, const struct blk *b, int idx)
 	for (i = 0; i < b->n_hash; i++)
 		fprintf(out, "%08x", b->hash[i]);
 	fputc('\n', out);
-}
-
-/*
- * Blank out every comment, preserving line structure.
- *
- * Not cosmetic: declarations are read out of the source, so a macro mentioned inside
- * a comment must not contribute. Line comments alone were not enough - a signature's
- * header block explains what kof_find_str does, and the name was found there.
- *
- * String and character literals are tracked so a comment introducer inside a pattern
- * cannot start a comment. Newlines are kept so line numbers stay correct.
- */
-static void strip_comments(char *s, size_t n)
-{
-	size_t i = 0;
-
-	while (i < n) {
-		if (s[i] == '"' || s[i] == '\'') {
-			char q = s[i++];
-			while (i < n && s[i] != q) {
-				if (s[i] == '\\' && i + 1 < n)
-					i++;
-				i++;
-			}
-			i++;
-			continue;
-		}
-		if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
-			while (i < n && s[i] != '\n')
-				s[i++] = ' ';
-			continue;
-		}
-		if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
-			s[i++] = ' ';
-			s[i++] = ' ';
-			while (i < n) {
-				if (s[i] == '*' && i + 1 < n && s[i + 1] == '/') {
-					s[i++] = ' ';
-					s[i++] = ' ';
-					break;
-				}
-				if (s[i] != '\n')
-					s[i] = ' ';
-				i++;
-			}
-			continue;
-		}
-		i++;
-	}
 }
 
 /* Read the whole source. Needed because a macro invocation may wrap onto further
@@ -4136,7 +4087,7 @@ static int extract_main(int argc, char **argv)
 		fprintf(stderr, "ksigbuilder: cannot read %s\n", argv[2]);
 		return 2;
 	}
-	strip_comments(src, src_len);
+	kof_dsrc_blank_comments(src, src_len);
 	while (pos < src_len) {
 		size_t e = pos;
 		while (e < src_len && src[e] != '\n')
@@ -6314,6 +6265,9 @@ static unsigned        g_n_built;
 
 /* Defined with the other argument helpers, below. */
 
+static void dsrc_error(void *ud, int line, const char *msg);
+static void dsrc_warn(void *ud, const char *msg);
+
 static void uses_add(const char *diag, const char *user)
 {
 	unsigned i;
@@ -6332,11 +6286,24 @@ static void uses_add(const char *diag, const char *user)
 	g_n_uses++;
 }
 
-/* Every kof_diag / kof_diag_share call in one source, as (diagnose, user). */
+/* Every diagnose one verdict source reads, as (diagnose, user). */
+static void uses_note(void *ud, const char *diag)
+{
+	uses_add(diag, (const char *)ud);
+}
+
+/*
+ * THE VERDICT IS READ BY THE ONE READER - kof_dsrc_parse, which the editor and
+ * the diagnose build use - and not by a scan of its own for the call names: two
+ * readers of one grammar are two places for it to differ. A source that names
+ * kof_diag and that reader refuses is an error here, as it is everywhere.
+ */
 static void uses_scan(const char *path)
 {
+	static struct kof_dsrc d;
+	const struct kof_dsrc_report rep = { dsrc_error, dsrc_warn, NULL };
 	size_t n = 0;
-	char *t = slurp(path, &n), *p, user[DIAG_USER_LEN], a[64];
+	char *t = slurp(path, &n), user[DIAG_USER_LEN];
 	const char *base = strrchr(path, '/'), *dot;
 
 	if (!t)
@@ -6346,29 +6313,24 @@ static void uses_scan(const char *path)
 	dot = strrchr(user, '.');
 	if (dot)
 		user[dot - user] = 0;
-	strip_comments(t, n);
-	for (p = t; (p = strstr(p, "kof_diag")) != NULL; p++) {
-		int share;
+	/* Only a source that reads a diagnose goes to the diagnose reader: its
+	 * vocabulary for a target is the diagnose's, and an ordinary signature
+	 * names others. */
+	{
+		char *code = malloc(n + 1u);
 
-		if (p > t && (isalnum((unsigned char)p[-1]) || p[-1] == '_'))
-			continue;
-		if (!strncmp(p, "kof_diag(", 9))
-			share = 0;
-		else if (!strncmp(p, "kof_diag_str_any(", 17) ||
-			 !strncmp(p, "kof_diag_str_all(", 17))
-			share = 0;      /* its first argument is the diagnose */
-		else if (!strncmp(p, "kof_diag_share(", 15))
-			share = 1;
-		else
-			continue;
-		if (!share) {
-			if (kof_dsrc_arg(p, 0, a, sizeof a))
-				uses_add(a, user);
-		} else {
-			if (kof_dsrc_arg(p, 1, a, sizeof a))
-				uses_add(a, user);
-			if (kof_dsrc_arg(p, 2, a, sizeof a))
-				uses_add(a, user);
+		if (code) {
+			memcpy(code, t, n);
+			code[n] = 0;
+			kof_dsrc_blank_comments(code, n);
+			if (strstr(code, "kof_diag")) {
+				src_name = path;
+				memset(&d, 0, sizeof d);
+				kof_dsrc_parse(t, n, &d, &rep);
+				if (d.has_cond)
+					kof_dsrc_cond_names(&d.cond, uses_note, user);
+			}
+			free(code);
 		}
 	}
 	free(t);
@@ -7688,9 +7650,21 @@ static int diagnose_main(int argc, char **argv)
 	if (n_ref) {
 		int k;
 
+		size_t refbody = 1u;
+
 		need += 2u + 1u;                /* tag, length, count */
-		for (k = 0; k < n_ref; k++)
+		for (k = 0; k < n_ref; k++) {
 			need += 1u + strlen(ref_tbl[k]);
+			refbody += 1u + strlen(ref_tbl[k]);
+		}
+		/* The section's length is one byte: a longer body would be
+		 * written truncated and read back as something else. */
+		if (refbody > 255u) {
+			fprintf(stderr, "FAIL: %s: the symbols this diagnose needs "
+				"take %zu bytes, the section holds 255\n",
+				name, refbody);
+			return 1;
+		}
 	}
 	if (g_uses_known)
 		need += 2u + 1u + users_len;

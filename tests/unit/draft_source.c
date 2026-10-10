@@ -260,8 +260,8 @@ static void mixed_rule(void)
 	/* The three whole-object measures the same reader recovers. This rule
 	 * names none of them, so they come back zero - which is the answer
 	 * that says "the file did not ask for it". */
-	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
-	int shp_lv = 0, str_lv = 0, blkv_lv = 0;
+	uint8_t shp_pct = 0;
+	int shp_lv = 0;
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
@@ -276,15 +276,14 @@ static void mixed_rule(void)
 	/* And the block half, off the same file. */
 	CK(plague_from_source(&e, path, d, 4, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
-			      &blkv_pct, &blkv_lv) != 0);
+			      &verdict, &shp_pct, &shp_lv) != 0);
 	CK(n == 1);
 	if (n) {
 		CK(d[0].id == 0xdded9322u);
 		CK(d[0].n_hash == 16);
 		CK(d[0].thr == 70);
 	}
-	CK(!shp_pct && !str_pct && !blkv_pct);
+	CK(!shp_pct);
 	/*
 	 * draft_clear, NOT just unlink. A draft's literals are heap buffers and
 	 * the editor frees them exactly here; a test that skipped it leaked one
@@ -408,8 +407,8 @@ static void two_scores_one_line(void)
 	struct kof_plague_decl d[8];
 	struct kof_verdict_decl verdict;
 	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
-	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
-	int shp_lv = 0, str_lv = 0, blkv_lv = 0;
+	uint8_t shp_pct = 0;
+	int shp_lv = 0;
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
@@ -418,8 +417,7 @@ static void two_scores_one_line(void)
 	lend(&e);
 	CK(plague_from_source(&e, path, d, 8, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
-			      &blkv_pct, &blkv_lv) != 0);
+			      &verdict, &shp_pct, &shp_lv) != 0);
 	/*
 	 * FOUR AND NOT TWO, because one condition may name any number of
 	 * matchers and the reader must not stop at the second either. The
@@ -481,8 +479,8 @@ static void mixed_join_one_line(void)
 	struct kof_plague_decl d[8];
 	struct kof_verdict_decl verdict;
 	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
-	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
-	int shp_lv = 0, str_lv = 0, blkv_lv = 0;
+	uint8_t shp_pct = 0;
+	int shp_lv = 0;
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
@@ -491,8 +489,7 @@ static void mixed_join_one_line(void)
 	lend(&e);
 	CK(plague_from_source(&e, path, d, 8, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv, &str_pct, &str_lv,
-			      &blkv_pct, &blkv_lv) != 0);
+			      &verdict, &shp_pct, &shp_lv) != 0);
 	CK(n == 3);
 	if (n == 3) {
 		CK(d[0].thr == 91);

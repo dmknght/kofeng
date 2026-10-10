@@ -253,13 +253,17 @@ void     kof_elf_reloc_table_free(struct kof_elf_relocs *t);
 const struct kof_elf_reloc *kof_elf_reloc_in(const struct kof_elf_relocs *t,
 					     uint64_t at, uint8_t len);
 
-/* Where each function begins and how long it is, as the symbol table states
- * it. A function nothing calls can be found no other way. */
-typedef void (*kof_elf_func_fn)(void *user, uint64_t va, uint64_t size,
-				const char *name);
-
-uint32_t kof_elf_funcs(kof_buf f, const struct kof_elf_info *p,
-		       kof_elf_func_fn fn, void *user);
+/*
+ * An address a LINKED object is read at, as the file offset holding it.
+ *
+ * Through the loadable segments' FILE halves, so what the file does not hold
+ * (.bss) is not placed, and an extent that runs past the half it starts in is
+ * refused rather than clipped. One translation: the library finder and the
+ * function list both place a symbol by it, and two copies of "which segment" are
+ * two sets of rules that drift.
+ */
+int kof_elf_va_to_off(const struct kof_elf_info *e, uint64_t va, uint64_t sz,
+		      uint64_t *off);
 
 /*
  * Does this object look like ELF at all?

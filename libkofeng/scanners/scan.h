@@ -15,6 +15,7 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
+#include "../analyzers/parsers/binaries/funcs.h"
 #include <celllysis/celllysis.h>
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../extractors/unpack/pe_rebuild.h"
@@ -109,6 +110,7 @@
  */
 enum kof_obj_latch {
 	KOF_OL_SYM,             /* the symbol block                         */
+	KOF_OL_FUNCS,           /* the functions those symbols name         */
 	KOF_OL_USE,             /* the address-use map of the code          */
 	KOF_OL_DIAG_GATE,       /* which diagnoses' signs are present       */
 	KOF_OL_DIAG,            /* the pathogen walk has run                */
@@ -1061,6 +1063,8 @@ struct kof_scanner {
 	 */
 	uint8_t              *pend_syms;
 	uint32_t              n_pend_syms;
+	/* The view's functions, mapped from the parent's - see kof_funcs_remap. */
+	struct kof_func_set   pend_funcs;
 	/* And what it is for, which is also its name when nothing named it. */
 	uint32_t pend_kind;
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */
@@ -1252,6 +1256,9 @@ struct kof_scanner {
 	 */
 	uint8_t  *sym;
 	uint32_t  sym_n;
+	/* The functions the same symbols name, built once beside the block - see
+	 * oc_funcs. */
+	struct kof_func_set funcs;
 	/*
 	 * WHAT THE CODE DOES WITH EACH DATA ADDRESS, swept once for the same
 	 * reason the symbol block is built once: the sweep costs a decode per
@@ -1411,6 +1418,30 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep);
 /* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
 				struct kof_range *ext);
+
+/*
+ * Credit an object's units to a plague context - the ONE feed, for the scanner
+ * and for any tool that scores blocks against an object, so the number a tool
+ * shows is the one the scanner computes. `present` is the region bits the parse
+ * has (all bits for a caller that has not asked); `funcs` and `lib` are the
+ * parse's, or NULL for an object whose headers do not describe its own bytes -
+ * see kof_plague_units. `ext` is scratch for one region's extents.
+ */
+struct kof_plague_ctx;
+struct kof_func_set;
+struct kof_true_all;
+/* One unit of `region`, as kof_plague_units cuts it; non-zero stops the walk. */
+typedef int (*kof_scan_unit_fn)(void *user, uint32_t region, uint64_t off,
+				uint64_t len, uint32_t side,
+				const struct kof_func *first);
+void kof_scan_plague_units(const struct kof_obj_ctx *ctx, kof_buf b,
+			   uint32_t present, const struct kof_func_set *funcs,
+			   const struct kof_true_all *lib, struct kof_range *ext,
+			   kof_scan_unit_fn fn, void *user);
+void kof_scan_plague_feed(struct kof_plague_ctx *pc, const struct kof_obj_ctx *ctx,
+			  kof_buf b, uint32_t present, int from_packer,
+			  const struct kof_func_set *funcs,
+			  const struct kof_true_all *lib, struct kof_range *ext);
 
 /*
  * Recover the scanner from a context handed to a module.

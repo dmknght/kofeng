@@ -1,39 +1,23 @@
 /*
  * kofplague.c - the similarity matcher.
  *
- * See kofplague.h for what it costs and why the index is inverted. What
- * follows is the three pieces that make that cost real:
+ * A block is the MinHash sketch of one unit of code or data; the scanner
+ * sketches the units of the object it is looking at - see kofplague_units.c for
+ * how an object is cut, the same way a block was cut - and counts how much of a
+ * block's sketch a unit's holds. There is no scan of every window: the cost is
+ * one rolling pass over each unit and a lookup per kept hash.
  *
- *   THE BITMAP, which answers "is this hash in any rule at all" in one memory
- *   touch. About one window in thirty-two is even selected, and of those nearly
- *   all are in no rule, so this is where the overwhelming majority of the work
- *   ends.
+ *   THE SORTED PAIR ARRAY, searched once per kept hash. Pairs rather than a
+ *   hash table because a hash can belong to several blocks and the equal range
+ *   is then contiguous - one search, then a walk.
  *
- *   THE SORTED PAIR ARRAY, searched only for what the bitmap let through. Pairs
- *   rather than a hash table because a hash can belong to several blocks and
- *   the equal range is then contiguous - one search, then a walk.
- *
- *   THE GENERATION STAMP, which is what removes the per-object clear. See the
- *   note on `seen` in the header.
+ *   THE GENERATION STAMPS, which remove the per-object and per-unit clears.
  */
 
 #include <stdlib.h>
 #include <string.h>
 
 #include "kofplague.h"
-
-/*
- * The bitmap is sized from the number of indexed pairs so its load factor stays
- * low whatever the pack holds: a bitmap that is too small stops rejecting and
- * every window falls through to the search.
- *
- * Eight bits of table per pair keeps occupancy near an eighth, which is where
- * the test earns its keep. Bounded at both ends: below the floor a tiny pack
- * would allocate a table larger than its index, and above the ceiling a large
- * one would spend memory on a test that is already almost free.
- */
-#define PL_BM_MIN_BITS 12u
-#define PL_BM_MAX_BITS 24u
 
 /*
  * One hash of one block, and WHICH of that block's hashes it is.
@@ -53,7 +37,6 @@ struct pl_pair {
 
 #define PL_BS(b, sl)  (((b) << 8) | (sl))
 #define PL_BLOCK(bs)  ((bs) >> 8)
-#define PL_SLOT(bs)   ((bs) & 0xffu)
 
 /*
  * "Room to spare" above is the whole safety argument, so it is made to the
@@ -77,10 +60,6 @@ struct kof_plague_set {
 
 	struct pl_pair *pair;       /* sorted by hash */
 	uint32_t        n_pair;
-
-	uint8_t  *bm;
-	uint32_t  bm_bits;          /* the table is 1 << bm_bits bits */
-	uint32_t  bm_mask;
 
 	/*
 	 * WHAT EVERY BLOCK FOLDS TO, AND WHICH NORMALIZERS EXIST - both fixed
@@ -185,15 +164,6 @@ static int pl_cmp(const void *a, const void *b)
 	return x < y ? -1 : x > y ? 1 : 0;
 }
 
-static uint32_t pl_bm_bits(uint32_t n_pair)
-{
-	uint32_t b = PL_BM_MIN_BITS;
-
-	while (b < PL_BM_MAX_BITS && (1u << b) < n_pair * 8u)
-		b++;
-	return b;
-}
-
 struct kof_plague_set *kof_plague_build(const struct kof_plague_block *blocks,
 					uint32_t n_blocks,
 					const uint32_t *pool, uint32_t n_pool)
@@ -245,21 +215,7 @@ struct kof_plague_set *kof_plague_build(const struct kof_plague_block *blocks,
 		if (!pl_radix(s->pair, s->n_pair))
 			qsort(s->pair, s->n_pair, sizeof *s->pair, pl_cmp);
 
-	s->bm_bits = pl_bm_bits(s->n_pair);
-	s->bm_mask = (1u << s->bm_bits) - 1u;
-	s->bm = calloc((size_t)1 << (s->bm_bits - 3u), 1);
-	if (!s->bm) {
-		free(s->pair);
-		free(s);
-		return NULL;
-	}
-	for (i = 0; i < s->n_pair; i++) {
-		uint32_t k = s->pair[i].hash & s->bm_mask;
-
-		s->bm[k >> 3] |= (uint8_t)(1u << (k & 7u));
-	}
-	s->bytes = (uint64_t)s->n_pair * sizeof *s->pair +
-		   ((uint64_t)1 << (s->bm_bits - 3u)) + sizeof *s;
+	s->bytes = (uint64_t)s->n_pair * sizeof *s->pair + sizeof *s;
 
 	/* The two constants - see block_id and norm_bit in the struct. */
 	s->block_id = calloc(s->n_block ? s->n_block : 1u,
@@ -290,7 +246,6 @@ void kof_plague_set_free(struct kof_plague_set *s)
 	if (!s)
 		return;
 	free(s->pair);
-	free(s->bm);
 	free(s->block_id);
 	free(s);
 }
@@ -370,11 +325,13 @@ int kof_plague_ctx_init(struct kof_plague_ctx *c, const struct kof_plague_set *s
 	c->set = s;
 	c->n_block = s->n_block;
 	if (c->n_block) {
-		c->seen = calloc(c->n_block, sizeof *c->seen);
-		c->stamp = calloc(c->n_block, sizeof *c->stamp);
-		c->hit = calloc(s->n_pool ? s->n_pool : 1u, 1);
-		if (!c->seen || !c->stamp || !c->hit) {
-			free(c->seen); free(c->stamp); free(c->hit);
+		c->seen   = calloc(c->n_block, sizeof *c->seen);
+		c->stamp  = calloc(c->n_block, sizeof *c->stamp);
+		c->ucnt   = calloc(c->n_block, sizeof *c->ucnt);
+		c->ustamp = calloc(c->n_block, sizeof *c->ustamp);
+		if (!c->seen || !c->stamp || !c->ucnt || !c->ustamp) {
+			free(c->seen); free(c->stamp);
+			free(c->ucnt); free(c->ustamp);
 			memset(c, 0, sizeof *c);
 			return 0;
 		}
@@ -384,6 +341,7 @@ int kof_plague_ctx_init(struct kof_plague_ctx *c, const struct kof_plague_set *s
 	 * cannot be mistaken for "counted during this object".
 	 */
 	c->gen = 1;
+	c->ugen = 1;
 	return 1;
 }
 
@@ -393,7 +351,8 @@ void kof_plague_ctx_done(struct kof_plague_ctx *c)
 		return;
 	free(c->seen);
 	free(c->stamp);
-	free(c->hit);
+	free(c->ucnt);
+	free(c->ustamp);
 	memset(c, 0, sizeof *c);
 }
 
@@ -403,9 +362,6 @@ void kof_plague_begin(struct kof_plague_ctx *c)
 		return;
 	c->gen++;
 	c->any_region = 0;
-	c->obj_base = 0;
-	c->lib = 0;
-	c->n_lib = 0;
 	/*
 	 * Wrapping would make a stale stamp look current. It takes four billion
 	 * objects on one thread to get here and the clear is a millisecond, so
@@ -426,48 +382,13 @@ void kof_plague_any_region(struct kof_plague_ctx *c, int on)
 		c->any_region = on != 0;
 }
 
-void kof_plague_object(struct kof_plague_ctx *c, const uint8_t *base,
-		       const struct kof_range *lib, uint32_t n_lib)
-{
-	if (!c)
-		return;
-	c->obj_base = base;
-	c->lib      = (base && n_lib) ? lib : 0;
-	c->n_lib    = (base && lib) ? n_lib : 0;
-}
-
-/*
- * Does the window at file offset `off` touch the library?
- *
- * Linear over the spans, which number a few tens at most, and reached only by a
- * window that already passed selection - so this runs on roughly one window in
- * a few thousand and an object with no library never reaches it at all.
- *
- * ANY OVERLAP DISQUALIFIES, not majority overlap. A window straddling the
- * boundary is part library, and a hash of part of the library is still a hash
- * every binary built against that library can produce.
- */
-static int pl_in_lib(const struct kof_plague_ctx *c, uint64_t off, uint64_t len)
-{
-	uint32_t i;
-
-	for (i = 0; i < c->n_lib; i++) {
-		uint64_t s = c->lib[i].off;
-		uint64_t e = s + c->lib[i].len;
-
-		if (off < e && s < off + len)
-			return 1;
-	}
-	return 0;
-}
-
 /*
  * THE GENERATOR SIDE: hash one span the way the matcher will read it.
  *
  * Here rather than in whoever is carving because there is one right answer and
  * several callers - the panel that offers blocks, anything that wants to
  * recognise a block it has been handed, a test. A generator that derived a
- * value differently from kof_plague_feed would produce a rule that matches
+ * value differently from kof_plague_unit would produce a rule that matches
  * nothing and reports no error, and the way to make that impossible is for
  * there to be one of it.
  *
@@ -476,67 +397,19 @@ static int pl_in_lib(const struct kof_plague_ctx *c, uint64_t off, uint64_t len)
  * content does. Windows of one repeated byte are left out on both sides - see
  * kof_plague_flat.
  *
- * Returns how many were written, never more than max_out.
+ * KEPT IN A SORTED ARRAY OF k, NOT COLLECTED AND SORTED. What this wants out is
+ * the k smallest, and a window larger than the array's largest is rejected by
+ * one compare - which is nearly all of them once k values are held. The
+ * collecting version needed a working array of every selected window, capped at
+ * KOF_PLAGUE_SPAN_MAX, and a window past the cap was dropped without a word: a
+ * span long enough to need it lost the tail of itself. Nothing is capped now.
  */
-/*
- * ASCENDING, IN PLACE, AND NOT AN INSERTION SORT.
- *
- * What the caller wants out of this is a sorted, de-duplicated list, and any
- * correct sort produces the same one - so the choice is only about what it
- * costs. An insertion sort was here, and the values being sorted are hashes:
- * they arrive in no order at all, which is the input that makes it quadratic
- * rather than the nearly-sorted one that makes it fast.
- *
- * The array is up to KOF_PLAGUE_SPAN_MAX entries. At the cap that is 268
- * million moves against 229 thousand comparisons for an n log n sort, and the
- * span this runs over is a whole region of a file - kofviewer carves one every
- * time a researcher moves the selection.
- *
- * HEAPSORT, WHICH IS THE ONE THAT FITS. `tmp` is already 64 KB of frame and
- * the build refuses a frame past 128 KB, so a merge or a radix pass has
- * nowhere to put its second buffer; heapsort needs none, recurses nowhere, and
- * has no input that degrades it.
- */
-static void pl_sift(uint32_t *a, uint32_t root, uint32_t n)
+uint32_t kof_plague_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
+			    uint32_t *out)
 {
-	for (;;) {
-		uint32_t c = 2u * root + 1u, big = root, t;
-
-		if (c < n && a[c] > a[big])
-			big = c;
-		if (c + 1u < n && a[c + 1u] > a[big])
-			big = c + 1u;
-		if (big == root)
-			return;
-		t = a[root]; a[root] = a[big]; a[big] = t;
-		root = big;
-	}
-}
-
-static void pl_sort(uint32_t *a, uint32_t n)
-{
-	uint32_t i;
-
-	if (n < 2u)
-		return;
-	for (i = n / 2u; i-- > 0u; )
-		pl_sift(a, i, n);
-	for (i = n; i-- > 1u; ) {
-		uint32_t t = a[0];
-
-		a[0] = a[i];
-		a[i] = t;
-		pl_sift(a, 0, i);
-	}
-}
-
-uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
-			      uint32_t *out, uint32_t max_out)
-{
+	const uint32_t max_out = KOF_PLAGUE_MINHASH_K;
 	uint32_t h = 0, drop = kof_plague_drop_weight(), i, got = 0;
 	uint64_t at;
-	uint32_t tmp[KOF_PLAGUE_SPAN_MAX];
-	uint32_t nt = 0;
 
 	if (norm != KOF_PLAGUE_RAW) {
 		if (n < 2u)
@@ -546,38 +419,80 @@ uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
 	if (n < KOF_PLAGUE_NG)
 		return 0;
 
-	/* One definition of what a normalizer presents - see kofplague.h. The
-	 * macro that used to be here was a second copy of it, and a generator
-	 * that derived a byte differently from the matcher is a rule that
-	 * matches nothing and reports no error. */
+	/* One definition of what a normalizer presents - see kofplague.h. */
 #define PB(k) ((uint32_t)kof_plague_byte(p, (k), norm))
 	for (i = 0; i < KOF_PLAGUE_NG; i++)
 		h = h * KOF_PLAGUE_BASE + PB(i);
 	for (at = 0;; at++) {
-		/* The multiply decides selection on its own - see
-		 * kof_plague_premix. The xor-shift is paid only by the one
-		 * window in 2^SEL_BITS that is going to be stored. */
-		uint32_t pre = kof_plague_premix(h);
+		uint32_t v = kof_plague_mix(h);
 
-		if (kof_plague_selects_pre(pre) &&
-		    !kof_plague_flat(p, at, norm) &&
-		    nt < KOF_PLAGUE_SPAN_MAX)
-			tmp[nt++] = kof_plague_mix_from(pre);
+		/* THE CHEAP TEST FIRST. Once k values are held a window larger
+		 * than the largest is rejected by this compare, which is nearly
+		 * all of them; the flat test is eight comparisons and is paid
+		 * only by a window that would have been kept. The answer is the
+		 * same - a flat window is refused either way. */
+		if ((got < max_out || v < out[got - 1u]) &&
+		    !kof_plague_flat(p, at, norm)) {
+			uint32_t lo = 0, hi = got;
+
+			while (lo < hi) {
+				uint32_t mid = lo + (hi - lo) / 2u;
+
+				if (out[mid] < v)
+					lo = mid + 1u;
+				else
+					hi = mid;
+			}
+			if (lo == got || out[lo] != v) {
+				uint32_t last = got < max_out ? got : max_out - 1u;
+
+				memmove(out + lo + 1u, out + lo,
+					(last - lo) * sizeof *out);
+				out[lo] = v;
+				if (got < max_out)
+					got++;
+			}
+		}
 		if (at + KOF_PLAGUE_NG >= n)
 			break;
-		h -= PB(at) * drop;
-		h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
+		/* The normalizer is decided once per window, not twice. */
+		if (norm == KOF_PLAGUE_RAW) {
+			h -= (uint32_t)p[at] * drop;
+			h = h * KOF_PLAGUE_BASE + (uint32_t)p[at + KOF_PLAGUE_NG];
+		} else {
+			h -= PB(at) * drop;
+			h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
+		}
 	}
 #undef PB
-	pl_sort(tmp, nt);
-	for (i = 0; i < nt && got < max_out; i++)
-		if (!i || tmp[i] != tmp[i - 1u])
-			out[got++] = tmp[i];
 	return got;
 }
 
+void kof_plague_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t min,
+		    uint32_t max, kof_plague_cut_fn fn, void *user)
+{
+	uint32_t h = 0, drop = kof_plague_drop_weight(), w;
+	uint64_t at, cut = 0;
 
-/* Credit one hash to every block that holds it. */
+	for (w = 0; w < KOF_PLAGUE_NG && w < len; w++)
+		h = h * KOF_PLAGUE_BASE + p[w];
+	for (at = KOF_PLAGUE_NG; at < len; at++) {
+		int here = (kof_plague_mix(h) & (avg - 1u)) == 0u;
+
+		if ((here && at - cut >= min) || at - cut >= max) {
+			if (fn(user, cut, at))
+				return;
+			cut = at;
+		}
+		h -= (uint32_t)p[at - KOF_PLAGUE_NG] * drop;
+		h = h * KOF_PLAGUE_BASE + p[at];
+	}
+	/* And the tail, whatever is left of the span. */
+	if (cut < len)
+		(void)fn(user, cut, len);
+}
+
+/* Credit one hash of a unit's sketch to every block that holds it. */
 static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
 		      uint32_t h, uint32_t side)
 {
@@ -593,203 +508,55 @@ static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t nor
 	}
 	for (; lo < s->n_pair && s->pair[lo].hash == h; lo++) {
 		uint32_t b = PL_BLOCK(s->pair[lo].bs);
-		uint32_t sl = PL_SLOT(s->pair[lo].bs);
 		const struct kof_plague_block *blk = &s->block[b];
 
 		/*
-		 * THE REGION AND THE NORMALIZER ARE PART OF THE MATCH, not a
-		 * filter applied afterwards. The same eight bytes in another
-		 * region, or hashed another way, is a different fact - and a
-		 * matcher that credited it would quietly undo the anchoring the
-		 * rule was written with.
+		 * THE REGION, THE NORMALIZER AND THE SIDE ARE PART OF THE MATCH,
+		 * not a filter applied afterwards. The same bytes in another
+		 * region, hashed another way, or on the other side of the static
+		 * library are a different fact - see enum kof_plague_side.
 		 */
-		if (blk->norm != norm ||
+		if (blk->norm != norm || blk->side != side ||
 		    (!c->any_region && !(blk->scan_mask & scan_mask)))
 			continue;
-		/*
-		 * AND THE SIDE, for the reason the two above are here: a block
-		 * cut from the static library and a block cut from the author's
-		 * own code are answers to different questions, and one must not
-		 * be able to score the other. See enum kof_plague_side.
-		 */
-		if (blk->side != side)
-			continue;
+		if (c->ustamp[b] != c->ugen) {
+			c->ustamp[b] = c->ugen;
+			c->ucnt[b] = 0;
+		}
+		c->ucnt[b]++;
 		if (c->stamp[b] != c->gen) {
 			c->stamp[b] = c->gen;
 			c->seen[b] = 0;
-			/* And the block's slice of the hit marks, which is the
-			 * only thing that has to be cleared per object - at
-			 * most KOF_PLAGUE_MAX_HASH bytes, and only for a block
-			 * something actually matched. */
-			memset(c->hit + blk->first_hash, 0, blk->n_hash);
 		}
 		/*
-		 * COUNTED ONCE PER DISTINCT HASH, not per occurrence.
-		 *
-		 * A block repeated twice in a file is still that one block, and
-		 * a run of padding that happens to carry one of a rule's hashes
-		 * must not be able to score the rule on its own.
-		 *
-		 * Bounding an occurrence counter by the block's size was NOT
-		 * this, though it was written as though it were: it let any
-		 * file that repeated a handful of a block's hashes often enough
-		 * saturate the count and read as a hundred per cent. Measured
-		 * on a sample and a two per cent variant of it, every carried
-		 * block scored 100 where the true containment was 93.
+		 * THE BEST UNIT, not the sum over units. A sketch's hashes are
+		 * distinct and so are a block's, so one unit counts each hash of
+		 * the block once; and two unrelated units that each hold a few
+		 * of a block's hashes must not add up to a match.
 		 */
-		if (!c->hit[blk->first_hash + sl]) {
-			c->hit[blk->first_hash + sl] = 1;
-			c->seen[b]++;
-		}
+		if (c->ucnt[b] > c->seen[b])
+			c->seen[b] = c->ucnt[b];
 	}
 }
 
-void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
-		     const uint8_t *p, uint64_t n)
+void kof_plague_unit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
+		     uint32_t side, const uint8_t *p, uint64_t n)
 {
-	const struct kof_plague_set *s;
-	uint32_t h = 0, drop, i;
-	uint64_t at;
+	uint32_t sk[KOF_PLAGUE_MINHASH_K], got, i;
 
-	if (!c || !c->set || !p || norm >= KOF_PLAGUE_NORM_COUNT)
+	if (!c || !c->set || !p || norm >= KOF_PLAGUE_NORM_COUNT ||
+	    !c->set->n_pair)
 		return;
-	s = c->set;
-	if (!s->n_pair)
+	got = kof_plague_minhash(p, n, norm, sk);
+	if (!got)
 		return;
-
-	/*
-	 * The normalized stream is one shorter than the bytes, because a
-	 * difference needs two of them. Written as a bound on the loop rather
-	 * than a copy of the buffer: a region is up to a megabyte and the point
-	 * of a rolling hash is not to touch it twice.
-	 */
-	if (norm != KOF_PLAGUE_RAW) {
-		if (n < 2u)
-			return;
-		n -= 1u;
+	/* A new unit: the counts of the last say nothing about this one. */
+	if (++c->ugen == 0u) {
+		memset(c->ustamp, 0, (size_t)c->n_block * sizeof *c->ustamp);
+		c->ugen = 1u;
 	}
-	if (n < KOF_PLAGUE_NG)
-		return;
-
-	drop = kof_plague_drop_weight();
-
-	/* One definition of what a normalizer presents - see kofplague.h. The
-	 * macro that used to be here was a third copy of it. */
-#define kof_plague_byte_of(k) ((uint32_t)kof_plague_byte(p, (k), norm))
-	for (i = 0; i < KOF_PLAGUE_NG; i++)
-		h = h * KOF_PLAGUE_BASE + kof_plague_byte_of(i);
-
-	for (at = 0;; at++) {
-		/* The multiply decides selection on its own - see
-		 * kof_plague_premix. This is the hottest loop in the matcher
-		 * and the xor-shift was being run on every byte of every
-		 * region to produce a value that thirty-one windows in
-		 * thirty-two never read. */
-		uint32_t pre = kof_plague_premix(h);
-
-		if (kof_plague_selects_pre(pre) &&
-		    !kof_plague_flat(p, at, norm)) {
-			uint32_t mixed = kof_plague_mix_from(pre);
-			uint32_t k = mixed & s->bm_mask;
-
-			/*
-			 * WHICH SIDE THIS WINDOW IS ON - see enum
-			 * kof_plague_side. It used to be a refusal: a window
-			 * inside the library credited nothing at all. Now it
-			 * chooses which blocks it may credit, so the library is
-			 * still unable to score a rule written on author code
-			 * and has become able to score one written on itself.
-			 *
-			 * Per window, and after selection because that is what
-			 * makes it free: one object in a thousand windows gets
-			 * this far.
-			 */
-			/*
-			 * NG BYTES RAW AND NG+1 DIFFERENCED, because that is
-			 * what the window actually READ - see kof_plague_byte,
-			 * which takes p[k] and p[k+1] for XOR and SUB. Asked
-			 * about NG either way, a window whose last differenced
-			 * byte was the library's first would have been called
-			 * the author's, and the rule this states is that ANY
-			 * overlap disqualifies.
-			 */
-			/*
-			 * THE BITMAP FIRST, AND THE SIDE ONLY IF IT PASSES.
-			 *
-			 * Both values below are read by pl_credit and by
-			 * nothing else, so computing them before the index
-			 * test is work thrown away for every window the index
-			 * does not hold - which is nearly all of them. The cost
-			 * model at the top of kofplague.h says exactly that:
-			 * "most windows are not selected at all, and of those
-			 * that are, most are in no rule; both are rejected
-			 * without touching the index."
-			 *
-			 * pl_in_lib walks the library spans, and the symbol
-			 * tier produces one per library function - up to
-			 * KOF_TRUE_MAX_SPANS_ALL of them. Paid per selected
-			 * window on a three-megabyte object that is ninety
-			 * thousand walks of a list answering nothing the
-			 * verdict uses.
-			 *
-			 * The answer is identical either way: the index test
-			 * reads nothing these compute, and they read nothing
-			 * the index test changes.
-			 */
-			if (s->bm[k >> 3] & (1u << (k & 7u))) {
-				uint64_t wlen = norm == KOF_PLAGUE_RAW
-					      ? (uint64_t)KOF_PLAGUE_NG
-					      : (uint64_t)KOF_PLAGUE_NG + 1u;
-				uint32_t side = (c->n_lib && p >= c->obj_base &&
-						 pl_in_lib(c,
-							   (uint64_t)(p - c->obj_base) + at,
-							   wlen))
-					      ? (uint32_t)KOF_PLAGUE_SIDE_LIB
-					      : (uint32_t)KOF_PLAGUE_SIDE_USER;
-
-				pl_credit(c, scan_mask, norm, mixed, side);
-			}
-		}
-		/* The `next:` label that was here is gone with the refusal it
-		 * existed for: a library window no longer skips the crediting
-		 * step, it credits a different set of blocks. */
-		if (at + KOF_PLAGUE_NG >= n)
-			break;
-		/*
-		 * THE NORMALIZER IS DECIDED ONCE PER WINDOW, NOT TWICE.
-		 *
-		 * kof_plague_byte is a two-branch chain on `norm`, and the two
-		 * calls below run it for every byte of every region fed - so
-		 * the rolling update asked a question that cannot change for
-		 * the whole walk, four times a window.
-		 *
-		 * GCC does not lift it: loop unswitching is an -O3 pass and
-		 * this tree builds at -O2, so the invariant test stays inside
-		 * the loop however obvious it is. Lifted by hand, it becomes
-		 * one branch the predictor gets right every time, and the two
-		 * accessors become plain loads.
-		 *
-		 * The three arms are kof_plague_byte's three cases, spelled the
-		 * same way and in the same order - see kofplague.h, which is
-		 * still the one definition of what a normalizer presents.
-		 */
-		if (norm == KOF_PLAGUE_RAW) {
-			h -= (uint32_t)p[at] * drop;
-			h = h * KOF_PLAGUE_BASE +
-			    (uint32_t)p[at + KOF_PLAGUE_NG];
-		} else if (norm == KOF_PLAGUE_XOR) {
-			h -= (uint32_t)(uint8_t)(p[at] ^ p[at + 1u]) * drop;
-			h = h * KOF_PLAGUE_BASE +
-			    (uint32_t)(uint8_t)(p[at + KOF_PLAGUE_NG] ^
-						p[at + KOF_PLAGUE_NG + 1u]);
-		} else {
-			h -= (uint32_t)(uint8_t)(p[at + 1u] - p[at]) * drop;
-			h = h * KOF_PLAGUE_BASE +
-			    (uint32_t)(uint8_t)(p[at + KOF_PLAGUE_NG + 1u] -
-						p[at + KOF_PLAGUE_NG]);
-		}
-	}
-#undef kof_plague_byte_of
+	for (i = 0; i < got; i++)
+		pl_credit(c, scan_mask, norm, sk[i], side);
 }
 
 /* ---- scoring ------------------------------------------------------------ */
@@ -824,8 +591,13 @@ int kof_plague_counts(const struct kof_plague_ctx *c, uint32_t b,
 	blk = &c->set->block[b];
 	if (!blk->n_hash)
 		return 0;
-	if (seen)
+	if (seen) {
 		*seen = (c->stamp[b] == c->gen) ? c->seen[b] : 0u;
+		/* A block that names one hash twice must not read past a
+		 * hundred per cent. */
+		if (*seen > blk->n_hash)
+			*seen = blk->n_hash;
+	}
 	if (n_hash)
 		*n_hash = blk->n_hash;
 	return 1;

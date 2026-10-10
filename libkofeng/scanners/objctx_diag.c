@@ -354,6 +354,38 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 }
 
 
+const struct kof_func_set *oc_funcs(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	/* Once per object, like the symbol block it is read from the table of:
+	 * "built, and there were none" is an answer and is not asked again. */
+	if (!sc->latch[KOF_OL_FUNCS]) {
+		sc->latch[KOF_OL_FUNCS] = 1;
+		kof_funcs_free(&sc->funcs);
+		if (ctx->file_header) {
+			kof_diag_funcs_of(ctx, sc->m.data.p, sc->m.data.n,
+					  &sc->funcs);
+		} else {
+			/* A normalised view has no headers to read them from; its
+			 * producer mapped them over - see kof_funcs_remap. */
+			uint32_t n = 0;
+			const struct kof_func *d = kof_src_funcs_of(sc->cur_src, &n);
+
+			if (d && n) {
+				sc->funcs.v = malloc(n * sizeof *sc->funcs.v);
+				if (sc->funcs.v) {
+					memcpy(sc->funcs.v, d, n * sizeof *d);
+					sc->funcs.n = n;
+				} else {
+					sc->funcs.oom = 1;
+				}
+			}
+		}
+	}
+	return &sc->funcs;
+}
+
 /*
  * DOES THIS OBJECT CARRY THE SIGNS THIS DIAGNOSE ASKED FOR - see
  * struct kof_diag.need.
@@ -961,6 +993,10 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		struct kof_diag_inputs in;
 
 		in.relocs = sc_relocs(sc, ctx);
+		/* Read from the same table the symbol block is, once - and only
+		 * for a route that walks functions. */
+		in.funcs = (run & (KOF_DIAG_RUN_SYMBOL | KOF_DIAG_RUN_EMULATE))
+			   ? oc_funcs(ctx) : NULL;
 		in.seq = seqv;
 		in.n_seq = n_seq;
 		/* The analysis result, from the latch: the normaliser may have

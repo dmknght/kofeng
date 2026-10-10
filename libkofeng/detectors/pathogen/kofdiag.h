@@ -17,6 +17,7 @@
 #ifndef KOFENG_PATHOGEN_KOFDIAG_H
 #define KOFENG_PATHOGEN_KOFDIAG_H
 
+#include "../../analyzers/parsers/binaries/funcs.h"
 #include <stdint.h>
 
 #include "../../kofeng.h"
@@ -338,6 +339,10 @@ struct kof_diag_seq {
 struct kof_diag_inputs {
 	const struct kof_elf_relocs *relocs;
 	const struct kof_apihash    *apihash;
+	/* The object's functions - see funcs.h. The scanner builds them once beside
+	 * its symbol block; a caller with none leaves this NULL and the first route
+	 * that needs them builds its own. */
+	const struct kof_func_set   *funcs;
 	/*
 	 * THE HEADS THE ENGINE BUILDS OUT OF TWO CALLS - one per diagnose that
 	 * declared a sequence and whose gate is open. Without one, no such node
@@ -493,5 +498,8 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 		  struct kof_diag_node *node, uint8_t max_node,
 		  char *name, uint32_t name_cap,
 		  char *needs, uint32_t needs_cap);
+
+void kof_diag_funcs_of(const struct kof_obj_ctx *ctx, const uint8_t *data,
+		       uint64_t data_n, struct kof_func_set *out);
 
 #endif /* KOFENG_PATHOGEN_KOFDIAG_H */

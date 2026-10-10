@@ -5,6 +5,7 @@
  */
 
 #include "trueline.h"
+#include "../parsers/binaries/elf/elf_parse.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -352,57 +353,24 @@ static int reserved_name(const char *s, uint64_t n)
  * the file half of a segment covers no bytes of the file and must not become
  * an offset that lands on whatever follows it.
  */
-static int addr_to_off(const struct kof_elf_info *e, uint64_t va, uint64_t sz,
-		       uint64_t *off)
-{
-	uint32_t s;
-
-	for (s = 0; s < e->seg_count && s < KOF_ELF_MAX_SEGMENTS; s++) {
-		const struct kof_elf_seg *g = &e->seg[s];
-
-		if (g->type != PT_LOAD || !g->file_size)
-			continue;
-		if (va < g->mem_addr || va - g->mem_addr >= g->file_size)
-			continue;
-		if (sz > g->file_size - (va - g->mem_addr))
-			return 0;       /* it runs past the file half */
-		*off = g->file_off + (va - g->mem_addr);
-		return 1;
-	}
-	return 0;
-}
-
 /*
  * The file bytes one symbol covers, or nothing.
  *
  * FUNC and OBJECT only: a SECTION or NOTYPE symbol names a place rather than an
  * extent somebody wrote, and a zero size states no extent at all.
  */
-static int sym_extent(kof_buf file, const struct kof_elf_info *e, int be,
-		      int is64, uint64_t ent, uint8_t info,
+static int sym_extent(const struct kof_elf_info *e,
+		      const struct kof_elf_symbol *sy,
 		      uint64_t *lo, uint64_t *hi)
 {
-	uint64_t va, sz, off;
+	uint64_t off;
 
-	if ((info & 0xfu) != STT_OBJECT_ && (info & 0xfu) != STT_FUNC_)
+	if ((sy->info & 0xfu) != STT_OBJECT_ && (sy->info & 0xfu) != STT_FUNC_)
 		return 0;
-	if (is64) {
-		if (!kof_rd_u64(file, ent + 8, be, &va) ||
-		    !kof_rd_u64(file, ent + 16, be, &sz))
-			return 0;
-	} else {
-		uint32_t v32 = 0, s32 = 0;
-
-		if (!kof_rd_u32(file, ent + 4, be, &v32) ||
-		    !kof_rd_u32(file, ent + 8, be, &s32))
-			return 0;
-		va = v32;
-		sz = s32;
-	}
-	if (!sz || !addr_to_off(e, va, sz, &off))
+	if (!sy->size || !kof_elf_va_to_off(e, sy->value, sy->size, &off))
 		return 0;
 	*lo = off;
-	*hi = off + sz;
+	*hi = off + sy->size;
 	return 1;
 }
 
@@ -584,26 +552,17 @@ static void fill_gaps(const struct kof_elf_info *e, struct kof_rlist *lib,
 static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
 			 struct kof_rlist *l, struct kof_rlist *mine)
 {
-	const struct kof_elf_sec *sym = NULL, *str;
+	struct kof_elf_symtab t;
+	const struct kof_elf_sec *str;
 	uint8_t grp_lib[GRP_MAX / 8u];
-	uint32_t i, entsz, count, pass, n_mark = l->n;
-	int is64, be;
+	uint64_t si;
+	uint32_t pass, n_mark = l->n;
 
-	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++)
-		if (e->sec[i].type == SHT_SYMTAB_) { sym = &e->sec[i]; break; }
 	str = sec_named(e, ".strtab");
-	if (!sym || !str)
-		return;                 /* stripped: the markers are all there is */
+	/* Stripped: the markers are all there is. */
+	if (!str || !kof_elf_symtab_of(file, e, KOF_ELF_SYMTAB_FULL, &t) || !t.n)
+		return;
 	if (str->file_off >= file.n || str->file_size > file.n - str->file_off)
-		return;
-	if (sym->file_off >= file.n || sym->file_size > file.n - sym->file_off)
-		return;
-
-	is64  = e->elf_class == KOF_ELFCLASS_64;
-	be    = e->elf_data  == KOF_ELFDATA_BE;
-	entsz = is64 ? 24u : 16u;
-	count = (uint32_t)(sym->file_size / entsz);
-	if (!count)
 		return;
 
 	memset(grp_lib, 0, sizeof grp_lib);
@@ -617,16 +576,17 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
 	for (pass = 0; pass < 2u; pass++) {
 		uint32_t grp = 0;
 
-		for (i = 0; i < count; i++) {
-			uint64_t ent = sym->file_off + (uint64_t)i * entsz;
+		for (si = 0; si < t.n; si++) {
+			struct kof_elf_symbol sy;
 			uint64_t lo = 0, hi = 0;
-			uint32_t nm = 0;
-			uint8_t info = 0;
+			uint32_t nm;
+			uint8_t info;
 			int local;
 
-			if (!kof_rd_u32(file, ent, be, &nm) ||
-			    !kof_rd_u8(file, ent + (is64 ? 4u : 12u), &info))
+			if (!kof_elf_symbol_at(file, &t, si, &sy))
 				break;
+			nm = sy.nameoff;
+			info = sy.info;
 			if ((info & 0xfu) == STT_FILE_) {
 				grp++;
 				continue;
@@ -646,16 +606,11 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
 				continue;
 
 			if (pass == 0) {
-				uint16_t shndx = 0;
 				int lib;
 
 				if (!local)
 					continue;   /* it convicts no group */
-				if (!kof_rd_u16(file,
-						ent + (is64 ? 6u : 14u),
-						be, &shndx))
-					break;
-				if (!shndx)
+				if (!sy.shndx)
 					continue;   /* referenced, not written */
 				lib = sym_reserved(file, str, nm);
 				/*
@@ -670,9 +625,7 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
 				 * that object - which carries no strings, so
 				 * the marker tier can never see it - goes too.
 				 */
-				if (!lib &&
-				    sym_extent(file, e, be, is64, ent, info,
-					       &lo, &hi) &&
+				if (!lib && sym_extent(e, &sy, &lo, &hi) &&
 				    hits_marker(l, n_mark, lo, hi))
 					lib = 1;
 				if (lib)
@@ -692,8 +645,7 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
 					 * stops a gap being closed over them -
 					 * see fill_gaps.
 					 */
-					if (sym_extent(file, e, be, is64, ent,
-						       info, &lo, &hi))
+					if (sym_extent(e, &sy, &lo, &hi))
 						kof_rl_add(mine, file.n, lo,
 							   hi - lo);
 					continue;
@@ -721,12 +673,11 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
 				 * way round - the two mistakes are not worth
 				 * the same.
 				 */
-				if (sym_extent(file, e, be, is64, ent, info,
-					       &lo, &hi))
+				if (sym_extent(e, &sy, &lo, &hi))
 					kof_rl_add(mine, file.n, lo, hi - lo);
 				continue;
 			}
-			if (sym_extent(file, e, be, is64, ent, info, &lo, &hi))
+			if (sym_extent(e, &sy, &lo, &hi))
 				lib_add(l, file.n, lo, hi - lo);
 		}
 	}
@@ -748,25 +699,32 @@ static void symbol_spans(kof_buf file, const struct kof_elf_info *e,
  * every other unknown is resolved in here: what cannot be attributed stays with
  * the author, so a view never loses a record on a guess.
  */
-int kof_true_has_addr(const struct kof_elf_info *e,
-		     const struct kof_true_all *lib, uint64_t va, uint64_t size)
+int kof_true_touches(const struct kof_true_all *lib, uint64_t off, uint64_t len)
 {
-	uint64_t off, end;
 	uint32_t i;
 
-	if (!e || !lib || !lib->n || !size)
+	if (!lib || !lib->n || !len)
 		return 0;
-	if (!addr_to_off(e, va, size, &off))
-		return 0;
-	end = off + size;
 	for (i = 0; i < lib->n; i++) {
 		uint64_t a = lib->span[i].off;
 		uint64_t b = a + lib->span[i].len;
 
-		if (off < b && a < end)
+		if (off < b && a < off + len)
 			return 1;
 	}
 	return 0;
+}
+
+int kof_true_has_addr(const struct kof_elf_info *e,
+		     const struct kof_true_all *lib, uint64_t va, uint64_t size)
+{
+	uint64_t off;
+
+	if (!e || !size)
+		return 0;
+	if (!kof_elf_va_to_off(e, va, size, &off))
+		return 0;
+	return kof_true_touches(lib, off, size);
 }
 
 void kof_true_find(kof_buf file, const struct kof_elf_info *e,

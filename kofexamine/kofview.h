@@ -45,6 +45,7 @@
  * vary.
  */
 extern int g_rows, g_cols;
+extern int g_term_small;      /* the real terminal is smaller than the 12x60 the layout needs */
 
 /*
  * Everything this program puts on the terminal goes through one call.

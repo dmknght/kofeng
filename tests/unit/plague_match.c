@@ -1,27 +1,21 @@
 /*
  * plague_match - the similarity matcher, against inputs built here.
  *
- * WHAT NEEDS PROVING, and each of these is a way the matcher could be wrong
- * while still looking like it works:
+ * The scanner sketches UNITS of an object - kof_plague_unit - and a block's
+ * score is how much of its sketch the best single unit holds. What needs proving,
+ * each a way the matcher could be wrong while still looking like it works:
  *
- *   - a block found whole scores 100, and one that is absent scores nothing.
- *   - THE SCORE MOVES WITH THE DAMAGE. A block with a quarter of it overwritten
- *     must score near seventy-five, not "matched" or "not matched" - the
- *     percentage is the finding, so a matcher that only had two answers would
- *     pass every yes/no test and be useless.
- *   - REORDERING THE RECORDS COSTS ONLY THE SEAMS. Set containment is why a
- *     credential table shuffled between builds still matches; the shortfall is
- *     the windows that spanned a record boundary, and it is arithmetic rather
- *     than noise - see the note where it is checked.
- *   - INSERTION DOES NOT SHIFT IT. Bytes added before the block must not move
- *     the score, because nothing here is measured from an offset.
- *   - THE NORMALIZER ERASES A CONSTANT KEY. A block XORed with any single byte
- *     must score the same under KOF_PLAGUE_XOR, and must NOT under RAW.
- *   - THE REGION IS PART OF THE MATCH. The same bytes fed as another region
- *     score zero, which is what a rule's anchoring rests on.
- *   - BLOCKS ARE INDEPENDENT. Two blocks fed in one pass each report their own
- *     percentage; combining them is the rule's business and not the matcher's,
- *     so what is tested here is that neither disturbs the other.
+ *   - a unit equal to the block scores 100, and an absent one scores nothing.
+ *   - THE SCORE MOVES WITH THE DAMAGE. A unit with a quarter overwritten must
+ *     score between the extremes: the percentage is the finding, so a matcher
+ *     that only had two answers would pass every yes/no test and be useless.
+ *   - REORDERING THE RECORDS COSTS ONLY THE SEAMS.
+ *   - THE NORMALIZER ERASES A CONSTANT KEY: a unit XORed with any single byte
+ *     scores the same under KOF_PLAGUE_XOR, and does not under RAW.
+ *   - THE REGION AND THE SIDE ARE PART OF THE MATCH.
+ *   - THE BEST UNIT, NOT THE SUM: two units that each hold half of a block do not
+ *     add up to the whole of it.
+ *   - BLOCKS ARE INDEPENDENT, and padding is not content.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -70,51 +64,17 @@ static void make_block(uint8_t *b, uint32_t seed)
 		b[i] = (uint8_t)rnd(&s);
 }
 
-/* Every hash a buffer yields under one normalizer, in ascending order, cut to
- * what a rule may carry - the same k-smallest cut the authoring side makes. */
+/* The sketch a buffer yields under one normalizer, in ascending order. The
+ * engine's own generator: this file carried a copy of it once, and a copy is
+ * exactly what lets the authoring side and the matcher drift apart with
+ * nothing reporting it. */
 static uint32_t harvest(const uint8_t *p, uint32_t n, uint32_t norm,
-			uint32_t *out, uint32_t max_out)
+			uint32_t *out)
 {
-	uint32_t h = 0, drop = kof_plague_drop_weight(), i, got = 0, at;
-	uint32_t tmp[8192];
-	uint32_t nt = 0;
-
-	if (norm != KOF_PLAGUE_RAW) {
-		if (n < 2u) return 0;
-		n -= 1u;
-	}
-	if (n < KOF_PLAGUE_NG)
-		return 0;
-#define BY(k) ((uint32_t)(norm == KOF_PLAGUE_RAW ? p[(k)]                     \
-	       : norm == KOF_PLAGUE_XOR ? (uint8_t)(p[(k)] ^ p[(k) + 1u])     \
-	       : (uint8_t)(p[(k) + 1u] - p[(k)])))
-	for (i = 0; i < KOF_PLAGUE_NG; i++)
-		h = h * KOF_PLAGUE_BASE + BY(i);
-	for (at = 0;; at++) {
-		uint32_t m = kof_plague_mix(h);
-
-		if (kof_plague_selects(m) && nt < 8192u)
-			tmp[nt++] = m;
-		if (at + KOF_PLAGUE_NG >= n)
-			break;
-		h -= BY(at) * drop;
-		h = h * KOF_PLAGUE_BASE + BY(at + KOF_PLAGUE_NG);
-	}
-#undef BY
-	/* sort + dedupe, then take the smallest max_out */
-	for (i = 1; i < nt; i++) {
-		uint32_t v = tmp[i], j = i;
-
-		while (j && tmp[j - 1u] > v) { tmp[j] = tmp[j - 1u]; j--; }
-		tmp[j] = v;
-	}
-	for (i = 0; i < nt && got < max_out; i++)
-		if (!i || tmp[i] != tmp[i - 1u])
-			out[got++] = tmp[i];
-	return got;
+	return kof_plague_minhash(p, n, norm, out);
 }
 
-/* Feed a buffer, then read one block's percentage. */
+/* Feed a buffer as ONE unit, then read one block's percentage. */
 static uint32_t score_of(struct kof_plague_ctx *c, uint32_t rgn,
 			 const uint8_t *p, uint32_t n, uint32_t norms,
 			 uint32_t block)
@@ -124,7 +84,7 @@ static uint32_t score_of(struct kof_plague_ctx *c, uint32_t rgn,
 	kof_plague_begin(c);
 	for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
 		if (norms & (1u << k))
-			kof_plague_feed(c, rgn, k, p, n);
+			kof_plague_unit(c, rgn, k, KOF_PLAGUE_SIDE_USER, p, n);
 	return kof_plague_pct(c, block);
 }
 
@@ -141,7 +101,7 @@ int main(void)
 	make_block(blk, 0x1234u);
 	make_block(anchor, 0x9999u);
 
-	n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool, KOF_PLAGUE_MAX_HASH);
+	n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 	if (n0 < KOF_PLAGUE_MIN_HASH) {
 		printf("plague match: block yielded %u hashes, too few to test\n", n0);
 		return 1;
@@ -159,32 +119,23 @@ int main(void)
 	ok_(norms == (1u << KOF_PLAGUE_RAW), "the set reports the one normalizer it uses");
 
 	/* whole, absent, and the region */
-	memset(hay, 0xA5, sizeof hay);
-	memcpy(hay + BLK, blk, BLK);
-	ok_(score_of(&ctx, RGN_A, hay, sizeof hay, norms, 0u) == 100u,
-	    "a block present whole scores 100");
-	ok_(score_of(&ctx, RGN_B, hay, sizeof hay, norms, 0u) == 0u,
+	ok_(score_of(&ctx, RGN_A, blk, BLK, norms, 0u) == 100u,
+	    "a unit equal to the block scores 100");
+	ok_(score_of(&ctx, RGN_B, blk, BLK, norms, 0u) == 0u,
 	    "the same bytes in another region score nothing");
 	memset(hay, 0x5A, sizeof hay);
-	ok_(score_of(&ctx, RGN_A, hay, sizeof hay, norms, 0u) == 0u,
-	    "a block that is not there scores nothing");
-
-	/* insertion in front must not move it */
-	memset(hay, 0xA5, sizeof hay);
-	memcpy(hay + BLK + 37u, blk, BLK);
-	ok_(score_of(&ctx, RGN_A, hay, sizeof hay, norms, 0u) == 100u,
-	    "bytes inserted before the block do not move the score");
+	ok_(score_of(&ctx, RGN_A, hay, BLK, norms, 0u) == 0u,
+	    "a unit that is not the block scores nothing");
 
 	/* damage: overwrite a quarter of it */
-	memset(hay, 0xA5, sizeof hay);
-	memcpy(hay + BLK, blk, BLK);
-	memset(hay + BLK, 0x00, BLK / 4u);
-	s = score_of(&ctx, RGN_A, hay, sizeof hay, norms, 0u);
-	if (s < 60u || s > 90u) {
+	memcpy(hay, blk, BLK);
+	memset(hay, 0x00, BLK / 4u);
+	s = score_of(&ctx, RGN_A, hay, BLK, norms, 0u);
+	if (s < 45u || s > 90u) {
 		char why[96];
 
 		snprintf(why, sizeof why, "a quarter overwritten scored %u, "
-			 "expected the 60-90 band", s);
+			 "expected the 45-90 band", s);
 		fail("the score moves with the damage", why);
 	}
 
@@ -195,8 +146,6 @@ int main(void)
 
 		for (i = 0; i < NREC; i++)
 			memcpy(shuf + i * REC, blk + (NREC - 1u - i) * REC, REC);
-		memset(hay, 0xA5, sizeof hay);
-		memcpy(hay + BLK, shuf, BLK);
 		/*
 		 * NOT 100, AND THE SHORTFALL IS ARITHMETIC. Every window inside
 		 * a record survives the shuffle; every window spanning a seam
@@ -206,12 +155,12 @@ int main(void)
 		 * cannot give, and one accepting 50 would not notice a matcher
 		 * that had lost set semantics entirely.
 		 */
-		s = score_of(&ctx, RGN_A, hay, sizeof hay, norms, 0u);
-		if (s < 85u || s > 95u) {
+		s = score_of(&ctx, RGN_A, shuf, BLK, norms, 0u);
+		if (s < 70u || s > 98u) {
 			char why[112];
 
 			snprintf(why, sizeof why, "reordered records scored %u, "
-				 "the seam arithmetic says about 89", s);
+				 "the seam arithmetic says most survives", s);
 			fail("reordering the records costs only the seams", why);
 		}
 	}
@@ -223,15 +172,13 @@ int main(void)
 		uint8_t keyed[BLK];
 		uint32_t i, raw_s, xor_s;
 
-		n1 = harvest(blk, BLK, KOF_PLAGUE_XOR, pool, KOF_PLAGUE_MAX_HASH);
+		n1 = harvest(blk, BLK, KOF_PLAGUE_XOR, pool);
 		blocks[0].n_hash = n1; blocks[0].norm = KOF_PLAGUE_XOR;
 		set = kof_plague_build(blocks, 1, pool, n1);
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
 		for (i = 0; i < BLK; i++)
 			keyed[i] = (uint8_t)(blk[i] ^ 0x3Bu);
-		memset(hay, 0xA5, sizeof hay);
-		memcpy(hay + BLK, keyed, BLK);
-		xor_s = score_of(&ctx, RGN_A, hay, sizeof hay,
+		xor_s = score_of(&ctx, RGN_A, keyed, BLK,
 				 1u << KOF_PLAGUE_XOR, 0u);
 		ok_(xor_s == 100u, "a constant XOR key vanishes under XOR");
 		kof_plague_ctx_done(&ctx);
@@ -240,16 +187,15 @@ int main(void)
 		blocks[0].n_hash = n0; blocks[0].norm = KOF_PLAGUE_RAW;
 		set = kof_plague_build(blocks, 1, pool, n0);
 		if (set) {
-			uint32_t m = harvest(blk, BLK, KOF_PLAGUE_RAW, pool,
-					     KOF_PLAGUE_MAX_HASH);
+			uint32_t m = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 			(void)m;
 			kof_plague_set_free(set);
 		}
-		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool, KOF_PLAGUE_MAX_HASH);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 		blocks[0].n_hash = n0;
 		set = kof_plague_build(blocks, 1, pool, n0);
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
-		raw_s = score_of(&ctx, RGN_A, hay, sizeof hay,
+		raw_s = score_of(&ctx, RGN_A, keyed, BLK,
 				 1u << KOF_PLAGUE_RAW, 0u);
 		ok_(raw_s == 0u, "and does not vanish under RAW");
 		kof_plague_ctx_done(&ctx);
@@ -260,9 +206,8 @@ int main(void)
 	{
 		uint32_t na;
 
-		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool, KOF_PLAGUE_MAX_HASH);
-		na = harvest(anchor, BLK, KOF_PLAGUE_RAW, pool + n0,
-			     KOF_PLAGUE_MAX_HASH);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
+		na = harvest(anchor, BLK, KOF_PLAGUE_RAW, pool + n0);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
 		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
 		blocks[1].first_hash = n0; blocks[1].n_hash = na;
@@ -273,15 +218,14 @@ int main(void)
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
 
 		/*
-		 * Both blocks present, one whole and one a third: each must
-		 * report its own number. A matcher that mixed them would show
-		 * one value for two different facts.
+		 * Two units, one the first block whole and one a third of the
+		 * second: each block reports its own number.
 		 */
-		memset(hay, 0xA5, sizeof hay);
-		memcpy(hay + BLK, blk, BLK);
-		memcpy(hay + BLK * 2u, anchor, BLK / 3u);
 		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				anchor, BLK / 3u);
 		ok_(kof_plague_pct(&ctx, 0u) == 100u,
 		    "the block that is whole reports 100");
 		s = kof_plague_pct(&ctx, 1u);
@@ -294,13 +238,29 @@ int main(void)
 		}
 
 		/* and one absent reports nothing while the other still does */
-		memset(hay, 0xA5, sizeof hay);
-		memcpy(hay + BLK, blk, BLK);
 		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
 		ok_(kof_plague_pct(&ctx, 0u) == 100u &&
 		    kof_plague_pct(&ctx, 1u) == 0u,
 		    "an absent block reports nothing and the other is unaffected");
+
+		/* THE BEST UNIT, NOT THE SUM: each half of the first block in a
+		 * unit of its own holds about half of it, and the two halves
+		 * together are not the block. */
+		kof_plague_begin(&ctx);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK / 2u);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk + BLK / 2u, BLK / 2u);
+		s = kof_plague_pct(&ctx, 0u);
+		if (s == 0u || s > 70u) {
+			char why[112];
+
+			snprintf(why, sizeof why, "two halves scored %u, "
+				 "the best one holds about half", s);
+			fail("units do not add up", why);
+		}
 		kof_plague_ctx_done(&ctx);
 		kof_plague_set_free(set);
 	}
@@ -320,8 +280,7 @@ int main(void)
 	{
 		size_t at;
 
-		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool,
-			     KOF_PLAGUE_MAX_HASH);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
 		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
@@ -329,12 +288,9 @@ int main(void)
 		set = kof_plague_build(blocks, 1, pool, n0);
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
 
-		memset(hay, 0xA5, sizeof hay);
-		for (at = 0; at + BLK / 16u < sizeof hay; at += BLK / 16u)
+		for (at = 0; at + BLK / 16u <= sizeof hay; at += BLK / 16u)
 			memcpy(hay + at, blk, BLK / 16u);
-		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
-		s = kof_plague_pct(&ctx, 0u);
+		s = score_of(&ctx, RGN_A, hay, sizeof hay, 1u << KOF_PLAGUE_RAW, 0u);
 		if (s > 25u) {
 			char why[128];
 
@@ -365,18 +321,15 @@ int main(void)
 		memset(blk + BLK / 2u, 0, BLK / 2u);
 		memset(hay, 0, sizeof hay);
 
-		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool,
-			     KOF_PLAGUE_MAX_HASH);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
 		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
 
 		set = kof_plague_build(blocks, 1, pool, n0);
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
-		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
-		ok_(kof_plague_pct(&ctx, 0u) == 0u,
-		    "an object of pure padding matches nothing");
+		ok_(score_of(&ctx, RGN_A, hay, sizeof hay, 1u << KOF_PLAGUE_RAW, 0u) == 0u,
+		    "a unit of pure padding matches nothing");
 		kof_plague_ctx_done(&ctx);
 		kof_plague_set_free(set);
 	}
@@ -390,8 +343,7 @@ int main(void)
 	 */
 	{
 		make_block(blk, 0x1234u);
-		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool,
-			     KOF_PLAGUE_MAX_HASH);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
 		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
@@ -399,93 +351,60 @@ int main(void)
 		set = kof_plague_build(blocks, 1, pool, n0);
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
 
-		memset(hay, 0xA5, sizeof hay);
-		memcpy(hay + BLK, blk, BLK);
-
 		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_B, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_B, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
 		ok_(kof_plague_pct(&ctx, 0u) == 0u,
 		    "the wrong region scores nothing");
 
 		kof_plague_begin(&ctx);
 		kof_plague_any_region(&ctx, 1);
-		kof_plague_feed(&ctx, RGN_B, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_B, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
 		ok_(kof_plague_pct(&ctx, 0u) == 100u,
 		    "without the anchor the same bytes score whole");
 
 		/* And the next object starts anchored again. */
 		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_B, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_B, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
 		ok_(kof_plague_pct(&ctx, 0u) == 0u,
 		    "begin puts the anchor back");
 		kof_plague_ctx_done(&ctx);
 		kof_plague_set_free(set);
 	}
 
-	/* ---- the static library is not hashed ---------------------------- */
+	/* ---- the side is part of the match ------------------------------- */
 	/*
-	 * A block that lands inside the library must score nothing, because a
-	 * block cut from libc matches every program built against that libc and
-	 * is a signature of the toolchain rather than of anyone - see
-	 * kof_plague_object.
-	 *
-	 * The third case is the one that would be silent if it were wrong: a
-	 * span covering only PART of the block must still suppress it, because
-	 * the windows that straddle the edge are part library, and a hash of
-	 * part of the library is still a hash the toolchain produces.
+	 * A block cut from the static library and one cut from the author's own
+	 * code answer different questions, and one must not score the other - see
+	 * enum kof_plague_side. A block of one side scores only from units of that
+	 * side.
 	 */
 	{
-		struct kof_range lib[1];
-
 		make_block(blk, 0x77aau);
-		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool,
-			     KOF_PLAGUE_MAX_HASH);
+		n0 = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
 		blocks[0].first_hash = 0; blocks[0].n_hash = n0;
 		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
 		memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);
+		blocks[0].side = KOF_PLAGUE_SIDE_LIB;
 
 		set = kof_plague_build(blocks, 1, pool, n0);
 		if (!set || !kof_plague_ctx_init(&ctx, set)) return 1;
 
-		memset(hay, 0xA5, sizeof hay);
-		memcpy(hay + BLK, blk, BLK);
-
 		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
-		ok_(kof_plague_pct(&ctx, 0u) == 100u,
-		    "with no library declared the block scores whole");
-
-		lib[0].off = BLK;
-		lib[0].len = BLK;
-		kof_plague_begin(&ctx);
-		kof_plague_object(&ctx, hay, lib, 1u);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
 		ok_(kof_plague_pct(&ctx, 0u) == 0u,
-		    "a block inside the library scores nothing");
-
-		lib[0].off = BLK;
-		lib[0].len = BLK / 2u;
+		    "a library block is not scored by the author's code");
 		kof_plague_begin(&ctx);
-		kof_plague_object(&ctx, hay, lib, 1u);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
-		ok_(kof_plague_pct(&ctx, 0u) < 100u,
-		    "a span over half the block suppresses at least that half");
-
-		lib[0].off = 0;
-		lib[0].len = BLK;          /* the padding, not the block */
-		kof_plague_begin(&ctx);
-		kof_plague_object(&ctx, hay, lib, 1u);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_LIB,
+				blk, BLK);
 		ok_(kof_plague_pct(&ctx, 0u) == 100u,
-		    "a span elsewhere leaves the block alone");
-
-		/* And it does not leak into the next object. */
-		kof_plague_begin(&ctx);
-		kof_plague_feed(&ctx, RGN_A, KOF_PLAGUE_RAW, hay, sizeof hay);
-		ok_(kof_plague_pct(&ctx, 0u) == 100u,
-		    "begin clears the library spans");
+		    "and is scored by the library's");
 		kof_plague_ctx_done(&ctx);
 		kof_plague_set_free(set);
+		blocks[0].side = KOF_PLAGUE_SIDE_USER;
 	}
 
 	/*
@@ -520,7 +439,7 @@ int main(void)
 		printf("plague match: %d check(s) failed\n", failures);
 		return 1;
 	}
-	printf("plague match: whole, absent, region, insertion, damage, "
+	printf("plague match: whole, absent, region, damage, "
 	       "reordering (seams only), a constant key, a repeated fragment, "
 	       "padding, the region anchor and dropping it, "
 	       "two blocks that do not disturb "

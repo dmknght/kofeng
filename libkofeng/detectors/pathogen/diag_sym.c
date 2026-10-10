@@ -171,36 +171,6 @@ const uint8_t kof_diag_sysv_arg[6] = {
 	CELL_REG_CX, 8u, 9u
 };
 
-struct funcrange {
-	uint64_t va, size;
-};
-
-struct funcgather {
-	struct funcrange *fn;
-	uint32_t          n, cap_n;
-};
-
-static void gather_fn(void *user, uint64_t va, uint64_t size, const char *name)
-{
-	struct funcgather *g = user;
-
-	(void)name;
-	if (!size)
-		return;
-	if (g->n == g->cap_n) {
-		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
-		struct funcrange *nf = realloc(g->fn, (size_t)nc * sizeof *nf);
-
-		if (!nf)
-			return;
-		g->fn = nf;
-		g->cap_n = nc;
-	}
-	g->fn[g->n].va = va;
-	g->fn[g->n].size = size;
-	g->n++;
-}
-
 /* A site's decoder address and where it is in the gather order, so a call can
  * be matched to its site by binary search - the walk used to scan every site
  * for every call instruction. Ordered by address THEN index, so among sites
@@ -224,13 +194,13 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			 const uint8_t *base, uint64_t size)
 {
 	struct relsite  *sites;
-	struct funcrange *fns = NULL;
+	const struct kof_func *fns;
 	uint16_t        *node_of = NULL;
 	struct site_at  *by_at = NULL;
 	const struct kof_elf_relocs *rt;
 	struct cell_space sp;
 	struct relgather g;
-	struct funcgather fg;
+	const struct kof_func_set *fg;
 	const struct kof_elf_info *ei;
 	kof_buf f;
 	uint32_t i, j;
@@ -257,7 +227,6 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	f.p = base;
 	f.n = size;
 	memset(&g, 0, sizeof g);
-	memset(&fg, 0, sizeof fg);
 	kof_elf_relcalls(f, ei, gather, &g);
 	sites = g.site;
 	if (g.oom)
@@ -292,7 +261,7 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 			continue;
 		h = kof_diag_hit_add(s, off, sites[i].cap, 0);
 		if (!h)
-			break;
+			continue;       /* full: the rest keep their 0xffff */
 		node_of[i] = (uint16_t)(s->n_hit - 1u);
 	}
 	for (i = 0; i < g.n; i++) {
@@ -301,8 +270,8 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	}
 	qsort(by_at, g.n, sizeof *by_at, site_at_cmp);
 
-	kof_elf_funcs(f, ei, gather_fn, &fg);
-	fns = fg.fn;
+	fg = kof_diag_funcs(s, ctx);
+	fns = fg->v;
 
 	/*
 	 * ---- ONE WALK PER FUNCTION ---------------------------------------
@@ -323,17 +292,17 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	rt = kof_diag_relocs(s, ctx, KOF_ELF_RELOC_CODE);
 
 	kof_cell_space_init(&sp, ctx, base, size);
-	for (j = 0; j < fg.n; j++) {
+	for (j = 0; j < fg->n; j++) {
 		struct kof_cell_cur k;
 		struct cell_insn in;
 		struct walk w;
 		uint64_t lo, hi;
 		uint32_t r;
 
-		lo = fns[j].va;         /* a file offset, as above */
+		lo = fns[j].off;         /* a file offset, as above */
 		if (lo >= size)
 			continue;
-		hi = lo + fns[j].size;
+		hi = lo + fns[j].len;
 		if (hi > size)
 			hi = size;
 
@@ -440,7 +409,6 @@ void kof_diag_run_symbol(struct kof_diag_scan *s,
 	}
 out:
 	free(sites);
-	free(fns);
 	free(node_of);
 	free(by_at);
 }

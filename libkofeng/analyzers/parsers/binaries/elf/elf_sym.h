@@ -21,6 +21,12 @@ struct kof_elf_info;
  * well-formed empty block rather than nothing. Zero only if `cap` cannot hold
  * even the header.
  */
+struct kof_func_set;
+void kof_elf_funcs_build(kof_buf file, const struct kof_elf_info *e,
+			 struct kof_func_set *out);
+void kof_elf_funcs_from_entries(kof_buf file, const struct kof_elf_info *e,
+				uint64_t entry_off, const uint64_t *ent,
+				uint32_t n_ent, struct kof_func_set *out);
 uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
 		      uint8_t *out, uint32_t cap);
 

@@ -500,6 +500,28 @@ static void block_indices(void)
 	CK(E.dr.grp[0].sim[0].blk == 1);
 
 	/*
+	 * A REORDERING IS ONE MOVE OF EVERY BLOCK, not a series of single ones: a
+	 * series moves an item that was just moved a second time. Here 0 goes to 2,
+	 * 1 to 0 and 2 to 1 - the matchers naming 2 and 0 must end up naming 1 and 2,
+	 * whereas blk_moved(0,2) then blk_moved(2,1) would leave both at 1.
+	 */
+	{
+		static const uint32_t to[3] = { 2, 0, 1 };
+
+		E.dr.grp[0].sim[0].blk = 2;
+		E.dr.grp[1].sim[0].blk = 0;
+		blk_permute(&E, to, 3);
+		CK(E.dr.grp[0].sim[0].blk == 1);
+		CK(E.dr.grp[1].sim[0].blk == 2);
+		/* An index past the list is left alone, not read out of the table. */
+		E.dr.grp[0].sim[0].blk = 7;
+		blk_permute(&E, to, 3);
+		CK(E.dr.grp[0].sim[0].blk == 7);
+		E.dr.grp[0].sim[0].blk = 1;
+		E.dr.grp[1].sim[0].blk = 2;
+	}
+
+	/*
 	 * A MEASURE IS IDENTIFIED BY WHAT IT IS AND, FOR A BLOCK, BY WHICH -
 	 * so the same block twice is one item, two different blocks are two,
 	 * and a whole-object measure is one per matcher whatever `blk` says.
@@ -508,9 +530,10 @@ static void block_indices(void)
 	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 0) && E.dr.grp[0].n_sim == 2);
 	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 7) && E.dr.grp[0].n_sim == 2);
 	CK(grp_sim_of(&E, SIM_IT_SHAPE, 0) == 0);
-	CK(grp_sim_of(&E, SIM_IT_BLKSET, 0) == MAX_GROUP);
+	/* 3 was the block vector and is a gap: nothing holds it. */
+	CK(grp_sim_of(&E, 3u, 0) == MAX_GROUP);
 	CK(draft_uses_sim(&E, SIM_IT_SHAPE));
-	CK(!draft_uses_sim(&E, SIM_IT_BLKSET));
+	CK(!draft_uses_sim(&E, 3u));
 	/* Taking one out closes the gap rather than leaving a hole for the
 	 * list row to draw. */
 	grp_sim_del(&E, 0, 0);

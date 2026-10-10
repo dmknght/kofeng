@@ -30,6 +30,8 @@
 #include <kofmod/kofsym.h>
 #include "elf_sym.h"
 #include "elf_parse.h"
+#include "../funcs.h"
+#include <stdlib.h>
 
 #define SHN_UNDEF_  0
 #define SHF_WRITE_  0x1
@@ -144,13 +146,13 @@ uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
 	 * makes sense against a full table can check rather than assume.
 	 */
 	if (!kof_elf_symtab_of(file, e, KOF_ELF_SYMTAB_BEST, &t) ||
-	    !t.n_decl || !t.strn ||
-	    t.str > file.n || t.str + t.strn > file.n) {
+	    !t.n_decl || !t.strn || t.str >= file.n) {
 		out[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_NONE;
 		return KOF_SYM_HDRLEN;
 	}
 	strtab.p = file.p + t.str;
-	strtab.n = t.strn;
+	/* A string table the file cuts short is read as far as it goes. */
+	strtab.n = t.strn < file.n - t.str ? t.strn : file.n - t.str;
 
 	/*
 	 * THE COUNT THE FILE DECLARES, because `trunc` is a statement about
@@ -201,4 +203,162 @@ uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
 	put32(out + KOF_SYM_H_COUNT, n);
 	put16(out + KOF_SYM_H_START, start);
 	return KOF_SYM_HDRLEN + n * KOF_SYM_RECLEN;
+}
+
+/* ---- the functions ------------------------------------------------------------ */
+
+#define ET_REL_ 1u
+
+/*
+ * The functions of an ELF - see funcs.h. Walks the table the symbol block is
+ * built from, through the same reader, and keeps what is a sized FUNC in an
+ * executable section.
+ *
+ * THE ADDRESS SPACE THE OBJECT IS READ IN. In a LINKED object st_value is the
+ * virtual address and goes through the segments. In an ET_REL it is an offset
+ * from the start of its section, which declares address zero, so the section's
+ * place in the file is what names it. (The section's address used to be added in
+ * BOTH cases, which put every function of a linked object at twice its address:
+ * measured on a static Mirai, 419 declared starts and every one outside the code
+ * range - see the history of the sweep that reads these.)
+ */
+void kof_elf_funcs_build(kof_buf file, const struct kof_elf_info *e,
+			 struct kof_func_set *out)
+{
+	struct kof_elf_symtab t;
+	struct kof_func *v = NULL;
+	uint32_t cap = 0, n = 0;
+	uint64_t si;
+
+	memset(out, 0, sizeof *out);
+	if (!file.p || !e || !e->valid)
+		return;
+	if (!kof_elf_symtab_of(file, e, KOF_ELF_SYMTAB_FULL, &t))
+		return;
+	for (si = 1; si < t.n; si++) {
+		struct kof_elf_symbol sy;
+		const struct kof_elf_sec *sec;
+		uint64_t off;
+
+		if (!kof_elf_symbol_at(file, &t, si, &sy))
+			break;
+		if ((sy.info & 0xfu) != 2u || !sy.size)         /* sized STT_FUNC */
+			continue;
+		if (!sy.shndx || sy.shndx >= e->sec_count ||
+		    sy.shndx >= KOF_ELF_MAX_SECTIONS)
+			continue;
+		sec = &e->sec[sy.shndx];
+		if (!(sec->flags & SHF_EXEC_))
+			continue;
+		/* By the object's type, not by whether this section has an
+		 * address: a linked file's section at address zero would be read
+		 * as relocatable. */
+		if (e->e_type != ET_REL_) {
+			if (!kof_elf_va_to_off(e, sy.value, sy.size, &off))
+				continue;
+		} else {
+			if (sy.value > file.n || sec->file_off > file.n - sy.value)
+				continue;
+			off = sec->file_off + sy.value;
+		}
+		/* Both forms: the body lies inside the file. The segment table is
+		 * the file's own claim and is not clipped by the parse. */
+		if (off > file.n || sy.size > file.n - off)
+			continue;
+		if (n == cap) {
+			uint32_t nc = cap ? cap * 2u : 256u;
+			struct kof_func *nv = realloc(v, (size_t)nc * sizeof *nv);
+
+			if (!nv) {
+				out->oom = 1;
+				free(v);
+				return;
+			}
+			v = nv;
+			cap = nc;
+		}
+		v[n].off = off;
+		v[n].len = sy.size;
+		v[n].value = sy.value;
+		v[n].shndx = sy.shndx;
+		n++;
+	}
+	kof_funcs_finish(v, n, out);
+}
+
+/*
+ * THE FUNCTIONS OF AN ELF THAT KEPT NO SYMBOLS, from the entries the code has -
+ * see kof_diag_entries_of, which finds them. Each entry inside an executable
+ * segment starts a function that runs to the next entry or to the end of the
+ * segment; the object's own entry point is one as well. No decoding here: this
+ * only cuts the segments where the entries say.
+ */
+void kof_elf_funcs_from_entries(kof_buf file, const struct kof_elf_info *e,
+				uint64_t entry_off, const uint64_t *ent,
+				uint32_t n_ent, struct kof_func_set *out)
+{
+	struct kof_func *v;
+	uint32_t i, n = 0;
+	uint64_t *all;
+
+	memset(out, 0, sizeof *out);
+	if (!file.p || !e || !e->valid || !n_ent)
+		return;
+	all = malloc(((size_t)n_ent + 1u) * sizeof *all);
+	v = malloc(((size_t)n_ent + 1u) * sizeof *v);
+	if (!all || !v) {
+		free(all);
+		free(v);
+		out->oom = 1;
+		return;
+	}
+	memcpy(all, ent, (size_t)n_ent * sizeof *all);
+	{
+		uint32_t m = n_ent;
+
+		if (entry_off < file.n) {
+			uint32_t k;
+
+			for (k = 0; k < m && all[k] != entry_off; k++)
+				;
+			if (k == m) {
+				/* in order: the entries are sorted */
+				for (k = m; k > 0 && all[k - 1u] > entry_off; k--)
+					all[k] = all[k - 1u];
+				all[k] = entry_off;
+				m++;
+			}
+		}
+		n_ent = m;
+	}
+	for (i = 0; i < n_ent; i++) {
+		uint32_t s;
+		uint64_t end = 0;
+
+		for (s = 0; s < e->seg_count && s < KOF_ELF_MAX_SEGMENTS; s++) {
+			const struct kof_elf_seg *g = &e->seg[s];
+
+			if (g->type == 1u && (g->perm & KOF_PERM_X) &&
+			    g->file_off < file.n && all[i] >= g->file_off &&
+			    all[i] - g->file_off < g->file_size) {
+				uint64_t lim = g->file_off + g->file_size;
+
+				end = lim < file.n ? lim : file.n;
+				break;
+			}
+		}
+		if (!end)
+			continue;       /* not in code: an entry of nothing */
+		if (i + 1u < n_ent && all[i + 1u] < end)
+			end = all[i + 1u];
+		if (end <= all[i])
+			continue;
+		v[n].off = all[i];
+		v[n].len = end - all[i];
+		v[n].value = 0;         /* recovered from the code: no symbol */
+		v[n].shndx = 0;
+		n++;
+	}
+	free(all);
+	kof_funcs_finish(v, n, out);
 }

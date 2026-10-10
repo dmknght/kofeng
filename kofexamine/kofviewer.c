@@ -64,6 +64,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
 #include "../libkofeng/analyzers/parsers/binaries/elf/elf_sym.h"
+#include "../libkofeng/detectors/pathogen/kofdiag.h"
 #include "../libkofeng/analyzers/parsers/binaries/pe/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
@@ -643,8 +644,14 @@ static int hex_last(void)
  * matchers, verdict, variant - plus its JOIN and its ADD. Spelled from the
  * limits for the reason the note above gives: a table that silently stops short
  * is a panel whose bottom cannot be scrolled to. */
+/* THE TABLES, which were not counted at all: the block table (a block per row,
+ * and a function is a block now - PLG_MAX_BLOCK), the similarity table and the
+ * diagnose table. The array stopped at a hundred rows, so a file with more
+ * functions than that showed the first hundred and its panel could not be
+ * scrolled to the rest - which is exactly the failure the note above is about. */
 #define MAX_PROW  (OPT_COUNT + 1 + 2 + MAX_DECL + 2 + 2 * MAX_GROUP + 2 + \
-		   6 * MAX_GROUP)
+		   6 * MAX_GROUP + 2 + PLG_MAX_BLOCK + 2 + SIM_ROWS + 2 + \
+		   KOF_DB_MAX_DIAG + 2)
 
 /*
  * How much encoded text the decoder will hold.
@@ -1199,7 +1206,6 @@ static void hit_plg_goto(struct view *v, uint32_t i);
 static void view_show_in(struct view *v, uint32_t obj, uint8_t sym,
 			 uint64_t off, int narrow);
 static void hit_grp_pct(struct view *v, uint32_t i);
-static void hit_plg_norm(struct view *v, uint32_t i);
 static void hit_plg_rgn(struct view *v, uint32_t i);
 static void hit_head_type(struct view *v, uint32_t arg);
 static void hit_head_family(struct view *v, uint32_t arg);
@@ -1227,7 +1233,6 @@ static void sim_take_out(struct view *v, uint32_t what, uint32_t blk);
  */
 static int sim_section_shown(void) { return 0; }
 
-static uint32_t sim_row_what(uint32_t i);
 static void sim_item_name(const struct view *v,
 			  const struct grp_sim_item *it, char *out,
 			  size_t cap);
@@ -1238,7 +1243,7 @@ static uint32_t sim_offer(struct view *v, uint32_t g,
 static void hit_sim_item_del(struct view *v, uint32_t pk);
 static void hit_sim_tick(struct view *v, uint32_t which);
 static int  blk_row_shown(const struct view *v, uint32_t i);
-static int  sim_row_shown(const struct view *v, uint32_t i);
+static int  sim_row_shown(const struct view *v);
 static void hit_fold(struct view *v, uint32_t which);
 static uint32_t plg_n_picked(const struct view *v);
 /* Reached by the row callbacks above, defined with the panel below them. */
@@ -1253,12 +1258,10 @@ static void hit_optbtn(struct view *v, uint32_t arg);
 #define PLG_MAX_REGION 32u
 
 /* The two generator buttons on the Plague blocks heading, as drawn. */
-/* The measures the similarity table lists, in the order it lists them: most
- * of the object read first. A third row, the call chain, stood after these
- * two and went with the chain matcher. */
-#define SIM_BLOCKS 0u
-#define SIM_SHAPE  1u
-#define SIM_ROWS   2u
+/* The measures the similarity table lists. The call chain and the block
+ * vector stood beside the shape and went with their matchers. */
+#define SIM_SHAPE  0u
+#define SIM_ROWS   1u
 
 
 struct view {
@@ -1301,8 +1304,8 @@ struct view {
 	 * are certainties and not measurements - see plg_segment. */
 	int              plg_scores_known;
 	/*
-	 * HOW ALIKE THE OBJECT IN FRONT OF THE PANEL IS TO THE DRAFT, by each
-	 * of the three measures, as a percentage.
+	 * HOW ALIKE THE OBJECT IN FRONT OF THE PANEL IS TO THE DRAFT, by the
+	 * shape, as a percentage.
 	 *
 	 * Refreshed beside the block rescore and for the same reason: the
 	 * string set costs a pass over the loadable regions, and a panel that
@@ -1313,7 +1316,7 @@ struct view {
 	 * another sample - which is the whole use of the column: it says how
 	 * alike the NEXT file is.
 	 */
-	uint32_t         sim_shape, sim_blk;
+	uint32_t         sim_shape;
 	/*
 	 * FOLDED TABLES.
 	 *
@@ -2832,9 +2835,9 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	o = &v->obj[v->n_obj];
 	/* The slot may have held an object before - see the reset loop for what
 	 * one owns. */
-	free(o->ovl_blk);
 	free(o->carve);
 	free(o->diag);
+	kof_funcs_free(&o->funcs);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->broken = res->broken;
@@ -3642,6 +3645,38 @@ static uint32_t sym_half_recs(const struct object *o, uint32_t mask,
 }
 
 /*
+ * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block - the one
+ * lookup, for everything that names a symbol from the block: the variable a
+ * payload came out of and the function a block starts at. `shndx` of -1 matches
+ * any section; a relocatable object's values are section-relative, so there the
+ * section is part of the answer. Empty when no record matches.
+ */
+static void sym_name_of(const uint8_t *blk, uint32_t n, uint64_t value,
+			int shndx, char *out, size_t cap)
+{
+	const uint8_t *r;
+	uint32_t k;
+
+	out[0] = 0;
+	if (!value)
+		return;
+	for (k = 0; (r = kof_sym_rec(blk, n, k)); k++) {
+		uint32_t j;
+
+		if (kof_sym_u64(r, KOF_SYM_R_VALUE) != value ||
+		    (shndx >= 0 && (int)(r[KOF_SYM_R_SHNDX] |
+					(r[KOF_SYM_R_SHNDX + 1u] << 8)) != shndx))
+			continue;
+		for (j = 0; j + 1u < cap && j < KOF_SYM_NAMELEN &&
+		     r[KOF_SYM_R_NAME + j]; j++)
+			out[j] = (char)r[KOF_SYM_R_NAME + j];
+		out[j] = 0;
+		if (j)
+			return;
+	}
+}
+
+/*
  * The object's symbol block, built once.
  *
  * One call, because which builder a format gets is kof_syms_build's decision
@@ -3734,8 +3769,6 @@ static void payload_tag(struct view *v, uint32_t at)
 	for (p = 0; p < at; p++) {
 		const struct object *par = &v->obj[p];
 		size_t pn = strlen(par->name);
-		const uint8_t *r;
-		uint32_t k;
 
 		if (par->depth + 1u != o->depth || !par->payload_at)
 			continue;
@@ -3750,17 +3783,8 @@ static void payload_tag(struct view *v, uint32_t at)
 		 * same symbol. The address is the engine's - the heuristic
 		 * reported it - and the block is the engine's too.
 		 */
-		for (k = 0; (r = kof_sym_rec(par->sym, par->sym_n, k)); k++) {
-			uint32_t j;
-
-			if (kof_sym_u64(r, KOF_SYM_R_VALUE) != par->payload_at)
-				continue;
-			for (j = 0; j < KOF_SYM_NAMELEN &&
-				    r[KOF_SYM_R_NAME + j]; j++)
-				o->payload_sym[j] = (char)r[KOF_SYM_R_NAME + j];
-			o->payload_sym[j] = 0;
-			break;
-		}
+		sym_name_of(par->sym, par->sym_n, par->payload_at, -1,
+			    o->payload_sym, sizeof o->payload_sym);
 		return;
 	}
 }
@@ -4412,12 +4436,9 @@ static void log_window(struct view *v)
 	for (i = 0; i < v->n_obj; i++) {
 		/*
 		 * The buffers are the mapping and are not this loop's, but the
-		 * kept answers ARE - see object.ovl_blk, which is heap and is
+		 * kept answers ARE - see object.carve, which is heap and is
 		 * kept so that returning to an object does not read it again.
-		 * The note that used to be here said nothing was owned, and it
-		 * stopped being true the moment anything was.
 		 */
-		free(v->obj[i].ovl_blk);
 		free(v->obj[i].carve);
 		memset(&v->obj[i], 0, sizeof v->obj[i]);
 	}
@@ -6500,7 +6521,8 @@ static void goto_node(struct view *v, uint32_t k)
 	 * millions is the wrong answer given confidently. The window follows
 	 * the selection instead, and the ids on screen keep counting.
 	 */
-	if (v->log && k >= v->n_node && v->n_node) {
+	/* k == -1 is "one before the first row" and is handled below: it is also >= n_node */
+	if (v->log && k != (uint32_t)-1 && k >= v->n_node && v->n_node) {
 		uint32_t j;
 
 		/*
@@ -6733,7 +6755,8 @@ static const char *plg_lit_at(const struct view *v, uint64_t rgn_off)
  */
 static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 		    uint64_t lo, uint64_t hi, uint32_t mask, const char *rgn,
-		    const char *rgn_enum, uint32_t norm, uint8_t side)
+		    const char *rgn_enum, uint32_t norm, uint8_t side,
+		    const char *sym)
 {
 	struct plg_block *b;
 	uint64_t len;
@@ -6758,8 +6781,9 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 	snprintf(b->rgn_enum, sizeof b->rgn_enum, "%s",
 		 rgn_enum ? rgn_enum : "KOF_SCAN_ALL");
 	b->norm = (uint8_t)norm;
-	b->n_hash = kof_plague_hash_span(base + lo, len, norm, b->hash,
-				  KOF_PLAGUE_MAX_HASH);
+	if (sym)
+		snprintf(b->sym, sizeof b->sym, "%s", sym);
+	b->n_hash = kof_plague_minhash(base + lo, len, norm, b->hash);
 	if (b->n_hash < KOF_PLAGUE_MIN_HASH) {
 		/*
 		 * A SPAN THAT CANNOT BE SCORED IS NOT A BLOCK.
@@ -6808,6 +6832,7 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 				o2->len = b->len;
 				snprintf(o2->rgn, sizeof o2->rgn, "%s",
 					 b->rgn);
+				snprintf(o2->sym, sizeof o2->sym, "%s", b->sym);
 			}
 			return 0;
 		}
@@ -6839,58 +6864,11 @@ static int plg_mark(struct view *v, const uint8_t *base, uint64_t base_n,
 /*
  * THE BLOCK SIZES FOLLOW FROM THE SAMPLING RATE, they are not a taste.
  *
- * One window in 2^KOF_PLAGUE_SEL_BITS is kept - one in thirty-two - so a block
- * yields about its length over thirty-two hashes, and only from bytes that
- * VARY: a run of padding is one window repeated and collapses to a single
- * distinct value however long it is.
- *
- * KOF_PLAGUE_MIN_HASH is sixteen, so five hundred bytes is the floor in the
- * best case and nothing in the ordinary one - measured on a small ELF, 512 byte
- * blocks came back with one hash each. Eight kilobytes averages 256 and stays
- * useful through padding and repetition, which is what the numbers below are
- * for.
+ * A block keeps the smallest KOF_PLAGUE_MINHASH_K of its windows, so any span
+ * of 23 varying bytes or more yields KOF_PLAGUE_MIN_HASH of them and a large
+ * one yields the same count. A run of padding is one window repeated and
+ * collapses to a single distinct value however long it is.
  */
-/*
- * The STARTING target. The one actually used is per region and is this doubled
- * until the region fits the rows it was given - see plg_segment - and the floor
- * and ceiling are a quarter and four times whatever that came out as. They are
- * not constants of their own because a region that had to be coarsened needs
- * its bounds coarsened with it, and two numbers written here would have been
- * the bounds of a target that is no longer in use.
- */
-#define PLG_SEG_AVG   8192u          /* average block, as a power of two mask */
-
-/*
- * HOW FAR THE SIDE STAYS THE SAME, starting at `pos` and stopping at `end`.
- *
- * Returns the length of the longest run from `pos` that is entirely inside one
- * library span or entirely outside all of them, and says which through `side`.
- * Walking an extent with this splits it exactly where it crosses a boundary,
- * so each piece is carved on its own and no block ever straddles one.
- *
- * Linear in the number of spans, which koflib caps - see KOF_TRUE_MAX_SPANS_ALL.
- */
-static uint64_t plg_side_run(const struct kof_true_all *lib, uint64_t pos,
-			     uint64_t end, uint8_t *side)
-{
-	uint64_t next = end;
-	uint32_t i;
-
-	*side = KOF_PLAGUE_SIDE_USER;
-	for (i = 0; i < lib->n; i++) {
-		uint64_t a = lib->span[i].off;
-		uint64_t b = a + lib->span[i].len;
-
-		if (pos >= a && pos < b) {           /* inside this one */
-			*side = KOF_PLAGUE_SIDE_LIB;
-			return (b < end ? b : end) - pos;
-		}
-		if (a > pos && a < next)             /* the nearest ahead */
-			next = a;
-	}
-	return next - pos;
-}
-
 /*
  * THE SAME LIBRARY THE ENGINE WILL SEE - see lib_facts in the scanner.
  *
@@ -6920,18 +6898,158 @@ static void obj_lib_find(const struct object *o, struct kof_true_all *out)
 	kof_true_find_object(o->buf, e, out);
 }
 
+/*
+ * THE TABLE'S ROWS are units the engine cut - see kof_scan_plague_units, which
+ * the scanner feeds from - so a block made here is a unit the scanner will
+ * sketch. A function when the object's symbols (or, with none, its call targets)
+ * name them, a content-defined piece or a string cluster otherwise; what touches
+ * the static library is cut on its own side.
+ */
+struct plg_slot {
+	uint32_t mask, n, quota, taken, stride;
+	uint64_t bytes, seen;
+};
+
+struct plg_cut {
+	struct view *v;
+	struct object *o;
+	const struct kof_parser *fp;
+	struct plg_slot slot[PLG_MAX_REGION];
+	uint32_t n_slot;
+};
+
+/* How wide the symbol column is. */
+#define PLG_SYM_COL 28u
+
+static struct plg_slot *plg_slot_of(struct plg_cut *c, uint32_t mask)
+{
+	uint32_t i;
+
+	for (i = 0; i < c->n_slot; i++)
+		if (c->slot[i].mask == mask)
+			return &c->slot[i];
+	if (c->n_slot >= PLG_MAX_REGION)
+		return NULL;
+	memset(&c->slot[c->n_slot], 0, sizeof c->slot[0]);
+	c->slot[c->n_slot].mask = mask;
+	return &c->slot[c->n_slot++];
+}
+
+static int plg_count_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
+			uint32_t side, const struct kof_func *first)
+{
+	struct plg_slot *s = plg_slot_of(user, mask);
+
+	(void)off; (void)side; (void)first;
+	if (s) {
+		s->n++;
+		s->bytes += len;
+	}
+	return 0;
+}
+
+/* Rows per region: see the note in plg_segment. */
+static void plg_share(struct plg_cut *c, uint32_t format)
+{
+	uint32_t i, used = 0, left, big = 0;
+	uint64_t total = 0;
+
+	for (i = 0; i < c->n_slot; i++) {
+		struct plg_slot *s = &c->slot[i];
+
+		if (kof_plague_by_function(format, s->mask)) {
+			s->quota = s->n;
+			continue;
+		}
+		s->quota = 1;
+		used++;
+		total += s->bytes;
+		if (s->bytes > c->slot[big].bytes ||
+		    kof_plague_by_function(format, c->slot[big].mask))
+			big = i;
+	}
+	left = PLG_DATA_BLOCKS > used ? PLG_DATA_BLOCKS - used : 0u;
+	for (i = 0; i < c->n_slot && total; i++)
+		if (!kof_plague_by_function(format, c->slot[i].mask))
+			c->slot[i].quota += (uint32_t)
+				((uint64_t)left * c->slot[i].bytes / total);
+	if (total) {
+		uint32_t sum = 0;
+
+		for (i = 0; i < c->n_slot; i++)
+			if (!kof_plague_by_function(format, c->slot[i].mask))
+				sum += c->slot[i].quota;
+		if (sum < PLG_DATA_BLOCKS)
+			c->slot[big].quota += PLG_DATA_BLOCKS - sum;
+	}
+	for (i = 0; i < c->n_slot; i++) {
+		struct plg_slot *s = &c->slot[i];
+
+		s->stride = s->quota && s->n > s->quota
+			  ? (s->n + s->quota - 1u) / s->quota : 1u;
+	}
+}
+
+static int plg_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
+		       uint32_t side, const struct kof_func *first)
+{
+	struct plg_cut *c = user;
+	struct plg_slot *s = plg_slot_of(c, mask);
+	const char *rn, *lbl;
+	char sym[sizeof ((struct plg_block *)0)->sym];
+
+	if (c->v->ed.dr.n_blk >= PLG_MAX_BLOCK)
+		return 1;
+	if (!s || s->taken >= s->quota || s->seen++ % s->stride)
+		return 0;
+	s->taken++;
+	rn = (c->fp && c->fp->region_name && mask != KOF_SCAN_ALL)
+	   ? c->fp->region_name(mask) : NULL;
+	lbl = rn ? kof_region_label(rn) : "ALL";
+	sym_name_of(c->o->sym, c->o->sym_n, first ? first->value : 0,
+		    first ? (int)first->shndx : -1, sym, sizeof sym);
+	plg_mark(c->v, c->o->buf.p, c->o->buf.n, off, off + len, mask, lbl, rn,
+		 KOF_PLAGUE_RAW, (uint8_t)side, sym);
+	return 0;
+}
+
+static uint32_t obj_ancestors(const struct view *v, const struct object *ob,
+			      const struct object **out, uint32_t cap);
+
+/*
+ * The object's functions, built once - see kof_diag_funcs_of. A normalised view
+ * has no headers to build them from, so they are its parent's, found again in
+ * its bytes: the same kof_funcs_remap the scanner maps them with when it makes
+ * the view, so the table lists the units the scanner will sketch.
+ */
+static const struct kof_func_set *plg_funcs(struct view *v, struct object *o)
+{
+	if (!o->funcs_done) {
+		o->funcs_done = 1;
+		if (o->n_rgn) {
+			const struct object *anc[MAX_OBJ];
+			uint32_t n = obj_ancestors(v, o, anc, MAX_OBJ);
+
+			if (n) {
+				struct object *par = &v->obj[anc[n - 1u] - v->obj];
+
+				kof_funcs_remap(par->buf.p, par->buf.n,
+						plg_funcs(v, par), o->buf.p,
+						o->buf.n, &o->funcs);
+			}
+		} else {
+			kof_diag_funcs_of(&o->ctx, o->buf.p, o->buf.n, &o->funcs);
+		}
+	}
+	return &o->funcs;
+}
+
 static void plg_segment(struct view *v)
 {
 	struct object *o = cur_obj(v);
 	const struct kof_parser *fp;
-	uint32_t bits[KOF_MAX_REGIONS], n_bits;
-	uint32_t ri, keep = 0, i;
-	uint32_t avg, min, max;
-	/* What each region is, how big it is, and how many of the table's rows
-	 * it may have - see the note below on sharing the table. */
-	uint32_t rgn_mask[PLG_MAX_REGION], quota[PLG_MAX_REGION];
-	uint64_t rgn_bytes[PLG_MAX_REGION];
-	uint32_t n_reg, budget, used, left, cap_acc = 0;
+	uint32_t keep = 0, i;
+	struct plg_cut cut;
 	struct kof_true_all lib;
 
 	/*
@@ -6950,12 +7068,21 @@ static void plg_segment(struct view *v)
 		v->ed.dr.blk[keep] = v->ed.dr.blk[i];
 		v->ed.dr.blk[keep].kept = 1;
 		v->ed.dr.blk[keep].lit = 0;   /* its offsets are another file's */
+		v->ed.dr.blk[keep].off = 0;
+		v->ed.dr.blk[keep].len = 0;   /* so plg_mark can learn where it is HERE */
 		keep++;
 	}
 	v->ed.dr.n_blk = keep;
 	v->plg_scored = 0;
 	if (!o || !o->buf.p || !o->buf.n || !v->ext2)
 		return;
+	/*
+	 * A NORMALISED VIEW HAS ITS BLOCKS TOO: the scanner feeds it on its own
+	 * bytes - see sx_plague_feed - so the rows here are the units it will
+	 * sketch. Its functions are its parent's, found again in its bytes
+	 * (plg_funcs); it has no library to place, the library having been moved
+	 * to regions that are not offered.
+	 */
 	/*
 	 * WHAT THIS OBJECT'S CARVE PRODUCED LAST TIME - see object.carve. Only
 	 * when nothing is ticked, which is when the answer is identical.
@@ -6989,12 +7116,6 @@ static void plg_segment(struct view *v)
 	 * regions that are deliberately not hashed were hashed.
 	 */
 	fp = obj_region_vocab(o);
-	/*
-	 * The region kinds, from the parser or from a declared table - see
-	 * obj_region_bits. Taken once here so the loop below asks about the
-	 * same list either way.
-	 */
-	n_bits = obj_region_bits(o, bits, KOF_MAX_REGIONS);
 	/* Where the library is, so no block is cut from it - see the note in
 	 * the carve loop. Empty for anything that is not an ELF, and for an ELF
 	 * this cannot place a library in, which is the same answer: cut
@@ -7006,243 +7127,23 @@ static void plg_segment(struct view *v)
 		obj_lib_find(o, &lib);
 
 	/*
-	 * EVERY REGION GETS A SHARE OF THE TABLE, in proportion to its size.
-	 *
-	 * The table holds sixty-four blocks and the carve used to fill it in
-	 * region order, so on a 4.1 MB miner whose CODE is 3.85 MB of the 4.4 MB
-	 * the parse claims, CODE took every slot and the loop stopped - DATA,
-	 * the symbols and everything after it produced no block at all, and the
-	 * reader was left asking where the data block was. First come first
-	 * served is the wrong rule for a shared table: what an author wants to
-	 * mark is very often the small region, and the big one is the one that
-	 * can afford to be described coarsely.
-	 *
-	 * So each region is counted first, gets one slot for existing and a
-	 * share of the rest, and is then cut at whatever target makes it fit in
-	 * its own share. A small region keeps the natural eight kilobyte
-	 * granularity; only the region that is most of the object is coarsened,
-	 * which is the one place coarsening costs the least.
+	 * THE UNITS ARE THE ENGINE'S - kof_scan_plague_units, the list the scanner
+	 * feeds from - and so are the regions they come from and which of them are
+	 * left out. What is the viewer's is only the size of the table: counted
+	 * first, then every region gets a row for existing and a share of the rest
+	 * by its bytes, the remainder to the largest, so a 3.85 MB CODE cannot
+	 * leave DATA without a row. A region offered a function at a time keeps a
+	 * row per unit. A region with more units than rows offers every n-th: the
+	 * cut is the scanner's and does not move to fit a table. The ticked rows
+	 * are not in the sum, so ticking one never moves where the next begins.
 	 */
-	{
-		uint64_t total = 0;
-
-		n_reg = 0;
-		for (ri = 0; ; ri++) {
-			uint32_t mask, cnt, q;
-			uint64_t bytes = 0;
-
-			if (n_bits) {
-				if (ri >= n_bits)
-					break;
-				mask = bits[ri];
-			} else {
-				if (ri)
-					break;
-				mask = KOF_SCAN_ALL;
-			}
-			if (n_reg >= PLG_MAX_REGION)
-				break;
-			/* Not offered, so not counted for a share of the table
-			 * either - see kof_plague_region_excluded. */
-			if (fp && fp->region_name && mask != KOF_SCAN_ALL &&
-			    kof_plague_region_excluded(fp->region_name(mask)))
-				continue;
-			cnt = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
-			for (q = 0; q < cnt; q++)
-				bytes += v->ext2[q].len;
-			rgn_mask[n_reg] = mask;
-			rgn_bytes[n_reg] = bytes;
-			total += bytes;
-			n_reg++;
-		}
-
-		/*
-		 * THE WHOLE TABLE, WHATEVER IS ALREADY TICKED.
-		 *
-		 * The share-out decides each region's target, the target
-		 * decides where the cuts fall, and the cuts are a property of
-		 * the OBJECT - so nothing the author has ticked may enter this
-		 * sum. Counting the carried blocks out of the budget made the
-		 * quotas smaller, coarsened whichever region had to be
-		 * coarsened, and moved its cuts: the block that had just been
-		 * ticked was no longer produced by a carve of the very file it
-		 * was cut from, so its row never learned where it was and sat
-		 * in the table at offset zero, size zero. Ticking a block must
-		 * not change where the next block begins.
-		 */
-		budget = PLG_MAX_BLOCK;
-		for (i = 0; i < n_reg; i++)
-			quota[i] = rgn_bytes[i] ? 1u : 0u;
-		for (i = 0, used = 0; i < n_reg; i++)
-			used += quota[i];
-		left = budget > used ? budget - used : 0u;
-		for (i = 0; i < n_reg && total; i++)
-			quota[i] += (uint32_t)
-				((uint64_t)left * rgn_bytes[i] / total);
-		/*
-		 * AND THE ROWS THE DIVISION DROPPED ON THE FLOOR.
-		 *
-		 * Each share is a truncating divide, so the shares sum to
-		 * somewhere between budget - (n_reg - 1) and budget, and the
-		 * shortfall is never handed to anybody: the per-region ceiling
-		 * below is the running sum of the shares, so a row nobody was
-		 * given is a row nobody may carve. With five regions that is up
-		 * to four of sixty-four - blocks the object was entitled to and
-		 * the table simply never held.
-		 *
-		 * To the largest region, because that is the one whose target
-		 * had to be coarsened to fit its share: giving the remainder to
-		 * a small region that already describes itself finely buys
-		 * nothing, and giving it to the coarsest one is exactly where a
-		 * finer cut is still wanted.
-		 */
-		{
-			uint32_t sum = 0, big = 0;
-
-			for (i = 0; i < n_reg; i++) {
-				sum += quota[i];
-				if (rgn_bytes[i] > rgn_bytes[big])
-					big = i;
-			}
-			if (n_reg && sum < budget)
-				quota[big] += budget - sum;
-		}
-	}
-
-	for (ri = 0; ri < n_reg && v->ed.dr.n_blk < PLG_MAX_BLOCK; ri++) {
-		uint32_t mask = rgn_mask[ri];
-		const char *rn, *lbl;
-		uint32_t n, k, cap;
-
-		if (!rgn_bytes[ri] || !quota[ri])
-			continue;
-		rn  = (fp && fp->region_name && mask != KOF_SCAN_ALL)
-		    ? fp->region_name(mask) : NULL;
-		lbl = rn ? kof_region_label(rn) : "ALL";
-
-		/*
-		 * THIS REGION'S OWN TARGET, from its own share.
-		 *
-		 * Doubling until the region fits in its quota, so the region
-		 * that is most of the object is the only one described
-		 * coarsely. A region small enough to fit at the natural target
-		 * never enters the loop.
-		 */
-		avg = PLG_SEG_AVG;
-		while (avg < (1u << 22) &&
-		       rgn_bytes[ri] / avg > (uint64_t)quota[ri])
-			avg <<= 1;
-		min = avg / 4u;
-		max = avg * 4u;
-
-		/* And the row it may not carve past, so one region cannot take
-		 * the rows another was counted for. Counted from the shares
-		 * themselves rather than from the rows in hand, because the
-		 * carried blocks are already among those rows and would
-		 * otherwise be granted to the first region a second time. */
-		cap_acc += quota[ri];
-		cap = keep + cap_acc;
-		if (cap > PLG_MAX_BLOCK)
-			cap = PLG_MAX_BLOCK;
-
-		n = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
-		/*
-		 * NOT ONE BYTE OF THE STATIC LIBRARY.
-		 *
-		 * A block cut from libc matches every program that linked the
-		 * same libc, so it names a toolchain and not a family. It is
-		 * also, since kof_plague_object, a block the SCORER refuses to
-		 * credit - and a block the carve offers that the matcher will
-		 * never feed is a rule that matches the moment it is written
-		 * and never again. The two have to agree, and this is where.
-		 *
-		 * ALL OR NOTHING PER REGION. A subtraction that does not fit
-		 * the extent table would leave the library bytes in, which is
-		 * the direction that costs a false positive; dropping the
-		 * region costs a block nobody should have been offered.
-		 */
-		/*
-		 * THE LIBRARY IS NOT SUBTRACTED ANY MORE - IT IS CARVED AS
-		 * ITSELF.
-		 *
-		 * It used to be cut out and thrown away, because the matcher
-		 * refused to credit a window inside it and a block offered from
-		 * there could never score. The matcher no longer refuses: it
-		 * asks which SIDE a window is on and credits only blocks from
-		 * the same side, so a library block is scored against other
-		 * samples' libraries and an author-code block against their
-		 * author code. Neither can lift the other's number, which is
-		 * what subtracting was protecting against.
-		 *
-		 * So each extent is walked and split where it crosses a library
-		 * boundary, and each piece is carved with its own side. The
-		 * pieces are carved SEPARATELY, which preserves the rule the
-		 * subtraction was careful about: a rolling hash never runs
-		 * across a join, so no block spans two pieces.
-		 */
-		for (k = 0; k < n && v->ed.dr.n_blk < cap; k++) {
-			uint64_t eoff = v->ext2[k].off, elen = v->ext2[k].len;
-			uint64_t pos;
-
-			if (eoff >= o->buf.n)
-				continue;
-			if (elen > o->buf.n - eoff)
-				elen = o->buf.n - eoff;
-
-		for (pos = eoff; pos < eoff + elen &&
-		     v->ed.dr.n_blk < cap; ) {
-			uint64_t off = pos, len;
-			uint64_t at, cut;
-			uint32_t h = 0, drop = kof_plague_drop_weight(), w;
-			uint8_t  side;
-
-			len = plg_side_run(&lib, pos, eoff + elen, &side);
-			pos += len;
-			if (!len)
-				break;
-			/*
-			 * A SHORT EXTENT IS STILL CARVED.
-			 *
-			 * The floor is a TARGET for where to cut, not a rule
-			 * about what may be a block. Used as a rule it threw
-			 * away whole regions - an ELF's 353-byte CODE, its
-			 * 1680-byte DATA, six unclaimed extents of 1.5 KB
-			 * each - and the reader was told the object had
-			 * nothing to carve. What actually disqualifies a span
-			 * is that it cannot be scored, which is a count of
-			 * hashes and not a count of bytes, and plg_mark is
-			 * where that is decided.
-			 */
-
-
-			cut = 0;
-			for (w = 0; w < KOF_PLAGUE_NG && w < len; w++)
-				h = h * KOF_PLAGUE_BASE + o->buf.p[off + w];
-			for (at = KOF_PLAGUE_NG; at < len; at++) {
-				uint32_t m = kof_plague_mix(h);
-				int here = (m & (avg - 1u)) == 0u;
-
-				if ((here && at - cut >= min) ||
-				    at - cut >= max) {
-					plg_mark(v, o->buf.p, o->buf.n,
-						 off + cut, off + at, mask,
-						 lbl, rn, KOF_PLAGUE_RAW, side);
-					cut = at;
-					if (v->ed.dr.n_blk >= cap)
-						break;
-				}
-				h -= (uint32_t)o->buf.p[off + at - KOF_PLAGUE_NG] * drop;
-				h = h * KOF_PLAGUE_BASE + o->buf.p[off + at];
-			}
-			/* And the tail, whatever is left of the extent - for
-			 * the same reason. */
-			if (cut < len && v->ed.dr.n_blk < cap)
-				plg_mark(v, o->buf.p, o->buf.n, off + cut,
-					 off + len, mask, lbl, rn,
-					 KOF_PLAGUE_RAW, side);
-		}
-		}
-	}
+	memset(&cut, 0, sizeof cut);
+	cut.v = v; cut.o = o; cut.fp = fp;
+	kof_scan_plague_units(&o->ctx, o->buf, ~0u, plg_funcs(v, o),
+			      &lib, v->ext2, plg_count_cb, &cut);
+	plg_share(&cut, o->ctx.format);
+	kof_scan_plague_units(&o->ctx, o->buf, ~0u, plg_funcs(v, o),
+			      &lib, v->ext2, plg_take_cb, &cut);
 	/*
 	 * AND KEPT, so arriving here again costs nothing - see object.carve.
 	 * Only the rows this carve produced: a ticked one is the draft's and
@@ -7281,24 +7182,21 @@ static void plg_segment(struct view *v)
  * Re-run only when the blocks or the object changed - see plg_scored_obj.
  */
 /*
- * THE THREE MEASURES, against the object the panel is showing.
+ * THE SHAPE MEASURE, against the object the panel is showing.
  *
- * Each answers the question its own matcher asks, with the same call the
- * matcher will make at scan time - so a row that reads 64 is the number the
- * generated rule will see, not an approximation of it. Zero where the draft
- * carries nothing to compare against, which is the state a fresh draft is in.
+ * It answers the question its matcher asks, with the same call the matcher will
+ * make at scan time - so a row that reads 64 is the number the generated rule
+ * will see, not an approximation of it. Zero where the draft carries nothing to
+ * compare against, which is the state a fresh draft is in.
  */
 
 static void plg_sim_refresh(struct view *v)
 {
 	struct object *o = cur_obj(v);
-	uint32_t i, n = 0, sum = 0;
 
-	v->sim_shape = v->sim_blk = 0;
+	v->sim_shape = 0;
 	if (!o || !o->buf.p)
 		return;
-
-	(void)i; (void)n; (void)sum;
 	if (o->ctx.format != KOF_FMT_ELF || !o->info)
 		return;
 	if (v->ed.dr.has_shp)
@@ -7310,8 +7208,8 @@ static void plg_sim_refresh(struct view *v)
 static void plg_rescore(struct view *v)
 {
 	struct kof_true_all slib;
-	struct kof_plague_block blk[PLG_MAX_BLOCK];
-	uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
+	struct kof_plague_block *blk;
+	uint32_t *pool;
 	struct kof_plague_set *set;
 	struct kof_plague_ctx ctx;
 	struct object *o;
@@ -7322,6 +7220,15 @@ static void plg_rescore(struct view *v)
 	o = cur_obj(v);
 	if (!o || !o->buf.p)
 		return;
+	/* On the heap: a table of thousands of blocks is megabytes, and the
+	 * blocks in it hold at most KOF_PLAGUE_MAX_HASH hashes each. */
+	blk = malloc((size_t)v->ed.dr.n_blk * sizeof *blk);
+	pool = malloc((size_t)v->ed.dr.n_blk * KOF_PLAGUE_MAX_HASH * sizeof *pool);
+	if (!blk || !pool) {
+		free(blk);
+		free(pool);
+		return;
+	}
 
 	for (i = 0; i < v->ed.dr.n_blk; i++) {
 		const struct plg_block *b = &v->ed.dr.blk[i];
@@ -7344,93 +7251,38 @@ static void plg_rescore(struct view *v)
 			pool[np++] = b->hash[j];
 		nb++;
 	}
-	if (!nb)
+	if (!nb) {
+		free(blk);
+		free(pool);
 		return;
+	}
 
+	/* The set borrows both arrays, so they are released after it is. */
 	set = kof_plague_build(blk, nb, pool, np);
-	if (!set)
+	if (!set) {
+		free(blk);
+		free(pool);
 		return;
+	}
 	if (!kof_plague_ctx_init(&ctx, set)) {
 		kof_plague_set_free(set);
+		free(blk);
+		free(pool);
 		return;
 	}
 	kof_plague_begin(&ctx);
 	/*
-	 * AND THE OBJECT'S OWN LIBRARY SPANS, exactly as scan.c hands them over.
-	 *
-	 * Without them every window here is on the USER side, so a library
-	 * block scores zero in the panel and the author is shown a number the
-	 * engine will not reproduce - which is the one thing this whole
-	 * function exists to avoid. See the note above it.
+	 * THE ENGINE'S OWN FEED, with the library and the functions the engine
+	 * would hand it: the number shown here is the one the scanner computes.
+	 * Neither on a view - its headers describe its parent, so there is no
+	 * library to place and no functions to name; see kof_plague_units.
 	 */
 	memset(&slib, 0, sizeof slib);
-	/*
-	 * NOT ON A VIEW, and that is not caution - it is that the answer would
-	 * be wrong.
-	 *
-	 * kof_true_find works from markers found INSIDE a loadable segment, and
-	 * a view's segment offsets come from its parent's headers, which
-	 * describe the file before the padding came out. On a view those
-	 * offsets are stale wherever something collapsed ahead of them, so the
-	 * spans would be drawn over the wrong bytes and blocks would be put on
-	 * the wrong side.
-	 *
-	 * With no spans every window is KOF_PLAGUE_SIDE_USER, which is the
-	 * honest answer for an object whose library cannot be located: the
-	 * library half is simply not described here.
-	 */
 	if (!o->n_rgn)
 		obj_lib_find(o, &slib);
-	/*
-	 * AT FUNCTION SCOPE, because kof_plague_object keeps the POINTER and
-	 * not a copy - so the spans have to outlive every feed below. scan.c
-	 * says the same thing where it does this, and a block-scoped local here
-	 * would have been read after it died.
-	 */
-	kof_plague_object(&ctx, o->buf.p, slib.span, slib.n);
-
-	/*
-	 * ONE PASS PER REGION AND NORMALIZER, exactly as scan.c feeds it.
-	 *
-	 * Written as a loop over BLOCKS it fed every block's region again for
-	 * every block - fifty-four passes over half a megabyte where five were
-	 * needed - and the repetition was not merely slow: it is what exposed
-	 * the matcher counting arrivals instead of distinct hashes, because
-	 * fifty-four passes saturated every counter and the panel showed a
-	 * column of hundreds. The region a block was cut from is still what it
-	 * is looked for in; that anchoring is in the mask, not in the loop.
-	 */
-	for (i = 0; i < v->ed.dr.n_blk; i++) {
-		uint32_t mask = plg_mask(&v->ed.dr.blk[i]), norms, n, k, q;
-		int done = 0;
-
-		if (v->ed.dr.blk[i].n_hash < KOF_PLAGUE_MIN_HASH)
-			continue;
-		for (q = 0; q < i; q++)
-			if (plg_mask(&v->ed.dr.blk[q]) == mask &&
-			    v->ed.dr.blk[q].n_hash >= KOF_PLAGUE_MIN_HASH)
-				done = 1;
-		if (done)
-			continue;
-		norms = kof_plague_set_norms(set, mask);
-		if (!norms)
-			continue;
-		n = kof_scan_resolve_range(&o->ctx, mask, v->ext2);
-		for (k = 0; k < n; k++) {
-			uint64_t off = v->ext2[k].off, len = v->ext2[k].len;
-
-			if (off >= o->buf.n)
-				continue;
-			if (len > o->buf.n - off)
-				len = o->buf.n - off;
-			if (!len)
-				continue;
-			for (q = 0; q < KOF_PLAGUE_NORM_COUNT; q++)
-				if (norms & (1u << q))
-					kof_plague_feed(&ctx, mask, q,
-							o->buf.p + off, len);
-		}
-	}
+	kof_scan_plague_feed(&ctx, &o->ctx, o->buf, ~0u, 0,
+			     plg_funcs(v, o),
+			     o->n_rgn ? NULL : &slib, v->ext2);
 	for (i = 0, nb = 0; i < v->ed.dr.n_blk; i++) {
 		if (v->ed.dr.blk[i].n_hash < KOF_PLAGUE_MIN_HASH)
 			continue;
@@ -7439,6 +7291,8 @@ static void plg_rescore(struct view *v)
 	}
 	kof_plague_ctx_done(&ctx);
 	kof_plague_set_free(set);
+	free(blk);
+	free(pool);
 }
 
 /* ---- panes ---------------------------------------------------------------- */
@@ -7576,6 +7430,12 @@ static void draw_tree(struct out *o, struct view *v)
 	int rows = bot - top + 1;
 	uint32_t i;
 
+	static int g_tree_rows_seen;
+
+	if (rows != g_tree_rows_seen) {
+		g_tree_rows_seen = rows;
+		g_tree_followed = 0xffffffffu;   /* the window changed height: follow the selection again */
+	}
 	if (v->sel_node != g_tree_followed) {
 		g_tree_followed = v->sel_node;
 		if (v->sel_node < v->tree_top)
@@ -8877,13 +8737,12 @@ static void draft_wipe(struct view *v)
  */
 static int plg_load_rule(struct view *v, const char *path)
 {
-	uint8_t shp_pct = 0, str_pct = 0, blkv_pct = 0;
-	int shp_level = LV_SUSPECT, str_level = LV_INFECT;
-	int blkv_level = LV_INFECT;
-	struct kof_plague_decl d[PLG_MAX_BLOCK];
+	uint8_t shp_pct = 0;
+	int shp_level = LV_SUSPECT;
+	static struct kof_plague_decl d[PLG_MAX_BLOCK];
 	/* Which condition each block matcher belongs to, by matcher index -
 	 * see kof_plague_decl.cnd. */
-	uint8_t blk_cnd[MAX_GROUP];
+	uint8_t blk_cnd[MAX_GROUP] = { 0 };
 	struct kof_verdict_decl verdict;
 	static uint32_t pool[PLG_MAX_BLOCK * KOF_PLAGUE_MAX_HASH];
 	const struct object *o = cur_obj(v);
@@ -8891,8 +8750,7 @@ static int plg_load_rule(struct view *v, const char *path)
 
 	if (!plague_from_source(&v->ed, path, d, PLG_MAX_BLOCK, &n, pool,
 				(uint32_t)(sizeof pool / sizeof pool[0]),
-				&verdict, &shp_pct, &shp_level,
-				&str_pct, &str_level, &blkv_pct, &blkv_level))
+				&verdict, &shp_pct, &shp_level))
 		return 0;
 
 	v->ed.dr.n_blk = 0;
@@ -9068,35 +8926,22 @@ static int plg_load_rule(struct view *v, const char *path)
 	 * rows it was written from, so opening a generated rule and saving it
 	 * again changes nothing.
 	 *
-	 * A rule whose author JOINED two measures into one matcher by hand
-	 * comes back as two, which is the same logic with the operator one
-	 * level out. Recovering the grouping needs one reader over the whole
+	 * A rule whose author JOINED a measure and blocks into one matcher by
+	 * hand comes back as separate matchers, which is the same logic with the
+	 * operator one level out. Recovering the grouping needs one reader over the whole
 	 * kof_scan rather than two that parse independently; until then the
 	 * panel shows what it recovered rather than guessing at the rest.
 	 */
 	{
-		static const uint8_t meas[3] = {
-			SIM_IT_BLKSET, SIM_IT_SHAPE
-		};
-		uint8_t pct[2];
-		int lv[2];
-		uint32_t have[2], k;
+		struct group *g;
 
-		pct[0] = blkv_pct; pct[1] = shp_pct;
-		lv[0]  = blkv_level; lv[1] = shp_level;
-		have[0] = v->ed.dr.n_blkv;
-		have[1] = (uint32_t)(v->ed.dr.has_shp != 0);
-		for (k = 0; k < 2u; k++) {
-			struct group *g;
-
-			if (!have[k] || !pct[k] || v->ed.dr.n_grp >= MAX_GROUP)
-				continue;
+		if (v->ed.dr.has_shp && shp_pct && v->ed.dr.n_grp < MAX_GROUP) {
 			g = &v->ed.dr.grp[v->ed.dr.n_grp];
 			memset(g, 0, sizeof *g);
 			g->kind = (uint8_t)GRP_KIND_SIM;
 			v->ed.dr.n_grp++;
-			grp_sim_add(&v->ed, v->ed.dr.n_grp - 1u, meas[k], 0);
-			g->pct = pct[k];
+			grp_sim_add(&v->ed, v->ed.dr.n_grp - 1u, SIM_IT_SHAPE, 0);
+			g->pct = shp_pct;
 			/*
 			 * TICKED AND CARRIED, because the rule chose it and
 			 * the description came out of the FILE.
@@ -9108,9 +8953,9 @@ static int plg_load_rule(struct view *v, const char *path)
 			 * same pair of facts plg_load_rule sets on a block -
 			 * see plg_block.kept.
 			 */
-			v->ed.dr.sim_use[meas[k]]  = 1;
-			v->ed.dr.sim_kept[meas[k]] = 1;
-			plg_wire(v, v->ed.dr.n_grp - 1u, lv[k]);
+			v->ed.dr.sim_use[SIM_IT_SHAPE]  = 1;
+			v->ed.dr.sim_kept[SIM_IT_SHAPE] = 1;
+			plg_wire(v, v->ed.dr.n_grp - 1u, shp_level);
 		}
 	}
 
@@ -9197,7 +9042,7 @@ static void draft_show(struct view *v, uint32_t idx)
 			int sim = 0;
 
 			for (gi = 0; gi < SIM_ROWS; gi++)
-				sim |= v->ed.dr.sim_use[sim_row_what(gi)] != 0;
+				sim |= v->ed.dr.sim_use[SIM_IT_SHAPE] != 0;
 			v->sim_fold = !sim;
 		}
 
@@ -10709,8 +10554,14 @@ static void ch_take(struct view *v)
 		 * rather than fallen into: a row added after it some day would
 		 * otherwise quietly start removing the format instead.
 		 */
-		if (c->sel == c->n - 1)
-			fmt_swap(v, c->arg, KOF_FMT_COUNT);
+		if (c->sel == c->n - 1) {
+			uint64_t fm = v->ed.dr.fmt_mask;
+
+			if (fm && !(fm & (fm - 1u)))
+				say_note(&v->ed, "A rule needs at least one format");
+			else
+				fmt_swap(v, c->arg, KOF_FMT_COUNT);
+		}
 		return;
 	}
 	if (c->what == CH_FMT_SW) {
@@ -10888,6 +10739,7 @@ static void ch_take(struct view *v)
 			 * closed - ch_take shut it on the way in. */
 			d->icase = c->pend_icase;
 			d->fullword = c->pend_word;
+			decl_locate(&v->ed, d);   /* the hit list depends on both */
 			return;
 		}
 		switch (c->sel) {
@@ -11628,12 +11480,12 @@ static void prow_build(struct view *v)
 				prow_add(v, RW_BLK, i);
 	}
 	/*
-	 * AND THE THREE MEASURES, under the blocks they are one of.
+	 * AND THE MEASURE, under the blocks it is one of.
 	 *
 	 * Beside the block table rather than in a menu, because the number is
-	 * the point: a menu offers three ways of being alike and says nothing
-	 * about how alike THIS file is by any of them, which is the one thing
-	 * a reader moving between samples needs to see.
+	 * the point: a menu offers a way of being alike and says nothing about
+	 * how alike THIS file is by it, which is the one thing a reader moving
+	 * between samples needs to see.
 	 */
 	/*
 	 * THE SAME TEST draw_decl_sim MAKES, and in the same order.
@@ -11650,7 +11502,7 @@ static void prow_build(struct view *v)
 		prow_add(v, RW_SIMHDR, 0);
 		prow_add(v, RW_SIMCOL, 0);
 		for (i = 0; i < SIM_ROWS; i++)
-			if (sim_row_shown(v, i))
+			if (sim_row_shown(v))
 				prow_add(v, RW_SIM, i);
 	}
 	/*
@@ -14746,7 +14598,7 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 				ghead_tail(o, v, y, g);
 				/* After the row, so it wins where they overlap
 				 * - see hit_at. */
-				hit_add(v, y, c0, (int)o->col_hint,
+				hit_add(v, y, c0, v->grp_th[g][1],   /* not past the comment box */
 					hit_grp_pct, g);
 			} else {
 				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
@@ -15482,21 +15334,11 @@ static int blk_section_shown(struct view *v)
 	       (fm == KOF_FMT_ELF || fm == KOF_FMT_PE);
 }
 
-/*
- * WHICH MEASURE A ROW OF THE SIMILARITY TABLE IS - written once, because the
- * drawer, the fold predicate and the tick all have to agree about it and three
- * copies of a switch is three chances for one of them to drift.
- */
-static uint32_t sim_row_what(uint32_t i)
-{
-	return i == SIM_BLOCKS ? SIM_IT_BLKSET : SIM_IT_SHAPE;
-}
-
-static int sim_row_shown(const struct view *v, uint32_t i)
+static int sim_row_shown(const struct view *v)
 {
 	if (!v->sim_fold)
 		return 1;
-	return v->ed.dr.sim_use[sim_row_what(i)] != 0;
+	return v->ed.dr.sim_use[SIM_IT_SHAPE] != 0;
 }
 
 /* How many blocks are ticked - what the smart-blocks row is measured over. */
@@ -15517,52 +15359,17 @@ static uint32_t plg_n_picked(const struct view *v)
  * is that the row the reader ticks is the row that says how alike this file is,
  * so the choice is made beside the number that informs it.
  */
-/*
- * WHAT THE SCORE CAN AND CANNOT SAY, at the size of this reference.
- *
- * NOT A DETECTION THRESHOLD, and it does not refuse anything. Both set
- * measures answer `in * 100 / n_ref`, so one entry is worth 100/n_ref points -
- * and when n_ref is small that is the whole resolution of the instrument. A
- * reference of seven runs cannot express "sixty per cent alike": it can say
- * 57 or 71 and nothing in between, and four generic entries clear any
- * threshold under 58. The author is the one who decides whether that is worth
- * using; what they should not have to do is work the arithmetic out from a
- * percentage that looks continuous.
- *
- * MEASURED, and it is the thing that made this worth saying: a loader whose
- * whole set was `__gmon_start__`, the two `_ITM_*CloneTable` symbols and a
- * printable run of x86 epilogue bytes scored 100% against /usr/bin/giftext.
- * The arithmetic was right and the set described the toolchain, not the
- * author.
- *
- * Twenty is where one entry stops being worth five points. It is a legibility
- * line, not a measurement - which is exactly why it warns and does not gate.
- */
-static void sim_say_resolution(struct view *v, uint32_t what)
-{
-	uint32_t n;
-
-	if (what == SIM_IT_BLKSET)
-		n = v->ed.dr.n_blkv;
-	else
-		return;             /* the shape's dimensions are fixed */
-	if (!n || n >= 20u)
-		return;
-	snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-		 "%s: %u %s - one is worth %u%% of the score, so it has no "
-		 "finer answer than that", sim_it_word(what), n,
-		 "windows", 100u / n);
-	/* Not a fault: a small set is a fact about the object, and the author
-	 * may know it is the right one. */
-	v->ed.dr.warn_bad = 0;
-}
-
 static void hit_sim_tick(struct view *v, uint32_t which)
 {
-	uint32_t what = sim_row_what(which);
+	uint32_t what = SIM_IT_SHAPE;
+
+	(void)which;
 
 	if (v->ed.dr.sim_use[what]) {
 		v->ed.dr.sim_use[what] = 0;
+		/* Not carried any more: the description is retaken from whatever
+		 * object is in front, so the percentage is a dash again. */
+		v->ed.dr.sim_kept[what] = 0;
 		sim_take_out(v, what, 0);
 	} else {
 		/* Only where there is something to be about. An object this
@@ -15574,7 +15381,6 @@ static void hit_sim_tick(struct view *v, uint32_t which)
 				return;
 		}
 		v->ed.dr.sim_use[what] = 1;
-		sim_say_resolution(v, what);
 	}
 	v->plg_scored = 0;
 }
@@ -15657,9 +15463,6 @@ static void plg_wire(struct view *v, uint32_t g, int level)
 static int sim_prepare(struct view *v, uint32_t what)
 {
 	struct object *o = cur_obj(v);
-	struct kof_plague_desc *d;
-	struct kof_true_all   dlib;
-	uint32_t i;
 
 	if (what == SIM_IT_BLOCK)
 		return 1;
@@ -15700,42 +15503,7 @@ static int sim_prepare(struct view *v, uint32_t what)
 			v->ed.dr.warn_bad = 1;
 			return 0;
 		}
-		return 1;
 	}
-	/*
-	 * THE LIBRARY IS ALREADY OUT of both sets. kof_plague_build subtracts the
-	 * spans it is handed - see trueline.h - so what lands in the draft is
-	 * what the author wrote and not what the linker did.
-	 *
-	 * Found HERE and handed over, because the search needs an object whose
-	 * headers describe its own bytes and only this side knows that - see
-	 * the note on kof_plague_build.
-	 */
-	d = malloc(sizeof *d);
-	if (!d)
-		return 0;
-	obj_lib_find(o, &dlib);
-	if (!kof_plague_desc_build(d, o->buf, (const struct kof_elf_info *)o->info,
-			   dlib.span, dlib.n) ||
-	    !d->n_blk) {
-		snprintf(v->ed.dr.warn, sizeof v->ed.dr.warn,
-			 "no blocks left after the library cut");
-		v->ed.dr.warn_bad = 1;
-		free(d);
-		return 0;
-	}
-	v->ed.dr.n_blkv = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk
-						    : DRAFT_MAX_BLKV;
-	for (i = 0; i < v->ed.dr.n_blkv; i++)
-		v->ed.dr.blkv[i] = d->blk[i];
-	free(d);
-	/*
-	 * SAY SO WHEN THE CUT FOUND NOTHING. Measured, the marker tier reaches
-	 * only 14% of stripped static IoT builds - and a set that still has its
-	 * libc in it matches every program built against that libc. The panel
-	 * offers it anyway, because the researcher may know better than the
-	 * cut; it does not offer it silently.
-	 */
 	return 1;
 }
 
@@ -15801,8 +15569,8 @@ static void sim_item_name(const struct view *v,
  * Not what this matcher already holds either, because adding it twice would
  * emit the same comparison twice.
  *
- * The whole-object measures only where there is an object to take them from:
- * all three are cut from an ELF's regions.
+ * The whole-object measure only where there is an object to take it from: the
+ * shape is read off an ELF's program headers.
  *
  * `out` may be NULL, in which case this counts - which is what the drawer asks
  * before deciding whether to draw the button at all.
@@ -15810,8 +15578,7 @@ static void sim_item_name(const struct view *v,
 static uint32_t sim_offer(struct view *v, uint32_t g,
 			  struct grp_sim_item *out, uint32_t cap)
 {
-	static const uint8_t whole[2] = { SIM_IT_BLKSET, SIM_IT_SHAPE };
-	const struct object *ob = cur_obj(v);
+		const struct object *ob = cur_obj(v);
 	uint32_t n = 0, i;
 
 	if (g >= v->ed.dr.n_grp ||
@@ -15830,12 +15597,10 @@ static uint32_t sim_offer(struct view *v, uint32_t g,
 	}
 	if (!ob || ob->ctx.format != KOF_FMT_ELF)
 		return n;
-	for (i = 0; i < 2u; i++) {
-		if (!v->ed.dr.sim_use[whole[i]] ||
-		    grp_sim_has(&v->ed, g, whole[i], 0))
-			continue;
+	if (v->ed.dr.sim_use[SIM_IT_SHAPE] &&
+	    !grp_sim_has(&v->ed, g, SIM_IT_SHAPE, 0)) {
 		if (out && n < cap) {
-			out[n].what = whole[i];
+			out[n].what = SIM_IT_SHAPE;
 			out[n].blk  = 0;
 		}
 		n++;
@@ -15844,7 +15609,7 @@ static uint32_t sim_offer(struct view *v, uint32_t g,
 }
 
 /*
- * TAKE THE THREE WHOLE-OBJECT DESCRIPTIONS OFF THE OBJECT IN FRONT OF US -
+ * TAKE THE WHOLE-OBJECT DESCRIPTION OFF THE OBJECT IN FRONT OF US -
  * the other half of what the carve does for blocks.
  *
  * TICKED MEASURES ARE CARRIED, everything else is taken again. Word for word
@@ -15853,18 +15618,14 @@ static uint32_t sim_offer(struct view *v, uint32_t g,
  * what gets fed to the second. What is NOT ticked was a description of the
  * object being left behind and has no business in a table about this one.
  *
- * It used to be done by the tick, so until a measure was chosen the table said
- * the object had zero strings and zero windows - a count of nothing, under a
- * heading that promised what the measure is compared over. The reader had to
- * tick a thing to find out whether it was worth ticking.
- *
- * ONE BUILD FOR BOTH SETS, because they come out of the same pass over the
- * same bytes - see kof_plague_build - and it is the one expensive thing here.
+ * It used to be done by the tick, so until the measure was chosen the table said
+ * nothing about the object, under a heading that promised what the measure is
+ * compared over. The reader had to tick a thing to find out whether it was worth
+ * ticking.
  */
 static void sim_recarve(struct view *v)
 {
 	struct object *o = cur_obj(v);
-	struct kof_plague_desc *d;
 	uint32_t i;
 
 	for (i = 0; i < SIM_IT_COUNT; i++)
@@ -15882,21 +15643,6 @@ static void sim_recarve(struct view *v)
 				o->buf.n, slib.span, slib.n, &v->ed.dr.shp);
 			v->ed.dr.has_shp = v->ed.dr.shp.n_region != 0;
 		}
-	}
-	if (!v->ed.dr.sim_use[SIM_IT_BLKSET])
-		v->ed.dr.n_blkv = 0;
-	if (v->ed.dr.sim_use[SIM_IT_BLKSET])
-		return;
-	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
-		return;
-	/* Built once and shared with plg_sim_refresh - see obj_ovl. */
-	(void)d;
-	if (!obj_ovl(o))
-		return;
-	if (!v->ed.dr.sim_use[SIM_IT_BLKSET]) {
-		v->ed.dr.n_blkv = o->n_ovl_blk;
-		for (i = 0; i < o->n_ovl_blk; i++)
-			v->ed.dr.blkv[i] = o->ovl_blk[i];
 	}
 }
 
@@ -16099,69 +15845,6 @@ static void hit_plg_rgn(struct view *v, uint32_t i)
 	v->plg_scored = 0;
 }
 
-/* And the hash column cycles, because it is a choice of three and not a
- * number. Changing it re-hashes the block: the values depend on it. */
-static void hit_plg_norm(struct view *v, uint32_t i)
-{
-	if (plg_foreign(v)) {
-		say_err(&v->ed, "These blocks are not in this object");
-		return;
-	}
-	struct plg_block *b;
-	struct object *o;
-
-	if (i >= v->ed.dr.n_blk)
-		return;
-	b = &v->ed.dr.blk[i];
-	o = cur_obj(v);
-	if (!o || !o->buf.p || b->off >= o->buf.n || !b->len) {
-		/* Nothing here to re-read. A block carried from another sample
-		 * keeps the hashes it was declared with - changing how they
-		 * were taken would need the bytes they were taken from. */
-		say_err(&v->ed, "%s",
-			"This block's bytes are not in the object on screen");
-		return;
-	}
-	{
-		/*
-		 * RE-HASHED INTO A COPY FIRST, because a normalizer can leave
-		 * the block unscoreable.
-		 *
-		 * xor and sub hash the difference between neighbours, and a
-		 * span whose neighbours mostly agree collapses to almost
-		 * nothing - below KOF_PLAGUE_MIN_HASH the block cannot be
-		 * scored at all. Written straight into the block that would
-		 * have left a declared block that no menu offers and no rule
-		 * can use, with nothing said about why.
-		 */
-		uint32_t tmp[KOF_PLAGUE_MAX_HASH], n;
-		uint8_t next = (uint8_t)((b->norm + 1u) %
-					 KOF_PLAGUE_NORM_COUNT);
-		uint64_t len = b->len;
-		static const char *const nm[KOF_PLAGUE_NORM_COUNT] = {
-			"bytes", "xor", "sub"
-		};
-
-		if (len > o->buf.n - b->off)
-			len = o->buf.n - b->off;
-		n = kof_plague_hash_span(o->buf.p + b->off, len, next, tmp,
-					 KOF_PLAGUE_MAX_HASH);
-		if (n < KOF_PLAGUE_MIN_HASH) {
-			say_err(&v->ed, "Hashed as %s this block yields %u of "
-				"the %u it needs", nm[next], n,
-				KOF_PLAGUE_MIN_HASH);
-			return;
-		}
-		b->norm = next;
-		b->n_hash = n;
-		memcpy(b->hash, tmp, n * sizeof tmp[0]);
-		b->id = kof_plague_fold(b->hash, b->n_hash);
-	}
-	v->plg_scored = 0;
-}
-
-
-
 /*
  * THE LIST READS IN FILE ORDER.
  *
@@ -16209,9 +15892,15 @@ static void plg_order(struct view *v)
 	}
 	for (i = 0; i < n; i++)
 		tmp[i] = v->ed.dr.blk[ord[i]];
-	for (i = 0; i < n; i++) {
-		v->ed.dr.blk[i] = tmp[i];
-		blk_moved(&v->ed, ord[i], i);
+	{
+		/* Where each block went, handed over whole: see blk_permute. */
+		static uint32_t to[PLG_MAX_BLOCK];
+
+		for (i = 0; i < n; i++) {
+			v->ed.dr.blk[i] = tmp[i];
+			to[ord[i]] = i;
+		}
+		blk_permute(&v->ed, to, n);
 	}
 	/* Cycled by POSITION, so neighbours never share - which is a property
 	 * of the order and has to be redone when the order changes. */
@@ -16438,8 +16127,7 @@ static void sim_made_word(const struct view *v, uint32_t what, char *out,
 			 v->ed.dr.shp.n_region == 1u ? "" : "s", sz);
 		break;
 	default:
-		snprintf(out, cap, "%u selected window%s", v->ed.dr.n_blkv,
-			 v->ed.dr.n_blkv == 1u ? "" : "s");
+		out[0] = 0;
 		break;
 	}
 }
@@ -16447,8 +16135,7 @@ static void sim_made_word(const struct view *v, uint32_t what, char *out,
 /* Is there a description of this measure in the draft at all. */
 static int sim_have(const struct view *v, uint32_t what)
 {
-	return what == SIM_IT_SHAPE ? v->ed.dr.has_shp != 0
-				    : v->ed.dr.n_blkv != 0;
+	return what == SIM_IT_SHAPE && v->ed.dr.has_shp != 0;
 }
 
 static int draw_decl_sim(struct out *o, struct view *v, int r)
@@ -16462,11 +16149,10 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 	/*
 	 * ELF ONLY, AND IT OPENED ON PE FOR A WHILE.
 	 *
-	 * Every measure left here is an ELF answer by construction - the
-	 * shape is read off the program headers, and both set measures depend
-	 * on the static-library subtraction, which is koflib's ELF answer.
-	 * The one that was not, the call chain, is gone, and the gate came
-	 * back onto the table with it.
+	 * The measure left here is an ELF answer by construction - the shape is
+	 * read off the program headers. The ones that were not, the call chain
+	 * and the block vector, are gone, and the gate came back onto the table
+	 * with them.
 	 */
 	if (!ob || ob->ctx.format != KOF_FMT_ELF)
 		return r;
@@ -16475,7 +16161,7 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 		uint32_t g, on = 0;
 
 		for (g = 0; g < SIM_ROWS; g++)
-			on += v->ed.dr.sim_use[sim_row_what(g)] != 0;
+			on += v->ed.dr.sim_use[SIM_IT_SHAPE] != 0;
 		snprintf(sum, sizeof sum, " %u measure%s, %u in use", n_row,
 			 n_row == 1u ? "" : "s", on);
 		/*
@@ -16497,16 +16183,16 @@ static int draw_decl_sim(struct out *o, struct view *v, int r)
 	for (i = 0; i < SIM_ROWS; i++) {
 		char made[32], mt[8];
 
-		uint32_t what = sim_row_what(i), pct;
+		uint32_t what = SIM_IT_SHAPE, pct;
 		int on, y, c0;
 
-		if (!sim_row_shown(v, i))
+		if (!sim_row_shown(v))
 			continue;
 		if (!PR_VIS(r)) {
 			r++;
 			continue;
 		}
-		pct = i == SIM_BLOCKS ? v->sim_blk : v->sim_shape;
+		pct = v->sim_shape;
 		sim_made_word(v, what, made, sizeof made);
 		/*
 		 * A PERCENTAGE ONLY ONCE THERE IS SOMETHING TO COMPARE
@@ -16613,10 +16299,10 @@ static int draw_decl_diag(struct out *o, struct view *v, int r)
 		c0 = 2 + (int)o->col_hint;
 		out_fmt(o, " %s%-28.28s" A_OFF, A_HIT1,
 			d->name ? d->name : "?");
-		hit_add(v, y, c0, (int)o->col_hint, hit_diag_goto, i);
 		out_fmt(o, A_DIM " %2u/%-2u " A_OFF, d->n_bound, d->n_node);
 		out_fmt(o, "%s0x%llx" A_OFF, A_WARN,
 			(unsigned long long)d->at[0]);
+		hit_add(v, y, c0, (int)o->col_hint, hit_diag_goto, i);   /* the whole row */
 		r++;
 	}
 	return r;
@@ -16661,10 +16347,11 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	if (!blk_section_shown(v))
 		return r;
 	{
-		char cols[80], sum[48];
+		char cols[112], sum[48];
 
 		snprintf(cols, sizeof cols,
-			 " use  hash      offset        size  region  hashed%s",
+			 " use  %-10s  %-8s  %-*s  %6s  %-6s%s",
+			 "offset", "hash", (int)PLG_SYM_COL, "name", "size", "region",
 			 plg_kept_any(v) ? "  score" : "");
 		snprintf(sum, sizeof sum, " %u block(s), %u ticked",
 			 v->ed.dr.n_blk, plg_n_picked(v));
@@ -16690,12 +16377,6 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	for (i = 0; i < v->ed.dr.n_blk; i++) {
 		struct plg_block *b = &v->ed.dr.blk[i];
 		int y, c0;
-		/* What is hashed, which is the column's heading: the bytes
-		 * themselves, or the difference between neighbours. */
-		static const char *const nm[KOF_PLAGUE_NORM_COUNT] = {
-			"bytes", "xor", "sub"
-		};
-
 		if (!blk_row_shown(v, i))
 			continue;
 		if (!PR_VIS(r)) {
@@ -16724,35 +16405,12 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 		out_str(o, " ");
 
 		/*
-		 * The name, in its own colour while lit and plain otherwise -
-		 * which is the whole feedback loop: the table says which colour
-		 * in the hex pane is this block, and it says it by BEING that
-		 * colour.
-		 */
-		/*
-		 * The gap comes FIRST and uncoloured.
-		 *
-		 * Opening the colour before the separating space painted that
-		 * space too, so a lit block was eight characters of value with
-		 * a ninth cell of colour hanging off its left. The highlight is
-		 * the value.
-		 */
-		out_str(o, " ");
-		c0 = 1 + (int)o->col_hint;
-		if (b->lit)
-			out_str(o, plg_colour[b->colour % PLG_COLOURS]);
-		out_fmt(o, "%08x", b->id);
-		if (b->lit)
-			out_str(o, A_OFF);
-		hit_add(v, y, c0, (int)o->col_hint, hit_plg_light, i);
-
-		/*
 		 * WHERE IN THIS FILE IT IS. A carried block has no offset here:
 		 * its bytes belong to the sample it was cut from, which is also
 		 * why it cannot be lit.
 		 */
 		if (!b->len) {
-			out_str(o, A_DIM "  " "          " A_OFF);
+			out_str(o, A_DIM " " "          " A_OFF);
 		} else {
 			/*
 			 * AND THE OFFSET GOES THERE TOO.
@@ -16763,17 +16421,41 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 			 * left the bytes unmarked would put the pane somewhere
 			 * without saying what at.
 			 */
-			c0 = 2 + (int)o->col_hint;
-			out_fmt(o, A_DIM "  0x%08llx" A_OFF,
+			c0 = 1 + (int)o->col_hint;
+			out_fmt(o, A_DIM " 0x%08llx" A_OFF,
 				(unsigned long long)b->off);
 			hit_add(v, y, c0, (int)o->col_hint, hit_plg_goto, i);
 		}
 		/*
+		 * THE HASH, right after the offset, so the two columns that find a
+		 * block are side by side, in its own colour
+		 * while lit and plain otherwise - which is the whole feedback
+		 * loop: the table says which colour in the hex pane is this
+		 * block, and it says it by BEING that colour.
+		 *
+		 * The gap comes FIRST and uncoloured: opening the colour before
+		 * the separating space painted that space too, and the highlight
+		 * is the value.
+		 */
+		out_str(o, "  ");
+		c0 = 1 + (int)o->col_hint;
+		if (b->lit)
+			out_str(o, plg_colour[b->colour % PLG_COLOURS]);
+		out_fmt(o, "%08x", b->id);
+		if (b->lit)
+			out_str(o, A_OFF);
+		hit_add(v, y, c0, (int)o->col_hint, hit_plg_light, i);
+		/*
+		 * THE NAME, when the block is functions the object names; blank
+		 * for data and for anything else. Display only: it is not part of
+		 * what the rule matches.
+		 */
+		out_fmt(o, A_DIM "  %-*.*s" A_OFF, (int)PLG_SYM_COL, (int)PLG_SYM_COL,
+			b->sym);
+		/*
 		 * AND ITS SIZE IN THIS FILE, which a carried block also has
-		 * none of. It printed "0" beside a blank offset, and a row
-		 * reading "         0" is read as a block that came out empty
-		 * rather than as one this object does not hold whole. A dash
-		 * says the same thing the blank offset beside it says.
+		 * none of. A dash says the same thing the blank offset beside
+		 * it says; a "0" would read as a block that came out empty.
 		 */
 		if (!b->len)
 			out_str(o, A_DIM "       -" A_OFF);
@@ -16793,20 +16475,6 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 				b->anywhere ? A_ID : A_DIM,
 				b->anywhere ? "any" : b->rgn);
 			hit_add(v, y, rc, (int)o->col_hint, hit_plg_rgn, i);
-		}
-		/*
-		 * HOW THE BLOCK IS HASHED, and it is a control because it
-		 * changes what the block matches. raw is the bytes; xor and sub
-		 * hash the difference between neighbours, which makes a
-		 * one-byte key over the block disappear - see kofplague.h. An
-		 * obfuscated config is the case that wants one.
-		 */
-		{
-			int hc = 2 + (int)o->col_hint;
-
-			out_fmt(o, A_ID "  %-6s" A_OFF,
-				nm[b->norm % KOF_PLAGUE_NORM_COUNT]);
-			hit_add(v, y, hc, (int)o->col_hint, hit_plg_norm, i);
 		}
 		/*
 		 * HOW MUCH OF IT IS IN THE OBJECT ON SCREEN - the number the
@@ -19679,6 +19347,14 @@ static void redraw(struct view *v)
 	if (!fsel_range(v, &g_fsel.lo, &g_fsel.hi))
 		g_fsel.lo = g_fsel.hi = 0;
 	term_size();
+	if (g_term_small) {
+		/* 60 columns written into 40 wrap every line into the next: say so instead */
+		free(g_last);
+		g_last = NULL;
+		g_last_n = 0;
+		term_write("[2J[HTerminal too small - need at least 60x12");
+		return;
+	}
 	/*
 	 * THE SCREEN, as the outermost bound every drawer is inside.
 	 *
@@ -19855,6 +19531,11 @@ static void redraw(struct view *v)
 			  : v->sym_open    ? 3
 			  : v->help_open   ? 4 : 0;
 
+		/* A bar menu opened over the dialog is another picture: it has to be
+		 * erased when it moves or closes, and only the panes can do that. */
+		if (modal)
+			modal = modal * 100 + (v->bar_open + 2);
+
 		under = !modal || wiped || g_modal_drawn != modal;
 		g_modal_drawn = modal;
 	}
@@ -19886,8 +19567,7 @@ static void redraw(struct view *v)
 		if (want_rows > room - 3)
 			want_rows = room - 3;
 		g_disasm_rows = want_rows > 0 ? want_rows : 0;
-		if (!g_disasm_rows)
-			v->dis_open = 0;   /* nowhere to put it */
+		/* nowhere to put it: dis_open is left alone so the panel returns when there is room */
 	} else {
 		g_disasm_rows = 0;
 	}
@@ -20044,6 +19724,17 @@ static void redraw(struct view *v)
 		out_clip_restore(&o, cl);
 		if (v->show_list)
 			draw_list(&o, v);
+	}
+	/*
+	 * THE DIALOGS ARE PAINTED ON EVERY FRAME, under the panes or not.
+	 *
+	 * `under` decides only whether the panes behind a full-screen modal are
+	 * repainted. The boxes themselves were inside that test, so once a dialog
+	 * was open and its first frame drawn, nothing painted it again: a scroll,
+	 * a click on a tab, a typed filter all changed the state and left the
+	 * screen as it was.
+	 */
+	{
 		/*
 		 * THE DECODER BEFORE THE CONTEXT MENU, because its plaintext
 		 * window has a menu of its own.
@@ -20814,6 +20505,8 @@ enum bar_item {
 	BI_FILT_V5, BI_FILT_V6, BI_FILT_V7, BI_FILT_V8, BI_FILT_V9,
 	BI_FILT_V10, BI_FILT_V11, BI_FILT_V12, BI_FILT_V13, BI_FILT_V14,
 	BI_FILT_V15, BI_FILT_V16, BI_FILT_V17, BI_FILT_V18, BI_FILT_V19,
+	BI_FILT_V20, BI_FILT_V21, BI_FILT_V22, BI_FILT_V23, BI_FILT_V24,
+	BI_FILT_V25, BI_FILT_V26, BI_FILT_V27,   /* KOF_EVT_TYPE_COUNT - 2 = 27 verbs */
 	BI_FILT_APPLY,
 
 	BI_KEYS, BI_ABOUT,
@@ -20867,6 +20560,14 @@ static const struct {
 	{ "Next",              BM_SWITCH, -1, 0 },
 	{ "Previous",          BM_SWITCH, -1, 0 },
 	{ "Filter events",     BM_ANALYSIS, -1, 1 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
+	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
@@ -20960,7 +20661,7 @@ static int bar_filt_verb(int i)
 	static int n_order;
 	int k;
 
-	if (i < BI_FILT_V0 || i > BI_FILT_V19)
+	if (i < BI_FILT_V0 || i > BI_FILT_V27)
 		return -1;
 
 	if (!n_order) {
@@ -21304,7 +21005,7 @@ case BI_UNPACKER: {
 		break;
 	}
 
-	if (i >= BI_FILT_V0 && i <= BI_FILT_V19) {
+	if (i >= BI_FILT_V0 && i <= BI_FILT_V27) {
 		verb = bar_filt_verb(i);
 		/*
 		 * Only verbs the log actually contains. A submenu listing
@@ -22178,6 +21879,19 @@ static void prop_head(const char *w)
 	if (g_n_prop)
 		prop_add(A_DIM "%s", "");
 	prop_add(A_BOLD "%s" A_OFF, w);
+}
+
+/* An offset that may be one of the two sentinels: KOF_NA (the format has no such
+ * thing - an ET_REL has no entry in the file) or KOF_BROKEN (it should, and does
+ * not resolve). Printed raw they read as 18446744073709551615. */
+static void prop_off(char *out, size_t cap, uint64_t v)
+{
+	if (v == KOF_NA)
+		snprintf(out, cap, "-");
+	else if (v == KOF_BROKEN)
+		snprintf(out, cap, "unresolved");
+	else
+		snprintf(out, cap, "0x%llx", (unsigned long long)v);
 }
 
 static void prop_perm(char *out, size_t cap, unsigned p)
@@ -23128,7 +22842,7 @@ static void prop_proc_libs(const struct view *v)
 static void prop_elf(const struct object *ob)
 {
 	const struct kof_elf_info *e = ob->info;
-	char perm[4];
+	char perm[4], fo[24];
 	uint32_t i;
 
 	prop_head("ELF");
@@ -23140,10 +22854,10 @@ static void prop_elf(const struct object *ob)
 					       : "little-endian",
 		 e->e_type, e->e_machine);
 	prop_perm(perm, sizeof perm, e->entry_perm);
+	prop_off(fo, sizeof fo, ob->ctx.entry_off);
 	prop_add(A_DIM "  %-11s " A_LOC "0x%llx" A_OFF A_DIM
-		 "  file " A_OFF A_LOC "%llu" A_OFF "  " A_ID "%s" A_OFF,
-		 "entry", (unsigned long long)e->entry_addr,
-		 (unsigned long long)ob->ctx.entry_off, perm);
+		 "  file " A_OFF A_LOC "%s" A_OFF "  " A_ID "%s" A_OFF,
+		 "entry", (unsigned long long)e->entry_addr, fo, perm);
 
 	prop_claimed("segments", e->phnum, e->phnum_claimed);
 	for (i = 0; i < e->seg_count; i++) {
@@ -23151,13 +22865,13 @@ static void prop_elf(const struct object *ob)
 		char num[24];
 
 		if (!w) {
-			snprintf(num, sizeof num, "%u", e->seg[i].type);
+			snprintf(num, sizeof num, "0x%x", e->seg[i].type);
 			w = num;
 		}
 		prop_perm(perm, sizeof perm, e->seg[i].perm);
-		prop_add("     " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
-			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
-			 "%-9llu" A_OFF A_DIM "vaddr=" A_OFF A_LOC
+		prop_add("    " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
+			 A_LOC "0x%-8llx" A_OFF A_DIM " size=" A_OFF A_SIZE
+			 "%-9llu" A_OFF A_DIM " vaddr=" A_OFF A_LOC
 			 "0x%-10llx" A_OFF A_ID "%s" A_OFF,
 			 w, (unsigned long long)e->seg[i].file_off,
 			 (unsigned long long)e->seg[i].file_size,
@@ -23169,11 +22883,11 @@ static void prop_elf(const struct object *ob)
 		char num[24];
 
 		if (!w) {
-			snprintf(num, sizeof num, "%u", e->sec[i].type);
+			snprintf(num, sizeof num, "0x%x", e->sec[i].type);
 			w = num;
 		}
-		prop_add("     " A_ID "%-20s" A_OFF A_DIM " off=" A_OFF
-			 A_LOC "%-9llu" A_OFF A_DIM "size=" A_OFF A_SIZE
+		prop_add("    " A_ID "%-16s" A_OFF A_DIM " off=" A_OFF
+			 A_LOC "0x%-8llx" A_OFF A_DIM " size=" A_OFF A_SIZE
 			 "%-9llu" A_OFF A_DIM " %s" A_OFF,
 			 e->sec[i].name,
 			 (unsigned long long)e->sec[i].file_off,
@@ -23245,7 +22959,7 @@ static void prop_pdf(const struct object *ob)
 static void prop_pe(const struct object *ob)
 {
 	const struct kof_pe_info *p = ob->info;
-	char perm[4];
+	char perm[4], fo[24];
 	uint32_t i;
 
 	prop_head("PE");
@@ -23256,26 +22970,26 @@ static void prop_pe(const struct object *ob)
 	/* The CLI header's own extent. What it MEANS - that this is managed
 	 * code - is said on the identity block; this is the header fact. */
 	if (p->clr_len)
-		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF A_DIM
+		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
 			 "  len=" A_OFF A_SIZE "%llu" A_OFF A_DIM
 			 "  entry token=" A_OFF A_LOC "0x%08x" A_OFF,
 			 "CLI header", (unsigned long long)p->clr_off,
 			 (unsigned long long)p->clr_len, p->clr_entry_token);
 
-	prop_add(A_DIM "  %-11s lfanew=" A_OFF A_LOC "%llu" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s lfanew=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
 		 "  gap=" A_OFF A_SIZE "%llu" A_OFF, "stub",
 		 (unsigned long long)p->lfanew,
 		 (unsigned long long)p->stub_len);
-	prop_add(A_DIM "  %-11s end=" A_OFF A_LOC "%llu" A_OFF A_DIM
+	prop_add(A_DIM "  %-11s end=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
 		 "  declared=" A_OFF A_SIZE "%llu" A_OFF, "headers",
 		 (unsigned long long)p->header_end,
 		 (unsigned long long)p->size_of_headers);
 	prop_perm(perm, sizeof perm, p->entry_perm);
+	prop_off(fo, sizeof fo, ob->ctx.entry_off);
 	prop_add(A_DIM "  %-11s rva=" A_OFF A_LOC "0x%llx" A_OFF A_DIM
-		 "  file " A_OFF A_LOC "%llu" A_OFF A_DIM "  sec=" A_OFF A_ID
+		 "  file " A_OFF A_LOC "%s" A_OFF A_DIM "  sec=" A_OFF A_ID
 		 "%s" A_OFF "  " A_ID "%s" A_OFF, "entry",
-		 (unsigned long long)p->entry_rva,
-		 (unsigned long long)ob->ctx.entry_off,
+		 (unsigned long long)p->entry_rva, fo,
 		 p->entry_sec < p->sec_count ? p->sec[p->entry_sec].name
 					     : "none", perm);
 	prop_add(A_DIM "  %-11s code=" A_OFF A_SIZE "%llu" A_OFF A_DIM
@@ -23290,22 +23004,22 @@ static void prop_pe(const struct object *ob)
 	 * is missing, and an overlay is where a packer's payload usually is.
 	 */
 	if (p->cert_len)
-		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "%llu" A_OFF
+		prop_add(A_DIM "  %-11s off=" A_OFF A_LOC "0x%llx" A_OFF
 			 A_DIM "  len=" A_OFF A_SIZE "%llu" A_OFF, "signature",
 			 (unsigned long long)p->cert_off,
 			 (unsigned long long)p->cert_len);
 	if (p->overlay_len)
 		prop_add(A_WARN "  %-11s" A_OFF A_DIM " off=" A_OFF A_LOC
-			 "%llu" A_OFF A_DIM "  len=" A_OFF A_WARN "%llu" A_OFF,
+			 "0x%llx" A_OFF A_DIM "  len=" A_OFF A_WARN "%llu" A_OFF,
 			 "overlay", (unsigned long long)p->overlay_off,
 			 (unsigned long long)p->overlay_len);
 	prop_claimed("sections", p->nsec, p->nsec_claimed);
 	for (i = 0; i < p->sec_count; i++) {
 		prop_perm(perm, sizeof perm, p->sec[i].perm);
-		prop_add("     " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
-			 A_LOC "%-9llu" A_OFF A_DIM "raw=" A_OFF A_SIZE
-			 "%-9llu" A_OFF A_DIM "rva=" A_OFF A_LOC "0x%-8llx"
-			 A_OFF A_DIM "vsz=" A_OFF A_LOC "0x%-8llx" A_OFF A_ID
+		prop_add("    " A_ID "%-9s" A_OFF A_DIM " off=" A_OFF
+			 A_LOC "0x%-8llx" A_OFF A_DIM " raw=" A_OFF A_SIZE
+			 "%-9llu" A_OFF A_DIM " rva=" A_OFF A_LOC "0x%-8llx"
+			 A_OFF A_DIM " vsz=" A_OFF A_LOC "0x%-8llx" A_OFF A_ID
 			 "%s" A_OFF, p->sec[i].name,
 			 (unsigned long long)p->sec[i].file_off,
 			 (unsigned long long)p->sec[i].file_size,
@@ -23914,7 +23628,15 @@ static void prop_build(struct view *v)
 		return;
 	}
 
-	if (ob->fmt && ob->info) {
+	/*
+	 * NOT FOR A NORMALISED VIEW. Its headers describe the file before the
+	 * padding came out, so every offset in them is stale wherever something
+	 * collapsed ahead of it: read against the view's own bytes the section
+	 * table came out as fifteen rows of 15263131283388305642. The view is
+	 * declared raw (see KOF_ENT_NORMALIZED); what it is - its regions - is
+	 * drawn below, and what its parent said is on the parent's page.
+	 */
+	if (ob->fmt && ob->info && ob->entry_kind != KOF_ENT_NORMALIZED) {
 		if (ob->ctx.format == KOF_FMT_ELF)
 			prop_elf(ob);
 		else if (ob->ctx.format == KOF_FMT_PE)
@@ -26189,7 +25911,7 @@ static int read_mouse(void)
 
 		t[n] = 0;
 		if (sscanf(t, "%d;%d;%d", &b, &x, &y) != 3)
-			return K_NONE;
+			return K_RESIZE;        /* ignored (one repaint): K_NONE means end of input */
 		g_mx = x;
 		g_my = y;
 		if (release)
@@ -27717,8 +27439,10 @@ static void draw_symbols(struct out *o, struct view *v)
 							KOF_SYM_R_VALUE));
 		}
 		symd_edge(o, w);
-		if (sc.rec)
+		if (sc.rec) {
 			dlg_rec_row(v, &sc);
+			dlg_rec_src(v, (uint32_t)at);   /* what dlg_row_of_src() looks rows up by */
+		}
 	}
 
 	/* Bottom border. */
@@ -27969,8 +27693,8 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 		f->x = 1;
 	if (f->y + f->h - 1 > g_rows)
 		f->y = g_rows - f->h + 1;
-	if (f->y < 1)
-		f->y = 1;
+	if (f->y < 2)
+		f->y = 2;               /* row 1 is the menu bar */
 	f->ix = f->x + 2;
 	f->iw = f->w - 4;
 	/* The box owns these rows and these columns and nothing else. Set
@@ -28626,6 +28350,10 @@ static void goto_take(struct view *v)
 
 	if (val == KOF_BROKEN) {
 		say_err(&v->ed, "%s", "Not a number");
+		return;
+	}
+	if (!v->goto_file && val >= v->rgn_len) {
+		say_err(&v->ed, "Past the end of the region");
 		return;
 	}
 	fo = v->goto_file ? val : view_map(v, val, 0);
@@ -29649,6 +29377,8 @@ static int click_hex(struct view *v, int rclick)
 			else
 				v->sel_a = v->sel_b = at;
 			v->sel_from_dis = 0;    /* the hex pane owns it now */
+			v->dis_have = 0;        /* a stale panel-text selection must not win Ctrl+C */
+			v->dis_dragging = 0;
 			dis_bias_to_sel(v);
 			v->dragging = 1;
 			/*
@@ -29938,6 +29668,8 @@ static void click(struct view *v, int rclick)
 		}
 		v->dlg_have = 0;
 		v->dlg_drag = 0;
+		if (v->prop_open)
+			return;         /* a modal page: nothing under it takes the click */
 	}
 	/*
 	 * MOVING THE BOX IS ASKED ABOUT FIRST, because the title row carries no
@@ -31666,6 +31398,14 @@ static void on_wheel(struct view *v, int k)
 					v->n_node > (uint32_t)rows)
 				       ? v->n_node - (uint32_t)rows : 0u;
 
+			if (v->log && down && v->tree_top >= max) {
+				goto_node(v, v->n_node);        /* slide the event window forward */
+				return;
+			}
+			if (v->log && !down && v->tree_top == 0u) {
+				goto_node(v, (uint32_t)-1);     /* ... and back */
+				return;
+			}
 			if (down)
 				v->tree_top = v->tree_top + 3u > max
 					      ? max : v->tree_top + 3u;
@@ -31788,9 +31528,20 @@ static void on_cursor_up(struct view *v)
 
 
 
+/* A refusal that must be visible whichever pane has the focus: the draft's own
+ * channel (say_note) is drawn only while the draft panel is focused. */
+static void say_act(struct view *v, const char *s)
+{
+	snprintf(v->act_msg, sizeof v->act_msg, "%s", s);
+	v->act_ok = 0;
+}
+
 static int handle(struct view *v, int k)
 {
 	int page = hex_last() - hex_top();
+
+	if (k == 0x11)                  /* Ctrl+Q quits from anywhere, dialogs and menus included */
+		return 0;
 
 	/*
 	 * Ctrl+C with a run of disassembly picked.
@@ -31977,13 +31728,13 @@ static int handle(struct view *v, int k)
 		if (bar_enabled(v, BI_PREV))
 			open_step(v, -1);
 		else
-			say_note(&v->ed, "Finish or undo the draft first");
+			say_act(v, "Finish or undo the draft first");
 		break;
 	case 0x1c:                      /* Ctrl+\ */
 		if (bar_enabled(v, BI_NEXT))
 			open_step(v, +1);
 		else
-			say_note(&v->ed, "Finish or undo the draft first");
+			say_act(v, "Finish or undo the draft first");
 		break;
 	case 0x06:                      /* Ctrl+F */
 		v->find_open = 1;
@@ -31995,8 +31746,8 @@ static int handle(struct view *v, int k)
 			find_run(v, 0);
 		break;
 	case 0x0f:                      /* Ctrl+O */
-		say_note(&v->ed, "No file picker - pass the file on the "
-			    "command line");
+		say_act(v, "No file picker - pass the file on the "
+			   "command line");
 		break;
 	/*
 	 * READ IT THE OTHER WAY - the same thing the context menu offers.
@@ -32273,7 +32024,6 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 		struct object *o = &v->obj[0];
 
 		/* See the reset loop for what an object owns. */
-			free(o->ovl_blk);
 		free(o->carve);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);
@@ -32340,8 +32090,8 @@ static void file_close(struct view *v)
 	 * are the mapping - so there is nothing else to undo", which is the
 	 * same sentence log_window's reset loop already corrected about itself:
 	 * "it stopped being true the moment anything was." The loop below grew
-	 * the frees for touch, finding, info, sym and own; ovl_blk and
-	 * carve were never added to it, and they are heap the object keeps so
+	 * the frees for touch, finding, info, sym and own; carve
+	 * was never added to it, and it is heap the object keeps so
 	 * that coming back to a row does not re-read it.
 	 *
 	 * WHAT THAT LEAKED, and it needs two files to see. The invariant every
@@ -32376,11 +32126,11 @@ static void file_close(struct view *v)
 
 		kof_touch_free(o->touch, o->n_touch);
 		free(o->diag);
+		kof_funcs_free(&o->funcs);
 		free(o->finding);
 		free(o->info);
 		free(o->sym);
 		free(o->own);
-			free(o->ovl_blk);
 		free(o->carve);
 		if (o->mapped)
 			kof_unmap_file(o->mapped, o->mapped_len);
@@ -32662,7 +32412,6 @@ static int file_open(struct view *v, const char *path, kof_engine *eng)
 		struct object *o = &v->obj[0];
 
 		/* See the reset loop for what an object owns. */
-			free(o->ovl_blk);
 		free(o->carve);
 		memset(o, 0, sizeof *o);
 		snprintf(o->name, sizeof o->name, "%s", v->path);

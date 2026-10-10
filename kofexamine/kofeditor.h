@@ -42,6 +42,7 @@
 #include <kofeng.h>
 #include "kofinspect.h"
 #include "../libkofeng/databases/diagsrc.h"
+#include "../libkofeng/analyzers/parsers/binaries/funcs.h"
 
 
 #define MAX_DECL  32
@@ -707,16 +708,6 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  */
 #define SIM_IT_SHAPE  1u
 /*
- * THE BLOCK VECTOR - how alike the object is across the reference's WHOLE set
- * of selected windows, not how much of any one named run is here:
- * kof_plague_blocks. Its own set, built by kof_plague_build with the library cut
- * out; the blocks a researcher ticked are the ones they meant individually.
- *
- * Measured: agreement across the set beat the best single block - 83.0%
- * against 81.8% at the same zero false positives - because agreement in every
- * region is what a rebuild preserves and a coincidence does not.
- */
-/*
  * 3 IS NOT USED EITHER, AND FOR THE SAME REASON AS 2.
  *
  * It was the block vector - how alike an object was across a reference's
@@ -729,7 +720,7 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * The id stays a gap for the reason 2's does: so the ids of the measures that
  * remain do not move, and a draft written by an older build still reads.
  */
-#define SIM_IT_BLKSET 3u
+/* (3 is a gap; there is no name for it.) */
 /*
  * 4 IS A GAP TOO, AND NOT FOR 2 AND 3'S REASON.
  *
@@ -757,7 +748,7 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * percentage stayed a dash for ever. */
 #define SIM_IT_COUNT  5u
 
-/* How many measures one similarity matcher can hold. Four kinds and, at most,
+/* How many measures one similarity matcher can hold. The shape and, at most,
  * one block apiece for the blocks a draft carries; eight is past what any
  * measured rule has needed, and it is also how many items a list row can hold
  * a click span for. */
@@ -864,9 +855,6 @@ static inline void grp_at_fix_sign(struct group *q)
 /* How many of a reference's strings a draft keeps. Measured: the median sample
  * yields 74 and three in four are under 327. */
 
-/* And how many block hashes. Larger because a window is selected far more often
- * than a printable run of six is found. */
-#define DRAFT_MAX_BLKV 2048u
 
 
 struct cond {
@@ -901,11 +889,20 @@ struct cond {
  */
 /*
  * How many similarity blocks one draft can hold - the engine's offers for the
- * object in front of it, plus whatever a loaded rule declared. Sixty-four is a
- * table a person can look down; past that the carve is describing the object
- * rather than offering a choice from it.
+ * object in front of it, plus whatever a loaded rule declared.
+ *
+ * A BOUND ON A HOSTILE FILE, not a taste. The functions of a binary are offered
+ * one block each, and a few hundred is ordinary (46652 author functions over 133
+ * measured binaries); a file that names a hundred thousand is not asking to be
+ * browsed. It was sixty-four when the offer was a carve of the bytes into
+ * roughly eight-kilobyte pieces, which is still how everything that is not
+ * code is offered - see PLG_DATA_BLOCKS.
  */
-#define PLG_MAX_BLOCK 64u
+#define PLG_MAX_BLOCK 4096u
+
+/* The share of the table the byte carve may fill: the regions that are not
+ * code. Unchanged from when the table held no more than this. */
+#define PLG_DATA_BLOCKS 64u
 
 /*
  * One block a researcher has marked on THIS object.
@@ -917,6 +914,13 @@ struct cond {
  */
 struct plg_block {
 	uint64_t off, len;                 /* where it is in this object */
+	/*
+	 * THE SYMBOL THE BLOCK IS, when it is functions the object names: the first
+	 * function's name, and " +N" when the block is a group of N+1. Empty for a
+	 * piece of data or of anything the symbols do not name. Display only - it is
+	 * not part of what a rule matches.
+	 */
+	char     sym[40];
 	uint32_t mask;                     /* the region it was taken from */
 	/*
 	 * WHICH HALF OF THE OBJECT IT WAS CUT FROM - enum kof_plague_side.
@@ -1033,15 +1037,6 @@ struct kof_draft {
 	 * a three-quarters of samples reach, and a draft that is copied about
 	 * should not carry an allocation somebody has to remember to free.
 	 */
-	/*
-	 * AND ITS BLOCK HASHES, from the same bytes and the same cut.
-	 *
-	 * Not the blocks of the table above: those are named runs a researcher
-	 * picked and each is its own matcher. This is the object's whole set,
-	 * which is what the block-vector measure is over - see SIM_IT_BLKSET.
-	 */
-	uint32_t     blkv[DRAFT_MAX_BLKV];
-	uint32_t     n_blkv;
 	/*
 	 * WHICH WHOLE-OBJECT MEASURES THE AUTHOR HAS CHOSEN, and which of them
 	 * are carried - indexed by SIM_IT_*, with the block slot unused
@@ -1266,25 +1261,7 @@ struct object {
 	uint8_t   sym_declared;
 
 	/*
-	 * WHAT kof_plague_build MADE OF THIS OBJECT, KEPT.
-	 *
-	 * It reads every byte - the string set and the block vector are over
-	 * the whole thing - and the panel asked for it again every time the
-	 * selection came back to this object: measured at 226ms on a 15MB
-	 * view, paid on each return, and it faulted a spilled object into
-	 * memory in full to do it.
-	 *
-	 * The answer is a property of the OBJECT and of nothing else, so it is
-	 * kept with the object. On the heap and only once something asks, since
-	 * most objects are never selected; freed with the tree.
-	 */
-	uint32_t *ovl_blk;
-	uint32_t  n_ovl_blk;
-	uint8_t   ovl_done;
-
-	/*
-	 * AND THE BLOCKS THE CARVE CUT FROM IT, for the same reason and with
-	 * one condition.
+	 * THE BLOCKS THE CARVE CUT FROM THIS OBJECT, KEPT.
 	 *
 	 * The carve hashes every region, so it reads the whole object too:
 	 * measured at 310ms on a 15MB view and 0.7s on a sample with three
@@ -1409,6 +1386,13 @@ struct object {
 	 */
 	struct kof_diag_report *diag;
 	uint32_t                n_diag;
+	/*
+	 * THE FUNCTIONS ITS SYMBOLS NAME, built once beside the symbol block - see
+	 * funcs.h. Empty for an object with none, and for a normalised view, whose
+	 * headers describe its parent.
+	 */
+	struct kof_func_set     funcs;
+	uint8_t                 funcs_done;
 
 	/*
 	 * The object's symbol records, in the KSYM layout kofsym.h fixes.
@@ -1560,7 +1544,6 @@ void say_err(struct kof_editor *e, const char *fmt, ...);
 /* ---- what an object IS, worked out once - see the definitions ---- */
 void    obj_sha256(struct object *o);
 uint8_t obj_emu_why(const struct object *o);
-int     obj_ovl(struct object *o);
 
 void say_note(struct kof_editor *e, const char *fmt, ...);
 int meta_has_sample(struct kof_editor *e);
@@ -1789,8 +1772,8 @@ int grp_make_sim(struct kof_editor *e, uint32_t g);
  * these rather than by reaching into the array.
  *
  * Every one of them takes the pair (what, blk) as the item's IDENTITY: `blk`
- * is read only for SIM_IT_BLOCK, so the three whole-object measures are one
- * apiece per matcher and a block is one per block. That is what makes "is this
+ * is read only for SIM_IT_BLOCK, so the whole-object measure is one
+ * per matcher and a block is one per block. That is what makes "is this
  * already here" answerable, and a matcher that held the same measure twice
  * would emit the same comparison twice.
  */
@@ -1801,16 +1784,17 @@ int grp_sim_has(const struct kof_editor *e, uint32_t g, uint32_t what,
 /* Which matcher holds this item, or MAX_GROUP when none does. */
 uint32_t grp_sim_of(const struct kof_editor *e, uint32_t what, uint32_t blk);
 /* Does any matcher measure this way at all - blk ignored, so it answers for
- * the three whole-object measures and for "any block". */
+ * the whole-object measure and for "any block". */
 int draft_uses_sim(const struct kof_editor *e, uint32_t what);
 /* The default threshold for a measure: where each was measured, not one
- * number for all four. See the notes on the SIM_IT_* kinds. */
+ * number for all. See the notes on the SIM_IT_* kinds. */
 uint32_t sim_pct_default(uint32_t what);
 /* What a measure is called on the panel and in a menu. */
 const char *sim_it_word(uint32_t what);
 void blk_set_picked(struct kof_editor *e, uint32_t i, int on);
 int blk_clears(const struct kof_editor *e, uint32_t i);
 void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
+void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n);
 
 /*
  * READ A PLAGUE RULE BACK, so an infected file opens the rule that caught it.
@@ -1839,9 +1823,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_plague_decl *blk, uint32_t max_blk,
 		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
 		       struct kof_verdict_decl *verdict,
-		       uint8_t *shp_pct, int *shp_level,
-		       uint8_t *str_pct, int *str_level,
-		       uint8_t *blkv_pct, int *blkv_level);
+		       uint8_t *shp_pct, int *shp_level);
 
 
 /*

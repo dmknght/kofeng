@@ -176,6 +176,7 @@ struct wctx {
 	} tseg[KOF_ELF_MAX_SEGMENTS];
 	uint64_t pk_end, pk_delta;      /* the packer's: where the last record ended */
 	int      tr_on;                 /* offsets fit the record */
+	int      entries_only;          /* collect the entries and nothing else */
 	uint64_t *open;                 /* sites whose NUMBER the sweep could not read */
 	uint32_t n_open, cap_open;
 	struct wsum *ws;                /* the wrappers, by entry */
@@ -1142,7 +1143,7 @@ static int pass_a(struct wctx *c, unsigned seg, uint64_t off, uint64_t n)
 			 */
 			if (!push_u64(&c->tgt, &c->n_tgt, &c->cap_tgt, in.target))
 				return 0;
-		} else if (is_kernel_entry(c, &in)) {
+		} else if (!c->entries_only && is_kernel_entry(c, &in)) {
 			if (!push_u64(&c->site, &c->n_site, &c->cap_site, in.at))
 				return 0;
 		}
@@ -1774,6 +1775,19 @@ static uint64_t seg_range(const struct kof_obj_ctx *ctx,
 	return have;
 }
 
+/* The entries, sorted and each once. */
+static void tgt_unique(struct wctx *c)
+{
+	uint32_t i, w = 0;
+
+	if (c->n_tgt)
+		qsort(c->tgt, c->n_tgt, sizeof *c->tgt, u64_cmp);
+	for (i = 0; i < c->n_tgt; i++)
+		if (!w || c->tgt[w - 1u] != c->tgt[i])
+			c->tgt[w++] = c->tgt[i];
+	c->n_tgt = w;
+}
+
 void kof_diag_run_wrappers(struct kof_diag_scan *s,
 			   const struct kof_obj_ctx *ctx,
 			   const uint8_t *base, uint64_t size)
@@ -1812,16 +1826,7 @@ void kof_diag_run_wrappers(struct kof_diag_scan *s,
 	/* qsort's base is declared nonnull, and with no elements it is NULL. */
 	if (c.n_open)
 		qsort(c.open, c.n_open, sizeof *c.open, u64_cmp);
-	if (c.n_tgt)
-		qsort(c.tgt, c.n_tgt, sizeof *c.tgt, u64_cmp);
-	{
-		uint32_t w = 0;
-
-		for (i = 0; i < c.n_tgt; i++)
-			if (!w || c.tgt[w - 1u] != c.tgt[i])
-				c.tgt[w++] = c.tgt[i];
-		c.n_tgt = w;
-	}
+	tgt_unique(&c);
 	c.fret = calloc(c.n_tgt ? c.n_tgt : 1u, sizeof *c.fret);
 	c.fmiss = calloc(c.n_tgt ? c.n_tgt : 1u, sizeof *c.fmiss);
 	if (!c.fret || !c.fmiss)
@@ -1948,4 +1953,46 @@ out:
 	free(c.fmiss);
 	free(c.ws);
 	free(c.glob);
+}
+
+/*
+ * THE ENTRIES AND NOTHING ELSE, for whoever needs the functions of an object
+ * that kept no symbols: the same walk pass_a makes for the wrappers - every
+ * instruction of every executable segment, through celllysis, whichever
+ * architecture it has a decoder for - with no trace kept and no syscall sites
+ * recorded, because those are x86's and the wrapper resolution that reads them
+ * is not run. Returns the entries sorted and unique, malloc'd, and how many.
+ */
+uint32_t kof_diag_entries_of(const struct kof_obj_ctx *ctx, const uint8_t *base,
+			     uint64_t size, uint64_t **out)
+{
+	const struct kof_elf_info *e = kof_elf(ctx);
+	struct wctx c;
+	uint32_t i, n;
+
+	*out = NULL;
+	if (!e || !e->valid || ctx->format != KOF_FMT_ELF)
+		return 0;
+	memset(&c, 0, sizeof c);
+	c.ctx = ctx;
+	c.base = base;
+	kof_cell_space_init(&c.sp, ctx, base, size);
+	c.size = size;
+	c.wide = ctx->arch == KOF_ARCH_X86_64;
+	c.w = c.wide ? 8 : 4;
+	c.tr_on = 0;
+	c.entries_only = 1;
+	for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++) {
+		uint64_t at, have = seg_range(ctx, e, i, size, &at);
+
+		if (have && !pass_a(&c, i, at, have)) {
+			free(c.tgt);
+			return 0;
+		}
+	}
+	tgt_unique(&c);
+	free(c.site);
+	*out = c.tgt;
+	n = c.n_tgt;
+	return n;
 }

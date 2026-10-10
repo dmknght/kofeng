@@ -207,7 +207,9 @@ void kof_scan_free(struct kof_scanner *sc)
 	sym_decl_free(sc);
 	free(sc->sym_decl);
 	free(sc->sym);
+	kof_funcs_free(&sc->funcs);
 	free(sc->pend_syms);
+	kof_funcs_free(&sc->pend_funcs);
 	free(sc->pend_sec);
 	free(sc->pend_imp);
 	free(sc->emu_rep_p);
@@ -660,6 +662,7 @@ void sx_obj_begin(struct kof_scanner *sc)
 	sc->sym_served = 0;
 	sym_decl_free(sc);
 	sc->sym_n = 0;
+	kof_funcs_free(&sc->funcs);
 	sc->msym_bound = 0;
 	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
 

@@ -920,6 +920,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/detectors/heur/kofheur.c \
            libkofeng/detectors/overlord/matchers/kofmatch.c \
            libkofeng/detectors/overlord/plague/kofplague.c \
+           libkofeng/detectors/overlord/plague/kofplague_units.c \
            libkofeng/detectors/overlord/matchers/kofmultimatch.c \
            libkofeng/detectors/overlord/matchers/hexcomp.c \
            libkofeng/analyzers/parsers/binaries/elf/elf_parse.c \

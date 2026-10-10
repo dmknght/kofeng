@@ -419,7 +419,7 @@ static inline int kof_tty_size(int *rows, int *cols)
 	return 1;
 }
 
-static volatile sig_atomic_t kof_winch;
+extern volatile sig_atomic_t kof_winch;   /* defined once, in kofview.c: a static here was one flag per .c file */
 
 static inline void kof_on_winch(int sig)
 {

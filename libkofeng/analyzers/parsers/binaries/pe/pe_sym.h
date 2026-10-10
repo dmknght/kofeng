@@ -32,4 +32,12 @@ uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 				 const char *const *dll, const char *const *name,
 				 uint32_t n);
 
+/*
+ * The functions of an x64 PE, from its RUNTIME_FUNCTION table - see funcs.h.
+ * `off` is a file offset. Empty for anything else.
+ */
+struct kof_func_set;
+void kof_pe_funcs_build(kof_buf file, const struct kof_pe_info *p,
+			struct kof_func_set *out);
+
 #endif /* KOF_PE_SYM_H */

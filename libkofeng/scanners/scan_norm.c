@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include "objtree.h"
 #include "../detectors/overlord/matchers/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
@@ -683,6 +684,16 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			break;                  /* a limit said no; keep what is */
 		sent += take;
 	}
+	/*
+	 * AND ITS FUNCTIONS, taken from the parent's and found again in the
+	 * bytes just produced - see kof_funcs_remap. Only for an object whose
+	 * functions are known (symbols, or the entries diagnose recovers), and
+	 * only when the view went out whole.
+	 */
+	kof_funcs_free(&sc->pend_funcs);
+	if (sent == n && ctx->file_header)
+		kof_funcs_remap(buf.p, buf.n, oc_funcs(ctx), out, n,
+				&sc->pend_funcs);
 	free(out);
 	if (sent == n) {
 		/*

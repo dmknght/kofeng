@@ -18,6 +18,10 @@
  * draws should not have to pull in the engine to do it. */
 #include <kofmod/kofsig.h>
 #include "kofplat.h"
+
+#ifndef _WIN32
+volatile sig_atomic_t kof_winch;
+#endif
 #include "../libkofeng/kofcore/kofplatform.h"
 
 #include <stdarg.h>
@@ -93,6 +97,12 @@ int term_setup(void)
 	atexit(term_restore);
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
+#ifdef SIGHUP
+	signal(SIGHUP, on_signal);
+#endif
+#ifdef SIGQUIT
+	signal(SIGQUIT, on_signal);
+#endif
 	signal(SIGSEGV, on_signal);
 
 	if (!kof_tty_raw_enter())
@@ -124,13 +134,17 @@ int term_setup(void)
 	return 1;
 }
 
+int g_term_small;
+
 void term_size(void)
 {
 	int r = 0, c = 0;
 
+	g_term_small = 0;
 	if (kof_tty_size(&r, &c)) {
 		g_rows = r;
 		g_cols = c;
+		g_term_small = r < 12 || c < 60;   /* the layout below needs 12x60 */
 	}
 	if (g_rows < 12)
 		g_rows = 12;

@@ -28,6 +28,8 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>   /* struct kof_range, for the library spans */
 #include <kofmod/kofplague.h>
+#include "../../../analyzers/parsers/binaries/funcs.h"
+#include "../../../analyzers/trueline/trueline.h"
 
 /*
  * The immutable side: the rules, their blocks, the hash pool, and the index
@@ -79,38 +81,93 @@ const uint32_t *kof_plague_block_hashes(const struct kof_plague_set *set,
 					uint32_t block, uint32_t *n_hash);
 
 /*
- * How many selected windows one call may hold before it starts discarding
- * them. A span is at most a few tens of kilobytes and one window in
- * 2^KOF_PLAGUE_SEL_BITS is kept, so this is generous; it exists so the working
- * array is a fixed size and the call needs no allocation.
+ * HOW A BLOCK'S HASHES ARE CHOSEN - one generator, one loop.
+ *
+ * kof_plague_minhash keeps the smallest KOF_PLAGUE_MINHASH_K of ALL a span's
+ * windows - a bottom-k MinHash sketch. Any block of 23 bytes or more yields
+ * enough, and a large one yields the same count: the record is the same size
+ * however big the function. Measured against the alternatives on 17826
+ * comparisons it is as accurate as keeping every window the density calls for
+ * (73.4% against 73.7% of true matches at a 1% false-match rate), and it holds
+ * up when 3% of bytes or every call displacement differ (69.7% and 72.9%).
+ *
+ * Returns the values ascending and distinct, never more than K.
  */
-#define KOF_PLAGUE_SPAN_MAX (1u << 14)
+#define KOF_PLAGUE_MINHASH_K 32u
 
-uint32_t kof_plague_hash_span(const uint8_t *p, uint64_t n, uint32_t norm,
-			      uint32_t *out, uint32_t max_out);
+uint32_t kof_plague_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
+			    uint32_t *out);
+
+/*
+ * WHERE TO CUT A SPAN OF BYTES THAT HAS NO FUNCTIONS - the other half of how
+ * blocks are offered.
+ *
+ * Content-defined: a cut falls where the window hash of the bytes has its low
+ * bits clear, so the same bytes are cut in the same places whatever was inserted
+ * before them, and a block cut from one sample is recognisable in the next.
+ * `avg` is the mean piece (a power of two), `min` and `max` bound it.
+ *
+ * Here, beside the hash it uses, and not in the panel that wants the pieces: a
+ * second copy of the rolling loop is a second definition of what a window is.
+ * `fn` is called for each piece in order with its [from, to) offsets inside the
+ * span, and stops the walk by returning non-zero. A span of kof_plague_ng bytes
+ * or fewer is one piece.
+ */
+typedef int (*kof_plague_cut_fn)(void *user, uint64_t from, uint64_t to);
+void kof_plague_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t min,
+		    uint32_t max, kof_plague_cut_fn fn, void *user);
+
+/*
+ * HOW AN OBJECT IS CUT INTO UNITS - the same cut for the tool that makes a block
+ * and the scanner that finds it, so it is made here and nowhere else.
+ *
+ * `ext` are the extents of ONE region, resolved by the caller. A region that is
+ * offered a function at a time (kof_plague_by_function) yields the functions of
+ * `funcs` that lie in it - grouped when small, dropped when they are stubs or
+ * the library's - and, from the bytes alone, the clusters of
+ * strings that such a region holds when .rodata shares its segment (by_string in
+ * kofplague_units.c). With `funcs` empty only the clusters remain. Any other region is cut by kof_plague_cut at the fixed target
+ * KOF_PLAGUE_SEG_AVG, split where it crosses a library boundary so that no unit
+ * spans one. `lib` may be NULL.
+ *
+ * `fn` gets each unit's file offset, length and side, in order, and stops the
+ * walk by returning non-zero. A unit that is functions also gets the largest of
+ * them - the one the unit is mostly made of, for a tool that names it; a piece of
+ * bytes gets NULL.
+ */
+#define KOF_PLAGUE_SEG_AVG 8192u        /* the mean carved piece, a power of two */
+
+typedef int (*kof_plague_unit_fn)(void *user, uint64_t off, uint64_t len,
+				  uint32_t side, const struct kof_func *first);
+
+int kof_plague_by_function(uint32_t format, uint32_t mask);
+
+void kof_plague_units(const uint8_t *p, uint64_t n_obj, uint32_t format,
+		      uint32_t mask, const struct kof_range *ext, uint32_t n_ext,
+		      const struct kof_func_set *funcs,
+		      const struct kof_true_all *lib,
+		      kof_plague_unit_fn fn, void *user);
 
 /* The mutable side: one per scanner thread. */
 struct kof_plague_ctx {
 	const struct kof_plague_set *set;
 	/*
-	 * Per block: how many of its hashes have been seen for THIS object, and
-	 * which object that was.
+	 * Per block: the best count of its hashes that ONE unit of this object
+	 * held, and which object that was.
 	 *
 	 * The stamp is what removes the clear: an object bumps a generation
 	 * counter and every stale count reads as zero without anything being
-	 * written. At ten thousand blocks a memset per object is forty kilobytes
-	 * of pointless stores on the overwhelmingly common path where nothing
-	 * matches at all.
+	 * written.
 	 */
 	uint32_t *seen;
 	uint32_t *stamp;
 	/*
-	 * One byte per hash in the set: has THIS hash of this block been seen
-	 * for this object. It is what makes `seen` a count of distinct hashes
-	 * rather than of arrivals - see the note where it is set. Cleared a
-	 * block at a time, lazily, by the same stamp that resets the count.
+	 * Per block, for the unit being credited: how many of its hashes this
+	 * unit holds, and which unit that was. Same device, one level in.
 	 */
-	uint8_t  *hit;
+	uint32_t *ucnt;
+	uint32_t *ustamp;
+	uint32_t  ugen;
 	/*
 	 * Credit a block whatever region the bytes came from - see
 	 * kof_plague_any_region. Per object, because it is a property of the
@@ -118,17 +175,6 @@ struct kof_plague_ctx {
 	 * leak from one object into the next.
 	 */
 	int       any_region;
-	/*
-	 * THE STATIC LIBRARY OF THIS OBJECT, which is not hashed.
-	 *
-	 * See kof_plague_object. Per object and cleared by kof_plague_begin,
-	 * for the same reason any_region is: a span list belongs to the bytes it
-	 * was computed from and carrying it into the next object would cut holes
-	 * in a file it says nothing about.
-	 */
-	const uint8_t      *obj_base;
-	const struct kof_range *lib;
-	uint32_t            n_lib;
 	uint32_t  gen;
 	uint32_t  n_block;
 };
@@ -160,42 +206,21 @@ void kof_plague_begin(struct kof_plague_ctx *c);
 void kof_plague_any_region(struct kof_plague_ctx *c, int on);
 
 /*
- * DO NOT HASH THE STATIC LIBRARY.
+ * Credit one UNIT of the object - a function, a run of small ones, or a piece of
+ * a region cut by kof_plague_cut; see kof_plague_units, which makes the same
+ * cuts a block was made from. The unit is sketched with one normalizer and each
+ * hash of its sketch is credited to the blocks that hold it.
  *
- * Two unrelated statically linked binaries share their libc, and that shared
- * half is most of the file - clean against clean reaches a median similarity of
- * 0.25 and a 90th percentile of 0.99 through the toolchain alone. A block cut
- * from those bytes matches every program the same linker ever built, so it is
- * not a signature of anything; hashing them at scan time is the same mistake
- * from the other end.
+ * `scan_mask` is the region bit the bytes are in; only blocks taken from that
+ * region are credited, so the same bytes in the wrong region cannot score. That
+ * is the anchor a rule relies on. `side` is which half of the object the unit
+ * is on - see enum kof_plague_side - and only blocks from the same side count.
  *
- * `base` is the first byte of the OBJECT, so that a feed of a region can be
- * placed back in the file - the spans koflib produces are file offsets, and the
- * feeds are interior pointers. `lib` must outlive the object's feeds; it is not
- * copied.
- *
- * Set after kof_plague_begin and before the feeds, and cleared by the next
- * begin. Passing n_lib = 0 - or not calling this at all - hashes everything,
- * which is the right behaviour for an object with no library to find and for a
- * caller that has not looked.
- *
- * COSTS NOTHING ON THE HOT PATH. The test runs only for a window that already
- * passed selection, which is one in a few thousand, so an object with no
- * library in it pays a comparison against zero.
+ * A block's score is the BEST single unit's: how much of its sketch that unit
+ * holds, not what several units hold between them.
  */
-void kof_plague_object(struct kof_plague_ctx *c, const uint8_t *base,
-		       const struct kof_range *lib, uint32_t n_lib);
-
-/*
- * Feed one region's bytes, hashed with one normalizer.
- *
- * `scan_mask` is the region bit these bytes are; only blocks taken from that
- * region are credited, so the same byte in the wrong region cannot score. That
- * is the anchor a rule relies on - see the note in kofplague.h about a block
- * being a place as much as a content.
- */
-void kof_plague_feed(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
-		     const uint8_t *p, uint64_t n);
+void kof_plague_unit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
+		     uint32_t side, const uint8_t *p, uint64_t n);
 
 /*
  * How much of block `b` was found in what was fed, as a percentage.

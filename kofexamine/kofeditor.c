@@ -1490,58 +1490,6 @@ uint8_t obj_emu_why(const struct object *o)
 	return (o && o->emu_why_done) ? o->emu_why : 0u;
 }
 
-/*
- * THE OBJECT'S OVERLORD VECTOR, BUILT ONCE - see object.ovl_blk.
- *
- * Two callers wanted them and each built its own: sim_recarve, to seed a draft
- * with the measures this object offers, and plg_sim_refresh, to score the
- * draft against it. Both called kof_plague_build over the whole object, so every
- * arrival at an object read it twice - 231ms and 230ms of one 0.7s keypress.
- * They ask this instead, and the second caller finds it already done.
- *
- * Returns zero when the object has none to give, or when there was no room to
- * keep them; a caller that gets zero simply has no percentage to show, which
- * is the same answer a failed build always gave.
- */
-int obj_ovl(struct object *o)
-{
-	struct kof_plague_desc *d;
-	struct kof_true_all   olib;
-	uint32_t i, nb;
-
-	if (!o || !o->info || o->ctx.format != KOF_FMT_ELF)
-		return 0;
-	if (o->ovl_done)
-		return o->ovl_blk != NULL;
-	o->ovl_done = 1;
-	d = malloc(sizeof *d);
-	if (!d) {
-		o->ovl_done = 0;
-		return 0;
-	}
-	/* The spans this object's library owns, established here and handed
-	 * over rather than searched for inside - see kof_plague_build. */
-	kof_true_find_object(o->buf, (const struct kof_elf_info *)o->info, &olib);
-	if (!kof_plague_desc_build(d, o->buf, (const struct kof_elf_info *)o->info,
-			   olib.span, olib.n)) {
-		free(d);
-		return 0;
-	}
-	nb = d->n_blk < DRAFT_MAX_BLKV ? d->n_blk : DRAFT_MAX_BLKV;
-	o->ovl_blk = malloc((nb ? nb : 1u) * sizeof *o->ovl_blk);
-	if (!o->ovl_blk) {
-		o->ovl_blk = NULL;
-		o->ovl_done = 0;        /* no room: asked again next time */
-		free(d);
-		return 0;
-	}
-	for (i = 0; i < nb; i++)
-		o->ovl_blk[i] = d->blk[i];
-	o->n_ovl_blk = nb;
-	free(d);
-	return 1;
-}
-
 void say_note(struct kof_editor *e, const char *fmt, ...)
 {
 	va_list ap;
@@ -2400,8 +2348,6 @@ uint32_t draft_hash(struct kof_editor *e)
 				 * changes about it is that description. */
 				MIX((uint32_t)e->dr.shp.fsize);
 				MIX(e->dr.shp.n_region);
-			} else {
-				MIX(e->dr.n_blkv);
 			}
 		}
 	}
@@ -2926,8 +2872,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * one thing it can be written from. A shape rule reads no content at
 	 * all and is still a whole rule - that is the point of it.
 	 */
-	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
-	    !draft_uses_sim(e, SIM_IT_BLKSET))
+	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE))
 		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
@@ -3770,7 +3715,6 @@ const char *sim_it_word(uint32_t what)
 {
 	switch (what) {
 	case SIM_IT_SHAPE:  return "file structure";
-	case SIM_IT_BLKSET: return "smart blocks";
 	default:            return "block";
 	}
 }
@@ -3954,6 +3898,30 @@ void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to)
 }
 
 /*
+ * A WHOLE REORDERING OF THE BLOCKS, applied to every matcher once.
+ *
+ * `to[old]` is where the block that WAS at `old` is now. It is not a series of
+ * blk_moved calls, because a series cannot express a permutation: moving 0 to
+ * 53 and then 53 to 4 moves the item that was just moved a second time, so a
+ * matcher ended up naming a block it never named - and the draft read as edited
+ * the moment a rule was opened, which refuses to switch file.
+ */
+void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n)
+{
+	uint32_t g, i;
+
+	for (g = 0; g < e->dr.n_grp; g++) {
+		if (e->dr.grp[g].kind != GRP_KIND_SIM)
+			continue;
+		for (i = 0; i < e->dr.grp[g].n_sim; i++)
+			if (e->dr.grp[g].sim[i].what == SIM_IT_BLOCK &&
+			    e->dr.grp[g].sim[i].blk < n)
+				e->dr.grp[g].sim[i].blk =
+					to[e->dr.grp[g].sim[i].blk];
+	}
+}
+
+/*
  * Which matcher names this block, or MAX_GROUP when none does.
  *
  * The question three things ask: the menu that offers a block to a new matcher
@@ -4015,6 +3983,10 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 			const struct grp_sim_item *it = &q->sim[i];
 
 			if (it->what == SIM_IT_BLOCK && it->blk >= e->dr.n_blk)
+				continue;
+			/* An item this build cannot write is skipped BEFORE the
+			 * operator that would have joined it. */
+			if (it->what != SIM_IT_BLOCK && it->what != SIM_IT_SHAPE)
 				continue;
 			if (wrote)
 				fputs(" && ", f);
@@ -5343,7 +5315,7 @@ shc_done:
 		for (p = line; *p; p++) {
 			if (*p == '{' && body) {
 				depth++;
-				if (depth < 8)
+				if (depth >= 0 && depth < 8)
 					owner[depth] = cur;
 				if (depth > 1 && cur >= 0)
 					parent = cur;
@@ -5351,7 +5323,8 @@ shc_done:
 			} else if (*p == '}' && body) {
 				if (depth < 8 && depth >= 0)
 					owner[depth] = -1;
-				depth--;
+				if (depth > 0)
+					depth--;        /* a stray '}' is not a level below the file */
 				if (depth <= 1)
 					parent = -1;
 			}
@@ -5688,6 +5661,13 @@ void generate(struct kof_editor *e, int as_new)
 			return;
 		}
 		dup = draft_dup(e, &near_miss);
+		/* draft_dup never names the file this draft came from (Save rewrites it),
+		 * but Save As of a draft nobody changed writes an identical copy of it. */
+		if (!dup && as_new && e->dr.gen_path[0] && !draft_dirty(e)) {
+			say_note(e, "Same markers as %s - edit that instead",
+				 e->dr.gen_path);
+			return;
+		}
 		if (dup && !near_miss) {
 			say_note(e, "Same markers as %s - edit that instead",
 				 dup);
@@ -5729,8 +5709,7 @@ void generate(struct kof_editor *e, int as_new)
 	 * It stays because the key that runs generate is not gated by the
 	 * button, but it asks the same question the button asked.
 	 */
-	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE) &&
-	     !draft_uses_sim(e, SIM_IT_BLKSET)) ||
+	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE)) ||
 	    !e->dr.family[0])
 		return;
 
@@ -6411,24 +6390,6 @@ have_path:
 			fprintf(f, "%s %uu", ri ? "," : "", sh->region_x[ri]);
 		fprintf(f, " }\n};\n");
 	}
-	/*
-	 * THE REFERENCE'S BLOCK HASHES, if any matcher asks about them.
-	 *
-	 * Sorted, like the strings and for the same reason - the host merges
-	 * the two sets rather than searching one.
-	 */
-	if (draft_uses_sim(e, SIM_IT_BLKSET) && e->dr.n_blkv) {
-		uint32_t bi;
-
-		fprintf(f, "\n/* The selected windows of the sample above, "
-			"after its static library was cut. */\n");
-		fprintf(f, "static const uint32_t ref_blocks[] = {\n");
-		for (bi = 0; bi < e->dr.n_blkv; bi++)
-			fprintf(f, "%s0x%08xu%s", bi % 4u ? " " : "\t",
-				e->dr.blkv[bi],
-				bi + 1u == e->dr.n_blkv ? "\n};\n"
-				: bi % 4u == 3u ? ",\n" : ",");
-	}
 	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
@@ -6832,6 +6793,16 @@ int body_modelled(const char *line)
  * show the value without recomputing it. The hashes are read anyway, because
  * they are what the rule actually matches with.
  */
+
+/* What follows the '=' of an initialiser field on this line - an empty string
+ * for a line that names the field and has no '=', which reads as zero. */
+static const char *after_eq(const char *q)
+{
+	const char *e = strchr(q, '=');
+
+	return e ? e + 1 : "";
+}
+
 /* Whether `what` occurs in [a, b) - the text between two calls on one line.
  * Both point into one NUL terminated line, so a plain search bounded by the
  * end is enough and no copy is needed. */
@@ -6855,9 +6826,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		       struct kof_plague_decl *blk, uint32_t max_blk,
 		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
 		       struct kof_verdict_decl *verdict,
-		       uint8_t *shp_pct, int *shp_level,
-		       uint8_t *str_pct, int *str_level,
-		       uint8_t *blkv_pct, int *blkv_level)
+		       uint8_t *shp_pct, int *shp_level)
 {
 	FILE *f;
 	char line[1024];
@@ -6884,11 +6853,11 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	 * the second - and the rule opened in the panel missing a matcher the
 	 * file plainly had.
 	 */
-	unsigned pending = 0;   /* 1 blocks 2 shape 4 strings 8 block set */
+	unsigned pending = 0;   /* 1 blocks 2 shape */
 	/* Conditions as the other reader counts them - see
 	 * kof_plague_decl.cnd. */
 	unsigned n_if = 0;
-	int in_shape = 0, in_blkv = 0;
+	int in_shape = 0, trunc_said = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
@@ -6896,15 +6865,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		*shp_pct = 0;
 	if (shp_level)
 		*shp_level = LV_SUSPECT;
-	if (str_pct)
-		*str_pct = 0;
-	if (str_level)
-		*str_level = LV_INFECT;
-	if (blkv_pct)
-		*blkv_pct = 0;
-	if (blkv_level)
-		*blkv_level = LV_INFECT;
-	e->dr.n_blkv = 0;
 	memset(&e->dr.shp, 0, sizeof e->dr.shp);
 	e->dr.has_shp = 0;
 	*n_blk = 0;
@@ -6958,6 +6918,12 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			const char *q;
 
 			if (n >= max_blk) {
+				if (!trunc_said) {
+					say_note(e, "this rule has more blocks than the "
+						 "panel holds (%u): the rest are not shown "
+						 "and Save would drop them", max_blk);
+					trunc_said = 1;
+				}
 				in_block = -1;
 				continue;
 			}
@@ -7027,29 +6993,29 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			const char *q;
 
 			if ((q = strstr(line, ".fsize")) != NULL)
-				e->dr.shp.fsize = strtoull(strchr(q, '=') + 1,
+				e->dr.shp.fsize = strtoull(after_eq(q),
 							   NULL, 0);
 			else if ((q = strstr(line, ".ptypes")) != NULL)
 				e->dr.shp.ptypes = (uint32_t)
-					strtoul(strchr(q, '=') + 1, NULL, 0);
+					strtoul(after_eq(q), NULL, 0);
 			else if ((q = strstr(line, ".etype")) != NULL)
 				e->dr.shp.etype = (uint16_t)
-					strtoul(strchr(q, '=') + 1, NULL, 0);
+					strtoul(after_eq(q), NULL, 0);
 			else if ((q = strstr(line, ".cls")) != NULL)
 				e->dr.shp.cls = (uint8_t)
-					strtoul(strchr(q, '=') + 1, NULL, 0);
+					strtoul(after_eq(q), NULL, 0);
 			else if ((q = strstr(line, ".end")) != NULL)
 				e->dr.shp.end = (uint8_t)
-					strtoul(strchr(q, '=') + 1, NULL, 0);
+					strtoul(after_eq(q), NULL, 0);
 			else if ((q = strstr(line, ".n_region")) != NULL)
 				e->dr.shp.n_region = (uint8_t)
-					strtoul(strchr(q, '=') + 1, NULL, 0);
+					strtoul(after_eq(q), NULL, 0);
 			/* Read back, so reopening a draft does not quietly turn
 			 * a library-free reference into a library-inclusive
 			 * one - see kof_plague_shape.lib_cut. */
 			else if ((q = strstr(line, ".lib_cut")) != NULL)
 				e->dr.shp.lib_cut = (uint8_t)
-					strtoul(strchr(q, '=') + 1, NULL, 0);
+					strtoul(after_eq(q), NULL, 0);
 			else if ((q = strstr(line, ".region_fsz")) != NULL) {
 				const char *r = strchr(q, '{');
 				uint32_t k;
@@ -7073,23 +7039,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				in_shape = 0;
 			continue;
 		}
-		if (strstr(line, "uint32_t ref_blocks[]")) {
-			in_blkv = 1;
-			continue;
-		}
-		if (in_blkv) {
-			const char *q = line;
-
-			while ((q = strstr(q, "0x")) != NULL) {
-				if (e->dr.n_blkv < DRAFT_MAX_BLKV)
-					e->dr.blkv[e->dr.n_blkv++] = (uint32_t)
-						strtoul(q, NULL, 16);
-				q += 2;
-			}
-			if (strchr(line, '}'))
-				in_blkv = 0;
-			continue;
-		}
 		if ((p = strstr(line, "kof_plague_shape(")) != NULL) {
 			const char *ge = strstr(p, ">=");
 
@@ -7108,14 +7057,6 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			if (pending & 2u) {
 				if (shp_level)
 					*shp_level = lvl;
-			}
-			if (pending & 4u) {
-				if (str_level)
-					*str_level = lvl;
-			}
-			if (pending & 8u) {
-				if (blkv_level)
-					*blkv_level = lvl;
 			}
 			if (pending & ~1u) {
 				pending = 0;
@@ -7276,5 +7217,5 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	*n_blk = n;
 	/* A rule may be all shape and no block, which is still a rule this
 	 * panel wrote and must be able to open. */
-	return n != 0 || e->dr.has_shp || e->dr.n_blkv != 0;
+	return n != 0 || e->dr.has_shp;
 }

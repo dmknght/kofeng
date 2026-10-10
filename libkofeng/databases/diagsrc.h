@@ -178,6 +178,17 @@ size_t kof_dsrc_cond_print(const struct kof_dsrc_cond *c, char *out, size_t cap)
 /* One term of it, for a caller that shows them one to a row. 0 if it cannot be written. */
 size_t kof_dsrc_term_print(const struct kof_dsrc_term *t, char *out, size_t cap);
 
+/* Every comment blanked in place, newlines kept - see the definition. */
+void kof_dsrc_blank_comments(char *s, size_t n);
+
+/*
+ * THE DIAGNOSES A VERDICT SOURCE READS, from the condition kof_dsrc_parse read:
+ * each term's names, in order, `a` and then `b` for a join. Calls `fn` once per
+ * name. Nothing for a source with no condition.
+ */
+void kof_dsrc_cond_names(const struct kof_dsrc_cond *c,
+			 void (*fn)(void *ud, const char *diag), void *ud);
+
 /*
  * WHAT A VERDICT MUST SAY, checked where the diagnose's own rules are: a
  * format, a name, at least one term, and a join whose two diagnoses are terms

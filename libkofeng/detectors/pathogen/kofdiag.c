@@ -31,6 +31,8 @@
 #include <celllysis/celllysis.h>
 #include "../../analyzers/nucleo/nucleo.h"
 #include <celllysis/space.h>
+#include "../../analyzers/parsers/binaries/funcs.h"
+#include "../../analyzers/parsers/binaries/elf/elf_sym.h"
 
 /*
  * HOW MANY NODES ONE OBJECT MAY HOLD.
@@ -1363,6 +1365,7 @@ struct kof_diag_scan *kof_diag_scan_with_inputs(const struct kof_obj_ctx *ctx,
 	s->base = base;
 	s->size = size;
 	s->relocs = in ? in->relocs : NULL;
+	s->funcs = in ? in->funcs : NULL;
 	s->apihash = in ? in->apihash : NULL;
 	s->seq = in ? in->seq : NULL;
 	s->n_seq = in ? in->n_seq : 0;
@@ -1399,6 +1402,46 @@ const struct kof_apihash *kof_diag_apihash(struct kof_diag_scan *s,
 		s->apihash_done = 1;
 	}
 	return s->apihash;
+}
+
+/*
+ * THE FUNCTIONS, ONE SET. The scanner's, when it handed one over; otherwise built
+ * on first use from the object this scan was given and kept - the same two
+ * shapes the relocation table has, and for the same reason: a route must not
+ * care who produced what it reads, and nobody lists them twice.
+ */
+/*
+ * THE FUNCTIONS OF AN OBJECT: its symbols' extents, and - only when it has none -
+ * the ones its code enters, found by the wrapper analysis's own walk. One call
+ * for the scanner, the diagnose routes and the viewer, so the answer cannot
+ * differ between them.
+ */
+void kof_diag_funcs_of(const struct kof_obj_ctx *ctx, const uint8_t *data,
+		       uint64_t data_n, struct kof_func_set *out)
+{
+	uint64_t *ent = NULL;
+	uint32_t n;
+
+	kof_funcs_build(ctx->format, data, data_n, ctx->file_header, out);
+	if (out->n || out->oom || ctx->format != KOF_FMT_ELF || !ctx->file_header)
+		return;
+	n = kof_diag_entries_of(ctx, data, data_n, &ent);
+	if (n)
+		kof_elf_funcs_from_entries(kof_buf_make(data, data_n),
+					   ctx->file_header, ctx->entry_off,
+					   ent, n, out);
+	free(ent);
+}
+
+const struct kof_func_set *kof_diag_funcs(struct kof_diag_scan *s,
+					  const struct kof_obj_ctx *ctx)
+{
+	if (!s->funcs) {
+		if (ctx && ctx->file_header)
+			kof_diag_funcs_of(ctx, s->base, s->size, &s->own_funcs);
+		s->funcs = &s->own_funcs;
+	}
+	return s->funcs;
 }
 
 const struct kof_elf_relocs *kof_diag_relocs(struct kof_diag_scan *s,
@@ -1618,6 +1661,7 @@ void kof_diag_scan_free(struct kof_diag_scan *s)
 	free(s->wrap);
 	kof_apihash_free(s->own_apihash);
 	kof_elf_reloc_table_free(&s->own_relocs);
+	kof_funcs_free(&s->own_funcs);
 	kof_elf_reloc_table_free(&s->data_relocs);
 	free(s->hit);
 	free(s);
@@ -2282,7 +2326,7 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 			 * wrote.
 			 */
 			if (tag == KDIG_SEC_REFS && len >= 1u && needs && needs_cap) {
-				uint32_t cnt2 = b[at], z, p2 = at + 1u;
+				uint32_t cnt2 = b[at], z, p2 = (uint32_t)(at + 1u);
 
 				if (cnt2 > KOF_DIAG_MAX_NEED)
 					return 0;

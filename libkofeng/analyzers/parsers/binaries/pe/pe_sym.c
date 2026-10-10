@@ -53,6 +53,7 @@
 #define DLL_ROOM 16
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <kofcore.h>
@@ -60,6 +61,7 @@
 #include <kofmod/pe.h>
 #include "pe_sym.h"
 #include "pe_parse.h"
+#include "../funcs.h"
 
 /* The import descriptor is walked by kof_pe_imports in pe_parse.c, which is
  * the only place that knows its field offsets - see the note there. What is
@@ -416,4 +418,83 @@ uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 		blk[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_PE_RESOLVED;
 	}
 	return KOF_SYM_HDRLEN + count * KOF_SYM_RECLEN;
+}
+
+/* ---- the functions ------------------------------------------------------------ */
+
+#define PE_MACHINE_AMD64 0x8664u
+#define UNW_FLAG_CHAININFO 0x4u
+
+/*
+ * The functions of an x64 PE - see funcs.h.
+ *
+ * Each RUNTIME_FUNCTION is three RVAs: where the function begins, where it ends,
+ * and its unwind information. A chained entry (the unwind flags say so) is a
+ * fragment of a function that has an entry of its own, so it is not listed; an
+ * entry whose unwind address has the low bit set is an indirect one and is not
+ * listed either. An entry that does not resolve to bytes of the file is
+ * skipped, and the table is read as far as the file holds it.
+ */
+void kof_pe_funcs_build(kof_buf file, const struct kof_pe_info *p,
+			struct kof_func_set *out)
+{
+	struct kof_func *v = NULL;
+	uint32_t cap = 0, n = 0, i, n_ent;
+	uint64_t tab;
+
+	memset(out, 0, sizeof *out);
+	if (!file.p || !p || !p->valid || p->machine != PE_MACHINE_AMD64 ||
+	    !p->pe32_plus)
+		return;
+	if (!p->dir[KOF_PE_DIR_EXCEPTION].rva || !p->dir[KOF_PE_DIR_EXCEPTION].size)
+		return;
+	tab = kof_pe_rva_to_off(p, p->dir[KOF_PE_DIR_EXCEPTION].rva);
+	if (tab == KOF_BROKEN || tab >= file.n)
+		return;
+	/* As many entries as the directory declares and the file holds. */
+	{
+		uint64_t by_dir = p->dir[KOF_PE_DIR_EXCEPTION].size / 12u;
+		uint64_t by_file = (file.n - tab) / 12u;
+
+		n_ent = (uint32_t)(by_dir < by_file ? by_dir : by_file);
+	}
+	for (i = 0; i < n_ent; i++) {
+		uint32_t b, e, u;
+		uint64_t off, uo;
+		uint8_t flags = 0;
+
+		if (!kof_rd_u32(file, tab + (uint64_t)i * 12u, 0, &b) ||
+		    !kof_rd_u32(file, tab + (uint64_t)i * 12u + 4u, 0, &e) ||
+		    !kof_rd_u32(file, tab + (uint64_t)i * 12u + 8u, 0, &u))
+			break;
+		if (!b || e <= b || (u & 1u))
+			continue;
+		uo = kof_pe_rva_to_off(p, u);
+		if (uo != KOF_BROKEN && uo < file.n)
+			flags = (uint8_t)(file.p[uo] >> 3);
+		if (flags & UNW_FLAG_CHAININFO)
+			continue;
+		off = kof_pe_rva_to_off(p, b);
+		if (off == KOF_BROKEN || off >= file.n ||
+		    (uint64_t)(e - b) > file.n - off)
+			continue;
+		if (n == cap) {
+			uint32_t nc = cap ? cap * 2u : 256u;
+			struct kof_func *nv = realloc(v, (size_t)nc * sizeof *nv);
+
+			if (!nv) {
+				out->oom = 1;
+				free(v);
+				return;
+			}
+			v = nv;
+			cap = nc;
+		}
+		v[n].off = off;
+		v[n].len = e - b;
+		v[n].value = 0;         /* .pdata names nothing */
+		v[n].shndx = 0;
+		n++;
+	}
+	kof_funcs_finish(v, n, out);
 }

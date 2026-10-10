@@ -11,7 +11,6 @@
  */
 
 #include <kofmod/kofsig.h>
-#include <kofmod/kofplague.h>
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
 KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Gafgyt");
@@ -37,40 +36,10 @@ KOF_DEFINE_STR(s14, "zyxelscanner", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_STR(s15, "huaweiscanner", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_HEXSTR(s16, "02010019746370466C303064", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 KOF_DEFINE_STR(s17, "linksys_scanner", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
-/* +0x0, 0 bytes, 108 hash(es) */
-KOF_PLAGUE_BLOCK(blk_51f88b7c, KOF_SCAN_ELF_CODE, KOF_PLAGUE_RAW,
-	0x00060aa7u, 0x002ebecau, 0x00500f6bu, 0x00580465u,
-	0x005c9d11u, 0x00621426u, 0x00666751u, 0x006bbba9u,
-	0x008e19e3u, 0x0095f473u, 0x0096800eu, 0x00a2e41au,
-	0x00af9a43u, 0x00bc1c49u, 0x00c677e6u, 0x00d0035eu,
-	0x0119df27u, 0x013742c5u, 0x01398d58u, 0x015feeacu,
-	0x0173ed42u, 0x01825c5bu, 0x0187366bu, 0x018a7243u,
-	0x018b1c13u, 0x0190fa08u, 0x01a2aa95u, 0x01c14032u,
-	0x01ccad6du, 0x01ea16f3u, 0x02029862u, 0x0223ccbcu,
-	0x02413572u, 0x0265b48bu, 0x028c2a2au, 0x02bbcd7fu,
-	0x02be5c01u, 0x02d16911u, 0x02dc1240u, 0x0307c54fu,
-	0x030a8e66u, 0x030cdcd2u, 0x031bc07bu, 0x03231de4u,
-	0x032ff9d6u, 0x0332bea8u, 0x033bc3d6u, 0x033cf564u,
-	0x036483d3u, 0x03755296u, 0x037fa047u, 0x03844bacu,
-	0x038d77e1u, 0x039b0298u, 0x03a40f88u, 0x03a6942bu,
-	0x03b0f0c4u, 0x03b163dbu, 0x03e2e629u, 0x03f2bbd1u,
-	0x03f6a135u, 0x03fcc5bdu, 0x0403e68du, 0x0432af0fu,
-	0x043e81bcu, 0x04475ae1u, 0x0453e4f6u, 0x049ae098u,
-	0x04a9d44au, 0x04bccb31u, 0x04bced09u, 0x04ce9f18u,
-	0x04dbb8a9u, 0x04dd56f1u, 0x04e45812u, 0x04ea95e6u,
-	0x0509ab62u, 0x0522681eu, 0x05487e31u, 0x0548db62u,
-	0x0576d62au, 0x05858450u, 0x05b502e4u, 0x05cc97c4u,
-	0x05e2cf7cu, 0x05ee470au, 0x05f010f0u, 0x060c29e8u,
-	0x060ea84eu, 0x06409544u, 0x064fc99au, 0x067051dbu,
-	0x0676cda7u, 0x06b38e3fu, 0x06c85ab3u, 0x06cac091u,
-	0x06f11dbfu, 0x06f63f87u, 0x071e2c02u, 0x072aaa00u,
-	0x07520068u, 0x0766e049u, 0x07800817u, 0x079eed60u,
-	0x07ac76d4u, 0x07ad17f0u, 0x07c03406u, 0x07fca117u);
-
 
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
-	if (kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4, s5, s6) >= 2 || kof_plague_score(blk_51f88b7c) >= 70u)
+	if (kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4, s5, s6) >= 2)
 		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
 	/* matcher 2: Find malicious export */
 	if (kof_find_str_any(scan_range_sym_exp, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17))

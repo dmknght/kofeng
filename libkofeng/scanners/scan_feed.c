@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include "objtree.h"
 #include "../detectors/overlord/matchers/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
@@ -38,108 +39,161 @@
 /*
  * Count every declared similarity block against this object, once.
  *
- * ONE PASS PER (REGION, NORMALIZER) THAT SOME BLOCK ASKED FOR, and no pass at
- * all otherwise. The set is NULL unless a pack carried blocks, so a database
- * without plague rules does not reach this; within it, kof_plague_set_norms
- * answers which normalizers a region needs, so a pack whose blocks all hash raw
- * bytes pays one pass rather than three.
+ * THE OBJECT IS CUT INTO UNITS THE WAY A BLOCK WAS CUT - kof_plague_units is the
+ * one cut, for the tool that makes a block and for this - and each unit is
+ * sketched and credited. One pass per (region, normalizer) that some block asked
+ * for, and no pass at all otherwise: the set is NULL unless a pack carried
+ * blocks, so a database without plague rules does not reach this, and
+ * kof_plague_set_norms answers which normalizers a region needs.
  *
  * BEFORE ANY MODULE, for the reason sx_multi_prepass runs first: a rule's
  * kof_plague_score has to be a division rather than a search, and the only way
- * to make it one is to have counted already. A rule may then ask about the same
- * block in any order and as often as it likes for nothing.
+ * to make it one is to have counted already.
+ *
+ * THE FUNCTIONS AND THE LIBRARY ARE THE PARSE'S - see kof_scanner.cur_lib - and
+ * a normalised view is fed on its own bytes: see sx_plague_feed.
  */
-void sx_plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-			   uint32_t present, int from_packer)
+struct plague_feed {
+	struct kof_plague_ctx *pc;
+	uint32_t mask, norms;
+	const uint8_t *p;
+};
+
+static int plague_feed_unit(void *user, uint64_t off, uint64_t len, uint32_t side,
+			    const struct kof_func *first)
+{
+	struct plague_feed *f = user;
+	uint32_t k;
+
+	(void)first;
+	for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
+		if (f->norms & (1u << k))
+			kof_plague_unit(f->pc, f->mask, k, side,
+					f->p + off, len);
+	return 0;
+}
+
+/* A unit of whichever region it lies in, credited as ALL: f->mask stays ALL. */
+static int plague_feed_any(void *user, uint32_t region, uint64_t off,
+			   uint64_t len, uint32_t side, const struct kof_func *first)
+{
+	(void)region;
+	return plague_feed_unit(user, off, len, side, first);
+}
+
+/*
+ * EVERY UNIT OF AN OBJECT, region by region - the one list both the scanner's
+ * feed (for a block declared "anywhere") and a tool's table of candidate blocks
+ * are made from, so a row in the viewer is a unit the scanner will sketch and
+ * the viewer decides nothing about which regions or which cut. The regions are
+ * the parse's, except the ones that are not hashed - a header describes the
+ * object rather than being part of what it does, and the symbol regions are not
+ * bytes of the file at all. A parse with no regions is one region, ALL.
+ */
+struct obj_units {
+	kof_scan_unit_fn fn;
+	void *user;
+	uint32_t mask;
+	int stopped;
+};
+
+static int obj_unit_cb(void *user, uint64_t off, uint64_t len, uint32_t side,
+		       const struct kof_func *first)
+{
+	struct obj_units *u = user;
+
+	u->stopped = u->fn(u->user, u->mask, off, len, side, first) != 0;
+	return u->stopped;
+}
+
+void kof_scan_plague_units(const struct kof_obj_ctx *ctx, kof_buf b,
+			   uint32_t present, const struct kof_func_set *funcs,
+			   const struct kof_true_all *lib, struct kof_range *ext,
+			   kof_scan_unit_fn fn, void *user)
+{
+	const struct kof_parser *fp = kof_parser_of(ctx->format);
+	struct obj_units u;
+	uint32_t ri, n;
+
+	if (!b.p || !fn)
+		return;
+	u.fn = fn;
+	u.user = user;
+	u.stopped = 0;
+	if (!fp || !fp->regions || !fp->n_regions || !fp->region_name) {
+		struct kof_range whole;
+
+		whole.off = 0;
+		whole.len = b.n;
+		u.mask = KOF_SCAN_ALL;
+		kof_plague_units(b.p, b.n, ctx->format, KOF_SCAN_ALL, &whole, 1,
+				 funcs, lib, obj_unit_cb, &u);
+		return;
+	}
+	for (ri = 0; ri < fp->n_regions; ri++) {
+		uint32_t rm = fp->regions[ri];
+
+		if (kof_plague_region_excluded(fp->region_name(rm)) ||
+		    !(present & rm))
+			continue;
+		u.mask = rm;
+		n = kof_scan_resolve_range(ctx, rm, ext);
+		kof_plague_units(b.p, b.n, ctx->format, rm, ext, n, funcs, lib,
+				 obj_unit_cb, &u);
+		if (u.stopped)
+			return;
+	}
+}
+
+void kof_scan_plague_feed(struct kof_plague_ctx *pc, const struct kof_obj_ctx *ctx,
+			  kof_buf b, uint32_t present, int from_packer,
+			  const struct kof_func_set *funcs,
+			  const struct kof_true_all *lib, struct kof_range *ext)
 {
 	static const uint32_t all_masks[] = {
 		KOF_SCAN_ALL, 1u << 1, 1u << 2, 1u << 3, 1u << 4, 1u << 5,
 		1u << 6, 1u << 7, 1u << 8, 1u << 9, 1u << 10, 1u << 11,
 		1u << 12, 1u << 13, 1u << 14, 1u << 15
 	};
-	struct kof_range *ext = sc->ext_gather;
 	const struct kof_parser *fp;
-	kof_buf b;
+	struct plague_feed f;
 	size_t mi;
 
-	if (!sc->eng->plague || !sc->plague.set)
+	if (!pc || !pc->set || !b.p)
 		return;
 	fp = kof_parser_of(ctx->format);
-	/* The generation bump that used to be here is in sx_scan_object now, where
-	 * it runs for every object rather than only for the ones that feed. */
-	b = kof_src_buf(sc->cur_src);
-	if (!b.p)
-		return;
+	f.pc = pc;
+	f.p  = b.p;
 
 	/*
-	 * THE STATIC LIBRARY OF THIS OBJECT IS NOT HASHED.
-	 *
-	 * A block cut from libc matches every program that linked the same libc,
-	 * so it identifies a toolchain and not a family - see kof_plague_object.
-	 * Found here rather than inside the matcher because it needs the parse,
-	 * and handed over rather than subtracted from the ranges below because
-	 * the ranges are also what the region anchor is expressed in: cutting
-	 * holes in them would make a rule's region mean something different for
-	 * an object that happens to have a library in it.
-	 *
-	 * `lib` lives for the rest of this call, which is exactly as long as the
-	 * feeds do.
-	 */
-	/*
-	 * AND NOT ON A NORMALISED VIEW, whose segment offsets are its parent's.
-	 *
-	 * The view is declared as its parent's format, so it parses - but its
-	 * headers describe the file before the padding came out, and
-	 * kof_true_find works from markers found inside a loadable SEGMENT.
-	 * Given stale offsets it would name spans over the wrong bytes and put
-	 * blocks on the wrong side of enum kof_plague_side.
-	 *
-	 * An object with a declared region table is exactly the one that has
-	 * this problem, which is why that is the test.
-	 */
-	/*
-	 * INHERITED FROM THE PARSE - see kof_scanner.cur_lib and sx_lib_facts.
-	 *
-	 * This used to call kof_true_find for itself, with its own gate: not on
-	 * an object carrying a declared region table, because that is a view
-	 * and a view's segment offsets are its parent's. The gate moved into
-	 * sx_lib_facts with the answer, where it is stated once and where the
-	 * normaliser reads the same one.
-	 */
-	if (sc->cur_lib_ok)
-		kof_plague_object(&sc->plague, b.p,
-				  sc->cur_lib.span, sc->cur_lib.n);
-
-	/*
-	 * WHAT AN UNPACKER PRODUCED IS FED WHOLE, WITHOUT THE REGION ANCHOR.
+	 * WHAT AN UNPACKER PRODUCED IS CUT WHOLE, WITHOUT THE REGION ANCHOR.
 	 *
 	 * Which region a blob lands in after a rebuild is a property of the
 	 * packer, not of the malware - and very often there are no regions at
 	 * all, because nothing parses the output. Anchored, every block would
 	 * score zero on precisely the object the unpacker was run to produce.
 	 * See kof_plague_any_region.
-	 *
-	 * One pass per normalizer over the whole thing, which is also fewer
-	 * passes than the region walk below.
 	 */
 	if (from_packer) {
-		uint32_t norms = kof_plague_set_norms(sc->eng->plague, 0), k;
+		struct kof_range whole;
 
-		kof_plague_any_region(&sc->plague, 1);
-		for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
-			if (norms & (1u << k))
-				kof_plague_feed(&sc->plague,
-						(uint32_t)KOF_SCAN_ALL, k,
-						b.p, b.n);
+		whole.off = 0;
+		whole.len = b.n;
+		f.mask  = KOF_SCAN_ALL;
+		f.norms = kof_plague_set_norms(pc->set, 0);
+		kof_plague_any_region(pc, 1);
+		kof_plague_units(b.p, b.n, 0, KOF_SCAN_ALL, &whole, 1, NULL, NULL,
+				 plague_feed_unit, &f);
 		return;
 	}
 
 	for (mi = 0; mi < sizeof all_masks / sizeof all_masks[0]; mi++) {
 		uint32_t mask = all_masks[mi];
-		uint32_t norms = kof_plague_set_norms(sc->eng->plague, mask);
-		uint32_t n, i, k;
+		uint32_t n;
 
-		if (!norms)
+		f.mask  = mask;
+		f.norms = kof_plague_set_norms(pc->set, mask);
+		if (!f.norms)
 			continue;
 		/*
 		 * A region the parse does not have is not fed, and that is the
@@ -153,68 +207,45 @@ void sx_plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * KOF_SCAN_ALL IS "WHEREVER IN THE OBJECT", NOT "EVERY BYTE".
 		 *
 		 * A block declared over the whole file has no region to anchor
-		 * it, so the pass that serves it resolves to one extent
-		 * covering everything - headers, symbol tables, alignment gaps
-		 * and all. A header describes the object rather than being part
-		 * of what it does and nothing is ever cut from one, so hashing
-		 * it can only produce an accidental match. The symbol regions
-		 * are not bytes of the file at all.
-		 *
-		 * PADDING NEEDS NO RULE HERE, and one was written and taken out
-		 * again. A span too poor to yield hashes never became a block,
-		 * so nothing in the database is anchored to padding, and a
-		 * padding window can only score by colliding with a real
-		 * block's hash - which a test on the region would not prevent
-		 * anyway. What the test WOULD do is disagree with the carve: a
-		 * block cut from a region the test then refuses to feed is a
-		 * rule that matches at the moment it is written and never
-		 * again. The pipeline already decides this at the step that
-		 * takes the hashes; the matcher inherits that decision.
+		 * it, so it is looked for in the units of every region the
+		 * parse has except the ones that are not hashed - a header
+		 * describes the object rather than being part of what it does,
+		 * and the symbol regions are not bytes of the file at all. The
+		 * units are those of the region they lie in, credited as ALL.
 		 */
 		if (mask == KOF_SCAN_ALL && fp && fp->regions && fp->n_regions &&
 		    fp->region_name) {
-			uint32_t ri;
-
-			for (ri = 0; ri < fp->n_regions; ri++) {
-				uint32_t rm = fp->regions[ri];
-				const char *rn = fp->region_name(rm);
-
-				if (kof_plague_region_excluded(rn))
-					continue;
-				if (!(present & rm))
-					continue;
-				n = kof_scan_resolve_range(ctx, rm, ext);
-				for (i = 0; i < n; i++) {
-					uint64_t off = ext[i].off;
-					uint64_t len = kof_clip_len(b.n, off,
-								   ext[i].len);
-
-					if (!len)
-						continue;
-					for (k = 0; k < KOF_PLAGUE_NORM_COUNT;
-					     k++)
-						if (norms & (1u << k))
-							kof_plague_feed(
-								&sc->plague,
-								mask, k,
-								b.p + off, len);
-				}
-			}
+			kof_scan_plague_units(ctx, b, present, funcs, lib, ext,
+					      plague_feed_any, &f);
 			continue;
 		}
 		n = kof_scan_resolve_range(ctx, mask, ext);
-		for (i = 0; i < n; i++) {
-			uint64_t off = ext[i].off;
-			uint64_t len = kof_clip_len(b.n, off, ext[i].len);
-
-			if (!len)
-				continue;
-			for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
-				if (norms & (1u << k))
-					kof_plague_feed(&sc->plague, mask, k,
-							b.p + off, len);
-		}
+		kof_plague_units(b.p, b.n, ctx->format, mask, ext, n, funcs, lib,
+				 plague_feed_unit, &f);
 	}
+}
+
+void sx_plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			   uint32_t present, int from_packer)
+{
+	kof_buf b;
+
+	if (!sc->eng->plague || !sc->plague.set)
+		return;
+	/*
+	 * A NORMALISED VIEW IS FED ON ITS OWN BYTES, like any object.
+	 *
+	 * Its headers describe the file before the padding came out, so its
+	 * functions cannot be read from them (oc_funcs is NULL for it) and
+	 * its library is already moved to the SLIB regions, which are not
+	 * hashed. What is cut from it is what the bytes hold: string clusters
+	 * and pieces. The parent is fed as well - the view is known only after
+	 * the detectors have run - so a block can be met in either.
+	 */
+	b = kof_src_buf(sc->cur_src);
+	kof_scan_plague_feed(&sc->plague, ctx, b, present, from_packer,
+			     oc_funcs(ctx),
+			     sc->cur_lib_ok ? &sc->cur_lib : NULL, sc->ext_gather);
 }
 
 void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,

@@ -164,6 +164,10 @@ uint8_t  kof_src_region_fmt_of(const struct kof_objsrc *);
  */
 void     kof_src_declare_syms(struct kof_objsrc *, const uint8_t *, uint32_t);
 const uint8_t *kof_src_syms_of(const struct kof_objsrc *, uint32_t *);
+struct kof_func;
+void     kof_src_declare_funcs(struct kof_objsrc *, const struct kof_func *, uint32_t);
+const struct kof_func *kof_src_funcs_of(const struct kof_objsrc *, uint32_t *);
+
 
 uint32_t kof_src_regions_of(const struct kof_objsrc *,
 			    const struct kof_src_region **out);

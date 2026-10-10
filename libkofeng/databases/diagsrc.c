@@ -300,66 +300,87 @@ static void say_warn(const struct kof_dsrc_report *r, const char *msg)
 }
 
 /*
- * THE CODE OF A TEXT, with the comments blanked - every comment byte but the
- * newline becomes a space, so a position in the result is the same position in
- * the source. The reader matched a macro's name anywhere in the line, which is
- * right for a file of declarations and wrong for a file of declarations and long
- * comments: a patch deletes the line of a declaration it removes, and a comment
- * that mentioned the macro, if read as one, would be deleted with it. A string
- * is kept whole, so a comment opener inside one is text.
+ * EVERY COMMENT BLANKED IN PLACE - every comment byte but the newline becomes a
+ * space, so a position in the result is the same position in the source and line
+ * numbers stay right. The reader matched a macro's name anywhere in the line,
+ * which is right for a file of declarations and wrong for a file of declarations
+ * and long comments: a patch deletes the line of a declaration it removes, and a
+ * comment that mentioned the macro, if read as one, would be deleted with it. A
+ * string or character literal is kept whole, so a comment opener inside one is
+ * text; it ends at its closing quote or at the end of its line, so one that is
+ * never closed cannot swallow the rest of the file.
+ *
+ * ONE DEFINITION, for this reader and for the build, which has to find the same
+ * declarations and the same calls in the same text.
  */
+void kof_dsrc_blank_comments(char *s, size_t n)
+{
+	size_t i = 0;
+
+	while (i < n) {
+		char c = s[i];
+
+		if (c == '"' || c == '\'') {
+			i++;
+			while (i < n && s[i] != c && s[i] != '\n') {
+				if (s[i] == '\\' && i + 1u < n && s[i + 1u] != '\n')
+					i++;
+				i++;
+			}
+			if (i < n && s[i] == c)
+				i++;
+			continue;
+		}
+		if (c == '/' && i + 1u < n && s[i + 1u] == '/') {
+			while (i < n && s[i] != '\n')
+				s[i++] = ' ';
+			continue;
+		}
+		if (c == '/' && i + 1u < n && s[i + 1u] == '*') {
+			s[i++] = ' ';
+			s[i++] = ' ';
+			while (i < n) {
+				if (s[i] == '*' && i + 1u < n && s[i + 1u] == '/') {
+					s[i++] = ' ';
+					s[i++] = ' ';
+					break;
+				}
+				if (s[i] != '\n')
+					s[i] = ' ';
+				i++;
+			}
+			continue;
+		}
+		i++;
+	}
+}
+
+/* The code of a text: a copy with the comments blanked. */
 static char *blank_comments(const char *t, size_t n)
 {
 	char *o = malloc(n + 1u);
-	size_t i = 0;
-	int in_comment = 0, in_str = 0;
 
 	if (!o)
 		return NULL;
 	memcpy(o, t, n);
 	o[n] = 0;
-	while (i < n) {
-		char c = t[i];
-
-		if (in_comment) {
-			if (c == '*' && i + 1u < n && t[i + 1u] == '/') {
-				o[i] = o[i + 1u] = ' ';
-				in_comment = 0;
-				i += 2u;
-				continue;
-			}
-			if (c != '\n')
-				o[i] = ' ';
-			i++;
-			continue;
-		}
-		if (in_str) {
-			if (c == '\\' && i + 1u < n)
-				i++;
-			else if (c == '"' || c == '\n')
-				in_str = 0;
-			i++;
-			continue;
-		}
-		if (c == '"') {
-			in_str = 1;
-			i++;
-			continue;
-		}
-		if (c == '/' && i + 1u < n && t[i + 1u] == '*') {
-			o[i] = o[i + 1u] = ' ';
-			in_comment = 1;
-			i += 2u;
-			continue;
-		}
-		if (c == '/' && i + 1u < n && t[i + 1u] == '/') {
-			while (i < n && t[i] != '\n')
-				o[i++] = ' ';
-			continue;
-		}
-		i++;
-	}
+	kof_dsrc_blank_comments(o, n);
 	return o;
+}
+
+void kof_dsrc_cond_names(const struct kof_dsrc_cond *c,
+			 void (*fn)(void *ud, const char *diag), void *ud)
+{
+	uint32_t i;
+
+	for (i = 0; c && i < c->n; i++) {
+		const struct kof_dsrc_term *t = &c->t[i];
+
+		if (t->a[0])
+			fn(ud, t->a);
+		if (t->kind == KVT_SHARE && t->b[0])
+			fn(ud, t->b);
+	}
 }
 
 /* ---- the verdict's condition ------------------------------------------------ */

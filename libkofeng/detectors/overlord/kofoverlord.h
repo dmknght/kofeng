@@ -80,21 +80,8 @@ struct kof_elf_info;
  */
 #define KOF_PLAGUE_MAX_REGIONS 8u
 
-/*
- * Block hashes one descriptor keeps.
- *
- * The same selected-window hashes plague cuts its blocks from - see
- * kof_plague_hash_span - but taken over the whole object rather than carved
- * into named runs. That is the difference between the two measures: plague
- * asks how much of ONE declared run is here and is anchored to the region it
- * was cut from; this asks how much of the reference's WHOLE set is here and is
- * anchored to nothing, which is what lets it survive a rebuild that moved
- * everything.
- */
-#define KOF_OVL_MAX_BLOCKS 8192u
-
 struct kof_plague_region {
-	uint64_t fsz;        /* the region's bytes on disk, before subtraction */
+	uint64_t fsz;        /* the region's bytes on disk                    */
 	uint8_t  x;          /* executable: what the pairing keys on           */
 	uint8_t  pad[3];
 };
@@ -114,8 +101,6 @@ struct kof_plague_desc {
 	uint8_t  truncated;       /* a cap stopped the build                    */
 	uint8_t  pad[2];
 	struct kof_plague_region region[KOF_PLAGUE_MAX_REGIONS];
-	uint32_t n_blk;
-	uint32_t blk[KOF_OVL_MAX_BLOCKS];    /* sorted, deduplicated             */
 };
 
 /* Which dimensions of a comparison had an answer. */
@@ -212,30 +197,9 @@ static inline void kof_plague_shape_of_cut(const struct kof_elf_info *e,
 /*
  * Build a descriptor. Returns 0 when the object is not one this can describe -
  * not ELF, no loadable region - and the descriptor is zeroed and safe to read.
- *
- * THE LIBRARY SPANS COME FROM THE CALLER, and this is the third and last place
- * that used to work them out for itself.
- *
- * It called kof_true_find here. That is correct for an object whose headers
- * describe its own bytes and WRONG for the one case the scanner most often
- * hands over: a NORMALISED VIEW, whose header is the file its parent was, so
- * the segment offsets the search walks point at bytes that have moved. The
- * scanner already knows the answer for both - see kof_scanner.cur_lib and
- * lib_facts, which reads a view's declared SLIB_CODE and SLIB_DATA regions
- * rather than searching it - and the normaliser and the block builder were
- * both moved onto that answer already. This is the walk they left behind.
- *
- * Measured before the change: of 1092 descriptors built over 5248 real ELF
- * samples, 391 were built on a view - so better than a third of them subtracted
- * a span derived from the wrong offsets.
- *
- * `lib_n` of zero means CUT NOTHING, and a caller that has not established the
- * spans must pass zero rather than a guess: "no library was found" and "there
- * is no library" are the same argument here and a wrong span is not.
  */
 int kof_plague_desc_build(struct kof_plague_desc *d, kof_buf file,
-		  const struct kof_elf_info *e,
-		  const struct kof_range *lib_span, uint32_t lib_n);
+			  const struct kof_elf_info *e);
 
 /* Compare two descriptors. Symmetric; neither argument is privileged. */
 void kof_ovl_compare(const struct kof_plague_desc *a, const struct kof_plague_desc *b,
