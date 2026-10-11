@@ -145,6 +145,47 @@ static int emit_cluster(uint64_t from, uint64_t to, const struct kof_true_all *l
 	return 0;
 }
 
+/* The next printable run closed by a NUL at or after `pos`. */
+static int next_string(const uint8_t *p, uint64_t pos, uint64_t end,
+		       uint64_t *s, uint64_t *e)
+{
+	while (pos < end) {
+		uint64_t q = pos;
+
+		while (q < end && printable(p[q]))
+			q++;
+		if (q - pos >= STR_RUN && q < end && !p[q]) {
+			*s = pos;
+			*e = q + 1u;
+			return 1;
+		}
+		pos = q > pos ? q : pos + 1u;
+	}
+	return 0;
+}
+
+/* The next cluster of strings at or after `pos`: whole strings, each within
+ * STR_GAP of the one before, at least STR_MIN bytes. A string that would pass
+ * the size cap opens the next cluster, so no string is ever cut. */
+static int next_cluster(const uint8_t *p, uint64_t pos, uint64_t end,
+			uint64_t *from, uint64_t *to)
+{
+	uint64_t s, e;
+
+	while (next_string(p, pos, end, &s, &e)) {
+		*from = s;
+		*to = e;
+		while (next_string(p, *to, end, &s, &e) &&
+		       s - *to <= STR_GAP &&
+		       e - *from <= KOF_PLAGUE_SEG_AVG * 4u)
+			*to = e;
+		if (*to - *from >= STR_MIN)
+			return 1;
+		pos = *to;
+	}
+	return 0;
+}
+
 static int by_string(const uint8_t *p, const struct kof_range *ext,
 		     uint32_t n_ext, uint64_t n_obj,
 		     const struct kof_true_all *lib, kof_plague_unit_fn fn,
@@ -153,46 +194,15 @@ static int by_string(const uint8_t *p, const struct kof_range *ext,
 	uint32_t k;
 
 	for (k = 0; k < n_ext; k++) {
-		uint64_t pos = ext[k].off, end, from = 0, to = 0;
+		uint64_t pos = ext[k].off, end, from, to;
 
 		if (pos >= n_obj)
 			continue;
 		end = ext[k].len > n_obj - pos ? n_obj : pos + ext[k].len;
-		for (;;) {
-			uint64_t q = pos, e = pos;
-			int found = 0;
-
-			while (q < end && printable(p[q]))
-				q++;
-			if (q - pos >= STR_RUN && q < end && !p[q]) {
-				found = 1;
-				e = q + 1u;
-			}
-			if (found && (!to || (pos - to <= STR_GAP &&
-			    e - from <= KOF_PLAGUE_SEG_AVG * 4u))) {
-				if (!to)
-					from = pos;
-				to = e;
-				pos = e;
-				continue;
-			}
-			/* Not extending: close what is open, and a string that
-			 * would not fit opens the next cluster. */
-			if (to && (found || pos >= end || pos - to > STR_GAP)) {
-				if (to - from >= STR_MIN &&
-				    emit_cluster(from, to, lib, fn, user))
-					return 1;
-				from = to = 0;
-			}
-			if (found) {
-				from = pos;
-				to = e;
-				pos = e;
-				continue;
-			}
-			if (pos >= end)
-				break;
-			pos = q > pos ? q : pos + 1u;
+		while (next_cluster(p, pos, end, &from, &to)) {
+			if (emit_cluster(from, to, lib, fn, user))
+				return 1;
+			pos = to;
 		}
 	}
 	return 0;
@@ -236,6 +246,31 @@ static int cut_piece(void *user, uint64_t from, uint64_t to)
 	return c->stopped;
 }
 
+/* Cut [from, to) by content, apart at library joins so no unit spans one. A
+ * short run is still a unit: whether it can be scored is a count of hashes,
+ * and is decided where the block is made. */
+static int cut_span(const uint8_t *p, uint64_t from, uint64_t to,
+		    const struct kof_true_all *lib, kof_plague_unit_fn fn,
+		    void *user)
+{
+	while (from < to) {
+		struct cut_ctx c;
+		uint64_t len;
+
+		c.fn = fn; c.user = user; c.off = from; c.stopped = 0;
+		len = side_run(lib, from, to, &c.side);
+		if (!len)
+			break;
+		kof_plague_cut(p + from, len, KOF_PLAGUE_SEG_AVG,
+			       KOF_PLAGUE_SEG_AVG / 4u,
+			       KOF_PLAGUE_SEG_AVG * 4u, cut_piece, &c);
+		if (c.stopped)
+			return 1;
+		from += len;
+	}
+	return 0;
+}
+
 void kof_plague_units(const uint8_t *p, uint64_t n_obj, uint32_t format,
 		      uint32_t mask, const struct kof_range *ext, uint32_t n_ext,
 		      const struct kof_func_set *funcs,
@@ -252,29 +287,20 @@ void kof_plague_units(const uint8_t *p, uint64_t n_obj, uint32_t format,
 		return;
 	}
 	for (k = 0; k < n_ext; k++) {
-		uint64_t eoff = ext[k].off, elen = ext[k].len, pos;
+		uint64_t eoff = ext[k].off, elen = ext[k].len, pos, from, to;
 
 		if (eoff >= n_obj)
 			continue;
 		if (elen > n_obj - eoff)
 			elen = n_obj - eoff;
-		for (pos = eoff; pos < eoff + elen; ) {
-			struct cut_ctx c;
-			uint64_t len;
-
-			c.fn = fn; c.user = user; c.off = pos; c.stopped = 0;
-			len = side_run(lib, pos, eoff + elen, &c.side);
-			if (!len)
-				break;
-			/* Cut apart, so no unit spans a join. A short run is
-			 * still a unit: whether it can be scored is a count of
-			 * hashes, and is decided where the block is made. */
-			kof_plague_cut(p + pos, len, KOF_PLAGUE_SEG_AVG,
-				       KOF_PLAGUE_SEG_AVG / 4u,
-				       KOF_PLAGUE_SEG_AVG * 4u, cut_piece, &c);
-			if (c.stopped)
+		/* Strings are whole units here too: only what lies between
+		 * them is cut by content. */
+		for (pos = eoff; pos < eoff + elen; pos = to) {
+			if (!next_cluster(p, pos, eoff + elen, &from, &to))
+				from = to = eoff + elen;
+			if (cut_span(p, pos, from, lib, fn, user) ||
+			    (to > from && emit_cluster(from, to, lib, fn, user)))
 				return;
-			pos += len;
 		}
 	}
 }

@@ -240,12 +240,60 @@ static void data_in_code(void)
 	}
 }
 
+/*
+ * A data region is cut by content, but a string is never cut: a cluster of
+ * strings is one unit, and the cut falls only in the bytes around it
+ * (1794cf09...: a 14011-byte .rodata cluster was cut mid-text).
+ */
+static void data_strings(void)
+{
+	static uint8_t obj[60000];
+	struct kof_range e = { 0, sizeof obj };
+	struct kof_func_set fs;
+	struct kof_true_all lib;
+	struct got g;
+	uint32_t s = 11, i, j, hit = 0;
+	uint64_t at = 0;
+
+	memset(&fs, 0, sizeof fs);
+	memset(&lib, 0, sizeof lib);
+	for (i = 0; i < sizeof obj; i++) {
+		s = s * 1103515245u + 12345u;
+		obj[i] = (uint8_t)(s >> 16) | 0x80;	/* never printable */
+	}
+	/* 20000 bytes of strings from 20000: far larger than a cut piece */
+	for (i = 20000; i < 40000; ) {
+		for (j = 0; j < 40 && i < 40000; j++, i++)
+			obj[i] = 'a' + (uint8_t)(j % 26);
+		obj[i - 1] = 0;
+	}
+	memset(&g, 0, sizeof g);
+	kof_plague_units(obj, sizeof obj, KOF_FMT_ELF, KOF_SCAN_ELF_DATA, &e, 1,
+			 &fs, &lib, take, &g);
+	for (i = 0; i < g.n; i++) {
+		check(g.off[i] == at, "the units do not tile the region");
+		at = g.off[i] + g.len[i];
+		/* a unit boundary inside the strings must sit after a NUL */
+		for (j = 0; j < 2; j++) {
+			uint64_t b = j ? g.off[i] + g.len[i] : g.off[i];
+
+			if (b > 20000u && b < 40000u)
+				check(obj[b - 1] == 0, "a string was cut");
+		}
+		if (g.off[i] == 20000u)
+			hit = 1;
+	}
+	check(at == sizeof obj, "the region is not covered");
+	check(hit, "the string cluster does not start a unit");
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	functions();
 	pe_functions();
 	data_in_code();
+	data_strings();
 	if (failures) {
 		printf("plague units: %d failure(s)\n", failures);
 		return 1;
