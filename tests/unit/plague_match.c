@@ -1,8 +1,9 @@
 /*
  * plague_match - the similarity matcher, against inputs built here.
  *
- * The scanner sketches UNITS of an object - kof_plague_unit - and a block's
- * score is how much of its sketch the best single unit holds. What needs proving,
+ * The scanner walks the windows of UNITS of an object - kof_plague_unit - and a
+ * block's score is how many of its hashes the best single unit contains. What
+ * needs proving,
  * each a way the matcher could be wrong while still looking like it works:
  *
  *   - a unit equal to the block scores 100, and an absent one scores nothing.
@@ -16,6 +17,9 @@
  *   - THE BEST UNIT, NOT THE SUM: two units that each hold half of a block do not
  *     add up to the whole of it.
  *   - BLOCKS ARE INDEPENDENT, and padding is not content.
+ *   - A BLOCK INSIDE A LARGER UNIT STILL SCORES 100: containment, not the overlap
+ *     of two sketches, which falls to a fraction once the unit holds more than
+ *     the block did.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -245,22 +249,32 @@ int main(void)
 		    kof_plague_pct(&ctx, 1u) == 0u,
 		    "an absent block reports nothing and the other is unaffected");
 
-		/* THE BEST UNIT, NOT THE SUM: each half of the first block in a
-		 * unit of its own holds about half of it, and the two halves
-		 * together are not the block. */
+		/* THE UNION OVER UNITS, NOT THE BEST ONE: each half of the first block
+		 * in a unit of its own holds about half of it, and the two together
+		 * are the block - less the few windows that straddle the cut, which
+		 * belong to neither half. Whether a gap fell in the middle of the data
+		 * is the scanner's cut and not a fact about the object, so it must
+		 * not change the score. */
 		kof_plague_begin(&ctx);
 		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
 				blk, BLK / 2u);
 		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
 				blk + BLK / 2u, BLK / 2u);
 		s = kof_plague_pct(&ctx, 0u);
-		if (s == 0u || s > 70u) {
+		if (s < 80u) {
 			char why[112];
 
-			snprintf(why, sizeof why, "two halves scored %u, "
-				 "the best one holds about half", s);
-			fail("units do not add up", why);
+			snprintf(why, sizeof why, "two halves scored %u; the "
+				 "union is the block less the straddling windows", s);
+			fail("units add up", why);
 		}
+		/* And a hash seen again in a later unit is still one hash. */
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
+		kof_plague_unit(&ctx, RGN_A, KOF_PLAGUE_RAW, KOF_PLAGUE_SIDE_USER,
+				blk, BLK);
+		ok_(kof_plague_pct(&ctx, 0u) == 100u,
+		    "the same block seen in three units reads 100, not 300");
 		kof_plague_ctx_done(&ctx);
 		kof_plague_set_free(set);
 	}
@@ -433,6 +447,34 @@ int main(void)
 		    "a pair is not named after either half");
 		ok_(kof_plague_name_of(NULL, 0u) == 0u,
 		    "no blocks, no name");
+	}
+
+	/*
+	 * THE BLOCK INSIDE MORE. The block's 32 hashes are the smallest of its own
+	 * span; a unit four times as long carries the whole span and three others,
+	 * and its own 32 smallest are mostly not the block's. Compared as sketches
+	 * that unit scored about a quarter; every hash of the block is in its bytes,
+	 * so asked by containment it scores all of them.
+	 */
+	{
+		uint32_t n = harvest(blk, BLK, KOF_PLAGUE_RAW, pool);
+		uint32_t seed;
+
+		for (seed = 0; seed < 4u; seed++)
+			make_block(hay + seed * BLK, 0x7000u + seed);
+		memcpy(hay + 2u * BLK, blk, BLK);
+		blocks[0].first_hash = 0; blocks[0].n_hash = n;
+		blocks[0].scan_mask = RGN_A; blocks[0].norm = KOF_PLAGUE_RAW;
+		set = kof_plague_build(blocks, 1, pool, n);
+		if (!set || !kof_plague_ctx_init(&ctx, set))
+			return 1;
+		s = score_of(&ctx, RGN_A, hay, BLK * 4u, 1u << KOF_PLAGUE_RAW, 0u);
+		ok_(s == 100u, "a block inside a unit four times its size scores all of it");
+		make_block(hay + 2u * BLK, 0x7002u);
+		s = score_of(&ctx, RGN_A, hay, BLK * 4u, 1u << KOF_PLAGUE_RAW, 0u);
+		ok_(s == 0u, "and the same unit without the block scores nothing");
+		kof_plague_ctx_done(&ctx);
+		kof_plague_set_free(set);
 	}
 
 	if (failures) {

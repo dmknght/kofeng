@@ -81,22 +81,58 @@ const uint32_t *kof_plague_block_hashes(const struct kof_plague_set *set,
 					uint32_t block, uint32_t *n_hash);
 
 /*
- * HOW A BLOCK'S HASHES ARE CHOSEN - one generator, one loop.
+ * HOW A BLOCK'S HASHES ARE CHOSEN - one generator, one definition of a window.
  *
- * kof_plague_minhash keeps the smallest KOF_PLAGUE_MINHASH_K of ALL a span's
- * windows - a bottom-k MinHash sketch. Any block of 23 bytes or more yields
- * enough, and a large one yields the same count: the record is the same size
- * however big the function. Measured against the alternatives on 17826
- * comparisons it is as accurate as keeping every window the density calls for
- * (73.4% against 73.7% of true matches at a 1% false-match rate), and it holds
- * up when 3% of bytes or every call displacement differ (69.7% and 72.9%).
+ * The POOL of a span is every distinct window hash it has (not flat, see
+ * kof_plague_flat), ascending. A block is NOT the pool - that would be thousands
+ * of values - it is a sample of it: the smallest KOF_PLAGUE_MINHASH_K of the
+ * windows worth keeping. For one sample "worth keeping" is every window, which
+ * is kof_plague_minhash: the bottom-k sketch every block so far was made with.
  *
- * Returns the values ascending and distinct, never more than K.
+ * WITH MORE THAN ONE SAMPLE it is a choice, and it is the one that matters.
+ * Measured on 149 files that carry one exploit request (research notes in
+ * /mnt/games/kofscratch/blkcut/PROPOSAL.md): a block cut from the span a unit
+ * gives hit 3 of them; the same data cut by hand as 1200 bytes, 129; and a block
+ * of the windows that EVERY sample shares and NO background file holds, 142 -
+ * with the same 32 hashes for any span that contains the request, shifted,
+ * grown or shrunk. The variable material of a span is inside it, so no choice
+ * of where to cut removes it; what removes it is asking more than one sample
+ * which windows are the data's and which the sample's. kof_plague_member is that
+ * question and kof_plague_core is the answer.
  */
 #define KOF_PLAGUE_MINHASH_K 32u
 
+/* Every distinct non-flat window hash of the span, ascending, malloc'd; NULL
+ * (and *n_out 0) when the span has none. The CALLER bounds the span: a block's
+ * input is a function or a cluster, never a file. */
+uint32_t *kof_plague_pool(const uint8_t *p, uint64_t n, uint32_t norm,
+			  uint32_t *n_out);
+
+/* The smallest K of the pool; ascending, distinct. */
 uint32_t kof_plague_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
 			    uint32_t *out);
+
+/*
+ * Which of `pool`'s windows does this sample hold? Bit i of `bits` (n_pool bits,
+ * zeroed by the caller; set, never cleared) is set when the sample has window
+ * pool[i] anywhere. One pass over the sample, a bit table first.
+ */
+void kof_plague_member(const uint32_t *pool, uint32_t n_pool, const uint8_t *p,
+		       uint64_t n, uint32_t norm, uint8_t *bits);
+
+/*
+ * The block of a pool, given how many positive samples held each window
+ * (`pos`, against `pos_need`) and how many background samples did (`bg`, at most
+ * `bg_max`; NULL for no background). The smallest `k` windows that pass, ascending
+ * - the pool is ascending, so they are the first k. Returns 0 when fewer than
+ * KOF_PLAGUE_MIN_HASH pass: there is no invariant, informative material in this
+ * span, and saying so is the answer - the alternative is a block made of the
+ * sample's own accidents.
+ */
+uint32_t kof_plague_core(const uint32_t *pool, uint32_t n_pool,
+			 const uint16_t *pos, uint32_t pos_need,
+			 const uint16_t *bg, uint32_t bg_max, uint32_t k,
+			 uint32_t *out);
 
 /*
  * WHERE TO CUT A SPAN OF BYTES THAT HAS NO FUNCTIONS - the other half of how
@@ -165,9 +201,9 @@ struct kof_plague_ctx {
 	 * Per block, for the unit being credited: how many of its hashes this
 	 * unit holds, and which unit that was. Same device, one level in.
 	 */
-	uint32_t *ucnt;
-	uint32_t *ustamp;
-	uint32_t  ugen;
+	/* Per (block, hash) pair, same device: a hash that many windows of one
+	 * object produce is one hash of the block, counted once - see pl_credit. */
+	uint32_t *pstamp;
 	/*
 	 * Credit a block whatever region the bytes came from - see
 	 * kof_plague_any_region. Per object, because it is a property of the

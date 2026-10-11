@@ -212,10 +212,11 @@ static void st_facts(struct kof_pipeline *p)
 }
 
 /*
- * DETECT: the detectors, in database order, cheapest test first. A detector
- * that names a family ends the stage unless the caller asked for everything.
+ * THE MODULES OF ONE STAGE, in database order, over the ones that could target
+ * this format. DETECT and SIMILAR are this loop with a different set: a module
+ * that names similarity blocks is SIMILAR's, every other is DETECT's.
  */
-static void st_detect(struct kof_pipeline *p)
+static void run_modules(struct kof_pipeline *p, int similarity)
 {
 	struct kof_scanner *sc = p->sc;
 	const struct kof_scan_option *opt = p->opt;
@@ -236,13 +237,19 @@ static void st_detect(struct kof_pipeline *p)
 			ix = e->mod_by_target;
 			lo = e->mod_at[p->ctx.format];
 			hi = e->mod_at[p->ctx.format + 1u];
-			sc->st.considered += e->n_mods - (hi - lo);
-			sc->st.by_target  += e->n_mods - (hi - lo);
+			/* Once per object: the second call is the same run's other half. */
+			if (!similarity) {
+				sc->st.considered += e->n_mods - (hi - lo);
+				sc->st.by_target  += e->n_mods - (hi - lo);
+			}
 		}
 
 	for (k = lo; k < hi; k++) {
 		const struct kof_module *m = &e->mods[ix ? ix[k] : k];
 		struct kof_finding *f;
+
+		if ((m->n_block != 0) != (similarity != 0))
+			continue;
 
 		/*
 		 * BETWEEN MODULES, WHICH IS WHERE A SLOW OBJECT CAN BE LEFT.
@@ -320,6 +327,19 @@ static void st_detect(struct kof_pipeline *p)
 	}
 	}
 
+}
+
+/*
+ * DETECT: the detectors, in database order, cheapest test first. A detector
+ * that names a family ends the stage unless the caller asked for everything.
+ */
+static void st_detect(struct kof_pipeline *p)
+{
+	struct kof_scanner *sc = p->sc;
+	struct kof_result *out = p->out;
+
+	run_modules(p, 0);
+
 	/*
 	 * WHAT THE DETECTORS ALONE FOUND, taken here because this is the last
 	 * moment at which it is still true: sx_heur_run appends below, and once it
@@ -332,6 +352,29 @@ static void st_detect(struct kof_pipeline *p)
 	sc->st.searches       += sc->m.n_calls;
 	sc->st.bytes_searched += sc->m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
+}
+
+/*
+ * SIMILAR: the rules that compare the object with declared blocks - after the
+ * steps that decide WHICH object that is.
+ *
+ * A block is cut from the normalised view, so the object it is looked for in is
+ * the view. They used to run with the detectors, before the object was opened
+ * or normalised: the parent was scored, its verdict (which stops at the first
+ * finding) carried the parent's number, and the view - the thing the block was
+ * made from - was never asked. Here the chain's own rule decides it: a step that
+ * PRODUCED something (an unpacked image, a member, the view) ends the chain, so
+ * a parent that has a view, or was opened, is not scored and its child is, when
+ * the child reaches this stage itself; an object that produced nothing - nothing
+ * to unpack, nothing a normalisation could change - is scored as it is. And a
+ * detector's verdict ends the chain before this, as it ends the others.
+ *
+ * A parent under a rule's threshold is not clean-so-skip: the view is a child
+ * and is scanned whatever the parent would have scored.
+ */
+static void st_similar(struct kof_pipeline *p)
+{
+	run_modules(p, 1);
 }
 
 /*
@@ -743,6 +786,7 @@ static const struct stage_row {
 	{ KOF_STAGE_DECRYPT,   KOF_ANALYZE_DECRYPT, ROW_CHAIN,                      st_open },
 	{ KOF_STAGE_CARVE,     KOF_ANALYZE_CARVE,   ROW_CHAIN | ROW_GROUP_END,      st_open },
 	{ KOF_STAGE_NORMZ,     KOF_ANALYZE_NORMZ,   ROW_CHAIN | ROW_GROUP_END,      st_normz },
+	{ KOF_STAGE_SIMILAR,   KOF_ANALYZE_UNWRAP,  ROW_CHAIN | ROW_GROUP_END,      st_similar },
 	{ KOF_STAGE_SCRIPT,    KOF_ANALYZE_UNWRAP,  0,                              st_script },
 	{ KOF_STAGE_SERVE,     KOF_ANALYZE_UNWRAP,  0,                              st_serve },
 	{ KOF_STAGE_VERDICT,   KOF_ANALYZE_UNWRAP,  0,                              st_verdict },

@@ -119,6 +119,32 @@ static int printable(uint8_t c)
 	return (c >= 0x20 && c < 0x7f) || c == '\t' || c == '\n' || c == '\r';
 }
 
+static uint64_t side_run(const struct kof_true_all *lib, uint64_t pos,
+			 uint64_t end, uint32_t *side);
+
+/*
+ * A cluster is cut where it crosses a library boundary, like every other unit:
+ * the string that sits in a data unit the library's span touches used to make
+ * the whole cluster LIB, and a block cut from the author's side then scored 0
+ * on the file that carries it (1 of 149 measured carriers).
+ */
+static int emit_cluster(uint64_t from, uint64_t to, const struct kof_true_all *lib,
+			kof_plague_unit_fn fn, void *user)
+{
+	while (from < to) {
+		uint32_t side;
+		uint64_t len = side_run(lib, from, to, &side);
+
+		if (!len)
+			break;
+		if (len >= KOF_PLAGUE_NG &&
+		    fn(user, from, len, side, NULL))
+			return 1;
+		from += len;
+	}
+	return 0;
+}
+
 static int by_string(const uint8_t *p, const struct kof_range *ext,
 		     uint32_t n_ext, uint64_t n_obj,
 		     const struct kof_true_all *lib, kof_plague_unit_fn fn,
@@ -154,10 +180,7 @@ static int by_string(const uint8_t *p, const struct kof_range *ext,
 			 * would not fit opens the next cluster. */
 			if (to && (found || pos >= end || pos - to > STR_GAP)) {
 				if (to - from >= STR_MIN &&
-				    fn(user, from, to - from,
-				       lib && kof_true_touches(lib, from, to - from)
-				       ? KOF_PLAGUE_SIDE_LIB : KOF_PLAGUE_SIDE_USER,
-				       NULL))
+				    emit_cluster(from, to, lib, fn, user))
 					return 1;
 				from = to = 0;
 			}

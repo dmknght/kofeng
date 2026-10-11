@@ -89,6 +89,22 @@ struct kof_plague_set {
 	uint32_t  norm_all;
 	uint8_t   norm_ready;
 
+	/*
+	 * THE BIT PREFILTER, built once with the index and shared like it.
+	 *
+	 * One bit per hash of the set, in a table sized from the number of them,
+	 * indexed by the low bits of a window's value. A window whose bit is clear
+	 * is in no block and never reaches the search. `top` alone could not do
+	 * this once a block carried large values: a block's hashes are the
+	 * smallest of ITS span, so a block cut from a span of few windows, or one
+	 * made of the windows its samples share, has a high `top`, and that one
+	 * block then lets every window of the database through to the binary
+	 * search (measured by the research agent: 58 / 113 / 207 ns/byte at 1k /
+	 * 50k / 200k such blocks, against 2-35 with small-valued blocks).
+	 */
+	uint64_t *bloom;
+	uint32_t  bloom_mask;       /* bits - 1 */
+
 	uint64_t bytes;
 };
 
@@ -217,6 +233,29 @@ struct kof_plague_set *kof_plague_build(const struct kof_plague_block *blocks,
 
 	s->bytes = (uint64_t)s->n_pair * sizeof *s->pair + sizeof *s;
 
+	/* 32 bits of table per hash keeps a window that is in no block from
+	 * passing about three times in a hundred; clamped so a tiny set does not
+	 * pay a page and a huge one does not pay more than 32 MB. */
+	{
+		uint64_t bits = 1u << 12, w;
+
+		while (bits < (uint64_t)s->n_pair * 32u && bits < (1u << 28))
+			bits <<= 1;
+		w = bits / 64u;
+		s->bloom = calloc((size_t)w, sizeof *s->bloom);
+		if (s->bloom) {
+			uint32_t k;
+
+			s->bloom_mask = (uint32_t)(bits - 1u);
+			for (k = 0; k < s->n_pair; k++) {
+				uint32_t ix = s->pair[k].hash & s->bloom_mask;
+
+				s->bloom[ix >> 6] |= (uint64_t)1 << (ix & 63u);
+			}
+			s->bytes += w * sizeof *s->bloom;
+		}
+	}
+
 	/* The two constants - see block_id and norm_bit in the struct. */
 	s->block_id = calloc(s->n_block ? s->n_block : 1u,
 			     sizeof *s->block_id);
@@ -246,6 +285,7 @@ void kof_plague_set_free(struct kof_plague_set *s)
 	if (!s)
 		return;
 	free(s->pair);
+	free(s->bloom);
 	free(s->block_id);
 	free(s);
 }
@@ -327,11 +367,9 @@ int kof_plague_ctx_init(struct kof_plague_ctx *c, const struct kof_plague_set *s
 	if (c->n_block) {
 		c->seen   = calloc(c->n_block, sizeof *c->seen);
 		c->stamp  = calloc(c->n_block, sizeof *c->stamp);
-		c->ucnt   = calloc(c->n_block, sizeof *c->ucnt);
-		c->ustamp = calloc(c->n_block, sizeof *c->ustamp);
-		if (!c->seen || !c->stamp || !c->ucnt || !c->ustamp) {
-			free(c->seen); free(c->stamp);
-			free(c->ucnt); free(c->ustamp);
+		c->pstamp = calloc(s->n_pair ? s->n_pair : 1u, sizeof *c->pstamp);
+		if (!c->seen || !c->stamp || !c->pstamp) {
+			free(c->seen); free(c->stamp); free(c->pstamp);
 			memset(c, 0, sizeof *c);
 			return 0;
 		}
@@ -341,7 +379,6 @@ int kof_plague_ctx_init(struct kof_plague_ctx *c, const struct kof_plague_set *s
 	 * cannot be mistaken for "counted during this object".
 	 */
 	c->gen = 1;
-	c->ugen = 1;
 	return 1;
 }
 
@@ -351,8 +388,7 @@ void kof_plague_ctx_done(struct kof_plague_ctx *c)
 		return;
 	free(c->seen);
 	free(c->stamp);
-	free(c->ucnt);
-	free(c->ustamp);
+	free(c->pstamp);
 	memset(c, 0, sizeof *c);
 }
 
@@ -371,6 +407,8 @@ void kof_plague_begin(struct kof_plague_ctx *c)
 		if (c->n_block) {
 			memset(c->stamp, 0, (size_t)c->n_block * sizeof *c->stamp);
 			memset(c->seen, 0, (size_t)c->n_block * sizeof *c->seen);
+			memset(c->pstamp, 0,
+			       (size_t)c->set->n_pair * sizeof *c->pstamp);
 		}
 		c->gen = 1;
 	}
@@ -392,24 +430,24 @@ void kof_plague_any_region(struct kof_plague_ctx *c, int on)
  * nothing and reports no error, and the way to make that impossible is for
  * there to be one of it.
  *
- * The k smallest DISTINCT values, which is the cut the matcher expects: a block
- * and a file both keep their smallest, so the two subsets overlap wherever the
- * content does. Windows of one repeated byte are left out on both sides - see
- * kof_plague_flat.
- *
- * KEPT IN A SORTED ARRAY OF k, NOT COLLECTED AND SORTED. What this wants out is
- * the k smallest, and a window larger than the array's largest is rejected by
- * one compare - which is nearly all of them once k values are held. The
- * collecting version needed a working array of every selected window, capped at
- * KOF_PLAGUE_SPAN_MAX, and a window past the cap was dropped without a word: a
- * span long enough to need it lost the tail of itself. Nothing is capped now.
+ * ONE DEFINITION OF A WINDOW, three readers. The iterator below is what a window
+ * IS - eight bytes as the normalizer presents them, rolled, mixed - and the pool
+ * (the generator), the membership pass (the authoring tool asking whether a
+ * sample holds a pool's windows) and the scan (kof_plague_unit) all walk it.
+ * Windows of one repeated byte are left out on every side - see
+ * kof_plague_flat. The loop was written out three times before it was one.
  */
-uint32_t kof_plague_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
-			    uint32_t *out)
+struct pl_win {
+	const uint8_t *p;
+	uint64_t       n, at;
+	uint32_t       norm, h, drop;
+};
+
+/* Position on the first window; 0 when the span has none. */
+static inline int pl_win_begin(struct pl_win *w, const uint8_t *p, uint64_t n,
+			       uint32_t norm)
 {
-	const uint32_t max_out = KOF_PLAGUE_MINHASH_K;
-	uint32_t h = 0, drop = kof_plague_drop_weight(), i, got = 0;
-	uint64_t at;
+	uint32_t i;
 
 	if (norm != KOF_PLAGUE_RAW) {
 		if (n < 2u)
@@ -418,54 +456,163 @@ uint32_t kof_plague_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
 	}
 	if (n < KOF_PLAGUE_NG)
 		return 0;
-
-	/* One definition of what a normalizer presents - see kofplague.h. */
-#define PB(k) ((uint32_t)kof_plague_byte(p, (k), norm))
+	w->p = p; w->n = n; w->at = 0; w->norm = norm;
+	w->drop = kof_plague_drop_weight();
+	w->h = 0;
 	for (i = 0; i < KOF_PLAGUE_NG; i++)
-		h = h * KOF_PLAGUE_BASE + PB(i);
-	for (at = 0;; at++) {
-		uint32_t v = kof_plague_mix(h);
+		w->h = w->h * KOF_PLAGUE_BASE +
+		       (uint32_t)kof_plague_byte(p, i, norm);
+	return 1;
+}
 
-		/* THE CHEAP TEST FIRST. Once k values are held a window larger
-		 * than the largest is rejected by this compare, which is nearly
-		 * all of them; the flat test is eight comparisons and is paid
-		 * only by a window that would have been kept. The answer is the
-		 * same - a flat window is refused either way. */
-		if ((got < max_out || v < out[got - 1u]) &&
-		    !kof_plague_flat(p, at, norm)) {
-			uint32_t lo = 0, hi = got;
+static inline uint32_t pl_win_value(const struct pl_win *w)
+{
+	return kof_plague_mix(w->h);
+}
 
-			while (lo < hi) {
-				uint32_t mid = lo + (hi - lo) / 2u;
+static inline int pl_win_flat(const struct pl_win *w)
+{
+	return kof_plague_flat(w->p, w->at, w->norm);
+}
 
-				if (out[mid] < v)
-					lo = mid + 1u;
-				else
-					hi = mid;
-			}
-			if (lo == got || out[lo] != v) {
-				uint32_t last = got < max_out ? got : max_out - 1u;
-
-				memmove(out + lo + 1u, out + lo,
-					(last - lo) * sizeof *out);
-				out[lo] = v;
-				if (got < max_out)
-					got++;
-			}
-		}
-		if (at + KOF_PLAGUE_NG >= n)
-			break;
-		/* The normalizer is decided once per window, not twice. */
-		if (norm == KOF_PLAGUE_RAW) {
-			h -= (uint32_t)p[at] * drop;
-			h = h * KOF_PLAGUE_BASE + (uint32_t)p[at + KOF_PLAGUE_NG];
-		} else {
-			h -= PB(at) * drop;
-			h = h * KOF_PLAGUE_BASE + PB(at + KOF_PLAGUE_NG);
-		}
+/* Roll to the next window; 0 once the last has been given. */
+static inline int pl_win_next(struct pl_win *w)
+{
+	if (w->at + KOF_PLAGUE_NG >= w->n)
+		return 0;
+	if (w->norm == KOF_PLAGUE_RAW) {
+		w->h -= (uint32_t)w->p[w->at] * w->drop;
+		w->h = w->h * KOF_PLAGUE_BASE +
+		       (uint32_t)w->p[w->at + KOF_PLAGUE_NG];
+	} else {
+		w->h -= (uint32_t)kof_plague_byte(w->p, w->at, w->norm) * w->drop;
+		w->h = w->h * KOF_PLAGUE_BASE +
+		       (uint32_t)kof_plague_byte(w->p, w->at + KOF_PLAGUE_NG,
+					       w->norm);
 	}
-#undef PB
+	w->at++;
+	return 1;
+}
+
+static int pl_u32_cmp(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+uint32_t *kof_plague_pool(const uint8_t *p, uint64_t n, uint32_t norm,
+			  uint32_t *n_out)
+{
+	struct pl_win w;
+	uint32_t *v, got = 0, k = 0;
+	uint64_t room;
+
+	if (n_out)
+		*n_out = 0;
+	if (!p || norm >= KOF_PLAGUE_NORM_COUNT || !pl_win_begin(&w, p, n, norm))
+		return NULL;
+	room = w.n - KOF_PLAGUE_NG + 1u;
+	/* A span this size is not a block's input; refuse rather than wrap. */
+	if (room > 0x3fffffffu)
+		return NULL;
+	v = malloc((size_t)room * sizeof *v);
+	if (!v)
+		return NULL;
+	do {
+		if (!pl_win_flat(&w))
+			v[got++] = pl_win_value(&w);
+	} while (pl_win_next(&w));
+	if (!got) {
+		free(v);
+		return NULL;
+	}
+	qsort(v, got, sizeof *v, pl_u32_cmp);
+	for (k = 1, room = 1; room < got; room++)
+		if (v[room] != v[k - 1u])
+			v[k++] = v[room];
+	if (n_out)
+		*n_out = k;
+	return v;
+}
+
+/*
+ * THE k SMALLEST OF THE POOL - what a block of one sample is, and the generator
+ * every older block was made with, now spelled as what it always was. Returns
+ * the values ascending and distinct, never more than K.
+ */
+uint32_t kof_plague_minhash(const uint8_t *p, uint64_t n, uint32_t norm,
+			    uint32_t *out)
+{
+	uint32_t np = 0, got, *pool = kof_plague_pool(p, n, norm, &np);
+
+	if (!pool)
+		return 0;
+	got = np < KOF_PLAGUE_MINHASH_K ? np : KOF_PLAGUE_MINHASH_K;
+	memcpy(out, pool, got * sizeof *out);
+	free(pool);
 	return got;
+}
+
+void kof_plague_member(const uint32_t *pool, uint32_t n_pool, const uint8_t *p,
+		       uint64_t n, uint32_t norm, uint8_t *bits)
+{
+	struct pl_win w;
+	uint64_t *bloom = NULL, nb = 1u << 12;
+	uint32_t mask = 0;
+
+	if (!pool || !n_pool || !p || !bits || norm >= KOF_PLAGUE_NORM_COUNT ||
+	    !pl_win_begin(&w, p, n, norm))
+		return;
+	/* Most windows of a sample are in no pool: a bit table says so without a
+	 * search. Without room for it the search is simply done every time. */
+	while (nb < (uint64_t)n_pool * 32u && nb < (1u << 24))
+		nb <<= 1;
+	bloom = calloc((size_t)(nb / 64u), sizeof *bloom);
+	if (bloom) {
+		uint32_t i;
+
+		mask = (uint32_t)(nb - 1u);
+		for (i = 0; i < n_pool; i++)
+			bloom[(pool[i] & mask) >> 6] |=
+				(uint64_t)1 << (pool[i] & 63u);
+	}
+	do {
+		uint32_t v = pl_win_value(&w), lo = 0, hi = n_pool;
+
+		if (v < pool[0] || v > pool[n_pool - 1u])
+			continue;
+		if (bloom &&
+		    !((bloom[(v & mask) >> 6] >> (v & 63u)) & 1u))
+			continue;
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+
+			if (pool[mid] < v)
+				lo = mid + 1u;
+			else
+				hi = mid;
+		}
+		if (lo < n_pool && pool[lo] == v && !pl_win_flat(&w))
+			bits[lo >> 3] |= (uint8_t)(1u << (lo & 7u));
+	} while (pl_win_next(&w));
+	free(bloom);
+}
+
+uint32_t kof_plague_core(const uint32_t *pool, uint32_t n_pool,
+			 const uint16_t *pos, uint32_t pos_need,
+			 const uint16_t *bg, uint32_t bg_max, uint32_t k,
+			 uint32_t *out)
+{
+	uint32_t i, got = 0;
+
+	if (!pool || !pos || !out)
+		return 0;
+	/* The pool is ascending, so the first k that qualify are the k smallest. */
+	for (i = 0; i < n_pool && got < k; i++)
+		if (pos[i] >= pos_need && (!bg || bg[i] <= bg_max))
+			out[got++] = pool[i];
+	return got >= KOF_PLAGUE_MIN_HASH ? got : 0u;
 }
 
 void kof_plague_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t min,
@@ -492,7 +639,16 @@ void kof_plague_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t min,
 		(void)fn(user, cut, len);
 }
 
-/* Credit one hash of a unit's sketch to every block that holds it. */
+/*
+ * Credit one window hash to every block that holds it, once per OBJECT.
+ *
+ * A pair is a block's hash, and an object holds it or does not: how many units
+ * it sits in is the scanner's cut and not a fact about the object. Counted per
+ * unit, a block spanning two units - two grouped functions, a cluster the
+ * cutter split - needed both in one, and the same data scored differently
+ * depending on where a gap fell. The stamp is keyed by the object's generation,
+ * so the first unit to hold a hash counts it and no other does.
+ */
 static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
 		      uint32_t h, uint32_t side)
 {
@@ -510,6 +666,9 @@ static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t nor
 		uint32_t b = PL_BLOCK(s->pair[lo].bs);
 		const struct kof_plague_block *blk = &s->block[b];
 
+		if (c->pstamp[lo] == c->gen)
+			continue;
+
 		/*
 		 * THE REGION, THE NORMALIZER AND THE SIDE ARE PART OF THE MATCH,
 		 * not a filter applied afterwards. The same bytes in another
@@ -519,44 +678,59 @@ static void pl_credit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t nor
 		if (blk->norm != norm || blk->side != side ||
 		    (!c->any_region && !(blk->scan_mask & scan_mask)))
 			continue;
-		if (c->ustamp[b] != c->ugen) {
-			c->ustamp[b] = c->ugen;
-			c->ucnt[b] = 0;
-		}
-		c->ucnt[b]++;
+		c->pstamp[lo] = c->gen;
 		if (c->stamp[b] != c->gen) {
 			c->stamp[b] = c->gen;
 			c->seen[b] = 0;
 		}
-		/*
-		 * THE BEST UNIT, not the sum over units. A sketch's hashes are
-		 * distinct and so are a block's, so one unit counts each hash of
-		 * the block once; and two unrelated units that each hold a few
-		 * of a block's hashes must not add up to a match.
-		 */
-		if (c->ucnt[b] > c->seen[b])
-			c->seen[b] = c->ucnt[b];
+		c->seen[b]++;
 	}
 }
 
+/*
+ * A UNIT IS HELD AGAINST A BLOCK BY CONTAINMENT: every window of the unit is
+ * asked whether it is one of the block's hashes. Not by comparing two sketches.
+ *
+ * A block is the smallest window hashes of the span it was cut from, so it is a
+ * sample of that span - and a unit is the same sample taken of a different
+ * span. When the unit is bigger than the block (a variant with more strings
+ * round the same exploit, a function body with something added) its own
+ * smallest are a different set, the block's fall out of them, and the score
+ * drops though every one of them is still in the bytes. Measured: a 1200-byte
+ * block of the exploit strings, cut from one bot, scored 0 of 83 on the 83
+ * Bazaar files that carry the same request (sketch 28%), and 67 of 83 at 70%
+ * or more asked this way.
+ *
+ * TWO REJECTS BEFORE THE SEARCH, both one load: `top`, the largest hash of the
+ * whole set (the blocks of an old rule are all small), then the bit table. A
+ * window that passes neither is in no block.
+ */
 void kof_plague_unit(struct kof_plague_ctx *c, uint32_t scan_mask, uint32_t norm,
 		     uint32_t side, const uint8_t *p, uint64_t n)
 {
-	uint32_t sk[KOF_PLAGUE_MINHASH_K], got, i;
+	const struct kof_plague_set *s;
+	struct pl_win w;
+	uint32_t top;
 
 	if (!c || !c->set || !p || norm >= KOF_PLAGUE_NORM_COUNT ||
-	    !c->set->n_pair)
+	    !c->set->n_pair || !pl_win_begin(&w, p, n, norm))
 		return;
-	got = kof_plague_minhash(p, n, norm, sk);
-	if (!got)
-		return;
-	/* A new unit: the counts of the last say nothing about this one. */
-	if (++c->ugen == 0u) {
-		memset(c->ustamp, 0, (size_t)c->n_block * sizeof *c->ustamp);
-		c->ugen = 1u;
-	}
-	for (i = 0; i < got; i++)
-		pl_credit(c, scan_mask, norm, sk[i], side);
+	s = c->set;
+	top = s->pair[s->n_pair - 1u].hash;
+	do {
+		uint32_t v = pl_win_value(&w);
+
+		if (v > top)
+			continue;
+		if (s->bloom) {
+			uint32_t ix = v & s->bloom_mask;
+
+			if (!((s->bloom[ix >> 6] >> (ix & 63u)) & 1u))
+				continue;
+		}
+		if (!pl_win_flat(&w))
+			pl_credit(c, scan_mask, norm, v, side);
+	} while (pl_win_next(&w));
 }
 
 /* ---- scoring ------------------------------------------------------------ */

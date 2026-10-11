@@ -356,6 +356,7 @@ enum kof_stage {
 	KOF_STAGE_DECRYPT,
 	KOF_STAGE_CARVE,
 	KOF_STAGE_NORMZ,        /* the object said plainly - the host's own      */
+	KOF_STAGE_SIMILAR,      /* similarity rules, on the object that is left  */
 	KOF_STAGE_SCRIPT,       /* the second form of a script                    */
 	KOF_STAGE_SERVE,        /* what the engine completed, declared            */
 	KOF_STAGE_VERDICT,      /* rules about what the stages above produced     */

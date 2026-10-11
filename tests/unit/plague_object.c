@@ -58,6 +58,8 @@ struct seen {
 	/* Which verdict this scan is counting - the file holds more than one
 	 * rule now, and each case is about its own. */
 	const char *want;
+	/* Where the hits were: on the file itself, or on a child of it. */
+	int hit_parent, hit_child;
 };
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
@@ -66,18 +68,23 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	struct seen *s = user;
 	uint32_t i;
 
-	(void)name; (void)bytes; (void)len;
+	(void)bytes; (void)len;
 	s->objects++;
 	if (!res)
 		return 0;
 	for (i = 0; i < res->n; i++)
-		if (strstr(res->v[i].name, s->want))
+		if (strstr(res->v[i].name, s->want)) {
 			s->hit++;
+			if (name && strstr(name, "//"))
+				s->hit_child++;
+			else
+				s->hit_parent++;
+		}
 	return 0;
 }
 
-static int scan_named(struct kof_engine *eng, const uint8_t *p, size_t n,
-		      const char *want)
+static int scan_where(struct kof_engine *eng, const uint8_t *p, size_t n,
+		      const char *want, int *on_parent, int *on_child)
 {
 	struct kof_scan_option opt;
 	struct kof_scanner *sc = kscan_new(eng);
@@ -101,7 +108,17 @@ static int scan_named(struct kof_engine *eng, const uint8_t *p, size_t n,
 	if (kscan_bytes(sc, p, n, "fixture.bin", &opt, on_object, &s) <= 0)
 		s.hit = -1;
 	kscan_free(sc);
+	if (on_parent)
+		*on_parent = s.hit_parent;
+	if (on_child)
+		*on_child = s.hit_child;
 	return s.hit;
+}
+
+static int scan_named(struct kof_engine *eng, const uint8_t *p, size_t n,
+		      const char *want)
+{
+	return scan_where(eng, p, n, want, NULL, NULL);
 }
 
 static int scan_it(struct kof_engine *eng, const uint8_t *p, size_t n)
@@ -145,6 +162,34 @@ static void elf_paths(struct kof_engine *eng)
 	if (scan_named(eng, buf, n, "InHeader") <= 0)
 		fail("header block", "a block that names the header region was "
 		     "not looked for there");
+	/* A region declared as a SET: credited from any member, and only from its
+	 * members. The block is in NOLOAD. */
+	if (scan_named(eng, buf, n, "MaskOr") <= 0)
+		fail("region set", "a block declared over CODE | NOLOAD was not "
+		     "found in NOLOAD");
+	if (scan_named(eng, buf, n, "MaskMiss") > 0)
+		fail("region set miss", "a block declared over CODE | DATA fired "
+		     "on bytes that are in neither");
+	/*
+	 * THE VIEW, NOT THE PARENT. This fixture normalises (it carries a library
+	 * to cut and wide text), and a block is cut from the view - so when there
+	 * is one the rule is scored on it and the parent is not: the stage that
+	 * runs similarity rules comes after the step that makes the view, and a
+	 * step that produced a child ends the chain for the object it was made
+	 * from. Run with the detectors, as it used to be, the parent was the one
+	 * scored and the verdict carried its number.
+	 */
+	{
+		int on_parent = 0, on_child = 0;
+
+		(void)scan_where(eng, buf, n, "AnyRegion", &on_parent, &on_child);
+		if (on_child <= 0)
+			fail("view scored", "the object has a normalised view and "
+			     "the rule was not scored on it");
+		if (on_parent > 0)
+			fail("parent not scored", "the rule was scored on the "
+			     "parent although its view exists");
+	}
 }
 
 int main(int argc, char **argv)

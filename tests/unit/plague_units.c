@@ -213,6 +213,31 @@ static void data_in_code(void)
 		      "the strings and the table between them are one block");
 		check(g.side[0] == KOF_PLAGUE_SIDE_USER, "on the author's side");
 	}
+
+	/* A library span across the middle of the cluster cuts it like any other
+	 * unit: the author's strings stay on the author's side. */
+	{
+		struct kof_true_all lib;
+		size_t cut = first_from + 40;
+
+		memset(&lib, 0, sizeof lib);
+		lib.span[0].off = cut; lib.span[0].len = 30; lib.n = 1;
+		memset(&g, 0, sizeof g);
+		kof_plague_units(obj, sizeof obj, KOF_FMT_ELF, KOF_SCAN_ELF_CODE, &ext, 1,
+				 &fs, &lib, take, &g);
+		check(g.n == 3u, "a library span inside the cluster cuts it in three");
+		if (g.n == 3u) {
+			check(g.off[0] == first_from && g.len[0] == 40 &&
+			      g.side[0] == KOF_PLAGUE_SIDE_USER,
+			      "the part before the library is the author's");
+			check(g.off[1] == cut && g.len[1] == 30 &&
+			      g.side[1] == KOF_PLAGUE_SIDE_LIB,
+			      "the library's own bytes are on its side");
+			check(g.off[2] == cut + 30 && g.side[2] == KOF_PLAGUE_SIDE_USER &&
+			      g.off[2] + g.len[2] == first_to,
+			      "and the part after is the author's again");
+		}
+	}
 }
 
 int main(void)
