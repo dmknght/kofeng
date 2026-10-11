@@ -987,4 +987,14 @@ uint32_t kof_declared_regions(const struct kof_scan_region *rgn, uint32_t n_rgn,
  * counts against every caller's field width.
  */
 
+/*
+ * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block - the one
+ * lookup, for everything that names a symbol from the block: the variable a
+ * payload came out of and the function a block starts at. `shndx` of -1 matches
+ * any section; a relocatable object's values are section-relative, so there the
+ * section is part of the answer. Empty when no record matches.
+ */
+void kof_inspect_sym_name(const uint8_t *blk, uint32_t n, uint64_t value,
+			  int shndx, char *out, size_t cap);
+
 #endif /* KOFENG_KOFINSPECT_H */

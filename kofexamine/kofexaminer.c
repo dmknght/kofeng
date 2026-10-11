@@ -122,6 +122,12 @@
 #include <kofmod/rtf.h>
 
 #include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../libkofeng/analyzers/parsers/binaries/funcs.h"
+#include "../libkofeng/analyzers/trueline/trueline.h"
+#include "../libkofeng/detectors/pathogen/kofdiag.h"
+#include "../libkofeng/detectors/overlord/plague/kofplague.h"
+#include "../libkofeng/scanners/scan.h"
+#include "kofinspect.h"
 #include "../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
@@ -1936,6 +1942,144 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 	kof_touch_free(v, n);
 }
 
+/*
+ * THE BLOCKS - what the engine cuts an object into, with every hash of each.
+ *
+ * `--blocks` lists the UNITS the similarity matcher reads and a block is made
+ * from: the same cut the scanner makes (kof_scan_plague_units), so what is
+ * printed is what would be matched. Per unit: its region, offset, length, side
+ * (the author's or the static library's), the function it is when it is one, how
+ * many distinct windows it holds, and the block - the K smallest of those
+ * windows, which is what a rule carries. `--hashes` adds the POOL, every distinct
+ * window hash of the unit, ascending: the full set the block is a sample of, for
+ * anyone comparing units of two samples to find what they share.
+ *
+ * Nothing here decides anything. The cut, the functions, the library and the
+ * hash are the engine's; this prints them.
+ *
+ * A NORMALISED VIEW has no headers of its own, so its functions are its
+ * parent's found again in its bytes - kof_funcs_remap, the same call the
+ * scanner and the viewer make - and its library is already moved out.
+ */
+static int g_blocks, g_hashes;
+static int g_decl_view;           /* the object on hand is a normalised view */
+static const char *g_root_path;   /* the file a recovered object came from */
+
+struct blk_ctx {
+	kof_buf buf;
+	const struct kof_parser *fp;
+	const uint8_t *syms;
+	uint32_t syms_n;
+	uint32_t units;
+};
+
+static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
+		    uint32_t side, const struct kof_func *first)
+{
+	struct blk_ctx *c = user;
+	uint32_t np = 0, k, nb, block[KOF_PLAGUE_MINHASH_K];
+	uint32_t *pool = kof_plague_pool(c->buf.p + off, len, KOF_PLAGUE_RAW, &np);
+	const char *rn = (c->fp && c->fp->region_name && region != KOF_SCAN_ALL)
+		       ? kof_region_label(c->fp->region_name(region)) : "ALL";
+	char sym[64];
+
+	sym[0] = 0;
+	if (first && c->syms)
+		kof_inspect_sym_name(c->syms, c->syms_n, first->value,
+				     (int)first->shndx, sym, sizeof sym);
+	nb = kof_plague_minhash(c->buf.p + off, len, KOF_PLAGUE_RAW, block);
+	c->units++;
+	printf("    unit  region=%s  off=0x%llx  len=%llu  side=%s", rn,
+	       (unsigned long long)off, (unsigned long long)len,
+	       side == KOF_PLAGUE_SIDE_LIB ? "LIB" : "USER");
+	if (first)
+		printf("  func=%s", sym[0] ? sym : "(no symbol)");
+	printf("  windows=%u", np);
+	if (nb >= KOF_PLAGUE_MIN_HASH)
+		printf("  block_id=%08x\n      block", kof_plague_fold(block, nb));
+	else
+		printf("  block_id=-  (under %u windows: no block)\n      block",
+		       KOF_PLAGUE_MIN_HASH);
+	for (k = 0; k < nb; k++)
+		printf(" %08x", block[k]);
+	printf("\n");
+	if (g_hashes) {
+		printf("      pool ");
+		for (k = 0; k < np; k++)
+			printf(" %08x", pool[k]);
+		printf("\n");
+	}
+	free(pool);
+	return 0;
+}
+
+static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
+{
+	static struct kof_range ext[KOF_SRC_MAX_REGIONS];
+	static uint8_t blk[KOF_SYM_MAX_BYTES];
+	struct kof_func_set fs, parent;
+	struct kof_true_all lib;
+	struct blk_ctx c;
+	int have_lib = 0;
+
+	memset(&fs, 0, sizeof fs);
+	memset(&parent, 0, sizeof parent);
+	memset(&lib, 0, sizeof lib);
+	memset(&c, 0, sizeof c);
+	c.buf = buf;
+	c.fp = kof_parser_of(ctx->format);
+	if (g_decl_view && g_root_path) {
+		/* The parent's functions, found again in this object's bytes. */
+		FILE *f = fopen(g_root_path, "rb");
+
+		if (f) {
+			long n;
+			uint8_t *rb = NULL;
+			struct kof_obj_ctx rctx;
+			void *rview = NULL;
+			const struct kof_parser *rf;
+
+			if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 &&
+			    fseek(f, 0, SEEK_SET) == 0 && (rb = malloc((size_t)n)) &&
+			    fread(rb, 1, (size_t)n, f) == (size_t)n) {
+				rf = kof_inspect_identify(kof_buf_make(rb, (uint64_t)n),
+							  &rctx, &rview);
+				if (rf && rctx.file_header)
+					kof_diag_funcs_of_view(&rctx,
+							       kof_buf_make(rb, (uint64_t)n),
+							       NULL, buf, &fs);
+			}
+			free(rview);
+			free(rb);
+			fclose(f);
+		}
+	} else if (ctx->file_header) {
+		kof_diag_funcs_of(ctx, buf.p, buf.n, &fs);
+	}
+	if (!g_decl_view && ctx->format == KOF_FMT_ELF && ctx->file_header) {
+		kof_true_find_object(buf, ctx->file_header, &lib);
+		have_lib = 1;
+	}
+	/* The names are the symbol table's, or what the engine said they are. */
+	if (g_decl_syms && g_decl_syms_n) {
+		c.syms = g_decl_syms;
+		c.syms_n = g_decl_syms_n;
+	} else {
+		c.syms_n = kof_syms_build(ctx->format, buf.p, buf.n, ctx->file_header,
+					  blk, sizeof blk);
+		c.syms = c.syms_n ? blk : NULL;
+	}
+	printf("  blocks    %s%s%s  (unit = what the matcher reads; block = its %u "
+	       "smallest window hashes%s)\n", C_NOTE,
+	       g_decl_view ? "of a normalised view" : "of the object", C_OFF,
+	       KOF_PLAGUE_MINHASH_K, g_hashes ? "; pool = all of them" : "");
+	kof_scan_plague_units(ctx, buf, ~0u, &fs, have_lib ? &lib : NULL, ext,
+			      blk_unit, &c);
+	printf("  units     %u\n", c.units);
+	kof_funcs_free(&fs);
+	kof_funcs_free(&parent);
+}
+
 static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			 struct kof_engine *eng)
 {
@@ -2113,6 +2257,8 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 		}
 		if (eng)
 			print_markers(eng, buf, &ctx, f, display);
+		if (g_blocks)
+			print_blocks(buf, &ctx);
 		rc = 1;
 	}
 out:
@@ -2493,6 +2639,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	 */
 	g_decl_syms = res->syms;
 	g_decl_syms_n = res->n_syms;
+	g_decl_view = res->entry_kind == KOF_ENT_NORMALIZED;
 	g_decl_lang = res->lang_known;
 	g_decl_subtype = res->subtype;
 	g_decl_subfam = res->subfamily;
@@ -2503,7 +2650,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		       g_decl_rgn_n * sizeof g_decl_rgn[0]);
 
 	if (!u->dump_dir) {
-		if (u->touch) {
+		if (u->touch || g_blocks) {
 			printf("\n");
 			if (examine_bytes(kof_buf_make(bytes, len), name, 0,
 					  u->touch) < 0)
@@ -2513,6 +2660,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		g_decl_syms_n = 0;
 		g_decl_rgn_n = 0;
 		g_decl_lang = 0;
+		g_decl_view = 0;
 		return 0;
 	}
 	/*
@@ -2557,6 +2705,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 	g_decl_syms_n = 0;
 	g_decl_rgn_n = 0;
 	g_decl_lang = 0;
+	g_decl_view = 0;
 	return 0;
 }
 
@@ -2591,6 +2740,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	u.dump_dir = dump_dir;
 	u.touch = markers ? eng : NULL;
 	g_debug = verbose;
+	g_root_path = path;
 
 	sc = kscan_new(eng);
 	if (!sc) {
@@ -2624,7 +2774,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s [--dump] [--db <dir>] <file>...\n"
+		"usage: %s [--dump] [--blocks|--hashes] [--db <dir>] <file>...\n"
 		"\n"
 		"  --dump     also write each region of each file into a directory\n"
 		"             beside it: <path>/_<name>_dump/<region enum name>\n"
@@ -2640,7 +2790,15 @@ static void usage(const char *argv0)
 		"             --markers.\n"
 		"  --markers  list every database marker found in the file and whose\n"
 		"             it is, including modules that did not fire, with the\n"
-		"             reason each did not. Needs --db.\n",
+		"             reason each did not. Needs --db.\n"
+		"  --blocks   list the units the similarity matcher reads - the same cut\n"
+		"             the scanner makes - with region, offset, length, side,\n"
+		"             function, window count, and each unit's block (its\n"
+		"             smallest window hashes, the values a rule carries). With\n"
+		"             --db, the normalised view of a file is listed too.\n"
+		"  --hashes   as --blocks, and also every distinct window hash of each\n"
+		"             unit (the pool), ascending: the full set, for comparing\n"
+		"             two samples. Large; redirect it to a file.\n",
 		argv0);
 }
 
@@ -2673,6 +2831,11 @@ int main(int argc, char **argv)
 			dump = 1;
 		} else if (strcmp(argv[i], "--debug") == 0) {
 			verbose = 1;
+		} else if (strcmp(argv[i], "--blocks") == 0) {
+			g_blocks = 1;
+		} else if (strcmp(argv[i], "--hashes") == 0) {
+			g_blocks = 1;
+			g_hashes = 1;
 		} else if (strcmp(argv[i], "--markers") == 0) {
 			markers = 1;
 		} else if (strcmp(argv[i], "--sources") == 0) {

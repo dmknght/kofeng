@@ -1433,6 +1433,31 @@ void kof_diag_funcs_of(const struct kof_obj_ctx *ctx, const uint8_t *data,
 	free(ent);
 }
 
+/*
+ * THE FUNCTIONS OF A NORMALISED VIEW - the parent's, found again in the view's
+ * bytes. One call for every tool that lists or scores the view's units, so the
+ * sequence (the parent's own functions, then kof_funcs_remap over the view) is
+ * written once. `parent_funcs` is the parent's set when the caller already
+ * holds it; NULL builds it here.
+ */
+void kof_diag_funcs_of_view(const struct kof_obj_ctx *parent_ctx, kof_buf parent,
+			    const struct kof_func_set *parent_funcs, kof_buf view,
+			    struct kof_func_set *out)
+{
+	struct kof_func_set own;
+
+	memset(out, 0, sizeof *out);
+	if (!parent_ctx || !parent.p || !view.p)
+		return;
+	memset(&own, 0, sizeof own);
+	if (!parent_funcs) {
+		kof_diag_funcs_of(parent_ctx, parent.p, parent.n, &own);
+		parent_funcs = &own;
+	}
+	kof_funcs_remap(parent.p, parent.n, parent_funcs, view.p, view.n, out);
+	kof_funcs_free(&own);
+}
+
 const struct kof_func_set *kof_diag_funcs(struct kof_diag_scan *s,
 					  const struct kof_obj_ctx *ctx)
 {

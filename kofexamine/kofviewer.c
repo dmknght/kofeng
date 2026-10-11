@@ -3645,38 +3645,6 @@ static uint32_t sym_half_recs(const struct object *o, uint32_t mask,
 }
 
 /*
- * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block - the one
- * lookup, for everything that names a symbol from the block: the variable a
- * payload came out of and the function a block starts at. `shndx` of -1 matches
- * any section; a relocatable object's values are section-relative, so there the
- * section is part of the answer. Empty when no record matches.
- */
-static void sym_name_of(const uint8_t *blk, uint32_t n, uint64_t value,
-			int shndx, char *out, size_t cap)
-{
-	const uint8_t *r;
-	uint32_t k;
-
-	out[0] = 0;
-	if (!value)
-		return;
-	for (k = 0; (r = kof_sym_rec(blk, n, k)); k++) {
-		uint32_t j;
-
-		if (kof_sym_u64(r, KOF_SYM_R_VALUE) != value ||
-		    (shndx >= 0 && (int)(r[KOF_SYM_R_SHNDX] |
-					(r[KOF_SYM_R_SHNDX + 1u] << 8)) != shndx))
-			continue;
-		for (j = 0; j + 1u < cap && j < KOF_SYM_NAMELEN &&
-		     r[KOF_SYM_R_NAME + j]; j++)
-			out[j] = (char)r[KOF_SYM_R_NAME + j];
-		out[j] = 0;
-		if (j)
-			return;
-	}
-}
-
-/*
  * The object's symbol block, built once.
  *
  * One call, because which builder a format gets is kof_syms_build's decision
@@ -3783,7 +3751,7 @@ static void payload_tag(struct view *v, uint32_t at)
 		 * same symbol. The address is the engine's - the heuristic
 		 * reported it - and the block is the engine's too.
 		 */
-		sym_name_of(par->sym, par->sym_n, par->payload_at, -1,
+		kof_inspect_sym_name(par->sym, par->sym_n, par->payload_at, -1,
 			    o->payload_sym, sizeof o->payload_sym);
 		return;
 	}
@@ -7006,7 +6974,7 @@ static int plg_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
 	rn = (c->fp && c->fp->region_name && mask != KOF_SCAN_ALL)
 	   ? c->fp->region_name(mask) : NULL;
 	lbl = rn ? kof_region_label(rn) : "ALL";
-	sym_name_of(c->o->sym, c->o->sym_n, first ? first->value : 0,
+	kof_inspect_sym_name(c->o->sym, c->o->sym_n, first ? first->value : 0,
 		    first ? (int)first->shndx : -1, sym, sizeof sym);
 	plg_mark(c->v, c->o->buf.p, c->o->buf.n, off, off + len, mask, lbl, rn,
 		 KOF_PLAGUE_RAW, (uint8_t)side, sym);
@@ -7033,9 +7001,9 @@ static const struct kof_func_set *plg_funcs(struct view *v, struct object *o)
 			if (n) {
 				struct object *par = &v->obj[anc[n - 1u] - v->obj];
 
-				kof_funcs_remap(par->buf.p, par->buf.n,
-						plg_funcs(v, par), o->buf.p,
-						o->buf.n, &o->funcs);
+				kof_diag_funcs_of_view(&par->ctx, par->buf,
+						       plg_funcs(v, par), o->buf,
+						       &o->funcs);
 			}
 		} else {
 			kof_diag_funcs_of(&o->ctx, o->buf.p, o->buf.n, &o->funcs);

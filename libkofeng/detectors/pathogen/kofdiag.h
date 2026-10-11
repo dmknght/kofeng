@@ -22,6 +22,7 @@
 
 #include "../../kofeng.h"
 #include "../../kofcore/kofmod/kofsig.h"   /* struct kof_obj_ctx */
+#include "../../kofcore/kofcore.h"            /* kof_buf */
 #include "../../kofcore/kofmod/kofpathogen.h"
 
 /*
@@ -501,5 +502,8 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 
 void kof_diag_funcs_of(const struct kof_obj_ctx *ctx, const uint8_t *data,
 		       uint64_t data_n, struct kof_func_set *out);
+void kof_diag_funcs_of_view(const struct kof_obj_ctx *parent_ctx, kof_buf parent,
+			    const struct kof_func_set *parent_funcs, kof_buf view,
+			    struct kof_func_set *out);
 
 #endif /* KOFENG_PATHOGEN_KOFDIAG_H */

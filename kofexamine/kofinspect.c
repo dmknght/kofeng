@@ -2647,3 +2647,34 @@ uint32_t kof_inspect_plague(const struct kof_scanner *sc,
  * store of nodes and typed edges.
  */
 
+/*
+ * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block - the one
+ * lookup, for everything that names a symbol from the block: the variable a
+ * payload came out of and the function a block starts at. `shndx` of -1 matches
+ * any section; a relocatable object's values are section-relative, so there the
+ * section is part of the answer. Empty when no record matches.
+ */
+void kof_inspect_sym_name(const uint8_t *blk, uint32_t n, uint64_t value,
+			int shndx, char *out, size_t cap)
+{
+	const uint8_t *r;
+	uint32_t k;
+
+	out[0] = 0;
+	if (!value)
+		return;
+	for (k = 0; (r = kof_sym_rec(blk, n, k)); k++) {
+		uint32_t j;
+
+		if (kof_sym_u64(r, KOF_SYM_R_VALUE) != value ||
+		    (shndx >= 0 && (int)(r[KOF_SYM_R_SHNDX] |
+					(r[KOF_SYM_R_SHNDX + 1u] << 8)) != shndx))
+			continue;
+		for (j = 0; j + 1u < cap && j < KOF_SYM_NAMELEN &&
+		     r[KOF_SYM_R_NAME + j]; j++)
+			out[j] = (char)r[KOF_SYM_R_NAME + j];
+		out[j] = 0;
+		if (j)
+			return;
+	}
+}
