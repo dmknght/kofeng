@@ -66,7 +66,7 @@
  * note at the top of kofmod/heur.h. */
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/kofdiag.h"
+#include "../detectors/pathogen/diagnoses/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"

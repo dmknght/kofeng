@@ -32,7 +32,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libkofeng/detectors/pathogen/diag_int.h"
+#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 
 /* any and all over the ONE-name call a module reaches: `||` and `&&`, which is

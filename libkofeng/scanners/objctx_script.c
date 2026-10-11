@@ -61,7 +61,7 @@
 #include <kofmod/sevenzip.h>
 
 #include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/kofdiag.h"
+#include "../detectors/pathogen/diagnoses/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

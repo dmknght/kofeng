@@ -94,15 +94,15 @@
 
 #include "kofdiag.h"
 #include "diag_int.h"
-#include "../../kofcore/kofcore.h"
-#include "../../kofcore/kofmod/kofcap.h"
-#include "../../kofcore/kofmod/elf.h"
-#include "../../analyzers/nucleo/nucleo.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/kofcap.h"
+#include "../../../kofcore/kofmod/elf.h"
+#include "../../../analyzers/nucleo/nucleo.h"
 #include <celllysis/celllysis.h>
-#include "../../disinfect/pzero.h"
-#include "../../analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../../extractors/unpack/emu_unpack.h"
-#include "../../../libgenome/phenotype/kofemu.h"
+#include "../../../disinfect/pzero.h"
+#include "../../../analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../../../extractors/unpack/emu_unpack.h"
+#include "../../../../libgenome/phenotype/kofemu.h"
 
 /*
  * WHAT THE RUN IS ALLOWED TO COST.

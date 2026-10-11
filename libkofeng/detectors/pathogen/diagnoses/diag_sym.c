@@ -48,12 +48,12 @@
 
 #include "kofdiag.h"
 #include "diag_int.h"
-#include "../../kofcore/kofcore.h"
-#include "../../kofcore/kofmod/kofcap.h"
-#include "../../kofcore/kofmod/elf.h"
-#include "../../analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../../analyzers/nucleo/nucleo.h"
-#include "../../disinfect/pzero.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/kofcap.h"
+#include "../../../kofcore/kofmod/elf.h"
+#include "../../../analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../../../analyzers/nucleo/nucleo.h"
+#include "../../../disinfect/pzero.h"
 #include <celllysis/space.h>
 
 

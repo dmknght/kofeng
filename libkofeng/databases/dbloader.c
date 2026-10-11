@@ -54,7 +54,7 @@
 #include "dbloader.h"
 #include "hexprog.h"
 #include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/kofdiag.h"
+#include "../detectors/pathogen/diagnoses/kofdiag.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -773,6 +773,115 @@ static void load_diagnoses(struct kof_engine *e, const char *dir)
 			load_diag_pack(e, p);
 		free(names[i]);
 	}
+}
+
+/*
+ * THE PROFILES, from syndromes.kdig - see ksigbuilder's build_syndromes for the
+ * layout. Refused WHOLE when the header does not add up, and a record that does
+ * not is skipped, as for a diagnose pack: one bad syndrome must not take the
+ * others with it and must not be believed either.
+ */
+static void load_syndromes(struct kof_engine *e, const char *dir)
+{
+	char p[4096];
+	FILE *f;
+	long len;
+	uint8_t *buf;
+	size_t got, n_rec, i, n = 0;
+	struct kof_synd_in *in = NULL;
+	const char **dis = NULL;
+	char *arena = NULL;
+	size_t n_dis = 0, used = 0;
+
+	if ((size_t)snprintf(p, sizeof p, "%s/syndromes.kdig", dir) >= sizeof p)
+		return;
+	f = fopen(p, "rb");
+	if (!f)
+		return;
+	if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) < 8 ||
+	    (unsigned long)len > KOF_DIAG_PACK_MAX || fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		fprintf(stderr, "dbloader: %s is not a syndrome pack\n", p);
+		return;
+	}
+	buf = malloc((size_t)len);
+	got = buf ? fread(buf, 1, (size_t)len, f) : 0;
+	fclose(f);
+	if (!buf || got != (size_t)len || memcmp(buf, "KSYN", 4) != 0 || buf[4] != 1u) {
+		free(buf);
+		fprintf(stderr, "dbloader: %s is not a syndrome pack this build can read\n", p);
+		return;
+	}
+	n_rec = (size_t)buf[6] | ((size_t)buf[7] << 8);
+	if (8u + n_rec * 8u > got) {
+		free(buf);
+		fprintf(stderr, "dbloader: %s has a table longer than the file\n", p);
+		return;
+	}
+	in = calloc(n_rec ? n_rec : 1u, sizeof *in);
+	/*
+	 * The diseases are not terminated in the file - a length precedes each -
+	 * so they are copied into one arena as terminated strings. The file's
+	 * disease bytes plus one terminator each is a bound on its size, and the
+	 * set copies what it keeps, so the arena goes with this function.
+	 */
+	dis = malloc((n_rec * 255u + 1u) * sizeof *dis);
+	arena = malloc(got + n_rec * 255u + 1u);
+	if (!in || !dis || !arena)
+		goto out;
+	for (i = 0; i < n_rec; i++) {
+		const uint8_t *t = buf + 8u + i * 8u;
+		uint64_t off = (uint64_t)t[0] | ((uint64_t)t[1] << 8) |
+			       ((uint64_t)t[2] << 16) | ((uint64_t)t[3] << 24);
+		uint64_t rl = (uint64_t)t[4] | ((uint64_t)t[5] << 8) |
+			      ((uint64_t)t[6] << 16) | ((uint64_t)t[7] << 24);
+		const uint8_t *r;
+		uint32_t cnt, k, at;
+		size_t first = n_dis, used0 = used;
+		int bad = 0;
+
+		if (off > got || rl > got - off || rl < 5u)
+			continue;
+		r = buf + off;
+		cnt = r[4];
+		at = 5u;
+		for (k = 0; k < cnt; k++) {
+			uint32_t L;
+
+			if (at >= rl) {
+				bad = 1;
+				break;
+			}
+			L = r[at++];
+			if (!L || L > KOF_DIAG_DISEASE_LEN || at + L > rl) {
+				bad = 1;
+				break;
+			}
+			memcpy(arena + used, r + at, L);
+			arena[used + L] = 0;
+			dis[n_dis++] = arena + used;
+			used += L + 1u;
+			at += L;
+		}
+		if (bad) {
+			n_dis = first;
+			used = used0;
+			fprintf(stderr, "dbloader: syndrome %zu of %s is not one this "
+				"build can read\n", i, p);
+			continue;
+		}
+		in[n].type_mask = (uint32_t)r[0] | ((uint32_t)r[1] << 8) |
+				  ((uint32_t)r[2] << 16) | ((uint32_t)r[3] << 24);
+		in[n].n_dis = cnt;
+		in[n].dis = dis + first;
+		n++;
+	}
+	e->synd = kof_synd_build(in, (uint32_t)n);
+out:
+	free(in);
+	free(dis);
+	free(arena);
+	free(buf);
 }
 
 static const char **collect_packs(const char *dir, uint32_t *out_n)
@@ -1710,8 +1819,10 @@ struct kof_engine *kof_db_load_tables(const char *path)
 		 * with none is an ordinary database - they are new, and
 		 * nothing yet depends on there being any.
 		 */
-		if (dir_for_diag)
+		if (dir_for_diag) {
 			load_diagnoses(e, dir_for_diag);
+			load_syndromes(e, dir_for_diag);
+		}
 	}
 out:
 	if (mp) {
@@ -1744,6 +1855,7 @@ void kof_db_free_tables(struct kof_engine *e)
 	free(e->diag_node);
 	free(e->diag_name);
 	free(e->diag_needs);
+	kof_synd_free(e->synd);
 	if (e->packs) {
 		uint32_t i;
 

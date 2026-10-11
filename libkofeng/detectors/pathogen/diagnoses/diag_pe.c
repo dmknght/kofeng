@@ -38,13 +38,13 @@
 
 #include "kofdiag.h"
 #include "diag_int.h"
-#include "../../kofcore/kofcore.h"
-#include "../../kofcore/kofmod/kofcap.h"
-#include "../../kofcore/kofmod/pe.h"
-#include "../../kofcore/kofmod/cell.h"
-#include "../../analyzers/parsers/binaries/pe/pe_parse.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/kofcap.h"
+#include "../../../kofcore/kofmod/pe.h"
+#include "../../../kofcore/kofmod/cell.h"
+#include "../../../analyzers/parsers/binaries/pe/pe_parse.h"
 #include <celllysis/celllysis.h>
-#include "../../analyzers/nucleo/nucleo.h"
+#include "../../../analyzers/nucleo/nucleo.h"
 #include <celllysis/space.h>
 
 struct pe_imp {

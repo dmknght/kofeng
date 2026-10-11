@@ -1,5 +1,5 @@
 /*
- * detectors/pathogen/kofdiag.h - the engine side of a diagnose.
+ * detectors/pathogen/diagnoses/kofdiag.h - the engine side of a diagnose.
  *
  * The FORMAT a diagnose is stored in is module ABI and lives in
  * kofmod/kofpathogen.h, beside the vocabulary it is made of. What is here is
@@ -17,13 +17,13 @@
 #ifndef KOFENG_PATHOGEN_KOFDIAG_H
 #define KOFENG_PATHOGEN_KOFDIAG_H
 
-#include "../../analyzers/parsers/binaries/funcs.h"
+#include "../../../analyzers/parsers/binaries/funcs.h"
 #include <stdint.h>
 
-#include "../../kofeng.h"
-#include "../../kofcore/kofmod/kofsig.h"   /* struct kof_obj_ctx */
-#include "../../kofcore/kofcore.h"            /* kof_buf */
-#include "../../kofcore/kofmod/kofpathogen.h"
+#include "../../../kofeng.h"
+#include "../../../kofcore/kofmod/kofsig.h"   /* struct kof_obj_ctx */
+#include "../../../kofcore/kofcore.h"            /* kof_buf */
+#include "../../../kofcore/kofmod/kofpathogen.h"
 
 /*
  * ONE NODE FOUND IN AN OBJECT.

@@ -438,12 +438,65 @@ static void tables(void)
 	}
 }
 
+/*
+ * The disease: one per diagnose, a lower-case path, read and printed back,
+ * and a patch that adds one touches its own line only.
+ */
+static void disease(void)
+{
+	static const char good[] =
+		"/* what it means */\n"
+		"KOF_DIAG_NAME(DIAG_A);\n"
+		"KOF_DIAG_DISEASE(\"cnc/recv-syscall\");\n"
+		"KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n"
+		"KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);\n"
+		"KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n";
+	static const char *const bad[] = {
+		"KOF_DIAG_DISEASE(\"Cnc/Recv\");\n",             /* upper case        */
+		"KOF_DIAG_DISEASE(\"cnc recv\");\n",             /* a space           */
+		"KOF_DIAG_DISEASE(\"/recv\");\n",                /* an empty part     */
+		"KOF_DIAG_DISEASE(\"recv/\");\n",
+		"KOF_DIAG_DISEASE(\"cnc//recv\");\n",
+		"KOF_DIAG_DISEASE(cnc/recv);\n",                 /* not quoted        */
+		"KOF_DIAG_DISEASE(\"a\");\nKOF_DIAG_DISEASE(\"b\");\n", /* two */
+	};
+	static struct kof_dsrc d;
+	struct kof_dsrc_view v;
+	struct kof_dsrc_report rep = { NULL, NULL, NULL };
+	char line[128];
+	unsigned k;
+
+	CHECK(kof_dsrc_parse(good, sizeof good - 1u, &d, &rep) == 0, "a good source parses");
+	CHECK(kof_dsrc_resolve(&d, &v, &rep) == 0, "and resolves");
+	CHECK(!strcmp(v.disease, "cnc/recv-syscall"), "the disease reaches the view: %s", v.disease);
+	for (k = 0; k < d.n; k++)
+		if (d.item[k].kind == KDS_DISEASE) {
+			CHECK(kof_dsrc_print(&d.item[k], line, sizeof line) > 0 &&
+			      !strcmp(line, "KOF_DIAG_DISEASE(\"cnc/recv-syscall\");"),
+			      "printed as written: %s", line);
+		}
+	for (k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+		static char text[512];
+		int errs;
+
+		snprintf(text, sizeof text,
+			 "KOF_DIAG_NAME(DIAG_B);\nKOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n"
+			 "KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);\n"
+			 "KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n%s", bad[k]);
+		errs = kof_dsrc_parse(text, strlen(text), &d, &rep);
+		if (!errs)
+			errs = kof_dsrc_resolve(&d, &v, &rep);
+		CHECK(errs > 0, "refused: %s", bad[k]);
+	}
+}
+
 int main(void)
 {
 	static const char *const dirs[] = { "bases/diagnoses", "tests/sigs/diagnoses" };
 	unsigned k, files = 0;
 
 	tables();
+	disease();
 	mentions();
 	edits();
 	verdicts();

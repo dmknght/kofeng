@@ -25,6 +25,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/kofpathogen.h>
+#include "../detectors/pathogen/syndromes/kofsyndrome.h"
 #include <kofmod/kofplague.h>
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */
@@ -383,6 +384,13 @@ struct kof_engine {
 	char                 *diag_needs;
 	uint32_t              n_diag;
 	int                   diag_full;
+	/*
+	 * THE PROFILES, from syndromes.kdig beside the diagnoses: what a set of
+	 * diseases makes - see detectors/pathogen/syndromes/kofsyndrome.h. NULL when the
+	 * database has none, which is a database that cannot type a finding and is
+	 * otherwise ordinary.
+	 */
+	struct kof_synd_set  *synd;
 
 	/*
 	 * Detectors and unpackers, in separate arrays.

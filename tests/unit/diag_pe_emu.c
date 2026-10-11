@@ -24,7 +24,7 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include "../../libkofeng/detectors/pathogen/kofdiag.h"
+#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
 #include "../../libkofeng/analyzers/nucleo/nucleo.h"
 #include "../../libgenome/phenotype/kofemu.h"
 #include "../../libkofeng/kofcore/kofmod/kofsym.h"

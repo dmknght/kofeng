@@ -43,7 +43,7 @@
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
 #include "../../libkofeng/analyzers/nucleo/nucleo.h"
-#include "../../libkofeng/detectors/pathogen/diag_int.h"
+#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
 
 static int fails;
 

@@ -1527,4 +1527,20 @@ uint32_t kof_scan_diag_count(const struct kof_obj_ctx *ctx);
 int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 			 struct kof_diag_report *out);
 
+/*
+ * THE DISEASES OF THE DIAGNOSES THAT MATCHED, and what they make - see
+ * detectors/pathogen/syndromes/kofsyndrome.h. The same all-diagnoses analysis as
+ * kof_scan_diag_report, so asking costs what that costs and a normal scan pays
+ * nothing: nothing in a scan reads this yet.
+ *
+ * kof_scan_diseases writes up to `cap` of them to `out` (the engine's strings,
+ * valid for its life) and returns how many matched, which may exceed `cap`.
+ * kof_scan_syndrome infers the type from every one of them, and returns 0 when no
+ * diagnose that names a disease matched, the database has no syndrome pack, or the object
+ * was not scanned for all diagnoses.
+ */
+uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, const char **out,
+			      uint32_t cap);
+int kof_scan_syndrome(const struct kof_obj_ctx *ctx, struct kof_synd_result *r);
+
 #endif /* KOFENG_SCAN_H */

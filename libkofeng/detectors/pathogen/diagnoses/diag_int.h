@@ -17,8 +17,8 @@
 
 #include "kofdiag.h"
 #include <celllysis/celllysis.h>
-#include "../../kofcore/kofmod/cell.h"
-#include "../../analyzers/parsers/binaries/elf/elf_parse.h"
+#include "../../../kofcore/kofmod/cell.h"
+#include "../../../analyzers/parsers/binaries/elf/elf_parse.h"
 
 struct kof_diag_scan {
 	struct kof_diag_hit *hit;

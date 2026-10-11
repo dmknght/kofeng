@@ -92,6 +92,7 @@
 #include <kofmod/kofpathogen.h>
 #include "../libkofeng/analyzers/nucleo/nucleo.h"
 #include "../libkofeng/databases/diagsrc.h"
+#include "../libkofeng/databases/syndsrc.h"
 #include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
@@ -6261,6 +6262,7 @@ static unsigned        g_n_uses;
 static int             g_uses_known;    /* only a tree build knows them all */
 static char            g_built[64][64];
 static unsigned        g_n_built;
+static char            g_built_annot[64][64];   /* the disease of g_built[i], or "" */
 
 
 /* Defined with the other argument helpers, below. */
@@ -6686,6 +6688,214 @@ static int write_diag_packs(const char *db, char **recs, char **kinds,
 	return rc;
 }
 
+
+/*
+ * THE PROFILES OF A DATABASE, in one pack: syndromes.kdig.
+ *
+ *     "KSYN"   magic
+ *     u8       version, 1
+ *     u8       0
+ *     u16      count
+ *     count x  { u32 offset, u32 length }       from the start of the file
+ *     the records:  u32 type mask, u8 n, then n x { u8 length, the disease }
+ *
+ * The header is a diagnose pack's, so one reader of the table serves both. A
+ * pack of its own and not a section of a diagnose pack: a diagnose is a thing
+ * to look for and a syndrome is what a set of findings is read against, and the
+ * second changes when somebody verifies a sample, not when the code is.
+ *
+ * Records are in the order of their file names, so the same sources give the
+ * same bytes whatever order the directory listed them in.
+ */
+static int ssrc_name_cmp(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void ssrc_error(void *ud, int line, const char *msg)
+{
+	(void)ud;
+	err(line, msg);
+}
+
+static int build_syndromes(const char *base, const char *db)
+{
+	char dpath[4200], path[4400];
+	const struct kof_dsrc_report rep = { ssrc_error, dsrc_warn, NULL };
+	DIR *dd;
+	struct dirent *de;
+	char **pnames = NULL;
+	size_t n_names = 0, i, k;
+	unsigned char **rec = NULL;
+	size_t *rlen = NULL, total;
+	unsigned char *out;
+	size_t at;
+	FILE *f;
+	static char seen[256][KOF_DIAG_DISEASE_LEN + 1u];
+	size_t n_seen = 0;
+
+	snprintf(path, sizeof path, "%s/syndromes.kdig", db);
+	(void)remove(path);
+	snprintf(dpath, sizeof dpath, "%s/syndromes", base);
+	dd = opendir(dpath);
+	if (!dd)
+		return 1;
+	while ((de = readdir(dd)) != NULL) {
+		char **g;
+
+		if (de->d_name[0] == '.' || !is_c_source(de->d_name))
+			continue;
+		g = realloc(pnames, (n_names + 1u) * sizeof *pnames);
+		if (!g) {
+			closedir(dd);
+			return 0;
+		}
+		pnames = g;
+		if (!(pnames[n_names] = dup_n(de->d_name, strlen(de->d_name)))) {
+			closedir(dd);
+			return 0;
+		}
+		n_names++;
+	}
+	closedir(dd);
+	if (!n_names)
+		return 1;
+	qsort(pnames, n_names, sizeof *pnames, ssrc_name_cmp);
+	if (n_names > 0xffffu) {
+		fprintf(stderr, "ksigbuilder: more syndromes than a pack holds\n");
+		return 0;
+	}
+	rec = calloc(n_names, sizeof *rec);
+	rlen = calloc(n_names, sizeof *rlen);
+	if (!rec || !rlen)
+		return 0;
+	total = 8u + n_names * 8u;
+	for (i = 0; i < n_names; i++) {
+		static struct kof_ssrc ps;
+		char *text;
+		size_t tn = 0, L = 4u + 1u;
+
+		snprintf(path, sizeof path, "%s/%s", dpath, pnames[i]);
+		text = slurp(path, &tn);
+		if (!text) {
+			fprintf(stderr, "FAIL: cannot open %s\n", path);
+			return 0;
+		}
+		src_name = pnames[i];
+		(void)kof_ssrc_parse(text, tn, &ps, &rep);
+		free(text);
+		if (errors)
+			return 0;
+		for (k = 0; k < ps.n_dis; k++)
+			L += 1u + strlen(ps.dis[k]);
+		rec[i] = calloc(1, L);
+		if (!rec[i])
+			return 0;
+		rec[i][0] = (unsigned char)ps.type_mask;
+		rec[i][1] = (unsigned char)(ps.type_mask >> 8);
+		rec[i][2] = (unsigned char)(ps.type_mask >> 16);
+		rec[i][3] = (unsigned char)(ps.type_mask >> 24);
+		rec[i][4] = (unsigned char)ps.n_dis;
+		at = 5u;
+		for (k = 0; k < ps.n_dis; k++) {
+			size_t l = strlen(ps.dis[k]), z;
+
+			rec[i][at++] = (unsigned char)l;
+			memcpy(rec[i] + at, ps.dis[k], l);
+			at += l;
+			for (z = 0; z < n_seen; z++)
+				if (!strcmp(seen[z], ps.dis[k]))
+					break;
+			if (z == n_seen) {
+				/* Only the cross-check below reads this list, and a
+				 * list that silently stopped growing would report a
+				 * behaviour as unnamed when a syndrome does name it. */
+				if (n_seen >= sizeof seen / sizeof seen[0]) {
+					fprintf(stderr, "FAIL: %s: more than %zu distinct "
+						"behaviours across the syndromes - raise the "
+						"bound in build_syndromes\n", pnames[i],
+						sizeof seen / sizeof seen[0]);
+					return 0;
+				}
+				memcpy(seen[n_seen++], ps.dis[k], l + 1u);
+			}
+		}
+		rlen[i] = L;
+		total += L;
+	}
+	out = calloc(1, total);
+	if (!out)
+		return 0;
+	memcpy(out, "KSYN", 4);
+	out[4] = 1;
+	out[6] = (unsigned char)n_names;
+	out[7] = (unsigned char)(n_names >> 8);
+	at = 8u + n_names * 8u;
+	for (i = 0; i < n_names; i++) {
+		unsigned char *e = out + 8u + i * 8u;
+		uint32_t off = (uint32_t)at, len = (uint32_t)rlen[i];
+
+		e[0] = (unsigned char)off; e[1] = (unsigned char)(off >> 8);
+		e[2] = (unsigned char)(off >> 16); e[3] = (unsigned char)(off >> 24);
+		e[4] = (unsigned char)len; e[5] = (unsigned char)(len >> 8);
+		e[6] = (unsigned char)(len >> 16); e[7] = (unsigned char)(len >> 24);
+		memcpy(out + at, rec[i], rlen[i]);
+		at += rlen[i];
+	}
+	snprintf(path, sizeof path, "%s/syndromes.kdig", db);
+	f = fopen(path, "wb");
+	if (!f || fwrite(out, 1, total, f) != total) {
+		fprintf(stderr, "FAIL: cannot write %s\n", path);
+		if (f) fclose(f);
+		return 0;
+	}
+	fclose(f);
+	printf("== %s  %zu syndrome(s), %zu bytes\n", path, n_names, total);
+	/*
+	 * THE TWO WAYS A SYNDROME AND A DIAGNOSE CAN DISAGREE. A behaviour a syndrome
+	 * names and no diagnose carries can never be found; and a diagnose whose
+	 * behaviour no syndrome names answers "unresolved" for every file it
+	 * matches, because a behaviour nobody verified is evidence for no type.
+	 * Warnings: both are what a database looks like part way through being
+	 * written.
+	 */
+	for (k = 0; k < n_seen; k++) {
+		unsigned z;
+
+		for (z = 0; z < g_n_built; z++)
+			if (!strcmp(g_built_annot[z], seen[k]))
+				break;
+		if (z == g_n_built)
+			fprintf(stderr, "ksigbuilder: warning: syndromes name the "
+				"behaviour \"%s\" and no diagnose carries it\n",
+				seen[k]);
+	}
+	{
+		unsigned z;
+
+		for (z = 0; z < g_n_built; z++) {
+			if (!g_built_annot[z][0])
+				continue;
+			for (k = 0; k < n_seen; k++)
+				if (!strcmp(g_built_annot[z], seen[k]))
+					break;
+			if (k == n_seen)
+				fprintf(stderr, "ksigbuilder: warning: no syndrome names "
+					"\"%s\", so a file it matches is never typed "
+					"by it\n", g_built_annot[z]);
+		}
+	}
+	for (i = 0; i < n_names; i++) {
+		free(pnames[i]);
+		free(rec[i]);
+	}
+	free(pnames);
+	free(rec);
+	free(rlen);
+	free(out);
+	return 1;
+}
+
 static int tree_main(int argc, char **argv)
 {
 	const char *base = argc > 2 ? argv[2] : NULL;
@@ -6778,7 +6988,8 @@ static int tree_main(int argc, char **argv)
 			 * not have. They are built below, by name, into a
 			 * file of their own.
 			 */
-			if (strcmp(e->d_name, "diagnoses") == 0)
+			if (strcmp(e->d_name, "diagnoses") == 0 ||
+			    strcmp(e->d_name, "syndromes") == 0)
 				continue;
 			sd = opendir(path);
 			if (!sd)
@@ -6898,6 +7109,8 @@ static int tree_main(int argc, char **argv)
 		if (dd)
 			closedir(dd);
 		if (!write_diag_packs(db, recs, kinds, n_recs))
+			return 1;
+		if (!build_syndromes(base, db))
 			return 1;
 		while (n_recs > 0) {
 			free(recs[--n_recs]);
@@ -7602,6 +7815,8 @@ static int diagnose_main(int argc, char **argv)
 	int n_when = v.n_when, has_seq = v.has_seq;
 	uint16_t seq_first = v.seq_first, seq_then = v.seq_then;
 	unsigned analysis = v.analysis;
+	const char *disease = v.disease;
+	size_t annot_len = strlen(v.disease);
 
 	need = sizeof(struct dhdr) + strlen(name) + (size_t)n_nd * 8u;
 	for (i = 0; i < n_nd; i++) {
@@ -7641,7 +7856,7 @@ static int diagnose_main(int argc, char **argv)
 				}
 		}
 	}
-	if (n_need || n_when || n_ref || g_uses_known)
+	if (n_need || n_when || n_ref || g_uses_known || annot_len)
 		need += 1u;                     /* the legacy name count: 0 */
 	if (n_need)
 		need += 2u + 2u * (size_t)n_need;   /* tag, length, caps */
@@ -7676,6 +7891,8 @@ static int diagnose_main(int argc, char **argv)
 	 */
 	if (n_when)
 		need += 2u + (size_t)n_when * 10u;
+	if (annot_len)
+		need += 2u + annot_len;                 /* tag, length, the bytes */
 	blob = calloc(1, need);
 	if (!blob)
 		return 1;
@@ -7720,7 +7937,7 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (n_need || n_when || n_ref || g_uses_known)
+	if (n_need || n_when || n_ref || g_uses_known || annot_len)
 		blob[at++] = 0;                 /* no names: see KDIG_SEC_NEEDS */
 	if (n_need) {
 		int k;
@@ -7792,9 +8009,16 @@ static int diagnose_main(int argc, char **argv)
 			left -= 1u + (unsigned)L;
 		}
 	}
+	if (annot_len) {
+		blob[at++] = KDIG_SEC_DISEASE;
+		blob[at++] = (unsigned char)annot_len;
+		memcpy(blob + at, disease, annot_len);
+		at += annot_len;
+	}
 	/* Remembered so the tree build can check that every call names a
 	 * diagnose that exists - see the end of tree_main. */
 	if (g_n_built < 64u) {
+		snprintf(g_built_annot[g_n_built], sizeof g_built_annot[0], "%s", disease);
 		snprintf(g_built[g_n_built++], sizeof g_built[0], "%s", name);
 	}
 	o = fopen(out, "wb");

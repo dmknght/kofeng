@@ -8,6 +8,7 @@
  * build when one is - the role table learnt that lesson the expensive way.
  */
 
+#include "../detectors/pathogen/diseases/kofdisease.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -628,6 +629,27 @@ int kof_dsrc_parse(const char *text, size_t n, struct kof_dsrc *d,
 				continue;
 			memcpy(it->s1, a[0], strlen(a[0]) + 1u);
 			d->n++;
+		} else if ((p = strstr(line, "KOF_DIAG_DISEASE(")) != NULL) {
+			size_t L;
+
+			if (!kof_dsrc_arg(p, 0, a[0], sizeof a[0])) {
+				say_err(r, &errs, (int)lineno,
+					"KOF_DIAG_DISEASE(\"layer/behaviour\")");
+				continue;
+			}
+			L = strlen(a[0]);
+			if (L < 3u || a[0][0] != '"' || a[0][L - 1u] != '"' ||
+			    L - 2u > KOF_DIAG_DISEASE_LEN) {
+				say_err(r, &errs, (int)lineno,
+					"KOF_DIAG_DISEASE wants a quoted path "
+					"of at most 63 characters");
+				continue;
+			}
+			if (!(it = add_item(d, &errs, r, lineno, KDS_DISEASE)))
+				continue;
+			memcpy(it->s1, a[0] + 1, L - 2u);
+			it->s1[L - 2u] = 0;
+			d->n++;
 		} else if (strstr(line, "KOF_DIAG_USE_EMU(") != NULL) {
 			if (!(it = add_item(d, &errs, r, lineno, KDS_USE_EMU)))
 				continue;
@@ -906,6 +928,18 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 		case KDS_NAME:
 			memcpy(v->name, it->s1, sizeof v->name);
 			break;
+		case KDS_DISEASE: {
+			/* What a well-formed disease is, asked of the one function that
+			 * decides it - see kofdisease.h. */
+			const char *why = kof_disease_check(it->s1);
+
+			if (v->disease[0])
+				say_err(r, &errs, ln, "a diagnose has one disease");
+			if (why)
+				say_err(r, &errs, ln, why);
+			memcpy(v->disease, it->s1, sizeof v->disease);
+			break;
+		}
 		case KDS_ANALYSIS:
 			v->analysis |= it->a;
 			break;
@@ -1204,6 +1238,9 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 	switch (it->kind) {
 	case KDS_NAME:
 		n = snprintf(out, cap, "KOF_DIAG_NAME(%s);", it->s1);
+		break;
+	case KDS_DISEASE:
+		n = snprintf(out, cap, "KOF_DIAG_DISEASE(\"%s\");", it->s1);
 		break;
 	case KDS_USE_EMU:
 		n = snprintf(out, cap, "KOF_DIAG_USE_EMU();");

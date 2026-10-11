@@ -64,7 +64,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
 #include "../libkofeng/analyzers/parsers/binaries/elf/elf_sym.h"
-#include "../libkofeng/detectors/pathogen/kofdiag.h"
+#include "../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
 #include "../libkofeng/analyzers/parsers/binaries/pe/pe_sym.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>

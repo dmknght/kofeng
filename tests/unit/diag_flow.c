@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "../../libkofeng/detectors/pathogen/diag_int.h"
+#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 
 static int fails;

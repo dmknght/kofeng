@@ -58,7 +58,7 @@
 #include <kofmod/sevenzip.h>
 
 #include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/kofdiag.h"
+#include "../detectors/pathogen/diagnoses/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -1115,6 +1115,45 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 		}
 	}
 	return 1;
+}
+
+uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, const char **out,
+			      uint32_t cap)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t i, n = 0, lim = kof_scan_diag_count(ctx);
+
+	if (!sc || !sc->eng || !sc->diag_all)
+		return 0;
+	/* The one run, if no rule had asked for it yet. */
+	kof_scan_diag_force(ctx);
+	if (!sc->diag_graph)
+		return 0;
+	for (i = 0; i < lim; i++) {
+		const struct kof_diag *d = &sc->eng->diag[i];
+
+		if (!d->disease || !((sc->diag_hit[i >> 3] >> (i & 7u)) & 1u))
+			continue;
+		if (out && n < cap)
+			out[n] = d->disease;
+		n++;
+	}
+	return n;
+}
+
+int kof_scan_syndrome(const struct kof_obj_ctx *ctx, struct kof_synd_result *r)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	const char *dis[KOF_DB_MAX_DIAG];
+	uint32_t n;
+
+	memset(r, 0, sizeof *r);
+	if (!sc || !sc->eng || !sc->eng->synd)
+		return 0;
+	n = kof_scan_diseases(ctx, dis, KOF_DB_MAX_DIAG);
+	if (n > KOF_DB_MAX_DIAG)
+		n = KOF_DB_MAX_DIAG;
+	return kof_synd_infer(sc->eng->synd, dis, n, r);
 }
 
 /*

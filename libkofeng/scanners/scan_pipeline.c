@@ -17,7 +17,7 @@
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/kofdiag.h"
+#include "../detectors/pathogen/diagnoses/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
@@ -709,6 +709,8 @@ static void st_report(struct kof_pipeline *p)
 	n = kof_scan_diag_count(&p->ctx);
 	if (!n)
 		return;
+	/* What the ones that matched make - the same analysis, nothing more to run. */
+	p->out->has_syndrome = (uint8_t)(kof_scan_syndrome(&p->ctx, &p->out->syndrome) != 0);
 	/* One buffer for the scanner's life, lent to the caller for its callback
 	 * - see kof_result.diag. */
 	if (!sc->diag_rep) {

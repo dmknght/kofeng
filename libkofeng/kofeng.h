@@ -436,6 +436,21 @@ struct kof_diag_report {
 };
 
 
+/*
+ * WHAT THE DIAGNOSES THAT MATCHED MAKE, by type - delivered in kof_result.syndrome
+ * to a caller that asked for kof_scan_option.report_diag, when at least one
+ * diagnose that names a disease matched and the database carries syndromes. Types are bits of
+ * 1u << kof_maltype. See detectors/pathogen/syndromes/kofsyndrome.h for what each means and
+ * for the name it renders to.
+ */
+struct kof_synd_result {
+	uint32_t guaranteed;    /* types the evidence proves */
+	uint32_t possible;      /* types still compatible and not proven */
+	uint32_t n_compat;      /* verified samples the evidence is no more than */
+	uint32_t n_query;       /* diseases asked about */
+	uint32_t n_unknown;     /* ...that no verified sample carries */
+};
+
 struct kof_result {
 	struct kof_finding v[KOF_MAX_FINDINGS];
 	uint32_t n;
@@ -681,6 +696,10 @@ struct kof_result {
 	 */
 	const struct kof_diag_report *diag;
 	uint32_t n_diag;
+	/* What the matched diagnoses make, with the same opt-in and the same
+	 * cost as `diag`. `has_syndrome` is 1 when `syndrome` was computed. */
+	struct kof_synd_result syndrome;
+	uint8_t has_syndrome;
 
 	/*
 	 * REGIONS THE PRODUCER DECLARED, when nothing could parse them out.

@@ -389,6 +389,8 @@ struct kof_diag_when {
  */
 #define KOF_DIAG_MAX_NEED  8u
 #define KOF_DIAG_NEED_LEN 48u
+/* A disease, without the terminator. */
+#define KOF_DIAG_DISEASE_LEN 63u
 
 struct kof_diag {
 	uint16_t              id;       /* assigned by the build            */
@@ -448,6 +450,11 @@ struct kof_diag {
 	 */
 	uint8_t               n_ref;
 	const char           *ref[KOF_DIAG_MAX_NEED];
+	/*
+	 * WHAT THE MATCH MEANS - see KOF_DIAG_DISEASE. NULL when the diagnose
+	 * has none. In the same string store as `need` and `ref`.
+	 */
+	const char           *disease;
 };
 
 /*
@@ -496,6 +503,27 @@ enum kof_diag_link {
  * joined to another - see the note on kof_diag_node.bits.
  */
 #define KOF_DIAG_NAME(id)
+/*
+ * KOF_DIAG_DISEASE("cnc/recv-syscall") - what this diagnose's match FINDS, as a
+ * word for the behaviour: the disease the test detects.
+ *
+ *     KOF_DIAG_DISEASE("flood-network/raw-header");
+ *
+ * ONE PER DIAGNOSE, and a path: the first part is the layer, the rest narrows
+ * it. A diagnose says what the code DOES; what KIND of malware a set of those
+ * is, is read from verified samples (see detectors/pathogen/syndromes/kofsyndrome.h), so
+ * the disease names a behaviour and never a family or a verdict. Optional:
+ * a diagnose without one matches as before and is simply not part of a syndrome.
+ */
+#define KOF_DIAG_DISEASE(s)
+/*
+ * KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET) and KOF_SYNDROME_HAS("cnc/recv-syscall") -
+ * a syndrome source, one verified sample: the types it was and the behaviours
+ * that fired on it. Read by ksigbuilder into syndromes.kdig. See
+ * databases/syndsrc.h.
+ */
+#define KOF_SYNDROME_TYPE(t)
+#define KOF_SYNDROME_HAS(s)
 #define KOF_DIAG_ANALYSIS(mask)
 /*
  * KOF_DIAG_USE_EMU() - run the emulator for this diagnose. Written, it is
@@ -643,6 +671,8 @@ enum kof_diag_link {
 /* The capabilities of a head the engine builds from two calls: first u16,
  * then u16, little endian. See KOF_DIAG_DECLARE_SEQUENCE. */
 #define KDIG_SEC_SEQUENCE 7u
+/* The disease: the bytes, not terminated. See KOF_DIAG_DISEASE. */
+#define KDIG_SEC_DISEASE 8u
 
 /*
  * AND A TAGGED ATTRIBUTE OF ONE NODE, inside that node's attr run: kind,

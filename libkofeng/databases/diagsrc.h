@@ -48,6 +48,7 @@ enum kof_dsrc_kind {
 	KDS_ACTION,     /* a  = the head's capability, b = the action, v = value */
 	KDS_FIELD,      /* a  = capability, s1 = the symbol's label           */
 	KDS_SEQUENCE,   /* a  = first capability, b = then                    */
+	KDS_DISEASE,      /* s1 = the disease                                */
 	/* A VERDICT'S OWN DECLARATION - see kof_dsrc_cond. */
 	KDS_VNAME       /* s1 = KOF_MALTYPE_* word, s2 = the family name       */
 };
@@ -141,6 +142,7 @@ struct kof_dsrc_node {
 
 struct kof_dsrc_view {
 	char     name[KOF_DSRC_NAME_LEN];
+	char     disease[KOF_DSRC_NAME_LEN];   /* "" when the diagnose has none */
 	unsigned analysis;      /* KOF_DIAG_ANALYSIS_* | KOF_DIAG_USES_EMU */
 	struct kof_dsrc_node nd[KOF_DSRC_MAX_NODE];
 	int      n_nd;

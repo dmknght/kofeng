@@ -917,6 +917,7 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/detectors/dbindex.c \
            libkofeng/databases/dbpacker.c \
            libkofeng/databases/diagsrc.c \
+           libkofeng/databases/syndsrc.c \
            libkofeng/detectors/heur/kofheur.c \
            libkofeng/detectors/overlord/matchers/kofmatch.c \
            libkofeng/detectors/overlord/plague/kofplague.c \
@@ -1001,12 +1002,14 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/scanners/objsrc.c \
            libkofeng/analyzers/trueline/trueline.c \
            libkofeng/detectors/overlord/kofoverlord.c \
-           libkofeng/detectors/pathogen/kofdiag.c \
-           libkofeng/detectors/pathogen/diag_emu.c \
-           libkofeng/detectors/pathogen/diag_sym.c \
-           libkofeng/detectors/pathogen/diag_pe.c \
-           libkofeng/detectors/pathogen/diag_wrap.c \
-           libkofeng/detectors/pathogen/diag_apihash.c \
+           libkofeng/detectors/pathogen/diagnoses/kofdiag.c \
+           libkofeng/detectors/pathogen/syndromes/kofsyndrome.c \
+           libkofeng/detectors/pathogen/diseases/kofdisease.c \
+           libkofeng/detectors/pathogen/diagnoses/diag_emu.c \
+           libkofeng/detectors/pathogen/diagnoses/diag_sym.c \
+           libkofeng/detectors/pathogen/diagnoses/diag_pe.c \
+           libkofeng/detectors/pathogen/diagnoses/diag_wrap.c \
+           libkofeng/detectors/pathogen/diagnoses/diag_apihash.c \
            libkofeng/disinfect/pzero.c \
            libkofeng/kofcore/kofhash.c \
            libkofeng/kofcore/kofdebug.c

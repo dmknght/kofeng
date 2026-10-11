@@ -30,18 +30,18 @@
 
 #include "kofdiag.h"
 #include "diag_int.h"
-#include "../../kofcore/kofcore.h"
-#include "../../kofcore/kofmod/kofcap.h"
-#include "../../kofcore/kofmod/kofsym.h"
-#include "../../kofcore/kofmod/pe.h"
-#include "../../kofcore/kofmod/cell.h"
-#include "../../analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../analyzers/parsers/binaries/pe/pe_sym.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/kofcap.h"
+#include "../../../kofcore/kofmod/kofsym.h"
+#include "../../../kofcore/kofmod/pe.h"
+#include "../../../kofcore/kofmod/cell.h"
+#include "../../../analyzers/parsers/binaries/pe/pe_parse.h"
+#include "../../../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/celllysis.h>
-#include "../../analyzers/nucleo/nucleo.h"
-#include "../../disinfect/pzero.h"
-#include "../../extractors/unpack/emu_unpack.h"
-#include "../../../libgenome/phenotype/kofemu.h"
+#include "../../../analyzers/nucleo/nucleo.h"
+#include "../../../disinfect/pzero.h"
+#include "../../../extractors/unpack/emu_unpack.h"
+#include "../../../../libgenome/phenotype/kofemu.h"
 #include <celllysis/space.h>
 
 /*

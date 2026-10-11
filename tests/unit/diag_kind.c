@@ -34,8 +34,8 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
-#include "../../libkofeng/detectors/pathogen/kofdiag.h"
-#include "../../libkofeng/detectors/pathogen/diag_int.h"
+#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
+#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
 
 static int fails;
 

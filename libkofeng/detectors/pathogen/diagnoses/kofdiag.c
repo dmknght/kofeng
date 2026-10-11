@@ -24,15 +24,15 @@
 #include <string.h>
 
 #include "kofdiag.h"
-#include "../../kofcore/kofdebug.h"
+#include "../../../kofcore/kofdebug.h"
 #include "diag_int.h"
-#include "../../kofcore/kofcore.h"
-#include "../../kofcore/kofmod/elf.h"
+#include "../../../kofcore/kofcore.h"
+#include "../../../kofcore/kofmod/elf.h"
 #include <celllysis/celllysis.h>
-#include "../../analyzers/nucleo/nucleo.h"
+#include "../../../analyzers/nucleo/nucleo.h"
 #include <celllysis/space.h>
-#include "../../analyzers/parsers/binaries/funcs.h"
-#include "../../analyzers/parsers/binaries/elf/elf_sym.h"
+#include "../../../analyzers/parsers/binaries/funcs.h"
+#include "../../../analyzers/parsers/binaries/elf/elf_sym.h"
 
 /*
  * HOW MANY NODES ONE OBJECT MAY HOLD.
@@ -2372,6 +2372,18 @@ int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
 					p2 += L2;
 				}
 				out->n_ref = (uint8_t)cnt2;
+			}
+			/* The disease: kept in the same store as the signs. A
+			 * length that does not fit refuses the record, like the
+			 * rest - a diagnose with half a name is another behaviour. */
+			if (tag == KDIG_SEC_DISEASE && needs && needs_cap) {
+				if (!len || len > KOF_DIAG_DISEASE_LEN ||
+				    used + len + 1u > needs_cap)
+					return 0;
+				memcpy(needs + used, b + at, len);
+				needs[used + len] = 0;
+				out->disease = needs + used;
+				used += len + 1u;
 			}
 			if (tag == KDIG_SEC_WHEN) {
 				uint32_t q;

@@ -124,7 +124,7 @@
 #include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../libkofeng/analyzers/parsers/binaries/funcs.h"
 #include "../libkofeng/analyzers/trueline/trueline.h"
-#include "../libkofeng/detectors/pathogen/kofdiag.h"
+#include "../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
 #include "../libkofeng/detectors/overlord/plague/kofplague.h"
 #include "../libkofeng/scanners/scan.h"
 #include "kofinspect.h"
