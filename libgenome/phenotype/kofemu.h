@@ -37,38 +37,41 @@
  * surface that makes emulation an arms race is simply not present here.
  */
 
-#ifndef KOFENG_KOFEMU_H
-#define KOFENG_KOFEMU_H
+#ifndef KGENOME_KOFEMU_H
+#define KGENOME_KOFEMU_H
 
 #include <stdint.h>
 
-struct kof_emu;
+struct kgenome_emu;
 
 /* Page size of the emulated address space. Not the host's; this is a property
  * of what is being emulated and the ELF images it loads. */
-#define KOF_EMU_PAGE      4096u
+#define KGENOME_EMU_PAGE      4096u
+/* The pages a run may touch when its config says nothing: 64 MiB of guest
+ * space. A caller with a smaller allowance passes fewer (kgenome_budget). */
+#define KGENOME_EMU_DEF_PAGES (16u * 1024u)
 
 /* General purpose registers, in the decoder's encoding order so a decoded operand
  * indexes this array directly rather than through a translation nobody would
  * keep in step. */
 enum {
-	KOF_EMU_RAX = 0, KOF_EMU_RCX, KOF_EMU_RDX, KOF_EMU_RBX,
-	KOF_EMU_RSP,     KOF_EMU_RBP, KOF_EMU_RSI, KOF_EMU_RDI,
-	KOF_EMU_R8,      KOF_EMU_R9,  KOF_EMU_R10, KOF_EMU_R11,
-	KOF_EMU_R12,     KOF_EMU_R13, KOF_EMU_R14, KOF_EMU_R15,
-	KOF_EMU_NGPR
+	KGENOME_EMU_RAX = 0, KGENOME_EMU_RCX, KGENOME_EMU_RDX, KGENOME_EMU_RBX,
+	KGENOME_EMU_RSP,     KGENOME_EMU_RBP, KGENOME_EMU_RSI, KGENOME_EMU_RDI,
+	KGENOME_EMU_R8,      KGENOME_EMU_R9,  KGENOME_EMU_R10, KGENOME_EMU_R11,
+	KGENOME_EMU_R12,     KGENOME_EMU_R13, KGENOME_EMU_R14, KGENOME_EMU_R15,
+	KGENOME_EMU_NGPR
 };
 
 /* Why the run ended. Only BUDGET and the two DONE reasons are ordinary; the
  * rest say the emulation went somewhere this build cannot follow, and are worth
  * counting because they are the map of what to implement next. */
-enum kof_emu_stop {
-	KOF_EMU_STOP_BUDGET = 0,   /* ran out of instructions - dump anyway */
-	KOF_EMU_STOP_EXIT,         /* the stub called exit/exit_group */
-	KOF_EMU_STOP_HANDOFF,      /* execve, or a jump into a page it wrote */
-	KOF_EMU_STOP_FAULT,        /* read, wrote or fetched an unmapped address */
-	KOF_EMU_STOP_UNSUPPORTED,  /* an instruction this build does not carry */
-	KOF_EMU_STOP_DECODE,       /* the decoder refused the bytes */
+enum kgenome_emu_stop {
+	KGENOME_EMU_STOP_BUDGET = 0,   /* ran out of instructions - dump anyway */
+	KGENOME_EMU_STOP_EXIT,         /* the stub called exit/exit_group */
+	KGENOME_EMU_STOP_HANDOFF,      /* execve, or a jump into a page it wrote */
+	KGENOME_EMU_STOP_FAULT,        /* read, wrote or fetched an unmapped address */
+	KGENOME_EMU_STOP_UNSUPPORTED,  /* an instruction this build does not carry */
+	KGENOME_EMU_STOP_DECODE,       /* the decoder refused the bytes */
 	/*
 	 * Waiting for something that is never going to happen. There is one
 	 * instruction pointer here, so a guest blocking on another thread is
@@ -77,22 +80,22 @@ enum kof_emu_stop {
 	 * otherwise consume the entire budget in a loop three instructions
 	 * long. Whatever has been written is still worth dumping.
 	 */
-	KOF_EMU_STOP_STALLED,
+	KGENOME_EMU_STOP_STALLED,
 	/*
 	 * THE INSTRUCTION ABOUT TO RUN IS ONE A MODULE ASKED TO SEE.
 	 *
 	 * Not a failure and not the end: the run is PAUSED with the guest's
-	 * state intact, the module reads what it wants, and kof_emu_run called
-	 * again carries on from the same place. See kof_emu_watch_insn.
+	 * state intact, the module reads what it wants, and kgenome_emu_run called
+	 * again carries on from the same place. See kgenome_emu_watch_insn.
 	 */
-	KOF_EMU_STOP_INSN,
+	KGENOME_EMU_STOP_INSN,
 	/*
 	 * THE DECRYPTION FINISHED. Not a failure and not a budget: the guest
 	 * decrypted something and then stopped doing so, which is exactly the
 	 * moment everything this interpreter exists for has already happened.
-	 * See KOF_EMU_QUIET.
+	 * See KGENOME_EMU_QUIET.
 	 */
-	KOF_EMU_STOP_QUIET
+	KGENOME_EMU_STOP_QUIET
 };
 
 /*
@@ -105,7 +108,7 @@ enum kof_emu_stop {
  * decoded and SIMULATED - nothing is jitted, nothing is mapped executable,
  * nothing reaches the host's CPU as code. A guest syscall is answered from
  * synthesised state; the only file it can ever see is the buffer handed to
- * kof_emu_set_self, and every descriptor it opens refers to that. So a run
+ * kgenome_emu_set_self, and every descriptor it opens refers to that. So a run
  * cannot read the machine it is running on, write to it, talk to a network, or
  * outlive the call.
  *
@@ -117,9 +120,9 @@ enum kof_emu_stop {
  *                  per REP iteration, so a repeat over a megabyte costs a
  *                  megabyte of budget rather than one instruction's worth
  *   pages          cfg.max_pages - guest address space that has been touched
- *   live mappings  KOF_EMU_MAX_VMA - mmap costs the host a record even when it
+ *   live mappings  KGENOME_EMU_MAX_VMA - mmap costs the host a record even when it
  *                  commits no page, so a loop of reservations needs a ceiling
- *   snapshots      KOF_EMU_MAX_SNAP and a byte total - these are COPIES, the
+ *   snapshots      KGENOME_EMU_MAX_SNAP and a byte total - these are COPIES, the
  *                  one thing here that can cost the host more than the guest
  *                  was given
  *
@@ -138,7 +141,7 @@ enum kof_emu_stop {
  * the densest interval measured on real decompression, so productive runs never
  * see it and an unproductive one ends in a fraction of a second.
  */
-#define KOF_EMU_IDLE      (4u << 20)
+#define KGENOME_EMU_IDLE      (4u << 20)
 
 /*
  * HOW LONG A RUN CARRIES ON AFTER THE DECRYPTION STOPS - AND WHY IT IS OFF.
@@ -169,16 +172,16 @@ enum kof_emu_stop {
  * loses a detection - measured, 57d128c3 stops after 11,066 instructions
  * having decrypted nothing.
  *
- * So this stays behind KOF_EMU_QUIET, off, with the numbers written down. A
+ * So this stays behind KGENOME_EMU_QUIET, off, with the numbers written down. A
  * relative rule - a multiple of the gaps seen so far - is the obvious next
  * thing to try and has not been measured.
  */
-#define KOF_EMU_QUIET     1500u
+#define KGENOME_EMU_QUIET     1500u
 
-#define KOF_EMU_MAX_VMA   1024u
-#define KOF_EMU_MAX_SNAP  64u
+#define KGENOME_EMU_MAX_VMA   1024u
+#define KGENOME_EMU_MAX_SNAP  64u
 
-struct kof_emu_cfg {
+struct kgenome_emu_cfg {
 	uint64_t max_insn;    /* instruction budget; 0 takes the default */
 	uint64_t max_pages;   /* pages this emulation may own; 0 takes the default */
 	/*
@@ -211,21 +214,21 @@ struct kof_emu_cfg {
 };
 
 /* Page protection, as PT_LOAD's p_flags spells it. */
-#define KOF_EMU_X   1u
-#define KOF_EMU_W   2u
-#define KOF_EMU_R   4u
+#define KGENOME_EMU_X   1u
+#define KGENOME_EMU_W   2u
+#define KGENOME_EMU_R   4u
 
-struct kof_emu *kof_emu_new(const struct kof_emu_cfg *cfg);
-void            kof_emu_free(struct kof_emu *e);
+struct kgenome_emu *kgenome_emu_new(const struct kgenome_emu_cfg *cfg);
+void            kgenome_emu_free(struct kgenome_emu *e);
 /* A copy of an emulator that has never run; NULL when it has, or on OOM. */
-struct kof_emu *kof_emu_fork(const struct kof_emu *t);
+struct kgenome_emu *kgenome_emu_fork(const struct kgenome_emu *t);
 
 /*
  * Map `n` bytes of `src` at `va`, in a region `memsz` long - the tail past `n`
  * reads as zero, which is what a PT_LOAD with memsz > filesz means. `src` may
  * be NULL for a region that is all zero, which is how a stack is made.
  */
-int kof_emu_map(struct kof_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
+int kgenome_emu_map(struct kgenome_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
 		uint64_t memsz, unsigned prot);
 
 /*
@@ -239,7 +242,7 @@ int kof_emu_map(struct kof_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
  *
  * Borrowed, not copied: the caller keeps them alive for the emulation.
  */
-void     kof_emu_set_self(struct kof_emu *e, const uint8_t *bytes, uint64_t n);
+void     kgenome_emu_set_self(struct kgenome_emu *e, const uint8_t *bytes, uint64_t n);
 
 /*
  * The FS or GS base, for a guest whose thread block the host builds.
@@ -255,7 +258,7 @@ void     kof_emu_set_self(struct kof_emu *e, const uint8_t *bytes, uint64_t n);
  * `seg` is 4 for FS and 5 for GS, which is the decoder's numbering and the only
  * numbering this interpreter uses for segments anywhere.
  */
-void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
+void     kgenome_emu_set_seg_base(struct kgenome_emu *e, unsigned seg, uint64_t base);
 
 /*
  * ---- THE WINDOWS ENVIRONMENT ----------------------------------------------
@@ -266,27 +269,27 @@ void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
  * on i386, where the callee pops - the argument count of every function, so
  * the table lives in kofemu.c and is read through these.
  *
- * KOF_EMU_WIN_STUB is how far apart the stubs are. Eight bytes is what one
+ * KGENOME_EMU_WIN_STUB is how far apart the stubs are. Eight bytes is what one
  * needs (load the trap number, trap, return) and sixteen leaves the next one
  * aligned, which matters only in that a disassembly of the page is readable.
  */
-#define KOF_EMU_WIN_STUB 16u
+#define KGENOME_EMU_WIN_STUB 16u
 /* Where the stubs sit inside every module image. One number, because the
  * images are all built the same way and a resolver never sees it. */
-#define KOF_EMU_WIN_STUB_RVA 0x1000u
+#define KGENOME_EMU_WIN_STUB_RVA 0x1000u
 
 /* The libraries this environment can hand out a base for. kernel32 is first
  * because it is the one a stub always asks for and the one a report names. */
-#define KOF_EMU_WIN_MOD_K32   0u
-#define KOF_EMU_WIN_MOD_NTDLL 1u
+#define KGENOME_EMU_WIN_MOD_K32   0u
+#define KGENOME_EMU_WIN_MOD_NTDLL 1u
 /* The rest of win_mod[], in its order. Only the first two had names, so an
  * export belonging to any other module could not be written down. */
-#define KOF_EMU_WIN_MOD_USER32   2u
-#define KOF_EMU_WIN_MOD_ADVAPI32 3u
-#define KOF_EMU_WIN_MOD_SHELL32  4u
-#define KOF_EMU_WIN_MOD_SHLWAPI  5u
-#define KOF_EMU_WIN_MOD_MSVCRT   6u
-#define KOF_EMU_WIN_MOD_OLE32    7u
+#define KGENOME_EMU_WIN_MOD_USER32   2u
+#define KGENOME_EMU_WIN_MOD_ADVAPI32 3u
+#define KGENOME_EMU_WIN_MOD_SHELL32  4u
+#define KGENOME_EMU_WIN_MOD_SHLWAPI  5u
+#define KGENOME_EMU_WIN_MOD_MSVCRT   6u
+#define KGENOME_EMU_WIN_MOD_OLE32    7u
 /*
  * AND KERNELBASE, WHICH IS NOT AN ALIAS FOR KERNEL32.
  *
@@ -298,7 +301,7 @@ void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
  * one image behind both names those writes land on kernel32's export
  * directory. Its own image costs a mapping and keeps the two apart.
  */
-#define KOF_EMU_WIN_MOD_KBASE    8u
+#define KGENOME_EMU_WIN_MOD_KBASE    8u
 /*
  * WS2_32, AND WHY IT IS HERE. A Windows stager has no import table to speak of:
  * it LoadLibrary's ws2_32 and walks its exports for socket, connect and recv.
@@ -308,8 +311,8 @@ void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
  * LoadLibraryA by itself. The module is what lets the stager's OWN resolver run
  * to the end, whatever hash it uses.
  */
-#define KOF_EMU_WIN_MOD_WS2      9u
-#define KOF_EMU_WIN_MOD_COUNT 10u
+#define KGENOME_EMU_WIN_MOD_WS2      9u
+#define KGENOME_EMU_WIN_MOD_COUNT 10u
 
 /*
  * How much address space one synthetic library occupies. The builder in
@@ -319,34 +322,34 @@ void     kof_emu_set_seg_base(struct kof_emu *e, unsigned seg, uint64_t base);
  * there and a protector asks in order to find out whether it is being
  * emulated.
  */
-#define KOF_EMU_WIN_MOD_SPAN (256u * KOF_EMU_PAGE)
+#define KGENOME_EMU_WIN_MOD_SPAN (256u * KGENOME_EMU_PAGE)
 
-unsigned    kof_emu_win_api_count(void);
-const char *kof_emu_win_api_name(unsigned i);
-unsigned    kof_emu_win_api_argc(unsigned i);
-unsigned    kof_emu_win_api_mod(unsigned i);
-unsigned    kof_emu_win_api_slot(unsigned i);
-uint32_t    kof_emu_win_api_trap(unsigned i);
+unsigned    kgenome_emu_win_api_count(void);
+const char *kgenome_emu_win_api_name(unsigned i);
+unsigned    kgenome_emu_win_api_argc(unsigned i);
+unsigned    kgenome_emu_win_api_mod(unsigned i);
+unsigned    kgenome_emu_win_api_slot(unsigned i);
+uint32_t    kgenome_emu_win_api_trap(unsigned i);
 
-unsigned    kof_emu_win_mod_count(void);
-const char *kof_emu_win_mod_name(unsigned i);
-uint64_t    kof_emu_win_mod_base(unsigned i, unsigned bits);
-void        kof_emu_win_set_module(struct kof_emu *e, unsigned i,
+unsigned    kgenome_emu_win_mod_count(void);
+const char *kgenome_emu_win_mod_name(unsigned i);
+uint64_t    kgenome_emu_win_mod_base(unsigned i, unsigned bits);
+void        kgenome_emu_win_set_module(struct kgenome_emu *e, unsigned i,
 				   uint64_t base);
 /* Where the process heap structure is. GetProcessHeap hands this back, and a
  * guest reads its Flags through it - so it is an address and not a token. */
-void        kof_emu_win_set_heap(struct kof_emu *e, uint64_t heap);
+void        kgenome_emu_win_set_heap(struct kgenome_emu *e, uint64_t heap);
 
 /* Count reads that land inside a library image, so "never asked" can be told
  * from "asked and was not answered". Off by default - see mem_rd. */
-void        kof_emu_count_mod_reads(struct kof_emu *e, int on);
-uint64_t    kof_emu_mod_reads(const struct kof_emu *e, unsigned i);
+void        kgenome_emu_count_mod_reads(struct kgenome_emu *e, int on);
+uint64_t    kgenome_emu_mod_reads(const struct kgenome_emu *e, unsigned i);
 /*
  * ---- INSTRUCTION TRACE ----------------------------------------------------
  *
  * The last N instructions, each with the registers AS THEY WERE BEFORE IT RAN.
  *
- * WHY THE REGISTERS AND NOT JUST THE ADDRESSES. kof_emu_first_hop and the rip
+ * WHY THE REGISTERS AND NOT JUST THE ADDRESSES. kgenome_emu_first_hop and the rip
  * ring above answer "where did it go"; they cannot answer "where did that
  * address come from", and that is the question a wrong address always raises.
  * Measured on an MPRESS sample: the stub read a library at base+0x2296c
@@ -359,35 +362,35 @@ uint64_t    kof_emu_mod_reads(const struct kof_emu *e, unsigned i);
  * of them. This is a diagnostic to turn on for one file, never something a
  * scan runs with.
  *
- * n is rounded down to KOF_EMU_ITRACE_MAX and 0 turns it off, freeing the
- * ring. Entries are read oldest first: k from 0 to kof_emu_itrace_count.
+ * n is rounded down to KGENOME_EMU_ITRACE_MAX and 0 turns it off, freeing the
+ * ring. Entries are read oldest first: k from 0 to kgenome_emu_itrace_count.
  *
  * THE RING KEEPS THE LAST N, WHICH IS USUALLY THE WRONG N. A run that goes
  * wrong at instruction 60000 and then wanders for another 250000 leaves
- * nothing of the mistake in a ring of any affordable size. kof_emu_itrace_at
+ * nothing of the mistake in a ring of any affordable size. kgenome_emu_itrace_at
  * names the address to stop recording at, so the ring holds the N
  * instructions BEFORE it - which is where the value that address was built
  * from came from. 0 records to the end.
  */
-#define KOF_EMU_ITRACE_MAX 262144u
+#define KGENOME_EMU_ITRACE_MAX 262144u
 
-int         kof_emu_itrace(struct kof_emu *e, unsigned n);
-void        kof_emu_itrace_at(struct kof_emu *e, uint64_t rip);
+int         kgenome_emu_itrace(struct kgenome_emu *e, unsigned n);
+void        kgenome_emu_itrace_at(struct kgenome_emu *e, uint64_t rip);
 /* Or freeze at an instruction NUMBER, which an address cannot express: an
  * address inside a dispatch loop is reached thousands of times and the first
  * hit is never the interesting one. 0 for never. */
-void        kof_emu_itrace_until(struct kof_emu *e, uint64_t insn);
-void        kof_emu_itrace_on_null(struct kof_emu *e, int on);
-unsigned    kof_emu_itrace_count(const struct kof_emu *e);
-int         kof_emu_itrace_get(const struct kof_emu *e, unsigned k,
+void        kgenome_emu_itrace_until(struct kgenome_emu *e, uint64_t insn);
+void        kgenome_emu_itrace_on_null(struct kgenome_emu *e, int on);
+unsigned    kgenome_emu_itrace_count(const struct kgenome_emu *e);
+int         kgenome_emu_itrace_get(const struct kgenome_emu *e, unsigned k,
 			       uint64_t *rip, const char **text,
 			       const uint64_t **gpr);
 
-void        kof_emu_first_hop(const struct kof_emu *e, uint64_t *insn,
+void        kgenome_emu_first_hop(const struct kgenome_emu *e, uint64_t *insn,
 			      uint64_t *rip);
 /* And the last hop, plus how many there were: where execution had got to when
  * the run ended, which is the address a dump writes as its entry point. */
-void        kof_emu_last_hop(const struct kof_emu *e, uint64_t *rip,
+void        kgenome_emu_last_hop(const struct kgenome_emu *e, uint64_t *rip,
 			     uint32_t *count);
 
 /*
@@ -395,7 +398,7 @@ void        kof_emu_last_hop(const struct kof_emu *e, uint64_t *rip,
  * called every entry point in that environment answers zero, so an ELF run
  * cannot reach any of it.
  */
-void kof_emu_win_setup(struct kof_emu *e, uint64_t image_base);
+void kgenome_emu_win_setup(struct kgenome_emu *e, uint64_t image_base);
 
 /* The address a named export resolves to, for filling an import thunk. Zero
  * for a name this environment does not carry, which is a thunk to leave as the
@@ -414,40 +417,40 @@ void kof_emu_win_setup(struct kof_emu *e, uint64_t image_base);
  * The first four arguments are the ones the Windows APIs a stager uses carry
  * their meaning in; `ret` is what the environment answered.
  */
-struct kof_emu_win_event {
+struct kgenome_emu_win_event {
 	uint64_t site;
-	uint32_t api;           /* an index for kof_emu_win_api_name */
+	uint32_t api;           /* an index for kgenome_emu_win_api_name */
 	uint32_t count;
 	uint64_t arg[4];
 	uint64_t ret;
 };
 
-uint32_t kof_emu_win_event_count(const struct kof_emu *e);
+uint32_t kgenome_emu_win_event_count(const struct kgenome_emu *e);
 /* The address of the instruction that last transferred control. With the final
  * rip it says where a run LEFT from, which is the jump into a buffer the
  * program allocated and filled - the `jmp r15` at the end of a stager. */
-uint64_t kof_emu_last_branch_at(const struct kof_emu *e);
+uint64_t kgenome_emu_last_branch_at(const struct kgenome_emu *e);
 
-int      kof_emu_win_event_at(const struct kof_emu *e, uint32_t i,
-			      struct kof_emu_win_event *out);
+int      kgenome_emu_win_event_at(const struct kgenome_emu *e, uint32_t i,
+			      struct kgenome_emu_win_event *out);
 
-uint64_t kof_emu_win_addr_of(struct kof_emu *e, const char *name);
+uint64_t kgenome_emu_win_addr_of(struct kgenome_emu *e, const char *name);
 /* The same, but a plausible name the table lacks gets a miss thunk instead of
  * 0 - see the definition. For a resolver (GetProcAddress, the IAT fill). */
-uint64_t kof_emu_win_resolve(struct kof_emu *e, const char *name);
+uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name);
 
-void     kof_emu_set_rip(struct kof_emu *e, uint64_t rip);
-void     kof_emu_set_reg(struct kof_emu *e, unsigned gpr, uint64_t v);
-uint64_t kof_emu_get_reg(const struct kof_emu *e, unsigned gpr);
+void     kgenome_emu_set_rip(struct kgenome_emu *e, uint64_t rip);
+void     kgenome_emu_set_reg(struct kgenome_emu *e, unsigned gpr, uint64_t v);
+uint64_t kgenome_emu_get_reg(const struct kgenome_emu *e, unsigned gpr);
 /*
- * Where the machine is. A module that PAUSED a run - see kof_emu_watch_insn -
+ * Where the machine is. A module that PAUSED a run - see kgenome_emu_watch_insn -
  * is standing at an instruction it asked to stop at, and cannot check what
  * surrounds it without knowing where it is.
  */
-uint64_t kof_emu_get_rip(const struct kof_emu *e);
-uint64_t kof_emu_rip(const struct kof_emu *e);
+uint64_t kgenome_emu_get_rip(const struct kgenome_emu *e);
+uint64_t kgenome_emu_rip(const struct kgenome_emu *e);
 
-enum kof_emu_stop kof_emu_run(struct kof_emu *e);
+enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e);
 
 /*
  * ---- RUNNING ON, WHEN THE RUN IS STILL PRODUCING -------------------------
@@ -460,10 +463,10 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e);
  * on a crafted one, where the whole ceiling buys nothing.
  *
  * So the ceiling is raised only for a run that has EARNED it, and the evidence
- * is the one the interpreter already keeps: kof_emu_last_write says how far
+ * is the one the interpreter already keeps: kgenome_emu_last_write says how far
  * back the last page it had never written before was. A run still touching
  * fresh memory is still unpacking; one that has not for millions of
- * instructions is spinning, which is what KOF_EMU_STOP_STALLED already says
+ * instructions is spinning, which is what KGENOME_EMU_STOP_STALLED already says
  * about a shorter version of the same thing.
  *
  * THE CALLER OWNS THE POLICY. This pair only reports and permits: how many
@@ -473,29 +476,29 @@ enum kof_emu_stop kof_emu_run(struct kof_emu *e);
  * Memory is NOT extended with it: max_pages and the snapshot budget are
  * unchanged, so a longer run cannot hold more than a short one.
  */
-uint64_t kof_emu_last_write(const struct kof_emu *e);
-void     kof_emu_set_max_insn(struct kof_emu *e, uint64_t n);
+uint64_t kgenome_emu_last_write(const struct kgenome_emu *e);
+void     kgenome_emu_set_max_insn(struct kgenome_emu *e, uint64_t n);
 
 /*
  * RUN THE ONE INSTRUCTION THE MACHINE IS STOPPED ON, even when it is watched.
  *
- * A pause from kof_emu_watch_insn leaves rip ON the instruction, so resuming
+ * A pause from kgenome_emu_watch_insn leaves rip ON the instruction, so resuming
  * pauses on it again and a caller can never see what it did. This executes
  * exactly it and restores the budget and the watch. Returns why the step
- * ended - KOF_EMU_STOP_BUDGET when it simply finished.
+ * ended - KGENOME_EMU_STOP_BUDGET when it simply finished.
  */
-enum kof_emu_stop kof_emu_step(struct kof_emu *e);
+enum kgenome_emu_stop kgenome_emu_step(struct kgenome_emu *e);
 
 /*
  * THE TWO BOUNDS THAT ARE NOT AN INSTRUCTION COUNT.
  *
- * kof_emu_set_idle replaces KOF_EMU_IDLE for this run: how many instructions
+ * kgenome_emu_set_idle replaces KGENOME_EMU_IDLE for this run: how many instructions
  * may pass with no page touched for the first time before the run is called
  * finished. The default is the right answer for a scan; a diagnostic that
  * wants to see how far a guest WOULD get raises it, and takes on the risk the
  * default exists to avoid.
  *
- * kof_emu_set_deadline is a WALL CLOCK bound and is the only one that holds
+ * kgenome_emu_set_deadline is a WALL CLOCK bound and is the only one that holds
  * when the others are lifted. An instruction budget bounds work, not time, and
  * the two stop being the same number as soon as the budget is large: a guest
  * that would run for an hour is not made safe by permitting it. 0 disables it.
@@ -505,14 +508,14 @@ enum kof_emu_stop kof_emu_step(struct kof_emu *e);
  */
 /* How many times the run called an import this environment does not export -
  * see the null page check in the loop. A high number is a list to extend. */
-unsigned kof_emu_null_calls(const struct kof_emu *e);
+unsigned kgenome_emu_null_calls(const struct kgenome_emu *e);
 /* And how many exceptions it raised that nothing caught. */
-unsigned kof_emu_unhandled(const struct kof_emu *e);
+unsigned kgenome_emu_unhandled(const struct kgenome_emu *e);
 /* And how many fields it read off a null pointer. */
-unsigned kof_emu_null_reads(const struct kof_emu *e);
-uint64_t kof_emu_idle_max(const struct kof_emu *e);
-void     kof_emu_set_idle(struct kof_emu *e, uint64_t n);
-void     kof_emu_set_deadline(struct kof_emu *e, uint64_t ms);
+unsigned kgenome_emu_null_reads(const struct kgenome_emu *e);
+uint64_t kgenome_emu_idle_max(const struct kgenome_emu *e);
+void     kgenome_emu_set_idle(struct kgenome_emu *e, uint64_t n);
+void     kgenome_emu_set_deadline(struct kgenome_emu *e, uint64_t ms);
 
 /*
  * Copy every run of written memory into the snapshot set, now.
@@ -527,7 +530,7 @@ void     kof_emu_set_deadline(struct kof_emu *e, uint64_t ms);
  * it is kept before the risk is taken. Bounded by the same snapshot budget as
  * every other snapshot, so this cannot grow memory without limit.
  */
-void     kof_emu_snap_written(struct kof_emu *e);
+void     kgenome_emu_snap_written(struct kgenome_emu *e);
 
 /*
  * Make a Windows API of this environment return `ret`, whatever it would have
@@ -536,26 +539,26 @@ void     kof_emu_snap_written(struct kof_emu *e);
  * the null-call policy and has no handler to replace) or the table is full.
  * Later declarations of the same name replace earlier ones.
  */
-int      kof_emu_shim_api(struct kof_emu *e, const char *name, uint64_t ret);
+int      kgenome_emu_shim_api(struct kgenome_emu *e, const char *name, uint64_t ret);
 
 /* How many instructions were retired, and where it stopped. For deciding
  * whether a dump is worth taking and for reporting what a build cannot do. */
-uint64_t    kof_emu_insn_count(const struct kof_emu *e);
+uint64_t    kgenome_emu_insn_count(const struct kgenome_emu *e);
 
 /* Faults offered to a guest exception handler, faults a handler took, and how
  * many vectored handlers the guest registered. See the exception dispatcher in
  * kofemu.c for why the first two are counted separately. */
-void kof_emu_exc_counts(const struct kof_emu *e, uint32_t *raised,
+void kgenome_emu_exc_counts(const struct kgenome_emu *e, uint32_t *raised,
 			uint32_t *taken, uint32_t *veh);
 
 /* Where the exception records were built, so a harvest can leave them alone -
- * the same reason kof_emu_unp_report carries the stack. Zero when no exception
+ * the same reason kgenome_emu_unp_report carries the stack. Zero when no exception
  * was ever raised, in which case nothing was built. */
-uint64_t kof_emu_exc_scratch(const struct kof_emu *e, uint64_t *len);
-const char *kof_emu_stop_name(enum kof_emu_stop s);
+uint64_t kgenome_emu_exc_scratch(const struct kgenome_emu *e, uint64_t *len);
+const char *kgenome_emu_stop_name(enum kgenome_emu_stop s);
 /* The mnemonic that ended an UNSUPPORTED run, or "" - this is the list that
  * says what to implement next, so it is kept rather than merely counted. */
-const char *kof_emu_stop_detail(const struct kof_emu *e);
+const char *kgenome_emu_stop_detail(const struct kgenome_emu *e);
 
 /*
  * THE LAST FEW ADDRESSES EXECUTED, NEWEST LAST.
@@ -567,16 +570,16 @@ const char *kof_emu_stop_detail(const struct kof_emu *e);
  *
  * Returns how many were written into `out`.
  */
-#define KOF_EMU_TRACE   256u
-unsigned kof_emu_trace(const struct kof_emu *e, uint64_t *out, unsigned n);
+#define KGENOME_EMU_TRACE   256u
+unsigned kgenome_emu_trace(const struct kgenome_emu *e, uint64_t *out, unsigned n);
 
 /*
  * Read emulated memory. Returns 0 if any byte of the range is unmapped, and
  * touches nothing then - a partial read is the failure mode this whole module
  * is arranged to make impossible, so it is not offered here either.
  */
-int kof_emu_read(struct kof_emu *e, uint64_t va, void *dst, unsigned n);
-int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n);
+int kgenome_emu_read(struct kgenome_emu *e, uint64_t va, void *dst, unsigned n);
+int kgenome_emu_write(struct kgenome_emu *e, uint64_t va, const void *src, unsigned n);
 
 /*
  * ---- WHERE THE ORIGINAL PROGRAM WILL BE, AND STOPPING WHEN IT RUNS --------
@@ -607,18 +610,18 @@ int kof_emu_write(struct kof_emu *e, uint64_t va, const void *src, unsigned n);
  * decompresses into the section its own entry point is in, so "being in one"
  * ended the run at instruction 0.
  *
- * Ranges are half open. At most KOF_EMU_EXEC_WATCH of them; more are dropped,
+ * Ranges are half open. At most KGENOME_EMU_EXEC_WATCH of them; more are dropped,
  * since a file declaring dozens of hollow sections is describing something
  * other than a packed program.
  */
-#define KOF_EMU_EXEC_WATCH 16u
+#define KGENOME_EMU_EXEC_WATCH 16u
 
-void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi);
+void kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
 
 /*
  * ---- STOPPING ON WHAT IS ABOUT TO RUN, RATHER THAN ON WHERE ----------------
  *
- * kof_emu_watch_exec names an ADDRESS, and that is the wrong question for
+ * kgenome_emu_watch_exec names an ADDRESS, and that is the wrong question for
  * three families this engine meets:
  *
  *   - PECompact copies its loader to 0x20000000 and finishes there, so the
@@ -630,8 +633,8 @@ void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi);
  *
  * So a module names BYTES. The run stops when the instruction about to execute
  * begins with them, and that is a pause: registers and memory are as the guest
- * left them, kof_emu_reg and kof_emu_read answer about that moment, and calling
- * kof_emu_run again continues from it.
+ * left them, kof_emu_reg and kgenome_emu_read answer about that moment, and calling
+ * kgenome_emu_run again continues from it.
  *
  * WHY A PAUSE AND NOT A CALLBACK. A callback would put module code inside the
  * loop that executes hostile bytes, and the one architectural rule here is that
@@ -643,22 +646,22 @@ void kof_emu_watch_exec(struct kof_emu *e, uint64_t lo, uint64_t hi);
  * one-byte C3, read [ESP] and check what is there - expressed without a hook.
  * See THIRD-PARTY.md.
  *
- * `n` is 1 to KOF_EMU_INSN_WATCH_LEN bytes. Up to KOF_EMU_INSN_WATCH patterns.
+ * `n` is 1 to KGENOME_EMU_INSN_WATCH_LEN bytes. Up to KGENOME_EMU_INSN_WATCH patterns.
  */
-#define KOF_EMU_INSN_WATCH     8u
+#define KGENOME_EMU_INSN_WATCH     8u
 /* Declared API return values per run - a bound on a module's declaration, not
  * on anything the file supplies. */
-#define KOF_EMU_SHIM_MAX       16u
-#define KOF_EMU_INSN_WATCH_LEN 8u
+#define KGENOME_EMU_SHIM_MAX       16u
+#define KGENOME_EMU_INSN_WATCH_LEN 8u
 
-void kof_emu_watch_insn(struct kof_emu *e, const uint8_t *bytes, unsigned n);
+void kgenome_emu_watch_insn(struct kgenome_emu *e, const uint8_t *bytes, unsigned n);
 
 /*
  * AND WHETHER THE WHOLE INSTRUCTION IS THAT LONG, which is what tells `C3`
  * from `C2 imm16` and from a longer instruction that merely starts with those
  * bytes. 0 means "do not care".
  */
-void kof_emu_watch_insn_len(struct kof_emu *e, unsigned len);
+void kgenome_emu_watch_insn_len(struct kgenome_emu *e, unsigned len);
 
 /*
  * AND WHERE THE CIPHERTEXT IS.
@@ -670,8 +673,8 @@ void kof_emu_watch_insn_len(struct kof_emu *e, unsigned len);
  * themida-dumper polls the same sections from outside the process for the same
  * reason; see THIRD-PARTY.md.
  */
-void kof_emu_watch_write(struct kof_emu *e, uint64_t lo, uint64_t hi);
-int  kof_emu_write_seen(const struct kof_emu *e);
+void kgenome_emu_watch_write(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
+int  kgenome_emu_write_seen(const struct kgenome_emu *e);
 
 /*
  * WHERE THE STUB ITSELF LIVES, so that a jump into a page it wrote is only a
@@ -689,11 +692,11 @@ int  kof_emu_write_seen(const struct kof_emu *e);
  * THIRD-PARTY.md. Given as the entry point's section, which is the stub's own
  * by definition.
  */
-void kof_emu_set_stub_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
+void kgenome_emu_set_stub_range(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
 /* And the stack, for the same test and the same reason. */
-void kof_emu_set_stack_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
+void kgenome_emu_set_stack_range(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
 /* And where the image is - see the dump at the handover in the run loop. */
-void kof_emu_set_image_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
+void kgenome_emu_set_image_range(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
 
 /*
  * THE HANDOVER, BY THE SHAPE OF THE TRANSFER RATHER THAN BY ITS ADDRESS.
@@ -706,7 +709,7 @@ void kof_emu_set_image_range(struct kof_emu *e, uint64_t lo, uint64_t hi);
  * THIRD-PARTY.md. It needs no ranges from a module and no guess about where
  * the program will be.
  */
-void kof_emu_set_oep_watch(struct kof_emu *e, int on);
+void kgenome_emu_set_oep_watch(struct kgenome_emu *e, int on);
 
 /*
  * ---- SECTION HOPPING ------------------------------------------------------
@@ -728,7 +731,7 @@ void kof_emu_set_oep_watch(struct kof_emu *e, int on);
  * makes section hopping the ordinary mechanism; its source was read to
  * understand that and none of it is reproduced here. See THIRD-PARTY.md.
  */
-void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen);
+void kgenome_emu_hop_add(struct kgenome_emu *e, uint64_t lo, uint64_t hi, int seen);
 
 /*
  * WATCH ONE ADDRESS, so "nothing ever wrote it" can be told apart from "the
@@ -738,9 +741,9 @@ void kof_emu_hop_add(struct kof_emu *e, uint64_t lo, uint64_t hi, int seen);
  * or written a different one, and reading the code cannot settle which. Records
  * the rip and value of every write that touches the byte at `va`.
  */
-#define KOF_EMU_WATCH_MAX 16u
-void     kof_emu_watch(struct kof_emu *e, uint64_t va);
-unsigned kof_emu_watch_hits(const struct kof_emu *e, uint64_t *rip,
+#define KGENOME_EMU_WATCH_MAX 16u
+void     kgenome_emu_watch(struct kgenome_emu *e, uint64_t va);
+unsigned kgenome_emu_watch_hits(const struct kgenome_emu *e, uint64_t *rip,
 			    uint64_t *val, unsigned n);
 
 /*
@@ -752,28 +755,28 @@ unsigned kof_emu_watch_hits(const struct kof_emu *e, uint64_t *rip,
  * numbers are kept: they are the list of what to implement next, and without
  * them a wrong result looks like an emulation bug rather than a missing stub.
  */
-#define KOF_EMU_UNKSYS  8u
-unsigned kof_emu_unknown_syscalls(const struct kof_emu *e, uint32_t *out,
+#define KGENOME_EMU_UNKSYS  8u
+unsigned kgenome_emu_unknown_syscalls(const struct kgenome_emu *e, uint32_t *out,
 				  unsigned n);
 
 /*
- * EVERY SYSCALL THE STUB MADE, newest last, capped at the last KOF_EMU_SYSLOG.
+ * EVERY SYSCALL THE STUB MADE, newest last, capped at the last KGENOME_EMU_SYSLOG.
  *
- * kof_emu_unknown_syscalls says what was refused; this says what was asked and
+ * kgenome_emu_unknown_syscalls says what was refused; this says what was asked and
  * what it was told, which is a different question. A stub that gets a plausible
  * answer to the wrong question fails silently much later - a read served short,
  * an fstat size the decompressor then trusts - and there is no way to see that
  * from the register dump at the end.
  */
-#define KOF_EMU_SYSLOG 64u
-struct kof_emu_syscall {
+#define KGENOME_EMU_SYSLOG 64u
+struct kgenome_emu_syscall {
 	uint64_t nr, arg[6], ret;
 };
-unsigned kof_emu_syscall_log(const struct kof_emu *e,
-			     struct kof_emu_syscall *out, unsigned n);
+unsigned kgenome_emu_syscall_log(const struct kgenome_emu *e,
+			     struct kgenome_emu_syscall *out, unsigned n);
 
 /*
- * WHAT THE GUEST PRINTED, from the beginning and no more than KOF_EMU_SAY.
+ * WHAT THE GUEST PRINTED, from the beginning and no more than KGENOME_EMU_SAY.
  *
  * A runtime that refuses to start says why on its standard error, and that
  * sentence is worth more than any register dump: a Go-built packer printed a
@@ -783,7 +786,7 @@ unsigned kof_emu_syscall_log(const struct kof_emu *e,
  * Returns the number of bytes placed in `out`; nothing is NUL-terminated for
  * the caller.
  */
-#define KOF_EMU_SAY 4096u
+#define KGENOME_EMU_SAY 4096u
 
 /*
  * WHAT THE STUB DECOMPRESSED, CAUGHT WHILE IT STILL EXISTS.
@@ -799,9 +802,9 @@ unsigned kof_emu_syscall_log(const struct kof_emu *e,
  *
  * Walk with *it = 0 until it returns 0. Snapshots are owned by the emulator.
  * A packer that maps its payload PROT_EXEC from the start never mprotects, and
- * leaves nothing here; kof_emu_next_written still has those pages.
+ * leaves nothing here; kgenome_emu_next_written still has those pages.
  */
-int kof_emu_next_snapshot(struct kof_emu *e, uint32_t *it, uint64_t *va,
+int kgenome_emu_next_snapshot(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 			  const uint8_t **bytes, uint64_t *len);
 
 /*
@@ -812,7 +815,7 @@ int kof_emu_next_snapshot(struct kof_emu *e, uint32_t *it, uint64_t *va,
  * until it returns 0. The bytes stay owned by the emulator and are valid until
  * it is freed.
  */
-int kof_emu_next_written(struct kof_emu *e, uint32_t *it, uint64_t *va,
+int kgenome_emu_next_written(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 			 const uint8_t **bytes, uint64_t *len);
 
-#endif /* KOFENG_KOFEMU_H */
+#endif /* KGENOME_KOFEMU_H */

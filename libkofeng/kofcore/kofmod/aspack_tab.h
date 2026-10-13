@@ -1,48 +1,19 @@
 /*
- * aspack_tab.h - the two constant tables ASPack's coding is steered by.
+ * aspack_tab.h - the ASPack coding tables, as a module sees them.
  *
- * IN THE SDK BECAUSE BOTH SIDES NEED IT, AND FOR DIFFERENT REASONS. The host
- * decoder (libkofeng/extractors/decomp/aspack.c) indexes it while decoding; the
- * module (bases/unp/aspack_pe.c) compares the STUB's copy against it before it
- * asks for a decode at all, so a build whose tables differ is reported as
- * unsupported rather than decoded into something plausible. Two copies of a
- * table that has to agree byte for byte is the bug this header exists to make
- * impossible.
- *
- * MATCH LENGTH BASES, THEIR EXTRA BIT COUNTS, AND OFFSET WIDTHS, IN ONE TABLE.
- *
- * The stub holds it and the decoder indexes it three ways, which is why it
- * looks like three tables run together and is one:
- *
- *   [0x00 .. 0x1b]  length base for the long-match escape
- *   [0x1c .. 0x71]  how many extra bits that base takes
- *   [0x38 .. 0x71]  the width of an offset, by offset class
- *
- * The last overlaps the second, and that is not a mistake in the transcription
- * - it is what the stub does, and it is why aspack.h says the offset table and
- * this one are the same bytes.
+ * THE ABI RE-EXPORTS kuncoat's TABLE. The decoder (libuncoat/decompressors/aspack.c)
+ * indexes it and the module (bases/unp/aspack_pe.c) compares the stub's copy
+ * against it, so it is defined once, in libuncoat/decompressors/aspack_tab.h.
  */
-
 #ifndef KOFENG_ASPACK_TAB_H
 #define KOFENG_ASPACK_TAB_H
 
-#include <stdint.h>
+#include <decompressors/aspack_tab.h>
 
-#define KOF_ASPACK_TAB_N    0x72u
-#define KOF_ASPACK_OFF_BASE 0x38u
-#define KOF_ASPACK_OFF_N    58u
-
-static const uint8_t kof_aspack_tab[KOF_ASPACK_TAB_N] = {
-	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0c, 0x0e,
-	0x10, 0x14, 0x18, 0x1c, 0x20, 0x28, 0x30, 0x38, 0x40, 0x50, 0x60, 0x70,
-	0x80, 0xa0, 0xc0, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x03, 0x03, 0x03, 0x03,
-	0x04, 0x04, 0x04, 0x04, 0x05, 0x05, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00,
-	0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06,
-	0x07, 0x07, 0x08, 0x08, 0x09, 0x09, 0x0a, 0x0a, 0x0b, 0x0b, 0x0c, 0x0c,
-	0x0d, 0x0d, 0x0e, 0x0e, 0x0f, 0x0f, 0x10, 0x10, 0x11, 0x11, 0x11, 0x11,
-	0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12, 0x12,
-	0x12, 0x12, 0x12, 0x12, 0x12, 0x12
-};
+/* module-facing names: the lib defines KUNCOAT_*, the ABI keeps the old spelling */
+#define KOF_ASPACK_OFF_BASE KUNCOAT_ASPACK_OFF_BASE
+#define KOF_ASPACK_OFF_N    KUNCOAT_ASPACK_OFF_N
+#define KOF_ASPACK_TAB_N    KUNCOAT_ASPACK_TAB_N
+#define kof_aspack_tab      kuncoat_aspack_tab
 
 #endif /* KOFENG_ASPACK_TAB_H */

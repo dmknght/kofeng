@@ -22,7 +22,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -81,44 +81,44 @@ static uint8_t page_loop[] = {
 
 static void run_one(const char *what, uint8_t *code, uint32_t n)
 {
-	struct kof_emu_cfg cfg = { BUDGET, PAGES, 0, 0 };  /* bits 0 = 64 */
-	struct kof_emu *e = kof_emu_new(&cfg);
-	enum kof_emu_stop st;
+	struct kgenome_emu_cfg cfg = { BUDGET, PAGES, 0, 0 };  /* bits 0 = 64 */
+	struct kgenome_emu *e = kgenome_emu_new(&cfg);
+	enum kgenome_emu_stop st;
 	uint32_t it = 0, snaps = 0;
 	uint64_t va, len, held = 0;
 	const uint8_t *bytes;
 
 	if (!e) { fail("out of memory"); return; }
-	if (!kof_emu_map(e, CODE_VA, code, n, 0x1000, KOF_EMU_R | KOF_EMU_X) ||
-	    !kof_emu_map(e, SCRATCH, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W) ||
-	    !kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W))
+	if (!kgenome_emu_map(e, CODE_VA, code, n, 0x1000, KGENOME_EMU_R | KGENOME_EMU_X) ||
+	    !kgenome_emu_map(e, SCRATCH, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W) ||
+	    !kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W))
 		fail("map");
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
 
-	st = kof_emu_run(e);
-	while (kof_emu_next_snapshot(e, &it, &va, &bytes, &len)) {
+	st = kgenome_emu_run(e);
+	while (kgenome_emu_next_snapshot(e, &it, &va, &bytes, &len)) {
 		snaps++;
 		held += len;
 	}
 	printf("  %-18s %7llu lệnh  dừng=%-11s ảnh=%u (%llu KB)\n",
-	       what, (unsigned long long)kof_emu_insn_count(e),
-	       kof_emu_stop_name(st), snaps, (unsigned long long)(held >> 10));
+	       what, (unsigned long long)kgenome_emu_insn_count(e),
+	       kgenome_emu_stop_name(st), snaps, (unsigned long long)(held >> 10));
 
 	/*
 	 * The budget is the CPU bound and nothing may exceed it - not a REP
 	 * iteration, not a syscall that loops internally.
 	 */
-	if (kof_emu_insn_count(e) > BUDGET)
+	if (kgenome_emu_insn_count(e) > BUDGET)
 		fail("the run went past its instruction budget");
-	if (st == KOF_EMU_STOP_UNSUPPORTED || st == KOF_EMU_STOP_DECODE)
+	if (st == KGENOME_EMU_STOP_UNSUPPORTED || st == KGENOME_EMU_STOP_DECODE)
 		fail("the stub did not assemble to what this test meant");
-	if (snaps > KOF_EMU_MAX_SNAP)
+	if (snaps > KGENOME_EMU_MAX_SNAP)
 		fail("more snapshots were kept than the ceiling allows");
 	/* Copies must not outgrow the address space the guest was given. */
-	if (held > (uint64_t)PAGES * KOF_EMU_PAGE)
+	if (held > (uint64_t)PAGES * KGENOME_EMU_PAGE)
 		fail("snapshots hold more than the guest's whole address space");
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 }
 
 int main(void)

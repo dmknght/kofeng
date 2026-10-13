@@ -6,7 +6,7 @@
  * view, and a parse that never fails - hostile or truncated input yields what was
  * recovered plus anomaly bits.
  *
- * The wrapper only. Nothing here decodes the stream: that is extractors/decomp/inflate.c,
+ * The wrapper only. Nothing here decodes the stream: that is libuncoat/decompressors/inflate.c,
  * reached by an unpacker through the host, and it is deliberately not reachable
  * from a collector. Identifying an object must not cost the decompression of it,
  * or every file in a scan pays a decoder to find out what it is.

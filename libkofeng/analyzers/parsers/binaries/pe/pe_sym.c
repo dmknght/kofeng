@@ -40,15 +40,14 @@
  * not saying which function is being used, and a rule looking for it needs the
  * ordinal to be matchable.
  *
- * WHICH HALF LOSES WHEN THE PAIR DOES NOT FIT. The record's name field is
- * KOF_SYM_NAMELEN and "DLL!function" can exceed it, so one of the two is cut -
- * and it must be the DLL. The function name is what identifies an import; the
- * module is what disambiguates it, and a rule that has the function and a
- * truncated module still has something to match, while the reverse has nothing.
- * So the DLL is capped at DLL_ROOM and the function takes the rest. DLL_ROOM
- * is 16, which holds every ordinary Windows module name whole - kernel32.dll
- * is 12, advapi32.dll is 12 - and cuts only the long api-ms-win-* forms, where
- * the interesting half is the function anyway.
+ * THE MODULE IS CAPPED AT DLL_ROOM, THE FUNCTION IS NOT. The name is no longer
+ * bound by a 40 byte field (it is whatever length the pool needs, up to
+ * KOF_SYM_NAME_MAX), so the function is kept whole - it is what identifies an
+ * import. The module is what disambiguates it, and DLL_ROOM is 16, which holds
+ * every ordinary Windows module name whole - kernel32.dll is 12, advapi32.dll is
+ * 12 - and cuts only the long api-ms-win-* forms. That cut is a SPELLING and not
+ * a limit (rules written against the block already say "api-ms-win-core-"), so it
+ * is kept, and it is the one cut here that does not set NAMECUT.
  */
 #define DLL_ROOM 16
 
@@ -62,8 +61,9 @@
 #include "pe_sym.h"
 #include "pe_parse.h"
 #include "../funcs.h"
+#include "../sym_pool.h"
 
-/* The import descriptor is walked by kof_pe_imports in pe_parse.c, which is
+/* The import descriptor is walked by kgenome_pe_imports in pe_parse.c, which is
  * the only place that knows its field offsets - see the note there. What is
  * left here is how an import is SPELLED in a KSYM record. */
 
@@ -81,24 +81,6 @@
  * The import side has its own bounds, in pe_parse.c, for the same reason.
  */
 #define MAX_THUNKS 4096u
-
-static void put16(uint8_t *p, uint32_t v)
-{
-	p[0] = (uint8_t)v;
-	p[1] = (uint8_t)(v >> 8);
-}
-
-static void put32(uint8_t *p, uint32_t v)
-{
-	put16(p, v & 0xffffu);
-	put16(p + 2, v >> 16);
-}
-
-static void put64(uint8_t *p, uint64_t v)
-{
-	put32(p, (uint32_t)v);
-	put32(p + 4, (uint32_t)(v >> 32));
-}
 
 /*
  * Copy a NUL-terminated name out of the file at `off`, sanitised.
@@ -124,102 +106,98 @@ static uint32_t name_at(kof_buf f, uint64_t off, char *out, uint32_t cap)
 	return i;
 }
 
-/* One record, with the fields every caller of this file sets the same way. */
-static void rec_put(uint8_t *rec, uint8_t flags, uint64_t value,
-		    const char *name)
+/* One symbol, with the fields every caller of this file sets the same way: an
+ * import or an export is a global function (see the header), named `name`. */
+static int sym_put(struct kof_symw *w, uint8_t flags, uint64_t value,
+		   const char *name, uint32_t name_len, int cut)
 {
-	uint32_t i;
+	struct kof_symrec r;
 
-	memset(rec, 0, KOF_SYM_RECLEN);
-	rec[KOF_SYM_R_TYPE]  = 2u;              /* STT_FUNC - see the header */
-	rec[KOF_SYM_R_BIND]  = 1u;              /* STB_GLOBAL */
-	rec[KOF_SYM_R_VIS]   = 0u;              /* STV_DEFAULT */
-	rec[KOF_SYM_R_FLAGS] = flags;
+	r.type  = 2u;                   /* STT_FUNC - see the header */
+	r.bind  = 1u;                   /* STB_GLOBAL */
+	r.vis   = 0u;                   /* STV_DEFAULT */
+	r.flags = flags;
 	/* 0xffff, "not a real section index", which is what a PE import or
 	 * export is: the directories name a module and an RVA, not a section.
 	 * Spelled the same way elf_sym.c spells an ELF reserved index so a rule
 	 * comparing the field has one value to compare against. */
-	put16(rec + KOF_SYM_R_SHNDX, 0xffffu);
-	put64(rec + KOF_SYM_R_VALUE, value);
-	for (i = 0; i + 1u < KOF_SYM_NAMELEN && name[i]; i++)
-		rec[KOF_SYM_R_NAME + i] = (uint8_t)name[i];
+	r.shndx = 0xffffu;
+	r.size  = 0;
+	r.value = value;
+	r.name = name;
+	r.name_len = name_len;
+	r.cut = (uint8_t)cut;
+	return kof_symw_put(w, &r);
+}
+
+/* "dll!func", or "dll!#ordinal" when imported without a name - one spelling for
+ * the import table and for a name a module reports. `func` is NUL-terminated and
+ * already printable. Returns the length. */
+static uint32_t spell_import(char *out, const char *dll, const char *func)
+{
+	const uint32_t cap = DLL_ROOM + 1u + KOF_SYM_NAME_MAX + 2u;
+	int k = snprintf(out, cap, "%.*s!%s", DLL_ROOM, dll, func);
+
+	/* snprintf answers the length it WOULD have written: what was written
+	 * ends at the buffer. */
+	return k < 0 ? 0 : ((uint32_t)k < cap ? (uint32_t)k : cap - 1u);
 }
 
 /*
  * THE IMPORTS, spelled as records.
  *
- * The directory is walked by kof_pe_imports and this is only what a KSYM
- * record makes of each entry: "dll!func", or "dll!#ordinal" for the ones
+ * The directory is walked once, into a kgenome_pe_imptab, and this is only what a
+ * KSYM record makes of each entry: "dll!func", or "dll!#ordinal" for the ones
  * imported without a name, with the printable-only policy applied for the
  * reason elf_sym.c gives.
  *
- * NO VALUE IS RECORDED. The walk knows the slot the import goes through,
+ * NO VALUE IS RECORDED. The table knows the slot the import goes through,
  * and a record keeps zero because that is what this block has always said
  * and a rule written against it compares names. The slot is available to
- * anyone who asks the parser directly, which is what the sweep did.
+ * anyone who reads the table, which is what the PE diagnose does.
  */
-struct imp_sink {
-	uint8_t  *out;
-	uint32_t want, n;
-};
-
-static void imp_rec(void *user, uint64_t slot, const char *dll,
-		    const char *name, uint32_t ordinal, uint64_t nameoff)
+static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_imptab *t)
 {
-	struct imp_sink *k = (struct imp_sink *)user;
-	char sym[KOF_SYM_NAMELEN], clean[KOF_SYM_NAMELEN];
-	uint32_t i;
+	char nm[KOF_SYM_NAME_MAX + 2u], clean[KOF_SYM_NAME_MAX + 2u];
+	char sym[DLL_ROOM + 1u + KOF_SYM_NAME_MAX + 2u];
+	uint32_t k;
 
-	(void)slot;
-	(void)nameoff;
-	if (k->n >= k->want)
-		return;
-	if (name) {
-		for (i = 0; i + 1u < sizeof clean && name[i]; i++)
-			clean[i] = (name[i] >= 0x20 && name[i] < 0x7f)
-				 ? name[i] : '?';
-		clean[i] = 0;
-		/* Both halves bounded explicitly rather than left to
-		 * snprintf: the truncation is INTENDED, and saying so in the
-		 * format is what tells a reader - and the compiler - that it
-		 * was chosen and not overlooked. */
-		snprintf(sym, sizeof sym, "%.*s!%.*s", DLL_ROOM, dll,
-			 (int)(sizeof sym - DLL_ROOM - 2u), clean);
-	} else {
-		snprintf(sym, sizeof sym, "%.*s!#%u", DLL_ROOM, dll,
-			 (unsigned)ordinal);
+	for (k = 0; k < t->n; k++) {
+		const struct kgenome_pe_imp *e = &t->v[k];
+		const char *dll = t->dll[e->dll];
+		uint32_t i, len;
+
+		if (kgenome_pe_imp_name(f, e, nm, sizeof nm)) {
+			for (i = 0; nm[i]; i++)
+				clean[i] = (nm[i] >= 0x20 && nm[i] < 0x7f)
+					 ? nm[i] : '?';
+			clean[i] = 0;
+			len = spell_import(sym, dll, clean);
+		} else {
+			snprintf(clean, sizeof clean, "#%u", (unsigned)e->ordinal);
+			len = spell_import(sym, dll, clean);
+		}
+		/* A name past KOF_SYM_NAME_MAX is cut by the writer, which says so
+		 * on the record. */
+		if (!sym_put(w, KOF_SYM_F_UNDEFINED, 0, sym, len, 0))
+			break;
 	}
-	rec_put(k->out + KOF_SYM_HDRLEN + (uint64_t)k->n * KOF_SYM_RECLEN,
-		KOF_SYM_F_UNDEFINED, 0, sym);
-	k->n++;
 }
 
-static uint32_t do_imports(kof_buf f, const struct kof_pe_info *p,
-			   uint8_t *out, uint32_t want, uint32_t n)
+/* The exports, appended after the imports. */
+static void do_exports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_info *p)
 {
-	struct imp_sink k;
-
-	k.out = out;
-	k.want = want;
-	k.n = n;
-	kof_pe_imports(f, p, imp_rec, &k);
-	return k.n;
-}
-
-/* The exports, appended from `n` onward. Returns the new count. */
-static uint32_t do_exports(kof_buf f, const struct kof_pe_info *p,
-			   uint8_t *out, uint32_t want, uint32_t n)
-{
-	uint64_t d = kof_pe_rva_to_off(p, p->dir[KOF_PE_DIR_EXPORT].rva);
+	uint64_t d = kgenome_pe_rva_to_off(p, p->dir[KGENOME_PE_DIR_EXPORT].rva);
 	uint32_t n_names = 0, a_names = 0, a_ords = 0, a_funcs = 0, i;
+	char fn[KOF_SYM_NAME_MAX + 1u];
 
-	if (!p->dir[KOF_PE_DIR_EXPORT].rva || !d)
-		return n;
+	if (!p->dir[KGENOME_PE_DIR_EXPORT].rva || !d)
+		return;
 	if (!kof_rd_u32(f, d + EXP_N_NAMES, 0, &n_names) ||
 	    !kof_rd_u32(f, d + EXP_NAMES,   0, &a_names) ||
 	    !kof_rd_u32(f, d + EXP_ORDS,    0, &a_ords)  ||
 	    !kof_rd_u32(f, d + EXP_FUNCS,   0, &a_funcs))
-		return n;
+		return;
 	if (n_names > MAX_THUNKS)
 		n_names = MAX_THUNKS;
 
@@ -234,63 +212,68 @@ static uint32_t do_exports(kof_buf f, const struct kof_pe_info *p,
 	 * how many records there are, so nothing pretends the block is the
 	 * whole directory.
 	 */
-	for (i = 0; i < n_names && n < want; i++) {
-		uint64_t no = kof_pe_rva_to_off(p, a_names) + (uint64_t)i * 4u;
-		uint32_t nrva = 0, frva = 0;
+	for (i = 0; i < n_names; i++) {
+		uint64_t no = kgenome_pe_rva_to_off(p, a_names) + (uint64_t)i * 4u;
+		uint32_t nrva = 0, frva = 0, len;
 		uint16_t ord = 0;
-		char fn[KOF_SYM_NAMELEN];
+		int cut;
 
 		if (!a_names || !kof_rd_u32(f, no, 0, &nrva))
 			break;
-		if (!name_at(f, kof_pe_rva_to_off(p, nrva), fn, sizeof fn))
+		len = name_at(f, kgenome_pe_rva_to_off(p, nrva), fn, sizeof fn);
+		if (!len)
 			continue;
 		/* The RVA comes through the ordinal table, which is what maps a
 		 * name to its slot in AddressOfFunctions. Skipped rather than
 		 * guessed when either table is missing: a value of zero would
 		 * read as "at the image base". */
 		if (a_ords && a_funcs &&
-		    kof_rd_u16(f, kof_pe_rva_to_off(p, a_ords) +
+		    kof_rd_u16(f, kgenome_pe_rva_to_off(p, a_ords) +
 				  (uint64_t)i * 2u, 0, &ord))
-			(void)kof_rd_u32(f, kof_pe_rva_to_off(p, a_funcs) +
+			(void)kof_rd_u32(f, kgenome_pe_rva_to_off(p, a_funcs) +
 					    (uint64_t)ord * 4u, 0, &frva);
-		rec_put(out + KOF_SYM_HDRLEN + (uint64_t)n * KOF_SYM_RECLEN,
-			(uint8_t)(KOF_SYM_F_DEFINED |
-				  (frva ? KOF_SYM_F_IN_EXEC : 0u)),
-			frva, fn);
-		n++;
+		/* name_at stops at the buffer's size: the name goes on when the
+		 * byte after what it copied is not the terminator. */
+		{
+			uint64_t no2 = kgenome_pe_rva_to_off(p, nrva);
+
+			cut = len == KOF_SYM_NAME_MAX && no2 + len < f.n &&
+			      f.p[no2 + len] != 0;
+		}
+		if (!sym_put(w, (uint8_t)(KOF_SYM_F_DEFINED |
+					  (frva ? KOF_SYM_F_IN_EXEC : 0u)),
+			     frva, fn, len, cut))
+			break;
 	}
-	return n;
 }
 
-uint32_t kof_pe_syms(kof_buf file, const struct kof_pe_info *p,
+uint32_t kof_pe_syms(kof_buf file, const struct kgenome_pe_info *p,
 		     uint8_t *out, uint32_t cap)
 {
-	uint32_t want, n = 0;
+	return kof_pe_syms_with(file, p, NULL, out, cap);
+}
+
+uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
+			  const struct kgenome_pe_imptab *tab,
+			  uint8_t *out, uint32_t cap)
+{
+	struct kgenome_pe_imptab own;
+	struct kof_symw w;
+	uint32_t bytes;
 
 	if (!out || cap < KOF_SYM_HDRLEN)
 		return 0;
-	memset(out, 0, KOF_SYM_HDRLEN);
-	out[KOF_SYM_H_MAGIC + 0] = KOF_SYM_MAGIC0;
-	out[KOF_SYM_H_MAGIC + 1] = KOF_SYM_MAGIC1;
-	out[KOF_SYM_H_MAGIC + 2] = KOF_SYM_MAGIC2;
-	out[KOF_SYM_H_MAGIC + 3] = KOF_SYM_MAGIC3;
-	put16(out + KOF_SYM_H_VERSION, KOF_SYM_VERSION);
-	put16(out + KOF_SYM_H_RECLEN,  KOF_SYM_RECLEN);
+	/* Unknown count: a PE's imports are walked, not counted. */
+	kof_symw_begin(&w, out, cap, 0, 0);
 	/*
-	 * No `_start` to record, so the field says "absent" - and it has to be
-	 * written rather than left as the memset's zero, because zero is a
-	 * valid index and a reader would take it as "begin at record 1". Same
-	 * reasoning as elf_sym.c; see KOF_SYM_H_START.
+	 * No `_start` to record, so the field says "absent" - kof_symw_begin wrote
+	 * that, because zero is a valid index and a reader would take it as
+	 * "begin at record 1". Same reasoning as elf_sym.c; see KOF_SYM_H_START.
 	 */
-	put16(out + KOF_SYM_H_START, KOF_SYM_NO_START);
 	out[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_NONE;
 
 	if (!file.p || !p || !p->valid)
-		return KOF_SYM_HDRLEN;
-
-	want = (cap - KOF_SYM_HDRLEN) / KOF_SYM_RECLEN;
-	if (want > KOF_SYM_MAX_RECS)
-		want = KOF_SYM_MAX_RECS;
+		return kof_symw_end(&w);
 
 	/*
 	 * IMPORTS FIRST, and the order is part of the contract.
@@ -301,10 +284,16 @@ uint32_t kof_pe_syms(kof_buf file, const struct kof_pe_info *p,
 	 * prints the block in order - and a PE is read imports-first because
 	 * that is the half that says what the file DOES.
 	 */
-	n = do_imports(file, p, out, want, n);
-	n = do_exports(file, p, out, want, n);
+	if (!tab) {
+		kgenome_pe_imptab_build(file, p, &own);
+		tab = &own;
+	}
+	do_imports(&w, file, tab);
+	if (tab == &own)
+		kgenome_pe_imptab_free(&own);
+	do_exports(&w, file, p);
 
-	put32(out + KOF_SYM_H_COUNT, n);
+	bytes = kof_symw_end(&w);
 	/*
 	 * The origin, said rather than left as NONE.
 	 *
@@ -313,25 +302,14 @@ uint32_t kof_pe_syms(kof_buf file, const struct kof_pe_info *p,
 	 * export directories. Only when there ARE records - a PE with neither
 	 * directory genuinely has no origin.
 	 */
-	if (n)
+	if (w.n)
 		out[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_PE_DIR;
 	/*
-	 * TRUNCATED when the block filled exactly, which is the only thing this
-	 * can honestly say.
-	 *
-	 * Both walks stop at `want`, and neither looks ahead, so "n == want"
-	 * means the cap is what ended them and there MAY be more. Conservative
-	 * on purpose: a reader told the block might be short can go and check,
-	 * while one told it is complete when it is not has no reason to.
-	 *
-	 * The first version of this compared `want` against the expression
-	 * `want` was computed from, which is only ever true when the record cap
-	 * clamped it - so a file with more imports than the block holds was
-	 * reported as complete.
+	 * TRUNCATED is the writer's: a symbol it was offered and could not hold -
+	 * the table or the pool was full. It was "the block filled exactly",
+	 * which could not tell a full block from a cut one; now it is the cut.
 	 */
-	if (n && n == want)
-		out[KOF_SYM_H_TRUNC] = 1;
-	return KOF_SYM_HDRLEN + n * KOF_SYM_RECLEN;
+	return bytes;
 }
 
 /*
@@ -367,134 +345,100 @@ static int same_name(const char *a, const char *b)
 	return *a == *b;
 }
 
+/* The bytes an insert of `n` imports can add to a block: what the engine makes room
+ * for before calling kof_pe_syms_add_imports. An upper bound. */
+uint32_t kof_pe_syms_add_room(const char *const *dll, const char *const *name,
+			      uint32_t n)
+{
+	uint64_t t = 0;
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		size_t d = strlen(dll[i]), f = strlen(name[i]);
+
+		if (d > DLL_ROOM)
+			d = DLL_ROOM;
+		if (f > KOF_SYM_NAME_MAX)
+			f = KOF_SYM_NAME_MAX;
+		t += KOF_SYM_RECLEN + KOF_SYM_KEYLEN + d + 1u + f + 1u;
+	}
+	return t > 0xffffffffu ? 0xffffffffu : (uint32_t)t;
+}
+
 uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 				 const char *const *dll, const char *const *name,
 				 uint32_t n)
 {
-	uint32_t count, at, i, added = 0;
+	char sym[DLL_ROOM + 1u + KOF_SYM_NAME_MAX + 2u];
+	struct kof_symw w;
+	uint8_t *old;
+	uint32_t count, at, i, added = 0, room, old_trunc, origin, k;
+	uint32_t pool_in;
 
 	if (!blk || n_bytes < KOF_SYM_HDRLEN || n_bytes > cap)
 		return n_bytes;
-	count = (uint32_t)blk[KOF_SYM_H_COUNT] |
-		((uint32_t)blk[KOF_SYM_H_COUNT + 1] << 8) |
-		((uint32_t)blk[KOF_SYM_H_COUNT + 2] << 16) |
-		((uint32_t)blk[KOF_SYM_H_COUNT + 3] << 24);
-	if (KOF_SYM_HDRLEN + (uint64_t)count * KOF_SYM_RECLEN > n_bytes)
+	count = kof_sym_count(blk, n_bytes);
+	if (kof_sym_pool_at(blk, n_bytes) > n_bytes)
 		return n_bytes;
-	/* The first record that is not an import: where the new ones go. */
-	for (at = 0; at < count; at++)
-		if (!(blk[KOF_SYM_HDRLEN + (uint64_t)at * KOF_SYM_RECLEN +
-			  KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
-			break;
-	for (i = 0; i < n; i++) {
-		char sym[KOF_SYM_NAMELEN];
-		uint32_t k;
-		uint8_t *rec;
+	pool_in = n_bytes - (uint32_t)kof_sym_pool_at(blk, n_bytes);
+	/* Everything that could be added, so the table and the pool are reserved
+	 * once and the records already there are never at risk. */
+	room = kof_pe_syms_add_room(dll, name, n);
+	if ((uint64_t)n_bytes + room > cap) {
+		blk[KOF_SYM_H_TRUNC] = 1;
+		return n_bytes;
+	}
+	old = malloc(n_bytes);
+	if (!old) {
+		blk[KOF_SYM_H_TRUNC] = 1;
+		return n_bytes;
+	}
+	memcpy(old, blk, n_bytes);
+	old_trunc = old[KOF_SYM_H_TRUNC];
+	origin = old[KOF_SYM_H_ORIGIN];
 
-		snprintf(sym, sizeof sym, "%.*s!%.*s", DLL_ROOM, dll[i],
-			 (int)(sizeof sym - DLL_ROOM - 2u), name[i]);
-		for (k = 0; k < count; k++)
-			if (same_name(sym, (const char *)blk + KOF_SYM_HDRLEN +
-					   (uint64_t)k * KOF_SYM_RECLEN +
-					   KOF_SYM_R_NAME))
-				break;
-		if (k < count)
-			continue;
-		if (KOF_SYM_HDRLEN + (uint64_t)(count + 1u) * KOF_SYM_RECLEN >
-		    cap) {
-			blk[KOF_SYM_H_TRUNC] = 1;
+	/* The first record that is not an import: where the new ones go. */
+	for (at = 0; at < count; at++) {
+		const uint8_t *r = kof_sym_rec(old, n_bytes, at);
+
+		if (!r || !(r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
 			break;
+	}
+	kof_symw_begin(&w, blk, cap, count + n, pool_in + room);
+	/* The block is REBUILT, in order, with the new records between the imports
+	 * and the exports: the pool is in record order (see kof_sym_index_at), so an
+	 * insert is a copy and not a memmove of the pool. */
+	for (k = 0; k < at; k++)
+		(void)kof_symw_put_from(&w, old, n_bytes, kof_sym_rec(old, n_bytes, k));
+	for (i = 0; i < n; i++) {
+		uint32_t len = spell_import(sym, dll[i], name[i]), nl;
+		const uint8_t *r;
+
+		for (k = 0; (r = kof_sym_rec(old, n_bytes, k)) != NULL; k++)
+			if (same_name(sym, kof_sym_name(old, n_bytes, r, &nl)))
+				break;
+		if (r)
+			continue;
+		/* Or one this call has already offered. */
+		for (k = 0; k < i; k++) {
+			char prev[DLL_ROOM + 1u + KOF_SYM_NAME_MAX + 2u];
+
+			(void)spell_import(prev, dll[k], name[k]);
+			if (same_name(prev, sym))
+				break;
 		}
-		rec = blk + KOF_SYM_HDRLEN + (uint64_t)at * KOF_SYM_RECLEN;
-		memmove(rec + KOF_SYM_RECLEN, rec,
-			(uint64_t)(count - at) * KOF_SYM_RECLEN);
-		rec_put(rec, KOF_SYM_F_UNDEFINED, 0, sym);
-		count++;
-		at++;
+		if (k < i)
+			continue;
+		if (!sym_put(&w, KOF_SYM_F_UNDEFINED, 0, sym, len, 0))
+			break;
 		added++;
 	}
-	if (added) {
-		put32(blk + KOF_SYM_H_COUNT, count);
-		blk[KOF_SYM_H_ORIGIN] = KOF_SYM_ORIGIN_PE_RESOLVED;
-	}
-	return KOF_SYM_HDRLEN + count * KOF_SYM_RECLEN;
-}
-
-/* ---- the functions ------------------------------------------------------------ */
-
-#define PE_MACHINE_AMD64 0x8664u
-#define UNW_FLAG_CHAININFO 0x4u
-
-/*
- * The functions of an x64 PE - see funcs.h.
- *
- * Each RUNTIME_FUNCTION is three RVAs: where the function begins, where it ends,
- * and its unwind information. A chained entry (the unwind flags say so) is a
- * fragment of a function that has an entry of its own, so it is not listed; an
- * entry whose unwind address has the low bit set is an indirect one and is not
- * listed either. An entry that does not resolve to bytes of the file is
- * skipped, and the table is read as far as the file holds it.
- */
-void kof_pe_funcs_build(kof_buf file, const struct kof_pe_info *p,
-			struct kof_func_set *out)
-{
-	struct kof_func *v = NULL;
-	uint32_t cap = 0, n = 0, i, n_ent;
-	uint64_t tab;
-
-	memset(out, 0, sizeof *out);
-	if (!file.p || !p || !p->valid || p->machine != PE_MACHINE_AMD64 ||
-	    !p->pe32_plus)
-		return;
-	if (!p->dir[KOF_PE_DIR_EXCEPTION].rva || !p->dir[KOF_PE_DIR_EXCEPTION].size)
-		return;
-	tab = kof_pe_rva_to_off(p, p->dir[KOF_PE_DIR_EXCEPTION].rva);
-	if (tab == KOF_BROKEN || tab >= file.n)
-		return;
-	/* As many entries as the directory declares and the file holds. */
-	{
-		uint64_t by_dir = p->dir[KOF_PE_DIR_EXCEPTION].size / 12u;
-		uint64_t by_file = (file.n - tab) / 12u;
-
-		n_ent = (uint32_t)(by_dir < by_file ? by_dir : by_file);
-	}
-	for (i = 0; i < n_ent; i++) {
-		uint32_t b, e, u;
-		uint64_t off, uo;
-		uint8_t flags = 0;
-
-		if (!kof_rd_u32(file, tab + (uint64_t)i * 12u, 0, &b) ||
-		    !kof_rd_u32(file, tab + (uint64_t)i * 12u + 4u, 0, &e) ||
-		    !kof_rd_u32(file, tab + (uint64_t)i * 12u + 8u, 0, &u))
-			break;
-		if (!b || e <= b || (u & 1u))
-			continue;
-		uo = kof_pe_rva_to_off(p, u);
-		if (uo != KOF_BROKEN && uo < file.n)
-			flags = (uint8_t)(file.p[uo] >> 3);
-		if (flags & UNW_FLAG_CHAININFO)
-			continue;
-		off = kof_pe_rva_to_off(p, b);
-		if (off == KOF_BROKEN || off >= file.n ||
-		    (uint64_t)(e - b) > file.n - off)
-			continue;
-		if (n == cap) {
-			uint32_t nc = cap ? cap * 2u : 256u;
-			struct kof_func *nv = realloc(v, (size_t)nc * sizeof *nv);
-
-			if (!nv) {
-				out->oom = 1;
-				free(v);
-				return;
-			}
-			v = nv;
-			cap = nc;
-		}
-		v[n].off = off;
-		v[n].len = e - b;
-		v[n].value = 0;         /* .pdata names nothing */
-		v[n].shndx = 0;
-		n++;
-	}
-	kof_funcs_finish(v, n, out);
+	for (k = at; k < count; k++)
+		(void)kof_symw_put_from(&w, old, n_bytes, kof_sym_rec(old, n_bytes, k));
+	n_bytes = kof_symw_end(&w);
+	blk[KOF_SYM_H_ORIGIN] = (uint8_t)(added ? KOF_SYM_ORIGIN_PE_RESOLVED : origin);
+	if (old_trunc)
+		blk[KOF_SYM_H_TRUNC] = 1;
+	free(old);
+	return n_bytes;
 }

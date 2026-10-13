@@ -100,7 +100,7 @@ struct kof_pw_mod {
 	 * slice. The block records index `pool` from ZERO - the writer rebases
 	 * them into the pack's own pool as it copies, the same way it rebases a
 	 * string's offset. NULL and zero for every module that declared none. */
-	const struct kof_plague_block *blk;
+	const struct kof_mutation_block *blk;
 	uint32_t                       n_blk;
 	const uint32_t                *pool;
 	uint32_t                       n_pool;
@@ -110,6 +110,10 @@ struct kof_pw_mod {
 	 * interns whatever it is given either way. */
 	const char *family;
 	uint32_t    maltype;      /* enum kof_maltype */
+	/* What KOF_DECLARE_DISEASE declared: the id and its kof_maltype, 0 and 0 for
+	 * none. See struct kof_pack_mod in dbcore.h. */
+	uint32_t    disease;
+	uint32_t    disease_type;
 };
 
 /*

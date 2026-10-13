@@ -3,7 +3,7 @@
  *
  * IT IS A COMPILE-TIME DECISION AND NOT A RUNTIME ONE.
  *
- * Every one of these used to be `if (getenv("KOF_EMU_TRACE"))`, and that is
+ * Every one of these used to be `if (getenv("KGENOME_EMU_TRACE"))`, and that is
  * wrong twice over. It puts a lookup of the process environment on paths that
  * run millions of times - one of them was measured costing four times the
  * work it guarded - and it means a shipped scanner carries, and can be made

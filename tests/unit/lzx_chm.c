@@ -50,7 +50,7 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/analyzers/parsers/containers/chm_parse.h"
-#include "../../libkofeng/extractors/decomp/lzx.h"
+#include <decompressors/lzx.h>
 #include "slurp.h"
 
 static int failures;
@@ -131,7 +131,7 @@ static uint64_t rd64(const uint8_t *p)
 /* ---- one file ---------------------------------------------------------------- */
 
 static void examine(const char *path, struct kof_chm_info *c,
-		    struct kof_lzx *lz)
+		    struct kuncoat_lzx *lz)
 {
 	struct kof_obj_ctx ctx;
 	kof_buf b;
@@ -140,7 +140,7 @@ static void examine(const char *path, struct kof_chm_info *c,
 	uint64_t want_uncomp, first_len;
 	uint32_t n_entries_rt, entry_size;
 	struct out o;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 	uint64_t got = 0;
 	uint64_t tab = 0, frame = 0;
 	uint8_t *whole = NULL;
@@ -223,7 +223,7 @@ static void examine(const char *path, struct kof_chm_info *c,
 			block = 32768u;
 		frame = block;
 		tab = c->reset_off + 0x28u;
-		st = KOF_DEC_OK;
+		st = KUNCOAT_OK;
 		for (k = 0; k < n_entries_rt && at_out < want_uncomp;
 		     k += c->lzx_reset_interval) {
 			uint64_t coff, take;
@@ -236,24 +236,24 @@ static void examine(const char *path, struct kof_chm_info *c,
 				take = want_uncomp - at_out;
 			if (coff >= c->lzx_len)
 				break;
-			st = kof_lzx_decode(lz, c->lzx_window_bits,
+			st = kuncoat_lzx_decode(lz, c->lzx_window_bits,
 					    f + c->lzx_off + coff,
 					    c->lzx_len - coff, 0, take,
 					    out_sink, &o, &got);
-			if (st != KOF_DEC_OK && st != KOF_DEC_STOPPED &&
-			    st != KOF_DEC_UNSUPPORTED)
+			if (st != KUNCOAT_OK && st != KUNCOAT_STOPPED &&
+			    st != KUNCOAT_UNSUPPORTED)
 				break;
 			at_out += take;
 		}
 	}
-	if (st != KOF_DEC_OK && st != KOF_DEC_STOPPED &&
-	    st != KOF_DEC_UNSUPPORTED) {
+	if (st != KUNCOAT_OK && st != KUNCOAT_STOPPED &&
+	    st != KUNCOAT_UNSUPPORTED) {
 		char why[160];
 
 		snprintf(why, sizeof why,
 			 "the content section did not decode (%s), %llu of "
 			 "%llu bytes",
-			 kof_decomp_status_name(st), (unsigned long long)o.n,
+			 kuncoat_status_name(st), (unsigned long long)o.n,
 			 (unsigned long long)want_uncomp);
 		fail(path, why);
 		free(whole);
@@ -330,7 +330,7 @@ static void examine(const char *path, struct kof_chm_info *c,
 		uint64_t skip = 1024u;
 
 		if (want_uncomp > skip + first_len && coff < c->lzx_len)
-			st = kof_lzx_decode(lz, c->lzx_window_bits,
+			st = kuncoat_lzx_decode(lz, c->lzx_window_bits,
 					    f + c->lzx_off + coff,
 					    c->lzx_len - coff, skip, first_len,
 					    out_sink, &o, &got);
@@ -420,26 +420,26 @@ static void examine(const char *path, struct kof_chm_info *c,
 			 * first alone.
 			 */
 			left = take;
-			st = KOF_DEC_OK;
+			st = KUNCOAT_OK;
 			for (k = 0; k < c->split[i].n_run && left; k++) {
 				const uint32_t run = c->split[i].first_run + k;
 				uint64_t part = 0;
 
-				st = kof_lzx_decode(lz, c->lzx_window_bits,
+				st = kuncoat_lzx_decode(lz, c->lzx_window_bits,
 						    f + c->run[run].off,
 						    c->run[run].len,
 						    k ? 0u : skip, left,
 						    out_sink, &o, &part);
-				if (st != KOF_DEC_OK &&
-				    st != KOF_DEC_TRUNCATED &&
-				    st != KOF_DEC_UNSUPPORTED)
+				if (st != KUNCOAT_OK &&
+				    st != KUNCOAT_TRUNCATED &&
+				    st != KUNCOAT_UNSUPPORTED)
 					break;
 				if (!part)
 					break;
 				left -= part;
 			}
-			if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
-			    st != KOF_DEC_UNSUPPORTED) {
+			if (st != KUNCOAT_OK && st != KUNCOAT_TRUNCATED &&
+			    st != KUNCOAT_UNSUPPORTED) {
 				fail(path, "an entry the parse placed did not "
 				     "decode");
 				break;
@@ -569,7 +569,7 @@ int main(void)
 	};
 	static const char *db = "build/release/databases";
 	struct kof_chm_info *c = malloc(sizeof *c);
-	struct kof_lzx *lz = malloc(sizeof *lz);
+	struct kuncoat_lzx *lz = malloc(sizeof *lz);
 	struct kof_engine *eng;
 	size_t d;
 

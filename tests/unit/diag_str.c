@@ -32,12 +32,13 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <phenotype/diag_int.h>
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 
 /* any and all over the ONE-name call a module reaches: `||` and `&&`, which is
  * what kof_diag_str_any and _all expand to. */
-static int names_all(const struct kof_diag_scan *s, const struct kof_diag *d,
+static int names_all(const struct kgenome_diag_scan *s, const struct kof_diag *d,
 		     const char *const *v, uint32_t n)
 {
 	uint32_t i;
@@ -50,7 +51,7 @@ static int names_all(const struct kof_diag_scan *s, const struct kof_diag *d,
 	return 1;
 }
 
-static int names_any(const struct kof_diag_scan *s, const struct kof_diag *d,
+static int names_any(const struct kgenome_diag_scan *s, const struct kof_diag *d,
 		     const char *const *v, uint32_t n)
 {
 	uint32_t i;
@@ -70,67 +71,71 @@ static int fails;
 #define NONE 0xffffu
 
 /* Add a hit and return its index. */
-static uint16_t hit(struct kof_diag_scan *s, uint16_t cap)
+static uint16_t hit(struct kgenome_diag_scan *s, uint16_t cap)
 {
-	kof_diag_hit_add(s, 0x1000u + s->n_hit * 0x10u, cap, 0);
+	kgenome_diag_hit_add(s, 0x1000u + s->n_hit * 0x10u, cap, 0);
 	return (uint16_t)(s->n_hit - 1u);
 }
 
 int main(void)
 {
-	struct kof_diag_scan s;
+	struct kgenome_diag_scan s;
 	char nm[48];
 	uint32_t i;
-	const uint16_t A = KOF_NUCLEO_KPROBE_REG, B = KOF_NUCLEO_KSYM_LOOKUP;
+	const uint16_t A = KGENOME_NUCLEO_KPROBE_REG, B = KGENOME_NUCLEO_KSYM_LOOKUP;
 
 	memset(&s, 0, sizeof s);
 
 	/* DEDUPLICATION, and the answer to "was it new". */
-	CK(kof_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 1);
-	CK(kof_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 0);
-	CK(kof_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 0);
-	CK(kof_diag_str_count(&s, A) == 1);
+	CK(kgenome_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 1);
+	CK(kgenome_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 0);
+	CK(kgenome_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 0);
+	CK(kgenome_diag_str_count(&s, A) == 1);
 
 	/* THE KEY IS (CAPABILITY, NODE, NAME): the same word elsewhere is new. */
-	CK(kof_diag_str_add(&s, B, 0, "kallsyms_lookup_name") == 1);
-	CK(kof_diag_str_add(&s, A, 1, "kallsyms_lookup_name") == 1);
-	CK(kof_diag_str_count(&s, A) == 2 && kof_diag_str_count(&s, B) == 1);
+	CK(kgenome_diag_str_add(&s, B, 0, "kallsyms_lookup_name") == 1);
+	CK(kgenome_diag_str_add(&s, A, 1, "kallsyms_lookup_name") == 1);
+	CK(kgenome_diag_str_count(&s, A) == 2 && kgenome_diag_str_count(&s, B) == 1);
 
 	/* ORDER IS THE ORDER FIRST SEEN, within a capability. */
-	CK(kof_diag_str_add(&s, A, 1, "do_exit") == 1);
-	CK(!strcmp(kof_diag_str_at(&s, A, 0), "kallsyms_lookup_name"));
-	CK(!strcmp(kof_diag_str_at(&s, A, 1), "kallsyms_lookup_name"));
-	CK(!strcmp(kof_diag_str_at(&s, A, 2), "do_exit"));
-	CK(kof_diag_str_at(&s, A, 3) == NULL);
+	CK(kgenome_diag_str_add(&s, A, 1, "do_exit") == 1);
+	CK(!strcmp(kgenome_diag_str_at(&s, A, 0), "kallsyms_lookup_name"));
+	CK(!strcmp(kgenome_diag_str_at(&s, A, 1), "kallsyms_lookup_name"));
+	CK(!strcmp(kgenome_diag_str_at(&s, A, 2), "do_exit"));
+	CK(kgenome_diag_str_at(&s, A, 3) == NULL);
 
 	/* GROWTH. Far past the first capacity of 16, so the table is rebuilt
 	 * several times, and every entry must still dedupe afterwards. */
 	for (i = 0; i < 700u; i++) {
 		snprintf(nm, sizeof nm, "sym_%u", i);
-		CK(kof_diag_str_add(&s, A, (uint16_t)(i % 7u), nm) == 1);
+		CK(kgenome_diag_str_add(&s, A, (uint16_t)(i % 7u), nm) == 1);
 	}
 	for (i = 0; i < 700u; i++) {
 		snprintf(nm, sizeof nm, "sym_%u", i);
-		CK(kof_diag_str_add(&s, A, (uint16_t)(i % 7u), nm) == 0);
+		CK(kgenome_diag_str_add(&s, A, (uint16_t)(i % 7u), nm) == 0);
 	}
-	CK(kof_diag_str_count(&s, A) == 703u);
+	CK(kgenome_diag_str_count(&s, A) == 703u);
 
 	/* THE BOUND marks the scan full and refuses the name - it does not
 	 * pretend, and it does not corrupt what is there. */
 	for (i = 0; i < 700u; i++) {
 		snprintf(nm, sizeof nm, "more_%u", i);
-		kof_diag_str_add(&s, A, 2, nm);
+		kgenome_diag_str_add(&s, A, 2, nm);
 	}
-	CK(kof_diag_scan_full(&s) == 1);
-	CK(kof_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 0);
+	CK(kgenome_diag_scan_full(&s) == 1);
+	CK(kgenome_diag_str_add(&s, A, 0, "kallsyms_lookup_name") == 0);
 
-	/* A name longer than a symbol can be is not kept. */
+	/* A name longer than the record (KGENOME_DIAG_STR_MAX) is not kept - it is
+	 * refused, counted, and the scan says so. A 199-byte name IS kept now: the
+	 * limit was 64 and is the record's own size. */
 	{
-		char big[200];
+		char big[KGENOME_DIAG_STR_MAX + 40u];
+		uint32_t before = kgenome_diag_scan_refused(&s);
 
 		memset(big, 'a', sizeof big - 1u);
 		big[sizeof big - 1u] = 0;
-		CK(kof_diag_str_add(&s, B, 0, big) == 0);
+		CK(kgenome_diag_str_add(&s, B, 0, big) == 0);
+		CK(kgenome_diag_scan_refused(&s) == before + 1u);
 	}
 	free(s.str);
 	free(s.str_tab);
@@ -151,8 +156,8 @@ int main(void)
 	 * not give them different answers.
 	 */
 	{
-		struct kof_diag_scan t;
-		struct kof_diag_hit hits[4];
+		struct kgenome_diag_scan t;
+		struct kgenome_diag_hit hits[4];
 		struct kof_diag_node n_any[1], n_one[2];
 		struct kof_diag d_any, d_one;
 		const char *both[2] = { "kallsyms_lookup_name", "do_exit" };
@@ -167,11 +172,11 @@ int main(void)
 		t.cap_hit = 4u;
 		(void)hit(&t, A);
 		(void)hit(&t, A);
-		(void)hit(&t, KOF_NUCLEO_ACTION_READ);
-		kof_diag_note_in(kof_diag_hit_of(&t, 2u), 1u,
-				 KOF_DIAG_ROLE_SOURCE, KOF_DIAG_KIND_PRODUCED);
-		CK(kof_diag_str_add(&t, A, 0, "kallsyms_lookup_name") == 1);
-		CK(kof_diag_str_add(&t, A, 1, "do_exit") == 1);
+		(void)hit(&t, KGENOME_NUCLEO_ACTION_READ);
+		kgenome_diag_note_in(&t, kgenome_diag_hit_of(&t, 2u), 1u,
+				 KGENOME_DIAG_ROLE_SOURCE, KGENOME_DIAG_KIND_PRODUCED);
+		CK(kgenome_diag_str_add(&t, A, 0, "kallsyms_lookup_name") == 1);
+		CK(kgenome_diag_str_add(&t, A, 1, "do_exit") == 1);
 
 		memset(&d_any, 0, sizeof d_any);
 		memset(n_any, 0, sizeof n_any);
@@ -184,9 +189,9 @@ int main(void)
 		memset(n_one, 0, sizeof n_one);
 		n_one[0].cap = A;
 		n_one[0].parent = KOF_DIAG_NO_PARENT;
-		n_one[1].cap = KOF_NUCLEO_ACTION_READ;
+		n_one[1].cap = KGENOME_NUCLEO_ACTION_READ;
 		n_one[1].parent = 0;
-		n_one[1].role = KOF_DIAG_ROLE_SOURCE;
+		n_one[1].role = KGENOME_DIAG_ROLE_SOURCE;
 		d_one.n_node = 2;
 		d_one.node = n_one;
 
@@ -215,9 +220,9 @@ int main(void)
 		CK(names_any(&t, &d_one, x, 1) == 0);
 
 		/* A diagnose that does not match carries nothing. */
-		n_one[1].role = KOF_DIAG_ROLE_FD;
+		n_one[1].role = KGENOME_DIAG_ROLE_FD;
 		CK(names_all(&t, &d_one, y, 1) == 0);
-		n_one[1].role = KOF_DIAG_ROLE_SOURCE;
+		n_one[1].role = KGENOME_DIAG_ROLE_SOURCE;
 
 		/* Degenerate calls are a plain no. */
 		CK(names_all(&t, &d_any, NULL, 1) == 0);

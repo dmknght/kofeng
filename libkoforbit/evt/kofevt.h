@@ -817,7 +817,7 @@ enum kof_evt_arch {
 /*
  * "windows", "linux", ... and "x86_64", "arm64", ... Never NULL.
  *
- * PREFIXED kof_evt_ AND NOT kof_, because the engine already has a
+ * PREFIXED kof_evt_ AND NOT kgenome_, because the engine already has a
  * kof_arch_name and it answers a different question: what architecture is this
  * SCANNED OBJECT. This one says which machine produced a log. Two concepts,
  * two names - the collision was a linker warning today and would have been a

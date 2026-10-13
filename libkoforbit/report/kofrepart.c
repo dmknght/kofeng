@@ -57,7 +57,7 @@
 
 #include "kofrepint.h"
 #include "kofeng.h"
-#include "kofplatform.h"
+#include "../../libkofeng/kofcore/kofplatform.h"
 
 /* ---- paths --------------------------------------------------------------- */
 

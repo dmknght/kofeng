@@ -46,7 +46,7 @@ int kof_gzip_sniff(kof_buf file)
  * Walk a NUL terminated field.
  *
  * Returns the length without the terminator and advances *at past it, or returns
- * KOF_BROKEN when the object ends first - which is the case that matters, because
+ * KGENOME_BROKEN when the object ends first - which is the case that matters, because
  * an unterminated name is how a reader that trusts the terminator is walked off
  * the end of the buffer. Bounded by the object, never by a terminator.
  */

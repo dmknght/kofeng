@@ -2,7 +2,7 @@
  * codec_forms - what each string coding means, both ways through it.
  *
  * The property under test is that the two directions are INVERSES, and it is
- * worth a test because they are written apart: kof_codec_run reads with one
+ * worth a test because they are written apart: kuncoat_transform reads with one
  * pass and writes with another, and nothing at run time compares them. A
  * decoder that accepts what its encoder never produces is a box that looks
  * like it works until somebody round-trips a sample through it.
@@ -20,8 +20,30 @@
 #include <string.h>
 
 #include "../../kofexamine/kofinspect.h"
+#include "../../libkofeng/extractors/codec_ui.h"
 
 static int fails;
+
+/*
+ * One coding, run through libuncoat's transform the way a tool does: the typed
+ * coding and key become a step. A result that is complete, or a prefix cut by the
+ * caller's room, is the count; anything else is 0 - what the box shows as "this
+ * coding cannot read this".
+ */
+static enum kuncoat_status last_status;
+
+static uint32_t codec_run(const uint8_t *in, uint32_t n, uint32_t codec,
+			  uint32_t key, int encode, uint8_t *out, uint32_t cap)
+{
+	struct kuncoat_step step;
+	uint8_t keybyte[1];
+	uint64_t got = 0;
+
+	kof_codec_step(codec, key, encode, keybyte, &step);
+	last_status = kuncoat_transform(&step, in, n, out, cap, &got);
+	return last_status == KUNCOAT_OK || last_status == KUNCOAT_OVER_BUDGET
+	       ? (uint32_t)got : 0;
+}
 
 static void bad(const char *what, const char *why)
 {
@@ -34,7 +56,7 @@ static void one(const char *tag, uint32_t codec, uint32_t key, int encode,
 		const char *in, const char *want)
 {
 	uint8_t out[512];
-	uint32_t n = kof_codec_run((const uint8_t *)in, (uint32_t)strlen(in),
+	uint32_t n = codec_run((const uint8_t *)in, (uint32_t)strlen(in),
 				   codec, key, encode, out, sizeof out);
 
 	if (!want) {
@@ -54,13 +76,13 @@ static void round_trip(const char *tag, uint32_t codec, uint32_t key,
 	uint8_t enc[512], dec[512];
 	uint32_t n, m;
 
-	n = kof_codec_run((const uint8_t *)text, (uint32_t)strlen(text),
+	n = codec_run((const uint8_t *)text, (uint32_t)strlen(text),
 			  codec, key, 1, enc, sizeof enc);
 	if (!n) {
 		bad(tag, "would not encode");
 		return;
 	}
-	m = kof_codec_run(enc, n, codec, key, 0, dec, sizeof dec);
+	m = codec_run(enc, n, codec, key, 0, dec, sizeof dec);
 	if (m != strlen(text) || memcmp(dec, text, m) != 0)
 		printf("  FAIL %-22s round trip gave \"%.*s\"\n",
 		       tag, (int)m, (const char *)dec), fails++;
@@ -149,7 +171,7 @@ int main(void)
 	/* ---- the output bound is the caller's, and it is respected ---- */
 	{
 		uint8_t small[4];
-		uint32_t n = kof_codec_run((const uint8_t *)"cmd.exe", 7u,
+		uint32_t n = codec_run((const uint8_t *)"cmd.exe", 7u,
 					   KOF_CODEC_HEX, 0, 1, small,
 					   sizeof small);
 
@@ -160,7 +182,7 @@ int main(void)
 	{
 		uint8_t one_byte[1];
 
-		if (kof_codec_run(NULL, 4u, KOF_CODEC_HEX, 0, 0, one_byte, 1u))
+		if (codec_run(NULL, 4u, KOF_CODEC_HEX, 0, 0, one_byte, 1u))
 			bad("cap", "read from a null input");
 	}
 
@@ -168,6 +190,34 @@ int main(void)
 	for (i = 0; i <= (uint32_t)KOF_CODEC_COUNT; i++)
 		if (!kof_codec_name(i) || !kof_codec_name(i)[0])
 			bad("name", "a coding with no word for it");
+
+	/* ---- the status says WHY, where the count alone said 0 ---- */
+	{
+		uint8_t o[16];
+		struct { uint32_t codec, key; int enc; const char *in; uint32_t cap;
+			 enum kuncoat_status want; const char *tag; } t[] = {
+			{ KOF_CODEC_HEX, 0, 0, "636D642E657865", 16, KUNCOAT_OK, "hex ok" },
+			{ KOF_CODEC_HEX, 0, 0, "636D6", 16, KUNCOAT_TRUNCATED, "hex odd digit" },
+			{ KOF_CODEC_HEX, 0, 0, "zzzz", 16, KUNCOAT_CORRUPT, "hex not hex" },
+			{ KOF_CODEC_HEX, 0, 1, "cmd.exe", 4, KUNCOAT_OVER_BUDGET, "hex cut by room" },
+			{ KOF_CODEC_B64, 0, 0, "not base64!", 16, KUNCOAT_CORRUPT, "b64 not b64" },
+			{ KOF_CODEC_URL, 0, 0, "a%4", 16, KUNCOAT_TRUNCATED, "url cut escape" },
+			{ KOF_CODEC_URL, 0, 0, "a%zzb", 16, KUNCOAT_CORRUPT, "url bad escape" },
+			{ KOF_CODEC_URL, 0, 0, "cmd.exe", 16, KUNCOAT_CORRUPT, "url no escape" },
+			{ KOF_CODEC_CAESAR, 26, 1, "cmd", 16, KUNCOAT_BAD_ARG, "caesar zero" },
+			{ KOF_CODEC_COUNT, 0, 0, "cmd", 16, KUNCOAT_UNSUPPORTED, "not a coding" },
+		};
+		size_t k;
+
+		for (k = 0; k < sizeof t / sizeof t[0]; k++) {
+			(void)codec_run((const uint8_t *)t[k].in, (uint32_t)strlen(t[k].in),
+					t[k].codec, t[k].key, t[k].enc, o, t[k].cap);
+			if (last_status != t[k].want)
+				printf("  FAIL %-22s status %s wanted %s\n", t[k].tag,
+				       kuncoat_status_name(last_status),
+				       kuncoat_status_name(t[k].want)), fails++;
+		}
+	}
 
 	if (fails) {
 		printf("codec forms: %d check(s) failed\n", fails);

@@ -88,11 +88,13 @@
 #include <sys/stat.h>
 
 #include <kofmod/kofsig.h>
-#include <kofmod/kofplague.h>
+#include <kofmod/kofmutation.h>
 #include <kofmod/kofpathogen.h>
-#include "../libkofeng/analyzers/nucleo/nucleo.h"
+#include <celllysis/nucleo.h>
 #include "../libkofeng/databases/diagsrc.h"
 #include "../libkofeng/databases/syndsrc.h"
+#include "../libkofeng/databases/pack/dbtables.h"   /* KOF_DB_MAX_DIAG: what the loader holds */
+#include "../libkofeng/analyzers/diseases/kofdisease.h"
 #include <kofmod/script.h>   /* KOF_SCAN_ALL, the per-module maxima */
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
 #include <kofmod/pe.h>       /* and the PE image kinds, for --subtype-mask */
@@ -126,8 +128,8 @@
 #include <kofmod/proc.h>   /* and a process record's */
 
 #include "../libkofeng/databases/dbpacker.h"
-#include "../libkofeng/databases/dbcore.h"
-#include "../libkofeng/databases/hexprog.h"
+#include "../libkofeng/databases/pack/dbcore.h"
+#include "../libkofeng/databases/pack/hexprog.h"
 #include "../libkofeng/kofcore/kofcore.h"   /* kof_hash_bytes/kof_hash_step - FNV-1a,
 					    reused for KOF_MALVAR_AUTO's suffix and
 					    for the whole-module duplicate check */
@@ -195,7 +197,7 @@ static int nrngs;
  *
  * The hashes are written out by the generator, not typed, so the only thing
  * checked here is that there are enough of them to score with and not more than
- * a rule may carry - see KOF_PLAGUE_MIN_HASH and KOF_PLAGUE_MAX_HASH. What they
+ * a rule may carry - see KGENOME_MUTATION_MIN_HASH and KOF_MUTATION_MAX_HASH. What they
  * mean is nothing this program can know: they are what one particular block of
  * one particular sample came to, and the build cannot recompute them without
  * the sample.
@@ -205,8 +207,8 @@ struct blk {
 	char     name[64];
 	uint32_t mask;
 	uint32_t norm;
-	uint32_t side;                  /* enum kof_plague_side */
-	uint32_t hash[KOF_PLAGUE_MAX_HASH];
+	uint32_t side;                  /* enum kgenome_mutation_side */
+	uint32_t hash[KOF_MUTATION_MAX_HASH];
 	uint32_t n_hash;
 };
 
@@ -237,7 +239,7 @@ static int errors;
  *
  * A precondition that costs the author nothing, because it is read out of the
  * declarations rather than declared separately - and it cannot go stale. If a module
- * only searches KOF_SCAN_ELF_NOLOAD and the object has no section table, that region
+ * only searches KGENOME_SCAN_ELF_NOLOAD and the object has no section table, that region
  * resolves to nothing and the module cannot match.
  *
  * A module with no searches gets 0, which reads correctly: it names no region, so no
@@ -275,6 +277,10 @@ struct rgn_name {
 };
 
 #define RGN(x) { #x, (unsigned long)(x) },
+/* the lists that hold the bare suffix (see ELF_REGIONS): the word is "KOF_" #x */
+#define RGN_S(x) { "KOF_" #x, (unsigned long)(KGENOME_##x) },
+/* the lists that hold the bare suffix (see ELF_REGIONS): the word is "KOF_" #x */
+#define RGN_S(x) { "KOF_" #x, (unsigned long)(KGENOME_##x) },
 static const struct rgn_name rgn_names[] = {
 	RGN(KOF_SCAN_ALL)
 
@@ -297,8 +303,8 @@ static const struct rgn_name rgn_names[] = {
 	 * remembered to add a line here. The lists moved into the headers so
 	 * this could stop being a copy.
 	 */
-	ELF_REGIONS(RGN)
-	PE_REGIONS(RGN)
+	ELF_REGIONS(RGN_S)
+	PE_REGIONS(RGN_S)
 	GZIP_REGIONS(RGN)
 	DOCOLE_REGIONS(RGN)
 	ZIP_REGIONS(RGN)
@@ -370,7 +376,8 @@ enum decl_kind {
 	DECL_REGEX,
 	DECL_NAME,
 	DECL_HEUR_CLASS,
-	DECL_PLAGUE
+	DECL_MUTATION,
+	DECL_DISEASE
 };
 
 struct macro {
@@ -381,6 +388,7 @@ struct macro {
 static const struct macro macros[] = {
 	{ "KOF_TARGET_RANGE",  DECL_RANGE   },
 	{ "KOF_TARGET_NAME",   DECL_NAME    },
+	{ "KOF_DECLARE_DISEASE", DECL_DISEASE },
 	{ "KOF_HEUR_SCAN_CLASS", DECL_HEUR_CLASS },
 	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR  },
 	{ "KOF_DEFINE_REGEX",  DECL_REGEX   },
@@ -390,17 +398,17 @@ static const struct macro macros[] = {
 	{ "KOF_DEFINE_STR_WIDE", DECL_STRWIDE },
 	{ "KOF_DEFINE_STR",    DECL_STR     },
 	/*
-	 * BEFORE KOF_PLAGUE_BLOCK, which is a prefix of it - the same trap
+	 * BEFORE KOF_MUTATION_BLOCK, which is a prefix of it - the same trap
 	 * KOF_DEFINE_STR_WIDE sits in above, and the same consequence: read the
 	 * other way round, every library block would be packed as an ordinary
 	 * one, credited by author-code windows, and the separation it exists
 	 * for would be gone with nothing to show it.
 	 *
 	 * Declared the same way and packed the same way otherwise; the only
-	 * difference is the side it records - see enum kof_plague_side.
+	 * difference is the side it records - see enum kgenome_mutation_side.
 	 */
-	{ "KOF_PLAGUE_BLOCK_LIB", DECL_PLAGUE },
-	{ "KOF_PLAGUE_BLOCK",  DECL_PLAGUE  },
+	{ "KOF_MUTATION_BLOCK_LIB", DECL_MUTATION },
+	{ "KOF_MUTATION_BLOCK",  DECL_MUTATION  },
 	{ NULL, DECL_RANGE }
 };
 
@@ -412,6 +420,15 @@ static const struct macro macros[] = {
  */
 static char g_family[80];
 static int  g_maltype;
+/*
+ * KOF_DECLARE_DISEASE(TYPE, "layer/behaviour"): what this detector's match finds,
+ * and the type of malware it belongs to. One per file, like KOF_TARGET_NAME and
+ * for the same reason: the module is one detector. Read at this level so the
+ * extract file can carry it to the packer, which is where it is registered.
+ */
+static char g_dis_name[KOF_DIAG_DISEASE_LEN + 1u];
+static int  g_dis_type;
+static int  g_have_dis;
 /* The type the FILE NAME says, or -1 - see nameform_read. */
 static int  g_name_type = -1;
 /*
@@ -926,7 +943,7 @@ static int blk_name_taken(const char *nm)
 }
 
 /*
- * The normalizer, argument 3 of KOF_PLAGUE_BLOCK.
+ * The normalizer, argument 3 of KOF_MUTATION_BLOCK.
  *
  * By name only. The value decides how the hashes were computed, so a rule whose
  * normalizer disagreed with the one the generator used would produce a block
@@ -936,9 +953,9 @@ static int blk_name_taken(const char *nm)
 static int read_norm(const char *p, int line, struct blk *out)
 {
 	static const struct { const char *name; uint32_t v; } nm[] = {
-		{ "KOF_PLAGUE_RAW", KOF_PLAGUE_RAW },
-		{ "KOF_PLAGUE_XOR", KOF_PLAGUE_XOR },
-		{ "KOF_PLAGUE_SUB", KOF_PLAGUE_SUB },
+		{ "KOF_MUTATION_RAW", KGENOME_MUTATION_RAW },
+		{ "KOF_MUTATION_XOR", KGENOME_MUTATION_XOR },
+		{ "KOF_MUTATION_SUB", KGENOME_MUTATION_SUB },
 		{ NULL, 0 }
 	};
 	const char *a = nth_arg(p, 3, line);
@@ -963,7 +980,7 @@ static int read_norm(const char *p, int line, struct blk *out)
 			out->norm = nm[i].v;
 			return 1;
 		}
-	err(line, "unknown normalizer; use KOF_PLAGUE_RAW, _XOR or _SUB");
+	err(line, "unknown normalizer; use KOF_MUTATION_RAW, _XOR or _SUB");
 	return 0;
 }
 
@@ -998,7 +1015,7 @@ static int read_hashes(const char *p, int line, struct blk *out)
 			a++;
 		if (!*a || *a == ')')
 			break;
-		if (out->n_hash >= KOF_PLAGUE_MAX_HASH) {
+		if (out->n_hash >= KOF_MUTATION_MAX_HASH) {
 			err(line, "more hashes than a block may carry");
 			return 0;
 		}
@@ -1018,7 +1035,7 @@ static int read_hashes(const char *p, int line, struct blk *out)
 		while (*a == 'u' || *a == 'U' || *a == 'l' || *a == 'L')
 			a++;
 	}
-	if (out->n_hash < KOF_PLAGUE_MIN_HASH) {
+	if (out->n_hash < KGENOME_MUTATION_MIN_HASH) {
 		err(line, "too few hashes to score a block with; widen it");
 		return 0;
 	}
@@ -2030,6 +2047,28 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		return;
 	}
 
+	if (m->kind == DECL_DISEASE) {
+		struct kof_disease_decl dd;
+		const char *why;
+
+		if (g_have_dis) {
+			err(lineno, "KOF_DECLARE_DISEASE declared more than once; a "
+				    "detector finds one disease");
+			return;
+		}
+		/* The one parser - see kofdisease.h - the diagnose reader and any
+		 * tool that writes the declaration use it too. */
+		why = kof_disease_decl_parse(p, &dd);
+		if (why) {
+			err(lineno, why);
+			return;
+		}
+		memcpy(g_dis_name, dd.name, strlen(dd.name) + 1u);
+		g_dis_type = dd.type;
+		g_have_dis = 1;
+		return;
+	}
+
 	if (m->kind == DECL_HEUR_CLASS) {
 		int type_idx;
 
@@ -2071,7 +2110,7 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		return;
 	}
 
-	if (m->kind == DECL_PLAGUE) {
+	if (m->kind == DECL_MUTATION) {
 		struct blk *b;
 		struct rng tmp;
 
@@ -2084,9 +2123,9 @@ static void scan_line(char *at, size_t line_len, int lineno)
 		b->line = lineno;
 		/* Which of the two spellings was matched is the whole of the
 		 * difference between them. */
-		b->side = strcmp(m->name, "KOF_PLAGUE_BLOCK_LIB") == 0
-			? (uint32_t)KOF_PLAGUE_SIDE_LIB
-			: (uint32_t)KOF_PLAGUE_SIDE_USER;
+		b->side = strcmp(m->name, "KOF_MUTATION_BLOCK_LIB") == 0
+			? (uint32_t)KGENOME_MUTATION_SIDE_LIB
+			: (uint32_t)KGENOME_MUTATION_SIDE_USER;
 		if (!read_ident(p, lineno, b->name, sizeof b->name))
 			return;
 		if (blk_name_taken(b->name)) {
@@ -2716,7 +2755,7 @@ next:
  */
 static int pe_image_read(const char *path, struct img_facts *out)
 {
-	struct kof_pe_info *info;
+	struct kgenome_pe_info *info;
 	struct kof_obj_ctx ctx;
 	uint8_t *buf;
 	size_t len;
@@ -2744,11 +2783,11 @@ static int pe_image_read(const char *path, struct img_facts *out)
 	 * expects to be fixed up at whatever address it lands at, and the
 	 * loader fixes up nothing: it copies the bytes and enters them.
 	 */
-	if (info->dir[KOF_PE_DIR_BASERELOC].size)
+	if (info->dir[KGENOME_PE_DIR_BASERELOC].size)
 		out->have_reloc = 1;
 
 	for (i = 0; i < info->sec_count; i++) {
-		const struct kof_pe_sec *s = &info->sec[i];
+		const struct kgenome_pe_sec *s = &info->sec[i];
 
 		/* Everything was merged into .text at link time; anything else
 		 * carrying content means the merge and the compiler's flags
@@ -2783,7 +2822,7 @@ static int img_read(const char *path, const char *want_blob,
 	static const char *const allowed[] = {
 		".blob", ".symtab", ".strtab", ".shstrtab", NULL
 	};
-	struct kof_elf_info *info;
+	struct kgenome_elf_info *info;
 	/* Required, not optional: kof_elf_parse writes ctx->obj_size before it
 	 * looks at anything, so a null one faults. Nothing here reads it back -
 	 * this wants the sections, not an object identity. */
@@ -2808,10 +2847,10 @@ static int img_read(const char *path, const char *want_blob,
 	memset(&ctx, 0, sizeof ctx);
 	if (!kof_elf_parse(b, info, &ctx))
 		goto done;
-	is64 = info->elf_class == KOF_ELFCLASS_64;
+	is64 = info->elf_class == KGENOME_ELFCLASS_64;
 
 	for (i = 0; i < info->sec_count; i++) {
-		const struct kof_elf_sec *s = &info->sec[i];
+		const struct kgenome_elf_sec *s = &info->sec[i];
 		int j, known = 0;
 
 		/* SHT_RELA is 4, SHT_REL is 9 - a relocation section at all
@@ -2845,8 +2884,8 @@ static int img_read(const char *path, const char *want_blob,
 	/* The symbol table, walked directly: three names and whether anything
 	 * is undefined is all this needs, and both are one field each. */
 	for (i = 0; i < info->sec_count; i++) {
-		const struct kof_elf_sec *st = &info->sec[i];
-		const struct kof_elf_sec *str = NULL;
+		const struct kgenome_elf_sec *st = &info->sec[i];
+		const struct kgenome_elf_sec *str = NULL;
 		uint64_t at, esz = is64 ? 24u : 16u;
 		uint32_t k;
 
@@ -3283,15 +3322,15 @@ static void lint_report(void)
 }
 
 /*
- * --arch-mask "KOF_ARCH_X86|KOF_ARCH_X86_64" -> the bit mask, on stdout.
+ * --arch-mask "KGENOME_ARCH_X86|KGENOME_ARCH_X86_64" -> the bit mask, on stdout.
  *
  * Here rather than in a shell wrapper because a shell cannot include
  * kofsig.h, and the copy it kept instead was wrong twice over: it matched
- * substrings, so KOF_ARCH_X86 - a prefix of KOF_ARCH_X86_64 - set both bits,
+ * substrings, so KGENOME_ARCH_X86 - a prefix of KGENOME_ARCH_X86_64 - set both bits,
  * and it listed eight of the eleven architectures. A shell that asks this
  * program cannot fall behind the header this program compiles against.
  *
- * The mask has one bit per enum value, so KOF_ARCH_ANY is bit 0 and is a real
+ * The mask has one bit per enum value, so KGENOME_ARCH_ANY is bit 0 and is a real
  * choice rather than the absence of one: a rule may target objects that have no
  * architecture.
  */
@@ -3339,10 +3378,10 @@ static int arch_mask_main(int argc, char **argv)
 }
 
 /*
- * --subtype-mask "KOF_ELF_EXEC|KOF_ELF_DYN" -> "<mask> <ELF|PE>" on stdout.
+ * --subtype-mask "KGENOME_ELF_EXEC|KGENOME_ELF_DYN" -> "<mask> <ELF|PE>" on stdout.
  *
- * Two formats' subtypes share one number space on purpose - KOF_ELF_REL and
- * KOF_PE_DLL are both 1 - so which format was named is part of the answer, and
+ * Two formats' subtypes share one number space on purpose - KGENOME_ELF_REL and
+ * KGENOME_PE_DLL are both 1 - so which format was named is part of the answer, and
  * naming both at once is an error rather than a union. ksigbuilder --module takes
  * the format word back and checks it against what the source targets.
  *
@@ -4226,6 +4265,8 @@ static int extract_main(int argc, char **argv)
 	fprintf(out, "n_level=%d\n", g_decl[SD_HEUR_LEVEL].count);
 	fprintf(out, "family=%s\n", g_have_name ? g_family : "");
 	fprintf(out, "maltype=%d\n", g_have_name ? g_maltype : 0);
+	fprintf(out, "disease=%s\n", g_have_dis ? g_dis_name : "");
+	fprintf(out, "disease_type=%d\n", g_have_dis ? g_dis_type : 0);
 	/* The variant - see g_name_id. */
 	fprintf(out, "nameid=%s\n", g_name_id);
 	fclose(out);
@@ -4284,6 +4325,9 @@ struct artefact {
 	 * unpack-kind module, where it is not required. */
 	char    *family;
 	uint32_t maltype;
+	/* What KOF_DECLARE_DISEASE declared; empty and 0 when it did not. */
+	char    *disease;
+	uint32_t disease_type;
 
 	/* What KOF_HEUR_PREDICT declared, or NULL. Only a rule has one. */
 	char    *heur_predict;
@@ -4306,7 +4350,7 @@ struct artefact {
 	/* The similarity blocks this module declared, and the hashes they are
 	 * slices of. Empty for every module that declared none, which is most
 	 * of them. */
-	struct kof_plague_block *blk;
+	struct kof_mutation_block *blk;
 	uint32_t                 n_blk;
 	uint32_t                *pool;
 	uint32_t                 n_pool;
@@ -4322,6 +4366,7 @@ static void artefact_free(struct artefact *a)
 	free(a->label);
 	free(a->srcpath);
 	free(a->family);
+	free(a->disease);
 	free(a->heur_predict);
 	free(a->content);
 	free(a->code);
@@ -4515,6 +4560,19 @@ static int meta_load(struct artefact *a)
 			}
 		} else if (strncmp(line, "maltype=", 8) == 0) {
 			a->maltype = (uint32_t)strtoul(line + 8, 0, 10);
+		} else if (strncmp(line, "disease_type=", 13) == 0) {
+			a->disease_type = (uint32_t)strtoul(line + 13, 0, 10);
+		} else if (strncmp(line, "disease=", 8) == 0) {
+			char *nl = strchr(line + 8, '\n');
+
+			if (nl)
+				*nl = 0;
+			free(a->disease);
+			a->disease = line[8] ? strdup(line + 8) : NULL;
+			if (line[8] && !a->disease) {
+				fclose(f);
+				goto out;
+			}
 		} else if (strncmp(line, "content=", 8) == 0) {
 			char *nl = strchr(line + 8, '\n');
 
@@ -4715,7 +4773,7 @@ static int strs_load(struct artefact *a)
 			unsigned long v[4];
 			char *hex;
 			uint32_t k;
-			struct kof_plague_block *nb;
+			struct kof_mutation_block *nb;
 			uint32_t *np;
 
 			p += 2;
@@ -4737,8 +4795,8 @@ static int strs_load(struct artefact *a)
 				unsigned long n_hash = strtoul(p, 0, 10);
 
 				hex = tab + 1;
-				if (n_hash < KOF_PLAGUE_MIN_HASH ||
-				    n_hash > KOF_PLAGUE_MAX_HASH ||
+				if (n_hash < KGENOME_MUTATION_MIN_HASH ||
+				    n_hash > KOF_MUTATION_MAX_HASH ||
 				    strlen(hex) < n_hash * 8u)
 					goto out;
 				nb = realloc(a->blk, (a->n_blk + 1u) * sizeof *nb);
@@ -5220,13 +5278,13 @@ static uint64_t target_set_of(const struct artefact *a)
 struct group {
 	uint32_t  kind, arch_mask;
 	/*
-	 * A `plague` FLAG STOOD HERE and split the groups, so a rule carrying
-	 * a similarity block packed into plague-elf.ksig instead of
+	 * A `mutation` FLAG STOOD HERE and split the groups, so a rule carrying
+	 * a similarity block packed into mutation-elf.ksig instead of
 	 * sigs-elf.ksig. The reason given was the person reading a directory
 	 * listing, and its own words conceded the rest: "a detector by kind -
 	 * it runs in the same loop, reports the same way".
 	 *
-	 * It went with bases/plague. The engine never read it - selection is
+	 * It went with bases/mutation. The engine never read it - selection is
 	 * per module, and the only pack-level fields are the unioned target
 	 * and arch masks, which no prefilter consults yet; see the note at the
 	 * grouping loop for why a wider union costs sweeps and never a
@@ -5691,6 +5749,9 @@ static void module_reset(void)
 	g_family[0] = 0;
 	g_maltype = 0;
 	g_have_name = 0;
+	g_dis_name[0] = 0;
+	g_dis_type = 0;
+	g_have_dis = 0;
 	g_scan_mask_out = 0;
 	g_nstr_out = 0;
 	g_src_text = NULL;
@@ -5974,6 +6035,8 @@ static int module_main(int argc, char **argv)
 					    : (g_have_name ? g_family : ""));
 	fprintf(f, "maltype=%d\n", kind == 2 ? 0
 					     : (g_have_name ? g_maltype : 0));
+	fprintf(f, "disease=%s\n", g_have_dis ? g_dis_name : "");
+	fprintf(f, "disease_type=%d\n", g_have_dis ? g_dis_type : 0);
 	fprintf(f, "nstr=%d\n", g_nstr_out);
 	fprintf(f, "blob_len=%ld\n", blob_len);
 	fprintf(f, "kind=%d\n", kind);
@@ -6262,7 +6325,6 @@ static unsigned        g_n_uses;
 static int             g_uses_known;    /* only a tree build knows them all */
 static char            g_built[64][64];
 static unsigned        g_n_built;
-static char            g_built_annot[64][64];   /* the disease of g_built[i], or "" */
 
 
 /* Defined with the other argument helpers, below. */
@@ -6574,55 +6636,48 @@ static void clear_diag_packs(const char *db)
 		closedir(dd);
 }
 
-/* One pack: the records of `r[0..n)` that belong to `kind`. */
-static int write_one_diag_pack(const char *db, const char *kind,
-			       struct diag_rec *r, size_t n_all)
+/*
+ * A PACK OF RECORDS, written: the header every .kdig of this shape has - the
+ * magic, version 1, a u16 count and a table of { u32 offset, u32 length } - then
+ * the records, in the order given. The diagnose packs and the syndrome pack are
+ * this one shape, so the layout is written here once. Returns the file's size in
+ * `*total`, or 0 on failure with the reason on stderr.
+ */
+static int write_krec_pack(const char *path, const char *magic,
+			   unsigned char *const *rec, const size_t *rlen,
+			   size_t n, size_t *total_out)
 {
-	char path[4200];
+	size_t i, at, total = 8u + n * 8u;
 	unsigned char *out;
-	size_t i, n = 0, total, at;
 	FILE *f;
 
-	for (i = 0; i < n_all; i++)
-		if (!strcmp(r[i].kind, kind))
-			n++;
-	if (!n)
-		return 1;
 	if (n > 0xffffu) {
-		fprintf(stderr, "ksigbuilder: more diagnoses than a pack holds\n");
+		fprintf(stderr, "FAIL: more records than a pack holds (%s)\n", path);
 		return 0;
 	}
-	total = 8u + n * 8u;
-	for (i = 0; i < n_all; i++)
-		if (!strcmp(r[i].kind, kind))
-			total += r[i].n;
+	for (i = 0; i < n; i++)
+		total += rlen[i];
 	if (total > 0xffffffffu)
 		return 0;
 	out = calloc(1, total);
 	if (!out)
 		return 0;
-	memcpy(out, "KDGP", 4);
+	memcpy(out, magic, 4);
 	out[4] = 1;
 	out[6] = (unsigned char)n;
 	out[7] = (unsigned char)(n >> 8);
 	at = 8u + n * 8u;
-	n = 0;
-	for (i = 0; i < n_all; i++) {
-		unsigned char *e;
-		uint32_t off = (uint32_t)at, len = (uint32_t)r[i].n;
+	for (i = 0; i < n; i++) {
+		unsigned char *e = out + 8u + i * 8u;
+		uint32_t off = (uint32_t)at, len = (uint32_t)rlen[i];
 
-		if (strcmp(r[i].kind, kind))
-			continue;
-		e = out + 8u + n * 8u;
 		e[0] = (unsigned char)off; e[1] = (unsigned char)(off >> 8);
 		e[2] = (unsigned char)(off >> 16); e[3] = (unsigned char)(off >> 24);
 		e[4] = (unsigned char)len; e[5] = (unsigned char)(len >> 8);
 		e[6] = (unsigned char)(len >> 16); e[7] = (unsigned char)(len >> 24);
-		memcpy(out + at, r[i].b, r[i].n);
-		at += r[i].n;
-		n++;
+		memcpy(out + at, rec[i], rlen[i]);
+		at += rlen[i];
 	}
-	snprintf(path, sizeof path, "%s/diag-%s.kdig", db, kind);
 	f = fopen(path, "wb");
 	if (!f || fwrite(out, 1, total, f) != total) {
 		fprintf(stderr, "FAIL: cannot write %s\n", path);
@@ -6632,12 +6687,107 @@ static int write_one_diag_pack(const char *db, const char *kind,
 	}
 	fclose(f);
 	free(out);
-	printf("== %s  %zu diagnose(s), %zu bytes\n", path, n, total);
+	*total_out = total;
 	return 1;
+}
+
+/* One pack: the records of `r[0..n)` that belong to `kind`. */
+static int write_one_diag_pack(const char *db, const char *kind,
+			       struct diag_rec *r, size_t n_all)
+{
+	char path[4200];
+	unsigned char **rec;
+	size_t *rlen, i, n = 0, total = 0;
+	int ok;
+
+	rec = calloc(n_all ? n_all : 1u, sizeof *rec);
+	rlen = calloc(n_all ? n_all : 1u, sizeof *rlen);
+	if (!rec || !rlen) {
+		free(rec);
+		free(rlen);
+		return 0;
+	}
+	for (i = 0; i < n_all; i++)
+		if (!strcmp(r[i].kind, kind)) {
+			rec[n] = r[i].b;
+			rlen[n] = r[i].n;
+			n++;
+		}
+	if (!n) {
+		free(rec);
+		free(rlen);
+		return 1;
+	}
+	snprintf(path, sizeof path, "%s/diag-%s.kdig", db, kind);
+	ok = write_krec_pack(path, "KDGP", rec, rlen, n, &total);
+	if (ok)
+		printf("== %s  %zu diagnose(s), %zu bytes\n", path, n, total);
+	free(rec);
+	free(rlen);
+	return ok;
 }
 
 /* All the packs. `recs[i]` is a record file and `kinds[i]` the kind of the
  * source it was built from. */
+/*
+ * THE BUILD REFUSES A DATABASE THE LOADER WOULD CUT.
+ *
+ * Two ways a diagnose can be in the packs and not in the engine, and both used to
+ * be silent in the scan (tests/unit/caps_db.c):
+ *
+ *   TWO NAMES, ONE ID. A rule calls a diagnose by KOF_DIAG_ID(name), the 32-bit
+ *   hash of the name, and the loader keeps the first of two diagnoses with one id.
+ *   The id was 16 bits and with 256 names the chance that some pair collided was
+ *   about 40%; at 32 bits it is about one in a million for 256 names, and still
+ *   refused here, naming both, so the author renames one rather than a diagnose
+ *   silently not existing.
+ *
+ *   MORE DIAGNOSES THAN THE LOADER HOLDS (KOF_DB_MAX_DIAG): the ones past it are
+ *   not loaded. Refused here for the same reason.
+ *
+ * The id is computed from the record's own name (its length at byte 3, the name
+ * from byte 4 - the layout diag_rec_cmp reads), by the function the modules use.
+ */
+static int diag_ids_distinct(const struct diag_rec *r, size_t n)
+{
+	size_t i, j;
+	uint32_t *id;
+	int rc = 1;
+
+	if (n > KOF_DB_MAX_DIAG) {
+		fprintf(stderr, "ksigbuilder: %zu diagnoses; the loader holds at most "
+			"%u, the rest would not be loaded\n", n, KOF_DB_MAX_DIAG);
+		return 0;
+	}
+	id = malloc((n ? n : 1u) * sizeof *id);
+	if (!id)
+		return 0;
+	for (i = 0; i < n; i++) {
+		char nm[256];
+		size_t l = r[i].b[3];
+
+		if (l > r[i].n - 4u)
+			l = r[i].n - 4u;
+		memcpy(nm, r[i].b + 4, l);
+		nm[l] = 0;
+		id[i] = kof_diag_id32_(nm);
+	}
+	for (i = 0; i < n; i++)
+		for (j = 0; j < i; j++)
+			if (id[i] == id[j]) {
+				fprintf(stderr, "ksigbuilder: the diagnoses '%.*s' and "
+					"'%.*s' hash to the same 32-bit id (%u): a rule could "
+					"not tell them apart and the loader would keep only one "
+					"- rename one\n",
+					(int)r[j].b[3], (const char *)r[j].b + 4,
+					(int)r[i].b[3], (const char *)r[i].b + 4,
+					(unsigned)id[i]);
+				rc = 0;
+			}
+	free(id);
+	return rc;
+}
+
 static int write_diag_packs(const char *db, char **recs, char **kinds,
 			    size_t n_recs)
 {
@@ -6671,6 +6821,8 @@ static int write_diag_packs(const char *db, char **recs, char **kinds,
 		}
 		fclose(in);
 	}
+	if (rc)
+		rc = diag_ids_distinct(r, n_recs);
 	if (rc) {
 		qsort(r, n_recs, sizeof *r, diag_rec_cmp);
 		/* One pack per kind, each once, in the sorted order. */
@@ -6690,14 +6842,175 @@ static int write_diag_packs(const char *db, char **recs, char **kinds,
 
 
 /*
- * THE PROFILES OF A DATABASE, in one pack: syndromes.kdig.
+ * THE DISEASES OF A DATABASE, as the build sees them: every name a detector
+ * declares and every name a syndrome mentions, once, with the type it was
+ * declared with. What the packs carry is the id (kofdisease.h); this is where
+ * two names that hash alike, or one name declared with two types, are caught -
+ * both would make one disease answer for another, silently.
+ *
+ *     "KDIS"   magic
+ *     u8       version, 1
+ *     u8 x 3   0
+ *     u32      count
+ *     count x  { u32 id, u8 maltype, u8 length, the name }     ascending by id
+ *
+ * The id to name table the tools read; a scan never does. A name only a
+ * syndrome mentions has no declared type and carries 0xff.
+ */
+#define DIS_TYPE_UNKNOWN 0xffu
+
+/* Who named a disease: a detector declared it, a syndrome mentions it. A name only
+ * a syndrome mentions can never be found, and a disease no syndrome mentions is
+ * never typed by anything - both are what a database looks like part way through
+ * being written, and both are warned about from this one table. */
+#define DIS_BY_DETECTOR 1u
+#define DIS_BY_SYNDROME 2u
+
+struct dis_ent {
+	uint32_t id;
+	unsigned type;
+	unsigned by;
+	char     name[KOF_DIAG_DISEASE_LEN + 1u];
+};
+
+static struct dis_ent *g_dis;
+static size_t g_n_dis, g_cap_dis;
+
+/* 1 when the name is now known, 0 (and the reason on stderr) when it cannot be. */
+static int disease_note(const char *name, unsigned type, unsigned by)
+{
+	uint32_t id = kof_disease_id(name);
+	size_t i;
+
+	for (i = 0; i < g_n_dis; i++) {
+		if (g_dis[i].id != id)
+			continue;
+		if (strcmp(g_dis[i].name, name)) {
+			fprintf(stderr, "FAIL: the diseases \"%s\" and \"%s\" hash to one id - "
+				"rename one\n", g_dis[i].name, name);
+			return 0;
+		}
+		if (type != DIS_TYPE_UNKNOWN && g_dis[i].type != DIS_TYPE_UNKNOWN &&
+		    g_dis[i].type != type) {
+			fprintf(stderr, "FAIL: the disease \"%s\" is declared with two types, %s "
+				"and %s\n", name, kof_maltype_ident(g_dis[i].type),
+				kof_maltype_ident(type));
+			return 0;
+		}
+		if (g_dis[i].type == DIS_TYPE_UNKNOWN)
+			g_dis[i].type = type;
+		g_dis[i].by |= by;
+		return 1;
+	}
+	if (g_n_dis == g_cap_dis) {
+		size_t nc = g_cap_dis ? g_cap_dis * 2u : 64u;
+		struct dis_ent *g = realloc(g_dis, nc * sizeof *g);
+
+		if (!g) {
+			fprintf(stderr, "FAIL: out of memory\n");
+			return 0;
+		}
+		g_dis = g;
+		g_cap_dis = nc;
+	}
+	g_dis[g_n_dis].id = id;
+	g_dis[g_n_dis].type = type;
+	g_dis[g_n_dis].by = by;
+	snprintf(g_dis[g_n_dis].name, sizeof g_dis[g_n_dis].name, "%s", name);
+	g_n_dis++;
+	return 1;
+}
+
+static int dis_cmp(const void *a, const void *b)
+{
+	const struct dis_ent *x = a, *y = b;
+
+	return x->id < y->id ? -1 : x->id > y->id;
+}
+
+static int write_diseases(const char *db)
+{
+	char path[4400];
+	unsigned char *out;
+	size_t i, at, total = 12u;
+	FILE *f;
+
+	snprintf(path, sizeof path, "%s/diseases.kdig", db);
+	(void)remove(path);
+	if (!g_n_dis)
+		return 1;
+	/*
+	 * THE TWO WAYS A SYNDROME AND A DETECTOR CAN DISAGREE, read off the one table
+	 * every source registered in. A disease a syndrome names and no detector
+	 * declares can never be found; and once any syndrome exists, a disease none of
+	 * them names answers "unresolved" for every file a detector finds it on,
+	 * because a behaviour nobody verified is evidence for no type. Warnings, not
+	 * errors: both are what a database looks like part way through being written.
+	 */
+	{
+		int any_syndrome = 0;
+
+		for (i = 0; i < g_n_dis; i++)
+			any_syndrome |= (g_dis[i].by & DIS_BY_SYNDROME) != 0;
+		for (i = 0; i < g_n_dis; i++) {
+			if ((g_dis[i].by & DIS_BY_SYNDROME) && !(g_dis[i].by & DIS_BY_DETECTOR))
+				fprintf(stderr, "ksigbuilder: warning: a syndrome names the "
+					"disease \"%s\" and no detector declares it\n",
+					g_dis[i].name);
+			if (any_syndrome && (g_dis[i].by & DIS_BY_DETECTOR) &&
+			    !(g_dis[i].by & DIS_BY_SYNDROME))
+				fprintf(stderr, "ksigbuilder: warning: no syndrome names the "
+					"disease \"%s\", so a file a detector finds it on is "
+					"never typed by it\n", g_dis[i].name);
+		}
+	}
+	qsort(g_dis, g_n_dis, sizeof *g_dis, dis_cmp);
+	for (i = 0; i < g_n_dis; i++)
+		total += 6u + strlen(g_dis[i].name);
+	out = calloc(1, total);
+	if (!out)
+		return 0;
+	memcpy(out, "KDIS", 4);
+	out[4] = 1;
+	out[8] = (unsigned char)g_n_dis;
+	out[9] = (unsigned char)(g_n_dis >> 8);
+	out[10] = (unsigned char)(g_n_dis >> 16);
+	out[11] = (unsigned char)(g_n_dis >> 24);
+	at = 12u;
+	for (i = 0; i < g_n_dis; i++) {
+		size_t l = strlen(g_dis[i].name);
+
+		out[at++] = (unsigned char)g_dis[i].id;
+		out[at++] = (unsigned char)(g_dis[i].id >> 8);
+		out[at++] = (unsigned char)(g_dis[i].id >> 16);
+		out[at++] = (unsigned char)(g_dis[i].id >> 24);
+		out[at++] = (unsigned char)g_dis[i].type;
+		out[at++] = (unsigned char)l;
+		memcpy(out + at, g_dis[i].name, l);
+		at += l;
+	}
+	f = fopen(path, "wb");
+	if (!f || fwrite(out, 1, total, f) != total) {
+		fprintf(stderr, "FAIL: cannot write %s\n", path);
+		if (f) fclose(f);
+		free(out);
+		return 0;
+	}
+	fclose(f);
+	free(out);
+	printf("== %s  %zu disease(s), %zu bytes\n", path, g_n_dis, total);
+	return 1;
+}
+
+/*
+ * THE SYNDROMES OF A DATABASE, in one pack: syndromes.kdig.
  *
  *     "KSYN"   magic
  *     u8       version, 1
  *     u8       0
  *     u16      count
  *     count x  { u32 offset, u32 length }       from the start of the file
- *     the records:  u32 type mask, u8 n, then n x { u8 length, the disease }
+ *     the records:  u32 type mask, u8 n, then n x u32 disease id
  *
  * The header is a diagnose pack's, so one reader of the table serves both. A
  * pack of its own and not a section of a diagnose pack: a diagnose is a thing
@@ -6727,12 +7040,7 @@ static int build_syndromes(const char *base, const char *db)
 	char **pnames = NULL;
 	size_t n_names = 0, i, k;
 	unsigned char **rec = NULL;
-	size_t *rlen = NULL, total;
-	unsigned char *out;
-	size_t at;
-	FILE *f;
-	static char seen[256][KOF_DIAG_DISEASE_LEN + 1u];
-	size_t n_seen = 0;
+	size_t *rlen = NULL, total = 0, at;
 
 	snprintf(path, sizeof path, "%s/syndromes.kdig", db);
 	(void)remove(path);
@@ -6769,7 +7077,6 @@ static int build_syndromes(const char *base, const char *db)
 	rlen = calloc(n_names, sizeof *rlen);
 	if (!rec || !rlen)
 		return 0;
-	total = 8u + n_names * 8u;
 	for (i = 0; i < n_names; i++) {
 		static struct kof_ssrc ps;
 		char *text;
@@ -6786,8 +7093,7 @@ static int build_syndromes(const char *base, const char *db)
 		free(text);
 		if (errors)
 			return 0;
-		for (k = 0; k < ps.n_dis; k++)
-			L += 1u + strlen(ps.dis[k]);
+		L += 4u * ps.n_dis;
 		rec[i] = calloc(1, L);
 		if (!rec[i])
 			return 0;
@@ -6798,93 +7104,21 @@ static int build_syndromes(const char *base, const char *db)
 		rec[i][4] = (unsigned char)ps.n_dis;
 		at = 5u;
 		for (k = 0; k < ps.n_dis; k++) {
-			size_t l = strlen(ps.dis[k]), z;
+			uint32_t id = kof_disease_id(ps.dis[k]);
 
-			rec[i][at++] = (unsigned char)l;
-			memcpy(rec[i] + at, ps.dis[k], l);
-			at += l;
-			for (z = 0; z < n_seen; z++)
-				if (!strcmp(seen[z], ps.dis[k]))
-					break;
-			if (z == n_seen) {
-				/* Only the cross-check below reads this list, and a
-				 * list that silently stopped growing would report a
-				 * behaviour as unnamed when a syndrome does name it. */
-				if (n_seen >= sizeof seen / sizeof seen[0]) {
-					fprintf(stderr, "FAIL: %s: more than %zu distinct "
-						"behaviours across the syndromes - raise the "
-						"bound in build_syndromes\n", pnames[i],
-						sizeof seen / sizeof seen[0]);
-					return 0;
-				}
-				memcpy(seen[n_seen++], ps.dis[k], l + 1u);
-			}
+			if (!disease_note(ps.dis[k], DIS_TYPE_UNKNOWN, DIS_BY_SYNDROME))
+				return 0;
+			rec[i][at++] = (unsigned char)id;
+			rec[i][at++] = (unsigned char)(id >> 8);
+			rec[i][at++] = (unsigned char)(id >> 16);
+			rec[i][at++] = (unsigned char)(id >> 24);
 		}
 		rlen[i] = L;
-		total += L;
-	}
-	out = calloc(1, total);
-	if (!out)
-		return 0;
-	memcpy(out, "KSYN", 4);
-	out[4] = 1;
-	out[6] = (unsigned char)n_names;
-	out[7] = (unsigned char)(n_names >> 8);
-	at = 8u + n_names * 8u;
-	for (i = 0; i < n_names; i++) {
-		unsigned char *e = out + 8u + i * 8u;
-		uint32_t off = (uint32_t)at, len = (uint32_t)rlen[i];
-
-		e[0] = (unsigned char)off; e[1] = (unsigned char)(off >> 8);
-		e[2] = (unsigned char)(off >> 16); e[3] = (unsigned char)(off >> 24);
-		e[4] = (unsigned char)len; e[5] = (unsigned char)(len >> 8);
-		e[6] = (unsigned char)(len >> 16); e[7] = (unsigned char)(len >> 24);
-		memcpy(out + at, rec[i], rlen[i]);
-		at += rlen[i];
 	}
 	snprintf(path, sizeof path, "%s/syndromes.kdig", db);
-	f = fopen(path, "wb");
-	if (!f || fwrite(out, 1, total, f) != total) {
-		fprintf(stderr, "FAIL: cannot write %s\n", path);
-		if (f) fclose(f);
+	if (!write_krec_pack(path, "KSYN", rec, rlen, n_names, &total))
 		return 0;
-	}
-	fclose(f);
 	printf("== %s  %zu syndrome(s), %zu bytes\n", path, n_names, total);
-	/*
-	 * THE TWO WAYS A SYNDROME AND A DIAGNOSE CAN DISAGREE. A behaviour a syndrome
-	 * names and no diagnose carries can never be found; and a diagnose whose
-	 * behaviour no syndrome names answers "unresolved" for every file it
-	 * matches, because a behaviour nobody verified is evidence for no type.
-	 * Warnings: both are what a database looks like part way through being
-	 * written.
-	 */
-	for (k = 0; k < n_seen; k++) {
-		unsigned z;
-
-		for (z = 0; z < g_n_built; z++)
-			if (!strcmp(g_built_annot[z], seen[k]))
-				break;
-		if (z == g_n_built)
-			fprintf(stderr, "ksigbuilder: warning: syndromes name the "
-				"behaviour \"%s\" and no diagnose carries it\n",
-				seen[k]);
-	}
-	{
-		unsigned z;
-
-		for (z = 0; z < g_n_built; z++) {
-			if (!g_built_annot[z][0])
-				continue;
-			for (k = 0; k < n_seen; k++)
-				if (!strcmp(g_built_annot[z], seen[k]))
-					break;
-			if (k == n_seen)
-				fprintf(stderr, "ksigbuilder: warning: no syndrome names "
-					"\"%s\", so a file it matches is never typed "
-					"by it\n", g_built_annot[z]);
-		}
-	}
 	for (i = 0; i < n_names; i++) {
 		free(pnames[i]);
 		free(rec[i]);
@@ -6892,7 +7126,6 @@ static int build_syndromes(const char *base, const char *db)
 	free(pnames);
 	free(rec);
 	free(rlen);
-	free(out);
 	return 1;
 }
 
@@ -7575,6 +7808,15 @@ static int pack_main(int argc, char **argv)
 			pm[a].n_names     = s->n_names;
 			pm[a].family      = s->family;
 			pm[a].maltype     = s->maltype;
+			/* THE DISEASE, registered here where the whole database is seen:
+			 * the same name with two types, or two names that hash alike, are
+			 * caught across detectors of every kind - see disease_note. */
+			if (s->disease && s->disease[0]) {
+				if (!disease_note(s->disease, s->disease_type, DIS_BY_DETECTOR))
+					goto done;
+				pm[a].disease      = kof_disease_id(s->disease);
+				pm[a].disease_type = s->disease_type;
+			}
 			pm[a].heur_predict = s->heur_predict;
 			pm[a].content = s->content;
 		}
@@ -7716,6 +7958,14 @@ static int pack_main(int argc, char **argv)
 		free(img);
 	}
 
+	/*
+	 * THE TABLE OF DISEASES, LAST: the modules register theirs while their packs
+	 * are made - above - and the diagnoses and syndromes registered before this
+	 * ran, so only here is the whole registry known. Written before it, a
+	 * detector's disease had no entry and a syndrome's showed no type.
+	 */
+	if (!write_diseases(outdir))
+		goto done;
 	rc = 0;
 done:
 	if (d)
@@ -7804,6 +8054,8 @@ static int diagnose_main(int argc, char **argv)
 	free(text);
 	if (errors)
 		return 1;
+	if (v.disease[0] && !disease_note(v.disease, v.disease_type, DIS_BY_DETECTOR))
+		return 1;
 	{
 	/* The record below is written from the view's own tables. */
 	struct kof_dsrc_node *nd = v.nd;
@@ -7815,8 +8067,9 @@ static int diagnose_main(int argc, char **argv)
 	int n_when = v.n_when, has_seq = v.has_seq;
 	uint16_t seq_first = v.seq_first, seq_then = v.seq_then;
 	unsigned analysis = v.analysis;
-	const char *disease = v.disease;
-	size_t annot_len = strlen(v.disease);
+	const int has_dis = v.disease[0] != 0;
+	const uint32_t dis_id = has_dis ? kof_disease_id(v.disease) : 0u;
+	const unsigned char dis_type = v.disease_type;
 
 	need = sizeof(struct dhdr) + strlen(name) + (size_t)n_nd * 8u;
 	for (i = 0; i < n_nd; i++) {
@@ -7856,7 +8109,7 @@ static int diagnose_main(int argc, char **argv)
 				}
 		}
 	}
-	if (n_need || n_when || n_ref || g_uses_known || annot_len)
+	if (n_need || n_when || n_ref || g_uses_known || has_dis)
 		need += 1u;                     /* the legacy name count: 0 */
 	if (n_need)
 		need += 2u + 2u * (size_t)n_need;   /* tag, length, caps */
@@ -7891,8 +8144,8 @@ static int diagnose_main(int argc, char **argv)
 	 */
 	if (n_when)
 		need += 2u + (size_t)n_when * 10u;
-	if (annot_len)
-		need += 2u + annot_len;                 /* tag, length, the bytes */
+	if (has_dis)
+		need += 2u + 5u;                        /* tag, length, id and type */
 	blob = calloc(1, need);
 	if (!blob)
 		return 1;
@@ -7937,7 +8190,7 @@ static int diagnose_main(int argc, char **argv)
 			at += L;
 		}
 	}
-	if (n_need || n_when || n_ref || g_uses_known || annot_len)
+	if (n_need || n_when || n_ref || g_uses_known || has_dis)
 		blob[at++] = 0;                 /* no names: see KDIG_SEC_NEEDS */
 	if (n_need) {
 		int k;
@@ -8009,16 +8262,18 @@ static int diagnose_main(int argc, char **argv)
 			left -= 1u + (unsigned)L;
 		}
 	}
-	if (annot_len) {
+	if (has_dis) {
 		blob[at++] = KDIG_SEC_DISEASE;
-		blob[at++] = (unsigned char)annot_len;
-		memcpy(blob + at, disease, annot_len);
-		at += annot_len;
+		blob[at++] = 5;
+		blob[at++] = (unsigned char)dis_id;
+		blob[at++] = (unsigned char)(dis_id >> 8);
+		blob[at++] = (unsigned char)(dis_id >> 16);
+		blob[at++] = (unsigned char)(dis_id >> 24);
+		blob[at++] = dis_type;
 	}
 	/* Remembered so the tree build can check that every call names a
 	 * diagnose that exists - see the end of tree_main. */
 	if (g_n_built < 64u) {
-		snprintf(g_built_annot[g_n_built], sizeof g_built_annot[0], "%s", disease);
 		snprintf(g_built[g_n_built++], sizeof g_built[0], "%s", name);
 	}
 	o = fopen(out, "wb");

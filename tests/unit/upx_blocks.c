@@ -40,8 +40,8 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/extractors/decomp/nrv2.h"
-#include "../../libkofeng/extractors/decomp/lzma.h"
+#include <decompressors/nrv2.h>
+#include <decompressors/lzma.h>
 
 static uint64_t blocks, matched;
 
@@ -72,9 +72,9 @@ static uint64_t be_blocks;
 static int variant_of(unsigned method)
 {
 	switch (method) {
-	case 2: case 3: case 4:   return KOF_NRV2B;
-	case 5: case 6: case 7:   return KOF_NRV2D;
-	case 8: case 9: case 10:  return KOF_NRV2E;
+	case 2: case 3: case 4:   return KUNCOAT_NRV2B;
+	case 5: case 6: case 7:   return KUNCOAT_NRV2D;
+	case 8: case 9: case 10:  return KUNCOAT_NRV2E;
 	default:                  return -1;
 	}
 }
@@ -148,7 +148,7 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 		unsigned method  = f[at + 8];
 		uint8_t *out;
 		uint64_t produced = 0;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		int variant;
 
 		if (sz_cpr == 0 || sz_unc == 0)
@@ -168,25 +168,25 @@ static void one_file(const char *path, const uint8_t *f, uint64_t n)
 		if (!out)
 			return;
 		if (method == 14)
-			st = kof_lzma_decode(f[at + 12] >> 3, LZMA_LP,
+			st = kuncoat_lzma_decode(f[at + 12] >> 3, LZMA_LP,
 					     f[at + 12] & 7u,
 					     f + at + 12 + LZMA_SKIP,
 					     sz_cpr - LZMA_SKIP, out, sz_unc,
 					     &produced);
 		else
-			st = kof_nrv2_decode(variant, bits_of(method), f + at + 12,
+			st = kuncoat_nrv2_decode(variant, bits_of(method), f + at + 12,
 					     sz_cpr, out, sz_unc, &produced);
 		blocks++;
 		be_blocks += (uint64_t)(be != 0);
 		if (method < 16)
 			seen_by[method]++;
-		if (st != KOF_DEC_OK) {
+		if (st != KUNCOAT_OK) {
 			bad_status++;
 			if (!first_bad[0])
 				snprintf(first_bad, sizeof first_bad,
 					 "%.400s: block at %llu method %u: %s",
 					 path, (unsigned long long)at, method,
-					 kof_decomp_status_name(st));
+					 kuncoat_status_name(st));
 		} else if (produced != sz_unc) {
 			bad_length++;
 			if (!first_bad[0])

@@ -12,8 +12,11 @@
 
 #include <kofcore.h>
 #include <kofmod/kofsym.h>
+/* The function extents moved to the genome; still reachable from here for
+ * the callers that came through this header. */
+#include <genotype/image/funcs.h>
 
-struct kof_elf_info;
+struct kgenome_elf_info;
 
 /*
  * Write the block for `file` into `out`, returning the bytes written - at
@@ -21,13 +24,10 @@ struct kof_elf_info;
  * well-formed empty block rather than nothing. Zero only if `cap` cannot hold
  * even the header.
  */
-struct kof_func_set;
-void kof_elf_funcs_build(kof_buf file, const struct kof_elf_info *e,
-			 struct kof_func_set *out);
-void kof_elf_funcs_from_entries(kof_buf file, const struct kof_elf_info *e,
-				uint64_t entry_off, const uint64_t *ent,
-				uint32_t n_ent, struct kof_func_set *out);
-uint32_t kof_elf_syms(kof_buf file, const struct kof_elf_info *e,
+uint32_t kof_elf_syms(kof_buf file, const struct kgenome_elf_info *e,
 		      uint8_t *out, uint32_t cap);
+
+/* How many records the symbol table declares: what a caller sizes `out` by. */
+uint32_t kof_elf_syms_declared(kof_buf file, const struct kgenome_elf_info *e);
 
 #endif /* KOF_ELF_SYM_H */

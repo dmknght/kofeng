@@ -61,7 +61,7 @@
 
 #include <stddef.h>
 #include "docole_parse.h"
-#include "../../../extractors/decomp/ovba.h"
+#include <decompressors/ovba.h>
 #include "../../../kofcore/runlist.h"
 
 #include <string.h>
@@ -789,7 +789,7 @@ static void vba_module_offsets(struct ole *s)
 		    !name_eq(s, &o->ent[i], (const uint8_t *)"dir", 3u))
 			continue;
 		if (ent_bytes_at(s, &o->ent[i], 0, head, sizeof head) ==
-		    sizeof head && kof_ovba_plausible(head, sizeof head))
+		    sizeof head && kuncoat_ovba_plausible(head, sizeof head))
 			break;
 	}
 	if (i >= o->n_entries)
@@ -807,7 +807,7 @@ static void vba_module_offsets(struct ole *s)
 
 		if (!got)
 			goto out;
-		kof_ovba_decode(raw, got, dirbuf_sink, &d, &produced);
+		kuncoat_ovba_decode(raw, got, dirbuf_sink, &d, &produced);
 	}
 
 	/*
@@ -907,7 +907,7 @@ static void vba_module_offsets(struct ole *s)
 		if (e->cls != KOF_DOCOLE_CLS_MACROS || !e->n_runs)
 			continue;
 		got = ent_bytes_at(s, e, e->data_off, head, sizeof head);
-		if (got == sizeof head && kof_ovba_plausible(head, got))
+		if (got == sizeof head && kuncoat_ovba_plausible(head, got))
 			e->flags |= KOF_DOCOLE_ENT_OVBA;
 	}
 out:
@@ -926,25 +926,7 @@ static const uint32_t docole_cls_bit[KOF_DOCOLE_CLS_COUNT] = {
 	KOF_SCAN_DOCOLE_RESOURCES
 };
 
-static uint32_t docole_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				    struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_docole_info *o =
-		(const struct kof_docole_info *)ctx->file_header;
-
-	if (!o || !o->valid || !out || max_out == 0)
-		return 0;
-	/*
-	 * The cast is to the shared run shape, which docole.h spells out field for
-	 * field rather than including a host header from the ABI. A mismatch would be
-	 * a memory bug, so it is asserted at compile time rather than trusted.
-	 */
-	_Static_assert(sizeof o->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)o->run, o->n_runs, mask,
-				docole_cls_bit, KOF_SCAN_DOCOLE_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(docole, struct kof_docole_info, docole_cls_bit, KOF_SCAN_DOCOLE_UNCLAIMED)
 
 /* ---- the parse ---------------------------------------------------------------- */
 

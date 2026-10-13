@@ -58,7 +58,7 @@ remove the line rather than to reword this paragraph.
 ### ClamAV — GPL-2.0
 
 `clamav/libclamav/upx.c` decodes the same NRV2B/NRV2D/NRV2E codings that
-`libkofeng/extractors/decomp/nrv2.c` does. It was read to understand the coding.
+`libuncoat/decompressors/nrv2.c` does. It was read to understand the coding.
 The structure of the decoder here is its own - one decode loop with the two
 points the variants differ at, rather than three near-copies - and no part of
 ClamAV's is reproduced. The note in `nrv2.h` says the same thing beside the
@@ -276,7 +276,7 @@ things it does instead are now what kofeng does:
     only if it ends in a return or a transfer. What counts as plausible is
     kofeng's own - RetDec's x86 test is built around `mov eax,1; int 0x80`
     and this engine already answers that question better with
-    `kof_sys_noreturn`.
+    `kgenome_sys_noreturn` (since removed).
   - RUNS OF ZERO STRUCK OUT FIRST. Alignment is not code, and on x86 it
     decodes to a stream of `add [rax], al` - each of which counted as an
     instruction and so stretched the distance between the two real steps
@@ -383,7 +383,7 @@ sources this engine took structure from, under the MIT terms above:
   - THE ASPACK CODING, which is not documented anywhere else this project could
     find: the bit reader, the four alphabets, the delta-coded code lengths, the
     repeat-offset history, and the 114-byte table the decoder indexes three ways.
-    `libkofeng/extractors/decomp/aspack.c` is C against this engine's decoder
+    `libuncoat/decompressors/aspack.c` is C against this engine's decoder
     interface rather than a transcription, and every bound in it is this
     engine's own - the original decodes into an image it owns, and this decodes
     into a caller's buffer with a hostile file behind it. It reports what it

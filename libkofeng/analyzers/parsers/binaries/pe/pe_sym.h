@@ -12,16 +12,29 @@
 
 #include <kofcore.h>
 #include <kofmod/kofsym.h>
+/* kgenome_pe_funcs_build moved to the genome (RUNTIME_FUNCTION table); still
+ * reachable from here for the callers that came through this header. */
+#include <genotype/image/funcs.h>
 
-struct kof_pe_info;
+struct kgenome_pe_info;
+struct kgenome_pe_imptab;
 
 /*
  * Write the block for `file` into `out`, returning the bytes written - at
  * least KOF_SYM_HDRLEN, so a PE with neither directory still yields a
  * well-formed empty block. Zero only if `cap` cannot hold the header.
  */
-uint32_t kof_pe_syms(kof_buf file, const struct kof_pe_info *p,
+uint32_t kof_pe_syms(kof_buf file, const struct kgenome_pe_info *p,
 		     uint8_t *out, uint32_t cap);
+
+/*
+ * The same, reading the imports from a table the caller already built from
+ * `file` - see kgenome_pe_imptab in pe_parse.h - instead of walking the directory
+ * again. NULL builds one for this call, which is what kof_pe_syms is.
+ */
+uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
+			  const struct kgenome_pe_imptab *tab,
+			  uint8_t *out, uint32_t cap);
 
 /*
  * Insert imports the program resolved for itself, after the last import and
@@ -32,12 +45,9 @@ uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 				 const char *const *dll, const char *const *name,
 				 uint32_t n);
 
-/*
- * The functions of an x64 PE, from its RUNTIME_FUNCTION table - see funcs.h.
- * `off` is a file offset. Empty for anything else.
- */
-struct kof_func_set;
-void kof_pe_funcs_build(kof_buf file, const struct kof_pe_info *p,
-			struct kof_func_set *out);
+/* The bytes inserting these `n` imports can add - the room to make in `cap` first.
+ * A block that cannot hold them is left as it was, with its truncated byte set. */
+uint32_t kof_pe_syms_add_room(const char *const *dll, const char *const *name,
+			      uint32_t n);
 
 #endif /* KOF_PE_SYM_H */

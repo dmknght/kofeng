@@ -23,7 +23,7 @@
 #include <stdint.h>
 #include <math.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -38,24 +38,24 @@ static int failures;
 static int run(const uint8_t *code, unsigned n, const void *seed,
 	       unsigned seedn, unsigned out, void *got, unsigned gotn)
 {
-	struct kof_emu_cfg cfg = { 0 };
-	struct kof_emu *e;
+	struct kgenome_emu_cfg cfg = { 0 };
+	struct kgenome_emu *e;
 	int ok;
 
 	cfg.bits = 32;
 	cfg.max_insn = 200;
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e)
 		return 0;
-	kof_emu_map(e, CODE_VA, code, n, 0x1000, KOF_EMU_R | KOF_EMU_X);
-	kof_emu_map(e, DATA_VA, seed, seedn, 0x1000, KOF_EMU_R | KOF_EMU_W);
-	kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W);
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
-	kof_emu_set_reg(e, KOF_EMU_RDX, DATA_VA);
-	(void)kof_emu_run(e);
-	ok = kof_emu_read(e, DATA_VA + out, got, gotn);
-	kof_emu_free(e);
+	kgenome_emu_map(e, CODE_VA, code, n, 0x1000, KGENOME_EMU_R | KGENOME_EMU_X);
+	kgenome_emu_map(e, DATA_VA, seed, seedn, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W);
+	kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RDX, DATA_VA);
+	(void)kgenome_emu_run(e);
+	ok = kgenome_emu_read(e, DATA_VA + out, got, gotn);
+	kgenome_emu_free(e);
 	return ok;
 }
 

@@ -27,7 +27,8 @@
 #include <stdint.h>
 
 #include "../../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../../libkofeng/extractors/unpack/emu_unpack.h"
+#include <phenotype/emu_unpack.h>
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 static int failures;
 
@@ -78,16 +79,18 @@ static void build(uint8_t *f, uint64_t entry, int phoff_past_eof)
 	w64(ph + 0x30, 0x1000);
 }
 
-static enum kof_emu_unp_why gate_of(const uint8_t *f)
+static enum kgenome_emu_unp_why gate_of(const uint8_t *f)
 {
-	struct kof_elf_info info;
+	struct kgenome_elf_info info;
 	struct kof_obj_ctx ctx;
+	struct kgenome_obj gobj;
 
 	memset(&info, 0, sizeof info);
 	memset(&ctx, 0, sizeof ctx);
 	if (!kof_elf_parse(kof_buf_make(f, FSIZE), &info, &ctx))
-		return KOF_EMU_UNP_NO;
-	return kof_emu_unp_gate(&ctx, &info, f, FSIZE);
+		return KGENOME_EMU_UNP_NO;
+	kof_genome_obj(&ctx, &gobj);
+	return kgenome_emu_unp_gate(&gobj, &info, f, FSIZE);
 }
 
 int main(void)
@@ -107,11 +110,11 @@ int main(void)
 		0x48,0xFF,0xC6, 0x48,0xFF,0xC9, 0x75,0xF2,
 		0x48,0x31,0xFF, 0x48,0xC7,0xC0, 0x3C,0,0,0, 0x0F,0x05
 	};
-	struct kof_elf_info info;
+	struct kgenome_elf_info info;
 	struct kof_obj_ctx ctx;
-	struct kof_emu_unp_report rep;
-	struct kof_emu *e;
-	enum kof_emu_unp_why why;
+	struct kgenome_emu_unp_report rep;
+	struct kgenome_emu *e;
+	enum kgenome_emu_unp_why why;
 	uint32_t seed = 0x1234567u, i;
 	uint32_t it;
 	uint64_t va, len;
@@ -123,7 +126,7 @@ int main(void)
 	memset(f + BODY, 0x90, 0x1000);
 	why = gate_of(f);
 	printf("  đặc? không (mã thường)         -> %d\n", (int)why);
-	if (why != KOF_EMU_UNP_NO)
+	if (why != KGENOME_EMU_UNP_NO)
 		fail("a segment of NOPs was selected for emulation");
 
 	/*
@@ -143,7 +146,7 @@ int main(void)
 	}
 	why = gate_of(f);
 	printf("  đặc? có (entropy cao)          -> %d\n", (int)why);
-	if (why != KOF_EMU_UNP_WHY_DENSE)
+	if (why != KGENOME_EMU_UNP_WHY_DENSE)
 		fail("a dense executable segment was not selected");
 
 	/* 3. The fail-safe: the program header table is not there to read. */
@@ -155,13 +158,17 @@ int main(void)
 
 	why = gate_of(f);
 	printf("  header không đọc được          -> %d\n", (int)why);
-	if (why != KOF_EMU_UNP_WHY_BROKEN)
+	if (why != KGENOME_EMU_UNP_WHY_BROKEN)
 		fail("an unreadable program header table was not recognised");
 
 	memset(&info, 0, sizeof info);
 	memset(&ctx, 0, sizeof ctx);
 	kof_elf_parse(kof_buf_make(f, FSIZE), &info, &ctx);
-	e = kof_emu_unp_run(f, FSIZE, &info, 100000, 0, &rep);
+	{
+		struct kgenome_budget bud = { .max_insn = 100000 };
+
+		e = kgenome_emu_unp_run(f, FSIZE, &info, &bud, &rep);
+	}
 	if (!e) {
 		fail("no process image could be built from a broken header");
 		printf("emu gate: FAILED\n");
@@ -169,9 +176,9 @@ int main(void)
 	}
 	printf("  chạy dự phòng: entry=%#llx%s %llu lệnh, dừng=%s\n",
 	       (unsigned long long)rep.entry, rep.improvised ? " (đoán)" : "",
-	       (unsigned long long)rep.insn, kof_emu_stop_name(rep.stop));
+	       (unsigned long long)rep.insn, kgenome_emu_stop_name(rep.stop));
 
-	for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
+	for (it = 0; kgenome_emu_next_written(e, &it, &va, &bytes, &len); ) {
 		uint64_t k;
 
 		for (k = 0; len >= sizeof plain && k + sizeof plain <= len; k++)
@@ -185,12 +192,12 @@ int main(void)
 	 * works if the object was mapped flat and the entry was resolved
 	 * against that map. Recovering the mark proves both.
 	 */
-	if (rep.stop != KOF_EMU_STOP_EXIT)
+	if (rep.stop != KGENOME_EMU_STOP_EXIT)
 		fail("the fallback image did not run the stub to its exit");
 	if (!found)
 		fail("the stub ran but what it decrypted was not recovered");
 
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 
 	/*
 	 * 4. The loader: ordinary code, a big high-entropy block in a segment
@@ -208,11 +215,12 @@ int main(void)
 		       LDATA = 0x2000, LDLEN = 0x6000,
 		       LSIZE = LDATA + LDLEN + 16 };
 		static uint8_t g[LSIZE];
-		struct kof_elf_info li;
+		struct kgenome_elf_info li;
 		struct kof_obj_ctx lc;
+		struct kgenome_obj gobj;
 		uint8_t *ph;
 		uint32_t s2 = 0x9e3779b9u, j;
-		enum kof_emu_unp_why lw;
+		enum kgenome_emu_unp_why lw;
 
 		memset(g, 0, sizeof g);
 		memcpy(g, "\177ELF\2\1\1", 7);
@@ -255,9 +263,10 @@ int main(void)
 		memset(&li, 0, sizeof li);
 		memset(&lc, 0, sizeof lc);
 		kof_elf_parse(kof_buf_make(g, sizeof g), &li, &lc);
-		lw = kof_emu_unp_gate(&lc, &li, g, sizeof g);
+		kof_genome_obj(&lc, &gobj);
+		lw = kgenome_emu_unp_gate(&gobj, &li, g, sizeof g);
 		printf("  loader (ciphertext + import)   -> %d\n", (int)lw);
-		if (lw != KOF_EMU_UNP_WHY_LOADER)
+		if (lw != KGENOME_EMU_UNP_WHY_LOADER)
 			fail("an encrypted payload beside an exec import was not selected");
 
 		/* The import alone, with no ciphertext block, must NOT fire. */
@@ -265,9 +274,10 @@ int main(void)
 		memset(&li, 0, sizeof li);
 		memset(&lc, 0, sizeof lc);
 		kof_elf_parse(kof_buf_make(g, sizeof g), &li, &lc);
-		lw = kof_emu_unp_gate(&lc, &li, g, sizeof g);
+		kof_genome_obj(&lc, &gobj);
+		lw = kgenome_emu_unp_gate(&gobj, &li, g, sizeof g);
 		printf("  import without ciphertext      -> %d\n", (int)lw);
-		if (lw != KOF_EMU_UNP_NO)
+		if (lw != KGENOME_EMU_UNP_NO)
 			fail("the exec import alone was enough to select an object");
 	}
 

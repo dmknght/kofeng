@@ -21,7 +21,8 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
 
@@ -100,7 +101,7 @@ static uint64_t elf64(uint8_t *b, uint64_t cap, const uint8_t *code, uint64_t n)
 
 static unsigned char view[1u << 21];
 
-static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
+static struct kgenome_diag_scan *scan(const uint8_t *b, uint64_t n,
 				  struct kof_obj_ctx *ctx, const char *what)
 {
 	const struct kof_parser *pl;
@@ -114,23 +115,27 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 	pl = kof_parser_list(&np);
 	for (i = 0; i < np; i++)
 		if (pl[i].sniff && pl[i].sniff(buf) &&
-		    pl[i].parse && pl[i].parse(buf, view, ctx))
+		    pl[i].parse && pl[i].parse(buf, view, ctx)) {
+			struct kgenome_obj gobj;
+
 			/* THE SYSCALL ROUTINE AND ONLY IT. These cases are
 			 * about which byte sequences count as a way into
 			 * the kernel, which is that routine's rule; a node
 			 * from a run would be a different question counted
 			 * in the same total. */
-			return kof_diag_scan_with(ctx, b, n,
-						  KOF_DIAG_RUN_SYSCALL);
+			kof_genome_obj(ctx, &gobj);
+			return kgenome_diag_scan_with(&gobj, b, n,
+						  KGENOME_DIAG_RUN_SYSCALL);
+		}
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;
 }
 
 
-static uint32_t count(struct kof_diag_scan *s)
+static uint32_t count(struct kgenome_diag_scan *s)
 {
-	return s ? kof_diag_scan_count(s) : 0;
+	return s ? kgenome_diag_scan_count(s) : 0;
 }
 
 /* the wrapper, as uClibc builds it: call = [esp+4], args = [esp+8] */
@@ -158,7 +163,7 @@ int main(void)
 {
 	static uint8_t b[0x800], code[256];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
+	struct kgenome_diag_scan *s;
 	uint32_t i, n_net, n_opaque;
 	uint64_t n;
 	int saw_connect, saw_send;
@@ -184,15 +189,15 @@ int main(void)
 	saw_connect = saw_send = 0;
 	n_opaque = 0;
 	for (i = 0; s && i < count(s); i++) {
-		const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-		if (h->cap == KOF_NUCLEO_NET_CONNECT) {
+		if (h->cap == KGENOME_NUCLEO_NET_CONNECT) {
 			n_net++;
 			saw_connect += h->at == 0x54u + 3u;     /* the call that pushed 3 */
-		} else if (h->cap == KOF_NUCLEO_NET_WRITE) {
+		} else if (h->cap == KGENOME_NUCLEO_NET_WRITE) {
 			n_net++;
 			saw_send += h->at == 0x54u + 14u;       /* the call that pushed 9 */
-		} else if (h->bits & KOF_DIAG_H_OPAQUE) {
+		} else if (h->bits & KGENOME_DIAG_H_OPAQUE) {
 			n_opaque++;
 		}
 		CK(h->at != 0x54u + 22u);       /* the call with no argument */
@@ -201,7 +206,7 @@ int main(void)
 	CK(saw_connect == 1);
 	CK(saw_send == 1);
 	CK(n_opaque == 0);      /* the site is explained, not unknown */
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 
 	/*
 	 * 2. NOBODY CALLS IT WITH A VALUE: the site must be REPORTED as a
@@ -216,14 +221,14 @@ int main(void)
 	s = scan(b, n, &ctx, "no resolvable caller");
 	n_opaque = 0;
 	for (i = 0; s && i < count(s); i++) {
-		const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-		CK(h->cap != KOF_NUCLEO_NET_CONNECT && h->cap != KOF_NUCLEO_NET_WRITE);
-		if (h->bits & KOF_DIAG_H_OPAQUE)
+		CK(h->cap != KGENOME_NUCLEO_NET_CONNECT && h->cap != KGENOME_NUCLEO_NET_WRITE);
+		if (h->bits & KGENOME_DIAG_H_OPAQUE)
 			n_opaque++;
 	}
 	CK(n_opaque == 1);
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 
 	/*
 	 * 3. THE SUB-CALL IS KNOWN AT THE SITE: nothing is deferred, and the
@@ -240,13 +245,13 @@ int main(void)
 		n = elf32(b, sizeof b, local, sizeof local);
 		s = scan(b, n, &ctx, "resolved at the site");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			found += h->cap == KOF_NUCLEO_NET_CONNECT &&
+			found += h->cap == KGENOME_NUCLEO_NET_CONNECT &&
 				 h->at == 0x54u + 8u;
 		}
 		CK(found == 1);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -271,14 +276,14 @@ int main(void)
 		n = elf32(b, sizeof b, code, 45);
 		s = scan(b, n, &ctx, "jump stub");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 36u;
-			bad += h->at != 0x54u + 36u && h->cap == KOF_NUCLEO_NET_CONNECT;
+			found += h->cap == KGENOME_NUCLEO_NET_CONNECT && h->at == 0x54u + 36u;
+			bad += h->at != 0x54u + 36u && h->cap == KGENOME_NUCLEO_NET_CONNECT;
 		}
 		CK(found == 1);
 		CK(bad == 0);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -308,12 +313,12 @@ int main(void)
 		n = elf32(b, sizeof b, code, 16u + sizeof viaptr);
 		s = scan(b, n, &ctx, "parameter through a stack pointer");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 2u;
+			found += h->cap == KGENOME_NUCLEO_NET_CONNECT && h->at == 0x54u + 2u;
 		}
 		CK(found == 1);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -345,12 +350,12 @@ int main(void)
 		n = elf32(b, sizeof b, code, 16u + sizeof bracketed);
 		s = scan(b, n, &ctx, "bracketed by another call");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 2u;
+			found += h->cap == KGENOME_NUCLEO_NET_CONNECT && h->at == 0x54u + 2u;
 		}
 		CK(found == 1);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -379,12 +384,12 @@ int main(void)
 		n = elf32(b, sizeof b, code, 24);
 		s = scan(b, n, &ctx, "arguments in registers");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 18u;
+			found += h->cap == KGENOME_NUCLEO_NET_CONNECT && h->at == 0x54u + 18u;
 		}
 		CK(found == 1);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -419,12 +424,12 @@ int main(void)
 		n = elf32(b, sizeof b, code, 33);
 		s = scan(b, n, &ctx, "two paths");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			found += h->cap == KOF_NUCLEO_NET_CONNECT && h->at == 0x54u + 24u;
+			found += h->cap == KGENOME_NUCLEO_NET_CONNECT && h->at == 0x54u + 24u;
 		}
 		CK(found == 1);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -441,7 +446,7 @@ int main(void)
 			0xcd, 0x80,                   /* int 0x80           */
 			0xc3
 		};
-		const struct kof_diag_hit *rd = NULL;
+		const struct kgenome_diag_hit *rd = NULL;
 		int opened = -1;
 
 		memset(code, 0x90, sizeof code);
@@ -460,12 +465,12 @@ int main(void)
 		n = elf32(b, sizeof b, code, 49);
 		s = scan(b, n, &ctx, "returned descriptor");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			if (h->cap == KOF_NUCLEO_FILE_OPEN && h->at == 0x54u + 16u &&
-			    !(h->bits & KOF_DIAG_H_SUPERSEDED))
+			if (h->cap == KGENOME_NUCLEO_FILE_OPEN && h->at == 0x54u + 16u &&
+			    !(h->bits & KGENOME_DIAG_H_SUPERSEDED))
 				opened = (int)i;
-			if (h->cap == KOF_NUCLEO_MEM_READ && h->at == 0x54u + 40u)
+			if (h->cap == KGENOME_NUCLEO_MEM_READ && h->at == 0x54u + 40u)
 				rd = h;
 		}
 		CK(opened >= 0);
@@ -478,7 +483,7 @@ int main(void)
 				linked += opened >= 0 && rd->in[k].from == (uint16_t)opened;
 			CK(linked >= 1);
 		}
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -502,11 +507,11 @@ int main(void)
 		n = elf64(b, sizeof b, with, sizeof with);
 		s = scan(b, n, &ctx, "socket with SOCK_NONBLOCK");
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
-			if (h->cap == KOF_NUCLEO_NET_OPEN)
+			if (h->cap == KGENOME_NUCLEO_NET_OPEN)
 				open = (int)i;
-			if (h->cap == KOF_NUCLEO_FD_NONBLOCK) {
+			if (h->cap == KGENOME_NUCLEO_FD_NONBLOCK) {
 				unsigned k;
 
 				nb++;
@@ -517,7 +522,7 @@ int main(void)
 		CK(open >= 0);
 		CK(nb == 1);
 		CK(linked == 1);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 
 		memcpy(without, with, sizeof with);
 		without[7] = 0x00;                      /* type 1: no flag */
@@ -525,9 +530,9 @@ int main(void)
 		s = scan(b, n, &ctx, "socket without it");
 		nb = 0;
 		for (i = 0; s && i < count(s); i++)
-			nb += kof_diag_scan_at(s, i)->cap == KOF_NUCLEO_FD_NONBLOCK;
+			nb += kgenome_diag_scan_at(s, i)->cap == KGENOME_NUCLEO_FD_NONBLOCK;
 		CK(nb == 0);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	printf("diag wrap: the caller's constant, a call with none, the unknown site, a jump stub, a stack pointer, a bracketing call, register parameters, two paths, a returned descriptor, a non-blocking socket type%s\n",

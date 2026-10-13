@@ -1,0 +1,189 @@
+/*
+ * kofmutation.h - the similarity matcher: an index over rule blocks, and the
+ * per-thread state that scores one object against all of them.
+ *
+ * THE SPLIT IS THE ENGINE'S OWN. `kof_mutation_set` is built once, is immutable,
+ * and is shared by every thread; `kof_mutation_ctx` is the counters, one per
+ * scanner. That is the same division kof_engine and kof_scanner already have,
+ * and it is what keeps a few megabytes of index out of the per-thread cost.
+ *
+ * COST, because this runs on every eligible object:
+ *
+ *   - one linear pass per (region, normalizer) a rule asked for. About two
+ *     operations a byte: a rolling hash update and a multiply.
+ *   - one bitmap test per window. Most windows are not selected at all, and of
+ *     those that are, most are in no rule; both are rejected without touching
+ *     the index.
+ *   - a binary search only for the few that survive.
+ *
+ * So the cost is linear in the bytes and INDEPENDENT OF THE NUMBER OF RULES.
+ * That is the whole reason the index is inverted rather than the rules being
+ * walked - ten thousand rules walked per object would be a million set
+ * intersections and is not a design that ships.
+ */
+
+#ifndef KOFENG_KOFMUTATION_MATCH_H
+#define KOFENG_KOFMUTATION_MATCH_H
+
+#include <stdint.h>
+#include <kofmod/kofsig.h>   /* struct kof_range, for the library spans */
+#include <kofmod/kofmutation.h>
+#include <celllysis/fragmentation.h>
+
+/*
+ * The immutable side: the rules, their blocks, the hash pool, and the index
+ * built over it.
+ *
+ * Built from the arrays a pack loaded, and it does not own them - a pack is
+ * mapped or read once and outlives every set built from it.
+ */
+struct kof_mutation_set;
+
+/*
+ * Build the index. Returns NULL if the inputs do not describe a consistent set
+ * - a block whose hash slice runs past the pool - because a matcher that
+ * indexed those would read out of bounds on an object nobody could predict.
+ */
+struct kof_mutation_set *kof_mutation_build(const struct kof_mutation_block *blocks,
+					uint32_t n_blocks,
+					const uint32_t *pool, uint32_t n_pool);
+void kof_mutation_set_free(struct kof_mutation_set *set);
+
+/* What the index cost, for whoever reports engine size. */
+uint64_t kof_mutation_set_bytes(const struct kof_mutation_set *set);
+uint32_t kof_mutation_set_blocks(const struct kof_mutation_set *set);
+
+/*
+ * Which normalizers any block of this set uses, as a bit per enum value.
+ *
+ * A caller feeds a region once per normalizer in use; asking first is what
+ * keeps a pack that only ever hashes raw bytes from paying for two extra
+ * passes over every object.
+ */
+uint32_t kof_mutation_set_norms(const struct kof_mutation_set *set, uint32_t scan_mask);
+
+/*
+ * ONE BLOCK'S HASHES, so a caller can recognise the block by its content.
+ *
+ * A block has no name in the database - the source calls it blk_<something>
+ * and the pack keeps only the numbers - so the way to tell that a span of a
+ * file IS a block the database already has is to hash the span and compare the
+ * sets. The viewer does exactly that: it carves a sample, and a carved block
+ * whose hashes fold to the same value as a declared one is that declared one.
+ *
+ * NULL and *n_hash = 0 for an index the set does not have.
+ */
+/* The block's name: the fold of its hashes, as the verdict spells it. */
+uint32_t kof_mutation_block_id(const struct kof_mutation_set *set, uint32_t block);
+
+const uint32_t *kof_mutation_block_hashes(const struct kof_mutation_set *set,
+					uint32_t block, uint32_t *n_hash);
+
+
+/* The mutable side: one per scanner thread. */
+struct kof_mutation_ctx {
+	const struct kof_mutation_set *set;
+	/*
+	 * Per block: the best count of its hashes that ONE unit of this object
+	 * held, and which object that was.
+	 *
+	 * The stamp is what removes the clear: an object bumps a generation
+	 * counter and every stale count reads as zero without anything being
+	 * written.
+	 */
+	uint32_t *seen;
+	uint32_t *stamp;
+	/*
+	 * Per block, for the unit being credited: how many of its hashes this
+	 * unit holds, and which unit that was. Same device, one level in.
+	 */
+	/* Per (block, hash) pair, same device: a hash that many windows of one
+	 * object produce is one hash of the block, counted once - see mtn_credit. */
+	uint32_t *pstamp;
+	/*
+	 * Credit a block whatever region the bytes came from - see
+	 * kof_mutation_any_region. Per object, because it is a property of the
+	 * OBJECT and not of the set: cleared by kof_mutation_begin so it cannot
+	 * leak from one object into the next.
+	 */
+	int       any_region;
+	uint32_t  gen;
+	uint32_t  n_block;
+};
+
+int  kof_mutation_ctx_init(struct kof_mutation_ctx *c, const struct kof_mutation_set *s);
+void kof_mutation_ctx_done(struct kof_mutation_ctx *c);
+
+/* Start a new object. Cheap - it bumps a counter. */
+void kof_mutation_begin(struct kof_mutation_ctx *c);
+
+/*
+ * DROP THE REGION ANCHOR FOR THIS OBJECT.
+ *
+ * A block records the region it was cut from and is credited only from that
+ * region, which is the anchoring a rule is written with - see the note in
+ * kofmutation.h on a block being a place as much as a content.
+ *
+ * That anchor is meaningless on an object an UNPACKER PRODUCED. What comes out
+ * of a packer is a reconstructed image, and which region of it a given blob
+ * lands in is a property of the packer and of the rebuild, not of the malware:
+ * the same code sits in CODE in one build, in DATA after a repack, and in a
+ * single unnamed run of bytes when nothing parses the output at all. Anchored,
+ * every block scores zero on exactly the object the unpacker was run to
+ * produce.
+ *
+ * Set after kof_mutation_begin and before the feeds, and cleared by the next
+ * begin.
+ */
+void kof_mutation_any_region(struct kof_mutation_ctx *c, int on);
+
+/*
+ * Credit one UNIT of the object - a function, a run of small ones, or a piece of
+ * a region cut by kgenome_mutation_cut; see kgenome_mutation_units, which makes the same
+ * cuts a block was made from. The unit is sketched with one normalizer and each
+ * hash of its sketch is credited to the blocks that hold it.
+ *
+ * `scan_mask` is the region bit the bytes are in; only blocks taken from that
+ * region are credited, so the same bytes in the wrong region cannot score. That
+ * is the anchor a rule relies on. `side` is which half of the object the unit
+ * is on - see enum kgenome_mutation_side - and only blocks from the same side count.
+ *
+ * A block's score is the BEST single unit's: how much of its sketch that unit
+ * holds, not what several units hold between them.
+ */
+void kof_mutation_unit(struct kof_mutation_ctx *c, uint32_t scan_mask, uint32_t norm,
+		     uint32_t side, const uint8_t *p, uint64_t n);
+
+/*
+ * How much of block `b` was found in what was fed, as a percentage.
+ *
+ * Named `pct` and not `score` because the RULE-facing spelling of this is
+ * kof_mutation_score in kofsig.h, and that one takes a declared block name rather
+ * than an engine-wide index. Two names for two layers: a module never sees this
+ * one, and the host never sees a block name.
+ *
+ * This is the whole interface a rule sees, through that macro. What the number means is the rule's
+ * to decide - see the note in kofmod/kofmutation.h about why the thresholds are
+ * not here.
+ *
+ * Zero for a block nothing fed could reach, which is the same answer as "none
+ * of it was there": a rule cannot tell the two apart and must not try, because
+ * a region that was never resolved and a region with nothing in it are the same
+ * fact about this object.
+ */
+uint32_t kof_mutation_pct(const struct kof_mutation_ctx *c, uint32_t b);
+/* The same measurement unreduced, for a caller combining several blocks. */
+int kof_mutation_counts(const struct kof_mutation_ctx *c, uint32_t b,
+		      uint32_t *seen, uint32_t *n_hash);
+
+/*
+ * The count the percentage was computed from.
+ *
+ * Not for a rule - a rule wants the percentage and nothing else - but for a
+ * tool showing an author why a block scored what it did. Seven of twenty and
+ * seven of twenty-one are both thirty-five percent, and which one it is decides
+ * whether a threshold of forty is reachable at all.
+ */
+uint32_t kof_mutation_matched(const struct kof_mutation_ctx *c, uint32_t b);
+
+#endif /* KOFENG_KOFMUTATION_MATCH_H */

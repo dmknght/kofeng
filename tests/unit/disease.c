@@ -5,7 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../libkofeng/detectors/pathogen/diseases/kofdisease.h"
+#include "../../libkofeng/analyzers/diseases/kofdisease.h"
+#include <kofmod/kofsig.h>
 
 static int failures;
 
@@ -36,6 +37,39 @@ int main(void)
 	longest[KOF_DIAG_DISEASE_LEN] = 'a';
 	longest[KOF_DIAG_DISEASE_LEN + 1u] = 0;
 	check(kof_disease_check(longest) != NULL, "one more is refused");
+	check(kof_disease_id("cnc/recv") == kof_disease_id("cnc/recv"), "an id is a function of the name");
+	check(kof_disease_id("cnc/recv") != kof_disease_id("cnc/send"), "different names, different ids");
+	check(kof_disease_id("") != 0 && kof_disease_id("a") != 0, "zero is never an id");
+	/* the declaration: read, written, read back */
+	{
+		struct kof_disease_decl d, e;
+		char line[160];
+		const char *src = "KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"flood-network/raw-header\");";
+
+		check(!kof_disease_decl_parse(src, &d), "a declaration is read");
+		check(d.type == KOF_MALTYPE_BOTNET && !strcmp(d.name, "flood-network/raw-header"),
+		      "with its type and its name");
+		check(kof_disease_decl_print(&d, line, sizeof line) == strlen(src) && !strcmp(line, src),
+		      "written as it was read");
+		check(!kof_disease_decl_parse(line, &e) && kof_disease_decl_same(&d, &e),
+		      "and read back the same");
+		check(!kof_disease_decl_parse("KOF_DECLARE_DISEASE(\n\tKOF_MALTYPE_MINER,\n\t\"a/b\"\n);", &e) &&
+		      e.type == KOF_MALTYPE_MINER, "a declaration wrapped over lines is read");
+		check(!kof_disease_decl_same(&d, &e), "different declarations are not the same");
+		check(kof_disease_decl_parse("KOF_DECLARE_DISEASE(KOF_MALTYPE_NOPE, \"a/b\")", &e) != NULL,
+		      "an unknown type is refused");
+		check(kof_disease_decl_parse("KOF_DECLARE_DISEASE(\"a/b\")", &e) != NULL, "a missing type is refused");
+		check(kof_disease_decl_parse("KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, a/b)", &e) != NULL,
+		      "an unquoted name is refused");
+		check(kof_disease_decl_parse("KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"A/b\")", &e) != NULL,
+		      "a name that is not well formed is refused");
+		check(kof_disease_decl_parse("KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"a/b\", 1)", &e) != NULL,
+		      "a third argument is refused");
+		check(kof_disease_decl_parse("KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"a/b\"", &e) != NULL,
+		      "an unclosed declaration is refused");
+		d.type = (uint8_t)KOF_MALTYPE_COUNT;
+		check(kof_disease_decl_print(&d, line, sizeof line) == 0, "a type that is no maltype is not written");
+	}
 	if (failures) {
 		printf("disease: %d failure(s)\n", failures);
 		return 1;

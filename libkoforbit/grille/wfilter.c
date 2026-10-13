@@ -666,7 +666,7 @@ static int filter_decide(struct kofw_ptab *t, const struct kofw_filter *f,
 	 * from a record this file did not build - a shift of 32 or more is
 	 * UNDEFINED, not merely a wrong bit. The decoder only ever writes
 	 * values from its own tables, so this is not a hole somebody walks
-	 * through; it is the same guard kofmod/kofoverlord.h already writes as
+	 * through; it is the same guard the engine writes as
 	 * `if (g->type < 32u)` over a p_type out of an ELF header, applied to
 	 * the three places here that did not.
 	 *

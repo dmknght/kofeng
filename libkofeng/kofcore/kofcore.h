@@ -119,6 +119,49 @@ static inline int kof_rd_u64(kof_buf b, uint64_t off, int be, uint64_t *out)
 }
 
 /*
+ * Little-endian load and store through a raw pointer. UNCHECKED: the caller has
+ * already established that the bytes are there (a decompressor that tested its
+ * window, a cipher walking a block it sized). Where the range is not known, use
+ * kof_rd_u16/32/64 above. One spelling, because the same four-line shift chain
+ * had been written in a dozen decompressors, each a place to get one shift wrong.
+ */
+static inline uint16_t kof_ld_le16(const uint8_t *p)
+{
+	return (uint16_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8));
+}
+
+static inline uint32_t kof_ld_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline uint64_t kof_ld_le64(const uint8_t *p)
+{
+	return (uint64_t)kof_ld_le32(p) | ((uint64_t)kof_ld_le32(p + 4) << 32);
+}
+
+static inline void kof_st_le16(uint8_t *p, uint16_t v)
+{
+	p[0] = (uint8_t)v;
+	p[1] = (uint8_t)(v >> 8);
+}
+
+static inline void kof_st_le32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v;
+	p[1] = (uint8_t)(v >> 8);
+	p[2] = (uint8_t)(v >> 16);
+	p[3] = (uint8_t)(v >> 24);
+}
+
+static inline void kof_st_le64(uint8_t *p, uint64_t v)
+{
+	kof_st_le32(p, (uint32_t)v);
+	kof_st_le32(p + 4, (uint32_t)(v >> 32));
+}
+
+/*
  * Arithmetic on values that came out of a file.
  *
  * Every one of these was written inline several times before it was written once,
@@ -407,6 +450,19 @@ static inline int kof_is_alpha(uint8_t c)
 static inline int kof_is_alnum(uint8_t c)
 {
 	return kof_is_alpha(c) || kof_is_digit(c);
+}
+
+/* A byte that continues an identifier: [A-Za-z0-9_]. The one definition - the
+ * pattern matcher's word boundary and the examiner's token view both ask it. */
+static inline int kof_is_word_byte(uint8_t c)
+{
+	return kof_is_alnum(c) || c == '_';
+}
+
+/* C isspace() in the "C" locale, for a byte: space, \t \n \v \f \r. */
+static inline int kof_is_space_byte(uint8_t c)
+{
+	return c == ' ' || (uint8_t)(c - '\t') < 5u;
 }
 
 static inline int kof_hex_val(uint8_t c)

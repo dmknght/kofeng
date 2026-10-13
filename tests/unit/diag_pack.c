@@ -50,7 +50,7 @@ static void ok(const char *what, int cond)
 static size_t rec(uint8_t *b, const char *name)
 {
 	size_t nl = strlen(name), at = 0;
-	uint16_t cap = (uint16_t)KOF_NUCLEO_NET_OPEN;
+	uint16_t cap = (uint16_t)KGENOME_NUCLEO_NET_OPEN;
 
 	b[at++] = 1; b[at++] = 0;                 /* one node          */
 	b[at++] = KOF_DIAG_ANALYSIS_SYSCALL;

@@ -1,9 +1,9 @@
 /*
- * cell_state.c - the constant map and the modelled stack: what the registers
+ * kgenome_cell_state.c - the constant map and the modelled stack: what the registers
  * hold, where that is knowable by reading forwards and nothing else.
  *
  * THIS IS THE "PSEUDO" IN PSEUDO-EMULATION, and it is decode-level: it reads one
- * decoded instruction (struct cell_insn) and nothing about the object the code
+ * decoded instruction (struct kgenome_cell_insn) and nothing about the object the code
  * sits in. Where the code came from, how an offset becomes an address and what
  * a number means are the cursor's (cursor.c) and the engine's (nucleo).
  *
@@ -19,29 +19,29 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "kofmod/cell.h"
-#include "kofmod/cell.h"
+#include <celllysis/cell.h>
+#include <celllysis/cell.h>
 #include "cell_state.h"
 
 /* ---- the modelled stack -------------------------------------------------
  *
- * See CELL_STACK in cell.h for why sixteen slots is the right size and what
+ * See KGENOME_CELL_STACK in cell.h for why sixteen slots is the right size and what
  * this is for. Pushing past the end drops the oldest rather than refusing,
  * because a walk that stopped there would stop on ordinary code.
  */
-static void stk_push(struct cell_state *k, uint64_t v, int known)
+static void stk_push(struct kgenome_cell_state *k, uint64_t v, int known)
 {
 	unsigned i;
 
-	if (k->stk_n >= CELL_STACK) {
-		for (i = 1; i < CELL_STACK; i++) {
+	if (k->stk_n >= KGENOME_CELL_STACK) {
+		for (i = 1; i < KGENOME_CELL_STACK; i++) {
 			k->stk[i - 1u] = k->stk[i];
 			if (k->stk_known & (1u << i))
 				k->stk_known |= (uint16_t)(1u << (i - 1u));
 			else
 				k->stk_known &= (uint16_t)~(1u << (i - 1u));
 		}
-		k->stk_n = CELL_STACK - 1u;
+		k->stk_n = KGENOME_CELL_STACK - 1u;
 	}
 	k->stk[k->stk_n] = v;
 	if (known)
@@ -52,7 +52,7 @@ static void stk_push(struct cell_state *k, uint64_t v, int known)
 }
 
 /* The top of the modelled stack. Answers 0 when it is empty or unknown. */
-int cell_state_stack_top(const struct cell_state *k, uint64_t *out)
+int kgenome_cell_state_stack_top(const struct kgenome_cell_state *k, uint64_t *out)
 {
 	if (!k->stk_n || !(k->stk_known & (1u << (k->stk_n - 1u))))
 		return 0;
@@ -60,13 +60,13 @@ int cell_state_stack_top(const struct cell_state *k, uint64_t *out)
 	return 1;
 }
 
-static int stk_pop(struct cell_state *k, uint64_t *out)
+static int stk_pop(struct kgenome_cell_state *k, uint64_t *out)
 {
 	int got;
 
 	if (!k->stk_n)
 		return 0;
-	got = cell_state_stack_top(k, out);
+	got = kgenome_cell_state_stack_top(k, out);
 	k->stk_n--;
 	return got;
 }
@@ -75,7 +75,7 @@ static int stk_pop(struct cell_state *k, uint64_t *out)
  * FORGET EVERY REGISTER THIS INSTRUCTION WRITES, except the one the caller
  * has just worked out for itself.
  *
- * The decoder reports the implicit writes in `wmask` - see cell_insn - and
+ * The decoder reports the implicit writes in `wmask` - see kgenome_cell_insn - and
  * for a while nothing read it: the map cleared the FIRST OPERAND instead.
  * That is wrong in both directions at once, and `mul ebx` shows both:
  * the operand is READ, not written, so a known ebx was thrown away, while
@@ -85,10 +85,10 @@ static int stk_pop(struct cell_state *k, uint64_t *out)
  * lost its whole network half.
  *
  * ONE MASK OPERATION, NOT A LOOP OVER THE SIXTEEN REGISTERS: it is called once or
- * twice for nearly every instruction, and MEASURED (callgrind, 30 blobs, 9.67 M instructions) cell_state_track
- * went from 1.32 G to 0.40 G executed instructions, and kof_cell_next from 68 to 42 ns.
+ * twice for nearly every instruction, and MEASURED (callgrind, 30 blobs, 9.67 M instructions) kgenome_cell_state_track
+ * went from 1.32 G to 0.40 G executed instructions, and kgenome_cell_next from 68 to 42 ns.
  */
-static inline void cell_forget_written(struct cell_state *k, const struct cell_insn *in,
+static inline void cell_forget_written(struct kgenome_cell_state *k, const struct kgenome_cell_insn *in,
 				       int keep_reg)
 {
 	uint32_t m = (uint32_t)(in->wmask & 0xffffu);
@@ -109,7 +109,7 @@ static inline void cell_forget_written(struct cell_state *k, const struct cell_i
  * were the whole register is the one outcome that must not happen: it is a
  * number, it looks like an answer, and it is wrong.
  */
-static void cell_put(struct cell_state *k, uint8_t d, const struct cell_operand *o,
+static void cell_put(struct kgenome_cell_state *k, uint8_t d, const struct kgenome_cell_operand *o,
 		     uint64_t v)
 {
 	uint64_t old;
@@ -128,7 +128,7 @@ static void cell_put(struct cell_state *k, uint8_t d, const struct cell_operand 
 	old = k->reg[d];
 	if (o->size == 2u)
 		k->reg[d] = (old & ~(uint64_t)0xffff) | (v & 0xffffu);
-	else if (o->flags & CELL_OF_HIGH8)
+	else if (o->flags & KGENOME_CELL_OF_HIGH8)
 		k->reg[d] = (old & ~(uint64_t)0xff00) | ((v & 0xffu) << 8);
 	else
 		k->reg[d] = (old & ~(uint64_t)0xff) | (v & 0xffu);
@@ -143,14 +143,14 @@ static void cell_put(struct cell_state *k, uint8_t d, const struct cell_operand 
  * (x86 never sets it on a register); reading the plain register there is the
  * one outcome that must not happen - a number, looking like an answer, wrong.
  */
-static int src_val(const struct cell_state *k, const struct cell_operand *o,
+static int src_val(const struct kgenome_cell_state *k, const struct kgenome_cell_operand *o,
 		   uint64_t *v)
 {
-	if (o->kind == CELL_O_IMM) {
+	if (o->kind == KGENOME_CELL_O_IMM) {
 		*v = o->imm;
 		return 1;
 	}
-	if (o->kind == CELL_O_REG && o->reg < 16u && !o->scale &&
+	if (o->kind == KGENOME_CELL_O_REG && o->reg < 16u && !o->scale &&
 	    (k->known & (1u << o->reg))) {
 		*v = k->reg[o->reg];
 		return 1;
@@ -165,7 +165,7 @@ static int src_val(const struct cell_state *k, const struct cell_operand *o,
  * operation is one this can compute. Anything else makes it unknown, which is
  * the answer that keeps the map honest.
  */
-void cell_state_track(struct cell_state *k, const struct cell_insn *in)
+void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome_cell_insn *in)
 {
 	uint8_t d;
 	uint64_t a, b;
@@ -173,29 +173,29 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 
 	/*
 	 * THE STACK FIRST, because the idiom that matters most goes through
-	 * it - see CELL_STACK. A CALL pushes the address of the instruction
+	 * it - see KGENOME_CELL_STACK. A CALL pushes the address of the instruction
 	 * after it, which is exactly the cursor, so the POP that follows is
 	 * the one place a static walk learns a real address.
 	 */
 	switch (in->op) {
-	case CELL_CALL:
-		if (in->at_va != KOF_BROKEN)
+	case KGENOME_CELL_CALL:
+		if (in->at_va != KGENOME_BROKEN)
 			stk_push(k, in->at_va + in->len, 1);
 		else
 			stk_push(k, 0, 0);
 		return;
-	case CELL_PUSH:
-		if (in->n_op && in->o[0].kind == CELL_O_IMM)
+	case KGENOME_CELL_PUSH:
+		if (in->n_op && in->o[0].kind == KGENOME_CELL_O_IMM)
 			stk_push(k, in->o[0].imm, 1);
-		else if (in->n_op && in->o[0].kind == CELL_O_REG &&
+		else if (in->n_op && in->o[0].kind == KGENOME_CELL_O_REG &&
 			 in->o[0].reg < 16u &&
 			 (k->known & (1u << in->o[0].reg)))
 			stk_push(k, k->reg[in->o[0].reg], 1);
 		else
 			stk_push(k, 0, 0);
 		return;
-	case CELL_POP:
-		if (in->n_op && in->o[0].kind == CELL_O_REG &&
+	case KGENOME_CELL_POP:
+		if (in->n_op && in->o[0].kind == KGENOME_CELL_O_REG &&
 		    in->o[0].reg < 16u) {
 			uint64_t v = 0;
 
@@ -215,7 +215,7 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 			(void)stk_pop(k, &v);
 		}
 		return;
-	case CELL_RET: {
+	case KGENOME_CELL_RET: {
 		uint64_t v;
 
 		cell_forget_written(k, in, -1);   /* `pop {..,pc}` is a RET */
@@ -235,12 +235,12 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 	 * the sign bit set is left unknown rather than extended, because the
 	 * width that was extended is not recorded here.
 	 */
-	if (in->op == CELL_WIDEN) {
-		if ((in->wmask & (1ull << CELL_REG_DX)) &&
-		    (k->known & (1u << CELL_REG_AX)) &&
-		    k->reg[CELL_REG_AX] < 0x80000000u) {
-			k->reg[CELL_REG_DX] = 0;
-			k->known |= (uint16_t)(1u << CELL_REG_DX);
+	if (in->op == KGENOME_CELL_WIDEN) {
+		if ((in->wmask & (1ull << KGENOME_CELL_REG_DX)) &&
+		    (k->known & (1u << KGENOME_CELL_REG_AX)) &&
+		    k->reg[KGENOME_CELL_REG_AX] < 0x80000000u) {
+			k->reg[KGENOME_CELL_REG_DX] = 0;
+			k->known |= (uint16_t)(1u << KGENOME_CELL_REG_DX);
 			return;
 		}
 		cell_forget_written(k, in, -1);
@@ -253,7 +253,7 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 	 * memory. Returning without forgetting those is how a stale value
 	 * outlives the instruction that destroyed it.
 	 */
-	if (!in->n_op || in->o[0].kind != CELL_O_REG ||
+	if (!in->n_op || in->o[0].kind != KGENOME_CELL_O_REG ||
 	    in->o[0].reg >= 16u) {
 		cell_forget_written(k, in, -1);
 		return;
@@ -284,16 +284,16 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 	 * A 32-bit result wraps, which x86's two-operand arms never needed.
 	 */
 	if (in->n_op >= 3u &&
-	    (in->op == CELL_ADD || in->op == CELL_SUB || in->op == CELL_AND ||
-	     in->op == CELL_OR || in->op == CELL_XOR)) {
+	    (in->op == KGENOME_CELL_ADD || in->op == KGENOME_CELL_SUB || in->op == KGENOME_CELL_AND ||
+	     in->op == KGENOME_CELL_OR || in->op == KGENOME_CELL_XOR)) {
 		uint64_t x, y, r = 0;
 
 		if (src_val(k, &in->o[1], &x) && src_val(k, &in->o[2], &y)) {
 			switch (in->op) {
-			case CELL_ADD: r = x + y; break;
-			case CELL_SUB: r = x - y; break;
-			case CELL_AND: r = x & y; break;
-			case CELL_OR:  r = x | y; break;
+			case KGENOME_CELL_ADD: r = x + y; break;
+			case KGENOME_CELL_SUB: r = x - y; break;
+			case KGENOME_CELL_AND: r = x & y; break;
+			case KGENOME_CELL_OR:  r = x | y; break;
 			default:       r = x ^ y; break;
 			}
 			if (in->o[0].size == 4u)
@@ -308,14 +308,14 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 	}
 
 	switch (in->op) {
-	case CELL_MOV:
+	case KGENOME_CELL_MOV:
 		if (have_b)
 			cell_put(k, d, &in->o[0], b);
 		else
 			k->known &= (uint16_t)~(1u << d);
 		cell_forget_written(k, in, d);
 		return;
-	case CELL_XCHG:
+	case KGENOME_CELL_XCHG:
 		/*
 		 * TWO DESTINATIONS, and the old code had none: XCHG fell to
 		 * the default arm, which cleared the first operand and left
@@ -324,7 +324,7 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 		 * msfvenom's x86-64 stager parks its socket descriptor with
 		 * `xchg rdi, rax`.
 		 */
-		if (in->n_op > 1u && in->o[1].kind == CELL_O_REG &&
+		if (in->n_op > 1u && in->o[1].kind == KGENOME_CELL_O_REG &&
 		    in->o[1].reg < 16u) {
 			uint8_t e = in->o[1].reg;
 			uint64_t va = k->reg[d], ve = k->reg[e];
@@ -340,7 +340,7 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 			cell_forget_written(k, in, -1);
 		}
 		return;
-	case CELL_SUB: case CELL_XOR:
+	case KGENOME_CELL_SUB: case KGENOME_CELL_XOR:
 		/*
 		 * A REGISTER AGAINST ITSELF IS ZERO whatever it held, and
 		 * this used to answer "unknown" for it because it demanded a
@@ -348,7 +348,7 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 		 * msfvenom opens with `xor edi,edi` - so the map started
 		 * blind at the first instruction.
 		 */
-		if (in->n_op > 1u && in->o[1].kind == CELL_O_REG &&
+		if (in->n_op > 1u && in->o[1].kind == KGENOME_CELL_O_REG &&
 		    in->o[1].reg == d) {
 			k->reg[d] = 0;
 			k->known |= (uint16_t)(1u << d);
@@ -356,37 +356,37 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 			return;
 		}
 		/* fall through */
-	case CELL_ADD: case CELL_AND: case CELL_OR:
+	case KGENOME_CELL_ADD: case KGENOME_CELL_AND: case KGENOME_CELL_OR:
 		if (!have_b || !(k->known & (1u << d))) {
 			k->known &= (uint16_t)~(1u << d);
 			cell_forget_written(k, in, d);
 			return;
 		}
 		switch (in->op) {
-		case CELL_ADD: k->reg[d] = a + b; break;
-		case CELL_SUB: k->reg[d] = a - b; break;
-		case CELL_AND: k->reg[d] = a & b; break;
-		case CELL_OR:  k->reg[d] = a | b; break;
+		case KGENOME_CELL_ADD: k->reg[d] = a + b; break;
+		case KGENOME_CELL_SUB: k->reg[d] = a - b; break;
+		case KGENOME_CELL_AND: k->reg[d] = a & b; break;
+		case KGENOME_CELL_OR:  k->reg[d] = a | b; break;
 		default:       k->reg[d] = a ^ b; break;
 		}
 		cell_forget_written(k, in, d);
 		return;
-	case CELL_INC: case CELL_DEC:
+	case KGENOME_CELL_INC: case KGENOME_CELL_DEC:
 		if (k->known & (1u << d))
-			k->reg[d] = in->op == CELL_INC ? a + 1u : a - 1u;
+			k->reg[d] = in->op == KGENOME_CELL_INC ? a + 1u : a - 1u;
 		cell_forget_written(k, in, d);
 		return;
-	case CELL_NOT:
+	case KGENOME_CELL_NOT:
 		if (k->known & (1u << d))
 			k->reg[d] = ~a;
 		cell_forget_written(k, in, d);
 		return;
-	case CELL_NEG:
+	case KGENOME_CELL_NEG:
 		if (k->known & (1u << d))
 			k->reg[d] = (uint64_t)0 - a;
 		cell_forget_written(k, in, d);
 		return;
-	case CELL_MUL:
+	case KGENOME_CELL_MUL:
 		/*
 		 * MULTIPLYING BY A KNOWN ZERO GIVES ZERO whatever the other
 		 * half held, and that is not a corner case here: `xor
@@ -400,18 +400,18 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 			cell_forget_written(k, in, -1);
 			return;
 		}
-		if (in->n_op && in->o[0].kind == CELL_O_REG &&
+		if (in->n_op && in->o[0].kind == KGENOME_CELL_O_REG &&
 		    in->o[0].reg < 16u && (k->known & (1u << in->o[0].reg)) &&
 		    k->reg[in->o[0].reg] == 0) {
-			k->reg[CELL_REG_AX] = 0;
-			k->reg[CELL_REG_DX] = 0;
-			k->known |= (uint16_t)((1u << CELL_REG_AX) |
-					       (1u << CELL_REG_DX));
+			k->reg[KGENOME_CELL_REG_AX] = 0;
+			k->reg[KGENOME_CELL_REG_DX] = 0;
+			k->known |= (uint16_t)((1u << KGENOME_CELL_REG_AX) |
+					       (1u << KGENOME_CELL_REG_DX));
 			return;
 		}
 		cell_forget_written(k, in, -1);
 		return;
-	case CELL_CMP: case CELL_TEST: case CELL_PUSH:
+	case KGENOME_CELL_CMP: case KGENOME_CELL_TEST: case KGENOME_CELL_PUSH:
 		return;                         /* no destination written */
 	default:
 		/*
@@ -424,19 +424,19 @@ void cell_state_track(struct cell_state *k, const struct cell_insn *in)
 		 * that survived and kept two that did not.
 		 */
 		cell_forget_written(k, in, -1);
-		if (in->o[0].flags & CELL_OF_WRITE)
+		if (in->o[0].flags & KGENOME_CELL_OF_WRITE)
 			k->known &= (uint16_t)~(1u << d);
 		return;
 	}
 }
 
 
-void cell_state_reset(struct cell_state *k)
+void kgenome_cell_state_reset(struct kgenome_cell_state *k)
 {
 	memset(k, 0, sizeof *k);
 }
 
-int cell_state_reg(const struct cell_state *k, uint8_t r, uint64_t *out)
+int kgenome_cell_state_reg(const struct kgenome_cell_state *k, uint8_t r, uint64_t *out)
 {
 	if (!k || !out || r >= 16u || !(k->known & (1u << r)))
 		return 0;

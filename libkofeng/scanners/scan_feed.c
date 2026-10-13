@@ -12,16 +12,16 @@
 #include "scan_int.h"
 #include "objctx_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,46 +39,38 @@
 /*
  * Count every declared similarity block against this object, once.
  *
- * THE OBJECT IS CUT INTO UNITS THE WAY A BLOCK WAS CUT - kof_plague_units is the
+ * THE OBJECT IS CUT INTO UNITS THE WAY A BLOCK WAS CUT - kgenome_mutation_units is the
  * one cut, for the tool that makes a block and for this - and each unit is
  * sketched and credited. One pass per (region, normalizer) that some block asked
  * for, and no pass at all otherwise: the set is NULL unless a pack carried
- * blocks, so a database without plague rules does not reach this, and
- * kof_plague_set_norms answers which normalizers a region needs.
+ * blocks, so a database without mutation rules does not reach this, and
+ * kof_mutation_set_norms answers which normalizers a region needs.
  *
  * BEFORE ANY MODULE, for the reason sx_multi_prepass runs first: a rule's
- * kof_plague_score has to be a division rather than a search, and the only way
+ * kof_mutation_score has to be a division rather than a search, and the only way
  * to make it one is to have counted already.
  *
  * THE FUNCTIONS AND THE LIBRARY ARE THE PARSE'S - see kof_scanner.cur_lib - and
- * a normalised view is fed on its own bytes: see sx_plague_feed.
+ * a normalised view is fed on its own bytes: see sx_mutation_feed.
  */
-struct plague_feed {
-	struct kof_plague_ctx *pc;
+struct mutation_feed {
+	struct kof_mutation_ctx *pc;
 	uint32_t mask, norms;
 	const uint8_t *p;
 };
 
-static int plague_feed_unit(void *user, uint64_t off, uint64_t len, uint32_t side,
-			    const struct kof_func *first)
+static int mutation_feed_unit(void *user, uint64_t off, uint64_t len, uint32_t side,
+			    const struct kgenome_func *first)
 {
-	struct plague_feed *f = user;
+	struct mutation_feed *f = user;
 	uint32_t k;
 
 	(void)first;
-	for (k = 0; k < KOF_PLAGUE_NORM_COUNT; k++)
+	for (k = 0; k < KGENOME_MUTATION_NORM_COUNT; k++)
 		if (f->norms & (1u << k))
-			kof_plague_unit(f->pc, f->mask, k, side,
+			kof_mutation_unit(f->pc, f->mask, k, side,
 					f->p + off, len);
 	return 0;
-}
-
-/* A unit of whichever region it lies in, credited as ALL: f->mask stays ALL. */
-static int plague_feed_any(void *user, uint32_t region, uint64_t off,
-			   uint64_t len, uint32_t side, const struct kof_func *first)
-{
-	(void)region;
-	return plague_feed_unit(user, off, len, side, first);
 }
 
 /*
@@ -98,7 +90,7 @@ struct obj_units {
 };
 
 static int obj_unit_cb(void *user, uint64_t off, uint64_t len, uint32_t side,
-		       const struct kof_func *first)
+		       const struct kgenome_func *first)
 {
 	struct obj_units *u = user;
 
@@ -106,9 +98,37 @@ static int obj_unit_cb(void *user, uint64_t off, uint64_t len, uint32_t side,
 	return u->stopped;
 }
 
-void kof_scan_plague_units(const struct kof_obj_ctx *ctx, kof_buf b,
-			   uint32_t present, const struct kof_func_set *funcs,
-			   const struct kof_true_all *lib, struct kof_range *ext,
+/*
+ * WHICH REGIONS "ANYWHERE IN THE OBJECT" COVERS - the one test, asked by the
+ * tool's list of units (kof_scan_mutation_units) and by the scanner's feed
+ * (kof_scan_mutation_feed), so a row the viewer shows is a unit the scanner
+ * credits as ALL. Not hashed: a header, the symbol halves, a static library's
+ * tail (kof_mutation_region_excluded); and a region the parse does not have.
+ */
+static int region_in_all(const struct kof_parser *fp, uint32_t rm,
+			 uint32_t present)
+{
+	return (present & rm) && !kof_mutation_region_excluded(fp->region_name(rm));
+}
+
+static int has_regions(const struct kof_parser *fp)
+{
+	return fp && fp->regions && fp->n_regions && fp->region_name;
+}
+
+static int is_region_of(const struct kof_parser *fp, uint32_t m)
+{
+	uint32_t i;
+
+	for (i = 0; i < fp->n_regions; i++)
+		if (fp->regions[i] == m)
+			return 1;
+	return 0;
+}
+
+void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
+			   uint32_t present, const struct kgenome_func_set *funcs,
+			   const struct kgenome_true_all *lib, struct kof_range *ext,
 			   kof_scan_unit_fn fn, void *user)
 {
 	const struct kof_parser *fp = kof_parser_of(ctx->format);
@@ -120,44 +140,38 @@ void kof_scan_plague_units(const struct kof_obj_ctx *ctx, kof_buf b,
 	u.fn = fn;
 	u.user = user;
 	u.stopped = 0;
-	if (!fp || !fp->regions || !fp->n_regions || !fp->region_name) {
+	if (!has_regions(fp)) {
 		struct kof_range whole;
 
 		whole.off = 0;
 		whole.len = b.n;
 		u.mask = KOF_SCAN_ALL;
-		kof_plague_units(b.p, b.n, ctx->format, KOF_SCAN_ALL, &whole, 1,
+		kgenome_mutation_units(b.p, b.n, ctx->format, KOF_SCAN_ALL, &whole, 1,
 				 funcs, lib, obj_unit_cb, &u);
 		return;
 	}
 	for (ri = 0; ri < fp->n_regions; ri++) {
 		uint32_t rm = fp->regions[ri];
 
-		if (kof_plague_region_excluded(fp->region_name(rm)) ||
-		    !(present & rm))
+		if (!region_in_all(fp, rm, present))
 			continue;
 		u.mask = rm;
 		n = kof_scan_resolve_range(ctx, rm, ext);
-		kof_plague_units(b.p, b.n, ctx->format, rm, ext, n, funcs, lib,
+		kgenome_mutation_units(b.p, b.n, ctx->format, rm, ext, n, funcs, lib,
 				 obj_unit_cb, &u);
 		if (u.stopped)
 			return;
 	}
 }
 
-void kof_scan_plague_feed(struct kof_plague_ctx *pc, const struct kof_obj_ctx *ctx,
+void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ctx *ctx,
 			  kof_buf b, uint32_t present, int from_packer,
-			  const struct kof_func_set *funcs,
-			  const struct kof_true_all *lib, struct kof_range *ext)
+			  const struct kgenome_func_set *funcs,
+			  const struct kgenome_true_all *lib, struct kof_range *ext)
 {
-	static const uint32_t all_masks[] = {
-		KOF_SCAN_ALL, 1u << 1, 1u << 2, 1u << 3, 1u << 4, 1u << 5,
-		1u << 6, 1u << 7, 1u << 8, 1u << 9, 1u << 10, 1u << 11,
-		1u << 12, 1u << 13, 1u << 14, 1u << 15
-	};
 	const struct kof_parser *fp;
-	struct plague_feed f;
-	size_t mi;
+	struct mutation_feed f;
+	uint32_t mi;
 
 	if (!pc || !pc->set || !b.p)
 		return;
@@ -172,7 +186,7 @@ void kof_scan_plague_feed(struct kof_plague_ctx *pc, const struct kof_obj_ctx *c
 	 * packer, not of the malware - and very often there are no regions at
 	 * all, because nothing parses the output. Anchored, every block would
 	 * score zero on precisely the object the unpacker was run to produce.
-	 * See kof_plague_any_region.
+	 * See kof_mutation_any_region.
 	 */
 	if (from_packer) {
 		struct kof_range whole;
@@ -180,57 +194,110 @@ void kof_scan_plague_feed(struct kof_plague_ctx *pc, const struct kof_obj_ctx *c
 		whole.off = 0;
 		whole.len = b.n;
 		f.mask  = KOF_SCAN_ALL;
-		f.norms = kof_plague_set_norms(pc->set, 0);
-		kof_plague_any_region(pc, 1);
-		kof_plague_units(b.p, b.n, 0, KOF_SCAN_ALL, &whole, 1, NULL, NULL,
-				 plague_feed_unit, &f);
+		f.norms = kof_mutation_set_norms(pc->set, 0);
+		kof_mutation_any_region(pc, 1);
+		kgenome_mutation_units(b.p, b.n, 0, KOF_SCAN_ALL, &whole, 1, NULL, NULL,
+				 mutation_feed_unit, &f);
 		return;
 	}
 
-	for (mi = 0; mi < sizeof all_masks / sizeof all_masks[0]; mi++) {
-		uint32_t mask = all_masks[mi];
+	/*
+	 * EACH REGION IS CUT AND SKETCHED ONCE, AND CREDITED TO EVERY MASK IT
+	 * COUNTS FOR.
+	 *
+	 * A region's units are the same bytes whether a block names the region
+	 * or says "anywhere" (KOF_SCAN_ALL): the cut depends on the format, the
+	 * region and the functions, never on which block is asking. The two
+	 * used to be two passes - the region under its own mask, and again as
+	 * part of ALL through kof_scan_mutation_units - and the window
+	 * hashing, which is the cost, ran twice per normalizer.
+	 *
+	 * Now one pass credits the mask set (own region | ALL): a block counts
+	 * a pair when its scan_mask meets the set (mtn_credit), and a pair is
+	 * counted once per object (pstamp), so crediting two masks in one pass
+	 * is the same fact as two passes. The normalizers are those of the
+	 * masks named, which set_norms already unions per bit.
+	 *
+	 * KOF_SCAN_ALL is "wherever in the object", not "every byte": it covers
+	 * the regions of the parse except the ones that are not hashed - see
+	 * region_in_all. A parse with no regions is one region, ALL.
+	 */
+	if (!has_regions(fp)) {
 		uint32_t n;
 
-		f.mask  = mask;
-		f.norms = kof_plague_set_norms(pc->set, mask);
+		f.mask  = KOF_SCAN_ALL;
+		f.norms = kof_mutation_set_norms(pc->set, KOF_SCAN_ALL);
+		if (f.norms) {
+			n = kof_scan_resolve_range(ctx, KOF_SCAN_ALL, ext);
+			kgenome_mutation_units(b.p, b.n, ctx->format, KOF_SCAN_ALL,
+					 ext, n, funcs, lib, mutation_feed_unit, &f);
+		}
+		fp = NULL;
+	}
+	for (mi = 1; mi < 16u + (fp ? fp->n_regions : 0u); mi++) {
+		uint32_t m, own = 0, an = 0, n;
+
+		if (mi < 16u) {
+			m = 1u << mi;
+			own = kof_mutation_set_norms(pc->set, m);
+		} else {
+			/* A region of the parse that is none of the sixteen
+			 * masks: it is fed for ALL and for nothing else. */
+			m = fp->regions[mi - 16u];
+			if (m < (1u << 16))
+				continue;
+		}
+		if (!(present & m))
+			continue;
+		if (fp && is_region_of(fp, m) && region_in_all(fp, m, present))
+			an = kof_mutation_set_norms(pc->set, KOF_SCAN_ALL);
+		f.mask  = (own ? m : 0u) | (an ? KOF_SCAN_ALL : 0u);
+		f.norms = own | an;
 		if (!f.norms)
 			continue;
-		/*
-		 * A region the parse does not have is not fed, and that is the
-		 * same answer as a region with nothing in it - see the note on
-		 * plague_score in kofsig.h about why a rule cannot tell them
-		 * apart and must not try.
-		 */
-		if (mask != KOF_SCAN_ALL && !(present & mask))
-			continue;
-		/*
-		 * KOF_SCAN_ALL IS "WHEREVER IN THE OBJECT", NOT "EVERY BYTE".
-		 *
-		 * A block declared over the whole file has no region to anchor
-		 * it, so it is looked for in the units of every region the
-		 * parse has except the ones that are not hashed - a header
-		 * describes the object rather than being part of what it does,
-		 * and the symbol regions are not bytes of the file at all. The
-		 * units are those of the region they lie in, credited as ALL.
-		 */
-		if (mask == KOF_SCAN_ALL && fp && fp->regions && fp->n_regions &&
-		    fp->region_name) {
-			kof_scan_plague_units(ctx, b, present, funcs, lib, ext,
-					      plague_feed_any, &f);
-			continue;
-		}
-		n = kof_scan_resolve_range(ctx, mask, ext);
-		kof_plague_units(b.p, b.n, ctx->format, mask, ext, n, funcs, lib,
-				 plague_feed_unit, &f);
+		n = kof_scan_resolve_range(ctx, m, ext);
+		kgenome_mutation_units(b.p, b.n, ctx->format, m, ext, n, funcs, lib,
+				 mutation_feed_unit, &f);
 	}
 }
 
-void sx_plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+/*
+ * DOES THIS FEED READ THE OBJECT'S FUNCTIONS AT ALL.
+ *
+ * Only a region that is cut a function at a time (kgenome_mutation_by_function) does,
+ * and only when some block would be credited from it: under the region's own
+ * mask or as ALL. Anything else is cut from the bytes alone, so the functions
+ * - which on a stripped ELF cost an entry walk of the whole code - are not
+ * asked for. Same walk of regions as kof_scan_mutation_feed, so the answer
+ * cannot say "no" where the feed would have used them.
+ */
+static int feed_wants_funcs(const struct kof_mutation_set *set,
+			    const struct kof_obj_ctx *ctx, uint32_t present)
+{
+	const struct kof_parser *fp = kof_parser_of(ctx->format);
+	uint32_t i;
+
+	if (!set || !has_regions(fp))
+		return 0;
+	for (i = 0; i < fp->n_regions; i++) {
+		uint32_t rm = fp->regions[i];
+
+		if (!(present & rm) || !kgenome_mutation_by_function(ctx->format, rm))
+			continue;
+		if ((rm < (1u << 16) && kof_mutation_set_norms(set, rm)) ||
+		    (region_in_all(fp, rm, present) &&
+		     kof_mutation_set_norms(set, KOF_SCAN_ALL)))
+			return 1;
+	}
+	return 0;
+}
+
+void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			   uint32_t present, int from_packer)
 {
 	kof_buf b;
 
-	if (!sc->eng->plague || !sc->plague.set)
+	if (!sc->eng->mutation || !sc->mutation.set)
 		return;
 	/*
 	 * A NORMALISED VIEW IS FED ON ITS OWN BYTES, like any object.
@@ -243,8 +310,10 @@ void sx_plague_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * the detectors have run - so a block can be met in either.
 	 */
 	b = kof_src_buf(sc->cur_src);
-	kof_scan_plague_feed(&sc->plague, ctx, b, present, from_packer,
-			     oc_funcs(ctx),
+	kof_scan_mutation_feed(&sc->mutation, ctx, b, present, from_packer,
+			     (!from_packer &&
+			      feed_wants_funcs(sc->mutation.set, ctx, present))
+				     ? oc_funcs(ctx) : NULL,
 			     sc->cur_lib_ok ? &sc->cur_lib : NULL, sc->ext_gather);
 }
 
@@ -425,10 +494,10 @@ void sx_need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 	sx_multi_prepass(sc, ctx, sc->cur_present);
 }
 
-void sx_need_plague(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
+void sx_need_mutation(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
-	if (sc->latch[KOF_OL_PLAGUE])
+	if (sc->latch[KOF_OL_MUTATION])
 		return;
-	sc->latch[KOF_OL_PLAGUE] = 1;
-	sx_plague_feed(sc, ctx, sc->cur_present, sc->cur_from_packer);
+	sc->latch[KOF_OL_MUTATION] = 1;
+	sx_mutation_feed(sc, ctx, sc->cur_present, sc->cur_from_packer);
 }

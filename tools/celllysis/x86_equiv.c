@@ -7,12 +7,12 @@
  * enums too, so both headers can be included here). The new pipeline is what is
  * in the tree. Both decode the same bytes and the answers are compared:
  *
- *   gt_x86_decode      status, len, id, and what the public accessors say about
+ *   kgenome_x86_decode      status, len, id, and what the public accessors say about
  *                      the instruction (nops, cat, cond, nexp, nform, wgpr, osz,
- *                      asz, efop, mand, repeated); and gt_x86_operand for EVERY
+ *                      asz, efop, mand, repeated); and kgenome_x86_operand for EVERY
  *                      operand, field by field (the emulator and the cross-
  *                      reference pass read those);
- *   cell_decode_x86    the return value and every field of struct cell_insn -
+ *   kgenome_cell_decode_x86    the return value and every field of struct kgenome_cell_insn -
  *                      op, len, n_op, cond, flags, wmask, at, at_va, target,
  *                      target_va, and for each of the three operands kind, reg,
  *                      index, scale, size, flags, seg, disp, imm. The padding is
@@ -22,7 +22,7 @@
  *                      caller's struct), so they are compared only when
  *                      -s is given - which is a statement about the
  *                      frozen code's leftovers, not about a result;
- *   gt_x86_format      the text, on one decode in 16 (it is the slow part, and
+ *   kgenome_x86_format      the text, on one decode in 16 (it is the slow part, and
  *                      it reads every field of the decoded struct).
  *
  * Build by hand (the reference is in the scratch directory, not in the tree).
@@ -55,15 +55,15 @@
 #include <string.h>
 #include <time.h>
 
-#include "kofmod/cell.h"
-#include "celllysis/celllysis.h"
-#include "celllysis/decode.h"
+#include "../../libkofeng/kofcore/kofmod/cell.h"
+#include <celllysis/celllysis.h>
+#include <celllysis/decode.h>
 #include <x86/x86.h>
 #include "x86ref/x86.h"
 #include "x86ref/ref_cursor.h"
 
 uint32_t ref_cell_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
-			     unsigned bits, struct cell_insn *out);
+			     unsigned bits, struct kgenome_cell_insn *out);
 
 static int g_strict, g_walk = 1;
 
@@ -84,7 +84,7 @@ static void hex(const uint8_t *p, unsigned n, char *out)
 	fprintf(stderr, "DIFF %db va=%" PRIx64 " n=%u [%s] " fmt "\n", bits, va, n, hb, __VA_ARGS__); } \
 	bad++; } while (0)
 
-static int cmp_op(const struct gt_x86_op *a, const struct ref_gt_x86_op *b)
+static int cmp_op(const struct kgenome_x86_op *a, const struct ref_gt_x86_op *b)
 {
 	return a->type != b->type || a->enc != b->enc || a->acc != b->acc || a->flags != b->flags ||
 	       a->size != b->size || a->rtype != b->rtype || a->rsize != b->rsize ||
@@ -94,7 +94,7 @@ static int cmp_op(const struct gt_x86_op *a, const struct ref_gt_x86_op *b)
 	       a->elem != b->elem || a->mf != b->mf || a->sel != b->sel || a->v != b->v;
 }
 
-static int cmp_insn(const struct cell_insn *a, const struct cell_insn *b, const char **what)
+static int cmp_insn(const struct kgenome_cell_insn *a, const struct kgenome_cell_insn *b, const char **what)
 {
 	unsigned k;
 
@@ -102,7 +102,7 @@ static int cmp_insn(const struct cell_insn *a, const struct cell_insn *b, const 
 	C(op); C(len); C(n_op); C(cond); C(flags); C(wmask); C(at); C(at_va);
 	C(target); C(target_va);
 	for (k = 0; k < 3; k++) {
-		const struct cell_operand *x = &a->o[k], *y = &b->o[k];
+		const struct kgenome_cell_operand *x = &a->o[k], *y = &b->o[k];
 
 		if (x->kind != y->kind) { *what = "o.kind"; return 1; }
 		if (x->reg != y->reg) { *what = "o.reg"; return 1; }
@@ -111,7 +111,7 @@ static int cmp_insn(const struct cell_insn *a, const struct cell_insn *b, const 
 		if (x->seg != y->seg) { *what = "o.seg"; return 1; }
 		if (x->disp != y->disp) { *what = "o.disp"; return 1; }
 		if (x->imm != y->imm) { *what = "o.imm"; return 1; }
-		if (x->kind != CELL_O_NONE || g_strict) {
+		if (x->kind != KGENOME_CELL_O_NONE || g_strict) {
 			if (x->size != y->size) { *what = "o.size"; return 1; }
 			if (x->scale != y->scale) { *what = "o.scale"; return 1; }
 		}
@@ -124,39 +124,39 @@ static int cmp_insn(const struct cell_insn *a, const struct cell_insn *b, const 
 static unsigned one(struct stat_ *st, const uint8_t *p, unsigned n, uint64_t va, unsigned bits,
 		    int text)
 {
-	struct gt_x86_insn nx;
+	struct kgenome_x86_insn nx;
 	struct ref_gt_x86_insn rx;
-	struct cell_insn a, b;
+	struct kgenome_cell_insn a, b;
 	uint32_t la, lb;
-	enum gt_status sa, sb;
+	enum kgenome_status sa, sb;
 	unsigned bad = 0;
 
 	st->n++;
-	sa = gt_x86_decode(&nx, p, n, (int)bits);
+	sa = kgenome_x86_decode(&nx, p, n, (int)bits);
 	sb = ref_gt_x86_decode(&rx, p, n, (int)bits);
 	if (sa != sb) {
 		D("status %d vs ref %d", sa, sb);
-	} else if (sa == GT_OK) {
+	} else if (sa == KGENOME_OK) {
 		unsigned k, nops;
 
 		st->ok_dec++;
 		if (nx.id != rx.id || nx.len != rx.len) {
 			D("id/len %u/%u vs ref %u/%u", nx.id, nx.len, rx.id, rx.len);
 		} else {
-			if (gt_x86_nops(&nx) != ref_gt_x86_nops(&rx) || gt_x86_cat(&nx) != ref_gt_x86_cat(&rx) ||
-			    gt_x86_cond(&nx) != ref_gt_x86_cond(&rx) || gt_x86_nexp(&nx) != ref_gt_x86_nexp(&rx) ||
-			    gt_x86_nform(&nx) != ref_gt_x86_nform(&rx) || gt_x86_wgpr(&nx) != ref_gt_x86_wgpr(&rx) ||
-			    gt_x86_osz(&nx) != ref_gt_x86_osz(&rx) || gt_x86_asz(&nx) != ref_gt_x86_asz(&rx) ||
-			    gt_x86_efop(&nx) != ref_gt_x86_efop(&rx) || gt_x86_mand(&nx) != ref_gt_x86_mand(&rx) ||
-			    gt_x86_repeated(&nx) != ref_gt_x86_repeated(&rx)) {
+			if (kgenome_x86_nops(&nx) != ref_gt_x86_nops(&rx) || kgenome_x86_cat(&nx) != ref_gt_x86_cat(&rx) ||
+			    kgenome_x86_cond(&nx) != ref_gt_x86_cond(&rx) || kgenome_x86_nexp(&nx) != ref_gt_x86_nexp(&rx) ||
+			    kgenome_x86_nform(&nx) != ref_gt_x86_nform(&rx) || kgenome_x86_wgpr(&nx) != ref_gt_x86_wgpr(&rx) ||
+			    kgenome_x86_osz(&nx) != ref_gt_x86_osz(&rx) || kgenome_x86_asz(&nx) != ref_gt_x86_asz(&rx) ||
+			    kgenome_x86_efop(&nx) != ref_gt_x86_efop(&rx) || kgenome_x86_mand(&nx) != ref_gt_x86_mand(&rx) ||
+			    kgenome_x86_repeated(&nx) != ref_gt_x86_repeated(&rx)) {
 				D("accessors id=%u", nx.id);
 			} else {
-				nops = gt_x86_nops(&nx);
+				nops = kgenome_x86_nops(&nx);
 				for (k = 0; k < nops; k++) {
-					struct gt_x86_op oa;
+					struct kgenome_x86_op oa;
 					struct ref_gt_x86_op ob;
 
-					gt_x86_operand(&nx, k, &oa);
+					kgenome_x86_operand(&nx, k, &oa);
 					ref_gt_x86_operand(&rx, k, &ob);
 					if (cmp_op(&oa, &ob)) {
 						D("operand %u id=%u", k, nx.id);
@@ -165,8 +165,8 @@ static unsigned one(struct stat_ *st, const uint8_t *p, unsigned n, uint64_t va,
 				}
 			}
 			if (text) {
-				char ta[GT_X86_TEXT], tb[REF_GT_X86_TEXT];
-				size_t xa = gt_x86_format(&nx, va, ta, sizeof ta);
+				char ta[KGENOME_X86_TEXT], tb[REF_GT_X86_TEXT];
+				size_t xa = kgenome_x86_format(&nx, va, ta, sizeof ta);
 				size_t xb = ref_gt_x86_format(&rx, va, tb, sizeof tb);
 
 				if (xa != xb || memcmp(ta, tb, xa))
@@ -177,7 +177,7 @@ static unsigned one(struct stat_ *st, const uint8_t *p, unsigned n, uint64_t va,
 
 	memset(&a, 0xA5, sizeof a);
 	memset(&b, 0xA5, sizeof b);
-	la = cell_decode_x86(p, n, va, bits, &a);
+	la = kgenome_cell_decode_x86(p, n, va, bits, &a);
 	lb = ref_cell_decode_x86(p, n, va, bits, &b);
 	if (la != lb) {
 		D("cell ret %u vs ref %u", la, lb);
@@ -195,7 +195,7 @@ static unsigned one(struct stat_ *st, const uint8_t *p, unsigned n, uint64_t va,
 
 /* ---- the cursor ----------------------------------------------------------- */
 
-static int seg_at(void *priv, uint64_t off, struct cell_seg *o)
+static int seg_at(void *priv, uint64_t off, struct kgenome_cell_seg *o)
 {
 	(void)off;
 	o->lo = 0;
@@ -210,7 +210,7 @@ static uint64_t off_of_va(void *priv, uint64_t va)
 }
 
 /*
- * The whole file walked by kof_cell_next (or kof_cell_step) beside the frozen
+ * The whole file walked by kgenome_cell_next (or kgenome_cell_step) beside the frozen
  * cursor and frozen constant map, an undecodable byte skipped by one: every
  * instruction, the return value, the cursor and the register/stack state are
  * compared after each step.
@@ -218,25 +218,25 @@ static uint64_t off_of_va(void *priv, uint64_t va)
 static unsigned walk_one(struct stat_ *st, const uint8_t *buf, size_t sz, unsigned bits,
 			 uint64_t vabase, int step)
 {
-	struct cell_space sp = { buf, sz, bits == 64 ? KOF_ARCH_X86_64 : KOF_ARCH_X86, 0,
+	struct kgenome_cell_space sp = { buf, sz, bits == 64 ? KGENOME_ARCH_X86_64 : KGENOME_ARCH_X86, 0,
 				 (void *)(uintptr_t)vabase, seg_at, off_of_va };
-	struct kof_cell_cur a;
+	struct kgenome_cell_cur a;
 	struct ref_kof_cell_cur b;
 	unsigned bad = 0, n = 0;
 	const uint8_t *p = buf;
 
 	memset(&a, 0, sizeof a);
 	memset(&b, 0, sizeof b);
-	kof_cell_seek(&a, 0, 0);
+	kgenome_cell_seek(&a, 0, 0);
 	ref_kof_cell_seek(&b, 0, 0);
 	while (a.at < sz) {
-		struct cell_insn ia, ib;
+		struct kgenome_cell_insn ia, ib;
 		int ra, rb;
 		const char *w = "";
 
 		memset(&ia, 0xA5, sizeof ia);
 		memset(&ib, 0xA5, sizeof ib);
-		ra = step ? kof_cell_step(&a, &sp, &ia) : kof_cell_next(&a, &sp, &ia);
+		ra = step ? kgenome_cell_step(&a, &sp, &ia) : kgenome_cell_next(&a, &sp, &ia);
 		rb = step ? ref_kof_cell_step(&b, &sp, &ib) : ref_kof_cell_next(&b, &sp, &ib);
 		st->n++;
 		if (ra != rb || a.at != b.at) {
@@ -474,7 +474,7 @@ static int bench(int argc, char **argv)
 		size_t i;
 		double t0, ta, tb;
 		uint64_t ni = 0, sink = 0;
-		struct cell_insn in;
+		struct kgenome_cell_insn in;
 		int rep;
 
 		base = base ? base + 1 : argv[a];
@@ -495,7 +495,7 @@ static int bench(int argc, char **argv)
 			t0 = now();
 			for (i = 0, ni = 0; i < (size_t)sz; ni++) {
 				size_t left = (size_t)sz - i;
-				uint32_t l = cell_decode_x86(buf + i, left > 16 ? 16 : (uint32_t)left, 0x400000 + i, bits, &in);
+				uint32_t l = kgenome_cell_decode_x86(buf + i, left > 16 ? 16 : (uint32_t)left, 0x400000 + i, bits, &in);
 
 				sink += l;
 				i += l ? l : 1;

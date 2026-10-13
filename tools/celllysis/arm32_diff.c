@@ -1,5 +1,5 @@
 /*
- * arm32_diff - the ARM state and Thumb state decoders (cell_decode_arm32, cell_decode_thumb) against
+ * arm32_diff - the ARM state and Thumb state decoders (kgenome_cell_decode_arm32, kgenome_cell_decode_thumb) against
  * an oracle.
  *
  * A DEV TOOL, NOT A TEST: the oracle is Capstone, which this tree does not
@@ -47,8 +47,8 @@
 #include <time.h>
 #include <capstone/capstone.h>
 
-#include "kofmod/kofsig.h"
-#include "celllysis/decode.h"
+#include "../../libkofeng/kofcore/kofmod/kofsig.h"
+#include <celllysis/decode.h>
 
 enum kind {
 	K_VALID_CS_ONLY, K_VALID_US_ONLY, K_VALID_US_FIELD, K_LEN, K_CLASS, K_WMASK, K_TARGET,
@@ -187,11 +187,11 @@ static uint64_t expect(const cs_insn *in, uint32_t wr, int thumb)
 	case ARM_INS_EOR: case ARM_INS_ORR: case ARM_INS_SUB: case ARM_INS_SUBW:
 	case ARM_INS_SBC: {
 		static const struct { int id; int c; } m[] = {
-			{ ARM_INS_ADC, CELL_ADC }, { ARM_INS_ADD, CELL_ADD },
-			{ ARM_INS_ADDW, CELL_ADD }, { ARM_INS_AND, CELL_AND },
-			{ ARM_INS_EOR, CELL_XOR }, { ARM_INS_ORR, CELL_OR },
-			{ ARM_INS_SUB, CELL_SUB }, { ARM_INS_SUBW, CELL_SUB },
-			{ ARM_INS_SBC, CELL_SBB },
+			{ ARM_INS_ADC, KGENOME_CELL_ADC }, { ARM_INS_ADD, KGENOME_CELL_ADD },
+			{ ARM_INS_ADDW, KGENOME_CELL_ADD }, { ARM_INS_AND, KGENOME_CELL_AND },
+			{ ARM_INS_EOR, KGENOME_CELL_XOR }, { ARM_INS_ORR, KGENOME_CELL_OR },
+			{ ARM_INS_SUB, KGENOME_CELL_SUB }, { ARM_INS_SUBW, KGENOME_CELL_SUB },
+			{ ARM_INS_SBC, KGENOME_CELL_SBB },
 		};
 		unsigned i;
 		uint64_t a = 0;
@@ -200,118 +200,118 @@ static uint64_t expect(const cs_insn *in, uint32_t wr, int thumb)
 			if (m[i].id == (int)in->id)
 				a = BIT(m[i].c);
 		if (pcw)
-			return BIT(CELL_JMP) | BIT(CELL_PRIV);
+			return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV);
 		/* add rd, pc, #imm is an address */
 		if ((in->id == ARM_INS_ADD || in->id == ARM_INS_SUB ||
 		     in->id == ARM_INS_ADDW || in->id == ARM_INS_SUBW) &&
 		    n >= 2 && o[1].type == ARM_OP_REG && o[1].reg == ARM_REG_PC &&
 		    imm_last)
-			return a | BIT(CELL_LEA);
+			return a | BIT(KGENOME_CELL_LEA);
 		return a;
 	}
 	case ARM_INS_ADR:
-		return BIT(CELL_LEA);
+		return BIT(KGENOME_CELL_LEA);
 	case ARM_INS_CMP:
-		return BIT(CELL_CMP);
+		return BIT(KGENOME_CELL_CMP);
 	case ARM_INS_TST: case ARM_INS_TEQ:
-		return BIT(CELL_TEST);
+		return BIT(KGENOME_CELL_TEST);
 	case ARM_INS_MUL:
-		return BIT(CELL_MUL);
+		return BIT(KGENOME_CELL_MUL);
 	case ARM_INS_UDIV:
-		return BIT(CELL_DIV);
+		return BIT(KGENOME_CELL_DIV);
 	case ARM_INS_SDIV:
-		return BIT(CELL_IDIV);
+		return BIT(KGENOME_CELL_IDIV);
 	case ARM_INS_MOV:
 		/* movw also arrives under this id */
 		if (pcw)
-			return BIT(CELL_JMP) | BIT(CELL_RET) | BIT(CELL_PRIV) |
-			       (imm_last ? BIT(CELL_MOV) : 0);
-		return BIT(CELL_MOV) | BIT(CELL_NOP);
+			return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_RET) | BIT(KGENOME_CELL_PRIV) |
+			       (imm_last ? BIT(KGENOME_CELL_MOV) : 0);
+		return BIT(KGENOME_CELL_MOV) | BIT(KGENOME_CELL_NOP);
 	case ARM_INS_MOVW:
-		return pcw ? BIT(CELL_MOV) | BIT(CELL_JMP) : BIT(CELL_MOV);
+		return pcw ? BIT(KGENOME_CELL_MOV) | BIT(KGENOME_CELL_JMP) : BIT(KGENOME_CELL_MOV);
 	case ARM_INS_MOVT:
-		return BIT(CELL_OR);
+		return BIT(KGENOME_CELL_OR);
 	case ARM_INS_MVN:
 		if (pcw)
-			return BIT(CELL_JMP) | BIT(CELL_PRIV);
-		return imm_last ? BIT(CELL_MOV) : BIT(CELL_NOT) | BIT(CELL_OTHER);
+			return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV);
+		return imm_last ? BIT(KGENOME_CELL_MOV) : BIT(KGENOME_CELL_NOT) | BIT(KGENOME_CELL_OTHER);
 	case ARM_INS_LSL:
-		return pcw ? BIT(CELL_JMP) | BIT(CELL_PRIV) : BIT(CELL_SHL);
+		return pcw ? BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV) : BIT(KGENOME_CELL_SHL);
 	case ARM_INS_LSR:
-		return pcw ? BIT(CELL_JMP) | BIT(CELL_PRIV) : BIT(CELL_SHR);
+		return pcw ? BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV) : BIT(KGENOME_CELL_SHR);
 	case ARM_INS_ASR:
-		return pcw ? BIT(CELL_JMP) | BIT(CELL_PRIV) : BIT(CELL_SAR);
+		return pcw ? BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV) : BIT(KGENOME_CELL_SAR);
 	case ARM_INS_ROR:
-		return pcw ? BIT(CELL_JMP) | BIT(CELL_PRIV) : BIT(CELL_ROR);
+		return pcw ? BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV) : BIT(KGENOME_CELL_ROR);
 	case ARM_INS_RSB:
 		/* a rotated zero is spelt as two immediates: still a negate */
 		if (pcw)
-			return BIT(CELL_JMP) | BIT(CELL_PRIV);
+			return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_PRIV);
 		if (imm_last && (o[n - 1].imm == 0 || (n >= 4 && o[n - 2].type == ARM_OP_IMM)))
-			return BIT(CELL_NEG) | BIT(CELL_OTHER);
-		return BIT(CELL_OTHER);
+			return BIT(KGENOME_CELL_NEG) | BIT(KGENOME_CELL_OTHER);
+		return BIT(KGENOME_CELL_OTHER);
 	case ARM_INS_B:
 		return d->cc == ARM_CC_AL || d->cc == ARM_CC_INVALID
-		       ? BIT(CELL_JMP) : BIT(CELL_JCC);
+		       ? BIT(KGENOME_CELL_JMP) : BIT(KGENOME_CELL_JCC);
 	case ARM_INS_CBZ: case ARM_INS_CBNZ:
-		return BIT(CELL_JCC);
+		return BIT(KGENOME_CELL_JCC);
 	case ARM_INS_BL: case ARM_INS_BLX:
-		return BIT(CELL_CALL);
+		return BIT(KGENOME_CELL_CALL);
 	case ARM_INS_BX:
-		return BIT(CELL_RET) | BIT(CELL_JMP);
+		return BIT(KGENOME_CELL_RET) | BIT(KGENOME_CELL_JMP);
 	case ARM_INS_BXJ:
-		return BIT(CELL_JMP);
+		return BIT(KGENOME_CELL_JMP);
 	case ARM_INS_BXNS:
-		return BIT(CELL_JMP) | BIT(CELL_RET);
+		return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_RET);
 	case ARM_INS_BLXNS:
-		return BIT(CELL_CALL);
+		return BIT(KGENOME_CELL_CALL);
 	case ARM_INS_TBB: case ARM_INS_TBH:
-		return BIT(CELL_JMP);
+		return BIT(KGENOME_CELL_JMP);
 	case ARM_INS_SUBS:
-		return BIT(CELL_PRIV);
+		return BIT(KGENOME_CELL_PRIV);
 	case ARM_INS_MOVS:
-		return BIT(CELL_MOV) | BIT(CELL_NOP);
+		return BIT(KGENOME_CELL_MOV) | BIT(KGENOME_CELL_NOP);
 	case ARM_INS_SVC:
-		return BIT(CELL_SYSCALL);
+		return BIT(KGENOME_CELL_SYSCALL);
 	case ARM_INS_BKPT:
-		return BIT(CELL_INT);
+		return BIT(KGENOME_CELL_INT);
 	case ARM_INS_UDF: case ARM_INS_TRAP:
-		return BIT(CELL_UD);
+		return BIT(KGENOME_CELL_UD);
 	case ARM_INS_HINT:
 	case ARM_INS_NOP: case ARM_INS_YIELD: case ARM_INS_WFE: case ARM_INS_WFI:
 	case ARM_INS_SEV: case ARM_INS_SEVL: case ARM_INS_DBG:
-		return BIT(CELL_NOP);
+		return BIT(KGENOME_CELL_NOP);
 	case ARM_INS_PUSH:
-		return BIT(CELL_PUSH);
+		return BIT(KGENOME_CELL_PUSH);
 	case ARM_INS_POP:
-		return BIT(CELL_POP) | BIT(CELL_RET);
+		return BIT(KGENOME_CELL_POP) | BIT(KGENOME_CELL_RET);
 	case ARM_INS_LDR: case ARM_INS_LDRT: case ARM_INS_LDRD:
 		if (n && o[0].type == ARM_OP_REG && o[0].reg == ARM_REG_PC)
-			return BIT(CELL_JMP) | BIT(CELL_RET) |
-			       (in->id == ARM_INS_LDRD ? BIT(CELL_MOV) : 0);
+			return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_RET) |
+			       (in->id == ARM_INS_LDRD ? BIT(KGENOME_CELL_MOV) : 0);
 		/* ldr rt,[sp],#4 is pop {rt} */
 		if (in->id == ARM_INS_LDR && n >= 2 && o[1].type == ARM_OP_MEM &&
 		    o[1].mem.base == ARM_REG_SP)
-			return BIT(CELL_MOV) | BIT(CELL_POP);
-		return BIT(CELL_MOV);
+			return BIT(KGENOME_CELL_MOV) | BIT(KGENOME_CELL_POP);
+		return BIT(KGENOME_CELL_MOV);
 	case ARM_INS_STR: case ARM_INS_STRT:
 		if (in->id == ARM_INS_STR && n >= 2 && o[1].type == ARM_OP_MEM &&
 		    o[1].mem.base == ARM_REG_SP)
-			return BIT(CELL_MOV) | BIT(CELL_PUSH);
-		return BIT(CELL_MOV);
+			return BIT(KGENOME_CELL_MOV) | BIT(KGENOME_CELL_PUSH);
+		return BIT(KGENOME_CELL_MOV);
 	case ARM_INS_STRB: case ARM_INS_STRBT: case ARM_INS_STRH:
 	case ARM_INS_STRHT: case ARM_INS_STRD:
-		return BIT(CELL_MOV);
+		return BIT(KGENOME_CELL_MOV);
 	case ARM_INS_LDRB: case ARM_INS_LDRBT: case ARM_INS_LDRH:
 	case ARM_INS_LDRHT:
-		return BIT(CELL_MOVZX) | (pcl ? BIT(CELL_OTHER) : 0);
+		return BIT(KGENOME_CELL_MOVZX) | (pcl ? BIT(KGENOME_CELL_OTHER) : 0);
 	case ARM_INS_LDRSB: case ARM_INS_LDRSBT: case ARM_INS_LDRSH:
 	case ARM_INS_LDRSHT:
-		return BIT(CELL_MOVSX) | (pcl ? BIT(CELL_OTHER) : 0);
+		return BIT(KGENOME_CELL_MOVSX) | (pcl ? BIT(KGENOME_CELL_OTHER) : 0);
 	case ARM_INS_SXTB: case ARM_INS_SXTH:
-		return BIT(CELL_MOVSX);
+		return BIT(KGENOME_CELL_MOVSX);
 	case ARM_INS_UXTB: case ARM_INS_UXTH:
-		return BIT(CELL_MOVZX);
+		return BIT(KGENOME_CELL_MOVZX);
 	case ARM_INS_LDM: case ARM_INS_LDMDA: case ARM_INS_LDMDB:
 	case ARM_INS_LDMIB:
 		/* a list with pc is a branch; ldmia sp! is a pop */
@@ -323,24 +323,24 @@ static uint64_t expect(const cs_insn *in, uint32_t wr, int thumb)
 				if (o[i].type == ARM_OP_REG && o[i].reg == ARM_REG_PC)
 					pc = 1;
 			if (pc)
-				return BIT(CELL_JMP) | BIT(CELL_RET) | BIT(CELL_PRIV);
-			return BIT(CELL_OTHER) | BIT(CELL_POP);
+				return BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_RET) | BIT(KGENOME_CELL_PRIV);
+			return BIT(KGENOME_CELL_OTHER) | BIT(KGENOME_CELL_POP);
 		}
 	case ARM_INS_STM: case ARM_INS_STMDA: case ARM_INS_STMDB:
 	case ARM_INS_STMIB:
-		return BIT(CELL_OTHER) | BIT(CELL_PUSH);
+		return BIT(KGENOME_CELL_OTHER) | BIT(KGENOME_CELL_PUSH);
 	case ARM_INS_MSR: case ARM_INS_MRS: case ARM_INS_CPS: case ARM_INS_SETEND:
 	case ARM_INS_RFEDA: case ARM_INS_RFEDB: case ARM_INS_RFEIA:
 	case ARM_INS_RFEIB: case ARM_INS_SRSDA: case ARM_INS_SRSDB:
 	case ARM_INS_SRSIA: case ARM_INS_SRSIB: case ARM_INS_SMC:
 	case ARM_INS_HVC: case ARM_INS_ERET:
-		return BIT(CELL_PRIV);
+		return BIT(KGENOME_CELL_PRIV);
 	default:
 		(void)wr;
 		if (pcw)
-			return BIT(CELL_PRIV) | BIT(CELL_JMP) | BIT(CELL_OTHER);
+			return BIT(KGENOME_CELL_PRIV) | BIT(KGENOME_CELL_JMP) | BIT(KGENOME_CELL_OTHER);
 		(void)pcl;
-		return BIT(CELL_OTHER);
+		return BIT(KGENOME_CELL_OTHER);
 	}
 }
 
@@ -520,7 +520,7 @@ static int sbz_fixable(struct th *t, uint32_t w0, uint32_t w1, uint64_t va,
 		const uint8_t *cp = b;
 		size_t sz = 4;
 		uint64_t ad = va;
-		struct cell_insn k;
+		struct kgenome_cell_insn k;
 
 		if (v < total) {
 			unsigned q = v;
@@ -544,11 +544,11 @@ static int sbz_fixable(struct th *t, uint32_t w0, uint32_t w1, uint64_t va,
 		if (t->thumb) {
 			b[0] = (uint8_t)(x >> 16); b[1] = (uint8_t)(x >> 24);
 			b[2] = (uint8_t)x; b[3] = (uint8_t)(x >> 8);
-			(void)cell_decode_thumb(b, 4, va, 0, &k);
+			(void)kgenome_cell_decode_thumb(b, 4, va, 0, &k);
 		} else {
 			b[0] = (uint8_t)x; b[1] = (uint8_t)(x >> 8);
 			b[2] = (uint8_t)(x >> 16); b[3] = (uint8_t)(x >> 24);
-			(void)cell_decode_arm32(b, 4, va, 0, &k);
+			(void)kgenome_cell_decode_arm32(b, 4, va, 0, &k);
 		}
 		/* the same instruction, not a neighbour that happens to decode */
 		if (k.op != our_op)
@@ -569,7 +569,7 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 	const uint8_t *cp = buf;
 	size_t sz = 4;
 	uint64_t addr = va;
-	struct cell_insn k;
+	struct kgenome_cell_insn k;
 	uint32_t n;
 	int ok;
 	char txt[72];
@@ -584,8 +584,8 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 		buf[2] = (uint8_t)w1; buf[3] = (uint8_t)(w1 >> 8);
 	}
 	s->total++;
-	n = t->thumb ? cell_decode_thumb(buf, 4, va, 0, &k)
-		     : cell_decode_arm32(buf, 4, va, 0, &k);
+	n = t->thumb ? kgenome_cell_decode_thumb(buf, 4, va, 0, &k)
+		     : kgenome_cell_decode_arm32(buf, 4, va, 0, &k);
 	ok = cs_disasm_iter(t->h, &cp, &sz, &addr, t->in) ? 1 : 0;
 	if (ok) {
 		snprintf(txt, sizeof txt, "%s %s", in->mnemonic, in->op_str);
@@ -595,7 +595,7 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 		snprintf(txt, sizeof txt, "(invalid)");
 	}
 	{
-		int us_ud = (k.op == CELL_UD) || n == 0;
+		int us_ud = (k.op == KGENOME_CELL_UD) || n == 0;
 		/*
 		 * WHERE THE WORD IS, so a category is a region of the encoding
 		 * space and not one example: ARM state is cond==F, bits 27..20 and
@@ -654,7 +654,7 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 			       w0, w1, va, txt);
 
 		/* ---- branch target ---- */
-		if ((k.op == CELL_JMP || k.op == CELL_JCC || k.op == CELL_CALL) &&
+		if ((k.op == KGENOME_CELL_JMP || k.op == KGENOME_CELL_JCC || k.op == KGENOME_CELL_CALL) &&
 		    nops && (in->id == ARM_INS_B || in->id == ARM_INS_BL ||
 			     in->id == ARM_INS_BLX || in->id == ARM_INS_CBZ ||
 			     in->id == ARM_INS_CBNZ)) {
@@ -664,15 +664,15 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 				uint64_t want = (uint64_t)(uint32_t)io->imm & ~1ull;
 
 				if (k.target_va != want || k.target != want ||
-				    (k.flags & CELL_F_INDIRECT))
+				    (k.flags & KGENOME_CELL_F_INDIRECT))
 					st_add(s, K_TARGET, k.op, in->id, 0, w0, w1,
 					       va, txt);
-			} else if (!(k.flags & CELL_F_INDIRECT) ||
-				   k.target_va != KOF_BROKEN) {
+			} else if (!(k.flags & KGENOME_CELL_F_INDIRECT) ||
+				   k.target_va != KGENOME_BROKEN) {
 				st_add(s, K_TARGET, k.op, in->id, 1, w0, w1, va, txt);
 			}
 		}
-		if (k.op == CELL_JCC && d->cc != ARM_CC_INVALID &&
+		if (k.op == KGENOME_CELL_JCC && d->cc != ARM_CC_INVALID &&
 		    in->id != ARM_INS_CBZ && in->id != ARM_INS_CBNZ &&
 		    (int)k.cond != (int)d->cc - 1)
 			st_add(s, K_COND, k.op, in->id, k.cond, w0, w1, va, txt);
@@ -687,13 +687,13 @@ static void check1(struct th *t, uint32_t w0, uint32_t w1, int nb, uint64_t va)
 			if (has_mem)
 				goto no_imm;
 		}
-		if (k.n_op && k.o[k.n_op - 1].kind == CELL_O_IMM && nops &&
+		if (k.n_op && k.o[k.n_op - 1].kind == KGENOME_CELL_O_IMM && nops &&
 		    o[nops - 1].type == ARM_OP_IMM &&
-		    (k.op == CELL_MOV || k.op == CELL_ADD || k.op == CELL_SUB ||
-		     k.op == CELL_AND || k.op == CELL_OR || k.op == CELL_XOR ||
-		     k.op == CELL_ADC || k.op == CELL_SBB || k.op == CELL_CMP ||
-		     k.op == CELL_TEST || k.op == CELL_SHL || k.op == CELL_SHR ||
-		     k.op == CELL_SAR || k.op == CELL_ROR)) {
+		    (k.op == KGENOME_CELL_MOV || k.op == KGENOME_CELL_ADD || k.op == KGENOME_CELL_SUB ||
+		     k.op == KGENOME_CELL_AND || k.op == KGENOME_CELL_OR || k.op == KGENOME_CELL_XOR ||
+		     k.op == KGENOME_CELL_ADC || k.op == KGENOME_CELL_SBB || k.op == KGENOME_CELL_CMP ||
+		     k.op == KGENOME_CELL_TEST || k.op == KGENOME_CELL_SHL || k.op == KGENOME_CELL_SHR ||
+		     k.op == KGENOME_CELL_SAR || k.op == KGENOME_CELL_ROR)) {
 			uint32_t want = (uint32_t)o[nops - 1].imm;
 
 			/* a rotated immediate is spelt as value, rotation */
@@ -719,14 +719,14 @@ no_imm:
 			for (i = 0; i < nops; i++)
 				if (o[i].type == ARM_OP_MEM)
 					mi = (int)i;
-			if (mi >= 0 && (k.op == CELL_MOV || k.op == CELL_MOVZX ||
-					k.op == CELL_MOVSX || k.op == CELL_JMP)) {
-				const struct cell_operand *m = NULL;
+			if (mi >= 0 && (k.op == KGENOME_CELL_MOV || k.op == KGENOME_CELL_MOVZX ||
+					k.op == KGENOME_CELL_MOVSX || k.op == KGENOME_CELL_JMP)) {
+				const struct kgenome_cell_operand *m = NULL;
 				const arm_op_mem *cm = &o[mi].mem;
 				unsigned q;
 
 				for (q = 0; q < k.n_op; q++)
-					if (k.o[q].kind == CELL_O_MEM)
+					if (k.o[q].kind == KGENOME_CELL_O_MEM)
 						m = &k.o[q];
 				if (!m) {
 					st_add(s, K_MEM, k.op, in->id, 9, w0, w1, va, txt);
@@ -747,11 +747,11 @@ no_imm:
 						litva = t->thumb
 						    ? ((va + 4u) & ~3ull) + (uint64_t)(int64_t)cm->disp
 						    : va + 8u + (uint64_t)(int64_t)cm->disp;
-						if (!(m->flags & CELL_OF_RIPREL) ||
+						if (!(m->flags & KGENOME_CELL_OF_RIPREL) ||
 						    va + (uint64_t)m->disp != litva)
 							st_add(s, K_LIT, k.op, in->id, 0, w0, w1, va, txt);
 					} else {
-						if (m->flags & CELL_OF_RIPREL)
+						if (m->flags & KGENOME_CELL_OF_RIPREL)
 							st_add(s, K_LIT, k.op, in->id, 1, w0, w1, va, txt);
 						if (rnum(cm->base) != (int)m->reg)
 							st_add(s, K_MEM, k.op, in->id, 1, w0, w1, va, txt);
@@ -762,7 +762,7 @@ no_imm:
 							st_add(s, K_MEM, k.op, in->id, 6, w0, w1, va, txt);
 					}
 					if (cm->index ? rnum(cm->index) != (int)m->index
-						      : m->index != CELL_REG_NONE)
+						      : m->index != KGENOME_CELL_REG_NONE)
 						st_add(s, K_MEM, k.op, in->id, 3, w0, w1, va, txt);
 					if (want && m->size != want)
 						st_add(s, K_MEM, k.op, in->id, 4, w0, w1, va, txt);
@@ -776,47 +776,47 @@ no_imm:
 
 		/* ---- destination and first source ---- */
 		if (nops && o[0].type == ARM_OP_REG && k.n_op &&
-		    k.o[0].kind == CELL_O_REG &&
-		    k.op != CELL_PUSH && k.op != CELL_POP && k.op != CELL_RET &&
-		    k.op != CELL_JMP && k.op != CELL_CALL && k.op != CELL_JCC &&
-		    k.op != CELL_OTHER && k.op != CELL_PRIV && k.op != CELL_INT &&
-		    k.op != CELL_SYSCALL &&
+		    k.o[0].kind == KGENOME_CELL_O_REG &&
+		    k.op != KGENOME_CELL_PUSH && k.op != KGENOME_CELL_POP && k.op != KGENOME_CELL_RET &&
+		    k.op != KGENOME_CELL_JMP && k.op != KGENOME_CELL_CALL && k.op != KGENOME_CELL_JCC &&
+		    k.op != KGENOME_CELL_OTHER && k.op != KGENOME_CELL_PRIV && k.op != KGENOME_CELL_INT &&
+		    k.op != KGENOME_CELL_SYSCALL &&
 		    rnum(o[0].reg) != (int)k.o[0].reg &&
 		    in->id != ARM_INS_STR && in->id != ARM_INS_STRB)
 			st_add(s, K_REG, k.op, in->id, 0, w0, w1, va, txt);
 		if (nops >= 3 && k.n_op == 3 && o[1].type == ARM_OP_REG &&
-		    o[2].type == ARM_OP_REG && k.o[1].kind == CELL_O_REG &&
-		    k.o[2].kind == CELL_O_REG && rnum(o[1].reg) == (int)k.o[2].reg &&
-		    rnum(o[2].reg) == (int)k.o[1].reg && k.op == CELL_ADD) {
+		    o[2].type == ARM_OP_REG && k.o[1].kind == KGENOME_CELL_O_REG &&
+		    k.o[2].kind == KGENOME_CELL_O_REG && rnum(o[1].reg) == (int)k.o[2].reg &&
+		    rnum(o[2].reg) == (int)k.o[1].reg && k.op == KGENOME_CELL_ADD) {
 			/* add rd, sp, rd is add rd, rd, sp: the oracle commutes it */
 		} else if (nops >= 3 && k.n_op == 3 && o[1].type == ARM_OP_REG &&
-		    k.o[1].kind == CELL_O_REG && k.op != CELL_OTHER &&
-		    k.op != CELL_MOV && k.op != CELL_MOVZX && k.op != CELL_MOVSX &&
+		    k.o[1].kind == KGENOME_CELL_O_REG && k.op != KGENOME_CELL_OTHER &&
+		    k.op != KGENOME_CELL_MOV && k.op != KGENOME_CELL_MOVZX && k.op != KGENOME_CELL_MOVSX &&
 		    rnum(o[1].reg) != (int)k.o[1].reg)
 			st_add(s, K_REG, k.op, in->id, 1, w0, w1, va, txt);
 		/* `add r0, r0, #4` is r0 += 4 here: the oracle's rn must be our rd */
 		if (nops >= 3 && k.n_op == 2 && o[1].type == ARM_OP_REG &&
-		    (k.op == CELL_ADD || k.op == CELL_SUB || k.op == CELL_AND ||
-		     k.op == CELL_OR || k.op == CELL_XOR || k.op == CELL_ADC ||
-		     k.op == CELL_SBB) &&
+		    (k.op == KGENOME_CELL_ADD || k.op == KGENOME_CELL_SUB || k.op == KGENOME_CELL_AND ||
+		     k.op == KGENOME_CELL_OR || k.op == KGENOME_CELL_XOR || k.op == KGENOME_CELL_ADC ||
+		     k.op == KGENOME_CELL_SBB) &&
 		    rnum(o[1].reg) != (int)k.o[0].reg &&
 		    !(o[2].type == ARM_OP_REG && rnum(o[2].reg) == (int)k.o[0].reg))
 			st_add(s, K_REG, k.op, in->id, 4, w0, w1, va, txt);
 		if (nops == 2 && k.n_op == 2 && o[1].type == ARM_OP_REG &&
-		    k.o[1].kind == CELL_O_REG &&
-		    (k.op == CELL_MOV || k.op == CELL_NOT || k.op == CELL_NEG ||
-		     k.op == CELL_MOVZX || k.op == CELL_MOVSX) &&
+		    k.o[1].kind == KGENOME_CELL_O_REG &&
+		    (k.op == KGENOME_CELL_MOV || k.op == KGENOME_CELL_NOT || k.op == KGENOME_CELL_NEG ||
+		     k.op == KGENOME_CELL_MOVZX || k.op == KGENOME_CELL_MOVSX) &&
 		    rnum(o[1].reg) != (int)k.o[1].reg)
 			st_add(s, K_REG, k.op, in->id, 2, w0, w1, va, txt);
-		if (nops == 2 && k.n_op == 1 && k.op == CELL_CALL &&
-		    (k.flags & CELL_F_INDIRECT) && o[0].type == ARM_OP_REG &&
+		if (nops == 2 && k.n_op == 1 && k.op == KGENOME_CELL_CALL &&
+		    (k.flags & KGENOME_CELL_F_INDIRECT) && o[0].type == ARM_OP_REG &&
 		    rnum(o[0].reg) != (int)k.o[0].reg)
 			st_add(s, K_REG, k.op, in->id, 3, w0, w1, va, txt);
 		/* indirect flag on register branches */
 		if ((in->id == ARM_INS_BX || in->id == ARM_INS_BLX) && nops &&
-		    o[0].type == ARM_OP_REG && !(k.flags & CELL_F_INDIRECT))
+		    o[0].type == ARM_OP_REG && !(k.flags & KGENOME_CELL_F_INDIRECT))
 			st_add(s, K_FLAGS, k.op, in->id, 0, w0, w1, va, txt);
-		if (k.op == CELL_SYSCALL && nops && o[0].type == ARM_OP_IMM &&
+		if (k.op == KGENOME_CELL_SYSCALL && nops && o[0].type == ARM_OP_IMM &&
 		    (uint32_t)o[0].imm != (uint32_t)k.o[0].imm)
 			st_add(s, K_IMM, k.op, in->id, 1, w0, w1, va, txt);
 	}
@@ -1053,7 +1053,7 @@ int main(int argc, char **argv)
 			size_t cn, off;
 			uint64_t va;
 			unsigned rep;
-			struct cell_insn k;
+			struct kgenome_cell_insn k;
 			struct timespec t0, t1;
 
 			if (!load_elf(argv[a], &code, &cn, &va) || cn < 1024)
@@ -1062,8 +1062,8 @@ int main(int argc, char **argv)
 			for (rep = 0; rep < 200; rep++) {
 				for (off = 0; off + 4 <= cn;) {
 					uint32_t n = thumb
-						? cell_decode_thumb(code + off, 4, va + off, 0, &k)
-						: cell_decode_arm32(code + off, 4, va + off, 0, &k);
+						? kgenome_cell_decode_thumb(code + off, 4, va + off, 0, &k)
+						: kgenome_cell_decode_arm32(code + off, 4, va + off, 0, &k);
 
 					sink += k.op + k.wmask + k.target_va;
 					insns++;

@@ -56,9 +56,9 @@
 #include <sys/stat.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/extractors/decomp/nrv2.h"
-#include "../../libkofeng/extractors/decomp/lzma.h"
-#include "../../libkofeng/extractors/decomp/aspack.h"
+#include <decompressors/nrv2.h>
+#include <decompressors/lzma.h>
+#include <decompressors/aspack.h>
 
 #define OUT_CAP   (1u << 20)
 #define IN_MAX    8192u
@@ -68,7 +68,7 @@ static uint64_t failures, rounds_done, seeds;
 /* One bucket per status, the WHOLE closed set - see decomp.h. Sized to a
  * subset it would index out of bounds the day a decoder returned the code
  * it was missing. */
-static uint64_t by_status[KOF_DEC_UNSUPPORTED + 1];
+static uint64_t by_status[KUNCOAT_UNSUPPORTED + 1];
 
 static void fail(uint64_t r, const char *why)
 {
@@ -112,9 +112,9 @@ static uint32_t rd32(const uint8_t *p)
 
 static int variant_of(unsigned m, int *bits)
 {
-	static const int V[9] = { KOF_NRV2B, KOF_NRV2B, KOF_NRV2B,
-				  KOF_NRV2D, KOF_NRV2D, KOF_NRV2D,
-				  KOF_NRV2E, KOF_NRV2E, KOF_NRV2E };
+	static const int V[9] = { KUNCOAT_NRV2B, KUNCOAT_NRV2B, KUNCOAT_NRV2B,
+				  KUNCOAT_NRV2D, KUNCOAT_NRV2D, KUNCOAT_NRV2D,
+				  KUNCOAT_NRV2E, KUNCOAT_NRV2E, KUNCOAT_NRV2E };
 	static const int B[9] = { 32, 8, 16, 32, 8, 16, 32, 8, 16 };
 
 	if (m < 2 || m > 10)
@@ -210,14 +210,14 @@ static uint8_t out_a[OUT_CAP], out_b[OUT_CAP];
  * one format, and two copies of the checks would be two places for one of them to
  * be dropped.
  */
-static enum kof_decomp_status decode_any(int which, int variant, int bits, unsigned lc,
+static enum kuncoat_status decode_any(int which, int variant, int bits, unsigned lc,
 				       unsigned lp, unsigned pbits,
 				       const uint8_t *src, uint64_t n,
 				       uint8_t *dst, uint64_t cap,
 				       uint64_t *produced)
 {
 	if (which == W_LZMA)
-		return kof_lzma_decode(lc, lp, pbits, src, n, dst, cap, produced);
+		return kuncoat_lzma_decode(lc, lp, pbits, src, n, dst, cap, produced);
 	/*
 	 * ASPack fuzzed here rather than in a test of its own for the reason
 	 * the note at the top gives about NRV2: it has no magic and no header,
@@ -231,8 +231,8 @@ static enum kof_decomp_status decode_any(int which, int variant, int bits, unsig
 	 * invariant below compares only what both runs produced.
 	 */
 	if (which == W_ASPACK)
-		return kof_aspack_decode(src, n, dst, cap, produced);
-	return kof_nrv2_decode(variant, bits, src, n, dst, cap, produced);
+		return kuncoat_aspack_decode(src, n, dst, cap, produced);
+	return kuncoat_nrv2_decode(variant, bits, src, n, dst, cap, produced);
 }
 
 static void one(uint64_t r)
@@ -241,7 +241,7 @@ static void one(uint64_t r)
 	int variant, bits, which = W_NRV2;
 	unsigned lc = 3, lp = 0, pbits = 2;
 	uint64_t cap, pa = 0, pb = 0, i;
-	enum kof_decomp_status sa, sb;
+	enum kuncoat_status sa, sb;
 
 	/*
 	 * One round in eight leaves a real block ALONE and checks it decodes.
@@ -257,20 +257,20 @@ static void one(uint64_t r)
 	if (seeds && (r % 8) == 3) {
 		uint32_t s = (uint32_t)(rnd() % seeds);
 		uint64_t p = 0;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 
 		if (seed_unc[s] <= OUT_CAP) {
 			memset(out_a, MARKER, seed_unc[s]);
-			st = kof_nrv2_decode(seed_variant[s], seed_bits[s],
+			st = kuncoat_nrv2_decode(seed_variant[s], seed_bits[s],
 					     seed_buf[s], seed_len[s], out_a,
 					     seed_unc[s], &p);
 			rounds_done++;
-			if (st != KOF_DEC_OK)
+			if (st != KUNCOAT_OK)
 				fail(r, "a real, untouched block did not decode");
 			else if (p != seed_unc[s])
 				fail(r, "a real block decoded to the wrong length");
 			else
-				by_status[KOF_DEC_OK]++;
+				by_status[KUNCOAT_OK]++;
 		}
 		return;
 	}
@@ -308,9 +308,9 @@ static void one(uint64_t r)
 		 */
 		if ((rnd() % 3) == 0) {
 			which = W_LZMA;
-			lc = (unsigned)(rnd() % (KOF_LZMA_MAX_LC + 2));
-			lp = (unsigned)(rnd() % (KOF_LZMA_MAX_LP + 2));
-			pbits = (unsigned)(rnd() % (KOF_LZMA_MAX_PB + 2));
+			lc = (unsigned)(rnd() % (KUNCOAT_LZMA_MAX_LC + 2));
+			lp = (unsigned)(rnd() % (KUNCOAT_LZMA_MAX_LP + 2));
+			pbits = (unsigned)(rnd() % (KUNCOAT_LZMA_MAX_PB + 2));
 		} else if ((rnd() % 3) == 0) {
 			which = W_ASPACK;
 		}
@@ -332,15 +332,15 @@ static void one(uint64_t r)
 	/*
 	 * MEMBERSHIP OF THE WHOLE SET, and the "< 0" has to stay able to fail.
 	 *
-	 * The bound was KOF_DEC_CORRUPT, which is the last code THESE TWO
+	 * The bound was KUNCOAT_CORRUPT, which is the last code THESE TWO
 	 * decoders produce rather than the last one the enum defines - so a
 	 * decoder that learnt to report an unsupported coding would have been
 	 * failed here for returning something valid. And the sign test is only
-	 * a test at all because enum kof_decomp_status is pinned signed; under
+	 * a test at all because enum kuncoat_status is pinned signed; under
 	 * an unsigned underlying type it is always false and a stray -1 arrives
 	 * as a large positive index instead.
 	 */
-	if (sa < 0 || sa > KOF_DEC_UNSUPPORTED) {
+	if (sa < 0 || sa > KUNCOAT_UNSUPPORTED) {
 		fail(r, "status is not one the enum defines");
 		return;
 	}
@@ -427,11 +427,11 @@ int main(int argc, char **argv)
 
 		for (v = 0; v < 3; v++) {
 			uint64_t p = 0;
-			enum kof_decomp_status st = kof_nrv2_decode(v, 32, zeros,
+			enum kuncoat_status st = kuncoat_nrv2_decode(v, 32, zeros,
 								     sizeof zeros,
 						 out_a, OUT_CAP, &p);
 
-			if (st != KOF_DEC_CORRUPT)
+			if (st != KUNCOAT_CORRUPT)
 				fail(0, "a runaway prefix was not refused as "
 					"corrupt");
 		}
@@ -443,9 +443,9 @@ int main(int argc, char **argv)
 	printf("decomp fuzz: %llu round(s), %llu real seed(s); ok %llu stopped %llu "
 	       "truncated %llu corrupt %llu\n",
 	       (unsigned long long)rounds_done, (unsigned long long)seeds,
-	       (unsigned long long)by_status[KOF_DEC_OK],
-	       (unsigned long long)by_status[KOF_DEC_STOPPED],
-	       (unsigned long long)by_status[KOF_DEC_TRUNCATED],
-	       (unsigned long long)by_status[KOF_DEC_CORRUPT]);
+	       (unsigned long long)by_status[KUNCOAT_OK],
+	       (unsigned long long)by_status[KUNCOAT_STOPPED],
+	       (unsigned long long)by_status[KUNCOAT_TRUNCATED],
+	       (unsigned long long)by_status[KUNCOAT_CORRUPT]);
 	return failures != 0;
 }

@@ -505,8 +505,8 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 			if (fo->compress == KOF_CAB_C_MSZIP) {
 				method = KOF_UNP_MSZIP;
 			} else if (fo->compress == KOF_CAB_C_LZX &&
-				   fo->window >= KOF_LZX_MIN_BITS &&
-				   fo->window <= KOF_LZX_MAX_BITS) {
+				   fo->window >= KUNCOAT_LZX_MIN_BITS &&
+				   fo->window <= KUNCOAT_LZX_MAX_BITS) {
 				method = KOF_UNP_LZX(fo->window);
 			} else {
 				continue;

@@ -34,7 +34,7 @@
 
 #include "kofinspect.h"
 #include "../libkofeng/kofcore/kofplatform.h"
-#include "../libkofeng/detectors/overlord/matchers/kofmatch.h"
+#include "../libkofeng/detectors/pattern/kofmatch.h"
 #include "../libkofeng/scanners/scan.h"
 #include <kofmod/script.h>
 /* KOF_PROC_OS_LIST: the platform a process record is from, which is its
@@ -114,19 +114,8 @@ const char *kof_inspect_shtype_name(uint32_t t)
 
 /* ---- reading a compiled hex pattern back ---------------------------------- */
 
-/* Little endian by hand: the program is written that way whatever the host is,
- * which is the point of a pack being portable. */
-static uint32_t hx_u32(const uint8_t *p)
-{
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static uint32_t hx_u16(const uint8_t *p)
-{
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
-}
-
+/* The program is little endian whatever the host is, which is the point of a
+ * pack being portable: read with kof_ld_le16/32 (kofcore.h). */
 /* Every offset in a program is from its own start, and every one of them came
  * out of a file, so each is checked against the length the caller vouches for
  * rather than against the program's own claim about itself. */
@@ -138,13 +127,13 @@ static int hx_ok(uint32_t n, uint32_t off, uint32_t need)
 /* Does any gap in this program run without an upper bound. */
 static int hx_open(const uint8_t *prog, uint32_t n)
 {
-	uint32_t n_steps = hx_u16(prog + 0);
-	uint32_t steps_off = hx_u32(prog + 32), s;
+	uint32_t n_steps = kof_ld_le16(prog + 0);
+	uint32_t steps_off = kof_ld_le32(prog + 32), s;
 
 	if (!hx_ok(n, steps_off, n_steps * 8u))
 		return 0;
 	for (s = 0; s < n_steps; s++)
-		if (hx_u16(prog + steps_off + s * 8u + 2) >= KOF_HEX_GAP_OPEN)
+		if (kof_ld_le16(prog + steps_off + s * 8u + 2) >= KOF_HEX_GAP_OPEN)
 			return 1;
 	return 0;
 }
@@ -159,8 +148,8 @@ void kof_inspect_hex_span(const uint8_t *prog, uint32_t n, char *out,
 	out[0] = 0;
 	if (!prog || n < 48u)
 		return;
-	lo = hx_u32(prog + 4);
-	hi = hx_u32(prog + 8);
+	lo = kof_ld_le32(prog + 4);
+	hi = kof_ld_le32(prog + 8);
 	/*
 	 * An open gap makes max_span a sum that includes a sentinel, so the
 	 * only true thing left to say is the floor.
@@ -191,16 +180,16 @@ uint32_t kof_inspect_hex_text(const uint8_t *prog, uint32_t n,
 	out[0] = 0;
 	if (!prog || n < 48u)
 		return 0;
-	n_steps   = hx_u16(prog + 0);
-	steps_off = hx_u32(prog + 32);
+	n_steps   = kof_ld_le16(prog + 0);
+	steps_off = kof_ld_le32(prog + 32);
 	if (!hx_ok(n, steps_off, n_steps * 8u))
 		return 0;
 
 	for (s = 0; s < n_steps && at + 1u < cap; s++) {
 		const uint8_t *st = prog + steps_off + s * 8u;
-		uint32_t gap_min = hx_u16(st + 0), gap_max = hx_u16(st + 2);
-		uint32_t alt_first = hx_u16(st + 4), n_alts = hx_u16(st + 6);
-		uint32_t alts_off = hx_u32(prog + 36);
+		uint32_t gap_min = kof_ld_le16(st + 0), gap_max = kof_ld_le16(st + 2);
+		uint32_t alt_first = kof_ld_le16(st + 4), n_alts = kof_ld_le16(st + 6);
+		uint32_t alts_off = kof_ld_le32(prog + 36);
 		uint32_t a;
 
 		/*
@@ -232,8 +221,8 @@ uint32_t kof_inspect_hex_text(const uint8_t *prog, uint32_t n,
 			hx_put(out, cap, &at, "(");
 		for (a = 0; a < n_alts && at + 1u < cap; a++) {
 			const uint8_t *al = prog + alts_off + (alt_first + a) * 8u;
-			uint32_t len = hx_u16(al + 0), flags = hx_u16(al + 2);
-			uint32_t doff = hx_u32(al + 4), b;
+			uint32_t len = kof_ld_le16(al + 0), flags = kof_ld_le16(al + 2);
+			uint32_t doff = kof_ld_le32(al + 4), b;
 			int masked = (flags & 1u) != 0;
 
 			if (a)
@@ -267,18 +256,18 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 {
 	if (fmt == KOF_FMT_ELF)
 		switch (sub) {
-		case KOF_ELF_NONE: return "ET_NONE";
-		case KOF_ELF_REL:  return "ET_REL";
-		case KOF_ELF_EXEC: return "ET_EXEC";
-		case KOF_ELF_DYN:  return "ET_DYN";
-		case KOF_ELF_CORE: return "ET_CORE";
+		case KGENOME_ELF_NONE: return "ET_NONE";
+		case KGENOME_ELF_REL:  return "ET_REL";
+		case KGENOME_ELF_EXEC: return "ET_EXEC";
+		case KGENOME_ELF_DYN:  return "ET_DYN";
+		case KGENOME_ELF_CORE: return "ET_CORE";
 		default:           return "ET_?";
 		}
 	if (fmt == KOF_FMT_PE)
 		switch (sub) {
-		case KOF_PE_EXE: return "EXE";
-		case KOF_PE_DLL: return "DLL";
-		case KOF_PE_SYS: return "SYS";
+		case KGENOME_PE_EXE: return "EXE";
+		case KGENOME_PE_DLL: return "DLL";
+		case KGENOME_PE_SYS: return "SYS";
 		default:         return "?";
 		}
 	if (fmt == KOF_EVT_AMSI)
@@ -343,13 +332,13 @@ const struct kof_parser *kof_inspect_declare(kof_buf buf, uint8_t format,
 	 *
 	 * Most fields of a view are the parser's own answers and it does not
 	 * matter what they held first. Some are INPUTS the caller fills -
-	 * kof_pe_info.layout and kof_amsi_view.obj_off are the two today - and
+	 * kgenome_pe_info.layout and kof_amsi_view.obj_off are the two today - and
 	 * a parser reads those rather than writing them. pe_parse deliberately
 	 * carries `layout` across its own memset, so whatever was in this
 	 * allocation IS the answer.
 	 *
 	 * Straight out of malloc that answer is uninitialised heap. If it
-	 * happened to equal KOF_PE_LAYOUT_MAPPED, a file read off a disk was
+	 * happened to equal KGENOME_PE_LAYOUT_MAPPED, a file read off a disk was
 	 * parsed as though its sections sat at their virtual addresses, and
 	 * every region resolved to the wrong bytes - nondeterministically,
 	 * which is worse than consistently wrong because it cannot be
@@ -492,7 +481,7 @@ static const char *ruled_out_by(const struct kof_module *m,
  * Where is this marker, searching the extents given?
  *
  * The first hit and not all of them: a viewer scrolls to one place, and a marker
- * that occurs forty times is not forty findings. KOF_BROKEN when it is in none of
+ * that occurs forty times is not forty findings. KGENOME_BROKEN when it is in none of
  * them, which is the value the rest of this engine uses for "applies, but not
  * determined" and reads correctly as absent here.
  */
@@ -557,7 +546,7 @@ static int span_is(const struct kof_finding *f,
  * "/" is copied verbatim - see kof_touch.fired_verdict for why it is copied and
  * not recomposed.
  */
-/* The shape now carries the measurement behind it - "Plague?83" - so the mark
+/* The shape now carries the measurement behind it - "Mutation?83" - so the mark
  * is matched by its head. */
 static int span_starts(const struct kof_finding *f,
 		       const struct kof_name_span *sp, const char *word)
@@ -597,12 +586,12 @@ static const char *fired_as(struct kof_touch *t,
 	 *
 	 * The loop below pairs a finding with the module that made it by
 	 * maltype, family AND variant - the variant being one of the names the
-	 * module declares. A plague verdict does not carry a name there: it
+	 * module declares. A mutation verdict does not carry a name there: it
 	 * carries the SCORE, because that is what a reader of such a verdict
 	 * needs - see finding_str. So the three-part test never matched, the
 	 * module came back as not having fired, and a pane that drops a module
 	 * with no markers and no firing dropped it - which is how a file the
-	 * scanner named Botnet:Gafgyt#100!Plague opened on an empty rule list.
+	 * scanner named Botnet:Gafgyt#100!Mutation opened on an empty rule list.
 	 *
 	 * The mark is what identifies the shape, and n_block is what keeps a
 	 * pattern rule of the same family from answering for it.
@@ -624,28 +613,28 @@ static const char *fired_as(struct kof_touch *t,
 			int mine = 0;
 
 			if (!span_starts(&finding[k], &finding[k].shape,
-					 "Plague"))
+					 "Mutation"))
 				continue;
 			/*
 			 * THE SET, AND THEN EACH BLOCK.
 			 *
 			 * A verdict is named after the blocks the rule ASKED
-			 * about - all of them, folded (see kof_plague_name_of).
+			 * about - all of them, folded (see kof_mutation_name_of).
 			 * That is the whole of this module's blocks for a rule
 			 * that ands them, so the set is tried first; a rule
 			 * that ors them may have short-circuited and been named
 			 * after the one block it reached, so each is tried too.
 			 */
 			{
-				uint32_t set[KOF_PLAGUE_NAME_MAX], n = 0;
+				uint32_t set[KOF_MUTATION_NAME_MAX], n = 0;
 
 				for (b = 0; b < t->mod->n_block &&
-					    n < KOF_PLAGUE_NAME_MAX; b++)
-					set[n++] = kof_plague_block_id(
-						eng->plague,
+					    n < KOF_MUTATION_NAME_MAX; b++)
+					set[n++] = kof_mutation_block_id(
+						eng->mutation,
 						t->mod->block_base + b);
 				snprintf(id, sizeof id, "%08x",
-					 kof_plague_name_of(set, n));
+					 kof_mutation_name_of(set, n));
 				mine = span_is(&finding[k],
 					       &finding[k].variant, id);
 				for (b = 0; b < n && !mine; b++) {
@@ -825,7 +814,7 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 
 			e = kof_db_str(eng, mod, j, &bytes);
 			if (!e || !bytes) {
-				s->at = KOF_BROKEN;
+				s->at = KGENOME_BROKEN;
 				continue;
 			}
 			s->pool     = bytes;
@@ -913,7 +902,7 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 				s->in_rgn = why ? 0 : lo.in_rgn;
 				s->span_at = lo.n_hits ? lo.hit_len[lo.cur_hit]
 						       : s->span_min;
-				if (s->at != KOF_BROKEN)
+				if (s->at != KGENOME_BROKEN)
 					t->n_present++;
 				if (s->in_rgn)
 					t->n_in_rgn++;
@@ -1074,7 +1063,7 @@ static int dump_fail(char *err, uint32_t cap, const char *what, const char *at)
  * sample there, and a sample is routinely examined where it was found: an
  * extracted archive, a shared drop directory, somebody else's tree. fopen(,"wb")
  * follows a symlink and takes its mode from the umask, so a planted
- * "_sample_dump/01.KOF_SCAN_ELF_CODE" pointing elsewhere makes the dumper write
+ * "_sample_dump/01.KGENOME_SCAN_ELF_CODE" pointing elsewhere makes the dumper write
  * the sample's bytes through it.
  *
  * kof_fopen_trunc is O_CREAT|O_TRUNC|O_NOFOLLOW at 0600 - the same create-or-
@@ -1627,7 +1616,7 @@ static void locate_walk(struct kof_locate *o, struct kof_match_ctx *m,
 					      kind, flags);
 		uint32_t rm;
 
-		if (at == KOF_BROKEN)
+		if (at == KGENOME_BROKEN)
 			return;
 		if ((flags & KOF_STR_FULLWORD) &&
 		    !kof_match_at(m, at, pat, plen, kind, flags)) {
@@ -1639,12 +1628,12 @@ static void locate_walk(struct kof_locate *o, struct kof_match_ctx *m,
 		else
 			o->clipped = 1;
 		rm = fixed_region ? fixed_region : kof_region_map_at(map, at);
-		if (*first == KOF_BROKEN) {
+		if (*first == KGENOME_BROKEN) {
 			*first = at;
 			*first_mask = rm;
 		}
 		o->seen_mask |= rm;
-		if (o->at == KOF_BROKEN &&
+		if (o->at == KGENOME_BROKEN &&
 		    (!mask || (mask & KOF_SCAN_ALL) || (rm & mask))) {
 			o->at = at;
 			o->at_mask = rm;
@@ -1652,7 +1641,7 @@ static void locate_walk(struct kof_locate *o, struct kof_match_ctx *m,
 			o->cur_hit = o->n_hits ? o->n_hits - 1u : 0u;
 		}
 		from = at + 1u;
-		if (o->clipped && o->at != KOF_BROKEN)
+		if (o->clipped && o->at != KGENOME_BROKEN)
 			return;         /* the list is full and we have an answer */
 	}
 }
@@ -1665,11 +1654,11 @@ int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
 		   struct kof_range *scratch, uint32_t cap,
 		   struct kof_locate *out)
 {
-	uint64_t first = KOF_BROKEN;
+	uint64_t first = KGENOME_BROKEN;
 	uint32_t first_mask = 0, h;
 
 	memset(out, 0, sizeof *out);
-	out->at = KOF_BROKEN;
+	out->at = KGENOME_BROKEN;
 	if (!pat || !plen)
 		return 0;
 
@@ -1714,7 +1703,7 @@ int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
 	 * row still points at an occurrence and says the rule cannot fire on
 	 * it - the union is what a widened range would have to cover.
 	 */
-	if (out->at == KOF_BROKEN && first != KOF_BROKEN) {
+	if (out->at == KGENOME_BROKEN && first != KGENOME_BROKEN) {
 		out->at = first;
 		out->at_mask = out->seen_mask ? out->seen_mask : first_mask;
 		out->cur_hit = 0;
@@ -1723,7 +1712,7 @@ int kof_locate_str(struct kof_match_ctx *m, struct kof_match_ctx *msym,
 	if (out->n_hits)
 		locate_lens(out, m, obj, pat, plen, kind, flags, span_min,
 			    span_max);
-	return out->at != KOF_BROKEN;
+	return out->at != KGENOME_BROKEN;
 }
 
 /* ---- describing one collected event ------------------------------------- */
@@ -1897,7 +1886,7 @@ uint32_t kof_inspect_region_entropy(const struct kof_obj_ctx *ctx,
 /* One heap row, or nothing when the heap is absent. */
 static void clr_row(const struct kof_inspect_style *st, kof_inspect_line out,
 		    void *user, const char *name,
-		    const struct kof_clr_stream *s)
+		    const struct kgenome_clr_stream *s)
 {
 	char line[256];
 
@@ -1913,8 +1902,8 @@ void kof_inspect_dotnet(const struct kof_obj_ctx *ctx, const void *info,
 			const struct kof_inspect_style *st,
 			kof_inspect_line out, void *user)
 {
-	const struct kof_pe_info *p;
-	const struct kof_clr_meta *m;
+	const struct kgenome_pe_info *p;
+	const struct kgenome_clr_meta *m;
 	char line[256];
 	unsigned i;
 
@@ -1922,7 +1911,7 @@ void kof_inspect_dotnet(const struct kof_obj_ctx *ctx, const void *info,
 		return;
 	p = info;
 	m = &p->clr;
-	if (!kof_clr_present(m))
+	if (!kgenome_clr_present(m))
 		return;
 
 	snprintf(line, sizeof line,
@@ -1954,12 +1943,12 @@ void kof_inspect_dotnet(const struct kof_obj_ctx *ctx, const void *info,
 	 * this object does not reach", and a reader cannot tell those apart
 	 * from the rows above.
 	 */
-	for (i = 0; i < KOF_CLR_ANOM_COUNT; i++) {
+	for (i = 0; i < KGENOME_CLR_ANOM_COUNT; i++) {
 		if (!(m->anomalies & (1u << i)))
 			continue;
 		snprintf(line, sizeof line, "  %s%-11s %s%s",
 			 sty(st ? st->warn : NULL), "", sty(st ? st->warn : NULL),
-			 kof_clr_anomaly_name(i));
+			 kgenome_clr_anomaly_name(i));
 		out(user, line);
 	}
 }
@@ -1975,7 +1964,7 @@ void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 		return;
 
 	if (ctx->format == KOF_FMT_PE) {
-		const struct kof_pe_info *p = info;
+		const struct kgenome_pe_info *p = info;
 
 		/*
 		 * NOT A CLAIM: the runtime needs the CLI header to load the
@@ -2016,7 +2005,7 @@ void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 	}
 
 	if (ctx->format == KOF_FMT_ELF) {
-		const struct kof_elf_info *e = info;
+		const struct kgenome_elf_info *e = info;
 		uint32_t i;
 		int interp = 0;
 
@@ -2025,7 +2014,7 @@ void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 		 * PT_INTERP segment names the loader an image needs, and an
 		 * image with no interpreter is one nothing has to load for it.
 		 */
-		for (i = 0; i < e->seg_count && i < KOF_ELF_MAX_SEGMENTS; i++)
+		for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++)
 			if (e->seg[i].type == 3u) {   /* PT_INTERP */
 				interp = 1;
 				break;
@@ -2042,7 +2031,7 @@ void kof_inspect_toolchain(const struct kof_obj_ctx *ctx, const void *info,
 		 * nothing - a stripped binary has none - so the row is left off
 		 * rather than reported as unknown.
 		 */
-		for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
+		for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
 			char txt[80];
 			uint64_t off, len, k, w = 0;
 
@@ -2194,266 +2183,6 @@ uint32_t kof_pdf_text(const uint8_t *p, uint64_t n, int hex,
 	return w;
 }
 
-/* ---- the string codings - see kofinspect.h -------------------------------- */
-
-const char *kof_codec_name(uint32_t codec)
-{
-	switch (codec) {
-	case KOF_CODEC_B64:     return "base64";
-	case KOF_CODEC_HEX:     return "hex";
-	case KOF_CODEC_URL:     return "url";
-	case KOF_CODEC_XOR:     return "xor";
-	case KOF_CODEC_ADD:     return "add";
-	case KOF_CODEC_CAESAR:  return "caesar";
-	case KOF_CODEC_REVERSE: return "reverse";
-	default:                return "?";
-	}
-}
-
-int kof_codec_keyed(uint32_t codec)
-{
-	return codec == KOF_CODEC_XOR || codec == KOF_CODEC_ADD ||
-	       codec == KOF_CODEC_CAESAR;
-}
-
-uint32_t kof_codec_key(const char *text)
-{
-	uint32_t k = 0;
-
-	if (!text)
-		return 0;
-	if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
-		text += 2;
-	for (; *text; text++) {
-		int d = kof_hex_val((uint8_t)*text);
-
-		if (d < 0)
-			return k;
-		k = (k << 4) | (uint32_t)d;
-	}
-	return k;
-}
-
-/* Writing the coding: bytes in, its own form out. */
-static uint32_t codec_write(const uint8_t *p, uint32_t len, uint32_t codec,
-			    uint32_t key, uint8_t *out, uint32_t cap)
-{
-	static const char b64[] =
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	static const char hexd[] = "0123456789ABCDEF";
-	uint32_t w = 0, i;
-
-	switch (codec) {
-	case KOF_CODEC_B64:
-		for (i = 0; i < len && w + 4u <= cap; i += 3u) {
-			uint32_t n = len - i < 3u ? len - i : 3u;
-			uint32_t acc = (uint32_t)p[i] << 16;
-
-			if (n > 1u)
-				acc |= (uint32_t)p[i + 1u] << 8;
-			if (n > 2u)
-				acc |= p[i + 2u];
-			out[w++] = (uint8_t)b64[(acc >> 18) & 63u];
-			out[w++] = (uint8_t)b64[(acc >> 12) & 63u];
-			/* Padded, because a decoder that counts on it is the
-			 * common case and one that ignores it reads this
-			 * anyway. */
-			out[w++] = n > 1u ? (uint8_t)b64[(acc >> 6) & 63u]
-					  : (uint8_t)'=';
-			out[w++] = n > 2u ? (uint8_t)b64[acc & 63u]
-					  : (uint8_t)'=';
-		}
-		return w;
-	case KOF_CODEC_HEX:
-		/*
-		 * UPPER CASE AND NO SEPARATOR, which is the form a pattern is
-		 * written in - KOF_DEFINE_HEXSTR takes exactly this, so what
-		 * comes out of here can be pasted into a signature.
-		 */
-		for (i = 0; i < len && w + 2u <= cap; i++) {
-			out[w++] = (uint8_t)hexd[p[i] >> 4];
-			out[w++] = (uint8_t)hexd[p[i] & 15u];
-		}
-		return w;
-	case KOF_CODEC_URL:
-		/*
-		 * RFC 3986's unreserved set stays and everything else is
-		 * escaped - `+` among it, so that a `+` a reader typed comes
-		 * back a `+` and not the space the reading pass turns one
-		 * into. Upper case digits, the form a URL is written in.
-		 */
-		for (i = 0; i < len; i++) {
-			uint8_t ch = p[i];
-
-			if ((ch >= 'A' && ch <= 'Z') ||
-			    (ch >= 'a' && ch <= 'z') ||
-			    (ch >= '0' && ch <= '9') ||
-			    ch == '-' || ch == '_' || ch == '.' || ch == '~') {
-				if (w + 1u > cap)
-					break;
-				out[w++] = ch;
-				continue;
-			}
-			if (w + 3u > cap)
-				break;
-			out[w++] = '%';
-			out[w++] = (uint8_t)hexd[ch >> 4];
-			out[w++] = (uint8_t)hexd[ch & 15u];
-		}
-		return w;
-	case KOF_CODEC_XOR:
-		for (i = 0; i < len && w < cap; i++)
-			out[w++] = (uint8_t)(p[i] ^ (uint8_t)key);
-		return w;
-	case KOF_CODEC_ADD:
-		for (i = 0; i < len && w < cap; i++)
-			out[w++] = (uint8_t)(p[i] - (uint8_t)key);
-		return w;
-	case KOF_CODEC_CAESAR:
-		key %= 26u;
-		if (!key)
-			return 0;
-		for (i = 0; i < len && w < cap; i++) {
-			uint8_t c = p[i];
-
-			if (c >= 'a' && c <= 'z')
-				c = (uint8_t)('a' + (c - 'a' + key) % 26u);
-			else if (c >= 'A' && c <= 'Z')
-				c = (uint8_t)('A' + (c - 'A' + key) % 26u);
-			out[w++] = c;
-		}
-		return w;
-	case KOF_CODEC_REVERSE:
-		for (i = 0; i < len && w < cap; i++)
-			out[w++] = p[len - 1u - i];
-		return w;
-	default:
-		return 0;
-	}
-}
-
-/* Reading the coding: its form in, bytes out. */
-static uint32_t codec_read(const uint8_t *p, uint32_t len, uint32_t codec,
-			   uint32_t key, uint8_t *out, uint32_t cap)
-{
-	uint32_t w = 0, acc = 0, have = 0, i;
-
-	switch (codec) {
-	case KOF_CODEC_B64:
-		for (i = 0; i < len && w < cap; i++) {
-			int v = kof_b64_val(p[i]);
-
-			/* Padding, and the wrapping a 76-column encoder puts
-			 * in - both belong to the text and neither is data. */
-			if (v < 0) {
-				if (p[i] == '=' || p[i] == '\n' ||
-				    p[i] == '\r' || p[i] == ' ' ||
-				    p[i] == '\t')
-					continue;
-				return 0;       /* not base64 at all */
-			}
-			acc = (acc << 6) | (uint32_t)v;
-			have += 6u;
-			if (have >= 8u) {
-				have -= 8u;
-				out[w++] = (uint8_t)(acc >> have);
-			}
-		}
-		return w;
-	case KOF_CODEC_HEX:
-		for (i = 0; i < len && w < cap; i++) {
-			int v = kof_hex_val(p[i]);
-
-			if (v < 0) {
-				if (p[i] == ' ' || p[i] == '\n' ||
-				    p[i] == '\r' || p[i] == '\t' ||
-				    p[i] == ':' || p[i] == ',')
-					continue;
-				return 0;
-			}
-			acc = (acc << 4) | (uint32_t)v;
-			have += 4u;
-			if (have >= 8u) {
-				have -= 8u;
-				out[w++] = (uint8_t)acc;
-			}
-		}
-		return have ? 0 : w;  /* an odd digit is not a byte string */
-	case KOF_CODEC_URL: {
-		uint32_t esc = 0;
-
-		for (i = 0; i < len && w < cap; i++) {
-			if (p[i] == '%') {
-				int hi, lo;
-
-				if (len - i < 3u)
-					return 0;
-				hi = kof_hex_val(p[i + 1u]);
-				lo = kof_hex_val(p[i + 2u]);
-				/* A `%` that is not an escape means the text
-				 * was never written this way - a printf
-				 * format, a literal per cent. */
-				if (hi < 0 || lo < 0)
-					return 0;
-				out[w++] = (uint8_t)((hi << 4) | lo);
-				i += 2u;
-				esc++;
-				continue;
-			}
-			out[w++] = p[i] == '+' ? (uint8_t)' ' : p[i];
-		}
-		/* Text carrying no escape at all is not encoded text, and
-		 * saying so is the answer hex gives to an odd digit rather
-		 * than an error. */
-		return esc ? w : 0;
-	}
-	case KOF_CODEC_XOR:
-		for (i = 0; i < len && w < cap; i++)
-			out[w++] = (uint8_t)(p[i] ^ (uint8_t)key);
-		return w;
-	case KOF_CODEC_ADD:
-		for (i = 0; i < len && w < cap; i++)
-			out[w++] = (uint8_t)(p[i] + (uint8_t)key);
-		return w;
-	case KOF_CODEC_CAESAR:
-		/*
-		 * The key is how far the text was shifted, so decoding shifts
-		 * BACK by it - a reader who knows a sample was rot-7 types 7,
-		 * not 19. Nothing but letters moves; digits, punctuation and
-		 * the spaces stay where they are, which is what makes a
-		 * shifted command still look like a command.
-		 */
-		key %= 26u;
-		if (!key)
-			return 0;       /* a shift of nothing is not a coding */
-		for (i = 0; i < len && w < cap; i++) {
-			uint8_t c = p[i];
-
-			if (c >= 'a' && c <= 'z')
-				c = (uint8_t)('a' + (c - 'a' + 26u - key) % 26u);
-			else if (c >= 'A' && c <= 'Z')
-				c = (uint8_t)('A' + (c - 'A' + 26u - key) % 26u);
-			out[w++] = c;
-		}
-		return w;
-	case KOF_CODEC_REVERSE:
-		for (i = 0; i < len && w < cap; i++)
-			out[w++] = p[len - 1u - i];
-		return w;
-	default:
-		return 0;
-	}
-}
-
-uint32_t kof_codec_run(const uint8_t *in, uint32_t n, uint32_t codec,
-		       uint32_t key, int encode, uint8_t *out, uint32_t cap)
-{
-	if (!in || !out || !n || !cap)
-		return 0;
-	return encode ? codec_write(in, n, codec, key, out, cap)
-		      : codec_read(in, n, codec, key, out, cap);
-}
-
 /* ---- the name a module would report - see kofinspect.h ---- */
 
 void kof_touch_name(const struct kof_touch *t, char *out, size_t cap)
@@ -2595,8 +2324,8 @@ const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n)
 
 /* ---- similarity blocks, for whoever is writing the rule --------------------- */
 
-uint32_t kof_inspect_plague(const struct kof_scanner *sc,
-			    struct kof_plague_view *out, uint32_t max_out)
+uint32_t kof_inspect_mutation(const struct kof_scanner *sc,
+			    struct kof_mutation_view *out, uint32_t max_out)
 {
 	const struct kof_engine *e;
 	uint32_t b, n = 0;
@@ -2604,19 +2333,19 @@ uint32_t kof_inspect_plague(const struct kof_scanner *sc,
 	if (!sc || !out || !max_out)
 		return 0;
 	e = sc->eng;
-	if (!e || !e->n_blk || !sc->plague.set)
+	if (!e || !e->n_blk || !sc->mutation.set)
 		return 0;
 
 	for (b = 0; b < e->n_blk && n < max_out; b++) {
-		const struct kof_plague_block *blk = &e->blk_tab[b];
+		const struct kof_mutation_block *blk = &e->blk_tab[b];
 		uint32_t i;
 
 		out[n].block     = b;
 		out[n].scan_mask = blk->scan_mask;
 		out[n].norm      = blk->norm;
 		out[n].n_hash    = blk->n_hash;
-		out[n].score     = (uint8_t)kof_plague_pct(&sc->plague, b);
-		out[n].matched   = kof_plague_matched(&sc->plague, b);
+		out[n].score     = (uint8_t)kof_mutation_pct(&sc->mutation, b);
+		out[n].matched   = kof_mutation_matched(&sc->mutation, b);
 		out[n].rule      = "";
 		/*
 		 * Which module declared it. A linear walk because the tables
@@ -2670,9 +2399,13 @@ void kof_inspect_sym_name(const uint8_t *blk, uint32_t n, uint64_t value,
 		    (shndx >= 0 && (int)(r[KOF_SYM_R_SHNDX] |
 					(r[KOF_SYM_R_SHNDX + 1u] << 8)) != shndx))
 			continue;
-		for (j = 0; j + 1u < cap && j < KOF_SYM_NAMELEN &&
-		     r[KOF_SYM_R_NAME + j]; j++)
-			out[j] = (char)r[KOF_SYM_R_NAME + j];
+		{
+			uint32_t len = 0;
+			const char *nm = kof_sym_name(blk, n, r, &len);
+
+			for (j = 0; j + 1u < cap && j < len; j++)
+				out[j] = nm[j];
+		}
 		out[j] = 0;
 		if (j)
 			return;

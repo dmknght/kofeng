@@ -26,7 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -71,34 +71,34 @@ static uint8_t spins[] = {
 	0xEB,0xFC                                /*     jmp L              */
 };
 
-static enum kof_emu_stop run(uint8_t *code, size_t n, uint64_t *insn)
+static enum kgenome_emu_stop run(uint8_t *code, size_t n, uint64_t *insn)
 {
-	struct kof_emu_cfg cfg = { BUDGET, 0, 0, 0 };
-	struct kof_emu *e = kof_emu_new(&cfg);
-	enum kof_emu_stop st = KOF_EMU_STOP_DECODE;
+	struct kgenome_emu_cfg cfg = { BUDGET, 0, 0, 0 };
+	struct kgenome_emu *e = kgenome_emu_new(&cfg);
+	enum kgenome_emu_stop st = KGENOME_EMU_STOP_DECODE;
 
 	if (!e) {
 		ck(0, "out of memory");
 		return st;
 	}
-	if (!kof_emu_map(e, CODE_VA, code, n, 0x1000, KOF_EMU_R | KOF_EMU_X) ||
-	    !kof_emu_map(e, DATA_VA, NULL, 0, 16u * 0x1000u,
-			 KOF_EMU_R | KOF_EMU_W) ||
-	    !kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W))
+	if (!kgenome_emu_map(e, CODE_VA, code, n, 0x1000, KGENOME_EMU_R | KGENOME_EMU_X) ||
+	    !kgenome_emu_map(e, DATA_VA, NULL, 0, 16u * 0x1000u,
+			 KGENOME_EMU_R | KGENOME_EMU_W) ||
+	    !kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W))
 		ck(0, "map");
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
-	kof_emu_set_idle(e, IDLE);
-	st = kof_emu_run(e);
-	*insn = kof_emu_insn_count(e);
-	kof_emu_free(e);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_idle(e, IDLE);
+	st = kgenome_emu_run(e);
+	*insn = kgenome_emu_insn_count(e);
+	kgenome_emu_free(e);
 	return st;
 }
 
 int main(void)
 {
 	uint64_t insn = 0;
-	enum kof_emu_stop st;
+	enum kgenome_emu_stop st;
 
 	memcpy(sweeps + 2, &(uint64_t){ DATA_VA }, 8);
 	memcpy(sweeps + 36, &(uint64_t){ DATA_VA }, 8);
@@ -106,14 +106,14 @@ int main(void)
 
 	st = run(sweeps, sizeof sweeps, &insn);
 	printf("  sweeps: %llu instructions, stop=%s\n", (unsigned long long)insn,
-	       kof_emu_stop_name(st));
-	ck(st == KOF_EMU_STOP_EXIT, "a sweep over written pages is work, not a stall");
+	       kgenome_emu_stop_name(st));
+	ck(st == KGENOME_EMU_STOP_EXIT, "a sweep over written pages is work, not a stall");
 	ck(insn > 5u * IDLE, "and it ran well past the idle limit to finish");
 
 	st = run(spins, sizeof spins, &insn);
 	printf("  spins: %llu instructions, stop=%s\n", (unsigned long long)insn,
-	       kof_emu_stop_name(st));
-	ck(st == KOF_EMU_STOP_STALLED, "a loop on one line is stopped as stalled");
+	       kgenome_emu_stop_name(st));
+	ck(st == KGENOME_EMU_STOP_STALLED, "a loop on one line is stopped as stalled");
 	ck(insn < 4u * IDLE, "near the idle limit and not at the budget");
 
 	printf("emu progress: %s\n", failures ? "FAILED" : "ok");

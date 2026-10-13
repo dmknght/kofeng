@@ -126,19 +126,7 @@ static const uint32_t xz_cls_bit[KOF_XZ_CLS_COUNT] = {
 	KOF_SCAN_XZ_PACKED
 };
 
-static uint32_t xz_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_xz_info *x = (const struct kof_xz_info *)ctx->file_header;
-
-	if (!x || !x->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof x->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)x->run, x->n_runs, mask,
-				xz_cls_bit, KOF_SCAN_XZ_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(xz, struct kof_xz_info, xz_cls_bit, KOF_SCAN_XZ_UNCLAIMED)
 
 /* ---- the block header --------------------------------------------------------- */
 

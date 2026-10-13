@@ -17,16 +17,16 @@
 
 #include "scan.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +39,7 @@
 #include "../kofcore/kofplatform.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan_int.h"
+#include "../kofcore/kofhash.h"   /* KOF_ERR_* */
 
 
 /* ---- the parallel walk ---------------------------------------------------- */

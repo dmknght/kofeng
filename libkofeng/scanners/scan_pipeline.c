@@ -13,16 +13,16 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include "scan_int.h"
 
@@ -78,7 +78,7 @@ static void st_facts(struct kof_pipeline *p)
 	 * diagnoses no verdict reads would have to be thrown away and run again -
 	 * the same object analysed twice for one answer.
 	 */
-	sc->diag_all = opt->report_diag != 0;
+	sc->diag_all = 1;
 
 	/*
 	 * How big the object is, before anything tries to sx_identify it.
@@ -104,9 +104,20 @@ static void st_facts(struct kof_pipeline *p)
 	 * second is the specific claim: the caller's applies to the root of the
 	 * walk and would otherwise be re-applied to every object under it.
 	 */
-	sx_identify(sc, p->buf, &p->ctx,
-		 p->as_fmt ? p->as_fmt : (opt ? opt->as_format : 0u),
-		 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
+	if (!sx_inherit_image(sc, &p->ctx))
+		sx_identify(sc, p->buf, &p->ctx,
+			 p->as_fmt ? p->as_fmt : (opt ? opt->as_format : 0u),
+			 opt ? opt->as_view : NULL, opt ? opt->as_view_len : 0u);
+	/*
+	 * AND THE ANALYSIS OF THE OBJECT IT RENDERS, when it renders one - see
+	 * objprod.h. After the image, before anything reads either.
+	 */
+	{
+		const struct kof_prod *pr = kof_src_prod_of(sc->cur_src);
+
+		if (pr)
+			kof_prod_adopt(sc, pr);
+	}
 	/*
 	 * AND THE LANGUAGE THE PRODUCER DECLARED BEATS THE ONE READ BACK.
 	 *
@@ -181,26 +192,26 @@ static void st_facts(struct kof_pipeline *p)
 
 	/*
 	 * And the same for similarity: every block any loaded rule declared is
-	 * counted once, so a module's kof_plague_score is a division - but on
+	 * counted once, so a module's kof_mutation_score is a division - but on
 	 * the first ask rather than here, for the reason above.
 	 *
 	 * Gated twice on purpose, and both gates still apply inside the feed.
 	 * The set is NULL unless some pack carried a block, so a database
-	 * without plague rules never reaches this. And within it, a region is
+	 * without mutation rules never reaches this. And within it, a region is
 	 * fed only for the normalizers some block of that region actually asked
 	 * for - a pack whose blocks all hash raw bytes pays one pass, not three.
 	 *
 	 * THE GENERATION BUMP IS NOT DEFERRED WITH THE FEED. It is O(1) - see
-	 * kof_plague_begin - and it is what makes "this object fed nothing" read
+	 * kof_mutation_begin - and it is what makes "this object fed nothing" read
 	 * as nothing rather than as whatever the last object fed.
 	 */
-	kof_plague_begin(&sc->plague);
+	kof_mutation_begin(&sc->mutation);
 	/*
 	 * THIS OBJECT'S DESCRIPTOR IS NOT THE LAST ONE'S.
 	 *
-	 * Here and not inside sx_plague_feed, which returns early when no pack
-	 * carried a block: a database with no plague rules would then have left
-	 * the previous object's descriptor in place, and every kof_plague_blocks
+	 * Here and not inside sx_mutation_feed, which returns early when no pack
+	 * carried a block: a database with no mutation rules would then have left
+	 * the previous object's descriptor in place, and every kof_mutation_blocks
 	 * rule would have measured the wrong file. Built on the first ask - see
 	 * ovl_of - so this costs a store.
 	 */
@@ -275,7 +286,7 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 		if (m->n_str)
 			sx_need_multi(sc, &p->ctx);
 		if (m->n_block)
-			sx_need_plague(sc, &p->ctx);
+			sx_need_mutation(sc, &p->ctx);
 
 		sx_mod_begin(sc, m);
 		m->fn(&p->ctx);
@@ -322,8 +333,17 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 		 * It saves nothing on a clean object, which is nearly every object -
 		 * this is a bound on the worst case, not a throughput win.
 		 */
-		if (!opt->all_matches && (!f || f->level == KOF_LEVEL_INFECT))
-			break;
+		/*
+		 * The diseases are a SET and the verdict is read off all of it: a
+		 * detector found first is not the answer. A result with no room left
+		 * for another FINDING is not the end either - a detector that reports
+		 * still adds its disease to the set before its finding is counted as
+		 * dropped (sx_mod_report), and stopping here made every detector
+		 * after the sixteenth finding invisible to the verdict
+		 * (tests/unit/verdict_branches.c: the disease sorted after the
+		 * fillers was never run). Only a request to stop, above, ends it.
+		 */
+		(void)f;
 	}
 	}
 
@@ -699,6 +719,19 @@ static void st_model(struct kof_pipeline *p)
  * verdict reads and rebuilds the graph with them: whatever it changes is not
  * something a verdict can have read.
  */
+/*
+ * SYNDROME: what the diseases the object has make - the verdict.
+ *
+ * ONCE, after everything that can find a disease has run, and the answer is kept
+ * in the result for st_report and for a caller that asked for it: the set is read
+ * and inferred from one time and nothing downstream reads it again.
+ */
+static void st_syndrome(struct kof_pipeline *p)
+{
+	p->out->has_syndrome = (uint8_t)(kof_scan_syndrome(&p->ctx, &p->out->syndrome) != 0);
+	sx_syndrome_verdict(p->sc, &p->ctx, p->opt, p->out, &p->out->syndrome);
+}
+
 static void st_report(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
@@ -709,12 +742,10 @@ static void st_report(struct kof_pipeline *p)
 	n = kof_scan_diag_count(&p->ctx);
 	if (!n)
 		return;
-	/* What the ones that matched make - the same analysis, nothing more to run. */
-	p->out->has_syndrome = (uint8_t)(kof_scan_syndrome(&p->ctx, &p->out->syndrome) != 0);
 	/* One buffer for the scanner's life, lent to the caller for its callback
 	 * - see kof_result.diag. */
 	if (!sc->diag_rep) {
-		sc->diag_rep = calloc(KOF_DB_MAX_DIAG, sizeof *sc->diag_rep);
+		sc->diag_rep = calloc(sc->diag_cap ? sc->diag_cap : 1u, sizeof *sc->diag_rep);
 		if (!sc->diag_rep)
 			return;
 	}
@@ -794,6 +825,7 @@ static const struct stage_row {
 	{ KOF_STAGE_VERDICT,   KOF_ANALYZE_UNWRAP,  0,                              st_verdict },
 	{ KOF_STAGE_RECONCILE, KOF_ANALYZE_UNWRAP,  0,                              st_reconcile },
 	{ KOF_STAGE_MODEL,     KOF_ANALYZE_UNWRAP,  0,                              st_model },
+	{ KOF_STAGE_SYNDROME,  KOF_ANALYZE_UNWRAP,  0,                              st_syndrome },
 	{ KOF_STAGE_REPORT,    KOF_ANALYZE_UNWRAP,  0,                              st_report }
 };
 
@@ -969,4 +1001,6 @@ void sx_scan_object(struct kof_scanner *sc, kof_buf buf,
 	p.inherit_predict = inherit_predict;
 	p.as_fmt = as_fmt;
 	sx_pipeline_run(&p);
+	/* What this object learned is shared with the renderings of it it made. */
+	kof_prod_publish(sc);
 }

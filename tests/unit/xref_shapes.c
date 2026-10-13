@@ -20,9 +20,33 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <celllysis/celllysis.h>
 #include <celllysis/xref.h>
 
 static int fails;
+
+/* One run of code into the map, the way a caller feeds it: decode, hand over
+ * each instruction, step one byte over what does not decode. The sweep itself
+ * reads no bytes (see xref.h), so the test owns this loop. */
+static void kof_xref_add(struct kgenome_xref *u, const uint8_t *code, uint32_t n,
+			 uint64_t va, unsigned arch)
+{
+	uint32_t at = 0;
+
+	kgenome_xref_begin(u, arch);
+	while (at < n) {
+		struct kgenome_cell_insn in;
+		uint32_t len = kgenome_cell_decode(arch, 0, code + at, n - at, va + at, &in);
+
+		if (!len) {
+			kgenome_xref_feed(u, NULL);
+			at++;
+			continue;
+		}
+		kgenome_xref_feed(u, &in);
+		at += len;
+	}
+}
 
 #define CODE_VA 0x1000u
 #define DATA_VA 0x4000u
@@ -30,7 +54,7 @@ static int fails;
 static void expect(const char *tag, const uint8_t *code, uint32_t n,
 		   uint32_t want, uint32_t must_not)
 {
-	struct kof_xref *u = kof_xref_new();
+	struct kgenome_xref *u = kgenome_xref_new();
 	uint32_t got;
 
 	if (!u) {
@@ -38,8 +62,8 @@ static void expect(const char *tag, const uint8_t *code, uint32_t n,
 		fails++;
 		return;
 	}
-	kof_xref_add(u, code, n, CODE_VA, 64);
-	got = kof_xref_in(u, DATA_VA, 8);
+	kof_xref_add(u, code, n, CODE_VA, KGENOME_ARCH_X86_64);
+	got = kgenome_xref_in(u, DATA_VA, 8);
 	if ((got & want) != want) {
 		printf("  FAIL %s: wanted 0x%x, got 0x%x\n", tag, want, got);
 		fails++;
@@ -48,7 +72,7 @@ static void expect(const char *tag, const uint8_t *code, uint32_t n,
 		       must_not, got);
 		fails++;
 	}
-	kof_xref_free(u);
+	kgenome_xref_free(u);
 }
 
 int main(void)
@@ -100,16 +124,30 @@ int main(void)
 		0x48,0x8b,0x05,0xf9,0x2f,0x00,0x00, 0xc3
 	};
 
+	/*
+	 *   mov  eax, [rip+0x2ffa]      # 0x4000
+	 *   cltq                        <- rewrites rax, names no operand
+	 *   call rbx
+	 * The address in rax died at the cltq, so the call is not handed it. The
+	 * sweep once forgot only the operand an instruction NAMED, kept it, and
+	 * recorded an argument that was never passed (found on /usr/bin/ul).
+	 */
+	static const uint8_t implicit_write[] = {
+		0x8b,0x05,0xfa,0x2f,0x00,0x00, 0x48,0x98, 0xff,0xd3, 0xc3
+	};
+
 	expect("lea+call",  lea_call,  (uint32_t)sizeof lea_call,
-	       KOF_XREF_READ | KOF_XREF_CALL, 0);
+	       KGENOME_XREF_READ | KGENOME_XREF_CALL, 0);
 	expect("via_stack", via_stack, (uint32_t)sizeof via_stack,
-	       KOF_XREF_READ | KOF_XREF_CALL, 0);
+	       KGENOME_XREF_READ | KGENOME_XREF_CALL, 0);
 	expect("direct",    direct,    (uint32_t)sizeof direct,
-	       KOF_XREF_READ | KOF_XREF_CALL, 0);
+	       KGENOME_XREF_READ | KGENOME_XREF_CALL, 0);
 	expect("as_arg",    as_arg,    (uint32_t)sizeof as_arg,
-	       KOF_XREF_READ | KOF_XREF_ARG, KOF_XREF_CALL | KOF_XREF_JUMP);
+	       KGENOME_XREF_READ | KGENOME_XREF_ARG, KGENOME_XREF_CALL | KGENOME_XREF_JUMP);
+	expect("implicit_write", implicit_write, (uint32_t)sizeof implicit_write,
+	       KGENOME_XREF_READ, KGENOME_XREF_ARG | KGENOME_XREF_CALL | KGENOME_XREF_JUMP);
 	expect("read_only", read_only, (uint32_t)sizeof read_only,
-	       KOF_XREF_READ, KOF_XREF_CALL | KOF_XREF_JUMP | KOF_XREF_ARG);
+	       KGENOME_XREF_READ, KGENOME_XREF_CALL | KGENOME_XREF_JUMP | KGENOME_XREF_ARG);
 
 	/*
 	 * AND THE RANGE, which is not a detail: a blob is not referred to at its
@@ -122,25 +160,40 @@ int main(void)
 		static const uint8_t mid[] = {
 			0x48,0x8d,0x05,0x01,0x30,0x00,0x00, 0xff,0xd0, 0xc3
 		};
-		struct kof_xref *u = kof_xref_new();
+		struct kgenome_xref *u = kgenome_xref_new();
 
 		if (u) {
-			kof_xref_add(u, mid, (uint32_t)sizeof mid, CODE_VA, 64);
-			if (kof_xref_in(u, DATA_VA, 1) & KOF_XREF_CALL) {
+			kof_xref_add(u, mid, (uint32_t)sizeof mid, CODE_VA, KGENOME_ARCH_X86_64);
+			if (kgenome_xref_in(u, DATA_VA, 1) & KGENOME_XREF_CALL) {
 				printf("  FAIL range: a one byte query saw an "
 				       "xref eight bytes away\n");
 				fails++;
 			}
-			if (!(kof_xref_in(u, DATA_VA, 32) & KOF_XREF_CALL)) {
+			if (!(kgenome_xref_in(u, DATA_VA, 32) & KGENOME_XREF_CALL)) {
 				printf("  FAIL range: a 32 byte query missed an "
 				       "xref inside it\n");
 				fails++;
 			}
-			kof_xref_free(u);
+			kgenome_xref_free(u);
+		}
+	}
+
+	/* Code of another architecture is not read as x86: nothing is recorded. */
+	{
+		struct kgenome_xref *u = kgenome_xref_new();
+
+		if (u) {
+			kof_xref_add(u, lea_call, (uint32_t)sizeof lea_call, CODE_VA,
+				     KGENOME_ARCH_ARM);
+			if (kgenome_xref_in(u, DATA_VA, 8)) {
+				printf("  FAIL arch: ARM code was swept as x86\n");
+				fails++;
+			}
+			kgenome_xref_free(u);
 		}
 	}
 
 	printf("xref shapes: %s\n",
-	       fails ? "FAILED" : "call, stack, direct, arg, read, range - ok");
+	       fails ? "FAILED" : "call, stack, direct, arg, read, range, implicit write, arch - ok");
 	return fails != 0;
 }

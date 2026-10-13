@@ -72,20 +72,7 @@ static const uint32_t rtf_cls_bit[KOF_RTF_CLS_COUNT] = {
 	KOF_SCAN_RTF_BINARY
 };
 
-static uint32_t rtf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_rtf_info *r =
-		(const struct kof_rtf_info *)ctx->file_header;
-
-	if (!r || !r->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof r->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)r->run, r->n_runs, mask,
-				rtf_cls_bit, KOF_SCAN_RTF_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(rtf, struct kof_rtf_info, rtf_cls_bit, KOF_SCAN_RTF_UNCLAIMED)
 
 /* ---- pieces of the walk ------------------------------------------------------- */
 

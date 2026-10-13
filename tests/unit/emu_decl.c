@@ -21,7 +21,7 @@
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../libkofeng/extractors/unpack/emu_unpack.h"
+#include <phenotype/emu_unpack.h>
 #include "../../libkofeng/kofeng.h"
 
 #define BASE      0x0000000140000000ull
@@ -115,18 +115,18 @@ static unsigned char *build(const unsigned char *code, unsigned ncode,
 }
 
 /* Parse and run, with a declaration. NULL when no machine came back. */
-static struct kof_emu *run(unsigned char *f, size_t len,
-			   const struct kof_emu_decl *decl)
+static struct kgenome_emu *run(unsigned char *f, size_t len,
+			   const struct kgenome_emu_decl *decl)
 {
-	static struct kof_pe_info info;
+	static struct kgenome_pe_info info;
 	static struct kof_obj_ctx ctx;
-	struct kof_emu_unp_report rep;
+	struct kgenome_emu_unp_report rep;
 
 	memset(&info, 0, sizeof info);
 	memset(&ctx, 0, sizeof ctx);
 	if (!kof_pe_parse(kof_buf_make(f, len), &info, &ctx) || !info.valid)
 		return NULL;
-	return kof_emu_unp_run_pe(f, len, &info, 0, 0, 0, 0, KOF_EMU_EXTEND_MAX, NULL, 0, decl, &rep);
+	return kgenome_emu_unp_run_pe(f, len, &info, NULL, NULL, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, decl, &rep);
 }
 
 /*
@@ -154,11 +154,11 @@ static unsigned api_code(unsigned char *c, uint64_t a, uint64_t b)
 	return i;
 }
 
-static uint32_t stored(struct kof_emu *e, unsigned slot)
+static uint32_t stored(struct kgenome_emu *e, unsigned slot)
 {
 	uint32_t v = 0xdeadbeefu;
 
-	if (!kof_emu_read(e, BASE + DATA_RVA + 4u * slot, &v, 4u))
+	if (!kgenome_emu_read(e, BASE + DATA_RVA + 4u * slot, &v, 4u))
 		return 0xdeadbeefu;
 	return v;
 }
@@ -169,8 +169,8 @@ static void api(void)
 	unsigned char code[64];
 	unsigned char *f;
 	size_t len = 0;
-	struct kof_emu *e;
-	struct kof_emu_decl d;
+	struct kgenome_emu *e;
+	struct kgenome_emu_decl d;
 	uint64_t dbg, tick;
 	unsigned n;
 	uint32_t base_dbg, base_tick;
@@ -188,9 +188,9 @@ static void api(void)
 			free(f);
 			return;
 		}
-		dbg = kof_emu_win_addr_of(e, "IsDebuggerPresent");
-		tick = kof_emu_win_addr_of(e, "GetTickCount");
-		kof_emu_free(e);
+		dbg = kgenome_emu_win_addr_of(e, "IsDebuggerPresent");
+		tick = kgenome_emu_win_addr_of(e, "GetTickCount");
+		kgenome_emu_free(e);
 		free(f);
 	}
 	ck(dbg && tick, "both stubs exist in this environment");
@@ -207,7 +207,7 @@ static void api(void)
 	base_dbg = stored(e, 0);
 	base_tick = stored(e, 1);
 	ck(base_dbg == 0, "control: IsDebuggerPresent says no debugger");
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 
 	memset(&d, 0, sizeof d);
 	strcpy(d.shim[0].name, "IsDebuggerPresent");
@@ -219,7 +219,7 @@ static void api(void)
 	ck(e && stored(e, 1) == base_tick,
 	   "an API nobody declared still answers as it did (unrelated call unaffected)");
 	if (e)
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 
 	/* Aimed at the table: a second declaration for the SAME name replaces the
 	 * first, so the order a module declares in cannot leave two answers. */
@@ -233,29 +233,29 @@ static void api(void)
 	ck(e && stored(e, 1) == 0x777u && stored(e, 0) == base_dbg,
 	   "the later declaration of one name wins, and the other API is untouched");
 	if (e)
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 
 	/* Aimed at the name check: a name this environment has no handler for does
 	 * nothing and is reported as not kept. */
 	e = run(f, len, NULL);
-	ck(e && kof_emu_shim_api(e, "NoSuchApiAnywhere", 1) == 0,
+	ck(e && kgenome_emu_shim_api(e, "NoSuchApiAnywhere", 1) == 0,
 	   "a name the table lacks is refused, not silently kept");
-	ck(e && kof_emu_shim_api(e, NULL, 1) == 0, "a NULL name is refused");
+	ck(e && kgenome_emu_shim_api(e, NULL, 1) == 0, "a NULL name is refused");
 	if (e) {
 		unsigned i;
 		int all = 1;
 
 		/* And the declaration table is a bound on the DECLARATION. Fill it
-		 * with distinct real names; the first KOF_EMU_SHIM_MAX are kept and
+		 * with distinct real names; the first KGENOME_EMU_SHIM_MAX are kept and
 		 * the next is refused, nothing grows. */
-		for (i = 0; i < kof_emu_win_api_count() && i < KOF_EMU_SHIM_MAX; i++)
-			if (!kof_emu_shim_api(e, kof_emu_win_api_name(i), 1))
+		for (i = 0; i < kgenome_emu_win_api_count() && i < KGENOME_EMU_SHIM_MAX; i++)
+			if (!kgenome_emu_shim_api(e, kgenome_emu_win_api_name(i), 1))
 				all = 0;
 		ck(all, "a table's worth of distinct names is kept");
-		if (kof_emu_win_api_count() > KOF_EMU_SHIM_MAX)
-			ck(kof_emu_shim_api(e, kof_emu_win_api_name(KOF_EMU_SHIM_MAX), 1) == 0,
+		if (kgenome_emu_win_api_count() > KGENOME_EMU_SHIM_MAX)
+			ck(kgenome_emu_shim_api(e, kgenome_emu_win_api_name(KGENOME_EMU_SHIM_MAX), 1) == 0,
 			   "one more than the table holds is refused");
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 	}
 	free(f);
 }
@@ -275,13 +275,13 @@ static unsigned xor_code(unsigned char *c)
 	return i;
 }
 
-static int marker_written(struct kof_emu *e)
+static int marker_written(struct kgenome_emu *e)
 {
 	uint32_t it = 0;
 	uint64_t va, l, k;
 	const uint8_t *b;
 
-	while (kof_emu_next_written(e, &it, &va, &b, &l))
+	while (kgenome_emu_next_written(e, &it, &va, &b, &l))
 		for (k = 0; l >= sizeof MARKER - 1 && k + sizeof MARKER - 1 <= l; k++)
 			if (!memcmp(b + k, MARKER, sizeof MARKER - 1))
 				return 1;
@@ -293,8 +293,8 @@ static void patch(void)
 	unsigned char code[64], data[DATA_RAW], payload[DATA_RAW], *f, *orig;
 	unsigned n, i, mlen = (unsigned)sizeof MARKER;
 	size_t len = 0;
-	struct kof_emu *e;
-	struct kof_emu_decl d;
+	struct kgenome_emu *e;
+	struct kgenome_emu_decl d;
 	static const unsigned char find[3] = { 0x80, 0x36, KEY };
 	static const unsigned char zero[3] = { 0x80, 0x36, 0x00 };
 	static const unsigned char none[3] = { 0xDE, 0xAD, 0xC0 };
@@ -319,7 +319,7 @@ static void patch(void)
 	e = run(f, len, NULL);
 	ck(e && marker_written(e), "control: the stub decodes the payload");
 	if (e)
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 
 	memset(&d, 0, sizeof d);
 	memcpy(d.patch[0].find, find, 3);
@@ -331,7 +331,7 @@ static void patch(void)
 	ck(e && !marker_written(e),
 	   "a patched key byte leaves the payload encoded (the patch was applied)");
 	if (e)
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 	ck(!memcmp(f, orig, len),
 	   "the caller's file is untouched - the patch lives in the mapped copy");
 
@@ -344,19 +344,19 @@ static void patch(void)
 	e = run(f, len, &d);
 	ck(e && marker_written(e), "a pattern that does not occur changes nothing");
 	if (e)
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 
 	/* Aimed at the length guard: an entry whose n is out of range is ignored,
 	 * never read past its arrays. */
 	memset(&d, 0, sizeof d);
 	memcpy(d.patch[0].find, find, 3);
 	memcpy(d.patch[0].rep, zero, 3);
-	d.patch[0].n = KOF_EMU_PATCH_LEN + 1u;
+	d.patch[0].n = KGENOME_EMU_PATCH_LEN + 1u;
 	d.n_patch = 1;
 	e = run(f, len, &d);
 	ck(e && marker_written(e), "an out-of-range length is ignored");
 	if (e)
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 
 	/* Aimed at where it looks: the same three bytes ONLY inside the headers
 	 * are not code, so declaring them patches nothing. */
@@ -373,7 +373,7 @@ static void patch(void)
 		ck(e && marker_written(e),
 		   "bytes found only outside every section are not patched");
 		if (e)
-			kof_emu_free(e);
+			kgenome_emu_free(e);
 	}
 	free(f);
 	free(orig);

@@ -192,7 +192,7 @@ static void one_file(const char *path, struct tally *t)
 		if (view) {
 			/*
 			 * ZEROED, because a view carries fields the PARSE DOES
-			 * NOT WRITE - kof_pe_info.layout is one, and pe_parse
+			 * NOT WRITE - kgenome_pe_info.layout is one, and pe_parse
 			 * deliberately preserves it across its own memset. Out
 			 * of malloc that is uninitialised heap, and if it read
 			 * as MAPPED this test would compute a partition for an

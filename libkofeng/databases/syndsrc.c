@@ -1,6 +1,6 @@
 #include "syndsrc.h"
 #include <kofmod/kofsig.h>
-#include "../detectors/pathogen/diseases/kofdisease.h"
+#include "../analyzers/diseases/kofdisease.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,16 +40,16 @@ int kof_ssrc_parse(const char *text, size_t n, struct kof_ssrc *p,
 		len = e - at < sizeof line - 1u ? e - at : sizeof line - 1u;
 		memcpy(line, code + at, len);
 		line[len] = 0;
-		if ((q = strstr(line, "KOF_SYNDROME_TYPE(")) != NULL) {
+		if ((q = strstr(line, "KOF_DECLARE_SYNDROME_TYPE(")) != NULL) {
 			int t = 0;
 
 			if (!kof_dsrc_arg(q, 0, arg, sizeof arg) ||
 			    !kof_maltype_from_name(arg, &t))
 				say(r, &errs, (int)lineno,
-				    "KOF_SYNDROME_TYPE wants a KOF_MALTYPE_ word");
+				    "KOF_DECLARE_SYNDROME_TYPE wants a KOF_MALTYPE_ word");
 			else
 				p->type_mask |= 1u << t;
-		} else if ((q = strstr(line, "KOF_SYNDROME_HAS(")) != NULL) {
+		} else if ((q = strstr(line, "KOF_DECLARE_SYNDROME_HAS(")) != NULL) {
 			size_t L;
 			uint32_t i;
 
@@ -57,7 +57,7 @@ int kof_ssrc_parse(const char *text, size_t n, struct kof_ssrc *p,
 			    (L = strlen(arg)) < 3u || arg[0] != '"' ||
 			    arg[L - 1u] != '"' || L - 2u > KOF_DIAG_DISEASE_LEN) {
 				say(r, &errs, (int)lineno,
-				    "KOF_SYNDROME_HAS wants a quoted disease of at "
+				    "KOF_DECLARE_SYNDROME_HAS wants a quoted disease of at "
 				    "most 63 characters");
 			} else {
 				arg[L - 1u] = 0;
@@ -86,8 +86,84 @@ int kof_ssrc_parse(const char *text, size_t n, struct kof_ssrc *p,
 	}
 	free(code);
 	if (!p->type_mask)
-		say(r, &errs, 0, "a syndrome names a type: KOF_SYNDROME_TYPE");
+		say(r, &errs, 0, "a syndrome names a type: KOF_DECLARE_SYNDROME_TYPE");
 	if (!p->n_dis)
-		say(r, &errs, 0, "a syndrome lists a behaviour: KOF_SYNDROME_HAS");
+		say(r, &errs, 0, "a syndrome lists a behaviour: KOF_DECLARE_SYNDROME_HAS");
 	return errs;
+}
+
+size_t kof_ssrc_print_type(unsigned maltype, char *out, size_t cap)
+{
+	int n;
+
+	if (maltype >= (unsigned)KOF_MALTYPE_COUNT)
+		return 0;
+	n = snprintf(out, cap, "KOF_DECLARE_SYNDROME_TYPE(%s);", kof_maltype_ident(maltype));
+	return n > 0 ? (size_t)n : 0;
+}
+
+size_t kof_ssrc_print_dis(const char *disease, char *out, size_t cap)
+{
+	int n;
+
+	if (kof_disease_check(disease))
+		return 0;
+	n = snprintf(out, cap, "KOF_DECLARE_SYNDROME_HAS(\"%s\");", disease);
+	return n > 0 ? (size_t)n : 0;
+}
+
+size_t kof_ssrc_source(const struct kof_ssrc *p, const char *why, char *out,
+		       size_t cap)
+{
+	size_t at = 0, l;
+	unsigned t;
+	uint32_t i;
+	char line[160];
+
+	if (!p->type_mask || !p->n_dis)
+		return 0;
+	for (i = 0; i < p->n_dis; i++)
+		if (!kof_ssrc_print_dis(p->dis[i], line, sizeof line))
+			return 0;
+#define PUT(s) do { const char *s_ = (s); size_t l_ = strlen(s_); \
+		if (cap && at < cap) { size_t room_ = cap - at - 1u; \
+			memcpy(out + at, s_, l_ < room_ ? l_ : room_); } \
+		at += l_; } while (0)
+	if (why && *why) {
+		const char *c;
+
+		PUT("/*\n * ");
+		for (c = why; *c; c++) {
+			char ch[3] = { *c, 0, 0 };
+
+			if (*c == '\n') {
+				PUT("\n * ");
+				continue;
+			}
+			/* a comment ends at the first star-slash: never write one */
+			if (*c == '*' && c[1] == '/') {
+				PUT("* ");
+				continue;
+			}
+			PUT(ch);
+		}
+		PUT("\n */\n\n");
+	}
+	for (t = 0; t < (unsigned)KOF_MALTYPE_COUNT; t++)
+		if ((p->type_mask >> t) & 1u) {
+			l = kof_ssrc_print_type(t, line, sizeof line);
+			if (!l)
+				return 0;
+			PUT(line);
+			PUT("\n");
+		}
+	for (i = 0; i < p->n_dis; i++) {
+		kof_ssrc_print_dis(p->dis[i], line, sizeof line);
+		PUT(line);
+		PUT("\n");
+	}
+#undef PUT
+	if (cap)
+		out[at < cap ? at : cap - 1u] = 0;
+	return at;
 }

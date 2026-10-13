@@ -12,7 +12,7 @@
  *       libgenome/genotype/arm64/arm64.c libgenome/genotype/arm64/arm64_tab.c -o arm64_equiv
  *
  * WHAT IS COMPARED. Both decoders are given the same four bytes at the same
- * address and every field of struct cell_insn is compared - op, len, n_op, cond,
+ * address and every field of struct kgenome_cell_insn is compared - op, len, n_op, cond,
  * flags, wmask, at, at_va, target, target_va, and for each of the three operands
  * kind, reg, index, scale, size, flags, seg, disp and imm. The fields, not the
  * bytes: _pad is undefined and is not looked at. The return value is compared
@@ -27,7 +27,7 @@
  *   -e FILE     every four-byte word of every executable section of the
  *               AArch64 ELF files named in FILE (one path per line), decoded at
  *               each -a address plus the word's FILE OFFSET
- *   -t          speed: ns per instruction for gt_arm64_decode alone, the
+ *   -t          speed: ns per instruction for kgenome_arm64_decode alone, the
  *               whole adapter path and the replaced decoder, over the -e words
  *
  * Exit status is 0 only when no difference was found.
@@ -41,13 +41,13 @@
 #include <string.h>
 #include <time.h>
 
-#include "kofmod/cell.h"
+#include "../../libkofeng/kofcore/kofmod/cell.h"
 #include "decode.h"
 #include <arm64/arm64.h>
 
 /* the replaced decoder, symbol renamed */
 uint32_t ref_decode_a64(const uint8_t *p, uint32_t n, uint64_t va,
-			struct cell_insn *out);
+			struct kgenome_cell_insn *out);
 
 #define NTHR 16
 #define MAXVA 16
@@ -69,8 +69,8 @@ struct res {
 };
 
 /* The first field in which two decodes differ, or NULL. */
-static const char *diff(uint32_t ra, const struct cell_insn *a,
-			uint32_t rb, const struct cell_insn *b)
+static const char *diff(uint32_t ra, const struct kgenome_cell_insn *a,
+			uint32_t rb, const struct kgenome_cell_insn *b)
 {
 	unsigned i;
 	static const char *const opn[3] = { "o[0].", "o[1].", "o[2]." };
@@ -88,7 +88,7 @@ static const char *diff(uint32_t ra, const struct cell_insn *a,
 	if (a->target != b->target) return "target";
 	if (a->target_va != b->target_va) return "target_va";
 	for (i = 0; i < 3; i++) {
-		const struct cell_operand *x = &a->o[i], *y = &b->o[i];
+		const struct kgenome_cell_operand *x = &a->o[i], *y = &b->o[i];
 
 		if (x->kind != y->kind) return i == 0 ? "o0.kind" : i == 1 ? "o1.kind" : "o2.kind";
 		if (x->reg != y->reg) return i == 0 ? "o0.reg" : i == 1 ? "o1.reg" : "o2.reg";
@@ -106,7 +106,7 @@ static const char *diff(uint32_t ra, const struct cell_insn *a,
 static inline void check(struct res *r, uint32_t w, uint64_t va)
 {
 	uint8_t b[4] = { (uint8_t)w, (uint8_t)(w >> 8), (uint8_t)(w >> 16), (uint8_t)(w >> 24) };
-	struct cell_insn a, c;
+	struct kgenome_cell_insn a, c;
 	uint32_t ra, rc;
 	const char *f;
 
@@ -114,7 +114,7 @@ static inline void check(struct res *r, uint32_t w, uint64_t va)
 	memset(&a, 0xa5, sizeof a);
 	memset(&c, 0x5a, sizeof c);
 	ra = ref_decode_a64(b, 4, va, &a);
-	rc = cell_decode_arm64(b, 4, va, &c);
+	rc = kgenome_cell_decode_arm64(b, 4, va, &c);
 	r->words++;
 	f = diff(ra, &a, rc, &c);
 	if (f) {
@@ -339,8 +339,8 @@ static void speed(void)
 	int reps = 7, r;
 	uint64_t sink = 0;
 	double t0, best[3] = { 1e9, 1e9, 1e9 };
-	struct cell_insn k;
-	struct gt_arm64_insn g;
+	struct kgenome_cell_insn k;
+	struct kgenome_arm64_insn g;
 
 	if (!n) {
 		printf("speed: no real code loaded\n");
@@ -352,13 +352,13 @@ static void speed(void)
 			uint32_t w;
 
 			memcpy(&w, g_code + i * 4, 4);
-			(void)gt_arm64_decode(&g, w);
+			(void)kgenome_arm64_decode(&g, w);
 			sink += g.id;
 		}
 		if (now() - t0 < best[0]) best[0] = now() - t0;
 		t0 = now();
 		for (i = 0; i < n; i++) {
-			cell_decode_arm64(g_code + i * 4, 4, 0x400000 + g_off[i], &k);
+			kgenome_cell_decode_arm64(g_code + i * 4, 4, 0x400000 + g_off[i], &k);
 			sink += k.wmask + k.op;
 		}
 		if (now() - t0 < best[1]) best[1] = now() - t0;

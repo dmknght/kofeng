@@ -102,7 +102,7 @@ static uint64_t partition_of(const struct kof_obj_ctx *ctx, int *overlap)
 static uint64_t first_code(const struct kof_obj_ctx *ctx, int *found)
 {
 	struct kof_range r[64];
-	uint32_t n = ctx->resolve_scan(ctx, KOF_SCAN_PE_CODE, r, 64u);
+	uint32_t n = ctx->resolve_scan(ctx, KGENOME_SCAN_PE_CODE, r, 64u);
 	uint32_t i;
 	uint64_t lo = 0;
 
@@ -117,7 +117,7 @@ static uint64_t first_code(const struct kof_obj_ctx *ctx, int *found)
 
 static void one_file(const char *path, struct tally *t)
 {
-	struct kof_pe_info info;
+	struct kgenome_pe_info info;
 	struct kof_obj_ctx ctx;
 	struct stat st;
 	unsigned char *file, *mem;
@@ -203,7 +203,7 @@ static void one_file(const char *path, struct tally *t)
 
 	memset(&info, 0, sizeof info);
 	memset(&ctx, 0, sizeof ctx);
-	info.layout = KOF_PE_LAYOUT_MAPPED;
+	info.layout = KGENOME_PE_LAYOUT_MAPPED;
 	if (!kof_pe_parse(kof_buf_make(mem, img), &info, &ctx) ||
 	    !ctx.resolve_scan) {
 		printf("  %s: mapped parse refused\n", path);

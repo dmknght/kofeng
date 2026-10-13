@@ -3,7 +3,7 @@
  *
  * WHAT IS UNDER TEST IS THE CHAIN, not the analysis. diag_nodes.c already
  * proves the walk finds the right nodes and links them; it does that by
- * calling kof_diag_scan directly, so everything BETWEEN the source file and
+ * calling kgenome_diag_scan directly, so everything BETWEEN the source file and
  * a scan result is untested by it:
  *
  *   ksigbuilder   reads the KOF_DIAG_* macros as text and writes a .kdig

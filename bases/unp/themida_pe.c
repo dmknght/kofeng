@@ -108,7 +108,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/heur.h>
 #include <kofmod/pe.h>
-#include <kofunpack/pe_reassemble.h>
+#include <kofmod/pe_reassemble.h>
 
 /*
  * A PACKER, AND THE CHILD IS WHERE THE INTERPRETER SHOULD START.

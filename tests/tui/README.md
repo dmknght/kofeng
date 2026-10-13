@@ -41,7 +41,7 @@ Exit status is 1 when any case is FAIL or ERROR.
 | file | covers |
 |---|---|
 | `tui.py` | the library: `Viewer` (spawn, pump, key, type, click, rclick, dclick, drag, wheel, hwheel, motion, resize, screen helpers, popup/dialog finders, OSC52 capture), `case`/`check`/`eq`, sample and fixture helpers |
-| `dl.py` | helpers for the draft panel (grip, add_string, add_matcher, fold_plague, ...) |
+| `dl.py` | helpers for the draft panel (grip, add_string, add_matcher, fold_mutation, ...) |
 | `mkfixtures.py`, `evtgen.c` | synthetic inputs: zip/tar.gz/gz/php/long-line/64 MiB/empty/1-byte and event logs (`.ktr`, written by the repository's own kofevt log writer) |
 | `t_menu.py` | menu bar, items, enabled/disabled, keyboard navigation, Analysis actions |
 | `t_tree.py` | tree pane |
@@ -51,7 +51,7 @@ Exit status is 1 when any case is FAIL or ERROR.
 | `t_symbols.py` | Symbols dialog |
 | `t_dialogs.py` | properties page, help boxes, find, goto, decoder, context menus, repaint-after-input sweep |
 | `t_draft.py` | draft panel: Type, Family, Comment, Format, Region, Options, Strings |
-| `t_plague.py` | plague block table |
+| `t_mutation.py` | mutation block table |
 | `t_rules.py` | matchers, thresholds, Similarity, Conditions, Diagnose table |
 | `t_sig.py` | Generate / Save / Save As / Discard, rule loading, Next/Previous with and without a draft |
 | `t_switch.py` | Switch-File Next / Previous over a folder (menu and Ctrl+\\ / Ctrl+]) |

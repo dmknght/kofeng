@@ -47,7 +47,7 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/analyzers/parsers/containers/cab_parse.h"
-#include "../../libkofeng/extractors/decomp/lzx.h"
+#include <decompressors/lzx.h>
 #include "slurp.h"
 #include "outsink.h"
 
@@ -124,7 +124,7 @@ static uint64_t pe_checksum_at(const uint8_t *d, uint64_t n)
 /* ---- one cabinet ------------------------------------------------------------- */
 
 static void examine(const char *path, struct kof_cab_info *c,
-		    struct kof_lzx *lz)
+		    struct kuncoat_lzx *lz)
 {
 	struct kof_obj_ctx ctx;
 	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
@@ -159,7 +159,7 @@ static void examine(const char *path, struct kof_cab_info *c,
 		uint64_t skip, take, total = 0, at = 0, got = 0;
 		uint32_t n, k, bits;
 		struct out o;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 
 		if (!KOF_UNP_IS_LZX(e->coding[0]))
 			continue;
@@ -205,9 +205,9 @@ static void examine(const char *path, struct kof_cab_info *c,
 		memset(&o, 0, sizeof o);
 		o.dst = outbuf;
 		o.cap = take;
-		st = kof_lzx_decode(lz, bits, in, at, skip, take, out_sink, &o,
+		st = kuncoat_lzx_decode(lz, bits, in, at, skip, take, out_sink, &o,
 				    &got);
-		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED) {
+		if (st != KUNCOAT_OK && st != KUNCOAT_TRUNCATED) {
 			fail(path, "an LZX folder did not decode");
 			break;
 		}
@@ -302,7 +302,7 @@ static int engine_pass(const char *path, struct kof_engine *eng)
 
 /* ---- walking a corpus ---------------------------------------------------------- */
 
-static void walk(const char *dir, struct kof_cab_info *c, struct kof_lzx *lz,
+static void walk(const char *dir, struct kof_cab_info *c, struct kuncoat_lzx *lz,
 		 struct kof_engine *eng, int depth, int *children)
 {
 	DIR *dp = opendir(dir);
@@ -361,7 +361,7 @@ int main(void)
 	};
 	static const char *db = "build/release/databases";
 	struct kof_cab_info *c = malloc(sizeof *c);
-	struct kof_lzx *lz = malloc(sizeof *lz);
+	struct kuncoat_lzx *lz = malloc(sizeof *lz);
 	struct kof_engine *eng;
 	int children = 0;
 	size_t d;

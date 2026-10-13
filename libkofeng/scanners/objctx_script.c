@@ -29,22 +29,22 @@
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/xref.h>
-#include "../disinfect/pzero.h"
+#include "pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include <kofmod/elf.h>
-#include "../extractors/unpack/emu_unpack.h"
-#include "../extractors/unpack/elf_rebuild.h"
+#include <phenotype/emu_unpack.h>
+#include <genotype/image/elf_rebuild.h>
 
-#include "../extractors/decomp/ovba.h"
-#include "../extractors/decomp/lzma.h"
-#include "../extractors/decomp/aplib.h"
-#include "../extractors/decomp/aspack.h"
-#include "../extractors/decomp/lzmat.h"
-#include "../extractors/decomp/bcj.h"
-#include "../extractors/decomp/rar3.h"
-#include "../extractors/decomp/rar5.h"
-#include "../extractors/decomp/bcj2.h"
+#include <decompressors/ovba.h>
+#include <decompressors/lzma.h>
+#include <decompressors/aplib.h>
+#include <decompressors/aspack.h>
+#include <decompressors/lzmat.h>
+#include <decompressors/bcj.h>
+#include <decompressors/rar3.h>
+#include <decompressors/rar5.h>
+#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
 #include "../analyzers/parsers/scripts/script_norm.h"
@@ -60,8 +60,8 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/pattern/kofmultimatch.h"
+#include "../detectors/linkage/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

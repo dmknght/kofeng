@@ -48,10 +48,10 @@
 
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/databases/dbloader.h"
-#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/databases/pack/dbcore.h"
 #include "../../libkofeng/databases/dbpacker.h"
-#include "../../libkofeng/databases/hexprog.h"
-#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
+#include "../../libkofeng/databases/pack/hexprog.h"
+#include "../../libkofeng/detectors/pattern/kofmatch.h"
 
 static int failures;
 static char root[256];

@@ -3,21 +3,21 @@
  *
  * Fills both tiers in one call: the common scan context and the PE specific view.
  * Keeping it in one function means one place knows how a PE fact maps onto a
- * common one - Machine to kof_arch, AddressOfEntryPoint to entry_off - instead of
+ * common one - Machine to kgenome_arch, AddressOfEntryPoint to entry_off - instead of
  * that mapping being duplicated by every caller.
  *
  * Handles PE32 and PE32+, and never fails: on hostile or truncated input it
  * reports what it recovered plus an anomaly bitmask.
  */
 
+
 #ifndef KOFENG_PE_PARSE_H
 #define KOFENG_PE_PARSE_H
 
-#include <kofmod/pe.h>
-#include <kofmod/kofsig.h>
-/* For CLR_REGIONS, which PE_REGIONS below splices into its own list. */
+#include <genotype/image/pe_image.h>
+#include <kofmod/kofsig.h>   /* struct kof_obj_ctx */
+/* For KGENOME_CLR_REGIONS, which PE_REGIONS below splices into its own list. */
 #include <kofmod/clr.h>
-#include "../../../../kofcore/kofcore.h"
 
 /*
  * Returns non-zero if the object is PE at all - MZ and PE\0\0 both matched.
@@ -31,48 +31,8 @@
  * An MZ with no usable PE header is not PE: it is a DOS executable, and claiming
  * it would hand a module a view with nothing in it.
  */
-int kof_pe_parse(kof_buf file, struct kof_pe_info *info,
+int kof_pe_parse(kof_buf file, struct kgenome_pe_info *info,
 		 struct kof_obj_ctx *ctx);
-
-/*
- * THE IMPORT DIRECTORY, walked on demand - see the note in elf_parse.h for
- * why this is pulled rather than carried in the view, why it reports to a
- * visitor rather than filling an array, and why it answers with names rather
- * than with meanings.
- *
- * `slot` is the address a call goes THROUGH, taken from FirstThunk, because
- * that is the one the loader writes and the one an indirect call names. The
- * NAME comes from OriginalFirstThunk where there is one: a file on disk has
- * both tables, a memory image dumped to disk has only the first, and the
- * original is the one that still holds names after the loader has written
- * addresses over the other.
- *
- * `nameoff` IS WHERE THE NAME IS IN THE FILE, and zero when there is none. The
- * `name` pointer is a copy - the walk reads it into a buffer of its own - so it
- * cannot be turned into a position, and a node that has to say which import it
- * stands for needs one. A position and not the string, as kof_elf_relocs
- * reports it, because the string is already in the buffer the caller handed in.
- *
- * AN IMPORT BY ORDINAL has no name. It is still reported, with `name` NULL
- * and `ordinal` set - the slot is real and a caller that only matches names
- * can ignore it, which is not the same as not being told.
- */
-typedef void (*kof_pe_import_fn)(void *user, uint64_t slot, const char *dll,
-				 const char *name, uint32_t ordinal,
-				 uint64_t nameoff);
-
-uint32_t kof_pe_imports(kof_buf f, const struct kof_pe_info *p,
-			kof_pe_import_fn fn, void *user);
-
-/*
- * Does this object look like PE at all?
- *
- * MZ plus a PE signature where e_lfanew points, because MZ alone is a DOS
- * executable and claiming one would hand a module an empty view. Magic only, and
- * separate from the parse for the reason given in elf_parse.h: identifying must
- * not need the view buffer.
- */
-int kof_pe_sniff(kof_buf file);
 
 /*
  * Names for the region bits and the anomaly bits.
@@ -110,20 +70,22 @@ const char *kof_pe_anomaly_name(unsigned index);
  * format that can host an assembly, and they are here because PE is the format
  * that hosts one today - ECMA-335 puts .NET metadata inside a PE, so this is
  * where it is met. An ELF that learns to carry an assembly appends the same
- * CLR_REGIONS to its own list and nothing else changes.
+ * KGENOME_CLR_REGIONS to its own list and nothing else changes.
  *
  * They are empty for a native image, which is most of them, and a region that
  * resolves to nothing costs a caller nothing.
  */
+/* The entries are the bare suffix: the bit is KGENOME_##x and the name a signature source
+ * writes is "KOF_" #x (see the two macros in the .c). */
 #define PE_REGIONS(X)           \
-	X(KOF_SCAN_PE_HEADERS)    \
-	X(KOF_SCAN_PE_CODE)       \
-	X(KOF_SCAN_PE_DATA)       \
-	X(KOF_SCAN_PE_RESOURCE)   \
-	X(KOF_SCAN_PE_SIGNATURE)  \
-	X(KOF_SCAN_PE_OVERLAY)    \
-	CLR_REGIONS(X)            \
-	X(KOF_SCAN_PE_UNCLAIMED)
+	X(SCAN_PE_HEADERS)    \
+	X(SCAN_PE_CODE)       \
+	X(SCAN_PE_DATA)       \
+	X(SCAN_PE_RESOURCE)   \
+	X(SCAN_PE_SIGNATURE)  \
+	X(SCAN_PE_OVERLAY)    \
+	KGENOME_CLR_REGIONS(X)            \
+	X(SCAN_PE_UNCLAIMED)
 
 extern const uint32_t kof_pe_region_bits[];
 #define KOF_PE_REGION_COUNT 13u  /* asserted against the array in the .c */

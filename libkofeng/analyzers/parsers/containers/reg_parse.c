@@ -100,20 +100,7 @@ static const uint32_t reg_cls_bit[KOF_REG_CLS_COUNT] = {
 	KOF_SCAN_REG_COMMENT
 };
 
-static uint32_t reg_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_reg_info *r =
-		(const struct kof_reg_info *)ctx->file_header;
-
-	if (!r || !r->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof r->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)r->run, r->n_runs, mask,
-				reg_cls_bit, KOF_SCAN_REG_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(reg, struct kof_reg_info, reg_cls_bit, KOF_SCAN_REG_UNCLAIMED)
 
 /*
  * WHERE A VALUE'S DATA ENDS, which is the end of its line unless the data is

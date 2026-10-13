@@ -44,8 +44,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/extractors/decomp/lzx.h"
-#include "../../libkofeng/extractors/decomp/lzhuf.h"
+#include <decompressors/lzx.h>
+#include <decompressors/lzhuf.h>
 
 static int failures;
 
@@ -79,11 +79,11 @@ static int sink_fn(void *user, const uint8_t *p, uint32_t n)
 	return 1;
 }
 
-static int status_ok(enum kof_decomp_status st)
+static int status_ok(enum kuncoat_status st)
 {
-	return st == KOF_DEC_OK || st == KOF_DEC_STOPPED ||
-	       st == KOF_DEC_TRUNCATED || st == KOF_DEC_CORRUPT ||
-	       st == KOF_DEC_UNSUPPORTED;
+	return st == KUNCOAT_OK || st == KUNCOAT_STOPPED ||
+	       st == KUNCOAT_TRUNCATED || st == KUNCOAT_CORRUPT ||
+	       st == KUNCOAT_UNSUPPORTED;
 }
 
 /* A small deterministic generator: the same rounds run on every host and on
@@ -101,18 +101,18 @@ static uint32_t rnd(uint32_t *s)
 #define IN_MAX   4096u
 #define TAKE_MAX 65536u
 
-static void one_lzx(struct kof_lzx *st, const uint8_t *in, uint32_t n,
+static void one_lzx(struct kuncoat_lzx *st, const uint8_t *in, uint32_t n,
 		    uint32_t bits, uint64_t skip, uint64_t take,
 		    uint64_t refuse_at, const char *what)
 {
 	struct sink s;
-	enum kof_decomp_status r;
+	enum kuncoat_status r;
 	uint64_t produced = 12345u;   /* must be overwritten */
 
 	memset(&s, 0, sizeof s);
 	s.cap = take;
 	s.refuse_at = refuse_at;
-	r = kof_lzx_decode(st, bits, in, n, skip, take, sink_fn, &s, &produced);
+	r = kuncoat_lzx_decode(st, bits, in, n, skip, take, sink_fn, &s, &produced);
 	if (!status_ok(r))
 		fail(what, "the status is not one of the five");
 	if (s.over)
@@ -120,7 +120,7 @@ static void one_lzx(struct kof_lzx *st, const uint8_t *in, uint32_t n,
 		     "for");
 	if (produced != s.seen)
 		fail(what, "the count it reports is not what it handed over");
-	if (refuse_at && r != KOF_DEC_STOPPED && s.seen >= refuse_at)
+	if (refuse_at && r != KUNCOAT_STOPPED && s.seen >= refuse_at)
 		fail(what, "the receiver refused and the answer was not "
 		     "STOPPED");
 	/*
@@ -136,18 +136,18 @@ static void one_lzx(struct kof_lzx *st, const uint8_t *in, uint32_t n,
 		     "bytes to hand over");
 }
 
-static void one_lzhuf(struct kof_lzhuf *st, enum kof_lzhuf_variant var,
+static void one_lzhuf(struct kuncoat_lzhuf *st, enum kuncoat_lzhuf_variant var,
 		      const uint8_t *in, uint32_t n, uint64_t out_len,
 		      uint64_t refuse_at, const char *what)
 {
 	struct sink s;
-	enum kof_decomp_status r;
+	enum kuncoat_status r;
 	uint64_t produced = 12345u;
 
 	memset(&s, 0, sizeof s);
 	s.cap = out_len;
 	s.refuse_at = refuse_at;
-	r = kof_lzhuf_decode(st, var, in, n, out_len, sink_fn, &s, &produced);
+	r = kuncoat_lzhuf_decode(st, var, in, n, out_len, sink_fn, &s, &produced);
 	if (!status_ok(r))
 		fail(what, "the status is not one of the five");
 	if (s.over)
@@ -155,7 +155,7 @@ static void one_lzhuf(struct kof_lzhuf *st, enum kof_lzhuf_variant var,
 		     "for");
 	if (produced < s.seen)
 		fail(what, "it reports less than it handed over");
-	if (refuse_at && r != KOF_DEC_STOPPED && s.seen >= refuse_at)
+	if (refuse_at && r != KUNCOAT_STOPPED && s.seen >= refuse_at)
 		fail(what, "the receiver refused and the answer was not "
 		     "STOPPED");
 	if (s.calls > out_len + 64u)
@@ -165,8 +165,8 @@ static void one_lzhuf(struct kof_lzhuf *st, enum kof_lzhuf_variant var,
 
 int main(void)
 {
-	struct kof_lzx *lzx = malloc(sizeof *lzx);
-	struct kof_lzhuf *lzh = malloc(sizeof *lzh);
+	struct kuncoat_lzx *lzx = malloc(sizeof *lzx);
+	struct kuncoat_lzhuf *lzh = malloc(sizeof *lzh);
 	uint8_t *in = malloc(IN_MAX);
 	uint32_t seed = 0x5eed1234u, round;
 	int rounds = 0;
@@ -204,7 +204,7 @@ int main(void)
 			(round & 3u) == 1u ? take / 2u + 1u : 0u, what);
 
 		snprintf(what, sizeof what, "lzhuf round %u", round);
-		one_lzhuf(lzh, (enum kof_lzhuf_variant)(rnd(&seed) % 4u), in, n,
+		one_lzhuf(lzh, (enum kuncoat_lzhuf_variant)(rnd(&seed) % 4u), in, n,
 			  take, (round & 3u) == 2u ? take / 2u + 1u : 0u, what);
 		rounds++;
 	}
@@ -213,8 +213,8 @@ int main(void)
 	 * for eventually and which are the two easiest to get wrong. */
 	one_lzx(lzx, in, 0, 15u, 0, 16u, 0, "lzx empty");
 	one_lzx(lzx, in, 4u, 15u, 0, 0, 0, "lzx nothing wanted");
-	one_lzhuf(lzh, KOF_LZHUF_ARJ, in, 0, 16u, 0, "lzhuf empty");
-	one_lzhuf(lzh, KOF_LZHUF_LH5, in, 4u, 0, 0, "lzhuf nothing wanted");
+	one_lzhuf(lzh, KUNCOAT_LZHUF_ARJ, in, 0, 16u, 0, "lzhuf empty");
+	one_lzhuf(lzh, KUNCOAT_LZHUF_LH5, in, 4u, 0, 0, "lzhuf nothing wanted");
 
 	free(lzx);
 	free(lzh);

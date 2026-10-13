@@ -104,7 +104,7 @@ static uint64_t rd_le(const uint8_t *p, unsigned bytes)
 	return v;
 }
 
-#define TRUNC_OR_BAD(lim) ((lim) < 15 ? GT_TRUNCATED : GT_INVALID)
+#define TRUNC_OR_BAD(lim) ((lim) < 15 ? KGENOME_TRUNCATED : KGENOME_INVALID)
 
 /*
  * The checks on a register NUMBER that no table can hold, because they depend on
@@ -121,41 +121,41 @@ static uint64_t rd_le(const uint8_t *p, unsigned bytes)
  *          on a tile in the r/m field; X is ignored;
  *          a vvvv above 7 is invalid.
  */
-static int reg_number_ok(const struct gt_x86_leaf *L, unsigned modrm, unsigned rex,
+static int reg_number_ok(const struct kgenome_x86_leaf *L, unsigned modrm, unsigned rex,
 			 unsigned vexv, unsigned xr)
 {
-	const struct gt_x86_tpl *t = &gt_x86_tpls[L->ops];
+	const struct kgenome_x86_tpl *t = &kgenome_x86_tpls[L->ops];
 	unsigned k;
 
 	for (k = 0; k < L->nops; k++, t++) {
 		unsigned enc = t->te >> 4, f;
 
-		if ((t->te & 15u) != GT_X86_OP_REG ||
-		    (enc != GT_X86_ENC_R && enc != GT_X86_ENC_M && enc != GT_X86_ENC_V))
+		if ((t->te & 15u) != KGENOME_X86_OP_REG ||
+		    (enc != KGENOME_X86_ENC_R && enc != KGENOME_X86_ENC_M && enc != KGENOME_X86_ENC_V))
 			continue;
-		if (t->rtype != GT_X86_REG_CR && t->rtype != GT_X86_REG_DR &&
-		    t->rtype != GT_X86_REG_BND && t->rtype != GT_X86_REG_MSK &&
-		    t->rtype != GT_X86_REG_TILE)
+		if (t->rtype != KGENOME_X86_REG_CR && t->rtype != KGENOME_X86_REG_DR &&
+		    t->rtype != KGENOME_X86_REG_BND && t->rtype != KGENOME_X86_REG_MSK &&
+		    t->rtype != KGENOME_X86_REG_TILE)
 			continue;
-		f = enc == GT_X86_ENC_R ? (modrm >> 3) & 7u
-		  : enc == GT_X86_ENC_M ? modrm & 7u : vexv & 15u;
+		f = enc == KGENOME_X86_ENC_R ? (modrm >> 3) & 7u
+		  : enc == KGENOME_X86_ENC_M ? modrm & 7u : vexv & 15u;
 		switch (t->rtype) {
-		case GT_X86_REG_CR:
+		case KGENOME_X86_REG_CR:
 			if ((rex & 4) ? f != 0 : (f != 0 && (f < 2 || f > 4)))
 				return 0;
 			break;
-		case GT_X86_REG_DR:
+		case KGENOME_X86_REG_DR:
 			if (rex & 4)
 				return 0;
 			break;
-		case GT_X86_REG_BND:
-			if (f > 3u || (rex & (enc == GT_X86_ENC_R ? 4 : 1)))
+		case KGENOME_X86_REG_BND:
+			if (f > 3u || (rex & (enc == KGENOME_X86_ENC_R ? 4 : 1)))
 				return 0;
 			break;
 		default:
 			/* A mask register has eight numbers, and no extension bit applies. */
-			if (enc == GT_X86_ENC_V ? f > 7u : enc == GT_X86_ENC_R ? ((rex & 4) || xr)
-				   : (t->rtype == GT_X86_REG_TILE && (rex & 1)))
+			if (enc == KGENOME_X86_ENC_V ? f > 7u : enc == KGENOME_X86_ENC_R ? ((rex & 4) || xr)
+				   : (t->rtype == KGENOME_X86_REG_TILE && (rex & 1)))
 				return 0;
 			break;
 		}
@@ -175,7 +175,7 @@ enum { SPACE_LEGACY, SPACE_VEX, SPACE_XOP, SPACE_EVEX };
  * reloaded the zeroes of four variables it never reads and spilled a dozen more.
  */
 static inline __attribute__((always_inline))
-enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
+enum kgenome_status decode_rest(struct kgenome_x86_insn *I, const uint8_t *p,
 			   const size_t lim, size_t i, unsigned flags, unsigned rex,
 			   unsigned seg, unsigned segr, unsigned rep, unsigned pp_last,
 			   unsigned opc, unsigned rmap, unsigned osz, unsigned asel,
@@ -183,20 +183,20 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 			   const unsigned evex, const unsigned vpp, const int mode64)
 {
 	unsigned e, modrm = 0, have_modrm = 0, asz_bytes, sibv = 0;
-	const struct gt_x86_leaf *L;
+	const struct kgenome_x86_leaf *L;
 	const uint16_t *nodes;
 
 	I->mo = (uint8_t)i;
 
 	/* ---- the walk ----------------------------------------------------- */
-	nodes = gt_x86_space_nodes[sp];
-	e = gt_x86_root[mode64][rmap][opc];
+	nodes = kgenome_x86_space_nodes[sp];
+	e = kgenome_x86_root[mode64][rmap][opc];
 	while (e & 0x8000u) {
 		const uint16_t *nd = &nodes[e & 0x7fffu];
 		unsigned kind = nd[0] & 15u, idx;
 
 		switch (kind) {
-		case GK_X86_PP:
+		case KGENOME_GK_X86_PP:
 			if (sp != SPACE_LEGACY) {
 				idx = vpp;
 			} else if ((nd[0] >> 4) == 4u) {
@@ -204,9 +204,9 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 				 * 66, which then stays a size prefix; alone, it is the opcode. */
 				if (pp_last)
 					idx = pp_last;
-				else if (flags & GF_X86_66) {
+				else if (flags & KGENOME_GF_X86_66) {
 					idx = 1;
-					flags |= GF_X86_M66;
+					flags |= KGENOME_GF_X86_M66;
 					osz &= 2u;
 				} else {
 					idx = 0;
@@ -215,58 +215,58 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 				idx = pp_last == 2 ? 1u : pp_last == 3 ? 2u : 0u;
 			}
 			break;
-		case GK_X86_MOD:
-		case GK_X86_REG:
-		case GK_X86_RM:
+		case KGENOME_GK_X86_MOD:
+		case KGENOME_GK_X86_REG:
+		case KGENOME_GK_X86_RM:
 			if (!have_modrm) {
 				if (i >= lim)
 					return TRUNC_OR_BAD(lim);
 				modrm = p[i];
 				have_modrm = 1;
 			}
-			idx = kind == GK_X86_MOD ? ((modrm >> 6) == 3u ? 2u : (modrm >> 6) ? 1u : 0u)
-			    : kind == GK_X86_REG ? (modrm >> 3) & 7u : modrm & 7u;
+			idx = kind == KGENOME_GK_X86_MOD ? ((modrm >> 6) == 3u ? 2u : (modrm >> 6) ? 1u : 0u)
+			    : kind == KGENOME_GK_X86_REG ? (modrm >> 3) & 7u : modrm & 7u;
 			break;
-		case GK_X86_OB0:
-		case GK_X86_OB1:
-		case GK_X86_OB2:
-			idx = (osz >> (kind - GK_X86_OB0)) & 1u;
+		case KGENOME_GK_X86_OB0:
+		case KGENOME_GK_X86_OB1:
+		case KGENOME_GK_X86_OB2:
+			idx = (osz >> (kind - KGENOME_GK_X86_OB0)) & 1u;
 			break;
 		default:
 			/* The address-size axis. Legacy: bit 0 a 67, bit 1 the REX.B that
 			 * reinterprets the one opcode (0x90) that reads it. VEX and EVEX: see
 			 * the encoding spaces in x86_gen.c. */
-			idx = (asel >> (kind - GK_X86_AB0)) & 1u;
+			idx = (asel >> (kind - KGENOME_GK_X86_AB0)) & 1u;
 			break;
 		}
 		e = nd[1 + idx];
 	}
-	L = &gt_x86_leaves[e];
+	L = &kgenome_x86_leaves[e];
 	if (!L->id)
-		return GT_INVALID;
-	if ((flags & GF_X86_LOCK) && !(L->flags & GL_X86_LOCK))
-		return GT_INVALID;
-	if (L->flags & GL_X86_VMASK) {
+		return KGENOME_INVALID;
+	if ((flags & KGENOME_GF_X86_LOCK) && !(L->flags & KGENOME_GL_X86_LOCK))
+		return KGENOME_INVALID;
+	if (L->flags & KGENOME_GL_X86_VMASK) {
 		/* Some combinations of size prefix, REX.W, address size and REX.B (or, for
 		 * VEX, W, L and whether vvvv is in use) are not an instruction at all;
 		 * the leaf says which. */
 		const unsigned v = osz * (sp == SPACE_LEGACY ? 4u : sp == SPACE_EVEX ? 16u : 2u) + asel;
 
-		if (!((gt_x86_vmask[L->vmk][v >> 3] >> (v & 7u)) & 1u))
-			return GT_INVALID;
+		if (!((kgenome_x86_vmask[L->vmk][v >> 3] >> (v & 7u)) & 1u))
+			return KGENOME_INVALID;
 	}
 
-	asz_bytes = mode64 ? ((flags & GF_X86_67) ? 4u : 8u)
-			   : ((flags & GF_X86_67) ? 2u : 4u);
+	asz_bytes = mode64 ? ((flags & KGENOME_GF_X86_67) ? 4u : 8u)
+			   : ((flags & KGENOME_GF_X86_67) ? 2u : 4u);
 	/* MPX takes its addresses at 64 bits in 64-bit mode, whatever a 67 says. */
-	if (mode64 && (L->id == GT_X86_I_BNDLDX || L->id == GT_X86_I_BNDSTX ||
-			 L->id == GT_X86_I_BNDMK || L->id == GT_X86_I_BNDCL ||
-			 L->id == GT_X86_I_BNDCU || L->id == GT_X86_I_BNDCN || L->id == GT_X86_I_BNDMOV))
+	if (mode64 && (L->id == KGENOME_X86_I_BNDLDX || L->id == KGENOME_X86_I_BNDSTX ||
+			 L->id == KGENOME_X86_I_BNDMK || L->id == KGENOME_X86_I_BNDCL ||
+			 L->id == KGENOME_X86_I_BNDCU || L->id == KGENOME_X86_I_BNDCN || L->id == KGENOME_X86_I_BNDMOV))
 		asz_bytes = 8;
 
 	/* A mandatory 66 is not an operand-size prefix. */
 	if (sp == SPACE_LEGACY && (L->mand & 1u)) {
-		flags |= GF_X86_M66;
+		flags |= KGENOME_GF_X86_M66;
 		osz &= 2u;
 	}
 
@@ -275,15 +275,15 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 		unsigned dsz = 0;
 		size_t tot;
 
-		if (L->flags & GL_X86_MODRM) {
+		if (L->flags & KGENOME_GL_X86_MODRM) {
 			if (!have_modrm) {
 				if (i >= lim)
 					return TRUNC_OR_BAD(lim);
 				modrm = p[i];
 			}
 			i++;
-			flags |= GF_X86_MODRM;
-			if ((modrm >> 6) != 3u && !(L->flags & GL_X86_NOMEM)) {
+			flags |= KGENOME_GF_X86_MODRM;
+			if ((modrm >> 6) != 3u && !(L->flags & KGENOME_GL_X86_NOMEM)) {
 				const unsigned mod = modrm >> 6, rm = modrm & 7u;
 
 				if (asz_bytes == 2) {
@@ -299,19 +299,19 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 							return TRUNC_OR_BAD(lim);
 						sib = p[i++];
 						sibv = sib;
-						flags |= GF_X86_SIB;
+						flags |= KGENOME_GF_X86_SIB;
 					}
 					if (mod == 1)
 						dsz = 1;
 					else if (mod == 2 || (mod == 0 && rm == 5) ||
-						 (mod == 0 && (flags & GF_X86_SIB) && (sib & 7u) == 5u))
+						 (mod == 0 && (flags & KGENOME_GF_X86_SIB) && (sib & 7u) == 5u))
 						dsz = 4;
 					if (mode64 && mod == 0 && rm == 5)
-						flags |= GF_X86_RIPREL;
+						flags |= KGENOME_GF_X86_RIPREL;
 				}
 			}
-			if ((L->flags & GL_X86_REGCHK) && !reg_number_ok(L, modrm, rex, vexv, xr))
-				return GT_INVALID;
+			if ((L->flags & KGENOME_GL_X86_REGCHK) && !reg_number_ok(L, modrm, rex, vexv, xr))
+				return KGENOME_INVALID;
 			if (L->dist) {
 				/* Registers that must differ - see probe_dist in x86_gen.c. The
 				 * leaf is a register form or a memory form, so only the checks
@@ -323,25 +323,25 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 							    ((sp == SPACE_EVEX && (rex & 2)) ? 16u : 0u);
 
 					if (((L->dist & 1u) && reg == rm) || ((L->dist & 4u) && rm == vexv))
-						return GT_INVALID;
+						return KGENOME_INVALID;
 				}
 				if ((L->dist & 2u) && reg == vexv)
-					return GT_INVALID;
-				if ((flags & GF_X86_SIB) && (L->dist & 24u)) {
+					return KGENOME_INVALID;
+				if ((flags & KGENOME_GF_X86_SIB) && (L->dist & 24u)) {
 					const unsigned idx = ((sibv >> 3) & 7u) | ((rex & 2) ? 8u : 0u) |
 							     ((sp == SPACE_EVEX && (vexv & 16u)) ? 16u : 0u);
 
 					if (((L->dist & 8u) && reg == idx) || ((L->dist & 16u) && vexv == idx))
-						return GT_INVALID;
+						return KGENOME_INVALID;
 				}
 			}
 		}
 		/* Displacement, immediates, relative offset, far address and moffs:
 		 * summed, not read - the bytes are kept and read when asked for. */
-		tot = i + dsz + gt_x86_fix[L->lenk][osz] +
-		      ((L->flags & GL_X86_MOFFS) ? asz_bytes : 0u);
+		tot = i + dsz + kgenome_x86_fix[L->lenk][osz] +
+		      ((L->flags & KGENOME_GL_X86_MOFFS) ? asz_bytes : 0u);
 		if (tot > 15)
-			return GT_INVALID;
+			return KGENOME_INVALID;
 		if (tot > lim)
 			return TRUNC_OR_BAD(lim);
 		I->len = (uint8_t)tot;
@@ -363,11 +363,11 @@ enum gt_status decode_rest(struct gt_x86_insn *I, const uint8_t *p,
 	I->vexv = (uint8_t)vexv;
 	I->xr = (uint8_t)xr;
 	I->evex = (uint8_t)evex;
-	return GT_OK;
+	return KGENOME_OK;
 }
 
 static inline __attribute__((always_inline))
-enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
+enum kgenome_status decode_general(struct kgenome_x86_insn *I, const uint8_t *p, size_t n,
 			      const int mode64)
 {
 	const uint8_t *pfx = mode64 ? pfx64 : pfx32;
@@ -380,7 +380,7 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 	unsigned rmap, sp = SPACE_LEGACY, vexv = 0, xr = 0, evex = 0, vpp = 0;
 
 	if (!lim)
-		return GT_TRUNCATED;
+		return KGENOME_TRUNCATED;
 
 	/* ---- prefixes ----------------------------------------------------- */
 	for (;;) {
@@ -399,11 +399,11 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 		}
 		rex = 0;                /* a REX must be the last prefix: see opcode  */
 		switch (c) {
-		case P_66: flags |= GF_X86_66; break;
-		case P_67: flags |= GF_X86_67; break;
-		case P_F0: flags |= GF_X86_LOCK; break;
-		case P_F2: flags |= GF_X86_F2; pp_last = 3; rep = b; break;
-		case P_F3: flags |= GF_X86_F3; pp_last = 2; rep = b; break;
+		case P_66: flags |= KGENOME_GF_X86_66; break;
+		case P_67: flags |= KGENOME_GF_X86_67; break;
+		case P_F0: flags |= KGENOME_GF_X86_LOCK; break;
+		case P_F2: flags |= KGENOME_GF_X86_F2; pp_last = 3; rep = b; break;
+		case P_F3: flags |= KGENOME_GF_X86_F3; pp_last = 2; rep = b; break;
 		default:
 			/*
 			 * WHICH SEGMENT PREFIX THE TEXT AND THE BRANCH HINTS SEE. In 32-bit
@@ -418,7 +418,7 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 				segr = b;
 			/* In 64-bit mode only FS and GS name a segment. */
 			if (!mode64 || b == 0x64 || b == 0x65) {
-				flags |= GF_X86_SEG;
+				flags |= KGENOME_GF_X86_SEG;
 				seg = b;
 			}
 			break;
@@ -426,7 +426,7 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 		i++;
 	}
 	if (rex)
-		flags |= GF_X86_REX;
+		flags |= KGENOME_GF_X86_REX;
 
 	/* ---- opcode ------------------------------------------------------- */
 	opc = p[i++];
@@ -442,14 +442,14 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 		unsigned xop = opc == 0x8f;
 
 		if (opc == 0xd5 && mode64)
-			return GT_INVALID;      /* REX2 */
+			return KGENOME_INVALID;      /* REX2 */
 		if (opc != 0xd5 && (xop ? (i < lim && (p[i] & 0x1f) >= 8)
 					: (mode64 || (i < lim && (p[i] >> 6) == 3)))) {
 			unsigned b1, b2, w, r_, x_, b_, l, vv;
 
 			/* No legacy size, repeat or lock prefix, and no REX, may precede. */
-			if ((flags & (GF_X86_66 | GF_X86_F2 | GF_X86_F3 | GF_X86_LOCK)) || rex)
-				return GT_INVALID;
+			if ((flags & (KGENOME_GF_X86_66 | KGENOME_GF_X86_F2 | KGENOME_GF_X86_F3 | KGENOME_GF_X86_LOCK)) || rex)
+				return KGENOME_INVALID;
 			if (opc == 0xc5) {
 				if (i + 2 > lim)
 					return TRUNC_OR_BAD(lim);
@@ -475,10 +475,10 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 				/* P0 bit 3 and P1 bit 2 are fixed in the form this reads; the
 				 * APX encodings that use them are not decoded. */
 				if ((b1 & 0x08) || !(b2 & 0x04))
-					return GT_INVALID;
+					return KGENOME_INVALID;
 				map = b1 & 7u;
 				if (!(map == 1 || map == 2 || map == 3 || map == 5 || map == 6))
-					return GT_INVALID;
+					return KGENOME_INVALID;
 				r_ = !(b1 & 0x80);
 				x_ = !(b1 & 0x40);
 				b_ = !(b1 & 0x20);
@@ -512,13 +512,13 @@ enum gt_status decode_general(struct gt_x86_insn *I, const uint8_t *p, size_t n,
 				vpp = b2 & 3u;
 				if (xop) {
 					if (map > 10)
-						return GT_INVALID;
+						return KGENOME_INVALID;
 					sp = SPACE_XOP;
 				} else {
 					/* Map 5 is the AMX tile instructions; the table
 					 * has them for 64-bit mode only. */
 					if (map < 1 || (map > 3 && map != 5))
-						return GT_INVALID;
+						return KGENOME_INVALID;
 					sp = SPACE_VEX;
 				}
 				i += 2;
@@ -537,9 +537,9 @@ ext_done:
 				 * (which VEX and EVEX cannot, or they would be LES and BOUND)
 				 * is not an instruction. EVEX's V' must be clear. */
 				if (sp == SPACE_XOP && (r_ || x_ || !(vv & 8u)))
-					return GT_INVALID;
+					return KGENOME_INVALID;
 				if (sp == SPACE_EVEX && !(evex & 8u))
-					return GT_INVALID;
+					return KGENOME_INVALID;
 				b_ = 0;
 				xr = 0;
 				vexv &= 7u;
@@ -562,11 +562,11 @@ ext_done:
 					return TRUNC_OR_BAD(lim);
 				opc = p[i++];
 			} else if (opc == 0x0f) {
-				return GT_INVALID;      /* 3DNow!: not yet */
+				return KGENOME_INVALID;      /* 3DNow!: not yet */
 			}
 		}
-		osz = ((rex & 8) ? 2u : 0u) | ((flags & GF_X86_66) ? 1u : 0u);
-		asel = ((flags & GF_X86_67) ? 1u : 0u) | ((rex & 1u) ? 2u : 0u);
+		osz = ((rex & 8) ? 2u : 0u) | ((flags & KGENOME_GF_X86_66) ? 1u : 0u);
+		asel = ((flags & KGENOME_GF_X86_67) ? 1u : 0u) | ((rex & 1u) ? 2u : 0u);
 		/* The legacy encoding has no VEX/EVEX state: the constants fold it away. */
 		return decode_rest(I, p, lim, i, flags, rex, seg, segr, rep, pp_last, opc,
 				   map, osz, asel, SPACE_LEGACY, 0, 0, 0, 0, mode64);
@@ -579,13 +579,13 @@ ext_done:
 
 /* The full prefix scan, once per mode: the path for anything the fast path declines. */
 static __attribute__((noinline))
-enum gt_status decode_slow32(struct gt_x86_insn *I, const uint8_t *p, size_t n)
+enum kgenome_status decode_slow32(struct kgenome_x86_insn *I, const uint8_t *p, size_t n)
 {
 	return decode_general(I, p, n, 0);
 }
 
 static __attribute__((noinline))
-enum gt_status decode_slow64(struct gt_x86_insn *I, const uint8_t *p, size_t n)
+enum kgenome_status decode_slow64(struct kgenome_x86_insn *I, const uint8_t *p, size_t n)
 {
 	return decode_general(I, p, n, 1);
 }
@@ -602,11 +602,11 @@ enum gt_status decode_slow64(struct gt_x86_insn *I, const uint8_t *p, size_t n)
  * extended lead, the 3DNow! escape) go to decode_general, which is the original
  * scan - so the two can only disagree on a byte this one accepts.
  */
-/* What decode_fast answers when the bytes are not its kind. Not a gt_status. */
+/* What decode_fast answers when the bytes are not its kind. Not a kgenome_status. */
 #define DECODE_DECLINED 3
 
 static inline __attribute__((always_inline))
-int decode_fast(struct gt_x86_insn *I, const uint8_t *p, size_t n, const int mode64)
+int decode_fast(struct kgenome_x86_insn *I, const uint8_t *p, size_t n, const int mode64)
 {
 	const uint8_t *pfx = mode64 ? pfx64 : pfx32;
 	const size_t lim = n < 15 ? n : 15;
@@ -614,7 +614,7 @@ int decode_fast(struct gt_x86_insn *I, const uint8_t *p, size_t n, const int mod
 	size_t i = 1;
 
 	if (!lim)
-		return GT_TRUNCATED;
+		return KGENOME_TRUNCATED;
 	opc = p[0];
 	c = pfx[opc];
 	if (c == P_REX) {
@@ -635,18 +635,18 @@ int decode_fast(struct gt_x86_insn *I, const uint8_t *p, size_t n, const int mod
 	} else if (c != P_NONE) {
 		return DECODE_DECLINED;
 	}
-	return decode_rest(I, p, lim, i, rex ? GF_X86_REX : 0u, rex, 0, 0, 0, 0, opc, rmap,
+	return decode_rest(I, p, lim, i, rex ? KGENOME_GF_X86_REX : 0u, rex, 0, 0, 0, 0, opc, rmap,
 			   (rex & 8) ? 2u : 0u, (rex & 1u) ? 2u : 0u, SPACE_LEGACY, 0, 0, 0, 0, mode64);
 }
 
-enum gt_status gt_x86_decode(struct gt_x86_insn *out, const uint8_t *p, size_t n,
+enum kgenome_status kgenome_x86_decode(struct kgenome_x86_insn *out, const uint8_t *p, size_t n,
 			     int mode)
 {
 	int st = mode == 64 ? decode_fast(out, p, n, 1) : decode_fast(out, p, n, 0);
 
 	if (st == DECODE_DECLINED)
 		st = mode == 64 ? decode_slow64(out, p, n) : decode_slow32(out, p, n);
-	if (st == GT_OK) {
+	if (st == KGENOME_OK) {
 		/* The bytes, for the operand builder. A whole 16 when the caller has them,
 		 * as one move; what it has when it does not. */
 		if (n >= 16)
@@ -654,33 +654,33 @@ enum gt_status gt_x86_decode(struct gt_x86_insn *out, const uint8_t *p, size_t n
 		else
 			memcpy(out->code, p, n);
 	}
-	return (enum gt_status)st;
+	return (enum kgenome_status)st;
 }
 
 /* ---- attributes -------------------------------------------------------------- */
 
-unsigned gt_x86_nops(const struct gt_x86_insn *I) { return gt_x86_leaves[I->leaf].nops; }
-unsigned gt_x86_cat(const struct gt_x86_insn *I)  { return gt_x86_leaves[I->leaf].cat; }
-unsigned gt_x86_cond(const struct gt_x86_insn *I) { return gt_x86_leaves[I->leaf].cond; }
-unsigned gt_x86_mand(const struct gt_x86_insn *I) { return gt_x86_leaves[I->leaf].mand; }
-unsigned gt_x86_nexp(const struct gt_x86_insn *I) { return gt_x86_leaves[I->leaf].nexp; }
-unsigned gt_x86_nform(const struct gt_x86_insn *I) { return gt_x86_leaves[I->leaf].nform; }
-unsigned gt_x86_repeated(const struct gt_x86_insn *I) { return (gt_x86_leaves[I->leaf].flags & GL_X86_REPEATED) != 0; }
-unsigned gt_x86_wgpr(const struct gt_x86_insn *I) { return gt_x86_leaves[I->leaf].wgpr; }
+unsigned kgenome_x86_nops(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].nops; }
+unsigned kgenome_x86_cat(const struct kgenome_x86_insn *I)  { return kgenome_x86_leaves[I->leaf].cat; }
+unsigned kgenome_x86_cond(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].cond; }
+unsigned kgenome_x86_mand(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].mand; }
+unsigned kgenome_x86_nexp(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].nexp; }
+unsigned kgenome_x86_nform(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].nform; }
+unsigned kgenome_x86_repeated(const struct kgenome_x86_insn *I) { return (kgenome_x86_leaves[I->leaf].flags & KGENOME_GL_X86_REPEATED) != 0; }
+unsigned kgenome_x86_wgpr(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].wgpr; }
 
-unsigned gt_x86_osz(const struct gt_x86_insn *I)
+unsigned kgenome_x86_osz(const struct kgenome_x86_insn *I)
 {
 	return I->osz;
 }
 
-unsigned gt_x86_asz(const struct gt_x86_insn *I)
+unsigned kgenome_x86_asz(const struct kgenome_x86_insn *I)
 {
 	return I->asz;
 }
 
-unsigned gt_x86_efop(const struct gt_x86_insn *I)
+unsigned kgenome_x86_efop(const struct kgenome_x86_insn *I)
 {
-	return gt_x86_tri[gt_x86_leaves[I->leaf].opszk][gt_x86_osz(I)];
+	return kgenome_x86_tri[kgenome_x86_leaves[I->leaf].opszk][kgenome_x86_osz(I)];
 }
 
 /* ---- operands ---------------------------------------------------------------- */
@@ -688,14 +688,14 @@ unsigned gt_x86_efop(const struct gt_x86_insn *I)
 /* Register numbers get the REX extension bit only for these classes. */
 static int ext_class(uint8_t rtype)
 {
-	return rtype == GT_X86_REG_GPR || rtype == GT_X86_REG_SSE ||
-	       rtype == GT_X86_REG_CR || rtype == GT_X86_REG_DR;
+	return rtype == KGENOME_X86_REG_GPR || rtype == KGENOME_X86_REG_SSE ||
+	       rtype == KGENOME_X86_REG_CR || rtype == KGENOME_X86_REG_DR;
 }
 
 /*
  * WHAT AN INSTRUCTION'S OPERANDS SHARE. Everything below read it again for every
  * operand of every instruction: the leaf, the size selector, the address size
- * (which gt_x86_asz re-derived from the id each time), the ModRM and SIB bytes,
+ * (which kgenome_x86_asz re-derived from the id each time), the ModRM and SIB bytes,
  * and the sizes of the immediate-like fields. MEASURED over a whole scan of a 7 MB
  * static ELF, building the operands one at a time was 150 instructions per
  * operand (862 M of 4.28 G), a third of them this set-up and the walk over the
@@ -704,8 +704,8 @@ static int ext_class(uint8_t rtype)
  */
 struct octx {
 	const uint8_t *code;            /* the instruction's own bytes */
-	const struct gt_x86_leaf *L;
-	const struct gt_x86_tpl *t;
+	const struct kgenome_x86_leaf *L;
+	const struct kgenome_x86_tpl *t;
 	unsigned osz, asz, rex, seg, mode64, mo, modrm, sib;
 	unsigned flags, xr, sp, opc, vexv, evex, dsz;
 };
@@ -718,11 +718,11 @@ struct octx {
  * the registers.
  */
 static inline __attribute__((always_inline))
-void octx_init(struct octx *c, const struct gt_x86_insn *I, const uint8_t *code)
+void octx_init(struct octx *c, const struct kgenome_x86_insn *I, const uint8_t *code)
 {
 	c->code = code;
-	c->L = &gt_x86_leaves[I->leaf];
-	c->t = &gt_x86_tpls[c->L->ops];
+	c->L = &kgenome_x86_leaves[I->leaf];
+	c->t = &kgenome_x86_tpls[c->L->ops];
 	c->osz = I->osz;
 	c->asz = I->asz;
 	c->rex = I->rex;
@@ -736,8 +736,8 @@ void octx_init(struct octx *c, const struct gt_x86_insn *I, const uint8_t *code)
 	c->vexv = I->vexv;
 	c->evex = I->evex;
 	c->dsz = I->dsz;
-	c->modrm = (I->flags & GF_X86_MODRM) ? code[c->mo] : 0u;
-	c->sib = (I->flags & GF_X86_SIB) ? code[c->mo + 1] : 0u;
+	c->modrm = (I->flags & KGENOME_GF_X86_MODRM) ? code[c->mo] : 0u;
+	c->sib = (I->flags & KGENOME_GF_X86_SIB) ? code[c->mo + 1] : 0u;
 }
 
 /*
@@ -748,16 +748,16 @@ void octx_init(struct octx *c, const struct gt_x86_insn *I, const uint8_t *code)
 static inline __attribute__((always_inline))
 uint64_t field_of(const struct octx *c, unsigned j, unsigned *size)
 {
-	const uint8_t *lk = gt_x86_lenk[c->L->lenk];
-	unsigned at = c->mo + ((c->flags & GF_X86_MODRM) ? 1u : 0u) +
-		      ((c->flags & GF_X86_SIB) ? 1u : 0u) + c->dsz, q;
+	const uint8_t *lk = kgenome_x86_lenk[c->L->lenk];
+	unsigned at = c->mo + ((c->flags & KGENOME_GF_X86_MODRM) ? 1u : 0u) +
+		      ((c->flags & KGENOME_GF_X86_SIB) ? 1u : 0u) + c->dsz, q;
 	unsigned sizes[5];
 
-	sizes[0] = (c->L->flags & GL_X86_MOFFS) ? c->asz : 0u;
-	sizes[1] = lk[3 * GT_X86_NOSZ + c->osz];        /* far address */
-	sizes[2] = lk[2 * GT_X86_NOSZ + c->osz];        /* relative offset */
+	sizes[0] = (c->L->flags & KGENOME_GL_X86_MOFFS) ? c->asz : 0u;
+	sizes[1] = lk[3 * KGENOME_X86_NOSZ + c->osz];        /* far address */
+	sizes[2] = lk[2 * KGENOME_X86_NOSZ + c->osz];        /* relative offset */
 	sizes[3] = lk[c->osz];                          /* first immediate */
-	sizes[4] = lk[GT_X86_NOSZ + c->osz];            /* second immediate */
+	sizes[4] = lk[KGENOME_X86_NOSZ + c->osz];            /* second immediate */
 	for (q = 0; q < 5; q++) {
 		unsigned sz = sizes[q];
 
@@ -776,12 +776,12 @@ uint64_t field_of(const struct octx *c, unsigned j, unsigned *size)
 /* Does operand template `t` use up one of the instruction's immediate-like fields?
  * A register named in an immediate byte (is4) reads the field without using it up:
  * when an instruction also has an immediate operand, the two are halves of one byte. */
-static inline unsigned takes_field(const struct gt_x86_tpl *t)
+static inline unsigned takes_field(const struct kgenome_x86_tpl *t)
 {
 	unsigned ty = t->te & 15u;
 
-	return ty == GT_X86_OP_IMM || ty == GT_X86_OP_REL || ty == GT_X86_OP_FAR ||
-	       (ty == GT_X86_OP_MEM && (t->memf & 4u));
+	return ty == KGENOME_X86_OP_IMM || ty == KGENOME_X86_OP_REL || ty == KGENOME_X86_OP_FAR ||
+	       (ty == KGENOME_X86_OP_MEM && (t->memf & 4u));
 }
 
 /*
@@ -798,9 +798,9 @@ static inline unsigned takes_field(const struct gt_x86_tpl *t)
 #define XO(f, val) do { if (!lean) o->f = (val); } while (0)
 
 static inline __attribute__((always_inline))
-void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, const int lean)
+void build_op(struct octx *c, unsigned k, unsigned field, struct kgenome_x86_op *o, const int lean)
 {
-	const struct gt_x86_tpl *tk = &c->t[k];
+	const struct kgenome_x86_tpl *tk = &c->t[k];
 	const unsigned osz = c->osz, asz_bytes = c->asz;
 	const unsigned rex = c->rex, seg = c->seg, mode64 = c->mode64;
 	const unsigned mo = c->mo, modrm = c->modrm, sib = c->sib;
@@ -813,13 +813,13 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 		memset(o, 0, sizeof *o);
 	o->type = (uint8_t)type;
 	o->acc = tk->acc;
-	o->size = (uint16_t)gt_x86_tri[tk->szk][osz];
+	o->size = (uint16_t)kgenome_x86_tri[tk->szk][osz];
 	XO(enc, (uint8_t)enc);
 	XO(flags, tk->flags & 7u);
-	XO(elem, (uint16_t)gt_x86_tri[tk->ek][osz]);
+	XO(elem, (uint16_t)kgenome_x86_tri[tk->ek][osz]);
 	switch (type) {
-	case GT_X86_OP_REG: {
-		unsigned r, rsz = gt_x86_tri[tk->rszk][osz];
+	case KGENOME_X86_OP_REG: {
+		unsigned r, rsz = kgenome_x86_tri[tk->rszk][osz];
 
 		o->rtype = tk->rtype;
 		if (tk->ad) {
@@ -828,40 +828,40 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 		}
 		XO(rsize, (uint16_t)rsz);
 		XO(count, tk->cnt);
-		if (lean && tk->rtype != GT_X86_REG_GPR)
+		if (lean && tk->rtype != KGENOME_X86_REG_GPR)
 			break;                      /* the sweep tracks general registers only */
 		switch (enc) {
-		case GT_X86_ENC_R:
+		case KGENOME_X86_ENC_R:
 			r = (modrm >> 3) & 7u;
-			if (tk->rtype == GT_X86_REG_CR) {
+			if (tk->rtype == KGENOME_X86_REG_CR) {
 				/* decode has already refused an impossible number */
-				if ((rex & 4) || (!mode64 && (c->flags & GF_X86_LOCK)))
+				if ((rex & 4) || (!mode64 && (c->flags & KGENOME_GF_X86_LOCK)))
 					r |= 8u;
 			} else if ((rex & 4) && ext_class(tk->rtype)) {
 				r |= 8u;
 			}
 			/* EVEX.R' is the fifth bit of a vector register. */
-			if (c->xr && tk->rtype == GT_X86_REG_SSE)
+			if (c->xr && tk->rtype == KGENOME_X86_REG_SSE)
 				r |= 16u;
 			break;
-		case GT_X86_ENC_M:
+		case KGENOME_X86_ENC_M:
 			r = modrm & 7u;
 			if ((rex & 1) && ext_class(tk->rtype))
 				r |= 8u;
 			/* EVEX.X is the fifth bit of a vector register in the r/m field. */
-			if (c->sp == SPACE_EVEX && (rex & 2) && tk->rtype == GT_X86_REG_SSE)
+			if (c->sp == SPACE_EVEX && (rex & 2) && tk->rtype == KGENOME_X86_REG_SSE)
 				r |= 16u;
 			break;
-		case GT_X86_ENC_O:
+		case KGENOME_X86_ENC_O:
 			r = c->opc & 7u;
 			if ((rex & 1) && ext_class(tk->rtype))
 				r |= 8u;
 			break;
-		case GT_X86_ENC_V:
-			r = c->vexv & (tk->rtype == GT_X86_REG_SSE ? 31u
-				       : tk->rtype == GT_X86_REG_MSK ? 7u : 15u);
+		case KGENOME_X86_ENC_V:
+			r = c->vexv & (tk->rtype == KGENOME_X86_REG_SSE ? 31u
+				       : tk->rtype == KGENOME_X86_REG_MSK ? 7u : 15u);
 			break;
-		case GT_X86_ENC_L: {
+		case KGENOME_X86_ENC_L: {
 			unsigned sz4;
 
 			/* The register is in the high four bits of an immediate byte. */
@@ -870,7 +870,7 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 				r &= 7u;
 			break;
 		}
-		case GT_X86_ENC_A:
+		case KGENOME_X86_ENC_A:
 			r = c->evex & 7u;           /* the mask register EVEX.aaa names */
 			break;
 		default:
@@ -881,22 +881,22 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 		if (tk->cnt > 1)
 			r &= ~(unsigned)(tk->cnt - 1u);
 		o->reg = r;
-		o->high8 = c->sp == SPACE_LEGACY && tk->rtype == GT_X86_REG_GPR && rsz == 1 &&
+		o->high8 = c->sp == SPACE_LEGACY && tk->rtype == KGENOME_X86_REG_GPR && rsz == 1 &&
 			   r >= 4 && r < 8 &&
-			   (!rex || enc == GT_X86_ENC_NP || enc == GT_X86_ENC_S || enc == GT_X86_ENC_C);
+			   (!rex || enc == KGENOME_X86_ENC_NP || enc == KGENOME_X86_ENC_S || enc == KGENOME_X86_ENC_C);
 		break;
 	}
-	case GT_X86_OP_MEM:
+	case KGENOME_X86_OP_MEM:
 		o->mf = (uint16_t)((unsigned)tk->memf << 8);
-		if (!(tk->memf & 4u) && enc != GT_X86_ENC_M) {
+		if (!(tk->memf & 4u) && enc != KGENOME_X86_ENC_M) {
 			/* Implicit: the stack, a string operand, a table. */
-			if (enc == GT_X86_ENC_R) {
+			if (enc == KGENOME_X86_ENC_R) {
 				/* [reg]: the register in the reg field is the address (ENQCMD). */
-				o->mf |= GT_X86_M_BASE;
+				o->mf |= KGENOME_X86_M_BASE;
 				o->base = (uint8_t)(((modrm >> 3) & 7u) | ((rex & 4) ? 8u : 0u));
 				XO(bsz, (uint8_t)asz_bytes);
 			} else if (tk->base != 0xffu) {
-				o->mf |= GT_X86_M_BASE;
+				o->mf |= KGENOME_X86_M_BASE;
 				o->base = tk->base;
 				/* The stack and frame pointers follow the stack size; string
 				 * and table operands the address's. */
@@ -904,28 +904,28 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 						  ? (mode64 ? 8u : 4u) : asz_bytes));
 			}
 			if (tk->reg != 0xffu && (tk->memf & 0x80u) == 0 && tk->cnt) {
-				o->mf |= GT_X86_M_INDEX;
+				o->mf |= KGENOME_X86_M_INDEX;
 				o->index = (uint8_t)tk->reg;
 				o->scale = tk->cnt;
-				XO(isz, (uint8_t)gt_x86_tri[tk->rawk][osz]);
+				XO(isz, (uint8_t)kgenome_x86_tri[tk->rawk][osz]);
 			}
 			if (tk->seg != 0xffu) {
-				o->mf |= GT_X86_M_SEG;
+				o->mf |= KGENOME_X86_M_SEG;
 				/* A source string operand takes an override. */
 				o->seg = (tk->seg == 3u && seg) ? (uint8_t)(seg_of[seg] - 1u) : tk->seg;
 			}
 		} else if (tk->memf & 4u) {                 /* moffs */
 			unsigned sz;
 
-			o->mf |= GT_X86_M_DISP | GT_X86_M_SEG;
+			o->mf |= KGENOME_X86_M_DISP | KGENOME_X86_M_SEG;
 			o->v = (int64_t)field_of(c, field, &sz);
 			o->seg = seg ? (uint8_t)(seg_of[seg] - 1u) : 3u;
 		} else if ((modrm >> 6) == 3u) {
 			/* A register in the r/m field that names a memory operand (UMONITOR). */
-			o->mf |= GT_X86_M_BASE;
+			o->mf |= KGENOME_X86_M_BASE;
 			o->base = (uint8_t)((modrm & 7u) | ((rex & 1) ? 8u : 0u));
 			XO(bsz, (uint8_t)asz_bytes);
-			o->mf |= GT_X86_M_SEG;
+			o->mf |= KGENOME_X86_M_SEG;
 			o->seg = seg ? (uint8_t)(seg_of[seg] - 1u) : 3u;
 		} else {
 			const unsigned mod = modrm >> 6, rm = modrm & 7u;
@@ -935,12 +935,12 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 				static const uint8_t i16[8] = { 6, 7, 6, 7, 0xff, 0xff, 0xff, 0xff };
 
 				if (!(mod == 0 && rm == 6)) {
-					o->mf |= GT_X86_M_BASE;
+					o->mf |= KGENOME_X86_M_BASE;
 					o->base = b16[rm];
 					XO(bsz, 2);
 				}
 				if (i16[rm] != 0xff) {
-					o->mf |= GT_X86_M_INDEX;
+					o->mf |= KGENOME_X86_M_INDEX;
 					o->index = i16[rm];
 					XO(isz, 2);
 					o->scale = 1;
@@ -958,75 +958,75 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 						 * number is - xmm4 is not "no index". */
 						if (c->vexv & 16u && c->sp == SPACE_EVEX)
 							ib |= 16u;
-						o->mf |= GT_X86_M_INDEX;
+						o->mf |= KGENOME_X86_M_INDEX;
 						o->index = (uint8_t)ib;
-						XO(isz, (uint8_t)gt_x86_tri[tk->rszk][osz]);
+						XO(isz, (uint8_t)kgenome_x86_tri[tk->rszk][osz]);
 						o->scale = (uint8_t)(1u << (sib >> 6));
 					} else if (ib != 4u) {
-						o->mf |= GT_X86_M_INDEX;
+						o->mf |= KGENOME_X86_M_INDEX;
 						o->index = (uint8_t)ib;
 						XO(isz, (uint8_t)asz_bytes);
 						o->scale = (uint8_t)(1u << (sib >> 6));
 					}
 					if (!(mod == 0 && bs == 5)) {
-						o->mf |= GT_X86_M_BASE;
+						o->mf |= KGENOME_X86_M_BASE;
 						o->base = (uint8_t)(bs | bx);
 						XO(bsz, (uint8_t)asz_bytes);
 					}
 				} else if (!(mod == 0 && rm == 5)) {
-					o->mf |= GT_X86_M_BASE;
+					o->mf |= KGENOME_X86_M_BASE;
 					o->base = (uint8_t)(rm | bx);
 					XO(bsz, (uint8_t)asz_bytes);
 				} else if (mode64) {
-					o->mf |= GT_X86_M_RIPREL;
+					o->mf |= KGENOME_X86_M_RIPREL;
 				}
 			}
 			if (c->dsz) {
-				const unsigned dat = mo + 1u + ((c->flags & GF_X86_SIB) ? 1u : 0u);
+				const unsigned dat = mo + 1u + ((c->flags & KGENOME_GF_X86_SIB) ? 1u : 0u);
 
-				o->mf |= GT_X86_M_DISP;
+				o->mf |= KGENOME_X86_M_DISP;
 				o->v = sx(rd_le(c->code + dat, c->dsz), c->dsz);
 				/* An EVEX disp8 counts in units of the operand's width. */
 				if (c->sp == SPACE_EVEX && c->dsz == 1) {
-					const unsigned scale = gt_x86_tri[tk->rawk][osz];
+					const unsigned scale = kgenome_x86_tri[tk->rawk][osz];
 
 					if (scale)
 						o->v *= (int64_t)scale;
 				}
 			}
 			if (c->sp == SPACE_EVEX && (c->evex & 0x10u))
-				o->mf |= GT_X86_M_BCAST;
+				o->mf |= KGENOME_X86_M_BCAST;
 			/* A segment is always named: the override, else the stack segment
 			 * for an sp or bp base, else ds. lea names none. */
 			if (!(tk->memf & 8u)) {
-				o->mf |= GT_X86_M_SEG;
+				o->mf |= KGENOME_X86_M_SEG;
 				o->seg = seg ? (uint8_t)(seg_of[seg] - 1u)
-					     : ((o->mf & GT_X86_M_BASE) &&
+					     : ((o->mf & KGENOME_X86_M_BASE) &&
 						(o->base == 4u || o->base == 5u)) ? 2u : 3u;
 			}
 		}
 		break;
-	case GT_X86_OP_IMM: {
+	case KGENOME_X86_OP_IMM: {
 		unsigned rs;
 		uint64_t v = field_of(c, field, &rs);
 
 		XO(rawsize, (uint8_t)rs);
-		if (enc == GT_X86_ENC_L)
+		if (enc == KGENOME_X86_ENC_L)
 			o->v = (int64_t)(v & 3u);   /* the two low bits beside an is4 register */
-		else if (tk->flags & (GT_X86_OF_SEXT_OP1 | GT_X86_OF_SEXT_DWS))
+		else if (tk->flags & (KGENOME_X86_OF_SEXT_OP1 | KGENOME_X86_OF_SEXT_DWS))
 			o->v = sx(v, rs);
 		else
 			o->v = (int64_t)v;
 		break;
 	}
-	case GT_X86_OP_REL: {
+	case KGENOME_X86_OP_REL: {
 		unsigned rs;
 		uint64_t v = field_of(c, field, &rs);
 
 		o->v = sx(v, rs);
 		break;
 	}
-	case GT_X86_OP_FAR: {
+	case KGENOME_X86_OP_FAR: {
 		unsigned rs;
 		uint64_t v;
 
@@ -1037,7 +1037,7 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 		o->sel = (uint16_t)(v >> (8u * (rs - 2u)));
 		break;
 	}
-	case GT_X86_OP_CONST:
+	case KGENOME_X86_OP_CONST:
 		XO(v, tk->reg);
 		break;
 	default:
@@ -1047,7 +1047,7 @@ void build_op(struct octx *c, unsigned k, unsigned field, struct gt_x86_op *o, c
 
 /* The first n operands, in order: the field each reads is counted as they go by. */
 static inline __attribute__((always_inline))
-void build_n(const struct gt_x86_insn *I, const uint8_t *code, unsigned n, struct gt_x86_op *out,
+void build_n(const struct kgenome_x86_insn *I, const uint8_t *code, unsigned n, struct kgenome_x86_op *out,
 	     const int lean)
 {
 	struct octx c;
@@ -1060,7 +1060,7 @@ void build_n(const struct gt_x86_insn *I, const uint8_t *code, unsigned n, struc
 	}
 }
 
-void gt_x86_operand(const struct gt_x86_insn *I, unsigned k, struct gt_x86_op *o)
+void kgenome_x86_operand(const struct kgenome_x86_insn *I, unsigned k, struct kgenome_x86_op *o)
 {
 	struct octx c;
 	unsigned j, field = 0;
@@ -1071,9 +1071,9 @@ void gt_x86_operand(const struct gt_x86_insn *I, unsigned k, struct gt_x86_op *o
 	build_op(&c, k, field, o, 0);
 }
 
-void gt_x86_operands(const struct gt_x86_insn *I, struct gt_x86_op *out)
+void kgenome_x86_operands(const struct kgenome_x86_insn *I, struct kgenome_x86_op *out)
 {
-	build_n(I, I->code, gt_x86_leaves[I->leaf].nops, out, 0);
+	build_n(I, I->code, kgenome_x86_leaves[I->leaf].nops, out, 0);
 }
 
 /*
@@ -1082,13 +1082,13 @@ void gt_x86_operands(const struct gt_x86_insn *I, struct gt_x86_op *out)
  * Decoding, and then the explicit operands in the form a sweep reads them, with
  * nothing in between written to memory: the decoded struct is a local here and
  * the operand builder is the lean instantiation of the SAME build_op that
- * gt_x86_operand runs, so the two cannot disagree about what an operand is. The
- * adapter used to call gt_x86_decode, then gt_x86_cat, _cond, _nexp and _wgpr,
- * then gt_x86_operand once per operand, each of which read the leaf and the
+ * kgenome_x86_operand runs, so the two cannot disagree about what an operand is. The
+ * adapter used to call kgenome_x86_decode, then kgenome_x86_cat, _cond, _nexp and _wgpr,
+ * then kgenome_x86_operand once per operand, each of which read the leaf and the
  * decoded struct again and built a 56-byte operand it then took six fields from.
  * MEASURED over 190 code blobs (44.4 M instructions, one pinned core): the
  * adapter layer went from 45.4 to 33.4 ns per instruction, of which this call and
- * the adapter's move to it are the larger part; gt_x86_decode alone 17.9 -> 15.9.
+ * the adapter's move to it are the larger part; kgenome_x86_decode alone 17.9 -> 15.9.
  *
  * WHICH OPERANDS ARE KEPT is the sweep's own rule and is written here once: a
  * general register, a memory operand, an immediate and a relative offset; the first
@@ -1096,18 +1096,18 @@ void gt_x86_operands(const struct gt_x86_insn *I, struct gt_x86_op *out)
  * name nothing the sweep tracks and take no slot. Every general register the
  * instruction names and writes goes in `wmask` whether or not it got a slot.
  */
-static const struct gt_x86_sop g_sop_none[3] = {
-	GT_X86_SOP_NONE, GT_X86_SOP_NONE, GT_X86_SOP_NONE
+static const struct kgenome_x86_sop g_sop_none[3] = {
+	KGENOME_X86_SOP_NONE, KGENOME_X86_SOP_NONE, KGENOME_X86_SOP_NONE
 };
 
 static const uint8_t g_sop_acc[4] = {
-	0, GT_X86_SF_READ, GT_X86_SF_WRITE, GT_X86_SF_READ | GT_X86_SF_WRITE
+	0, KGENOME_X86_SF_READ, KGENOME_X86_SF_WRITE, KGENOME_X86_SF_READ | KGENOME_X86_SF_WRITE
 };
 
-enum gt_status gt_x86_sweep(struct gt_x86_sweep *x, const uint8_t *p, size_t n, int mode)
+enum kgenome_status kgenome_x86_sweep(struct kgenome_x86_sweep *x, const uint8_t *p, size_t n, int mode)
 {
-	struct gt_x86_insn I, S;
-	const struct gt_x86_leaf *L;
+	struct kgenome_x86_insn I, S;
+	const struct kgenome_x86_leaf *L;
 	struct octx c;
 	uint64_t wmask;
 	unsigned i, nexp, k = 0, field = 0;
@@ -1118,9 +1118,9 @@ enum gt_status gt_x86_sweep(struct gt_x86_sweep *x, const uint8_t *p, size_t n, 
 		st = mode == 64 ? decode_slow64(&S, p, n) : decode_slow32(&S, p, n);
 		I = S;
 	}
-	if (st != GT_OK)
-		return (enum gt_status)st;
-	L = &gt_x86_leaves[I.leaf];
+	if (st != KGENOME_OK)
+		return (enum kgenome_status)st;
+	L = &kgenome_x86_leaves[I.leaf];
 	x->id = I.id;
 	x->cat = L->cat;
 	x->len = I.len;
@@ -1134,49 +1134,49 @@ enum gt_status gt_x86_sweep(struct gt_x86_sweep *x, const uint8_t *p, size_t n, 
 	 * over 30 blobs (callgrind), so this is the cheaper of the two. */
 	memcpy(x->op, g_sop_none, sizeof x->op);
 	for (i = 0; i < nexp; i++) {
-		struct gt_x86_op o = { 0 };
-		struct gt_x86_sop *v = &x->op[k];
+		struct kgenome_x86_op o = { 0 };
+		struct kgenome_x86_sop *v = &x->op[k];
 
 		build_op(&c, i, field, &o, 1);
 		field += takes_field(&c.t[i]);
-		if (o.type == GT_X86_OP_REG && (o.acc & GT_X86_ACC_W) &&
-		    o.rtype == GT_X86_REG_GPR && o.reg < 64u)
-			wmask |= 1ull << gt_x86_gpr_of(&o);
+		if (o.type == KGENOME_X86_OP_REG && (o.acc & KGENOME_X86_ACC_W) &&
+		    o.rtype == KGENOME_X86_REG_GPR && o.reg < 64u)
+			wmask |= 1ull << kgenome_x86_gpr_of(&o);
 		/* Only the first three become operands. */
 		if (k >= 3u)
 			continue;
 		switch (o.type) {
-		case GT_X86_OP_REG:
-			if (o.rtype != GT_X86_REG_GPR)
+		case KGENOME_X86_OP_REG:
+			if (o.rtype != KGENOME_X86_REG_GPR)
 				continue;
-			v->kind = GT_X86_SK_REG;
-			v->reg = (uint8_t)gt_x86_gpr_of(&o);
-			v->flags = (uint8_t)(g_sop_acc[o.acc & 3u] | (o.high8 ? GT_X86_SF_HIGH8 : 0u));
+			v->kind = KGENOME_X86_SK_REG;
+			v->reg = (uint8_t)kgenome_x86_gpr_of(&o);
+			v->flags = (uint8_t)(g_sop_acc[o.acc & 3u] | (o.high8 ? KGENOME_X86_SF_HIGH8 : 0u));
 			break;
-		case GT_X86_OP_IMM:
-			v->kind = GT_X86_SK_IMM;
+		case KGENOME_X86_OP_IMM:
+			v->kind = KGENOME_X86_SK_IMM;
 			v->imm = (uint64_t)o.v;
 			v->flags = g_sop_acc[o.acc & 3u];
 			break;
-		case GT_X86_OP_REL:
-			v->kind = GT_X86_SK_REL;
+		case KGENOME_X86_OP_REL:
+			v->kind = KGENOME_X86_SK_REL;
 			v->imm = (uint64_t)o.v;
 			v->flags = g_sop_acc[o.acc & 3u];
 			break;
-		case GT_X86_OP_MEM:
-			v->kind = GT_X86_SK_MEM;
-			if (o.mf & GT_X86_M_BASE)
+		case KGENOME_X86_OP_MEM:
+			v->kind = KGENOME_X86_SK_MEM;
+			if (o.mf & KGENOME_X86_M_BASE)
 				v->reg = o.base;
-			if (o.mf & GT_X86_M_INDEX) {
+			if (o.mf & KGENOME_X86_M_INDEX) {
 				v->index = o.index;
 				v->scale = o.scale;
 			}
-			if (o.mf & GT_X86_M_DISP)
+			if (o.mf & KGENOME_X86_M_DISP)
 				v->disp = o.v;
-			if (o.mf & GT_X86_M_SEG)
+			if (o.mf & KGENOME_X86_M_SEG)
 				v->seg = o.seg;
 			v->flags = (uint8_t)(g_sop_acc[o.acc & 3u] |
-					     ((o.mf & GT_X86_M_RIPREL) ? GT_X86_SF_RIPREL : 0u));
+					     ((o.mf & KGENOME_X86_M_RIPREL) ? KGENOME_X86_SF_RIPREL : 0u));
 			break;
 		default:
 			continue;
@@ -1186,5 +1186,5 @@ enum gt_status gt_x86_sweep(struct gt_x86_sweep *x, const uint8_t *p, size_t n, 
 	}
 	x->wmask = wmask;
 	x->n = (uint8_t)k;
-	return GT_OK;
+	return KGENOME_OK;
 }

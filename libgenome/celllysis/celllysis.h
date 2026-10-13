@@ -17,29 +17,30 @@
  * THE DEPENDENCY RUNS ONE WAY. genotype knows nothing of celllysis, celllysis
  * knows nothing of the engine's objects, and the engine reaches all of it
  * through this header. What the engine alone knows - how a file offset becomes
- * an address in a PE or an ELF - arrives as a `struct cell_space`, so this
+ * an address in a PE or an ELF - arrives as a `struct kgenome_cell_space`, so this
  * library never includes a parser and can read a buffer that has no file.
  *
- * THE VOCABULARY IS kofmod/cell.h: struct cell_insn, the opcode classes, the
+ * THE VOCABULARY IS kofmod/cell.h: struct kgenome_cell_insn, the opcode classes, the
  * operand kinds. A signature module reads the same form, so nothing is
  * translated between what the engine sees and what a rule sees.
  *
  * FOUR THINGS ARE HERE, and each is its own header so a user takes only what it
  * asks:
- *   decode.h       one instruction, in the one form (cell_decode)
- *   cell_state.h   what the registers and the stack hold, from instructions
+ *   decode.h       one instruction, in the one form (kgenome_cell_decode)
+ *   kgenome_cell_state.h   what the registers and the stack hold, from instructions
  *   this file      the address space, and the cursor that walks it
  *   xref.h         where an address comes from (separate: it needs no cursor)
  */
-#ifndef KOFENG_CELLLYSIS_H
-#define KOFENG_CELLLYSIS_H
+#ifndef KGENOME_CELLLYSIS_H
+#define KGENOME_CELLLYSIS_H
 
 #include <stdint.h>
 
-/* The vocabulary, and with it KOF_BROKEN and KOF_ARCH_*. */
-#include "kofmod/cell.h"
+/* The vocabulary, and with it KGENOME_BROKEN and KOF_ARCH_*. */
+#include <celllysis/cell.h>
 #include "cell_state.h"
 #include "decode.h"
+#include "../kgenome_status.h"
 
 /*
  * ---- THE ADDRESS SPACE ----------------------------------------------------
@@ -55,12 +56,12 @@
  * conversions for 1.3 million instructions and all but a handful landed in the
  * segment of the one before.
  */
-struct cell_seg {
+struct kgenome_cell_seg {
 	uint64_t lo, hi;        /* the file offsets it covers, [lo, hi) */
 	int64_t  delta;         /* address minus offset across it */
 };
 
-struct cell_space {
+struct kgenome_cell_space {
 	const uint8_t *base;    /* the bytes */
 	uint64_t       size;
 	unsigned       arch;    /* KOF_ARCH_* - which decoder */
@@ -73,8 +74,8 @@ struct cell_space {
 	 * space it has, and a branch computed in it still lands on a file
 	 * offset.
 	 */
-	int      (*seg_at)(void *priv, uint64_t off, struct cell_seg *out);
-	/* The file offset of an address, or KOF_BROKEN - for a target that is
+	int      (*seg_at)(void *priv, uint64_t off, struct kgenome_cell_seg *out);
+	/* The file offset of an address, or KGENOME_BROKEN - for a target that is
 	 * not in the segment the walk is in. */
 	uint64_t (*off_of_va)(void *priv, uint64_t va);
 };
@@ -86,26 +87,26 @@ struct cell_space {
  * struct the caller owns and nothing is allocated - an allocation per walk
  * would be a handle in the module ABI for no gain.
  */
-struct kof_cell_cur {
+struct kgenome_cell_cur {
 	uint64_t at;            /* the cursor, a file offset */
-	struct cell_state st;   /* what the walk knows: see cell_state.h */
+	struct kgenome_cell_state st;   /* what the walk knows: see kgenome_cell_state.h */
 	uint8_t  open;
 	uint8_t  seg_ok;        /* `seg` has been established */
 	/*
-	 * INVALIDATED BY kof_cell_seek AND NOT BY COMPARING THE SPACE. The
+	 * INVALIDATED BY kgenome_cell_seek AND NOT BY COMPARING THE SPACE. The
 	 * caller's space is usually a local, so the NEXT object's is very
 	 * often at the same address as this one's - a pointer compare would
 	 * say "same object" about a different file. Every walk starts with a
 	 * seek, so clearing it there is sufficient and cannot be got wrong.
 	 */
-	struct cell_seg seg;
+	struct kgenome_cell_seg seg;
 };
 
 /*
  * Start a walk at `off`. `keep` carries the register map across the move, which
  * is what following a branch inside one walk needs; 0 starts it empty.
  */
-int kof_cell_seek(struct kof_cell_cur *k, uint64_t off, int keep);
+int kgenome_cell_seek(struct kgenome_cell_cur *k, uint64_t off, int keep);
 
 /*
  * Decode at the cursor, advance it, update the map. Answers 0 at the end of the
@@ -119,20 +120,29 @@ int kof_cell_seek(struct kof_cell_cur *k, uint64_t off, int keep);
  * And on ARM a literal-pool load is rewritten as the MOV of the constant it is,
  * because the word is in the buffer and nothing about it is unknown.
  */
-int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
-		  struct cell_insn *out);
+int kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+		  struct kgenome_cell_insn *out);
 
 /*
  * THE SAME WITHOUT THE MAP: decode at the cursor, translate, resolve a direct
  * target, advance - and nothing is learned from the instruction. For a caller
  * that keeps a state of its own (a function summary, a walk over the call graph)
- * and asks neither kof_cell_reg nor for an indirect branch's target, the map is
+ * and asks neither kgenome_cell_reg nor for an indirect branch's target, the map is
  * work it throws away: MEASURED, tracking was a third of the cost of a step.
  */
-int kof_cell_step(struct kof_cell_cur *k, const struct cell_space *sp,
-		  struct cell_insn *out);
+int kgenome_cell_step(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+		  struct kgenome_cell_insn *out);
+
+/*
+ * AN OBSERVER OF INSTRUCTIONS: what a reader of code hands each instruction to.
+ * `in` is NULL for a byte that did not decode (the reader stepped over it).
+ * Whoever reads the code - a cursor, a trace of an earlier walk - calls it the
+ * same way, so a consumer (xref.h's kgenome_xref_feed) is written once and does not
+ * know where the instructions came from.
+ */
+typedef void (*kgenome_cell_insn_fn)(void *user, const struct kgenome_cell_insn *in);
 
 /* A register's constant, or 0 for "not knowable here" - a real answer. */
-int kof_cell_reg(const struct kof_cell_cur *k, uint8_t r, uint64_t *out);
+int kgenome_cell_reg(const struct kgenome_cell_cur *k, uint8_t r, uint64_t *out);
 
-#endif /* KOFENG_CELLLYSIS_H */
+#endif /* KGENOME_CELLLYSIS_H */

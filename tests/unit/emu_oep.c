@@ -27,7 +27,7 @@
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../libkofeng/extractors/unpack/emu_unpack.h"
+#include <phenotype/emu_unpack.h>
 #include "../../libkofeng/kofeng.h"
 
 #define BASE     0x0000000140000000ull
@@ -154,16 +154,16 @@ static unsigned char *build(size_t *out_len, unsigned long dst, enum how how,
 	return f;
 }
 
-static enum kof_emu_stop run(unsigned long dst, enum how how, unsigned plen,
+static enum kgenome_emu_stop run(unsigned long dst, enum how how, unsigned plen,
 			     uint64_t *insn, char *detail, size_t dn)
 {
 	size_t len = 0;
 	unsigned char *f = build(&len, dst, how, plen);
-	struct kof_pe_info *info = calloc(1, sizeof *info);
+	struct kgenome_pe_info *info = calloc(1, sizeof *info);
 	struct kof_obj_ctx *ctx = calloc(1, sizeof *ctx);
-	struct kof_emu_unp_report rep;
-	struct kof_emu *e;
-	enum kof_emu_stop st = KOF_EMU_STOP_DECODE;
+	struct kgenome_emu_unp_report rep;
+	struct kgenome_emu *e;
+	enum kgenome_emu_stop st = KGENOME_EMU_STOP_DECODE;
 
 	detail[0] = 0;
 	if (!f || !info || !ctx || !kof_pe_parse(kof_buf_make(f, len), info, ctx) ||
@@ -171,8 +171,12 @@ static enum kof_emu_stop run(unsigned long dst, enum how how, unsigned plen,
 		ck(0, "the fixture did not build or parse");
 		goto out;
 	}
-	e = kof_emu_unp_run_pe(f, len, info, BUDGET, 0, 0, 0, KOF_EMU_EXTEND_MAX, NULL, 0, NULL,
-			       &rep);
+	{
+		struct kgenome_budget bud = { .max_insn = BUDGET };
+
+		e = kgenome_emu_unp_run_pe(f, len, info, NULL, &bud, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, NULL,
+				       &rep);
+	}
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image");
 		goto out;
@@ -181,7 +185,7 @@ static enum kof_emu_stop run(unsigned long dst, enum how how, unsigned plen,
 	*insn = rep.insn;
 	if (rep.detail)
 		snprintf(detail, dn, "%s", rep.detail);
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 out:
 	free(info);
 	free(ctx);
@@ -199,29 +203,33 @@ static void resolves(void)
 {
 	size_t len = 0;
 	unsigned char *f = build(&len, ORIG_RVA, JMP_REG, PAY_LEN);
-	struct kof_pe_info *info = calloc(1, sizeof *info);
+	struct kgenome_pe_info *info = calloc(1, sizeof *info);
 	struct kof_obj_ctx *ctx = calloc(1, sizeof *ctx);
-	struct kof_emu_unp_report rep;
-	struct kof_emu *e = NULL;
+	struct kgenome_emu_unp_report rep;
+	struct kgenome_emu *e = NULL;
 
 	if (f && info && ctx && kof_pe_parse(kof_buf_make(f, len), info, ctx) &&
 	    info->valid)
-		e = kof_emu_unp_run_pe(f, len, info, 1000, 0, 0, 0, KOF_EMU_EXTEND_MAX, NULL, 0, NULL,
+	{
+		struct kgenome_budget bud = { .max_insn = 1000 };
+
+		e = kgenome_emu_unp_run_pe(f, len, info, NULL, &bud, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, NULL,
 				       &rep);
+	}
 	if (!e) {
 		ck(0, "no machine to resolve against");
 	} else {
-		uint64_t k = kof_emu_win_addr_of(e, "GetProcAddress");
-		uint64_t a = kof_emu_win_resolve(e, "DeleteFileW");
-		uint64_t b = kof_emu_win_resolve(e, "DeleteFileW");
+		uint64_t k = kgenome_emu_win_addr_of(e, "GetProcAddress");
+		uint64_t a = kgenome_emu_win_resolve(e, "DeleteFileW");
+		uint64_t b = kgenome_emu_win_resolve(e, "DeleteFileW");
 
-		ck(k && kof_emu_win_resolve(e, "GetProcAddress") == k,
+		ck(k && kgenome_emu_win_resolve(e, "GetProcAddress") == k,
 		   "a modelled name keeps its real stub");
 		ck(a > 0 && a < 0x1000, "a plausible name the table lacks gets a null-page thunk");
 		ck(b != a, "and two answers are two addresses");
-		ck(kof_emu_win_resolve(e, "no way!") == 0, "a non-identifier is still refused");
-		ck(kof_emu_win_resolve(e, "ab") == 0, "and so is a name too short to be one");
-		kof_emu_free(e);
+		ck(kgenome_emu_win_resolve(e, "no way!") == 0, "a non-identifier is still refused");
+		ck(kgenome_emu_win_resolve(e, "ab") == 0, "and so is a name too short to be one");
+		kgenome_emu_free(e);
 	}
 	free(info);
 	free(ctx);
@@ -235,11 +243,11 @@ int main(void)
 {
 	uint64_t insn = 0;
 	char d[96];
-	enum kof_emu_stop st;
+	enum kgenome_emu_stop st;
 
 	/* A stub in the last section writes the first and jumps back to it. */
 	st = run(ORIG_RVA, JMP_REG, PAY_LEN, &insn, d, sizeof d);
-	ck(st == KOF_EMU_STOP_HANDOFF, "a jump from the stub into written code is the handover");
+	ck(st == KGENOME_EMU_STOP_HANDOFF, "a jump from the stub into written code is the handover");
 	/* The transfer is only a candidate: the run stops when nothing
 	 * challenges it for the quiet window, which is well under the budget. */
 	ck(insn > 1000000 && insn < BUDGET, "and it stops after the quiet window, not at the budget");
@@ -247,15 +255,15 @@ int main(void)
 
 	/* The same decoder, into its own section. */
 	st = run(STUB_RVA, JMP_REG, PAY_LEN, &insn, d, sizeof d);
-	ck(st != KOF_EMU_STOP_HANDOFF, "a loader moving inside its own section is not a handover");
+	ck(st != KGENOME_EMU_STOP_HANDOFF, "a loader moving inside its own section is not a handover");
 
 	/* Only a few pages: a stage of a loader, not the program. */
 	st = run(ORIG_RVA, JMP_REG, 0x3000, &insn, d, sizeof d);
-	ck(st != KOF_EMU_STOP_HANDOFF, "a transfer into a few pages is a stage, not the program");
+	ck(st != KGENOME_EMU_STOP_HANDOFF, "a transfer into a few pages is a stage, not the program");
 
 	/* A call: the stack is not as the stub found it. */
 	st = run(ORIG_RVA, CALL_REG, PAY_LEN, &insn, d, sizeof d);
-	ck(st != KOF_EMU_STOP_HANDOFF, "a call into written code is not a handover");
+	ck(st != KGENOME_EMU_STOP_HANDOFF, "a call into written code is not a handover");
 
 	resolves();
 

@@ -58,7 +58,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
-#include <kofunpack/emu_harvest.h>
+#include <kofmod/emu_harvest.h>
 
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 

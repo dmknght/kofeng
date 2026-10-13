@@ -17,8 +17,10 @@
 
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/databases/dbloader.h"
+#include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/databases/syndsrc.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
+#include "../../libkofeng/analyzers/diseases/kofdisease.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 
@@ -42,6 +44,47 @@ static int parse(const char *text, struct kof_ssrc *p)
 	return kof_ssrc_parse(text, strlen(text), p, &rep);
 }
 
+static void writing(void)
+{
+	static struct kof_ssrc a, b;
+	static char text[4096];
+	char line[160];
+	size_t n;
+
+	memset(&a, 0, sizeof a);
+	a.type_mask = (1u << KOF_MALTYPE_BOTNET) | (1u << KOF_MALTYPE_EXPLOIT);
+	a.n_dis = 2;
+	snprintf(a.dis[0], sizeof a.dis[0], "%s", "cnc/recv");
+	snprintf(a.dis[1], sizeof a.dis[1], "%s", "flood/raw");
+	n = kof_ssrc_source(&a, "Mirai x86 from Bazaar.\nA comment must never end here */ so.", text, sizeof text);
+	ok("a source is written", n > 0 && n < sizeof text);
+	ok("and read back to the same syndrome",
+	   parse(text, &b) == 0 && b.type_mask == a.type_mask && b.n_dis == 2u &&
+	   !strcmp(b.dis[0], "cnc/recv") && !strcmp(b.dis[1], "flood/raw"));
+	ok("a star-slash in the header does not end the comment",
+	   strstr(text, "never end here * /") != NULL);
+	ok("without a header it is still a source",
+	   kof_ssrc_source(&a, NULL, text, sizeof text) > 0 && parse(text, &b) == 0);
+	n = kof_ssrc_source(&a, "x", text, 8);
+	ok("a short buffer is cut, terminated, and the true length returned",
+	   n > 8u && strlen(text) == 7u);
+	b = a;
+	b.n_dis = 0;
+	ok("a syndrome with no disease is not written", kof_ssrc_source(&b, "x", text, sizeof text) == 0);
+	b = a;
+	snprintf(b.dis[1], sizeof b.dis[1], "%s", "Bad Name");
+	ok("one with a disease that is not well formed is not written",
+	   kof_ssrc_source(&b, "x", text, sizeof text) == 0);
+	ok("the two lines a patch uses are written as a source has them",
+	   kof_ssrc_print_type(KOF_MALTYPE_BOTNET, line, sizeof line) > 0 &&
+	   !strcmp(line, "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);") &&
+	   kof_ssrc_print_dis("cnc/recv", line, sizeof line) > 0 &&
+	   !strcmp(line, "KOF_DECLARE_SYNDROME_HAS(\"cnc/recv\");"));
+	ok("a type that is no maltype and a disease that is no word are not written",
+	   kof_ssrc_print_type(KOF_MALTYPE_COUNT, line, sizeof line) == 0 &&
+	   kof_ssrc_print_dis("A", line, sizeof line) == 0);
+}
+
 static void source(void)
 {
 	static struct kof_ssrc p;
@@ -51,32 +94,32 @@ static void source(void)
 
 	ok("a syndrome of one type and two behaviours reads",
 	   parse("/* a sample */\n"
-		 "KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n"
-		 "KOF_SYNDROME_HAS(\"cnc/recv\");\n"
-		 "KOF_SYNDROME_HAS(\"flood/raw\");\n", &p) == 0 &&
+		 "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n"
+		 "KOF_DECLARE_SYNDROME_HAS(\"cnc/recv\");\n"
+		 "KOF_DECLARE_SYNDROME_HAS(\"flood/raw\");\n", &p) == 0 &&
 	   p.type_mask == (1u << KOF_MALTYPE_BOTNET) && p.n_dis == 2u &&
 	   !strcmp(p.dis[1], "flood/raw"));
 	ok("two types are a sample that was both",
-	   parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_SYNDROME_TYPE(KOF_MALTYPE_EXPLOIT);\n"
-		 "KOF_SYNDROME_HAS(\"a/b\");\n", &p) == 0 &&
+	   parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_EXPLOIT);\n"
+		 "KOF_DECLARE_SYNDROME_HAS(\"a/b\");\n", &p) == 0 &&
 	   p.type_mask == ((1u << KOF_MALTYPE_BOTNET) | (1u << KOF_MALTYPE_EXPLOIT)));
 	ok("a declaration inside a comment is a mention, not a declaration",
-	   parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_SYNDROME_HAS(\"a/b\");\n"
-		 "/* KOF_SYNDROME_HAS(\"c/d\"); */\n", &p) == 0 && p.n_dis == 1u);
-	ok("no type is refused", parse("KOF_SYNDROME_HAS(\"a/b\");\n", &p) > 0);
-	ok("no behaviour is refused", parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n", &p) > 0);
+	   parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"a/b\");\n"
+		 "/* KOF_DECLARE_SYNDROME_HAS(\"c/d\"); */\n", &p) == 0 && p.n_dis == 1u);
+	ok("no type is refused", parse("KOF_DECLARE_SYNDROME_HAS(\"a/b\");\n", &p) > 0);
+	ok("no behaviour is refused", parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n", &p) > 0);
 	ok("a word that is not a type is refused",
-	   parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_NOPE);\nKOF_SYNDROME_HAS(\"a/b\");\n", &p) > 0);
+	   parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_NOPE);\nKOF_DECLARE_SYNDROME_HAS(\"a/b\");\n", &p) > 0);
 	ok("upper case is refused",
-	   parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_SYNDROME_HAS(\"A/b\");\n", &p) > 0);
+	   parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"A/b\");\n", &p) > 0);
 	ok("an empty part is refused",
-	   parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_SYNDROME_HAS(\"a//b\");\n", &p) > 0);
+	   parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"a//b\");\n", &p) > 0);
 	ok("the same behaviour twice is refused",
-	   parse("KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_SYNDROME_HAS(\"a/b\");\n"
-		 "KOF_SYNDROME_HAS(\"a/b\");\n", &p) > 0);
+	   parse("KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"a/b\");\n"
+		 "KOF_DECLARE_SYNDROME_HAS(\"a/b\");\n", &p) > 0);
 	for (i = 0; i < KOF_SSRC_MAX_DIS + 2u; i++)
-		at += (size_t)snprintf(many + at, sizeof many - at, "KOF_SYNDROME_HAS(\"x/b%u\");\n", i);
-	snprintf(many + at, sizeof many - at, "KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n");
+		at += (size_t)snprintf(many + at, sizeof many - at, "KOF_DECLARE_SYNDROME_HAS(\"x/b%u\");\n", i);
+	snprintf(many + at, sizeof many - at, "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n");
 	ok("more behaviours than a sample can have is refused, not truncated",
 	   parse(many, &p) > 0);
 }
@@ -89,7 +132,7 @@ static void put32(uint8_t *p, uint32_t v)
 	p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
-/* One syndrome record: type mask, count, then length-prefixed diseases. */
+/* One syndrome record: type mask, count, then the ids of its diseases. */
 static size_t prec(uint8_t *b, uint32_t types, const char *const *dis, unsigned n)
 {
 	size_t at = 0;
@@ -99,11 +142,8 @@ static size_t prec(uint8_t *b, uint32_t types, const char *const *dis, unsigned 
 	at = 4;
 	b[at++] = (uint8_t)n;
 	for (i = 0; i < n; i++) {
-		size_t l = strlen(dis[i]);
-
-		b[at++] = (uint8_t)l;
-		memcpy(b + at, dis[i], l);
-		at += l;
+		put32(b + at, kof_disease_id(dis[i]));
+		at += 4;
 	}
 	return at;
 }
@@ -204,7 +244,11 @@ static void loader(void)
 	ok("an engine with a syndrome pack loads", e != NULL);
 	ok("and carries its two syndromes", e && kof_synd_count(e->synd) == 2u);
 	if (e) {
-		kof_synd_infer(e->synd, q, 2, &r);
+		{
+			uint32_t ids[2] = { kof_disease_id(q[0]), kof_disease_id(q[1]) };
+
+			kof_synd_infer(e->synd, ids, 2, &r);
+		}
 		ok("what it was loaded with proves what the syndrome shows",
 		   r.guaranteed == T(KOF_MALTYPE_BOTNET));
 		kof_db_free(e);
@@ -256,45 +300,179 @@ static void loader(void)
 
 /* ---- the disease in a diagnose record ----------------------------------- */
 
-static void disease(void)
+static size_t drec(uint8_t *b, uint32_t id, unsigned type, unsigned len_byte)
 {
-	static const char *const names[] = { "DIAG_X" };
-	uint8_t b[128];
-	struct kof_diag d;
-	struct kof_diag_node node[2];
-	char name[KOF_DB_DIAG_NAME], needs[KOF_DB_DIAG_NEEDS];
-	size_t at = 0, nl = strlen(names[0]);
-	const char *an = "cnc/recv-syscall";
-	uint16_t cap = (uint16_t)KOF_NUCLEO_NET_OPEN;
+	static const char *const nm = "DIAG_X";
+	size_t at = 0, nl = strlen(nm);
+	uint16_t cap = (uint16_t)KGENOME_NUCLEO_NET_OPEN;
 
 	b[at++] = 1; b[at++] = 0;
 	b[at++] = KOF_DIAG_ANALYSIS_SYSCALL;
 	b[at++] = (uint8_t)nl;
-	memcpy(b + at, names[0], nl); at += nl;
+	memcpy(b + at, nm, nl); at += nl;
 	b[at++] = (uint8_t)cap; b[at++] = (uint8_t)(cap >> 8);
 	b[at++] = 0; b[at++] = 0;
 	b[at++] = KOF_DIAG_NO_PARENT;
 	b[at++] = 0; b[at++] = 0; b[at++] = 0;
 	b[at++] = 0;                            /* the legacy name count */
 	b[at++] = KDIG_SEC_DISEASE;
-	b[at++] = (uint8_t)strlen(an);
-	memcpy(b + at, an, strlen(an)); at += strlen(an);
+	b[at++] = (uint8_t)len_byte;
+	put32(b + at, id); at += 4;
+	b[at++] = (uint8_t)type;
+	return at;
+}
 
+static void disease(void)
+{
+	uint8_t b[128];
+	struct kof_diag d;
+	struct kof_diag_node node[2];
+	char name[KOF_DB_DIAG_NAME], needs[KOF_DB_DIAG_NEEDS];
+	const uint32_t id = kof_disease_id("cnc/recv-syscall");
+	size_t at;
+
+	at = drec(b, id, KOF_MALTYPE_BOTNET, 5);
 	memset(&d, 0, sizeof d);
 	ok("a record with a disease loads",
 	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 1);
-	ok("and carries it", d.disease && !strcmp(d.disease, an));
+	ok("and carries its id and its type",
+	   d.disease == id && d.disease_type == KOF_MALTYPE_BOTNET);
+	memset(&d, 0, sizeof d);
 	ok("a record without one has none",
-	   kof_diag_load(b, at - 2u - strlen(an), &d, node, 2, name, sizeof name,
-			 needs, sizeof needs) == 1 && d.disease == NULL);
-	/* a length that runs past the record refuses it whole */
-	b[at - 1u - strlen(an)] = 200;
-	ok("a length past the record refuses it",
+	   kof_diag_load(b, at - 7u, &d, node, 2, name, sizeof name,
+			 needs, sizeof needs) == 1 && d.disease == 0);
+	/* a section that is not an id and a type refuses the record whole */
+	at = drec(b, id, KOF_MALTYPE_BOTNET, 4);
+	ok("a length that is not five refuses the record",
 	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 0);
-	b[at - 1u - strlen(an)] = (uint8_t)strlen(an);
-	/* one the store cannot hold refuses it too, instead of cutting it */
-	ok("a disease the store cannot hold refuses the record",
-	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, 8u) == 0);
+	at = drec(b, id, KOF_MALTYPE_COUNT, 5);
+	ok("a type that is no maltype refuses the record",
+	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 0);
+	at = drec(b, 0, KOF_MALTYPE_BOTNET, 5);
+	ok("the id zero, which means no disease, refuses the record",
+	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 0);
+}
+
+/* ---- the database the build makes from tests/sigs ------------------------- */
+
+/*
+ * The whole path, once: sources through the builder, the diagnose pack that
+ * carries ids, the syndrome pack, the table of names, and what the engine makes
+ * of them. Nothing here is written by hand, so what is checked is the build.
+ */
+static void database(void)
+{
+	struct kof_engine *e = kof_db_load(dbdir);
+	const struct kof_disease_ent *d;
+	struct kof_synd_result r;
+	uint32_t id = kof_disease_id("kernel/giveroot"), i;
+	int carried = 0;
+	char nm[64];
+
+	ok("the engine loads the database the build made", e != NULL);
+	if (!e)
+		return;
+	/* botnet_00, dropper_00, rootkit_00 and the four vd_*_00 exemplars that
+	 * tests/unit/verdict_branches.c reads sets of diseases against */
+	ok("it holds the seven syndromes of the fixtures", kof_synd_count(e->synd) == 7u);
+	d = kof_db_disease(e, id);
+	ok("a disease id is turned back into its name and its type",
+	   d && !strcmp(d->name, "kernel/giveroot") && d->type == KOF_MALTYPE_ROOTKIT);
+	{
+		/* The type a DETECTOR declared reaches the table: the module packs are
+		 * made after the diagnoses and syndromes, and a table written before
+		 * them named this disease with no type. */
+		const struct kof_disease_ent *u = kof_db_disease(e, kof_disease_id("flood-network/udp"));
+
+		ok("a disease a signature declared has its type in the table",
+		   u && u->type == KOF_MALTYPE_BOTNET);
+	}
+	ok("an id nobody carries is not named", kof_db_disease(e, kof_disease_id("no/such")) == NULL);
+	for (i = 0; i < e->n_diag; i++)
+		if (e->diag[i].disease == id)
+			carried = e->diag[i].disease_type == KOF_MALTYPE_ROOTKIT;
+	ok("the diagnose carries the id and the type it declared", carried);
+	{
+		uint32_t prev = 0, k, n = kof_db_disease_count(e);
+		int ascending = n > 0;
+
+		for (k = 0; k < n; k++) {
+			const struct kof_disease_ent *x = kof_db_disease_at(e, k);
+
+			if (!x || x->id <= prev)
+				ascending = 0;
+			else
+				prev = x->id;
+		}
+		ok("the names can be listed, ascending by id", ascending);
+		ok("and a list ends where it ends", kof_db_disease_at(e, n) == NULL);
+	}
+	{
+		uint32_t tm, nd, k, found = 0;
+		const uint32_t *dd;
+
+		for (k = 0; kof_synd_get(e->synd, k, &tm, &nd, &dd); k++)
+			if (tm == (1u << KOF_MALTYPE_ROOTKIT) && nd == 1u && dd[0] == id)
+				found = 1;
+		ok("the verified samples can be read back as ids", found && k == 7u);
+	}
+	kof_synd_infer(e->synd, &id, 1, &r);
+	kof_synd_name(&r, nm, sizeof nm);
+	ok("and the inference reads that id as a rootkit", !strcmp(nm, "Rootkit:Agent"));
+	kof_db_free(e);
+}
+
+/* ---- a detector that is not a diagnose finds a disease --------------------- */
+
+static int g_has;
+static char g_name[96];
+static uint32_t g_guar;
+
+static int on_obj(const char *name, const void *bytes, uint64_t len,
+		  const struct kof_result *res, void *user)
+{
+	(void)name; (void)bytes; (void)len; (void)user;
+	g_has = res->has_syndrome;
+	g_guar = res->syndrome.guaranteed;
+	kof_synd_name(&res->syndrome, g_name, sizeof g_name);
+	return 0;
+}
+
+static void detector(void)
+{
+	kof_engine *eng = keng_open(dbdir);
+	kof_scanner *sc;
+	struct kof_scan_option opt;
+	uint8_t hit[256], miss[256];
+
+	ok("the engine opens the database", eng != NULL);
+	if (!eng)
+		return;
+	sc = kscan_new(eng);
+	memset(hit, 'x', sizeof hit);
+	memset(miss, 'x', sizeof miss);
+	memcpy(hit + 40, "DISEASE_FIXTURE_MARKER", 22);
+	memset(&opt, 0, sizeof opt);
+	opt.report_diag = 1;
+	opt.all_matches = 1;
+
+	g_has = 0;
+	kscan_bytes(sc, hit, sizeof hit, "hit", &opt, on_obj, NULL);
+	ok("an object a detector reports on carries that detector's disease",
+	   g_has == 1 && (g_guar & (1u << KOF_MALTYPE_BOTNET)));
+	ok("and the syndrome reads it as a botnet", !strcmp(g_name, "Botnet:Agent"));
+
+	g_has = 0;
+	kscan_bytes(sc, miss, sizeof miss, "miss", &opt, on_obj, NULL);
+	ok("an object nothing reports on has no syndrome and no disease", g_has == 0);
+
+	/* the next object does not inherit the last one's disease */
+	g_has = 0;
+	kscan_bytes(sc, hit, sizeof hit, "hit2", &opt, on_obj, NULL);
+	kscan_bytes(sc, miss, sizeof miss, "miss2", &opt, on_obj, NULL);
+	ok("a disease belongs to the object it was found on", g_has == 0);
+	kscan_free(sc);
+	keng_close(eng);
 }
 
 int main(int argc, char **argv)
@@ -308,8 +486,11 @@ int main(int argc, char **argv)
 	}
 	printf("syndrome_pack:\n");
 	source();
+	writing();
 	loader();
 	disease();
+	database();
+	detector();
 	rm_all(root);
 	if (failures) {
 		printf("syndrome_pack: %d failure(s)\n", failures);

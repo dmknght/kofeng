@@ -7,10 +7,10 @@
  * header for the engine to parse back, it DECLARES its layout - see `section`
  * in kofsig.h - and the two halves left are the ones tested here.
  *
- *   kof_pe_layout_of   reads a layout out of an image a stub assembled. This
+ *   kgenome_pe_layout_of   reads a layout out of an image a stub assembled. This
  *                      is what kunp_rcstruct_layout_of_image answers with, so
  *                      every emulator-produced child depends on it.
- *   kof_pe_write_hdr   writes a header from a declared layout, which is how
+ *   kgenome_pe_write_hdr   writes a header from a declared layout, which is how
  *                      every declared child gets one.
  *
  * The assertion is a ROUND TRIP: declare a layout, write a header, read it
@@ -34,7 +34,7 @@
 
 #include <kofmod/pe.h>
 
-#include "../../libkofeng/extractors/unpack/pe_rebuild.h"
+#include <genotype/image/pe_rebuild.h>
 
 static int failures;
 
@@ -148,14 +148,14 @@ static uint8_t *build_image(uint64_t *len_out, uint32_t hdr_at_out[1])
 
 #define DECL_MAX 16u
 
-/* What the image above says, as kof_pe_layout_of should report it. */
+/* What the image above says, as kgenome_pe_layout_of should report it. */
 static void check_layout_of(void)
 {
 	uint64_t img_len = 0, entry = 0, base = 0;
 	uint32_t hdr_at = 0, i, n;
 	uint8_t *img = build_image(&img_len, &hdr_at);
-	struct kof_sec_decl decl[DECL_MAX];
-	struct kof_dir_decl dir[16];
+	struct kgenome_sec_decl decl[DECL_MAX];
+	struct kgenome_dir_decl dir[16];
 
 	if (!img) {
 		fail("layout_of", "out of memory");
@@ -163,7 +163,7 @@ static void check_layout_of(void)
 	}
 	memset(decl, 0, sizeof decl);
 	memset(dir, 0, sizeof dir);
-	n = kof_pe_layout_of(kof_buf_make(img, img_len), decl, DECL_MAX,
+	n = kgenome_pe_layout_of(kof_buf_make(img, img_len), decl, DECL_MAX,
 			     &entry, &base, dir);
 	if (n != N_SEC) {
 		fail("layout_of", "the section count is not what the header says");
@@ -191,9 +191,9 @@ static void check_roundtrip(void)
 	uint64_t img_len = 0, entry = 0, base = 0, wrote;
 	uint32_t hdr_at = 0, i, n;
 	uint8_t *img = build_image(&img_len, &hdr_at);
-	struct kof_sec_decl decl[DECL_MAX], back[DECL_MAX];
-	struct kof_dir_decl dir[16], dir2[16];
-	struct kof_pe_info *pe;
+	struct kgenome_sec_decl decl[DECL_MAX], back[DECL_MAX];
+	struct kgenome_dir_decl dir[16], dir2[16];
+	struct kgenome_pe_info *pe;
 	uint8_t *out;
 
 	if (!img) {
@@ -204,7 +204,7 @@ static void check_roundtrip(void)
 	memset(back, 0, sizeof back);
 	memset(dir, 0, sizeof dir);
 	memset(dir2, 0, sizeof dir2);
-	n = kof_pe_layout_of(kof_buf_make(img, img_len), decl, DECL_MAX,
+	n = kgenome_pe_layout_of(kof_buf_make(img, img_len), decl, DECL_MAX,
 			     &entry, &base, dir);
 	pe = calloc(1, sizeof *pe);
 	out = calloc(1, (size_t)FIRST_RVA);
@@ -220,7 +220,7 @@ static void check_roundtrip(void)
 	pe->pe32_plus = 0;
 	pe->image_base = base;
 
-	wrote = kof_pe_write_hdr(out, FIRST_RVA, pe, decl, n,
+	wrote = kgenome_pe_write_hdr(out, FIRST_RVA, pe, decl, n,
 				 secs[0].rva, secs[N_SEC - 1].rva +
 					      secs[N_SEC - 1].raw, dir);
 	if (!wrote) {
@@ -248,7 +248,7 @@ static void check_roundtrip(void)
 			return;
 		}
 		memcpy(whole, out, (size_t)wrote);
-		if (kof_pe_layout_of(kof_buf_make(whole, img_len), back,
+		if (kgenome_pe_layout_of(kof_buf_make(whole, img_len), back,
 				     DECL_MAX, &entry, &base, dir2) != n) {
 			fail("roundtrip", "the written header lost a section");
 		} else {
@@ -300,8 +300,8 @@ static void check_hostile(void)
 		uint64_t img_len = 0, entry = 0, base = 0;
 		uint32_t hdr_at = 0, got;
 		uint8_t *img = build_image(&img_len, &hdr_at);
-		struct kof_sec_decl decl[DECL_MAX];
-		struct kof_dir_decl dir[16];
+		struct kgenome_sec_decl decl[DECL_MAX];
+		struct kgenome_dir_decl dir[16];
 
 		if (!img)
 			return;
@@ -315,7 +315,7 @@ static void check_hostile(void)
 		/* Reading is allowed to succeed - another header may still be
 		 * found - but it must never report more than it was given room
 		 * for, and every address it reports must be inside the image. */
-		got = kof_pe_layout_of(kof_buf_make(img, img_len), decl,
+		got = kgenome_pe_layout_of(kof_buf_make(img, img_len), decl,
 				       DECL_MAX, &entry, &base, dir);
 		if (got > DECL_MAX)
 			fail(bad[c].what, "reported more sections than the cap");
@@ -327,8 +327,8 @@ static void check_hostile(void)
 		uint64_t img_len = 0, entry = 0, base = 0;
 		uint32_t hdr_at = 0, t, got;
 		uint8_t *img = build_image(&img_len, &hdr_at);
-		struct kof_sec_decl decl[DECL_MAX];
-		struct kof_dir_decl dir[16];
+		struct kgenome_sec_decl decl[DECL_MAX];
+		struct kgenome_dir_decl dir[16];
 
 		if (!img)
 			return;
@@ -336,7 +336,7 @@ static void check_hostile(void)
 		memset(dir, 0, sizeof dir);
 		t = hdr_at + SIG_LEN + COFF_LEN + OPT_LEN;
 		put32(img, t + 12, 0x7fff0000u);        /* an RVA far past the image */
-		got = kof_pe_layout_of(kof_buf_make(img, img_len), decl,
+		got = kgenome_pe_layout_of(kof_buf_make(img, img_len), decl,
 				       DECL_MAX, &entry, &base, dir);
 		if (got > DECL_MAX)
 			fail("rva past the image", "reported more sections than the cap");
@@ -353,9 +353,9 @@ static void check_hostile(void)
 		uint64_t img_len = 0, entry = 0, base = 0;
 		uint32_t hdr_at = 0, got;
 		uint8_t *img = build_image(&img_len, &hdr_at);
-		struct kof_sec_decl decl[DECL_MAX];
-		struct kof_dir_decl dir[16];
-		struct kof_pe_info *pe = calloc(1, sizeof *pe);
+		struct kgenome_sec_decl decl[DECL_MAX];
+		struct kgenome_dir_decl dir[16];
+		struct kgenome_pe_info *pe = calloc(1, sizeof *pe);
 		uint8_t small[64];
 
 		if (!img || !pe) {
@@ -366,11 +366,11 @@ static void check_hostile(void)
 		memset(decl, 0, sizeof decl);
 		memset(dir, 0, sizeof dir);
 		memset(small, 0, sizeof small);
-		got = kof_pe_layout_of(kof_buf_make(img, img_len), decl,
+		got = kgenome_pe_layout_of(kof_buf_make(img, img_len), decl,
 				       DECL_MAX, &entry, &base, dir);
 		pe->valid = 1;
 		pe->machine = 0x014c;
-		if (got && kof_pe_write_hdr(small, sizeof small, pe, decl, got,
+		if (got && kgenome_pe_write_hdr(small, sizeof small, pe, decl, got,
 					    secs[0].rva, img_len, dir))
 			fail("cap too small",
 			     "wrote a header into less room than it needs");

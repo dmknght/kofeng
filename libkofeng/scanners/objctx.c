@@ -33,29 +33,31 @@
 
 #include <kofmod/kofsym.h>
 #include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
+#include "../kofcore/kofentropy.h"   /* kentropy_eighths, kentropy_hist */
 #include "../kofcore/kofplatform.h"
 #include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
 #include "../analyzers/parsers/binaries/elf/elf_sym.h"
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/xref.h>
-#include "../disinfect/pzero.h"
+#include "pzero.h"
+#include <phenotype/diag_int.h>   /* kgenome_diag_code_range, kgenome_diag_code_run */
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include "objctx_int.h"
 #include <kofmod/elf.h>
-#include "../extractors/unpack/emu_unpack.h"
-#include "../extractors/unpack/elf_rebuild.h"
+#include <phenotype/emu_unpack.h>
+#include <genotype/image/elf_rebuild.h>
 
-#include "../extractors/decomp/ovba.h"
-#include "../extractors/decomp/lzma.h"
-#include "../extractors/decomp/aplib.h"
-#include "../extractors/decomp/aspack.h"
-#include "../extractors/decomp/lzmat.h"
-#include "../extractors/decomp/bcj.h"
-#include "../extractors/decomp/rar3.h"
-#include "../extractors/decomp/rar5.h"
-#include "../extractors/decomp/bcj2.h"
+#include <decompressors/ovba.h>
+#include <decompressors/lzma.h>
+#include <decompressors/aplib.h>
+#include <decompressors/aspack.h>
+#include <decompressors/lzmat.h>
+#include <decompressors/bcj.h>
+#include <decompressors/rar3.h>
+#include <decompressors/rar5.h>
+#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
 #include "../analyzers/parsers/scripts/script_norm.h"
@@ -71,13 +73,14 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/pattern/kofmultimatch.h"
+#include "../detectors/linkage/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <celllysis/space.h>
+#include "../analyzers/genome_obj.h"
 
 static uint8_t c_rd8(const struct kof_obj_ctx *ctx, uint64_t off)
 {
@@ -204,8 +207,8 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
  * file entries, then libc and the toolchain, and the author's own symbols
  * LAST. A rule scoped to a symbol half is nearly always asking about one of
  * the author's, so the answer is at the end of the table and a forward walk
- * pays for the whole runtime prefix to reach it. bases/heur/scloader_00.c
- * already walks its records this way for exactly this reason.
+ * pays for the whole runtime prefix to reach it. a rule written
+ * against the author's symbols already walks its records this way.
  *
  * IT CANNOT CHANGE AN ANSWER, and that is what makes it free rather than a
  * trade. kof_match_lookup returns whether the pattern is PRESENT - match_ranges
@@ -470,13 +473,13 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
 
 	if (!e)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 	{
 		uint64_t at = kof_match_where(&sc->m, off, len, bytes, e->len,
 					      e->kind, e->flags);
 
 		/* Answering WHERE is answering WHETHER - see str_found. */
-		str_found(sc, at != KOF_BROKEN);
+		str_found(sc, at != KGENOME_BROKEN);
 		return at;
 	}
 }
@@ -539,13 +542,13 @@ int oc_can_produce(const struct kof_scanner *sc)
 
 /* A decoder's status, in the vocabulary the caller sees. Stopping is the
  * receiver's limit; everything else is the stream failing. */
-uint32_t oc_broken_of_status(enum kof_decomp_status st)
+uint32_t oc_broken_of_status(enum kuncoat_status st)
 {
-	if (st == KOF_DEC_STOPPED)
+	if (st == KUNCOAT_STOPPED)
 		return KOF_BROKEN_LIMIT;
 	/* A coding this build lacks is a gap in the engine, not damage in the file,
 	 * and the two are reported apart because they lead different places. */
-	if (st == KOF_DEC_UNSUPPORTED)
+	if (st == KUNCOAT_UNSUPPORTED)
 		return KOF_BROKEN_UNSUPPORTED;
 	return KOF_BROKEN_DAMAGED;
 }
@@ -629,6 +632,80 @@ static int kof_str_ne(const char *a, const char *b)
 }
 
 /*
+ * ONE RUN OF CODE FOR THE XREF SWEEP: where its bytes are in the file, how many
+ * of them there are, and the address the first one is mapped at.
+ */
+struct xref_run {
+	uint64_t at, have, va;
+};
+
+/*
+ * THE CODE THE XREF SWEEP READS, as runs; returns how many.
+ *
+ * THE LINKER'S VIEW (the section table) IS KEPT HERE, AND ONLY HERE, because the
+ * sweep's answers depend on how the code is cut into runs and not only on which
+ * bytes are in them: a run is where the register map starts empty, where a
+ * region starts, and a section is what the budget in c_data_xref is ordered by.
+ * MEASURED over 1100 x86 ELF files with the whole PT_LOAD+PF_X segment as the
+ * one run, 311 of the 317 files the section sweep read completely came back with
+ * different answers (USER and the region flags move with the region cut). The
+ * instructions inside a run are not this function's business: they come from
+ * kgenome_diag_code_run, the one reader every walk of the code shares, so the cut is
+ * the only thing this sweep chooses for itself.
+ *
+ * THE LOADER'S VIEW WHEN THERE ARE NO EXECUTABLE SECTIONS - an object with no
+ * section table, or one whose table marks nothing executable: a
+ * stripped-to-the-bone payload, a packer's output, a forged header that hides
+ * the code from a reader of sections. That was answered "nothing refers to it"
+ * with the code never read, while every other walk of the engine read it from
+ * the segments. The runs are kgenome_diag_code_range's - the one definition of the
+ * code ranges of an ELF: PT_LOAD with PF_X, started after the ELF and program
+ * headers when the segment holds them.
+ *
+ * NOT kgenome_diag_walk_range, which also moves the start to the entry point when
+ * the sections give none. MEASURED over the 96 sectionless x86 ELF files here,
+ * 44 give different answers with it, and the reason is the budget, not the
+ * code: this sweep counts its eight kilobytes from the start of the run, so a
+ * start at the entry reads the bytes after it and reports "complete" (cut = 0)
+ * for code before it that was never read. From the headers it reads the front
+ * and says PARTIAL when it stopped short, which is the honest answer.
+ */
+static uint32_t xref_runs(const struct kgenome_elf_info *e, uint64_t size,
+			  struct xref_run *r)
+{
+	uint32_t i, n = 0;
+
+	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
+		const struct kgenome_elf_sec *sec = &e->sec[i];
+		uint64_t have, at;
+
+		if (!kgenome_elf_sec_is_code(sec))
+			continue;               /* PROGBITS, executable */
+		have = kgenome_elf_sec_extent(sec, size, &at);
+		if (!have)
+			continue;
+		r[n].at = at;
+		r[n].have = have;
+		r[n].va = sec->mem_addr;
+		n++;
+	}
+	if (n)
+		return n;
+	for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS &&
+		    n < KGENOME_ELF_MAX_SECTIONS; i++) {
+		uint64_t at = 0, have = kgenome_diag_code_range(e, i, size, &at);
+
+		if (!have)
+			continue;
+		r[n].at = at;
+		r[n].have = have;
+		r[n].va = e->seg[i].mem_addr + (at - e->seg[i].file_off);
+		n++;
+	}
+	return n;
+}
+
+/*
  * WHAT THE CODE DOES WITH ONE DATA ADDRESS.
  *
  * The sweep is over the EXECUTABLE sections only, and it is one sweep for the
@@ -639,7 +716,7 @@ static int kof_str_ne(const char *a, const char *b)
  *
  * ELF only for now, and x86 only, because that is what can be swept: the
  * decoder is an x86 decoder. Any other object answers zero, which a rule reads
- * as "nothing known" rather than "not used" - see KOF_XREF_PARTIAL.
+ * as "nothing known" rather than "not used" - see KGENOME_XREF_PARTIAL.
  */
 static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			    uint64_t size)
@@ -648,7 +725,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 	uint32_t f;
 
 	if (!sc->latch[KOF_OL_USE]) {
-		const struct kof_elf_info *e = ctx->file_header;
+		const struct kgenome_elf_info *e = ctx->file_header;
 		uint32_t i;
 
 		sc->latch[KOF_OL_USE] = 1;
@@ -664,8 +741,8 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 		 * shellcode finder did exactly that for one build.
 		 */
 		if (ctx->format != KOF_FMT_ELF || !e ||
-		    (ctx->arch != KOF_ARCH_X86 && ctx->arch != KOF_ARCH_X86_64))
-			return KOF_XREF_PARTIAL;
+		    (ctx->arch != KGENOME_ARCH_X86 && ctx->arch != KGENOME_ARCH_X86_64))
+			return KGENOME_XREF_PARTIAL;
 		/*
 		 * EVERY executable section, under ONE budget.
 		 *
@@ -678,46 +755,29 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 		 * with a single large one.
 		 */
 		{
-			uint32_t left = KOF_XREF_MAX, pass;
-			uint64_t biggest = 0;
+			uint32_t left = KGENOME_XREF_MAX, pass, nrun;
+			uint64_t biggest = 0, total = 0;
+			struct xref_run run[KGENOME_ELF_MAX_SECTIONS];
 			kof_buf b = kof_src_buf(sc->cur_src);
 
 			/*
-			 * THE SIZE THAT IS THERE, not the size that is
-			 * claimed, and the two are a whole ELF header field
-			 * apart.
+			 * THE RUNS ARE DECIDED ONCE, here, and the three
+			 * questions below - which is biggest, what is swept,
+			 * how much exists - read the same table. They used to
+			 * walk the section table three times with the same
+			 * clip, which is three chances to disagree.
 			 *
-			 * sh_size is a 64-bit number the file writes and the
-			 * parser records without clamping - it only flags
-			 * SEC_PAST_EOF - so `biggest` taken from it is won by
-			 * whichever section lies hardest. That section then
-			 * owns pass 0 alone, is dropped there for holding no
-			 * bytes, and every real section falls to pass 1 in
-			 * TABLE ORDER - which is .init, .plt, .plt.got,
-			 * .plt.sec and then .text, exactly the order the two
-			 * passes exist to avoid. One wrong field turns the
-			 * ordering off and nothing says so.
-			 *
-			 * kof_clip_len is the engine's own answer to "how much
-			 * of this is really here" and is what the sweep below
-			 * takes its bytes from, so ordering on anything else
-			 * is ordering on a different number than the one being
-			 * spent.
+			 * THE SIZE THAT IS THERE, not the size that is claimed
+			 * (see xref_runs).
 			 */
-			for (i = 0; i < e->sec_count &&
-				    i < KOF_ELF_MAX_SECTIONS; i++) {
-				uint64_t have;
-
-				if (e->sec[i].type != 1u ||
-				    !(e->sec[i].flags & 0x4u))
-					continue;
-				have = kof_clip_len(b.n, e->sec[i].file_off,
-						    e->sec[i].file_size);
-				if (have > biggest)
-					biggest = have;
+			nrun = xref_runs(e, b.n, run);
+			for (i = 0; i < nrun; i++) {
+				if (run[i].have > biggest)
+					biggest = run[i].have;
+				total += run[i].have;
 			}
 
-			sc->use = kof_xref_new();
+			sc->use = kgenome_xref_new();
 			/*
 			 * WHAT THE COMPILER PUT THERE, from the ELF's own
 			 * structure and not from symbols - the files this has
@@ -734,16 +794,16 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			 * pair is ever found, since nothing names them.
 			 */
 			if (sc->use && e->entry_addr)
-				kof_xref_startup(sc->use, e->entry_addr);
+				kgenome_xref_startup(sc->use, e->entry_addr);
 			for (i = 0; sc->use && i < e->sec_count &&
-				    i < KOF_ELF_MAX_SECTIONS; i++) {
-				const struct kof_elf_sec *sec = &e->sec[i];
-				uint32_t w = ctx->arch == KOF_ARCH_X86 ? 4u : 8u;
+				    i < KGENOME_ELF_MAX_SECTIONS; i++) {
+				const struct kgenome_elf_sec *sec = &e->sec[i];
+				uint32_t w = ctx->arch == KGENOME_ARCH_X86 ? 4u : 8u;
 				uint64_t k, have;
 
-				if (sec->type == 1u && (sec->flags & 0x4u) &&
+				if (kgenome_elf_sec_is_code(sec) &&
 				    kof_str_ne(sec->name, ".text"))
-					kof_xref_startup(sc->use, sec->mem_addr);
+					kgenome_xref_startup(sc->use, sec->mem_addr);
 				if (sec->type != 14u && sec->type != 15u)
 					continue;   /* INIT_ARRAY, FINI_ARRAY */
 				/*
@@ -796,7 +856,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 					 * the object has room for; past full,
 					 * every further turn records nothing.
 					 */
-					if (!kof_xref_startup(sc->use, v))
+					if (!kgenome_xref_startup(sc->use, v))
 						break;
 				}
 			}
@@ -818,66 +878,48 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			 * code is.
 			 */
 			for (pass = 0; sc->use && left && pass < 2; pass++)
-			for (i = 0; sc->use && left &&
-				    i < e->sec_count && i < KOF_ELF_MAX_SECTIONS;
-			     i++) {
-				const struct kof_elf_sec *sec = &e->sec[i];
-				uint64_t have;
+			for (i = 0; sc->use && left && i < nrun; i++) {
 				uint32_t n;
-				int big;
+				struct kgenome_obj gobj;
+				int big = run[i].have >= biggest;
 
-				if (sec->type != 1u || !(sec->flags & 0x4u))
-					continue;       /* PROGBITS, executable */
-				/* The same clip the ordering above used, so
-				 * what decides the pass and what is swept in
-				 * it are one number. */
-				have = kof_clip_len(b.n, sec->file_off,
-						    sec->file_size);
-				if (!have)
-					continue;
-				big = have >= biggest;
 				if ((pass == 0) != (big != 0))
 					continue;
-				n = have < left ? (uint32_t)have : left;
-				kof_xref_add(sc->use, b.p + sec->file_off, n,
-						sec->mem_addr,
-						ctx->arch == KOF_ARCH_X86
-						? 32u : 64u);
+				n = run[i].have < left ? (uint32_t)run[i].have
+						       : left;
+				/*
+				 * The instructions come from the shared reader:
+				 * the object's trace where the diagnose walk made
+				 * one and still holds it, the one decoder
+				 * otherwise. Same answer either way.
+				 */
+				kgenome_xref_begin(sc->use, ctx->arch);
+				kof_genome_obj(ctx, &gobj);
+				kgenome_diag_code_run(sc->walk, &gobj, b.p, b.n,
+						  run[i].at, n, run[i].va,
+						  kgenome_xref_feed, sc->use, NULL);
 				left -= n;
-				if (n < have)
+				if (n < run[i].have)
 					sc->use_cut = 1;
 			}
 			/* The budget is a total, so the sweep was cut exactly when the
-			 * executable bytes the object holds exceed it: a section swept
-			 * in part leaves n < have, one never reached leaves nothing
+			 * executable bytes the object holds exceed it: a run swept in
+			 * part leaves n < have, one never reached leaves nothing
 			 * behind to compare, and the total says both. */
-			{
-				uint64_t total = 0;
-
-				for (i = 0; i < e->sec_count &&
-					    i < KOF_ELF_MAX_SECTIONS; i++) {
-					const struct kof_elf_sec *sec = &e->sec[i];
-
-					if (sec->type == 1u && (sec->flags & 0x4u))
-						total += kof_clip_len(b.n,
-								sec->file_off,
-								sec->file_size);
-				}
-				if (total > KOF_XREF_MAX)
-					sc->use_cut = 1;
-			}
+			if (total > KGENOME_XREF_MAX)
+				sc->use_cut = 1;
 		}
 	}
 	if (!sc->use)
-		return KOF_XREF_PARTIAL;
-	f = kof_xref_in(sc->use, va, size);
+		return KGENOME_XREF_PARTIAL;
+	f = kgenome_xref_in(sc->use, va, size);
 	/* PARTIAL when either bound bit: the address table is full, or the byte
 	 * budget ended before every executable section was swept. Only the
 	 * first was reported; "nothing refers to it" was then said of code that
 	 * had never been read. */
 	{
-		uint32_t part = (kof_xref_full(sc->use) || sc->use_cut)
-				? KOF_XREF_PARTIAL : 0u;
+		uint32_t part = (kgenome_xref_full(sc->use) || sc->use_cut)
+				? KGENOME_XREF_PARTIAL : 0u;
 
 		return f ? f | part : part;
 	}
@@ -1062,7 +1104,7 @@ static uint32_t c_entropy_at(const struct kof_obj_ctx *ctx, uint64_t off,
  * this is a division, not a search. A module may ask about the same block
  * repeatedly and in any order for nothing.
  */
-static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
+static uint32_t c_mutation_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
@@ -1078,9 +1120,9 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 		if (!sc || !sc->cur_mod)
 			return 0;
 		b = sc->cur_mod->block_base + block_id;
-		pct = kof_plague_pct(&sc->plague, b);
-		if (sc->plague_asked < 0)
-			sc->plague_asked = 0;
+		pct = kof_mutation_pct(&sc->mutation, b);
+		if (sc->mutation_asked < 0)
+			sc->mutation_asked = 0;
 
 		/*
 		 * EVERY BLOCK THE RULE ASKS ABOUT IS PART OF ITS VERDICT.
@@ -1089,7 +1131,7 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 		 * "block A and block B" rule after whichever half happened to
 		 * score better and reported that half's percentage as the
 		 * whole rule's. Both are now the set's: the name is the fold of
-		 * the set (see kof_plague_name_of) and the score is the set's
+		 * the set (see kof_mutation_name_of) and the score is the set's
 		 * own containment, matched hashes over declared hashes, which
 		 * is the same measurement one block's score already is.
 		 *
@@ -1098,20 +1140,20 @@ static uint32_t c_plague_score(const struct kof_obj_ctx *ctx, uint32_t block_id)
 		 * twice would weight it twice.
 		 */
 		/* The best any one block reached, which is what the verdict
-		 * reports - see kof_scanner.plague_best. Before the
+		 * reports - see kof_scanner.mutation_best. Before the
 		 * already-counted return below, because a block asked about
 		 * twice scores the same twice and this is a maximum. */
-		if (pct > sc->plague_best)
-			sc->plague_best = pct;
-		id = kof_plague_block_id(sc->eng->plague, b);
-		for (i = 0; i < sc->n_plague_blk; i++)
-			if (sc->plague_blk[i] == id)
+		if (pct > sc->mutation_best)
+			sc->mutation_best = pct;
+		id = kof_mutation_block_id(sc->eng->mutation, b);
+		for (i = 0; i < sc->n_mutation_blk; i++)
+			if (sc->mutation_blk[i] == id)
 				return pct;
-		if (sc->n_plague_blk < KOF_PLAGUE_NAME_MAX) {
-			sc->plague_blk[sc->n_plague_blk++] = id;
-			if (kof_plague_counts(&sc->plague, b, &seen, &n_hash)) {
-				sc->plague_hit += seen;
-				sc->plague_tot += n_hash;
+		if (sc->n_mutation_blk < KOF_MUTATION_NAME_MAX) {
+			sc->mutation_blk[sc->n_mutation_blk++] = id;
+			if (kof_mutation_counts(&sc->mutation, b, &seen, &n_hash)) {
+				sc->mutation_hit += seen;
+				sc->mutation_tot += n_hash;
 			}
 		}
 		return pct;
@@ -1177,7 +1219,7 @@ static int c_cure_truncate(const struct kof_obj_ctx *ctx, uint64_t len)
 }
 
 /*
- * THE DISINFECT STAGE, REACHED FROM A RULE - see libkofeng/disinfect/pzero.h.
+ * THE DISINFECT STAGE, REACHED FROM A RULE - see libkofeng/scanners/pzero.h.
  *
  * Thin on purpose. The arithmetic is pzero's and the bounds are this file's,
  * which is the same division cure_patch draws: a rule may name any offset it
@@ -1195,7 +1237,10 @@ static int c_pz_is_code(const struct kof_obj_ctx *ctx, uint64_t off)
 
 static uint64_t c_pz_addr_to_off(const struct kof_obj_ctx *ctx, uint64_t addr)
 {
-	return kof_pz_addr_to_off(ctx, addr);
+	struct kgenome_obj gobj;
+
+	kof_genome_obj(ctx, &gobj);
+	return kgenome_pz_addr_to_off(&gobj, addr);
 }
 
 /*
@@ -1232,27 +1277,29 @@ static int c_dis_seek(const struct kof_obj_ctx *ctx, uint64_t off, int keep)
 
 	if (!sc || off >= b.n)
 		return 0;
-	return kof_cell_seek(&sc->cell, off, keep);
+	return kgenome_cell_seek(&sc->cell, off, keep);
 }
 
-static int c_dis_next(const struct kof_obj_ctx *ctx, struct cell_insn *out)
+static int c_dis_next(const struct kof_obj_ctx *ctx, struct kgenome_cell_insn *out)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	kof_buf b = oc_mc(ctx)->data;
 
-	struct cell_space sp;
+	struct kgenome_cell_space sp;
+	struct kgenome_obj gobj;
 
 	if (!sc || !out || !b.p)
 		return 0;
-	kof_cell_space_init(&sp, ctx, b.p, b.n);
-	return kof_cell_next(&sc->cell, &sp, out);
+	kof_genome_obj(ctx, &gobj);
+	kgenome_cell_space_init(&sp, &gobj, b.p, b.n);
+	return kgenome_cell_next(&sc->cell, &sp, out);
 }
 
 static int c_dis_reg(const struct kof_obj_ctx *ctx, uint8_t r, uint64_t *out)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	return sc ? kof_cell_reg(&sc->cell, r, out) : 0;
+	return sc ? kgenome_cell_reg(&sc->cell, r, out) : 0;
 }
 
 /*
@@ -1305,7 +1352,7 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * even ENTER a rule gated above the scan's level.
  *
  * SO THEY ANSWER ZERO BELOW THEIR LEVEL, which a rule cannot tell from "none
- * of it was there". That is the same conflation plague_score makes for a
+ * of it was there". That is the same conflation mutation_score makes for a
  * region that was never resolved, and it is deliberate for the same reason: a
  * rule that could tell them apart would start reporting on the scanner's
  * settings rather than on the object.
@@ -1354,32 +1401,6 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
 /* Containment over the object's block set, against a reference's own. */
 
 /*
- * THE STRUCTURE TRACK, with the library out of both sides when the reference
- * asked for it - see kof_plague_shape.lib_cut.
- *
- * The spans are the ones the scanner already established for this object, so
- * this is not a fourth walk of the same bytes - see kof_scanner.cur_lib. A
- * reference that did not ask gets exactly the arithmetic the inline does,
- * which is what keeps every reference written before the cut existed meaning
- * what it meant.
- */
-static uint32_t c_plague_shape(const struct kof_obj_ctx *ctx,
-			    const struct kof_plague_shape *ref)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_plague_shape cur;
-
-	if (!ref || !kof_elf(ctx))
-		return 0;
-	if (!ref->lib_cut || !sc || !sc->cur_lib_ok)
-		return kof_plague_shape_pct(kof_elf(ctx), ref, ctx->obj_size);
-	kof_plague_shape_of_cut(kof_elf(ctx), ctx->obj_size,
-			     sc->cur_lib.span, sc->cur_lib.n, &cur);
-	return kof_plague_shape_cmp(&cur, ref);
-}
-
-
-/*
  * WHICH DIAGNOSES THIS OBJECT CARRIES - read once, on the first ask.
  *
  * The walk over the code regions is the expensive half and it happens
@@ -1405,7 +1426,7 @@ static const struct kof_content kof_detect_vtable = {
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
 	/* The block vector is gone - see the note in kofsig.h. The SLOT
 	 * stays so no other entry moves, exactly as ovl_strings' did. */
-	c_plague_score, NULL, NULL /* was c_pth_match */, c_plague_shape,
+	c_mutation_score, NULL, NULL /* was c_pth_match */, NULL /* was c_mutation_shape */,
 	c_cure_offer, c_cure_patch, c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	/* supersede - a detector produces nothing to be superseded by. */
@@ -1442,7 +1463,14 @@ static const struct kof_content kof_detect_vtable = {
 	/* emu_api_returns, emu_patch - a detector drives no run. */
 	NULL, NULL,
 	/* api_resolved, sym_import - a detector reports nothing about the object. */
-	NULL, NULL
+	NULL, NULL,
+	/* decrypt, decrypt_peek - a detector produces nothing, so it has nothing to
+	 * decrypt into; an unpacker is the one that asks. */
+	NULL, NULL,
+	/* capsid_apply - arithmetic over the module's own bytes, so a detector may. */
+	oc_capsid_apply,
+	/* diag32, diag_share32, diag_str32 - the diagnose questions by full id. */
+	oc_diag32, oc_diag_share32, oc_diag_str32
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -1456,8 +1484,8 @@ static const struct kof_content kof_unpack_vtable = {
 	oc_child_dir, oc_layout_of_produced,
 	oc_emu_run, oc_emu_region, oc_emu_take, oc_opened_already, oc_incomplete,
 	oc_unpack_entry, oc_syms, c_data_xref, c_fmt_wanted, c_region_shape,
-	c_region_entropy, c_entropy_at, c_plague_score,
-	NULL, NULL /* was c_pth_match */, c_plague_shape, c_cure_offer, c_cure_patch,
+	c_region_entropy, c_entropy_at, c_mutation_score,
+	NULL, NULL /* was c_pth_match */, NULL /* was c_mutation_shape */, c_cure_offer, c_cure_patch,
 	c_cure_truncate,
 	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
 	oc_supersede, oc_as_format, oc_packer_build, oc_emu_reg, oc_emu_read,
@@ -1473,7 +1501,11 @@ static const struct kof_content kof_unpack_vtable = {
 	oc_diag_share,
 	oc_diag_str,
 	oc_emu_api_returns, oc_emu_patch,
-	oc_api_resolved, oc_sym_import
+	oc_api_resolved, oc_sym_import,
+	oc_decrypt, oc_decrypt_peek,
+	oc_capsid_apply,
+	/* diag32 is unplugged here as diag is; the other two are asked by name. */
+	NULL, oc_diag_share32, oc_diag_str32
 };
 
 /*

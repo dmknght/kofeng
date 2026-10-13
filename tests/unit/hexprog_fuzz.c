@@ -20,9 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../../libkofeng/databases/hexprog.h"
-#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
-#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/databases/pack/hexprog.h"
+#include "../../libkofeng/detectors/pattern/kofmatch.h"
+#include "../../libkofeng/databases/pack/dbcore.h"
 
 int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len);
 

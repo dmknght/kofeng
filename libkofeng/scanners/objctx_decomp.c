@@ -21,22 +21,23 @@
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/xref.h>
-#include "../disinfect/pzero.h"
+#include "pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include <kofmod/elf.h>
-#include "../extractors/unpack/emu_unpack.h"
-#include "../extractors/unpack/elf_rebuild.h"
+#include <phenotype/emu_unpack.h>
+#include <genotype/image/elf_rebuild.h>
 
-#include "../extractors/decomp/ovba.h"
-#include "../extractors/decomp/lzma.h"
-#include "../extractors/decomp/aplib.h"
-#include "../extractors/decomp/aspack.h"
-#include "../extractors/decomp/lzmat.h"
-#include "../extractors/decomp/bcj.h"
-#include "../extractors/decomp/rar3.h"
-#include "../extractors/decomp/rar5.h"
-#include "../extractors/decomp/bcj2.h"
+#include <decompressors/ovba.h>
+#include <decompressors/lzma.h>
+#include <decompressors/aplib.h>
+#include <uncoat.h>
+#include <decompressors/aspack.h>
+#include <decompressors/lzmat.h>
+#include <decompressors/bcj.h>
+#include <decompressors/rar3.h>
+#include <decompressors/rar5.h>
+#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
 #include "../analyzers/parsers/scripts/script_norm.h"
@@ -52,8 +53,8 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/pattern/kofmultimatch.h"
+#include "../detectors/linkage/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -182,12 +183,12 @@ static uint64_t expand_limit(uint64_t in_len, uint64_t declared)
  * though it were the whole entry. It was right in all eight, and nothing was
  * making it so.
  */
-static void stream_note(struct kof_scanner *sc, enum kof_decomp_status st,
+static void stream_note(struct kof_scanner *sc, enum kuncoat_status st,
 			uint32_t ordinary, const struct expand_sink *snk)
 {
-	if (st != KOF_DEC_OK &&
-	    !(st == KOF_DEC_TRUNCATED && (ordinary & STREAM_PARTIAL)) &&
-	    !(st == KOF_DEC_STOPPED && (ordinary & STREAM_FILLED)))
+	if (st != KUNCOAT_OK &&
+	    !(st == KUNCOAT_TRUNCATED && (ordinary & STREAM_PARTIAL)) &&
+	    !(st == KUNCOAT_STOPPED && (ordinary & STREAM_FILLED)))
 		oc_scan_broken(sc, oc_broken_of_status(st));
 	else if (snk->left == 0)
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
@@ -316,9 +317,9 @@ static int buffered_method(uint32_t method)
 static int nrv2_of(uint32_t method, int *variant, int *bits)
 {
 	static const struct { int v, b; } tab[9] = {
-		{ KOF_NRV2B, 8 }, { KOF_NRV2B, 16 }, { KOF_NRV2B, 32 },
-		{ KOF_NRV2D, 8 }, { KOF_NRV2D, 16 }, { KOF_NRV2D, 32 },
-		{ KOF_NRV2E, 8 }, { KOF_NRV2E, 16 }, { KOF_NRV2E, 32 }
+		{ KUNCOAT_NRV2B, 8 }, { KUNCOAT_NRV2B, 16 }, { KUNCOAT_NRV2B, 32 },
+		{ KUNCOAT_NRV2D, 8 }, { KUNCOAT_NRV2D, 16 }, { KUNCOAT_NRV2D, 32 },
+		{ KUNCOAT_NRV2E, 8 }, { KUNCOAT_NRV2E, 16 }, { KUNCOAT_NRV2E, 32 }
 	};
 
 	if (method < KOF_UNP_NRV2B_8 || method > KOF_UNP_NRV2E_32)
@@ -352,8 +353,8 @@ static int lzma_props_of(uint32_t method, unsigned *lc, unsigned *lp, unsigned *
 	*lc = v % 9u;
 	*lp = (v / 9u) % 5u;
 	*pb = v / 45u;
-	return *lc <= KOF_LZMA_MAX_LC && *lp <= KOF_LZMA_MAX_LP &&
-	       *pb <= KOF_LZMA_MAX_PB;
+	return *lc <= KUNCOAT_LZMA_MAX_LC && *lp <= KUNCOAT_LZMA_MAX_LP &&
+	       *pb <= KUNCOAT_LZMA_MAX_PB;
 }
 
 /*
@@ -392,7 +393,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 {
 	uint64_t room, want, produced = 0, decoded, at;
 	uint8_t *buf;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 	int capped = 0;
 	/* Whether `buf` is this function's to free - see the note beside the
 	 * allocation. */
@@ -556,8 +557,8 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		 * The two formats bound it differently, so the smaller decoder does
 		 * not pay for the larger one's room.
 		 */
-		uint64_t sn = method == KOF_UNP_RAR3 ? KOF_RAR3_SCRATCH
-						     : KOF_RAR5_SCRATCH;
+		uint64_t sn = method == KOF_UNP_RAR3 ? KUNCOAT_RAR3_SCRATCH
+						     : KUNCOAT_RAR5_SCRATCH;
 		uint8_t *scratch;
 
 		/*
@@ -573,10 +574,10 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		if (scratch)
 			scan_charge(sc, sn);
 		if (method == KOF_UNP_RAR3)
-			st = kof_rar3_decode(in, in_len, buf, want, scratch,
+			st = kuncoat_rar3_decode(in, in_len, buf, want, scratch,
 					     scratch ? sn : 0u, &produced);
 		else
-			st = kof_rar5_decode(in, in_len, buf, want, scratch,
+			st = kuncoat_rar5_decode(in, in_len, buf, want, scratch,
 					     scratch ? sn : 0u, &produced);
 		if (scratch) {
 			oc_scan_release(sc, sn);
@@ -587,23 +588,23 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 
 		/* Buffered like aPLib and for the same reason: a match
 		 * distance has no ceiling and the buffer IS the window. */
-		st = kof_lzmat_decode(in, in_len, buf, want, &produced);
+		st = kuncoat_lzmat_decode(in, in_len, buf, want, &produced);
 		/* And the call target conversion undone over the whole of it,
 		 * exactly as the LZMA pair below does it. */
 		if (cto && produced)
-			kof_mpress_cto_decode(buf, produced, cto);
+			kuncoat_mpress_cto_decode(buf, produced, cto);
 	} else if (method == KOF_UNP_APLIB) {
 		/*
 		 * Buffered for the reason NRV2 is: an aPLib match distance has
 		 * no ceiling, so the whole output has to stay addressable until
 		 * the stream ends and the buffer IS the window.
 		 */
-		st = kof_aplib_decode(in, in_len, buf, want, &produced);
+		st = kuncoat_aplib_decode(in, in_len, buf, want, &produced);
 	} else if (aspack_mark_of(method) >= 0) {
 		int mark = aspack_mark_of(method);
 
 		/* Buffered for the same reason again - see aspack.h. */
-		st = kof_aspack_decode(in, in_len, buf, want, &produced);
+		st = kuncoat_aspack_decode(in, in_len, buf, want, &produced);
 		/*
 		 * And the call/jmp filter undone over the whole block, where
 		 * the LZMA and BCJ pairs undo theirs and for the same reason:
@@ -611,10 +612,10 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		 * position in the OUTPUT.
 		 */
 		if (mark > 0 && produced)
-			kof_aspack_e8e9_decode(buf, produced,
+			kuncoat_aspack_e8e9_decode(buf, produced,
 					       (uint8_t)(mark - 1));
 	} else if (method == KOF_UNP_LZMA2 || method == KOF_UNP_LZMA2_BCJ_X86) {
-		st = kof_lzma2_decode(in, in_len, buf, want, &produced);
+		st = kuncoat_lzma2_decode(in, in_len, buf, want, &produced);
 		/*
 		 * The transform is undone here, over the whole decoded buffer,
 		 * because that is the only place it can be: it rewrites addresses
@@ -624,7 +625,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		 * whole thing in hand and a streaming one never would.
 		 */
 		if (method == KOF_UNP_LZMA2_BCJ_X86 && produced)
-			kof_bcj_x86_decode(buf, produced, 0);
+			kuncoat_bcj_x86_decode(buf, produced, 0);
 	} else if (method >= KOF_UNP_LZMA) {
 		unsigned lc, lp, pb, cto = lzma_cto_bits(method);
 
@@ -639,7 +640,7 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
 			return 0;
 		}
-		st = kof_lzma_decode(lc, lp, pb, in, in_len, buf, want, &produced);
+		st = kuncoat_lzma_decode(lc, lp, pb, in, in_len, buf, want, &produced);
 		/*
 		 * Undone here for the reason the BCJ call above is: the
 		 * transform rewrites addresses relative to a position in the
@@ -647,22 +648,22 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 		 * whole output is.
 		 *
 		 * ON A SHORT DECODE TOO, and deliberately. A stream that
-		 * stopped early still yields a real prefix - kof_lzma_decode's
+		 * stopped early still yields a real prefix - kuncoat_lzma_decode's
 		 * contract says so - and the filter's bound is a length rather
 		 * than a structure, so it converts what arrived and leaves the
 		 * rest. The alternative is handing back a prefix whose calls
 		 * are all wrong, which is the state this exists to end.
 		 */
 		if (cto && produced)
-			kof_mpress_cto_decode(buf, produced, cto);
+			kuncoat_mpress_cto_decode(buf, produced, cto);
 	} else {
-		st = kof_nrv2_decode(variant, bits, in, in_len, buf, want,
+		st = kuncoat_nrv2_decode(variant, bits, in, in_len, buf, want,
 				     &produced);
 	}
 	/*
 	 * STOPPED IS NOT A LIMIT WHEN THE CALLER GOT WHAT IT ASKED FOR.
 	 *
-	 * KOF_DEC_STOPPED means the output buffer filled. Whether that is a
+	 * KUNCOAT_STOPPED means the output buffer filled. Whether that is a
 	 * failure depends entirely on who chose the buffer's size, and until now
 	 * this did not ask.
 	 *
@@ -679,9 +680,9 @@ static uint64_t unpack_buffered(struct kof_scanner *sc,
 	 * recorded the limit above - this is not the place that knows about it,
 	 * and saying so twice was never what carried the message.
 	 */
-	if (st == KOF_DEC_STOPPED && out_hint && want == out_hint)
-		st = KOF_DEC_OK;
-	if (st != KOF_DEC_OK) {
+	if (st == KUNCOAT_STOPPED && out_hint && want == out_hint)
+		st = KUNCOAT_OK;
+	if (st != KUNCOAT_OK) {
 		uint32_t why = oc_broken_of_status(st);
 
 		/* A buffer the ratio clamp sized, filled: this stream was cut
@@ -980,7 +981,7 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 				kof_buf b, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 	uint64_t room, got = 0, at;
 	uint8_t *buf;
 
@@ -995,7 +996,7 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 
 		snk.ctx = ctx;
 		snk.left = expand_limit(len, 0);
-		st = kof_rle_decode(b.p + off, len, expand_sink_fn, &snk, &got);
+		st = kuncoat_rle_decode(b.p + off, len, expand_sink_fn, &snk, &got);
 		stream_note(sc, st, STREAM_PARTIAL, &snk);
 		return got;
 	}
@@ -1013,9 +1014,9 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 	scan_charge(sc, len);
 
 	st = method == KOF_UNP_ASCII85
-	   ? kof_a85_decode(b.p + off, len, buf, len, &got)
-	   : kof_ahx_decode(b.p + off, len, buf, len, &got);
-	if (st != KOF_DEC_OK) {
+	   ? kuncoat_a85_decode(b.p + off, len, buf, len, &got)
+	   : kuncoat_ahx_decode(b.p + off, len, buf, len, &got);
+	if (st != KUNCOAT_OK) {
 		/* The container said this WAS the coding, so input that is not
 		 * it is the file disagreeing with itself - damage, not a gap in
 		 * the engine, and the two lead different places. Whatever
@@ -1028,6 +1029,117 @@ static uint64_t unpack_textcode(const struct kof_obj_ctx *ctx, uint32_t method,
 	free(buf);
 	oc_scan_release(sc, len);
 	return at;
+}
+
+/*
+ * THE MODULE ABI'S CIPHER DESCRIPTOR, as the lib's transform step.
+ *
+ * The descriptor and its ids (kofmod/kofdecode.h) are the engine's and stay as
+ * they are for the modules built against them; the lib has its own step and its
+ * own ids, and this is the one place the two meet. An id the engine does not know
+ * becomes ALGO_NONE, which the lib answers UNSUPPORTED.
+ *
+ * What the ABI slot returns is a COUNT - the bytes produced - and 0 for "not a
+ * cipher", "nothing to do" and "no room" alike, as it always did: the slot's
+ * signature is what the modules compiled against. The lib's status is dropped
+ * here and nowhere else.
+ */
+static uint64_t capsid_run(const struct kof_capsid *c, const uint8_t *in, uint64_t n,
+			   uint8_t *out, uint64_t cap)
+{
+	struct kuncoat_step s;
+	uint64_t got = 0;
+
+	if (!c)
+		return 0;
+	switch (c->algo) {
+	case KOF_CAPSID_XOR_KEY:         s.algo = KUNCOAT_ALGO_XOR_KEY; break;
+	case KOF_CAPSID_XOR_COUNTER:     s.algo = KUNCOAT_ALGO_XOR_COUNTER; break;
+	case KOF_CAPSID_XOR_ADD32:       s.algo = KUNCOAT_ALGO_XOR_ADD32; break;
+	case KOF_CAPSID_PLACEHOLDER_SUB: s.algo = KUNCOAT_ALGO_PLACEHOLDER_SUB; break;
+	case KOF_CAPSID_X86_SUB_CHAIN:   s.algo = KUNCOAT_ALGO_X86_SUB_CHAIN; break;
+	case KOF_CAPSID_RC4:             s.algo = KUNCOAT_ALGO_RC4; break;
+	default:                         s.algo = KUNCOAT_ALGO_NONE; break;
+	}
+	s.dir = KUNCOAT_DECODE;
+	s.flags = 0;
+	s.k32 = c->k32;
+	s.key = c->key;
+	s.key_len = c->key_len;
+	s.max_out = c->max_out;
+	(void)kuncoat_transform(&s, in, n, out, cap, &got);
+	return got;
+}
+
+/*
+ * A CIPHER A MODULE NAMED, run by the host - see kofmod/kofdecode.h.
+ *
+ * THE SAME BUDGET AS A DECODER'S. The plaintext is as long as the ciphertext for
+ * the stream ciphers, so the room the scan has left is checked against the range
+ * before anything is allocated, and the bytes are charged and released the way
+ * unpack_textcode's are: a module cannot decrypt its way around the ceiling a
+ * decompression is held to.
+ *
+ * CLIPPED, NOT REFUSED, like every range a module hands in: the length came out of
+ * the file, and what is really there is what gets decrypted.
+ */
+uint64_t oc_decrypt(const struct kof_obj_ctx *ctx, const struct kof_capsid *c,
+		    uint64_t off, uint64_t len)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint64_t room, got, at;
+	uint8_t *buf;
+	kof_buf b;
+
+	if (!sc->cur_src || !c)
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	len = kof_clip_len(b.n, off, len);
+	if (!len)
+		return 0;
+	room = oc_scan_room(sc);
+	if (len > room) {
+		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	buf = malloc((size_t)len);
+	if (!buf) {
+		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+		return 0;
+	}
+	scan_charge(sc, len);
+	got = capsid_run(c, b.p + off, len, buf, len);
+	at = got ? oc_emit_all(ctx, buf, got) : 0;
+	free(buf);
+	oc_scan_release(sc, len);
+	return at;
+}
+
+/* The same into the caller's buffer, which is also the only size involved: what a
+ * hostile object declares sizes nothing here. */
+uint32_t oc_decrypt_peek(const struct kof_obj_ctx *ctx, const struct kof_capsid *c,
+			 uint64_t off, uint64_t len, void *out, uint32_t cap)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	kof_buf b;
+
+	if (!sc->cur_src || !c || !out || !cap)
+		return 0;
+	b = kof_src_buf(sc->cur_src);
+	len = kof_clip_len(b.n, off, len);
+	if (!len)
+		return 0;
+	return (uint32_t)capsid_run(c, b.p + off, len, (uint8_t *)out, cap);
+}
+
+/* A cipher over the module's own bytes: no object, no scanner, no budget - the
+ * caller's buffers are the only sizes. */
+uint32_t oc_capsid_apply(const struct kof_capsid *c, const void *in, uint32_t n,
+			 void *out, uint32_t cap)
+{
+	if (!in || !out)
+		return 0;
+	return (uint32_t)capsid_run(c, (const uint8_t *)in, n, (uint8_t *)out, cap);
 }
 
 uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
@@ -1086,11 +1198,11 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 */
 		{
 			struct expand_sink e;
-			enum kof_decomp_status st;
+			enum kuncoat_status st;
 
 			e.ctx = ctx;
 			e.left = expand_limit(len, out_hint);
-			st = kof_inflate(sc->inf, b.p + off, len, expand_sink_fn,
+			st = kuncoat_inflate(sc->inf, b.p + off, len, expand_sink_fn,
 					 &e, NULL, &produced);
 			stream_note(sc, st, STREAM_STRICT, &e);
 		}
@@ -1104,7 +1216,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		return unpack_textcode(ctx, method, b, off, len);
 	if (method == KOF_UNP_LZW) {
 		struct expand_sink snk;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		uint64_t got = 0;
 
 		if (!sc->lzw) {
@@ -1116,7 +1228,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		}
 		snk.ctx = ctx;
 		snk.left = expand_limit(len, out_hint);
-		st = kof_lzw_decode(sc->lzw, b.p + off, len, expand_sink_fn,
+		st = kuncoat_lzw_decode(sc->lzw, b.p + off, len, expand_sink_fn,
 				    &snk, &got);
 		/*
 		 * Truncation is not an error, for the reason the DEFLATE path
@@ -1129,7 +1241,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	if (method == KOF_UNP_BZIP2) {
 		struct expand_sink snk;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		uint64_t got = 0;
 
 		if (!sc->bz) {
@@ -1141,7 +1253,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		}
 		snk.ctx = ctx;
 		snk.left = expand_limit(len, out_hint);
-		st = kof_bunzip_decode(sc->bz, b.p + off, len, expand_sink_fn,
+		st = kuncoat_bunzip_decode(sc->bz, b.p + off, len, expand_sink_fn,
 				       &snk, &got);
 		/*
 		 * Truncation is not an error, for the reason the DEFLATE path
@@ -1156,7 +1268,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	if (method >= KOF_UNP_LZHUF_ARJ && method <= KOF_UNP_LZHUF_LH7) {
 		struct expand_sink snk;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		uint64_t got = 0;
 
 		/*
@@ -1177,8 +1289,8 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		}
 		snk.ctx = ctx;
 		snk.left = expand_limit(len, out_hint);
-		st = kof_lzhuf_decode(sc->lzh,
-				      (enum kof_lzhuf_variant)
+		st = kuncoat_lzhuf_decode(sc->lzh,
+				      (enum kuncoat_lzhuf_variant)
 					      (method - KOF_UNP_LZHUF_ARJ),
 				      b.p + off, len, out_hint,
 				      expand_sink_fn, &snk, &got);
@@ -1219,18 +1331,18 @@ static uint64_t decode_stream(const struct kof_7z_pack *pk, const uint8_t *in,
 			      uint8_t *out, uint64_t cap, uint64_t *got)
 {
 	uint64_t n = 0;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 
 	*got = 0;
 	if (pk->coder == KOF_7Z_CODER_LZMA2)
-		st = kof_lzma2_decode(in, pk->size, out, cap, &n);
+		st = kuncoat_lzma2_decode(in, pk->size, out, cap, &n);
 	else if (pk->coder == KOF_7Z_CODER_LZMA)
-		st = kof_lzma_decode(pk->lc, pk->lp, pk->pb, in, pk->size,
+		st = kuncoat_lzma_decode(pk->lc, pk->lp, pk->pb, in, pk->size,
 				     out, cap, &n);
 	else
 		return 0;              /* a coder this build does not have */
 	*got = n;
-	return st == KOF_DEC_OK || n ? 1u : 0u;
+	return st == KUNCOAT_OK || n ? 1u : 0u;
 }
 
 static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
@@ -1292,7 +1404,7 @@ static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ct
 	 * not a damaged one.
 	 *
 	 * This skipped the allocation for such a channel and left the pointer
-	 * NULL, and kof_bcj2_decode refuses any NULL pointer outright - it
+	 * NULL, and kuncoat_bcj2_decode refuses any NULL pointer outright - it
 	 * bounds every read by the channel's LENGTH, so the pointer never
 	 * mattered, but the guard does not know that. The decode returned 0,
 	 * `produced != out_len` fired, and a sound archive was reported
@@ -1316,7 +1428,7 @@ static uint64_t unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ct
 	if (!out)
 		goto done;
 
-	produced = kof_bcj2_decode(buf[0], len[0], buf[1], len[1],
+	produced = kuncoat_bcj2_decode(buf[0], len[0], buf[1], len[1],
 				   buf[2], len[2],
 				   b.p + pk[3]->off, pk[3]->size,
 				   out, out_len);
@@ -1357,11 +1469,11 @@ static int mszip_sink_fn(void *user, const uint8_t *p, uint32_t n)
 	uint32_t at = 0;
 
 	/* The tail, for the block after this one. */
-	if (n >= KOF_INF_WINDOW) {
-		memcpy(o->hist, p + (n - KOF_INF_WINDOW), KOF_INF_WINDOW);
-		o->hist_len = KOF_INF_WINDOW;
+	if (n >= KUNCOAT_INF_WINDOW) {
+		memcpy(o->hist, p + (n - KUNCOAT_INF_WINDOW), KUNCOAT_INF_WINDOW);
+		o->hist_len = KUNCOAT_INF_WINDOW;
 	} else if (n) {
-		uint32_t keep = KOF_INF_WINDOW - n;
+		uint32_t keep = KUNCOAT_INF_WINDOW - n;
 
 		if (o->hist_len > keep)
 			memmove(o->hist, o->hist + (o->hist_len - keep), keep);
@@ -1403,7 +1515,7 @@ static int mszip_sink_fn(void *user, const uint8_t *p, uint32_t n)
  * "CK" and then a deflate stream. They are not one stream and must not be
  * joined: every block is its own, and every block after the first may reference
  * up to 32KB of the previous one's output. So each is decoded separately with
- * the last block's tail as history - see kof_inflate_seeded, whose note records
+ * the last block's tail as history - see kuncoat_inflate_seeded, whose note records
  * what decoding them from an empty window produces instead.
  *
  * WHY THE WHOLE FOLDER IS DECODED FOR ONE FILE. A CFFILE names a byte range
@@ -1444,26 +1556,26 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 	if (!snk.left)
 		return 0;
 
-	snk.hist = malloc(KOF_INF_WINDOW);
+	snk.hist = malloc(KUNCOAT_INF_WINDOW);
 	if (!snk.hist) {
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		return 0;
 	}
-	scan_charge(sc, KOF_INF_WINDOW);
+	scan_charge(sc, KUNCOAT_INF_WINDOW);
 
 	if (!sc->inf) {
 		sc->inf = malloc(sizeof *sc->inf);
 		if (!sc->inf) {
 			oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 			free(snk.hist);
-			oc_scan_release(sc, KOF_INF_WINDOW);
+			oc_scan_release(sc, KUNCOAT_INF_WINDOW);
 			return 0;
 		}
 	}
 
 	for (i = 0; i < n && snk.left && !snk.stopped; i++) {
 		uint64_t off = ext[i].off, len = kof_clip_len(b.n, off, ext[i].len);
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		uint64_t got = 0;
 
 		/* "CK", which every MSZIP block begins with. A block without it
@@ -1479,17 +1591,17 @@ static uint64_t unpack_mszip(struct kof_scanner *sc,
 		 * of the file belong to other files and are dropped. The two
 		 * were both accumulated and only the second was ever read.
 		 */
-		st = kof_inflate_seeded(sc->inf, snk.hist, snk.hist_len,
+		st = kuncoat_inflate_seeded(sc->inf, snk.hist, snk.hist_len,
 					b.p + off + 2u, len - 2u,
 					mszip_sink_fn, &snk, NULL, &got);
-		if (st != KOF_DEC_OK && st != KOF_DEC_STOPPED) {
+		if (st != KUNCOAT_OK && st != KUNCOAT_STOPPED) {
 			oc_scan_broken(sc, oc_broken_of_status(st));
 			break;
 		}
 	}
 
 	free(snk.hist);
-	oc_scan_release(sc, KOF_INF_WINDOW);
+	oc_scan_release(sc, KUNCOAT_INF_WINDOW);
 	return snk.emitted;
 }
 
@@ -1569,7 +1681,7 @@ static uint64_t unpack_lzx_reset(struct kof_scanner *sc,
 {
 	struct kof_range *ext = sc->ext_gather;
 	struct expand_sink snk;
-	enum kof_decomp_status st = KOF_DEC_OK;
+	enum kuncoat_status st = KUNCOAT_OK;
 	kof_buf b;
 	uint64_t skip, take, got = 0;
 	uint32_t n, i;
@@ -1625,7 +1737,7 @@ static uint64_t unpack_lzx_reset(struct kof_scanner *sc,
 
 		if (!len)
 			break;
-		st = kof_lzx_decode(sc->lzx, window_bits, b.p + off, len, skip,
+		st = kuncoat_lzx_decode(sc->lzx, window_bits, b.p + off, len, skip,
 				    take, expand_sink_fn, &snk, &part);
 		got += part;
 		/*
@@ -1639,10 +1751,10 @@ static uint64_t unpack_lzx_reset(struct kof_scanner *sc,
 		 * per frame, and saying so is better than either silence or a
 		 * refusal.
 		 */
-		if (st != KOF_DEC_OK && st != KOF_DEC_TRUNCATED &&
-		    st != KOF_DEC_STOPPED)
+		if (st != KUNCOAT_OK && st != KUNCOAT_TRUNCATED &&
+		    st != KUNCOAT_STOPPED)
 			break;
-		if (st == KOF_DEC_STOPPED)
+		if (st == KUNCOAT_STOPPED)
 			break;         /* the receiver has had enough */
 		if (!part)
 			break;         /* no progress: another pass would not
@@ -1675,7 +1787,7 @@ static uint64_t unpack_lzx(struct kof_scanner *sc,
 {
 	struct kof_range *ext = sc->ext_gather;
 	struct expand_sink snk;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 	kof_buf b;
 	uint8_t *in;
 	uint64_t total = 0, skip, take, got = 0;
@@ -1705,7 +1817,7 @@ static uint64_t unpack_lzx(struct kof_scanner *sc,
 
 	snk.ctx = ctx;
 	snk.left = expand_limit(total, take);
-	st = kof_lzx_decode(sc->lzx, window_bits, in, total, skip, take,
+	st = kuncoat_lzx_decode(sc->lzx, window_bits, in, total, skip, take,
 			    expand_sink_fn, &snk, &got);
 	stream_note(sc, st, STREAM_PARTIAL | STREAM_FILLED, &snk);
 
@@ -1723,7 +1835,7 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	uint8_t *in;
 	uint64_t total = 0, produced = 0;
 	uint32_t n;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 
 	if (!oc_can_produce(sc))
 		return 0;
@@ -1746,13 +1858,13 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 	if (method == KOF_UNP_MSZIP)
 		return unpack_mszip(sc, ctx, index, out_hint);
 	if (method > KOF_UNP_LZX_RESET_BASE &&
-	    method <= KOF_UNP_LZX_RESET_BASE + KOF_LZX_MAX_BITS)
+	    method <= KOF_UNP_LZX_RESET_BASE + KUNCOAT_LZX_MAX_BITS)
 		return unpack_lzx_reset(sc, ctx, index,
 					method -
 						(uint32_t)KOF_UNP_LZX_RESET_BASE,
 					out_hint);
 	if (method > KOF_UNP_LZX_BASE &&
-	    method <= KOF_UNP_LZX_BASE + KOF_LZX_MAX_BITS)
+	    method <= KOF_UNP_LZX_BASE + KUNCOAT_LZX_MAX_BITS)
 		return unpack_lzx(sc, ctx, index,
 				  method - (uint32_t)KOF_UNP_LZX_BASE, out_hint);
 	if (method != KOF_UNP_OVBA && method != KOF_UNP_STORED)
@@ -1766,15 +1878,15 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	if (method == KOF_UNP_STORED) {
 		/* The joined bytes ARE the object. */
-		st = KOF_DEC_OK;
+		st = KUNCOAT_OK;
 		produced = oc_emit_all(ctx, in, total);
 	} else {
 		struct sink_carry carry = { ctx };
 
-		st = kof_ovba_decode(in, total, inflate_sink, &carry,
+		st = kuncoat_ovba_decode(in, total, inflate_sink, &carry,
 				     &produced);
 	}
-	if (st != KOF_DEC_OK)
+	if (st != KUNCOAT_OK)
 		oc_scan_broken(sc, oc_broken_of_status(st));
 
 	oc_scan_release(sc, total);
@@ -1905,7 +2017,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		 */
 		{
 			const uint8_t *p = mid;
-			enum kof_decomp_status st;
+			enum kuncoat_status st;
 
 			if (!p) {
 				kof_buf b = kof_src_buf(sc->cur_src);
@@ -1913,8 +2025,8 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 				p = b.p + off;
 			}
 			st = e->coding[i] == KOF_UNP_ASCII85
-			   ? kof_a85_decode(p, len, next, len, &got)
-			   : kof_ahx_decode(p, len, next, len, &got);
+			   ? kuncoat_a85_decode(p, len, next, len, &got)
+			   : kuncoat_ahx_decode(p, len, next, len, &got);
 			/*
 			 * A middle step that disagreed with its own declared
 			 * coding stops the chain: the next step would decode
@@ -1923,7 +2035,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 			 * partial output is NOT kept here - a half-decoded
 			 * intermediate is not input for anything.
 			 */
-			if (st != KOF_DEC_OK)
+			if (st != KUNCOAT_OK)
 				got = 0;
 		}
 		/* The old intermediate is finished with: released, and its
@@ -1973,7 +2085,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 	}
 	{
 		struct expand_sink snk;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		const uint8_t *p = mid;
 		uint64_t n = len;
 
@@ -1995,7 +2107,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 		snk.ctx = ctx;
 		snk.left = expand_limit(n, e->out_hint);
 		produced = 0;
-		st = kof_inflate(sc->inf, p, n, expand_sink_fn, &snk, NULL,
+		st = kuncoat_inflate(sc->inf, p, n, expand_sink_fn, &snk, NULL,
 				 &produced);
 		stream_note(sc, st, STREAM_STRICT, &snk);
 	}

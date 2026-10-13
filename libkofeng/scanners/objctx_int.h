@@ -62,8 +62,8 @@ uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
 uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 		       const char *fn);
 uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
-			   struct kof_scanner *sc, struct kof_emu *e,
-			   struct kof_emu_unp_report rep);
+			   struct kof_scanner *sc, struct kgenome_emu *e,
+			   struct kgenome_emu_unp_report rep);
 
 /* ---- shared helpers (objctx.c) ---- */
 uint64_t oc_scan_room(const struct kof_scanner *sc);
@@ -78,12 +78,18 @@ void oc_scan_broken(struct kof_scanner *sc, uint32_t reason);
 const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
 /* The functions of the object, built once - see funcs.h. Never NULL. */
-const struct kof_func_set *oc_funcs(const struct kof_obj_ctx *ctx);
+const struct kgenome_func_set *oc_funcs(const struct kof_obj_ctx *ctx);
 int oc_diag(const struct kof_obj_ctx *ctx, uint16_t id);
 int oc_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
 			uint16_t a, uint16_t b);
 int oc_diag_str(const struct kof_obj_ctx *ctx, uint16_t id,
 			   const char *name);
+/* The same three questions with the diagnose named by its full 32-bit id - see
+ * diag32 in struct kof_content. */
+int oc_diag32(const struct kof_obj_ctx *ctx, uint32_t id);
+int oc_diag_share32(const struct kof_obj_ctx *ctx, uint16_t cap,
+		    uint32_t a, uint32_t b);
+int oc_diag_str32(const struct kof_obj_ctx *ctx, uint32_t id, const char *name);
 
 /* ---- the boundary (objctx.c) ---- */
 static inline struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx)
@@ -91,9 +97,24 @@ static inline struct kof_match_ctx *oc_mc(const struct kof_obj_ctx *ctx)
 	return &kof_scan_of(ctx)->m;
 }
 
+/* The PE's import directory, walked once for the object and kept by the scanner
+ * (objctx_diag.c). Every reader of it - the symbol block, the PE diagnose, the
+ * API-hash run and the emulator's IAT - takes this one table. */
+struct kgenome_pe_imptab;
+const struct kgenome_pe_imptab *sc_pe_imports(struct kof_scanner *sc,
+					  const struct kof_obj_ctx *ctx);
+
 /* ---- decoders (objctx_decomp.c) ---- */
 uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 			 uint64_t off, uint64_t len, uint64_t out_hint);
+/* A range of the object, decrypted with a cipher a module named - see
+ * kofmod/kofdecode.h. The first produces; the second fills the caller's buffer. */
+uint64_t oc_decrypt(const struct kof_obj_ctx *ctx, const struct kof_capsid *c,
+		    uint64_t off, uint64_t len);
+uint32_t oc_decrypt_peek(const struct kof_obj_ctx *ctx, const struct kof_capsid *c,
+			 uint64_t off, uint64_t len, void *out, uint32_t cap);
+uint32_t oc_capsid_apply(const struct kof_capsid *c, const void *in, uint32_t n,
+			 void *out, uint32_t cap);
 uint32_t oc_unpack_peek(const struct kof_obj_ctx *ctx, uint32_t method,
 			      uint64_t off, uint64_t len, void *out,
 			      uint32_t cap);
@@ -103,7 +124,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index);
 
 /* ---- shared helpers (objctx.c) ---- */
 void oc_scan_release(struct kof_scanner *sc, uint64_t produced);
-uint32_t oc_broken_of_status(enum kof_decomp_status st);
+uint32_t oc_broken_of_status(enum kuncoat_status st);
 void oc_incomplete(const struct kof_obj_ctx *ctx, uint32_t reason);
 int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n);
 

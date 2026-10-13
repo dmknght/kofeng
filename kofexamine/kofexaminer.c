@@ -25,7 +25,7 @@
  * nothing downstream can tell the difference.
  *
  * Region files are named after the region's enum identifier, so
- * _wget.exe_dump/02.KOF_SCAN_PE_CODE is exactly the bytes a module asking for
+ * _wget.exe_dump/02.KGENOME_SCAN_PE_CODE is exactly the bytes a module asking for
  * that region would have been searched over, and the name is one somebody can
  * grep for to find where it came from.
  *
@@ -123,11 +123,13 @@
 
 #include "../libkofeng/analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../libkofeng/analyzers/parsers/binaries/funcs.h"
-#include "../libkofeng/analyzers/trueline/trueline.h"
-#include "../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
-#include "../libkofeng/detectors/overlord/plague/kofplague.h"
+#include <celllysis/trueline.h>
+#include "../libkofeng/detectors/linkage/kofdiag.h"
+#include "../libkofeng/analyzers/genome_obj.h"
+#include "../libkofeng/detectors/mutations/kofmutation.h"
 #include "../libkofeng/scanners/scan.h"
 #include "kofinspect.h"
+#include "kofscfind.h"
 #include "../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/gzip_parse.h"
 #include "../libkofeng/analyzers/parsers/containers/docole_parse.h"
@@ -140,7 +142,7 @@
 #include "../libkofeng/analyzers/parsers/containers/pdf_parse.h"
 
 #include "kofinspect.h"
-#include "../libkofeng/databases/hexprog.h"
+#include "../libkofeng/databases/pack/hexprog.h"
 
 /*
  * What one format offers a tool: how to recognise it, how to parse it, how big
@@ -391,9 +393,9 @@ static void put_off(const char *label, uint64_t v)
 {
 	/* "unresolved" is not a value, it is a parse that applies here and could
 	 * not finish - the one case on this line worth a second look. */
-	if (v == KOF_NA)
+	if (v == KGENOME_NA)
 		printf("%s=%sn/a%s", label, C_DIM, C_OFF);
-	else if (v == KOF_BROKEN)
+	else if (v == KGENOME_BROKEN)
 		printf("%s=%sunresolved%s", label, C_WARN, C_OFF);
 	else
 		printf("%s=%s%llu%s", label, C_LOC, (unsigned long long)v,
@@ -498,12 +500,12 @@ static uint32_t declared_regions(const struct kof_obj_ctx *ctx,
 static void print_elf(const void *view, const struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
-	const struct kof_elf_info *e = view;
+	const struct kgenome_elf_info *e = view;
 	uint32_t i;
 
 	printf("  class     %s %s%s%s  type=%u machine=%u\n",
-	       e->elf_class == KOF_ELFCLASS_64 ? "ELF64" : "ELF32", C_ID,
-	       e->elf_data == KOF_ELFDATA_BE ? "big-endian" : "little-endian",
+	       e->elf_class == KGENOME_ELFCLASS_64 ? "ELF64" : "ELF32", C_ID,
+	       e->elf_data == KGENOME_ELFDATA_BE ? "big-endian" : "little-endian",
 	       C_OFF, e->e_type, e->e_machine);
 	printf("  entry     addr=%s0x%llx%s ", C_LOC,
 	       (unsigned long long)e->entry_addr, C_OFF);
@@ -571,7 +573,7 @@ static void print_syms(const uint8_t *blk, uint32_t w)
 	printf("  symbols   %s%s%s  count=%s%u%s%s\n",
 	       C_ID, kof_sym_origin_name(blk, w),
 	       C_OFF, C_SIZE, count, C_OFF,
-	       blk[KOF_SYM_H_TRUNC] ? "  (truncated at the record cap)" : "");
+	       blk[KOF_SYM_H_TRUNC] ? "  (truncated: the block is full)" : "");
 	for (i = 0; i < count; i++) {
 		const uint8_t *r = kof_sym_rec(blk, w, i);
 
@@ -591,14 +593,14 @@ static void print_syms(const uint8_t *blk, uint32_t w)
 		       (fl & KOF_SYM_F_UNDEFINED)   ? "UND " : "",
 		       (fl & KOF_SYM_F_IN_WRITABLE) ? "W" : "",
 		       C_OFF,
-		       C_ID, (const char *)(r + KOF_SYM_R_NAME), C_OFF);
+		       C_ID, kof_sym_name(blk, w, r, NULL), C_OFF);
 	}
 }
 
 static void print_pe(const void *view, const struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
-	const struct kof_pe_info *p = view;
+	const struct kgenome_pe_info *p = view;
 	uint32_t i;
 
 	(void)buf;
@@ -1862,7 +1864,7 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
 		 */
 		for (j = 0, shown = 0; j < t->n_str && shown < 16u; j++) {
 			const struct kof_touch_str *s = &t->str[j];
-			int miss = s->at == KOF_BROKEN;
+			int miss = s->at == KGENOME_BROKEN;
 			const char *ci = miss ? "" : C_ID;
 			const char *cs = miss ? "" : C_SIZE;
 			const char *cl = miss ? "" : C_LOC;
@@ -1946,7 +1948,7 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
  * THE BLOCKS - what the engine cuts an object into, with every hash of each.
  *
  * `--blocks` lists the UNITS the similarity matcher reads and a block is made
- * from: the same cut the scanner makes (kof_scan_plague_units), so what is
+ * from: the same cut the scanner makes (kof_scan_mutation_units), so what is
  * printed is what would be matched. Per unit: its region, offset, length, side
  * (the author's or the static library's), the function it is when it is one, how
  * many distinct windows it holds, and the block - the K smallest of those
@@ -1958,10 +1960,10 @@ static void print_markers(struct kof_engine *eng, kof_buf buf,
  * hash are the engine's; this prints them.
  *
  * A NORMALISED VIEW has no headers of its own, so its functions are its
- * parent's found again in its bytes - kof_funcs_remap, the same call the
+ * parent's found again in its bytes - kgenome_funcs_remap, the same call the
  * scanner and the viewer make - and its library is already moved out.
  */
-static int g_blocks, g_hashes;
+static int g_blocks, g_hashes, g_scfind;
 static int g_decl_view;           /* the object on hand is a normalised view */
 static const char *g_root_path;   /* the file a recovered object came from */
 
@@ -1974,11 +1976,11 @@ struct blk_ctx {
 };
 
 static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
-		    uint32_t side, const struct kof_func *first)
+		    uint32_t side, const struct kgenome_func *first)
 {
 	struct blk_ctx *c = user;
-	uint32_t np = 0, k, nb, block[KOF_PLAGUE_MINHASH_K];
-	uint32_t *pool = kof_plague_pool(c->buf.p + off, len, KOF_PLAGUE_RAW, &np);
+	uint32_t np = 0, k, nb, block[KGENOME_MUTATION_MINHASH_K];
+	uint32_t *pool = kgenome_mutation_pool(c->buf.p + off, len, KGENOME_MUTATION_RAW, &np);
 	const char *rn = (c->fp && c->fp->region_name && region != KOF_SCAN_ALL)
 		       ? kof_region_label(c->fp->region_name(region)) : "ALL";
 	char sym[64];
@@ -1987,19 +1989,19 @@ static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 	if (first && c->syms)
 		kof_inspect_sym_name(c->syms, c->syms_n, first->value,
 				     (int)first->shndx, sym, sizeof sym);
-	nb = kof_plague_minhash(c->buf.p + off, len, KOF_PLAGUE_RAW, block);
+	nb = kgenome_mutation_minhash(c->buf.p + off, len, KGENOME_MUTATION_RAW, block);
 	c->units++;
 	printf("    unit  region=%s  off=0x%llx  len=%llu  side=%s", rn,
 	       (unsigned long long)off, (unsigned long long)len,
-	       side == KOF_PLAGUE_SIDE_LIB ? "LIB" : "USER");
+	       side == KGENOME_MUTATION_SIDE_LIB ? "LIB" : "USER");
 	if (first)
 		printf("  func=%s", sym[0] ? sym : "(no symbol)");
 	printf("  windows=%u", np);
-	if (nb >= KOF_PLAGUE_MIN_HASH)
-		printf("  block_id=%08x\n      block", kof_plague_fold(block, nb));
+	if (nb >= KGENOME_MUTATION_MIN_HASH)
+		printf("  block_id=%08x\n      block", kof_mutation_fold(block, nb));
 	else
 		printf("  block_id=-  (under %u windows: no block)\n      block",
-		       KOF_PLAGUE_MIN_HASH);
+		       KGENOME_MUTATION_MIN_HASH);
 	for (k = 0; k < nb; k++)
 		printf(" %08x", block[k]);
 	printf("\n");
@@ -2017,8 +2019,8 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 {
 	static struct kof_range ext[KOF_SRC_MAX_REGIONS];
 	static uint8_t blk[KOF_SYM_MAX_BYTES];
-	struct kof_func_set fs, parent;
-	struct kof_true_all lib;
+	struct kgenome_func_set fs, parent;
+	struct kgenome_true_all lib;
 	struct blk_ctx c;
 	int have_lib = 0;
 
@@ -2044,20 +2046,27 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 			    fread(rb, 1, (size_t)n, f) == (size_t)n) {
 				rf = kof_inspect_identify(kof_buf_make(rb, (uint64_t)n),
 							  &rctx, &rview);
-				if (rf && rctx.file_header)
-					kof_diag_funcs_of_view(&rctx,
+				if (rf && rctx.file_header) {
+					struct kgenome_obj robj;
+
+					kof_genome_obj(&rctx, &robj);
+					kgenome_diag_funcs_of_view(&robj,
 							       kof_buf_make(rb, (uint64_t)n),
 							       NULL, buf, &fs);
+				}
 			}
 			free(rview);
 			free(rb);
 			fclose(f);
 		}
 	} else if (ctx->file_header) {
-		kof_diag_funcs_of(ctx, buf.p, buf.n, &fs);
+		struct kgenome_obj gobj;
+
+		kof_genome_obj(ctx, &gobj);
+		kgenome_diag_funcs_of(&gobj, buf.p, buf.n, &fs);
 	}
 	if (!g_decl_view && ctx->format == KOF_FMT_ELF && ctx->file_header) {
-		kof_true_find_object(buf, ctx->file_header, &lib);
+		kgenome_true_find_object(buf, ctx->file_header, &lib);
 		have_lib = 1;
 	}
 	/* The names are the symbol table's, or what the engine said they are. */
@@ -2072,12 +2081,43 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 	printf("  blocks    %s%s%s  (unit = what the matcher reads; block = its %u "
 	       "smallest window hashes%s)\n", C_NOTE,
 	       g_decl_view ? "of a normalised view" : "of the object", C_OFF,
-	       KOF_PLAGUE_MINHASH_K, g_hashes ? "; pool = all of them" : "");
-	kof_scan_plague_units(ctx, buf, ~0u, &fs, have_lib ? &lib : NULL, ext,
+	       KGENOME_MUTATION_MINHASH_K, g_hashes ? "; pool = all of them" : "");
+	kof_scan_mutation_units(ctx, buf, ~0u, &fs, have_lib ? &lib : NULL, ext,
 			      blk_unit, &c);
 	printf("  units     %u\n", c.units);
-	kof_funcs_free(&fs);
-	kof_funcs_free(&parent);
+	kgenome_funcs_free(&fs);
+	kgenome_funcs_free(&parent);
+}
+
+/*
+ * --scfind: where a shellcode loader keeps its payload. An analysis the examiner
+ * offers on an ELF object and nothing the engine decides with - see kofscfind.h.
+ * The answer is a place and the way it was found, never a verdict.
+ */
+static void print_scfind(kof_buf buf, const struct kof_obj_ctx *ctx)
+{
+	static struct kofscfind f;
+	struct kgenome_obj gobj;
+	enum kgenome_status st;
+
+	if (ctx->format != KOF_FMT_ELF || !ctx->file_header) {
+		printf("  scfind    %snot an ELF object%s\n", C_NOTE, C_OFF);
+		return;
+	}
+	kof_genome_obj(ctx, &gobj);
+	st = kofscfind_find(&gobj, buf.p, buf.n, &f);
+	if (st != KGENOME_OK || !f.found) {
+		printf("  scfind    %snone%s\n", C_NOTE, C_OFF);
+		return;
+	}
+	printf("  scfind    payload at va %s0x%llx%s, offset 0x%llx, %s%llu%s bytes",
+	       C_SIZE, (unsigned long long)f.va, C_OFF, (unsigned long long)f.at,
+	       C_SIZE, (unsigned long long)f.len, C_OFF);
+	if (f.bits)
+		printf(", %u-bit syscall", f.bits);
+	if (f.dec_n)
+		printf(", base64 (%u bytes decoded)", f.dec_n);
+	printf("\n");
 }
 
 static int examine_bytes(kof_buf buf, const char *display, const char *dir,
@@ -2131,7 +2171,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 		/*
 		 * AND FOR A SCRIPT, THE FAMILY WHERE THE ARCHITECTURE WOULD BE.
 		 *
-		 * Every script is KOF_ARCH_ANY, so that column printed "any"
+		 * Every script is KGENOME_ARCH_ANY, so that column printed "any"
 		 * on every one of them and carried no information. The family
 		 * does: kof_module_precond declines a module whose declared
 		 * subtypes all sit in another one, and a reader looking at
@@ -2259,6 +2299,8 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			print_markers(eng, buf, &ctx, f, display);
 		if (g_blocks)
 			print_blocks(buf, &ctx);
+		if (g_scfind)
+			print_scfind(buf, &ctx);
 		rc = 1;
 	}
 out:
@@ -2774,7 +2816,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s [--dump] [--blocks|--hashes] [--db <dir>] <file>...\n"
+		"usage: %s [--dump] [--blocks|--hashes] [--scfind] [--db <dir>] <file>...\n"
 		"\n"
 		"  --dump     also write each region of each file into a directory\n"
 		"             beside it: <path>/_<name>_dump/<region enum name>\n"
@@ -2796,6 +2838,8 @@ static void usage(const char *argv0)
 		"             function, window count, and each unit's block (its\n"
 		"             smallest window hashes, the values a rule carries). With\n"
 		"             --db, the normalised view of a file is listed too.\n"
+		"  --scfind   where a shellcode loader keeps its payload, for an ELF\n"
+		"             object: a place and how it was found, not a verdict.\n"
 		"  --hashes   as --blocks, and also every distinct window hash of each\n"
 		"             unit (the pool), ascending: the full set, for comparing\n"
 		"             two samples. Large; redirect it to a file.\n",
@@ -2833,6 +2877,8 @@ int main(int argc, char **argv)
 			verbose = 1;
 		} else if (strcmp(argv[i], "--blocks") == 0) {
 			g_blocks = 1;
+		} else if (strcmp(argv[i], "--scfind") == 0) {
+			g_scfind = 1;
 		} else if (strcmp(argv[i], "--hashes") == 0) {
 			g_blocks = 1;
 			g_hashes = 1;

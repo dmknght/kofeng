@@ -34,8 +34,8 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <phenotype/diag_int.h>
 
 static int fails;
 
@@ -45,9 +45,9 @@ static int fails;
 
 int main(void)
 {
-	struct kof_diag_hit hits[4];
-	struct kof_diag_scan s;
-	struct kof_diag_hit *h;
+	struct kgenome_diag_hit hits[4];
+	struct kgenome_diag_scan s;
+	struct kgenome_diag_hit *h;
 
 	memset(hits, 0, sizeof hits);
 	memset(&s, 0, sizeof s);
@@ -56,24 +56,24 @@ int main(void)
 
 	/* the three nodes of a hooked getdents, built by hand so the test
 	 * states the shape rather than depending on a sample to contain it */
-	CK(kof_diag_hit_add(&s, 0x10, KOF_NUCLEO_HEAP, 0) != NULL);
-	CK(kof_diag_hit_add(&s, 0x20, KOF_NUCLEO_COPY_FROM_USER, 0) != NULL);
-	CK(kof_diag_hit_add(&s, 0x30, KOF_NUCLEO_COPY_TO_USER, 0) != NULL);
+	CK(kgenome_diag_hit_add(&s, 0x10, KGENOME_NUCLEO_HEAP, 0) != NULL);
+	CK(kgenome_diag_hit_add(&s, 0x20, KGENOME_NUCLEO_COPY_FROM_USER, 0) != NULL);
+	CK(kgenome_diag_hit_add(&s, 0x30, KGENOME_NUCLEO_COPY_TO_USER, 0) != NULL);
 	CK(s.n_hit == 3u);
 
-	h = kof_diag_hit_of(&s, 1u);
+	h = kgenome_diag_hit_of(&s, 1u);
 	CK(h != NULL);
 	if (h)
-		kof_diag_note_in(h, 0u, KOF_DIAG_ROLE_BUFFER,
-				 KOF_DIAG_KIND_PRODUCED);
+		kgenome_diag_note_in(&s, h, 0u, KGENOME_DIAG_ROLE_BUFFER,
+				 KGENOME_DIAG_KIND_PRODUCED);
 
-	h = kof_diag_hit_of(&s, 2u);
+	h = kgenome_diag_hit_of(&s, 2u);
 	CK(h != NULL);
 	if (h) {
-		kof_diag_note_in(h, 0u, KOF_DIAG_ROLE_SOURCE,
-				 KOF_DIAG_KIND_PRODUCED);
-		kof_diag_note_in(h, 1u, KOF_DIAG_ROLE_SOURCE,
-				 KOF_DIAG_KIND_SHARED);
+		kgenome_diag_note_in(&s, h, 0u, KGENOME_DIAG_ROLE_SOURCE,
+				 KGENOME_DIAG_KIND_PRODUCED);
+		kgenome_diag_note_in(&s, h, 1u, KGENOME_DIAG_ROLE_SOURCE,
+				 KGENOME_DIAG_KIND_SHARED);
 	}
 
 	/*
@@ -89,8 +89,8 @@ int main(void)
 	/* and a repeat of either IS refused - the loop case the dedup exists
 	 * for, which must survive the key growing a third field */
 	if (h) {
-		kof_diag_note_in(h, 1u, KOF_DIAG_ROLE_SOURCE,
-				 KOF_DIAG_KIND_SHARED);
+		kgenome_diag_note_in(&s, h, 1u, KGENOME_DIAG_ROLE_SOURCE,
+				 KGENOME_DIAG_KIND_SHARED);
 		CK(h->n_in == 2u);
 	}
 
@@ -101,9 +101,9 @@ int main(void)
 	 */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KOF_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
-			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KGENOME_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
+			  KGENOME_DIAG_ROLE_NONE, 0, 0 },
+			{ KGENOME_NUCLEO_COPY_TO_USER, 0, 0, KGENOME_DIAG_ROLE_SOURCE,
 			  0, 0 },
 		};
 		static const struct kof_diag dg = {
@@ -124,15 +124,15 @@ int main(void)
 	 */
 	{
 		static const struct kof_diag_node yes[] = {
-			{ KOF_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
-			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KGENOME_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
+			  KGENOME_DIAG_ROLE_NONE, 0, 0 },
+			{ KGENOME_NUCLEO_COPY_TO_USER, 0, 0, KGENOME_DIAG_ROLE_SOURCE,
 			  KOF_DIAG_B_SHARED, 0 },
 		};
 		static const struct kof_diag_node no[] = {
-			{ KOF_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
-			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KGENOME_NUCLEO_COPY_FROM_USER, 0, KOF_DIAG_NO_PARENT,
+			  KGENOME_DIAG_ROLE_NONE, 0, 0 },
+			{ KGENOME_NUCLEO_COPY_TO_USER, 0, 0, KGENOME_DIAG_ROLE_SOURCE,
 			  KOF_DIAG_B_PRODUCED, 0 },
 		};
 		static const struct kof_diag dyes = {
@@ -149,9 +149,9 @@ int main(void)
 	/* and the allocation's edge is provenance, from the other side */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KOF_NUCLEO_HEAP, 0, KOF_DIAG_NO_PARENT,
-			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_NUCLEO_COPY_TO_USER, 0, 0, KOF_DIAG_ROLE_SOURCE,
+			{ KGENOME_NUCLEO_HEAP, 0, KOF_DIAG_NO_PARENT,
+			  KGENOME_DIAG_ROLE_NONE, 0, 0 },
+			{ KGENOME_NUCLEO_COPY_TO_USER, 0, 0, KGENOME_DIAG_ROLE_SOURCE,
 			  KOF_DIAG_B_PRODUCED, 0 },
 		};
 		static const struct kof_diag dg = {

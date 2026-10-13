@@ -15,7 +15,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -71,10 +71,10 @@ static void syscalls_answered(void)
 	for (i = 0; i < sizeof want / sizeof want[0]; i++) {
 		uint8_t code[64];
 		unsigned n = 0;
-		struct kof_emu_cfg cfg = { 0 };
+		struct kgenome_emu_cfg cfg = { 0 };
 
 		cfg.max_insn = 100000;
-		struct kof_emu *e = kof_emu_new(&cfg);
+		struct kgenome_emu *e = kgenome_emu_new(&cfg);
 		uint64_t ret;
 
 		if (!e) { fail("out of memory"); return; }
@@ -93,21 +93,21 @@ static void syscalls_answered(void)
 		code[n++] = 0x0F; code[n++] = 0x05;
 		code[n++] = 0xF4;                       /* hlt: stop here */
 
-		kof_emu_map(e, CODE_VA, code, n, 0x1000,
-			    KOF_EMU_R | KOF_EMU_X);
-		kof_emu_map(e, buf, NULL, 0, 0x3000, KOF_EMU_R | KOF_EMU_W);
-		kof_emu_map(e, STACK_VA, NULL, 0, 0x1000,
-			    KOF_EMU_R | KOF_EMU_W);
-		kof_emu_set_rip(e, CODE_VA);
-		kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
-		(void)kof_emu_run(e);
-		ret = kof_emu_get_reg(e, KOF_EMU_RAX);
+		kgenome_emu_map(e, CODE_VA, code, n, 0x1000,
+			    KGENOME_EMU_R | KGENOME_EMU_X);
+		kgenome_emu_map(e, buf, NULL, 0, 0x3000, KGENOME_EMU_R | KGENOME_EMU_W);
+		kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000,
+			    KGENOME_EMU_R | KGENOME_EMU_W);
+		kgenome_emu_set_rip(e, CODE_VA);
+		kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
+		(void)kgenome_emu_run(e);
+		ret = kgenome_emu_get_reg(e, KGENOME_EMU_RAX);
 		if ((int64_t)ret == -38) {              /* ENOSYS */
 			printf("  FAIL %s answered -ENOSYS\n", want[i].name);
 			failures++;
 			refused++;
 		}
-		kof_emu_free(e);
+		kgenome_emu_free(e);
 	}
 	printf("  %zu syscall(s) a stub asks first, %u refused\n",
 	       sizeof want / sizeof want[0], refused);
@@ -139,9 +139,9 @@ int main(void)
 	uint8_t cipher[16];
 	/* This stub really does hand off by jumping into what it wrote, which is
 	 * the case the option exists for. */
-	struct kof_emu_cfg cfg = { 0 };
-	struct kof_emu *e;
-	enum kof_emu_stop st;
+	struct kgenome_emu_cfg cfg = { 0 };
+	struct kgenome_emu *e;
+	enum kgenome_emu_stop st;
 	uint32_t it = 0, runs = 0;
 	uint64_t va, len;
 
@@ -153,34 +153,34 @@ int main(void)
 	for (i = 0; i < 16; i++)
 		cipher[i] = (uint8_t)plain[i] ^ KEY;
 
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e) { fail("out of memory"); return 1; }
 
-	if (!kof_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
-			 KOF_EMU_R | KOF_EMU_X) ||
-	    !kof_emu_map(e, DATA_VA, cipher, sizeof cipher, 0x1000,
-			 KOF_EMU_R | KOF_EMU_W) ||
-	    !kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W))
+	if (!kgenome_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
+			 KGENOME_EMU_R | KGENOME_EMU_X) ||
+	    !kgenome_emu_map(e, DATA_VA, cipher, sizeof cipher, 0x1000,
+			 KGENOME_EMU_R | KGENOME_EMU_W) ||
+	    !kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W))
 		fail("map");
 
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
 
-	st = kof_emu_run(e);
+	st = kgenome_emu_run(e);
 	printf("  ran %llu insn, stopped: %s%s%s\n",
-	       (unsigned long long)kof_emu_insn_count(e),
-	       kof_emu_stop_name(st),
-	       kof_emu_stop_detail(e)[0] ? " " : "", kof_emu_stop_detail(e));
+	       (unsigned long long)kgenome_emu_insn_count(e),
+	       kgenome_emu_stop_name(st),
+	       kgenome_emu_stop_detail(e)[0] ? " " : "", kgenome_emu_stop_detail(e));
 
 	/*
 	 * HANDOFF and not BUDGET. Reaching the end by running out of budget
 	 * would mean the jump into the decrypted page was not recognised, and
 	 * the one thing this emulator exists to notice is exactly that moment.
 	 */
-	if (st != KOF_EMU_STOP_HANDOFF)
+	if (st != KGENOME_EMU_STOP_HANDOFF)
 		fail("did not stop at the jump into what it wrote");
 
-	while (kof_emu_next_written(e, &it, &va, &bytes, &len)) {
+	while (kgenome_emu_next_written(e, &it, &va, &bytes, &len)) {
 		runs++;
 		if (va <= DATA_VA && DATA_VA + 16 <= va + len &&
 		    !memcmp(bytes + (DATA_VA - va), plain, 15))
@@ -196,7 +196,7 @@ int main(void)
 	printf("  %u written run(s), plaintext recovered: %s\n",
 	       runs, found ? "yes" : "NO");
 
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 
 	syscalls_answered();
 

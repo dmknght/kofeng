@@ -207,19 +207,7 @@ static const uint32_t tar_cls_bit[KOF_TAR_CLS_COUNT] = {
 	KOF_SCAN_TAR_DATA
 };
 
-static uint32_t tar_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_tar_info *t = (const struct kof_tar_info *)ctx->file_header;
-
-	if (!t || !t->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof t->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)t->run, t->n_runs, mask,
-				tar_cls_bit, KOF_SCAN_TAR_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(tar, struct kof_tar_info, tar_cls_bit, KOF_SCAN_TAR_UNCLAIMED)
 
 /* ---- the parse ---------------------------------------------------------------- */
 

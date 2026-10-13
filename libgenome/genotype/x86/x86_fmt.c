@@ -94,19 +94,19 @@ static void put_gpr(struct out *o, unsigned n, unsigned size, int rexlike)
 	}
 }
 
-static void put_reg(struct out *o, const struct gt_x86_op *op, int rexlike)
+static void put_reg(struct out *o, const struct kgenome_x86_op *op, int rexlike)
 {
 	switch (op->rtype) {
-	case GT_X86_REG_GPR: put_gpr(o, op->reg, op->rsize, rexlike); break;
-	case GT_X86_REG_SEG:
+	case KGENOME_X86_REG_GPR: put_gpr(o, op->reg, op->rsize, rexlike); break;
+	case KGENOME_X86_REG_SEG:
 		if (op->reg > 7)
 			o->bad = 1;
 		else
 			put(o, segn[op->reg]);
 		break;
-	case GT_X86_REG_FPU: if (op->reg > 7) o->bad = 1; else put_numbered(o, "st", op->reg); break;
-	case GT_X86_REG_MMX: if (op->reg > 7) o->bad = 1; else put_numbered(o, "mm", op->reg); break;
-	case GT_X86_REG_SSE:
+	case KGENOME_X86_REG_FPU: if (op->reg > 7) o->bad = 1; else put_numbered(o, "st", op->reg); break;
+	case KGENOME_X86_REG_MMX: if (op->reg > 7) o->bad = 1; else put_numbered(o, "mm", op->reg); break;
+	case KGENOME_X86_REG_SSE:
 		if (op->reg > 31)
 			o->bad = 1;
 		else if (op->rsize == 16)
@@ -118,12 +118,12 @@ static void put_reg(struct out *o, const struct gt_x86_op *op, int rexlike)
 		else
 			o->bad = 1;
 		break;
-	case GT_X86_REG_CR: if (op->reg > 31) o->bad = 1; else put_numbered(o, "cr", op->reg); break;
-	case GT_X86_REG_DR: if (op->reg > 31) o->bad = 1; else put_numbered(o, "dr", op->reg); break;
-	case GT_X86_REG_TR: if (op->reg > 15) o->bad = 1; else put_numbered(o, "tr", op->reg); break;
-	case GT_X86_REG_BND: if (op->reg > 3) o->bad = 1; else put_numbered(o, "bnd", op->reg); break;
-	case GT_X86_REG_MSK: if (op->reg > 7) o->bad = 1; else put_numbered(o, "k", op->reg); break;
-	case GT_X86_REG_TILE: if (op->reg > 7) o->bad = 1; else put_numbered(o, "tmm", op->reg); break;
+	case KGENOME_X86_REG_CR: if (op->reg > 31) o->bad = 1; else put_numbered(o, "cr", op->reg); break;
+	case KGENOME_X86_REG_DR: if (op->reg > 31) o->bad = 1; else put_numbered(o, "dr", op->reg); break;
+	case KGENOME_X86_REG_TR: if (op->reg > 15) o->bad = 1; else put_numbered(o, "tr", op->reg); break;
+	case KGENOME_X86_REG_BND: if (op->reg > 3) o->bad = 1; else put_numbered(o, "bnd", op->reg); break;
+	case KGENOME_X86_REG_MSK: if (op->reg > 7) o->bad = 1; else put_numbered(o, "k", op->reg); break;
+	case KGENOME_X86_REG_TILE: if (op->reg > 7) o->bad = 1; else put_numbered(o, "tmm", op->reg); break;
 	default: break;
 	}
 	if (op->count > 1) {
@@ -134,12 +134,12 @@ static void put_reg(struct out *o, const struct gt_x86_op *op, int rexlike)
 	}
 }
 
-static void put_mem(struct out *o, const struct gt_x86_insn *I, const struct gt_x86_op *op,
+static void put_mem(struct out *o, const struct kgenome_x86_insn *I, const struct kgenome_x86_op *op,
 		    uint64_t rip, int rexlike)
 {
 	/* A gather names the size of one element, not of everything it touches. */
-	const unsigned size = (op->mf & GT_X86_M_VSIB) ? op->elem : op->size;
-	const unsigned asz = gt_x86_asz(I);
+	const unsigned size = (op->mf & KGENOME_X86_M_VSIB) ? op->elem : op->size;
+	const unsigned asz = kgenome_x86_asz(I);
 	unsigned trim = asz == 2 ? 2u : asz == 4 ? 4u : 8u;
 	uint64_t disp = (uint64_t)op->v;
 
@@ -157,30 +157,30 @@ static void put_mem(struct out *o, const struct gt_x86_insn *I, const struct gt_
 	default: break;
 	}
 	/* A segment is named only when a prefix said so, and in 64-bit mode only fs and gs. */
-	if ((op->mf & GT_X86_M_SEG) && I->segr &&
+	if ((op->mf & KGENOME_X86_M_SEG) && I->segr &&
 	    (I->mode != 64 || op->seg == 4 || op->seg == 5)) {
 		put(o, segn[op->seg & 7]);
 		put(o, ":");
 	}
 	put(o, "[");
-	if (op->mf & GT_X86_M_BASE)
+	if (op->mf & KGENOME_X86_M_BASE)
 		put_gpr(o, op->base, op->bsz, rexlike);
-	if (op->mf & GT_X86_M_INDEX) {
-		if (op->mf & GT_X86_M_BASE)
+	if (op->mf & KGENOME_X86_M_INDEX) {
+		if (op->mf & KGENOME_X86_M_BASE)
 			put(o, "+");
-		if (op->isz >= 16 && (op->mf & GT_X86_M_VSIB)) {
+		if (op->isz >= 16 && (op->mf & KGENOME_X86_M_VSIB)) {
 			put_numbered(o, op->isz == 16 ? "xmm" : op->isz == 32 ? "ymm" : "zmm", op->index);
 		} else {
 			put_gpr(o, op->index, op->isz, rexlike);
 		}
-		if (op->scale != 1 && !(op->mf & GT_X86_M_MIB))
+		if (op->scale != 1 && !(op->mf & KGENOME_X86_M_MIB))
 			putf(o, "*%llu", op->scale);
 	}
-	if (op->mf & GT_X86_M_DISP) {
-		const int based = (op->mf & (GT_X86_M_BASE | GT_X86_M_INDEX)) != 0;
+	if (op->mf & KGENOME_X86_M_DISP) {
+		const int based = (op->mf & (KGENOME_X86_M_BASE | KGENOME_X86_M_INDEX)) != 0;
 		uint64_t norm;
 
-		if ((op->mf & GT_X86_M_DIRECT) || !based) {
+		if ((op->mf & KGENOME_X86_M_DIRECT) || !based) {
 			norm = disp;
 		} else {
 			/* Shown as a sign and a magnitude, at the width the bytes had. An EVEX disp8
@@ -196,7 +196,7 @@ static void put_mem(struct out *o, const struct gt_x86_insn *I, const struct gt_
 		}
 		if (based)
 			put(o, (disp >> 63) ? "-" : "+");
-		if (op->mf & GT_X86_M_RIPREL) {
+		if (op->mf & KGENOME_X86_M_RIPREL) {
 			uint64_t target = disp + rip + I->len;
 
 			if (asz == 4)
@@ -211,36 +211,36 @@ static void put_mem(struct out *o, const struct gt_x86_insn *I, const struct gt_
 	put(o, "]");
 }
 
-size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_t cap)
+size_t kgenome_x86_format(const struct kgenome_x86_insn *I, uint64_t rip, char *buf, size_t cap)
 {
-	const struct gt_x86_leaf *L = &gt_x86_leaves[I->leaf];
+	const struct kgenome_x86_leaf *L = &kgenome_x86_leaves[I->leaf];
 	const unsigned osz = I->osz;
-	const unsigned mn = gt_x86_mnk[L->mnk][osz];
-	const char *mnem = gt_x86_mnem[mn & 0xfffu];
+	const unsigned mn = kgenome_x86_mnk[L->mnk][osz];
+	const char *mnem = kgenome_x86_mnem[mn & 0xfffu];
 	const unsigned wl = mn >> 12;               /* 1: 16-bit, 2: 32-bit, 3: 64-bit */
-	const int lock = (I->flags & GF_X86_LOCK) != 0;
-	const int rexlike = I->sp != 0 || (I->flags & GF_X86_REX) != 0;
+	const int lock = (I->flags & KGENOME_GF_X86_LOCK) != 0;
+	const int rexlike = I->sp != 0 || (I->flags & KGENOME_GF_X86_REX) != 0;
 	struct out o = { buf, 0, cap, 0 };
 	unsigned k, shown = 0, nform = L->nform;
 
 	if (!buf || cap < 32)
 		return 0;
 	buf[0] = 0;
-	if (L->pf & GP_X86_REPC) {
+	if (L->pf & KGENOME_GP_X86_REPC) {
 		if (I->rep == 0xf3)
 			put(&o, "REPZ ");
 		else if (I->rep == 0xf2)
 			put(&o, "REPNZ ");
 	}
-	if (L->pf & GP_X86_REP) {
+	if (L->pf & KGENOME_GP_X86_REP) {
 		if (I->rep == 0xf3)
 			put(&o, "REP ");
 		else if (I->rep == 0xf2)
 			put(&o, "REPNZ ");
 	}
 	{
-		const int xacq = (L->pf & GP_X86_XACQ) || (lock && (L->pf2 & GQ_X86_XACQ_LOCK));
-		const int xrel = (L->pf & GP_X86_XREL) || (lock && (L->pf2 & GQ_X86_XREL_LOCK));
+		const int xacq = (L->pf & KGENOME_GP_X86_XACQ) || (lock && (L->pf2 & KGENOME_GQ_X86_XACQ_LOCK));
+		const int xrel = (L->pf & KGENOME_GP_X86_XREL) || (lock && (L->pf2 & KGENOME_GQ_X86_XREL_LOCK));
 
 		if (xrel)
 			put(&o, "XRELEASE ");
@@ -249,11 +249,11 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 	}
 	/* In 32-bit mode a LOCK in front of a move to or from a control register is AMD's way
 	 * of writing CR8 and is not a lock. */
-	if (lock && !(I->mode == 32 && I->id == GT_X86_I_MOV_CR))
+	if (lock && !(I->mode == 32 && I->id == KGENOME_X86_I_MOV_CR))
 		put(&o, "LOCK ");
-	if (L->pf & GP_X86_BND)
+	if (L->pf & KGENOME_GP_X86_BND)
 		put(&o, "BND ");
-	if ((L->pf2 & GQ_X86_BHINT) && I->segr) {
+	if ((L->pf2 & KGENOME_GQ_X86_BHINT) && I->segr) {
 		if (I->segr == 0x3e)
 			put(&o, "BHT ");
 		else if (I->segr == 0x2e)
@@ -261,23 +261,23 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 		else if (I->segr == 0x64)
 			put(&o, "BHALT ");
 	}
-	if ((L->pf2 & GQ_X86_DNT) && I->segr == 0x3e)
+	if ((L->pf2 & KGENOME_GQ_X86_DNT) && I->segr == 0x3e)
 		put(&o, "DNT ");
 	put(&o, mnem);
 	if (!nform)
 		return o.bad ? 0 : o.n;
 
 	for (k = 0; k < nform; k++) {
-		struct gt_x86_op op;
+		struct kgenome_x86_op op;
 
-		gt_x86_operand(I, k, &op);
-		if (op.type == GT_X86_OP_NONE)
+		kgenome_x86_operand(I, k, &op);
+		if (op.type == KGENOME_X86_OP_NONE)
 			break;
-		if ((op.flags & GT_X86_OF_DEFAULT) || op.type == GT_X86_OP_DFV)
+		if ((op.flags & KGENOME_X86_OF_DEFAULT) || op.type == KGENOME_X86_OP_DFV)
 			continue;
 		/* The mask register an EVEX instruction names in aaa is printed as a decoration of
 		 * the destination, not as an operand of its own. */
-		if (op.enc == GT_X86_ENC_A && op.type == GT_X86_OP_REG && op.rtype == GT_X86_REG_MSK && k > 0)
+		if (op.enc == KGENOME_X86_ENC_A && op.type == KGENOME_X86_OP_REG && op.rtype == KGENOME_X86_REG_MSK && k > 0)
 			continue;
 		if (!shown) {
 			/* Operands start in column 10, or one space on if the mnemonic is longer. */
@@ -289,19 +289,19 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 		}
 		shown++;
 		switch (op.type) {
-		case GT_X86_OP_REG:
+		case KGENOME_X86_OP_REG:
 			put_reg(&o, &op, rexlike);
 			break;
-		case GT_X86_OP_BANK:
+		case KGENOME_X86_OP_BANK:
 			break;
-		case GT_X86_OP_CONST: {
+		case KGENOME_X86_OP_CONST: {
 			char t[24];
 
 			snprintf(t, sizeof t, "%d", (int)op.v);
 			put(&o, t);
 			break;
 		}
-		case GT_X86_OP_IMM:
+		case KGENOME_X86_OP_IMM:
 			switch (op.size) {
 			case 1: putf(&o, "0x%02llx", (uint64_t)op.v & 0xffu); break;
 			case 2: putf(&o, "0x%04llx", (uint64_t)op.v & 0xffffu); break;
@@ -309,7 +309,7 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 			default: putf(&o, "0x%016llx", (uint64_t)op.v); break;
 			}
 			break;
-		case GT_X86_OP_REL: {
+		case KGENOME_X86_OP_REL: {
 			uint64_t dest = rip + I->len + (uint64_t)op.v;
 
 			if (wl == 1)
@@ -319,8 +319,8 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 			putf(&o, "0x%llx", dest);
 			break;
 		}
-		case GT_X86_OP_FAR: {
-			const unsigned addr = gt_x86_lenk[L->lenk][3 * GT_X86_NOSZ + osz];
+		case KGENOME_X86_OP_FAR: {
+			const unsigned addr = kgenome_x86_lenk[L->lenk][3 * KGENOME_X86_NOSZ + osz];
 			char t[40];
 
 			if (addr == 4)
@@ -332,10 +332,10 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 			put(&o, t);
 			break;
 		}
-		case GT_X86_OP_MEM:
+		case KGENOME_X86_OP_MEM:
 			put_mem(&o, I, &op, rip, rexlike);
 			/* An embedded broadcast: the element is repeated to fill the vector. */
-			if (op.mf & GT_X86_M_BCAST)
+			if (op.mf & KGENOME_X86_M_BCAST)
 				putf(&o, "{1to%llu}", op.elem);
 			break;
 		default:
@@ -345,7 +345,7 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 		if (I->sp == 3) {
 			static const char *const round[4] = { "rn", "rd", "ru", "rz" };
 			const unsigned aaa = I->evex & 7u;
-			const int imm1 = gt_x86_lenk[L->lenk][osz] != 0;
+			const int imm1 = kgenome_x86_lenk[L->lenk][osz] != 0;
 
 			/* The mask and its zeroing belong to the destination, the first operand. */
 			if (k == 0 && aaa) {
@@ -355,11 +355,11 @@ size_t gt_x86_format(const struct gt_x86_insn *I, uint64_t rip, char *buf, size_
 			}
 			/* Suppress-all-exceptions and embedded rounding sit after the last
 			 * register or memory operand (before a trailing immediate). */
-			if ((op.type == GT_X86_OP_MEM || op.type == GT_X86_OP_REG) &&
+			if ((op.type == KGENOME_X86_OP_MEM || op.type == KGENOME_X86_OP_REG) &&
 			    (k + 1 == nform || (k + 2 == nform && imm1))) {
-				if ((L->pf & GP_X86_SAE) && !(L->pf & GP_X86_ER))
+				if ((L->pf & KGENOME_GP_X86_SAE) && !(L->pf & KGENOME_GP_X86_ER))
 					put(&o, "{sae}");
-				if (L->pf & GP_X86_ER) {
+				if (L->pf & KGENOME_GP_X86_ER) {
 					put(&o, "{");
 					put(&o, round[(I->evex >> 5) & 3u]);
 					put(&o, "-sae}");

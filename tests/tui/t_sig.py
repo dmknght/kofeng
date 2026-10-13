@@ -18,7 +18,7 @@ def sigs():
 def build_rule(v, family='TestFam', text='GCC: (Debian', typ=None):
     """string + find_str matcher + marker + condition + matcher-in-condition + family"""
     enlarge(v, 10)
-    fold_plague(v)
+    fold_mutation(v)
     add_string(v, text)
     add_matcher(v, 'find_str')
     y = [y for y in panel(v) if 'Markers: none yet' in v.row(y)][0]
@@ -57,7 +57,7 @@ def generate_needs_family_and_says_so():
 def generate_needs_a_matcher_in_every_condition():
     fresh_bases()
     with ko() as v:
-        enlarge(v, 10); fold_plague(v)
+        enlarge(v, 10); fold_mutation(v)
         add_string(v, 'GCC')
         add_matcher(v, 'find_str')
         y = [y for y in panel(v) if 'Markers: none yet' in v.row(y)][0]

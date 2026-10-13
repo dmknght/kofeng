@@ -2,7 +2,7 @@
  * imports_fuzz - the import directory the engine writes from a module's
  * declarations, against declarations that make no sense.
  *
- * WHY IT IS FUZZED AT ALL. `kof_pe_write_imports` is fed by a module reading a
+ * WHY IT IS FUZZED AT ALL. `kgenome_pe_write_imports` is fed by a module reading a
  * PACKER'S OWN TABLE - MPRESS's hint list - so every library name, every
  * function name, every ordinal and every thunk address in it came out of a file
  * somebody else wrote. The module bounds what it reads; this bounds what is
@@ -46,7 +46,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofcore/kofplatform.h"
-#include "../../libkofeng/extractors/unpack/pe_rebuild.h"
+#include <genotype/image/pe_rebuild.h>
 
 #define IMG_N    (1u << 20)
 #define MAX_IMP  256u
@@ -128,7 +128,7 @@ static uint32_t pick_name(void)
 }
 
 static uint8_t img[IMG_N], copy[IMG_N];
-static struct kof_imp_decl imp[MAX_IMP];
+static struct kgenome_imp_decl imp[MAX_IMP];
 
 /*
  * Walk the written table and check it says what was declared.
@@ -374,8 +374,8 @@ static void one(uint64_t r)
 	memset(img, MARKER, IMG_N);
 	memcpy(copy, img, IMG_N);
 
-	size = kof_pe_imports_size(imp, n, pool, pool_n, is64);
-	got = kof_pe_write_imports(img, IMG_N, base, imp, n, pool, pool_n,
+	size = kgenome_pe_imports_size(imp, n, pool, pool_n, is64);
+	got = kgenome_pe_write_imports(img, IMG_N, base, imp, n, pool, pool_n,
 				   is64);
 	rounds_done++;
 

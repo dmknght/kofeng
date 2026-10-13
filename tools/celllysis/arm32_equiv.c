@@ -4,9 +4,9 @@
  * A DEV TOOL, NOT A TEST: the reference is the decoder as it was BEFORE the split
  * into genotype (a decode table) and celllysis (the adapter), copied out of the
  * tree with every external symbol renamed (ref_decode_a32, ref_decode_t32,
- * ref_arm_*). The new pipeline is cell_decode_arm32 / cell_decode_thumb as they
+ * ref_arm_*). The new pipeline is kgenome_cell_decode_arm32 / kgenome_cell_decode_thumb as they
  * are in the tree. Both decode the same bytes at the same address and EVERY
- * field of struct cell_insn is compared - op, len, n_op, cond, flags, wmask, at,
+ * field of struct kgenome_cell_insn is compared - op, len, n_op, cond, flags, wmask, at,
  * at_va, target, target_va, and for each of the three operands kind, reg, index,
  * scale, size, flags, seg, disp, imm. The padding is not defined and is not
  * compared. The returned length is compared too.
@@ -43,15 +43,15 @@
 #include <string.h>
 #include <time.h>
 
-#include "kofmod/cell.h"
-#include "celllysis/decode.h"
+#include "../../libkofeng/kofcore/kofmod/cell.h"
+#include <celllysis/decode.h>
 #include <arm32/arm32.h>
 #include <arm32/thumb.h>
 
 uint32_t ref_decode_a32(const uint8_t *p, uint32_t n, uint64_t va, int be,
-			struct cell_insn *out);
+			struct kgenome_cell_insn *out);
 uint32_t ref_decode_t32(const uint8_t *p, uint32_t n, uint64_t va, int be,
-			struct cell_insn *out);
+			struct kgenome_cell_insn *out);
 
 #define NTHREADS 16
 
@@ -84,7 +84,7 @@ static uint64_t rng_next(uint64_t *s)
 }
 
 /* The first field that differs, as a name; NULL when they are equal. */
-static const char *cmp_insn(const struct cell_insn *a, const struct cell_insn *b)
+static const char *cmp_insn(const struct kgenome_cell_insn *a, const struct kgenome_cell_insn *b)
 {
 	unsigned i;
 
@@ -97,7 +97,7 @@ static const char *cmp_insn(const struct cell_insn *a, const struct cell_insn *b
 			{ "o1.kind", "o1.reg", "o1.index", "o1.scale", "o1.size", "o1.flags", "o1.seg", "o1.disp", "o1.imm" },
 			{ "o2.kind", "o2.reg", "o2.index", "o2.scale", "o2.size", "o2.flags", "o2.seg", "o2.disp", "o2.imm" },
 		};
-		const struct cell_operand *x = &a->o[i], *y = &b->o[i];
+		const struct kgenome_cell_operand *x = &a->o[i], *y = &b->o[i];
 
 		if (x->kind != y->kind) return nm[i][0];
 		if (x->reg != y->reg) return nm[i][1];
@@ -114,8 +114,8 @@ static const char *cmp_insn(const struct cell_insn *a, const struct cell_insn *b
 }
 
 static void report(const char *what, const uint8_t *b, unsigned nb, uint64_t va,
-		   int be, uint32_t ra, uint32_t rb, const struct cell_insn *x,
-		   const struct cell_insn *y)
+		   int be, uint32_t ra, uint32_t rb, const struct kgenome_cell_insn *x,
+		   const struct kgenome_cell_insn *y)
 {
 	pthread_mutex_lock(&g_mu);
 	g_diffs++;
@@ -138,7 +138,7 @@ static uint64_t g_count[NTHREADS];
 static inline void one(int thumb, const uint8_t *b, unsigned nb, uint64_t va, int be,
 		       uint64_t *cnt)
 {
-	struct cell_insn x, y;
+	struct kgenome_cell_insn x, y;
 	uint32_t ra, rb;
 	const char *d;
 
@@ -146,10 +146,10 @@ static inline void one(int thumb, const uint8_t *b, unsigned nb, uint64_t va, in
 	memset(&y, 0x5a, sizeof y);
 	if (thumb) {
 		ra = ref_decode_t32(b, nb, va, be, &x);
-		rb = cell_decode_thumb(b, nb, va, be, &y);
+		rb = kgenome_cell_decode_thumb(b, nb, va, be, &y);
 	} else {
 		ra = ref_decode_a32(b, nb, va, be, &x);
-		rb = cell_decode_arm32(b, nb, va, be, &y);
+		rb = kgenome_cell_decode_arm32(b, nb, va, be, &y);
 	}
 	(*cnt)++;
 	if (ra != rb) {
@@ -230,7 +230,7 @@ static void *run_job(void *arg)
 			for (i = j->a; i < j->b; i++) {
 				uint32_t h0 = (uint32_t)i;
 
-				if (gt_thumb_len(h0) == 2u) {
+				if (kgenome_thumb_len(h0) == 2u) {
 					unsigned k;
 
 					for (k = 0; k < 8u; k++) {
@@ -497,9 +497,9 @@ static int do_bench(int thumb, int only, int argc, char **argv)
 		/* the first decode builds the index: what that costs, once */
 		double t0 = now(), t1;
 
-		gt_arm32_build();
+		kgenome_arm32_build();
 		t1 = now();
-		gt_thumb_build();
+		kgenome_thumb_build();
 		printf("index build: ARM state %.0f us, Thumb state %.0f us\n", (t1 - t0) * 1e6,
 		       (now() - t1) * 1e6);
 	}
@@ -518,34 +518,34 @@ static int do_bench(int thumb, int only, int argc, char **argv)
 				uint64_t off = 0;
 
 				while (off + (thumb ? 2u : 4u) <= lens[c]) {
-					struct cell_insn k;
+					struct kgenome_cell_insn k;
 					uint32_t len;
 					const uint8_t *p = codes[c] + off;
 					uint32_t avail = (uint32_t)(lens[c] - off < 4 ? lens[c] - off : 4);
 
 					if (path == 0) {
 						if (thumb) {
-							struct gt_thumb_insn t;
+							struct kgenome_thumb_insn t;
 							uint32_t h0 = arm_h_(p, bes[c]), h1 = 0;
 
-							len = gt_thumb_len(h0);
+							len = kgenome_thumb_len(h0);
 							if (len == 4u) {
 								if (avail < 4u)
 									break;
 								h1 = arm_h_(p + 2, bes[c]);
 							}
-							(void)gt_thumb_decode(&t, h0, h1);
+							(void)kgenome_thumb_decode(&t, h0, h1);
 							sink += t.id;
 						} else {
-							struct gt_arm32_insn t;
+							struct kgenome_arm32_insn t;
 
-							(void)gt_arm32_decode(&t, arm_w_(p, bes[c]));
+							(void)kgenome_arm32_decode(&t, arm_w_(p, bes[c]));
 							sink += t.id;
 							len = 4;
 						}
 					} else if (path == 1) {
-						len = thumb ? cell_decode_thumb(p, avail, vas[c] + off, bes[c], &k)
-							    : cell_decode_arm32(p, avail, vas[c] + off, bes[c], &k);
+						len = thumb ? kgenome_cell_decode_thumb(p, avail, vas[c] + off, bes[c], &k)
+							    : kgenome_cell_decode_arm32(p, avail, vas[c] + off, bes[c], &k);
 						sink += k.op;
 					} else {
 						len = thumb ? ref_decode_t32(p, avail, vas[c] + off, bes[c], &k)

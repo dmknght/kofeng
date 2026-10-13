@@ -35,8 +35,8 @@ int main(void)
 {
 	/* parent: A(0..64) pad(16 zeros) LIB(80..144) B(144..208) C(208..272) */
 	uint8_t par[272], view[256];
-	struct kof_func f[4];
-	struct kof_func_set pf, out;
+	struct kgenome_func f[4];
+	struct kgenome_func_set pf, out;
 	size_t at = 0;
 
 	memset(par, 0, sizeof par);
@@ -59,9 +59,9 @@ int main(void)
 	f[1].off = 80;  f[1].len = 64; f[1].value = 0x1050;      /* the library's */
 	f[2].off = 144; f[2].len = 64; f[2].value = 0x1090;
 	f[3].off = 208; f[3].len = 64; f[3].value = 0x10d0;
-	pf.v = f; pf.n = 4; pf.oom = 0;
+	pf.v = f; pf.n = 4; pf.status = KGENOME_OK;
 
-	kof_funcs_remap(par, sizeof par, &pf, view, at, &out);
+	kgenome_funcs_remap(par, sizeof par, &pf, view, at, &out);
 	check(out.n == 2, "A and B survive; the library's and the rewritten C do not");
 	if (out.n == 2) {
 		check(out.v[0].off == 0 && out.v[0].len == 64, "A stays at 0");
@@ -73,16 +73,16 @@ int main(void)
 		check(memcmp(view + out.v[1].off, par + 144, 64) == 0,
 		      "B's bytes are where it says");
 	}
-	kof_funcs_free(&out);
+	kgenome_funcs_free(&out);
 
 	/* nothing to map, and a hostile function extent, are both empty answers */
 	pf.n = 0;
-	kof_funcs_remap(par, sizeof par, &pf, view, at, &out);
+	kgenome_funcs_remap(par, sizeof par, &pf, view, at, &out);
 	check(out.n == 0 && !out.v, "no functions in, none out");
 	f[0].off = 1000; f[0].len = 64; pf.n = 1;
-	kof_funcs_remap(par, sizeof par, &pf, view, at, &out);
+	kgenome_funcs_remap(par, sizeof par, &pf, view, at, &out);
 	check(out.n == 0, "an extent past the parent is skipped, not read");
-	kof_funcs_remap(NULL, 0, &pf, view, at, &out);
+	kgenome_funcs_remap(NULL, 0, &pf, view, at, &out);
 	check(out.n == 0, "no parent, no functions");
 
 	if (failures) {

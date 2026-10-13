@@ -17,7 +17,7 @@
 #include <string.h>
 #include <dirent.h>
 
-#include "../../libkofeng/extractors/decomp/ovba.h"
+#include <decompressors/ovba.h>
 
 struct acc {
 	uint32_t crc;
@@ -67,13 +67,13 @@ static void one_file(const char *path, const char *name)
 	for (i = 0; i + 3 <= len; i++) {
 		struct acc a;
 		uint64_t produced = 0;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 
-		if (!kof_ovba_plausible(b + i, (uint64_t)(len - i)))
+		if (!kuncoat_ovba_plausible(b + i, (uint64_t)(len - i)))
 			continue;
 		a.crc = 0xffffffffu;
 		a.n = 0;
-		st = kof_ovba_decode(b + i, (uint64_t)(len - i), sink, &a, &produced);
+		st = kuncoat_ovba_decode(b + i, (uint64_t)(len - i), sink, &a, &produced);
 		printf("%s %ld %d %llu %08x\n", name, i, st,
 		       (unsigned long long)produced, a.crc ^ 0xffffffffu);
 	}
@@ -120,7 +120,7 @@ static int selfcheck(void)
 	uint64_t produced;
 	uint32_t len = (uint32_t)(sizeof msg - 1u);
 	uint16_t hdr;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 	int bad = 0, i;
 
 	hdr = (uint16_t)((len + 2u - 3u) | (3u << 12));
@@ -128,16 +128,16 @@ static int selfcheck(void)
 	memcpy(in + 3, msg, len);
 
 	sunk_n = 0;
-	st = kof_ovba_decode(in, 3u + len, keep, NULL, &produced);
-	if (st != KOF_DEC_OK || produced != len || memcmp(sunk, msg, len) != 0) {
+	st = kuncoat_ovba_decode(in, 3u + len, keep, NULL, &produced);
+	if (st != KUNCOAT_OK || produced != len || memcmp(sunk, msg, len) != 0) {
 		printf("  FAIL raw chunk: status=%d produced=%llu\n", st,
 		       (unsigned long long)produced);
 		bad++;
 	}
 
 	sunk_n = 0;
-	st = kof_ovba_decode(in, 3u + len - 4u, keep, NULL, &produced);
-	if (st != KOF_DEC_TRUNCATED || produced != len - 4u) {
+	st = kuncoat_ovba_decode(in, 3u + len - 4u, keep, NULL, &produced);
+	if (st != KUNCOAT_TRUNCATED || produced != len - 4u) {
 		printf("  FAIL short chunk: status=%d produced=%llu\n", st,
 		       (unsigned long long)produced);
 		bad++;
@@ -154,8 +154,8 @@ static int selfcheck(void)
 		ev[4] = 'A';
 		ev[5] = 0xff; ev[6] = 0xff; /* offset far past one byte produced */
 		sunk_n = 0;
-		st = kof_ovba_decode(ev, 7u, keep, NULL, &produced);
-		if (st != KOF_DEC_CORRUPT || produced != 1u) {
+		st = kuncoat_ovba_decode(ev, 7u, keep, NULL, &produced);
+		if (st != KUNCOAT_CORRUPT || produced != 1u) {
 			printf("  FAIL back reference bound: status=%d produced=%llu\n",
 			       st, (unsigned long long)produced);
 			bad++;
@@ -172,7 +172,7 @@ static int selfcheck(void)
 		b[0] = 0x01;
 		b[2] = (uint8_t)((b[2] & 0x8fu) | 0x30u);   /* a valid signature */
 		sunk_n = 0;
-		kof_ovba_decode(b, n, keep, NULL, &produced);
+		kuncoat_ovba_decode(b, n, keep, NULL, &produced);
 	}
 
 	printf("ovba: round trip, truncation, back reference bound, "

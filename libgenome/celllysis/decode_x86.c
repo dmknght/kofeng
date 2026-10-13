@@ -3,7 +3,7 @@
  *
  * The decoding itself is genotype's (libgenome/genotype/x86); this is the
  * translation, and it is the ONLY place in the engine that reads one of its
- * instructions. Everything downstream reads struct cell_insn, so a decoder
+ * instructions. Everything downstream reads struct kgenome_cell_insn, so a decoder
  * that renames an instruction class is applied here and nowhere else - see
  * decode.h for why that mattered enough to write this.
  *
@@ -17,8 +17,8 @@
 #include <stddef.h>
 #include <string.h>
 
-/* KOF_BROKEN - the sentinel cell.h names for a target there is not. */
-#include "kofmod/cell.h"
+/* KGENOME_BROKEN - the sentinel cell.h names for a target there is not. */
+#include <celllysis/cell.h>
 #include "decode.h"
 #include <x86/x86.h>
 
@@ -26,7 +26,7 @@
 /*
  * the decoder names roughly sixteen hundred instructions and the sweep asks
  * about thirty-eight of them. The rest are not "unknown": they are
- * instructions whose CLASS is all anyone downstream needs, and CELL_OTHER
+ * instructions whose CLASS is all anyone downstream needs, and KGENOME_CELL_OTHER
  * with a correct wmask is a complete answer for them.
  *
  * THE ANSWER IS LOOKED UP, NOT SEARCHED, and there is one statement of it: this
@@ -37,76 +37,76 @@
  * instruction; MEASURED over 9.2 M instructions that was 15 of the ~700
  * instructions executed per decode. The table is constant, so there is nothing
  * to initialise and nothing two threads could race on, and an id the table does
- * not name is CELL_OTHER with no flag because zero is what the designated
+ * not name is KGENOME_CELL_OTHER with no flag because zero is what the designated
  * initialisers leave.
  */
 struct xcls {
 	uint8_t op;
-	uint8_t flags;                  /* CELL_F_FAR, CELL_F_INDIRECT */
+	uint8_t flags;                  /* KGENOME_CELL_F_FAR, KGENOME_CELL_F_INDIRECT */
 };
 
-static const struct xcls g_cls[GT_X86_I__COUNT] = {
-	[GT_X86_I_NOP]      = { CELL_NOP, 0 },
-	[GT_X86_I_MOV]      = { CELL_MOV, 0 },
-	[GT_X86_I_MOVZX]    = { CELL_MOVZX, 0 },
-	[GT_X86_I_MOVSX]    = { CELL_MOVSX, 0 },
-	[GT_X86_I_MOVSXD]   = { CELL_MOVSX, 0 },
-	[GT_X86_I_LEA]      = { CELL_LEA, 0 },
-	[GT_X86_I_XCHG]     = { CELL_XCHG, 0 },
-	[GT_X86_I_PUSH]     = { CELL_PUSH, 0 },
-	[GT_X86_I_POP]      = { CELL_POP, 0 },
-	[GT_X86_I_ADD]      = { CELL_ADD, 0 },
-	[GT_X86_I_SUB]      = { CELL_SUB, 0 },
-	[GT_X86_I_ADC]      = { CELL_ADC, 0 },
-	[GT_X86_I_SBB]      = { CELL_SBB, 0 },
-	[GT_X86_I_AND]      = { CELL_AND, 0 },
-	[GT_X86_I_OR]       = { CELL_OR, 0 },
-	[GT_X86_I_XOR]      = { CELL_XOR, 0 },
-	[GT_X86_I_NOT]      = { CELL_NOT, 0 },
-	[GT_X86_I_NEG]      = { CELL_NEG, 0 },
-	[GT_X86_I_INC]      = { CELL_INC, 0 },
-	[GT_X86_I_DEC]      = { CELL_DEC, 0 },
-	[GT_X86_I_CMP]      = { CELL_CMP, 0 },
-	[GT_X86_I_TEST]     = { CELL_TEST, 0 },
-	[GT_X86_I_SHL]      = { CELL_SHL, 0 },
-	[GT_X86_I_SHR]      = { CELL_SHR, 0 },
-	[GT_X86_I_SAR]      = { CELL_SAR, 0 },
-	[GT_X86_I_ROL]      = { CELL_ROL, 0 },
-	[GT_X86_I_ROR]      = { CELL_ROR, 0 },
-	[GT_X86_I_RCL]      = { CELL_RCL, 0 },
-	[GT_X86_I_RCR]      = { CELL_RCR, 0 },
-	[GT_X86_I_MUL]      = { CELL_MUL, 0 },
-	[GT_X86_I_IMUL]     = { CELL_IMUL, 0 },
-	[GT_X86_I_DIV]      = { CELL_DIV, 0 },
-	[GT_X86_I_IDIV]     = { CELL_IDIV, 0 },
-	[GT_X86_I_CALLNR]   = { CELL_CALL, 0 },
-	[GT_X86_I_CALLNI]   = { CELL_CALL, CELL_F_INDIRECT },
-	[GT_X86_I_CALLFI]   = { CELL_CALL, CELL_F_FAR | CELL_F_INDIRECT },
-	[GT_X86_I_CALLFD]   = { CELL_CALL, CELL_F_FAR },
-	[GT_X86_I_JMPNR]    = { CELL_JMP, 0 },
-	[GT_X86_I_JMPNI]    = { CELL_JMP, CELL_F_INDIRECT },
-	[GT_X86_I_JMPFI]    = { CELL_JMP, CELL_F_FAR | CELL_F_INDIRECT },
-	[GT_X86_I_JMPFD]    = { CELL_JMP, CELL_F_FAR },
-	[GT_X86_I_Jcc]      = { CELL_JCC, 0 },
-	[GT_X86_I_LOOP]     = { CELL_LOOP, 0 },
-	[GT_X86_I_LOOPNZ]   = { CELL_LOOP, 0 },
-	[GT_X86_I_LOOPZ]    = { CELL_LOOP, 0 },
-	[GT_X86_I_RETN]     = { CELL_RET, 0 },
-	[GT_X86_I_RETF]     = { CELL_RET, CELL_F_FAR },
-	[GT_X86_I_INT]      = { CELL_INT, 0 },
-	[GT_X86_I_INT1]     = { CELL_INT, 0 },
-	[GT_X86_I_INT3]     = { CELL_INT, 0 },
-	[GT_X86_I_INTO]     = { CELL_INT, 0 },
-	[GT_X86_I_SYSCALL]  = { CELL_SYSCALL, 0 },
-	[GT_X86_I_SYSENTER] = { CELL_SYSCALL, 0 },
-	[GT_X86_I_CMOVcc]   = { CELL_CMOV, 0 },
-	[GT_X86_I_SETcc]    = { CELL_SETCC, 0 },
-	[GT_X86_I_CBW]      = { CELL_WIDEN, 0 },
-	[GT_X86_I_CWDE]     = { CELL_WIDEN, 0 },
-	[GT_X86_I_CDQE]     = { CELL_WIDEN, 0 },
-	[GT_X86_I_CWD]      = { CELL_WIDEN, 0 },
-	[GT_X86_I_CDQ]      = { CELL_WIDEN, 0 },
-	[GT_X86_I_CQO]      = { CELL_WIDEN, 0 },
+static const struct xcls g_cls[KGENOME_X86_I__COUNT] = {
+	[KGENOME_X86_I_NOP]      = { KGENOME_CELL_NOP, 0 },
+	[KGENOME_X86_I_MOV]      = { KGENOME_CELL_MOV, 0 },
+	[KGENOME_X86_I_MOVZX]    = { KGENOME_CELL_MOVZX, 0 },
+	[KGENOME_X86_I_MOVSX]    = { KGENOME_CELL_MOVSX, 0 },
+	[KGENOME_X86_I_MOVSXD]   = { KGENOME_CELL_MOVSX, 0 },
+	[KGENOME_X86_I_LEA]      = { KGENOME_CELL_LEA, 0 },
+	[KGENOME_X86_I_XCHG]     = { KGENOME_CELL_XCHG, 0 },
+	[KGENOME_X86_I_PUSH]     = { KGENOME_CELL_PUSH, 0 },
+	[KGENOME_X86_I_POP]      = { KGENOME_CELL_POP, 0 },
+	[KGENOME_X86_I_ADD]      = { KGENOME_CELL_ADD, 0 },
+	[KGENOME_X86_I_SUB]      = { KGENOME_CELL_SUB, 0 },
+	[KGENOME_X86_I_ADC]      = { KGENOME_CELL_ADC, 0 },
+	[KGENOME_X86_I_SBB]      = { KGENOME_CELL_SBB, 0 },
+	[KGENOME_X86_I_AND]      = { KGENOME_CELL_AND, 0 },
+	[KGENOME_X86_I_OR]       = { KGENOME_CELL_OR, 0 },
+	[KGENOME_X86_I_XOR]      = { KGENOME_CELL_XOR, 0 },
+	[KGENOME_X86_I_NOT]      = { KGENOME_CELL_NOT, 0 },
+	[KGENOME_X86_I_NEG]      = { KGENOME_CELL_NEG, 0 },
+	[KGENOME_X86_I_INC]      = { KGENOME_CELL_INC, 0 },
+	[KGENOME_X86_I_DEC]      = { KGENOME_CELL_DEC, 0 },
+	[KGENOME_X86_I_CMP]      = { KGENOME_CELL_CMP, 0 },
+	[KGENOME_X86_I_TEST]     = { KGENOME_CELL_TEST, 0 },
+	[KGENOME_X86_I_SHL]      = { KGENOME_CELL_SHL, 0 },
+	[KGENOME_X86_I_SHR]      = { KGENOME_CELL_SHR, 0 },
+	[KGENOME_X86_I_SAR]      = { KGENOME_CELL_SAR, 0 },
+	[KGENOME_X86_I_ROL]      = { KGENOME_CELL_ROL, 0 },
+	[KGENOME_X86_I_ROR]      = { KGENOME_CELL_ROR, 0 },
+	[KGENOME_X86_I_RCL]      = { KGENOME_CELL_RCL, 0 },
+	[KGENOME_X86_I_RCR]      = { KGENOME_CELL_RCR, 0 },
+	[KGENOME_X86_I_MUL]      = { KGENOME_CELL_MUL, 0 },
+	[KGENOME_X86_I_IMUL]     = { KGENOME_CELL_IMUL, 0 },
+	[KGENOME_X86_I_DIV]      = { KGENOME_CELL_DIV, 0 },
+	[KGENOME_X86_I_IDIV]     = { KGENOME_CELL_IDIV, 0 },
+	[KGENOME_X86_I_CALLNR]   = { KGENOME_CELL_CALL, 0 },
+	[KGENOME_X86_I_CALLNI]   = { KGENOME_CELL_CALL, KGENOME_CELL_F_INDIRECT },
+	[KGENOME_X86_I_CALLFI]   = { KGENOME_CELL_CALL, KGENOME_CELL_F_FAR | KGENOME_CELL_F_INDIRECT },
+	[KGENOME_X86_I_CALLFD]   = { KGENOME_CELL_CALL, KGENOME_CELL_F_FAR },
+	[KGENOME_X86_I_JMPNR]    = { KGENOME_CELL_JMP, 0 },
+	[KGENOME_X86_I_JMPNI]    = { KGENOME_CELL_JMP, KGENOME_CELL_F_INDIRECT },
+	[KGENOME_X86_I_JMPFI]    = { KGENOME_CELL_JMP, KGENOME_CELL_F_FAR | KGENOME_CELL_F_INDIRECT },
+	[KGENOME_X86_I_JMPFD]    = { KGENOME_CELL_JMP, KGENOME_CELL_F_FAR },
+	[KGENOME_X86_I_Jcc]      = { KGENOME_CELL_JCC, 0 },
+	[KGENOME_X86_I_LOOP]     = { KGENOME_CELL_LOOP, 0 },
+	[KGENOME_X86_I_LOOPNZ]   = { KGENOME_CELL_LOOP, 0 },
+	[KGENOME_X86_I_LOOPZ]    = { KGENOME_CELL_LOOP, 0 },
+	[KGENOME_X86_I_RETN]     = { KGENOME_CELL_RET, 0 },
+	[KGENOME_X86_I_RETF]     = { KGENOME_CELL_RET, KGENOME_CELL_F_FAR },
+	[KGENOME_X86_I_INT]      = { KGENOME_CELL_INT, 0 },
+	[KGENOME_X86_I_INT1]     = { KGENOME_CELL_INT, 0 },
+	[KGENOME_X86_I_INT3]     = { KGENOME_CELL_INT, 0 },
+	[KGENOME_X86_I_INTO]     = { KGENOME_CELL_INT, 0 },
+	[KGENOME_X86_I_SYSCALL]  = { KGENOME_CELL_SYSCALL, 0 },
+	[KGENOME_X86_I_SYSENTER] = { KGENOME_CELL_SYSCALL, 0 },
+	[KGENOME_X86_I_CMOVcc]   = { KGENOME_CELL_CMOV, 0 },
+	[KGENOME_X86_I_SETcc]    = { KGENOME_CELL_SETCC, 0 },
+	[KGENOME_X86_I_CBW]      = { KGENOME_CELL_WIDEN, 0 },
+	[KGENOME_X86_I_CWDE]     = { KGENOME_CELL_WIDEN, 0 },
+	[KGENOME_X86_I_CDQE]     = { KGENOME_CELL_WIDEN, 0 },
+	[KGENOME_X86_I_CWD]      = { KGENOME_CELL_WIDEN, 0 },
+	[KGENOME_X86_I_CDQ]      = { KGENOME_CELL_WIDEN, 0 },
+	[KGENOME_X86_I_CQO]      = { KGENOME_CELL_WIDEN, 0 },
 	/*
 	 * WHICH special register, in `cond` - the field is the condition
 	 * code of a JCC and a MOV has none, so it is free here. A module
@@ -114,54 +114,54 @@ static const struct xcls g_cls[GT_X86_I__COUNT] = {
 	 * touching a debug register is doing something else entirely, and
 	 * the class alone cannot tell them apart.
 	 */
-	[GT_X86_I_MOV_CR]   = { CELL_MOV_SPECIAL, 0 },
-	[GT_X86_I_MOV_DR]   = { CELL_MOV_SPECIAL, 0 },
-	[GT_X86_I_MOV_TR]   = { CELL_MOV_SPECIAL, 0 },
-	[GT_X86_I_IRET]     = { CELL_IRET, 0 },
-	[GT_X86_I_UD0]      = { CELL_UD, 0 },
-	[GT_X86_I_UD1]      = { CELL_UD, 0 },
-	[GT_X86_I_UD2]      = { CELL_UD, 0 },
-	[GT_X86_I_MOVS]     = { CELL_STRING, 0 },
-	[GT_X86_I_STOS]     = { CELL_STRING, 0 },
-	[GT_X86_I_LODS]     = { CELL_STRING, 0 },
-	[GT_X86_I_SCAS]     = { CELL_STRING, 0 },
-	[GT_X86_I_CMPS]     = { CELL_STRING, 0 }
+	[KGENOME_X86_I_MOV_CR]   = { KGENOME_CELL_MOV_SPECIAL, 0 },
+	[KGENOME_X86_I_MOV_DR]   = { KGENOME_CELL_MOV_SPECIAL, 0 },
+	[KGENOME_X86_I_MOV_TR]   = { KGENOME_CELL_MOV_SPECIAL, 0 },
+	[KGENOME_X86_I_IRET]     = { KGENOME_CELL_IRET, 0 },
+	[KGENOME_X86_I_UD0]      = { KGENOME_CELL_UD, 0 },
+	[KGENOME_X86_I_UD1]      = { KGENOME_CELL_UD, 0 },
+	[KGENOME_X86_I_UD2]      = { KGENOME_CELL_UD, 0 },
+	[KGENOME_X86_I_MOVS]     = { KGENOME_CELL_STRING, 0 },
+	[KGENOME_X86_I_STOS]     = { KGENOME_CELL_STRING, 0 },
+	[KGENOME_X86_I_LODS]     = { KGENOME_CELL_STRING, 0 },
+	[KGENOME_X86_I_SCAS]     = { KGENOME_CELL_STRING, 0 },
+	[KGENOME_X86_I_CMPS]     = { KGENOME_CELL_STRING, 0 }
 };
 
 /*
  * THE DECODER'S SWEEP VIEW IS THIS FORM, not a look-alike: genotype fills
- * struct gt_x86_sop with the numbers of cell_operand and the adapter copies the
+ * struct kgenome_x86_sop with the numbers of kgenome_cell_operand and the adapter copies the
  * three operands as they stand. The asserts are what makes that agreement a fact
  * and not a coincidence.
  */
-_Static_assert(sizeof(struct gt_x86_sop) == sizeof(struct cell_operand), "operand size");
-_Static_assert(offsetof(struct gt_x86_sop, kind) == offsetof(struct cell_operand, kind) &&
-	       offsetof(struct gt_x86_sop, reg) == offsetof(struct cell_operand, reg) &&
-	       offsetof(struct gt_x86_sop, index) == offsetof(struct cell_operand, index) &&
-	       offsetof(struct gt_x86_sop, scale) == offsetof(struct cell_operand, scale) &&
-	       offsetof(struct gt_x86_sop, size) == offsetof(struct cell_operand, size) &&
-	       offsetof(struct gt_x86_sop, flags) == offsetof(struct cell_operand, flags) &&
-	       offsetof(struct gt_x86_sop, seg) == offsetof(struct cell_operand, seg) &&
-	       offsetof(struct gt_x86_sop, disp) == offsetof(struct cell_operand, disp) &&
-	       offsetof(struct gt_x86_sop, imm) == offsetof(struct cell_operand, imm),
+_Static_assert(sizeof(struct kgenome_x86_sop) == sizeof(struct kgenome_cell_operand), "operand size");
+_Static_assert(offsetof(struct kgenome_x86_sop, kind) == offsetof(struct kgenome_cell_operand, kind) &&
+	       offsetof(struct kgenome_x86_sop, reg) == offsetof(struct kgenome_cell_operand, reg) &&
+	       offsetof(struct kgenome_x86_sop, index) == offsetof(struct kgenome_cell_operand, index) &&
+	       offsetof(struct kgenome_x86_sop, scale) == offsetof(struct kgenome_cell_operand, scale) &&
+	       offsetof(struct kgenome_x86_sop, size) == offsetof(struct kgenome_cell_operand, size) &&
+	       offsetof(struct kgenome_x86_sop, flags) == offsetof(struct kgenome_cell_operand, flags) &&
+	       offsetof(struct kgenome_x86_sop, seg) == offsetof(struct kgenome_cell_operand, seg) &&
+	       offsetof(struct kgenome_x86_sop, disp) == offsetof(struct kgenome_cell_operand, disp) &&
+	       offsetof(struct kgenome_x86_sop, imm) == offsetof(struct kgenome_cell_operand, imm),
 	       "operand layout");
-_Static_assert(GT_X86_SK_NONE == CELL_O_NONE && GT_X86_SK_REG == CELL_O_REG &&
-	       GT_X86_SK_MEM == CELL_O_MEM && GT_X86_SK_IMM == CELL_O_IMM &&
-	       GT_X86_SK_REL == CELL_O_REL, "operand kinds");
-_Static_assert(GT_X86_SF_WRITE == CELL_OF_WRITE && GT_X86_SF_READ == CELL_OF_READ &&
-	       GT_X86_SF_RIPREL == CELL_OF_RIPREL && GT_X86_SF_HIGH8 == CELL_OF_HIGH8 &&
-	       GT_X86_SREG_NONE == CELL_REG_NONE, "operand flags");
+_Static_assert(KGENOME_X86_SK_NONE == KGENOME_CELL_O_NONE && KGENOME_X86_SK_REG == KGENOME_CELL_O_REG &&
+	       KGENOME_X86_SK_MEM == KGENOME_CELL_O_MEM && KGENOME_X86_SK_IMM == KGENOME_CELL_O_IMM &&
+	       KGENOME_X86_SK_REL == KGENOME_CELL_O_REL, "operand kinds");
+_Static_assert(KGENOME_X86_SF_WRITE == KGENOME_CELL_OF_WRITE && KGENOME_X86_SF_READ == KGENOME_CELL_OF_READ &&
+	       KGENOME_X86_SF_RIPREL == KGENOME_CELL_OF_RIPREL && KGENOME_X86_SF_HIGH8 == KGENOME_CELL_OF_HIGH8 &&
+	       KGENOME_X86_SREG_NONE == KGENOME_CELL_REG_NONE, "operand flags");
 
-uint32_t cell_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
-			unsigned bits, struct cell_insn *out)
+uint32_t kgenome_cell_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
+			unsigned bits, struct kgenome_cell_insn *out)
 {
-	struct gt_x86_sweep x;
+	struct kgenome_x86_sweep x;
 	const struct xcls *c;
 	unsigned op, k;
 
 	if (!p || !n || !out)
 		return 0;
-	if (gt_x86_sweep(&x, p, n, bits == 32 ? 32 : 64) != GT_OK)
+	if (kgenome_x86_sweep(&x, p, n, bits == 32 ? 32 : 64) != KGENOME_OK)
 		return 0;
 
 	/*
@@ -175,47 +175,47 @@ uint32_t cell_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 	 * instruction does not have arrive from genotype marked absent, so
 	 * nothing is written twice and nothing is left stale.
 	 */
-	c = x.id < (unsigned)GT_X86_I__COUNT ? &g_cls[x.id] : &g_cls[0];
+	c = x.id < (unsigned)KGENOME_X86_I__COUNT ? &g_cls[x.id] : &g_cls[0];
 	op = c->op;
 	/* The x87 test needs the category, which the table cannot hold. */
-	if (op == CELL_OTHER && x.cat == GT_X86_C_X87_ALU)
-		op = CELL_FPU;
+	if (op == KGENOME_CELL_OTHER && x.cat == KGENOME_X86_C_X87_ALU)
+		op = KGENOME_CELL_FPU;
 	out->op = (uint8_t)op;
 	out->len = x.len;
 	out->n_op = x.n;
-	out->flags = (uint8_t)(c->flags | (x.rep ? CELL_F_REP : 0u));
+	out->flags = (uint8_t)(c->flags | (x.rep ? KGENOME_CELL_F_REP : 0u));
 	out->cond = x.cond;
-	if (op == CELL_MOV_SPECIAL)
-		out->cond = x.id == GT_X86_I_MOV_CR ? CELL_SR_CR
-			  : x.id == GT_X86_I_MOV_DR ? CELL_SR_DR
-						    : CELL_SR_TR;
+	if (op == KGENOME_CELL_MOV_SPECIAL)
+		out->cond = x.id == KGENOME_X86_I_MOV_CR ? KGENOME_CELL_SR_CR
+			  : x.id == KGENOME_X86_I_MOV_DR ? KGENOME_CELL_SR_DR
+						    : KGENOME_CELL_SR_TR;
 	/* The registers it writes: the ones it names and the ones it does not - see
-	 * cell_insn.wmask. The decoder reports both, so the consumer need not care which. */
+	 * kgenome_cell_insn.wmask. The decoder reports both, so the consumer need not care which. */
 	out->wmask = x.wmask;
 	out->at_va = va;
 	out->at = va;
 	/*
-	 * KOF_BROKEN AND NOT (uint64_t)-1, WHICH IS A DIFFERENT NUMBER.
+	 * KGENOME_BROKEN AND NOT (uint64_t)-1, WHICH IS A DIFFERENT NUMBER.
 	 *
-	 * cell.h says "no target" is KOF_BROKEN, and KOF_BROKEN is
+	 * cell.h says "no target" is KGENOME_BROKEN, and KGENOME_BROKEN is
 	 * UINT64_MAX - 1. Writing UINT64_MAX here meant every reader's
-	 * `target_va != KOF_BROKEN` was true for EVERY instruction, branch
-	 * or not. MEASURED: kof_cell_next then called kof_pz_addr_to_off -
+	 * `target_va != KGENOME_BROKEN` was true for EVERY instruction, branch
+	 * or not. MEASURED: kgenome_cell_next then called kgenome_pz_addr_to_off -
 	 * a linear walk of the segment table - 1,327,512 times over a 12 MB
 	 * subset where only 273,617 instructions have a relative target,
 	 * and that one wasted call was 6.2% of the whole scan.
 	 *
 	 * It did not produce a wrong answer, which is why it survived: the
-	 * walk found no segment holding UINT64_MAX and returned KOF_BROKEN,
+	 * walk found no segment holding UINT64_MAX and returned KGENOME_BROKEN,
 	 * so `target` came out right by the long way round. `target_va` did
 	 * not - it kept UINT64_MAX, and a reader testing IT against
-	 * KOF_BROKEN still sees a target that is not there.
+	 * KGENOME_BROKEN still sees a target that is not there.
 	 */
-	out->target = KOF_BROKEN;
-	out->target_va = KOF_BROKEN;
+	out->target = KGENOME_BROKEN;
+	out->target_va = KGENOME_BROKEN;
 	memcpy(out->o, x.op, sizeof out->o);
 	for (k = 0; k < x.n; k++) {
-		if (x.op[k].kind == CELL_O_REL) {
+		if (x.op[k].kind == KGENOME_CELL_O_REL) {
 			out->target_va = va + x.len +
 					 (uint64_t)(int64_t)(int32_t)x.op[k].imm;
 			out->target = out->target_va;

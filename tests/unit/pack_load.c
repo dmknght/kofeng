@@ -33,7 +33,7 @@
 
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/databases/dbloader.h"
-#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/databases/pack/dbcore.h"
 #include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/kofeng.h"
 

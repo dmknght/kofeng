@@ -12,6 +12,7 @@
 
 #if KOF_DEBUG
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
@@ -22,14 +23,32 @@ static const char *const slot_name[KOF_T_COUNT] = {
 	"diag match"
 };
 
+/*
+ * THE TABLE IS TOUCHED AT SCAN TIME, from every scan thread (the scanner's
+ * --jobs): KOF_TIME_BEGIN/END sit in the unpack, heuristic, emulation, diag and
+ * match stages, which run per object. It only exists in a DEBUG build, but a
+ * measurement taken with several jobs must not be a data race.
+ *
+ * So the table is split by who may write it. What is a total over the whole run
+ * (nanoseconds, entries) is atomic and shared. What belongs to ONE thread's
+ * nesting - the depth and the start of the outermost entry - is thread-local:
+ * a second thread entering the same stage is its own outermost entry and starts
+ * its own clock, instead of seeing the first thread's depth and never timing
+ * anything. A row is therefore the SUM of the time every thread spent in the
+ * stage, which is thread-seconds and not wall time with more than one job.
+ */
 struct slot {
-	uint64_t total;         /* nanoseconds, outermost spans only */
+	_Atomic uint64_t total;         /* nanoseconds, outermost spans only */
+	_Atomic uint64_t calls;         /* entries, including re-entries     */
+};
+
+struct slot_nest {
 	uint64_t started;
-	uint64_t calls;         /* entries, including re-entries     */
 	unsigned depth;
 };
 
 static struct slot g_slot[KOF_T_COUNT];
+static _Thread_local struct slot_nest t_nest[KOF_T_COUNT];
 
 static uint64_t now_ns(void)
 {
@@ -44,19 +63,21 @@ void kof_time_begin(enum kof_time_slot s)
 {
 	if ((unsigned)s >= (unsigned)KOF_T_COUNT)
 		return;
-	g_slot[s].calls++;
+	atomic_fetch_add_explicit(&g_slot[s].calls, 1, memory_order_relaxed);
 	/* Only the outermost entry starts the clock - see the note on nesting
 	 * in the header. */
-	if (!g_slot[s].depth++)
-		g_slot[s].started = now_ns();
+	if (!t_nest[s].depth++)
+		t_nest[s].started = now_ns();
 }
 
 void kof_time_end(enum kof_time_slot s)
 {
-	if ((unsigned)s >= (unsigned)KOF_T_COUNT || !g_slot[s].depth)
+	if ((unsigned)s >= (unsigned)KOF_T_COUNT || !t_nest[s].depth)
 		return;
-	if (!--g_slot[s].depth && g_slot[s].started)
-		g_slot[s].total += now_ns() - g_slot[s].started;
+	if (!--t_nest[s].depth && t_nest[s].started)
+		atomic_fetch_add_explicit(&g_slot[s].total,
+					  now_ns() - t_nest[s].started,
+					  memory_order_relaxed);
 }
 
 void kof_time_report(void)
@@ -101,9 +122,9 @@ void kof_time_report(void)
 	fprintf(stderr, "  %-14s %9.3f ms  (rows only; stages nest)\n",
 		"sum", (double)sum / 1000000.0);
 	for (i = 0; i < (unsigned)KOF_T_COUNT; i++) {
-		g_slot[i].total = 0;
-		g_slot[i].calls = 0;
-		g_slot[i].depth = 0;
+		atomic_store(&g_slot[i].total, 0);
+		atomic_store(&g_slot[i].calls, 0);
+		t_nest[i].depth = 0;     /* the reporting thread's own nesting */
 	}
 }
 

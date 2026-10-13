@@ -313,19 +313,7 @@ static const uint32_t zip_cls_bit[KOF_ZIP_CLS_COUNT] = {
 	KOF_SCAN_ZIP_PACKED
 };
 
-static uint32_t zip_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_zip_info *z = (const struct kof_zip_info *)ctx->file_header;
-
-	if (!z || !z->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof z->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)z->run, z->n_runs, mask,
-				zip_cls_bit, KOF_SCAN_ZIP_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(zip, struct kof_zip_info, zip_cls_bit, KOF_SCAN_ZIP_UNCLAIMED)
 
 /* ---- the parse ---------------------------------------------------------------- */
 

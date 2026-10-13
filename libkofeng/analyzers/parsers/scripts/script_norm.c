@@ -498,17 +498,507 @@ int kof_lex_is_code_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
 	return st == ST_OUT;
 }
 
-uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
-			 uint32_t n, uint8_t *out, uint32_t cap,
-			 uint32_t what)
-{
-	uint32_t i = 0, w = 0;
-	int st = ST_OUT, ml_k = 0;      /* which ml_open is open - see ST_ML */
+/* What the pass over one script carries from line to line. */
+struct norm_pass {
+	const struct kof_lex *lx;
+	const uint8_t *in;
+	uint32_t n;
+	uint8_t *out;
+	uint32_t what;
+	uint32_t i, w;
+	int st;
+	int ml_k;                       /* which ml_open is open - see ST_ML */
 	/*
 	 * DID THE LINE JUST EMITTED END INSIDE A LINE COMMENT - which the brace
 	 * rule below has to know and did not. See the note there.
 	 */
-	int cmt_tail = 0;
+	int cmt_tail;
+};
+
+/* What one line is, as it is walked. */
+struct norm_line {
+	uint32_t ls, le, body, start_w;
+	int only_cmt, blank;
+	int resumed;
+	int tail;
+};
+
+/*
+ * A string still open from the line above owns this line. One when the line
+ * is done.
+ */
+static int norm_resume_string(struct norm_pass *N, struct norm_line *L)
+{
+	const struct kof_lex *lx = N->lx;
+	const uint8_t *in = N->in;
+	uint8_t *out = N->out;
+	uint32_t n = N->n;
+	uint32_t w = N->w;
+	int st = N->st;
+	uint32_t le = L->le;
+	uint32_t j = L->ls;
+
+	/*
+	 * A STRING THAT IS STILL OPEN OWNS THE LINE, and this is the
+	 * case the pass used to assert could not happen.
+	 *
+	 * It can. A double-quoted php string may hold real newlines -
+	 * echoing a block of html is the ordinary way to do it - and
+	 * has_multiline does not see one, because it looks for heredoc
+	 * and backtick openers and a plain quote is neither. The state
+	 * was then thrown away at the end of every line, so the SECOND
+	 * line of such a string was walked AS CODE. Measured on a page
+	 * echoed from one literal:
+	 *
+	 *   - its indentation was stripped, its runs of spaces closed
+	 *     up and its blank lines dropped - all of it string VALUE;
+	 *   - and a line of it reading "// this is not a comment, it is
+	 *     text" was DELETED, because at the start of a line a "//"
+	 *     is read as a comment. A pass that silently removes a line
+	 *     of a file is the one outcome worth never producing.
+	 *
+	 * So the state carries, and a line that begins inside a string
+	 * is copied byte for byte - newline included - until the quote
+	 * that closes it. None of the line rules below are asked about
+	 * such a line: a blank line is data, an indent is data, and a
+	 * comment opener is text.
+	 */
+
+		while (j < le) {
+			uint8_t c = in[j];
+
+			if (c == '\\' &&
+			    !lx->no_bs_escape &&
+			    (st == ST_DQ || lx->sq_escapes) &&
+			    j + 1u < le) {
+				out[w++] = c;
+				out[w++] = in[j + 1u];
+				j += 2u;
+				continue;
+			}
+			out[w++] = c;
+			j++;
+			if ((st == ST_SQ && c == '\'') ||
+			    (st == ST_DQ && c == '"')) {
+				st = ST_OUT;
+				break;
+			}
+		}
+		if (st != ST_OUT) {
+			/* Still open at the end of the line: the
+			 * newline is part of the value. */
+			if (le < n)
+				out[w++] = '\n';
+			N->i = le < n ? le + 1u : le;
+			N->w = w;
+			N->st = st;
+			return 1;
+		}
+		/* Closed part way along: what follows is code, and it
+		 * is walked below without the line rules. */
+		L->ls = j;
+	N->w = w;
+	N->st = st;
+	return 0;
+}
+
+/*
+ * A multi-line literal still open owns the line; every byte of it is copied.
+ * One when the line is done.
+ */
+static int norm_resume_ml(struct norm_pass *N, struct norm_line *L)
+{
+	const uint8_t *in = N->in;
+	uint8_t *out = N->out;
+	const struct kof_lex *lx = N->lx;
+	uint32_t n = N->n;
+	uint32_t w = N->w;
+	int st = N->st;
+	int ml_k = N->ml_k;
+	uint32_t le = L->le;
+	uint32_t j = L->ls;
+
+	/*
+	 * A MULTI-LINE LITERAL THAT IS STILL OPEN OWNS THE LINE, and
+	 * every byte of it is copied exactly - including the newline
+	 * that ends the line, which is part of the string.
+	 */
+
+		while (j < le) {
+			if (at_text(in, n, j, lx->ml_close[ml_k])) {
+				uint32_t t = text_len(lx->ml_close[ml_k]);
+
+				while (t--)
+					out[w++] = in[j++];
+				st = ST_OUT;
+				break;
+			}
+			out[w++] = in[j++];
+		}
+		if (st == ST_ML) {
+			/* Still open: the newline is the literal's. */
+			if (le < n)
+				out[w++] = in[le];
+			N->i = le < n ? le + 1u : le;
+			N->w = w;
+			N->st = st;
+			return 1;
+		}
+		L->ls = j;
+		if (L->ls >= le) {
+			if (le < n)
+				out[w++] = '\n';
+			N->i = le < n ? le + 1u : le;
+			N->w = w;
+			N->st = st;
+			return 1;
+		}
+	N->w = w;
+	N->st = st;
+	return 0;
+}
+
+/*
+ * A block comment still open owns the line; what follows its close is code.
+ * One when the line is done.
+ */
+static int norm_resume_blk(struct norm_pass *N, struct norm_line *L)
+{
+	uint32_t j = L->ls;
+
+	/*
+	 * A BLOCK COMMENT THAT IS STILL OPEN OWNS THE WHOLE LINE.
+	 * Nothing on it is code, so it is dropped with the comment
+	 * lines - and the close is looked for as the line is walked.
+	 */
+
+		while (j < L->le) {
+			if (at_text(N->in, N->n, j, N->lx->blk_close)) {
+				N->st = ST_OUT;
+				j += text_len(N->lx->blk_close);
+				break;
+			}
+			j++;
+		}
+		/* Anything after the close on this line is code and is
+		 * kept; a line that is all comment goes. */
+		if (N->st == ST_OUT && j < L->le)
+			L->ls = j;
+		else {
+			N->i = L->le < N->n ? L->le + 1u : L->le;
+			return 1;
+		}
+	return 0;
+}
+
+/*
+ * The line's leading whitespace, measured either way and dropped on ask. One
+ * when the line is dropped.
+ */
+static int norm_measure_line(struct norm_pass *N, struct norm_line *L)
+{
+	const uint8_t *in = N->in;
+	uint32_t le = L->le;
+	uint32_t body;
+
+	/* Leading whitespace: measured either way, dropped on ask. */
+	body = L->ls;
+	while (body < le && is_ws(in[body]))
+		body++;
+	L->body = body;
+	L->blank = body == le;
+	if (L->blank && !L->resumed && (N->what & KOF_NORM_BLANK)) {
+		N->i = le < N->n ? le + 1u : le;
+		return 1;
+	}
+	if (!L->resumed && (N->what & KOF_NORM_INDENT))
+		L->ls = body;
+	return 0;
+}
+
+/* Is the whole line a comment. One when it is, and the line is dropped. */
+static int norm_whole_comment(struct norm_pass *N, struct norm_line *L)
+{
+	/*
+	 * IS THE WHOLE LINE A COMMENT - asked before the line is
+	 * walked, and answered by looking at its FIRST content only.
+	 *
+	 * That is what makes it safe without tracking strings: a
+	 * comment opener at the start of a line cannot be inside a
+	 * string, because a single-line string cannot reach here from
+	 * the line above - see has_multiline. A comment opener in the
+	 * MIDDLE of a line is a different question and this pass does
+	 * not ask it.
+	 */
+	if ((N->what & KOF_NORM_COMMENT) && !L->blank && !L->resumed) {
+		if (line_cmt_at(N->lx, N->in, N->n, L->body))
+			L->only_cmt = 1;
+		else if (N->lx->blk_open &&
+			 at_text(N->in, N->n, L->body, N->lx->blk_open)) {
+			/* Only when it also closes on this line, or
+			 * runs to the end of it. */
+			uint32_t j = L->body + text_len(N->lx->blk_open);
+			uint32_t close = 0;
+
+			while (j < L->le) {
+				if (at_text(N->in, N->n, j, N->lx->blk_close)) {
+					close = j +
+					    text_len(N->lx->blk_close);
+					break;
+				}
+				j++;
+			}
+			if (!close) {
+				N->st = ST_BLK;
+				L->only_cmt = 1;
+			} else {
+				uint32_t t = close;
+
+				while (t < L->le && is_ws(N->in[t]))
+					t++;
+				L->only_cmt = t == L->le;
+			}
+		}
+	}
+	if (L->only_cmt) {
+		N->i = L->le < N->n ? L->le + 1u : L->le;
+		return 1;
+	}
+	return 0;
+}
+
+/* A lone "{" joins the line above it. */
+static void norm_join_brace(struct norm_pass *N, struct norm_line *L)
+{
+	const uint8_t *in = N->in;
+	uint8_t *out = N->out;
+	const struct kof_lex *lx = N->lx;
+	uint32_t what = N->what;
+	uint32_t w = N->w;
+
+	/*
+	 * A LONE "{" JOINS THE LINE ABOVE IT.
+	 *
+	 * Not for looks. Allman and K&R are the two ways everyone
+	 * writes the same code and they differ in exactly this byte, so
+	 * closing it up is what makes one marker match both. Never in a
+	 * language where whitespace is syntax - in sh "{" is a command
+	 * group and needs the separator it is losing.
+	 */
+	/*
+	 * AND NEVER ONTO A LINE THAT ENDS IN A COMMENT.
+	 *
+	 * The brace is appended after whatever the line above left, and
+	 * what a line comment leaves is "everything to the end of the
+	 * line is not code". Joined there the brace is INSIDE the
+	 * comment - the block it opened is gone and the program the
+	 * form describes is not the program in the file. Found in a
+	 * real shell:
+	 *
+	 *   function Zip($source, $destination) // Thanks to Alix Axel
+	 *   {
+	 *
+	 * became "...$destination)// Thanks to Alix Axel{", and every
+	 * brace after it was one level out.
+	 */
+	if ((what & KOF_NORM_BRACE) && !lx->ws_significant && !L->resumed &&
+	    !N->cmt_tail &&
+	    L->le == L->body + 1u && in[L->body] == '{' && w > 0 &&
+	    out[w - 1u] == '\n') {
+		w--;                    /* take back the newline */
+		/*
+		 * AND THE "DID THIS LINE EMIT ANYTHING" MARK MOVES WITH
+		 * IT. start_w was taken before this, so after taking
+		 * the newline back and writing the brace, w was equal
+		 * to it again - the test at the foot of the loop then
+		 * read the line as having produced nothing and dropped
+		 * the newline that should follow the brace. The next
+		 * line was appended to it.
+		 */
+		L->start_w = w;
+	}
+	N->w = w;
+}
+
+/*
+ * The line itself, walked byte by byte with the state of the string or
+ * comment it is in.
+ */
+static void norm_walk_line(struct norm_pass *N, struct norm_line *L)
+{
+	const struct kof_lex *lx = N->lx;
+	const uint8_t *in = N->in;
+	uint32_t n = N->n;
+	uint8_t *out = N->out;
+	uint32_t what = N->what;
+	uint32_t w = N->w;
+	int st = N->st;
+	int ml_k = N->ml_k;
+	uint32_t le = L->le;
+	int tail = L->tail;
+	uint32_t j = L->ls;
+
+	/* ---- the line itself ---- */
+
+		while (j < le) {
+			uint8_t c = in[j];
+
+			if (st == ST_OUT) {
+				uint32_t cl;
+
+				if (at_text(in, n, j, lx->blk_open)) {
+					st = ST_BLK;
+					j += text_len(lx->blk_open);
+					continue;
+				}
+				cl = line_cmt_at(lx, in, n, j);
+				if (cl) {
+					/* A trailing comment is left
+					 * alone - see the header note
+					 * on dropping whole lines
+					 * only. */
+					while (j < le)
+						out[w++] = in[j++];
+					tail = 1;
+					break;
+				}
+				{
+					int k = ml_at(lx, in, n, j);
+
+					/*
+					 * COPIED FROM THE OPENER ON,
+					 * because the opener is part of
+					 * the literal and because what
+					 * follows it may be anything at
+					 * all.
+					 */
+					if (k >= 0) {
+						uint32_t t = text_len(
+							lx->ml_open[k]);
+
+						ml_k = k;
+						st = ST_ML;
+						while (t--)
+							out[w++] = in[j++];
+						continue;
+					}
+				}
+				if (lx->quotes &&
+				    strchr(lx->quotes, (int)c)) {
+					st = c == '\'' ? ST_SQ : ST_DQ;
+					out[w++] = c;
+					j++;
+					continue;
+				}
+				if (is_ws(c) &&
+				    (what & KOF_NORM_SPACE)) {
+					uint32_t e = j;
+					uint8_t prev, next;
+
+					while (e < le && is_ws(in[e]))
+						e++;
+					if (e >= le)
+						break;  /* trailing */
+					prev = w ? out[w - 1u] : 0;
+					next = in[e];
+					/*
+					 * CLOSED UP UNLESS THE TWO
+					 * WOULD BECOME ONE TOKEN.
+					 *
+					 * Two word bytes glue into one
+					 * name. Two bytes that spell a
+					 * longer operator glue into it
+					 * - see glues. Everything else
+					 * closes up, which is the
+					 * "eval (" case and also
+					 * "$s = \"", where the pair is
+					 * non-word on both sides and
+					 * perfectly safe.
+					 */
+					if (!lx->ws_significant && w &&
+					    !(is_word(prev) &&
+					      is_word(next)) &&
+					    !glues(lx, prev, next))
+						;       /* closed up */
+					else
+						out[w++] = ' ';
+					j = e;
+					continue;
+				}
+				if (c == '\t')
+					c = ' ';
+				out[w++] = c;
+				j++;
+				continue;
+			}
+			if (st == ST_ML) {
+				if (at_text(in, n, j,
+					    lx->ml_close[ml_k])) {
+					uint32_t t = text_len(
+						lx->ml_close[ml_k]);
+
+					while (t--)
+						out[w++] = in[j++];
+					st = ST_OUT;
+				} else {
+					out[w++] = in[j++];
+				}
+				continue;
+			}
+			if (st == ST_BLK) {
+				if (at_text(in, n, j, lx->blk_close)) {
+					st = ST_OUT;
+					j += text_len(lx->blk_close);
+				} else {
+					j++;
+				}
+				continue;
+			}
+			/* Inside a string: every byte is a value. */
+			if (c == '\\' &&
+			    !lx->no_bs_escape &&
+			    (st == ST_DQ || lx->sq_escapes) &&
+			    j + 1u < le) {
+				out[w++] = c;
+				out[w++] = in[j + 1u];
+				j += 2u;
+				continue;
+			}
+			if ((st == ST_SQ && c == '\'') ||
+			    (st == ST_DQ && c == '"'))
+				st = ST_OUT;
+			out[w++] = c;
+			j++;
+		}
+		/*
+		 * AND AN OPEN STRING CARRIES TO THE NEXT LINE, which
+		 * is the whole of the fix above. This used to reset
+		 * it, on the argument that has_multiline had ruled the
+		 * case out - it had not, and the reset is what let a
+		 * string's second line be walked as code.
+		 */
+	N->w = w;
+	N->st = st;
+	N->ml_k = ml_k;
+	L->tail = tail;
+}
+
+uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
+			 uint32_t n, uint8_t *out, uint32_t cap,
+			 uint32_t what)
+{
+	struct norm_pass N;
+
+	N.lx = lx;
+	N.in = in;
+	N.n = n;
+	N.out = out;
+	N.what = what;
+	N.i = 0;
+	N.w = 0;
+	N.st = ST_OUT;
+	N.ml_k = 0;
+	N.cmt_tail = 0;
 
 	if (!lx || !in || !out || !n || cap < n)
 		return 0;
@@ -522,11 +1012,14 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 	if (has_multiline(lx, in, n))
 		return 0;
 
-	while (i < n) {
-		uint32_t ls = i, le, body, start_w = w;
-		int only_cmt = 0, blank;
-		int resumed = st == ST_SQ || st == ST_DQ;
-		int tail = 0;
+	while (N.i < n) {
+		struct norm_line L;
+
+		L.ls = N.i;
+		L.start_w = N.w;
+		L.only_cmt = 0;
+		L.resumed = N.st == ST_SQ || N.st == ST_DQ;
+		L.tail = 0;
 
 		/*
 		 * Where this line ends, newline excluded.
@@ -538,389 +1031,37 @@ uint32_t kof_script_norm(const struct kof_lex *lx, const uint8_t *in,
 		 * when the last line is unterminated.
 		 */
 		{
-			const uint8_t *e = memchr(in + ls, '\n',
-						  (size_t)(n - ls));
+			const uint8_t *e = memchr(in + L.ls, '\n',
+						  (size_t)(n - L.ls));
 
-			le = e ? (uint32_t)(e - in) : n;
+			L.le = e ? (uint32_t)(e - in) : n;
 		}
 
-		/*
-		 * A STRING THAT IS STILL OPEN OWNS THE LINE, and this is the
-		 * case the pass used to assert could not happen.
-		 *
-		 * It can. A double-quoted php string may hold real newlines -
-		 * echoing a block of html is the ordinary way to do it - and
-		 * has_multiline does not see one, because it looks for heredoc
-		 * and backtick openers and a plain quote is neither. The state
-		 * was then thrown away at the end of every line, so the SECOND
-		 * line of such a string was walked AS CODE. Measured on a page
-		 * echoed from one literal:
-		 *
-		 *   - its indentation was stripped, its runs of spaces closed
-		 *     up and its blank lines dropped - all of it string VALUE;
-		 *   - and a line of it reading "// this is not a comment, it is
-		 *     text" was DELETED, because at the start of a line a "//"
-		 *     is read as a comment. A pass that silently removes a line
-		 *     of a file is the one outcome worth never producing.
-		 *
-		 * So the state carries, and a line that begins inside a string
-		 * is copied byte for byte - newline included - until the quote
-		 * that closes it. None of the line rules below are asked about
-		 * such a line: a blank line is data, an indent is data, and a
-		 * comment opener is text.
-		 */
-		if (resumed) {
-			uint32_t j = ls;
-
-			while (j < le) {
-				uint8_t c = in[j];
-
-				if (c == '\\' &&
-				    !lx->no_bs_escape &&
-				    (st == ST_DQ || lx->sq_escapes) &&
-				    j + 1u < le) {
-					out[w++] = c;
-					out[w++] = in[j + 1u];
-					j += 2u;
-					continue;
-				}
-				out[w++] = c;
-				j++;
-				if ((st == ST_SQ && c == '\'') ||
-				    (st == ST_DQ && c == '"')) {
-					st = ST_OUT;
-					break;
-				}
-			}
-			if (st != ST_OUT) {
-				/* Still open at the end of the line: the
-				 * newline is part of the value. */
-				if (le < n)
-					out[w++] = '\n';
-				i = le < n ? le + 1u : le;
-				continue;
-			}
-			/* Closed part way along: what follows is code, and it
-			 * is walked below without the line rules. */
-			ls = j;
-		}
-
-		/*
-		 * A BLOCK COMMENT THAT IS STILL OPEN OWNS THE WHOLE LINE.
-		 * Nothing on it is code, so it is dropped with the comment
-		 * lines - and the close is looked for as the line is walked.
-		 */
-		/*
-		 * A MULTI-LINE LITERAL THAT IS STILL OPEN OWNS THE LINE, and
-		 * every byte of it is copied exactly - including the newline
-		 * that ends the line, which is part of the string.
-		 */
-		if (st == ST_ML) {
-			uint32_t j = ls;
-
-			while (j < le) {
-				if (at_text(in, n, j, lx->ml_close[ml_k])) {
-					uint32_t t = text_len(lx->ml_close[ml_k]);
-
-					while (t--)
-						out[w++] = in[j++];
-					st = ST_OUT;
-					break;
-				}
-				out[w++] = in[j++];
-			}
-			if (st == ST_ML) {
-				/* Still open: the newline is the literal's. */
-				if (le < n)
-					out[w++] = in[le];
-				i = le < n ? le + 1u : le;
-				continue;
-			}
-			ls = j;
-			if (ls >= le) {
-				if (le < n)
-					out[w++] = '\n';
-				i = le < n ? le + 1u : le;
-				continue;
-			}
-		}
-
-		if (st == ST_BLK) {
-			uint32_t j = ls;
-
-			while (j < le) {
-				if (at_text(in, n, j, lx->blk_close)) {
-					st = ST_OUT;
-					j += text_len(lx->blk_close);
-					break;
-				}
-				j++;
-			}
-			/* Anything after the close on this line is code and is
-			 * kept; a line that is all comment goes. */
-			if (st == ST_OUT && j < le)
-				ls = j;
-			else {
-				i = le < n ? le + 1u : le;
-				continue;
-			}
-		}
-
-		/* Leading whitespace: measured either way, dropped on ask. */
-		body = ls;
-		while (body < le && is_ws(in[body]))
-			body++;
-		blank = body == le;
-		if (blank && !resumed && (what & KOF_NORM_BLANK)) {
-			i = le < n ? le + 1u : le;
+		if (L.resumed && norm_resume_string(&N, &L))
 			continue;
-		}
-		if (!resumed && (what & KOF_NORM_INDENT))
-			ls = body;
-
-		/*
-		 * IS THE WHOLE LINE A COMMENT - asked before the line is
-		 * walked, and answered by looking at its FIRST content only.
-		 *
-		 * That is what makes it safe without tracking strings: a
-		 * comment opener at the start of a line cannot be inside a
-		 * string, because a single-line string cannot reach here from
-		 * the line above - see has_multiline. A comment opener in the
-		 * MIDDLE of a line is a different question and this pass does
-		 * not ask it.
-		 */
-		if ((what & KOF_NORM_COMMENT) && !blank && !resumed) {
-			if (line_cmt_at(lx, in, n, body))
-				only_cmt = 1;
-			else if (lx->blk_open &&
-				 at_text(in, n, body, lx->blk_open)) {
-				/* Only when it also closes on this line, or
-				 * runs to the end of it. */
-				uint32_t j = body + text_len(lx->blk_open);
-				uint32_t close = 0;
-
-				while (j < le) {
-					if (at_text(in, n, j, lx->blk_close)) {
-						close = j +
-						    text_len(lx->blk_close);
-						break;
-					}
-					j++;
-				}
-				if (!close) {
-					st = ST_BLK;
-					only_cmt = 1;
-				} else {
-					uint32_t t = close;
-
-					while (t < le && is_ws(in[t]))
-						t++;
-					only_cmt = t == le;
-				}
-			}
-		}
-		if (only_cmt) {
-			i = le < n ? le + 1u : le;
+		if (N.st == ST_ML && norm_resume_ml(&N, &L))
 			continue;
-		}
-
-		/*
-		 * A LONE "{" JOINS THE LINE ABOVE IT.
-		 *
-		 * Not for looks. Allman and K&R are the two ways everyone
-		 * writes the same code and they differ in exactly this byte, so
-		 * closing it up is what makes one marker match both. Never in a
-		 * language where whitespace is syntax - in sh "{" is a command
-		 * group and needs the separator it is losing.
-		 */
-		/*
-		 * AND NEVER ONTO A LINE THAT ENDS IN A COMMENT.
-		 *
-		 * The brace is appended after whatever the line above left, and
-		 * what a line comment leaves is "everything to the end of the
-		 * line is not code". Joined there the brace is INSIDE the
-		 * comment - the block it opened is gone and the program the
-		 * form describes is not the program in the file. Found in a
-		 * real shell:
-		 *
-		 *   function Zip($source, $destination) // Thanks to Alix Axel
-		 *   {
-		 *
-		 * became "...$destination)// Thanks to Alix Axel{", and every
-		 * brace after it was one level out.
-		 */
-		if ((what & KOF_NORM_BRACE) && !lx->ws_significant && !resumed &&
-		    !cmt_tail &&
-		    le == body + 1u && in[body] == '{' && w > 0 &&
-		    out[w - 1u] == '\n') {
-			w--;                    /* take back the newline */
-			/*
-			 * AND THE "DID THIS LINE EMIT ANYTHING" MARK MOVES WITH
-			 * IT. start_w was taken before this, so after taking
-			 * the newline back and writing the brace, w was equal
-			 * to it again - the test at the foot of the loop then
-			 * read the line as having produced nothing and dropped
-			 * the newline that should follow the brace. The next
-			 * line was appended to it.
-			 */
-			start_w = w;
-		}
-
-		/* ---- the line itself ---- */
-		{
-			uint32_t j = ls;
-
-			while (j < le) {
-				uint8_t c = in[j];
-
-				if (st == ST_OUT) {
-					uint32_t cl;
-
-					if (at_text(in, n, j, lx->blk_open)) {
-						st = ST_BLK;
-						j += text_len(lx->blk_open);
-						continue;
-					}
-					cl = line_cmt_at(lx, in, n, j);
-					if (cl) {
-						/* A trailing comment is left
-						 * alone - see the header note
-						 * on dropping whole lines
-						 * only. */
-						while (j < le)
-							out[w++] = in[j++];
-						tail = 1;
-						break;
-					}
-					{
-						int k = ml_at(lx, in, n, j);
-
-						/*
-						 * COPIED FROM THE OPENER ON,
-						 * because the opener is part of
-						 * the literal and because what
-						 * follows it may be anything at
-						 * all.
-						 */
-						if (k >= 0) {
-							uint32_t t = text_len(
-								lx->ml_open[k]);
-
-							ml_k = k;
-							st = ST_ML;
-							while (t--)
-								out[w++] = in[j++];
-							continue;
-						}
-					}
-					if (lx->quotes &&
-					    strchr(lx->quotes, (int)c)) {
-						st = c == '\'' ? ST_SQ : ST_DQ;
-						out[w++] = c;
-						j++;
-						continue;
-					}
-					if (is_ws(c) &&
-					    (what & KOF_NORM_SPACE)) {
-						uint32_t e = j;
-						uint8_t prev, next;
-
-						while (e < le && is_ws(in[e]))
-							e++;
-						if (e >= le)
-							break;  /* trailing */
-						prev = w ? out[w - 1u] : 0;
-						next = in[e];
-						/*
-						 * CLOSED UP UNLESS THE TWO
-						 * WOULD BECOME ONE TOKEN.
-						 *
-						 * Two word bytes glue into one
-						 * name. Two bytes that spell a
-						 * longer operator glue into it
-						 * - see glues. Everything else
-						 * closes up, which is the
-						 * "eval (" case and also
-						 * "$s = \"", where the pair is
-						 * non-word on both sides and
-						 * perfectly safe.
-						 */
-						if (!lx->ws_significant && w &&
-						    !(is_word(prev) &&
-						      is_word(next)) &&
-						    !glues(lx, prev, next))
-							;       /* closed up */
-						else
-							out[w++] = ' ';
-						j = e;
-						continue;
-					}
-					if (c == '\t')
-						c = ' ';
-					out[w++] = c;
-					j++;
-					continue;
-				}
-				if (st == ST_ML) {
-					if (at_text(in, n, j,
-						    lx->ml_close[ml_k])) {
-						uint32_t t = text_len(
-							lx->ml_close[ml_k]);
-
-						while (t--)
-							out[w++] = in[j++];
-						st = ST_OUT;
-					} else {
-						out[w++] = in[j++];
-					}
-					continue;
-				}
-				if (st == ST_BLK) {
-					if (at_text(in, n, j, lx->blk_close)) {
-						st = ST_OUT;
-						j += text_len(lx->blk_close);
-					} else {
-						j++;
-					}
-					continue;
-				}
-				/* Inside a string: every byte is a value. */
-				if (c == '\\' &&
-				    !lx->no_bs_escape &&
-				    (st == ST_DQ || lx->sq_escapes) &&
-				    j + 1u < le) {
-					out[w++] = c;
-					out[w++] = in[j + 1u];
-					j += 2u;
-					continue;
-				}
-				if ((st == ST_SQ && c == '\'') ||
-				    (st == ST_DQ && c == '"'))
-					st = ST_OUT;
-				out[w++] = c;
-				j++;
-			}
-			/*
-			 * AND AN OPEN STRING CARRIES TO THE NEXT LINE, which
-			 * is the whole of the fix above. This used to reset
-			 * it, on the argument that has_multiline had ruled the
-			 * case out - it had not, and the reset is what let a
-			 * string's second line be walked as code.
-			 */
-		}
+		if (N.st == ST_BLK && norm_resume_blk(&N, &L))
+			continue;
+		if (norm_measure_line(&N, &L))
+			continue;
+		if (norm_whole_comment(&N, &L))
+			continue;
+		norm_join_brace(&N, &L);
+		norm_walk_line(&N, &L);
 
 		/* A line that emitted nothing but was not dropped - all of it
 		 * was a block comment - leaves no blank behind. */
-		if (w == start_w && (what & KOF_NORM_BLANK)) {
-			i = le < n ? le + 1u : le;
+		if (N.w == L.start_w && (what & KOF_NORM_BLANK)) {
+			N.i = L.le < n ? L.le + 1u : L.le;
 			continue;
 		}
-		cmt_tail = tail;
-		if (le < n)
-			out[w++] = '\n';
-		i = le < n ? le + 1u : le;
+		N.cmt_tail = L.tail;
+		if (L.le < n)
+			out[N.w++] = '\n';
+		N.i = L.le < n ? L.le + 1u : L.le;
 	}
-	return w;
+	return N.w;
 }
 
 /* ---- the folding pass ------------------------------------------------------

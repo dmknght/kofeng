@@ -21,7 +21,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <phenotype/diag_int.h>
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 
 static int fails;
@@ -29,27 +30,27 @@ static int fails;
 	__LINE__, #c); fails++; } } while (0)
 
 /* add a node, return its index */
-static uint16_t nd(struct kof_diag_scan *s, uint16_t cap)
+static uint16_t nd(struct kgenome_diag_scan *s, uint16_t cap)
 {
-	kof_diag_hit_add(s, 0x1000u + s->n_hit * 0x10u, cap, 0);
+	kgenome_diag_hit_add(s, 0x1000u + s->n_hit * 0x10u, cap, 0);
 	return (uint16_t)(s->n_hit - 1u);
 }
 
-static void edge(struct kof_diag_scan *s, uint16_t node, uint16_t from,
+static void edge(struct kgenome_diag_scan *s, uint16_t node, uint16_t from,
 		 uint8_t role)
 {
-	struct kof_diag_hit *h = kof_diag_hit_of(s, node);
+	struct kgenome_diag_hit *h = kgenome_diag_hit_of(s, node);
 
 	if (h)
-		kof_diag_note_in(h, from, role, KOF_DIAG_KIND_PRODUCED);
+		kgenome_diag_note_in(s, h, from, role, KGENOME_DIAG_KIND_PRODUCED);
 }
 
-static void reset(struct kof_diag_scan *s, struct kof_diag_hit *hits,
+static void reset(struct kgenome_diag_scan *s, struct kgenome_diag_hit *hits,
 		  uint32_t cap)
 {
 	free(s->adj_head);
 	free(s->adj_edge);
-	memset(hits, 0, sizeof(struct kof_diag_hit) * cap);
+	memset(hits, 0, sizeof(struct kgenome_diag_hit) * cap);
 	memset(s, 0, sizeof *s);
 	s->hit = hits;
 	s->cap_hit = cap;
@@ -57,8 +58,8 @@ static void reset(struct kof_diag_scan *s, struct kof_diag_hit *hits,
 
 int main(void)
 {
-	struct kof_diag_hit hits[8];
-	struct kof_diag_scan s;
+	struct kgenome_diag_hit hits[8];
+	struct kgenome_diag_scan s;
 	uint16_t a_bind[4], b_bind[4];
 
 	memset(&s, 0, sizeof s);
@@ -72,18 +73,18 @@ int main(void)
 	 * still catch it: a zero or one hop path is a path.
 	 */
 	{
-		uint16_t region = nd(&s, KOF_NUCLEO_ALLOC_EXEC);
-		uint16_t sock   = nd(&s, KOF_NUCLEO_NET_OPEN);
-		uint16_t rd     = nd(&s, KOF_NUCLEO_MEM_READ);
-		uint16_t ex     = nd(&s, KOF_NUCLEO_EXEC_REG);
+		uint16_t region = nd(&s, KGENOME_NUCLEO_ALLOC_EXEC);
+		uint16_t sock   = nd(&s, KGENOME_NUCLEO_NET_OPEN);
+		uint16_t rd     = nd(&s, KGENOME_NUCLEO_MEM_READ);
+		uint16_t ex     = nd(&s, KGENOME_NUCLEO_EXEC_REG);
 
-		edge(&s, rd, region, KOF_DIAG_ROLE_BUFFER);   /* read -> region */
-		edge(&s, rd, sock,   KOF_DIAG_ROLE_FD);       /* sock -> read   */
-		edge(&s, ex, region, KOF_DIAG_ROLE_TARGET);   /* region -> exec */
+		edge(&s, rd, region, KGENOME_DIAG_ROLE_BUFFER);   /* read -> region */
+		edge(&s, rd, sock,   KGENOME_DIAG_ROLE_FD);       /* sock -> read   */
+		edge(&s, ex, region, KGENOME_DIAG_ROLE_TARGET);   /* region -> exec */
 
 		a_bind[0] = region; a_bind[1] = rd; a_bind[2] = ex;  /* MEMEXEC */
 		b_bind[0] = sock;   b_bind[1] = rd;                  /* NETRECV */
-		CK(kof_diag_flow_join(&s, KOF_NUCLEO_MEM_READ,
+		CK(kof_diag_flow_join(&s, KGENOME_NUCLEO_MEM_READ,
 				      a_bind, 3u, b_bind, 2u) == 1);
 		printf("  direct stager: %s\n", fails ? "FAIL" : "matched");
 	}
@@ -101,24 +102,24 @@ int main(void)
 		uint16_t region, sock, rd, scratch, cpy, ex;
 
 		reset(&s, hits, 8u);
-		region  = nd(&s, KOF_NUCLEO_ALLOC_EXEC);
-		sock    = nd(&s, KOF_NUCLEO_NET_OPEN);
-		scratch = nd(&s, KOF_NUCLEO_HEAP);
-		rd      = nd(&s, KOF_NUCLEO_MEM_READ);
-		cpy     = nd(&s, KOF_NUCLEO_MEM_WRITE);
-		ex      = nd(&s, KOF_NUCLEO_EXEC_REG);
+		region  = nd(&s, KGENOME_NUCLEO_ALLOC_EXEC);
+		sock    = nd(&s, KGENOME_NUCLEO_NET_OPEN);
+		scratch = nd(&s, KGENOME_NUCLEO_HEAP);
+		rd      = nd(&s, KGENOME_NUCLEO_MEM_READ);
+		cpy     = nd(&s, KGENOME_NUCLEO_MEM_WRITE);
+		ex      = nd(&s, KGENOME_NUCLEO_EXEC_REG);
 
-		edge(&s, rd,  sock,    KOF_DIAG_ROLE_FD);      /* sock -> read     */
-		edge(&s, rd,  scratch, KOF_DIAG_ROLE_BUFFER);  /* read -> scratch  */
-		edge(&s, cpy, scratch, KOF_DIAG_ROLE_SOURCE);  /* scratch -> copy  */
-		edge(&s, cpy, region,  KOF_DIAG_ROLE_BUFFER);  /* copy -> region   */
-		edge(&s, ex,  region,  KOF_DIAG_ROLE_TARGET);  /* region -> exec   */
+		edge(&s, rd,  sock,    KGENOME_DIAG_ROLE_FD);      /* sock -> read     */
+		edge(&s, rd,  scratch, KGENOME_DIAG_ROLE_BUFFER);  /* read -> scratch  */
+		edge(&s, cpy, scratch, KGENOME_DIAG_ROLE_SOURCE);  /* scratch -> copy  */
+		edge(&s, cpy, region,  KGENOME_DIAG_ROLE_BUFFER);  /* copy -> region   */
+		edge(&s, ex,  region,  KGENOME_DIAG_ROLE_TARGET);  /* region -> exec   */
 
 		/* MEMEXEC binds only the region and the exec - it cannot bind
 		 * a read, there is none into the region. */
 		a_bind[0] = region; a_bind[1] = ex;
 		b_bind[0] = sock;   b_bind[1] = rd;
-		CK(kof_diag_flow_join(&s, KOF_NUCLEO_MEM_READ,
+		CK(kof_diag_flow_join(&s, KGENOME_NUCLEO_MEM_READ,
 				      a_bind, 2u, b_bind, 2u) == 1);
 		printf("  staged stager (scratch in between): %s\n",
 		       fails > before ? "FAIL" : "matched");
@@ -136,23 +137,23 @@ int main(void)
 		uint16_t region, sock, rd, scratchA, scratchB, cpy, ex;
 
 		reset(&s, hits, 8u);
-		region   = nd(&s, KOF_NUCLEO_ALLOC_EXEC);
-		sock     = nd(&s, KOF_NUCLEO_NET_OPEN);
-		scratchA = nd(&s, KOF_NUCLEO_HEAP);
-		scratchB = nd(&s, KOF_NUCLEO_HEAP);
-		rd       = nd(&s, KOF_NUCLEO_MEM_READ);
-		cpy      = nd(&s, KOF_NUCLEO_MEM_WRITE);
-		ex       = nd(&s, KOF_NUCLEO_EXEC_REG);
+		region   = nd(&s, KGENOME_NUCLEO_ALLOC_EXEC);
+		sock     = nd(&s, KGENOME_NUCLEO_NET_OPEN);
+		scratchA = nd(&s, KGENOME_NUCLEO_HEAP);
+		scratchB = nd(&s, KGENOME_NUCLEO_HEAP);
+		rd       = nd(&s, KGENOME_NUCLEO_MEM_READ);
+		cpy      = nd(&s, KGENOME_NUCLEO_MEM_WRITE);
+		ex       = nd(&s, KGENOME_NUCLEO_EXEC_REG);
 
-		edge(&s, rd,  sock,     KOF_DIAG_ROLE_FD);
-		edge(&s, rd,  scratchA, KOF_DIAG_ROLE_BUFFER); /* read -> A    */
-		edge(&s, cpy, scratchB, KOF_DIAG_ROLE_SOURCE); /* B -> copy    */
-		edge(&s, cpy, region,   KOF_DIAG_ROLE_BUFFER); /* copy -> region */
-		edge(&s, ex,  region,   KOF_DIAG_ROLE_TARGET);
+		edge(&s, rd,  sock,     KGENOME_DIAG_ROLE_FD);
+		edge(&s, rd,  scratchA, KGENOME_DIAG_ROLE_BUFFER); /* read -> A    */
+		edge(&s, cpy, scratchB, KGENOME_DIAG_ROLE_SOURCE); /* B -> copy    */
+		edge(&s, cpy, region,   KGENOME_DIAG_ROLE_BUFFER); /* copy -> region */
+		edge(&s, ex,  region,   KGENOME_DIAG_ROLE_TARGET);
 
 		a_bind[0] = region; a_bind[1] = ex;
 		b_bind[0] = sock;   b_bind[1] = rd;
-		CK(kof_diag_flow_join(&s, KOF_NUCLEO_MEM_READ,
+		CK(kof_diag_flow_join(&s, KGENOME_NUCLEO_MEM_READ,
 				      a_bind, 2u, b_bind, 2u) == 0);
 		printf("  unrelated buffer (must not match): %s\n",
 		       fails > before ? "FAIL" : "silent");

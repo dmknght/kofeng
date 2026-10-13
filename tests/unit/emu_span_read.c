@@ -30,7 +30,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -65,9 +65,9 @@ int main(void)
 	};
 	static const char plain[8] = { 'S','P','A','N','-','O','K','!' };
 	uint8_t data[16], got[16];
-	struct kof_emu_cfg cfg = { 0 };
-	struct kof_emu *e;
-	enum kof_emu_stop st;
+	struct kgenome_emu_cfg cfg = { 0 };
+	struct kgenome_emu *e;
+	enum kgenome_emu_stop st;
 	int i;
 
 	cfg.max_insn = 100000;
@@ -78,23 +78,23 @@ int main(void)
 	for (i = 0; i < 8; i++)
 		data[4 + i] = (uint8_t)plain[i] ^ KEY;
 
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e) { fail("out of memory"); return 1; }
 
-	if (!kof_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
-			 KOF_EMU_R | KOF_EMU_X) ||
-	    !kof_emu_map(e, DATA_VA, NULL, 0, DATA_LEN,
-			 KOF_EMU_R | KOF_EMU_W) ||
-	    !kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W))
+	if (!kgenome_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
+			 KGENOME_EMU_R | KGENOME_EMU_X) ||
+	    !kgenome_emu_map(e, DATA_VA, NULL, 0, DATA_LEN,
+			 KGENOME_EMU_R | KGENOME_EMU_W) ||
+	    !kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W))
 		fail("map");
-	if (!kof_emu_write(e, MARK_VA - 4, data, sizeof data))
+	if (!kgenome_emu_write(e, MARK_VA - 4, data, sizeof data))
 		fail("seed the ciphertext");
 
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
 
-	st = kof_emu_run(e);
-	if (st != KOF_EMU_STOP_HANDOFF)
+	st = kgenome_emu_run(e);
+	if (st != KGENOME_EMU_STOP_HANDOFF)
 		fail("the stub did not reach the jump into what it wrote");
 
 	/*
@@ -103,7 +103,7 @@ int main(void)
 	 * of the first page, so neither page alone can answer it.
 	 */
 	memset(got, 0xAA, sizeof got);
-	if (!kof_emu_read(e, MARK_VA - 4, got, sizeof got))
+	if (!kgenome_emu_read(e, MARK_VA - 4, got, sizeof got))
 		fail("a span across a page boundary was refused");
 	else if (memcmp(got + 4, plain, 8))
 		fail("a span across a page boundary came back wrong");
@@ -113,7 +113,7 @@ int main(void)
 	{
 		uint8_t page[0x1000];
 
-		if (!kof_emu_read(e, DATA_VA + 0x800u, page, sizeof page))
+		if (!kgenome_emu_read(e, DATA_VA + 0x800u, page, sizeof page))
 			fail("an unaligned page-sized span was refused");
 		else if (memcmp(page + (MARK_VA - (DATA_VA + 0x800u)), plain, 8))
 			fail("an unaligned page-sized span came back wrong");
@@ -121,13 +121,13 @@ int main(void)
 
 	/* ---- and one that runs off the end answers nothing at all --------- */
 	memset(got, 0xAA, sizeof got);
-	if (kof_emu_read(e, DATA_VA + DATA_LEN - 8u, got, sizeof got))
+	if (kgenome_emu_read(e, DATA_VA + DATA_LEN - 8u, got, sizeof got))
 		fail("a span with one end unmapped was answered");
 	for (i = 0; i < 16; i++)
 		if (got[i] != 0xAA)
 			{ fail("a refused span still wrote to the buffer"); break; }
 
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 	printf("emu span read: cross-page, unaligned, post-stop, all-or-nothing"
 	       " - %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;

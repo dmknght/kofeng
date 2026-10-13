@@ -26,7 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -102,9 +102,9 @@ int main(void)
 	};
 	static const char plain[N] = "KOFENG-UNPACK-K";
 	static uint8_t self[SELF_OFF + 0x1000];
-	struct kof_emu_cfg cfg = { 100000, 0, 0, 0 };  /* bits 0 = 64 */
-	struct kof_emu *e;
-	enum kof_emu_stop st;
+	struct kgenome_emu_cfg cfg = { 100000, 0, 0, 0 };  /* bits 0 = 64 */
+	struct kgenome_emu *e;
+	enum kgenome_emu_stop st;
 	uint32_t it;
 	uint64_t va, len;
 	const uint8_t *bytes;
@@ -114,31 +114,31 @@ int main(void)
 	for (i = 0; i < N; i++)
 		self[SELF_OFF + i] = (uint8_t)plain[i] ^ KEY;
 
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e) { fail("out of memory"); return 1; }
 
-	if (!kof_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
-			 KOF_EMU_R | KOF_EMU_X) ||
-	    !kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W))
+	if (!kgenome_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
+			 KGENOME_EMU_R | KGENOME_EMU_X) ||
+	    !kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W))
 		fail("map");
-	kof_emu_set_self(e, self, sizeof self);
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_self(e, self, sizeof self);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
 
-	st = kof_emu_run(e);
+	st = kgenome_emu_run(e);
 	printf("  ran %llu insn, stopped: %s%s%s\n",
-	       (unsigned long long)kof_emu_insn_count(e),
-	       kof_emu_stop_name(st),
-	       kof_emu_stop_detail(e)[0] ? " " : "", kof_emu_stop_detail(e));
-	if (st != KOF_EMU_STOP_EXIT)
+	       (unsigned long long)kgenome_emu_insn_count(e),
+	       kgenome_emu_stop_name(st),
+	       kgenome_emu_stop_detail(e)[0] ? " " : "", kgenome_emu_stop_detail(e));
+	if (st != KGENOME_EMU_STOP_EXIT)
 		fail("the stub did not run to its own exit");
 
-	for (it = 0; kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+	for (it = 0; kgenome_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
 		snaps++;
 		if (has(bytes, len, plain, N))
 			in_snapshot = 1;
 	}
-	for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); )
+	for (it = 0; kgenome_emu_next_written(e, &it, &va, &bytes, &len); )
 		if (has(bytes, len, plain, N))
 			in_final = 1;
 
@@ -155,7 +155,7 @@ int main(void)
 		fail("the stub did not overwrite its payload, so this proves "
 		     "nothing - check the stub, not the emulator");
 
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 	printf("emu unpack: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

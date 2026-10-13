@@ -43,7 +43,7 @@
 #ifndef KOFENG_OBJTREE_H
 #define KOFENG_OBJTREE_H
 
-#include "../kofeng.h"
+#include "../kofcore/koftypes.h"
 #include <kofmod/kofsig.h>
 
 /*

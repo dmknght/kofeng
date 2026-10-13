@@ -33,7 +33,7 @@ static void ok(int cond, const char *why)
 
 /*
  * The bug this guards: the build script matched architecture names as
- * substrings, so KOF_TARGET_ARCH(KOF_ARCH_X86_64) set the X86 bit too and every
+ * substrings, so KOF_TARGET_ARCH(KGENOME_ARCH_X86_64) set the X86 bit too and every
  * x86-64-only rule also ran on x86 objects. The fix moved into the engine, so
  * the test belongs against the engine.
  */
@@ -47,7 +47,7 @@ static void arch_names(void)
 #undef X_W
 	};
 
-	ok(sizeof want / sizeof want[0] == KOF_ARCH_COUNT,
+	ok(sizeof want / sizeof want[0] == KGENOME_ARCH_COUNT,
 	   "the list and its count disagree");
 	for (i = 0; i < sizeof want / sizeof want[0]; i++) {
 		ok(kof_arch_from_name(want[i].word, &v) && v == want[i].val,
@@ -58,8 +58,8 @@ static void arch_names(void)
 	ok(!kof_arch_from_name("KOF_ARCH_X86_6", &v), "prefix must not match");
 	ok(!kof_arch_from_name("KOF_ARCH_X86_640", &v), "extension must not match");
 	ok(!kof_arch_from_name("KOF_ARCH_ARM6", &v), "ARM6 is not ARM64");
-	ok(kof_arch_from_name("KOF_ARCH_X86", &v) && v == KOF_ARCH_X86, "X86");
-	ok(kof_arch_from_name("KOF_ARCH_X86_64", &v) && v == KOF_ARCH_X86_64,
+	ok(kof_arch_from_name("KOF_ARCH_X86", &v) && v == KGENOME_ARCH_X86, "X86");
+	ok(kof_arch_from_name("KOF_ARCH_X86_64", &v) && v == KGENOME_ARCH_X86_64,
 	   "X86_64 is not X86");
 }
 
@@ -103,59 +103,59 @@ static void precond(void)
 	struct kof_obj_ctx c;
 
 	/* An x86-64-only module must not run on an x86 object, and the reverse. */
-	m = mod_of(1u << KOF_FMT_ELF, 1u << KOF_ARCH_X86_64, 0, 0);
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_X86_64, KOF_ELF_EXEC);
+	m = mod_of(1u << KOF_FMT_ELF, 1u << KGENOME_ARCH_X86_64, 0, 0);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_X86_64, KGENOME_ELF_EXEC);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_OK, "x64 rule on x64");
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_X86, KOF_ELF_EXEC);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_X86, KGENOME_ELF_EXEC);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_ARCH,
 	   "x64 rule must not run on x86");
 
-	m = mod_of(1u << KOF_FMT_ELF, 1u << KOF_ARCH_X86, 0, 0);
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_X86_64, KOF_ELF_EXEC);
+	m = mod_of(1u << KOF_FMT_ELF, 1u << KGENOME_ARCH_X86, 0, 0);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_X86_64, KGENOME_ELF_EXEC);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_ARCH,
 	   "x86 rule must not run on x64");
 
 	/* No mask at all means every architecture. */
 	m = mod_of(1u << KOF_FMT_ELF, 0, 0, 0);
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_ARM64, KOF_ELF_DYN);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_ARM64, KGENOME_ELF_DYN);
 	ok(kof_module_precond(&m, &c, 1) == KOF_PRECOND_OK, "no arch mask, any arch");
 
 	/*
-	 * SUBTYPE VALUES COLLIDE BETWEEN FORMATS ON PURPOSE - KOF_ELF_REL and
-	 * KOF_PE_DLL are both 1 - and what keeps that safe is that target is
+	 * SUBTYPE VALUES COLLIDE BETWEEN FORMATS ON PURPOSE - KGENOME_ELF_REL and
+	 * KGENOME_PE_DLL are both 1 - and what keeps that safe is that target is
 	 * tested first. A module that targets ELF only must be excluded on a PE
 	 * BY FORMAT, before its subtype mask is ever compared.
 	 */
-	m = mod_of(1u << KOF_FMT_ELF, 0, 1u << KOF_ELF_REL, 0);
+	m = mod_of(1u << KOF_FMT_ELF, 0, 1u << KGENOME_ELF_REL, 0);
 	/*
-	 * KOF_PE_SYS and not KOF_PE_DLL, and the difference is the whole test.
+	 * KGENOME_PE_SYS and not KGENOME_PE_DLL, and the difference is the whole test.
 	 * DLL is 1 and so is ELF_REL, so a subtype test would ACCIDENTALLY pass
 	 * on that object and fall through to the format test anyway - the check
 	 * would hold whatever order the two were applied in, which is to say it
 	 * would check nothing. SYS is 2, so a subtype test reached first rejects
 	 * it and says so, and only the right order answers TARGET.
 	 */
-	c = ctx_of(KOF_FMT_PE, KOF_ARCH_X86_64, KOF_PE_SYS);
+	c = ctx_of(KOF_FMT_PE, KGENOME_ARCH_X86_64, KGENOME_PE_SYS);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_TARGET,
 	   "ELF subtype rule on a PE is ruled out by format, not by subtype");
-	c = ctx_of(KOF_FMT_PE, KOF_ARCH_X86_64, KOF_PE_DLL);
+	c = ctx_of(KOF_FMT_PE, KGENOME_ARCH_X86_64, KGENOME_PE_DLL);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_TARGET,
 	   "and the colliding value is still ruled out by format");
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_X86_64, KOF_ELF_REL);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_X86_64, KGENOME_ELF_REL);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_OK, "REL rule on a REL");
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_X86_64, KOF_ELF_DYN);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_X86_64, KGENOME_ELF_DYN);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_SUBTYPE,
 	   "REL rule must not run on a DYN");
 
 	/* Size is tested before architecture, so a too-small object says so. */
-	m = mod_of(1u << KOF_FMT_ELF, 1u << KOF_ARCH_X86, 0, 8192);
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_X86_64, KOF_ELF_EXEC);
+	m = mod_of(1u << KOF_FMT_ELF, 1u << KGENOME_ARCH_X86, 0, 8192);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_X86_64, KGENOME_ELF_EXEC);
 	ok(kof_module_precond(&m, &c, 100) == KOF_PRECOND_SIZE,
 	   "below the minimum size, and that is the reason given");
 
 	/* An architecture no mask can name is not covered by a constrained module. */
-	m = mod_of(1u << KOF_FMT_ELF, 1u << KOF_ARCH_X86, 0, 0);
-	c = ctx_of(KOF_FMT_ELF, KOF_ARCH_OTHER, KOF_ELF_EXEC);
+	m = mod_of(1u << KOF_FMT_ELF, 1u << KGENOME_ARCH_X86, 0, 0);
+	c = ctx_of(KOF_FMT_ELF, KGENOME_ARCH_OTHER, KGENOME_ELF_EXEC);
 	ok(kof_module_precond(&m, &c, 4096) == KOF_PRECOND_ARCH,
 	   "OTHER is outside the mask width");
 }
@@ -215,11 +215,11 @@ static void target_word(void)
 {
 	char w[32];
 
-	kverdict_target(w, sizeof w, KOF_FMT_ELF, KOF_ARCH_X86_64);
+	kverdict_target(w, sizeof w, KOF_FMT_ELF, KGENOME_ARCH_X86_64);
 	ok(strcmp(w, "ELF-x64") == 0, "ELF-x64");
-	kverdict_target(w, sizeof w, KOF_FMT_ELF, KOF_ARCH_ANY);
+	kverdict_target(w, sizeof w, KOF_FMT_ELF, KGENOME_ARCH_ANY);
 	ok(strcmp(w, "ELF") == 0, "no architecture, no suffix");
-	kverdict_target(w, sizeof w, KOF_FMT_UNKNOWN, KOF_ARCH_X86_64);
+	kverdict_target(w, sizeof w, KOF_FMT_UNKNOWN, KGENOME_ARCH_X86_64);
 	ok(strcmp(w, kof_format_name(KOF_FMT_UNKNOWN)) == 0,
 	   "an unidentified object names no architecture");
 }

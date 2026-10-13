@@ -8,17 +8,18 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
+#include "../kofcore/kofmod/pe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -171,6 +172,46 @@ uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx,
 	return n;
 }
 
+/*
+ * AN OBJECT THAT IS TOLD WHAT IT IS, AND IS NOT ASKED.
+ *
+ * A normalised view carries the image description of the parent it renders, with
+ * every file offset moved through the transform (see kof_src_desc). Installed
+ * where a parse would have put its answer - the format's view struct, and the
+ * context's format, architecture, subtype and entry - so everything downstream
+ * reads the same fields it always did and cannot tell the difference, except
+ * that the fields are TRUE. The parse is not run: it would read the parent's
+ * header out of bytes that are no longer where that header points.
+ *
+ * Returns 0 when there is nothing to install (the object is identified from its
+ * bytes), or when the view struct cannot be had - an object that is then raw,
+ * which is the honest answer for one that cannot be described.
+ */
+int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
+{
+	const struct kof_src_desc *d = kof_src_desc_of(sc->cur_src);
+	const struct kof_parser *p;
+
+	if (!d || d->fmt >= KOF_TARGET_COUNT)
+		return 0;
+	p = kof_parser_of(d->fmt);
+	if (!p || d->info_len > p->view_size)
+		return 0;
+	if (!sc->view[d->fmt]) {
+		sc->view[d->fmt] = malloc(p->view_size);
+		if (!sc->view[d->fmt])
+			return 0;
+	}
+	memset(sc->view[d->fmt], 0, p->view_size);
+	memcpy(sc->view[d->fmt], d->info, d->info_len);
+	ctx->format = d->fmt;
+	ctx->arch = d->arch;
+	ctx->subtype = d->subtype;
+	ctx->entry_off = d->entry_off;
+	ctx->file_header = sc->view[d->fmt];
+	return 1;
+}
+
 void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		     uint8_t as_format, const void *as_view, uint32_t as_view_len)
 {
@@ -307,7 +348,7 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		 * objects and the sniff path can do that "because each of those
 		 * parsers fills every field it later reads". That stopped being
 		 * true when a parser gained a field the CALLER fills -
-		 * kof_pe_info.layout, which pe_parse deliberately preserves
+		 * kgenome_pe_info.layout, which pe_parse deliberately preserves
 		 * across its own memset because clearing it would make every
 		 * declared mapped image parse as a file.
 		 *
@@ -345,15 +386,15 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 void sx_dense_code_unread(struct kof_scanner *sc,
 			      const struct kof_obj_ctx *ctx)
 {
-	const struct kof_pe_info *pe = kof_pe(ctx);
+	const struct kgenome_pe_info *pe = kof_pe(ctx);
 	uint32_t i;
 
 	if (!pe || !pe->valid || pe->entry_sec >= pe->sec_count)
 		return;
-	for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
-		const struct kof_pe_sec *s = &pe->sec[i];
+	for (i = 0; i < pe->sec_count && i < KGENOME_PE_MAX_SECTIONS; i++) {
+		const struct kgenome_pe_sec *s = &pe->sec[i];
 
-		if (i == pe->entry_sec || !(s->perm & KOF_PE_PERM_X))
+		if (i == pe->entry_sec || !kgenome_pe_sec_is_code(s))
 			continue;
 		if (s->file_size < DENSE_MIN_SEC || !s->file_off)
 			continue;
@@ -375,7 +416,7 @@ void sx_dense_code_unread(struct kof_scanner *sc,
  * Beside the parse, because that is what it needs and because every consumer
  * of the answer runs after it: the normaliser leaves these bytes out of the
  * view, the block builder puts a block on the library side of enum
- * kof_plague_side when it lands in one, and both used to work it out for
+ * kgenome_mutation_side when it lands in one, and both used to work it out for
  * themselves. See kof_scanner.cur_lib.
  *
  * TWO TIERS, AND THE SECOND IS GATED ON HOW THE OBJECT WAS LINKED.
@@ -402,14 +443,14 @@ void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * A VIEW KNOWS WHERE ITS LIBRARY IS BECAUSE IT WAS TOLD.
 		 *
 		 * The bytes are in it - moved to the end under SLIB_CODE and
-		 * SLIB_DATA, see KOF_SCAN_ELF_SLIB_CODE - and nothing here can
-		 * work them out a second time: kof_true_find reads segment
+		 * SLIB_DATA, see KGENOME_SCAN_ELF_SLIB_CODE - and nothing here can
+		 * work them out a second time: kgenome_true_find reads segment
 		 * offsets, and a view's headers describe the file before the
 		 * transform. The declared table is the answer, and it came from
 		 * this same field one object ago.
 		 *
 		 * WITHOUT THIS THEY ARE THE AUTHOR'S. Every window is then
-		 * KOF_PLAGUE_SIDE_USER, so a block cut from somebody's own code
+		 * KGENOME_MUTATION_SIDE_USER, so a block cut from somebody's own code
 		 * is credited by libc - which is the one thing the side
 		 * mechanism exists to stop. Measured when it was missing: ten
 		 * files dropped from infected to suspected, because a rule that
@@ -419,10 +460,10 @@ void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		uint32_t i;
 
 		for (i = 0; i < sc->n_cur_rgn &&
-			    sc->cur_lib.n < KOF_TRUE_MAX_SPANS_ALL; i++) {
+			    sc->cur_lib.n < KGENOME_TRUE_MAX_SPANS_ALL; i++) {
 			if (!(sc->cur_rgn[i].mask &
-			      (KOF_SCAN_ELF_SLIB_CODE |
-			       KOF_SCAN_ELF_SLIB_DATA)))
+			      (KGENOME_SCAN_ELF_SLIB_CODE |
+			       KGENOME_SCAN_ELF_SLIB_DATA)))
 				continue;
 			if (!sc->cur_rgn[i].len)
 				continue;
@@ -440,7 +481,7 @@ void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (!buf.p || !buf.n)
 		return;
 	/* Which tier the object needs is the object's question, answered in one
-	 * place - see kof_true_find_object. */
-	kof_true_find_object(buf, kof_elf(ctx), &sc->cur_lib);
+	 * place - see kgenome_true_find_object. */
+	kgenome_true_find_object(buf, kof_elf(ctx), &sc->cur_lib);
 	sc->cur_lib_ok = 1;
 }

@@ -5,7 +5,7 @@
  * TWO FAULTS, BOTH SILENT, BOTH FOUND BY SURVEYING PE SAMPLES RATHER THAN BY
  * ANYTHING FAILING:
  *
- *   THE WRONG TABLE   kof_flow_cap_of_syscall only knows Linux. Handed a
+ *   THE WRONG TABLE   kgenome_flow_cap_of_syscall only knows Linux. Handed a
  *                     Windows service number it does not refuse - it
  *                     ANSWERS. A Hell's Gate shaped stub, `mov r10,rcx; mov
  *                     eax,0x3b; syscall`, in a PE came back as proc-start,
@@ -34,7 +34,8 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
 
@@ -146,7 +147,7 @@ static uint64_t pe(uint8_t *b, uint64_t cap, int bits64,
 
 static unsigned char view[1u << 21];
 
-static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
+static struct kgenome_diag_scan *scan(const uint8_t *b, uint64_t n,
 				  struct kof_obj_ctx *ctx, const char *what)
 {
 	const struct kof_parser *pl;
@@ -160,29 +161,33 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 	pl = kof_parser_list(&np);
 	for (i = 0; i < np; i++)
 		if (pl[i].sniff && pl[i].sniff(buf) &&
-		    pl[i].parse && pl[i].parse(buf, view, ctx))
+		    pl[i].parse && pl[i].parse(buf, view, ctx)) {
+			struct kgenome_obj gobj;
+
 			/* THE SYSCALL ROUTINE AND ONLY IT. These cases are
 			 * about which byte sequences count as a way into
 			 * the kernel, which is that routine's rule; a node
 			 * from a run would be a different question counted
 			 * in the same total. */
-			return kof_diag_scan_with(ctx, b, n,
-						  KOF_DIAG_RUN_SYSCALL);
+			kof_genome_obj(ctx, &gobj);
+			return kgenome_diag_scan_with(&gobj, b, n,
+						  KGENOME_DIAG_RUN_SYSCALL);
+		}
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;
 }
 
-static uint32_t count(struct kof_diag_scan *s)
+static uint32_t count(struct kgenome_diag_scan *s)
 {
-	return s ? kof_diag_scan_count(s) : 0;
+	return s ? kgenome_diag_scan_count(s) : 0;
 }
 
 int main(void)
 {
 	static uint8_t b[0x800];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
+	struct kgenome_diag_scan *s;
 	uint64_t n;
 
 	/*
@@ -205,9 +210,9 @@ int main(void)
 		if (s && count(s) == 1u)
 			/* mem-write, not file-write: write(2) takes a
 			 * descriptor and nothing here says what it is. See
-			 * KOF_CG_IO. */
-			CK(kof_diag_scan_at(s, 0)->cap == KOF_NUCLEO_MEM_WRITE);
-		kof_diag_scan_free(s);
+			 * KGENOME_CG_IO. */
+			CK(kgenome_diag_scan_at(s, 0)->cap == KGENOME_NUCLEO_MEM_WRITE);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -224,7 +229,7 @@ int main(void)
 		n = elf32(b, sizeof b, bad32, sizeof bad32);
 		s = scan(b, n, &ctx, "i386 ELF syscall");
 		CK(count(s) == 0u);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -241,7 +246,7 @@ int main(void)
 		n = pe(b, sizeof b, 0, int80, sizeof int80);
 		s = scan(b, n, &ctx, "PE int 0x80");
 		CK(count(s) == 0u);
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -258,22 +263,22 @@ int main(void)
 			0x0f, 0x05,                   /* syscall            */
 			0xc3
 		};
-		const struct kof_diag_hit *h;
+		const struct kgenome_diag_hit *h;
 
 		n = pe(b, sizeof b, 1, hg, sizeof hg);
 		s = scan(b, n, &ctx, "PE direct syscall");
 		CK(count(s) == 1u);
 		if (s && count(s) == 1u) {
-			h = kof_diag_scan_at(s, 0);
+			h = kgenome_diag_scan_at(s, 0);
 			/* Not proc-start. Not anything. */
-			CK(h->cap == KOF_NUCLEO_NONE);
+			CK(h->cap == KGENOME_NUCLEO_NONE);
 			/* And said to be a read number rather than an
 			 * unreadable one - the two are different states and
 			 * only one of them is interesting. */
-			CK((h->bits & KOF_DIAG_H_RAW_SYSCALL) != 0);
-			CK((h->bits & KOF_DIAG_H_OPAQUE) == 0);
+			CK((h->bits & KGENOME_DIAG_H_RAW_SYSCALL) != 0);
+			CK((h->bits & KGENOME_DIAG_H_OPAQUE) == 0);
 		}
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -288,17 +293,17 @@ int main(void)
 			0x0f, 0x05,                   /* syscall            */
 			0xc3
 		};
-		const struct kof_diag_hit *h;
+		const struct kgenome_diag_hit *h;
 
 		n = pe(b, sizeof b, 1, blind, sizeof blind);
 		s = scan(b, n, &ctx, "PE syscall, number unknown");
 		CK(count(s) == 1u);
 		if (s && count(s) == 1u) {
-			h = kof_diag_scan_at(s, 0);
-			CK((h->bits & KOF_DIAG_H_OPAQUE) != 0);
-			CK((h->bits & KOF_DIAG_H_RAW_SYSCALL) == 0);
+			h = kgenome_diag_scan_at(s, 0);
+			CK((h->bits & KGENOME_DIAG_H_OPAQUE) != 0);
+			CK((h->bits & KGENOME_DIAG_H_RAW_SYSCALL) == 0);
 		}
-		kof_diag_scan_free(s);
+		kgenome_diag_scan_free(s);
 	}
 
 	printf("diagnose kernel entry: mode, format, and whose syscall table%s\n",

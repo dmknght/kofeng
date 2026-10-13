@@ -25,7 +25,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -47,31 +47,31 @@ static void fail(const char *what)
  */
 static uint64_t peb_read(const uint8_t *code, unsigned n, int *reached)
 {
-	struct kof_emu_cfg cfg = { 0 };
-	struct kof_emu *e;
+	struct kgenome_emu_cfg cfg = { 0 };
+	struct kgenome_emu *e;
 	uint8_t teb[0x1000];
 	uint64_t ebx;
 
 	cfg.bits = 32;
 	cfg.max_insn = 64;
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e)
 		return 0;
 	memset(teb, 0, sizeof teb);
 	teb[0x30] = 0x00; teb[0x31] = 0x20; teb[0x32] = 0xfe; teb[0x33] = 0x7f;
 
-	kof_emu_map(e, CODE_VA, code, n, 0x1000, KOF_EMU_R | KOF_EMU_X);
-	kof_emu_map(e, TEB_VA, teb, sizeof teb, 0x2000, KOF_EMU_R | KOF_EMU_W);
-	kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W);
+	kgenome_emu_map(e, CODE_VA, code, n, 0x1000, KGENOME_EMU_R | KGENOME_EMU_X);
+	kgenome_emu_map(e, TEB_VA, teb, sizeof teb, 0x2000, KGENOME_EMU_R | KGENOME_EMU_W);
+	kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W);
 	/* the decoder's segment ids: ES, CS, SS, DS, FS, GS - FS is 4, which is
 	 * where a 32-bit Windows thread keeps its TEB. */
-	kof_emu_set_seg_base(e, 4, TEB_VA);
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
-	(void)kof_emu_run(e);
-	ebx = kof_emu_get_reg(e, KOF_EMU_RBX);
-	*reached = kof_emu_get_reg(e, KOF_EMU_RAX) == 0x5aa5u;
-	kof_emu_free(e);
+	kgenome_emu_set_seg_base(e, 4, TEB_VA);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
+	(void)kgenome_emu_run(e);
+	ebx = kgenome_emu_get_reg(e, KGENOME_EMU_RBX);
+	*reached = kgenome_emu_get_reg(e, KGENOME_EMU_RAX) == 0x5aa5u;
+	kgenome_emu_free(e);
 	return ebx;
 }
 

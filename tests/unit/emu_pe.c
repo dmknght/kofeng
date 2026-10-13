@@ -31,8 +31,9 @@
 #include <kofmod/pe.h>
 #include <kofmod/kofsig.h>
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../libkofeng/extractors/unpack/emu_unpack.h"
+#include <phenotype/emu_unpack.h>
 #include "../../libkofeng/kofeng.h"
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 #define BASE      0x0000000140000000ull
 #define HDR_LEN   0x400u
@@ -176,10 +177,10 @@ static void decodes(void)
 {
 	size_t len = 0;
 	unsigned char *f = build(&len);
-	struct kof_pe_info *info = calloc(1, sizeof *info);
+	struct kgenome_pe_info *info = calloc(1, sizeof *info);
 	struct kof_obj_ctx *ctx = calloc(1, sizeof *ctx);
-	struct kof_emu_unp_report rep;
-	struct kof_emu *e;
+	struct kgenome_emu_unp_report rep;
+	struct kgenome_emu *e;
 	uint32_t it;
 	uint64_t va, l;
 	const uint8_t *bytes;
@@ -196,7 +197,7 @@ static void decodes(void)
 	ck(info->entry_rva == TEXT_RVA, "the entry point survived the parse");
 	ck(info->sec_count == 2, "both sections were read");
 
-	e = kof_emu_unp_run_pe(f, len, info, 0, 0, 0, 0, KOF_EMU_EXTEND_MAX, NULL, 0, NULL,
+	e = kgenome_emu_unp_run_pe(f, len, info, NULL, NULL, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, NULL,
 			       &rep);
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image could be built");
@@ -211,7 +212,7 @@ static void decodes(void)
 	 * build_stack_pe writes. Faulting there is the CORRECT ending: it says
 	 * the stub finished and did not run on into whatever followed.
 	 */
-	ck(rep.stop == KOF_EMU_STOP_FAULT,
+	ck(rep.stop == KGENOME_EMU_STOP_FAULT,
 	   "stopped by returning to the unmapped sentinel");
 	/*
 	 * And it is REPORTED as a return rather than left as a bare fault.
@@ -221,7 +222,7 @@ static void decodes(void)
 	 */
 	ck(rep.returned, "the return was reported as a return, not a fault");
 
-	for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &l); ) {
+	for (it = 0; kgenome_emu_next_written(e, &it, &va, &bytes, &l); ) {
 		uint64_t k;
 
 		if (l < sizeof MARKER - 1)
@@ -235,7 +236,7 @@ static void decodes(void)
 			break;
 	}
 	ck(found, "the decoded payload came back in the written pages");
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 
 out:
 	free(info);
@@ -253,8 +254,9 @@ static void refuses_arm64(void)
 {
 	size_t len = 0;
 	unsigned char *f = build(&len);
-	struct kof_pe_info *info = calloc(1, sizeof *info);
+	struct kgenome_pe_info *info = calloc(1, sizeof *info);
 	struct kof_obj_ctx *ctx = calloc(1, sizeof *ctx);
+	struct kgenome_obj gobj;
 
 	if (!f || !info || !ctx) {
 		ck(0, "out of memory building the fixture");
@@ -265,7 +267,8 @@ static void refuses_arm64(void)
 		ck(0, "the ARM64 variant did not parse");
 		goto out;
 	}
-	ck(kof_emu_unp_gate_pe(ctx, info, f, len) == KOF_EMU_UNP_NO,
+	kof_genome_obj(ctx, &gobj);
+	ck(kgenome_emu_unp_gate_pe(&gobj, info, f, len) == KGENOME_EMU_UNP_NO,
 	   "the gate refuses a machine the decoder cannot read");
 out:
 	free(info);
@@ -362,8 +365,9 @@ static void selects_appended(void)
 {
 	size_t len = 0;
 	unsigned char *f = build_appended(&len);
-	struct kof_pe_info *info = calloc(1, sizeof *info);
+	struct kgenome_pe_info *info = calloc(1, sizeof *info);
 	struct kof_obj_ctx *ctx = calloc(1, sizeof *ctx);
+	struct kgenome_obj gobj;
 
 	if (!f || !info || !ctx) {
 		ck(0, "out of memory building the fixture");
@@ -376,7 +380,8 @@ static void selects_appended(void)
 	ck(info->sec_count == 2, "both sections were read");
 	ck(info->entry_sec == info->sec_count - 1u,
 	   "the entry is in the last section");
-	ck(kof_emu_unp_gate_pe(ctx, info, f, len) == KOF_EMU_UNP_WHY_APPENDED,
+	kof_genome_obj(ctx, &gobj);
+	ck(kgenome_emu_unp_gate_pe(&gobj, info, f, len) == KGENOME_EMU_UNP_WHY_APPENDED,
 	   "the gate selects it, and for the appended-stub reason");
 out:
 	free(info);

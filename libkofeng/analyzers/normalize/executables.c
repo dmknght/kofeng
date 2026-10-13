@@ -13,6 +13,25 @@
 #include <kofcore.h>
 
 #include "executables.h"
+#include <uncoat.h>
+
+/*
+ * Decode the run `p[0..n)` where it sits, through libuncoat's one transform. The
+ * write trails the read for both codings used here, so no copy is needed.
+ *
+ * Returns the bytes written, or 0 unless the lib says the decode is COMPLETE -
+ * the contract these call sites were written against: a run the coding cannot
+ * read whole is left to the caller as "decoded to nothing".
+ */
+static uint64_t decode_in_place(uint32_t algo, uint32_t flags, uint8_t *p, uint64_t n)
+{
+	struct kuncoat_step s = { algo, KUNCOAT_DECODE, flags, 0, NULL, 0, 0 };
+	uint64_t got = 0;
+
+	if (kuncoat_transform(&s, p, n, p, n, &got) != KUNCOAT_OK)
+		return 0;
+	return got;
+}
 
 /* Printable ASCII, which is what a widened marker is made of. Control bytes are
  * refused: a run of "02 00 03 00" is a table of small integers, and reading it
@@ -310,7 +329,6 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 	for (i = from; i + 8u < to && made < B64_MAX_PAY; i++) {
 		uint64_t run_end, run_beg, j;
 		uint64_t out_n = 0;
-		uint32_t acc = 0, have = 0;
 		uint8_t  before;
 		int      piped = 0;
 
@@ -414,18 +432,8 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * bytes out per four in - so the output cannot overtake what
 		 * has not been read yet, and no copy is needed.
 		 */
-		for (j = run_beg; j < run_end; j++) {
-			int v = kof_b64_val(p[j]);
-
-			if (v < 0)
-				continue;       /* the padding and the newlines */
-			acc = (acc << 6) | (uint32_t)v;
-			have += 6u;
-			if (have >= 8u) {
-				have -= 8u;
-				p[run_beg + out_n++] = (uint8_t)(acc >> have);
-			}
-		}
+		out_n = decode_in_place(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX,
+					p + run_beg, run_end - run_beg);
 		/*
 		 * A run that decoded to nothing is left exactly as it was.
 		 * Zeroing it would remove bytes the matcher can still read for
@@ -1087,9 +1095,7 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			continue;
 		/* In place: the write trails the read by half, so it cannot
 		 * overtake what has not been read. */
-		for (j = beg; j < end; j += 2u)
-			p[beg + out_n++] = (uint8_t)((kof_hex_val(p[j]) << 4)
-						     | kof_hex_val(p[j + 1u]));
+		out_n = decode_in_place(KUNCOAT_ALGO_HEX, 0, p + beg, end - beg);
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
 		if (wrote && n_wrote && *n_wrote < cap) {
 			wrote[*n_wrote].off = beg;
@@ -1110,12 +1116,10 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 
 		for (k = 0; k < n_pend; k++) {
 			uint64_t beg = pend[k].beg, end = pend[k].end;
-			uint64_t j, out_n = 0;
+			uint64_t out_n;
 
-			for (j = beg; j < end; j += 2u)
-				p[beg + out_n++] =
-					(uint8_t)((kof_hex_val(p[j]) << 4)
-						  | kof_hex_val(p[j + 1u]));
+			out_n = decode_in_place(KUNCOAT_ALGO_HEX, 0, p + beg,
+						end - beg);
 			memset(p + beg + out_n, 0,
 			       (size_t)(end - beg - out_n));
 			if (wrote && n_wrote && *n_wrote < cap) {

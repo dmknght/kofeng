@@ -30,9 +30,9 @@
 #include <stdint.h>
 
 #include "../../libkofeng/kofcore/kofcore.h"
-#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
-#include "../../libkofeng/databases/hexprog.h"
-#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/detectors/pattern/kofmatch.h"
+#include "../../libkofeng/databases/pack/hexprog.h"
+#include "../../libkofeng/databases/pack/dbcore.h"
 
 static int failures;
 static const char *g_case = "?";
@@ -290,11 +290,11 @@ static void one_round(void)
 		int in = kof_match_in(&m, off, len, use, (uint16_t)plen, kind,
 				      flags);
 
-		if (in != (at != KOF_BROKEN))
+		if (in != (at != KGENOME_BROKEN))
 			fail("kof_match_in and kof_match_where disagree on "
 			     "whether the pattern is in the range");
 	}
-	if (at != KOF_BROKEN) {
+	if (at != KGENOME_BROKEN) {
 		if (at < off || at >= off + len)
 			fail("kof_match_where returned an offset outside the "
 			     "range it was given");
@@ -337,7 +337,7 @@ static void one_round(void)
 				     off + len > prev + 1u
 				     ? off + len - (prev + 1u) : 0,
 				     use, (uint16_t)plen, kind, flags);
-		if (at != KOF_BROKEN && at <= prev)
+		if (at != KGENOME_BROKEN && at <= prev)
 			fail("restarting past a hit did not move forward");
 	} else {
 		for (i = 0; i < n_brute; i++)

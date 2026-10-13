@@ -22,8 +22,9 @@
 #define KOFENG_RANGELIST_H
 
 #include <stdint.h>
-#include <kofmod/kofsig.h>
+#include "range.h"      /* struct kof_range */
 #include "kofcore.h"   /* kof_clip_len */
+#include "heapsort.h"   /* KOF_HEAPSORT: one sort for the three tables */
 
 /* A range list under construction, bounded by the caller's buffer. */
 struct kof_rlist {
@@ -87,47 +88,13 @@ static inline void kof_rl_add(struct kof_rlist *l, uint64_t obj_size,
  * takes the rest: O(n log n) with no input that defeats it, in place, and with no
  * allocation on a path that has nowhere to report a failure.
  */
-static inline void kof_rl_sift(struct kof_range *v, uint32_t root, uint32_t n)
+static inline int kof_rl_before(const struct kof_range *a,
+				const struct kof_range *b)
 {
-	for (;;) {
-		uint32_t big = root, l = 2u * root + 1u, r = l + 1u;
-
-		if (l < n && v[big].off < v[l].off)
-			big = l;
-		if (r < n && v[big].off < v[r].off)
-			big = r;
-		if (big == root)
-			return;
-		{
-			struct kof_range t = v[root];
-
-			v[root] = v[big];
-			v[big] = t;
-		}
-		root = big;
-	}
+	return a->off < b->off;
 }
 
-static inline void kof_rl_sort(struct kof_range *v, uint32_t n)
-{
-	uint32_t i;
-
-	for (i = 1; i < n; i++)
-		if (v[i].off < v[i - 1].off)
-			break;
-	if (i >= n)
-		return;
-
-	for (i = n / 2u; i-- > 0; )
-		kof_rl_sift(v, i, n);
-	for (i = n; i-- > 1; ) {
-		struct kof_range t = v[0];
-
-		v[0] = v[i];
-		v[i] = t;
-		kof_rl_sift(v, 0, i);
-	}
-}
+KOF_HEAPSORT(kof_rl, struct kof_range, kof_rl_before)
 
 /*
  * Sort by offset, then merge anything that touches or overlaps.
@@ -280,47 +247,7 @@ static inline int kof_claim_before(const struct kof_claim *a,
 	return a->off < b->off || (a->off == b->off && a->rank < b->rank);
 }
 
-static inline void kof_claim_sift(struct kof_claim *v, uint32_t root, uint32_t n)
-{
-	for (;;) {
-		uint32_t big = root, l = 2u * root + 1u, r = l + 1u;
-
-		if (l < n && kof_claim_before(&v[big], &v[l]))
-			big = l;
-		if (r < n && kof_claim_before(&v[big], &v[r]))
-			big = r;
-		if (big == root)
-			return;
-		{
-			struct kof_claim t = v[root];
-
-			v[root] = v[big];
-			v[big] = t;
-		}
-		root = big;
-	}
-}
-
-static inline void kof_claim_sort(struct kof_claim *v, uint32_t n)
-{
-	uint32_t i;
-
-	for (i = 1; i < n; i++)
-		if (kof_claim_before(&v[i], &v[i - 1]))
-			break;
-	if (i >= n)
-		return;
-
-	for (i = n / 2u; i-- > 0; )
-		kof_claim_sift(v, i, n);
-	for (i = n; i-- > 1; ) {
-		struct kof_claim t = v[0];
-
-		v[0] = v[i];
-		v[i] = t;
-		kof_claim_sift(v, 0, i);
-	}
-}
+KOF_HEAPSORT(kof_claim, struct kof_claim, kof_claim_before)
 
 /*
  * Decide which claimant owns which bytes, so that the claims are disjoint.

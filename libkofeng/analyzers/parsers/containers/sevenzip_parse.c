@@ -36,11 +36,11 @@
 
 #include <stddef.h>
 #include "sevenzip_parse.h"
-#include "../../../extractors/decomp/lzma.h"
+#include <decompressors/lzma.h>
 
 #include <stdlib.h>
 #include "../../../kofcore/runlist.h"
-#include "../../../extractors/decomp/lzma.h"
+#include <decompressors/lzma.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -200,9 +200,9 @@ static void hdr_probe(kof_buf f, uint64_t at, uint64_t end, struct kof_7z_info *
 			z->hdr_lc = (uint8_t)(d % 9u);
 			z->hdr_lp = (uint8_t)((d / 9u) % 5u);
 			z->hdr_pb = (uint8_t)(d / 45u);
-			if (z->hdr_lc > KOF_LZMA_MAX_LC ||
-			    z->hdr_lp > KOF_LZMA_MAX_LP ||
-			    z->hdr_pb > KOF_LZMA_MAX_PB) {
+			if (z->hdr_lc > KUNCOAT_LZMA_MAX_LC ||
+			    z->hdr_lp > KUNCOAT_LZMA_MAX_LP ||
+			    z->hdr_pb > KUNCOAT_LZMA_MAX_PB) {
 				z->anomalies |= KOF_7Z_ANOM_UNKNOWN_CODER;
 				return;
 			}
@@ -776,7 +776,7 @@ static void content_probe(kof_buf f, struct kof_7z_info *z)
 {
 	uint8_t *out;
 	uint64_t produced = 0;
-	enum kof_decomp_status st;
+	enum kuncoat_status st;
 
 	/*
 	 * A PLAIN HEADER NEEDS NO DECODE AND WAS THEREFORE NEVER READ.
@@ -815,7 +815,7 @@ static void content_probe(kof_buf f, struct kof_7z_info *z)
 	out = malloc((size_t)z->hdr_unpack_size);
 	if (!out)
 		return;
-	st = kof_lzma_decode(z->hdr_lc, z->hdr_lp, z->hdr_pb,
+	st = kuncoat_lzma_decode(z->hdr_lc, z->hdr_lp, z->hdr_pb,
 			     f.p + z->hdr_pack_off, z->hdr_pack_size,
 			     out, z->hdr_unpack_size, &produced);
 	if (produced)

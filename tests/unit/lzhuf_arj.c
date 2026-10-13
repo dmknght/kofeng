@@ -33,7 +33,7 @@
 
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/analyzers/parsers/containers/arj_parse.h"
-#include "../../libkofeng/extractors/decomp/lzhuf.h"
+#include <decompressors/lzhuf.h>
 #include "outsink.h"
 
 static int failures;
@@ -220,7 +220,7 @@ int main(void)
 	};
 	static const char *db = "build/release/databases";
 	struct kof_arj_info *a = NULL;
-	struct kof_lzhuf *lz = NULL;
+	struct kuncoat_lzhuf *lz = NULL;
 	struct kof_obj_ctx ctx;
 	struct row *rows = NULL;
 	uint8_t *f = NULL, *outbuf = NULL;
@@ -269,7 +269,7 @@ int main(void)
 	for (i = 0; i < a->n_entries; i++) {
 		const struct kof_entry *e = &a->entry[i];
 		struct out o;
-		enum kof_decomp_status st;
+		enum kuncoat_status st;
 		uint64_t got = 0;
 		uint32_t k, row = nrows;
 
@@ -312,9 +312,9 @@ int main(void)
 		memset(&o, 0, sizeof o);
 		o.dst = outbuf;
 		o.cap = rows[row].osize;
-		st = kof_lzhuf_decode(lz, KOF_LZHUF_ARJ, f + e->off, e->len,
+		st = kuncoat_lzhuf_decode(lz, KUNCOAT_LZHUF_ARJ, f + e->off, e->len,
 				      rows[row].osize, out_sink, &o, &got);
-		if (st != KOF_DEC_OK) {
+		if (st != KUNCOAT_OK) {
 			fail(rows[row].name, "the file did not decode");
 			break;
 		}

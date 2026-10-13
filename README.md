@@ -74,13 +74,9 @@ map to it.
                                 │
                     ┌───────────┴───────────┐
                     ↓                       ↓
-              ┌───────────┐          ┌────────────┐
-              │  Pattern  │          │  Overlord  │──────────────┐
-              └───────────┘          └──────┬─────┘              |
-                                            ↓                    ↓
-                                      ┌───────────┐   ┌────────────────────┐
-                                      │   Plague  │   │  Struct similarity |
-                                      └───────────┘   └────────────────────┘
+              ┌───────────┐          ┌───────────┐
+              │  Pattern  │          │   Mutation  │
+              └───────────┘          └───────────┘
                                 ↓
                          ┌─────────────┐
                          │    Cure     │
@@ -129,8 +125,7 @@ map to it.
 
 | | |
 |---|---|
-| [Plague signatures](../../wiki/Plague-signatures) | how much of one declared block of code is present, as a percentage |
-| [Overlord signatures](../../wiki/Overlord-signatures) | is this the same program as that one — shape, string set, call chain |
+| [Mutation signatures](../../wiki/Mutation-signatures) | how much of one declared block of code is present, as a percentage |
 
 ## Beyond files
 

@@ -84,7 +84,7 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
 
-#include <kofunpack/pe_reassemble.h>
+#include <kofmod/pe_reassemble.h>
 
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 

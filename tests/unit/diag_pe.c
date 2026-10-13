@@ -22,8 +22,9 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
-#include "../../libkofeng/analyzers/nucleo/nucleo.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <celllysis/nucleo.h>
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
 
@@ -137,12 +138,12 @@ static uint64_t pe_with_import(uint8_t *b, uint64_t cap, int wide,
 	return hdr + fa;
 }
 
-static uint32_t count(struct kof_diag_scan *s)
+static uint32_t count(struct kgenome_diag_scan *s)
 {
-	return s ? kof_diag_scan_count(s) : 0;
+	return s ? kgenome_diag_scan_count(s) : 0;
 }
 
-static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
+static struct kgenome_diag_scan *scan(const uint8_t *b, uint64_t n,
 				  struct kof_obj_ctx *ctx, const char *what)
 {
 	const struct kof_parser *pl;
@@ -156,8 +157,12 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 	pl = kof_parser_list(&np);
 	for (i = 0; i < np; i++)
 		if (pl[i].sniff && pl[i].sniff(buf) &&
-		    pl[i].parse && pl[i].parse(buf, view, ctx))
-			return kof_diag_scan_with(ctx, b, n, KOF_DIAG_RUN_SYMBOL);
+		    pl[i].parse && pl[i].parse(buf, view, ctx)) {
+			struct kgenome_obj gobj;
+
+			kof_genome_obj(ctx, &gobj);
+			return kgenome_diag_scan_with(&gobj, b, n, KGENOME_DIAG_RUN_SYMBOL);
+		}
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;
@@ -167,12 +172,12 @@ int main(void)
 {
 	static uint8_t b[0x1000], code[0x100];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
-	const uint16_t want = kof_flow_cap_of_name("VirtualAlloc");
+	struct kgenome_diag_scan *s;
+	const uint16_t want = kgenome_flow_cap_of_name("VirtualAlloc");
 	uint32_t i, hits;
 	uint64_t n;
 
-	CK(want != KOF_NUCLEO_NONE);    /* the vocabulary has a word for it */
+	CK(want != KGENOME_NUCLEO_NONE);    /* the vocabulary has a word for it */
 
 	/*
 	 * 1. x64, AFTER BYTES THAT DO NOT DECODE. 0x06 (push es) is invalid in 64-bit
@@ -189,18 +194,18 @@ int main(void)
 	s = scan(b, n, &ctx, "x64 import call");
 	hits = 0;
 	for (i = 0; s && i < count(s); i++) {
-		const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
 		if (h->cap == want && h->at == 0x400u + 4u) {
 			hits++;
 			/* the node says WHICH import: the name is where the table put it */
-			CK(h->bits & KOF_DIAG_H_SYMREF);
+			CK(h->bits & KGENOME_DIAG_H_SYMREF);
 			CK(h->symref + 12u <= n &&
 			   !memcmp(b + h->symref, "VirtualAlloc", 13));
 		}
 	}
 	CK(hits == 1);
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 
 	/*
 	 * 2. x86 THROUGH A STUB: two callers, one `jmp [slot]`. A node on each
@@ -218,7 +223,7 @@ int main(void)
 		int at0 = 0, at5 = 0, on_stub = 0;
 
 		for (i = 0; s && i < count(s); i++) {
-			const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+			const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
 			if (h->cap != want)
 				continue;
@@ -230,7 +235,7 @@ int main(void)
 		CK(at5 == 1);
 		CK(on_stub == 0);
 	}
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 
 	/*
 	 * 3. NOT AN IMPORT: an indirect call through a fixed address that is not
@@ -245,14 +250,14 @@ int main(void)
 	n = pe_with_import(b, sizeof b, 1, code, 0x100, 1);
 	s = scan(b, n, &ctx, "not an import");
 	for (i = 0; s && i < count(s); i++)
-		CK(kof_diag_scan_at(s, i)->cap != want);
-	kof_diag_scan_free(s);
+		CK(kgenome_diag_scan_at(s, i)->cap != want);
+	kgenome_diag_scan_free(s);
 
 	/* 4. NO IMPORT DIRECTORY: nothing to match, nothing invented. */
 	n = pe_with_import(b, sizeof b, 1, code, 0x100, 0);
 	s = scan(b, n, &ctx, "no imports");
 	CK(count(s) == 0);
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 
 	printf("diag pe: import calls, data in the code, the x86 stub, a call that is not an import%s\n",
 	       fails ? " - FAILED" : " - ok");

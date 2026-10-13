@@ -15,23 +15,24 @@
 #define KOFENG_SCAN_H
 
 #include "objsrc.h"
+#include "objprod.h"
 #include "../analyzers/parsers/binaries/funcs.h"
 #include <celllysis/celllysis.h>
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
-#include "../extractors/unpack/pe_rebuild.h"
-#include "../kofeng.h"
-/* KOF_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
+#include <genotype/image/pe_rebuild.h>
+#include "../kofcore/koftypes.h"
+#include "../kofcore/kofhash.h"   /* KOF_ERR_*, SHA-256 */
+/* KGENOME_EMU_EXEC_WATCH bounds the per-object list below; the interpreter owns
  * the number because it owns the list it is copied into. */
-#include "../../libgenome/phenotype/kofemu.h"
-#include "../extractors/unpack/emu_unpack.h"
+#include <phenotype/kofemu.h>
+#include <phenotype/emu_unpack.h>
 #include "../databases/dbloader.h"
-#include "../detectors/overlord/matchers/kofmatch.h"
-#include "../detectors/overlord/plague/kofplague.h"
+#include "../detectors/pattern/kofmatch.h"
+#include "../detectors/mutations/kofmutation.h"
 /* KOF_NUCLEO_COUNT, for the profile below. */
-#include "../detectors/overlord/kofoverlord.h"
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
 #include "../analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../extractors/unpack/pe_rebuild.h"
+#include <genotype/image/pe_rebuild.h>
 #include "../analyzers/parsers/containers/gzip_parse.h"
 #include "../analyzers/parsers/containers/docole_parse.h"
 #include "../analyzers/parsers/containers/zip_parse.h"
@@ -42,14 +43,7 @@
 #include "../analyzers/parsers/containers/rtf_parse.h"
 #include "../analyzers/parsers/containers/pdf_parse.h"
 #include "objsrc.h"
-#include "../extractors/decomp/inflate.h"
-#include "../extractors/decomp/textcode.h"
-#include "../extractors/decomp/lzw.h"
-#include "../extractors/decomp/bzip2.h"
-#include "../extractors/decomp/lzx.h"
-#include "../extractors/decomp/lzhuf.h"
-#include "../extractors/decomp/nrv2.h"
-#include "../extractors/decomp/lzma.h"
+#include <uncoat.h>
 
 /*
  * Everything mutable, one per thread.
@@ -116,9 +110,10 @@ enum kof_obj_latch {
 	KOF_OL_DIAG,            /* the pathogen walk has run                */
 	KOF_OL_RELOCS,          /* the relocation table                     */
 	KOF_OL_APIHASH,         /* what a PE resolves for itself            */
+	KOF_OL_PE_IMPORTS,      /* the PE's import directory, walked        */
 	KOF_OL_GRAPH_BLOCK,     /* the graph serialised for a rule          */
 	KOF_OL_MULTI,           /* the multi-pattern set is bound           */
-	KOF_OL_PLAGUE,          /* the similarity set is bound              */
+	KOF_OL_MUTATION,          /* the similarity set is bound              */
 	KOF_OL_COUNT
 };
 
@@ -188,17 +183,9 @@ struct kof_scanner {
 	 * Beside the pattern matcher's state and for the same reason: the index
 	 * they count against belongs to the engine and is shared, and only the
 	 * counting is per object. Empty when no loaded block exists, which is
-	 * what keeps a build with no plague rules from allocating anything.
+	 * what keeps a build with no mutation rules from allocating anything.
 	 */
-	struct kof_plague_ctx plague;
-	/*
-	 * THIS OBJECT'S OWN OVERLORD DESCRIPTOR, for kof_plague_blocks.
-	 *
-	 * Built once per object in the same prepass the plague feed runs in,
-	 * and only when some loaded module could ask - see ovl_wanted. A
-	 * pointer because the descriptor carries a four-thousand entry pool and
-	 * a scanner that never meets an ELF should not hold one.
-	 */
+	struct kof_mutation_ctx mutation;
 	/*
 	 * WHICH DIAGNOSES THIS OBJECT CARRIES, worked out once.
 	 *
@@ -208,7 +195,24 @@ struct kof_scanner {
 	 * must not pay for it. The first rule that asks pays; the rest read
 	 * the answer.
 	 */
-	uint8_t  diag_hit[32];          /* one bit per diagnose id          */
+	/*
+	 * ONE BIT PER DIAGNOSE (its slot), for as many as the database holds:
+	 * diag_cap, allocated once per scanner in kof_scan_new. A fixed 256 here
+	 * was the table that capped the loader (KOF_DB_MAX_DIAG) and, with it, a
+	 * database's diagnoses 257 and on were not loaded.
+	 */
+	uint8_t *diag_hit;
+	uint32_t diag_cap;              /* diagnoses this scanner has room for  */
+	uint32_t diag_bm;               /* bytes in each bitmap                 */
+	/*
+	 * THE DIAGNOSES THAT COULD NOT SAY: their gate was open, the scan ran, and a
+	 * limit was reached on it so a 'no' would not be an answer - see
+	 * kof_diag_match_known. Set where diag_hit is, cleared with it.
+	 */
+	uint8_t *diag_unk;
+	/* The head sequences handed to the scan, which keeps the pointer while its
+	 * graph lives. */
+	struct kgenome_diag_seq *diag_seq;
 	/*
 	 * WHICH DIAGNOSES' GATES THIS OBJECT PASSES, one bit each, worked out
 	 * ONCE per object for all of them - see diag_gates.
@@ -219,14 +223,14 @@ struct kof_scanner {
 	 * "which of these objects' signs are present" is one fact about the
 	 * object, so it is one walk and one bitmap.
 	 */
-	uint8_t  diag_gate[32];
+	uint8_t *diag_gate;
 	/*
-	 * THE OBJECT'S RELOCATIONS, derived once - see struct kof_elf_relocs. The
+	 * THE OBJECT'S RELOCATIONS, derived once - see struct kgenome_elf_relocs. The
 	 * gate reads them for KOF_DIAG_DECLARE_SYMBOL and the diag routes read the same table
-	 * through kof_diag_scan_with_inputs; both used to walk the relocation
+	 * through kgenome_diag_scan_with_inputs; both used to walk the relocation
 	 * sections themselves. Built on first need, freed with the object.
 	 */
-	struct kof_elf_relocs *relocs;
+	struct kgenome_elf_relocs *relocs;
 	/* A decrypt step added names to sym - see sym_declared. Per object. */
 	int      sym_served;
 	/*
@@ -237,12 +241,19 @@ struct kof_scanner {
 	struct kof_sym_decl *sym_decl;
 	uint32_t n_sym_decl, cap_sym_decl;
 	/*
-	 * WHAT THE PE RESOLVES FOR ITSELF - see struct kof_apihash. An analysis
+	 * WHAT THE PE RESOLVES FOR ITSELF - see struct kgenome_apihash. An analysis
 	 * result and not a diag-route detail: the graph reads it and so does the
 	 * normaliser, and whichever asks first pays for it once. Freed with the
 	 * object, like the relocations.
 	 */
-	struct kof_apihash *apihash;
+	struct kgenome_apihash *apihash;
+	/*
+	 * THE PE'S IMPORT DIRECTORY, WALKED ONCE - see kgenome_pe_imptab. The symbol
+	 * block spells it as records and the PE diagnose matches call sites
+	 * against its slots; whichever asks first pays for the walk. Freed with
+	 * the object.
+	 */
+	struct kgenome_pe_imptab pe_imp;
 	/*
 	 * WHICH NODE EACH DIAGNOSE BOUND EACH OF ITS OWN NODES TO - see
 	 * kof_diag_share.
@@ -260,8 +271,8 @@ struct kof_scanner {
 	 * able to answer about any node. 16 KB, once per scanner, bounded by
 	 * the database and not by the object.
 	 */
-	uint16_t diag_bind[KOF_DB_MAX_DIAG][KOF_DB_MAX_DIAG_NODE];
-	uint8_t  diag_n_bind[KOF_DB_MAX_DIAG];
+	uint16_t (*diag_bind)[KOF_DB_MAX_DIAG_NODE];
+	uint8_t  *diag_n_bind;
 	/* see kof_scan_option.want_diag */
 	/*
 	 * THE GRAPH ITSELF, kept for as long as the object is.
@@ -280,7 +291,27 @@ struct kof_scanner {
 	 * that outlived its object would answer the next one's questions
 	 * about the wrong bytes.
 	 */
-	struct kof_diag_scan *diag_graph;
+	struct kgenome_diag_scan *diag_graph;
+	/*
+	 * THE PARENT'S ANALYSIS, when this object is a rendering of one - see
+	 * objprod.h. While set, diag_graph and apihash point into it and are NOT
+	 * this scanner's to free (prod_borrowed); the per-object reset lets go of
+	 * them first.
+	 */
+	const struct kof_prod *cur_prod;
+	uint8_t                prod_borrowed;
+	/*
+	 * WHAT THE GRAPH COST AND WHETHER IT IS WHOLE, read back from the lib after
+	 * the scan (kgenome_diag_scan_bytes, kgenome_diag_scan_status). The bytes are
+	 * charged to this scanner's own memory ceiling (`resident`) for as long as
+	 * the graph lives, and given back with it - see oc_diag_graph_drop - so a
+	 * child scanned while the graph is held sees the room that is really left.
+	 * The status is KGENOME_OK or the worst limit a routine of the scan reached,
+	 * the memory allowance included: see kof_scan_diag_status.
+	 */
+	uint64_t diag_charged;
+	enum kgenome_status diag_status;
+	uint32_t diag_refused;          /* names the scan refused (kgenome_diag_scan_refused) */
 	/*
 	 * And the same graph as the RECORD BLOCK a rule reads - see
 	 * kofmod/kofpathogen.h. Serialised on the first ask and kept until the
@@ -288,6 +319,7 @@ struct kof_scanner {
 	 */
 	uint8_t  *gr;
 	uint32_t  gr_n;
+	uint32_t  gr_cap;       /* its allocation: a header and a record per node */
 
 	/*
 	 * THREE FIELDS STOOD HERE and all three went with the chain: the
@@ -322,7 +354,7 @@ struct kof_scanner {
 	 * multi_prepass), so a module that could search without declaring would
 	 * already be mis-sized today.
 	 *
-	 * Reset per object beside every other per-object fact. kof_plague_begin
+	 * Reset per object beside every other per-object fact. kof_mutation_begin
 	 * is NOT deferred with the feed - it is a generation bump, O(1), and
 	 * leaving it eager is what keeps a block from reading the last object's
 	 * answer when this object never fed anything.
@@ -340,7 +372,7 @@ struct kof_scanner {
 	uint32_t             cur_want, cur_want_level;
 	/* Where the module that recognised this object says its program will
 	 * be. Per OBJECT, not per child - see emu_watch in kofsig.h. */
-	struct { uint64_t rva, len; } xw[KOF_EMU_EXEC_WATCH];
+	struct { uint64_t rva, len; } xw[KGENOME_EMU_EXEC_WATCH];
 	uint32_t             n_xw;
 	/* Whether the emulator has produced a child from the object in hand.
 	 * Cleared per object and published in kof_result.emu_unpacked. */
@@ -348,30 +380,29 @@ struct kof_scanner {
 	const char          *res_why;
 	/* A run a module asked to be paused on, and the report it will be
 	 * gathered with when it finishes - see `emu_resume` in kofsig.h. */
-	struct kof_emu_unp_report *emu_rep_p;
+	struct kgenome_emu_unp_report *emu_rep_p;
 	int                  emu_paused;
 	/* What a module declared before the run - instruction patterns
 	 * (`emu_watch_insn`), API return values (`emu_api_returns`) and image
 	 * patches (`emu_patch`), all in kofsig.h. */
-	struct kof_emu_decl  pend_decl;
+	struct kgenome_emu_decl  pend_decl;
 	/*
 	 * THE HEURISTIC LEVEL THIS SCAN ASKED FOR, as kof_scan_option spells
 	 * it: 0 when heuristics are off, otherwise 1 and up.
 	 *
 	 * Kept here because the two most expensive similarity measures are
 	 * gated on it and the content hooks that answer them have no option
-	 * to read - see c_plague_blocks and c_pth_match. Set once per object,
+	 * to read - see c_mutation_blocks and c_pth_match. Set once per object,
 	 * beside the two ready flags and for the same reason.
 	 */
 	uint32_t             heur_lvl;
 	/*
 	 * WHETHER A SIMILARITY MEASURE ANSWERED, and with what.
 	 *
-	 * The same pair of facts plague_asked and plague_hit are, for the
+	 * The same pair of facts mutation_asked and mutation_hit are, for the
 	 * measures that carry a reference in the module's own rodata rather
-	 * than a declared block - kof_plague_blocks,
-	 * kof_plague_shape. A verdict reached through one of
-	 * those is named for it, exactly as a plague verdict is, so a reader
+	 * than a declared block - kof_mutation_blocks. A verdict reached through
+	 * one of those is named for it, exactly as a mutation verdict is, so a reader
 	 * of the name knows what recognised the object.
 	 *
 	 * The HIGHEST answer, not the last: a rule may ask twice, and what
@@ -435,17 +466,15 @@ struct kof_scanner {
 	uint8_t              use_cut;
 	/* The module-facing code reader's cursor - see libgenome/celllysis/celllysis.h.
 	 * One per object, because a module walks one run of code at a time. */
-	struct kof_cell_cur      cell;
-	int                  ovl_asked;
-	uint32_t             ovl_pct;
+	struct kgenome_cell_cur      cell;
 	/*
-	 * THE HIGHEST PLAGUE SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
+	 * THE HIGHEST MUTATION SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
 	 *
 	 * A similarity verdict is a MEASUREMENT, and the name it is reported
-	 * under should carry it: "Botnet:Mirai#83!Plague" says how alike the
+	 * under should carry it: "Botnet:Mirai#83!Mutation" says how alike the
 	 * sample was, which is the one thing a reader of such a verdict needs
 	 * and the one thing a hand-written variant cannot know. Recorded where
-	 * it is produced - see c_plague_score - because nothing downstream can
+	 * it is produced - see c_mutation_score - because nothing downstream can
 	 * work out afterwards which block a rule looked at, or whether it
 	 * looked at one at all.
 	 *
@@ -453,7 +482,7 @@ struct kof_scanner {
 	 * verdicts, each naming what IT measured. -1 is "this module has not
 	 * asked", which is what keeps every other rule's name untouched.
 	 */
-	int plague_asked;
+	int mutation_asked;
 	/*
 	 * AND WHICH BLOCKS THOSE WERE - ALL OF THEM, not the best one.
 	 *
@@ -468,23 +497,23 @@ struct kof_scanner {
 	 * part of the rule and left the other part unmentioned, and two rules
 	 * sharing that one block reported the same name. So every block the
 	 * module asked about is kept, and the verdict is named after the SET -
-	 * see kof_plague_name_of, which sorts them so the order a C expression
+	 * see kof_mutation_name_of, which sorts them so the order a C expression
 	 * evaluated them in cannot change the answer.
 	 *
 	 * The score is the set's too: `hit` and `tot` are matched hashes and
 	 * declared hashes summed over these blocks, so the percentage says how
 	 * much of what the rule is made of is in this object. A block asked
-	 * about twice is counted once - see c_plague_score.
+	 * about twice is counted once - see c_mutation_score.
 	 */
-	uint32_t plague_blk[KOF_PLAGUE_NAME_MAX];
-	uint32_t n_plague_blk;
-	uint32_t plague_hit;
-	uint32_t plague_tot;
+	uint32_t mutation_blk[KOF_MUTATION_NAME_MAX];
+	uint32_t n_mutation_blk;
+	uint32_t mutation_hit;
+	uint32_t mutation_tot;
 	/*
 	 * AND WHETHER A DECLARED STRING OF THIS MODULE WAS FOUND, which is
-	 * what says the plague residue is not the explanation.
+	 * what says the mutation residue is not the explanation.
 	 *
-	 * plague_asked plus plague_hit answer "was a block asked about, and
+	 * mutation_asked plus mutation_hit answer "was a block asked about, and
 	 * did it find anything". They do not answer "is that what recognised
 	 * the object", and the name claims exactly that - see the contract on
 	 * the similarity fields below: a reader of the name knows what
@@ -493,25 +522,25 @@ struct kof_scanner {
 	 * A RULE HAS SEVERAL MATCHERS AND THEY ARE NOT ONE EXPRESSION:
 	 *
 	 *     if (kof_find_str_multi(code, s0..s6) >= 2 ||
-	 *         kof_plague_score(blk) >= 70u)   KOF_SCAN_INFECT(...);
+	 *         kof_mutation_score(blk) >= 70u)   KOF_SCAN_INFECT(...);
 	 *     if (kof_find_str_any(sym_exp, s7..s13))  KOF_SCAN_INFECT(...);
 	 *
 	 * `||` short-circuits when its LEFT side is true, so a string that
-	 * carries the first matcher keeps kof_plague_score from ever running
-	 * and plague_asked stays -1. What it does not cover is the first
+	 * carries the first matcher keeps kof_mutation_score from ever running
+	 * and mutation_asked stays -1. What it does not cover is the first
 	 * matcher failing BOTH ways and the SECOND one firing: the block was
 	 * scored, found 17 per cent of itself - far under the 70 the rule
 	 * wanted, and under any threshold a rule would use - and a Gafgyt
 	 * sample recognised by an exported symbol came back named
-	 * "#51f88b7c!Plague?17". The number was real and the sentence it
+	 * "#51f88b7c!Mutation?17". The number was real and the sentence it
 	 * formed was false.
 	 *
 	 * SO: a string of this module matched, and the name belongs to the
 	 * string. It costs a combined rule nothing that it had - all three
-	 * mixed rules shipped are `string || plague`, where a matching string
-	 * means the plague call never happened.
+	 * mixed rules shipped are `string || mutation`, where a matching string
+	 * means the mutation call never happened.
 	 *
-	 * Reset per module beside the plague fields and for the same reason.
+	 * Reset per module beside the mutation fields and for the same reason.
 	 */
 	int str_hit;
 	/*
@@ -542,7 +571,7 @@ struct kof_scanner {
 	 * Measured on
 	 * HEUR-Backdoor.Linux.Mirai.b-020fd6b946c52e68ea21a1533d6ed5f9f3b50fc1d19eef0c1fd6e8c18802505b:
 	 * 26 of one block's 30 hashes and 26 of another's 128, over a rule
-	 * demanding 80 of either. It reported "Plague?32" - a number belonging
+	 * demanding 80 of either. It reported "Mutation?32" - a number belonging
 	 * to neither block, and below the threshold the branch that fired had
 	 * just cleared.
 	 *
@@ -555,12 +584,12 @@ struct kof_scanner {
 	 * its own threshold. It is never a figure no block has and never below
 	 * what the rule demanded.
 	 *
-	 * THE NAME IS STILL THE SET'S - see kof_plague_name_of. What a rule is
+	 * THE NAME IS STILL THE SET'S - see kof_mutation_name_of. What a rule is
 	 * made of and how much of it is here are two different questions, and
 	 * naming after the best block alone made two rules sharing that block
 	 * report the same thing.
 	 */
-	uint32_t plague_best;
+	uint32_t mutation_best;
 	/*
 	 * One parsed view per format, allocated the first time an object of that
 	 * format is seen and kept for the life of the scanner.
@@ -641,7 +670,7 @@ struct kof_scanner {
 	 * that made it is out of scope by the time the child is reached. */
 	uint32_t           *kid_want;
 	uint32_t           *kid_want_level;
-	/* One count and KOF_EMU_EXEC_WATCH (rva,len) pairs per child, flat. */
+	/* One count and KGENOME_EMU_EXEC_WATCH (rva,len) pairs per child, flat. */
 	uint32_t           *kid_n_xw;
 	uint64_t           *kid_xw;
 	/*
@@ -718,20 +747,20 @@ struct kof_scanner {
 	 * that produces a flat payload declares one. Spent by the push, beside
 	 * the region table and the symbols.
 	 */
-	struct kof_sec_decl      *pend_sec;
+	struct kgenome_sec_decl      *pend_sec;
 	uint32_t                  n_pend_sec;
 	uint64_t                  pend_entry_rva;
 	int                       pend_entry_set;
 	/* Directories a module rebuilt, which override the parent's - see
 	 * `child_dir` in kofsig.h. */
-	struct kof_dir_decl       pend_dir[16];
+	struct kgenome_dir_decl       pend_dir[16];
 	/* The child is an image laid out by those sections, and the engine
-	 * writes its header - see kof_pe_write_hdr. */
+	 * writes its header - see kgenome_pe_write_hdr. */
 	int                       pend_image;
 
 	/*
 	 * WHAT THE CHILD IMPORTS, as the producer declared it - see `import`
-	 * in kofsig.h, and kof_pe_write_imports, which turns this into a real
+	 * in kofsig.h, and kgenome_pe_write_imports, which turns this into a real
 	 * directory when the child closes.
 	 *
 	 * HELD HERE RATHER THAN WRITTEN AS IT ARRIVES, for the reason the
@@ -742,7 +771,7 @@ struct kof_scanner {
 	 * doing this meets, and a per-entry allocation for a name that averages
 	 * fifteen bytes would cost more in bookkeeping than in text.
 	 */
-	struct kof_imp_decl      *pend_imp;
+	struct kgenome_imp_decl      *pend_imp;
 	uint32_t                  n_pend_imp;
 	char                     *imp_pool;
 	uint32_t                  imp_pool_n;
@@ -763,7 +792,7 @@ struct kof_scanner {
 	 * still point into its memory, and released when the module that asked
 	 * for the run returns.
 	 */
-	struct kof_emu           *emu_live;
+	struct kgenome_emu           *emu_live;
 	/*
 	 * AND WHETHER THIS OBJECT HAS ALREADY HAD ITS RUN.
 	 *
@@ -818,7 +847,7 @@ struct kof_scanner {
 		/*
 		 * WHEN THE ENGINE OWNS THOSE BYTES, AND IT USUALLY MUST.
 		 *
-		 * `kof_emu_next_written` hands back a buffer the emulator owns
+		 * `kgenome_emu_next_written` hands back a buffer the emulator owns
 		 * and REPLACES ON THE NEXT CALL - it says so beside itself.
 		 * That was safe while the interpreter emitted each run as it
 		 * walked them; it is not safe now that the regions are gathered
@@ -1029,16 +1058,16 @@ struct kof_scanner {
 	 *
 	 * It was the second kind. The normaliser worked it out to decide what
 	 * to leave out of the view, the block builder worked it out again to
-	 * decide which side of enum kof_plague_side each block was on, and
-	 * kofoverlord a third time - three walks of the same bytes, three
+	 * decide which side of enum kgenome_mutation_side each block was on, and
+	 * a shape matcher (since removed) a third time - three walks of the same bytes, three
 	 * places for the answer to differ, and no way for a reader to see one
 	 * answer and know the others matched it.
 	 *
 	 * Empty for anything that is not an ELF, and for a VIEW, whose headers
-	 * describe the file its parent was: kof_true_find reads segment offsets,
+	 * describe the file its parent was: kgenome_true_find reads segment offsets,
 	 * and on a view they point at bytes that have moved.
 	 */
-	struct kof_true_all    cur_lib;
+	struct kgenome_true_all    cur_lib;
 	uint8_t               cur_lib_ok;
 
 	/* And what the NEXT child's regions are, spent by kid_push exactly as
@@ -1062,9 +1091,21 @@ struct kof_scanner {
 	 * anything renders and kept for the rest of the scan.
 	 */
 	uint8_t              *pend_syms;
+	uint32_t              pend_syms_cap;  /* bytes allocated for it */
 	uint32_t              n_pend_syms;
-	/* The view's functions, mapped from the parent's - see kof_funcs_remap. */
-	struct kof_func_set   pend_funcs;
+	/* The view's functions, mapped from the parent's - see kgenome_funcs_remap. */
+	struct kgenome_func_set   pend_funcs;
+	/*
+	 * AND THE IMAGE IT IS A RENDERING OF - format, architecture, entry and the
+	 * parent's info struct with every file offset carried through the
+	 * transform (see kof_src_declare_desc). `pend_desc.info` points at
+	 * pend_desc_buf, which is kept for the next view and only grows. Spent by
+	 * kid_push with the rest.
+	 */
+	struct kof_src_desc       pend_desc;
+	uint8_t                  *pend_desc_buf;
+	uint32_t                  pend_desc_cap;
+	uint8_t                   pend_desc_set;
 	/* And what it is for, which is also its name when nothing named it. */
 	uint32_t pend_kind;
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */
@@ -1084,7 +1125,7 @@ struct kof_scanner {
 	 * child was pushed, the clear ran, and every run saw none.
 	 */
 	uint32_t pend_n_xw;
-	struct { uint64_t rva, len; } pend_xw[KOF_EMU_EXEC_WATCH];
+	struct { uint64_t rva, len; } pend_xw[KGENOME_EMU_EXEC_WATCH];
 
 	/* The object being emitted, before it becomes a child. Heap while it is
 	 * small, an unnamed temporary file once it is not - see objsrc.h. */
@@ -1134,14 +1175,14 @@ struct kof_scanner {
 	 * the same reason the parsed views are: an archive of a thousand entries
 	 * would otherwise be a thousand allocations of it, and a scanner that never
 	 * meets a compressed file never pays for it at all. Nothing carries over
-	 * between streams - kof_inflate resets every field, including zeroing the
+	 * between streams - kuncoat_inflate resets every field, including zeroing the
 	 * window, which is what keeps one entry's bytes out of the next.
 	 */
-	struct kof_inflate *inf;
+	struct kuncoat_inflate *inf;
 	/* 20KB of dictionary, allocated on the first LZW stream and reused for
 	 * the rest - the same treatment `inf` gets, and for the same reason:
 	 * most scans never meet one. */
-	struct kof_lzw     *lzw;
+	struct kuncoat_lzw     *lzw;
 	/*
 	 * And 3.7MB for bzip2, on the same terms - allocated when the first
 	 * stream needs it and never per stream.
@@ -1152,7 +1193,7 @@ struct kof_scanner {
 	 * before any of it can be produced. A scan that never meets a .bz2 pays
 	 * nothing, which is what makes the size affordable.
 	 */
-	struct kof_bunzip  *bz;
+	struct kuncoat_bunzip  *bz;
 	/*
 	 * And 2.1MB for LZX, on the same terms.
 	 *
@@ -1162,12 +1203,12 @@ struct kof_scanner {
 	 * the width comes from the container, so a scanner would be
 	 * reallocating whenever a cabinet and a help file disagreed.
 	 */
-	struct kof_lzx     *lzx;
+	struct kuncoat_lzx     *lzx;
 	/*
 	 * And 90KB for LHA's and ARJ's coding, on the same terms: a dictionary
 	 * wide enough for the largest variant, plus its three decoding tables.
 	 */
-	struct kof_lzhuf   *lzh;
+	struct kuncoat_lzhuf   *lzh;
 
 	/*
 	 * Where notes go, when anybody wants them.
@@ -1219,7 +1260,7 @@ struct kof_scanner {
 	/*
 	 * A TOOL ASKED ABOUT EVERY DIAGNOSE on this object, read by a verdict or
 	 * not - see kof_scan_diag_report. Per object, like diag_ask: a scan
-	 * normally runs only what a verdict reads (KDIG_SEC_USERS), and a
+	 * normally runs only what a rule reads (KDIG_SEC_USERS), and a
 	 * researcher looking at a file wants the answer for a diagnose nothing
 	 * reads yet, which is exactly the one that is being written.
 	 */
@@ -1227,6 +1268,18 @@ struct kof_scanner {
 	/* The report for the object being finished, built by sx_diag_report and
 	 * lent to the caller for the length of its callback. */
 	struct kof_diag_report *diag_rep;
+
+	/*
+	 * THE DISEASES THE OBJECT'S MODULES FOUND - the ids of the diseases of every
+	 * detector or heuristic that reported on it, once each. Per object, cleared
+	 * in obj_begin; the array is kept and only grows, so an object that matches
+	 * nothing costs nothing and one that matches many is never cut short: a
+	 * disease dropped to keep a table small is evidence deleted.
+	 *
+	 * The diagnoses add theirs when a caller asks - see kof_scan_diseases.
+	 */
+	uint32_t *dis_set;
+	uint32_t  n_dis_set, cap_dis_set;
 
 	/*
 	 * WHAT THE INTERPRETER MAY DO ON THIS OBJECT, as ONE value.
@@ -1256,9 +1309,14 @@ struct kof_scanner {
 	 */
 	uint8_t  *sym;
 	uint32_t  sym_n;
+	uint32_t  sym_cap;      /* bytes allocated for `sym` - see oc_syms */
 	/* The functions the same symbols name, built once beside the block - see
 	 * oc_funcs. */
-	struct kof_func_set funcs;
+	struct kgenome_func_set funcs;
+	/* The walk of the code, decoded once for whoever needs it: the entries the
+	 * functions are cut from and the wrapper resolution's sites and trace.
+	 * Filled by the first reader - see oc_walk. Per object. */
+	struct kgenome_diag_walk *walk;
 	/*
 	 * WHAT THE CODE DOES WITH EACH DATA ADDRESS, swept once for the same
 	 * reason the symbol block is built once: the sweep costs a decode per
@@ -1266,7 +1324,7 @@ struct kof_scanner {
 	 * again. `use_done` separates "swept, and it named nothing" from "not
 	 * swept yet", exactly as sym_done does.
 	 */
-	struct kof_xref *use;
+	struct kgenome_xref *use;
 	/*
 	 * A SECOND MATCHER, BOUND TO THAT BLOCK.
 	 *
@@ -1420,28 +1478,28 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
 				struct kof_range *ext);
 
 /*
- * Credit an object's units to a plague context - the ONE feed, for the scanner
+ * Credit an object's units to a mutation context - the ONE feed, for the scanner
  * and for any tool that scores blocks against an object, so the number a tool
  * shows is the one the scanner computes. `present` is the region bits the parse
  * has (all bits for a caller that has not asked); `funcs` and `lib` are the
  * parse's, or NULL for an object whose headers do not describe its own bytes -
- * see kof_plague_units. `ext` is scratch for one region's extents.
+ * see kgenome_mutation_units. `ext` is scratch for one region's extents.
  */
-struct kof_plague_ctx;
-struct kof_func_set;
-struct kof_true_all;
-/* One unit of `region`, as kof_plague_units cuts it; non-zero stops the walk. */
+struct kof_mutation_ctx;
+struct kgenome_func_set;
+struct kgenome_true_all;
+/* One unit of `region`, as kgenome_mutation_units cuts it; non-zero stops the walk. */
 typedef int (*kof_scan_unit_fn)(void *user, uint32_t region, uint64_t off,
 				uint64_t len, uint32_t side,
-				const struct kof_func *first);
-void kof_scan_plague_units(const struct kof_obj_ctx *ctx, kof_buf b,
-			   uint32_t present, const struct kof_func_set *funcs,
-			   const struct kof_true_all *lib, struct kof_range *ext,
+				const struct kgenome_func *first);
+void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
+			   uint32_t present, const struct kgenome_func_set *funcs,
+			   const struct kgenome_true_all *lib, struct kof_range *ext,
 			   kof_scan_unit_fn fn, void *user);
-void kof_scan_plague_feed(struct kof_plague_ctx *pc, const struct kof_obj_ctx *ctx,
+void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ctx *ctx,
 			  kof_buf b, uint32_t present, int from_packer,
-			  const struct kof_func_set *funcs,
-			  const struct kof_true_all *lib, struct kof_range *ext);
+			  const struct kgenome_func_set *funcs,
+			  const struct kgenome_true_all *lib, struct kof_range *ext);
 
 /*
  * Recover the scanner from a context handed to a module.
@@ -1461,6 +1519,11 @@ static inline struct kof_scanner *kof_scan_of(const struct kof_obj_ctx *ctx)
  * Scan whatever a path names. Returns the number of objects scanned or a KOF_ERR_*.
  * The facade in kofeng.c is the only intended caller.
  */
+/* The scan of a buffer: what kscan_bytes (kofeng.c) answers. */
+int sx_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
+		  const char *name, const struct kof_scan_option *opt,
+		  kof_on_object cb, void *user);
+
 int kof_scan_walk(struct kof_scanner *, const char *path,
 		  const struct kof_scan_option *, kof_on_object cb, void *user);
 
@@ -1493,6 +1556,26 @@ int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
  * object, which is the routing a heuristic rule used to do by hand.
  */
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
+/*
+ * Could this object's analysis not say everything it was asked: a diagnose that
+ * ran returned 'cannot say' (a limit was reached on its scan), or the symbol
+ * block was cut. 1 means the diseases of the object may be incomplete.
+ */
+int kof_scan_incomplete(const struct kof_obj_ctx *ctx);
+/*
+ * THE STATUS OF THE OBJECT'S DIAGNOSE SCAN, read back from the lib: KGENOME_OK
+ * when it ran whole or never ran, else the worst limit any routine of it reached -
+ * the instruction budget, a node store, the memory allowance the engine passed
+ * (kgenome_budget.max_bytes, the ledger). The detail behind kof_scan_incomplete,
+ * for a tool that says WHICH limit.
+ */
+enum kgenome_status kof_scan_diag_status(const struct kof_obj_ctx *ctx);
+/* How many names the scan refused (too long, or the store at its limit) - each
+ * one is also a status, this is the count. */
+uint32_t kof_scan_diag_refused(const struct kof_obj_ctx *ctx);
+/* Free the object's diagnose graph and give back the bytes it was charged to this
+ * scanner's memory ceiling - the one place the graph dies. */
+void kof_scan_diag_drop(struct kof_scanner *sc);
 /* The symbol block the engine completed for this object, or NULL when it added
  * nothing - see kof_result.syms. */
 const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n);
@@ -1528,19 +1611,22 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 			 struct kof_diag_report *out);
 
 /*
- * THE DISEASES OF THE DIAGNOSES THAT MATCHED, and what they make - see
- * detectors/pathogen/syndromes/kofsyndrome.h. The same all-diagnoses analysis as
+ * THE DISEASES AN OBJECT HAS - found by its detectors, heuristics and diagnoses - and
+ * what they make - see
+ * databases/pack/kofsyndrome.h. The same all-diagnoses analysis as
  * kof_scan_diag_report, so asking costs what that costs and a normal scan pays
  * nothing: nothing in a scan reads this yet.
  *
- * kof_scan_diseases writes up to `cap` of them to `out` (the engine's strings,
- * valid for its life) and returns how many matched, which may exceed `cap`.
+ * kof_scan_diseases writes up to `cap` disease ids to `out` (kof_db_disease turns
+ * one into a name and a type) and returns how many matched, which may exceed
+ * `cap`; two diagnoses that find the same disease count once.
  * kof_scan_syndrome infers the type from every one of them, and returns 0 when no
- * diagnose that names a disease matched, the database has no syndrome pack, or the object
- * was not scanned for all diagnoses.
+ * disease was found, or the database has no syndrome pack. What the detectors and
+ * heuristics found is always there; the diagnoses' are added only when the object
+ * was scanned for all of them (kof_scan_option.report_diag).
  */
-uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, const char **out,
-			      uint32_t cap);
+uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, uint32_t *out,
+			   uint32_t cap);
 int kof_scan_syndrome(const struct kof_obj_ctx *ctx, struct kof_synd_result *r);
 
 #endif /* KOFENG_SCAN_H */

@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include "../../libkofeng/extractors/unpack/elf_rebuild.h"
+#include <genotype/image/elf_rebuild.h>
 
 static int failures;
 
@@ -92,7 +92,7 @@ static int try_rebuild(uint8_t **out, uint64_t *len)
 {
 	uint64_t lo = 0, hi = 0;
 
-	return kof_elf_rebuild(BASE, rd, NULL, 1u << 20, out, len, &lo, &hi);
+	return kgenome_elf_rebuild(BASE, rd, NULL, 1u << 20, out, len, &lo, &hi);
 }
 
 int main(void)

@@ -14,16 +14,16 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -160,7 +160,7 @@ struct layer {
 	uint32_t           want, want_level;
 	/* And where its producer said the program will be - see pend_xw. */
 	uint32_t           n_xw;
-	uint64_t           xw[KOF_EMU_EXEC_WATCH][2];
+	uint64_t           xw[KGENOME_EMU_EXEC_WATCH][2];
 	/*
 	 * The family its producer decodes, inherited as a prediction, or NULL.
 	 *
@@ -201,7 +201,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	 * root, which nothing produced. */
 	uint32_t want_decl = 0, want_decl_level = 0;
 	uint32_t xw_decl_n = 0;                 /* a root has no producer */
-	uint64_t xw_decl[KOF_EMU_EXEC_WATCH][2];
+	uint64_t xw_decl[KGENOME_EMU_EXEC_WATCH][2];
 	const char *inherit = NULL;     /* the root inherits no prediction */
 	const struct kof_module *derived_by = NULL;  /* nothing derived a root */
 
@@ -491,11 +491,11 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 						? w->sc->kid_want_level[i] : 0u;
 				stack[n].n_xw = w->sc->kid_n_xw
 						? w->sc->kid_n_xw[i] : 0u;
-				if (stack[n].n_xw > KOF_EMU_EXEC_WATCH)
-					stack[n].n_xw = KOF_EMU_EXEC_WATCH;
+				if (stack[n].n_xw > KGENOME_EMU_EXEC_WATCH)
+					stack[n].n_xw = KGENOME_EMU_EXEC_WATCH;
 				for (uint32_t q = 0; q < stack[n].n_xw; q++) {
 					const uint64_t *sx = w->sc->kid_xw +
-						(size_t)i * KOF_EMU_EXEC_WATCH *
+						(size_t)i * KGENOME_EMU_EXEC_WATCH *
 						2u + (size_t)q * 2u;
 
 					stack[n].xw[q][0] = sx[0];
@@ -817,7 +817,7 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
  *
  * The bytes are borrowed, not taken: they must outlive the call.
  */
-int kscan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
+int sx_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
 		   const char *name, const struct kof_scan_option *opt,
 		   kof_on_object cb, void *user)
 {

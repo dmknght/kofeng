@@ -20,8 +20,8 @@
 #include <kofmod/kofsig.h>   /* the per-module maxima the ABI declares */
 
 #include "dbpacker.h"
-#include "dbcore.h"
-#include "hexprog.h"
+#include "pack/dbcore.h"
+#include "pack/hexprog.h"
 #include "../kofcore/kofcore.h"
 
 /* A growable byte buffer, alive only while building. */
@@ -206,7 +206,7 @@ struct built {
 	struct kof_pack_str  *str;
 	struct kof_pack_name *name;
 	uint32_t             *rng;
-	struct kof_plague_block *blk;
+	struct kof_mutation_block *blk;
 	uint32_t                *pool;
 
 	uint32_t n_mods, n_str, n_name, n_rng, n_blk, n_pool;
@@ -396,6 +396,8 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 				goto out;
 		}
 		o->maltype = m->maltype;
+		o->disease = m->disease;
+		o->disease_type = m->disease_type;
 		o->step = m->step;
 		o->heur_phase = m->heur_phase;
 		o->heur_level = m->heur_level;
@@ -600,8 +602,8 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 	len[KOF_SEC_NAME_DESC]  = (uint64_t)b.n_name * sizeof(struct kof_pack_name);
 	len[KOF_SEC_NAME_POOL]  = b.name_pool.len;
 	len[KOF_SEC_RANGE]      = (uint64_t)b.n_rng  * 4;
-	len[KOF_SEC_PLAGUE_BLK] = (uint64_t)b.n_blk  * sizeof(struct kof_plague_block);
-	len[KOF_SEC_PLAGUE_POOL] = (uint64_t)b.n_pool * 4;
+	len[KOF_SEC_MUTATION_BLK] = (uint64_t)b.n_blk  * sizeof(struct kof_mutation_block);
+	len[KOF_SEC_MUTATION_POOL] = (uint64_t)b.n_pool * 4;
 	len[KOF_SEC_CODE]       = b.code.len;
 	/* The inverted index is not built yet. Zero length is how a pack says it
 	 * has none, and the loader falls back to asking each module in turn. */
@@ -656,12 +658,12 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 		       (size_t)len[KOF_SEC_NAME_POOL]);
 	if (len[KOF_SEC_RANGE])
 		memcpy(img + at[KOF_SEC_RANGE], b.rng, (size_t)len[KOF_SEC_RANGE]);
-	if (len[KOF_SEC_PLAGUE_BLK])
-		memcpy(img + at[KOF_SEC_PLAGUE_BLK], b.blk,
-		       (size_t)len[KOF_SEC_PLAGUE_BLK]);
-	if (len[KOF_SEC_PLAGUE_POOL])
-		memcpy(img + at[KOF_SEC_PLAGUE_POOL], b.pool,
-		       (size_t)len[KOF_SEC_PLAGUE_POOL]);
+	if (len[KOF_SEC_MUTATION_BLK])
+		memcpy(img + at[KOF_SEC_MUTATION_BLK], b.blk,
+		       (size_t)len[KOF_SEC_MUTATION_BLK]);
+	if (len[KOF_SEC_MUTATION_POOL])
+		memcpy(img + at[KOF_SEC_MUTATION_POOL], b.pool,
+		       (size_t)len[KOF_SEC_MUTATION_POOL]);
 	if (len[KOF_SEC_CODE])
 		memcpy(img + at[KOF_SEC_CODE], b.code.p, (size_t)len[KOF_SEC_CODE]);
 

@@ -5,9 +5,9 @@
  *
  * THREE JOBS AND THEY ARE DELIBERATELY SEPARATE.
  *
- *   DECODE is reached through cell_decode, which picks the decoder; this file
+ *   DECODE is reached through kgenome_cell_decode, which picks the decoder; this file
  *     does not name one.
- *   THE CONSTANT MAP is cell_state.c: what a register holds, where that is
+ *   THE CONSTANT MAP is kgenome_cell_state.c: what a register holds, where that is
  *     knowable by reading forwards, from one decoded instruction.
  *   WHAT THIS FILE OWNS is the walk itself: the offset/address conversion
  *     through the space the owner supplied, the literal pool, and resolving an
@@ -32,15 +32,15 @@
  * The cursor is an offset; a branch is computed in addresses. Both directions
  * are needed.
  */
-static uint64_t off_to_va(struct kof_cell_cur *k, const struct cell_space *sp,
+static uint64_t off_to_va(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
 			  uint64_t off)
 {
 	/* Inside the segment the last call established it is one addition -
-	 * see struct cell_seg for why that is almost always. */
+	 * see struct kgenome_cell_seg for why that is almost always. */
 	if (k->seg_ok && off >= k->seg.lo && off < k->seg.hi)
 		return (uint64_t)((int64_t)off + k->seg.delta);
 	if (!sp->seg_at || !sp->seg_at(sp->priv, off, &k->seg))
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 	k->seg_ok = 1;
 	return (uint64_t)((int64_t)off + k->seg.delta);
 }
@@ -54,8 +54,8 @@ static uint64_t off_to_va(struct kof_cell_cur *k, const struct cell_space *sp,
  * subtraction - and when the target IS somewhere else this falls through to
  * the owner's one resolver rather than growing a second copy of it.
  */
-static uint64_t va_to_off(const struct kof_cell_cur *k,
-			  const struct cell_space *sp, uint64_t va)
+static uint64_t va_to_off(const struct kgenome_cell_cur *k,
+			  const struct kgenome_cell_space *sp, uint64_t va)
 {
 	if (k->seg_ok) {
 		uint64_t lo = (uint64_t)((int64_t)k->seg.lo + k->seg.delta);
@@ -64,26 +64,26 @@ static uint64_t va_to_off(const struct kof_cell_cur *k,
 		if (va >= lo && va < hi)
 			return (uint64_t)((int64_t)va - k->seg.delta);
 	}
-	return sp->off_of_va ? sp->off_of_va(sp->priv, va) : KOF_BROKEN;
+	return sp->off_of_va ? sp->off_of_va(sp->priv, va) : KGENOME_BROKEN;
 }
 
 /* ---- the cursor ---------------------------------------------------------- */
 
-int kof_cell_seek(struct kof_cell_cur *k, uint64_t off, int keep)
+int kgenome_cell_seek(struct kgenome_cell_cur *k, uint64_t off, int keep)
 {
 	if (!k)
 		return 0;
 	k->at = off;
 	k->open = 1;
-	k->seg_ok = 0;                  /* see struct kof_cell_cur */
+	k->seg_ok = 0;                  /* see struct kgenome_cell_cur */
 	if (!keep)
-		cell_state_reset(&k->st);
+		kgenome_cell_state_reset(&k->st);
 	return 1;
 }
 
-int kof_cell_reg(const struct kof_cell_cur *k, uint8_t r, uint64_t *out)
+int kgenome_cell_reg(const struct kgenome_cell_cur *k, uint8_t r, uint64_t *out)
 {
-	return k ? cell_state_reg(&k->st, r, out) : 0;
+	return k ? kgenome_cell_state_reg(&k->st, r, out) : 0;
 }
 
 /*
@@ -97,33 +97,33 @@ int kof_cell_reg(const struct kof_cell_cur *k, uint8_t r, uint64_t *out)
  * left as the memory read it is. Literal address = at_va + disp, the decoders'
  * convention (see decode_arm32.h).
  */
-static void resolve_literal(const struct kof_cell_cur *k,
-			    const struct cell_space *sp, struct cell_insn *in)
+static void resolve_literal(const struct kgenome_cell_cur *k,
+			    const struct kgenome_cell_space *sp, struct kgenome_cell_insn *in)
 {
 	uint64_t off, v = 0;
 	uint32_t sz, i;
 
-	if (in->op != CELL_MOV || in->n_op < 2u ||
-	    in->o[1].kind != CELL_O_MEM || !(in->o[1].flags & CELL_OF_RIPREL) ||
-	    in->at_va == KOF_BROKEN)
+	if (in->op != KGENOME_CELL_MOV || in->n_op < 2u ||
+	    in->o[1].kind != KGENOME_CELL_O_MEM || !(in->o[1].flags & KGENOME_CELL_OF_RIPREL) ||
+	    in->at_va == KGENOME_BROKEN)
 		return;
 	sz = in->o[1].size;
 	if (sz != 4u && sz != 8u)
 		return;
 	off = va_to_off(k, sp, in->at_va + (uint64_t)in->o[1].disp);
-	if (off == KOF_BROKEN || off > sp->size || sp->size - off < sz)
+	if (off == KGENOME_BROKEN || off > sp->size || sp->size - off < sz)
 		return;
 	for (i = 0; i < sz; i++)
 		v |= (uint64_t)sp->base[off + i] <<
 		     (8u * (sp->be ? sz - 1u - i : i));
-	in->o[1].kind = CELL_O_IMM;
+	in->o[1].kind = KGENOME_CELL_O_IMM;
 	in->o[1].imm = v;
-	in->o[1].reg = in->o[1].index = CELL_REG_NONE;
-	in->o[1].flags = CELL_OF_READ;
+	in->o[1].reg = in->o[1].index = KGENOME_CELL_REG_NONE;
+	in->o[1].flags = KGENOME_CELL_OF_READ;
 }
 
-static int cell_fetch(struct kof_cell_cur *k, const struct cell_space *sp,
-		      struct cell_insn *out)
+static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+		      struct kgenome_cell_insn *out)
 {
 	uint64_t left;
 	uint32_t n;
@@ -138,31 +138,31 @@ static int cell_fetch(struct kof_cell_cur *k, const struct cell_space *sp,
 	 * ONE DECODE PATH. This used to call a decoder itself, classify with a
 	 * switch of its own and build its own operands - a complete copy of
 	 * decode_x86.c standing beside it. The copy was written first and never
-	 * caught up: when the enum gained CELL_SYSCALL and CELL_WIDEN and the
+	 * caught up: when the enum gained KGENOME_CELL_SYSCALL and KGENOME_CELL_WIDEN and the
 	 * decoder gained `wmask`, only one of the two learned them.
 	 *
 	 * MEASURED, and it is not a small drift: a `syscall` instruction came
-	 * back as CELL_OTHER, so nothing reading an object through this cursor
+	 * back as KGENOME_CELL_OTHER, so nothing reading an object through this cursor
 	 * could see a Linux system call AT ALL - on a static binary that is
 	 * every capability the program has. `cdq` was the same, and `wmask`
 	 * was zero for every instruction, which is what the constant map needs
 	 * to know which registers an instruction destroys.
 	 */
-	n = cell_decode(sp->arch, sp->be, sp->base + k->at, (uint32_t)left,
+	n = kgenome_cell_decode(sp->arch, sp->be, sp->base + k->at, (uint32_t)left,
 			off_to_va(k, sp, k->at), out);
 	if (!n)
 		return 0;
-	if (sp->arch == KOF_ARCH_ARM || sp->arch == KOF_ARCH_ARM64)
+	if (sp->arch == KGENOME_ARCH_ARM || sp->arch == KGENOME_ARCH_ARM64)
 		resolve_literal(k, sp, out);
 	out->at = k->at;
 	n = out->n_op;
-	if (out->target_va != KOF_BROKEN)
+	if (out->target_va != KGENOME_BROKEN)
 		out->target = va_to_off(k, sp, out->target_va);
 	return 1;
 }
 
-int kof_cell_step(struct kof_cell_cur *k, const struct cell_space *sp,
-		  struct cell_insn *out)
+int kgenome_cell_step(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+		  struct kgenome_cell_insn *out)
 {
 	if (!cell_fetch(k, sp, out))
 		return 0;
@@ -170,8 +170,8 @@ int kof_cell_step(struct kof_cell_cur *k, const struct cell_space *sp,
 	return 1;
 }
 
-int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
-		  struct cell_insn *out)
+int kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+		  struct kgenome_cell_insn *out)
 {
 	uint32_t n;
 
@@ -181,27 +181,27 @@ int kof_cell_next(struct kof_cell_cur *k, const struct cell_space *sp,
 
 	/*
 	 * AND AN INDIRECT BRANCH RESOLVED FROM WHAT IS KNOWN - see
-	 * kof_cell_next in celllysis.h.
+	 * kgenome_cell_next in celllysis.h.
 	 *
-	 * DONE BEFORE cell_state_track, because a RET's target is the value
+	 * DONE BEFORE kgenome_cell_state_track, because a RET's target is the value
 	 * still on the stack - tracking pops it.
 	 */
-	if (out->target == KOF_BROKEN) {
+	if (out->target == KGENOME_BROKEN) {
 		uint64_t v = 0;
 		int have = 0;
 
-		if (out->op == CELL_RET)
-			have = cell_state_stack_top(&k->st, &v);
-		else if ((out->op == CELL_JMP || out->op == CELL_CALL) && n &&
-			 out->o[0].kind == CELL_O_REG && out->o[0].reg < 16u)
-			have = kof_cell_reg(k, out->o[0].reg, &v);
+		if (out->op == KGENOME_CELL_RET)
+			have = kgenome_cell_state_stack_top(&k->st, &v);
+		else if ((out->op == KGENOME_CELL_JMP || out->op == KGENOME_CELL_CALL) && n &&
+			 out->o[0].kind == KGENOME_CELL_O_REG && out->o[0].reg < 16u)
+			have = kgenome_cell_reg(k, out->o[0].reg, &v);
 		if (have) {
 			out->target_va = v;
 			out->target = va_to_off(k, sp, v);
 		}
 	}
 
-	cell_state_track(&k->st, out);
+	kgenome_cell_state_track(&k->st, out);
 	k->at += out->len;
 	return 1;
 }

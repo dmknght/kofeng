@@ -26,8 +26,8 @@
  *                     carries the desync into the real code - the mmap came
  *                     back with its number unreadable.
  *   int 0x80          i386 reaches the kernel through a software interrupt,
- *                     which the decoder classes as CELL_INT and not
- *                     CELL_SYSCALL. Reading only the latter found ZERO
+ *                     which the decoder classes as KGENOME_CELL_INT and not
+ *                     KGENOME_CELL_SYSCALL. Reading only the latter found ZERO
  *                     nodes in every 32-bit payload.
  *   stale rax         A `syscall` does not WRITE rax as far as the decoder
  *                     is concerned, so the constant map keeps the number
@@ -47,7 +47,8 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
 
@@ -181,13 +182,13 @@ static int parse(const uint8_t *b, uint64_t n, struct kof_obj_ctx *ctx,
 	return 0;
 }
 
-static const struct kof_diag_hit *find(const struct kof_diag_scan *s,
+static const struct kgenome_diag_hit *find(const struct kgenome_diag_scan *s,
 				       uint16_t cap, uint32_t *idx)
 {
 	uint32_t i;
 
-	for (i = 0; i < kof_diag_scan_count(s); i++) {
-		const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+	for (i = 0; i < kgenome_diag_scan_count(s); i++) {
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
 		if (h->cap == cap) {
 			if (idx)
@@ -199,7 +200,7 @@ static const struct kof_diag_hit *find(const struct kof_diag_scan *s,
 }
 
 /* Is `h` linked to node `want` in `role`, either by value or by region. */
-static int has_in(const struct kof_diag_hit *h, uint16_t want, uint8_t role)
+static int has_in(const struct kgenome_diag_hit *h, uint16_t want, uint8_t role)
 {
 	uint8_t i;
 
@@ -213,8 +214,9 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 {
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
-	const struct kof_diag_hit *a, *r, *x;
+	struct kgenome_obj gobj;
+	struct kgenome_diag_scan *s;
+	const struct kgenome_diag_hit *a, *r, *x;
 	uint32_t ia = 0;
 
 	memset(view, 0, sizeof view);
@@ -223,7 +225,8 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 		fails++;
 		return;
 	}
-	s = kof_diag_scan(&ctx, b, n);
+	kof_genome_obj(&ctx, &gobj);
+	s = kgenome_diag_scan(&gobj, b, n);
 	if (!s) {
 		printf("  FAIL %s: no scan\n", what);
 		fails++;
@@ -236,30 +239,30 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	 * so W AND X IN ONE CALL is what separates the two. Measured, no
 	 * clean binary in 846 of /usr/bin does it.
 	 */
-	a = find(s, KOF_NUCLEO_ALLOC_EXEC, &ia);
+	a = find(s, KGENOME_NUCLEO_ALLOC_EXEC, &ia);
 	CK(a != NULL);
 	if (a) {
-		CK((a->flags & KOF_FLOWF_WX) != 0);
-		CK(!(a->bits & KOF_DIAG_H_ARG_UNKNOWN));
-		CK(region == ((a->bits & KOF_DIAG_H_REGION_STACK) != 0));
+		CK((a->flags & KGENOME_FLOWF_WX) != 0);
+		CK(!(a->bits & KGENOME_DIAG_H_ARG_UNKNOWN));
+		CK(region == ((a->bits & KGENOME_DIAG_H_REGION_STACK) != 0));
 	}
 
 	/* The read that fills it, and the branch that runs it. Both linked
 	 * to the allocation and not merely present beside it.
 	 *
 	 * mem-read: read(2) takes a descriptor and the walk has not been
-	 * told what this one is - see KOF_CG_IO. A run that proves it came
+	 * told what this one is - see KGENOME_CG_IO. A run that proves it came
 	 * from a socket corrects the word to net-recv, and the diagnose below
 	 * still matches because a rule names the level it means. */
-	r = find(s, KOF_NUCLEO_MEM_READ, NULL);
-	x = find(s, KOF_NUCLEO_EXEC_REG, NULL);
+	r = find(s, KGENOME_NUCLEO_MEM_READ, NULL);
+	x = find(s, KGENOME_NUCLEO_EXEC_REG, NULL);
 	CK(r != NULL);
 	CK(x != NULL);
 	if (a && r && x) {
-		uint16_t src = region ? KOF_DIAG_FROM_STACK : (uint16_t)ia;
+		uint16_t src = region ? KGENOME_DIAG_FROM_STACK : (uint16_t)ia;
 
-		CK(has_in(r, src, KOF_DIAG_ROLE_BUFFER));
-		CK(has_in(x, src, KOF_DIAG_ROLE_TARGET));
+		CK(has_in(r, src, KGENOME_DIAG_ROLE_BUFFER));
+		CK(has_in(x, src, KGENOME_DIAG_ROLE_TARGET));
 	}
 
 	/*
@@ -270,11 +273,11 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	 */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
-			  KOF_DIAG_ROLE_NONE, 0, 0 },
-			{ KOF_NUCLEO_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER,
+			{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+			  KGENOME_DIAG_ROLE_NONE, 0, 0 },
+			{ KGENOME_NUCLEO_MEM_READ, 0, 0, KGENOME_DIAG_ROLE_BUFFER,
 			  0, 0 },
-			{ KOF_NUCLEO_EXEC_REG, 0, 0, KOF_DIAG_ROLE_TARGET, 0, 0 },
+			{ KGENOME_NUCLEO_EXEC_REG, 0, 0, KGENOME_DIAG_ROLE_TARGET, 0, 0 },
 		};
 		static const struct kof_diag dg = {
 			1, KOF_DIAG_ANALYSIS_SYSCALL, 3, "rwx_exec", nd
@@ -290,11 +293,11 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 		 * capability has to be able to see all three.
 		 */
 		CK(nb == 3);
-		CK(kof_diag_scan_at(s, bind[0])->cap == KOF_NUCLEO_ALLOC_EXEC);
-		CK(kof_diag_scan_at(s, bind[1])->cap == KOF_NUCLEO_MEM_READ);
-		CK(kof_diag_scan_at(s, bind[2])->cap == KOF_NUCLEO_EXEC_REG);
+		CK(kgenome_diag_scan_at(s, bind[0])->cap == KGENOME_NUCLEO_ALLOC_EXEC);
+		CK(kgenome_diag_scan_at(s, bind[1])->cap == KGENOME_NUCLEO_MEM_READ);
+		CK(kgenome_diag_scan_at(s, bind[2])->cap == KGENOME_NUCLEO_EXEC_REG);
 	}
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 }
 
 /*
@@ -309,16 +312,17 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 static void unlinked_does_not_match(void)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
-		  KOF_DIAG_ROLE_NONE, 0, 0 },
-		{ KOF_NUCLEO_MEM_READ, 0, 0, KOF_DIAG_ROLE_BUFFER, 0, 0 },
+		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		  KGENOME_DIAG_ROLE_NONE, 0, 0 },
+		{ KGENOME_NUCLEO_MEM_READ, 0, 0, KGENOME_DIAG_ROLE_BUFFER, 0, 0 },
 	};
 	static const struct kof_diag dg = {
 		1, KOF_DIAG_ANALYSIS_SYSCALL, 2, "needs_a_link", nd
 	};
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
+	struct kgenome_obj gobj;
+	struct kgenome_diag_scan *s;
 
 	/* mmap(RWX) into rax, then a read whose buffer came from NOWHERE
 	 * this walk saw - a different register, never written here. */
@@ -355,17 +359,18 @@ static void unlinked_does_not_match(void)
 		fails++;
 		return;
 	}
-	s = kof_diag_scan(&ctx, b, sizeof b);
+	kof_genome_obj(&ctx, &gobj);
+	s = kgenome_diag_scan(&gobj, b, sizeof b);
 	CK(s != NULL);
 	if (!s)
 		return;
 	/* Both capabilities are there... */
-	CK(find(s, KOF_NUCLEO_ALLOC_EXEC, NULL) != NULL);
-	CK(find(s, KOF_NUCLEO_MEM_READ, NULL) != NULL);
+	CK(find(s, KGENOME_NUCLEO_ALLOC_EXEC, NULL) != NULL);
+	CK(find(s, KGENOME_NUCLEO_MEM_READ, NULL) != NULL);
 	/* ...and the diagnose still must not match, because nothing joins
 	 * them. */
 	CK(kof_diag_match(s, &dg, NULL, NULL) == 0);
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 }
 
 /*
@@ -386,8 +391,8 @@ static void unlinked_does_not_match(void)
 static void unreadable_prot_is_not_zero(void)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX, KOF_DIAG_NO_PARENT,
-		  KOF_DIAG_ROLE_NONE, 0, 0 },
+		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		  KGENOME_DIAG_ROLE_NONE, 0, 0 },
 	};
 	static const struct kof_diag dg = {
 		1, KOF_DIAG_ANALYSIS_SYSCALL, 1, "needs_wx", nd
@@ -405,8 +410,9 @@ static void unreadable_prot_is_not_zero(void)
 	};
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
-	const struct kof_diag_hit *h;
+	struct kgenome_obj gobj;
+	struct kgenome_diag_scan *s;
+	const struct kgenome_diag_hit *h;
 	uint8_t b[0x100];
 
 	memset(b, 0, sizeof b);
@@ -425,20 +431,21 @@ static void unreadable_prot_is_not_zero(void)
 		fails++;
 		return;
 	}
-	s = kof_diag_scan(&ctx, b, sizeof b);
+	kof_genome_obj(&ctx, &gobj);
+	s = kgenome_diag_scan(&gobj, b, sizeof b);
 	CK(s != NULL);
 	if (!s)
 		return;
 	/* The node is there - dropping it would lose the site entirely. */
-	h = find(s, KOF_NUCLEO_ALLOC, NULL);
+	h = find(s, KGENOME_NUCLEO_ALLOC, NULL);
 	CK(h != NULL);
 	/* ...and it says the argument that decides its meaning was unread. */
-	CK(h && (h->bits & KOF_DIAG_H_ARG_UNKNOWN));
+	CK(h && (h->bits & KGENOME_DIAG_H_ARG_UNKNOWN));
 	/* It is NOT reported as an executable allocation... */
-	CK(find(s, KOF_NUCLEO_ALLOC_EXEC, NULL) == NULL);
+	CK(find(s, KGENOME_NUCLEO_ALLOC_EXEC, NULL) == NULL);
 	/* ...and a diagnose that demands one does not match it. */
 	CK(kof_diag_match(s, &dg, NULL, NULL) == 0);
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 }
 
 
@@ -473,8 +480,9 @@ static void deep_in_a_big_segment(void)
 	static uint8_t b[0x4100];
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
-	const struct kof_diag_hit *a, *r, *x;
+	struct kgenome_obj gobj;
+	struct kgenome_diag_scan *s;
+	const struct kgenome_diag_hit *a, *r, *x;
 	uint32_t ia = 0;
 	unsigned i;
 
@@ -499,22 +507,23 @@ static void deep_in_a_big_segment(void)
 		fails++;
 		return;
 	}
-	s = kof_diag_scan(&ctx, b, sizeof b);
+	kof_genome_obj(&ctx, &gobj);
+	s = kgenome_diag_scan(&gobj, b, sizeof b);
 	CK(s != NULL);
 	if (!s)
 		return;
-	a = find(s, KOF_NUCLEO_ALLOC_EXEC, &ia);
-	r = find(s, KOF_NUCLEO_MEM_READ, NULL);
-	x = find(s, KOF_NUCLEO_EXEC_REG, NULL);
+	a = find(s, KGENOME_NUCLEO_ALLOC_EXEC, &ia);
+	r = find(s, KGENOME_NUCLEO_MEM_READ, NULL);
+	x = find(s, KGENOME_NUCLEO_EXEC_REG, NULL);
 	CK(a != NULL);
 	CK(r != NULL);
 	CK(x != NULL);
 	/* And still LINKED - a window that opened in the right place but
 	 * too late carries no argument registers, so the nodes would be
 	 * there and the tree would not. */
-	CK(has_in(r, (uint16_t)ia, KOF_DIAG_ROLE_BUFFER));
-	CK(has_in(x, (uint16_t)ia, KOF_DIAG_ROLE_TARGET));
-	kof_diag_scan_free(s);
+	CK(has_in(r, (uint16_t)ia, KGENOME_DIAG_ROLE_BUFFER));
+	CK(has_in(x, (uint16_t)ia, KGENOME_DIAG_ROLE_TARGET));
+	kgenome_diag_scan_free(s);
 }
 
 
@@ -536,7 +545,8 @@ static void scenarios_are_separable(void)
 {
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *all, *one, *none;
+	struct kgenome_obj gobj;
+	struct kgenome_diag_scan *all, *one, *none;
 	uint32_t n_all, n_one;
 
 	build_x64();
@@ -547,10 +557,11 @@ static void scenarios_are_separable(void)
 		return;
 	}
 
-	all  = kof_diag_scan(&ctx, x64, sizeof x64);
-	one  = kof_diag_scan_with(&ctx, x64, sizeof x64,
-				  KOF_DIAG_RUN_SYSCALL);
-	none = kof_diag_scan_with(&ctx, x64, sizeof x64, 0u);
+	kof_genome_obj(&ctx, &gobj);
+	all  = kgenome_diag_scan(&gobj, x64, sizeof x64);
+	one  = kgenome_diag_scan_with(&gobj, x64, sizeof x64,
+				  KGENOME_DIAG_RUN_SYSCALL);
+	none = kgenome_diag_scan_with(&gobj, x64, sizeof x64, 0u);
 
 	CK(all != NULL);
 	CK(one != NULL);
@@ -558,8 +569,8 @@ static void scenarios_are_separable(void)
 	if (!all || !one || !none)
 		goto out;
 
-	n_all = kof_diag_scan_count(all);
-	n_one = kof_diag_scan_count(one);
+	n_all = kgenome_diag_scan_count(all);
+	n_one = kgenome_diag_scan_count(one);
 	/* The stager is found by the syscall routine, so the two must agree
 	 * exactly - if they differ, something else is contributing nodes
 	 * under a bit nobody asked about. */
@@ -567,24 +578,24 @@ static void scenarios_are_separable(void)
 	CK(n_all > 0u);
 	/* And nothing at all when nothing is asked for. An empty scan is a
 	 * valid answer and must not be a crash or a NULL. */
-	CK(kof_diag_scan_count(none) == 0u);
+	CK(kgenome_diag_scan_count(none) == 0u);
 
 	/*
 	 * `ran` is what HAPPENED, which is not what was asked for. The two
-	 * static routines are in KOF_DIAG_RUN_DEFAULT and both run, even
+	 * static routines are in KGENOME_DIAG_RUN_DEFAULT and both run, even
 	 * though the symbol routine finds nothing in a payload with no
 	 * imports - running and finding nothing is a different answer from
 	 * not running, and that difference is the whole reason for this
 	 * field. EMULATE is not in the default set, so it must not appear.
 	 */
-	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYSCALL) != 0u);
-	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_SYMBOL) != 0u);
-	CK((kof_diag_scan_ran(all) & KOF_DIAG_RUN_EMULATE) == 0u);
-	CK(kof_diag_scan_ran(none) == 0u);
+	CK((kgenome_diag_scan_ran(all) & KGENOME_DIAG_RUN_SYSCALL) != 0u);
+	CK((kgenome_diag_scan_ran(all) & KGENOME_DIAG_RUN_SYMBOL) != 0u);
+	CK((kgenome_diag_scan_ran(all) & KGENOME_DIAG_RUN_EMULATE) == 0u);
+	CK(kgenome_diag_scan_ran(none) == 0u);
 out:
-	kof_diag_scan_free(all);
-	kof_diag_scan_free(one);
-	kof_diag_scan_free(none);
+	kgenome_diag_scan_free(all);
+	kgenome_diag_scan_free(one);
+	kgenome_diag_scan_free(none);
 }
 
 int main(void)

@@ -23,20 +23,20 @@
 #define MAXLIST 64u
 #define MAXROWS 1024u
 
-struct gt_arm32_row gt_arm32_lists[ARM_POOL];
-uint16_t gt_arm32_idx[2 * GT_ARM32_KEYS];
-struct gt_arm32_row gt_thumb_lists[THUMB_POOL];
-uint16_t gt_thumb_idx_narrow[GT_THUMB_NARROW_KEYS];
-uint16_t gt_thumb_idx_wide[GT_THUMB_WIDE_KEYS];
+struct kgenome_arm32_row kgenome_arm32_lists[ARM_POOL];
+uint16_t kgenome_arm32_idx[2 * KGENOME_ARM32_KEYS];
+struct kgenome_arm32_row kgenome_thumb_lists[THUMB_POOL];
+uint16_t kgenome_thumb_idx_narrow[KGENOME_THUMB_NARROW_KEYS];
+uint16_t kgenome_thumb_idx_wide[KGENOME_THUMB_WIDE_KEYS];
 
-atomic_int gt_arm32_state, gt_thumb_state;
+atomic_int kgenome_arm32_state, kgenome_thumb_state;
 
 static unsigned g_pool_arm32, g_pool_thumb;
 static unsigned g_shadowed_arm32, g_shadowed_thumb;
 
-static unsigned key_arm32(uint32_t w) { return gt_arm32_key12(w); }
-static unsigned key_narrow(uint32_t w) { return gt_thumb_narrow_key(w); }
-static unsigned key_wide(uint32_t w) { return gt_thumb_wide_key(w); }
+static unsigned key_arm32(uint32_t w) { return kgenome_arm32_key12(w); }
+static unsigned key_narrow(uint32_t w) { return kgenome_thumb_narrow_key(w); }
+static unsigned key_wide(uint32_t w) { return kgenome_thumb_wide_key(w); }
 
 /*
  * One index, built by walking the key's bits from the top instead of trying every
@@ -64,12 +64,12 @@ static unsigned key_wide(uint32_t w) { return gt_thumb_wide_key(w); }
  * that it was left.
  */
 struct bld {
-	const struct gt_arm32_row *rows;
+	const struct kgenome_arm32_row *rows;
 	unsigned nbits;
 	uint32_t keymask, pre_mask;
 	unsigned kbit[16];              /* the word bit each key bit comes from */
 	int direct;
-	struct gt_arm32_row *pool;
+	struct kgenome_arm32_row *pool;
 	unsigned cap, *used;
 	uint16_t *idx;
 	unsigned char *hits;
@@ -80,12 +80,12 @@ struct bld {
  * rows it reaches are marked. */
 static uint16_t bld_emit(struct bld *x, const uint16_t *cand, unsigned nc)
 {
-	struct gt_arm32_row list[MAXLIST + 1u];
+	struct kgenome_arm32_row list[MAXLIST + 1u];
 	unsigned n = 0, found = ~0u, i, c;
 	int decided = 0;
 
 	for (c = 0; c < nc && !decided; c++) {
-		const struct gt_arm32_row *r = &x->rows[cand[c]];
+		const struct kgenome_arm32_row *r = &x->rows[cand[c]];
 
 		x->hits[cand[c]] = 1;
 		if (n >= MAXLIST)
@@ -103,7 +103,7 @@ static uint16_t bld_emit(struct bld *x, const uint16_t *cand, unsigned nc)
 		n++;
 	}
 	if (x->direct && n == 1 && decided)
-		return (uint16_t)(GT_ARM32_DIRECT | list[0].id);
+		return (uint16_t)(KGENOME_ARM32_DIRECT | list[0].id);
 	/* neighbouring keys mostly share a list: try the last one first */
 	if (x->prev_n == n && !memcmp(&x->pool[x->prev_start], list, n * sizeof list[0])) {
 		found = x->prev_start;
@@ -121,7 +121,7 @@ static uint16_t bld_emit(struct bld *x, const uint16_t *cand, unsigned nc)
 		memcpy(&x->pool[found], list, n * sizeof list[0]);
 		*x->used += n;
 	}
-	if (found >= GT_ARM32_DIRECT)
+	if (found >= KGENOME_ARM32_DIRECT)
 		abort();
 	x->prev_start = found;
 	x->prev_n = n;
@@ -139,7 +139,7 @@ static void bld_walk(struct bld *x, int bit, unsigned kk, const uint16_t *cand, 
 		rest |= 1u << x->kbit[b];
 	/* Does anything the list is made of look at a bit not yet fixed? */
 	for (c = 0; c < nc; c++) {
-		const struct gt_arm32_row *r = &x->rows[cand[c]];
+		const struct kgenome_arm32_row *r = &x->rows[cand[c]];
 
 		if (r->mask & rest) {
 			free_bits = 1;
@@ -164,7 +164,7 @@ static void bld_walk(struct bld *x, int bit, unsigned kk, const uint16_t *cand, 
 			unsigned n = 0;
 
 			for (c = 0; c < nc; c++) {
-				const struct gt_arm32_row *r = &x->rows[cand[c]];
+				const struct kgenome_arm32_row *r = &x->rows[cand[c]];
 
 				if (((r->mask >> x->kbit[bit]) & 1u) &&
 				    ((r->value >> x->kbit[bit]) & 1u) != v)
@@ -176,9 +176,9 @@ static void bld_walk(struct bld *x, int bit, unsigned kk, const uint16_t *cand, 
 	}
 }
 
-static void build_one(const struct gt_arm32_row *rows, unsigned nrows, unsigned keys,
+static void build_one(const struct kgenome_arm32_row *rows, unsigned nrows, unsigned keys,
 		      unsigned (*keyf)(uint32_t), uint32_t pre_mask, uint32_t pre_val,
-		      int direct, struct gt_arm32_row *pool, unsigned cap, unsigned *used,
+		      int direct, struct kgenome_arm32_row *pool, unsigned cap, unsigned *used,
 		      uint16_t *idx, unsigned char *hits)
 {
 	struct bld x;
@@ -241,46 +241,46 @@ static int claim(atomic_int *state)
 	return 0;
 }
 
-void gt_arm32_build(void)
+void kgenome_arm32_build(void)
 {
 	static unsigned char hc[MAXROWS], hu[MAXROWS];
 	unsigned used = 0;
 
-	if (!claim(&gt_arm32_state))
+	if (!claim(&kgenome_arm32_state))
 		return;
 	memset(hc, 0, sizeof hc);
 	memset(hu, 0, sizeof hu);
-	build_one(gt_arm32_src_cond, gt_arm32_src_cond_n, GT_ARM32_KEYS, key_arm32, 0, 0, 0,
-		  gt_arm32_lists, ARM_POOL, &used, gt_arm32_idx, hc);
-	build_one(gt_arm32_src_unc, gt_arm32_src_unc_n, GT_ARM32_KEYS, key_arm32, 0xf0000000u,
-		  0xf0000000u, 0, gt_arm32_lists, ARM_POOL, &used, gt_arm32_idx + GT_ARM32_KEYS, hu);
+	build_one(kgenome_arm32_src_cond, kgenome_arm32_src_cond_n, KGENOME_ARM32_KEYS, key_arm32, 0, 0, 0,
+		  kgenome_arm32_lists, ARM_POOL, &used, kgenome_arm32_idx, hc);
+	build_one(kgenome_arm32_src_unc, kgenome_arm32_src_unc_n, KGENOME_ARM32_KEYS, key_arm32, 0xf0000000u,
+		  0xf0000000u, 0, kgenome_arm32_lists, ARM_POOL, &used, kgenome_arm32_idx + KGENOME_ARM32_KEYS, hu);
 	g_pool_arm32 = used;
-	g_shadowed_arm32 = count_dead(hc, gt_arm32_src_cond_n) + count_dead(hu, gt_arm32_src_unc_n);
-	atomic_store_explicit(&gt_arm32_state, 2, memory_order_release);
+	g_shadowed_arm32 = count_dead(hc, kgenome_arm32_src_cond_n) + count_dead(hu, kgenome_arm32_src_unc_n);
+	atomic_store_explicit(&kgenome_arm32_state, 2, memory_order_release);
 }
 
-void gt_thumb_build(void)
+void kgenome_thumb_build(void)
 {
 	static unsigned char hn[MAXROWS], hw[MAXROWS];
 	unsigned used = 0;
 
-	if (!claim(&gt_thumb_state))
+	if (!claim(&kgenome_thumb_state))
 		return;
 	memset(hn, 0, sizeof hn);
 	memset(hw, 0, sizeof hw);
-	build_one(gt_thumb_src_narrow, gt_thumb_src_narrow_n, GT_THUMB_NARROW_KEYS, key_narrow, 0, 0,
-		  1, gt_thumb_lists, THUMB_POOL, &used, gt_thumb_idx_narrow, hn);
-	build_one(gt_thumb_src_wide, gt_thumb_src_wide_n, GT_THUMB_WIDE_KEYS, key_wide, 0, 0, 1,
-		  gt_thumb_lists, THUMB_POOL, &used, gt_thumb_idx_wide, hw);
+	build_one(kgenome_thumb_src_narrow, kgenome_thumb_src_narrow_n, KGENOME_THUMB_NARROW_KEYS, key_narrow, 0, 0,
+		  1, kgenome_thumb_lists, THUMB_POOL, &used, kgenome_thumb_idx_narrow, hn);
+	build_one(kgenome_thumb_src_wide, kgenome_thumb_src_wide_n, KGENOME_THUMB_WIDE_KEYS, key_wide, 0, 0, 1,
+		  kgenome_thumb_lists, THUMB_POOL, &used, kgenome_thumb_idx_wide, hw);
 	g_pool_thumb = used;
-	g_shadowed_thumb = count_dead(hn, gt_thumb_src_narrow_n) + count_dead(hw, gt_thumb_src_wide_n);
-	atomic_store_explicit(&gt_thumb_state, 2, memory_order_release);
+	g_shadowed_thumb = count_dead(hn, kgenome_thumb_src_narrow_n) + count_dead(hw, kgenome_thumb_src_wide_n);
+	atomic_store_explicit(&kgenome_thumb_state, 2, memory_order_release);
 }
 
-void gt_arm32_stats(struct gt_arm32_stats *out)
+void kgenome_arm32_stats(struct kgenome_arm32_stats *out)
 {
-	gt_arm32_build();
-	gt_thumb_build();
+	kgenome_arm32_build();
+	kgenome_thumb_build();
 	out->shadowed_arm32 = g_shadowed_arm32;
 	out->shadowed_thumb = g_shadowed_thumb;
 	out->lists_arm32 = g_pool_arm32;

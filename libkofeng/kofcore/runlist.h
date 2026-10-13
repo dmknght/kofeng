@@ -39,9 +39,9 @@
 #define KOFENG_RUNLIST_H
 
 #include <stdint.h>
-#include <kofmod/kofsig.h>
 #include "kofcore.h"   /* kof_clip_len */
 #include "rangelist.h"        /* kof_rlist, for answering a mask */
+#include "heapsort.h"         /* KOF_HEAPSORT */
 
 /* One run of bytes and what claims it. */
 struct kof_run {
@@ -182,47 +182,7 @@ static inline int kof_run_before(const struct kof_run *a, const struct kof_run *
  * O(n log n) with no worst case to find, in place, and needing no allocation on a
  * path that must not fail.
  */
-static inline void kof_runs_sift(struct kof_run *v, uint32_t root, uint32_t n)
-{
-	for (;;) {
-		uint32_t big = root, l = 2u * root + 1u, r = l + 1u;
-
-		if (l < n && kof_run_before(&v[big], &v[l]))
-			big = l;
-		if (r < n && kof_run_before(&v[big], &v[r]))
-			big = r;
-		if (big == root)
-			return;
-		{
-			struct kof_run t = v[root];
-
-			v[root] = v[big];
-			v[big] = t;
-		}
-		root = big;
-	}
-}
-
-static inline void kof_runs_sort(struct kof_run *v, uint32_t n)
-{
-	uint32_t i;
-
-	for (i = 1; i < n; i++)
-		if (kof_run_before(&v[i], &v[i - 1]))
-			break;
-	if (i >= n)
-		return;                 /* already ordered, which is the usual case */
-
-	for (i = n / 2u; i-- > 0; )
-		kof_runs_sift(v, i, n);
-	for (i = n; i-- > 1; ) {
-		struct kof_run t = v[0];
-
-		v[0] = v[i];
-		v[i] = t;
-		kof_runs_sift(v, 0, i);
-	}
-}
+KOF_HEAPSORT(kof_runs, struct kof_run, kof_run_before)
 
 /*
  * Make the runs disjoint and ordered, and total what each class ended up with.
@@ -306,6 +266,41 @@ static inline uint32_t kof_runs_resolve(const struct kof_run *v, uint32_t n,
 			kof_rl_add(&l, obj_size, cursor, obj_size - cursor);
 	}
 	return kof_rl_normalise(&l);
+}
+
+/*
+ * THE resolve_scan OF A FORMAT WHOSE VIEW CARRIES SETTLED RUNS, written once.
+ *
+ * Eight parsers (tar, rtf, rar, docole, zip, reg, pdf, xz) each carried a
+ * line-for-line copy of this function; they differed only in the view struct
+ * (the type behind ctx->file_header), the class-to-bit table, and the bit for
+ * the complement. Those three are the parameters. The view must have the
+ * members `valid`, `run[]` and `n_runs`, and its run must have the shape of
+ * struct kof_run - the cast is to that shared shape, which the ABI header of
+ * the format spells out field for field rather than including a host header,
+ * so a mismatch would be a memory bug and is asserted at compile time instead
+ * of trusted.
+ *
+ * Expands to a static function `<fmt>_resolve_scan`, the signature of
+ * ctx->resolve_scan. A macro and not a function because the view types are
+ * different structs with the fields at different offsets: a function would
+ * need a wrapper per format, which is the copy this removes. Needs
+ * <kofmod/kofsig.h> (struct kof_obj_ctx) at the point of use.
+ */
+#define KOF_RUNS_RESOLVER(fmt, view_t, cls_bit_tab, unclaimed_bit)          \
+static uint32_t fmt##_resolve_scan(const struct kof_obj_ctx *ctx,          \
+				   uint32_t mask, struct kof_range *out,    \
+				   uint32_t max_out)                       \
+{                                                                          \
+	const view_t *v = (const view_t *)ctx->file_header;                \
+									   \
+	if (!v || !v->valid || !out || max_out == 0)                       \
+		return 0;                                                  \
+	_Static_assert(sizeof v->run[0] == sizeof(struct kof_run),         \
+		       "the view's run and runlist.h's have drifted apart");\
+	return kof_runs_resolve((const struct kof_run *)v->run, v->n_runs, \
+				mask, cls_bit_tab, unclaimed_bit,          \
+				ctx->obj_size, out, max_out);              \
 }
 
 #endif /* KOFENG_RUNLIST_H */

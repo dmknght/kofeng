@@ -1,13 +1,13 @@
 /*
- * diag_roles - the invariant kof_diag_note_in rests on, checked instead of
+ * diag_roles - the invariant kgenome_diag_note_in rests on, checked instead of
  * assumed.
  *
  * WHAT A LINK IS IDENTIFIED BY. A link says "this input of the child came
  * from that parent", and the model identifies it by (parent, role, kind) -
- * see enum kof_diag_kind for the third field, which says WHICH relation it
+ * see enum kgenome_diag_kind for the third field, which says WHICH relation it
  * is. The role is the part a capability's table controls, and the part that
  * can be got wrong by hand.
- * kof_diag_note_in refuses one it already holds, because a run that goes
+ * kgenome_diag_note_in refuses one it already holds, because a run that goes
  * round a loop arrives at the same call with the same value from the same
  * producer, and that is one relation seen twice rather than two relations.
  *
@@ -23,7 +23,7 @@
  * and the pair shares two objects. Both arguments of copy_to_user were given
  * the role `buffer`, so the kernel source and the userspace destination became
  * the same link and one of them vanished. The repair was a second word
- * (KOF_DIAG_ROLE_SOURCE) - and the lesson is that a table a human maintains
+ * (KGENOME_DIAG_ROLE_SOURCE) - and the lesson is that a table a human maintains
  * will drift back unless something fails when it does.
  *
  * THE KIND DOES NOT RESCUE THIS. Two arguments of one call wearing one role
@@ -42,8 +42,9 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
-#include "../../libkofeng/analyzers/nucleo/nucleo.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/diag_int.h"
+#include <celllysis/nucleo.h>
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <phenotype/diag_int.h>
 
 static int fails;
 
@@ -57,24 +58,24 @@ int main(void)
 	unsigned checked = 0, with_roles = 0;
 
 	for (c = 1u; c < 0x10000u; c++) {
-		uint8_t seen[KOF_DIAG_ROLE_COUNT];
+		uint8_t seen[KGENOME_DIAG_ROLE_COUNT];
 		unsigned i, any = 0;
 
-		if (!KOF_NUCLEO_VALID(c))
+		if (!KGENOME_NUCLEO_VALID(c))
 			continue;
 		checked++;
 		memset(seen, 0, sizeof seen);
 		for (i = 0; i < N_ARG; i++) {
-			uint8_t r = kof_diag_role_of_arg((uint16_t)c, i);
+			uint8_t r = kgenome_diag_role_of_arg((uint16_t)c, i);
 
-			if (r == KOF_DIAG_ROLE_NONE)
+			if (r == KGENOME_DIAG_ROLE_NONE)
 				continue;
 			any = 1;
-			if (r >= KOF_DIAG_ROLE_COUNT) {
+			if (r >= KGENOME_DIAG_ROLE_COUNT) {
 				printf("  FAIL %s: argument %u has role %u, "
 				       "which is not a role\n",
-				       kof_flow_cap_name((uint16_t)c)
-					       ? kof_flow_cap_name((uint16_t)c)
+				       kgenome_flow_cap_name((uint16_t)c)
+					       ? kgenome_flow_cap_name((uint16_t)c)
 					       : "?",
 				       i, r);
 				fails++;
@@ -82,7 +83,7 @@ int main(void)
 			}
 			if (seen[r]) {
 				const char *nm =
-					kof_flow_cap_name((uint16_t)c);
+					kgenome_flow_cap_name((uint16_t)c);
 
 				printf("  FAIL %s: arguments %u and %u both "
 				       "carry role %u - two different inputs "

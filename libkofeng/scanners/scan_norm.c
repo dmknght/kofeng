@@ -12,17 +12,18 @@
 #include "scan_int.h"
 #include "objctx_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
+#include "../kofcore/kofmod/pe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,22 +35,48 @@
 #include "../kofcore/kofplatform.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan_int.h"
+#include "../analyzers/genome_obj.h"
+#include <genotype/image/offmap.h>
 
 
-void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		      kof_buf buf)
-{
+/*
+ * What one normalisation holds between its steps. The two big buffers, the
+ * keep and drop bitmaps, the region tables of the parent and of the view, and the
+ * sorted boundary marks all live from the first allocation to the hand-over, and
+ * every step reads what the one before it left, so they travel together.
+ */
+struct norm_work {
 	uint8_t *out, *tmp, *keep, *drop;
-	const struct kof_true_all *lib;
-	uint64_t n, sent = 0;
+	const struct kgenome_true_all *lib;
+	uint64_t n;
 	int changed;
 	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
 	struct kof_src_region rgn0[KOF_SRC_MAX_REGIONS];
-	uint64_t mark[2u * KOF_SRC_MAX_REGIONS];
-	uint64_t mark_out[2u * KOF_SRC_MAX_REGIONS];
-	uint32_t midx[2u * KOF_SRC_MAX_REGIONS];
-	uint32_t nr, n_rgn0, n_mark = 0, fired = 0;
+	/*
+	 * THE BOUNDARY TABLE: every parent offset the view's description names, and
+	 * where the collapse put each. `mk` is what the collapse is asked to report
+	 * (sorted, no duplicates), `mk_to` what it answered. Regions, the image
+	 * description and the entry all go through it, so they cannot disagree about
+	 * where a byte went.
+	 */
+	uint64_t *mk, *mk_to;
+	uint32_t n_mark, cap_mark;
+	/* The parent's info struct, copied; its offsets are carried through the
+	 * table once the collapse has run. `img` is NULL for a parent with none. */
+	uint8_t *img;
+	uint32_t img_len;
+	uint64_t entry_off;
+	uint32_t nr, n_rgn0, fired;
+};
 
+/*
+ * Is this object one that gets a view at all. Decided from the object, its
+ * format, its size and what the rest of the scan already knows - nothing is
+ * allocated and nothing is produced.
+ */
+static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		       kof_buf buf)
+{
 	/*
 	 * PE AND ELF ONLY, AND ONLY WHAT WAS NOT ITSELF PRODUCED.
 	 *
@@ -79,7 +106,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * regions could not be resolved, and that exception was a real one.
 	 */
 	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
-		return;
+		return 0;
 	/*
 	 * AND NOT A FORM SOMEBODY ELSE ALREADY MADE.
 	 *
@@ -96,7 +123,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (sc->cur_src &&
 	    kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
-		return;
+		return 0;
 	/*
 	 * AND NOT A SCRIPT, BECAUSE A SCRIPT HAS ITS OWN NORMALISER.
 	 *
@@ -114,9 +141,9 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (!ctx || (ctx->format != KOF_FMT_ELF &&
 		     ctx->format != KOF_FMT_PE))
-		return;
+		return 0;
 	if (buf.n < NORM_MIN_OBJ)
-		return;
+		return 0;
 
 	/*
 	 * AND NOT AN OBJECT TOO LARGE TO HOLD TWICE, WHICH IS ASKED HERE AND
@@ -142,7 +169,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	if (sc->resident > sc->resident_max ||
 	    buf.n > (sc->resident_max - sc->resident) / 2u)
-		return;
+		return 0;
 	/*
 	 * AND NOT AN OBJECT WHOSE CODE IS STILL COMPRESSED.
 	 *
@@ -168,7 +195,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * CODE AND NOT THE WHOLE OBJECT. A program with a compressed resource
 	 * or an appended archive is still a program, and its code is still
 	 * worth rendering; what is being asked is whether the EXECUTABLE bytes
-	 * have been replaced by a stream. KOF_SCAN_ELF_CODE and KOF_SCAN_PE_CODE
+	 * have been replaced by a stream. KGENOME_SCAN_ELF_CODE and KGENOME_SCAN_PE_CODE
 	 * are the same bit, which is what lets one test serve both formats here.
 	 *
 	 * THE ANSWER IS MEMOISED - c_region_entropy keeps the last few masks it
@@ -178,38 +205,13 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (ctx->content && ctx->content->region_entropy &&
 	    ctx->content->region_entropy(ctx, NORM_CODE_MASK) >=
 	    NORM_DENSE_EIGHTHS)
-		return;
+		return 0;
+	return 1;
+}
 
-	/*
-	 * A VIEW, NOT A SECOND EXECUTABLE - AND THE ORDER OF THE THREE PASSES
-	 * IS DECIDED RATHER THAN INCIDENTAL.
-	 *
-	 *   1  unwide    UTF-16 ASCII becomes ASCII. Length preserving: the
-	 *                vacated half of the run is zeroed.
-	 *   2  unb64     the payload of `... | base64 -d` becomes what it
-	 *                decodes to. Also length preserving, also zero filled.
-	 *   3  nullrun   every zero run of eight or more becomes TWO zeros.
-	 *                This one SHORTENS, and it is what makes the view a
-	 *                view rather than a copy.
-	 *
-	 * Narrow before decoding, because a payload stored as UTF-16 is not
-	 * base64 until it has been narrowed, and nothing decoded can turn into
-	 * wide text. Collapse LAST, because the two passes above each leave a
-	 * zero run behind them and collapsing first would leave those uncollapsed
-	 * - the fill from a 4 KB payload is a kilobyte of zeros that nothing
-	 * will ever match.
-	 *
-	 * TWO ZEROS AND NOT ONE, which is the whole safety argument and is set
-	 * out in executables.h: a literal pattern cannot contain a zero byte,
-	 * so collapsing to two never puts two non-zero bytes beside each other
-	 * that were not beside each other before. Collapsing to ONE would - and
-	 * a single zero also reads as the high half of a UTF-16 character that
-	 * is not there, which is the thing pass 1 exists to find.
-	 *
-	 * THE PARENT IS STILL SCANNED, so nothing is traded away by this. The
-	 * view is an ADDITIONAL object, and a pattern that only matches the
-	 * original still matches the original.
-	 */
+/* The parent's regions, and their coordinates kept for the library cut. */
+static void norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
+{
 	/*
 	 * THE PARENT'S REGIONS FIRST, because they decide what may be rewritten
 	 * and they are also what the view will carry.
@@ -219,69 +221,65 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * keep and nothing to declare, and the transform runs over the whole of
 	 * it exactly as it did before regions were understood here.
 	 */
-	nr = sx_norm_gather(ctx, rgn, KOF_SRC_MAX_REGIONS);
+	w->nr = sx_norm_gather(ctx, w->rgn, KOF_SRC_MAX_REGIONS);
 	/*
 	 * THE PARENT'S OWN COORDINATES, KEPT. `rgn` is rewritten into the
 	 * view's below, and the library spans are file offsets - so deciding
 	 * which region a span came out of has to be done against the table as
 	 * it was.
 	 */
-	memcpy(rgn0, rgn, nr * sizeof rgn[0]);
-	n_rgn0 = nr;
+	memcpy(w->rgn0, w->rgn, w->nr * sizeof w->rgn[0]);
+	w->n_rgn0 = w->nr;
+}
 
-	/*
-	 * AND THE STATIC LIBRARY, WHICH LEAVES THE VIEW ALTOGETHER.
-	 *
-	 * Those bytes are the toolchain's, not the author's: measured over 226
-	 * Linux malware samples the library is a mean 22% of CODE and past half
-	 * of it in 46, and two unrelated CLEAN binaries reach a string-set
-	 * Jaccard of 0.99 through nothing but a shared libc. A view of what the
-	 * object actually carries is a view without them.
-	 *
-	 * FOUND ON THE PARENT, WHERE THE PARSE IS TRUE. kof_true_find works from
-	 * markers inside a loadable segment, so it needs segment offsets that
-	 * describe the bytes it is reading - which is the case here and is not
-	 * the case on a view, whose headers still describe the file before the
-	 * padding came out. That is why it is refused there and used here.
-	 */
-	/*
-	 * INHERITED, NOT WORKED OUT AGAIN - see kof_scanner.cur_lib. The gate
-	 * that used to be here, refusing the cut on a dynamically linked
-	 * object, moved with it: sx_lib_facts asks the marker tier only of a
-	 * static build and the symbol tier of everything.
-	 */
-	lib = &sc->cur_lib;
-
-	out = malloc((size_t)buf.n);
-	tmp = malloc((size_t)buf.n);
-	keep = nr ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
-	drop = lib->n ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
-	if (!out || !tmp || (nr && !keep) || (lib->n && !drop)) {
-		free(out);
-		free(tmp);
-		free(keep);
-		free(drop);
-		return;
+/*
+ * The two working buffers and the two bitmaps, all sized from the object.
+ * Zero means nothing was allocated and nothing is left to free.
+ */
+static int norm_alloc(struct norm_work *w, kof_buf buf)
+{
+	w->out = malloc((size_t)buf.n);
+	w->tmp = malloc((size_t)buf.n);
+	w->keep = w->nr ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
+	w->drop = w->lib->n ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
+	if (!w->out || !w->tmp || (w->nr && !w->keep) || (w->lib->n && !w->drop)) {
+		free(w->out);
+		free(w->tmp);
+		free(w->keep);
+		free(w->drop);
+		return 0;
 	}
-	if (nr) {
-		sx_norm_keep_bits(keep, buf.n, rgn, nr, NORM_KEEP_MASK);
+	return 1;
+}
+
+/* What may not be rewritten: the kept regions, and the instructions in code. */
+static void norm_keep_build(struct norm_work *w, struct kof_obj_ctx *ctx,
+			    kof_buf buf)
+{
+	if (w->nr) {
+		sx_norm_keep_bits(w->keep, buf.n, w->rgn, w->nr, NORM_KEEP_MASK);
 		/* And CODE narrowed to the instructions in it - see
 		 * sx_norm_keep_exec. */
 		if (ctx->format == KOF_FMT_ELF && ctx->file_header)
-			sx_norm_keep_exec(keep, buf.n, kof_elf(ctx), rgn, nr);
+			sx_norm_keep_exec(w->keep, buf.n, kof_elf(ctx), w->rgn, w->nr);
 		/* And the PE question, which is about the write bit - see
 		 * sx_norm_keep_exec_pe. */
 		if (ctx->format == KOF_FMT_PE && ctx->file_header)
-			sx_norm_keep_exec_pe(keep, buf.n, kof_pe(ctx), rgn, nr);
+			sx_norm_keep_exec_pe(w->keep, buf.n, kof_pe(ctx), w->rgn, w->nr);
 	}
-	if (lib->n) {
+}
+
+/* What leaves the view: the static library's spans, as a bitmap. */
+static void norm_drop_build(struct norm_work *w, kof_buf buf)
+{
+	if (w->lib->n) {
 		uint32_t a;
 
-		memset(drop, 0, (size_t)((buf.n + 7u) / 8u));
-		for (a = 0; a < lib->n; a++) {
+		memset(w->drop, 0, (size_t)((buf.n + 7u) / 8u));
+		for (a = 0; a < w->lib->n; a++) {
 			uint64_t e;
 
-			if (lib->span[a].off >= buf.n)
+			if (w->lib->span[a].off >= buf.n)
 				continue;
 			/*
 			 * Clipped by the room LEFT rather than by the sum:
@@ -291,13 +289,20 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 * silently drops nothing at all. Subtraction cannot
 			 * wrap here, off being known smaller than buf.n.
 			 */
-			e = lib->span[a].len > buf.n - lib->span[a].off
+			e = w->lib->span[a].len > buf.n - w->lib->span[a].off
 				  ? buf.n
-				  : lib->span[a].off + lib->span[a].len;
-			sx_bits_set(drop, lib->span[a].off, e);
+				  : w->lib->span[a].off + w->lib->span[a].len;
+			sx_bits_set(w->drop, w->lib->span[a].off, e);
 		}
 	}
+}
 
+/*
+ * The decode passes over a copy, and the answer about whether they changed
+ * anything.
+ */
+static void norm_decode(struct norm_work *w, kof_buf buf)
+{
 	/*
 	 * THE DECODE PASSES, THEN THE KEPT BYTES PUT BACK.
 	 *
@@ -312,10 +317,12 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * Before the collapse, because the collapse is what moves bytes and the
 	 * decode has to happen while offsets still mean what the bitmap says.
 	 */
-	memcpy(tmp, buf.p, (size_t)buf.n);
-	changed = kof_exe_decode(tmp, buf.n);
-	if (nr && changed) {
+	memcpy(w->tmp, buf.p, (size_t)buf.n);
+	w->changed = kof_exe_decode(w->tmp, buf.n);
+	if (w->nr && w->changed) {
 		uint64_t j;
+		const uint8_t *keep = w->keep;
+		uint8_t *tmp = w->tmp;
 
 		for (j = 0; j < buf.n; j++)
 			if (keep[j >> 3] & (uint8_t)(1u << (j & 7u)))
@@ -338,46 +345,112 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * and the comparison is one pass over an object that has
 		 * already had several.
 		 */
-		changed = memcmp(tmp, buf.p, (size_t)buf.n) != 0;
+		w->changed = memcmp(w->tmp, buf.p, (size_t)buf.n) != 0;
 	}
+}
 
-	/*
-	 * AND THE COLLAPSE, WHICH IS THE ONLY PASS THAT MOVES ANYTHING - so it
-	 * is the only one that has to report where the boundaries went.
-	 *
-	 * The marks are every region's start and end, sorted, because the
-	 * walk that answers them runs forward once and regions overlap: an
-	 * ELF's header tables sit inside its first loadable segment, so the
-	 * starts and ends do not arrive in order by themselves.
-	 */
-	{
-		uint32_t a, b;
+static void mark_add(struct norm_work *w, uint64_t off, uint64_t n)
+{
+	if (off > n)
+		off = n;
+	if (w->n_mark == w->cap_mark) {
+		uint32_t nc = w->cap_mark ? w->cap_mark * 2u : 64u;
+		uint64_t *g = realloc(w->mk, (size_t)nc * sizeof *g);
 
-		for (a = 0; a < nr; a++) {
-			mark[2u * a] = rgn[a].off;
-			mark[2u * a + 1u] = rgn[a].off + rgn[a].len;
-			midx[2u * a] = 2u * a;
-			midx[2u * a + 1u] = 2u * a + 1u;
-		}
-		n_mark = 2u * nr;
-		/* Insertion sort: at most 32 entries, and a qsort here would be
-		 * a comparator and a context pointer for a list this size. */
-		for (a = 1; a < n_mark; a++) {
-			uint64_t v = mark[a];
-			uint32_t vi = midx[a];
+		if (!g)
+			return;         /* a place not asked about maps to itself */
+		w->mk = g;
+		w->cap_mark = nc;
+	}
+	w->mk[w->n_mark++] = off;
+}
 
-			for (b = a; b > 0 && mark[b - 1u] > v; b--) {
-				mark[b] = mark[b - 1u];
-				midx[b] = midx[b - 1u];
-			}
-			mark[b] = v;
-			midx[b] = vi;
+struct mark_ask {
+	struct norm_work *w;
+	uint64_t n;
+};
+
+/* The visitor of genotype/image/offmap.h, collecting: every offset and every
+ * extent end the description holds is a place the collapse is asked about. */
+static void mark_visit(void *user, uint64_t *off, uint64_t *len)
+{
+	struct mark_ask *a = user;
+
+	if (*off == KGENOME_NA || *off == KGENOME_BROKEN)
+		return;
+	mark_add(a->w, *off, a->n);
+	if (len)
+		mark_add(a->w, *len > a->n - (*off < a->n ? *off : a->n) ? a->n : *off + *len, a->n);
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+/*
+ * THE PLACES THE COLLAPSE IS ASKED ABOUT, sorted and unique, and the copy of
+ * the parent's description whose offsets they are.
+ *
+ * AND THE COLLAPSE, WHICH IS THE ONLY PASS THAT MOVES ANYTHING - so it is the
+ * only one that has to report where things went. What is asked: every region's
+ * start and end, every offset the image description holds (sections, directories,
+ * the header table), and the entry. They are sorted because the walk that
+ * answers them runs forward once, and unique because the answer for a place is
+ * one number.
+ *
+ * The description is copied here, off the parent's own struct, because the
+ * parent is scanned on and the copy is what goes to the view.
+ */
+static void norm_marks_build(struct norm_work *w, struct kof_obj_ctx *ctx,
+			     kof_buf buf)
+{
+	struct mark_ask ask;
+	uint32_t a, b;
+
+	ask.w = w;
+	ask.n = buf.n;
+	for (a = 0; a < w->nr; a++) {
+		mark_add(w, w->rgn[a].off, buf.n);
+		mark_add(w, w->rgn[a].len > buf.n - (w->rgn[a].off < buf.n ? w->rgn[a].off : buf.n)
+			    ? buf.n : w->rgn[a].off + w->rgn[a].len, buf.n);
+	}
+	w->entry_off = ctx->entry_off;
+	if (w->entry_off != KGENOME_NA && w->entry_off != KGENOME_BROKEN)
+		mark_add(w, w->entry_off, buf.n);
+	if (ctx->file_header && (ctx->format == KOF_FMT_ELF || ctx->format == KOF_FMT_PE)) {
+		w->img_len = ctx->format == KOF_FMT_PE ? (uint32_t)sizeof(struct kgenome_pe_info)
+						       : (uint32_t)sizeof(struct kgenome_elf_info);
+		w->img = malloc(w->img_len);
+		if (w->img) {
+			memcpy(w->img, ctx->file_header, w->img_len);
+			if (ctx->format == KOF_FMT_PE)
+				kgenome_pe_info_offsets((struct kgenome_pe_info *)w->img, mark_visit, &ask);
+			else
+				kgenome_elf_info_offsets((struct kgenome_elf_info *)w->img, mark_visit, &ask);
 		}
 	}
+	qsort(w->mk, w->n_mark, sizeof *w->mk, cmp_u64);
+	for (a = b = 0; a < w->n_mark; a++)
+		if (!b || w->mk[a] != w->mk[b - 1u])
+			w->mk[b++] = w->mk[a];
+	w->n_mark = b;
+	w->mk_to = calloc(b ? b : 1u, sizeof *w->mk_to);
+	if (!w->mk_to)
+		w->n_mark = 0;          /* nothing is asked and nothing is carried */
+}
 
-	n = kof_exe_norm_masked(tmp, buf.n, keep, drop,
+/*
+ * The collapse, and the decision whether the view it made is worth having.
+ * Zero means no view: everything is already freed.
+ */
+static int norm_collapse(struct norm_work *w, kof_buf buf)
+{
+	w->n = kof_exe_norm_masked(w->tmp, buf.n, w->keep, w->drop,
 				KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
-				out, buf.n, mark, mark_out, n_mark, &fired);
+				w->out, buf.n, w->mk, w->mk_to, w->n_mark, &w->fired);
 	/*
 	 * A VIEW IS MADE ONLY WHEN IT CAN SHOW SOMETHING THE PARENT CANNOT.
 	 *
@@ -414,12 +487,12 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * means something. Collapsing zeros is still not a reason - it is
 	 * proved to create no match that the parent does not already have.
 	 */
-	if (!(fired & (KOF_EXE_NORM_UNWIDE | KOF_EXE_NORM_CUTLIB)) && !changed) {
-		free(out);
-		free(tmp);
-		free(keep);
-		free(drop);
-		return;
+	if (!(w->fired & (KOF_EXE_NORM_UNWIDE | KOF_EXE_NORM_CUTLIB)) && !w->changed) {
+		free(w->out);
+		free(w->tmp);
+		free(w->keep);
+		free(w->drop);
+		return 0;
 	}
 	/*
 	 * A LENGTH OF ZERO MEANS TWO DIFFERENT THINGS AND THEY ARE TOLD APART
@@ -439,57 +512,86 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * region table describing none of them, and handing one over would put
 	 * an object into the tree that says it is an executable and contains
 	 * nothing. It takes a library covering the whole object, header
-	 * included, which is not something kof_true_find can currently produce -
+	 * included, which is not something kgenome_true_find can currently produce -
 	 * the test is here so that the day it can, this says no rather than
 	 * building a copy of the parent and calling it a view.
 	 */
-	if (!fired) {
-		memcpy(out, tmp, (size_t)buf.n);
-		n = buf.n;
-		for (n_mark = 0; n_mark < 2u * nr; n_mark++)
-			mark_out[n_mark] = mark[n_mark];
-	} else if (!n) {
-		free(out);
-		free(tmp);
-		free(keep);
-		free(drop);
-		return;
+	if (!w->fired) {
+		memcpy(w->out, w->tmp, (size_t)buf.n);
+		w->n = buf.n;
+		if (w->n_mark)
+			memcpy(w->mk_to, w->mk, (size_t)w->n_mark * sizeof *w->mk);
+	} else if (!w->n) {
+		free(w->out);
+		free(w->tmp);
+		free(w->keep);
+		free(w->drop);
+		return 0;
 	}
-	free(tmp);
-	tmp = NULL;
-	free(drop);
-	drop = NULL;
+	free(w->tmp);
+	w->tmp = NULL;
+	free(w->drop);
+	w->drop = NULL;
+	return 1;
+}
 
+/*
+ * What the view is, in its own coordinates: the regions, the entry and the
+ * image description, each carried through the boundary table the collapse just
+ * filled. The description the parent's parse found is TRUE of the program and
+ * only its offsets are wrong for these bytes, so they are moved; parsing the
+ * view's header again would read the parent's offsets out of bytes that are no
+ * longer where they point.
+ */
+static void norm_view_describe(struct norm_work *w, struct kof_obj_ctx *ctx)
+{
+	struct kgenome_offmap m;
+	uint32_t a;
+
+	m.from = w->mk;
+	m.to = w->mk_to;
+	m.n = w->n_mark;
+	m.from_end = ctx->obj_size;
+	m.to_end = w->n;
 	/*
 	 * THE REGIONS, IN THE VIEW'S OWN COORDINATES.
 	 *
-	 * Scattered back through the sort, so each region gets its own two
-	 * answers rather than whichever two happened to be next. A region whose
-	 * end no longer follows its start is dropped: that cannot happen from
-	 * this transform, and a region of negative length is the sort of thing
-	 * that should stop here rather than reach a matcher.
+	 * Each region is its own two answers - start and end - so a region whose
+	 * end no longer follows its start is dropped to length zero: that cannot
+	 * happen from this transform, and a region of negative length is the sort
+	 * of thing that should stop here rather than reach a matcher.
+	 *
+	 * Written back into rgn[] rather than straight onto the scanner:
+	 * kof_mod_unpack_mode clears the pending claims, and it has not run yet.
+	 * Written there and this table would be wiped before the child it
+	 * describes was ever made.
 	 */
-	{
-		uint32_t a;
+	for (a = 0; a < w->nr; a++) {
+		uint64_t o0 = kgenome_offmap_at(&m, w->rgn[a].off);
+		uint64_t e = w->rgn[a].len > ctx->obj_size - w->rgn[a].off
+			     ? ctx->obj_size : w->rgn[a].off + w->rgn[a].len;
+		uint64_t o1 = kgenome_offmap_at(&m, e);
 
-		for (a = 0; a < 2u * nr; a++)
-			mark[midx[a]] = mark_out[a];
-		for (a = 0; a < nr; a++) {
-			uint64_t o0 = mark[2u * a], o1 = mark[2u * a + 1u];
-
-			/*
-			 * Back into rgn[] rather than straight onto the
-			 * scanner: kof_mod_unpack_mode clears the pending
-			 * claims, and it has not run yet. Written there and
-			 * this table would be wiped before the child it
-			 * describes was ever made.
-			 */
-			rgn[a].off = o0;
-			rgn[a].len = o1 > o0 ? o1 - o0 : 0u;
-		}
+		w->rgn[a].off = o0;
+		w->rgn[a].len = o1 > o0 ? o1 - o0 : 0u;
 	}
-	free(keep);
-	keep = NULL;
+	if (w->entry_off != KGENOME_NA && w->entry_off != KGENOME_BROKEN)
+		w->entry_off = kgenome_offmap_at(&m, w->entry_off);
+	if (w->img) {
+		if (ctx->format == KOF_FMT_PE)
+			kgenome_pe_info_remap((struct kgenome_pe_info *)w->img, &m);
+		else
+			kgenome_elf_info_remap((struct kgenome_elf_info *)w->img, &m);
+	}
+	free(w->keep);
+	w->keep = NULL;
+}
+
+/* The library, appended in file order under regions of its own. */
+static void norm_append_library(struct norm_work *w, kof_buf buf)
+{
+	uint64_t n = w->n;
+	uint8_t *out = w->out;
 
 	/*
 	 * AND THE LIBRARY BACK ON THE END, UNDER A NAME THAT SAYS WHAT IT IS.
@@ -499,7 +601,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * between the file and its view could not be accounted for. They are
 	 * moved instead - appended in file order and given a region of their
 	 * own, SLIB_CODE for what came out of CODE and SLIB_DATA for what came
-	 * out of DATA - see KOF_SCAN_ELF_SLIB_CODE.
+	 * out of DATA - see KGENOME_SCAN_ELF_SLIB_CODE.
 	 *
 	 * WHAT THE CUT WAS FOR STILL HOLDS. A block or a measure anchored to
 	 * CODE no longer reaches them, because they are not in CODE any more;
@@ -517,33 +619,33 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * for the code side, once for the data side - lays each down
 	 * contiguously.
 	 */
-	if (lib->n && n_rgn0 && n < buf.n) {
+	if (w->lib->n && w->n_rgn0 && n < buf.n) {
 		static const uint32_t pair[2][2] = {
-			{ (uint32_t)KOF_SCAN_ELF_CODE,
-			  (uint32_t)KOF_SCAN_ELF_SLIB_CODE },
-			{ (uint32_t)KOF_SCAN_ELF_DATA,
-			  (uint32_t)KOF_SCAN_ELF_SLIB_DATA }
+			{ (uint32_t)KGENOME_SCAN_ELF_CODE,
+			  (uint32_t)KGENOME_SCAN_ELF_SLIB_CODE },
+			{ (uint32_t)KGENOME_SCAN_ELF_DATA,
+			  (uint32_t)KGENOME_SCAN_ELF_SLIB_DATA }
 		};
 		uint32_t side, a, b;
 
-		for (side = 0; side < 2u && nr < KOF_SRC_MAX_REGIONS; side++) {
+		for (side = 0; side < 2u && w->nr < KOF_SRC_MAX_REGIONS; side++) {
 			uint64_t begin = n;
 
-			for (a = 0; a < lib->n && n < buf.n; a++) {
-				uint64_t off = lib->span[a].off, e, j;
+			for (a = 0; a < w->lib->n && n < buf.n; a++) {
+				uint64_t off = w->lib->span[a].off, e, j;
 				int mine = 0;
 
 				if (off >= buf.n)
 					continue;
-				e = lib->span[a].len > buf.n - off
-				  ? buf.n : off + lib->span[a].len;
+				e = w->lib->span[a].len > buf.n - off
+				  ? buf.n : off + w->lib->span[a].len;
 				/* Which of the parent's regions these bytes
 				 * came out of - the same table the view's own
 				 * regions were resolved from. */
-				for (b = 0; b < n_rgn0; b++)
-					if (rgn0[b].mask == pair[side][0] &&
-					    off >= rgn0[b].off &&
-					    off < rgn0[b].off + rgn0[b].len) {
+				for (b = 0; b < w->n_rgn0; b++)
+					if (w->rgn0[b].mask == pair[side][0] &&
+					    off >= w->rgn0[b].off &&
+					    off < w->rgn0[b].off + w->rgn0[b].len) {
 						mine = 1;
 						break;
 					}
@@ -553,29 +655,19 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 					out[n++] = buf.p[j];
 			}
 			if (n > begin) {
-				rgn[nr].mask = pair[side][1];
-				rgn[nr].off = begin;
-				rgn[nr].len = n - begin;
-				nr++;
+				w->rgn[w->nr].mask = pair[side][1];
+				w->rgn[w->nr].off = begin;
+				w->rgn[w->nr].len = n - begin;
+				w->nr++;
 			}
 		}
 	}
+	w->n = n;
+}
 
-	/*
-	 * THE UNPACK VTABLE, BORROWED FOR THE LENGTH OF ONE CHILD.
-	 *
-	 * emit and child are NULL on the detect vtable - a detector may not
-	 * produce objects, which is the rule that keeps a signature from
-	 * inventing evidence - and by here the context is back in detect mode.
-	 * The host is not a detector, so it turns the producing half on, makes
-	 * the one child it came to make, and puts the context back exactly as
-	 * it found it.
-	 *
-	 * Through the module sink, so the view is charged, capped and spilled
-	 * by exactly the code that does that for a decompressed child. There is
-	 * no second budget here and no path by which this can exceed the
-	 * ceiling the caller set.
-	 */
+/* Does the view fit under both ceilings. Zero means no, and `out` is freed. */
+static int norm_fits(struct kof_scanner *sc, struct norm_work *w)
+{
 	/*
 	 * A VIEW THAT WILL NOT FIT IS NOT PRODUCED AT ALL, and finding that out
 	 * HERE rather than from the sink is the whole of this test.
@@ -597,13 +689,21 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * Both ceilings are asked about, in the same terms c_emit uses, because
 	 * either of them produces the same half object.
 	 */
-	if (n > sc->obj_cap ||
+	if (w->n > sc->obj_cap ||
 	    sc->resident > sc->resident_max ||
-	    n > sc->resident_max - sc->resident) {
-		free(out);
-		return;
+	    w->n > sc->resident_max - sc->resident) {
+		free(w->out);
+		return 0;
 	}
-	kof_mod_unpack_mode(ctx, 1);
+	return 1;
+}
+
+/*
+ * Everything the child will be declared with, before its first byte goes out.
+ */
+static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			 struct norm_work *w)
+{
 	/*
 	 * DECLARED BEFORE THE FIRST BYTE, NOT AFTER THE LAST.
 	 *
@@ -622,7 +722,39 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
 						sizeof sc->pend_label, "%s",
 						KOF_OBJ_LABEL_NORM);
-	sc->pend_fmt = nr ? ctx->format : (uint8_t)KOF_FMT_DECLARED_RAW;
+	/*
+	 * RAW, ALWAYS, AND THE DESCRIPTION DECLARED BESIDE IT.
+	 *
+	 * This used to declare the parent's format whenever there were regions, so
+	 * that the child would be parsed - and the parse read a header that is the
+	 * parent's byte for byte and no longer describes the bytes under it. A PE
+	 * view came back with its section offsets past the end of the file, its
+	 * entry unresolved and its code region empty, and so lost the parent's
+	 * verdict. The view is not asked what it is: it is told, in kof_src_desc,
+	 * and the parse is not run. A view with no description (nothing could be
+	 * copied) is raw, which is what it always was without regions.
+	 */
+	sc->pend_fmt = (uint8_t)KOF_FMT_DECLARED_RAW;
+	if (w->img) {
+		if (sc->pend_desc_cap < w->img_len) {
+			uint8_t *g = realloc(sc->pend_desc_buf, w->img_len);
+
+			if (g) {
+				sc->pend_desc_buf = g;
+				sc->pend_desc_cap = w->img_len;
+			}
+		}
+		if (sc->pend_desc_cap >= w->img_len) {
+			memcpy(sc->pend_desc_buf, w->img, w->img_len);
+			sc->pend_desc.fmt = ctx->format;
+			sc->pend_desc.arch = ctx->arch;
+			sc->pend_desc.subtype = ctx->subtype;
+			sc->pend_desc.entry_off = w->entry_off;
+			sc->pend_desc.info = sc->pend_desc_buf;
+			sc->pend_desc.info_len = w->img_len;
+			sc->pend_desc_set = 1;
+		}
+	}
 	/*
 	 * AND THE LANGUAGE WITH IT, for a view that is declared a format at
 	 * all. The decode rewrites the view's own text, so a re-read of it can
@@ -631,7 +763,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * shell rule is then declined on the one object that finally holds the
 	 * evidence. See kof_src_declare_lang.
 	 */
-	if (nr) {
+	if (w->nr) {
 		sc->pend_subtype = ctx->subtype;
 		sc->pend_subfam  = ctx->subfamily;
 		sc->pend_lang    = 1;
@@ -652,9 +784,9 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	{
 		uint32_t a;
 
-		for (a = 0; a < nr; a++)
-			sc->pend_rgn[a] = rgn[a];
-		sc->n_pend_rgn = nr;
+		for (a = 0; a < w->nr; a++)
+			sc->pend_rgn[a] = w->rgn[a];
+		sc->n_pend_rgn = w->nr;
 		/*
 		 * IN THE PARENT'S VOCABULARY, and that has to travel with the
 		 * table. These bits were resolved out of the parent, and a bit
@@ -670,32 +802,65 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * kof_mod_unpack_mode cleared the pending claims and before c_child
 	 * spends them. See sx_norm_syms.
 	 */
-	if (!sc->pend_syms)
-		sc->pend_syms = malloc(KOF_SYM_MAX_BYTES);
+	/*
+	 * Room for the parent's block WHOLE: it is no longer at most
+	 * KOF_SYM_MAX_BYTES (see sym_build), and a PE view is a copy of it that
+	 * is refused when it does not fit - a block past the old size would
+	 * have given the view no symbols at all.
+	 */
+	{
+		uint32_t pn = 0, need = KOF_SYM_MAX_BYTES;
+
+		if (ctx->content && ctx->content->syms) {
+			(void)ctx->content->syms(ctx, &pn);
+			if (pn > need)
+				need = pn;
+		}
+		if (sc->pend_syms_cap < need) {
+			uint8_t *g = realloc(sc->pend_syms, need);
+
+			if (g) {
+				sc->pend_syms = g;
+				sc->pend_syms_cap = need;
+			}
+		}
+	}
 	if (sc->pend_syms)
 		sc->n_pend_syms = sx_norm_syms(sc, ctx, sc->pend_syms,
-					    KOF_SYM_MAX_BYTES);
-	while (sent < n) {
-		uint64_t take = n - sent;
+					    sc->pend_syms_cap);
+}
+
+/* The bytes out through the sink, the functions carried over, and the child. */
+static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			    kof_buf buf, struct norm_work *w)
+{
+	uint64_t sent = 0;
+
+	while (sent < w->n) {
+		uint64_t take = w->n - sent;
 
 		if (take > (1u << 20))
 			take = 1u << 20;
-		if (!ctx->content->emit(ctx, out + sent, (uint32_t)take))
+		if (!ctx->content->emit(ctx, w->out + sent, (uint32_t)take))
 			break;                  /* a limit said no; keep what is */
 		sent += take;
 	}
 	/*
 	 * AND ITS FUNCTIONS, taken from the parent's and found again in the
-	 * bytes just produced - see kof_funcs_remap. Only for an object whose
+	 * bytes just produced - see kgenome_funcs_remap. Only for an object whose
 	 * functions are known (symbols, or the entries diagnose recovers), and
 	 * only when the view went out whole.
 	 */
-	kof_funcs_free(&sc->pend_funcs);
-	if (sent == n && ctx->file_header)
-		kof_funcs_remap(buf.p, buf.n, oc_funcs(ctx), out, n,
-				&sc->pend_funcs);
-	free(out);
-	if (sent == n) {
+	kgenome_funcs_free(&sc->pend_funcs);
+	if (sent == w->n && ctx->file_header) {
+		struct kgenome_obj pobj;
+
+		kof_genome_obj(ctx, &pobj);
+		kgenome_diag_funcs_of_view(&pobj, buf, oc_funcs(ctx),
+				       kof_buf_make(w->out, w->n), &sc->pend_funcs);
+	}
+	free(w->out);
+	if (sent == w->n) {
 		/*
 		 * AND DECLARED RAW, WHICH IS WHAT IT NOW IS.
 		 *
@@ -735,5 +900,112 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				sc->n_views++;
 		}
 	}
+}
+
+static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+			   kof_buf buf, struct norm_work *w)
+{
+
+	if (!norm_wanted(sc, ctx, buf))
+		return;
+
+	/*
+	 * A VIEW, NOT A SECOND EXECUTABLE - AND THE ORDER OF THE THREE PASSES
+	 * IS DECIDED RATHER THAN INCIDENTAL.
+	 *
+	 *   1  unwide    UTF-16 ASCII becomes ASCII. Length preserving: the
+	 *                vacated half of the run is zeroed.
+	 *   2  unb64     the payload of `... | base64 -d` becomes what it
+	 *                decodes to. Also length preserving, also zero filled.
+	 *   3  nullrun   every zero run of eight or more becomes TWO zeros.
+	 *                This one SHORTENS, and it is what makes the view a
+	 *                view rather than a copy.
+	 *
+	 * Narrow before decoding, because a payload stored as UTF-16 is not
+	 * base64 until it has been narrowed, and nothing decoded can turn into
+	 * wide text. Collapse LAST, because the two passes above each leave a
+	 * zero run behind them and collapsing first would leave those uncollapsed
+	 * - the fill from a 4 KB payload is a kilobyte of zeros that nothing
+	 * will ever match.
+	 *
+	 * TWO ZEROS AND NOT ONE, which is the whole safety argument and is set
+	 * out in executables.h: a literal pattern cannot contain a zero byte,
+	 * so collapsing to two never puts two non-zero bytes beside each other
+	 * that were not beside each other before. Collapsing to ONE would - and
+	 * a single zero also reads as the high half of a UTF-16 character that
+	 * is not there, which is the thing pass 1 exists to find.
+	 *
+	 * THE PARENT IS STILL SCANNED, so nothing is traded away by this. The
+	 * view is an ADDITIONAL object, and a pattern that only matches the
+	 * original still matches the original.
+	 */
+	norm_gather_regions(w, ctx);
+	/*
+	 * AND THE STATIC LIBRARY, WHICH LEAVES THE VIEW ALTOGETHER.
+	 *
+	 * Those bytes are the toolchain's, not the author's: measured over 226
+	 * Linux malware samples the library is a mean 22% of CODE and past half
+	 * of it in 46, and two unrelated CLEAN binaries reach a string-set
+	 * Jaccard of 0.99 through nothing but a shared libc. A view of what the
+	 * object actually carries is a view without them.
+	 *
+	 * FOUND ON THE PARENT, WHERE THE PARSE IS TRUE. kgenome_true_find works from
+	 * markers inside a loadable segment, so it needs segment offsets that
+	 * describe the bytes it is reading - which is the case here and is not
+	 * the case on a view, whose headers still describe the file before the
+	 * padding came out. That is why it is refused there and used here.
+	 */
+	/*
+	 * INHERITED, NOT WORKED OUT AGAIN - see kof_scanner.cur_lib. The gate
+	 * that used to be here, refusing the cut on a dynamically linked
+	 * object, moved with it: sx_lib_facts asks the marker tier only of a
+	 * static build and the symbol tier of everything.
+	 */
+	w->lib = &sc->cur_lib;
+	if (!norm_alloc(w, buf))
+		return;
+	norm_keep_build(w, ctx, buf);
+	norm_drop_build(w, buf);
+	norm_decode(w, buf);
+	norm_marks_build(w, ctx, buf);
+	if (!norm_collapse(w, buf))
+		return;
+	norm_view_describe(w, ctx);
+	norm_append_library(w, buf);
+
+	/*
+	 * THE UNPACK VTABLE, BORROWED FOR THE LENGTH OF ONE CHILD.
+	 *
+	 * emit and child are NULL on the detect vtable - a detector may not
+	 * produce objects, which is the rule that keeps a signature from
+	 * inventing evidence - and by here the context is back in detect mode.
+	 * The host is not a detector, so it turns the producing half on, makes
+	 * the one child it came to make, and puts the context back exactly as
+	 * it found it.
+	 *
+	 * Through the module sink, so the view is charged, capped and spilled
+	 * by exactly the code that does that for a decompressed child. There is
+	 * no second budget here and no path by which this can exceed the
+	 * ceiling the caller set.
+	 */
+	if (!norm_fits(sc, w))
+		return;
+	kof_mod_unpack_mode(ctx, 1);
+	norm_declare(sc, ctx, w);
+	norm_send_child(sc, ctx, buf, w);
 	kof_mod_unpack_mode(ctx, 0);
+}
+
+void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		      kof_buf buf)
+{
+	struct norm_work w;
+
+	memset(&w, 0, sizeof w);
+	norm_emit_work(sc, ctx, buf, &w);
+	/* The boundary table and the description's copy outlive every early
+	 * return above; they are released here, once. */
+	free(w.mk);
+	free(w.mk_to);
+	free(w.img);
 }

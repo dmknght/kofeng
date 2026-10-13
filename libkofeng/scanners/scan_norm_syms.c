@@ -6,17 +6,18 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "../analyzers/parsers/binaries/sym_pool.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +49,7 @@
  *
  * THE SAME CLASSIFICATION AND NOT A SECOND ONE. A record is dropped when the
  * address it covers falls in the library spans sx_lib_facts already worked out -
- * see kof_true_has_addr. Nothing here decides what the library is.
+ * see kgenome_true_has_addr. Nothing here decides what the library is.
  *
  * `_start` GOES WITH IT, and the header's index of it is cleared rather than
  * left pointing at whatever record now sits there: crt is the toolchain's, so
@@ -58,9 +59,10 @@
 uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			  uint8_t *out, uint32_t cap)
 {
-	const struct kof_elf_info *e;
+	const struct kgenome_elf_info *e;
 	const uint8_t *in;
-	uint32_t n_in = 0, total, i, kept = 0;
+	uint32_t n_in = 0, total, i, kept = 0, nb;
+	struct kof_symw w;
 	uint32_t start_at, start_new = KOF_SYM_NO_START;
 
 	if (!ctx->content || !ctx->content->syms)
@@ -106,25 +108,22 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (!total || cap < KOF_SYM_HDRLEN)
 		return 0;
 
-	memcpy(out, in, KOF_SYM_HDRLEN);
 	/* Where the parent said `_start` was, so the copy can say where it
 	 * ended up - see the note below on why it is not simply cleared. */
 	start_at = (uint32_t)in[KOF_SYM_H_START] |
 		   ((uint32_t)in[KOF_SYM_H_START + 1] << 8);
+	/* The pool is carried whole, so the room for it is the parent's: the block
+	 * is rebuilt in order and a record the cut drops takes its name with it. */
+	kof_symw_begin(&w, out, cap, total, n_in - (uint32_t)kof_sym_pool_at(in, n_in));
 	for (i = 0; i < total; i++) {
 		const uint8_t *r = kof_sym_rec(in, n_in, i);
 		uint64_t va, sz;
-		uint32_t k;
 
 		if (!r)
 			continue;
-		va = 0;
-		sz = 0;
-		for (k = 0; k < 8u; k++) {
-			va |= (uint64_t)r[KOF_SYM_R_VALUE + k] << (8u * k);
-			sz |= (uint64_t)r[KOF_SYM_R_SIZE + k] << (8u * k);
-		}
-		if (kof_true_has_addr(e, &sc->cur_lib, va, sz))
+		va = kof_sym_u64(r, KOF_SYM_R_VALUE);
+		sz = kof_sym_u64(r, KOF_SYM_R_SIZE);
+		if (kgenome_true_has_addr(e, &sc->cur_lib, va, sz))
 			continue;
 		/*
 		 * AND NOTHING ELSE DECIDES THIS.
@@ -142,23 +141,23 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * were asked: is what it covers inside what was cut. A symbol
 		 * covering nothing was cut from nothing, and stays.
 		 */
-		if (KOF_SYM_HDRLEN + (kept + 1u) * KOF_SYM_RECLEN > cap)
-			break;
 		/* After the room test, not before it: a record the cap stopped
 		 * short of is not at an index, so the header must not name one
 		 * for it. */
+		if (!kof_symw_put_from(&w, in, n_in, r))
+			break;
 		if (i == start_at)
-			start_new = kept;
-		memcpy(out + KOF_SYM_HDRLEN + (uint64_t)kept * KOF_SYM_RECLEN,
-		       r, KOF_SYM_RECLEN);
-		kept++;
+			start_new = w.n - 1u;
 	}
+	kept = w.n;
 	if (!kept)
 		return 0;
-	out[KOF_SYM_H_COUNT + 0] = (uint8_t)kept;
-	out[KOF_SYM_H_COUNT + 1] = (uint8_t)(kept >> 8);
-	out[KOF_SYM_H_COUNT + 2] = (uint8_t)(kept >> 16);
-	out[KOF_SYM_H_COUNT + 3] = (uint8_t)(kept >> 24);
+	nb = kof_symw_end(&w);
+	/* The origin is the parent's, and so is a cut: the copy holds what the
+	 * parent held, less what the library cut dropped. */
+	out[KOF_SYM_H_ORIGIN] = in[KOF_SYM_H_ORIGIN];
+	if (in[KOF_SYM_H_TRUNC])
+		out[KOF_SYM_H_TRUNC] = 1;
 	/*
 	 * AND WHERE `_start` ENDED UP, WHICH IS ALSO NOT A NEW FACT.
 	 *
@@ -172,5 +171,5 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	out[KOF_SYM_H_START + 0] = (uint8_t)(start_new & 0xffu);
 	out[KOF_SYM_H_START + 1] = (uint8_t)((start_new >> 8) & 0xffu);
-	return KOF_SYM_HDRLEN + kept * KOF_SYM_RECLEN;
+	return nb;
 }

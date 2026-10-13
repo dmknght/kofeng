@@ -25,7 +25,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -70,9 +70,9 @@ int main(void)
 		0x0F,0x05                                /* 76 syscall        */
 	};
 	uint64_t ts[2] = { SLEEP_SEC, 0 }, out[2] = { 0, 0 };
-	struct kof_emu_cfg cfg = { 2000000, 0, 0, 0 };  /* bits 0 = 64 */
-	struct kof_emu *e;
-	enum kof_emu_stop st;
+	struct kgenome_emu_cfg cfg = { 2000000, 0, 0, 0 };  /* bits 0 = 64 */
+	struct kgenome_emu *e;
+	enum kgenome_emu_stop st;
 	uint64_t insn;
 	unsigned k;
 
@@ -80,24 +80,24 @@ int main(void)
 	memcpy(code + 20, &(uint64_t){ DATA_VA }, 8);
 	memcpy(code + 49, &(uint64_t){ DATA_VA + 16u }, 8);
 
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e) { fail("out of memory"); return 1; }
-	if (!kof_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
-			 KOF_EMU_R | KOF_EMU_X) ||
-	    !kof_emu_map(e, DATA_VA, (const uint8_t *)ts, sizeof ts, 0x1000,
-			 KOF_EMU_R | KOF_EMU_W) ||
-	    !kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W))
+	if (!kgenome_emu_map(e, CODE_VA, code, sizeof code, 0x1000,
+			 KGENOME_EMU_R | KGENOME_EMU_X) ||
+	    !kgenome_emu_map(e, DATA_VA, (const uint8_t *)ts, sizeof ts, 0x1000,
+			 KGENOME_EMU_R | KGENOME_EMU_W) ||
+	    !kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W))
 		fail("map");
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
 
-	st = kof_emu_run(e);
-	insn = kof_emu_insn_count(e);
+	st = kgenome_emu_run(e);
+	insn = kgenome_emu_insn_count(e);
 	printf("  chờ %u tick, ngủ %u s -> %llu lệnh, dừng=%s\n",
 	       SPIN_FOR, SLEEP_SEC, (unsigned long long)insn,
-	       kof_emu_stop_name(st));
+	       kgenome_emu_stop_name(st));
 
-	if (st != KOF_EMU_STOP_EXIT)
+	if (st != KGENOME_EMU_STOP_EXIT)
 		fail("the stub did not reach its own exit");
 	/*
 	 * The loop asked for SPIN_FOR ticks and the clock runs at about a tick
@@ -107,7 +107,7 @@ int main(void)
 	if (insn >= SPIN_FOR / 8u)
 		fail("the delay loop was waited out rather than recognised");
 
-	if (!kof_emu_read(e, DATA_VA + 16u, out, sizeof out))
+	if (!kgenome_emu_read(e, DATA_VA + 16u, out, sizeof out))
 		fail("the guest's clock reading could not be read back");
 	printf("  đồng hồ sau khi ngủ: %llu s %llu ns\n",
 	       (unsigned long long)out[0], (unsigned long long)out[1]);
@@ -116,13 +116,13 @@ int main(void)
 
 	/* Nothing here should have needed a syscall this build lacks. */
 	{
-		uint32_t un[KOF_EMU_UNKSYS];
+		uint32_t un[KGENOME_EMU_UNKSYS];
 
-		for (k = kof_emu_unknown_syscalls(e, un, KOF_EMU_UNKSYS); k--; )
+		for (k = kgenome_emu_unknown_syscalls(e, un, KGENOME_EMU_UNKSYS); k--; )
 			printf("  syscall bị từ chối: %u\n", un[k]);
 	}
 
-	kof_emu_free(e);
+	kgenome_emu_free(e);
 	printf("emu stall: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;
 }

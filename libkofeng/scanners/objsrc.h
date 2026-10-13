@@ -164,13 +164,43 @@ uint8_t  kof_src_region_fmt_of(const struct kof_objsrc *);
  */
 void     kof_src_declare_syms(struct kof_objsrc *, const uint8_t *, uint32_t);
 const uint8_t *kof_src_syms_of(const struct kof_objsrc *, uint32_t *);
-struct kof_func;
-void     kof_src_declare_funcs(struct kof_objsrc *, const struct kof_func *, uint32_t);
-const struct kof_func *kof_src_funcs_of(const struct kof_objsrc *, uint32_t *);
+struct kgenome_func;
+void     kof_src_declare_funcs(struct kof_objsrc *, const struct kgenome_func *, uint32_t);
+const struct kgenome_func *kof_src_funcs_of(const struct kof_objsrc *, uint32_t *);
 
 
 uint32_t kof_src_regions_of(const struct kof_objsrc *,
 			    const struct kof_src_region **out);
+
+/*
+ * THE IMAGE A RENDERING IS A RENDERING OF, as its producer described it.
+ *
+ * A normalised view has the parent's header byte for byte and fewer bytes
+ * after it, so its own header describes a file that is no longer under it and
+ * parsing it again answers about that file. The description of the parent is
+ * carried instead, with every file offset in it moved through the transform
+ * (see genotype/image/offmap.h): the format, the architecture, the subtype, the
+ * entry, and the format's own info struct. `info` is that struct, `info_len`
+ * its size; both are copied.
+ *
+ * A source with no description is identified from its bytes as before.
+ */
+struct kof_src_desc {
+	uint8_t     fmt;          /* enum kof_format of the image            */
+	uint8_t     arch;
+	uint8_t     subtype;
+	uint64_t    entry_off;    /* in THIS object; KGENOME_NA/BROKEN as given */
+	const void *info;
+	uint32_t    info_len;
+};
+void kof_src_declare_desc(struct kof_objsrc *, const struct kof_src_desc *);
+const struct kof_src_desc *kof_src_desc_of(const struct kof_objsrc *);
+
+/* The parent's analysis, shared with the rendering - see objprod.h. The source
+ * takes the reference it is given. */
+struct kof_prod;
+void kof_src_declare_prod(struct kof_objsrc *, struct kof_prod *);
+const struct kof_prod *kof_src_prod_of(const struct kof_objsrc *);
 uint8_t kof_src_fmt_of(const struct kof_objsrc *);
 
 /* Which entry of its parent this source is the content of, or

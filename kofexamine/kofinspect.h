@@ -288,7 +288,7 @@ struct kof_touch_str {
 	 * characters off the thing the reader was shown.
 	 *
 	 * Equal to span_min whenever the pattern is fixed, which is nearly
-	 * always, and KOF_BROKEN's absence is not a case: it is only filled
+	 * always, and KGENOME_BROKEN's absence is not a case: it is only filled
 	 * when `at` was found.
 	 */
 	uint32_t       span_at;
@@ -310,7 +310,7 @@ struct kof_touch_str {
 	 * the only one that would have counted. A marker with `at` set and `in_rgn`
 	 * clear is the interesting case: present, and in the wrong place.
 	 */
-	uint64_t       at;       /* KOF_BROKEN when absent from the object */
+	uint64_t       at;       /* KGENOME_BROKEN when absent from the object */
 	/*
 	 * WHICH BUFFER `at` IS AN OFFSET INTO.
 	 *
@@ -368,7 +368,7 @@ struct kof_touch {
 	 * a similarity verdict carries the SCORE where a pattern rule carries a
 	 * variant, and a panel rebuilding the name from the module's declared
 	 * names wrote "Gafgyt#Gafgyt" beside a scanner saying
-	 * "Gafgyt#100!Plague".
+	 * "Gafgyt#100!Mutation".
 	 *
 	 * Copied rather than pointed at, because the findings belong to the
 	 * caller and these rows outlive the call. Empty when the module did not
@@ -524,7 +524,7 @@ uint32_t kof_region_map_at(const struct kof_region_map *, uint64_t off);
 #define KOF_LOCATE_HITS 64u
 
 struct kof_locate {
-	uint64_t at;            /* KOF_BROKEN when nowhere at all */
+	uint64_t at;            /* KGENOME_BROKEN when nowhere at all */
 	uint32_t at_mask;       /* the region or half holding `at` */
 	uint32_t sym;           /* KOF_SCAN_SYM_* when `at` is in the block */
 	uint32_t seen_mask;     /* every region the file occurrences are in */
@@ -643,100 +643,6 @@ void kof_touch_name(const struct kof_touch *t, char *out, size_t cap);
  * - marker counts, "structural" - are the true ones.
  */
 const char *kof_touch_method(const struct kof_touch *t);
-
-/* ---- the string codings ----------------------------------------------------
- *
- * WHAT A SAMPLE WROTE ITS STRINGS IN, both ways through.
- *
- * Here rather than in the viewer's dialog because a coding is not a dialog. It
- * is bytes in and bytes out, it has no terminal in it and no engine, and the
- * moment a second caller wants one - kofexamine printing a decoded blob, a test
- * pinning what "hex" means - a copy inside a panel is a second implementation
- * to disagree with the first. The box that started it keeps the form; this
- * keeps the transformation.
- *
- * EVERY ONE OF THESE EITHER HAS NO KEY OR HAS A KEY SOMEBODY CAN TYPE. A coding
- * whose key must be RECOVERED is a different problem and belongs in a module
- * that derives it, the way bases/unp/ezuri.c does.
- */
-enum kof_codec {
-	KOF_CODEC_B64 = 0,
-	KOF_CODEC_HEX,
-	/*
-	 * URL, AND IT IS `%XX` AND NOTHING ELSE.
-	 *
-	 * The same one form the norm view decodes - unpct_range in
-	 * normalize/executables.c - and for the same reason: an IoT dropper
-	 * carries its commands percent-encoded by the protocol rather than by
-	 * its author, so what is in the file is `wget+http%3A%2F%2F...` while
-	 * what a rule is written against is the plain text. A reader needs
-	 * both directions of exactly that, and neither of the other escape
-	 * conventions - \xNN, &#NN; - belongs here with it.
-	 *
-	 * `+` reads as a space, because the samples that need this are form
-	 * bodies. Writing escapes everything outside RFC 3986's unreserved
-	 * set, `+` among them, so the two passes stay inverses.
-	 */
-	KOF_CODEC_URL,
-	KOF_CODEC_XOR,          /* one byte, typed */
-	KOF_CODEC_ADD,          /* byte + n, typed - subsumes a byte rotate */
-	/*
-	 * CAESAR, AND IT REPLACES BOTH A BIT ROTATE AND A FIXED ROT13.
-	 *
-	 * They were two controls for one idea and neither was the useful half.
-	 * ROT13 is Caesar with the key written into its name, so it cannot
-	 * decode the rot-7 next to it; a BIT rotate turns text into bytes
-	 * outside ASCII almost every time, which is the opposite of what a
-	 * coding for encoded TEXT is for.
-	 *
-	 * One coding with a typed key covers rot13 by typing 13, and every
-	 * other shift by typing it.
-	 */
-	KOF_CODEC_CAESAR,
-	KOF_CODEC_REVERSE,
-	KOF_CODEC_COUNT
-};
-
-/* The word a reader picks it by. "?" for a value that is not a coding. */
-const char *kof_codec_name(uint32_t codec);
-
-/* Does this one take a key the reader types - see enum kof_codec. */
-int kof_codec_keyed(uint32_t codec);
-
-/*
- * A typed key as a number. Hex without a prefix, because a key written down
- * anywhere is written in hex - and "0x" is accepted for the reader who types it
- * out of habit. Stops at the first character that is not a hex digit, so a
- * half-typed key is worth what has been typed so far.
- */
-uint32_t kof_codec_key(const char *text);
-
-/*
- * RUN ONE CODING, either way. Returns the bytes written to `out`.
- *
- * `encode` chooses the direction: 0 reads the coding - "what does this say" -
- * and non-zero writes it - "what would this look like written that way". The
- * second is what a researcher needs while WRITING a rule, because the pattern
- * to be matched is the encoded form.
- *
- * ZERO MEANS THIS CODING CANNOT DO IT, which is an answer and not an error:
- * base64 given text that is not base64, hex given an odd number of digits, a
- * caesar shift of nothing. A caller shows that as "this coding cannot read this
- * text" rather than as a failure.
- *
- * Which direction each one has is not the same question for all of them:
- *
- *   base64, hex   a real pair - bytes to text one way, text to bytes the other
- *   url           a real pair too - `%XX` in, the byte out, and back again
- *   xor, reverse  their own inverse, so the same pass runs both ways
- *   add           decoding ADDS the key, so encoding subtracts it
- *   caesar        decoding shifts back, so encoding shifts forward
- *
- * Writes at most `cap` bytes and never NUL terminates: the result is BYTES,
- * and a decoded blob may hold zeroes.
- */
-uint32_t kof_codec_run(const uint8_t *in, uint32_t n, uint32_t codec,
-		       uint32_t key, int encode, uint8_t *out, uint32_t cap);
 
 /*
  * A hex pattern, respaced into pairs.
@@ -919,8 +825,8 @@ const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n);
 /*
  * WHAT EVERY SIMILARITY BLOCK SCORED ON THE OBJECT JUST SCANNED.
  *
- * REQUIRED FOR WRITING A PLAGUE RULE AT ALL, which is why it is here and not a
- * debugging extra. A rule says `kof_plague_score(blk) >= 50`; the author has no
+ * REQUIRED FOR WRITING A MUTATION RULE AT ALL, which is why it is here and not a
+ * debugging extra. A rule says `kof_mutation_score(blk) >= 50`; the author has no
  * way to choose that fifty, or to know why a rule did not fire, unless the tool
  * can show what the block actually came to. A verdict alone answers "did it" and
  * never "how close was it".
@@ -935,20 +841,20 @@ const char *kof_sym_origin_name(const uint8_t *blk, uint32_t n);
  * one more window, and an author choosing a threshold needs to see which.
  *
  * Returns how many were written, at most max_out. Zero when the database
- * carries no blocks, which is every build with no plague rules.
+ * carries no blocks, which is every build with no mutation rules.
  */
-struct kof_plague_view {
+struct kof_mutation_view {
 	uint32_t    block;       /* index in the engine's table */
 	uint32_t    scan_mask;   /* the region the block was taken from */
-	uint8_t     norm;        /* enum kof_plague_norm */
+	uint8_t     norm;        /* enum kgenome_mutation_norm */
 	uint8_t     score;       /* 0..100 */
 	uint32_t    matched;     /* hashes of it found in this object */
 	uint32_t    n_hash;      /* hashes it has */
 	const char *rule;        /* the family the declaring module names */
 };
 
-uint32_t kof_inspect_plague(const struct kof_scanner *sc,
-			    struct kof_plague_view *out, uint32_t max_out);
+uint32_t kof_inspect_mutation(const struct kof_scanner *sc,
+			    struct kof_mutation_view *out, uint32_t max_out);
 
 /*
  * THE REGIONS A PRODUCER DECLARED, filtered by mask - the shape resolve_scan

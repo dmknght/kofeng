@@ -148,11 +148,11 @@ LDFLAGS += -pthread -lm
 # SQRTSD instruction and only calls libm for the branch that sets errno, and
 # whether it emits that branch at all depends on how the surrounding function
 # was inlined. So this was a link that worked by accident and broke the first
-# time kof_emu_run grew - which is exactly the kind of dependency to name
+# time kgenome_emu_run grew - which is exactly the kind of dependency to name
 # rather than to keep getting away with.
 override CFLAGS  += -std=c11 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
            -Wpointer-arith -Wstrict-prototypes -Wmissing-prototypes \
-           -fno-common -Ilibkofeng/kofcore -Ilibgenome
+           -fno-common -Ilibkofeng/kofcore -Ilibgenome -Ilibuncoat
 
 # A second tier of warnings, probed rather than assumed.
 #
@@ -914,19 +914,21 @@ $(STAMP): ;
 
 LIB_SRC := libkofeng/kofeng.c \
            libkofeng/databases/dbloader.c \
-           libkofeng/detectors/dbindex.c \
+           libkofeng/databases/dbindex.c \
            libkofeng/databases/dbpacker.c \
+           libkofeng/databases/pack/dbaccess.c \
            libkofeng/databases/diagsrc.c \
            libkofeng/databases/syndsrc.c \
            libkofeng/detectors/heur/kofheur.c \
-           libkofeng/detectors/overlord/matchers/kofmatch.c \
-           libkofeng/detectors/overlord/plague/kofplague.c \
-           libkofeng/detectors/overlord/plague/kofplague_units.c \
-           libkofeng/detectors/overlord/matchers/kofmultimatch.c \
-           libkofeng/detectors/overlord/matchers/hexcomp.c \
+           libkofeng/detectors/pattern/kofmatch.c \
+           libkofeng/detectors/mutations/kofmutation.c \
+           libkofeng/detectors/pattern/kofmultimatch.c \
+           libkofeng/detectors/pattern/hexcomp.c \
            libkofeng/analyzers/parsers/binaries/elf/elf_parse.c \
            libkofeng/analyzers/parsers/binaries/elf/elf_sym.c \
            libkofeng/analyzers/parsers/binaries/sym_any.c \
+           libkofeng/analyzers/parsers/binaries/sym_pool.c \
+           libkofeng/analyzers/genome_obj.c \
            libkofeng/analyzers/parsers/kofformat.c \
            libkofeng/analyzers/normalize/executables.c \
            libkofeng/analyzers/parsers/scripts/scantext.c \
@@ -938,10 +940,8 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/scripts/script_norm.c \
            libkofeng/analyzers/parsers/events/amsi_parse.c \
            libkofeng/analyzers/parsers/processes/proc_parse.c \
-           libkofeng/analyzers/nucleo/nucleo.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_sym.c \
            libkofeng/analyzers/parsers/binaries/pe/pe_parse.c \
-           libkofeng/analyzers/parsers/binaries/pe/clr_parse.c \
            libkofeng/analyzers/parsers/containers/gzip_parse.c \
            libkofeng/analyzers/parsers/containers/docole_parse.c \
            libkofeng/analyzers/parsers/containers/zip_parse.c \
@@ -958,32 +958,13 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/analyzers/parsers/containers/reg_parse.c \
            libkofeng/analyzers/parsers/containers/rtf_parse.c \
            libkofeng/analyzers/parsers/containers/pdf_parse.c \
-           libkofeng/extractors/unpack/pe_rebuild.c \
-           libkofeng/extractors/unpack/pe_unmap.c \
-           libkofeng/extractors/unpack/emu_unpack.c \
-           libkofeng/extractors/unpack/elf_rebuild.c \
-           libkofeng/extractors/decomp/decomp.c \
-           libkofeng/extractors/decomp/aplib.c \
-           libkofeng/extractors/decomp/aspack.c \
-           libkofeng/extractors/decomp/lzmat.c \
-           libkofeng/extractors/decomp/inflate.c \
-           libkofeng/extractors/decomp/textcode.c \
-           libkofeng/extractors/decomp/lzw.c \
-           libkofeng/extractors/decomp/bzip2.c \
-           libkofeng/extractors/decomp/lzx.c \
-           libkofeng/extractors/decomp/lzhuf.c \
-           libkofeng/extractors/decomp/ovba.c \
-           libkofeng/extractors/decomp/bcj.c \
-           libkofeng/extractors/decomp/bcj2.c \
-           libkofeng/extractors/decomp/ppmd.c \
-           libkofeng/extractors/decomp/rar3.c \
-           libkofeng/extractors/decomp/rar5.c \
-           libkofeng/extractors/decomp/lzma.c \
-           libkofeng/extractors/decomp/nrv2.c \
+           libkofeng/extractors/codec_ui.c \
            libkofeng/scanners/scan.c \
            libkofeng/scanners/scan_mt.c \
            libkofeng/scanners/scan_pipeline.c \
            libkofeng/scanners/scan_walk.c \
+           libkofeng/verdictor/verdicts/verdict.c \
+           libkofeng/verdictor/verdicts/syndrome.c \
            libkofeng/scanners/scan_verdict.c \
            libkofeng/scanners/scan_norm_text.c \
            libkofeng/scanners/scan_norm_syms.c \
@@ -1000,18 +981,13 @@ LIB_SRC := libkofeng/kofeng.c \
            libkofeng/scanners/objctx_decomp.c \
            libkofeng/scanners/objctx_child.c \
            libkofeng/scanners/objsrc.c \
-           libkofeng/analyzers/trueline/trueline.c \
-           libkofeng/detectors/overlord/kofoverlord.c \
-           libkofeng/detectors/pathogen/diagnoses/kofdiag.c \
-           libkofeng/detectors/pathogen/syndromes/kofsyndrome.c \
-           libkofeng/detectors/pathogen/diseases/kofdisease.c \
-           libkofeng/detectors/pathogen/diagnoses/diag_emu.c \
-           libkofeng/detectors/pathogen/diagnoses/diag_sym.c \
-           libkofeng/detectors/pathogen/diagnoses/diag_pe.c \
-           libkofeng/detectors/pathogen/diagnoses/diag_wrap.c \
-           libkofeng/detectors/pathogen/diagnoses/diag_apihash.c \
-           libkofeng/disinfect/pzero.c \
+           libkofeng/scanners/objprod.c \
+           libkofeng/detectors/linkage/kofdiag.c \
+           libkofeng/databases/pack/kofsyndrome.c \
+           libkofeng/analyzers/diseases/kofdisease.c \
+           libkofeng/scanners/pzero.c \
            libkofeng/kofcore/kofhash.c \
+           libkofeng/kofcore/kofentropy.c \
            libkofeng/kofcore/kofdebug.c
 
 LIB_OBJ := $(patsubst libkofeng/%.c,$(INT)/lib_%.o,$(LIB_SRC))
@@ -1078,10 +1054,30 @@ $(INT)/cl_%.o: libgenome/celllysis/%.c $(STAMP) | $(INT)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(EMU_INC) -c $< -o $@
 
+# ---- libuncoat: the algorithms that grow without a forecast ---------------
+#
+# Decompression, decoding and decryption on bytes: buffers and a budget in,
+# bytes and a status out. Three parts - libuncoat/decompressors, decryptors and
+# decoders - and the top level (status, the transform dispatcher, the umbrella
+# uncoat.h). Public headers are <uncoat.h> and <decompressors/xxx.h> through
+# -Ilibuncoat
+# (in CFLAGS above). The lib includes nothing of the engine - only the core
+# headers under libkofeng/kofcore. Compiled under the same warning policy and
+# the same sanitizers as the rest.
+UC_SRC := $(wildcard libuncoat/*/*.c) $(wildcard libuncoat/*.c)
+UC_OBJ := $(patsubst libuncoat/%.c,$(INT)/uc_%.o,$(UC_SRC))
+
+$(INT)/uc_%.o: libuncoat/%.c $(STAMP) | $(INT)
+	@$(call MKDIR,$(dir $@))
+	$(CC) $(CFLAGS) -c $< -o $@
+
+
+#
+
 # THE ORACLE FOR THE ARM DECODERS IS NOT IN THIS TREE EITHER: Capstone, used on a
 # developer's machine to check the ARM32 (ARM and Thumb state) and ARM64 decoders -
 # the genotype tables under libgenome/genotype/arm32 and arm64 and the celllysis
-# adapters that turn them into cell_insn. Pass the header directory and the
+# adapters that turn them into kgenome_cell_insn. Pass the header directory and the
 # static library; match the two (a v5 header with a v6 library crashes).
 CS_INC ?=
 CS_LIB ?=
@@ -1139,7 +1135,36 @@ $(INT)/emu_%.o: libgenome/phenotype/%.c $(STAMP) | $(INT)
 # built from empty every time. It costs one unlink; ar then writes the same
 # members it was going to write anyway.
 #
-$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ) $(CL_OBJ)
+$(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ) $(CL_OBJ) $(UC_OBJ)
+	@$(call MKDIR,$(dir $@))
+	@$(call RM,$@)
+	$(AR) rcs $@ $^
+
+#
+# THE TWO LIBS AS ARCHIVES OF THEIR OWN, beside the one the SDK ships.
+#
+# libkofeng.a above stays the single archive every product links - a consumer
+# names one library - and these two are built from the SAME objects, so there is
+# one compile of each file and no second copy to drift. What they are for is the
+# proof the layering rule asks for (CLAUDE.md section 12): a test linked against
+# libkgenome.a or libkuncoat.a ALONE resolves, so neither lib reaches the engine.
+# The harness in tests/lib/ links nothing else.
+#
+# libkgenome.a carries one object that is not under libgenome/: kofentropy.o, the
+# foundation's entropy histogram, which the emulator's page statistics call. It
+# is the only symbol of the foundation either lib uses (read off `nm -u`), and
+# putting that one object in the archive is what lets it stand alone without a
+# fourth archive for a single function. libkuncoat.a needs no foundation object.
+KGENOME_CORE_OBJ := $(INT)/lib_kofcore/kofentropy.o
+KGENOME_LIB := $(INT)/libkgenome.a
+KUNCOAT_LIB := $(INT)/libkuncoat.a
+
+$(KGENOME_LIB): $(EMU_OBJ) $(GT_OBJ) $(CL_OBJ) $(KGENOME_CORE_OBJ)
+	@$(call MKDIR,$(dir $@))
+	@$(call RM,$@)
+	$(AR) rcs $@ $^
+
+$(KUNCOAT_LIB): $(UC_OBJ)
 	@$(call MKDIR,$(dir $@))
 	@$(call RM,$@)
 	$(AR) rcs $@ $^
@@ -1157,17 +1182,21 @@ $(LIB): $(LIB_OBJ) $(EMU_OBJ) $(GT_OBJ) $(CL_OBJ)
 # kofscanner is already built under, applied to anyone outside this tree.
 
 SDK_HDR := $(SDK)/include/kofeng.h \
+           $(SDK)/include/koftypes.h \
+           $(SDK)/include/kofhash.h \
+           $(SDK)/include/kofentropy.h \
            $(SDK)/include/kofmod/kofsig.h \
            $(SDK)/include/kofmod/basic.h \
            $(SDK)/include/kofmod/cell.h \
            $(SDK)/include/kofmod/infected.h \
            $(SDK)/include/kofmod/kofcure.h \
-           $(SDK)/include/kofmod/kofplague.h \
-           $(SDK)/include/kofmod/kofoverlord.h \
+           $(SDK)/include/kofmod/kofmutation.h \
            $(SDK)/include/kofmod/kofcap.h \
            $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/kofpathogen.h \
+           $(SDK)/include/kofmod/disease.h \
+           $(SDK)/include/kofmod/kofdecode.h \
            $(SDK)/include/kofmod/aspack_tab.h \
            $(SDK)/include/kofmod/elf.h \
            $(SDK)/include/kofmod/pe.h \
@@ -1191,15 +1220,44 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/proc.h \
            $(SDK)/include/kofmod/clr.h \
            $(SDK)/include/kofmod/script.h \
-           $(SDK)/include/kofanalyze/scfind.h \
-           $(SDK)/include/kofanalyze/msf_pe.h \
-           $(SDK)/include/kofanalyze/msf_elf64.h \
-           $(SDK)/include/kofanalyze/msf_elf32.h \
-           $(SDK)/include/kofunpack/pe_reassemble.h \
-           $(SDK)/include/kofunpack/emu_harvest.h \
-           $(SDK)/include/kofunpack/ep_shape.h
+           $(SDK)/include/kofshared/msf_pe.h \
+           $(SDK)/include/kofshared/msf_elf64.h \
+           $(SDK)/include/kofshared/msf_elf32.h \
+           $(SDK)/include/kofmod/pe_reassemble.h \
+           $(SDK)/include/kofmod/emu_harvest.h \
+           $(SDK)/include/kofmod/ep_shape.h \
+           $(SDK)/include/celllysis/arch.h \
+           $(SDK)/include/celllysis/cell.h \
+           $(SDK)/include/celllysis/capability.h \
+           $(SDK)/include/celllysis/mutation_window.h \
+           $(SDK)/include/genotype/image/elf_types.h \
+           $(SDK)/include/genotype/image/pe_types.h \
+           $(SDK)/include/genotype/image/clr_types.h \
+           $(SDK)/include/genotype/image/section_flags.h \
+           $(SDK)/include/range.h \
+           $(SDK)/include/celllysis/xref.h \
+           $(SDK)/include/phenotype/lineage_vocab.h \
+           $(SDK)/include/decompressors/aspack_tab.h \
+           $(SDK)/include/decompressors/format_limits.h
 
 $(SDK)/include/kofeng.h: libkofeng/kofeng.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/koftypes.h: libkofeng/kofcore/koftypes.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/kofentropy.h: libkofeng/kofcore/kofentropy.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/kofhash.h: libkofeng/kofcore/kofhash.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+# struct kof_range: core's own type, which <kofmod/kofsig.h> re-exports.
+$(SDK)/include/range.h: libkofeng/kofcore/range.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
@@ -1208,26 +1266,48 @@ $(SDK)/include/kofmod/%.h: libkofeng/kofcore/kofmod/%.h
 	@$(call COPY,$<,$@)
 
 #
-# WHAT A MODULE MAY INCLUDE, IN THREE NAMESPACES RATHER THAN ONE.
+# WHAT A MODULE MAY INCLUDE, IN TWO NAMESPACES RATHER THAN ONE.
 #
 # kofmod/ is the ABI - the vtable, the enums, the macros a module is written
 # against. It is not a dumping ground for anything a module happens to include,
 # and it was becoming one.
 #
-# kofanalyze/ is knowledge about what bytes ARE: where a metasploit stub keeps
-# its payload, what a shellcode entry looks like. That is the analyzer's
-# business and the sources live there.
+# kofshared/ is what the modules of bases/ share among themselves: where a
+# metasploit stub keeps its payload, what a shellcode entry looks like. It is
+# the database's own knowledge, written per family, and the sources live in
+# libkofeng/analyzers/diseases/ with the other analysis of one kind of
+# malware - not in bases/, which holds only case routines.
 #
-# kofunpack/ is the step after - putting an object back together. PE layout
-# arithmetic and what to do with the regions an interpreter run left are both
-# reconstruction, not recognition, and they sit with the rest of the unpack
-# code.
+# The helpers that put an object back together (pe_reassemble.h, emu_harvest.h,
+# ep_shape.h) are module-side code over the ABI, so they sit in kofmod/ with it.
 #
-$(SDK)/include/kofanalyze/%.h: libkofeng/analyzers/payloads/%.h
+$(SDK)/include/kofshared/%.h: libkofeng/analyzers/diseases/%.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
-$(SDK)/include/kofunpack/%.h: libkofeng/extractors/unpack/%.h
+#
+# THE TYPES THE ABI RE-EXPORTS, shipped under the layout the re-export names.
+#
+# kgenome defines what it analyses (the instruction form, the structure of an
+# ELF/PE/CLR object, the capability words, the mutation window) and kuncoat the
+# tables and limits of its algorithms; <kofmod/cell.h>, <kofmod/elf.h> and the
+# others are thin files that include them as <celllysis/..>, <image/..> and
+# <decompressors/..>. A module is built against this directory alone, so the same
+# relative paths exist here as under -Ilibgenome and -Ilibuncoat.
+#
+$(SDK)/include/celllysis/%.h: libgenome/celllysis/%.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/genotype/image/%.h: libgenome/genotype/image/%.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/phenotype/%.h: libgenome/phenotype/%.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+$(SDK)/include/decompressors/%.h: libuncoat/decompressors/%.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 
@@ -1350,8 +1430,8 @@ SCANNER_EXTRA = libkoforbit/grille/wwalk.c libkoforbit/grille/wdiff.c libkoforbi
 #
 # -Ilibkofeng IS IN THIS LIST AND NOT LEFT TO $(SDK)/include.
 #
-# wwalk.c includes kofunpack/pe_unmap.h - it un-maps a hand-mapped image before
-# handing it over, which is the whole point of it - and kofunpack is NOT among
+# wwalk.c includes <image/pe_unmap.h> - it un-maps a hand-mapped image before
+# handing it over, which is the whole point of it - and the module-side helpers are NOT among
 # the headers copied into the SDK include directory. kofeng.h and kofmod/pe.h
 # are, which is why those two resolved and this one did not, and why the failure
 # read as a missing file rather than as a missing flag.
@@ -1399,7 +1479,8 @@ $(OUT)/bin/kofscanner$(EXE): $(SCANNER_SRC) $(SCANNER_EXTRA) $(LIB) \
 # database what it already knows about an object. Separate because a second
 # consumer is coming - the viewer - and because the two halves reach for
 # different things: the printer wants the parse, this wants the engine.
-EXAMINE_SRC := kofexamine/kofexaminer.c kofexamine/kofinspect.c kofexamine/kofeditor.c
+EXAMINE_SRC := kofexamine/kofexaminer.c kofexamine/kofinspect.c kofexamine/kofeditor.c \
+               kofexamine/kofscfind.c
 
 $(OUT)/bin/kofexaminer$(EXE): $(EXAMINE_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
@@ -1423,7 +1504,7 @@ ifeq ($(NATIVE_OS),windows)
 VIEWER_PROC := libkoforbit/grille/wwalk.c libkoforbit/grille/wdiff.c libkoforbit/grille/wproc.c \
                libkoforbit/grille/wcmdline.c libkoforbit/grille/wtext.c $(KOFPROC_SRC)
 # -Ilibkofeng for the same reason SCANNER_INC needs it: wwalk.c reaches
-# kofunpack/pe_unmap.h, which the SDK include directory does not carry.
+# libkofeng's own headers, which the SDK include directory does not carry.
 VIEWER_PROC_INC := -Ilibkoforbit/grille -Ilibkofeng
 VIEWER_PROC_LIB := -ladvapi32 -lpsapi
 else
@@ -1434,7 +1515,46 @@ endif
 VIEWER_PROC_INC += -Ilibkoforbit/walk -Ilibkoforbit/proc \
                    -Ilibkoforbit/mon
 
-VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c $(VIEWER_PROC)
+# The viewer is one program in several translation units: kofexamine/kv.h is the
+# one interface between them (the view, the object model, and the prototypes the
+# units share).
+VIEWER_UNITS := kofexamine/kv_actions.c \
+                kofexamine/kv_bar.c \
+                kofexamine/kv_chooser.c \
+                kofexamine/kv_click.c \
+                kofexamine/kv_clip.c \
+                kofexamine/kv_collect.c \
+                kofexamine/kv_decl.c \
+                kofexamine/kv_declact.c \
+                kofexamine/kv_dialogs.c \
+                kofexamine/kv_disasm.c \
+                kofexamine/kv_draft.c \
+                kofexamine/kv_events.c \
+                kofexamine/kv_evt.c \
+                kofexamine/kv_field.c \
+                kofexamine/kv_find.c \
+                kofexamine/kv_help.c \
+                kofexamine/kv_hex.c \
+                kofexamine/kv_hit.c \
+                kofexamine/kv_input.c \
+                kofexamine/kv_keys.c \
+                kofexamine/kv_list.c \
+                kofexamine/kv_main.c \
+                kofexamine/kv_marker.c \
+                kofexamine/kv_menu.c \
+                kofexamine/kv_mutation.c \
+                kofexamine/kv_page.c \
+                kofexamine/kv_paint.c \
+                kofexamine/kv_props.c \
+                kofexamine/kv_screen.c \
+                kofexamine/kv_state.c \
+                kofexamine/kv_symd.c \
+                kofexamine/kv_text.c \
+                kofexamine/kv_tree.c \
+                kofexamine/kv_tree_draw.c \
+                kofexamine/kv_view.c
+VIEWER_SRC := $(VIEWER_UNITS) kofexamine/kofview.c kofexamine/kofinspect.c kofexamine/kofeditor.c \
+              kofexamine/kofscfind.c $(VIEWER_PROC)
 
 # EMU_INC because the viewer disassembles: the decoder is already inside $(LIB),
 # so what is missing is only the header.
@@ -1443,7 +1563,7 @@ VIEWER_SRC := kofexamine/kofviewer.c kofexamine/kofview.c kofexamine/kofinspect.
 # header, counts the records, and asks where each one is so a hex pane can be
 # pointed at it. The engine cannot answer any of that - a log is not a scanned
 # object - which is why the format lives beside the engine and not inside it.
-$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
+$(OUT)/bin/kofviewer$(EXE): $(VIEWER_SRC) kofexamine/kv.h $(KOFEVT_SRC) $(LIB) $(SDK_HDR) \
                             $(STAMP)
 	@$(call MKDIR,$(dir $@))
 	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include -Ilibkoforbit/evt $(EMU_INC) \
@@ -1795,8 +1915,13 @@ endif
 #   bases/heur/        the heuristic modules.
 #   bases/decomp/      the CONTAINER unpackers - gzip, zip, tar, rar, 7z, xz,
 #                      docole, rtf, overlay. A file that carried other files.
-#   bases/unp/         the PACKER unpackers - UPX, Ezuri, midgetpack, the msf
-#                      encoders. A file that IS the payload, transformed.
+#   bases/unp/         the PACKER unpackers - UPX, Ezuri, midgetpack.
+#                      A file that IS the payload, transformed.
+#   bases/decoders/    the modules that INVOKE a decoder - the msf encoders. A
+#                      module here recognises a file and reads the key, the
+#                      count and the offset out of it; the cipher itself is the
+#                      libuncoat's (transform.h), asked for through
+#                      kunp_decrypt - see kofmod/kofdecode.h.
 #
 # For the unpackers the directory is the module's KOF_UNPACK_KIND and nothing
 # else, so that split is checkable in one line rather than remembered:
@@ -1809,20 +1934,20 @@ endif
 # and tar, named here as decomp, were among them. A split described by examples
 # is a split nothing checks.
 #
-# bases/plague/ WAS A SIXTH, for rules carrying a similarity block, and it is
+# bases/mutation/ WAS A SIXTH, for rules carrying a similarity block, and it is
 # gone. A block rule declares the same macros, names a family the same way and
 # is packed by the same builder; it is a detection that happens to measure a
 # block, which is what dbcore.h already says about keeping the blocks a section
 # rather than a pack kind. And the split cost something a comment cannot argue
 # away: two directories let two files be called gafgyt_00.c, the number in the
 # name IS the variant, so the database shipped two rules both saying
-# Gafgyt.00. Eleven such pairs. The plague ones were renumbered upward when
+# Gafgyt.00. Eleven such pairs. The mutation ones were renumbered upward when
 # they merged - see the note on variants in ksigbuilder.
 #
 # decomp and unp compile to the same pack kind and the engine does not tell them
 # apart - the split is for the people who maintain them. The decompression
 # ALGORITHMS are not here at all: they are host services in
-# libkofeng/extractors/decomp, reached through the module ABI, for the reason
+# libuncoat, reached through the module ABI, for the reason
 # kofsig.h gives at the inflate
 # entry. Same division Kaspersky shipped, where _nrv.c and _lzma.c live in the
 # unpacker kernel and the per-packer modules call into them.
@@ -2117,6 +2242,28 @@ endif
 $(TEST)/unit_%$(EXE): tests/unit/%.c $(LIB) $(STAMP) | $(TEST)
 	$(CC) $(CFLAGS) $(DEPTO) $< $(LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
 
+#
+# ONE HARNESS PER LIB, linked against that lib's archive ALONE.
+#
+# tests/lib/genome/*.c is linked with libkgenome.a and nothing else, and
+# tests/lib/uncoat/*.c with libkuncoat.a: a unit test of the engine could resolve
+# a symbol of the lib through the engine's own archive and never say so, and these
+# cannot. Neither lib may depend on the engine (CLAUDE.md section 12), and a link
+# that has no engine to take a symbol from is the only test of that which a header
+# check cannot fake. Hand-written sources only; nothing here reads a stored file.
+LIBTEST_GENOME_SRC := $(wildcard tests/lib/genome/*.c)
+LIBTEST_UNCOAT_SRC := $(wildcard tests/lib/uncoat/*.c)
+LIBTEST_BIN := $(patsubst tests/lib/genome/%.c,$(TEST)/libtest_genome_%$(EXE),$(LIBTEST_GENOME_SRC)) \
+               $(patsubst tests/lib/uncoat/%.c,$(TEST)/libtest_uncoat_%$(EXE),$(LIBTEST_UNCOAT_SRC))
+LIBTEST_ASAN_BIN := $(patsubst tests/lib/genome/%.c,$(TEST)/asan_libtest_genome_%$(EXE),$(LIBTEST_GENOME_SRC)) \
+                    $(patsubst tests/lib/uncoat/%.c,$(TEST)/asan_libtest_uncoat_%$(EXE),$(LIBTEST_UNCOAT_SRC))
+
+$(TEST)/libtest_genome_%$(EXE): tests/lib/genome/%.c $(KGENOME_LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) $< $(KGENOME_LIB) -o $@ $(LDFLAGS)
+
+$(TEST)/libtest_uncoat_%$(EXE): tests/lib/uncoat/%.c $(KUNCOAT_LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) $< $(KUNCOAT_LIB) -o $@ $(LDFLAGS)
+
 # The draft model is not in the library, so the one test over it says so here.
 #
 # A signature draft is what the viewer edits, not what the engine scans with, so
@@ -2152,7 +2299,7 @@ $(TEST)/unit_hostile_mem$(EXE): tests/unit/hostile_mem.c \
 # THE THREAD CORRELATION, which needs the WALK and not just the collector.
 #
 # wwalk.c is the file under test here and it is not in libkofgrille.a - it
-# calls kof_pe_unmap, so it is compiled into whoever needs it, exactly as the
+# calls kgenome_pe_unmap, so it is compiled into whoever needs it, exactly as the
 # scanner does. That is why this is a rule rather than a line in the wildcard:
 # the same sources the scanner links, minus the scanner.
 #
@@ -2370,6 +2517,19 @@ $(TEST)/asan_codec_forms$(EXE): tests/unit/codec_forms.c \
 	       kofexamine/kofinspect.c $(KOFEVT_SRC) $(ASAN_LIB) -o $@ \
 	       $(LDFLAGS)
 
+# The examiner's shellcode-loader finder is tool code, not library code, so the
+# test over it compiles that source beside the engine - the same arrangement as
+# the string codings above.
+$(TEST)/unit_kofscfind$(EXE): tests/unit/kofscfind.c kofexamine/kofscfind.c \
+                              $(LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) $(DEPTO) -I$(SDK)/include $< kofexamine/kofscfind.c \
+	      $(LIB) -o $@ $(LDFLAGS)
+
+$(TEST)/asan_kofscfind$(EXE): tests/unit/kofscfind.c kofexamine/kofscfind.c \
+                              $(ASAN_LIB) $(SDK_HDR) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -I$(SDK)/include $< kofexamine/kofscfind.c \
+	       $(ASAN_LIB) -o $@ $(LDFLAGS)
+
 # The editor's round trip over the rules that ship - see the test's own note for
 # the three silent losses that motivated it. Linked like cond_expr, because it
 # drives the same model.
@@ -2438,7 +2598,7 @@ test-sigs:
 # test instead of running the rest and summarising. `make -k unit` restores
 # the old behaviour where that is wanted, and a first failure is usually the
 # one worth reading anyway.
-UNIT_RUN := $(addprefix run-,$(UNIT_BIN))
+UNIT_RUN := $(addprefix run-,$(UNIT_BIN)) $(addprefix run-,$(LIBTEST_BIN))
 
 #
 # A TEST BINARY THAT IS NOT THERE STOPS THE RUN, AND ON WINDOWS THAT IS NOT A
@@ -2476,7 +2636,7 @@ $(UNIT_RUN): run-%: % | fixtures test-sigs
 	@$(call EXEC,$*)
 
 unit: fixtures test-sigs $(UNIT_RUN)
-	$(info all $(words $(UNIT_BIN)) test(s) passed)
+	$(info all $(words $(UNIT_BIN) $(LIBTEST_BIN)) test(s) passed)
 	@$(NOOP)
 
 # Everything -MMD wrote. Missing on a clean tree, which is why it is a soft
@@ -2563,7 +2723,7 @@ $(BUILD)/%.d: ;
 # a shell glob would need a shell that globs - which PowerShell, for a native
 # command, does not.
 asan_obj = $(TEST)/asan-obj/$(subst /,_,$(1:.c=.o))
-ASAN_OBJ := $(foreach f,$(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC),$(call asan_obj,$(f)))
+ASAN_OBJ := $(foreach f,$(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC) $(UC_SRC),$(call asan_obj,$(f)))
 
 # A literal newline, so $(foreach) can put each command on its own recipe line
 # - which is what makes make run them one at a time and stop at the first that
@@ -2579,7 +2739,7 @@ endef
 # payload snapshots - so leaving it out would exempt exactly what most needs
 # checking.
 #
-$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC) $(SDK_HDR) | $(TEST)
+$(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC) $(UC_SRC) $(SDK_HDR) | $(TEST)
 	@$(call RMRF,$(TEST)/asan-obj)
 	@$(call MKDIR,$(TEST)/asan-obj)
 	@# EMU_INC on every loop: libkofeng's own sources include the decoder's
@@ -2591,6 +2751,8 @@ $(ASAN_LIB): $(LIB_SRC) $(EMU_SRC) $(GT_SRC) $(CL_SRC) $(SDK_HDR) | $(TEST)
 	@$(foreach f,$(GT_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(CL_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) $(EMU_INC) \
+		-c $(f) -o $(call asan_obj,$(f))$(NL))
+	@$(foreach f,$(UC_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(call RM,$@)
 	@$(AR) rcs $@ $(ASAN_OBJ)
@@ -2610,14 +2772,35 @@ $(TEST)/asan_%$(EXE): tests/unit/%.c $(ASAN_LIB) $(STAMP) | $(TEST)
 export ASAN_OPTIONS  := detect_leaks=1:abort_on_error=0
 export UBSAN_OPTIONS := print_stacktrace=1
 
-ASAN_RUN := $(addprefix run-,$(ASAN_BIN))
+#
+# The libs' own archives, sanitised: the same asan objects, grouped the way the
+# release archives are, so the harness under tests/lib/ is checked linked against
+# one lib alone here too. They are built from $(ASAN_LIB)'s objects and so after it.
+ASAN_KGENOME_LIB := $(TEST)/libkgenome-asan.a
+ASAN_KUNCOAT_LIB := $(TEST)/libkuncoat-asan.a
+
+$(ASAN_KGENOME_LIB): $(ASAN_LIB)
+	@$(call RM,$@)
+	@$(AR) rcs $@ $(foreach f,$(EMU_SRC) $(GT_SRC) $(CL_SRC) libkofeng/kofcore/kofentropy.c,$(call asan_obj,$(f)))
+
+$(ASAN_KUNCOAT_LIB): $(ASAN_LIB)
+	@$(call RM,$@)
+	@$(AR) rcs $@ $(foreach f,$(UC_SRC),$(call asan_obj,$(f)))
+
+$(TEST)/asan_libtest_genome_%$(EXE): tests/lib/genome/%.c $(ASAN_KGENOME_LIB) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $< $(ASAN_KGENOME_LIB) -o $@ $(LDFLAGS)
+
+$(TEST)/asan_libtest_uncoat_%$(EXE): tests/lib/uncoat/%.c $(ASAN_KUNCOAT_LIB) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $< $(ASAN_KUNCOAT_LIB) -o $@ $(LDFLAGS)
+
+ASAN_RUN := $(addprefix run-,$(ASAN_BIN)) $(addprefix run-,$(LIBTEST_ASAN_BIN))
 
 $(ASAN_RUN): run-%: %
 	$(info == $(notdir $*))
 	@$(call EXEC,$*)
 
 unit-asan: fixtures test-sigs $(ASAN_RUN)
-	$(info all $(words $(ASAN_BIN)) sanitized test(s) passed)
+	$(info all $(words $(ASAN_BIN) $(LIBTEST_ASAN_BIN)) sanitized test(s) passed)
 	@$(NOOP)
 
 #
@@ -2717,7 +2900,7 @@ $(TEST)/antarc_dump$(EXE): tests/tools/antarc_dump.c $(ANTARC_SRC) \
 .PHONY: check-rules
 check-rules:
 	@bad=`grep -rn 'getenv *(' --include=*.c --include=*.h \
-	        libkofeng libgenome libkoforbit kofexamine kofscanner \
+	        libkofeng libgenome libuncoat libkoforbit kofexamine kofscanner \
 	        kofwatcher ksigbuilder 2>/dev/null \
 	      | grep -v 'kofcore/kofdebug.h' \
 	      | grep -v 'kofwatcher/kofmontrace.c' \
@@ -2728,10 +2911,11 @@ check-rules:
 	  exit 1 ; \
 	fi ; \
 	echo 'check-rules: no getenv in the engine'
-	@bad=`grep -L KOF_TARGET_CONTENT bases/unp/*.c bases/decomp/*.c` ; \
+	@bad=`grep -L KOF_TARGET_CONTENT bases/unp/*.c bases/decomp/*.c bases/decoders/*.c` ; \
 	if [ -n "$$bad" ]; then \
 	  echo 'a module must declare what it takes out (KOF_TARGET_CONTENT) - see CLAUDE.md:' ; \
 	  echo "$$bad" ; \
 	  exit 1 ; \
 	fi ; \
 	echo 'check-rules: every unpack and unwrap module declares its content'
+	@python3 tools/check_layers.py || exit 1

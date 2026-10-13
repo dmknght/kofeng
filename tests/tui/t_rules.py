@@ -14,7 +14,7 @@ def gaf(rows=70):
 def ko(rows=70):
     v = Viewer(SAMPLES['ko'], rows=rows, cols=200)
     enlarge(v, 10)
-    fold_plague(v)
+    fold_mutation(v)
     return v
 
 

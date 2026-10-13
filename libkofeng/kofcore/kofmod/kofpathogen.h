@@ -54,6 +54,7 @@
 #include <stdint.h>
 
 #include "kofcap.h"
+#include "disease.h"      /* KOF_DECLARE_DISEASE */
 
 /*
  * WHICH ANALYSIS THIS DIAGNOSE USES TO FIND ITS NODES, as a set.
@@ -71,16 +72,18 @@
  *   APIHASH  the APIs a PE resolves for itself have no name in its import table;
  *            its own resolver is run against the modelled loader.
  *
- * THE FILE DECIDES WHETHER THE DECLARATION APPLIES, and SYSCALL IS THE LAST
- * RESORT: it is offered only to a file in which no symbol could be found - no
- * symbol table, no section table to keep one in, no loader - because sweeping
- * the code for system calls was 90% of the time of a scan of 254 ELF files when
- * every static one was offered it. A file that names what it calls is read by its
- * names. What the file offers is read off it by the engine (diag_evidence in
- * scanners/objctx_diag.c) and a diagnose whose analysis the file does not offer
- * is not run. That replaced a second statement of the same fact in the diagnose,
- * a condition on the interpreter, which had to be kept in step with what the
- * file was.
+ * THE ROUTE THAT RUNS IS WHAT THE DIAGNOSE DECLARED AND THE FILE CAN SERVE.
+ * A static ELF serves SYMBOL and SYSCALL whether or not it keeps a section table
+ * or symbols (those say how it was linked, not that its code has no system
+ * call); a dynamically linked ELF and an object file serve SYMBOL only; a PE
+ * serves SYMBOL and APIHASH. The engine reads that off the file
+ * (diag_servable in scanners/objctx_diag.c). What keeps the SYSCALL sweep from
+ * being the cost of every scan - it was 90% of the time of 254 ELF files when
+ * every static one was swept - is the gate, not the route: a diagnose whose
+ * shape conditions or imports are unmet asks for no route, and one no verdict
+ * reads is not run. That replaced a second statement of the same fact in the
+ * diagnose, a condition on the interpreter, which had to be kept in step with
+ * what the file was.
  */
 #define KOF_DIAG_ANALYSIS_SYSCALL (1u << 0)
 #define KOF_DIAG_ANALYSIS_SYMBOL  (1u << 1)
@@ -99,43 +102,16 @@
 #define KOF_DIAG_USES_EMU (1u << 2)
 #define KOF_DIAG_ANALYSIS_APIHASH (1u << 3)
 
-/*
- * WHICH INPUT OF THE CHILD CAME FROM THE PARENT.
- *
- * SEPARATE FROM KOF_FLOW_ROLE_*, which answers a different question - which
- * argument decides what the CALL ITSELF means, like mmap's prot or socket's
- * domain. Sharing the name would put two meanings on one word in a file
- * where both are in scope.
- *
- * A role and not an argument index, because the index differs between the
- * syscall and the import that mean the same thing, and a diagnose must not
- * have to know which route satisfied it.
- */
-enum kof_diag_role {
-	KOF_DIAG_ROLE_NONE = 0,  /* the anchor: nothing fed it            */
-	KOF_DIAG_ROLE_BUFFER,    /* read/write/recv: the memory written   */
-	KOF_DIAG_ROLE_TARGET,    /* an indirect jump or call: where it goes */
-	KOF_DIAG_ROLE_FD,        /* read/connect/close: the descriptor    */
-	KOF_DIAG_ROLE_PATH,      /* open/exec: the name                   */
-	/*
-	 * THE MEMORY READ FROM, as against BUFFER which is the memory
-	 * WRITTEN. A call with one of each needs both words.
-	 *
-	 * copy_to_user(to, from, n) is the case, and it is not a corner one:
-	 * a hooked getdents reads a directory listing in, edits it, and
-	 * writes it back, so the pair shares TWO objects - the kernel buffer
-	 * it edits in and the userspace buffer the caller asked it to fill.
-	 * With one word for both, the two relations collapse: kof_diag_note_in
-	 * refuses the second as a repeat of the first, and the one it keeps is
-	 * whichever came first.
-	 *
-	 * That refusal is right for a LOOP - the same site reached twice has
-	 * not found a second relation - and it was hiding this. A role has to
-	 * be precise enough that no call has two inputs wearing one.
-	 */
-	KOF_DIAG_ROLE_SOURCE,
-	KOF_DIAG_ROLE_COUNT
-};
+/* The role an argument plays at a lineage node (KOF_DIAG_ROLE_*) and how far a
+ * link was established (KOF_DIAG_LINK_*): defined by libgenome with the lineage
+ * walk that records them. */
+#include <phenotype/lineage_vocab.h>
+
+/* module-facing names: the lib defines KGENOME_*, the ABI keeps the old spelling.
+ * Object-like macros, so a module (and the signature language) still writes the
+ * old name, `struct cell_insn` and `enum kof_arch` included. Engine code uses
+ * the KGENOME_ / kgenome_ name. */
+#define kof_diag_role                      kgenome_diag_role
 
 /*
  * THE `parent` OF THE ROOT. One tree, one root, and the root is the node
@@ -260,7 +236,7 @@ struct kof_diag_node {
 /*
  * WHY THE ATTRIBUTE RUN CARRIES ITS OWN LENGTH rather than being a fixed
  * struct: so a pack built today still reads when a later build adds an
- * attribute kind. The same reason dbcore.h gives for keeping a plague
+ * attribute kind. The same reason dbcore.h gives for keeping a mutation
  * block's hashes in a second section rather than inside the block.
  *
  * WHAT BELONGS IN IT, and the line is the one the vocabulary already draws
@@ -393,7 +369,7 @@ struct kof_diag_when {
 #define KOF_DIAG_DISEASE_LEN 63u
 
 struct kof_diag {
-	uint16_t              id;       /* assigned by the build            */
+	uint32_t              id;       /* the name's hash - see kof_diag_id32_ */
 	uint8_t               analysis; /* KOF_DIAG_ANALYSIS_*, KOF_DIAG_USES_EMU */
 	uint8_t               n_node;
 	const char           *name;     /* for a person, never matched on   */
@@ -439,7 +415,7 @@ struct kof_diag {
 	uint8_t               n_when;
 	struct kof_diag_when  when[KOF_DIAG_MAX_WHEN];
 	/*
-	 * HOW MANY VERDICTS READ IT, when the build said - see KDIG_SEC_USERS.
+	 * HOW MANY RULES READ IT, when the build said - see KDIG_SEC_USERS.
 	 * `users_known` distinguishes "none" from "nobody wrote it down".
 	 */
 	uint8_t               users_known;
@@ -451,26 +427,11 @@ struct kof_diag {
 	uint8_t               n_ref;
 	const char           *ref[KOF_DIAG_MAX_NEED];
 	/*
-	 * WHAT THE MATCH MEANS - see KOF_DIAG_DISEASE. NULL when the diagnose
-	 * has none. In the same string store as `need` and `ref`.
+	 * WHAT THE MATCH FINDS - see KOF_DECLARE_DISEASE. Zero when the diagnose has none;
+	 * `disease_type` is a kof_maltype and means nothing then.
 	 */
-	const char           *disease;
-};
-
-/*
- * HOW FAR A LINK WAS ESTABLISHED. Three answers and not two.
- *
- * `BROKEN` and `UNKNOWN` must not be folded together. One says the value
- * demonstrably came from somewhere else - the diagnose really does not
- * match. The other says the model lost the value, through arithmetic it
- * does not follow or a round trip through memory it cannot see. Folded,
- * an author who can make the engine lose track has made themselves
- * innocent; kept apart, the weak answer can be weighed by the layer above.
- */
-enum kof_diag_link {
-	KOF_DIAG_LINK_PROVEN = 0,
-	KOF_DIAG_LINK_BROKEN,
-	KOF_DIAG_LINK_UNKNOWN
+	uint32_t              disease;
+	uint8_t               disease_type;
 };
 
 /*
@@ -504,26 +465,13 @@ enum kof_diag_link {
  */
 #define KOF_DIAG_NAME(id)
 /*
- * KOF_DIAG_DISEASE("cnc/recv-syscall") - what this diagnose's match FINDS, as a
- * word for the behaviour: the disease the test detects.
- *
- *     KOF_DIAG_DISEASE("flood-network/raw-header");
- *
- * ONE PER DIAGNOSE, and a path: the first part is the layer, the rest narrows
- * it. A diagnose says what the code DOES; what KIND of malware a set of those
- * is, is read from verified samples (see detectors/pathogen/syndromes/kofsyndrome.h), so
- * the disease names a behaviour and never a family or a verdict. Optional:
- * a diagnose without one matches as before and is simply not part of a syndrome.
- */
-#define KOF_DIAG_DISEASE(s)
-/*
- * KOF_SYNDROME_TYPE(KOF_MALTYPE_BOTNET) and KOF_SYNDROME_HAS("cnc/recv-syscall") -
+ * KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET) and KOF_DECLARE_SYNDROME_HAS("cnc/recv-syscall") -
  * a syndrome source, one verified sample: the types it was and the behaviours
  * that fired on it. Read by ksigbuilder into syndromes.kdig. See
  * databases/syndsrc.h.
  */
-#define KOF_SYNDROME_TYPE(t)
-#define KOF_SYNDROME_HAS(s)
+#define KOF_DECLARE_SYNDROME_TYPE(t)
+#define KOF_DECLARE_SYNDROME_HAS(s)
 #define KOF_DIAG_ANALYSIS(mask)
 /*
  * KOF_DIAG_USE_EMU() - run the emulator for this diagnose. Written, it is
@@ -671,7 +619,8 @@ enum kof_diag_link {
 /* The capabilities of a head the engine builds from two calls: first u16,
  * then u16, little endian. See KOF_DIAG_DECLARE_SEQUENCE. */
 #define KDIG_SEC_SEQUENCE 7u
-/* The disease: the bytes, not terminated. See KOF_DIAG_DISEASE. */
+/* The disease: u32 id little endian, then the u8 maltype. See KOF_DECLARE_DISEASE. The
+ * text is not in the record. */
 #define KDIG_SEC_DISEASE 8u
 
 /*
@@ -708,12 +657,14 @@ enum kof_diag_link {
  */
 /*
  * WHAT ONE OBJECT'S GRAPH MAY TAKE. Nothing is pruned - a verdict reads
- * nodes no diagnose names, so there is no set to prune to - and the bound is
- * therefore the OBJECT's: 4096 nodes, which the walk's own DIAG_MAX_NODE
- * stops at first. What keeps a 40 MB binary from paying for this is not
- * being asked about at all, see KOF_ENG_USE_PATHOGEN.
+ * nodes no diagnose names, so there is no set to prune to - and the size is
+ * therefore the OBJECT's: KOF_GR_HDRLEN + count * KOF_GR_RECLEN, where the count
+ * is what the walk found (it scales with the object's code, kgenome_budget
+ * max_nodes: max(4096, code / 8), at most 65534 - the 16-bit node index). It was
+ * a constant block of 4096 records, and a graph past it was refused WHOLE. What
+ * keeps a 40 MB binary from paying for this is not being asked about at all, see
+ * KOF_ENG_USE_PATHOGEN.
  */
-#define KOF_GR_MAX_BYTES (8u + 4096u * 32u)
 
 #define KOF_GR_HDRLEN   8u
 #define KOF_GR_H_COUNT  0u      /* 4  how many records follow */

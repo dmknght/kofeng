@@ -176,6 +176,143 @@ or filter findings by logic of their own. When a tool needs something the
 engine does not expose, add it to the engine - including the callback the
 tool registers to be told.
 
+## 12. Where code lives (PROVISIONAL - moves to README and the wiki)
+
+This is the target model decided 2026-10-12. Most of it is NOT built yet: the
+tree today ships one archive (`libkofeng.a`) with the layers below as directories,
+and ALSO builds the two libs as archives of their own from the same objects -
+`libkgenome.a` (libgenome, plus the one foundation object it calls,
+`kofentropy.o`) and `libkuncoat.a` (libuncoat) in `build/temp`. They are not
+shipped; they exist so that `tests/lib/genome/*.c` and `tests/lib/uncoat/*.c`
+are linked against ONE lib's archive and nothing else, which is the test that
+the lib does not reach the engine (an engine symbol is an undefined reference
+there). `make unit` runs them; `make unit-asan` runs them against the
+sanitised twins. A new file in either directory is picked up by wildcard.
+`libuncoat/`
+(kuncoat) is built as its own top-level directory (parts `decompressors/`,
+`decryptors/`, `decoders/`; one umbrella header `<uncoat.h>`, one transform API
+`transform.h`, status enum `kuncoat_status` in `status.h`); the part
+of libgenome that exists is `libgenome/`. Do not move code to match the rest
+without being asked; do not add code that contradicts it.
+
+**Three parts and a foundation, one dependency direction.**
+
+    libkofeng (the engine, the kernel)  -> kuncoat, kgenome, core
+    kuncoat   (decompress/decrypt/decode algorithms) -> kgenome, core
+    kgenome   (analysis of executables)  -> core
+    core      (kof_buf, bounds helpers, hash, rangelist, platform)
+
+- Semantically `kgenome` is the foundation of everything that is about a file;
+  unpacking is the process after it; the engine runs the pipeline. So `kuncoat`
+  may include `kgenome`'s public header and use its types (the structure of a
+  PE or ELF is defined once, in `kgenome`). The one forbidden edge is `kgenome`
+  calling `kuncoat`: if analysis ever needs a decode, it gets a primitive of
+  its own (in `core`) or the engine hands it the decoded bytes. Neither lib
+  depends on the engine, and a lib never reaches the engine's objects
+  (`kof_scanner`, `kof_obj_ctx`).
+- `core` is the foundation directory (today `libkofeng/kofcore`, the module
+  ABI under `kofmod/` stays where it is). It is not `bases/`.
+- No cycles, and no lib includes the engine. A dependency that points up the
+  list above is a defect.
+- The engine (`libkofeng`) controls the pipeline: stages, the object tree,
+  budgets, the per-object products and their lifetime, detection, verdicts and
+  the module ABI. It calls the libs through their API and takes results.
+
+**What each lib is for.**
+
+- `kgenome` is the analysis of executable code and, later, of other formats
+  that are NOT containers (.NET, AMSI buffers, script files): genotype (which
+  instruction), celllysis (the analysis), phenotype (the emulator and the
+  dynamic analysis), the structure of PE and ELF, the library-span table, the
+  lineage walk and its products. It defines its own structs.
+- `kuncoat` is the algorithms that grow without a forecast, in three parts:
+  `decompressors`, `decryptors`, `decoders`. Buffers and a budget in, bytes and
+  a status out. There is no `unpackers` part: unpacking a packer statically is a
+  ROUTINE in `bases/` (it identifies the packer, reads its parameters, and calls
+  these algorithms), and unpacking that RUNS the sample is `kgenome`'s.
+- A container (zip, rar, OLE, PDF...) is opened by the engine into child
+  objects, and a child re-enters the pipeline. A lib analyses ONE object.
+
+**Rules every lib follows.**
+
+- Names: `kgenome_` and `kuncoat_` on every public function, type and macro
+  (`KGENOME_`, `KUNCOAT_` on macros). The engine keeps `kof_`.
+- Errors: each lib has its own status enum - what fails in an unpacker is not
+  what fails in a disassembler. A status says whether the answer is complete;
+  "truncated" and "over budget" are values, never a silent "none" (rule 4).
+- Budget: the caller passes it. Limits scale with the input and the global
+  budget is the DoS bound; a lib never reads engine state to find it. The engine
+  passes a `kgenome_budget` whose `max_bytes` is what its own memory ceiling has
+  left, and reads the answer back: `kgenome_diag_scan_status` says whether a
+  limit fired (the allowance included) and `kgenome_diag_scan_bytes` is what the
+  lib's ledger holds, which the engine charges to its own ceiling for as long as
+  the product lives (`kof_scan_diag_drop` gives it back). A floor on a limit
+  (`KGENOME_INSN_MIN`, `W_BODY_MIN`) is what a small object gets; the limit
+  itself follows the object (a wait before a stager does not shrink with the
+  file, so the DoS bound is the budget and not a flat per-stage number).
+- Memory: the caller owns the output, either a buffer it supplies or an
+  allocation it asked for through a callback, so that it is charged to the
+  scan's budget.
+- No writable global state; a lib is safe on many threads.
+- One public header per lib. Everything else is private to it.
+- Modules are freestanding blobs: they reach a lib only through a slot of the
+  module ABI, which the engine owns and implements by calling the lib.
+- `bases/` is case routines that use the module API. Anything two routines
+  share, or that is big enough to need its own tests, graduates into a lib or
+  the engine; `bases/` does not carry shared code. The analysis that is specific
+  to one kind of malware lives as a disease unit with the other analysis, not
+  in `bases/`: the msfvenom wrapper declarations (`msf_*.h`, SDK `kofshared/`)
+  are such a unit. Shellcode in general cannot be covered by the engine; a
+  loader is detected by a hand-written signature. The loader payload finder is
+  a tool-side analysis of the examiner (`kofexamine/kofscfind.c`, `kofexaminer
+  --scfind`), not engine, ABI or library code.
+- A derived object (today the normalised view) is not a second program and is
+  not re-analysed. It inherits the parent's analysis product by product: what is
+  a PLACE (regions, the image description, the entry, the functions) is carried
+  through the transform's own boundary table (`kgenome_offmap`,
+  `genotype/image/offmap.h`; the visitor that lists every file offset of a PE/ELF
+  description is the one walk used both to ask the transform and to remap), and
+  what is an ANSWER (the diagnoses that matched, the graph, what a PE resolves)
+  is shared in the parent's coordinates (`scanners/objprod.c`, published when
+  the parent's pipeline ends, adopted when the view's begins). The view's header
+  is never parsed: it is the parent's header over bytes that moved. A new
+  per-object product needs a line in one of those two lists, not a re-run.
+- Parsers keep their engine-facing API. The body that does the work moves into
+  `kgenome`; the engine-side function stays as the adapter and says so.
+
+**Decided with it.** The PE/ELF rebuild writers live in `kgenome`, next to the
+code that reads the same layout. `kuncoat` does not rebuild a file: a routine
+identifies the packer and extracts its parameters, `kuncoat` runs the
+algorithm on bytes, and the engine asks `kgenome` to write the file back. So
+`kuncoat` needs no PE or ELF structure: it runs algorithms on bytes. A
+packer-specific algorithm (ASPack's block decoder, MPRESS's call filter, UPX's
+unfilter) is still just an algorithm and lives with the decompressors; what
+interprets the packer's own layout stays in the `bases/` routine.
+
+**Not decided yet.** The open method-id space for new algorithms; whether
+decrypt splits from decompress when it grows.
+
+`make check-rules` runs `tools/check_layers.py`, which checks the include
+direction between these parts. The parts are classed by where their code is
+GOING (the lineage backend, now in `libgenome/phenotype`, counts as
+`kgenome`; `libuncoat/` is `kuncoat`), so the edges in `tools/layers.baseline`
+are the list of cuts the move still has to make. A new upward include fails;
+the baseline only shrinks.
+
+The same script checks two more things, each with its own baseline file.
+**The engine's own order**, bottom to top: `core` (`libkofeng/kofcore`) <
+`analyzers` (`analyzers/`, and `extractors/`, which holds only thin files that forward to the lib APIs) < `pack` (`databases/pack/`: the
+layout of a loaded pack and its accessors, which the matchers read) <
+`detectors` < `databases` (the loader and packer, which BUILD matchers) <
+`verdictor` < `scanners` < the public API
+(`libkofeng/kofeng.{c,h}`); a file may include its own class and lower ones
+(`tools/layers_engine.baseline`, now empty: the scan's types live in `libkofeng/kofcore/koftypes.h`, which `kofeng.h` includes, the syndrome set the loader builds is `databases/pack/kofsyndrome.*`, and the verdictor is handed a `struct kof_verdict_in` by the scanners). **The core closure**: no file of core proper
+may reach `libgenome/` or `libuncoat/` through a chain of includes, because
+a direct-include check cannot see `rangelist.h -> kofsig.h -> libgenome`
+(`tools/layers_closure.baseline`; `kofmod/` re-exports the libs' types on
+purpose and is only an intermediate node, never a source). Both baselines only
+shrink.
+
 ## Working in this tree
 
 - **Scratch files go in `/mnt/games/`, never `/tmp`.** `/tmp` is a 3.2 GB

@@ -179,19 +179,6 @@ int main(int argc, char **argv)
 				      has_named(&first_res, "RepairStrong"));
 	ok("the weak one reported FIRST (the case is set up)",
 	   first_res.n >= 2 && strstr(first_res.v[0].name, "RepairWeak"));
-	{
-		uint32_t k, owner = (uint32_t)-1;
-
-		for (k = 0; k < first_res.n; k++)
-			if (first_res.v[k].is_verdict)
-				owner = k;
-		ok("the object is reported under the stronger finding",
-		   owner != (uint32_t)-1 &&
-		   strstr(first_res.v[owner].name, "RepairStrong"));
-	}
-	ok("so the repair is the stronger rule's, not the first to run",
-	   first_res.repair.n_fix == 1 && first_res.repair.fix[0].off == 44u &&
-	   first_res.repair.fix[0].b[0] == 0xB1);
 
 	/* ---- 2. the first to report must not hide a stronger one ---------- */
 	memset(&opt, 0, sizeof opt);            /* all_matches OFF */

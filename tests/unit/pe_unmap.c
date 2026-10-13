@@ -10,7 +10,7 @@
  *
  *   file  --(this test lays it out)-->  image at base+D
  *         --(this test relocates it)-->  image as the loader would leave it
- *         --(kof_pe_unmap undoes both)-->  file again
+ *         --(kgenome_pe_unmap undoes both)-->  file again
  *
  * A shared misreading of the relocation table would have to apply +D and -D to
  * the SAME wrong address to cancel, and the comparison is against the original
@@ -35,7 +35,7 @@
 #include <kofmod/pe.h>
 
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
-#include "../../libkofeng/extractors/unpack/pe_unmap.h"
+#include <genotype/image/pe_unmap.h>
 
 #define DELTA 0x13370000ull
 
@@ -80,16 +80,16 @@ static unsigned char *slurp(const char *path, size_t *len)
  * under test.
  */
 static uint32_t relocate(unsigned char *img, uint64_t img_len,
-			 const struct kof_pe_info *p, uint64_t delta)
+			 const struct kgenome_pe_info *p, uint64_t delta)
 {
 	uint64_t at, end;
 	uint32_t done = 0;
 
-	if (p->n_dirs <= KOF_PE_DIR_BASERELOC)
+	if (p->n_dirs <= KGENOME_PE_DIR_BASERELOC)
 		return 0;
-	at = p->dir[KOF_PE_DIR_BASERELOC].rva;
-	end = at + p->dir[KOF_PE_DIR_BASERELOC].size;
-	if (!p->dir[KOF_PE_DIR_BASERELOC].size || end > img_len)
+	at = p->dir[KGENOME_PE_DIR_BASERELOC].rva;
+	end = at + p->dir[KGENOME_PE_DIR_BASERELOC].size;
+	if (!p->dir[KGENOME_PE_DIR_BASERELOC].size || end > img_len)
 		return 0;
 
 	while (at + 8 <= end) {
@@ -136,7 +136,7 @@ static uint32_t relocate(unsigned char *img, uint64_t img_len,
  * the reason relocate() is: a test that borrows the code's idea of where a
  * field lives cannot catch the code being wrong about it.
  */
-static void put_hdr_base(unsigned char *img, const struct kof_pe_info *p,
+static void put_hdr_base(unsigned char *img, const struct kgenome_pe_info *p,
 			 uint64_t base)
 {
 	uint32_t lfanew;
@@ -167,15 +167,15 @@ static void put_hdr_base(unsigned char *img, const struct kof_pe_info *p,
  */
 static int round_trip(const char *path, const unsigned char *file, size_t flen,
 		      const unsigned char *img, uint64_t img_len,
-		      const struct kof_pe_info *p, uint32_t applied,
+		      const struct kgenome_pe_info *p, uint32_t applied,
 		      uint64_t mapped_at, uint64_t preferred,
-		      struct kof_pe_unmap_info *ui)
+		      struct kgenome_pe_unmap_info *ui)
 {
 	uint8_t *back = NULL;
 	uint64_t back_len = 0;
 	uint32_t i;
 
-	if (!kof_pe_unmap(kof_buf_make(img, img_len), mapped_at, preferred,
+	if (!kgenome_pe_unmap(kof_buf_make(img, img_len), mapped_at, preferred,
 			  1ull << 30, &back, &back_len, ui)) {
 		fail(path, "unmap refused a mapped image");
 		return 0;
@@ -224,9 +224,9 @@ static int round_trip(const char *path, const unsigned char *file, size_t flen,
 
 static void one_file(const char *path)
 {
-	struct kof_pe_info info;
+	struct kgenome_pe_info info;
 	struct kof_obj_ctx ctx;
-	struct kof_pe_unmap_info ui;
+	struct kgenome_pe_unmap_info ui;
 	unsigned char *file, *img;
 	uint8_t *back = NULL;
 	uint64_t back_len = 0, img_len;
@@ -310,7 +310,7 @@ static void one_file(const char *path)
 
 	/* Told nothing: it must undo NOTHING and must SAY it could not know. */
 	back = NULL;
-	if (!kof_pe_unmap(kof_buf_make(img, img_len), info.image_base + DELTA,
+	if (!kgenome_pe_unmap(kof_buf_make(img, img_len), info.image_base + DELTA,
 			  0, 1ull << 30, &back, &back_len, &ui)) {
 		fail(path, "unmap refused a loader-mapped image");
 		goto done;
@@ -344,7 +344,7 @@ static void one_file(const char *path)
 	 * since a wrong delta is worse than none.
 	 */
 	back = NULL;
-	if (kof_pe_unmap(kof_buf_make(img, img_len), 0, 0, 1ull << 30, &back,
+	if (kgenome_pe_unmap(kof_buf_make(img, img_len), 0, 0, 1ull << 30, &back,
 			 &back_len, &ui)) {
 		if (ui.relocs_undone != 0)
 			fail(path, "relocations undone with no address given");
@@ -388,17 +388,17 @@ static void refusals(void)
 	for (i = 0; i < sizeof junk; i++)
 		junk[i] = (unsigned char)(i * 7u + 3u);
 
-	if (kof_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 0, 1u << 20, &out, &n,
+	if (kgenome_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 0, 1u << 20, &out, &n,
 			 NULL))
 		fail("<junk>", "unmap accepted arbitrary bytes");
 
 	junk[0] = 'M';
 	junk[1] = 'Z';
-	if (kof_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 0, 1u << 20, &out, &n,
+	if (kgenome_pe_unmap(kof_buf_make(junk, sizeof junk), 0, 0, 1u << 20, &out, &n,
 			 NULL))
 		fail("<MZ only>", "unmap accepted an MZ with no PE header");
 
-	if (kof_pe_unmap(kof_buf_make(junk, 0), 0, 0, 1u << 20, &out, &n, NULL))
+	if (kgenome_pe_unmap(kof_buf_make(junk, 0), 0, 0, 1u << 20, &out, &n, NULL))
 		fail("<empty>", "unmap accepted an empty buffer");
 }
 

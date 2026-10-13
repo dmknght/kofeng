@@ -8,7 +8,7 @@
  * build when one is - the role table learnt that lesson the expensive way.
  */
 
-#include "../detectors/pathogen/diseases/kofdisease.h"
+#include "../analyzers/diseases/kofdisease.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,13 +17,13 @@
 #include <kofmod/kofpathogen.h>
 #include <kofmod/elf.h>      /* KOF_PERM_*, KOF_ELF_*        */
 #include <kofmod/pe.h>       /* KOF_PE_PERM_*                */
-#include "../analyzers/nucleo/nucleo.h"
+#include <celllysis/nucleo.h>
 #include "diagsrc.h"
 
 /*
  * A NAME TO A NUMBER, through the one table that defines both.
  *
- * The source says KOF_NUCLEO_ALLOC_EXEC and the record holds its value, and
+ * The source says KGENOME_NUCLEO_ALLOC_EXEC and the record holds its value, and
  * the two must be the same thing or a rule means something other than what
  * it says.
  */
@@ -111,12 +111,12 @@ int kof_dsrc_cap_table_check(void)
 	for (c = 1u; c < 0x10000u; c++) {
 		const char *nm;
 
-		if (!KOF_NUCLEO_VALID(c))
+		if (!KGENOME_NUCLEO_VALID(c))
 			continue;
 		/* "?" is what the name table answers for a value inside a
-		 * group's range that no capability uses - KOF_NUCLEO_VALID is a
+		 * group's range that no capability uses - KGENOME_NUCLEO_VALID is a
 		 * range test and the groups are not full. */
-		nm = kof_flow_cap_name((uint16_t)c);
+		nm = kgenome_flow_cap_name((uint16_t)c);
 		if (!nm || strcmp(nm, "?") == 0)
 			continue;
 		for (i = 0; i < N_CAP; i++)
@@ -135,7 +135,7 @@ int kof_dsrc_cap_table_check(void)
 /*
  * The source writes the ENUMERATOR, so this is a lookup and not a search.
  * It used to take the display name in quotes and walk the capability space
- * asking kof_flow_cap_name what each value was called; the display name is
+ * asking kgenome_flow_cap_name what each value was called; the display name is
  * what a report prints, and spelling a rule in it meant the vocabulary was
  * written two ways for two audiences.
  */
@@ -243,7 +243,7 @@ static int kind_of(const char *w, uint8_t *out)
 static int flag_of(const char *w, uint16_t *out)
 {
 	if (strcmp(w, "0") == 0)             { *out = 0; return 1; }
-	if (strcmp(w, "KOF_FLOWF_WX") == 0)  { *out = KOF_FLOWF_WX; return 1; }
+	if (strcmp(w, "KOF_FLOWF_WX") == 0)  { *out = KGENOME_FLOWF_WX; return 1; }
 	return 0;
 }
 
@@ -629,26 +629,19 @@ int kof_dsrc_parse(const char *text, size_t n, struct kof_dsrc *d,
 				continue;
 			memcpy(it->s1, a[0], strlen(a[0]) + 1u);
 			d->n++;
-		} else if ((p = strstr(line, "KOF_DIAG_DISEASE(")) != NULL) {
-			size_t L;
+		} else if ((p = strstr(line, "KOF_DECLARE_DISEASE(")) != NULL) {
+			/* The one parser - see kofdisease.h. */
+			struct kof_disease_decl dd;
+			const char *why = kof_disease_decl_parse(p, &dd);
 
-			if (!kof_dsrc_arg(p, 0, a[0], sizeof a[0])) {
-				say_err(r, &errs, (int)lineno,
-					"KOF_DIAG_DISEASE(\"layer/behaviour\")");
-				continue;
-			}
-			L = strlen(a[0]);
-			if (L < 3u || a[0][0] != '"' || a[0][L - 1u] != '"' ||
-			    L - 2u > KOF_DIAG_DISEASE_LEN) {
-				say_err(r, &errs, (int)lineno,
-					"KOF_DIAG_DISEASE wants a quoted path "
-					"of at most 63 characters");
+			if (why) {
+				say_err(r, &errs, (int)lineno, why);
 				continue;
 			}
 			if (!(it = add_item(d, &errs, r, lineno, KDS_DISEASE)))
 				continue;
-			memcpy(it->s1, a[0] + 1, L - 2u);
-			it->s1[L - 2u] = 0;
+			it->a = dd.type;
+			memcpy(it->s1, dd.name, strlen(dd.name) + 1u);
 			d->n++;
 		} else if (strstr(line, "KOF_DIAG_USE_EMU(") != NULL) {
 			if (!(it = add_item(d, &errs, r, lineno, KDS_USE_EMU)))
@@ -938,6 +931,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			if (why)
 				say_err(r, &errs, ln, why);
 			memcpy(v->disease, it->s1, sizeof v->disease);
+			v->disease_type = (uint8_t)it->a;
 			break;
 		}
 		case KDS_ANALYSIS:
@@ -1079,7 +1073,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 			}
 			/* What the object must import, so each has to be a name that
 			 * can be imported - or the sequence can never be found. */
-			if (!kof_flow_cap_named(it->a) || !kof_flow_cap_named(it->b)) {
+			if (!kgenome_flow_cap_named(it->a) || !kgenome_flow_cap_named(it->b)) {
 				say_err(r, &errs, ln,
 					"no imported name is that capability, so "
 					"the sequence can never be found");
@@ -1122,9 +1116,9 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 	 * root of READ costs one descent per read in the object; one 1.1 MB
 	 * sample here holds 447 indirect calls.
 	 */
-	if (v->n_nd && (v->nd[0].cap == KOF_NUCLEO_READ ||
-			v->nd[0].cap == KOF_NUCLEO_WRITE ||
-			v->nd[0].cap == KOF_NUCLEO_EXEC_REG))
+	if (v->n_nd && (v->nd[0].cap == KGENOME_NUCLEO_READ ||
+			v->nd[0].cap == KGENOME_NUCLEO_WRITE ||
+			v->nd[0].cap == KGENOME_NUCLEO_EXEC_REG))
 		say_warn(r, "anchoring on a common capability - every one in "
 			    "the object starts a descent");
 	for (i = 0; i < n_sym; i++)
@@ -1146,7 +1140,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 		for (i = 0; i < v->n_nd; i++) {
 			int k;
 
-			if (!kof_flow_cap_named(v->nd[i].cap))
+			if (!kgenome_flow_cap_named(v->nd[i].cap))
 				continue;       /* an action has no import name */
 			for (k = 0; k < v->n_need && v->need[k] != v->nd[i].cap; k++)
 				;
@@ -1240,8 +1234,13 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		n = snprintf(out, cap, "KOF_DIAG_NAME(%s);", it->s1);
 		break;
 	case KDS_DISEASE:
-		n = snprintf(out, cap, "KOF_DIAG_DISEASE(\"%s\");", it->s1);
-		break;
+		{
+			struct kof_disease_decl dd;
+
+			dd.type = (uint8_t)it->a;
+			snprintf(dd.name, sizeof dd.name, "%s", it->s1);
+			return kof_disease_decl_print(&dd, out, cap);
+		}
 	case KDS_USE_EMU:
 		n = snprintf(out, cap, "KOF_DIAG_USE_EMU();");
 		break;
@@ -1309,7 +1308,7 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		if (!(c1 = kof_dsrc_cap_word(it->a)))
 			return 0;
 		n = snprintf(out, cap, "KOF_DIAG_DECLARE_HEAD(%s, %s);", c1,
-			     it->b == KOF_FLOWF_WX ? "KOF_FLOWF_WX" : "0");
+			     it->b == KGENOME_FLOWF_WX ? "KOF_FLOWF_WX" : "0");
 		break;
 	case KDS_TAIL:
 		if (!(c1 = kof_dsrc_cap_word(it->a)))

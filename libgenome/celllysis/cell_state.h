@@ -1,17 +1,17 @@
 /*
- * cell_state.h - what a walk over decoded code knows: register constants and a
- * small modelled stack. See cell_state.c for what it will and will not do.
+ * kgenome_cell_state.h - what a walk over decoded code knows: register constants and a
+ * small modelled stack. See kgenome_cell_state.c for what it will and will not do.
  */
-#ifndef KOFENG_CELL_STATE_H
-#define KOFENG_CELL_STATE_H
+#ifndef KGENOME_CELL_STATE_H
+#define KGENOME_CELL_STATE_H
 
 #include <stdint.h>
 
-struct cell_insn;
+struct kgenome_cell_insn;
 
-#define CELL_STACK 16u
+#define KGENOME_CELL_STACK 16u
 
-struct cell_state {
+struct kgenome_cell_state {
 	uint64_t reg[16];
 	uint16_t known;         /* bit i: reg[i] holds a derived constant */
 	/*
@@ -33,15 +33,15 @@ struct cell_state {
 	 * back. A walk that pushes past the end simply loses the oldest, which
 	 * is the same honest "unknown" every other limit here produces.
 	 */
-	uint64_t stk[CELL_STACK];
+	uint64_t stk[KGENOME_CELL_STACK];
 	uint16_t stk_known;     /* bit i: stk[i] is a derived constant */
 	uint8_t  stk_n;
 };
 
-void cell_state_reset(struct cell_state *k);
-int  cell_state_reg(const struct cell_state *k, uint8_t r, uint64_t *out);
-int  cell_state_stack_top(const struct cell_state *k, uint64_t *out);
+void kgenome_cell_state_reset(struct kgenome_cell_state *k);
+int  kgenome_cell_state_reg(const struct kgenome_cell_state *k, uint8_t r, uint64_t *out);
+int  kgenome_cell_state_stack_top(const struct kgenome_cell_state *k, uint64_t *out);
 /* Apply one decoded instruction to the map. */
-void cell_state_track(struct cell_state *k, const struct cell_insn *in);
+void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome_cell_insn *in);
 
-#endif /* KOFENG_CELL_STATE_H */
+#endif /* KGENOME_CELL_STATE_H */

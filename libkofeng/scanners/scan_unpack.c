@@ -11,16 +11,16 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,7 +139,7 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	if (m->n_str)
 		sx_need_multi(sc, ctx);
 	if (m->n_block)
-		sx_need_plague(sc, ctx);
+		sx_need_mutation(sc, ctx);
 	/*
 	 * WHAT THIS MODULE REPORTED, AND NOT WHAT THE LAST
 	 * ONE DID.

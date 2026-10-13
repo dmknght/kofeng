@@ -30,7 +30,7 @@ KOF_DIAG_USE_EMU();
  * NO CONDITION ON THE INTERPRETER. A dynamically linked program contains no
  * system call - it reaches the kernel through the import table and a library
  * this file does not carry - so the sweep this diagnose declared has nothing to
- * find in it. The engine reads that off the file (diag_evidence): a diagnose
+ * find in it. The engine reads that off the file (diag_servable): a diagnose
  * whose analysis the file does not offer is not run, and nothing here has to be
  * kept in step with what the file is. It is not a sign either: that the file is
  * static is no reason to analyse it, so this diagnose still does not ask - see

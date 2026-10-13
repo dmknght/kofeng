@@ -35,7 +35,7 @@
 #include <string.h>
 #include <zlib.h>
 
-#include "../../libkofeng/extractors/decomp/inflate.h"
+#include <decompressors/inflate.h>
 
 static int failures;
 
@@ -78,7 +78,7 @@ static int out_sink(void *user, const uint8_t *p, uint32_t n)
 /* ---- zlib, as the oracle ------------------------------------------------------ */
 
 /* Raw DEFLATE, so windowBits is negative: no zlib or gzip wrapper, exactly what
- * kof_inflate reads. */
+ * kuncoat_inflate reads. */
 static int zlib_deflate_raw(const uint8_t *in, size_t n, int level,
 			    uint8_t **out, size_t *out_n)
 {
@@ -123,7 +123,7 @@ static size_t zlib_inflate_raw(const uint8_t *in, size_t n, uint8_t **out, int *
 	z.next_in = (Bytef *)(uintptr_t)in;
 	z.avail_in = (uInt)n;
 	for (;;) {
-		enum kof_decomp_status r;
+		enum kuncoat_status r;
 
 		z.next_out = *out + have;
 		z.avail_out = (uInt)(cap - have);
@@ -156,9 +156,9 @@ static void round_trip(const char *what, const uint8_t *data, size_t n, int leve
 {
 	uint8_t *comp = NULL;
 	size_t comp_n = 0;
-	struct kof_inflate *st;
+	struct kuncoat_inflate *st;
 	struct out o;
-	enum kof_decomp_status r;
+	enum kuncoat_status r;
 
 	if (!zlib_deflate_raw(data, n, level, &comp, &comp_n)) {
 		fail(what, "zlib would not compress the input");
@@ -168,10 +168,10 @@ static void round_trip(const char *what, const uint8_t *data, size_t n, int leve
 	st = malloc(sizeof *st);
 	if (!st)
 		exit(1);
-	r = kof_inflate(st, comp, comp_n, out_sink, &o, NULL, NULL);
+	r = kuncoat_inflate(st, comp, comp_n, out_sink, &o, NULL, NULL);
 
-	if (r != KOF_DEC_OK)
-		fail(what, kof_decomp_status_name(r));
+	if (r != KUNCOAT_OK)
+		fail(what, kuncoat_status_name(r));
 	else if (o.n != n)
 		fail(what, "decoded a different number of bytes than were compressed");
 	else if (n && memcmp(o.p, data, n) != 0)
@@ -194,9 +194,9 @@ static void stops_short(const uint8_t *data, size_t n, size_t limit)
 {
 	uint8_t *comp = NULL;
 	size_t comp_n = 0;
-	struct kof_inflate *st;
+	struct kuncoat_inflate *st;
 	struct out o;
-	enum kof_decomp_status r;
+	enum kuncoat_status r;
 
 	if (!zlib_deflate_raw(data, n, 6, &comp, &comp_n))
 		return;
@@ -205,11 +205,11 @@ static void stops_short(const uint8_t *data, size_t n, size_t limit)
 	st = malloc(sizeof *st);
 	if (!st)
 		exit(1);
-	r = kof_inflate(st, comp, comp_n, out_sink, &o, NULL, NULL);
+	r = kuncoat_inflate(st, comp, comp_n, out_sink, &o, NULL, NULL);
 
 	if (o.n > limit)
 		fail("stop", "more was produced than the sink accepted");
-	if (o.n < n && r != KOF_DEC_STOPPED)
+	if (o.n < n && r != KUNCOAT_STOPPED)
 		fail("stop", "a refused sink was not reported as stopped");
 	if (o.n && memcmp(o.p, data, o.n) != 0)
 		fail("stop", "the prefix produced before stopping was wrong");
@@ -265,11 +265,11 @@ static void hostile(uint64_t rounds)
 	for (r = 0; r < rounds; r++) {
 		uint8_t buf[8192];
 		size_t n;
-		struct kof_inflate *st;
+		struct kuncoat_inflate *st;
 		struct out o;
 		uint8_t *zout = NULL;
 		size_t zn;
-		enum kof_decomp_status status;
+		enum kuncoat_status status;
 		int zended, k;
 
 		if (r % 3 != 2) {
@@ -308,12 +308,12 @@ static void hostile(uint64_t rounds)
 		st = malloc(sizeof *st);
 		if (!st)
 			exit(1);
-		status = kof_inflate(st, buf, n, out_sink, &o, NULL, NULL);
+		status = kuncoat_inflate(st, buf, n, out_sink, &o, NULL, NULL);
 		free(st);
 
 		zn = zlib_inflate_raw(buf, n, &zout, &zended);
 
-		if (status == KOF_DEC_OK && zended) {
+		if (status == KUNCOAT_OK && zended) {
 			/* Both say the stream is whole: the bytes must match. */
 			accepted++;
 			if (o.n != zn || (o.n && memcmp(o.p, zout, o.n) != 0)) {
@@ -321,7 +321,7 @@ static void hostile(uint64_t rounds)
 				fail("hostile", "accepted a stream zlib decoded "
 						"differently");
 			}
-		} else if (status == KOF_DEC_OK && !zended) {
+		} else if (status == KUNCOAT_OK && !zended) {
 			/*
 			 * We claim a complete stream where zlib does not. That is
 			 * the dangerous direction - it means bytes reached a scan

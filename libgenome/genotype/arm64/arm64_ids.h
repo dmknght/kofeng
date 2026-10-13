@@ -3,7 +3,7 @@
  * Armv8-A and the extensions up to Armv9.x that the decoder knows) table can
  * answer with.
  *
- * ONE LIST, THREE USES. GT_ARM64_ID_LIST names every identity once, with the two
+ * ONE LIST, THREE USES. KGENOME_ARM64_ID_LIST names every identity once, with the two
  * attributes a consumer needs from the identity alone - what a load or store
  * does with its data register (`kind`) and how it forms its address (`amode`).
  * The enum below, the attribute table in arm64_tab.c and the names the unit
@@ -26,35 +26,35 @@
  * whose offset width is read from the identity's range, and the first two
  * (INVALID, UDF), which are what "not an instruction" looks like.
  */
-#ifndef KOF_GENOTYPE_ARM64_IDS_H
-#define KOF_GENOTYPE_ARM64_IDS_H
+#ifndef KGENOME_GENOTYPE_ARM64_IDS_H
+#define KGENOME_GENOTYPE_ARM64_IDS_H
 
 /* What a load or store does with its data register. */
-enum gt_arm64_lskind {
-	GT_ARM64_K_NONE,
-	GT_ARM64_K_STORE,       /* store Xt/Wt                                     */
-	GT_ARM64_K_LOAD,        /* load Xt/Wt of the access size (4 or 8 bytes in the register) */
-	GT_ARM64_K_LOAD_S64,    /* load a byte, halfword or word, sign-extended into Xt */
-	GT_ARM64_K_LOAD_S32,    /* load a byte or halfword, sign-extended into Wt */
-	GT_ARM64_K_PREFETCH,    /* prfm: reads memory's address, writes nothing     */
-	GT_ARM64_K_STORE_FP,    /* store a scalar floating point / SIMD register    */
-	GT_ARM64_K_LOAD_FP
+enum kgenome_arm64_lskind {
+	KGENOME_ARM64_K_NONE,
+	KGENOME_ARM64_K_STORE,       /* store Xt/Wt                                     */
+	KGENOME_ARM64_K_LOAD,        /* load Xt/Wt of the access size (4 or 8 bytes in the register) */
+	KGENOME_ARM64_K_LOAD_S64,    /* load a byte, halfword or word, sign-extended into Xt */
+	KGENOME_ARM64_K_LOAD_S32,    /* load a byte or halfword, sign-extended into Wt */
+	KGENOME_ARM64_K_PREFETCH,    /* prfm: reads memory's address, writes nothing     */
+	KGENOME_ARM64_K_STORE_FP,    /* store a scalar floating point / SIMD register    */
+	KGENOME_ARM64_K_LOAD_FP
 };
 
 /* How a load or store forms its address. */
-enum gt_arm64_amode {
-	GT_ARM64_AM_NONE,       /* [Xn]                                            */
-	GT_ARM64_AM_OFFSET,     /* [Xn, #imm]: unsigned scaled, or signed for a pair or a tag */
-	GT_ARM64_AM_UNSCALED,   /* [Xn, #simm9]                                    */
-	GT_ARM64_AM_POST,       /* [Xn], #imm - Xn is written                      */
-	GT_ARM64_AM_PRE,        /* [Xn, #imm]! - Xn is written                     */
-	GT_ARM64_AM_UNPRIV,     /* ldtr/sttr: unscaled, as if at EL0               */
-	GT_ARM64_AM_REG,        /* [Xn, Xm{, extend {#amount}}]                    */
-	GT_ARM64_AM_LIT,        /* PC-relative literal                             */
-	GT_ARM64_AM_NOALLOC     /* ldnp/stnp: signed scaled offset, non-temporal   */
+enum kgenome_arm64_amode {
+	KGENOME_ARM64_AM_NONE,       /* [Xn]                                            */
+	KGENOME_ARM64_AM_OFFSET,     /* [Xn, #imm]: unsigned scaled, or signed for a pair or a tag */
+	KGENOME_ARM64_AM_UNSCALED,   /* [Xn, #simm9]                                    */
+	KGENOME_ARM64_AM_POST,       /* [Xn], #imm - Xn is written                      */
+	KGENOME_ARM64_AM_PRE,        /* [Xn, #imm]! - Xn is written                     */
+	KGENOME_ARM64_AM_UNPRIV,     /* ldtr/sttr: unscaled, as if at EL0               */
+	KGENOME_ARM64_AM_REG,        /* [Xn, Xm{, extend {#amount}}]                    */
+	KGENOME_ARM64_AM_LIT,        /* PC-relative literal                             */
+	KGENOME_ARM64_AM_NOALLOC     /* ldnp/stnp: signed scaled offset, non-temporal   */
 };
 
-#define GT_ARM64_ID_LIST(X) \
+#define KGENOME_ARM64_ID_LIST(X) \
 	/* what an undecodable word is: INVALID is unallocated, UDF is the permanently undefined udf #imm16 */ \
 	X(INVALID, NONE, NONE) X(UDF, NONE, NONE) \
 	/* SME (bit 31 set in the 0000 group): valid, writes no general register */ \
@@ -82,7 +82,7 @@ enum gt_arm64_amode {
 	X(MOVN, NONE, NONE) X(MOVZ, NONE, NONE) X(MOVK, NONE, NONE) \
 	X(SBFM, NONE, NONE) X(BFM, NONE, NONE) X(UBFM, NONE, NONE) X(EXTR, NONE, NONE) \
 	/* branches. B and BL carry an imm26, CBZ CBNZ BCOND an imm19, TBZ and TBNZ an imm14: */ \
-	/* gt_arm64_branch_off reads the width from this ORDER */ \
+	/* kgenome_arm64_branch_off reads the width from this ORDER */ \
 	X(B, NONE, NONE) X(BL, NONE, NONE) \
 	X(CBZ, NONE, NONE) X(CBNZ, NONE, NONE) X(BCOND, NONE, NONE) \
 	X(TBZ, NONE, NONE) X(TBNZ, NONE, NONE) \
@@ -174,11 +174,11 @@ enum gt_arm64_amode {
 	X(CRC32B, NONE, NONE) X(CRC32H, NONE, NONE) X(CRC32W, NONE, NONE) X(CRC32X, NONE, NONE) \
 	X(CRC32CB, NONE, NONE) X(CRC32CH, NONE, NONE) X(CRC32CW, NONE, NONE) X(CRC32CX, NONE, NONE)
 
-enum gt_arm64_id {
-#define X(n, k, a) GT_ARM64_I_##n,
-	GT_ARM64_ID_LIST(X)
+enum kgenome_arm64_id {
+#define X(n, k, a) KGENOME_ARM64_I_##n,
+	KGENOME_ARM64_ID_LIST(X)
 #undef X
-	GT_ARM64_I_COUNT
+	KGENOME_ARM64_I_COUNT
 };
 
-#endif /* KOF_GENOTYPE_ARM64_IDS_H */
+#endif /* KGENOME_GENOTYPE_ARM64_IDS_H */

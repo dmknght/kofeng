@@ -34,8 +34,8 @@ def enlarge(v, to=8):
     v.drag(x, g, x, to)
 
 
-def fold_plague(v):
-    """Collapse the plague block table (it is hundreds of rows on a .ko)."""
+def fold_mutation(v):
+    """Collapse the mutation block table (it is hundreds of rows on a .ko)."""
     g = grip(v)
     for y in range(g + 1, v.rows):
         if v.row(y).lstrip().startswith('[-] use'):

@@ -22,7 +22,7 @@
 /* ---- searching ---------------------------------------------------------------- */
 
 /*
- * Find `pat` in [from, to), or KOF_BROKEN.
+ * Find `pat` in [from, to), or KGENOME_BROKEN.
  *
  * memchr for the first byte and memcmp for the rest, which is what every other
  * literal search in this tree does and for the same reason: both are vectorised in
@@ -32,16 +32,16 @@ static uint64_t find_bytes(kof_buf f, uint64_t from, uint64_t to,
 			   const char *pat, uint32_t n)
 {
 	if (n == 0 || to > f.n || from >= to || (uint64_t)n > to - from)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 	for (;;) {
 		const uint8_t *p;
 		uint64_t left = to - from;
 
 		if ((uint64_t)n > left)
-			return KOF_BROKEN;
+			return KGENOME_BROKEN;
 		p = memchr(f.p + from, pat[0], (size_t)(left - n + 1u));
 		if (!p)
-			return KOF_BROKEN;
+			return KGENOME_BROKEN;
 		from = (uint64_t)(p - f.p);
 		if (memcmp(f.p + from, pat, n) == 0)
 			return from;
@@ -66,7 +66,7 @@ static int is_digit(uint8_t c)
  * Walks BACKWARDS, because that is the direction the anchor gives: "obj" is what was
  * searched for, and the two numbers in front of it are what make it an object header
  * rather than the word appearing in a stream. Returns where the header starts, or
- * KOF_BROKEN when the bytes in front are not two numbers.
+ * KGENOME_BROKEN when the bytes in front are not two numbers.
  */
 static uint64_t obj_header_start(kof_buf f, uint64_t at, uint32_t *num,
 				 uint32_t *gen)
@@ -76,29 +76,29 @@ static uint64_t obj_header_start(kof_buf f, uint64_t at, uint32_t *num,
 	uint32_t v;
 
 	if (i == 0)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 	/* whitespace, then the generation number */
 	while (i > 0 && is_ws(f.p[i - 1u]))
 		i--;
 	if (i == at)
-		return KOF_BROKEN;         /* "obj" must be preceded by space */
+		return KGENOME_BROKEN;         /* "obj" must be preceded by space */
 	g_end = i;
 	while (i > 0 && is_digit(f.p[i - 1u]))
 		i--;
 	g_start = i;
 	if (g_start == g_end || g_end - g_start > 10u)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 
 	while (i > 0 && is_ws(f.p[i - 1u]))
 		i--;
 	if (i == g_start)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 	n_end = i;
 	while (i > 0 && is_digit(f.p[i - 1u]))
 		i--;
 	n_start = i;
 	if (n_start == n_end || n_end - n_start > 10u)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 
 	v = 0;
 	for (i = n_start; i < n_end; i++)
@@ -687,19 +687,7 @@ static uint32_t stream_class(const struct kof_pdf_object *o)
 	return KOF_PDF_CLS_CONTENT;
 }
 
-static uint32_t pdf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_pdf_info *p = (const struct kof_pdf_info *)ctx->file_header;
-
-	if (!p || !p->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof p->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)p->run, p->n_runs, mask,
-				pdf_cls_bit, KOF_SCAN_PDF_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(pdf, struct kof_pdf_info, pdf_cls_bit, KOF_SCAN_PDF_UNCLAIMED)
 
 /* ---- the cross reference section ---------------------------------------------- */
 
@@ -722,7 +710,7 @@ static uint32_t pdf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
  *
  * Refusing is the point as much as measuring is: "xref" is four bytes and a
  * compressed stream carries them as readily as any others, so a candidate whose
- * shape does not hold gets KOF_BROKEN and stays out of the region.
+ * shape does not hold gets KGENOME_BROKEN and stays out of the region.
  */
 static uint64_t xref_section_end(kof_buf f, uint64_t at, uint64_t *tr_off,
 				 uint32_t *tr_len)
@@ -730,12 +718,12 @@ static uint64_t xref_section_end(kof_buf f, uint64_t at, uint64_t *tr_off,
 	uint64_t i, last_good;
 
 	if (at + 4u > f.n || memcmp(f.p + at, "xref", 4u) != 0)
-		return KOF_BROKEN;
+		return KGENOME_BROKEN;
 	i = at + 4u;
 	while (i < f.n && is_ws(f.p[i]))
 		i++;
 	if (i == at + 4u)
-		return KOF_BROKEN;         /* "xref" must be followed by space */
+		return KGENOME_BROKEN;         /* "xref" must be followed by space */
 	last_good = i;
 
 	/* Subsections: "<start> <count>", then count entries of twenty bytes. */
@@ -1154,7 +1142,7 @@ static void read_chain(kof_buf f, const struct kof_pdf_object *o,
 	 *
 	 * The key decides whether the code width grows one code before the
 	 * table needs it. The default is 1, which is what this build's decoder
-	 * does - see extractors/decomp/lzw.h - and a stream that says 0 decodes to
+	 * does - see libuncoat/decompressors/lzw.h - and a stream that says 0 decodes to
 	 * PLAUSIBLE GARBAGE rather than to nothing: the first few hundred bytes
 	 * are right and then it drifts. That is the worst possible failure, so
 	 * it is reported as a coding this build cannot perform, which is what it
@@ -1401,7 +1389,7 @@ int kof_pdf_sniff(kof_buf file)
 	uint64_t to = file.n < KOF_PDF_HEADER_SEARCH ? file.n
 						     : KOF_PDF_HEADER_SEARCH;
 
-	return find_bytes(file, 0, to, "%PDF-", 5u) != KOF_BROKEN;
+	return find_bytes(file, 0, to, "%PDF-", 5u) != KGENOME_BROKEN;
 }
 
 /* ---- what the document says about itself ----------------------------------- */
@@ -1585,73 +1573,74 @@ static void read_docinfo(struct kof_pdf_info *p, kof_buf file)
 	}
 }
 
-int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
+/* Everything of the view but its arrays - see the note inside. */
+static void pdf_clear_view(struct kof_pdf_info *p)
 {
-	struct kof_runs runs;
-	uint64_t at, hdr, to;
-	/* 8192 bits for the redefinition filter above. A kilobyte of frame, on
-	 * a path whose caller already hands it a 650KB view. */
-	uint8_t seen_num[1024];
+/*
+ * EVERYTHING BUT THE 800KB OF ARRAYS: 288 bytes instead of 819488.
+ *
+ * `memset(p, 0, sizeof *p)` cleared the whole view for every PDF
+ * object scanned. Measured on this machine: 13.7us each, against a
+ * head that is 168 bytes. The ZIP parser had the same line and the
+ * same fix took a 300-file scan from 12ms to 7ms.
+ *
+ * THREE SPANS RATHER THAN ONE, because unlike ZIP the arrays here are
+ * not at the tail - they are interleaved with the scalars:
+ *
+ *        0 .. 168      head
+ *      168 .. 393384   run[]        393216 bytes, skipped
+ *   393384 .. 753832   object[]     360448 bytes, skipped
+ *   753832 .. 753840   n_entries and its padding
+ *   753840 .. 819376   entry[]       65536 bytes, skipped
+ *   819376 .. 819488   docinfo[] and the trailer scalars
+ *
+ * WHAT MAKES IT SAFE: nothing reads past a count. Every loop over
+ * these arrays - here, in bases/decomp/pdf.c, in kofviewer - is bounded
+ * by n_objects, n_entries or n_runs, and all three counts live in the
+ * spans that ARE cleared. A parse that gives up early therefore leaves
+ * the arrays dirty and the counts at zero, which reads as "nothing
+ * found" and not as the previous file's objects. Each slot is cleared
+ * as it is claimed - see the memsets beside `&p->object[p->n_objects]`
+ * and `&p->entry[p->n_entries++]`.
+ *
+ * THE ASSERTS ARE THE GUARD. They pin every boundary above, so a field
+ * added or moved breaks the build rather than quietly falling into a
+ * gap nothing clears.
+ */
+	const size_t head_end = offsetof(struct kof_pdf_info, run);
+	const size_t obj_end  = offsetof(struct kof_pdf_info, object) +
+				sizeof p->object;
+	const size_t ent_at   = offsetof(struct kof_pdf_info, entry);
+	const size_t ent_end  = ent_at + sizeof p->entry;
 
-	/*
-	 * EVERYTHING BUT THE 800KB OF ARRAYS: 288 bytes instead of 819488.
-	 *
-	 * `memset(p, 0, sizeof *p)` cleared the whole view for every PDF
-	 * object scanned. Measured on this machine: 13.7us each, against a
-	 * head that is 168 bytes. The ZIP parser had the same line and the
-	 * same fix took a 300-file scan from 12ms to 7ms.
-	 *
-	 * THREE SPANS RATHER THAN ONE, because unlike ZIP the arrays here are
-	 * not at the tail - they are interleaved with the scalars:
-	 *
-	 *        0 .. 168      head
-	 *      168 .. 393384   run[]        393216 bytes, skipped
-	 *   393384 .. 753832   object[]     360448 bytes, skipped
-	 *   753832 .. 753840   n_entries and its padding
-	 *   753840 .. 819376   entry[]       65536 bytes, skipped
-	 *   819376 .. 819488   docinfo[] and the trailer scalars
-	 *
-	 * WHAT MAKES IT SAFE: nothing reads past a count. Every loop over
-	 * these arrays - here, in bases/decomp/pdf.c, in kofviewer - is bounded
-	 * by n_objects, n_entries or n_runs, and all three counts live in the
-	 * spans that ARE cleared. A parse that gives up early therefore leaves
-	 * the arrays dirty and the counts at zero, which reads as "nothing
-	 * found" and not as the previous file's objects. Each slot is cleared
-	 * as it is claimed - see the memsets beside `&p->object[p->n_objects]`
-	 * and `&p->entry[p->n_entries++]`.
-	 *
-	 * THE ASSERTS ARE THE GUARD. They pin every boundary above, so a field
-	 * added or moved breaks the build rather than quietly falling into a
-	 * gap nothing clears.
-	 */
-	{
-		const size_t head_end = offsetof(struct kof_pdf_info, run);
-		const size_t obj_end  = offsetof(struct kof_pdf_info, object) +
-					sizeof p->object;
-		const size_t ent_at   = offsetof(struct kof_pdf_info, entry);
-		const size_t ent_end  = ent_at + sizeof p->entry;
+	_Static_assert(offsetof(struct kof_pdf_info, object) ==
+		       offsetof(struct kof_pdf_info, run) +
+		       sizeof ((struct kof_pdf_info *)0)->run,
+		       "a field appeared between run[] and object[] "
+		       "and nothing clears it");
+	_Static_assert(offsetof(struct kof_pdf_info, docinfo) >=
+		       offsetof(struct kof_pdf_info, entry) +
+		       sizeof ((struct kof_pdf_info *)0)->entry,
+		       "entry[] and docinfo[] are out of order");
 
-		_Static_assert(offsetof(struct kof_pdf_info, object) ==
-			       offsetof(struct kof_pdf_info, run) +
-			       sizeof ((struct kof_pdf_info *)0)->run,
-			       "a field appeared between run[] and object[] "
-			       "and nothing clears it");
-		_Static_assert(offsetof(struct kof_pdf_info, docinfo) >=
-			       offsetof(struct kof_pdf_info, entry) +
-			       sizeof ((struct kof_pdf_info *)0)->entry,
-			       "entry[] and docinfo[] are out of order");
+	memset(p, 0, head_end);
+	memset((char *)p + obj_end, 0, ent_at - obj_end);
+	memset((char *)p + ent_end, 0,
+	       sizeof(struct kof_pdf_info) - ent_end);
+}
 
-		memset(p, 0, head_end);
-		memset((char *)p + obj_end, 0, ent_at - obj_end);
-		memset((char *)p + ent_end, 0,
-		       sizeof(struct kof_pdf_info) - ent_end);
-	}
-	memset(seen_num, 0, sizeof seen_num);
-	p->version = KOF_PDF_INFO_VERSION;
+/*
+ * The header: where "%PDF-" is, and the version after it. Zero when there is
+ * none.
+ */
+static int pdf_find_header(kof_buf file, struct kof_pdf_info *p,
+			   uint64_t *hdr_out)
+{
+	uint64_t hdr, to;
 
 	to = file.n < KOF_PDF_HEADER_SEARCH ? file.n : KOF_PDF_HEADER_SEARCH;
 	hdr = find_bytes(file, 0, to, "%PDF-", 5u);
-	if (hdr == KOF_BROKEN)
+	if (hdr == KGENOME_BROKEN)
 		return 0;
 	p->valid = 1;
 	p->header_off = hdr;
@@ -1662,10 +1651,16 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 		p->ver_major = (uint8_t)(file.p[hdr + 5u] - '0');
 		p->ver_minor = (uint8_t)(file.p[hdr + 7u] - '0');
 	}
+	*hdr_out = hdr;
+	return 1;
+}
 
-	kof_runs_init(&runs, (struct kof_run *)p->run, KOF_PDF_MAX_EXTENTS,
-		      KOF_PDF_CLS_COUNT);
-
+/*
+ * The version line, and the binary comment that may follow it, claimed as
+ * header.
+ */
+static void pdf_claim_header(kof_buf file, struct kof_runs *runs, uint64_t hdr)
+{
 	/*
 	 * THE VERSION LINE, AND NOT WHAT MAY SIT IN FRONT OF IT.
 	 *
@@ -1680,7 +1675,7 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 	 * complement puts them there by construction now that this claim starts
 	 * at the magic rather than at zero.
 	 */
-	kof_runs_add(&runs, file.n, hdr, hdr + 8u <= file.n ? 8u : file.n - hdr,
+	kof_runs_add(runs, file.n, hdr, hdr + 8u <= file.n ? 8u : file.n - hdr,
 		     KOF_PDF_CLS_HEADERS);
 	/*
 	 * AND THE BINARY COMMENT UNDER IT.
@@ -1694,149 +1689,388 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 	 * Recognised by the '%' and bounded by the line, because that is all it
 	 * is: a comment. Nothing reads its contents.
 	 */
-	{
-		uint64_t c = hdr + 8u;
+	uint64_t c = hdr + 8u;
 
-		while (c < file.n && (file.p[c] == '\r' || file.p[c] == '\n'))
-			c++;
-		if (c < file.n && file.p[c] == '%') {
-			uint64_t e = c;
+	while (c < file.n && (file.p[c] == '\r' || file.p[c] == '\n'))
+		c++;
+	if (c < file.n && file.p[c] == '%') {
+		uint64_t e = c;
 
-			while (e < file.n && file.p[e] != '\r' && file.p[e] != '\n')
-				e++;
-			while (e < file.n && (file.p[e] == '\r' || file.p[e] == '\n'))
-				e++;
-			kof_runs_add(&runs, file.n, hdr + 8u, e - (hdr + 8u),
+		while (e < file.n && file.p[e] != '\r' && file.p[e] != '\n')
+			e++;
+		while (e < file.n && (file.p[e] == '\r' || file.p[e] == '\n'))
+			e++;
+		kof_runs_add(runs, file.n, hdr + 8u, e - (hdr + 8u),
+			     KOF_PDF_CLS_HEADERS);
+	}
+}
+
+/*
+ * The trailer end: every %%EOF and startxref, recorded and checked, never
+ * followed.
+ */
+static void pdf_read_trailer(kof_buf file, struct kof_pdf_info *p,
+			     struct kof_runs *runs)
+{
+	uint64_t at;
+
+/*
+ * The trailer end, read before the objects so that a truncated file is
+ * already known to be one. startxref is recorded and checked, never
+ * followed.
+ */
+	uint64_t eof = KGENOME_BROKEN, sx, from;
+
+	from = file.n > (1u << 16) ? file.n - (1u << 16) : 0;
+	for (at = from; at < file.n; ) {
+		uint64_t h = find_bytes(file, at, file.n, "%%EOF", 5u);
+
+		if (h == KGENOME_BROKEN)
+			break;
+		eof = h;
+		/*
+		 * EVERY ONE OF THEM, AND NOT ONLY THE LAST.
+		 *
+		 * An incrementally updated document ends each revision
+		 * with its own startxref and %%EOF, and they are all
+		 * structure. Keeping only the last left the earlier
+		 * ones owned by nothing, so a hybrid file - one with a
+		 * classic table for old readers AND a cross reference
+		 * stream for new ones - reported a revision's whole
+		 * tail as bytes no structure claimed. `eof_off` still
+		 * says the LAST, which is the one a reader resumes
+		 * from; the claim is about all of them.
+		 */
+		kof_runs_add(runs, file.n, h, 5u, KOF_PDF_CLS_HEADERS);
+		at = h + 5u;
+	}
+	if (eof == KGENOME_BROKEN)
+		p->anomalies |= KOF_PDF_ANOM_NO_EOF;
+	else
+		p->eof_off = eof;   /* claimed in the loop above */
+
+	sx = KGENOME_BROKEN;
+	for (at = from; at < file.n; ) {
+		uint64_t h = find_bytes(file, at, file.n, "startxref", 9u);
+
+		if (h == KGENOME_BROKEN)
+			break;
+		sx = h;
+		/* Each revision's pointer, for the reason the %%EOF
+		 * loop above gives - and the digits with it, so the
+		 * extent is the whole statement rather than a fixed
+		 * nine bytes with its value left in the complement. */
+		{
+			uint64_t j = h + 9u;
+
+			while (j < file.n && is_ws(file.p[j]))
+				j++;
+			while (j < file.n && is_digit(file.p[j]))
+				j++;
+			kof_runs_add(runs, file.n, h, j - h,
 				     KOF_PDF_CLS_HEADERS);
 		}
+		at = h + 9u;
 	}
+	if (sx == KGENOME_BROKEN) {
+		p->anomalies |= KOF_PDF_ANOM_NO_XREF;
+	} else {
+		uint64_t i = sx + 9u, v = 0;
+		int any = 0;
 
-	/*
-	 * The trailer end, read before the objects so that a truncated file is
-	 * already known to be one. startxref is recorded and checked, never
-	 * followed.
-	 */
-	{
-		uint64_t eof = KOF_BROKEN, sx, from;
-
-		from = file.n > (1u << 16) ? file.n - (1u << 16) : 0;
-		for (at = from; at < file.n; ) {
-			uint64_t h = find_bytes(file, at, file.n, "%%EOF", 5u);
-
-			if (h == KOF_BROKEN)
-				break;
-			eof = h;
-			/*
-			 * EVERY ONE OF THEM, AND NOT ONLY THE LAST.
-			 *
-			 * An incrementally updated document ends each revision
-			 * with its own startxref and %%EOF, and they are all
-			 * structure. Keeping only the last left the earlier
-			 * ones owned by nothing, so a hybrid file - one with a
-			 * classic table for old readers AND a cross reference
-			 * stream for new ones - reported a revision's whole
-			 * tail as bytes no structure claimed. `eof_off` still
-			 * says the LAST, which is the one a reader resumes
-			 * from; the claim is about all of them.
-			 */
-			kof_runs_add(&runs, file.n, h, 5u, KOF_PDF_CLS_HEADERS);
-			at = h + 5u;
+		while (i < file.n && is_ws(file.p[i]))
+			i++;
+		while (i < file.n && is_digit(file.p[i]) && v < (1ull << 60)) {
+			v = v * 10u + (uint64_t)(file.p[i] - '0');
+			i++;
+			any = 1;
 		}
-		if (eof == KOF_BROKEN)
-			p->anomalies |= KOF_PDF_ANOM_NO_EOF;
-		else
-			p->eof_off = eof;   /* claimed in the loop above */
-
-		sx = KOF_BROKEN;
-		for (at = from; at < file.n; ) {
-			uint64_t h = find_bytes(file, at, file.n, "startxref", 9u);
-
-			if (h == KOF_BROKEN)
-				break;
-			sx = h;
-			/* Each revision's pointer, for the reason the %%EOF
-			 * loop above gives - and the digits with it, so the
-			 * extent is the whole statement rather than a fixed
-			 * nine bytes with its value left in the complement. */
-			{
-				uint64_t j = h + 9u;
-
-				while (j < file.n && is_ws(file.p[j]))
-					j++;
-				while (j < file.n && is_digit(file.p[j]))
-					j++;
-				kof_runs_add(&runs, file.n, h, j - h,
-					     KOF_PDF_CLS_HEADERS);
-			}
-			at = h + 9u;
-		}
-		if (sx == KOF_BROKEN) {
-			p->anomalies |= KOF_PDF_ANOM_NO_XREF;
-		} else {
-			uint64_t i = sx + 9u, v = 0;
-			int any = 0;
-
-			while (i < file.n && is_ws(file.p[i]))
-				i++;
-			while (i < file.n && is_digit(file.p[i]) && v < (1ull << 60)) {
-				v = v * 10u + (uint64_t)(file.p[i] - '0');
-				i++;
-				any = 1;
-			}
-			/* Claimed in the loop above, keyword and value both -
-			 * a second claim on the same bytes would be trimmed by
-			 * kof_runs_settle and reported as an OVERLAP the file
-			 * does not have. This only reads the value. */
-			p->startxref = any ? v : 0;
-			if (!any || v >= file.n)
-				p->anomalies |= KOF_PDF_ANOM_BAD_STARTXREF;
-		}
-		/*
-		 * /Encrypt USED TO BE SEARCHED FOR HERE, AND SHOULD NOT HAVE
-		 * BEEN.
-		 *
-		 * The bytes were looked for in the last 64KiB of the file,
-		 * which is neither where the name has to be nor the only place
-		 * it can be: a linearised document puts its trailer at the
-		 * FRONT and so never set the bit, while any stream in the tail
-		 * carrying those eight bytes set it for a document that is not
-		 * encrypted at all.
-		 *
-		 * It is a marker in the table now, so it is found where it is
-		 * actually written - in an object's dictionary, which is where
-		 * a cross reference stream keeps it, and in the trailer
-		 * dictionary, which the xref section below reads.
-		 */
+		/* Claimed in the loop above, keyword and value both -
+		 * a second claim on the same bytes would be trimmed by
+		 * kof_runs_settle and reported as an OVERLAP the file
+		 * does not have. This only reads the value. */
+		p->startxref = any ? v : 0;
+		if (!any || v >= file.n)
+			p->anomalies |= KOF_PDF_ANOM_BAD_STARTXREF;
 	}
-
 	/*
-	 * The objects.
+	 * /Encrypt USED TO BE SEARCHED FOR HERE, AND SHOULD NOT HAVE
+	 * BEEN.
 	 *
-	 * Anchored on "obj" and confirmed by the two numbers in front of it, which
-	 * is what keeps the word appearing inside a stream from starting a phantom
-	 * object. Each iteration advances past the anchor whether or not it was
-	 * real, so the walk ends on the object.
+	 * The bytes were looked for in the last 64KiB of the file,
+	 * which is neither where the name has to be nor the only place
+	 * it can be: a linearised document puts its trailer at the
+	 * FRONT and so never set the bit, while any stream in the tail
+	 * carrying those eight bytes set it for a document that is not
+	 * encrypted at all.
+	 *
+	 * It is a marker in the table now, so it is found where it is
+	 * actually written - in an object's dictionary, which is where
+	 * a cross reference stream keeps it, and in the trailer
+	 * dictionary, which the xref section below reads.
 	 */
+}
+
+/* The stream inside one object: where it ends, and what its length said about that.
+ * Returns where the object ends, which the stream may have moved. */
+static uint64_t pdf_stream_extent(kof_buf file, struct kof_pdf_info *p,
+				  struct kof_pdf_object *o, uint64_t start,
+				  uint64_t s_kw, uint64_t end,
+				  uint64_t declared)
+{
+	uint64_t s_end;
+
+	uint64_t d = s_kw + 6u;
+
+	/* The data begins after the EOL that must follow the
+	 * keyword; both CRLF and LF appear. */
+	if (d < file.n && file.p[d] == '\r')
+		d++;
+	if (d < file.n && file.p[d] == '\n')
+		d++;
+
+	/*
+	 * THE KEYWORD BELONGS TO THE OBJECT, NOT TO NOBODY.
+	 *
+	 * The dictionary run ended where "stream" begins and the
+	 * data run starts after the end of line that follows it,
+	 * so the eight bytes between them - the word and its EOL
+	 * - were owned by nothing. Fifteen streams in one
+	 * ordinary document, 120 of its 161 unclaimed bytes: the
+	 * single largest thing left in a region whose whole
+	 * value is being nearly empty on a file with nothing to
+	 * hide.
+	 *
+	 * The dictionary grows to cover it rather than a run of
+	 * its own being added, so the two coalesce and it costs
+	 * no extent. What dict_scan already read is unchanged -
+	 * it was given the range that ends at the keyword, and a
+	 * keyword holds no names.
+	 */
+	if (d > start)
+		o->dict_len = d - start;
+
+	s_end = find_bytes(file, d, file.n, "endstream", 9u);
+
+	/*
+	 * /Length, CORROBORATED RATHER THAN TRUSTED.
+	 *
+	 * The format says /Length decides and "endstream" is
+	 * how a reader recovers when it is wrong, so searching
+	 * alone was reading the fallback and calling it the
+	 * answer: a stream whose DATA carries the nine bytes
+	 * "endstream" got cut off at them, and everything past
+	 * the decoy left the stream, never reached the
+	 * decompressor, and raised nothing at all.
+	 *
+	 * Corroborated, because a length is a number the file
+	 * chooses too and a huge one would pull the rest of the
+	 * document into one opaque region - the same trick from
+	 * the other end. So it wins only where an "endstream"
+	 * really stands where it points, and the two disagreeing
+	 * is itself the thing recorded.
+	 */
+	if (declared) {
+		uint64_t dend = kof_sat_add(d, declared);
+
+		if (dend <= file.n && endstream_at(file, dend)) {
+			if (s_end != KGENOME_BROKEN && s_end < dend) {
+				p->anomalies |=
+				    KOF_PDF_ANOM_STREAM_DECOY;
+				o->flags |=
+				    KOF_PDF_OBJ_STREAM_DECOY;
+			}
+			s_end = dend;
+		} else {
+			/* Pointing at no keyword at all: damage
+			 * as often as intent, so its own bit. */
+			p->anomalies |= KOF_PDF_ANOM_LENGTH_BAD;
+		}
+	}
+
+	if (s_end == KGENOME_BROKEN) {
+		p->anomalies |= KOF_PDF_ANOM_STREAM_UNTERM;
+		s_end = end;
+	} else if (s_end + 9u > end) {
+		/*
+		 * THE STREAM BOUNDS THE OBJECT, NOT THE FIRST
+		 * "endobj" IN THE FILE.
+		 *
+		 * `end` was taken before the stream had been
+		 * located, by a search with nothing but the file to
+		 * bound it - and compressed bytes carry the string
+		 * "endobj" as readily as any other six. Taken from
+		 * inside the stream it made the walk rewind into the
+		 * stream body and read opaque bytes as dictionaries:
+		 * a phantom object whose /Launch or /JS raised an
+		 * anomaly about a document that declared neither, a
+		 * run colliding with the stream's own so the file was
+		 * reported OVERLAP when nothing in it overlapped, and
+		 * a slot spent out of the object table that a real
+		 * stream-bearing object then could not have.
+		 *
+		 * Re-taken from past "endstream", which is the first
+		 * offset the object's own structure resumes at.
+		 */
+		uint64_t e2 = find_bytes(file, s_end + 9u, file.n,
+					 "endobj", 6u);
+
+		if (e2 == KGENOME_BROKEN) {
+			p->anomalies |= KOF_PDF_ANOM_TRUNCATED;
+			end = file.n;
+		} else {
+			end = e2 + 6u;
+		}
+	}
+	if (s_end > d) {
+		o->stream_off = d;
+		o->stream_len = s_end - d;
+		o->flags |= KOF_PDF_OBJ_STREAM;
+		p->n_streams++;
+		o->len = end - start;
+	}
+	return end;
+}
+
+/* What an object claims: its dictionary and the whitespace after it, and the
+ * tail of its stream. Returns where the next object may begin. */
+static uint64_t pdf_claim_object(kof_buf file, struct kof_runs *runs,
+				 struct kof_pdf_object *o, uint64_t start,
+				 uint64_t end)
+{
+	uint64_t stop;
+
+	/*
+	 * WHERE THE NEXT OBJECT BEGINS, AND WHY THE GAP IS OURS.
+	 *
+	 * One or two bytes of end of line sit between "endobj" and the
+	 * next "N G obj". Left to nobody they became a run in the
+	 * complement, and that gap is exactly what stopped kof_runs_add
+	 * from joining one object's tail to the next one's dictionary -
+	 * so a document's runs went dict, stream, tail, GAP, dict, and
+	 * every object cost three extents instead of the one its bytes
+	 * describe. Measured on an ordinary 1.65MB document: 180 of its
+	 * 240 UNCLAIMED extents were four bytes or fewer of this, and
+	 * OBJECTS resolved to 238 extents where 58 say the same thing.
+	 *
+	 * Not a cosmetic count. A region resolves into KOF_SCAN_MAX_EXTENTS
+	 * ranges and one that does not fit is searched IN PART, with the
+	 * scan saying KOF_BROKEN_LIMIT - and a benign PDF was reaching it.
+	 * Whitespace between two structures is structure, so it goes to
+	 * OBJECTS and consecutive objects coalesce into one run.
+	 */
+	stop = end;
+	while (stop < file.n && is_ws(file.p[stop]))
+		stop++;
+	/* An object with no stream owns the gap as part of its own run;
+	 * one with a stream has a tail below that reaches the same
+	 * place. Only the RUN grows - the dictionary has already been
+	 * read, and whitespace holds no names. */
+	if (!o->stream_len && stop > start)
+		o->dict_len = stop - start;
+
+	kof_runs_add(runs, file.n, o->dict_off, o->dict_len,
+		     KOF_PDF_CLS_OBJ_TABLE);
+	/*
+	 * THE STREAM'S OWN RUN IS NOT ADDED HERE.
+	 *
+	 * It cannot be. Which region it belongs in depends on the
+	 * category, and the category of a script stream is not known
+	 * until the /JS that points at it has been found - which may be
+	 * in an object that comes LATER in the file. Added from here it
+	 * was filed as CONTENT and the resolution below then changed a
+	 * category that no longer decided anything: the region said
+	 * CONTENT and the object table said SCRIPT, and the two
+	 * disagreed with nothing to notice it.
+	 *
+	 * So the dictionary and the tail are claimed here, where they
+	 * are known, and every stream run is added after the pass that
+	 * settles categories. kof_runs_settle sorts, so nothing depends
+	 * on the order the two are added in.
+	 */
+	/* The tail of the object - "endstream endobj" - is structure. */
+	if (o->stream_len) {
+		uint64_t tail = o->stream_off + o->stream_len;
+
+		if (stop > tail)
+			kof_runs_add(runs, file.n, tail, stop - tail,
+				     KOF_PDF_CLS_OBJ_TABLE);
+	}
+	return stop;
+}
+
+/* This number and generation, seen before. */
+static void pdf_note_redefined(struct kof_pdf_info *p, struct kof_pdf_object *o,
+			       uint8_t *seen_num)
+{
+	/*
+	 * THIS NUMBER AND GENERATION, SEEN BEFORE.
+	 *
+	 * Through an 8192 bit filter rather than a scan of the table,
+	 * because the table holds four thousand objects and comparing
+	 * against every earlier one is eight million compares per
+	 * document - milliseconds, per object, on the scan path. A
+	 * collision in the filter costs the walk it saved and only
+	 * then; a duplicate is rare and a false hit on 13 bits rarer.
+	 *
+	 * See KOF_PDF_ANOM_OBJ_REDEFINED for why this is recorded and
+	 * not resolved: an incrementally updated document does it on
+	 * purpose, and which definition a viewer picks is a question
+	 * only the cross reference table answers.
+	 */
+	uint32_t b = o->num & 8191u;
+
+	if (seen_num[b >> 3] & (uint8_t)(1u << (b & 7u))) {
+		uint32_t k;
+
+		for (k = 0; k < p->n_objects; k++)
+			if (p->object[k].num == o->num &&
+			    p->object[k].gen == o->gen) {
+				p->anomalies |=
+				    KOF_PDF_ANOM_OBJ_REDEFINED;
+				o->flags |=
+				    KOF_PDF_OBJ_REDEFINED;
+				break;
+			}
+	}
+	seen_num[b >> 3] |= (uint8_t)(1u << (b & 7u));
+}
+
+/* The objects: every "obj" confirmed by the two numbers before it. */
+static void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p,
+			     struct kof_runs *runs, uint8_t *seen_num,
+			     uint64_t hdr)
+{
+	uint64_t at;
+
+/*
+ * The objects.
+ *
+ * Anchored on "obj" and confirmed by the two numbers in front of it, which
+ * is what keeps the word appearing inside a stream from starting a phantom
+ * object. Each iteration advances past the anchor whether or not it was
+ * real, so the walk ends on the object.
+ */
 	at = hdr;
 	while (at < file.n) {
 		uint64_t tok = find_bytes(file, at, file.n, "obj", 3u);
-		uint64_t start, end, stop, dict_end, s_kw, s_end;
+		uint64_t start, end, stop, dict_end, s_kw;
 		uint64_t declared = 0;
 		struct kof_pdf_object *o, spill;
 		uint32_t num = 0, gen = 0;
 
-		if (tok == KOF_BROKEN)
+		if (tok == KGENOME_BROKEN)
 			break;
 		at = tok + 3u;                  /* advance first, always */
 
 		start = obj_header_start(file, tok, &num, &gen);
-		if (start == KOF_BROKEN)
+		if (start == KGENOME_BROKEN)
 			continue;                /* "obj" inside something else */
 
 		/* Where this object ends. A missing endobj is ordinary in a damaged
 		 * file, so the next object's header bounds it instead. */
 		end = find_bytes(file, tok + 3u, file.n, "endobj", 6u);
-		if (end == KOF_BROKEN) {
+		if (end == KGENOME_BROKEN) {
 			p->anomalies |= KOF_PDF_ANOM_TRUNCATED;
 			end = file.n;
 		} else {
@@ -1871,10 +2105,10 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 		s_kw = find_bytes(file, tok + 3u, end, "stream", 6u);
 		/* Only the keyword begins the data - see stream_kw_at, which
 		 * says what else the word turns up inside and what it cost. */
-		while (s_kw != KOF_BROKEN && !stream_kw_at(file, s_kw))
+		while (s_kw != KGENOME_BROKEN && !stream_kw_at(file, s_kw))
 			s_kw = find_bytes(file, s_kw + 6u, end, "stream", 6u);
 
-		dict_end = (s_kw == KOF_BROKEN) ? end : s_kw;
+		dict_end = (s_kw == KGENOME_BROKEN) ? end : s_kw;
 
 		/*
 		 * THE DICTIONARY IS READ BEFORE THE STREAM IS MEASURED.
@@ -1889,208 +2123,13 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 		o->dict_len = dict_end > start ? dict_end - start : 0;
 		dict_scan(file, o->dict_off, o->dict_len, o, p, &declared);
 
-		if (s_kw != KOF_BROKEN) {
-			uint64_t d = s_kw + 6u;
+		if (s_kw != KGENOME_BROKEN)
+			end = pdf_stream_extent(file, p, o, start, s_kw, end,
+						declared);
 
-			/* The data begins after the EOL that must follow the
-			 * keyword; both CRLF and LF appear. */
-			if (d < file.n && file.p[d] == '\r')
-				d++;
-			if (d < file.n && file.p[d] == '\n')
-				d++;
+		stop = pdf_claim_object(file, runs, o, start, end);
 
-			/*
-			 * THE KEYWORD BELONGS TO THE OBJECT, NOT TO NOBODY.
-			 *
-			 * The dictionary run ended where "stream" begins and the
-			 * data run starts after the end of line that follows it,
-			 * so the eight bytes between them - the word and its EOL
-			 * - were owned by nothing. Fifteen streams in one
-			 * ordinary document, 120 of its 161 unclaimed bytes: the
-			 * single largest thing left in a region whose whole
-			 * value is being nearly empty on a file with nothing to
-			 * hide.
-			 *
-			 * The dictionary grows to cover it rather than a run of
-			 * its own being added, so the two coalesce and it costs
-			 * no extent. What dict_scan already read is unchanged -
-			 * it was given the range that ends at the keyword, and a
-			 * keyword holds no names.
-			 */
-			if (d > start)
-				o->dict_len = d - start;
-
-			s_end = find_bytes(file, d, file.n, "endstream", 9u);
-
-			/*
-			 * /Length, CORROBORATED RATHER THAN TRUSTED.
-			 *
-			 * The format says /Length decides and "endstream" is
-			 * how a reader recovers when it is wrong, so searching
-			 * alone was reading the fallback and calling it the
-			 * answer: a stream whose DATA carries the nine bytes
-			 * "endstream" got cut off at them, and everything past
-			 * the decoy left the stream, never reached the
-			 * decompressor, and raised nothing at all.
-			 *
-			 * Corroborated, because a length is a number the file
-			 * chooses too and a huge one would pull the rest of the
-			 * document into one opaque region - the same trick from
-			 * the other end. So it wins only where an "endstream"
-			 * really stands where it points, and the two disagreeing
-			 * is itself the thing recorded.
-			 */
-			if (declared) {
-				uint64_t dend = kof_sat_add(d, declared);
-
-				if (dend <= file.n && endstream_at(file, dend)) {
-					if (s_end != KOF_BROKEN && s_end < dend) {
-						p->anomalies |=
-						    KOF_PDF_ANOM_STREAM_DECOY;
-						o->flags |=
-						    KOF_PDF_OBJ_STREAM_DECOY;
-					}
-					s_end = dend;
-				} else {
-					/* Pointing at no keyword at all: damage
-					 * as often as intent, so its own bit. */
-					p->anomalies |= KOF_PDF_ANOM_LENGTH_BAD;
-				}
-			}
-
-			if (s_end == KOF_BROKEN) {
-				p->anomalies |= KOF_PDF_ANOM_STREAM_UNTERM;
-				s_end = end;
-			} else if (s_end + 9u > end) {
-				/*
-				 * THE STREAM BOUNDS THE OBJECT, NOT THE FIRST
-				 * "endobj" IN THE FILE.
-				 *
-				 * `end` was taken before the stream had been
-				 * located, by a search with nothing but the file to
-				 * bound it - and compressed bytes carry the string
-				 * "endobj" as readily as any other six. Taken from
-				 * inside the stream it made the walk rewind into the
-				 * stream body and read opaque bytes as dictionaries:
-				 * a phantom object whose /Launch or /JS raised an
-				 * anomaly about a document that declared neither, a
-				 * run colliding with the stream's own so the file was
-				 * reported OVERLAP when nothing in it overlapped, and
-				 * a slot spent out of the object table that a real
-				 * stream-bearing object then could not have.
-				 *
-				 * Re-taken from past "endstream", which is the first
-				 * offset the object's own structure resumes at.
-				 */
-				uint64_t e2 = find_bytes(file, s_end + 9u, file.n,
-							 "endobj", 6u);
-
-				if (e2 == KOF_BROKEN) {
-					p->anomalies |= KOF_PDF_ANOM_TRUNCATED;
-					end = file.n;
-				} else {
-					end = e2 + 6u;
-				}
-			}
-			if (s_end > d) {
-				o->stream_off = d;
-				o->stream_len = s_end - d;
-				o->flags |= KOF_PDF_OBJ_STREAM;
-				p->n_streams++;
-				o->len = end - start;
-			}
-		}
-
-		/*
-		 * WHERE THE NEXT OBJECT BEGINS, AND WHY THE GAP IS OURS.
-		 *
-		 * One or two bytes of end of line sit between "endobj" and the
-		 * next "N G obj". Left to nobody they became a run in the
-		 * complement, and that gap is exactly what stopped kof_runs_add
-		 * from joining one object's tail to the next one's dictionary -
-		 * so a document's runs went dict, stream, tail, GAP, dict, and
-		 * every object cost three extents instead of the one its bytes
-		 * describe. Measured on an ordinary 1.65MB document: 180 of its
-		 * 240 UNCLAIMED extents were four bytes or fewer of this, and
-		 * OBJECTS resolved to 238 extents where 58 say the same thing.
-		 *
-		 * Not a cosmetic count. A region resolves into KOF_SCAN_MAX_EXTENTS
-		 * ranges and one that does not fit is searched IN PART, with the
-		 * scan saying KOF_BROKEN_LIMIT - and a benign PDF was reaching it.
-		 * Whitespace between two structures is structure, so it goes to
-		 * OBJECTS and consecutive objects coalesce into one run.
-		 */
-		stop = end;
-		while (stop < file.n && is_ws(file.p[stop]))
-			stop++;
-		/* An object with no stream owns the gap as part of its own run;
-		 * one with a stream has a tail below that reaches the same
-		 * place. Only the RUN grows - the dictionary has already been
-		 * read, and whitespace holds no names. */
-		if (!o->stream_len && stop > start)
-			o->dict_len = stop - start;
-
-		kof_runs_add(&runs, file.n, o->dict_off, o->dict_len,
-			     KOF_PDF_CLS_OBJ_TABLE);
-		/*
-		 * THE STREAM'S OWN RUN IS NOT ADDED HERE.
-		 *
-		 * It cannot be. Which region it belongs in depends on the
-		 * category, and the category of a script stream is not known
-		 * until the /JS that points at it has been found - which may be
-		 * in an object that comes LATER in the file. Added from here it
-		 * was filed as CONTENT and the resolution below then changed a
-		 * category that no longer decided anything: the region said
-		 * CONTENT and the object table said SCRIPT, and the two
-		 * disagreed with nothing to notice it.
-		 *
-		 * So the dictionary and the tail are claimed here, where they
-		 * are known, and every stream run is added after the pass that
-		 * settles categories. kof_runs_settle sorts, so nothing depends
-		 * on the order the two are added in.
-		 */
-		/* The tail of the object - "endstream endobj" - is structure. */
-		if (o->stream_len) {
-			uint64_t tail = o->stream_off + o->stream_len;
-
-			if (stop > tail)
-				kof_runs_add(&runs, file.n, tail, stop - tail,
-					     KOF_PDF_CLS_OBJ_TABLE);
-		}
-
-		/*
-		 * THIS NUMBER AND GENERATION, SEEN BEFORE.
-		 *
-		 * Through an 8192 bit filter rather than a scan of the table,
-		 * because the table holds four thousand objects and comparing
-		 * against every earlier one is eight million compares per
-		 * document - milliseconds, per object, on the scan path. A
-		 * collision in the filter costs the walk it saved and only
-		 * then; a duplicate is rare and a false hit on 13 bits rarer.
-		 *
-		 * See KOF_PDF_ANOM_OBJ_REDEFINED for why this is recorded and
-		 * not resolved: an incrementally updated document does it on
-		 * purpose, and which definition a viewer picks is a question
-		 * only the cross reference table answers.
-		 */
-		{
-			uint32_t b = o->num & 8191u;
-
-			if (seen_num[b >> 3] & (uint8_t)(1u << (b & 7u))) {
-				uint32_t k;
-
-				for (k = 0; k < p->n_objects; k++)
-					if (p->object[k].num == o->num &&
-					    p->object[k].gen == o->gen) {
-						p->anomalies |=
-						    KOF_PDF_ANOM_OBJ_REDEFINED;
-						o->flags |=
-						    KOF_PDF_OBJ_REDEFINED;
-						break;
-					}
-			}
-			seen_num[b >> 3] |= (uint8_t)(1u << (b & 7u));
-		}
+		pdf_note_redefined(p, o, seen_num);
 
 		if (o != &spill)
 			p->n_objects++;
@@ -2098,143 +2137,177 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 		if (stop > at)
 			at = stop;
 	}
+}
 
-	/*
-	 * THE CROSS REFERENCE SECTIONS, CLAIMED AFTER THE OBJECTS.
-	 *
-	 * After, because that is what makes a candidate inside a stream
-	 * refusable. xref_section_end turns down most stray "xref" bytes by
-	 * validating the shape behind them, but HEADER is class zero and so
-	 * outranks every stream class in the settle: a survivor would TAKE
-	 * bytes the walk had already established belong to a stream, and the
-	 * region would be describing the file less accurately than before.
-	 *
-	 * The object table is in increasing offset order, so `oi` walks it once
-	 * alongside the search rather than being scanned per candidate - and a
-	 * stream that happens to be full of the string costs one skip instead
-	 * of one validation per hit.
-	 *
-	 * Every section, not just the last: an incrementally updated document
-	 * has one per revision, and the earlier ones are as much structure as
-	 * the newest. /Prev is not followed - it is another offset the file
-	 * chooses - so they are found the same way everything else here is.
-	 */
-	{
-		uint32_t oi = 0;
+/* The cross reference sections, claimed after the objects. */
+static void pdf_claim_xref(kof_buf file, struct kof_pdf_info *p,
+			   struct kof_runs *runs, uint64_t hdr)
+{
+	uint64_t at;
 
-		at = hdr;
-		while (at < file.n) {
-			uint64_t h = find_bytes(file, at, file.n, "xref", 4u);
-			uint64_t xend, s_lim;
+/*
+ * THE CROSS REFERENCE SECTIONS, CLAIMED AFTER THE OBJECTS.
+ *
+ * After, because that is what makes a candidate inside a stream
+ * refusable. xref_section_end turns down most stray "xref" bytes by
+ * validating the shape behind them, but HEADER is class zero and so
+ * outranks every stream class in the settle: a survivor would TAKE
+ * bytes the walk had already established belong to a stream, and the
+ * region would be describing the file less accurately than before.
+ *
+ * The object table is in increasing offset order, so `oi` walks it once
+ * alongside the search rather than being scanned per candidate - and a
+ * stream that happens to be full of the string costs one skip instead
+ * of one validation per hit.
+ *
+ * Every section, not just the last: an incrementally updated document
+ * has one per revision, and the earlier ones are as much structure as
+ * the newest. /Prev is not followed - it is another offset the file
+ * chooses - so they are found the same way everything else here is.
+ */
+	uint32_t oi = 0;
 
-			if (h == KOF_BROKEN)
-				break;
-			at = h + 4u;
-			/* "startxref" ends in "xref"; its own claim is made
-			 * above, and this must not make a second one. */
-			if (h >= 5u && memcmp(file.p + h - 5u, "start", 5u) == 0)
-				continue;
+	at = hdr;
+	while (at < file.n) {
+		uint64_t h = find_bytes(file, at, file.n, "xref", 4u);
+		uint64_t xend, s_lim;
 
-			while (oi < p->n_objects &&
-			       p->object[oi].stream_off +
-			       p->object[oi].stream_len <= h)
-				oi++;
-			if (oi < p->n_objects && p->object[oi].stream_len &&
-			    h >= p->object[oi].stream_off) {
-				s_lim = p->object[oi].stream_off +
-					p->object[oi].stream_len;
-				if (s_lim > at)
-					at = s_lim;
-				continue;
-			}
+		if (h == KGENOME_BROKEN)
+			break;
+		at = h + 4u;
+		/* "startxref" ends in "xref"; its own claim is made
+		 * above, and this must not make a second one. */
+		if (h >= 5u && memcmp(file.p + h - 5u, "start", 5u) == 0)
+			continue;
 
-			xend = xref_section_end(file, h, &p->trailer_off,
-						&p->trailer_len);
-			if (xend == KOF_BROKEN || xend <= h)
-				continue;
-			kof_runs_add(&runs, file.n, h, xend - h,
-				     KOF_PDF_CLS_XREF);
-			/*
-			 * And read for what it declares. The trailer is a
-			 * dictionary like any other - /Encrypt and /Root live
-			 * in it - and nothing was reading it, so a classic
-			 * document's own statement about itself reached no
-			 * flag. The whole claimed range is passed because a
-			 * table's entries are digits: the only names inside it
-			 * are the trailer's own.
-			 *
-			 * A scratch object, because these are the FILE's facts
-			 * and the trailer is not one of the numbered objects -
-			 * giving it a row would invent one the document does
-			 * not have. Only p->anomalies is meant to survive.
-			 */
-			{
-				struct kof_pdf_object t;
-
-				memset(&t, 0, sizeof t);
-				dict_scan(file, h, xend - h, &t, p, 0);
-			}
-			if (xend > at)
-				at = xend;
-		}
-	}
-
-	/*
-	 * WHAT THE REFERENCES SAID, resolved once the table is complete.
-	 *
-	 * After the walk, because the object a reference names is as likely to
-	 * come later in the file as earlier - a descriptor pointing forward at
-	 * its font program is the ordinary shape, and so is a catalog at the
-	 * front pointing at an action at the back.
-	 *
-	 * Quadratic in the worst case and that is measured rather than assumed:
-	 * the outer loop runs only for objects that carry one of these keys,
-	 * which on the documents to hand is six of a hundred and eighty. The
-	 * inner scan is paid that many times, not four thousand.
-	 *
-	 * SET ONLY WHERE THE TARGET DESCRIBED NOTHING BETTER. An object saying
-	 * /Type /EmbeddedFile that some dictionary also points at with /JS
-	 * keeps EMBEDDED: what a stream declares about itself outranks what
-	 * another dictionary says about it, and the two disagreeing is worth
-	 * leaving visible rather than resolving in favour of the second one.
-	 */
-	{
-		uint32_t i, k;
-
-		for (i = 0; i < p->n_objects; i++) {
-			if (!p->object[i].ref_num)
-				continue;
-			for (k = 0; k < p->n_objects; k++) {
-				if (p->object[k].num != p->object[i].ref_num ||
-				    !p->object[k].stream_len)
-					continue;
-				if (p->object[k].cat == KOF_PDF_CAT_CONTENT ||
-				    p->object[k].cat == KOF_PDF_CAT_UNKNOWN) {
-					p->object[k].cat = p->object[i].ref_cat;
-					if (p->object[i].ref_cat ==
-					    KOF_PDF_CAT_SCRIPT)
-						p->object[k].flags |=
-						    KOF_PDF_OBJ_JS;
-				}
-				break;
-			}
+		while (oi < p->n_objects &&
+		       p->object[oi].stream_off +
+		       p->object[oi].stream_len <= h)
+			oi++;
+		if (oi < p->n_objects && p->object[oi].stream_len &&
+		    h >= p->object[oi].stream_off) {
+			s_lim = p->object[oi].stream_off +
+				p->object[oi].stream_len;
+			if (s_lim > at)
+				at = s_lim;
+			continue;
 		}
 
+		xend = xref_section_end(file, h, &p->trailer_off,
+					&p->trailer_len);
+		if (xend == KGENOME_BROKEN || xend <= h)
+			continue;
+		kof_runs_add(runs, file.n, h, xend - h,
+			     KOF_PDF_CLS_XREF);
 		/*
-		 * AND NOW THE STREAMS, with every category settled.
+		 * And read for what it declares. The trailer is a
+		 * dictionary like any other - /Encrypt and /Root live
+		 * in it - and nothing was reading it, so a classic
+		 * document's own statement about itself reached no
+		 * flag. The whole claimed range is passed because a
+		 * table's entries are digits: the only names inside it
+		 * are the trailer's own.
 		 *
-		 * One pass, in object order, so the runs of any one class still
-		 * arrive ascending and kof_runs_add's coalescing hint works as
-		 * it does everywhere else.
+		 * A scratch object, because these are the FILE's facts
+		 * and the trailer is not one of the numbered objects -
+		 * giving it a row would invent one the document does
+		 * not have. Only p->anomalies is meant to survive.
 		 */
-		for (i = 0; i < p->n_objects; i++) {
-			const struct kof_pdf_object *o = &p->object[i];
+		{
+			struct kof_pdf_object t;
 
-			if (o->stream_len)
-				kof_runs_add(&runs, file.n, o->stream_off,
-					     o->stream_len, stream_class(o));
+			memset(&t, 0, sizeof t);
+			dict_scan(file, h, xend - h, &t, p, 0);
+		}
+		if (xend > at)
+			at = xend;
+	}
+}
+
+/* What the references said, resolved once the table is complete, and then
+ * the streams' own runs. */
+static void pdf_resolve_refs(kof_buf file, struct kof_pdf_info *p,
+			     struct kof_runs *runs)
+{
+/*
+ * WHAT THE REFERENCES SAID, resolved once the table is complete.
+ *
+ * After the walk, because the object a reference names is as likely to
+ * come later in the file as earlier - a descriptor pointing forward at
+ * its font program is the ordinary shape, and so is a catalog at the
+ * front pointing at an action at the back.
+ *
+ * Quadratic in the worst case and that is measured rather than assumed:
+ * the outer loop runs only for objects that carry one of these keys,
+ * which on the documents to hand is six of a hundred and eighty. The
+ * inner scan is paid that many times, not four thousand.
+ *
+ * SET ONLY WHERE THE TARGET DESCRIBED NOTHING BETTER. An object saying
+ * /Type /EmbeddedFile that some dictionary also points at with /JS
+ * keeps EMBEDDED: what a stream declares about itself outranks what
+ * another dictionary says about it, and the two disagreeing is worth
+ * leaving visible rather than resolving in favour of the second one.
+ */
+	uint32_t i, k;
+
+	for (i = 0; i < p->n_objects; i++) {
+		if (!p->object[i].ref_num)
+			continue;
+		for (k = 0; k < p->n_objects; k++) {
+			if (p->object[k].num != p->object[i].ref_num ||
+			    !p->object[k].stream_len)
+				continue;
+			if (p->object[k].cat == KOF_PDF_CAT_CONTENT ||
+			    p->object[k].cat == KOF_PDF_CAT_UNKNOWN) {
+				p->object[k].cat = p->object[i].ref_cat;
+				if (p->object[i].ref_cat ==
+				    KOF_PDF_CAT_SCRIPT)
+					p->object[k].flags |=
+					    KOF_PDF_OBJ_JS;
+			}
+			break;
 		}
 	}
+
+	/*
+	 * AND NOW THE STREAMS, with every category settled.
+	 *
+	 * One pass, in object order, so the runs of any one class still
+	 * arrive ascending and kof_runs_add's coalescing hint works as
+	 * it does everywhere else.
+	 */
+	for (i = 0; i < p->n_objects; i++) {
+		const struct kof_pdf_object *o = &p->object[i];
+
+		if (o->stream_len)
+			kof_runs_add(runs, file.n, o->stream_off,
+				     o->stream_len, stream_class(o));
+	}
+}
+
+int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
+{
+	struct kof_runs runs;
+	uint64_t hdr;
+	/* 8192 bits for the redefinition filter above. A kilobyte of frame, on
+	 * a path whose caller already hands it a 650KB view. */
+	uint8_t seen_num[1024];
+
+	pdf_clear_view(p);
+	memset(seen_num, 0, sizeof seen_num);
+	p->version = KOF_PDF_INFO_VERSION;
+
+	if (!pdf_find_header(file, p, &hdr))
+		return 0;
+
+	kof_runs_init(&runs, (struct kof_run *)p->run, KOF_PDF_MAX_EXTENTS,
+		      KOF_PDF_CLS_COUNT);
+
+	pdf_claim_header(file, &runs, hdr);
+	pdf_read_trailer(file, p, &runs);
+	pdf_walk_objects(file, p, &runs, seen_num, hdr);
+	pdf_claim_xref(file, p, &runs, hdr);
+	pdf_resolve_refs(file, p, &runs);
 
 	/* Both bits are read AFTER the settle, because the settle is what finds an
 	 * overlap - it is the pass that sorts the runs and trims one against the

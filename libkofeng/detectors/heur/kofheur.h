@@ -55,7 +55,7 @@ struct kof_obj_ctx;
  * A TRACE IS EITHER AN ANOMALY OR A FACT ABOUT HOW THE OBJECT WAS REACHED.
  *
  * Anomalies are named by their format AND their mask, never by a bit index. The
- * masks are the parser's own constants, so a term reads KOF_ELF_ANOM_SECTAB_MISSING
+ * masks are the parser's own constants, so a term reads KGENOME_ELF_ANOM_SECTAB_MISSING
  * and cannot drift when a parser inserts a flag. Writing indices by hand was tried
  * and six of seven were wrong.
  */

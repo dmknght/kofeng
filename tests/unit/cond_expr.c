@@ -378,7 +378,7 @@ static void view_inputs(void)
 		0xe0,0x00, 0x02,0x01,
 		0x0b,0x01
 	};
-	struct kof_pe_info info;
+	struct kgenome_pe_info info;
 	struct kof_obj_ctx ctx;
 
 	/*
@@ -393,7 +393,7 @@ static void view_inputs(void)
 		       "case did not run\n");
 		return;
 	}
-	CK(info.layout == KOF_PE_LAYOUT_FILE);
+	CK(info.layout == KGENOME_PE_LAYOUT_FILE);
 
 	/*
 	 * AND SET MEANS SET. The parse memsets its view and must put this one
@@ -402,9 +402,9 @@ static void view_inputs(void)
 	 */
 	memset(&info, 0, sizeof info);
 	memset(&ctx, 0, sizeof ctx);
-	info.layout = KOF_PE_LAYOUT_MAPPED;
+	info.layout = KGENOME_PE_LAYOUT_MAPPED;
 	if (kof_pe_parse(kof_buf_make(pe, sizeof pe), &info, &ctx))
-		CK(info.layout == KOF_PE_LAYOUT_MAPPED);
+		CK(info.layout == KGENOME_PE_LAYOUT_MAPPED);
 
 	/*
 	 * mem_origin RIDES WITH IT, and is cleared when the layout is not
@@ -413,9 +413,9 @@ static void view_inputs(void)
 	 */
 	memset(&info, 0, sizeof info);
 	memset(&ctx, 0, sizeof ctx);
-	info.mem_origin = KOF_PE_ORIGIN_MANUAL;
+	info.mem_origin = KGENOME_PE_ORIGIN_MANUAL;
 	if (kof_pe_parse(kof_buf_make(pe, sizeof pe), &info, &ctx))
-		CK(info.mem_origin == KOF_PE_ORIGIN_NONE);
+		CK(info.mem_origin == KGENOME_PE_ORIGIN_NONE);
 }
 
 /*
@@ -473,14 +473,14 @@ static void operator_word(void)
  */
 static void block_indices(void)
 {
-	static struct plg_block blk[4];
+	static struct mtn_block blk[4];
 
 	memset(&E.dr, 0, sizeof E.dr);
 	E.dr.blk = blk;
 	E.dr.n_blk = 3;
 	E.dr.n_grp = 2;
 	blk[0].picked = blk[1].picked = blk[2].picked = 1;
-	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash = KOF_PLAGUE_MIN_HASH;
+	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash = KGENOME_MUTATION_MIN_HASH;
 	E.dr.grp[0].kind = (uint8_t)GRP_KIND_SIM;
 	E.dr.grp[1].kind = (uint8_t)GRP_KIND_SIM;
 	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 2));
@@ -522,22 +522,23 @@ static void block_indices(void)
 	}
 
 	/*
-	 * A MEASURE IS IDENTIFIED BY WHAT IT IS AND, FOR A BLOCK, BY WHICH -
-	 * so the same block twice is one item, two different blocks are two,
-	 * and a whole-object measure is one per matcher whatever `blk` says.
+	 * A MEASURE IS IDENTIFIED BY WHICH BLOCK IT IS - so the same block twice is
+	 * one item and two different blocks are two.
 	 */
 	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 1) && E.dr.grp[0].n_sim == 1);
-	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 0) && E.dr.grp[0].n_sim == 2);
-	CK(grp_sim_add(&E, 0, SIM_IT_SHAPE, 7) && E.dr.grp[0].n_sim == 2);
-	CK(grp_sim_of(&E, SIM_IT_SHAPE, 0) == 0);
-	/* 3 was the block vector and is a gap: nothing holds it. */
+	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 0) && E.dr.grp[0].n_sim == 2);
+	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 0) && E.dr.grp[0].n_sim == 2);
+	/* 1 and 2 were the shape and the string set, 3 the block vector: gaps,
+	 * nothing holds them. */
+	CK(grp_sim_of(&E, 1u, 0) == MAX_GROUP);
 	CK(grp_sim_of(&E, 3u, 0) == MAX_GROUP);
-	CK(draft_uses_sim(&E, SIM_IT_SHAPE));
+	CK(!draft_uses_sim(&E, 1u));
 	CK(!draft_uses_sim(&E, 3u));
 	/* Taking one out closes the gap rather than leaving a hole for the
 	 * list row to draw. */
 	grp_sim_del(&E, 0, 0);
-	CK(E.dr.grp[0].n_sim == 1 && E.dr.grp[0].sim[0].what == SIM_IT_SHAPE);
+	CK(E.dr.grp[0].n_sim == 1 && E.dr.grp[0].sim[0].what == SIM_IT_BLOCK &&
+	   E.dr.grp[0].sim[0].blk == 0);
 	CK(!draft_uses_sim(&E, SIM_IT_BLOCK) || grp_of_block(&E, 2) == 1);
 	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 1) && E.dr.grp[0].n_sim == 2);
 
@@ -547,7 +548,7 @@ static void block_indices(void)
 	blk[1].picked = 0;
 	CK(!blk_usable(&E, 1));
 	blk[1].picked = 1;
-	blk[1].n_hash = KOF_PLAGUE_MIN_HASH - 1u;
+	blk[1].n_hash = KGENOME_MUTATION_MIN_HASH - 1u;
 	CK(!blk_usable(&E, 1));
 	CK(!blk_usable(&E, 99));
 

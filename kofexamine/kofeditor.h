@@ -37,8 +37,7 @@
 #include <string.h>
 #include <kofmod/kofsig.h>
 #include <kofmod/kofsym.h>
-#include <kofmod/kofplague.h>
-#include <kofmod/kofoverlord.h>
+#include <kofmod/kofmutation.h>
 #include <kofeng.h>
 #include "kofinspect.h"
 #include "../libkofeng/databases/diagsrc.h"
@@ -239,7 +238,7 @@ struct decl {
 	 */
 	uint32_t sym;
 	/* Where these bytes are in the object, so the row can jump to them and
-	 * the pane can light them. KOF_BROKEN when they are not there at all -
+	 * the pane can light them. KGENOME_BROKEN when they are not there at all -
 	 * a marker taken from one sample and carried to another. */
 	uint64_t at;
 	/*
@@ -696,17 +695,20 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * emit_matcher.
  */
 /*
- * ONE NAMED RUN OF BYTES, region-anchored and fuzzy: kof_plague_score. The
+ * ONE NAMED RUN OF BYTES, region-anchored and fuzzy: kof_mutation_score. The
  * item carries which block, by index into kof_draft.blk.
  */
 #define SIM_IT_BLOCK  0u
 /*
- * THE OBJECT'S GEOMETRY - size, how many loadable regions and how big each -
- * against a reference somebody identified: kof_plague_shape. It reads no bytes,
- * which is the whole reason it exists: it still answers when the payload is
- * ciphertext. See kofmod/kofoverlord.h.
+ * 1 IS A GAP, AND SO IS 2: they were the object's GEOMETRY and its STRING SET,
+ * measures over a whole object against a reference somebody identified. Both
+ * were taken out. The geometry (kof_mutation_shape) identified nothing on its own -
+ * an unrelated program of the same size answered 100% - and as a filter it fired
+ * too rarely to keep a header, a descriptor and an editor path alive for it.
+ *
+ * The ids stay gaps so the ids of the measures that remain do not move and a
+ * draft written by an older build still reads.
  */
-#define SIM_IT_SHAPE  1u
 /*
  * 3 IS NOT USED EITHER, AND FOR THE SAME REASON AS 2.
  *
@@ -748,8 +750,7 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * percentage stayed a dash for ever. */
 #define SIM_IT_COUNT  5u
 
-/* How many measures one similarity matcher can hold. The shape and, at most,
- * one block apiece for the blocks a draft carries; eight is past what any
+/* How many measures one similarity matcher can hold. At most one block apiece for the blocks a draft carries; eight is past what any
  * measured rule has needed, and it is also how many items a list row can hold
  * a click span for. */
 #define GRP_SIM_MAX 8u
@@ -896,13 +897,13 @@ struct cond {
  * measured binaries); a file that names a hundred thousand is not asking to be
  * browsed. It was sixty-four when the offer was a carve of the bytes into
  * roughly eight-kilobyte pieces, which is still how everything that is not
- * code is offered - see PLG_DATA_BLOCKS.
+ * code is offered - see MTN_DATA_BLOCKS.
  */
-#define PLG_MAX_BLOCK 4096u
+#define MTN_MAX_BLOCK 4096u
 
 /* The share of the table the byte carve may fill: the regions that are not
  * code. Unchanged from when the table held no more than this. */
-#define PLG_DATA_BLOCKS 64u
+#define MTN_DATA_BLOCKS 64u
 
 /*
  * One block a researcher has marked on THIS object.
@@ -912,7 +913,7 @@ struct cond {
  * produces eleven hashes cannot be a rule and the author should learn that
  * while they are still choosing the span.
  */
-struct plg_block {
+struct mtn_block {
 	uint64_t off, len;                 /* where it is in this object */
 	/*
 	 * THE SYMBOL THE BLOCK IS, when it is functions the object names: the first
@@ -923,7 +924,7 @@ struct plg_block {
 	char     sym[40];
 	uint32_t mask;                     /* the region it was taken from */
 	/*
-	 * WHICH HALF OF THE OBJECT IT WAS CUT FROM - enum kof_plague_side.
+	 * WHICH HALF OF THE OBJECT IT WAS CUT FROM - enum kgenome_mutation_side.
 	 *
 	 * A block from the static library and a block from the author's own
 	 * code answer different questions, and the matcher will only let a
@@ -932,7 +933,7 @@ struct plg_block {
 	 * the note on the enum.
 	 */
 	uint8_t  side;
-	uint32_t hash[KOF_PLAGUE_MAX_HASH];
+	uint32_t hash[KOF_MUTATION_MAX_HASH];
 	uint32_t n_hash;
 	/*
 	 * The whole block folded to one value, shown in the table and clicked
@@ -953,7 +954,7 @@ struct plg_block {
 	/*
 	 * And the region's ENUM SPELLING, which is a different string from the
 	 * label above and is the one a generated rule must carry: the table
-	 * shows "CODE", the source says KOF_SCAN_ELF_CODE, and writing the
+	 * shows "CODE", the source says KGENOME_SCAN_ELF_CODE, and writing the
 	 * short form into a rule produces a file that does not compile.
 	 */
 	char     rgn_enum[48];
@@ -985,10 +986,10 @@ struct plg_block {
 	 * finds it here, which is when it learns where it is.
 	 */
 	uint8_t  kept;
-	uint8_t  norm;                     /* enum kof_plague_norm */
+	uint8_t  norm;                     /* enum kgenome_mutation_norm */
 	uint8_t  picked;                   /* ticked: goes into the rule */
 	uint8_t  lit;                      /* painted in the hex pane */
-	uint8_t  colour;                   /* index into plg_colour */
+	uint8_t  colour;                   /* index into mtn_colour */
 	/*
 	 * How much of this block is in the object now on screen.
 	 *
@@ -1019,17 +1020,8 @@ struct kof_draft {
 	 * the score column has nothing to measure without it. Allocated once -
 	 * see where ext and probe are.
 	 */
-	struct plg_block *blk;
+	struct mtn_block *blk;
 	uint32_t     n_blk;
-	/*
-	 * THE OBJECT'S SHAPE, read off the sample when the panel offers it.
-	 *
-	 * One per draft and not one per matcher: a draft is written about one
-	 * object, and a second shape would be a second object's - which is a
-	 * second rule.
-	 */
-	struct kof_plague_shape shp;
-	int          has_shp;
 	/*
 	 * AND ITS STRINGS, after the static library was subtracted.
 	 *
@@ -1051,7 +1043,7 @@ struct kof_draft {
 	 * other than the object in front of the reader - another sample, or a
 	 * rule that was opened. Until then the percentage beside it is the
 	 * object compared with itself, which is a hundred and means nothing;
-	 * see plg_block.kept, where the score column answers the same way.
+	 * see mtn_block.kept, where the score column answers the same way.
 	 */
 	uint8_t      sim_use[SIM_IT_COUNT];
 	uint8_t      sim_kept[SIM_IT_COUNT];
@@ -1070,7 +1062,7 @@ struct kof_draft {
 	 * WHICH OF THOSE THE ENGINE FILLED IN, rather than the reader.
 	 *
 	 * draft_seed_target copies the object's own subtype into OPT_SUBTYPE so
-	 * a drafted rule targets what is in front of the reader, and plg_sync
+	 * a drafted rule targets what is in front of the reader, and mtn_sync
 	 * calls it on ARRIVAL at an object - before anything has been drafted
 	 * at all. The options are hashed, so that copy made an empty draft read
 	 * as edited the moment a file was opened, and an edited draft refuses
@@ -1274,7 +1266,7 @@ struct object {
 	 * list recorded with none ticked is the list a fresh carve produces
 	 * with none ticked, and nothing else is reused.
 	 */
-	struct plg_block *carve;
+	struct mtn_block *carve;
 	uint32_t          n_carve;
 	uint8_t           carve_done;
 
@@ -1391,7 +1383,7 @@ struct object {
 	 * funcs.h. Empty for an object with none, and for a normalised view, whose
 	 * headers describe its parent.
 	 */
-	struct kof_func_set     funcs;
+	struct kgenome_func_set     funcs;
 	uint8_t                 funcs_done;
 
 	/*
@@ -1422,14 +1414,22 @@ struct object {
 	uint8_t          *sym;
 	uint32_t          sym_n;
 
-	/* The address a heuristic named as a carried payload, and its length, or
-	 * zero when none did. Reported through kof_debug - see on_debug. */
+	/*
+	 * WHERE THIS OBJECT'S LOADER KEEPS ITS PAYLOAD, from the tool's own
+	 * analysis (kofscfind) - the engine does not look for loaders. Worked out
+	 * ONCE per object, when it is examined (scfind_object in kv_collect.c),
+	 * and read from here by every pane after that: the symbols dialog, the
+	 * menu, the status line. payload_at is the symbol's value, zero when
+	 * nothing was found; payload_len the blob's size as it sits in the object;
+	 * payload_bits 32 or 64 where the payload said so, 0 where it did not.
+	 * sc_done says the analysis ran, whatever it answered.
+	 */
 	uint64_t          payload_at;
 	uint64_t          payload_len;
-	/* How wide it is, from whoever found it rather than guessed again from
-	 * the same bytes - see bases/heur/scloader_00.c. 0 when unknown. */
 	uint32_t          payload_bits;
-	/* Set on the CHILD this viewer built from a parent's payload, so the
+	uint8_t           sc_done;
+	/* Set on the object the VIEWER derived from a parent's payload (the
+	 * engine never produces one), so the
 	 * menu can find it without inferring anything from the name. A name
 	 * test alone would also match an unpacker's child that happened to sit
 	 * under the same parent. */
@@ -1469,7 +1469,7 @@ struct object {
 	 * was found. A reader wants both, and only one of them belongs in a
 	 * tree row eighteen columns wide.
 	 */
-	char              payload_sym[KOF_SYM_NAMELEN + 1];
+	char              payload_sym[KOF_SYM_NAME_MAX + 1];
 };
 /*
  * WHAT THE EDITOR IS DRIVING: the draft, plus the little of its surroundings a
@@ -1693,7 +1693,7 @@ void generate(struct kof_editor *e, int as_new);
  * writes the source. Same division generate() has with the draft: the model is
  * the caller's, the file format is this file's.
  */
-struct kof_plague_decl {
+struct kof_mutation_decl {
 	uint32_t    id;            /* what the block is called in the source */
 	const char *region;        /* the KOF_SCAN_* spelling, or NULL for ALL */
 	/*
@@ -1703,10 +1703,10 @@ struct kof_plague_decl {
 	 * read. Unused by the writer, which is handed names that outlive it.
 	 */
 	char        region_buf[48];
-	uint32_t    norm;          /* enum kof_plague_norm */
+	uint32_t    norm;          /* enum kgenome_mutation_norm */
 	/* Which half of the object the block was cut from - see enum
-	 * kof_plague_side. It is the difference between KOF_PLAGUE_BLOCK and
-	 * KOF_PLAGUE_BLOCK_LIB in the source, and it decides who may score it. */
+	 * kgenome_mutation_side. It is the difference between KOF_MUTATION_BLOCK and
+	 * KOF_MUTATION_BLOCK_LIB in the source, and it decides who may score it. */
 	uint8_t     side;
 	uint8_t     thr;           /* the percentage the rule will demand */
 	/*
@@ -1797,7 +1797,7 @@ void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
 void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n);
 
 /*
- * READ A PLAGUE RULE BACK, so an infected file opens the rule that caught it.
+ * READ A MUTATION RULE BACK, so an infected file opens the rule that caught it.
  *
  * The same division of labour draft_from_source has with the draft: this turns
  * the FILE into the model, and what the model means is the caller's. It fills
@@ -1811,19 +1811,10 @@ void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n);
  *
  * Non-zero when the file was read and held at least one block.
  */
-/*
- * `shp_pct` comes back non-zero when the rule declared a SHAPE and asked about
- * it, and e->dr.shp holds what it declared - so a rule written by the panel
- * opens in the panel with the same matchers it was written with. `shp_level` is
- * that matcher's own verdict, which is not the blocks': a rule concludes
- * different things from content and from geometry, and reading one verdict for
- * the file would quietly move one of them.
- */
-int plague_from_source(struct kof_editor *e, const char *path,
-		       struct kof_plague_decl *blk, uint32_t max_blk,
+int mutation_from_source(struct kof_editor *e, const char *path,
+		       struct kof_mutation_decl *blk, uint32_t max_blk,
 		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
-		       struct kof_verdict_decl *verdict,
-		       uint8_t *shp_pct, int *shp_level);
+		       struct kof_verdict_decl *verdict);
 
 
 /*

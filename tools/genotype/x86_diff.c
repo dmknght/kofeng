@@ -85,47 +85,47 @@ static int not_decoded(const INSTRUX *ix, const uint8_t *p)
 static int known_divergence(unsigned id)
 {
 	switch (id) {
-	case GT_X86_I_BNDMOV: case GT_X86_I_BNDLDX: case GT_X86_I_BNDSTX:
-	case GT_X86_I_BNDMK: case GT_X86_I_BNDCL: case GT_X86_I_BNDCU:
-	case GT_X86_I_BNDCN:
-	case GT_X86_I_UMONITOR: case GT_X86_I_RMPUPDATE:
-	case GT_X86_I_VCVTSD2USI: case GT_X86_I_VCVTSS2SI: case GT_X86_I_VCVTSS2USI:
-	case GT_X86_I_VCVTSD2SI:
-	case GT_X86_I_VFCMADDCPH: case GT_X86_I_VFCMADDCSH: case GT_X86_I_VFCMULCPH:
-	case GT_X86_I_VFCMULCSH: case GT_X86_I_VFMADDCPH: case GT_X86_I_VFMADDCSH:
-	case GT_X86_I_VFMULCPH: case GT_X86_I_VFMULCSH:
-	case GT_X86_I_VGATHERDPD: case GT_X86_I_VGATHERDPS: case GT_X86_I_VGATHERQPD:
-	case GT_X86_I_VGATHERQPS: case GT_X86_I_VPGATHERDD: case GT_X86_I_VPGATHERDQ:
-	case GT_X86_I_VPGATHERQD: case GT_X86_I_VPGATHERQQ:
-	case GT_X86_I_VSCATTERDPD: case GT_X86_I_VSCATTERDPS: case GT_X86_I_VSCATTERQPD:
-	case GT_X86_I_VSCATTERQPS: case GT_X86_I_VPSCATTERDD: case GT_X86_I_VPSCATTERDQ:
-	case GT_X86_I_VPSCATTERQD: case GT_X86_I_VPSCATTERQQ:
-	case GT_X86_I_ENQCMD: case GT_X86_I_ENQCMDS: case GT_X86_I_MOVDIR64B:
+	case KGENOME_X86_I_BNDMOV: case KGENOME_X86_I_BNDLDX: case KGENOME_X86_I_BNDSTX:
+	case KGENOME_X86_I_BNDMK: case KGENOME_X86_I_BNDCL: case KGENOME_X86_I_BNDCU:
+	case KGENOME_X86_I_BNDCN:
+	case KGENOME_X86_I_UMONITOR: case KGENOME_X86_I_RMPUPDATE:
+	case KGENOME_X86_I_VCVTSD2USI: case KGENOME_X86_I_VCVTSS2SI: case KGENOME_X86_I_VCVTSS2USI:
+	case KGENOME_X86_I_VCVTSD2SI:
+	case KGENOME_X86_I_VFCMADDCPH: case KGENOME_X86_I_VFCMADDCSH: case KGENOME_X86_I_VFCMULCPH:
+	case KGENOME_X86_I_VFCMULCSH: case KGENOME_X86_I_VFMADDCPH: case KGENOME_X86_I_VFMADDCSH:
+	case KGENOME_X86_I_VFMULCPH: case KGENOME_X86_I_VFMULCSH:
+	case KGENOME_X86_I_VGATHERDPD: case KGENOME_X86_I_VGATHERDPS: case KGENOME_X86_I_VGATHERQPD:
+	case KGENOME_X86_I_VGATHERQPS: case KGENOME_X86_I_VPGATHERDD: case KGENOME_X86_I_VPGATHERDQ:
+	case KGENOME_X86_I_VPGATHERQD: case KGENOME_X86_I_VPGATHERQQ:
+	case KGENOME_X86_I_VSCATTERDPD: case KGENOME_X86_I_VSCATTERDPS: case KGENOME_X86_I_VSCATTERQPD:
+	case KGENOME_X86_I_VSCATTERQPS: case KGENOME_X86_I_VPSCATTERDD: case KGENOME_X86_I_VPSCATTERDQ:
+	case KGENOME_X86_I_VPSCATTERQD: case KGENOME_X86_I_VPSCATTERQQ:
+	case KGENOME_X86_I_ENQCMD: case KGENOME_X86_I_ENQCMDS: case KGENOME_X86_I_MOVDIR64B:
 		return 1;
 	}
 	return 0;
 }
 
 /* Why two decodes of the same bytes differ, or 0. */
-static const char *differ(const INSTRUX *ix, const struct gt_x86_insn *x)
+static const char *differ(const INSTRUX *ix, const struct kgenome_x86_insn *x)
 {
-	struct gt_x86_op ops[GT_X86_MAX_OPS];
+	struct kgenome_x86_op ops[KGENOME_X86_MAX_OPS];
 	unsigned i;
 
 	if (ix->Length != x->len)
 		return "length";
 	if ((unsigned)ix->Instruction != x->id)
 		return "identity";
-	if (ix->OperandsCount != gt_x86_nops(x))
+	if (ix->OperandsCount != kgenome_x86_nops(x))
 		return "operand count";
-	if (ix->Condition != gt_x86_cond(x))
+	if (ix->Condition != kgenome_x86_cond(x))
 		return "condition";
 	if (ix->Rep != x->rep)
 		return "rep";
-	gt_x86_operands(x, ops);
+	kgenome_x86_operands(x, ops);
 	for (i = 0; i < ix->OperandsCount; i++) {
 		const ND_OPERAND *o = &ix->Operands[i];
-		const struct gt_x86_op *d = &ops[i];
+		const struct kgenome_x86_op *d = &ops[i];
 
 		if (o->Type != d->type)
 			return "operand type";
@@ -152,19 +152,19 @@ static const char *differ(const INSTRUX *ix, const struct gt_x86_insn *x)
 				     (m->IsAG ? 8 : 0) | (m->IsBitbase ? 16 : 0) | (m->IsMib ? 32 : 0) |
 				     (m->IsVsib ? 64 : 0) | (m->IsShadowStack ? 128 : 0);
 
-			if (m->HasBase != !!(d->mf & GT_X86_M_BASE) ||
+			if (m->HasBase != !!(d->mf & KGENOME_X86_M_BASE) ||
 			    (m->HasBase && (m->Base != d->base || m->BaseSize != d->bsz)))
 				return "memory base";
-			if (m->HasIndex != !!(d->mf & GT_X86_M_INDEX) ||
+			if (m->HasIndex != !!(d->mf & KGENOME_X86_M_INDEX) ||
 			    (m->HasIndex && (m->Index != d->index || m->IndexSize != d->isz ||
 					     m->Scale != d->scale)))
 				return "memory index";
-			if (m->HasDisp != !!(d->mf & GT_X86_M_DISP) ||
+			if (m->HasDisp != !!(d->mf & KGENOME_X86_M_DISP) ||
 			    (m->HasDisp && (int64_t)m->Disp * (m->HasCompDisp ? (int64_t)m->CompDispSize : 1) != d->v))
 				return "memory displacement";
-			if (m->HasSeg != !!(d->mf & GT_X86_M_SEG) || (m->HasSeg && m->Seg != d->seg))
+			if (m->HasSeg != !!(d->mf & KGENOME_X86_M_SEG) || (m->HasSeg && m->Seg != d->seg))
 				return "memory segment";
-			if (m->IsRipRel != !!(d->mf & GT_X86_M_RIPREL) || f != (unsigned)(d->mf >> 8) % 256u)
+			if (m->IsRipRel != !!(d->mf & KGENOME_X86_M_RIPREL) || f != (unsigned)(d->mf >> 8) % 256u)
 				return "memory kind";
 			break;
 		}
@@ -268,9 +268,9 @@ static void differential(void)
 		const uint8_t *p;
 		int w;
 		INSTRUX ix;
-		struct gt_x86_insn x;
+		struct kgenome_x86_insn x;
 		NDSTATUS s;
-		enum gt_status gs;
+		enum kgenome_status gs;
 		const char *why = NULL;
 		unsigned id;
 
@@ -278,15 +278,15 @@ static void differential(void)
 		w = buf[0];
 		p = buf + 1;
 		s = NdDecodeEx(&ix, p, 16, w ? ND_CODE_64 : ND_CODE_32, w ? ND_DATA_64 : ND_DATA_32);
-		gs = gt_x86_decode(&x, p, 16, w ? 64 : 32);
-		id = ND_SUCCESS(s) ? (unsigned)ix.Instruction : gs == GT_OK ? x.id : 0u;
+		gs = kgenome_x86_decode(&x, p, 16, w ? 64 : 32);
+		id = ND_SUCCESS(s) ? (unsigned)ix.Instruction : gs == KGENOME_OK ? x.id : 0u;
 		if (ND_SUCCESS(s)) {
 			if (not_decoded(&ix, p)) {
 				skipped++;
 				continue;
 			}
-			why = gs != GT_OK ? "valid for the reference, refused here" : differ(&ix, &x);
-		} else if (gs == GT_OK) {
+			why = gs != KGENOME_OK ? "valid for the reference, refused here" : differ(&ix, &x);
+		} else if (gs == KGENOME_OK) {
 			why = "refused by the reference, accepted here";
 		}
 		if (!why) {
@@ -321,8 +321,8 @@ int main(void)
 {
 	printf("x86 differential:\n");
 	ok("identities are the reference's",
-	   GT_X86_I_ADD == ND_INS_ADD && GT_X86_I_MOV == ND_INS_MOV &&
-	   GT_X86_I_CALLNR == ND_INS_CALLNR && GT_X86_I_VADDPS == ND_INS_VADDPS);
+	   KGENOME_X86_I_ADD == ND_INS_ADD && KGENOME_X86_I_MOV == ND_INS_MOV &&
+	   KGENOME_X86_I_CALLNR == ND_INS_CALLNR && KGENOME_X86_I_VADDPS == ND_INS_VADDPS);
 	differential();
 	printf("x86 differential: %s\n", failures ? "FAILED" : "ok");
 	return failures != 0;

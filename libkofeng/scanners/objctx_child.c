@@ -25,22 +25,22 @@
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/xref.h>
-#include "../disinfect/pzero.h"
+#include "pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include <kofmod/elf.h>
-#include "../extractors/unpack/emu_unpack.h"
-#include "../extractors/unpack/elf_rebuild.h"
+#include <phenotype/emu_unpack.h>
+#include <genotype/image/elf_rebuild.h>
 
-#include "../extractors/decomp/ovba.h"
-#include "../extractors/decomp/lzma.h"
-#include "../extractors/decomp/aplib.h"
-#include "../extractors/decomp/aspack.h"
-#include "../extractors/decomp/lzmat.h"
-#include "../extractors/decomp/bcj.h"
-#include "../extractors/decomp/rar3.h"
-#include "../extractors/decomp/rar5.h"
-#include "../extractors/decomp/bcj2.h"
+#include <decompressors/ovba.h>
+#include <decompressors/lzma.h>
+#include <decompressors/aplib.h>
+#include <decompressors/aspack.h>
+#include <decompressors/lzmat.h>
+#include <decompressors/bcj.h>
+#include <decompressors/rar3.h>
+#include <decompressors/rar5.h>
+#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
 #include "../analyzers/parsers/scripts/script_norm.h"
@@ -56,8 +56,8 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/pattern/kofmultimatch.h"
+#include "../detectors/linkage/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -181,7 +181,8 @@ void oc_pend_clear(struct kof_scanner *sc)
 	sc->n_pend_rgn = 0;
 	sc->pend_rgn_fmt = 0;
 	sc->n_pend_syms = 0;
-	kof_funcs_free(&sc->pend_funcs);
+	kgenome_funcs_free(&sc->pend_funcs);
+	sc->pend_desc_set = 0;
 	sc->pend_derived_by = NULL;
 	sc->pend_superseded = 0;
 	sc->pend_as_fmt = 0;
@@ -239,15 +240,15 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 	if (!sc->pend_sec || !sc->n_pend_sec)
 		return;
 	if (fmt == KOF_FMT_ELF) {
-		m_hdr = KOF_SCAN_ELF_HEADERS;
-		m_code = KOF_SCAN_ELF_CODE;
-		m_data = KOF_SCAN_ELF_DATA;
-		m_unclaimed = KOF_SCAN_ELF_UNCLAIMED;
+		m_hdr = KGENOME_SCAN_ELF_HEADERS;
+		m_code = KGENOME_SCAN_ELF_CODE;
+		m_data = KGENOME_SCAN_ELF_DATA;
+		m_unclaimed = KGENOME_SCAN_ELF_UNCLAIMED;
 	} else {
-		m_hdr = KOF_SCAN_PE_HEADERS;
-		m_code = KOF_SCAN_PE_CODE;
-		m_data = KOF_SCAN_PE_DATA;
-		m_unclaimed = KOF_SCAN_PE_UNCLAIMED;
+		m_hdr = KGENOME_SCAN_PE_HEADERS;
+		m_code = KGENOME_SCAN_PE_CODE;
+		m_data = KGENOME_SCAN_PE_DATA;
+		m_unclaimed = KGENOME_SCAN_PE_UNCLAIMED;
 	}
 	/* Everything before the first section is the header, which no module
 	 * declares and every consumer expects. */
@@ -259,12 +260,12 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 		n++;
 	}
 	for (i = 0; i < sc->n_pend_sec; i++) {
-		const struct kof_sec_decl *d = &sc->pend_sec[i];
+		const struct kgenome_sec_decl *d = &sc->pend_sec[i];
 		uint32_t mask;
 
-		if (d->flags & (KOF_SECF_PAD | KOF_SECF_HOLLOW))
+		if (d->flags & (KGENOME_SECF_PAD | KGENOME_SECF_HOLLOW))
 			mask = m_unclaimed;
-		else if (d->flags & KOF_SECF_CODE)
+		else if (d->flags & KGENOME_SECF_CODE)
 			mask = m_code;
 		else
 			mask = m_data;
@@ -291,7 +292,7 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 
 /*
  * HOW WIDE THE CHILD IS, which decides the size of a lookup entry and of a
- * thunk - see kof_pe_write_imports.
+ * thunk - see kgenome_pe_write_imports.
  *
  * What the module said with kunp_rcstruct_as beats what the parent is, for the
  * reason the header writer gives: a 64-bit payload is routinely carried by a
@@ -300,15 +301,15 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 static int child_is64(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_pe_info *tmpl;
+	const struct kgenome_pe_info *tmpl;
 
 	if (sc && sc->pend_as_fmt == KOF_FMT_PE) {
-		if (sc->pend_as_arch == KOF_ARCH_X86_64)
+		if (sc->pend_as_arch == KGENOME_ARCH_X86_64)
 			return 1;
-		if (sc->pend_as_arch == KOF_ARCH_X86)
+		if (sc->pend_as_arch == KGENOME_ARCH_X86)
 			return 0;
 	}
-	tmpl = (const struct kof_pe_info *)ctx->file_header;
+	tmpl = (const struct kgenome_pe_info *)ctx->file_header;
 	return tmpl && tmpl->valid && tmpl->pe32_plus;
 }
 
@@ -488,7 +489,11 @@ static int kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	}
 	if (sc->pend_funcs.n) {
 		kof_src_declare_funcs(kid, sc->pend_funcs.v, sc->pend_funcs.n);
-		kof_funcs_free(&sc->pend_funcs);
+		kgenome_funcs_free(&sc->pend_funcs);
+	}
+	if (sc->pend_desc_set) {
+		kof_src_declare_desc(kid, &sc->pend_desc);
+		sc->pend_desc_set = 0;
 	}
 	if (sc->kids_left == 0) {
 		/* Refused, and recorded: a container that yields more children than
@@ -558,7 +563,7 @@ static int kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			sc->kid_n_xw = nx;
 		if (nx)
 			nr = realloc(sc->kid_xw,
-				     (size_t)nc * KOF_EMU_EXEC_WATCH * 2u *
+				     (size_t)nc * KGENOME_EMU_EXEC_WATCH * 2u *
 				     sizeof *nr);
 		if (nr)
 			sc->kid_xw = nr;
@@ -589,7 +594,7 @@ static int kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		sc->kid_n_xw[sc->n_kids] = sc->pend_n_xw;
 		for (q = 0; q < sc->pend_n_xw; q++) {
 			uint64_t *d = sc->kid_xw +
-				      (size_t)sc->n_kids * KOF_EMU_EXEC_WATCH *
+				      (size_t)sc->n_kids * KGENOME_EMU_EXEC_WATCH *
 				      2u + (size_t)q * 2u;
 
 			d[0] = sc->pend_xw[q].rva;
@@ -1099,8 +1104,8 @@ int oc_child(const struct kof_obj_ctx *ctx)
 	 * kunp_rcstruct_poke calls into a header it wrote itself.
 	 */
 	if (sc->pend_image && sc->sink_mem && sc->n_pend_sec) {
-		const struct kof_pe_info *tmpl =
-			(const struct kof_pe_info *)ctx->file_header;
+		const struct kgenome_pe_info *tmpl =
+			(const struct kgenome_pe_info *)ctx->file_header;
 		uint64_t span = sc->pend_sec[sc->n_pend_sec - 1u].rva +
 				sc->pend_sec[sc->n_pend_sec - 1u].vsize;
 		uint64_t entry = sc->pend_entry_set ? sc->pend_entry_rva : 0;
@@ -1116,19 +1121,19 @@ int oc_child(const struct kof_obj_ctx *ctx)
 		 *
 		 * BEFORE the header, because the directory entry it sets is
 		 * one of the header's own fields - see the pend_dir walk in
-		 * kof_pe_write_hdr. Written after, the header would carry
+		 * kgenome_pe_write_hdr. Written after, the header would carry
 		 * whatever the parent's import directory said, which points
 		 * into the PACKER's sections and not into this child's.
 		 *
 		 * A failure here is not silent and not fatal to the child: the
 		 * bytes it would have written are untouched - see
-		 * kof_pe_write_imports, which changes nothing unless the whole
+		 * kgenome_pe_write_imports, which changes nothing unless the whole
 		 * table fits - and no directory is set, so the child goes out
 		 * as an image with no imports rather than as one pointing at
 		 * a table that is not there.
 		 */
 		if (sc->pend_imp_set && sc->n_pend_imp) {
-			uint64_t n = kof_pe_write_imports(sc->sink_mem,
+			uint64_t n = kgenome_pe_write_imports(sc->sink_mem,
 							  sc->sink_len,
 							  sc->pend_imp_at,
 							  sc->pend_imp,
@@ -1138,11 +1143,11 @@ int oc_child(const struct kof_obj_ctx *ctx)
 							  child_is64(ctx));
 
 			if (n && sc->pend_imp_at < span &&
-			    KOF_PE_DIR_IMPORT < 16u) {
-				sc->pend_dir[KOF_PE_DIR_IMPORT].rva =
+			    KGENOME_PE_DIR_IMPORT < 16u) {
+				sc->pend_dir[KGENOME_PE_DIR_IMPORT].rva =
 					sc->pend_imp_at;
-				sc->pend_dir[KOF_PE_DIR_IMPORT].size = n;
-				sc->pend_dir[KOF_PE_DIR_IMPORT].set = 1;
+				sc->pend_dir[KGENOME_PE_DIR_IMPORT].size = n;
+				sc->pend_dir[KGENOME_PE_DIR_IMPORT].set = 1;
 			}
 		}
 
@@ -1157,10 +1162,10 @@ int oc_child(const struct kof_obj_ctx *ctx)
 		 * so only the module can say. See `as_format` in kofsig.h.
 		 */
 		if (sc->pend_as_fmt == KOF_FMT_ELF) {
-			int is64 = sc->pend_as_arch == KOF_ARCH_X86_64;
+			int is64 = sc->pend_as_arch == KGENOME_ARCH_X86_64;
 			uint16_t mach = (uint16_t)(is64 ? 62u : 3u);
 
-			ok = kof_elf_write_hdr(sc->sink_mem,
+			ok = kgenome_elf_write_hdr(sc->sink_mem,
 					       sc->pend_sec[0].rva, is64, mach,
 					       sc->pend_as_base, sc->pend_sec,
 					       sc->n_pend_sec, entry,
@@ -1191,14 +1196,14 @@ int oc_child(const struct kof_obj_ctx *ctx)
 			 * guessing a machine number for an architecture this
 			 * builds no PE for would be inventing one.
 			 */
-			struct kof_pe_info as_pe;
-			const struct kof_pe_info *use = tmpl;
+			struct kgenome_pe_info as_pe;
+			const struct kgenome_pe_info *use = tmpl;
 
 			if (tmpl && tmpl->valid &&
 			    sc->pend_as_fmt == KOF_FMT_PE &&
-			    (sc->pend_as_arch == KOF_ARCH_X86 ||
-			     sc->pend_as_arch == KOF_ARCH_X86_64)) {
-				int is64 = sc->pend_as_arch == KOF_ARCH_X86_64;
+			    (sc->pend_as_arch == KGENOME_ARCH_X86 ||
+			     sc->pend_as_arch == KGENOME_ARCH_X86_64)) {
+				int is64 = sc->pend_as_arch == KGENOME_ARCH_X86_64;
 
 				as_pe = *tmpl;
 				as_pe.pe32_plus = (uint8_t)(is64 ? 1 : 0);
@@ -1211,7 +1216,7 @@ int oc_child(const struct kof_obj_ctx *ctx)
 			ok = (ctx->format == KOF_FMT_PE || sc->pend_as_fmt ==
 							   KOF_FMT_PE) &&
 			     use && use->valid &&
-			     kof_pe_write_hdr(sc->sink_mem,
+			     kgenome_pe_write_hdr(sc->sink_mem,
 					      sc->pend_sec[0].rva, use,
 					      sc->pend_sec, sc->n_pend_sec,
 					      entry, span, sc->pend_dir) != 0;
@@ -1516,7 +1521,7 @@ int oc_import(const struct kof_obj_ctx *ctx, const char *dll,
 		    const char *fn, uint32_t ordinal, uint64_t iat_rva)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_imp_decl *d;
+	struct kgenome_imp_decl *d;
 	uint32_t dll_off = 0, fn_off = 0;
 
 	if (!sc || !dll || !*dll)
@@ -1561,7 +1566,7 @@ uint64_t oc_import_bytes(const struct kof_obj_ctx *ctx)
 
 	if (!sc || !sc->n_pend_imp)
 		return 0;
-	return kof_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
+	return kgenome_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
 				   sc->imp_pool, sc->imp_pool_n,
 				   child_is64(ctx));
 }
@@ -1608,7 +1613,7 @@ int oc_import_at(const struct kof_obj_ctx *ctx, uint64_t rva)
 
 	if (!sc || !sc->n_pend_imp || !sc->sink_fixed || !sc->sink_mem)
 		return 0;
-	need = kof_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
+	need = kgenome_pe_imports_size(sc->pend_imp, sc->n_pend_imp,
 				   sc->imp_pool, sc->imp_pool_n,
 				   child_is64(ctx));
 	if (!need)
@@ -1652,7 +1657,7 @@ int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 		     uint32_t flags)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_sec_decl *d;
+	struct kgenome_sec_decl *d;
 	uint32_t k;
 	unsigned q;
 
@@ -1682,7 +1687,7 @@ int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 	 */
 	for (k = 0; k < sc->n_pend_sec; k++)
 		if (sc->pend_sec[k].rva == rva) {
-			struct kof_sec_decl *e = &sc->pend_sec[k];
+			struct kgenome_sec_decl *e = &sc->pend_sec[k];
 			unsigned w;
 
 			/* An extent may be corrected, but not over its
@@ -1735,7 +1740,7 @@ uint64_t oc_layout_of_produced(const struct kof_obj_ctx *ctx)
 		if (!sc->pend_sec)
 			return 0;
 	}
-	n = kof_pe_layout_of(kof_buf_make(sc->sink_mem, sc->sink_len),
+	n = kgenome_pe_layout_of(kof_buf_make(sc->sink_mem, sc->sink_len),
 			     sc->pend_sec, DECL_SEC_MAX, &entry, &base,
 			     sc->pend_dir);
 	if (!n)
@@ -1851,7 +1856,7 @@ int oc_image(const struct kof_obj_ctx *ctx)
 	if (sc->sink_len || sc->sink_spilled || !sc->n_pend_sec)
 		return 0;
 	{
-		const struct kof_sec_decl *last =
+		const struct kgenome_sec_decl *last =
 			&sc->pend_sec[sc->n_pend_sec - 1u];
 
 		span = last->rva + last->vsize;

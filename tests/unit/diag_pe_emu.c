@@ -13,7 +13,7 @@
  * by address. Nothing in it resolves anything: the point of the test is the
  * environment (the ws2_32 module, the scripted peer, the call record, the last
  * branch) and the route that reads it, and the resolver half is measured on the
- * real stagers in the notes beside kof_diag_run_pe_symbol.
+ * real stagers in the notes beside kgenome_diag_run_pe_symbol.
  */
 
 #include <stdio.h>
@@ -24,12 +24,15 @@
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include "../../libkofeng/detectors/pathogen/diagnoses/kofdiag.h"
-#include "../../libkofeng/analyzers/nucleo/nucleo.h"
-#include "../../libgenome/phenotype/kofemu.h"
+#include "../../libkofeng/detectors/linkage/kofdiag.h"
+#include <celllysis/nucleo.h>
+#include <phenotype/kofemu.h>
 #include "../../libkofeng/kofcore/kofmod/kofsym.h"
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_sym.h"
+#include "../../libkofeng/analyzers/parsers/binaries/sym_pool.h"
+#include "../../libkofeng/kofcore/kofmod/pe.h"
+#include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
 
@@ -144,7 +147,7 @@ static uint64_t pe_with_import(uint8_t *b, uint64_t cap, int wide,
 }
 
 
-static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
+static struct kgenome_diag_scan *scan(const uint8_t *b, uint64_t n,
 				  struct kof_obj_ctx *ctx, const char *what,
 				  unsigned run)
 {
@@ -159,8 +162,12 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
 	pl = kof_parser_list(&np);
 	for (i = 0; i < np; i++)
 		if (pl[i].sniff && pl[i].sniff(buf) &&
-		    pl[i].parse && pl[i].parse(buf, view, ctx))
-			return kof_diag_scan_with(ctx, b, n, run);
+		    pl[i].parse && pl[i].parse(buf, view, ctx)) {
+			struct kgenome_obj gobj;
+
+			kof_genome_obj(ctx, &gobj);
+			return kgenome_diag_scan_with(&gobj, b, n, run);
+		}
 	printf("  FAIL %s: the engine did not parse it\n", what);
 	fails++;
 	return NULL;
@@ -170,13 +177,13 @@ static struct kof_diag_scan *scan(const uint8_t *b, uint64_t n,
  * that found it would be calling. */
 static uint32_t stub_of(const char *name)
 {
-	unsigned i, n = kof_emu_win_api_count();
+	unsigned i, n = kgenome_emu_win_api_count();
 
 	for (i = 0; i < n; i++)
-		if (!strcmp(kof_emu_win_api_name(i), name))
-			return (uint32_t)(kof_emu_win_mod_base(kof_emu_win_api_mod(i), 32) +
-					  KOF_EMU_WIN_STUB_RVA +
-					  (uint64_t)kof_emu_win_api_slot(i) * KOF_EMU_WIN_STUB);
+		if (!strcmp(kgenome_emu_win_api_name(i), name))
+			return (uint32_t)(kgenome_emu_win_mod_base(kgenome_emu_win_api_mod(i), 32) +
+					  KGENOME_EMU_WIN_STUB_RVA +
+					  (uint64_t)kgenome_emu_win_api_slot(i) * KGENOME_EMU_WIN_STUB);
 	return 0;
 }
 
@@ -203,13 +210,13 @@ static uint8_t *call_stub(uint8_t *p, const char *name)
 	return p;
 }
 
-static const struct kof_diag_hit *find(struct kof_diag_scan *s, uint16_t cap,
+static const struct kgenome_diag_hit *find(struct kgenome_diag_scan *s, uint16_t cap,
 				       uint32_t *idx, uint32_t from)
 {
 	uint32_t i;
 
-	for (i = from; s && i < kof_diag_scan_count(s); i++) {
-		const struct kof_diag_hit *h = kof_diag_scan_at(s, i);
+	for (i = from; s && i < kgenome_diag_scan_count(s); i++) {
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
 
 		if (h->cap == cap) {
 			*idx = i;
@@ -219,7 +226,7 @@ static const struct kof_diag_hit *find(struct kof_diag_scan *s, uint16_t cap,
 	return NULL;
 }
 
-static int linked(const struct kof_diag_hit *h, uint32_t from, uint8_t role)
+static int linked(const struct kgenome_diag_hit *h, uint32_t from, uint8_t role)
 {
 	unsigned k;
 
@@ -269,10 +276,32 @@ static int has_sym(const struct seen_syms *k, const char *want)
 	for (i = 0; k->blk && i < c; i++) {
 		const uint8_t *r = kof_sym_rec(k->blk, k->n, i);
 
-		if (r && !strcmp((const char *)r + KOF_SYM_R_NAME, want))
+		if (r && !strcmp(kof_sym_name(k->blk, k->n, r, NULL), want))
 			return 1;
 	}
 	return 0;
+}
+
+/*
+ * What the scanner does with a module's report of the APIs the program
+ * resolves (oc_api_resolved, then oc_sym_import, merged by sym_declared):
+ * the distinct APIs of the product as imports of the block, and the block's
+ * truncation byte when the run was stopped while still going. The pieces are
+ * the production ones; the full path is checked through the scanner below.
+ */
+static uint32_t add_resolved(const struct kgenome_apihash *a, uint8_t *blk,
+			     uint32_t n_bytes, uint32_t cap)
+{
+	const char *dll[64], *name[64];
+	uint32_t n;
+
+	if (!a || !a->n_call || a->n_call > 64u)
+		return n_bytes;
+	n = kgenome_apihash_distinct(a, dll, name);
+	n_bytes = kof_pe_syms_add_imports(blk, n_bytes, cap, dll, name, n);
+	if (a->status != KGENOME_OK && n_bytes >= KOF_SYM_HDRLEN)
+		blk[KOF_SYM_H_TRUNC] = 1;
+	return n_bytes;
 }
 
 int main(int argc, char **argv)
@@ -294,8 +323,8 @@ int main(int argc, char **argv)
 	static const uint8_t push_edi[] = { 0x57 };
 	static const uint8_t jmp_ebx[] = { 0xff, 0xe3 };
 	struct kof_obj_ctx ctx;
-	struct kof_diag_scan *s;
-	const struct kof_diag_hit *open, *conn, *rd1, *alloc, *rd2, *jump;
+	struct kgenome_diag_scan *s;
+	const struct kgenome_diag_hit *open, *conn, *rd1, *alloc, *rd2, *jump;
 	uint32_t i_open = 0, i_conn = 0, i_rd1 = 0, i_alloc = 0, i_rd2 = 0, i_jmp = 0;
 	uint8_t *p = code;
 	uint64_t n;
@@ -347,55 +376,55 @@ int main(int argc, char **argv)
 		p = emit(p, ret1, 1);
 	}
 	n = pe_with_import(b, sizeof b, 0, code, (uint64_t)(p - code), 0);
-	s = scan(b, n, &ctx, "emulated stager", KOF_DIAG_RUN_APIHASH);
+	s = scan(b, n, &ctx, "emulated stager", KGENOME_DIAG_RUN_APIHASH);
 
-	open  = find(s, KOF_NUCLEO_NET_OPEN, &i_open, 0);
-	conn  = find(s, KOF_NUCLEO_NET_CONNECT, &i_conn, 0);
-	rd1   = find(s, KOF_NUCLEO_NET_READ, &i_rd1, 0);
-	alloc = find(s, KOF_NUCLEO_ALLOC_EXEC, &i_alloc, 0);
-	rd2   = rd1 ? find(s, KOF_NUCLEO_NET_READ, &i_rd2, i_rd1 + 1u) : NULL;
-	jump  = find(s, KOF_NUCLEO_EXEC_REG, &i_jmp, 0);
+	open  = find(s, KGENOME_NUCLEO_NET_OPEN, &i_open, 0);
+	conn  = find(s, KGENOME_NUCLEO_NET_CONNECT, &i_conn, 0);
+	rd1   = find(s, KGENOME_NUCLEO_NET_READ, &i_rd1, 0);
+	alloc = find(s, KGENOME_NUCLEO_ALLOC_EXEC, &i_alloc, 0);
+	rd2   = rd1 ? find(s, KGENOME_NUCLEO_NET_READ, &i_rd2, i_rd1 + 1u) : NULL;
+	jump  = find(s, KGENOME_NUCLEO_EXEC_REG, &i_jmp, 0);
 
 	{ uint32_t i_peb = 0;
 
-		CK(find(s, KOF_NUCLEO_SELF_RESOLVE, &i_peb, 0) != NULL); }   /* the gate: the read is a node */
+		CK(find(s, KGENOME_NUCLEO_SELF_RESOLVE, &i_peb, 0) != NULL); }   /* the gate: the read is a node */
 	CK(open && conn && rd1 && alloc && rd2 && jump);
 	if (!(open && conn && rd1 && alloc && rd2 && jump)) {
 		uint32_t q;
 
 		/* say what WAS found, because "a node is missing" is not a lead */
-		for (q = 0; s && q < kof_diag_scan_count(s); q++)
+		for (q = 0; s && q < kgenome_diag_scan_count(s); q++)
 			printf("    node %u: %s at %#llx\n", q,
-			       kof_flow_cap_name(kof_diag_scan_at(s, q)->cap),
-			       (unsigned long long)kof_diag_scan_at(s, q)->at);
+			       kgenome_flow_cap_name(kgenome_diag_scan_at(s, q)->cap),
+			       (unsigned long long)kgenome_diag_scan_at(s, q)->at);
 	}
 	if (open && conn && rd1 && alloc && rd2 && jump) {
 		/* the socket is the descriptor of the connect and of both reads */
-		CK(linked(conn, i_open, KOF_DIAG_ROLE_FD));
-		CK(linked(rd1, i_open, KOF_DIAG_ROLE_FD));
-		CK(linked(rd2, i_open, KOF_DIAG_ROLE_FD));
+		CK(linked(conn, i_open, KGENOME_DIAG_ROLE_FD));
+		CK(linked(rd1, i_open, KGENOME_DIAG_ROLE_FD));
+		CK(linked(rd2, i_open, KGENOME_DIAG_ROLE_FD));
 		/* the allocation is the SECOND read's buffer and not the first's */
-		CK(linked(rd2, i_alloc, KOF_DIAG_ROLE_BUFFER));
-		CK(!linked(rd1, i_alloc, KOF_DIAG_ROLE_BUFFER));
+		CK(linked(rd2, i_alloc, KGENOME_DIAG_ROLE_BUFFER));
+		CK(!linked(rd1, i_alloc, KGENOME_DIAG_ROLE_BUFFER));
 		/* PAGE_EXECUTE_READWRITE is W+X, which is a different statement from X */
-		CK(alloc->flags & KOF_FLOWF_WX);
+		CK(alloc->flags & KGENOME_FLOWF_WX);
 		/* and the run ends by jumping into it */
-		CK(linked(jump, i_alloc, KOF_DIAG_ROLE_TARGET));
+		CK(linked(jump, i_alloc, KGENOME_DIAG_ROLE_TARGET));
 	}
-	kof_diag_scan_free(s);
+	kgenome_diag_scan_free(s);
 
 	/*
 	 * THE ROUTES ARE SEPARATE. The import walk alone must not run the
 	 * program, so a database that asked for it and not for the analysis
 	 * pays no emulation - and has no node the analysis would have made.
 	 */
-	s = scan(b, n, &ctx, "import walk only", KOF_DIAG_RUN_SYMBOL);
+	s = scan(b, n, &ctx, "import walk only", KGENOME_DIAG_RUN_SYMBOL);
 	if (s) {
 		uint32_t z;
 
-		CK(!find(s, KOF_NUCLEO_NET_CONNECT, &z, 0));
-		CK(!find(s, KOF_NUCLEO_EXEC_REG, &z, 0));
-		kof_diag_scan_free(s);
+		CK(!find(s, KGENOME_NUCLEO_NET_CONNECT, &z, 0));
+		CK(!find(s, KGENOME_NUCLEO_EXEC_REG, &z, 0));
+		kgenome_diag_scan_free(s);
 	}
 
 	/*
@@ -416,15 +445,19 @@ int main(int argc, char **argv)
 		uint8_t bm[8192];
 		uint64_t nm = pe_with_import(bm, sizeof bm, 0, mis, sizeof mis, 0);
 		struct kof_obj_ctx cm;
-		struct kof_diag_scan *sm = scan(bm, nm, &cm, "misaligned override",
-						KOF_DIAG_RUN_APIHASH);
-		struct kof_apihash *am = kof_apihash_run(&cm, bm, nm);
+		struct kgenome_diag_scan *sm = scan(bm, nm, &cm, "misaligned override",
+						KGENOME_DIAG_RUN_APIHASH);
+		struct kgenome_obj gm;
+		struct kgenome_apihash *am;
 		uint32_t z;
 
+		kof_genome_obj(&cm, &gm);
+		am = kgenome_apihash_run(&gm, bm, nm, NULL, NULL);
+
 		CK(am && am->n_ldr == 0u && am->n_call == 0u);
-		CK(sm && !find(sm, KOF_NUCLEO_SELF_RESOLVE, &z, 0));
-		kof_apihash_free(am);
-		kof_diag_scan_free(sm);
+		CK(sm && !find(sm, KGENOME_NUCLEO_SELF_RESOLVE, &z, 0));
+		kgenome_apihash_free(am);
+		kgenome_diag_scan_free(sm);
 	}
 
 	/*
@@ -433,19 +466,23 @@ int main(int argc, char **argv)
 	 * ahead of the exports.
 	 */
 	{
-		struct kof_apihash *a = kof_apihash_run(&ctx, b, n);
+		struct kgenome_obj gobj;
+		struct kgenome_apihash *a;
+
 		static uint8_t blk[KOF_SYM_MAX_BYTES];
 		kof_buf fb;
 		uint32_t len, cnt, r, first_def = 0xffffffffu, last_imp = 0;
 		int have_connect = 0, once = 0;
 
+		kof_genome_obj(&ctx, &gobj);
+		a = kgenome_apihash_run(&gobj, b, n, NULL, NULL);
 		CK(a != NULL);
 		if (a) {
 			CK(a->n_ldr > 0u && a->n_call > 0u);
 			fb.p = b;
 			fb.n = n;
 			len = kof_pe_syms(fb, kof_pe(&ctx), blk, sizeof blk);
-			len = kof_apihash_syms(a, blk, len, sizeof blk);
+			len = add_resolved(a, blk, len, sizeof blk);
 			cnt = kof_sym_count(blk, len);
 			for (r = 0; r < cnt; r++) {
 				const uint8_t *rec = kof_sym_rec(blk, len, r);
@@ -456,10 +493,10 @@ int main(int argc, char **argv)
 					last_imp = r;
 				else if (first_def == 0xffffffffu)
 					first_def = r;
-				if (!strcmp((const char *)rec + KOF_SYM_R_NAME,
+				if (!strcmp(kof_sym_name(blk, len, rec, NULL),
 					    "ws2_32.dll!connect"))
 					have_connect++;
-				if (!strncmp((const char *)rec + KOF_SYM_R_NAME,
+				if (!strncmp(kof_sym_name(blk, len, rec, NULL),
 					     "kernel32.dll!VirtualAlloc", 25))
 					once++;
 			}
@@ -476,22 +513,28 @@ int main(int argc, char **argv)
 				uint32_t l2 = kof_pe_syms(none, NULL, b2, sizeof b2);
 				const uint8_t *r0, *r1;
 
-				memset(b2 + l2, 0, KOF_SYM_RECLEN);
-				b2[l2 + KOF_SYM_R_FLAGS] = KOF_SYM_F_DEFINED;
-				memcpy(b2 + l2 + KOF_SYM_R_NAME, "an_export", 10);
-				b2[KOF_SYM_H_COUNT] = 1;
-				l2 += KOF_SYM_RECLEN;
-				l2 = kof_apihash_syms(a, b2, l2, sizeof b2);
+				struct kof_symw w;
+				struct kof_symrec ex;
+
+				/* A block that holds one export, made by the one writer. */
+				memset(&ex, 0, sizeof ex);
+				ex.flags = KOF_SYM_F_DEFINED;
+				ex.name = "an_export";
+				ex.name_len = 9;
+				kof_symw_begin(&w, b2, sizeof b2, 0, 0);
+				CK(kof_symw_put(&w, &ex));
+				l2 = kof_symw_end(&w);
+				l2 = add_resolved(a, b2, l2, sizeof b2);
 				CK(kof_sym_count(b2, l2) >= 2u);
 				r0 = kof_sym_rec(b2, l2, 0);
 				r1 = kof_sym_rec(b2, l2, kof_sym_count(b2, l2) - 1u);
 				CK(r0 && (r0[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED));
-				CK(r1 && !strcmp((const char *)r1 + KOF_SYM_R_NAME,
+				CK(r1 && !strcmp(kof_sym_name(b2, l2, r1, NULL),
 						 "an_export"));
 			}
 			/* a second application changes nothing */
-			CK(kof_apihash_syms(a, blk, len, sizeof blk) == len);
-			kof_apihash_free(a);
+			CK(add_resolved(a, blk, len, sizeof blk) == len);
+			kgenome_apihash_free(a);
 		}
 	}
 

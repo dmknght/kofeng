@@ -18,7 +18,9 @@
 
 #include "objsrc.h"
 #include "../analyzers/parsers/binaries/funcs.h"
-#include "../kofeng.h"
+#include "objprod.h"
+#include "../kofcore/koftypes.h"
+#include "../kofcore/kofhash.h"   /* KOF_ERR_* */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,10 +97,22 @@ struct kof_objsrc {
 	 */
 	uint8_t              *syms;
 	uint32_t              n_syms;
-	/* THE FUNCTIONS OF A VIEW, in its own offsets - see kof_funcs_remap and
+	/* THE FUNCTIONS OF A VIEW, in its own offsets - see kgenome_funcs_remap and
 	 * kof_src_declare_funcs. Owned, freed with the source. */
-	struct kof_func      *funcs;
+	struct kgenome_func      *funcs;
 	uint32_t              n_funcs;
+
+	/*
+	 * WHAT THE PRODUCER SAYS THE OBJECT IS - the image description carried
+	 * through the transform, see kof_src_declare_desc. `desc.info` points at
+	 * `desc_info`, owned and freed with the source.
+	 */
+	struct kof_src_desc   desc;
+	void                 *desc_info;
+	uint8_t               has_desc;
+
+	/* The parent's analysis, shared - see objprod.h. Released with the source. */
+	struct kof_prod      *prod;
 };
 
 /*
@@ -467,10 +481,10 @@ void kof_src_declare_syms(struct kof_objsrc *s, const uint8_t *b, uint32_t n)
 	s->n_syms = n;
 }
 
-void kof_src_declare_funcs(struct kof_objsrc *s, const struct kof_func *v,
+void kof_src_declare_funcs(struct kof_objsrc *s, const struct kgenome_func *v,
 			   uint32_t n)
 {
-	struct kof_func *own;
+	struct kgenome_func *own;
 
 	if (!s || !v || !n)
 		return;
@@ -483,7 +497,42 @@ void kof_src_declare_funcs(struct kof_objsrc *s, const struct kof_func *v,
 	s->n_funcs = n;
 }
 
-const struct kof_func *kof_src_funcs_of(const struct kof_objsrc *s, uint32_t *n)
+void kof_src_declare_desc(struct kof_objsrc *s, const struct kof_src_desc *d)
+{
+	void *own;
+
+	if (!s || !d || !d->info || !d->info_len)
+		return;
+	own = malloc(d->info_len);
+	if (!own)
+		return;         /* the view simply arrives without it, and is raw */
+	memcpy(own, d->info, d->info_len);
+	free(s->desc_info);
+	s->desc = *d;
+	s->desc.info = own;
+	s->desc_info = own;
+	s->has_desc = 1;
+}
+
+const struct kof_src_desc *kof_src_desc_of(const struct kof_objsrc *s)
+{
+	return s && s->has_desc ? &s->desc : NULL;
+}
+
+void kof_src_declare_prod(struct kof_objsrc *s, struct kof_prod *p)
+{
+	if (!s || !p)
+		return;
+	kof_prod_unref(s->prod);
+	s->prod = p;
+}
+
+const struct kof_prod *kof_src_prod_of(const struct kof_objsrc *s)
+{
+	return s ? s->prod : NULL;
+}
+
+const struct kgenome_func *kof_src_funcs_of(const struct kof_objsrc *s, uint32_t *n)
 {
 	if (n)
 		*n = s ? s->n_funcs : 0u;
@@ -509,6 +558,8 @@ void kof_src_unref(struct kof_objsrc *s)
 		free(s->heap);
 		free(s->syms);
 		free(s->funcs);
+		free(s->desc_info);
+		kof_prod_unref(s->prod);
 		free(s);
 		/* After the free, not before: the account should reflect memory
 		 * that has already been handed back. */

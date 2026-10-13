@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "../../libgenome/genotype/arm64/arm64.h"
+#include <genotype/arm64/arm64.h>
 
 static int failures;
 
@@ -29,11 +29,11 @@ static void ok(const char *what, int cond)
 		failures++;
 }
 
-static struct gt_arm64_insn dec(uint32_t w)
+static struct kgenome_arm64_insn dec(uint32_t w)
 {
-	struct gt_arm64_insn in;
+	struct kgenome_arm64_insn in;
 
-	(void)gt_arm64_decode(&in, w);
+	(void)kgenome_arm64_decode(&in, w);
 	return in;
 }
 
@@ -43,7 +43,7 @@ struct curated {
 	unsigned id;
 };
 
-#define C(w, id, what) { what, w, GT_ARM64_I_##id }
+#define C(w, id, what) { what, w, KGENOME_ARM64_I_##id }
 
 static const struct curated T[] = {
 	/* what an undecodable word is */
@@ -241,17 +241,17 @@ static void table(void)
 
 	printf("identities:\n");
 	for (i = 0; i < sizeof T / sizeof *T; i++) {
-		struct gt_arm64_insn in = dec(T[i].w);
+		struct kgenome_arm64_insn in = dec(T[i].w);
 		char what[256];
 		int good = in.id == T[i].id && in.word == T[i].w;
 
 		n++;
 		snprintf(what, sizeof what, "%08x %s -> %s", T[i].w, T[i].what,
-			 gt_arm64_name(T[i].id));
+			 kgenome_arm64_name(T[i].id));
 		ok(what, good);
 		if (!good) {
 			bad++;
-			printf("       got %s\n", gt_arm64_name(in.id));
+			printf("       got %s\n", kgenome_arm64_name(in.id));
 		}
 	}
 	printf("  %u checked, %u wrong\n", n, bad);
@@ -259,126 +259,126 @@ static void table(void)
 
 static void status(void)
 {
-	struct gt_arm64_insn in;
+	struct kgenome_arm64_insn in;
 
 	printf("status:\n");
-	ok("an unallocated word is GT_INVALID", gt_arm64_decode(&in, 0x20000000u) == GT_INVALID &&
-	   in.id == GT_ARM64_I_INVALID);
-	ok("udf is a defined instruction: GT_OK", gt_arm64_decode(&in, 0x00001234u) == GT_OK &&
-	   in.id == GT_ARM64_I_UDF);
-	ok("an ordinary instruction is GT_OK", gt_arm64_decode(&in, 0xd65f03c0u) == GT_OK);
+	ok("an unallocated word is GT_INVALID", kgenome_arm64_decode(&in, 0x20000000u) == KGENOME_INVALID &&
+	   in.id == KGENOME_ARM64_I_INVALID);
+	ok("udf is a defined instruction: GT_OK", kgenome_arm64_decode(&in, 0x00001234u) == KGENOME_OK &&
+	   in.id == KGENOME_ARM64_I_UDF);
+	ok("an ordinary instruction is GT_OK", kgenome_arm64_decode(&in, 0xd65f03c0u) == KGENOME_OK);
 }
 
 static void fields(void)
 {
-	struct gt_arm64_insn in;
+	struct kgenome_arm64_insn in;
 
 	printf("accessors:\n");
 	in = dec(0xd28018c8u);
 	ok("movz x8,#198: sf 1, Rd 8, imm 198, shift 0",
-	   gt_arm64_sf(&in) == 1 && gt_arm64_rd(&in) == 8 && gt_arm64_movw_imm(&in) == 198 &&
-	   gt_arm64_movw_shift(&in) == 0);
+	   kgenome_arm64_sf(&in) == 1 && kgenome_arm64_rd(&in) == 8 && kgenome_arm64_movw_imm(&in) == 198 &&
+	   kgenome_arm64_movw_shift(&in) == 0);
 	in = dec(0xd2a00020u);
-	ok("movz x0,#1,lsl #16: the immediate is shifted into place", gt_arm64_movw_imm(&in) == 0x10000);
+	ok("movz x0,#1,lsl #16: the immediate is shifted into place", kgenome_arm64_movw_imm(&in) == 0x10000);
 	in = dec(0xd0000080u);
-	ok("adrp: the immediate is 0x12 pages", gt_arm64_adr_imm(&in) == 0x12);
+	ok("adrp: the immediate is 0x12 pages", kgenome_arm64_adr_imm(&in) == 0x12);
 	in = dec(0xf0ffffe0u);
-	ok("adrp backwards: the immediate is -1", gt_arm64_adr_imm(&in) == -1);
+	ok("adrp backwards: the immediate is -1", kgenome_arm64_adr_imm(&in) == -1);
 	in = dec(0x911ea000u);
-	ok("add x0,x0,#0x7a8", gt_arm64_addsub_imm(&in) == 0x7a8 && gt_arm64_rn(&in) == 0);
+	ok("add x0,x0,#0x7a8", kgenome_arm64_addsub_imm(&in) == 0x7a8 && kgenome_arm64_rn(&in) == 0);
 	in = dec(0x91400400u);
-	ok("add x0,x0,#1,lsl #12: sh scales the immediate", gt_arm64_addsub_imm(&in) == 0x1000);
+	ok("add x0,x0,#1,lsl #12: sh scales the immediate", kgenome_arm64_addsub_imm(&in) == 0x1000);
 	in = dec(0x8b020020u);
-	ok("add x0,x1,x2: Rd 0 Rn 1 Rm 2", gt_arm64_rd(&in) == 0 && gt_arm64_rn(&in) == 1 &&
-	   gt_arm64_rm(&in) == 2);
+	ok("add x0,x1,x2: Rd 0 Rn 1 Rm 2", kgenome_arm64_rd(&in) == 0 && kgenome_arm64_rn(&in) == 1 &&
+	   kgenome_arm64_rm(&in) == 2);
 	in = dec(0xf240003fu);
-	ok("tst x1,#1: the bitmask is 1", gt_arm64_logical_imm(&in) == 1);
+	ok("tst x1,#1: the bitmask is 1", kgenome_arm64_logical_imm(&in) == 1);
 	in = dec(0xb200c3e0u);
 	ok("orr x0,xzr,#0x0101..01: the bitmask replicates an 8-bit element",
-	   gt_arm64_logical_imm(&in) == 0x0101010101010101ull);
+	   kgenome_arm64_logical_imm(&in) == 0x0101010101010101ull);
 	in = dec(0x320003e0u);
-	ok("orr w0,wzr,#1: the 32-bit bitmask", gt_arm64_logical_imm(&in) == 1);
+	ok("orr w0,wzr,#1: the 32-bit bitmask", kgenome_arm64_logical_imm(&in) == 1);
 	in = dec(0xb2400fe0u);
-	ok("orr x0,xzr,#0xf: a run of four", gt_arm64_logical_imm(&in) == 0xf);
+	ok("orr x0,xzr,#0xf: a run of four", kgenome_arm64_logical_imm(&in) == 0xf);
 	in = dec(0xb2440fe0u);
 	ok("orr x0,xzr,#0xf000...0: a run of four rotated to the top",
-	   gt_arm64_logical_imm(&in) == 0xf000000000000000ull);
+	   kgenome_arm64_logical_imm(&in) == 0xf000000000000000ull);
 	in = dec(0x94000010u);
-	ok("bl: +0x40", gt_arm64_branch_off(&in) == 0x40);
+	ok("bl: +0x40", kgenome_arm64_branch_off(&in) == 0x40);
 	in = dec(0x17fffffeu);
-	ok("b: -8", gt_arm64_branch_off(&in) == -8);
+	ok("b: -8", kgenome_arm64_branch_off(&in) == -8);
 	in = dec(0x54000041u);
-	ok("b.ne: +8, condition 1", gt_arm64_branch_off(&in) == 8 && gt_arm64_cond_branch(&in) == 1);
+	ok("b.ne: +8, condition 1", kgenome_arm64_branch_off(&in) == 8 && kgenome_arm64_cond_branch(&in) == 1);
 	in = dec(0xb4000080u);
-	ok("cbz x0: +0x10", gt_arm64_branch_off(&in) == 0x10 && gt_arm64_rt(&in) == 0);
+	ok("cbz x0: +0x10", kgenome_arm64_branch_off(&in) == 0x10 && kgenome_arm64_rt(&in) == 0);
 	in = dec(0x35ffffe1u);
-	ok("cbnz w1: -4, sf 0", gt_arm64_branch_off(&in) == -4 && gt_arm64_sf(&in) == 0);
+	ok("cbnz w1: -4, sf 0", kgenome_arm64_branch_off(&in) == -4 && kgenome_arm64_sf(&in) == 0);
 	in = dec(0xb6180103u);
-	ok("tbz x3,#35: +0x20, bit 35", gt_arm64_branch_off(&in) == 0x20 && gt_arm64_tbz_bit(&in) == 35 &&
-	   gt_arm64_rt(&in) == 3);
+	ok("tbz x3,#35: +0x20, bit 35", kgenome_arm64_branch_off(&in) == 0x20 && kgenome_arm64_tbz_bit(&in) == 35 &&
+	   kgenome_arm64_rt(&in) == 3);
 	in = dec(0xd4001c01u);
-	ok("svc #0xe0: imm16", gt_arm64_imm16(&in) == 0xe0);
+	ok("svc #0xe0: imm16", kgenome_arm64_imm16(&in) == 0xe0);
 	in = dec(0xd53bd040u);
-	ok("mrs x0,tpidr_el0: Rt 0, the system register field", gt_arm64_rt(&in) == 0 &&
-	   gt_arm64_sysreg(&in) == ((0xd53bd040u >> 5) & 0x7fffu));
+	ok("mrs x0,tpidr_el0: Rt 0, the system register field", kgenome_arm64_rt(&in) == 0 &&
+	   kgenome_arm64_sysreg(&in) == ((0xd53bd040u >> 5) & 0x7fffu));
 	in = dec(0xd50323bfu);
-	ok("hint number of autiasp is 29", gt_arm64_hint(&in) == 29);
+	ok("hint number of autiasp is 29", kgenome_arm64_hint(&in) == 29);
 
 	in = dec(0xf9400c20u);
 	ok("ldr x0,[x1,#24]: 8 bytes, scaled offset 24, a load, an offset address",
-	   gt_arm64_ldst_bytes(&in) == 8 && gt_arm64_ldst_off(&in) == 24 &&
-	   gt_arm64_lskind(&in) == GT_ARM64_K_LOAD && gt_arm64_amode(&in) == GT_ARM64_AM_OFFSET);
+	   kgenome_arm64_ldst_bytes(&in) == 8 && kgenome_arm64_ldst_off(&in) == 24 &&
+	   kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_LOAD && kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_OFFSET);
 	in = dec(0x39400420u);
-	ok("ldrb w0,[x1,#1]: one byte, offset 1", gt_arm64_ldst_bytes(&in) == 1 && gt_arm64_ldst_off(&in) == 1);
+	ok("ldrb w0,[x1,#1]: one byte, offset 1", kgenome_arm64_ldst_bytes(&in) == 1 && kgenome_arm64_ldst_off(&in) == 1);
 	in = dec(0x3dc00420u);
 	ok("ldr q0,[x1,#16]: the Q register moves 16 bytes and scales the offset by 16",
-	   gt_arm64_ldst_bytes(&in) == 16 && gt_arm64_ldst_off(&in) == 16 &&
-	   gt_arm64_lskind(&in) == GT_ARM64_K_LOAD_FP);
+	   kgenome_arm64_ldst_bytes(&in) == 16 && kgenome_arm64_ldst_off(&in) == 16 &&
+	   kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_LOAD_FP);
 	in = dec(0xb9800020u);
 	ok("ldrsw: a sign-extending load into X, four bytes",
-	   gt_arm64_lskind(&in) == GT_ARM64_K_LOAD_S64 && gt_arm64_ldst_bytes(&in) == 4);
+	   kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_LOAD_S64 && kgenome_arm64_ldst_bytes(&in) == 4);
 	in = dec(0x39c00020u);
-	ok("ldrsb w0: a sign-extending load into W", gt_arm64_lskind(&in) == GT_ARM64_K_LOAD_S32);
+	ok("ldrsb w0: a sign-extending load into W", kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_LOAD_S32);
 	in = dec(0xf90007e0u);
-	ok("str x0,[sp,#8]: a store, Rn 31", gt_arm64_lskind(&in) == GT_ARM64_K_STORE && gt_arm64_rn(&in) == 31 &&
-	   gt_arm64_ldst_off(&in) == 8);
+	ok("str x0,[sp,#8]: a store, Rn 31", kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_STORE && kgenome_arm64_rn(&in) == 31 &&
+	   kgenome_arm64_ldst_off(&in) == 8);
 	in = dec(0xf8408420u);
 	ok("ldr x0,[x1],#8: post-index, the increment is 8",
-	   gt_arm64_amode(&in) == GT_ARM64_AM_POST && gt_arm64_ldst_off(&in) == 8);
+	   kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_POST && kgenome_arm64_ldst_off(&in) == 8);
 	in = dec(0xf8408c20u);
-	ok("ldr x0,[x1,#8]!: pre-index", gt_arm64_amode(&in) == GT_ARM64_AM_PRE && gt_arm64_ldst_off(&in) == 8);
+	ok("ldr x0,[x1,#8]!: pre-index", kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_PRE && kgenome_arm64_ldst_off(&in) == 8);
 	in = dec(0xf85f8020u);
-	ok("ldur x0,[x1,#-8]: unscaled, -8", gt_arm64_amode(&in) == GT_ARM64_AM_UNSCALED &&
-	   gt_arm64_ldst_off(&in) == -8);
+	ok("ldur x0,[x1,#-8]: unscaled, -8", kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_UNSCALED &&
+	   kgenome_arm64_ldst_off(&in) == -8);
 	in = dec(0xb8627820u);
 	ok("ldr w0,[x1,x2,lsl #2]: register offset, Rm 2, S set",
-	   gt_arm64_amode(&in) == GT_ARM64_AM_REG && gt_arm64_rm(&in) == 2 && gt_arm64_bits(&in, 12, 1) == 1);
+	   kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_REG && kgenome_arm64_rm(&in) == 2 && kgenome_arm64_bits(&in, 12, 1) == 1);
 	in = dec(0x58000100u);
-	ok("ldr x0,[pc,#0x20]: literal, 8 bytes, +0x20", gt_arm64_amode(&in) == GT_ARM64_AM_LIT &&
-	   gt_arm64_ldst_bytes(&in) == 8 && gt_arm64_ldst_off(&in) == 0x20);
+	ok("ldr x0,[pc,#0x20]: literal, 8 bytes, +0x20", kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_LIT &&
+	   kgenome_arm64_ldst_bytes(&in) == 8 && kgenome_arm64_ldst_off(&in) == 0x20);
 	in = dec(0x18ffffe1u);
-	ok("ldr w1,.-4: literal, 4 bytes, -4", gt_arm64_ldst_bytes(&in) == 4 && gt_arm64_ldst_off(&in) == -4);
+	ok("ldr w1,.-4: literal, 4 bytes, -4", kgenome_arm64_ldst_bytes(&in) == 4 && kgenome_arm64_ldst_off(&in) == -4);
 	in = dec(0xa9bf7bfdu);
 	ok("stp x29,x30,[sp,#-16]!: 8 bytes a register, -16, pre-index, Rt2 30",
-	   gt_arm64_ldst_bytes(&in) == 8 && gt_arm64_ldst_off(&in) == -16 &&
-	   gt_arm64_amode(&in) == GT_ARM64_AM_PRE && gt_arm64_rt2(&in) == 30 && gt_arm64_rt(&in) == 29);
+	   kgenome_arm64_ldst_bytes(&in) == 8 && kgenome_arm64_ldst_off(&in) == -16 &&
+	   kgenome_arm64_amode(&in) == KGENOME_ARM64_AM_PRE && kgenome_arm64_rt2(&in) == 30 && kgenome_arm64_rt(&in) == 29);
 	in = dec(0x6d400400u);
 	ok("ldp d0,d1,[x0]: 8 bytes a register, a floating point load",
-	   gt_arm64_ldst_bytes(&in) == 8 && gt_arm64_lskind(&in) == GT_ARM64_K_LOAD_FP);
+	   kgenome_arm64_ldst_bytes(&in) == 8 && kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_LOAD_FP);
 	in = dec(0x69400800u);
-	ok("ldpsw x0,x2,[x0]: 4 bytes a register, offset scaled by 4", gt_arm64_ldst_bytes(&in) == 4 &&
-	   gt_arm64_lskind(&in) == GT_ARM64_K_LOAD_S64);
+	ok("ldpsw x0,x2,[x0]: 4 bytes a register, offset scaled by 4", kgenome_arm64_ldst_bytes(&in) == 4 &&
+	   kgenome_arm64_lskind(&in) == KGENOME_ARM64_K_LOAD_S64);
 	in = dec(0xf8200420u);
-	ok("ldraa x0,[x1]: the offset is a signed multiple of 8, here 0", gt_arm64_ldst_off(&in) == 0);
+	ok("ldraa x0,[x1]: the offset is a signed multiple of 8, here 0", kgenome_arm64_ldst_off(&in) == 0);
 	in = dec(0xf8a00c20u);
-	ok("ldrab x0,[x1]!: pre-index", gt_arm64_ldst_off(&in) == 0 && gt_arm64_rn(&in) == 1);
+	ok("ldrab x0,[x1]!: pre-index", kgenome_arm64_ldst_off(&in) == 0 && kgenome_arm64_rn(&in) == 1);
 }
 
 /*
  * THE LOOKUP IN FRONT OF THE TREE IS BUILT BY CODE FROM IT, so what is checked is
  * that the code is sound: a word under every one of the 2048 top-bit keys, the
  * lowest and the highest and a pseudo-random sample, and then a stride through
- * the whole space, must decode the same through gt_arm64_decode and through the
+ * the whole space, must decode the same through kgenome_arm64_decode and through the
  * tree alone.
  */
 static void lookup_agrees(void)
@@ -393,21 +393,21 @@ static void lookup_agrees(void)
 
 		for (i = 0; i < 64; i++) {
 			uint32_t v, low;
-			struct gt_arm64_insn a, b;
+			struct kgenome_arm64_insn a, b;
 
 			s = s * 1664525u + 1013904223u;
 			low = i == 0 ? 0 : i == 1 ? (1u << 21) - 1u : (s >> 3) & ((1u << 21) - 1u);
 			v = (k << 21) | low;
 			n++;
-			if (gt_arm64_decode(&a, v) != gt_arm64_decode_tree(&b, v) || a.id != b.id)
+			if (kgenome_arm64_decode(&a, v) != kgenome_arm64_decode_tree(&b, v) || a.id != b.id)
 				bad++;
 		}
 	}
 	for (w = 0; w < 0x100000000ull; w += 251) {
-		struct gt_arm64_insn a, b;
+		struct kgenome_arm64_insn a, b;
 
 		n++;
-		if (gt_arm64_decode(&a, (uint32_t)w) != gt_arm64_decode_tree(&b, (uint32_t)w) || a.id != b.id)
+		if (kgenome_arm64_decode(&a, (uint32_t)w) != kgenome_arm64_decode_tree(&b, (uint32_t)w) || a.id != b.id)
 			bad++;
 	}
 	ok("decode answers what the tree does, under every top-bit key and on a stride of the space", bad == 0);
@@ -419,18 +419,18 @@ static void names(void)
 	unsigned i, dup = 0, missing = 0;
 
 	printf("names:\n");
-	for (i = 0; i < GT_ARM64_I_COUNT; i++) {
+	for (i = 0; i < KGENOME_ARM64_I_COUNT; i++) {
 		unsigned j;
 
-		if (!gt_arm64_name(i) || !strcmp(gt_arm64_name(i), "?"))
+		if (!kgenome_arm64_name(i) || !strcmp(kgenome_arm64_name(i), "?"))
 			missing++;
 		for (j = 0; j < i; j++)
-			if (!strcmp(gt_arm64_name(i), gt_arm64_name(j)))
+			if (!strcmp(kgenome_arm64_name(i), kgenome_arm64_name(j)))
 				dup++;
 	}
 	ok("every identity has a name", missing == 0);
 	ok("no two identities share a name", dup == 0);
-	ok("a number past the end is named \"?\"", !strcmp(gt_arm64_name(GT_ARM64_I_COUNT), "?"));
+	ok("a number past the end is named \"?\"", !strcmp(kgenome_arm64_name(KGENOME_ARM64_I_COUNT), "?"));
 }
 
 int main(void)

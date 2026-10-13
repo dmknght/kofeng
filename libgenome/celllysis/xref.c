@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "gpr.h"
+#include "celllysis.h"
+
+/* A general register is an index below this; the same number means "not one". */
+#define NGPR 16u
 
 /*
  * HOW MANY ADDRESSES ONE SWEEP MAY REMEMBER.
@@ -79,8 +82,8 @@
  * rather than inventing one.
  */
 /* The two registers whose stack slots are followed, by the decoder's numbering. */
-#define GPR_RSP 4u
-#define GPR_RBP 5u
+#define GPR_RSP KGENOME_CELL_REG_SP
+#define GPR_RBP KGENOME_CELL_REG_BP
 
 #define NSLOT 8u
 
@@ -90,7 +93,17 @@ struct slot {
 	uint64_t va;
 };
 
-struct kof_xref {
+struct kgenome_xref {
+	/*
+	 * THE RUN IN PROGRESS: what the registers and the locals hold since
+	 * kgenome_xref_begin. A run is the unit the caller cuts the code into, and
+	 * it is where this state is empty; see kgenome_xref_begin.
+	 */
+	uint64_t run_reg[NGPR];
+	struct slot run_slot[NSLOT];
+	uint32_t run_next_slot;
+	uint32_t run_rgn;
+	int      run_on;                /* x86, and a run has begun */
 	uint64_t va[USE_MAX];
 	uint8_t  flag[USE_MAX];
 	uint16_t slot[USE_HASH];        /* index into va[] plus one; 0 is empty */
@@ -143,7 +156,7 @@ static uint32_t h_of(uint64_t va)
 }
 
 /* The slot this address is in, or the empty slot it belongs in. */
-static uint32_t h_find(const struct kof_xref *u, uint64_t va)
+static uint32_t h_find(const struct kgenome_xref *u, uint64_t va)
 {
 	uint32_t h = h_of(va);
 
@@ -153,7 +166,7 @@ static uint32_t h_find(const struct kof_xref *u, uint64_t va)
 	return h;
 }
 
-static void note(struct kof_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
+static void note(struct kgenome_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
 {
 	uint32_t h;
 
@@ -179,25 +192,29 @@ static void note(struct kof_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
 }
 
 /* The GPR an operand names, or NGPR when it names none. */
+static uint32_t gpr_of(const struct kgenome_cell_operand *op)
+{
+	return op->kind == KGENOME_CELL_O_REG && op->reg < NGPR ? op->reg : NGPR;
+}
 
 /*
  * The stack slot a memory operand names, or NSLOT when it names none this
  * sweep will follow. rbp and rsp only - see the note on NSLOT.
  */
-static uint32_t slot_of(struct slot *slot, const struct gt_x86_op *op, int make,
-			uint32_t *next)
+static uint32_t slot_of(struct slot *slot, const struct kgenome_cell_operand *op,
+			int make, uint32_t *next)
 {
 	uint32_t i;
 	uint32_t base;
 	int64_t  disp;
 
-	if (op->type != GT_X86_OP_MEM || !(op->mf & GT_X86_M_BASE) ||
-	    (op->mf & (GT_X86_M_INDEX | GT_X86_M_RIPREL)))
+	if (op->kind != KGENOME_CELL_O_MEM || op->reg == KGENOME_CELL_REG_NONE ||
+	    op->index != KGENOME_CELL_REG_NONE || (op->flags & KGENOME_CELL_OF_RIPREL))
 		return NSLOT;
-	base = op->base;
+	base = op->reg;
 	if (base != GPR_RBP && base != GPR_RSP)
 		return NSLOT;
-	disp = (op->mf & GT_X86_M_DISP) ? op->v : 0;
+	disp = op->disp;
 	for (i = 0; i < NSLOT; i++)
 		if (slot[i].base == base && slot[i].disp == disp)
 			return i;
@@ -219,247 +236,265 @@ static uint32_t slot_of(struct slot *slot, const struct gt_x86_op *op, int make,
  * is rare enough to be noise, and a base register would need the dataflow this
  * file has already said it does not do.
  */
-static uint64_t mem_va(const struct gt_x86_insn *ix, const struct gt_x86_op *op,
-		       uint64_t rip)
+static uint64_t mem_va(const struct kgenome_cell_insn *in, const struct kgenome_cell_operand *op)
 {
-	if (op->type != GT_X86_OP_MEM || !(op->mf & GT_X86_M_DISP))
+	if (op->kind != KGENOME_CELL_O_MEM || !(op->flags & KGENOME_CELL_OF_RIPREL))
 		return 0;
-	if (!(op->mf & GT_X86_M_RIPREL))
-		return 0;
-	return rip + ix->len + (uint64_t)op->v;
+	return in->at_va + in->len + (uint64_t)op->disp;
 }
 
-struct kof_xref *kof_xref_new(void)
+struct kgenome_xref *kgenome_xref_new(void)
 {
-	return calloc(1, sizeof(struct kof_xref));
+	return calloc(1, sizeof(struct kgenome_xref));
 }
 
-void kof_xref_add(struct kof_xref *u, const uint8_t *code, uint32_t code_n,
-		     uint64_t code_va, unsigned bits)
+void kgenome_xref_begin(struct kgenome_xref *u, unsigned arch)
 {
-	uint64_t reg[NGPR];
-	struct slot slot[NSLOT];
-	uint32_t at = 0, next_slot = 0, rgn;
+	uint32_t i;
 
-	if (!u || !code || !code_n)
+	if (!u)
 		return;
-	for (at = 0; at < NSLOT; at++)
-		slot[at].base = NGPR;
-	at = 0;
+	/*
+	 * The sweep tracks x86 registers and rip-relative operands; what the
+	 * decoder says of another architecture's code would be read as if it
+	 * were that. Nothing recorded is "nothing known" and the caller says so.
+	 */
+	u->run_on = arch == KGENOME_ARCH_X86 || arch == KGENOME_ARCH_X86_64;
+	if (!u->run_on)
+		return;
+	for (i = 0; i < NSLOT; i++)
+		u->run_slot[i].base = NGPR;
+	u->run_next_slot = 0;
 	/* A run of code starts a region, and every RET ends one. */
-	rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
+	u->run_rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
 	/* Each run starts knowing nothing: a register left over from the end of
 	 * one section says nothing about the start of the next. */
-	memset(reg, 0, sizeof reg);
+	memset(u->run_reg, 0, sizeof u->run_reg);
+}
 
-	while (at < code_n) {
-		struct gt_x86_insn ix;
-		struct gt_x86_op ops[GT_X86_MAX_OPS];
-		unsigned nops;
-		uint32_t i, dst = NGPR;
-		uint64_t rip = code_va + at;
-		uint64_t formed = 0;
+void kgenome_xref_feed(void *user, const struct kgenome_cell_insn *in)
+{
+	struct kgenome_xref *u = user;
+	uint64_t *reg;
+	struct slot *slot;
+	uint32_t *next_slot;
+	uint32_t rgn;
+	const struct kgenome_cell_operand *ops;
+	uint32_t nops, i, dst = NGPR, len;
+	uint64_t formed = 0, wm, rip;
+	int near_br, direct, indirect, is_call;
 
-		if (gt_x86_decode(&ix, code + at, code_n - at,
-				  bits == 32 ? 32 : 64) != GT_OK) {
-			/*
-			 * One byte on rather than giving up.
-			 *
-			 * A linear sweep meets data between functions - jump
-			 * tables, alignment padding, a literal pool - and that
-			 * is not a reason to stop reading the code after it.
-			 * Resynchronising costs at most one byte per byte of
-			 * data, which the size bound already covers.
-			 */
-			at++;
-			memset(reg, 0, sizeof reg);
-			continue;
-		}
-
-		nops = gt_x86_nops(&ix);
-		gt_x86_operands(&ix, ops);
-
+	if (!u || !u->run_on)
+		return;
+	reg = u->run_reg;
+	slot = u->run_slot;
+	next_slot = &u->run_next_slot;
+	rgn = u->run_rgn;
+	if (!in) {
 		/*
-		 * AN INDIRECT CALL OR JUMP, FIRST, because it reads the map
-		 * this instruction is about to change.
-		 */
-		/*
-		 * A DIRECT CALL OR JUMP COUNTS TOO, and leaving it out was
-		 * wrong.
+		 * One byte on rather than giving up.
 		 *
-		 * "A direct call names a code address, never a variable" is
-		 * true of code a compiler wrote for itself and false of this:
-		 * gcc -O2 turns `((void(*)())shellcode)()` into a relative call
-		 * straight to the variable, because the target is a constant it
-		 * can compute. The address is what matters, not how the
-		 * instruction encoded it; whether that address is a variable is
-		 * the caller's question, not this sweep's.
+		 * A linear sweep meets data between functions - jump
+		 * tables, alignment padding, a literal pool - and that
+		 * is not a reason to stop reading the code after it.
+		 * Resynchronising costs at most one byte per byte of
+		 * data, which the size bound already covers.
 		 */
-		if (ix.id == GT_X86_I_CALLNR ||
-		    ix.id == GT_X86_I_JMPNR) {
-			uint32_t k = ix.id == GT_X86_I_CALLNR
-				   ? KOF_XREF_CALL : KOF_XREF_JUMP;
+		memset(reg, 0, sizeof u->run_reg);
+		return;
+	}
+	ops = in->o;
+	rip = in->at_va;
+	len = in->len;
+	nops = in->n_op;
+	/* A near call or jump: a far one leaves the segment and is
+	 * neither. */
+	is_call = in->op == KGENOME_CELL_CALL && !(in->flags & KGENOME_CELL_F_FAR);
+	near_br = is_call || (in->op == KGENOME_CELL_JMP && !(in->flags & KGENOME_CELL_F_FAR));
+	indirect = near_br && (in->flags & KGENOME_CELL_F_INDIRECT);
+	direct = near_br && !indirect;
 
-			for (i = 0; i < nops; i++) {
-				uint64_t t;
+	/*
+	 * AN INDIRECT CALL OR JUMP, FIRST, because it reads the map
+	 * this instruction is about to change.
+	 */
+	/*
+	 * A DIRECT CALL OR JUMP COUNTS TOO, and leaving it out was
+	 * wrong.
+	 *
+	 * "A direct call names a code address, never a variable" is
+	 * true of code a compiler wrote for itself and false of this:
+	 * gcc -O2 turns `((void(*)())shellcode)()` into a relative call
+	 * straight to the variable, because the target is a constant it
+	 * can compute. The address is what matters, not how the
+	 * instruction encoded it; whether that address is a variable is
+	 * the caller's question, not this sweep's.
+	 */
+	if (direct && in->target_va != KGENOME_BROKEN) {
+		uint32_t k = is_call ? KGENOME_XREF_CALL : KGENOME_XREF_JUMP;
+		uint64_t t = in->target_va;
 
-				if (ops[i].type != GT_X86_OP_REL)
-					continue;
-				t = rip + ix.len +
-				    (uint64_t)ops[i].v;
-				note(u, t, KOF_XREF_READ | k, rgn);
-				/*
-				 * AND REMEMBER WHO CALLS WHOM.
-				 *
-				 * The target is a code address; which region it
-				 * lands in is not known until the sweep reaches
-				 * it, so the address is kept and resolved after.
-				 */
-				if (ix.id == GT_X86_I_CALLNR &&
-				    u->n_edge < USE_RGN) {
-					u->edge_from[u->n_edge] = (uint8_t)rgn;
-					u->edge_to[u->n_edge] = t;
-					u->n_edge++;
-				}
-			}
-		}
-		if (ix.id == GT_X86_I_CALLNI)
-			u->rgn_flag[rgn] |= KOF_XREF_RGN_ICALL;
-		if (ix.id == GT_X86_I_CALLNI ||
-		    ix.id == GT_X86_I_JMPNI) {
-			uint32_t k = ix.id == GT_X86_I_CALLNI
-				   ? KOF_XREF_CALL : KOF_XREF_JUMP;
-
-			for (i = 0; i < nops; i++) {
-				const struct gt_x86_op *op = &ops[i];
-				uint32_t r = gpr_of(op);
-				uint64_t m;
-
-				if (r < NGPR && reg[r])
-					note(u, reg[r], KOF_XREF_READ | k, rgn);
-				/* call [rip+d] - the pointer is named by the
-				 * instruction itself, no register involved. */
-				m = mem_va(&ix, op, rip);
-				if (m)
-					note(u, m, KOF_XREF_READ | k, rgn);
-			}
-		}
-
+		note(u, t, KGENOME_XREF_READ | k, rgn);
 		/*
-		 * EVERY TRACKED ADDRESS STILL IN A REGISTER AT A CALL is an
-		 * argument, as far as this can tell.
+		 * AND REMEMBER WHO CALLS WHOM.
 		 *
-		 * No knowledge of any calling convention, on purpose: which
-		 * registers carry arguments differs by ABI and by architecture,
-		 * and a sweep that guessed would be wrong on the first Windows
-		 * binary. "It was in a register when a call happened" is the
-		 * fact; whether that means it was passed is the caller's
-		 * question, and a rule that wants certainty has CALL for that.
+		 * The target is a code address; which region it lands
+		 * in is not known until the sweep reaches it, so the
+		 * address is kept and resolved after.
 		 */
-		if (ix.id == GT_X86_I_CALLNR ||
-		    ix.id == GT_X86_I_CALLNI) {
-			uint32_t r;
-
-			for (r = 0; r < NGPR; r++)
-				if (reg[r])
-					note(u, reg[r],
-					     KOF_XREF_READ | KOF_XREF_ARG, rgn);
+		if (is_call && u->n_edge < USE_RGN) {
+			u->edge_from[u->n_edge] = (uint8_t)rgn;
+			u->edge_to[u->n_edge] = t;
+			u->n_edge++;
 		}
+	}
+	if (indirect && is_call)
+		u->rgn_flag[rgn] |= KGENOME_XREF_RGN_ICALL;
+	if (indirect) {
+		uint32_t k = is_call ? KGENOME_XREF_CALL : KGENOME_XREF_JUMP;
 
-		/*
-		 * WHAT THIS INSTRUCTION PUTS INTO A REGISTER.
-		 *
-		 * LEA gives the address, a load gives what is at it, and a
-		 * register to register move carries either along. Everything
-		 * else that writes a GPR ends what was known about it - which
-		 * is the conservative direction: a forgotten register loses a
-		 * finding, a remembered stale one invents evidence.
-		 */
 		for (i = 0; i < nops; i++) {
-			const struct gt_x86_op *op = &ops[i];
+			const struct kgenome_cell_operand *op = &ops[i];
+			uint32_t r = gpr_of(op);
 			uint64_t m;
 
-			if ((op->acc & GT_X86_ACC_W)) {
+			if (r < NGPR && reg[r])
+				note(u, reg[r], KGENOME_XREF_READ | k, rgn);
+			/* call [rip+d] - the pointer is named by the
+			 * instruction itself, no register involved. */
+			m = mem_va(in, op);
+			if (m)
+				note(u, m, KGENOME_XREF_READ | k, rgn);
+		}
+	}
+
+	/*
+	 * EVERY TRACKED ADDRESS STILL IN A REGISTER AT A CALL is an
+	 * argument, as far as this can tell.
+	 *
+	 * No knowledge of any calling convention, on purpose: which
+	 * registers carry arguments differs by ABI and by architecture,
+	 * and a sweep that guessed would be wrong on the first Windows
+	 * binary. "It was in a register when a call happened" is the
+	 * fact; whether that means it was passed is the caller's
+	 * question, and a rule that wants certainty has CALL for that.
+	 */
+	if (is_call) {
+		uint32_t r;
+
+		for (r = 0; r < NGPR; r++)
+			if (reg[r])
+				note(u, reg[r],
+				     KGENOME_XREF_READ | KGENOME_XREF_ARG, rgn);
+	}
+
+	/*
+	 * WHAT THIS INSTRUCTION PUTS INTO A REGISTER.
+	 *
+	 * LEA gives the address, a load gives what is at it, and a
+	 * register to register move carries either along. Everything
+	 * else that writes a GPR ends what was known about it - which
+	 * is the conservative direction: a forgotten register loses a
+	 * finding, a remembered stale one invents evidence.
+	 */
+	for (i = 0; i < nops; i++) {
+		const struct kgenome_cell_operand *op = &ops[i];
+		uint64_t m;
+
+		if ((op->flags & KGENOME_CELL_OF_WRITE)) {
+			uint32_t r = gpr_of(op);
+			uint64_t w = mem_va(in, op);
+
+			if (r < NGPR && dst == NGPR)
+				dst = r;
+			if (w)
+				note(u, w, KGENOME_XREF_WRITE, rgn);
+		}
+		if ((op->flags & KGENOME_CELL_OF_READ)) {
+			m = mem_va(in, op);
+			if (m) {
+				note(u, m, KGENOME_XREF_READ, rgn);
+				formed = m;
+			} else if (in->op == KGENOME_CELL_MOV) {
 				uint32_t r = gpr_of(op);
-				uint64_t w = mem_va(&ix, op, rip);
-
-				if (r < NGPR && dst == NGPR)
-					dst = r;
-				if (w)
-					note(u, w, KOF_XREF_WRITE, rgn);
-			}
-			if ((op->acc & GT_X86_ACC_R)) {
-				m = mem_va(&ix, op, rip);
-				if (m) {
-					note(u, m, KOF_XREF_READ, rgn);
-					formed = m;
-				} else if (ix.id == GT_X86_I_MOV) {
-					uint32_t r = gpr_of(op);
-					uint32_t sl;
-
-					if (r < NGPR && reg[r])
-						formed = reg[r];
-					sl = slot_of(slot, op, 0, &next_slot);
-					if (sl < NSLOT && slot[sl].va)
-						formed = slot[sl].va;
-				}
-			}
-		}
-		if (ix.id == GT_X86_I_LEA) {
-			/* LEA's memory operand is an address generation and is
-			 * not read, so the loop above never saw it. */
-			for (i = 0; i < nops; i++) {
-				uint64_t m = mem_va(&ix, &ops[i], rip);
-
-				if (m) {
-					note(u, m, KOF_XREF_READ, rgn);
-					formed = m;
-				}
-			}
-		}
-		if (dst < NGPR)
-			reg[dst] = (ix.id == GT_X86_I_LEA ||
-				    ix.id == GT_X86_I_MOV) ? formed : 0;
-		/*
-		 * A store of a tracked address into a local. Only for MOV, and
-		 * only when something was tracked: a store of anything else
-		 * ends what the slot held, for the same reason a register write
-		 * does.
-		 */
-		if (ix.id == GT_X86_I_MOV)
-			for (i = 0; i < nops; i++) {
-				const struct gt_x86_op *op = &ops[i];
 				uint32_t sl;
 
-				if (!(op->acc & GT_X86_ACC_W))
-					continue;
-				sl = slot_of(slot, op, formed != 0, &next_slot);
-				if (sl < NSLOT)
-					slot[sl].va = formed;
+				if (r < NGPR && reg[r])
+					formed = reg[r];
+				sl = slot_of(slot, op, 0, next_slot);
+				if (sl < NSLOT && slot[sl].va)
+					formed = slot[sl].va;
 			}
-
-		/*
-		 * A RET ENDS THE REGION. The next instruction starts another,
-		 * and it starts knowing nothing: a register or a local from
-		 * the function that just returned says nothing about the one
-		 * that follows it.
-		 */
-		if (ix.id == GT_X86_I_RETN || ix.id == GT_X86_I_RETF) {
-			rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
-			if (rgn < USE_RGN)
-				u->rgn_at[rgn] = rip + ix.len;
-			memset(reg, 0, sizeof reg);
-			for (i = 0; i < NSLOT; i++)
-				slot[i].base = NGPR;
 		}
-		at += ix.len;
 	}
+	if (in->op == KGENOME_CELL_LEA) {
+		/* LEA's memory operand is an address generation and is
+		 * not read, so the loop above never saw it. */
+		for (i = 0; i < nops; i++) {
+			uint64_t m = mem_va(in, &ops[i]);
+
+			if (m) {
+				note(u, m, KGENOME_XREF_READ, rgn);
+				formed = m;
+			}
+		}
+	}
+	/*
+	 * EVERY REGISTER IT WRITES IS FORGOTTEN, the ones it does not
+	 * name included - `cltq` has no operand and still replaces rax,
+	 * and `mul` fills the one above its operand. The sweep used to
+	 * forget only the first written operand it could see, which
+	 * kept a stale address in a register the instruction had just
+	 * overwritten; MEASURED on /usr/bin/ul, a `movl optind, %eax ;
+	 * cltq` left optind's address in rax until the next call and
+	 * the call recorded it as an argument. wmask is the decoder's
+	 * own answer to "what did this write", so it is read, not
+	 * re-derived from the operands.
+	 */
+	for (wm = in->wmask & (((uint64_t)1 << NGPR) - 1u); wm; wm &= wm - 1u)
+		reg[(uint32_t)__builtin_ctzll(wm)] = 0;
+	if (dst < NGPR)
+		reg[dst] = (in->op == KGENOME_CELL_LEA || in->op == KGENOME_CELL_MOV)
+			 ? formed : 0;
+	/*
+	 * A store of a tracked address into a local. Only for MOV, and
+	 * only when something was tracked: a store of anything else
+	 * ends what the slot held, for the same reason a register write
+	 * does.
+	 */
+	if (in->op == KGENOME_CELL_MOV)
+		for (i = 0; i < nops; i++) {
+			const struct kgenome_cell_operand *op = &ops[i];
+			uint32_t sl;
+
+			if (!(op->flags & KGENOME_CELL_OF_WRITE))
+				continue;
+			sl = slot_of(slot, op, formed != 0, next_slot);
+			if (sl < NSLOT)
+				slot[sl].va = formed;
+		}
+
+	/*
+	 * A RET ENDS THE REGION. The next instruction starts another,
+	 * and it starts knowing nothing: a register or a local from
+	 * the function that just returned says nothing about the one
+	 * that follows it.
+	 */
+	if (in->op == KGENOME_CELL_RET) {
+		rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
+		if (rgn < USE_RGN)
+			u->rgn_at[rgn] = rip + len;
+		memset(reg, 0, sizeof u->run_reg);
+		for (i = 0; i < NSLOT; i++)
+			slot[i].base = NGPR;
+	}
+	u->run_rgn = rgn;
 }
 
 /* Insertion sort over the index. n is at most USE_MAX and the array is nearly
  * ordered already - addresses are recorded roughly as the code names them - so
  * this beats anything cleverer at this size. */
-static void order_build(struct kof_xref *u)
+static void order_build(struct kgenome_xref *u)
 {
 	uint32_t i, j;
 	uint64_t reach = 0;
@@ -506,8 +541,8 @@ static void order_build(struct kof_xref *u)
 			    (best == USE_RGN || u->rgn_at[r] > u->rgn_at[best]))
 				best = r;
 		if (best < USE_RGN &&
-		    (u->rgn_flag[best] & KOF_XREF_RGN_ICALL))
-			u->rgn_flag[u->edge_from[i]] |= KOF_XREF_RGN_NEAR;
+		    (u->rgn_flag[best] & KGENOME_XREF_RGN_ICALL))
+			u->rgn_flag[u->edge_from[i]] |= KGENOME_XREF_RGN_NEAR;
 		/*
 		 * AND WHAT STARTUP CODE REACHES IS STARTUP TOO, one level.
 		 *
@@ -524,7 +559,7 @@ static void order_build(struct kof_xref *u)
 	u->sorted = 1;
 }
 
-uint32_t kof_xref_in(struct kof_xref *u, uint64_t va, uint64_t n)
+uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n)
 {
 	uint32_t lo = 0, hi, f = 0;
 
@@ -550,7 +585,7 @@ uint32_t kof_xref_in(struct kof_xref *u, uint64_t va, uint64_t n)
 		/* Anything outside the startup set having mentioned it is the
 		 * one fact a rule about a person's program wants first. */
 		if (u->rgn[e] & ~u->startup)
-			f |= KOF_XREF_USER;
+			f |= KGENOME_XREF_USER;
 		/*
 		 * And what the regions that referred to it do. The address
 		 * facts are about the variable; these are about the code
@@ -569,12 +604,12 @@ uint32_t kof_xref_in(struct kof_xref *u, uint64_t va, uint64_t n)
 	return f;
 }
 
-int kof_xref_full(const struct kof_xref *u)
+int kgenome_xref_full(const struct kgenome_xref *u)
 {
 	return u ? u->full : 0;
 }
 
-int kof_xref_startup(struct kof_xref *u, uint64_t va)
+int kgenome_xref_startup(struct kgenome_xref *u, uint64_t va)
 {
 	if (!u || u->n_start >= USE_RGN)
 		return 0;              /* no room: see the note in xref.h */
@@ -583,7 +618,7 @@ int kof_xref_startup(struct kof_xref *u, uint64_t va)
 	return 1;
 }
 
-void kof_xref_free(struct kof_xref *u)
+void kgenome_xref_free(struct kgenome_xref *u)
 {
 	free(u);
 }

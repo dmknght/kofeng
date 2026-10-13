@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "../../libgenome/phenotype/kofemu.h"
+#include <phenotype/kofemu.h>
 
 static int failures;
 
@@ -32,23 +32,23 @@ static int failures;
 static uint64_t run_one(unsigned bits, const uint8_t *code, unsigned n,
 			uint64_t rax)
 {
-	struct kof_emu_cfg cfg = { 0 };
-	struct kof_emu *e;
+	struct kgenome_emu_cfg cfg = { 0 };
+	struct kgenome_emu *e;
 	uint64_t out;
 
 	cfg.bits = bits;
 	cfg.max_insn = 64;
-	e = kof_emu_new(&cfg);
+	e = kgenome_emu_new(&cfg);
 	if (!e)
 		return 0;
-	kof_emu_map(e, CODE_VA, code, n, 0x1000, KOF_EMU_R | KOF_EMU_X);
-	kof_emu_map(e, STACK_VA, NULL, 0, 0x1000, KOF_EMU_R | KOF_EMU_W);
-	kof_emu_set_rip(e, CODE_VA);
-	kof_emu_set_reg(e, KOF_EMU_RSP, STACK_VA + 0x800);
-	kof_emu_set_reg(e, KOF_EMU_RAX, rax);
-	(void)kof_emu_run(e);
-	out = kof_emu_get_reg(e, KOF_EMU_RAX);
-	kof_emu_free(e);
+	kgenome_emu_map(e, CODE_VA, code, n, 0x1000, KGENOME_EMU_R | KGENOME_EMU_X);
+	kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W);
+	kgenome_emu_set_rip(e, CODE_VA);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RAX, rax);
+	(void)kgenome_emu_run(e);
+	out = kgenome_emu_get_reg(e, KGENOME_EMU_RAX);
+	kgenome_emu_free(e);
 	return out;
 }
 

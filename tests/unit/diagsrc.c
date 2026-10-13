@@ -14,7 +14,8 @@
 #include <string.h>
 
 #include "../../libkofeng/databases/diagsrc.h"
-#include "../../libkofeng/analyzers/nucleo/nucleo.h"
+#include <kofmod/kofsig.h>   /* KOF_FMT_*, KOF_MALTYPE_* - no longer reached through the genome headers */
+#include <celllysis/nucleo.h>
 
 static int fails;
 
@@ -158,14 +159,14 @@ static void edits(void)
 	CHECK(kof_dsrc_parse(src, n, d, NULL) == 0, "fixture does not parse");
 	CHECK(d->n == 5, "fixture has %u declarations, want 5", d->n);
 	CHECK(kof_dsrc_resolve(d, &v, NULL) == 0 && v.n_nd == 3 &&
-	      v.nd[0].flags == KOF_FLOWF_WX, "fixture tree is wrong");
+	      v.nd[0].flags == KGENOME_FLOWF_WX, "fixture tree is wrong");
 	pr0 = prose(src, n);
 
 	/* Remove the second tail. Only its line goes. */
 	*e = *d;
 	for (i = 0; i < e->n; i++)
 		if (e->item[i].kind == KDS_TAIL &&
-		    e->item[i].a == KOF_NUCLEO_EXEC_REG) {
+		    e->item[i].a == KGENOME_NUCLEO_EXEC_REG) {
 			memmove(&e->item[i], &e->item[i + 1u],
 				(e->n - i - 1u) * sizeof e->item[0]);
 			e->n--;
@@ -186,7 +187,7 @@ static void edits(void)
 	*e = *d;
 	memset(&e->item[e->n], 0, sizeof e->item[0]);
 	e->item[e->n].kind = KDS_TAIL;
-	e->item[e->n].a = KOF_NUCLEO_NET_OPEN;
+	e->item[e->n].a = KGENOME_NUCLEO_NET_OPEN;
 	e->item[e->n].b = KOF_DIAG_B_PRODUCED;
 	e->n++;
 	p = kof_dsrc_patch(src, n, e, &pn);
@@ -203,7 +204,7 @@ static void edits(void)
 
 		kof_dsrc_parse(p, pn, r, NULL);
 		CHECK(kof_dsrc_resolve(r, &v, NULL) == 0 && v.n_nd == 4 &&
-		      v.nd[3].cap == KOF_NUCLEO_NET_OPEN &&
+		      v.nd[3].cap == KGENOME_NUCLEO_NET_OPEN &&
 		      (v.nd[3].bits & KOF_DIAG_B_PRODUCED),
 		      "addition: tree after the edit is wrong");
 		free(r);
@@ -321,7 +322,7 @@ static void verdicts(void)
 	CHECK(kof_dsrc_parse(vsrc, n, d, NULL) == 0 && d->has_cond, "fixture not read");
 	CHECK(d->cond.n == 3 && d->cond.t[0].kind == KVT_DIAG &&
 	      !strcmp(d->cond.t[0].a, "DIAG_MEM_EXECSYSCALL") && d->cond.t[2].kind == KVT_SHARE &&
-	      d->cond.t[2].cap == KOF_NUCLEO_MEM_READ &&
+	      d->cond.t[2].cap == KGENOME_NUCLEO_MEM_READ &&
 	      !strcmp(d->cond.t[2].b, "DIAG_NET_RECVSYSCALL"),
 	      "terms: %u, a wrapped kof_diag_share was misread", d->cond.n);
 	/* the comment named kof_diag(NOT_A_TERM) and it is not a term */
@@ -447,18 +448,20 @@ static void disease(void)
 	static const char good[] =
 		"/* what it means */\n"
 		"KOF_DIAG_NAME(DIAG_A);\n"
-		"KOF_DIAG_DISEASE(\"cnc/recv-syscall\");\n"
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"cnc/recv-syscall\");\n"
 		"KOF_DIAG_ANALYSIS(KOF_DIAG_ANALYSIS_SYSCALL);\n"
 		"KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);\n"
 		"KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n";
 	static const char *const bad[] = {
-		"KOF_DIAG_DISEASE(\"Cnc/Recv\");\n",             /* upper case        */
-		"KOF_DIAG_DISEASE(\"cnc recv\");\n",             /* a space           */
-		"KOF_DIAG_DISEASE(\"/recv\");\n",                /* an empty part     */
-		"KOF_DIAG_DISEASE(\"recv/\");\n",
-		"KOF_DIAG_DISEASE(\"cnc//recv\");\n",
-		"KOF_DIAG_DISEASE(cnc/recv);\n",                 /* not quoted        */
-		"KOF_DIAG_DISEASE(\"a\");\nKOF_DIAG_DISEASE(\"b\");\n", /* two */
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"Cnc/Recv\");\n",             /* upper case        */
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"cnc recv\");\n",             /* a space           */
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"/recv\");\n",                /* an empty part     */
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"recv/\");\n",
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"cnc//recv\");\n",
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, cnc/recv);\n",   /* not quoted        */
+		"KOF_DECLARE_DISEASE(\"cnc/recv\");\n",                 /* no type           */
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_NOPE, \"cnc/recv\");\n",  /* not a maltype     */
+		"KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"a\");\nKOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"b\");\n", /* two */
 	};
 	static struct kof_dsrc d;
 	struct kof_dsrc_view v;
@@ -468,11 +471,12 @@ static void disease(void)
 
 	CHECK(kof_dsrc_parse(good, sizeof good - 1u, &d, &rep) == 0, "a good source parses");
 	CHECK(kof_dsrc_resolve(&d, &v, &rep) == 0, "and resolves");
-	CHECK(!strcmp(v.disease, "cnc/recv-syscall"), "the disease reaches the view: %s", v.disease);
+	CHECK(!strcmp(v.disease, "cnc/recv-syscall") && v.disease_type == KOF_MALTYPE_BOTNET,
+	      "the disease and its type reach the view: %s", v.disease);
 	for (k = 0; k < d.n; k++)
 		if (d.item[k].kind == KDS_DISEASE) {
 			CHECK(kof_dsrc_print(&d.item[k], line, sizeof line) > 0 &&
-			      !strcmp(line, "KOF_DIAG_DISEASE(\"cnc/recv-syscall\");"),
+			      !strcmp(line, "KOF_DECLARE_DISEASE(KOF_MALTYPE_BOTNET, \"cnc/recv-syscall\");"),
 			      "printed as written: %s", line);
 		}
 	for (k = 0; k < sizeof bad / sizeof bad[0]; k++) {

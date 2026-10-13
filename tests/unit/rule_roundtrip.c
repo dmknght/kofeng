@@ -14,7 +14,7 @@
  * an empty format mask), and the scan RANGE - region names were resolved
  * against whatever object the reader happened to have open, so opening an ELF
  * rule while looking at a php file and saving it turned
- * KOF_SCAN_ELF_CODE into KOF_SCAN_ALL. 49 of the 52 rules in bases/signatures
+ * KGENOME_SCAN_ELF_CODE into KOF_SCAN_ALL. 49 of the 52 rules in bases/signatures
  * are region-scoped, so that one was nearly all of them.
  *
  * None of the three failed a build, none printed anything, and none changed

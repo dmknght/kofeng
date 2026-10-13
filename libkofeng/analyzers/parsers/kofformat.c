@@ -30,12 +30,12 @@
  */
 static int elf_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
-	return kof_elf_parse(b, (struct kof_elf_info *)v, c);
+	return kof_elf_parse(b, (struct kgenome_elf_info *)v, c);
 }
 
 static int pe_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
 {
-	return kof_pe_parse(b, (struct kof_pe_info *)v, c);
+	return kof_pe_parse(b, (struct kgenome_pe_info *)v, c);
 }
 
 static int gzip_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
@@ -139,12 +139,12 @@ static int amsi_parse_thunk(kof_buf b, void *v, struct kof_obj_ctx *c)
  */
 static uint64_t anom_elf(const void *v)
 {
-	return ((const struct kof_elf_info *)v)->anomalies;
+	return ((const struct kgenome_elf_info *)v)->anomalies;
 }
 
 static uint64_t anom_pe(const void *v)
 {
-	return ((const struct kof_pe_info *)v)->anomalies;
+	return ((const struct kgenome_pe_info *)v)->anomalies;
 }
 
 static uint64_t anom_gzip(const void *v)
@@ -236,12 +236,12 @@ static uint64_t anom_rtf(const void *v)
 }
 
 static const struct kof_parser formats[] = {
-	{ KOF_FMT_ELF, (uint32_t)sizeof(struct kof_elf_info),
-	  kof_elf_sniff, elf_parse_thunk,
+	{ KOF_FMT_ELF, (uint32_t)sizeof(struct kgenome_elf_info),
+	  kgenome_elf_sniff, elf_parse_thunk,
 	  kof_elf_region_bits, KOF_ELF_REGION_COUNT,
 	  kof_elf_region_name, kof_elf_anomaly_name, anom_elf },
-	{ KOF_FMT_PE, (uint32_t)sizeof(struct kof_pe_info),
-	  kof_pe_sniff, pe_parse_thunk,
+	{ KOF_FMT_PE, (uint32_t)sizeof(struct kgenome_pe_info),
+	  kgenome_pe_sniff, pe_parse_thunk,
 	  kof_pe_region_bits, KOF_PE_REGION_COUNT,
 	  kof_pe_region_name, kof_pe_anomaly_name, anom_pe },
 	{ KOF_FMT_GZIP, (uint32_t)sizeof(struct kof_gzip_info),

@@ -22,7 +22,7 @@
 #include <string.h>
 
 #include "kofeng.h"
-#include "kofmod/proc.h"
+#include "../../libkofeng/kofcore/kofmod/proc.h"
 #include "kofproc.h"
 #include "../../libkofeng/analyzers/parsers/processes/proc_parse.h"
 

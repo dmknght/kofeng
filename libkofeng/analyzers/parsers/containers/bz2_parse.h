@@ -7,7 +7,7 @@
  * was recovered plus anomaly bits.
  *
  * The wrapper only. Nothing here decodes the stream: that is
- * extractors/decomp/bzip2.c, reached by an unpacker through the host, and it is
+ * libuncoat/decompressors/bzip2.c, reached by an unpacker through the host, and it is
  * deliberately not reachable from a collector. Identifying an object must not
  * cost the decompression of it, and for this format that matters more than
  * most - a bzip2 block cannot be partly decoded, so the cheapest question

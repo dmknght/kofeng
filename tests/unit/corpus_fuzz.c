@@ -15,7 +15,7 @@
  *   entry_off is a sentinel or an offset inside the object
  *   resolve_scan survives a mask with bits no format defines
  *   an RVA the file never mentions resolves to an offset inside the object, or
- *     to KOF_BROKEN, and never to something in between
+ *     to KGENOME_BROKEN, and never to something in between
  *
  * Two cheap tricks keep this fast enough to sit in `make unit`:
  *
@@ -140,7 +140,7 @@ static void poke_accessors(const struct kof_obj_ctx *ctx, uint64_t obj_size,
 	 * legal and nothing else is: not applicable, could not be determined, or
 	 * a place inside the object.
 	 */
-	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN &&
+	if (ctx->entry_off != KGENOME_NA && ctx->entry_off != KGENOME_BROKEN &&
 	    ctx->entry_off >= obj_size) {
 		printf("  FAIL %s: entry_off %llu is outside a %llu byte object\n",
 		       what, (unsigned long long)ctx->entry_off,
@@ -149,15 +149,15 @@ static void poke_accessors(const struct kof_obj_ctx *ctx, uint64_t obj_size,
 	}
 
 	if (ctx->format == KOF_FMT_PE && ctx->file_header) {
-		const struct kof_pe_info *pe = ctx->file_header;
+		const struct kgenome_pe_info *pe = ctx->file_header;
 		static const uint64_t rvas[] = {
 			0, 1, 0x1000, 0x7fffffff, 0xffffffff, 0xfffffffffull
 		};
 
 		for (i = 0; i < sizeof rvas / sizeof rvas[0]; i++) {
-			uint64_t off = kof_pe_rva_to_off(pe, rvas[i]);
+			uint64_t off = kgenome_pe_rva_to_off(pe, rvas[i]);
 
-			if (off != KOF_BROKEN && off >= obj_size) {
+			if (off != KGENOME_BROKEN && off >= obj_size) {
 				printf("  FAIL %s: rva 0x%llx resolved to %llu, "
 				       "outside a %llu byte object\n", what,
 				       (unsigned long long)rvas[i],
@@ -224,7 +224,7 @@ static void fuzz_file(const char *path, uint32_t rounds, struct pc_report *rep,
 		goto out;
 	/*
 	 * ZEROED ONCE, WHICH IS ENOUGH HERE. A view carries fields the parse
-	 * does not write - kof_pe_info.layout, which pe_parse deliberately
+	 * does not write - kgenome_pe_info.layout, which pe_parse deliberately
 	 * preserves across its own memset because a caller owns it. Nothing in
 	 * this file ever sets one, so zero at the start stays zero, and zero is
 	 * FILE layout. Out of malloc it would be uninitialised heap instead,

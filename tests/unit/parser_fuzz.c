@@ -1288,8 +1288,8 @@ static struct fmt {
 	uint32_t n_anom;
 	const struct kof_parser *p;
 } fmts[] = {
-	{ KOF_FMT_PE, gen_pe, KOF_PE_ANOM_COUNT, NULL },
-	{ KOF_FMT_ELF, gen_elf, KOF_ELF_ANOM_COUNT, NULL },
+	{ KOF_FMT_PE, gen_pe, KGENOME_PE_ANOM_COUNT, NULL },
+	{ KOF_FMT_ELF, gen_elf, KGENOME_ELF_ANOM_COUNT, NULL },
 	{ KOF_FMT_GZIP, gen_gzip, KOF_GZIP_ANOM_COUNT, NULL },
 	{ KOF_FMT_DOCOLE, gen_docole, KOF_DOCOLE_ANOM_COUNT, NULL },
 	{ KOF_FMT_ZIP, gen_zip, KOF_ZIP_ANOM_COUNT, NULL },

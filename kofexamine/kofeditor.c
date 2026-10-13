@@ -35,13 +35,18 @@
  * subtype - see the note on that list. */
 #include <kofmod/proc.h>
 /* For the object facts below - see "what an object IS". */
-#include "../libkofeng/detectors/overlord/kofoverlord.h"
-#include "../libkofeng/extractors/unpack/emu_unpack.h"
+#include <phenotype/emu_unpack.h>
 
 #include "kofeditor.h"
-#include "../libkofeng/databases/hexprog.h"
-#include "../libkofeng/detectors/overlord/matchers/kofmatch.h"
+#include "../libkofeng/databases/pack/hexprog.h"
+#include "../libkofeng/detectors/pattern/kofmatch.h"
 #include "../libkofeng/kofcore/kofplatform.h"
+
+/* The macro and the call the generated source is read back by: their lengths
+ * are what the reader skips past to reach the name, so they are taken from the
+ * strings and never typed. */
+#define MBLK_LEN   (sizeof "KOF_MUTATION_BLOCK" - 1u)
+#define MSCORE_LEN (sizeof "kof_mutation_score(" - 1u)
 
 
 
@@ -883,11 +888,13 @@ int src_read(const char *path, struct src_ent *out)
 		/* Either spelling: a library block is still a block, and a
 		 * source index that counted only one of them would call two
 		 * different rules the same. */
-		if ((p = strstr(line, "KOF_PLAGUE_BLOCK_LIB(")) != NULL ||
-		    (p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
+		if ((p = strstr(line, "KOF_MUTATION_BLOCK_LIB(")) != NULL ||
+		    (p = strstr(line, "KOF_MUTATION_BLOCK(")) != NULL) {
 			char w[48];
 
-			src_ident(p + (strncmp(p + 16, "_LIB(", 5) ? 17 : 21),
+			/* Past the name, and past "_LIB(" or just "(" - the lengths
+			 * are the strings' own, so renaming the macro moves them. */
+			src_ident(p + MBLK_LEN + (strncmp(p + MBLK_LEN, "_LIB(", 5) ? 1 : 5),
 				  w, sizeof w);
 			if (w[0]) {
 				out->blk += (uint32_t)strtoul(
@@ -964,12 +971,12 @@ void src_scan(const char *dir, int depth)
  * THE FORMAT A RULE DECLARES, read before the rest of the file.
  *
  * WHY THIS IS A PASS OF ITS OWN. Region names are a FORMAT'S vocabulary -
- * "KOF_SCAN_ELF_CODE" means something to the ELF parser and nothing to any
+ * "KGENOME_SCAN_ELF_CODE" means something to the ELF parser and nothing to any
  * other - so reading a range needs the format first. It used to be taken from
  * the OBJECT the viewer happened to have open, and the failure was silent and
  * total: open an ELF rule while looking at a php file, save it, and
  *
- *     KOF_TARGET_RANGE(scan_range_code, KOF_SCAN_ELF_CODE);
+ *     KOF_TARGET_RANGE(scan_range_code, KGENOME_SCAN_ELF_CODE);
  *
  * came back as
  *
@@ -1093,7 +1100,7 @@ static uint32_t src_mask_decl(uint32_t fmt_mask,
  *
  * THE READER AND THE WRITER HAVE TO AGREE ABOUT THIS. src_rule_fmt fixed the
  * half that reads a rule; a writer still asking the OBJECT could resolve
- * KOF_SCAN_ELF_CODE on the way in and then fail to spell it on the way out,
+ * KGENOME_SCAN_ELF_CODE on the way in and then fail to spell it on the way out,
  * which is the same loss one step later: the mask is right in the panel and
  * the file says KOF_SCAN_ALL.
  */
@@ -1444,9 +1451,9 @@ void say_err(struct kof_editor *e, const char *fmt, ...)
 /* ---- what an object IS, worked out once ------------------------------------
  *
  * HERE RATHER THAN IN THE VIEWER, because these are facts about an object and
- * not about a screen: a digest, the sets kof_plague_build makes of it, what the
+ * not about a screen: a digest, the sets kof_mutation_build makes of it, what the
  * emulator's gate said. The panel was working each of them out for itself, and
- * more than once - kof_plague_build ran twice per arrival at an object, once to
+ * more than once - kof_mutation_build ran twice per arrival at an object, once to
  * seed the draft and once to score it - which is the duplication this file
  * exists to stop for everything else the two tools share.
  *
@@ -1617,7 +1624,7 @@ void decl_locate(struct kof_editor *e, struct decl *d)
 	uint32_t plen, h;
 	uint8_t kind, flags = 0;
 
-	d->at = KOF_BROKEN;
+	d->at = KGENOME_BROKEN;
 	d->sym = 0;
 	d->off_rgn = 0;
 	d->at_rgn[0] = 0;
@@ -2073,7 +2080,7 @@ uint32_t cnd_children(struct kof_editor *e, uint32_t i)
  * rule searches, when there is one - so the panel and the matcher agree about
  * which of several occurrences is "the" one without either being told.
  *
- * KOF_BROKEN means the bytes are not in this object at all - a marker carried
+ * KGENOME_BROKEN means the bytes are not in this object at all - a marker carried
  * over from another sample. Left at zero then, which is a place that exists,
  * rather than writing a sentinel into generated C.
  */
@@ -2089,14 +2096,14 @@ void grp_seed_at(struct kof_editor *e, uint32_t g)
 			 * literal base. Naming a base is the author's choice
 			 * and is made on the WHERE control. */
 			e->dr.grp[g].at_anchor = KOF_ANCHOR_BOF;
-			e->dr.grp[g].at_off = d->at == KOF_BROKEN
+			e->dr.grp[g].at_off = d->at == KGENOME_BROKEN
 					    ? 0 : (int64_t)d->at;
 			/*
 			 * AND WHETHER THAT NUMBER IS A PLACE - see
 			 * group.at_auto.
 			 *
 			 * Both halves are asked because both can fail. `at`
-			 * is KOF_BROKEN when the bytes are not in this object
+			 * is KGENOME_BROKEN when the bytes are not in this object
 			 * at all, and the zero written above is then a
 			 * default rather than a location. `mask0` is the
 			 * region the bytes were SELECTED in and is zero for a
@@ -2105,7 +2112,7 @@ void grp_seed_at(struct kof_editor *e, uint32_t g)
 			 * a later search may have turned up.
 			 */
 			e->dr.grp[g].at_auto =
-				(uint8_t)(d->at != KOF_BROKEN && d->mask0 != 0);
+				(uint8_t)(d->at != KGENOME_BROKEN && d->mask0 != 0);
 			return;
 		}
 }
@@ -2274,7 +2281,7 @@ uint32_t draft_hash(struct kof_editor *e)
 	/*
 	 * AND AS A SET, NOT AS A LIST.
 	 *
-	 * The order of this array is not the draft's. plg_order sorts it by
+	 * The order of this array is not the draft's. mtn_order sorts it by
 	 * where each block sits IN THE OBJECT IN FRONT OF THE READER, and a
 	 * block the current file does not hold has no offset and sorts behind
 	 * the ones it does - so arriving at another sample permutes the ticked
@@ -2342,12 +2349,6 @@ uint32_t draft_hash(struct kof_editor *e)
 			if (it->what == SIM_IT_BLOCK) {
 				if (it->blk < e->dr.n_blk && e->dr.blk)
 					MIX(e->dr.blk[it->blk].id);
-			} else if (it->what == SIM_IT_SHAPE) {
-				/* A whole-object measure is about the draft's
-				 * own description of the object, so what
-				 * changes about it is that description. */
-				MIX((uint32_t)e->dr.shp.fsize);
-				MIX(e->dr.shp.n_region);
 			}
 		}
 	}
@@ -2785,7 +2786,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * A RULE WHOSE BLOCKS THIS OBJECT DOES NOT PRODUCE IS NOT EDITED HERE,
 	 * AND THAT IS ABOUT THE RULE AND NOT ABOUT THE DRAFT.
 	 *
-	 * Opening a plague rule loads its blocks as CARRIED rows - hashes from
+	 * Opening a mutation rule loads its blocks as CARRIED rows - hashes from
 	 * the file, offsets belonging to whatever sample it was cut from. The
 	 * panel then scores them against the object in front of it, and a
 	 * carried block that scores ZERO is one this object does not contain:
@@ -2800,7 +2801,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * opening one - so a rule with any block still reaching this object is
 	 * a rule about it. Nothing reaching it at all is the case this refuses.
 	 *
-	 * The SCORE is the engine's own - see plg_rescore, which runs the
+	 * The SCORE is the engine's own - see mtn_rescore, which runs the
 	 * matcher the generated module will run. Nothing here re-decides what
 	 * matching means.
 	 */
@@ -2864,15 +2865,7 @@ const char *draft_missing_of(struct kof_editor *e, int as_new)
 	 * be a string. A draft with a block matcher and no markers is a
 	 * similarity rule, which is a whole rule.
 	 */
-	/*
-	 * AND A RULE MADE OF A SHAPE OR A STRING SET DECLARES NEITHER.
-	 *
-	 * Same reasoning one step further out: what the demand is really about
-	 * is that the rule be written from SOMETHING, and there is more than
-	 * one thing it can be written from. A shape rule reads no content at
-	 * all and is still a whole rule - that is the point of it.
-	 */
-	if (!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE))
+	if (!e->dr.n_decl && !draft_uses_blocks(e))
 		return "Declare a string, tick a block, or add a matcher";
 	if (!e->dr.n_grp)
 		return "Add a matcher";
@@ -3361,7 +3354,7 @@ void draft_refresh(struct kof_editor *e)
 		struct decl *d = &e->dr.decl[i];
 
 		decl_locate(e, d);
-		if (d->at == KOF_BROKEN) {
+		if (d->at == KGENOME_BROKEN) {
 			gone++;
 			continue;
 		}
@@ -3693,30 +3686,17 @@ int grp_make_sim(struct kof_editor *e, uint32_t g)
 
 uint32_t sim_pct_default(uint32_t what)
 {
-	/*
-	 * EACH WHERE IT WAS MEASURED, not one number for all four.
-	 *
-	 * 70 for the shape: it fired on 71.5% of 925 deduplicated botnet
-	 * samples and on none of 3870 clean objects. 50 for the string set:
-	 * 84.6% of the same samples matched another there, against zero of
-	 * 3850 clean. The two block measures keep GRP_PCT_DEFAULT, which is
-	 * where the plague scorer was measured.
-	 *
-	 * A matcher has one threshold, so this is what the FIRST measure put
-	 * into an empty one sets it to - after that the author owns it.
-	 */
-	switch (what) {
-	case SIM_IT_SHAPE:  return 70u;
-	default:            return GRP_PCT_DEFAULT;
-	}
+	/* Every measure left keeps GRP_PCT_DEFAULT, which is where the block scorer
+	 * was measured. A matcher has one threshold, so this is what the FIRST
+	 * measure put into an empty one sets it to - after that the author owns it. */
+	(void)what;
+	return GRP_PCT_DEFAULT;
 }
 
 const char *sim_it_word(uint32_t what)
 {
-	switch (what) {
-	case SIM_IT_SHAPE:  return "file structure";
-	default:            return "block";
-	}
+	(void)what;
+	return "block";
 }
 
 int grp_sim_has(const struct kof_editor *e, uint32_t g, uint32_t what,
@@ -3847,7 +3827,7 @@ void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap)
 int blk_usable(const struct kof_editor *e, uint32_t i)
 {
 	return i < e->dr.n_blk && e->dr.blk[i].picked &&
-	       e->dr.blk[i].n_hash >= KOF_PLAGUE_MIN_HASH;
+	       e->dr.blk[i].n_hash >= KGENOME_MUTATION_MIN_HASH;
 }
 
 /*
@@ -3986,25 +3966,14 @@ void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
 				continue;
 			/* An item this build cannot write is skipped BEFORE the
 			 * operator that would have joined it. */
-			if (it->what != SIM_IT_BLOCK && it->what != SIM_IT_SHAPE)
+			if (it->what != SIM_IT_BLOCK)
 				continue;
 			if (wrote)
 				fputs(" && ", f);
 			switch (it->what) {
 			case SIM_IT_BLOCK:
-				fprintf(f, "kof_plague_score(blk_%08x) >= %uu",
+				fprintf(f, "kof_mutation_score(blk_%08x) >= %uu",
 					e->dr.blk[it->blk].id, q->pct);
-				break;
-			/*
-			 * THE SHAPE READS NO BYTES AT ALL - the arithmetic is
-			 * inlined from kofmod/kofoverlord.h over facts the
-			 * parse already has. The percentage is the
-			 * worst-agreeing dimension, so this one comparison is
-			 * a conjunction over all of them.
-			 */
-			case SIM_IT_SHAPE:
-				fprintf(f, "kof_plague_shape(ref_shape) >= %uu",
-					q->pct);
 				break;
 			/*
 			 * THE BLOCK VECTOR AND THE CALL CHAIN ARE GONE - see
@@ -4827,8 +4796,8 @@ no_head:
 		 * `pend` is the last single-line comment seen and it is spent
 		 * by the next matcher built, however far below it that is.
 		 * generate writes the block's own description above its
-		 * KOF_PLAGUE_BLOCK - "+0xd245, 13305 bytes, 128 hash(es)" -
-		 * and nothing cleared it, so opening a plague rule gave its
+		 * KOF_MUTATION_BLOCK - "+0xd245, 13305 bytes, 128 hash(es)" -
+		 * and nothing cleared it, so opening a mutation rule gave its
 		 * first matcher that line as a comment and the next Save wrote
 		 * it into kof_scan as "matcher 1: +0xd245, 13305 bytes, 128
 		 * hash(es)". The panel showed it in the comment box, which is
@@ -4837,7 +4806,7 @@ no_head:
 		 * A note only ever belongs to the branch immediately below it,
 		 * so anything that declares something in between ends it.
 		 */
-		if (strstr(line, "KOF_PLAGUE_BLOCK") ||
+		if (strstr(line, "KOF_MUTATION_BLOCK") ||
 		    strstr(line, "KOF_DEFINE_STR") ||
 		    strstr(line, "KOF_TARGET_"))
 			pend[0] = 0;
@@ -5709,8 +5678,7 @@ void generate(struct kof_editor *e, int as_new)
 	 * It stays because the key that runs generate is not gated by the
 	 * button, but it asks the same question the button asked.
 	 */
-	if ((!e->dr.n_decl && !draft_uses_blocks(e) && !draft_uses_sim(e, SIM_IT_SHAPE)) ||
-	    !e->dr.family[0])
+	if ((!e->dr.n_decl && !draft_uses_blocks(e)) || !e->dr.family[0])
 		return;
 
 	for (i = 0; e->dr.family[i] && j + 1u < sizeof safe; i++)
@@ -5778,9 +5746,9 @@ void generate(struct kof_editor *e, int as_new)
 		/*
 		 * A SIMILARITY BLOCK NO LONGER PICKS A DIRECTORY.
 		 *
-		 * Block rules had bases/plague to themselves, on the argument
+		 * Block rules had bases/mutation to themselves, on the argument
 		 * that one block made a rule a different kind of content.
-		 * That argument does not survive reading the files: a plague
+		 * That argument does not survive reading the files: a mutation
 		 * rule declares KOF_TARGET_FORMAT and KOF_TARGET_NAME and
 		 * KOF_SCAN_INFECT like any other, names a family like any
 		 * other, and most of them carry ordinary strings beside the
@@ -5796,7 +5764,7 @@ void generate(struct kof_editor *e, int as_new)
 		/*
 		 * A RULE ABOUT A COLLECTED RECORD LIVES IN bases/evts.
 		 *
-		 * The same argument as plague, one axis over: bases/signatures
+		 * The same argument as mutation, one axis over: bases/signatures
 		 * holds detections about FILES, and a rule whose target is a
 		 * process start or a submission is not about a file at all. It
 		 * is prefiltered apart by the engine - the target byte sees to
@@ -6054,9 +6022,7 @@ have_path:
 	}
 	fprintf(f, "\n#include <kofmod/kofsig.h>\n");
 	if (draft_uses_blocks(e))
-		fprintf(f, "#include <kofmod/kofplague.h>\n");
-	if (draft_uses_sim(e, SIM_IT_SHAPE))
-		fprintf(f, "#include <kofmod/kofoverlord.h>\n");
+		fprintf(f, "#include <kofmod/kofmutation.h>\n");
 	fprintf(f, "\n");
 
 	/* The format the object actually is, so the host can rule the module
@@ -6128,7 +6094,7 @@ have_path:
 		 * looking at something that is not a script.
 		 *
 		 * Keyed on the object, that wrote the script language's INDEX
-		 * through the PE table - "KOF_TARGET_SUBTYPE(KOF_PE_DLL)" on a
+		 * through the PE table - "KOF_TARGET_SUBTYPE(KGENOME_PE_DLL)" on a
 		 * rule the researcher wrote for php, which compiles and targets
 		 * the wrong thing. The subtype axis is per format, so the
 		 * format it is read against has to be the one the rule
@@ -6307,7 +6273,7 @@ have_path:
 		for (g = 0; g < e->dr.n_grp * GRP_SIM_MAX; g++) {
 			const struct group *q = &e->dr.grp[g / GRP_SIM_MAX];
 			const struct grp_sim_item *it;
-			const struct plg_block *b;
+			const struct mtn_block *b;
 
 			/*
 			 * ONE DECLARATION PER BLOCK ITEM, walked as matcher
@@ -6330,16 +6296,16 @@ have_path:
 				(unsigned long long)b->off,
 				(unsigned long long)b->len, b->n_hash);
 			/* The library half is a macro of its own - see
-			 * KOF_PLAGUE_BLOCK_LIB. The rest of the declaration is
+			 * KOF_MUTATION_BLOCK_LIB. The rest of the declaration is
 			 * identical, so only the name changes here. */
-			fprintf(f, "KOF_PLAGUE_BLOCK%s(blk_%08x, %s, "
-				"KOF_PLAGUE_%s,\n",
-				b->side == KOF_PLAGUE_SIDE_LIB ? "_LIB" : "",
+			fprintf(f, "KOF_MUTATION_BLOCK%s(blk_%08x, %s, "
+				"KOF_MUTATION_%s,\n",
+				b->side == KGENOME_MUTATION_SIDE_LIB ? "_LIB" : "",
 				b->id,
 				b->anywhere ? "KOF_SCAN_ALL"
 				: b->rgn_enum[0] ? b->rgn_enum : "KOF_SCAN_ALL",
-				b->norm == KOF_PLAGUE_XOR ? "XOR"
-				: b->norm == KOF_PLAGUE_SUB ? "SUB" : "RAW");
+				b->norm == KGENOME_MUTATION_XOR ? "XOR"
+				: b->norm == KGENOME_MUTATION_SUB ? "SUB" : "RAW");
 			for (w = 0; w < b->n_hash; w++)
 				fprintf(f, "%s0x%08xu%s", w % 4u ? " " : "\t",
 					b->hash[w],
@@ -6355,41 +6321,6 @@ have_path:
 	 * exactly this, and every module in bases/ writes it this way - a
 	 * generated file that does not look like the hand written ones is a
 	 * file people hesitate to edit. */
-	/*
-	 * THE REFERENCE SHAPE, if any matcher asks about it.
-	 *
-	 * File scope and const, so it lands in the module's .rodata - which
-	 * module.ld keeps and .data, which it refuses, would not. Every field
-	 * was read off the sample named in the header above; nobody types one.
-	 */
-	if (draft_uses_sim(e, SIM_IT_SHAPE)) {
-		const struct kof_plague_shape *sh = &e->dr.shp;
-		uint32_t ri;
-
-		fprintf(f, "\n/* The shape of the sample above: what the "
-			"builder produced, not what it says. */\n");
-		fprintf(f, "static const struct kof_plague_shape ref_shape = {\n");
-		fprintf(f, "\t.fsize    = %lluull,\n",
-			(unsigned long long)sh->fsize);
-		fprintf(f, "\t.ptypes   = 0x%08xu,\n", sh->ptypes);
-		fprintf(f, "\t.etype    = %uu,\n", sh->etype);
-		fprintf(f, "\t.cls      = %uu,\n", sh->cls);
-		fprintf(f, "\t.end      = %uu,\n", sh->end);
-		fprintf(f, "\t.n_region = %uu,\n", sh->n_region);
-		/* What these numbers ARE, written down beside them - see
-		 * kof_plague_shape.lib_cut. Without it the engine would compare a
-		 * library-free reference against a library-inclusive object. */
-		if (sh->lib_cut)
-			fprintf(f, "\t.lib_cut  = 1u,\n");
-		fprintf(f, "\t.region_fsz = {");
-		for (ri = 0; ri < sh->n_region && ri < KOF_PLAGUE_MAX_REGIONS; ri++)
-			fprintf(f, "%s %lluull", ri ? "," : "",
-				(unsigned long long)sh->region_fsz[ri]);
-		fprintf(f, " },\n\t.region_x   = {");
-		for (ri = 0; ri < sh->n_region && ri < KOF_PLAGUE_MAX_REGIONS; ri++)
-			fprintf(f, "%s %uu", ri ? "," : "", sh->region_x[ri]);
-		fprintf(f, " }\n};\n");
-	}
 	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
 	/*
 	 * A maximum size is a line in the body, not a declaration.
@@ -6779,14 +6710,14 @@ int body_modelled(const char *line)
 /* ---- similarity rules ------------------------------------------------------ */
 
 /*
- * plague_from_source - a plague rule read back out of its source.
+ * mutation_from_source - a mutation rule read back out of its source.
  *
  * Line-based, exactly as draft_from_source is, and for the same reason: the
  * file is C and the thing being read out of it is a handful of macros, so a
  * parser that understood C would be a large amount of machinery to answer
  * "which identifiers are on this line". A line it does not recognise is a line
  * it ignores, which is what lets a rule carry hand-written code beside its
- * blocks - see the note in kofplague.h about an anchor written by hand.
+ * blocks - see the note in kofmutation.h about an anchor written by hand.
  *
  * The block's NAME carries its identity: generate() writes blk_<the fold of
  * its hashes>, so the name and the hashes say the same thing and the panel can
@@ -6794,14 +6725,6 @@ int body_modelled(const char *line)
  * they are what the rule actually matches with.
  */
 
-/* What follows the '=' of an initialiser field on this line - an empty string
- * for a line that names the field and has no '=', which reads as zero. */
-static const char *after_eq(const char *q)
-{
-	const char *e = strchr(q, '=');
-
-	return e ? e + 1 : "";
-}
 
 /* Whether `what` occurs in [a, b) - the text between two calls on one line.
  * Both point into one NUL terminated line, so a plain search bounded by the
@@ -6813,20 +6736,19 @@ static int seg_has(const char *a, const char *b, const char *what)
 	return q != NULL && q < b;
 }
 
-static int plg_src_norm(const char *line)
+static int mtn_src_norm(const char *line)
 {
-	if (strstr(line, "KOF_PLAGUE_XOR"))
-		return KOF_PLAGUE_XOR;
-	if (strstr(line, "KOF_PLAGUE_SUB"))
-		return KOF_PLAGUE_SUB;
-	return KOF_PLAGUE_RAW;
+	if (strstr(line, "KOF_MUTATION_XOR"))
+		return KGENOME_MUTATION_XOR;
+	if (strstr(line, "KOF_MUTATION_SUB"))
+		return KGENOME_MUTATION_SUB;
+	return KGENOME_MUTATION_RAW;
 }
 
-int plague_from_source(struct kof_editor *e, const char *path,
-		       struct kof_plague_decl *blk, uint32_t max_blk,
+int mutation_from_source(struct kof_editor *e, const char *path,
+		       struct kof_mutation_decl *blk, uint32_t max_blk,
 		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
-		       struct kof_verdict_decl *verdict,
-		       uint8_t *shp_pct, int *shp_level)
+		       struct kof_verdict_decl *verdict)
 {
 	FILE *f;
 	char line[1024];
@@ -6835,38 +6757,14 @@ int plague_from_source(struct kof_editor *e, const char *path,
 	int in_block = -1;
 	int got_score;          /* this line held a score call - see below */
 	const char *seg;        /* where the operator for the next call starts */
-	/*
-	 * WHICH MATCHER THE VERDICT ON THE NEXT LINE BELONGS TO.
-	 *
-	 * emit writes `if (<call>)` and the verdict beneath it, so the call
-	 * that was just read is the one the next KOF_SCAN_* concludes from.
-	 * Without this the file's LAST verdict became every matcher's, and a
-	 * rule whose blocks said INFECT and whose shape said SUSPECT opened
-	 * with both saying SUSPECT.
-	 */
-	/*
-	 * WHICH MEASURES ARE WAITING FOR THE VERDICT ON THE NEXT LINE, as a
-	 * MASK and not a single value.
-	 *
-	 * emit writes `if (A || B)` on one line when two measures share a
-	 * verdict, so a reader that stopped at the first call on a line lost
-	 * the second - and the rule opened in the panel missing a matcher the
-	 * file plainly had.
-	 */
-	unsigned pending = 0;   /* 1 blocks 2 shape */
+	unsigned pending = 0;   /* 1: a block call was read and a verdict is awaited */
 	/* Conditions as the other reader counts them - see
-	 * kof_plague_decl.cnd. */
+	 * kof_mutation_decl.cnd. */
 	unsigned n_if = 0;
-	int in_shape = 0, trunc_said = 0;
+	int trunc_said = 0;
 
 	if (!e || !path || !blk || !n_blk || !pool || !verdict)
 		return 0;
-	if (shp_pct)
-		*shp_pct = 0;
-	if (shp_level)
-		*shp_level = LV_SUSPECT;
-	memset(&e->dr.shp, 0, sizeof e->dr.shp);
-	e->dr.has_shp = 0;
 	*n_blk = 0;
 	memset(verdict, 0, sizeof *verdict);
 	verdict->level = LV_INFECT;
@@ -6906,14 +6804,14 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		/*
 		 * EITHER SPELLING, and which one is the block's side.
 		 *
-		 * "_LIB(" is tested first because "KOF_PLAGUE_BLOCK(" is not a
+		 * "_LIB(" is tested first because "KOF_MUTATION_BLOCK(" is not a
 		 * prefix of it - the parenthesis differs - but reading them in
 		 * one place keeps the two from drifting, and the offset past
 		 * the name differs by four.
 		 */
-		if ((p = strstr(line, "KOF_PLAGUE_BLOCK_LIB(")) != NULL ||
-		    (p = strstr(line, "KOF_PLAGUE_BLOCK(")) != NULL) {
-			int is_lib = strncmp(p + 16, "_LIB(", 5) == 0;
+		if ((p = strstr(line, "KOF_MUTATION_BLOCK_LIB(")) != NULL ||
+		    (p = strstr(line, "KOF_MUTATION_BLOCK(")) != NULL) {
+			int is_lib = strncmp(p + MBLK_LEN, "_LIB(", 5) == 0;
 			char w[48];
 			const char *q;
 
@@ -6927,10 +6825,10 @@ int plague_from_source(struct kof_editor *e, const char *path,
 				in_block = -1;
 				continue;
 			}
-			q = src_ident(p + (is_lib ? 21 : 17), w, sizeof w);
+			q = src_ident(p + MBLK_LEN + (is_lib ? 5 : 1), w, sizeof w);
 			memset(&blk[n], 0, sizeof blk[n]);
-			blk[n].side = is_lib ? (uint8_t)KOF_PLAGUE_SIDE_LIB
-					     : (uint8_t)KOF_PLAGUE_SIDE_USER;
+			blk[n].side = is_lib ? (uint8_t)KGENOME_MUTATION_SIDE_LIB
+					     : (uint8_t)KGENOME_MUTATION_SIDE_USER;
 			snprintf(name[n], sizeof name[0], "%s", w);
 			blk[n].id = (uint32_t)strtoul(
 				strncmp(w, "blk_", 4) ? w : w + 4, NULL, 16);
@@ -6942,7 +6840,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 					 sizeof blk[n].region_buf, "%s", rgn);
 				blk[n].region = blk[n].region_buf;
 			}
-			blk[n].norm = (uint32_t)plg_src_norm(line);
+			blk[n].norm = (uint32_t)mtn_src_norm(line);
 			blk[n].thr  = 50;
 			blk[n].join = 1;
 			blk[n].hash = pool + np;
@@ -6978,90 +6876,11 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 * The three shapes emit_verdict writes, read back as the three
 		 * it writes them from - see struct kof_verdict_decl.
 		 */
-		/*
-		 * THE SHAPE, as emit wrote it: one designated initialiser per
-		 * line, so each field is read where it is named rather than by
-		 * counting commas - which is what lets a field be added to the
-		 * struct without this silently reading the next one.
-		 */
-		if (strstr(line, "struct kof_plague_shape ref_shape")) {
-			in_shape = 1;
-			e->dr.has_shp = 1;
-			continue;
-		}
-		if (in_shape) {
-			const char *q;
-
-			if ((q = strstr(line, ".fsize")) != NULL)
-				e->dr.shp.fsize = strtoull(after_eq(q),
-							   NULL, 0);
-			else if ((q = strstr(line, ".ptypes")) != NULL)
-				e->dr.shp.ptypes = (uint32_t)
-					strtoul(after_eq(q), NULL, 0);
-			else if ((q = strstr(line, ".etype")) != NULL)
-				e->dr.shp.etype = (uint16_t)
-					strtoul(after_eq(q), NULL, 0);
-			else if ((q = strstr(line, ".cls")) != NULL)
-				e->dr.shp.cls = (uint8_t)
-					strtoul(after_eq(q), NULL, 0);
-			else if ((q = strstr(line, ".end")) != NULL)
-				e->dr.shp.end = (uint8_t)
-					strtoul(after_eq(q), NULL, 0);
-			else if ((q = strstr(line, ".n_region")) != NULL)
-				e->dr.shp.n_region = (uint8_t)
-					strtoul(after_eq(q), NULL, 0);
-			/* Read back, so reopening a draft does not quietly turn
-			 * a library-free reference into a library-inclusive
-			 * one - see kof_plague_shape.lib_cut. */
-			else if ((q = strstr(line, ".lib_cut")) != NULL)
-				e->dr.shp.lib_cut = (uint8_t)
-					strtoul(after_eq(q), NULL, 0);
-			else if ((q = strstr(line, ".region_fsz")) != NULL) {
-				const char *r = strchr(q, '{');
-				uint32_t k;
-
-				for (k = 0; r && k < KOF_PLAGUE_MAX_REGIONS; k++) {
-					e->dr.shp.region_fsz[k] =
-						strtoull(r + 1, NULL, 0);
-					r = strchr(r + 1, ',');
-				}
-			} else if ((q = strstr(line, ".region_x")) != NULL) {
-				const char *r = strchr(q, '{');
-				uint32_t k;
-
-				for (k = 0; r && k < KOF_PLAGUE_MAX_REGIONS; k++) {
-					e->dr.shp.region_x[k] = (uint8_t)
-						strtoul(r + 1, NULL, 0);
-					r = strchr(r + 1, ',');
-				}
-			}
-			if (strchr(line, '}') && strchr(line, ';'))
-				in_shape = 0;
-			continue;
-		}
-		if ((p = strstr(line, "kof_plague_shape(")) != NULL) {
-			const char *ge = strstr(p, ">=");
-
-			if (shp_pct)
-				*shp_pct = ge ? (uint8_t)strtoul(ge + 2, NULL, 10)
-					      : 70u;
-			pending |= 2u;
-		}
 		if ((p = strstr(line, "KOF_SCAN_INFECT(")) != NULL ||
 		    (p = strstr(line, "KOF_SCAN_SUSPECT(")) != NULL) {
 			int lvl = strstr(line, "SUSPECT") ? LV_SUSPECT
 							  : LV_INFECT;
 
-			/* Every measure the line above named concludes this,
-			 * because they shared the `if` that reached it. */
-			if (pending & 2u) {
-				if (shp_level)
-					*shp_level = lvl;
-			}
-			if (pending & ~1u) {
-				pending = 0;
-				continue;
-			}
 			pending = 0;
 			verdict->level = lvl;
 			if (strstr(p, "KOF_MALVAR_GENERIC"))
@@ -7083,7 +6902,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		 * This ran strstr once and continued, so a condition that
 		 * asked about two blocks on one line -
 		 *
-		 *   if (kof_plague_score(a) >= 75u || kof_plague_score(b) >= 70u)
+		 *   if (kof_mutation_score(a) >= 75u || kof_mutation_score(b) >= 70u)
 		 *
 		 * - gave the first block its threshold and left the second at
 		 * the default the declaration parser writes, which is 50.
@@ -7097,7 +6916,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		p = line;
 		got_score = 0;
 		seg = line;
-		while ((p = strstr(p, "kof_plague_score(")) != NULL) {
+		while ((p = strstr(p, "kof_mutation_score(")) != NULL) {
 			char w[48];
 			const char *ge = strstr(p, ">=");
 			int is_or;
@@ -7120,7 +6939,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			 *
 			 * The FIRST call on the line keeps the old question,
 			 * because what precedes it is not on this line at
-			 * all. See the note on kof_plague_decl.join: nothing
+			 * all. See the note on kof_mutation_decl.join: nothing
 			 * reads it for the first block.
 			 */
 			if (seg == line)
@@ -7128,7 +6947,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			else
 				is_or = seg_has(seg, p, "||");
 
-			src_ident(p + 17, w, sizeof w);
+			src_ident(p + MSCORE_LEN, w, sizeof w);
 			for (i = 0; i < n; i++)
 				if (!strcmp(name[i], w)) {
 					if (ge)
@@ -7136,7 +6955,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 							strtoul(ge + 2, NULL, 10);
 					blk[i].join = (uint8_t)(is_or ? 0 : 1);
 					/* And which branch asked - see
-					 * kof_plague_decl.cnd. */
+					 * kof_mutation_decl.cnd. */
 					blk[i].cnd = (uint8_t)(n_if ? n_if - 1u
 								    : 0u);
 					break;
@@ -7168,7 +6987,7 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		uint32_t keep = 0;
 
 		for (i = 0; i < n; i++) {
-			if (blk[i].n_hash < KOF_PLAGUE_MIN_HASH)
+			if (blk[i].n_hash < KGENOME_MUTATION_MIN_HASH)
 				continue;
 			if (keep != i) {
 				blk[keep] = blk[i];
@@ -7200,9 +7019,9 @@ int plague_from_source(struct kof_editor *e, const char *path,
 			 * AND SAID, not only flagged.
 			 *
 			 * The flag governs saving; this governs understanding.
-			 * Without it the panel showed a rule with one block and
-			 * a file-structure measure, and the only reading
-			 * available was that the author had written it that way
+			 * Without it the panel showed a rule with one block fewer
+			 * than the file, and the only reading available was that
+			 * the author had written it that way
 			 * - when what happened is that a block this build
 			 * cannot hold was left out. Naming the count is enough
 			 * to tell the two apart, and it is a fact rather than a
@@ -7215,7 +7034,5 @@ int plague_from_source(struct kof_editor *e, const char *path,
 		n = keep;
 	}
 	*n_blk = n;
-	/* A rule may be all shape and no block, which is still a rule this
-	 * panel wrote and must be able to open. */
-	return n != 0 || e->dr.has_shp;
+	return n != 0;
 }

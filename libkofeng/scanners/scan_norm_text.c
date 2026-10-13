@@ -10,16 +10,16 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -138,7 +138,7 @@ void sx_norm_keep_bits(uint8_t *keep, uint64_t n,
 /*
  * CODE IS A SEGMENT, AND THE INSTRUCTIONS ARE ONLY PART OF IT.
  *
- * KOF_SCAN_ELF_CODE is the loadable segment with PF_X, and a linker puts
+ * KGENOME_SCAN_ELF_CODE is the loadable segment with PF_X, and a linker puts
  * .rodata in there beside .text - so "CODE" holds every string literal the
  * program has as well as its opcodes. Kept byte for byte, as the whole region
  * was, those strings could not be rewritten: an IoT dropper's exploits are
@@ -156,7 +156,7 @@ void sx_norm_keep_bits(uint8_t *keep, uint64_t n,
  * keeps the whole region, exactly as before.
  */
 void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
-			   const struct kof_elf_info *e,
+			   const struct kgenome_elf_info *e,
 			   const struct kof_src_region *r, uint32_t nr)
 {
 	uint32_t i;
@@ -167,7 +167,7 @@ void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
 	for (i = 0; i < nr; i++) {
 		uint64_t end;
 
-		if (r[i].mask != (uint32_t)KOF_SCAN_ELF_CODE)
+		if (r[i].mask != (uint32_t)KGENOME_SCAN_ELF_CODE)
 			continue;
 		if (r[i].off >= n)
 			continue;
@@ -175,24 +175,23 @@ void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
 		sx_bits_clr(keep, r[i].off, end);
 	}
 	/* ...and give back only what is instructions. */
-	for (i = 0; i < e->sec_count && i < KOF_ELF_MAX_SECTIONS; i++) {
-		const struct kof_elf_sec *c = &e->sec[i];
-		uint64_t end;
+	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
+		const struct kgenome_elf_sec *c = &e->sec[i];
+		uint64_t at, have;
 
-		if (!(c->flags & 0x4u))         /* SHF_EXECINSTR */
+		if (!kgenome_elf_sec_is_code(c))
 			continue;
-		if (!c->file_size || c->file_off >= n)
+		have = kgenome_elf_sec_extent(c, n, &at);
+		if (!have)
 			continue;
-		end = c->file_size > n - c->file_off ? n
-						     : c->file_off + c->file_size;
-		sx_bits_set(keep, c->file_off, end);
+		sx_bits_set(keep, at, at + have);
 	}
 }
 
 /*
  * THE PE HALF OF THE SAME ARGUMENT, AND IT TURNS ON ONE BIT.
  *
- * KOF_SCAN_PE_CODE is every section with IMAGE_SCN_MEM_EXECUTE, and keeping it
+ * KGENOME_SCAN_PE_CODE is every section kgenome_pe_sec_is_code names, and keeping it
  * whole is about INSTRUCTIONS - "opcodes are what a hex rule is written
  * against, byte for byte". That holds for a section that is executable and NOT
  * writable, which is what a compiler emits and what a rule is written against.
@@ -216,19 +215,21 @@ void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
  * different way because ELF's CODE is a segment and carries .rodata with it.
  */
 void sx_norm_keep_exec_pe(uint8_t *keep, uint64_t n,
-			      const struct kof_pe_info *e,
+			      const struct kgenome_pe_info *e,
 			      const struct kof_src_region *r, uint32_t nr)
 {
 	uint32_t i;
 
 	if (!e || !e->valid || !e->sec_count)
 		return;
-	for (i = 0; i < e->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
-		const struct kof_pe_sec *c = &e->sec[i];
+	for (i = 0; i < e->sec_count && i < KGENOME_PE_MAX_SECTIONS; i++) {
+		const struct kgenome_pe_sec *c = &e->sec[i];
 		uint64_t end;
 
-		if ((c->perm & (KOF_PE_PERM_W | KOF_PE_PERM_X)) !=
-		    (KOF_PE_PERM_W | KOF_PE_PERM_X))
+		/* The same predicate that put the section in CODE, and the
+		 * write bit on top of it. Ownership is the claim, not the
+		 * declaration: this clears bits of a map that is a partition. */
+		if (!kgenome_pe_sec_is_code(c) || !(c->perm & KGENOME_PE_PERM_W))
 			continue;
 		if (!c->claim_len || c->claim_off >= n)
 			continue;

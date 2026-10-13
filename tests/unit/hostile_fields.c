@@ -197,9 +197,9 @@ struct target {
 };
 
 static uint32_t n_elf(const void *v)
-{ return ((const struct kof_elf_info *)v)->sec_count; }
+{ return ((const struct kgenome_elf_info *)v)->sec_count; }
 static uint32_t n_pe(const void *v)
-{ return ((const struct kof_pe_info *)v)->sec_count; }
+{ return ((const struct kgenome_pe_info *)v)->sec_count; }
 static uint32_t n_zip(const void *v)
 { return ((const struct kof_zip_info *)v)->n_entries; }
 static uint32_t n_rar(const void *v)
@@ -498,7 +498,7 @@ int main(void)
 		 * the only version that does not lie about the timings.
 		 *
 		 * A view carries fields the parse does not write - see
-		 * kof_pe_info.layout - so out of malloc it starts as
+		 * kgenome_pe_info.layout - so out of malloc it starts as
 		 * uninitialised heap. Nothing here ever sets one, so clearing
 		 * it once leaves it clear. Clearing before every parse instead
 		 * would put a 7.6KB memset inside the loop that decides whether

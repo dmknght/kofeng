@@ -18,9 +18,11 @@
  * another section - so name and attributes can never be one pattern.
  *
  * So the records below are OURS. Fixed stride, every field at a constant offset,
- * the name inline. A rule can then say type, bind, size and name in a single
- * pattern, and mean it about a symbol rather than about some bytes that happened
- * to spell it.
+ * and the name in a pool the record points into - kept WHOLE, whatever its length.
+ * A rule can then say type, bind, size and name in a single pattern, and mean it
+ * about a symbol rather than about some bytes that happened to spell it: the
+ * pattern is written against the pool entry, which begins with the four attribute
+ * bytes and ends with the name and its NUL (see KOF_SYM_KEYLEN).
  *
  * THE VALUES ARE ELF'S, THOUGH, AND DELIBERATELY.
  *
@@ -56,18 +58,52 @@
 #define KOF_SYM_MAGIC2  'Y'
 #define KOF_SYM_MAGIC3  'M'
 /*
- * 3.
+ * 4.
  *
  * Version 1 put the name at 24 with the numeric fields in front of it; a reader
  * that trusted those offsets would decode every record wrong, so the number had
- * to move with the layout. Version 3 gives the two reserved header bytes a
- * meaning - the index of `_start` - which a version 2 reader would read as the
- * zero the contract promised. Records are untouched between 2 and 3.
+ * to move with the layout. Version 3 gave the two reserved header bytes a
+ * meaning - the index of `_start`. Version 4 moves the NAME out of the record: it
+ * was 40 bytes inline, so a longer one was cut to 39 characters (a C++ or Rust
+ * symbol, __x64_sys_...) and a rule could never match its tail. The record is now
+ * KOF_SYM_RECLEN (32) bytes and holds an offset and a length into a pool of names
+ * that follows the records; the pool is as long as its names. The header is
+ * unchanged (16 bytes, the same fields): the pool starts at
+ * KOF_SYM_HDRLEN + count * KOF_SYM_RECLEN and runs to the end of the block, so no
+ * new field says where it is.
  */
-#define KOF_SYM_VERSION 3u
+#define KOF_SYM_VERSION 4u
 #define KOF_SYM_HDRLEN  16u
-#define KOF_SYM_RECLEN  64u
-#define KOF_SYM_NAMELEN 40u     /* inline, NUL-padded, truncated if longer */
+#define KOF_SYM_RECLEN  32u
+/*
+ * THE LONGEST NAME ONE RECORD KEEPS, a DoS bound and not a design limit: a name
+ * past it is cut here, and the record says so (KOF_SYM_R_NAMECUT) - never
+ * silently. 4096 is far past any symbol measured (the longest mangled C++ and
+ * Rust names are in the hundreds); the table's own size is what the block is
+ * bounded by (KOF_SYM_ABS_MAX_BYTES).
+ */
+#define KOF_SYM_NAME_MAX 4096u
+/*
+ * WHAT A POOL ENTRY IS - and why it carries four bytes that are also in the
+ * record.
+ *
+ * The signatures already written against the symbol halves are patterns of the
+ * form "attributes, then the name", e.g. 04 00 00 01 'exploit.c': the four
+ * attribute bytes and the name as one run, which is how a rule asks for "a GLOBAL
+ * OBJECT called X". kof_sym_extents hands the matcher the RUNS the records name,
+ * and a run has to be contiguous bytes, so the pool entry for a symbol is
+ *
+ *     type, bind, vis, flags, name..., 0
+ *
+ * - the same four bytes the record holds at +0..+3, copied by the one writer that
+ * makes both (analyzers/parsers/binaries/sym_pool.c, which is the only place
+ * a block is written) - and the NUL is what ends the name, as the padding did.
+ * The record is the one authoritative carrier; the pool's four bytes are the
+ * match view of it, and a test (tests/unit/caps_syms.c) compares them for every
+ * record of a built block. The numeric fields are not in the run, as they were
+ * not meant to be: an address and a size move with every build.
+ */
+#define KOF_SYM_KEYLEN  4u
 
 /* Header field offsets. */
 #define KOF_SYM_H_MAGIC     0u  /* 4  "KSYM"                                  */
@@ -81,7 +117,7 @@
  *
  * In the two bytes that were reserved, so the header stays sixteen and every
  * record offset is unchanged. Sixteen bits is enough by construction:
- * KOF_SYM_MAX_RECS is 4096, so no valid index needs more, and 0xffff cannot
+ * KOF_SYM_ABS_MAX_RECS is 65534, so no valid index needs more, and 0xffff cannot
  * collide with one.
  *
  * WHY THE BUILDER RECORDS IT. `_start` comes from crt1.o, which the link line
@@ -117,39 +153,53 @@
  * from the standard is the ENUM VALUES - STT_*, STB_*, STV_* below - because a
  * private numbering would cost every rule author a translation table.
  *
- * The order here is chosen so that WHAT A RULE MATCHES ON IS CONTIGUOUS.
- * Attributes first, then the name immediately after them, because the question
- * a rule asks is almost always some form of "a GLOBAL OBJECT called X": with
- * the numeric fields in between - as they were, twenty bytes of shndx,
- * reserved, value and size - that one question needed a hex pattern with a gap
- * step across all twenty, on every rule. Now the four attribute bytes and the
- * name are one run and the pattern has no gap in it at all.
+ * What a rule matches on is contiguous, and it is the POOL ENTRY that holds it:
+ * the four attribute bytes and then the name (see KOF_SYM_KEYLEN). With the
+ * numeric fields in between - as they were, twenty bytes of shndx, reserved,
+ * value and size - the one question "a GLOBAL OBJECT called X" needed a hex
+ * pattern with a gap step across all twenty, on every rule. The record's own
+ * fields are ordered the way they are READ: attributes, the name's place,
+ * section, then the two numbers.
  *
- * The numeric fields go last because they are READ far more often than they are
- * matched: an address and a size move with every build, so a rule that pinned
- * them would be a rule about one binary.
+ * The numeric fields are not in what a rule matches because they are READ far
+ * more often than they are matched: an address and a size move with every build,
+ * so a rule that pinned them would be a rule about one binary.
  *
- * ALIGNMENT IS DELIBERATELY NOT PRESERVED. value and size are at 54 and 46,
- * neither 8-aligned, and that is safe because nothing casts a pointer into a
- * record - every read goes through kof_rd_* or the viewer's own byte loop, both
- * of which assemble the value a byte at a time. Alignment would have cost the
- * contiguity above, which is the property that matters.
+ * ALIGNED NOW: value and size are at 24 and 16, both 8-aligned and the record is
+ * 32 bytes, so the record array is. Nothing casts a pointer into a record all the
+ * same - the reads go through kof_rd_* or kof_sym_u64, which assemble the value a
+ * byte at a time, so the block can sit at any address.
  *
- * The record stays 64 bytes rather than shrinking to the 62 the fields need.
- * A power of two keeps a record an exact number of hex rows - four at sixteen
- * bytes to the row, eight at eight - so record boundaries line up down the
+ * 32 bytes is a power of two: a record is an exact number of hex rows - two at
+ * sixteen bytes to the row, four at eight - so record boundaries line up down the
  * pane instead of walking across it.
  */
 #define KOF_SYM_R_TYPE      0u  /* 1  STT_*  - ELF's numbering                */
 #define KOF_SYM_R_BIND      1u  /* 1  STB_*                                   */
 #define KOF_SYM_R_VIS       2u  /* 1  STV_*                                   */
 #define KOF_SYM_R_FLAGS     3u  /* 1  KOF_SYM_F_*                             */
-#define KOF_SYM_R_NAME      4u  /* 40 NUL-padded - adjacent to the attributes */
-#define KOF_SYM_R_SHNDX    44u  /* 2  section index; 0 is ELF's SHN_UNDEF,    */
+/*
+ * THE NAME: where it starts in the pool, and how long it is. The offset is from
+ * the start of the POOL (not the block) and points at the first byte of the name;
+ * the four attribute bytes of the entry are the KOF_SYM_KEYLEN before it, and the
+ * NUL is the byte after the last. Read it with kof_sym_name, which checks all
+ * three against the block's length and gives the whole name.
+ */
+#define KOF_SYM_R_NAMEOFF   4u  /* 4  offset of the name in the pool          */
+#define KOF_SYM_R_NAMELEN   8u  /* 2  its length, the NUL not counted         */
+#define KOF_SYM_R_SHNDX    10u  /* 2  section index; 0 is ELF's SHN_UNDEF,    */
                                 /*    0xffff any reserved index (ABS, COMMON) */
-#define KOF_SYM_R_SIZE     46u  /* 8  size, little endian                     */
-#define KOF_SYM_R_VALUE    54u  /* 8  address, little endian                  */
-#define KOF_SYM_R_RESERVED 62u  /* 2  zero                                    */
+/*
+ * THE NAME WAS CUT - only by KOF_SYM_NAME_MAX now, which is a DoS bound: 1 when
+ * the name in the source was longer than the bound and the pool holds its
+ * beginning. A rule on a name that long cannot match its tail, and the block says
+ * why. Not in the flags byte: that byte is part of the run a pattern matches, and
+ * a new bit there would have changed what an existing pattern matches.
+ */
+#define KOF_SYM_R_NAMECUT  12u  /* 1  1 when the name was cut to the bound    */
+#define KOF_SYM_R_RESERVED 13u  /* 3  zero                                    */
+#define KOF_SYM_R_SIZE     16u  /* 8  size, little endian                     */
+#define KOF_SYM_R_VALUE    24u  /* 8  address, little endian                  */
 
 /* Which table the block was built from. */
 enum kof_sym_origin {
@@ -217,8 +267,48 @@ enum { KOF_STV_DEFAULT = 0, KOF_STV_INTERNAL = 1, KOF_STV_HIDDEN = 2,
  * `truncated` byte says when it bit, so a reader is never quietly told a short
  * table is the whole one.
  */
+/*
+ * 4096 is the size a caller that does not know better allocates (the examiner's
+ * static buffer, the viewer's copy): the builders keep as many records as the
+ * `cap` they are given holds, so for them nothing changed. It is NOT the engine's
+ * bound any more. The engine sizes the block for the table the object has, up to
+ * KOF_SYM_ABS_MAX_RECS - 24 of 272 measured ELF files have more than 4096, and a
+ * symbol past the 4096th was not in the block, so a rule on it did not fire
+ * (tests/unit/caps_syms.c: prepare_creds as the 4097th, commit_creds as the
+ * 5900th). Past the ABSOLUTE bound the `truncated` byte is set and the engine
+ * reads it (kof_scan_incomplete): an object whose symbols were cut is not
+ * reported clean.
+ *
+ * The absolute bound is the index's: 0xffff is KOF_SYM_NO_START and is reserved,
+ * so a record index is at most 65534. It is also what bounds the block (4 MB)
+ * against a table whose declared size is hostile.
+ */
 #define KOF_SYM_MAX_RECS 4096u
-#define KOF_SYM_MAX_BYTES (KOF_SYM_HDRLEN + KOF_SYM_MAX_RECS * KOF_SYM_RECLEN)
+/*
+ * WHAT A BLOCK COSTS, in bytes: the records plus the pool. The pool is as long as
+ * its names, so a size for `recs` records is a PLAN and not a promise -
+ * KOF_SYM_POOL_PER_REC is the room planned for each name (its four attribute
+ * bytes, a NUL and 43 characters: the mean over the 272 ELF files measured is a
+ * third of that, a mangled C++ or Rust table is several times it). A block that
+ * did not fit its plan says so in the header's `truncated` byte; the engine then
+ * rebuilds it larger (kof_syms_build_grow), a caller with a fixed buffer
+ * (KOF_SYM_MAX_BYTES: the viewer, the examiner) keeps what the buffer held and the
+ * byte says it was cut.
+ */
+#define KOF_SYM_POOL_PER_REC 48u
+#define KOF_SYM_BYTES_FOR(recs) \
+	(KOF_SYM_HDRLEN + (recs) * (KOF_SYM_RECLEN + KOF_SYM_POOL_PER_REC))
+#define KOF_SYM_MAX_BYTES KOF_SYM_BYTES_FOR(KOF_SYM_MAX_RECS)
+#define KOF_SYM_ABS_MAX_RECS 65534u
+/*
+ * THE POOL'S DoS BOUND: the most name bytes one block holds, whatever the table
+ * declares - 8 MB, which is 65534 names of 128 characters. A table that wants
+ * more is built to the bound with `truncated` set, and the engine reads it
+ * (kof_scan_incomplete): an object whose names were cut is not reported clean.
+ */
+#define KOF_SYM_ABS_MAX_POOL (8u << 20)
+#define KOF_SYM_ABS_MAX_BYTES \
+	(KOF_SYM_HDRLEN + KOF_SYM_ABS_MAX_RECS * KOF_SYM_RECLEN + KOF_SYM_ABS_MAX_POOL)
 
 /*
  * Build the block for an ELF. Returns the bytes written - never less than the
@@ -231,7 +321,7 @@ enum { KOF_STV_DEFAULT = 0, KOF_STV_INTERNAL = 1, KOF_STV_HIDDEN = 2,
  * - the engine, kofexaminer, kofviewer and any module - because the alternative
  * is what was there first: three private copies of the same four lines, which
  * is three places to get the bounds wrong and three to forget when the layout
- * moves. The layout HAS moved once already (see the note on version 2).
+ * moves. The layout HAS moved twice already (see the notes on versions 2 and 4).
  *
  * kof_sym_rec is the whole of the walk a rule needs. It answers the question
  * "is there a record i" with a pointer or NULL, so a loop is
@@ -245,7 +335,9 @@ enum { KOF_STV_DEFAULT = 0, KOF_STV_INTERNAL = 1, KOF_STV_HIDDEN = 2,
  *
  * That loop is also why the record length is fixed. A rule steps
  * KOF_SYM_RECLEN from KOF_SYM_HDRLEN and tests three bytes per record - type
- * at +0, bind at +1, flags at +3 - instead of searching for anything.
+ * at +0, bind at +1, flags at +3 - instead of searching for anything. The NAME
+ * is the one thing a record does not hold: kof_sym_name(b, n, r, &len) returns it,
+ * whole, from the pool.
  */
 static inline uint32_t kof_sym_count(const uint8_t *b, uint32_t n)
 {
@@ -277,6 +369,137 @@ static inline uint64_t kof_sym_u64(const uint8_t *r, uint32_t at)
 	for (k = 7; k >= 0; k--)
 		v = (v << 8) | (uint64_t)r[at + (uint32_t)k];
 	return v;
+}
+
+/* A 16 or 32 bit field of a record, little endian whatever the host is. */
+static inline uint32_t kof_sym_u32(const uint8_t *r, uint32_t at)
+{
+	return (uint32_t)r[at] | ((uint32_t)r[at + 1u] << 8) |
+	       ((uint32_t)r[at + 2u] << 16) | ((uint32_t)r[at + 3u] << 24);
+}
+
+static inline uint32_t kof_sym_u16(const uint8_t *r, uint32_t at)
+{
+	return (uint32_t)r[at] | ((uint32_t)r[at + 1u] << 8);
+}
+
+/*
+ * WHERE THE POOL STARTS, in the block: right after the last record. 0 when the
+ * block is too short to say.
+ */
+static inline uint64_t kof_sym_pool_at(const uint8_t *b, uint32_t n)
+{
+	return (uint64_t)KOF_SYM_HDRLEN +
+	       (uint64_t)kof_sym_count(b, n) * KOF_SYM_RECLEN;
+}
+
+/*
+ * THE NAME OF A RECORD, WHOLE. Returns a NUL-terminated string inside the block
+ * and its length in *len (NULL len is fine). A record whose offset, length or
+ * terminator does not lie inside the block - a hostile or truncated block - has
+ * the empty name, so a caller never reads outside it and never has to test.
+ *
+ * This is the one way to read a name. The pool is not at a constant offset in
+ * the record, and a name is not any particular length.
+ */
+static inline const char *kof_sym_name(const uint8_t *b, uint32_t n,
+				       const uint8_t *rec, uint32_t *len)
+{
+	uint64_t pool = kof_sym_pool_at(b, n);
+	uint32_t off, l;
+
+	if (len)
+		*len = 0;
+	if (!b || !rec || pool > (uint64_t)n)
+		return "";
+	off = kof_sym_u32(rec, KOF_SYM_R_NAMEOFF);
+	l = kof_sym_u16(rec, KOF_SYM_R_NAMELEN);
+	if (off < KOF_SYM_KEYLEN || pool + off + l + 1u > (uint64_t)n ||
+	    b[pool + off + l] != 0)
+		return "";
+	if (len)
+		*len = l;
+	return (const char *)b + pool + off;
+}
+
+/*
+ * THE RUN OF RECORD i: the bytes a pattern is matched against - the four
+ * attribute bytes, the name and its NUL (see KOF_SYM_KEYLEN) - as an offset into
+ * the block and a length. 0 when there is no such record or its run is not
+ * inside the block.
+ */
+static inline int kof_sym_run(const uint8_t *b, uint32_t n, uint32_t i,
+			      uint64_t *off, uint64_t *len)
+{
+	const uint8_t *r = kof_sym_rec(b, n, i);
+	uint64_t at, l;
+	uint32_t no;
+
+	if (!r)
+		return 0;
+	no = kof_sym_u32(r, KOF_SYM_R_NAMEOFF);
+	l = (uint64_t)KOF_SYM_KEYLEN + kof_sym_u16(r, KOF_SYM_R_NAMELEN) + 1u;
+	if (no < KOF_SYM_KEYLEN)
+		return 0;
+	at = kof_sym_pool_at(b, n) + no - KOF_SYM_KEYLEN;
+	if (at + l > (uint64_t)n)
+		return 0;
+	*off = at;
+	*len = l;
+	return 1;
+}
+
+/*
+ * WHICH RECORD A RUN STARTS AT - the inverse of kof_sym_run, for a caller that
+ * has an extent (kof_sym_extents) and wants the records in it. The runs lie in
+ * the pool in record order, one after another, so this is a binary search.
+ * Returns the index, or the record count when none starts at `off`.
+ */
+static inline uint32_t kof_sym_index_at(const uint8_t *b, uint32_t n,
+					uint64_t off)
+{
+	uint32_t lo = 0, hi = kof_sym_count(b, n);
+	const uint32_t none = hi;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+		uint64_t at = 0, l = 0;
+
+		if (!kof_sym_run(b, n, mid, &at, &l))
+			return none;
+		if (at == off)
+			return mid;
+		if (at < off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return none;
+}
+
+/*
+ * HOW MANY RECORDS an extent covers, and which is the first: the extents
+ * kof_sym_extents returns join adjacent records of one half, so one is a run of
+ * consecutive records. 0 when it starts at no record.
+ */
+static inline uint32_t kof_sym_extent_recs(const uint8_t *b, uint32_t n,
+					   const struct kof_range *ext,
+					   uint32_t *first)
+{
+	uint32_t i = kof_sym_index_at(b, n, ext->off), k = 0;
+	uint64_t end = ext->off + ext->len;
+
+	if (i >= kof_sym_count(b, n))
+		return 0;
+	if (first)
+		*first = i;
+	for (;; i++, k++) {
+		uint64_t at = 0, l = 0;
+
+		if (!kof_sym_run(b, n, i, &at, &l) || at + l > end)
+			break;
+	}
+	return k;
 }
 
 /*
@@ -312,7 +535,9 @@ static inline uint32_t kof_sym_first(const uint8_t *b, uint32_t n)
  * lives here and the callers only run the matcher over what it returns.
  *
  * The extents index the BLOCK, not the object - the block is built, and none of
- * its records is a run of bytes in the file.
+ * its records is a run of bytes in the file. A run is a record's POOL ENTRY
+ * (attributes, name, NUL - see KOF_SYM_KEYLEN), not the 32-byte record: what a
+ * pattern is written against is the name and what is said about it.
  *
  * LAST RECORD FIRST. A symbol table is written runtime-first, with the author's
  * own symbols at the end, so a rule scoped to a half is nearly always asking
@@ -324,9 +549,9 @@ static inline uint32_t kof_sym_first(const uint8_t *b, uint32_t n)
  * other half breaks it. That is deliberate: the halves are separate targets, so
  * a pattern is never matched across the join between them.
  *
- * Records only - the block's own header is not searched, because its count and
- * `_start` index are the host's bookkeeping rather than anything the object
- * says.
+ * Pool entries only - the block's header and the record table are not searched,
+ * because the count and `_start` index are the host's bookkeeping and the numeric
+ * fields move with every build; neither is anything the object says by name.
  */
 static inline uint32_t kof_sym_extents(const uint8_t *b, uint32_t n,
 				       uint32_t mask, struct kof_range *ext,
@@ -345,7 +570,7 @@ static inline uint32_t kof_sym_extents(const uint8_t *b, uint32_t n,
 		total = kof_sym_count(b, n);
 		for (i = total; i-- > 0; ) {
 			const uint8_t *r = kof_sym_rec(b, n, i);
-			uint64_t off;
+			uint64_t off, len;
 
 			if (!r)
 				continue;
@@ -353,21 +578,22 @@ static inline uint32_t kof_sym_extents(const uint8_t *b, uint32_t n,
 			if (((r[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED) != 0u)
 			    == (half != 0u))
 				continue;
-			off = (uint64_t)KOF_SYM_HDRLEN +
-			      (uint64_t)i * KOF_SYM_RECLEN;
-			/* The record just above is the run being built, so the
-			 * run grows downward. Only within this half - `first`
-			 * is where this half's runs start. */
-			if (k > first &&
-			    ext[k - 1u].off == off + KOF_SYM_RECLEN) {
+			if (!kof_sym_run(b, n, i, &off, &len))
+				continue;
+			/* The run just above is the one being built, so it grows
+			 * downward - when this record's run ends exactly where it
+			 * starts, which it does for adjacent records of the SAME
+			 * half. Only within this half - `first` is where this
+			 * half's runs start. */
+			if (k > first && ext[k - 1u].off == off + len) {
 				ext[k - 1u].off = off;
-				ext[k - 1u].len += KOF_SYM_RECLEN;
+				ext[k - 1u].len += len;
 				continue;
 			}
 			if (k >= cap)
 				return k;
 			ext[k].off = off;
-			ext[k].len = KOF_SYM_RECLEN;
+			ext[k].len = len;
 			k++;
 		}
 	}
@@ -392,6 +618,12 @@ uint32_t kof_syms_build(uint32_t format, const uint8_t *data, uint64_t data_n,
 static inline uint8_t kof_sym_origin(const uint8_t *b, uint32_t n)
 {
 	return (b && n >= KOF_SYM_HDRLEN) ? b[KOF_SYM_H_ORIGIN] : 0u;
+}
+
+/* Was this record's name cut at KOF_SYM_NAME_MAX - see KOF_SYM_R_NAMECUT. */
+static inline int kof_sym_name_cut(const uint8_t *rec)
+{
+	return rec ? rec[KOF_SYM_R_NAMECUT] != 0 : 0;
 }
 
 /* Did the cap stop the block short of the symbols the file has. */

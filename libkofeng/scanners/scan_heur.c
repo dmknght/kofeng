@@ -8,16 +8,16 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/overlord/matchers/kofmultimatch.h"
+#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/linkage/kofdiag.h"
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include <celllysis/xref.h>
-#include "../analyzers/trueline/trueline.h"
+#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,10 +128,10 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	 * model that has no evidence about this kind of object.
 	 */
 	if (ctx->format == KOF_FMT_ELF) {
-		const struct kof_elf_info *ei = kof_elf(ctx);
+		const struct kgenome_elf_info *ei = kof_elf(ctx);
 
-		if (!ei || (ei->e_type != KOF_ELF_EXEC &&
-			    ei->e_type != KOF_ELF_DYN))
+		if (!ei || (ei->e_type != KGENOME_ELF_EXEC &&
+			    ei->e_type != KGENOME_ELF_DYN))
 			return;
 	}
 
@@ -179,7 +179,7 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	 * again. See kof_result.emu_unpacked. */
 	out->emu_unpacked   = sc->emu_produced;
 
-	if (score < m->bar_centinats || out->n >= KOF_MAX_FINDINGS)
+	if (score < m->bar_centinats || out->n >= KOF_MAX_EVIDENCE)
 		return;
 
 	/*
@@ -345,7 +345,7 @@ uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		if (m->n_str)
 			sx_need_multi(sc, ctx);
 		if (m->n_block)
-			sx_need_plague(sc, ctx);
+			sx_need_mutation(sc, ctx);
 
 		sx_mod_begin(sc, m);
 		KOF_TIME_BEGIN(KOF_T_HEUR);

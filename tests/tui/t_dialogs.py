@@ -500,7 +500,7 @@ def ctx_menu_hex_items_and_esc():
 def ctx_menu_offset_column_items():
     with ko() as v:
         v.rclick(36, 6)
-        for it in ('Copy offset (hex)', 'Copy offset (dec)', 'Go to', 'Which plague block'):
+        for it in ('Copy offset (hex)', 'Copy offset (dec)', 'Go to', 'Which mutation block'):
             check(v.has(it), 'offset-column menu missing %r' % it)
         n0 = len(v.osc52())
         v.click(*v.find('Copy offset (hex)'))

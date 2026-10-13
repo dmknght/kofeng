@@ -26,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/extractors/decomp/bzip2.h"
+#include <decompressors/bzip2.h>
 #include "slurp.h"
 
 static int failures;
@@ -68,18 +68,18 @@ static int out_sink(void *user, const uint8_t *p, uint32_t n)
 }
 
 
-static enum kof_decomp_status run(struct kof_bunzip *st, const uint8_t *in,
+static enum kuncoat_status run(struct kuncoat_bunzip *st, const uint8_t *in,
 				  size_t n, struct out *o, uint64_t *got)
 {
 	o->n = 0;
-	return kof_bunzip_decode(st, in, n, out_sink, o, got);
+	return kuncoat_bunzip_decode(st, in, n, out_sink, o, got);
 }
 
 int main(void)
 {
 	static const char *bz_path  = "build/test/fixtures/sample.bz2";
 	static const char *raw_path = "build/test/fixtures/sample.tar";
-	struct kof_bunzip *st = malloc(sizeof *st);
+	struct kuncoat_bunzip *st = malloc(sizeof *st);
 	struct out o;
 	uint8_t *bz = NULL, *raw = NULL;
 	size_t bz_n = 0, raw_n = 0;
@@ -103,13 +103,13 @@ int main(void)
 			0x17, 0x72, 0x45, 0x38, 0x50, 0x90,
 			0x00, 0x00, 0x00, 0x00
 		};
-		enum kof_decomp_status s = run(st, empty, sizeof empty, &o, &got);
+		enum kuncoat_status s = run(st, empty, sizeof empty, &o, &got);
 
 		checks++;
-		if (s != KOF_DEC_OK || got != 0 || o.n != 0)
+		if (s != KUNCOAT_OK || got != 0 || o.n != 0)
 			fail("empty stream", "a header and an end marker is a "
 			     "valid stream holding nothing");
-		if (!kof_bunzip_sniff(empty, sizeof empty))
+		if (!kuncoat_bunzip_sniff(empty, sizeof empty))
 			fail("empty stream", "the sniff refused one");
 	}
 
@@ -120,12 +120,12 @@ int main(void)
 		static const uint8_t near3[] = "BZip2 is what this says";
 
 		checks++;
-		if (kof_bunzip_sniff(near1, sizeof near1 - 1u) ||
-		    kof_bunzip_sniff(near2, sizeof near2 - 1u) ||
-		    kof_bunzip_sniff(near3, sizeof near3 - 1u))
+		if (kuncoat_bunzip_sniff(near1, sizeof near1 - 1u) ||
+		    kuncoat_bunzip_sniff(near2, sizeof near2 - 1u) ||
+		    kuncoat_bunzip_sniff(near3, sizeof near3 - 1u))
 			fail("near misses", "four bytes of header is not a "
 			     "stream without a block behind it");
-		if (run(st, near2, sizeof near2 - 1u, &o, &got) != KOF_DEC_CORRUPT)
+		if (run(st, near2, sizeof near2 - 1u, &o, &got) != KUNCOAT_CORRUPT)
 			fail("near misses", "a file that is not bzip2 decoded");
 	}
 
@@ -144,10 +144,10 @@ int main(void)
 
 	/* The whole point: what the tool compressed is what comes back. */
 	{
-		enum kof_decomp_status s = run(st, bz, bz_n, &o, &got);
+		enum kuncoat_status s = run(st, bz, bz_n, &o, &got);
 
 		checks++;
-		if (s != KOF_DEC_OK)
+		if (s != KUNCOAT_OK)
 			fail("fixture", "a stream bzip2 wrote did not decode");
 		else if (got != raw_n || o.n != raw_n ||
 			 memcmp(o.p, raw, raw_n) != 0)
@@ -166,7 +166,7 @@ int main(void)
 		if (both) {
 			memcpy(both, bz, bz_n);
 			memcpy(both + bz_n, bz, bz_n);
-			if (run(st, both, bz_n * 2u, &o, &got) != KOF_DEC_OK ||
+			if (run(st, both, bz_n * 2u, &o, &got) != KUNCOAT_OK ||
 			    got != raw_n * 2u || o.n != raw_n * 2u ||
 			    memcmp(o.p, raw, raw_n) != 0 ||
 			    memcmp(o.p + raw_n, raw, raw_n) != 0)
@@ -188,9 +188,9 @@ int main(void)
 
 		checks++;
 		for (cut = 1; cut < bz_n; cut += (bz_n / 97u) + 1u) {
-			enum kof_decomp_status s = run(st, bz, cut, &o, &got);
+			enum kuncoat_status s = run(st, bz, cut, &o, &got);
 
-			if (s == KOF_DEC_OK && cut < bz_n)
+			if (s == KUNCOAT_OK && cut < bz_n)
 				fail("truncated", "a cut stream reported a "
 				     "complete decode");
 			if (o.n > raw_n)
@@ -220,13 +220,13 @@ int main(void)
 
 		checks++;
 		for (at = 4; at < bz_n; at += (bz_n / 53u) + 1u) {
-			enum kof_decomp_status s;
+			enum kuncoat_status s;
 
 			bz[at] ^= 0x40u;
 			s = run(st, bz, bz_n, &o, &got);
 			bz[at] ^= 0x40u;
 
-			if (s != KOF_DEC_OK)
+			if (s != KUNCOAT_OK)
 				continue;      /* refused, which is the point */
 			if (o.n != raw_n || memcmp(o.p, raw, raw_n) != 0)
 				fail("bit flip", "a changed stream decoded to "
@@ -236,13 +236,13 @@ int main(void)
 
 	/* A receiver that has had enough is not an error. */
 	{
-		enum kof_decomp_status s;
+		enum kuncoat_status s;
 
 		checks++;
 		o.limit = raw_n / 4u ? raw_n / 4u : 1u;
 		s = run(st, bz, bz_n, &o, &got);
 		o.limit = 0;
-		if (s != KOF_DEC_STOPPED)
+		if (s != KUNCOAT_STOPPED)
 			fail("stopped", "a sink that refused more was not "
 			     "reported as a stop");
 	}

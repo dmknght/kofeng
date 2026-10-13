@@ -43,7 +43,7 @@
  *
  * kofantarc.h's rule - collect, do not judge - holds for the archive, which is
  * cross-built with mingw and linked by kofwatchtower, a tool with no engine in
- * it. This file calls kof_pe_unmap, so it is compiled INTO the scanner instead,
+ * it. This file calls kgenome_pe_unmap, so it is compiled INTO the scanner instead,
  * exactly as libkoforbit/antarc/awalk.c is on Linux. Adding it to the archive would
  * make every collector consumer link the engine.
  *
@@ -75,7 +75,7 @@
 
 #include "kofeng.h"
 #include <kofmod/pe.h>
-#include "extractors/unpack/pe_unmap.h"
+#include <genotype/image/pe_unmap.h>
 
 #include "wproc.h"
 #include "wdiff.h"
@@ -267,7 +267,7 @@ struct wwalk {
 
 	/* Declared alongside a mapped image; borrowed by the item, so it has
 	 * to outlive the call that returns it. */
-	struct kof_pe_info hint;
+	struct kgenome_pe_info hint;
 
 	uint64_t procs, refused, regions, bytes;
 };
@@ -828,9 +828,9 @@ static int take_span(struct wwalk *w, struct kof_walk_item *out)
 		 * reads by offset.
 		 */
 		memset(&w->hint, 0, sizeof w->hint);
-		w->hint.layout     = KOF_PE_LAYOUT_MAPPED;
+		w->hint.layout     = KGENOME_PE_LAYOUT_MAPPED;
 		/* A PE in executable memory no file accounts for. */
-		w->hint.mem_origin = KOF_PE_ORIGIN_MANUAL;
+		w->hint.mem_origin = KGENOME_PE_ORIGIN_MANUAL;
 		out->as_format  = KOF_FMT_PE;
 		out->as_view    = &w->hint;
 		out->as_view_len = (uint32_t)sizeof w->hint;
@@ -847,7 +847,7 @@ static int take_span(struct wwalk *w, struct kof_walk_item *out)
 		 * not trouble itself to rewrite ImageBase afterwards.
 		 */
 		if (got >= W_MIN_IMAGE &&
-		    kof_pe_unmap(kof_buf_make(w->buf, (uint64_t)got),
+		    kgenome_pe_unmap(kof_buf_make(w->buf, (uint64_t)got),
 				 w->span_base, 0, W_MAX_SPAN,
 				 &w->back, &w->back_len, NULL)) {
 			w->back_addr = w->span_base;
@@ -914,18 +914,18 @@ static int take_nameless_module(struct wwalk *w, const struct kofw_module *md,
 						      : "MEM_UNNAMED";
 
 	memset(&w->hint, 0, sizeof w->hint);
-	w->hint.layout     = KOF_PE_LAYOUT_MAPPED;
+	w->hint.layout     = KGENOME_PE_LAYOUT_MAPPED;
 	/* The loader lists it; the file behind it is gone or was never
-	 * named. Far commoner than a manual map - see kof_pe_origin. */
+	 * named. Far commoner than a manual map - see kgenome_pe_origin. */
 	w->hint.mem_origin = (md->flags & KOFW_MDF_REPLACED)
-			   ? KOF_PE_ORIGIN_REPLACED
+			   ? KGENOME_PE_ORIGIN_REPLACED
 			   : (md->flags & KOFW_MDF_NO_FILE)
-			   ? KOF_PE_ORIGIN_DELETED : KOF_PE_ORIGIN_UNNAMED;
+			   ? KGENOME_PE_ORIGIN_DELETED : KGENOME_PE_ORIGIN_UNNAMED;
 	out->as_format   = KOF_FMT_PE;
 	out->as_view     = &w->hint;
 	out->as_view_len = (uint32_t)sizeof w->hint;
 
-	if (kof_pe_unmap(kof_buf_make(w->buf, (uint64_t)got), md->base, 0,
+	if (kgenome_pe_unmap(kof_buf_make(w->buf, (uint64_t)got), md->base, 0,
 			 W_MAX_SPAN, &w->back, &w->back_len, NULL)) {
 		w->back_addr = md->base;
 		w->back_pending = 1;

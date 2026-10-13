@@ -24,8 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../libkofeng/detectors/overlord/matchers/kofmatch.h"
-#include "../../libkofeng/databases/dbcore.h"
+#include "../../libkofeng/detectors/pattern/kofmatch.h"
+#include "../../libkofeng/databases/pack/dbcore.h"
 
 static int failures;
 

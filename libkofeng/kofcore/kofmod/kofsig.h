@@ -32,12 +32,55 @@
 /* The sentinels, and the architecture list - small enough to need no format
  * header, and shared with the code reader. */
 #include "basic.h"
+/* The format limits a method id carries; defined by kuncoat, which is what
+ * checks them. Re-exported so a module reads them where it always did. */
+#include <decompressors/format_limits.h>
+
+/* module-facing names: the lib defines KUNCOAT_*, the ABI keeps the old spelling */
+#define KOF_LZMA_MAX_LC  KUNCOAT_LZMA_MAX_LC
+#define KOF_LZMA_MAX_LP  KUNCOAT_LZMA_MAX_LP
+#define KOF_LZMA_MAX_PB  KUNCOAT_LZMA_MAX_PB
+#define KOF_LZX_MAX_BITS KUNCOAT_LZX_MAX_BITS
+#define KOF_LZX_MIN_BITS KUNCOAT_LZX_MIN_BITS
 
 /* The code reader's vocabulary - see cell.h for what it is for. */
 #include "cell.h"
+#include <range.h>   /* struct kof_range - core */
+#include <celllysis/xref.h>   /* KOF_XREF_*, what code does to an address */
+#include <genotype/image/section_flags.h>   /* KOF_SECF_*, what a declared section is */
+
+/* module-facing names: the lib defines KGENOME_*, the ABI keeps the old spelling.
+ * Object-like macros, so a module (and the signature language) still writes the
+ * old name, `struct cell_insn` and `enum kof_arch` included. Engine code uses
+ * the KGENOME_ / kgenome_ name. */
+#define DIAG_MAX_NODE                      KGENOME_DIAG_MAX_NODE
+#define KOF_SECF_CIPHERTEXT                KGENOME_SECF_CIPHERTEXT
+#define KOF_SECF_CODE                      KGENOME_SECF_CODE
+#define KOF_SECF_DATA                      KGENOME_SECF_DATA
+#define KOF_SECF_HOLLOW                    KGENOME_SECF_HOLLOW
+#define KOF_SECF_PAD                       KGENOME_SECF_PAD
+#define KOF_SECF_READ                      KGENOME_SECF_READ
+#define KOF_SECF_REBUILT                   KGENOME_SECF_REBUILT
+#define KOF_SECF_SYNTHETIC                 KGENOME_SECF_SYNTHETIC
+#define KOF_XREF_ARG                       KGENOME_XREF_ARG
+#define KOF_XREF_CALL                      KGENOME_XREF_CALL
+#define KOF_XREF_JUMP                      KGENOME_XREF_JUMP
+#define KOF_XREF_PARTIAL                   KGENOME_XREF_PARTIAL
+#define kof_diag_kind                      kgenome_diag_kind
+#define kof_diag_role_of_arg               kgenome_diag_role_of_arg
+#define kof_diag_str                       kgenome_diag_str
+#define kof_diag_str_add                   kgenome_diag_str_add
+#define kof_emu_get_reg                    kgenome_emu_get_reg
+#define kof_emu_read                       kgenome_emu_read
+#define kof_emu_watch                      kgenome_emu_watch
+#define kof_flow_name_arg                  kgenome_flow_name_arg
+#define kof_true_find                      kgenome_true_find
+#define kof_xref_in                        kgenome_xref_in
 
 /* The two kinds of range kof_mark_infected takes. */
 #include "infected.h"
+#include "disease.h"      /* KOF_DECLARE_DISEASE, what a detector finds */
+#include "kofdecode.h"    /* struct kof_capsid, what a module asks the host to decrypt with */
 
 /*
  * ABI version, and it covers TWO things a module depends on: the vtable it
@@ -78,16 +121,16 @@
 /*
  * 3 - THE STRING MEASURE WAS TAKEN OUT, AND WITH IT A VTABLE SLOT.
  *
- * `ovl_strings` sat between plague_score and ovl_blocks and is gone, so every
+ * `ovl_strings` sat between mutation_score and ovl_blocks and is gone, so every
  * slot after it moved up one; `ovl_shape` was appended at the end in the same
  * change. Both halves of this number move because the first of those is the
  * removal the note above describes, and a module built against ABI 2 would
  * call ovl_blocks where it meant ovl_strings.
  *
  * The view structs moved too, which would have been reason enough on its own:
- * struct kof_plague_desc lost its string pool, struct kof_plague_region lost the
+ * struct kof_mutation_desc lost its string pool, struct kof_mutation_region lost the
  * slice that indexed it, struct kof_ovl_vec lost the two string dimensions,
- * and struct kof_plague_shape gained lib_cut.
+ * and struct kof_mutation_shape (since removed) gained lib_cut.
  *
  * WHY THE MEASURE WENT is recorded where a researcher will look for it - see
  * the note beside SIM_IT_BLKSET in kofexamine/kofeditor.h, which carries the
@@ -96,7 +139,7 @@
  * what it collected was not strings at all but printable byte sequences inside
  * machine code that unrelated programs share.
  */
-#define KOFSIG_ABI_VERSION 3
+#define KOFSIG_ABI_VERSION 4
 #define KOFSIG_ABI_MIN     3
 
 /*
@@ -885,11 +928,8 @@ static inline int kof_comment_char(int c)
  * where the code is is format specific work and the parser already has the tables.
  */
 
-/* A resolved range. len == 0 means the extent is empty. */
-struct kof_range {
-	uint64_t off;
-	uint64_t len;
-};
+/* A resolved range: struct kof_range, defined in core (<range.h>, included at
+ * the top of this file). */
 
 /*
  * Resolving a mask produces a list of ranges, not one range: a single bounding range
@@ -951,10 +991,12 @@ struct kof_range {
  * rather than by how they are coded. It was 7 when this was written, so the
  * number is worth re-reading rather than trusting.
  *
- * The split is on KOF_SYM_F_UNDEFINED, and the extents cover RECORDS ONLY - the
- * block's own header is not searched. Its count and `_start` index change with
- * the file, so a pattern over them would be matching the host's bookkeeping
- * rather than anything the object says.
+ * The split is on KOF_SYM_F_UNDEFINED, and the extents cover the symbols' POOL
+ * ENTRIES only (the four attribute bytes, the whole name, its NUL - see
+ * KOF_SYM_KEYLEN) - the block's own header and the record table are not searched.
+ * The count and `_start` index change with the file, and the numeric fields with
+ * every build, so a pattern over them would be matching the host's bookkeeping
+ * or one binary's addresses rather than anything the object says.
  */
 /*
  * A FILE THIS OBJECT CARRIES AS A FILE - SHARED, BECAUSE IT IS NOT ONE
@@ -1022,7 +1064,6 @@ struct kof_region_shape {
 	uint32_t reserved;
 };
 
-struct kof_plague_shape;    /* kofmod/kofoverlord.h      - see ovl_shape */
 
 struct kof_content {
 	uint8_t  (*rd8) (const struct kof_obj_ctx *, uint64_t off);
@@ -1758,27 +1799,27 @@ struct kof_content {
 	/*
 	 * HOW MUCH OF A DECLARED BLOCK IS IN THIS OBJECT, nought to a hundred.
 	 *
-	 * The argument is an index the build assigned to KOF_PLAGUE_BLOCK, the
+	 * The argument is an index the build assigned to KOF_MUTATION_BLOCK, the
 	 * same way find_str's are assigned to KOF_DEFINE_STR - so the hashes are
 	 * neither here nor in the blob, and the host answers from one pass it
 	 * made over the regions any loaded block asked for.
 	 *
 	 * A PERCENTAGE AND NOT A VERDICT. What the number means is the rule's to
 	 * decide, in the rule, beside everything else it decides - see
-	 * kofmod/kofplague.h for why the thresholds are not in the matcher.
+	 * kofmod/kofmutation.h for why the thresholds are not in the matcher.
 	 *
 	 * Zero for a block nothing could be fed for, which is the same answer as
 	 * "none of it was there". A rule cannot tell those apart and must not
 	 * try: a region that was never resolved and a region with nothing in it
 	 * are one fact about this object.
 	 */
-	uint32_t (*plague_score)(const struct kof_obj_ctx *, uint32_t block_id);
+	uint32_t (*mutation_score)(const struct kof_obj_ctx *, uint32_t block_id);
 
 	
 	/*
-	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_plague_blocks.
+	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_mutation_blocks.
 	 *
-	 * Beside plague_score and not instead of it: that one asks how much of
+	 * Beside mutation_score and not instead of it: that one asks how much of
 	 * ONE declared run of bytes is here and is anchored to the region the
 	 * run was cut from; this asks how much of a reference's WHOLE set is
 	 * here and is anchored to nothing. A rule that means "that exact run"
@@ -1805,20 +1846,15 @@ struct kof_content {
 	void *ovl_chain_unused;
 
 	/*
-	 * THE STRUCTURE TRACK, WITH THE LIBRARY THE ENGINE ALREADY FOUND.
+	 * A STRUCTURE TRACK STOOD HERE: the ELF header and the object's size, compared
+	 * with a reference's. It was taken out. Measured, it identifies nothing on its
+	 * own - an unrelated program of the same size answered 100% - and as a filter
+	 * its detection rate was too low to keep a measure, a header, a descriptor and
+	 * an editor path alive for it.
 	 *
-	 * A shape comparison is arithmetic over the ELF header and needs
-	 * nothing from the host - kof_plague_shape_pct does it inline, and that
-	 * is still what runs when this is absent. What the host has and the
-	 * rule does not is WHERE THE STATIC LIBRARY IS, which a reference may
-	 * ask to have taken out of both sides. See kof_plague_shape.lib_cut for
-	 * why that is the reference's declaration and not the engine's choice.
-	 *
-	 * Last in this struct, so a module built against the older shape of it
-	 * finds every field it knew where it left it.
+	 * The SLOT stays so no entry after it moves, as ovl_chain_unused's did.
 	 */
-	uint32_t (*ovl_shape)(const struct kof_obj_ctx *,
-			      const struct kof_plague_shape *ref);
+	void *ovl_shape_unused;
 
 	/*
 	 * THE MODULE CAN UNDO WHAT IT FOUND, AND HERE IS WHERE THE DAMAGE
@@ -1867,7 +1903,7 @@ struct kof_content {
 
 	/*
 	 * THE DISINFECT STAGE'S ARITHMETIC, reached the way everything else
-	 * is - see libkofeng/disinfect/pzero.h for what each one answers and
+	 * is - see libkofeng/scanners/pzero.h for what each one answers and
 	 * kofcure.h for the spellings a rule writes.
 	 *
 	 * Through the vtable and not as inline code in the header, for the
@@ -2372,6 +2408,54 @@ struct kof_content {
 				 char *fn, uint32_t fn_cap);
 	uint32_t (*sym_import)(const struct kof_obj_ctx *, const char *dll,
 			       const char *fn);
+	/*
+	 * decrypt        run the cipher a descriptor names over a range of THIS object
+	 *                and produce the result, as repeated kunp_rcstruct_write calls
+	 *                would. Returns the bytes produced - zero when the descriptor
+	 *                is not a cipher or the host refused (budget).
+	 * decrypt_peek   the same into the caller's own buffer, producing nothing: for
+	 *                a module that has to read the front of the plaintext before it
+	 *                can say what the object is, or how long it is - the additive
+	 *                cipher's length is only known by running it.
+	 *
+	 * AT THE END OF THE TABLE, so a module built against an older header is
+	 * unaffected. See kofmod/kofdecode.h for what a descriptor is and why the
+	 * loop is the host's.
+	 */
+	uint64_t (*decrypt)(const struct kof_obj_ctx *, const struct kof_capsid *,
+			    uint64_t off, uint64_t len);
+	uint32_t (*decrypt_peek)(const struct kof_obj_ctx *,
+				 const struct kof_capsid *, uint64_t off,
+				 uint64_t len, void *out, uint32_t cap);
+	/*
+	 * capsid_apply   run a cipher over bytes the MODULE holds - not the object.
+	 *                Pure arithmetic with no scanner state, so a detector may ask
+	 *                too. What it is for: a module testing a candidate key needs
+	 *                the first bytes of its keystream, and calling decrypt_peek
+	 *                for every position of an object would key the cipher that
+	 *                many times; one call over a few zero bytes yields the
+	 *                keystream, once.
+	 */
+	uint32_t (*capsid_apply)(const struct kof_capsid *, const void *in,
+				 uint32_t n, void *out, uint32_t cap);
+	/*
+	 * diag32, diag_share32, diag_str32   the three diagnose questions with the
+	 * diagnose named by its FULL 32-bit id (kof_diag_id32_) instead of the 16-bit
+	 * fold the slots above take. The fold lets two names share an id - with 256
+	 * diagnoses the chance that some pair does is about 40% - and the loader had to
+	 * refuse the second one; the full hash makes that a one-in-a-million event at
+	 * the sizes a database reaches (and still refused, never silently answered for
+	 * the wrong diagnose). The kof_diag, kof_diag_share and kof_diag_str_* macros
+	 * ask these; the 16-bit slots stay where they are for a module built before.
+	 *
+	 * AT THE END OF THE TABLE, so a module built against an older header is
+	 * unaffected.
+	 */
+	int (*diag32)(const struct kof_obj_ctx *, uint32_t id);
+	int (*diag_share32)(const struct kof_obj_ctx *, uint16_t cap,
+			    uint32_t a, uint32_t b);
+	int (*diag_str32)(const struct kof_obj_ctx *, uint32_t diag,
+			  const char *name);
 };
 
 /*
@@ -2384,7 +2468,7 @@ struct kof_content {
  * new entry point.
  *
  * NRV2 carries its bit width in the id because the width is part of the coding
- * rather than a variant of it - see kof_nrv2_bits for what that cost to learn.
+ * rather than a variant of it - see kuncoat_nrv2_bits for what that cost to learn.
  */
 /*
  * What the unpacked bytes are, so the host knows whether to reassemble them.
@@ -2535,7 +2619,7 @@ enum kof_unp_method {
 	KOF_UNP_ASCII85 = 10,
 
 	/*
-	 * The other two transport codings, and see extractors/decomp/textcode.h for
+	 * The other two transport codings, and see libuncoat/decoders/textcode.h for
 	 * why the three belong together.
 	 *
 	 * ASCIIHEX is bounded by its input like ASCII85, so it can be a middle
@@ -2552,7 +2636,7 @@ enum kof_unp_method {
 
 	/*
 	 * LZW as PDF and TIFF write it - most-significant-bit first, which is
-	 * NOT the GIF variant. See extractors/decomp/lzw.h.
+	 * NOT the GIF variant. See libuncoat/decompressors/lzw.h.
 	 *
 	 * Worth having because it was superseded: a filter nobody expects is a
 	 * filter a parser was never taught, and that is a cheap way to put
@@ -2564,7 +2648,7 @@ enum kof_unp_method {
 	KOF_UNP_LZW = 13,
 
 	/*
-	 * bzip2, whole streams of it - see extractors/decomp/bzip2.h.
+	 * bzip2, whole streams of it - see libuncoat/decompressors/bzip2.h.
 	 *
 	 * A .bz2 file, a zip entry stored with method 12, and the compressed
 	 * half of a .tar.bz2 are all this one coding, and none of them could be
@@ -2593,7 +2677,7 @@ enum kof_unp_method {
 	 * to 32KB of the previous block's output. So it is decoded through
 	 * kunp_static_entry rather than kof_unpack_at: what it needs is the list
 	 * of blocks, which resolve_entry answers, and a decoder that can be
-	 * seeded, which kof_inflate_seeded is.
+	 * seeded, which kuncoat_inflate_seeded is.
 	 *
 	 * `out_hint` CARRIES TWO NUMBERS for this method: the file's offset
 	 * inside the folder's decoded stream in the high 32 bits, its length in
@@ -2794,33 +2878,9 @@ enum kof_unp_method {
 				  : KOF_UNP_LZMA_MPRESS32) +                \
 	 (uint32_t)(lc) + 9u * (uint32_t)(lp) + 45u * (uint32_t)(pb))
 
-/*
- * What the LZMA specification allows for each parameter.
- *
- * Module facing because a module is what reads them out of a container and has to
- * refuse the ones that are out of range - they size the decoder's probability
- * model, so an unchecked value is an allocation chosen by whoever wrote the file.
- * The decoder checks them again on its own side; this is so a module can say it
- * could not finish rather than being refused with nothing to report.
- */
-#define KOF_LZMA_MAX_LC 8u
-#define KOF_LZMA_MAX_LP 4u
-#define KOF_LZMA_MAX_PB 4u
-
 #define KOF_UNP_LZMA_PROPS(lc, lp, pb)                                      \
 	((uint32_t)KOF_UNP_LZMA + (uint32_t)(lc) + 9u * (uint32_t)(lp) +    \
 	 45u * (uint32_t)(pb))
-
-/*
- * The window sizes LZX defines: 2^15 to 2^21.
- *
- * Module facing for the reason KOF_LZMA_MAX_LC is - a module is what reads the
- * width out of a container, a cabinet's typeCompress or a help file's
- * ControlData, and has to refuse one the format never defines rather than pass
- * it on as a method id nothing decodes.
- */
-#define KOF_LZX_MIN_BITS 15u
-#define KOF_LZX_MAX_BITS 21u
 
 /* The LZX window, in the id - see KOF_UNP_LZX_BASE. `bits` is 15 to 21. */
 #define KOF_UNP_LZX(bits)  ((uint32_t)KOF_UNP_LZX_BASE + (uint32_t)(bits))
@@ -3530,13 +3590,14 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  *                           Decompresses an image that was compressed to stop
  *                           it being read.
  *
- *     KOF_ANALYZE_DECRYPT   bases/unp/     ezuri, msf_xor, msf_sub, msf_dword,
- *                                          msf_ctxkey, msf_evasion
+ *     KOF_ANALYZE_DECRYPT   bases/decoders/ msf_xor, msf_sub, msf_dword,
+ *                                          msf_ctxkey, msf_evasion; and
+ *                           bases/unp/     ezuri
  *                           Undoes a cipher or an encoder. An msf encoder is a
  *                           cipher with a short key and belongs here, not with
  *                           the packers: nothing about it is compression.
  *
- *     KOF_ANALYZE_CARVE     bases/unp/     scpayload, and embedded files
+ *     KOF_ANALYZE_CARVE     bases/unp/     embedded files
  *                           SEARCHES. Nothing declared where this content is -
  *                           there is no table to read - so it is found by
  *                           looking. That is the line between this and DECOMP.
@@ -3705,21 +3766,17 @@ static inline const char *kof_analyze_word(uint32_t step)
 
 /*
  * ============================================================================
- * THE FIVE SIMILARITY MEASURES, AND WHICH ONE ANSWERS WHICH QUESTION.
+ * THE SIMILARITY MEASURES, AND WHICH ONE ANSWERS WHICH QUESTION.
  * ============================================================================
  *
- * They are not five spellings of one idea and they do not fail together. Each
+ * They are not spellings of one idea and they do not fail together. Each
  * is listed below with the DATA it needs - which is what decides when a rule
  * may ask it - and what it measured on the cases that break the others.
  *
- *   kof_plague_shape    STRUCTURE. The ELF header and the object's size, nothing
- *                    read. The cheapest of the five by a wide margin: no pass
- *                    over the bytes at all.
- *
- *   kof_plague_score BLOCK. Selected rolling-hash windows of ONE declared run,
+ *   kof_mutation_score BLOCK. Selected rolling-hash windows of ONE declared run,
  *                    anchored to the region it was cut from.
  *
- *   kof_plague_blocks   BLOCK SET. The same windows over the WHOLE object against
+ *   kof_mutation_blocks   BLOCK SET. The same windows over the WHOLE object against
  *                    a reference's whole set, anchored to nothing.
  *
  *   (the behaviour track is unplugged - see "THE BEHAVIOUR MACROS ARE GONE")
@@ -3776,28 +3833,28 @@ static inline const char *kof_analyze_word(uint32_t step)
  *
  * An ordinary expression, so it composes with everything else a rule can say:
  *
- *     if (kof_find_str(rng, cmd_exe) && kof_plague_score(cfg) >= 50)
+ *     if (kof_find_str(rng, cmd_exe) && kof_mutation_score(cfg) >= 50)
  *
  * which is the case that decided the design - a common string as an anchor
  * beside a block as the measurement. No combining logic lives in the matcher
  * because this is enough to write it here.
  */
-#define kof_plague_score(blk)                                              \
-	((ctx)->content->plague_score((ctx), KOF_PASTE(kof_blockid_, blk)))
+#define kof_mutation_score(blk)                                              \
+	((ctx)->content->mutation_score((ctx), KOF_PASTE(kof_blockid_, blk)))
 
 /*
  * HOW MUCH OF A REFERENCE'S BLOCK SET THIS OBJECT HAS.
  *
  *     static const uint32_t ref_blocks[] = { 0x..., 0x..., };
  *
- *     if (kof_plague_blocks(ref_blocks) >= 60u)
+ *     if (kof_mutation_blocks(ref_blocks) >= 60u)
  *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
  *
  * The hashes are the selected windows of the reference's loadable regions after
- * its static library was subtracted - the same windows plague selects, over the
+ * its static library was subtracted - the same windows mutation selects, over the
  * whole object rather than carved into named runs.
  *
- * NOT A SUM OF PLAGUE SCORES. A rule could add up kof_plague_score over several
+ * NOT A SUM OF MUTATION SCORES. A rule could add up kof_mutation_score over several
  * declared blocks and divide, and that would be a different measurement: each
  * of those is anchored to the region its block came from and each can fire on
  * its own. This is one set, one containment, one threshold.
@@ -3842,8 +3899,8 @@ static inline const char *kof_analyze_word(uint32_t step)
  * none loaded, a format the analysis does not run on.
  */
 #define kof_diag(name) \
-	((ctx)->content->diag ? (ctx)->content->diag((ctx), \
-						     kof_diag_id_(#name)) : 0)
+	((ctx)->content->diag32 ? (ctx)->content->diag32((ctx), \
+							 kof_diag_id32_(#name)) : 0)
 
 /*
  * THE ID OF A DIAGNOSE, FROM ITS NAME.
@@ -3857,9 +3914,33 @@ static inline const char *kof_analyze_word(uint32_t step)
  * which is readdir order - it changed when a file was added, and no rule
  * could name one at all.
  *
- * SIXTEEN BITS, and the loader refuses a database where two diagnoses
- * collide rather than letting one answer for the other.
+ * THIRTY-TWO BITS: FNV-1a over the name, never zero (zero means "no diagnose").
+ * It was a 16-bit fold of the same hash (kof_diag_fold16_, which the three
+ * 16-bit slots of the vtable still take, for a module built before), and two names
+ * that folded alike could not both be loaded. The loader still refuses a database
+ * where two diagnoses collide in the full id rather than letting one answer for
+ * the other.
  */
+static inline uint32_t kof_diag_id32_(const char *s)
+{
+	uint32_t h = 2166136261u;
+
+	while (*s) {
+		h ^= (uint8_t)*s++;
+		h *= 16777619u;
+	}
+	return h ? h : 1u;
+}
+
+/* The 16-bit id the old slots take: the fold the id used to be. Computed from the
+ * full id, so the two always agree. */
+static inline uint16_t kof_diag_fold16_(uint32_t id32)
+{
+	uint32_t h = (id32 ^ (id32 >> 16)) & 0xffffu;
+
+	return (uint16_t)(h ? h : 1u);   /* zero means "no diagnose" */
+}
+
 static inline uint16_t kof_diag_id_(const char *s)
 {
 	uint32_t h = 2166136261u;
@@ -3868,11 +3949,10 @@ static inline uint16_t kof_diag_id_(const char *s)
 		h ^= (uint8_t)*s++;
 		h *= 16777619u;
 	}
-	h = (h ^ (h >> 16)) & 0xffffu;
-	return (uint16_t)(h ? h : 1u);   /* zero means "no diagnose" */
+	return kof_diag_fold16_(h);
 }
 
-#define KOF_DIAG_ID(name) kof_diag_id_(name)
+#define KOF_DIAG_ID(name) kof_diag_id32_(name)
 
 /*
  * DO TWO DIAGNOSES MEET AT A NODE OF THIS CAPABILITY.
@@ -3933,8 +4013,8 @@ static inline uint16_t kof_diag_id_(const char *s)
  * name appear. At most KOF_DIAG_STR_MAX are taken in one call.
  */
 #define KOF_DIAG_STR_MAX 8u
-#define kof_diag_str_one(diag, name) ((ctx)->content->diag_str ? \
-	(ctx)->content->diag_str((ctx), kof_diag_id_(#diag), (name)) : 0)
+#define kof_diag_str_one(diag, name) ((ctx)->content->diag_str32 ? \
+	(ctx)->content->diag_str32((ctx), kof_diag_id32_(#diag), (name)) : 0)
 #define KOF_DFS_1(op, d, a)       kof_diag_str_one(d, a)
 #define KOF_DFS_2(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_1(op, d, __VA_ARGS__))
 #define KOF_DFS_3(op, d, a, ...) (kof_diag_str_one(d, a) op KOF_DFS_2(op, d, __VA_ARGS__))
@@ -3948,11 +4028,11 @@ static inline uint16_t kof_diag_id_(const char *s)
 #define kof_diag_str_any(diag, ...) KOF_DFS_FOLD(||, diag, __VA_ARGS__)
 #define kof_diag_str_all(diag, ...) KOF_DFS_FOLD(&&, diag, __VA_ARGS__)
 
-#define kof_diag_share(cap, a, b) ((ctx)->content->diag_share ? \
-				   (ctx)->content->diag_share((ctx), \
-							      (uint16_t)(cap), \
-							      kof_diag_id_(#a), \
-							      kof_diag_id_(#b)) \
+#define kof_diag_share(cap, a, b) ((ctx)->content->diag_share32 ? \
+				   (ctx)->content->diag_share32((ctx), \
+								(uint16_t)(cap), \
+								kof_diag_id32_(#a), \
+								kof_diag_id32_(#b)) \
 				 : 0)
 
 /*
@@ -4122,7 +4202,7 @@ static inline uint32_t kof_bswap32(uint32_t v)
  *     uint32_t n; const uint8_t *b = kof_syms(&n), *r;
  *     for (i = 0; (r = kof_sym_rec(b, n, i)); i++)
  *             if (r[KOF_SYM_R_TYPE] == 1 && r[KOF_SYM_R_BIND] == 1)
- *                     ...
+ *                     ... kof_sym_name(b, n, r, &len) ...      its whole name
  *
  * NULL and zero for an object with no symbols - a stripped file, or any
  * non-ELF - which is a normal answer and stops the loop on its first test.
@@ -4179,58 +4259,8 @@ static inline uint32_t kof_bswap32(uint32_t v)
 							   (uint64_t)(va),  \
 							   (uint64_t)(size)) : 0u)
 
-/* Code forms this address, or loads from it. */
-#define KOF_XREF_READ    (1u << 0)
-/* Code stores to it. */
-#define KOF_XREF_WRITE   (1u << 1)
-/* It is the target of a CALL - direct or through a register. A direct call
- * usually names code, and names a variable exactly when a compiler could prove
- * the target constant, which is what -O2 does to a called function pointer. */
-#define KOF_XREF_CALL    (1u << 2)
-/* The same, for a JMP. */
-#define KOF_XREF_JUMP    (1u << 3)
-/* It was in a register when a CALL happened - an argument, as far as a sweep
- * that knows no calling convention can tell. */
-#define KOF_XREF_ARG     (1u << 4)
-/*
- * The sweep gave up before it had seen everything - too many distinct
- * addresses, or code it could not decode. A rule may still trust a bit that IS
- * set; it may not read the absence of one as "not referred to".
- */
-#define KOF_XREF_PARTIAL (1u << 5)
-/*
- * A REGION THAT REFERS TO IT ALSO MAKES AN INDIRECT CALL.
- *
- * Evidence about the neighbourhood rather than about the address, and it exists
- * because the address facts miss the shape that matters most: a payload copied
- * into a fresh mapping and called there is never called, jumped to, or even
- * passed anywhere - and yet one region of code reads it and transfers control.
- *
- * A REGION, not a function: the boundaries come from RET, because the files
- * this has to work on are stripped and have no function table to read.
- *
- * MEASURED 11.6% ON CLEAN BINARIES, which is why no rule gates on it alone.
- */
-#define KOF_XREF_RGN_ICALL (1u << 6)
-/* ...or the region directly calls a region that does. One level. Measured 3.3%
- * on clean binaries, and it fires on programs that only read a lookup table:
- * every dynamically linked binary calls __libc_start_main through the GOT, from
- * the region its entry point is in. */
-#define KOF_XREF_RGN_NEAR  (1u << 7)
-/*
- * SOMETHING OTHER THAN STARTUP CODE REFERS TO IT.
- *
- * Every ELF carries code nobody wrote - the entry stub, the PLT thunks, .init
- * and .fini, and whatever .init_array registers - and all of it references data
- * that no rule about a person's program is looking for. The startup set is
- * found from the ELF's own structure, not from symbols: 4 of 400 binaries in
- * /usr/bin still carry `_start` as a symbol, and every one of them has an entry
- * point and an .init_array.
- *
- * Absent means the only code that ever mentions it is code the compiler wrote.
- * Measured: 87% of sized variables in clean binaries are in that position.
- */
-#define KOF_XREF_USER      (1u << 8)
+/* KOF_XREF_*: the flags of kof_data_xref - defined by libgenome with the sweep
+ * that computes them (<celllysis/xref.h>), included at the top of this file. */
 
 #define kof_u8(off)  ((ctx)->content->rd8 ((ctx), (uint64_t)(off)))
 #define kof_u16(off) ((ctx)->content->rd16((ctx), (uint64_t)(off)))
@@ -4611,22 +4641,8 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 #define KUNP_PERM_W          0x0002u
 #define KUNP_PERM_R          0x0004u
 
-/* What it is. */
-#define KOF_SECF_CODE        0x0001u
-#define KOF_SECF_DATA        0x0002u
-#define KOF_SECF_PAD         0x0004u  /* alignment fill; belongs to no one */
-#define KOF_SECF_HOLLOW      0x0008u  /* declared with no bytes behind it */
-/* Where it came from - see `section` in struct kof_content. */
-#define KOF_SECF_READ        0x0000u  /* parsed from the file as written */
-#define KOF_SECF_REBUILT     0x0010u  /* recovered from evidence */
-#define KOF_SECF_SYNTHETIC   0x0020u  /* stood up because it had to exist */
-#define KOF_SECF_ORIGIN_MASK 0x0030u
-/* Whether it can be read yet. PLAIN is the absence of the others. */
-#define KOF_SECF_PLAIN       0x0000u
-#define KOF_SECF_COMPRESSED  0x0040u
-#define KOF_SECF_CIPHERTEXT  0x0080u
-#define KOF_SECF_VIRTUALISED 0x0100u
-#define KOF_SECF_STATE_MASK  0x01c0u
+/* KOF_SECF_*: the section flags a declaration carries - defined by libgenome
+ * (<genotype/image/section_flags.h>), included at the top of this file. */
 
 #define kunp_rcstruct_at(off)                                                    \
 	((ctx)->content->at ? (ctx)->content->at((ctx), (uint64_t)(off)) : 0)
@@ -4760,188 +4776,6 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 	((ctx)->content->emu_take                                          \
 	 ? (ctx)->content->emu_take((ctx), (uint32_t)(i)) : 0)
 
-
-#define kunp_emu_oep_range(rva, len)                                            \
-	((void)((ctx)->content->emu_watch ?                                 \
-		((ctx)->content->emu_watch((ctx), (uint64_t)(rva),          \
-					   (uint64_t)(len)), 0) : 0))
-
-#define kunp_rcstruct_name(off, len)                                            \
-	((void)((ctx)->content->name_next ?                                \
-		((ctx)->content->name_next((ctx), (uint64_t)(off),         \
-					   (uint64_t)(len)), 0) : 0))
-
-/*
- * Decompress a DEFLATE stream at off into the object being produced.
- *
- * `len` bounds the input, not the output: the stream ends where DEFLATE says it
- * does, which is usually sooner. Returns bytes produced - zero when nothing could
- * be decoded, which is the answer for a corrupt stream and for a budget that was
- * already gone.
- *
- * It does not close the child. A module may want to put more after the
- * decompressed bytes, or decompress two streams into one object, so kunp_rcstruct_done()
- * stays the module's to call:
- *
- *     kof_unpack_deflate(gz->data_off, gz->data_len);
- *     kunp_rcstruct_done();
- */
-#define kunp_static_decode(method, off, len, out_hint)                        \
-	((ctx)->content->unpack ?                                          \
-	 (ctx)->content->unpack((ctx), (uint32_t)(method), (uint64_t)(off),\
-				(uint64_t)(len), (uint64_t)(out_hint)) : 0)
-
-/* kunp_rcstruct_note("MPRESS 2.12-2.19 LZMA") - what this module worked out about
- * the container, carried on the child it is about to produce. */
-#define kunp_rcstruct_note(text)                                                 \
-	((ctx)->content->note_next ? (ctx)->content->note_next((ctx), (text)) \
-				  : (void)0)
-
-/* kunp_rcstruct_read(off, buf, cap) / kunp_rcstruct_poke(off, buf, n) - see
- * produced_read and produced_poke above. */
-#define kunp_rcstruct_read(off, buf, cap)                                        \
-	((ctx)->content->produced_read                                     \
-	 ? (ctx)->content->produced_read((ctx), (uint64_t)(off), (buf),    \
-					 (uint32_t)(cap)) : 0u)
-
-/*
- * Start this child as a copy of the object being unpacked, then change it with
- * kunp_rcstruct_poke. See `derive` in struct kof_content.
- */
-/*
- * WHAT A SECTION IS, BEYOND WHERE IT IS.
- *
- * Three axes, and they are independent: what the bytes are for, where they came
- * from, and whether they can be read yet.
- */
-/*
- * WHAT A DECLARED SECTION MAY BE READ, WRITTEN OR RUN AS.
- *
- * Here and not in kofmod/pe.h because a declaration is not about PE: a module
- * that targets several formats, or none, still has to say what a range it
- * recovered is for - and including a format header would tie it to that one
- * format, which the build refuses for a good reason (kof_<fmt>() casts
- * ctx->file_header and there is no single view when there are several targets).
- *
- * Same bits as KOF_PE_PERM_*, which is what the PE parser already reports.
- */
-/*
- * HOW MUCH ROOM THE ENGINE NEEDS IN FRONT OF THE CONTENT when it is asked to
- * write an ELF header - see kunp_rcstruct_as and kof_elf_write_hdr.
- *
- * The ELF header plus one program header, which is what that writer emits: one
- * PT_LOAD over the whole file. A module declaring its first section at this
- * address leaves exactly the room and no padding; declaring it further out is
- * allowed and the gap is padding; declaring it closer is refused, because a
- * header that does not fit in front of the content would have to overwrite it.
- *
- * Published rather than inferred because a module has to place its sections
- * BEFORE the engine writes anything, so it cannot ask afterwards how much was
- * used.
- */
-#define KUNP_HDR_ELF32       0x54u
-#define KUNP_HDR_ELF64       0x78u
-
-#define KUNP_PERM_X          0x0001u
-#define KUNP_PERM_W          0x0002u
-#define KUNP_PERM_R          0x0004u
-
-/* What it is. */
-#define KOF_SECF_CODE        0x0001u
-#define KOF_SECF_DATA        0x0002u
-#define KOF_SECF_PAD         0x0004u  /* alignment fill; belongs to no one */
-#define KOF_SECF_HOLLOW      0x0008u  /* declared with no bytes behind it */
-/* Where it came from - see `section` in struct kof_content. */
-#define KOF_SECF_READ        0x0000u  /* parsed from the file as written */
-#define KOF_SECF_REBUILT     0x0010u  /* recovered from evidence */
-#define KOF_SECF_SYNTHETIC   0x0020u  /* stood up because it had to exist */
-#define KOF_SECF_ORIGIN_MASK 0x0030u
-/* Whether it can be read yet. PLAIN is the absence of the others. */
-#define KOF_SECF_PLAIN       0x0000u
-#define KOF_SECF_COMPRESSED  0x0040u
-#define KOF_SECF_CIPHERTEXT  0x0080u
-#define KOF_SECF_VIRTUALISED 0x0100u
-#define KOF_SECF_STATE_MASK  0x01c0u
-
-#define kunp_rcstruct_at(off)                                                    \
-	((ctx)->content->at ? (ctx)->content->at((ctx), (uint64_t)(off)) : 0)
-
-#define kunp_rcstruct_image()                                                    \
-	((ctx)->content->image ? (ctx)->content->image((ctx)) : 0)
-
-#define kunp_rcstruct_section(name, rva, vsz, perm, flags)                       \
-	((ctx)->content->section                                           \
-	 ? (ctx)->content->section((ctx), (name), (uint64_t)(rva),         \
-				   (uint64_t)(vsz), (uint32_t)(perm),      \
-				   (uint32_t)(flags))                      \
-	 : -1)
-
-#define kunp_rcstruct_reset()                                           \
-	((ctx)->content->sections_reset                                    \
-	 ? (ctx)->content->sections_reset((ctx)) : 0)
-
-/*
- * WHAT THE CHILD IMPORTS - see `import` in struct kof_content.
- *
- *     for (each entry the container lists)
- *             kunp_rcstruct_import(dll, fn, 0, slot_rva);
- *     need = kunp_rcstruct_import_bytes();
- *     kunp_rcstruct_section(".kofimp", at, need, KUNP_PERM_R,
- *                           KOF_SECF_DATA | KOF_SECF_SYNTHETIC);
- *     kunp_rcstruct_import_at(at);
- *
- * By ordinal: pass NULL for `fn` and the number for `ordinal`.
- */
-#define kunp_rcstruct_import(dll, fn, ordinal, iat_rva)                     \
-	((ctx)->content->import                                            \
-	 ? (ctx)->content->import((ctx), (dll), (fn), (uint32_t)(ordinal), \
-				  (uint64_t)(iat_rva)) : 0)
-
-#define kunp_rcstruct_import_bytes()                                        \
-	((ctx)->content->import_bytes                                      \
-	 ? (ctx)->content->import_bytes((ctx)) : (uint64_t)0)
-
-#define kunp_rcstruct_import_at(rva)                                        \
-	((ctx)->content->import_at                                         \
-	 ? (ctx)->content->import_at((ctx), (uint64_t)(rva)) : 0)
-
-
-/* What a run left. See `emu_run` in struct kof_content. */
-#define KOF_EMU_RGN_IMAGE   0u
-#define KOF_EMU_RGN_EXEC    1u
-#define KOF_EMU_RGN_WRITTEN 2u
-
-#define kunp_emu_run(vouch_level)                                          \
-	((ctx)->content->emu_run                                           \
-	 ? (ctx)->content->emu_run((ctx), (uint32_t)(vouch_level)) : 0u)
-
-/*
- * Pause the run on an instruction, and carry on - see `emu_watch_insn`.
- *
- *     kunp_emu_watch_insn(ret, 1, 1);        // a one-byte C3
- *     n = kunp_emu_run(2);
- *     while (!n && kunp_emu_paused()) {
- *             ...read the machine, decide...
- *             n = kunp_emu_resume();
- *     }
- */
-#define kunp_emu_watch_insn(bytes, n, len)                                 \
-	((ctx)->content->emu_watch_insn                                    \
-	 ? (ctx)->content->emu_watch_insn((ctx), (bytes), (uint32_t)(n),   \
-					  (uint32_t)(len)) : (void)0)
-
-#define kunp_emu_resume()                                                  \
-	((ctx)->content->emu_resume ? (ctx)->content->emu_resume((ctx)) : 0u)
-
-#define kunp_emu_region(i, va, len, kind)                               \
-	((ctx)->content->emu_region                                        \
-	 ? (ctx)->content->emu_region((ctx), (uint32_t)(i), (va), (len),   \
-				      (kind)) : 0)
-
-#define kunp_emu_take(i)                                                \
-	((ctx)->content->emu_take                                          \
-	 ? (ctx)->content->emu_take((ctx), (uint32_t)(i)) : 0)
-
 /*
  * ---- THE CODE READER - see kofmod/cell.h ---------------------------------
  *
@@ -5022,6 +4856,47 @@ static inline int kof_range_in_obj(uint64_t obj_size, uint64_t off, uint64_t n)
 
 #define kof_unpack_at(method, off, len, out_hint)                          \
 	kunp_static_decode((method), (off), (len), (out_hint))
+
+/*
+ * Decrypt a range of this object and produce what comes out:
+ *
+ *     struct kof_capsid c = { KOF_CAPSID_XOR_KEY, 0, key, key_len };
+ *     kunp_decrypt(&c, ct_off, ct_len);
+ *
+ * The bytes are the result of the cipher over the range as it sits in the object,
+ * in order, taken by the host in as many pieces as its budget allows - a module
+ * does not chunk. Returns how many were produced; zero is a refusal or a
+ * descriptor that names no cipher. See kofmod/kofdecode.h.
+ */
+#define kunp_decrypt(cipher, off, len)                                        \
+	((ctx)->content->decrypt                                           \
+	 ? (ctx)->content->decrypt((ctx), (cipher), (uint64_t)(off),       \
+				    (uint64_t)(len)) : 0u)
+
+/*
+ * Run a cipher over the module's own bytes - the keystream of RC4 is what it
+ * returns when `in` is zeros - into the module's own buffer:
+ *
+ *     n = kunp_capsid_apply(&c, zeros, 9, ks, sizeof ks);
+ *
+ * Available to a detector as well as an unpacker. Returns the bytes written.
+ */
+#define kunp_capsid_apply(cipher, in, n, out, cap)                            \
+	((ctx)->content->capsid_apply ?                                    \
+	 (ctx)->content->capsid_apply((cipher), (in), (uint32_t)(n), (out),  \
+				      (uint32_t)(cap)) : 0u)
+
+/*
+ * The same, into the module's own buffer and producing nothing:
+ *
+ *     n = kunp_decrypt_peek(&c, off, len, buf, sizeof buf);
+ *
+ * Returns the bytes written, at most `cap`.
+ */
+#define kunp_decrypt_peek(cipher, off, len, buf, cap)                         \
+	((ctx)->content->decrypt_peek ?                                    \
+	 (ctx)->content->decrypt_peek((ctx), (cipher), (uint64_t)(off),    \
+				      (uint64_t)(len), (buf), (uint32_t)(cap)) : 0u)
 
 /*
  * Decode the front of a stream into `buf`, for a header that is compressed.
@@ -5190,25 +5065,24 @@ enum kunp_rcstruct_broken {
  * One list, so the word a verdict prints and the value the engine stores
  * cannot drift - the reason every other enum here is written this way.
  *
- * OVERLORD WAS CALLED PATHOGEN and printed "Pathogen", which named the
- * capability-chain work. No chain ever reached it: the one caller is the
- * overlord's shape percentage in scan.c. The VALUE is unchanged, so a stored
- * verdict still reads back as itself.
+ * PATHOGEN is a value of its own, because a rule whose finding came from the node
+ * graph rather than from bytes is a different claim from Pattern and has to read
+ * as one - the bytes of a shikata build are new every time and the rule never
+ * looked at them.
  *
- * AND PATHOGEN IS BACK, as a value of its own at the end of the list, because
- * now something does reach it: a rule whose finding came from the node graph
- * rather than from bytes. It is a different claim from Pattern and has to
- * read as one - the bytes of a shikata build are new every time and the rule
- * never looked at them.
+ * A shape-similarity value, "Overlord", stood between Mutation and Pathogen until
+ * the matcher behind it was removed: it identified nothing on its own. The values
+ * after it moved up one, so a verdict stored by an older build does not read back
+ * as itself.
  */
 #define KOF_ENGINE_LIST(X)                                                   \
 	X(KOF_ENGINE_NONE,     "None")                                       \
 	X(KOF_ENGINE_ANALYZER, "Analyzer")  /* the parse and its anomalies */\
 	X(KOF_ENGINE_PATTERN,  "Pattern")   /* declared bytes and strings   */\
-	X(KOF_ENGINE_PLAGUE,   "Plague")    /* block similarity             */\
-	X(KOF_ENGINE_OVERLORD, "Overlord")  /* shape similarity             */\
+	X(KOF_ENGINE_MUTATION,   "Mutation")    /* block similarity             */\
 	X(KOF_ENGINE_PATHOGEN, "Pathogen")  /* what the code does, as a graph */\
-	X(KOF_ENGINE_UNPACKER, "Unpacker")  /* a module that opens containers */
+	X(KOF_ENGINE_UNPACKER, "Unpacker")  /* a module that opens containers */ \
+	X(KOF_ENGINE_SYNDROME, "Syndrome")  /* what the diseases make, inferred */
 
 enum kof_engine_id {
 #define KOF_ENGINE_X_ENUM(name, word) name,
@@ -5581,14 +5455,14 @@ enum kof_str_word {
 /*
  * Declare a SIMILARITY BLOCK this module measures against.
  *
- *     KOF_PLAGUE_BLOCK(cfg, KOF_SCAN_ELF_CODE, KOF_PLAGUE_RAW,
+ *     KOF_MUTATION_BLOCK(cfg, KOF_SCAN_ELF_CODE, KOF_MUTATION_RAW,
  *                      0x1a2b3c4d, 0x5e6f7a8b, ...);
  *
- *     if (kof_plague_score(cfg) >= 50)
+ *     if (kof_mutation_score(cfg) >= 50)
  *             KOF_SCAN_INFECT("Family");
  *
  * The hashes are what a researcher's chosen block came to under
- * kof_plague_mix - see kofmod/kofplague.h, which also says why the block is a
+ * kof_mutation_mix - see kofmod/kofmutation.h, which also says why the block is a
  * person's choice and not a computation. They are written out by the generator
  * in kofviewer; nobody types them.
  *
@@ -5602,12 +5476,12 @@ enum kof_str_word {
  * names. A block that was never declared is an undefined identifier at compile
  * time rather than a score that is quietly always zero.
  */
-#define KOF_PLAGUE_BLOCK(name, scan_mask, norm, ...)
+#define KOF_MUTATION_BLOCK(name, scan_mask, norm, ...)
 
 /*
  * The same declaration for a block cut from the STATIC LIBRARY.
  *
- *     KOF_PLAGUE_BLOCK_LIB(blk_9f22, KOF_SCAN_ELF_CODE, KOF_PLAGUE_RAW,
+ *     KOF_MUTATION_BLOCK_LIB(blk_9f22, KOF_SCAN_ELF_CODE, KOF_MUTATION_RAW,
  *                          0x1a2b3c4d, ...);
  *
  * A separate macro rather than a fourth argument, because the arguments after
@@ -5617,7 +5491,7 @@ enum kof_str_word {
  *
  * WHAT IT CHANGES IS WHO MAY SCORE IT. A block declared this way is credited
  * only by windows inside the target's own library spans, and an ordinary block
- * only by windows outside them - see enum kof_plague_side. The two never add
+ * only by windows outside them - see enum kof_mutation_side. The two never add
  * together, which is the whole point: "these samples share a vendored runtime"
  * and "these samples share their author's code" are different claims, and a
  * number that mixed them would be measuring the toolchain.
@@ -5626,7 +5500,7 @@ enum kof_str_word {
  * static builds - so on those every block is an ordinary one and this macro has
  * nothing to describe.
  */
-#define KOF_PLAGUE_BLOCK_LIB(name, scan_mask, norm, ...)
+#define KOF_MUTATION_BLOCK_LIB(name, scan_mask, norm, ...)
 
 /*
  * Declare a string the target holds as UTF-16LE.

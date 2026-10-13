@@ -18,20 +18,23 @@
  * An architecture is added by adding a directory. Nothing outside it changes,
  * which is the test of whether the split is real.
  */
-#ifndef KOF_GENOTYPE_H
-#define KOF_GENOTYPE_H
+#ifndef KGENOME_GENOTYPE_H
+#define KGENOME_GENOTYPE_H
 
-/* What a decode attempt came to, the same for every architecture. */
-enum gt_status {
-	GT_OK = 0,
-	GT_INVALID = 1,         /* these bytes are not an instruction              */
-	GT_TRUNCATED = 2        /* they might be, but the buffer ends first        */
-};
+/*
+ * What a decode attempt came to is the lib's one status (kgenome_status.h):
+ * OK, TRUNCATED (the bytes might be an instruction, but the buffer ends first)
+ * and - under its decoder name - INVALID, which is BAD_INPUT: these bytes are
+ * not an instruction. The decoders kept saying INVALID; it is an alias and not a
+ * seventh value, so a status means one thing in every part of the lib.
+ */
+#include "../kgenome_status.h"
+#define KGENOME_INVALID KGENOME_BAD_INPUT
 
 /* The architectures this tree has (or will have) a decoder for. */
-enum gt_arch {
-	GT_ARCH_X86_32,
-	GT_ARCH_X86_64
+enum kgenome_gt_arch {
+	KGENOME_GT_ARCH_X86_32,
+	KGENOME_GT_ARCH_X86_64
 };
 
-#endif /* KOF_GENOTYPE_H */
+#endif /* KGENOME_GENOTYPE_H */

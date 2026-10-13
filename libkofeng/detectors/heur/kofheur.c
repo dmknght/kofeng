@@ -128,21 +128,21 @@ static const struct kof_heur_anom_term default_anom[] = {
 	 * object add to it - so a table that computes clean on paper can still
 	 * fire in a scan.
 	 */
-	{ KOF_FMT_PE,  KOF_PE_ANOM_SEC_WRITE_EXEC,     CN(8.64), "WriteExec" },
-	{ KOF_FMT_PE,  KOF_PE_ANOM_SUMMARY_MISMATCH,   CN(7.93), "HdrMismatch" },
-	{ KOF_FMT_PE,  KOF_PE_ANOM_ENTRY_ZEROFILL,     CN(6.55), "EntryUnwritten" },
-	{ KOF_FMT_PE,  KOF_PE_ANOM_DIR_COUNT_ODD,      CN(6.28), "DirCount"  },
-	{ KOF_FMT_PE,  KOF_PE_ANOM_CERT_PAST_EOF,      CN(6.17), "CertCut"   },
-	{ KOF_FMT_PE,  KOF_PE_ANOM_SEC_PAST_EOF,       CN(1.10), "Truncated" },
+	{ KOF_FMT_PE,  KGENOME_PE_ANOM_SEC_WRITE_EXEC,     CN(8.64), "WriteExec" },
+	{ KOF_FMT_PE,  KGENOME_PE_ANOM_SUMMARY_MISMATCH,   CN(7.93), "HdrMismatch" },
+	{ KOF_FMT_PE,  KGENOME_PE_ANOM_ENTRY_ZEROFILL,     CN(6.55), "EntryUnwritten" },
+	{ KOF_FMT_PE,  KGENOME_PE_ANOM_DIR_COUNT_ODD,      CN(6.28), "DirCount"  },
+	{ KOF_FMT_PE,  KGENOME_PE_ANOM_CERT_PAST_EOF,      CN(6.17), "CertCut"   },
+	{ KOF_FMT_PE,  KGENOME_PE_ANOM_SEC_PAST_EOF,       CN(1.10), "Truncated" },
 
 	/* --- the file's own structure ----------------------------------- */
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_SECTAB_MISSING,    CN(2.75), "Stripped"  },
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEG_PAST_EOF,      CN(5.15), "Truncated" },
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_SHOFF_PAST_EOF,    CN(4.84), "Truncated" },
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEC_PAST_EOF,      CN(4.50), "Truncated" },
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_SEG_OVERLAP,       CN(2.96), "Overlap"   },
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_ENTRY_NOT_EXEC,    CN(2.63), "BadEntry"  },
-	{ KOF_FMT_ELF, KOF_ELF_ANOM_NO_LOAD_SEGMENT,   CN(1.35), "NoLoad"    }
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_SECTAB_MISSING,    CN(2.75), "Stripped"  },
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_SEG_PAST_EOF,      CN(5.15), "Truncated" },
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_SHOFF_PAST_EOF,    CN(4.84), "Truncated" },
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_SEC_PAST_EOF,      CN(4.50), "Truncated" },
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_SEG_OVERLAP,       CN(2.96), "Overlap"   },
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_ENTRY_NOT_EXEC,    CN(2.63), "BadEntry"  },
+	{ KOF_FMT_ELF, KGENOME_ELF_ANOM_NO_LOAD_SEGMENT,   CN(1.35), "NoLoad"    }
 };
 
 static const struct kof_heur_flag_term default_flag[] = {

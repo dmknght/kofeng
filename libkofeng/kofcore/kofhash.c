@@ -37,7 +37,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../kofeng.h"
+#include <kofhash.h>
 
 /*
  * The constants are the first thirty-two bits of the fractional parts of the

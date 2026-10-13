@@ -50,8 +50,8 @@
 
 #include <capstone/capstone.h>
 
-#include "kofmod/kofsig.h"
-#include "celllysis/decode.h"
+#include "../../libkofeng/kofcore/kofmod/kofsig.h"
+#include <celllysis/decode.h>
 
 #define NTHR 16
 
@@ -74,7 +74,7 @@ struct stats {
 	uint64_t words, cap_valid, our_valid;
 	uint64_t both_valid, cap_only, our_only;
 	uint64_t cmp_class, cmp_target, cmp_wmask, cmp_imm, cmp_adr;
-	uint64_t degrade[CELL_OP_COUNT];        /* our class when Capstone's primary is a real class */
+	uint64_t degrade[KGENOME_CELL_OP_COUNT];        /* our class when Capstone's primary is a real class */
 	struct bucket b[NSLOT];
 	uint64_t full;
 };
@@ -124,7 +124,7 @@ static void merge(struct stats *d, const struct stats *s)
 	d->cmp_class += s->cmp_class; d->cmp_target += s->cmp_target;
 	d->cmp_wmask += s->cmp_wmask; d->cmp_imm += s->cmp_imm;
 	d->cmp_adr += s->cmp_adr;
-	for (k = 0; k < CELL_OP_COUNT; k++)
+	for (k = 0; k < KGENOME_CELL_OP_COUNT; k++)
 		d->degrade[k] += s->degrade[k];
 	for (i = 0; i < NSLOT; i++) {
 		const struct bucket *b = &s->b[i];
@@ -149,7 +149,7 @@ static void merge(struct stats *d, const struct stats *s)
 
 /* ---- Capstone side --------------------------------------------------------- */
 
-static const char *const KN[CELL_OP_COUNT] = {
+static const char *const KN[KGENOME_CELL_OP_COUNT] = {
 	"OTHER", "NOP", "MOV", "MOVZX", "MOVSX", "LEA", "XCHG", "PUSH", "POP",
 	"ADD", "SUB", "ADC", "SBB", "AND", "OR", "XOR", "NOT", "NEG", "INC", "DEC",
 	"CMP", "TEST", "SHL", "SHR", "SAR", "ROL", "ROR", "RCL", "RCR",
@@ -244,7 +244,7 @@ static uint64_t want_inner(const cs_insn *in, uint32_t w)
 	 * shares a mnemonic with a scalar one (add, mul, orr, adr, mov ...) */
 	if (d0 < 0 && n > 0 && o[0].type == ARM64_OP_REG &&
 	    !starts(in->mnemonic, "st") && !starts(in->mnemonic, "ld"))
-		return B(CELL_OTHER);
+		return B(KGENOME_CELL_OTHER);
 
 #define IS(x) (!strcmp(m, x))
 	/* the two-operand ALU family: the class, or OTHER when the operands do
@@ -257,130 +257,130 @@ static uint64_t want_inner(const cs_insn *in, uint32_t w)
 	    IS("negs") || IS("ngc") || IS("ngcs") || IS("mvn")) {
 		uint64_t p;
 
-		if (IS("add") || IS("adds")) p = B(CELL_ADD);
-		else if (IS("sub") || IS("subs")) p = B(CELL_SUB);
-		else if (IS("adc") || IS("adcs")) p = B(CELL_ADC);
-		else if (IS("sbc") || IS("sbcs") || IS("ngc") || IS("ngcs")) p = B(CELL_SBB);
-		else if (IS("and") || IS("ands")) p = B(CELL_AND);
-		else if (IS("orr")) p = B(CELL_OR);
-		else if (IS("eor")) p = B(CELL_XOR);
-		else if (IS("lsl")) p = B(CELL_SHL);
-		else if (IS("lsr")) p = B(CELL_SHR);
-		else if (IS("asr")) p = B(CELL_SAR);
-		else if (IS("ror")) p = B(CELL_ROR);
-		else if (IS("mul") || IS("umull") || IS("umulh")) p = B(CELL_MUL);
-		else if (IS("smull") || IS("smulh")) p = B(CELL_IMUL);
-		else if (IS("udiv")) p = B(CELL_DIV);
-		else if (IS("sdiv")) p = B(CELL_IDIV);
-		else if (IS("neg") || IS("negs") || IS("ngc") || IS("ngcs")) p = B(CELL_NEG) | B(CELL_SBB);
-		else p = B(CELL_NOT) | B(CELL_MOV);     /* mvn */
+		if (IS("add") || IS("adds")) p = B(KGENOME_CELL_ADD);
+		else if (IS("sub") || IS("subs")) p = B(KGENOME_CELL_SUB);
+		else if (IS("adc") || IS("adcs")) p = B(KGENOME_CELL_ADC);
+		else if (IS("sbc") || IS("sbcs") || IS("ngc") || IS("ngcs")) p = B(KGENOME_CELL_SBB);
+		else if (IS("and") || IS("ands")) p = B(KGENOME_CELL_AND);
+		else if (IS("orr")) p = B(KGENOME_CELL_OR);
+		else if (IS("eor")) p = B(KGENOME_CELL_XOR);
+		else if (IS("lsl")) p = B(KGENOME_CELL_SHL);
+		else if (IS("lsr")) p = B(KGENOME_CELL_SHR);
+		else if (IS("asr")) p = B(KGENOME_CELL_SAR);
+		else if (IS("ror")) p = B(KGENOME_CELL_ROR);
+		else if (IS("mul") || IS("umull") || IS("umulh")) p = B(KGENOME_CELL_MUL);
+		else if (IS("smull") || IS("smulh")) p = B(KGENOME_CELL_IMUL);
+		else if (IS("udiv")) p = B(KGENOME_CELL_DIV);
+		else if (IS("sdiv")) p = B(KGENOME_CELL_IDIV);
+		else if (IS("neg") || IS("negs") || IS("ngc") || IS("ngcs")) p = B(KGENOME_CELL_NEG) | B(KGENOME_CELL_SBB);
+		else p = B(KGENOME_CELL_NOT) | B(KGENOME_CELL_MOV);     /* mvn */
 		s = p;
 		if (shifted || ext)
-			s |= B(CELL_OTHER);
+			s |= B(KGENOME_CELL_OTHER);
 		if (hasz || d0 == 32) {
-			s |= B(CELL_MOV) | B(CELL_NOP) | B(CELL_OTHER);
+			s |= B(KGENOME_CELL_MOV) | B(KGENOME_CELL_NOP) | B(KGENOME_CELL_OTHER);
 			if (IS("neg") || IS("negs") || IS("mvn") || IS("ngc") ||
 			    IS("ngcs"))
-				s |= B(CELL_NOT) | B(CELL_NEG);
+				s |= B(KGENOME_CELL_NOT) | B(KGENOME_CELL_NEG);
 		}
 		/* `add xd,xn,#0` is a move */
 		if (IS("add") && n == 3 && o[2].type == ARM64_OP_IMM && o[2].imm == 0)
-			s |= B(CELL_MOV);
+			s |= B(KGENOME_CELL_MOV);
 		if (IS("ngc") || IS("ngcs") || IS("negs") || IS("neg") || IS("mvn"))
-			s |= B(CELL_OTHER);
+			s |= B(KGENOME_CELL_OTHER);
 		/* a shift whose source is the zero register is the constant 0 */
 		return s;
 	}
 	if (IS("cmp") || IS("tst")) {
-		s = IS("cmp") ? B(CELL_CMP) : B(CELL_TEST);
+		s = IS("cmp") ? B(KGENOME_CELL_CMP) : B(KGENOME_CELL_TEST);
 		if (shifted || ext || (IS("tst") && hasz))
-			s |= B(CELL_OTHER);
+			s |= B(KGENOME_CELL_OTHER);
 		return s;
 	}
 	if (IS("cmn") || IS("ccmp") || IS("ccmn") || IS("bic") || IS("bics") ||
 	    IS("orn") || IS("eon"))
-		return B(CELL_OTHER) | B(CELL_NOP);
+		return B(KGENOME_CELL_OTHER) | B(KGENOME_CELL_NOP);
 	if (IS("mov")) {
 		/* movz, movn, orr-immediate, add sp, orr-register all spell mov */
 		if (n >= 1 && o[0].type == ARM64_OP_REG && is_vecreg(o[0].reg))
-			return B(CELL_OTHER);
-		return B(CELL_MOV) | B(CELL_NOP) | B(CELL_OTHER);
+			return B(KGENOME_CELL_OTHER);
+		return B(KGENOME_CELL_MOV) | B(KGENOME_CELL_NOP) | B(KGENOME_CELL_OTHER);
 	}
 	if (IS("movz") || IS("movn"))
-		return B(CELL_MOV) | B(CELL_NOP);
+		return B(KGENOME_CELL_MOV) | B(KGENOME_CELL_NOP);
 	if (IS("movk"))
-		return B(CELL_OTHER);
+		return B(KGENOME_CELL_OTHER);
 	if (IS("uxtb") || IS("uxth"))
-		return B(CELL_MOVZX) | B(CELL_OTHER);
+		return B(KGENOME_CELL_MOVZX) | B(KGENOME_CELL_OTHER);
 	if (IS("sxtb") || IS("sxth") || IS("sxtw"))
-		return B(CELL_MOVSX) | B(CELL_OTHER);
-	if (IS("lslv")) return B(CELL_SHL);
-	if (IS("lsrv")) return B(CELL_SHR);
-	if (IS("asrv")) return B(CELL_SAR);
-	if (IS("rorv")) return B(CELL_ROR);
+		return B(KGENOME_CELL_MOVSX) | B(KGENOME_CELL_OTHER);
+	if (IS("lslv")) return B(KGENOME_CELL_SHL);
+	if (IS("lsrv")) return B(KGENOME_CELL_SHR);
+	if (IS("asrv")) return B(KGENOME_CELL_SAR);
+	if (IS("rorv")) return B(KGENOME_CELL_ROR);
 	if (IS("b"))
 		return a->cc != ARM64_CC_INVALID && a->cc != ARM64_CC_AL ?
-		       B(CELL_JCC) : B(CELL_JMP);
+		       B(KGENOME_CELL_JCC) : B(KGENOME_CELL_JMP);
 	if (starts(m, "b.") || starts(m, "bc.") || IS("cbz") || IS("cbnz") ||
 	    IS("tbz") || IS("tbnz"))
-		return B(CELL_JCC);
+		return B(KGENOME_CELL_JCC);
 	if (IS("bl") || IS("blr") || IS("blraa") || IS("blraaz") ||
 	    IS("blrab") || IS("blrabz"))
-		return B(CELL_CALL);
+		return B(KGENOME_CELL_CALL);
 	if (IS("br") || IS("braa") || IS("braaz") || IS("brab") || IS("brabz"))
-		return B(CELL_JMP);
+		return B(KGENOME_CELL_JMP);
 	if (IS("ret") || IS("retaa") || IS("retab"))
-		return B(CELL_RET);
+		return B(KGENOME_CELL_RET);
 	if (IS("eret") || IS("eretaa") || IS("eretab"))
-		return B(CELL_IRET);
+		return B(KGENOME_CELL_IRET);
 	if (IS("drps") || IS("hvc") || IS("smc") || starts(m, "dcps"))
-		return B(CELL_PRIV);
+		return B(KGENOME_CELL_PRIV);
 	if (IS("svc"))
-		return B(CELL_SYSCALL);
+		return B(KGENOME_CELL_SYSCALL);
 	if (IS("brk") || IS("hlt"))
-		return B(CELL_INT);
+		return B(KGENOME_CELL_INT);
 	if (IS("udf"))
-		return B(CELL_UD);
+		return B(KGENOME_CELL_UD);
 	if (IS("mrs") || IS("msr") || IS("smstart") || IS("smstop") ||
 	    IS("cfinv") || IS("xaflag") || IS("axflag"))
-		return B(CELL_PRIV);
+		return B(KGENOME_CELL_PRIV);
 	if (IS("tcommit") || IS("tstart") || IS("ttest"))
-		return B(CELL_OTHER);
+		return B(KGENOME_CELL_OTHER);
 	if (IS("nop") || IS("yield") || IS("wfe") || IS("wfi") || IS("sev") ||
 	    IS("sevl") || IS("csdb") || IS("esb") || IS("psb") || IS("tsb") ||
 	    IS("bti") || IS("dgh") || IS("hint") || IS("wfet") || IS("wfit"))
-		return B(CELL_NOP);
+		return B(KGENOME_CELL_NOP);
 	if (IS("paciasp") || IS("pacibsp") || IS("autiasp") || IS("autibsp") ||
 	    IS("paciaz") || IS("pacibz") || IS("autiaz") || IS("autibz") ||
 	    IS("pacia1716") || IS("pacib1716") || IS("autia1716") ||
 	    IS("autib1716") || IS("xpaclri"))
-		return B(CELL_OTHER) | B(CELL_NOP);
+		return B(KGENOME_CELL_OTHER) | B(KGENOME_CELL_NOP);
 	if (IS("adr") || IS("adrp"))
-		return B(CELL_LEA) | B(CELL_NOP);
+		return B(KGENOME_CELL_LEA) | B(KGENOME_CELL_NOP);
 	/* the single-register loads and stores */
 	if (starts(m, "ldr") || starts(m, "ldur") || starts(m, "ldtr") ||
 	    starts(m, "ldar") || starts(m, "ldlar") || starts(m, "ldaxr") ||
 	    starts(m, "ldxr") || starts(m, "ldapr") || starts(m, "ldapur")) {
 		if (starts(m, "ldxp") || starts(m, "ldaxp"))
-			return B(CELL_OTHER);
+			return B(KGENOME_CELL_OTHER);
 		if (n > 0 && o[0].type == ARM64_OP_REG && gpr(o[0].reg) >= 0 &&
 		    gpr(o[0].reg) != 32)
-			return B(CELL_MOV);
-		return B(CELL_OTHER);
+			return B(KGENOME_CELL_MOV);
+		return B(KGENOME_CELL_OTHER);
 	}
 	if (starts(m, "str") || starts(m, "stur") || starts(m, "sttr") ||
 	    starts(m, "stlr") || starts(m, "stllr") || starts(m, "stlur")) {
 		if (n > 0 && o[0].type == ARM64_OP_REG && gpr(o[0].reg) >= 0)
-			return B(CELL_MOV);
-		return B(CELL_OTHER);
+			return B(KGENOME_CELL_MOV);
+		return B(KGENOME_CELL_OTHER);
 	}
 	(void)ext;
-	return B(CELL_OTHER);
+	return B(KGENOME_CELL_OTHER);
 }
 
 /*
  * A write to the zero register is nothing, whatever wrote it: this decoder
- * calls it a CELL_NOP (or leaves it OTHER where it has no class for the
+ * calls it a KGENOME_CELL_NOP (or leaves it OTHER where it has no class for the
  * instruction), and Capstone's operand 0 is xzr/wzr. Compares, branches and
  * stores name the zero register as a SOURCE, so they are excluded.
  */
@@ -395,7 +395,7 @@ static uint64_t want(const cs_insn *in, uint32_t w)
 	    strcmp(m, "tst") && strcmp(m, "ccmp") && strcmp(m, "ccmn") &&
 	    !starts(m, "cb") && !starts(m, "tb") && !starts(m, "st") &&
 	    strcmp(m, "msr") && strcmp(m, "prfm"))
-		s |= B(CELL_NOP) | B(CELL_OTHER);
+		s |= B(KGENOME_CELL_NOP) | B(KGENOME_CELL_OTHER);
 	/* mrs/msr whose first field is below 2 are not system-register moves in
 	 * the architecture (L=1 op0=01 is sysl, op0=00 is unallocated; L=0 op0=00
 	 * is hints, barriers and pstate); Capstone names every one of them a
@@ -403,7 +403,7 @@ static uint64_t want(const cs_insn *in, uint32_t w)
 	if ((!strcmp(m, "mrs") || !strcmp(m, "msr")) &&
 	    (strstr(in->op_str, " s0_") || strstr(in->op_str, "s0_") ||
 	     strstr(in->op_str, "s1_")))
-		s |= B(CELL_OTHER) | B(CELL_NOP);
+		s |= B(KGENOME_CELL_OTHER) | B(KGENOME_CELL_NOP);
 	return s;
 }
 
@@ -555,7 +555,7 @@ static void describe(const cs_insn *in, char *buf, size_t n)
 
 static const char *kname(unsigned k)
 {
-	return k < CELL_OP_COUNT ? KN[k] : "?";
+	return k < KGENOME_CELL_OP_COUNT ? KN[k] : "?";
 }
 
 static void check(struct tctx *c, uint32_t w, uint64_t va)
@@ -566,19 +566,19 @@ static void check(struct tctx *c, uint32_t w, uint64_t va)
 	const uint8_t *p = bytes;
 	size_t sz = 4;
 	uint64_t addr = va;
-	struct cell_insn k;
+	struct kgenome_cell_insn k;
 	int cv, ov;
 	char key[96], text[200], cs_text[120];
 	const cs_insn *in = c->in;
 
 	st->words++;
 	cv = cs_disasm_iter(c->h, &p, &sz, &addr, c->in);
-	if (cell_decode_arm64(bytes, 4, va, &k) != 4) {
+	if (kgenome_cell_decode_arm64(bytes, 4, va, &k) != 4) {
 		fprintf(stderr, "arm64_diff: decoder returned a length other than 4\n");
 		exit(2);
 	}
 	/* `udf` is defined and faults; Capstone calls it valid, we call it UD. */
-	ov = k.op != CELL_UD || (w >> 16) == 0;
+	ov = k.op != KGENOME_CELL_UD || (w >> 16) == 0;
 	if (cv)
 		st->cap_valid++;
 	if (ov)
@@ -663,21 +663,21 @@ static void check(struct tctx *c, uint32_t w, uint64_t va)
 				if (a->operands[i].type == ARM64_OP_IMM)
 					t = (uint64_t)a->operands[i].imm;
 			st->cmp_target++;
-			if (t != k.target_va || k.o[0].kind != CELL_O_REL) {
+			if (t != k.target_va || k.o[0].kind != KGENOME_CELL_O_REL) {
 				snprintf(key, sizeof key, "target: %s", m);
 				snprintf(text, sizeof text, "%s | cap %llx ours %llx",
 					 cs_text, (unsigned long long)t,
 					 (unsigned long long)k.target_va);
 				note(st, key, w, va, text);
 			}
-		} else if (k.op == CELL_JMP || k.op == CELL_CALL ||
-			   k.op == CELL_JCC) {
-			if (!(k.flags & CELL_F_INDIRECT) && k.target_va == KOF_BROKEN) {
+		} else if (k.op == KGENOME_CELL_JMP || k.op == KGENOME_CELL_CALL ||
+			   k.op == KGENOME_CELL_JCC) {
+			if (!(k.flags & KGENOME_CELL_F_INDIRECT) && k.target_va == KGENOME_BROKEN) {
 				snprintf(key, sizeof key, "target: direct branch with no target %s", m);
 				note(st, key, w, va, cs_text);
 			}
 		}
-		if ((k.flags & CELL_F_INDIRECT) && k.target_va != KOF_BROKEN) {
+		if ((k.flags & KGENOME_CELL_F_INDIRECT) && k.target_va != KGENOME_BROKEN) {
 			snprintf(key, sizeof key, "target: indirect with target %s", m);
 			note(st, key, w, va, cs_text);
 		}
@@ -733,7 +733,7 @@ static void check(struct tctx *c, uint32_t w, uint64_t va)
 		if ((!strcmp(m, "mov") || !strcmp(m, "movz") || !strcmp(m, "movn")) &&
 		    a->op_count >= 2 && a->operands[1].type == ARM64_OP_IMM &&
 		    gpr(a->operands[0].reg) >= 0 && gpr(a->operands[0].reg) != 32 &&
-		    k.op == CELL_MOV) {
+		    k.op == KGENOME_CELL_MOV) {
 			uint64_t v = (uint64_t)a->operands[1].imm;
 			uint64_t sh = a->operands[1].shift.value;
 			unsigned sf = (unsigned)(w >> 31);
@@ -746,9 +746,9 @@ static void check(struct tctx *c, uint32_t w, uint64_t va)
 			if (!sf)
 				v &= 0xffffffffull;
 			st->cmp_imm++;
-			if (k.n_op < 2 || k.o[1].kind != CELL_O_IMM ||
+			if (k.n_op < 2 || k.o[1].kind != KGENOME_CELL_O_IMM ||
 			    k.o[1].imm != v) {
-				if (!strcmp(m, "mov") && k.o[1].kind == CELL_O_REG)
+				if (!strcmp(m, "mov") && k.o[1].kind == KGENOME_CELL_O_REG)
 					goto adr;       /* the register form */
 				snprintf(key, sizeof key, "imm: %s", m);
 				snprintf(text, sizeof text, "%s | cap %llx ours %llx",
@@ -760,7 +760,7 @@ static void check(struct tctx *c, uint32_t w, uint64_t va)
 adr:
 		if ((!strcmp(m, "adr") || !strcmp(m, "adrp")) &&
 		    a->op_count >= 2 && a->operands[1].type == ARM64_OP_IMM &&
-		    k.op == CELL_LEA) {
+		    k.op == KGENOME_CELL_LEA) {
 			st->cmp_adr++;
 			if (k.n_op < 2 ||
 			    k.o[1].imm != (uint64_t)a->operands[1].imm) {
@@ -990,19 +990,19 @@ static void speed(const char *elf_list)
 	int rep;
 	double t0, t1;
 	volatile uint64_t sink = 0;
-	struct cell_insn k;
+	struct kgenome_cell_insn k;
 
 	while (n < N) {
 		uint32_t x = (uint32_t)splitmix(&s);
 
-		if (cell_decode_arm64((const uint8_t *)&x, 4, 0, &k) == 4 && k.op != CELL_UD)
+		if (kgenome_cell_decode_arm64((const uint8_t *)&x, 4, 0, &k) == 4 && k.op != KGENOME_CELL_UD)
 			w[n++] = x;
 	}
 	memcpy(buf, w, (size_t)N * 4);
 	t0 = now();
 	for (rep = 0; rep < 20; rep++)
 		for (i = 0; i < N; i++) {
-			cell_decode_arm64(buf + i * 4, 4, 0x400000 + i * 4, &k);
+			kgenome_cell_decode_arm64(buf + i * 4, 4, 0x400000 + i * 4, &k);
 			sink += k.wmask + k.op;
 		}
 	t1 = now();
@@ -1017,7 +1017,7 @@ static void speed(const char *elf_list)
 	t0 = now();
 	for (rep = 0; rep < 20; rep++)
 		for (i = 0; i < N; i++) {
-			cell_decode_arm64(buf + i * 4, 4, 0x400000 + i * 4, &k);
+			kgenome_cell_decode_arm64(buf + i * 4, 4, 0x400000 + i * 4, &k);
 			sink += k.wmask + k.op;
 		}
 	t1 = now();
@@ -1075,7 +1075,7 @@ static void speed(const char *elf_list)
 			t0 = now();
 			for (rep = 0; rep < reps; rep++)
 				for (i = 0; i < cnt; i++) {
-					cell_decode_arm64(code + i * 4, 4, 0x400000 + i * 4, &k);
+					kgenome_cell_decode_arm64(code + i * 4, 4, 0x400000 + i * 4, &k);
 					sink += k.wmask + k.op;
 				}
 			t1 = now();
@@ -1111,7 +1111,7 @@ int main(int argc, char **argv)
 		const uint8_t *p = b;
 		size_t sz = 4;
 		uint64_t ad = 0x400000;
-		struct cell_insn k;
+		struct kgenome_cell_insn k;
 		int cv, i;
 
 		tctx_open(&c);
@@ -1132,7 +1132,7 @@ int main(int argc, char **argv)
 		} else {
 			printf("\n");
 		}
-		cell_decode_arm64(b, 4, 0x400000, &k);
+		kgenome_cell_decode_arm64(b, 4, 0x400000, &k);
 		printf("ours: op=%s n_op=%u cond=%u flags=%x wmask=%llx target=%llx\n", kname(k.op),
 		       k.n_op, k.cond, k.flags, (unsigned long long)k.wmask,
 		       (unsigned long long)k.target_va);

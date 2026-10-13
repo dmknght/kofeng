@@ -35,23 +35,24 @@
 #include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include <celllysis/xref.h>
-#include "../disinfect/pzero.h"
+#include "pzero.h"
 #include "../analyzers/normalize/executables.h"
 #include "scan.h"
 #include "objctx_int.h"
 #include <kofmod/elf.h>
-#include "../extractors/unpack/emu_unpack.h"
-#include "../extractors/unpack/elf_rebuild.h"
+#include <kofmod/pe.h>
+#include <phenotype/emu_unpack.h>
+#include <genotype/image/elf_rebuild.h>
 
-#include "../extractors/decomp/ovba.h"
-#include "../extractors/decomp/lzma.h"
-#include "../extractors/decomp/aplib.h"
-#include "../extractors/decomp/aspack.h"
-#include "../extractors/decomp/lzmat.h"
-#include "../extractors/decomp/bcj.h"
-#include "../extractors/decomp/rar3.h"
-#include "../extractors/decomp/rar5.h"
-#include "../extractors/decomp/bcj2.h"
+#include <decompressors/ovba.h>
+#include <decompressors/lzma.h>
+#include <decompressors/aplib.h>
+#include <decompressors/aspack.h>
+#include <decompressors/lzmat.h>
+#include <decompressors/bcj.h>
+#include <decompressors/rar3.h>
+#include <decompressors/rar5.h>
+#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_fold below. */
 #include "../analyzers/parsers/scripts/script_norm.h"
@@ -67,14 +68,15 @@
  */
 #include <kofmod/sevenzip.h>
 
-#include "../detectors/overlord/matchers/kofmultimatch.h"
-#include "../detectors/pathogen/diagnoses/kofdiag.h"
+#include "../detectors/pattern/kofmultimatch.h"
+#include "../detectors/linkage/kofdiag.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "objctx_int.h"
+#include "../analyzers/genome_obj.h"
 
 /* ---- the last resort ------------------------------------------------------
  *
@@ -154,7 +156,25 @@ static uint64_t emu_pages(const struct kof_scanner *sc)
 		room = EMU_PAGES_MAX;
 	if (room < EMU_PAGES_MIN)
 		room = EMU_PAGES_MIN;
-	return room / KOF_EMU_PAGE;
+	return room / KGENOME_EMU_PAGE;
+}
+
+/*
+ * THE INTERPRETER'S BUDGET, as kgenome takes it: the engine's two numbers above
+ * (the instruction budget `insn`, which the caller may have cut to a slice, and
+ * the address space emu_pages gives it) carried in the struct kgenome_budget the
+ * lib reads and nothing else - the lib never goes looking for them in engine
+ * state. The values are unchanged; this is only where they are written down.
+ */
+static struct kgenome_budget emu_budget(const struct kof_scanner *sc,
+					uint64_t obj_size, uint64_t insn)
+{
+	struct kgenome_budget kb;
+
+	kgenome_budget_default(&kb, obj_size, 0);
+	kb.max_insn = insn;
+	kb.max_bytes = emu_pages(sc) * KGENOME_EMU_PAGE;
+	return kb;
 }
 
 /*
@@ -228,7 +248,7 @@ static int emu_novel(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n
  * emulators and asks only for bytes at an address. */
 static int emu_rd(void *user, uint64_t va, void *dst, uint32_t n)
 {
-	return kof_emu_read(user, va, dst, n);
+	return kgenome_emu_read(user, va, dst, n);
 }
 
 /*
@@ -306,8 +326,8 @@ int oc_emit_exact(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n)
 uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_emu_unp_report rep;
-	struct kof_emu *e;
+	struct kgenome_emu_unp_report rep;
+	struct kgenome_emu *e;
 	kof_buf b;
 	int is_pe;
 
@@ -330,13 +350,16 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 	is_pe = ctx->format == KOF_FMT_PE;
 	b = kof_src_buf(sc->cur_src);
 	if (is_pe) {
-		const struct kof_pe_info *info = kof_pe(ctx);
+		const struct kgenome_pe_info *info = kof_pe(ctx);
 
-		if (!force && kof_emu_unp_gate_pe(ctx, info, b.p, b.n) ==
-			      KOF_EMU_UNP_NO)
+		struct kgenome_obj gobj;
+
+		kof_genome_obj(ctx, &gobj);
+		if (!force && kgenome_emu_unp_gate_pe(&gobj, info, b.p, b.n) ==
+			      KGENOME_EMU_UNP_NO)
 			return 0;
 		{
-			struct kof_emu_oep oep[KOF_EMU_EXEC_WATCH];
+			struct kgenome_emu_oep oep[KGENOME_EMU_EXEC_WATCH];
 			unsigned k;
 
 			for (k = 0; k < sc->n_xw; k++) {
@@ -349,8 +372,9 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				 * experiment switch, which replaces every work
 				 * bound with a wall clock. 2 GB of guest pages
 				 * is what "bounded by RAM" means here. */
-				uint64_t bi = emu_insn(b.n), bp = emu_pages(sc);
+				uint64_t bi = emu_insn(b.n);
 				uint64_t idle = 0;
+				struct kgenome_budget kb;
 
 				/*
 				 * AND A SLICE, WHEN THE MODULE ASKED FOR ONE -
@@ -403,33 +427,41 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				 */
 				if (force)
 					idle = EMU_IDLE_DECLARED;
-				e = kof_emu_unp_run_pe(b.p, b.n, info, bi, bp,
+				kb = emu_budget(sc, b.n, bi);
+				e = kgenome_emu_unp_run_pe(b.p, b.n, info,
+						       sc_pe_imports(sc, ctx), &kb,
 						       idle,
 						       sc->emu_slice != 0,
-						       force ? KOF_EMU_EXTEND_MAX : 0u,
+						       force ? KGENOME_EMU_EXTEND_MAX : 0u,
 						       oep, sc->n_xw,
 						       &sc->pend_decl,
 						       &rep);
 			}
 		}
 	} else {
-		const struct kof_elf_info *info = kof_elf(ctx);
+		const struct kgenome_elf_info *info = kof_elf(ctx);
 
-		if (!force && kof_emu_unp_gate(ctx, info, b.p, b.n) ==
-			      KOF_EMU_UNP_NO)
+		struct kgenome_obj gobj;
+
+		kof_genome_obj(ctx, &gobj);
+		if (!force && kgenome_emu_unp_gate(&gobj, info, b.p, b.n) ==
+			      KGENOME_EMU_UNP_NO)
 			return 0;
-		e = kof_emu_unp_run(b.p, b.n, info, emu_insn(b.n),
-				    emu_pages(sc), &rep);
+		{
+			struct kgenome_budget kb = emu_budget(sc, b.n, emu_insn(b.n));
+
+			e = kgenome_emu_unp_run(b.p, b.n, info, &kb, &rep);
+		}
 	}
 	/*
 	 * A SLICE THAT EXPIRED IS A PAUSE, NOT AN END - see `emu_slice`. The
 	 * guest is mid-decryption and the module asked to be shown that; the
 	 * machine stays alive exactly as it does for an instruction watch.
 	 */
-	if (e && rep.stop == KOF_EMU_STOP_BUDGET && sc->emu_slice &&
-	    kof_emu_insn_count(e) < sc->emu_full)
-		rep.stop = KOF_EMU_STOP_INSN;
-	if (e && rep.stop == KOF_EMU_STOP_INSN) {
+	if (e && rep.stop == KGENOME_EMU_STOP_BUDGET && sc->emu_slice &&
+	    kgenome_emu_insn_count(e) < sc->emu_full)
+		rep.stop = KGENOME_EMU_STOP_INSN;
+	if (e && rep.stop == KGENOME_EMU_STOP_INSN) {
 		/*
 		 * PAUSED, NOT FINISHED. Nothing is gathered yet - the guest is
 		 * mid-stub and whatever it has written so far is a snapshot of
@@ -448,32 +480,23 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 }
 
 /*
- * WHAT A RUN LEFT, TURNED INTO REGIONS - the half of kof_scan_emu_unpack that
- * happens AFTER the machine stops.
- *
- * Split out so that a PAUSED run can be resumed and gathered by the same code.
- * A module that named an instruction to stop on - see kof_emu_watch_insn - gets
- * control back with the machine intact, reads what it wanted, and asks for the
- * run to continue; when it finally stops for good, what it left is gathered
- * here exactly as it would have been without the pause. Two copies of this
- * would be two answers to "what did the run produce".
+ * What the gathering of one run holds from step to step: the one image the run
+ * produced (if it did), the range of addresses that image accounts for, and the
+ * extra regions collected beside it. Each step reads what the one before left.
  */
-uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
-			   struct kof_scanner *sc, struct kof_emu *e,
-			   struct kof_emu_unp_report rep)
-{
-	kof_buf b;
-	uint32_t it;
-	uint64_t va, len, built_lo = ~0ull, built_hi = 0;
-	const uint8_t *img_p = NULL;
-	uint64_t img_n = 0, img_va = 0;
+struct emu_gather {
+	const uint8_t *img_p;
+	uint64_t img_n, img_va;
+	uint64_t built_lo, built_hi;
 	struct emu_extra ex[EMU_EXTRA_MAX];
-	uint32_t n_ex = 0;
-	const uint8_t *bytes;
-	int any, built = 0, is_pe;
+	uint32_t n_ex;
+	int built, any;
+};
 
-	is_pe = ctx->format == KOF_FMT_PE;
-	b = kof_src_buf(sc->cur_src);
+/* The diagnostics of a stopped run, for a build that asked for them. */
+static void emu_trace_stop(struct kgenome_emu *e,
+			   const struct kgenome_emu_unp_report *rep)
+{
 	/*
 	 * WHERE THE RUN STOPPED, ON REQUEST.
 	 *
@@ -497,16 +520,16 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 		uint64_t tr[256];
 		unsigned nt, ti;
 
-		kof_emu_exc_counts(e, &xr, &xt, &xv);
+		kgenome_emu_exc_counts(e, &xr, &xt, &xv);
 		if (KOF_TRACING) {
 			unsigned mi;
 
 			fprintf(stderr, "[emu] module reads:");
-			for (mi = 0; mi < kof_emu_win_mod_count(); mi++)
+			for (mi = 0; mi < kgenome_emu_win_mod_count(); mi++)
 				fprintf(stderr, " %s=%llu",
-					kof_emu_win_mod_name(mi),
+					kgenome_emu_win_mod_name(mi),
 					(unsigned long long)
-						kof_emu_mod_reads(e, mi));
+						kgenome_emu_mod_reads(e, mi));
 			fprintf(stderr, "\n");
 		}
 		/*
@@ -528,44 +551,44 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 				fprintf(stderr, "%s %s=%#llx",
 					(ri % 4u) ? "" : "\n     ", rn[ri],
 					(unsigned long long)
-						kof_emu_get_reg(e, ri));
+						kgenome_emu_get_reg(e, ri));
 			fprintf(stderr, "\n");
 		}
 		{
 			uint64_t hi2 = 0, hr = 0;
 
-			kof_emu_first_hop(e, &hi2, &hr);
+			kgenome_emu_first_hop(e, &hi2, &hr);
 			fprintf(stderr, "[emu] first hop at insn=%llu rip=%#llx\n",
 				(unsigned long long)hi2,
 				(unsigned long long)hr);
 		}
-		nt = kof_emu_trace(e, tr, 256u);
+		nt = kgenome_emu_trace(e, tr, 256u);
 		fprintf(stderr, "[emu] last rips:");
 		for (ti = 0; ti < nt; ti++)
 			fprintf(stderr, " %#llx", (unsigned long long)tr[ti]);
 		fprintf(stderr, "\n");
 		fprintf(stderr, "[emu] exc raised=%u taken=%u veh=%u "
 			"null-calls=%u unhandled=%u\n", xr, xt, xv,
-			kof_emu_null_calls(e), kof_emu_unhandled(e));
+			kgenome_emu_null_calls(e), kgenome_emu_unhandled(e));
 		fprintf(stderr, "[emu] null-reads=%u idle-max=%llu decrypt=%d\n",
-			kof_emu_null_reads(e),
-			(unsigned long long)kof_emu_idle_max(e),
-			kof_emu_write_seen(e));
+			kgenome_emu_null_reads(e),
+			(unsigned long long)kgenome_emu_idle_max(e),
+			kgenome_emu_write_seen(e));
 	}
 	/* A diagnostic: a build choice, like the block above - see CLAUDE.md 1. */
-	if (KOF_TRACING && e && kof_emu_itrace_count(e)) {
+	if (KOF_TRACING && e && kgenome_emu_itrace_count(e)) {
 		static const char *const rn[16] = {
 			"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
 			"r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"
 		};
-		unsigned have = kof_emu_itrace_count(e), k, g;
+		unsigned have = kgenome_emu_itrace_count(e), k, g;
 
 		for (k = 0; k < have; k++) {
 			uint64_t at = 0;
 			const char *tx = NULL;
 			const uint64_t *gp = NULL;
 
-			if (!kof_emu_itrace_get(e, k, &at, &tx, &gp))
+			if (!kgenome_emu_itrace_get(e, k, &at, &tx, &gp))
 				break;
 			fprintf(stderr, "[ins] %#018llx  %-40s",
 				(unsigned long long)at, tx ? tx : "");
@@ -578,162 +601,140 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	KOF_TRACE("[emu] why=%d stop=%d insn=%llu entry=%#llx "
 			"images=%u written=%u returned=%d improvised=%d "
 			"detail=%s refused=%s\n",
-			(int)rep.why, (int)rep.stop,
-			(unsigned long long)rep.insn,
-			(unsigned long long)rep.entry, rep.images, rep.written,
-			rep.returned, rep.improvised,
-			rep.detail ? rep.detail : "-",
-			rep.refused ? rep.refused : "-");
-	if (!e) {
+			(int)rep->why, (int)rep->stop,
+			(unsigned long long)rep->insn,
+			(unsigned long long)rep->entry, rep->images, rep->written,
+			rep->returned, rep->improvised,
+			rep->detail ? rep->detail : "-",
+			rep->refused ? rep->refused : "-");
+}
+
+/*
+ * The whole PE image, when the run put the sections back where they belong and
+ * changed enough of them to be worth handing over.
+ */
+static void emu_gather_pe_image(const struct kof_obj_ctx *ctx,
+				struct kof_scanner *sc, struct kgenome_emu *e,
+				kof_buf b, struct emu_gather *g)
+{
+	uint8_t *whole = NULL;
+	uint64_t wlen = 0;
+	const struct kgenome_pe_info *pi = kof_pe(ctx);
+
+	int ok = pi && pi->valid &&
+		 kgenome_pe_image_from_run(e, pi, pi->image_base,
+				       sc->obj_cap, &whole, &wlen);
+
+	if (ok) {
 		/*
-		 * No image could be built, and the reasons are all statements
-		 * about the object: its entry point is past the bytes it
-		 * actually holds, or it declares none. Recorded on the same
-		 * channel a container uses for a truncated entry, so the object
-		 * reads as "not fully examined, and here is why" rather than as
-		 * one nothing happened to. A truncated UPX sample looks exactly
-		 * like this - the stub sits past the compressed data, so the
-		 * part that is missing is the part that would have run.
+		 * THE TEST FOR THIS PRODUCT IS "DID THE RUN CHANGE IT",
+		 * NOT "IS IT NEW".
+		 *
+		 * emu_novel asks whether a majority of an image is
+		 * already in the parent, which is the right question
+		 * about a region a stub mapped - a relocated copy of
+		 * itself is nearly all parent, a decompressed payload
+		 * is almost none. It is the WRONG question about this
+		 * one: an image decrypted in place IS the parent
+		 * everywhere the packer left alone. Measured on an
+		 * MPRESS sample, 1.2 MB of ciphertext inside 8 MB of
+		 * ordinary code - so fourteen of fifteen probes hit and
+		 * the decrypted image was thrown away.
+		 *
+		 * What separates a run that produced something from one
+		 * that did not is whether it WROTE inside the image.
+		 * The stack and the host's exception scratch are not
+		 * the image and are excluded by range, exactly as the
+		 * written-memory harvest below excludes them.
 		 */
-		if (rep.refused)
-			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
-		return 1;               /* tried, and said why it could not */
-	}
+		uint64_t diff = 0, seen = 0;
+		uint32_t si;
+		int changed;
 
-	/*
-	 * AN IMAGE IS NOT A FILE, AND A SCANNER WANTS THE FILE.
-	 *
-	 * What a run leaves is segments at their virtual addresses, spread over
-	 * however many regions the guest mapped. Handed over as they are, the
-	 * one holding the ELF header identifies as ELF with no sections - they
-	 * are in a different region - and the rest identify as nothing, so no
-	 * region partition exists and no signature scoped to CODE or DATA can
-	 * run on any of it. Measured on a sample this unpacks correctly: six
-	 * regions, five of them formatless, against a static unpacker's single
-	 * 2.8 MB file that partitions into HEADERS, CODE, DATA and NOLOAD.
-	 *
-	 * So a region that starts with an ELF header is rebuilt into a file
-	 * first, and the addresses that file accounts for are then skipped -
-	 * emitting them again would hand the same bytes over twice, once with
-	 * structure and once without.
-	 */
-	/*
-	 * THE WHOLE IMAGE FIRST, when the run put sections back where they
-	 * belong. See kof_pe_image_from_run: a region that starts exactly at a
-	 * section's address is that section, and the allocations, the thread
-	 * block, the stack and the host's own scratch are not. Assembled into
-	 * one file with the parent's header, so what comes out identifies as a
-	 * PE and gets regions, imports and every rule scoped to them.
-	 *
-	 * Before the loop below and not instead of it: a run that put nothing
-	 * at a section address falls through to the old behaviour unchanged.
-	 */
-	if (is_pe) {
-		uint8_t *whole = NULL;
-		uint64_t wlen = 0;
-		const struct kof_pe_info *pi = kof_pe(ctx);
+		/*
+		 * HOW MUCH, counted against the file this run started
+		 * from, section by section - raw offset in the file
+		 * against virtual address in the image, which is the
+		 * only pairing that means anything.
+		 *
+		 * Measured, the threshold is the whole point. An MPRESS
+		 * run changes 2112 bytes of an 8245248 byte image and a
+		 * Themida one 2565 of 5910528 - import thunks and a few
+		 * patched sites - so handing the image over costs eight
+		 * megabytes of scan for two kilobytes of new content,
+		 * and the same rules run over the same bytes twice. A
+		 * loader that actually decrypted its sections changes
+		 * them by percent, not by thousandths.
+		 */
+		for (si = 0; si < pi->sec_count &&
+			     si < KGENOME_PE_MAX_SECTIONS; si++) {
+			const struct kgenome_pe_sec *ps = &pi->sec[si];
+			uint64_t n = ps->file_size, q;
 
-		int ok = pi && pi->valid &&
-			 kof_pe_image_from_run(e, pi, pi->image_base,
-					       sc->obj_cap, &whole, &wlen);
-
-		if (ok) {
-			/*
-			 * THE TEST FOR THIS PRODUCT IS "DID THE RUN CHANGE IT",
-			 * NOT "IS IT NEW".
-			 *
-			 * emu_novel asks whether a majority of an image is
-			 * already in the parent, which is the right question
-			 * about a region a stub mapped - a relocated copy of
-			 * itself is nearly all parent, a decompressed payload
-			 * is almost none. It is the WRONG question about this
-			 * one: an image decrypted in place IS the parent
-			 * everywhere the packer left alone. Measured on an
-			 * MPRESS sample, 1.2 MB of ciphertext inside 8 MB of
-			 * ordinary code - so fourteen of fifteen probes hit and
-			 * the decrypted image was thrown away.
-			 *
-			 * What separates a run that produced something from one
-			 * that did not is whether it WROTE inside the image.
-			 * The stack and the host's exception scratch are not
-			 * the image and are excluded by range, exactly as the
-			 * written-memory harvest below excludes them.
-			 */
-			uint64_t diff = 0, seen = 0;
-			uint32_t si;
-			int changed;
-
-			/*
-			 * HOW MUCH, counted against the file this run started
-			 * from, section by section - raw offset in the file
-			 * against virtual address in the image, which is the
-			 * only pairing that means anything.
-			 *
-			 * Measured, the threshold is the whole point. An MPRESS
-			 * run changes 2112 bytes of an 8245248 byte image and a
-			 * Themida one 2565 of 5910528 - import thunks and a few
-			 * patched sites - so handing the image over costs eight
-			 * megabytes of scan for two kilobytes of new content,
-			 * and the same rules run over the same bytes twice. A
-			 * loader that actually decrypted its sections changes
-			 * them by percent, not by thousandths.
-			 */
-			for (si = 0; si < pi->sec_count &&
-				     si < KOF_PE_MAX_SECTIONS; si++) {
-				const struct kof_pe_sec *ps = &pi->sec[si];
-				uint64_t n = ps->file_size, q;
-
-				if (!n || ps->file_off >= b.n ||
-				    ps->mem_rva >= wlen)
-					continue;
-				if (n > b.n - ps->file_off)
-					n = b.n - ps->file_off;
-				if (n > wlen - ps->mem_rva)
-					n = wlen - ps->mem_rva;
-				seen += n;
-				for (q = 0; q < n; q++)
-					if (b.p[ps->file_off + q] !=
-					    whole[ps->mem_rva + q])
-						diff++;
-			}
-			changed = seen && diff * IMG_DIFF_DEN > seen;
-			KOF_TRACE("[img] len=%llu diff=%llu/%llu "
-					"changed=%d\n",
-					(unsigned long long)wlen,
-					(unsigned long long)diff,
-					(unsigned long long)seen, changed);
-			if (changed) {
-				/* Recorded, not handed over: what this is, is
-				 * the unpack module's to say. The buffer is
-				 * the engine's and is held until the module
-				 * that asked for the run returns. */
-				free(sc->emu_own);
-				sc->emu_own = whole;
-				img_p = whole;
-				img_n = wlen;
-				img_va = pi->image_base;
-				whole = NULL;
-				built = 1;
-				/*
-				 * AND THE REGIONS IT ACCOUNTS FOR ARE SPENT.
-				 * Every section of the assembled file lies in
-				 * [base, base + SizeOfImage), so that range is
-				 * what the snapshot loop below must skip -
-				 * otherwise the same bytes are handed over
-				 * twice, once as a file with a section table
-				 * and once as a formatless region. Measured on
-				 * a PECompact2 sample: 14.81 MB against 8.66,
-				 * the difference being its .text a second
-				 * time. Allocations the run made elsewhere are
-				 * outside the range and still come back.
-				 */
-				built_lo = pi->image_base;
-				built_hi = pi->image_base + img_n;
-			}
-			free(whole);
+			if (!n || ps->file_off >= b.n ||
+			    ps->mem_rva >= wlen)
+				continue;
+			if (n > b.n - ps->file_off)
+				n = b.n - ps->file_off;
+			if (n > wlen - ps->mem_rva)
+				n = wlen - ps->mem_rva;
+			seen += n;
+			for (q = 0; q < n; q++)
+				if (b.p[ps->file_off + q] !=
+				    whole[ps->mem_rva + q])
+					diff++;
 		}
+		changed = seen && diff * IMG_DIFF_DEN > seen;
+		KOF_TRACE("[img] len=%llu diff=%llu/%llu "
+				"changed=%d\n",
+				(unsigned long long)wlen,
+				(unsigned long long)diff,
+				(unsigned long long)seen, changed);
+		if (changed) {
+			/* Recorded, not handed over: what this is, is
+			 * the unpack module's to say. The buffer is
+			 * the engine's and is held until the module
+			 * that asked for the run returns. */
+			free(sc->emu_own);
+			sc->emu_own = whole;
+			g->img_p = whole;
+			g->img_n = wlen;
+			g->img_va = pi->image_base;
+			whole = NULL;
+			g->built = 1;
+			/*
+			 * AND THE REGIONS IT ACCOUNTS FOR ARE SPENT.
+			 * Every section of the assembled file lies in
+			 * [base, base + SizeOfImage), so that range is
+			 * what the snapshot loop below must skip -
+			 * otherwise the same bytes are handed over
+			 * twice, once as a file with a section table
+			 * and once as a formatless region. Measured on
+			 * a PECompact2 sample: 14.81 MB against 8.66,
+			 * the difference being its .text a second
+			 * time. Allocations the run made elsewhere are
+			 * outside the range and still come back.
+			 */
+			g->built_lo = pi->image_base;
+			g->built_hi = pi->image_base + g->img_n;
+		}
+		free(whole);
 	}
-	for (it = 0; kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+}
+
+/*
+ * The first snapshot that is a program: an ELF rebuilt into a file, or a PE the
+ * run built in one region. One per run.
+ */
+static void emu_gather_header_image(const struct kof_obj_ctx *ctx,
+				    struct kof_scanner *sc, struct kgenome_emu *e,
+				    int is_pe, struct emu_gather *g)
+{
+	uint32_t it;
+	uint64_t va, len;
+	const uint8_t *bytes;
+
+	for (it = 0; kgenome_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
 		uint8_t *file = NULL;
 		uint64_t flen = 0;
 
@@ -742,7 +743,7 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 			 * THE PE HALF REBUILDS FROM THE REGION, not through a
 			 * reader, and the difference is not a shortcut.
 			 *
-			 * kof_elf_rebuild walks a guest's segments by
+			 * kgenome_elf_rebuild walks a guest's segments by
 			 * ADDRESS because an ELF image is several mappings
 			 * that a stub placed itself - it has to be able to
 			 * reach across them. A PE that a stub built is one
@@ -778,19 +779,19 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 			 */
 			if (!emu_novel(ctx, bytes, len))
 				continue;
-			img_p = bytes;
-			img_n = len;
-			img_va = va;
-			built = 1;
-			built_lo = va;
-			built_hi = va + len;
+			g->img_p = bytes;
+			g->img_n = len;
+			g->img_va = va;
+			g->built = 1;
+			g->built_lo = va;
+			g->built_hi = va + len;
 			break;
 		} else {
 			if (len < 4 || memcmp(bytes, "\177ELF", 4))
 				continue;
-			if (!kof_elf_rebuild(va, emu_rd, e, sc->obj_cap,
-					     &file, &flen, &built_lo,
-					     &built_hi))
+			if (!kgenome_elf_rebuild(va, emu_rd, e, sc->obj_cap,
+					     &file, &flen, &g->built_lo,
+					     &g->built_hi))
 				continue;
 		}
 		/*
@@ -814,17 +815,27 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 		if (emu_novel(ctx, file, flen)) {
 			free(sc->emu_own);
 			sc->emu_own = file;
-			img_p = file;
-			img_n = flen;
-			img_va = va;
+			g->img_p = file;
+			g->img_n = flen;
+			g->img_va = va;
 			file = NULL;
-			built = 1;
+			g->built = 1;
 		}
 		free(file);
 		break;                  /* one program per run is what a stub
 					 * produces; a second header found in
 					 * its data is not a second program */
 	}
+}
+
+/* The memory the run made executable, collected beside the image. */
+static void emu_gather_exec_snapshots(const struct kof_obj_ctx *ctx,
+				      struct kof_scanner *sc,
+				      struct kgenome_emu *e, struct emu_gather *g)
+{
+	uint32_t it;
+	uint64_t va, len;
+	const uint8_t *bytes;
 
 	/*
 	 * Snapshots first, and the written pages only if there were none.
@@ -838,28 +849,28 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	 * When a packer never calls mprotect there are no snapshots, and then
 	 * the written pages are all there is.
 	 */
-	for (any = built, it = 0;
-	     kof_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
-		if (va >= built_lo && va < built_hi)
+	for (g->any = g->built, it = 0;
+	     kgenome_emu_next_snapshot(e, &it, &va, &bytes, &len); ) {
+		if (va >= g->built_lo && va < g->built_hi)
 			continue;               /* already in the rebuilt file */
 		if (!emu_novel(ctx, bytes, len))
 			continue;               /* the stub's own copy of itself */
-		any = 1;
+		g->any = 1;
 		/* Memory the run made executable, or wrote and then ran - see
 		 * the write-then-execute snapshot in kofemu. Collected rather
 		 * than handed over: it belongs to the same program as the
 		 * image, and emu_one_child puts them together. */
-		if (n_ex < EMU_EXTRA_MAX && !emu_dup(ex, n_ex, va, bytes, len)) {
-			ex[n_ex].p = bytes;
-			ex[n_ex].own = NULL;   /* a snapshot lives in the
+		if (g->n_ex < EMU_EXTRA_MAX && !emu_dup(g->ex, g->n_ex, va, bytes, len)) {
+			g->ex[g->n_ex].p = bytes;
+			g->ex[g->n_ex].own = NULL;   /* a snapshot lives in the
 						* machine, which outlives the
 						* module - see emu_rgn */
-			ex[n_ex].n = len;
-			ex[n_ex].va = va;
-			ex[n_ex].code = 1;
-			n_ex++;
-		} else if (n_ex >= EMU_EXTRA_MAX &&
-			   !emu_dup(ex, n_ex, va, bytes, len)) {
+			g->ex[g->n_ex].n = len;
+			g->ex[g->n_ex].va = va;
+			g->ex[g->n_ex].code = 1;
+			g->n_ex++;
+		} else if (g->n_ex >= EMU_EXTRA_MAX &&
+			   !emu_dup(g->ex, g->n_ex, va, bytes, len)) {
 			/* A bound on what one run may hand over. It stays a bound,
 			 * and it SAYS it was reached: dropped without a word, a
 			 * region past the thirty-second was evidence that simply
@@ -867,6 +878,21 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 			oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 		}
 	}
+}
+
+/*
+ * The written-memory fallback: what a finished run wrote, when nothing was
+ * made executable.
+ */
+static void emu_gather_written(const struct kof_obj_ctx *ctx,
+			       struct kof_scanner *sc, struct kgenome_emu *e,
+			       const struct kgenome_emu_unp_report *rep,
+			       struct emu_gather *g)
+{
+	uint32_t it;
+	uint64_t va, len;
+	const uint8_t *bytes;
+
 	/*
 	 * The written-memory fallback needs the run to have FINISHED.
 	 *
@@ -946,29 +972,29 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	 * execute snapshot, which goes through the loop above and is not
 	 * gated here at all.
 	 */
-	if (!any && (rep.stop == KOF_EMU_STOP_EXIT ||
-		     rep.stop == KOF_EMU_STOP_HANDOFF ||
-		     rep.stop == KOF_EMU_STOP_STALLED ||
-		     rep.stop == KOF_EMU_STOP_BUDGET ||
-		     rep.returned))
-		for (it = 0; kof_emu_next_written(e, &it, &va, &bytes, &len); ) {
-			if (va >= built_lo && va < built_hi)
+	if (!g->any && (rep->stop == KGENOME_EMU_STOP_EXIT ||
+		     rep->stop == KGENOME_EMU_STOP_HANDOFF ||
+		     rep->stop == KGENOME_EMU_STOP_STALLED ||
+		     rep->stop == KGENOME_EMU_STOP_BUDGET ||
+		     rep->returned))
+		for (it = 0; kgenome_emu_next_written(e, &it, &va, &bytes, &len); ) {
+			if (va >= g->built_lo && va < g->built_hi)
 				continue;
 			/* What the stub pushed is not what it unpacked. See
-			 * kof_emu_unp_report.stack_lo. */
-			if (rep.stack_hi && va >= rep.stack_lo &&
-			    va < rep.stack_hi)
+			 * kgenome_emu_unp_report.stack_lo. */
+			if (rep->stack_hi && va >= rep->stack_lo &&
+			    va < rep->stack_hi)
 				continue;
 			/* Nor the exception records, which the HOST wrote. */
-			if (rep.exc_hi && va >= rep.exc_lo && va < rep.exc_hi)
+			if (rep->exc_hi && va >= rep->exc_lo && va < rep->exc_hi)
 				continue;
 			if (!emu_novel(ctx, bytes, len))
 				continue;
-			if (n_ex < EMU_EXTRA_MAX &&
-			    !emu_dup(ex, n_ex, va, bytes, len)) {
+			if (g->n_ex < EMU_EXTRA_MAX &&
+			    !emu_dup(g->ex, g->n_ex, va, bytes, len)) {
 				/*
 				 * COPIED, BECAUSE THIS ONE IS BORROWED. See
-				 * kof_emu_next_written: the buffer it answers
+				 * kgenome_emu_next_written: the buffer it answers
 				 * with is replaced on the next call, so every
 				 * region but the last would be freed before
 				 * the module that asked for them ran.
@@ -978,18 +1004,23 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 				if (!own)
 					break;
 				memcpy(own, bytes, (size_t)len);
-				ex[n_ex].p = own;
-				ex[n_ex].own = own;
-				ex[n_ex].n = len;
-				ex[n_ex].va = va;
-				ex[n_ex].code = 0;
-				n_ex++;
-			} else if (n_ex >= EMU_EXTRA_MAX &&
-				   !emu_dup(ex, n_ex, va, bytes, len)) {
+				g->ex[g->n_ex].p = own;
+				g->ex[g->n_ex].own = own;
+				g->ex[g->n_ex].n = len;
+				g->ex[g->n_ex].va = va;
+				g->ex[g->n_ex].code = 0;
+				g->n_ex++;
+			} else if (g->n_ex >= EMU_EXTRA_MAX &&
+				   !emu_dup(g->ex, g->n_ex, va, bytes, len)) {
 				oc_scan_capped(sc, KOF_BROKEN_LIMIT);     /* said, not dropped */
 			}
 		}
+}
 
+/* The scanner's region table, from the image and the extras. */
+static void emu_gather_regions(struct kof_scanner *sc,
+			       const struct emu_gather *g)
+{
 	/*
 	 * AND THAT IS ALL A RUN DOES: it says what it found.
 	 *
@@ -1005,24 +1036,24 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	 * kof_scan_emu_release.
 	 */
 	sc->n_emu_rgn = 0;
-	if (img_p && sc->n_emu_rgn < KOF_EMU_RGN_MAX) {
-		sc->emu_rgn[sc->n_emu_rgn].p = img_p;
+	if (g->img_p && sc->n_emu_rgn < KOF_EMU_RGN_MAX) {
+		sc->emu_rgn[sc->n_emu_rgn].p = g->img_p;
 		/* img_p is sc->emu_own, freed with it. */
 		sc->emu_rgn[sc->n_emu_rgn].own = NULL;
-		sc->emu_rgn[sc->n_emu_rgn].va = img_va;
-		sc->emu_rgn[sc->n_emu_rgn].n = img_n;
+		sc->emu_rgn[sc->n_emu_rgn].va = g->img_va;
+		sc->emu_rgn[sc->n_emu_rgn].n = g->img_n;
 		sc->emu_rgn[sc->n_emu_rgn].kind = KOF_EMU_RGN_IMAGE;
 		sc->n_emu_rgn++;
 	}
 	{
 		uint32_t q;
 
-		for (q = 0; q < n_ex && sc->n_emu_rgn < KOF_EMU_RGN_MAX; q++) {
-			sc->emu_rgn[sc->n_emu_rgn].p = ex[q].p;
-			sc->emu_rgn[sc->n_emu_rgn].own = ex[q].own;
-			sc->emu_rgn[sc->n_emu_rgn].va = ex[q].va;
-			sc->emu_rgn[sc->n_emu_rgn].n = ex[q].n;
-			sc->emu_rgn[sc->n_emu_rgn].kind = ex[q].code
+		for (q = 0; q < g->n_ex && sc->n_emu_rgn < KOF_EMU_RGN_MAX; q++) {
+			sc->emu_rgn[sc->n_emu_rgn].p = g->ex[q].p;
+			sc->emu_rgn[sc->n_emu_rgn].own = g->ex[q].own;
+			sc->emu_rgn[sc->n_emu_rgn].va = g->ex[q].va;
+			sc->emu_rgn[sc->n_emu_rgn].n = g->ex[q].n;
+			sc->emu_rgn[sc->n_emu_rgn].kind = g->ex[q].code
 				? KOF_EMU_RGN_EXEC : KOF_EMU_RGN_WRITTEN;
 			sc->n_emu_rgn++;
 		}
@@ -1037,6 +1068,91 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 				(unsigned long long)sc->emu_rgn[q].n,
 				sc->emu_rgn[q].kind);
 	}
+}
+
+/*
+ * WHAT A RUN LEFT, TURNED INTO REGIONS - the half of kof_scan_emu_unpack that
+ * happens AFTER the machine stops.
+ *
+ * Split out so that a PAUSED run can be resumed and gathered by the same code.
+ * A module that named an instruction to stop on - see kgenome_emu_watch_insn - gets
+ * control back with the machine intact, reads what it wanted, and asks for the
+ * run to continue; when it finally stops for good, what it left is gathered
+ * here exactly as it would have been without the pause. Two copies of this
+ * would be two answers to "what did the run produce".
+ */
+uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
+			   struct kof_scanner *sc, struct kgenome_emu *e,
+			   struct kgenome_emu_unp_report rep)
+{
+	struct emu_gather g;
+	kof_buf b;
+	int is_pe;
+
+	g.img_p = NULL;
+	g.img_n = 0;
+	g.img_va = 0;
+	g.built_lo = ~0ull;
+	g.built_hi = 0;
+	g.n_ex = 0;
+	g.built = 0;
+	g.any = 0;
+
+	is_pe = ctx->format == KOF_FMT_PE;
+	b = kof_src_buf(sc->cur_src);
+	emu_trace_stop(e, &rep);
+	if (!e) {
+		/*
+		 * No image could be built, and the reasons are all statements
+		 * about the object: its entry point is past the bytes it
+		 * actually holds, or it declares none. Recorded on the same
+		 * channel a container uses for a truncated entry, so the object
+		 * reads as "not fully examined, and here is why" rather than as
+		 * one nothing happened to. A truncated UPX sample looks exactly
+		 * like this - the stub sits past the compressed data, so the
+		 * part that is missing is the part that would have run.
+		 */
+		if (rep.refused)
+			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
+		return 1;               /* tried, and said why it could not */
+	}
+
+	/*
+	 * AN IMAGE IS NOT A FILE, AND A SCANNER WANTS THE FILE.
+	 *
+	 * What a run leaves is segments at their virtual addresses, spread over
+	 * however many regions the guest mapped. Handed over as they are, the
+	 * one holding the ELF header identifies as ELF with no sections - they
+	 * are in a different region - and the rest identify as nothing, so no
+	 * region partition exists and no signature scoped to CODE or DATA can
+	 * run on any of it. Measured on a sample this unpacks correctly: six
+	 * regions, five of them formatless, against a static unpacker's single
+	 * 2.8 MB file that partitions into HEADERS, CODE, DATA and NOLOAD.
+	 *
+	 * So a region that starts with an ELF header is rebuilt into a file
+	 * first, and the addresses that file accounts for are then skipped -
+	 * emitting them again would hand the same bytes over twice, once with
+	 * structure and once without.
+	 */
+	/*
+	 * THE WHOLE IMAGE FIRST, when the run put sections back where they
+	 * belong. See kgenome_pe_image_from_run: a region that starts exactly at a
+	 * section's address is that section, and the allocations, the thread
+	 * block, the stack and the host's own scratch are not. Assembled into
+	 * one file with the parent's header, so what comes out identifies as a
+	 * PE and gets regions, imports and every rule scoped to them.
+	 *
+	 * Before the loop below and not instead of it: a run that put nothing
+	 * at a section address falls through to the old behaviour unchanged.
+	 */
+	if (is_pe)
+		emu_gather_pe_image(ctx, sc, e, b, &g);
+	emu_gather_header_image(ctx, sc, e, is_pe, &g);
+
+	emu_gather_exec_snapshots(ctx, sc, e, &g);
+	emu_gather_written(ctx, sc, e, &rep, &g);
+
+	emu_gather_regions(sc, &g);
 
 	/*
 	 * A BUDGET STOP IS NOT REPORTED AS A LIMIT, and that is a departure
@@ -1073,7 +1189,7 @@ void kof_scan_emu_release(struct kof_scanner *sc)
 	if (!sc)
 		return;
 	if (sc->emu_live) {
-		kof_emu_free(sc->emu_live);
+		kgenome_emu_free(sc->emu_live);
 		sc->emu_live = NULL;
 	}
 	free(sc->emu_own);
@@ -1217,9 +1333,9 @@ void oc_emu_set_reg(const struct kof_obj_ctx *ctx, uint32_t gpr,
 	if (!sc || !sc->emu_paused || !sc->emu_live)
 		return;
 	if (gpr == KUNP_REG_IP)
-		kof_emu_set_rip(sc->emu_live, value);
+		kgenome_emu_set_rip(sc->emu_live, value);
 	else
-		kof_emu_set_reg(sc->emu_live, gpr, value);
+		kgenome_emu_set_reg(sc->emu_live, gpr, value);
 }
 
 void oc_emu_set_ip(const struct kof_obj_ctx *ctx, uint64_t va)
@@ -1227,7 +1343,7 @@ void oc_emu_set_ip(const struct kof_obj_ctx *ctx, uint64_t va)
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
 	if (sc && sc->emu_paused && sc->emu_live)
-		kof_emu_set_rip(sc->emu_live, va);
+		kgenome_emu_set_rip(sc->emu_live, va);
 }
 
 uint32_t oc_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
@@ -1239,7 +1355,7 @@ uint32_t oc_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
 		return 0;
 	/* All or nothing, like every other span this engine hands a module: a
 	 * half-written patch is a machine nobody can reason about. */
-	return kof_emu_write(sc->emu_live, va, bytes, n) ? n : 0u;
+	return kgenome_emu_write(sc->emu_live, va, bytes, n) ? n : 0u;
 }
 
 /* One region into the child being built, at the cursor. */
@@ -1293,7 +1409,7 @@ void oc_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc || !len || sc->pend_n_xw >= KOF_EMU_EXEC_WATCH)
+	if (!sc || !len || sc->pend_n_xw >= KGENOME_EMU_EXEC_WATCH)
 		return;
 	sc->pend_xw[sc->pend_n_xw].rva = rva;
 	sc->pend_xw[sc->pend_n_xw].len = len;
@@ -1314,8 +1430,8 @@ uint64_t oc_emu_reg(const struct kof_obj_ctx *ctx, uint32_t gpr)
 	if (!sc || !sc->emu_live)
 		return 0;
 	if (gpr == KUNP_REG_IP)
-		return kof_emu_get_rip(sc->emu_live);
-	return kof_emu_get_reg(sc->emu_live, gpr);
+		return kgenome_emu_get_rip(sc->emu_live);
+	return kgenome_emu_get_reg(sc->emu_live, gpr);
 }
 
 uint32_t oc_emu_read(const struct kof_obj_ctx *ctx, uint64_t va,
@@ -1328,7 +1444,7 @@ uint32_t oc_emu_read(const struct kof_obj_ctx *ctx, uint64_t va,
 	/* The interpreter answers all-or-nothing for a span, which is the
 	 * right shape here too: a partial read of a structure is a structure
 	 * nobody can check. */
-	return kof_emu_read(sc->emu_live, va, out, n) ? n : 0u;
+	return kgenome_emu_read(sc->emu_live, va, out, n) ? n : 0u;
 }
 
 
@@ -1343,18 +1459,18 @@ void oc_emu_watch_insn(const struct kof_obj_ctx *ctx,
 
 	if (!sc)
 		return;
-	/* No bytes disarms - see kof_emu_watch_insn. Applied to a LIVE machine
+	/* No bytes disarms - see kgenome_emu_watch_insn. Applied to a LIVE machine
 	 * too, because that is when a module gives up on pausing and wants the
 	 * run to finish. */
 	if (!bytes || !n) {
 		sc->pend_decl.n_iw = 0;
 		sc->pend_decl.iw_len = 0;
 		if (sc->emu_live)
-			kof_emu_watch_insn(sc->emu_live, NULL, 0);
+			kgenome_emu_watch_insn(sc->emu_live, NULL, 0);
 		return;
 	}
 	if (n > sizeof sc->pend_decl.iw[0].b ||
-	    sc->pend_decl.n_iw >= KOF_EMU_INSN_WATCH)
+	    sc->pend_decl.n_iw >= KGENOME_EMU_INSN_WATCH)
 		return;
 	memcpy(sc->pend_decl.iw[sc->pend_decl.n_iw].b, bytes, n);
 	sc->pend_decl.iw[sc->pend_decl.n_iw].n = (uint8_t)n;
@@ -1372,14 +1488,14 @@ uint32_t oc_emu_api_returns(const struct kof_obj_ctx *ctx, const char *name,
 			    uint64_t ret)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_emu_decl *d;
+	struct kgenome_emu_decl *d;
 	size_t l;
 
 	if (!sc || !name)
 		return 0;
 	d = &sc->pend_decl;
 	l = strlen(name);
-	if (!l || l >= KOF_EMU_SHIM_NAME)
+	if (!l || l >= KGENOME_EMU_SHIM_NAME)
 		return 0;
 	{
 		uint32_t k;
@@ -1390,7 +1506,7 @@ uint32_t oc_emu_api_returns(const struct kof_obj_ctx *ctx, const char *name,
 				return 1;
 			}
 	}
-	if (d->n_shim >= KOF_EMU_SHIM_MAX)
+	if (d->n_shim >= KGENOME_EMU_SHIM_MAX)
 		return 0;
 	memcpy(d->shim[d->n_shim].name, name, l + 1u);
 	d->shim[d->n_shim].ret = ret;
@@ -1402,12 +1518,12 @@ uint32_t oc_emu_patch(const struct kof_obj_ctx *ctx, const uint8_t *find,
 		      const uint8_t *rep, uint32_t n)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_emu_decl *d;
+	struct kgenome_emu_decl *d;
 
-	if (!sc || !find || !rep || !n || n > KOF_EMU_PATCH_LEN)
+	if (!sc || !find || !rep || !n || n > KGENOME_EMU_PATCH_LEN)
 		return 0;
 	d = &sc->pend_decl;
-	if (d->n_patch >= KOF_EMU_PATCH_MAX)
+	if (d->n_patch >= KGENOME_EMU_PATCH_MAX)
 		return 0;
 	memcpy(d->patch[d->n_patch].find, find, n);
 	memcpy(d->patch[d->n_patch].rep, rep, n);
@@ -1444,12 +1560,12 @@ void oc_emu_slice(const struct kof_obj_ctx *ctx, uint64_t insn)
 uint32_t oc_emu_stop(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_emu *e;
+	struct kgenome_emu *e;
 
 	if (!sc || !sc->emu_paused || !sc->emu_live || !sc->emu_rep_p)
 		return 0;
 	e = sc->emu_live;
-	sc->emu_rep_p->insn = kof_emu_insn_count(e);
+	sc->emu_rep_p->insn = kgenome_emu_insn_count(e);
 	sc->emu_paused = 0;
 	sc->emu_live = NULL;
 	return oc_emu_gather(ctx, sc, e, *sc->emu_rep_p);
@@ -1458,8 +1574,8 @@ uint32_t oc_emu_stop(const struct kof_obj_ctx *ctx)
 uint32_t oc_emu_resume(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_emu *e;
-	enum kof_emu_stop st;
+	struct kgenome_emu *e;
+	enum kgenome_emu_stop st;
 
 	if (!sc || !sc->emu_paused || !sc->emu_live || !sc->emu_rep_p)
 		return 0;
@@ -1475,21 +1591,21 @@ uint32_t oc_emu_resume(const struct kof_obj_ctx *ctx)
 	 * samples of four to one.
 	 */
 	if (sc->emu_slice) {
-		uint64_t at = kof_emu_insn_count(e);
+		uint64_t at = kgenome_emu_insn_count(e);
 		uint64_t to = at + sc->emu_slice;
 
-		kof_emu_snap_written(e);
-		kof_emu_set_max_insn(e, to < sc->emu_full ? to : sc->emu_full);
+		kgenome_emu_snap_written(e);
+		kgenome_emu_set_max_insn(e, to < sc->emu_full ? to : sc->emu_full);
 	}
 	KOF_TIME_BEGIN(KOF_T_EMU);
-	st = kof_emu_run(e);
+	st = kgenome_emu_run(e);
 	KOF_TIME_END(KOF_T_EMU);
-	if (st == KOF_EMU_STOP_BUDGET && sc->emu_slice &&
-	    kof_emu_insn_count(e) < sc->emu_full)
-		st = KOF_EMU_STOP_INSN;
+	if (st == KGENOME_EMU_STOP_BUDGET && sc->emu_slice &&
+	    kgenome_emu_insn_count(e) < sc->emu_full)
+		st = KGENOME_EMU_STOP_INSN;
 	sc->emu_rep_p->stop = st;
-	sc->emu_rep_p->insn = kof_emu_insn_count(e);
-	if (st == KOF_EMU_STOP_INSN)
+	sc->emu_rep_p->insn = kgenome_emu_insn_count(e);
+	if (st == KGENOME_EMU_STOP_INSN)
 		return 0;               /* paused again */
 	/*
 	 * Finished. The machine goes to the gather, which takes ownership of it

@@ -191,7 +191,7 @@ static void two_calls_or(void)
 /*
  * A RULE MADE OF BLOCKS IS STILL A RULE THE INDEX HAS TO SEE.
  *
- * src_read read KOF_DEFINE_STR and nothing else, so a plague rule - which
+ * src_read read KOF_DEFINE_STR and nothing else, so a mutation rule - which
  * declares no strings at all - was indexed as a file with zero patterns, and
  * draft_dup, which skipped any source with zero patterns, could not tell two
  * of them apart. Generating the same block twice raised no duplicate warning.
@@ -200,18 +200,18 @@ static void src_sees_blocks(void)
 {
 	static const char src[] =
 		"#include <kofmod/kofsig.h>\n"
-		"#include <kofmod/kofplague.h>\n"
+		"#include <kofmod/kofmutation.h>\n"
 		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
 		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Blockly\");\n"
-		"KOF_PLAGUE_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
-		"KOF_PLAGUE_BLOCK(blk_6fad1193, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_6fad1193, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x3333u, 0x4444u);\n"
 		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
 		"{\n"
-		"\tif (kof_plague_score(blk_dded9322) >= 60u)\n"
+		"\tif (kof_mutation_score(blk_dded9322) >= 60u)\n"
 		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
 		"}\n";
 	struct src_ent ent;
@@ -238,30 +238,28 @@ static void mixed_rule(void)
 {
 	static const char src[] =
 		"#include <kofmod/kofsig.h>\n"
-		"#include <kofmod/kofplague.h>\n"
+		"#include <kofmod/kofmutation.h>\n"
 		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
 		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Mixy\");\n"
 		"KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);\n"
 		"KOF_DEFINE_STR(s0, \"alpha\", KOF_CASE_EXACT, "
 			"KOF_WORD_SUBSTRING);\n"
-		"KOF_PLAGUE_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
 		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
 		"{\n"
 		"\tif (kof_find_str_any(scan_range_whole_file, s0) && "
-		"kof_plague_score(blk_dded9322) >= 70u)\n"
+		"kof_mutation_score(blk_dded9322) >= 70u)\n"
 		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
 		"}\n";
 	struct kof_editor e;
-	struct kof_plague_decl d[4];
+	struct kof_mutation_decl d[4];
 	struct kof_verdict_decl verdict;
-	static uint32_t pool[4 * KOF_PLAGUE_MAX_HASH];
+	static uint32_t pool[4 * KOF_MUTATION_MAX_HASH];
 	/* The three whole-object measures the same reader recovers. This rule
 	 * names none of them, so they come back zero - which is the answer
 	 * that says "the file did not ask for it". */
-	uint8_t shp_pct = 0;
-	int shp_lv = 0;
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
@@ -274,16 +272,15 @@ static void mixed_rule(void)
 	CK(e.dr.n_grp == 1);
 	EQ(e.dr.family, "Mixy");
 	/* And the block half, off the same file. */
-	CK(plague_from_source(&e, path, d, 4, &n, pool,
+	CK(mutation_from_source(&e, path, d, 4, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv) != 0);
+			      &verdict) != 0);
 	CK(n == 1);
 	if (n) {
 		CK(d[0].id == 0xdded9322u);
 		CK(d[0].n_hash == 16);
 		CK(d[0].thr == 70);
 	}
-	CK(!shp_pct);
 	/*
 	 * draft_clear, NOT just unlink. A draft's literals are heap buffers and
 	 * the editor frees them exactly here; a test that skipped it leaked one
@@ -365,7 +362,7 @@ static void at_place_is_kept(void)
  *
  * bases/signatures/billgates_00.c is written
  *
- *   if (kof_plague_score(a) >= 75u || kof_plague_score(b) >= 70u)
+ *   if (kof_mutation_score(a) >= 75u || kof_mutation_score(b) >= 70u)
  *
  * and the reader ran strstr once per line, so the first block got its
  * threshold and the second kept the default the declaration parser writes -
@@ -380,44 +377,42 @@ static void two_scores_one_line(void)
 {
 	static const char src[] =
 		"#include <kofmod/kofsig.h>\n"
-		"#include <kofmod/kofplague.h>\n"
+		"#include <kofmod/kofmutation.h>\n"
 		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
 		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Twin\");\n"
-		"KOF_PLAGUE_BLOCK(blk_aaaa1111, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_aaaa1111, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
-		"KOF_PLAGUE_BLOCK(blk_bbbb2222, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_bbbb2222, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00002000u, 0x00002111u, 0x00002222u, 0x00002333u, 0x00002444u, 0x00002555u, 0x00002666u, 0x00002777u, 0x00002888u, 0x00002999u, 0x00002aaau, 0x00002bbbu, 0x00002cccu, 0x00002dddu, 0x00002eeeu, 0x00002fffu);\n"
-		"KOF_PLAGUE_BLOCK(blk_cccc3333, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_cccc3333, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00003000u, 0x00003111u, 0x00003222u, 0x00003333u, 0x00003444u, 0x00003555u, 0x00003666u, 0x00003777u, 0x00003888u, 0x00003999u, 0x00003aaau, 0x00003bbbu, 0x00003cccu, 0x00003dddu, 0x00003eeeu, 0x00003fffu);\n"
-		"KOF_PLAGUE_BLOCK(blk_dddd4444, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_dddd4444, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00004000u, 0x00004111u, 0x00004222u, 0x00004333u, 0x00004444u, 0x00004555u, 0x00004666u, 0x00004777u, 0x00004888u, 0x00004999u, 0x00004aaau, 0x00004bbbu, 0x00004cccu, 0x00004dddu, 0x00004eeeu, 0x00004fffu);\n"
 		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
 		"{\n"
-		"\tif (kof_plague_score(blk_aaaa1111) >= 91u || "
-		"kof_plague_score(blk_bbbb2222) >= 82u || "
-		"kof_plague_score(blk_cccc3333) >= 73u || "
-		"kof_plague_score(blk_dddd4444) >= 64u)\n"
+		"\tif (kof_mutation_score(blk_aaaa1111) >= 91u || "
+		"kof_mutation_score(blk_bbbb2222) >= 82u || "
+		"kof_mutation_score(blk_cccc3333) >= 73u || "
+		"kof_mutation_score(blk_dddd4444) >= 64u)\n"
 		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
 		"}\n";
 	struct kof_editor e;
-	struct kof_plague_decl d[8];
+	struct kof_mutation_decl d[8];
 	struct kof_verdict_decl verdict;
-	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
-	uint8_t shp_pct = 0;
-	int shp_lv = 0;
+	static uint32_t pool[8 * KOF_MUTATION_MAX_HASH];
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
 	if (!path)
 		return;
 	lend(&e);
-	CK(plague_from_source(&e, path, d, 8, &n, pool,
+	CK(mutation_from_source(&e, path, d, 8, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv) != 0);
+			      &verdict) != 0);
 	/*
 	 * FOUR AND NOT TWO, because one condition may name any number of
 	 * matchers and the reader must not stop at the second either. The
@@ -457,39 +452,37 @@ static void mixed_join_one_line(void)
 {
 	static const char src[] =
 		"#include <kofmod/kofsig.h>\n"
-		"#include <kofmod/kofplague.h>\n"
+		"#include <kofmod/kofmutation.h>\n"
 		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
-		"KOF_PLAGUE_BLOCK(blk_aaaa1111, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_aaaa1111, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
-		"KOF_PLAGUE_BLOCK(blk_bbbb2222, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_bbbb2222, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00002000u, 0x00002111u, 0x00002222u, 0x00002333u, 0x00002444u, 0x00002555u, 0x00002666u, 0x00002777u, 0x00002888u, 0x00002999u, 0x00002aaau, 0x00002bbbu, 0x00002cccu, 0x00002dddu, 0x00002eeeu, 0x00002fffu);\n"
-		"KOF_PLAGUE_BLOCK(blk_cccc3333, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_cccc3333, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00003000u, 0x00003111u, 0x00003222u, 0x00003333u, 0x00003444u, 0x00003555u, 0x00003666u, 0x00003777u, 0x00003888u, 0x00003999u, 0x00003aaau, 0x00003bbbu, 0x00003cccu, 0x00003dddu, 0x00003eeeu, 0x00003fffu);\n"
 		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
 		"{\n"
-		"\tif (kof_plague_score(blk_aaaa1111) >= 91u || "
-		"(kof_plague_score(blk_bbbb2222) >= 82u && "
-		"kof_plague_score(blk_cccc3333) >= 82u))\n"
+		"\tif (kof_mutation_score(blk_aaaa1111) >= 91u || "
+		"(kof_mutation_score(blk_bbbb2222) >= 82u && "
+		"kof_mutation_score(blk_cccc3333) >= 82u))\n"
 		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
 		"}\n";
 	struct kof_editor e;
-	struct kof_plague_decl d[8];
+	struct kof_mutation_decl d[8];
 	struct kof_verdict_decl verdict;
-	static uint32_t pool[8 * KOF_PLAGUE_MAX_HASH];
-	uint8_t shp_pct = 0;
-	int shp_lv = 0;
+	static uint32_t pool[8 * KOF_MUTATION_MAX_HASH];
 	uint32_t n = 0;
 	const char *path = write_tmp(src);
 
 	if (!path)
 		return;
 	lend(&e);
-	CK(plague_from_source(&e, path, d, 8, &n, pool,
+	CK(mutation_from_source(&e, path, d, 8, &n, pool,
 			      (uint32_t)(sizeof pool / sizeof pool[0]),
-			      &verdict, &shp_pct, &shp_lv) != 0);
+			      &verdict) != 0);
 	CK(n == 3);
 	if (n == 3) {
 		CK(d[0].thr == 91);
@@ -858,7 +851,7 @@ static void hex_options_survive(void)
 /*
  * THE TICKED BLOCKS ARE A SET, so the order they sit in cannot be an edit.
  *
- * plg_order sorts the block table by where each block lies in the object the
+ * mtn_order sorts the block table by where each block lies in the object the
  * reader has open, and a block the open file does not hold has no offset and
  * sorts behind the ones it does. So stepping to another sample permutes the
  * ticked blocks with nothing about the rule changed - and draft_hash folded
@@ -868,7 +861,7 @@ static void hex_options_survive(void)
  */
 static void block_order_is_not_an_edit(void)
 {
-	static struct plg_block pool[4];
+	static struct mtn_block pool[4];
 	struct kof_editor e;
 	uint32_t a, b;
 
@@ -885,7 +878,7 @@ static void block_order_is_not_an_edit(void)
 
 	a = draft_hash(&e);
 	{
-		struct plg_block t = pool[0];
+		struct mtn_block t = pool[0];
 
 		pool[0] = pool[1];
 		pool[1] = t;
@@ -903,7 +896,7 @@ static void block_order_is_not_an_edit(void)
  *
  * generate writes "+0xd245, 13305 bytes, 128 hash(es)" above the block it
  * describes. The reader kept the last comment it saw until a matcher spent it,
- * so opening a plague rule handed that line to the first matcher as its note -
+ * so opening a mutation rule handed that line to the first matcher as its note -
  * the panel showed it in the comment box, and the next Save wrote it into
  * kof_scan as "matcher 1: +0xd245, ...".
  */
@@ -911,22 +904,22 @@ static void block_note_is_not_a_matcher_note(void)
 {
 	static const char src[] =
 		"#include <kofmod/kofsig.h>\n"
-		"#include <kofmod/kofplague.h>\n"
+		"#include <kofmod/kofmutation.h>\n"
 		"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
 		"KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, \"Notey\");\n"
 		"KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);\n"
 		"KOF_DEFINE_STR(s0, \"alpha\", KOF_CASE_EXACT, "
 			"KOF_WORD_SUBSTRING);\n"
 		"/* +0xd245, 13305 bytes, 128 hash(es) */\n"
-		"KOF_PLAGUE_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
-			"KOF_PLAGUE_RAW,\n"
+		"KOF_MUTATION_BLOCK(blk_dded9322, KOF_SCAN_CODE, "
+			"KOF_MUTATION_RAW,\n"
 		"\t0x00001000u, 0x00001111u, 0x00001222u, 0x00001333u, 0x00001444u, 0x00001555u, 0x00001666u, 0x00001777u, 0x00001888u, 0x00001999u, 0x00001aaau, 0x00001bbbu, 0x00001cccu, 0x00001dddu, 0x00001eeeu, 0x00001fffu);\n"
 		"void kof_scan(const struct kof_obj_ctx *ctx)\n"
 		"{\n"
 		"\tif (kof_find_str_any(scan_range_whole_file, s0))\n"
 		"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
 		"}\n";
-	static struct plg_block pool[8];
+	static struct mtn_block pool[8];
 	struct kof_editor e;
 	const char *path = write_tmp(src);
 
@@ -947,7 +940,7 @@ static void block_note_is_not_a_matcher_note(void)
  * WHAT THE ENGINE FILLED IN IS NOT AN EDIT.
  *
  * draft_seed_target copies the object's own subtype into OPT_SUBTYPE so a
- * drafted rule targets what the reader is looking at, and plg_sync calls it on
+ * drafted rule targets what the reader is looking at, and mtn_sync calls it on
  * ARRIVAL at an object - before anything has been drafted. The options are
  * hashed, so that copy made an empty draft read as edited the moment a file
  * was opened, and an edited draft refuses to step to the next file: opening a

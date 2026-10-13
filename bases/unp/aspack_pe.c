@@ -48,7 +48,7 @@
  *
  *
  * Written against XVolkolak's xaspack.cpp (MIT) - see THIRD-PARTY.md. The coding
- * itself is libkofeng/extractors/decomp/aspack.c, in the host, because a match
+ * itself is libuncoat/decompressors/aspack.c, in the host, because a match
  * may reach any byte already produced and a module cannot hold the window.
  */
 

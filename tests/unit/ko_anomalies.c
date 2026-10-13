@@ -45,13 +45,13 @@ static const struct {
 	uint64_t bit;
 	const char *name;
 } watched[] = {
-	{ KOF_ELF_ANOM_SEG_PAST_EOF,    "SEG_PAST_EOF   (Truncated)" },
-	{ KOF_ELF_ANOM_SHOFF_PAST_EOF,  "SHOFF_PAST_EOF (Truncated)" },
-	{ KOF_ELF_ANOM_SEC_PAST_EOF,    "SEC_PAST_EOF   (Truncated)" },
-	{ KOF_ELF_ANOM_SECTAB_MISSING,  "SECTAB_MISSING (Stripped)"  },
-	{ KOF_ELF_ANOM_NO_LOAD_SEGMENT, "NO_LOAD_SEGMENT (NoLoad)"   },
-	{ KOF_ELF_ANOM_ENTRY_NOT_EXEC,  "ENTRY_NOT_EXEC (BadEntry)"  },
-	{ KOF_ELF_ANOM_SHNUM_CLAMPED,   "SHNUM_CLAMPED"              }
+	{ KGENOME_ELF_ANOM_SEG_PAST_EOF,    "SEG_PAST_EOF   (Truncated)" },
+	{ KGENOME_ELF_ANOM_SHOFF_PAST_EOF,  "SHOFF_PAST_EOF (Truncated)" },
+	{ KGENOME_ELF_ANOM_SEC_PAST_EOF,    "SEC_PAST_EOF   (Truncated)" },
+	{ KGENOME_ELF_ANOM_SECTAB_MISSING,  "SECTAB_MISSING (Stripped)"  },
+	{ KGENOME_ELF_ANOM_NO_LOAD_SEGMENT, "NO_LOAD_SEGMENT (NoLoad)"   },
+	{ KGENOME_ELF_ANOM_ENTRY_NOT_EXEC,  "ENTRY_NOT_EXEC (BadEntry)"  },
+	{ KGENOME_ELF_ANOM_SHNUM_CLAMPED,   "SHNUM_CLAMPED"              }
 };
 #define N_WATCH (sizeof watched / sizeof watched[0])
 
@@ -62,7 +62,7 @@ static uint64_t n_rel, n_other;
 
 static void look(const char *path)
 {
-	struct kof_elf_info info;
+	struct kgenome_elf_info info;
 	struct kof_obj_ctx ctx;
 	struct stat sb;
 	uint8_t *buf;
@@ -92,9 +92,9 @@ static void look(const char *path)
 
 	memset(&ctx, 0, sizeof ctx);
 	memset(&info, 0, sizeof info);
-	if (kof_elf_sniff(kof_buf_make(buf, n)) &&
+	if (kgenome_elf_sniff(kof_buf_make(buf, n)) &&
 	    kof_elf_parse(kof_buf_make(buf, n), &info, &ctx) && info.valid) {
-		if (info.e_type == KOF_ELF_REL) {
+		if (info.e_type == KGENOME_ELF_REL) {
 			n_rel++;
 			for (k = 0; k < (int)N_WATCH; k++)
 				if (info.anomalies & watched[k].bit) {

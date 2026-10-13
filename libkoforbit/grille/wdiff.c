@@ -61,7 +61,7 @@ struct cfile {
 	char     path[512];
 	int      valid;         /* the parse succeeded */
 
-	struct kof_pe_info info;
+	struct kgenome_pe_info info;
 	uint64_t image_base;
 	uint64_t iat_lo, iat_hi;
 
@@ -235,12 +235,12 @@ static void dv_load(struct cfile *e, uint64_t flen)
 	uint16_t dv_sec = 0;
 	uint32_t cfg_size = 0;
 
-	if (e->info.n_dirs <= KOF_PE_DIR_LOAD_CONFIG ||
-	    !e->info.dir[KOF_PE_DIR_LOAD_CONFIG].size)
+	if (e->info.n_dirs <= KGENOME_PE_DIR_LOAD_CONFIG ||
+	    !e->info.dir[KGENOME_PE_DIR_LOAD_CONFIG].size)
 		return;
-	lc_off = kof_pe_rva_to_off(&e->info,
-				   e->info.dir[KOF_PE_DIR_LOAD_CONFIG].rva);
-	if (lc_off == KOF_BROKEN)
+	lc_off = kgenome_pe_rva_to_off(&e->info,
+				   e->info.dir[KGENOME_PE_DIR_LOAD_CONFIG].rva);
+	if (lc_off == KGENOME_BROKEN)
 		return;
 	if (!cfile_read(e, lc_off, cfg, (uint32_t)sizeof cfg))
 		return;
@@ -419,23 +419,23 @@ static int cfile_fill(struct cfile *e, const char *path)
 		return 0;   /* no delta can be computed - see base_unknown */
 
 	/* The IAT, as a file range to step over. */
-	if (e->info.n_dirs > KOF_PE_DIR_IAT && e->info.dir[KOF_PE_DIR_IAT].size) {
-		uint64_t o = kof_pe_rva_to_off(&e->info,
-					       e->info.dir[KOF_PE_DIR_IAT].rva);
+	if (e->info.n_dirs > KGENOME_PE_DIR_IAT && e->info.dir[KGENOME_PE_DIR_IAT].size) {
+		uint64_t o = kgenome_pe_rva_to_off(&e->info,
+					       e->info.dir[KGENOME_PE_DIR_IAT].rva);
 
-		if (o != KOF_BROKEN) {
+		if (o != KGENOME_BROKEN) {
 			e->iat_lo = o;
-			e->iat_hi = o + e->info.dir[KOF_PE_DIR_IAT].size;
+			e->iat_hi = o + e->info.dir[KGENOME_PE_DIR_IAT].size;
 		}
 	}
 
 	/* The relocation directory, held whole. */
-	if (e->info.n_dirs > KOF_PE_DIR_BASERELOC &&
-	    e->info.dir[KOF_PE_DIR_BASERELOC].size) {
-		rl = e->info.dir[KOF_PE_DIR_BASERELOC].size;
-		ro = kof_pe_rva_to_off(&e->info,
-				       e->info.dir[KOF_PE_DIR_BASERELOC].rva);
-		if (ro != KOF_BROKEN && rl && rl <= RELOC_MAX &&
+	if (e->info.n_dirs > KGENOME_PE_DIR_BASERELOC &&
+	    e->info.dir[KGENOME_PE_DIR_BASERELOC].size) {
+		rl = e->info.dir[KGENOME_PE_DIR_BASERELOC].size;
+		ro = kgenome_pe_rva_to_off(&e->info,
+				       e->info.dir[KGENOME_PE_DIR_BASERELOC].rva);
+		if (ro != KGENOME_BROKEN && rl && rl <= RELOC_MAX &&
 		    ro + rl <= flen) {
 			e->reloc = malloc((size_t)rl);
 			if (e->reloc) {
@@ -618,7 +618,7 @@ static uint32_t reloc_width(struct cfile *e, uint64_t rva, uint64_t *start)
 /* --------------------------------------------------------- the comparison */
 
 /* Which section a file offset falls in, for naming a run. */
-static void section_of(const struct kof_pe_info *p, uint64_t off, char *buf,
+static void section_of(const struct kgenome_pe_info *p, uint64_t off, char *buf,
 		       size_t cap)
 {
 	uint32_t i;
@@ -636,7 +636,7 @@ static void section_of(const struct kof_pe_info *p, uint64_t off, char *buf,
 }
 
 /* The section an RVA belongs to, or NULL. */
-static const struct kof_pe_sec *sec_of_rva(const struct kof_pe_info *p,
+static const struct kgenome_pe_sec *sec_of_rva(const struct kgenome_pe_info *p,
 					   uint64_t rva)
 {
 	uint32_t i;
@@ -669,7 +669,7 @@ static const struct kof_pe_sec *sec_of_rva(const struct kof_pe_info *p,
  * module's thirty-five differing runs lives. The comparison reported the module
  * clean, quickly.
  */
-static uint64_t next_sec_rva(const struct kof_pe_info *p, uint64_t rva)
+static uint64_t next_sec_rva(const struct kgenome_pe_info *p, uint64_t rva)
 {
 	uint64_t best = 0;
 	uint32_t i;
@@ -698,13 +698,13 @@ struct cmp_ctx {
  *
  * Returns non-zero when the caller asked to stop.
  */
-static int cmp_piece(struct cmp_ctx *c, const struct kof_pe_sec *s,
+static int cmp_piece(struct cmp_ctx *c, const struct kgenome_pe_sec *s,
 		     uint64_t rva, const uint8_t *mem, const uint8_t *file,
 		     uint32_t len)
 {
 	uint64_t base_off = s->file_off + (rva - s->mem_rva);
 	uint32_t i, run_lo = 0, run_hi = 0;
-	int      in_run = 0, exec = (s->perm & KOF_PE_PERM_X) != 0;
+	int      in_run = 0, exec = (s->perm & KGENOME_PE_PERM_X) != 0;
 
 	for (i = 0; i <= len; i++) {
 		int differs = 0;
@@ -881,7 +881,7 @@ int kofw_diff_module(struct kofw_pmem *m, const struct kofw_module *md,
 		 * that spanned into one would otherwise carry its bytes along.
 		 */
 		while (left) {
-			const struct kof_pe_sec *s = sec_of_rva(&e->info, rva);
+			const struct kgenome_pe_sec *s = sec_of_rva(&e->info, rva);
 			uint64_t room;
 			uint32_t take;
 
@@ -913,7 +913,7 @@ int kofw_diff_module(struct kofw_pmem *m, const struct kofw_module *md,
 			if (take > 0x10000u)
 				take = 0x10000u;
 
-			if (!o.with_writable && (s->perm & KOF_PE_PERM_W))
+			if (!o.with_writable && (s->perm & KGENOME_PE_PERM_W))
 				goto advance;
 			if (s->characteristics & 0x02000000u)   /* DISCARDABLE */
 				goto advance;

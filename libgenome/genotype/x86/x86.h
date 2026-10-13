@@ -8,10 +8,10 @@
  * they read and nothing else, from tables that are generated (x86_gen.c) rather
  * than written, so that what an encoding MEANS is never a second opinion.
  *
- * TWO STEPS, BECAUSE MOST CALLERS NEED ONE. gt_x86_decode finds the instruction:
+ * TWO STEPS, BECAUSE MOST CALLERS NEED ONE. kgenome_x86_decode finds the instruction:
  * its length, its identity, its prefixes, and the raw displacement and immediates.
  * That is all a sweep that is looking for branches needs, and it is the part that
- * has to be fast. gt_x86_operand builds ONE operand - a register number, a
+ * has to be fast. kgenome_x86_operand builds ONE operand - a register number, a
  * base+index*scale+disp, a value - when somebody asks for it, implicit operands
  * (the stack pointer a push moves, the flags a compare sets) included. MEASURED
  * before the split, on 44.7 M instructions of PE and ELF code: finding the
@@ -27,8 +27,8 @@
  * encodes them. An EVEX instruction's mask, zeroing and rounding are returned as
  * the raw payload byte (`evex`), not as operand decorations.
  */
-#ifndef KOF_GENOTYPE_X86_H
-#define KOF_GENOTYPE_X86_H
+#ifndef KGENOME_GENOTYPE_X86_H
+#define KGENOME_GENOTYPE_X86_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -36,58 +36,58 @@
 #include "x86_ids.h"
 #include "../genotype.h"
 
-#define GT_X86_MAX_OPS 10
+#define KGENOME_X86_MAX_OPS 10
 
 /* Operand types. The values are the reference decoder's, so a port is a rename. */
-enum gt_x86_optype {
-	GT_X86_OP_NONE, GT_X86_OP_REG, GT_X86_OP_MEM, GT_X86_OP_IMM, GT_X86_OP_REL,
-	GT_X86_OP_FAR, GT_X86_OP_NEAR, GT_X86_OP_CONST, GT_X86_OP_BANK, GT_X86_OP_DFV
+enum kgenome_x86_optype {
+	KGENOME_X86_OP_NONE, KGENOME_X86_OP_REG, KGENOME_X86_OP_MEM, KGENOME_X86_OP_IMM, KGENOME_X86_OP_REL,
+	KGENOME_X86_OP_FAR, KGENOME_X86_OP_NEAR, KGENOME_X86_OP_CONST, KGENOME_X86_OP_BANK, KGENOME_X86_OP_DFV
 };
 
 /* Register classes, likewise. */
-enum gt_x86_regtype {
-	GT_X86_REG_NONE, GT_X86_REG_GPR, GT_X86_REG_SEG, GT_X86_REG_FPU,
-	GT_X86_REG_MMX, GT_X86_REG_SSE, GT_X86_REG_CR, GT_X86_REG_DR, GT_X86_REG_TR,
-	GT_X86_REG_BND, GT_X86_REG_MSK, GT_X86_REG_TILE, GT_X86_REG_MSR,
-	GT_X86_REG_XCR, GT_X86_REG_SYS, GT_X86_REG_X87, GT_X86_REG_MXCSR,
-	GT_X86_REG_PKRU, GT_X86_REG_SSP, GT_X86_REG_FLG, GT_X86_REG_RIP,
-	GT_X86_REG_UIF
+enum kgenome_x86_regtype {
+	KGENOME_X86_REG_NONE, KGENOME_X86_REG_GPR, KGENOME_X86_REG_SEG, KGENOME_X86_REG_FPU,
+	KGENOME_X86_REG_MMX, KGENOME_X86_REG_SSE, KGENOME_X86_REG_CR, KGENOME_X86_REG_DR, KGENOME_X86_REG_TR,
+	KGENOME_X86_REG_BND, KGENOME_X86_REG_MSK, KGENOME_X86_REG_TILE, KGENOME_X86_REG_MSR,
+	KGENOME_X86_REG_XCR, KGENOME_X86_REG_SYS, KGENOME_X86_REG_X87, KGENOME_X86_REG_MXCSR,
+	KGENOME_X86_REG_PKRU, KGENOME_X86_REG_SSP, KGENOME_X86_REG_FLG, KGENOME_X86_REG_RIP,
+	KGENOME_X86_REG_UIF
 };
 
 /* Where an operand is encoded. */
-enum gt_x86_enc {
-	GT_X86_ENC_NP, GT_X86_ENC_R, GT_X86_ENC_M, GT_X86_ENC_V, GT_X86_ENC_D,
-	GT_X86_ENC_O, GT_X86_ENC_I, GT_X86_ENC_C, GT_X86_ENC_1, GT_X86_ENC_L,
-	GT_X86_ENC_A, GT_X86_ENC_E, GT_X86_ENC_S
+enum kgenome_x86_enc {
+	KGENOME_X86_ENC_NP, KGENOME_X86_ENC_R, KGENOME_X86_ENC_M, KGENOME_X86_ENC_V, KGENOME_X86_ENC_D,
+	KGENOME_X86_ENC_O, KGENOME_X86_ENC_I, KGENOME_X86_ENC_C, KGENOME_X86_ENC_1, KGENOME_X86_ENC_L,
+	KGENOME_X86_ENC_A, KGENOME_X86_ENC_E, KGENOME_X86_ENC_S
 };
 
-#define GT_X86_ACC_R   0x01u
-#define GT_X86_ACC_W   0x02u
-#define GT_X86_ACC_CR  0x04u
-#define GT_X86_ACC_CW  0x08u
+#define KGENOME_X86_ACC_R   0x01u
+#define KGENOME_X86_ACC_W   0x02u
+#define KGENOME_X86_ACC_CR  0x04u
+#define KGENOME_X86_ACC_CW  0x08u
 
-#define GT_X86_OF_DEFAULT  0x01u    /* implicit - not written in the instruction  */
-#define GT_X86_OF_SEXT_OP1 0x02u    /* sign-extended to the first operand's size  */
-#define GT_X86_OF_SEXT_DWS 0x04u    /* sign-extended to the default word size     */
+#define KGENOME_X86_OF_DEFAULT  0x01u    /* implicit - not written in the instruction  */
+#define KGENOME_X86_OF_SEXT_OP1 0x02u    /* sign-extended to the first operand's size  */
+#define KGENOME_X86_OF_SEXT_DWS 0x04u    /* sign-extended to the default word size     */
 
 /* Memory operand bits. The low byte is what this decoder saw; the high byte is
  * what the encoding says the operand IS. */
-#define GT_X86_M_SEG     0x0001u
-#define GT_X86_M_BASE    0x0002u
-#define GT_X86_M_INDEX   0x0004u
-#define GT_X86_M_DISP    0x0008u
-#define GT_X86_M_RIPREL  0x0010u
-#define GT_X86_M_BCAST   0x0020u    /* EVEX embedded broadcast                    */
-#define GT_X86_M_STACK   0x0100u
-#define GT_X86_M_STRING  0x0200u
-#define GT_X86_M_DIRECT  0x0400u
-#define GT_X86_M_AG      0x0800u    /* address generation only - lea              */
-#define GT_X86_M_BITBASE 0x1000u
-#define GT_X86_M_MIB     0x2000u
-#define GT_X86_M_VSIB    0x4000u
-#define GT_X86_M_SHSTK   0x8000u
+#define KGENOME_X86_M_SEG     0x0001u
+#define KGENOME_X86_M_BASE    0x0002u
+#define KGENOME_X86_M_INDEX   0x0004u
+#define KGENOME_X86_M_DISP    0x0008u
+#define KGENOME_X86_M_RIPREL  0x0010u
+#define KGENOME_X86_M_BCAST   0x0020u    /* EVEX embedded broadcast                    */
+#define KGENOME_X86_M_STACK   0x0100u
+#define KGENOME_X86_M_STRING  0x0200u
+#define KGENOME_X86_M_DIRECT  0x0400u
+#define KGENOME_X86_M_AG      0x0800u    /* address generation only - lea              */
+#define KGENOME_X86_M_BITBASE 0x1000u
+#define KGENOME_X86_M_MIB     0x2000u
+#define KGENOME_X86_M_VSIB    0x4000u
+#define KGENOME_X86_M_SHSTK   0x8000u
 
-struct gt_x86_op {
+struct kgenome_x86_op {
 	uint8_t  type, enc, acc, flags;
 	uint16_t size;                  /* bytes of data used; 0xffff: not known  */
 	uint8_t  rtype;                 /* register                               */
@@ -105,30 +105,30 @@ struct gt_x86_op {
 };
 
 /* Instruction flags. */
-#define GF_X86_REX      0x0001u
-#define GF_X86_66       0x0002u /* present (may be mandatory: see GF_X86_M66) */
-#define GF_X86_67       0x0004u
-#define GF_X86_LOCK     0x0008u
-#define GF_X86_F2       0x0010u
-#define GF_X86_F3       0x0020u
-#define GF_X86_SEG      0x0040u
-#define GF_X86_MODRM    0x0080u
-#define GF_X86_SIB      0x0100u
-#define GF_X86_M66      0x0200u /* the 66 is part of the opcode, not a size prefix */
-#define GF_X86_RIPREL   0x0400u
+#define KGENOME_GF_X86_REX      0x0001u
+#define KGENOME_GF_X86_66       0x0002u /* present (may be mandatory: see KGENOME_GF_X86_M66) */
+#define KGENOME_GF_X86_67       0x0004u
+#define KGENOME_GF_X86_LOCK     0x0008u
+#define KGENOME_GF_X86_F2       0x0010u
+#define KGENOME_GF_X86_F3       0x0020u
+#define KGENOME_GF_X86_SEG      0x0040u
+#define KGENOME_GF_X86_MODRM    0x0080u
+#define KGENOME_GF_X86_SIB      0x0100u
+#define KGENOME_GF_X86_M66      0x0200u /* the 66 is part of the opcode, not a size prefix */
+#define KGENOME_GF_X86_RIPREL   0x0400u
 
 /*
  * A decoded instruction. It holds what finding the instruction produced and a
  * copy of its bytes; operands, displacement and immediates are read out of the
- * copy by gt_x86_operand, and the rarely wanted attributes (category, condition,
+ * copy by kgenome_x86_operand, and the rarely wanted attributes (category, condition,
  * operand count, effective operand mode) by the accessors below. MEASURED:
  * filling all of them at decode cost about a third of the decode.
  *
  * `leaf`, `mo`, `dsz`, `osz` and `code` are the working state those read; a caller has
  * no use for them and must not rely on them.
  */
-struct gt_x86_insn {
-	uint16_t id;                    /* enum gt_x86_id                         */
+struct kgenome_x86_insn {
+	uint16_t id;                    /* enum kgenome_x86_id                         */
 	uint16_t leaf;
 	uint16_t flags;                 /* GF_X86_*                               */
 	uint8_t  len;
@@ -140,8 +140,8 @@ struct gt_x86_insn {
 	uint8_t  opc;                   /* the last opcode byte                   */
 	uint8_t  mo;                    /* offset of the byte after the opcode    */
 	uint8_t  dsz;                   /* displacement bytes                     */
-	uint8_t  osz;                   /* size selector (see gt_x86_osz)         */
-	uint8_t  asz;                   /* address size in bytes: 2, 4 or 8 (see gt_x86_asz) */
+	uint8_t  osz;                   /* size selector (see kgenome_x86_osz)         */
+	uint8_t  asz;                   /* address size in bytes: 2, 4 or 8 (see kgenome_x86_asz) */
 	uint8_t  sp;                    /* encoding: 0 legacy, 1 VEX, 2 XOP, 3 EVEX */
 	uint8_t  vexv;                  /* VEX/EVEX register in vvvv, un-inverted, V' as bit 4 */
 	uint8_t  xr;                    /* EVEX R'                                */
@@ -150,24 +150,24 @@ struct gt_x86_insn {
 };
 
 /* Decode one instruction at p, of which n bytes may be read. mode is 32 or 64. */
-enum gt_status gt_x86_decode(struct gt_x86_insn *out, const uint8_t *p, size_t n,
+enum kgenome_status kgenome_x86_decode(struct kgenome_x86_insn *out, const uint8_t *p, size_t n,
 			     int mode);
 
 /* Attributes read on demand. */
-unsigned gt_x86_nops(const struct gt_x86_insn *in);   /* implicit ones included */
-unsigned gt_x86_cat(const struct gt_x86_insn *in);
-unsigned gt_x86_cond(const struct gt_x86_insn *in);
-unsigned gt_x86_efop(const struct gt_x86_insn *in);   /* effective operand mode: 0 16, 1 32, 2 64 */
-unsigned gt_x86_osz(const struct gt_x86_insn *in);    /* size selector. Legacy: bit 0 a 66 that sizes, bit 1 REX.W; VEX/XOP: bit 0 L, bit 1 W; EVEX: bit 0 W, bits 1-2 L'L */
-unsigned gt_x86_asz(const struct gt_x86_insn *in);    /* address size in bytes: 2, 4 or 8 */
-unsigned gt_x86_mand(const struct gt_x86_insn *in);   /* bit 0 66, bit 1 F2, bit 2 F3 are part of the opcode */
-unsigned gt_x86_repeated(const struct gt_x86_insn *in); /* a string instruction under REP/REPZ/REPNZ: it repeats while rcx counts down */
-unsigned gt_x86_nform(const struct gt_x86_insn *in);  /* operands the instruction's DEFINITION calls explicit: INSB counts its [rdi] and dx, though neither is written */
-unsigned gt_x86_nexp(const struct gt_x86_insn *in);   /* operands 0 .. nexp-1 are written in the instruction; the rest are implicit */
-unsigned gt_x86_wgpr(const struct gt_x86_insn *in);   /* general registers it writes without naming one: a bit per register 0-15 */
+unsigned kgenome_x86_nops(const struct kgenome_x86_insn *in);   /* implicit ones included */
+unsigned kgenome_x86_cat(const struct kgenome_x86_insn *in);
+unsigned kgenome_x86_cond(const struct kgenome_x86_insn *in);
+unsigned kgenome_x86_efop(const struct kgenome_x86_insn *in);   /* effective operand mode: 0 16, 1 32, 2 64 */
+unsigned kgenome_x86_osz(const struct kgenome_x86_insn *in);    /* size selector. Legacy: bit 0 a 66 that sizes, bit 1 REX.W; VEX/XOP: bit 0 L, bit 1 W; EVEX: bit 0 W, bits 1-2 L'L */
+unsigned kgenome_x86_asz(const struct kgenome_x86_insn *in);    /* address size in bytes: 2, 4 or 8 */
+unsigned kgenome_x86_mand(const struct kgenome_x86_insn *in);   /* bit 0 66, bit 1 F2, bit 2 F3 are part of the opcode */
+unsigned kgenome_x86_repeated(const struct kgenome_x86_insn *in); /* a string instruction under REP/REPZ/REPNZ: it repeats while rcx counts down */
+unsigned kgenome_x86_nform(const struct kgenome_x86_insn *in);  /* operands the instruction's DEFINITION calls explicit: INSB counts its [rdi] and dx, though neither is written */
+unsigned kgenome_x86_nexp(const struct kgenome_x86_insn *in);   /* operands 0 .. nexp-1 are written in the instruction; the rest are implicit */
+unsigned kgenome_x86_wgpr(const struct kgenome_x86_insn *in);   /* general registers it writes without naming one: a bit per register 0-15 */
 
 /*
- * The instruction as text, Intel syntax, in `buf` (at least GT_X86_TEXT bytes).
+ * The instruction as text, Intel syntax, in `buf` (at least KGENOME_X86_TEXT bytes).
  * `rip` is the address it sits at, which a relative branch and a RIP-relative
  * operand are shown resolved against. Returns the length written, 0 on failure.
  *
@@ -176,14 +176,14 @@ unsigned gt_x86_wgpr(const struct gt_x86_insn *in);   /* general registers it wr
  * printed. A prefix the instruction takes is named in front of it (REP, LOCK,
  * BND, XACQUIRE ...) and one it does not take is not.
  */
-#define GT_X86_TEXT 160u
-size_t gt_x86_format(const struct gt_x86_insn *in, uint64_t rip, char *buf, size_t cap);
+#define KGENOME_X86_TEXT 160u
+size_t kgenome_x86_format(const struct kgenome_x86_insn *in, uint64_t rip, char *buf, size_t cap);
 
-/* Build operand k (0 <= k < gt_x86_nops) of a decoded instruction. */
-void gt_x86_operand(const struct gt_x86_insn *in, unsigned k, struct gt_x86_op *out);
+/* Build operand k (0 <= k < kgenome_x86_nops) of a decoded instruction. */
+void kgenome_x86_operand(const struct kgenome_x86_insn *in, unsigned k, struct kgenome_x86_op *out);
 
 /* All of them: for a caller that reads most operands anyway. */
-void gt_x86_operands(const struct gt_x86_insn *in, struct gt_x86_op *out);
+void kgenome_x86_operands(const struct kgenome_x86_insn *in, struct kgenome_x86_op *out);
 
 /*
  * WHICH GENERAL REGISTER an operand names, as the sweeps number them: x86-64 has
@@ -197,52 +197,52 @@ void gt_x86_operands(const struct gt_x86_insn *in, struct gt_x86_op *out);
  * `cdq; mov dh,0x10`; the constant map had rdx untouched and rsi clobbered. The
  * caller still has to know it was a partial write - the operand's size says so.
  */
-#define GT_X86_NGPR 16u
+#define KGENOME_X86_NGPR 16u
 
-static inline uint32_t gt_x86_gpr_of(const struct gt_x86_op *op)
+static inline uint32_t kgenome_x86_gpr_of(const struct kgenome_x86_op *op)
 {
 	uint32_t r;
 
-	if (op->type != GT_X86_OP_REG || op->rtype != GT_X86_REG_GPR)
-		return GT_X86_NGPR;
+	if (op->type != KGENOME_X86_OP_REG || op->rtype != KGENOME_X86_REG_GPR)
+		return KGENOME_X86_NGPR;
 	r = op->reg;
 	if (op->high8 && r >= 4u && r < 8u)
 		r -= 4u;
-	return r < GT_X86_NGPR ? r : GT_X86_NGPR;
+	return r < KGENOME_X86_NGPR ? r : KGENOME_X86_NGPR;
 }
 
 /*
  * THE SWEEP'S VIEW: decode and the explicit operands in the form a sweep reads
  * them, in one call. For a caller that wants exactly this - the celllysis adapter -
- * and nothing implicit: it is gt_x86_decode, then the first `nexp` operands of
- * gt_x86_operands narrowed to what is kept, built by the same code, with no decoded
+ * and nothing implicit: it is kgenome_x86_decode, then the first `nexp` operands of
+ * kgenome_x86_operands narrowed to what is kept, built by the same code, with no decoded
  * struct left behind and no copy of the instruction's bytes.
  *
  * KEPT: a general register, a memory operand, an immediate, a relative offset; the
  * first three. Anything else (a vector or segment register, a far address, a
  * constant) takes no slot. `wmask` has a bit for every general register the leaf
- * writes without naming (gt_x86_wgpr) and for every one a named operand writes, kept
- * or not. An operand not present is GT_X86_SOP_NONE.
+ * writes without naming (kgenome_x86_wgpr) and for every one a named operand writes, kept
+ * or not. An operand not present is KGENOME_X86_SOP_NONE.
  *
- * THE LAYOUT OF gt_x86_sop AND THE NUMBERS OF GT_X86_SK_* / GT_X86_SF_* ARE
- * celllysis's struct cell_operand AND ITS enum cell_op_kind / CELL_OF_* flags,
+ * THE LAYOUT OF kgenome_x86_sop AND THE NUMBERS OF GT_X86_SK_* / GT_X86_SF_* ARE
+ * celllysis's struct kgenome_cell_operand AND ITS enum kgenome_cell_op_kind / CELL_OF_* flags,
  * which decode_x86.c asserts at compile time: the adapter copies the three
  * operands as they stand. genotype does not include celllysis; it agrees with it.
  */
-#define GT_X86_SK_NONE  0u
-#define GT_X86_SK_REG   1u
-#define GT_X86_SK_MEM   2u
-#define GT_X86_SK_IMM   3u
-#define GT_X86_SK_REL   4u
+#define KGENOME_X86_SK_NONE  0u
+#define KGENOME_X86_SK_REG   1u
+#define KGENOME_X86_SK_MEM   2u
+#define KGENOME_X86_SK_IMM   3u
+#define KGENOME_X86_SK_REL   4u
 
-#define GT_X86_SF_WRITE  0x01u
-#define GT_X86_SF_READ   0x02u
-#define GT_X86_SF_RIPREL 0x04u
-#define GT_X86_SF_HIGH8  0x08u
+#define KGENOME_X86_SF_WRITE  0x01u
+#define KGENOME_X86_SF_READ   0x02u
+#define KGENOME_X86_SF_RIPREL 0x04u
+#define KGENOME_X86_SF_HIGH8  0x08u
 
-#define GT_X86_SREG_NONE 0xffu
+#define KGENOME_X86_SREG_NONE 0xffu
 
-struct gt_x86_sop {
+struct kgenome_x86_sop {
 	uint8_t  kind;          /* GT_X86_SK_*                                  */
 	uint8_t  reg;           /* a register, or a memory base; _SREG_NONE if none */
 	uint8_t  index;         /* a memory index, or _SREG_NONE                */
@@ -255,20 +255,20 @@ struct gt_x86_sop {
 	uint64_t imm;           /* an immediate, or a relative offset sign-extended */
 };
 
-#define GT_X86_SOP_NONE { GT_X86_SK_NONE, GT_X86_SREG_NONE, GT_X86_SREG_NONE, 0, 0, 0, \
-			  GT_X86_SREG_NONE, 0, 0, 0 }
+#define KGENOME_X86_SOP_NONE { KGENOME_X86_SK_NONE, KGENOME_X86_SREG_NONE, KGENOME_X86_SREG_NONE, 0, 0, 0, \
+			  KGENOME_X86_SREG_NONE, 0, 0, 0 }
 
-struct gt_x86_sweep {
-	uint16_t id;            /* enum gt_x86_id                               */
-	uint16_t cat;           /* gt_x86_cat                                   */
+struct kgenome_x86_sweep {
+	uint16_t id;            /* enum kgenome_x86_id                               */
+	uint16_t cat;           /* kgenome_x86_cat                                   */
 	uint8_t  len;
 	uint8_t  rep;           /* last F2 / F3 byte, 0 if none                 */
-	uint8_t  cond;          /* gt_x86_cond                                  */
+	uint8_t  cond;          /* kgenome_x86_cond                                  */
 	uint8_t  n;             /* operands kept, 0 to 3                        */
 	uint64_t wmask;         /* general registers written, a bit per register 0-15 */
-	struct gt_x86_sop op[3];
+	struct kgenome_x86_sop op[3];
 };
 
-enum gt_status gt_x86_sweep(struct gt_x86_sweep *out, const uint8_t *p, size_t n, int mode);
+enum kgenome_status kgenome_x86_sweep(struct kgenome_x86_sweep *out, const uint8_t *p, size_t n, int mode);
 
-#endif /* KOF_GENOTYPE_X86_H */
+#endif /* KGENOME_GENOTYPE_X86_H */

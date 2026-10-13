@@ -120,19 +120,7 @@ static const uint32_t rar_cls_bit[KOF_RAR_CLS_COUNT] = {
 	KOF_SCAN_RAR_PACKED
 };
 
-static uint32_t rar_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
-				 struct kof_range *out, uint32_t max_out)
-{
-	const struct kof_rar_info *r = (const struct kof_rar_info *)ctx->file_header;
-
-	if (!r || !r->valid || !out || max_out == 0)
-		return 0;
-	_Static_assert(sizeof r->run[0] == sizeof(struct kof_run),
-		       "the view's run and runlist.h's have drifted apart");
-	return kof_runs_resolve((const struct kof_run *)r->run, r->n_runs, mask,
-				rar_cls_bit, KOF_SCAN_RAR_UNCLAIMED,
-				ctx->obj_size, out, max_out);
-}
+KOF_RUNS_RESOLVER(rar, struct kof_rar_info, rar_cls_bit, KOF_SCAN_RAR_UNCLAIMED)
 
 /*
  * Does this RAR5 file header say its data is encrypted.

@@ -49,10 +49,10 @@ static int bitmask_ok(uint32_t x)
  * THE TREE: index, match, descend, and the row's flags. This is the table's
  * authority; the lookup below is derived from it at first use.
  */
-unsigned gt_arm64_tree(uint32_t x, unsigned *flags)
+unsigned kgenome_arm64_tree(uint32_t x, unsigned *flags)
 {
-	const struct gt_arm64_node *n = &gt_arm64_top;
-	const struct gt_arm64_row *r;
+	const struct kgenome_arm64_node *n = &kgenome_arm64_top;
+	const struct kgenome_arm64_row *r;
 	unsigned id;
 
 	for (;;) {
@@ -62,23 +62,23 @@ unsigned gt_arm64_tree(uint32_t x, unsigned *flags)
 		while ((x & r->mask) != r->val)
 			r++;
 		id = r->id;
-		if (id < GT_ARM64_NODE0)
+		if (id < KGENOME_ARM64_NODE0)
 			break;
-		n = gt_arm64_nodes[id - GT_ARM64_NODE0];
+		n = kgenome_arm64_nodes[id - KGENOME_ARM64_NODE0];
 	}
 	*flags = r->fl;
 	return id;
 }
 
-enum gt_status gt_arm64_decode_tree(struct gt_arm64_insn *out, uint32_t x)
+enum kgenome_status kgenome_arm64_decode_tree(struct kgenome_arm64_insn *out, uint32_t x)
 {
-	unsigned fl, id = gt_arm64_tree(x, &fl);
+	unsigned fl, id = kgenome_arm64_tree(x, &fl);
 
-	if ((fl & GT_ARM64_RF_BITMASK) && !bitmask_ok(x))
-		id = GT_ARM64_I_INVALID;
+	if ((fl & KGENOME_ARM64_RF_BITMASK) && !bitmask_ok(x))
+		id = KGENOME_ARM64_I_INVALID;
 	out->word = x;
 	out->id = (uint16_t)id;
-	return id == GT_ARM64_I_INVALID ? GT_INVALID : GT_OK;
+	return id == KGENOME_ARM64_I_INVALID ? KGENOME_INVALID : KGENOME_OK;
 }
 
 /*
@@ -110,9 +110,9 @@ enum gt_status gt_arm64_decode_tree(struct gt_arm64_insn *out, uint32_t x)
 static uint16_t g_l1[L1_N];
 static atomic_int g_l1_state;           /* 0 not built, 1 being built, 2 ready */
 
-static unsigned resolve_node(const struct gt_arm64_node *n, uint32_t km, uint32_t kv);
+static unsigned resolve_node(const struct kgenome_arm64_node *n, uint32_t km, uint32_t kv);
 
-static unsigned resolve_rows(const struct gt_arm64_row *r, uint32_t km, uint32_t kv)
+static unsigned resolve_rows(const struct kgenome_arm64_row *r, uint32_t km, uint32_t kv)
 {
 	for (;; r++) {
 		if ((kv ^ r->val) & km & r->mask)
@@ -121,13 +121,13 @@ static unsigned resolve_rows(const struct gt_arm64_row *r, uint32_t km, uint32_t
 			return L1_MORE;         /* the row tests a bit that is not known */
 		if (r->fl)
 			return L1_MORE;
-		if (r->id >= GT_ARM64_NODE0)
-			return resolve_node(gt_arm64_nodes[r->id - GT_ARM64_NODE0], km, kv);
+		if (r->id >= KGENOME_ARM64_NODE0)
+			return resolve_node(kgenome_arm64_nodes[r->id - KGENOME_ARM64_NODE0], km, kv);
 		return r->id;
 	}
 }
 
-static unsigned resolve_node(const struct gt_arm64_node *n, uint32_t km, uint32_t kv)
+static unsigned resolve_node(const struct kgenome_arm64_node *n, uint32_t km, uint32_t kv)
 {
 	unsigned w0 = (unsigned)__builtin_popcount(n->m0);
 	unsigned nb = w0 + (unsigned)__builtin_popcount(n->m1), i;
@@ -170,7 +170,7 @@ static void l1_build(void)
 	unsigned k;
 
 	for (k = 0; k < L1_N; k++)
-		g_l1[k] = (uint16_t)resolve_node(&gt_arm64_top,
+		g_l1[k] = (uint16_t)resolve_node(&kgenome_arm64_top,
 						 ~0u << L1_SHIFT, k << L1_SHIFT);
 }
 
@@ -194,7 +194,7 @@ static void l1_init(void)
 		;
 }
 
-enum gt_status gt_arm64_decode(struct gt_arm64_insn *out, uint32_t x)
+enum kgenome_status kgenome_arm64_decode(struct kgenome_arm64_insn *out, uint32_t x)
 {
 	unsigned e;
 
@@ -202,28 +202,28 @@ enum gt_status gt_arm64_decode(struct gt_arm64_insn *out, uint32_t x)
 		l1_init();
 	e = g_l1[x >> L1_SHIFT];
 	if (e == L1_MORE)
-		return gt_arm64_decode_tree(out, x);
+		return kgenome_arm64_decode_tree(out, x);
 	out->word = x;
 	out->id = (uint16_t)e;
-	return e == GT_ARM64_I_INVALID ? GT_INVALID : GT_OK;
+	return e == KGENOME_ARM64_I_INVALID ? KGENOME_INVALID : KGENOME_OK;
 }
 
-const char *gt_arm64_name(unsigned id)
+const char *kgenome_arm64_name(unsigned id)
 {
-	return id < GT_ARM64_I_COUNT ? gt_arm64_names[id] : "?";
+	return id < KGENOME_ARM64_I_COUNT ? kgenome_arm64_names[id] : "?";
 }
 
-unsigned gt_arm64_lskind(const struct gt_arm64_insn *in)
+unsigned kgenome_arm64_lskind(const struct kgenome_arm64_insn *in)
 {
-	return gt_arm64_lsk[in->id];
+	return kgenome_arm64_lsk[in->id];
 }
 
-unsigned gt_arm64_amode(const struct gt_arm64_insn *in)
+unsigned kgenome_arm64_amode(const struct kgenome_arm64_insn *in)
 {
-	return gt_arm64_am[in->id];
+	return kgenome_arm64_am[in->id];
 }
 
-uint64_t gt_arm64_logical_imm(const struct gt_arm64_insn *in)
+uint64_t kgenome_arm64_logical_imm(const struct kgenome_arm64_insn *in)
 {
 	uint32_t x = in->word;
 	unsigned n = (x >> 22) & 1u, imms = (x >> 10) & 63u, immr = (x >> 16) & 63u;
@@ -247,49 +247,49 @@ uint64_t gt_arm64_logical_imm(const struct gt_arm64_insn *in)
 	return w;
 }
 
-int64_t gt_arm64_branch_off(const struct gt_arm64_insn *in)
+int64_t kgenome_arm64_branch_off(const struct kgenome_arm64_insn *in)
 {
 	uint32_t x = in->word;
 
-	if (in->id <= GT_ARM64_I_BL)
+	if (in->id <= KGENOME_ARM64_I_BL)
 		return sx(x & 0x3ffffffu, 26) * 4;
-	if (in->id <= GT_ARM64_I_BCOND)
+	if (in->id <= KGENOME_ARM64_I_BCOND)
 		return sx((x >> 5) & 0x7ffffu, 19) * 4;
-	if (in->id <= GT_ARM64_I_TBNZ)
+	if (in->id <= KGENOME_ARM64_I_TBNZ)
 		return sx((x >> 5) & 0x3fffu, 14) * 4;
 	return 0;
 }
 
 static int is_pair(unsigned id)
 {
-	return id >= GT_ARM64_I_STNP && id <= GT_ARM64_I_LDP_FP_PRE;
+	return id >= KGENOME_ARM64_I_STNP && id <= KGENOME_ARM64_I_LDP_FP_PRE;
 }
 
 static int is_literal(unsigned id)
 {
-	return id >= GT_ARM64_I_LDR_LIT_W && id <= GT_ARM64_I_LDR_LIT_FP;
+	return id >= KGENOME_ARM64_I_LDR_LIT_W && id <= KGENOME_ARM64_I_LDR_LIT_FP;
 }
 
 static int is_single(unsigned id)
 {
-	return id >= GT_ARM64_I_STR_UOFF && id <= GT_ARM64_I_LDAPURS32;
+	return id >= KGENOME_ARM64_I_STR_UOFF && id <= KGENOME_ARM64_I_LDAPURS32;
 }
 
-unsigned gt_arm64_ldst_bytes(const struct gt_arm64_insn *in)
+unsigned kgenome_arm64_ldst_bytes(const struct kgenome_arm64_insn *in)
 {
 	uint32_t x = in->word;
-	unsigned opc = x >> 30, k = gt_arm64_lsk[in->id];
-	int fp = k == GT_ARM64_K_STORE_FP || k == GT_ARM64_K_LOAD_FP;
+	unsigned opc = x >> 30, k = kgenome_arm64_lsk[in->id];
+	int fp = k == KGENOME_ARM64_K_STORE_FP || k == KGENOME_ARM64_K_LOAD_FP;
 
 	switch (in->id) {
-	case GT_ARM64_I_LDR_LIT_W:
-	case GT_ARM64_I_LDRSW_LIT:
+	case KGENOME_ARM64_I_LDR_LIT_W:
+	case KGENOME_ARM64_I_LDRSW_LIT:
 		return 4;
-	case GT_ARM64_I_LDR_LIT_X:
+	case KGENOME_ARM64_I_LDR_LIT_X:
 		return 8;
-	case GT_ARM64_I_LDR_LIT_FP:
+	case KGENOME_ARM64_I_LDR_LIT_FP:
 		return 4u << opc;
-	case GT_ARM64_I_PRFM_LIT:
+	case KGENOME_ARM64_I_PRFM_LIT:
 		return 0;
 	default:
 		break;
@@ -298,7 +298,7 @@ unsigned gt_arm64_ldst_bytes(const struct gt_arm64_insn *in)
 		if (fp)
 			return 4u << opc;
 		if (opc == 1u)
-			return k == GT_ARM64_K_LOAD_S64 ? 4u : 16u;     /* ldpsw, stgp */
+			return k == KGENOME_ARM64_K_LOAD_S64 ? 4u : 16u;     /* ldpsw, stgp */
 		return opc ? 8u : 4u;
 	}
 	if (is_single(in->id)) {
@@ -310,7 +310,7 @@ unsigned gt_arm64_ldst_bytes(const struct gt_arm64_insn *in)
 	return 0;
 }
 
-int64_t gt_arm64_ldst_off(const struct gt_arm64_insn *in)
+int64_t kgenome_arm64_ldst_off(const struct kgenome_arm64_insn *in)
 {
 	uint32_t x = in->word;
 	unsigned id = in->id;
@@ -318,30 +318,30 @@ int64_t gt_arm64_ldst_off(const struct gt_arm64_insn *in)
 	if (is_literal(id))
 		return sx((x >> 5) & 0x7ffffu, 19) * 4;
 	if (is_pair(id))
-		return sx((x >> 15) & 0x7fu, 7) * (int64_t)gt_arm64_ldst_bytes(in);
+		return sx((x >> 15) & 0x7fu, 7) * (int64_t)kgenome_arm64_ldst_bytes(in);
 	if (is_single(id)) {
-		switch (gt_arm64_am[id]) {
-		case GT_ARM64_AM_OFFSET: {
-			unsigned size = x >> 30, sh = gt_arm64_ldst_bytes(in) == 16u ? 4u : size;
+		switch (kgenome_arm64_am[id]) {
+		case KGENOME_ARM64_AM_OFFSET: {
+			unsigned size = x >> 30, sh = kgenome_arm64_ldst_bytes(in) == 16u ? 4u : size;
 
 			return (int64_t)((x >> 10) & 0xfffu) << sh;
 		}
-		case GT_ARM64_AM_REG:
+		case KGENOME_ARM64_AM_REG:
 			return 0;
 		default:
 			return sx((x >> 12) & 0x1ffu, 9);
 		}
 	}
 	switch (id) {
-	case GT_ARM64_I_LDRAA:
-	case GT_ARM64_I_LDRAB:
-	case GT_ARM64_I_LDRAA_PRE:
-	case GT_ARM64_I_LDRAB_PRE:
+	case KGENOME_ARM64_I_LDRAA:
+	case KGENOME_ARM64_I_LDRAB:
+	case KGENOME_ARM64_I_LDRAA_PRE:
+	case KGENOME_ARM64_I_LDRAB_PRE:
 		return sx((((x >> 22) & 1u) << 9) | ((x >> 12) & 0x1ffu), 10) * 8;
-	case GT_ARM64_I_STG_POST: case GT_ARM64_I_STG_OFF: case GT_ARM64_I_STG_PRE:
-	case GT_ARM64_I_STZG_POST: case GT_ARM64_I_STZG_OFF: case GT_ARM64_I_STZG_PRE:
-	case GT_ARM64_I_ST2G_POST: case GT_ARM64_I_ST2G_OFF: case GT_ARM64_I_ST2G_PRE:
-	case GT_ARM64_I_STZ2G_POST: case GT_ARM64_I_STZ2G_OFF: case GT_ARM64_I_STZ2G_PRE:
+	case KGENOME_ARM64_I_STG_POST: case KGENOME_ARM64_I_STG_OFF: case KGENOME_ARM64_I_STG_PRE:
+	case KGENOME_ARM64_I_STZG_POST: case KGENOME_ARM64_I_STZG_OFF: case KGENOME_ARM64_I_STZG_PRE:
+	case KGENOME_ARM64_I_ST2G_POST: case KGENOME_ARM64_I_ST2G_OFF: case KGENOME_ARM64_I_ST2G_PRE:
+	case KGENOME_ARM64_I_STZ2G_POST: case KGENOME_ARM64_I_STZ2G_OFF: case KGENOME_ARM64_I_STZ2G_PRE:
 		return sx((x >> 12) & 0x1ffu, 9) * 16;
 	default:
 		return 0;
