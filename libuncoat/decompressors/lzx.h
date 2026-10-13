@@ -48,6 +48,7 @@
 #include "format_limits.h"
 
 #include "../status.h"
+#include "../uncoat_io.h"
 
 /* The window sizes the format defines are KUNCOAT_LZX_MIN_BITS to
  * KUNCOAT_LZX_MAX_BITS, declared in kofsig.h because a module reads the width out
@@ -125,11 +126,22 @@ struct kuncoat_lzx {
 
 /* Receives decoded bytes; returns zero to refuse more, which the decoder
  * reports as KUNCOAT_STOPPED. The same shape every decoder here uses. */
-typedef int (*kuncoat_lzx_sink)(void *user, const uint8_t *p, uint32_t n);
+typedef kuncoat_sink_fn kuncoat_lzx_sink;
 
 /*
- * Decode the LZX stream at `in`, hand `take` bytes starting at `skip` to the
- * sink, and stop.
+ * What to cut from the stream: the window the container declared, and the byte
+ * range of the file the caller wants. One request, because the three are one
+ * statement - "this stream, this window, this slice of it".
+ */
+struct kuncoat_lzx_req {
+	uint32_t window_bits;   /* from the container; not in the stream */
+	uint64_t skip;          /* output bytes to decode and drop */
+	uint64_t take;          /* output bytes to hand to the sink after them */
+};
+
+/*
+ * Decode the LZX stream at `io->in`, hand `rq->take` bytes starting at
+ * `rq->skip` to the sink, and stop.
  *
  * `st` is caller-owned and needs no initialisation - everything is set here -
  * and is about 2.1MB, so it is meant to be allocated once and reused rather
@@ -139,14 +151,13 @@ typedef int (*kuncoat_lzx_sink)(void *user, const uint8_t *p, uint32_t n);
  * compression type, a help file in its ControlData. It is not in the stream,
  * which is why a decoder cannot be handed only the bytes.
  *
- * `produced` is always set - what was handed to the sink, not what was decoded
- * - because a caller that was stopped or truncated still needs to know how much
- * of its file it got.
+ * `io->produced` is always set - what was handed to the sink, not what was
+ * decoded - because a caller that was stopped or truncated still needs to know
+ * how much of its file it got. `io->consumed` is always 0: an LZX stream is
+ * framed by its container, which knows where it ends.
  */
-enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *st, uint32_t window_bits,
-				      const uint8_t *in, uint64_t in_len,
-				      uint64_t skip, uint64_t take,
-				      kuncoat_lzx_sink sink, void *user,
-				      uint64_t *produced);
+enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *st,
+				      const struct kuncoat_lzx_req *rq,
+				      struct kuncoat_io *io);
 
 #endif /* KUNCOAT_LZX_H */

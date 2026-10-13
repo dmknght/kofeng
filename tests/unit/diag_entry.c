@@ -5,7 +5,7 @@
  * TWO FAULTS, BOTH SILENT, BOTH FOUND BY SURVEYING PE SAMPLES RATHER THAN BY
  * ANYTHING FAILING:
  *
- *   THE WRONG TABLE   kgenome_flow_cap_of_syscall only knows Linux. Handed a
+ *   THE WRONG TABLE   kgenome_nucleo_cap_of_syscall only knows Linux. Handed a
  *                     Windows service number it does not refuse - it
  *                     ANSWERS. A Hell's Gate shaped stub, `mov r10,rcx; mov
  *                     eax,0x3b; syscall`, in a PE came back as proc-start,

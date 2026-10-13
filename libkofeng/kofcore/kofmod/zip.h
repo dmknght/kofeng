@@ -256,15 +256,10 @@ struct kof_zip_info {
 	uint64_t region_bytes[KOF_ZIP_CLS_COUNT];
 
 	/* Runs, classified, joined where consecutive and settled so no byte is in two
-	 * of them. Spelled out rather than including runlist.h, for the reason
-	 * docole.h gives: the ABI must not depend on a host header. */
+	 * of them. struct kof_run is range.h's. */
 	uint32_t n_runs;
 	uint32_t reserved0;
-	struct {
-		uint64_t off, len;
-		uint32_t cls;         /* enum kof_zip_class */
-		uint32_t reserved;
-	} run[KOF_ZIP_MAX_EXTENTS];
+	struct kof_run run[KOF_ZIP_MAX_EXTENTS];   /* cls is enum kof_zip_class */
 
 	struct kof_zip_entry entry[KOF_ZIP_MAX_ENTRIES];
 };

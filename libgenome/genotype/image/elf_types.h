@@ -344,8 +344,8 @@ struct kgenome_elf_info {
  *
  * Where a walk that decodes every byte of a segment needs both views - the
  * segment says which bytes can run, only the section table says which of them
- * are instructions - the answer is kgenome_diag_walk_range in
- * libgenome/phenotype/nodes.c, documented where it is defined; the
+ * are instructions - the answer is kgenome_diag_extent (its ELF
+ * half is kgenome_diag_walk_range) in libgenome/phenotype/diag_code.c, documented where it is defined; the
  * segment view past the headers is kgenome_diag_code_range beside it. The xref sweep
  * keeps the section view for its run cut, for the reason given at xref_runs in
  * scanners/objctx.c.

@@ -30,7 +30,7 @@
  *
  * WHAT IT DOES NOT DO YET, SAID PLAINLY
  *
- * There is no event-rule database. bases/evts is designed - facts, windows,
+ * There is no event-rule database. An event-rule set is designed - facts, windows,
  * M-of-N - and not implemented, so nothing here evaluates a SEQUENCE of
  * events. What it does instead is the part that already works: an event that
  * names a file gets that file scanned by the engine, which is the same engine,
@@ -86,7 +86,7 @@
  *
  * THE TEST USED TO BE _WIN32 AND IS NOW WHETHER A BACKEND IS LINKED. When the
  * channel lived in the Windows collector those were the same question; since
- * it moved to libkoforbit/kofchan they are not, because chan_posix.c is a real
+ * it moved to libkoforbit/chan they are not, because chan_posix.c is a real
  * backend on a real host. KOF_HAVE_CHAN is set by the build that links one -
  * which is the difference between "this OS is Windows" and "this build can
  * attach to a sensor", and only the second was ever what these sites meant.
@@ -531,53 +531,77 @@ static void source_close(struct wm_source *s)
 	s->log  = NULL;
 }
 
-int main(int argc, char **argv)
-{
-	const char *replay_path = NULL;
-	const char *db_path  = "build/release/databases";
-	int         show_all = 0, do_scan = 1, i;
+/*
+ * What main() shares between its steps: the options as parsed, then the
+ * state each step leaves for the next.
+ */
+struct wm_run {
+	const char *replay_path;
+	const char *db_path;
+	int         show_all, do_scan;
 
-	struct kofevt_log_r *lr;
 	struct wm_source src;
-	const struct kofevt_log_hdr *h = NULL;
-	const char *chan_name = NULL;
+	const struct kofevt_log_hdr *h;
+	const char *chan_name;
 	/*
 	 * PLAIN int AND NOT THE ENUM. kofchan.h is included only by a build
 	 * that HAS a channel, so naming kof_chan_why here breaks the build
 	 * that has none - which is the configuration this variable exists to
 	 * be harmless in.
 	 */
-	int chan_denied = 0;
-	const char *why = "";
-	kof_engine  *eng = NULL;
-	kof_scanner *sc  = NULL;
+	int chan_denied;
+	const char *why;
+	kof_engine  *eng;
+	kof_scanner *sc;
 	struct kof_evt e;
 	struct kof_evt_tally tally;
-	uint64_t n = 0, scanned = 0, skipped = 0, cached = 0;
-	struct koffridge *fridge = NULL;
-	uint64_t t0 = 0;
-	int      have_t0 = 0;
+	uint64_t n, scanned, skipped, cached;
+	struct koffridge *fridge;
+	uint64_t t0;
+	int      have_t0;
 	struct hit_ctx hits;
+};
 
-	/* argv and a log path, before either is read - see kof_utf8_init. */
-	kof_utf8_init(&argc, &argv);
+/* Step: the starting state of the run. */
+static void wm_init(struct wm_run *m)
+{
+	m->replay_path = NULL;
+	m->db_path     = "build/release/databases";
+	m->show_all    = 0;
+	m->do_scan     = 1;
+	m->h           = NULL;
+	m->chan_name   = NULL;
+	m->chan_denied = 0;
+	m->why         = "";
+	m->eng         = NULL;
+	m->sc          = NULL;
+	m->n = 0; m->scanned = 0; m->skipped = 0; m->cached = 0;
+	m->fridge      = NULL;
+	m->t0          = 0;
+	m->have_t0     = 0;
 
-	memset(&tally, 0, sizeof tally);
-	memset(&hits, 0, sizeof hits);
+	memset(&m->tally, 0, sizeof m->tally);
+	memset(&m->hits, 0, sizeof m->hits);
 	signal(SIGINT, on_sigint);
-	memset(&src, 0, sizeof src);
+	memset(&m->src, 0, sizeof m->src);
+}
+
+/* Step: read the command line. -1 to carry on, otherwise the exit status. */
+static int wm_parse_args(struct wm_run *m, int argc, char **argv)
+{
+	int i;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--replay") && i + 1 < argc)
-			replay_path = argv[++i];       /* read */
+			m->replay_path = argv[++i];       /* read */
 		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
-			chan_name = argv[++i];
+			m->chan_name = argv[++i];
 		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
-			db_path = argv[++i];
+			m->db_path = argv[++i];
 		else if (!strcmp(argv[i], "--all"))
-			show_all = 1;
+			m->show_all = 1;
 		else if (!strcmp(argv[i], "--no-scan"))
-			do_scan = 0;
+			m->do_scan = 0;
 		else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
 			usage();
 			return 0;
@@ -588,6 +612,18 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
+
+	return -1;
+}
+
+/*
+ * Step: open the source, the live channel or the recording. -1 to carry on,
+ * otherwise the exit status.
+ */
+static int wm_open_source(struct wm_run *m)
+{
+	struct kofevt_log_r *lr;
+
 	/*
 	 * NO --replay MEANS THE LIVE SENSOR, which is the ordinary way to run
 	 * this: watchman is the client, kofwatchtower is the server.
@@ -603,24 +639,24 @@ int main(int argc, char **argv)
 	 * it is --replay, and has been since the argument loop above was
 	 * written.)
 	 */
-	if (!replay_path) {
+	if (!m->replay_path) {
 #ifdef KOF_HAVE_CHAN
 		{
 			int reason = 0;
 
-			src.chan = kof_chan_sub_open(chan_name, &why, &reason);
-			chan_denied = (reason == KOF_CHAN_WHY_DENIED);
+			m->src.chan = kof_chan_sub_open(m->chan_name, &m->why, &reason);
+			m->chan_denied = (reason == KOF_CHAN_WHY_DENIED);
 		}
 #else
-		(void)chan_name;
-		why = "this build has no live channel - it is a Windows "
+		(void)m->chan_name;
+		m->why = "this build has no live channel - it is a Windows "
 		      "transport; pass --replay FILE";
 #endif
-		if (!src.chan) {
+		if (!m->src.chan) {
 			kof_evt_banner(stderr, "kofwatchman",
 				       (uint32_t)KOFENG_BUILD,
 				       "verdicts over an event stream");
-			fprintf(stderr, "\nkofwatchman: %s\n", why);
+			fprintf(stderr, "\nkofwatchman: %s\n", m->why);
 			/*
 			 * THE ADVICE HAS TO MATCH THE REASON. Told that a
 			 * channel exists and is not readable, this used to
@@ -630,7 +666,7 @@ int main(int argc, char **argv)
 			 * sensor, which is refused, and now has two wrong
 			 * answers.
 			 */
-			if (chan_denied)
+			if (m->chan_denied)
 				fputs("  The sensor is ALREADY RUNNING. A "
 				      "channel is private to the account that\n"
 				      "  published it, so a root sensor cannot "
@@ -645,16 +681,22 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	} else {
-		lr = kofevt_log_open(replay_path, 0, KOFEVT_REC_NONE, &why);
+		lr = kofevt_log_open(m->replay_path, 0, KOFEVT_REC_NONE, &m->why);
 		if (!lr) {
-			fprintf(stderr, "kofwatchman: %s: %s\n", replay_path,
-				why);
+			fprintf(stderr, "kofwatchman: %s: %s\n", m->replay_path,
+				m->why);
 			return 1;
 		}
-		src.log = lr;
-		h = kofevt_log_header(lr);
+		m->src.log = lr;
+		m->h = kofevt_log_header(lr);
 	}
 
+	return -1;
+}
+
+/* Step: say what the source is, before anything is concluded from it. */
+static void wm_announce_source(struct wm_run *m)
+{
 	/*
 	 * WHAT IT IS HOLDING, said before anything is concluded from it.
 	 *
@@ -664,8 +706,8 @@ int main(int argc, char **argv)
 	 */
 	fputs("kofwatchman: connected to real-time protection\n", stderr);
 #ifdef KOF_HAVE_CHAN
-	if (src.chan) {
-		const struct kof_chan_hdr *ch = kof_chan_sub_header(src.chan);
+	if (m->src.chan) {
+		const struct kof_chan_hdr *ch = kof_chan_sub_header(m->src.chan);
 
 		fprintf(stderr, "  source   live sensor, pid %lu\n",
 			(unsigned long)ch->pid);
@@ -674,21 +716,28 @@ int main(int argc, char **argv)
 	} else
 #endif
 	{
-		fprintf(stderr, "  source   %s (replay)\n", replay_path);
+		fprintf(stderr, "  source   %s (replay)\n", m->replay_path);
 		fprintf(stderr, "  platform %s/%s, sensor build %lu, record "
 			"%u bytes\n",
-			kof_evt_platform_name((uint8_t)h->platform),
-			kof_evt_arch_name((uint8_t)h->arch),
-			(unsigned long)h->build, (unsigned)h->rec_size);
-		if (h->n_records)
+			kof_evt_platform_name((uint8_t)m->h->platform),
+			kof_evt_arch_name((uint8_t)m->h->arch),
+			(unsigned long)m->h->build, (unsigned)m->h->rec_size);
+		if (m->h->n_records)
 			fprintf(stderr, "  %llu event(s)\n",
-				(unsigned long long)h->n_records);
+				(unsigned long long)m->h->n_records);
 		else
 			fputs("  event count unknown - the sensor did not close "
 			      "cleanly, so the log is however far it got\n",
 			      stderr);
 	}
+}
 
+/*
+ * Step: refuse a log whose record this build cannot decode. -1 to carry on,
+ * otherwise the exit status.
+ */
+static int wm_check_header(struct wm_run *m)
+{
 	/*
 	 * A NEUTRAL RECORD IS THE ONE THIS CAN DECODE.
 	 *
@@ -697,11 +746,11 @@ int main(int argc, char **argv)
 	 * is entirely plausible and entirely wrong - the reason rec_kind exists
 	 * beside rec_size.
 	 */
-	if (h && h->rec_kind != KOFEVT_REC_KOF) {
+	if (m->h && m->h->rec_kind != KOFEVT_REC_KOF) {
 		fputs("kofwatchman: this log holds a collector's own record, "
 		      "not the neutral one - nothing here can read it\n",
 		      stderr);
-		source_close(&src);
+		source_close(&m->src);
 		return 1;
 	}
 	/*
@@ -719,22 +768,28 @@ int main(int argc, char **argv)
 	 * uses the file's own head_size for I/O. The knowledge that
 	 * KOFEVT_REC_KOF means KOF_EVT_HEAD lives here, with the struct.
 	 */
-	if (h && h->head_size != (uint16_t)KOF_EVT_HEAD) {
+	if (m->h && m->h->head_size != (uint16_t)KOF_EVT_HEAD) {
 		fprintf(stderr, "kofwatchman: this log's record head is %u "
 			"bytes and this build's is %u - it was written by a "
 			"different version of the record, and every field "
 			"after the head would be read at the wrong offset\n",
-			(unsigned)h->head_size, (unsigned)KOF_EVT_HEAD);
-		source_close(&src);
+			(unsigned)m->h->head_size, (unsigned)KOF_EVT_HEAD);
+		source_close(&m->src);
 		return 1;
 	}
-	if (h && h->rec_size != sizeof(struct kof_evt)) {
+	if (m->h && m->h->rec_size != sizeof(struct kof_evt)) {
 		fputs("kofwatchman: the log's record is not this build's size\n",
 		      stderr);
-		source_close(&src);
+		source_close(&m->src);
 		return 1;
 	}
 
+	return -1;
+}
+
+/* Step: open the engine, the scanner and the verdict cache. */
+static void wm_open_engine(struct wm_run *m)
+{
 	/*
 	 * OPENED FROM WHAT THE SOURCE SAID, not from what this build assumes.
 	 *
@@ -744,19 +799,19 @@ int main(int argc, char **argv)
 	 * was written, and a reader of the second file must not be told it came
 	 * from here.
 	 */
-	if (do_scan) {
-		eng = keng_open(db_path);
-		if (!eng) {
+	if (m->do_scan) {
+		m->eng = keng_open(m->db_path);
+		if (!m->eng) {
 			fprintf(stderr, "kofwatchman: cannot load a database "
 				"from %s - continuing without scanning\n",
-				db_path);
-			do_scan = 0;
+				m->db_path);
+			m->do_scan = 0;
 		} else {
-			sc = kscan_new(eng);
-			if (!sc) {
-				keng_close(eng);
-				eng = NULL;
-				do_scan = 0;
+			m->sc = kscan_new(m->eng);
+			if (!m->sc) {
+				keng_close(m->eng);
+				m->eng = NULL;
+				m->do_scan = 0;
 			} else {
 				/*
 				 * KEYED ON THE DATABASE, which is not optional:
@@ -785,12 +840,16 @@ int main(int argc, char **argv)
 				 * memory and never saved, so the stamp only has
 				 * to outlive this run; it costs nothing to be
 				 * right about it anyway. */
-				fridge = koffridge_open(4096u,
-							kdb_stamp(eng));
+				m->fridge = koffridge_open(4096u,
+							kdb_stamp(m->eng));
 			}
 		}
 	}
+}
 
+/* Step: the event loop - count, join, and scan - until the source ends. */
+static void wm_loop(struct wm_run *m)
+{
 	/*
 	 * THE SUBMISSION BEING GATHERED, if one is.
 	 *
@@ -814,7 +873,7 @@ int main(int argc, char **argv)
 	memset(&join_head, 0, sizeof join_head);
 
 	while (!g_stop) {
-		int got = source_next(&src, &e);
+		int got = source_next(&m->src, &m->e);
 		const char *obj;
 		double secs;
 
@@ -823,14 +882,14 @@ int main(int argc, char **argv)
 		if (got < 0)
 			continue;           /* live, nothing yet - keep going */
 
-		obj = kof_evt_object(&e);
+		obj = kof_evt_object(&m->e);
 
-		n++;
-		if (!have_t0) {
-			have_t0 = 1;
-			t0 = e.stamp;
+		m->n++;
+		if (!m->have_t0) {
+			m->have_t0 = 1;
+			m->t0 = m->e.stamp;
 		}
-		secs = kof_evt_secs_since(t0, e.stamp);
+		secs = kof_evt_secs_since(m->t0, m->e.stamp);
 
 
 		/*
@@ -853,10 +912,10 @@ int main(int argc, char **argv)
 		 * counter, and a caller that wants only the count asks for
 		 * kof_evt_count INSTEAD.
 		 */
-		if (show_all)
-			kof_evt_render(&e, secs, "", stdout, &tally);
+		if (m->show_all)
+			kof_evt_render(&m->e, secs, "", stdout, &m->tally);
 		else
-			kof_evt_count(&e, &tally);
+			kof_evt_count(&m->e, &m->tally);
 
 		/*
 		 * GATHER, AND SCAN WHEN THE CHAIN ENDS.
@@ -867,19 +926,19 @@ int main(int argc, char **argv)
 		 * the assembled bytes go to the scanner before this record is
 		 * looked at itself.
 		 */
-		if (e.verb == KOF_EVT_CONT) {
+		if (m->e.verb == KOF_EVT_CONT) {
 			if (joining)
-				(void)kof_evt_join_add(&join, &e);
+				(void)kof_evt_join_add(&join, &m->e);
 			continue;   /* not an event: nothing else applies */
 		}
 		if (joining) {
-			scan_submission(sc, &join, &join_head, do_scan,
-					&hits, &scanned);
+			scan_submission(m->sc, &join, &join_head, m->do_scan,
+					&m->hits, &m->scanned);
 			joining = 0;
 		}
-		if (do_scan && kof_evt_join_start(&join, &e, join_buf,
+		if (m->do_scan && kof_evt_join_start(&join, &m->e, join_buf,
 						  sizeof join_buf)) {
-			join_head = e;
+			join_head = m->e;
 			joining = 1;
 			/*
 			 * Left open rather than scanned here: the chunks that
@@ -896,11 +955,11 @@ int main(int argc, char **argv)
 		 * The file half below answers the first from the image path;
 		 * this answers the second, and neither substitutes for it.
 		 */
-		scan_proc_event(sc, &e, do_scan, &hits, &scanned);
+		scan_proc_event(m->sc, &m->e, m->do_scan, &m->hits, &m->scanned);
 
-		if (!do_scan || !looks_openable(obj)) {
+		if (!m->do_scan || !looks_openable(obj)) {
 			if (*obj)
-				skipped++;
+				m->skipped++;
 			continue;
 		}
 		{
@@ -942,17 +1001,17 @@ int main(int argc, char **argv)
 			 * is the case the cheap filter was for, and it is the
 			 * only one it is sound for.
 			 */
-			if (!scan_needed(fridge, obj, &id, &have_id)) {
-				cached++;
+			if (!scan_needed(m->fridge, obj, &id, &have_id)) {
+				m->cached++;
 				continue;
 			}
 			if (!have_id && already_scanned(obj))
 				continue;
 
-			hits.e = &e;
-			before = hits.n;
-			(void)kscan_path(sc, obj, NULL, on_object, &hits);
-			scanned++;
+			m->hits.e = &m->e;
+			before = m->hits.n;
+			(void)kscan_path(m->sc, obj, NULL, on_object, &m->hits);
+			m->scanned++;
 
 			/*
 			 * ONLY A CLEAN SCAN IS REMEMBERED AS CLEAN. The engine
@@ -961,8 +1020,8 @@ int main(int argc, char **argv)
 			 * note on koffridge_get for what storing the wrong
 			 * answer here costs.
 			 */
-			if (fridge && hits.n == before)
-				(void)koffridge_put(fridge, &id, sizeof id,
+			if (m->fridge && m->hits.n == before)
+				(void)koffridge_put(m->fridge, &id, sizeof id,
 						    NULL);
 		}
 	}
@@ -970,16 +1029,20 @@ int main(int argc, char **argv)
 	/* A run that ended mid-chain still has bytes worth looking at, and they
 	 * are as complete as they are ever going to be. */
 	if (joining)
-		scan_submission(sc, &join, &join_head, do_scan, &hits, &scanned);
+		scan_submission(m->sc, &join, &join_head, m->do_scan, &m->hits, &m->scanned);
+}
 
-	if (do_scan) {
-		kscan_free(sc);
-		koffridge_close(fridge);
-		keng_close(eng);
+/* Step: release the engine, print the summary and return the exit status. */
+static int wm_finish(struct wm_run *m)
+{
+	if (m->do_scan) {
+		kscan_free(m->sc);
+		koffridge_close(m->fridge);
+		keng_close(m->eng);
 	}
 
-	kof_evt_print_tally(&tally,
-			    have_t0 ? kof_evt_secs_since(t0, e.stamp) : 0.0,
+	kof_evt_print_tally(&m->tally,
+			    m->have_t0 ? kof_evt_secs_since(m->t0, m->e.stamp) : 0.0,
 			    "the log", stderr);
 	/*
 	 * `cached` IS REPORTED, not merely acted on. It is the number of files
@@ -989,10 +1052,34 @@ int main(int argc, char **argv)
 	 */
 	fprintf(stderr, "   read %llu event(s), scanned %llu file(s), "
 		"cached %llu, skipped %llu unopenable path(s), matched %llu\n",
-		(unsigned long long)n, (unsigned long long)scanned,
-		(unsigned long long)cached,
-		(unsigned long long)skipped, (unsigned long long)hits.n);
+		(unsigned long long)m->n, (unsigned long long)m->scanned,
+		(unsigned long long)m->cached,
+		(unsigned long long)m->skipped, (unsigned long long)m->hits.n);
 
-	source_close(&src);
-	return hits.n ? 1 : 0;
+	source_close(&m->src);
+	return m->hits.n ? 1 : 0;
+}
+
+int main(int argc, char **argv)
+{
+	struct wm_run m;
+	int rc;
+
+	/* argv and a log path, before either is read - see kof_utf8_init. */
+	kof_utf8_init(&argc, &argv);
+
+	wm_init(&m);
+	rc = wm_parse_args(&m, argc, argv);
+	if (rc >= 0)
+		return rc;
+	rc = wm_open_source(&m);
+	if (rc >= 0)
+		return rc;
+	wm_announce_source(&m);
+	rc = wm_check_header(&m);
+	if (rc >= 0)
+		return rc;
+	wm_open_engine(&m);
+	wm_loop(&m);
+	return wm_finish(&m);
 }

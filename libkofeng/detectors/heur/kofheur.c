@@ -157,8 +157,8 @@ static const struct kof_heur_flag_term default_flag[] = {
 	 * measured - set at the bar so a single trace could report on its own,
 	 * which is not what a sum of log-likelihood ratios is for. That is the
 	 * shape of a rule, so it is written as one:
-	 * bases/heur/shellcode_00.c, where it also carries the measurement and
-	 * asks for the emulator. Nothing here has to pretend to score it.
+	 * the shellcode_00 rule (no longer in bases/heur), where it also carried
+	 * the measurement and asked for the emulator. Nothing here has to pretend to score it.
 	 */
 	/*
 	 * There were two more here - StrayMarker and PartFamily, both measured -

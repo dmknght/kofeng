@@ -3,7 +3,7 @@
  * object holds do what a diagnose says.
  *
  * LINKAGE is the quality of the links between nodes. What it reads is built by
- * the genotyping of the object (libgenome/phenotype/nodes.h, included
+ * the genotyping of the object (libgenome/phenotype/diag_scan.h, included
  * here so a caller of the matcher sees the whole of it); what is here walks a
  * diagnose tree over those nodes and names the result.
  *
@@ -14,17 +14,17 @@
  * packer defeats the second and leaves the first once the payload is out.
  */
 
-#ifndef KOFENG_PATHOGEN_KOFDIAG_H
-#define KOFENG_PATHOGEN_KOFDIAG_H
+#ifndef KOFENG_KOFDIAG_H
+#define KOFENG_KOFDIAG_H
 
-#include <phenotype/lineages.h>
+#include <phenotype/diag_scan.h>
 #include "../../analyzers/parsers/binaries/funcs.h"
 #include <stdint.h>
 
 #include "../../kofcore/koftypes.h"
 #include "../../kofcore/kofmod/kofsig.h"   /* struct kof_obj_ctx */
 #include "../../kofcore/kofcore.h"            /* kof_buf */
-#include "../../kofcore/kofmod/kofpathogen.h"
+#include "../../kofcore/kofmod/kofdiagtree.h"
 
 /*
  * DOES THIS DIAGNOSE CARRY THIS NAME - read at a call site its tree BOUND,
@@ -87,7 +87,7 @@ int kof_diag_match_known(const struct kgenome_diag_scan *, const struct kof_diag
 
 /*
  * SERIALISE THE GRAPH INTO THE RECORD BLOCK A RULE READS - see
- * kofmod/kofpathogen.h. Returns the bytes written, or 0.
+ * kofmod/kofdiagtree.h. Returns the bytes written, or 0.
  *
  * A COPY, and deliberately: the engine's node array is its own working state
  * and grows while the analysis runs, while a rule reads a block that does not
@@ -103,9 +103,20 @@ uint32_t kof_diag_graph_build(const struct kgenome_diag_scan *s, uint8_t *out,
  * `name`; nothing here allocates, so a load cannot fail halfway and leave
  * something to free.
  */
-int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
-		  struct kof_diag_node *node, uint8_t max_node,
-		  char *name, uint32_t name_cap,
-		  char *needs, uint32_t needs_cap);
+/*
+ * THE STORAGE A RECORD IS LOADED INTO - one concept, the caller's: the node
+ * array, the name and the string store beside the signs, each with its capacity.
+ * `needs` may be NULL (with needs_cap 0) for a caller that wants no sign words.
+ */
+struct kof_diag_store {
+	struct kof_diag_node *node;
+	char                 *name;
+	char                 *needs;
+	uint32_t              name_cap;
+	uint32_t              needs_cap;
+	uint8_t               max_node;
+};
 
-#endif /* KOFENG_PATHOGEN_KOFDIAG_H */
+int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st);
+
+#endif /* KOFENG_KOFDIAG_H */

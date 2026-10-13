@@ -11,29 +11,9 @@
 
 #include "scan_int.h"
 #include "objctx_int.h"
-#include "objtree.h"
 #include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
 
 
 /*
@@ -50,7 +30,7 @@
  * kof_mutation_score has to be a division rather than a search, and the only way
  * to make it one is to have counted already.
  *
- * THE FUNCTIONS AND THE LIBRARY ARE THE PARSE'S - see kof_scanner.cur_lib - and
+ * THE FUNCTIONS AND THE LIBRARY ARE THE PARSE'S - see kof_scanner.cur.lib - and
  * a normalised view is fed on its own bytes: see sx_mutation_feed.
  */
 struct mutation_feed {
@@ -146,8 +126,18 @@ void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
 		whole.off = 0;
 		whole.len = b.n;
 		u.mask = KOF_SCAN_ALL;
-		kgenome_mutation_units(b.p, b.n, ctx->format, KOF_SCAN_ALL, &whole, 1,
-				 funcs, lib, obj_unit_cb, &u);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = b.p,
+				.n_obj = b.n,
+				.format = ctx->format,
+				.mask = KOF_SCAN_ALL,
+				.ext = &whole,
+				.n_ext = 1,
+				.funcs = funcs,
+				.lib = lib,
+				.fn = obj_unit_cb,
+				.user = &u,
+			});
 		return;
 	}
 	for (ri = 0; ri < fp->n_regions; ri++) {
@@ -157,8 +147,18 @@ void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
 			continue;
 		u.mask = rm;
 		n = kof_scan_resolve_range(ctx, rm, ext);
-		kgenome_mutation_units(b.p, b.n, ctx->format, rm, ext, n, funcs, lib,
-				 obj_unit_cb, &u);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = b.p,
+				.n_obj = b.n,
+				.format = ctx->format,
+				.mask = rm,
+				.ext = ext,
+				.n_ext = n,
+				.funcs = funcs,
+				.lib = lib,
+				.fn = obj_unit_cb,
+				.user = &u,
+			});
 		if (u.stopped)
 			return;
 	}
@@ -196,8 +196,18 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 		f.mask  = KOF_SCAN_ALL;
 		f.norms = kof_mutation_set_norms(pc->set, 0);
 		kof_mutation_any_region(pc, 1);
-		kgenome_mutation_units(b.p, b.n, 0, KOF_SCAN_ALL, &whole, 1, NULL, NULL,
-				 mutation_feed_unit, &f);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = b.p,
+				.n_obj = b.n,
+				.format = 0,
+				.mask = KOF_SCAN_ALL,
+				.ext = &whole,
+				.n_ext = 1,
+				.funcs = NULL,
+				.lib = NULL,
+				.fn = mutation_feed_unit,
+				.user = &f,
+			});
 		return;
 	}
 
@@ -229,8 +239,18 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 		f.norms = kof_mutation_set_norms(pc->set, KOF_SCAN_ALL);
 		if (f.norms) {
 			n = kof_scan_resolve_range(ctx, KOF_SCAN_ALL, ext);
-			kgenome_mutation_units(b.p, b.n, ctx->format, KOF_SCAN_ALL,
-					 ext, n, funcs, lib, mutation_feed_unit, &f);
+			kgenome_mutation_units(&(const struct kgenome_mutation_req){
+					.p = b.p,
+					.n_obj = b.n,
+					.format = ctx->format,
+					.mask = KOF_SCAN_ALL,
+					.ext = ext,
+					.n_ext = n,
+					.funcs = funcs,
+					.lib = lib,
+					.fn = mutation_feed_unit,
+					.user = &f,
+				});
 		}
 		fp = NULL;
 	}
@@ -256,8 +276,18 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 		if (!f.norms)
 			continue;
 		n = kof_scan_resolve_range(ctx, m, ext);
-		kgenome_mutation_units(b.p, b.n, ctx->format, m, ext, n, funcs, lib,
-				 mutation_feed_unit, &f);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = b.p,
+				.n_obj = b.n,
+				.format = ctx->format,
+				.mask = m,
+				.ext = ext,
+				.n_ext = n,
+				.funcs = funcs,
+				.lib = lib,
+				.fn = mutation_feed_unit,
+				.user = &f,
+			});
 	}
 }
 
@@ -309,15 +339,15 @@ void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * and pieces. The parent is fed as well - the view is known only after
 	 * the detectors have run - so a block can be met in either.
 	 */
-	b = kof_src_buf(sc->cur_src);
+	b = kof_src_buf(sc->cur.src);
 	kof_scan_mutation_feed(&sc->mutation, ctx, b, present, from_packer,
 			     (!from_packer &&
 			      feed_wants_funcs(sc->mutation.set, ctx, present))
 				     ? oc_funcs(ctx) : NULL,
-			     sc->cur_lib_ok ? &sc->cur_lib : NULL, sc->ext_gather);
+			     sc->cur.lib_ok ? &sc->cur.lib : NULL, sc->cache.ext_gather);
 }
 
-void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+static void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			  uint32_t present)
 {
 	const struct kof_engine *e = sc->eng;
@@ -325,14 +355,14 @@ void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	uint32_t counts[3], a, i, r, b, u;
 	uint32_t swept = 0;
 
-	if (!e->multi || !e->multi->n_pat || !sc->live || !sc->found ||
+	if (!e->multi || !e->multi->n_pat || !sc->match.live || !sc->match.found ||
 	    !e->n_masks)
 		return;
 
-	memset(sc->live, 0, KOF_MULTIMATCH_BITS * sizeof *sc->live);
-	memset(sc->found, 0, (size_t)e->multi->n_pat * sizeof *sc->found);
-	if (sc->mask_ok)
-		memset(sc->mask_ok, 0, (size_t)e->n_masks * sizeof *sc->mask_ok);
+	memset(sc->match.live, 0, KOF_MULTIMATCH_BITS * sizeof *sc->match.live);
+	memset(sc->match.found, 0, (size_t)e->multi->n_pat * sizeof *sc->match.found);
+	if (sc->match.mask_ok)
+		memset(sc->match.mask_ok, 0, (size_t)e->n_masks * sizeof *sc->match.mask_ok);
 
 	/*
 	 * THE TOTALS ARE ALREADY KNOWN - see kof_engine.live_cap.
@@ -347,7 +377,7 @@ void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 				      (size_t)ctx->format * KOF_MULTIMATCH_BITS;
 
 		for (b = 0; b < KOF_MULTIMATCH_BITS; b++)
-			sc->live[b] = row[b];
+			sc->match.live[b] = row[b];
 		goto counted;
 	}
 
@@ -381,7 +411,7 @@ void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			}
 			for (b = 0; b < KOF_MULTIMATCH_BITS; b++)
 				if (bits & (1u << b))
-					sc->live[b] += m->n_str;
+					sc->match.live[b] += m->n_str;
 		}
 	}
 counted:;
@@ -397,7 +427,7 @@ counted:;
 	 */
 	for (b = 0; b < KOF_MULTIMATCH_BITS; b++) {
 		const struct kof_multimatch *t = &e->multi->tab[b];
-		enum kof_multimatch_kind kind = kof_multimatch_pick(t, sc->live[b]);
+		enum kof_multimatch_kind kind = kof_multimatch_pick(t, sc->match.live[b]);
 		uint32_t bit = 1u << b;
 		uint32_t n_ext;
 
@@ -414,14 +444,14 @@ counted:;
 			swept |= bit;
 			continue;
 		}
-		n_ext = kof_scan_resolve_range(ctx, bit, sc->ext);
+		n_ext = kof_scan_resolve_range(ctx, bit, sc->cache.ext);
 		if (!n_ext) {
 			swept |= bit;
 			continue;
 		}
 		sc->st.multi_bytes += kof_multimatch_sweep(e->multi, b, kind,
-							   &sc->m, sc->ext,
-							   n_ext, sc->found);
+							   &sc->match.m, sc->cache.ext,
+							   n_ext, sc->match.found);
 		sc->st.multi_passes++;
 		if (kind == KOF_MULTIMATCH_WUMANBER)
 			sc->st.multi_wumanber++;
@@ -464,12 +494,12 @@ counted:;
 		 * far slower than the sweep it wasted. So when the map is
 		 * missing this hands the answers out exactly as it always did.
 		 */
-		if (sc->mask_ok && e->multi->uid_slot) {
-			sc->mask_ok[u] = 1;
+		if (sc->match.mask_ok && e->multi->uid_slot) {
+			sc->match.mask_ok[u] = 1;
 		} else {
 			sc->st.multi_answers +=
-				kof_multimatch_fold(e->multi, &sc->m, u, bits,
-						    sc->found, e->n_masks);
+				kof_multimatch_fold(e->multi, &sc->match.m, u, bits,
+						    sc->match.found, e->n_masks);
 		}
 	}
 }
@@ -488,16 +518,16 @@ counted:;
  */
 void sx_need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
-	if (sc->latch[KOF_OL_MULTI])
+	if (sc->obj.latch[KOF_OL_MULTI])
 		return;
-	sc->latch[KOF_OL_MULTI] = 1;
-	sx_multi_prepass(sc, ctx, sc->cur_present);
+	sc->obj.latch[KOF_OL_MULTI] = 1;
+	sx_multi_prepass(sc, ctx, sc->cur.present);
 }
 
 void sx_need_mutation(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
-	if (sc->latch[KOF_OL_MUTATION])
+	if (sc->obj.latch[KOF_OL_MUTATION])
 		return;
-	sc->latch[KOF_OL_MUTATION] = 1;
-	sx_mutation_feed(sc, ctx, sc->cur_present, sc->cur_from_packer);
+	sc->obj.latch[KOF_OL_MUTATION] = 1;
+	sx_mutation_feed(sc, ctx, sc->cur.present, sc->cur.from_packer);
 }

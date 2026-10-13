@@ -22,8 +22,8 @@
  * the numbers had to go into the middle of a six thousand line file.
  */
 
-#ifndef KGENOME_DISASM_VOCAB_H
-#define KGENOME_DISASM_VOCAB_H
+#ifndef KGENOME_NUCLEO_H
+#define KGENOME_NUCLEO_H
 
 #include <stdint.h>
 #include <celllysis/capability.h>   /* KOF_NUCLEO_*, the capability words */
@@ -38,7 +38,7 @@
  * without the table that resolved it, so the name travels with the answer.
  */
 /*
- * WHICH ARGUMENT A CALL DECIDES ITSELF BY, or KGENOME_FLOW_ROLE_NONE. Here
+ * WHICH ARGUMENT A CALL DECIDES ITSELF BY, or KGENOME_NUCLEO_ROLE_NONE. Here
  * rather than with the decoder because every user of it is a row in a table
  * below.
  */
@@ -48,8 +48,8 @@
  * read it, and a vocabulary that needs a sweep to compile is a vocabulary
  * tied to one way of sweeping.
  */
-enum kgenome_flow_arch {
-	KGENOME_FLOW_A_MIPS32 = 1,
+enum kgenome_nucleo_arch {
+	KGENOME_NUCLEO_A_MIPS32 = 1,
 	/*
 	 * AND MIPS64, WHICH IS A DIFFERENT ABI AND NOT A WIDER MIPS32.
 	 *
@@ -67,9 +67,9 @@ enum kgenome_flow_arch {
 	 * ones that recur, which is the profile of a network client and not
 	 * of a mis-numbered table.
 	 */
-	KGENOME_FLOW_A_MIPS64,
-	KGENOME_FLOW_A_ARM32,
-	KGENOME_FLOW_A_ARM64,
+	KGENOME_NUCLEO_A_MIPS64,
+	KGENOME_NUCLEO_A_ARM32,
+	KGENOME_NUCLEO_A_ARM64,
 	/*
 	 * AND THE REST OF WHAT AN IoT BUILDER SHIPS. Measured over 20075
 	 * executable objects of one Bazaar collection plus the lab here:
@@ -78,73 +78,59 @@ enum kgenome_flow_arch {
 	 * existed. A botnet's build matrix is not a list of the architectures
 	 * anyone develops on.
 	 */
-	KGENOME_FLOW_A_PPC32,
-	KGENOME_FLOW_A_PPC64,
-	KGENOME_FLOW_A_SPARC32,
-	KGENOME_FLOW_A_RISCV,
+	KGENOME_NUCLEO_A_PPC32,
+	KGENOME_NUCLEO_A_PPC64,
+	KGENOME_NUCLEO_A_SPARC32,
+	KGENOME_NUCLEO_A_RISCV,
 	/*
 	 * The two that are not four bytes wide. SuperH is two, and m68k is
 	 * two to ten - so neither is swept by the word loop the four above
 	 * share, and both get a reader of their own that reads HALFWORDS.
 	 * Named here anyway, because what a caller has to say is still only
-	 * "this is the architecture" - see kof_flow_add_fixed.
+	 * "this is the architecture" - see kgenome_diag_cand_fixed.
 	 */
-	KGENOME_FLOW_A_SH,
-	KGENOME_FLOW_A_M68K,
+	KGENOME_NUCLEO_A_SH,
+	KGENOME_NUCLEO_A_M68K,
 	/*
 	 * AND THE TWO THE VARIABLE-LENGTH SWEEP HANDLES ITSELF.
 	 *
-	 * x86 and x86-64 never needed an entry here because kof_flow_add
-	 * takes `bits` and picks its own table. kof_flow_sys_name is asked
+	 * x86 and x86-64 never needed an entry here because the variable-length sweep
+	 * takes `bits` and picks its own table. kgenome_nucleo_sys_name is asked
 	 * from OUTSIDE the sweep, by something holding an object's
 	 * architecture and a number, and "the architectures the fixed-width
 	 * sweep knows" is not the question it is asking.
 	 */
-	KGENOME_FLOW_A_X86,
-	KGENOME_FLOW_A_X86_64
+	KGENOME_NUCLEO_A_X86,
+	KGENOME_NUCLEO_A_X86_64
 };
 
-#define KGENOME_FLOW_ROLE_NONE  0u
-#define KGENOME_FLOW_ROLE_MMAP  1u   /* prot is argument 2    */
-#define KGENOME_FLOW_ROLE_CLONE 2u   /* flags is argument 0   */
-#define KGENOME_FLOW_ROLE_SOCK  3u   /* domain 0, type 1      */
+#define KGENOME_NUCLEO_ROLE_NONE  0u
+#define KGENOME_NUCLEO_ROLE_MMAP  1u   /* prot is argument 2    */
+#define KGENOME_NUCLEO_ROLE_CLONE 2u   /* flags is argument 0   */
+#define KGENOME_NUCLEO_ROLE_SOCK  3u   /* domain 0, type 1      */
 
-#define KGENOME_FLOW_AF_UNIX    1u
-#define KGENOME_FLOW_SOCK_DGRAM 2u
-#define KGENOME_FLOW_SOCK_RAW   3u
+#define KGENOME_NUCLEO_AF_UNIX    1u
+#define KGENOME_NUCLEO_SOCK_DGRAM 2u
+#define KGENOME_NUCLEO_SOCK_RAW   3u
 
 /* CLONE_THREAD: the bit that makes a clone a thread and not a process. */
-#define KGENOME_FLOW_CLONE_THREAD  0x00010000u
+#define KGENOME_NUCLEO_CLONE_THREAD  0x00010000u
 
 struct kgenome_sysrow { uint16_t nr; uint16_t cap; uint8_t role; const char *name; };
 
 /*
- * The tables, one per ABI, with their lengths beside them.
- *
- * The length is a variable and not `sizeof`, because `sizeof` needs the
- * definition and these are declarations. Exporting the count is what lets
- * flow.c's FXN() keep working across the split.
+ * The per-ABI syscall tables are private to nucleo.c: a caller asks a question
+ * (kgenome_nucleo_sys_name, kgenome_nucleo_sys_name_abi, the cap lookups) and never holds a
+ * table, because a table handed out is a table that gets copied.
  */
-#define KGENOME_SYSTAB(t) extern const struct kgenome_sysrow kgenome_##t[]; \
-                      extern const uint32_t kgenome_##t##_n
-KGENOME_SYSTAB(sys64);      /* Linux x86-64            */
-KGENOME_SYSTAB(sys32);      /* Linux i386              */
-KGENOME_SYSTAB(sockcall);   /* i386's socketcall demux */
-KGENOME_SYSTAB(sys_a64);    /* AArch64 / asm-generic   */
-KGENOME_SYSTAB(sys_arm);
-KGENOME_SYSTAB(sys_mips);   /* o32, based at 4000      */
-KGENOME_SYSTAB(sys_mips64); /* n64, based at 5000      */
-KGENOME_SYSTAB(sys_ppc);
-KGENOME_SYSTAB(sys_sparc);
-#undef KGENOME_SYSTAB
 
 /* The three register roles each ABI uses, so the sweep below reads one way. */
-struct kgenome_fxabi {
+struct kgenome_nucleo_abi {
 	const struct kgenome_sysrow *tab;
 	uint32_t             n_tab;
 	/*
 	 * A SECOND TABLE, because three of these ports are i386's numbering
-	 * PLUS something of their own. Copying kgenome_sys32's forty rows into each
+	 * PLUS something of their own. Copying the i386 table's forty rows into each
 	 * would be three places to fix a number instead of one, and the row
 	 * that got missed would be the one nobody notices - the table is
 	 * consulted, finds nothing, and the object simply has no node.
@@ -169,13 +155,13 @@ struct kgenome_fxabi {
 	uint8_t              prot_arg;   /* which argument mmap's prot is */
 };
 
-const struct kgenome_fxabi *kgenome_fx_abi_of(unsigned arch);
+const struct kgenome_nucleo_abi *kgenome_nucleo_abi_of(unsigned arch);
 
-/* The same two answers as kgenome_flow_cap_of_syscall and kgenome_sys_name, for a port
- * described by its kgenome_fxabi. `arg` indexes from the port's first argument. */
-uint16_t kgenome_flow_cap_of_syscall_abi(const struct kgenome_fxabi *fx, uint32_t nr,
+/* The same two answers as kgenome_nucleo_cap_of_syscall and kgenome_nucleo_sys_name, for a port
+ * described by its kgenome_nucleo_abi. `arg` indexes from the port's first argument. */
+uint16_t kgenome_nucleo_cap_of_syscall_abi(const struct kgenome_nucleo_abi *fx, uint32_t nr,
 				     const uint64_t *arg, uint8_t *flags);
-const char *kgenome_sys_name_abi(const struct kgenome_fxabi *fx, uint32_t nr);
+const char *kgenome_nucleo_sys_name_abi(const struct kgenome_nucleo_abi *fx, uint32_t nr);
 
 /* Linear, because the tables are tens of rows and a binary search would need
  * them sorted - which is a rule the next person adding a row would break
@@ -197,16 +183,16 @@ const char *kgenome_sys_name_abi(const struct kgenome_fxabi *fx, uint32_t nr);
  * `read` with nothing anywhere setting the 0. See the note on the success
  * branch in flow.c.
  */
-int kgenome_sys_zero_on_success(const char *name);
+int kgenome_nucleo_sys_zero_on_success(const char *name);
 /* Whether argument `idx` is a flag set for which "this bit is set" is enough
  * to refine the call - see the note at its definition. */
-int kgenome_flow_arg_is_flags(unsigned bits, uint32_t nr, unsigned idx);
+int kgenome_nucleo_arg_is_flags(unsigned bits, uint32_t nr, unsigned idx);
 /* Whether a socket call asks for SOCK_NONBLOCK in its type - see the definition. */
-int kgenome_flow_sock_nonblock(unsigned bits, uint32_t nr, const uint64_t *arg,
+int kgenome_nucleo_sock_nonblock(unsigned bits, uint32_t nr, const uint64_t *arg,
 			   unsigned have);
-int kgenome_flow_sockcall_nonblock(uint32_t sub, const uint64_t *arg, unsigned have);
+int kgenome_nucleo_sockcall_nonblock(uint32_t sub, const uint64_t *arg, unsigned have);
 /* One operation of i386's socketcall, from the arguments found in its array. */
-uint16_t kgenome_flow_cap_of_sockcall(uint32_t sub, const uint64_t *arg,
+uint16_t kgenome_nucleo_cap_of_sockcall(uint32_t sub, const uint64_t *arg,
 				  unsigned have, uint8_t *flags);
 
 /*
@@ -214,14 +200,10 @@ uint16_t kgenome_flow_cap_of_sockcall(uint32_t sub, const uint64_t *arg,
  *
  * Here rather than at the one caller because the caller would need the
  * table, and handing a table out is handing out the thing that must not be
- * copied - see kgenome_sys_row, which this is the x86 shorthand for.
+ * copied.
  */
-const char *kgenome_sys_name(unsigned bits, uint32_t nr);
+const char *kgenome_nucleo_sys_name(unsigned bits, uint32_t nr);
 
-/* The row for a syscall number in one of the tables above, or NULL. The
- * caller reads cap, name or role from it. */
-const struct kgenome_sysrow *kgenome_sys_row(const struct kgenome_sysrow *t,
-					     uint32_t n, uint32_t nr);
 
 /*
  * THE LOOKUPS THEMSELVES, declared here because flow.h is gone.
@@ -236,20 +218,20 @@ const struct kgenome_sysrow *kgenome_sys_row(const struct kgenome_sysrow *t,
 /* Syscall number -> capability, for a caller that has a RUN rather than
  * code. `arg` may be NULL; `flags`, when given, receives the flow flags the
  * arguments imply (a WX mapping, an exec'able allocation). */
-uint16_t kgenome_flow_cap_of_syscall(unsigned bits, uint32_t nr,
+uint16_t kgenome_nucleo_cap_of_syscall(unsigned bits, uint32_t nr,
 				 const uint64_t *arg, uint8_t *flags);
 
 /* Imported or exported name -> capability, and KGENOME_NUCLEO_NONE when the name is
  * not one of the words. An `@` ends the comparison, so "socket@GLIBC_2.4"
  * reads as "socket". */
-uint16_t kgenome_flow_cap_of_name(const char *sym);
+uint16_t kgenome_nucleo_cap_of_name(const char *sym);
 /* Does any name in that table mean this capability (or a case of it)? A
  * capability nobody can name can never be found by its imports. */
-int kgenome_flow_cap_named(uint16_t cap);
+int kgenome_nucleo_cap_named(uint16_t cap);
 /* The capability this one is a special case of, or KGENOME_NUCLEO_NONE. See the
  * note at the definition: a rule names the level it means, and the matcher
  * accepts anything more specific. */
-uint16_t kgenome_flow_cap_generic(uint16_t cap);
+uint16_t kgenome_nucleo_cap_generic(uint16_t cap);
 
 /*
  * DOES A CALL OF THIS CAPABILITY HAND BACK THE OBJECT IT MADE, so a later
@@ -269,7 +251,7 @@ uint16_t kgenome_flow_cap_generic(uint16_t cap);
  * to a zero. NULL means the caller has no name, and the common case for a
  * capability that constructs is that it constructs.
  */
-int kgenome_flow_hands_on(uint16_t cap, const char *nm);
+int kgenome_nucleo_hands_on(uint16_t cap, const char *nm);
 
 /*
  * DOES A CALL OF THIS CAPABILITY BE GIVEN A NAME, and in which argument.
@@ -296,18 +278,18 @@ int kgenome_flow_hands_on(uint16_t cap, const char *nm);
  */
 #define KGENOME_NAME_DIRECT 1u
 #define KGENOME_NAME_OBJECT 2u
-unsigned kgenome_flow_name_arg(uint16_t cap, unsigned *arg);
+unsigned kgenome_nucleo_name_arg(uint16_t cap, unsigned *arg);
 
 /* The name's index in the table, 1-based, or 0. Carried instead of the
  * string so a node is fixed width. */
-uint16_t kgenome_flow_name_id(const char *sym);
+uint16_t kgenome_nucleo_name_id(const char *sym);
 
 /* A named call refined by its first four arguments - see the .c. */
-uint16_t kgenome_flow_cap_of_call(const char *name, const uint64_t *arg,
+uint16_t kgenome_nucleo_cap_of_call(const char *name, const uint64_t *arg,
 			      uint8_t *flags);
 
 
 /* And back: the word for an id, or NULL. */
-const char *kgenome_flow_name_of(uint16_t id);
+const char *kgenome_nucleo_name_of(uint16_t id);
 
 #endif

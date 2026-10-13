@@ -20,7 +20,7 @@
 /* KGENOME_BROKEN - the sentinel cell.h names for a target there is not. */
 #include <celllysis/cell.h>
 #include "decode.h"
-#include <x86/x86.h>
+#include <genotype/x86/x86.h>
 
 /* ---- THE CLASS ---------------------------------------------------------- */
 /*
@@ -200,7 +200,7 @@ uint32_t kgenome_cell_decode_x86(const uint8_t *p, uint32_t n, uint64_t va,
 	 * cell.h says "no target" is KGENOME_BROKEN, and KGENOME_BROKEN is
 	 * UINT64_MAX - 1. Writing UINT64_MAX here meant every reader's
 	 * `target_va != KGENOME_BROKEN` was true for EVERY instruction, branch
-	 * or not. MEASURED: kgenome_cell_next then called kgenome_pz_addr_to_off -
+	 * or not. MEASURED: kgenome_cell_next then called kgenome_image_addr_to_off -
 	 * a linear walk of the segment table - 1,327,512 times over a 12 MB
 	 * subset where only 273,617 instructions have a relative target,
 	 * and that one wasted call was 6.2% of the whole scan.

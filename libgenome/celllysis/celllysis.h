@@ -27,7 +27,7 @@
  * FOUR THINGS ARE HERE, and each is its own header so a user takes only what it
  * asks:
  *   decode.h       one instruction, in the one form (kgenome_cell_decode)
- *   kgenome_cell_state.h   what the registers and the stack hold, from instructions
+ *   cell_state.h   what the registers and the stack hold, from instructions
  *   this file      the address space, and the cursor that walks it
  *   xref.h         where an address comes from (separate: it needs no cursor)
  */
@@ -38,6 +38,7 @@
 
 /* The vocabulary, and with it KGENOME_BROKEN and KOF_ARCH_*. */
 #include <celllysis/cell.h>
+#include <genotype/image/image_addr.h>
 #include "cell_state.h"
 #include "decode.h"
 #include "../kgenome_status.h"
@@ -56,10 +57,8 @@
  * conversions for 1.3 million instructions and all but a handful landed in the
  * segment of the one before.
  */
-struct kgenome_cell_seg {
-	uint64_t lo, hi;        /* the file offsets it covers, [lo, hi) */
-	int64_t  delta;         /* address minus offset across it */
-};
+/* struct kgenome_image_seg (genotype/image/image_addr.h): the file offsets it covers,
+ * [lo, hi), and the address minus offset across it. */
 
 struct kgenome_cell_space {
 	const uint8_t *base;    /* the bytes */
@@ -74,7 +73,7 @@ struct kgenome_cell_space {
 	 * space it has, and a branch computed in it still lands on a file
 	 * offset.
 	 */
-	int      (*seg_at)(void *priv, uint64_t off, struct kgenome_cell_seg *out);
+	int      (*seg_at)(void *priv, uint64_t off, struct kgenome_image_seg *out);
 	/* The file offset of an address, or KGENOME_BROKEN - for a target that is
 	 * not in the segment the walk is in. */
 	uint64_t (*off_of_va)(void *priv, uint64_t va);
@@ -89,7 +88,7 @@ struct kgenome_cell_space {
  */
 struct kgenome_cell_cur {
 	uint64_t at;            /* the cursor, a file offset */
-	struct kgenome_cell_state st;   /* what the walk knows: see kgenome_cell_state.h */
+	struct kgenome_cell_state st;   /* what the walk knows: see cell_state.h */
 	uint8_t  open;
 	uint8_t  seg_ok;        /* `seg` has been established */
 	/*
@@ -99,7 +98,7 @@ struct kgenome_cell_cur {
 	 * say "same object" about a different file. Every walk starts with a
 	 * seek, so clearing it there is sufficient and cannot be got wrong.
 	 */
-	struct kgenome_cell_seg seg;
+	struct kgenome_image_seg seg;
 };
 
 /*

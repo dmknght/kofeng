@@ -14,13 +14,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+static uint32_t kof_syms_declared(uint32_t format, const uint8_t *data, uint64_t data_n,
+			   const void *info);
+
+static uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
+			     uint64_t data_n, const void *info,
+			     const struct kgenome_pe_imptab *imports,
+			     uint8_t *out, uint32_t cap);
+
 uint32_t kof_syms_build(uint32_t format, const uint8_t *data, uint64_t data_n,
 			const void *info, uint8_t *out, uint32_t cap)
 {
 	return kof_syms_build_with(format, data, data_n, info, NULL, out, cap);
 }
 
-uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
+static uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
 			     uint64_t data_n, const void *info,
 			     const struct kgenome_pe_imptab *imports,
 			     uint8_t *out, uint32_t cap)
@@ -88,7 +96,14 @@ uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data
 	}
 }
 
-uint32_t kof_syms_declared(uint32_t format, const uint8_t *data, uint64_t data_n,
+/*
+ * HOW MANY RECORDS THIS OBJECT'S SYMBOL TABLE DECLARES, so the caller sizes the
+ * block by the table it has instead of by a constant (KOF_SYM_ABS_MAX_RECS
+ * bounds it). ELF: the table's own count. Any other format: 0, which means
+ * "not known up front" - the caller grows the block until the builder says it
+ * was not cut.
+ */
+static uint32_t kof_syms_declared(uint32_t format, const uint8_t *data, uint64_t data_n,
 			   const void *info)
 {
 	if (info && format == KOF_FMT_ELF)

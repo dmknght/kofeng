@@ -144,12 +144,7 @@ struct kof_reg_info {
 	uint64_t region_bytes[KOF_REG_CLS_COUNT];
 
 	uint32_t n_runs;
-	struct {
-		uint64_t off;
-		uint64_t len;
-		uint32_t cls;
-		uint32_t _pad;
-	} run[KOF_REG_MAX_EXTENTS];
+	struct kof_run run[KOF_REG_MAX_EXTENTS];
 };
 
 #endif /* KOFENG_REG_H */

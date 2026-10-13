@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * tests/sigs/diagnoses/rwx_exec_pe.c

@@ -1,5 +1,5 @@
 /*
- * caps_sweep - limits of the syscall sweep (lineages.c) and of the node and
+ * caps_sweep - limits of the syscall sweep (diag_scan.c) and of the node and
  * name stores, probed at the boundary: evidence just INSIDE the limit, and just
  * OUTSIDE it.
  *
@@ -38,7 +38,7 @@
 
 #include "caps_fix.h"
 #include "known_miss.h"
-#include <phenotype/diag_int.h>
+#include <phenotype/diag_private.h>
 
 static unsigned char view[1u << 22];
 static uint8_t img[1u << 21];

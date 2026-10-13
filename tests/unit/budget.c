@@ -338,7 +338,7 @@ int main(void)
 	FILE *f;
 	const char *tmp = getenv("TMPDIR");
 
-	snprintf(root, sizeof root, "%s/kof_budget_XXXXXX", tmp && *tmp ? tmp : kof_tmpdir());
+	snprintf(root, sizeof root, "%s/kof_budget_XXXXXX", tmp && *tmp ? tmp : "build");
 	if (!mkdtemp(root)) {
 		printf("budget: cannot make a work directory\n");
 		return 1;

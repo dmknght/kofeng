@@ -7,7 +7,7 @@
 
 #include <stddef.h>
 
-#include "transform_int.h"
+#include "transform_private.h"
 #include "decryptors/ciphers.h"
 #include "decoders/codings.h"
 

@@ -33,7 +33,7 @@
 #include <stdint.h>
 
 #include "../../libkofeng/detectors/linkage/kofdiag.h"
-#include <phenotype/diag_int.h>
+#include <phenotype/diag_private.h>
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 
 /* any and all over the ONE-name call a module reaches: `||` and `&&`, which is

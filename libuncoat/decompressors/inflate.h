@@ -35,6 +35,7 @@
 
 #include <kofcore.h>
 #include "../status.h"
+#include "../uncoat_io.h"
 
 /* DEFLATE's maximum back reference, and therefore the whole of the decoder's
  * state. Not a tuning parameter: RFC 1951 fixes it. */
@@ -168,14 +169,13 @@ struct kuncoat_inflate {
  * `st` is caller-owned and needs no initialisation: everything is set here. It is
  * 32KB and is meant to be allocated once per thread and reused, not per stream.
  *
- * `consumed` and `produced` are always set, whatever the status, because a caller
+ * The stream is `io` (uncoat_io.h): `in` is the compressed data, `sink` and `user` are
+ * where the output goes, and `consumed` and `produced` are always set, whatever the status, because a caller
  * that stopped or was truncated still needs to know how far it got - the gzip
  * trailer is at the end of the compressed data, not at the end of the file, and
  * only the decoder knows where that is.
  */
-enum kuncoat_status kuncoat_inflate(struct kuncoat_inflate *st, const uint8_t *in, uint64_t in_len,
-		kuncoat_inflate_sink sink, void *user,
-		uint64_t *consumed, uint64_t *produced);
+enum kuncoat_status kuncoat_inflate(struct kuncoat_inflate *st, struct kuncoat_io *io);
 
 /*
  * The same decode, with `seed_len` bytes of HISTORY the stream may reference.
@@ -187,13 +187,11 @@ enum kuncoat_status kuncoat_inflate(struct kuncoat_inflate *st, const uint8_t *i
  * and the wrong BYTES, with no failure reported anywhere - see the note on the
  * definition.
  *
- * The seed is not emitted: it was already handed to the sink by whoever
+ * `seed` is NULL or empty for none; longer than the window, only its tail matters
+ * and only a window of it is kept. The seed is not emitted: it was already handed to the sink by whoever
  * produced it. `produced` counts only what this call made.
  */
 enum kuncoat_status kuncoat_inflate_seeded(struct kuncoat_inflate *st,
-		const uint8_t *seed, uint32_t seed_len,
-		const uint8_t *in, uint64_t in_len,
-		kuncoat_inflate_sink sink, void *user,
-		uint64_t *consumed, uint64_t *produced);
+		const struct kuncoat_span *seed, struct kuncoat_io *io);
 
 #endif /* KUNCOAT_INFLATE_H */

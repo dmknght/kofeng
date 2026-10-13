@@ -140,7 +140,7 @@ struct kgenome_x86_insn {
 	uint8_t  opc;                   /* the last opcode byte                   */
 	uint8_t  mo;                    /* offset of the byte after the opcode    */
 	uint8_t  dsz;                   /* displacement bytes                     */
-	uint8_t  osz;                   /* size selector (see kgenome_x86_osz)         */
+	uint8_t  osz;                   /* size selector. Legacy: bit 0 a 66 that sizes, bit 1 REX.W; VEX/XOP: bit 0 L, bit 1 W; EVEX: bit 0 W, bits 1-2 L'L */
 	uint8_t  asz;                   /* address size in bytes: 2, 4 or 8 (see kgenome_x86_asz) */
 	uint8_t  sp;                    /* encoding: 0 legacy, 1 VEX, 2 XOP, 3 EVEX */
 	uint8_t  vexv;                  /* VEX/EVEX register in vvvv, un-inverted, V' as bit 4 */
@@ -157,10 +157,7 @@ enum kgenome_status kgenome_x86_decode(struct kgenome_x86_insn *out, const uint8
 unsigned kgenome_x86_nops(const struct kgenome_x86_insn *in);   /* implicit ones included */
 unsigned kgenome_x86_cat(const struct kgenome_x86_insn *in);
 unsigned kgenome_x86_cond(const struct kgenome_x86_insn *in);
-unsigned kgenome_x86_efop(const struct kgenome_x86_insn *in);   /* effective operand mode: 0 16, 1 32, 2 64 */
-unsigned kgenome_x86_osz(const struct kgenome_x86_insn *in);    /* size selector. Legacy: bit 0 a 66 that sizes, bit 1 REX.W; VEX/XOP: bit 0 L, bit 1 W; EVEX: bit 0 W, bits 1-2 L'L */
 unsigned kgenome_x86_asz(const struct kgenome_x86_insn *in);    /* address size in bytes: 2, 4 or 8 */
-unsigned kgenome_x86_mand(const struct kgenome_x86_insn *in);   /* bit 0 66, bit 1 F2, bit 2 F3 are part of the opcode */
 unsigned kgenome_x86_repeated(const struct kgenome_x86_insn *in); /* a string instruction under REP/REPZ/REPNZ: it repeats while rcx counts down */
 unsigned kgenome_x86_nform(const struct kgenome_x86_insn *in);  /* operands the instruction's DEFINITION calls explicit: INSB counts its [rdi] and dx, though neither is written */
 unsigned kgenome_x86_nexp(const struct kgenome_x86_insn *in);   /* operands 0 .. nexp-1 are written in the instruction; the rest are implicit */

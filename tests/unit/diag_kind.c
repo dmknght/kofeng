@@ -33,9 +33,9 @@
 
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
-#include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
+#include "../../libkofeng/kofcore/kofmod/kofdiagtree.h"
 #include "../../libkofeng/detectors/linkage/kofdiag.h"
-#include <phenotype/diag_int.h>
+#include <phenotype/diag_private.h>
 
 static int fails;
 

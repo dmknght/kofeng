@@ -138,7 +138,7 @@ map to it.
 | | |
 |---|---|
 | `kofscanner` | scan a file or a tree |
-| `kofexamine` | what the engine sees in one object: regions, markers, what each module made of it |
+| `kofexaminer` | what the engine sees in one object: regions, markers, what each module made of it |
 | `kofviewer` | a terminal UI over the same facts, and where signatures are drafted |
 | `ksigbuilder` | pack compiled modules into a database; `--module` compiles one |
 | `kofwatchtower` | print what the machine is doing, and what it cost to find out |
@@ -157,11 +157,32 @@ map to it.
 make                # engine, tools, and the signature database
 make unit           # differential and fuzzing tests
 make unit-asan      # the same under AddressSanitizer and UBSan
+make check-rules    # the rules a grep can check, and the layer check (part of `make`)
+make tui-test       # the viewer, driven in a pseudo-terminal (needs python3 + pyte)
 ```
 
 The tests are differential where they can be — inflate against zlib, the three
 matcher entry points against each other — because a corpus run passes while the
 code is still wrong on an input the corpus does not happen to contain.
+
+## Source layout
+
+The engine is three libraries and a foundation, one dependency direction
+(`libkofeng` -> `libuncoat` -> `libgenome` -> core); [CLAUDE.md](CLAUDE.md)
+section 12 is the authority and `make check-rules` enforces the include direction.
+
+| directory | what it is |
+|---|---|
+| `libkofeng/` | the engine: `kofcore/` (buffers, hash, platform calls, the module ABI under `kofmod/`), `analyzers/` (what is read out of one object: parsers, the normaliser), `databases/` (the pack loader and builder), `detectors/` (pattern, mutation, linkage, heuristics), `verdictor/`, `scanners/` (the pipeline), and the public API `kofeng.h` |
+| `libgenome/` | analysis of executables: `genotype/` (one instruction, per architecture; the PE/ELF image), `celllysis/` (reading code without running it), `phenotype/` (the emulator and the diagnose scan) |
+| `libuncoat/` | decompress, decrypt and decode algorithms: bytes and a budget in, bytes and a status out |
+| `libkoforbit/` | the collectors and what they produce: `antarc/` (Linux), `grille/` (Windows), `evt/` (the event record), `fridge/` (the clean-file cache), `report/`, `chan/`, and the contract-only `mon/` and `walk/` |
+| `bases/` | the content that is compiled into databases: `signatures/`, `heur/`, `diagnoses/`, and the unpackers in `decomp/` (containers), `unp/` (packers) and `decoders/` |
+| `kofscanner/`, `ksigbuilder/`, `kofwatcher/`, `kofexamine/` | the programs (`kofexamine/` is the source of both `kofexaminer` and `kofviewer`) |
+| `mk/` | the Makefile's parts, included in dependency order by the top-level `Makefile` (platform, shell, flags, entry, stamp, libs, sdk, sources, tools, grille, packs, tests, deps, asan, misc, checks) |
+| `tools/` | developer tools that are not part of a build: the layer check, the x86 table generator, the decoder differential tools |
+| `tests/` | `unit/` (the engine), `lib/` (each lib alone, against its own archive), `sigs/` (signature sources that test the ABI), `tui/` (the viewer, end to end) |
+| `docs/` | notes that belong to no build; today the one module kept disabled |
 
 ## What this is exploring
 
@@ -215,7 +236,7 @@ do not attach to kofeng, is under "Read, not taken" in
 | [Capstone](https://github.com/capstone-engine/capstone) (BSD-3-Clause; some files NCSA) | **not linked.** Rejected as a library (31 MB against 2.8 MB, and DIET strips the detail), used offline as the reference the ARM decoders' tables are derived from |
 | [Unipacker](https://github.com/unipacker/unipacker) (GPL-2.0) | that a packed sample is dumped when execution first enters a section it has not run in before — and that the run should **continue** afterwards, so every stage is caught rather than the first. Also how a finished run is rebuilt into a *file*: the entry point is where execution got to rather than the one in the header, raw offsets equal RVAs, and memory the run allocated becomes sections of its own |
 | [Unpacker](https://github.com/anpa1200/Unpacker) (MIT) | named the rule above and pointed at where to read it |
-| [TinyAntivirus](https://github.com/develbranch/TinyAntivirus) (GPL-2.0) | where a Sality body keeps the host bytes it overwrote, and the length and flag in front of them — the four displacements `bases/unp/sality_pe.c` repairs from. Its byte signature and its `ret`/`[ESP]` stopping rule were both measured here and **rejected**: each names one generation of a polymorphic family |
+| [TinyAntivirus](https://github.com/develbranch/TinyAntivirus) (GPL-2.0) | where a Sality body keeps the host bytes it overwrote, and the length and flag in front of them — the four displacements `sality_pe` (a module no longer in bases/) repaired from. Its byte signature and its `ret`/`[ESP]` stopping rule were both measured here and **rejected**: each names one generation of a polymorphic family |
 | [US 5,696,822](https://patents.google.com/patent/US5696822A/en), Nachenberg / Symantec (expired patent) | that a polymorphic family is found by excluding candidates from the file's gross structure **before** emulating, by scanning **periodically** during the decryption rather than waiting for it to finish, and by scanning only the pages the run touched. The periodic scan is `emu_slice` — it took one sample from 40 seconds to 4.6 |
 | [ClamAV bytecode signatures](https://blog.clamav.net/2011/11/bytecode-signatures-for-polymorphic.html) (GPL-2.0) | that a polymorphic decryptor can be recognised with **no emulation at all** — anchor, then walk the disassembly checking opcode classes and operand kinds, eat the junk, follow the relative branches. That mechanism is `kofmod/cell.h` |
 | [SAFE](https://www.usenix.org/legacy/events/sec03/tech/christodorescu.html), Christodorescu & Jha, USENIX Security '03 | the four obfuscations such a rule must survive — dead code, code transposition, register reassignment, instruction substitution — and that register reassignment is answered by binding a register as a *variable* rather than naming it |

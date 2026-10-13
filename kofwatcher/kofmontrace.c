@@ -55,1186 +55,8 @@
 #define _GNU_SOURCE
 #endif
 
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-/*
- * ONE TRACER, TWO PLATFORMS, AND ONE PLACE THAT KNOWS WHICH.
- *
- * Everything below the adapter is the same code on both: the same options,
- * the same drain loop, the same report. What differs is the collector and how
- * a subject is started, scoped and contained - and it differs HERE rather
- * than at the forty-odd call sites it used to.
- */
-#ifdef _WIN32
-#include <windows.h>
-
-#include "kofgrille.h"
-#else
-#include <errno.h>
-#include <signal.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include "kofantarc.h"
-#include "afan.h"
-/* Both Linux collectors behind one api - see amon.h on why the merge and the
- * exec de-duplication live in antarc and not in here. */
-#include "amon.h"
-#endif
-
-/*
- * THE COLLECTOR'S OWN VERSION, recorded in a log header so a reader can tell
- * which producer wrote it. Two collectors, two numbers, one name here.
- */
-#ifdef _WIN32
-#define TRACER_MAJOR KOFW_MAJOR
-#define TRACER_MINOR KOFW_MINOR
-#else
-#define TRACER_MAJOR KOFA_MAJOR
-#define TRACER_MINOR KOFA_MINOR
-#endif
-
-/*
- * WHAT WAS ASKED FOR, in one vocabulary, because the FLAGS ARE THE SAME ON
- * BOTH PLATFORMS and a flag that exists on one host only is a flag somebody
- * has to remember the host for. On Windows each of these is a distinct ETW
- * subscription. On Linux fanotify answers the file ones and nothing answers
- * the rest - the banner still prints what was asked, and the health line at
- * the end is where a run learns that it got less than it asked for.
- */
-#ifdef _WIN32
-#define TRACER_SUB_PROCESS    KOFW_SUB_PROCESS
-#define TRACER_SUB_IMAGE      KOFW_SUB_IMAGE
-#define TRACER_SUB_FILE       KOFW_SUB_FILE
-#define TRACER_SUB_FILE_WRITE KOFW_SUB_FILE_WRITE
-#define TRACER_SUB_FILE_OPEN  KOFW_SUB_FILE_OPEN
-#define TRACER_SUB_NET        KOFW_SUB_NET
-#define TRACER_SUB_REGISTRY   KOFW_SUB_REGISTRY
-#define TRACER_SUB_AMSI       KOFW_SUB_AMSI
-#define TRACER_SUB_DNS        KOFW_SUB_DNS
-#define TRACER_SUB_THREAD     KOFW_SUB_THREAD
-#else
-#define TRACER_SUB_PROCESS    (1u << 0)
-#define TRACER_SUB_IMAGE      (1u << 1)
-#define TRACER_SUB_FILE       (1u << 2)
-#define TRACER_SUB_FILE_WRITE (1u << 3)
-#define TRACER_SUB_FILE_OPEN  (1u << 4)
-#define TRACER_SUB_NET        (1u << 5)
-#define TRACER_SUB_REGISTRY   (1u << 6)
-#define TRACER_SUB_AMSI       (1u << 7)
-#define TRACER_SUB_DNS        (1u << 8)
-#define TRACER_SUB_THREAD     (1u << 9)
-#endif
-#include "kofevt.h"
-#include "kofevtfmt.h"
-#include "kofevtlog.h"
-
-/*
- * AND THE ENGINE, WHICH THIS TOOL DID NOT USED TO LINK.
- *
- * It links it for the report: a trace says which files the program created and
- * which strings it used, and only the bytes say what those files ARE and
- * whether those strings are in the sample at all. Hashing an artefact, naming
- * the packer that produced it and checking a candidate string against the
- * subject's bytes are all engine work, and doing them anywhere else would mean
- * a second opinion on questions the engine already answers.
- *
- * The cost is in the Makefile and is written down there: this stopped
- * cross-building, because $(LIB) is built for the host. kofwatchtower stays in
- * the cross block and keeps libkoforbit/grille type-checked on a machine with no ETW.
- */
-#include "kofeng.h"
-#include "kofcore/kofplatform.h"
-#include "kofreport.h"
-
-/* ---------------------------------------------- answering the report's question
- *
- * WHY THIS LIVES HERE AND NOT IN libkoforbit.
- *
- * It used to sit in kofrepart.c, which made a library in orbit the place that
- * decided a host's scan policy: which options, which ceiling, whether the
- * interpreter runs. koffridge.h states the rule for the whole of orbit - it
- * may know the engine's TYPES, never drive it - and holding a kof_scanner and
- * calling kscan_path is driving it.
- *
- * So orbit now declares struct kof_rep_engine and this supplies one. The four
- * lines that build the options are the same four lines; what changed is that
- * they are the host's, which is the side that owns the scanner and knows what
- * a scan of a collected artefact is allowed to cost here.
- */
-
-struct scan_sink {
-	struct kof_fp_verdict *v;
-	uint32_t               depth0_seen;
-	uint32_t               f_version;
-};
-
-static void on_note(uint32_t fact, const char *what, uint64_t value, void *user)
-{
-	struct scan_sink *s = (struct scan_sink *)user;
-
-	if (!s || !s->v || !what)
-		return;
-
-	/*
-	 * THE FIRST NOTE FROM A MODULE WHOSE NAME IS ITS PACKER'S.
-	 *
-	 * `what` is authored text - "UPX.ELF.version", "Rar.entries" - and the
-	 * part before the first dot is the module. Taken whole up to the last
-	 * dot, so "UPX.ELF" survives and the field name does not: which packer
-	 * AND which of its variants is the useful half, and a report saying
-	 * "UPX" where the module said "UPX.ELF" would be throwing away the one
-	 * thing that distinguishes two unpackers.
-	 *
-	 * First wins. A scan of a nested object emits notes from every layer,
-	 * and the outermost is the one the artefact IS.
-	 */
-	if (!s->v->packer[0]) {
-		const char *dot = strrchr(what, '.');
-		size_t      n   = dot ? (size_t)(dot - what) : strlen(what);
-
-		if (n >= sizeof s->v->packer)
-			n = sizeof s->v->packer - 1u;
-		memcpy(s->v->packer, what, n);
-		s->v->packer[n] = '\0';
-	}
-
-	if (!s->f_version)
-		s->f_version = kverdict_fact_id("version");
-	if (fact == s->f_version && !s->v->packer_version)
-		s->v->packer_version = value;
-}
-
-static int on_object(const char *name, const void *bytes, uint64_t len,
-		     const struct kof_result *res, void *user)
-{
-	struct scan_sink *s = (struct scan_sink *)user;
-
-	(void)name;
-	if (!s || !s->v || !res)
-		return 0;
-
-	/*
-	 * THE FIRST OBJECT IS THE ONE THE REPORT IS ABOUT; the rest are what
-	 * came out of it.
-	 *
-	 * A file scan reports the file and then every child the engine
-	 * produced, in that order, so the first callback is the artefact itself
-	 * and each later one is evidence that something was inside it. Counting
-	 * children rather than describing them is deliberate: a report about a
-	 * dropped file needs to say "packed, one payload came out"; describing
-	 * the payload is a scan of the payload, which is a thing somebody asks
-	 * for separately.
-	 */
-	if (!s->depth0_seen++) {
-		s->v->asked    = 1;
-		s->v->examined = res->examined;
-		s->v->broken   = res->broken;
-		s->v->depth    = res->heur_depth;
-		s->v->packed   = (res->heur_depth || res->from_packer) ? 1u : 0u;
-		if (bytes && len)
-			s->v->entropy8 = kentropy_eighths(bytes, len);
-		if (res->n)
-			snprintf(s->v->finding, sizeof s->v->finding, "%s",
-				 res->v[0].name);
-	} else {
-		s->v->children++;
-		/* A CHILD IS WHAT PROVES THE PARENT WAS PACKED, and the parent's
-		 * own record may not say so: from_packer is set on the object
-		 * an unpacker PRODUCED, not on the one it read. */
-		if (res->from_packer)
-			s->v->packed = 1;
-		/*
-		 * A FINDING ON A CHILD IS THE FINDING, when the parent had
-		 * none. That is the normal shape of a packed sample: the stub
-		 * matches nothing and the payload matches a family, and a
-		 * report that showed only the parent's verdict would say
-		 * "nothing known" about a recognised trojan.
-		 */
-		if (!s->v->finding[0] && res->n)
-			snprintf(s->v->finding, sizeof s->v->finding, "%s",
-				 res->v[0].name);
-	}
-	return 0;
-}
-
-/*
- * DESCEND, AND DO NOT INTERPRET.
- *
- * A report wants to know what came out of a collected file, so the static
- * unpackers and the container walk are on. Emulation is not: kofeng.h measures
- * a UPX-with-LZMA sample at forty million instructions and the worst in its
- * corpus at two hundred and fifty, and a report over a dozen collected files
- * would inherit all of it. A caller who wants that scans the collected file,
- * which is what the files are collected FOR.
- *
- * The note callback is installed and then PUT BACK, because a host that had
- * one of its own must not lose it to this.
- */
-static int rep_ask(void *user, const char *path, struct kof_fp_verdict *v)
-{
-	kof_scanner            *sc = (kof_scanner *)user;
-	struct kof_scan_option  opt;
-	struct scan_sink        sink;
-
-	if (!sc || !path || !*path || !v)
-		return -1;
-
-	memset(&sink, 0, sizeof sink);
-	sink.v = v;
-
-	memset(&opt, 0, sizeof opt);
-	opt.emu_use = KOF_EMU_NEVER;
-
-	kscan_on_debug(sc, on_note, &sink);
-	(void)kscan_path(sc, path, &opt, on_object, &sink);
-	kscan_on_debug(sc, NULL, NULL);
-	return 0;
-}
-
-#ifdef _WIN32
-static volatile LONG g_stop;
-
-static BOOL WINAPI on_ctrl(DWORD type)
-{
-	(void)type;
-	InterlockedExchange(&g_stop, 1);
-	return TRUE;
-}
-
-static void stop_on_signal(void) { SetConsoleCtrlHandler(on_ctrl, TRUE); }
-#else
-static volatile sig_atomic_t g_stop;
-
-static void on_ctrl(int sig) { (void)sig; g_stop = 1; }
-
-static void stop_on_signal(void)
-{
-	signal(SIGINT, on_ctrl);
-	signal(SIGTERM, on_ctrl);
-}
-#endif
-
-/* ------------------------------------------------------------- the spiller */
-
-/*
- * COPY A CREATED FILE WHILE IT STILL EXISTS.
- *
- * THE PROBLEM THIS SOLVES, precisely. Collection happens after the traced tree
- * is dead - kofrepart.c opens with why, and the reasons are right: a file read
- * while its writer runs hashes to something that was never on the disk, and
- * unbounded I/O on the drain path costs a full ring rather than a queue. But a
- * dropper that writes its second stage and deletes it has nothing left to
- * collect by then, and that is not an unusual sample, it is the common one.
- * Every metasploit payload that stages through a file cleans up after itself.
- *
- * So the copy happens HERE, on the event, and it stays a FALLBACK: the report
- * still reads the disk at the end and only reaches for this when the original
- * is gone. See kof_report_spill.
- *
- * AND IT IS BOUNDED, because the objection in kofrepart.c does not stop being
- * true just because the copy is useful:
- *
- *   - one copy per path, not per event: a build tool writing a file in a loop
- *     costs one copy, not a thousand
- *   - a per-file ceiling and a total budget, both small by default
- *   - a fixed table, so a sample that touches ten thousand paths runs out of
- *     slots rather than out of disk
- *   - NOTHING UNDER THE REPORT DIRECTORY is ever copied. The copies live
- *     there, and copying them would raise events that produce more copies -
- *     a loop that fills a disk at the speed of the ring.
- */
-#define SPILL_MAX_FILES  256u
-#define SPILL_MAX_ONE    (16u * 1024u * 1024u)
-#define SPILL_MAX_TOTAL  (256u * 1024u * 1024u)
-
-struct spiller {
-	char     dir[512];      /* <report>/spill */
-	char     guard[512];    /* the report root: never copy from under it */
-	size_t   guard_len;
-	uint32_t n;
-	uint64_t bytes, skipped_big, skipped_full, failed;
-	int      ready;
-	/* Paths already copied. Hashes only - the strings live in the report's
-	 * arena and this table exists to answer "again?" in one compare. */
-	uint64_t seen[SPILL_MAX_FILES * 2u];
-};
-
-static uint64_t spill_hash(const char *s)
-{
-	uint64_t h = 1469598103934665603ull;
-
-	for (; *s; s++) {
-		h ^= (uint64_t)(unsigned char)*s;
-		h *= 1099511628211ull;
-	}
-	return h ? h : 1ull;   /* 0 means an empty slot */
-}
-
-static int spill_seen(struct spiller *sp, const char *path)
-{
-	uint64_t h = spill_hash(path);
-	size_t   n = sizeof sp->seen / sizeof sp->seen[0];
-	size_t   i = (size_t)(h % n);
-	size_t   k;
-
-	for (k = 0; k < n; k++, i = (i + 1) % n) {
-		if (!sp->seen[i]) {
-			sp->seen[i] = h;
-			return 0;
-		}
-		if (sp->seen[i] == h)
-			return 1;
-	}
-	return 1;   /* full: treat everything as seen rather than thrash */
-}
-
-static void spill_init(struct spiller *sp, const char *rep_dir)
-{
-	memset(sp, 0, sizeof *sp);
-	if (!rep_dir || !*rep_dir)
-		return;
-	snprintf(sp->guard, sizeof sp->guard, "%s", rep_dir);
-	sp->guard_len = strlen(sp->guard);
-	snprintf(sp->dir, sizeof sp->dir, "%s/spill", rep_dir);
-	sp->ready = (kof_report_mkpath(sp->dir) == 0);
-	if (!sp->ready)
-		fprintf(stderr, "kofmontrace: cannot make %s - a file the "
-			"sample deletes will not be captured\n", sp->dir);
-}
-
-static void spill_take(struct spiller *sp, struct kof_report *rep,
-		       const struct kof_evt *e)
-{
-	const char *path;
-	char  out[640];
-	FILE *in, *dst;
-	unsigned char buf[64u * 1024u];
-	uint64_t wrote = 0;
-	size_t   got;
-
-	if (!sp->ready || !rep)
-		return;
-	if (e->verb != KOF_EVT_FILE_NEW && e->verb != KOF_EVT_FILE_WRITE)
-		return;
-	path = kof_evt_object(e);
-	if (!path || !*path)
-		return;
-	/* Our own copies, and the report we are writing into. */
-	if (sp->guard_len && !strncmp(path, sp->guard, sp->guard_len))
-		return;
-	if (sp->n >= SPILL_MAX_FILES) {
-		sp->skipped_full++;
-		return;
-	}
-	if (spill_seen(sp, path))
-		return;
-
-	in = fopen(path, "rb");
-	if (!in) {
-		/* Already gone, or not ours to read. Not an error: the report
-		 * will say the bytes were not captured, which is true. */
-		sp->failed++;
-		return;
-	}
-	/*
-	 * THE NAME MUST NOT ALREADY EXIST, and this is the one tool in the
-	 * tree where that is not a formality.
-	 *
-	 * spill/0000.bin, 0001.bin, ... is a shape the sample can predict, and
-	 * the sample is RUNNING while this writes: it can drop a symlink at
-	 * the next number and have its own bytes copied through it to
-	 * anywhere this process can write. kof_fopen_new refuses a name that
-	 * is taken, symlink included, so a planted name is a failed capture
-	 * instead of a write-what-where.
-	 */
-	snprintf(out, sizeof out, "%s/%04u.bin", sp->dir, sp->n);
-	dst = kof_fopen_new(out);
-	if (!dst) {
-		fclose(in);
-		sp->failed++;
-		return;
-	}
-	while ((got = fread(buf, 1, sizeof buf, in)) > 0) {
-		if (wrote + got > SPILL_MAX_ONE ||
-		    sp->bytes + wrote + got > SPILL_MAX_TOTAL) {
-			/*
-			 * A TRUNCATED COPY IS WORSE THAN NONE. Its digest
-			 * would name bytes that were never a file, and every
-			 * tool downstream treats a digest as an identity. So
-			 * the partial copy is removed and the report goes on
-			 * saying the bytes were not captured.
-			 */
-			fclose(dst);
-			fclose(in);
-			remove(out);
-			sp->skipped_big++;
-			return;
-		}
-		if (fwrite(buf, 1, got, dst) != got) {
-			fclose(dst);
-			fclose(in);
-			remove(out);
-			sp->failed++;
-			return;
-		}
-		wrote += got;
-	}
-	fclose(in);
-	if (fclose(dst) != 0 || kof_report_spill(rep, path, out) != 0) {
-		remove(out);
-		sp->failed++;
-		return;
-	}
-	sp->n++;
-	sp->bytes += wrote;
-}
-
-static void spill_report(const struct spiller *sp, FILE *out)
-{
-	if (!sp->ready || (!sp->n && !sp->skipped_big && !sp->skipped_full &&
-			   !sp->failed))
-		return;
-	fprintf(out, "   %u file(s) copied during the run, %.2f MB",
-		sp->n, (double)sp->bytes / 1048576.0);
-	if (sp->skipped_big)
-		fprintf(out, "; %llu over the per-file ceiling",
-			(unsigned long long)sp->skipped_big);
-	if (sp->skipped_full)
-		fprintf(out, "; %llu past the table",
-			(unsigned long long)sp->skipped_full);
-	if (sp->failed)
-		fprintf(out, "; %llu unreadable",
-			(unsigned long long)sp->failed);
-	fputs("\n   These stand in ONLY where the original was deleted before "
-	      "the run ended.\n", out);
-}
-
-/* ------------------------------------------------------------ the subject */
-
-/*
- * WHAT A TRACER NEEDS: a collector scoped to one program, and a way to start,
- * hold and end that program. The two platforms answer both differently and
- * nothing below this block says so.
- *
- * SCOPING IS THE INTERESTING HALF. Windows is told about every process start
- * and keeps a tracked set - see kofw_mon_track. Linux has no such stream
- * without the netlink connector, which needs CAP_NET_ADMIN and drops records
- * under load, so the scope is a PROCESS GROUP: the child gets its own with
- * setpgid, every descendant inherits it, and an event is in scope exactly when
- * getpgid(pid) returns it. One syscall per event, nothing to build, nothing to
- * poll, and the kernel is not going to forget which group a process is in.
- *
- * WHAT ESCAPES THAT, plainly: a process that calls setsid() leaves the group
- * and stops being reported. That is the hole a daemonising payload walks
- * through, and it is why the Windows side tracks instead of grouping. The
- * honest position is that this scopes a well-behaved subject.
- *
- * AND WITHOUT PRIVILEGE THERE IS NOTHING TO SCOPE BY: an unprivileged fanotify
- * listener is handed pid 0 for every event it did not cause itself. A degraded
- * run reports what it can see and attributes none of it - see afan.h.
- */
-struct tracer {
-#ifdef _WIN32
-	struct kofw_mon    *mon;
-	struct kofw_evt     raw;
-	STARTUPINFOA        si;
-	PROCESS_INFORMATION pi;
-	HANDLE              job;
-	char                cmd[8192];
-#else
-	struct kofa_mon          *mon_l;
-	const struct kof_mon_api *api;
-	pid_t                     kid, group;
-	uint32_t                  asked, granted;
-	uint64_t                  out_of_scope, unattributed;
-	int                       running;
-	int                       unscoped;
-
-	/*
-	 * WHAT WE LEARNED WHILE THE ANSWER STILL EXISTED.
-	 *
-	 * getpgid() on a process that has exited returns -1, and an event
-	 * arrives AFTER the thing that caused it - so a program that writes a
-	 * file and exits inside one poll interval can no longer be asked which
-	 * group it was in. That is not an edge case, it is the shape of a
-	 * dropper: the trace was losing exactly the events it exists to catch.
-	 *
-	 * So every resolution is remembered. A pid seen once while it lived is
-	 * still answerable after it dies, which covers everything that raised
-	 * more than one event or lived longer than one drain.
-	 *
-	 * Open addressing, fixed size, no allocation on the event path. A full
-	 * table is not an error: an entry is overwritten and the pid becomes
-	 * unknown again, which falls back to the rule below rather than to a
-	 * wrong answer.
-	 */
-	struct { uint32_t pid; uint8_t known, in; } seen[512];
-#endif
-	uint32_t root_pid;
-};
-
-/*
- * THE FILES --watch NAMED, or NULL for "whatever this host will give".
- *
- * A file list, not a directory list, because the two are different marks and
- * only the inode one reports a write - see kofa_fan_option.files. Static
- * rather than threaded through every caller: there is one tracer per run and
- * the list is read once, at open.
- */
-static const char *g_watch[32];
-static unsigned    g_n_watch;
-
-static int tracer_open(struct tracer *t, unsigned providers, uint32_t ring)
-{
-	int err = 0;
-
-	memset(t, 0, sizeof *t);
-#ifdef _WIN32
-	{
-		struct kofw_mon_option opt;
-
-		memset(&opt, 0, sizeof opt);
-		opt.providers = providers;
-		opt.ring_capacity = ring;
-		opt.trace_self = 1;   /* our own CreateProcess raises the most
-				       * important event in the run */
-		/*
-		 * A DISCOVERY RUN SEES THE STREAM AS IT IS, so the duplicate
-		 * collapser is off here and nowhere else.
-		 *
-		 * This tool exists to answer "what does the machine actually
-		 * emit and what does it cost" - the same reason it defaults to
-		 * every provider. A reduction would answer a different
-		 * question, and it would hide the very measurement that
-		 * justifies the reduction: eight identical CreateKey records
-		 * from one nslookup is a fact somebody had to be able to see
-		 * before anyone could argue for collapsing it.
-		 */
-		opt.dedup_off = 1;
-		t->mon = kofw_mon_open(&opt, &err);
-		if (!t->mon) {
-			fprintf(stderr, "kofmontrace: %s\n",
-				kofw_err_name(err));
-			return 0;
-		}
-	}
-#else
-	{
-		struct kofa_mon_option mo;
-		struct kofa_fan_option *fop = &mo.fan;
-
-		(void)providers; (void)ring;
-		memset(&mo, 0, sizeof mo);
-		/* Our own events are the only ones carrying a pid in a
-		 * degraded session, and the group test below is what scopes -
-		 * so the self-filter must not drop them first. */
-		fop->trace_self = 1;
-		/*
-		 * WHAT --watch NAMED. The list is NULL-terminated and the
-		 * array has a spare slot for that, so a full list is still a
-		 * valid one. Naming anything also stops the collector from
-		 * reaching for the whole-filesystem mark, which is a different
-		 * question and a privilege the operator may not have.
-		 */
-		if (g_n_watch) {
-			g_watch[g_n_watch] = NULL;
-			fop->files = g_watch;
-		}
-		/*
-		 * BOTH HALVES, which is what makes a Linux trace comparable
-		 * to the Windows one: files from fanotify AND execs and exits
-		 * from the process connector. This used to open the file
-		 * collector alone, so `kofmontrace` on Linux showed no process
-		 * starts at all while the same tool on Windows showed seven
-		 * providers.
-		 */
-		t->mon_l = kofa_mon_open(&mo, &err);
-		if (!t->mon_l) {
-			fprintf(stderr, "kofmontrace: %s\n",
-				kofa_err_name(err));
-			return 0;
-		}
-		t->api = kofa_mon_api(t->mon_l);
-		t->api->print_extra(t->api->self, stderr);
-
-		/*
-		 * WHAT THIS HOST CAN ACTUALLY DELIVER, worked out here so the
-		 * REFUSED line below can say the rest out loud.
-		 *
-		 * fanotify watches FILES. It has nothing to say about a
-		 * connection, a name lookup or a thread, and there is no
-		 * registry or AMSI to have an opinion about - so six of the
-		 * ten providers this tool offers can never arrive on Linux.
-		 * The banner used to announce all ten anyway, which is the
-		 * exact failure the note beside it warns about: a trace that
-		 * shows no network activity, truthfully, to somebody who
-		 * asked for network activity and was told they had it.
-		 *
-		 * FILE_WRITE AND IMAGE ARE PRIVILEGE-DEPENDENT. The full mask
-		 * carries FAN_CLOSE_WRITE and FAN_OPEN_EXEC; the unprivileged
-		 * fallback carries neither, so a degraded session reports
-		 * creates, deletes and renames and nothing else. See the mask
-		 * pair in afan.c.
-		 */
-		t->asked = providers;
-		t->granted = providers & TRACER_SUB_FILE;
-		if (kofa_fan_mode(kofa_mon_fan(t->mon_l)) != KOFA_FAN_DEGRADED)
-			t->granted |= providers & (TRACER_SUB_FILE_WRITE |
-						   TRACER_SUB_IMAGE);
-		/*
-		 * NOTHING TO SCOPE BY, SAID OUT LOUD.
-		 *
-		 * Unprivileged, every record about another process arrives
-		 * with KOF_F_PID in `miss` - so the group test below has
-		 * nothing to test and would refuse the entire trace, which
-		 * looks exactly like a program that did nothing. Showing
-		 * everything and saying so is the only honest answer: the
-		 * lines are real, the attribution is not, and a reader told
-		 * that can still use them.
-		 */
-		if (kofa_fan_mode(kofa_mon_fan(t->mon_l)) == KOFA_FAN_DEGRADED) {
-			t->unscoped = 1;
-			fputs("kofmontrace: UNSCOPED: this session cannot "
-			      "attribute events, so every record below is "
-			      "shown and NONE is known to belong to the "
-			      "traced program - run as root to scope it\n",
-			      stderr);
-		}
-	}
-#endif
-	return 1;
-}
-
-/*
- * Start it, STOPPED, so that "the subject is known" happens strictly before
- * "the subject can do anything". Windows creates it suspended; POSIX raises
- * SIGSTOP on itself after setpgid and before exec.
- */
-static int tracer_start(struct tracer *t, char **argv, const char *cmdline)
-{
-#ifdef _WIN32
-	memset(&t->si, 0, sizeof t->si);
-	t->si.cb = sizeof t->si;
-	memset(&t->pi, 0, sizeof t->pi);
-	snprintf(t->cmd, sizeof t->cmd, "%s", cmdline);
-	if (!CreateProcessA(NULL, t->cmd, NULL, NULL, FALSE,
-			    CREATE_SUSPENDED, NULL, NULL, &t->si, &t->pi)) {
-		fprintf(stderr, "kofmontrace: cannot run '%s' (error %lu)\n",
-			argv[0], (unsigned long)GetLastError());
-		return 0;
-	}
-	t->root_pid = t->pi.dwProcessId;
-	return 1;
-#else
-	(void)cmdline;
-	t->kid = fork();
-	if (t->kid < 0) {
-		perror("kofmontrace: fork");
-		return 0;
-	}
-	if (t->kid == 0) {
-		setpgid(0, 0);
-		raise(SIGSTOP);
-		execvp(argv[0], argv);
-		fprintf(stderr, "kofmontrace: cannot run %s: %s\n",
-			argv[0], strerror(errno));
-		_exit(127);
-	}
-	/* Set on both sides: whichever runs first, the group is right before
-	 * the child can produce an event. */
-	setpgid(t->kid, t->kid);
-	t->group = t->kid;
-	t->root_pid = (uint32_t)t->kid;
-	t->running = 1;
-
-	/*
-	 * WAIT FOR IT TO ACTUALLY BE STOPPED, and this is not belt and braces.
-	 *
-	 * A SIGCONT delivered before the child reaches raise(SIGSTOP) is not
-	 * queued and not remembered - it is simply gone, and the child then
-	 * stops and never starts again. The tracer sits out its whole timeout
-	 * watching a process that never ran, and the trace is empty for a
-	 * reason nothing in it mentions. WUNTRACED returns when the child has
-	 * stopped, which is the only point at which SIGCONT is certain to be
-	 * seen.
-	 */
-	{
-		int st;
-
-		if (waitpid(t->kid, &st, WUNTRACED) == t->kid &&
-		    !WIFSTOPPED(st)) {
-			/* It exited before it ever stopped: exec failed, or
-			 * the program is gone. Nothing to trace and nothing
-			 * to resume. */
-			t->running = 0;
-			fprintf(stderr, "kofmontrace: %s did not start\n",
-				argv[0]);
-			return 0;
-		}
-	}
-	return 1;
-#endif
-}
-
-/* Scope the collector to it. Windows is told; POSIX already is, by the group. */
-static int tracer_track(struct tracer *t, const char *leaf)
-{
-#ifdef _WIN32
-	return kofw_mon_track(t->mon, t->root_pid, leaf) == 0;
-#else
-	(void)t; (void)leaf;
-	return 1;
-#endif
-}
-
-/*
- * Contain the lifetime, BEFORE it runs - a child created before the container
- * exists is outside it forever. Non-zero when contained.
- */
-static int tracer_contain(struct tracer *t)
-{
-#ifdef _WIN32
-	JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli;
-
-	t->job = CreateJobObjectW(NULL, NULL);
-	if (t->job) {
-		memset(&eli, 0, sizeof eli);
-		eli.BasicLimitInformation.LimitFlags =
-			JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-		if (!SetInformationJobObject(t->job,
-					     JobObjectExtendedLimitInformation,
-					     &eli, sizeof eli) ||
-		    !AssignProcessToJobObject(t->job, t->pi.hProcess)) {
-			CloseHandle(t->job);
-			t->job = NULL;
-		}
-	}
-	return t->job != NULL;
-#else
-	/* The group was created at fork and every descendant inherits it, so
-	 * there is nothing to assign and nothing that can be created outside
-	 * it - which is the one respect in which this is stronger than the
-	 * job object it replaces. */
-	(void)t;
-	return 1;
-#endif
-}
-
-static void tracer_resume(struct tracer *t)
-{
-#ifdef _WIN32
-	ResumeThread(t->pi.hThread);
-#else
-	kill(t->kid, SIGCONT);
-#endif
-}
-
-/* The next record, already neutral and already scoped. */
-#ifndef _WIN32
-#define TRACER_SEEN (sizeof ((struct tracer *)0)->seen / \
-		     sizeof ((struct tracer *)0)->seen[0])
-
-/* Was this pid in the traced group? 1 yes, 0 no, -1 never resolved. */
-static int seen_get(const struct tracer *t, uint32_t pid)
-{
-	size_t i = (size_t)(pid * 2654435761u) % TRACER_SEEN;
-	size_t n;
-
-	for (n = 0; n < 8; n++, i = (i + 1) % TRACER_SEEN) {
-		if (!t->seen[i].known)
-			return -1;
-		if (t->seen[i].pid == pid)
-			return t->seen[i].in;
-	}
-	return -1;
-}
-
-static void seen_put(struct tracer *t, uint32_t pid, int in)
-{
-	size_t i = (size_t)(pid * 2654435761u) % TRACER_SEEN;
-	size_t n;
-
-	for (n = 0; n < 8; n++, i = (i + 1) % TRACER_SEEN) {
-		if (!t->seen[i].known || t->seen[i].pid == pid) {
-			t->seen[i].pid = pid;
-			t->seen[i].known = 1;
-			t->seen[i].in = (uint8_t)(in ? 1 : 0);
-			return;
-		}
-	}
-	/* Every probe taken: overwrite the first. See the note on the table. */
-	i = (size_t)(pid * 2654435761u) % TRACER_SEEN;
-	t->seen[i].pid = pid;
-	t->seen[i].known = 1;
-	t->seen[i].in = (uint8_t)(in ? 1 : 0);
-}
-#endif
-
-static int tracer_next(struct tracer *t, struct kof_evt *out, uint32_t wait_ms,
-		       int all)
-{
-#ifdef _WIN32
-	(void)all;
-	if (!kofw_mon_next(t->mon, &t->raw, wait_ms))
-		return 0;
-	kofw_evt_to_kof(&t->raw, out);
-	return 1;
-#else
-	for (;;) {
-		if (!kof_mon_next(t->api, out, wait_ms))
-			return 0;
-		if (all || t->unscoped)
-			return 1;
-		if (out->miss & KOF_F_PID) {
-			t->out_of_scope++;
-			continue;
-		}
-		{
-			pid_t g = getpgid((pid_t)out->pid);
-			int known;
-
-			if (g >= 0) {
-				/* The kernel still knows. Answer, and
-				 * remember for after it exits. */
-				seen_put(t, out->pid, g == t->group);
-				if (g == t->group)
-					return 1;
-				t->out_of_scope++;
-				continue;
-			}
-			/*
-			 * IT HAS EXITED. Answer from what was learned while it
-			 * lived, and when nothing was - a process that wrote
-			 * one file and was gone before the drain - SHOW IT.
-			 *
-			 * That is the deliberate choice: a trace that drops
-			 * what it cannot prove drops the dropper, and the
-			 * whole run is then clean for the one reason nobody
-			 * would suspect. Counted separately and reported at
-			 * the end, so nothing here is mistaken for attributed.
-			 */
-			known = seen_get(t, out->pid);
-			if (known == 1)
-				return 1;
-			if (known == 0) {
-				t->out_of_scope++;
-				continue;
-			}
-			t->unattributed++;
-			out->miss |= KOF_F_PID;
-			return 1;
-		}
-	}
-#endif
-}
-
-/*
- * The image name for the pid of the record tracer_next last returned. It reads
- * the RAW record rather than the neutral one because the Windows lookup is
- * keyed on (pid, create_time) and create_time is a collector field - a pid on
- * its own names whoever holds it now, which after a reuse is the wrong
- * process. Linux has no such map and returns the empty string, which
- * kof_evt_render already treats as "not known".
- */
-static const char *tracer_name_of(struct tracer *t)
-{
-#ifdef _WIN32
-	return kofw_mon_name_of(t->mon, t->raw.pid,
-				t->raw.type == KOF_EVT_PROC_START ||
-				t->raw.type == KOF_EVT_PROC_STOP
-					? t->raw.create_time : 0);
-#else
-	(void)t;
-	return "";
-#endif
-}
-
-static int tracer_alive(struct tracer *t)
-{
-#ifdef _WIN32
-	return kofw_mon_tracked_alive(t->mon) != 0;
-#else
-	int st;
-
-	if (!t->running)
-		return 0;
-	if (waitpid(t->kid, &st, WNOHANG) == t->kid)
-		t->running = 0;
-	return t->running;
-#endif
-}
-
-static void tracer_health(struct tracer *t, struct kof_evt_health *nh)
-{
-#ifdef _WIN32
-	kofw_mon_health_neutral(t->mon, nh);
-#else
-	t->api->health(t->api->self, nh);
-#endif
-}
-
-static void tracer_extra(struct tracer *t, FILE *out)
-{
-#ifdef _WIN32
-	struct kofw_health h;
-
-	kofw_mon_health(t->mon, &h);
-	kofw_health_print_extra(out, &h);
-#else
-	t->api->print_extra(t->api->self, out);
-#endif
-}
-
-/*
- * WHAT THE COLLECTOR WAS ASKED FOR AND WHAT IT GOT. Windows can refuse a
- * provider one at a time; the Linux collector is one subscription that either
- * opened or did not, and tracer_open has already failed if it did not - so
- * asked and enabled are equal and the "REFUSED" report never fires.
- */
-static void tracer_subs(struct tracer *t, uint32_t *asked, uint32_t *enabled)
-{
-#ifdef _WIN32
-	struct kofw_health h;
-
-	kofw_mon_health(t->mon, &h);
-	*asked = h.sub_asked;
-	*enabled = h.sub_enabled;
-#else
-	*asked = t->asked;
-	*enabled = t->granted;
-#endif
-}
-
-static const char *tracer_sub_name(uint32_t bit)
-{
-#ifdef _WIN32
-	return kofw_sub_name(bit);
-#else
-	switch (bit) {
-	case TRACER_SUB_PROCESS:    return "process";
-	case TRACER_SUB_IMAGE:      return "image";
-	case TRACER_SUB_FILE:       return "file";
-	case TRACER_SUB_FILE_WRITE: return "file-write";
-	case TRACER_SUB_FILE_OPEN:  return "file-open";
-	case TRACER_SUB_NET:        return "net";
-	case TRACER_SUB_REGISTRY:   return "registry";
-	case TRACER_SUB_AMSI:       return "amsi";
-	case TRACER_SUB_DNS:        return "dns";
-	case TRACER_SUB_THREAD:     return "thread";
-	default:                    return "?";
-	}
-#endif
-}
-
-/*
- * The output filter. Windows applies it inside the collector, which is where
- * dropping belongs when the collector is the thing producing the volume.
- * fanotify has no such knob - the mask is set at open and there is nothing
- * per-event to tune - so the flags that matter there are carried on the tracer
- * and applied by tracer_next.
- */
-static void tracer_filter(struct tracer *t, uint32_t root_pid, int no_scope,
-			  int show_all_img, int show_raw, int amsi_anywhere)
-{
-#ifdef _WIN32
-	struct kofw_filter f;
-
-	memset(&f, 0, sizeof f);
-	/*
-	 * NO SCOPE AT ALL, when asked.
-	 *
-	 * Scoping to a tree is what makes a trace readable, and it has one
-	 * failure that is not a bug and cannot be fixed from inside:
-	 * parentage. A payload that migrates is running in a process that is
-	 * nobody's descendant, and everything it does from there - including
-	 * every process it goes on to create - is attributed outside the tree
-	 * and dropped. The trace shows a clean subtree and says nothing about
-	 * the thing that walked out of it.
-	 *
-	 * There is no clever repair for that: no event says "this process is
-	 * now running somebody else's code". So the honest option is to turn
-	 * the scope off and take the noise, which on a quiet test machine is a
-	 * fair trade.
-	 */
-	f.root_pid = no_scope ? 0u : root_pid;
-	if (!show_all_img)
-		f.drop_loc = 1u << KOF_LOC_SYSTEM;
-	if (!show_raw)
-		f.types = ~(uint32_t)(1u << KOF_EVT_RAW);
-	if (amsi_anywhere)
-		f.scope_exempt_prov = 1u << KOFW_PROV_AMSI;
-	kofw_mon_filter(t->mon, &f);
-#else
-	(void)t; (void)root_pid; (void)no_scope;
-	(void)show_all_img; (void)show_raw; (void)amsi_anywhere;
-#endif
-}
-
-/*
- * THE SUBJECT AS A PATH THAT CAN BE OPENED. Both hosts resolve a bare name
- * against PATH before running it, so the report has to resolve it the same
- * way or every digest in it is "could not be read". Non-zero when `out` holds
- * a path.
- */
-static int tracer_resolve(const char *name, char *out, size_t cap)
-{
-#ifdef _WIN32
-	/*
-	 * SearchPath returns TWO different lengths and only one of them means
-	 * it wrote something: the characters PUT IN the buffer on success, and
-	 * the characters the buffer would have NEEDED - the NUL among them -
-	 * when it was too small. The second writes nothing. Reading non-zero
-	 * as success left `out` holding whatever it held before and the report
-	 * named a subject it had never opened, which is the failure this whole
-	 * function exists to prevent.
-	 */
-	DWORD n = SearchPathA(NULL, name, ".exe", (DWORD)cap, out, NULL);
-
-	return n != 0 && (size_t)n < cap;
-#else
-	const char *path, *p, *e;
-	size_t nlen = strlen(name);
-
-	if (strchr(name, '/')) {   /* already a path: execvp does not search */
-		if (nlen >= cap)
-			return 0;
-		memcpy(out, name, nlen + 1);
-		return access(out, X_OK) == 0;
-	}
-	/*
-	 * The search this has to match is execvp's, which falls back to
-	 * confstr when PATH is unset - so the fallback is the same one, not a
-	 * guess at /bin:/usr/bin.
-	 */
-	path = getenv("PATH");
-	if (!path || !*path) {
-		static char def[1024];
-		size_t need = confstr(_CS_PATH, def, sizeof def);
-
-		/*
-		 * confstr reports the size it NEEDED, not the size it wrote,
-		 * and a value longer than the buffer is truncated while still
-		 * returning non-zero. A truncated PATH is missing its last
-		 * directory, and the whole point here is to search the same
-		 * places the exec will - so a search that cannot be the same
-		 * one is refused rather than done differently.
-		 */
-		if (need == 0 || need > sizeof def)
-			return 0;
-		path = def;
-	}
-	for (p = path; *p; p = (*e ? e + 1 : e)) {
-		size_t dlen;
-
-		e = strchr(p, ':');
-		if (!e)
-			e = p + strlen(p);
-		dlen = (size_t)(e - p);
-		if (dlen == 0) {   /* an empty field means "." */
-			p = ".";
-			dlen = 1;
-		}
-		if (dlen + 1 + nlen >= cap)
-			continue;
-		memcpy(out, p, dlen);
-		out[dlen] = '/';
-		memcpy(out + dlen + 1, name, nlen + 1);
-		if (access(out, X_OK) == 0)
-			return 1;
-	}
-	return 0;
-#endif
-}
-
-/*
- * HOW MANY RECORDS WERE SHOWN WITHOUT BEING ATTRIBUTED - see tracer_next.
- * Zero on Windows, which tracks processes and therefore always knows.
- */
-static void tracer_report_unattributed(struct tracer *t, FILE *out)
-{
-#ifdef _WIN32
-	(void)t; (void)out;
-#else
-	if (!t->unattributed)
-		return;
-	fprintf(out, "   %llu event(s) shown but NOT attributed: the process "
-		"that caused them had already exited\n"
-		"   and was never seen alive, so it could not be placed in or "
-		"out of the traced group.\n",
-		(unsigned long long)t->unattributed);
-#endif
-}
-
-/* How many records the scope refused - the one number that says whether a
- * quiet trace was quiet or merely narrow. */
-static uint64_t tracer_filtered_scope(struct tracer *t)
-{
-#ifdef _WIN32
-	struct kofw_health h;
-
-	kofw_mon_health(t->mon, &h);
-	return h.filtered_scope;
-#else
-	return t->out_of_scope;
-#endif
-}
-
-/* Two Windows-only readouts. Both have no Linux counterpart and say so by
- * being empty rather than by being printed wrong. */
-static int tracer_describe(struct tracer *t, char *buf, size_t cap)
-{
-#ifdef _WIN32
-	return kofw_mon_describe(t->mon, buf, cap) != 0;
-#else
-	(void)t; (void)buf; (void)cap;
-	return 0;
-#endif
-}
-
-static const char *tracer_tracked_nth(struct tracer *t, uint32_t k,
-				      uint32_t *pid)
-{
-#ifdef _WIN32
-	return kofw_mon_tracked_nth(t->mon, k, pid);
-#else
-	(void)t; (void)k; (void)pid;
-	return NULL;
-#endif
-}
-
-/* End the run. The container is what makes this one call rather than a hunt. */
-static void tracer_stop(struct tracer *t)
-{
-#ifdef _WIN32
-	if (t->job) {
-		TerminateJobObject(t->job, 1);
-		CloseHandle(t->job);
-		t->job = NULL;
-	}
-#else
-	kill(-t->group, SIGKILL);
-	if (t->running) {
-		int st;
-
-		(void)waitpid(t->kid, &st, 0);
-		t->running = 0;
-	}
-#endif
-}
-
-static void tracer_close(struct tracer *t)
-{
-#ifdef _WIN32
-	if (t->pi.hThread)  CloseHandle(t->pi.hThread);
-	if (t->pi.hProcess) CloseHandle(t->pi.hProcess);
-	kofw_mon_close(t->mon);
-#else
-	kof_mon_close(t->api);
-#endif
-}
+#include "kofmontrace_int.h"
+#include "kofstop.h"
 
 /*
  * ONE LINE A FLAG - see the same note on kofscanner's usage.
@@ -1278,14 +100,47 @@ static void usage(void)
 	"--timeout or --until-exit says otherwise.\n");
 }
 
-int main(int argc, char **argv)
-{
+/*
+ * What main() shares between its steps: the options as parsed, then the
+ * state each step leaves for the next. Declared here so the steps take one
+ * pointer and not forty arguments.
+ */
+struct mt_run {
 	struct tracer         tr;
 	struct spiller        spill;
 	struct kof_evt_health nh;
 	struct kof_evt        ke;
 	struct kof_evt_tally  tally;
 	char     cmd[8192];
+	double   timeout, grace, exited_at;
+	double   secs, ev_secs;
+	uint64_t t_wall0, t_ev0;
+	uint32_t root_pid, alive;
+	int      contained;
+	int      leave_running, stop_on_exit, amsi_anywhere;
+	int      no_scope;
+	int      want_file, want_image, want_net;
+	int      want_write, want_reg, want_thread, want_open;
+	int      want_amsi, want_dns;
+	int      show_raw, show_all_img, show_schema, quiet;
+	const char *log_path;
+	struct kofevt_log_w *log;
+	unsigned providers;
+	uint32_t ring;
+	int      first;
+	const char *rep_dir;
+	const char *db_path;
+	int      want_collect;
+	struct kof_report *rep;
+	kof_engine  *eng;
+	kof_scanner *sc;
+	uint64_t rep_index;
+	enum kof_rep_end how;
+};
+
+/* Step: the defaults of every option and the zero state of the run. */
+static void mt_init(struct mt_run *m)
+{
 	/*
 	 * NOTHING STOPS THIS ON ITS OWN, and both defaults got there the same
 	 * way - by being wrong in the case that matters.
@@ -1303,11 +158,10 @@ int main(int argc, char **argv)
 	 * So: Ctrl-C ends a run. --timeout N for unattended. --until-exit for
 	 * the old behaviour, when the target really is the whole story.
 	 */
-	double   timeout = 0.0, grace = 2.0, exited_at = -1.0;
-	double   secs = 0.0, ev_secs = 0.0;
-	uint64_t t_wall0, t_ev0 = 0;
-	uint32_t root_pid, alive = 1;
-	int      contained;
+	m->timeout = 0.0; m->grace = 2.0; m->exited_at = -1.0;
+	m->secs = 0.0; m->ev_secs = 0.0;
+	m->t_ev0 = 0;
+	m->alive = 1;
 	/*
 	 * AMSI FROM EVERYWHERE, ON BY DEFAULT.
 	 *
@@ -1319,8 +173,8 @@ int main(int argc, char **argv)
 	 * being right is a few extra lines; the cost of being tidy is missing
 	 * the thing being traced for.
 	 */
-	int      leave_running = 0, stop_on_exit = 0, amsi_anywhere = 1;
-	int      no_scope = 0;
+	m->leave_running = 0; m->stop_on_exit = 0; m->amsi_anywhere = 1;
+	m->no_scope = 0;
 	/*
 	 * LOUD BY DEFAULT, and that is a decision rather than an oversight.
 	 *
@@ -1334,7 +188,7 @@ int main(int argc, char **argv)
 	 * hidden the registry subscription would cost its volume and print
 	 * nothing at all.
 	 */
-	int      want_file = 1, want_image = 1, want_net = 1;
+	m->want_file = 1; m->want_image = 1; m->want_net = 1;
 	/*
 	 * EVERYTHING ON, INCLUDING THE TWO EXPENSIVE ONES.
 	 *
@@ -1347,16 +201,13 @@ int main(int argc, char **argv)
 	 * only view there is of an in-memory load and of getsystem. Making
 	 * somebody remember a flag to see those is making them miss them.
 	 */
-	int      want_write = 1, want_reg = 1, want_thread = 1, want_open = 1;
-	int      want_amsi = 1, want_dns = 1;
-	int      show_raw = 1, show_all_img = 0, show_schema = 0, quiet = 0;
-	const char *log_path = NULL;
-	struct kofevt_log_w *log = NULL;
-	unsigned providers;
-	uint32_t ring;
-	int      i, first;
-	size_t   n;
-
+	m->want_write = 1; m->want_reg = 1; m->want_thread = 1;
+	m->want_open = 1;
+	m->want_amsi = 1; m->want_dns = 1;
+	m->show_raw = 1; m->show_all_img = 0; m->show_schema = 0;
+	m->quiet = 0;
+	m->log_path = NULL;
+	m->log = NULL;
 	/*
 	 * THE REPORT, AND WHY IT IS A DIRECTORY RATHER THAN A FILE.
 	 *
@@ -1371,93 +222,100 @@ int main(int argc, char **argv)
 	 * of what a live sample produced onto the disk of whoever ran it. That
 	 * is not a default anybody should get by not reading the options.
 	 */
-	const char *rep_dir = NULL;
-	const char *db_path = "build/release/databases";
-	int      want_collect = 1;
-	struct kof_report *rep = NULL;
-	kof_engine  *eng = NULL;
-	kof_scanner *sc  = NULL;
+	m->rep_dir = NULL;
+	m->db_path = "build/release/databases";
+	m->want_collect = 1;
+	m->rep = NULL;
+	m->eng = NULL;
+	m->sc  = NULL;
 	/* Which record in the log the report should point a fingerprint at.
 	 * The count of records WRITTEN, so it is the log's own index and not
 	 * an event count - a run with no log passes KOF_REP_NO_INDEX. */
-	uint64_t rep_index = 0;
-	enum kof_rep_end how = KOF_END_UNKNOWN;
+	m->rep_index = 0;
+	m->how = KOF_END_UNKNOWN;
 
-	kof_utf8_init(&argc, &argv);
-
-	memset(&tally, 0, sizeof tally);
+	memset(&m->tally, 0, sizeof m->tally);
 	/* 32MB. The old 16384 was sized for process events alone; with the
 	 * registry in the same session a burst fills that in well under a
 	 * second, and a ring drop is a record nothing can get back. */
-	ring = 65536u;
+	m->ring = 65536u;
+}
+
+/*
+ * Step: read the command line. -1 to carry on, otherwise the exit status
+ * main returns (help is 0, a bad argument 2).
+ */
+static int mt_parse_args(struct mt_run *m, int argc, char **argv)
+{
+	int i;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--timeout") && i + 1 < argc)
-			timeout = atof(argv[++i]);
+			m->timeout = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--grace") && i + 1 < argc)
-			grace = atof(argv[++i]);
+			m->grace = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--ring") && i + 1 < argc)
-			ring = (uint32_t)strtoul(argv[++i],
+			m->ring = (uint32_t)strtoul(argv[++i],
 							      NULL, 10);
 		else if (!strcmp(argv[i], "--watch") && i + 1 < argc) {
-			if (g_n_watch + 1u < sizeof g_watch / sizeof g_watch[0])
-				g_watch[g_n_watch++] = argv[++i];
+			if (kmt_n_watch + 1u < sizeof kmt_watch / sizeof kmt_watch[0])
+				kmt_watch[kmt_n_watch++] = argv[++i];
 			else
 				i++;   /* said below, once, not per name */
 		}
 		else if (!strcmp(argv[i], "--raw"))
-			show_raw = 1;          /* the default; kept so an old
+			m->show_raw = 1;          /* the default; kept so an old
 						* command line still works */
 		else if (!strcmp(argv[i], "--no-raw"))
-			show_raw = 0;
+			m->show_raw = 0;
 		else if (!strcmp(argv[i], "--schema"))
-			show_schema = 1;
+			m->show_schema = 1;
 		else if (!strcmp(argv[i], "--all-images"))
-			show_all_img = 1;
+			m->show_all_img = 1;
 		else if (!strcmp(argv[i], "--no-image"))
-			want_image = 0;
+			m->want_image = 0;
 		else if (!strcmp(argv[i], "--no-file"))
-			want_file = 0;
+			m->want_file = 0;
 		else if (!strcmp(argv[i], "--no-file-write"))
-			want_write = 0;
+			m->want_write = 0;
 		else if (!strcmp(argv[i], "--no-net"))
-			want_net = 0;
+			m->want_net = 0;
 		else if (!strcmp(argv[i], "--leave-running"))
-			leave_running = 1;
+			m->leave_running = 1;
 		else if (!strcmp(argv[i], "--until-exit"))
-			stop_on_exit = 1;
+			m->stop_on_exit = 1;
 		else if (!strcmp(argv[i], "--no-amsi-anywhere"))
-			amsi_anywhere = 0;
+			m->amsi_anywhere = 0;
 		else if (!strcmp(argv[i], "--amsi-anywhere"))
-			amsi_anywhere = 1;      /* now a default; kept working */
+			m->amsi_anywhere = 1;      /* now a default; kept working */
 		else if (!strcmp(argv[i], "--no-scope"))
-			no_scope = 1;
+			m->no_scope = 1;
 		else if (!strcmp(argv[i], "--no-amsi"))
-			want_amsi = 0;
+			m->want_amsi = 0;
 		else if (!strcmp(argv[i], "--no-registry"))
-			want_reg = 0;
+			m->want_reg = 0;
 		else if (!strcmp(argv[i], "--no-dns"))
-			want_dns = 0;
+			m->want_dns = 0;
 		else if ((!strcmp(argv[i], "--report") ||
 			  !strcmp(argv[i], "-r")) && i + 1 < argc)
-			rep_dir = argv[++i];
+			m->rep_dir = argv[++i];
 		else if (!strcmp(argv[i], "--db") && i + 1 < argc)
-			db_path = argv[++i];
+			m->db_path = argv[++i];
 		else if (!strcmp(argv[i], "--no-collect"))
-			want_collect = 0;
+			m->want_collect = 0;
 		else if (!strcmp(argv[i], "--no-thread"))
-			want_thread = 0;
+			m->want_thread = 0;
 		else if (!strcmp(argv[i], "--no-pipe"))
-			want_open = 0;
+			m->want_open = 0;
 		/* The old opt-in spellings, kept so a command line in
 		 * somebody's history still works. They now confirm a default. */
 		else if (!strcmp(argv[i], "--thread"))
-			want_thread = 1;
+			m->want_thread = 1;
 		else if (!strcmp(argv[i], "--pipe"))
-			want_open = 1;
+			m->want_open = 1;
 		else if ((!strcmp(argv[i], "--log") ||
 			  !strcmp(argv[i], "-o")) && i + 1 < argc)
-			log_path = argv[++i];
+			m->log_path = argv[++i];
 		/*
 		 * COLLECT WITHOUT PRINTING, and it is not a cosmetic option.
 		 *
@@ -1473,7 +331,7 @@ int main(int argc, char **argv)
 		 * the detail; this is for when the detail is not wanted at all.
 		 */
 		else if (!strcmp(argv[i], "--quiet"))
-			quiet = 1;
+			m->quiet = 1;
 		/*
 		 * Asked for explicitly, so it goes to stdout and exits 0 -
 		 * `kofmontrace --help | more` has to work, and a help request
@@ -1490,9 +348,9 @@ int main(int argc, char **argv)
 		 * Accepted rather than refused: a command line somebody has in
 		 * their shell history should not start failing. */
 		else if (!strcmp(argv[i], "--file-write"))
-			want_write = 1;
+			m->want_write = 1;
 		else if (!strcmp(argv[i], "--net"))
-			want_net = 1;
+			m->want_net = 1;
 		/*
 		 * AN UNKNOWN OPTION IS AN ERROR, NOT A PROGRAM NAME.
 		 *
@@ -1516,11 +374,22 @@ int main(int argc, char **argv)
 		else
 			break;
 	}
-	first = i;
-	if (first >= argc) {
+	m->first = i;
+	if (m->first >= argc) {
 		usage();
 		return 2;
 	}
+	return -1;
+}
+
+/*
+ * Step: checks that must pass before anything is started - the report
+ * directory - and the target's command line re-joined. -1 to carry on.
+ */
+static int mt_prepare(struct mt_run *m, int argc, char **argv)
+{
+	size_t n;
+	int    i;
 
 	/*
 	 * THE REPORT DIRECTORY, MADE NOW - BEFORE A LIVE SAMPLE IS EXECUTED.
@@ -1537,11 +406,11 @@ int main(int argc, char **argv)
 	 * that it executes what you give it: being unable to record the
 	 * evidence is a reason not to create the evidence.
 	 */
-	if (rep_dir && kof_report_mkpath(rep_dir) != 0) {
+	if (m->rep_dir && kof_report_mkpath(m->rep_dir) != 0) {
 		fprintf(stderr, "kofmontrace: cannot create the report "
 			"directory '%s' - refusing to run the target, because "
 			"there would be nowhere to write what it did\n",
-			rep_dir);
+			m->rep_dir);
 		return 2;
 	}
 
@@ -1549,32 +418,40 @@ int main(int argc, char **argv)
 	 * makes it necessary, which is enough for a test harness and is not a
 	 * general command-line composer. */
 	n = 0;
-	for (i = first; i < argc; i++) {
+	for (i = m->first; i < argc; i++) {
 		int q = strchr(argv[i], ' ') != NULL;
-		int w = snprintf(cmd + n, sizeof cmd - n, "%s%s%s%s",
-				 i > first ? " " : "", q ? "\"" : "",
+		int w = snprintf(m->cmd + n, sizeof m->cmd - n, "%s%s%s%s",
+				 i > m->first ? " " : "", q ? "\"" : "",
 				 argv[i], q ? "\"" : "");
-		if (w < 0 || (size_t)w >= sizeof cmd - n) {
+		if (w < 0 || (size_t)w >= sizeof m->cmd - n) {
 			fputs("kofmontrace: command line too long\n", stderr);
 			return 2;
 		}
 		n += (size_t)w;
 	}
+	return -1;
+}
 
+/*
+ * Step: open the tracer, start the target suspended and scope the trace to
+ * it. -1 to carry on, otherwise the exit status.
+ */
+static int mt_start(struct mt_run *m, char **argv)
+{
 	stop_on_signal();
 
-	providers = TRACER_SUB_PROCESS |
-			(want_image ? TRACER_SUB_IMAGE : 0u) |
-			(want_file  ? TRACER_SUB_FILE  : 0u) |
-			(want_write ? TRACER_SUB_FILE_WRITE : 0u) |
-			(want_net   ? TRACER_SUB_NET   : 0u) |
-			(want_reg   ? TRACER_SUB_REGISTRY : 0u) |
-			(want_amsi  ? TRACER_SUB_AMSI : 0u) |
-			(want_dns   ? TRACER_SUB_DNS  : 0u) |
-			(want_thread ? TRACER_SUB_THREAD : 0u) |
-			(want_open  ? TRACER_SUB_FILE_OPEN : 0u);
+	m->providers = TRACER_SUB_PROCESS |
+			(m->want_image ? TRACER_SUB_IMAGE : 0u) |
+			(m->want_file  ? TRACER_SUB_FILE  : 0u) |
+			(m->want_write ? TRACER_SUB_FILE_WRITE : 0u) |
+			(m->want_net   ? TRACER_SUB_NET   : 0u) |
+			(m->want_reg   ? TRACER_SUB_REGISTRY : 0u) |
+			(m->want_amsi  ? TRACER_SUB_AMSI : 0u) |
+			(m->want_dns   ? TRACER_SUB_DNS  : 0u) |
+			(m->want_thread ? TRACER_SUB_THREAD : 0u) |
+			(m->want_open  ? TRACER_SUB_FILE_OPEN : 0u);
 
-	if (!tracer_open(&tr, providers, ring))
+	if (!kmt_tracer_open(&m->tr, m->providers, m->ring))
 		return 1;
 
 	/*
@@ -1587,31 +464,36 @@ int main(int argc, char **argv)
 	 * makes "the subtree is known" happen strictly before "the subtree can
 	 * do anything", which is the only ordering with no hole in it.
 	 */
-	if (!tracer_start(&tr, argv + first, cmd)) {
-		tracer_close(&tr);
+	if (!kmt_tracer_start(&m->tr, argv + m->first, m->cmd)) {
+		kmt_tracer_close(&m->tr);
 		return 1;
 	}
 
-	root_pid = tr.root_pid;
+	m->root_pid = m->tr.root_pid;
 
 	/*
 	 * SCOPE IT BEFORE IT RUNS. The process is still suspended here, so
 	 * "the subtree is known" happens strictly before "the subtree can do
 	 * anything" - the only ordering with no hole in it.
 	 */
-	if (!tracer_track(&tr, kof_path_leaf(argv[first]))) {
+	if (!kmt_tracer_track(&m->tr, kof_path_leaf(argv[m->first]))) {
 		fputs("kofmontrace: could not track the root process\n", stderr);
-		tracer_stop(&tr);
-		tracer_close(&tr);
+		kmt_tracer_stop(&m->tr);
+		kmt_tracer_close(&m->tr);
 		return 1;
 	}
-	tracer_filter(&tr, root_pid, no_scope, show_all_img, show_raw,
-		      amsi_anywhere);
+	kmt_tracer_filter(&m->tr, m->root_pid, m->no_scope, m->show_all_img, m->show_raw,
+		      m->amsi_anywhere);
+	return -1;
+}
 
+/* Step: say what is being traced, and what is not available. */
+static void mt_announce(struct mt_run *m)
+{
 	/* Said out loud, because it breaks the promise the rest of the output
 	 * makes: with this on, not every line below belongs to the traced
 	 * tree. */
-	if (amsi_anywhere)
+	if (m->amsi_anywhere)
 		fputs("kofmontrace: --amsi-anywhere: AMSI records from ANY "
 		      "process are shown, not only the traced tree\n", stderr);
 
@@ -1619,16 +501,16 @@ int main(int argc, char **argv)
 		(unsigned long long)KOFENG_BUILD);
 	fprintf(stderr, "kofmontrace: %s\nkofmontrace: root pid %lu, providers:"
 		" process%s%s%s%s%s%s%s%s%s\n\n",
-		cmd, (unsigned long)root_pid,
-		want_image ? " image" : "", want_file ? " file" : "",
-		want_write ? " file-write" : "", want_net ? " net" : "",
-		want_reg ? " registry" : "", want_amsi ? " amsi" : "",
-		want_dns ? " dns" : "",
+		m->cmd, (unsigned long)m->root_pid,
+		m->want_image ? " image" : "", m->want_file ? " file" : "",
+		m->want_write ? " file-write" : "", m->want_net ? " net" : "",
+		m->want_reg ? " registry" : "", m->want_amsi ? " amsi" : "",
+		m->want_dns ? " dns" : "",
 		/* thread and file-open were subscribed and not announced, which
 		 * is the one thing this line exists to prevent: when a provider
 		 * enables and then delivers nothing, the banner is what says
 		 * whether it was ever asked for. */
-		want_thread ? " thread" : "", want_open ? " file-open" : "");
+		m->want_thread ? " thread" : "", m->want_open ? " file-open" : "");
 
 	/*
 	 * SAID AT THE START, not only in the summary. A provider that refused
@@ -1645,14 +527,14 @@ int main(int argc, char **argv)
 	 * their DLL happened to live in System32. One line, at the point where
 	 * changing the command line is still free.
 	 */
-	if (!show_all_img && want_image)
+	if (!m->show_all_img && m->want_image)
 		fputs("kofmontrace: system module loads are SUPPRESSED "
 		      "(--all-images to show them)\n", stderr);
 
 	{
 		uint32_t asked, enabled, missing, b;
 
-		tracer_subs(&tr, &asked, &enabled);
+		kmt_tracer_subs(&m->tr, &asked, &enabled);
 		missing = asked & ~enabled;
 		if (missing) {
 			fputs("kofmontrace: NOT AVAILABLE on this host:",
@@ -1660,11 +542,15 @@ int main(int argc, char **argv)
 			for (b = 1u; b; b <<= 1)
 				if (missing & b)
 					fprintf(stderr, " %s",
-						tracer_sub_name(b));
+						kmt_tracer_sub_name(b));
 			fputs("\n\n", stderr);
 		}
 	}
+}
 
+/* Step: put the target in its container while it is still stopped. */
+static void mt_contain(struct mt_run *m)
+{
 	/*
 	 * CONTAINED WHILE THE TARGET IS STILL STOPPED.
 	 *
@@ -1672,24 +558,28 @@ int main(int argc, char **argv)
 	 * the root alone would not have fixed it either: it kills one process
 	 * and orphans the tree under it, which for a dropper is the half that
 	 * matters. So the container holds the whole descendancy - a job object
-	 * on Windows, a process group on Linux, see tracer_contain.
+	 * on Windows, a process group on Linux, see kmt_tracer_contain.
 	 *
 	 * Here, before the resume, for the same reason the pid is recorded
 	 * before it: after that instruction the target can create children, and
 	 * a child created before the container exists is outside it forever.
 	 */
-	contained = leave_running ? 1 : tracer_contain(&tr);
+	m->contained = m->leave_running ? 1 : kmt_tracer_contain(&m->tr);
 	/*
 	 * Loud, not silent. Without the container this tool leaves whatever it
 	 * ran behind when it exits, and that is a fact about the machine
 	 * somebody has to know before they trust the trace to have ended the
 	 * run.
 	 */
-	if (!contained)
+	if (!m->contained)
 		fputs("kofmontrace: WARNING could not contain the target; "
 		      "it and anything it starts will SURVIVE this tracer\n",
 		      stderr);
+}
 
+/* Step: open the event log, if one was asked for. */
+static void mt_open_log(struct mt_run *m)
+{
 	/*
 	 * OPENED AFTER THE SESSION AND BEFORE THE TARGET RUNS.
 	 *
@@ -1705,11 +595,11 @@ int main(int argc, char **argv)
 	 * process is not in the traced subtree, so its own events are refused
 	 * by the scope filter before they ever reach the writer.
 	 */
-	if (log_path) {
+	if (m->log_path) {
 		struct kofevt_log_info li;
 		uint32_t asked, enabled;
 
-		tracer_subs(&tr, &asked, &enabled);
+		kmt_tracer_subs(&m->tr, &asked, &enabled);
 		memset(&li, 0, sizeof li);
 		/* The record this collector produces, named as well as sized:
 		 * another collector's 640-byte record is not this one. */
@@ -1727,19 +617,23 @@ int main(int argc, char **argv)
 		 * to know how to spell it. */
 		li.platform    = 0u;
 		li.arch        = 0u;
-		li.root_pid    = root_pid;
+		li.root_pid    = m->root_pid;
 		li.sub_asked   = asked;
 		li.sub_enabled = enabled;
 		li.started     = kof_evt_now();
-		log = kofevt_log_create(log_path, &li);
-		if (!log)
+		m->log = kofevt_log_create(m->log_path, &li);
+		if (!m->log)
 			fprintf(stderr, "kofmontrace: cannot write '%s' - "
-				"continuing without a log\n", log_path);
+				"continuing without a log\n", m->log_path);
 		else
 			fprintf(stderr, "kofmontrace: recording to %s\n",
-				log_path);
+				m->log_path);
 	}
+}
 
+/* Step: open the report and, with it, the engine and the scanner. */
+static void mt_open_report(struct mt_run *m, char **argv)
+{
 	/*
 	 * THE REPORT, OPENED BEFORE THE TARGET RUNS.
 	 *
@@ -1752,9 +646,9 @@ int main(int argc, char **argv)
 	 * missing database is reported before a live sample has been run - not
 	 * after, when the run cannot be taken back.
 	 */
-	spill_init(&spill, rep_dir);
+	kmt_spill_init(&m->spill, m->rep_dir);
 
-	if (rep_dir) {
+	if (m->rep_dir) {
 		struct kof_report_info ri;
 
 		/*
@@ -1778,41 +672,41 @@ int main(int argc, char **argv)
 		 * file.
 		 */
 		static char subj[1024];
-		const char *subject = argv[first];
+		const char *subject = argv[m->first];
 
-		if (tracer_resolve(argv[first], subj, sizeof subj))
+		if (kmt_tracer_resolve(argv[m->first], subj, sizeof subj))
 			subject = subj;
 
 		memset(&ri, 0, sizeof ri);
 		ri.tool        = "kofmontrace";
 		ri.subject     = subject;
-		ri.subject_cmd = cmd;
-		ri.root_pid    = root_pid;
+		ri.subject_cmd = m->cmd;
+		ri.root_pid    = m->root_pid;
 		ri.build       = (uint32_t)KOFENG_BUILD;
 		/* Asked of kofevt rather than spelled here, so this tool and
 		 * the log header cannot name the same machine differently. */
 		ri.platform    = kof_evt_platform_self();
 		ri.arch        = kof_evt_arch_self();
 		ri.started     = kof_evt_now();
-		ri.dir         = rep_dir;
-		ri.log         = log_path;
+		ri.dir         = m->rep_dir;
+		ri.log         = m->log_path;
 		{
 			uint32_t asked, enabled;
 
-			tracer_subs(&tr, &asked, &enabled);
+			kmt_tracer_subs(&m->tr, &asked, &enabled);
 			ri.sub_asked   = asked;
 			ri.sub_enabled = enabled;
 		}
 
-		rep = kof_report_open(&ri);
-		if (!rep) {
+		m->rep = kof_report_open(&ri);
+		if (!m->rep) {
 			fprintf(stderr, "kofmontrace: cannot open a report - "
 				"continuing without one\n");
 		} else {
-			eng = keng_open(db_path);
-			if (eng)
-				sc = kscan_new(eng);
-			if (!sc) {
+			m->eng = keng_open(m->db_path);
+			if (m->eng)
+				m->sc = kscan_new(m->eng);
+			if (!m->sc) {
 				/*
 				 * NOT FATAL, AND NOT SILENT. Without the
 				 * engine the report still has every
@@ -1824,40 +718,41 @@ int main(int argc, char **argv)
 				 * completeness section rather than showing
 				 * empty columns.
 				 */
-				if (eng) {
-					keng_close(eng);
-					eng = NULL;
+				if (m->eng) {
+					keng_close(m->eng);
+					m->eng = NULL;
 				}
 				fprintf(stderr, "kofmontrace: no database at "
 					"%s - the report will identify "
-					"nothing (use --db)\n", db_path);
+					"nothing (use --db)\n", m->db_path);
 			}
-			fprintf(stderr, "kofmontrace: report -> %s\n", rep_dir);
+			fprintf(stderr, "kofmontrace: report -> %s\n", m->rep_dir);
 		}
 	}
+}
 
-	t_wall0 = kof_evt_now();
-	tracer_resume(&tr);
-
+/* Step: the collection loop, until a stop condition or Ctrl-C. */
+static void mt_loop(struct mt_run *m)
+{
 	while (!g_stop) {
 
-		if (!tracer_next(&tr, &ke, 200, no_scope)) {
-			secs = kof_evt_secs_since(t_wall0, kof_evt_now());
+		if (!kmt_tracer_next(&m->tr, &m->ke, 200, m->no_scope)) {
+			m->secs = kof_evt_secs_since(m->t_wall0, kof_evt_now());
 			goto tick;
 		}
 
-		if (t_ev0 == 0)
-			t_ev0 = ke.stamp;
-		ev_secs = kof_evt_secs_since(t_ev0, ke.stamp);
+		if (m->t_ev0 == 0)
+			m->t_ev0 = m->ke.stamp;
+		m->ev_secs = kof_evt_secs_since(m->t_ev0, m->ke.stamp);
 		/* The deadline clock still has to advance while events flow, or
 		 * a program that never stops producing them never times out. */
-		secs = kof_evt_secs_since(t_wall0, kof_evt_now());
+		m->secs = kof_evt_secs_since(m->t_wall0, kof_evt_now());
 
 		/*
 		 * Everything that decides WHETHER this record belongs to the
 		 * tree - growing the set on a ProcessStart, retiring it on a
 		 * ProcessStop, refusing everything outside it - happened inside
-		 * tracer_next. What arrives here is already scoped.
+		 * kmt_tracer_next. What arrives here is already scoped.
 		 */
 		/* Recorded before it is rendered, so a --quiet run and a loud
 		 * one produce the same file. */
@@ -1869,8 +764,8 @@ int main(int argc, char **argv)
 		 * viewer prints from it is produced by the same code that
 		 * printed it live.
 		 */
-		if (log)
-			(void)kofevt_log_write(log, &ke);
+		if (m->log)
+			(void)kofevt_log_write(m->log, &m->ke);
 
 		/*
 		 * FED HERE, BESIDE THE LOG AND BEFORE THE RENDERER.
@@ -1888,24 +783,24 @@ int main(int argc, char **argv)
 		 * a record was actually written: an event index would look the
 		 * same and refer to nothing.
 		 */
-		if (rep) {
-			kof_report_feed(rep, &ke,
-					log ? rep_index : KOF_REP_NO_INDEX);
-			if (log)
-				rep_index++;
+		if (m->rep) {
+			kof_report_feed(m->rep, &m->ke,
+					m->log ? m->rep_index : KOF_REP_NO_INDEX);
+			if (m->log)
+				m->rep_index++;
 			/* AFTER the feed, because the fingerprint the copy
 			 * attaches to is what the feed just created. */
-			spill_take(&spill, rep, &ke);
+			kmt_spill_take(&m->spill, m->rep, &m->ke);
 		}
 
-		if (!quiet)
-			kof_evt_render(&ke, ev_secs, tracer_name_of(&tr),
-				  stdout, &tally);
+		if (!m->quiet)
+			kof_evt_render(&m->ke, m->ev_secs, kmt_tracer_name_of(&m->tr),
+				  stdout, &m->tally);
 		else
-			kof_evt_count(&ke, &tally);
+			kof_evt_count(&m->ke, &m->tally);
 
 tick:
-		alive = (uint32_t)tracer_alive(&tr);
+		m->alive = (uint32_t)kmt_tracer_alive(&m->tr);
 		/*
 		 * THE SUBTREE EMPTYING IS NOT A REASON TO STOP, unless asked.
 		 *
@@ -1920,8 +815,8 @@ tick:
 		 * --timeout for an unattended run, or --until-exit for the old
 		 * behaviour when the target really is the whole story.
 		 */
-		if (stop_on_exit && alive == 0 && exited_at < 0.0)
-			exited_at = secs;
+		if (m->stop_on_exit && m->alive == 0 && m->exited_at < 0.0)
+			m->exited_at = m->secs;
 		/*
 		 * The grace window, and it is not politeness. Events are
 		 * delivered up to a flush timer after they happened, so the
@@ -1929,16 +824,20 @@ tick:
 		 * ProcessStop. Stopping the instant the subtree is empty
 		 * truncates exactly the tail that matters.
 		 */
-		if (exited_at >= 0.0 && secs - exited_at >= grace) {
-			how = KOF_END_TREE_EXIT;
+		if (m->exited_at >= 0.0 && m->secs - m->exited_at >= m->grace) {
+			m->how = KOF_END_TREE_EXIT;
 			break;
 		}
-		if (timeout > 0.0 && secs >= timeout) {
-			how = KOF_END_TIMEOUT;
+		if (m->timeout > 0.0 && m->secs >= m->timeout) {
+			m->how = KOF_END_TIMEOUT;
 			break;
 		}
 	}
+}
 
+/* Step: the end-of-run summary, the kill of the tree and the log close. */
+static void mt_summary(struct mt_run *m)
+{
 	/*
 	 * WHY THE RUN ENDED, RECORDED RATHER THAN INFERRED.
 	 *
@@ -1949,8 +848,8 @@ tick:
 	 * `how` is still KOF_END_UNKNOWN here only if the loop left by the
 	 * while condition - which is Ctrl-C.
 	 */
-	if (how == KOF_END_UNKNOWN)
-		how = KOF_END_INTERRUPT;
+	if (m->how == KOF_END_UNKNOWN)
+		m->how = KOF_END_INTERRUPT;
 
 	fflush(stdout);
 
@@ -1958,19 +857,19 @@ tick:
 		char what[64];
 
 		snprintf(what, sizeof what, "subtree of pid %lu",
-			 (unsigned long)root_pid);
-		kof_evt_print_tally(&tally, secs, what, stderr);
+			 (unsigned long)m->root_pid);
+		kof_evt_print_tally(&m->tally, m->secs, what, stderr);
 	}
 
-	tracer_health(&tr, &nh);
-	kof_evt_health_print(stderr, &nh, secs);
+	kmt_tracer_health(&m->tr, &m->nh);
+	kof_evt_health_print(stderr, &m->nh, m->secs);
 	/* And the half only this collector has - the unbacked count on
 	 * Windows, the queue and permission state on Linux. Same screen as the
 	 * neutral half, because a reader deciding whether to trust a quiet run
 	 * needs both. */
-	tracer_extra(&tr, stderr);
-	tracer_report_unattributed(&tr, stderr);
-	spill_report(&spill, stderr);
+	kmt_tracer_extra(&m->tr, stderr);
+	kmt_tracer_report_unattributed(&m->tr, stderr);
+	kmt_spill_report(&m->spill, stderr);
 
 	/*
 	 * THE SHAPES, AND WHY THIS IS ON THE TOOL PEOPLE ACTUALLY DEBUG WITH.
@@ -1981,10 +880,10 @@ tick:
 	 * for an id means the record reached the decoder. Without it the answer
 	 * to "why did I not see the DLL load" is a guess.
 	 */
-	if (show_schema) {
+	if (m->show_schema) {
 		static char shapes[16384];
 
-		if (tracer_describe(&tr, shapes, sizeof shapes))
+		if (kmt_tracer_describe(&m->tr, shapes, sizeof shapes))
 			fprintf(stderr, "\n-- payload shapes learned:\n%s",
 				shapes);
 	}
@@ -2004,7 +903,7 @@ tick:
 	 * exited in the trace above, which means its ProcessStop was never
 	 * matched to its entry and the counter, not the machine, is wrong.
 	 */
-	if (alive) {
+	if (m->alive) {
 		/* Neither `i` nor `n`: main already has both in scope by here.
 		 * A shadowed index is harmless until somebody moves code
 		 * between the two scopes, and this function is long enough
@@ -2013,8 +912,8 @@ tick:
 		const char *nm;
 
 		fprintf(stderr, "   %lu process(es) still running at exit:\n",
-			(unsigned long)alive);
-		for (k = 0; (nm = tracer_tracked_nth(&tr, k, &pid)) != NULL;
+			(unsigned long)m->alive);
+		for (k = 0; (nm = kmt_tracer_tracked_nth(&m->tr, k, &pid)) != NULL;
 		     k++)
 			fprintf(stderr, "     pid %-6lu %s\n",
 				(unsigned long)pid, *nm ? nm : "?");
@@ -2032,23 +931,27 @@ tick:
 	 * Linux side kills has no such fallback, so there it is the only thing
 	 * that ends the run.
 	 */
-	if (contained && !leave_running) {
-		if (alive)
+	if (m->contained && !m->leave_running) {
+		if (m->alive)
 			fprintf(stderr, "   terminating %lu process(es) still "
-				"in the traced tree\n", (unsigned long)alive);
-		tracer_stop(&tr);
-	} else if (alive) {
+				"in the traced tree\n", (unsigned long)m->alive);
+		kmt_tracer_stop(&m->tr);
+	} else if (m->alive) {
 		fputs("   WARNING those processes were NOT terminated\n",
 		      stderr);
 	}
 
-	if (log) {
-		uint64_t nrec = kofevt_log_close(log);
+	if (m->log) {
+		uint64_t nrec = kofevt_log_close(m->log);
 
 		fprintf(stderr, "   recorded %llu event(s) to %s\n",
-			(unsigned long long)nrec, log_path);
+			(unsigned long long)nrec, m->log_path);
 	}
+}
 
+/* Step: the report, written once the tree is dead. */
+static void mt_report(struct mt_run *m)
+{
 	/*
 	 * THE REPORT, AND IT HAPPENS HERE FOR ONE REASON: THE TREE IS DEAD.
 	 *
@@ -2068,33 +971,33 @@ tick:
 	 * too, and a report that referenced records still sitting in a stdio
 	 * buffer would point at a file that does not have them yet.
 	 */
-	if (rep) {
+	if (m->rep) {
 		struct kof_report_stage stage;
 		char path[1024];
 		FILE *f;
 		int   rc;
 
-		kof_report_ended(rep, how, secs);
-		kof_report_health(rep, &nh, tracer_filtered_scope(&tr));
+		kof_report_ended(m->rep, m->how, m->secs);
+		kof_report_health(m->rep, &m->nh, kmt_tracer_filtered_scope(&m->tr));
 
 		struct kof_rep_engine rep_eng;
 
 		memset(&stage, 0, sizeof stage);
-		stage.collect = want_collect ? 1u : 0u;
+		stage.collect = m->want_collect ? 1u : 0u;
 
 		/* The report asks through an interface; this supplies one over
 		 * the scanner this program already owns. NULL when there is no
 		 * engine, which is a legal report - see kof_report_stage. */
-		rep_eng.user = sc;
-		rep_eng.ask  = rep_ask;
-		stage.engine = (eng && sc) ? &rep_eng : NULL;
+		rep_eng.user = m->sc;
+		rep_eng.ask  = kmt_rep_ask;
+		stage.engine = (m->eng && m->sc) ? &rep_eng : NULL;
 
 		fprintf(stderr, "\nkofmontrace: collecting artefacts...\n");
-		rc = kof_report_finish(rep, &stage);
+		rc = kof_report_finish(m->rep, &stage);
 		if (rc < 0)
 			fprintf(stderr, "kofmontrace: the artefact phase could "
 				"not use '%s' (%d) - the report is written "
-				"without collected files\n", rep_dir, rc);
+				"without collected files\n", m->rep_dir, rc);
 
 		/*
 		 * THREE FILES, AND EACH HAS A DIFFERENT READER.
@@ -2107,33 +1010,33 @@ tick:
 		 * guessable as the spill files and the sample was alive until
 		 * a moment ago. O_NOFOLLOW makes a planted link a refusal.
 		 */
-		snprintf(path, sizeof path, "%s/report.txt", rep_dir);
+		snprintf(path, sizeof path, "%s/report.txt", m->rep_dir);
 		f = kof_fopen_trunc(path);
 		if (f) {
 			/* No colour into a file. The escapes would make it
 			 * ungreppable, which is the one thing a report of this
 			 * shape is read with. */
-			kof_report_write_text(rep, f, 0);
+			kof_report_write_text(m->rep, f, 0);
 			fclose(f);
 			fprintf(stderr, "   %s\n", path);
 		} else {
 			fprintf(stderr, "   cannot write %s\n", path);
 		}
 
-		snprintf(path, sizeof path, "%s/report.json", rep_dir);
+		snprintf(path, sizeof path, "%s/report.json", m->rep_dir);
 		f = kof_fopen_trunc(path);
 		if (f) {
-			kof_report_write_json(rep, f);
+			kof_report_write_json(m->rep, f);
 			fclose(f);
 			fprintf(stderr, "   %s\n", path);
 		} else {
 			fprintf(stderr, "   cannot write %s\n", path);
 		}
 
-		snprintf(path, sizeof path, "%s/candidates.tsv", rep_dir);
+		snprintf(path, sizeof path, "%s/candidates.tsv", m->rep_dir);
 		f = kof_fopen_trunc(path);
 		if (f) {
-			kof_report_write_candidates(rep, f);
+			kof_report_write_candidates(m->rep, f);
 			fclose(f);
 			fprintf(stderr, "   %s\n", path);
 		} else {
@@ -2149,16 +1052,51 @@ tick:
 		 * stderr, like every other summary this tool prints, so that a
 		 * run whose stdout was redirected to a file still shows it.
 		 */
-		kof_report_write_text(rep, stderr, 1);
+		kof_report_write_text(m->rep, stderr, 1);
 
-		kof_report_close(rep);
+		kof_report_close(m->rep);
 	}
+}
 
-	if (sc)
-		kscan_free(sc);
-	if (eng)
-		keng_close(eng);
+/* Step: release what the run opened. */
+static void mt_teardown(struct mt_run *m)
+{
+	if (m->sc)
+		kscan_free(m->sc);
+	if (m->eng)
+		keng_close(m->eng);
 
-	tracer_close(&tr);
+	kmt_tracer_close(&m->tr);
+}
+
+int main(int argc, char **argv)
+{
+	struct mt_run m;
+	int rc;
+
+	kof_utf8_init(&argc, &argv);
+	mt_init(&m);
+
+	rc = mt_parse_args(&m, argc, argv);
+	if (rc >= 0)
+		return rc;
+	rc = mt_prepare(&m, argc, argv);
+	if (rc >= 0)
+		return rc;
+	rc = mt_start(&m, argv);
+	if (rc >= 0)
+		return rc;
+	mt_announce(&m);
+	mt_contain(&m);
+	mt_open_log(&m);
+	mt_open_report(&m, argv);
+
+	m.t_wall0 = kof_evt_now();
+	kmt_tracer_resume(&m.tr);
+
+	mt_loop(&m);
+	mt_summary(&m);
+	mt_report(&m);
+	mt_teardown(&m);
 	return 0;
 }

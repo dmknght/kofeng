@@ -30,7 +30,7 @@
  * said before the split (frozen as the equivalence reference).
  */
 #include "arm32_ids.h"
-#include "arm32_int.h"
+#include "arm32_private.h"
 
 const struct kgenome_arm32_row kgenome_arm32_src_cond[] = {
 	/* ======================= conditional space: bits 27..25 = 000 ============= */

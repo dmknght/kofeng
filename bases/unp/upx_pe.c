@@ -83,7 +83,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/pe.h>
-
+#include <kofmod/upx_method.h>
 #include <kofmod/pe_reassemble.h>
 
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
@@ -633,24 +633,24 @@ static int upx_pe_known(uint8_t ver, uint8_t fmt)
  * in that order - not one coding with three filters. Getting that wrong decodes
  * every _LE32 stream correctly and every _8 stream not at all, which is what it
  * did before it was measured.
+ *
+ * method  coding (bit buffer: _32 = LE32, _8, _16 = LE16)
+ *    2    NRV2B_32     3  NRV2B_8     4  NRV2B_16
+ *    5    NRV2D_32     6  NRV2D_8     7  NRV2D_16
+ *    8    NRV2E_32     9  NRV2E_8    10  NRV2E_16
+ *   14    LZMA (UPX_M_LZMA), decoded by upx_lzma_method
+ * anything else: 0 - not a coding, or one this does not know
+ *
+ * The function is KOF_UPX_DEFINE_METHOD_OF (kofmod/upx_method.h), shared with the
+ * other UPX module and invoked HERE, in the place it had. This comment is as long
+ * as the function and its notes were: a blob follows the order its functions are
+ * emitted in and a report carries the line it was made on, so moving code in a
+ * module changes the pack even when nothing it does has changed.
+ *
+ *
+ *
  */
-static uint32_t method_of(unsigned m)
-{
-	switch (m) {
-	case 2:  return KOF_UNP_NRV2B_32;
-	case 3:  return KOF_UNP_NRV2B_8;
-	case 4:  return KOF_UNP_NRV2B_16;
-	case 5:  return KOF_UNP_NRV2D_32;
-	case 6:  return KOF_UNP_NRV2D_8;
-	case 7:  return KOF_UNP_NRV2D_16;
-	case 8:  return KOF_UNP_NRV2E_32;
-	case 9:  return KOF_UNP_NRV2E_8;
-	case 10: return KOF_UNP_NRV2E_16;
-	default: return 0;              /* LZMA, or something newer */
-	}
-}
-
-#define UPX_M_LZMA 14u
+KOF_UPX_DEFINE_METHOD_OF()
 
 /*
  * UPX's LZMA blocks: the stream starts two bytes in, and those two bytes carry the
@@ -671,20 +671,20 @@ static uint32_t method_of(unsigned m)
  * marked not fully examined. A wrong guess costs a sample reported incomplete,
  * never one silently declared clean.
  */
-#define UPX_LZMA_SKIP  2u
-#define UPX_LZMA_LP    0u
+/* UPX_LZMA_SKIP (the two parameter bytes) and UPX_LZMA_LP: <kofmod/upx_method.h>,
+ * which the function-defining macro there needs as well. */
 
-static uint32_t upx_lzma_method(unsigned first_byte)
-{
-	unsigned lc = first_byte >> 3, pb = first_byte & 7u;
-
-	/* Both come from the file, and both size or shape the decoder's model.
-	 * Out of range is refused here so the module can say it did not finish,
-	 * rather than being refused inside the host with nothing to report. */
-	if (lc > KOF_LZMA_MAX_LC || pb > KOF_LZMA_MAX_PB)
-		return 0;
-	return KOF_UNP_LZMA_PROPS(lc, UPX_LZMA_LP, pb);
-}
+/*
+ * The function is KOF_UPX_DEFINE_LZMA_METHOD (kofmod/upx_method.h), in the
+ * place it had: see the note on KOF_UPX_DEFINE_METHOD_OF.
+ *
+ * lc is the top five bits of the first byte of the block, pb the bottom three;
+ * out of range is 0 and the module reports it did not finish.
+ *
+ *
+ *
+ */
+KOF_UPX_DEFINE_LZMA_METHOD()
 
 
 void kof_unpack(const struct kof_obj_ctx *ctx)
@@ -726,7 +726,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	stream = ph + PH_LEN;
 
-	decoder = method_of(kof_u8(ph + PH_METHOD));
+	decoder = upx_method_of(kof_u8(ph + PH_METHOD));
 	u_len   = kof_u32(ph + PH_U_LEN);
 	c_len   = kof_u32(ph + PH_C_LEN);
 

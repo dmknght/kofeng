@@ -46,7 +46,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include "kofgrille.h"
-#include "../libkofeng/kofcore/kofplatform.h"
+#include <kofplatform.h>
 #else
 #include <signal.h>
 #include "kofantarc.h"
@@ -59,42 +59,15 @@
  * declared here for both. It used to be reached only from the _WIN32 branch,
  * which left the call on this side with no declaration at all - invisible
  * until something forced this file to be compiled again. */
-#include "../libkofeng/kofcore/kofplatform.h"
+#include <kofplatform.h>
 #endif
 
 #include "kofevt.h"
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
 #include "kofchan.h"
+#include "kofstop.h"
 
-#ifdef _WIN32
-static volatile LONG g_stop;
-
-static BOOL WINAPI on_ctrl(DWORD type)
-{
-	(void)type;
-	/* Only ask the loop to finish. Doing the teardown here would run it on
-	 * the control handler's own thread while the main thread is still
-	 * inside the collector. */
-	InterlockedExchange(&g_stop, 1);
-	return TRUE;
-}
-
-static void stop_on_signal(void) { SetConsoleCtrlHandler(on_ctrl, TRUE); }
-#else
-static volatile sig_atomic_t g_stop;
-
-/* Same contract as the Windows handler above: ask, do not tear down. A signal
- * handler that closed the collector would free memory the main thread is
- * reading inside a blocking read. */
-static void on_ctrl(int sig) { (void)sig; g_stop = 1; }
-
-static void stop_on_signal(void)
-{
-	signal(SIGINT, on_ctrl);
-	signal(SIGTERM, on_ctrl);
-}
-#endif
 
 /* ----------------------------------------------------------- the collector */
 
@@ -358,12 +331,31 @@ static void usage(void)
 	"  --health           one health line at exit\n");
 }
 
-int main(int argc, char **argv)
-{
+/*
+ * What main() shares between its steps: the options as parsed, then the
+ * state each step leaves for the next.
+ */
+struct ts_run {
 	struct sensor         sen;
 	struct kof_evt_health nh;
 	struct kof_evt        ke;
 	struct kof_evt_tally tally;
+	double   stats_every, next_stats, secs;
+	double   ev_secs;
+	uint64_t t_wall0, t_ev0;
+	int      do_print, show_health;
+	const char *log_path;
+	struct kofevt_log_w *rec;
+	struct kof_chan_pub *chan;
+	const char *chan_name;
+	const char *chan_group;
+	int chan_private;
+	uint32_t ring;
+};
+
+/* Step: the defaults of every option and the zero state of the run. */
+static void ts_init(struct ts_run *m)
+{
 	/*
 	 * NO DEADLINE, AND NOT AS A DEFAULT - THERE IS NO OPTION FOR ONE.
 	 *
@@ -373,8 +365,8 @@ int main(int argc, char **argv)
 	 * turns itself off, and an option for it is an option somebody sets by
 	 * accident. Ctrl-C, or the service manager, and nothing else.
 	 */
-	double   stats_every = 0.0, next_stats, secs = 0.0;
-	double   ev_secs = 0.0;
+	m->stats_every = 0.0; m->secs = 0.0;
+	m->ev_secs = 0.0;
 	/*
 	 * TWO BASELINES, because they answer to different things. `t_wall0` is
 	 * when this started and drives the deadlines - it has to advance even
@@ -384,17 +376,17 @@ int main(int argc, char **argv)
 	 * routinely older than a wall-clock reading taken while waiting for it,
 	 * so every offset clamped to 0.000.
 	 */
-	uint64_t t_wall0, t_ev0 = 0;
+	m->t_ev0 = 0;
 	/*
 	 * SILENT UNLESS ASKED. stats_every 0 means never, which is what a
 	 * service wants: the health line is a debugging affordance, not a log
 	 * format.
 	 */
-	int      do_print = 0, show_health = 0;
-	const char *log_path = NULL;
-	struct kofevt_log_w *rec = NULL;
-	struct kof_chan_pub *chan = NULL;
-	const char *chan_name = NULL;
+	m->do_print = 0; m->show_health = 0;
+	m->log_path = NULL;
+	m->rec = NULL;
+	m->chan = NULL;
+	m->chan_name = NULL;
 	/*
 	 * WHO MAY SUBSCRIBE, or NULL for "only this account".
 	 *
@@ -405,16 +397,12 @@ int main(int argc, char **argv)
 	 * they decide who gets to see every path on the machine. See
 	 * kof_chan_publish_grant for the second cost, which is the cursor.
 	 */
-	const char *chan_group = NULL;
 	/* Keep the channel to this account even when the default would widen
 	 * it. For an operator who knows the consumer runs as the same user. */
-	int chan_private = 0;
-	uint32_t ring;
-	int      i;
+	m->chan_group = NULL;
+	m->chan_private = 0;
 
-	kof_utf8_init(&argc, &argv);
-
-	memset(&tally, 0, sizeof tally);
+	memset(&m->tally, 0, sizeof m->tally);
 	/*
 	 * THE RING IS THIS SERVICE'S MEMORY BUDGET, and 16384 slots is 8MB.
 	 *
@@ -431,25 +419,31 @@ int main(int argc, char **argv)
 	 * matters more than the number: no growth, no fragmentation, and not
 	 * one allocation on the callback path.
 	 */
-	ring = 16384u;
+	m->ring = 16384u;
+}
+
+/* Step: read the command line. -1 to carry on, otherwise the exit status. */
+static int ts_parse_args(struct ts_run *m, int argc, char **argv)
+{
+	int i;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--stats-every") && i + 1 < argc)
-			stats_every = atof(argv[++i]);
+			m->stats_every = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--ring") && i + 1 < argc)
-			ring = (uint32_t)strtoul(argv[++i], NULL, 10);
+			m->ring = (uint32_t)strtoul(argv[++i], NULL, 10);
 		else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
-			chan_name = argv[++i];
+			m->chan_name = argv[++i];
 		else if (!strcmp(argv[i], "--channel-group") && i + 1 < argc)
-			chan_group = argv[++i];
+			m->chan_group = argv[++i];
 		else if (!strcmp(argv[i], "--channel-private"))
-			chan_private = 1;
+			m->chan_private = 1;
 		else if (!strcmp(argv[i], "--print"))
-			do_print = 1;
+			m->do_print = 1;
 		else if (!strcmp(argv[i], "--log") && i + 1 < argc)
-			log_path = argv[++i];
+			m->log_path = argv[++i];
 		else if (!strcmp(argv[i], "--health"))
-			show_health = 1;
+			m->show_health = 1;
 		else if (!strcmp(argv[i], "--help") ||
 			 !strcmp(argv[i], "-h") ||
 			 !strcmp(argv[i], "/?")) {
@@ -466,17 +460,29 @@ int main(int argc, char **argv)
 		}
 	}
 
+	return -1;
+}
+
+/* Step: open the sensor. -1 to carry on, otherwise the exit status. */
+static int ts_open_sensor(struct ts_run *m)
+{
 	stop_on_signal();
 
-	if (!sensor_open(&sen, ring))
+	if (!sensor_open(&m->sen, m->ring))
 		return 1;
 
 	/*
 	 * ONE LINE, AND ONLY WHAT A READER CANNOT INFER. What it collects is
 	 * fixed and in --help; what it was refused is not.
 	 */
-	sensor_report_refused(&sen, stderr);
+	sensor_report_refused(&m->sen, stderr);
 
+	return -1;
+}
+
+/* Step: open the log, if one was asked for. */
+static void ts_open_log(struct ts_run *m)
+{
 	/*
 	 * THE LOG, AND THIS IS THE HALF THAT CAN HONESTLY WRITE ITS HEADER.
 	 *
@@ -493,7 +499,7 @@ int main(int argc, char **argv)
 	 * sensor that refused to collect because it could not also write a
 	 * file would be trading the job for the record of the job.
 	 */
-	if (log_path) {
+	if (m->log_path) {
 		struct kofevt_log_info li;
 		struct kof_evt_health h0;
 
@@ -514,15 +520,22 @@ int main(int argc, char **argv)
 #endif
 		/* platform and arch stay 0, which asks kofevt for this host -
 		 * and for a live collector this host IS the source. */
-		sensor_health(&sen, &h0);
-		rec = kofevt_log_create(log_path, &li);
-		if (!rec)
+		sensor_health(&m->sen, &h0);
+		m->rec = kofevt_log_create(m->log_path, &li);
+		if (!m->rec)
 			fprintf(stderr, "kofwatchtower: cannot write '%s' - "
-				"continuing without a log\n", log_path);
+				"continuing without a log\n", m->log_path);
 		else
-			fprintf(stderr, "  logging to %s\n", log_path);
+			fprintf(stderr, "  logging to %s\n", m->log_path);
 	}
+}
 
+/*
+ * Step: open the channel and grant access to it. -1 to carry on, otherwise
+ * the exit status.
+ */
+static int ts_open_channel(struct ts_run *m)
+{
 	/*
 	 * THE CHANNEL, opened before the first event can arrive.
 	 *
@@ -532,11 +545,11 @@ int main(int argc, char **argv)
 	 * usual cause is a second sensor already publishing - which is refused
 	 * on purpose, two publishers on one ring interleave into it.
 	 */
-	chan = kof_chan_publish_open(chan_name, ring);
-	if (!chan) {
+	m->chan = kof_chan_publish_open(m->chan_name, m->ring);
+	if (!m->chan) {
 		fputs("kofwatchtower: cannot publish a channel - another "
 		      "sensor may already be running\n", stderr);
-		sensor_close(&sen);
+		sensor_close(&m->sen);
 		return 1;
 	}
 
@@ -548,7 +561,7 @@ int main(int argc, char **argv)
 	 * and hands nothing to anybody, which is the failure this flag exists
 	 * to prevent and is invisible from the outside.
 	 */
-	if (chan_group) {
+	if (m->chan_group) {
 		/*
 		 * ASKED FOR EXPLICITLY, SO A FAILURE IS FATAL. The whole
 		 * reason to pass it is that a subscriber cannot otherwise
@@ -556,17 +569,17 @@ int main(int argc, char **argv)
 		 * correctly and hands nothing to anybody, which is the failure
 		 * this flag exists to prevent and is invisible from outside.
 		 */
-		if (kof_chan_publish_grant(chan, chan_group) != 0) {
+		if (kof_chan_publish_grant(m->chan, m->chan_group) != 0) {
 			fprintf(stderr, "kofwatchtower: cannot grant '%s' "
 				"access to the channel: %s\n",
-				chan_group, strerror(errno));
-			kof_chan_publish_close(chan);
-			sensor_close(&sen);
+				m->chan_group, strerror(errno));
+			kof_chan_publish_close(m->chan);
+			sensor_close(&m->sen);
 			return 1;
 		}
 		fprintf(stderr, "kofwatchtower: group '%s' may subscribe\n",
-			chan_group);
-	} else if (!chan_private) {
+			m->chan_group);
+	} else if (!m->chan_private) {
 		/*
 		 * NOBODY NAMED ONE, so widen to whoever is at the terminal -
 		 * see kof_chan_publish_grant_console for why that is the
@@ -584,7 +597,7 @@ int main(int argc, char **argv)
 		 */
 		char who[64];
 
-		if (kof_chan_publish_grant_console(chan, who, sizeof who) == 0) {
+		if (kof_chan_publish_grant_console(m->chan, who, sizeof who) == 0) {
 			fprintf(stderr, "kofwatchtower: the channel belongs to "
 				"'%s' - that account may subscribe\n"
 				"  (whoever logged in; --channel-private to "
@@ -623,6 +636,12 @@ int main(int argc, char **argv)
 		}
 	}
 
+	return -1;
+}
+
+/* Step: the collection loop, until Ctrl-C or the service manager. */
+static void ts_loop(struct ts_run *m)
+{
 	/*
 	 * NO LOG HERE, AND NO SHAPE DUMP.
 	 *
@@ -642,22 +661,22 @@ int main(int argc, char **argv)
 	 * honest state of a sensor with nothing attached to it.
 	 */
 
-	t_wall0    = kof_evt_now();
-	next_stats = stats_every;
+	m->t_wall0    = kof_evt_now();
+	m->next_stats = m->stats_every;
 
 	while (!g_stop) {
 
-		if (!sensor_next(&sen, &ke, 200)) {
+		if (!sensor_next(&m->sen, &m->ke, 200)) {
 			/* Nothing arrived; the clock still has to advance so
 			 * --stats-every fires and --seconds still expires. */
-			secs = kof_evt_secs_since(t_wall0, kof_evt_now());
+			m->secs = kof_evt_secs_since(m->t_wall0, kof_evt_now());
 			goto tick;
 		}
 
-		if (t_ev0 == 0)
-			t_ev0 = ke.stamp;
-		ev_secs = kof_evt_secs_since(t_ev0, ke.stamp);
-		secs    = kof_evt_secs_since(t_wall0, kof_evt_now());
+		if (m->t_ev0 == 0)
+			m->t_ev0 = m->ke.stamp;
+		m->ev_secs = kof_evt_secs_since(m->t_ev0, m->ke.stamp);
+		m->secs    = kof_evt_secs_since(m->t_wall0, kof_evt_now());
 
 		/*
 		 * HANDED OVER FIRST, and its refusal is not this tool's
@@ -665,7 +684,7 @@ int main(int argc, char **argv)
 		 * keeping up, which is counted in the channel header where the
 		 * subscriber can see it too.
 		 */
-		(void)kof_chan_publish(chan, &ke);
+		(void)kof_chan_publish(m->chan, &m->ke);
 
 		/*
 		 * Counted always, printed only when asked - so a silent run and
@@ -673,12 +692,12 @@ int main(int argc, char **argv)
 		 * live in the render switch, which made the totals a side
 		 * effect of somebody looking at them.
 		 */
-		if (do_print)
-			kof_evt_render(&ke, ev_secs,
-				       sensor_name_of(&sen, ke.pid),
-				       stdout, &tally);
+		if (m->do_print)
+			kof_evt_render(&m->ke, m->ev_secs,
+				       sensor_name_of(&m->sen, m->ke.pid),
+				       stdout, &m->tally);
 		else
-			kof_evt_count(&ke, &tally);
+			kof_evt_count(&m->ke, &m->tally);
 		/*
 		 * AND THE SAME RECORD TO THE LOG, if one was asked for.
 		 *
@@ -688,32 +707,34 @@ int main(int argc, char **argv)
 		 * whole stream. Both happen - a run can print and log at once,
 		 * which is what somebody watching a reproduction wants.
 		 */
-		if (rec)
-			(void)kofevt_log_write(rec, &ke);
+		if (m->rec)
+			(void)kofevt_log_write(m->rec, &m->ke);
 
 tick:
-		if (stats_every > 0.0 && secs >= next_stats) {
-			sensor_health(&sen, &nh);
-			kof_evt_health_print(stderr, &nh, secs);
-			sensor_extra(&sen, stderr);
-			next_stats += stats_every;
+		if (m->stats_every > 0.0 && m->secs >= m->next_stats) {
+			sensor_health(&m->sen, &m->nh);
+			kof_evt_health_print(stderr, &m->nh, m->secs);
+			sensor_extra(&m->sen, stderr);
+			m->next_stats += m->stats_every;
 		}
 	}
+}
 
-
-
+/* Step: close the channel, print what was asked for, close the log. */
+static void ts_finish(struct ts_run *m)
+{
 	/*
 	 * At exit, only if asked. A sensor that printed a summary to a console
 	 * nobody is watching is spending the machine's time on nothing - and
 	 * one running as a service has no console at all.
 	 */
-	kof_chan_publish_close(chan);
+	kof_chan_publish_close(m->chan);
 
-	if (show_health) {
-		sensor_health(&sen, &nh);
-		kof_evt_print_tally(&tally, secs, "the whole machine", stderr);
-		kof_evt_health_print(stderr, &nh, secs);
-		sensor_extra(&sen, stderr);
+	if (m->show_health) {
+		sensor_health(&m->sen, &m->nh);
+		kof_evt_print_tally(&m->tally, m->secs, "the whole machine", stderr);
+		kof_evt_health_print(stderr, &m->nh, m->secs);
+		sensor_extra(&m->sen, stderr);
 	}
 
 
@@ -722,24 +743,46 @@ tick:
 
 
 
-	kof_evt_print_tally(&tally, secs, "whole machine", stderr);
-	sensor_health(&sen, &nh);
-	kof_evt_health_print(stderr, &nh, secs);
+	kof_evt_print_tally(&m->tally, m->secs, "whole machine", stderr);
+	sensor_health(&m->sen, &m->nh);
+	kof_evt_health_print(stderr, &m->nh, m->secs);
 	/* And the half only this collector has - see sensor_extra
 	 * for why the unbacked count and the reasons it may be unanswerable
 	 * belong on the same screen. */
-	sensor_extra(&sen, stderr);
+	sensor_extra(&m->sen, stderr);
 
 	/* Closed properly so the header's record count is right - a log cut
 	 * off mid-write is readable, and one that lied about its length would
 	 * not be. */
-	if (rec) {
-		uint64_t nrec = kofevt_log_close(rec);
+	if (m->rec) {
+		uint64_t nrec = kofevt_log_close(m->rec);
 
 		fprintf(stderr, "   logged %llu event(s) to %s\n",
-			(unsigned long long)nrec, log_path);
+			(unsigned long long)nrec, m->log_path);
 	}
 
-	sensor_close(&sen);
+	sensor_close(&m->sen);
+}
+
+int main(int argc, char **argv)
+{
+	struct ts_run m;
+	int rc;
+
+	kof_utf8_init(&argc, &argv);
+
+	ts_init(&m);
+	rc = ts_parse_args(&m, argc, argv);
+	if (rc >= 0)
+		return rc;
+	rc = ts_open_sensor(&m);
+	if (rc >= 0)
+		return rc;
+	ts_open_log(&m);
+	rc = ts_open_channel(&m);
+	if (rc >= 0)
+		return rc;
+	ts_loop(&m);
+	ts_finish(&m);
 	return 0;
 }

@@ -54,9 +54,11 @@ the same logic is a second thing to keep correct, and it will drift.
 
 Measured in this tree:
 
-- A chain was rendered as pseudo code in the viewer and as a flat list in the
-  examiner - two spellings of one chain, and the flat one was wrong. One
-  renderer now, `kof_chain_render`.
+- A detection's name was spelled in the engine and again in the examiner. The
+  family/variant separator moved from "-" to "#" in the engine, the examiner's
+  copy kept the "-", and every detected sample showed no verdict in the examiner
+  while the scanner called the same file infected. One spelling now,
+  `kverdict_compose` (`libkofeng/verdictor/verdict.h`).
 - The scanner's own name-matching guess at "did a packer produce this" was
   retired by the engine publishing `from_packer`.
 - A verdict was composed in the tool and in the engine; the tool's copy went.
@@ -118,10 +120,12 @@ it per use.
 
 Every claim about cost or coverage carries a number from this tree.
 
-- State the gate **before** the change. For analysis work it is chains,
-  links, loop coverage and time - **not** detections: there is no pathogen
-  matcher yet, so the detection count cannot move and quoting it proves
-  nothing.
+- State the gate **before** the change. For a change to the analysis (the
+  diagnose scan, the emulator, the parsers) the gate is what the analysis
+  produced - nodes, links, what a parser recovered - and time. For anything
+  else it is the verdicts on a frozen corpus: identical, or the differences
+  listed. A detection count that cannot move proves nothing, so do not quote
+  one as a result.
 - Change one variable at a time. Two at once is not a measurement.
 - Freeze the binary and the corpus. The scanner repairs in place, so scan
   copies and `chmod a-w` them.
@@ -176,24 +180,26 @@ or filter findings by logic of their own. When a tool needs something the
 engine does not expose, add it to the engine - including the callback the
 tool registers to be told.
 
-## 12. Where code lives (PROVISIONAL - moves to README and the wiki)
+## 12. Where code lives
 
-This is the target model decided 2026-10-12. Most of it is NOT built yet: the
-tree today ships one archive (`libkofeng.a`) with the layers below as directories,
-and ALSO builds the two libs as archives of their own from the same objects -
+The lib split is built; what is still open is at the end of this section. The
+tree ships one archive (`libkofeng.a`) holding the engine and the two libs, and
+ALSO builds each lib as an archive of its own from the same objects -
 `libkgenome.a` (libgenome, plus the one foundation object it calls,
 `kofentropy.o`) and `libkuncoat.a` (libuncoat) in `build/temp`. They are not
-shipped; they exist so that `tests/lib/genome/*.c` and `tests/lib/uncoat/*.c`
-are linked against ONE lib's archive and nothing else, which is the test that
-the lib does not reach the engine (an engine symbol is an undefined reference
-there). `make unit` runs them; `make unit-asan` runs them against the
-sanitised twins. A new file in either directory is picked up by wildcard.
-`libuncoat/`
-(kuncoat) is built as its own top-level directory (parts `decompressors/`,
-`decryptors/`, `decoders/`; one umbrella header `<uncoat.h>`, one transform API
-`transform.h`, status enum `kuncoat_status` in `status.h`); the part
-of libgenome that exists is `libgenome/`. Do not move code to match the rest
-without being asked; do not add code that contradicts it.
+shipped; they exist so that `tests/lib/genome/*.c` and `tests/lib/uncoat/*.c` are
+linked against ONE lib's archive and nothing else, which is the test that the
+lib does not reach the engine (an engine symbol is an undefined reference there).
+`make unit` runs them; `make unit-asan` runs them against the sanitised twins.
+**A test that needs only one lib belongs in `tests/lib/<lib>/`**, not in
+`tests/unit/` (which links the whole engine); a test that needs the object
+context, the parsers or a database stays in `tests/unit/`. A new file in
+`libgenome/`, `libuncoat/`, `libkofeng/` or `tests/lib/<lib>/` is picked up by
+wildcard. `libuncoat/` (kuncoat) has the parts `decompressors/`, `decryptors/`,
+`decoders/`, one umbrella header `<uncoat.h>`, one transform API `transform.h`
+and the status enum `kuncoat_status` in `status.h`; `libgenome/` has `genotype/`,
+`celllysis/` and `phenotype/` (below). Do not move code to match the rest without
+being asked; do not add code that contradicts it.
 
 **Three parts and a foundation, one dependency direction.**
 
@@ -224,7 +230,7 @@ without being asked; do not add code that contradicts it.
   that are NOT containers (.NET, AMSI buffers, script files): genotype (which
   instruction), celllysis (the analysis), phenotype (the emulator and the
   dynamic analysis), the structure of PE and ELF, the library-span table, the
-  lineage walk and its products. It defines its own structs.
+  diagnose walk and its products. It defines its own structs.
 - `kuncoat` is the algorithms that grow without a forecast, in three parts:
   `decompressors`, `decryptors`, `decoders`. Buffers and a budget in, bytes and
   a status out. There is no `unpackers` part: unpacking a packer statically is a
@@ -236,7 +242,53 @@ without being asked; do not add code that contradicts it.
 **Rules every lib follows.**
 
 - Names: `kgenome_` and `kuncoat_` on every public function, type and macro
-  (`KGENOME_`, `KUNCOAT_` on macros). The engine keeps `kof_`.
+  (`KGENOME_`, `KUNCOAT_` on macros). The engine keeps `kof_`, with these
+  exceptions, which are written down so they are not mistaken for lapses:
+  the PUBLIC API a host links keeps the family of its header - `keng_`, `kscan_`,
+  `kdb_`, `kmatch_` (`kofeng.h`), `kverdict_` (`verdictor/verdict.h`,
+  `koftypes.h`), `khash_` (`kofhash.h`), `kentropy_` (`kofentropy.h`) - and these
+  are not renamed, because a rename is a break for every host. What the engine
+  declares for its own units is `kof_<unit>_` (`kof_scan_*` in `scanners/scan.h`),
+  and three internal families mark a helper that is private to its directory:
+  `sx_` (one stage of the scan, `scanners/scan_int.h`), `oc_` (the object
+  context, `scanners/objctx_int.h`) and `pdf_` (the PDF parser's units,
+  `analyzers/parsers/containers/pdf_int.h`; its `static inline` helpers carry it
+  too). A new internal function takes one of those, not a new prefix. What the
+  API file (`kofeng.c`) or another directory calls is not private to a directory:
+  it is `kof_<unit>_` (`kof_scan_bytes`), not `sx_`.
+- One request, one result. A stage takes ONE struct describing its input and
+  fills or returns ONE struct (or a status) - not a list of loose scalars that
+  are really one concept. Group by concept (an input window, an output sink,
+  options, a budget), name the struct next to the function's header in the
+  lib's own prefix, and use one spelling per family: `kgenome_<family>_req` /
+  `_res` (`kgenome_emu_unp_pe_req`, `kgenome_mutation_req`,
+  `kgenome_diag_code_req`, `kgenome_elf_hdr_req`), `kof_<unit>_req` / `_res` in
+  the engine (`kof_match_req`, `kof_exe_norm_req`/`_res`, `kof_diag_store`),
+  `ksn_<unit>_req` in the scanner. The budget, the ledger and the status
+  counters belong to the CALLER and arrive as a member of the request (a
+  pointer), never as a trailing parameter. The struct is passed by `const`
+  pointer and read once at the top of the function into locals, so a hot path
+  pays nothing per byte; measure it (callgrind Ir) when the function is hot.
+  `make check-rules` fails a function with more than 8 parameters (the
+  `parameter count` pass of `tools/check_layers.py`; its EXEMPT table names the
+  one positional wrapper kept for kofexamine). In `kuncoat` the decoder
+  convention is a type: `struct kuncoat_io` (`uncoat_io.h`) is the input window
+  (`struct kuncoat_span`), the sink and its user pointer, and the two counters
+  (`consumed`, `produced`) a decoder always sets; `kuncoat_inflate`,
+  `kuncoat_inflate_seeded` and `kuncoat_lzx_decode` take it, with the
+  algorithm's own extras (`kuncoat_lzx_req`, a seed span) beside it. A decoder
+  that writes into a buffer rather than a sink takes the spans in a struct of its
+  own (`kuncoat_bcj2_io`).
+- Words: one concept has one word in new text, and the old spellings stay where
+  the ABI fixes them. SIMILARITY is `mutation` (`detectors/mutations/`,
+  `kofmod/kofmutation.h`, `kgenome_mutation_*`); what a program DOES is a
+  DIAGNOSE (`bases/diagnoses/`; `kofmod/kofdiagtree.h` holds its graph layout;
+  `KOF_ENGINE_PATHOGEN` and `KOF_ENG_USE_PATHOGEN` are aliases of
+  `KOF_ENGINE_DIAGNOSE` / `KOF_ENG_USE_DIAGNOSE`, same values, kept for
+  kofexamine and old module sources); a module asking
+  the host to undo a coding says `kunp_*` (the unpack ABI) while the algorithm it
+  asks for lives in kuncoat. Rename the file or directory when it is free to
+  move; leave an ABI name until the ABI version moves.
 - Errors: each lib has its own status enum - what fails in an unpacker is not
   what fails in a disassembler. A status says whether the answer is complete;
   "truncated" and "over budget" are values, never a silent "none" (rule 4).
@@ -254,12 +306,31 @@ without being asked; do not add code that contradicts it.
   allocation it asked for through a callback, so that it is charged to the
   scan's budget.
 - No writable global state; a lib is safe on many threads.
-- One public header per lib. Everything else is private to it.
+- One public SURFACE per lib: the umbrella (`<kgenome.h>`, `<uncoat.h>`) and the part
+  headers it lists. Everything else is private to the lib - every `_private.h`, and any
+  header the umbrella does not name. A file outside the lib includes the umbrella, or, when
+  it uses one part, that part's header by its part path (`<celllysis/nucleo.h>`,
+  `<decompressors/inflate.h>`); it never includes a `_private.h`. This was "one public
+  header per lib" and the engine had never obeyed it to the letter (33 include lines of 19
+  part headers): routing them all through the umbrella would make every engine unit
+  compile the whole of kgenome for one type, so the rule names what the headers already
+  were. `tools/check_layers.py` enforces it (LIB PUBLIC HEADERS); `libkofeng/kofcore/kofmod/` re-exports the libs' types by
+  design and `tests/` includes private headers for white-box tests, so neither is checked.
 - Modules are freestanding blobs: they reach a lib only through a slot of the
   module ABI, which the engine owns and implements by calling the lib.
 - `bases/` is case routines that use the module API. Anything two routines
   share, or that is big enough to need its own tests, graduates into a lib or
-  the engine; `bases/` does not carry shared code. The analysis that is specific
+  the engine; `bases/` does not carry shared code. What two MODULES share is a
+  module-side helper header under `libkofeng/kofcore/kofmod/` (`ep_shape.h`,
+  `pe_reassemble.h`, `upx_method.h`, `stub_pat.h`), which a module includes after
+  `<kofmod/kofsig.h>` and which stays freestanding. **A shared function there is
+  a macro that DEFINES it, invoked where the module had the function**
+  (`KOF_STUB_DEFINE_IS`, `KOF_UPX_DEFINE_METHOD_OF`): a blob is linked with
+  `-ffunction-sections`, so its bytes follow the order the functions were emitted
+  in, and every report (`KOF_SCAN_INFECT`, `kof_debug`) carries the source line it
+  was made on. Moving a function up into a header, or deleting lines above a
+  report, changes the pack with no change of behaviour - measured, and the packs
+  were no longer byte-identical. The analysis that is specific
   to one kind of malware lives as a disease unit with the other analysis, not
   in `bases/`: the msfvenom wrapper declarations (`msf_*.h`, SDK `kofshared/`)
   are such a unit. Shellcode in general cannot be covered by the engine; a
@@ -278,7 +349,67 @@ without being asked; do not add code that contradicts it.
   is never parsed: it is the parent's header over bytes that moved. A new
   per-object product needs a line in one of those two lists, not a re-run.
 - Parsers keep their engine-facing API. The body that does the work moves into
-  `kgenome`; the engine-side function stays as the adapter and says so.
+  `kgenome`; the engine-side function stays as the adapter and says so. The PE import
+  AND export directories are walked in `kgenome` (`kgenome_pe_imports`,
+  `kgenome_pe_exports`, `genotype/image/pe_image.c`); `analyzers/parsers/binaries/pe/pe_sym.c`
+  only decides how an import or an export is spelled in a KSYM record.
+
+**Names inside libgenome (built, not provisional).** A file name says what the
+file is: `<family>_<part>.c`. The family is the subject (what the symbols in it
+are called), the part is the job of that file in it.
+
+- Directories: `genotype/` (one instruction: decoders and tables per
+  architecture, the PE/ELF image), `celllysis/` (reading code without running
+  it), `phenotype/` (running code and diagnosing what it does).
+- Families in `phenotype/`, and the part words they use:
+  `emu` - the interpreter (`emu_interp`, `emu_api`, `emu_mem`, `emu_ops`,
+  `emu_sys`, `emu_vec`, `emu_x87`, `emu_win*`; public header `emu.h`);
+  `emu_unpack` - running a sample to take its code out (`emu_unpack_gate`,
+  `_map` the image loader both formats share, `_elf`, `_pe`, `_pe_teb`,
+  `_pe_module`, `_pe_dump`; public header `emu_unpack.h`);
+  `diag` - the diagnose scan (`diag_scan` the scan object, `diag_origin`,
+  `diag_hit`, `diag_site`, `diag_sweep`, `diag_sweep_cand`, `diag_code`,
+  `diag_str`), its routes (`diag_emu*` emulate, `diag_sym` symbol, `diag_pe`
+  PE imports, `diag_apihash`) and the syscall-wrapper analysis
+  (`diag_wrapper*`; "wrapper" is a libc function whose job is one syscall, and
+  is spelled out for that reason); public headers `diag_scan.h`, `diag_vocab.h`
+  and `diag_scan_state.h` (the open scan object, which the engine's matcher
+  reads). `diag` is the one family with several private headers, because it is
+  four jobs under one prefix: `diag_private.h` (what one analysis routine needs from
+  the scan it fills), `diag_scan_private.h` (the scan object, its hits and the sweep),
+  `diag_emu_private.h` (the emulate route's stages) and `diag_wrapper_private.h` (the
+  syscall-wrapper analysis); the last three include the first.
+- Families in `genotype/image/` and `celllysis/` where the file names differ from
+  the old ones: `image` (the file-offset/address translation, `image_addr`),
+  `nucleo` (the capability vocabulary and the syscall tables: `kgenome_nucleo_*`,
+  `KGENOME_NUCLEO_*`, one family and no longer `flow` beside it), `mutation`
+  (`mutation_units`, `mutation_pool`, public header `mutation.h`). In libuncoat the
+  MPRESS call filter is `mpress` and the bzip2 decoder is `bunzip`, as their symbols say.
+- A family that is split across files has ONE private header,
+  `<family>_private.h` (never `_int.h`: `int` says nothing). It holds the types
+  the parts share and the prototypes of what one part offers another; it is not
+  installed and not part of the surface. Small functions on the hot path that
+  more than one part calls are `static inline` in it, so the split costs no call.
+- Symbols: `kgenome_<family>_...` for functions and types,
+  `KGENOME_<FAMILY>_...` for macros and enumerators, the same family as the file.
+  When the family has routes or parts that need telling apart the part comes
+  next (`kgenome_diag_emu_...`, `kgenome_diag_wrapper_...`). No `kof` in a name
+  inside libgenome; the module-facing spelling is an alias in `kofmod/` and keeps
+  its old name (`#define kof_diag_str kgenome_diag_str`).
+- Object files: `build/temp/gt_*` (genotype), `cl_*` (celllysis), `ph_*`
+  (phenotype), `uc_*` (uncoat), `lib_*` (engine).
+- Splitting a big file: cut at a responsibility, name the pieces `<family>_<part>`,
+  move the types and macros two pieces share to the private header, give the
+  statics they share the family prefix. A function longer than about 400 lines is
+  a sequence of named static steps.
+- One spelling is still two: the emulated-unpack API is `kgenome_emu_unp_*` /
+  `KGENOME_EMU_UNP_*` (the examiner reads it) while the files say `emu_unpack`.
+  The private names follow the API. Spell it out the next time the examiner is open.
+- `libuncoat/` has `transform_private.h`; the same rule applies there.
+- A thing both the lib and the engine need (a comparator, a hash step, a byte
+  histogram) lives once in core and the lib includes it: `kofcmp.h`, `kofcore.h`'s
+  `kof_hash_step`, `kofentropy.h`'s `kentropy_count`. A lib header does not include
+  the engine.
 
 **Decided with it.** The PE/ELF rebuild writers live in `kgenome`, next to the
 code that reads the same layout. `kuncoat` does not rebuild a file: a routine
@@ -292,26 +423,192 @@ interprets the packer's own layout stays in the `bases/` routine.
 **Not decided yet.** The open method-id space for new algorithms; whether
 decrypt splits from decompress when it grows.
 
-`make check-rules` runs `tools/check_layers.py`, which checks the include
-direction between these parts. The parts are classed by where their code is
-GOING (the lineage backend, now in `libgenome/phenotype`, counts as
-`kgenome`; `libuncoat/` is `kuncoat`), so the edges in `tools/layers.baseline`
-are the list of cuts the move still has to make. A new upward include fails;
-the baseline only shrinks.
+**Where the rest of the tree lives.**
 
-The same script checks two more things, each with its own baseline file.
+- `libkoforbit/` is the collectors and what they produce. `antarc/` is the Linux
+  collector and `grille/` the Windows one; `evt/` is the event record both fill,
+  `fridge/` the clean-file cache, `report/` the trace report, `chan/` the channel
+  between a sensor and its consumer. `mon/` and `walk/` hold only a header each -
+  `kofmon.h` the sensor contract and `kofwalk.h` the process walk - which `antarc/`
+  and `grille/` implement; they are contracts, not unfinished code.
+- `ksigbuilder/` is one program with several modes (a module build, `--tree`,
+  the pack, `--diagnose`, `--extract`, `--image`), in `ksb_*.c` units behind one
+  private header, `ksb.h`: a unit is a mode or one responsibility inside it
+  (`ksb_read` reads a declaration's arguments, `ksb_scan` finds the macros,
+  `ksb_artefact` / `ksb_group` / `ksb_pack` are the pack, `ksb_tree` / `ksb_uses`
+  the tree walk, `ksb_diag*` / `ksb_disease` the diagnoses and diseases). The state
+  of a run is one `struct ksb_ctx`, allocated in `ksb_main.c` and passed as the first
+  parameter, `ksb`: a function that takes none touches no run state. What one unit
+  offers another is declared in `ksb.h` with a `ksb_` prefix; everything else is
+  `static`. A new `ksb_*.c` is picked up by the Makefile's wildcard.
+- `scanners/pzero.{c,h}` is the cure stage (what a file was before it was
+  infected). It is a stage of the pipeline: it takes the object context and the
+  cure request, so it lives with `scanners/` and not in `analyzers/`.
+  `analyzers/diseases/` is the disease units - name checks, the id, the `msf_*.h`
+  declarations - which the loader, the builder and the modules share.
+- `docs/disabled/` holds a module that is switched off: a `.c` whose header says
+  why, kept out of `bases/` so that nothing walking `bases/` has to know to skip
+  it. To turn one on, copy it back.
+- The Makefile is a short list of `include mk/<part>.mk` lines, in dependency order
+  (platform, shell, flags, entry, stamp, libs, sdk, sources, tools, grille, packs, tests,
+  deps, asan, misc, checks); a variable is set by an earlier fragment than the first rule
+  that names it, so a new source list goes in `mk/sources.mk`, a new tool in `mk/tools.mk`.
+- `docs/exports_kept.txt` lists what is exported, defined or named and has no engine caller
+  (tests-only exports, the emulator's diagnostic API, ABI vocabulary, members of a set), with the
+  reason each stays. A new such name is added there, or it is deleted or made static.
+- `tools/` is for developer tools that are not part of a build (the layer check,
+  the x86 table generator, the decoder differential tools). A tool that needs
+  something outside this tree to run says so in its header and is not built by
+  `make`; one that needs nothing outside is built by a target.
+- Object files go to `build/temp/<prefix>_...`: `lib_` the engine, `gt_`/`cl_`/`ph_`
+  genotype/celllysis/phenotype, `uc_` libuncoat. The prefixes are the build's
+  spelling (`OBJ_RULE` in `mk/libs.mk`); they predate the lib names and are not API.
+
+`make check-rules` runs `tools/check_layers.py`, which checks the include
+direction between these parts (`libgenome/` is `kgenome`, `libuncoat/` is
+`kuncoat`, `libkofeng/kofcore` is core). An upward include fails. There are no
+baseline files: every rule passes with no violation, and what cannot be cut today is
+in the `EXEMPT` table of `check_layers.py`, each entry with its reason (an entry whose
+violation is gone is reported so the line can be deleted).
+
+The same script checks more things (described below).
 **The engine's own order**, bottom to top: `core` (`libkofeng/kofcore`) <
-`analyzers` (`analyzers/`, and `extractors/`, which holds only thin files that forward to the lib APIs) < `pack` (`databases/pack/`: the
+`analyzers` (`analyzers/`) < `pack` (`databases/pack/`: the
 layout of a loaded pack and its accessors, which the matchers read) <
 `detectors` < `databases` (the loader and packer, which BUILD matchers) <
-`verdictor` < `scanners` < the public API
+`verdictor` (`verdictor/`: the names, `verdict.h`) < `scanners` < the public API
 (`libkofeng/kofeng.{c,h}`); a file may include its own class and lower ones
-(`tools/layers_engine.baseline`, now empty: the scan's types live in `libkofeng/kofcore/koftypes.h`, which `kofeng.h` includes, the syndrome set the loader builds is `databases/pack/kofsyndrome.*`, and the verdictor is handed a `struct kof_verdict_in` by the scanners). **The core closure**: no file of core proper
+(the scan's types live in `libkofeng/kofcore/koftypes.h`, which `kofeng.h` includes, the syndrome set the loader builds is `databases/pack/kofsyndrome.*`, and the verdictor is handed a `struct kof_verdict_in` by the scanners). **The core closure**: no file of core proper
 may reach `libgenome/` or `libuncoat/` through a chain of includes, because
 a direct-include check cannot see `rangelist.h -> kofsig.h -> libgenome`
-(`tools/layers_closure.baseline`; `kofmod/` re-exports the libs' types on
-purpose and is only an intermediate node, never a source). Both baselines only
-shrink.
+(`kofmod/` re-exports the libs' types on
+purpose and is only an intermediate node, never a source).
+**Tool includes**: a program under `kofscanner/`,
+`ksigbuilder/`, `kofwatcher/` or `tools/` names the engine by an include root
+(`<kofeng.h>`, `<databases/dbpacker.h>`, `<kofmod/kofsig.h>`), never by a relative
+path out of its own directory. `kofscanner` is written against the SDK headers
+(`kofeng.h` and the core headers the SDK ships beside it); `ksigbuilder` is the
+one program that reads the engine's inner headers, and says so with `-Ilibkofeng`.
+**Include guards**: a header's guard macro contains the
+header's file name, so a guard cannot be copied from another file unchanged
+(`libgenome/` and `libuncoat/` guards are covered by the prefix pass, which also
+requires the lib's prefix).
+**Five more** (module includes, lib public headers, headers compile alone, tests and
+`/tmp`, and the orbit rule inside the part check). **Lib public headers**: see "One public SURFACE per lib"
+above - a file outside a lib includes only what its umbrella names. **Module includes**: everything a file under `bases/` includes is
+`<kofmod/...>` or `<kofshared/...>` - a module is a freestanding blob that reaches the
+engine and the libs only through the module ABI, and a module's file is included by no
+other (`bases/` carries no shared code, so this is that rule too). **Orbit**:
+`libkoforbit/` is classed `orbit`, above the engine; no engine or lib file includes it
+(the standard says nothing about what orbit may include, so it may include anything).
+**Headers compile alone**: every header of `libkofeng/`, `libgenome/` and `libuncoat/`
+is compiled by itself with `-fsyntax-only` (`_GNU_SOURCE` set, as a translation unit
+sets it; a header of the module ABI after `<kofmod/kofsig.h>`, which is how a module
+meets it; `analyzers/diseases/msf_*.h` skipped, they include `<kofshared/...>`, which
+exists only in the staged SDK) - under a second, 16 threads. **Tests and /tmp**: a test
+creates its files beside the build output (`build/kof_<name>_XXXXXX`), never under
+`/tmp`; what is flagged is a creating call given a `/tmp` path (or a path built from
+one), and `tmpfile`, `tmpnam`, `tempnam`, `P_tmpdir`, `kof_tmpdir` - a `/tmp` string that
+is only text in a record under test is not. Honouring `TMPDIR` is allowed; defaulting to
+`/tmp` is not.
+**Five more (orbit headers, function length, file size, kof names in libgenome, getenv in tests).** *Orbit headers compile alone*: the
+18 non-Windows headers of `libkoforbit/` are compiled by themselves with the orbit
+include roots (the Windows ones need `windows.h` and are not tested). *Function
+length*: no function over 400 lines; `EXEMPT` names the ones that cannot move
+today - `kgenome_emu_run` (one interpreter switch over shared register state) and the
+unpackers under `bases/` (a module's pack bytes follow its functions' order and source
+lines, see "bases/" above). *File size*: a hand-written `.c` over 1500 lines or a header
+over 1000 is a prompt to look, not an order to split. Size is not the fault; mixing jobs a
+reader would look for separately is. A file over the ceiling needs a recorded reason: split
+it by purpose (one private header per family), or put it in `EXEMPT` with a one-line
+reason `cohesive: <what it is>` (one decoder, one interpreter loop). Judge it by what it
+is for, and when it is one job the fix is smaller - name the steps of an over-long
+function - or none. The module ABI's `kofmod/kofcontent.h` is exempt by name: it is ONE
+struct whose member order is the ABI, there is no cut by purpose that is not an ABI move.
+`libgenome/`, `libuncoat/` and the non-Windows orbit are in the pass; `kofexamine/` is
+not. *No kof name in libgenome*: the lib defines `kgenome_` /
+`KGENOME_` names, including its static helpers' macros and tags; it may use core's
+`kof_` names. *getenv in tests*: a test reads the environment only for scratch space
+(`TMPDIR`, `TMP`, `TEMP`); the four that exist today are in `EXEMPT`. *Parameter
+count*: no function definition in `libkofeng/`,
+`libgenome/`, `libuncoat/`, `ksigbuilder/`, `kofscanner/` or `kofwatcher/` takes more than 8
+parameters (see "One request, one result" above); the one `EXEMPT` entry is the
+positional `kgenome_elf_write_hdr` wrapper kept for kofexamine. A new check goes in `check_layers.py` (an `EXEMPT` entry needs a stated reason), and is
+shown to fail on a deliberate violation before it is trusted.
+Which rules a grep or this script cannot see - "no writable global state", "a tool
+does not compose verdicts" - are checked in review.
+
+**The module ABI is several headers behind one umbrella.** `libkofeng/kofcore/kofmod/kofsig.h`
+is the only ABI header a signature module includes (`bases/*.c` also names the module-side
+helper headers beside it, below); it holds
+the module contract, the alias block for the libs' types, and `#include`s the parts, each of which
+has one purpose and carries its own docs: `kofabi.h` (ABI version, finding level), `kofobjfmt.h`
+(format enum, target axis, format and arch names), `kofname.h` (what a name or comment may hold),
+`kofregion.h` (region masks, extent bound, region shape), `kofcontent.h` (`struct kof_content`, the
+vtable), `kofentry.h` (decoder ids, entry kinds, `struct kof_entry`), `kofctx.h` (`struct
+kof_obj_ctx`), `kofdefine.h` (`kof_scan`/`kof_unpack`/`kof_cure` and the macros defining them),
+`kofsearch.h`, `kofmeasure.h`, `kofdiagnose.h`, `kofread.h`, `kofchild.h`, `kofmodemu.h` (the macros a
+module calls, by what they ask the host), `kofverdict.h` (engine, verdict, malware type lists),
+`kofdeclare.h` (what the build reads out of a source), `kofhit.h` (report, mark, cure). A new
+macro goes in the part whose question it asks, not in the umbrella; a new part is added to
+`SDK_HDR` (`mk/sdk.mk`) and to the list in the umbrella's header comment. The parts are not
+included by modules directly, so the freestanding-blob rule is unchanged.
+
+**`struct kof_scanner` is a set of sub-structs, one per lifetime or stage**
+(`scanners/scan_state.h`; the types in `scan_state_life.h`, `scan_state_child.h`,
+`scan_state_stage.h`, the constants and enums in `scan_types.h`, the functions in
+`scan.h`). It was 193 fields in one struct and "which stage owns this" was not
+written anywhere. Now: `sc->obj` is everything wiped for each object - **`sx_obj_begin`
+(`scan.c`) is the one place per-object state is reset**: it releases what the fields own
+and then does one `memset` of `sc->obj`, so a field added to `struct kof_scan_obj` is
+reset without anyone naming it; `sc->mod` is wiped by `sx_mod_begin` (by hand, because
+three of its fields are arrays whose clearing every module of every object would pay
+for); `sc->cur` is the object in hand (set by the walk and FACTS); `sc->pend` is what a
+producer declared for its next child (`oc_pend_clear` is the one list); `sc->child` is
+the children collected; `sc->emu`, `sc->sink`, `sc->ledger` (the budget, per tree),
+`sc->cache`, `sc->match`, `sc->syms`, `sc->diag` and `sc->subject` are the per-stage
+and per-scanner state. Each sub-struct's comment says which unit owns it and which
+files touch it. A new field gets the lifetime it has; if it has none of these it is a new
+stage and gets a struct with the same header comment. `mutation` stays at the top level
+because `kofexamine` reads it; it moves into `sc->match` with that tool's upgrade.
+
+**One verdict per top-level file is the engine's** (`kverdict_filemap_*` in
+`verdictor/verdict.h`, reached through `kofeng.h`): a host calls
+`kverdict_filemap_fold(map, object_name, result, keep_clean)` from its on-object
+callback and reads the files back with `_at` / `_count` / `_files`. The name-to-file
+split (the first `//`), the rank of the three levels and the "examined" OR are in it, so
+a tool does not compose a file's verdict; `kofscanner` only prints.
+
+**The big engine units are split by what they serve, with a private header.** `scanners/objctx_decomp.c`
+(sinks and the streaming dispatch) shares `objctx_decomp.h` with `objctx_decomp_buf.c` (codings whose
+whole output must be addressable), `objctx_decomp_text.c`, `objctx_decomp_folder.c` (BCJ2, MSZIP, LZX),
+`objctx_decomp_entry.c` (an entry, a coding chain) and `objctx_decrypt.c`. The PDF parser in
+`analyzers/parsers/containers/` shares `pdf_int.h` between `pdf_parse.c` (the parse), `pdf_walk.c`
+(objects), `pdf_xref.c` (trailer, cross reference), `pdf_dict.c` (one dictionary), `pdf_entries.c`
+(the entry table), `pdf_docinfo.c` and `pdf_names.c`. The small helpers a hot loop calls stay
+`static inline` in the private header; what two units call is an extern with the family's prefix
+(`oc_`, `pdf_`). A new file in either family is picked up by the wildcard.
+
+**Splits by responsibility, each with one private header (no logic moved).** The child
+declaration unit is `scanners/objctx_child.c` (close, gather, produced reads, the budget),
+`objctx_child_sink.c` (the pending set, the claims a pushed child spends, the sink) and
+`objctx_child_image.c` (what a module declares about the child's image); the interpreter
+unit is `objctx_emu.c` and `objctx_emu_gather.c` (what a run produced); the diagnose unit
+`objctx_diag.c` and `objctx_diag_query.c`; all share `objctx_int.h`. The pack loader is
+`databases/dbloader.c`, `dbpackcheck.c` (validation) and `dbloader_packs.c` (mapping and
+the side tables), sharing `dbloader_int.h` (`kof_db_`); the diagnose source reader is
+`diagsrc.c`, `diagsrc_parse.c` and `diagsrc_resolve.c`, sharing `diagsrc_int.h`
+(`kof_dsrc_`). The tools: `kofscanner/` is `kofscanner.c` (arguments, the run),
+`kofscan_out.c` (output) and `kofscan_procs.c` (`--scan-procs`), sharing `kofscanner_int.h`
+(`ksn_`); `kofwatcher/kofmontrace*.c` is the run, the scan and spill half and the tracer,
+sharing `kofmontrace_int.h` (`kmt_`); `libkoforbit/antarc/aproc.c` is the process list and
+`aproc_pmem.c` one process opened, sharing `aproc_int.h` (`kofa_`). A header over 1000 lines
+is an umbrella over parts that sit beside it: `koftypes.h` (`kofobjname.h`, `kofresult.h`,
+`kofoption.h`), `kofplatform.h` (`kofplatform_os.h`, `kofplatform_file.h`), `kofevt.h`
+(`kofevt_vocab.h`, `kofevt_record.h`), `aproc.h` (`aproc_proc.h`, `aproc_region.h`,
+`aproc_pmem.h`), `kofgrille.h` and `wproc.h` (three parts each); an includer keeps the
+umbrella. `kofmod/kofcontent.h` stays one header: it is ONE struct (the module vtable) whose
+member order is the ABI, so no cut by purpose exists that is not an ABI move.
 
 ## Working in this tree
 
@@ -320,6 +617,9 @@ shrink.
 - **A scan is not read-only.** The scanner repairs infected files in place.
   Copy a sample before scanning it and `chmod a-w` the copy; four originals
   were destroyed learning this.
+- **`make tui-test` and `make population` are not part of `make unit`.** The
+  first drives the real viewer (python3 and pyte); the second writes N synthetic
+  signature sources for a scale measurement - not evidence about detection.
 - **`make unit` builds a different database** from `make`. Running a test
   binary by hand afterwards measures the wrong pack, and a corpus measurement
   in the same command as a build measures the build too.

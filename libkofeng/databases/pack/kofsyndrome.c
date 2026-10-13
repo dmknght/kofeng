@@ -1,5 +1,6 @@
 #include "kofsyndrome.h"
 #include "../../kofcore/kofmod/kofsig.h"   /* kof_maltype */
+#include "../../kofcore/kofcmp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,13 +29,6 @@ struct kof_synd_set {
 	uint32_t  *ex_first;
 	uint32_t  *ex_n;
 };
-
-static int cmp_u32(const void *a, const void *b)
-{
-	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
-
-	return x < y ? -1 : x > y;
-}
 
 static uint32_t dis_index(const struct kof_synd_set *s, uint32_t id)
 {
@@ -121,7 +115,7 @@ struct kof_synd_set *kof_synd_build(const struct kof_synd_in *in, uint32_t n)
 		for (i = 0; i < n; i++)
 			for (j = 0; j < in[i].n_dis; j++)
 				s->dis[n_all++] = in[i].dis[j];
-		qsort(s->dis, n_all, sizeof *s->dis, cmp_u32);
+		qsort(s->dis, n_all, sizeof *s->dis, kof_cmp_u32);
 		for (i = 0; i < n_all; i++)
 			if (!s->n_dis || s->dis[s->n_dis - 1u] != s->dis[i])
 				s->dis[s->n_dis++] = s->dis[i];

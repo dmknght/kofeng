@@ -25,6 +25,7 @@
 
 #include "chm_parse.h"
 #include "../../../kofcore/rangelist.h"
+#include "../../../kofcore/entryname.h"
 
 #define CHM_ITSF_MIN   0x60u     /* through the v3 content offset */
 #define CHM_ITSP_MIN   0x54u
@@ -191,24 +192,22 @@ static int chm_is_special(kof_buf f, uint64_t off, uint64_t len)
 /* A path that means to leave wherever it is written - the same question
  * tar_parse asks of its own names, and the answer is a FACT recorded rather
  * than a refusal: a CHM is not extracted by this engine, so the interest is in
- * what the file was built to do. */
+ * what the file was built to do.
+ *
+ * The one check is kof_name_escapes (entryname.h). A CHM names every entry
+ * from the archive root with a leading '/', which is not an absolute
+ * path, so that one slash is taken off before asking. */
 static int chm_traversal(kof_buf f, uint64_t off, uint64_t len)
 {
-	uint64_t i;
+	uint8_t b;
 
 	if (len > KOF_CHM_MAX_NAME)
 		len = KOF_CHM_MAX_NAME;
-	for (i = 0; i + 1u < len; i++) {
-		uint8_t a, b;
-
-		if (!kof_rd_u8(f, off + i, &a) || !kof_rd_u8(f, off + i + 1u, &b))
-			return 0;
-		if (a == '.' && b == '.')
-			return 1;
-		if (i == 0 && (a == '\\' || (a >= 'A' && a <= 'z' && b == ':')))
-			return 1;
+	if (len && kof_rd_u8(f, off, &b) && b == '/') {
+		off++;
+		len--;
 	}
-	return 0;
+	return kof_name_escapes(f, off, (uint32_t)len);
 }
 
 /* Does the name at `at` end with `tail` - which is how the three entries below

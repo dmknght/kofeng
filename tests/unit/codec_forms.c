@@ -20,7 +20,7 @@
 #include <string.h>
 
 #include "../../kofexamine/kofinspect.h"
-#include "../../libkofeng/extractors/codec_ui.h"
+#include "../../kofexamine/codec_ui.h"
 
 static int fails;
 

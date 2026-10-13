@@ -63,24 +63,10 @@
 #include "../funcs.h"
 #include "../sym_pool.h"
 
-/* The import descriptor is walked by kgenome_pe_imports in pe_parse.c, which is
- * the only place that knows its field offsets - see the note there. What is
- * left here is how an import is SPELLED in a KSYM record. */
-
-#define EXP_N_FUNCS      20u   /* 4  NumberOfFunctions                     */
-#define EXP_N_NAMES      24u   /* 4  NumberOfNames                         */
-#define EXP_FUNCS        28u   /* 4  AddressOfFunctions                    */
-#define EXP_NAMES        32u   /* 4  AddressOfNames                        */
-#define EXP_ORDS         36u   /* 4  AddressOfNameOrdinals                 */
-
-/*
- * How many exported names one file may contribute.
- *
- * Bounded because NumberOfNames is a field the file writes, and a hostile one
- * can claim as many as it likes. Nothing here trusts a count it was given.
- * The import side has its own bounds, in pe_parse.c, for the same reason.
- */
-#define MAX_THUNKS 4096u
+/* The import descriptor and the export directory are walked by kgenome_pe_imports
+ * and kgenome_pe_exports (libgenome/genotype/image/pe_image.c), the only place
+ * that knows their field offsets. What is left here is how an import or an
+ * export is SPELLED in a KSYM record. */
 
 /*
  * Copy a NUL-terminated name out of the file at `off`, sanitised.
@@ -184,22 +170,34 @@ static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_im
 	}
 }
 
-/* The exports, appended after the imports. */
+/* The exports, appended after the imports. The directory is walked by
+ * kgenome_pe_exports; what is here is how an export is SPELLED in a record. */
+struct exp_ctx {
+	struct kof_symw *w;
+	kof_buf f;
+};
+
+static int export_put(void *user, uint64_t nameoff, uint32_t frva)
+{
+	struct exp_ctx *x = user;
+	char fn[KOF_SYM_NAME_MAX + 1u];
+	uint32_t len = name_at(x->f, nameoff, fn, sizeof fn);
+	int cut;
+
+	if (!len)
+		return 1;
+	/* name_at stops at the buffer's size: the name goes on when the
+	 * byte after what it copied is not the terminator. */
+	cut = len == KOF_SYM_NAME_MAX && nameoff + len < x->f.n &&
+	      x->f.p[nameoff + len] != 0;
+	return sym_put(x->w, (uint8_t)(KOF_SYM_F_DEFINED |
+				       (frva ? KOF_SYM_F_IN_EXEC : 0u)),
+		       frva, fn, len, cut);
+}
+
 static void do_exports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_info *p)
 {
-	uint64_t d = kgenome_pe_rva_to_off(p, p->dir[KGENOME_PE_DIR_EXPORT].rva);
-	uint32_t n_names = 0, a_names = 0, a_ords = 0, a_funcs = 0, i;
-	char fn[KOF_SYM_NAME_MAX + 1u];
-
-	if (!p->dir[KGENOME_PE_DIR_EXPORT].rva || !d)
-		return;
-	if (!kof_rd_u32(f, d + EXP_N_NAMES, 0, &n_names) ||
-	    !kof_rd_u32(f, d + EXP_NAMES,   0, &a_names) ||
-	    !kof_rd_u32(f, d + EXP_ORDS,    0, &a_ords)  ||
-	    !kof_rd_u32(f, d + EXP_FUNCS,   0, &a_funcs))
-		return;
-	if (n_names > MAX_THUNKS)
-		n_names = MAX_THUNKS;
+	struct exp_ctx x = { w, f };
 
 	/*
 	 * The NAMED exports only.
@@ -212,39 +210,7 @@ static void do_exports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_in
 	 * how many records there are, so nothing pretends the block is the
 	 * whole directory.
 	 */
-	for (i = 0; i < n_names; i++) {
-		uint64_t no = kgenome_pe_rva_to_off(p, a_names) + (uint64_t)i * 4u;
-		uint32_t nrva = 0, frva = 0, len;
-		uint16_t ord = 0;
-		int cut;
-
-		if (!a_names || !kof_rd_u32(f, no, 0, &nrva))
-			break;
-		len = name_at(f, kgenome_pe_rva_to_off(p, nrva), fn, sizeof fn);
-		if (!len)
-			continue;
-		/* The RVA comes through the ordinal table, which is what maps a
-		 * name to its slot in AddressOfFunctions. Skipped rather than
-		 * guessed when either table is missing: a value of zero would
-		 * read as "at the image base". */
-		if (a_ords && a_funcs &&
-		    kof_rd_u16(f, kgenome_pe_rva_to_off(p, a_ords) +
-				  (uint64_t)i * 2u, 0, &ord))
-			(void)kof_rd_u32(f, kgenome_pe_rva_to_off(p, a_funcs) +
-					    (uint64_t)ord * 4u, 0, &frva);
-		/* name_at stops at the buffer's size: the name goes on when the
-		 * byte after what it copied is not the terminator. */
-		{
-			uint64_t no2 = kgenome_pe_rva_to_off(p, nrva);
-
-			cut = len == KOF_SYM_NAME_MAX && no2 + len < f.n &&
-			      f.p[no2 + len] != 0;
-		}
-		if (!sym_put(w, (uint8_t)(KOF_SYM_F_DEFINED |
-					  (frva ? KOF_SYM_F_IN_EXEC : 0u)),
-			     frva, fn, len, cut))
-			break;
-	}
+	(void)kgenome_pe_exports(f, p, export_put, &x, NULL);
 }
 
 uint32_t kof_pe_syms(kof_buf file, const struct kgenome_pe_info *p,

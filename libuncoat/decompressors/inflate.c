@@ -644,21 +644,21 @@ static int build_dynamic(struct kuncoat_inflate *s)
  * cannot drift.
  */
 enum kuncoat_status kuncoat_inflate_seeded(struct kuncoat_inflate *s,
-		const uint8_t *seed, uint32_t seed_len,
-		const uint8_t *in, uint64_t in_len,
-		kuncoat_inflate_sink sink, void *user,
-		uint64_t *consumed, uint64_t *produced)
+		const struct kuncoat_span *seed, struct kuncoat_io *io)
 {
 	int status = KUNCOAT_OK, last = 0;
 	uint64_t seed_start;
+	const uint8_t *in = io->in.p;
+	kuncoat_inflate_sink sink = io->sink;
+	void *user = io->user;
+	uint32_t seed_len = 0;
 
 	memset(s->win, 0, sizeof s->win);
 	s->wpos = s->wpend = 0;
 	s->produced = 0;
-	if (seed && seed_len) {
-		if (seed_len > KUNCOAT_INF_WINDOW)
-			seed_len = KUNCOAT_INF_WINDOW;
-		memcpy(s->win, seed, seed_len);
+	if (seed && seed->p && seed->n) {
+		seed_len = seed->n > KUNCOAT_INF_WINDOW ? KUNCOAT_INF_WINDOW : (uint32_t)seed->n;
+		memcpy(s->win, seed->p, seed_len);
 		/*
 		 * wpos is where the next byte goes, which is one past the seed;
 		 * wpend stays zero because NONE OF THE SEED IS OUTPUT - it has
@@ -670,7 +670,7 @@ enum kuncoat_status kuncoat_inflate_seeded(struct kuncoat_inflate *s,
 	}
 	seed_start = s->produced;
 	s->in = in;
-	s->in_len = in ? in_len : 0;
+	s->in_len = in ? io->in.n : 0;
 	s->in_pos = 0;
 	s->bitbuf = s->bitcnt = 0;
 
@@ -720,20 +720,15 @@ enum kuncoat_status kuncoat_inflate_seeded(struct kuncoat_inflate *s,
 	 * in_pos alone overstates it - and the caller uses this to find the gzip
 	 * trailer, which sits immediately after the last byte the stream needed.
 	 */
-	if (consumed)
-		*consumed = s->in_pos - (s->bitcnt >> 3);
+	io->consumed = s->in_pos - (s->bitcnt >> 3);
 	/* What THIS call produced, which is not s->produced: that one counts the
 	 * seed as well, because the distance check reads it. */
-	if (produced)
-		*produced = s->produced - seed_start;
+	io->produced = s->produced - seed_start;
 	return status;
 }
 
-enum kuncoat_status kuncoat_inflate(struct kuncoat_inflate *s, const uint8_t *in,
-		uint64_t in_len, kuncoat_inflate_sink sink, void *user,
-		uint64_t *consumed, uint64_t *produced)
+enum kuncoat_status kuncoat_inflate(struct kuncoat_inflate *s, struct kuncoat_io *io)
 {
-	return kuncoat_inflate_seeded(s, NULL, 0, in, in_len, sink, user,
-				  consumed, produced);
+	return kuncoat_inflate_seeded(s, NULL, io);
 }
 

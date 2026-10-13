@@ -137,7 +137,7 @@ static uint64_t __attribute__((unused)) pei_hdr_span(const struct kgenome_pe_inf
  *
  * THE IMPORT DIRECTORY IS CARRIED OVER TOO. It is the parent's, it points into
  * a section the child now has, and the host fills those thunks before the run -
- * see fill_iat_pe in emu_unpack.c. Left out, the thunks stay as the file wrote
+ * see fill_iat_pe in emu_unpack_pe_module.c. Left out, the thunks stay as the file wrote
  * them and the first call through one goes to an RVA.
  */
 static int __attribute__((unused)) pei_pad(const struct kof_obj_ctx *ctx, uint64_t n)

@@ -49,4 +49,21 @@ uint32_t kentropy_eighths(const void *bytes, uint64_t n);
  */
 uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total);
 
+/*
+ * THE COUNT ITSELF: add the `n` bytes at `bytes` to `hist`. The one place a byte
+ * histogram is built - kentropy_eighths, the emulator's gate windows and the
+ * engine's region measure all count through it, and each then asks
+ * kentropy_hist for the number. The caller zeroes `hist` first (or keeps adding
+ * to one histogram over several ranges, which is what a region of several
+ * extents does).
+ */
+static inline void kentropy_count(uint32_t hist[256], const void *bytes, uint64_t n)
+{
+	const uint8_t *p = (const uint8_t *)bytes;
+	uint64_t i;
+
+	for (i = 0; i < n; i++)
+		hist[p[i]]++;
+}
+
 #endif /* KOFENG_KOFENTROPY_H */

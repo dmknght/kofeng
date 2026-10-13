@@ -4,11 +4,12 @@
 /*
  * kgenome.h - the one public header of kgenome, the analysis of executables.
  *
- * Like <uncoat.h> for kuncoat: a caller includes this and nothing under
- * libgenome/ by path. The part headers below stay includable on their own for
- * the engine files that use one part (the include checks read them), but this
- * is the surface, and tests/unit/kgenome_header.c compiles a unit that includes
- * only it.
+ * Like <uncoat.h> for kuncoat: the SURFACE of the lib is this header and the part
+ * headers it lists below, and nothing else. A caller outside the lib includes
+ * either this, or - when it uses one part - that part's header by its part path
+ * (<celllysis/nucleo.h>); it never includes a header this one does not name, and
+ * never a `_private.h`. tools/check_layers.py enforces that (LIB PUBLIC HEADERS),
+ * and tests/unit/kgenome_header.c compiles a unit that includes only this.
  *
  * FOUR PARTS and the two headers they share:
  *
@@ -25,7 +26,7 @@
  *                     end (cell), the capability vocabulary (nucleo), address
  *                     spaces, cross-references, the library-span lines.
  *   phenotype/        the analysis that runs it: the emulator, the unpacking run,
- *                     the lineage walk and its products (the diagnose graph).
+ *                     the diagnose walk and its products (the diagnose graph).
  *
  * WHAT EVERY CALL FOLLOWS (CLAUDE.md section 12, "Rules every lib follows"):
  *   - names carry kgenome_ / KGENOME_;
@@ -44,7 +45,7 @@
  * builds, every other waits on the release store and reads them read-only after
  * it. Everything else the audit found was a const table that the dynamic linker
  * relocates (so it sits in .data) or a one-element cache of a build-time
- * constant in the emulator, which is gone (see win_trace in kofemu.c).
+ * constant in the emulator, which is gone (see win_trace in emu_interp.c).
  */
 
 #include "kgenome_status.h"
@@ -53,8 +54,9 @@
 /* genotype: the decoders and the structure of a file */
 #include "genotype/genotype.h"
 #include "genotype/image/obj.h"
-#include "genotype/image/addr.h"
+#include "genotype/image/image_addr.h"
 #include "genotype/image/section_flags.h"
+#include "genotype/image/offmap.h"
 #include "genotype/image/elf_types.h"
 #include "genotype/image/elf_image.h"
 #include "genotype/image/elf_rebuild.h"
@@ -76,13 +78,15 @@
 #include "celllysis/nucleo.h"
 #include "celllysis/xref.h"
 #include "celllysis/trueline.h"
-#include "celllysis/fragmentation.h"
+#include "celllysis/mutation.h"
 #include "celllysis/mutation_window.h"
+#include "celllysis/fnprint.h"
 
 /* phenotype: the emulator and what it produces */
-#include "phenotype/kofemu.h"
+#include "phenotype/emu.h"
 #include "phenotype/emu_unpack.h"
-#include "phenotype/lineage_vocab.h"
-#include "phenotype/lineages.h"
+#include "phenotype/diag_vocab.h"
+#include "phenotype/diag_scan.h"
+#include "phenotype/diag_scan_state.h"
 
 #endif /* KGENOME_H */

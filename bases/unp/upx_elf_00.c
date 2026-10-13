@@ -41,7 +41,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofmod/elf.h>
-
+#include <kofmod/upx_method.h>
 KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
@@ -139,36 +139,36 @@ static void upx_elf_say_build(const struct kof_obj_ctx *ctx)
  * Each group of three is one coding at three bit-buffer widths - _LE32, _8, _LE16
  * in that order - not one coding with three filters. That distinction is the whole
  * of why this table exists rather than a subtraction.
- */
-static uint32_t method_of(unsigned m)
-{
-	switch (m) {
-	case 2:  return KOF_UNP_NRV2B_32;
-	case 3:  return KOF_UNP_NRV2B_8;
-	case 4:  return KOF_UNP_NRV2B_16;
-	case 5:  return KOF_UNP_NRV2D_32;
-	case 6:  return KOF_UNP_NRV2D_8;
-	case 7:  return KOF_UNP_NRV2D_16;
-	case 8:  return KOF_UNP_NRV2E_32;
-	case 9:  return KOF_UNP_NRV2E_8;
-	case 10: return KOF_UNP_NRV2E_16;
-	default: return 0;              /* LZMA, or something new */
-	}
-}
-
-/*
- * UPX's own number for LZMA, and the reason it is named rather than lumped in
- * with every other byte this module does not recognise.
  *
- * A method byte of 14 is a coding UPX really uses, so meeting one means there was
- * a block here and it was not decoded - the object is short by whatever that block
- * held. Any other unrecognised byte is not a coding at all: it is whatever followed
- * the last block, which for this format is the decompression stub. Measured over
- * 154 packed samples, of the 31 walks that stopped on an unrecognised byte, 29 had
- * already recovered 99% or more of the original - they had finished, and were
- * reading machine code.
+ * method  coding (bit buffer: _32 = LE32, _8, _16 = LE16)
+ *    2    NRV2B_32     3  NRV2B_8     4  NRV2B_16
+ *    5    NRV2D_32     6  NRV2D_8     7  NRV2D_16
+ *    8    NRV2E_32     9  NRV2E_8    10  NRV2E_16
+ *   14    LZMA (UPX_M_LZMA), decoded by upx_lzma_method
+ * anything else: 0 - not a coding, or one this does not know
+ *
+ * The function is KOF_UPX_DEFINE_METHOD_OF (kofmod/upx_method.h), shared with the
+ * other UPX module and invoked HERE, in the place it had. This comment is as long
+ * as the function and its notes were: a blob follows the order its functions are
+ * emitted in and a report carries the line it was made on, so moving code in a
+ * module changes the pack even when nothing it does has changed.
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
  */
-#define UPX_M_LZMA 14u
+KOF_UPX_DEFINE_METHOD_OF()
 
 /*
  * Blocks followed before the chain is called a chain no longer.
@@ -206,8 +206,8 @@ static uint32_t method_of(unsigned m)
  * marked not fully examined. A wrong guess costs a sample reported incomplete,
  * never one silently declared clean.
  */
-#define UPX_LZMA_SKIP  2u
-#define UPX_LZMA_LP    0u
+/* UPX_LZMA_SKIP (the two parameter bytes) and UPX_LZMA_LP: <kofmod/upx_method.h>,
+ * which the function-defining macro there needs as well. */
 
 /*
  * ---- THE BRANCH FILTER -----------------------------------------------------
@@ -331,17 +331,17 @@ static void upx_unfilter(const struct kof_obj_ctx *ctx, uint64_t base,
 	}
 }
 
-static uint32_t upx_lzma_method(unsigned first_byte)
-{
-	unsigned lc = first_byte >> 3, pb = first_byte & 7u;
-
-	/* Both come from the file, and both size or shape the decoder's model.
-	 * Out of range is refused here so the module can say it did not finish,
-	 * rather than being refused inside the host with nothing to report. */
-	if (lc > KOF_LZMA_MAX_LC || pb > KOF_LZMA_MAX_PB)
-		return 0;
-	return KOF_UNP_LZMA_PROPS(lc, UPX_LZMA_LP, pb);
-}
+/*
+ * The function is KOF_UPX_DEFINE_LZMA_METHOD (kofmod/upx_method.h), in the
+ * place it had: see the note on KOF_UPX_DEFINE_METHOD_OF.
+ *
+ * lc is the top five bits of the first byte of the block, pb the bottom three;
+ * out of range is 0 and the module reports it did not finish.
+ *
+ *
+ *
+ */
+KOF_UPX_DEFINE_LZMA_METHOD()
 
 
 /*
@@ -983,7 +983,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			sz_unc0 = RD32(at);
 			sz_cpr = RD32(at + 4);
 			method = kof_u8(at + 8);
-			decoder = method_of(method);
+			decoder = upx_method_of(method);
 			if (decoder == 0 && method == UPX_M_LZMA &&
 			    sz_cpr > UPX_LZMA_SKIP) {
 				decoder = upx_lzma_method(kof_u8(at +
@@ -1135,7 +1135,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 			/* Not a coding this module runs: these bytes were never
 			 * a b_info, so nothing is wrong and nothing is said. */
-			if (!method_of(method) && method != UPX_M_LZMA)
+			if (!upx_method_of(method) && method != UPX_M_LZMA)
 				break;
 			kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 			if (have < UPX_MIN_CUT)
@@ -1157,7 +1157,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			cut = 1;
 		}
 
-		decoder = method_of(method);
+		decoder = upx_method_of(method);
 		/*
 		 * More blocks than any real archive has. Reported as a limit and
 		 * not as damage: what is wrong is that the walk stopped, and the
@@ -1314,7 +1314,7 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			 */
 			int t_stored = t_unc == t_len;
 
-			t_dec = method_of(t_m);
+			t_dec = upx_method_of(t_m);
 			if (!t_stored && t_dec == 0 && t_m == UPX_M_LZMA &&
 			    t_len > UPX_LZMA_SKIP) {
 				t_dec = upx_lzma_method(kof_u8(t_off));

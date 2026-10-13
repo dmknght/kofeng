@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * kernel_selfhide_00.c - a kernel module unlinking itself from the kernel's

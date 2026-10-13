@@ -413,7 +413,7 @@ static void converts(struct kofw_schema_cache *c)
 	{
 		char line[1024];
 		struct kof_evt_tally tally;
-		FILE *f = tmpfile();
+		FILE *f = fopen("build/kof_reg_event.tmp", "w+b");   /* beside the build, never /tmp */
 		size_t n;
 
 		memset(&tally, 0, sizeof tally);
@@ -427,6 +427,7 @@ static void converts(struct kofw_schema_cache *c)
 		n = fread(line, 1, sizeof line - 1u, f);
 		line[n] = '\0';
 		fclose(f);
+		remove("build/kof_reg_event.tmp");
 
 		if (!strstr(line, "C:\\a.exe"))
 			printf("  FAIL the rendered line does not show the "

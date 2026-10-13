@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * mem_execapihash_00.c - a Windows program that allocates memory it can write and
@@ -11,7 +11,7 @@
  * THE SAME SHAPE AS mem_execsyscall_00 ON LINUX, with the Windows words: the
  * allocation is VirtualAlloc with a protection that is both writable and
  * executable (the vocabulary refines it from the argument - see
- * kof_flow_cap_of_call), the read is whatever fills it, the jump is a branch
+ * kgenome_flow_cap_of_call), the read is whatever fills it, the jump is a branch
  * into what the allocation returned.
  *
  * A SEPARATE DIAGNOSE AND NOT THE ELF ONE WITH A WIDER WHEN, because it asks

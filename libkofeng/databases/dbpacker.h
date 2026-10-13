@@ -41,6 +41,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <kofmod/kofobjfmt.h>   /* KOF_TARGET_LIST_MAX, which struct kof_pw_mod is sized by */
+
 /* Mirrors struct kof_pack_str: `kind` selects how `bytes` is read, and `flags`
  * is KOF_STR_ICASE / KOF_STR_FULLWORD and applies to a literal only. */
 struct kof_pw_str {

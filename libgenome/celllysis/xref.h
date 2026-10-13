@@ -128,7 +128,7 @@ struct kgenome_cell_insn;
  *
  * It used to take a buffer and decode it, which made it a second decoder of the
  * same code the diagnose walks decode - and the diagnose walks keep what they
- * decoded (libgenome/phenotype/diag_wrap.c, "THE DECODE,
+ * decoded (libgenome/phenotype/diag_wrapper_walk.c, "THE DECODE,
  * ONCE"). Now the caller owns where the instructions come from, and this owns
  * only what they mean: kgenome_xref_feed is the callback a reader of instructions
  * calls (the kgenome_cell_insn_fn of celllysis.h), so the one decode of an object's code

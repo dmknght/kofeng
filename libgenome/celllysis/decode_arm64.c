@@ -79,14 +79,15 @@
  *
  * EQUIVALENCE. The decoder this replaced was kept as a frozen reference and
  * every word of the 32-bit space was decoded by both, at several addresses, with
- * every field of struct kgenome_cell_insn compared: tools/celllysis/arm64_equiv.c.
+ * every field of struct kgenome_cell_insn compared (a one-off measurement; the
+ * comparison tool is not kept in the tree, its reference decoder was external).
  */
 #include <string.h>
 
 /* KGENOME_BROKEN - the sentinel cell.h names for a target there is not. */
 #include <celllysis/cell.h>
 #include "decode.h"
-#include <arm64/arm64.h>
+#include <genotype/arm64/arm64.h>
 
 #define NOREG KGENOME_CELL_REG_NONE
 

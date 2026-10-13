@@ -24,14 +24,6 @@ static const uint8_t XZ_MAGIC[KOF_XZ_MAGIC_LEN] = {
 
 /* ---- reads -------------------------------------------------------------------- */
 
-static uint32_t rd32le(kof_buf f, uint64_t off)
-{
-	uint32_t v = 0;
-
-	kof_rd_u32(f, off, 0, &v);
-	return v;
-}
-
 /*
  * A multibyte integer, xz's own encoding.
  *
@@ -232,7 +224,7 @@ int kof_xz_parse(kof_buf file, struct kof_xz_info *x, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.x = x;
-	kof_runs_init(&s.runs, (struct kof_run *)x->run, KOF_XZ_MAX_EXTENTS,
+	kof_runs_init(&s.runs, x->run, KOF_XZ_MAX_EXTENTS,
 		      KOF_XZ_CLS_COUNT);
 
 	/* ---- the stream header ---- */
@@ -266,7 +258,7 @@ int kof_xz_parse(kof_buf file, struct kof_xz_info *x, struct kof_obj_ctx *ctx)
 	 * Backward size counts four byte units and is stored one less than it is,
 	 * which is the format's way of saying an index is never empty.
 	 */
-	back = rd32le(file, foot + 4u);
+	back = kof_rd32_or0(file, foot + 4u);
 	idx = kof_sat_add((uint64_t)back + 1u, 0) * 4u;
 	if (idx == 0 || idx > foot) {
 		x->anomalies |= KOF_XZ_ANOM_NO_INDEX;

@@ -91,13 +91,13 @@ uint64_t kof_pz_clean_end(const struct kof_obj_ctx *ctx);
 int kof_pz_is_code(const struct kof_obj_ctx *ctx, uint64_t off);
 
 /*
- * AN ADDRESS THE FILE USES, AS AN OFFSET INTO IT - kgenome_pz_addr_to_off and
- * kgenome_pz_off_to_addr. The bodies are the genome's now (the translation is the
- * file's own program headers or section table): see <image/addr.h>, which
+ * AN ADDRESS THE FILE USES, AS AN OFFSET INTO IT - kgenome_image_addr_to_off and
+ * kgenome_image_off_to_addr. The bodies are the genome's now (the translation is the
+ * file's own program headers or section table): see <genotype/image/image_addr.h>, which
  * carries the note that was here. Included so callers of this header keep both
  * names.
  */
-#include <genotype/image/addr.h>
+#include <genotype/image/image_addr.h>
 
 /*
  * THE MASK A VIRUS PUT OVER THE BYTES IT SAVED.
@@ -127,15 +127,5 @@ enum kof_pz_mask {
  */
 uint32_t kof_pz_unmask(const uint8_t *in, uint32_t n, uint32_t mask,
 		       uint32_t key, uint8_t *out, uint32_t cap);
-
-/*
- * THE PE CHECKSUM, over a buffer that already holds the repair.
- *
- * Only a driver or a system binary has one that matters, and a repair that
- * changes a header without it leaves a file Windows will refuse to load. The
- * field itself must read zero while the sum is taken, which is the caller's
- * to arrange - this does not write to the buffer.
- */
-uint32_t kof_pz_pe_checksum(const uint8_t *p, uint64_t n, uint64_t csum_off);
 
 #endif /* KOF_PZERO_H */

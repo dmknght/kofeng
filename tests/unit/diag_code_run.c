@@ -20,7 +20,7 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
-#include <phenotype/diag_int.h>
+#include <phenotype/diag_private.h>
 #include "../../libkofeng/analyzers/genome_obj.h"
 
 static int fails;
@@ -149,14 +149,25 @@ static int parse(struct kof_obj_ctx *ctx, void *view)
 
 static unsigned run(struct kgenome_diag_walk *wk, const struct kof_obj_ctx *ctx,
 		    uint64_t off, uint64_t n, uint64_t va,
-		    struct kgenome_code_run_stats *st, struct rec *keep)
+		    struct kgenome_diag_code_run_stats *st, struct rec *keep)
 {
 	struct kgenome_obj gobj;
 
 	n_out = 0;
 	memset(st, 0, sizeof *st);
 	kof_genome_obj(ctx, &gobj);
-	kgenome_diag_code_run(wk, &gobj, img, SZ, off, n, va, obs, NULL, st);
+	kgenome_diag_code_run(&(const struct kgenome_diag_code_req){
+			.wk = wk,
+			.obj = &gobj,
+			.base = img,
+			.size = SZ,
+			.off = off,
+			.n = n,
+			.va = va,
+			.fn = obs,
+			.user = NULL,
+			.st = st,
+		});
 	if (keep)
 		memcpy(keep, out, n_out * sizeof *out);
 	return n_out;
@@ -168,7 +179,7 @@ static void same(const char *tag, struct kgenome_diag_walk *wk,
 		 uint64_t va, int want_trace_use)
 {
 	static struct rec a[SZ + 8];
-	struct kgenome_code_run_stats sa, sb;
+	struct kgenome_diag_code_run_stats sa, sb;
 	unsigned na = run(NULL, ctx, off, n, va, &sa, a);
 	unsigned nb = run(wk, ctx, off, n, va, &sb, NULL);
 	unsigned i, bad = 0;
@@ -213,7 +224,7 @@ int main(void)
 	static unsigned char view[1u << 20];
 	struct kof_obj_ctx ctx;
 	struct kgenome_diag_walk *wk;
-	struct kgenome_code_run_stats st;
+	struct kgenome_diag_code_run_stats st;
 	struct kgenome_obj gobj;
 	uint64_t va0 = 0x400000u + CODE;
 

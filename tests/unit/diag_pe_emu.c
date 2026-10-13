@@ -26,7 +26,7 @@
 #include "../../libkofeng/analyzers/parsers/kofformat.h"
 #include "../../libkofeng/detectors/linkage/kofdiag.h"
 #include <celllysis/nucleo.h>
-#include <phenotype/kofemu.h>
+#include <phenotype/emu.h>
 #include "../../libkofeng/kofcore/kofmod/kofsym.h"
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_parse.h"
 #include "../../libkofeng/analyzers/parsers/binaries/pe/pe_sym.h"
@@ -289,7 +289,7 @@ static int has_sym(const struct seen_syms *k, const char *want)
  * truncation byte when the run was stopped while still going. The pieces are
  * the production ones; the full path is checked through the scanner below.
  */
-static uint32_t add_resolved(const struct kgenome_apihash *a, uint8_t *blk,
+static uint32_t add_resolved(const struct kgenome_diag_apihash_set *a, uint8_t *blk,
 			     uint32_t n_bytes, uint32_t cap)
 {
 	const char *dll[64], *name[64];
@@ -297,7 +297,7 @@ static uint32_t add_resolved(const struct kgenome_apihash *a, uint8_t *blk,
 
 	if (!a || !a->n_call || a->n_call > 64u)
 		return n_bytes;
-	n = kgenome_apihash_distinct(a, dll, name);
+	n = kgenome_diag_apihash_distinct(a, dll, name);
 	n_bytes = kof_pe_syms_add_imports(blk, n_bytes, cap, dll, name, n);
 	if (a->status != KGENOME_OK && n_bytes >= KOF_SYM_HDRLEN)
 		blk[KOF_SYM_H_TRUNC] = 1;
@@ -395,7 +395,7 @@ int main(int argc, char **argv)
 		/* say what WAS found, because "a node is missing" is not a lead */
 		for (q = 0; s && q < kgenome_diag_scan_count(s); q++)
 			printf("    node %u: %s at %#llx\n", q,
-			       kgenome_flow_cap_name(kgenome_diag_scan_at(s, q)->cap),
+			       kgenome_nucleo_cap_name(kgenome_diag_scan_at(s, q)->cap),
 			       (unsigned long long)kgenome_diag_scan_at(s, q)->at);
 	}
 	if (open && conn && rd1 && alloc && rd2 && jump) {
@@ -407,7 +407,7 @@ int main(int argc, char **argv)
 		CK(linked(rd2, i_alloc, KGENOME_DIAG_ROLE_BUFFER));
 		CK(!linked(rd1, i_alloc, KGENOME_DIAG_ROLE_BUFFER));
 		/* PAGE_EXECUTE_READWRITE is W+X, which is a different statement from X */
-		CK(alloc->flags & KGENOME_FLOWF_WX);
+		CK(alloc->flags & KGENOME_NUCLEO_F_WX);
 		/* and the run ends by jumping into it */
 		CK(linked(jump, i_alloc, KGENOME_DIAG_ROLE_TARGET));
 	}
@@ -448,15 +448,15 @@ int main(int argc, char **argv)
 		struct kgenome_diag_scan *sm = scan(bm, nm, &cm, "misaligned override",
 						KGENOME_DIAG_RUN_APIHASH);
 		struct kgenome_obj gm;
-		struct kgenome_apihash *am;
+		struct kgenome_diag_apihash_set *am;
 		uint32_t z;
 
 		kof_genome_obj(&cm, &gm);
-		am = kgenome_apihash_run(&gm, bm, nm, NULL, NULL);
+		am = kgenome_diag_apihash_run(&gm, bm, nm, NULL, NULL);
 
 		CK(am && am->n_ldr == 0u && am->n_call == 0u);
 		CK(sm && !find(sm, KGENOME_NUCLEO_SELF_RESOLVE, &z, 0));
-		kgenome_apihash_free(am);
+		kgenome_diag_apihash_free(am);
 		kgenome_diag_scan_free(sm);
 	}
 
@@ -467,7 +467,7 @@ int main(int argc, char **argv)
 	 */
 	{
 		struct kgenome_obj gobj;
-		struct kgenome_apihash *a;
+		struct kgenome_diag_apihash_set *a;
 
 		static uint8_t blk[KOF_SYM_MAX_BYTES];
 		kof_buf fb;
@@ -475,7 +475,7 @@ int main(int argc, char **argv)
 		int have_connect = 0, once = 0;
 
 		kof_genome_obj(&ctx, &gobj);
-		a = kgenome_apihash_run(&gobj, b, n, NULL, NULL);
+		a = kgenome_diag_apihash_run(&gobj, b, n, NULL, NULL);
 		CK(a != NULL);
 		if (a) {
 			CK(a->n_ldr > 0u && a->n_call > 0u);
@@ -534,7 +534,7 @@ int main(int argc, char **argv)
 			}
 			/* a second application changes nothing */
 			CK(add_resolved(a, blk, len, sizeof blk) == len);
-			kgenome_apihash_free(a);
+			kgenome_diag_apihash_free(a);
 		}
 	}
 
@@ -548,8 +548,8 @@ int main(int argc, char **argv)
 	 * are not rebuildable from it and are DECLARED by the engine - and for a
 	 * stager the directory lists nothing the program calls. With the PE
 	 * diagnose in the database, the view says what the resolver found; with
-	 * a database that lacks it - kof_scan_apihash_serving answers NULL - the
-	 * view says what the directory says and nothing more.
+	 * a database that lacks it the view says what the directory says and
+	 * nothing more.
 	 */
 	{
 		const char *db = argc > 1 ? argv[1] : "build/release/databases";

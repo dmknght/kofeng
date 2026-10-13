@@ -303,19 +303,10 @@ int kof_cab_sniff(kof_buf file)
 	return res == 0u;
 }
 
-int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
+/* THE FIXED HEADER: sizes, offsets, version, counts and flags, and the two anomalies
+ * that can be read off it alone (a size that is not the object's, a spanned set). */
+static void cab_read_header(kof_buf file, struct kof_cab_info *c)
 {
-	uint64_t at;
-	uint32_t hdr_res = 0, i;
-	uint8_t  fold_res = 0, data_res = 0;
-
-	memset(c, 0, sizeof *c);
-	c->version = KOF_CAB_INFO_VERSION;
-
-	if (!kof_in_range(file, 0, CAB_HDR_MIN) || memcmp(file.p, "MSCF", 4) != 0)
-		return 0;
-	c->valid = 1;
-
 	{
 		uint32_t u32;
 		uint16_t u16;
@@ -338,6 +329,18 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 		c->anomalies |= KOF_CAB_ANOM_SIZE_MISMATCH;
 	if (c->flags & (KOF_CAB_F_PREV_CABINET | KOF_CAB_F_NEXT_CABINET))
 		c->anomalies |= KOF_CAB_ANOM_SPANNED;
+}
+
+/*
+ * THE OPTIONAL PART OF THE HEADER, which moves the folder table: the reserve sizes
+ * and the names. Returns 0 when the object ends inside it (nothing further is read),
+ * else 1 with c->folders_off set and *fold_res the per-folder reserve.
+ */
+static int cab_read_optional(kof_buf file, struct kof_cab_info *c, uint8_t *fold_res)
+{
+	uint64_t at;
+	uint32_t hdr_res = 0;
+	uint8_t  data_res = 0;
 
 	/*
 	 * THE OPTIONAL PART OF THE HEADER, which is what moves the folder table.
@@ -354,10 +357,10 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 
 		if (!kof_rd_u16(file, at, 0, &cb)) {
 			c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
-			goto done;
+			return 0;
 		}
 		hdr_res = cb;
-		kof_rd_u8(file, at + 2u, &fold_res);
+		kof_rd_u8(file, at + 2u, fold_res);
 		kof_rd_u8(file, at + 3u, &data_res);
 		at += 4u + hdr_res;
 	}
@@ -374,17 +377,24 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 			n = kof_cname_len(file, at, KOF_CAB_MAX_NAME);
 			if (!n) {
 				c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
-				goto done;
+				return 0;
 			}
 			at += n;
 		}
 	}
-
 	if (at >= file.n) {
 		c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
-		goto done;
+		return 0;
 	}
 	c->folders_off = at;
+	return 1;
+}
+
+/* THE FOLDERS: bounded by what the object could hold and by the table's capacity. */
+static void cab_read_folders(kof_buf file, struct kof_cab_info *c, uint8_t fold_res)
+{
+	uint64_t at = c->folders_off;
+	uint32_t i;
 
 	/*
 	 * The folders. Bounded by what the object could hold as well as by the
@@ -427,12 +437,173 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 				c->data_off = off;
 		}
 	}
+}
 
-	/* ---- the files ---------------------------------------------------- */
+/*
+ * A FILE IN A CODED FOLDER, offered as a scattered entry over the folder's blocks.
+ * Returns 1 when the file table is full and the walk of the files must stop, else 0.
+ */
+static int cab_coded_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
+			  uint32_t size, uint32_t foff, uint64_t name_at,
+			  uint32_t nlen)
+{
+/*
+ * A CODED FOLDER: the pieces are its BLOCKS, not the file's.
+ *
+ * Neither coding this build has can be entered part way, so
+ * what they need is every block of the folder in order - the
+ * file's bytes are somewhere inside what those blocks decode
+ * to. The entry is therefore scattered over the whole folder
+ * and carries where in the decoded stream the file sits.
+ *
+ * WHICH CODING IS THE ENTRY'S OWN, in coding[0], which is what
+ * that field is for: MSZIP's blocks are separate streams the
+ * host seeds one from the next, LZX's are one stream the host
+ * joins, and the two are told apart by the id rather than by a
+ * table beside the entries.
+ *
+ * Quantum has no decoder here; its files are counted and not
+ * offered, which is the same answer this build gives everywhere
+ * it lacks a coding.
+ */
+	const struct kof_cab_folder *fo = &c->folder[ifold];
+	uint32_t first = 0, runs, method = 0;
+
+	c->n_coded++;
+	if (fo->compress == KOF_CAB_C_MSZIP) {
+		method = KOF_UNP_MSZIP;
+	} else if (fo->compress == KOF_CAB_C_LZX &&
+		   fo->window >= KUNCOAT_LZX_MIN_BITS &&
+		   fo->window <= KUNCOAT_LZX_MAX_BITS) {
+		method = KOF_UNP_LZX(fo->window);
+	} else {
+		return 0;
+	}
+	if (c->n_entries >= KOF_CAB_MAX_FILES) {
+		c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+		return 1;
+	}
+	runs = cab_blocks(file, c, fo, &first);
+	if (!runs)
+		return 0;
+	{
+		struct kof_entry *e = &c->entry[c->n_entries];
+
+		memset(e, 0, sizeof *e);
+		e->index     = c->n_entries;
+		e->kind      = KOF_ENT_EMBEDDED;
+		e->format    = KOF_FMT_UNKNOWN;
+		e->flags     = KOF_ENT_F_SCATTERED;
+		e->name_off  = name_at;
+		e->name_len  = nlen - 1u;
+		e->len       = size;
+		e->coding[0] = (uint16_t)method;
+		/* Where the file is inside the folder's decoded
+		 * stream, which is what the decoder is told and
+		 * what a range cannot say. */
+		e->out_hint = ((uint64_t)foff << 32) | size;
+		c->split[c->n_entries].first_run = first;
+		c->split[c->n_entries].n_run = runs;
+		c->n_entries++;
+	}
+	return 0;
+}
+
+/*
+ * A FILE IN A STORED FOLDER: one range, or - when it crosses a block boundary - a
+ * scattered entry over the pieces. Returns 1 when the file table is full and the walk
+ * of the files must stop, else 0.
+ */
+static int cab_stored_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
+			  uint32_t size, uint32_t foff, uint64_t name_at,
+			  uint32_t nlen)
+{
+	uint64_t avail = 0, off;
+	int ok = 0;
+
+	off = cab_map(file, &c->folder[ifold], foff, size,
+		      &avail, &ok);
+	if (!ok) {
+		c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
+		return 0;
+	}
+	/*
+	 * A FILE THAT CROSSES A BLOCK BOUNDARY IS NOT ONE
+	 * RANGE, because the next block's header sits in the
+	 * middle of it - a child holding a block header in its
+	 * middle is a different file.
+	 *
+	 * So it is recorded as SCATTERED and its pieces go in
+	 * the pool: the host joins them through resolve_entry.
+	 * It used to be counted and dropped, which quietly lost
+	 * EVERY STORED FILE OVER 32KB - a block is at most that
+	 * and any file larger than one has a boundary in it.
+	 */
+	if (avail < size) {
+		uint32_t first = 0;
+		uint32_t runs;
+
+		if (c->n_entries >= KOF_CAB_MAX_FILES) {
+			c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+			return 1;
+		}
+		runs = cab_cut(file, c, &c->folder[ifold],
+			       foff, size, &first);
+		c->n_split++;
+		if (!runs)
+			return 0;     /* said by the count */
+		{
+			struct kof_entry *e =
+				&c->entry[c->n_entries];
+
+			memset(e, 0, sizeof *e);
+			e->index    = c->n_entries;
+			e->kind     = KOF_ENT_EMBEDDED;
+			e->format   = KOF_FMT_UNKNOWN;
+			e->flags    = KOF_ENT_F_SCATTERED;
+			e->name_off = name_at;
+			e->name_len = nlen - 1u;
+			e->len      = size;
+			c->split[c->n_entries].first_run = first;
+			c->split[c->n_entries].n_run = runs;
+			c->n_entries++;
+		}
+		return 0;
+	}
+	if (off > file.n || size > file.n - off) {
+		c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
+		return 0;
+	}
+	if (c->n_entries >= KOF_CAB_MAX_FILES) {
+		c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+		return 1;
+	}
+	{
+		struct kof_entry *e = &c->entry[c->n_entries];
+
+		memset(e, 0, sizeof *e);
+		e->index    = c->n_entries;
+		e->kind     = KOF_ENT_EMBEDDED;
+		e->format   = KOF_FMT_UNKNOWN;
+		e->name_off = name_at;
+		e->name_len = nlen - 1u;
+		e->off      = off;
+		e->len      = size;
+		c->n_entries++;
+	}
+	return 0;
+}
+
+/* THE FILE TABLE: every file's name and place, as entries - single ranges, scattered
+ * block lists, or only counted where this build cannot offer them. */
+static void cab_read_files(kof_buf file, struct kof_cab_info *c)
+{
+	uint64_t at;
+	uint32_t i;
 
 	if (c->files_off < CAB_HDR_MIN || c->files_off >= file.n) {
 		c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
-		goto done;
+		return;
 	}
 	c->names_off = c->files_off;
 	at = c->files_off;
@@ -478,148 +649,20 @@ int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 		if (!size)
 			continue;      /* an empty file names nothing to open */
 
-		/*
-		 * A CODED FOLDER: the pieces are its BLOCKS, not the file's.
-		 *
-		 * Neither coding this build has can be entered part way, so
-		 * what they need is every block of the folder in order - the
-		 * file's bytes are somewhere inside what those blocks decode
-		 * to. The entry is therefore scattered over the whole folder
-		 * and carries where in the decoded stream the file sits.
-		 *
-		 * WHICH CODING IS THE ENTRY'S OWN, in coding[0], which is what
-		 * that field is for: MSZIP's blocks are separate streams the
-		 * host seeds one from the next, LZX's are one stream the host
-		 * joins, and the two are told apart by the id rather than by a
-		 * table beside the entries.
-		 *
-		 * Quantum has no decoder here; its files are counted and not
-		 * offered, which is the same answer this build gives everywhere
-		 * it lacks a coding.
-		 */
 		if (c->folder[ifold].compress != KOF_CAB_C_NONE) {
-			const struct kof_cab_folder *fo = &c->folder[ifold];
-			uint32_t first = 0, runs, method = 0;
-
-			c->n_coded++;
-			if (fo->compress == KOF_CAB_C_MSZIP) {
-				method = KOF_UNP_MSZIP;
-			} else if (fo->compress == KOF_CAB_C_LZX &&
-				   fo->window >= KUNCOAT_LZX_MIN_BITS &&
-				   fo->window <= KUNCOAT_LZX_MAX_BITS) {
-				method = KOF_UNP_LZX(fo->window);
-			} else {
-				continue;
-			}
-			if (c->n_entries >= KOF_CAB_MAX_FILES) {
-				c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+			if (cab_coded_file(file, c, ifold, size, foff, name_at, nlen))
 				break;
-			}
-			runs = cab_blocks(file, c, fo, &first);
-			if (!runs)
-				continue;
-			{
-				struct kof_entry *e = &c->entry[c->n_entries];
-
-				memset(e, 0, sizeof *e);
-				e->index     = c->n_entries;
-				e->kind      = KOF_ENT_EMBEDDED;
-				e->format    = KOF_FMT_UNKNOWN;
-				e->flags     = KOF_ENT_F_SCATTERED;
-				e->name_off  = name_at;
-				e->name_len  = nlen - 1u;
-				e->len       = size;
-				e->coding[0] = (uint16_t)method;
-				/* Where the file is inside the folder's decoded
-				 * stream, which is what the decoder is told and
-				 * what a range cannot say. */
-				e->out_hint = ((uint64_t)foff << 32) | size;
-				c->split[c->n_entries].first_run = first;
-				c->split[c->n_entries].n_run = runs;
-				c->n_entries++;
-			}
 			continue;
 		}
-
-		{
-			uint64_t avail = 0, off;
-			int ok = 0;
-
-			off = cab_map(file, &c->folder[ifold], foff, size,
-				      &avail, &ok);
-			if (!ok) {
-				c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
-				continue;
-			}
-			/*
-			 * A FILE THAT CROSSES A BLOCK BOUNDARY IS NOT ONE
-			 * RANGE, because the next block's header sits in the
-			 * middle of it - a child holding a block header in its
-			 * middle is a different file.
-			 *
-			 * So it is recorded as SCATTERED and its pieces go in
-			 * the pool: the host joins them through resolve_entry.
-			 * It used to be counted and dropped, which quietly lost
-			 * EVERY STORED FILE OVER 32KB - a block is at most that
-			 * and any file larger than one has a boundary in it.
-			 */
-			if (avail < size) {
-				uint32_t first = 0;
-				uint32_t runs;
-
-				if (c->n_entries >= KOF_CAB_MAX_FILES) {
-					c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
-					break;
-				}
-				runs = cab_cut(file, c, &c->folder[ifold],
-					       foff, size, &first);
-				c->n_split++;
-				if (!runs)
-					continue;     /* said by the count */
-				{
-					struct kof_entry *e =
-						&c->entry[c->n_entries];
-
-					memset(e, 0, sizeof *e);
-					e->index    = c->n_entries;
-					e->kind     = KOF_ENT_EMBEDDED;
-					e->format   = KOF_FMT_UNKNOWN;
-					e->flags    = KOF_ENT_F_SCATTERED;
-					e->name_off = name_at;
-					e->name_len = nlen - 1u;
-					e->len      = size;
-					c->split[c->n_entries].first_run = first;
-					c->split[c->n_entries].n_run = runs;
-					c->n_entries++;
-				}
-				continue;
-			}
-			if (off > file.n || size > file.n - off) {
-				c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
-				continue;
-			}
-			if (c->n_entries >= KOF_CAB_MAX_FILES) {
-				c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
-				break;
-			}
-			{
-				struct kof_entry *e = &c->entry[c->n_entries];
-
-				memset(e, 0, sizeof *e);
-				e->index    = c->n_entries;
-				e->kind     = KOF_ENT_EMBEDDED;
-				e->format   = KOF_FMT_UNKNOWN;
-				e->name_off = name_at;
-				e->name_len = nlen - 1u;
-				e->off      = off;
-				e->len      = size;
-				c->n_entries++;
-			}
-		}
+		if (cab_stored_file(file, c, ifold, size, foff, name_at, nlen))
+			break;
 	}
 	c->names_len = at > c->names_off ? at - c->names_off : 0;
+}
 
-done:
+/* What a rule reads the cabinet through. */
+static void cab_attach(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
+{
 	ctx->format = KOF_FMT_CAB;
 	ctx->obj_size = file.n;
 	ctx->file_header = c;
@@ -628,6 +671,25 @@ done:
 	ctx->resolve_entry = cab_resolve_entry;
 	/* No architecture and no entry point: a container is not code - the
 	 * same note every other container's parse ends on. */
+}
+
+int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
+{
+	uint8_t fold_res = 0;
+
+	memset(c, 0, sizeof *c);
+	c->version = KOF_CAB_INFO_VERSION;
+
+	if (!kof_in_range(file, 0, CAB_HDR_MIN) || memcmp(file.p, "MSCF", 4) != 0)
+		return 0;
+	c->valid = 1;
+
+	cab_read_header(file, c);
+	if (cab_read_optional(file, c, &fold_res)) {
+		cab_read_folders(file, c, fold_res);
+		cab_read_files(file, c);
+	}
+	cab_attach(file, c, ctx);
 	return 1;
 }
 

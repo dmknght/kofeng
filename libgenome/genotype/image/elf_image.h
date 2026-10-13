@@ -21,18 +21,46 @@
  *
  * Here rather than in elf_parse.c because a second reader appeared: the
  * disinfect stage turns a saved entry point back into a file offset and needs
- * the same test the parser makes - see kgenome_pz_addr_to_off. The value is the
+ * the same test the parser makes - see kgenome_image_addr_to_off. The value is the
  * ELF standard's; what must not be duplicated is the DECISION that this is
  * the segment kind to walk.
  */
 #define KGENOME_ELF_PT_LOAD 1u
 
+/* A segment that maps file bytes: PT_LOAD with a file half. .bss-only and
+ * non-loadable segments are not one. The ONE spelling of the test every
+ * translation and every walk over the mapped file applies. */
+static inline int kgenome_elf_seg_is_load(const struct kgenome_elf_seg *g)
+{
+	return g->type == KGENOME_ELF_PT_LOAD && g->file_size != 0;
+}
+
 /* The section types and flags the engine side reads as well. The ELF
  * standard's values; here so that the partition and the parse test the same
  * constants. */
 #define KGENOME_ELF_SHT_NULL	0
+#define KGENOME_ELF_SHT_PROGBITS 1
+/* SHT_DYNSYM is the linked object's symbol table, SHT_SYMTAB the one a
+ * relocatable object keeps; the table walkers read both and the relocations
+ * that name their entries. */
+#define KGENOME_ELF_SHT_SYMTAB	2
+#define KGENOME_ELF_SHT_STRTAB	3
+#define KGENOME_ELF_SHT_RELA	4
 #define KGENOME_ELF_SHT_NOBITS	8
+#define KGENOME_ELF_SHT_REL	9
+#define KGENOME_ELF_SHT_DYNSYM	11
+#define KGENOME_ELF_SHF_WRITE	0x1
+/* SHF_ALLOC is the one that decides whether a section becomes part of the
+ * process image, which is what separates KGENOME_SCAN_ELF_NOLOAD from the rest:
+ * .comment, .debug_* and .symtab are all kept in the file without it. */
 #define KGENOME_ELF_SHF_ALLOC	0x2
+#define KGENOME_ELF_SHF_EXEC	0x4
+/* SHN_UNDEF as a section index: no section (as a shstrndx, no name table). */
+#define KGENOME_ELF_SHN_UNDEF	0
+/* p_flags bits */
+#define KGENOME_ELF_PF_X	1
+#define KGENOME_ELF_PF_W	2
+#define KGENOME_ELF_PF_R	4
 
 /*
  * The parse itself: the body of kof_elf_parse (elf_parse.h), which calls this
@@ -242,8 +270,6 @@ void     kgenome_elf_reloc_table_free(struct kgenome_elf_relocs *t);
 uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 			  const struct kgenome_elf_relocs *t,
 			  kgenome_elf_relcall_fn fn, void *user);
-uint64_t kgenome_elf_reloc_call_at(const struct kgenome_elf_info *p,
-			       const struct kgenome_elf_reloc *r);
 
 /*
  * The CODE relocation, with a name, whose patched bytes lie inside the
@@ -265,6 +291,9 @@ const struct kgenome_elf_reloc *kgenome_elf_reloc_in(const struct kgenome_elf_re
  */
 int kgenome_elf_va_to_off(const struct kgenome_elf_info *e, uint64_t va, uint64_t sz,
 		      uint64_t *off);
+
+const struct kgenome_elf_seg *kgenome_elf_load_at_off(const struct kgenome_elf_info *e,
+						  uint64_t off);
 
 /*
  * Does this object look like ELF at all?

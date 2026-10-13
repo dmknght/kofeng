@@ -25,7 +25,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "diagsrc.h"
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /* A bound on COST: no sample is described by this many behaviours. A source
  * over it is an error, not truncated. */

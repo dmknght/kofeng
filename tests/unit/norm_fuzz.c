@@ -56,10 +56,15 @@ int main(void)
 			if (mark[k] < mark[k-1]) mark[k] = mark[k-1];
 			if (src[k]  < src[k-1])  src[k]  = src[k-1];
 		}
-		kof_exe_norm_masked(tmp, n, rnd()%2 ? keep : NULL,
-				    rnd()%3 ? NULL : keep,
-				    KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
-				    out, n, mark, mark_out, 64u, NULL);
+		{
+			struct kof_exe_norm_req rq = { tmp, n, rnd()%2 ? keep : NULL,
+						       NULL, KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
+						       mark, 64u };
+			struct kof_exe_norm_res res = { out, n, mark_out, 0 };
+
+			rq.drop = rnd()%3 ? NULL : keep;
+			kof_exe_norm_masked(&rq, &res);
+		}
 		kof_exe_norm_map(tmp, n, KOF_EXE_NORM_NULLRUN, src, dst, 64u);
 		kof_exe_unwide(in, n, out);
 		kof_exe_norm(tmp, n, KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,

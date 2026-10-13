@@ -37,10 +37,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "lineages.h"
-#include "diag_int.h"
+#include "diag_scan.h"
+#include "diag_private.h"
 #include <kofcore.h>
-#include <genotype/image/cmp.h>
+#include <kofcmp.h>
 #include <celllysis/capability.h>
 #include <celllysis/cell.h>
 #include <genotype/image/pe_image.h>
@@ -81,7 +81,7 @@ static void gather_imports(struct pe_acc *a, kof_buf f,
 
 		if (!kgenome_pe_imp_name(f, im, name, sizeof name))
 			continue;               /* by ordinal: no word to match */
-		cap = kgenome_flow_cap_of_name(name);
+		cap = kgenome_nucleo_cap_of_name(name);
 		if (cap == KGENOME_NUCLEO_NONE)
 			continue;
 		if (a->n == a->cap_n) {
@@ -100,9 +100,9 @@ static void gather_imports(struct pe_acc *a, kof_buf f,
 	}
 }
 
-/* Ordered by `slot`, which kgenome_cmp_u64 reads as the first member. */
+/* Ordered by `slot`, which kof_cmp_u64 reads as the first member. */
 _Static_assert(offsetof(struct pe_imp, slot) == 0,
-	       "kgenome_cmp_u64 reads the key from the start of the element");
+	       "kof_cmp_u64 reads the key from the start of the element");
 
 static const struct pe_imp *imp_find(const struct pe_acc *a, uint64_t slot)
 {
@@ -111,7 +111,7 @@ static const struct pe_imp *imp_find(const struct pe_acc *a, uint64_t slot)
 	if (!a->n)              /* bsearch's base is nonnull, and here it is NULL */
 		return NULL;
 	key.slot = slot;
-	return bsearch(&key, a->v, a->n, sizeof *a->v, kgenome_cmp_u64);
+	return bsearch(&key, a->v, a->n, sizeof *a->v, kof_cmp_u64);
 }
 
 /*
@@ -284,20 +284,16 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 	/* No imports does not end it: a stager has none worth the name, and what
 	 * it calls is named by the analysis in diag_apihash.c. */
 	if (w.imp.n)
-		qsort(w.imp.v, w.imp.n, sizeof *w.imp.v, kgenome_cmp_u64);
+		qsort(w.imp.v, w.imp.n, sizeof *w.imp.v, kof_cmp_u64);
 
 	/*
 	 * EVERY CODE SECTION (kgenome_pe_sec_is_code), from its first byte. Unlike an ELF segment a PE
 	 * section does not contain the headers, so there is no desync to avoid; a
 	 * section is decoded where its raw data begins.
 	 */
-	for (i = 0; i < p->sec_count; i++) {
-		const struct kgenome_pe_sec *sc = &p->sec[i];
-		uint64_t at, have;
+	for (i = 0; i < kgenome_diag_extent_count(obj); i++) {
+		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at);
 
-		if (!kgenome_pe_sec_is_code(sc))
-			continue;
-		have = kgenome_pe_sec_extent(sc, size, &at);
 		if (have)
 			walk_code(s, obj, base, size, at, have, wide, &w);
 		if (s->halt)
@@ -307,13 +303,13 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 	/* The stubs, now that all of them are known: a direct call to one is a
 	 * call to the import. */
 	if (w.n_thunk) {
-		qsort(w.thunk, w.n_thunk, sizeof *w.thunk, kgenome_cmp_u64);
+		qsort(w.thunk, w.n_thunk, sizeof *w.thunk, kof_cmp_u64);
 		for (i = 0; i < w.n_call; i++) {
 			struct pe_imp key, *t;
 
 			key.slot = w.call[i].target_va;
 			t = bsearch(&key, w.thunk, w.n_thunk, sizeof *w.thunk,
-				    kgenome_cmp_u64);
+				    kof_cmp_u64);
 			if (t)
 				add_node(s, w.call[i].at, t);
 		}

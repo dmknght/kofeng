@@ -46,19 +46,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "lineages.h"
-#include "diag_int.h"
+#include "diag_scan.h"
+#include "diag_private.h"
 #include <kofcore.h>
 #include <celllysis/capability.h>
 #include <genotype/image/elf_image.h>
 #include <celllysis/nucleo.h>
-#include <genotype/image/addr.h>
+#include <genotype/image/image_addr.h>
 #include <celllysis/space.h>
 
-
-/* How far back the walk reads before a call, to see its arguments set up.
- * The same 256 bytes the syscall routine uses and for the same reason. */
-#define DIAG_SYM_LEAD 256u
 
 /*
  * ---- WHICH SYMBOL AN INSTRUCTION'S OPERAND REALLY NAMES ------------------
@@ -76,7 +72,7 @@
  */
 /*
  * A register written by an instruction whose operand a relocation names now
- * carries that symbol - see struct kgenome_org.
+ * carries that symbol - see struct kgenome_diag_org.
  *
  * AFTER kgenome_diag_org_step AND NOT BEFORE, because the step clears every
  * register the instruction wrote, and this is what the instruction wrote.
@@ -85,7 +81,7 @@
  * displacement inside the branch, which is a KGENOME_CELL_O_REL operand, so the test
  * below is what keeps a branch target from being read as a loaded address.
  */
-static void note_symref(struct kgenome_walk *w, const struct kgenome_elf_relocs *t,
+static void note_symref(struct kgenome_diag_orgs *w, const struct kgenome_elf_relocs *t,
 			const struct kgenome_cell_insn *in)
 {
 	const struct kgenome_elf_reloc *r;
@@ -104,10 +100,10 @@ struct relsite {
 	uint16_t cap;
 	/*
 	 * The vocabulary's id for the name, not the string - see
-	 * kgenome_flow_name_id. Carried because one capability can cover two
+	 * kgenome_nucleo_name_id. Carried because one capability can cover two
 	 * calls that differ in whether the object comes back: mmap and
 	 * mprotect are both an executable mapping and only the first hands
-	 * one back. See kgenome_flow_hands_on.
+	 * one back. See kgenome_nucleo_hands_on.
 	 */
 	uint16_t name;
 	uint8_t  argrole[6];    /* which input each argument register is */
@@ -139,7 +135,7 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	 * nothing and names no capability. */
 	if (target || !name)
 		return;
-	cap = kgenome_flow_cap_of_name(name);
+	cap = kgenome_nucleo_cap_of_name(name);
 	if (cap == KGENOME_NUCLEO_NONE)
 		return;
 	if (g->n == g->cap_n) {
@@ -155,7 +151,7 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	}
 	g->site[g->n].at = at;
 	g->site[g->n].cap = cap;
-	g->site[g->n].name = kgenome_flow_name_id(name);
+	g->site[g->n].name = kgenome_nucleo_name_id(name);
 	for (i = 0; i < 6u; i++)
 		g->site[g->n].argrole[i] = kgenome_diag_role_of_arg(cap, i);
 	g->n++;
@@ -297,7 +293,7 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	for (j = 0; j < fg->n; j++) {
 		struct kgenome_cell_cur k;
 		struct kgenome_cell_insn in;
-		struct kgenome_walk w;
+		struct kgenome_diag_orgs w;
 		uint64_t lo, hi;
 		uint32_t r;
 
@@ -311,7 +307,7 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 		memset(&k, 0, sizeof k);
 		memset(&w, 0, sizeof w);
 		for (r = 0; r < 16u; r++)
-			w.reg[r].node = KGENOME_ORG_NONE;
+			w.reg[r].node = KGENOME_DIAG_ORG_NONE;
 		if (!kgenome_cell_seek(&k, lo, 0))
 			continue;
 
@@ -399,8 +395,8 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 			 * second is how both facts are kept.
 			 */
 			if (i < g.n && node_of[i] != 0xffffu) {
-				if (kgenome_flow_hands_on(sites[i].cap,
-						      kgenome_flow_name_of(
+				if (kgenome_nucleo_hands_on(sites[i].cap,
+						      kgenome_nucleo_name_of(
 							      sites[i].name)))
 					kgenome_diag_org_set(&w, KGENOME_CELL_REG_AX,
 							 node_of[i]);

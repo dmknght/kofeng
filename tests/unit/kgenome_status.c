@@ -6,14 +6,14 @@
  * it is not to review each cap once but to test that each one, when it fires,
  * leaves a value a caller can read: kgenome_diag_scan_status. One check per
  * limit of the diagnose graph (the limits of the PE import walk and of the apihash run are in
- * caps_pe.c, and the wrapper walk's per-path limits in caps_wrap.c, because
+ * caps_pe.c, and the wrapper walk's per-path limits in diag_wrapper_limits.c, because
  * their fixtures are theirs), each with its INSIDE case beside it - a limit that
  * sets a status while nothing was cut would make the status worthless in the
  * other direction.
  */
 
 #include "caps_fix.h"
-#include <phenotype/diag_int.h>
+#include <phenotype/diag_private.h>
 
 static unsigned char view[1u << 22];
 static uint8_t img[1u << 21];
@@ -48,7 +48,7 @@ static struct kgenome_diag_scan *scan_with(unsigned n, const struct kgenome_budg
 	return NULL;
 }
 
-/* x86-64: mmap through a generic wrapper at the end, as caps_wrap.c has it */
+/* x86-64: mmap through a generic wrapper at the end, as diag_wrapper_limits.c has it */
 static const uint8_t caller[] = {
 	0xbf, 9, 0, 0, 0, 0xbe, 0, 0, 0, 0, 0xba, 0, 0x10, 0, 0, 0xb9, 7, 0, 0, 0,
 	0x41, 0xb8, 0x22, 0, 0, 0, 0x45, 0x31, 0xc9,

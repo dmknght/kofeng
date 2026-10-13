@@ -1,6 +1,6 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofcap.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * trojan_meterp_08.c - a Windows stager, read off the graph instead of off bytes.

@@ -14,28 +14,14 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
+#include <dirent.h>
+#include "../kofcore/kofplatform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
+
+static void sx_note_unreadable(struct walk *w);
 
 
 static void scan_one(struct walk *w, const char *path);
@@ -181,383 +167,424 @@ struct layer {
 	const struct kof_module *derived_by;
 };
 
+/* The layers still to be walked: the stack that makes the walk depth-first without
+ * recursion. */
+struct layer_stack {
+	struct layer *v;
+	uint32_t      n, cap;
+};
+
+/*
+ * THE SCAN OF ONE OBJECT OF THE TREE: tell the scanner what the walk knows about it
+ * (what the producer declared, the regions, the language), decide whether it begins
+ * a new subject, and run the pipeline on it. Fills *res; nothing is reported here.
+ */
+static void tree_scan_object(struct walk *w, const struct layer *cur,
+			     struct kof_result *res)
+{
+	struct kof_objsrc *src = cur->src;
+
+	/*
+	 * Cleared WHOLE, not field by field.
+	 *
+	 * It was three assignments, and that is a shape that goes stale
+	 * the moment the struct grows: the heuristic fields were added
+	 * and every object carried whatever the stack happened to hold,
+	 * so a zip reported itself packed. A memset cannot forget a
+	 * field, which is the only property worth having here.
+	 */
+	memset(res, 0, sizeof *res);
+
+	/*
+	 * What the producer said this object is the content of, put
+	 * where a host can read it. Set before the scan rather than
+	 * after, so a callback fired from inside it sees the same
+	 * answer as one fired after.
+	 */
+	res->entry_of = kof_src_entry_of(src);
+	res->entry_kind = kof_src_kind_of(src);
+	w->sc->cur.src = src;
+	/*
+	 * And the regions, if the producer named any - the one object
+	 * that does is a normalised view. Copied onto the scanner here
+	 * because a resolver is reached through ctx, and ctx is built
+	 * inside sx_scan_object with nowhere to carry a table of its own.
+	 *
+	 * Cleared for every other object, unconditionally, because a
+	 * table left standing would describe the PREVIOUS object and
+	 * the ranges it names are ranges into different bytes.
+	 */
+	{
+		const struct kof_src_region *r = NULL;
+		uint32_t g, nr = kof_src_regions_of(src, &r);
+
+		for (g = 0; g < nr; g++)
+			w->sc->cur.rgn[g] = r[g];
+		w->sc->cur.n_rgn = nr;
+		w->sc->cur.rgn_fmt = kof_src_region_fmt_of(src);
+	}
+	w->sc->cur.lang = (uint8_t)kof_src_lang_of(src,
+					&w->sc->cur.subtype,
+					&w->sc->cur.subfam);
+	kof_scan_kids_reset(w->sc);
+	w->sc->cur.want = cur->want;
+	w->sc->cur.want_level = cur->want_level;
+	w->sc->cur.n_xw = cur->n_xw;
+	for (uint32_t q = 0; q < cur->n_xw; q++) {
+		w->sc->cur.xw[q].rva = cur->xw[q][0];
+		w->sc->cur.xw[q].len = cur->xw[q][1];
+	}
+	w->sc->cur.derived_by = cur->derived_by;
+	/*
+	 * A NEW SUBJECT BEGINS A NEW VERDICT - see
+	 * sc->subject.
+	 *
+	 * The slot holds one name for one subject, and the question
+	 * is where a subject ends. NOT at the file: an object that
+	 * came out of a PACKER is the same program decoded, and so
+	 * is the normalised view of that - representations, which is
+	 * why they share the parent's name rather than each earning
+	 * one.
+	 *
+	 * A CONTAINER'S MEMBER IS NOT A REPRESENTATION. Ten files in
+	 * an archive are ten subjects; carrying one member's verdict
+	 * into the next would name a clean file after the infected
+	 * one beside it, which is the worst thing this slot could do.
+	 *
+	 * `from_packer` draws most of that line - it is set for what
+	 * a packer produced and clear for a root and for a
+	 * container's members - but NOT ALL OF IT: a normalised view
+	 * has no packer behind it either, and it is the purest
+	 * representation there is, the same bytes re-laid-out so a
+	 * rule can read them. Clearing the slot for one let the view
+	 * take a verdict its own parent already held, which is the
+	 * duplicate this whole slot exists to remove.
+	 *
+	 * So: a root or a container's member, and not a view.
+	 */
+	if (!cur->from_packer &&
+	    kof_src_kind_of(src) != KOF_ENT_NORMALIZED) {
+		w->sc->subject.have = 0;
+		w->sc->subject.lvl  = 0;
+	}
+	sx_scan_object(w->sc, kof_src_buf(src), w->opt, res, cur->pdepth,
+		    cur->from_packer, cur->inherit_predict, kof_src_fmt_of(src));
+	w->sc->cur.src = NULL;
+	w->sc->cur.derived_by = NULL;
+}
+
+/*
+ * A LAYER THE DEPTH ALLOWANCE WILL REFUSE, said before the verdict is: marks *res
+ * as not fully examined when a child of the object just scanned is too costly to
+ * descend into.
+ */
+static void tree_mark_refused(struct walk *w, const struct layer *cur,
+			      struct kof_result *res)
+{
+	uint32_t i;
+
+	/*
+	 * A LAYER LEFT UNOPENED IS SAID SO, BEFORE THE VERDICT IS.
+	 *
+	 * The cost limit below refuses children, and refusing one in
+	 * silence would report an object as examined when a layer of it
+	 * was never looked at - the failure this engine's budgets are
+	 * careful never to produce. Decided here rather than at the push
+	 * because the callback has not fired yet: after it, the verdict
+	 * for this object is already out.
+	 *
+	 * It reads as "not fully examined", the same channel a
+	 * decompressor uses when its budget runs out, because it is the
+	 * same statement: something was produced and nobody looked at it.
+	 * Measured over 12.9GB and 60 248 objects it never once fires -
+	 * so this is a guard for the file that has not turned up yet
+	 * rather than a thing the scan does today.
+	 */
+	if (!res->broken) {
+		for (i = 0; i < w->sc->child.n; i++)
+			if (cur->depth + 1u >
+			    depth_allowance(kof_src_buf(w->sc->child.list[i]).n)) {
+				res->broken = KOF_BROKEN_LIMIT;
+				break;
+			}
+	}
+}
+
+/*
+ * THE REPORT OF ONE OBJECT: count it, attach what the engine knows about how it
+ * came to exist, and hand it to the host - the verdict events first, then the
+ * callback. A wrapper the module marked superseded is not reported below the root.
+ */
+static void tree_report(struct walk *w, const struct layer *cur,
+			struct kof_result *res)
+{
+	w->objects++;
+	/*
+	 * WHETHER THIS FILE PRODUCED ANYTHING, counted where the answer
+	 * is - see sx_scan_file, which will not remember a file that did.
+	 *
+	 * `broken` counts too. An object the scan could not finish is
+	 * not a clean one: remembering it would turn a truncated read,
+	 * a budget that ran out or a parse that gave up into a
+	 * permanent verdict of "nothing here".
+	 */
+	if (res->n || res->broken)
+		w->found++;
+	{
+		kof_buf ob = kof_src_buf(cur->src);
+
+		/* What the producer declared this object is to be read
+		 * with, passed on rather than rebuilt by the host -
+		 * see kof_result.syms. */
+		res->syms = kof_src_syms_of(cur->src, &res->n_syms);
+		/* The module that opened THIS object, recorded by the
+		 * engine where it produced a child - see opened_by. */
+		res->opened_by = w->sc->obj.open.opened_by[0] ? w->sc->obj.open.opened_by
+						    : 0;
+		/* And which build of it, when the module settled one -
+		 * see kof_result.packer_build. */
+		res->packer_build = w->sc->obj.open.packer_build[0]
+				 ? w->sc->obj.open.packer_build : 0;
+		/*
+		 * A WRAPPER IS NOT REPORTED AS A THING RECOVERED.
+		 *
+		 * `superseded` is the module saying the child it just
+		 * produced is what this object WAS - see `supersede`
+		 * in kofsig.h. The object has been scanned by then and
+		 * every rule has run on it; what is skipped is the
+		 * line that says it came out, because a decryptor and
+		 * the ciphertext behind it are not two findings.
+		 *
+		 * NOT AT THE TOP LEVEL. The file the caller handed
+		 * over is reported whatever any module says about it,
+		 * and that is checked here rather than trusted to
+		 * every module.
+		 */
+		/*
+		 * THE VERDICTS FIRST, each already composed - see
+		 * kof_on_event_detected. The engine says which findings it
+		 * is reporting and hands them over decoded, so a
+		 * host never walks the array deciding for itself.
+		 */
+		if (w->opt->on_event_detected && cur->name &&
+		    !(w->sc->obj.open.superseded && cur->depth)) {
+			uint32_t q;
+
+			for (q = 0; q < res->n; q++)
+				if (res->v[q].is_verdict)
+					w->opt->on_event_detected(cur->name,
+						res->v[q].name,
+						&res->v[q],
+						w->opt->event_user);
+		}
+		if (w->cb && cur->name && !(w->sc->obj.open.superseded && cur->depth) &&
+		    w->cb(cur->name, ob.p, ob.n, res, w->user) != 0)
+			w->aborted = 1;
+	}
+}
+
+/*
+ * THE OBJECT'S CHILDREN, onto the stack of layers still to be walked - or, when the
+ * walk was interrupted, the mark that the file has parts nobody examined.
+ */
+static void tree_take_kids(struct walk *w, struct layer_stack *sk,
+			   const struct layer *cur)
+{
+	uint32_t i;
+
+	/*
+	 * Take the children before anything else can reset them.
+	 *
+	 * On max_object_depth and not on max_depth: the second is how
+	 * deep into DIRECTORIES the walk goes, and reading it here was
+	 * what made one number mean two policies. See the note on both
+	 * in kofeng.h.
+	 *
+	 * The built-in allowance below still applies whatever these
+	 * say, so a caller that sets neither is bounded exactly as
+	 * before - the difference is only that it can now bound one
+	 * axis without the other.
+	 */
+	if (!w->aborted && !w->out_of_memory &&
+	    kof_objtree_may_open(w->opt) &&
+	    (!w->opt->max_object_depth ||
+	     cur->depth + 1 <= w->opt->max_object_depth)) {
+		/*
+		 * PUSHED BACKWARDS SO THEY COME OUT FORWARDS.
+		 *
+		 * The stack is what makes this depth-first without
+		 * recursion, and a stack reverses whatever order things
+		 * go onto it. Pushed 0..n-1, the children came back
+		 * n-1..0 - so an archive listed its last entry first,
+		 * and a dropper carrying one payload per architecture
+		 * showed them bottom to top in the viewer's tree. The
+		 * numbering was right all along; only the order they
+		 * were walked in was backwards.
+		 */
+		for (i = w->sc->child.n; i-- > 0; ) {
+			char kid[512];
+
+			if (sk->n == sk->cap) {
+				uint32_t nc = sk->cap ? sk->cap * 2 : 16;
+				struct layer *nv = realloc(sk->v,
+							   nc * sizeof *nv);
+				if (!nv) {
+					w->out_of_memory = 1;
+					w->incomplete = 1;
+					break;
+				}
+				sk->v = nv;
+				sk->cap = nc;
+			}
+			/*
+			 * The index AND the name, not the name alone.
+			 *
+			 * An index on its own says nothing about which of
+			 * fifty entries was found, which is what this used
+			 * to print. A name on its own is not unique: an
+			 * archive may hold two entries with the same name,
+			 * and sanitising two different names can collapse
+			 * them into one string. Together they are always
+			 * exactly one entry.
+			 */
+			{
+				const char *lab =
+					kof_src_label_of(w->sc->child.list[i]);
+
+				if (*lab)
+					snprintf(kid, sizeof kid,
+						 "%s//%u:%s",
+						 cur->name ? cur->name : "?", i, lab);
+				else
+					snprintf(kid, sizeof kid, "%s//%u",
+						 cur->name ? cur->name : "?", i);
+			}
+			/*
+			 * The cost limit, asked about the CHILD rather
+			 * than about this object: what a layer costs is
+			 * the size of the thing that layer produced, and
+			 * a bomb's children are larger than it is. Asking
+			 * the parent would let a small archive hand back
+			 * a huge one at full depth, which is the case the
+			 * limit exists for.
+			 */
+			if (cur->depth + 1u >
+			    depth_allowance(kof_src_buf(w->sc->child.list[i]).n))
+				continue;   /* said above, before the verdict */
+			sk->v[sk->n].src = kof_src_ref(w->sc->child.list[i]);
+			sk->v[sk->n].name = kof_strdup_n(kid, strlen(kid));
+			if (!sk->v[sk->n].name)
+				w->out_of_memory = 1;
+			sk->v[sk->n].depth = cur->depth + 1;
+			sk->v[sk->n].from_packer = w->sc->child.packer &&
+					       w->sc->child.packer[i];
+			sk->v[sk->n].pdepth = cur->pdepth +
+				(sk->v[sk->n].from_packer ? 1u : 0u);
+			sk->v[sk->n].want = w->sc->child.want
+					? w->sc->child.want[i] : 0u;
+			sk->v[sk->n].want_level = w->sc->child.want_level
+					? w->sc->child.want_level[i] : 0u;
+			sk->v[sk->n].n_xw = w->sc->child.n_xw
+					? w->sc->child.n_xw[i] : 0u;
+			if (sk->v[sk->n].n_xw > KGENOME_EMU_EXEC_WATCH)
+				sk->v[sk->n].n_xw = KGENOME_EMU_EXEC_WATCH;
+			for (uint32_t q = 0; q < sk->v[sk->n].n_xw; q++) {
+				const uint64_t *sx = w->sc->child.xw +
+					(size_t)i * KGENOME_EMU_EXEC_WATCH *
+					2u + (size_t)q * 2u;
+
+				sk->v[sk->n].xw[q][0] = sx[0];
+				sk->v[sk->n].xw[q][1] = sx[1];
+			}
+			sk->v[sk->n].inherit_predict =
+				w->sc->child.family ? w->sc->child.family[i]
+						  : NULL;
+			sk->v[sk->n].derived_by = w->sc->child.derived_by
+				? w->sc->child.derived_by[i] : NULL;
+			sk->n++;
+		}
+	} else if ((w->aborted || w->out_of_memory) && w->sc->child.n > 0) {
+		/*
+		 * THE CHILDREN THIS OBJECT PRODUCED ARE NOT WALKED, because the
+		 * walk was asked to stop (or ran out of memory) - so the file
+		 * has parts nobody examined. That is not the policy of a caller
+		 * who asked not to descend (heur_off, max_object_depth: "off
+		 * means do not descend, never do not look"); it is an
+		 * interruption, and a file that was interrupted is not clean -
+		 * see sx_scan_file.
+		 */
+		w->incomplete = 1;
+	}
+}
+
+/*
+ * ONE TREE: the root, and every object under it, depth first.
+ *
+ * The steps of one object are the functions above - tree_scan_object, then
+ * tree_mark_refused, tree_report, tree_take_kids - and this is the loop that
+ * hands them the layer in hand and then takes the next one off the stack.
+ */
 static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 {
-	struct layer *stack = NULL;
-	uint32_t n = 0, cap = 0;
-
+	struct layer_stack sk = { NULL, 0, 0 };
 	/* The root is not copied into the stack; it is scanned first and its
-	 * children seed it. */
-	struct kof_objsrc *src = kof_src_ref(root);
-	char *name = kof_strdup_n(path, strlen(path));
-	uint32_t depth = 0, pdepth = 0;
-	int from_packer = 0;            /* the root came off the disk */
+	 * children seed it. A root came off the disk (no packer layer, depth
+	 * 0), nothing produced it (no declared ask, no watch), it inherits no
+	 * prediction and nothing derived it - all of which is the zero value. */
+	struct layer cur;
+
+	memset(&cur, 0, sizeof cur);
+	cur.src = kof_src_ref(root);
+	cur.name = kof_strdup_n(path, strlen(path));
 
 	/* The root begins a scope - see the reset beside sx_scan_object below,
 	 * which is where the rule is stated. */
-	w->sc->verdict_have = 0;
-	w->sc->verdict_lvl  = 0;
-	/* What the producer of the object in hand declared it needs. Zero for a
-	 * root, which nothing produced. */
-	uint32_t want_decl = 0, want_decl_level = 0;
-	uint32_t xw_decl_n = 0;                 /* a root has no producer */
-	uint64_t xw_decl[KGENOME_EMU_EXEC_WATCH][2];
-	const char *inherit = NULL;     /* the root inherits no prediction */
-	const struct kof_module *derived_by = NULL;  /* nothing derived a root */
+	w->sc->subject.have = 0;
+	w->sc->subject.lvl  = 0;
 
 	/* Every other allocation failure in this function sets out_of_memory so
 	 * the walk is reported incomplete rather than clean - this one didn't,
 	 * which meant an OOM here dropped the root's finding silently instead
 	 * (the callback guard below already tolerates a NULL name, so nothing
 	 * crashes; it just never gets called). */
-	if (!name)
+	if (!cur.name)
 		w->out_of_memory = 1;
 
 	kof_scan_budget(w->sc, kof_src_buf(root).n, w->opt);
 
 	for (;;) {
 		struct kof_result res;
-		uint32_t i;
 
-		/*
-		 * Cleared WHOLE, not field by field.
-		 *
-		 * It was three assignments, and that is a shape that goes stale
-		 * the moment the struct grows: the heuristic fields were added
-		 * and every object carried whatever the stack happened to hold,
-		 * so a zip reported itself packed. A memset cannot forget a
-		 * field, which is the only property worth having here.
-		 */
-		memset(&res, 0, sizeof res);
-
-		/*
-		 * What the producer said this object is the content of, put
-		 * where a host can read it. Set before the scan rather than
-		 * after, so a callback fired from inside it sees the same
-		 * answer as one fired after.
-		 */
-		res.entry_of = kof_src_entry_of(src);
-		res.entry_kind = kof_src_kind_of(src);
-		w->sc->cur_src = src;
-		/*
-		 * And the regions, if the producer named any - the one object
-		 * that does is a normalised view. Copied onto the scanner here
-		 * because a resolver is reached through ctx, and ctx is built
-		 * inside sx_scan_object with nowhere to carry a table of its own.
-		 *
-		 * Cleared for every other object, unconditionally, because a
-		 * table left standing would describe the PREVIOUS object and
-		 * the ranges it names are ranges into different bytes.
-		 */
-		{
-			const struct kof_src_region *r = NULL;
-			uint32_t g, nr = kof_src_regions_of(src, &r);
-
-			for (g = 0; g < nr; g++)
-				w->sc->cur_rgn[g] = r[g];
-			w->sc->n_cur_rgn = nr;
-			w->sc->cur_rgn_fmt = kof_src_region_fmt_of(src);
-		}
-		w->sc->cur_lang = (uint8_t)kof_src_lang_of(src,
-						&w->sc->cur_subtype,
-						&w->sc->cur_subfam);
-		kof_scan_kids_reset(w->sc);
-		w->sc->cur_want = want_decl;
-		w->sc->cur_want_level = want_decl_level;
-		w->sc->n_xw = xw_decl_n;
-		for (uint32_t q = 0; q < xw_decl_n; q++) {
-			w->sc->xw[q].rva = xw_decl[q][0];
-			w->sc->xw[q].len = xw_decl[q][1];
-		}
-		w->sc->cur_derived_by = derived_by;
-		/*
-		 * A NEW SUBJECT BEGINS A NEW VERDICT - see
-		 * kof_scanner.verdict.
-		 *
-		 * The slot holds one name for one subject, and the question
-		 * is where a subject ends. NOT at the file: an object that
-		 * came out of a PACKER is the same program decoded, and so
-		 * is the normalised view of that - representations, which is
-		 * why they share the parent's name rather than each earning
-		 * one.
-		 *
-		 * A CONTAINER'S MEMBER IS NOT A REPRESENTATION. Ten files in
-		 * an archive are ten subjects; carrying one member's verdict
-		 * into the next would name a clean file after the infected
-		 * one beside it, which is the worst thing this slot could do.
-		 *
-		 * `from_packer` draws most of that line - it is set for what
-		 * a packer produced and clear for a root and for a
-		 * container's members - but NOT ALL OF IT: a normalised view
-		 * has no packer behind it either, and it is the purest
-		 * representation there is, the same bytes re-laid-out so a
-		 * rule can read them. Clearing the slot for one let the view
-		 * take a verdict its own parent already held, which is the
-		 * duplicate this whole slot exists to remove.
-		 *
-		 * So: a root or a container's member, and not a view.
-		 */
-		if (!from_packer &&
-		    kof_src_kind_of(src) != KOF_ENT_NORMALIZED) {
-			w->sc->verdict_have = 0;
-			w->sc->verdict_lvl  = 0;
-		}
-		sx_scan_object(w->sc, kof_src_buf(src), w->opt, &res, pdepth,
-			    from_packer, inherit, kof_src_fmt_of(src));
-		w->sc->cur_src = NULL;
-		w->sc->cur_derived_by = NULL;
-
-		/*
-		 * A LAYER LEFT UNOPENED IS SAID SO, BEFORE THE VERDICT IS.
-		 *
-		 * The cost limit below refuses children, and refusing one in
-		 * silence would report an object as examined when a layer of it
-		 * was never looked at - the failure this engine's budgets are
-		 * careful never to produce. Decided here rather than at the push
-		 * because the callback has not fired yet: after it, the verdict
-		 * for this object is already out.
-		 *
-		 * It reads as "not fully examined", the same channel a
-		 * decompressor uses when its budget runs out, because it is the
-		 * same statement: something was produced and nobody looked at it.
-		 * Measured over 12.9GB and 60 248 objects it never once fires -
-		 * so this is a guard for the file that has not turned up yet
-		 * rather than a thing the scan does today.
-		 */
-		if (!res.broken) {
-			for (i = 0; i < w->sc->n_kids; i++)
-				if (depth + 1u >
-				    depth_allowance(kof_src_buf(w->sc->kids[i]).n)) {
-					res.broken = KOF_BROKEN_LIMIT;
-					break;
-				}
-		}
-
-		w->objects++;
-		/*
-		 * WHETHER THIS FILE PRODUCED ANYTHING, counted where the answer
-		 * is - see sx_scan_file, which will not remember a file that did.
-		 *
-		 * `broken` counts too. An object the scan could not finish is
-		 * not a clean one: remembering it would turn a truncated read,
-		 * a budget that ran out or a parse that gave up into a
-		 * permanent verdict of "nothing here".
-		 */
-		if (res.n || res.broken)
-			w->found++;
-		{
-			kof_buf ob = kof_src_buf(src);
-
-			/* What the producer declared this object is to be read
-			 * with, passed on rather than rebuilt by the host -
-			 * see kof_result.syms. */
-			res.syms = kof_src_syms_of(src, &res.n_syms);
-			/* The module that opened THIS object, recorded by the
-			 * engine where it produced a child - see opened_by. */
-			res.opened_by = w->sc->opened_by[0] ? w->sc->opened_by
-							    : 0;
-			/* And which build of it, when the module settled one -
-			 * see kof_result.packer_build. */
-			res.packer_build = w->sc->packer_build[0]
-					 ? w->sc->packer_build : 0;
-			/*
-			 * A WRAPPER IS NOT REPORTED AS A THING RECOVERED.
-			 *
-			 * `superseded` is the module saying the child it just
-			 * produced is what this object WAS - see `supersede`
-			 * in kofsig.h. The object has been scanned by then and
-			 * every rule has run on it; what is skipped is the
-			 * line that says it came out, because a decryptor and
-			 * the ciphertext behind it are not two findings.
-			 *
-			 * NOT AT THE TOP LEVEL. The file the caller handed
-			 * over is reported whatever any module says about it,
-			 * and that is checked here rather than trusted to
-			 * every module.
-			 */
-			/*
-			 * THE VERDICTS FIRST, each already composed - see
-			 * kof_on_event_detected. The engine says which findings it
-			 * is reporting and hands them over decoded, so a
-			 * host never walks the array deciding for itself.
-			 */
-			if (w->opt->on_event_detected && name &&
-			    !(w->sc->superseded && depth)) {
-				uint32_t q;
-
-				for (q = 0; q < res.n; q++)
-					if (res.v[q].is_verdict)
-						w->opt->on_event_detected(name,
-							res.v[q].name,
-							&res.v[q],
-							w->opt->event_user);
-			}
-			if (w->cb && name && !(w->sc->superseded && depth) &&
-			    w->cb(name, ob.p, ob.n, &res, w->user) != 0)
-				w->aborted = 1;
-		}
-
-		/*
-		 * Take the children before anything else can reset them.
-		 *
-		 * On max_object_depth and not on max_depth: the second is how
-		 * deep into DIRECTORIES the walk goes, and reading it here was
-		 * what made one number mean two policies. See the note on both
-		 * in kofeng.h.
-		 *
-		 * The built-in allowance below still applies whatever these
-		 * say, so a caller that sets neither is bounded exactly as
-		 * before - the difference is only that it can now bound one
-		 * axis without the other.
-		 */
-		if (!w->aborted && !w->out_of_memory &&
-		    kof_objtree_may_open(w->opt) &&
-		    (!w->opt->max_object_depth ||
-		     depth + 1 <= w->opt->max_object_depth)) {
-			/*
-			 * PUSHED BACKWARDS SO THEY COME OUT FORWARDS.
-			 *
-			 * The stack is what makes this depth-first without
-			 * recursion, and a stack reverses whatever order things
-			 * go onto it. Pushed 0..n-1, the children came back
-			 * n-1..0 - so an archive listed its last entry first,
-			 * and a dropper carrying one payload per architecture
-			 * showed them bottom to top in the viewer's tree. The
-			 * numbering was right all along; only the order they
-			 * were walked in was backwards.
-			 */
-			for (i = w->sc->n_kids; i-- > 0; ) {
-				char kid[512];
-
-				if (n == cap) {
-					uint32_t nc = cap ? cap * 2 : 16;
-					struct layer *nv = realloc(stack,
-								   nc * sizeof *nv);
-					if (!nv) {
-						w->out_of_memory = 1;
-						w->incomplete = 1;
-						break;
-					}
-					stack = nv;
-					cap = nc;
-				}
-				/*
-				 * The index AND the name, not the name alone.
-				 *
-				 * An index on its own says nothing about which of
-				 * fifty entries was found, which is what this used
-				 * to print. A name on its own is not unique: an
-				 * archive may hold two entries with the same name,
-				 * and sanitising two different names can collapse
-				 * them into one string. Together they are always
-				 * exactly one entry.
-				 */
-				{
-					const char *lab =
-						kof_src_label_of(w->sc->kids[i]);
-
-					if (*lab)
-						snprintf(kid, sizeof kid,
-							 "%s//%u:%s",
-							 name ? name : "?", i, lab);
-					else
-						snprintf(kid, sizeof kid, "%s//%u",
-							 name ? name : "?", i);
-				}
-				/*
-				 * The cost limit, asked about the CHILD rather
-				 * than about this object: what a layer costs is
-				 * the size of the thing that layer produced, and
-				 * a bomb's children are larger than it is. Asking
-				 * the parent would let a small archive hand back
-				 * a huge one at full depth, which is the case the
-				 * limit exists for.
-				 */
-				if (depth + 1u >
-				    depth_allowance(kof_src_buf(w->sc->kids[i]).n))
-					continue;   /* said above, before the verdict */
-				stack[n].src = kof_src_ref(w->sc->kids[i]);
-				stack[n].name = kof_strdup_n(kid, strlen(kid));
-				if (!stack[n].name)
-					w->out_of_memory = 1;
-				stack[n].depth = depth + 1;
-				stack[n].from_packer = w->sc->kid_packer &&
-						       w->sc->kid_packer[i];
-				stack[n].pdepth = pdepth +
-					(stack[n].from_packer ? 1u : 0u);
-				stack[n].want = w->sc->kid_want
-						? w->sc->kid_want[i] : 0u;
-				stack[n].want_level = w->sc->kid_want_level
-						? w->sc->kid_want_level[i] : 0u;
-				stack[n].n_xw = w->sc->kid_n_xw
-						? w->sc->kid_n_xw[i] : 0u;
-				if (stack[n].n_xw > KGENOME_EMU_EXEC_WATCH)
-					stack[n].n_xw = KGENOME_EMU_EXEC_WATCH;
-				for (uint32_t q = 0; q < stack[n].n_xw; q++) {
-					const uint64_t *sx = w->sc->kid_xw +
-						(size_t)i * KGENOME_EMU_EXEC_WATCH *
-						2u + (size_t)q * 2u;
-
-					stack[n].xw[q][0] = sx[0];
-					stack[n].xw[q][1] = sx[1];
-				}
-				stack[n].inherit_predict =
-					w->sc->kid_family ? w->sc->kid_family[i]
-							  : NULL;
-				stack[n].derived_by = w->sc->kid_derived_by
-					? w->sc->kid_derived_by[i] : NULL;
-				n++;
-			}
-		} else if ((w->aborted || w->out_of_memory) && w->sc->n_kids > 0) {
-			/*
-			 * THE CHILDREN THIS OBJECT PRODUCED ARE NOT WALKED, because the
-			 * walk was asked to stop (or ran out of memory) - so the file
-			 * has parts nobody examined. That is not the policy of a caller
-			 * who asked not to descend (heur_off, max_object_depth: "off
-			 * means do not descend, never do not look"); it is an
-			 * interruption, and a file that was interrupted is not clean -
-			 * see sx_scan_file.
-			 */
-			w->incomplete = 1;
-		}
+		tree_scan_object(w, &cur, &res);
+		if (!res.broken)
+			tree_mark_refused(w, &cur, &res);
+		tree_report(w, &cur, &res);
+		tree_take_kids(w, &sk, &cur);
 		kof_scan_kids_reset(w->sc);
 
 		/* Nothing to release by hand: a produced source gives its bytes back
 		 * when it is destroyed, so every path that drops one - here, the
 		 * child cap, an aborted walk - accounts for it without knowing that
 		 * it has to. */
-		kof_src_unref(src);
-		free(name);
+		kof_src_unref(cur.src);
+		free(cur.name);
 
-		if (w->aborted || n == 0) {
+		if (w->aborted || sk.n == 0) {
 			/* Children still waiting are children nobody looked at. */
-			if (n > 0)
+			if (sk.n > 0)
 				w->incomplete = 1;
 			break;
 		}
-		n--;
-		src = stack[n].src;
-		name = stack[n].name;
-		depth = stack[n].depth;
-		pdepth = stack[n].pdepth;
-		from_packer = stack[n].from_packer;
-		want_decl = stack[n].want;
-		want_decl_level = stack[n].want_level;
-		xw_decl_n = stack[n].n_xw;
-		for (uint32_t q = 0; q < xw_decl_n; q++) {
-			xw_decl[q][0] = stack[n].xw[q][0];
-			xw_decl[q][1] = stack[n].xw[q][1];
-		}
-		inherit = stack[n].inherit_predict;
-		derived_by = stack[n].derived_by;
+		sk.n--;
+		cur = sk.v[sk.n];
 	}
 
-	while (n > 0) {
-		n--;
-		kof_src_unref(stack[n].src);
-		free(stack[n].name);
+	while (sk.n > 0) {
+		sk.n--;
+		kof_src_unref(sk.v[sk.n].src);
+		free(sk.v[sk.n].name);
 	}
-	free(stack);
+	free(sk.v);
 }
 
 /*
@@ -741,7 +768,7 @@ static void scan_one(struct walk *w, const char *path)
 
 /* A name the walk could not read, counted so that a subtree that silently
  * vanishes does not read as a subtree with nothing in it. */
-void sx_note_unreadable(struct walk *w)
+static void sx_note_unreadable(struct walk *w)
 {
 	if (w->q)
 		w->unreadable++;
@@ -817,7 +844,7 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
  *
  * The bytes are borrowed, not taken: they must outlive the call.
  */
-int sx_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
+int kof_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
 		   const char *name, const struct kof_scan_option *opt,
 		   kof_on_object cb, void *user)
 {

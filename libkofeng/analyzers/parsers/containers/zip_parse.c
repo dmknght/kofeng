@@ -112,20 +112,6 @@ static void add(struct zw *s, uint64_t off, uint64_t len, uint32_t cls)
 	kof_runs_add(&s->runs, s->f.n, off, len, cls);
 }
 
-static uint32_t rd32(kof_buf f, uint64_t off)
-{
-	uint32_t v = 0;
-	kof_rd_u32(f, off, 0, &v);
-	return v;
-}
-
-static uint16_t rd16(kof_buf f, uint64_t off)
-{
-	uint16_t v = 0;
-	kof_rd_u16(f, off, 0, &v);
-	return v;
-}
-
 /* ---- names -------------------------------------------------------------------- */
 
 /* Case insensitive over ASCII, which is all these comparisons need: every name this
@@ -203,11 +189,11 @@ static uint64_t find_eocd(kof_buf f)
 		return UINT64_MAX;
 
 	for (at = f.n - EOCD_LEN + 1; at-- > start; ) {
-		if (rd32(f, at) != SIG_EOCD)
+		if (kof_rd32_or0(f, at) != SIG_EOCD)
 			continue;
 		if (any == UINT64_MAX)
 			any = at;
-		if (at + EOCD_LEN + rd16(f, at + E_CMT_LEN) == f.n) {
+		if (at + EOCD_LEN + kof_rd16_or0(f, at + E_CMT_LEN) == f.n) {
 			best = at;
 			break;
 		}
@@ -227,11 +213,11 @@ static void read_zip64(struct zw *s, uint64_t eocd)
 	struct kof_zip_info *z = s->z;
 	uint64_t loc = eocd - LOC64_LEN, rec;
 
-	if (eocd < LOC64_LEN || rd32(s->f, loc) != SIG_LOC64)
+	if (eocd < LOC64_LEN || kof_rd32_or0(s->f, loc) != SIG_LOC64)
 		return;
 	if (!kof_rd_u64(s->f, loc + Z_LOC_OFF, 0, &rec))
 		return;
-	if (rd32(s->f, rec) != SIG_EOCD64)
+	if (kof_rd32_or0(s->f, rec) != SIG_EOCD64)
 		return;
 
 	add(s, loc, LOC64_LEN, KOF_ZIP_CLS_HEADERS);
@@ -264,13 +250,13 @@ static uint64_t place_entry(struct zw *s, struct kof_zip_entry *e)
 	uint64_t lh = e->local_off, name, data;
 	uint32_t nlen, xlen;
 
-	if (!kof_in_range(f, lh, LOCAL_LEN) || rd32(f, lh) != SIG_LOCAL) {
+	if (!kof_in_range(f, lh, LOCAL_LEN) || kof_rd32_or0(f, lh) != SIG_LOCAL) {
 		s->z->anomalies |= KOF_ZIP_ANOM_BAD_LOCAL;
 		e->suspicious |= KOF_ZIP_ENT_NO_LOCAL;
 		return 0;
 	}
-	nlen = rd16(f, lh + L_NAME_LEN);
-	xlen = rd16(f, lh + L_EXTRA_LEN);
+	nlen = kof_rd16_or0(f, lh + L_NAME_LEN);
+	xlen = kof_rd16_or0(f, lh + L_EXTRA_LEN);
 	name = lh + LOCAL_LEN;
 	data = name + nlen + xlen;
 
@@ -298,7 +284,7 @@ static uint64_t place_entry(struct zw *s, struct kof_zip_entry *e)
 	 * which is why they are never read from here. */
 	if (e->flags & KOF_ZIP_F_DESCRIPTOR)
 		add(s, data + e->csize, DESC_LEN +
-		    (rd32(f, data + e->csize) == SIG_DESCRIPTOR ? 4u : 0u),
+		    (kof_rd32_or0(f, data + e->csize) == SIG_DESCRIPTOR ? 4u : 0u),
 		    KOF_ZIP_CLS_HEADERS);
 
 	return data;
@@ -374,7 +360,7 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.z = z;
-	kof_runs_init(&s.runs, (struct kof_run *)z->run, KOF_ZIP_MAX_EXTENTS,
+	kof_runs_init(&s.runs, z->run, KOF_ZIP_MAX_EXTENTS,
 		      KOF_ZIP_CLS_COUNT);
 
 	eocd = find_eocd(file);
@@ -389,10 +375,10 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 	}
 
 	z->eocd_off = eocd;
-	z->declared_entries = rd16(file, eocd + E_N_TOTAL);
-	z->cd_size = rd32(file, eocd + E_CD_SIZE);
-	z->cd_off  = rd32(file, eocd + E_CD_OFF);
-	z->comment_len = rd16(file, eocd + E_CMT_LEN);
+	z->declared_entries = kof_rd16_or0(file, eocd + E_N_TOTAL);
+	z->cd_size = kof_rd32_or0(file, eocd + E_CD_SIZE);
+	z->cd_off  = kof_rd32_or0(file, eocd + E_CD_OFF);
+	z->comment_len = kof_rd16_or0(file, eocd + E_CMT_LEN);
 	z->comment_off = eocd + EOCD_LEN;
 
 	add(&s, eocd, EOCD_LEN, KOF_ZIP_CLS_HEADERS);
@@ -427,7 +413,7 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 		uint64_t moved = (uint64_t)((int64_t)z->cd_off + delta);
 
 		if (delta != 0 && (int64_t)z->cd_off + delta >= 0 &&
-		    kof_in_range(file, moved, 4) && rd32(file, moved) == SIG_CENTRAL) {
+		    kof_in_range(file, moved, 4) && kof_rd32_or0(file, moved) == SIG_CENTRAL) {
 			z->base_delta = delta;
 			z->cd_off = moved;
 			z->anomalies |= KOF_ZIP_ANOM_SFX;
@@ -452,29 +438,29 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 		uint32_t nlen, xlen, clen;
 
 		if (!kof_in_range(file, at, CENTRAL_LEN) ||
-		    rd32(file, at) != SIG_CENTRAL)
+		    kof_rd32_or0(file, at) != SIG_CENTRAL)
 			break;
 
 		e = &z->entry[z->n_entries];
 		memset(e, 0, sizeof *e);
 
-		e->flags  = rd16(file, at + C_FLAGS);
-		e->method = rd16(file, at + C_METHOD);
-		e->crc32  = rd32(file, at + C_CRC);
-		e->csize  = rd32(file, at + C_CSIZE);
-		e->usize  = rd32(file, at + C_USIZE);
+		e->flags  = kof_rd16_or0(file, at + C_FLAGS);
+		e->method = kof_rd16_or0(file, at + C_METHOD);
+		e->crc32  = kof_rd32_or0(file, at + C_CRC);
+		e->csize  = kof_rd32_or0(file, at + C_CSIZE);
+		e->usize  = kof_rd32_or0(file, at + C_USIZE);
 		/* Shifted by the same amount the directory was: the two are stated
 		 * in the same coordinates, so correcting one and not the other would
 		 * place every entry's data by an offset nothing wrote. */
 		{
-			int64_t lo = (int64_t)rd32(file, at + C_LOCAL_OFF) +
+			int64_t lo = (int64_t)kof_rd32_or0(file, at + C_LOCAL_OFF) +
 				     z->base_delta;
 
 			e->local_off = lo >= 0 ? (uint64_t)lo : UINT64_MAX;
 		}
-		nlen = rd16(file, at + C_NAME_LEN);
-		xlen = rd16(file, at + C_EXTRA_LEN);
-		clen = rd16(file, at + C_CMT_LEN);
+		nlen = kof_rd16_or0(file, at + C_NAME_LEN);
+		xlen = kof_rd16_or0(file, at + C_EXTRA_LEN);
+		clen = kof_rd16_or0(file, at + C_CMT_LEN);
 		e->name_off = at + CENTRAL_LEN;
 		e->name_len = nlen;
 

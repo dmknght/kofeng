@@ -141,7 +141,6 @@ static void examine(const char *path, struct kof_chm_info *c,
 	uint32_t n_entries_rt, entry_size;
 	struct out o;
 	enum kuncoat_status st;
-	uint64_t got = 0;
 	uint64_t tab = 0, frame = 0;
 	uint8_t *whole = NULL;
 
@@ -236,10 +235,15 @@ static void examine(const char *path, struct kof_chm_info *c,
 				take = want_uncomp - at_out;
 			if (coff >= c->lzx_len)
 				break;
-			st = kuncoat_lzx_decode(lz, c->lzx_window_bits,
-					    f + c->lzx_off + coff,
-					    c->lzx_len - coff, 0, take,
-					    out_sink, &o, &got);
+			{
+				const struct kuncoat_lzx_req rq = { c->lzx_window_bits, 0, take };
+				struct kuncoat_io io = {
+					.in = { f + c->lzx_off + coff, c->lzx_len - coff },
+					.sink = out_sink, .user = &o,
+				};
+
+				st = kuncoat_lzx_decode(lz, &rq, &io);
+			}
 			if (st != KUNCOAT_OK && st != KUNCOAT_STOPPED &&
 			    st != KUNCOAT_UNSUPPORTED)
 				break;
@@ -330,10 +334,15 @@ static void examine(const char *path, struct kof_chm_info *c,
 		uint64_t skip = 1024u;
 
 		if (want_uncomp > skip + first_len && coff < c->lzx_len)
-			st = kuncoat_lzx_decode(lz, c->lzx_window_bits,
-					    f + c->lzx_off + coff,
-					    c->lzx_len - coff, skip, first_len,
-					    out_sink, &o, &got);
+		{
+			const struct kuncoat_lzx_req rq = { c->lzx_window_bits, skip, first_len };
+			struct kuncoat_io io = {
+				.in = { f + c->lzx_off + coff, c->lzx_len - coff },
+				.sink = out_sink, .user = &o,
+			};
+
+			st = kuncoat_lzx_decode(lz, &rq, &io);
+		}
 		if (o.n != first_len)
 			fail(path, "a slice out of one interval came back the "
 			     "wrong length");
@@ -423,13 +432,15 @@ static void examine(const char *path, struct kof_chm_info *c,
 			st = KUNCOAT_OK;
 			for (k = 0; k < c->split[i].n_run && left; k++) {
 				const uint32_t run = c->split[i].first_run + k;
-				uint64_t part = 0;
+				const struct kuncoat_lzx_req rq = { c->lzx_window_bits, k ? 0u : skip, left };
+				struct kuncoat_io io = {
+					.in = { f + c->run[run].off, c->run[run].len },
+					.sink = out_sink, .user = &o,
+				};
+				uint64_t part;
 
-				st = kuncoat_lzx_decode(lz, c->lzx_window_bits,
-						    f + c->run[run].off,
-						    c->run[run].len,
-						    k ? 0u : skip, left,
-						    out_sink, &o, &part);
+				st = kuncoat_lzx_decode(lz, &rq, &io);
+				part = io.produced;
 				if (st != KUNCOAT_OK &&
 				    st != KUNCOAT_TRUNCATED &&
 				    st != KUNCOAT_UNSUPPORTED)

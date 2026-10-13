@@ -1,14 +1,11 @@
 /*
  * pzero.c - see pzero.h for why this stage exists and what it may not do.
  */
-#include <string.h>
 
 #include "pzero.h"
 #include "../kofcore/koftypes.h"
-#include "../kofcore/kofmod/kofsig.h"
-#include "../kofcore/kofmod/elf.h"
-#include "../kofcore/kofmod/pe.h"
 #include "../analyzers/parsers/binaries/elf/elf_parse.h"
+#include <string.h>
 
 uint64_t kof_pz_clean_end(const struct kof_obj_ctx *ctx)
 {
@@ -112,33 +109,4 @@ uint32_t kof_pz_unmask(const uint8_t *in, uint32_t n, uint32_t mask,
 	default:
 		return 0;
 	}
-}
-
-uint32_t kof_pz_pe_checksum(const uint8_t *p, uint64_t n, uint64_t csum_off)
-{
-	uint64_t i;
-	uint32_t sum = 0;
-
-	if (!p || !n)
-		return 0;
-	/*
-	 * THE FIELD READS ZERO WHILE THE SUM IS TAKEN, and it is skipped here
-	 * rather than zeroed in the buffer: this stage does not write to the
-	 * object it was handed. csum_off past the end means "no field", which
-	 * is what a caller checksumming something that is not a PE wants.
-	 */
-	for (i = 0; i + 1u < n; i += 2u) {
-		uint32_t w = (uint32_t)p[i] | ((uint32_t)p[i + 1u] << 8);
-
-		if (csum_off < n && i + 1u >= csum_off && i < csum_off + 4u)
-			w = 0;
-		sum += w;
-		sum = (sum & 0xffffu) + (sum >> 16);
-	}
-	if (n & 1u) {
-		sum += p[n - 1u];
-		sum = (sum & 0xffffu) + (sum >> 16);
-	}
-	sum = (sum & 0xffffu) + (sum >> 16);
-	return sum + (uint32_t)n;
 }

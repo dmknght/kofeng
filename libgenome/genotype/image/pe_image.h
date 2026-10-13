@@ -68,6 +68,22 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 			enum kgenome_status *status);
 
 /*
+ * THE NAMED EXPORTS, one call of `fn` each, in directory order.
+ *
+ * `nameoff` is where the name is in the file (the caller reads it: its own bound
+ * and its own sanitising) and `rva` the exported function's RVA, 0 when the
+ * ordinal or function table is missing - a value of zero would read as "at the
+ * image base", so it is left out rather than guessed. Exports BY ORDINAL with no
+ * name are not reported: the record's identity is its name. `fn` returns 0 to
+ * stop. Returns how many were handed over; `status`, when not NULL, is
+ * KGENOME_TRUNCATED when NumberOfNames was cut at the walk's bound.
+ */
+typedef int (*kgenome_pe_export_fn)(void *user, uint64_t nameoff, uint32_t rva);
+uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
+			kgenome_pe_export_fn fn, void *user,
+			enum kgenome_status *status);
+
+/*
  * THE IMPORT DIRECTORY, WALKED ONCE AND KEPT - for the readers that share one
  * object. The symbol block spells the imports as records and the PE diagnose
  * matches call sites against their slots; two walks of one directory, because

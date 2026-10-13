@@ -1,0 +1,89 @@
+exports_kept.txt - what is exported, defined or named in the tree and has no caller in the
+engine, and why each stays. One place, so a later audit does not rediscover it as a finding.
+Every entry below was checked by reading, not assumed: a name with no reference outside its
+definition and declaration, over .c .h .py .sh Makefile and the docs, with kofexamine/ counted
+as a user.
+
+1. TESTS-ONLY EXPORTS (62). Public functions whose only callers are tests. They are the
+   surface a test drives (a boundary of the lib or the engine unit), and a function the test
+   reaches by a name cannot be made static. Listed by defining file:
+
+  libgenome/celllysis/mutation_pool.c: kgenome_mutation_core, kgenome_mutation_member
+  libgenome/celllysis/trueline.c: kgenome_true_find_all
+  libgenome/genotype/arm32/arm32_index.c: kgenome_arm32_stats
+  libgenome/genotype/arm64/arm64.c: kgenome_arm64_decode_tree, kgenome_arm64_name
+  libgenome/genotype/image/funcs.c: kgenome_pe_funcs_build
+  libgenome/genotype/x86/x86.c: kgenome_x86_nexp, kgenome_x86_wgpr
+  libgenome/phenotype/diag_scan.c: kgenome_diag_scan_full, kgenome_diag_scan_ran
+  libgenome/phenotype/diag_str.c: kgenome_diag_str_at, kgenome_diag_str_count
+  libgenome/phenotype/emu_api.c: kgenome_emu_stop_name
+  libgenome/phenotype/emu_sys.c: kgenome_emu_unknown_syscalls
+  libkofeng/analyzers/diseases/kofdisease.c: kof_disease_decl_same
+  libkofeng/analyzers/normalize/executables.c: kof_exe_norm, kof_exe_norm_map, kof_exe_norm_src_of, kof_exe_unb64, kof_exe_unhex
+  libkofeng/databases/dbloader.c: kof_hex_prog_valid_for_test
+  libkofeng/databases/diagsrc.c: kof_dsrc_cap_at, kof_dsrc_cap_of, kof_dsrc_cond_same, kof_dsrc_patch, kof_dsrc_print, kof_dsrc_same, kof_dsrc_verdict_check, kof_dsrc_verdict_new
+  libkofeng/databases/pack/dbaccess.c: kof_db_disease, kof_db_disease_at, kof_db_disease_count
+  libkofeng/databases/pack/kofsyndrome.c: kof_synd_count, kof_synd_get, kof_synd_name
+  libkofeng/databases/syndsrc.c: kof_ssrc_print_dis, kof_ssrc_print_type, kof_ssrc_source
+  libkofeng/detectors/linkage/kofdiag.c: kof_diag_match
+  libkofeng/detectors/mutations/kofmutation.c: kof_mutation_block_hashes
+  libkofeng/detectors/pattern/kofmatch.c: kof_hex_walk
+  libkofeng/kofcore/kofhash.c: khash_sha256_final, khash_sha256_hex, khash_sha256_init, khash_sha256_update
+  libkofeng/kofeng.c: kdb_diag_collisions, kdb_diag_full, kdb_diagnoses
+  libkofeng/scanners/objctx_diag.c: kof_scan_diag_status
+  libkoforbit/antarc/afan.c: kofa_fan_mode_name, kofa_fan_watch_count
+  libkoforbit/antarc/aproc.c: kofa_pmem_read
+  libkoforbit/fridge/koffridge.c: koffridge_clear, koffridge_db_stamp, koffridge_describe, koffridge_load, koffridge_save, koffridge_seen_clear, koffridge_stats
+  libuncoat/decompressors/bunzip.c: kuncoat_bunzip_sniff
+  libuncoat/status.c: kuncoat_status_name
+
+2. DIAGNOSTIC API OF THE EMULATOR, NO CALLER IN THE TREE. A debugging session turns these on for
+   one file (see the notes in libgenome/phenotype/emu.h); a scan never does, so nothing in the
+   tree calls them and a release build carries them dormant:
+     kgenome_emu_itrace, _itrace_at, _itrace_until, _itrace_on_null   (the instruction ring;
+        its readers kgenome_emu_itrace_count/_get are called by objctx_emu.c under KOF_TRACING)
+     kgenome_emu_watch, kgenome_emu_watch_hits   (kgenome_emu_watch is also the module-ABI alias
+        kof_emu_watch in kofmod/kofsig.h)
+     kgenome_emu_syscall_log
+
+3. MODULE-ABI VOCABULARY. The alias macros of kofmod/ (a define whose body is one kgenome_ /
+   kuncoat_ name) and the enumerators and macros the ABI headers carry are the module contract:
+   a module may use any of them and the engine does not need to. 199 aliases, 66 with no user
+   outside kofmod/ today. They change only with the ABI version, which is not this change's to
+   bump.
+
+4. UNREFERENCED MACROS THAT ARE MEMBERS OF A SET. A value of a documented set (a wire layout, a
+   flag word, a table of register numbers) is kept when its siblings are used, because the set is
+   the statement and a hole in it reads as an oversight:
+     KGENOME_NUCLEO_F_LOW8, _F_LOOP (flag bits of a node)
+     KGENOME_CELL_SEG_ES, _SEG_CS (the segment numbers beside _SS _DS _FS _GS)
+     KGENOME_SECF_ORIGIN_MASK, _PLAIN, _COMPRESSED, _VIRTUALISED, _STATE_MASK (section flags)
+     KGENOME_X86_ACC_R, _ACC_CR, _ACC_CW, _M_STACK, _M_STRING, _M_AG (operand access / memory bits)
+     SCN_CNT_INIT_DATA (pe_image.c, beside SCN_CNT_CODE); ARJ_NAME_AT (arj_parse.c) and B_CRC,
+     F_HOST_OS, F_TIME, F_ATTR (rar_parse.c): offsets of a header layout whose other fields are
+     read; TL_G0 (script_parse.c, beside TL_G1 and TL_G2); KOF_MEMO_UNKNOWN (kofmatch.h, the
+     memo's 0); KUNCOAT_LZHUF_NP (lzhuf.h, beside _NC and _NT)
+   Deleted instead, because they were helpers or tunables and not members of a set:
+     KGENOME_NUCLEO_CTX, _AS_KERNEL, _BASE, _DENSE_MAX; KGENOME_CELL_NREG; DIAG_NAME_MAX;
+     NORM_MIN_SAVE; HEUR_EMU_MAX.
+
+5. FUNCTIONS OF NINE OR MORE PARAMETERS. None stays but one. Every one is a request struct now
+   (CLAUDE.md 12, "One request, one result"):
+     kgenome_emu_unp_run_pe (12)  -> struct kgenome_emu_unp_pe_req (emu_unpack.h)
+     kgenome_diag_code_run (10)   -> struct kgenome_diag_code_req (diag_scan.h)
+     kgenome_mutation_units (10)  -> struct kgenome_mutation_req (mutation.h)
+     kgenome_elf_write_hdr (10)   -> struct kgenome_elf_hdr_req, kgenome_elf_hdr_write
+     kof_exe_norm_masked (11)     -> struct kof_exe_norm_req / kof_exe_norm_res
+     kof_diag_load (9)            -> kof_buf + struct kof_diag_store
+     kof_match_lookup (9)         -> struct kof_match_req (with struct kof_match_pat)
+     kuncoat_inflate_seeded (9)   -> struct kuncoat_span (seed) + struct kuncoat_io
+     kuncoat_lzx_decode (9)       -> struct kuncoat_lzx_req + struct kuncoat_io
+     kuncoat_bcj2_decode (10)     -> struct kuncoat_bcj2_io
+     ksn_scan_procs (9)           -> struct ksn_procs_req
+   (The header of kgenome_emu_unp_run_pe listed fifteen: the three comments that explain
+   hand_back, extensions and the oep list sat inside the parameter list and were counted as
+   parameters. The definition had twelve and they agreed.) Kept, with the reason:
+     kgenome_elf_write_hdr (10): the positional form is an inline wrapper over
+        kgenome_elf_hdr_write in elf_rebuild.h, because kofexamine/kofscfind.c calls it and
+        kofexamine moves to the struct form in its own upgrade. It is the one EXEMPT entry of
+        the parameter count pass in tools/check_layers.py.

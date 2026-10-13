@@ -29,7 +29,7 @@ question this project has not had answered. The conservative reading is
 followed: the attribution is kept, and so is the licence text.
 
 The patch that was carried is now a rule in the generator's data and is pinned by
-`tests/unit/insn_addr16.c`, which stays as the regression test.
+`tests/lib/genome/insn_addr16.c`, which stays as the regression test.
 
 Re-running the generator or the comparison needs a bddisasm checkout, which is
 not shipped: `make genotype-x86 REF=<dir>`, `make genotype-x86-diff REF=<dir>`.
@@ -83,7 +83,7 @@ is a read of a register or of guest memory, `kof_emu_get_reg` and
 `kof_emu_read` existed, and nothing carried them across to a module. `emu_reg`
 and `emu_read` are that crossing.
 
-THERE IS NOW A SALITY MODULE - `bases/unp/sality_pe.c` - and the debt has to be
+THERE WAS A SALITY MODULE - `sality_pe`, no longer in bases/ - and the debt has to be
 stated more precisely than "the shape". Four numbers in it are TinyAntivirus's
 measurements and not this project's: the displacements at which a Sality body
 keeps the flag, the length and the bytes of the host code it overwrote
@@ -262,7 +262,7 @@ things it does instead are now what kofeng does:
     end. Measured here on an 8 MB static ELF: the PF_X segment is 7.79 MB and
     `.text` is 4.75 MB, so 3.04 MB of symbol tables, relocations, `.rodata`
     and unwind data was being disassembled - 39% of the work, producing
-    nothing but phantom blocks and loop spans. See `kof_flow_primary`.
+    nothing but phantom blocks and loop spans.
   - A WORKLIST OF JUMP TARGETS, not a cursor. Seeded from the entry and the
     function starts the format declares, grown as branches are decoded, and
     control-flow discoveries taken before anything else - RetDec ranks them
@@ -366,13 +366,13 @@ program, which is `OEP_CONTEXT` in `dep/XEmulUnpacker/`:
   - `nSpDelta`, the stack pointer measured against where it was at the entry
     point, and the rule that a real hand-over happens with it BALANCED. That
     is the single most useful thing in the file and it is what
-    `libgenome/phenotype/kofemu.c` now tests;
+    `libgenome/phenotype/emu_interp.c` now tests;
   - the per-packer tails: PECompact hands over with `ret` (1.00-1.10),
     `ret 4` (1.50-1.76) or `jmp eax` (2.40), and 0.90 does it with a `ret`
     from a heap buffer into the image;
   - that the undefined region of 16-bit `SHRD`/`SHLD` is NOT derivable and
     has to be taken from the host CPU. A formula was guessed here first and
-    was wrong; the note in `kofemu.c` says so beside the inline assembly that
+    was wrong; the note in `emu_interp.c` says so beside the inline assembly that
     replaced it.
 
 No code is reproduced from XEmulUnpacker: it is C++ against Qt and Unicorn.
@@ -443,7 +443,7 @@ engine now uses for Sality is its, in three parts:
 
   - a STATIC EXCLUSION phase that rules candidates out from the file's gross
     structure before any emulation, so that most files are never emulated at
-    all. Here that is `bases/heur/peinfect_00.c`.
+    all. Here that was `peinfect_00`, no longer in bases/.
   - a bounded emulation - its figure is 1.5 MILLION instructions - during which
     the scan may be entered PERIODICALLY, "to attempt to identify a virus that
     has been partially decrypted". That sentence is the whole saving: this
@@ -640,7 +640,7 @@ here for a different reason: this engine starts 35 interpreter runs across
 (Symantec).** An artificial memory region spanning operating-system components,
 and a monitor that detects the guest reaching into it. This engine already
 builds a synthetic PEB, LDR and module images and counts reads into them - see
-`count_mod_reads` in kofemu.c and the thread-block builder in emu_unpack.c.
+`count_mod_reads` in emu_interp.c and the thread-block builder in emu_unpack_pe_teb.c.
 
 **US 6,907,396 - "Detecting computer viruses by patching" (Networks Associates,
 2005).** Emulator extensions - program instructions loaded INTO the emulator to

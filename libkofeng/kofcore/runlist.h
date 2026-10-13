@@ -43,12 +43,8 @@
 #include "rangelist.h"        /* kof_rlist, for answering a mask */
 #include "heapsort.h"         /* KOF_HEAPSORT */
 
-/* One run of bytes and what claims it. */
-struct kof_run {
-	uint64_t off, len;
-	uint32_t cls;
-	uint32_t reserved;
-};
+/* struct kof_run - one run of bytes and what claims it - is range.h's: the parsers'
+ * info structs in kofmod/ hold the same array, so the type is shared. */
 
 /*
  * TWELVE, AND IT WAS EIGHT.

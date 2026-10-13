@@ -328,29 +328,29 @@ static void disease(void)
 	struct kof_diag d;
 	struct kof_diag_node node[2];
 	char name[KOF_DB_DIAG_NAME], needs[KOF_DB_DIAG_NEEDS];
+	const struct kof_diag_store st = { node, name, needs, sizeof name, sizeof needs, 2 };
 	const uint32_t id = kof_disease_id("cnc/recv-syscall");
 	size_t at;
 
 	at = drec(b, id, KOF_MALTYPE_BOTNET, 5);
 	memset(&d, 0, sizeof d);
 	ok("a record with a disease loads",
-	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 1);
+	   kof_diag_load(kof_buf_make(b, at), &d, &st) == 1);
 	ok("and carries its id and its type",
 	   d.disease == id && d.disease_type == KOF_MALTYPE_BOTNET);
 	memset(&d, 0, sizeof d);
 	ok("a record without one has none",
-	   kof_diag_load(b, at - 7u, &d, node, 2, name, sizeof name,
-			 needs, sizeof needs) == 1 && d.disease == 0);
+	   kof_diag_load(kof_buf_make(b, at - 7u), &d, &st) == 1 && d.disease == 0);
 	/* a section that is not an id and a type refuses the record whole */
 	at = drec(b, id, KOF_MALTYPE_BOTNET, 4);
 	ok("a length that is not five refuses the record",
-	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 0);
+	   kof_diag_load(kof_buf_make(b, at), &d, &st) == 0);
 	at = drec(b, id, KOF_MALTYPE_COUNT, 5);
 	ok("a type that is no maltype refuses the record",
-	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 0);
+	   kof_diag_load(kof_buf_make(b, at), &d, &st) == 0);
 	at = drec(b, 0, KOF_MALTYPE_BOTNET, 5);
 	ok("the id zero, which means no disease, refuses the record",
-	   kof_diag_load(b, at, &d, node, 2, name, sizeof name, needs, sizeof needs) == 0);
+	   kof_diag_load(kof_buf_make(b, at), &d, &st) == 0);
 }
 
 /* ---- the database the build makes from tests/sigs ------------------------- */

@@ -37,11 +37,26 @@
 
 #include <kofmod/infected.h>
 #include <kofhash.h>   /* SHA-256 and KOF_ERR_* - see core */
+#include <kofdebug.h>   /* KOFENG_BUILD, the stamp the Makefile passes - see core */
 
 #include <koftypes.h>   /* the scan's types: result, options, callbacks, stats - see core */
+#include "verdictor/verdict.h"   /* how a detection is named */
 
+/* What KOF_BROKEN_* reason means, as a noun phrase - see the definition. */
+const char *kverdict_broken_name(uint32_t reason);
 
-
+/*
+ * The id for a field name, so a caller can compute the handful it cares about
+ * once and then compare integers:
+ *
+ *     static uint32_t f_version;
+ *     if (!f_version) f_version = kverdict_fact_id("version");
+ *     if (fact == f_version) ...
+ *
+ * Takes the field alone, not the full name - kverdict_fact_id("version"), not
+ * kverdict_fact_id("UPX.ELF.version").
+ */
+uint32_t kverdict_fact_id(const char *field);
 
 /*
  * Open a database: a directory of packs, or a single one.
@@ -278,11 +293,7 @@ int         kmatch_tables(const kof_engine *, uint64_t *bytes,
  */
 #define KOFENG_MINOR 0u
 
-/* The Makefile passes the real stamp; this only keeps a stray compilation
- * building, the same way KOF_PACK_BUILD does. */
-#ifndef KOFENG_BUILD
-#define KOFENG_BUILD 0u
-#endif
+/* KOFENG_BUILD, the stamp the Makefile passes, is defaulted in <kofdebug.h>. */
 
 struct kof_version {
 	uint16_t major;

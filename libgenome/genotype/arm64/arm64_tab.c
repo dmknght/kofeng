@@ -22,8 +22,8 @@
  * fields are joined with |. ROW(identity, flags, fields) is the row they build.
  * Because the validity of a word is part of what a row says, an unallocated
  * encoding is a row to INVALID and not a missing one: that is what makes this
- * checkable word for word against the decoder it replaced (tools/celllysis/
- * arm64_equiv.c - all 2^32 words, no differences).
+ * checkable word for word against the decoder it replaced (a one-off
+ * comparison of all 2^32 words showed no differences).
  *
  * THE FIELD NAMES in the comments are the architecture reference's: sf is bit
  * 31, opc, S, N, imms, immr, o0 ... as the encoding diagram of each format spells
@@ -34,7 +34,7 @@
 #include <stdint.h>
 
 #include "arm64.h"
-#include "arm64_int.h"
+#include "arm64_private.h"
 
 #define FLD(hi, lo, v) \
 	((((uint64_t)((1ull << ((hi) - (lo) + 1u)) - 1u) << (lo)) << 32) | ((uint64_t)(v) << (lo)))

@@ -14,7 +14,7 @@
 #include <kofcore.h>   /* kof_ld_le32 */
 
 #include "ciphers.h"
-#include "../transform_int.h"
+#include "../transform_private.h"
 
 static kuncoat_st_t xor_key(const struct kuncoat_step *s, const uint8_t *in, uint64_t n,
 		    uint8_t *out, uint64_t cap, uint64_t *w)

@@ -2,7 +2,7 @@
 
 Black-box tests: each case starts the real `kofviewer` in a pseudo-terminal,
 feeds it keys and SGR mouse events, and reads the emulated screen (pyte).
-Nothing here is hooked into the Makefile (`make unit` does not run it).
+`make unit` does not run it; `make tui-test` does (`TUI_ARGS="..."` is passed to `run_all.py`).
 
 ## Requirements
 * Python 3 with `pyte` (`pip install pyte`) - the interpreter used for the
@@ -61,8 +61,3 @@ Exit status is 1 when any case is FAIL or ERROR.
 | `t_fuzz.py`, `fuzz.py` | seeded random input |
 
 Coordinates are 1-based `(x = column, y = row)`, like the SGR mouse protocol.
-
-## Proposed fixes
-`proposed_fixes.diff` (apply from the repository root with `patch -p1 < tests/tui/proposed_fixes.diff`)
-holds the patches that were verified against a scratch rebuild: every XFAIL it covers
-turns into `FIXED?` with `run_all.py --viewer <rebuilt kofviewer>`.

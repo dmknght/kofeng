@@ -1,9 +1,9 @@
 /*
  * diag_emu_steer.c - the limits of a run, and the rules that steer a call to its successful branch.
- * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_int.h for what the
+ * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_private.h for what the
  * files share.
  */
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 
 
@@ -32,8 +32,8 @@ int kgenome_diag_emu_ret_is_carryable(uint64_t ret)
 int kgenome_diag_emu_cap_hands_on_value(uint16_t cap, const char *nm)
 {
 	/* The vocabulary's answer, not a second copy - see
-	 * kgenome_flow_hands_on. */
-	return kgenome_flow_hands_on(cap, nm);
+	 * kgenome_nucleo_hands_on. */
+	return kgenome_nucleo_hands_on(cap, nm);
 }
 
 

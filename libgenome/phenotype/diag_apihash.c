@@ -29,17 +29,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "lineages.h"
-#include "diag_int.h"
+#include "diag_scan.h"
+#include "diag_private.h"
 #include <kofcore.h>
 #include <celllysis/capability.h>
 #include <celllysis/cell.h>
 #include <genotype/image/pe_image.h>
 #include <celllysis/celllysis.h>
 #include <celllysis/nucleo.h>
-#include <genotype/image/addr.h>
+#include <genotype/image/image_addr.h>
 #include <phenotype/emu_unpack.h>
-#include <phenotype/kofemu.h>
+#include <phenotype/emu.h>
 #include <celllysis/space.h>
 
 /*
@@ -58,7 +58,7 @@
  */
 #define PEB_TTL 8u
 
-static void note_peb(struct kgenome_apihash *a, uint64_t at)
+static void note_peb(struct kgenome_diag_apihash_set *a, uint64_t at)
 {
 	if (a->n_peb == a->cap_peb) {
 		uint32_t nc = a->cap_peb ? a->cap_peb * 2u : 16u;
@@ -115,7 +115,7 @@ static int is_peb_read(const struct kgenome_cell_insn *in, int wide)
 	return 0;
 }
 
-static void atoms_in(struct kgenome_apihash *a, const struct kgenome_obj *obj,
+static void atoms_in(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
 		     const uint8_t *base, uint64_t size, uint64_t off,
 		     uint64_t n, int wide)
 {
@@ -243,7 +243,7 @@ static uint32_t pe_idle_slices(const struct kgenome_budget *bud)
 }
 
 
-static void run_resolver(struct kgenome_apihash *a, const struct kgenome_obj *obj,
+static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
 			 const uint8_t *base, uint64_t size,
 			 const struct kgenome_pe_imptab *imports,
 			 const struct kgenome_budget *bud)
@@ -256,9 +256,20 @@ static void run_resolver(struct kgenome_apihash *a, const struct kgenome_obj *ob
 	memset(&first, 0, sizeof first);
 	first.max_insn = DIAG_PE_SLICE;
 	memset(&rep, 0, sizeof rep);
-	em = kgenome_emu_unp_run_pe(base, size, kgenome_obj_pe(obj), imports,
-				&first, 0, 1,
-				0u, NULL, 0, NULL, &rep);
+	em = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
+			.file = base,
+			.n = size,
+			.info = kgenome_obj_pe(obj),
+			.imports = imports,
+			.bud = &first,
+			.idle = 0,
+			.hand_back = 1,
+			.extensions = 0u,
+			.oep = NULL,
+			.n_oep = 0,
+			.decl = NULL,
+			.rep = &rep,
+		});
 	if (!em) {
 		a->status = KGENOME_NOMEM;
 		return;
@@ -302,7 +313,7 @@ static void run_resolver(struct kgenome_apihash *a, const struct kgenome_obj *ob
 	}
 	for (i = 0; i < n_ev; i++) {
 		struct kgenome_emu_win_event ev;
-		struct kgenome_apihash_call *c = &a->call[a->n_call];
+		struct kgenome_diag_apihash_call *c = &a->call[a->n_call];
 		const char *nm, *dll;
 
 		if (!kgenome_emu_win_event_at(em, i, &ev) || !ev.site)
@@ -324,13 +335,13 @@ static void run_resolver(struct kgenome_apihash *a, const struct kgenome_obj *ob
 	kgenome_emu_free(em);
 }
 
-struct kgenome_apihash *kgenome_apihash_run(const struct kgenome_obj *obj,
+struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_obj *obj,
 				    const uint8_t *base, uint64_t size,
 				    const struct kgenome_pe_imptab *imports,
 				    const struct kgenome_budget *budget)
 {
 	const struct kgenome_pe_info *p;
-	struct kgenome_apihash *a;
+	struct kgenome_diag_apihash_set *a;
 	struct kgenome_budget bud;
 	uint32_t i;
 	int wide;
@@ -353,13 +364,9 @@ struct kgenome_apihash *kgenome_apihash_run(const struct kgenome_obj *obj,
 	if (budget && budget->max_insn_resolve)
 		bud.max_insn_resolve = budget->max_insn_resolve;
 	bud.deadline_ms = budget ? budget->deadline_ms : 0;
-	for (i = 0; i < p->sec_count; i++) {
-		const struct kgenome_pe_sec *sc = &p->sec[i];
-		uint64_t at, have;
+	for (i = 0; i < kgenome_diag_extent_count(obj); i++) {
+		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at);
 
-		if (!kgenome_pe_sec_is_code(sc))
-			continue;
-		have = kgenome_pe_sec_extent(sc, size, &at);
 		if (have)
 			atoms_in(a, obj, base, size, at, have, wide);
 	}
@@ -370,7 +377,7 @@ struct kgenome_apihash *kgenome_apihash_run(const struct kgenome_obj *obj,
 	return a;
 }
 
-void kgenome_apihash_free(struct kgenome_apihash *a)
+void kgenome_diag_apihash_free(struct kgenome_diag_apihash_set *a)
 {
 	if (!a)
 		return;
@@ -394,7 +401,7 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 			  const struct kgenome_obj *obj,
 			  const uint8_t *base, uint64_t size)
 {
-	const struct kgenome_apihash *a;
+	const struct kgenome_diag_apihash_set *a;
 	uint16_t *node;
 	uint64_t *region, *rlen;
 	uint32_t i, k;
@@ -422,7 +429,7 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 		goto out;
 
 	for (i = 0; i < a->n_call; i++) {
-		const struct kgenome_apihash_call *c = &a->call[i];
+		const struct kgenome_diag_apihash_call *c = &a->call[i];
 		struct kgenome_diag_hit *h;
 		uint8_t fl = 0;
 		uint16_t cap;
@@ -430,10 +437,10 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 		uint32_t before;
 
 		node[i] = 0xffffu;
-		cap = kgenome_flow_cap_of_call(c->api, c->arg, &fl);
+		cap = kgenome_nucleo_cap_of_call(c->api, c->arg, &fl);
 		if (cap == KGENOME_NUCLEO_NONE)
 			continue;
-		at = kgenome_pz_addr_to_off(obj, c->site);
+		at = kgenome_image_addr_to_off(obj, c->site);
 		if (at == KGENOME_BROKEN)
 			continue;
 		before = kgenome_diag_scan_count(s);
@@ -476,7 +483,7 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 		    a->end_rip >= region[i] &&
 		    a->end_rip - region[i] < rlen[i]) {
 			uint64_t at = a->end_from
-				      ? kgenome_pz_addr_to_off(obj, a->end_from)
+				      ? kgenome_image_addr_to_off(obj, a->end_from)
 				      : KGENOME_BROKEN;
 			uint32_t before = kgenome_diag_scan_count(s);
 			struct kgenome_diag_hit *h;
@@ -495,7 +502,7 @@ out:
 	free(rlen);
 }
 
-uint32_t kgenome_apihash_distinct(const struct kgenome_apihash *a, const char **dll,
+uint32_t kgenome_diag_apihash_distinct(const struct kgenome_diag_apihash_set *a, const char **dll,
 			      const char **name)
 {
 	uint32_t i, n = 0;

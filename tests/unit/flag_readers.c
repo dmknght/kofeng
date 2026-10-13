@@ -7,7 +7,7 @@
  *     kgenome_diag_scan_full()   scan->full     called only by a unit test
  *     kof_sym_truncated()    KSYM header    called by nobody
  *     kof_engine.diag_full   the loader     read by nobody
- *     kgenome_apihash.budget     PE run         becomes scan->full, read by nobody
+ *     kgenome_diag_apihash_set.budget     PE run         becomes scan->full, read by nobody
  *
  * so an object whose evidence was cut comes back exactly as /usr/bin/ls does:
  * no finding, broken == 0, examined > 0. CLAUDE.md rule 4 says the degradation
@@ -130,7 +130,7 @@ static void node_store(void)
 
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+			{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_NUCLEO_F_WX, KOF_DIAG_NO_PARENT,
 			  KGENOME_DIAG_ROLE_NONE, 0, 0, 0, NULL },
 			{ KGENOME_NUCLEO_MEM_READ, 0, 0, KGENOME_DIAG_ROLE_BUFFER, 0, 0, 0, NULL },
 			{ KGENOME_NUCLEO_EXEC_REG, 0, 0, KGENOME_DIAG_ROLE_TARGET, 0, 0, 0, NULL },

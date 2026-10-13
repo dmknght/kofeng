@@ -12,19 +12,9 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-#include "scan_int.h"
+#include <stdlib.h>
+#include <string.h>
 
 /*
  * OPENING AN OBJECT, IN ORDER.
@@ -38,7 +28,7 @@
  * WHY A TABLE AND NOT THE THREE CALLS IT REPLACES.
  *
  * The rule "stop at the first step that yields" was already here, written out
- * by hand: sx_unpack_object, then a kids0 comparison, then sx_norm_emit under an if.
+ * by hand: the open stage, then a kids0 comparison, then sx_norm_emit under an if.
  * Written that way it holds for exactly the two things that were wired up, and
  * the next step added has to re-derive it - which is how sx_norm_emit came to be
  * called BEFORE unpacking in its first version, and gave a UPX stub a view of
@@ -78,7 +68,7 @@ static void st_facts(struct kof_pipeline *p)
 	 * diagnoses no verdict reads would have to be thrown away and run again -
 	 * the same object analysed twice for one answer.
 	 */
-	sc->diag_all = 1;
+	sc->obj.diag.all = 1;
 
 	/*
 	 * How big the object is, before anything tries to sx_identify it.
@@ -93,7 +83,7 @@ static void st_facts(struct kof_pipeline *p)
 	 */
 	p->ctx.obj_size = p->buf.n;
 
-	kof_match_begin(&sc->m, p->buf);
+	kof_match_begin(&sc->match.m, p->buf);
 
 	/*
 	 * THE CHILD'S OWN DECLARATION FIRST, then the caller's.
@@ -113,7 +103,7 @@ static void st_facts(struct kof_pipeline *p)
 	 * objprod.h. After the image, before anything reads either.
 	 */
 	{
-		const struct kof_prod *pr = kof_src_prod_of(sc->cur_src);
+		const struct kof_prod *pr = kof_src_prod_of(sc->cur.src);
 
 		if (pr)
 			kof_prod_adopt(sc, pr);
@@ -129,13 +119,13 @@ static void st_facts(struct kof_pipeline *p)
 	 * written for the language the object actually is. See
 	 * kof_src_declare_lang.
 	 */
-	if (sc->cur_lang) {
-		p->ctx.subtype = sc->cur_subtype;
-		p->ctx.subfamily = sc->cur_subfam;
+	if (sc->cur.lang) {
+		p->ctx.subtype = sc->cur.subtype;
+		p->ctx.subfamily = sc->cur.subfam;
 		/* And out to the caller, which has the same problem the engine
 		 * had: reading the bytes gives the wrong answer. */
-		out->subtype = sc->cur_subtype;
-		out->subfamily = sc->cur_subfam;
+		out->subtype = sc->cur.subtype;
+		out->subfamily = sc->cur.subfam;
 		out->lang_known = 1;
 	}
 	/* And the one fact about it that three later steps would each have
@@ -151,19 +141,19 @@ static void st_facts(struct kof_pipeline *p)
 	 * which the producer knew and no reading of the bytes can recover. See
 	 * kof_src_declare_regions.
 	 */
-	if (sc->n_cur_rgn) {
+	if (sc->cur.n_rgn) {
 		uint32_t g;
 
 		p->ctx.resolve_scan = sx_declared_resolve_scan;
 		/* And out to the caller, which has the same problem the engine
 		 * had: it cannot work these out from the bytes either. */
-		for (g = 0; g < sc->n_cur_rgn && g < KOF_MAX_REGIONS; g++) {
-			out->region[g].mask = sc->cur_rgn[g].mask;
-			out->region[g].off = sc->cur_rgn[g].off;
-			out->region[g].len = sc->cur_rgn[g].len;
+		for (g = 0; g < sc->cur.n_rgn && g < KOF_MAX_REGIONS; g++) {
+			out->region[g].mask = sc->cur.rgn[g].mask;
+			out->region[g].off = sc->cur.rgn[g].off;
+			out->region[g].len = sc->cur.rgn[g].len;
 		}
 		out->n_region = g;
-		out->region_fmt = sc->cur_rgn_fmt;
+		out->region_fmt = sc->cur.rgn_fmt;
 	}
 
 	/*
@@ -187,8 +177,8 @@ static void st_facts(struct kof_pipeline *p)
 	 * it, and one that ends the object without declaring any never does.
 	 * See kof_scanner.multi_ready for why, and sx_need_multi for how.
 	 */
-	sc->cur_present  = p->present;
-	sc->cur_from_packer = (uint8_t)(p->from_packer != 0);
+	sc->cur.present  = p->present;
+	sc->cur.from_packer = (uint8_t)(p->from_packer != 0);
 
 	/*
 	 * And the same for similarity: every block any loaded rule declared is
@@ -216,9 +206,9 @@ static void st_facts(struct kof_pipeline *p)
 	 * ovl_of - so this costs a store.
 	 */
 	/* What the two gated measures compare themselves against - see
-	 * kof_scanner.heur_lvl. Unstated is level 1, exactly as sx_heur_object
+	 * kof_scanner.cur.heur_lvl. Unstated is level 1, exactly as sx_heur_object
 	 * reads it, so the two cannot drift. */
-	sc->heur_lvl = opt->heur_off ? 0u
+	sc->cur.heur_lvl = opt->heur_off ? 0u
 		     : (opt->heur_level ? opt->heur_level : 1u);
 }
 
@@ -308,17 +298,17 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 		 * anybody, ever. A scan that repaired what it found would be a
 		 * scan nobody could run twice.
 		 */
-		if (sc->rep_valid && sc->cure_have && m->cure)
+		if (sc->mod.rep_valid && sc->mod.cure_have && m->cure)
 			m->cure(&p->ctx);
-		sc->cur_mod   = NULL;
+		sc->mod.cur   = NULL;
 
-		if (!sc->rep_valid)
+		if (!sc->mod.rep_valid)
 			continue;
 
 		/* Accumulate. Keeping only the last would drop a finding whenever two
 		 * families match one object, and the cap is counted rather than
 		 * silently applied. */
-		f = sx_mod_report(sc, &p->ctx, opt, out, m, sc->rep_level);
+		f = sx_mod_report(sc, &p->ctx, opt, out, m, sc->mod.rep_level);
 
 		/*
 		 * Stop unless the caller asked for everything - AND ONLY AT AN
@@ -369,9 +359,9 @@ static void st_detect(struct kof_pipeline *p)
 	p->det_n = out->n;
 
 	/* Before the next kof_match_begin clears them. */
-	sc->st.searches       += sc->m.n_calls;
-	sc->st.bytes_searched += sc->m.n_bytes_scanned;
-	sc->st.gram_bytes     += sc->m.n_bytes_indexed;
+	sc->st.searches       += sc->match.m.n_calls;
+	sc->st.bytes_searched += sc->match.m.n_bytes_scanned;
+	sc->st.gram_bytes     += sc->match.m.n_bytes_indexed;
 }
 
 /*
@@ -419,7 +409,7 @@ static void st_examine(struct kof_pipeline *p)
 	/*
 	 * ---- AND AN ASK FROM THIS PASS COUNTS -----------------------------
 	 *
-	 * KOF_ENG_USE_PATHOGEN was being read in sx_unpack_object and nowhere
+	 * KOF_ENG_USE_DIAGNOSE was being read in the open stage and nowhere
 	 * else, so an object that is not unpacked never saw it. MEASURED:
 	 * the msf stager asked and was analysed because a decoder produced a
 	 * child; a kernel module - which no unpacker touches - asked through
@@ -428,7 +418,7 @@ static void st_examine(struct kof_pipeline *p)
 	 * The two are OR-ed rather than assigned: a producer's ask and this
 	 * object's own are both asks, and neither may cancel the other.
 	 */
-	sc->diag_ask |= (p->want & KOF_ENG_USE_PATHOGEN) != 0;
+	sc->obj.diag.ask |= (p->want & KOF_ENG_USE_DIAGNOSE) != 0;
 	/*
 	 * ---- AND A DIAGNOSE'S OWN DECLARATION IS AN ASK -------------------
 	 *
@@ -450,7 +440,7 @@ static void st_examine(struct kof_pipeline *p)
 	 * module from the declaration it was gating.
 	 */
 	if (kof_scan_diag_sign_asks(&p->ctx)) {
-		sc->diag_ask = 1;
+		sc->obj.diag.ask = 1;
 		p->want |= KOF_ENG_USE_EMU;
 	}
 	/*
@@ -483,11 +473,11 @@ static void st_script(struct kof_pipeline *p)
 	 * After, so a script that was packed is normalised as the source it
 	 * turned out to be rather than as the wrapper - the unpacked child
 	 * reaches this same step with its own parse behind it. The flag follows
-	 * sx_unpack_object's rule: "not fully examined" is only worth saying about
+	 * the open stage's rule: "not fully examined" is only worth saying about
 	 * an object something actually tried to open.
 	 */
-	if (sx_script_forms(sc, &p->ctx, opt, p->pdepth) && sc->broken)
-		out->broken = sc->broken;
+	if (sx_script_forms(sc, &p->ctx, opt, p->pdepth) && sc->obj.open.broken)
+		out->broken = sc->obj.open.broken;
 }
 
 /*
@@ -507,8 +497,8 @@ static void st_serve(struct kof_pipeline *p)
 		uint32_t ns = 0;
 		const uint8_t *sb = kof_scan_served_syms(&p->ctx, &ns);
 
-		if (sb && sc->cur_src)
-			kof_src_declare_syms(sc->cur_src, sb, ns);
+		if (sb && sc->cur.src)
+			kof_src_declare_syms(sc->cur.src, sb, ns);
 	}
 }
 
@@ -526,11 +516,11 @@ static void st_verdict(struct kof_pipeline *p)
 	struct kof_result *out = p->out;
 
 	/*
-	 * ---- AND THE PATHOGEN ANALYSIS RUNS, IF ANYTHING ASKED -----------
+	 * ---- AND THE DIAGNOSE ANALYSIS RUNS, IF ANYTHING ASKED -----------
 	 *
 	 * ONE ASKER, AND IT IS THE DATABASE. A diagnose declares the symbols
 	 * or the file attributes that make an object worth the walk and the
-	 * EXAMINE pass sets sc->diag_ask from that; a rule reaching for a
+	 * EXAMINE pass sets sc->obj.diag.ask from that; a rule reaching for a
 	 * diagnose or the graph sets it too, at the moment it asks.
 	 *
 	 * There was a second asker - a caller's want_diag, which turned the
@@ -562,7 +552,7 @@ static void st_verdict(struct kof_pipeline *p)
 	 * nothing would otherwise read it until the VERDICT phase, and a
 	 * rule there would find a graph that had never been built.
 	 */
-	if (sc->diag_ask)
+	if (sc->obj.diag.ask)
 		kof_scan_diag_force(&p->ctx);
 
 	(void)sx_heur_run(sc, &p->ctx, opt, out, KOF_HEUR_VERDICT, p->present, NULL);
@@ -598,7 +588,7 @@ static void st_reconcile(struct kof_pipeline *p)
 	 * model that follows is about the object's own structure - a truncated
 	 * header is truncated whether or not the object unpacked - so it is
 	 * added after this and stays. Only children this object PRODUCED count;
-	 * sc->n_kids is reset before it was scanned, and a container's members
+	 * sc->child.n is reset before it was scanned, and a container's members
 	 * are its children too, but a container carries no rule heur to drop.
 	 */
 	/*
@@ -614,11 +604,11 @@ static void st_reconcile(struct kof_pipeline *p)
 	 *
 	 * KOF_ENG_KEEP_ON_OPEN is how such a rule says so, per finding rather
 	 * than per object: two rules may fire here and only one of them mean
-	 * it. See sc->heur_keep and the note in kofmod/heur.h.
+	 * it. See sc->obj.open.heur_keep and the note in kofmod/heur.h.
 	 */
 	/*
 	 * VIEWS DO NOT COUNT, because nothing came out of the object when one
-	 * was made - see kof_scanner.n_views. Subtracted rather than tested
+	 * was made - see kof_scanner.child.n_views. Subtracted rather than tested
 	 * separately so the question stays the one it always was: did this
 	 * object YIELD anything.
 	 *
@@ -643,15 +633,15 @@ static void st_reconcile(struct kof_pipeline *p)
 	 */
 	_Static_assert(KOF_MAX_FINDINGS <= 32, "heur_keep is a 32-bit mask of finding slots");
 	if (p->yielded && out->n > 0) {
-		uint32_t r, w = 0, keep = sc->heur_keep;
+		uint32_t r, w = 0, keep = sc->obj.open.heur_keep;
 
 		for (r = 0; r < out->n; r++)
 			if (out->v[r].level != KOF_LEVEL_HEUR ||
 			    (keep & (1u << r)))
 				out->v[w++] = out->v[r];
-			else if (out->v[r].is_verdict && sc->verdict_have &&
-				 out->v[r].level == sc->verdict_lvl &&
-				 !strcmp(out->v[r].name, sc->verdict.name)) {
+			else if (out->v[r].is_verdict && sc->subject.have &&
+				 out->v[r].level == sc->subject.lvl &&
+				 !strcmp(out->v[r].name, sc->subject.slot.name)) {
 				/*
 				 * AND THE SLOT GOES WITH IT - but only if it
 				 * is still the one in the slot.
@@ -675,8 +665,8 @@ static void st_reconcile(struct kof_pipeline *p)
 				 * shape that led to it instead. So the slot
 				 * is compared before it is given up.
 				 */
-				sc->verdict_have = 0;
-				sc->verdict_lvl  = 0;
+				sc->subject.have = 0;
+				sc->subject.lvl  = 0;
 			}
 		out->n = w;
 	}
@@ -707,7 +697,7 @@ static void st_model(struct kof_pipeline *p)
 	 * is skipped, because the layout belongs to the parent and the parent
 	 * is scanned too.
 	 */
-	if (!sc->n_cur_rgn)
+	if (!sc->cur.n_rgn)
 		sx_heur_object(sc, &p->ctx, opt, p->pdepth,
 			    out->broken == KOF_BROKEN_DAMAGED, out);
 }
@@ -744,15 +734,15 @@ static void st_report(struct kof_pipeline *p)
 		return;
 	/* One buffer for the scanner's life, lent to the caller for its callback
 	 * - see kof_result.diag. */
-	if (!sc->diag_rep) {
-		sc->diag_rep = calloc(sc->diag_cap ? sc->diag_cap : 1u, sizeof *sc->diag_rep);
-		if (!sc->diag_rep)
+	if (!sc->diag.rep) {
+		sc->diag.rep = calloc(sc->diag.cap ? sc->diag.cap : 1u, sizeof *sc->diag.rep);
+		if (!sc->diag.rep)
 			return;
 	}
 	for (i = 0; i < n; i++)
-		if (kof_scan_diag_report(&p->ctx, i, &sc->diag_rep[k]))
+		if (kof_scan_diag_report(&p->ctx, i, &sc->diag.rep[k]))
 			k++;
-	p->out->diag = sc->diag_rep;
+	p->out->diag = sc->diag.rep;
 	p->out->n_diag = k;
 }
 
@@ -763,8 +753,7 @@ static void st_recover(struct kof_pipeline *p)
 
 static void st_open(struct kof_pipeline *p)
 {
-	sx_open_step(p->sc, &p->ctx, p->opt, p->out, p->pdepth, p->want,
-		     p->predict, p->step, &p->open);
+	sx_open_step(p);
 }
 
 /* The end of the OPEN stage, once, if it began. A refusal answers 0, which is
@@ -774,7 +763,7 @@ static void st_open(struct kof_pipeline *p)
  * KOF_ANALYZE_CARVE. The one place this is asked. */
 static int group_yielded(const struct kof_pipeline *p)
 {
-	return p->sc->n_kids - p->kids0 != p->sc->n_carved - p->carved0;
+	return p->sc->child.n - p->kids0 != p->sc->child.n_carved - p->carved0;
 }
 
 static void open_finish(struct kof_pipeline *p)
@@ -829,7 +818,8 @@ static const struct stage_row {
 	{ KOF_STAGE_REPORT,    KOF_ANALYZE_UNWRAP,  0,                              st_report }
 };
 
-void sx_pipeline_run(struct kof_pipeline *p)
+/* One object through every stage. */
+static void sx_pipeline_run(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
 	const struct kof_scan_option *opt = p->opt;
@@ -850,8 +840,8 @@ void sx_pipeline_run(struct kof_pipeline *p)
 		if (!chain_begun) {
 			/* What the current GROUP of rows has produced is measured
 			 * from where it began. */
-			p->kids0 = sc->n_kids;
-			p->carved0 = sc->n_carved;
+			p->kids0 = sc->child.n;
+			p->carved0 = sc->child.n_carved;
 			chain_begun = 1;
 		}
 		/*
@@ -928,7 +918,7 @@ void sx_pipeline_run(struct kof_pipeline *p)
 		 * there is none to find until it has been opened.
 		 *
 		 * n_kids is how the rest of this file already asks "was it
-		 * opened" - see family_opened in sx_unpack_object, which compares
+		 * opened" - see the open stage (scan_unpack.c), which compares
 		 * the same counter across the same call. A container yields
 		 * too, and stops the chain for the same reason: an archive's
 		 * bytes ARE its members, and each member is normalised as
@@ -965,8 +955,8 @@ void sx_pipeline_run(struct kof_pipeline *p)
 				open_finish(p);
 				continue;
 			}
-			p->kids0 = sc->n_kids;
-			p->carved0 = sc->n_carved;
+			p->kids0 = sc->child.n;
+			p->carved0 = sc->child.n_carved;
 		}
 		/*
 		 * And between steps, because a step is the unit of work that

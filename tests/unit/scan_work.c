@@ -420,11 +420,14 @@ int main(void)
 				 * that one measured the long way round and
 				 * called it the engine.
 				 */
-				(void)kof_match_lookup(&m, 0, &ext, 1u,
-						       (const uint8_t *)lit,
-						       (uint16_t)strlen(lit),
-						       KOF_STR_LITERAL, 0,
-						       &skipped);
+				const struct kof_match_req rq = {
+					.slot = 0, .ext = &ext, .next = 1u,
+					.pat = { (const uint8_t *)lit, (uint16_t)strlen(lit),
+						 KOF_STR_LITERAL, 0 },
+					.answered = &skipped,
+				};
+
+				(void)kof_match_lookup(&m, &rq);
 			}
 			if (pass) {
 				read_big = m.n_bytes_scanned;

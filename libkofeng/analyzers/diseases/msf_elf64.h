@@ -7,7 +7,7 @@
  * lengths, and their payload sections are given different permissions. A
  * function taking a width would be two functions with a switch in front.
  *
- * It lived inside bases/unp/msf_xor_00.c as `emit_elf_hdr`, which is why the
+ * It lived inside bases/decoders/msf_xor_00.c as `emit_elf_hdr`, which is why the
  * split is worth stating. That copy assembled 0x78 bytes of ELF header and
  * program header field by field and handed them over with
  * kunp_rcstruct_write - the round trip the declaration mechanism exists to
@@ -22,8 +22,8 @@
  * which says it first and says it well.
  */
 
-#ifndef MSF_ELF64_H
-#define MSF_ELF64_H
+#ifndef KOFSHARED_MSF_ELF64_H
+#define KOFSHARED_MSF_ELF64_H
 
 #include <kofmod/kofsig.h>
 
@@ -70,4 +70,4 @@ static int msf_decl_elf64(const struct kof_obj_ctx *ctx, uint64_t payload_n)
 	return kunp_rcstruct_at(MSF_ELF64_HDR);
 }
 
-#endif /* MSF_ELF64_H */
+#endif /* KOFSHARED_MSF_ELF64_H */

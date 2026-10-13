@@ -5,7 +5,7 @@
 
 /*
  * See kofentropy.h. The arithmetic is the emulator gate's, lifted here rather than
- * copied: emu_unpack.c calls this, so there is one implementation and one
+ * copied: emu_unpack_gate.c calls this, so there is one implementation and one
  * place for the test in tests/unit/emu_gate.c to check.
  */
 uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total)
@@ -54,14 +54,11 @@ uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total)
 
 uint32_t kentropy_eighths(const void *bytes, uint64_t n)
 {
-	const uint8_t *p = bytes;
 	uint32_t hist[256];
-	uint64_t i;
 
-	if (!p || !n)
+	if (!bytes || !n)
 		return 0;
 	memset(hist, 0, sizeof hist);
-	for (i = 0; i < n; i++)
-		hist[p[i]]++;
+	kentropy_count(hist, bytes, n);
 	return kentropy_hist(hist, n);
 }

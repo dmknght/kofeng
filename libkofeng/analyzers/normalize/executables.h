@@ -228,7 +228,7 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out);
  *
  * WHERE THIS CAME FROM, AND WHY IT IS HERE RATHER THAN IN A MODULE.
  *
- * bases/decomp/cmdb64_00.c did this as an unpacker: it found the payload of
+ * The cmdb64_00 module (retired from bases/decomp) did this as an unpacker: it found the payload of
  *
  *     echo <base64> | base64 -d | sh
  *
@@ -381,19 +381,34 @@ void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
  * byte for byte what it was; it has only moved, and the region table says
  * where to. NULL when nothing is dropped.
  *
- * `fired` takes the ops that actually did something, and a caller needs it
+ * `res->fired` takes the ops that actually did something, and a caller needs it
  * because the two are not worth the same: de-widening REVEALS text a pattern
  * could not match before, while collapsing zeros provably reveals nothing -
  * see the safety note at the top of this file. Anything deciding whether a
- * view is worth making at all has to tell them apart. NULL when it does not.
+ * view is worth making at all has to tell them apart.
  *
  * Returns the view length, or 0 when nothing was rewritten.
  */
-uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
-			     const uint8_t *drop, uint32_t ops, uint8_t *out,
-			     uint64_t cap, const uint64_t *mark,
-			     uint64_t *mark_out, uint32_t n_mark,
-			     uint32_t *fired);
+struct kof_exe_norm_req {
+	const uint8_t  *in;        /* the object, n bytes */
+	uint64_t        n;
+	const uint8_t  *keep;      /* bitmap, or NULL */
+	const uint8_t  *drop;      /* bitmap, or NULL */
+	uint32_t        ops;       /* KOF_EXE_NORM_* */
+	const uint64_t *mark;      /* sorted parent offsets to carry, or NULL */
+	uint32_t        n_mark;
+};
+
+/* Where the view goes, and what the walk reports. `cap` must be >= req.n. */
+struct kof_exe_norm_res {
+	uint8_t  *out;
+	uint64_t  cap;
+	uint64_t *mark_out;        /* n_mark view positions, or NULL (then marks are ignored) */
+	uint32_t  fired;           /* OUT: the ops that did something; set on every call */
+};
+
+uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
+			     struct kof_exe_norm_res *res);
 
 uint64_t kof_exe_norm(const uint8_t *in, uint64_t n, uint32_t ops,
 		  uint8_t *out, uint64_t cap,

@@ -113,6 +113,13 @@ const char *kverdict_broken_name(uint32_t reason)
 	}
 }
 
+/* The id of a debug note's field - see kof_on_debug in koftypes.h. The hash
+ * has one definition, kof_fact_id in core, which the scan path uses too. */
+uint32_t kverdict_fact_id(const char *field)
+{
+	return kof_fact_id(field);
+}
+
 /*
  * What this build of the library is. See kofeng.h for why it decides nothing.
  */
@@ -240,7 +247,7 @@ int kscan_bytes(kof_scanner *sc, const void *bytes, uint64_t n,
 		const char *name, const struct kof_scan_option *opt,
 		kof_on_object cb, void *user)
 {
-	return sx_scan_bytes(sc, bytes, n, name, opt, cb, user);
+	return kof_scan_bytes(sc, bytes, n, name, opt, cb, user);
 }
 
 int kscan_path(kof_scanner *sc, const char *path,

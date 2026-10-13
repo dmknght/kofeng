@@ -78,12 +78,6 @@ static uint32_t key_block(const uint8_t *p, uint32_t bits, int fold)
 	return (v * 2654435761u) >> (32 - bits);
 }
 
-/* One byte of what swar_lower does to four - see kof_lower_byte. */
-static uint8_t fold_byte(uint8_t c)
-{
-	return kof_lower_byte(c);
-}
-
 /* ---- verification --------------------------------------------------------- */
 
 /*
@@ -159,7 +153,7 @@ static int pat_at(const struct kof_match_ctx *m, const struct kof_multimatch_pat
 
 	if (p->flags & KOF_STR_ICASE) {
 		for (i = 0; i < p->len; i++)
-			if (fold_byte(m->data.p[at + i]) != fold_byte(p->b[i]))
+			if (kof_lower_byte(m->data.p[at + i]) != kof_lower_byte(p->b[i]))
 				return 0;
 	} else if (memcmp(m->data.p + at, p->b, p->len) != 0) {
 		return 0;
@@ -490,8 +484,8 @@ static int ord_cmp(const void *A, const void *B)
 	const int fold = g_ord_tab->fold;
 
 	for (i = 0; i < n; i++) {
-		uint8_t a = fold ? fold_byte(p->b[i]) : p->b[i];
-		uint8_t b = fold ? fold_byte(q->b[i]) : q->b[i];
+		uint8_t a = fold ? kof_lower_byte(p->b[i]) : p->b[i];
+		uint8_t b = fold ? kof_lower_byte(q->b[i]) : q->b[i];
 
 		if (a != b)
 			return a < b ? -1 : 1;
@@ -508,8 +502,8 @@ static int is_prefix_of(const struct kof_multimatch_pat *a,
 	if (a->len >= b->len)
 		return 0;
 	for (i = 0; i < a->len; i++) {
-		uint8_t x = fold ? fold_byte(a->b[i]) : a->b[i];
-		uint8_t y = fold ? fold_byte(b->b[i]) : b->b[i];
+		uint8_t x = fold ? kof_lower_byte(a->b[i]) : a->b[i];
+		uint8_t y = fold ? kof_lower_byte(b->b[i]) : b->b[i];
 
 		if (x != y)
 			return 0;
@@ -636,8 +630,8 @@ static void sweep_bisect(const struct kof_multimatch *t,
 				uint8_t x, y;
 
 				if (k >= avail) { c = 1; break; }
-				x = fold ? fold_byte(p->b[k]) : p->b[k];
-				y = fold ? fold_byte(m->data.p[i + k])
+				x = fold ? kof_lower_byte(p->b[k]) : p->b[k];
+				y = fold ? kof_lower_byte(m->data.p[i + k])
 					 : m->data.p[i + k];
 				if (x != y) { c = x < y ? -1 : 1; break; }
 			}
@@ -745,7 +739,7 @@ static int fill_gram(struct kof_multimatch *t,
 		t->next[chain] = t->head[b];
 		/* The byte past the key, wherever the key now sits. */
 		t->tag[chain] = q->len > nx
-				? (t->fold ? fold_byte(q->b[nx]) : q->b[nx])
+				? (t->fold ? kof_lower_byte(q->b[nx]) : q->b[nx])
 				: (uint16_t)KOF_MULTIMATCH_NOTAG;
 		/* Chain-indexed, not marker-indexed: the walk has the chain
 		 * index in hand and nothing else. */
@@ -1113,7 +1107,7 @@ static void sweep_gram(const struct kof_multimatch *t,
 		if (!((seen[b >> 3] >> (b & 7)) & 1))                        \
 			continue;                                            \
 		nb = (i + KOF_MULTIMATCH_KEY < end)                          \
-		     ? (fold ? fold_byte(dp[i + KOF_MULTIMATCH_KEY])          \
+		     ? (fold ? kof_lower_byte(dp[i + KOF_MULTIMATCH_KEY])          \
 			     : dp[i + KOF_MULTIMATCH_KEY])                   \
 		     : (uint16_t)KOF_MULTIMATCH_NOTAG;                       \
 		for (k = head[b]; k; k = nxt[k]) {                           \

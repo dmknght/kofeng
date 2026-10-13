@@ -40,11 +40,9 @@
 
 #include <stdlib.h>
 #include "../../../kofcore/runlist.h"
-#include <decompressors/lzma.h>
 
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 static const uint8_t SEVENZ_SIG[6] = { 0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c };
 

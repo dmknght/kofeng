@@ -22,7 +22,7 @@
  * question. Three steps, three places:
  *
  *   libkoforbit/antarc (or libkoforbit/grille)  reads /proc, fills struct kofa_proc
- *   libkoforbit/kofproc             normalises it into the record's bytes
+ *   libkoforbit/proc             normalises it into the record's bytes
  *   THIS                            reads those bytes back as a scannable view
  *
  * The normalising is already in orbit; this is the step after it, and it is
@@ -50,10 +50,7 @@
 
 extern const uint32_t kof_proc_regions[3];
 
-int         kof_proc_sniff(kof_buf b);
 int         kof_proc_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx);
 const char *kof_proc_region_name(uint32_t bit);
-const char *kof_proc_anomaly_name(unsigned index);
-uint64_t    kof_proc_anomalies(const void *view);
 
 #endif /* KOF_PROC_PARSE_H */

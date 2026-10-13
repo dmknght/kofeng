@@ -155,22 +155,25 @@ static void inflate_status(void)
 	/* a stored block: BFINAL=1, BTYPE=00, LEN=5, NLEN=~5, "hello" */
 	static const uint8_t stored[] = { 0x01, 5, 0, 0xfa, 0xff, 'h', 'e', 'l', 'l', 'o' };
 	struct sink s;
-	uint64_t consumed = 0, produced = 0;
+	struct kuncoat_io io;
 
 	memset(&s, 0, sizeof s);
 	s.room = sizeof s.buf;
-	CK(kuncoat_inflate(&st, stored, sizeof stored, take, &s, &consumed, &produced) == KUNCOAT_OK);
-	CK(produced == 5u && consumed == sizeof stored && !memcmp(s.buf, "hello", 5));
+	io = (struct kuncoat_io){ .in = { stored, sizeof stored }, .sink = take, .user = &s };
+	CK(kuncoat_inflate(&st, &io) == KUNCOAT_OK);
+	CK(io.produced == 5u && io.consumed == sizeof stored && !memcmp(s.buf, "hello", 5));
 
 	/* the receiver saying stop is STOPPED - the receiver declining, not a broken archive */
 	memset(&s, 0, sizeof s);
 	s.room = 3;
-	CK(kuncoat_inflate(&st, stored, sizeof stored, take, &s, &consumed, &produced) == KUNCOAT_STOPPED);
+	io = (struct kuncoat_io){ .in = { stored, sizeof stored }, .sink = take, .user = &s };
+	CK(kuncoat_inflate(&st, &io) == KUNCOAT_STOPPED);
 
 	/* the input ending first is TRUNCATED, and the bytes before the cut are real */
 	memset(&s, 0, sizeof s);
 	s.room = sizeof s.buf;
-	CK(kuncoat_inflate(&st, stored, 8, take, &s, &consumed, &produced) == KUNCOAT_TRUNCATED);
+	io = (struct kuncoat_io){ .in = { stored, 8 }, .sink = take, .user = &s };
+	CK(kuncoat_inflate(&st, &io) == KUNCOAT_TRUNCATED);
 
 	/* a block type that does not exist is the stream's fault */
 	{
@@ -178,7 +181,8 @@ static void inflate_status(void)
 
 		memset(&s, 0, sizeof s);
 		s.room = sizeof s.buf;
-		CK(kuncoat_inflate(&st, bad, sizeof bad, take, &s, &consumed, &produced) == KUNCOAT_CORRUPT);
+		io = (struct kuncoat_io){ .in = { bad, sizeof bad }, .sink = take, .user = &s };
+	CK(kuncoat_inflate(&st, &io) == KUNCOAT_CORRUPT);
 	}
 }
 

@@ -1,0 +1,153 @@
+API COVERAGE OF libuncoat (the public umbrella <uncoat.h> and the headers it lists)
+====================================================================================================
+
+How this list was made: tools-free enumeration of every public name the headers listed in
+libuncoat/uncoat.h declare (functions, macros, enumerators and enum tags, struct tags, function-pointer
+typedefs, the one extern table), comments stripped; then a word search of tests/lib/uncoat/ and
+tests/unit/ for each name. A reference is a reference, not proof of depth: the third column marks a
+name whose only references are the smoke/fuzz/silent-loss files (surface.c, decomp_fuzz.c, stream_fuzz.c,
+silent_loss_uncoat.c) as SMOKE-ONLY. The last column is the test file(s) this work added.
+Private headers (rarcommon.h, inbyte.h, transform_private.h) are not public and are not listed.
+
+TOTALS: 134 public names (35 functions)
+  UNTESTED before this work: 62
+  UNTESTED after:            0
+  SMOKE-ONLY before:         28 (referenced only by smoke/fuzz/silent-loss files)
+  new test files: api_constants.c, api_filters.c, api_transform.c, hostile_api_misuse.c, hostile_bunzip.c, hostile_inflate.c, hostile_lzbit.c, hostile_lzhuf.c, hostile_lzma.c, hostile_lzx.c, hostile_rar.c, hostile_text.c, hostile_transform.c
+
+NAME                                     KIND           HEADER                         TESTED BY (before)                 TEST ADDED
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+struct kuncoat_span                      struct         uncoat_io.h                    SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c, hostile_inflate.c
+struct kuncoat_io                        struct         uncoat_io.h                    inflate_diff.c, silent_loss_uncoat api_constants.c, hostile_api_misuse.c, hostile_inflate.c, hostile_lzx.c
+kuncoat_sink_fn                          typedef        uncoat_io.h                    UNTESTED                           api_constants.c
+KUNCOAT_F_LAX                            macro          transform.h                    b64_alphabet.c, hex_alphabet.c, tr api_constants.c, api_transform.c
+enum kuncoat_algo                        enum           transform.h                    UNTESTED                           api_constants.c
+KUNCOAT_ALGO_NONE                        enumerator     transform.h                    decoders_capsid.c                  api_constants.c
+KUNCOAT_ALGO_XOR_KEY                     enumerator     transform.h                    decoders_capsid.c, silent_loss_unc api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_XOR_COUNTER                 enumerator     transform.h                    decoders_capsid.c, silent_loss_unc api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_XOR_ADD32                   enumerator     transform.h                    decoders_capsid.c, silent_loss_unc api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_PLACEHOLDER_SUB             enumerator     transform.h                    decoders_capsid.c, silent_loss_unc api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_X86_SUB_CHAIN               enumerator     transform.h                    decoders_capsid.c, silent_loss_unc api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_RC4                         enumerator     transform.h                    decoders_capsid.c, silent_loss_unc api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_B64                         enumerator     transform.h                    b64_alphabet.c, silent_loss_uncoat api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_HEX                         enumerator     transform.h                    hex_alphabet.c, silent_loss_uncoat api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_URL                         enumerator     transform.h                    hex_alphabet.c, silent_loss_uncoat api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_ADD                         enumerator     transform.h                    SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_CAESAR                      enumerator     transform.h                    silent_loss_uncoat.c, transform_st api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_REVERSE                     enumerator     transform.h                    SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c, api_transform.c, hostile_transform.c
+enum kuncoat_dir                         enum           transform.h                    UNTESTED                           api_constants.c
+KUNCOAT_DECODE                           enumerator     transform.h                    b64_alphabet.c, decoders_capsid.c, api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ENCODE                           enumerator     transform.h                    b64_alphabet.c, decoders_capsid.c, api_constants.c, api_transform.c, hostile_transform.c
+struct kuncoat_step                      struct         transform.h                    b64_alphabet.c, decoders_capsid.c, api_constants.c, api_transform.c, hostile_transform.c
+kuncoat_transform                        function       transform.h                    b64_alphabet.c, decoders_capsid.c, api_constants.c, api_transform.c, hostile_api_misuse.c, hostile_transform.c
+enum kuncoat_status                      enum           status.h                       b64_alphabet.c, bunzip_diff.c, dec api_constants.c, api_filters.c, api_transform.c, hostile_api_misuse.c +11
+KUNCOAT_OK                               enumerator     status.h                       b64_alphabet.c, bunzip_diff.c, dec api_constants.c, api_transform.c, hostile_api_misuse.c, hostile_bunzip.c +9
+KUNCOAT_STOPPED                          enumerator     status.h                       bunzip_diff.c, decomp_fuzz.c, infl api_transform.c, hostile_bunzip.c, hostile_inflate.c, hostile_lzbit.c +5
+KUNCOAT_TRUNCATED                        enumerator     status.h                       decoders_capsid.c, decomp_fuzz.c,  api_transform.c, hostile_bunzip.c, hostile_inflate.c, hostile_lzbit.c +4
+KUNCOAT_CORRUPT                          enumerator     status.h                       bunzip_diff.c, decomp_fuzz.c, hex_ api_constants.c, api_transform.c, hostile_bunzip.c, hostile_inflate.c +6
+KUNCOAT_UNSUPPORTED                      enumerator     status.h                       decoders_capsid.c, decomp_fuzz.c,  api_constants.c, api_transform.c, hostile_bunzip.c, hostile_lzhuf.c +3
+KUNCOAT_OVER_BUDGET                      enumerator     status.h                       decoders_capsid.c, transform_statu api_transform.c
+KUNCOAT_BAD_ARG                          enumerator     status.h                       decoders_capsid.c, surface.c, tran api_transform.c, hostile_api_misuse.c, hostile_common.h, hostile_transform.c
+KUNCOAT__PIN_SIGNED                      enumerator     status.h                       UNTESTED                           api_transform.c
+kuncoat_status_name                      function       status.h                       inflate_diff.c, silent_loss_uncoat api_constants.c, api_filters.c, api_transform.c, hostile_api_misuse.c +10
+kuncoat_aplib_decode                     function       decompressors/aplib.h          SMOKE-ONLY: silent_loss_uncoat.c,  hostile_api_misuse.c, hostile_lzbit.c
+KUNCOAT_ASPACK_LOOKAHEAD                 macro          decompressors/aspack.h         UNTESTED                           api_constants.c
+kuncoat_aspack_decode                    function       decompressors/aspack.h         SMOKE-ONLY: decomp_fuzz.c, surface hostile_api_misuse.c, hostile_lzbit.c
+kuncoat_aspack_e8e9_decode               function       decompressors/aspack.h         SMOKE-ONLY: surface.c              api_filters.c, hostile_lzbit.c
+KUNCOAT_ASPACK_TAB_N                     macro          decompressors/aspack_tab.h     UNTESTED                           api_constants.c
+KUNCOAT_ASPACK_OFF_BASE                  macro          decompressors/aspack_tab.h     UNTESTED                           api_constants.c
+KUNCOAT_ASPACK_OFF_N                     macro          decompressors/aspack_tab.h     UNTESTED                           api_constants.c
+kuncoat_bcj_x86_decode                   function       decompressors/bcj.h            SMOKE-ONLY: surface.c              api_filters.c
+struct kuncoat_bcj2_io                   struct         decompressors/bcj2.h           SMOKE-ONLY: silent_loss_uncoat.c,  api_filters.c
+kuncoat_bcj2_decode                      function       decompressors/bcj2.h           SMOKE-ONLY: silent_loss_uncoat.c,  api_filters.c
+kuncoat_mpress_cto_decode                function       decompressors/mpress.h         SMOKE-ONLY: surface.c              api_filters.c
+KUNCOAT_BZ_MAX_BLOCK                     macro          decompressors/bunzip.h         UNTESTED                           api_constants.c
+KUNCOAT_BZ_GROUPS                        macro          decompressors/bunzip.h         UNTESTED                           api_constants.c
+KUNCOAT_BZ_MAX_CODELEN                   macro          decompressors/bunzip.h         UNTESTED                           api_constants.c
+KUNCOAT_BZ_ALPHA                         macro          decompressors/bunzip.h         UNTESTED                           api_constants.c
+KUNCOAT_BZ_MAX_SELECT                    macro          decompressors/bunzip.h         UNTESTED                           api_constants.c
+struct kuncoat_bunzip                    struct         decompressors/bunzip.h         bunzip_diff.c, silent_loss_uncoat. api_constants.c, hostile_api_misuse.c, hostile_bunzip.c
+kuncoat_bunzip_sink                      typedef        decompressors/bunzip.h         UNTESTED                           api_constants.c
+kuncoat_bunzip_decode                    function       decompressors/bunzip.h         bunzip_diff.c, silent_loss_uncoat. hostile_api_misuse.c, hostile_bunzip.c
+kuncoat_bunzip_sniff                     function       decompressors/bunzip.h         bunzip_diff.c, surface.c           hostile_bunzip.c
+KUNCOAT_INF_WINDOW                       macro          decompressors/inflate.h        SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c
+KUNCOAT_INF_BITS                         macro          decompressors/inflate.h        UNTESTED                           api_constants.c
+KUNCOAT_INF_FILL_BYTES                   macro          decompressors/inflate.h        UNTESTED                           api_constants.c
+KUNCOAT_INF_FILL_BITS                    macro          decompressors/inflate.h        UNTESTED                           api_constants.c
+KUNCOAT_HUFF_FAST_BITS                   macro          decompressors/inflate.h        UNTESTED                           api_constants.c
+KUNCOAT_HUFF_FAST_SIZE                   macro          decompressors/inflate.h        UNTESTED                           api_constants.c
+struct kuncoat_huff                      struct         decompressors/inflate.h        UNTESTED                           api_constants.c
+struct kuncoat_inflate                   struct         decompressors/inflate.h        inflate_diff.c, silent_loss_uncoat api_constants.c, hostile_api_misuse.c, hostile_inflate.c
+kuncoat_inflate_sink                     typedef        decompressors/inflate.h        UNTESTED                           api_constants.c
+kuncoat_inf_word                         typedef        decompressors/inflate.h        UNTESTED                           api_constants.c
+kuncoat_inflate                          function       decompressors/inflate.h        inflate_diff.c, silent_loss_uncoat api_constants.c, hostile_api_misuse.c, hostile_inflate.c
+kuncoat_inflate_seeded                   function       decompressors/inflate.h        SMOKE-ONLY: silent_loss_uncoat.c   hostile_api_misuse.c, hostile_inflate.c
+KUNCOAT_LZHUF_NC                         macro          decompressors/lzhuf.h          UNTESTED                           api_constants.c
+KUNCOAT_LZHUF_NT                         macro          decompressors/lzhuf.h          UNTESTED                           api_constants.c
+KUNCOAT_LZHUF_NP                         macro          decompressors/lzhuf.h          UNTESTED                           api_constants.c
+KUNCOAT_LZHUF_DICT                       macro          decompressors/lzhuf.h          SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c
+enum kuncoat_lzhuf_variant               enum           decompressors/lzhuf.h          SMOKE-ONLY: stream_fuzz.c          api_constants.c, hostile_lzhuf.c
+KUNCOAT_LZHUF_ARJ                        enumerator     decompressors/lzhuf.h          silent_loss_uncoat.c, stream_fuzz. api_constants.c
+KUNCOAT_LZHUF_LH5                        enumerator     decompressors/lzhuf.h          SMOKE-ONLY: stream_fuzz.c          api_constants.c, hostile_api_misuse.c, hostile_lzhuf.c
+KUNCOAT_LZHUF_LH6                        enumerator     decompressors/lzhuf.h          UNTESTED                           api_constants.c
+KUNCOAT_LZHUF_LH7                        enumerator     decompressors/lzhuf.h          UNTESTED                           api_constants.c
+KUNCOAT_LZHUF_VARIANTS                   enumerator     decompressors/lzhuf.h          UNTESTED                           api_constants.c
+struct kuncoat_lzhuf                     struct         decompressors/lzhuf.h          silent_loss_uncoat.c, stream_fuzz. api_constants.c, hostile_api_misuse.c, hostile_lzhuf.c
+kuncoat_lzhuf_sink                       typedef        decompressors/lzhuf.h          UNTESTED                           api_constants.c
+kuncoat_lzhuf_decode                     function       decompressors/lzhuf.h          silent_loss_uncoat.c, stream_fuzz. api_constants.c, hostile_api_misuse.c, hostile_lzhuf.c
+kuncoat_lzma_decode                      function       decompressors/lzma.h           decomp_fuzz.c, silent_loss_uncoat. api_constants.c, hostile_api_misuse.c, hostile_lzma.c
+kuncoat_lzma2_decode                     function       decompressors/lzma.h           SMOKE-ONLY: silent_loss_uncoat.c,  api_filters.c, hostile_api_misuse.c, hostile_lzma.c
+KUNCOAT_LZMA_MAX_LC                      macro          decompressors/format_limits.h  SMOKE-ONLY: decomp_fuzz.c          api_constants.c
+KUNCOAT_LZMA_MAX_LP                      macro          decompressors/format_limits.h  SMOKE-ONLY: decomp_fuzz.c          api_constants.c
+KUNCOAT_LZMA_MAX_PB                      macro          decompressors/format_limits.h  SMOKE-ONLY: decomp_fuzz.c          api_constants.c
+KUNCOAT_LZX_MIN_BITS                     macro          decompressors/format_limits.h  UNTESTED                           api_constants.c
+KUNCOAT_LZX_MAX_BITS                     macro          decompressors/format_limits.h  UNTESTED                           api_constants.c
+kuncoat_lzmat_decode                     function       decompressors/lzmat.h          SMOKE-ONLY: silent_loss_uncoat.c,  hostile_api_misuse.c, hostile_lzbit.c
+KUNCOAT_LZW_CODES                        macro          decompressors/lzw.h            UNTESTED                           api_constants.c
+struct kuncoat_lzw                       struct         decompressors/lzw.h            SMOKE-ONLY: silent_loss_uncoat.c,  api_constants.c, hostile_api_misuse.c, hostile_text.c
+kuncoat_lzw_sink                         typedef        decompressors/lzw.h            UNTESTED                           api_constants.c
+kuncoat_lzw_decode                       function       decompressors/lzw.h            SMOKE-ONLY: silent_loss_uncoat.c,  api_constants.c, hostile_api_misuse.c, hostile_text.c
+KUNCOAT_LZX_MAX_WINDOW                   macro          decompressors/lzx.h            UNTESTED                           api_constants.c
+KUNCOAT_LZX_MAIN_MAX                     macro          decompressors/lzx.h            UNTESTED                           api_constants.c
+KUNCOAT_LZX_LEN_MAX                      macro          decompressors/lzx.h            UNTESTED                           api_constants.c
+KUNCOAT_LZX_ALIGN_MAX                    macro          decompressors/lzx.h            UNTESTED                           api_constants.c
+KUNCOAT_LZX_PRETREE_MAX                  macro          decompressors/lzx.h            UNTESTED                           api_constants.c
+KUNCOAT_LZX_FRAME                        macro          decompressors/lzx.h            UNTESTED                           api_constants.c
+struct kuncoat_lzx_huff                  struct         decompressors/lzx.h            UNTESTED                           api_constants.c
+struct kuncoat_lzx                       struct         decompressors/lzx.h            silent_loss_uncoat.c, stream_fuzz. api_constants.c, hostile_api_misuse.c, hostile_lzx.c
+struct kuncoat_lzx_req                   struct         decompressors/lzx.h            silent_loss_uncoat.c, stream_fuzz. api_constants.c, hostile_api_misuse.c, hostile_lzx.c
+kuncoat_lzx_sink                         typedef        decompressors/lzx.h            UNTESTED                           api_constants.c
+kuncoat_lzx_decode                       function       decompressors/lzx.h            silent_loss_uncoat.c, stream_fuzz. api_constants.c, hostile_api_misuse.c, hostile_lzx.c
+enum kuncoat_nrv2_variant                enum           decompressors/nrv2.h           UNTESTED                           api_constants.c
+KUNCOAT_NRV2B                            enumerator     decompressors/nrv2.h           decomp_fuzz.c, silent_loss_uncoat. api_constants.c, hostile_lzbit.c
+KUNCOAT_NRV2D                            enumerator     decompressors/nrv2.h           decomp_fuzz.c, upx_blocks.c        api_constants.c, hostile_lzbit.c
+KUNCOAT_NRV2E                            enumerator     decompressors/nrv2.h           decomp_fuzz.c, upx_blocks.c        api_constants.c, hostile_api_misuse.c
+enum kuncoat_nrv2_bits                   enum           decompressors/nrv2.h           UNTESTED                           api_constants.c
+KUNCOAT_NRV2_BITS_8                      enumerator     decompressors/nrv2.h           UNTESTED                           api_constants.c
+KUNCOAT_NRV2_BITS_16                     enumerator     decompressors/nrv2.h           UNTESTED                           api_constants.c
+KUNCOAT_NRV2_BITS_32                     enumerator     decompressors/nrv2.h           UNTESTED                           api_constants.c
+kuncoat_nrv2_decode                      function       decompressors/nrv2.h           decomp_fuzz.c, silent_loss_uncoat. api_constants.c, hostile_api_misuse.c, hostile_lzbit.c
+KUNCOAT_OVBA_CHUNK                       macro          decompressors/ovba.h           UNTESTED                           api_constants.c
+KUNCOAT_OVBA_SIGNATURE                   macro          decompressors/ovba.h           UNTESTED                           api_constants.c
+kuncoat_ovba_sink                        typedef        decompressors/ovba.h           UNTESTED                           api_constants.c
+kuncoat_ovba_decode                      function       decompressors/ovba.h           ovba_diff.c, silent_loss_uncoat.c, api_constants.c, hostile_api_misuse.c, hostile_text.c
+kuncoat_ovba_plausible                   function       decompressors/ovba.h           ovba_diff.c, surface.c             api_constants.c, hostile_text.c
+struct kuncoat_ppmd                      struct(opaque) decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_new                         function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_free                        function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_arena_want                  function       decompressors/ppmd.h           SMOKE-ONLY: silent_loss_uncoat.c   hostile_rar.c
+kuncoat_ppmd_start                       function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_resume                      function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_next                        function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_at                          function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+KUNCOAT_RAR3_SCRATCH                     macro          decompressors/rar3.h           UNTESTED                           api_constants.c, hostile_rar.c
+kuncoat_rar3_decode                      function       decompressors/rar3.h           SMOKE-ONLY: surface.c              hostile_api_misuse.c, hostile_rar.c
+KUNCOAT_RAR5_SCRATCH                     macro          decompressors/rar5.h           UNTESTED                           api_constants.c, hostile_rar.c
+kuncoat_rar5_decode                      function       decompressors/rar5.h           SMOKE-ONLY: surface.c              hostile_api_misuse.c, hostile_rar.c
+kuncoat_cipher                           function       decryptors/ciphers.h           UNTESTED                           api_transform.c
+kuncoat_coding                           function       decoders/codings.h             UNTESTED                           api_transform.c
+kuncoat_textcode_sink                    typedef        decoders/textcode.h            UNTESTED                           api_constants.c
+kuncoat_a85_decode                       function       decoders/textcode.h            SMOKE-ONLY: silent_loss_uncoat.c,  hostile_api_misuse.c, hostile_text.c
+kuncoat_ahx_decode                       function       decoders/textcode.h            SMOKE-ONLY: silent_loss_uncoat.c,  hostile_api_misuse.c, hostile_text.c
+kuncoat_rle_decode                       function       decoders/textcode.h            SMOKE-ONLY: silent_loss_uncoat.c,  api_constants.c, hostile_api_misuse.c, hostile_text.c
+kuncoat_aspack_tab                       data           decompressors/aspack_tab.h     UNTESTED                           api_constants.c

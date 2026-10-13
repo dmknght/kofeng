@@ -2,7 +2,7 @@
  * scan_verdict.c - what the scan state says about a finding: its method word, the
  * verdict slot it may take, and the diseases the scan collected for the syndrome.
  *
- * The NAMES are the verdictor's (verdictor/verdicts); what they are made of is
+ * The NAMES are the verdictor's (verdictor/); what they are made of is
  * state the scanner holds - which method answered, which disease was found - and
  * so reading it is the scanner's job.
  */
@@ -11,8 +11,28 @@
 
 #include "scan_int.h"
 #include "../databases/pack/kofsyndrome.h"
+#include "../verdictor/verdict.h"
+#include "../kofcore/kofmod/heur.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, uint32_t *out,
+/*
+ * THE DISEASES AN OBJECT HAS - found by its detectors, heuristics and diagnoses - and
+ * what they make - see
+ * databases/pack/kofsyndrome.h. The same all-diagnoses analysis as
+ * kof_scan_diag_report, so asking costs what that costs and a normal scan pays
+ * nothing: nothing in a scan reads this yet.
+ *
+ * kof_scan_diseases writes up to `cap` disease ids to `out` (kof_db_disease turns
+ * one into a name and a type) and returns how many matched, which may exceed
+ * `cap`; two diagnoses that find the same disease count once.
+ * kof_scan_syndrome infers the type from every one of them, and returns 0 when no
+ * disease was found, or the database has no syndrome pack. What the detectors and
+ * heuristics found is always there; the diagnoses' are added only when the object
+ * was scanned for all of them (kof_scan_option.report_diag).
+ */
+static uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, uint32_t *out,
 			   uint32_t cap)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -21,35 +41,35 @@ uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, uint32_t *out,
 	if (!sc || !sc->eng)
 		return 0;
 	/* What the modules found: always there, the scan collected it. */
-	for (i = 0; i < sc->n_dis_set; i++) {
+	for (i = 0; i < sc->obj.n_dis_set; i++) {
 		if (out && n < cap)
-			out[n] = sc->dis_set[i];
+			out[n] = sc->subject.dis_set[i];
 		n++;
 	}
 	/* What the diagnoses found, when the caller asked for all of them. */
-	if (!sc->diag_all)
+	if (!sc->obj.diag.all)
 		return n;
 	kof_scan_diag_force(ctx);
-	if (!sc->diag_graph)
+	if (!sc->obj.diag.graph)
 		return n;
 	lim = kof_scan_diag_count(ctx);
 	for (i = 0; i < lim; i++) {
 		const struct kof_diag *d = &sc->eng->diag[i];
 		int seen = 0;
 
-		if (!d->disease || !((sc->diag_hit[i >> 3] >> (i & 7u)) & 1u))
+		if (!d->disease || !((sc->diag.hit[i >> 3] >> (i & 7u)) & 1u))
 			continue;
 		/*
 		 * A disease more than one detector found is one finding - read off the
 		 * modules' set and the diagnoses already passed, not off `out`, so the
 		 * count is the same whether or not the caller gave a buffer.
 		 */
-		for (k = 0; k < sc->n_dis_set; k++)
-			if (sc->dis_set[k] == d->disease)
+		for (k = 0; k < sc->obj.n_dis_set; k++)
+			if (sc->subject.dis_set[k] == d->disease)
 				seen = 1;
 		for (k = 0; k < i && !seen; k++)
 			if (sc->eng->diag[k].disease == d->disease &&
-			    ((sc->diag_hit[k >> 3] >> (k & 7u)) & 1u))
+			    ((sc->diag.hit[k >> 3] >> (k & 7u)) & 1u))
 				seen = 1;
 		if (seen)
 			continue;
@@ -72,7 +92,7 @@ int kof_scan_syndrome(const struct kof_obj_ctx *ctx, struct kof_synd_result *r)
 	/* Room for every disease there can be - the modules' and one per diagnose -
 	 * so that nothing is cut to fit a table: a disease left out is evidence the
 	 * inference never saw. */
-	cap = sc->n_dis_set + sc->eng->n_diag;
+	cap = sc->obj.n_dis_set + sc->eng->n_diag;
 	dis = malloc(((size_t)cap + 1u) * sizeof *dis);
 	if (!dis)
 		return 0;
@@ -128,7 +148,7 @@ void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 }
 
 /*
- * TAKE A FINDING INTO THE FILE'S ONE VERDICT SLOT - see kof_scanner.verdict.
+ * TAKE A FINDING INTO THE FILE'S ONE VERDICT SLOT - see sc->subject.slot.
  *
  * Returns 1 when the slot now holds this finding, 0 when it was kept out by
  * one that outranks it. The caller still has the finding in the object's own
@@ -155,7 +175,7 @@ int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f,
 	    f->engine != (uint8_t)KOF_ENGINE_UNPACKER)
 		return 0;
 	rank = kverdict_level_rank(f->level);
-	have = sc->verdict_have ? kverdict_level_rank(sc->verdict_lvl) : -1;
+	have = sc->subject.have ? kverdict_level_rank(sc->subject.lvl) : -1;
 	/*
 	 * ALL MATCHES MEANS EVERY FINDING IS REPORTED, and the engine says
 	 * so here rather than leaving a host to work it out.
@@ -172,9 +192,9 @@ int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f,
 	 */
 	if (all_matches) {
 		if (have <= rank) {
-			sc->verdict      = *f;
-			sc->verdict_lvl  = f->level;
-			sc->verdict_have = 1;
+			sc->subject.slot      = *f;
+			sc->subject.lvl  = f->level;
+			sc->subject.have = 1;
 		}
 		return 1;
 	}
@@ -182,9 +202,9 @@ int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f,
 	 * first is the one that answered. */
 	if (have >= rank)
 		return 0;
-	sc->verdict      = *f;
-	sc->verdict_lvl  = f->level;
-	sc->verdict_have = 1;
+	sc->subject.slot      = *f;
+	sc->subject.lvl  = f->level;
+	sc->subject.have = 1;
 	return 1;
 }
 
@@ -196,7 +216,7 @@ int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f,
  * was declared: KOF_MALTYPE_VIRUS is 0, so a module that said nothing has a
  * maltype that reads as "Virus", and absence must not become a claim.
  */
-void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx,
+static void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx,
 			 const struct kof_module *m, uint32_t engine)
 {
 	f->fmt    = ctx ? ctx->format : 0u;
@@ -226,8 +246,8 @@ void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx,
 		{
 			const struct kof_scanner *sc = kof_scan_of(ctx);
 
-			f->engine = (uint8_t)(sc && sc->diag_read
-					      ? KOF_ENGINE_PATHOGEN
+			f->engine = (uint8_t)(sc && sc->mod.diag_read
+					      ? KOF_ENGINE_DIAGNOSE
 					      : KOF_ENGINE_ANALYZER);
 		}
 		if (KOF_ENG_CLASS_OF(m->heur_want)) {
@@ -245,7 +265,7 @@ void sx_finding_str(const struct kof_scanner *sc,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_module *m, struct kof_finding *f)
 {
-	const char *variant = kof_db_name(sc->eng, m, sc->rep_name_id);
+	const char *variant = kof_db_name(sc->eng, m, sc->mod.rep_name_id);
 	const char *family  = kof_db_family(sc->eng, m);
 
 	/*
@@ -288,10 +308,10 @@ void sx_finding_str(const struct kof_scanner *sc,
 	 * "broken" count with no name beside it.
 	 */
 	if (m && m->kind == KOF_PACK_UNPACK && m->family_off) {
-		const char *why = sc->rep_reason == KOF_BROKEN_ENCRYPTED ? "Encrypted"
-				: sc->rep_reason == KOF_BROKEN_DAMAGED ? "Damaged"
-				: sc->rep_reason == KOF_BROKEN_UNSUPPORTED ? "Unsupported"
-				: sc->rep_reason == KOF_BROKEN_LIMIT ? "Limit" : NULL;
+		const char *why = sc->mod.rep_reason == KOF_BROKEN_ENCRYPTED ? "Encrypted"
+				: sc->mod.rep_reason == KOF_BROKEN_DAMAGED ? "Damaged"
+				: sc->mod.rep_reason == KOF_BROKEN_UNSUPPORTED ? "Unsupported"
+				: sc->mod.rep_reason == KOF_BROKEN_LIMIT ? "Limit" : NULL;
 
 		sx_verdict_vals(f, ctx, m, KOF_ENGINE_UNPACKER);
 		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
@@ -312,7 +332,7 @@ void sx_finding_str(const struct kof_scanner *sc,
 	 * does - see kverdict_name.
 	 *
 	 * ASKED IS NOT THE SAME AS ANSWERED, and reading it as though it were
-	 * was a bug with a name on it. sc->mutation_asked only says
+	 * was a bug with a name on it. sc->mod.mutation_asked only says
 	 * kof_mutation_score was CALLED. A rule written as
 	 *
 	 *     if (kof_mutation_score(blk) >= 50u) ...
@@ -329,12 +349,12 @@ void sx_finding_str(const struct kof_scanner *sc,
 	 * carried the verdict still reports the block's number, and that is
 	 * the honest residue: the block did find something, just not enough.
 	 */
-	if (sc->mutation_asked >= 0 && sc->n_mutation_blk && sc->mutation_hit &&
-	    !sc->str_hit) {
+	if (sc->mod.mutation_asked >= 0 && sc->mod.n_mutation_blk && sc->mod.mutation_hit &&
+	    !sc->mod.str_hit) {
 		char shape[16];
 		/* The best single block's containment - see
-		 * kof_scanner.mutation_best for why it is not the set's. */
-		unsigned pct = sc->mutation_best;
+		 * kof_scanner.mod.mutation_best for why it is not the set's. */
+		unsigned pct = sc->mod.mutation_best;
 
 		if (pct > 100u)
 			pct = 100u;
@@ -354,8 +374,8 @@ void sx_finding_str(const struct kof_scanner *sc,
 		 */
 		f->sim_pct = (uint8_t)pct;
 		f->sim_kind = (uint8_t)KOF_SIM_MUTATION;
-		f->sim_of = kof_mutation_name_of(sc->mutation_blk,
-					       sc->n_mutation_blk);
+		f->sim_of = kof_mutation_name_of(sc->mod.mutation_blk,
+					       sc->mod.n_mutation_blk);
 		snprintf(shape, sizeof shape, "%u", pct);
 		sx_verdict_vals(f, ctx, m, KOF_ENGINE_MUTATION);
 		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
@@ -370,8 +390,8 @@ void sx_finding_str(const struct kof_scanner *sc,
 	 * graph is a pattern finding - the bytes are what reached it, and
 	 * naming the expensive half would send a reader to the wrong place.
 	 */
-	if (sc->diag_read && !sc->str_hit) {
-		sx_verdict_vals(f, ctx, m, KOF_ENGINE_PATHOGEN);
+	if (sc->mod.diag_read && !sc->mod.str_hit) {
+		sx_verdict_vals(f, ctx, m, KOF_ENGINE_DIAGNOSE);
 		kof_verdict_name(f, (family && family[0]) ? family : "unknown",
 				 variant, NULL);
 		return;

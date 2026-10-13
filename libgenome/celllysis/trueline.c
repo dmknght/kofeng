@@ -13,14 +13,10 @@
 #include <genotype/image/elf_types.h>
 #include <rangelist.h>
 
-/* ELF's own value; the parser keeps p_type verbatim. Defined here for the same
- * reason every other file that needs it defines it: there is no ELF constants
- * header, and one line beats a dependency. */
-#define PT_LOAD 1u
+static void kgenome_true_find_syms(kof_buf file, const struct kgenome_elf_info *e,
+		       struct kgenome_true_all *out);
 
-/* ELF's own values again, for the same reason: the section type of .symtab and
- * the three symbol types this reads. */
-#define SHT_SYMTAB_ 2u
+/* ELF's own values: the symbol types this reads. */
 #define STT_OBJECT_ 1u
 #define STT_FUNC_   2u
 #define STT_FILE_   4u
@@ -745,7 +741,7 @@ void kgenome_true_find(kof_buf file, const struct kgenome_elf_info *e,
 		const struct kgenome_elf_seg *g = &e->seg[s];
 		uint64_t len;
 
-		if (g->type != PT_LOAD || !g->file_size)
+		if (!kgenome_elf_seg_is_load(g))
 			continue;
 		if (g->file_off >= file.n)
 			continue;
@@ -842,7 +838,22 @@ void kgenome_true_find_object(kof_buf file, const struct kgenome_elf_info *e,
 		kgenome_true_find_syms(file, e, out);
 }
 
-void kgenome_true_find_syms(kof_buf file, const struct kgenome_elf_info *e,
+/*
+ * The symbol tier ALONE, for an object where the marker span cannot be trusted.
+ *
+ * The marker span runs from a segment's first library string to its last and
+ * takes everything between, which is right for a static build - the library is
+ * one run - and wrong for a DYNAMIC one, where there is no static library at
+ * all and the strings it finds are the program's own. Measured: an 8MB miner
+ * with a PT_INTERP yielded a 7MB "library" span across its CODE, which is the
+ * program.
+ *
+ * The symbol tier has no such failure mode: it claims exactly what a symbol
+ * covers and nothing between symbols, so it is as true of a dynamic object -
+ * where it finds the handful of crt and loader pieces the linker put in - as of
+ * a static one.
+ */
+static void kgenome_true_find_syms(kof_buf file, const struct kgenome_elf_info *e,
 		       struct kgenome_true_all *out)
 {
 	lib_find_tiered(file, e, out, 0);

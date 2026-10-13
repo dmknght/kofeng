@@ -677,12 +677,6 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
  * declares a project record it does not have. */
 #define VBA_DIR_MAX 131072u
 
-static uint32_t rd32_at(const uint8_t *p, uint32_t at)
-{
-	return (uint32_t)p[at] | ((uint32_t)p[at + 1] << 8) |
-	       ((uint32_t)p[at + 2] << 16) | ((uint32_t)p[at + 3] << 24);
-}
-
 struct dirbuf {
 	uint8_t *p;
 	uint32_t cap, n;
@@ -834,7 +828,7 @@ static void vba_module_offsets(struct ole *s)
 			at++;
 			continue;
 		}
-		nlen = rd32_at(d.p, at + 2u);
+		nlen = kof_ld_le32(d.p + at + 2u);
 		if (nlen < 1u || nlen > CFB_NAME_MAX || at + 6u + nlen > d.n) {
 			at++;
 			continue;
@@ -855,12 +849,12 @@ static void vba_module_offsets(struct ole *s)
 		j = name_at + nlen;
 		for (hop = 0; hop < 8u && j + 6u <= d.n; hop++) {
 			uint32_t id = (uint32_t)d.p[j] | ((uint32_t)d.p[j + 1] << 8);
-			uint32_t len = rd32_at(d.p, j + 2u);
+			uint32_t len = kof_ld_le32(d.p + j + 2u);
 
 			if (len > d.n - j - 6u)
 				break;
 			if (id == VBA_REC_MODULEOFFSET && len >= 4u) {
-				uint32_t off = rd32_at(d.p, j + 6u);
+				uint32_t off = kof_ld_le32(d.p + j + 6u);
 				uint32_t k;
 
 				for (k = 0; k < o->n_entries; k++) {
@@ -981,16 +975,17 @@ int kof_docole_sniff(kof_buf file)
 	       memcmp(file.p, CFB_SIG, sizeof CFB_SIG) == 0;
 }
 
-int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
-		     struct kof_obj_ctx *ctx)
-{
-	struct ole s;
-	uint16_t bo = 0, ss = 0, ms = 0;
-	uint32_t dir_start = 0, mfat_start = 0, dif_start = 0, mini_cut = 0;
-	uint32_t i, per, max_dirsec, root_child = 0, root_start = 0;
-	uint64_t root_size = 0, eoff;
-	uint8_t root_type = 0;
+/* The three list heads the header names. */
+struct ole_head {
+	uint32_t dir_start, mfat_start, dif_start;
+};
 
+/*
+ * A VIEW CLEARED FOR A NEW DOCUMENT - the head, the counts and the one bitmap that is
+ * read before it is written, and nothing else.
+ */
+static void docole_clear_view(struct kof_docole_info *o)
+{
 	/*
 	 * THE HEADER, THE SCALARS BETWEEN THE ARRAYS, AND THE ONE BITMAP:
 	 * 424 bytes instead of 62888. Same change as zip_parse.c, and the
@@ -1042,15 +1037,15 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 		memset((char *)o + stk_end, 0, dir_at - stk_end);
 	}
 	o->version = KOF_DOCOLE_INFO_VERSION;
+}
 
-	if (!kof_docole_sniff(file))
-		return 0;
-	o->valid = 1;
-
-	memset(&s, 0, sizeof s);
-	s.f = file;
-	s.o = o;
-	kof_runs_init(&s.runs, (struct kof_run *)o->run, KOF_DOCOLE_MAX_EXTENTS,
+/* The walk's state for one file: the runs, the step budgets, and the header claimed. */
+static void ole_begin(struct ole *s, kof_buf file, struct kof_docole_info *o)
+{
+	memset(s, 0, sizeof *s);
+	s->f = file;
+	s->o = o;
+	kof_runs_init(&s->runs, o->run, KOF_DOCOLE_MAX_EXTENTS,
 		      KOF_DOCOLE_CLS_COUNT);
 	/*
 	 * How many sector steps an honest file can need - one bound per
@@ -1066,8 +1061,8 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	 * from the real sector size. Until then a file cannot have walked
 	 * anything, and the floor is what the DIFAT walk needs to get started.
 	 */
-	s.step_max = file.n / 32u + 4096u;
-	s.fat_step_max = 1024u;   /* until the sector size is known, below */
+	s->step_max = file.n / 32u + 4096u;
+	s->fat_step_max = 1024u;   /* until the sector size is known, below */
 
 	/*
 	 * The header, claimed before anything in it is believed.
@@ -1079,7 +1074,20 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	 * header, that much was established by the signature, and a file that gives up
 	 * two fields later should not report every byte of itself as unclaimed.
 	 */
-	add_run(&s, 0, CFB_HEADER_LEN, KOF_DOCOLE_CLS_HEADERS);
+	add_run(s, 0, CFB_HEADER_LEN, KOF_DOCOLE_CLS_HEADERS);
+}
+
+/*
+ * THE HEADER: sector sizes, the three list heads and the mini cutoff, with what is
+ * wrong with them noted as anomalies. Returns 0 when the walk must not be attempted
+ * (a header it cannot read, a sector shift that would make every offset fiction).
+ */
+static int ole_read_header(struct ole *s, struct ole_head *h)
+{
+	kof_buf file = s->f;
+	struct kof_docole_info *o = s->o;
+	uint16_t bo = 0, ss = 0, ms = 0;
+	uint32_t mini_cut = 0;
 
 	if (!kof_rd_u16(file, H_MINOR, 0, &o->minor) ||
 	    !kof_rd_u16(file, H_MAJOR, 0, &o->major) ||
@@ -1088,7 +1096,7 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	    !kof_rd_u16(file, H_MINI_SHIFT, 0, &ms)) {
 		o->anomalies |= KOF_DOCOLE_ANOM_BAD_HEADER;
 		o->sector_size = 512;
-		goto done;
+		return 0;
 	}
 
 	if (bo != CFB_BYTE_ORDER || (o->major != 3 && o->major != 4))
@@ -1102,7 +1110,7 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	if (ss != 9 && ss != 12) {
 		o->anomalies |= KOF_DOCOLE_ANOM_BAD_SECTOR;
 		o->sector_size = 512;
-		goto done;
+		return 0;
 	}
 	o->sector_size = 1u << ss;
 	/*
@@ -1118,8 +1126,8 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	{
 		uint64_t want = file.n / o->sector_size * 2u + 1024u;
 
-		if (want > s.fat_step_max)
-			s.fat_step_max = want;
+		if (want > s->fat_step_max)
+			s->fat_step_max = want;
 	}
 	if ((o->major == 3 && ss != 9) || (o->major == 4 && ss != 12))
 		o->anomalies |= KOF_DOCOLE_ANOM_BAD_HEADER;
@@ -1130,9 +1138,9 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	}
 	o->mini_sector_size = 1u << ms;
 
-	kof_rd_u32(file, H_DIR_START, 0, &dir_start);
-	kof_rd_u32(file, H_MFAT_START, 0, &mfat_start);
-	kof_rd_u32(file, H_DIF_START, 0, &dif_start);
+	kof_rd_u32(file, H_DIR_START, 0, &h->dir_start);
+	kof_rd_u32(file, H_MFAT_START, 0, &h->mfat_start);
+	kof_rd_u32(file, H_DIF_START, 0, &h->dif_start);
 	kof_rd_u32(file, H_MINI_CUT, 0, &mini_cut);
 
 	o->mini_cutoff = mini_cut;
@@ -1145,8 +1153,18 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	 * 512 bytes. Left unclaimed it would put an always-present run of zeroes into
 	 * UNCLAIMED; claimed as a second run it coalesces with the header above. */
 	if (o->sector_size > CFB_HEADER_LEN)
-		add_run(&s, CFB_HEADER_LEN, o->sector_size - CFB_HEADER_LEN,
+		add_run(s, CFB_HEADER_LEN, o->sector_size - CFB_HEADER_LEN,
 			KOF_DOCOLE_CLS_HEADERS);
+	return 1;
+}
+
+/* THE FAT'S WHEREABOUTS AND THE MINIFAT: the DIFAT, then the sectors it names, then
+ * the chain of the MiniFAT. */
+static void ole_read_fat(struct ole *s, uint32_t dif_start, uint32_t mfat_start)
+{
+	kof_buf file = s->f;
+	struct kof_docole_info *o = s->o;
+	uint32_t i, per;
 
 	/* ---- the DIFAT: which sector holds which block of the FAT ---- */
 
@@ -1161,11 +1179,11 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	}
 
 	per = o->sector_size / 4u;
-	while (dif_start <= SEC_MAXREG && o->n_dif < KOF_DOCOLE_MAX_FAT && step_fat(&s)) {
+	while (dif_start <= SEC_MAXREG && o->n_dif < KOF_DOCOLE_MAX_FAT && step_fat(s)) {
 		uint64_t base = sec_off(o, dif_start);
 		uint32_t v;
 
-		add_run(&s, base, o->sector_size, KOF_DOCOLE_CLS_HEADERS);
+		add_run(s, base, o->sector_size, KOF_DOCOLE_CLS_HEADERS);
 		for (i = 0; i + 1u < per && o->n_dif < KOF_DOCOLE_MAX_FAT; i++) {
 			if (!kof_rd_u32(file, base + (uint64_t)i * 4u, 0, &v))
 				break;
@@ -1183,13 +1201,22 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 
 	/* The FAT itself is structure: it says where bytes are and holds none. */
 	for (i = 0; i < o->n_dif; i++)
-		add_run(&s, sec_off(o, o->dif[i]), o->sector_size,
+		add_run(s, sec_off(o, o->dif[i]), o->sector_size,
 			KOF_DOCOLE_CLS_HEADERS);
 
 	/* ---- the MiniFAT ---- */
 
-	o->n_mfat = collect_chain(&s, mfat_start, o->mfat, KOF_DOCOLE_MAX_MINIFAT,
+	o->n_mfat = collect_chain(s, mfat_start, o->mfat, KOF_DOCOLE_MAX_MINIFAT,
 				  KOF_DOCOLE_CLS_HEADERS);
+}
+
+/* THE DIRECTORY: its sectors, the entry count bounded by what the file could hold.
+ * Returns 0 when there is nothing to walk. */
+static int ole_read_directory(struct ole *s, uint32_t dir_start)
+{
+	kof_buf file = s->f;
+	struct kof_docole_info *o = s->o;
+	uint32_t per, max_dirsec;
 
 	/* ---- the directory ---- */
 
@@ -1198,7 +1225,7 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	if (max_dirsec > KOF_DOCOLE_MAX_DIR / 4u)
 		max_dirsec = KOF_DOCOLE_MAX_DIR / 4u;
 
-	o->n_dirsec = collect_chain(&s, dir_start, o->dirsec, max_dirsec,
+	o->n_dirsec = collect_chain(s, dir_start, o->dirsec, max_dirsec,
 				    KOF_DOCOLE_CLS_DIRECTORY);
 	o->dir_count = o->n_dirsec * per;
 	/*
@@ -1232,14 +1259,26 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 		o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
 	if (o->dir_count == 0) {
 		o->anomalies |= KOF_DOCOLE_ANOM_NO_STREAMS;
-		goto done;
+		return 0;
 	}
+	return 1;
+}
+
+/* THE ROOT, THE MINI STREAM AND THE TREE, and the array read of the directory when the
+ * tree said nothing. */
+static void ole_read_streams(struct ole *s)
+{
+	kof_buf file = s->f;
+	struct kof_docole_info *o = s->o;
+	uint32_t root_child = 0, root_start = 0;
+	uint64_t root_size = 0, eoff;
+	uint8_t root_type = 0;
 
 	/* ---- the root, and through it the mini stream ---- */
 
 	eoff = dir_ent_off(o, 0);
 	if (eoff == DIR_NONE)
-		goto done;
+		return;
 	kof_rd_u8(file, eoff + D_TYPE, &root_type);
 	if (root_type != KOF_DOCOLE_T_ROOT)
 		o->anomalies |= KOF_DOCOLE_ANOM_BAD_DIR_ENTRY;
@@ -1255,13 +1294,13 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	 * macro in two regions at once.
 	 */
 	if (root_size)
-		o->n_mini = collect_chain(&s, root_start, o->mini,
+		o->n_mini = collect_chain(s, root_start, o->mini,
 					  KOF_DOCOLE_MAX_MINI_SEC,
 					  KOF_DOCOLE_CLS_COUNT);
 	if (o->n_mini == KOF_DOCOLE_MAX_MINI_SEC)
 		o->anomalies |= KOF_DOCOLE_ANOM_MINI_UNMAPPED;
 
-	walk_dir(&s, root_child, 0);
+	walk_dir(s, root_child, 0);
 
 	/*
 	 * The tree said nothing. Read the directory as an array instead.
@@ -1285,26 +1324,31 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
 	if (o->stream_count == 0 && o->dir_count) {
 		o->anomalies |= KOF_DOCOLE_ANOM_DIR_RECOVERED;
 		memset(o->seen, 0, sizeof o->seen);
-		walk_dir(&s, 0, 1);
+		walk_dir(s, 0, 1);
 	}
 
 	if (o->stream_count == 0)
 		o->anomalies |= KOF_DOCOLE_ANOM_NO_STREAMS;
 	if (o->macro_bytes > KOF_DOCOLE_MACRO_SUSPECT)
 		o->anomalies |= KOF_DOCOLE_ANOM_MACRO_OVERSIZE;
+}
 
-done:
-	kof_runs_settle(&s.runs, o->region_bytes);
-	o->n_runs = s.runs.n;
-	if (s.runs.full)
+/* WHAT THE WALK LEFT: the runs settled into regions, the flags they raised, and the
+ * context a rule reads through. */
+static void ole_finish(struct ole *s, kof_buf file, struct kof_docole_info *o,
+		       struct kof_obj_ctx *ctx)
+{
+	kof_runs_settle(&s->runs, o->region_bytes);
+	o->n_runs = s->runs.n;
+	if (s->runs.full)
 		o->anomalies |= KOF_DOCOLE_ANOM_EXTENTS_FULL;
-	if (s.runs.clipped)
+	if (s->runs.clipped)
 		o->anomalies |= KOF_DOCOLE_ANOM_TRUNCATED;
-	if (s.runs.overlapped)
+	if (s->runs.overlapped)
 		o->anomalies |= KOF_DOCOLE_ANOM_OVERLAP;
 
 	ctx->format = KOF_FMT_DOCOLE;
-	vba_module_offsets(&s);
+	vba_module_offsets(s);
 
 	ctx->obj_size = file.n;
 	ctx->file_header = o;
@@ -1313,6 +1357,28 @@ done:
 	/* No architecture and no entry point: a document is not code, and leaving
 	 * them as the caller set them is what lets arch-targeted modules be ruled out
 	 * rather than matched by accident. */
+}
+
+int kof_docole_parse(kof_buf file, struct kof_docole_info *o,
+		     struct kof_obj_ctx *ctx)
+{
+	struct ole s;
+	struct ole_head h;
+
+	docole_clear_view(o);
+
+	if (!kof_docole_sniff(file))
+		return 0;
+	o->valid = 1;
+
+	ole_begin(&s, file, o);
+	memset(&h, 0, sizeof h);
+	if (ole_read_header(&s, &h)) {
+		ole_read_fat(&s, h.dif_start, h.mfat_start);
+		if (ole_read_directory(&s, h.dir_start))
+			ole_read_streams(&s);
+	}
+	ole_finish(&s, file, o, ctx);
 	return 1;
 }
 

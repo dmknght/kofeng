@@ -25,7 +25,7 @@ KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "Packed");
  * and a writable-executable section shows up in old or unusual toolchains. Both
  * together is a program that intends to build itself at startup.
  *
- * Measured on tests/PE_FILES: fires on the UPX-packed sample, silent on the six
+ * Measured on the PE sample set: fires on the UPX-packed sample, silent on the six
  * clean ones. The ASPack sample has the zero-raw section without the
  * writable-executable one, so it is reported at the weaker level rather than not
  * at all - which is the honest answer, since one of the two conditions holds.

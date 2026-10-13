@@ -8,10 +8,10 @@
  *
  * THREE PARTS, and no fourth:
  *
- *   decompressors/  inflate, bzip2, lzma (and LZMA2), lzx, lzhuf, lzw, ppmd,
+ *   decompressors/  inflate, bunzip (bzip2), lzma (and LZMA2), lzx, lzhuf, lzw, ppmd,
  *                   rar3, rar5, nrv2, aplib, lzmat, ovba, aspack, and the branch
  *                   and call filters that go with decompression (bcj, bcj2,
- *                   the MPRESS call filter). Each has its own header with its
+ *                   mpress, the MPRESS call filter). Each has its own header with its
  *                   own entry points.
  *   decryptors/     the keyed ciphers - XOR_KEY, XOR_COUNTER, XOR_ADD32,
  *                   PLACEHOLDER_SUB, X86_SUB_CHAIN, RC4 - run through
@@ -34,11 +34,13 @@
 #include "status.h"
 #include "transform.h"
 
+#include "uncoat_io.h"
 #include "decompressors/aplib.h"
 #include "decompressors/aspack.h"
 #include "decompressors/bcj.h"
 #include "decompressors/bcj2.h"
-#include "decompressors/bzip2.h"
+#include "decompressors/mpress.h"
+#include "decompressors/bunzip.h"
 #include "decompressors/inflate.h"
 #include "decompressors/lzhuf.h"
 #include "decompressors/lzma.h"

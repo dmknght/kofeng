@@ -22,14 +22,14 @@
 #include "../kofcore/koftypes.h"
 #include "../kofcore/kofhash.h"   /* KOF_ERR_* */
 
+
+#include "../kofcore/kofplatform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
-
-#include "../kofcore/kofplatform.h"
 
 struct kof_objsrc {
 	const uint8_t *p;
@@ -624,7 +624,7 @@ static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap)
 	 * This read TMPDIR, TEMP and TMP, and that was wrong for an embedded
 	 * engine: where the host process writes is the host's decision, and
 	 * lifting it out of that process's environment made a variable set for
-	 * something else into engine policy. kof_temp_dir asks the platform -
+	 * something else into engine policy. kof_tmpdir asks the platform -
 	 * GetTempPathA on Windows, the standard's P_tmpdir elsewhere - and the
 	 * conventional second place stays as a fallback below.
 	 */

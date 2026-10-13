@@ -2,8 +2,8 @@
  * kofmod/kofcap.h - THE CAPABILITY VOCABULARY, as a module sees it.
  *
  * THE ABI RE-EXPORTS kgenome's TYPE. The capability words, the (context,
- * group, action) packing and the node flags are what the lineage walk
- * produces (kof_flow_cap_name and the other tables are defined in
+ * group, action) packing and the node flags are what the diagnose walk
+ * produces (kgenome_nucleo_cap_name and the other tables are defined in
  * libgenome/celllysis/nucleo.c), so the vocabulary is defined once, in
  * libgenome/celllysis/capability.h, with the long note on what a node means.
  * A rule reaches it through this name.
@@ -17,7 +17,7 @@
  * Object-like macros, so a module (and the signature language) still writes the
  * old name, `struct cell_insn` and `enum kof_arch` included. Engine code uses
  * the KGENOME_ / kgenome_ name. */
-#define KOF_FLOWF_WX                       KGENOME_FLOWF_WX
+#define KOF_FLOWF_WX                       KGENOME_NUCLEO_F_WX
 #define KOF_NUCLEO_ACTION_READ             KGENOME_NUCLEO_ACTION_READ
 #define KOF_NUCLEO_ACTION_WRITE            KGENOME_NUCLEO_ACTION_WRITE
 #define KOF_NUCLEO_ALLOC                   KGENOME_NUCLEO_ALLOC
@@ -88,7 +88,7 @@
 #define KOF_NUCLEO_THREAD                  KGENOME_NUCLEO_THREAD
 #define KOF_NUCLEO_TIMESTOMP               KGENOME_NUCLEO_TIMESTOMP
 #define KOF_NUCLEO_WRITE                   KGENOME_NUCLEO_WRITE
-#define kof_flow_cap                       kgenome_flow_cap
-#define kof_flow_cap_name                  kgenome_flow_cap_name
+#define kof_flow_cap                       kgenome_nucleo_cap
+#define kof_flow_cap_name                  kgenome_nucleo_cap_name
 
 #endif /* KOFMOD_KOFCAP_H */

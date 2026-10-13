@@ -404,7 +404,7 @@ struct kof_pack_sec {
  * was almost entirely this. sigs-elf-x64.ksig carried 3132 bytes of zeros to
  * push 54 bytes of code onto a page boundary in a FILE nobody maps.
  *
- * Nobody maps it because the loader does not: kof_db_open sizes an anonymous
+ * Nobody maps it because the loader does not: kof_db_load sizes an anonymous
  * arena, memcpy's each pack's code section into it and rounds the ARENA offset
  * to KOF_PACK_BLOB_ALIGN as it goes. Where a blob lands in memory is decided
  * there and owes nothing to where it sat in the file. The AArch64-on-Windows
@@ -459,7 +459,7 @@ struct kof_pack_sec {
  * A blob is a signature module, not a program; four megabytes of position
  * independent code with no data section is already far past anything a signature
  * has needed. The cap is what lets the loader refuse a file before allocating for
- * it - see read_whole in ksigbuilder.c.
+ * it - see ksb_read_whole in ksigbuilder/ksb_util.c.
  *
  * A declared literal has to fit a uint16 length by construction; the real limit is
  * lower because a pattern that long is a file, not a string.
@@ -749,7 +749,7 @@ struct kof_pack_mod {
 	/*
 	 * WHAT THIS DETECTOR'S MATCH FINDS, as the id of a disease and the
 	 * kof_maltype it was declared with - see KOF_DECLARE_DISEASE in
-	 * kofmod/kofpathogen.h. Zero and unread for a module that declared none,
+	 * kofmod/kofdiagtree.h. Zero and unread for a module that declared none,
 	 * and for an unpacker. The text is not here: the database carries an id to
 	 * name table (diseases.kdig) for the tools.
 	 */

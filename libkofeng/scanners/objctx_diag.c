@@ -1,14 +1,14 @@
 /*
- * objctx_diag.c - the pathogen analysis and the symbol block, as a module sees them.
+ * objctx_diag.c - the diagnose analysis and the symbol block, as a module sees them.
  *
  * WHAT THIS SERVES: the calls a rule makes to ask what a diagnose found (kof_diag,
  * kof_diag_share, kgenome_diag_str, the graph), the object's symbols (completed from
  * what a serving diagnose resolved), and the routing that decides whether the
  * analysis runs on an object at all (the facts, the gates, the demand).
  *
- * OPEN: "reading is asking" (diag_demand) infers the demand for the analysis
- * from which accessor a rule called. A rule that touches the pathogen surface
- * should declare it (KOF_ENG_USE_PATHOGEN) and the loader refuse one that does
+ * OPEN: "reading is asking" (oc_diag_demand) infers the demand for the analysis
+ * from which accessor a rule called. A rule that touches the diagnose surface
+ * should declare it (KOF_ENG_USE_DIAGNOSE) and the loader refuse one that does
  * not; removing the inference first makes every such rule read an empty analysis
  * (twelve detections, measured). The relocation bias in ref_note is x86's and is
  * applied only to x86 machines.
@@ -17,36 +17,14 @@
 /* ------------------------------------------------------------ */
 #define _GNU_SOURCE
 
-#include <kofmod/kofsym.h>
-#include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
-#include "../kofcore/kofplatform.h"
 #include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
-#include "../analyzers/parsers/binaries/elf/elf_sym.h"
-#include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include <celllysis/xref.h>
-#include "pzero.h"
 #include <celllysis/nucleo.h>
-#include "../analyzers/normalize/executables.h"
-#include "scan.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
-#include <phenotype/emu_unpack.h>
-#include <genotype/image/elf_rebuild.h>
 
-#include <decompressors/ovba.h>
-#include <decompressors/lzma.h>
-#include <decompressors/aplib.h>
-#include <decompressors/aspack.h>
-#include <decompressors/lzmat.h>
-#include <decompressors/bcj.h>
-#include <decompressors/rar3.h>
-#include <decompressors/rar5.h>
-#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
- * kof_scan_script_fold below. */
-#include "../analyzers/parsers/scripts/script_norm.h"
-#include "../analyzers/parsers/scripts/script_parse.h"
+ * kof_scan_script_forms below. */
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -56,38 +34,34 @@
  * nowhere else. A general "multi stream coding" hook in the module ABI would be an
  * abstraction with exactly one user, invented to avoid naming the thing it is for.
  */
-#include <kofmod/sevenzip.h>
 
-#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/linkage/kofdiag.h"
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
 
 #include "objctx_int.h"
 #include "../analyzers/genome_obj.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-static const struct kgenome_apihash *sc_apihash(struct kof_scanner *sc,
+static const struct kgenome_diag_apihash_set *sc_apihash(struct kof_scanner *sc,
 					    const struct kof_obj_ctx *ctx);
 static int diag_when_met(const struct kof_obj_ctx *ctx,
 			 const struct kof_diag *d);
-static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 
 /*
- * READING THE PATHOGEN SURFACE IS ASKING FOR IT. A rule that names a diagnose,
+ * READING THE DIAGNOSE SURFACE IS ASKING FOR IT. A rule that names a diagnose,
  * asks which two meet, reads a name a diagnose carries, or reaches for the graph
  * is the demand for the analysis, and the engine says so in ONE place. Four
  * accessors each wrote the two stores out themselves, one bug at a time - "twelve
  * detections disappearing the moment the rule stopped naming a diagnose and
- * started reading nodes", "a rule whose only pathogen call was this one read an
+ * started reading nodes", "a rule whose only diagnose call was this one read an
  * analysis that never ran" - and each fix added one more copy. `diag_read` is
- * also what labels the finding Pathogen rather than Pattern.
+ * also what labels the finding Diagnose rather than Pattern.
  */
-static void diag_demand(struct kof_scanner *sc)
+void oc_diag_demand(struct kof_scanner *sc)
 {
-	sc->diag_ask = 1;
-	sc->diag_read = 1;
+	sc->obj.diag.ask = 1;
+	sc->mod.diag_read = 1;
 }
 
 /*
@@ -99,11 +73,11 @@ static void diag_demand(struct kof_scanner *sc)
  * module call; it is NOT rebuilt per ask, so ten rules asking cost one walk.
  */
 /*
- * THE PATHOGEN GRAPH A RULE READS - see kofmod/kofpathogen.h.
+ * THE DIAGNOSE GRAPH A RULE READS - see kofmod/kofdiagtree.h.
  *
  * Serialised once per object from the analysis that already ran, and NULL
  * when none did. Reading it cannot make it run: that is what
- * KOF_ENG_USE_PATHOGEN is for, and an object nobody asked about has no graph
+ * KOF_ENG_USE_DIAGNOSE is for, and an object nobody asked about has no graph
  * to hand over.
  */
 const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
@@ -122,12 +96,12 @@ const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 	 * detections disappearing the moment the rule stopped naming a
 	 * diagnose and started reading nodes.
 	 */
-	diag_demand(sc);
-	diag_ready(sc, ctx);
-	if (!sc->diag_graph)
+	oc_diag_demand(sc);
+	oc_diag_ready(sc, ctx);
+	if (!sc->obj.diag.graph)
 		return NULL;
-	if (!sc->latch[KOF_OL_GRAPH_BLOCK]) {
-		sc->latch[KOF_OL_GRAPH_BLOCK] = 1;
+	if (!sc->obj.latch[KOF_OL_GRAPH_BLOCK]) {
+		sc->obj.latch[KOF_OL_GRAPH_BLOCK] = 1;
 		/*
 		 * SIZED BY THE GRAPH, not by a constant: the block is a header and one
 		 * record per node, and the node count is the scan's (it scales with
@@ -135,22 +109,22 @@ const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		 * 4096 records would have refused every graph past it whole. It is
 		 * allocated once per object, here, after the scan that produced it.
 		 */
-		if (!sc->gr) {
-			uint32_t nn = kgenome_diag_scan_count(sc->diag_graph);
+		if (!sc->diag.gr) {
+			uint32_t nn = kgenome_diag_scan_count(sc->obj.diag.graph);
 
-			sc->gr_cap = KOF_GR_HDRLEN + nn * KOF_GR_RECLEN;
-			sc->gr = nn ? malloc(sc->gr_cap) : NULL;
+			sc->diag.gr_cap = KOF_GR_HDRLEN + nn * KOF_GR_RECLEN;
+			sc->diag.gr = nn ? malloc(sc->diag.gr_cap) : NULL;
 		}
-		sc->gr_n = sc->gr ? kof_diag_graph_build(sc->diag_graph,
-							 sc->gr,
-							 sc->gr_cap)
+		sc->obj.diag.gr_n = sc->diag.gr ? kof_diag_graph_build(sc->obj.diag.graph,
+							 sc->diag.gr,
+							 sc->diag.gr_cap)
 				  : 0;
 	}
-	if (!sc->gr_n)
+	if (!sc->obj.diag.gr_n)
 		return NULL;
 	if (nbytes)
-		*nbytes = sc->gr_n;
-	return sc->gr;
+		*nbytes = sc->obj.diag.gr_n;
+	return sc->diag.gr;
 }
 
 /*
@@ -178,9 +152,9 @@ const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 static void sym_declared(struct kof_scanner *sc, uint32_t from)
 {
 	const char **dll, **name;
-	uint32_t i, n = sc->n_sym_decl - from, before = sc->sym_n;
+	uint32_t i, n = sc->obj.sym.n_decl - from, before = sc->obj.sym.n;
 
-	if (sc->n_sym_decl <= from)
+	if (sc->obj.sym.n_decl <= from)
 		return;
 	dll = malloc((size_t)n * sizeof *dll);
 	name = malloc((size_t)n * sizeof *name);
@@ -190,38 +164,38 @@ static void sym_declared(struct kof_scanner *sc, uint32_t from)
 		return;
 	}
 	for (i = 0; i < n; i++) {
-		dll[i] = sc->sym_decl[from + i].dll;
-		name[i] = sc->sym_decl[from + i].fn;
+		dll[i] = sc->syms.decl[from + i].dll;
+		name[i] = sc->syms.decl[from + i].fn;
 	}
-	if (sc->sym_n < KOF_SYM_HDRLEN)         /* no directory records at all */
-		sc->sym_n = kof_pe_syms((kof_buf){ NULL, 0 }, NULL, sc->sym,
-					sc->sym_cap);
+	if (sc->obj.sym.n < KOF_SYM_HDRLEN)         /* no directory records at all */
+		sc->obj.sym.n = kof_pe_syms((kof_buf){ NULL, 0 }, NULL, sc->syms.buf,
+					sc->syms.cap);
 	/* Room for what is added first, so the records already there are never at
 	 * risk: a block that cannot hold the addition is left as it was, with its
 	 * truncated byte set (kof_pe_syms_add_imports). The bound is the block's. */
 	{
-		uint64_t need = (uint64_t)sc->sym_n + kof_pe_syms_add_room(dll, name, n);
+		uint64_t need = (uint64_t)sc->obj.sym.n + kof_pe_syms_add_room(dll, name, n);
 
 		if (need > KOF_SYM_ABS_MAX_BYTES)
 			need = KOF_SYM_ABS_MAX_BYTES;
-		if (sc->sym && sc->sym_cap < need) {
-			uint8_t *g = realloc(sc->sym, (size_t)need);
+		if (sc->syms.buf && sc->syms.cap < need) {
+			uint8_t *g = realloc(sc->syms.buf, (size_t)need);
 
 			if (g) {
-				sc->sym = g;
-				sc->sym_cap = (uint32_t)need;
+				sc->syms.buf = g;
+				sc->syms.cap = (uint32_t)need;
 			}
 		}
 	}
-	sc->sym_n = kof_pe_syms_add_imports(sc->sym, sc->sym_n,
-					    sc->sym_cap, dll, name,
+	sc->obj.sym.n = kof_pe_syms_add_imports(sc->syms.buf, sc->obj.sym.n,
+					    sc->syms.cap, dll, name,
 					    n);
 	/* The list the module reported may be short, and the block's own byte
 	 * says so: the run it came from was stopped while still going. */
-	if (sc->apihash && sc->apihash->status != KGENOME_OK && sc->sym_n >= KOF_SYM_HDRLEN)
-		sc->sym[KOF_SYM_H_TRUNC] = 1;
-	if (sc->sym_n != before)
-		sc->sym_served = 1;
+	if (sc->obj.diag.apihash && sc->obj.diag.apihash->status != KGENOME_OK && sc->obj.sym.n >= KOF_SYM_HDRLEN)
+		sc->syms.buf[KOF_SYM_H_TRUNC] = 1;
+	if (sc->obj.sym.n != before)
+		sc->obj.sym.served = 1;
 	free(dll);
 	free(name);
 }
@@ -233,7 +207,7 @@ uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
 			 uint32_t fn_cap)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kgenome_apihash *a;
+	const struct kgenome_diag_apihash_set *a;
 	const char **d, **nm;
 	uint32_t n;
 
@@ -249,7 +223,7 @@ uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
 		free(nm);
 		return 0;
 	}
-	n = kgenome_apihash_distinct(a, d, nm);
+	n = kgenome_diag_apihash_distinct(a, d, nm);
 	if (i < n) {
 		snprintf(dll, dll_cap, "%s", d[i]);
 		snprintf(fn, fn_cap, "%s", nm[i]);
@@ -270,20 +244,20 @@ uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 
 	if (!sc || !dll || !fn || !dll[0] || !fn[0] || ctx->format != KOF_FMT_PE)
 		return 0;
-	for (i = 0; i < sc->n_sym_decl; i++)
-		if (!strcmp(sc->sym_decl[i].dll, dll) &&
-		    !strcmp(sc->sym_decl[i].fn, fn))
+	for (i = 0; i < sc->obj.sym.n_decl; i++)
+		if (!strcmp(sc->syms.decl[i].dll, dll) &&
+		    !strcmp(sc->syms.decl[i].fn, fn))
 			return 1;               /* kept once */
-	if (sc->n_sym_decl == sc->cap_sym_decl) {
-		uint32_t nc = sc->cap_sym_decl ? sc->cap_sym_decl * 2u : 32u;
-		struct kof_sym_decl *nv = realloc(sc->sym_decl, (size_t)nc * sizeof *nv);
+	if (sc->obj.sym.n_decl == sc->syms.cap_decl) {
+		uint32_t nc = sc->syms.cap_decl ? sc->syms.cap_decl * 2u : 32u;
+		struct kof_sym_decl *nv = realloc(sc->syms.decl, (size_t)nc * sizeof *nv);
 
 		if (!nv)
 			return 0;
-		sc->sym_decl = nv;
-		sc->cap_sym_decl = nc;
+		sc->syms.decl = nv;
+		sc->syms.cap_decl = nc;
 	}
-	d = &sc->sym_decl[sc->n_sym_decl];
+	d = &sc->syms.decl[sc->obj.sym.n_decl];
 	d->dll = strdup(dll);
 	d->fn = strdup(fn);
 	if (!d->dll || !d->fn) {
@@ -291,7 +265,7 @@ uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 		free(d->fn);
 		return 0;
 	}
-	sc->n_sym_decl++;
+	sc->obj.sym.n_decl++;
 	/*
 	 * A block not built yet takes the report when it is. One that was is
 	 * completed IN PLACE by the same merge: rebuilding it from the file for
@@ -300,13 +274,13 @@ uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 	 * last import in report order, a repeat is skipped - as the build
 	 * followed by one merge of all of them does.
 	 */
-	if (sc->latch[KOF_OL_SYM] && sc->sym && ctx->file_header)
-		sym_declared(sc, sc->n_sym_decl - 1u);
+	if (sc->obj.latch[KOF_OL_SYM] && sc->syms.buf && ctx->file_header)
+		sym_declared(sc, sc->obj.sym.n_decl - 1u);
 	else
-		sc->latch[KOF_OL_SYM] = 0;
+		sc->obj.latch[KOF_OL_SYM] = 0;
 	/* What was derived from the block as it stood is stale either way. */
-	sc->msym_bound = 0;
-	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
+	sc->obj.sym.bound = 0;
+	sc->obj.sym.ext_done[0] = sc->obj.sym.ext_done[1] = 0;
 	return 1;
 }
 
@@ -327,11 +301,11 @@ const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n)
 	if (!sc || ctx->format != KOF_FMT_PE)
 		return NULL;
 	(void)oc_syms(ctx, &nb);
-	if (!sc->sym_served || !nb)
+	if (!sc->obj.sym.served || !nb)
 		return NULL;
 	if (n)
 		*n = nb;
-	return sc->sym;
+	return sc->syms.buf;
 }
 
 /*
@@ -351,11 +325,11 @@ const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n)
 static void sym_build(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 {
 	const struct kgenome_pe_imptab *imp =
-		ctx->format == KOF_FMT_PE ? sc_pe_imports(sc, ctx) : NULL;
+		ctx->format == KOF_FMT_PE ? oc_pe_imports(sc, ctx) : NULL;
 
-	sc->sym_n = kof_syms_build_grow(ctx->format, sc->m.data.p, sc->m.data.n,
-					ctx->file_header, imp, &sc->sym,
-					&sc->sym_cap);
+	sc->obj.sym.n = kof_syms_build_grow(ctx->format, sc->match.m.data.p, sc->match.m.data.n,
+					ctx->file_header, imp, &sc->syms.buf,
+					&sc->syms.cap);
 }
 
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
@@ -374,7 +348,7 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 	 */
 	{
 		uint32_t dn = 0;
-		const uint8_t *d = kof_src_syms_of(sc->cur_src, &dn);
+		const uint8_t *d = kof_src_syms_of(sc->cur.src, &dn);
 
 		if (d && dn) {
 			/* A header with no records answers NULL, and the count
@@ -389,39 +363,39 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		}
 	}
 
-	if (!sc->latch[KOF_OL_SYM]) {
-		sc->latch[KOF_OL_SYM] = 1;
-		sc->sym_n = 0;
+	if (!sc->obj.latch[KOF_OL_SYM]) {
+		sc->obj.latch[KOF_OL_SYM] = 1;
+		sc->obj.sym.n = 0;
 		/* A rendering is never asked for symbols its bytes would give: what
 		 * the parent's block held was declared above, and an empty one is
 		 * the answer - see objprod.h. */
-		if (!sc->cur_prod && ctx->file_header &&
+		if (!sc->cur.prod && ctx->file_header &&
 		    (ctx->format == KOF_FMT_ELF ||
 		     ctx->format == KOF_FMT_PE)) {
 			sym_build(sc, ctx);
-			if (sc->sym)
+			if (sc->syms.buf)
 				sym_declared(sc, 0);
 		}
 	}
 	/* A header with no records is not worth handing back: every reader
 	 * would have to test the count anyway, and NULL says it once. */
-	if (!kof_sym_count(sc->sym, sc->sym_n)) {
+	if (!kof_sym_count(sc->syms.buf, sc->obj.sym.n)) {
 		if (nbytes)
 			*nbytes = 0;
 		return NULL;
 	}
 	if (nbytes)
-		*nbytes = sc->sym_n;
-	return sc->sym;
+		*nbytes = sc->obj.sym.n;
+	return sc->syms.buf;
 }
 
 
 /* The object's walk, empty until the first reader fills it. */
 static struct kgenome_diag_walk *oc_walk(struct kof_scanner *sc)
 {
-	if (!sc->walk)
-		sc->walk = kgenome_diag_walk_new();
-	return sc->walk;
+	if (!sc->obj.diag.walk)
+		sc->obj.diag.walk = kgenome_diag_walk_new();
+	return sc->obj.diag.walk;
 }
 
 /* `want_trace`: the wrapper resolution will read the code again, so the walk
@@ -433,9 +407,9 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 
 	/* Once per object, like the symbol block it is read from the table of:
 	 * "built, and there were none" is an answer and is not asked again. */
-	if (!sc->latch[KOF_OL_FUNCS]) {
-		sc->latch[KOF_OL_FUNCS] = 1;
-		kgenome_funcs_free(&sc->funcs);
+	if (!sc->obj.latch[KOF_OL_FUNCS]) {
+		sc->obj.latch[KOF_OL_FUNCS] = 1;
+		kgenome_funcs_free(&sc->obj.sym.funcs);
 		/*
 		 * A RENDERING'S FUNCTIONS ARE ITS PARENT'S, FOUND AGAIN BY BYTES, and
 		 * never built from the rendering: it carries an image description now
@@ -444,31 +418,31 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 		 * of them would find the entries of a layout that is gone. "Built, and
 		 * there were none" is an answer here as everywhere else.
 		 */
-		if (!sc->cur_prod && ctx->file_header) {
+		if (!sc->cur.prod && ctx->file_header) {
 			struct kgenome_obj gobj;
 
 			kof_genome_obj(ctx, &gobj);
-			kgenome_diag_funcs_with_walk(&gobj, sc->m.data.p, sc->m.data.n,
+			kgenome_diag_funcs_with_walk(&gobj, sc->match.m.data.p, sc->match.m.data.n,
 						 oc_walk(sc), want_trace,
-						 &sc->funcs);
+						 &sc->obj.sym.funcs);
 		} else {
 			/* A normalised view: its producer mapped them over - see
 			 * kgenome_funcs_remap. */
 			uint32_t n = 0;
-			const struct kgenome_func *d = kof_src_funcs_of(sc->cur_src, &n);
+			const struct kgenome_func *d = kof_src_funcs_of(sc->cur.src, &n);
 
 			if (d && n) {
-				sc->funcs.v = malloc(n * sizeof *sc->funcs.v);
-				if (sc->funcs.v) {
-					memcpy(sc->funcs.v, d, n * sizeof *d);
-					sc->funcs.n = n;
+				sc->obj.sym.funcs.v = malloc(n * sizeof *sc->obj.sym.funcs.v);
+				if (sc->obj.sym.funcs.v) {
+					memcpy(sc->obj.sym.funcs.v, d, n * sizeof *d);
+					sc->obj.sym.funcs.n = n;
 				} else {
-					sc->funcs.status = KGENOME_NOMEM;
+					sc->obj.sym.funcs.status = KGENOME_NOMEM;
 				}
 			}
 		}
 	}
-	return &sc->funcs;
+	return &sc->obj.sym.funcs;
 }
 
 const struct kgenome_func_set *oc_funcs(const struct kof_obj_ctx *ctx)
@@ -689,7 +663,7 @@ static int diag_has_reader(const struct kof_diag *d)
  * kof_scan_diag_report. */
 static int diag_used(const struct kof_scanner *sc, const struct kof_diag *d)
 {
-	return sc->diag_all || diag_has_reader(d);
+	return sc->obj.diag.all || diag_has_reader(d);
 }
 
 enum kgenome_status kof_scan_diag_status(const struct kof_obj_ctx *ctx)
@@ -700,30 +674,20 @@ enum kgenome_status kof_scan_diag_status(const struct kof_obj_ctx *ctx)
 		return KGENOME_OK;
 	/* Live: the graph's own status moves after the scan (a join that the
 	 * memory allowance refused is noted on it), so it is read, not cached. */
-	return sc->diag_graph ? kgenome_diag_scan_status(sc->diag_graph)
-			      : sc->diag_status;
-}
-
-uint32_t kof_scan_diag_refused(const struct kof_obj_ctx *ctx)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-
-	if (!sc)
-		return 0;
-	return sc->diag_graph ? kgenome_diag_scan_refused(sc->diag_graph)
-			      : sc->diag_refused;
+	return sc->obj.diag.graph ? kgenome_diag_scan_status(sc->obj.diag.graph)
+			      : sc->obj.diag.status;
 }
 
 void kof_scan_diag_drop(struct kof_scanner *sc)
 {
-	if (sc->diag_graph) {
-		kgenome_diag_scan_free(sc->diag_graph);
-		sc->diag_graph = NULL;
+	if (sc->obj.diag.graph) {
+		kgenome_diag_scan_free(sc->obj.diag.graph);
+		sc->obj.diag.graph = NULL;
 	}
-	oc_scan_release(sc, sc->diag_charged);
-	sc->diag_charged = 0;
-	sc->diag_status = KGENOME_OK;
-	sc->diag_refused = 0;
+	oc_scan_release(sc, sc->obj.diag.charged);
+	sc->obj.diag.charged = 0;
+	sc->obj.diag.status = KGENOME_OK;
+	sc->obj.diag.refused = 0;
 }
 
 int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
@@ -734,8 +698,8 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 
 	if (!sc)
 		return 0;
-	for (i = 0; sc->diag_unk && i < sc->diag_bm; i++)
-		if (sc->diag_unk[i])
+	for (i = 0; sc->diag.unk && i < sc->diag.bm; i++)
+		if (sc->diag.unk[i])
 			return 1;
 	/* THE CALLER'S BUDGET, WHICH NO DIAGNOSE'S OWN ANSWER CARRIES: a product the
 	 * ledger refused (the graph of links a join reads) leaves the diagnose that
@@ -748,7 +712,7 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 		return 1;
 	/* The block counts only when it was built for this object: forcing it here
 	 * would make every clean object pay for a table nothing asked for. */
-	if (sc->latch[KOF_OL_SYM] && kof_sym_truncated(sc->sym, sc->sym_n))
+	if (sc->obj.latch[KOF_OL_SYM] && kof_sym_truncated(sc->syms.buf, sc->obj.sym.n))
 		return 1;
 	return 0;
 }
@@ -842,13 +806,13 @@ static int name_is(const struct refscan *rs, uint64_t off, const char *want)
  * until the object is done with - see kof_scanner.apihash. NULL for anything
  * that is not a PE, and for a PE the analysis could not run on.
  */
-static const struct kgenome_apihash *sc_apihash(struct kof_scanner *sc,
+static const struct kgenome_diag_apihash_set *sc_apihash(struct kof_scanner *sc,
 					    const struct kof_obj_ctx *ctx)
 {
-	if (!sc->latch[KOF_OL_APIHASH]) {
+	if (!sc->obj.latch[KOF_OL_APIHASH]) {
 		kof_buf b = oc_mc(ctx)->data;
 
-		sc->latch[KOF_OL_APIHASH] = 1;
+		sc->obj.latch[KOF_OL_APIHASH] = 1;
 		if (ctx->format == KOF_FMT_PE && b.p && b.n) {
 			struct kgenome_obj gobj;
 
@@ -857,29 +821,29 @@ static const struct kgenome_apihash *sc_apihash(struct kof_scanner *sc,
 
 			kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(&gobj, b.n));
 			kb.max_bytes = oc_scan_room(sc);
-			sc->apihash = kgenome_apihash_run(&gobj, b.p, b.n,
-						      sc_pe_imports(sc, ctx), &kb);
+			sc->obj.diag.apihash = kgenome_diag_apihash_run(&gobj, b.p, b.n,
+						      oc_pe_imports(sc, ctx), &kb);
 		}
 	}
-	return sc->apihash;
+	return sc->obj.diag.apihash;
 }
 
 /*
  * The PE's import directory, walked the first time anything asks and kept
- * until the object is done with - see kof_scanner.pe_imp. Empty for anything
+ * until the object is done with - see kof_scanner.obj.diag.pe_imp. Empty for anything
  * that is not a PE.
  */
-const struct kgenome_pe_imptab *sc_pe_imports(struct kof_scanner *sc,
+const struct kgenome_pe_imptab *oc_pe_imports(struct kof_scanner *sc,
 					  const struct kof_obj_ctx *ctx)
 {
-	if (!sc->latch[KOF_OL_PE_IMPORTS]) {
+	if (!sc->obj.latch[KOF_OL_PE_IMPORTS]) {
 		kof_buf b = oc_mc(ctx)->data;
 
-		sc->latch[KOF_OL_PE_IMPORTS] = 1;
+		sc->obj.latch[KOF_OL_PE_IMPORTS] = 1;
 		if (ctx->format == KOF_FMT_PE && ctx->file_header && b.p)
-			kgenome_pe_imptab_build(b, kof_pe(ctx), &sc->pe_imp);
+			kgenome_pe_imptab_build(b, kof_pe(ctx), &sc->obj.diag.pe_imp);
 	}
-	return &sc->pe_imp;
+	return &sc->obj.diag.pe_imp;
 }
 
 /*
@@ -890,20 +854,20 @@ const struct kgenome_pe_imptab *sc_pe_imports(struct kof_scanner *sc,
 static const struct kgenome_elf_relocs *sc_relocs(struct kof_scanner *sc,
 					      const struct kof_obj_ctx *ctx)
 {
-	if (!sc->latch[KOF_OL_RELOCS]) {
+	if (!sc->obj.latch[KOF_OL_RELOCS]) {
 		const struct kgenome_elf_info *ei = ctx->format == KOF_FMT_ELF
 						? kof_elf(ctx) : NULL;
 		kof_buf b = oc_mc(ctx)->data;
 
-		sc->latch[KOF_OL_RELOCS] = 1;
+		sc->obj.latch[KOF_OL_RELOCS] = 1;
 		if (ei && ei->valid && b.p) {
-			sc->relocs = calloc(1, sizeof *sc->relocs);
-			if (sc->relocs)
+			sc->obj.diag.relocs = calloc(1, sizeof *sc->obj.diag.relocs);
+			if (sc->obj.diag.relocs)
 				(void)kgenome_elf_reloc_table(b, ei, KGENOME_ELF_RELOC_CODE,
-						  sc->relocs);
+						  sc->obj.diag.relocs);
 		}
 	}
-	return sc->relocs;
+	return sc->obj.diag.relocs;
 }
 
 static void ref_note(struct refscan *rs, const struct kgenome_elf_reloc *r)
@@ -961,7 +925,7 @@ static void ref_note(struct refscan *rs, const struct kgenome_elf_reloc *r)
  */
 static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 {
-	/* Per diagnose, so sized by how many the database HAS (sc->diag_cap) and
+	/* Per diagnose, so sized by how many the database HAS (sc->diag.cap) and
 	 * taken from the heap: a fixed 256 here was one of the places that stopped
 	 * the loader reading more than 256 diagnoses. */
 	uint8_t *unmet, *ok, *rleft;
@@ -969,13 +933,13 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	uint32_t n, i, pending = 0, rpending = 0, sn = 0, total, r;
 	const uint8_t *sb;
 
-	if (sc->latch[KOF_OL_DIAG_GATE])
+	if (sc->obj.latch[KOF_OL_DIAG_GATE])
 		return;
-	sc->latch[KOF_OL_DIAG_GATE] = 1;
-	memset(sc->diag_gate, 0, sc->diag_bm);
+	sc->obj.latch[KOF_OL_DIAG_GATE] = 1;
+	memset(sc->diag.gate, 0, sc->diag.bm);
 	n = sc->eng ? sc->eng->n_diag : 0u;
-	if (n > sc->diag_cap)
-		n = sc->diag_cap;
+	if (n > sc->diag.cap)
+		n = sc->diag.cap;
 	if (!n)
 		return;
 	unmet = calloc(n, 3u);
@@ -1033,7 +997,7 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			/* WHICH CAPABILITY THIS IMPORT IS, said once by nucleo's one
 			 * name table - a diagnose names the capability, never the
 			 * spelling. */
-			cap = kgenome_flow_cap_of_name(kof_sym_name(sb, sn, rec, NULL));
+			cap = kgenome_nucleo_cap_of_name(kof_sym_name(sb, sn, rec, NULL));
 			if (cap == KGENOME_NUCLEO_NONE)
 				continue;
 			for (i = 0; i < n; i++) {
@@ -1045,7 +1009,7 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 				for (k = 0; k < d->n_needcap; k++)
 					if (!hit[i][k] &&
 					    (d->needcap[k] == cap ||
-					     d->needcap[k] == kgenome_flow_cap_generic(cap))) {
+					     d->needcap[k] == kgenome_nucleo_cap_generic(cap))) {
 						/* each sign counts once,
 						 * however many records spell
 						 * it */
@@ -1100,7 +1064,7 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 
 	for (i = 0; i < n; i++)
 		if (ok[i] && !rleft[i])
-			sc->diag_gate[i >> 3] |= (uint8_t)(1u << (i & 7u));
+			sc->diag.gate[i >> 3] |= (uint8_t)(1u << (i & 7u));
 	free(unmet);
 	free(hit);
 }
@@ -1110,20 +1074,20 @@ static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			  uint32_t i)
 {
 	diag_gates(sc, ctx);
-	return i < sc->diag_cap &&
-	       ((sc->diag_gate[i >> 3] >> (i & 7u)) & 1u);
+	return i < sc->diag.cap &&
+	       ((sc->diag.gate[i >> 3] >> (i & 7u)) & 1u);
 }
 
-static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
+void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 {
 	struct kgenome_diag_scan *ds;
 	kof_buf b;
 	uint32_t i;
 
-	if (sc->latch[KOF_OL_DIAG])
+	if (sc->obj.latch[KOF_OL_DIAG])
 		return;
 	/*
-	 * NOBODY ASKED, SO NOBODY PAYS - see KOF_ENG_USE_PATHOGEN. The sweep
+	 * NOBODY ASKED, SO NOBODY PAYS - see KOF_ENG_USE_DIAGNOSE. The sweep
 	 * is proportional to the object and this is the one place that can
 	 * decline it; a rule that recognised something turns it on for the
 	 * object it fired on, and a tool reporting rather than scanning turns
@@ -1139,11 +1103,11 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	 * Re-deciding costs one test of a flag, which is less than the memset
 	 * the refusal would otherwise do.
 	 */
-	if (!sc->diag_ask)
+	if (!sc->obj.diag.ask)
 		return;
-	sc->latch[KOF_OL_DIAG] = 1;
-	memset(sc->diag_hit, 0, sc->diag_bm);
-	memset(sc->diag_unk, 0, sc->diag_bm);
+	sc->obj.latch[KOF_OL_DIAG] = 1;
+	memset(sc->diag.hit, 0, sc->diag.bm);
+	memset(sc->diag.unk, 0, sc->diag.bm);
 	if (!sc->eng || !sc->eng->n_diag)
 		return;
 	b = oc_mc(ctx)->data;
@@ -1166,8 +1130,8 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		uint32_t n_seq = 0;
 
 		/* Kept in the scanner, not on the stack: the scan keeps this
-		 * pointer for as long as its graph lives (see kof_scanner.diag_seq). */
-		seqv = sc->diag_seq;
+		 * pointer for as long as its graph lives (see kof_scanner.diag.seq). */
+		seqv = sc->diag.seq;
 
 		for (i = 0; i < sc->eng->n_diag; i++) {
 			/* a diagnose whose signs are absent asks for no
@@ -1176,7 +1140,7 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 				continue;
 			/* A head built from two calls is built for the diagnose
 			 * that declared it, and for it alone. */
-			if (sc->eng->diag[i].seq_first && n_seq < sc->diag_cap) {
+			if (sc->eng->diag[i].seq_first && n_seq < sc->diag.cap) {
 				seqv[n_seq].made = sc->eng->diag[i].node[0].cap;
 				seqv[n_seq].first = sc->eng->diag[i].seq_first;
 				seqv[n_seq].then = sc->eng->diag[i].seq_then;
@@ -1218,7 +1182,7 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		 * built from the same table. */
 		in.imports = ((run & KGENOME_DIAG_RUN_SYMBOL) &&
 			      ctx->format == KOF_FMT_PE && ctx->file_header)
-			     ? sc_pe_imports(sc, ctx) : NULL;
+			     ? oc_pe_imports(sc, ctx) : NULL;
 		kof_genome_obj(ctx, &gobj);
 		/*
 		 * WHAT THE SCAN MAY COST, from this scanner's own ceiling: the
@@ -1241,15 +1205,15 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		if (ds) {
 			uint64_t peak;
 
-			sc->diag_status = kgenome_diag_scan_status(ds);
-			sc->diag_refused = kgenome_diag_scan_refused(ds);
-			sc->diag_charged = kgenome_diag_scan_bytes(ds, &peak);
+			sc->obj.diag.status = kgenome_diag_scan_status(ds);
+			sc->obj.diag.refused = kgenome_diag_scan_refused(ds);
+			sc->obj.diag.charged = kgenome_diag_scan_bytes(ds, &peak);
 			/* The most it held is the scanner's peak, what it holds now is
 			 * what stays charged. */
-			if (peak < sc->diag_charged)
-				peak = sc->diag_charged;
+			if (peak < sc->obj.diag.charged)
+				peak = sc->obj.diag.charged;
 			scan_charge(sc, peak);
-			oc_scan_release(sc, peak - sc->diag_charged);
+			oc_scan_release(sc, peak - sc->obj.diag.charged);
 		}
 		/* The walk's trace stays until the object ends: the xref sweep reads
 		 * it too (kgenome_diag_code_run). It is freed with the walk. */
@@ -1257,8 +1221,8 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	if (!ds)
 		return;
 	KOF_TIME_BEGIN(KOF_T_DIAG_MATCH);
-	memset(sc->diag_n_bind, 0, sc->diag_cap);
-	for (i = 0; i < sc->eng->n_diag && i < sc->diag_cap; i++) {
+	memset(sc->diag.n_bind, 0, sc->diag.cap);
+	for (i = 0; i < sc->eng->n_diag && i < sc->diag.cap; i++) {
 		uint8_t nb = 0;
 
 		/* An unread diagnose is not matched: nobody collects the answer,
@@ -1272,18 +1236,18 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		 * that one is incomplete; a diagnose the object's shape or imports
 		 * ruled out has an answer, and it is no.
 		 *
-		 * Every node it bound comes back - see kof_scanner.diag_bind.
+		 * Every node it bound comes back - see kof_scanner.diag.bind.
 		 */
 		switch (kof_diag_match_known(ds, &sc->eng->diag[i],
-					     sc->diag_bind[i], &nb)) {
+					     sc->diag.bind[i], &nb)) {
 		case 1:
-			sc->diag_hit[i >> 3] |= (uint8_t)(1u << (i & 7u));
-			sc->diag_n_bind[i] = nb > KOF_DB_MAX_DIAG_NODE
+			sc->diag.hit[i >> 3] |= (uint8_t)(1u << (i & 7u));
+			sc->diag.n_bind[i] = nb > KOF_DB_MAX_DIAG_NODE
 					   ? (uint8_t)KOF_DB_MAX_DIAG_NODE : nb;
 			break;
 		case -1:
 			if (diag_gate_open(sc, ctx, i))
-				sc->diag_unk[i >> 3] |= (uint8_t)(1u << (i & 7u));
+				sc->diag.unk[i >> 3] |= (uint8_t)(1u << (i & 7u));
 			break;
 		default:
 			break;
@@ -1291,11 +1255,11 @@ static void diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	}
 	KOF_TIME_END(KOF_T_DIAG_MATCH);
 	/*
-	 * AND THE GRAPH STAYS - see kof_scanner.diag_graph. It is what the
+	 * AND THE GRAPH STAYS - see kof_scanner.obj.diag.graph. It is what the
 	 * verdict layer reads; freeing it here would make every reader pay
 	 * for the analysis again.
 	 */
-	sc->diag_graph = ds;
+	sc->obj.diag.graph = ds;
 }
 
 /*
@@ -1309,10 +1273,10 @@ void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
 
 	if (!sc)
 		return;
-	/* The caller IS the asker here - see KOF_ENG_USE_PATHOGEN. Setting it
+	/* The caller IS the asker here - see KOF_ENG_USE_DIAGNOSE. Setting it
 	 * rather than bypassing the test keeps one gate on this work. */
-	sc->diag_ask = 1;
-	diag_ready(sc, ctx);
+	sc->obj.diag.ask = 1;
+	oc_diag_ready(sc, ctx);
 }
 
 _Static_assert(KOF_DIAG_REPORT_NODES >= KOF_DB_MAX_DIAG_NODE,
@@ -1324,7 +1288,7 @@ uint32_t kof_scan_diag_count(const struct kof_obj_ctx *ctx)
 
 	if (!sc || !sc->eng)
 		return 0;
-	return sc->eng->n_diag < sc->diag_cap ? sc->eng->n_diag : sc->diag_cap;
+	return sc->eng->n_diag < sc->diag.cap ? sc->eng->n_diag : sc->diag.cap;
 }
 
 int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
@@ -1341,7 +1305,7 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 	 * this reads its answer; a caller that did not ask has nothing here, and
 	 * running the analysis now would be a second pass over the object.
 	 */
-	if (!sc->diag_all)
+	if (!sc->obj.diag.all)
 		return 0;
 	/* The analysis itself, if no rule had asked for it yet: the one run. */
 	kof_scan_diag_force(ctx);
@@ -1359,18 +1323,18 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 		out->state = KOF_DIAG_ST_NO_ROUTE;
 	} else if (!diag_gate_open(sc, ctx, i)) {
 		out->state = KOF_DIAG_ST_SIGNS;
-	} else if (!((sc->diag_hit[i >> 3] >> (i & 7u)) & 1u) ||
-		   !sc->diag_graph) {
+	} else if (!((sc->diag.hit[i >> 3] >> (i & 7u)) & 1u) ||
+		   !sc->obj.diag.graph) {
 		out->state = KOF_DIAG_ST_SEEN;
 	} else {
-		uint8_t k, nb = sc->diag_n_bind[i];
+		uint8_t k, nb = sc->diag.n_bind[i];
 
 		out->state = KOF_DIAG_ST_MATCH;
 		for (k = 0; k < nb && k < out->n_node; k++) {
-			uint16_t b = sc->diag_bind[i][k];
+			uint16_t b = sc->diag.bind[i][k];
 			const struct kgenome_diag_hit *h =
-				b < kgenome_diag_scan_count(sc->diag_graph)
-				? kgenome_diag_scan_at(sc->diag_graph, b) : NULL;
+				b < kgenome_diag_scan_count(sc->obj.diag.graph)
+				? kgenome_diag_scan_at(sc->obj.diag.graph, b) : NULL;
 
 			out->cap[k] = d->node[k].cap;
 			out->at[k] = h ? h->at : 0;
@@ -1378,171 +1342,4 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 		}
 	}
 	return 1;
-}
-
-/*
- * DO TWO DIAGNOSES MEET AT A NODE OF THIS CAPABILITY - see kof_diag_share.
- *
- * THE CAPABILITY IS PART OF THE QUESTION and not a filter bolted on. "The
- * stager's read and the socket's read are the same read" is the claim; "the
- * two have some node in common" is a weaker one that a shared allocation or
- * a shared resolve would also satisfy, and those are what a packed binary is
- * full of. Naming the node makes the verdict say which shape it means, and
- * it is the reason a diagnose no longer declares its own join points: the
- * pair is known at the verdict, never at the declaration.
- */
-/*
- * THE SLOT OF THE DIAGNOSE A RULE NAMED. `wide` says what `id` is: the full 32-bit
- * id (kof_diag_id32_, what the macros pass) or the 16-bit fold an older module's
- * slots take (kof_diag_fold16_ of it). The slot is the diagnose's position and
- * what every bitmap here is indexed by; n_diag when none carries the id. The first
- * match wins, which only matters to a 16-bit caller - two diagnoses that fold
- * alike can both be loaded now, and the old slots cannot tell them apart.
- */
-static uint32_t diag_slot(const struct kof_scanner *sc, uint32_t id, int wide)
-{
-	uint32_t i;
-
-	for (i = 0; i < sc->eng->n_diag && i < sc->diag_cap; i++)
-		if ((wide ? sc->eng->diag[i].id
-			  : (uint32_t)kof_diag_fold16_(sc->eng->diag[i].id)) == id)
-			return i;
-	return sc->eng->n_diag;
-}
-
-static int diag_share_q(const struct kof_obj_ctx *ctx, uint16_t cap,
-			uint32_t a, uint32_t b, int wide)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	uint32_t ia, ib;
-
-	if (!sc || !cap || !a || !b)
-		return 0;
-	/* ASKING IS THE DEMAND, exactly as in oc_diag - this is the same
-	 * question about two diagnoses, and it used to call diag_ready
-	 * without setting the flag it is gated on, so a rule whose ONLY
-	 * pathogen call was this one read an analysis that never ran. */
-	diag_demand(sc);
-	diag_ready(sc, ctx);
-	ia = diag_slot(sc, a, wide);
-	ib = diag_slot(sc, b, wide);
-	if (ia >= sc->eng->n_diag || ib >= sc->eng->n_diag)
-		return 0;
-	if (!((sc->diag_hit[ia >> 3] >> (ia & 7u)) & 1u) ||
-	    !((sc->diag_hit[ib >> 3] >> (ib & 7u)) & 1u))
-		return 0;
-	/*
-	 * REACHABILITY, not a shared node - see kof_diag_flow_join. The byte
-	 * a socket read produced (a node of `cap` that NETRECV `b` bound)
-	 * must flow into the region MEMEXEC `a` is about, and a scratch
-	 * buffer between the read and the region is links in the middle that
-	 * still link, not a break. The old test here asked only whether one
-	 * node was bound by both, which a scratch buffer steps around.
-	 */
-	return kof_diag_flow_join(sc->diag_graph, cap,
-				  sc->diag_bind[ia], sc->diag_n_bind[ia],
-				  sc->diag_bind[ib], sc->diag_n_bind[ib]);
-}
-
-int oc_diag_share(const struct kof_obj_ctx *ctx, uint16_t cap,
-		  uint16_t a, uint16_t b)
-{
-	return diag_share_q(ctx, cap, a, b, 0);
-}
-
-int oc_diag_share32(const struct kof_obj_ctx *ctx, uint16_t cap,
-		    uint32_t a, uint32_t b)
-{
-	return diag_share_q(ctx, cap, a, b, 1);
-}
-
-/*
- * DOES THIS DIAGNOSE MATCH, AND DOES IT CARRY THESE NAMES - see
- * kof_diag_str_any and _all in kofsig.h for what the answer means, and why false is
- * not the same as "no".
- *
- * A diagnose's names are the ones the analysis read at the call sites its
- * tree BOUND: each name is kept with the node of the call it was handed to,
- * and the diagnose is the thing that says which of those calls it is about.
- *
- * ASKING IS THE DEMAND, as in every other call that reads the analysis, and
- * it is also what labels the finding Pathogen, so the flag is set here.
- */
-static int diag_str_q(const struct kof_obj_ctx *ctx, uint32_t id, const char *name,
-		      int wide)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_diag *d = NULL;
-	uint32_t i;
-
-	if (!sc || !sc->eng || !id || !name)
-		return 0;
-	diag_demand(sc);
-	diag_ready(sc, ctx);
-	i = diag_slot(sc, id, wide);
-	if (i >= sc->eng->n_diag || i >= sc->diag_cap)
-		return 0;
-	/* The diagnose has to have matched: a name beside a behaviour that did
-	 * not happen is not evidence of it. */
-	if (!((sc->diag_hit[i >> 3] >> (i & 7u)) & 1u) || !sc->diag_graph)
-		return 0;
-	d = &sc->eng->diag[i];
-	/*
-	 * THE NAMES THIS DIAGNOSE CARRIES are the ones read at the call sites
-	 * its tree bound - see kof_diag_scan_name - and not the ones handed to
-	 * any call of the same capability. It used to be the second: a
-	 * diagnose's names were those tagged with a capability one of its
-	 * nodes named, so two diagnoses with a node of the same capability
-	 * saw each other's.
-	 */
-	return kof_diag_scan_name(sc->diag_graph, d, name);
-}
-
-int oc_diag_str(const struct kof_obj_ctx *ctx, uint16_t id, const char *name)
-{
-	return diag_str_q(ctx, id, name, 0);
-}
-
-int oc_diag_str32(const struct kof_obj_ctx *ctx, uint32_t id, const char *name)
-{
-	return diag_str_q(ctx, id, name, 1);
-}
-
-static int diag_q(const struct kof_obj_ctx *ctx, uint32_t id, int wide)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	uint32_t i;
-
-	/* Ids are one based, because zero is what an uninitialised field
-	 * holds and a rule that asked for diagnose zero by accident would
-	 * otherwise be asking a real question. */
-	if (!sc || !id)
-		return 0;
-	/*
-	 * THE RULE ASKING IS THE ASKER - see KOF_ENG_USE_PATHOGEN.
-	 *
-	 * A signature runs before any heuristic does, so a rule reading a
-	 * diagnose cannot wait for one to turn the analysis on: it would
-	 * read the answer of an analysis that has not happened and get no.
-	 * Naming a diagnose in a rule IS the demand, and it is as scoped as
-	 * the rule - a rule targeting ELF asks on ELF and nowhere else.
-	 */
-	diag_demand(sc);
-	diag_ready(sc, ctx);
-	/* The id is the name's hash, not a position - see kof_diag_id32_. The bit
-	 * is still the diagnose's slot, which is its position. */
-	i = diag_slot(sc, id, wide);
-	if (i >= sc->eng->n_diag)
-		return 0;
-	return (sc->diag_hit[i >> 3] >> (i & 7u)) & 1u;
-}
-
-int oc_diag(const struct kof_obj_ctx *ctx, uint16_t id)
-{
-	return diag_q(ctx, id, 0);
-}
-
-int oc_diag32(const struct kof_obj_ctx *ctx, uint32_t id)
-{
-	return diag_q(ctx, id, 1);
 }

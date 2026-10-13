@@ -32,7 +32,7 @@ KOF_TARGET_NAME(KOF_MALTYPE_VIRUS, "CureElfTest");
  * The payload's own signature, at the entry point rather than anywhere in the
  * file: an ELF that merely CONTAINS these bytes is not one that RUNS them, and
  * the difference is what separates an infected host from a dropper carrying a
- * copy - see bases/signatures/rst_00.c, which is the real instance of this.
+ * copy - a real instance of this was the rst_00 signature (no longer in bases/signatures).
  */
 KOF_DEFINE_STR(mark, "KOFINFECT", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 
@@ -106,7 +106,7 @@ void kof_cure(const struct kof_obj_ctx *ctx)
 	 * well, because the kernel maps what is there, and is still damaged.
 	 * The engine says so: without this the cured file came back
 	 * Heur:Truncated, which is the right answer to a segment that is not
-	 * all there. bases/signatures/rst_00.c does the same thing for the same
+	 * all there. the rst_00 signature did the same thing for the same
 	 * reason.
 	 *
 	 * p_filesz and p_memsz are adjacent - 32 and 40 of an ELF64 program

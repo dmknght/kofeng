@@ -1,5 +1,5 @@
 /*
- * kgenome_cell_state.c - the constant map and the modelled stack: what the registers
+ * cell_state.c - the constant map and the modelled stack: what the registers
  * hold, where that is knowable by reading forwards and nothing else.
  *
  * THIS IS THE "PSEUDO" IN PSEUDO-EMULATION, and it is decode-level: it reads one

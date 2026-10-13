@@ -126,7 +126,7 @@
 #include "kofevtfmt.h"
 #include "kofevtlog.h"
 #include "kofinspect.h"
-#include "../libkofeng/extractors/codec_ui.h"
+#include "codec_ui.h"
 #include <kofmod/kofmutation.h>
 #include "kofview.h"
 #include <celllysis/trueline.h>

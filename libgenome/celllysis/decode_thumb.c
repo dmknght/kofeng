@@ -26,7 +26,7 @@
  * the architecture leaves unallocated is KGENOME_CELL_UD with the right length; the
  * coprocessor, VFP and Advanced SIMD space is not, and is KGENOME_CELL_OTHER.
  */
-#include <arm32/thumb.h>
+#include <genotype/arm32/thumb.h>
 
 #include "decode_arm32.h"
 

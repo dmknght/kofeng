@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * net_cncnonblock_00.c - a stream socket that is made non-blocking and then

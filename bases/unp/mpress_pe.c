@@ -2,7 +2,7 @@
  * mpress_pe.c - unpack an MPRESS packed PE.
  *
  * Written because the emulator was doing this job and failing at it. On one
- * sample - a 2,770,432 byte PE32+ - kof_emu_unp_gate_pe answered DENSE, the
+ * sample - a 2,770,432 byte PE32+ - kgenome_emu_unp_gate_pe answered DENSE, the
  * interpreter spent its entire 268,435,456 instruction ceiling and produced
  * nothing, and the scan cost 21.35 seconds against 0.015 with the emulator off.
  * Nothing was recovered for the 21 seconds; the object was reported exactly as

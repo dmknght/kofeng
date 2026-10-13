@@ -7,29 +7,8 @@
 
 #include "scan_int.h"
 #include "../analyzers/parsers/binaries/sym_pool.h"
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
 
 
 /*
@@ -54,7 +33,7 @@
  * `_start` GOES WITH IT, and the header's index of it is cleared rather than
  * left pointing at whatever record now sits there: crt is the toolchain's, so
  * the record is dropped, and an index into a table that has moved underneath it
- * is worse than no index - kof_sym_start's callers read it as a place to begin.
+ * is worse than no index - a caller reads that index as a place to begin.
  */
 uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			  uint8_t *out, uint32_t cap)
@@ -100,7 +79,7 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		memcpy(out, in, n_in);
 		return n_in;
 	}
-	if (ctx->format != KOF_FMT_ELF || !sc->cur_lib_ok)
+	if (ctx->format != KOF_FMT_ELF || !sc->cur.lib_ok)
 		return 0;
 	e = kof_elf(ctx);
 	in = ctx->content->syms(ctx, &n_in);
@@ -123,7 +102,7 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			continue;
 		va = kof_sym_u64(r, KOF_SYM_R_VALUE);
 		sz = kof_sym_u64(r, KOF_SYM_R_SIZE);
-		if (kgenome_true_has_addr(e, &sc->cur_lib, va, sz))
+		if (kgenome_true_has_addr(e, &sc->cur.lib, va, sz))
 			continue;
 		/*
 		 * AND NOTHING ELSE DECIDES THIS.

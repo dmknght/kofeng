@@ -115,7 +115,7 @@ static int mkdir_one(const char *path)
  * would fail in a way that has to be told apart from a real failure. Walking
  * separators and creating what lies between them is the whole of it.
  */
-int kofrep_ensure_dir(const char *path)
+static int kofrep_ensure_dir(const char *path)
 {
 	char  buf[1024];
 	size_t n, i;

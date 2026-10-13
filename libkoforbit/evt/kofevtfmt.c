@@ -182,6 +182,210 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 	}
 }
 
+/* Render step: a process start: the image, and the command line on its own line. */
+static void render_proc_start(const struct kof_evt *e, FILE *out)
+{
+	const char *cl = kof_evt_cmdline(e);
+
+	fprintf(out, "  ppid=%lu  %s", (unsigned long)e->ppid,
+	       kof_evt_image(e));
+	/*
+	 * On its own line and indented, because it is usually longer
+	 * than everything before it and because it is the line that
+	 * matters. An image path names the program; the arguments name
+	 * what it was asked to do, and for every living-off-the-land
+	 * technique the second IS the event.
+	 */
+	if (*cl)
+		fprintf(out, "\n                                 cmd: %s",
+		       cl);
+	else if (e->flags & KOF_EF_CMDLINE_RACED)
+		fprintf(out, "  [cmd unread: process gone]");
+}
+
+/* Render step: a verb whose detail is the collector's own text. */
+static void render_proc_detail(const struct kof_evt *e, FILE *out)
+{
+	const char *what = kof_evt_object(e);
+
+	if (*what)
+		fprintf(out, "  %s", what);
+	/* An attach names two processes and the second one is the
+	 * point - see kof_evt.actor_pid on this verb. */
+	if (e->verb == KOF_EVT_PROC_ATTACH && e->actor_pid)
+		fprintf(out, "  by=%lu", (unsigned long)e->actor_pid);
+}
+
+/* Render step: an AMSI submission, sanitised and cut. */
+static void render_amsi(const struct kof_evt *e, FILE *out)
+{
+	/*
+	 * The submitted content, RAW in the record and sanitised here.
+	 *
+	 * It is also a PREFIX: unlike a path, a script block is usually
+	 * longer than the arena, so the [cut] marker the common tail
+	 * adds is doing real work - most of these are legitimately
+	 * incomplete rather than exceptionally so.
+	 *
+	 * Printed through print_sanitised and not with %s, for two
+	 * reasons that are both the point of content_len existing: the
+	 * bytes may contain NULs, so %s would stop at the first one;
+	 * and they may contain a terminal escape, which %s would send
+	 * to the terminal.
+	 */
+	const char *ct = NULL;
+	size_t cn = 0;
+
+	if (kof_evt_content(e, &ct, &cn) && cn) {
+		fputs("  ", out);
+		print_sanitised(out, ct, cn, 120u);
+		if (cn > 120u)
+			fprintf(out, "... (%llu bytes)",
+				(unsigned long long)cn);
+	} else {
+		fputs("  (no content)", out);
+	}
+}
+
+/* Render step: a file write: the path and the range. */
+static void render_file_write(const struct kof_evt *e, FILE *out)
+{
+	const struct kof_evt_file *f = kof_evt_as_file(e);
+
+	fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
+	       kof_evt_object(e));
+	/*
+	 * THE RANGE AND NOT JUST THE LENGTH. "wrote 64 bytes to hosts"
+	 * and "wrote 64 bytes at 0x1a2 in hosts" are a sentence and a
+	 * piece of evidence respectively: only the second can be read
+	 * back off the file afterwards, which is the whole reason
+	 * kof_evt_file carries an offset.
+	 */
+	if (f && f->size)
+		fprintf(out, "  %lu bytes @%llu", (unsigned long)f->size,
+			(unsigned long long)f->offset);
+}
+
+/* Render step: a registry change: the key, and the data. */
+static void render_reg(const struct kof_evt *e, FILE *out)
+{
+	const struct kof_evt_reg *r = kof_evt_as_reg(e);
+
+	fprintf(out, "  %s", kof_evt_object(e));
+	/*
+	 * WHETHER A CREATE CREATED ANYTHING. RegCreateKeyEx opens an
+	 * existing key as readily as it makes one, so an unmarked
+	 * create is a line that says a program touched a key - which
+	 * is most lines. Only the new one is worth the reader's eye.
+	 */
+	if (e->verb == KOF_EVT_REG_CREATE && r && r->disp == 1u)
+		fputs("  (new)", out);
+	print_reg_data(out, e);
+}
+
+/* Render step: a network event or a lookup: the peer, or the name and its answer. */
+static void render_net(const struct kof_evt *e, FILE *out)
+{
+	/*
+	 * The address sits in the record in the order it sits in the
+	 * packet and the port in network byte order. Turned into text
+	 * here rather than stored that way, for the reason kofw_evt
+	 * gives: a record that silently disagreed with the packet would
+	 * be worse than one a printer has to convert.
+	 *
+	 * kof_evt_ip_str and not four %lu, because the same sixteen
+	 * bytes have to come out as the same string here, in a report's
+	 * IOC table and in a viewer - and a v6 address written by hand
+	 * in three places is written three ways.
+	 */
+	const struct kof_evt_net *n = kof_evt_as_net(e);
+	char  ip[KOF_IP_STR_MAX];
+	uint16_t dp;
+
+	if (!n)
+		return;
+	dp = (uint16_t)((n->dport >> 8) | (n->dport << 8));
+
+	/*
+	 * A LOOKUP PRINTS THE NAME IT ASKED ABOUT AND THEN THE ANSWER.
+	 *
+	 * The name is the object, which is why it is printed here and
+	 * not by the address code below: for every other verb in this
+	 * group the destination IS the subject of the line, and for
+	 * this one the destination is the answer to it.
+	 *
+	 * AN UNSET ADDRESS PRINTS NOTHING, and it used to print
+	 * "-> no answer".
+	 *
+	 * That read as a lookup that failed, which would be a real and
+	 * interesting finding - a name resolving to nothing is what a
+	 * domain-generation algorithm looks like while it hunts for the
+	 * one that is registered. It is not what the field means. The
+	 * Windows resolver reports its answers in a STRING property
+	 * (QueryResults, "Results %5" in the provider's own message)
+	 * which this build does not parse into an address, so unset
+	 * here means "not decoded" and every successful lookup on the
+	 * machine was being labelled a failure.
+	 *
+	 * So the line says the name, which is the durable half and the
+	 * half that is certainly correct, and says nothing it cannot
+	 * support. When QueryResults is decoded the answer appears here
+	 * and an unset address becomes meaningful again.
+	 */
+	if (e->verb == KOF_EVT_DNS_QUERY) {
+		fprintf(out, "  %s", kof_evt_object(e));
+		if (!kof_evt_ip_is_unset(n->daddr))
+			fprintf(out, "  -> %s",
+				kof_evt_ip_str(n->daddr, ip, sizeof ip));
+		return;
+	}
+
+	/* Brackets around a v6 address before the port, because
+	 * 2001:db8::1:443 cannot be read and [2001:db8::1]:443 can. */
+	kof_evt_ip_str(n->daddr, ip, sizeof ip);
+	if (kof_evt_ip_is_v6(n->daddr))
+		fprintf(out, "  [%s]:%u", ip, (unsigned)dp);
+	else
+		fprintf(out, "  %s:%u", ip, (unsigned)dp);
+	if (n->size)
+		fprintf(out, "  %lu bytes", (unsigned long)n->size);
+}
+
+/* Render step: an untyped record: its provider and id, and what it carries. */
+static void render_raw(const struct kof_evt *e, FILE *out)
+{
+	/*
+	 * "[file id 12]", not "[id 12]". A discovery run reads these
+	 * lines to decide what to type, and an id without its provider
+	 * is a number that names two different events.
+	 */
+	if (e->source)
+		fprintf(out, "  [%s id %u]",
+			kof_evt_source_name(e->source),
+			(unsigned)e->raw_id);
+	else
+		fprintf(out, "  [id %u]", (unsigned)e->raw_id);
+	/*
+	 * THE ADDRESS, ON THE RAW PATH TOO, and this was the bug.
+	 *
+	 * Thread events are not typed yet, so they arrive as RAW and
+	 * render here - and this branch printed only the object path,
+	 * which a thread event does not have. So `--thread` collected
+	 * the one field it exists for and then showed an empty line.
+	 * A start address that is never displayed is a subscription
+	 * paying full volume for nothing.
+	 */
+	{
+		const struct kof_evt_mem *m = kof_evt_as_mem(e);
+
+		if (m && m->addr)
+			fprintf(out, "  addr=0x%llx",
+				(unsigned long long)m->addr);
+	}
+	if (*kof_evt_object(e))
+		fprintf(out, "  %s", kof_evt_object(e));
+}
+
 void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		    FILE *out, struct kof_evt_tally *t)
 {
@@ -212,25 +416,9 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	       who && *who ? who : "?");
 
 	switch (e->verb) {
-	case KOF_EVT_PROC_START: {
-		const char *cl = kof_evt_cmdline(e);
-
-		fprintf(out, "  ppid=%lu  %s", (unsigned long)e->ppid,
-		       kof_evt_image(e));
-		/*
-		 * On its own line and indented, because it is usually longer
-		 * than everything before it and because it is the line that
-		 * matters. An image path names the program; the arguments name
-		 * what it was asked to do, and for every living-off-the-land
-		 * technique the second IS the event.
-		 */
-		if (*cl)
-			fprintf(out, "\n                                 cmd: %s",
-			       cl);
-		else if (e->flags & KOF_EF_CMDLINE_RACED)
-			fprintf(out, "  [cmd unread: process gone]");
+	case KOF_EVT_PROC_START:
+		render_proc_start(e, out);
 		break;
-	}
 	case KOF_EVT_PROC_STOP: {
 		const struct kof_evt_proc *pr = kof_evt_as_proc(e);
 
@@ -268,46 +456,12 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	case KOF_EVT_PROC_PRIVILEGE:
 	case KOF_EVT_PROC_SESSION:
 	case KOF_EVT_PROC_RENAME:
-	case KOF_EVT_PROC_CRASH: {
-		const char *what = kof_evt_object(e);
-
-		if (*what)
-			fprintf(out, "  %s", what);
-		/* An attach names two processes and the second one is the
-		 * point - see kof_evt.actor_pid on this verb. */
-		if (e->verb == KOF_EVT_PROC_ATTACH && e->actor_pid)
-			fprintf(out, "  by=%lu", (unsigned long)e->actor_pid);
+	case KOF_EVT_PROC_CRASH:
+		render_proc_detail(e, out);
 		break;
-	}
-	case KOF_EVT_AMSI_SCAN: {
-		/*
-		 * The submitted content, RAW in the record and sanitised here.
-		 *
-		 * It is also a PREFIX: unlike a path, a script block is usually
-		 * longer than the arena, so the [cut] marker the common tail
-		 * adds is doing real work - most of these are legitimately
-		 * incomplete rather than exceptionally so.
-		 *
-		 * Printed through print_sanitised and not with %s, for two
-		 * reasons that are both the point of content_len existing: the
-		 * bytes may contain NULs, so %s would stop at the first one;
-		 * and they may contain a terminal escape, which %s would send
-		 * to the terminal.
-		 */
-		const char *ct = NULL;
-		size_t cn = 0;
-
-		if (kof_evt_content(e, &ct, &cn) && cn) {
-			fputs("  ", out);
-			print_sanitised(out, ct, cn, 120u);
-			if (cn > 120u)
-				fprintf(out, "... (%llu bytes)",
-					(unsigned long long)cn);
-		} else {
-			fputs("  (no content)", out);
-		}
+	case KOF_EVT_AMSI_SCAN:
+		render_amsi(e, out);
 		break;
-	}
 	case KOF_EVT_FILE_NEW:
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
@@ -320,23 +474,9 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
 		       kof_evt_object(e));
 		break;
-	case KOF_EVT_FILE_WRITE: {
-		const struct kof_evt_file *f = kof_evt_as_file(e);
-
-		fprintf(out, "  [%s] %s", kof_loc_name(e->loc),
-		       kof_evt_object(e));
-		/*
-		 * THE RANGE AND NOT JUST THE LENGTH. "wrote 64 bytes to hosts"
-		 * and "wrote 64 bytes at 0x1a2 in hosts" are a sentence and a
-		 * piece of evidence respectively: only the second can be read
-		 * back off the file afterwards, which is the whole reason
-		 * kof_evt_file carries an offset.
-		 */
-		if (f && f->size)
-			fprintf(out, "  %lu bytes @%llu", (unsigned long)f->size,
-				(unsigned long long)f->offset);
+	case KOF_EVT_FILE_WRITE:
+		render_file_write(e, out);
 		break;
-	}
 
 	/*
 	 * The registry path goes in the same column every other object path
@@ -345,124 +485,20 @@ void kof_evt_render(const struct kof_evt *e, double secs, const char *who,
 	 */
 	case KOF_EVT_REG_CREATE:
 	case KOF_EVT_REG_SET_VALUE:
-	case KOF_EVT_REG_DELETE: {
-		const struct kof_evt_reg *r = kof_evt_as_reg(e);
-
-		fprintf(out, "  %s", kof_evt_object(e));
-		/*
-		 * WHETHER A CREATE CREATED ANYTHING. RegCreateKeyEx opens an
-		 * existing key as readily as it makes one, so an unmarked
-		 * create is a line that says a program touched a key - which
-		 * is most lines. Only the new one is worth the reader's eye.
-		 */
-		if (e->verb == KOF_EVT_REG_CREATE && r && r->disp == 1u)
-			fputs("  (new)", out);
-		print_reg_data(out, e);
+	case KOF_EVT_REG_DELETE:
+		render_reg(e, out);
 		break;
-	}
 
 	case KOF_EVT_NET_CONNECT:
 	case KOF_EVT_NET_DISCONNECT:
 	case KOF_EVT_NET_SEND:
 	case KOF_EVT_NET_RECV:
-	case KOF_EVT_DNS_QUERY: {
-		/*
-		 * The address sits in the record in the order it sits in the
-		 * packet and the port in network byte order. Turned into text
-		 * here rather than stored that way, for the reason kofw_evt
-		 * gives: a record that silently disagreed with the packet would
-		 * be worse than one a printer has to convert.
-		 *
-		 * kof_evt_ip_str and not four %lu, because the same sixteen
-		 * bytes have to come out as the same string here, in a report's
-		 * IOC table and in a viewer - and a v6 address written by hand
-		 * in three places is written three ways.
-		 */
-		const struct kof_evt_net *n = kof_evt_as_net(e);
-		char  ip[KOF_IP_STR_MAX];
-		uint16_t dp;
-
-		if (!n)
-			break;
-		dp = (uint16_t)((n->dport >> 8) | (n->dport << 8));
-
-		/*
-		 * A LOOKUP PRINTS THE NAME IT ASKED ABOUT AND THEN THE ANSWER.
-		 *
-		 * The name is the object, which is why it is printed here and
-		 * not by the address code below: for every other verb in this
-		 * group the destination IS the subject of the line, and for
-		 * this one the destination is the answer to it.
-		 *
-		 * AN UNSET ADDRESS PRINTS NOTHING, and it used to print
-		 * "-> no answer".
-		 *
-		 * That read as a lookup that failed, which would be a real and
-		 * interesting finding - a name resolving to nothing is what a
-		 * domain-generation algorithm looks like while it hunts for the
-		 * one that is registered. It is not what the field means. The
-		 * Windows resolver reports its answers in a STRING property
-		 * (QueryResults, "Results %5" in the provider's own message)
-		 * which this build does not parse into an address, so unset
-		 * here means "not decoded" and every successful lookup on the
-		 * machine was being labelled a failure.
-		 *
-		 * So the line says the name, which is the durable half and the
-		 * half that is certainly correct, and says nothing it cannot
-		 * support. When QueryResults is decoded the answer appears here
-		 * and an unset address becomes meaningful again.
-		 */
-		if (e->verb == KOF_EVT_DNS_QUERY) {
-			fprintf(out, "  %s", kof_evt_object(e));
-			if (!kof_evt_ip_is_unset(n->daddr))
-				fprintf(out, "  -> %s",
-					kof_evt_ip_str(n->daddr, ip, sizeof ip));
-			break;
-		}
-
-		/* Brackets around a v6 address before the port, because
-		 * 2001:db8::1:443 cannot be read and [2001:db8::1]:443 can. */
-		kof_evt_ip_str(n->daddr, ip, sizeof ip);
-		if (kof_evt_ip_is_v6(n->daddr))
-			fprintf(out, "  [%s]:%u", ip, (unsigned)dp);
-		else
-			fprintf(out, "  %s:%u", ip, (unsigned)dp);
-		if (n->size)
-			fprintf(out, "  %lu bytes", (unsigned long)n->size);
+	case KOF_EVT_DNS_QUERY:
+		render_net(e, out);
 		break;
-	}
 
 	default:
-		/*
-		 * "[file id 12]", not "[id 12]". A discovery run reads these
-		 * lines to decide what to type, and an id without its provider
-		 * is a number that names two different events.
-		 */
-		if (e->source)
-			fprintf(out, "  [%s id %u]",
-				kof_evt_source_name(e->source),
-				(unsigned)e->raw_id);
-		else
-			fprintf(out, "  [id %u]", (unsigned)e->raw_id);
-		/*
-		 * THE ADDRESS, ON THE RAW PATH TOO, and this was the bug.
-		 *
-		 * Thread events are not typed yet, so they arrive as RAW and
-		 * render here - and this branch printed only the object path,
-		 * which a thread event does not have. So `--thread` collected
-		 * the one field it exists for and then showed an empty line.
-		 * A start address that is never displayed is a subscription
-		 * paying full volume for nothing.
-		 */
-		{
-			const struct kof_evt_mem *m = kof_evt_as_mem(e);
-
-			if (m && m->addr)
-				fprintf(out, "  addr=0x%llx",
-					(unsigned long long)m->addr);
-		}
-		if (*kof_evt_object(e))
-			fprintf(out, "  %s", kof_evt_object(e));
+		render_raw(e, out);
 		break;
 	}
 
@@ -732,28 +768,42 @@ static uint16_t obj_extent(const struct kof_evt *e)
 	return (uint16_t)(n < room ? n : room);
 }
 
-static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
-		    char *name, size_t ncap, char *val, size_t vcap,
-		    uint16_t *xoff, uint16_t *xlen)
-{
+/*
+ * Where one call of field_at stands: which row is wanted, how many have been
+ * passed, and where to put the answer. A NULL sink is not filled.
+ */
+struct fa_cur {
+	unsigned  want;
+	unsigned  seen;
+	char     *name;
+	size_t    ncap;
+	char     *val;
+	size_t    vcap;
+	uint16_t *xoff;
+	uint16_t *xlen;
+};
+
 #define AT(f)  (uint16_t)offsetof(struct kof_evt, f)
 #define SZ(f)  (uint16_t)sizeof ((struct kof_evt *)0)->f
 #define ROWX(nm, o, l, ...)                                                   \
 	do {                                                                  \
-		if (*seen == want) {                                          \
-			if (name) snprintf(name, ncap, "%s", nm);             \
-			if (val)  snprintf(val, vcap, __VA_ARGS__);           \
-			if (xoff) *xoff = (o);                                \
-			if (xlen) *xlen = (l);                                \
+		if (c->seen == c->want) {                                          \
+			if (c->name) snprintf(c->name, c->ncap, "%s", nm);             \
+			if (c->val)  snprintf(c->val, c->vcap, __VA_ARGS__);           \
+			if (c->xoff) *c->xoff = (o);                                \
+			if (c->xlen) *c->xlen = (l);                                \
 			return 1;                                             \
 		}                                                             \
-		(*seen)++;                                                    \
+		c->seen++;                                                    \
 	} while (0)
 /* The ordinary case: a row about one named field of the record. */
 #define ROWF(nm, f, ...) ROWX(nm, AT(f), SZ(f), __VA_ARGS__)
 /* A row about no particular bytes - a note derived from a flag. */
 #define ROW(nm, ...)     ROWX(nm, 0, 0, __VA_ARGS__)
 
+/* Rows: identity, process payload and image. 1 when the wanted one was reached. */
+static int fa_head(const struct kof_evt *e, struct fa_cur *c)
+{
 	ROWF("verb", verb, "%s", kof_evt_verb_name(e->verb));
 	ROWF("pid", pid, "%lu", (unsigned long)e->pid);
 	if (e->actor_pid && e->actor_pid != e->pid)
@@ -795,6 +845,12 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 		ROWX("image", (uint16_t)(AT(text) + e->off_image),
 		     (uint16_t)strlen(kof_evt_image(e)),
 		     "%s", kof_evt_image(e));
+	return 0;
+}
+
+/* Rows: the object (path or content), command line, location, technique. 1 when the wanted one was reached. */
+static int fa_object(const struct kof_evt *e, struct fa_cur *c)
+{
 	/*
 	 * THE OBJECT, WHICH IS A PATH FOR EVERY VERB BUT ONE.
 	 *
@@ -813,13 +869,13 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 	 */
 	if (kof_evt_content(e, NULL, NULL) && e->content_len &&
 	    obj_extent(e) != 0) {
-		if (*seen == want) {
+		if (c->seen == c->want) {
 			const char *ct = NULL;
 			size_t cn = 0;
 
-			if (name)
-				snprintf(name, ncap, "%s", "object");
-			if (val && vcap) {
+			if (c->name)
+				snprintf(c->name, c->ncap, "%s", "object");
+			if (c->val && c->vcap) {
 				/*
 				 * NO "392 B" IN FRONT OF IT. The row already
 				 * carries its length in the offset column -
@@ -830,13 +886,13 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 				 * number that was not the number of bytes left.
 				 */
 				(void)kof_evt_content(e, &ct, &cn);
-				(void)content_readable(ct, cn, val, vcap);
+				(void)content_readable(ct, cn, c->val, c->vcap);
 			}
-			if (xoff) *xoff = (uint16_t)(AT(text) + e->off_object);
-			if (xlen) *xlen = obj_extent(e);
+			if (c->xoff) *c->xoff = (uint16_t)(AT(text) + e->off_object);
+			if (c->xlen) *c->xlen = obj_extent(e);
 			return 1;
 		}
-		(*seen)++;
+		c->seen++;
 	} else if (*kof_evt_object(e)) {
 		ROWX("object", (uint16_t)(AT(text) + e->off_object),
 		     obj_extent(e), "%s", kof_evt_object(e));
@@ -856,7 +912,12 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 	if (e->attack)
 		ROWF("technique", attack, "%s %s", kof_attack_id(e->attack),
 		     kof_attack_name(e->attack));
+	return 0;
+}
 
+/* Rows: the peer address, port and byte count. 1 when the wanted one was reached. */
+static int fa_net(const struct kof_evt *e, struct fa_cur *c)
+{
 	/*
 	 * THE ADDRESS AND THE PORT ARE TWO ROWS, because they are two ranges.
 	 *
@@ -901,6 +962,12 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 			ROWF("bytes", u.net.size, "%lu",
 			     (unsigned long)nt->size);
 	}
+	return 0;
+}
+
+/* Rows: the file write range and key. 1 when the wanted one was reached. */
+static int fa_file(const struct kof_evt *e, struct fa_cur *c)
+{
 	{
 		const struct kof_evt_file *fl = kof_evt_as_file(e);
 
@@ -919,6 +986,12 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 			ROWF("file key", u.file.key, "0x%llx",
 			     (unsigned long long)fl->key);
 	}
+	return 0;
+}
+
+/* Rows: the registry value rows. 1 when the wanted one was reached. */
+static int fa_reg(const struct kof_evt *e, struct fa_cur *c)
+{
 	{
 		const struct kof_evt_reg *rg = kof_evt_as_reg(e);
 
@@ -949,6 +1022,12 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 		if (rg && e->verb == KOF_EVT_REG_CREATE && rg->disp == 1u)
 			ROWF("disposition", u.reg.disp, "%s", "created new");
 	}
+	return 0;
+}
+
+/* Rows: memory, raw id, source, and the flag rows. 1 when the wanted one was reached. */
+static int fa_tail(const struct kof_evt *e, struct fa_cur *c)
+{
 	{
 		const struct kof_evt_mem *mm = kof_evt_as_mem(e);
 
@@ -1035,12 +1114,19 @@ static int field_at(const struct kof_evt *e, unsigned want, unsigned *seen,
 		ROW("anomaly", "entry point in no mapped image");
 	if (e->flags & KOF_EF_LATE_LOAD)
 		ROW("anomaly", "module mapped long after process start");
+	return 0;
+}
+
 #undef ROW
 #undef ROWF
 #undef ROWX
 #undef SZ
 #undef AT
-	return 0;
+
+static int field_at(const struct kof_evt *e, struct fa_cur *c)
+{
+	return fa_head(e, c) || fa_object(e, c) || fa_net(e, c) ||
+	       fa_file(e, c) || fa_reg(e, c) || fa_tail(e, c);
 }
 
 /*
@@ -1070,21 +1156,21 @@ static unsigned row_order(const struct kof_evt *e, uint8_t *ord)
 	unsigned n = 0, i;
 
 	for (i = 0; i < ORDER_MAX; i++) {
-		unsigned seen = 0;
 		uint16_t o = 0, l = 0;
+		struct fa_cur c = { .want = i, .xoff = &o, .xlen = &l };
 		unsigned k;
 
-		if (!field_at(e, i, &seen, NULL, 0, NULL, 0, &o, &l))
+		if (!field_at(e, &c))
 			break;
 		/* Insert by (has bytes, then offset), keeping equals in the
 		 * order they were declared - two rows over one range is a bug
 		 * in the table, and a stable order makes it look like one. */
 		for (k = n; k > 0; k--) {
-			unsigned seen2 = 0;
 			uint16_t po = 0, pl = 0;
+			struct fa_cur c2 = { .want = ord[k - 1u], .xoff = &po,
+					     .xlen = &pl };
 
-			(void)field_at(e, ord[k - 1u], &seen2, NULL, 0, NULL, 0,
-				       &po, &pl);
+			(void)field_at(e, &c2);
 			if (pl == 0 && l != 0)
 				ord[k] = ord[k - 1u];
 			else if (pl != 0 && l != 0 && po > o)
@@ -1102,7 +1188,8 @@ int kof_evt_field(const struct kof_evt *e, unsigned i,
 		  char *name, size_t ncap, char *val, size_t vcap)
 {
 	uint8_t ord[ORDER_MAX];
-	unsigned seen = 0, n;
+	struct fa_cur c = { 0 };
+	unsigned n;
 
 	if (!e || !name || !val || ncap == 0 || vcap == 0)
 		return 0;
@@ -1110,22 +1197,31 @@ int kof_evt_field(const struct kof_evt *e, unsigned i,
 	n = row_order(e, ord);
 	if (i >= n)
 		return 0;
-	return field_at(e, ord[i], &seen, name, ncap, val, vcap, NULL, NULL);
+	c.want = ord[i];
+	c.name = name;
+	c.ncap = ncap;
+	c.val  = val;
+	c.vcap = vcap;
+	return field_at(e, &c);
 }
 
 int kof_evt_field_extent(const struct kof_evt *e, unsigned i,
 			 uint16_t *off, uint16_t *len)
 {
 	uint8_t ord[ORDER_MAX];
-	unsigned seen = 0, n;
 	uint16_t o = 0, l = 0;
+	struct fa_cur c = { 0 };
+	unsigned n;
 
 	if (!e)
 		return 0;
 	n = row_order(e, ord);
 	if (i >= n)
 		return 0;
-	if (!field_at(e, ord[i], &seen, NULL, 0, NULL, 0, &o, &l))
+	c.want = ord[i];
+	c.xoff = &o;
+	c.xlen = &l;
+	if (!field_at(e, &c))
 		return 0;
 	/*
 	 * A row about no particular bytes - a note derived from a flag - is
@@ -1199,43 +1295,6 @@ int kof_evt_content(const struct kof_evt *e, const char **text, size_t *len)
 		return 1;
 	}
 	return 0;
-}
-
-/*
- * THE BYTES A REGISTRY WRITE PUT INTO A VALUE.
- *
- * A SIBLING OF kof_evt_content AND NOT THE SAME FUNCTION, because the two are
- * at different offsets and mean different things. Content is what an object IS
- * - an AMSI submission, sitting at off_object with no path beside it. Registry
- * data sits at off_data BESIDE a path, because a registry event has both: the
- * key it wrote to and what it wrote. Folding them into one accessor would make
- * "the object" mean one thing for one verb and another for the next, which is
- * the confusion off_image and off_object were split to prevent.
- *
- * The guard is the one kof_evt_content's note describes, and it is here for the
- * same reason rather than by analogy: the conversion from the collector's
- * record sets an offset ABSENT when it fell outside the bytes that were copied,
- * and a length left standing beside an absent offset is read as "there is data
- * at zero" - which is the object path, and a scanner would have matched on it.
- */
-int kof_evt_reg_data(const struct kof_evt *e, const char **data, size_t *len)
-{
-	size_t room, n;
-
-	if (data) *data = NULL;
-	if (len)  *len  = 0;
-
-	if (!e || !e->data_len || e->off_data == KOF_TEXT_NONE ||
-	    e->off_data >= sizeof e->text)
-		return 0;
-
-	room = sizeof e->text - e->off_data;
-	n    = e->data_len;
-	if (n > room)
-		n = room;
-	if (data) *data = e->text + e->off_data;
-	if (len)  *len  = n;
-	return n != 0;
 }
 
 int kof_evt_content_looks_binary(const struct kof_evt *e)

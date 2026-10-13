@@ -1,6 +1,6 @@
 /*
- * kgenome_cell_state.h - what a walk over decoded code knows: register constants and a
- * small modelled stack. See kgenome_cell_state.c for what it will and will not do.
+ * cell_state.h - what a walk over decoded code knows: register constants and a
+ * small modelled stack. See cell_state.c for what it will and will not do.
  */
 #ifndef KGENOME_CELL_STATE_H
 #define KGENOME_CELL_STATE_H

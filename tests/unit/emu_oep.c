@@ -16,7 +16,7 @@
  *   with_call      the transfer is a CALL, so the stack is not as the stub
  *                  found it: it is going to return.
  *
- * MUTATION CHECK, measured: with the candidate arm in kofemu.c disabled,
+ * MUTATION CHECK, measured: with the candidate arm in emu_interp.c disabled,
  * hands_over fails (the run ends at the budget); with the stub-range guard
  * removed, inside_stub fails.
  */
@@ -174,8 +174,20 @@ static enum kgenome_emu_stop run(unsigned long dst, enum how how, unsigned plen,
 	{
 		struct kgenome_budget bud = { .max_insn = BUDGET };
 
-		e = kgenome_emu_unp_run_pe(f, len, info, NULL, &bud, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, NULL,
-				       &rep);
+		e = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
+				.file = f,
+				.n = len,
+				.info = info,
+				.imports = NULL,
+				.bud = &bud,
+				.idle = 0,
+				.hand_back = 0,
+				.extensions = KGENOME_EMU_EXTEND_MAX,
+				.oep = NULL,
+				.n_oep = 0,
+				.decl = NULL,
+				.rep = &rep,
+			});
 	}
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image");
@@ -213,8 +225,20 @@ static void resolves(void)
 	{
 		struct kgenome_budget bud = { .max_insn = 1000 };
 
-		e = kgenome_emu_unp_run_pe(f, len, info, NULL, &bud, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, NULL,
-				       &rep);
+		e = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
+				.file = f,
+				.n = len,
+				.info = info,
+				.imports = NULL,
+				.bud = &bud,
+				.idle = 0,
+				.hand_back = 0,
+				.extensions = KGENOME_EMU_EXTEND_MAX,
+				.oep = NULL,
+				.n_oep = 0,
+				.decl = NULL,
+				.rep = &rep,
+			});
 	}
 	if (!e) {
 		ck(0, "no machine to resolve against");

@@ -14,7 +14,7 @@
 #include <stdatomic.h>
 
 #include "arm64.h"
-#include "arm64_int.h"
+#include "arm64_private.h"
 
 static int64_t sx(uint32_t v, unsigned bits)
 {
@@ -49,7 +49,7 @@ static int bitmask_ok(uint32_t x)
  * THE TREE: index, match, descend, and the row's flags. This is the table's
  * authority; the lookup below is derived from it at first use.
  */
-unsigned kgenome_arm64_tree(uint32_t x, unsigned *flags)
+static unsigned kgenome_arm64_tree(uint32_t x, unsigned *flags)
 {
 	const struct kgenome_arm64_node *n = &kgenome_arm64_top;
 	const struct kgenome_arm64_row *r;

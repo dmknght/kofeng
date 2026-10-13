@@ -10,30 +10,20 @@
 
 #include <kofcore.h>
 #include <genotype/image/obj.h>
-#include <genotype/image/addr.h>
+#include <genotype/image/image_addr.h>
 #include "space.h"
 
+/* The headers map at the image base, one to one: the one place a PE offset
+ * outside every section still has an address. */
 static int pe_seg(const struct kgenome_obj *obj, uint64_t off,
-		  struct kgenome_cell_seg *out)
+		  struct kgenome_image_seg *out)
 {
 	const struct kgenome_pe_info *p = kgenome_obj_pe(obj);
-	uint32_t i;
 
 	if (!p->valid)
 		return 0;
-	for (i = 0; i < p->sec_count; i++) {
-		const struct kgenome_pe_sec *s = &p->sec[i];
-
-		if (s->file_size && off >= s->file_off &&
-		    off - s->file_off < s->file_size) {
-			out->lo = s->file_off;
-			out->hi = s->file_off + s->file_size;
-			out->delta = (int64_t)(p->image_base + s->mem_rva) -
-				     (int64_t)s->file_off;
-			return 1;
-		}
-	}
-	/* The headers map at the image base, one to one. */
+	if (kgenome_image_seg_at(obj, off, out))
+		return 1;
 	if (p->sec_count && off < p->sec[0].file_off) {
 		out->lo = 0;
 		out->hi = p->sec[0].file_off;
@@ -44,17 +34,16 @@ static int pe_seg(const struct kgenome_obj *obj, uint64_t off,
 }
 
 static int elf_seg(const struct kgenome_obj *obj, uint64_t off,
-		   struct kgenome_cell_seg *out)
+		   struct kgenome_image_seg *out)
 {
 	const struct kgenome_elf_info *e = kgenome_obj_elf(obj);
-	uint32_t i;
 
 	/*
 	 * A RELOCATABLE OBJECT HAS NO LOAD ADDRESS, AND THE FILE IS THE ONLY
 	 * COHERENT ADDRESS SPACE IT HAS.
 	 *
 	 * A .ko carries no program header at all - readelf says so in as many
-	 * words - so the loop below finds nothing and every instruction is
+	 * words - so the segment lookup finds nothing and every instruction is
 	 * decoded with an address of KGENOME_BROKEN. The consequence is silent and
 	 * total: a relative branch is computed from that address, so `target`
 	 * is broken for every call in the object, and anything matching a call
@@ -73,22 +62,10 @@ static int elf_seg(const struct kgenome_obj *obj, uint64_t off,
 		out->delta = 0;
 		return 1;
 	}
-	for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++) {
-		const struct kgenome_elf_seg *s = &e->seg[i];
-
-		if (s->type != 1u || !s->file_size)   /* PT_LOAD */
-			continue;
-		if (off >= s->file_off && off - s->file_off < s->file_size) {
-			out->lo = s->file_off;
-			out->hi = s->file_off + s->file_size;
-			out->delta = (int64_t)s->mem_addr - (int64_t)s->file_off;
-			return 1;
-		}
-	}
-	return 0;
+	return kgenome_image_seg_at(obj, off, out);
 }
 
-static int obj_seg_at(void *priv, uint64_t off, struct kgenome_cell_seg *out)
+static int obj_seg_at(void *priv, uint64_t off, struct kgenome_image_seg *out)
 {
 	const struct kgenome_obj *obj = priv;
 
@@ -103,7 +80,7 @@ static int obj_seg_at(void *priv, uint64_t off, struct kgenome_cell_seg *out)
 
 static uint64_t obj_off_of_va(void *priv, uint64_t va)
 {
-	return kgenome_pz_addr_to_off(priv, va);
+	return kgenome_image_addr_to_off(priv, va);
 }
 
 void kgenome_cell_space_init(struct kgenome_cell_space *sp, const struct kgenome_obj *obj,

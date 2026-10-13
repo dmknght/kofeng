@@ -89,7 +89,7 @@
  * IT PROVES PRESENCE. A link it did not see is not a link that is not there.
  */
 
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 /* What the run of a linked program holds from one syscall stop to the next. */
 struct route {
@@ -104,34 +104,59 @@ struct route {
 	struct kgenome_diag_emu_made *made;
 	unsigned cap_site, cap_made;
 	unsigned n_site, n_made, n_fd;
-	/* Every address the run has stopped at, harmless call or not: the PROGRESS
+	/* Every stop identity the run has made, harmless call or not: the PROGRESS
 	 * of the run, see route_progress. An open-addressing set of the stop's
-	 * rip + 1 (zero is an empty slot). */
+	 * identity (route_identity, never zero: zero is an empty slot). */
 	uint64_t *seen;
 	unsigned cap_seen, n_seen;
-	int fresh;              /* the stop just made was at an address not seen before */
+	int fresh;              /* the stop just made was not one seen before: see route_identity */
 	int full;               /* the set is at KGENOME_DIAG_EMU_SITES and said so */
 };
 
 /*
- * IS THIS STOP AT AN ADDRESS THE RUN HAS NOT STOPPED AT BEFORE - the run's progress.
+ * THE IDENTITY OF A STOP: where it is AND WHO REACHED IT.
+ *
+ * An address alone is the wrong identity for "no progress". A libc syscall wrapper is ONE
+ * address however many places call it, and each call from a different place is new work - a
+ * program making three hundred different calls through one wrapper is going somewhere. What a
+ * poll is, is the SAME call site reaching the SAME instruction again and again. So the identity
+ * is the stop address and the two call instructions that most recently ran
+ * (kgenome_emu_last_calls: the interpreter's own record, the one the API-call log keys on). Two,
+ * because a wrapper that calls an inner one makes the newest the same for every caller.
+ *
+ * A direct `syscall` in a loop has the same address and the same call history every lap, so it
+ * is a repeat from the third visit on (the first two can differ while the history fills).
+ */
+static uint64_t route_identity(const struct route *R, uint64_t rip)
+{
+	uint64_t c[2], k;
+
+	kgenome_emu_last_calls(R->em, c);
+	k = (rip + 1u) * 0x9e3779b97f4a7c15ull;
+	k = (k ^ (k >> 29) ^ c[0]) * 0xbf58476d1ce4e5b9ull;
+	k = (k ^ (k >> 31) ^ c[1]) * 0x94d049bb133111ebull;
+	k ^= k >> 32;
+	return k ? k : 1u;
+}
+
+/*
+ * IS THIS STOP ONE THE RUN HAS NOT MADE BEFORE - the run's progress.
  *
  * A stop is evidence only the first time: a node is a site, so the second arrival
- * at it adds nothing (see the note on loops at the top) and a loop that polls one
- * syscall is the same stop counted again. What is NEW is a syscall instruction not
- * yet reached - a node when the call is one a diagnose names, and when it is not
- * (a getpid, a gettimeofday: no node, so route_node does not remember it) still
- * ground the run has covered. The run is for reaching the sites; a run that keeps
- * reaching new ones is going somewhere, and one that stops at the old ones is
- * turning round. See KGENOME_DIAG_EMU_QUIET in diag_emu_int.h for what ends it.
+ * at it from the same place adds nothing (see the note on loops at the top) and a loop
+ * that polls one syscall is the same stop counted again. What is NEW is a syscall instruction
+ * not yet reached, or one reached from a call site not yet seen - a node when the call is one a
+ * diagnose names, and when it is not (a getpid, a gettimeofday: no node, so route_node does
+ * not remember it) still ground the run has covered. The run is for reaching the sites; a run
+ * that keeps reaching new ones is going somewhere, and one that stops at the old ones is
+ * turning round. See KGENOME_DIAG_EMU_QUIET in diag_emu_private.h for what ends it.
  *
- * Returns 1 for a new address, 0 for one seen, and -1 when the set is full
- * (KGENOME_DIAG_EMU_SITES: a DoS bound on a program that makes new syscall
- * instructions without end) or memory is - which the caller reports.
+ * Returns 1 for a new identity, 0 for one seen, and -1 when the set is full
+ * (KGENOME_DIAG_EMU_SITES: a DoS bound on a program that makes new stops
+ * without end) or memory is - which the caller reports.
  */
-static int route_progress(struct route *R, uint64_t rip)
+static int route_progress(struct route *R, uint64_t key)
 {
-	uint64_t key = rip + 1u;
 	unsigned h, mask;
 
 	if (R->n_seen >= KGENOME_DIAG_EMU_SITES)
@@ -223,7 +248,7 @@ static void route_aim(struct route *R)
 		 */
 		if (lo < R->obj->entry_off)
 			lo = R->obj->entry_off;
-		va = kgenome_pz_off_to_addr(R->obj, lo);
+		va = kgenome_image_off_to_addr(R->obj, lo);
 		if (va != KGENOME_BROKEN)
 			kgenome_emu_set_rip(R->em, va);
 	}
@@ -244,7 +269,7 @@ static void route_socketcall(struct route *R, uint64_t nr, uint64_t *arg)
 	 * net-connect has no parent.
 	 *
 	 * AFTER THE DEMUX, NOT BEFORE. The first attempt overwrote
-	 * arg[] where it stood, which is where kgenome_flow_cap_of_syscall
+	 * arg[] where it stood, which is where kgenome_nucleo_cap_of_syscall
 	 * reads arg[0] to learn WHICH socket call this is - so the
 	 * operation was gone before it was used.
 	 */
@@ -403,11 +428,11 @@ static void route_remember(struct route *R, uint16_t cap, uint64_t nr,
 
 	/*
 	 * THE NAME, because mmap and mprotect are one capability and
-	 * only the first hands a mapping back - see kgenome_flow_hands_on.
+	 * only the first hands a mapping back - see kgenome_nucleo_hands_on.
 	 * Without it this route linked everything after an mprotect
 	 * to its status value.
 	 */
-	if (kgenome_diag_emu_cap_hands_on_value(cap, kgenome_sys_name(R->bits, (uint32_t)nr)) &&
+	if (kgenome_diag_emu_cap_hands_on_value(cap, kgenome_nucleo_sys_name(R->bits, (uint32_t)nr)) &&
 	    kgenome_diag_emu_ret_is_carryable(ret)) {
 		for (i = 0; i < R->n_made; i++)
 			if (R->made[i].node == node)
@@ -469,13 +494,13 @@ static int route_stop(struct route *R)
 	unsigned i;
 
 	if (st != KGENOME_EMU_STOP_INSN) {
-		kgenome_diag_emu_emu_stop_status(R->s, st);      /* exited, faulted, or ran out */
+		kgenome_diag_emu_stop_status(R->s, st);      /* exited, faulted, or ran out */
 		return 0;
 	}
 
 	rip = kgenome_emu_get_rip(R->em);
-	off = kgenome_pz_addr_to_off(R->obj, rip);
-	switch (route_progress(R, rip)) {
+	off = kgenome_image_addr_to_off(R->obj, rip);
+	switch (route_progress(R, route_identity(R, rip))) {
 	case 1:
 		R->fresh = 1;
 		break;
@@ -504,7 +529,7 @@ static int route_stop(struct route *R)
 	kgenome_emu_step(R->em);
 	ret = kgenome_emu_get_reg(R->em, KGENOME_DIAG_EMU_RET);
 
-	cap = kgenome_flow_cap_of_syscall(R->bits, (uint32_t)nr, arg, &fl);
+	cap = kgenome_nucleo_cap_of_syscall(R->bits, (uint32_t)nr, arg, &fl);
 
 	route_socketcall(R, nr, arg);
 
@@ -542,7 +567,7 @@ static void route_hops(struct route *R)
  * not this and is left alone.
  *
  * ONLY THE FIRST AND THE LAST are available without turning on the
- * instruction trace, which kofemu.h says is a diagnostic and never
+ * instruction trace, which emu.h says is a diagnostic and never
  * something a scan runs with. For a stager there is one hop that
  * matters and both report it; a run with many is one this routine
  * under-reports rather than one it gets wrong.
@@ -574,12 +599,12 @@ static void route_hops(struct route *R)
 			/*
 			 * THE SITE IS NOT IN THE FILE, and saying it
 			 * is would be the lie. Control is executing
-			 * bytes the run produced; kgenome_pz_addr_to_off
+			 * bytes the run produced; kgenome_image_addr_to_off
 			 * answers KGENOME_BROKEN for them, which is the
 			 * engine's word for "applies, could not be
 			 * determined" and is the truth here.
 			 */
-			off = kgenome_pz_addr_to_off(R->obj, hop[q]);
+			off = kgenome_image_addr_to_off(R->obj, hop[q]);
 			h = kgenome_diag_hit_add(R->s, off,
 					     KGENOME_NUCLEO_EXEC_REG, 0);
 			if (h)
@@ -633,11 +658,11 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 
 		memset(&eb, 0, sizeof eb);
 		eb.max_insn = s->bud.max_insn;
-		eb.max_bytes = kgenome_diag_emu_emu_pages_charge(s) * KGENOME_EMU_PAGE;
+		eb.max_bytes = kgenome_diag_emu_pages_charge(s) * KGENOME_EMU_PAGE;
 		R.em = kgenome_emu_unp_build(base, size, ei, &eb, &rep);
 	}
 	if (!R.em) {
-		kgenome_diag_emu_emu_pages_release(s);
+		kgenome_diag_emu_pages_release(s);
 		kgenome_diag_note(s, KGENOME_NOMEM);
 		return;
 	}
@@ -699,7 +724,7 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 	route_hops(&R);
 
 	kgenome_emu_free(R.em);
-	kgenome_diag_emu_emu_pages_release(s);
+	kgenome_diag_emu_pages_release(s);
 	free(R.sites);
 	free(R.made);
 	free(R.seen);

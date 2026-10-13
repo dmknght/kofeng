@@ -63,6 +63,7 @@
 #include "wproc.h"
 #include "wcmdline.h"
 #include "wtext.h"
+#include "../../libkofeng/kofcore/kofcore.h"
 
 /*
  * HOW MUCH TEXT ONE RECORD GETS.
@@ -270,14 +271,8 @@ void kofw_pcache_close(struct kofw_pcache *c)
 
 static uint64_t path_hash(const char *s)
 {
-	uint64_t h = 1469598103934665603ull;
-
-	for (; *s; s++) {
-		h ^= (uint64_t)(unsigned char)*s;
-		h *= 1099511628211ull;
-	}
 	/* A zero hash would be indistinguishable from an empty slot. */
-	return h ? h : 1ull;
+	return kof_hash64_nz(kof_hash64_str(s));
 }
 
 /*

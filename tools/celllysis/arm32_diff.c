@@ -47,7 +47,7 @@
 #include <time.h>
 #include <capstone/capstone.h>
 
-#include "../../libkofeng/kofcore/kofmod/kofsig.h"
+#include <kofmod/kofsig.h>
 #include <celllysis/decode.h>
 
 enum kind {

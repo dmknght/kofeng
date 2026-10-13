@@ -20,8 +20,8 @@
  * in which the bound is visible at the call site rather than hidden in a macro.
  */
 
-#ifndef KUNCOAT_DECOMP_RARCOMMON_H
-#define KUNCOAT_DECOMP_RARCOMMON_H
+#ifndef KUNCOAT_RARCOMMON_H
+#define KUNCOAT_RARCOMMON_H
 
 #include <stdint.h>
 #include <string.h>
@@ -176,4 +176,4 @@ static inline void kuncoat_rar_push_dist(uint32_t *old_dist, uint32_t d)
 	old_dist[0] = d;
 }
 
-#endif /* KUNCOAT_DECOMP_RARCOMMON_H */
+#endif /* KUNCOAT_RARCOMMON_H */

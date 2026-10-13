@@ -6,7 +6,7 @@
  *
  *   kof_synd_infer / kof_synd_name   (databases/pack/kofsyndrome.c)
  *       the set algebra and the four spellings, on a table small enough to read;
- *   sx_syndrome_verdict              (verdictor/verdicts/syndrome.c)
+ *   sx_syndrome_verdict              (verdictor/syndrome.c)
  *       how that lands in a finding: level, type word, family, reason, and
  *       whether it lands at all - through the whole scan, on objects built from
  *       the detector fixtures tests/sigs/sig_verdict_*.c and the exemplars

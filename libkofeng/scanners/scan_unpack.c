@@ -11,31 +11,12 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
 
 
-int sx_unp_eligible(const struct kof_scanner *sc,
+static int sx_unp_eligible(const struct kof_scanner *sc,
 			const struct kof_module *m,
 			const struct kof_obj_ctx *ctx,
 			const struct kof_scan_option *opt,
@@ -94,7 +75,7 @@ int sx_unp_eligible(const struct kof_scanner *sc,
 	 * inside a zip is opened by the zip module again, and MPRESS under
 	 * MPRESS is unpacked twice.
 	 */
-	if (sx_kof_scan_derived_by(sc) == m)
+	if (sx_derived_by(sc) == m)
 		return 0;
 	/*
 	 * Same preconditions as a detector's, from the same place.
@@ -111,7 +92,7 @@ int sx_unp_eligible(const struct kof_scanner *sc,
 /* Whether an unpacker's declared family is the one a rule predicted. Both are
  * strings; NULL on either side is "no", so an unpacker that declares no family
  * never matches and an object with no prediction never has a family pass. */
-int sx_unp_is_family(const struct kof_scanner *sc,
+static int sx_unp_is_family(const struct kof_scanner *sc,
 			 const struct kof_module *m, const char *predict)
 {
 	const char *fam;
@@ -154,7 +135,7 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	sx_mod_begin(sc, m);
 	{
-		uint32_t k0 = sc->n_kids;
+		uint32_t k0 = sc->child.n;
 
 	KOF_TIME_BEGIN(KOF_T_UNPACK);
 	m->fn(ctx);
@@ -162,10 +143,10 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		/* What a carve produced does not make its host
 		 * a wrapper - see KOF_ANALYZE_CARVE. */
 		if (m->step == KOF_ANALYZE_CARVE &&
-		    sc->n_kids > k0)
-			sc->n_carved += sc->n_kids - k0;
+		    sc->child.n > k0)
+			sc->child.n_carved += sc->child.n - k0;
 	}
-	sc->cur_mod = NULL;
+	sc->mod.cur = NULL;
 	/*
 	 * AND WHAT IT FOUND, WHICH WAS BEING THROWN AWAY.
 	 *
@@ -184,18 +165,18 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * dropped, because it is the same kind of statement
 	 * about the same object.
 	 */
-	if (sc->rep_valid && res)
+	if (sc->mod.rep_valid && res)
 		(void)sx_mod_report(sc, ctx, opt, res, m,
-				    sc->rep_level);
+				    sc->mod.rep_level);
 	/* A build claimed by a module that opened nothing is
 	 * a guess about somebody else's file - see
-	 * kof_scanner.pend_build. */
-	sc->pend_build[0] = 0;
-	sc->pend_build_of = NULL;
+	 * kof_scanner.obj.open.pend_build. */
+	sc->obj.open.pend_build[0] = 0;
+	sc->obj.open.pend_build_of = NULL;
 	/* The machine, if this module asked for one. Its
 	 * regions point into the machine's own memory and the
 	 * module has returned, so nothing may read them
-	 * again - see kof_scanner.emu_live. */
+	 * again - see kof_scanner.emu.live. */
 	kof_scan_emu_release(sc);
 }
 
@@ -260,10 +241,10 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * that refused to open one object must not leave it looking as though
 	 * the next object's rules had asked for anything.
 	 */
-	sc->raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
+	sc->cur.raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
 	/* OR, NOT ASSIGN: two passes can ask on one object and neither may
 	 * silence the other - see the note where the EXAMINE pass sets it. */
-	sc->diag_ask |= (want & KOF_ENG_USE_PATHOGEN) != 0;
+	sc->obj.diag.ask |= (want & KOF_ENG_USE_DIAGNOSE) != 0;
 
 	/*
 	 * AND WHETHER ANYBODY SPOKE FOR THE INTERPRETER ON THIS OBJECT.
@@ -297,23 +278,23 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	{
 		int default_ok = opt->emu_use != KOF_EMU_NEVER;
 		int ask = (want & KOF_ENG_USE_EMU) != 0 ||
-			  (default_ok && (sc->cur_want & KOF_ENG_USE_EMU) &&
-			   !sc->emu_produced && !opt->heur_off &&
-			   opt->heur_level >= sc->cur_want_level);
+			  (default_ok && (sc->cur.want & KOF_ENG_USE_EMU) &&
+			   !sc->obj.emu.produced && !opt->heur_off &&
+			   opt->heur_level >= sc->cur.want_level);
 		/*
 		 * THE TWO REFUSALS NO VOUCH TALKS PAST. Not budgets - those are in
 		 * oc_emu_run with the other ceilings - but "run nothing, I mean it"
 		 * and "this is already a payload of a payload".
 		 */
 		if (opt->emu_forbidden || pdepth > EMU_MAX_PACKER_DEPTH)
-			sc->emu_stance = KOF_EMU_STANCE_BANNED;
+			sc->obj.emu.stance = KOF_EMU_STANCE_BANNED;
 		else if (opt->emu_use == KOF_EMU_ONLY)
-			sc->emu_stance = ask ? KOF_EMU_STANCE_ONLY_ASKED
+			sc->obj.emu.stance = ask ? KOF_EMU_STANCE_ONLY_ASKED
 					     : KOF_EMU_STANCE_ONLY;
 		else if (ask)
-			sc->emu_stance = KOF_EMU_STANCE_ASKED;
+			sc->obj.emu.stance = KOF_EMU_STANCE_ASKED;
 		else
-			sc->emu_stance = default_ok ? KOF_EMU_STANCE_GUESS
+			sc->obj.emu.stance = default_ok ? KOF_EMU_STANCE_GUESS
 						    : KOF_EMU_STANCE_NOBODY;
 	}
 
@@ -356,7 +337,7 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * segment, which came out once as a child of the file and again as a
 	 * child of its view, the same bytes with the padding taken out.
 	 *
-	 * THE OBJECT SAYS SO ITSELF - see kof_src_declare_view. It was "has a
+	 * THE OBJECT SAYS SO ITSELF - see kof_src_kind_of. It was "has a
 	 * declared region table", which is a consequence of being a view and
 	 * not the fact: a view of an object whose regions could not be resolved
 	 * carries no table, and its parent's appendix came out twice.
@@ -367,7 +348,7 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * view and every rule searches them, which is what the view is for; it
 	 * is the structure that is not recovered.
 	 */
-	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
+	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
 		return 0;
 
 	kof_mod_unpack_mode(ctx, 1);
@@ -398,10 +379,10 @@ static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		       const char *predict, int *applies)
 {
 	uint32_t i;
-	uint32_t kids0 = sc->n_kids;
-	uint32_t carved0 = sc->n_carved;
+	uint32_t kids0 = sc->child.n;
+	uint32_t carved0 = sc->child.n_carved;
 
-	for (i = 0; i < sc->eng->n_unp && !sc->broken; i++) {
+	for (i = 0; i < sc->eng->n_unp && !sc->obj.open.broken; i++) {
 		const struct kof_module *m = &sc->eng->unp[i];
 
 		if (!sx_unp_eligible(sc, m, ctx, opt, want) ||
@@ -424,7 +405,7 @@ static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * analyze_object.
 	 */
 
-	return sc->n_kids - kids0 > sc->n_carved - carved0;
+	return sc->child.n - kids0 > sc->child.n_carved - carved0;
 }
 
 	/*
@@ -492,7 +473,7 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * The budget is the one thing that genuinely stops the tree,
 		 * and it is the only thing this now stops for.
 		 */
-		if (sc->broken == KOF_BROKEN_LIMIT)
+		if (sc->obj.open.broken == KOF_BROKEN_LIMIT)
 			return 0;       /* nothing left to spend on this tree */
 		unpack_turn(sc, ctx, opt, res, m);
 	}
@@ -535,11 +516,17 @@ void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * the stage is: the gate is decided on the first call, a refusal or an opening
  * by the predicted family answers every later call without work.
  */
-void sx_open_step(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		  const struct kof_scan_option *opt, struct kof_result *res,
-		  uint32_t pdepth, uint32_t want, const char *predict,
-		  enum kof_analyze step, struct kof_open *o)
+void sx_open_step(struct kof_pipeline *p)
 {
+	struct kof_scanner *sc = p->sc;
+	struct kof_obj_ctx *ctx = &p->ctx;
+	const struct kof_scan_option *opt = p->opt;
+	struct kof_result *res = p->out;
+	const uint32_t pdepth = p->pdepth, want = p->want;
+	const char *predict = p->predict;
+	const enum kof_analyze step = p->step;
+	struct kof_open *o = &p->open;
+
 	if (o->state == KOF_OPEN_FRESH) {
 		o->state = open_gate(sc, ctx, opt, res, pdepth, want)
 			   ? KOF_OPEN_ACTIVE : KOF_OPEN_REFUSED;
@@ -661,7 +648,7 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * kof_objtree_may_open is checked inside, at the top, so this is one
 	 * call rather than a call and a guard that could disagree.
 	 */
-	if (!sc->broken && kof_objtree_declared(ctx, opt))
+	if (!sc->obj.open.broken && kof_objtree_declared(ctx, opt))
 		applies = 1;
 
 	kof_mod_unpack_mode(ctx, 0);
@@ -688,7 +675,7 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * statement about bytes nobody could read and a false impression about
 	 * the program.
 	 */
-	if (!sc->broken && !sc->n_kids && ctx->format == KOF_FMT_PE)
+	if (!sc->obj.open.broken && !sc->child.n && ctx->format == KOF_FMT_PE)
 		sx_dense_code_unread(sc, ctx);
 
 	/*
@@ -698,5 +685,5 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * that on an object no unpacker would have touched anyway is noise that
 	 * makes the real case harder to see.
 	 */
-	return applies ? sc->broken : 0;
+	return applies ? sc->obj.open.broken : 0;
 }

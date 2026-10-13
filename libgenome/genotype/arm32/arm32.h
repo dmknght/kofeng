@@ -49,7 +49,7 @@
 
 #include "arm32_ids.h"
 #include "arm32_common.h"
-#include "arm32_int.h"
+#include "arm32_table.h"
 #include "../genotype.h"
 
 struct kgenome_arm32_insn {
@@ -69,7 +69,7 @@ struct kgenome_arm32_insn {
  * ARM binaries (632,171 instructions), genotype decode plus the celllysis
  * adapter: 120.9 M instructions out of line, 112.0 M inline. The instruction is
  * also handed to the adapter's builders BY VALUE - it is 8 bytes, one register -
- * and its accessors take it so: 109.5 M. ns per instruction: arm32_equiv bench.
+ * and its accessors take it so: 109.5 M. ns per instruction (one-off bench).
  */
 static inline enum kgenome_status kgenome_arm32_decode(struct kgenome_arm32_insn *out, uint32_t w)
 {

@@ -43,7 +43,7 @@
 #include "../../libkofeng/databases/dbloader.h"
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
-#include "../../libkofeng/kofcore/kofmod/kofpathogen.h"
+#include "../../libkofeng/kofcore/kofmod/kofdiagtree.h"
 
 static int fails;
 static char root[256];

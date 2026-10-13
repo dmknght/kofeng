@@ -132,11 +132,7 @@ struct kof_rtf_info {
 
 	uint32_t n_runs;
 	uint32_t reserved0;
-	struct {
-		uint64_t off, len;
-		uint32_t cls;         /* enum kof_rtf_class */
-		uint32_t reserved;
-	} run[KOF_RTF_MAX_EXTENTS];
+	struct kof_run run[KOF_RTF_MAX_EXTENTS];   /* cls is enum kof_rtf_class */
 
 	struct kof_rtf_object obj[KOF_RTF_MAX_OBJECTS];
 };

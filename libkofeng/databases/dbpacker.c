@@ -265,17 +265,25 @@ static int count_all(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	return 1;
 }
 
-static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
-{
-	struct dedup ds, dn;
-	uint32_t i, k, si = 0, ni = 0, ri = 0, bi = 0, pi = 0;
-	int ok = 0;
+/* What the pieces of collect() share: the pack being built, the two interning sets, and
+ * how far into each table the modules so far have written. */
+struct collect_cx {
+	struct built *b;
+	struct dedup  ds, dn;
+	uint32_t      si, ni, ri, bi, pi;
+};
 
-	memset(&ds, 0, sizeof ds);
-	memset(&dn, 0, sizeof dn);
+/*
+ * THE TABLES AND THE TWO INTERNING SETS, sized from the totals: allocated once at the
+ * right size and never grown. Returns 0 when a total does not fit or memory ran out.
+ */
+static int collect_alloc(struct collect_cx *cx, const struct kof_pw_mod *mods,
+			 uint32_t n)
+{
+	struct built *b = cx->b;
 
 	if (!count_all(mods, n, b))
-		goto out;
+		return 0;
 
 	b->mod  = calloc(b->n_mods ? b->n_mods : 1, sizeof *b->mod);
 	b->str  = calloc(b->n_str  ? b->n_str  : 1, sizeof *b->str);
@@ -284,7 +292,7 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	b->blk  = calloc(b->n_blk  ? b->n_blk  : 1, sizeof *b->blk);
 	b->pool = calloc(b->n_pool ? b->n_pool : 1, sizeof *b->pool);
 	if (!b->mod || !b->str || !b->name || !b->rng)
-		goto out;
+		return 0;
 	/*
 	 * dn interns, per module, a family AND (when present) a heur_predict and
 	 * a source path, plus one entry per finding name - so up to n_name + 3n
@@ -295,9 +303,9 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	 * what it was before predict and src were interned into it - overflowed
 	 * on a HEUR pack with more rules than names and aborted the whole build.
 	 */
-	if (!dedup_init(&ds, b->n_str ? b->n_str : 1) ||
-	    !dedup_init(&dn, (b->n_name ? b->n_name : 1) + 3u * (n ? n : 1) + 1u))
-		goto out;
+	if (!dedup_init(&cx->ds, b->n_str ? b->n_str : 1) ||
+	    !dedup_init(&cx->dn, (b->n_name ? b->n_name : 1) + 3u * (n ? n : 1) + 1u))
+		return 0;
 
 	/*
 	 * RESERVE POOL OFFSET ZERO for the empty string, so nothing else lands
@@ -312,262 +320,316 @@ static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
 	{
 		uint32_t empty_off, empty_uid;
 
-		if (!name_intern(&dn, &b->name_pool, "", &empty_off, &empty_uid))
-			goto out;
+		if (!name_intern(&cx->dn, &b->name_pool, "", &empty_off, &empty_uid))
+			return 0;
 	}
+	return 1;
+}
 
+/* THE CALLER'S ARRAYS AND PER-MODULE MAXIMA, refused before any of them is walked. */
+static int collect_check(const struct kof_pw_mod *m)
+{
+	/*
+	 * The caller's arrays are checked here rather than trusted. This
+	 * is a library entry point: a length with no bytes behind it is a
+	 * memcpy from NULL, which is a crash inside the writer for a
+	 * mistake made outside it, and the writer is the only place that
+	 * can tell the difference.
+	 */
+	if (m->code_len == 0 || m->code_len > KOF_BLOB_MAX_CODE || !m->code)
+		return 0;
+	if ((m->n_str && !m->str) || (m->n_rng && !m->rng) ||
+	    (m->n_names && !m->name) ||
+	    (m->n_blk && !m->blk) || (m->n_pool && !m->pool))
+		return 0;
+
+	/*
+	 * The per-module maxima the module ABI already declares, enforced
+	 * here because this is where they first have consequences. Before
+	 * any loop, not after: a count is the only description of how long
+	 * the caller's array is, so a count that is wrong has to be refused
+	 * before it is used to walk one - questioning it afterwards means
+	 * the walk already happened.
+	 *
+	 * They also make n_str x n_rng bounded by 4096, so the memo total
+	 * below cannot overflow whatever a caller passes.
+	 */
+	if (m->n_str > KOF_MAX_STR_PER_MODULE ||
+	    m->n_rng > KOF_MAX_RANGE_PER_MODULE)
+		return 0;
+	return 1;
+}
+
+/* THE MODULE'S BLOB AND ITS RECORD: the code (16-byte aligned), the counts and offsets,
+ * and what it declared as text - family, prediction, content, source - interned. */
+static int collect_head(struct collect_cx *cx, const struct kof_pw_mod *m,
+			struct kof_pack_mod *o)
+{
+	struct built *b = cx->b;
+	uint32_t code_off;
+
+	/* Each blob starts 16 byte aligned so its entry point is never
+	 * misaligned for the target's calling convention. */
+	{
+		uint64_t pad = kof_round_up(b->code.len, KOF_PACK_BLOB_ALIGN)
+			       - b->code.len;
+		static const uint8_t zero[KOF_PACK_BLOB_ALIGN] = { 0 };
+		uint32_t dummy;
+		if (pad && !buf_add(&b->code, zero, (size_t)pad, &dummy))
+			return 0;
+	}
+	if (!buf_add(&b->code, m->code, m->code_len, &code_off))
+		return 0;
+
+	o->code_off   = code_off;
+	o->code_len   = m->code_len;
+	o->str_first  = cx->si;
+	o->n_str      = m->n_str;
+	o->rng_first  = cx->ri;
+	o->n_rng      = m->n_rng;
+	o->blk_first  = cx->bi;
+	o->n_blk      = m->n_blk;
+	o->name_first = cx->ni;
+	o->n_names    = m->n_names;
+
+	/*
+	 * What KOF_TARGET_NAME declared, once per module rather than once
+	 * per finding - see the comment on struct kof_pack_mod. Interned
+	 * into the same pool and the same dedup table a finding's variant
+	 * uses (dn), so two modules declaring the same family share the
+	 * bytes. Empty rather than skipped when a module declared none,
+	 * so family_off is always a real offset to a real string and the
+	 * loader never has to treat it as a special case.
+	 *
+	 * An UNPACK module may well declare one - the msf decoders do,
+	 * and the scanner's family pass reads exactly this field to run
+	 * a predicted family's unpackers in front of the rest.
+	 */
+	{
+		const char *fam = m->family ? m->family : "";
+		uint32_t family_uid;
+
+		if (!name_intern(&cx->dn, &b->name_pool, fam,
+				 &o->family_off, &family_uid))
+			return 0;
+	}
+	o->maltype = m->maltype;
+	o->disease = m->disease;
+	o->disease_type = m->disease_type;
+	o->step = m->step;
+	o->heur_phase = m->heur_phase;
+	o->heur_level = m->heur_level;
+	o->cure_off   = m->cure_off;
+	o->heur_want  = m->heur_want;
+	/* Interned like the family and the source path: the text lives
+	 * once in the pool and the record carries an offset. */
+	if (m->heur_predict && m->heur_predict[0]) {
+		uint32_t predict_uid;
+
+		if (!name_intern(&cx->dn, &b->name_pool, m->heur_predict,
+				 &o->heur_predict_off, &predict_uid))
+			return 0;
+	}
+	if (m->content && m->content[0]) {
+		uint32_t content_uid;
+
+		if (!name_intern(&cx->dn, &b->name_pool, m->content,
+				 &o->content_off, &content_uid))
+			return 0;
+	}
+	if (m->src && m->src[0]) {
+		uint32_t src_uid;
+
+		if (!name_intern(&cx->dn, &b->name_pool, m->src,
+				 &o->src_off, &src_uid))
+			return 0;
+	}
+	return 1;
+}
+
+/* THE MODULE'S STRINGS, validated and interned; a compiled program stays aligned. */
+static int collect_strs(struct collect_cx *cx, const struct kof_pw_mod *m)
+{
+	struct built *b = cx->b;
+	uint32_t k;
+
+	for (k = 0; k < m->n_str; k++, cx->si++) {
+		const struct kof_pw_str *s = &m->str[k];
+		uint32_t off, uid = 0;
+		/* Per kind: a compiled hex program is a header and two
+		 * tables, so its length is not comparable with a
+		 * literal's and the literal cap would refuse ordinary
+		 * patterns. */
+		if (!s->bytes || s->len == 0)
+			return 0;
+		if (s->kind == KOF_STR_LITERAL) {
+			if (s->len > KOF_STR_MAX_LEN)
+				return 0;
+		} else if (s->kind == KOF_STR_HEX) {
+			if (s->len > KOF_HEX_MAX_PROG)
+				return 0;
+		} else {
+			return 0;
+		}
+		/*
+		 * A compiled program is read as a struct, so it has to be
+		 * aligned - the matcher casts the pool bytes rather than
+		 * copying them out, which is the whole reason the strides
+		 * are fixed. UBSan on a real corpus is what found this;
+		 * on x86 the unaligned read merely works, and on the
+		 * architectures the pack format already names it does not.
+		 *
+		 * Interned without dedup for the same reason: a matching
+		 * run of bytes elsewhere in the pool is very unlikely to
+		 * be aligned, and reusing it would undo the padding. Hex
+		 * programs are few and the copy is bytes.
+		 */
+		if (s->kind == KOF_STR_HEX) {
+			static const uint8_t pad[4] = { 0 };
+			uint32_t dummy;
+
+			if (b->str_pool.len % KOF_HEX_PROG_ALIGN &&
+			    !buf_add(&b->str_pool, pad,
+				     KOF_HEX_PROG_ALIGN -
+				     b->str_pool.len % KOF_HEX_PROG_ALIGN,
+				     &dummy))
+				return 0;
+			if (!buf_add(&b->str_pool, s->bytes, s->len, &off))
+				return 0;
+			/* Compiled programs are not interned - they must stay
+			 * aligned - so each gets an id of its own and shares
+			 * with nothing. */
+			uid = cx->ds.next_uid++;
+		/* The options are part of the identity - see dedup.tag.
+		 * Same bytes, different options: two entries, two uids,
+		 * two memo slots. The pool holds the bytes twice, which
+		 * is a handful of bytes for a question that was being
+		 * answered wrongly. */
+		} else if (!pool_intern_tag(&cx->ds, &b->str_pool, s->bytes,
+					    s->len, s->flags,
+					    &off, &uid)) {
+			return 0;
+		}
+		b->str[cx->si].uid   = uid;
+		b->str[cx->si].off   = off;
+		b->str[cx->si].len   = s->len;
+		b->str[cx->si].kind  = s->kind;
+		b->str[cx->si].flags = s->flags;
+	}
+	return 1;
+}
+
+/* THE RANGES, THE BLOCKS (rebased into the pack's pool), THE POOL AND THE NAMES. */
+static int collect_tables(struct collect_cx *cx, const struct kof_pw_mod *m)
+{
+	struct built *b = cx->b;
+	uint32_t k;
+
+	for (k = 0; k < m->n_rng; k++, cx->ri++)
+		b->rng[cx->ri] = m->rng[k];
+	/*
+	 * The blocks, REBASED into the pack's pool as they are copied.
+	 * A module's block records index its own hashes from zero, and
+	 * the pack has one pool for all of them - so first_hash moves
+	 * by however many hashes came before. The same rebasing a
+	 * string offset gets, and the same failure if it is skipped:
+	 * a block that reads another module's hashes and scores
+	 * against them.
+	 */
+	for (k = 0; k < m->n_blk; k++, cx->bi++) {
+		b->blk[cx->bi] = m->blk[k];
+		b->blk[cx->bi].first_hash += cx->pi;
+	}
+	for (k = 0; k < m->n_pool; k++, cx->pi++)
+		b->pool[cx->pi] = m->pool[k];
+	for (k = 0; k < m->n_names; k++, cx->ni++) {
+		const struct kof_pw_name *nm = &m->name[k];
+		uint32_t off, nuid;
+		if (!nm->text)
+			return 0;
+		/* Names share the pool too, but nothing keys on their id. */
+		if (!name_intern(&cx->dn, &b->name_pool, nm->text, &off,
+				 &nuid))
+			return 0;
+		(void)nuid;
+		b->name[cx->ni].id  = nm->id;
+		b->name[cx->ni].off = off;
+	}
+	return 1;
+}
+
+/* WHAT THE PACK'S DESCRIBES AS A WHOLE, derived from this module: the union of the
+ * targets, scans and architectures, the smallest minimum size, and the memo total. */
+static int collect_union(struct built *b, const struct kof_pw_mod *m, uint32_t i)
+{
+	/*
+	 * The union. Derived here and nowhere else: a value that claims
+	 * more than its members do stops running them, and a detection
+	 * that did not happen is not something a test notices.
+	 */
+	/*
+	 * The union is a PRESENCE SET over target ids now, not an OR of
+	 * masks: an id is an ordinary number, so "something here is for
+	 * target t" is a bit of this per id rather than the id itself.
+	 * A module that names no target names every one of them.
+	 */
+	if (!m->n_target) {
+		b->any_target = ~(uint64_t)0;
+	} else {
+		uint8_t ti;
+
+		for (ti = 0; ti < m->n_target &&
+			     ti < KOF_TARGET_LIST_MAX; ti++)
+			if (m->target[ti] < 64u)
+				b->any_target |= (uint64_t)1
+						 << m->target[ti];
+	}
+	b->any_scan   |= m->scan_mask;
+	b->any_arch   |= m->arch_mask;
+
+	/* Plain minimum. Zero already means "no minimum", and it is the
+	 * smallest value there is, so a module without one drags the
+	 * pack's minimum to zero on its own - which is the right answer
+	 * and needs no special case to reach it. */
+	if (i == 0 || m->size_min < b->min_size_min)
+		b->min_size_min = m->size_min;
+
+	/* In 64 bits: n_str x n_rng in 32 would wrap for an absurd module
+	 * and hand back a small product that passes any check made after
+	 * it. The memo is indexed with this number. */
+	{
+		uint64_t slots = (uint64_t)m->n_str * m->n_rng;
+		if (slots > 0xffffffffu ||
+		    b->memo_slots > 0xffffffffu - slots)
+			return 0;
+		b->memo_slots += (uint32_t)slots;
+	}
+	return 1;
+}
+
+static int collect(const struct kof_pw_mod *mods, uint32_t n, struct built *b)
+{
+	struct collect_cx cx;
+	uint32_t i;
+	int ok = 0;
+
+	memset(&cx, 0, sizeof cx);
+	cx.b = b;
+
+	if (!collect_alloc(&cx, mods, n))
+		goto out;
 	for (i = 0; i < n; i++) {
 		const struct kof_pw_mod *m = &mods[i];
-		struct kof_pack_mod *o = &b->mod[i];
-		uint32_t code_off;
 
-		/*
-		 * The caller's arrays are checked here rather than trusted. This
-		 * is a library entry point: a length with no bytes behind it is a
-		 * memcpy from NULL, which is a crash inside the writer for a
-		 * mistake made outside it, and the writer is the only place that
-		 * can tell the difference.
-		 */
-		if (m->code_len == 0 || m->code_len > KOF_BLOB_MAX_CODE || !m->code)
+		if (!collect_check(m) || !collect_head(&cx, m, &b->mod[i]) ||
+		    !collect_strs(&cx, m) || !collect_tables(&cx, m) ||
+		    !collect_union(b, m, i))
 			goto out;
-		if ((m->n_str && !m->str) || (m->n_rng && !m->rng) ||
-		    (m->n_names && !m->name) ||
-		    (m->n_blk && !m->blk) || (m->n_pool && !m->pool))
-			goto out;
-
-		/*
-		 * The per-module maxima the module ABI already declares, enforced
-		 * here because this is where they first have consequences. Before
-		 * any loop, not after: a count is the only description of how long
-		 * the caller's array is, so a count that is wrong has to be refused
-		 * before it is used to walk one - questioning it afterwards means
-		 * the walk already happened.
-		 *
-		 * They also make n_str x n_rng bounded by 4096, so the memo total
-		 * below cannot overflow whatever a caller passes.
-		 */
-		if (m->n_str > KOF_MAX_STR_PER_MODULE ||
-		    m->n_rng > KOF_MAX_RANGE_PER_MODULE)
-			goto out;
-
-		/* Each blob starts 16 byte aligned so its entry point is never
-		 * misaligned for the target's calling convention. */
-		{
-			uint64_t pad = kof_round_up(b->code.len, KOF_PACK_BLOB_ALIGN)
-				       - b->code.len;
-			static const uint8_t zero[KOF_PACK_BLOB_ALIGN] = { 0 };
-			uint32_t dummy;
-			if (pad && !buf_add(&b->code, zero, (size_t)pad, &dummy))
-				goto out;
-		}
-		if (!buf_add(&b->code, m->code, m->code_len, &code_off))
-			goto out;
-
-		o->code_off   = code_off;
-		o->code_len   = m->code_len;
-		o->str_first  = si;
-		o->n_str      = m->n_str;
-		o->rng_first  = ri;
-		o->n_rng      = m->n_rng;
-		o->blk_first  = bi;
-		o->n_blk      = m->n_blk;
-		o->name_first = ni;
-		o->n_names    = m->n_names;
-
-		/*
-		 * What KOF_TARGET_NAME declared, once per module rather than once
-		 * per finding - see the comment on struct kof_pack_mod. Interned
-		 * into the same pool and the same dedup table a finding's variant
-		 * uses (dn), so two modules declaring the same family share the
-		 * bytes. Empty rather than skipped when a module declared none,
-		 * so family_off is always a real offset to a real string and the
-		 * loader never has to treat it as a special case.
-		 *
-		 * An UNPACK module may well declare one - the msf decoders do,
-		 * and the scanner's family pass reads exactly this field to run
-		 * a predicted family's unpackers in front of the rest.
-		 */
-		{
-			const char *fam = m->family ? m->family : "";
-			uint32_t family_uid;
-
-			if (!name_intern(&dn, &b->name_pool, fam,
-					 &o->family_off, &family_uid))
-				goto out;
-		}
-		o->maltype = m->maltype;
-		o->disease = m->disease;
-		o->disease_type = m->disease_type;
-		o->step = m->step;
-		o->heur_phase = m->heur_phase;
-		o->heur_level = m->heur_level;
-		o->cure_off   = m->cure_off;
-		o->heur_want  = m->heur_want;
-		/* Interned like the family and the source path: the text lives
-		 * once in the pool and the record carries an offset. */
-		if (m->heur_predict && m->heur_predict[0]) {
-			uint32_t predict_uid;
-
-			if (!name_intern(&dn, &b->name_pool, m->heur_predict,
-					 &o->heur_predict_off, &predict_uid))
-				goto out;
-		}
-		if (m->content && m->content[0]) {
-			uint32_t content_uid;
-
-			if (!name_intern(&dn, &b->name_pool, m->content,
-					 &o->content_off, &content_uid))
-				goto out;
-		}
-		if (m->src && m->src[0]) {
-			uint32_t src_uid;
-
-			if (!name_intern(&dn, &b->name_pool, m->src,
-					 &o->src_off, &src_uid))
-				goto out;
-		}
-
-		for (k = 0; k < m->n_str; k++, si++) {
-			const struct kof_pw_str *s = &m->str[k];
-			uint32_t off, uid = 0;
-			/* Per kind: a compiled hex program is a header and two
-			 * tables, so its length is not comparable with a
-			 * literal's and the literal cap would refuse ordinary
-			 * patterns. */
-			if (!s->bytes || s->len == 0)
-				goto out;
-			if (s->kind == KOF_STR_LITERAL) {
-				if (s->len > KOF_STR_MAX_LEN)
-					goto out;
-			} else if (s->kind == KOF_STR_HEX) {
-				if (s->len > KOF_HEX_MAX_PROG)
-					goto out;
-			} else {
-				goto out;
-			}
-			/*
-			 * A compiled program is read as a struct, so it has to be
-			 * aligned - the matcher casts the pool bytes rather than
-			 * copying them out, which is the whole reason the strides
-			 * are fixed. UBSan on a real corpus is what found this;
-			 * on x86 the unaligned read merely works, and on the
-			 * architectures the pack format already names it does not.
-			 *
-			 * Interned without dedup for the same reason: a matching
-			 * run of bytes elsewhere in the pool is very unlikely to
-			 * be aligned, and reusing it would undo the padding. Hex
-			 * programs are few and the copy is bytes.
-			 */
-			if (s->kind == KOF_STR_HEX) {
-				static const uint8_t pad[4] = { 0 };
-				uint32_t dummy;
-
-				if (b->str_pool.len % KOF_HEX_PROG_ALIGN &&
-				    !buf_add(&b->str_pool, pad,
-					     KOF_HEX_PROG_ALIGN -
-					     b->str_pool.len % KOF_HEX_PROG_ALIGN,
-					     &dummy))
-					goto out;
-				if (!buf_add(&b->str_pool, s->bytes, s->len, &off))
-					goto out;
-				/* Compiled programs are not interned - they must stay
-				 * aligned - so each gets an id of its own and shares
-				 * with nothing. */
-				uid = ds.next_uid++;
-			/* The options are part of the identity - see dedup.tag.
-			 * Same bytes, different options: two entries, two uids,
-			 * two memo slots. The pool holds the bytes twice, which
-			 * is a handful of bytes for a question that was being
-			 * answered wrongly. */
-			} else if (!pool_intern_tag(&ds, &b->str_pool, s->bytes,
-						    s->len, s->flags,
-						    &off, &uid)) {
-				goto out;
-			}
-			b->str[si].uid   = uid;
-			b->str[si].off   = off;
-			b->str[si].len   = s->len;
-			b->str[si].kind  = s->kind;
-			b->str[si].flags = s->flags;
-		}
-		for (k = 0; k < m->n_rng; k++, ri++)
-			b->rng[ri] = m->rng[k];
-		/*
-		 * The blocks, REBASED into the pack's pool as they are copied.
-		 * A module's block records index its own hashes from zero, and
-		 * the pack has one pool for all of them - so first_hash moves
-		 * by however many hashes came before. The same rebasing a
-		 * string offset gets, and the same failure if it is skipped:
-		 * a block that reads another module's hashes and scores
-		 * against them.
-		 */
-		for (k = 0; k < m->n_blk; k++, bi++) {
-			b->blk[bi] = m->blk[k];
-			b->blk[bi].first_hash += pi;
-		}
-		for (k = 0; k < m->n_pool; k++, pi++)
-			b->pool[pi] = m->pool[k];
-		for (k = 0; k < m->n_names; k++, ni++) {
-			const struct kof_pw_name *nm = &m->name[k];
-			uint32_t off, nuid;
-			if (!nm->text)
-				goto out;
-			/* Names share the pool too, but nothing keys on their id. */
-			if (!name_intern(&dn, &b->name_pool, nm->text, &off,
-					 &nuid))
-				goto out;
-			(void)nuid;
-			b->name[ni].id  = nm->id;
-			b->name[ni].off = off;
-		}
-
-		/*
-		 * The union. Derived here and nowhere else: a value that claims
-		 * more than its members do stops running them, and a detection
-		 * that did not happen is not something a test notices.
-		 */
-		/*
-		 * The union is a PRESENCE SET over target ids now, not an OR of
-		 * masks: an id is an ordinary number, so "something here is for
-		 * target t" is a bit of this per id rather than the id itself.
-		 * A module that names no target names every one of them.
-		 */
-		if (!m->n_target) {
-			b->any_target = ~(uint64_t)0;
-		} else {
-			uint8_t ti;
-
-			for (ti = 0; ti < m->n_target &&
-				     ti < KOF_TARGET_LIST_MAX; ti++)
-				if (m->target[ti] < 64u)
-					b->any_target |= (uint64_t)1
-							 << m->target[ti];
-		}
-		b->any_scan   |= m->scan_mask;
-		b->any_arch   |= m->arch_mask;
-
-		/* Plain minimum. Zero already means "no minimum", and it is the
-		 * smallest value there is, so a module without one drags the
-		 * pack's minimum to zero on its own - which is the right answer
-		 * and needs no special case to reach it. */
-		if (i == 0 || m->size_min < b->min_size_min)
-			b->min_size_min = m->size_min;
-
-		/* In 64 bits: n_str x n_rng in 32 would wrap for an absurd module
-		 * and hand back a small product that passes any check made after
-		 * it. The memo is indexed with this number. */
-		{
-			uint64_t slots = (uint64_t)m->n_str * m->n_rng;
-			if (slots > 0xffffffffu ||
-			    b->memo_slots > 0xffffffffu - slots)
-				goto out;
-			b->memo_slots += (uint32_t)slots;
-		}
 	}
 	ok = 1;
 out:
-	dedup_free(&ds);
-	dedup_free(&dn);
+	dedup_free(&cx.ds);
+	dedup_free(&cx.dn);
 	return ok;
 }
 

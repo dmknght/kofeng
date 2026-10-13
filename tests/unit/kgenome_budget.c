@@ -18,7 +18,7 @@
  */
 
 #include "caps_fix.h"
-#include <phenotype/diag_int.h>
+#include <phenotype/diag_private.h>
 
 static unsigned char view[1u << 22];
 static uint8_t img[1u << 21];

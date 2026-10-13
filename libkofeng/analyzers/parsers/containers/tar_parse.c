@@ -258,7 +258,7 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.t = t;
-	kof_runs_init(&s.runs, (struct kof_run *)t->run, KOF_TAR_MAX_EXTENTS,
+	kof_runs_init(&s.runs, t->run, KOF_TAR_MAX_EXTENTS,
 		      KOF_TAR_CLS_COUNT);
 
 	/*

@@ -84,12 +84,9 @@ struct kof_amsi_view {
 	uint32_t reserved;
 };
 
-int  kof_amsi_sniff(kof_buf b);
 int  kof_amsi_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx);
 
 const char *kof_amsi_region_name(uint32_t bit);
-const char *kof_amsi_anomaly_name(unsigned index);
-uint64_t    kof_amsi_anomalies(const void *view);
 
 extern const uint32_t kof_amsi_regions[2];
 

@@ -1,7 +1,7 @@
 /*
  * arm32_index.c - the first-level index of the ARM state and Thumb state decoders,
  * derived from the hand-written rows (arm32_rows.c, thumb_rows.c) by code, once,
- * the first time a decode needs it. See arm32_int.h for what it is and how the
+ * the first time a decode needs it. See arm32_table.h for what it is and how the
  * guard works.
  *
  * For every value of the index key it lists, in priority order, the rows that can
@@ -16,7 +16,7 @@
 
 #include "arm32_ids.h"
 #include "thumb_ids.h"
-#include "arm32_int.h"
+#include "arm32_private.h"
 
 #define ARM_POOL 2048u
 #define THUMB_POOL 2048u
@@ -176,11 +176,31 @@ static void bld_walk(struct bld *x, int bit, unsigned kk, const uint16_t *cand, 
 	}
 }
 
-static void build_one(const struct kgenome_arm32_row *rows, unsigned nrows, unsigned keys,
-		      unsigned (*keyf)(uint32_t), uint32_t pre_mask, uint32_t pre_val,
-		      int direct, struct kgenome_arm32_row *pool, unsigned cap, unsigned *used,
-		      uint16_t *idx, unsigned char *hits)
+/* One index to build: the canonical rows, the key that indexes them, the bits
+ * the table fixes in advance (`pre_*`), where the index goes and where the
+ * builder records which rows it reached. */
+struct bld_job {
+	const struct kgenome_arm32_row *rows;
+	unsigned nrows, keys;
+	unsigned (*keyf)(uint32_t);
+	uint32_t pre_mask, pre_val;
+	int direct;
+	uint16_t *idx;
+	unsigned char *hits;
+};
+
+/* The list pool the jobs of one family share, and how much of it is used. */
+struct bld_pool {
+	struct kgenome_arm32_row *pool;
+	unsigned cap, used;
+};
+
+static void build_one(const struct bld_job *job, struct bld_pool *pl)
 {
+	const struct kgenome_arm32_row *rows = job->rows;
+	const unsigned nrows = job->nrows, keys = job->keys;
+	unsigned (*const keyf)(uint32_t) = job->keyf;
+	const uint32_t pre_mask = job->pre_mask, pre_val = job->pre_val;
 	struct bld x;
 	uint16_t cand[MAXROWS];
 	unsigned b, j, nc = 0;
@@ -190,12 +210,12 @@ static void build_one(const struct kgenome_arm32_row *rows, unsigned nrows, unsi
 	memset(&x, 0, sizeof x);
 	x.rows = rows;
 	x.pre_mask = pre_mask;
-	x.direct = direct;
-	x.pool = pool;
-	x.cap = cap;
-	x.used = used;
-	x.idx = idx;
-	x.hits = hits;
+	x.direct = job->direct;
+	x.pool = pl->pool;
+	x.cap = pl->cap;
+	x.used = &pl->used;
+	x.idx = job->idx;
+	x.hits = job->hits;
 	while ((1u << x.nbits) < keys)
 		x.nbits++;
 	if ((1u << x.nbits) != keys || x.nbits > 16u)
@@ -244,17 +264,21 @@ static int claim(atomic_int *state)
 void kgenome_arm32_build(void)
 {
 	static unsigned char hc[MAXROWS], hu[MAXROWS];
-	unsigned used = 0;
+	struct bld_pool pl = { kgenome_arm32_lists, ARM_POOL, 0 };
+	const struct bld_job cond = { kgenome_arm32_src_cond, kgenome_arm32_src_cond_n,
+				      KGENOME_ARM32_KEYS, key_arm32, 0, 0, 0,
+				      kgenome_arm32_idx, hc };
+	const struct bld_job unc = { kgenome_arm32_src_unc, kgenome_arm32_src_unc_n,
+				     KGENOME_ARM32_KEYS, key_arm32, 0xf0000000u, 0xf0000000u, 0,
+				     kgenome_arm32_idx + KGENOME_ARM32_KEYS, hu };
 
 	if (!claim(&kgenome_arm32_state))
 		return;
 	memset(hc, 0, sizeof hc);
 	memset(hu, 0, sizeof hu);
-	build_one(kgenome_arm32_src_cond, kgenome_arm32_src_cond_n, KGENOME_ARM32_KEYS, key_arm32, 0, 0, 0,
-		  kgenome_arm32_lists, ARM_POOL, &used, kgenome_arm32_idx, hc);
-	build_one(kgenome_arm32_src_unc, kgenome_arm32_src_unc_n, KGENOME_ARM32_KEYS, key_arm32, 0xf0000000u,
-		  0xf0000000u, 0, kgenome_arm32_lists, ARM_POOL, &used, kgenome_arm32_idx + KGENOME_ARM32_KEYS, hu);
-	g_pool_arm32 = used;
+	build_one(&cond, &pl);
+	build_one(&unc, &pl);
+	g_pool_arm32 = pl.used;
 	g_shadowed_arm32 = count_dead(hc, kgenome_arm32_src_cond_n) + count_dead(hu, kgenome_arm32_src_unc_n);
 	atomic_store_explicit(&kgenome_arm32_state, 2, memory_order_release);
 }
@@ -262,17 +286,21 @@ void kgenome_arm32_build(void)
 void kgenome_thumb_build(void)
 {
 	static unsigned char hn[MAXROWS], hw[MAXROWS];
-	unsigned used = 0;
+	struct bld_pool pl = { kgenome_thumb_lists, THUMB_POOL, 0 };
+	const struct bld_job narrow = { kgenome_thumb_src_narrow, kgenome_thumb_src_narrow_n,
+					KGENOME_THUMB_NARROW_KEYS, key_narrow, 0, 0, 1,
+					kgenome_thumb_idx_narrow, hn };
+	const struct bld_job wide = { kgenome_thumb_src_wide, kgenome_thumb_src_wide_n,
+				      KGENOME_THUMB_WIDE_KEYS, key_wide, 0, 0, 1,
+				      kgenome_thumb_idx_wide, hw };
 
 	if (!claim(&kgenome_thumb_state))
 		return;
 	memset(hn, 0, sizeof hn);
 	memset(hw, 0, sizeof hw);
-	build_one(kgenome_thumb_src_narrow, kgenome_thumb_src_narrow_n, KGENOME_THUMB_NARROW_KEYS, key_narrow, 0, 0,
-		  1, kgenome_thumb_lists, THUMB_POOL, &used, kgenome_thumb_idx_narrow, hn);
-	build_one(kgenome_thumb_src_wide, kgenome_thumb_src_wide_n, KGENOME_THUMB_WIDE_KEYS, key_wide, 0, 0, 1,
-		  kgenome_thumb_lists, THUMB_POOL, &used, kgenome_thumb_idx_wide, hw);
-	g_pool_thumb = used;
+	build_one(&narrow, &pl);
+	build_one(&wide, &pl);
+	g_pool_thumb = pl.used;
 	g_shadowed_thumb = count_dead(hn, kgenome_thumb_src_narrow_n) + count_dead(hw, kgenome_thumb_src_wide_n);
 	atomic_store_explicit(&kgenome_thumb_state, 2, memory_order_release);
 }

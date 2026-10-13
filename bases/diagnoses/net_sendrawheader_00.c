@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * net_sendrawheader_00.c - a raw socket that is told the program writes the IP

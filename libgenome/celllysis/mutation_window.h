@@ -2,7 +2,7 @@
  * mutation_window.h - what a WINDOW of bytes is, and how it is hashed.
  *
  * DEFINED BY libgenome: cutting an object into units and hashing a window is the
- * genotyping of bytes (see fragmentation.h, which includes this). The engine's
+ * genotyping of bytes (see mutation.h, which includes this). The engine's
  * <celllysis/mutation_window.h> re-exports it and adds the part that is the detector's
  * and the module ABI's own: the block record, the block's name, and the
  * ceiling on what one rule stores.
@@ -63,7 +63,8 @@ enum kgenome_mutation_norm {
  * engine and the viewer must all produce identical values and the only way to
  * be sure of that is for them to compile the same lines.
  */
-#define KGENOME_MUTATION_BASE 16777619u          /* the FNV prime, as a radix */
+#define KGENOME_MUTATION_BASE 16777619u          /* the FNV prime, as a radix (KOF_HASH_PRIME; not
+                                                  * included here: this header is freestanding) */
 #define KGENOME_MUTATION_MIX  2654435761u        /* 2^32 / golden ratio */
 
 /* BASE^(NG-1), the weight of the byte leaving the window. Computed rather than

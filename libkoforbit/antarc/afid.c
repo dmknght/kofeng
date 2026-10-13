@@ -75,17 +75,3 @@ int kof_fid_of(const char *path, struct kof_fid *out)
 	return 1;
 }
 
-int kofa_fid_of_fd(int fd, struct kof_fid *out)
-{
-	struct stat st;
-
-	if (!out)
-		return 0;
-	memset(out, 0, sizeof *out);
-	if (fd < 0 || fstat(fd, &st) != 0)
-		return 0;
-	if (!S_ISREG(st.st_mode))
-		return 0;
-	from_stat(&st, out);
-	return 1;
-}

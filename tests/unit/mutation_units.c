@@ -70,8 +70,18 @@ static void functions(void)
 	lib.span[0].off = 3100; lib.span[0].len = 50; lib.n = 1;
 
 	memset(&g, 0, sizeof g);
-	kgenome_mutation_units(obj, sizeof obj, KOF_FMT_ELF, KGENOME_SCAN_ELF_CODE, &ext, 1,
-			 &fs, &lib, take, &g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj,
+			.n_obj = sizeof obj,
+			.format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_CODE,
+			.ext = &ext,
+			.n_ext = 1,
+			.funcs = &fs,
+			.lib = &lib,
+			.fn = take,
+			.user = &g,
+		});
 	check(g.n == 2u, "the units of a function region are the functions that count");
 	check(g.n >= 1u && g.off[0] == 100u && g.len[0] == 300u,
 	      "a function is a unit of its own extent");
@@ -80,8 +90,18 @@ static void functions(void)
 	check(g.side[0] == KGENOME_MUTATION_SIDE_USER, "a function is on the author's side");
 
 	memset(&g, 0, sizeof g);
-	kgenome_mutation_units(obj, sizeof obj, KOF_FMT_ELF, KGENOME_SCAN_ELF_CODE, &ext, 1,
-			 NULL, &lib, take, &g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj,
+			.n_obj = sizeof obj,
+			.format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_CODE,
+			.ext = &ext,
+			.n_ext = 1,
+			.funcs = NULL,
+			.lib = &lib,
+			.fn = take,
+			.user = &g,
+		});
 	check(g.n == 0u, "no symbols, no functions, no units - and no byte carve");
 
 	/* a region that is not offered a function at a time is cut by bytes, whole */
@@ -98,8 +118,18 @@ static void functions(void)
 		}
 		lib.span[0].off = 3000; lib.span[0].len = 2000; lib.n = 1;
 		memset(&g, 0, sizeof g);
-		kgenome_mutation_units(big, sizeof big, KOF_FMT_ELF, KGENOME_SCAN_ELF_DATA,
-				 &e2, 1, &fs, &lib, take, &g);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = big,
+				.n_obj = sizeof big,
+				.format = KOF_FMT_ELF,
+				.mask = KGENOME_SCAN_ELF_DATA,
+				.ext = &e2,
+				.n_ext = 1,
+				.funcs = &fs,
+				.lib = &lib,
+				.fn = take,
+				.user = &g,
+			});
 		for (i = 0; i < g.n; i++) {
 			check(g.off[i] == at, "the pieces do not tile the region");
 			at = g.off[i] + g.len[i];
@@ -115,9 +145,18 @@ static void functions(void)
 			struct got h;
 
 			memset(&h, 0, sizeof h);
-			kgenome_mutation_units(big, sizeof big, KOF_FMT_ELF,
-					 KGENOME_SCAN_ELF_DATA, &e2, 1, &fs, &lib,
-					 take, &h);
+			kgenome_mutation_units(&(const struct kgenome_mutation_req){
+					.p = big,
+					.n_obj = sizeof big,
+					.format = KOF_FMT_ELF,
+					.mask = KGENOME_SCAN_ELF_DATA,
+					.ext = &e2,
+					.n_ext = 1,
+					.funcs = &fs,
+					.lib = &lib,
+					.fn = take,
+					.user = &h,
+				});
 			check(h.n == g.n && !memcmp(h.off, g.off, g.n * sizeof *g.off),
 			      "the cut is not the same twice");
 		}
@@ -205,8 +244,18 @@ static void data_in_code(void)
 	at = put_str(obj, at, "short one only");        /* 15 bytes: not a block */
 
 	memset(&g, 0, sizeof g);
-	kgenome_mutation_units(obj, sizeof obj, KOF_FMT_ELF, KGENOME_SCAN_ELF_CODE, &ext, 1,
-			 &fs, NULL, take, &g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj,
+			.n_obj = sizeof obj,
+			.format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_CODE,
+			.ext = &ext,
+			.n_ext = 1,
+			.funcs = &fs,
+			.lib = NULL,
+			.fn = take,
+			.user = &g,
+		});
 	check(g.n == 1u, "one cluster; the short string alone is not a block");
 	if (g.n == 1u) {
 		check(g.off[0] == first_from && g.len[0] == first_to - first_from,
@@ -223,8 +272,18 @@ static void data_in_code(void)
 		memset(&lib, 0, sizeof lib);
 		lib.span[0].off = cut; lib.span[0].len = 30; lib.n = 1;
 		memset(&g, 0, sizeof g);
-		kgenome_mutation_units(obj, sizeof obj, KOF_FMT_ELF, KGENOME_SCAN_ELF_CODE, &ext, 1,
-				 &fs, &lib, take, &g);
+		kgenome_mutation_units(&(const struct kgenome_mutation_req){
+				.p = obj,
+				.n_obj = sizeof obj,
+				.format = KOF_FMT_ELF,
+				.mask = KGENOME_SCAN_ELF_CODE,
+				.ext = &ext,
+				.n_ext = 1,
+				.funcs = &fs,
+				.lib = &lib,
+				.fn = take,
+				.user = &g,
+			});
 		check(g.n == 3u, "a library span inside the cluster cuts it in three");
 		if (g.n == 3u) {
 			check(g.off[0] == first_from && g.len[0] == 40 &&
@@ -268,8 +327,18 @@ static void data_strings(void)
 		obj[i - 1] = 0;
 	}
 	memset(&g, 0, sizeof g);
-	kgenome_mutation_units(obj, sizeof obj, KOF_FMT_ELF, KGENOME_SCAN_ELF_DATA, &e, 1,
-			 &fs, &lib, take, &g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj,
+			.n_obj = sizeof obj,
+			.format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_DATA,
+			.ext = &e,
+			.n_ext = 1,
+			.funcs = &fs,
+			.lib = &lib,
+			.fn = take,
+			.user = &g,
+		});
 	for (i = 0; i < g.n; i++) {
 		check(g.off[i] == at, "the units do not tile the region");
 		at = g.off[i] + g.len[i];

@@ -7,30 +7,12 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include "../kofcore/kofmod/pe.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
 
 
 /*
@@ -43,7 +25,7 @@
  */
 uint32_t sx_regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted)
 {
-	struct kof_range *ext = kof_scan_of(ctx)->ext;
+	struct kof_range *ext = kof_scan_of(ctx)->cache.ext;
 	uint32_t present = 0, bit;
 
 	if (ctx->obj_size)
@@ -158,15 +140,15 @@ uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx,
 
 	if (!sc || !out || !max_out)
 		return 0;
-	for (i = 0; i < sc->n_cur_rgn && n < max_out; i++) {
-		if (!(sc->cur_rgn[i].mask & scan_mask))
+	for (i = 0; i < sc->cur.n_rgn && n < max_out; i++) {
+		if (!(sc->cur.rgn[i].mask & scan_mask))
 			continue;
 		/* An empty region is not a range. A parser would not return one
 		 * and a matcher asked to search it would search nothing. */
-		if (!sc->cur_rgn[i].len)
+		if (!sc->cur.rgn[i].len)
 			continue;
-		out[n].off = sc->cur_rgn[i].off;
-		out[n].len = sc->cur_rgn[i].len;
+		out[n].off = sc->cur.rgn[i].off;
+		out[n].len = sc->cur.rgn[i].len;
 		n++;
 	}
 	return n;
@@ -189,7 +171,7 @@ uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx,
  */
 int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 {
-	const struct kof_src_desc *d = kof_src_desc_of(sc->cur_src);
+	const struct kof_src_desc *d = kof_src_desc_of(sc->cur.src);
 	const struct kof_parser *p;
 
 	if (!d || d->fmt >= KOF_TARGET_COUNT)
@@ -197,18 +179,18 @@ int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 	p = kof_parser_of(d->fmt);
 	if (!p || d->info_len > p->view_size)
 		return 0;
-	if (!sc->view[d->fmt]) {
-		sc->view[d->fmt] = malloc(p->view_size);
-		if (!sc->view[d->fmt])
+	if (!sc->cache.view[d->fmt]) {
+		sc->cache.view[d->fmt] = malloc(p->view_size);
+		if (!sc->cache.view[d->fmt])
 			return 0;
 	}
-	memset(sc->view[d->fmt], 0, p->view_size);
-	memcpy(sc->view[d->fmt], d->info, d->info_len);
+	memset(sc->cache.view[d->fmt], 0, p->view_size);
+	memcpy(sc->cache.view[d->fmt], d->info, d->info_len);
 	ctx->format = d->fmt;
 	ctx->arch = d->arch;
 	ctx->subtype = d->subtype;
 	ctx->entry_off = d->entry_off;
-	ctx->file_header = sc->view[d->fmt];
+	ctx->file_header = sc->cache.view[d->fmt];
 	return 1;
 }
 
@@ -292,9 +274,9 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		if (!p)
 			ctx->format = as_format;
 		if (p) {
-			if (!sc->view[as_format]) {
-				sc->view[as_format] = malloc(p->view_size);
-				if (!sc->view[as_format])
+			if (!sc->cache.view[as_format]) {
+				sc->cache.view[as_format] = malloc(p->view_size);
+				if (!sc->cache.view[as_format])
 					return;
 			}
 			/*
@@ -310,10 +292,10 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 			 * regions from a zero extent and every event after it
 			 * from the previous event's.
 			 */
-			memset(sc->view[as_format], 0, p->view_size);
+			memset(sc->cache.view[as_format], 0, p->view_size);
 			if (as_view && as_view_len &&
 			    as_view_len <= p->view_size)
-				memcpy(sc->view[as_format], as_view,
+				memcpy(sc->cache.view[as_format], as_view,
 				       as_view_len);
 			/*
 			 * The parse sets ctx->format itself when it succeeds -
@@ -324,7 +306,7 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 			 * unidentified, which is the same answer a failed sniff
 			 * gives and is the honest one.
 			 */
-			(void)p->parse(buf, sc->view[as_format], ctx);
+			(void)p->parse(buf, sc->cache.view[as_format], ctx);
 		}
 		return;
 	}
@@ -335,9 +317,9 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 
 		if (!p->sniff(buf))
 			continue;
-		if (!sc->view[p->format]) {
-			sc->view[p->format] = malloc(p->view_size);
-			if (!sc->view[p->format])
+		if (!sc->cache.view[p->format]) {
+			sc->cache.view[p->format] = malloc(p->view_size);
+			if (!sc->cache.view[p->format])
 				return;
 		}
 		/*
@@ -364,8 +346,8 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		 * the mapped image and once on the file-layout copy un-mapped
 		 * from it, which cannot be mapped and said it was.
 		 */
-		memset(sc->view[p->format], 0, p->view_size);
-		if (p->parse(buf, sc->view[p->format], ctx))
+		memset(sc->cache.view[p->format], 0, p->view_size);
+		if (p->parse(buf, sc->cache.view[p->format], ctx))
 			return;
 	}
 }
@@ -376,7 +358,7 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
  *
  * The thresholds: 64 KB, because below that a dense section is a resource or a
  * certificate rather than a program; 7.9 bits, which is where compressed and
- * encrypted sit and where compiled code does not go - emu_unpack.c measures
+ * encrypted sit and where compiled code does not go - emu_unpack_gate.c measures
  * the same boundary at 7.5 over 2678 clean PEs, and this is stricter again
  * because it is answering a harder question with no second signal beside it.
  */
@@ -404,8 +386,8 @@ void sx_dense_code_unread(struct kof_scanner *sc,
 			continue;
 		/* The first reason recorded is the one kept, which is why
 		 * this is guarded rather than assigned. */
-		if (!sc->broken)
-			sc->broken = KOF_BROKEN_UNSUPPORTED;
+		if (!sc->obj.open.broken)
+			sc->obj.open.broken = KOF_BROKEN_UNSUPPORTED;
 		return;
 	}
 }
@@ -417,7 +399,7 @@ void sx_dense_code_unread(struct kof_scanner *sc,
  * of the answer runs after it: the normaliser leaves these bytes out of the
  * view, the block builder puts a block on the library side of enum
  * kgenome_mutation_side when it lands in one, and both used to work it out for
- * themselves. See kof_scanner.cur_lib.
+ * themselves. See kof_scanner.cur.lib.
  *
  * TWO TIERS, AND THE SECOND IS GATED ON HOW THE OBJECT WAS LINKED.
  *
@@ -436,9 +418,9 @@ void sx_dense_code_unread(struct kof_scanner *sc,
 void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
-	sc->cur_lib.n = 0;
-	sc->cur_lib_ok = 0;
-	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED) {
+	sc->cur.lib.n = 0;
+	sc->cur.lib_ok = 0;
+	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED) {
 		/*
 		 * A VIEW KNOWS WHERE ITS LIBRARY IS BECAUSE IT WAS TOLD.
 		 *
@@ -459,21 +441,21 @@ void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 */
 		uint32_t i;
 
-		for (i = 0; i < sc->n_cur_rgn &&
-			    sc->cur_lib.n < KGENOME_TRUE_MAX_SPANS_ALL; i++) {
-			if (!(sc->cur_rgn[i].mask &
+		for (i = 0; i < sc->cur.n_rgn &&
+			    sc->cur.lib.n < KGENOME_TRUE_MAX_SPANS_ALL; i++) {
+			if (!(sc->cur.rgn[i].mask &
 			      (KGENOME_SCAN_ELF_SLIB_CODE |
 			       KGENOME_SCAN_ELF_SLIB_DATA)))
 				continue;
-			if (!sc->cur_rgn[i].len)
+			if (!sc->cur.rgn[i].len)
 				continue;
-			sc->cur_lib.span[sc->cur_lib.n].off =
-				sc->cur_rgn[i].off;
-			sc->cur_lib.span[sc->cur_lib.n].len =
-				sc->cur_rgn[i].len;
-			sc->cur_lib.n++;
+			sc->cur.lib.span[sc->cur.lib.n].off =
+				sc->cur.rgn[i].off;
+			sc->cur.lib.span[sc->cur.lib.n].len =
+				sc->cur.rgn[i].len;
+			sc->cur.lib.n++;
 		}
-		sc->cur_lib_ok = sc->cur_lib.n != 0;
+		sc->cur.lib_ok = sc->cur.lib.n != 0;
 		return;
 	}
 	if (!ctx || ctx->format != KOF_FMT_ELF || !ctx->file_header)
@@ -482,6 +464,6 @@ void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return;
 	/* Which tier the object needs is the object's question, answered in one
 	 * place - see kgenome_true_find_object. */
-	kgenome_true_find_object(buf, kof_elf(ctx), &sc->cur_lib);
-	sc->cur_lib_ok = 1;
+	kgenome_true_find_object(buf, kof_elf(ctx), &sc->cur.lib);
+	sc->cur.lib_ok = 1;
 }

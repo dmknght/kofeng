@@ -23,11 +23,6 @@
 static const char MAGIC5[] = "Windows Registry Editor Version 5.00";
 static const char MAGIC4[] = "REGEDIT4";
 
-static int reg_space(uint8_t c)
-{
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
 /* The end of the line starting at `at` - the offset of its '\n', or f.n. */
 static uint64_t line_end(kof_buf f, uint64_t at)
 {
@@ -165,7 +160,7 @@ static uint64_t value_end(kof_buf f, uint64_t at, uint64_t end,
 				uint64_t last = stop;
 
 				while (last > *hex_from &&
-				       reg_space(f.p[last - 1u]))
+				       kof_is_blank_byte(f.p[last - 1u]))
 					last--;
 				if (last == 0 || f.p[last - 1u] != '\\')
 					return stop;
@@ -193,7 +188,7 @@ int kof_reg_parse(kof_buf file, struct kof_reg_info *info,
 		info->anomalies |= KOF_REG_ANOM_NO_HEADER;
 		return 0;
 	}
-	kof_runs_init(&runs, (struct kof_run *)info->run, KOF_REG_MAX_EXTENTS,
+	kof_runs_init(&runs, info->run, KOF_REG_MAX_EXTENTS,
 		      KOF_REG_CLS_COUNT);
 
 	at = reg_magic_at(file);

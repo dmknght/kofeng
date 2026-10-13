@@ -1,9 +1,9 @@
 /*
  * diag_emu_sites.c - the walk of one function: the span, and what a step does at a site.
- * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_int.h for what the
+ * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_private.h for what the
  * files share.
  */
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 
 
@@ -136,11 +136,11 @@ int kgenome_diag_emu_rel_span_no_producer(struct kgenome_diag_emu_rel_walk *R, s
 		if (a < lo || a >= hi)
 			continue;
 		/* The vocabulary's answer - see
-		 * kgenome_flow_hands_on. No name here: this is
+		 * kgenome_nucleo_hands_on. No name here: this is
 		 * a call the span stepped over, and what it
 		 * is asking is only whether SOMETHING in the
 		 * gap could have produced a value. */
-		if (kgenome_flow_hands_on(skips[t].cap, NULL) ||
+		if (kgenome_nucleo_hands_on(skips[t].cap, NULL) ||
 		    (skips[t].callee &&
 		     kgenome_diag_emu_callee_node(s, fns, fg.n,
 				 skips[t].callee) != 0xffffu))
@@ -430,7 +430,7 @@ static void rel_site_result(struct kgenome_diag_emu_rel_walk *R, struct kgenome_
 		uint16_t src = 0xffffu;
 
 		if (node != 0xffffu &&
-		    kgenome_flow_hands_on(skips[q].cap,
+		    kgenome_nucleo_hands_on(skips[q].cap,
 				      NULL))
 			src = node;
 		else if (skips[q].callee) {

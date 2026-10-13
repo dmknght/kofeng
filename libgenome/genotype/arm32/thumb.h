@@ -2,7 +2,7 @@
  * genotype/arm32, Thumb state: the 16-bit and 32-bit Thumb instruction sets of
  * the 32-bit ARM architecture (Thumb-1, and Thumb-2's wide encodings). ARM
  * state is arm32.h; the two share nothing but the table shape and the bit
- * helpers (arm32_int.h, arm32_common.h). Read arm32.h first: what it says about
+ * helpers (arm32_table.h, arm32_common.h). Read arm32.h first: what it says about
  * a decode being a table, about accessors, and about validity applies here.
  *
  * THE LENGTH comes from the first halfword alone: 11101, 11110 and 11111 in its
@@ -32,7 +32,7 @@
 
 #include "thumb_ids.h"
 #include "arm32_common.h"
-#include "arm32_int.h"
+#include "arm32_table.h"
 #include "../genotype.h"
 
 struct kgenome_thumb_insn {

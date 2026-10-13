@@ -990,11 +990,6 @@ uint32_t kofa_fan_watch_count(const struct kofa_fan *f)
 	return f ? f->n_watch : 0u;
 }
 
-const char *kofa_fan_watch_at(const struct kofa_fan *f, uint32_t i)
-{
-	return (f && i < f->n_watch) ? f->watch[i] : NULL;
-}
-
 const struct kof_mon_api *kofa_fan_api(struct kofa_fan *f)
 {
 	return f ? &f->api : NULL;

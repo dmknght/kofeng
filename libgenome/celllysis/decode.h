@@ -44,7 +44,6 @@
  * compare two operands, so what matters is that one decoder is consistent
  * with itself, not that two architectures agree.
  */
-#define KGENOME_CELL_NREG 32u
 
 /* Which special register a KGENOME_CELL_MOV_SPECIAL touches, carried in `cond`. */
 #define KGENOME_CELL_SR_CR 0u

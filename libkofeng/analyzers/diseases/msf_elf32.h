@@ -21,8 +21,8 @@
  * child of that layer.
  */
 
-#ifndef MSF_ELF32_H
-#define MSF_ELF32_H
+#ifndef KOFSHARED_MSF_ELF32_H
+#define KOFSHARED_MSF_ELF32_H
 
 #include <kofmod/kofsig.h>
 
@@ -91,4 +91,4 @@ static int msf_emit_hdr(const struct kof_obj_ctx *ctx, uint32_t payload_n)
 				 : msf_decl_elf32(ctx, payload_n);
 }
 
-#endif /* MSF_ELF32_H */
+#endif /* KOFSHARED_MSF_ELF32_H */

@@ -19,11 +19,23 @@
  * `sizeof` of the expression - so a format that does not match its arguments
  * is a compile error in a release build too, which is the one thing a
  * #ifdef'd-out block cannot promise.
+ *
+ * THE BUILD STAMP IS THE OTHER THING THE MAKEFILE CHOOSES, and its fallback
+ * lives here once: KOFENG_BUILD is what `make` passes as -DKOFENG_BUILD=<stamp>,
+ * and the engine header and the event header both read it, so neither carries a
+ * copy of the default.
  */
 #ifndef KOFENG_KOFDEBUG_H
 #define KOFENG_KOFDEBUG_H
 
 #include <stdio.h>
+
+/* The Makefile passes the real stamp; this only keeps a stray compilation
+ * building, the same way KOF_PACK_BUILD does, and says so rather than printing a
+ * zero that looks like an answer. */
+#ifndef KOFENG_BUILD
+#define KOFENG_BUILD 0u
+#endif
 
 #ifndef KOF_DEBUG
 #define KOF_DEBUG 0

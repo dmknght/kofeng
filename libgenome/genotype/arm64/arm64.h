@@ -67,8 +67,6 @@ enum kgenome_status kgenome_arm64_decode(struct kgenome_arm64_insn *out, uint32_
 
 /* The tree alone, without the lookup: what kgenome_arm64_decode is checked against. */
 enum kgenome_status kgenome_arm64_decode_tree(struct kgenome_arm64_insn *out, uint32_t word);
-/* The tree's raw answer, before a row's check is applied: the identity and the row's flags (GT_ARM64_RF_*). */
-unsigned kgenome_arm64_tree(uint32_t word, unsigned *flags);
 
 /* The identity's name, for a tool or a test; "?" past the end. */
 const char *kgenome_arm64_name(unsigned id);

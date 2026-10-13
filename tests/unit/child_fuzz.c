@@ -160,13 +160,13 @@ static void one_round(uint64_t round)
 	 * The whole point. Every byte charged has to have been given back, whatever
 	 * happened to the object that was holding it.
 	 */
-	if (sc->resident != 0)
+	if (sc->ledger.resident != 0)
 		fail(round, "produced bytes were still charged after the walk");
 	if (sc->st.peak_resident > opt.max_resident_bytes)
 		fail(round, "more produced data was alive at once than the ceiling");
-	if (sc->n_kids != 0)
+	if (sc->child.n != 0)
 		fail(round, "children were left attached to the scanner");
-	if (sc->sink_fd >= 0 || sc->sink_mem)
+	if (sc->sink.fd >= 0 || sc->sink.mem)
 		fail(round, "the emit sink was left open");
 
 	kof_scan_free(sc);
@@ -185,7 +185,7 @@ int main(int argc, char **argv)
 		rounds = strtoull(argv[2], 0, 0);
 	rng_state = seed ? seed : 1;
 
-	snprintf(root, sizeof root, "%s/kof_child_XXXXXX", tmp && *tmp ? tmp : kof_tmpdir());
+	snprintf(root, sizeof root, "%s/kof_child_XXXXXX", tmp && *tmp ? tmp : "build");
 	if (!mkdtemp(root)) {
 		printf("child fuzz: cannot make a work directory\n");
 		return 1;

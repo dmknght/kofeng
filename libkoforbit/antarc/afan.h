@@ -156,9 +156,8 @@ struct kofa_fan *kofa_fan_open(const struct kofa_fan_option *opt, int *err);
 /* Which of the two modes this session got. */
 int kofa_fan_mode(const struct kofa_fan *);
 
-/* How many paths it is actually watching, and the i'th of them. */
+/* How many paths it is actually watching. */
 uint32_t    kofa_fan_watch_count(const struct kofa_fan *);
-const char *kofa_fan_watch_at(const struct kofa_fan *, uint32_t i);
 
 /*
  * The collector as a sensor sees it - see libkoforbit/mon/kofmon.h.

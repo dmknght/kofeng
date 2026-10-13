@@ -19,7 +19,7 @@
  * both.
  */
 #include "thumb_ids.h"
-#include "arm32_int.h"
+#include "arm32_private.h"
 
 /* 16 bits: the first halfword. */
 const struct kgenome_arm32_row kgenome_thumb_src_narrow[] = {

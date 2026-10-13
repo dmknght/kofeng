@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 #include <kofmod/kofsig.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 #include <kofmod/kofmutation.h>
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */

@@ -2,8 +2,8 @@
  * objctx_script.c - the two forms of a script, as a child object.
  *
  * WHAT THIS SERVES: a module that reads a script asks for it twice - once with
- * the lexical noise folded away (kof_scan_script_fold), once with the language
- * normalised to a canonical form (kof_scan_script_form). Each answer is a CHILD
+ * the lexical noise folded away (kof_scan_script_forms, deep), once with the language
+ * normalised to a canonical form (the same call, not deep). Each answer is a CHILD
  * of the object, produced through the same declaration path every other child
  * takes (objctx_child.c); this file decides only what the text becomes.
  *
@@ -21,32 +21,11 @@
  * macro - and _POSIX_C_SOURCE actively suppresses it. */
 #define _GNU_SOURCE
 
-#include <kofmod/kofsym.h>
-#include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
 #include "../kofcore/kofplatform.h"
-#include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
-#include "../analyzers/parsers/binaries/elf/elf_sym.h"
-#include <kofmod/kofpathogen.h>
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include <celllysis/xref.h>
-#include "pzero.h"
 #include "../analyzers/normalize/executables.h"
-#include "scan.h"
-#include <kofmod/elf.h>
-#include <phenotype/emu_unpack.h>
-#include <genotype/image/elf_rebuild.h>
 
-#include <decompressors/ovba.h>
-#include <decompressors/lzma.h>
-#include <decompressors/aplib.h>
-#include <decompressors/aspack.h>
-#include <decompressors/lzmat.h>
-#include <decompressors/bcj.h>
-#include <decompressors/rar3.h>
-#include <decompressors/rar5.h>
-#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
- * kof_scan_script_fold below. */
+ * kof_scan_script_forms below. */
 #include "../analyzers/parsers/scripts/script_norm.h"
 #include "../analyzers/parsers/scripts/script_parse.h"
 /*
@@ -58,16 +37,11 @@
  * nowhere else. A general "multi stream coding" hook in the module ABI would be an
  * abstraction with exactly one user, invented to avoid naming the thing it is for.
  */
-#include <kofmod/sevenzip.h>
 
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/linkage/kofdiag.h"
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
 
 #include "objctx_int.h"
+#include <stdlib.h>
+#include <string.h>
 
 
 /*
@@ -85,7 +59,7 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_script_info *si;
 
-	if (!sc || !sc->cur_src || !ctx->file_header)
+	if (!sc || !sc->cur.src || !ctx->file_header)
 		return 0;
 	if (ctx->format != KOF_FMT_SCRIPT || !oc_can_produce(sc))
 		return 0;
@@ -96,15 +70,15 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	 * the tree - the normalised form of a normalised form is itself, and
 	 * what a folded constant builds its parent already built.
 	 */
-	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
+	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
 		return 0;
 	si = (const struct kof_script_info *)ctx->file_header;
 	*plx = kof_lex_for(si->kind);
 	if (!*plx)
 		return 0;       /* no table for the kind: nothing is guessed */
 
-	*b = kof_src_buf(sc->cur_src);
-	if (!b->p || !b->n || b->n > sc->obj_cap || b->n > 0xffffffffu)
+	*b = kof_src_buf(sc->cur.src);
+	if (!b->p || !b->n || b->n > sc->ledger.obj_cap || b->n > 0xffffffffu)
 		return 0;
 	*psc = sc;
 	return 1;
@@ -125,9 +99,9 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 static void script_declare(struct kof_scanner *sc,
 			   const struct kof_obj_ctx *ctx)
 {
-	sc->pend_subtype = ctx->subtype;
-	sc->pend_subfam  = ctx->subfamily;
-	sc->pend_lang    = 1;
+	sc->pend.subtype = ctx->subtype;
+	sc->pend.subfam  = ctx->subfamily;
+	sc->pend.lang    = 1;
 }
 
 /*
@@ -153,7 +127,7 @@ static int script_head_emit(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_script_info *si = kof_script(ctx);
-	kof_buf b = kof_src_buf(sc->cur_src);
+	kof_buf b = kof_src_buf(sc->cur.src);
 	kof_buf s;
 
 	if (!si || !si->tag_len)
@@ -240,7 +214,7 @@ static uint32_t script_form(const struct kof_obj_ctx *ctx,
 	uint32_t n_ext, i, held = 0;
 	uint64_t at = 0;
 
-	ext = sc->ext_gather;
+	ext = sc->cache.ext_gather;
 	n_ext = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_BODY, ext);
 	if (!n_ext)
 		return 0;

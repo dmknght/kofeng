@@ -49,8 +49,25 @@
 
 #include <stdint.h>
 
+#include "../uncoat_io.h"
+
 /*
- * Decode `out_cap` bytes from the four streams into `out`.
+ * The four streams and the buffer the code goes into: one request, since none
+ * of them means anything without the others. This decoder writes to a buffer
+ * rather than a sink, so it takes the same `struct kuncoat_span` as the rest of
+ * the family but not `struct kuncoat_io`.
+ */
+struct kuncoat_bcj2_io {
+	struct kuncoat_span main_s;     /* the code, branch operands removed */
+	struct kuncoat_span call_s;     /* CALL targets, big endian */
+	struct kuncoat_span jump_s;     /* JMP targets, big endian */
+	struct kuncoat_span rc_s;       /* the range coder's bit stream */
+	uint8_t            *out;
+	uint64_t            out_cap;
+};
+
+/*
+ * Decode `io->out_cap` bytes from the four streams into `io->out`.
  *
  * Returns the number of bytes produced. Short of out_cap means a stream ran out -
  * a truncated archive, or a size the header stated and the streams cannot supply -
@@ -61,10 +78,6 @@
  * code with no branches of that kind - but the pointer must still be valid, because
  * the decoder cannot know it will not be asked until it is.
  */
-uint64_t kuncoat_bcj2_decode(const uint8_t *main_p, uint64_t main_n,
-			 const uint8_t *call_p, uint64_t call_n,
-			 const uint8_t *jump_p, uint64_t jump_n,
-			 const uint8_t *rc_p, uint64_t rc_n,
-			 uint8_t *out, uint64_t out_cap);
+uint64_t kuncoat_bcj2_decode(const struct kuncoat_bcj2_io *io);
 
 #endif /* KUNCOAT_BCJ2_H */

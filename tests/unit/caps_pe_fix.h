@@ -3,13 +3,13 @@
  * environment's API stubs by address (the way diag_pe_emu.c builds one), shared
  * by the PE cases of caps_pe.c, flag_readers.c and view_equiv.c.
  *
- * Needs caps_fix.h first, and links the engine (kofemu.h).
+ * Needs caps_fix.h first, and links the engine (emu.h).
  */
 
 #ifndef KOFENG_TESTS_CAPS_PE_FIX_H
 #define KOFENG_TESTS_CAPS_PE_FIX_H
 
-#include <phenotype/kofemu.h>
+#include <phenotype/emu.h>
 
 #ifndef TEXT_RVA
 #define TEXT_RVA 0x1000u
@@ -103,7 +103,7 @@ static inline uint8_t *emit_call(uint8_t *p, const char *name)
  * tests burn instructions with. It counts down to MINUS ONE and tests the sign
  * (`jns`), on purpose: a counted loop that ends on zero (`dec ecx ; jnz`, the
  * shape of every delay) is accounted by its iterations and not run
- * (libgenome/phenotype/kofemu_loop.c), so it costs a run neither instructions nor
+ * (libgenome/phenotype/emu_loop.c), so it costs a run neither instructions nor
  * idle time and cannot probe a bound on them. The sign test is outside what that
  * recognises, so this wait is run, lap by lap, as it always was.
  */

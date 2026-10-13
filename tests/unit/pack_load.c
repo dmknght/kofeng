@@ -726,7 +726,7 @@ static void check_order(void)
 	snprintf(dir, sizeof dir, "build/kof_order_XXXXXX");
 	if (!mkdtemp(dir)) {
 		snprintf(dir, sizeof dir, "%s/kof_order_XXXXXX",
-			 kof_tmpdir());
+			 "build/test");
 		if (!mkdtemp(dir)) {
 			fail("order", "cannot make a directory for the case");
 			return;
@@ -955,7 +955,7 @@ int main(void)
 	const char *tmp = getenv("TMPDIR");
 
 	snprintf(root, sizeof root, "%s/kof_pack_load_XXXXXX",
-		 tmp && *tmp ? tmp : kof_tmpdir());
+		 tmp && *tmp ? tmp : "build");
 	if (!mkdtemp(root)) {
 		printf("pack load: cannot make a work directory\n");
 		return 1;

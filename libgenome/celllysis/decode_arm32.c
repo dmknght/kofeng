@@ -20,7 +20,7 @@
  * calls INVALID or UDF is KGENOME_CELL_UD, length 4; the coprocessor, VFP and Advanced
  * SIMD spaces are KGENOME_CELL_OTHER with the core registers they write.
  */
-#include <arm32/arm32.h>
+#include <genotype/arm32/arm32.h>
 
 #include "decode_arm32.h"
 

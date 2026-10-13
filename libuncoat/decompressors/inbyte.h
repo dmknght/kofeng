@@ -14,8 +14,8 @@
  * an unexamined state.
  */
 
-#ifndef KUNCOAT_DECOMP_INBYTE_H
-#define KUNCOAT_DECOMP_INBYTE_H
+#ifndef KUNCOAT_INBYTE_H
+#define KUNCOAT_INBYTE_H
 
 #include <stdint.h>
 
@@ -29,4 +29,4 @@ static inline uint8_t kuncoat_in_byte(const uint8_t *in, uint64_t n, uint64_t *a
 	return in[(*at)++];
 }
 
-#endif /* KUNCOAT_DECOMP_INBYTE_H */
+#endif /* KUNCOAT_INBYTE_H */

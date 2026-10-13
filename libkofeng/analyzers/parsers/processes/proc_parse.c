@@ -73,12 +73,6 @@ static uint32_t proc_resolve_scan(const struct kof_obj_ctx *ctx,
 	return n;
 }
 
-int kof_proc_sniff(kof_buf b)
-{
-	(void)b;
-	return 0;
-}
-
 /* Is [off, off+n) inside the record, and does it hold a NUL-terminated string?
  * A string that runs to the end without one is refused rather than truncated:
  * truncating would hand a rule a name the process does not have. */
@@ -328,14 +322,3 @@ const char *kof_proc_region_name(uint32_t bit)
 }
 #undef X_CASE
 
-const char *kof_proc_anomaly_name(unsigned index)
-{
-	(void)index;
-	return "?";
-}
-
-uint64_t kof_proc_anomalies(const void *view)
-{
-	(void)view;
-	return 0;
-}

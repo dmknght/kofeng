@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * net_recvsyscall_00.c - the other half of a stager: where the bytes come

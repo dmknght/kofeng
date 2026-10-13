@@ -11,7 +11,7 @@
  *   scan_heur.c     heuristic rules (EXAMINE, VERDICT) and the model score
  *   scan_unpack.c   the OPEN stage: unpack modules and the interpreter's stance
  *   scan_norm*.c    the NORMALISE stage: the view of an object with noise removed
- *   verdictor/verdicts/verdict.c  naming a finding and the object's one verdict slot
+ *   verdictor/verdict.c  naming a finding and the object's one verdict slot
  *   scan_walk.c     from a path to objects: directories, files, the tree of kids
  *   scan_mt.c       the parallel walk
  *
@@ -37,8 +37,10 @@
  *   - the scanner still carries `cur_present` and `cur_from_packer` for the
  *     lazily built feeds beside the same facts in kof_pipeline; they are set once,
  *     by FACTS, and read by sx_need_mutation, which is not given the pipeline.
- *   - the per-object `sx_scan_object` reset (sx_obj_begin) still clears ~45 scanner
- *     fields by hand; the OPEN stage's kof_open is the pattern to follow.
+ *   - the scanner's per-module reset (sx_mod_begin) still clears its scalars by
+ *     hand, on purpose: three of the fields are arrays whose bytes need no clearing
+ *     and a wipe would be paid for by every module of every object. The
+ *     per-object reset (sx_obj_begin) is one wipe of sc->obj - see scan_state.h.
  */
 
 /* lstat and the dirent walk are POSIX and the tree builds as strict ISO C11, so the
@@ -58,34 +60,17 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
-#include "objtree.h"
 #include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
  * engine-side model next door is a different file with a similar name - see the
  * note at the top of kofmod/heur.h. */
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
 #include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "objprod.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
 
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
+static void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner);
+
+
 
 static void sym_decl_free(struct kof_scanner *sc);
 
@@ -96,11 +81,11 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	if (!sc)
 		return NULL;
 	sc->eng = eng;
-	sc->sink_fd = -1;   /* 0 is stdin; calloc would have made this a live fd */
+	sc->sink.fd = -1;   /* 0 is stdin; calloc would have made this a live fd */
 
 	/* The matcher owns the search state: the presence set and the memo are how a
 	 * search is answered, not how a scan is bookkept. */
-	if (!kof_match_state_init(&sc->m, eng->n_str, eng->memo_size))
+	if (!kof_match_state_init(&sc->match.m, eng->n_str, eng->memo_size))
 		goto fail;
 	/*
 	 * The symbol block's matcher: its own presence table, sized for a
@@ -118,9 +103,9 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	 * No memo here - c_find_str keeps the cell in sc->m, where the slot is
 	 * already allocated by the database. See the note there.
 	 */
-	sc->msym.gram_bits = 20;
-	sc->msym.gram_min = 2;
-	if (!kof_match_state_init(&sc->msym, eng->n_str, 0))
+	sc->match.msym.gram_bits = 20;
+	sc->match.msym.gram_min = 2;
+	if (!kof_match_state_init(&sc->match.msym, eng->n_str, 0))
 		goto fail;
 
 	/*
@@ -141,26 +126,26 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 	 * three bitmaps (matched, gate open, could not say) in one block, the
 	 * bound nodes, and the head sequences. One allocation per scanner.
 	 */
-	sc->diag_cap = eng->n_diag;
-	sc->diag_bm = (eng->n_diag + 7u) / 8u;
+	sc->diag.cap = eng->n_diag;
+	sc->diag.bm = (eng->n_diag + 7u) / 8u;
 	{
 		size_t n = eng->n_diag ? eng->n_diag : 1u;
 
-		sc->diag_hit = calloc(3u * (sc->diag_bm ? sc->diag_bm : 1u), 1u);
-		sc->diag_bind = calloc(n, sizeof *sc->diag_bind);
-		sc->diag_n_bind = calloc(n, 1u);
-		sc->diag_seq = calloc(n, sizeof *sc->diag_seq);
-		if (!sc->diag_hit || !sc->diag_bind || !sc->diag_n_bind ||
-		    !sc->diag_seq)
+		sc->diag.hit = calloc(3u * (sc->diag.bm ? sc->diag.bm : 1u), 1u);
+		sc->diag.bind = calloc(n, sizeof *sc->diag.bind);
+		sc->diag.n_bind = calloc(n, 1u);
+		sc->diag.seq = calloc(n, sizeof *sc->diag.seq);
+		if (!sc->diag.hit || !sc->diag.bind || !sc->diag.n_bind ||
+		    !sc->diag.seq)
 			goto fail;
-		sc->diag_gate = sc->diag_hit + (sc->diag_bm ? sc->diag_bm : 1u);
-		sc->diag_unk = sc->diag_gate + (sc->diag_bm ? sc->diag_bm : 1u);
+		sc->diag.gate = sc->diag.hit + (sc->diag.bm ? sc->diag.bm : 1u);
+		sc->diag.unk = sc->diag.gate + (sc->diag.bm ? sc->diag.bm : 1u);
 	}
-	sc->live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->live);
+	sc->match.live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->match.live);
 	if (eng->multi && eng->multi->n_pat) {
-		sc->found = calloc(eng->multi->n_pat, sizeof *sc->found);
-		sc->mask_ok = calloc(eng->n_masks ? eng->n_masks : 1u,
-				     sizeof *sc->mask_ok);
+		sc->match.found = calloc(eng->multi->n_pat, sizeof *sc->match.found);
+		sc->match.mask_ok = calloc(eng->n_masks ? eng->n_masks : 1u,
+				     sizeof *sc->match.mask_ok);
 	}
 	return sc;
 
@@ -175,42 +160,42 @@ void kof_scan_free(struct kof_scanner *sc)
 
 	if (!sc)
 		return;
-	kof_match_state_free(&sc->m);
-	kof_match_state_free(&sc->msym);
+	kof_match_state_free(&sc->match.m);
+	kof_match_state_free(&sc->match.msym);
 	kof_prod_unadopt(sc);
 	/* The last object's graph, which the per-object reset never reached
 	 * because there was no next object - see diag_graph. */
 	kof_scan_diag_drop(sc);
-	if (sc->relocs) {
-		kgenome_elf_reloc_table_free(sc->relocs);
-		free(sc->relocs);
-		sc->relocs = NULL;
+	if (sc->obj.diag.relocs) {
+		kgenome_elf_reloc_table_free(sc->obj.diag.relocs);
+		free(sc->obj.diag.relocs);
+		sc->obj.diag.relocs = NULL;
 	}
-	kgenome_apihash_free(sc->apihash);
-	sc->apihash = NULL;
-	kgenome_pe_imptab_free(&sc->pe_imp);
-	free(sc->diag_rep);
-	free(sc->diag_hit);             /* and diag_gate and diag_unk, one block */
-	free(sc->diag_bind);
-	free(sc->diag_n_bind);
-	free(sc->diag_seq);
-	free(sc->dis_set);
-	free(sc->gr);
-	free(sc->live);
-	free(sc->found);
-	free(sc->mask_ok);
-	sc->live = NULL;
-	sc->found = NULL;
-	sc->mask_ok = NULL;
+	kgenome_diag_apihash_free(sc->obj.diag.apihash);
+	sc->obj.diag.apihash = NULL;
+	kgenome_pe_imptab_free(&sc->obj.diag.pe_imp);
+	free(sc->diag.rep);
+	free(sc->diag.hit);             /* and diag_gate and diag_unk, one block */
+	free(sc->diag.bind);
+	free(sc->diag.n_bind);
+	free(sc->diag.seq);
+	free(sc->subject.dis_set);
+	free(sc->diag.gr);
+	free(sc->match.live);
+	free(sc->match.found);
+	free(sc->match.mask_ok);
+	sc->match.live = NULL;
+	sc->match.found = NULL;
+	sc->match.mask_ok = NULL;
 	kof_scan_kids_reset(sc);
-	free(sc->kids);
-	free(sc->kid_packer);
-	free(sc->kid_family);
-	free(sc->kid_derived_by);
-	free(sc->kid_want);
-	free(sc->kid_want_level);
-	free(sc->kid_n_xw);
-	free(sc->kid_xw);
+	free(sc->child.list);
+	free(sc->child.packer);
+	free(sc->child.family);
+	free(sc->child.derived_by);
+	free(sc->child.want);
+	free(sc->child.want_level);
+	free(sc->child.n_xw);
+	free(sc->child.xw);
 	/*
 	 * KOF_TARGET_COUNT AND NOT KOF_FMT_COUNT.
 	 *
@@ -221,28 +206,28 @@ void kof_scan_free(struct kof_scanner *sc)
 	 * that sizes the array is the bound that must empty it.
 	 */
 	for (i = 0; i < KOF_TARGET_COUNT; i++)
-		free(sc->view[i]);
-	free(sc->inf);
-	free(sc->lzw);
-	free(sc->bz);
-	free(sc->lzx);
+		free(sc->cache.view[i]);
+	free(sc->cache.inf);
+	free(sc->cache.lzw);
+	free(sc->cache.bz);
+	free(sc->cache.lzx);
 	kof_mutation_ctx_done(&sc->mutation);
-	free(sc->lzh);
-	kgenome_xref_free(sc->use);
+	free(sc->cache.lzh);
+	kgenome_xref_free(sc->obj.diag.use);
 	sym_decl_free(sc);
-	free(sc->sym_decl);
-	free(sc->sym);
-	kgenome_funcs_free(&sc->funcs);
-	kgenome_diag_walk_free(sc->walk);
-	free(sc->pend_syms);
-	free(sc->pend_desc_buf);
-	kgenome_funcs_free(&sc->pend_funcs);
-	free(sc->pend_sec);
-	free(sc->pend_imp);
-	free(sc->emu_rep_p);
-	free(sc->imp_pool);
-	free(sc->sym_ext[0]);
-	free(sc->sym_ext[1]);
+	free(sc->syms.decl);
+	free(sc->syms.buf);
+	kgenome_funcs_free(&sc->obj.sym.funcs);
+	kgenome_diag_walk_free(sc->obj.diag.walk);
+	free(sc->pend.syms);
+	free(sc->pend.desc_buf);
+	kgenome_funcs_free(&sc->pend.funcs);
+	free(sc->pend.sec);
+	free(sc->pend.imp);
+	free(sc->emu.rep_p);
+	free(sc->pend.imp_pool);
+	free(sc->syms.ext[0]);
+	free(sc->syms.ext[1]);
 	free(sc);
 }
 
@@ -286,8 +271,8 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mas
 		 */
 		struct kof_scanner *sc = kof_scan_of(ctx);
 
-		if (!sc->broken)
-			sc->broken = KOF_BROKEN_LIMIT;
+		if (!sc->obj.open.broken)
+			sc->obj.open.broken = KOF_BROKEN_LIMIT;
 		n = KOF_SCAN_MAX_EXTENTS;
 	}
 	return n;
@@ -438,9 +423,9 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mas
  * both apply it, and a check that lived in one loop and not the other would let
  * the family pass run a module the general pass would have ruled out.
  */
-const struct kof_module *sx_kof_scan_derived_by(const struct kof_scanner *sc)
+const struct kof_module *sx_derived_by(const struct kof_scanner *sc)
 {
-	return sc ? sc->cur_derived_by : NULL;
+	return sc ? sc->cur.derived_by : NULL;
 }
 
 
@@ -463,11 +448,11 @@ const struct kof_module *sx_kof_scan_derived_by(const struct kof_scanner *sc)
  * detector loop. Two modules repairing one object are two modules disagreeing
  * about what it is.
  */
-void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int owner)
+static void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int owner)
 {
 	uint32_t q;
 
-	if (!res || !sc->cure_have)
+	if (!res || !sc->mod.cure_have)
 		return;
 	/*
 	 * WHOSE REPAIR, when more than one module describes one.
@@ -486,36 +471,36 @@ void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int owner)
 		return;
 	res->repair.n_fix = 0;
 	res->repair.truncate = 0;
-	for (q = 0; q < sc->n_cure_fix && q < KOF_MAX_FIX; q++) {
-		res->repair.fix[q].off = sc->cure_fix[q].off;
-		res->repair.fix[q].n = sc->cure_fix[q].n;
-		memcpy(res->repair.fix[q].b, sc->cure_fix[q].b,
-		       sc->cure_fix[q].n);
+	for (q = 0; q < sc->mod.n_cure_fix && q < KOF_MAX_FIX; q++) {
+		res->repair.fix[q].off = sc->mod.cure_fix[q].off;
+		res->repair.fix[q].n = sc->mod.cure_fix[q].n;
+		memcpy(res->repair.fix[q].b, sc->mod.cure_fix[q].b,
+		       sc->mod.cure_fix[q].n);
 	}
 	res->repair.n_fix = q;
-	res->repair.truncate = sc->cure_trunc_set ? sc->cure_trunc : 0u;
+	res->repair.truncate = sc->mod.cure_trunc_set ? sc->mod.cure_trunc : 0u;
 }
 
 /* A disease the object has, once. Linear: the set is as long as the distinct
  * diseases the object's modules found, which is a handful. Out of memory loses
  * the disease and nothing else - the finding is made regardless. */
-void sx_disease_add(struct kof_scanner *sc, uint32_t id)
+static void sx_disease_add(struct kof_scanner *sc, uint32_t id)
 {
 	uint32_t i;
 
-	for (i = 0; i < sc->n_dis_set; i++)
-		if (sc->dis_set[i] == id)
+	for (i = 0; i < sc->obj.n_dis_set; i++)
+		if (sc->subject.dis_set[i] == id)
 			return;
-	if (sc->n_dis_set == sc->cap_dis_set) {
-		uint32_t nc = sc->cap_dis_set ? sc->cap_dis_set * 2u : 16u;
-		uint32_t *g = realloc(sc->dis_set, (size_t)nc * sizeof *g);
+	if (sc->obj.n_dis_set == sc->subject.cap_dis_set) {
+		uint32_t nc = sc->subject.cap_dis_set ? sc->subject.cap_dis_set * 2u : 16u;
+		uint32_t *g = realloc(sc->subject.dis_set, (size_t)nc * sizeof *g);
 
 		if (!g)
 			return;
-		sc->dis_set = g;
-		sc->cap_dis_set = nc;
+		sc->subject.dis_set = g;
+		sc->subject.cap_dis_set = nc;
 	}
-	sc->dis_set[sc->n_dis_set++] = id;
+	sc->subject.dis_set[sc->obj.n_dis_set++] = id;
 }
 
 /*
@@ -563,7 +548,7 @@ struct kof_finding *sx_mod_report(struct kof_scanner *sc,
 	}
 	sx_take_repair(sc, res, f && f->is_verdict);
 	sx_take_infected(sc, res, f && f->is_verdict);
-	sc->rep_valid = 0;
+	sc->mod.rep_valid = 0;
 	return f;
 }
 
@@ -575,21 +560,21 @@ struct kof_finding *sx_mod_report(struct kof_scanner *sc,
  * four loops that run modules - detectors and heuristics - and not in the two
  * unpackers' loops, whose reports go through the same sx_finding_str that reads
  * them: an unpacker's finding could be labelled by the previous module's
- * Pathogen read or carry its similarity block. One function, called by all four,
+ * Diagnose read or carry its similarity block. One function, called by all four,
  * so a new loop cannot forget one.
  */
 void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m)
 {
-	sc->rep_valid = 0;
-	sc->rep_reason = 0;
+	sc->mod.rep_valid = 0;
+	sc->mod.rep_reason = 0;
 	/* Nothing asked yet - see scan.h. */
-	sc->mutation_asked = -1;
-	sc->n_mutation_blk = 0;
-	sc->mutation_hit = 0;
-	sc->mutation_tot = 0;
-	sc->mutation_best = 0;
-	sc->str_hit = 0;
-	sc->diag_read = 0;
+	sc->mod.mutation_asked = -1;
+	sc->mod.n_mutation_blk = 0;
+	sc->mod.mutation_hit = 0;
+	sc->mod.mutation_tot = 0;
+	sc->mod.mutation_best = 0;
+	sc->mod.str_hit = 0;
+	sc->mod.diag_read = 0;
 	/*
 	 * WHAT THIS MODULE DESCRIBES, and only it. The patches, the cut and the
 	 * infected spans were cleared once per OBJECT, so the second module to
@@ -598,13 +583,13 @@ void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m)
 	 * and neither was the one that matches the verdict
 	 * (tests/unit/scan_logic.c).
 	 */
-	sc->cure_have = 0;
-	sc->cure_at = 0;
-	sc->n_cure_fix = 0;
-	sc->cure_trunc_set = 0;
-	sc->n_infect = 0;
-	sc->cur_mod = m;
-	sc->emu_run_by = NULL;
+	sc->mod.cure_have = 0;
+	sc->mod.cure_at = 0;
+	sc->mod.n_cure_fix = 0;
+	sc->mod.cure_trunc_set = 0;
+	sc->mod.n_infect = 0;
+	sc->mod.cur = m;
+	sc->obj.emu.run_by = NULL;
 	/* A sink the previous module left open is not this one's. */
 	kof_scan_sink_discard(sc);
 }
@@ -617,17 +602,17 @@ void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m)
  * body but not put the host back marks the body and offers no repair, and that
  * is a useful thing to be able to say.
  */
-void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner)
+static void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner)
 {
 	uint32_t q;
 
-	if (!res || !sc->n_infect)
+	if (!res || !sc->mod.n_infect)
 		return;
 	/* The same rule as the repair: the spans that go out are the verdict's. */
 	if (!owner && res->n_infected)
 		return;
-	for (q = 0; q < sc->n_infect && q < KOF_MAX_INFECTED; q++)
-		res->infected[q] = sc->infect[q];
+	for (q = 0; q < sc->mod.n_infect && q < KOF_MAX_INFECTED; q++)
+		res->infected[q] = sc->mod.infect[q];
 	res->n_infected = q;
 }
 
@@ -654,11 +639,11 @@ static void sym_decl_free(struct kof_scanner *sc)
 {
 	uint32_t i;
 
-	for (i = 0; i < sc->n_sym_decl; i++) {
-		free(sc->sym_decl[i].dll);
-		free(sc->sym_decl[i].fn);
+	for (i = 0; i < sc->obj.sym.n_decl; i++) {
+		free(sc->syms.decl[i].dll);
+		free(sc->syms.decl[i].fn);
 	}
-	sc->n_sym_decl = 0;
+	sc->obj.sym.n_decl = 0;
 }
 
 /*
@@ -666,7 +651,7 @@ static void sym_decl_free(struct kof_scanner *sc)
  *
  * ONE FUNCTION, called once, first, for every object that enters sx_scan_object -
  * and the only place per-object state is cleared. It was cleared at seven
- * places in two functions, and the second of them, sx_unpack_object, is not reached
+ * places in two functions, and the second of them, the open stage, is not reached
  * by an object that already has a finding of its own unless all_matches is on.
  * So a decoded child with its own verdict went on carrying its parent's
  * `superseded` (its report was dropped as "a wrapper"), `opened_by` and
@@ -684,82 +669,61 @@ static void sym_decl_free(struct kof_scanner *sc)
  */
 void sx_obj_begin(struct kof_scanner *sc)
 {
-	sc->n_dis_set = 0;
-	/* Computed-once results: one array, one clear - see enum kof_obj_latch. */
-	memset(sc->latch, 0, sizeof sc->latch);
-	/* ...and what those latches guarded. Freed and not kept the way `sym` is:
-	 * `sym` has a fixed cap and is reused, these are sized by what a sweep
+	/*
+	 * RELEASE FIRST. Everything sc->obj owns that is not a plain value goes back
+	 * here, and each release leaves its field NULL or empty; the wipe below then
+	 * clears the rest, which is every scalar, flag and latch the struct holds.
+	 */
+	/* ...what the latches guarded. Freed and not kept the way `syms.buf` is:
+	 * that has a fixed cap and is reused, these are sized by what a sweep
 	 * found, and reusing them would mean carrying the largest met so far. */
 	/* A rendering's analysis is the parent's: let go of it before the frees
 	 * below, which are for what THIS scanner derived. */
 	kof_prod_unadopt(sc);
-	kgenome_xref_free(sc->use);
-	sc->use = NULL;
-	if (sc->relocs) {
-		kgenome_elf_reloc_table_free(sc->relocs);
-		free(sc->relocs);
-		sc->relocs = NULL;
+	kgenome_xref_free(sc->obj.diag.use);
+	if (sc->obj.diag.relocs) {
+		kgenome_elf_reloc_table_free(sc->obj.diag.relocs);
+		free(sc->obj.diag.relocs);
 	}
-	kgenome_apihash_free(sc->apihash);
-	sc->apihash = NULL;
-	kgenome_pe_imptab_free(&sc->pe_imp);
+	kgenome_diag_apihash_free(sc->obj.diag.apihash);
+	kgenome_pe_imptab_free(&sc->obj.diag.pe_imp);
 	/* The graph of the object that has just finished: held until here so
 	 * anything reporting on it could still read it. */
 	kof_scan_diag_drop(sc);
-	sc->gr_n = 0;                   /* the serialised copy of that graph */
-	sc->use_cut = 0;
-	sc->emu_full = 0;               /* only the PE branch of a run sets it */
-
-	/* The pathogen demand. See KOF_ENG_USE_PATHOGEN: there is no state to set,
-	 * so one object's ask cannot become the next object's. */
-	sc->diag_ask = 0;
-	sc->diag_all = 0;
-	memset(sc->diag_hit, 0, sc->diag_bm);
-	memset(sc->diag_unk, 0, sc->diag_bm);
-
-	/* The symbol block is rebuilt on first use. */
-	sc->sym_served = 0;
 	sym_decl_free(sc);
-	sc->sym_n = 0;
-	kgenome_funcs_free(&sc->funcs);
-	kgenome_diag_walk_free(sc->walk);
-	sc->walk = NULL;
-	sc->msym_bound = 0;
-	sc->sym_ext_done[0] = sc->sym_ext_done[1] = 0;
+	kgenome_funcs_free(&sc->obj.sym.funcs);
+	kgenome_diag_walk_free(sc->obj.diag.walk);
 
-	/* What a module asked of the interpreter. `emu_slice` has one writer and
-	 * used to have no reader that cleared it, so the first module to ask ran
-	 * every later object in slices as well. [Read off the code, not measured
-	 * on a sample: the only shipped module that sets it is the Sality one.] */
-	sc->emu_slice = 0;
+	/* The bitmaps are the scanner's, sized by the database and kept; only their
+	 * bytes are the object's. The diagnose demand (obj.diag.ask, .all) is
+	 * cleared by the wipe: see KOF_ENG_USE_DIAGNOSE, there is no state to set,
+	 * so one object's ask cannot become the next object's. */
+	memset(sc->diag.hit, 0, sc->diag.bm);
+	memset(sc->diag.unk, 0, sc->diag.bm);
+
+	/*
+	 * THE WIPE: the latches (one array, see enum kof_obj_latch), the symbol
+	 * block's state, the analysis products, the interpreter's stance and slice
+	 * (`emu.slice` had one writer and no reader that cleared it, so the first
+	 * module to ask ran every later object in slices as well - read off the
+	 * code, not measured on a sample: the only shipped module that sets it is
+	 * the Sality one), how the object came to exist and which module opened it,
+	 * `superseded`, and the fresh attempt every object gets: a limit hit while
+	 * unpacking one container does not mean the tree is finished, the room it
+	 * held is back by the time the next is scanned. Only `ledger.budget` is
+	 * cumulative. A field added to struct kof_scan_obj is reset here without
+	 * being named.
+	 */
+	memset(&sc->obj, 0, sizeof sc->obj);
+	/* The stance of an object nobody has spoken for (KOF_EMU_STANCE_BANNED is
+	 * 0; written out because the wipe must not be what decides it). */
+	sc->obj.emu.stance = KOF_EMU_STANCE_BANNED;
 
 	/* What was found, and what was claimed: the sentinel and not zero, because
-	 * zero is entry 0. And no finding of the last object's is protected from
-	 * this one's drop - the bits are slot numbers in a result about to be
-	 * refilled. */
-	sc->pend_entry = KOF_ENTRY_NONE;
-	sc->heur_keep = 0;
-
-	/* How this object came to exist and whether it is only a wrapper: which
-	 * module opened the LAST one says nothing about this one. */
-	sc->opened_by[0] = 0;
-	sc->packer_build[0] = 0;
-	sc->pend_build[0] = 0;
-	sc->pend_build_of = NULL;
-	sc->mod_tag[0] = 0;
-	sc->mod_tag_of = NULL;
-	sc->packed_here = 0;
-	sc->emu_produced = 0;
-	sc->emu_ran = 0;
-	sc->emu_stance = KOF_EMU_STANCE_BANNED;
-	sc->emu_run_by = NULL;
-	sc->superseded = 0;
-
-	/* A fresh attempt for every object. Hitting a limit while unpacking one
-	 * container does not mean the tree is finished: the room it held is back
-	 * by the time the next is scanned. Only `budget` is cumulative. */
-	sc->broken = 0;
-	sc->stop = 0;
+	 * zero is entry 0. The finding of the last object's no longer protected
+	 * from this one's drop (obj.open.heur_keep, wiped above) - the bits are
+	 * slot numbers in a result about to be refilled. */
+	sc->pend.entry = KOF_ENTRY_NONE;
 
 	/* What a repair or an infection note refers to is cleared with the module's
 	 * turn - see sx_mod_begin - and not here: a module describes its OWN. */

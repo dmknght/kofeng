@@ -2,7 +2,7 @@
  * kofmutation.c - the similarity matcher.
  *
  * A block is the MinHash sketch of one unit of code or data; the scanner
- * sketches the units of the object it is looking at - see libgenome/celllysis/fragment_units.c for
+ * sketches the units of the object it is looking at - see libgenome/celllysis/mutation_units.c for
  * how an object is cut, the same way a block was cut - and counts how much of a
  * block's sketch a unit's holds. There is no scan of every window: the cost is
  * one rolling pass over each unit and a lookup per kept hash.
@@ -288,16 +288,6 @@ void kof_mutation_set_free(struct kof_mutation_set *s)
 	free(s->bloom);
 	free(s->block_id);
 	free(s);
-}
-
-uint64_t kof_mutation_set_bytes(const struct kof_mutation_set *s)
-{
-	return s ? s->bytes : 0;
-}
-
-uint32_t kof_mutation_set_blocks(const struct kof_mutation_set *s)
-{
-	return s ? s->n_block : 0;
 }
 
 const uint32_t *kof_mutation_block_hashes(const struct kof_mutation_set *s,

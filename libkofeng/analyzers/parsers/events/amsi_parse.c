@@ -3,22 +3,12 @@
 #include <string.h>
 
 #include "amsi_parse.h"
+#include <genotype/image/pe_types.h>   /* KGENOME_PE_DOS_MAGIC, KGENOME_PE_SIG_MAGIC */
 
 const uint32_t kof_amsi_regions[2] = {
 	KOF_SCAN_AMSI_META,
 	KOF_SCAN_AMSI_OBJ
 };
-
-int kof_amsi_sniff(kof_buf b)
-{
-	/*
-	 * Never. A record has no magic, so any test here would be a guess about
-	 * whose bytes these are - see the header. Reached only through
-	 * kof_parser_of(KOF_FMT_AMSI), by a caller that already knows.
-	 */
-	(void)b;
-	return 0;
-}
 
 /*
  * The two regions, as ranges over the object.
@@ -106,13 +96,13 @@ static void declare_carried(struct kof_amsi_view *v, kof_buf b)
 	v->n_ent = 0;
 	if (v->obj_len < 0x40u)
 		return;
-	if (!kof_rd_u16(b, v->obj_off, 0, &mz) || mz != 0x5a4du)
+	if (!kof_rd_u16(b, v->obj_off, 0, &mz) || mz != KGENOME_PE_DOS_MAGIC)
 		return;
 	if (!kof_rd_u32(b, v->obj_off + 0x3cu, 0, &lfanew))
 		return;
 	if (lfanew < 0x40u || lfanew > v->obj_len - 4u)
 		return;
-	if (!kof_rd_u32(b, v->obj_off + lfanew, 0, &sig) || sig != 0x00004550u)
+	if (!kof_rd_u32(b, v->obj_off + lfanew, 0, &sig) || sig != KGENOME_PE_SIG_MAGIC)
 		return;   /* "PE\0\0" little endian */
 
 	memset(&v->ent[0], 0, sizeof v->ent[0]);
@@ -179,14 +169,3 @@ const char *kof_amsi_region_name(uint32_t bit)
 	}
 }
 
-const char *kof_amsi_anomaly_name(unsigned index)
-{
-	(void)index;
-	return "?";
-}
-
-uint64_t kof_amsi_anomalies(const void *view)
-{
-	(void)view;
-	return 0;
-}

@@ -8,7 +8,7 @@
  * manually mapped image has to be put back into file layout first are answers
  * about Windows memory, and Windows memory is this library's subject.
  *
- * This file REPLACES kofwatcher/kofmemscan.c, which was a whole second tool
+ * This file REPLACES the earlier kofwatcher/kofmemscan.c (gone), which was a whole second tool
  * holding the same decisions. What it does not carry over is named at the
  * bottom of this comment, so the omission is a decision rather than a gap
  * somebody finds later.

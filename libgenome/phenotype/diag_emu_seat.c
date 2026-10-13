@@ -1,9 +1,9 @@
 /*
  * diag_emu_seat.c - the walk of one function: seating a span, finishing it, and the driver over all functions.
- * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_int.h for what the
+ * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_private.h for what the
  * files share.
  */
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 /*
  * On to the next site: seat the span there. Zero when there is none, and the
@@ -235,36 +235,19 @@ static void rel_span_finish(struct kgenome_diag_emu_rel_walk *R, struct kgenome_
 	kgenome_emu_free(em);
 }
 
-static void run_rel_gaps_in(struct kgenome_diag_scan *s,
-			    const struct kgenome_obj *obj,
-			    const struct kgenome_elf_info *ei,
-			    const uint8_t *base, uint64_t size,
-			    const struct kgenome_diag_emu_skipgather *sgp,
-			    const struct kgenome_func_set *fgp,
-			    uint16_t *ret, uint8_t *dirty,
-			    uint8_t *next_dirty, uint8_t *vis,
-			    struct kgenome_emu **tmpl)
+/* `init` is what the caller filled: the object, the gathered sites and
+ * functions, the per-function tables and the template. The rest is this walk's. */
+static void run_rel_gaps_in(const struct kgenome_diag_emu_rel_walk *init)
 {
-	struct kgenome_diag_emu_rel_walk R;
+	struct kgenome_diag_emu_rel_walk R = *init;
+	struct kgenome_diag_scan *s = R.s;
+	uint16_t *ret = R.ret;
+	uint8_t *dirty = R.dirty, *next_dirty = R.next_dirty, *vis = R.vis;
 	struct kgenome_diag_emu_rel_span S;
 	uint32_t j, pass;
 
-	R.s = s;
-	R.obj = obj;
-	R.base = base;
-	R.size = size;
-	R.skips = sgp->site;
-	R.fns = fgp->v;
-	R.sg = *sgp;
-	R.fg = *fgp;
-	R.ret = ret;
-	R.dirty = dirty;
-	R.next_dirty = next_dirty;
-	R.vis = vis;
-	R.tmpl = tmpl;
 	R.n = kgenome_diag_scan_count(s);
 
-	(void)ei;
 	kgenome_diag_emu_promote_wrappers(s, R.fns, R.fg.n);
 	for (j = 0; j < R.fg.n; j++)
 		ret[j] = 0xffffu;
@@ -321,7 +304,7 @@ static void run_rel_gaps_in(struct kgenome_diag_scan *s,
 			S.n_latch = 0;
 			S.n_fault = 0;
 			S.lo = R.fns[j].off;
-			if (S.lo >= size)
+			if (S.lo >= R.size)
 				continue;
 			S.hi = S.lo + R.fns[j].len;
 
@@ -404,17 +387,31 @@ void kgenome_diag_emu_run_rel_gaps(struct kgenome_diag_scan *s,
 	if (sg.n && fgp->n) {
 		ret = malloc((size_t)fgp->n * sizeof *ret);
 		flags = calloc((size_t)fgp->n * 3u + sg.n, 1);
-		if (ret && flags)
-			run_rel_gaps_in(s, obj, ei, base, size, &sg, fgp, ret,
-					flags, flags + fgp->n,
-					flags + 2u * fgp->n, &tmpl);
-		else {
+		if (ret && flags) {
+			struct kgenome_diag_emu_rel_walk R;
+
+			memset(&R, 0, sizeof R);
+			R.s = s;
+			R.obj = obj;
+			R.base = base;
+			R.size = size;
+			R.skips = sg.site;
+			R.fns = fgp->v;
+			R.sg = sg;
+			R.fg = *fgp;
+			R.ret = ret;
+			R.dirty = flags;
+			R.next_dirty = flags + fgp->n;
+			R.vis = flags + 2u * fgp->n;
+			R.tmpl = &tmpl;
+			run_rel_gaps_in(&R);
+		} else {
 			s->halt = 1;
 			kgenome_diag_note(s, KGENOME_NOMEM);
 		}
 	}
 	kgenome_emu_free(tmpl);
-	kgenome_diag_emu_emu_pages_release(s);
+	kgenome_diag_emu_pages_release(s);
 	free(ret);
 	free(flags);
 	free(sg.site);

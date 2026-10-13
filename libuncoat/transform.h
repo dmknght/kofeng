@@ -79,7 +79,9 @@ enum kuncoat_algo {
 	 * skipped, an odd digit is TRUNCATED. Encode: upper case, no separator. */
 	KUNCOAT_ALGO_HEX,
 	/* `%XX` and nothing else. Decode reads '+' as a space and needs at least one
-	 * escape; encode escapes all but RFC 3986's unreserved set, '+' among them. */
+	 * escape; a `%` that is not an escape is CORRUPT (or TRUNCATED when cut) unless
+	 * KUNCOAT_F_LAX, which keeps it as the byte it is and does not need an escape.
+	 * Encode escapes all but RFC 3986's unreserved set, '+' among them. */
 	KUNCOAT_ALGO_URL,
 	/* Decode: byte + (uint8_t)k32. Encode: byte - (uint8_t)k32. */
 	KUNCOAT_ALGO_ADD,
@@ -96,7 +98,7 @@ enum kuncoat_dir {
 };
 
 /* Step flags. */
-#define KUNCOAT_F_LAX 0x1u  /* B64 decode: skip a character outside the alphabet */
+#define KUNCOAT_F_LAX 0x1u  /* B64 decode: skip a character outside the alphabet; URL decode: keep a stray `%` */
 
 struct kuncoat_step {
 	uint32_t        algo;           /* enum kuncoat_algo */

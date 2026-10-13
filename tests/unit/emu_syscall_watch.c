@@ -7,29 +7,28 @@
  * call (kgenome_emu_step) and goes on. A call it does not pause on is a call
  * the diagnose never sees.
  *
- * THE KNOWN MISS (diag_emu_int.h, "WHAT THE COUNT SEES"): kgenome_emu_run's
- * watch compares the FETCH BUFFER (`at_b`), and an instruction-cache HIT does
- * not fill it. A cached instruction is therefore matched against the bytes of
- * whatever was last DECODED, so:
+ * THE DEFECT THIS GUARDS AGAINST (it was a KNOWN-MISS here until fixed; see run_step in
+ * emu_interp.c): kgenome_emu_run's watch compared a fetch buffer that only an instruction-cache
+ * MISS filled. A cached instruction was matched against the bytes of whatever was last DECODED,
+ * so a polled `syscall` was paused on once (the first visit) and not again, and a cached
+ * instruction that is NOT a syscall was paused on as one when the last decode was a `0f 05`. The
+ * run now takes the bytes, the length and the address from one per-step record filled the same
+ * way on a hit and a miss, so these are plain checks:
  *
- *   - a polled `syscall` is paused on once, the first time (a miss: it is
- *     decoded, the buffer is right) and not again (every later visit is a hit,
- *     and the buffer holds the last miss - the loop's `jnz`);
- *   - a cached instruction that is NOT a syscall is paused on as one when the
- *     last decode was a `0f 05`.
+ *   - a polled `syscall` is paused on at every visit, the first (a decode) and every later one
+ *     (a cache hit);
+ *   - a cached non-syscall is never paused on, whatever was decoded before it;
+ *   - a run with the instruction cache forced off and the same run with it on make exactly the
+ *     same stops, registers and instruction counts (the cache is an acceleration).
  *
- * Both are KM_CHECKs written as the correct behaviour. The fixtures are
- * hand-built bytes in memory; the first is the "one getpid polled 1000 times"
- * loop of the note. FIXED-UNEXPECTEDLY here is the signal to turn the two into
- * plain checks AND to re-read caps_emu.c / diag_emu_int.h, whose notes and
- * window arithmetic assume the stale behaviour.
+ * The fixtures are hand-built bytes in memory.
  *
- * AND WHAT DOES NOT DEPEND ON IT, which is a plain check: a syscall that is
+ * AND WHAT NEVER DEPENDED ON IT: a syscall that is
  * decoded every time it runs (its cache slot is taken by another instruction
  * between visits) is paused on every time, and the first visit of any
  * instruction is decoded, so a straight line of distinct syscalls loses none.
  *
- * THE DIAGNOSE RUN'S QUIET WINDOW (KGENOME_DIAG_EMU_QUIET, diag_emu_int.h) is
+ * THE DIAGNOSE RUN'S QUIET WINDOW (KGENOME_DIAG_EMU_QUIET, diag_emu_private.h) is
  * built on exactly those stops and is checked below the same way: a decoded
  * program polls one syscall site from a loop whose body evicts it from the
  * cache, so every visit is a pause AT AN ADDRESS ALREADY SEEN.
@@ -40,8 +39,7 @@
  */
 
 #include "caps_fix.h"
-#include "known_miss.h"
-#include <phenotype/kofemu.h>
+#include <phenotype/emu.h>
 
 #define CODE_VA  0x400000ull
 #define STACK_VA 0x7ff00000ull
@@ -54,6 +52,9 @@ struct watched {
 	unsigned at_other;              /* ...of them, at something else            */
 	uint64_t insn;                  /* instructions the run executed            */
 	enum kgenome_emu_stop end;
+	uint64_t rip;                   /* where the run ended                      */
+	uint64_t gpr[16];               /* ...and the registers it ended with       */
+	uint64_t pause_rip[64];         /* the first 64 pauses, in order            */
 };
 
 /*
@@ -62,8 +63,8 @@ struct watched {
  * syscall" when the bytes of the image at rip are `0f 05` - the image is the
  * test's own, so this does not ask the emulator.
  */
-static struct watched drive(const uint8_t *code, unsigned len, uint64_t base,
-			    uint64_t max_insn)
+static struct watched drive_ic(const uint8_t *code, unsigned len, uint64_t base,
+			       uint64_t max_insn, int icache)
 {
 	static const uint8_t pat[2] = { 0x0f, 0x05 };
 	struct kgenome_emu_cfg cfg = { 0 };
@@ -80,6 +81,7 @@ static struct watched drive(const uint8_t *code, unsigned len, uint64_t base,
 	kgenome_emu_map(e, STACK_VA, NULL, 0, 0x1000, KGENOME_EMU_R | KGENOME_EMU_W);
 	kgenome_emu_set_rip(e, base);
 	kgenome_emu_set_reg(e, KGENOME_EMU_RSP, STACK_VA + 0x800);
+	kgenome_emu_set_icache(e, icache);
 	kgenome_emu_watch_insn(e, pat, sizeof pat);
 	for (;;) {
 		enum kgenome_emu_stop st = kgenome_emu_run(e);
@@ -89,8 +91,10 @@ static struct watched drive(const uint8_t *code, unsigned len, uint64_t base,
 			w.end = st;
 			break;
 		}
-		w.stops++;
 		rip = kgenome_emu_get_rip(e);
+		if (w.stops < 64u)
+			w.pause_rip[w.stops] = rip;
+		w.stops++;
 		if (rip >= base && rip - base + 2u <= len &&
 		    code[rip - base] == 0x0f && code[rip - base + 1u] == 0x05)
 			w.at_syscall++;
@@ -99,8 +103,21 @@ static struct watched drive(const uint8_t *code, unsigned len, uint64_t base,
 		(void)kgenome_emu_step(e);
 	}
 	w.insn = kgenome_emu_insn_count(e);
+	w.rip = kgenome_emu_get_rip(e);
+	{
+		unsigned r;
+
+		for (r = 0; r < 16u; r++)
+			w.gpr[r] = kgenome_emu_get_reg(e, r);
+	}
 	kgenome_emu_free(e);
 	return w;
+}
+
+static struct watched drive(const uint8_t *code, unsigned len, uint64_t base,
+			    uint64_t max_insn)
+{
+	return drive_ic(code, len, base, max_insn, 1);
 }
 
 /*
@@ -173,16 +190,12 @@ static void polled_syscall(void)
 	CK(w.insn >= 4000u);
 	CK(w.at_other == 0);
 	/* every executed syscall instruction is seen */
-	KM_CHECK(w.stops == 1000u && w.at_syscall == 1000u,
-		 "a getpid polled 1000 times is paused on 1000 times (one pause today)",
-		 "EMU_AT_B_STALE");
+	CK(w.stops == 1000u && w.at_syscall == 1000u);
 
 	/* A short poll: the first visit decodes, the rest hit */
 	n = poll_loop(c, 3);
 	w = drive(c, n, CODE_VA, 1u << 20);
-	KM_CHECK(w.stops == 3u && w.at_syscall == 3u,
-		 "a getpid polled 3 times is paused on 3 times",
-		 "EMU_AT_B_STALE");
+	CK(w.stops == 3u && w.at_syscall == 3u);
 	/* ...and what holds either way: the first visit IS seen */
 	CK(w.at_syscall >= 1u);
 	CK(w.at_other == 0);
@@ -200,9 +213,7 @@ static void cached_non_syscall(void)
 	CK(w.insn >= 10u);                      /* the fixture ran to its hlt */
 	CK(w.at_syscall >= 1u);                 /* S is paused on, right          */
 	/* ...and nothing else is: T is two bytes that are not `0f 05` */
-	KM_CHECK(w.stops == 1u && w.at_other == 0u,
-		 "the cached `xor edx,edx` after a decoded syscall is not paused on as one",
-		 "EMU_AT_B_STALE");
+	CK(w.stops == 1u && w.at_other == 0u);
 }
 
 /*
@@ -237,7 +248,7 @@ static uint8_t code[1u << 18];
 #define ELF_CODE_VA 0x400078ull
 #define DECODER_LEN 20u
 
-/* The instruction cache's slot of an address - kofemu.c run_fetch: a
+/* The instruction cache's slot of an address - emu_interp.c run_fetch: a
  * multiplicative hash into KGENOME_EMU_ICACHE (2048) slots. The fixture needs a
  * `syscall` and another instruction that share one, so every visit to the
  * syscall is a decode;
@@ -356,11 +367,8 @@ static unsigned probe_pauses(unsigned n)
 
 /* [xor decoder] [payload ^ key]: the file holds no `0f 05` and no `cd 80`, so
  * only a run can see the calls. Returns the code length. */
-static unsigned encoded_payload(unsigned n1, unsigned n2, int mid)
+static unsigned encode_payload(const uint8_t *pay, unsigned pn)
 {
-	uint8_t pay[16384];
-	struct quiet q;
-	unsigned pn = quiet_payload(pay, ELF_CODE_VA + DECODER_LEN, n1, n2, mid, 1, &q);
 	unsigned key, k, n = 0;
 
 	for (key = 1; key < 256u; key++) {
@@ -387,6 +395,56 @@ static unsigned encoded_payload(unsigned n1, unsigned n2, int mid)
 	return n;
 }
 
+static unsigned encoded_payload(unsigned n1, unsigned n2, int mid)
+{
+	uint8_t pay[16384];
+	struct quiet q;
+	unsigned pn = quiet_payload(pay, ELF_CODE_VA + DECODER_LEN, n1, n2, mid, 1, &q);
+
+	return encode_payload(pay, pn);
+}
+
+/*
+ * A SHARED WRAPPER, the shape of a static libc: every call goes through ONE `syscall`
+ * instruction (in W: mov eax,39 ; syscall ; ret) and the callers are what differ.
+ *
+ *   `sites` > 0   that many DIFFERENT call sites, `call rbx` (rbx = W) once each, then the stager
+ *   `sites` == 0  ONE call site polled `laps` times: L: call W ; dec ebx ; jnz L, then the stager
+ */
+static unsigned wrapper_payload(uint8_t *c, unsigned sites, uint32_t laps)
+{
+	uint8_t tmp[64];
+	unsigned slen = cf_stager64(tmp, 0), at = 0, w, k;
+
+	if (sites) {
+		/* `call rbx` is two bytes, so the object stays small enough to be emulated at all
+		 * with tens of thousands of sites; rbx is W, set once */
+		uint64_t wva;
+
+		w = 10u + 2u * sites + slen;
+		wva = ELF_CODE_VA + DECODER_LEN + w;
+		c[at++] = 0x48; c[at++] = 0xbb;                /* mov rbx,W       */
+		for (k = 0; k < 8u; k++)
+			c[at++] = (uint8_t)(wva >> (8u * k));
+		for (k = 0; k < sites; k++) {
+			c[at++] = 0xff; c[at++] = 0xd3;        /* call rbx        */
+		}
+	} else {
+		w = 5u + 5u + 2u + 2u + slen;
+		c[at++] = 0xbb; put32(c, at, laps); at += 4;   /* mov ebx,laps    */
+		c[at++] = 0xe8;                                /* L: call W       */
+		put32(c, at, w - (at + 4u)); at += 4;
+		c[at++] = 0xff; c[at++] = 0xcb;                /* dec ebx         */
+		c[at++] = 0x75; c[at++] = (uint8_t)-9;         /* jnz L           */
+	}
+	at = cf_stager64(c, at);                               /* the stager      */
+	CK(at == w);
+	c[at++] = 0xb8; put32(c, at, 39); at += 4;             /* W: mov eax,39   */
+	c[at++] = 0x0f; c[at++] = 0x05;                        /* syscall         */
+	c[at++] = 0xc3;                                        /* ret             */
+	return at;
+}
+
 struct got { int match; enum kgenome_status st; int static_blind; };
 
 static struct got run_quiet(unsigned n1, unsigned n2, int mid)
@@ -410,6 +468,65 @@ static struct got run_quiet(unsigned n1, unsigned n2, int mid)
 	return g;
 }
 
+static struct got run_wrapper(unsigned sites, uint32_t laps)
+{
+	struct kof_obj_ctx ctx;
+	struct kgenome_diag_scan *s;
+	struct got g;
+	static uint8_t pay[1u << 17];
+	unsigned pn = wrapper_payload(pay, sites, laps), n = encode_payload(pay, pn);
+	uint64_t len;
+
+	memset(view, 0, sizeof view);
+	len = cf_elf64(img, sizeof img, code, n);
+	s = cf_scan(img, len, KGENOME_DIAG_RUN_SYSCALL, &ctx, view);
+	g.static_blind = s && kgenome_diag_scan_count(s) == 0u;
+	kgenome_diag_scan_free(s);
+	memset(view, 0, sizeof view);
+	s = cf_scan(img, len, KGENOME_DIAG_RUN_ALL, &ctx, view);
+	g.match = cf_match_rwx(s);
+	g.st = kgenome_diag_scan_status(s);
+	kgenome_diag_scan_free(s);
+	return g;
+}
+
+/*
+ * THE STOP'S IDENTITY IS ITS ADDRESS AND ITS CALLER. A wrapper reached from many different call
+ * sites is progress at every one; the same site reaching the same instruction over and over is a
+ * poll and is ended - 256 repeats in a row, counted from the third visit (the call history of
+ * the first two can differ).
+ */
+static void wrapper_identity(void)
+{
+	struct got g;
+
+	/* three hundred distinct call sites through one address: every one is new work, the run
+	 * is not turned round and reaches the stager behind them */
+	g = run_wrapper(300, 0);
+	CK(g.static_blind);
+	CK(g.match == 1 && g.st == KGENOME_OK);
+	/* and far past the window: 1000 distinct sites */
+	g = run_wrapper(1000, 0);
+	CK(g.match == 1 && g.st == KGENOME_OK);
+
+	/* the DoS bound is REPORTED: more distinct call sites than KGENOME_DIAG_EMU_SITES (32768)
+	 * and the run is said to be cut, not silently dropped */
+	g = run_wrapper(33000, 0);
+	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
+
+	/* one site polled: 255 repeats are tolerated, 256 end the run */
+	g = run_wrapper(0, 3);
+	CK(g.match == 1 && g.st == KGENOME_OK);
+	g = run_wrapper(0, 257);                 /* 255 repeats */
+	CK(g.match == 1 && g.st == KGENOME_OK);
+	g = run_wrapper(0, 258);                 /* 256 repeats */
+	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
+	g = run_wrapper(0, 259);
+	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
+	g = run_wrapper(0, 1000);
+	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
+}
+
 static void quiet_window(void)
 {
 	struct got g;
@@ -422,35 +539,130 @@ static void quiet_window(void)
 	g = run_quiet(5, 0, 0);
 	CK(g.static_blind);
 	CK(g.match == 1 && g.st == KGENOME_OK);
-	/* 1 first stop + 255 repeats = 255 quiet stops in a row: the stager's
-	 * mmap is a new address and the run goes on. */
+	/* A STOP IS A REPEAT FROM ITS THIRD VISIT (the call history of the first two can differ),
+	 * so a poll of N laps makes N-2 repeats: 255 of them at N = 257 - the stager's mmap is a
+	 * new stop and the run goes on. */
 	g = run_quiet(256, 0, 0);
 	CK(g.match == 1 && g.st == KGENOME_OK);
-	/* One more repeat is 256 in a row: the run is turned round and the scan
-	 * says it was cut - the stager behind the poll is not reached. */
 	g = run_quiet(257, 0, 0);
+	CK(g.match == 1 && g.st == KGENOME_OK);
+	/* 256 repeats in a row (N = 258): the run is turned round and the scan says it was cut -
+	 * the stager behind the poll is not reached. */
+	g = run_quiet(258, 0, 0);
 	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
 	g = run_quiet(1000, 0, 0);
 	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
 
-	/* A stop at a NEW address starts the count again: a poll of 256 (255
-	 * quiet), a new site, and a poll of 255 (all quiet) are 510 repeats in all
-	 * and the run is not ended. */
-	g = run_quiet(256, 255, 1);
+	/* A stop with a NEW identity starts the count again: a poll of 255 repeats (257 laps), a
+	 * new site, and a second poll of 255 repeats (256 laps: its first lap is a new identity
+	 * but its second repeats the first poll's) are 510 repeats in all and the run is not
+	 * ended. */
+	g = run_quiet(257, 256, 1);
 	CK(g.match == 1 && g.st == KGENOME_OK);
-	/* ...and the second poll is held to the window as the first was: 256
-	 * repeats after the new site. */
-	g = run_quiet(256, 256, 1);
+	/* ...and the second poll is held to the window as the first was. */
+	g = run_quiet(257, 257, 1);
 	CK(g.match == 0 && g.st == KGENOME_TRUNCATED);
+}
+
+
+/*
+ * EVERY EXECUTED SYSCALL INSTRUCTION IS SEEN, on the first visit and on every later one: a poll of
+ * N laps is N pauses, all at the one `syscall`, for any N - 1 (a decode only) up to a count that
+ * wraps the cache's recency many times over.
+ */
+static void every_visit_seen(void)
+{
+	static const uint32_t ns[] = { 1, 2, 3, 7, 64, 255, 256, 257, 1000 };
+	uint8_t c[64];
+	unsigned i, k;
+
+	for (i = 0; i < sizeof ns / sizeof ns[0]; i++) {
+		unsigned n = poll_loop(c, ns[i]);
+		struct watched w = drive(c, n, CODE_VA, 1u << 22);
+
+		CK(w.stops == ns[i] && w.at_syscall == ns[i] && w.at_other == 0u);
+		/* every pause is at the one site */
+		for (k = 1; k < ns[i] && k < 64u; k++)
+			CK(w.pause_rip[k] == w.pause_rip[0]);
+	}
+}
+
+/*
+ * THE CACHE IS AN ACCELERATION, NEVER A CHANGE OF SEMANTICS: each fixture is run with the
+ * instruction cache forced off and again with it on, and the two runs must agree on everything the
+ * run reports - the pauses (how many, at which addresses, which were syscalls), the instruction
+ * count, the stop, the final rip and every register.
+ */
+static void same_run(const struct watched *a, const struct watched *b)
+{
+	CK(a->stops == b->stops && a->at_syscall == b->at_syscall && a->at_other == b->at_other);
+	CK(a->insn == b->insn);
+	CK(a->end == b->end);
+	CK(a->rip == b->rip);
+	CK(!memcmp(a->gpr, b->gpr, sizeof a->gpr));
+	CK(!memcmp(a->pause_rip, b->pause_rip, sizeof a->pause_rip));
+}
+
+static void cache_off_equals_on(void)
+{
+	uint8_t c[8192];
+	unsigned i, n, s, t, at;
+	static const uint32_t ns[] = { 1, 3, 100, 1000 };
+
+	for (i = 0; i < sizeof ns / sizeof ns[0]; i++) {
+		struct watched off, on;
+
+		n = poll_loop(c, ns[i]);
+		off = drive_ic(c, n, CODE_VA, 1u << 22, 0);
+		on = drive_ic(c, n, CODE_VA, 1u << 22, 1);
+		CK(off.stops == ns[i]);
+		same_run(&off, &on);
+	}
+	{
+		struct watched off, on;
+
+		n = false_stop(c, &s, &t);
+		off = drive_ic(c, n, CODE_VA, 1u << 20, 0);
+		on = drive_ic(c, n, CODE_VA, 1u << 20, 1);
+		CK(off.stops == 1u);
+		same_run(&off, &on);
+	}
+	{
+		struct watched off, on;
+
+		for (at = 0, i = 0; i < 500u; i++) {
+			c[at++] = 0xb8; put32(c, at, 39); at += 4;
+			c[at++] = 0x0f; c[at++] = 0x05;
+		}
+		c[at++] = 0xf4;
+		off = drive_ic(c, at, CODE_VA, 1u << 20, 0);
+		on = drive_ic(c, at, CODE_VA, 1u << 20, 1);
+		CK(off.stops == 500u);
+		same_run(&off, &on);
+	}
+	/* The quiet-window payload: a poll whose body evicts the syscall's cache slot at every
+	 * lap, so the cache is exercised both ways inside one run. */
+	{
+		uint8_t p[16384];
+		struct quiet q;
+		unsigned len = quiet_payload(p, ELF_CODE_VA + DECODER_LEN, 300, 0, 0, 0, &q);
+		struct watched off = drive_ic(p, len, ELF_CODE_VA + DECODER_LEN, 1u << 20, 0);
+		struct watched on = drive_ic(p, len, ELF_CODE_VA + DECODER_LEN, 1u << 20, 1);
+
+		CK(off.stops == 300u);
+		same_run(&off, &on);
+	}
 }
 
 int main(void)
 {
 	quiet_window();
+	wrapper_identity();
 	polled_syscall();
 	cached_non_syscall();
 	straight_line();
-	printf("emu syscall watch: %u known miss(es) recorded, %s\n", km_known(),
-	       fails || km_failed() ? "FAILED" : "ok");
-	return fails != 0 || km_failed();
+	every_visit_seen();
+	cache_off_equals_on();
+	printf("emu syscall watch: %s\n", fails ? "FAILED" : "ok");
+	return fails != 0;
 }

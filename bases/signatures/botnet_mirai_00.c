@@ -1,6 +1,6 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofcap.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * botnet_mirai_00.c - a bot read off its two habits: it dials its controller on

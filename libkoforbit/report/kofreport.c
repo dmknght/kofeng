@@ -32,7 +32,7 @@
 
 /* ---- the string arena ---------------------------------------------------- */
 
-const char *kofrep_arena_put(struct kofrep_arena *a, const char *s, size_t n)
+static const char *kofrep_arena_put(struct kofrep_arena *a, const char *s, size_t n)
 {
 	struct kofrep_ablock *b = a->head;
 	char *out;
@@ -65,12 +65,12 @@ const char *kofrep_arena_put(struct kofrep_arena *a, const char *s, size_t n)
 	return out;
 }
 
-const char *kofrep_arena_str(struct kofrep_arena *a, const char *s)
+static const char *kofrep_arena_str(struct kofrep_arena *a, const char *s)
 {
 	return s ? kofrep_arena_put(a, s, strlen(s)) : "";
 }
 
-void kofrep_arena_free(struct kofrep_arena *a)
+static void kofrep_arena_free(struct kofrep_arena *a)
 {
 	struct kofrep_ablock *b = a->head;
 
@@ -489,7 +489,7 @@ static uint32_t hash_of(uint8_t kind, const char *s)
 	/* FNV-1a, folded over a case-insensitive view: the same path spelled
 	 * with a different case is the same artefact, and Windows will hand
 	 * over both spellings within one trace. */
-	uint32_t h = 2166136261u ^ kind;
+	uint32_t h = KOF_HASH_INIT ^ kind;
 
 	for (; *s; s++) {
 		char c = *s;
@@ -571,7 +571,7 @@ static struct kof_fingerprint *intern(struct kof_report *r, uint8_t kind,
  * report something no event established, and the whole claim of this library
  * is that every line in a report came off the trace.
  */
-struct kof_fingerprint *kofrep_find(struct kof_report *r, uint8_t kind,
+static struct kof_fingerprint *kofrep_find(struct kof_report *r, uint8_t kind,
 				    const char *text)
 {
 	uint32_t h, i;
@@ -848,6 +848,283 @@ static struct kof_fingerprint *note(struct kof_report *r, uint8_t kind,
 	return f;
 }
 
+/* Feed step: a process start: the entry, and the command line as a fingerprint. */
+static void feed_proc_start(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	struct kof_rep_proc *p = proc_find(r, e->pid,
+		kof_evt_as_proc(e) ? kof_evt_as_proc(e)->create_time
+				   : 0);
+
+	/* A ProcessStart for a pid already in the table with the same
+	 * creation time is a duplicate record, not a second process. */
+	if (!p || (kof_evt_as_proc(e) &&
+		   p->create_time != kof_evt_as_proc(e)->create_time))
+		(void)proc_add(r, e);
+
+	/*
+	 * THE COMMAND LINE IS THE FINGERPRINT, not the image path.
+	 *
+	 * "powershell.exe started" is not something anybody can act
+	 * on; the arguments are the whole event for every
+	 * living-off-the-land technique. The image is on the process
+	 * entry, where it belongs, and a process with no readable
+	 * command line falls back to it so that the fingerprint exists
+	 * at all.
+	 */
+	{
+		const char *cl = kof_evt_cmdline(e);
+
+		/* The root's, from the host, when the trace lost the
+		 * race - see proc_add, which does the same for the
+		 * process entry and explains why only the root. */
+		if ((!cl || !*cl) && e->pid == r->info.root_pid &&
+		    r->info.subject_cmd && *r->info.subject_cmd)
+			cl = r->info.subject_cmd;
+
+		note(r, KOF_FP_PROCESS, (cl && *cl) ? cl
+						   : kof_evt_image(e),
+		     e, index);
+	}
+}
+
+/* Feed step: a file write: the fingerprint and the first range written. */
+static void feed_file_write(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	struct kof_fingerprint *f;
+	const struct kof_evt_file *fl = kof_evt_as_file(e);
+
+	note(r, KOF_FP_FILE_WRITE, kof_evt_object(e), e, index);
+
+	/*
+	 * THE RANGE, AND ONLY THE FIRST ONE PER PATH.
+	 *
+	 * A program appending to a file produces a write per buffer,
+	 * and keeping every range would be an unbounded list on the
+	 * drain path - the one thing this phase may not have. So the
+	 * fingerprint holds the FIRST range and the total the writes
+	 * claimed, and says so: `claimed` grows with each write while
+	 * `offset` stays where the first one landed.
+	 *
+	 * That is enough for what the range is for. A reader wants to
+	 * know where the sample started writing and how much it wrote;
+	 * the bytes are read back from there in the expensive phase,
+	 * and a gap in the middle of a sparse write is a case this
+	 * reports as a length rather than pretending to reconstruct.
+	 */
+	f = intern(r, KOF_FP_FILE_WRITE, kof_evt_object(e));
+	if (f && fl) {
+		if (f->count <= 1u) {
+			f->bytes.offset  = fl->offset;
+			f->bytes.claimed = fl->size;
+		} else if (fl->size) {
+			f->bytes.claimed += fl->size;
+			if (fl->offset < f->bytes.offset)
+				f->bytes.offset = fl->offset;
+		}
+	}
+}
+
+/* Feed step: a key create: grouped as ambient unless named. */
+static void feed_reg_create(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	/*
+	 * A CREATE IS NOT A CHANGE, AND IT IS GROUPED RATHER THAN
+	 * DROPPED.
+	 *
+	 * RegCreateKeyEx opens an existing key as readily as it makes a
+	 * new one and the kernel raises CreateKey either way - see the
+	 * note in wevt_decode.c's type_of. So every key a program
+	 * merely reads arrives here, and a report that listed them all
+	 * as registry modifications would bury the one SetValue that
+	 * established persistence under fifty opens of Tcpip
+	 * parameters. That is not hypothetical: it is what
+	 * nslookup.kevt is, eight times over.
+	 *
+	 * Dropping them would be the easy answer and is the one this
+	 * library refuses everywhere else: a dropped fingerprint is a
+	 * judgement the reader cannot see or overrule. So it is kept
+	 * and grouped as ambient WITH THE REASON PRINTED - unless the
+	 * path is one the matrix has a name for, because "created a key
+	 * under Run" is worth a reader's attention even before the
+	 * value arrives.
+	 */
+	struct kof_fingerprint *f = note(r, KOF_FP_REGISTRY,
+					 kof_evt_object(e), e, index);
+
+	if (f && f->count == 1u && !f->attack &&
+	    f->group == KOF_RG_STABLE) {
+		f->group = KOF_RG_AMBIENT;
+		f->why   = "a key opened with create disposition, "
+			   "which is how every program reads one - "
+			   "the SetValue is the event";
+	}
+}
+
+/* Feed step: a network event: the peer as a fingerprint. */
+static void feed_net(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	const struct kof_evt_net *n = kof_evt_as_net(e);
+	char peer[KOF_IP_STR_MAX + 16];
+	char ip[KOF_IP_STR_MAX];
+	uint16_t dp;
+
+	if (!n || kof_evt_ip_is_unset(n->daddr))
+		return;
+	dp = (uint16_t)((n->dport >> 8) | (n->dport << 8));
+	kof_evt_ip_str(n->daddr, ip, sizeof ip);
+
+	/* One spelling, and it is the one somebody pastes into a
+	 * search: brackets around a v6 address because
+	 * 2001:db8::1:443 cannot be read. */
+	if (kof_evt_ip_is_v6(n->daddr))
+		snprintf(peer, sizeof peer, "[%s]:%u", ip,
+			 (unsigned)dp);
+	else
+		snprintf(peer, sizeof peer, "%s:%u", ip, (unsigned)dp);
+	note(r, KOF_FP_PEER, peer, e, index);
+}
+
+/* Feed step: an AMSI submission: one folded line of it as a fingerprint. */
+static void feed_amsi(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	/*
+	 * CONTENT AND NOT A PATH, so it is taken by length and not as
+	 * a string: a submission may hold NULs, and UTF-16 read as
+	 * bytes has one at index 1 - which as a string is exactly one
+	 * character. That mistake was made once in this tree already
+	 * and is why kof_evt carries content_len.
+	 */
+	const char *ct = NULL;
+	size_t      cn = 0;
+	char        buf[256];
+	size_t      i, o = 0;
+
+	if (!kof_evt_content(e, &ct, &cn) || !cn)
+		return;
+
+	/*
+	 * ONE LINE OF IT, with control characters folded to spaces.
+	 *
+	 * The fingerprint's text is what identifies the submission and
+	 * what a reader sees; the bytes are in the log at
+	 * `first_index`, which is where somebody who needs all of them
+	 * goes. Folding is not sanitising for a terminal - that is the
+	 * printer's job and it does it again - it is so that two
+	 * submissions differing only in line endings are one
+	 * fingerprint.
+	 */
+	for (i = 0; i < cn && o + 1u < sizeof buf; i++) {
+		unsigned char c = (unsigned char)ct[i];
+
+		if (c == '\r' || c == '\n' || c == '\t')
+			c = ' ';
+		if (c < 0x20u || c >= 0x7fu)
+			continue;
+		if (c == ' ' && o && buf[o - 1u] == ' ')
+			continue;
+		buf[o++] = (char)c;
+	}
+	buf[o] = '\0';
+	if (o) {
+		struct kof_fingerprint *f;
+
+		note(r, KOF_FP_SCRIPT, buf, e, index);
+		f = intern(r, KOF_FP_SCRIPT, buf);
+		/* A submission is almost always longer than the record
+		 * - kofevt.h says so - and the flag is what stops a
+		 * signature being written from a prefix as if it were
+		 * the whole thing. */
+		if (f && (cn > o || (e->flags & KOF_EF_TRUNCATED)))
+			f->flags |= KOF_FP_F_CUT;
+	}
+}
+
+/* Feed step: a thread start: only an unbacked entry point is filed. */
+static void feed_thread_start(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	/*
+	 * THE ONE FINGERPRINT WITH NO STRING.
+	 *
+	 * An unbacked entry point is what a manually mapped payload
+	 * and a remote injection both look like, and there is no path
+	 * to name - that is the entire point of it. So the text is the
+	 * process it happened in, which is the only identifying thing
+	 * there is, and the address is in the log at first_index.
+	 *
+	 * Only when the flag is set. kofgrille.h is careful that the
+	 * flag is set only when the answer is KNOWABLE - the session
+	 * has to have seen the process start - and a report that
+	 * inferred it from a missing module list would be reporting a
+	 * gap in the trace as an injection.
+	 */
+	if (e->flags & KOF_EF_UNBACKED) {
+		struct kof_rep_proc *p = proc_find(r, e->pid, 0);
+
+		note(r, KOF_FP_UNBACKED,
+		     (p && p->image && *p->image) ? p->image
+						  : kof_evt_image(e),
+		     e, index);
+	}
+}
+
+/* Feed step: an untyped record, filed by its provider. */
+static void feed_raw(struct kof_report *r, const struct kof_evt *e,
+		      uint64_t index)
+{
+	if (e->source == KOF_SRC_REGISTRY)
+		note(r, KOF_FP_REGISTRY, kof_evt_object(e), e, index);
+	/*
+	 * A NAMED PIPE, WHICH ARRIVES WITH NO VERB BY DESIGN.
+	 *
+	 * kofevt.h refuses a verb for "a file was opened" on purpose -
+	 * the test it sets is whether a detection can be stated in one
+	 * sentence using it, and that one cannot. Kernel-File's id 12
+	 * (Create|FileIo, per the provider's keyword table) is
+	 * therefore untyped and always will be.
+	 *
+	 * But a pipe is only ever visible through it. kofgrille.h
+	 * subscribes to file opens for exactly this reason and says so:
+	 * a pipe is how one process makes another act for it, and
+	 * getsystem creates a pipe, has a SYSTEM service connect, and
+	 * impersonates the token that arrives. Without this line the
+	 * whole technique produces a report that mentions nothing.
+	 *
+	 * The LOCATION is what makes it safe to file: wfilter.c
+	 * classifies the object of every event including an untyped
+	 * one, and \Device\NamedPipe\ is the first row of kofevt.c's
+	 * table. So this is not guessing at an id - it is reading a
+	 * classification that already happened.
+	 */
+	else if (e->source == KOF_SRC_FILE && e->loc == KOF_LOC_PIPE)
+		note(r, KOF_FP_PIPE, kof_evt_object(e), e, index);
+	/*
+	 * DNS IS NOT FILED FROM A RAW RECORD, AND IT USED TO BE.
+	 *
+	 * While no DNS id was typed this was the only way a name
+	 * reached a report. Now 3008 is typed - see type_of - and the
+	 * fallback became actively wrong: the resolver raises five or
+	 * six events per resolution (the call, the cache lookup, the
+	 * wire, the server's answer, the completion), every one of them
+	 * carries the same name, and they dedup onto one fingerprint
+	 * whose COUNT would then say a sample looked a host up six
+	 * times. The set stays right and the number lies, which is the
+	 * worse of the two failures.
+	 *
+	 * Registry keeps its fallback because the shape is opposite:
+	 * each record carries a DIFFERENT key path, so dedup cannot
+	 * inflate anything, and only the four mutation ids are
+	 * subscribed at all. If those ids ever differ on some build,
+	 * the fallback is what stops a report going silent about
+	 * persistence.
+	 */
+}
+
 void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 		     uint64_t index)
 {
@@ -874,43 +1151,9 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 	r->last_stamp = e->stamp;
 
 	switch (e->verb) {
-	case KOF_EVT_PROC_START: {
-		struct kof_rep_proc *p = proc_find(r, e->pid,
-			kof_evt_as_proc(e) ? kof_evt_as_proc(e)->create_time
-					   : 0);
-
-		/* A ProcessStart for a pid already in the table with the same
-		 * creation time is a duplicate record, not a second process. */
-		if (!p || (kof_evt_as_proc(e) &&
-			   p->create_time != kof_evt_as_proc(e)->create_time))
-			(void)proc_add(r, e);
-
-		/*
-		 * THE COMMAND LINE IS THE FINGERPRINT, not the image path.
-		 *
-		 * "powershell.exe started" is not something anybody can act
-		 * on; the arguments are the whole event for every
-		 * living-off-the-land technique. The image is on the process
-		 * entry, where it belongs, and a process with no readable
-		 * command line falls back to it so that the fingerprint exists
-		 * at all.
-		 */
-		{
-			const char *cl = kof_evt_cmdline(e);
-
-			/* The root's, from the host, when the trace lost the
-			 * race - see proc_add, which does the same for the
-			 * process entry and explains why only the root. */
-			if ((!cl || !*cl) && e->pid == r->info.root_pid &&
-			    r->info.subject_cmd && *r->info.subject_cmd)
-				cl = r->info.subject_cmd;
-
-			note(r, KOF_FP_PROCESS, (cl && *cl) ? cl
-							   : kof_evt_image(e),
-			     e, index);
-		}
+	case KOF_EVT_PROC_START:
+		feed_proc_start(r, e, index);
 		break;
-	}
 	case KOF_EVT_PROC_STOP: {
 		const struct kof_evt_proc *pr = kof_evt_as_proc(e);
 		struct kof_rep_proc *p = proc_find(r, e->pid,
@@ -936,41 +1179,9 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 		     kof_evt_object(e), e, index);
 		break;
 
-	case KOF_EVT_FILE_WRITE: {
-		struct kof_fingerprint *f;
-		const struct kof_evt_file *fl = kof_evt_as_file(e);
-
-		note(r, KOF_FP_FILE_WRITE, kof_evt_object(e), e, index);
-
-		/*
-		 * THE RANGE, AND ONLY THE FIRST ONE PER PATH.
-		 *
-		 * A program appending to a file produces a write per buffer,
-		 * and keeping every range would be an unbounded list on the
-		 * drain path - the one thing this phase may not have. So the
-		 * fingerprint holds the FIRST range and the total the writes
-		 * claimed, and says so: `claimed` grows with each write while
-		 * `offset` stays where the first one landed.
-		 *
-		 * That is enough for what the range is for. A reader wants to
-		 * know where the sample started writing and how much it wrote;
-		 * the bytes are read back from there in the expensive phase,
-		 * and a gap in the middle of a sparse write is a case this
-		 * reports as a length rather than pretending to reconstruct.
-		 */
-		f = intern(r, KOF_FP_FILE_WRITE, kof_evt_object(e));
-		if (f && fl) {
-			if (f->count <= 1u) {
-				f->bytes.offset  = fl->offset;
-				f->bytes.claimed = fl->size;
-			} else if (fl->size) {
-				f->bytes.claimed += fl->size;
-				if (fl->offset < f->bytes.offset)
-					f->bytes.offset = fl->offset;
-			}
-		}
+	case KOF_EVT_FILE_WRITE:
+		feed_file_write(r, e, index);
 		break;
-	}
 
 	case KOF_EVT_FILE_DELETE: {
 		struct kof_fingerprint *prev;
@@ -999,40 +1210,9 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 		note(r, KOF_FP_REGISTRY, kof_evt_object(e), e, index);
 		break;
 
-	case KOF_EVT_REG_CREATE: {
-		/*
-		 * A CREATE IS NOT A CHANGE, AND IT IS GROUPED RATHER THAN
-		 * DROPPED.
-		 *
-		 * RegCreateKeyEx opens an existing key as readily as it makes a
-		 * new one and the kernel raises CreateKey either way - see the
-		 * note in wevt_decode.c's type_of. So every key a program
-		 * merely reads arrives here, and a report that listed them all
-		 * as registry modifications would bury the one SetValue that
-		 * established persistence under fifty opens of Tcpip
-		 * parameters. That is not hypothetical: it is what
-		 * nslookup.kevt is, eight times over.
-		 *
-		 * Dropping them would be the easy answer and is the one this
-		 * library refuses everywhere else: a dropped fingerprint is a
-		 * judgement the reader cannot see or overrule. So it is kept
-		 * and grouped as ambient WITH THE REASON PRINTED - unless the
-		 * path is one the matrix has a name for, because "created a key
-		 * under Run" is worth a reader's attention even before the
-		 * value arrives.
-		 */
-		struct kof_fingerprint *f = note(r, KOF_FP_REGISTRY,
-						 kof_evt_object(e), e, index);
-
-		if (f && f->count == 1u && !f->attack &&
-		    f->group == KOF_RG_STABLE) {
-			f->group = KOF_RG_AMBIENT;
-			f->why   = "a key opened with create disposition, "
-				   "which is how every program reads one - "
-				   "the SetValue is the event";
-		}
+	case KOF_EVT_REG_CREATE:
+		feed_reg_create(r, e, index);
 		break;
-	}
 
 	case KOF_EVT_IMAGE_LOAD:
 		note(r, KOF_FP_MODULE, kof_evt_object(e), e, index);
@@ -1044,107 +1224,16 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 
 	case KOF_EVT_NET_CONNECT:
 	case KOF_EVT_NET_SEND:
-	case KOF_EVT_NET_RECV: {
-		const struct kof_evt_net *n = kof_evt_as_net(e);
-		char peer[KOF_IP_STR_MAX + 16];
-		char ip[KOF_IP_STR_MAX];
-		uint16_t dp;
-
-		if (!n || kof_evt_ip_is_unset(n->daddr))
-			break;
-		dp = (uint16_t)((n->dport >> 8) | (n->dport << 8));
-		kof_evt_ip_str(n->daddr, ip, sizeof ip);
-
-		/* One spelling, and it is the one somebody pastes into a
-		 * search: brackets around a v6 address because
-		 * 2001:db8::1:443 cannot be read. */
-		if (kof_evt_ip_is_v6(n->daddr))
-			snprintf(peer, sizeof peer, "[%s]:%u", ip,
-				 (unsigned)dp);
-		else
-			snprintf(peer, sizeof peer, "%s:%u", ip, (unsigned)dp);
-		note(r, KOF_FP_PEER, peer, e, index);
+	case KOF_EVT_NET_RECV:
+		feed_net(r, e, index);
 		break;
-	}
 
-	case KOF_EVT_AMSI_SCAN: {
-		/*
-		 * CONTENT AND NOT A PATH, so it is taken by length and not as
-		 * a string: a submission may hold NULs, and UTF-16 read as
-		 * bytes has one at index 1 - which as a string is exactly one
-		 * character. That mistake was made once in this tree already
-		 * and is why kof_evt carries content_len.
-		 */
-		const char *ct = NULL;
-		size_t      cn = 0;
-		char        buf[256];
-		size_t      i, o = 0;
-
-		if (!kof_evt_content(e, &ct, &cn) || !cn)
-			break;
-
-		/*
-		 * ONE LINE OF IT, with control characters folded to spaces.
-		 *
-		 * The fingerprint's text is what identifies the submission and
-		 * what a reader sees; the bytes are in the log at
-		 * `first_index`, which is where somebody who needs all of them
-		 * goes. Folding is not sanitising for a terminal - that is the
-		 * printer's job and it does it again - it is so that two
-		 * submissions differing only in line endings are one
-		 * fingerprint.
-		 */
-		for (i = 0; i < cn && o + 1u < sizeof buf; i++) {
-			unsigned char c = (unsigned char)ct[i];
-
-			if (c == '\r' || c == '\n' || c == '\t')
-				c = ' ';
-			if (c < 0x20u || c >= 0x7fu)
-				continue;
-			if (c == ' ' && o && buf[o - 1u] == ' ')
-				continue;
-			buf[o++] = (char)c;
-		}
-		buf[o] = '\0';
-		if (o) {
-			struct kof_fingerprint *f;
-
-			note(r, KOF_FP_SCRIPT, buf, e, index);
-			f = intern(r, KOF_FP_SCRIPT, buf);
-			/* A submission is almost always longer than the record
-			 * - kofevt.h says so - and the flag is what stops a
-			 * signature being written from a prefix as if it were
-			 * the whole thing. */
-			if (f && (cn > o || (e->flags & KOF_EF_TRUNCATED)))
-				f->flags |= KOF_FP_F_CUT;
-		}
+	case KOF_EVT_AMSI_SCAN:
+		feed_amsi(r, e, index);
 		break;
-	}
 
 	case KOF_EVT_THREAD_START:
-		/*
-		 * THE ONE FINGERPRINT WITH NO STRING.
-		 *
-		 * An unbacked entry point is what a manually mapped payload
-		 * and a remote injection both look like, and there is no path
-		 * to name - that is the entire point of it. So the text is the
-		 * process it happened in, which is the only identifying thing
-		 * there is, and the address is in the log at first_index.
-		 *
-		 * Only when the flag is set. kofgrille.h is careful that the
-		 * flag is set only when the answer is KNOWABLE - the session
-		 * has to have seen the process start - and a report that
-		 * inferred it from a missing module list would be reporting a
-		 * gap in the trace as an injection.
-		 */
-		if (e->flags & KOF_EF_UNBACKED) {
-			struct kof_rep_proc *p = proc_find(r, e->pid, 0);
-
-			note(r, KOF_FP_UNBACKED,
-			     (p && p->image && *p->image) ? p->image
-							  : kof_evt_image(e),
-			     e, index);
-		}
+		feed_thread_start(r, e, index);
 		break;
 
 	/*
@@ -1175,52 +1264,7 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 	 * three lines in type_of() and a trace to read them off.
 	 */
 	case KOF_EVT_RAW:
-		if (e->source == KOF_SRC_REGISTRY)
-			note(r, KOF_FP_REGISTRY, kof_evt_object(e), e, index);
-		/*
-		 * A NAMED PIPE, WHICH ARRIVES WITH NO VERB BY DESIGN.
-		 *
-		 * kofevt.h refuses a verb for "a file was opened" on purpose -
-		 * the test it sets is whether a detection can be stated in one
-		 * sentence using it, and that one cannot. Kernel-File's id 12
-		 * (Create|FileIo, per the provider's keyword table) is
-		 * therefore untyped and always will be.
-		 *
-		 * But a pipe is only ever visible through it. kofgrille.h
-		 * subscribes to file opens for exactly this reason and says so:
-		 * a pipe is how one process makes another act for it, and
-		 * getsystem creates a pipe, has a SYSTEM service connect, and
-		 * impersonates the token that arrives. Without this line the
-		 * whole technique produces a report that mentions nothing.
-		 *
-		 * The LOCATION is what makes it safe to file: wfilter.c
-		 * classifies the object of every event including an untyped
-		 * one, and \Device\NamedPipe\ is the first row of kofevt.c's
-		 * table. So this is not guessing at an id - it is reading a
-		 * classification that already happened.
-		 */
-		else if (e->source == KOF_SRC_FILE && e->loc == KOF_LOC_PIPE)
-			note(r, KOF_FP_PIPE, kof_evt_object(e), e, index);
-		/*
-		 * DNS IS NOT FILED FROM A RAW RECORD, AND IT USED TO BE.
-		 *
-		 * While no DNS id was typed this was the only way a name
-		 * reached a report. Now 3008 is typed - see type_of - and the
-		 * fallback became actively wrong: the resolver raises five or
-		 * six events per resolution (the call, the cache lookup, the
-		 * wire, the server's answer, the completion), every one of them
-		 * carries the same name, and they dedup onto one fingerprint
-		 * whose COUNT would then say a sample looked a host up six
-		 * times. The set stays right and the number lies, which is the
-		 * worse of the two failures.
-		 *
-		 * Registry keeps its fallback because the shape is opposite:
-		 * each record carries a DIFFERENT key path, so dedup cannot
-		 * inflate anything, and only the four mutation ids are
-		 * subscribed at all. If those ids ever differ on some build,
-		 * the fallback is what stops a report going silent about
-		 * persistence.
-		 */
+		feed_raw(r, e, index);
 		break;
 
 	default:

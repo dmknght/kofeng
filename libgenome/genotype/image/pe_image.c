@@ -116,6 +116,21 @@ int kgenome_pe_sec_is_code(const struct kgenome_pe_sec *s)
 	return (s->perm & KGENOME_PE_PERM_X) != 0;
 }
 
+const struct kgenome_pe_sec *kgenome_pe_sec_at_off(const struct kgenome_pe_info *p,
+					       uint64_t off)
+{
+	uint32_t i;
+
+	for (i = 0; i < p->sec_count; i++) {
+		const struct kgenome_pe_sec *s = &p->sec[i];
+
+		if (s->file_size && off >= s->file_off &&
+		    off - s->file_off < s->file_size)
+			return s;
+	}
+	return NULL;
+}
+
 /* The declared raw bytes, clipped. See pe.h for why this is not the claim. */
 uint64_t kgenome_pe_sec_extent(const struct kgenome_pe_sec *s, uint64_t obj_size,
 			   uint64_t *off)
@@ -532,7 +547,7 @@ int kgenome_pe_sniff(kof_buf file)
 	uint16_t mz;
 	uint32_t lfanew;
 
-	if (!kof_rd_u16(file, 0, 0, &mz) || mz != 0x5a4d)
+	if (!kof_rd_u16(file, 0, 0, &mz) || mz != KGENOME_PE_DOS_MAGIC)
 		return 0;
 	if (!kof_rd_u32(file, DOS_LFANEW, 0, &lfanew))
 		return 0;
@@ -626,7 +641,7 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 	obj->arch        = KGENOME_ARCH_ANY;
 	obj->file_header = 0;
 
-	if (!kof_rd_u16(file, 0, 0, &mz) || mz != 0x5a4d) {
+	if (!kof_rd_u16(file, 0, 0, &mz) || mz != KGENOME_PE_DOS_MAGIC) {
 		info->anomalies |= KGENOME_PE_ANOM_BAD_MZ;
 		return 0;
 	}
@@ -1020,6 +1035,68 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 			fn(user, slot, dll, nm, 0, noff);
 			n++;
 		}
+	}
+	return n;
+}
+
+/* The export directory, IMAGE_EXPORT_DIRECTORY: the only place that knows its
+ * field offsets, as the descriptor offsets above are for the imports. */
+#define EXP_N_NAMES      24u   /* 4  NumberOfNames                         */
+#define EXP_FUNCS        28u   /* 4  AddressOfFunctions                    */
+#define EXP_NAMES        32u   /* 4  AddressOfNames                        */
+#define EXP_ORDS         36u   /* 4  AddressOfNameOrdinals                 */
+
+/*
+ * How many exported names one walk reports. NumberOfNames is a field the file
+ * writes and a hostile one claims as many as it likes, so the walk is bounded and
+ * `status` says KGENOME_TRUNCATED when it was cut - the bound is the DoS bound,
+ * not a statement about the file.
+ */
+#define EXP_NAMES_MAX 4096u
+
+uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
+			kgenome_pe_export_fn fn, void *user,
+			enum kgenome_status *status)
+{
+	uint64_t d;
+	uint32_t n_names = 0, a_names = 0, a_ords = 0, a_funcs = 0, i, n = 0;
+
+	if (status)
+		*status = KGENOME_OK;
+	if (!f.p || !p || !p->valid || !fn)
+		return 0;
+	d = kgenome_pe_rva_to_off(p, p->dir[KGENOME_PE_DIR_EXPORT].rva);
+	if (!p->dir[KGENOME_PE_DIR_EXPORT].rva || !d)
+		return 0;
+	if (!kof_rd_u32(f, d + EXP_N_NAMES, 0, &n_names) ||
+	    !kof_rd_u32(f, d + EXP_NAMES,   0, &a_names) ||
+	    !kof_rd_u32(f, d + EXP_ORDS,    0, &a_ords)  ||
+	    !kof_rd_u32(f, d + EXP_FUNCS,   0, &a_funcs))
+		return 0;
+	if (n_names > EXP_NAMES_MAX) {
+		n_names = EXP_NAMES_MAX;
+		if (status)
+			*status = KGENOME_TRUNCATED;
+	}
+	for (i = 0; i < n_names; i++) {
+		uint64_t no = kgenome_pe_rva_to_off(p, a_names) + (uint64_t)i * 4u;
+		uint32_t nrva = 0, frva = 0;
+		uint16_t ord = 0;
+
+		if (!a_names || !kof_rd_u32(f, no, 0, &nrva))
+			break;
+		/* The RVA comes through the ordinal table, which is what maps a
+		 * name to its slot in AddressOfFunctions. Skipped rather than
+		 * guessed when either table is missing: a value of zero would
+		 * read as "at the image base". */
+		if (a_ords && a_funcs &&
+		    kof_rd_u16(f, kgenome_pe_rva_to_off(p, a_ords) +
+				  (uint64_t)i * 2u, 0, &ord))
+			(void)kof_rd_u32(f, kgenome_pe_rva_to_off(p, a_funcs) +
+					    (uint64_t)ord * 4u, 0, &frva);
+		n++;
+		if (!fn(user, kgenome_pe_rva_to_off(p, nrva), frva))
+			break;
 	}
 	return n;
 }

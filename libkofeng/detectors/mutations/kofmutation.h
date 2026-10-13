@@ -28,7 +28,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>   /* struct kof_range, for the library spans */
 #include <kofmod/kofmutation.h>
-#include <celllysis/fragmentation.h>
+#include <celllysis/mutation.h>
 
 /*
  * The immutable side: the rules, their blocks, the hash pool, and the index
@@ -48,10 +48,6 @@ struct kof_mutation_set *kof_mutation_build(const struct kof_mutation_block *blo
 					uint32_t n_blocks,
 					const uint32_t *pool, uint32_t n_pool);
 void kof_mutation_set_free(struct kof_mutation_set *set);
-
-/* What the index cost, for whoever reports engine size. */
-uint64_t kof_mutation_set_bytes(const struct kof_mutation_set *set);
-uint32_t kof_mutation_set_blocks(const struct kof_mutation_set *set);
 
 /*
  * Which normalizers any block of this set uses, as a bit per enum value.

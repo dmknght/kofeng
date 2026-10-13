@@ -2,7 +2,7 @@
  * kofdiag.c - the matcher: take a diagnose, walk it over the nodes an object
  * holds, and say whether it is there and which nodes it bound.
  *
- * The nodes themselves are found in libgenome/phenotype/nodes.c; this
+ * The nodes themselves are found in libgenome/phenotype (diag_scan.h); this
  * file only reads them.
  */
 
@@ -10,8 +10,8 @@
 #include <string.h>
 
 #include "kofdiag.h"
+#include <phenotype/diag_scan_state.h>
 #include "../../kofcore/kofdebug.h"
-#include <phenotype/diag_int.h>
 #include "../../kofcore/kofcore.h"
 #include "../../kofcore/kofmod/elf.h"
 #include <celllysis/celllysis.h>
@@ -34,7 +34,7 @@
  * its capability - it is looked for among the nodes that point AT THE
  * PARENT ALREADY BOUND, which is usually none or one. The walk is then the
  * size of the diagnose, once per candidate root, and the root is the rarest
- * node by construction - see the note on anchors in kofmod/kofpathogen.h.
+ * node by construction - see the note on anchors in kofmod/kofdiagtree.h.
  */
 
 /* A node satisfies a spec when it has the capability, carries every flag the
@@ -64,7 +64,7 @@ static int spec_ok(const struct kgenome_diag_scan *s,
 	/*
 	 * THE WORD THE RULE NAMED, OR ANY KIND OF IT. A rule saying mem-read
 	 * is satisfied by net-recv, because net-recv IS a mem-read whose
-	 * descriptor turned out to be a socket - see kgenome_flow_cap_generic.
+	 * descriptor turned out to be a socket - see kgenome_nucleo_cap_generic.
 	 * Comparing for equality made a rule stop matching whenever the
 	 * engine learned something more about the program it described.
 	 */
@@ -72,7 +72,7 @@ static int spec_ok(const struct kgenome_diag_scan *s,
 		uint16_t g = h->cap;
 		int kind = 0;
 
-		while ((g = kgenome_flow_cap_generic(g)) != KGENOME_NUCLEO_NONE)
+		while ((g = kgenome_nucleo_cap_generic(g)) != KGENOME_NUCLEO_NONE)
 			if (g == sp->cap) { kind = 1; break; }
 		if (!kind)
 			return 0;
@@ -532,11 +532,14 @@ int kof_diag_scan_name(const struct kgenome_diag_scan *s, const struct kof_diag 
  * half read is a diagnose that matches something its author did not write.
  */
 
-int kof_diag_load(const uint8_t *b, uint64_t n, struct kof_diag *out,
-		  struct kof_diag_node *node, uint8_t max_node,
-		  char *name, uint32_t name_cap,
-		  char *needs, uint32_t needs_cap)
+int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store *st)
 {
+	const uint8_t *b = rec.p;
+	const uint64_t n = rec.n;
+	struct kof_diag_node *node = st->node;
+	char *name = st->name, *needs = st->needs;
+	const uint32_t name_cap = st->name_cap, needs_cap = st->needs_cap;
+	const uint8_t max_node = st->max_node;
 	uint32_t n_node, nlen, i;
 	/* How much of the string store a node attribute has taken - the
 	 * signs below continue from here, because both are words this

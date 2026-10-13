@@ -96,7 +96,6 @@ struct walk {
 
 /* ---- the walk (scan_walk.c, for now scan.c) ------------------------------- */
 int  sx_push_dir(struct walk *w, const char *path, size_t len, uint32_t depth);
-void sx_note_unreadable(struct walk *w);
 void sx_read_dir(struct walk *w, const char *dir, uint32_t depth);
 void sx_scan_file(struct walk *w, const char *path);
 
@@ -116,42 +115,16 @@ void sx_scan_object(struct kof_scanner *sc, kof_buf buf,
 /* ---- the parallel walk (scan_mt.c) ---------------------------------------- */
 void sx_mtq_put(struct walk *w, const char *path, size_t len);
 
-/* ---- the verdict (verdictor/verdicts/verdict.c) ---- */
-int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f, 	int all_matches);
-/* The object's verdict from the diseases it has (verdictor/verdicts/syndrome.c). */
+/* ---- the verdict (verdictor/verdict.c) ---- */
+int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f, int all_matches);
+/* The object's verdict from the diseases it has (verdictor/syndrome.c). */
 void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt, struct kof_result *res,
 			 const struct kof_synd_result *r);
-void sx_finding_str(const struct kof_scanner *sc, 	const struct kof_obj_ctx *ctx, 	const struct kof_module *m, struct kof_finding *f);
-
-/* ---- the verdict (verdictor/verdicts/verdict.c) ---- */
-void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx, 	 const struct kof_module *m, uint32_t engine);
+void sx_finding_str(const struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		    const struct kof_module *m, struct kof_finding *f);
 
 /* ---- the normalised view (scan_norm*.c) ------------------------------------ */
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
-
 
 /*
  * THE SAME EXECUTABLE, SAID PLAINLY, AS ONE CHILD.
@@ -188,13 +161,11 @@ void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx, 	 con
  */
 #define NORM_CODE_MASK     (1u << 2)
 
-/* 7.5 bits per byte, which is DENSE_EIGHTHS in emu_unpack.c and is measured
+/* 7.5 bits per byte, which is DENSE_EIGHTHS in emu_unpack_gate.c and is measured
  * there. Not shared through a header: the two are the same number for the same
  * reason rather than one derived from the other, and a later measurement may
  * move one without moving the other. */
 #define NORM_DENSE_EIGHTHS 60u
-
-#define NORM_MIN_SAVE  16u          /* per cent, or it is not worth an object */
 
 /*
  * THE PARENT'S REGIONS, GATHERED SO THE VIEW CAN CARRY THEM.
@@ -224,21 +195,30 @@ void sx_verdict_vals(struct kof_finding *f, const struct kof_obj_ctx *ctx, 	 con
 
 /* ---- the normalised view (scan_norm*.c) ---- */
 void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,       kof_buf buf);
-uint32_t sx_norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r, 	    uint32_t cap);
+uint32_t sx_norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r, uint32_t cap);
 void sx_bits_set(uint8_t *b, uint64_t from, uint64_t to);
-void sx_bits_clr(uint8_t *b, uint64_t from, uint64_t to);
-void sx_norm_keep_bits(uint8_t *keep, uint64_t n, 	   const struct kof_src_region *r, uint32_t nr, 	   uint32_t keep_mask);
-void sx_norm_keep_exec(uint8_t *keep, uint64_t n, 	   const struct kgenome_elf_info *e, 	   const struct kof_src_region *r, uint32_t nr);
-void sx_norm_keep_exec_pe(uint8_t *keep, uint64_t n, 	      const struct kgenome_pe_info *e, 	      const struct kof_src_region *r, uint32_t nr);
-uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	  uint8_t *out, uint32_t cap);
+void sx_norm_keep_bits(uint8_t *keep, uint64_t n, const struct kof_src_region *r,
+		       uint32_t nr, uint32_t keep_mask);
+void sx_norm_keep_exec(uint8_t *keep, uint64_t n, const struct kgenome_elf_info *e,
+		       const struct kof_src_region *r, uint32_t nr);
+void sx_norm_keep_exec_pe(uint8_t *keep, uint64_t n, const struct kgenome_pe_info *e,
+			  const struct kof_src_region *r, uint32_t nr);
+uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx, uint8_t *out,
+		      uint32_t cap);
 
 /* ---- stages of one object (scan.c and the stage units) ---- */
-int sx_prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,      uint32_t present, struct kof_stats *st,      struct kof_result *out);
+int sx_prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
+		      uint32_t present, struct kof_stats *st,      struct kof_result *out);
 void sx_need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
 void sx_need_mutation(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
-uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	 const struct kof_scan_option *opt, 	 struct kof_result *out, uint32_t phase, 	 uint32_t present, const char **predict);
-int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, 	const struct kof_scan_option *opt, uint32_t pdepth);
-void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, 	const struct kof_scan_option *opt, uint32_t pdepth, 	uint32_t partial, struct kof_result *out);
+uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
+		     const struct kof_scan_option *opt, struct kof_result *out,
+		     uint32_t phase, uint32_t present, const char **predict);
+int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		    const struct kof_scan_option *opt, uint32_t pdepth);
+void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		    const struct kof_scan_option *opt, uint32_t pdepth, uint32_t partial,
+		    struct kof_result *out);
 /*
  * WHERE THE OPEN STAGE IS FOR ONE OBJECT. One value, not a flag per question:
  * FRESH until the first step asks, then REFUSED (the gate said no), ACTIVE
@@ -263,53 +243,25 @@ struct kof_open {
 void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		const struct kof_scan_option *opt, struct kof_result *res,
 		uint32_t want);
-void sx_open_step(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		  const struct kof_scan_option *opt, struct kof_result *res,
-		  uint32_t pdepth, uint32_t want, const char *predict,
-		  enum kof_analyze step, struct kof_open *o);
+struct kof_pipeline;
+void sx_open_step(struct kof_pipeline *p);
 uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		     const struct kof_scan_option *opt, struct kof_open *o);
 int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
-void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,      uint8_t as_format, const void *as_view, uint32_t as_view_len);
+void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
+		      uint8_t as_format, const void *as_view, uint32_t as_view_len);
 void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,       kof_buf buf);
-uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx, 		      uint32_t scan_mask, struct kof_range *out, 		      uint32_t max_out);
+uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t scan_mask,
+				  struct kof_range *out, uint32_t max_out);
 uint32_t sx_regions_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
-uint32_t sx_sym_halves_present(const struct kof_obj_ctx *ctx, 		   uint32_t wanted);
-void sx_dense_code_unread(struct kof_scanner *sc, 	      const struct kof_obj_ctx *ctx);
-void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	   uint32_t present, int from_packer);
-void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx, 	  uint32_t present);
+uint32_t sx_sym_halves_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
+void sx_dense_code_unread(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
+void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx, uint32_t present,
+		      int from_packer);
 void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m);
-void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int owner);
-void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int owner);
-const struct kof_module *sx_kof_scan_derived_by(const struct kof_scanner *sc);
-int sx_unp_eligible(const struct kof_scanner *sc, 	const struct kof_module *m, 	const struct kof_obj_ctx *ctx, 	const struct kof_scan_option *opt, 	uint32_t want);
-int sx_unp_is_family(const struct kof_scanner *sc, 	 const struct kof_module *m, const char *predict);
+const struct kof_module *sx_derived_by(const struct kof_scanner *sc);
 
 /* ---- ceilings the unpack stage and scan.c share --------------------------- */
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
-
 
 /*
  * HOW MANY LAYERS OF PACKING THE INTERPRETER WILL GO THROUGH.
@@ -326,18 +278,6 @@ int sx_unp_is_family(const struct kof_scanner *sc, 	 const struct kof_module *m,
  * could otherwise spend minutes of a scan on itself.
  */
 #define EMU_MAX_PACKER_DEPTH 1u
-
-/*
- * How many times one scan will honour a rule's ask for the emulator.
- *
- * A number and not a fraction of the tree, because the thing being bounded is
- * wall time on a tree of any size. 512 is what the measured population supports
- * with room to spare: the rule that asks today fires on 18 of 4398 malware
- * objects and on none of 5252 clean ones, so a scan that reaches this ceiling
- * is looking at something no measured corpus resembles - and the honest thing
- * then is to stop interpreting, not to keep going.
- */
-#define HEUR_EMU_MAX KOF_SCAN_EMU_MAX
 
 /* ---- the pipeline (scan_pipeline.c) ------------------------------------------- */
 /*
@@ -431,10 +371,6 @@ struct kof_pipeline {
 	int                              yielded;
 };
 
-/* One object through every stage. */
-void sx_pipeline_run(struct kof_pipeline *p);
 void sx_obj_begin(struct kof_scanner *sc);
-/* A disease the object has - see kof_scanner.dis_set. */
-void sx_disease_add(struct kof_scanner *sc, uint32_t id);
 
 #endif /* KOF_SCAN_INT_H */

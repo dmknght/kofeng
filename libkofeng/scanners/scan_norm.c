@@ -11,32 +11,18 @@
 
 #include "scan_int.h"
 #include "objctx_int.h"
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
+#include "../kofcore/kofcmp.h"
 #include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
 #include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include "../kofcore/kofmod/pe.h"
+#include "../kofcore/kofplatform.h"
+#include "../analyzers/normalize/executables.h"
+#include "../analyzers/genome_obj.h"
+#include <genotype/image/offmap.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
-#include "../analyzers/genome_obj.h"
-#include <genotype/image/offmap.h>
 
 
 /*
@@ -100,18 +86,18 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * miner, norm//norm//norm to the depth budget, every level carrying the
 	 * same detection.
 	 *
-	 * THE OBJECT SAYS SO ITSELF - see kof_src_declare_view - rather than
+	 * THE OBJECT SAYS SO ITSELF - see kof_src_kind_of - rather than
 	 * being recognised by a side effect. This was "has a declared region
 	 * table", which every view has EXCEPT one made from an object whose
 	 * regions could not be resolved, and that exception was a real one.
 	 */
-	if (kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
+	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
 		return 0;
 	/*
 	 * AND NOT A FORM SOMEBODY ELSE ALREADY MADE.
 	 *
 	 * THE TWO NORMALISERS WERE BLIND TO EACH OTHER. This one marks what it
-	 * produces with kof_src_declare_view; the script pass in objctx.c marks
+	 * produces with a kind of its own; the script pass in objctx.c marks
 	 * its own with KOF_ENT_NORMALIZED, and each guard tested only its own
 	 * mark. So each ran on the other's output and one shell script came
 	 * back with four views - 1.norm, 2.NORMALIZED, then 3.NORMALIZED of the
@@ -121,8 +107,8 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * "A FORM OF A FORM IS THE FORM", as the other guard puts it. Both of
 	 * them now say so about both marks.
 	 */
-	if (sc->cur_src &&
-	    kof_src_kind_of(sc->cur_src) == KOF_ENT_NORMALIZED)
+	if (sc->cur.src &&
+	    kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
 		return 0;
 	/*
 	 * AND NOT A SCRIPT, BECAUSE A SCRIPT HAS ITS OWN NORMALISER.
@@ -167,8 +153,8 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * caller set and two buffers is what this costs. An object over that is
 	 * left unnormalised - it is still parsed, still scanned, still carved.
 	 */
-	if (sc->resident > sc->resident_max ||
-	    buf.n > (sc->resident_max - sc->resident) / 2u)
+	if (sc->ledger.resident > sc->ledger.resident_max ||
+	    buf.n > (sc->ledger.resident_max - sc->ledger.resident) / 2u)
 		return 0;
 	/*
 	 * AND NOT AN OBJECT WHOSE CODE IS STILL COMPRESSED.
@@ -187,7 +173,7 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * of LZMA stream, normalised to no effect, at two copies of the object.
 	 *
 	 * THE SAME 7.5 BITS PER BYTE THE EMULATOR'S GATE USES, and for the same
-	 * reason it uses it - see DENSE_EIGHTHS in emu_unpack.c, where over 2678
+	 * reason it uses it - see DENSE_EIGHTHS in emu_unpack_gate.c, where over 2678
 	 * clean PEs the executable sections fall almost entirely between 6.0 and
 	 * 7.0 bits and exactly one file clears 7.5. Compiled code is not this
 	 * dense, and the transform has nothing to do to bytes that are.
@@ -383,13 +369,6 @@ static void mark_visit(void *user, uint64_t *off, uint64_t *len)
 		mark_add(a->w, *len > a->n - (*off < a->n ? *off : a->n) ? a->n : *off + *len, a->n);
 }
 
-static int cmp_u64(const void *a, const void *b)
-{
-	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-
-	return x < y ? -1 : x > y;
-}
-
 /*
  * THE PLACES THE COLLAPSE IS ASKED ABOUT, sorted and unique, and the copy of
  * the parent's description whose offsets they are.
@@ -432,7 +411,7 @@ static void norm_marks_build(struct norm_work *w, struct kof_obj_ctx *ctx,
 				kgenome_elf_info_offsets((struct kgenome_elf_info *)w->img, mark_visit, &ask);
 		}
 	}
-	qsort(w->mk, w->n_mark, sizeof *w->mk, cmp_u64);
+	qsort(w->mk, w->n_mark, sizeof *w->mk, kof_cmp_u64);
 	for (a = b = 0; a < w->n_mark; a++)
 		if (!b || w->mk[a] != w->mk[b - 1u])
 			w->mk[b++] = w->mk[a];
@@ -448,9 +427,17 @@ static void norm_marks_build(struct norm_work *w, struct kof_obj_ctx *ctx,
  */
 static int norm_collapse(struct norm_work *w, kof_buf buf)
 {
-	w->n = kof_exe_norm_masked(w->tmp, buf.n, w->keep, w->drop,
-				KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
-				w->out, buf.n, w->mk, w->mk_to, w->n_mark, &w->fired);
+	{
+		const struct kof_exe_norm_req rq = {
+			.in = w->tmp, .n = buf.n, .keep = w->keep, .drop = w->drop,
+			.ops = KOF_EXE_NORM_NULLRUN | KOF_EXE_NORM_UNWIDE,
+			.mark = w->mk, .n_mark = w->n_mark,
+		};
+		struct kof_exe_norm_res res = { .out = w->out, .cap = buf.n, .mark_out = w->mk_to };
+
+		w->n = kof_exe_norm_masked(&rq, &res);
+		w->fired = res.fired;
+	}
 	/*
 	 * A VIEW IS MADE ONLY WHEN IT CAN SHOW SOMETHING THE PARENT CANNOT.
 	 *
@@ -689,9 +676,9 @@ static int norm_fits(struct kof_scanner *sc, struct norm_work *w)
 	 * Both ceilings are asked about, in the same terms c_emit uses, because
 	 * either of them produces the same half object.
 	 */
-	if (w->n > sc->obj_cap ||
-	    sc->resident > sc->resident_max ||
-	    w->n > sc->resident_max - sc->resident) {
+	if (w->n > sc->ledger.obj_cap ||
+	    sc->ledger.resident > sc->ledger.resident_max ||
+	    w->n > sc->ledger.resident_max - sc->ledger.resident) {
 		free(w->out);
 		return 0;
 	}
@@ -719,8 +706,8 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 	/* The word itself is in kofeng.h, because the tools read it back out
 	 * of the object's name - see kobj_label. */
-	sc->pend_label_len = (uint32_t)snprintf(sc->pend_label,
-						sizeof sc->pend_label, "%s",
+	sc->pend.label_len = (uint32_t)snprintf(sc->pend.label,
+						sizeof sc->pend.label, "%s",
 						KOF_OBJ_LABEL_NORM);
 	/*
 	 * RAW, ALWAYS, AND THE DESCRIPTION DECLARED BESIDE IT.
@@ -734,25 +721,25 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * and the parse is not run. A view with no description (nothing could be
 	 * copied) is raw, which is what it always was without regions.
 	 */
-	sc->pend_fmt = (uint8_t)KOF_FMT_DECLARED_RAW;
+	sc->pend.fmt = (uint8_t)KOF_FMT_DECLARED_RAW;
 	if (w->img) {
-		if (sc->pend_desc_cap < w->img_len) {
-			uint8_t *g = realloc(sc->pend_desc_buf, w->img_len);
+		if (sc->pend.desc_cap < w->img_len) {
+			uint8_t *g = realloc(sc->pend.desc_buf, w->img_len);
 
 			if (g) {
-				sc->pend_desc_buf = g;
-				sc->pend_desc_cap = w->img_len;
+				sc->pend.desc_buf = g;
+				sc->pend.desc_cap = w->img_len;
 			}
 		}
-		if (sc->pend_desc_cap >= w->img_len) {
-			memcpy(sc->pend_desc_buf, w->img, w->img_len);
-			sc->pend_desc.fmt = ctx->format;
-			sc->pend_desc.arch = ctx->arch;
-			sc->pend_desc.subtype = ctx->subtype;
-			sc->pend_desc.entry_off = w->entry_off;
-			sc->pend_desc.info = sc->pend_desc_buf;
-			sc->pend_desc.info_len = w->img_len;
-			sc->pend_desc_set = 1;
+		if (sc->pend.desc_cap >= w->img_len) {
+			memcpy(sc->pend.desc_buf, w->img, w->img_len);
+			sc->pend.desc.fmt = ctx->format;
+			sc->pend.desc.arch = ctx->arch;
+			sc->pend.desc.subtype = ctx->subtype;
+			sc->pend.desc.entry_off = w->entry_off;
+			sc->pend.desc.info = sc->pend.desc_buf;
+			sc->pend.desc.info_len = w->img_len;
+			sc->pend.desc_set = 1;
 		}
 	}
 	/*
@@ -764,9 +751,9 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * evidence. See kof_src_declare_lang.
 	 */
 	if (w->nr) {
-		sc->pend_subtype = ctx->subtype;
-		sc->pend_subfam  = ctx->subfamily;
-		sc->pend_lang    = 1;
+		sc->pend.subtype = ctx->subtype;
+		sc->pend.subfam  = ctx->subfamily;
+		sc->pend.lang    = 1;
 	}
 	/*
 	 * AND WHAT IT IS, in the enum every consumer already reads.
@@ -780,13 +767,13 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * The script normaliser in objctx.c has declared this from the start;
 	 * this one did not, and the two produce the same kind of thing.
 	 */
-	sc->pend_kind = KOF_ENT_NORMALIZED;
+	sc->pend.kind = KOF_ENT_NORMALIZED;
 	{
 		uint32_t a;
 
 		for (a = 0; a < w->nr; a++)
-			sc->pend_rgn[a] = w->rgn[a];
-		sc->n_pend_rgn = w->nr;
+			sc->pend.rgn[a] = w->rgn[a];
+		sc->pend.n_rgn = w->nr;
 		/*
 		 * IN THE PARENT'S VOCABULARY, and that has to travel with the
 		 * table. These bits were resolved out of the parent, and a bit
@@ -795,7 +782,7 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * it could not name and dropped every one - the view showed no
 		 * regions at all, which looked like the table never arrived.
 		 */
-		sc->pend_rgn_fmt = ctx->format;
+		sc->pend.rgn_fmt = ctx->format;
 	}
 	/*
 	 * AND THE SYMBOLS, HERE FOR THE REASON THE REGIONS ARE: this is after
@@ -816,18 +803,18 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			if (pn > need)
 				need = pn;
 		}
-		if (sc->pend_syms_cap < need) {
-			uint8_t *g = realloc(sc->pend_syms, need);
+		if (sc->pend.syms_cap < need) {
+			uint8_t *g = realloc(sc->pend.syms, need);
 
 			if (g) {
-				sc->pend_syms = g;
-				sc->pend_syms_cap = need;
+				sc->pend.syms = g;
+				sc->pend.syms_cap = need;
 			}
 		}
 	}
-	if (sc->pend_syms)
-		sc->n_pend_syms = sx_norm_syms(sc, ctx, sc->pend_syms,
-					    sc->pend_syms_cap);
+	if (sc->pend.syms)
+		sc->pend.n_syms = sx_norm_syms(sc, ctx, sc->pend.syms,
+					    sc->pend.syms_cap);
 }
 
 /* The bytes out through the sink, the functions carried over, and the child. */
@@ -851,13 +838,13 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * functions are known (symbols, or the entries diagnose recovers), and
 	 * only when the view went out whole.
 	 */
-	kgenome_funcs_free(&sc->pend_funcs);
+	kgenome_funcs_free(&sc->pend.funcs);
 	if (sent == w->n && ctx->file_header) {
 		struct kgenome_obj pobj;
 
 		kof_genome_obj(ctx, &pobj);
 		kgenome_diag_funcs_of_view(&pobj, buf, oc_funcs(ctx),
-				       kof_buf_make(w->out, w->n), &sc->pend_funcs);
+				       kof_buf_make(w->out, w->n), &sc->pend.funcs);
 	}
 	free(w->out);
 	if (sent == w->n) {
@@ -885,19 +872,19 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * SAID WITH KOF_FMT_DECLARED_RAW AND NOT WITH
 		 * KOF_FMT_UNKNOWN, which is the gap this used to fall into.
 		 * UNKNOWN is 0, the child builder reads the pending format as
-		 * `if (sc->pend_fmt)`, and so "declared raw" and "declared
+		 * `if (sc->pend.fmt)`, and so "declared raw" and "declared
 		 * nothing" were one value: the view was sniffed from its own
 		 * bytes, those bytes still begin \x7fELF, and it came back a
 		 * damaged executable. See the sentinel in scan.h.
 		 */
 		{
-			uint32_t k0 = sc->n_kids;
+			uint32_t k0 = sc->child.n;
 			(void)ctx->content->child(ctx);
 			/* Counted only if it was actually taken: the child cap
 			 * can refuse it, and a view that was refused is not a
 			 * view that has to be discounted later. */
-			if (sc->n_kids > k0)
-				sc->n_views++;
+			if (sc->child.n > k0)
+				sc->child.n_views++;
 		}
 	}
 }
@@ -956,12 +943,12 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * padding came out. That is why it is refused there and used here.
 	 */
 	/*
-	 * INHERITED, NOT WORKED OUT AGAIN - see kof_scanner.cur_lib. The gate
+	 * INHERITED, NOT WORKED OUT AGAIN - see kof_scanner.cur.lib. The gate
 	 * that used to be here, refusing the cut on a dynamically linked
 	 * object, moved with it: sx_lib_facts asks the marker tier only of a
 	 * static build and the symbol tier of everything.
 	 */
-	w->lib = &sc->cur_lib;
+	w->lib = &sc->cur.lib;
 	if (!norm_alloc(w, buf))
 		return;
 	norm_keep_build(w, ctx, buf);

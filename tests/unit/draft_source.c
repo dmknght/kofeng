@@ -80,7 +80,7 @@ static const char *write_tmp(const char *body)
 	static char path[64];
 	FILE *f;
 
-	snprintf(path, sizeof path, "/tmp/kof_draft_src_%d.c", (int)getpid());
+	snprintf(path, sizeof path, "build/test/kof_draft_src_%d.c", (int)getpid());
 	f = fopen(path, "w");
 	if (!f)
 		return NULL;
@@ -360,7 +360,7 @@ static void at_place_is_kept(void)
 /*
  * TWO BLOCKS ASKED ABOUT ON ONE LINE, which is a shape bases/ actually holds.
  *
- * bases/signatures/billgates_00.c is written
+ * a billgates_00 signature, written as
  *
  *   if (kof_mutation_score(a) >= 75u || kof_mutation_score(b) >= 70u)
  *
@@ -754,7 +754,7 @@ static void shipped_rules_are_all_modelled(void)
 			if (draft_from_source(&e, path)) {
 				int cures = src_has(path, "void kof_cure");
 				/*
-				 * A VERDICT OVER THE PATHOGEN GRAPH is the
+				 * A VERDICT OVER THE DIAGNOSE GRAPH is the
 				 * second thing the panel has no section
 				 * for. It is an ALGORITHM - asks whether two
 				 * diagnoses met at a node, counts entries of
@@ -789,7 +789,7 @@ static void shipped_rules_are_all_modelled(void)
 	}
 	CK(foreign == 0);
 	printf("  %d shipped rule(s) read, %d carry a hand-written cure, "
-	       "%d read the pathogen graph, %d refused without either\n",
+	       "%d read the diagnose graph, %d refused without either\n",
 	       read, cured, graphed, foreign);
 }
 

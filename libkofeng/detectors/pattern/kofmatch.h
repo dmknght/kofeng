@@ -134,7 +134,7 @@ struct kof_match_ctx {
 		uint32_t val;
 		uint8_t  live;
 	} ent[KOF_ENT_MEMO];
-	uint8_t ent_next;               /* round robin; see kof_entropy_memo */
+	uint8_t ent_next;               /* round robin over ent[] */
 
 	/* Counters, for measuring whether the memo is worth its complexity. */
 	uint64_t n_calls;
@@ -211,10 +211,32 @@ void kof_match_state_free(struct kof_match_ctx *);
 int  kof_match_memo_get(const struct kof_match_ctx *, uint32_t slot);
 void kof_match_memo_put(struct kof_match_ctx *, uint32_t slot, int found);
 
-int kof_match_lookup(struct kof_match_ctx *, uint32_t slot,
-		     const struct kof_range *ext, uint32_t next,
-		     const uint8_t *bytes, uint16_t len, uint8_t kind, uint8_t flags,
-		     uint64_t *answered_without_scan);
+/*
+ * One lookup, as one request: which cell of the memo, which ranges of the object,
+ * which pattern, and the counter the caller keeps. The pattern is the same
+ * quadruple an entry of the string table carries (bytes, len, kind, flags), so the
+ * caller fills it from the entry and does not unpack it.
+ *
+ * `answered` is the caller's ledger - NULL for none. It is incremented when the
+ * presence set answers "not here" without a scan.
+ */
+struct kof_match_pat {
+	const uint8_t *bytes;
+	uint16_t       len;
+	uint8_t        kind;
+	uint8_t        flags;
+};
+
+struct kof_match_req {
+	uint32_t                slot;      /* memo cell, or KOF_MEMO_NONE */
+	uint32_t                next;      /* how many ranges `ext` holds */
+	const struct kof_range *ext;
+	struct kof_match_pat    pat;
+	uint64_t               *answered;  /* ledger, or NULL */
+};
+
+/* Passed by const pointer on the hot path: nothing here is copied. */
+int kof_match_lookup(struct kof_match_ctx *, const struct kof_match_req *rq);
 
 /*
  * Does the pattern match at exactly this offset? No search - one compare, or one

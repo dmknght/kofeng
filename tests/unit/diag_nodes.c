@@ -242,7 +242,7 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	a = find(s, KGENOME_NUCLEO_ALLOC_EXEC, &ia);
 	CK(a != NULL);
 	if (a) {
-		CK((a->flags & KGENOME_FLOWF_WX) != 0);
+		CK((a->flags & KGENOME_NUCLEO_F_WX) != 0);
 		CK(!(a->bits & KGENOME_DIAG_H_ARG_UNKNOWN));
 		CK(region == ((a->bits & KGENOME_DIAG_H_REGION_STACK) != 0));
 	}
@@ -273,7 +273,7 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 	 */
 	{
 		static const struct kof_diag_node nd[] = {
-			{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+			{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_NUCLEO_F_WX, KOF_DIAG_NO_PARENT,
 			  KGENOME_DIAG_ROLE_NONE, 0, 0 },
 			{ KGENOME_NUCLEO_MEM_READ, 0, 0, KGENOME_DIAG_ROLE_BUFFER,
 			  0, 0 },
@@ -312,7 +312,7 @@ static void one_arch(const uint8_t *b, uint64_t n, const char *what, int region)
 static void unlinked_does_not_match(void)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_NUCLEO_F_WX, KOF_DIAG_NO_PARENT,
 		  KGENOME_DIAG_ROLE_NONE, 0, 0 },
 		{ KGENOME_NUCLEO_MEM_READ, 0, 0, KGENOME_DIAG_ROLE_BUFFER, 0, 0 },
 	};
@@ -391,7 +391,7 @@ static void unlinked_does_not_match(void)
 static void unreadable_prot_is_not_zero(void)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_NUCLEO_F_WX, KOF_DIAG_NO_PARENT,
 		  KGENOME_DIAG_ROLE_NONE, 0, 0 },
 	};
 	static const struct kof_diag dg = {

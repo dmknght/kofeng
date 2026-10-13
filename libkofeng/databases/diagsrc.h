@@ -28,7 +28,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 #define KOF_DSRC_MAX_ITEM   96u
 #define KOF_DSRC_MAX_NODE   64u
@@ -127,6 +127,11 @@ struct kof_dsrc_report {
 	void *ud;
 };
 
+/* One error: count it in *n and tell the caller. Shared by the diagnose and the
+ * syndrome source readers, which report the same way. */
+void kof_dsrc_say_err(const struct kof_dsrc_report *r, int *n, int line,
+		      const char *msg);
+
 /*
  * THE DIAGNOSE AS THE ENGINE WILL HAVE IT: the star of nodes, the gate, and the
  * conditions. Field names are the record's.
@@ -175,12 +180,6 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap);
 int kof_dsrc_same(const struct kof_dsrc_item *a, const struct kof_dsrc_item *b);
 int kof_dsrc_cond_same(const struct kof_dsrc_cond *a, const struct kof_dsrc_cond *b);
 
-/* The condition as source: "if (...)" with the terms wrapped the way the shipped
- * verdicts wrap them, ready to stand where the old one stood. */
-size_t kof_dsrc_cond_print(const struct kof_dsrc_cond *c, char *out, size_t cap);
-/* One term of it, for a caller that shows them one to a row. 0 if it cannot be written. */
-size_t kof_dsrc_term_print(const struct kof_dsrc_term *t, char *out, size_t cap);
-
 /* Every comment blanked in place, newlines kept - see the definition. */
 void kof_dsrc_blank_comments(char *s, size_t n);
 
@@ -223,7 +222,6 @@ int kof_dsrc_arg(const char *p, int i, char *out, size_t cap);
 /* The vocabulary, both ways. A capability is written as its enumerator. */
 int         kof_dsrc_cap_of(const char *word, uint16_t *out);
 const char *kof_dsrc_cap_word(uint16_t cap);
-size_t      kof_dsrc_cap_count(void);
 const char *kof_dsrc_cap_at(size_t i, uint16_t *cap);
 
 /* 1 when every capability the engine names can be written. A build failure

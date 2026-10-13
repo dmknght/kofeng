@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * kernel_kprobe-resolve_00.c - a kernel module obtaining the address of a kernel

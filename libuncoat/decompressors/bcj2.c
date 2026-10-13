@@ -101,12 +101,14 @@ static int is_branch(uint8_t prev, uint8_t b)
 	       (prev == 0x0fu && (b & 0xf0u) == 0x80u);
 }
 
-uint64_t kuncoat_bcj2_decode(const uint8_t *main_p, uint64_t main_n,
-			 const uint8_t *call_p, uint64_t call_n,
-			 const uint8_t *jump_p, uint64_t jump_n,
-			 const uint8_t *rc_p, uint64_t rc_n,
-			 uint8_t *out, uint64_t out_cap)
+uint64_t kuncoat_bcj2_decode(const struct kuncoat_bcj2_io *io)
 {
+	const uint8_t *main_p = io->main_s.p, *call_p = io->call_s.p;
+	const uint8_t *jump_p = io->jump_s.p, *rc_p = io->rc_s.p;
+	const uint64_t main_n = io->main_s.n, call_n = io->call_s.n;
+	const uint64_t jump_n = io->jump_s.n, rc_n = io->rc_s.n;
+	uint8_t *out = io->out;
+	const uint64_t out_cap = io->out_cap;
 	uint16_t prob[N_PROBS];
 	struct rc r;
 	uint64_t at = 0, mi = 0, ci = 0, ji = 0;

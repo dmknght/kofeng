@@ -599,7 +599,7 @@ int main(void)
 		n = 1024u;
 
 	if (snprintf(dir, sizeof dir, "%s/kofscaleXXXXXX",
-		     tmp && *tmp ? tmp : kof_tmpdir()) >= (int)sizeof dir) {
+		     tmp && *tmp ? tmp : "build") >= (int)sizeof dir) {
 		fail("scale", "TMPDIR is too long to work in");
 		return 1;
 	}

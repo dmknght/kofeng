@@ -29,7 +29,7 @@
  */
 
 #include "elf_image.h"
-#include "cmp.h"
+#include <kofcmp.h>
 #include <rangelist.h>
 
 #include <stddef.h>
@@ -57,38 +57,6 @@
 #define PHDR64_SIZE	56
 #define SHDR32_SIZE	40
 #define SHDR64_SIZE	64
-
-/* e_type values that change what counts as anomalous. */
-#define ET_NONE		0
-#define ET_REL		1
-#define ET_EXEC		2
-#define ET_DYN		3
-
-/* The one spelling is in elf_parse.h - see the note there. */
-#define PT_LOAD		KGENOME_ELF_PT_LOAD
-#define SHT_NULL	KGENOME_ELF_SHT_NULL
-#define SHT_PROGBITS	1
-#define SHT_NOBITS	KGENOME_ELF_SHT_NOBITS
-#define SHT_STRTAB	3
-
-/* The kinds the table walkers at the end of this file read: a symbol table
- * and the relocations that name its entries. SHT_DYNSYM is the linked
- * object's, SHT_SYMTAB the one a relocatable object keeps. */
-#define SHT_REL		9
-#define SHT_RELA	4
-#define SHT_SYMTAB	2
-#define SHT_DYNSYM	11
-
-/* Section flags. SHF_ALLOC is the one that decides whether a section becomes part
- * of the process image, which is what separates KGENOME_SCAN_ELF_NOLOAD from the rest:
- * .comment, .debug_* and .symtab are all kept in the file without it. */
-#define SHF_ALLOC	KGENOME_ELF_SHF_ALLOC
-#define SHF_EXECINSTR	0x4
-
-/* p_flags bits */
-#define PF_X		1
-#define PF_W		2
-#define PF_R		4
 
 /* e_machine values worth normalising. Anything else becomes KGENOME_ARCH_OTHER. */
 #define EM_386		3
@@ -118,13 +86,10 @@
  */
 #define PN_XNUM		0xffff
 
-/* SHN_UNDEF as a shstrndx means there is no section name string table. */
-#define SHN_UNDEF	0
-
 /* See elf.h for which view is which, and why both exist. */
 int kgenome_elf_seg_is_code(const struct kgenome_elf_seg *g)
 {
-	return g->type == PT_LOAD && (g->perm & KGENOME_PERM_X) != 0;
+	return g->type == KGENOME_ELF_PT_LOAD && (g->perm & KGENOME_PERM_X) != 0;
 }
 
 uint64_t kgenome_elf_seg_extent(const struct kgenome_elf_seg *g, uint64_t obj_size,
@@ -136,7 +101,7 @@ uint64_t kgenome_elf_seg_extent(const struct kgenome_elf_seg *g, uint64_t obj_si
 
 int kgenome_elf_sec_is_code(const struct kgenome_elf_sec *s)
 {
-	return s->type == SHT_PROGBITS && (s->flags & SHF_EXECINSTR) != 0;
+	return s->type == KGENOME_ELF_SHT_PROGBITS && (s->flags & KGENOME_ELF_SHF_EXEC) != 0;
 }
 
 uint64_t kgenome_elf_sec_extent(const struct kgenome_elf_sec *s, uint64_t obj_size,
@@ -149,9 +114,9 @@ uint64_t kgenome_elf_sec_extent(const struct kgenome_elf_sec *s, uint64_t obj_si
 static uint32_t perm_from_pflags(uint32_t f)
 {
 	uint32_t p = 0;
-	if (f & PF_X) p |= KGENOME_PERM_X;
-	if (f & PF_W) p |= KGENOME_PERM_W;
-	if (f & PF_R) p |= KGENOME_PERM_R;
+	if (f & KGENOME_ELF_PF_X) p |= KGENOME_PERM_X;
+	if (f & KGENOME_ELF_PF_W) p |= KGENOME_PERM_W;
+	if (f & KGENOME_ELF_PF_R) p |= KGENOME_PERM_R;
 	return p;
 }
 
@@ -358,7 +323,7 @@ static void parse_sections(kof_buf file, struct kgenome_elf_info *info,
 
 		/* SHT_NOBITS occupies no file bytes, so its file_off says
 		 * nothing and must not be range checked as if it did. */
-		if (s->type != SHT_NOBITS && s->type != SHT_NULL &&
+		if (s->type != KGENOME_ELF_SHT_NOBITS && s->type != KGENOME_ELF_SHT_NULL &&
 		    !kof_in_range(file, s->file_off, s->file_size))
 			*anom |= KGENOME_ELF_ANOM_SEC_PAST_EOF;
 
@@ -367,8 +332,8 @@ static void parse_sections(kof_buf file, struct kgenome_elf_info *info,
 
 	/* Resolve names. The string table is one of the sections just read, so
 	 * this cannot be folded into the loop above. */
-	if (info->shstrndx == SHN_UNDEF || info->shstrndx >= info->sec_count) {
-		if (info->shstrndx != SHN_UNDEF)
+	if (info->shstrndx == KGENOME_ELF_SHN_UNDEF || info->shstrndx >= info->sec_count) {
+		if (info->shstrndx != KGENOME_ELF_SHN_UNDEF)
 			*anom |= KGENOME_ELF_ANOM_SHSTRNDX_BAD;
 		return;
 	}
@@ -485,7 +450,7 @@ static void settle_claims(struct kgenome_elf_info *e, uint64_t obj_size)
 		n++;
 	}
 	for (i = 0; i < e->seg_count && n < cap; i++) {
-		if (e->seg[i].type != PT_LOAD || !e->seg[i].file_size)
+		if (!kgenome_elf_seg_is_load(&e->seg[i]))
 			continue;
 		c[n].off = e->seg[i].file_off;
 		c[n].len = e->seg[i].file_size;
@@ -507,10 +472,10 @@ static void settle_claims(struct kgenome_elf_info *e, uint64_t obj_size)
 		 * DATA empty, so the prefilter ruled out every module targeting ELF
 		 * code before it ran. A Linux rootkit is exactly this file shape.
 		 */
-		if (e->sec[i].type == SHT_NULL || e->sec[i].type == SHT_NOBITS ||
+		if (e->sec[i].type == KGENOME_ELF_SHT_NULL || e->sec[i].type == KGENOME_ELF_SHT_NOBITS ||
 		    !e->sec[i].file_size)
 			continue;
-		if (e->seg_count && (e->sec[i].flags & SHF_ALLOC))
+		if (e->seg_count && (e->sec[i].flags & KGENOME_ELF_SHF_ALLOC))
 			continue;
 		c[n].off = e->sec[i].file_off;
 		c[n].len = e->sec[i].file_size;
@@ -684,7 +649,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 	 * nothing. ET_DYN covers both PIE executables and shared libraries, so
 	 * e_type cannot separate those and neither is anomalous.
 	 */
-	if (info->entry_addr == 0 && info->e_type == ET_EXEC)
+	if (info->entry_addr == 0 && info->e_type == KGENOME_ELF_EXEC)
 		anom |= KGENOME_ELF_ANOM_ENTRY_ZERO;
 
 	/* ---- program headers -------------------------------------------- */
@@ -723,7 +688,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 		s->perm = perm_from_pflags(flags);
 		info->seg_count++;
 
-		if (s->type != PT_LOAD)
+		if (s->type != KGENOME_ELF_PT_LOAD)
 			continue;
 
 		if (s->file_size > s->mem_size)
@@ -748,15 +713,15 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 	 * executable or shared object with nothing to load is odd.
 	 */
 	if (info->load_count == 0 &&
-	    (info->e_type == ET_EXEC || info->e_type == ET_DYN))
+	    (info->e_type == KGENOME_ELF_EXEC || info->e_type == KGENOME_ELF_DYN))
 		anom |= KGENOME_ELF_ANOM_NO_LOAD_SEGMENT;
 
 	/* Pairwise overlap over PT_LOAD only. seg_count is clamped, so bounded. */
 	for (i = 0; i < info->seg_count && !(anom & KGENOME_ELF_ANOM_SEG_OVERLAP); i++) {
-		if (info->seg[i].type != PT_LOAD)
+		if (info->seg[i].type != KGENOME_ELF_PT_LOAD)
 			continue;
 		for (j = i + 1; j < info->seg_count; j++) {
-			if (info->seg[j].type != PT_LOAD)
+			if (info->seg[j].type != KGENOME_ELF_PT_LOAD)
 				continue;
 			if (vaddr_overlap(&info->seg[i], &info->seg[j])) {
 				anom |= KGENOME_ELF_ANOM_SEG_OVERLAP;
@@ -779,7 +744,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 			const struct kgenome_elf_seg *s = &info->seg[i];
 			uint64_t delta;
 
-			if (s->type != PT_LOAD || info->entry_addr < s->mem_addr)
+			if (s->type != KGENOME_ELF_PT_LOAD || info->entry_addr < s->mem_addr)
 				continue;
 			delta = info->entry_addr - s->mem_addr;
 			if (delta >= s->mem_size)
@@ -848,8 +813,8 @@ int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 {
 	static const struct { uint32_t sht; const char *str; uint8_t origin; }
 	tab[2] = {
-		{ SHT_SYMTAB, ".strtab", 1u },   /* KOF_SYM_ORIGIN_SYMTAB */
-		{ SHT_DYNSYM, ".dynstr", 2u }    /* KOF_SYM_ORIGIN_DYNSYM */
+		{ KGENOME_ELF_SHT_SYMTAB, ".strtab", 1u },   /* KOF_SYM_ORIGIN_SYMTAB */
+		{ KGENOME_ELF_SHT_DYNSYM, ".dynstr", 2u }    /* KOF_SYM_ORIGIN_DYNSYM */
 	};
 	uint32_t k, lo = want == KGENOME_ELF_SYMTAB_DYN ? 1u : 0u;
 	uint32_t hi = want == KGENOME_ELF_SYMTAB_FULL ? 0u : 1u;
@@ -889,7 +854,7 @@ int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 		for (i = 0; i < p->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
 			if (p->sec[i].type == tab[k].sht && !sym)
 				sym = &p->sec[i];
-			else if (p->sec[i].type == SHT_STRTAB &&
+			else if (p->sec[i].type == KGENOME_ELF_SHT_STRTAB &&
 				 !strcmp(p->sec[i].name, tab[k].str))
 				str = &p->sec[i];
 		}
@@ -1030,7 +995,7 @@ static uint64_t rel_target(const struct kgenome_elf_info *p, const char *nm,
 		return 0;
 	for (j = 0; j < p->sec_count && j < KGENOME_ELF_MAX_SECTIONS; j++)
 		if (!strcmp(p->sec[j].name, nm)) {
-			if (p->sec[j].type == SHT_NOBITS)
+			if (p->sec[j].type == KGENOME_ELF_SHT_NOBITS)
 				return 0;
 			*is_code = kgenome_elf_sec_is_code(&p->sec[j]);
 			return p->sec[j].file_off;
@@ -1056,7 +1021,7 @@ static int reloc_section(const struct kgenome_elf_info *p, uint32_t i,
 			 unsigned want, uint64_t *tgt_off, int *is_code)
 {
 	*is_code = 0;
-	if (p->sec[i].type != SHT_RELA)
+	if (p->sec[i].type != KGENOME_ELF_SHT_RELA)
 		return 0;               /* REL has no addend to report */
 	*tgt_off = rel_target(p, p->sec[i].name, is_code);
 	if (!*tgt_off)
@@ -1113,9 +1078,9 @@ static int reloc_is_call(const struct kgenome_elf_info *p,
 	return 1;
 }
 
-/* Ordered by `where`, which kgenome_cmp_u64 reads as the first member. */
+/* Ordered by `where`, which kof_cmp_u64 reads as the first member. */
 _Static_assert(offsetof(struct kgenome_elf_reloc, where) == 0,
-	       "kgenome_cmp_u64 reads the key from the start of the element");
+	       "kof_cmp_u64 reads the key from the start of the element");
 
 uint32_t kgenome_elf_reloc_table(kof_buf f, const struct kgenome_elf_info *p,
 			     unsigned want, struct kgenome_elf_relocs *out)
@@ -1193,7 +1158,7 @@ uint32_t kgenome_elf_reloc_table(kof_buf f, const struct kgenome_elf_info *p,
 	}
 	out->n = n;
 	if (n > 1u)
-		qsort(out->v, n, sizeof *out->v, kgenome_cmp_u64);
+		qsort(out->v, n, sizeof *out->v, kof_cmp_u64);
 	return n;
 }
 
@@ -1228,7 +1193,7 @@ const struct kgenome_elf_reloc *kgenome_elf_reloc_in(const struct kgenome_elf_re
 	return NULL;
 }
 
-uint64_t kgenome_elf_reloc_call_at(const struct kgenome_elf_info *p,
+static uint64_t kgenome_elf_reloc_call_at(const struct kgenome_elf_info *p,
 			       const struct kgenome_elf_reloc *r)
 {
 	/*
@@ -1267,22 +1232,52 @@ uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 	return n;
 }
 
-int kgenome_elf_va_to_off(const struct kgenome_elf_info *e, uint64_t va, uint64_t sz,
-		      uint64_t *off)
+/*
+ * The loadable segment whose FILE half holds an address, or a file offset;
+ * NULL when none does. The first in table order, which is the one every
+ * translation here answers through: kgenome_elf_va_to_off, the object-wide
+ * kgenome_image_* pair (image_addr.h) and the cell space (celllysis/space.c) all ask this
+ * and add their own policy on top.
+ */
+static const struct kgenome_elf_seg *kgenome_elf_load_at_va(const struct kgenome_elf_info *e,
+						 uint64_t va)
 {
 	uint32_t s;
 
 	for (s = 0; s < e->seg_count && s < KGENOME_ELF_MAX_SEGMENTS; s++) {
 		const struct kgenome_elf_seg *g = &e->seg[s];
 
-		if (g->type != 1u /* PT_LOAD */ || !g->file_size)
-			continue;
-		if (va < g->mem_addr || va - g->mem_addr >= g->file_size)
-			continue;
-		if (sz > g->file_size - (va - g->mem_addr))
-			return 0;       /* it runs past the file half */
-		*off = g->file_off + (va - g->mem_addr);
-		return 1;
+		if (kgenome_elf_seg_is_load(g) && va >= g->mem_addr &&
+		    va - g->mem_addr < g->file_size)
+			return g;
 	}
-	return 0;
+	return NULL;
+}
+
+const struct kgenome_elf_seg *kgenome_elf_load_at_off(const struct kgenome_elf_info *e,
+						  uint64_t off)
+{
+	uint32_t s;
+
+	for (s = 0; s < e->seg_count && s < KGENOME_ELF_MAX_SEGMENTS; s++) {
+		const struct kgenome_elf_seg *g = &e->seg[s];
+
+		if (kgenome_elf_seg_is_load(g) && off >= g->file_off &&
+		    off - g->file_off < g->file_size)
+			return g;
+	}
+	return NULL;
+}
+
+int kgenome_elf_va_to_off(const struct kgenome_elf_info *e, uint64_t va, uint64_t sz,
+		      uint64_t *off)
+{
+	const struct kgenome_elf_seg *g = kgenome_elf_load_at_va(e, va);
+
+	if (!g)
+		return 0;
+	if (sz > g->file_size - (va - g->mem_addr))
+		return 0;       /* it runs past the file half */
+	*off = g->file_off + (va - g->mem_addr);
+	return 1;
 }

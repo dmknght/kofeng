@@ -169,11 +169,11 @@ static void status_direct(void)
 	/* a graph that finished: whole */
 	g = scan_with_allowance(300, 0);
 	CK(g && kgenome_diag_scan_status(g) == KGENOME_OK);
-	sc->diag_graph = g;
+	sc->obj.diag.graph = g;
 	CK(kof_scan_diag_status(&ctx) == KGENOME_OK);
 	CK(kof_scan_incomplete(&ctx) == 0);
 	kof_scan_diag_drop(sc);
-	CK(sc->diag_graph == NULL);
+	CK(sc->obj.diag.graph == NULL);
 
 	/* a graph the allowance cut (one block of nodes fits): OVER_BUDGET, read
 	 * LIVE from the graph, and the object is not complete */
@@ -181,32 +181,32 @@ static void status_direct(void)
 	CK(g && kgenome_diag_scan_status(g) == KGENOME_OVER_BUDGET);
 	charged = g ? kgenome_diag_scan_bytes(g, &peak) : 0;
 	CK(charged > 0);
-	sc->diag_graph = g;
-	sc->diag_charged = charged;
-	sc->resident = charged + 100u;          /* the graph's bytes and something else */
+	sc->obj.diag.graph = g;
+	sc->obj.diag.charged = charged;
+	sc->ledger.resident = charged + 100u;          /* the graph's bytes and something else */
 	CK(kof_scan_diag_status(&ctx) == KGENOME_OVER_BUDGET);
 	CK(kof_scan_incomplete(&ctx) == 1);
 
 	/* the drop frees the graph and gives back EXACTLY what was charged */
 	kof_scan_diag_drop(sc);
-	CK(sc->diag_graph == NULL && sc->diag_charged == 0);
-	CK(sc->resident == 100u);
+	CK(sc->obj.diag.graph == NULL && sc->obj.diag.charged == 0);
+	CK(sc->ledger.resident == 100u);
 	CK(kof_scan_diag_status(&ctx) == KGENOME_OK);
 	CK(kof_scan_incomplete(&ctx) == 0);
 	/* a second drop is nothing, and cannot wrap the count */
 	kof_scan_diag_drop(sc);
-	CK(sc->resident == 100u);
+	CK(sc->ledger.resident == 100u);
 
 	/* no graph, but the scan's own status says it could not finish: the status
 	 * the engine kept when the graph went (an allocation that failed) is read */
-	sc->diag_status = KGENOME_NOMEM;
+	sc->obj.diag.status = KGENOME_NOMEM;
 	CK(kof_scan_diag_status(&ctx) == KGENOME_NOMEM);
 	CK(kof_scan_incomplete(&ctx) == 1);
-	sc->diag_status = KGENOME_OVER_BUDGET;
+	sc->obj.diag.status = KGENOME_OVER_BUDGET;
 	CK(kof_scan_incomplete(&ctx) == 1);
-	sc->diag_status = KGENOME_TRUNCATED;    /* a per-diagnose limit: said by diag_unk, not here */
+	sc->obj.diag.status = KGENOME_TRUNCATED;    /* a per-diagnose limit: said by diag_unk, not here */
 	CK(kof_scan_incomplete(&ctx) == 0);
-	sc->diag_status = KGENOME_OK;
+	sc->obj.diag.status = KGENOME_OK;
 	kscan_free(sc);
 }
 

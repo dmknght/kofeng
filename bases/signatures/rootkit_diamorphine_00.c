@@ -1,6 +1,6 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofcap.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * rootkit_diamorphine_00.c - Diamorphine and what is built from it: a

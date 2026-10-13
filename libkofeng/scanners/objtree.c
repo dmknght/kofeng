@@ -6,7 +6,6 @@
  */
 
 #include "objtree.h"
-#include "scan.h"
 
 /*
  * One place, so that every step of descending asks the same question of the

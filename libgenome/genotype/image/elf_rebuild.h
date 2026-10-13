@@ -97,10 +97,42 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
  * e_entry 0 when none was. A blob lifted out of a variable has no entry point,
  * and saying ET_EXEC of it would be a claim the parser correctly objects to.
  */
-uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
-			   uint16_t machine, uint64_t base,
-			   const struct kgenome_sec_decl *sec, uint32_t n,
-			   uint64_t entry_rva, int has_entry,
-			   uint64_t image_end);
+struct kgenome_elf_hdr_req {
+	/* where the header goes: `out`, with `cap` bytes before the first section */
+	uint8_t                       *out;
+	uint64_t                       cap;
+	/* the image: width, machine, load address and the declared sections */
+	int                            is64;
+	uint16_t                       machine;
+	uint64_t                       base;
+	const struct kgenome_sec_decl *sec;
+	uint32_t                       n;
+	/* where execution starts, if the producer said */
+	uint64_t                       entry_rva;
+	int                            has_entry;
+	/* the file's end: what the one PT_LOAD covers */
+	uint64_t                       image_end;
+};
+
+uint64_t kgenome_elf_hdr_write(const struct kgenome_elf_hdr_req *rq);
+
+/*
+ * THE OLD POSITIONAL FORM, kept as a thin wrapper so the examiner keeps compiling
+ * until it moves to the struct form in its own upgrade (kofexamine is not edited
+ * with the engine). Nothing else may call it; it is the one function in the tree
+ * over the parameter limit and is listed in the parameter-count baseline.
+ */
+static inline uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
+					     uint16_t machine, uint64_t base,
+					     const struct kgenome_sec_decl *sec, uint32_t n,
+					     uint64_t entry_rva, int has_entry,
+					     uint64_t image_end)
+{
+	const struct kgenome_elf_hdr_req rq = {
+		out, cap, is64, machine, base, sec, n, entry_rva, has_entry, image_end
+	};
+
+	return kgenome_elf_hdr_write(&rq);
+}
 
 #endif /* KGENOME_ELF_REBUILD_H */

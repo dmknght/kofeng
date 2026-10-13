@@ -153,7 +153,7 @@ static void ctx_x64(struct kof_obj_ctx *ctx, uint64_t n)
  * The length is the one that matters: it arrives as `cdq` followed by
  * `mov dh,0x10`, so a map that writes the byte as the whole register reports
  * a 16-byte allocation. The prot is the other: 7 has both WRITE and EXEC,
- * which is what separates a stager from a JIT - see kgenome_flow_cap_of_syscall.
+ * which is what separates a stager from a JIT - see kgenome_nucleo_cap_of_syscall.
  */
 static void mmap_args(void)
 {

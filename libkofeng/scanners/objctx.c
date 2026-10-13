@@ -17,7 +17,7 @@
  * THIS one is the boundary itself: the byte readers, string
  * search, reports and debug facts, the region/entropy/similarity/repair/code
  * accessors, the code-use map, the vtable and the attach. Child production, the
- * decoders, the interpreter, the pathogen analysis and the script forms are
+ * decoders, the interpreter, the diagnose analysis and the script forms are
  * their own units, each bounded by the same rule: a mistake here is a memory
  * safety bug rather than a wrong answer, so each reads end to end on its own.
  *
@@ -31,37 +31,14 @@
  * macro - and _POSIX_C_SOURCE actively suppresses it. */
 #define _GNU_SOURCE
 
-#include <kofmod/kofsym.h>
-#include <kofmod/heur.h>   /* KOF_ENG_USE_EMU - a module's declaration */
 #include "../kofcore/kofentropy.h"   /* kentropy_eighths, kentropy_hist */
-#include "../kofcore/kofplatform.h"
-#include "../kofcore/kofdebug.h"   /* kof_write_all - the spill file below */
-#include "../analyzers/parsers/binaries/elf/elf_sym.h"
-#include <kofmod/kofpathogen.h>
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include <celllysis/xref.h>
 #include "pzero.h"
-#include <phenotype/diag_int.h>   /* kgenome_diag_code_range, kgenome_diag_code_run */
-#include "../analyzers/normalize/executables.h"
-#include "scan.h"
+#include <phenotype/diag_scan.h>      /* kgenome_diag_code_range, kgenome_diag_code_run */
 #include "objctx_int.h"
-#include <kofmod/elf.h>
-#include <phenotype/emu_unpack.h>
-#include <genotype/image/elf_rebuild.h>
 
-#include <decompressors/ovba.h>
-#include <decompressors/lzma.h>
-#include <decompressors/aplib.h>
-#include <decompressors/aspack.h>
-#include <decompressors/lzmat.h>
-#include <decompressors/bcj.h>
-#include <decompressors/rar3.h>
-#include <decompressors/rar5.h>
-#include <decompressors/bcj2.h>
 /* The script folding pass and the lexical table it is driven from - see
- * kof_scan_script_fold below. */
-#include "../analyzers/parsers/scripts/script_norm.h"
-#include "../analyzers/parsers/scripts/script_parse.h"
+ * kof_scan_script_forms below. */
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -71,16 +48,12 @@
  * nowhere else. A general "multi stream coding" hook in the module ABI would be an
  * abstraction with exactly one user, invented to avoid naming the thing it is for.
  */
-#include <kofmod/sevenzip.h>
 
 #include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/linkage/kofdiag.h"
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
 #include <celllysis/space.h>
 #include "../analyzers/genome_obj.h"
+#include <stdlib.h>
+#include <string.h>
 
 static uint8_t c_rd8(const struct kof_obj_ctx *ctx, uint64_t off)
 {
@@ -91,23 +64,17 @@ static uint8_t c_rd8(const struct kof_obj_ctx *ctx, uint64_t off)
 
 static uint16_t c_rd16(const struct kof_obj_ctx *ctx, uint64_t off)
 {
-	uint16_t v = 0;
-	kof_rd_u16(oc_mc(ctx)->data, off, 0, &v);
-	return v;
+	return kof_rd16_or0(oc_mc(ctx)->data, off);
 }
 
 static uint32_t c_rd32(const struct kof_obj_ctx *ctx, uint64_t off)
 {
-	uint32_t v = 0;
-	kof_rd_u32(oc_mc(ctx)->data, off, 0, &v);
-	return v;
+	return kof_rd32_or0(oc_mc(ctx)->data, off);
 }
 
 static uint64_t c_rd64(const struct kof_obj_ctx *ctx, uint64_t off)
 {
-	uint64_t v = 0;
-	kof_rd_u64(oc_mc(ctx)->data, off, 0, &v);
-	return v;
+	return kof_rd64_or0(oc_mc(ctx)->data, off);
 }
 
 static int c_memeq(const struct kof_obj_ctx *ctx, uint64_t off, const void *pat,
@@ -154,9 +121,9 @@ static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
 	    level != (uint32_t)KOF_LVL_HEUR &&
 	    level != (uint32_t)KOF_LVL_ACT)
 		level = (uint32_t)KOF_LVL_SUSPECT;
-	sc->rep_level   = level;
-	sc->rep_name_id = name_id;
-	sc->rep_valid   = 1;
+	sc->mod.rep_level   = level;
+	sc->mod.rep_name_id = name_id;
+	sc->mod.rep_valid   = 1;
 }
 
 /* ---- searching a declared string ------------------------------------------- */
@@ -172,7 +139,7 @@ static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
 static const struct kof_str_ent *str_of(const struct kof_scanner *sc, uint32_t id,
 					const uint8_t **bytes)
 {
-	return kof_db_str(sc->eng, sc->cur_mod, id, bytes);
+	return kof_db_str(sc->eng, sc->mod.cur, id, bytes);
 }
 
 /*
@@ -244,9 +211,9 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 
 	if (!sym)
 		return 0;
-	if (!sc->msym_bound) {
-		kof_match_begin(&sc->msym, kof_buf_make(sym, sym_n));
-		sc->msym_bound = 1;
+	if (!sc->obj.sym.bound) {
+		kof_match_begin(&sc->match.msym, kof_buf_make(sym, sym_n));
+		sc->obj.sym.bound = 1;
 	}
 	/* Imports then exports, so a mask naming both stops on the first half
 	 * that answers rather than always walking the longer one. */
@@ -258,12 +225,12 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 		 * split is the object's and not the pattern's. See sym_ext in
 		 * scan.h.
 		 */
-		if (!sc->sym_ext_done[half]) {
-			if (!sc->sym_ext[half]) {
-				sc->sym_ext[half] =
+		if (!sc->obj.sym.ext_done[half]) {
+			if (!sc->syms.ext[half]) {
+				sc->syms.ext[half] =
 					malloc(KOF_SCAN_MAX_EXTENTS *
-					       sizeof *sc->sym_ext[half]);
-				if (!sc->sym_ext[half]) {
+					       sizeof *sc->syms.ext[half]);
+				if (!sc->syms.ext[half]) {
 					/* Not "the symbol is absent", which is
 					 * what a bare zero says and what a
 					 * rule would read it as. The block was
@@ -272,25 +239,25 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 					return 0;
 				}
 			}
-			sc->sym_ext_n[half] =
+			sc->syms.ext_n[half] =
 				kof_sym_extents(sym, sym_n,
 						half ? KOF_SCAN_SYM_EXP
 						     : KOF_SCAN_SYM_IMP,
-						sc->sym_ext[half],
+						sc->syms.ext[half],
 						KOF_SCAN_MAX_EXTENTS);
-			sc->sym_ext_done[half] = 1;
+			sc->obj.sym.ext_done[half] = 1;
 		}
-		if (sc->sym_ext_n[half] &&
-		    kof_match_lookup(&sc->msym, KOF_MEMO_NONE,
-				     sc->sym_ext[half], sc->sym_ext_n[half],
-				     bytes, e->len, e->kind, e->flags, 0))
+		if (sc->syms.ext_n[half] &&
+		    kof_match_lookup(&sc->match.msym, &(const struct kof_match_req){
+			    .slot = KOF_MEMO_NONE, .ext = sc->syms.ext[half], .next = sc->syms.ext_n[half],
+			    .pat = { bytes, e->len, e->kind, e->flags } }))
 			return 1;
 	}
 	return 0;
 }
 
 /*
- * A DECLARED STRING WAS FOUND IN THIS OBJECT - see kof_scanner.str_hit.
+ * A DECLARED STRING WAS FOUND IN THIS OBJECT - see kof_scanner.mod.str_hit.
  *
  * Recorded at the four hooks that answer a marker search rather than at the
  * one that looks the fastest, because a rule reaches them by different names -
@@ -300,7 +267,7 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 static int str_found(struct kof_scanner *sc, int r)
 {
 	if (r && sc)
-		sc->str_hit = 1;
+		sc->mod.str_hit = 1;
 	return r;
 }
 
@@ -308,10 +275,10 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_module *m = sc->cur_mod;
+	const struct kof_module *m = sc->mod.cur;
 	const uint8_t *bytes;
 	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
-	struct kof_range *ext = sc->ext;
+	struct kof_range *ext = sc->cache.ext;
 	uint32_t n;
 
 	uint32_t mask, slot, uid;
@@ -367,24 +334,23 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 			uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
 			sslot = uid * sc->eng->n_masks +
 				sc->eng->rng_uid[m->rng_base + range_id];
-			found = kof_match_memo_get(&sc->m, sslot);
+			found = kof_match_memo_get(&sc->match.m, sslot);
 			if (found >= 0)
 				return str_found(sc, found);
 		}
 		found = c_find_str_sym(ctx, mask, bytes, e);
 		if (sslot != KOF_MEMO_NONE)
-			kof_match_memo_put(&sc->m, sslot, found);
+			kof_match_memo_put(&sc->match.m, sslot, found);
 		if (found)
 			return str_found(sc, 1);
 		mask &= ~KOF_SCAN_SYM;
 		if (!mask)
 			return 0;
 		n = kof_scan_resolve_range(ctx, mask, ext);
-		return str_found(sc,
-				 kof_match_lookup(&sc->m, KOF_MEMO_NONE, ext,
-						  n, bytes, e->len, e->kind,
-						  e->flags,
-						  &sc->st.gram_answers));
+		return str_found(sc, kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
+				.slot = KOF_MEMO_NONE, .ext = ext, .next = n,
+				.pat = { bytes, e->len, e->kind, e->flags },
+				.answered = &sc->st.gram_answers }));
 	}
 
 	uid = sc->eng->packs[m->pack_id].uid_base + e->uid;
@@ -402,10 +368,10 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		 * uid_slot in kofmultimatch.h for what distributing it instead
 		 * cost at scale.
 		 */
-		if (sc->mask_ok && mask_uid < sc->eng->n_masks &&
-		    sc->mask_ok[mask_uid]) {
+		if (sc->match.mask_ok && mask_uid < sc->eng->n_masks &&
+		    sc->match.mask_ok[mask_uid]) {
 			int a = kof_multimatch_answer(sc->eng->multi, uid,
-						      mask_uid, sc->found);
+						      mask_uid, sc->match.found);
 
 			if (a >= 0) {
 				sc->st.multi_answers++;
@@ -415,9 +381,9 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	}
 
 	n = kof_scan_resolve_range(ctx, mask, ext);
-	return str_found(sc, kof_match_lookup(&sc->m, slot, ext, n, bytes,
-					      e->len, e->kind, e->flags,
-					      &sc->st.gram_answers));
+	return str_found(sc, kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
+			.slot = slot, .ext = ext, .next = n, .pat = { bytes, e->len, e->kind, e->flags },
+			.answered = &sc->st.gram_answers }));
 }
 
 /*
@@ -442,7 +408,7 @@ static int c_find_str_at(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return 0;
-	return str_found(sc, kof_match_at(&sc->m, off, bytes, e->len,
+	return str_found(sc, kof_match_at(&sc->match.m, off, bytes, e->len,
 					  e->kind, e->flags));
 }
 
@@ -455,7 +421,7 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return 0;
-	return str_found(sc, kof_match_in(&sc->m, off, len, bytes, e->len,
+	return str_found(sc, kof_match_in(&sc->match.m, off, len, bytes, e->len,
 					  e->kind, e->flags));
 }
 
@@ -475,7 +441,7 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	if (!e)
 		return KGENOME_BROKEN;
 	{
-		uint64_t at = kof_match_where(&sc->m, off, len, bytes, e->len,
+		uint64_t at = kof_match_where(&sc->match.m, off, len, bytes, e->len,
 					      e->kind, e->flags);
 
 		/* Answering WHERE is answering WHETHER - see str_found. */
@@ -493,10 +459,10 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
  */
 void oc_scan_broken(struct kof_scanner *sc, uint32_t reason)
 {
-	if (!sc->broken)
-		sc->broken = reason;
+	if (!sc->obj.open.broken)
+		sc->obj.open.broken = reason;
 	if (reason == KOF_BROKEN_LIMIT)
-		sc->stop = 1;
+		sc->obj.open.stop = 1;
 }
 
 /*
@@ -515,8 +481,8 @@ void oc_scan_broken(struct kof_scanner *sc, uint32_t reason)
  */
 void oc_scan_capped(struct kof_scanner *sc, uint32_t reason)
 {
-	if (!sc->broken)
-		sc->broken = reason;
+	if (!sc->obj.open.broken)
+		sc->obj.open.broken = reason;
 }
 
 /*
@@ -537,7 +503,7 @@ void oc_scan_capped(struct kof_scanner *sc, uint32_t reason)
  */
 int oc_can_produce(const struct kof_scanner *sc)
 {
-	return sc->cur_src && !sc->stop;
+	return sc->cur.src && !sc->obj.open.stop;
 }
 
 /* A decoder's status, in the vocabulary the caller sees. Stopping is the
@@ -567,7 +533,7 @@ void oc_incomplete(const struct kof_obj_ctx *ctx, uint32_t reason)
 	if (reason != KOF_BROKEN_UNSUPPORTED && reason != KOF_BROKEN_DAMAGED &&
 	    reason != KOF_BROKEN_ENCRYPTED)
 		reason = KOF_BROKEN_LIMIT;
-	kof_scan_of(ctx)->rep_reason = reason;
+	kof_scan_of(ctx)->mod.rep_reason = reason;
 	oc_scan_broken(kof_scan_of(ctx), reason);
 }
 
@@ -583,15 +549,15 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const char *text;
 
-	if (!sc->cur_mod)
+	if (!sc->mod.cur)
 		return;
 	/* An id the table does not know is a stale table, and says so rather than
 	 * borrowing the neighbouring name - the same rule findings follow. */
-	text = kof_db_name(sc->eng, sc->cur_mod, name_id);
+	text = kof_db_name(sc->eng, sc->mod.cur, name_id);
 	if (!text)
 		text = "unknown";
 	/*
-	 * THE MODULE NAMING ITSELF, KEPT - see kof_scanner.mod_tag.
+	 * THE MODULE NAMING ITSELF, KEPT - see kof_scanner.obj.open.mod_tag.
 	 *
 	 * "MPRESS.PE.lc" carries the module's name in front of the field, and
 	 * this is the only place the engine ever sees it. Taken here so a
@@ -607,11 +573,11 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
 		if (last && last != text) {
 			size_t n = (size_t)(last - text);
 
-			if (n >= sizeof sc->mod_tag)
-				n = sizeof sc->mod_tag - 1u;
-			memcpy(sc->mod_tag, text, n);
-			sc->mod_tag[n] = 0;
-			sc->mod_tag_of = sc->cur_mod;
+			if (n >= sizeof sc->obj.open.mod_tag)
+				n = sizeof sc->obj.open.mod_tag - 1u;
+			memcpy(sc->obj.open.mod_tag, text, n);
+			sc->obj.open.mod_tag[n] = 0;
+			sc->obj.open.mod_tag_of = sc->mod.cur;
 		}
 	}
 	if (!sc->debug_cb)
@@ -619,7 +585,7 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
 	/* The field, not the whole name: consumers ask "which version" without
 	 * caring which module answered, the same way they always did - only
 	 * without finding the dot themselves once per fact per object. */
-	sc->debug_cb(kverdict_fact_id(text), text, value, sc->debug_user);
+	sc->debug_cb(kof_fact_id(text), text, value, sc->debug_user);
 }
 
 
@@ -724,11 +690,11 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	uint32_t f;
 
-	if (!sc->latch[KOF_OL_USE]) {
+	if (!sc->obj.latch[KOF_OL_USE]) {
 		const struct kgenome_elf_info *e = ctx->file_header;
 		uint32_t i;
 
-		sc->latch[KOF_OL_USE] = 1;
+		sc->obj.latch[KOF_OL_USE] = 1;
 		/*
 		 * NOTHING KNOWN IS NOT THE SAME AS NOTHING FOUND.
 		 *
@@ -758,7 +724,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			uint32_t left = KGENOME_XREF_MAX, pass, nrun;
 			uint64_t biggest = 0, total = 0;
 			struct xref_run run[KGENOME_ELF_MAX_SECTIONS];
-			kof_buf b = kof_src_buf(sc->cur_src);
+			kof_buf b = kof_src_buf(sc->cur.src);
 
 			/*
 			 * THE RUNS ARE DECIDED ONCE, here, and the three
@@ -777,7 +743,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 				total += run[i].have;
 			}
 
-			sc->use = kgenome_xref_new();
+			sc->obj.diag.use = kgenome_xref_new();
 			/*
 			 * WHAT THE COMPILER PUT THERE, from the ELF's own
 			 * structure and not from symbols - the files this has
@@ -793,9 +759,9 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			 * inside the map - which is the only way the tm_clones
 			 * pair is ever found, since nothing names them.
 			 */
-			if (sc->use && e->entry_addr)
-				kgenome_xref_startup(sc->use, e->entry_addr);
-			for (i = 0; sc->use && i < e->sec_count &&
+			if (sc->obj.diag.use && e->entry_addr)
+				kgenome_xref_startup(sc->obj.diag.use, e->entry_addr);
+			for (i = 0; sc->obj.diag.use && i < e->sec_count &&
 				    i < KGENOME_ELF_MAX_SECTIONS; i++) {
 				const struct kgenome_elf_sec *sec = &e->sec[i];
 				uint32_t w = ctx->arch == KGENOME_ARCH_X86 ? 4u : 8u;
@@ -803,7 +769,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 
 				if (kgenome_elf_sec_is_code(sec) &&
 				    kof_str_ne(sec->name, ".text"))
-					kgenome_xref_startup(sc->use, sec->mem_addr);
+					kgenome_xref_startup(sc->obj.diag.use, sec->mem_addr);
 				if (sec->type != 14u && sec->type != 15u)
 					continue;   /* INIT_ARRAY, FINI_ARRAY */
 				/*
@@ -856,7 +822,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 					 * the object has room for; past full,
 					 * every further turn records nothing.
 					 */
-					if (!kgenome_xref_startup(sc->use, v))
+					if (!kgenome_xref_startup(sc->obj.diag.use, v))
 						break;
 				}
 			}
@@ -877,8 +843,8 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			 * matters: whatever holds the most code is where the
 			 * code is.
 			 */
-			for (pass = 0; sc->use && left && pass < 2; pass++)
-			for (i = 0; sc->use && left && i < nrun; i++) {
+			for (pass = 0; sc->obj.diag.use && left && pass < 2; pass++)
+			for (i = 0; sc->obj.diag.use && left && i < nrun; i++) {
 				uint32_t n;
 				struct kgenome_obj gobj;
 				int big = run[i].have >= biggest;
@@ -893,32 +859,33 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 				 * one and still holds it, the one decoder
 				 * otherwise. Same answer either way.
 				 */
-				kgenome_xref_begin(sc->use, ctx->arch);
+				kgenome_xref_begin(sc->obj.diag.use, ctx->arch);
 				kof_genome_obj(ctx, &gobj);
-				kgenome_diag_code_run(sc->walk, &gobj, b.p, b.n,
-						  run[i].at, n, run[i].va,
-						  kgenome_xref_feed, sc->use, NULL);
+				kgenome_diag_code_run(&(const struct kgenome_diag_code_req){
+					.wk = sc->obj.diag.walk, .obj = &gobj, .base = b.p, .size = b.n,
+					.off = run[i].at, .n = n, .va = run[i].va,
+					.fn = kgenome_xref_feed, .user = sc->obj.diag.use });
 				left -= n;
 				if (n < run[i].have)
-					sc->use_cut = 1;
+					sc->obj.diag.use_cut = 1;
 			}
 			/* The budget is a total, so the sweep was cut exactly when the
 			 * executable bytes the object holds exceed it: a run swept in
 			 * part leaves n < have, one never reached leaves nothing
 			 * behind to compare, and the total says both. */
 			if (total > KGENOME_XREF_MAX)
-				sc->use_cut = 1;
+				sc->obj.diag.use_cut = 1;
 		}
 	}
-	if (!sc->use)
+	if (!sc->obj.diag.use)
 		return KGENOME_XREF_PARTIAL;
-	f = kgenome_xref_in(sc->use, va, size);
+	f = kgenome_xref_in(sc->obj.diag.use, va, size);
 	/* PARTIAL when either bound bit: the address table is full, or the byte
 	 * budget ended before every executable section was swept. Only the
 	 * first was reported; "nothing refers to it" was then said of code that
 	 * had never been read. */
 	{
-		uint32_t part = (kgenome_xref_full(sc->use) || sc->use_cut)
+		uint32_t part = (kgenome_xref_full(sc->obj.diag.use) || sc->obj.diag.use_cut)
 				? KGENOME_XREF_PARTIAL : 0u;
 
 		return f ? f | part : part;
@@ -954,7 +921,7 @@ static int c_fmt_wanted(const struct kof_obj_ctx *ctx, uint8_t fmt)
 
 	if (!sc || !sc->eng)
 		return 1;
-	if (sc->raise_carried)
+	if (sc->cur.raise_carried)
 		return 1;
 	if (fmt == KOF_FMT_UNKNOWN || fmt >= KOF_FMT_COUNT)
 		return 1;
@@ -988,7 +955,7 @@ static int c_region_shape(const struct kof_obj_ctx *ctx, uint32_t mask,
 	memset(out, 0, sizeof *out);
 	if (!sc)
 		return 0;
-	ext = sc->ext_gather;
+	ext = sc->cache.ext_gather;
 	n = kof_scan_resolve_range(ctx, mask, ext);
 	out->runs = n;
 	for (i = 0; i < n; i++) {
@@ -1020,7 +987,7 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 	b = oc_mc(ctx)->data;
 	if (!b.p || !b.n)
 		return 0;
-	ext = sc->ext_gather;
+	ext = sc->cache.ext_gather;
 	n = kof_scan_resolve_range(ctx, mask, ext);
 	if (!n)
 		return 0;
@@ -1039,10 +1006,8 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 	memset(hist, 0, sizeof hist);
 	for (i = 0; i < n; i++) {
 		kof_buf s2 = kof_slice(b, ext[i].off, ext[i].len);
-		uint64_t k;
 
-		for (k = 0; k < s2.n; k++)
-			hist[s2.p[k]]++;
+		kentropy_count(hist, s2.p, s2.n);
 		total += s2.n;
 	}
 	{
@@ -1117,12 +1082,12 @@ static uint32_t c_mutation_score(const struct kof_obj_ctx *ctx, uint32_t block_i
 	{
 		uint32_t b, pct, seen = 0, n_hash = 0, id, i;
 
-		if (!sc || !sc->cur_mod)
+		if (!sc || !sc->mod.cur)
 			return 0;
-		b = sc->cur_mod->block_base + block_id;
+		b = sc->mod.cur->block_base + block_id;
 		pct = kof_mutation_pct(&sc->mutation, b);
-		if (sc->mutation_asked < 0)
-			sc->mutation_asked = 0;
+		if (sc->mod.mutation_asked < 0)
+			sc->mod.mutation_asked = 0;
 
 		/*
 		 * EVERY BLOCK THE RULE ASKS ABOUT IS PART OF ITS VERDICT.
@@ -1140,20 +1105,20 @@ static uint32_t c_mutation_score(const struct kof_obj_ctx *ctx, uint32_t block_i
 		 * twice would weight it twice.
 		 */
 		/* The best any one block reached, which is what the verdict
-		 * reports - see kof_scanner.mutation_best. Before the
+		 * reports - see kof_scanner.mod.mutation_best. Before the
 		 * already-counted return below, because a block asked about
 		 * twice scores the same twice and this is a maximum. */
-		if (pct > sc->mutation_best)
-			sc->mutation_best = pct;
+		if (pct > sc->mod.mutation_best)
+			sc->mod.mutation_best = pct;
 		id = kof_mutation_block_id(sc->eng->mutation, b);
-		for (i = 0; i < sc->n_mutation_blk; i++)
-			if (sc->mutation_blk[i] == id)
+		for (i = 0; i < sc->mod.n_mutation_blk; i++)
+			if (sc->mod.mutation_blk[i] == id)
 				return pct;
-		if (sc->n_mutation_blk < KOF_MUTATION_NAME_MAX) {
-			sc->mutation_blk[sc->n_mutation_blk++] = id;
+		if (sc->mod.n_mutation_blk < KOF_MUTATION_NAME_MAX) {
+			sc->mod.mutation_blk[sc->mod.n_mutation_blk++] = id;
 			if (kof_mutation_counts(&sc->mutation, b, &seen, &n_hash)) {
-				sc->mutation_hit += seen;
-				sc->mutation_tot += n_hash;
+				sc->mod.mutation_hit += seen;
+				sc->mod.mutation_tot += n_hash;
 			}
 		}
 		return pct;
@@ -1196,12 +1161,12 @@ static int c_cure_patch(const struct kof_obj_ctx *ctx, uint64_t off,
 		return 0;
 	if (off > b.n || b.n - off < n)
 		return 0;
-	if (sc->n_cure_fix >= sizeof sc->cure_fix / sizeof sc->cure_fix[0])
+	if (sc->mod.n_cure_fix >= sizeof sc->mod.cure_fix / sizeof sc->mod.cure_fix[0])
 		return 0;
-	sc->cure_fix[sc->n_cure_fix].off = off;
-	sc->cure_fix[sc->n_cure_fix].n = n;
-	memcpy(sc->cure_fix[sc->n_cure_fix].b, bytes, n);
-	sc->n_cure_fix++;
+	sc->mod.cure_fix[sc->mod.n_cure_fix].off = off;
+	sc->mod.cure_fix[sc->mod.n_cure_fix].n = n;
+	memcpy(sc->mod.cure_fix[sc->mod.n_cure_fix].b, bytes, n);
+	sc->mod.n_cure_fix++;
 	return 1;
 }
 
@@ -1213,8 +1178,8 @@ static int c_cure_truncate(const struct kof_obj_ctx *ctx, uint64_t len)
 	/* Cutting to nothing, or to more than there is, is not a repair. */
 	if (!sc || !len || len >= b.n)
 		return 0;
-	sc->cure_trunc = len;
-	sc->cure_trunc_set = 1;
+	sc->mod.cure_trunc = len;
+	sc->mod.cure_trunc_set = 1;
 	return 1;
 }
 
@@ -1240,7 +1205,7 @@ static uint64_t c_pz_addr_to_off(const struct kof_obj_ctx *ctx, uint64_t addr)
 	struct kgenome_obj gobj;
 
 	kof_genome_obj(ctx, &gobj);
-	return kgenome_pz_addr_to_off(&gobj, addr);
+	return kgenome_image_addr_to_off(&gobj, addr);
 }
 
 /*
@@ -1277,7 +1242,7 @@ static int c_dis_seek(const struct kof_obj_ctx *ctx, uint64_t off, int keep)
 
 	if (!sc || off >= b.n)
 		return 0;
-	return kgenome_cell_seek(&sc->cell, off, keep);
+	return kgenome_cell_seek(&sc->cur.cell, off, keep);
 }
 
 static int c_dis_next(const struct kof_obj_ctx *ctx, struct kgenome_cell_insn *out)
@@ -1292,14 +1257,14 @@ static int c_dis_next(const struct kof_obj_ctx *ctx, struct kgenome_cell_insn *o
 		return 0;
 	kof_genome_obj(ctx, &gobj);
 	kgenome_cell_space_init(&sp, &gobj, b.p, b.n);
-	return kgenome_cell_next(&sc->cell, &sp, out);
+	return kgenome_cell_next(&sc->cur.cell, &sp, out);
 }
 
 static int c_dis_reg(const struct kof_obj_ctx *ctx, uint8_t r, uint64_t *out)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	return sc ? kgenome_cell_reg(&sc->cell, r, out) : 0;
+	return sc ? kgenome_cell_reg(&sc->cur.cell, r, out) : 0;
 }
 
 /*
@@ -1317,17 +1282,17 @@ static void c_infected(const struct kof_obj_ctx *ctx, uint64_t off,
 
 	if (!sc || !len || off > b.n || b.n - off < len)
 		return;
-	if (sc->n_infect >= KOF_MAX_INFECTED) {
+	if (sc->mod.n_infect >= KOF_MAX_INFECTED) {
 		/* A bound, and it says so: an infection past the sixteenth was a
 		 * span a repair would never be offered, with nothing to tell the
 		 * module or the report. */
 		oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 		return;
 	}
-	sc->infect[sc->n_infect].off = off;
-	sc->infect[sc->n_infect].len = len;
-	sc->infect[sc->n_infect].kind = kind;
-	sc->n_infect++;
+	sc->mod.infect[sc->mod.n_infect].off = off;
+	sc->mod.infect[sc->mod.n_infect].len = len;
+	sc->mod.infect[sc->mod.n_infect].kind = kind;
+	sc->mod.n_infect++;
 }
 
 /* See kof_content.cure_offer: the module located the damage and says so. */
@@ -1336,8 +1301,8 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
 	if (sc) {
-		sc->cure_have = 1;
-		sc->cure_at = at;
+		sc->mod.cure_have = 1;
+		sc->mod.cure_at = at;
 	}
 }
 
@@ -1455,7 +1420,7 @@ static const struct kof_content kof_detect_vtable = {
 	NULL, NULL, NULL,
 	/* The profile's two questions - unplugged, see above. */
 	oc_diag, NULL,
-	/* the graph that diagnose produced, as records - see kofpathogen.h */
+	/* the graph that diagnose produced, as records - see kofdiagtree.h */
 	oc_graph,
 	/* two diagnoses meeting at a named node - see kof_diag_share */
 	oc_diag_share,
@@ -1530,27 +1495,6 @@ void kof_mod_unpack_mode(struct kof_obj_ctx *ctx, int on)
 	 * would label it with an entry from a different object. */
 	oc_pend_clear(kof_scan_of(ctx));
 	ctx->content = on ? &kof_unpack_vtable : &kof_detect_vtable;
-}
-
-
-/*
- * The id for a field name. See kof_on_debug.
- *
- * The text after the last dot when there is one, the whole string when there is
- * not, hashed. Here rather than in a header so the hash has exactly one
- * definition: two of them drifting apart would be an id that means one thing to
- * the engine and another to the tool comparing against it.
- */
-uint32_t kverdict_fact_id(const char *field)
-{
-	const char *dot;
-
-	if (!field || !*field)
-		return 0;
-	dot = strrchr(field, '.');
-	if (dot && dot[1])
-		field = dot + 1;
-	return kof_crc32(field, (uint64_t)strlen(field));
 }
 
 

@@ -66,7 +66,7 @@
 /*
  * THE VOCABULARY COMES FROM THERE, NOT FROM HERE.
  *
- * Verbs, locations and techniques are defined once in libkoforbit/kofevt and
+ * Verbs, locations and techniques are defined once in libkoforbit/evt and
  * this library uses them. kofgrille declared its own for one afternoon and
  * mirrored them into kofevt, which is a shape that works exactly until the two
  * copies disagree - and then the conversion between them compiles, runs, and

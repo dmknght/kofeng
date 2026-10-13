@@ -74,7 +74,7 @@ int kof_objtree_may_open(const struct kof_scan_option *opt);
  * THE OTHER HALF IS NOT HERE, and that is the design rather than an omission. A
  * file NOBODY declared - one a linker placed in a data section at compile time -
  * is found by looking for its header, and that search is a MODULE:
- * bases/decomp/carried_pe.c declares the format it targets, the regions worth
+ * the carried_pe module (it was in bases/decomp) declares the format it targets, the regions worth
  * looking in and the magic to look for. It was engine code with the magics
  * written in, and then adding a kind of carried file meant editing the engine
  * while declining to search a format meant a table in the engine naming that

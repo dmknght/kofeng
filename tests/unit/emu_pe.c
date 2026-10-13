@@ -197,8 +197,20 @@ static void decodes(void)
 	ck(info->entry_rva == TEXT_RVA, "the entry point survived the parse");
 	ck(info->sec_count == 2, "both sections were read");
 
-	e = kgenome_emu_unp_run_pe(f, len, info, NULL, NULL, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, NULL,
-			       &rep);
+	e = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
+			.file = f,
+			.n = len,
+			.info = info,
+			.imports = NULL,
+			.bud = NULL,
+			.idle = 0,
+			.hand_back = 0,
+			.extensions = KGENOME_EMU_EXTEND_MAX,
+			.oep = NULL,
+			.n_oep = 0,
+			.decl = NULL,
+			.rep = &rep,
+		});
 	if (!e) {
 		ck(0, rep.refused ? rep.refused : "no image could be built");
 		goto out;

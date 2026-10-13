@@ -119,6 +119,36 @@ static inline int kof_rd_u64(kof_buf b, uint64_t off, int be, uint64_t *out)
 }
 
 /*
+ * Little-endian reads where a short buffer means 0. For a parser that has
+ * already decided a truncated field is a no-op rather than an error (it checks
+ * the result against a bound it knows, or the field is advisory). Where a
+ * failed read has to be told from a stored 0, use kof_rd_u16/32/64.
+ */
+static inline uint16_t kof_rd16_or0(kof_buf b, uint64_t off)
+{
+	uint16_t v = 0;
+
+	(void)kof_rd_u16(b, off, 0, &v);
+	return v;
+}
+
+static inline uint32_t kof_rd32_or0(kof_buf b, uint64_t off)
+{
+	uint32_t v = 0;
+
+	(void)kof_rd_u32(b, off, 0, &v);
+	return v;
+}
+
+static inline uint64_t kof_rd64_or0(kof_buf b, uint64_t off)
+{
+	uint64_t v = 0;
+
+	(void)kof_rd_u64(b, off, 0, &v);
+	return v;
+}
+
+/*
  * Little-endian load and store through a raw pointer. UNCHECKED: the caller has
  * already established that the bytes are there (a decompressor that tested its
  * window, a cipher walking a block it sized). Where the range is not known, use
@@ -196,11 +226,12 @@ static inline uint64_t kof_round_up(uint64_t v, uint64_t a)
  * a NUL terminated name out of a bounded buffer can feed it one byte at a time
  * without first copying it somewhere.
  */
-#define KOF_HASH_INIT 2166136261u
+#define KOF_HASH_INIT  2166136261u
+#define KOF_HASH_PRIME 16777619u        /* also a polynomial hash's radix: see the mutation window */
 
 static inline uint32_t kof_hash_step(uint32_t h, uint8_t c)
 {
-	return (h ^ c) * 16777619u;
+	return (h ^ c) * KOF_HASH_PRIME;
 }
 
 static inline uint32_t kof_hash_bytes(const void *p, uint64_t n)
@@ -212,6 +243,53 @@ static inline uint32_t kof_hash_bytes(const void *p, uint64_t n)
 	for (i = 0; i < n; i++)
 		h = kof_hash_step(h, b[i]);
 	return h;
+}
+
+/*
+ * The same FNV-1a at 64 bits, for the tables that key on it (the fridge, the
+ * collectors' seen-sets). Zero is not a key there - a table uses it for an empty
+ * slot - so `kof_hash64_nz` maps it away.
+ *
+ * KOF_HASH64_INIT IS NOT THE STANDARD FNV-64 OFFSET BASIS (14695981039346656037).
+ * It is the constant the tree has always used - one digit short - and it is kept
+ * because the fridge writes these keys into its cache file: changing it would
+ * discard every verdict a user has cached. It spreads exactly as well.
+ */
+#define KOF_HASH64_INIT 1469598103934665603ull
+
+static inline uint64_t kof_hash64_step(uint64_t h, uint8_t c)
+{
+	return (h ^ c) * 1099511628211ull;
+}
+
+static inline uint64_t kof_hash64_update(uint64_t h, const void *p, uint64_t n)
+{
+	const uint8_t *b = (const uint8_t *)p;
+	uint64_t i;
+
+	for (i = 0; i < n; i++)
+		h = kof_hash64_step(h, b[i]);
+	return h;
+}
+
+static inline uint64_t kof_hash64_bytes(const void *p, uint64_t n)
+{
+	return kof_hash64_update(KOF_HASH64_INIT, p, n);
+}
+
+/* A NUL terminated string, no copy. */
+static inline uint64_t kof_hash64_str(const char *s)
+{
+	uint64_t h = KOF_HASH64_INIT;
+
+	for (; *s; s++)
+		h = kof_hash64_step(h, (uint8_t)*s);
+	return h;
+}
+
+static inline uint64_t kof_hash64_nz(uint64_t h)
+{
+	return h ? h : 1ull;
 }
 
 /*
@@ -459,10 +537,42 @@ static inline int kof_is_word_byte(uint8_t c)
 	return kof_is_alnum(c) || c == '_';
 }
 
+/*
+ * The id of a debug note's field: the text after the last dot when there is one,
+ * the whole string when there is not, CRC-32'd. The one definition - the engine
+ * computes it per fact per object (scanners/objctx.c) and kverdict_fact_id
+ * (kofeng.h) hands the same value to a host, so an id means one thing to both.
+ */
+static inline uint32_t kof_fact_id(const char *field)
+{
+	const char *dot;
+
+	if (!field || !*field)
+		return 0;
+	dot = strrchr(field, '.');
+	if (dot && dot[1])
+		field = dot + 1;
+	return kof_crc32(field, (uint64_t)strlen(field));
+}
+
 /* C isspace() in the "C" locale, for a byte: space, \t \n \v \f \r. */
 static inline int kof_is_space_byte(uint8_t c)
 {
 	return c == ' ' || (uint8_t)(c - '\t') < 5u;
+}
+
+/* The blank of a SOURCE line: space, tab, newline, CR - not \v or \f. */
+static inline int kof_is_blank_byte(uint8_t c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* Past the blanks of a SOURCE line (kof_is_blank_byte). */
+static inline const char *kof_skip_blank(const char *p)
+{
+	while (kof_is_blank_byte((uint8_t)*p))
+		p++;
+	return p;
 }
 
 static inline int kof_hex_val(uint8_t c)
@@ -477,6 +587,18 @@ static inline int kof_hex_val(uint8_t c)
 	};
 
 	return (int)v1[c] - 1;
+}
+
+/*
+ * ONE BYTE FROM TWO HEX DIGITS, or -1 when either is not a digit. The pairing
+ * that kof_hex_val's callers all wrote out (high digit << 4 | low digit): the
+ * lib's url decoder and the normaliser's "would this decode to text" test.
+ */
+static inline int kof_hex_byte(const uint8_t *p)
+{
+	int hi = kof_hex_val(p[0]), lo = kof_hex_val(p[1]);
+
+	return (hi | lo) < 0 ? -1 : (hi << 4) | lo;
 }
 
 /*

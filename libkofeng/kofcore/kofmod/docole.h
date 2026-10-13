@@ -299,16 +299,11 @@ struct kof_docole_info {
 	uint32_t n_ent_runs;
 
 	/* Runs, classified, joined where consecutive and settled so that no byte is
-	 * in two of them. struct kof_run is the shared shape from runlist.h; it is
-	 * spelled out here rather than included because a module never walks these
-	 * and including a host header from the ABI would invert the dependency. */
+	 * in two of them. struct kof_run is the shared shape, defined once in
+	 * range.h (core, types only, re-exported by kofsig.h). */
 	uint32_t n_runs;
 	uint32_t reserved1;
-	struct {
-		uint64_t off, len;
-		uint32_t cls;         /* enum kof_docole_class */
-		uint32_t reserved;
-	} run[KOF_DOCOLE_MAX_EXTENTS];
+	struct kof_run run[KOF_DOCOLE_MAX_EXTENTS];   /* cls is enum kof_docole_class */
 
 	struct kof_docole_entry {
 		uint64_t name_off;    /* UTF-16 name, in the object */

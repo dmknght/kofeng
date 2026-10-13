@@ -13,12 +13,7 @@
 #include <string.h>
 
 #include "pe_unmap.h"
-
-#define DOS_MAGIC   0x5a4du
-#define SIG_LEN     4u
-#define COFF_LEN    20u
-#define SEC_LEN     40u
-#define MIN_OPT_LEN 96u
+#include "pe_types.h"
 
 #define OPT_MAGIC_PE32     0x10bu
 #define OPT_MAGIC_PE32PLUS 0x20bu
@@ -33,17 +28,11 @@
 
 #define DIR_BASERELOC 5u
 
-/* IMAGE_REL_BASED_*, and only the two that carry a pointer. HIGH and LOW split
- * one across two entries and appear on nothing this will meet; ABSOLUTE is the
- * padding a block uses to stay four-byte aligned and is meant to be skipped. */
 /* "this RVA has no file offset". A local sentinel rather than KGENOME_BROKEN,
  * which lives in the module ABI: nothing else in extractor/unpack includes that, and a
  * private helper does not need a public vocabulary to say "no". */
 #define NO_FILE_OFF UINT64_MAX
 
-#define REL_ABSOLUTE 0u
-#define REL_HIGHLOW  3u
-#define REL_DIR64    10u
 
 struct hdr {
 	uint64_t at;          /* the PE signature */
@@ -73,20 +62,20 @@ static int read_hdr(kof_buf img, struct hdr *h)
 	uint32_t lfanew = 0, sig = 0;
 
 	memset(h, 0, sizeof *h);
-	if (!kof_rd_u16(img, 0, 0, &mz) || mz != DOS_MAGIC)
+	if (!kof_rd_u16(img, 0, 0, &mz) || mz != KGENOME_PE_DOS_MAGIC)
 		return 0;
 	if (!kof_rd_u32(img, 0x3c, 0, &lfanew))
 		return 0;
 	h->at = lfanew;
-	if (!kof_rd_u32(img, h->at, 0, &sig) || sig != 0x00004550u)
-		return 0;   /* "PE\0\0" little endian */
-	if (!kof_rd_u16(img, h->at + SIG_LEN + 2u, 0, &h->nsec) || !h->nsec)
+	if (!kof_rd_u32(img, h->at, 0, &sig) || sig != KGENOME_PE_SIG_MAGIC)
 		return 0;
-	if (!kof_rd_u16(img, h->at + SIG_LEN + 16u, 0, &h->optsz) ||
-	    h->optsz < MIN_OPT_LEN)
+	if (!kof_rd_u16(img, h->at + KGENOME_PE_SIG_LEN + 2u, 0, &h->nsec) || !h->nsec)
+		return 0;
+	if (!kof_rd_u16(img, h->at + KGENOME_PE_SIG_LEN + 16u, 0, &h->optsz) ||
+	    h->optsz < KGENOME_PE_MIN_OPT_LEN)
 		return 0;
 
-	h->opt = h->at + SIG_LEN + COFF_LEN;
+	h->opt = h->at + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN;
 	if (!kof_rd_u16(img, h->opt, 0, &magic))
 		return 0;
 	h->plus = magic == OPT_MAGIC_PE32PLUS;
@@ -124,7 +113,7 @@ static int read_hdr(kof_buf img, struct hdr *h)
 	}
 
 	h->sec_tab = h->opt + h->optsz;
-	if (!kof_in_range(img, h->sec_tab, (uint64_t)h->nsec * SEC_LEN))
+	if (!kof_in_range(img, h->sec_tab, (uint64_t)h->nsec * KGENOME_PE_SEC_LEN))
 		return 0;
 	return 1;
 }
@@ -136,7 +125,7 @@ struct sec {
 static int read_sec(kof_buf img, const struct hdr *h, uint32_t i,
 		    struct sec *s)
 {
-	uint64_t at = h->sec_tab + (uint64_t)i * SEC_LEN;
+	uint64_t at = h->sec_tab + (uint64_t)i * KGENOME_PE_SEC_LEN;
 	uint32_t vs = 0, rva = 0, raw = 0, ptr = 0;
 
 	if (!kof_rd_u32(img, at + 8u,  0, &vs) ||
@@ -228,7 +217,7 @@ static void undo_relocs(kof_buf img, const struct hdr *h,
 			if (!kof_rd_u16(img, e, 0, &ent))
 				return;
 			type = (uint32_t)(ent >> 12);
-			if (type == REL_ABSOLUTE)
+			if (type == KGENOME_PE_REL_ABSOLUTE)
 				continue;
 			rva = (uint64_t)page + (ent & 0x0fffu);
 			off = rva_to_file(sec, h->nsec, rva);
@@ -237,7 +226,7 @@ static void undo_relocs(kof_buf img, const struct hdr *h,
 					info->relocs_skipped++;
 				continue;
 			}
-			if (type == REL_HIGHLOW && off + 4u <= file_len) {
+			if (type == KGENOME_PE_REL_HIGHLOW && off + 4u <= file_len) {
 				uint32_t v;
 
 				memcpy(&v, file + off, 4);
@@ -245,7 +234,7 @@ static void undo_relocs(kof_buf img, const struct hdr *h,
 				memcpy(file + off, &v, 4);
 				if (info)
 					info->relocs_undone++;
-			} else if (type == REL_DIR64 && off + 8u <= file_len) {
+			} else if (type == KGENOME_PE_REL_DIR64 && off + 8u <= file_len) {
 				uint64_t v;
 
 				memcpy(&v, file + off, 8);
@@ -315,8 +304,8 @@ int kgenome_pe_unmap(kof_buf img, uint64_t mapped_at, uint64_t preferred_base,
 	 * else.
 	 */
 	file_len = h.size_of_headers;
-	if (file_len < h.sec_tab + (uint64_t)h.nsec * SEC_LEN)
-		file_len = h.sec_tab + (uint64_t)h.nsec * SEC_LEN;
+	if (file_len < h.sec_tab + (uint64_t)h.nsec * KGENOME_PE_SEC_LEN)
+		file_len = h.sec_tab + (uint64_t)h.nsec * KGENOME_PE_SEC_LEN;
 	for (i = 0; i < h.nsec; i++) {
 		uint64_t e;
 

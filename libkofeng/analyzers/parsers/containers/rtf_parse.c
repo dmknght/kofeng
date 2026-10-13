@@ -21,24 +21,9 @@
 
 /* ---- character classes, ASCII only ------------------------------------------- */
 
-static int is_alpha(uint8_t c)
-{
-	return kof_is_alpha(c);
-}
-
-static int is_digit(uint8_t c)
-{
-	return kof_is_digit(c);
-}
-
 static int is_hex(uint8_t c)
 {
 	return kof_hex_val(c) >= 0;
-}
-
-static int is_space(uint8_t c)
-{
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
 /* ---- the walk's own state ---------------------------------------------------- */
@@ -98,10 +83,10 @@ static uint64_t read_control(struct rw *s, uint64_t at, char *name, uint32_t cap
 	at++;                                   /* past the backslash */
 	if (!kof_rd_u8(s->f, at, &c))
 		return at;
-	if (!is_alpha(c))
+	if (!kof_is_alpha(c))
 		return at + 1u;                 /* a control symbol */
 
-	while (kof_rd_u8(s->f, at, &c) && is_alpha(c)) {
+	while (kof_rd_u8(s->f, at, &c) && kof_is_alpha(c)) {
 		if (n + 1u < cap)
 			name[n] = (char)(c | 0x20u);   /* folded, ASCII only */
 		n++;
@@ -122,7 +107,7 @@ static uint64_t read_control(struct rw *s, uint64_t at, char *name, uint32_t cap
 		neg = 1;
 		at++;
 	}
-	while (kof_rd_u8(s->f, at, &c) && is_digit(c)) {
+	while (kof_rd_u8(s->f, at, &c) && kof_is_digit(c)) {
 		*has_param = 1;
 		if (*param < 0x7fffffff)
 			*param = *param * 10 + (c - '0');
@@ -172,7 +157,7 @@ static uint64_t read_hex(struct rw *s, uint64_t at, uint64_t *bytes, int *clean)
 			at++;
 			continue;
 		}
-		if (is_space(c)) {
+		if (kof_is_blank_byte(c)) {
 			at++;
 			continue;
 		}
@@ -209,15 +194,15 @@ static uint64_t read_hex(struct rw *s, uint64_t at, uint64_t *bytes, int *clean)
 			at++;
 			if (!kof_rd_u8(s->f, at, &c))
 				break;
-			if (!is_alpha(c)) {
+			if (!kof_is_alpha(c)) {
 				at++;          /* a control symbol */
 				continue;
 			}
-			while (kof_rd_u8(s->f, at, &c) && is_alpha(c))
+			while (kof_rd_u8(s->f, at, &c) && kof_is_alpha(c))
 				at++;
 			if (kof_rd_u8(s->f, at, &c) && c == '-')
 				at++;
-			while (kof_rd_u8(s->f, at, &c) && is_digit(c))
+			while (kof_rd_u8(s->f, at, &c) && kof_is_digit(c))
 				at++;
 			if (kof_rd_u8(s->f, at, &c) && c == ' ')
 				at++;
@@ -254,13 +239,13 @@ static uint32_t hex_head(struct rw *s, uint64_t at, uint8_t *out, uint32_t n)
 	while (got < n && kof_rd_u8(s->f, at, &c)) {
 		int v;
 
-		if (is_space(c)) {
+		if (kof_is_blank_byte(c)) {
 			at++;
 			continue;
 		}
 		if (!is_hex(c))
 			break;
-		v = is_digit(c) ? c - '0' : (c | 0x20) - 'a' + 10;
+		v = kof_is_digit(c) ? c - '0' : (c | 0x20) - 'a' + 10;
 		if (hi < 0) {
 			hi = v;
 		} else {
@@ -283,7 +268,7 @@ int kof_rtf_sniff(kof_buf file)
 	if (file.p[0] != '{' || file.p[1] != '\\')
 		return 0;
 	return (file.p[2] | 0x20) == 'r' && (file.p[3] | 0x20) == 't' &&
-	       kof_rd_u8(file, 4, &c) && is_alpha(c);
+	       kof_rd_u8(file, 4, &c) && kof_is_alpha(c);
 }
 
 int kof_rtf_parse(kof_buf file, struct kof_rtf_info *r, struct kof_obj_ctx *ctx)
@@ -328,7 +313,7 @@ int kof_rtf_parse(kof_buf file, struct kof_rtf_info *r, struct kof_obj_ctx *ctx)
 	s.f = file;
 	s.r = r;
 	s.body_from = 0;
-	kof_runs_init(&s.runs, (struct kof_run *)r->run, KOF_RTF_MAX_EXTENTS,
+	kof_runs_init(&s.runs, r->run, KOF_RTF_MAX_EXTENTS,
 		      KOF_RTF_CLS_COUNT);
 
 	/*

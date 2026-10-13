@@ -9,11 +9,11 @@
 #include <genotype/image/pe_types.h>   /* KOF_PE_PERM_* - the permission bits a declaration uses */
 
 #include "elf_rebuild.h"
+#include "elf_image.h"      /* KGENOME_ELF_PT_LOAD and the rest of the ELF words */
 
 #define EHDR64      64u
 #define PHENT64     56u
 #define SHENT64     64u
-#define PT_LOAD     1u
 
 /* Bounds on what a header may claim before it is not describing a program. */
 #define MAX_PHNUM   256u
@@ -71,7 +71,7 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 		const uint8_t *p = ph + (uint64_t)i * PHENT64;
 		uint64_t off, vaddr, fsz;
 
-		if (kof_ld_le32(p) != PT_LOAD)
+		if (kof_ld_le32(p) != KGENOME_ELF_PT_LOAD)
 			continue;
 		off   = kof_ld_le64(p + 0x08);
 		vaddr = kof_ld_le64(p + 0x10);
@@ -155,7 +155,7 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 		const uint8_t *p = ph + (uint64_t)i * PHENT64;
 		uint64_t off, vaddr, fsz;
 
-		if (kof_ld_le32(p) != PT_LOAD)
+		if (kof_ld_le32(p) != KGENOME_ELF_PT_LOAD)
 			continue;
 		off   = kof_ld_le64(p + 0x08);
 		vaddr = kof_ld_le64(p + 0x10);
@@ -213,12 +213,15 @@ no:
 
 /* ---- a header from a declared layout ------------------------------------- */
 
-uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
-			   uint16_t machine, uint64_t base,
-			   const struct kgenome_sec_decl *sec, uint32_t n,
-			   uint64_t entry_rva, int has_entry,
-			   uint64_t image_end)
+uint64_t kgenome_elf_hdr_write(const struct kgenome_elf_hdr_req *rq)
 {
+	uint8_t *out = rq->out;
+	const uint64_t cap = rq->cap, base = rq->base, entry_rva = rq->entry_rva;
+	const uint64_t image_end = rq->image_end;
+	const int is64 = rq->is64, has_entry = rq->has_entry;
+	const uint16_t machine = rq->machine;
+	const struct kgenome_sec_decl *sec = rq->sec;
+	const uint32_t n = rq->n;
 	const uint64_t eh = is64 ? 64u : 52u;
 	const uint64_t ph = is64 ? 56u : 32u;
 	uint64_t need = eh + ph;
@@ -237,11 +240,11 @@ uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 
 	for (i = 0; i < n; i++) {
 		if (sec[i].perm & KGENOME_PE_PERM_X)
-			flags |= 1u;         /* PF_X */
+			flags |= KGENOME_ELF_PF_X;
 		if (sec[i].perm & KGENOME_PE_PERM_W)
-			flags |= 2u;         /* PF_W */
+			flags |= KGENOME_ELF_PF_W;
 		if (sec[i].perm & KGENOME_PE_PERM_R)
-			flags |= 4u;         /* PF_R */
+			flags |= KGENOME_ELF_PF_R;
 	}
 	if (!flags)
 		flags = 4u;
@@ -270,7 +273,7 @@ uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 	 * a legitimately zero e_entry, so a zero entry is only anomalous where
 	 * the type promises one.
 	 */
-	kof_st_le16(out + 0x10, (uint16_t)(has_entry ? 2 : 3));  /* ET_EXEC/ET_DYN */
+	kof_st_le16(out + 0x10, (uint16_t)(has_entry ? KGENOME_ELF_EXEC : KGENOME_ELF_DYN));
 	kof_st_le16(out + 0x12, machine);
 	kof_st_le32(out + 0x14, 1);                     /* e_version   */
 
@@ -290,7 +293,7 @@ uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 
 	p = out + eh;
 	if (is64) {
-		kof_st_le32(p + 0x00, 1);                   /* PT_LOAD  */
+		kof_st_le32(p + 0x00, KGENOME_ELF_PT_LOAD);
 		kof_st_le32(p + 0x04, flags);
 		kof_st_le64(p + 0x08, 0);                   /* p_offset */
 		kof_st_le64(p + 0x10, base);                /* p_vaddr  */
@@ -299,7 +302,7 @@ uint64_t kgenome_elf_write_hdr(uint8_t *out, uint64_t cap, int is64,
 		kof_st_le64(p + 0x28, image_end);           /* p_memsz  */
 		kof_st_le64(p + 0x30, 0x1000);              /* p_align  */
 	} else {
-		kof_st_le32(p + 0x00, 1);
+		kof_st_le32(p + 0x00, KGENOME_ELF_PT_LOAD);
 		kof_st_le32(p + 0x04, 0);
 		kof_st_le32(p + 0x08, (uint32_t)base);
 		kof_st_le32(p + 0x0c, (uint32_t)base);

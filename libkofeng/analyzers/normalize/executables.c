@@ -259,7 +259,7 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out)
 /*
  * THE BASE64 PASS. See the note on kof_exe_unb64 in the header for why it is
  * here at all; what follows is why each test is the test it is, and every one
- * of those reasons was worked out in bases/decomp/cmdb64_00.c against real
+ * of those reasons was worked out in the cmdb64_00 unpacker (retired from bases/decomp) against real
  * droppers rather than reasoned out here.
  */
 
@@ -626,12 +626,17 @@ static uint64_t keep_bound(const uint8_t *keep, uint64_t n, uint64_t i)
 	return e;
 }
 
-uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
-			     const uint8_t *drop, uint32_t ops, uint8_t *out,
-			     uint64_t cap, const uint64_t *mark,
-			     uint64_t *mark_out, uint32_t n_mark,
-			     uint32_t *fired)
+uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
+			     struct kof_exe_norm_res *res)
 {
+	/* The request is read once, here: the walk below is per byte and works
+	 * from these locals exactly as it did when they were parameters. */
+	const uint8_t *in = rq->in, *keep = rq->keep, *drop = rq->drop;
+	const uint64_t n = rq->n, *mark = rq->mark;
+	const uint32_t ops = rq->ops, n_mark = rq->n_mark;
+	uint8_t *out = res->out;
+	const uint64_t cap = res->cap;
+	uint64_t *mark_out = res->mark_out;
 	uint64_t i = 0, o = 0, lim = 0;
 	uint32_t q = 0, did = 0;
 	int changed = 0;
@@ -658,8 +663,7 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 	uint32_t nm = mk ? n_mark : 0u;
 	uint64_t next_mark;
 
-	if (fired)
-		*fired = 0;
+	res->fired = 0;
 
 	if (!in || !out || !n || cap < n)
 		return 0;
@@ -857,8 +861,7 @@ uint64_t kof_exe_norm_masked(const uint8_t *in, uint64_t n, const uint8_t *keep,
 	while (q < n_mark && mark_out)
 		mark_out[q++] = o;
 
-	if (fired)
-		*fired = did;
+	res->fired = did;
 	if (!changed)
 		return 0;
 	return o;
@@ -1069,9 +1072,7 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			    p[end] != p[beg - 1u])
 				continue;
 			for (j = beg; j < end && text; j += 2u)
-				text = hex_text((uint8_t)
-						((kof_hex_val(p[j]) << 4)
-						 | kof_hex_val(p[j + 1u])));
+				text = hex_text((uint8_t)kof_hex_byte(p + j));
 			if (!text)
 				continue;
 			pend[n_pend].beg = beg;
@@ -1089,8 +1090,7 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * whole value of this rule is that it refuses those.
 		 */
 		for (j = beg; j < end && text; j += 2u)
-			text = hex_text((uint8_t)((kof_hex_val(p[j]) << 4)
-						  | kof_hex_val(p[j + 1u])));
+			text = hex_text((uint8_t)kof_hex_byte(p + j));
 		if (!text)
 			continue;
 		/* In place: the write trails the read by half, so it cannot
@@ -1319,8 +1319,7 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			    kof_hex_val(p[j + 1u]) < 0 || kof_hex_val(p[j + 2u]) < 0)
 				continue;
 			esc++;
-			text = hex_text((uint8_t)((kof_hex_val(p[j + 1u]) << 4) |
-						  kof_hex_val(p[j + 2u])));
+			text = hex_text((uint8_t)kof_hex_byte(p + j + 1u));
 			j += 2u;
 		}
 		if (!text || esc < PCT_MIN)
@@ -1330,22 +1329,11 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * for one out at every escape, one for one elsewhere - so the
 		 * output cannot overtake what has not been read.
 		 */
-		for (j = beg; j < end; j++) {
-			if (p[j] == '%' && j + 2u < end &&
-			    kof_hex_val(p[j + 1u]) >= 0 &&
-			    kof_hex_val(p[j + 2u]) >= 0) {
-				p[beg + out_n++] =
-					(uint8_t)((kof_hex_val(p[j + 1u]) << 4) |
-						  kof_hex_val(p[j + 2u]));
-				j += 2u;
-				continue;
-			}
-			/* `+` is a space in a form body, and the commands this
-			 * carries are separated by them. Left alone, the
-			 * decoded text reads "wget+http://..." and a rule
-			 * written on the plain command still misses. */
-			p[beg + out_n++] = p[j] == '+' ? (uint8_t)' ' : p[j];
-		}
+		/* Through the lib's one URL decode, LAX: a `%` without two digits
+		 * after it is an ordinary byte here, and `+` is a space - "wget+http://..."
+		 * left alone would be a command a rule written on the plain text still
+		 * misses. */
+		out_n = decode_in_place(KUNCOAT_ALGO_URL, KUNCOAT_F_LAX, p + beg, end - beg);
 		/* The vacated tail. Zeros, for the reason at the top of this
 		 * file. */
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));

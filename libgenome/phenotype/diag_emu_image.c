@@ -1,9 +1,9 @@
 /*
  * diag_emu_image.c - an image for a relocatable object, its relocations, and names read out of guest memory.
- * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_int.h for what the
+ * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_private.h for what the
  * files share.
  */
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 /*
  * ---- AN IMAGE FOR A RELOCATABLE OBJECT -----------------------------------
@@ -54,11 +54,11 @@ struct relapply { struct kgenome_emu *em; uint64_t size; };
  * IS THERE A PRINTABLE, NUL-TERMINATED NAME AT THIS OFFSET.
  *
  * A symbol name, not a string in general: short, printable, and ending. The
- * bound is what the kernel's own symbol table allows, and the floor keeps a
- * stray byte that happens to be followed by a NUL from being read as a name.
+ * bound is KGENOME_DIAG_STR_MAX, what the kernel's own symbol table allows, and
+ * the floor keeps a stray byte that happens to be followed by a NUL from being
+ * read as a name.
  */
 #define DIAG_NAME_MIN 3u
-#define DIAG_NAME_MAX 64u
 
 /*
  * ---- A C STRING OUT OF THE GUEST'S MEMORY ---------------------------------
@@ -114,7 +114,7 @@ unsigned kgenome_diag_emu_guest_name(struct kgenome_emu *em, uint64_t va, char *
 #define DIAG_NAME_OBJ_WORDS 32u
 
 /*
- * THE NAMES A CALL WAS GIVEN, kept in the scan. See kgenome_flow_name_arg for
+ * THE NAMES A CALL WAS GIVEN, kept in the scan. See kgenome_nucleo_name_arg for
  * where the vocabulary says to look; this does the looking.
  *
  * An OBJECT is read word by word and every word that points at a symbol name
@@ -125,7 +125,7 @@ unsigned kgenome_diag_emu_guest_name(struct kgenome_emu *em, uint64_t va, char *
 void kgenome_diag_emu_capture_names(struct kgenome_diag_scan *s, struct kgenome_emu *em,
 			  uint16_t cap, uint16_t node)
 {
-	unsigned arg, kind = kgenome_flow_name_arg(cap, &arg);
+	unsigned arg, kind = kgenome_nucleo_name_arg(cap, &arg);
 	uint64_t a;
 	char nm[KGENOME_DIAG_STR_MAX + 1u];
 
@@ -196,7 +196,7 @@ static int apply_reloc(void *user, uint64_t where, uint32_t type,
  * the most it may take and not for what it takes, so the ledger can refuse it
  * before it exists. Released when the emulator is freed.
  */
-uint64_t kgenome_diag_emu_emu_pages_charge(struct kgenome_diag_scan *s)
+uint64_t kgenome_diag_emu_pages_charge(struct kgenome_diag_scan *s)
 {
 	uint64_t pg = kgenome_ledger_room(&s->led) / KGENOME_EMU_PAGE;
 
@@ -212,7 +212,7 @@ uint64_t kgenome_diag_emu_emu_pages_charge(struct kgenome_diag_scan *s)
 }
 
 /* The run is over (its emulator freed): give its pages back. */
-void kgenome_diag_emu_emu_pages_release(struct kgenome_diag_scan *s)
+void kgenome_diag_emu_pages_release(struct kgenome_diag_scan *s)
 {
 	kgenome_ledger_release(&s->led, s->emu_charged);
 	s->emu_charged = 0;
@@ -223,7 +223,7 @@ void kgenome_diag_emu_emu_pages_release(struct kgenome_diag_scan *s)
 static void rel_image_fail(struct kgenome_diag_scan *s, struct kgenome_emu *em)
 {
 	kgenome_emu_free(em);
-	kgenome_diag_emu_emu_pages_release(s);
+	kgenome_diag_emu_pages_release(s);
 	kgenome_diag_note(s, KGENOME_NOMEM);
 }
 
@@ -238,7 +238,7 @@ static void rel_image_fail(struct kgenome_diag_scan *s, struct kgenome_emu *em)
  *                new page for KGENOME_EMU_IDLE instructions - KGENOME_TRUNCATED
  *   UNSUPPORTED  an instruction this build does not carry - KGENOME_UNSUPPORTED
  */
-void kgenome_diag_emu_emu_stop_status(struct kgenome_diag_scan *s, enum kgenome_emu_stop st)
+void kgenome_diag_emu_stop_status(struct kgenome_diag_scan *s, enum kgenome_emu_stop st)
 {
 	if (st == KGENOME_EMU_STOP_BUDGET)
 		kgenome_diag_note(s, KGENOME_OVER_BUDGET);
@@ -257,11 +257,11 @@ struct kgenome_emu *kgenome_diag_emu_build_rel_image(struct kgenome_diag_scan *s
 
 	memset(&cfg, 0, sizeof cfg);
 	cfg.max_insn = s->bud.max_insn;
-	cfg.max_pages = kgenome_diag_emu_emu_pages_charge(s);
+	cfg.max_pages = kgenome_diag_emu_pages_charge(s);
 	cfg.bits = obj->arch == KGENOME_ARCH_X86_64 ? 64u : 32u;
 	em = kgenome_emu_new(&cfg);
 	if (!em) {
-		kgenome_diag_emu_emu_pages_release(s);
+		kgenome_diag_emu_pages_release(s);
 		kgenome_diag_note(s, KGENOME_NOMEM);
 		return 0;
 	}

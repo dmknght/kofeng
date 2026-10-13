@@ -403,12 +403,16 @@ static int lzx_flush(struct kuncoat_lzx *s, struct lzx_out *o, uint64_t *flushed
 
 /* ---- the decode --------------------------------------------------------------- */
 
-enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s, uint32_t window_bits,
-				      const uint8_t *in, uint64_t in_len,
-				      uint64_t skip, uint64_t take,
-				      kuncoat_lzx_sink sink, void *user,
-				      uint64_t *produced)
+enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s,
+				      const struct kuncoat_lzx_req *rq,
+				      struct kuncoat_io *io)
 {
+	const uint32_t window_bits = rq->window_bits;
+	const uint8_t *in = io->in.p;
+	const uint64_t in_len = io->in.n;
+	const uint64_t skip = rq->skip, take = rq->take;
+	kuncoat_lzx_sink sink = io->sink;
+	void *user = io->user;
 	uint32_t base[51], slots;
 	uint8_t  extra[51];
 	struct lzx_out out;
@@ -417,8 +421,8 @@ enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s, uint32_t window_bi
 	uint32_t fsize = 0;          /* what the header says the file comes to */
 	int status = KUNCOAT_OK, bad = 0, intel = 0;
 
-	if (produced)
-		*produced = 0;
+	io->consumed = 0;
+	io->produced = 0;
 	if (!s || !in || !sink)
 		return KUNCOAT_CORRUPT;
 	if (window_bits < KUNCOAT_LZX_MIN_BITS || window_bits > KUNCOAT_LZX_MAX_BITS)
@@ -698,7 +702,6 @@ enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s, uint32_t window_bi
 	(void)want;
 	if (out.stopped && status == KUNCOAT_OK)
 		status = KUNCOAT_STOPPED;
-	if (produced)
-		*produced = out.given;
+	io->produced = out.given;
 	return status;
 }

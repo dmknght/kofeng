@@ -18,7 +18,7 @@
 #include <string.h>
 
 #include "x86.h"
-#include "x86_int.h"
+#include "x86_private.h"
 
 /*
  * What a first byte is, from one table per mode. P_NONE: an opcode of the one-byte
@@ -33,8 +33,6 @@ enum {
 };
 
 #define IS_PREFIX(c) ((c) != P_NONE && (c) < P_0F)
-
-#define R16(c) c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c
 
 static const uint8_t pfx32[256] = {
 	[0x26] = P_SEG, [0x2e] = P_SEG, [0x36] = P_SEG, [0x3e] = P_SEG,
@@ -167,6 +165,18 @@ static int reg_number_ok(const struct kgenome_x86_leaf *L, unsigned modrm, unsig
 enum { SPACE_LEGACY, SPACE_VEX, SPACE_XOP, SPACE_EVEX };
 
 /*
+ * WHAT THE PREFIX SCAN LEARNED, handed to decode_rest as one value. It is passed
+ * by value into a function that is always inlined, so it is scalarised and the
+ * constants of the legacy fast path still fold away - see decode_rest. `flags` and
+ * `osz` are the two a mandatory prefix rewrites inside decode_rest; the rest is
+ * read only.
+ */
+struct x86_pfx {
+	unsigned flags, rex, seg, segr, rep, pp_last, opc, rmap, osz, asel;
+	unsigned sp, vexv, xr, evex, vpp;
+};
+
+/*
  * THE DECODE FROM THE OPCODE ON - the tree walk, the leaf's checks, the length -
  * written once and instantiated twice by decode_core: for a legacy encoding, whose
  * VEX/EVEX state (vexv, xr, evex, vpp) is a constant here and folds away, and for
@@ -176,12 +186,13 @@ enum { SPACE_LEGACY, SPACE_VEX, SPACE_XOP, SPACE_EVEX };
  */
 static inline __attribute__((always_inline))
 enum kgenome_status decode_rest(struct kgenome_x86_insn *I, const uint8_t *p,
-			   const size_t lim, size_t i, unsigned flags, unsigned rex,
-			   unsigned seg, unsigned segr, unsigned rep, unsigned pp_last,
-			   unsigned opc, unsigned rmap, unsigned osz, unsigned asel,
-			   const unsigned sp, const unsigned vexv, const unsigned xr,
-			   const unsigned evex, const unsigned vpp, const int mode64)
+			   const size_t lim, size_t i, const struct x86_pfx s,
+			   const int mode64)
 {
+	unsigned flags = s.flags, osz = s.osz;
+	const unsigned rex = s.rex, seg = s.seg, segr = s.segr, rep = s.rep;
+	const unsigned pp_last = s.pp_last, opc = s.opc, rmap = s.rmap, asel = s.asel;
+	const unsigned sp = s.sp, vexv = s.vexv, xr = s.xr, evex = s.evex, vpp = s.vpp;
 	unsigned e, modrm = 0, have_modrm = 0, asz_bytes, sibv = 0;
 	const struct kgenome_x86_leaf *L;
 	const uint16_t *nodes;
@@ -568,13 +579,19 @@ ext_done:
 		osz = ((rex & 8) ? 2u : 0u) | ((flags & KGENOME_GF_X86_66) ? 1u : 0u);
 		asel = ((flags & KGENOME_GF_X86_67) ? 1u : 0u) | ((rex & 1u) ? 2u : 0u);
 		/* The legacy encoding has no VEX/EVEX state: the constants fold it away. */
-		return decode_rest(I, p, lim, i, flags, rex, seg, segr, rep, pp_last, opc,
-				   map, osz, asel, SPACE_LEGACY, 0, 0, 0, 0, mode64);
+		const struct x86_pfx s = { flags, rex, seg, segr, rep, pp_last, opc,
+					   map, osz, asel, SPACE_LEGACY, 0, 0, 0, 0 };
+
+		return decode_rest(I, p, lim, i, s, mode64);
 	}
 	rmap = sp == SPACE_VEX ? (map == 5u ? 17u : 4u + map - 1u)
 	     : sp == SPACE_XOP ? 7u + map - 8u : 10u + map - 1u;
-	return decode_rest(I, p, lim, i, flags, rex, seg, segr, rep, pp_last, opc,
-			   rmap, osz, asel, sp, vexv, xr, evex, vpp, mode64);
+	{
+		const struct x86_pfx s = { flags, rex, seg, segr, rep, pp_last, opc,
+					   rmap, osz, asel, sp, vexv, xr, evex, vpp };
+
+		return decode_rest(I, p, lim, i, s, mode64);
+	}
 }
 
 /* The full prefix scan, once per mode: the path for anything the fast path declines. */
@@ -635,8 +652,13 @@ int decode_fast(struct kgenome_x86_insn *I, const uint8_t *p, size_t n, const in
 	} else if (c != P_NONE) {
 		return DECODE_DECLINED;
 	}
-	return decode_rest(I, p, lim, i, rex ? KGENOME_GF_X86_REX : 0u, rex, 0, 0, 0, 0, opc, rmap,
-			   (rex & 8) ? 2u : 0u, (rex & 1u) ? 2u : 0u, SPACE_LEGACY, 0, 0, 0, 0, mode64);
+	{
+		const struct x86_pfx s = { rex ? KGENOME_GF_X86_REX : 0u, rex, 0, 0, 0, 0, opc, rmap,
+					   (rex & 8) ? 2u : 0u, (rex & 1u) ? 2u : 0u,
+					   SPACE_LEGACY, 0, 0, 0, 0 };
+
+		return decode_rest(I, p, lim, i, s, mode64);
+	}
 }
 
 enum kgenome_status kgenome_x86_decode(struct kgenome_x86_insn *out, const uint8_t *p, size_t n,
@@ -662,25 +684,14 @@ enum kgenome_status kgenome_x86_decode(struct kgenome_x86_insn *out, const uint8
 unsigned kgenome_x86_nops(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].nops; }
 unsigned kgenome_x86_cat(const struct kgenome_x86_insn *I)  { return kgenome_x86_leaves[I->leaf].cat; }
 unsigned kgenome_x86_cond(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].cond; }
-unsigned kgenome_x86_mand(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].mand; }
 unsigned kgenome_x86_nexp(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].nexp; }
 unsigned kgenome_x86_nform(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].nform; }
 unsigned kgenome_x86_repeated(const struct kgenome_x86_insn *I) { return (kgenome_x86_leaves[I->leaf].flags & KGENOME_GL_X86_REPEATED) != 0; }
 unsigned kgenome_x86_wgpr(const struct kgenome_x86_insn *I) { return kgenome_x86_leaves[I->leaf].wgpr; }
 
-unsigned kgenome_x86_osz(const struct kgenome_x86_insn *I)
-{
-	return I->osz;
-}
-
 unsigned kgenome_x86_asz(const struct kgenome_x86_insn *I)
 {
 	return I->asz;
-}
-
-unsigned kgenome_x86_efop(const struct kgenome_x86_insn *I)
-{
-	return kgenome_x86_tri[kgenome_x86_leaves[I->leaf].opszk][kgenome_x86_osz(I)];
 }
 
 /* ---- operands ---------------------------------------------------------------- */

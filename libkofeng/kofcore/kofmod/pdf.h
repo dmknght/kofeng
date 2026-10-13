@@ -830,11 +830,7 @@ struct kof_pdf_info {
 
 	uint32_t n_runs;
 	uint32_t reserved2;
-	struct {
-		uint64_t off, len;
-		uint32_t cls;
-		uint32_t reserved;
-	} run[KOF_PDF_MAX_EXTENTS];
+	struct kof_run run[KOF_PDF_MAX_EXTENTS];
 
 	struct kof_pdf_object object[KOF_PDF_MAX_OBJECTS];
 

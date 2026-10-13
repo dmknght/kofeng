@@ -21,13 +21,13 @@
  * heuristic first.
  */
 
-#ifndef KGENOME_EMU_UNPACK_H
-#define KGENOME_EMU_UNPACK_H
+#ifndef KGENOME_EMU_UNP_H
+#define KGENOME_EMU_UNP_H
 
 #include <genotype/image/elf_types.h>
 #include <genotype/image/pe_types.h>
 #include <genotype/image/obj.h>
-#include <phenotype/kofemu.h>
+#include <phenotype/emu.h>
 #include "../kgenome_budget.h"   /* struct kgenome_budget */
 
 /*
@@ -219,9 +219,9 @@ struct kgenome_emu *kgenome_emu_unp_build(const uint8_t *file, uint64_t n,
 /*
  * ---- THE SAME TWO JOBS, FOR A PE -----------------------------------------
  *
- * WHY THIS EXISTS AT ALL, GIVEN WHAT kofemu.h SAYS
+ * WHY THIS EXISTS AT ALL, GIVEN WHAT emu.h SAYS
  *
- * kofemu.h states the position plainly: on ELF the boundary worth stubbing is
+ * emu.h states the position plainly: on ELF the boundary worth stubbing is
  * the syscall, and "the Windows API surface that makes emulation an arms race
  * is simply not present here". That is still true and nothing below changes
  * it. What it does NOT say, and what was being read into it, is that a PE
@@ -311,9 +311,9 @@ struct kgenome_emu_oep { uint64_t rva, len; };
 /* How many allocations the assembled image can carry as sections of its own.
  * A stub makes a handful; a program that makes dozens is running, not
  * unpacking, and the rest come back as their own objects either way. */
-#define KGENOME_PE_RUN_CHUNKS 8u
+#define KGENOME_EMU_UNP_PE_RUN_CHUNKS 8u
 
-int kgenome_pe_image_from_run(struct kgenome_emu *e, const struct kgenome_pe_info *info,
+int kgenome_emu_unp_pe_image(struct kgenome_emu *e, const struct kgenome_pe_info *info,
 			  uint64_t base, uint64_t cap,
 			  uint8_t **out, uint64_t *out_len);
 
@@ -388,41 +388,53 @@ struct kgenome_emu_decl {
  * guest does when it runs - and stays here.
  */
 struct kgenome_pe_imptab;
-struct kgenome_emu *kgenome_emu_unp_run_pe(const uint8_t *file, uint64_t n,
-				   const struct kgenome_pe_info *info,
-				   const struct kgenome_pe_imptab *imports,
-				   const struct kgenome_budget *bud,
-				   uint64_t idle,
-				   /*
-				    * NON-ZERO WHEN A MODULE WANTS CONTROL BACK
-				    * AFTER the instruction budget RATHER THAN AN EXTENSION.
-				    *
-				    * emu_run_while_producing keeps going past
-				    * the budget for as long as each slice
-				    * writes a new page - which is the right
-				    * policy for an object nobody is watching,
-				    * and the wrong one for a module that wants
-				    * to LOOK at what has been decrypted and
-				    * stop when it is enough. See `emu_slice`
-				    * in kofsig.h.
-				    */
-				   int hand_back,
-				   /*
-				    * HOW MANY TIMES THE BUDGET MAY BE EXTENDED
-				    * while the guest keeps writing new pages -
-				    * KGENOME_EMU_EXTEND_MAX for a run somebody
-				    * asked for, ZERO for the engine's own
-				    * guess at an object nothing recognised.
-				    * The budget is a bound only when this is
-				    * zero: with the maximum it is the first
-				    * of nine slices, and an object that keeps
-				    * touching fresh pages is run for all of
-				    * them.
-				    */
-				   unsigned extensions,
-				   const struct kgenome_emu_oep *oep,
-				   unsigned n_oep,
-				   const struct kgenome_emu_decl *decl,
-				   struct kgenome_emu_unp_report *rep);
 
-#endif /* KGENOME_EMU_UNPACK_H */
+/*
+ * ONE RUN OF A PE, as a request: what is run, how long, what a module declared,
+ * and where the report goes. (This was twelve positional parameters; the header
+ * showed fifteen in its signature only because the comments that explain three of
+ * them sat inside the list. They are the field notes below now.)
+ */
+struct kgenome_emu_unp_pe_req {
+	/* THE IMAGE. */
+	const uint8_t                  *file;
+	uint64_t                        n;
+	const struct kgenome_pe_info   *info;
+	const struct kgenome_pe_imptab *imports;
+
+	/* HOW LONG. `bud` bounds the machine (NULL for the defaults). */
+	const struct kgenome_budget    *bud;
+	uint64_t                        idle;
+	/*
+	 * NON-ZERO WHEN A MODULE WANTS CONTROL BACK
+	 * AFTER the instruction budget RATHER THAN AN EXTENSION.
+	 *
+	 * emu_run_while_producing keeps going past the budget for as long as each
+	 * slice writes a new page - which is the right policy for an object nobody
+	 * is watching, and the wrong one for a module that wants to LOOK at what
+	 * has been decrypted and stop when it is enough. See `emu_slice` in
+	 * kofsig.h.
+	 */
+	int                             hand_back;
+	/*
+	 * HOW MANY TIMES THE BUDGET MAY BE EXTENDED while the guest keeps writing
+	 * new pages - KGENOME_EMU_EXTEND_MAX for a run somebody asked for, ZERO for
+	 * the engine's own guess at an object nothing recognised. The budget is a
+	 * bound only when this is zero: with the maximum it is the first of nine
+	 * slices, and an object that keeps touching fresh pages is run for all of
+	 * them.
+	 */
+	unsigned                        extensions;
+
+	/* WHAT A MODULE DECLARED: instructions to pause on, and the rest. */
+	const struct kgenome_emu_oep   *oep;
+	unsigned                        n_oep;
+	const struct kgenome_emu_decl  *decl;
+
+	/* THE RESULT: filled when non-NULL, zeroed first. */
+	struct kgenome_emu_unp_report  *rep;
+};
+
+struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *rq);
+
+#endif /* KGENOME_EMU_UNP_H */

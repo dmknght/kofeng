@@ -24,7 +24,7 @@
  *
  * next_proc HANDS BACK A kof_proc_build, WHICH IS NOT AN ACCIDENT.
  *
- * That struct is what libkoforbit/kofproc turns into the record the engine
+ * That struct is what libkoforbit/proc turns into the record the engine
  * scans a process as, and it is already platform-neutral with a per-platform
  * tail - see kofmod/proc.h. Handing it back directly means the walk fills the
  * thing the scanner was going to fill anyway, and there is no third struct

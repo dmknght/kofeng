@@ -91,10 +91,6 @@ struct kofrep_arena {
 	uint64_t              bytes;
 };
 
-const char *kofrep_arena_put(struct kofrep_arena *, const char *, size_t);
-const char *kofrep_arena_str(struct kofrep_arena *, const char *);
-void        kofrep_arena_free(struct kofrep_arena *);
-
 struct kof_report {
 	struct kof_report_info info;      /* strings owned by `arena` */
 	struct kofrep_arena    arena;
@@ -150,17 +146,5 @@ struct kof_report {
 	uint64_t                subject_size;
 	struct kof_fp_verdict   subject_verdict;
 };
-
-/* Make a directory and every level above it. In kofrepart.c with the other
- * filesystem work; shared because a host wants it BEFORE the run - see
- * kof_report_mkpath. */
-int kofrep_ensure_dir(const char *path);
-
-/* Find an existing fingerprint, or NULL. The finish phase needs this to hang
- * bytes and verdicts on what the feed phase recorded, and must never create
- * one: a fingerprint that exists only because somebody looked for it is a
- * report of the report. */
-struct kof_fingerprint *kofrep_find(struct kof_report *, uint8_t kind,
-				    const char *text);
 
 #endif /* KOFREPINT_H */

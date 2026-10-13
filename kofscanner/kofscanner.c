@@ -30,1002 +30,7 @@
 #define _GNU_SOURCE
 #endif
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <unistd.h>
-#include <time.h>
-#include <signal.h>
-
-#include "../libkofeng/kofeng.h"
-#include "../libkofeng/kofcore/kofdebug.h"
-#include "../libkofeng/kofcore/kofplatform.h"
-/* kof_hash_bytes - the engine's one FNV, see kofcore.h. */
-#include "../libkofeng/kofcore/kofcore.h"
-
-/*
- * SCANNING WHAT IS RUNNING, on the platform that has a collector for it.
- *
- * libkoforbit/antarc is the Linux collector and builds only there, the way
- * libkoforbit/grille builds only for Windows. The scan itself is the same scan - see
- * scan_procs below - so what is guarded is the collector, not the idea.
- */
-/*
- * THE PROCESS WALK IS A CONTRACT, NOT A PLATFORM. kof_walk_open is declared
- * once and defined by whichever collector this host links - libkoforbit/antarc on
- * Linux, libkoforbit/grille on Windows. Nothing in this file is #ifdef'd for it.
- */
-#include "kofwalk.h"
-#include "kofproc.h"
-#include "koffridge.h"
-#include "fidset.h"
-
-#include <kofmod/proc.h>
-
-/*
- * COLOUR, and only when the output is a terminal.
- *
- * A pipe, a log or a grep must get the bytes it always did, so every escape goes
- * through col(): it returns the sequence when stdout is a tty and an empty string
- * otherwise, which is the same rule progress already applies to stderr. The codes
- * are chosen so the verdict reads at a glance - red is the one that stops a
- * release, green the one that does not.
- */
-#define C_RED "\033[1;31m"      /* INFECTED  */
-#define C_YEL "\033[1;33m"      /* SUSPECT   */
-#define C_MAG "\033[1;35m"      /* HEURISTIC */
-#define C_CYN "\033[36m"        /* BROKEN    */
-#define C_GRN "\033[32m"        /* OK        */
-#define C_DIM "\033[2m"         /* secondary context */
-#define C_BLD "\033[1m"         /* a neutral number worth the eye */
-#define C_RST "\033[0m"
-
-/*
- * ONE VERDICT PER TOP-LEVEL FILE, rolled up from every object inside it.
- *
- * A packed or carrying file is scanned as a tree - the file, then whatever the
- * unpackers made of it - and the malware is usually in a child, not the root. So
- * the root on its own comes back clean, and reporting THAT as the file's verdict
- * calls an infected file clean. The fix is to key a verdict by the top-level file
- * (the name up to the first "//") and keep the WORST thing found anywhere in its
- * tree; the child's finding still prints in full, but the file it came in is what
- * is counted.
- *
- * A small open-addressed map, because the callback is serialised (even under
- * --jobs) and the objects of one file need not arrive together, so a running
- * "current file" cannot be trusted - two files' objects interleave. Keyed by the
- * file name, valued by the worst level seen (-1 for none), the broken reason, and
- * the finding text to show.
- */
-struct fent {
-	char    *file;
-	int      level;          /* worst KOF_LEVEL_*, or -1 */
-	uint32_t broken;         /* worst kof_broken reason, or 0 */
-	/*
-	 * Whether ANY module ran on any object of this file.
-	 *
-	 * A file every applicable module cleared and a file nothing was
-	 * eligible for are both "no findings", and reporting them the same way
-	 * is the mistake `broken` was added to avoid in its own case. A
-	 * formatless blob - a payload lifted out of a variable, a decoder's
-	 * output - matches no module's declared target, so the prefilter
-	 * excludes all of them and the object comes back looking clean.
-	 *
-	 * Rolled up as an OR across the file's objects: a container whose
-	 * members were examined has been examined, even if the container's own
-	 * bytes matched nothing.
-	 */
-	int      examined;
-	char     name[224];      /* the worst finding's composed name */
-	/*
-	 * WHICH KIND of heuristic it was: "Shellcode" for a rule that recognised
-	 * a shape, "Truncated" and the like for the scored model. The summary
-	 * breaks its count down by this, because "broken structure" is true of
-	 * the second and wrong about the first.
-	 *
-	 * Taken from the finding the engine handed over, which carries its own
-	 * parts. This file used to walk the composed name for the '!' and then
-	 * the '#' to find the same word again.
-	 */
-	char     kind[48];
-	/*
-	 * Whether -v has already printed this file's line.
-	 *
-	 * The verdict is streamed as each file finishes rather than listed at
-	 * the end, so the flag is what stops the sweep at exit from saying it
-	 * twice - and what lets that sweep still catch anything streaming did
-	 * not reach.
-	 */
-	int      said;
-};
-
-struct fmap {
-	struct fent *arr;        /* entries in first-seen order, for -v listing */
-	size_t       n, cap;
-	uint32_t    *idx;        /* open-addressed: (arr index + 1), 0 = empty */
-	size_t       icap;       /* a power of two */
-};
-
-struct run {
-	/* No object counter: the engine already keeps one, and a second copy is a
-	 * second thing that can disagree with it. */
-	uint64_t dropped;
-	uint64_t by_reason[KOF_BROKEN_COUNT];
-	/* Files a rule repaired. Counted here rather than derived from
-	 * `files` because a verdict says what a file WAS, not what was done
-	 * about it - a repaired file is still reported infected. */
-	uint64_t repaired;
-	/* Files the clean set answered for, counted where the skip happens
-	 * so the progress line can say so. kof_stats counts them too, but
-	 * that arrives at the END of the scan and this is needed during
-	 * it. */
-	uint64_t cached_seen;
-	/* The tail of the path currently on the progress line. Kept so the
-	 * line can be painted again after a finding was printed over it -
-	 * see progress_restore. */
-	char     last[64];
-	int verbose;
-	int stats;
-	int color;               /* stdout is a terminal */
-
-	/* Every top-level file's rolled-up verdict, and how many files there were.
-	 * The counts printed at the end are derived from these, so a file with an
-	 * infected child is one infected file and not one clean plus one infected. */
-	struct fmap files;
-	uint64_t    files_total;
-
-	/*
-	 * HOW MANY OBJECTS CAME BACK WITH SOMETHING ON THEM.
-	 *
-	 * Not a statistic - it is what lets a caller that hands work to
-	 * kscan_path find out afterwards whether that work found anything.
-	 * The callback reports findings and the call itself returns nothing
-	 * about them, so without this a caller can only assume, and ps_file
-	 * assumed clean.
-	 */
-	uint64_t    found_objects;
-
-	/*
-	 * THE WORST THING THE CURRENT FILE TURNED OUT TO BE, so it can be
-	 * written into the cache.
-	 *
-	 * Kept here rather than read back out of `files` after the scan,
-	 * because fmap_get CREATES the entry it does not find - asking it about
-	 * a clean file would invent one and the summary counts it. A caller
-	 * that needs the answer has to be told it, not go looking.
-	 *
-	 * Reset by whoever is about to scan; `last_level` is -1 for nothing.
-	 */
-	int         last_level;
-	uint32_t    last_broken;
-	uint32_t    last_findings;
-	char        last_name[224];
-
-	/*
-	 * THE FILE -v IS STILL WAITING ON, so a clean one is reported when it
-	 * finishes instead of when the whole scan does.
-	 *
-	 * Findings print the moment they are found; clean files used to be
-	 * listed only at exit. On a tree where most files are clean that is a
-	 * long silence between the last finding and the summary - on 4698
-	 * files here, twenty seconds of a scanner that looks stopped. It is
-	 * also the wrong shape for a pipe, where a reader wants the answer for
-	 * a file when that file is done.
-	 *
-	 * WHY A SINGLE NAME IS ENOUGH, AND ONLY AT --jobs 1. The callback is
-	 * serialised, and with one thread the walk finishes a file's whole
-	 * object tree before it starts the next - so a name different from
-	 * this one means the previous file is complete. With more threads the
-	 * objects of two files interleave (see the note on fmap) and a name
-	 * change proves nothing, so streaming is off and the sweep at exit
-	 * does the work it always did.
-	 */
-	char        cur_file[512];
-	size_t      cur_len;
-	int         stream_v;        /* -v may report as it goes */
-
-	/*
-	 * The progress line: how many objects have gone by, when it was last
-	 * drawn, and whether to draw it at all.
-	 *
-	 * A count kept here rather than read from the engine's stats, which is
-	 * the one place this file otherwise refuses to keep its own: the stats
-	 * belong to a scanner, and with several scanners there is no single one
-	 * to ask while the walk is still running. This counts callbacks, which is
-	 * the same thing seen from where it can actually be seen.
-	 */
-	int      progress;
-	uint64_t seen;
-	double   drawn_at;
-	int      drawn;          /* something is on the line, and must be erased */
-
-	/*
-	 * THE ENGINE, held only to turn a diagnose id back into its name.
-	 *
-	 * A result carries ids, because an id is what a rule names a diagnose
-	 * by and so an id is what travels; the name exists for a person to
-	 * read and lives in the database. Keeping a copy of the table here
-	 * would be a second carrier for one fact, and it would be the one that
-	 * is stale after a database reload - so the engine is asked.
-	 */
-	const kof_engine *eng;
-};
-
-/* The escape when stdout is a terminal, nothing otherwise. */
-static const char *col(const struct run *r, const char *c)
-{
-	return r->color ? c : "";
-}
-
-
-/* The colour a level speaks in. */
-/*
- * ONE COLUMN, AND WHAT GOES IN IT.
- *
- * The line was "<LEVEL>  <path>: <name>", which spent its widest, first and
- * most-read column on the least specific thing it knew. A reader scanning a
- * page of results wants the finding, and the level is already in the colour it
- * is printed in - so the name takes the column and the level is what colours
- * it. "INFECTED ... : ELF-x64/Botnet:Mirai#el7jd" said the same thing twice.
- *
- * Everything printed per object follows that rule: the most specific thing
- * known goes first, coloured by how strongly it is meant. Where there is
- * nothing more specific - a file that came back clean - the status word stays,
- * because it IS the whole of what is known.
- *
- * The width fits the common detection name (31 of the 55 characters the longest
- * in this corpus runs to) so paths line up for most rows; a longer one pushes
- * its path right rather than being cut.
- */
-#define W_TAG 31
-
-static const char *level_col(uint32_t level)
-{
-	if (level == KOF_LEVEL_INFECT)
-		return C_RED;
-	return level == KOF_LEVEL_HEUR ? C_MAG : C_YEL;
-}
-
-
-
-/* ---- the per-file verdict map --------------------------------------------- */
-
-/*
- * THE ENGINE'S OWN FNV, NOT A SECOND ONE.
- *
- * This was a private copy of kof_hash_bytes - same prime, same seed, same
- * loop - in a file that already includes the header holding it. kofcore.h says
- * that function exists so a name can be hashed in one place; a copy here made
- * that claim false and gave a second thing to keep in step.
- */
-#define fnv_n(s, n) kof_hash_bytes((s), (uint64_t)(n))
-
-/* Find the top-level file's entry, creating it if new. `file` is a substring of a
- * longer name and is `flen` bytes, not NUL-terminated. NULL only on OOM. */
-static struct fent *fmap_get(struct fmap *m, const char *file, size_t flen)
-{
-	uint32_t h, slot;
-
-	/* Grow the index when it is half full, so probe chains stay short. */
-	if (m->n * 2u >= m->icap) {
-		size_t nc = m->icap ? m->icap * 2u : 256u;
-		uint32_t *ni = calloc(nc, sizeof *ni);
-		size_t i;
-
-		if (!ni)
-			return NULL;
-		for (i = 0; i < m->n; i++) {
-			uint32_t s = fnv_n(m->arr[i].file,
-					   strlen(m->arr[i].file)) &
-				     (uint32_t)(nc - 1u);
-
-			while (ni[s])
-				s = (s + 1u) & (uint32_t)(nc - 1u);
-			ni[s] = (uint32_t)(i + 1u);
-		}
-		free(m->idx);
-		m->idx = ni;
-		m->icap = nc;
-	}
-
-	h = fnv_n(file, flen) & (uint32_t)(m->icap - 1u);
-	for (slot = h; m->idx[slot]; slot = (slot + 1u) & (uint32_t)(m->icap - 1u)) {
-		struct fent *e = &m->arr[m->idx[slot] - 1u];
-
-		if (strlen(e->file) == flen && !memcmp(e->file, file, flen))
-			return e;
-	}
-
-	/* New file: append an entry and point the slot at it. */
-	if (m->n == m->cap) {
-		size_t nc = m->cap ? m->cap * 2u : 128u;
-		struct fent *na = realloc(m->arr, nc * sizeof *na);
-
-		if (!na)
-			return NULL;
-		m->arr = na;
-		m->cap = nc;
-	}
-	{
-		struct fent *e = &m->arr[m->n];
-
-		e->file = malloc(flen + 1u);
-		if (!e->file)
-			return NULL;
-		memcpy(e->file, file, flen);
-		e->file[flen] = 0;
-		e->level = -1;
-		e->broken = 0;
-		e->examined = 0;
-		e->name[0] = 0;
-		e->kind[0] = 0;
-		/* The array is realloc'd, never zeroed, so every field is set
-		 * here or it is whatever the allocator left behind. */
-		e->said = 0;
-		m->idx[slot] = (uint32_t)(m->n + 1u);
-		m->n++;
-		return e;
-	}
-}
-
-static void fmap_free(struct fmap *m)
-{
-	size_t i;
-
-	for (i = 0; i < m->n; i++)
-		free(m->arr[i].file);
-	free(m->arr);
-	free(m->idx);
-}
-
-
-/*
- * Called once per object the engine scanned, findings or not.
- *
- * Returning zero always: this scanner reports everything and stops for nothing. A
- * different caller - an on-access hook that only needs to know whether to block -
- * returns non-zero at the first finding and the engine abandons the rest of the tree.
- */
-/*
- * WHERE THE TIME GOES WHEN NOTHING IS FOUND.
- *
- * A scan prints a line per finding, so a subtree with no findings prints
- * nothing at all - and a person watching cannot tell that from a scan that has
- * stopped. Measured on this collection: 1 282 files across five directories
- * yield no finding between them, which is four seconds of silence in the middle
- * of a run, and every report of "it hangs at file X" has been that silence
- * ending at X rather than anything about X.
- *
- * On stderr and only when stderr is a terminal, so a redirect, a pipe or a log
- * gets exactly the bytes it always did. Rate limited to ten a second, because
- * the point is to show that time is passing and not to spend it: at 60 000
- * objects an unlimited version would draw more often than a terminal can scroll.
- */
-#define PROGRESS_HZ 10.0
-
-/*
- * CTRL-C STOPS THE SCAN; IT DOES NOT THROW AWAY WHAT THE SCAN FOUND.
- *
- * Without a handler the default action kills the process, and everything the
- * sweep had already established - which files were infected, how many were
- * cached, what was repaired - went with it. A person who interrupts a long
- * scan is almost always interrupting it BECAUSE of something they saw, and
- * answering that with nothing is the worst moment to have nothing to say.
- *
- * A flag and nothing else. The handler may not print, allocate or touch the
- * run: the callback checks the flag and returns non-zero, which is the walk's
- * own documented way to be abandoned - "Return non-zero to abandon the walk."
- * So the scan unwinds through its ordinary path, the mappings are released,
- * and main goes on to the summary it would have printed anyway.
- *
- * volatile sig_atomic_t because that is the only thing a handler may write.
- */
-static volatile sig_atomic_t g_interrupted;
-
-static void on_interrupt(int sig)
-{
-	(void)sig;
-	g_interrupted = 1;
-}
-
-/*
- * THE ENGINE'S OWN WAY OUT, asked between modules and between files.
- *
- * The callback abandons the walk at the next OBJECT, which on a tree of
- * ordinary files is immediate and on one large shared object is not: measured
- * on /usr/lib, 150 to 456 ms between the key and the exit. This is the same
- * answer given where the time is spent - see should_stop in kofeng.h.
- *
- * Reads one volatile flag and nothing else, which is what that contract asks
- * for: it runs on a hot path and from every worker thread at once.
- */
-static int scan_should_stop(void *user)
-{
-	(void)user;
-	return g_interrupted;
-}
-
-static double now_s(void)
-{
-	struct timespec t;
-
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
-}
-
-/*
- * THE LINE ITSELF, from what the run already knows.
- *
- * Split out of progress_draw so that restoring the line after a finding was
- * printed over it paints exactly what was there rather than an approximation
- * of it - and so the two can never disagree about the format.
- */
-static void progress_paint(struct run *r)
-{
-	/*
-	 * THE CACHED COUNT IS ON THE LINE, AND ONLY WHEN THERE IS ONE.
-	 *
-	 * Without it a sweep of a tree the cache already answers for reads
-	 * "1 object(s)" for minutes - true, and useless, because the number
-	 * that is moving is the one not shown. With it the reader can tell a
-	 * scan that is working from one that is skipping, which is the
-	 * difference between waiting and worrying.
-	 */
-	if (r->cached_seen)
-		fprintf(stderr, "\r\033[K  %llu object(s)  %llu cached  %s",
-			(unsigned long long)r->seen,
-			(unsigned long long)r->cached_seen, r->last);
-	else
-		fprintf(stderr, "\r\033[K  %llu object(s)  %s",
-			(unsigned long long)r->seen, r->last);
-	fflush(stderr);
-	r->drawn = 1;
-}
-
-static void progress_draw(struct run *r, const char *name)
-{
-	double now;
-	const char *tail;
-	size_t n;
-
-	if (!r->progress)
-		return;
-	r->seen++;
-	now = now_s();
-	if (r->drawn && now - r->drawn_at < 1.0 / PROGRESS_HZ)
-		return;
-	r->drawn_at = now;
-
-	/*
-	 * The last two path components, THEN whatever object of the file this
-	 * is: a full path wraps and a bare basename does not say which subtree
-	 * the scan is in, which is the one thing somebody watching wants.
-	 *
-	 * THE SEARCH STOPS AT THE FILE, and that is the whole of the fix. An
-	 * object is named "<file>//<n>", so scanning the WHOLE name for
-	 * slashes finds the two that spell "//" and cuts between them: while
-	 * unpacking one sample this line read
-	 *
-	 *     4850 object(s)  /0
-	 *
-	 * where it should have read "new_Mirai/Mozi.m.48//0". The name was
-	 * there and the progress line threw it away, so a scan working
-	 * through a container looked like a scan stuck on nothing.
-	 *
-	 * kobj_toplevel_len is the same split the rest of this file uses to
-	 * key a verdict by its file - see fmap.
-	 */
-	{
-		size_t flen = kobj_toplevel_len(name);
-		const char *p1 = NULL, *p2 = NULL;
-		size_t i;
-
-		for (i = 0; i < flen; i++)
-			if (name[i] == '/') { p2 = p1; p1 = name + i; }
-		if (p2)
-			tail = p2 + 1;
-		else if (p1)
-			tail = p1 + 1;
-		else
-			tail = name;
-	}
-	n = strlen(tail);
-	if (n > 48)
-		tail += n - 48;
-	snprintf(r->last, sizeof r->last, "%s", tail);
-	progress_paint(r);
-}
-
-/* Take the line back before anything else writes, so a finding is never printed
- * onto a half-erased progress line. */
-static void progress_clear(struct run *r)
-{
-	if (r->progress && r->drawn) {
-		fprintf(stderr, "\r\033[K");
-		fflush(stderr);
-		r->drawn = 0;
-	}
-}
-
-/*
- * PUT IT BACK AFTER SOMETHING WAS PRINTED OVER IT.
- *
- * progress_clear takes the line away so a finding can be written, and until
- * now nothing brought it back: the next draw was the one at the top of the
- * next object, and that one is rate limited to PROGRESS_HZ. On a scan where
- * every file reports - a tree of infected files, which is exactly when a
- * reader is watching - the line was erased on every object and redrawn on
- * almost none, so it was simply never there. Reported as the repair line
- * "erasing" the progress bar; any finding did it, the repair line just made
- * it happen on every file.
- *
- * The rate limit is left alone rather than reset. This does not COUNT
- * anything - seen is not touched - it only paints the line that already
- * belongs on screen, so it cannot make the line move faster than the draws
- * that do count.
- */
-static void progress_restore(struct run *r)
-{
-	if (r->progress && !r->drawn && r->seen)
-		progress_paint(r);
-}
-
-/*
- * ONE TAGGED LINE, WHICH IS EVERY LINE THIS TOOL PRINTS ABOUT AN OBJECT.
- *
- * A coloured tag in a fixed column, then the name. Six places wrote that
- * printf, and they agreed - but taking the progress line back first was NOT
- * in any of them: it was done once, at the top of on_object, under a condition
- * that named the findings. The repair line prints later and from a different
- * branch, so it was the one that could land on a progress line nobody had
- * cleared.
- *
- * The clear belongs with the print because it is the same act: write over the
- * line, having first taken it away. Kept apart, the next line added will be
- * apart too, and the fault comes back under a different name.
- */
-static void say(struct run *r, const char *colour, const char *tag,
-		const char *name)
-{
-	progress_clear(r);
-	printf("%s%-*s%s %s\n", col(r, colour), W_TAG, tag,
-	       col(r, C_RST), name);
-}
-
-/*
- * Report one finished file under -v, once.
- *
- * Only the clean verdict is streamed here: a finding has already printed in
- * full where it was found, and an unexamined file is reported unconditionally
- * by the sweep at exit - see the note there for why "OK" would be a lie.
- */
-/*
- * A VERDICT, FROM THE ENGINE, ALREADY COMPOSED - see kof_on_event_detected.
- *
- * All this tool does with it is put it on the screen. It does not choose
- * which findings count, does not compose a name and does not know the form
- * of one: the engine decided and decoded, and a second tool asking the same
- * engine gets the same line.
- */
-static void on_event_detected(const char *object, const char *verdict,
-		       const struct kof_finding *f, void *user)
-{
-	struct run *r = user;
-
-	if (r && object && verdict)
-		say(r, level_col(f ? f->level : 0u), verdict, object);
-}
-
-static void v_say_file(struct run *r, const char *file, size_t flen)
-{
-	struct fent *e;
-
-	if (!r->verbose || !flen)
-		return;
-	e = fmap_get(&r->files, file, flen);
-	if (!e || e->said)
-		return;
-	if (e->level < 0 && !e->broken && e->examined) {
-		e->said = 1;
-		say(r, C_GRN, "OK", e->file);
-	}
-}
-
-/* The file the callback was on has ended: report it, and remember the new one. */
-static void v_file_turn(struct run *r, const char *name, size_t flen)
-{
-	if (!r->stream_v)
-		return;
-	if (r->cur_len &&
-	    (flen != r->cur_len || memcmp(name, r->cur_file, flen) != 0))
-		v_say_file(r, r->cur_file, r->cur_len);
-	if (flen && flen < sizeof r->cur_file &&
-	    (flen != r->cur_len || memcmp(name, r->cur_file, flen) != 0)) {
-		memcpy(r->cur_file, name, flen);
-		r->cur_file[flen] = '\0';
-		r->cur_len = flen;
-	}
-}
-
-/*
- * Apply a described repair to the file it was described against.
- *
- * IN PLACE AND IN ORDER: the patches first, then the length. Opening for
- * update rather than rewriting means a file that cannot be written is left
- * exactly as it was rather than half replaced.
- *
- * NO BACKUP IS TAKEN HERE. Whether the original is worth keeping is a policy
- * question with a different answer in a lab and on a mail gateway, and
- * guessing it in a scanner would be answering it for everybody.
- */
-static int repair_apply(const char *path, const struct kof_repair *rp)
-{
-	/*
-	 * kof_fopen_rw AND kof_fseek64, NOT fopen AND fseek.
-	 *
-	 * The opener refuses to follow a link: this file was identified by
-	 * scanning THIS file, and if the name now points somewhere else the
-	 * answer is to fail rather than to repair whatever it points at.
-	 *
-	 * The seek is sixty-four bit. `fseek` takes a long, this offset is a
-	 * uint64, and on mingw-w64 a long is thirty-two bits - so the cast that
-	 * used to be here wrapped, and a wrapped offset does not fail, it puts
-	 * the sixteen bytes of a repair somewhere else in the user's file. The
-	 * scanner maps a top level file whole however large it is, and
-	 * kcure_patch bounds the offset by the OBJECT, so the offset really
-	 * can pass 4 GB.
-	 */
-	FILE *f = kof_fopen_rw(path);
-	uint32_t i;
-	int ok = 1;
-
-	if (!f)
-		return 0;
-	for (i = 0; i < rp->n_fix && ok; i++) {
-		if (!kof_fseek64(f, rp->fix[i].off) ||
-		    fwrite(rp->fix[i].b, 1, rp->fix[i].n, f) != rp->fix[i].n)
-			ok = 0;
-	}
-	if (fclose(f) != 0)
-		ok = 0;
-	if (ok && rp->truncate)
-		ok = kof_truncate_file(path, rp->truncate);
-	return ok;
-}
-
-static int on_object(const char *name, const void *bytes, uint64_t len,
-		     const struct kof_result *res, void *user)
-{
-	struct run *r = user;
-	uint32_t i;
-	int worst = -1;
-	const char *worst_name = NULL;
-	const struct kof_finding *worst_f = NULL;
-	size_t flen = kobj_toplevel_len(name);
-
-	(void)bytes;
-	(void)len;
-
-	progress_draw(r, name);
-	/*
-	 * NO CLEAR HERE ANY MORE - say() does it.
-	 *
-	 * This used to take the progress line back for anything that was about
-	 * to print, and the condition had to name every branch below that
-	 * prints. It named the findings, the broken reason and the dropped
-	 * count; it did not name the repair, which prints from a branch added
-	 * later. So a repair could land on a progress line still on screen.
-	 *
-	 * A condition that has to be kept in step with the code under it is a
-	 * condition that will fall out of step. The clear now happens where the
-	 * printing happens, so there is nothing to keep in step.
-	 *
-	 * It also costs nothing when nothing prints: a clean object still
-	 * leaves the line alone, which is what the rate limit is protecting.
-	 */
-
-	/* Each top-level FILE counted once, and a root object is the one whose
-	 * name carries no "//" - the separator the engine puts between a parent
-	 * and the objects it produced. */
-	if (flen == strlen(name))
-		r->files_total++;
-
-	/* Counted at every level, not only at a root: a finding on a child is
-	 * still a finding this scan produced, and the file that carried it must
-	 * not be remembered as clean. */
-	if (res->n)
-		r->found_objects++;
-
-	/*
-	 * AND REMEMBERED, so the cache can be told what this file IS rather
-	 * than only that it was not clean. Accumulated across the whole file
-	 * including its children - a finding three layers down is what that
-	 * file is, which is the same roll-up the summary does.
-	 */
-	r->last_findings += res->n;
-	if (res->broken && !r->last_broken)
-		r->last_broken = res->broken;
-
-	/*
-	 * The findings, in full, at the object that carries them - a child three
-	 * layers down still prints with its own "//"-joined name, so a reader sees
-	 * exactly where in the file it is. The worst of them is what the file rolls
-	 * up to.
-	 */
-	for (i = 0; i < res->n; i++) {
-		uint32_t lv = res->v[i].level;
-
-		/*
-		 * NOT PRINTED HERE ANY MORE - see on_event_detected below. The
-		 * engine composes a verdict and hands it over; this loop is
-		 * left with the file-level roll-up, which is a summary this
-		 * tool is presenting and not a decision about what counts.
-		 */
-		/*
-		 * Ranked, not compared as numbers: KOF_LEVEL_HEUR is 2 and INFECT
-		 * is 1, so ">" on the values alone would let a heuristic outrank a
-		 * named detection. The order a level speaks in is its own fact.
-		 */
-		if (kverdict_level_rank((uint32_t)(int)lv) > kverdict_level_rank((uint32_t)worst)) {
-			worst = (int)lv;
-			worst_name = res->v[i].name;
-			worst_f = &res->v[i];
-		}
-	}
-
-
-	/*
-	 * AND THE REPAIR, WHICH IS NOT A SEPARATE DECISION.
-	 *
-	 * CURE IS WHAT DETECTION MEANS HERE, not a second thing an operator
-	 * opts into. A rule that carries a kof_cure has said what the damage
-	 * is and how to undo it; the engine ran that cure only because the
-	 * rule REPORTED - see the gate in scan.c, which needs rep_valid and
-	 * cure_have together - so by the time a repair exists, the question
-	 * "is this file infected" has already been answered yes by the rule
-	 * that also knows the answer to "what did it change".
-	 *
-	 * This used to sit behind --cure, on the reasoning that a scanner
-	 * which rewrites what it finds cannot be run twice. That reasoning
-	 * describes a scanner that GUESSES. This one does not: the repair is
-	 * two numbers a rule read out of the file being repaired, the host
-	 * refuses any request that does not fit the object, and the file is
-	 * still REPORTED as infected afterwards - the verdict is not softened
-	 * by having been acted on.
-	 *
-	 * ONLY AT THE TOP LEVEL. A repair is described against the OBJECT the
-	 * module saw, and for a child that is bytes the engine produced in
-	 * memory, not a file on disk - there is nothing to write it back to.
-	 */
-	if (res->repair.n_fix && flen == strlen(name)) {
-		uint32_t q;
-		int done = repair_apply(name, &res->repair);
-
-		/*
-		 * GREEN, AND CAPITALISED, BECAUSE IT IS ADDRESSED TO A PERSON.
-		 *
-		 * Every other tag on this column is the verdict, and the verdict
-		 * speaks in the colour of its level - red for infected and so on.
-		 * This one is not a verdict, it is the only line in the output
-		 * that says the scanner CHANGED something, and the reader wants
-		 * to find it at a glance among the red. Green says it went well;
-		 * a repair that could not be written stays red, because that is
-		 * a file still infected and still needing a hand.
-		 */
-		if (done)
-			r->repaired++;
-		say(r, done ? C_GRN : C_RED,
-		    done ? "  Repaired" : "  NOT repaired", name);
-		/*
-		 * AND THE BYTES ONLY UNDER -v.
-		 *
-		 * "four bytes at 24" is for somebody checking the repair against
-		 * the rule that described it, which is a thing done once while
-		 * writing the rule and never during a sweep. On a run that cures
-		 * a hundred files it is three hundred lines between the reader
-		 * and the summary.
-		 */
-		if (r->verbose) {
-			for (q = 0; q < res->repair.n_fix; q++)
-				printf("             %llu bytes at %llu\n",
-				       (unsigned long long)res->repair.fix[q].n,
-				       (unsigned long long)res->repair.fix[q].off);
-			if (res->repair.truncate)
-				printf("             ends at %llu\n",
-				       (unsigned long long)res->repair.truncate);
-		}
-		if (!done)
-			printf("             could not be written\n");
-	}
-
-	/*
-	 * AND WHERE THE INFECTION IS, when a rule said so - see
-	 * `struct kof_infected`.
-	 *
-	 * NOT UNDER THE REPAIR, and not conditional on one. A rule may locate a
-	 * family's body without being able to put the host back, and that is
-	 * exactly the case where a reader most wants to be told where it is.
-	 * Printed under -v for the same reason the repair's byte counts are:
-	 * it is for somebody checking a rule, not for a sweep.
-	 */
-	if (r->verbose && res->n_infected) {
-		uint32_t q;
-
-		for (q = 0; q < res->n_infected; q++)
-			printf("  %-9s %llu bytes at %llu\n",
-			       res->infected[q].kind == KOF_INF_BODY
-			       ? "Infection" : "Damage",
-			       (unsigned long long)res->infected[q].len,
-			       (unsigned long long)res->infected[q].off);
-	}
-
-	/*
-	 * BROKEN is secondary to a finding, not a second verdict beside it.
-	 *
-	 * A context-keyed encoder comes back both as a rule's Heur:Shellcode and,
-	 * from the unpacker that could not read its key, as "the content is
-	 * encrypted". Those are one thing said twice: the finding is the answer,
-	 * the encryption is only why nothing further could be read - so with a
-	 * finding present it is shown under -v and nowhere else. With no finding it
-	 * IS the verdict and always prints. The reason is still tallied either way.
-	 */
-	if (res->broken) {
-		if (res->broken < KOF_BROKEN_COUNT)
-			r->by_reason[res->broken]++;
-		if (res->n == 0 || r->verbose)
-			say(r, C_CYN, kverdict_broken_name(res->broken), name);
-	}
-
-	/*
-	 * Roll this object's verdict up into its top-level file. Non-clean objects
-	 * always get an entry so the file is counted; a clean object touches one
-	 * only under -v, where every file is listed at the end whatever it turned
-	 * out to be.
-	 *
-	 * AN UNEXAMINED OBJECT ALWAYS GETS ONE TOO, for the same reason a broken
-	 * one does: it is not clean. Without this it had no entry outside -v, so
-	 * the SKIPPED line below had nothing to iterate and the file vanished
-	 * into the clean count by subtraction - which is exactly the silence
-	 * being fixed.
-	 */
-	if (worst >= 0 &&
-	    (r->last_level < 0 ||
-	     kverdict_level_rank((uint32_t)worst) >
-		     kverdict_level_rank((uint32_t)r->last_level))) {
-		r->last_level = worst;
-		snprintf(r->last_name, sizeof r->last_name, "%s",
-			 worst_name ? worst_name : "");
-	}
-
-	if (res->n || res->broken || !res->examined || r->verbose) {
-		struct fent *e = fmap_get(&r->files, name, flen);
-
-		if (e) {
-			if (worst >= 0 && kverdict_level_rank((uint32_t)worst) > kverdict_level_rank((uint32_t)e->level)) {
-				const struct kof_name_span *k;
-
-				e->level = worst;
-				snprintf(e->name, sizeof e->name, "%s",
-					 worst_name ? worst_name : "");
-				/*
-				 * The shape when the rule offered one, the
-				 * family when it did not - the same choice as
-				 * before, made on the engine's spans rather
-				 * than on the punctuation between them.
-				 */
-				e->kind[0] = 0;
-				if (worst_f && kverdict_is_heur(worst_f)) {
-					k = worst_f->shape.n ? &worst_f->shape
-							     : &worst_f->family;
-					snprintf(e->kind, sizeof e->kind,
-						 "%.*s", (int)k->n,
-						 worst_f->name + k->at);
-				}
-			}
-			if (res->broken && !e->broken)
-				e->broken = res->broken;
-			if (res->examined)
-				e->examined = 1;
-		}
-	}
-
-	/* This object's verdict is in the file's entry now, so a change of file
-	 * means the previous one is finished - see run.cur_file. */
-	v_file_turn(r, name, flen);
-
-	if (res->dropped) {
-		char tag[48];
-
-		snprintf(tag, sizeof tag, "+%u finding(s) not reported",
-			 res->dropped);
-		say(r, C_DIM, tag, name);
-		r->dropped += res->dropped;
-	}
-
-	/*
-	 * PUT THE PROGRESS LINE BACK, and stop here if the reader asked.
-	 *
-	 * The restore is a no-op unless something above cleared the line, so a
-	 * clean object pays a branch. See progress_restore for why the next
-	 * object's draw was not enough.
-	 */
-	progress_restore(r);
-	if (g_interrupted) {
-		progress_clear(r);
-		/*
-		 * Non-zero abandons the walk - kofeng.h's own words - so the
-		 * scan unwinds normally and main prints the summary for what
-		 * it managed to look at. Said once, here, because the walk is
-		 * about to stop and a reader who pressed the key wants to know
-		 * it was heard rather than that the tool died.
-		 */
-		fprintf(stderr, "interrupted - reporting what was scanned\n");
-		return 1;
-	}
-	return 0;
-}
-
-/*
- * What the filtering earned.
- *
- * Behind a flag rather than always printed, and printed at all rather than merely
- * collected: the engine counts every one of these on every module of every object,
- * and a counter nothing can read is a counter nobody keeps honest. The whole design
- * rests on ruling a module out being much cheaper than running it, and these are the
- * numbers that say whether it does.
- *
- * `considered` must equal `ran` plus the four rejections - the prefilter has no
- * other exit - so the two columns are also a check on each other.
- */
-static void print_stats(const struct kof_stats *st)
-{
-	uint64_t skipped = st->by_target + st->by_size + st->by_arch +
-			  st->by_subtype + st->by_region;
-
-	printf("\n--- filtering ---\n");
-	printf("considered %llu module evaluation(s)\n",
-	       (unsigned long long)st->considered);
-	printf("  ran      %llu\n", (unsigned long long)st->ran);
-	printf("  target   %llu\n", (unsigned long long)st->by_target);
-	printf("  size     %llu\n", (unsigned long long)st->by_size);
-	printf("  arch     %llu\n", (unsigned long long)st->by_arch);
-	printf("  subtype  %llu\n", (unsigned long long)st->by_subtype);
-	printf("  region   %llu\n", (unsigned long long)st->by_region);
-	if (st->ran + skipped != st->considered)
-		printf("  NOTE: ran + skipped is %llu, not %llu\n",
-		       (unsigned long long)(st->ran + skipped),
-		       (unsigned long long)st->considered);
-
-	/*
-	 * The batched pass first, because it is what the per-marker line below
-	 * is now measured AGAINST. A region swept once appears here; whatever
-	 * the sweep could not answer - hex programs, markers too short to key,
-	 * the symbol halves - appears there. The second number growing with the
-	 * database while the first does not is the shape to watch for.
-	 */
-	printf("multi      %llu pass(es) (%llu hash4, %llu wu-manber), "
-	       "%.2f MB read\n",
-	       (unsigned long long)st->multi_passes,
-	       (unsigned long long)st->multi_hash4,
-	       (unsigned long long)st->multi_wumanber,
-	       (double)st->multi_bytes / 1048576.0);
-	printf("  answers written without a search %llu\n",
-	       (unsigned long long)st->multi_answers);
-	printf("searches   %llu, %.2f MB read\n",
-	       (unsigned long long)st->searches,
-	       (double)st->bytes_searched / 1048576.0);
-	printf("  answered without scanning %llu\n",
-	       (unsigned long long)st->gram_answers);
-	printf("presence   %.2f MB indexed\n",
-	       (double)st->gram_bytes / 1048576.0);
-	/*
-	 * Printed even at zero, because zero is the answer a reader wants on a
-	 * clean tree: it says the rules that can turn the emulator on did not.
-	 */
-	printf("heur emu   %llu object(s) interpreted at a rule's request\n",
-	       (unsigned long long)st->heur_emu);
-}
+#include "kofscanner_int.h"
 
 /*
  * ONE LINE A FLAG.
@@ -1088,7 +93,7 @@ static void usage(const char *argv0)
  * number, because a zeroed kof_scan_option has to mean the heuristic RUNS.
  *
  * Written as a number rather than as --no-heur so that the command lines and
- * scripts that already say --heur 0 or --heur 1 keep working.
+ * scripts that already ksn_say --heur 0 or --heur 1 keep working.
  */
 /*
  * A NUMBER, OR THE RUN DOES NOT START.
@@ -1143,7 +148,7 @@ static int heur_arg(const char *v, struct kof_scan_option *opt)
 	 * unpackers already produced, or do not. 2 adds the one thing that is
 	 * not free - running an object no unpacker could open. It belongs on
 	 * this flag rather than on its own because it is the same question
-	 * asked harder: how much is this scan willing to spend to say something
+	 * asked harder: how much is this scan willing to spend to ksn_say something
 	 * about a file nothing recognised.
 	 */
 	switch (n) {
@@ -1166,543 +171,37 @@ static int heur_bad(const char *argv0, const char *v)
 	return 2;
 }
 
-/* ------------------------------------------------- scanning what is running
- *
- * WHY THIS IS IN THE SCANNER AND NOT A TOOL OF ITS OWN.
- *
- * A process is another place bytes live. Everything else about the scan is the
- * same - the same database, the same verdict, the same rollup - and the only
- * thing that differs is where the bytes come from. Splitting it out would give
- * two programs that must agree about what "infected" means.
- *
- *
- * AND WHY THE WALK IS NOT IN HERE.
- *
- * Deciding that a file-backed mapping is scanned as its FILE, that an
- * anonymous executable region is scanned as BYTES, and that a kernel mapping
- * is neither, are answers about an operating system's process table. They
- * belong to the collector that owns that table - libkoforbit/antarc on Linux,
- * libkoforbit/grille on Windows - and this file asks for them through
- * libkoforbit/walk/kofwalk.h. It was written the other way round first,
- * and the cost of that would have been making all three decisions a second
- * time, slightly differently, for the other platform.
- *
- *
- * THE CACHE IS THE WHOLE REASON THIS IS AFFORDABLE, and the number is why.
- *
- * Measured on this machine: 5795 file-backed mappings across the readable
- * processes, and 335 distinct files behind them - 17.3 to one. libc.so.6 is
- * mapped a hundred times. Scanning each mapping would scan libc a hundred
- * times to reach the same answer a hundred times.
- *
- * So a file is identified - one stat - and looked up; on a miss it is scanned
- * and the answer remembered. That needs no process tree and no relationship
- * between processes: the key is the file's identity, so two processes sharing
- * a library share an answer by construction.
- *
- * WHAT CANNOT BE CACHED IS WHAT MATTERS MOST, and that is not a coincidence.
- * Bytes with no file behind them exist in one process at one instant. They are
- * read and scanned every time, and there is little of them - measured, about
- * 48 MB across this machine.
- */
+
 
 /*
- * WHAT THE CACHE HOOKS ARE GIVEN.
- *
- * The set, and the run - and the run is here for one reason: a file the set
- * answers for never reaches on_object, so it never reaches progress_draw
- * either. Measured on 300 files from /usr/bin: a cold scan drew the progress
- * line six times and the second scan, with every file cached, drew it ZERO
- * times. The scanner did its work and said nothing at all while doing it,
- * which on a large tree is indistinguishable from being stuck.
+ * EVERYTHING ONE RUN OF THE TOOL IS MADE OF, which main used to hold as forty locals.
+ * Filled by cli_parse, used by the steps that follow it in main, in order: open the
+ * database, make the scanners, scan, total the stats, report, close, exit.
  */
-struct cache_hook {
-	struct kof_fidset *fs;
-	struct run        *r;
-};
-
-struct procscan {
-	struct run       *r;
-	kof_scanner      *sc;
-	/*
-	 * THE SAME SET THE FILE SWEEP USES - see fidset.h.
-	 *
-	 * It was a koffridge here and nothing at all on the file path, so the
-	 * two sweeps cached by different rules with different failure modes and
-	 * only one of them was ever exercised. One mechanism now, asked through
-	 * the engine, so a fault in it is a fault in both and gets found.
-	 */
-	struct kof_fidset *fs;
-	struct kof_scan_option *opt;
-	struct cache_hook hook;
-
-	uint64_t files_scanned, files_cached;
-	uint64_t chunks, chunk_bytes;
-	/* Runs of a loaded module that differ from the file it was mapped
-	 * from - see wdiff.h. Its own line, because an unbacked allocation
-	 * and a modified module are different findings. */
-	uint64_t patches, patch_bytes;
-};
-
-/* One file behind a mapping: scan it only if this sweep has not already
- * answered for it. */
-
-/*
- * THE TWO ANSWERS THE ENGINE ASKS FOR - see cache_seen in kofeng.h.
- *
- * This is the whole of what the engine knows about caching: two functions and
- * an opaque pointer. It does not know the key is a file identity, that the
- * identity comes from a stat, that the set lives in a file, or that anything
- * called a fridge exists. All of that is a property of a MACHINE, and the
- * engine is the part that is the same everywhere.
- *
- * An identity that cannot be established means no caching for that file - not a
- * zeroed key. A key that could not be computed must not be invented: every
- * unidentifiable file would share it, and one of them being called clean would
- * speak for all of them.
- */
-static int fid_seen(void *user, const char *path)
-{
-	struct cache_hook *h = user;
-	struct kof_fid id;
-
-	if (!h || !h->fs || !kof_fid_of(path, &id))
-		return 0;
-	if (!kof_fidset_has(h->fs, kof_fid_key(&id)))
-		return 0;
-	/*
-	 * SKIPPED, AND SAID SO. The same rate limit the scanned path uses, so
-	 * a cached sweep costs no more terminal writes than a cold one - it
-	 * just stops being silent.
-	 */
-	if (h->r) {
-		h->r->cached_seen++;
-		progress_draw(h->r, path);
-	}
-	return 1;
-}
-
-static void fid_keep(void *user, const char *path)
-{
-	struct kof_fid id;
-
-	struct cache_hook *h = user;
-
-	if (!h || !h->fs || !kof_fid_of(path, &id))
-		return;
-	(void)kof_fidset_add(h->fs, kof_fid_key(&id));
-}
-
-/*
- * AND THE THIRD ANSWER: this file is not clean, so whatever the set says about
- * it is wrong - see kof_fidset_drop.
- *
- * Wired even when the set is not being READ, which is the case it is for: a
- * --no-cache run is the one that reaches a file an older entry would have
- * skipped, and its finding has to outlive the run that made it.
- */
-/*
- * "written 3 h ago", or nothing when the file did not say.
- *
- * The header keeps seconds since the epoch - an integer, for the reasons the
- * field's own note gives - and a person reading a build log wants an age, so
- * the conversion is here, in the tool that prints, and not in the format.
- */
-static void cache_age(uint64_t made, char *out, size_t cap)
-{
-	time_t now = time(NULL);
-	long long age;
-
-	out[0] = 0;
-	if (!made || now == (time_t)-1)
-		return;
-	age = (long long)now - (long long)made;
-	if (age < 0)
-		age = 0;
-	if (age < 90)
-		snprintf(out, cap, ", written %llds ago", age);
-	else if (age < 90 * 60)
-		snprintf(out, cap, ", written %lldm ago", age / 60);
-	else if (age < 48 * 3600)
-		snprintf(out, cap, ", written %lldh ago", age / 3600);
-	else
-		snprintf(out, cap, ", written %lld day(s) ago", age / 86400);
-}
-
-/*
- * THE ENGINE THESE ANSWERS CAME FROM, as one number - see kof_fidset_open.
- *
- * Version and build together: the build alone moves every hour and the version
- * alone does not move between releases of the same number.
- */
-static uint64_t engine_stamp(void)
-{
-	struct kof_version v;
-
-	memset(&v, 0, sizeof v);
-	keng_version(&v);
-	return ((uint64_t)v.major << 48) | ((uint64_t)v.minor << 32) | v.build;
-}
-
-static void fid_drop(void *user, const char *path)
-{
-	struct kof_fid id;
-
-	struct cache_hook *h = user;
-
-	if (!h || !h->fs || !kof_fid_of(path, &id))
-		return;
-	(void)kof_fidset_drop(h->fs, kof_fid_key(&id));
-}
-
-/*
- * ONE FILE BEHIND A MAPPING.
- *
- * WHAT THIS USED TO BE was a second implementation of the cache - identify,
- * look up, decide, scan, store - written here because the engine had no way to
- * ask. It has one now, and the whole of that logic is in scan_file where the
- * walk already meets every file. So this is the engine's own path with the same
- * two callbacks the file sweep uses, and there is no second copy left to drift.
- *
- * The counters still live here because they are the report's, not the engine's:
- * `cached` comes back through kof_stats, and this only has to add it up.
- */
-static void ps_file(struct procscan *p, const char *path)
-{
-	uint64_t before_cached = 0;
-	const struct kof_stats *st;
-
-	if (!p || !path || !path[0])
-		return;
-	st = kscan_stats(p->sc);
-	if (st)
-		before_cached = st->cached;
-	(void)kscan_path(p->sc, path, p->opt, on_object, p->r);
-	st = kscan_stats(p->sc);
-	if (st && st->cached != before_cached)
-		p->files_cached++;
-	else
-		p->files_scanned++;
-}
-
-/* Returns 0, or a KOF_ERR_*. */
-static int scan_procs(struct run *r, kof_scanner *sc,
-		      struct kof_scan_option *opt, uint64_t db_stamp,
-		      const char *cache_path, int trust, const uint32_t *pids,
-		      uint32_t n_pids, int compare_modules)
-{
-	struct procscan p;
-	struct kof_walk_api *w;
-	struct kof_walk_option wo;
-	struct kof_proc_build b;
-	struct kof_walk_item it;
-	unsigned char rec[KOF_PROC_REC_MAX];
-	uint64_t procs = 0, refused = 0, regions = 0, bytes = 0;
-	char line[160];
-	/* Filled from the walk BEFORE it is closed - see there. */
-	char note[256];
-	int err = 0;
-
-	memset(&p, 0, sizeof p);
-	note[0] = 0;
-	p.r = r;
-	p.sc = sc;
-	p.opt = opt;
-	/*
-	 * NO CACHE IS A STATE, NOT A FAILURE. The sweep runs either way; it
-	 * simply opens every file. Returning an error because a cache could not
-	 * be opened would make a missing cache directory stop a scan.
-	 */
-	if (cache_path) {
-		p.fs = kof_fidset_open(db_stamp, engine_stamp());
-		if (p.fs) {
-			struct kof_fidset_stat fst;
-
-			(void)kof_fidset_load(p.fs, cache_path);
-			kof_fidset_stats(p.fs, &fst);
-			/*
-			 * LOADED EVEN WHEN IT IS NOT TRUSTED, and that is what
-			 * --no-cache means here.
-			 *
-			 * Not trusting it is `seen` and `keep` staying unset:
-			 * nothing is skipped on its word and nothing new is
-			 * written down. What remains is `drop` - a file this
-			 * run finds something in must not be left behind in a
-			 * set the NEXT run will believe, and the set has to be
-			 * in hand to take it out of.
-			 */
-			if (trust) {
-				char when[64];
-
-				cache_age(fst.made, when, sizeof when);
-				fprintf(stderr, "cache: %llu entr%s loaded%s\n",
-					(unsigned long long)fst.mapped,
-					fst.mapped == 1u ? "y" : "ies", when);
-				opt->cache_seen = fid_seen;
-				opt->cache_keep = fid_keep;
-			}
-			opt->cache_drop = fid_drop;
-			/* The bundle lives as long as the option does - see
-			 * struct cache_hook for why the run is in it. */
-			p.hook.fs = p.fs;
-			p.hook.r  = r;
-			opt->cache_user = &p.hook;
-		}
-	}
-
-	memset(&wo, 0, sizeof wo);
-	wo.pids = pids;
-	wo.n_pids = n_pids;
-	wo.compare_modules = compare_modules;
-
-	w = kof_walk_open(&wo, &err);
-	if (!w) {
-		/* The option still points at what is about to be freed, and it
-		 * is the caller's struct - it outlives this function. */
-		opt->cache_seen = NULL;
-		opt->cache_keep = NULL;
-		opt->cache_drop = NULL;
-		opt->cache_user = NULL;
-		kof_fidset_close(p.fs);
-		fprintf(stderr, "cannot walk the process table (%d)\n", err);
-		return KOF_ERR_OPEN;
-	}
-
-	while (w->next_proc(w->self, &b)) {
-		char who[256];
-		uint32_t n;
-
-		snprintf(who, sizeof who, "pid:%u/%s", b.pid,
-			 b.comm && b.comm[0] ? b.comm : "?");
-
-		/*
-		 * THE PROCESS ITSELF IS AN OBJECT, and the rules about one
-		 * live in the database like every other rule - see
-		 * kofmod/proc.h. That is what makes "a shell holding one
-		 * socket on both ends of its stdio" a finding somebody can add
-		 * without rebuilding the scanner.
-		 */
-		n = kof_proc_build_rec(&b, rec, sizeof rec);
-		if (n) {
-			struct kof_scan_option po = *opt;
-
-			po.as_format = KOF_EVT_PROC;
-			(void)kscan_bytes(sc, rec, n, who, &po,
-					     on_object, r);
-		}
-
-		while (w->next_item(w->self, &it)) {
-			if (it.kind == KOF_WALK_FILE) {
-				ps_file(&p, it.path);
-			} else if (it.kind == KOF_WALK_BYTES) {
-				struct kof_scan_option bo = *opt;
-				char nm[320];
-
-				/*
-				 * THE WORD AS WELL AS THE ADDRESS.
-				 *
-				 * This named findings by address alone, which
-				 * is what kof_walk_item.label exists to fix:
-				 * "powershell.exe//00007ffdbf644690" says
-				 * where and never what, so a reader has to go
-				 * and work out what lives there - and a report
-				 * a week later has lost the chance entirely,
-				 * because that address means nothing once the
-				 * process is gone.
-				 *
-				 * The address STAYS. It is what a finding is
-				 * reported against and what a second tool
-				 * would be pointed at; the word is what makes
-				 * the line readable, not a replacement for it.
-				 */
-				if (it.label && it.label[0])
-					snprintf(nm, sizeof nm,
-						 "%s//%s@%016llx", who,
-						 it.label,
-						 (unsigned long long)it.addr);
-				else
-					snprintf(nm, sizeof nm, "%s//%016llx",
-						 who,
-						 (unsigned long long)it.addr);
-				/*
-				 * WHAT THE WALK KNOWS AND THE BYTES DO NOT -
-				 * copied straight across, never interpreted
-				 * here. On Linux nothing is declared and this
-				 * is three zero assignments; on Windows it is
-				 * what stops every region of a loader-mapped
-				 * PE resolving to another section's bytes.
-				 * See kof_walk_item.as_format.
-				 */
-				if (it.as_format) {
-					bo.as_format   = it.as_format;
-					bo.as_view     = it.as_view;
-					bo.as_view_len = it.as_view_len;
-				}
-				(void)kscan_bytes(sc, it.p, it.len, nm,
-						     &bo, on_object, r);
-				/*
-				 * COUNTED HERE AND NOT IN THE WALK'S STATS.
-				 *
-				 * kof_walk_api.stats carries four numbers every
-				 * platform has. "How many modules differ from
-				 * their file" is not one of them today - Linux
-				 * measured its EXEC pages 0% different - and
-				 * widening a neutral signature for one
-				 * platform's concept is how a neutral header
-				 * stops being one. The label is already in the
-				 * item, so the host can count what it cares
-				 * about without anything being added anywhere.
-				 *
-				 * AND IT IS AN "ELSE", WHICH IT WAS NOT.
-				 *
-				 * A modified run is image memory that differs
-				 * from its file; unbacked memory is memory no
-				 * file holds at all. Adding the first to the
-				 * second's counter made turning --modified on
-				 * read as though the unbacked count had gone
-				 * from 98 to 649 - a six-fold jump in the one
-				 * number on that summary that is closest to an
-				 * alarm, caused by nothing changing in the
-				 * process at all.
-				 */
-				if (it.label &&
-				    strcmp(it.label, "MEM_PATCH") == 0) {
-					p.patches++;
-					p.patch_bytes += it.len;
-				} else {
-					p.chunks++;
-					p.chunk_bytes += it.len;
-				}
-			}
-		}
-	}
-
-	if (w->stats)
-		w->stats(w->self, &procs, &refused, &regions, &bytes);
-	/*
-	 * TAKEN BEFORE close, like the stats above it.
-	 *
-	 * This was read from the summary further down, after the walk had been
-	 * closed and freed - a use-after-free that did not crash and did not
-	 * print either, because the freed struct happened to read back as a
-	 * walk with the comparison turned off. A silent wrong answer out of
-	 * freed memory is the worst shape this could have taken: it looked
-	 * exactly like a collector with nothing to say.
-	 */
-	if (w->describe)
-		(void)w->describe(w->self, note, sizeof note);
-	w->close(w->self);
-
-	if (p.fs && cache_path) {
-		struct kof_fidset_stat fst;
-
-		/* An untrusted run writes the set back ONLY to take something
-		 * out of it - see the load above. */
-		kof_fidset_stats(p.fs, &fst);
-		if ((trust || fst.dropped) &&
-		    !kof_fidset_save(p.fs, cache_path))
-			fprintf(stderr, "cache: could not be written to %s\n",
-				cache_path);
-		if (fst.dropped)
-			fprintf(stderr, "cache: %llu entr%s dropped - found "
-				"something in a file the cache called clean\n",
-				(unsigned long long)fst.dropped,
-				fst.dropped == 1u ? "y" : "ies");
-	}
-
-	printf("\n--- processes ---\n");
-	printf("walked    %llu process(es)", (unsigned long long)procs);
-	if (refused)
-		printf(", %llu refused", (unsigned long long)refused);
-	printf("\n");
-	printf("regions   %llu, %.2f MB read out of them\n",
-	       (unsigned long long)regions, (double)bytes / 1048576.0);
-	printf("modules   %llu scanned, %llu clean from cache",
-	       (unsigned long long)p.files_scanned,
-	       (unsigned long long)p.files_cached);
-	/*
-	 * COUNTED APART FROM THE CLEAN ONES. Both skipped a scan, but one of
-	 * them produced a FINDING out of the cache, and a reader totalling
-	 * "served from cache" against "scanned" would otherwise have no way to
-	 * see that some of this run's verdicts were remembered rather than
-	 * reached.
-	 */
-	if (p.files_scanned + p.files_cached)
-		printf("  (%.1f%% saved)",
-		       (double)p.files_cached * 100.0 /
-		       (double)(p.files_scanned + p.files_cached));
-	printf("\n");
-	printf("unbacked  %llu chunk(s), %.2f MB\n",
-	       (unsigned long long)p.chunks,
-	       (double)p.chunk_bytes / 1048576.0);
-	/*
-	 * Only when there were any. A zero here would read as "checked and
-	 * none", and on a platform whose walk does not compare modules at all
-	 * it would be claiming a check that never ran - see wdiff.h, which is
-	 * Windows only.
-	 */
-	if (p.patches)
-		printf("modified  %llu run(s) in loaded module(s), %llu byte(s)"
-		       " - differs from the file, which is not yet a verdict\n",
-		       (unsigned long long)p.patches,
-		       (unsigned long long)p.patch_bytes);
-	/*
-	 * WHAT THE COLLECTOR HAS TO SAY THAT THE FOUR NUMBERS CANNOT.
-	 *
-	 * Optional and empty on a collector with nothing extra, so this prints
-	 * nothing rather than an empty heading. It is where a count of modules
-	 * that could NOT be compared appears - a number that existed and
-	 * reached nobody until there was a line for it.
-	 */
-	if (note[0])
-		printf("%s\n", note);
-	if (p.fs) {
-		struct kof_fidset_stat fst;
-
-		kof_fidset_stats(p.fs, &fst);
-		snprintf(line, sizeof line,
-			 "cache     %llu known, %llu added, %llu dropped, "
-			 "%llu hit, %llu miss",
-			 (unsigned long long)fst.mapped,
-			 (unsigned long long)fst.added,
-			 (unsigned long long)fst.dropped,
-			 (unsigned long long)fst.hit,
-			 (unsigned long long)fst.miss);
-		printf("%s\n", line);
-	}
-
-	/*
-	 * CLEARED BEFORE THE SET IS FREED, and `opt` is the CALLER'S - it
-	 * outlives this function and is reused by whatever runs next. Leaving
-	 * the pointers behind would hand a freed set to the following scan,
-	 * which is the one shape of use-after-free that would not crash: the
-	 * lookup would read whatever the allocator put there and answer yes or
-	 * no from it.
-	 */
-	opt->cache_seen = NULL;
-	opt->cache_keep = NULL;
-	opt->cache_user = NULL;
-	kof_fidset_close(p.fs);
-	return 0;
-}
-
-
-int main(int argc, char **argv)
-{
-	const char *db = NULL, *target = NULL;
-	kof_engine *eng;
-	kof_scanner *sc;
+struct cli {
+	const char *argv0;
+	const char *db, *target;
 	struct kof_scan_option opt;
-	struct run r;
-	const struct kof_stats *st;
-	struct timespec t0, t1;
-	double secs, mb;
-	uint64_t unreadable = 0;
-	/* The file-level tallies, computed from the per-file map for the summary
-	 * and read again by the exit code after the map is gone. */
-	uint64_t inf_f = 0, sus_f = 0, broken_objs = 0;
+	struct run  r;
 	/*
-	 * WHERE THE VERDICT CACHE IS KEPT BETWEEN RUNS, or NULL.
+	 * How many scanners the walk runs on. One by default and not the core
+	 * count, because more than one changes something a caller can see: the
+	 * ORDER objects are reported in. A scan that prints its findings as it
+	 * goes is read by a person, and the same directory scanned twice should
+	 * read the same way both times. Speed is asked for, not assumed.
+	 */
+	unsigned    jobs;
+	int         want_procs;
+	/*
+	 * WHERE THE VERDICT CACHE IS KEPT BETWEEN RUNS.
+	 *
+	 * On by default at a per-user path - see koffridge_default_path, which
+	 * is also where the reason the DEFAULT is safe is written down. It used
+	 * to be off unless a path was given, and that made a five-fold
+	 * difference in sweep time depend on somebody knowing to ask.
+	 *
+	 * --cache-file overrides the path; --no-cache turns it off, for a run
+	 * that must answer from nothing but this database and these bytes.
 	 *
 	 * CACHING ITSELF IS NOT OPTIONAL AND HAS NO FLAG. A process sweep
 	 * meets the same file many times - measured, 5795 mappings behind 335
@@ -1717,24 +216,11 @@ int main(int argc, char **argv)
 	 * says where it lives, which is the moment they decide who can write
 	 * it. See koffridge.h.
 	 */
-	int want_procs = 0;
-	/*
-	 * WHERE THE VERDICT CACHE IS KEPT BETWEEN RUNS.
-	 *
-	 * On by default at a per-user path - see koffridge_default_path, which
-	 * is also where the reason the DEFAULT is safe is written down. It used
-	 * to be off unless a path was given, and that made a five-fold
-	 * difference in sweep time depend on somebody knowing to ask.
-	 *
-	 * --cache-file overrides the path; --no-cache turns it off, for a run
-	 * that must answer from nothing but this database and these bytes.
-	 */
-	const char *cache_path = NULL;
-	char cache_buf[1024];
-	int  no_cache = 0;
-	uint32_t pids[64];
-	uint32_t n_pids = 0;
-	int i, rc;
+	const char *cache_path;
+	char        cache_buf[1024];
+	int         no_cache;
+	uint32_t    pids[64];
+	uint32_t    n_pids;
 	/*
 	 * What --emu asked for, held back until every argument has been read.
 	 *
@@ -1745,55 +231,56 @@ int main(int argc, char **argv)
 	 * silently downgraded to auto. --emu is documented as the override, so
 	 * it is applied last rather than in place.
 	 */
-	int emu_want = -1;
-	/*
-	 * How many scanners the walk runs on. One by default and not the core
-	 * count, because more than one changes something a caller can see: the
-	 * ORDER objects are reported in. A scan that prints its findings as it
-	 * goes is read by a person, and the same directory scanned twice should
-	 * read the same way both times. Speed is asked for, not assumed.
-	 */
-	unsigned jobs = 1;
-	kof_scanner **scs = NULL;
-	unsigned made = 0;
+	int         emu_want;
 
-	/*
-	 * BEFORE A BYTE OF argv IS READ OR A PATH IS OPENED.
-	 *
-	 * On Windows argv has already lost every character outside the machine's
-	 * ANSI codepage by the time main is entered, and the narrow path
-	 * functions would not find the file even if it had not. A scanner that
-	 * cannot open a file is not a scanner that found it clean - see
-	 * kof_utf8_init. No-op on POSIX, where a path is just bytes.
-	 */
-	kof_utf8_init(&argc, &argv);
+	kof_engine   *eng;
+	kof_scanner  *sc;
+	kof_scanner **scs;
+	unsigned      made;
 
-	memset(&r, 0, sizeof r);
-	memset(&opt, 0, sizeof opt);
+	int           rc;                /* the scan's own answer: 0, or a KOF_ERR_* */
+	double        secs, mb;
+	struct kof_stats        sum;     /* the totals over every scanner of a parallel walk */
+	const struct kof_stats *st;
+	uint64_t      unreadable;
+	/* The file-level tallies, computed from the per-file map for the summary and read
+	 * again by the exit code after the map is gone. */
+	uint64_t      inf_f, sus_f, broken_objs;
+	struct timespec t0, t1;
+};
+
+/*
+ * THE ARGUMENTS: the policy of the scan, the target, and what to print. Returns -1 to
+ * go on, else the exit code - 0 for --help, 2 for anything that cannot run.
+ */
+static int cli_parse(struct cli *c, int argc, char **argv)
+{
+	int i;
+
 	/* Where the engine sends a verdict - see kof_on_event_detected. This tool
 	 * registers it and prints; it decides nothing. */
-	opt.on_event_detected = on_event_detected;
-	opt.event_user        = &r;
+	c->opt.on_event_detected = ksn_on_event_detected;
+	c->opt.event_user        = &c->r;
 	/* Set once, for every scan this run makes - the file sweep and the
-	 * process sweep both. See scan_should_stop. */
-	opt.should_stop = scan_should_stop;
+	 * process sweep both. See ksn_scan_should_stop. */
+	c->opt.should_stop = ksn_scan_should_stop;
 	/* Scanning a named directory means scanning what is in it. The engine defaults
 	 * to not recursing so that a caller who says nothing gets less rather than a
 	 * surprise; a scanner is the caller that does want it. */
-	opt.recurse_dirs = 1;
+	c->opt.recurse_dirs = 1;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--db") == 0 && i + 1 < argc)
-			db = argv[++i];
+			c->db = argv[++i];
 		else if (strcmp(argv[i], "--scan-files") == 0 && i + 1 < argc)
-			target = argv[++i];
+			c->target = argv[++i];
 		else if (strcmp(argv[i], "--max-depth") == 0 && i + 1 < argc) {
 			unsigned long long v;
 
 			if (!num_arg(argv[0], "--max-depth", argv[++i],
 				     1, 0xffffffffull, &v))
 				return 2;
-			opt.max_depth = (uint32_t)v;
+			c->opt.max_depth = (uint32_t)v;
 		}
 		else if (strcmp(argv[i], "--object-depth") == 0 && i + 1 < argc) {
 			unsigned long long v;
@@ -1801,12 +288,12 @@ int main(int argc, char **argv)
 			if (!num_arg(argv[0], "--object-depth", argv[++i],
 				     1, 0xffffffffull, &v))
 				return 2;
-			opt.max_object_depth = (uint32_t)v;
+			c->opt.max_object_depth = (uint32_t)v;
 		}
 		else if (strcmp(argv[i], "--follow-links") == 0)
-			opt.follow_symlinks = 1;
+			c->opt.follow_symlinks = 1;
 		else if (strcmp(argv[i], "--all-matches") == 0)
-			opt.all_matches = 1;
+			c->opt.all_matches = 1;
 
 		/*
 		 * One number, because the three settings are a ladder and an
@@ -1822,10 +309,10 @@ int main(int argc, char **argv)
 		 * prompt.
 		 */
 		else if (strncmp(argv[i], "--heur=", 7) == 0) {
-			if (!heur_arg(argv[i] + 7, &opt))
+			if (!heur_arg(argv[i] + 7, &c->opt))
 				return heur_bad(argv[0], argv[i] + 7);
 		} else if (strcmp(argv[i], "--heur") == 0 && i + 1 < argc) {
-			if (!heur_arg(argv[++i], &opt))
+			if (!heur_arg(argv[++i], &c->opt))
 				return heur_bad(argv[0], argv[i]);
 		}
 		else if (strcmp(argv[i], "--emu") == 0 && i + 1 < argc) {
@@ -1835,11 +322,11 @@ int main(int argc, char **argv)
 			 * about what it does, and the three settings are not
 			 * points on a scale - "only" is not more of "auto". */
 			if (strcmp(w, "auto") == 0)
-				emu_want = KOF_EMU_AUTO;
+				c->emu_want = KOF_EMU_AUTO;
 			else if (strcmp(w, "never") == 0)
-				emu_want = KOF_EMU_NEVER;
+				c->emu_want = KOF_EMU_NEVER;
 			else if (strcmp(w, "only") == 0)
-				emu_want = KOF_EMU_ONLY;
+				c->emu_want = KOF_EMU_ONLY;
 			else {
 				fprintf(stderr, "%s: --emu takes auto, never "
 					"or only, not '%s'\n", argv[0], w);
@@ -1852,7 +339,7 @@ int main(int argc, char **argv)
 			if (!num_arg(argv[0], "--max-produced", argv[++i],
 				     1, ~0ull, &v))
 				return 2;
-			opt.max_produced_bytes = v;
+			c->opt.max_produced_bytes = v;
 		}
 		/* The memory ceiling, exposed because it is the limit that decides
 		 * how much of a container is examined and because a decoder that
@@ -1864,7 +351,7 @@ int main(int argc, char **argv)
 			if (!num_arg(argv[0], "--max-resident", argv[++i],
 				     1, ~0ull, &v))
 				return 2;
-			opt.max_resident_bytes = v;
+			c->opt.max_resident_bytes = v;
 		}
 		else if (strcmp(argv[i], "--max-object") == 0 && i + 1 < argc) {
 			unsigned long long v;
@@ -1872,7 +359,7 @@ int main(int argc, char **argv)
 			if (!num_arg(argv[0], "--max-object", argv[++i],
 				     1, ~0ull, &v))
 				return 2;
-			opt.max_object_bytes = v;
+			c->opt.max_object_bytes = v;
 		}
 		else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) {
 			unsigned long v = strtoul(argv[++i], NULL, 10);
@@ -1886,15 +373,15 @@ int main(int argc, char **argv)
 					"not '%s'\n", argv[0], argv[i]);
 				return 2;
 			}
-			jobs = (unsigned)v;
+			c->jobs = (unsigned)v;
 		}
 		else if (strcmp(argv[i], "--scan-procs") == 0)
-			want_procs = 1;
+			c->want_procs = 1;
 
 		else if (strcmp(argv[i], "--cache-file") == 0 && i + 1 < argc)
-			cache_path = argv[++i];
+			c->cache_path = argv[++i];
 		else if (strcmp(argv[i], "--no-cache") == 0)
-			no_cache = 1;
+			c->no_cache = 1;
 		/*
 		 * ONE PROCESS, OR A FEW. Naming them is not a filter over the
 		 * whole table - the walk opens only what was named, which is
@@ -1911,22 +398,22 @@ int main(int argc, char **argv)
 			 * nothing, which is the failure this tool counts
 			 * `cached` and `unreadable` to avoid everywhere else.
 			 */
-			if (n_pids >= (uint32_t)(sizeof pids / sizeof pids[0])) {
+			if (c->n_pids >= (uint32_t)(sizeof c->pids / sizeof c->pids[0])) {
 				fprintf(stderr, "%s: --pid may be given at "
 					"most %u times\n", argv[0],
-					(unsigned)(sizeof pids / sizeof pids[0]));
+					(unsigned)(sizeof c->pids / sizeof c->pids[0]));
 				return 2;
 			}
 			if (!num_arg(argv[0], "--pid", argv[++i],
 				     1, 0xffffffffull, &v))
 				return 2;
-			pids[n_pids++] = (uint32_t)v;
-			want_procs = 1;
+			c->pids[c->n_pids++] = (uint32_t)v;
+			c->want_procs = 1;
 		}
 		else if (strcmp(argv[i], "--stats") == 0)
-			r.stats = 1;
+			c->r.stats = 1;
 		else if (strcmp(argv[i], "-v") == 0)
-			r.verbose = 1;
+			c->r.verbose = 1;
 		/* Asked for by name rather than reached by getting something
 		 * wrong: --help printed "unrecognised argument" first, which
 		 * is the tool telling a reader they made a mistake for using
@@ -1943,8 +430,8 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (emu_want >= 0) {
-		opt.emu_use = (enum kof_emu_use)emu_want;
+	if (c->emu_want >= 0) {
+		c->opt.emu_use = (enum kof_emu_use)c->emu_want;
 		/*
 		 * SAID EXPLICITLY, so a heuristic rule may not ask past it.
 		 *
@@ -1953,21 +440,27 @@ int main(int argc, char **argv)
 		 * is meant to turn into emulation. Only a --emu never typed on
 		 * the command line means never.
 		 */
-		if (emu_want == KOF_EMU_NEVER)
-			opt.emu_forbidden = 1;
+		if (c->emu_want == KOF_EMU_NEVER)
+			c->opt.emu_forbidden = 1;
 	}
 
 	/* --scan-procs names its own target: what is running. */
-	if (!db || (!target && !want_procs)) {
+	if (!c->db || (!c->target && !c->want_procs)) {
 		usage(argv[0]);
 		return 2;
 	}
+	return -1;
+}
 
+/* The database, and what a reader should know about it before anything is reported.
+ * Returns -1 to go on, else the exit code. */
+static int cli_open(struct cli *c)
+{
 	KOF_TIME_BEGIN(KOF_T_DB_LOAD);
-	eng = keng_open(db);
+	c->eng = keng_open(c->db);
 	KOF_TIME_END(KOF_T_DB_LOAD);
-	if (!eng) {
-		fprintf(stderr, "%s: cannot load a database from %s\n", argv[0], db);
+	if (!c->eng) {
+		fprintf(stderr, "%s: cannot load a database from %s\n", c->argv0, c->db);
 		return 2;
 	}
 	{
@@ -1980,31 +473,40 @@ int main(int argc, char **argv)
 		uint64_t mmb = 0;
 		uint32_t mmc = 0;
 
-		kdb_version(eng, &dv);
+		kdb_version(c->eng, &dv);
 		printf("database: format %u.%u build %u, %u record(s), "
 		       "%u unpacker(s), %u heur rule(s)\n",
 		       (unsigned)dv.major, (unsigned)dv.minor, dv.build,
-		       kdb_records(eng), kdb_unpackers(eng),
-		       kmatch_rules(eng));
+		       kdb_records(c->eng), kdb_unpackers(c->eng),
+		       kmatch_rules(c->eng));
 		/* The matcher's footprint is a design claim - bucket counts are
 		 * derived from the marker count and bounded - so it is printed
 		 * where a reader will see it rather than left to be inferred. */
-		if (kmatch_tables(eng, &mmb, &mmc) == 0 && mmb)
+		if (kmatch_tables(c->eng, &mmb, &mmc) == 0 && mmb)
 			printf("          multi-pattern tables %.2f MB, "
 			       "worst bucket %u marker(s)\n",
 			       (double)mmb / 1048576.0, mmc);
 	}
+	return -1;
+}
 
+/* The scanner, and the extra ones a parallel walk asks for with the budgets divided
+ * among them. Returns -1 to go on, else the exit code. */
+static int cli_scanners(struct cli *c)
+{
 	/*
 	 * -v reports each file as it finishes, and that is only sound on one
 	 * thread - see run.cur_file.
 	 */
-	r.stream_v = (jobs == 1);
+	c->r.stream_v = (c->jobs == 1);
 
-	sc = kscan_new(eng);
-	if (!sc) {
-		fprintf(stderr, "%s: out of memory\n", argv[0]);
-		keng_close(eng);
+	c->sc = kscan_new(c->eng);
+	c->r.files = kverdict_filemap_new();
+	if (!c->sc || !c->r.files) {
+		fprintf(stderr, "%s: out of memory\n", c->argv0);
+		kverdict_filemap_free(c->r.files);
+		kscan_free(c->sc);
+		keng_close(c->eng);
 		return 2;
 	}
 
@@ -2029,29 +531,29 @@ int main(int argc, char **argv)
 	 * run inside the bound the caller asked for. The other two ceilings are
 	 * per object and per tree and need no division.
 	 */
-	if (jobs > 1) {
+	if (c->jobs > 1) {
 		unsigned k;
-		uint64_t resident_all = opt.max_resident_bytes;
+		uint64_t resident_all = c->opt.max_resident_bytes;
 
-		scs = calloc(jobs, sizeof *scs);
-		if (scs) {
-			scs[0] = sc;
-			for (k = 1; k < jobs; k++) {
-				scs[k] = kscan_new(eng);
-				if (!scs[k])
+		c->scs = calloc(c->jobs, sizeof *c->scs);
+		if (c->scs) {
+			c->scs[0] = c->sc;
+			for (k = 1; k < c->jobs; k++) {
+				c->scs[k] = kscan_new(c->eng);
+				if (!c->scs[k])
 					break;
 			}
-			made = k;
+			c->made = k;
 		}
-		if (!scs || made < 2) {
+		if (!c->scs || c->made < 2) {
 			/* Fewer scanners than asked for is a scan that did not
-			 * do what it was told; say so rather than run slower
+			 * do what it was told; ksn_say so rather than run slower
 			 * and let the number be a mystery. */
 			fprintf(stderr, "%s: could not create %u scanners\n",
-				argv[0], jobs);
-			jobs = made > 1 ? made : 1;
+				c->argv0, c->jobs);
+			c->jobs = c->made > 1 ? c->made : 1;
 		} else {
-			jobs = made;
+			c->jobs = c->made;
 		}
 		/*
 		 * SHARED OUT AMONG THE THREADS THERE ARE, not among the ones
@@ -2062,16 +564,141 @@ int main(int argc, char **argv)
 		 * been configured not to have.
 		 */
 		if (resident_all)
-			opt.max_resident_bytes = resident_all / jobs;
+			c->opt.max_resident_bytes = resident_all / c->jobs;
 	}
+	return -1;
+}
 
+/*
+ * THE FILE SWEEP, with the between-run cache when it applies. Sets c->rc.
+ */
+static void scan_files(struct cli *c)
+{
+	/*
+	 * THE SAME CACHE THE PROCESS SWEEP HAS, on the path that meets
+	 * far more files.
+	 *
+	 * It was only ever wired into --scan-procs, and the help text
+	 * describes it as a property of the scanner - so a directory
+	 * sweep re-read the whole database against every unchanged file
+	 * on every run, while the help said it would not.
+	 *
+	 * ONE JOB ONLY, FOR NOW. The set is not written for concurrent
+	 * add, and a cache that loses entries under --jobs would be a
+	 * cache that is slower the more workers it is given - the exact
+	 * opposite of what asking for workers means. Making it
+	 * thread-safe is a measurement, not a guess: it needs to be
+	 * shown that the contention costs less than the sweep it saves.
+	 */
+	struct kof_fidset *fs = NULL;
+	/* Outlives the scan below, because opt.cache_user points at it. */
+	struct cache_hook hook = { NULL, NULL };
+	/*
+	 * AND IT SAYS SO, because the alternative is a silent one.
+	 *
+	 * --jobs turns the persistent cache off for the reason above,
+	 * and without a word a reader sees a second run take as long
+	 * as the first and has nothing to connect it to. The sweep
+	 * already prints exactly this sentence when --jobs meets
+	 * --scan-procs; a flag that quietly disables another flag is
+	 * the kind of thing this cache has been burned by before.
+	 */
+	if (!c->no_cache && c->jobs > 1)
+		fprintf(stderr, "%s: --jobs turns the between-run "
+			"cache off; it is not written for concurrent "
+			"add\n", c->argv0);
+	if (c->jobs <= 1) {
+		if (!c->cache_path &&
+		    koffridge_default_path(c->cache_buf, sizeof c->cache_buf))
+			c->cache_path = c->cache_buf;
+		if (c->cache_path) {
+			/* The DATABASE, not the date on it - see
+			 * kdb_stamp for what a build number
+			 * failed to notice. */
+			fs = kof_fidset_open(kdb_stamp(c->eng),
+					       ksn_engine_stamp());
+			if (fs) {
+				struct kof_fidset_stat fst;
+				char when[64];
+
+				(void)kof_fidset_load(fs, c->cache_path);
+				/*
+				 * SAID ON THE WAY IN, because a sweep
+				 * that reuses answers should ksn_say whose
+				 * and how old before it reports
+				 * anything. An empty set says nothing:
+				 * a first run has no news.
+				 */
+				kof_fidset_stats(fs, &fst);
+				if (fst.mapped) {
+					ksn_cache_age(fst.made, when,
+						  sizeof when);
+					fprintf(stderr,
+						"cache: %llu entr%s "
+						"loaded%s\n",
+						(unsigned long long)
+						fst.mapped,
+						fst.mapped == 1u
+						? "y" : "ies", when);
+				}
+				/*
+				 * --no-cache takes the two that
+				 * BELIEVE the set and leaves the one
+				 * that corrects it - see ksn_fid_drop.
+				 */
+				if (!c->no_cache) {
+					c->opt.cache_seen = ksn_fid_seen;
+					c->opt.cache_keep = ksn_fid_keep;
+				}
+				c->opt.cache_drop = ksn_fid_drop;
+				hook.fs = fs;
+				hook.r  = &c->r;
+				c->opt.cache_user = &hook;
+			}
+		}
+	}
+	if (c->jobs > 1)
+		c->rc = kscan_path_mt(c->scs, c->jobs, c->target, &c->opt,
+				      ksn_on_object, &c->r);
+	else
+		c->rc = kscan_path(c->sc, c->target, &c->opt, ksn_on_object, &c->r);
+	if (fs) {
+		struct kof_fidset_stat fst;
+
+		kof_fidset_stats(fs, &fst);
+		/* A run that was told to trust nothing writes the set
+		 * back only when it has something to TAKE OUT of it. */
+		if ((!c->no_cache || fst.dropped) &&
+		    !kof_fidset_save(fs, c->cache_path))
+			fprintf(stderr,
+				"cache: could not be written to %s\n",
+				c->cache_path);
+		if (fst.dropped)
+			fprintf(stderr, "cache: %llu entr%s dropped - "
+				"found something in a file the cache "
+				"called clean\n",
+				(unsigned long long)fst.dropped,
+				fst.dropped == 1u ? "y" : "ies");
+		/* Before the free, and for the same reason ksn_scan_procs
+		 * does it: `opt` lives past this block. */
+		c->opt.cache_seen = NULL;
+		c->opt.cache_keep = NULL;
+		c->opt.cache_drop = NULL;
+		c->opt.cache_user = NULL;
+		kof_fidset_close(fs);
+	}
+}
+
+/* The scan itself, in wall clock: what is running, or what is on the disk. */
+static void cli_scan(struct cli *c)
+{
 	/*
 	 * Progress is on when stderr is a terminal and off otherwise, with no
 	 * flag to set. A person watching a scan wants it; a pipe, a log or a
 	 * script must get the bytes it always got, and isatty is the question
 	 * that separates those two without anybody having to answer it.
 	 */
-	r.progress = isatty(2) ? 1 : 0;
+	c->r.progress = isatty(2) ? 1 : 0;
 	/*
 	 * INSTALLED BEFORE ANY WORK, and deliberately not with sigaction's
 	 * SA_RESTART left to chance: the handler sets a flag and returns, and
@@ -2079,28 +706,27 @@ int main(int argc, char **argv)
 	 * business - the walk finds out through the callback on the next
 	 * object either way.
 	 */
-	signal(SIGINT, on_interrupt);
+	signal(SIGINT, ksn_on_interrupt);
 #ifdef SIGTERM
 	/* A sweep is the kind of thing a service manager stops. Same answer:
 	 * report what was scanned rather than vanish. */
-	signal(SIGTERM, on_interrupt);
+	signal(SIGTERM, ksn_on_interrupt);
 #endif
 	/* Colour follows the same rule, asked of stdout because that is where the
 	 * findings go: a redirect or a pipe gets plain text, a terminal gets the
 	 * highlight. */
-	r.color = isatty(1) ? 1 : 0;
-	r.eng = eng;
-
-	clock_gettime(CLOCK_MONOTONIC, &t0);
+	c->r.color = isatty(1) ? 1 : 0;
+	c->r.eng = c->eng;
+	clock_gettime(CLOCK_MONOTONIC, &c->t0);
 	/*
 	 * WHAT IS RUNNING, rather than what is on the disk. A different
-	 * source of bytes and the same scan - see scan_procs.
+	 * source of bytes and the same scan - see ksn_scan_procs.
 	 */
-	if (want_procs) {
+	if (c->want_procs) {
 		struct kof_db_version dv;
 
 		memset(&dv, 0, sizeof dv);
-		(void)kdb_version(eng, &dv);
+		(void)kdb_version(c->eng, &dv);
 		/* The cache is only true of one database - see koffridge.h. */
 		/*
 		 * THE COMPARISON IS WHAT --heur 2 MEANS HERE.
@@ -2124,149 +750,47 @@ int main(int argc, char **argv)
 		 * real: of a 5.2s sweep, 4.2s is scanning the distinct module
 		 * files, and those are independent of each other.
 		 */
-		if (jobs > 1)
+		if (c->jobs > 1)
 			fprintf(stderr, "%s: --jobs is ignored with "
 				"--scan-procs; the process walk is "
-				"sequential\n", argv[0]);
+				"sequential\n", c->argv0);
 		/*
 		 * The default path is worked out here rather than inside
-		 * scan_procs, so that "no cache" and "a cache nobody could
+		 * ksn_scan_procs, so that "no cache" and "a cache nobody could
 		 * find a home for" are one state at the call rather than two
 		 * behaviours inside it.
 		 */
-		if (!cache_path &&
-		    koffridge_default_path(cache_buf, sizeof cache_buf))
-			cache_path = cache_buf;
+		if (!c->cache_path &&
+		    koffridge_default_path(c->cache_buf, sizeof c->cache_buf))
+			c->cache_path = c->cache_buf;
 
 		/* --no-cache does not mean "there is no cache file": it means
 		 * this run answers from these bytes alone. The set is still
 		 * where it was, and a finding here has to reach it. */
-		rc = scan_procs(&r, sc, &opt, kdb_stamp(eng),
-				cache_path, !no_cache,
-				pids, n_pids,
-				!opt.heur_off && opt.heur_level >= 2);
+		{
+			const struct ksn_procs_req rq = {
+				.r = &c->r, .sc = c->sc, .opt = &c->opt,
+				.cache = { kdb_stamp(c->eng), c->cache_path, !c->no_cache },
+				.pick = { c->pids, c->n_pids,
+					  !c->opt.heur_off && c->opt.heur_level >= 2 },
+			};
+
+			c->rc = ksn_scan_procs(&rq);
+		}
 	} else {
-		/*
-		 * THE SAME CACHE THE PROCESS SWEEP HAS, on the path that meets
-		 * far more files.
-		 *
-		 * It was only ever wired into --scan-procs, and the help text
-		 * describes it as a property of the scanner - so a directory
-		 * sweep re-read the whole database against every unchanged file
-		 * on every run, while the help said it would not.
-		 *
-		 * ONE JOB ONLY, FOR NOW. The set is not written for concurrent
-		 * add, and a cache that loses entries under --jobs would be a
-		 * cache that is slower the more workers it is given - the exact
-		 * opposite of what asking for workers means. Making it
-		 * thread-safe is a measurement, not a guess: it needs to be
-		 * shown that the contention costs less than the sweep it saves.
-		 */
-		struct kof_fidset *fs = NULL;
-		/* Outlives the scan below, because opt.cache_user points at it. */
-		struct cache_hook hook = { NULL, NULL };
-		/*
-		 * AND IT SAYS SO, because the alternative is a silent one.
-		 *
-		 * --jobs turns the persistent cache off for the reason above,
-		 * and without a word a reader sees a second run take as long
-		 * as the first and has nothing to connect it to. The sweep
-		 * already prints exactly this sentence when --jobs meets
-		 * --scan-procs; a flag that quietly disables another flag is
-		 * the kind of thing this cache has been burned by before.
-		 */
-		if (!no_cache && jobs > 1)
-			fprintf(stderr, "%s: --jobs turns the between-run "
-				"cache off; it is not written for concurrent "
-				"add\n", argv[0]);
-		if (jobs <= 1) {
-			if (!cache_path &&
-			    koffridge_default_path(cache_buf, sizeof cache_buf))
-				cache_path = cache_buf;
-			if (cache_path) {
-				/* The DATABASE, not the date on it - see
-				 * kdb_stamp for what a build number
-				 * failed to notice. */
-				fs = kof_fidset_open(kdb_stamp(eng),
-						       engine_stamp());
-				if (fs) {
-					struct kof_fidset_stat fst;
-					char when[64];
-
-					(void)kof_fidset_load(fs, cache_path);
-					/*
-					 * SAID ON THE WAY IN, because a sweep
-					 * that reuses answers should say whose
-					 * and how old before it reports
-					 * anything. An empty set says nothing:
-					 * a first run has no news.
-					 */
-					kof_fidset_stats(fs, &fst);
-					if (fst.mapped) {
-						cache_age(fst.made, when,
-							  sizeof when);
-						fprintf(stderr,
-							"cache: %llu entr%s "
-							"loaded%s\n",
-							(unsigned long long)
-							fst.mapped,
-							fst.mapped == 1u
-							? "y" : "ies", when);
-					}
-					/*
-					 * --no-cache takes the two that
-					 * BELIEVE the set and leaves the one
-					 * that corrects it - see fid_drop.
-					 */
-					if (!no_cache) {
-						opt.cache_seen = fid_seen;
-						opt.cache_keep = fid_keep;
-					}
-					opt.cache_drop = fid_drop;
-					hook.fs = fs;
-					hook.r  = &r;
-					opt.cache_user = &hook;
-				}
-			}
-		}
-		if (jobs > 1)
-			rc = kscan_path_mt(scs, jobs, target, &opt,
-					      on_object, &r);
-		else
-			rc = kscan_path(sc, target, &opt, on_object, &r);
-		if (fs) {
-			struct kof_fidset_stat fst;
-
-			kof_fidset_stats(fs, &fst);
-			/* A run that was told to trust nothing writes the set
-			 * back only when it has something to TAKE OUT of it. */
-			if ((!no_cache || fst.dropped) &&
-			    !kof_fidset_save(fs, cache_path))
-				fprintf(stderr,
-					"cache: could not be written to %s\n",
-					cache_path);
-			if (fst.dropped)
-				fprintf(stderr, "cache: %llu entr%s dropped - "
-					"found something in a file the cache "
-					"called clean\n",
-					(unsigned long long)fst.dropped,
-					fst.dropped == 1u ? "y" : "ies");
-			/* Before the free, and for the same reason scan_procs
-			 * does it: `opt` lives past this block. */
-			opt.cache_seen = NULL;
-			opt.cache_keep = NULL;
-			opt.cache_drop = NULL;
-			opt.cache_user = NULL;
-			kof_fidset_close(fs);
-		}
+		scan_files(c);
 	}
-	clock_gettime(CLOCK_MONOTONIC, &t1);
-	progress_clear(&r);
-	if (rc < 0)
-		fprintf(stderr, "%s: cannot scan %s\n", argv[0], target);
+	clock_gettime(CLOCK_MONOTONIC, &c->t1);
+	ksn_progress_clear(&c->r);
+	if (c->rc < 0)
+		fprintf(stderr, "%s: cannot scan %s\n", c->argv0, c->target);
+}
 
-	secs = (double)(t1.tv_sec - t0.tv_sec) +
-	       (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+/* The scan's time, and the totals summed over every scanner that ran. */
+static void cli_stats(struct cli *c)
+{
+	c->secs = (double)(c->t1.tv_sec - c->t0.tv_sec) +
+	       (double)(c->t1.tv_nsec - c->t0.tv_nsec) / 1e9;
 	/*
 	 * The totals, summed over every scanner that ran.
 	 *
@@ -2277,46 +801,49 @@ int main(int argc, char **argv)
 	 * engine never owned the array.
 	 */
 	{
-		static struct kof_stats sum;
 		const struct kof_stats *one;
 		unsigned k;
 
-		if (jobs > 1 && scs) {
-			for (k = 0; k < jobs; k++) {
-				one = scs[k] ? kscan_stats(scs[k]) : NULL;
+		if (c->jobs > 1 && c->scs) {
+			for (k = 0; k < c->jobs; k++) {
+				one = c->scs[k] ? kscan_stats(c->scs[k]) : NULL;
 				if (!one)
 					continue;
-				sum.objects        += one->objects;
-				sum.object_bytes   += one->object_bytes;
-				sum.unreadable     += one->unreadable;
-				sum.cached         += one->cached;
-				sum.considered     += one->considered;
-				sum.ran            += one->ran;
-				sum.by_target      += one->by_target;
-				sum.by_size        += one->by_size;
-				sum.by_arch        += one->by_arch;
-				sum.by_subtype     += one->by_subtype;
-				sum.by_region      += one->by_region;
-				sum.gram_bytes     += one->gram_bytes;
-				sum.gram_answers   += one->gram_answers;
-				sum.searches       += one->searches;
-				sum.multi_passes   += one->multi_passes;
-				sum.multi_hash4     += one->multi_hash4;
-				sum.multi_wumanber += one->multi_wumanber;
-				sum.multi_bytes    += one->multi_bytes;
-				sum.multi_answers    += one->multi_answers;
-				sum.heur_emu       += one->heur_emu;
-				sum.bytes_searched += one->bytes_searched;
-				if (one->peak_resident > sum.peak_resident)
-					sum.peak_resident = one->peak_resident;
+				c->sum.objects        += one->objects;
+				c->sum.object_bytes   += one->object_bytes;
+				c->sum.unreadable     += one->unreadable;
+				c->sum.cached         += one->cached;
+				c->sum.considered     += one->considered;
+				c->sum.ran            += one->ran;
+				c->sum.by_target      += one->by_target;
+				c->sum.by_size        += one->by_size;
+				c->sum.by_arch        += one->by_arch;
+				c->sum.by_subtype     += one->by_subtype;
+				c->sum.by_region      += one->by_region;
+				c->sum.gram_bytes     += one->gram_bytes;
+				c->sum.gram_answers   += one->gram_answers;
+				c->sum.searches       += one->searches;
+				c->sum.multi_passes   += one->multi_passes;
+				c->sum.multi_hash4     += one->multi_hash4;
+				c->sum.multi_wumanber += one->multi_wumanber;
+				c->sum.multi_bytes    += one->multi_bytes;
+				c->sum.multi_answers    += one->multi_answers;
+				c->sum.heur_emu       += one->heur_emu;
+				c->sum.bytes_searched += one->bytes_searched;
+				if (one->peak_resident > c->sum.peak_resident)
+					c->sum.peak_resident = one->peak_resident;
 			}
-			st = &sum;
+			c->st = &c->sum;
 		} else {
-			st = kscan_stats(sc);
+			c->st = kscan_stats(c->sc);
 		}
 	}
-	mb = st ? (double)st->object_bytes / 1048576.0 : 0.0;
+	c->mb = c->st ? (double)c->st->object_bytes / 1048576.0 : 0.0;
+}
 
+/* Under -v, the files that came back clean, and the ones nothing examined. */
+static void report_files(struct cli *c)
+{
 	/*
 	 * Under -v, the files that came back clean, at the file level.
 	 *
@@ -2326,26 +853,26 @@ int main(int argc, char **argv)
 	 * to look at reads as a scanner that skipped it. One line per file, not per
 	 * object, so a container and the layers it unpacked to are one "OK".
 	 */
-	if (r.verbose) {
+	if (c->r.verbose) {
 		size_t fi;
 
 		/* The file the walk ended on has no successor to trigger it. */
-		if (r.stream_v && r.cur_len)
-			v_say_file(&r, r.cur_file, r.cur_len);
+		if (c->r.stream_v && c->r.cur_len)
+			ksn_v_say_file(&c->r, c->r.cur_file, c->r.cur_len);
 
 		/*
 		 * Whatever streaming did not reach: every file under --jobs
 		 * above 1, and any file the walk revisited. `said` is what
 		 * keeps the two from printing the same line twice.
 		 */
-		for (fi = 0; fi < r.files.n; fi++) {
-			struct fent *e = &r.files.arr[fi];
+		for (fi = 0; fi < kverdict_filemap_count(c->r.files); fi++) {
+			struct kverdict_file *e = kverdict_filemap_at(c->r.files, fi);
 
-			if (e->said)
+			if (e->host)
 				continue;
 			if (e->level < 0 && !e->broken && e->examined) {
-				e->said = 1;
-				say(&r, C_GRN, "OK", e->file);
+				e->host = 1;
+				ksn_say(&c->r, C_GRN, "OK", e->file);
 			}
 		}
 		/*
@@ -2373,19 +900,25 @@ int main(int argc, char **argv)
 		 * is damaged - so a line each is information. Skipped is
 		 * ordinary: 190 of the 954 files in /usr/bin are shell and
 		 * Perl scripts that no module targets, and a line each buried
-		 * everything else the scan had to say. Same kind of verdict,
+		 * everything else the scan had to ksn_say. Same kind of verdict,
 		 * two orders of magnitude apart in how often it happens, so
 		 * the count carries it and the per-file line is detail.
 		 */
-		for (fi = 0; fi < r.files.n; fi++) {
-			const struct fent *e = &r.files.arr[fi];
+		for (fi = 0; fi < kverdict_filemap_count(c->r.files); fi++) {
+			const struct kverdict_file *e = kverdict_filemap_at(c->r.files, fi);
 
 			if (e->level < 0 && !e->broken && !e->examined)
-				say(&r, C_DIM, "No module targets this format",
+				ksn_say(&c->r, C_DIM, "No module targets this format",
 				    e->file);
 		}
 	}
+}
 
+/*
+ * THE SUMMARY: counts per file, read off the engine's per-file verdicts, then the time.
+ */
+static void report_summary(struct cli *c)
+{
 	printf("\n--- scan complete ---\n");
 
 	/*
@@ -2401,7 +934,7 @@ int main(int argc, char **argv)
 	 */
 	{
 		/* Heuristic files broken down by the WORD each finding carries, so
-		 * the summary can say "Shellcode" and "Truncated" apart rather than
+		 * the summary can ksn_say "Shellcode" and "Truncated" apart rather than
 		 * calling a well-formed shellcode shape "broken structure". */
 		struct { char kind[48]; uint64_t n; } hk[16];
 		int n_hk = 0, j;
@@ -2412,13 +945,13 @@ int main(int argc, char **argv)
 		uint32_t k;
 
 		memset(rf, 0, sizeof rf);
-		for (fi = 0; fi < r.files.n; fi++) {
-			const struct fent *e = &r.files.arr[fi];
+		for (fi = 0; fi < kverdict_filemap_count(c->r.files); fi++) {
+			const struct kverdict_file *e = kverdict_filemap_at(c->r.files, fi);
 
 			if (e->level == KOF_LEVEL_INFECT) {
-				inf_f++;
+				c->inf_f++;
 			} else if (e->level == KOF_LEVEL_SUSPECT) {
-				sus_f++;
+				c->sus_f++;
 			} else if (e->level == KOF_LEVEL_HEUR) {
 				const char *kd = e->kind[0] ? e->kind : NULL;
 
@@ -2453,7 +986,7 @@ int main(int argc, char **argv)
 		 * stopped means the scan did not see all of the tree, whatever the
 		 * file it was in rolled up to. */
 		for (k = 1; k < KOF_BROKEN_COUNT; k++)
-			broken_objs += r.by_reason[k];
+			c->broken_objs += c->r.by_reason[k];
 		/*
 		 * Clean is the files nothing was said about, and it is a SUBTRACTION
 		 * clamped so it cannot wrap. It cannot go negative under any normal
@@ -2463,23 +996,23 @@ int main(int argc, char **argv)
 		 * underflow there would print a clean count in the billions.
 		 */
 		{
-			uint64_t nonclean = inf_f + sus_f + heur_f + broken_f +
+			uint64_t nonclean = c->inf_f + c->sus_f + heur_f + broken_f +
 					    skip_f;
 
-			clean_f = r.files_total > nonclean
-				  ? r.files_total - nonclean : 0;
+			clean_f = kverdict_filemap_files(c->r.files) > nonclean
+				  ? kverdict_filemap_files(c->r.files) - nonclean : 0;
 		}
 
 		printf("scanned   %llu object(s) in %s%llu%s file(s), %.2f MB\n",
-		       st ? (unsigned long long)st->objects : 0ull,
-		       col(&r, C_BLD), (unsigned long long)r.files_total,
-		       col(&r, C_RST), mb);
+		       c->st ? (unsigned long long)c->st->objects : 0ull,
+		       ksn_col(&c->r, C_BLD), (unsigned long long)kverdict_filemap_files(c->r.files),
+		       ksn_col(&c->r, C_RST), c->mb);
 		printf("infected  %s%llu%s file(s)\n",
-		       inf_f ? col(&r, C_RED) : "", (unsigned long long)inf_f,
-		       inf_f ? col(&r, C_RST) : "");
+		       c->inf_f ? ksn_col(&c->r, C_RED) : "", (unsigned long long)c->inf_f,
+		       c->inf_f ? ksn_col(&c->r, C_RST) : "");
 		printf("suspected %s%llu%s file(s)\n",
-		       sus_f ? col(&r, C_YEL) : "", (unsigned long long)sus_f,
-		       sus_f ? col(&r, C_RST) : "");
+		       c->sus_f ? ksn_col(&c->r, C_YEL) : "", (unsigned long long)c->sus_f,
+		       c->sus_f ? ksn_col(&c->r, C_RST) : "");
 		/*
 		 * REPAIRED, AND ONLY WHEN SOMETHING WAS.
 		 *
@@ -2494,10 +1027,10 @@ int main(int argc, char **argv)
 		 * infected and is still reported as such - the verdict says what
 		 * was found, this says what was done about it.
 		 */
-		if (r.repaired)
+		if (c->r.repaired)
 			printf("repaired  %s%llu%s file(s)\n",
-			       col(&r, C_GRN), (unsigned long long)r.repaired,
-			       col(&r, C_RST));
+			       ksn_col(&c->r, C_GRN), (unsigned long long)c->r.repaired,
+			       ksn_col(&c->r, C_RST));
 		/*
 		 * HEURISTIC, split by KIND. Printed even at zero when the heuristic
 		 * ran, so a reader can tell "found nothing" from "was switched off".
@@ -2507,11 +1040,11 @@ int main(int argc, char **argv)
 		 * SHAPE in a perfectly well-formed file. Each kind now speaks for
 		 * itself.
 		 */
-		if (!opt.heur_off) {
+		if (!c->opt.heur_off) {
 			printf("heuristic %s%llu%s file(s)\n",
-			       heur_f ? col(&r, C_MAG) : "",
+			       heur_f ? ksn_col(&c->r, C_MAG) : "",
 			       (unsigned long long)heur_f,
-			       heur_f ? col(&r, C_RST) : "");
+			       heur_f ? ksn_col(&c->r, C_RST) : "");
 		/*
 		 * Only when there are any. A line reading "skipped 0" on every
 		 * scan is noise; the interesting case is the one where it is
@@ -2523,8 +1056,8 @@ int main(int argc, char **argv)
 			 * indented so it sits under the heuristic total. */
 			for (j = 0; j < n_hk; j++)
 				printf("  %-8s %s%llu%s file(s)\n", hk[j].kind,
-				       col(&r, C_MAG),
-				       (unsigned long long)hk[j].n, col(&r, C_RST));
+				       ksn_col(&c->r, C_MAG),
+				       (unsigned long long)hk[j].n, ksn_col(&c->r, C_RST));
 		}
 		/*
 		 * Broken files, split by reason. The reasons are counted per object
@@ -2535,13 +1068,13 @@ int main(int argc, char **argv)
 		if (skip_f) {
 			printf("skipped   %s%llu%s file(s)  "
 			       "(no module targets the format)\n",
-			       col(&r, C_DIM), (unsigned long long)skip_f,
-			       col(&r, C_RST));
+			       ksn_col(&c->r, C_DIM), (unsigned long long)skip_f,
+			       ksn_col(&c->r, C_RST));
 		}
 		if (broken_f) {
 			printf("broken    %s%llu%s file(s) the engine could not finish\n",
-			       col(&r, C_CYN), (unsigned long long)broken_f,
-			       col(&r, C_RST));
+			       ksn_col(&c->r, C_CYN), (unsigned long long)broken_f,
+			       ksn_col(&c->r, C_RST));
 			for (k = 1; k < KOF_BROKEN_COUNT; k++)
 				if (rf[k])
 					printf("            %-28s %llu\n",
@@ -2549,53 +1082,69 @@ int main(int argc, char **argv)
 					       (unsigned long long)rf[k]);
 		}
 		printf("clean     %s%llu%s file(s)\n",
-		       clean_f ? col(&r, C_GRN) : "", (unsigned long long)clean_f,
-		       clean_f ? col(&r, C_RST) : "");
+		       clean_f ? ksn_col(&c->r, C_GRN) : "", (unsigned long long)clean_f,
+		       clean_f ? ksn_col(&c->r, C_RST) : "");
 	}
 	/* Throughput beside the time it came from: on its own, a duration says nothing
 	 * without the size of what was scanned, and both are already here. Guarded
 	 * because a scan can finish inside the clock's resolution. */
-	if (secs > 0.0005)
-		printf("time      %.2f s (%.0f MB/s)\n", secs, mb / secs);
+	if (c->secs > 0.0005)
+		printf("time      %.2f s (%.0f MB/s)\n", c->secs, c->mb / c->secs);
 	else
-		printf("time      %.3f s\n", secs);
+		printf("time      %.3f s\n", c->secs);
 	/* Copied out while the scanner is alive. kscan_stats hands back a
 	 * pointer INTO the scanner, and the exit decision below runs after the
 	 * scanner has been freed - reading it there was a use-after-free, reached
 	 * on exactly the scans that found nothing, which is why every run that
 	 * detected something hid it. */
-	if (st)
-		unreadable = st->unreadable;
-	if (unreadable)
+}
+
+/* What else the run has to ksn_say: the objects it could not read, the cache, the cap. */
+static void report_notes(struct cli *c)
+{
+	if (c->st)
+		c->unreadable = c->st->unreadable;
+	if (c->unreadable)
 		printf("skipped   %llu object(s) that could not be read\n",
-		       (unsigned long long)unreadable);
+		       (unsigned long long)c->unreadable);
 	/*
 	 * SAID OUT LOUD, because a sweep that opened a tenth of what it was
 	 * pointed at and printed nothing about the rest reads as a sweep of a
 	 * tree with nothing in it. It is also the number that says whether the
 	 * cache is earning anything.
 	 */
-	if (st && st->cached)
+	if (c->st && c->st->cached)
 		printf("cached    %llu file(s) unchanged since the last scan\n",
-		       (unsigned long long)st->cached);
-	if (r.dropped)
+		       (unsigned long long)c->st->cached);
+	if (c->r.dropped)
 		printf("note      %llu finding(s) over the per-object cap\n",
-		       (unsigned long long)r.dropped);
-	if (r.stats && st)
-		print_stats(st);
+		       (unsigned long long)c->r.dropped);
+	if (c->r.stats && c->st)
+		ksn_print_stats(c->st);
+}
 
-	if (scs) {
+/* The scanners, the engine and the per-file map. */
+static void cli_close(struct cli *c)
+{
+	if (c->scs) {
 		unsigned k;
 
 		/* scs[0] is sc, freed below like it always was. */
-		for (k = 1; k < made; k++)
-			kscan_free(scs[k]);
-		free(scs);
+		for (k = 1; k < c->made; k++)
+			kscan_free(c->scs[k]);
+		free(c->scs);
 	}
-	kscan_free(sc);
-	keng_close(eng);
-	fmap_free(&r.files);
+	kscan_free(c->sc);
+	keng_close(c->eng);
+	kverdict_filemap_free(c->r.files);
+}
 
+/*
+ * THE EXIT CODE - see the three outcomes below. Also where the time report is printed,
+ * because every path out of the tool passes here.
+ */
+static int cli_exit(const struct cli *c)
+{
 	/*
 	 * Three outcomes, not two, because "found nothing" and "could not look" are
 	 * different answers and a shell has to be able to tell them apart. Reporting
@@ -2617,13 +1166,13 @@ int main(int argc, char **argv)
 	fflush(stdout);
 	KOF_TIME_REPORT();
 
-	if (inf_f || sus_f)
+	if (c->inf_f || c->sus_f)
 		return 1;
 	/* "Could not finish" belongs with "could not look", not with "found
 	 * nothing": a caller that treats an exhausted budget as a clean scan has
 	 * been evaded rather than reassured. broken_objs counts the objects a limit
 	 * or a gap stopped, which is the per-object fact the exit turns on. */
-	if (rc < 0 || unreadable || broken_objs)
+	if (c->rc < 0 || c->unreadable || c->broken_objs)
 		return 2;
 	/*
 	 * AND AN INTERRUPTED SWEEP IS THE SAME KIND OF ANSWER.
@@ -2637,7 +1186,40 @@ int main(int argc, char **argv)
 	 * Below the detection check on purpose: if the interrupted part had
 	 * already found something, the finding is still the answer.
 	 */
-	if (g_interrupted)
+	if (ksn_interrupted)
 		return 2;
 	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	struct cli c;
+	int rc;
+
+	/*
+	 * BEFORE A BYTE OF argv IS READ OR A PATH IS OPENED.
+	 *
+	 * On Windows argv has already lost every character outside the machine's
+	 * ANSI codepage by the time main is entered, and the narrow path
+	 * functions would not find the file even if it had not. A scanner that
+	 * cannot open a file is not a scanner that found it clean - see
+	 * kof_utf8_init. No-op on POSIX, where a path is just bytes.
+	 */
+	kof_utf8_init(&argc, &argv);
+
+	memset(&c, 0, sizeof c);
+	c.argv0 = argv[0];
+	c.jobs = 1;
+	c.emu_want = -1;
+	if ((rc = cli_parse(&c, argc, argv)) >= 0 ||
+	    (rc = cli_open(&c)) >= 0 ||
+	    (rc = cli_scanners(&c)) >= 0)
+		return rc;
+	cli_scan(&c);
+	cli_stats(&c);
+	report_files(&c);
+	report_summary(&c);
+	report_notes(&c);
+	cli_close(&c);
+	return cli_exit(&c);
 }

@@ -22,7 +22,7 @@
 #include <string.h>
 
 #include "x86.h"
-#include "x86_int.h"
+#include "x86_private.h"
 
 static const char *const r8_legacy[8] = { "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh" };
 static const char *const r8_rex[16] = {

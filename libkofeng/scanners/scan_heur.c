@@ -7,39 +7,24 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "../verdictor/verdict.h"
 #include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
 #include "../detectors/heur/kofheur.h"
 #include "../kofcore/kofmod/heur.h"
 #include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
 #include "../kofcore/kofmod/elf.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
 
 
 /*
  * THE FORMS OF A SCRIPT, AS OBJECTS - and deliberately NOT inside
- * sx_unpack_object.
+ * the open stage (scan_unpack.c).
  *
  * It was in there, which looked tidy and was wrong three ways, and the third
  * one is why nothing ever came of it:
  *
- *   - sx_unpack_object returns at its first line when the database has no
+ *   - the open stage returns at its first line when the database has no
  *     unpacker modules. kofviewer opened with no --db is exactly that engine,
  *     so the reader who asked to see the folded form of a shell got a tree
  *     with no child in it and no reason given. Folding needs a lexical table
@@ -68,7 +53,7 @@
 int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			const struct kof_scan_option *opt, uint32_t pdepth)
 {
-	if (sc->broken || ctx->format != KOF_FMT_SCRIPT)
+	if (sc->obj.open.broken || ctx->format != KOF_FMT_SCRIPT)
 		return 0;
 	if (!kof_objtree_may_open(opt) || pdepth > EMU_MAX_PACKER_DEPTH)
 		return 0;
@@ -81,7 +66,7 @@ int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
  *
  * Everything below already exists by the time this runs: the anomaly word came
  * out of the parse, the depth came down the walk, and whether an unpacker gave up
- * is the value sx_unpack_object just returned. Nothing is searched for and no pass is
+ * is the value sx_open_end just returned. Nothing is searched for and no pass is
  * made over the object, which is why this runs unless the caller switched it off
  * rather than only when the caller asked for it.
  *
@@ -150,11 +135,11 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	/*
 	 * The object that WAS packed, not the one that came out.
 	 *
-	 * See kof_scanner.packed_here. Both are true of a packed sample and they
+	 * See kof_scanner.obj.open.packed_here. Both are true of a packed sample and they
 	 * are different objects: this marks the file on disk, and packer_depth
 	 * above marks what was inside it.
 	 */
-	if (sc->packed_here)
+	if (sc->obj.open.packed_here)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_PACKED);
 	if (partial)
 		f.flags |= KOF_HEUR_FL(KOF_HEUR_F_UNPACK_PARTIAL);
@@ -177,7 +162,7 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	/* And whether the emulator produced anything from this object, which is
 	 * the thing a caller offering "run it" has to know before offering it
 	 * again. See kof_result.emu_unpacked. */
-	out->emu_unpacked   = sc->emu_produced;
+	out->emu_unpacked   = sc->obj.emu.produced;
 
 	if (score < m->bar_centinats || out->n >= KOF_MAX_EVIDENCE)
 		return;
@@ -225,7 +210,7 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	 * file and `Heur:Infected` on its child, which is the evidence and
 	 * the conclusion printed as two findings about one file.
 	 */
-	if (sc->n_kids > sc->n_views + sc->n_carved)
+	if (sc->child.n > sc->child.n_views + sc->child.n_carved)
 		return;
 
 	{
@@ -351,9 +336,9 @@ uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		KOF_TIME_BEGIN(KOF_T_HEUR);
 		m->fn(ctx);
 		KOF_TIME_END(KOF_T_HEUR);
-		sc->cur_mod   = NULL;
+		sc->mod.cur   = NULL;
 
-		if (!sc->rep_valid)
+		if (!sc->mod.rep_valid)
 			continue;
 		want |= m->heur_want;
 		/*
@@ -379,7 +364,7 @@ uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 * still steered. Before the finding, because the finding is
 		 * the whole of what it declines to make.
 		 */
-		if (sc->rep_level == (uint32_t)KOF_LVL_ACT)
+		if (sc->mod.rep_level == (uint32_t)KOF_LVL_ACT)
 			continue;
 		/*
 		 * A NAMED FAMILY SUPERSEDES A GUESS ABOUT THE SHAPE, and the
@@ -406,7 +391,7 @@ uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 			/* The bit is this finding's index: the drop below reads it. */
 			if (f && (m->heur_want & KOF_ENG_KEEP_ON_OPEN))
-				sc->heur_keep |= 1u << (unsigned)(f - out->v);
+				sc->obj.open.heur_keep |= 1u << (unsigned)(f - out->v);
 		}
 		/* One HEUR line per object, the same way the detector loop
 		 * stops at the first family - and for the same reason: the

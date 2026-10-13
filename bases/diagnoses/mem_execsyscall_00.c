@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * mem_execsyscall_00.c - memory asked for as executable, filled, and entered.

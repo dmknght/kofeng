@@ -9,29 +9,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
-#include "objtree.h"
-#include "../detectors/pattern/kofmultimatch.h"
-#include "../detectors/heur/kofheur.h"
-#include "../kofcore/kofmod/heur.h"
-#include "../kofcore/kofdebug.h"
-#include "../detectors/linkage/kofdiag.h"
-#include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "../kofcore/kofmod/kofsym.h"
-#include "../analyzers/parsers/kofformat.h"
-#include <celllysis/xref.h>
-#include <celllysis/trueline.h>
-#include "../kofcore/kofmod/elf.h"
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include "../kofcore/kofplatform.h"
-#include "../analyzers/normalize/executables.h"
-#include "scan_int.h"
 
 
 uint32_t sx_norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
@@ -95,7 +73,7 @@ void sx_bits_set(uint8_t *b, uint64_t from, uint64_t to)
 	b[tb] |= (uint8_t)(0xffu >> (7u - ((to - 1u) & 7u)));
 }
 
-void sx_bits_clr(uint8_t *b, uint64_t from, uint64_t to)
+static void sx_bits_clr(uint8_t *b, uint64_t from, uint64_t to)
 {
 	uint64_t fb, tb;
 

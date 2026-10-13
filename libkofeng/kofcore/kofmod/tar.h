@@ -184,15 +184,10 @@ struct kof_tar_info {
 
 	uint64_t region_bytes[KOF_TAR_CLS_COUNT];
 
-	/* Runs, classified and settled. Spelled out rather than including runlist.h,
-	 * for the reason docole.h gives: the ABI must not depend on a host header. */
+	/* Runs, classified and settled. struct kof_run is range.h's. */
 	uint32_t n_runs;
 	uint32_t reserved0;
-	struct {
-		uint64_t off, len;
-		uint32_t cls;         /* enum kof_tar_class */
-		uint32_t reserved;
-	} run[KOF_TAR_MAX_EXTENTS];
+	struct kof_run run[KOF_TAR_MAX_EXTENTS];   /* cls is enum kof_tar_class */
 
 	struct kof_tar_entry entry[KOF_TAR_MAX_ENTRIES];
 };

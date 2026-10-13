@@ -174,7 +174,7 @@ static void a_literal_cannot_hold_a_zero(void)
 	 * ksigbuilder's literal parser - so it is asserted as the sentence it
 	 * is, and the reference is exact so the next reader can check it.
 	 *
-	 *   ksigbuilder.c, "SIX ESCAPES AND NO MORE":
+	 *   ksigbuilder/ksb_read.c, "SIX ESCAPES AND NO MORE":
 	 *     \\  \"  \?  \t  \n  \r
 	 *   and for anything else: "use a hex pattern for anything else".
 	 *
@@ -408,7 +408,7 @@ static void the_map_covers_the_output(void)
 /* ------------------------------------------------------------------------
  * THE BASE64 PASS.
  *
- * It took over from bases/decomp/cmdb64_00.c, which was an unpacker with its
+ * It took over from the cmdb64_00 module (retired from bases/decomp), which was an unpacker with its
  * own tests, so the cases below are the ones that module was measured on. Each
  * is a shape a real dropper writes or a shape that broke an earlier version of
  * the walk - none of them is here to cover a line.
@@ -693,8 +693,13 @@ static void kept_regions_do_not_move(void)
 		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
 
 	mark[0] = 0; mark[1] = 64; mark[2] = 512; mark[3] = 640;
-	m = kof_exe_norm_masked(in, n, keep, NULL, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, mark, mark_out, 4u, NULL);
+	{
+		const struct kof_exe_norm_req rq = { in, n, keep, NULL, KOF_EXE_NORM_NULLRUN,
+						     mark, 4u };
+		struct kof_exe_norm_res res = { out, sizeof out, mark_out, 0 };
+
+		m = kof_exe_norm_masked(&rq, &res);
+	}
 
 	check(m > 0 && m < n, "masked: the object still shortens",
 	      "the data run has to collapse or nothing is being tested");
@@ -751,8 +756,12 @@ static void a_run_stops_at_the_boundary(void)
 	for (i = 200; i < 300; i++)
 		keep[i >> 3] |= (uint8_t)(1u << (i & 7u));
 
-	m = kof_exe_norm_masked(in, n, keep, NULL, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, NULL, NULL, 0u, NULL);
+	{
+		const struct kof_exe_norm_req rq = { in, n, keep, NULL, KOF_EXE_NORM_NULLRUN };
+		struct kof_exe_norm_res res = { out, sizeof out };
+
+		m = kof_exe_norm_masked(&rq, &res);
+	}
 	/* Only [150,200) may collapse: 50 zeros to 2, so 48 bytes go. */
 	check(m == n - 48u, "masked: a run collapses only up to the boundary",
 	      "taking the kept half of it would move everything after");
@@ -782,8 +791,13 @@ static void a_dropped_span_leaves_the_view(void)
 	for (i = 100; i < 200; i++)
 		drop[i >> 3] |= (uint8_t)(1u << (i & 7u));
 
-	m = kof_exe_norm_masked(in, n, NULL, drop, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, NULL, NULL, 0u, &fired);
+	{
+		const struct kof_exe_norm_req rq = { in, n, NULL, drop, KOF_EXE_NORM_NULLRUN };
+		struct kof_exe_norm_res res = { out, sizeof out };
+
+		m = kof_exe_norm_masked(&rq, &res);
+		fired = res.fired;
+	}
 	check(m == n - 100u, "masked: a dropped span is gone from the view",
 	      "not rewritten and not kept - removed, so the view is shorter");
 	check((fired & KOF_EXE_NORM_CUTLIB) != 0,
@@ -814,8 +828,13 @@ static void an_empty_view_is_not_an_unchanged_one(void)
 		in[i] = (uint8_t)('z');
 	memset(drop, 0xff, sizeof drop);        /* all of it is the library */
 
-	m = kof_exe_norm_masked(in, n, NULL, drop, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, NULL, NULL, 0u, &fired);
+	{
+		const struct kof_exe_norm_req rq = { in, n, NULL, drop, KOF_EXE_NORM_NULLRUN };
+		struct kof_exe_norm_res res = { out, sizeof out };
+
+		m = kof_exe_norm_masked(&rq, &res);
+		fired = res.fired;
+	}
 	check(m == 0, "masked: an object dropped in full has an empty view",
 	      "there is no byte left to write");
 	check(fired == KOF_EXE_NORM_CUTLIB,
@@ -825,8 +844,13 @@ static void an_empty_view_is_not_an_unchanged_one(void)
 	/* The other zero: nothing to do, so nothing fires. */
 	memset(drop, 0, sizeof drop);
 	fired = 0xffffffffu;
-	m = kof_exe_norm_masked(in, n, NULL, drop, KOF_EXE_NORM_NULLRUN, out,
-				sizeof out, NULL, NULL, 0u, &fired);
+	{
+		const struct kof_exe_norm_req rq = { in, n, NULL, drop, KOF_EXE_NORM_NULLRUN };
+		struct kof_exe_norm_res res = { out, sizeof out };
+
+		m = kof_exe_norm_masked(&rq, &res);
+		fired = res.fired;
+	}
 	check(m == 0 && fired == 0, "masked: an untouched object fires nothing",
 	      "same length, and the difference is entirely in `fired`");
 }

@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * net_recvapihash_00.c - a Windows program that opens a socket, connects it, and

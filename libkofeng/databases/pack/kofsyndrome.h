@@ -40,8 +40,8 @@
  * decide it says (ambiguous, unresolved) instead of picking.
  */
 
-#ifndef KOFENG_PATHOGEN_KOFSYNDROME_H
-#define KOFENG_PATHOGEN_KOFSYNDROME_H
+#ifndef KOFENG_KOFSYNDROME_H
+#define KOFENG_KOFSYNDROME_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -116,4 +116,4 @@ int kof_synd_infer(const struct kof_synd_set *, const uint32_t *dis,
  */
 size_t kof_synd_name(const struct kof_synd_result *r, char *out, size_t cap);
 
-#endif /* KOFENG_PATHOGEN_KOFSYNDROME_H */
+#endif /* KOFENG_KOFSYNDROME_H */

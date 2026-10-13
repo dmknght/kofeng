@@ -21,11 +21,10 @@
  *                         A stop at a NEW address is progress and starts the count
  *                         again, so a decoder of a thousand different harmless
  *                         calls is followed. The other half - a loop that polls
- *                         ONE call ending the run - is NOT checked here: the
- *                         emulator's decode cache hands the watch stale bytes on a
- *                         second visit to an instruction (see the note in
- *                         diag_emu_int.h), so a fixture of that loop makes one
- *                         stop, not a thousand.
+ *                         ONE call ending the run, and the converse - one
+ *                         libc wrapper reached from 300 different call sites is
+ *                         NOT a loop (a stop is its address AND its caller) - are
+ *                         checked at the window's edges by emu_syscall_watch.c.
  *   DIAG_EMU_INSN (2M)    the instruction budget, max(2M, 64 x code bytes); spent,
  *                         the scan says KGENOME_OVER_BUDGET. A delay loop of 1M
  *                         iterations before the decoder - the cheapest
@@ -33,7 +32,7 @@
  *                         so did one of 2.5M iterations in a 100 KB object (the
  *                         emulator calls a run finished after KGENOME_EMU_IDLE, 4M
  *                         instructions, without a new page). A COUNTED delay is now
- *                         accounted by its iterations, not run (kofemu_loop.c), so
+ *                         accounted by its iterations, not run (emu_loop.c), so
  *                         neither bound sees it. A wait that is NOT that shape - a
  *                         counter in memory, a spin - is still what the budget is
  *                         for, and the scan still says so.

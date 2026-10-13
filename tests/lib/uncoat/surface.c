@@ -96,8 +96,15 @@ static void in_place_and_streams(void)
 	CK(kuncoat_bcj_x86_decode(buf, sizeof buf, 0) <= sizeof buf);
 	CK(kuncoat_mpress_cto_decode(buf, sizeof buf, 64) <= sizeof buf);
 	kuncoat_aspack_e8e9_decode(buf, sizeof buf, 0xe8);
-	CK(kuncoat_bcj2_decode(garbage, 0, garbage, 0, garbage, 0, garbage, 0, out, OUT) <= OUT);
-	CK(kuncoat_bcj2_decode(garbage, sizeof garbage, garbage, 8, garbage, 8, garbage, 16, out, OUT) <= OUT);
+	{
+		struct kuncoat_bcj2_io b0 = { { garbage, 0 }, { garbage, 0 }, { garbage, 0 },
+					      { garbage, 0 }, out, OUT };
+		struct kuncoat_bcj2_io b1 = { { garbage, sizeof garbage }, { garbage, 8 },
+					      { garbage, 8 }, { garbage, 16 }, out, OUT };
+
+		CK(kuncoat_bcj2_decode(&b0) <= OUT);
+		CK(kuncoat_bcj2_decode(&b1) <= OUT);
+	}
 
 	/* the streaming ones, with a sink that counts */
 	got = 0; n = 99;

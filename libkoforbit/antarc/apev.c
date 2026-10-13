@@ -456,74 +456,43 @@ static uint32_t ev_tid(const struct proc_event *ev)
 	}
 }
 
-static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
-		  struct kof_evt *out)
+/* to_evt step: a clone() of a thread is a thread start, not a process. */
+static int to_evt_thread_fork(struct kofa_pev *p, struct kof_evt *out,
+			      uint32_t pid, uint32_t tid)
 {
-	uint32_t pid = ev_tgid(ev);
-	uint32_t tid = ev_tid(ev);
-	uint32_t ppid = 0;
-	/* A task that is not its own group leader is a THREAD of the process
-	 * that leads it - see the note on ev_tgid. */
-	int is_thread = tid && tid != pid;
 	struct apev_ent *e;
-	uint16_t verb;
 
-	if (!pid)
+	if (!p->trace_self && pid == p->self_pid)
 		return 0;
+	memset(out, 0, sizeof *out);
+	out->stamp  = kof_evt_now();
+	out->seq    = p->seq++;
+	out->verb   = KOF_EVT_THREAD_START;
+	out->os     = KOF_OS_LINUX;
+	out->source = KOF_SRC_PROCESS;
+	out->pid    = pid;
+	out->tid    = tid;
+	out->actor_pid = pid;
+	out->off_object  = KOF_TEXT_NONE;
+	out->off_image   = KOF_TEXT_NONE;
+	out->off_cmdline = KOF_TEXT_NONE;
+	e = ent_find(p, pid);
+	if (e && e->image[0])
+		out->off_image = kof_evt_text_put(out,
+						  e->image);
+	p->produced++;
+	return 1;
+}
 
-	/*
-	 * A FORK IS RECORDED AND NOT REPORTED.
-	 *
-	 * It is the same program in a second process - a shell's subshell, a
-	 * server's worker - and it carries no new image, so what a rule is
-	 * written against is the exec that may follow. Reporting both would
-	 * double the volume of the highest-value stream and give the second
-	 * record nothing the first did not have.
-	 *
-	 * BUT IT IS WHERE THE PARENT COMES FROM, and that is why it is
-	 * subscribed to at all. The kernel names both ends here; by EXEC time
-	 * /proc may already be gone.
-	 */
-	if (ev->what == PROC_EVENT_FORK) {
-		/*
-		 * A THREAD, NOT A PROCESS. clone() with CLONE_THREAD arrives
-		 * here too, and recording it would overwrite the parent of the
-		 * process that already owns this tgid with the thread's own
-		 * creator. It is reported as what it is instead.
-		 */
-		if (is_thread) {
-			if (!p->trace_self && pid == p->self_pid)
-				return 0;
-			memset(out, 0, sizeof *out);
-			out->stamp  = kof_evt_now();
-			out->seq    = p->seq++;
-			out->verb   = KOF_EVT_THREAD_START;
-			out->os     = KOF_OS_LINUX;
-			out->source = KOF_SRC_PROCESS;
-			out->pid    = pid;
-			out->tid    = tid;
-			out->actor_pid = pid;
-			out->off_object  = KOF_TEXT_NONE;
-			out->off_image   = KOF_TEXT_NONE;
-			out->off_cmdline = KOF_TEXT_NONE;
-			e = ent_find(p, pid);
-			if (e && e->image[0])
-				out->off_image = kof_evt_text_put(out,
-								  e->image);
-			p->produced++;
-			return 1;
-		}
-		e = ent_get(p, pid);
-		if (e) {
-			e->ppid    = (uint32_t)ev->event_data.fork.parent_tgid;
-			e->started = ev->timestamp_ns;
-		}
-		return 0;
-	}
+/*
+ * to_evt step: decide whether a record is reported at all. Returns the verb to
+ * report under (a thread's exit is not a process stop), or 0 to drop it.
+ */
+static uint16_t to_evt_admit(struct kofa_pev *p, const struct proc_event *ev,
+			     uint32_t pid, int is_thread, uint16_t verb)
+{
+	struct apev_ent *e;
 
-	verb = verb_of(ev->what);
-	if (!verb)
-		return 0;
 	/*
 	 * AND AN EXIT IS A THREAD'S EXIT WHEN THE TASK IS NOT THE LEADER.
 	 *
@@ -570,6 +539,13 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 	if (!p->trace_self && pid == p->self_pid)
 		return 0;
 
+	return verb;
+}
+
+/* to_evt step: the fields every reported record starts with. */
+static void to_evt_head(struct kofa_pev *p, struct kof_evt *out, uint16_t verb,
+			uint32_t pid, uint32_t tid)
+{
 	memset(out, 0, sizeof *out);
 	out->stamp  = kof_evt_now();
 	out->seq    = p->seq++;
@@ -587,205 +563,284 @@ static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
 	out->off_object  = KOF_TEXT_NONE;
 	out->off_image   = KOF_TEXT_NONE;
 	out->off_cmdline = KOF_TEXT_NONE;
+}
 
-	if (verb == KOF_EVT_THREAD_STOP) {
-		out->actor_pid = pid;
-		{
-			const struct apev_ent *k = ent_find(p, pid);
-
-			if (k && k->image[0])
-				out->off_image = kof_evt_text_put(out,
-								  k->image);
-		}
-		p->produced++;
-		return 1;
-	}
-	if (verb != KOF_EVT_PROC_START && verb != KOF_EVT_PROC_STOP) {
-		char det[160];
-
-		verb_detail(ev, det, sizeof det);
-		if (det[0])
-			out->off_object = kof_evt_text_put(out, det);
-		/*
-		 * THE TRACER IS THE ACTOR, and it is the whole point of the
-		 * record: an attach is ABOUT the process being attached to and
-		 * is caused by the one attaching.
-		 */
-		if (verb == KOF_EVT_PROC_ATTACH)
-			out->actor_pid =
-				(uint32_t)ev->event_data.ptrace.tracer_tgid;
-		else
-			out->actor_pid = pid;
-		/* The image, when the table already knows it - these arrive
-		 * about a process that is running, so it usually does. */
-		{
-			const struct apev_ent *k = ent_find(p, pid);
-
-			if (k && k->image[0])
-				out->off_image = kof_evt_text_put(out,
-								  k->image);
-		}
-		p->produced++;
-		return 1;
-	}
-
-	if (verb == KOF_EVT_PROC_STOP) {
-		/*
-		 * A stop is its own actor, absent evidence to the contrary:
-		 * the connector's EXIT record does not say who ended the
-		 * process - a signal from elsewhere and a plain return look
-		 * identical - and there is no KOF_F_ for an actor to be
-		 * reported missing with.
-		 */
-		out->actor_pid = pid;
-		/*
-		 * THE PARENT FROM THE RECORD ITSELF, not from the table.
-		 *
-		 * An exit record names its parent, so the answer is IN THE
-		 * STREAM and does not have to be remembered. That also makes
-		 * it right in the two cases the table is wrong about: a
-		 * process whose entry was recycled, and one that was
-		 * reparented after its own parent died. The table is the
-		 * fallback now rather than the source.
-		 */
-		if (ev->event_data.exit.parent_tgid)
-			ppid = (uint32_t)ev->event_data.exit.parent_tgid;
-		/*
-		 * HOW IT ENDED, through the union's own setter - see the note
-		 * on kof_evt's overlapping members, which says never to reach
-		 * into it directly.
-		 *
-		 * The connector carries both halves and they are different
-		 * facts: a status from exit(), or the signal that killed it. A
-		 * killed process has exit_code zero and would otherwise read
-		 * as a clean exit, which is the difference between a program
-		 * that finished and one that was stopped.
-		 */
-		{
-			struct kof_evt_proc *pr = kof_evt_set_proc(out);
-			uint32_t st = (uint32_t)ev->event_data.exit.exit_code;
-
-			/*
-			 * exit_signal IS NOT HOW IT DIED. It is the signal the
-			 * task sends its PARENT when it ends, which is SIGCHLD
-			 * for everything an ordinary program does - so reading
-			 * it as the cause of death reported 17 for every clean
-			 * exit on a real host, which is what a reader saw:
-			 *
-			 *     ProcStop  pid=93288  ?  exit=17
-			 *
-			 * The cause is in exit_code, which is a wait status:
-			 * the low seven bits are the signal that killed it and
-			 * zero when nothing did, and the next eight are what
-			 * the program returned.
-			 */
-			if (pr)
-				pr->exit_code = (st & 0x7fu) ? (st & 0x7fu)
-							     : ((st >> 8) & 0xffu);
-		}
-		e = ent_find(p, pid);
-		if (!ppid && e)
-			ppid = e->ppid;
-		if (ppid)
-			out->ppid = ppid;
-		else
-			out->miss |= KOF_F_PPID;
-		if (e && e->image[0])
-			out->off_image = kof_evt_text_put(out, e->image);
-		else
-			out->miss |= KOF_F_IMAGE;
-		ent_drop(p, pid);
-		p->produced++;
-		return 1;
-	}
-
-	/* ---- a start ---- */
+/* to_evt step: a thread exit - the process is still running. */
+static int to_evt_thread_stop(struct kofa_pev *p, struct kof_evt *out,
+			      uint32_t pid)
+{
+	out->actor_pid = pid;
 	{
-		e = ent_get(p, pid);
-		if (!e)
-			return 0;
-		e->running = 1;
-		e->started = ev->timestamp_ns;
-		e->last_exec_ns = ev->timestamp_ns;
-		/*
-		 * THE PARENT, FROM THE FORK THIS SESSION ALREADY SAW. Falling
-		 * back to /proc is for a process that forked before the
-		 * session opened, and it is the racy path - which is why it is
-		 * the fallback rather than the rule.
-		 */
-		if (!e->ppid) {
-			char path[64], st[512];
-			int fd;
+		const struct apev_ent *k = ent_find(p, pid);
 
-			snprintf(path, sizeof path, "/proc/%u/stat",
-				 (unsigned)pid);
-			fd = open(path, O_RDONLY | O_CLOEXEC);
-			if (fd >= 0) {
-				ssize_t n = read(fd, st, sizeof st - 1u);
-
-				close(fd);
-				if (n > 0) {
-					char *rp;
-
-					st[n] = '\0';
-					/* Past comm, which may hold anything
-					 * including spaces and brackets - the
-					 * LAST ')' ends it. */
-					rp = strrchr(st, ')');
-					if (rp && rp[1] && rp[2])
-						e->ppid = (uint32_t)strtoul(
-							rp + 4, NULL, 10);
-				}
-			}
-		}
-		if (e->ppid) {
-			out->ppid = e->ppid;
-			/*
-			 * THE ACTOR OF A START IS WHOEVER LAUNCHED IT, not the
-			 * process that just came into being - see
-			 * kof_evt.actor_pid, and libkoforbit/grille fills it from the
-			 * ETW raiser for the same reason.
-			 */
-			out->actor_pid = e->ppid;
-		} else {
-			out->miss |= KOF_F_PPID;
-		}
-
-		/*
-		 * WHAT THE PREFETCH GOT, and one more attempt when it got
-		 * nothing: a process that outlives the read is still there,
-		 * and the second look costs one readlink on the rare path.
-		 */
-		if (!e->got_exe)
-			e->got_exe = (uint8_t)read_exe(pid, e->image,
-						       sizeof e->image);
-		if (!e->got_cmd)
-			e->got_cmd = (uint8_t)read_cmdline(pid, e->cmd,
-							   sizeof e->cmd);
-		if (e->got_exe) {
-			out->off_image  = kof_evt_text_put(out, e->image);
-			out->off_object = out->off_image;
-			out->loc = kof_classify(e->image, &out->attack);
-		} else {
-			out->miss |= KOF_F_IMAGE;
-			e->image[0] = '\0';
-			p->no_proc++;
-		}
-		if (e->got_cmd) {
-			out->off_cmdline = kof_evt_text_put(out, e->cmd);
-		} else {
-			out->miss |= KOF_F_CMDLINE;
-			/*
-			 * AND WHICH KIND OF ABSENCE IT WAS. "it had none" and
-			 * "we lost the race" are different facts - see
-			 * KOF_EF_CMDLINE_RACED, which the live line already
-			 * knows how to say and which nothing was setting.
-			 */
-			out->flags |= KOF_EF_CMDLINE_RACED;
-		}
+		if (k && k->image[0])
+			out->off_image = kof_evt_text_put(out,
+							  k->image);
 	}
 	p->produced++;
 	return 1;
+}
+
+/* to_evt step: every verb that is neither a start nor a stop. */
+static int to_evt_detail(struct kofa_pev *p, const struct proc_event *ev,
+			 struct kof_evt *out, uint16_t verb, uint32_t pid)
+{
+	char det[160];
+
+	verb_detail(ev, det, sizeof det);
+	if (det[0])
+		out->off_object = kof_evt_text_put(out, det);
+	/*
+	 * THE TRACER IS THE ACTOR, and it is the whole point of the
+	 * record: an attach is ABOUT the process being attached to and
+	 * is caused by the one attaching.
+	 */
+	if (verb == KOF_EVT_PROC_ATTACH)
+		out->actor_pid =
+			(uint32_t)ev->event_data.ptrace.tracer_tgid;
+	else
+		out->actor_pid = pid;
+	/* The image, when the table already knows it - these arrive
+	 * about a process that is running, so it usually does. */
+	{
+		const struct apev_ent *k = ent_find(p, pid);
+
+		if (k && k->image[0])
+			out->off_image = kof_evt_text_put(out,
+							  k->image);
+	}
+	p->produced++;
+	return 1;
+}
+
+/* to_evt step: a process stop, with its parent and how it ended. */
+static int to_evt_stop(struct kofa_pev *p, const struct proc_event *ev,
+		       struct kof_evt *out, uint32_t pid)
+{
+	uint32_t ppid = 0;
+	struct apev_ent *e;
+
+	/*
+	 * A stop is its own actor, absent evidence to the contrary:
+	 * the connector's EXIT record does not say who ended the
+	 * process - a signal from elsewhere and a plain return look
+	 * identical - and there is no KOF_F_ for an actor to be
+	 * reported missing with.
+	 */
+	out->actor_pid = pid;
+	/*
+	 * THE PARENT FROM THE RECORD ITSELF, not from the table.
+	 *
+	 * An exit record names its parent, so the answer is IN THE
+	 * STREAM and does not have to be remembered. That also makes
+	 * it right in the two cases the table is wrong about: a
+	 * process whose entry was recycled, and one that was
+	 * reparented after its own parent died. The table is the
+	 * fallback now rather than the source.
+	 */
+	if (ev->event_data.exit.parent_tgid)
+		ppid = (uint32_t)ev->event_data.exit.parent_tgid;
+	/*
+	 * HOW IT ENDED, through the union's own setter - see the note
+	 * on kof_evt's overlapping members, which says never to reach
+	 * into it directly.
+	 *
+	 * The connector carries both halves and they are different
+	 * facts: a status from exit(), or the signal that killed it. A
+	 * killed process has exit_code zero and would otherwise read
+	 * as a clean exit, which is the difference between a program
+	 * that finished and one that was stopped.
+	 */
+	{
+		struct kof_evt_proc *pr = kof_evt_set_proc(out);
+		uint32_t st = (uint32_t)ev->event_data.exit.exit_code;
+
+		/*
+		 * exit_signal IS NOT HOW IT DIED. It is the signal the
+		 * task sends its PARENT when it ends, which is SIGCHLD
+		 * for everything an ordinary program does - so reading
+		 * it as the cause of death reported 17 for every clean
+		 * exit on a real host, which is what a reader saw:
+		 *
+		 *     ProcStop  pid=93288  ?  exit=17
+		 *
+		 * The cause is in exit_code, which is a wait status:
+		 * the low seven bits are the signal that killed it and
+		 * zero when nothing did, and the next eight are what
+		 * the program returned.
+		 */
+		if (pr)
+			pr->exit_code = (st & 0x7fu) ? (st & 0x7fu)
+						     : ((st >> 8) & 0xffu);
+	}
+	e = ent_find(p, pid);
+	if (!ppid && e)
+		ppid = e->ppid;
+	if (ppid)
+		out->ppid = ppid;
+	else
+		out->miss |= KOF_F_PPID;
+	if (e && e->image[0])
+		out->off_image = kof_evt_text_put(out, e->image);
+	else
+		out->miss |= KOF_F_IMAGE;
+	ent_drop(p, pid);
+	p->produced++;
+	return 1;
+}
+
+/* to_evt step: a process start, with its parent, image and command line. */
+static int to_evt_start(struct kofa_pev *p, const struct proc_event *ev,
+			struct kof_evt *out, uint32_t pid)
+{
+	struct apev_ent *e;
+
+	e = ent_get(p, pid);
+	if (!e)
+		return 0;
+	e->running = 1;
+	e->started = ev->timestamp_ns;
+	e->last_exec_ns = ev->timestamp_ns;
+	/*
+	 * THE PARENT, FROM THE FORK THIS SESSION ALREADY SAW. Falling
+	 * back to /proc is for a process that forked before the
+	 * session opened, and it is the racy path - which is why it is
+	 * the fallback rather than the rule.
+	 */
+	if (!e->ppid) {
+		char path[64], st[512];
+		int fd;
+
+		snprintf(path, sizeof path, "/proc/%u/stat",
+			 (unsigned)pid);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			ssize_t n = read(fd, st, sizeof st - 1u);
+
+			close(fd);
+			if (n > 0) {
+				char *rp;
+
+				st[n] = '\0';
+				/* Past comm, which may hold anything
+				 * including spaces and brackets - the
+				 * LAST ')' ends it. */
+				rp = strrchr(st, ')');
+				if (rp && rp[1] && rp[2])
+					e->ppid = (uint32_t)strtoul(
+						rp + 4, NULL, 10);
+			}
+		}
+	}
+	if (e->ppid) {
+		out->ppid = e->ppid;
+		/*
+		 * THE ACTOR OF A START IS WHOEVER LAUNCHED IT, not the
+		 * process that just came into being - see
+		 * kof_evt.actor_pid, and libkoforbit/grille fills it from the
+		 * ETW raiser for the same reason.
+		 */
+		out->actor_pid = e->ppid;
+	} else {
+		out->miss |= KOF_F_PPID;
+	}
+
+	/*
+	 * WHAT THE PREFETCH GOT, and one more attempt when it got
+	 * nothing: a process that outlives the read is still there,
+	 * and the second look costs one readlink on the rare path.
+	 */
+	if (!e->got_exe)
+		e->got_exe = (uint8_t)read_exe(pid, e->image,
+					       sizeof e->image);
+	if (!e->got_cmd)
+		e->got_cmd = (uint8_t)read_cmdline(pid, e->cmd,
+						   sizeof e->cmd);
+	if (e->got_exe) {
+		out->off_image  = kof_evt_text_put(out, e->image);
+		out->off_object = out->off_image;
+		out->loc = kof_classify(e->image, &out->attack);
+	} else {
+		out->miss |= KOF_F_IMAGE;
+		e->image[0] = '\0';
+		p->no_proc++;
+	}
+	if (e->got_cmd) {
+		out->off_cmdline = kof_evt_text_put(out, e->cmd);
+	} else {
+		out->miss |= KOF_F_CMDLINE;
+		/*
+		 * AND WHICH KIND OF ABSENCE IT WAS. "it had none" and
+		 * "we lost the race" are different facts - see
+		 * KOF_EF_CMDLINE_RACED, which the live line already
+		 * knows how to say and which nothing was setting.
+		 */
+		out->flags |= KOF_EF_CMDLINE_RACED;
+	}
+	p->produced++;
+	return 1;
+}
+
+static int to_evt(struct kofa_pev *p, const struct proc_event *ev,
+		  struct kof_evt *out)
+{
+	uint32_t pid = ev_tgid(ev);
+	uint32_t tid = ev_tid(ev);
+	/* A task that is not its own group leader is a THREAD of the process
+	 * that leads it - see the note on ev_tgid. */
+	int is_thread = tid && tid != pid;
+	struct apev_ent *e;
+	uint16_t verb;
+
+	if (!pid)
+		return 0;
+
+	/*
+	 * A FORK IS RECORDED AND NOT REPORTED.
+	 *
+	 * It is the same program in a second process - a shell's subshell, a
+	 * server's worker - and it carries no new image, so what a rule is
+	 * written against is the exec that may follow. Reporting both would
+	 * double the volume of the highest-value stream and give the second
+	 * record nothing the first did not have.
+	 *
+	 * BUT IT IS WHERE THE PARENT COMES FROM, and that is why it is
+	 * subscribed to at all. The kernel names both ends here; by EXEC time
+	 * /proc may already be gone.
+	 */
+	if (ev->what == PROC_EVENT_FORK) {
+		/*
+		 * A THREAD, NOT A PROCESS. clone() with CLONE_THREAD arrives
+		 * here too, and recording it would overwrite the parent of the
+		 * process that already owns this tgid with the thread's own
+		 * creator. It is reported as what it is instead.
+		 */
+		if (is_thread)
+			return to_evt_thread_fork(p, out, pid, tid);
+		e = ent_get(p, pid);
+		if (e) {
+			e->ppid    = (uint32_t)ev->event_data.fork.parent_tgid;
+			e->started = ev->timestamp_ns;
+		}
+		return 0;
+	}
+
+	verb = verb_of(ev->what);
+	if (!verb)
+		return 0;
+	verb = to_evt_admit(p, ev, pid, is_thread, verb);
+	if (!verb)
+		return 0;
+
+	to_evt_head(p, out, verb, pid, tid);
+
+	if (verb == KOF_EVT_THREAD_STOP)
+		return to_evt_thread_stop(p, out, pid);
+	if (verb != KOF_EVT_PROC_START && verb != KOF_EVT_PROC_STOP)
+		return to_evt_detail(p, ev, out, verb, pid);
+	if (verb == KOF_EVT_PROC_STOP)
+		return to_evt_stop(p, ev, out, pid);
+	return to_evt_start(p, ev, out, pid);
 }
 
 void kofa_pev_hint_image(struct kofa_pev *p, uint32_t pid, const char *path)

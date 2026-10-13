@@ -19,7 +19,9 @@
 #include "elf_image.h"
 #include "pe_image.h"
 
-#define SHF_EXEC_   0x4
+static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
+			 struct kgenome_func_set *out);
+
 
 /*
  * THE FUNCTIONS, by the same decision. ELF only for now: a PE names its
@@ -48,7 +50,13 @@ static int func_cmp(const void *a, const void *b)
 	return x->len < y->len ? 1 : x->len > y->len ? -1 : 0;
 }
 
-void kgenome_funcs_finish(struct kgenome_func *v, uint32_t n, struct kgenome_func_set *out)
+/*
+ * The last step of every format's builder, once: sort by offset, keep one
+ * function per address (the longer extent stands) and no label inside another
+ * body. Takes the malloc'd array `v` of `n` entries into `out`; frees it when
+ * nothing is left.
+ */
+static void kgenome_funcs_finish(struct kgenome_func *v, uint32_t n, struct kgenome_func_set *out)
 {
 	uint32_t i, k = 0;
 
@@ -145,8 +153,6 @@ void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
 
 /* ---- the functions ------------------------------------------------------------ */
 
-#define ET_REL_ 1u
-
 /*
  * The functions of an ELF - see funcs.h. Walks the table the symbol block is
  * built from, through the same reader, and keeps what is a sized FUNC in an
@@ -160,7 +166,7 @@ void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
  * measured on a static Mirai, 419 declared starts and every one outside the code
  * range - see the history of the sweep that reads these.)
  */
-void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
+static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
 			 struct kgenome_func_set *out)
 {
 	struct kgenome_elf_symtab t;
@@ -186,12 +192,12 @@ void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
 		    sy.shndx >= KGENOME_ELF_MAX_SECTIONS)
 			continue;
 		sec = &e->sec[sy.shndx];
-		if (!(sec->flags & SHF_EXEC_))
+		if (!(sec->flags & KGENOME_ELF_SHF_EXEC))
 			continue;
 		/* By the object's type, not by whether this section has an
 		 * address: a linked file's section at address zero would be read
 		 * as relocatable. */
-		if (e->e_type != ET_REL_) {
+		if (e->e_type != KGENOME_ELF_REL) {
 			if (!kgenome_elf_va_to_off(e, sy.value, sy.size, &off))
 				continue;
 		} else {

@@ -54,8 +54,8 @@
  * instead of quietly transposing every pid.
  */
 
-#ifndef KOFEVT_LOG_H
-#define KOFEVT_LOG_H
+#ifndef KOFEVTLOG_H
+#define KOFEVTLOG_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -336,4 +336,4 @@ int kofevt_log_extent(struct kofevt_log_r *, uint64_t n, uint64_t *off,
 
 void kofevt_log_free(struct kofevt_log_r *);
 
-#endif /* KOFEVT_LOG_H */
+#endif /* KOFEVTLOG_H */

@@ -97,24 +97,6 @@ void kgenome_true_find_all(kof_buf file, const struct kgenome_elf_info *e,
 		      struct kgenome_true_all *out);
 
 /*
- * The symbol tier ALONE, for an object where the marker span cannot be trusted.
- *
- * The marker span runs from a segment's first library string to its last and
- * takes everything between, which is right for a static build - the library is
- * one run - and wrong for a DYNAMIC one, where there is no static library at
- * all and the strings it finds are the program's own. Measured: an 8MB miner
- * with a PT_INTERP yielded a 7MB "library" span across its CODE, which is the
- * program.
- *
- * The symbol tier has no such failure mode: it claims exactly what a symbol
- * covers and nothing between symbols, so it is as true of a dynamic object -
- * where it finds the handful of crt and loader pieces the linker put in - as of
- * a static one.
- */
-void kgenome_true_find_syms(kof_buf file, const struct kgenome_elf_info *e,
-		       struct kgenome_true_all *out);
-
-/*
  * THE CHOICE BETWEEN THE TWO ABOVE, MADE ONCE.
  *
  * Which tier is right is a property of the OBJECT and not of the caller: the

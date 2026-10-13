@@ -15,12 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The one spelling of these is in <image/elf_image.h>. */
-#define PT_LOAD		KGENOME_ELF_PT_LOAD
-#define SHT_NULL	KGENOME_ELF_SHT_NULL
-#define SHT_NOBITS	KGENOME_ELF_SHT_NOBITS
-#define SHF_ALLOC	KGENOME_ELF_SHF_ALLOC
-
 /*
  * Resolve a mask to ranges. Reached through ctx->resolve_scan, so the host never
  * learns that any of this is ELF specific.
@@ -64,7 +58,7 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		if (!e->seg_count)
 			for (i = 0; i < e->sec_count; i++)
 				if (kgenome_elf_sec_is_code(&e->sec[i]) &&
-				    (e->sec[i].flags & SHF_ALLOC))
+				    (e->sec[i].flags & KGENOME_ELF_SHF_ALLOC))
 					kof_rl_add(&l, ctx->obj_size,
 						   e->sec[i].claim_off,
 						   e->sec[i].claim_len);
@@ -72,13 +66,13 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 
 	if (mask & KGENOME_SCAN_ELF_DATA) {
 		for (i = 0; i < e->seg_count; i++)
-			if (e->seg[i].type == PT_LOAD &&
+			if (e->seg[i].type == KGENOME_ELF_PT_LOAD &&
 			    !(e->seg[i].perm & KGENOME_PERM_X))
 				kof_rl_add(&l, ctx->obj_size, e->seg[i].claim_off,
 					   e->seg[i].claim_len);
 		if (!e->seg_count)
 			for (i = 0; i < e->sec_count; i++)
-				if ((e->sec[i].flags & SHF_ALLOC) &&
+				if ((e->sec[i].flags & KGENOME_ELF_SHF_ALLOC) &&
 				    !kgenome_elf_sec_is_code(&e->sec[i]))
 					kof_rl_add(&l, ctx->obj_size,
 						   e->sec[i].claim_off,
@@ -87,9 +81,9 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 
 	if (mask & KGENOME_SCAN_ELF_NOLOAD)
 		for (i = 0; i < e->sec_count; i++)
-			if (e->sec[i].type != SHT_NULL &&
-			    e->sec[i].type != SHT_NOBITS &&
-			    !(e->sec[i].flags & SHF_ALLOC))
+			if (e->sec[i].type != KGENOME_ELF_SHT_NULL &&
+			    e->sec[i].type != KGENOME_ELF_SHT_NOBITS &&
+			    !(e->sec[i].flags & KGENOME_ELF_SHF_ALLOC))
 				kof_rl_add(&l, ctx->obj_size, e->sec[i].claim_off,
 					   e->sec[i].claim_len);
 

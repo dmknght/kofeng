@@ -1,6 +1,6 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofcap.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * sig_diag_rwx_00.c - the one thing that reads the rwx_exec fixture diagnose.

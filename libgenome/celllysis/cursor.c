@@ -7,7 +7,7 @@
  *
  *   DECODE is reached through kgenome_cell_decode, which picks the decoder; this file
  *     does not name one.
- *   THE CONSTANT MAP is kgenome_cell_state.c: what a register holds, where that is
+ *   THE CONSTANT MAP is cell_state.c: what a register holds, where that is
  *     knowable by reading forwards, from one decoded instruction.
  *   WHAT THIS FILE OWNS is the walk itself: the offset/address conversion
  *     through the space the owner supplied, the literal pool, and resolving an
@@ -36,7 +36,7 @@ static uint64_t off_to_va(struct kgenome_cell_cur *k, const struct kgenome_cell_
 			  uint64_t off)
 {
 	/* Inside the segment the last call established it is one addition -
-	 * see struct kgenome_cell_seg for why that is almost always. */
+	 * see struct kgenome_image_seg for why that is almost always. */
 	if (k->seg_ok && off >= k->seg.lo && off < k->seg.hi)
 		return (uint64_t)((int64_t)off + k->seg.delta);
 	if (!sp->seg_at || !sp->seg_at(sp->priv, off, &k->seg))

@@ -135,7 +135,7 @@ static void one_file(const char *path)
 
 /* A small source with prose around its declarations. */
 static const char src[] =
-	"#include <kofmod/kofpathogen.h>\n"
+	"#include <kofmod/kofdiagtree.h>\n"
 	"\n"
 	"/* WHY: measured on 900 clean modules, none do this. */\n"
 	"KOF_DIAG_NAME(DIAG_T);\n"
@@ -159,7 +159,7 @@ static void edits(void)
 	CHECK(kof_dsrc_parse(src, n, d, NULL) == 0, "fixture does not parse");
 	CHECK(d->n == 5, "fixture has %u declarations, want 5", d->n);
 	CHECK(kof_dsrc_resolve(d, &v, NULL) == 0 && v.n_nd == 3 &&
-	      v.nd[0].flags == KGENOME_FLOWF_WX, "fixture tree is wrong");
+	      v.nd[0].flags == KGENOME_NUCLEO_F_WX, "fixture tree is wrong");
 	pr0 = prose(src, n);
 
 	/* Remove the second tail. Only its line goes. */

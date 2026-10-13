@@ -8,7 +8,7 @@
 #include <kofcore.h>            /* kof_hex_val, kof_b64_val: the digit tables */
 
 #include "codings.h"
-#include "../transform_int.h"
+#include "../transform_private.h"
 
 /* Upper case digits, for hex_write and url_write alike. */
 static const char hexd[] = "0123456789ABCDEF";
@@ -101,32 +101,33 @@ static kuncoat_st_t hex_read(const uint8_t *in, uint64_t n, uint8_t *out, uint64
 	return KUNCOAT_OK;
 }
 
-static kuncoat_st_t url_read(const uint8_t *p, uint64_t len, uint8_t *out, uint64_t cap,
-		     uint64_t *w)
+static kuncoat_st_t url_read(const struct kuncoat_step *s, const uint8_t *p, uint64_t len,
+		     uint8_t *out, uint64_t cap, uint64_t *w)
 {
+	int lax = (s->flags & KUNCOAT_F_LAX) != 0;
 	uint64_t i, esc = 0;
 
 	for (i = 0; i < len && *w < cap; i++) {
 		if (p[i] == '%') {
-			int hi, lo;
+			int b = len - i < 3u ? -1 : kof_hex_byte(p + i + 1u);
 
-			if (len - i < 3u)
-				return KUNCOAT_TRUNCATED;       /* a cut escape */
-			hi = kof_hex_val(p[i + 1u]);
-			lo = kof_hex_val(p[i + 2u]);
+			if (b >= 0) {
+				out[(*w)++] = (uint8_t)b;
+				i += 2u;
+				esc++;
+				continue;
+			}
 			/* A `%` that is not an escape means the text was never
-			 * written this way - a printf format, a literal per cent. */
-			if (hi < 0 || lo < 0)
-				return KUNCOAT_CORRUPT;
-			out[(*w)++] = (uint8_t)((hi << 4) | lo);
-			i += 2u;
-			esc++;
-			continue;
+			 * written this way - a printf format, a literal per cent -
+			 * unless the caller reads text that may carry one. */
+			if (!lax)
+				return len - i < 3u ? KUNCOAT_TRUNCATED   /* a cut escape */
+						    : KUNCOAT_CORRUPT;
 		}
 		out[(*w)++] = p[i] == '+' ? (uint8_t)' ' : p[i];
 	}
 	/* Text carrying no escape at all is not encoded text. */
-	if (!esc)
+	if (!esc && !lax)
 		return KUNCOAT_CORRUPT;
 	return i < len ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
 }
@@ -255,7 +256,7 @@ enum kuncoat_status kuncoat_coding(const struct kuncoat_step *s,
 						: hex_read(in, n, out, cap, w);
 	case KUNCOAT_ALGO_URL:
 		return s->dir == KUNCOAT_ENCODE ? url_write(in, n, out, cap, w)
-						: url_read(in, n, out, cap, w);
+						: url_read(s, in, n, out, cap, w);
 	case KUNCOAT_ALGO_ADD:
 		return add_run(s, in, n, out, cap, w);
 	case KUNCOAT_ALGO_CAESAR:

@@ -5,7 +5,7 @@
  * kofmod/disease.h - the declaration every kind of detector uses to say what its
  * match FINDS.
  *
- * Here and not in kofpathogen.h or kofsig.h because it is written in a diagnose
+ * Here and not in kofdiagtree.h or kofsig.h because it is written in a diagnose
  * (which includes the first), in a signature or a heuristic (which include the
  * second), and one fact has one carrier: both include this.
  */

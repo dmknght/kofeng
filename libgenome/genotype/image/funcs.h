@@ -6,7 +6,7 @@
  * executable and are in libgenome/image; the KSYM block builders that the note
  * below calls "the same step" (sym_any.c, elf_sym.c, pe_sym.c) are the
  * engine's. libkofeng/analyzers/parsers/binaries/funcs.h includes this header
- * and adds kof_syms_build_with.
+ * and adds the block builder kof_syms_build_grow.
  */
 
 /*
@@ -87,14 +87,6 @@ void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
 		     const struct kgenome_func_set *pf, const uint8_t *view,
 		     uint64_t view_n, struct kgenome_func_set *out);
 
-/*
- * The last step of every format's builder, once: sort by offset, keep one
- * function per address (the longer extent stands) and no label inside another
- * body. Takes the malloc'd array `v` of `n` entries into `out`; frees it when
- * nothing is left.
- */
-void kgenome_funcs_finish(struct kgenome_func *v, uint32_t n, struct kgenome_func_set *out);
-
 
 /*
  * The builders of the two formats, which kgenome_funcs_build chooses between.
@@ -104,8 +96,6 @@ void kgenome_funcs_finish(struct kgenome_func *v, uint32_t n, struct kgenome_fun
  */
 struct kgenome_elf_info;
 struct kgenome_pe_info;
-void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info *e,
-			 struct kgenome_func_set *out);
 void kgenome_elf_funcs_from_entries(kof_buf file, const struct kgenome_elf_info *e,
 				uint64_t entry_off, const uint64_t *ent,
 				uint32_t n_ent, struct kgenome_func_set *out);

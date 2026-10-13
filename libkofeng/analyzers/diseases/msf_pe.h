@@ -42,8 +42,8 @@
  * engine now honours the declaration; see the note beside it in objctx.c.
  */
 
-#ifndef MSF_PE_H
-#define MSF_PE_H
+#ifndef KOFSHARED_MSF_PE_H
+#define KOFSHARED_MSF_PE_H
 
 #include <kofmod/kofsig.h>
 
@@ -115,4 +115,4 @@ static int msf_decl_pe(const struct kof_obj_ctx *ctx, uint32_t payload_n,
  */
 #define MSF_RECON_PE(ctx) ((ctx)->format == KOF_FMT_PE)
 
-#endif /* MSF_PE_H */
+#endif /* KOFSHARED_MSF_PE_H */

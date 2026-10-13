@@ -38,9 +38,4 @@
  * window an attacker chooses rather than one they have to wait for.
  */
 
-/* The same for a file already open, which is what a scanner holds by the time
- * it wants to ask. Saves a second path lookup and closes the window between
- * naming a file and opening it. */
-int kofa_fid_of_fd(int fd, struct kof_fid *out);
-
 #endif /* KOFANTARC_AFID_H */

@@ -1,9 +1,9 @@
 /*
  * diag_emu_step.c - the walk of one function: branches, field values, decoding and emulating one step.
- * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_int.h for what the
+ * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_private.h for what the
  * files share.
  */
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 /*
  * A branch out of the span, a backward branch, and a call that the table did

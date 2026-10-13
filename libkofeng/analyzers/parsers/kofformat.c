@@ -17,12 +17,17 @@
 #include "containers/arj_parse.h"
 #include "containers/lnk_parse.h"
 #include "containers/reg_parse.h"
-#include "containers/reg_parse.h"
 #include "containers/rtf_parse.h"
 #include "containers/pdf_parse.h"
 #include "scripts/script_parse.h"
 #include "events/amsi_parse.h"
 #include "processes/proc_parse.h"
+
+static uint64_t kof_parser_no_anomalies(const void *view);
+
+static const char *kof_parser_no_anomaly_name(unsigned index);
+
+static int kof_parser_never_sniffs(kof_buf b);
 
 /*
  * Each parser takes its own view type; the table takes one signature. The casts
@@ -352,9 +357,10 @@ static const struct kof_parser formats[] = {
 	 * caller that already knows what it is holding. See amsi_parse.h.
 	 */
 	{ KOF_EVT_AMSI, (uint32_t)sizeof(struct kof_amsi_view),
-	  kof_amsi_sniff, amsi_parse_thunk,
+	  kof_parser_never_sniffs, amsi_parse_thunk,
 	  kof_amsi_regions, 2u,
-	  kof_amsi_region_name, kof_amsi_anomaly_name, kof_amsi_anomalies },
+	  kof_amsi_region_name, kof_parser_no_anomaly_name,
+	  kof_parser_no_anomalies },
 
 	/*
 	 * A PROCESS SNAPSHOT. Like the row above it this never sniffs and is
@@ -362,11 +368,37 @@ static const struct kof_parser formats[] = {
 	 * built the record. See processes/proc_parse.h.
 	 */
 	{ KOF_EVT_PROC, (uint32_t)sizeof(struct kof_proc_info),
-	  kof_proc_sniff, proc_parse_thunk,
+	  kof_parser_never_sniffs, proc_parse_thunk,
 	  kof_proc_regions, 3u,
-	  kof_proc_region_name, kof_proc_anomaly_name, kof_proc_anomalies }
+	  kof_proc_region_name, kof_parser_no_anomaly_name,
+	  kof_parser_no_anomalies }
 };
 
+
+/*
+ * The three entries of a parser row for a format that has nothing to say: an
+ * event record (AMSI, a process snapshot) has no magic, so its sniff never
+ * accepts - any test would be a guess about whose bytes these are - and it
+ * keeps no anomaly word. Reached only through kof_parser_of(), by a caller that
+ * already knows what it holds.
+ */
+static int kof_parser_never_sniffs(kof_buf b)
+{
+	(void)b;
+	return 0;
+}
+
+static const char *kof_parser_no_anomaly_name(unsigned index)
+{
+	(void)index;
+	return "?";
+}
+
+static uint64_t kof_parser_no_anomalies(const void *view)
+{
+	(void)view;
+	return 0;
+}
 
 _Static_assert(sizeof formats / sizeof formats[0] == KOF_PARSER_COUNT,
 	       "KOF_PARSER_COUNT no longer matches the table");

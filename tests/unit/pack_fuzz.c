@@ -433,7 +433,7 @@ int main(int argc, char **argv)
 	rng_state = seed ? seed : 1;
 
 	snprintf(root, sizeof root, "%s/kof_pack_fuzz_XXXXXX",
-		 tmp && *tmp ? tmp : kof_tmpdir());
+		 tmp && *tmp ? tmp : "build");
 	if (!mkdtemp(root)) {
 		printf("pack fuzz: cannot make a work directory\n");
 		return 1;

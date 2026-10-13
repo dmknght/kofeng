@@ -15,6 +15,7 @@
 #include "wcompat.h"
 
 #include "wevt_decode.h"
+#include "../../libkofeng/kofcore/kofcore.h"
 #include "wtext.h"
 
 /*
@@ -1002,18 +1003,16 @@ static struct kofw_schema *learn(struct kofw_schema_cache *c, uint8_t prov,
 
 /* ------------------------------------------------------------- one payload */
 
+/* Unchecked, like the walk around it: the caller has bounded `p`. Windows is
+ * little-endian, which is what kof_ld_le* reads. */
 static uint32_t rd_u32(const uint8_t *p)
 {
-	uint32_t v;
-	memcpy(&v, p, sizeof v);
-	return v;
+	return kof_ld_le32(p);
 }
 
 static uint64_t rd_u64(const uint8_t *p)
 {
-	uint64_t v;
-	memcpy(&v, p, sizeof v);
-	return v;
+	return kof_ld_le64(p);
 }
 
 /*
@@ -1145,41 +1144,29 @@ static void path_more(struct kofw_evt *out, size_t *tnext,
 		out->flags |= KOFW_EF_TRUNCATED;
 }
 
-int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
-		struct kofw_evt *out, struct kofw_spill *spill)
+/*
+ * What one walk over a record's properties shares between its steps: where it
+ * is writing, how far the text arena is filled, which fields are still wanted
+ * and the longest string no named field claimed.
+ */
+struct dec_walk {
+	struct kofw_evt   *out;
+	struct kofw_spill *spill;
+	const uint8_t     *base;
+	size_t             total;
+	size_t             tnext;
+	uint32_t           want;
+	/* The longest string no named field claimed - see KOFW_FLD_SKIP in
+	 * dec_strings, and the use after the walk. */
+	size_t             spare_off;
+	size_t             spare_len;
+	uint16_t           spare_type;
+};
+
+/* Decode step: the fields every record starts with, and their defaults. */
+static void dec_head(struct kofw_evt *out, const EVENT_RECORD *rec,
+		     uint8_t prov, uint16_t id, uint16_t type)
 {
-	/* Not const: the shape's own hit counter is bumped below, and it is
-	 * this thread's to bump - there is one producer by construction. */
-	struct kofw_schema *sc;
-	const uint8_t *base;
-	size_t   off, total, tnext = 0;
-	/* The longest string no named field claimed - see KOFW_FLD_SKIP in the
-	 * walk below, and the use after it. */
-	size_t   spare_off = 0, spare_len = 0;
-	uint16_t spare_type = 0;
-	uint16_t id, type;
-	uint32_t want;
-	size_t   prop_at[KOFW_SCHEMA_MAX_PROP];
-	uint8_t  prov;
-	uint8_t  i;
-
-	prov = kofw_provider_of(&rec->EventHeader.ProviderId);
-	if (prov == KOFW_PROV_NONE)
-		return 0;
-
-	id   = rec->EventHeader.EventDescriptor.Id;
-	type = type_of(prov, id);
-
-	sc = find(c, prov, id, rec->EventHeader.EventDescriptor.Version);
-	if (!sc) {
-		sc = learn(c, prov, type, rec);
-		if (!sc)
-			return 0;
-	}
-	/* One producer, one cache line this thread already owns - see the note
-	 * on kofw_schema.hits for why a count and not just a list. */
-	sc->hits++;
-
 	memset(out, 0, sizeof *out);
 	out->type        = type;
 	out->provider    = prov;
@@ -1221,10 +1208,427 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 	 * the raiser is somebody else.
 	 */
 	out->pid = rec->EventHeader.ProcessId;
+}
 
-	want = wanted(type);
-	base = (const uint8_t *)rec->UserData;
-	total = rec->UserDataLength;
+/* Decode step: the fixed-size fields - ids, times, addresses, registry sizes. */
+static void dec_scalar(struct dec_walk *w, const struct kofw_prop *pr,
+		       size_t off, size_t len)
+{
+	switch (pr->field) {
+	case KOFW_FLD_PID:
+		if (len >= 4) {
+			w->out->pid = rd_u32(w->base + off);
+			w->want &= ~(uint32_t)KOFW_F_PID;
+		}
+		break;
+	case KOFW_FLD_PPID:
+		if (len >= 4) {
+			w->out->ppid = rd_u32(w->base + off);
+			w->want &= ~(uint32_t)KOFW_F_PPID;
+		}
+		break;
+	case KOFW_FLD_SESSION:
+		if (len >= 4) {
+			w->out->session_id = rd_u32(w->base + off);
+			w->want &= ~(uint32_t)KOFW_F_SESSION;
+		}
+		break;
+	case KOFW_FLD_EXIT_CODE:
+		if (len >= 4) {
+			w->out->exit_code = rd_u32(w->base + off);
+			w->want &= ~(uint32_t)KOFW_F_EXIT_CODE;
+		}
+		break;
+	case KOFW_FLD_CREATE_TIME:
+		if (len >= 8) {
+			w->out->create_time = rd_u64(w->base + off);
+			w->want &= ~(uint32_t)KOFW_F_CREATE_TIME;
+		}
+		break;
+	/*
+	 * BY THE LENGTH THE PROVIDER DECLARED, WHICH IS HOW IPv6 GETS
+	 * IN WITHOUT AN ESTABLISHED EVENT ID.
+	 *
+	 * Kernel-Network raises its v6 events under ids of their own,
+	 * and this build has not established them the way type_of()
+	 * requires - one operation at a time under --raw --schema. But
+	 * the PROPERTY is still called daddr and still arrives with its
+	 * declared size, so taking 16 bytes when 16 bytes are offered
+	 * puts the peer in the record either way. A v6 connection then
+	 * shows up as a RAW event with the address on it, rather than
+	 * not showing up at all.
+	 *
+	 * Four bytes go in IPv4-mapped, so the record has one
+	 * representation and a reader never has to ask which family it
+	 * is holding - see struct kof_evt_net.
+	 */
+	case KOFW_FLD_DADDR:
+		if (len >= 16)
+			memcpy(w->out->net_daddr, w->base + off, 16);
+		else if (len >= 4)
+			kof_evt_ip_set_v4(w->out->net_daddr,
+					  rd_u32(w->base + off));
+		break;
+	case KOFW_FLD_SADDR:
+		if (len >= 16)
+			memcpy(w->out->net_saddr, w->base + off, 16);
+		else if (len >= 4)
+			kof_evt_ip_set_v4(w->out->net_saddr,
+					  rd_u32(w->base + off));
+		break;
+	case KOFW_FLD_DPORT:
+		if (len >= 2)
+			memcpy(&w->out->net_dport, w->base + off, 2);
+		break;
+	case KOFW_FLD_SPORT:
+		if (len >= 2)
+			memcpy(&w->out->net_sport, w->base + off, 2);
+		break;
+	case KOFW_FLD_SIZE:
+		if (len >= 4)
+			w->out->net_size = rd_u32(w->base + off);
+		break;
+	case KOFW_FLD_FILE_OFFSET:
+		/* Declared as a 64-bit signed integer by FileIo Write.
+		 * Taken as eight bytes where there are eight, because
+		 * an offset truncated to 32 bits does not look wrong -
+		 * it looks like an offset near the start of a large
+		 * file, which is exactly where a reader would then
+		 * read the wrong bytes back. */
+		if (len >= 8)
+			w->out->file_offset = rd_u64(w->base + off);
+		else if (len >= 4)
+			w->out->file_offset = rd_u32(w->base + off);
+		break;
+	case KOFW_FLD_FILE_KEY:
+		/* Into `addr`, which a file event never uses for
+		 * anything else - a write has no entry point. The
+		 * consumer thread resolves it to a path; see
+		 * kofw_ftab_resolve. */
+		if (!w->out->addr) {
+			if (len >= 8)
+				w->out->addr = rd_u64(w->base + off);
+			else if (len >= 4)
+				w->out->addr = rd_u32(w->base + off);
+		}
+		break;
+	case KOFW_FLD_ADDR:
+		/* 8 on a 64-bit payload, 4 on a 32-bit one - the shape
+		 * already sized it as a POINTER, so take what is
+		 * there rather than assuming the wider form. */
+		if (len >= 8)
+			w->out->addr = rd_u64(w->base + off);
+		else if (len >= 4)
+			w->out->addr = rd_u32(w->base + off);
+		break;
+	case KOFW_FLD_ADDR_SIZE:
+		if (len >= 8)
+			w->out->addr_size = rd_u64(w->base + off);
+		else if (len >= 4)
+			w->out->addr_size = rd_u32(w->base + off);
+		break;
+	/*
+	 * NARROWED, NOT TRUNCATED. A registry type is winnt.h's small
+	 * enum - REG_NONE through REG_QWORD - so a byte holds every
+	 * value there is, and a value outside it would be a provider
+	 * this build does not understand rather than a number worth
+	 * keeping the high bits of.
+	 */
+	case KOFW_FLD_REG_TYPE:
+		if (len >= 4) {
+			uint32_t v = rd_u32(w->base + off);
+
+			w->out->reg_type = v > 0xffu ? 0xffu : (uint8_t)v;
+		}
+		break;
+	case KOFW_FLD_REG_SIZE:
+		if (len >= 4)
+			w->out->reg_data_size = rd_u32(w->base + off);
+		break;
+	case KOFW_FLD_REG_DISP:
+		if (len >= 4) {
+			uint32_t v = rd_u32(w->base + off);
+
+			w->out->reg_disp = v > 0xffu ? 0xffu : (uint8_t)v;
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+/* Decode step: an IMAGE or OBJECT string, or a binary buffer, into the arena. */
+static void dec_object(struct dec_walk *w, const struct kofw_prop *pr,
+		       size_t off, size_t len)
+{
+		int    cut = 0;
+		size_t room, n = 0;
+		int    got = 1;
+
+		/*
+		 * Both strings share one arena and are appended in the
+		 * order the payload happens to carry them, so the second
+		 * gets whatever the first left. A path that has to be cut
+		 * because of that is still flagged - a truncated path
+		 * that looks whole is exactly what a later rule would
+		 * match against and be wrong about.
+		 */
+		if (w->tnext + 1 >= sizeof w->out->text)
+			return;
+		room = sizeof w->out->text - w->tnext;
+
+		if (pr->in_type == TDH_INTYPE_UNICODESTRING)
+			n = kofw_utf16_to_utf8(
+				(const uint16_t *)(const void *)
+					(w->base + off),
+				len / 2u, w->out->text + w->tnext, room,
+				&cut);
+		else if (pr->in_type == TDH_INTYPE_ANSISTRING)
+			n = kofw_ansi_to_text(w->base + off, len,
+					      w->out->text + w->tnext, room,
+					      &cut);
+		/*
+		 * A BINARY BUFFER, which is what AMSI's `content` is.
+		 *
+		 * Not a string type, so it used to be skipped entirely
+		 * - the second of the two reasons the one field that
+		 * subscription exists for never appeared.
+		 *
+		 * WHICH ENCODING IS A HEURISTIC AND IS LABELLED AS
+		 * ONE: a PowerShell script block arrives as UTF-16 and
+		 * a macro body as bytes, and the provider does not say
+		 * which. Two NUL high bytes in the first four is the
+		 * test.
+		 *
+		 * AND IT IS NO LONGER CONVERTED AT ALL. Sanitising -
+		 * high bytes to '?', control characters to '.' - was
+		 * justified by the record being printed, and this
+		 * record is not printed: it goes over a channel to
+		 * kofwatchman, whose entire purpose is to SCAN what is
+		 * in it. A lossy conversion here destroys the evidence
+		 * before the half that needs it ever sees it, so the
+		 * bytes are copied verbatim and content_len says how
+		 * many. Whoever PRINTS one sanitises it there, which is
+		 * where the terminal is.
+		 */
+		else if (pr->in_type == TDH_INTYPE_BINARY) {
+			size_t take = len;
+
+			if (take > room - 1u) {
+				take = room - 1u;
+				cut = 1;
+			}
+			/*
+			 * WHERE THE WHOLE THING IS, for the caller to
+			 * send on. The record still holds a prefix and
+			 * is still flagged - a consumer that cannot
+			 * reassemble is no worse off than before - but
+			 * the rest is no longer lost here.
+			 */
+			if (w->spill) {
+				w->spill->src   = w->base + off;
+				w->spill->total = len;
+				w->spill->taken = take;
+			}
+			memcpy(w->out->text + w->tnext, w->base + off, take);
+			/*
+			 * Length-delimited, but still NUL terminated
+			 * after it: content_len is what a scanner
+			 * reads, and the NUL is so that anything
+			 * treating the arena as strings - a label, a
+			 * panel row - cannot run off the end of it.
+			 */
+			w->out->text[w->tnext + take] = '\0';
+			w->out->content_len = (uint16_t)take;
+			n = take;
+		}
+		else
+			got = 0;
+
+		if (got) {
+			if (pr->field == KOFW_FLD_IMAGE) {
+				w->out->off_image = (uint16_t)w->tnext;
+				w->want &= ~(uint32_t)KOFW_F_IMAGE;
+			} else {
+				w->out->off_object = (uint16_t)w->tnext;
+				w->want &= ~(uint32_t)KOFW_F_OBJECT;
+			}
+			w->tnext += n + 1u;
+			w->out->text_len = (uint16_t)w->tnext;
+			if (cut)
+				w->out->flags |= KOFW_EF_TRUNCATED;
+		}
+}
+
+/* Decode step: the fields that put text into the arena. */
+static void dec_strings(struct dec_walk *w, const struct kofw_prop *pr,
+			size_t off, size_t len)
+{
+	switch (pr->field) {
+	case KOFW_FLD_PATH_MORE:
+		path_more(w->out, &w->tnext, w->base, off, len, pr->in_type, 0);
+		break;
+	case KOFW_FLD_REG_VALUE:
+		path_more(w->out, &w->tnext, w->base, off, len, pr->in_type, 1);
+		break;
+
+	/*
+	 * THE BYTES THAT WERE WRITTEN, into a slot of their own.
+	 *
+	 * Verbatim, for the reason the AMSI buffer below is verbatim: a
+	 * REG_SZ is UTF-16 and a REG_BINARY is arbitrary, and either one
+	 * sanitised at the collector is evidence destroyed before the
+	 * half that scans it ever sees it.
+	 *
+	 * WHAT THE LENGTHS MEAN APART. `len` is what the provider
+	 * captured, reg_data_size is what the value actually is, and
+	 * data_len is what fit here. The flag is set when the last is
+	 * short of the first, so a rule that matched a prefix can tell
+	 * it was a prefix.
+	 */
+	case KOFW_FLD_REG_DATA: {
+		size_t take = len, room;
+
+		if (!len || w->tnext + 1u >= sizeof w->out->text)
+			break;
+		room = sizeof w->out->text - w->tnext;
+		if (take > room - 1u) {
+			take = room - 1u;
+			w->out->flags |= KOFW_EF_TRUNCATED;
+		}
+		memcpy(w->out->text + w->tnext, w->base + off, take);
+		w->out->text[w->tnext + take] = '\0';
+		w->out->off_data = (uint16_t)w->tnext;
+		w->out->data_len = (uint16_t)take;
+		w->tnext += take + 1u;
+		w->out->text_len = (uint16_t)w->tnext;
+		break;
+	}
+
+	/*
+	 * A STRING NOBODY CLAIMED, remembered in case nothing does.
+	 *
+	 * An event whose property names this build has never seen -
+	 * every provider on its first encounter - fills no string field
+	 * and renders as a bare `[prov id v]` with nothing after it.
+	 * That reads as "the event carried nothing", which is what AMSI
+	 * looked like for a whole session while it was in fact carrying
+	 * the script.
+	 *
+	 * So the longest unclaimed string is kept, and used below only
+	 * if no named field took the object slot. Longest rather than
+	 * first, because the payload that matters is the content and
+	 * the ones beside it are labels: an application name and a
+	 * content name are short, a submitted script block is not.
+	 *
+	 * A fallback, never an override. Anything this build actually
+	 * recognises still wins.
+	 */
+	case KOFW_FLD_SKIP:
+		if ((pr->in_type == TDH_INTYPE_UNICODESTRING ||
+		     pr->in_type == TDH_INTYPE_ANSISTRING) &&
+		    len > w->spare_len) {
+			w->spare_off  = off;
+			w->spare_len  = len;
+			w->spare_type = pr->in_type;
+		}
+		break;
+
+	case KOFW_FLD_IMAGE:
+	case KOFW_FLD_OBJECT:
+		dec_object(w, pr, off, len);
+		break;
+
+	default:
+		break;
+	}
+}
+
+/* Decode step: one property's value, wherever it belongs in the record. */
+static void dec_field(struct dec_walk *w, const struct kofw_prop *pr,
+		      size_t off, size_t len)
+{
+	dec_scalar(w, pr, off, len);
+	dec_strings(w, pr, off, len);
+}
+
+/* Decode step: the unclaimed string, used only if nothing named took the slot. */
+static void dec_spare(struct dec_walk *w)
+{
+/*
+ * THE UNCLAIMED STRING, used only if nothing named took the slot.
+ *
+ * This is what makes a provider legible on its first encounter instead
+ * of on the second, after somebody has read a shape dump and added its
+ * property names. The record still says which provider and which id it
+ * came from, so the string is offered as "here is what it carried", not
+ * as a field this build understands.
+ */
+if (w->out->off_object == KOF_TEXT_NONE && w->spare_len &&
+    w->tnext + 1u < sizeof w->out->text) {
+	size_t room = sizeof w->out->text - w->tnext, n = 0;
+	int    cut = 0;
+
+	if (w->spare_type == TDH_INTYPE_UNICODESTRING)
+		n = kofw_utf16_to_utf8(
+			(const uint16_t *)(const void *)
+				(w->base + w->spare_off),
+			w->spare_len / 2u, w->out->text + w->tnext, room, &cut);
+	else
+		n = kofw_ansi_to_text(w->base + w->spare_off, w->spare_len,
+				      w->out->text + w->tnext, room, &cut);
+	if (n) {
+		w->out->off_object = (uint16_t)w->tnext;
+		w->tnext += n + 1u;
+		w->out->text_len = (uint16_t)w->tnext;
+		if (cut)
+			w->out->flags |= KOFW_EF_TRUNCATED;
+	}
+}
+}
+
+int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
+		struct kofw_evt *out, struct kofw_spill *spill)
+{
+	/* Not const: the shape's own hit counter is bumped below, and it is
+	 * this thread's to bump - there is one producer by construction. */
+	struct kofw_schema *sc;
+	struct dec_walk w;
+	size_t   off;
+	uint16_t id, type;
+	size_t   prop_at[KOFW_SCHEMA_MAX_PROP];
+	uint8_t  prov;
+	uint8_t  i;
+
+	prov = kofw_provider_of(&rec->EventHeader.ProviderId);
+	if (prov == KOFW_PROV_NONE)
+		return 0;
+
+	id   = rec->EventHeader.EventDescriptor.Id;
+	type = type_of(prov, id);
+
+	sc = find(c, prov, id, rec->EventHeader.EventDescriptor.Version);
+	if (!sc) {
+		sc = learn(c, prov, type, rec);
+		if (!sc)
+			return 0;
+	}
+	/* One producer, one cache line this thread already owns - see the note
+	 * on kofw_schema.hits for why a count and not just a list. */
+	sc->hits++;
+
+	dec_head(out, rec, prov, id, type);
+
+	w.out        = out;
+	w.spill      = spill;
+	w.tnext      = 0;
+	w.spare_off  = 0;
+	w.spare_len  = 0;
+	w.spare_type = 0;
+
+	w.want = wanted(type);
+	w.base = (const uint8_t *)rec->UserData;
+	w.total = rec->UserDataLength;
 	off   = 0;
 
 	/*
@@ -1239,7 +1643,7 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 		const struct kofw_prop *pr = &sc->prop[i];
 		size_t len = pr->fixed;
 
-		if (off >= total)
+		if (off >= w.total)
 			break;
 
 		prop_at[i] = off;
@@ -1252,375 +1656,33 @@ int kofw_decode(struct kofw_schema_cache *c, const EVENT_RECORD *rec,
 			size_t lat = prop_at[pr->len_from - 1u];
 			uint32_t v = 0;
 
-			if (lat + lp->fixed > total)
+			if (lat + lp->fixed > w.total)
 				break;
 			if (lp->fixed == 1u)
-				v = base[lat];
+				v = w.base[lat];
 			else if (lp->fixed == 2u)
-				v = (uint32_t)base[lat] |
-				    ((uint32_t)base[lat + 1u] << 8);
+				v = (uint32_t)w.base[lat] |
+				    ((uint32_t)w.base[lat + 1u] << 8);
 			else
-				v = rd_u32(base + lat);
+				v = rd_u32(w.base + lat);
 			len = v;
 		} else if (len == 0) {
-			len = measure(pr->in_type, base + off, total - off);
+			len = measure(pr->in_type, w.base + off, w.total - off);
 			if (len == SIZE_MAX)
 				break;
 		}
-		if (len > total - off)
+		if (len > w.total - off)
 			break;
 
-		switch (pr->field) {
-		case KOFW_FLD_PID:
-			if (len >= 4) {
-				out->pid = rd_u32(base + off);
-				want &= ~(uint32_t)KOFW_F_PID;
-			}
-			break;
-		case KOFW_FLD_PPID:
-			if (len >= 4) {
-				out->ppid = rd_u32(base + off);
-				want &= ~(uint32_t)KOFW_F_PPID;
-			}
-			break;
-		case KOFW_FLD_SESSION:
-			if (len >= 4) {
-				out->session_id = rd_u32(base + off);
-				want &= ~(uint32_t)KOFW_F_SESSION;
-			}
-			break;
-		case KOFW_FLD_EXIT_CODE:
-			if (len >= 4) {
-				out->exit_code = rd_u32(base + off);
-				want &= ~(uint32_t)KOFW_F_EXIT_CODE;
-			}
-			break;
-		case KOFW_FLD_CREATE_TIME:
-			if (len >= 8) {
-				out->create_time = rd_u64(base + off);
-				want &= ~(uint32_t)KOFW_F_CREATE_TIME;
-			}
-			break;
-		/*
-		 * BY THE LENGTH THE PROVIDER DECLARED, WHICH IS HOW IPv6 GETS
-		 * IN WITHOUT AN ESTABLISHED EVENT ID.
-		 *
-		 * Kernel-Network raises its v6 events under ids of their own,
-		 * and this build has not established them the way type_of()
-		 * requires - one operation at a time under --raw --schema. But
-		 * the PROPERTY is still called daddr and still arrives with its
-		 * declared size, so taking 16 bytes when 16 bytes are offered
-		 * puts the peer in the record either way. A v6 connection then
-		 * shows up as a RAW event with the address on it, rather than
-		 * not showing up at all.
-		 *
-		 * Four bytes go in IPv4-mapped, so the record has one
-		 * representation and a reader never has to ask which family it
-		 * is holding - see struct kof_evt_net.
-		 */
-		case KOFW_FLD_DADDR:
-			if (len >= 16)
-				memcpy(out->net_daddr, base + off, 16);
-			else if (len >= 4)
-				kof_evt_ip_set_v4(out->net_daddr,
-						  rd_u32(base + off));
-			break;
-		case KOFW_FLD_SADDR:
-			if (len >= 16)
-				memcpy(out->net_saddr, base + off, 16);
-			else if (len >= 4)
-				kof_evt_ip_set_v4(out->net_saddr,
-						  rd_u32(base + off));
-			break;
-		case KOFW_FLD_DPORT:
-			if (len >= 2)
-				memcpy(&out->net_dport, base + off, 2);
-			break;
-		case KOFW_FLD_SPORT:
-			if (len >= 2)
-				memcpy(&out->net_sport, base + off, 2);
-			break;
-		case KOFW_FLD_SIZE:
-			if (len >= 4)
-				out->net_size = rd_u32(base + off);
-			break;
-		case KOFW_FLD_FILE_OFFSET:
-			/* Declared as a 64-bit signed integer by FileIo Write.
-			 * Taken as eight bytes where there are eight, because
-			 * an offset truncated to 32 bits does not look wrong -
-			 * it looks like an offset near the start of a large
-			 * file, which is exactly where a reader would then
-			 * read the wrong bytes back. */
-			if (len >= 8)
-				out->file_offset = rd_u64(base + off);
-			else if (len >= 4)
-				out->file_offset = rd_u32(base + off);
-			break;
-		case KOFW_FLD_FILE_KEY:
-			/* Into `addr`, which a file event never uses for
-			 * anything else - a write has no entry point. The
-			 * consumer thread resolves it to a path; see
-			 * kofw_ftab_resolve. */
-			if (!out->addr) {
-				if (len >= 8)
-					out->addr = rd_u64(base + off);
-				else if (len >= 4)
-					out->addr = rd_u32(base + off);
-			}
-			break;
-		case KOFW_FLD_ADDR:
-			/* 8 on a 64-bit payload, 4 on a 32-bit one - the shape
-			 * already sized it as a POINTER, so take what is
-			 * there rather than assuming the wider form. */
-			if (len >= 8)
-				out->addr = rd_u64(base + off);
-			else if (len >= 4)
-				out->addr = rd_u32(base + off);
-			break;
-		case KOFW_FLD_ADDR_SIZE:
-			if (len >= 8)
-				out->addr_size = rd_u64(base + off);
-			else if (len >= 4)
-				out->addr_size = rd_u32(base + off);
-			break;
-
-		case KOFW_FLD_PATH_MORE:
-			path_more(out, &tnext, base, off, len, pr->in_type, 0);
-			break;
-		case KOFW_FLD_REG_VALUE:
-			path_more(out, &tnext, base, off, len, pr->in_type, 1);
-			break;
-
-		/*
-		 * NARROWED, NOT TRUNCATED. A registry type is winnt.h's small
-		 * enum - REG_NONE through REG_QWORD - so a byte holds every
-		 * value there is, and a value outside it would be a provider
-		 * this build does not understand rather than a number worth
-		 * keeping the high bits of.
-		 */
-		case KOFW_FLD_REG_TYPE:
-			if (len >= 4) {
-				uint32_t v = rd_u32(base + off);
-
-				out->reg_type = v > 0xffu ? 0xffu : (uint8_t)v;
-			}
-			break;
-		case KOFW_FLD_REG_SIZE:
-			if (len >= 4)
-				out->reg_data_size = rd_u32(base + off);
-			break;
-		case KOFW_FLD_REG_DISP:
-			if (len >= 4) {
-				uint32_t v = rd_u32(base + off);
-
-				out->reg_disp = v > 0xffu ? 0xffu : (uint8_t)v;
-			}
-			break;
-
-		/*
-		 * THE BYTES THAT WERE WRITTEN, into a slot of their own.
-		 *
-		 * Verbatim, for the reason the AMSI buffer below is verbatim: a
-		 * REG_SZ is UTF-16 and a REG_BINARY is arbitrary, and either one
-		 * sanitised at the collector is evidence destroyed before the
-		 * half that scans it ever sees it.
-		 *
-		 * WHAT THE LENGTHS MEAN APART. `len` is what the provider
-		 * captured, reg_data_size is what the value actually is, and
-		 * data_len is what fit here. The flag is set when the last is
-		 * short of the first, so a rule that matched a prefix can tell
-		 * it was a prefix.
-		 */
-		case KOFW_FLD_REG_DATA: {
-			size_t take = len, room;
-
-			if (!len || tnext + 1u >= sizeof out->text)
-				break;
-			room = sizeof out->text - tnext;
-			if (take > room - 1u) {
-				take = room - 1u;
-				out->flags |= KOFW_EF_TRUNCATED;
-			}
-			memcpy(out->text + tnext, base + off, take);
-			out->text[tnext + take] = '\0';
-			out->off_data = (uint16_t)tnext;
-			out->data_len = (uint16_t)take;
-			tnext += take + 1u;
-			out->text_len = (uint16_t)tnext;
-			break;
-		}
-
-		/*
-		 * A STRING NOBODY CLAIMED, remembered in case nothing does.
-		 *
-		 * An event whose property names this build has never seen -
-		 * every provider on its first encounter - fills no string field
-		 * and renders as a bare `[prov id v]` with nothing after it.
-		 * That reads as "the event carried nothing", which is what AMSI
-		 * looked like for a whole session while it was in fact carrying
-		 * the script.
-		 *
-		 * So the longest unclaimed string is kept, and used below only
-		 * if no named field took the object slot. Longest rather than
-		 * first, because the payload that matters is the content and
-		 * the ones beside it are labels: an application name and a
-		 * content name are short, a submitted script block is not.
-		 *
-		 * A fallback, never an override. Anything this build actually
-		 * recognises still wins.
-		 */
-		case KOFW_FLD_SKIP:
-			if ((pr->in_type == TDH_INTYPE_UNICODESTRING ||
-			     pr->in_type == TDH_INTYPE_ANSISTRING) &&
-			    len > spare_len) {
-				spare_off  = off;
-				spare_len  = len;
-				spare_type = pr->in_type;
-			}
-			break;
-
-		case KOFW_FLD_IMAGE:
-		case KOFW_FLD_OBJECT: {
-			int    cut = 0;
-			size_t room, n = 0;
-			int    got = 1;
-
-			/*
-			 * Both strings share one arena and are appended in the
-			 * order the payload happens to carry them, so the second
-			 * gets whatever the first left. A path that has to be cut
-			 * because of that is still flagged - a truncated path
-			 * that looks whole is exactly what a later rule would
-			 * match against and be wrong about.
-			 */
-			if (tnext + 1 >= sizeof out->text)
-				break;
-			room = sizeof out->text - tnext;
-
-			if (pr->in_type == TDH_INTYPE_UNICODESTRING)
-				n = kofw_utf16_to_utf8(
-					(const uint16_t *)(const void *)
-						(base + off),
-					len / 2u, out->text + tnext, room,
-					&cut);
-			else if (pr->in_type == TDH_INTYPE_ANSISTRING)
-				n = kofw_ansi_to_text(base + off, len,
-						      out->text + tnext, room,
-						      &cut);
-			/*
-			 * A BINARY BUFFER, which is what AMSI's `content` is.
-			 *
-			 * Not a string type, so it used to be skipped entirely
-			 * - the second of the two reasons the one field that
-			 * subscription exists for never appeared.
-			 *
-			 * WHICH ENCODING IS A HEURISTIC AND IS LABELLED AS
-			 * ONE: a PowerShell script block arrives as UTF-16 and
-			 * a macro body as bytes, and the provider does not say
-			 * which. Two NUL high bytes in the first four is the
-			 * test.
-			 *
-			 * AND IT IS NO LONGER CONVERTED AT ALL. Sanitising -
-			 * high bytes to '?', control characters to '.' - was
-			 * justified by the record being printed, and this
-			 * record is not printed: it goes over a channel to
-			 * kofwatchman, whose entire purpose is to SCAN what is
-			 * in it. A lossy conversion here destroys the evidence
-			 * before the half that needs it ever sees it, so the
-			 * bytes are copied verbatim and content_len says how
-			 * many. Whoever PRINTS one sanitises it there, which is
-			 * where the terminal is.
-			 */
-			else if (pr->in_type == TDH_INTYPE_BINARY) {
-				size_t take = len;
-
-				if (take > room - 1u) {
-					take = room - 1u;
-					cut = 1;
-				}
-				/*
-				 * WHERE THE WHOLE THING IS, for the caller to
-				 * send on. The record still holds a prefix and
-				 * is still flagged - a consumer that cannot
-				 * reassemble is no worse off than before - but
-				 * the rest is no longer lost here.
-				 */
-				if (spill) {
-					spill->src   = base + off;
-					spill->total = len;
-					spill->taken = take;
-				}
-				memcpy(out->text + tnext, base + off, take);
-				/*
-				 * Length-delimited, but still NUL terminated
-				 * after it: content_len is what a scanner
-				 * reads, and the NUL is so that anything
-				 * treating the arena as strings - a label, a
-				 * panel row - cannot run off the end of it.
-				 */
-				out->text[tnext + take] = '\0';
-				out->content_len = (uint16_t)take;
-				n = take;
-			}
-			else
-				got = 0;
-
-			if (got) {
-				if (pr->field == KOFW_FLD_IMAGE) {
-					out->off_image = (uint16_t)tnext;
-					want &= ~(uint32_t)KOFW_F_IMAGE;
-				} else {
-					out->off_object = (uint16_t)tnext;
-					want &= ~(uint32_t)KOFW_F_OBJECT;
-				}
-				tnext += n + 1u;
-				out->text_len = (uint16_t)tnext;
-				if (cut)
-					out->flags |= KOFW_EF_TRUNCATED;
-			}
-			break;
-		}
-
-		default:
-			break;
-		}
+		dec_field(&w, pr, off, len);
 
 		off += len;
 	}
 
-	/*
-	 * THE UNCLAIMED STRING, used only if nothing named took the slot.
-	 *
-	 * This is what makes a provider legible on its first encounter instead
-	 * of on the second, after somebody has read a shape dump and added its
-	 * property names. The record still says which provider and which id it
-	 * came from, so the string is offered as "here is what it carried", not
-	 * as a field this build understands.
-	 */
-	if (out->off_object == KOF_TEXT_NONE && spare_len &&
-	    tnext + 1u < sizeof out->text) {
-		size_t room = sizeof out->text - tnext, n = 0;
-		int    cut = 0;
+	dec_spare(&w);
 
-		if (spare_type == TDH_INTYPE_UNICODESTRING)
-			n = kofw_utf16_to_utf8(
-				(const uint16_t *)(const void *)
-					(base + spare_off),
-				spare_len / 2u, out->text + tnext, room, &cut);
-		else
-			n = kofw_ansi_to_text(base + spare_off, spare_len,
-					      out->text + tnext, room, &cut);
-		if (n) {
-			out->off_object = (uint16_t)tnext;
-			tnext += n + 1u;
-			out->text_len = (uint16_t)tnext;
-			if (cut)
-				out->flags |= KOFW_EF_TRUNCATED;
-		}
-	}
-
-	out->miss = want;
-	if (want)
+	out->miss = w.want;
+	if (w.want)
 		out->flags |= KOFW_EF_PARTIAL;
 
 	return 1;

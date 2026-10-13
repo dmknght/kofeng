@@ -15,10 +15,10 @@
  * syndrome reader - and the two had already drifted by one rule.
  */
 
-#ifndef KOFENG_PATHOGEN_KOFDISEASE_H
-#define KOFENG_PATHOGEN_KOFDISEASE_H
+#ifndef KOFENG_DISEASES_KOFDISEASE_H
+#define KOFENG_DISEASES_KOFDISEASE_H
 
-#include <kofmod/kofpathogen.h>   /* KOF_DIAG_DISEASE_LEN, the longest a disease may be */
+#include <kofmod/kofdiagtree.h>   /* KOF_DIAG_DISEASE_LEN, the longest a disease may be */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -81,4 +81,4 @@ size_t kof_disease_decl_print(const struct kof_disease_decl *d, char *out,
 int kof_disease_decl_same(const struct kof_disease_decl *a,
 			  const struct kof_disease_decl *b);
 
-#endif /* KOFENG_PATHOGEN_KOFDISEASE_H */
+#endif /* KOFENG_DISEASES_KOFDISEASE_H */

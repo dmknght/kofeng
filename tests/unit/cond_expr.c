@@ -24,6 +24,9 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Beside the build output, never in /tmp: see tools/check_layers.py. */
+#define SCRATCH_FILE "build/kof_cond_expr.tmp"
+
 #include "../../kofexamine/kofeditor.h"
 #include "../../kofexamine/kofinspect.h"
 #include <kofmod/pe.h>
@@ -56,7 +59,7 @@ static const char *emit(const char *expr)
 	long n;
 
 	memset(buf, 0, sizeof buf);
-	f = tmpfile();
+	f = fopen(SCRATCH_FILE, "w+b");
 	if (!f)
 		return "";
 	emit_expr(f, &E, expr);
@@ -68,6 +71,7 @@ static const char *emit(const char *expr)
 		n = 0;
 	buf[n] = 0;
 	fclose(f);
+	remove(SCRATCH_FILE);
 	return buf;
 }
 
@@ -241,7 +245,7 @@ static const char *emit_block(void)
 	uint32_t k;
 
 	memset(buf, 0, sizeof buf);
-	f = tmpfile();
+	f = fopen(SCRATCH_FILE, "w+b");
 	if (!f)
 		return "";
 	for (k = 0; k < E.dr.n_cnd; k++) {
@@ -257,6 +261,7 @@ static const char *emit_block(void)
 		n = 0;
 	buf[n] = 0;
 	fclose(f);
+	remove(SCRATCH_FILE);
 	return buf;
 }
 

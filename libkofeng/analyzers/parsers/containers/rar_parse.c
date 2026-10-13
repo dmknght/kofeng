@@ -58,22 +58,6 @@
 
 /* ---- reads -------------------------------------------------------------------- */
 
-static uint16_t rd16(kof_buf f, uint64_t off)
-{
-	uint16_t v = 0;
-
-	kof_rd_u16(f, off, 0, &v);
-	return v;
-}
-
-static uint32_t rd32(kof_buf f, uint64_t off)
-{
-	uint32_t v = 0;
-
-	kof_rd_u32(f, off, 0, &v);
-	return v;
-}
-
 /*
  * A RAR5 variable length integer.
  *
@@ -452,8 +436,8 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 		return 0;
 	}
 
-	csize = rd32(s->f, at + F_PACK_SIZE);
-	usize = rd32(s->f, at + F_UNP_SIZE);
+	csize = kof_rd32_or0(s->f, at + F_PACK_SIZE);
+	usize = kof_rd32_or0(s->f, at + F_UNP_SIZE);
 	hdr_len = F_FIXED_LEN;
 
 	/*
@@ -469,8 +453,8 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 			r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
 			return 0;
 		}
-		csize |= (uint64_t)rd32(s->f, at + F_HIGH_PACK) << 32;
-		usize |= (uint64_t)rd32(s->f, at + F_HIGH_UNP) << 32;
+		csize |= (uint64_t)kof_rd32_or0(s->f, at + F_HIGH_PACK) << 32;
+		usize |= (uint64_t)kof_rd32_or0(s->f, at + F_HIGH_UNP) << 32;
 		hdr_len += F_HIGH_LEN;
 	}
 
@@ -487,7 +471,7 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 		return 1;
 	}
 
-	name_len = rd16(s->f, at + F_NAME_LEN);
+	name_len = kof_rd16_or0(s->f, at + F_NAME_LEN);
 	name_off = at + hdr_len;
 
 	/*
@@ -507,7 +491,7 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 	e->usize    = usize;
 	e->name_off = name_off;
 	e->name_len = name_len;
-	e->crc32    = rd32(s->f, at + F_CRC);
+	e->crc32    = kof_rd32_or0(s->f, at + F_CRC);
 	e->flags    = flags;
 	e->method   = s->f.p[at + F_METHOD];
 	e->unp_ver  = s->f.p[at + F_UNP_VER];
@@ -645,7 +629,7 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.r = r;
-	kof_runs_init(&s.runs, (struct kof_run *)r->run, KOF_RAR_MAX_EXTENTS,
+	kof_runs_init(&s.runs, r->run, KOF_RAR_MAX_EXTENTS,
 		      KOF_RAR_CLS_COUNT);
 
 	if (file.p[6] == 0x01) {
@@ -685,8 +669,8 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 		uint8_t typ;
 
 		typ   = file.p[at + B_TYPE];
-		flags = rd16(file, at + B_FLAGS);
-		size  = rd16(file, at + B_SIZE);
+		flags = kof_rd16_or0(file, at + B_FLAGS);
+		size  = kof_rd16_or0(file, at + B_SIZE);
 
 		if (size < B_BASE_LEN) {
 			r->anomalies |= KOF_RAR_ANOM_BAD_BLOCK;
@@ -734,7 +718,7 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 				r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
 				break;
 			}
-			data = rd32(file, at + B_BASE_LEN);
+			data = kof_rd32_or0(file, at + B_BASE_LEN);
 		}
 
 		/*

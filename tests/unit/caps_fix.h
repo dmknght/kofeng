@@ -143,7 +143,7 @@ static inline unsigned cf_count_cap(const struct kgenome_diag_scan *s, uint16_t 
 static inline int cf_match_rwx(const struct kgenome_diag_scan *s)
 {
 	static const struct kof_diag_node nd[] = {
-		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_FLOWF_WX, KOF_DIAG_NO_PARENT,
+		{ KGENOME_NUCLEO_ALLOC_EXEC, KGENOME_NUCLEO_F_WX, KOF_DIAG_NO_PARENT,
 		  KGENOME_DIAG_ROLE_NONE, 0, 0, 0, NULL },
 		{ KGENOME_NUCLEO_MEM_READ, 0, 0, KGENOME_DIAG_ROLE_BUFFER, 0, 0, 0, NULL },
 		{ KGENOME_NUCLEO_EXEC_REG, 0, 0, KGENOME_DIAG_ROLE_TARGET, 0, 0, 0, NULL },

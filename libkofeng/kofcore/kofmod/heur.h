@@ -167,7 +167,7 @@ enum kof_eng_want {
 	KOF_ENG_CONCLUDE = 1u << 3,
 
 	/*
-	 * WORK OUT WHAT THIS OBJECT'S CODE DOES - the pathogen analysis.
+	 * WORK OUT WHAT THIS OBJECT'S CODE DOES - the diagnose analysis.
 	 *
 	 * It sweeps for the places the code enters the kernel or calls an
 	 * import, then resolves which of those are linked by a value, and the
@@ -186,7 +186,7 @@ enum kof_eng_want {
 	 * turn the analysis on by what it contains, and there is no state, so
 	 * one object's ask cannot become the next object's.
 	 */
-	KOF_ENG_USE_PATHOGEN = 1u << 4,
+	KOF_ENG_USE_DIAGNOSE = 1u << 4,
 
 	/*
 	 * THE LOW BITS ARE ASKS. THE HIGH BYTE IS A CLASS - see
@@ -194,6 +194,12 @@ enum kof_eng_want {
 	 */
 	KOF_ENG_CLASS_SHIFT = 8
 };
+
+/*
+ * The old name of KOF_ENG_USE_DIAGNOSE, same value. A module source that
+ * still spells it the old way compiles; new text says DIAGNOSE.
+ */
+#define KOF_ENG_USE_PATHOGEN KOF_ENG_USE_DIAGNOSE
 
 /*
  * NARROW THE SEARCH TO ONE CLASS OF MALWARE.

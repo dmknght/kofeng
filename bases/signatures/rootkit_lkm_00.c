@@ -1,6 +1,6 @@
 #include <kofmod/kofsig.h>
 #include <kofmod/kofcap.h>
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * rootkit_lkm_00.c - a loadable kernel module that hides itself from the

@@ -69,7 +69,7 @@
 
 #include <kofmod/kofsig.h>
 #include <kofshared/msf_elf32.h>
-
+#include <kofmod/stub_pat.h>
 KOF_ANALYZE_STEP(KOF_ANALYZE_DECRYPT);
 
 /* ELF and the formatless children, for the reason msf_xor_00.c gives: these can
@@ -144,20 +144,20 @@ typedef char coding_rows_cover_stub_pat[
 #define PLACE_DD    11u
 #define PLACE_MARK  19u
 
-static int stub_is(const struct kof_obj_ctx *ctx, uint64_t ep, uint32_t c)
-{
-	uint32_t i;
-
-	if (!kof_in_obj(ep, coding[c].n))
-		return 0;
-	for (i = 0; i < coding[c].n; i++) {
-		uint16_t w = stub_pat[coding[c].at + i];
-
-		if (w != 0x100u && kof_u8(ep + i) != (uint8_t)w)
-			return 0;
-	}
-	return 1;
-}
+/*
+ * Does the run of fixed bytes at `ep` match row `c`? Reads inside the object
+ * only, so a file that ends inside the pattern matches nothing.
+ *
+ * The function is defined by KOF_STUB_DEFINE_IS (kofmod/stub_pat.h), because the
+ * other msf_x86 module needs the same one. It is invoked HERE, in the place the
+ * function had, and this comment is as long as the function was: a blob follows
+ * the order its functions are emitted in, and a report carries the line it was
+ * made on, so moving code in a module changes the pack even when nothing it does
+ * has changed.
+ *
+ *
+ */
+KOF_STUB_DEFINE_IS(stub_is, coding, stub_pat)
 
 KOF_DEFINE_UNPACK
 {

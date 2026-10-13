@@ -126,7 +126,20 @@ static struct kgenome_emu *run(unsigned char *f, size_t len,
 	memset(&ctx, 0, sizeof ctx);
 	if (!kof_pe_parse(kof_buf_make(f, len), &info, &ctx) || !info.valid)
 		return NULL;
-	return kgenome_emu_unp_run_pe(f, len, &info, NULL, NULL, 0, 0, KGENOME_EMU_EXTEND_MAX, NULL, 0, decl, &rep);
+	return kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
+			.file = f,
+			.n = len,
+			.info = &info,
+			.imports = NULL,
+			.bud = NULL,
+			.idle = 0,
+			.hand_back = 0,
+			.extensions = KGENOME_EMU_EXTEND_MAX,
+			.oep = NULL,
+			.n_oep = 0,
+			.decl = decl,
+			.rep = &rep,
+		});
 }
 
 /*

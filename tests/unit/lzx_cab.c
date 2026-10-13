@@ -156,7 +156,7 @@ static void examine(const char *path, struct kof_cab_info *c,
 
 	for (i = 0; i < c->n_entries && done < 8u; i++) {
 		const struct kof_entry *e = &c->entry[i];
-		uint64_t skip, take, total = 0, at = 0, got = 0;
+		uint64_t skip, take, total = 0, at = 0;
 		uint32_t n, k, bits;
 		struct out o;
 		enum kuncoat_status st;
@@ -205,8 +205,12 @@ static void examine(const char *path, struct kof_cab_info *c,
 		memset(&o, 0, sizeof o);
 		o.dst = outbuf;
 		o.cap = take;
-		st = kuncoat_lzx_decode(lz, bits, in, at, skip, take, out_sink, &o,
-				    &got);
+		{
+			const struct kuncoat_lzx_req rq = { bits, skip, take };
+			struct kuncoat_io io = { .in = { in, at }, .sink = out_sink, .user = &o };
+
+			st = kuncoat_lzx_decode(lz, &rq, &io);
+		}
 		if (st != KUNCOAT_OK && st != KUNCOAT_TRUNCATED) {
 			fail(path, "an LZX folder did not decode");
 			break;

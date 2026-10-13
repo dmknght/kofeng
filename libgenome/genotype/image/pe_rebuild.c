@@ -59,20 +59,15 @@
  * The signature sits in front of the COFF header, and forgetting it is a four byte
  * error that does not look like one.
  *
- * `hdr` points at "PE\0\0", so the COFF header begins at hdr + SIG_LEN and the
- * section table at hdr + SIG_LEN + COFF_LEN + optsz. Written without the signature
+ * `hdr` points at "PE\0\0", so the COFF header begins at hdr + KGENOME_PE_SIG_LEN and the
+ * section table at hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + optsz. Written without the signature
  * once, every section field was read four bytes early: the header copied out was
  * still correct - it is copied from hdr directly - so the rebuilt file identified
  * as PE, parsed, and reported sane sections, while the section CONTENT was placed
  * from garbage offsets. A wrong answer that passes every cheap check is the reason
  * the test below compares bytes rather than verdicts.
  */
-#define SIG_LEN          4u
-#define COFF_LEN        20u
-#define SEC_LEN         40u
 #define MAX_SECTIONS   96u      /* the loader's own limit */
-#define MIN_OPT_LEN     96u
-#define DOS_LEN        0x40u    /* the MZ stub this writes: header and nothing else */
 
 /*
  * Is there a header here that could be true?
@@ -86,15 +81,15 @@ static int header_plausible(kof_buf img, uint64_t at, uint16_t *nsec_out,
 {
 	uint16_t machine, nsec, optsz, magic;
 
-	if (!kof_rd_u16(img, at + SIG_LEN + 0, 0, &machine) ||
-	    !kof_rd_u16(img, at + SIG_LEN + 2, 0, &nsec) ||
-	    !kof_rd_u16(img, at + SIG_LEN + 16, 0, &optsz))
+	if (!kof_rd_u16(img, at + KGENOME_PE_SIG_LEN + 0, 0, &machine) ||
+	    !kof_rd_u16(img, at + KGENOME_PE_SIG_LEN + 2, 0, &nsec) ||
+	    !kof_rd_u16(img, at + KGENOME_PE_SIG_LEN + 16, 0, &optsz))
 		return 0;
 	if (nsec == 0 || nsec > MAX_SECTIONS)
 		return 0;
-	if (optsz < MIN_OPT_LEN)
+	if (optsz < KGENOME_PE_MIN_OPT_LEN)
 		return 0;
-	if (!kof_rd_u16(img, at + SIG_LEN + COFF_LEN, 0, &magic))
+	if (!kof_rd_u16(img, at + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN, 0, &magic))
 		return 0;
 	/* 0x10b is PE32 and 0x20b is PE32+; anything else is not an optional
 	 * header, whatever the bytes before it said. */
@@ -105,8 +100,8 @@ static int header_plausible(kof_buf img, uint64_t at, uint16_t *nsec_out,
 		return 0;
 	/* The section table has to be inside the image, or there is nothing to
 	 * rebuild from. */
-	if (!kof_in_range(img, at + SIG_LEN + COFF_LEN + optsz,
-			  (uint64_t)nsec * SEC_LEN))
+	if (!kof_in_range(img, at + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + optsz,
+			  (uint64_t)nsec * KGENOME_PE_SEC_LEN))
 		return 0;
 
 	*nsec_out = nsec;
@@ -357,28 +352,28 @@ uint32_t kgenome_pe_layout_of(kof_buf img, struct kgenome_sec_decl *out, uint32_
 	}
 	if (!found)
 		return 0;
-	sec_tab = hdr + SIG_LEN + COFF_LEN + optsz;
+	sec_tab = hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + optsz;
 
 	if (entry) {
 		uint32_t v = 0;
 
-		kof_rd_u32(img, hdr + SIG_LEN + COFF_LEN + 16, 0, &v);
+		kof_rd_u32(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + 16, 0, &v);
 		*entry = v;
 	}
 	if (base) {
 		uint16_t magic = 0;
 
-		kof_rd_u16(img, hdr + SIG_LEN + COFF_LEN, 0, &magic);
+		kof_rd_u16(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN, 0, &magic);
 		if (magic == 0x020bu) {
 			uint32_t lo = 0, hi = 0;
 
-			kof_rd_u32(img, hdr + SIG_LEN + COFF_LEN + 24, 0, &lo);
-			kof_rd_u32(img, hdr + SIG_LEN + COFF_LEN + 28, 0, &hi);
+			kof_rd_u32(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + 24, 0, &lo);
+			kof_rd_u32(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + 28, 0, &hi);
 			*base = ((uint64_t)hi << 32) | lo;
 		} else {
 			uint32_t v = 0;
 
-			kof_rd_u32(img, hdr + SIG_LEN + COFF_LEN + 28, 0, &v);
+			kof_rd_u32(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN + 28, 0, &v);
 			*base = v;
 		}
 	}
@@ -398,10 +393,10 @@ uint32_t kgenome_pe_layout_of(kof_buf img, struct kgenome_sec_decl *out, uint32_
 		unsigned dd;
 		uint32_t nrva = 0;
 
-		kof_rd_u16(img, hdr + SIG_LEN + COFF_LEN, 0, &magic);
-		dd = (unsigned)(hdr + SIG_LEN + COFF_LEN +
+		kof_rd_u16(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN, 0, &magic);
+		dd = (unsigned)(hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN +
 				(magic == 0x020bu ? 112u : 96u));
-		kof_rd_u32(img, hdr + SIG_LEN + COFF_LEN +
+		kof_rd_u32(img, hdr + KGENOME_PE_SIG_LEN + KGENOME_PE_COFF_LEN +
 			   (magic == 0x020bu ? 108u : 92u), 0, &nrva);
 		if (nrva > 16u)
 			nrva = 16u;
@@ -427,7 +422,7 @@ uint32_t kgenome_pe_layout_of(kof_buf img, struct kgenome_sec_decl *out, uint32_
 	}
 
 	for (i = 0; i < nsec && n < cap; i++) {
-		uint64_t e = sec_tab + (uint64_t)i * SEC_LEN;
+		uint64_t e = sec_tab + (uint64_t)i * KGENOME_PE_SEC_LEN;
 		uint32_t vsz = 0, rva = 0, chars = 0;
 		unsigned k;
 

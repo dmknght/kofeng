@@ -1,7 +1,7 @@
 /*
  * find_lit_diff - differential test for find_lit, both cases.
  *
- * The nocase=1 half exists because kof_match_find_set's folded path was rewritten
+ * The nocase=1 half exists because find_lit's folded path was rewritten
  * to keep its skip inside memchr, and that rewrite is index arithmetic in the hot
  * path: an anchor offset subtracted from a match position, two overlapping memchr
  * spans, and bounds that must not underflow when the needle is as long as the
@@ -20,26 +20,24 @@
  * and the colon means patterns both with and without a case-invariant byte are
  * generated, so both branches are covered.
  *
- * The optimised routine is included from the matcher rather than copied, so this
- * cannot silently drift from what actually runs.
+ * The optimised routine is included from the matcher's own header rather than
+ * copied, so this cannot silently drift from what actually runs.
  */
 
-/* Before any include, not after: this file includes kofmatch.c below, which
- * includes kofplatform.h, whose POSIX branch needs the real memmem declared
- * (a GNU/BSD extension) to compile kof_memmem's body - but by the time that
- * nested #define _GNU_SOURCE in kofmatch.c itself would run, this file's own
- * <string.h> a few lines down has already been processed and its include
- * guard blocks memmem's declaration from ever appearing. Defined here, first,
- * so it's in effect before <string.h> is seen at all, from either copy. */
+/* Before any include, not after: kofmatch_lit.h includes kofplatform.h, whose
+ * POSIX branch needs the real memmem declared (a GNU/BSD extension) to compile
+ * kof_memmem's body, and this file's own <string.h> below would otherwise be
+ * the first to be processed and its include guard would block memmem's
+ * declaration from ever appearing. */
 #define _GNU_SOURCE
 
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
-/* The .c, not the header: find_lit is static, and a copy here could drift from
- * the one that runs. */
-#include "../../libkofeng/detectors/pattern/kofmatch.c"
+/* The routine the matcher runs: find_lit is static and lives in this header so
+ * that a copy here cannot drift from it. */
+#include "../../libkofeng/detectors/pattern/kofmatch_lit.h"
 
 /* Same shape, no folding - what nocase=0 has to agree with. */
 static int ref_find_exact(const uint8_t *h, uint64_t hl, const uint8_t *n,
@@ -72,7 +70,7 @@ static int ref_find(const uint8_t *h, uint64_t hl, const uint8_t *n, uint64_t nl
 		return 0;
 	for (i = 0; i + nl <= hl; i++) {
 		for (j = 0; j < nl; j++)
-			if (fold(h[i + j]) != fold(n[j]))
+			if (kof_lower_byte(h[i + j]) != kof_lower_byte(n[j]))
 				break;
 		if (j == nl) {
 			*f = i;

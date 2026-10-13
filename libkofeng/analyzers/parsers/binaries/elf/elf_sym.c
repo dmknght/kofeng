@@ -34,10 +34,6 @@
 #include "../sym_pool.h"
 #include <stdlib.h>
 
-#define SHN_UNDEF_  0
-#define SHF_WRITE_  0x1
-#define SHF_EXEC_   0x4
-
 /*
  * One symbol, from what the shared reader has already unpacked, handed to the
  * writer. The name is read WHOLE - up to KOF_SYM_NAME_MAX, which is a DoS bound
@@ -59,7 +55,7 @@ static int one_rec(struct kof_symw *w, kof_buf strtab, const struct kgenome_elf_
 	 * SECTION the symbol lands in, which is how a rule asks "is this data
 	 * something the program could jump into" without re-deriving it.
 	 */
-	if (sy->shndx == SHN_UNDEF_) {
+	if (sy->shndx == KGENOME_ELF_SHN_UNDEF) {
 		flags |= KOF_SYM_F_UNDEFINED;
 	} else {
 		flags |= KOF_SYM_F_DEFINED;
@@ -67,8 +63,8 @@ static int one_rec(struct kof_symw *w, kof_buf strtab, const struct kgenome_elf_
 		    sy->shndx < KGENOME_ELF_MAX_SECTIONS) {
 			uint64_t sf = e->sec[sy->shndx].flags;
 
-			if (sf & SHF_WRITE_) flags |= KOF_SYM_F_IN_WRITABLE;
-			if (sf & SHF_EXEC_)  flags |= KOF_SYM_F_IN_EXEC;
+			if (sf & KGENOME_ELF_SHF_WRITE) flags |= KOF_SYM_F_IN_WRITABLE;
+			if (sf & KGENOME_ELF_SHF_EXEC)  flags |= KOF_SYM_F_IN_EXEC;
 		}
 	}
 	if (sy->size)

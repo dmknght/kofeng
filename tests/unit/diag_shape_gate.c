@@ -1,6 +1,6 @@
 /*
  * diag_shape_gate - the file attributes that route an object into the
- * pathogen analysis.
+ * diagnose analysis.
  *
  * The engine publishes what it read out of the header - see enum
  * kof_diag_fact - and a diagnose registers the conditions it wants those to
@@ -16,7 +16,7 @@
  * exactly like a slow machine. So this watches kof_stats.heur_emu, which is
  * the engine's own count of objects interpreted because something asked.
  *
- * THIS WAS A HEURISTIC RULE, bases/heur/shellcode_00.c, which carried the
+ * THIS WAS A HEURISTIC RULE, the shellcode_00 rule in bases/heur (gone), which carried the
  * same shape test and asked on the diagnose's behalf. It had to publish a
  * verdict to be allowed to ask - Heur:Meterp?Shellcode on every object it
  * fired on, saying only that the engine had decided to look - and the test

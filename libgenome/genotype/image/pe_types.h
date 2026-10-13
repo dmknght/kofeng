@@ -381,6 +381,30 @@ enum kgenome_pe_image {
 
 
 /* IMAGE_FILE_DLL, and the subsystem a driver runs in. */
+/*
+ * THE FIXED SIZES OF A PE'S HEADERS, and the magic that starts one - one
+ * statement for the reader (pe_image.c), the rebuild (pe_rebuild.c) and the
+ * unmapper (pe_unmap.c), which had each written them out.
+ *
+ * `hdr` at "PE\0\0": the COFF header begins KGENOME_PE_SIG_LEN after it, the
+ * optional header KGENOME_PE_COFF_LEN after that, and the section table
+ * follows the optional header (of the size the COFF header declares, at least
+ * KGENOME_PE_MIN_OPT_LEN) in records of KGENOME_PE_SEC_LEN.
+ */
+#define KGENOME_PE_DOS_MAGIC    0x5a4du
+#define KGENOME_PE_SIG_MAGIC    0x00004550u   /* "PE\0\0", little endian */
+#define KGENOME_PE_SIG_LEN      4u
+#define KGENOME_PE_COFF_LEN     20u
+#define KGENOME_PE_SEC_LEN      40u
+#define KGENOME_PE_MIN_OPT_LEN  96u
+
+/* IMAGE_REL_BASED_*: the base-relocation entry types a pointer fix-up uses.
+ * HIGH and LOW split one across two entries and appear on nothing met; ABSOLUTE
+ * is the padding a block uses to stay four-byte aligned. */
+#define KGENOME_PE_REL_ABSOLUTE 0u
+#define KGENOME_PE_REL_HIGHLOW  3u
+#define KGENOME_PE_REL_DIR64    10u
+
 #define KGENOME_PE_CHAR_DLL      0x2000u
 #define KGENOME_PE_SUBSYS_NATIVE 1u
 
@@ -626,6 +650,11 @@ int kgenome_pe_sec_is_code(const struct kgenome_pe_sec *s);
 uint32_t kgenome_pe_sec_perm(uint32_t characteristics);
 uint64_t kgenome_pe_sec_extent(const struct kgenome_pe_sec *s, uint64_t obj_size,
 			   uint64_t *off);
+/* The section whose RAW bytes hold file offset `off` (the first in table
+ * order), or NULL: the file-offset side of the translation kgenome_pe_rva_to_off
+ * does for an RVA. The one walk celllysis/space.c and kgenome_image_off_to_addr share. */
+const struct kgenome_pe_sec *kgenome_pe_sec_at_off(const struct kgenome_pe_info *p,
+					       uint64_t off);
 
 /*
  * Turn an RVA into a file offset.

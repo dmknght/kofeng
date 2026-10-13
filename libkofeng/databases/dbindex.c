@@ -7,7 +7,7 @@
  * `struct kof_engine` spans two layers. Most of it is what dbloader.c read out
  * of the packs - modules, ranges, similarity blocks, the code arena. Two fields
  * are not: `mutation` and `multi` are acceleration structures over that data,
- * built by detectors/matchers and read by nothing else.
+ * built by the detectors and read by nothing else.
  *
  * Those two fields used to be filled inside kof_db_load, and that one decision
  * made the two directories mutually dependent:

@@ -132,8 +132,20 @@ static void run(const char *what, unsigned char *f, size_t len,
 {
 	struct kgenome_emu_unp_report rep;
 	struct kgenome_budget bud = { .max_insn = 1000 };
-	struct kgenome_emu *e = kgenome_emu_unp_run_pe(f, len, info, tab, &bud, 0, 0,
-					       0, NULL, 0, NULL, &rep);
+	struct kgenome_emu *e = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
+			.file = f,
+			.n = len,
+			.info = info,
+			.imports = tab,
+			.bud = &bud,
+			.idle = 0,
+			.hand_back = 0,
+			.extensions = 0,
+			.oep = NULL,
+			.n_oep = 0,
+			.decl = NULL,
+			.rep = &rep,
+		});
 	uint64_t stub;
 
 	*named = *ord = 0;

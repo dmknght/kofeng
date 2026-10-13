@@ -4,16 +4,13 @@
 #include <string.h>
 
 #include <kofmod/kofsig.h>   /* kof_maltype_from_name, kof_maltype_ident */
+#include "../../kofcore/kofcore.h"   /* kof_skip_blank */
 
+/* A disease is a diagnose-shaped name: one id for both, defined once in the
+ * module ABI (kof_diag_id32_), which is what the macros in a module compute. */
 uint32_t kof_disease_id(const char *name)
 {
-	uint32_t h = 2166136261u;
-
-	while (*name) {
-		h ^= (uint8_t)*name++;
-		h *= 16777619u;
-	}
-	return h ? h : 1u;
+	return kof_diag_id32_(name);
 }
 
 const char *kof_disease_check(const char *s)
@@ -34,13 +31,6 @@ const char *kof_disease_check(const char *s)
 	return NULL;
 }
 
-static const char *skip_ws(const char *p)
-{
-	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-		p++;
-	return p;
-}
-
 const char *kof_disease_decl_parse(const char *p, struct kof_disease_decl *d)
 {
 	char tok[40];
@@ -52,17 +42,17 @@ const char *kof_disease_decl_parse(const char *p, struct kof_disease_decl *d)
 	memset(d, 0, sizeof *d);
 	if (!q)
 		return "KOF_DECLARE_DISEASE(KOF_MALTYPE_..., \"layer/behaviour\")";
-	q = skip_ws(q + 1);
+	q = kof_skip_blank(q + 1);
 	while (*q && *q != ',' && *q != ')' && *q != ' ' && *q != '\t' &&
 	       *q != '\n' && *q != '\r' && n + 1u < sizeof tok)
 		tok[n++] = *q++;
 	tok[n] = 0;
 	if (!kof_maltype_from_name(tok, &mt))
 		return "the first argument of KOF_DECLARE_DISEASE is a KOF_MALTYPE_ word";
-	q = skip_ws(q);
+	q = kof_skip_blank(q);
 	if (*q != ',')
 		return "KOF_DECLARE_DISEASE wants a type and a name";
-	q = skip_ws(q + 1);
+	q = kof_skip_blank(q + 1);
 	if (*q != '"')
 		return "the second argument of KOF_DECLARE_DISEASE is a quoted layer/behaviour";
 	q++;
@@ -74,7 +64,7 @@ const char *kof_disease_decl_parse(const char *p, struct kof_disease_decl *d)
 	name[n] = 0;
 	if (*q != '"')
 		return "the name in KOF_DECLARE_DISEASE is not closed";
-	q = skip_ws(q + 1);
+	q = kof_skip_blank(q + 1);
 	if (*q != ')')
 		return "KOF_DECLARE_DISEASE takes two arguments";
 	why = kof_disease_check(name);

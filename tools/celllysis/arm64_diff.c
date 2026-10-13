@@ -19,7 +19,7 @@
  * leaves vector words undecided, reports an immediate-less `add` as a move) is
  * recorded in decode_arm64.c and counted here under its own heading so it cannot hide a
  * real one. Agreement proves nothing about a bug both share, which is why
- * tests/unit/decode_arm64.c holds encodings written from the manual.
+ * tests/lib/genome/decode_arm64.c holds encodings written from the manual.
  *
  * WHAT IS COMPARED, per word: validity; the class (Capstone's mnemonic is
  * mapped to the set of classes this decoder may legitimately give it); the
@@ -50,7 +50,7 @@
 
 #include <capstone/capstone.h>
 
-#include "../../libkofeng/kofcore/kofmod/kofsig.h"
+#include <kofmod/kofsig.h>
 #include <celllysis/decode.h>
 
 #define NTHR 16

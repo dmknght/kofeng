@@ -245,8 +245,8 @@ enum kof_multimatch_kind {
 
 /*
  * The thresholds, named because they were measured and will have to be
- * measured again when the base changes shape. tests/tmp_performance holds the
- * harness that produced them.
+ * measured again when the base changes shape. The harness that produced them
+ * is not in the tree any more.
  */
 #define KOF_MULTIMATCH_MIN_LIVE   8u        /* K below this: per-marker */
 #define KOF_MULTIMATCH_LONG_MIN   8u        /* shortest marker at or above: skip pays */
@@ -276,7 +276,7 @@ enum kof_multimatch_kind {
  * not evidence of anything.
  *
  * What justifies it is the shape, which the harness DID measure: a key with no
- * verify behind it is the `prefix` case in tests/tmp_performance, and that goes
+ * verify behind it is the `prefix` case in that harness, and that goes
  * quadratic - up to 1157750 ms per MB at a million markers. A four-byte anchor
  * is that case with one pattern instead of many. Eight is the smallest length
  * at which the memcmp is doing real work; below it, the lazy path's memmem skip

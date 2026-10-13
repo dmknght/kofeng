@@ -1,4 +1,4 @@
-#include <kofmod/kofpathogen.h>
+#include <kofmod/kofdiagtree.h>
 
 /*
  * tests/sigs/diagnoses/rwx_exec.c
@@ -69,7 +69,7 @@ KOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_ALLOC_EXEC, KOF_FLOWF_WX);
  * The diagnose is true of a loader filling the region from a file and of a
  * stager filling it from the network; naming the specific word would fit this
  * one sample and refuse the other. The matcher accepts anything more specific
- * - see kof_flow_cap_generic.
+ * - see kgenome_nucleo_cap_generic.
  */
 KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);
 KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_EXEC_REG);

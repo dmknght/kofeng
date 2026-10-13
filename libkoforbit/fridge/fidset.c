@@ -26,7 +26,9 @@
 #include <time.h>
 
 #include "fidset.h"
+#include "../../libkofeng/kofcore/kofcore.h"
 #include "../../libkofeng/kofcore/kofplatform.h"
+#include "../../libkofeng/kofcore/kofcmp.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -173,23 +175,18 @@ struct kof_fidset {
 
 uint64_t kof_fid_key(const struct kof_fid *f)
 {
-	const uint8_t *p = (const uint8_t *)f;
-	uint64_t h = 1469598103934665603ull;
-	size_t i;
+	uint64_t h;
 
 	if (!f)
 		return 0;
-	for (i = 0; i < sizeof *f; i++) {
-		h ^= p[i];
-		h *= 1099511628211ull;
-	}
+	h = kof_hash64_bytes(f, sizeof *f);
 	/*
 	 * ZERO IS NOT A KEY. The index below uses it for an empty slot, and a
 	 * real key that collided with the sentinel would be invisible in the
 	 * table while being present in the array - findable on a reload and not
 	 * before it, which is the kind of difference nothing would ever notice.
 	 */
-	return h ? h : 1ull;
+	return kof_hash64_nz(h);
 }
 
 /* ---- the run's own additions ---------------------------------------------- */
@@ -628,13 +625,6 @@ int kof_fidset_drop(struct kof_fidset *s, uint64_t key)
 
 /* ---- writing it back ------------------------------------------------------ */
 
-static int cmp_u64(const void *a, const void *b)
-{
-	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-
-	return x < y ? -1 : x > y ? 1 : 0;
-}
-
 int kof_fidset_save(struct kof_fidset *s, const char *path)
 {
 	struct fid_hdr h;
@@ -663,7 +653,7 @@ int kof_fidset_save(struct kof_fidset *s, const char *path)
 	 * and qsort is declared never to take one, whatever the count says.
 	 */
 	if (s->n_add)
-		qsort(s->add, (size_t)s->n_add, sizeof *s->add, cmp_u64);
+		qsort(s->add, (size_t)s->n_add, sizeof *s->add, kof_cmp_u64);
 	out = malloc((size_t)(s->n_key + s->n_add) * sizeof *out);
 	if (!out)
 		return 0;

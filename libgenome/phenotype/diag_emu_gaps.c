@@ -1,16 +1,14 @@
 /*
  * diag_emu_gaps.c - the gap between two known sites: when a run is moved on, what is remembered, promotion of a function to a node.
- * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_int.h for what the
+ * Part of the emulate route; see diag_emu.c for what it is for and diag_emu_private.h for what the
  * files share.
  */
-#include "diag_emu_int.h"
+#include "diag_emu_private.h"
 
 
 
 
 
-
-#define DIAG_REL_TOKEN 0x5A6E0000DEAD0000ull
 
 /*
  * EVERY CALL IN THE SPAN IS SKIPPED, AND ITS RESULT IS SUPPLIED.
@@ -62,7 +60,7 @@ void kgenome_diag_emu_gather_skip(void *user, uint64_t at, uint64_t target,
 	/* An internal call names a capability only by accident; it is here to
 	 * be skipped, not to be a node. */
 	g->site[g->n].cap = target ? KGENOME_NUCLEO_NONE
-				   : (name ? kgenome_flow_cap_of_name(name)
+				   : (name ? kgenome_nucleo_cap_of_name(name)
 					   : KGENOME_NUCLEO_NONE);
 	g->n++;
 }
