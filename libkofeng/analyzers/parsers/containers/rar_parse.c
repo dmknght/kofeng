@@ -28,6 +28,7 @@
 
 #include "rar_parse.h"
 #include "../../../kofcore/runlist.h"
+#include "../../../kofcore/tabgrow.h"
 #include "../../../kofcore/entryname.h"
 
 /* ---- the block header, by offset from its own start --------------------------- */
@@ -93,7 +94,29 @@ struct rw {
 	kof_buf f;
 	struct kof_rar_info *r;
 	struct kof_runs runs;
+	uint32_t cap_entry;
+	uint64_t rows_limit;     /* what the FILE can hold: its length over a file block */
 };
+
+/* One more row of the entry table, or 0 and it is as it was: the entry is not listed and ENTRIES_FULL
+ * says so. The walk goes on either way - the bytes after it are still the archive's, and are still
+ * classified into regions. */
+static int rar_row(struct rw *s)
+{
+	struct kof_rar_info *r = s->r;
+	void *t;
+
+	if (r->n_entries < s->cap_entry)
+		return 1;
+	t = r->entry;
+	if (!kof_tab_grow(&r->mem, &t, &s->cap_entry, sizeof *r->entry,
+			  (uint64_t)r->n_entries + 1u, s->rows_limit)) {
+		r->anomalies |= KOF_RAR_ANOM_ENTRIES_FULL;
+		return 0;
+	}
+	r->entry = (struct kof_rar_entry *)t;
+	return 1;
+}
 
 /* ---- regions ------------------------------------------------------------------ */
 
@@ -275,8 +298,7 @@ static void rar5_walk(struct rw *s, kof_buf file)
 			method = (uint32_t)(KOF_RAR_M_STORE +
 					    ((comp >> 7) & 7u));
 
-			if (r->n_entries < KOF_RAR_MAX_ENTRIES &&
-			    htype == KOF_RAR5_BLK_FILE) {
+			if (htype == KOF_RAR5_BLK_FILE && rar_row(s)) {
 				struct kof_rar_entry *e =
 					&r->entry[r->n_entries++];
 
@@ -334,8 +356,6 @@ static void rar5_walk(struct rw *s, kof_buf file)
 					e->suspicious |= KOF_RAR_ENT_PAST_EOF;
 					r->anomalies |= KOF_RAR_ANOM_TRUNCATED;
 				}
-			} else if (htype == KOF_RAR5_BLK_FILE) {
-				r->anomalies |= KOF_RAR_ANOM_ENTRIES_FULL;
 			}
 
 			/* Header on either side of the name, so NAMES is a region
@@ -460,16 +480,15 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 
 	/*
 	 * Where the next block starts is now known, and it is known whether or not
-	 * this entry gets recorded - so it is published before the cap is tested.
-	 * An archive past the cap keeps being WALKED, and its remaining data keeps
-	 * being classified into regions; what it stops getting is entry rows.
+	 * this entry gets recorded - so it is published before the table is asked
+	 * for a row. An archive whose table cannot grow keeps being WALKED, and its
+	 * remaining data keeps being classified into regions; what it stops getting
+	 * is entry rows.
 	 */
 	*data = csize;
 
-	if (r->n_entries >= KOF_RAR_MAX_ENTRIES) {
-		r->anomalies |= KOF_RAR_ANOM_ENTRIES_FULL;
+	if (!rar_row(s))
 		return 1;
-	}
 
 	name_len = kof_rd16_or0(s->f, at + F_NAME_LEN);
 	name_off = at + hdr_len;
@@ -587,39 +606,34 @@ static int file_block(struct rw *s, uint64_t at, uint64_t size, uint16_t flags,
 	return 1;
 }
 
+void kof_rar_release(struct kof_rar_info *r)
+{
+	kof_tab_free((void **)&r->run);
+	kof_tab_free((void **)&r->entry);
+	r->n_runs = 0;
+	r->n_entries = 0;
+	r->mem.held = 0;
+	r->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(rar, struct kof_rar_info, entry, n_entries)
+
 int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 {
 	struct rw s;
-	uint64_t at;
+	uint64_t at, room;
 	int saw_end = 0;
 
 	/*
-	 * THE HEADER ONLY, NOT THE 311384 BYTES OF ARRAYS BEHIND IT.
-	 *
-	 * The same change, for the same reason, as the one at the top of
-	 * zip_parse.c: this cleared the whole view for every RAR object
-	 * scanned, whatever was in it, and the two arrays at the tail are all
-	 * but a few hundred bytes of it.
-	 *
-	 * WHAT MAKES IT SAFE TO LEAVE THE TAIL DIRTY: nothing reads past the
-	 * count. Every consumer - this parser, kofexaminer, bases/decomp - loops
-	 * `i < r->n_entries`, and the runs go through kof_runs_* which bounds
-	 * on n_runs. Both counts are IN the header, so both start at zero here:
-	 * a parse that gives up early leaves the arrays untouched AND the counts
-	 * at zero, which reads as "no entries" rather than as the last file's.
-	 * Each slot is cleared as it is claimed.
-	 *
-	 * THE ASSERT IS THE GUARD. The two arrays are the last two members and
-	 * this clears everything before them; a field added AFTER them would
-	 * silently stop being cleared. Adding one breaks the build instead.
+	 * THE WHOLE VIEW IS CLEARED, because it is small now: the 311384 bytes of arrays that made
+	 * a header-only clear worth an assert are tables the parse allocates. What the previous
+	 * parse of this view left behind is let go first; the caller's room is the one field read
+	 * before the clear and put back after it (zip_parse.c says the same).
 	 */
-	_Static_assert(offsetof(struct kof_rar_info, run) +
-		       sizeof ((struct kof_rar_info *)0)->run +
-		       sizeof ((struct kof_rar_info *)0)->entry ==
-		       sizeof(struct kof_rar_info),
-		       "kof_rar_info gained a field after its arrays: the header-only "
-		       "clear below would not reach it");
-	memset(r, 0, offsetof(struct kof_rar_info, run));
+	room = r->mem.room;
+	kof_rar_release(r);
+	memset(r, 0, sizeof *r);
+	r->mem.room = room;
 	r->version = KOF_RAR_INFO_VERSION;
 
 	if (!kof_rar_sniff(file))
@@ -629,8 +643,11 @@ int kof_rar_parse(kof_buf file, struct kof_rar_info *r, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.r = r;
-	kof_runs_init(&s.runs, r->run, KOF_RAR_MAX_EXTENTS,
-		      KOF_RAR_CLS_COUNT);
+	/* What the FILE can hold, and not what it says: a file block is at least KOF_RAR_ENTRY_MIN
+	 * bytes and an entry makes at most KOF_RAR_RUNS_PER_ENTRY runs. */
+	s.rows_limit = file.n / KOF_RAR_ENTRY_MIN + 1u;
+	kof_runs_init_dyn(&s.runs, &r->mem, KOF_RAR_CLS_COUNT,
+			  (uint64_t)KOF_RAR_RUNS_PER_ENTRY * s.rows_limit + 16u);
 
 	if (file.p[6] == 0x01) {
 		/*
@@ -781,7 +798,9 @@ settle:
 		r->anomalies |= KOF_RAR_ANOM_EXTENTS_FULL;
 	if (s.runs.overlapped)
 		r->anomalies |= KOF_RAR_ANOM_OVERLAP;
+	r->run = s.runs.v;
 	r->n_runs = s.runs.n;
+	r->mem.rows = r->n_entries;
 
 	ctx->obj_size    = file.n;
 	ctx->format      = KOF_FMT_RAR;

@@ -135,8 +135,7 @@ uint32_t sx_norm_syms(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	/* The origin is the parent's, and so is a cut: the copy holds what the
 	 * parent held, less what the library cut dropped. */
 	out[KOF_SYM_H_ORIGIN] = in[KOF_SYM_H_ORIGIN];
-	if (in[KOF_SYM_H_TRUNC])
-		out[KOF_SYM_H_TRUNC] = 1;
+	out[KOF_SYM_H_TRUNC] |= in[KOF_SYM_H_TRUNC];
 	/*
 	 * AND WHERE `_start` ENDED UP, WHICH IS ALSO NOT A NEW FACT.
 	 *

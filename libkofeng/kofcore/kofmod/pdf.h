@@ -53,7 +53,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_PDF_INFO_VERSION 1
+#define KOF_PDF_INFO_VERSION 2
 
 /*
  * SCAN REGIONS: WHAT THE BYTES ARE, AND NEVER HOW THEY ARE CODED.
@@ -540,17 +540,27 @@ KOF_PDF_CLASSES(KOF_PDF_CLS_NONZERO)
 #define KOF_PDF_REGION_COUNT (KOF_PDF_CLS_COUNT + 1u)
 
 /*
- * Bounds.
+ * What bounds the parse, and what does not.
  *
- * Measured over the PDFs on this machine the largest holds 548 objects; a document
- * built by a generator can hold far more, so the cap is set well above what was seen
- * and reaching it is recorded rather than silently truncating the walk.
+ * NO COUNT OF OBJECTS IS A LIMIT ON THE FILE. The object table was 4096 rows, the entry
+ * table 1024 and the run list 16384 until a document with 4200 objects lost the 104 past
+ * the cap and one with 1100 streams lost every stream past the 1024th - and padding a
+ * document with empty objects is the obvious way to put a payload where the table ends.
+ * Measured on this machine the largest real PDF held 548 objects, which says what is
+ * common and nothing about what a builder emits.
+ *
+ * The tables are allocated to what the walk finds. What bounds an allocation is the bytes
+ * the file really has, and the structure says how few that is: an object is at least
+ * "N G obj" and "endobj", KOF_PDF_OBJECT_MIN bytes, so the rows cannot exceed the length
+ * of the file divided by it; a cross reference section is at least KOF_PDF_XREF_MIN bytes
+ * and the last 64 KiB can carry at most that many %%EOF and startxref lines. Under those
+ * sits the engine's per-object ledger (struct kof_view_mem.room): when a table cannot
+ * grow the walk goes on counting (declared_objects) and what it cannot store is said -
+ * OBJECTS_FULL, EXTENTS_FULL - so the object reads KOF_BROKEN_LIMIT rather than as a
+ * document that was read.
  */
-#define KOF_PDF_MAX_OBJECTS  4096u
-/* A quarter of the object cap: one entry per stream, and the documents to
- * hand carry 57, 15 and 4 of them. See the entry table in kof_pdf_info. */
-#define KOF_PDF_MAX_STREAMS  1024u
-#define KOF_PDF_MAX_EXTENTS 16384u
+#define KOF_PDF_OBJECT_MIN   13u
+#define KOF_PDF_XREF_MIN      5u
 
 /* How far into the file the %PDF- header may sit. Readers accept junk in front of
  * it, and malware uses that, so a small window is searched rather than offset 0
@@ -798,6 +808,29 @@ struct kof_pdf_object {
 	uint32_t ref_cat;      /* enum kof_pdf_cat: what it makes that object */
 };
 
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2. `run[16384]`, `object[4096]` and `entry[1024]` - 819 KB, three quarters of
+ * it never touched by an ordinary document - are tables the parse allocates to the size of
+ * the file, reached through the pointers after `reserved2`. The scalars up to there are
+ * where they were.
+ *
+ * `n_objects` WAS AT OFFSET 40 AND IS NOW `legacy_n_objects`, ALWAYS ZERO, for the
+ * reason zip.h gives about `n_entries`: a module built against version 1 starts with
+ * `if (!p->valid || !p->n_objects) return;`, and with the count at zero it returns at
+ * once - it reads a valid empty table instead of the bytes that happen to lie where its
+ * `object[i]` used to be, and the engine reports the object because the walk below was
+ * never called (sx_walk_check). It is the SHIPPED module's shape. A third party module
+ * that reads fields past the scalars - docinfo, the trailer - would now read past the end
+ * of this struct, and nothing but the floor, KOFSIG_ABI_MIN, refuses that one: see
+ * kofabi.h. The real counts are `n_objects` and `n_entries` at the tail.
+ *
+ * A module walks the objects with kof_pdf_next and does not index `object`. The entry
+ * table is what the host reads and what a module reads beside the walk (the row of the
+ * stream it is on, by index), so it is a plain array here: kof_entry is the ABI row
+ * every format shares.
+ */
 struct kof_pdf_info {
 	uint32_t version;      /* KOF_PDF_INFO_VERSION */
 	uint32_t valid;
@@ -808,57 +841,41 @@ struct kof_pdf_info {
 	uint64_t startxref;    /* what the file says; not trusted */
 	uint64_t eof_off;      /* the last %%EOF, or 0 */
 
-	uint32_t n_objects;
+	uint32_t legacy_n_objects;   /* version 1's count, kept for its offset: always 0 */
 	uint32_t n_streams;
-	uint32_t declared_objects;   /* what the walk found before any cap */
+	uint32_t declared_objects;   /* what the walk found, however many the tables took */
 
 	/*
-	 * EIGHT, AND NOT KOF_PDF_CLS_COUNT.
+	 * TWELVE, AND NOT KOF_PDF_CLS_COUNT.
 	 *
-	 * Sized to the run list's own ceiling rather than to the count of
-	 * classes this format has today, because this array is NOT at the end
-	 * of the structure: n_runs, run[] and object[] follow it. Sized to the
-	 * count, adding a class moved every one of them - which is exactly what
-	 * the layout rule at the top of this file forbids, and what a module
-	 * compiled against the older header would read straight through.
-	 *
-	 * Adding the fifth class cost that move once. At eight it cannot happen
-	 * again: KOF_RUNS_MAX_CLS is the most the run list will carry, and
-	 * pdf_parse.c asserts the two agree.
+	 * Sized to the run list's own ceiling so that adding a class moves nothing after
+	 * it: KOF_RUNS_MAX_CLS is the most the run list will carry, and pdf_parse.c
+	 * asserts the two agree.
 	 */
 	uint64_t region_bytes[12];
 
 	uint32_t n_runs;
 	uint32_t reserved2;
-	struct kof_run run[KOF_PDF_MAX_EXTENTS];
 
-	struct kof_pdf_object object[KOF_PDF_MAX_OBJECTS];
+	/* ---- version 2: from here the tables are the file's size ---------------------- */
 
+	struct kof_view_mem mem;   /* what the tables hold; see range.h */
+	struct kof_run *run;       /* n_runs of them */
+	struct kof_pdf_object *object;
+	uint32_t n_objects;        /* rows in `object` */
+	uint32_t n_entries;        /* rows in `entry`: one per stream, never more than
+				    * n_objects */
 	/*
 	 * THE SAME STREAMS, IN THE SHAPE THE HOST READS.
 	 *
-	 * Built from object[] above and holding nothing that is not already
-	 * there - so this is a projection and not a second source of truth. It
-	 * exists because struct kof_entry is what every format speaks and
-	 * kof_pdf_object is what only PDF speaks: the host cannot walk the
-	 * second, and teaching it to would be teaching it one format at a time.
-	 *
-	 * One entry per stream, so `n_entries` is n_streams and never more.
+	 * Built from the object table and holding nothing that is not already there - so
+	 * this is a projection and not a second source of truth. It exists because
+	 * struct kof_entry is what every format speaks and kof_pdf_object is what only
+	 * PDF speaks: the host cannot walk the second, and teaching it to would be
+	 * teaching it one format at a time. In object order, so `index` ascends.
 	 */
-	uint32_t n_entries;
-	uint32_t reserved4;
-	/*
-	 * SIZED TO WHAT STREAMS CAN NUMBER, not to what objects can.
-	 *
-	 * One entry per stream and never more, and a stream needs its own
-	 * object - so the ceiling is the object cap. Sized THERE it cost 196KB
-	 * of a view for rows that cannot be filled: the documents measured
-	 * carry 57, 15 and 4 streams against 4096 objects. A quarter of the
-	 * cap is still far past anything seen and is a fifth of the memory.
-	 *
-	 * Reaching it is recorded rather than silently truncating, the same way
-	 * the object walk records KOF_PDF_ANOM_OBJECTS_FULL.
-	 */
+	struct kof_entry *entry;
+
 	/*
 	 * The /Info strings, as RANGES IN THE FILE and never as copies - the
 	 * text is already there and a parse has nowhere to build another one,
@@ -868,16 +885,6 @@ struct kof_pdf_info {
 	 * The range is what is INSIDE the delimiters: a literal string's
 	 * parentheses and a hex string's angle brackets are syntax, and a host
 	 * drawing them would be drawing the file's punctuation.
-	 */
-	struct kof_entry entry[KOF_PDF_MAX_STREAMS];
-
-	/*
-	 * APPENDED, and the placement is the point rather than a preference.
-	 * This header's own rule is at the top of it: new fields go at the END,
-	 * existing fields never move. These went in above entry[] first, which
-	 * moved a 64KB array and every offset after it - and the version number
-	 * that exists to catch exactly that would have had to be bumped for a
-	 * change that needed no bump at all.
 	 */
 	/*
 	 * `hex` says the value was written <4A4B> rather than (JK), which a
@@ -903,6 +910,29 @@ struct kof_pdf_info {
 static inline const struct kof_pdf_info *kof_pdf(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_pdf_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT OBJECT OF THE DOCUMENT, in the order the walk found them. The object's index -
+ * what kunp_static_decode_chain and kunp_rcstruct_child_entry take, and what
+ * kof_entry.index holds - is the cursor minus one after the call:
+ *
+ *     uint32_t cur = 0;
+ *     const struct kof_pdf_object *o;
+ *
+ *     while ((o = kof_pdf_next(ctx, &cur)) != 0) {
+ *             uint32_t i = cur - 1u;
+ *             ...
+ *
+ * A walk with a cursor the module owns, for the reason kof_zip_next gives. NULL at the
+ * end. The host sees every call, which is how it knows the table was read.
+ */
+static inline const struct kof_pdf_object *kof_pdf_next(const struct kof_obj_ctx *ctx,
+							uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_pdf_object *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_PDF_H */

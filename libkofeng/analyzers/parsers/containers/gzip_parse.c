@@ -21,7 +21,9 @@
  *     bytes as the trailer is therefore a guess, and it is right for the ordinary
  *     single-member file and wrong for the rest. It is recorded as a guess: what
  *     is past the trailer is UNCLAIMED rather than assumed to be nothing, so the
- *     bytes of a second member are still scanned as part of the object.
+ *     bytes of a second member are still scanned as part of the object. The
+ *     DECODING of the later members is the host's (oc_inflate_members in
+ *     scanners/objctx_decomp.c), which finds each one with kof_gzip_header.
  */
 
 #include "gzip_parse.h"
@@ -115,14 +117,26 @@ static uint32_t gzip_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		c.n = gzip_resolve_scan(ctx, KOF_SCAN_GZIP_CLAIMED, cv, c.cap);
 		kof_rl_complement(&l, &c, ctx->obj_size);
 	}
-	return kof_rl_normalise(&l);
+	return kof_rl_finish(&l);
 }
 
 /* ---- the parse ---------------------------------------------------------------- */
 
-int kof_gzip_parse(kof_buf file, struct kof_gzip_info *g, struct kof_obj_ctx *ctx)
+/*
+ * ONE MEMBER'S HEADER, from the first byte of `file`, up to where its stream
+ * starts (g->data_off).
+ *
+ * Split out of kof_gzip_parse because the host needs the same walk for every
+ * LATER member of a concatenated file (RFC 1952 section 2.2): it decodes the
+ * first member's stream, steps over the trailer and asks this about the bytes
+ * after it, on a view that starts there. One header walk, so the optional
+ * fields are bounded the same way in the member the module was shown and in the
+ * ones behind it. Answers 0 when there is no gzip header at byte 0, exactly as
+ * kof_gzip_parse always did.
+ */
+int kof_gzip_header(kof_buf file, struct kof_gzip_info *g)
 {
-	uint64_t at = GZIP_FIXED_HDR, end;
+	uint64_t at = GZIP_FIXED_HDR;
 	uint8_t cm, flg, xfl, os;
 	uint32_t mtime;
 
@@ -226,6 +240,16 @@ int kof_gzip_parse(kof_buf file, struct kof_gzip_info *g, struct kof_obj_ctx *ct
 	}
 
 	g->data_off = at;
+	return 1;
+}
+
+int kof_gzip_parse(kof_buf file, struct kof_gzip_info *g, struct kof_obj_ctx *ctx)
+{
+	uint64_t at, end;
+
+	if (!kof_gzip_header(file, g))
+		return 0;
+	at = g->data_off;
 
 	/*
 	 * The trailer, if the object is long enough to have one past the header.

@@ -40,6 +40,7 @@
 
 #include <stdlib.h>
 #include "../../../kofcore/runlist.h"
+#include "../../../kofcore/tabgrow.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -239,14 +240,19 @@ static void hdr_probe(kof_buf f, uint64_t at, uint64_t end, struct kof_7z_info *
 /* ---- the decoded header, and the folders in it -------------------------------- */
 
 /*
- * What the decode of the header is allowed to produce.
+ * What the decode of the header is allowed to produce: HDR_DECODE_MIN, and above it HDR_DECODE_RATIO
+ * times the bytes the header is stored in - the number that ties the output to the file.
  *
- * A header is a file list, not content: over 369 real archives the largest decoded
- * to a few hundred kilobytes. Four megabytes is far above that and bounds an
- * archive whose declared header size is a lie - which costs an allocation, so it is
- * capped here rather than trusted.
+ * A header is a file list, not content: over 369 real archives the largest decoded to a few hundred
+ * kilobytes, and four megabytes was the flat cap. An archive of 84644 files (the largest measured)
+ * has a name list near seven, so a flat four megabytes made every such archive read as one with no
+ * folders at all - UNSUPPORTED, with the content never looked at. A name list compresses six or
+ * seven to one; sixteen is above what an encoder writes for one and below a bomb, and the engine's
+ * ledger bounds the allocation whatever the ratio says. A header that does not fit is REPORTED
+ * (FOLDERS_FULL), never read short and passed.
  */
-#define HDR_DECODE_MAX (4u << 20)
+#define HDR_DECODE_MIN   (4u << 20)
+#define HDR_DECODE_RATIO 16u
 
 /* Steps the folder walk will take before deciding the header is not one. */
 #define FOLDER_WALK_STEPS 65536u
@@ -350,22 +356,35 @@ static int coder_read(kof_buf h, uint64_t *at, struct kof_7z_folder *fo,
  * One struct rather than seven locals so that reading a folder can be its own
  * function without that function taking seven tables as arguments.
  */
-struct sz_walk {
-	/* Packed streams per folder. */
-	uint8_t  npk[KOF_7Z_MAX_FOLDERS];
+struct sz_fw {
+	/* Packed streams of this folder. */
+	uint8_t  npk;
 	/*
-	 * Which of a folder's packed streams feeds which BCJ2 input: 0 main,
+	 * Which of the folder's packed streams feeds which BCJ2 input: 0 main,
 	 * 1 call, 2 jump, 3 the range coder - and 0xff for every stream of
 	 * every folder that is not BCJ2, which is nearly all of them.
 	 */
-	uint8_t  role[KOF_7Z_MAX_FOLDERS][8];
+	uint8_t  role[8];
 	/* Which coder each packed stream feeds, so its properties and its own
 	 * output length can be attached to it once both are known. */
-	uint8_t  pcod[KOF_7Z_MAX_FOLDERS][8];
-	uint32_t cprop[KOF_7Z_MAX_FOLDERS][8];  /* lc | lp<<8 | pb<<16 */
-	uint32_t cid[KOF_7Z_MAX_FOLDERS][8];
-	uint64_t osize[KOF_7Z_MAX_FOLDERS][8];
-	uint64_t psize[KOF_7Z_MAX_FOLDERS];
+	uint8_t  pcod[8];
+	uint32_t cprop[8];  /* lc | lp<<8 | pb<<16 */
+	uint32_t cid[8];
+	uint64_t osize[8];
+};
+
+/*
+ * THE TABLES THE WALK WORKS WITH, as long as the header says and no longer: a row per folder and a
+ * size per packed stream, bounded by what the header's own bytes can hold (a folder is at least
+ * KOF_7Z_FOLDER_MIN of them, a size one) and charged to the view's account while the walk runs.
+ * They were fixed arrays of 64 folders - role[64][8] and the rest - which is what made 64 the
+ * number of folders an archive could have.
+ */
+struct sz_walk {
+	struct sz_fw *fw;
+	uint64_t *psize;
+	uint32_t cap_fw, cap_psize, cap_folder, cap_pack;
+	uint64_t pack_limit;
 };
 
 /*
@@ -388,6 +407,7 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 	int ok;
 
 	struct kof_7z_folder *fo = &z->folder[i];
+	struct sz_fw *fw = &w->fw[i];
 	uint64_t nc, k, tot_in = 0, tot_out = 0, n_bind, n_packed;
 	uint64_t bind_in[8], bind_out[8], pk_idx[8];
 	uint32_t cin[8], cout[8];
@@ -407,8 +427,8 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 			return 0;
 		cin[k] = ci;
 		cout[k] = co;
-		w->cid[i][k] = tmp.coder;
-		w->cprop[i][k] = (uint32_t)tmp.lc | ((uint32_t)tmp.lp << 8) |
+		fw->cid[k] = tmp.coder;
+		fw->cprop[k] = (uint32_t)tmp.lc | ((uint32_t)tmp.lp << 8) |
 			      ((uint32_t)tmp.pb << 16);
 		tot_in += ci;
 		tot_out += co;
@@ -485,7 +505,7 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 			}
 		}
 	}
-	w->npk[i] = (uint8_t)n_packed;
+	fw->npk = (uint8_t)n_packed;
 	{
 		uint64_t q, ib, c2;
 
@@ -493,7 +513,7 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 			ib = 0;
 			for (c2 = 0; c2 < nc; c2++) {
 				if (pk_idx[q] < ib + cin[c2]) {
-					w->pcod[i][q] = (uint8_t)c2;
+					fw->pcod[q] = (uint8_t)c2;
 					break;
 				}
 				ib += cin[c2];
@@ -551,7 +571,7 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 				(void)bound;
 				for (k = 0; k < n_packed; k++)
 					if (pk_idx[k] == src) {
-						w->role[i][k] = (uint8_t)j;
+						fw->role[k] = (uint8_t)j;
 						break;
 					}
 			}
@@ -575,11 +595,37 @@ static int one_folder(kof_buf h, uint64_t *at, struct kof_7z_info *z,
 	return 1;
 }
 
+/* Make `*tab` hold `want` rows or as many as the account allows, fewer each time it is refused:
+ * the folders past what fits are said (FOLDERS_FULL) and the ones before are whole. `limit` is what
+ * the header can physically hold. Returns the rows it holds. */
+static uint64_t sz_fit(struct kof_7z_info *z, void **tab, uint32_t *cap, size_t elem,
+		       uint64_t want, uint64_t limit)
+{
+	while (want && !kof_tab_grow(&z->mem, tab, cap, elem, want, limit)) {
+		z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
+		want /= 2u;
+	}
+	return want;
+}
+
+static void folders_walk_tables(kof_buf h, struct kof_7z_info *z, uint64_t base,
+				struct sz_walk *w);
+
 static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 {
+	struct sz_walk w;
+
+	memset(&w, 0, sizeof w);
+	folders_walk_tables(h, z, base, &w);
+	kof_tab_drop(&z->mem, (void **)&w.fw, &w.cap_fw, sizeof *w.fw);
+	kof_tab_drop(&z->mem, (void **)&w.psize, &w.cap_psize, sizeof *w.psize);
+}
+
+/* The walk itself: `w` holds what it allocates, and the caller gives it back. */
+static void folders_walk_tables(kof_buf h, struct kof_7z_info *z, uint64_t base,
+				struct sz_walk *w)
+{
 	uint64_t at = 0, pack_pos = 0, n_pack = 0, n_folders = 0, i, n_out = 0;
-	/* Zeroed here rather than midway - see the note where the wipe was. */
-	struct sz_walk w = { 0 };
 	uint32_t steps = 0;
 	uint8_t id = 0;
 	int ok;
@@ -600,12 +646,20 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	n_pack = sz_num(h, &at, &ok);
 	if (!ok || n_pack == 0)
 		return;
-	if (n_pack > KOF_7Z_MAX_FOLDERS) {
-		z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
-		n_pack = KOF_7Z_MAX_FOLDERS;
-	}
-	for (i = 0; i < KOF_7Z_MAX_FOLDERS; i++)
-		w.psize[i] = 0;
+	/*
+	 * A COUNT THE HEADER CANNOT HOLD IS NOT A COUNT: a packed stream states its size in at least
+	 * one byte, so there are at most as many as the header has bytes. What the file claims past
+	 * that is a lie that costs nothing to refuse, and the table is sized to the truth - it was a
+	 * flat 64, which turned an honest archive of sixty-five blocks into a report.
+	 */
+	if (n_pack > h.n)
+		n_pack = h.n;
+	w->pack_limit = n_pack;
+	n_pack = sz_fit(z, (void **)&w->psize, &w->cap_psize, sizeof *w->psize, n_pack, h.n);
+	if (!n_pack)
+		return;
+	for (i = 0; i < n_pack; i++)
+		w->psize[i] = 0;
 
 	for (;;) {
 		if (++steps > FOLDER_WALK_STEPS)
@@ -621,7 +675,7 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 
 				if (!ok)
 					return;
-				w.psize[i] = v;
+				w->psize[i] = v;
 			}
 		} else if (id == KOF_7Z_ID_CRC) {
 			/* Sizes are what this needs; a CRC block is skipped by
@@ -647,9 +701,23 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	n_folders = sz_num(h, &at, &ok);
 	if (!ok || n_folders == 0)
 		return;
-	if (n_folders > KOF_7Z_MAX_FOLDERS) {
-		z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
-		n_folders = KOF_7Z_MAX_FOLDERS;
+	/* The same truth for folders: at least KOF_7Z_FOLDER_MIN bytes each. */
+	if (n_folders > h.n / KOF_7Z_FOLDER_MIN)
+		n_folders = h.n / KOF_7Z_FOLDER_MIN;
+	{
+		uint64_t want = n_folders, fit;
+		void *t = z->folder;
+
+		/* Both tables hold as many as the account allows - fewer, said, when it cannot hold
+		 * them all: the folders past them are in the header and not in the view. */
+		fit = sz_fit(z, &t, &w->cap_folder, sizeof *z->folder, want, h.n / KOF_7Z_FOLDER_MIN + 1u);
+		z->folder = (struct kof_7z_folder *)t;
+		t = w->fw;
+		fit = sz_fit(z, &t, &w->cap_fw, sizeof *w->fw, fit, h.n / KOF_7Z_FOLDER_MIN + 1u);
+		w->fw = (struct sz_fw *)t;
+		n_folders = fit;
+		if (!n_folders)
+			return;
 	}
 	/*
 	 * THE WIPE USED TO BE HERE AND IT ERASED THE PACK SIZES.
@@ -668,13 +736,19 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	 * for the per-folder tables the loop below fills, and nothing has
 	 * touched those yet.
 	 */
-	memset(w.role, 0xff, sizeof w.role);
-	memset(w.pcod, 0xff, sizeof w.pcod);
 	at++;                                   /* external */
 
-	for (i = 0; i < n_folders; i++)
-		if (!one_folder(h, &at, z, &w, i, &n_out))
+	for (i = 0; i < n_folders; i++) {
+		/* A row of the view is written whole before it is read: the table is the parse's own
+		 * and what the last parse of this view left in it is not a folder. The work row starts
+		 * with the defaults the walk fills over (no role, no coder). */
+		memset(&z->folder[i], 0, sizeof z->folder[i]);
+		memset(&w->fw[i], 0, sizeof w->fw[i]);
+		memset(w->fw[i].role, 0xff, sizeof w->fw[i].role);
+		memset(w->fw[i].pcod, 0xff, sizeof w->fw[i].pcod);
+		if (!one_folder(h, &at, z, w, i, &n_out))
 			return;
+	}
 
 
 	if (!kof_rd_u8(h, at, &id) || id != KOF_7Z_ID_CODERS_SIZE)
@@ -706,7 +780,7 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 				 * streams decode to, and each is needed to decode
 				 * that stream on its own. */
 				if (k < 8u)
-					w.osize[i][k] = v;
+					w->fw[i].osize[k] = v;
 				/* The last of a folder's streams is its output. */
 				fo->unpack_size = v;
 			}
@@ -722,7 +796,7 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 	 * so folder n starts where the sum of the sizes before it ends.
 	 */
 	{
-		/* kof_sat_add, not +: pack_pos and every w.psize[] below are
+		/* kof_sat_add, not +: pack_pos and every w->psize[] below are
 		 * unclamped sz_num() values off the stream, same as hdr_pack_off
 		 * a few lines above (which does saturate, with the same
 		 * reasoning) - a raw + here would let an attacker-chosen
@@ -732,7 +806,8 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 		uint64_t cur = kof_sat_add(base, pack_pos), si = 0;
 
 		for (i = 0; i < n_folders; i++) {
-			uint32_t want = w.npk[i] ? w.npk[i] : 1u, j;
+			const struct sz_fw *fw = &w->fw[i];
+			uint32_t want = fw->npk ? fw->npk : 1u, j;
 
 			if (si + want > n_pack)
 				break;      /* the list ran out: stop where it did */
@@ -740,28 +815,43 @@ static void folders_walk(kof_buf h, struct kof_7z_info *z, uint64_t base)
 			/* The first is the folder's own, which is what every
 			 * single-stream reader has always used. */
 			z->folder[i].pack_off = cur;
-			z->folder[i].pack_size = w.psize[si];
+			z->folder[i].pack_size = w->psize[si];
+			z->folder[i].first_pack = z->n_pack;
 
 			for (j = 0; j < want; j++) {
-				if (z->n_pack < KOF_7Z_MAX_PACK) {
-					struct kof_7z_pack *pk =
-						&z->pack[z->n_pack++];
+				if (z->n_pack >= w->cap_pack) {
+					void *t = z->pack;
 
-					pk->off = cur;
-					pk->size = w.psize[si];
-					pk->folder = (uint32_t)i;
-					pk->role = w.role[i][j];
-					if (w.pcod[i][j] < 8u) {
-						uint32_t cc = w.pcod[i][j];
-
-						pk->coder = w.cid[i][cc];
-						pk->out_size = w.osize[i][cc];
-						pk->lc = (uint8_t)w.cprop[i][cc];
-						pk->lp = (uint8_t)(w.cprop[i][cc] >> 8);
-						pk->pb = (uint8_t)(w.cprop[i][cc] >> 16);
+					if (!kof_tab_grow(&z->mem, &t, &w->cap_pack, sizeof *z->pack,
+							  (uint64_t)z->n_pack + 1u, w->pack_limit)) {
+						/* The stream is in the header and not in the view. */
+						z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
+						cur = kof_sat_add(cur, w->psize[si]);
+						si++;
+						continue;
 					}
+					z->pack = (struct kof_7z_pack *)t;
 				}
-				cur = kof_sat_add(cur, w.psize[si]);
+				{
+					struct kof_7z_pack *pk = &z->pack[z->n_pack++];
+
+					memset(pk, 0, sizeof *pk);
+					pk->off = cur;
+					pk->size = w->psize[si];
+					pk->folder = (uint32_t)i;
+					pk->role = fw->role[j];
+					if (fw->pcod[j] < 8u) {
+						uint32_t cc = fw->pcod[j];
+
+						pk->coder = fw->cid[cc];
+						pk->out_size = fw->osize[cc];
+						pk->lc = (uint8_t)fw->cprop[cc];
+						pk->lp = (uint8_t)(fw->cprop[cc] >> 8);
+						pk->pb = (uint8_t)(fw->cprop[cc] >> 16);
+					}
+					z->folder[i].n_packs++;
+				}
+				cur = kof_sat_add(cur, w->psize[si]);
 				si++;
 			}
 		}
@@ -805,14 +895,28 @@ static void content_probe(kof_buf f, struct kof_7z_info *z)
 	if (z->header_kind != KOF_7Z_HDR_CODED ||
 	    z->hdr_coder != KOF_7Z_CODER_LZMA || !z->hdr_pack_size)
 		return;
-	if (z->hdr_unpack_size == 0 || z->hdr_unpack_size > HDR_DECODE_MAX)
+	if (z->hdr_unpack_size == 0)
 		return;
 	if (!kof_in_range(f, z->hdr_pack_off, z->hdr_pack_size))
 		return;
+	/* The decode is bounded by what the header is stored in, and by what the account can hold. A
+	 * header that does not fit is a folder list not read: said, and not passed. */
+	{
+		uint64_t cap = z->hdr_pack_size * HDR_DECODE_RATIO;
 
+		if (cap < HDR_DECODE_MIN)
+			cap = HDR_DECODE_MIN;
+		if (z->hdr_unpack_size > cap || z->hdr_unpack_size > kof_view_room(&z->mem)) {
+			z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
+			return;
+		}
+	}
 	out = malloc((size_t)z->hdr_unpack_size);
-	if (!out)
+	if (!out) {
+		z->anomalies |= KOF_7Z_ANOM_FOLDERS_FULL;
 		return;
+	}
+	z->mem.held += z->hdr_unpack_size;         /* while the decoded header lives */
 	st = kuncoat_lzma_decode(z->hdr_lc, z->hdr_lp, z->hdr_pb,
 			     f.p + z->hdr_pack_off, z->hdr_pack_size,
 			     out, z->hdr_unpack_size, &produced);
@@ -822,6 +926,7 @@ static void content_probe(kof_buf f, struct kof_7z_info *z)
 		z->anomalies |= KOF_7Z_ANOM_HDR_UNREAD;
 	(void)st;
 	free(out);
+	z->mem.held -= z->hdr_unpack_size;
 }
 
 /* ---- regions ------------------------------------------------------------------ */
@@ -889,49 +994,35 @@ int kof_7z_sniff(kof_buf file)
 	       memcmp(file.p, SEVENZ_SIG, sizeof SEVENZ_SIG) == 0;
 }
 
+void kof_7z_release(struct kof_7z_info *z)
+{
+	kof_tab_free((void **)&z->folder);
+	kof_tab_free((void **)&z->pack);
+	z->n_folders = 0;
+	z->n_pack = 0;
+	z->mem.held = 0;
+	z->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(7z, struct kof_7z_info, folder, n_folders)
+
 int kof_7z_parse(kof_buf file, struct kof_7z_info *z, struct kof_obj_ctx *ctx)
 {
 	struct kof_runs l;
 	struct kof_run run[3];
-	uint64_t off = 0, size = 0;
+	uint64_t off = 0, size = 0, room;
 	uint8_t first = 0;
 
 	/*
-	 * EVERYTHING BUT THE TWO ARRAYS: 112 bytes instead of 12912 - the same
-	 * change as the one at the top of zip_parse.c.
-	 *
-	 * TWO SPANS AND NOT ONE, because folder[] and pack[] are NOT adjacent:
-	 * there are eight bytes of scalar between them. The single-span version
-	 * of this was written first and the static assert below rejected it,
-	 * which is the entire reason the assert is written as an equality over
-	 * the whole struct rather than as a comment.
-	 *
-	 *        0 .. 104     head                 <- cleared
-	 *      104 .. 2664    folder[]             <- skipped
-	 *     2664 .. 2672    a count and padding  <- cleared
-	 *     2672 .. 12912   pack[]               <- skipped
-	 *
-	 * Nothing reads past a count and both counts are in the cleared spans,
-	 * so a parse that gives up early reads as "nothing found".
+	 * THE WHOLE VIEW IS CLEARED, because it is small now: the 12912 bytes of arrays that made a
+	 * two-span clear worth an assert are tables the parse allocates. What the previous parse of
+	 * this view left behind is let go first; the caller's room is the one field read before the
+	 * clear and put back after it (zip_parse.c says the same).
 	 */
-	{
-		const size_t fold_end = offsetof(struct kof_7z_info, folder) +
-					sizeof z->folder;
-
-		_Static_assert(offsetof(struct kof_7z_info, pack) +
-			       sizeof ((struct kof_7z_info *)0)->pack ==
-			       sizeof(struct kof_7z_info),
-			       "kof_7z_info gained a field after pack[]: the "
-			       "clear below would not reach it");
-		_Static_assert(offsetof(struct kof_7z_info, pack) >=
-			       offsetof(struct kof_7z_info, folder) +
-			       sizeof ((struct kof_7z_info *)0)->folder,
-			       "folder[] and pack[] are out of order");
-
-		memset(z, 0, offsetof(struct kof_7z_info, folder));
-		memset((char *)z + fold_end, 0,
-		       offsetof(struct kof_7z_info, pack) - fold_end);
-	}
+	room = z->mem.room;
+	kof_7z_release(z);
+	memset(z, 0, sizeof *z);
+	z->mem.room = room;
 	z->version = KOF_7Z_INFO_VERSION;
 
 	if (!kof_7z_sniff(file))
@@ -1008,6 +1099,7 @@ done:
 	 * differ - settled once so the per-class totals are available to a module
 	 * without resolving anything. */
 	content_probe(file, z);
+	z->mem.rows = z->n_folders;
 	sz_runs(z, file.n, &l, run, z->region_bytes);
 	if (l.overlapped)
 		z->anomalies |= KOF_7Z_ANOM_OVERLAP;

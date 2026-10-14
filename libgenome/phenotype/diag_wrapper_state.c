@@ -118,6 +118,18 @@ static void glob_put(struct kgenome_diag_wrapper_ctx *c, uint64_t addr, struct k
  * address). 0 = somewhere else, which neither reads nor invalidates. */
 enum { LOC_NONE = 0, LOC_STACK, LOC_GLOBAL };
 
+/*
+ * 64-BIT ADDRESS ARITHMETIC WRAPS, as the machine's does. A virtual address, a register's
+ * constant and a displacement are all the sample's: an ELF loaded near 2^63, or two such
+ * constants added, overflowed the signed sum (undefined behaviour, found by running the engine
+ * under UBSan on mutated binaries). Addresses are compared and keyed, never ordered by
+ * magnitude, so the wrapped value is the right one.
+ */
+static inline int64_t wadd(int64_t a, int64_t b)
+{
+	return (int64_t)((uint64_t)a + (uint64_t)b);
+}
+
 static int mem_loc(const struct kgenome_diag_wrapper_ctx *c, const struct kgenome_diag_wrapper_frame *f,
 		   const struct kgenome_diag_wrapper_insn *in, const struct kgenome_diag_wrapper_op *o,
 		   int64_t *key)
@@ -130,7 +142,7 @@ static int mem_loc(const struct kgenome_diag_wrapper_ctx *c, const struct kgenom
 	if (o->flags & KGENOME_CELL_OF_RIPREL) {
 		if (in->at_va == KGENOME_BROKEN)
 			return LOC_NONE;
-		*key = (int64_t)(in->at_va + in->len) + o->v;
+		*key = wadd((int64_t)(in->at_va + in->len), o->v);
 		return LOC_GLOBAL;
 	}
 	if (o->reg == KGENOME_CELL_REG_NONE) {
@@ -138,11 +150,11 @@ static int mem_loc(const struct kgenome_diag_wrapper_ctx *c, const struct kgenom
 		return LOC_GLOBAL;
 	}
 	if (o->reg == KGENOME_CELL_REG_SP) {
-		*key = -(int64_t)f->sp + o->v;
+		*key = wadd(-(int64_t)f->sp, o->v);
 		return LOC_STACK;
 	}
 	if (o->reg == KGENOME_CELL_REG_BP && f->bp_known) {
-		*key = (int64_t)f->bp_off + o->v;
+		*key = wadd((int64_t)f->bp_off, o->v);
 		return LOC_STACK;
 	}
 	/*
@@ -154,7 +166,7 @@ static int mem_loc(const struct kgenome_diag_wrapper_ctx *c, const struct kgenom
 	 * read from "somewhere else", and no fcntl node on x86-64 carried a flag.
 	 */
 	if (o->reg < 16u && f->reg[o->reg].t == KGENOME_DIAG_WRAPPER_V_SADDR) {
-		*key = f->reg[o->reg].v + o->v;
+		*key = wadd(f->reg[o->reg].v, o->v);
 		return LOC_STACK;
 	}
 	return LOC_NONE;
@@ -295,7 +307,7 @@ void kgenome_diag_wrapper_frame_step(struct kgenome_diag_wrapper_ctx *c, struct 
 		    !(s->flags & KGENOME_CELL_OF_RIPREL)) {
 			if (s->reg == KGENOME_CELL_REG_SP) {
 				f->reg[d->reg].t = KGENOME_DIAG_WRAPPER_V_SADDR;
-				f->reg[d->reg].v = -(int64_t)f->sp + s->v;
+				f->reg[d->reg].v = wadd(-(int64_t)f->sp, s->v);
 				f->reg[d->reg].node = 0;
 				if (d->reg == KGENOME_CELL_REG_BP) {
 					f->bp_known = 1;
@@ -305,7 +317,7 @@ void kgenome_diag_wrapper_frame_step(struct kgenome_diag_wrapper_ctx *c, struct 
 			}
 			if (s->reg == KGENOME_CELL_REG_BP && f->bp_known) {
 				f->reg[d->reg].t = KGENOME_DIAG_WRAPPER_V_SADDR;
-				f->reg[d->reg].v = (int64_t)f->bp_off + s->v;
+				f->reg[d->reg].v = wadd((int64_t)f->bp_off, s->v);
 				f->reg[d->reg].node = 0;
 				return;
 			}
@@ -337,16 +349,31 @@ void kgenome_diag_wrapper_frame_step(struct kgenome_diag_wrapper_ctx *c, struct 
 	case KGENOME_CELL_SUB:
 		if (in->n_op >= 2u && d->kind == KGENOME_CELL_O_REG &&
 		    d->reg == KGENOME_CELL_REG_SP && s->kind == KGENOME_CELL_O_IMM) {
-			f->sp += in->op == KGENOME_CELL_SUB ? (int32_t)s->v
-						    : -(int32_t)s->v;
+			/*
+			 * The immediate is the sample's. `sub esp, 0x7fffffff` twice, or an
+			 * `add esp, 0x80000000` (whose negation is not an int), overflowed the
+			 * 32-bit counter: undefined behaviour found by running the engine
+			 * under UBSan on mutated stripped i386 binaries. The sum is made wide
+			 * and held to +-2^30, where it is still "a frame no real function has"
+			 * and where `-f->sp` cannot overflow either; no frame of real code
+			 * comes near it, so what the walk concludes about one does not move.
+			 */
+			{
+				int64_t imm = (int64_t)(int32_t)s->v;
+				int64_t v = (int64_t)f->sp + (in->op == KGENOME_CELL_SUB ? imm : -imm);
+
+				f->sp = v > KGENOME_DIAG_WRAPPER_SP_LIM ? KGENOME_DIAG_WRAPPER_SP_LIM
+				      : v < -KGENOME_DIAG_WRAPPER_SP_LIM ? -KGENOME_DIAG_WRAPPER_SP_LIM
+				      : (int32_t)v;
+			}
 			return;
 		}
 		/* A stack address moved by a constant is another stack address. */
 		if (in->n_op >= 2u && d->kind == KGENOME_CELL_O_REG && d->reg < 16u &&
 		    d->size >= 4u && s->kind == KGENOME_CELL_O_IMM &&
 		    f->reg[d->reg].t == KGENOME_DIAG_WRAPPER_V_SADDR) {
-			f->reg[d->reg].v += in->op == KGENOME_CELL_SUB ? -(int64_t)(int32_t)s->v
-							       : (int64_t)(int32_t)s->v;
+			f->reg[d->reg].v = wadd(f->reg[d->reg].v, in->op == KGENOME_CELL_SUB ? -(int64_t)(int32_t)s->v
+								    : (int64_t)(int32_t)s->v);
 			return;
 		}
 		break;

@@ -210,7 +210,7 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	 * file and `Heur:Infected` on its child, which is the evidence and
 	 * the conclusion printed as two findings about one file.
 	 */
-	if (sc->child.n > sc->child.n_views + sc->child.n_carved)
+	if (sx_opened(sc))
 		return;
 
 	{
@@ -264,7 +264,7 @@ void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		fi->engine = (uint8_t)KOF_ENGINE_ANALYZER;
 		fi->verdict = (uint8_t)KOF_VERDICT_HEUR;
 		kof_verdict_name(fi, guess, sv, NULL);
-		fi->is_verdict = (uint8_t)sx_verdict_take(sc, fi, opt->all_matches);
+		fi->is_verdict = (uint8_t)sx_verdict_take(sc, fi, opt->all_matches, 0);
 	}
 }
 

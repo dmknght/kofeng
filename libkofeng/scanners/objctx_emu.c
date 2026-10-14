@@ -47,6 +47,7 @@
 
 
 #include "../analyzers/genome_obj.h"
+#include <phenotype/diag_scan.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,32 +108,221 @@ static uint64_t emu_insn(uint64_t obj_size)
 }
 
 /*
- * THE INTERPRETER'S SHARE OF THE SCAN'S OWN MEMORY CEILING.
+ * THE TREE'S INTERPRETER ALLOWANCE - the bound the per-object numbers above cannot be.
  *
- * Not a constant of its own. A caller who set max_resident_bytes did so to
- * bound what this scan holds at any instant, and an interpreter allocating
- * outside that number would make the setting a lie - it would be the one part
- * of the engine that ignored it. So the guest's address space comes out of what
- * is left under that ceiling, halved so that producing the payload afterwards
- * still has room: the images are copied into the sink while the emulator is
- * still holding its pages, and both live at once.
+ * Every limit above follows ONE object, and a floor makes a small object's limit larger
+ * than its size: a 1 KB PE whose code is `jmp $` runs 16 Mi instructions (0.25 s). A
+ * limit that restarts for each child multiplies by the number of children, which a file
+ * chooses: a zip of 100 of them (18.9 KB) took 26 s, with a loop that decodes 85 s
+ * (tests/unit/hunt_emu_tree.c). A child's bytes are produced from the root, so its size
+ * is no new allowance either (a decompression bomb must not buy emulation time): the
+ * tree gets one account, from the ROOT's size alone.
  *
- * Floored, because below a few megabytes nothing unpacks and the run would only
- * waste the instructions it takes to fail; capped, because a caller who allowed
- * a gigabyte did not thereby ask for a gigabyte of emulated address space.
+ *   allowance = 64 Mi + 512 per root byte, at most 4 Gi instructions
+ *
+ * 512 is EMU_INSN_PER_BYTE: every byte of the file may be the packed input of one run,
+ * once. 64 Mi is four floors (EMU_INSN_MIN), what a file too small to scale gets. 4 Gi is
+ * about a minute at the 70 million instructions a second this interpreter runs (a spin
+ * loop, release build), the DoS bound for a root of any size. A host sets its own with
+ * kof_scan_option.max_emu_insn.
+ *
+ * WHAT A RUN GETS is the smaller of its per-object limit and what is left. Degradation
+ * is in the order of rule 4: the emulating routes of the diagnose scan and the
+ * API-resolution run are OPTIONAL evidence and are skipped (oc_emu_afford) once less
+ * than EMU_OPT_MIN is left; an unpack run is given what is left while that is its
+ * floor (EMU_INSN_MIN, or its limit when smaller); and the FIRST KOF_SCAN_EMU_FLOOR_RUNS runs of
+ * the tree - the root's and the first four children's - get that floor even when
+ * nothing is left, so a packed file that is the whole tree is never denied its unpack.
+ * Past that the run is not made, the object reads KOF_BROKEN_LIMIT, limit_hits and
+ * emu_budget_denied move. Nothing is silent.
+ *
+ * MEASURED (build/release, spin-loop PE of 1025 bytes): 16.7 Mi instructions = 0.24 s,
+ * 70 Mi/s. Legitimate packed files need far less than the floor: see
+ * tests/unit/emu_tree_budget.c for the unpack runs of the corpus (UPX, PECompact,
+ * Themida samples) against the allowance.
  */
-#define EMU_PAGES_MIN   (4u << 20)
+#define EMU_TREE_MIN    (4ull * EMU_INSN_MIN)
+#define EMU_TREE_MAX    (4096ull << 20)
+#define EMU_OPT_MIN     (1ull << 20)
+
+uint64_t oc_emu_tree_insn(uint64_t root_size, uint64_t host_max)
+{
+	uint64_t n;
+
+	if (host_max)
+		return host_max;
+	n = root_size > UINT64_MAX / EMU_INSN_PER_BYTE ? UINT64_MAX
+						       : root_size * EMU_INSN_PER_BYTE;
+	n = n > UINT64_MAX - EMU_TREE_MIN ? UINT64_MAX : n + EMU_TREE_MIN;
+	return n > EMU_TREE_MAX ? EMU_TREE_MAX : n;
+}
+
+/* The tree's allowance ran out on this object: said once for the object. */
+static void emu_denied(struct kof_scanner *sc)
+{
+	if (sc->obj.emu.refused)
+		return;
+	sc->obj.emu.refused = 1;
+	sc->st.emu_budget_denied++;
+	OC_LIMIT(sc, "the tree's interpreter allowance is spent");
+}
+
+/*
+ * What an OPTIONAL emulation may execute: `own` (its per-object limit) or what is left
+ * if that is less, and 0 - denied and said - when less than EMU_OPT_MIN is left.
+ */
+uint64_t oc_emu_afford(struct kof_scanner *sc, uint64_t own)
+{
+	const uint64_t left = sc->ledger.emu_insn_left;
+
+	if (left >= own)
+		return own;
+	if (left >= (own < EMU_OPT_MIN ? own : EMU_OPT_MIN))
+		return left;
+	emu_denied(sc);
+	return 0;
+}
+
+/* Take `insn` executed instructions from the tree's allowance. */
+void oc_emu_charge(struct kof_scanner *sc, uint64_t insn)
+{
+	sc->st.emu_insn += insn;
+	sc->ledger.emu_insn_left = insn > sc->ledger.emu_insn_left
+				   ? 0u : sc->ledger.emu_insn_left - insn;
+}
+
+/*
+ * THE DIAGNOSE SCAN'S EMULATING ROUTES, under the tree's allowance. They are optional
+ * evidence: with less than EMU_OPT_MIN left they are not run (`run` loses them), the
+ * object is said to be cut, and the scan the other routes make is noted incomplete so a
+ * diagnose that needed them reads "could not say" and not "no" (oc_emu_diag_end).
+ */
+void oc_emu_diag_begin(struct kof_scanner *sc, struct oc_emu_diag *acct,
+		       struct kgenome_budget *kb, unsigned *run)
+{
+	const unsigned routes = KGENOME_DIAG_RUN_EMULATE | KGENOME_DIAG_RUN_APIHASH;
+
+	acct->spent = 0;
+	acct->skipped = 0;
+	if (*run & routes) {
+		const uint64_t grant = oc_emu_afford(sc, kb->max_insn);
+
+		if (grant) {
+			kb->max_insn = grant;
+			if (kb->max_insn_resolve > grant)
+				kb->max_insn_resolve = grant;
+		} else {
+			*run &= ~routes;
+			acct->skipped = 1;
+		}
+	}
+	kb->insn_spent = &acct->spent;
+}
+
+void oc_emu_diag_end(struct kof_scanner *sc, const struct oc_emu_diag *acct,
+		     struct kgenome_diag_scan *ds)
+{
+	oc_emu_charge(sc, acct->spent);
+	if (ds && acct->skipped)
+		kgenome_diag_note(ds, KGENOME_OVER_BUDGET);
+}
+
+/*
+ * THE PE'S API-RESOLUTION PRODUCT, made under the tree's allowance: the resolver's run
+ * may execute what the tree has left (oc_emu_afford), and NULL - said - when it has
+ * nothing. The product is also what the symbol view and the graph read.
+ */
+struct kgenome_diag_apihash_set *oc_emu_apihash(struct kof_scanner *sc,
+		const struct kgenome_obj *gobj, kof_buf b, const struct kgenome_pe_imptab *imports)
+{
+	struct kgenome_budget kb;
+	struct kgenome_diag_apihash_set *a;
+	uint64_t spent = 0;
+
+	kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(gobj, b.n));
+	kb.max_bytes = oc_scan_room(sc);
+	kb.max_insn_resolve = oc_emu_afford(sc, kb.max_insn_resolve);
+	if (!kb.max_insn_resolve)
+		return NULL;
+	kb.insn_spent = &spent;
+	a = kgenome_diag_apihash_run(gobj, b.p, b.n, imports, &kb);
+	oc_emu_charge(sc, spent);
+	return a;
+}
+
+/*
+ * What an UNPACK run may execute: `own`, or what is left while that is at least its
+ * floor, or the floor itself for one of the tree's first KOF_SCAN_EMU_FLOOR_RUNS runs, else 0.
+ * `commit` says the run is starting (the run counts toward the floor runs); a probe
+ * (oc_emu_run, before it counts the ask) does not.
+ */
+static uint64_t emu_grant(struct kof_scanner *sc, uint64_t own, int commit)
+{
+	const uint64_t left = sc->ledger.emu_insn_left;
+	const uint64_t floor = own < EMU_INSN_MIN ? own : EMU_INSN_MIN;
+	const int protect = sc->ledger.emu_floor_left != 0;
+
+	if (commit && protect)
+		sc->ledger.emu_floor_left--;
+	if (left >= own)
+		return own;
+	if (left >= floor)
+		return left;
+	return protect ? floor : 0u;
+}
+
+/* A run's total so far, charged to the tree for what it did since the last call. */
+static void emu_spend(struct kof_scanner *sc, uint64_t total)
+{
+	oc_emu_charge(sc, total > sc->obj.emu.spent ? total - sc->obj.emu.spent : 0u);
+	sc->obj.emu.spent = total;
+}
+
+/*
+ * THE INTERPRETER AND THE SCAN'S OWN MEMORY CEILING.
+ *
+ * A caller who set max_resident_bytes did so to bound what this scan holds at any
+ * instant, and an interpreter allocating outside that number would make the
+ * setting a lie. So the guest's memory is charged to the scan's ledger - but AS IT
+ * IS TAKEN (emu_account, which the machine calls for its table, its private pages
+ * in chunks, its snapshots), not as it might be: this was a page cap taken from
+ * half of what the ceiling had left, floored at 4 MiB and capped at 128 MiB, which
+ * made the same object map a different amount of address space under a different
+ * allowance and left the memory it really took out of the ledger altogether.
+ *
+ * The cap that remains is the machine's own bound, the same under every
+ * allowance: EMU_PAGES_MAX of guest address space (what an unlimited caller always
+ * got). What an allowance cuts is reported - the machine says
+ * KGENOME_EMU_HIT_MEM, the refusal marks the object incomplete (oc_scan_limit).
+ */
 #define EMU_PAGES_MAX   (128u << 20)
 
 static uint64_t emu_pages(const struct kof_scanner *sc)
 {
-	uint64_t room = oc_scan_room(sc) / 2u;
+	(void)sc;
+	return EMU_PAGES_MAX / KGENOME_EMU_PAGE;
+}
 
-	if (room > EMU_PAGES_MAX)
-		room = EMU_PAGES_MAX;
-	if (room < EMU_PAGES_MIN)
-		room = EMU_PAGES_MIN;
-	return room / KGENOME_EMU_PAGE;
+/* The machine asks before it takes memory and tells what it gives back. */
+static int emu_account(void *user, int64_t bytes)
+{
+	struct kof_scanner *sc = user;
+
+	if (bytes < 0) {
+		const uint64_t back = (uint64_t)-bytes;
+
+		oc_scan_release(sc, back);
+		sc->emu.charged = back > sc->emu.charged ? 0u : sc->emu.charged - back;
+		return 1;
+	}
+	if ((uint64_t)bytes > oc_scan_room(sc)) {
+		/* The answer of this run is shorter than the object's: said. */
+		oc_scan_limit(sc);
+		return 0;
+	}
+	scan_charge(sc, (uint64_t)bytes);
+	sc->emu.charged += (uint64_t)bytes;
+	return 1;
 }
 
 /*
@@ -142,7 +332,7 @@ static uint64_t emu_pages(const struct kof_scanner *sc)
  * lib reads and nothing else - the lib never goes looking for them in engine
  * state. The values are unchanged; this is only where they are written down.
  */
-static struct kgenome_budget emu_budget(const struct kof_scanner *sc,
+static struct kgenome_budget emu_budget(struct kof_scanner *sc,
 					uint64_t obj_size, uint64_t insn)
 {
 	struct kgenome_budget kb;
@@ -150,6 +340,8 @@ static struct kgenome_budget emu_budget(const struct kof_scanner *sc,
 	kgenome_budget_default(&kb, obj_size, 0);
 	kb.max_insn = insn;
 	kb.max_bytes = emu_pages(sc) * KGENOME_EMU_PAGE;
+	kb.account = emu_account;
+	kb.account_user = (void *)sc;
 	return kb;
 }
 
@@ -209,9 +401,26 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				 * experiment switch, which replaces every work
 				 * bound with a wall clock. 2 GB of guest pages
 				 * is what "bounded by RAM" means here. */
-				uint64_t bi = emu_insn(b.n);
+				uint64_t bi = emu_grant(sc, emu_insn(b.n), 1);
 				uint64_t idle = 0;
+				unsigned ext = force ? KGENOME_EMU_EXTEND_MAX : 0u;
 				struct kgenome_budget kb;
+
+				if (!bi) {
+					emu_denied(sc);
+					return 0;
+				}
+
+				/* An extension is another slice of the run's own limit, so
+				 * it must fit in the tree's allowance too. */
+				if (bi && ext && sc->ledger.emu_insn_left > bi) {
+					const uint64_t more = (sc->ledger.emu_insn_left - bi) / bi;
+
+					if (more < ext)
+						ext = (unsigned)more;
+				} else if (ext) {
+					ext = 0u;
+				}
 
 				/*
 				 * AND A SLICE, WHEN THE MODULE ASKED FOR ONE -
@@ -273,7 +482,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 						.bud = &kb,
 						.idle = idle,
 						.hand_back = sc->obj.emu.slice != 0,
-						.extensions = force ? KGENOME_EMU_EXTEND_MAX : 0u,
+						.extensions = ext,
 						.oep = oep,
 						.n_oep = sc->cur.n_xw,
 						.decl = &sc->pend.decl,
@@ -291,11 +500,18 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 			      KGENOME_EMU_UNP_NO)
 			return 0;
 		{
-			struct kgenome_budget kb = emu_budget(sc, b.n, emu_insn(b.n));
+			const uint64_t grant = emu_grant(sc, emu_insn(b.n), 1);
+			struct kgenome_budget kb;
 
+			if (!grant) {
+				emu_denied(sc);
+				return 0;
+			}
+			kb = emu_budget(sc, b.n, grant);
 			e = kgenome_emu_unp_run(b.p, b.n, info, &kb, &rep);
 		}
 	}
+	emu_spend(sc, e ? kgenome_emu_insn_count(e) : rep.insn);
 	/*
 	 * A SLICE THAT EXPIRED IS A PAUSE, NOT AN END - see `emu_slice`. The
 	 * guest is mid-decryption and the module asked to be shown that; the
@@ -316,6 +532,8 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 			sc->emu.rep_p = calloc(1, sizeof *sc->emu.rep_p);
 		if (sc->emu.rep_p)
 			*sc->emu.rep_p = rep;
+		else
+			OC_LIMIT(sc, "emulator report of a paused run not kept");
 		sc->emu.paused = 1;
 		return 0;
 	}
@@ -350,6 +568,8 @@ void kof_scan_emu_release(struct kof_scanner *sc)
 		}
 	}
 	sc->emu.n_rgn = 0;
+	oc_scan_release(sc, sc->emu.held);
+	sc->emu.held = 0;
 }
 
 /*
@@ -419,8 +639,23 @@ uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch)
 		return 0;
 	/* The scan's own ceiling on how many runs it will spend - see
 	 * KOF_SCAN_EMU_MAX. */
-	if (sc->st.heur_emu >= KOF_SCAN_EMU_MAX)
+	if (!sc->ledger.emu_left) {
+		/* The tree has had its runs. Refused AND SAID, once for this object:
+		 * what the interpreter would have shown of it is not in the answer. */
+		if (!sc->obj.emu.refused) {
+			sc->obj.emu.refused = 1;
+			oc_scan_limit(sc);
+		}
 		return 0;
+	}
+	/* The tree's instruction allowance (see emu_grant): an ELF or PE that would be run
+	 * and cannot be is refused here, before the ask is counted as a run. */
+	if ((ctx->format == KOF_FMT_ELF || ctx->format == KOF_FMT_PE) && sc->cur.src &&
+	    !emu_grant(sc, emu_insn(kof_src_buf(sc->cur.src).n), 0)) {
+		emu_denied(sc);
+		return 0;
+	}
+	sc->ledger.emu_left--;
 	sc->st.heur_emu++;
 	sc->obj.emu.ran = 1;
 	sc->obj.emu.run_by = sc->mod.cur;   /* the one carrier: see kid_push */
@@ -504,13 +739,66 @@ uint32_t oc_emu_write(const struct kof_obj_ctx *ctx, uint64_t va,
 	return kgenome_emu_write(sc->emu.live, va, bytes, n) ? n : 0u;
 }
 
+/*
+ * THE ASSEMBLED IMAGE, HANDED TO THE CHILD INSTEAD OF COPIED INTO IT.
+ *
+ * The run's rebuilt image (sc->emu.own) is the engine's own allocation and the
+ * child's image (oc_image) is another of the same size, which the take then filled
+ * with a copy: one PE's bytes twice, for the length of the take. When the child's
+ * extent is the fresh zeroed one oc_image made and the cursor is at its start,
+ * the answer of a copy is the image followed by zeroes - which is the image buffer
+ * grown to the extent's size with its tail zeroed. So it is taken over: the
+ * extent's own memory goes, the image's takes its place, and the region says it
+ * has no bytes any more (a module reads a region it has taken only through
+ * oc_emu_region_read, which then answers 0; emu_harvest.h does not).
+ *
+ * Only when the extent is provably what oc_image made: fixed, in memory, nothing
+ * spilled, the cursor at 0, and every byte of it still zero - a module that has
+ * written into it first gets the copy, which preserves what it wrote beyond the
+ * image. 0 means "not handed over": the caller copies.
+ */
+static int emu_adopt(struct kof_scanner *sc, struct kof_emu_rgn *r)
+{
+	size_t k;
+	uint8_t *m;
+
+	if (!sc->emu.own || r->p != sc->emu.own || r->own || !r->n)
+		return 0;
+	if (!sc->sink.fixed || sc->sink.fd >= 0 || sc->sink.spilled || sc->sink.at != 0 ||
+	    !sc->sink.mem || r->n > sc->sink.cap)
+		return 0;
+	for (k = 0; k < sc->sink.cap; k++)
+		if (sc->sink.mem[k])
+			return 0;
+	m = sc->emu.own;
+	if (sc->sink.cap > r->n) {
+		m = realloc(m, sc->sink.cap);
+		if (!m)
+			return 0;       /* the image is still where it was */
+		memset(m + r->n, 0, sc->sink.cap - (size_t)r->n);
+	}
+	free(sc->sink.mem);
+	sc->sink.mem = m;
+	sc->sink.at = (size_t)r->n;
+	if (sc->sink.at > sc->sink.len)
+		sc->sink.len = sc->sink.at;
+	sc->emu.own = NULL;
+	r->p = NULL;
+	sc->st.emu_adopted++;
+	oc_scan_release(sc, r->n);      /* the extent is charged already (oc_image) */
+	sc->emu.held = r->n > sc->emu.held ? 0u : sc->emu.held - r->n;
+	return 1;
+}
+
 /* One region into the child being built, at the cursor. */
 int oc_emu_take(const struct kof_obj_ctx *ctx, uint32_t i)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc || i >= sc->emu.n_rgn)
+	if (!sc || i >= sc->emu.n_rgn || !sc->emu.rgn[i].p)
 		return 0;
+	if (emu_adopt(sc, &sc->emu.rgn[i]))
+		return 1;
 	return oc_emit_exact(ctx, sc->emu.rgn[i].p, sc->emu.rgn[i].n);
 }
 
@@ -549,8 +837,13 @@ void oc_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!sc || !len || sc->pend.n_xw >= KGENOME_EMU_EXEC_WATCH)
+	if (!sc || !len)
 		return;
+	if (sc->pend.n_xw >= KGENOME_EMU_EXEC_WATCH) {
+		/* A range the table has no room for is a range not watched: said. */
+		oc_scan_limit(sc);
+		return;
+	}
 	sc->pend.xw[sc->pend.n_xw].rva = rva;
 	sc->pend.xw[sc->pend.n_xw].len = len;
 	sc->pend.n_xw++;
@@ -609,9 +902,14 @@ void oc_emu_watch_insn(const struct kof_obj_ctx *ctx,
 			kgenome_emu_watch_insn(sc->emu.live, NULL, 0);
 		return;
 	}
-	if (n > sizeof sc->pend.decl.iw[0].b ||
-	    sc->pend.decl.n_iw >= KGENOME_EMU_INSN_WATCH)
+	if (n > sizeof sc->pend.decl.iw[0].b)
 		return;
+	/* As many as the emulator will take, not the eight its table starts with; one
+	 * past that is a pattern not watched, and said. */
+	if (sc->pend.decl.n_iw >= KGENOME_EMU_INSN_WATCH_MAX) {
+		oc_scan_limit(sc);
+		return;
+	}
 	memcpy(sc->pend.decl.iw[sc->pend.decl.n_iw].b, bytes, n);
 	sc->pend.decl.iw[sc->pend.decl.n_iw].n = (uint8_t)n;
 	sc->pend.decl.n_iw++;
@@ -745,6 +1043,7 @@ uint32_t oc_emu_resume(const struct kof_obj_ctx *ctx)
 		st = KGENOME_EMU_STOP_INSN;
 	sc->emu.rep_p->stop = st;
 	sc->emu.rep_p->insn = kgenome_emu_insn_count(e);
+	emu_spend(sc, sc->emu.rep_p->insn);
 	if (st == KGENOME_EMU_STOP_INSN)
 		return 0;               /* paused again */
 	/*

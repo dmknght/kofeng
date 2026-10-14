@@ -351,8 +351,22 @@ enum kof_diag_fact {
 	KOF_FACT_COUNT
 };
 
-/* How many conditions one diagnose may state. */
-#define KOF_DIAG_MAX_WHEN 8u
+/*
+ * NODES ONE DIAGNOSE MAY HAVE - the ONE carrier of the number. The pack record holds
+ * the count in sixteen bits and the matcher binds up to 255, so this is what the
+ * loader's tables are sized for; the source reader (diagsrc.h) and the loader
+ * (dbtables.h) both take it from here. It was 32 in the loader and 64 in the
+ * reader: a diagnose of 33 to 64 nodes built, was written into a pack, and was
+ * absent at run time with one line on stderr. A result reports the first
+ * KOF_DIAG_REPORT_NODES of them (kofresult.h) - the match itself uses all.
+ */
+#define KOF_DIAG_MAX_NODE 64u
+
+/* How many conditions one diagnose may state: sixteen, twice the eight it was. The
+ * record carries them as a length in bytes (ten a condition), so the format holds
+ * far more; the bound is the array in struct kof_diag. A record past it is
+ * refused and COUNTED (kdb_diag_refused). */
+#define KOF_DIAG_MAX_WHEN 16u
 
 struct kof_diag_when {
 	uint16_t fact;          /* enum kof_diag_fact */
@@ -363,7 +377,7 @@ struct kof_diag_when {
  * HOW MANY SIGNS A DIAGNOSE MAY DECLARE, and how long one may be. A sign is
  * a symbol name; the kernel's own are well under this.
  */
-#define KOF_DIAG_MAX_NEED  8u
+#define KOF_DIAG_MAX_NEED  16u
 #define KOF_DIAG_NEED_LEN 48u
 /* A disease, without the terminator. */
 #define KOF_DIAG_DISEASE_LEN 63u
@@ -420,6 +434,11 @@ struct kof_diag {
 	 */
 	uint8_t               users_known;
 	uint8_t               n_users;
+	/* Where the names of those rules sit in the record that was read (the
+	 * USERS section's body: a count, then a length and the name of each), or
+	 * zero and zero. Valid only while that record is, so the loader reads them
+	 * as the record is accepted. */
+	uint32_t              users_off, users_len;
 	/*
 	 * SYMBOLS THE CODE MUST REFER INTO, at a non-zero offset - see
 	 * KOF_DIAG_DECLARE_SYMBOL. Strings live in the same store as `need`.
@@ -684,15 +703,26 @@ struct kof_diag {
 #define KOF_GR_R_CAP    16u     /* 2  enum kgenome_nucleo_cap               */
 #define KOF_GR_R_FLAGS  18u     /* 2  KOF_FLOWF_* seen here                 */
 #define KOF_GR_R_BITS   20u     /* 1  KOF_GR_B_*                            */
-#define KOF_GR_R_NIN    21u     /* 1  how many of the four links are used   */
+#define KOF_GR_R_NIN    21u     /* 1  how many links are used (<= KOF_GR_IN_FIT) */
 /*
- * The links in, four of them, two bytes each: the parent's RECORD INDEX, then
- * the role, then the kind. A parent of 0xffff is none; 0xfffe is the stack
- * region, which is a place rather than a node.
+ * The links in, four bytes each: the parent's RECORD INDEX (two), then the
+ * role, then the kind. A parent of 0xffff is none; 0xfffe is the stack region,
+ * which is a place rather than a node.
+ *
+ * THE RECORD HOLDS TWO. Ten bytes remain after byte 22 and a link is four, so
+ * KOF_GR_IN_FIT is two; a third would end at byte 33. KOF_GR_IN_MAX is four and
+ * is what a NODE OF THE SCAN keeps (kgenome_diag_hit.in[4]) - the numbers were
+ * once read as one, and the serialiser wrote links 2 and 3 past the record: over
+ * the next record's `at` and, for the last node, past the block. Records and
+ * offsets are the module ABI and do not move, so the block carries the first
+ * KOF_GR_IN_FIT links of a node and the builder reports the rest as a cut
+ * (kof_diag_graph_build: KGENOME_TRUNCATED on the scan). A rule that needs a
+ * node's third and fourth input asks the scan, not this block.
  */
-#define KOF_GR_R_IN     22u     /* 4 x (2 from, 1 role, 1 kind) = 10 bytes  */
+#define KOF_GR_R_IN     22u     /* KOF_GR_IN_FIT x (2 from, 1 role, 1 kind) */
 #define KOF_GR_IN_STRIDE 4u
 #define KOF_GR_IN_MAX    4u
+#define KOF_GR_IN_FIT    ((KOF_GR_RECLEN - KOF_GR_R_IN) / KOF_GR_IN_STRIDE)
 #define KOF_GR_FROM_NONE  0xffffu
 #define KOF_GR_FROM_STACK 0xfffeu
 
@@ -736,13 +766,14 @@ static inline uint16_t kof_gr_u16(const uint8_t *r, uint32_t at)
 }
 
 /* One link of a node: its parent's index, the role it fills and which
- * relation it is. Answers KOF_GR_FROM_NONE past the last one. */
+ * relation it is. Answers KOF_GR_FROM_NONE past the last one, and for a NULL
+ * record (what kof_gr_rec answers past the last record). */
 static inline uint16_t kof_gr_in(const uint8_t *r, unsigned k,
 				 uint8_t *role, uint8_t *kind)
 {
 	const uint8_t *p;
 
-	if (k >= KOF_GR_IN_MAX || k >= r[KOF_GR_R_NIN])
+	if (!r || k >= KOF_GR_IN_FIT || k >= r[KOF_GR_R_NIN])
 		return KOF_GR_FROM_NONE;
 	p = r + KOF_GR_R_IN + k * KOF_GR_IN_STRIDE;
 	if (role)
@@ -794,7 +825,7 @@ static inline int kof_gr_linked(const uint8_t *b, uint32_t n,
 
 		if (kof_gr_u16(r, KOF_GR_R_CAP) != child_cap)
 			continue;
-		for (k = 0; k < KOF_GR_IN_MAX; k++) {
+		for (k = 0; k < KOF_GR_IN_FIT; k++) {
 			uint8_t ro = 0, kind = 0;
 			uint16_t from = kof_gr_in(r, k, &ro, &kind);
 			const uint8_t *p;
@@ -855,7 +886,7 @@ static inline uint32_t kof_gr_entries(const uint8_t *b, uint32_t n,
 		at = kof_gr_u64(r, KOF_GR_R_ATTR);
 		if (!at)
 			continue;
-		for (k = 0; k < KOF_GR_IN_MAX; k++) {
+		for (k = 0; k < KOF_GR_IN_FIT; k++) {
 			uint8_t ro = 0, kind = 0;
 			uint16_t from = kof_gr_in(r, k, &ro, &kind);
 			const uint8_t *p;

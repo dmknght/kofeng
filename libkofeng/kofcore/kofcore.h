@@ -345,7 +345,7 @@ static inline uint64_t kof_clip_len(uint64_t size, uint64_t off, uint64_t len)
  * An integrity check against corruption and wrong-file mistakes, not a security
  * boundary. Anything that must resist tampering gets signed instead.
  */
-static inline uint32_t kof_crc32(const void *data, uint64_t len)
+static inline uint32_t kof_crc32_cont(uint32_t prev, const void *data, uint64_t len)
 {
 	static const uint32_t tab[256] = {
 		0x00000000u, 0x77073096u, 0xee0e612cu, 0x990951bau,
@@ -414,12 +414,20 @@ static inline uint32_t kof_crc32(const void *data, uint64_t len)
 		0xb40bbe37u, 0xc30c8ea1u, 0x5a05df1bu, 0x2d02ef8du
 	};
 	const uint8_t *p = (const uint8_t *)data;
-	uint32_t crc = 0xFFFFFFFFu;
+	uint32_t crc = ~prev;
 	uint64_t i;
 
 	for (i = 0; i < len; i++)
 		crc = (crc >> 8) ^ tab[(crc ^ p[i]) & 0xffu];
 	return ~crc;
+}
+
+/* The same value over a buffer in one call, and over several in pieces:
+ * kof_crc32_cont(kof_crc32_cont(0, a, na), b, nb) == kof_crc32(a || b). The database
+ * index (databases/pack/dbkix.c) checks a filter it reads in chunks. */
+static inline uint32_t kof_crc32(const void *data, uint64_t len)
+{
+	return kof_crc32_cont(0, data, len);
 }
 
 /*

@@ -121,6 +121,7 @@ struct pat {
 	int      icase;             /* literal only */
 	int      fullword;          /* literal only */
 	uint32_t len;               /* bytes, or the compiled program length */
+	uint32_t open_gaps;         /* hex: jumps written open ("[n-]"), clamped */
 	uint8_t  bytes[KOF_HEX_MAX_PROG];
 
 	/*
@@ -504,6 +505,7 @@ struct ksb_diaguse {
 	unsigned        n_uses;
 	int             uses_known;    /* only a tree build knows them all */
 	char            built[64][64];
+	unsigned char   built_dis[64]; /* 1: it declares a disease, which the verdict reads */
 	unsigned        n_built;
 };
 

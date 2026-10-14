@@ -10,6 +10,7 @@
 #include <kofmod/kofsym.h>
 #include "elf/elf_sym.h"
 #include "pe/pe_sym.h"
+#include "pe/pe_parse.h"
 #include "funcs.h"
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,13 @@ static uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
  * write (a PE: imports are walked, not counted) - it is rebuilt at four times the
  * size, until it was not or KOF_SYM_ABS_MAX_BYTES is reached. Past that the
  * header's `truncated` byte is set and the engine reads it (kof_scan_incomplete).
+ * Only a block cut for ROOM is rebuilt: a cut by a bound of the source (the PE
+ * export name bound, an import table that stopped short: KOF_SYM_TRUNC_SOURCE)
+ * is the same at any size, and a rebuild for it would be a pass that changes nothing.
+ *
+ * `*passes` (may be NULL) is how many times the builder ran, so the caller counts
+ * each as a run of the product (kof_prod_ran): a rebuild is a second build of the
+ * block and is not hidden by the first being counted.
  *
  * `*buf` / `*cap` are the caller's buffer and its size in bytes; it is kept and
  * only grows, so the next object reuses it. Returns the block's length, or 0 when
@@ -67,11 +75,17 @@ static uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
 uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data_n,
 			     const void *info,
 			     const struct kgenome_pe_imptab *imports,
-			     uint8_t **buf, uint32_t *cap)
+			     uint8_t **buf, uint32_t *cap, uint32_t *passes)
 {
 	uint32_t recs = KOF_SYM_MAX_RECS, decl, need;
 
+	if (passes)
+		*passes = 0;
 	decl = kof_syms_declared(format, data, data_n, info);
+	/* A PE's imports are counted by the table the caller built; its exports
+	 * are not known up front. */
+	if (!decl && format == KOF_FMT_PE && imports)
+		decl = imports->n;
 	if (decl > recs)
 		recs = decl < KOF_SYM_ABS_MAX_RECS ? decl : KOF_SYM_ABS_MAX_RECS;
 	need = KOF_SYM_BYTES_FOR(recs) < KOF_SYM_ABS_MAX_BYTES
@@ -89,7 +103,11 @@ uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data
 		}
 		n = kof_syms_build_with(format, data, data_n, info, imports,
 					*buf, *cap);
-		if (!kof_sym_truncated(*buf, n) || need >= KOF_SYM_ABS_MAX_BYTES)
+		if (passes)
+			(*passes)++;
+		if (n <= KOF_SYM_H_TRUNC ||
+		    !((*buf)[KOF_SYM_H_TRUNC] & KOF_SYM_TRUNC_ROOM) ||
+		    need >= KOF_SYM_ABS_MAX_BYTES)
 			return n;
 		need = need > KOF_SYM_ABS_MAX_BYTES / 4u ? KOF_SYM_ABS_MAX_BYTES
 							 : need * 4u;

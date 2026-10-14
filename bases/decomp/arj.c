@@ -31,7 +31,8 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_arj_info *a = kof_arj(ctx);
-	uint32_t i, opened = 0;
+	const struct kof_entry *e;
+	uint32_t cur = 0, opened = 0;
 
 	if (!a->valid)
 		return;
@@ -42,9 +43,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * much was left". */
 	kof_debug("Arj.coded", a->n_coded);
 
-	for (i = 0; i < a->n_entries; i++) {
-		const struct kof_entry *e = &a->entry[i];
-
+	/* A walk and not an array: the archive has as many entries as its chain holds (zip.c). */
+	while ((e = kof_arj_next(ctx, &cur)) != 0) {
 		/* The stored ones are the host's - opening them here would
 		 * produce every one of them twice. */
 		if (!e->coding[0])

@@ -43,6 +43,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * WORK COUNTING, for the test that bounds a state reset. A test that wants to count
+ * the probability words this file writes defines KUNCOAT_LZMA_WORK_HOOK, supplies
+ * `kuncoat_lzma_work`, and includes this file; in every other build the macro is
+ * empty and costs nothing.
+ */
+#ifdef KUNCOAT_LZMA_WORK_HOOK
+extern uint64_t kuncoat_lzma_work;
+#define LZ_WORK(n) (kuncoat_lzma_work += (uint64_t)(n))
+#else
+#define LZ_WORK(n) ((void)0)
+#endif
+
 /* ---- the model's shape ------------------------------------------------------- */
 
 #define PROB_BITS      11u
@@ -116,6 +129,7 @@ struct rc {
 	uint64_t n, at;
 	uint32_t range, code;
 	int      short_input;      /* set once, rather than tested at every read */
+	int      fab;              /* a decision was taken from bytes that are not there */
 };
 
 /* A byte, or zero once the input is spent. Reading past the end is recorded and
@@ -137,6 +151,7 @@ static void rc_init(struct rc *r, const uint8_t *in, uint64_t n)
 	r->range = 0xffffffffu;
 	r->code = 0;
 	r->short_input = 0;
+	r->fab = 0;
 	(void)rc_byte(r);
 	for (i = 0; i < 4; i++)
 		r->code = (r->code << 8) | rc_byte(r);
@@ -160,6 +175,7 @@ static inline uint32_t rc_bit(struct rc *r, uint16_t *p)
 {
 	uint32_t bound = (r->range >> PROB_BITS) * *p;
 
+	r->fab |= r->short_input;
 	if (r->code < bound) {
 		r->range = bound;
 		*p = (uint16_t)(*p + (((1u << PROB_BITS) - *p) >> MOVE_BITS));
@@ -206,6 +222,7 @@ static inline uint32_t rc_direct(struct rc *r, unsigned n)
 {
 	uint32_t out = 0;
 
+	r->fab |= r->short_input;
 	while (n--) {
 		uint32_t t;
 
@@ -261,8 +278,20 @@ static uint32_t decode_len(struct rc *r, uint16_t *base, uint32_t pos_state)
 struct lz_state {
 	uint16_t *probs;
 	uint64_t  n_probs;
+	/* Which reset each literal context's 0x300 words were last initialised
+	 * under. A reset bumps `gen` instead of rewriting the whole literal
+	 * model (3.1M words at lc8 lp4); a context is initialised the first time
+	 * it is used after a reset. The work of a reset is then the fixed part,
+	 * and the rest is paid for by the symbols that use it. */
+	uint32_t *lit_gen;
+	uint64_t  n_lit_gen;
+	uint32_t  gen;
 	unsigned  lc, lp, pb;
 	uint32_t  state, rep0, rep1, rep2, rep3;
+	/* Where the dictionary starts in the output: LZMA2's dictionary reset
+	 * means a match may not reach before it, and the position the model
+	 * keeps (pos_state, the literal's context) counts from it. */
+	uint64_t  dict_start;
 };
 
 static void lz_reset_state(struct lz_state *z)
@@ -271,8 +300,29 @@ static void lz_reset_state(struct lz_state *z)
 
 	z->state = 0;
 	z->rep0 = z->rep1 = z->rep2 = z->rep3 = 1;
-	for (i = 0; i < z->n_probs; i++)
+	for (i = 0; i < O_LITERAL; i++)
 		z->probs[i] = PROB_INIT;
+	LZ_WORK(O_LITERAL);
+	if (++z->gen == 0) {                    /* wrapped: nothing is current any more */
+		memset(z->lit_gen, 0, (size_t)z->n_lit_gen * sizeof *z->lit_gen);
+		z->gen = 1;
+	}
+}
+
+/* The literal coder for context `ctx`, initialised if this reset has not yet. */
+static inline uint16_t *lz_literal(struct lz_state *z, uint64_t ctx)
+{
+	uint16_t *lit = z->probs + O_LITERAL + (uint64_t)0x300u * ctx;
+
+	if (z->lit_gen[ctx] != z->gen) {
+		uint32_t i;
+
+		for (i = 0; i < 0x300u; i++)
+			lit[i] = PROB_INIT;
+		z->lit_gen[ctx] = z->gen;
+		LZ_WORK(0x300u);
+	}
+	return lit;
 }
 
 /*
@@ -298,6 +348,16 @@ static int lz_set_props(struct lz_state *z, unsigned lc, unsigned lp, unsigned p
 		z->probs = nv;
 		z->n_probs = want;
 	}
+	if (((uint64_t)1 << (lc + lp)) > z->n_lit_gen) {
+		uint32_t *ng = realloc(z->lit_gen, ((size_t)1 << (lc + lp)) * sizeof *ng);
+
+		if (!ng)
+			return 0;
+		memset(ng + z->n_lit_gen, 0,
+		       ((size_t)((uint64_t)1 << (lc + lp)) - (size_t)z->n_lit_gen) * sizeof *ng);
+		z->lit_gen = ng;
+		z->n_lit_gen = (uint64_t)1 << (lc + lp);
+	}
 	z->lc = lc;
 	z->lp = lp;
 	z->pb = pb;
@@ -305,18 +365,76 @@ static int lz_set_props(struct lz_state *z, unsigned lc, unsigned lp, unsigned p
 }
 
 /*
+ * The distance of a new match, as the raw field (0xffffffff is the end marker).
+ * Shared by the decode and by the look at what follows a full buffer.
+ */
+static inline uint32_t decode_dist(struct rc *r, uint16_t *probs, uint32_t len)
+{
+	uint32_t slot, rep0, len_state = len - MATCH_MIN_LEN;
+
+	if (len_state >= LEN_TO_POS_STATES)
+		len_state = LEN_TO_POS_STATES - 1u;
+	slot = rc_tree(r, probs + O_POS_SLOT + len_state * 64u, 6);
+
+	if (slot < 4)
+		return slot;
+	{
+		unsigned nd = (unsigned)((slot >> 1) - 1u);
+
+		rep0 = (2u | (slot & 1u)) << nd;
+		if (slot < END_POS_MODEL_INDEX) {
+			rep0 += rc_tree_rev(r, probs + O_SPEC_POS + rep0 - slot - 1u, nd);
+		} else {
+			rep0 += rc_direct(r, nd - ALIGN_BITS) << ALIGN_BITS;
+			rep0 += rc_tree_rev(r, probs + O_ALIGN, ALIGN_BITS);
+		}
+	}
+	return rep0;
+}
+
+/* Is the next thing in the stream the end marker? Asked once the output is full,
+ * to tell a stream that ends here (marker, or none) from one that has more to say.
+ * It consumes the rest of the coder's state, so only a stream's last look may ask. */
+static int at_end_marker(struct rc *r, uint16_t *probs, uint32_t state, uint32_t pos_state)
+{
+	uint32_t len;
+
+	if (r->short_input)
+		return 1;
+	if (rc_bit(r, &probs[O_IS_MATCH + state * MAX_PB_STATES + pos_state]) == 0)
+		return 0;
+	if (rc_bit(r, &probs[O_IS_REP + state]))
+		return 0;
+	len = MATCH_MIN_LEN + decode_len(r, probs + O_LEN, pos_state);
+	return !r->fab && decode_dist(r, probs, len) == 0xffffffffu && !r->fab;
+}
+
+/*
  * Decode one LZMA stream into out[] starting at `at`, stopping at `limit`.
  *
  * `at` is both where output goes and how far back a match may reach, which is why
  * it comes in rather than starting at zero: an LZMA2 chunk continues the previous
- * chunk's dictionary, and the dictionary is the output written so far.
+ * chunk's dictionary, and the dictionary is the output written so far (from
+ * z->dict_start, which a dictionary reset moves).
+ *
+ * NOTHING IS EMITTED FROM BYTES THAT ARE NOT THERE. Past the end of the input the
+ * range decoder feeds zeros so the symbol under way finishes in a defined state,
+ * but a decision taken from them is a decision the stream never made: `r.fab` says
+ * one was, and the symbol is then dropped (TRUNCATED) instead of written. A stream
+ * that is complete never sets it, because the coder's normalisation after the last
+ * bit consumes exactly the bytes the encoder flushed.
+ *
+ * `peek_end` is for a stream that stands alone (plain LZMA): when the buffer fills
+ * with input left, look at whether what is left is the end marker, so a stream
+ * whose size the caller knew exactly is OK and not STOPPED.
  */
 static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
-		  uint8_t *out, uint64_t limit, uint64_t *at_io)
+		  uint8_t *out, uint64_t limit, uint64_t *at_io, int peek_end)
 {
 	struct rc r;
 	uint16_t *probs = z->probs;
 	uint64_t at = *at_io;
+	const uint64_t dstart = z->dict_start;
 	uint32_t state = z->state, rep0 = z->rep0, rep1 = z->rep1;
 	uint32_t rep2 = z->rep2, rep3 = z->rep3;
 	uint32_t pos_mask = (1u << z->pb) - 1u;
@@ -328,10 +446,10 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 	rc_init(&r, in, in_len);
 
 	while (at < out_cap) {
-		uint32_t pos_state = (uint32_t)at & pos_mask;
+		uint32_t pos_state = (uint32_t)(at - dstart) & pos_mask;
 		uint32_t len;
 
-		if (r.short_input) {
+		if (r.fab) {
 			status = KUNCOAT_TRUNCATED;
 			break;
 		}
@@ -343,14 +461,13 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 			 * says the last thing was a match - which is what lets the
 			 * model predict the byte that "should" have been there.
 			 */
-			uint16_t *lit = probs + O_LITERAL +
-				(uint64_t)0x300u *
-				((((uint32_t)at & lit_pos_mask) << lc) +
-				 (at ? (uint32_t)(out[at - 1] >> (8u - lc)) : 0u));
+			uint16_t *lit = lz_literal(z,
+				((((uint64_t)(at - dstart) & lit_pos_mask) << lc) +
+				 (at > dstart ? (uint32_t)(out[at - 1] >> (8u - lc)) : 0u)));
 			uint32_t sym = 1;
 
 			if (state >= 7) {
-				uint32_t match = at >= rep0 ? out[at - rep0] : 0;
+				uint32_t match = at - dstart >= rep0 ? out[at - rep0] : 0;
 
 				do {
 					uint32_t mb = (match >> 7) & 1u;
@@ -370,6 +487,10 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 				while (sym < 0x100)
 					sym = (sym << 1) | rc_bit(&r, &lit[sym]);
 			}
+			if (r.fab) {
+				status = KUNCOAT_TRUNCATED;
+				break;
+			}
 			out[at++] = (uint8_t)sym;
 			state = state < 4 ? 0 : (state < 10 ? state - 3 : state - 6);
 			continue;
@@ -382,8 +503,12 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 						      state * MAX_PB_STATES +
 						      pos_state]) == 0) {
 					/* One byte at the last distance. */
+					if (r.fab) {
+						status = KUNCOAT_TRUNCATED;
+						break;
+					}
 					state = state < 7 ? 9 : 11;
-					if (rep0 == 0 || (uint64_t)rep0 > at) {
+					if (rep0 == 0 || (uint64_t)rep0 > at - dstart) {
 						status = KUNCOAT_CORRUPT;
 						break;
 					}
@@ -412,53 +537,38 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 			state = state < 7 ? 8 : 11;
 		} else {
 			/* A new match: a length, then a distance. */
-			uint32_t slot, len_state;
-
 			rep3 = rep2;
 			rep2 = rep1;
 			rep1 = rep0;
 			len = MATCH_MIN_LEN + decode_len(&r, probs + O_LEN, pos_state);
 			state = state < 7 ? 7 : 10;
-
-			len_state = len - MATCH_MIN_LEN;
-			if (len_state >= LEN_TO_POS_STATES)
-				len_state = LEN_TO_POS_STATES - 1u;
-			slot = rc_tree(&r, probs + O_POS_SLOT + len_state * 64u, 6);
-
-			if (slot < 4) {
-				rep0 = slot;
-			} else {
-				unsigned nd = (unsigned)((slot >> 1) - 1u);
-
-				rep0 = (2u | (slot & 1u)) << nd;
-				if (slot < END_POS_MODEL_INDEX) {
-					rep0 += rc_tree_rev(&r,
-						probs + O_SPEC_POS + rep0 - slot - 1u,
-						nd);
-				} else {
-					rep0 += rc_direct(&r, nd - ALIGN_BITS)
-						<< ALIGN_BITS;
-					rep0 += rc_tree_rev(&r, probs + O_ALIGN,
-							    ALIGN_BITS);
-				}
-			}
+			rep0 = decode_dist(&r, probs, len);
 			/*
 			 * The end marker. A real encoding rather than a sentinel
 			 * this code invented: an all-ones distance cannot be a
 			 * distance, so the format spends it on saying "done".
 			 */
+			if (r.fab) {
+				status = KUNCOAT_TRUNCATED;
+				break;
+			}
 			if (rep0 == 0xffffffffu)
 				break;
 			rep0++;
 		}
+		if (r.fab) {                    /* the length or the distance is not the stream's */
+			status = KUNCOAT_TRUNCATED;
+			break;
+		}
 
 		/*
 		 * The two checks that make the copy safe, and they check different
-		 * things: the distance against what has been WRITTEN, the length
-		 * against the room left. A distance inside the buffer but ahead of
-		 * the cursor would copy bytes this stream never produced.
+		 * things: the distance against what has been WRITTEN (since the
+		 * dictionary began), the length against the room left. A distance
+		 * inside the buffer but ahead of the cursor would copy bytes this
+		 * stream never produced.
 		 */
-		if (rep0 == 0 || (uint64_t)rep0 > at) {
+		if (rep0 == 0 || (uint64_t)rep0 > at - dstart) {
 			status = KUNCOAT_CORRUPT;
 			break;
 		}
@@ -484,8 +594,12 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 			break;
 	}
 
-	if (status == KUNCOAT_OK && at >= out_cap && r.at < r.n)
-		status = KUNCOAT_STOPPED;
+	if (status == KUNCOAT_OK && at >= out_cap && r.at < r.n) {
+		if (peek_end && at_end_marker(&r, probs, state, (uint32_t)(at - dstart) & pos_mask))
+			;                       /* the buffer is the whole stream */
+		else
+			status = KUNCOAT_STOPPED;
+	}
 	if (r.short_input && status == KUNCOAT_OK)
 		status = KUNCOAT_TRUNCATED;
 
@@ -513,7 +627,9 @@ enum kuncoat_status kuncoat_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 
 	if (produced)
 		*produced = 0;
-	if (!in || !out || out_cap == 0)
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
+	if (out_cap == 0)
 		return KUNCOAT_STOPPED;
 
 	memset(&z, 0, sizeof z);
@@ -521,11 +637,13 @@ enum kuncoat_status kuncoat_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 	 * them: these came out of a container and nothing has vouched for them. */
 	if (!lz_set_props(&z, lc, lp, pb)) {
 		free(z.probs);
+		free(z.lit_gen);
 		return KUNCOAT_CORRUPT;
 	}
 	lz_reset_state(&z);
-	status = lz_run(&z, in, in_len, out, out_cap, &at);
+	status = lz_run(&z, in, in_len, out, out_cap, &at, 1);
 	free(z.probs);
+	free(z.lit_gen);
 	if (produced)
 		*produced = at;
 	return status;
@@ -563,22 +681,26 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 {
 	struct lz_state z;
 	uint64_t p = 0, at = 0;
-	int status = KUNCOAT_OK, have_props = 0;
+	int status = KUNCOAT_OK, have_props = 0, ended = 0;
 
 	if (produced)
 		*produced = 0;
-	if (!in || !out || out_cap == 0)
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
+	if (out_cap == 0)
 		return KUNCOAT_STOPPED;
 
 	memset(&z, 0, sizeof z);
 
 	while (p < in_len && at < out_cap) {
 		uint8_t control = in[p++];
-		uint64_t u_len, c_len;
+		uint64_t u_len, u_full, c_len;
 		unsigned reset;
 
-		if (control == 0)
-			break;                  /* the stream says it is done */
+		if (control == 0) {
+			ended = 1;              /* the stream says it is done */
+			break;
+		}
 
 		if (control < 0x80u) {
 			if (control > 2u) {
@@ -591,6 +713,8 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 			}
 			u_len = ((uint64_t)in[p] << 8 | in[p + 1]) + 1u;
 			p += 2u;
+			if (control == 1u)
+				z.dict_start = at;      /* a dictionary reset */
 			if (p + u_len > in_len) {
 				u_len = in_len - p;
 				status = KUNCOAT_TRUNCATED;
@@ -625,8 +749,9 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 			status = KUNCOAT_TRUNCATED;
 			break;
 		}
-		u_len = (((uint64_t)(control & 0x1fu) << 16) |
-			 ((uint64_t)in[p] << 8) | in[p + 1]) + 1u;
+		u_full = (((uint64_t)(control & 0x1fu) << 16) |
+			  ((uint64_t)in[p] << 8) | in[p + 1]) + 1u;
+		u_len = u_full;
 		c_len = (((uint64_t)in[p + 2] << 8) | in[p + 3]) + 1u;
 		p += 4u;
 		reset = ((unsigned)control >> 5) & 3u;
@@ -651,6 +776,8 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 			status = KUNCOAT_CORRUPT;
 			break;
 		}
+		if (reset == 3u)
+			z.dict_start = at;      /* a dictionary reset: nothing before it is reachable */
 		if (reset >= 1u)
 			lz_reset_state(&z);
 
@@ -682,7 +809,7 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 			 * chunk's own length still decides where the next one
 			 * begins, which is the only thing it is authoritative for.
 			 */
-			r_status = lz_run(&z, in + p, in_len - p, out, at + u_len, &at);
+			r_status = lz_run(&z, in + p, in_len - p, out, at + u_len, &at, 0);
 			/*
 			 * A CHUNK THAT FILLED ITS OWN LENGTH HAS ENDED, NOT BEEN
 			 * REFUSED.
@@ -703,13 +830,21 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 			 * exactly - while a reference decoder read both folders
 			 * whole.
 			 *
-			 * The caller's buffer being full is a real STOPPED and is
-			 * still caught, below, where it is also known whether the
-			 * stream had more to say.
+			 * But the bound is the CHUNK's only when the caller's room
+			 * did not cut it: a chunk clipped to the room (u_len below
+			 * the declared u_full) ended because the buffer filled, and
+			 * that is STOPPED.
 			 */
-			if (r_status == KUNCOAT_STOPPED && at == before + u_len)
-				r_status = KUNCOAT_OK;
-			/* Not just the zero-progress case below: a chunk can produce
+			if ((r_status == KUNCOAT_STOPPED || r_status == KUNCOAT_OK) &&
+			    at == before + u_len)
+				r_status = u_len < u_full ? KUNCOAT_STOPPED : KUNCOAT_OK;
+			/* A chunk is exactly its declared length: an end marker or any
+			 * other way of stopping short is the stream disagreeing with
+			 * itself. (A chunk that produced nothing is the same fault, and
+			 * is what keeps a chain of empty chunks from never ending.) */
+			if (r_status == KUNCOAT_OK && at != before + u_len)
+				r_status = KUNCOAT_CORRUPT;
+			/* Not just the zero-progress case: a chunk can produce
 			 * some bytes and still end short (r.short_input mid-stream),
 			 * and that status must survive past `p += c_len` too, or a
 			 * corrupt/truncated chunk that decoded partially reads as a
@@ -718,10 +853,6 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 			if (status == KUNCOAT_OK)
 				status = r_status;
 			if (at == before) {
-				/* The chunk decoded nothing. Continuing would ask
-				 * the next record the same question with the same
-				 * answer, which is how a chain of empty chunks
-				 * becomes a decode that never ends. */
 				if (status == KUNCOAT_OK)
 					status = KUNCOAT_CORRUPT;
 				break;
@@ -730,22 +861,26 @@ enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uin
 		p += c_len;
 		if (status != KUNCOAT_OK)
 			break;
-		/*
-		 * Filling the buffer is not being refused.
-		 *
-		 * The loop condition ends the decode on its own when the output is
-		 * full, and reporting STOPPED there would call every stream that
-		 * decoded to exactly its declared length a truncated one - measured,
-		 * 251 of 256 real archives. STOPPED belongs to the case below,
-		 * where the buffer is full AND the stream has more to say.
-		 */
-		if (at >= out_cap && p < in_len && in[p] != 0) {
-			status = KUNCOAT_STOPPED;
-			break;
+	}
+
+	if (status == KUNCOAT_OK) {
+		if (at >= out_cap) {
+			/*
+			 * The buffer is full. Filling it is not being refused: it
+			 * is the whole answer when the stream ends here, with its
+			 * end byte or (a container that kept no end byte) with its
+			 * last chunk. STOPPED belongs to the case where the stream
+			 * has more chunks to say.
+			 */
+			if (p < in_len && in[p] != 0)
+				status = KUNCOAT_STOPPED;
+		} else if (!ended) {
+			status = KUNCOAT_TRUNCATED;   /* no end byte: the input ended first */
 		}
 	}
 
 	free(z.probs);
+	free(z.lit_gen);
 	if (produced)
 		*produced = at;
 	return status;

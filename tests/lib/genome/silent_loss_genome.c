@@ -219,7 +219,8 @@ static uint64_t rel_object(const char *symname)
 			p64(rel_a, at + 8, s[i].flags);
 			p64(rel_a, at + 24, s[i].off);
 			p64(rel_a, at + 32, s[i].size);
-			p32(rel_a, at + 40, i == 2u ? 3u : 0u);
+			p32(rel_a, at + 40, i == 2u ? 3u : i == 3u ? 4u : 0u);   /* sh_link: rela -> .symtab, .symtab -> its strings */
+			p32(rel_a, at + 44, i == 2u ? 1u : 0u);   /* sh_info: the section a relocation section applies to */
 			p64(rel_a, at + 56, i == 2u || i == 3u ? 24u : 0u);
 		}
 	}
@@ -256,17 +257,40 @@ static void elf_reloc_names(void)
 	CK(kgenome_elf_reloc_table(kof_buf_make(rel_a, n), &info, KGENOME_ELF_RELOC_CODE, &t) == NREL);
 	/* NOT CAPPED: every one of the 3000 relocations and call sites is kept */
 	CK(t.n == NREL);
-	CK(kgenome_elf_relcalls(kof_buf_make(rel_a, n), &info, &t, rc_cb, &seen) == NREL);
+	{
+		enum kgenome_status rst = KGENOME_BAD_INPUT;
+
+		CK(kgenome_elf_relcalls(kof_buf_make(rel_a, n), &info, &t, rc_cb, &seen, &rst) == NREL);
+		CK(rst == KGENOME_OK);                       /* nothing was cut */
+	}
 	CK(seen.n == NREL);
 	/*
-	 * KGENOME_SYMNAME_MAX elf_image.h:162 - a symbol name is handed to the visitor
-	 * cut to 63 bytes and nothing says it was cut (the visitor gets a plain
-	 * string). Every vocabulary word is shorter, so what is lost is the identity of
-	 * a symbol longer than that, e.g. a C++-mangled import.
+	 * KGENOME_SYMNAME_MAX (4096): a symbol name is handed to the visitor whole up to the same bound
+	 * as the symbol pool; past it, it is cut AND the status says so. (It was cut to 63 bytes with
+	 * no word.)
 	 */
-	KM_CHECK(seen.first_len == 100u,
-		 "a 100-byte undefined symbol is reported whole, or the cut is flagged",
-		 "KGENOME_SYMNAME_MAX elf_image.h:162 lost: the tail of a symbol name over 63 bytes");
+	CK(seen.first_len == 100u);
+	kgenome_elf_reloc_table_free(&t);
+	{
+		enum kgenome_status rst = KGENOME_OK;
+		static char big[5000];
+		const uint64_t sh = 0x16400, sym = 0x16000, str = 0x16100;
+
+		memset(big, 'z', sizeof big - 1u);
+		big[sizeof big - 1u] = 0;
+		(void)rel_object("k");
+		n = str + 0x1000u + sizeof big + 16u;        /* the file runs on past the section table */
+		memcpy(rel_a + str + 0x1000u, big, sizeof big);
+		p32(rel_a, sym + 24, 0x1000);                /* the symbol's name, far into .strtab */
+		p64(rel_a, sh + 64u * 4u + 32u, 0x6000);     /* ... which is made that long */
+		CK(kgenome_elf_image_parse(kof_buf_make(rel_a, n), &info, &obj));
+		CK(kgenome_elf_reloc_table(kof_buf_make(rel_a, n), &info, KGENOME_ELF_RELOC_CODE, &t) == NREL);
+		seen.n = 0;
+		seen.first_len = 0;
+		CK(kgenome_elf_relcalls(kof_buf_make(rel_a, n), &info, &t, rc_cb, &seen, &rst) == NREL);
+		CK(seen.first_len == KGENOME_SYMNAME_MAX - 1u);   /* cut at the bound */
+		CK(rst == KGENOME_TRUNCATED);                /* ... and said */
+	}
 	kgenome_elf_reloc_table_free(&t);
 }
 
@@ -408,9 +432,24 @@ static void pe_imports(void)
 	 * kgenome_pe_imports pe_image.c:945/987 (dll[64], name[64]) - the import name and
 	 * the library name are handed over cut to 63 bytes, status OK.
 	 */
-	KM_CHECK(seen.first_len == 100u && seen.dll_len == sizeof dll70 - 1u,
-		 "an import name and a DLL name over 63 bytes are reported whole, or a status says they were cut",
-		 "IMPORT_NAME[64] pe_image.c:987 (dll[64] :945) lost: the tail of an import or library name over 63 bytes");
+	CK(seen.first_len == 100u && seen.dll_len == sizeof dll70 - 1u && st == KGENOME_OK);   /* names over 63 bytes are reported whole */
+
+	/* names of 5000 bytes: read whole to the bound (4096), cut past it AND said */
+	pe_base(1, NULL);
+	p32(pe_a, 0x98 + 120, 0x1000);
+	p32(pe_a, 0x98 + 124, 40);
+	p32(pe_a, RAW(0x1000) + 0, 0x1100);
+	p32(pe_a, RAW(0x1000) + 12, 0x9000);         /* the library name, far away, 5000 bytes */
+	p32(pe_a, RAW(0x1000) + 16, 0x1300);
+	memset(pe_a + RAW(0x9000), 'd', 5000);
+	p64(pe_a, RAW(0x1100), 0x1400);
+	p64(pe_a, RAW(0x1300), 0x1400);
+	memset(pe_a + RAW(0x1400) + 2, 'f', 5000);
+	CK(pe_parse());
+	memset(&seen, 0, sizeof seen);
+	CK(kgenome_pe_imports(kof_buf_make(pe_a, sizeof pe_a), &pe_info, im_cb, &seen, &st) == 1u);
+	CK(seen.first_len == 4095u && seen.dll_len == 4095u);
+	CK(st == KGENOME_TRUNCATED);
 
 	/* --- the total thunk budget: 256 descriptors over one 4096-thunk table ---- */
 	pe_base(1, NULL);
@@ -478,9 +517,7 @@ static void pe_layout_order(void)
 	pe_base(3, sec);
 	n = kgenome_pe_layout_of(kof_buf_make(pe_a, sizeof pe_a), out, 8, &entry, &base, NULL);
 	CK(n >= 1u);
-	KM_CHECK(n == 3u,
-		 "a section whose RVA is below the previous section's end is still declared, or the cut is signalled",
-		 "PE_LAYOUT_ORDER pe_rebuild.c:438 lost: every section after an out-of-address-order entry of a produced image's table");
+	CK(n == 3u && out[0].rva == 0x1000u && out[1].rva == 0x2000u && out[2].rva == 0x3000u);   /* an out-of-order table is sorted, not cut */
 }
 
 /* ======================================================================== *
@@ -509,15 +546,20 @@ static void funcs_remap(void)
 	CK(out.n == 2u && out.status == KGENOME_OK);
 	kgenome_funcs_free(&out);
 
-	/* the second function sits further past the first than REMAP_SLACK (4096) +
-	 * its length: it is not in the view's set, and the set says nothing about it */
+	/* the second function sits further past the first than the old fixed slack (4096) + its
+	 * length, but not further than it did in the parent: found */
 	memset(view, 0x5a, sizeof view);
 	memcpy(view, par, 64);
 	memcpy(view + 9000, par + 10000, 64);
 	kgenome_funcs_remap(par, sizeof par, &pf, view, sizeof view, &out);
-	KM_CHECK(out.n == 2u || out.status != KGENOME_OK,
-		 "every function of the parent that the view still holds is listed, or a status says the search was cut",
-		 "REMAP_SLACK funcs.c:113 lost: a function more than 4096 bytes past the previous one in the view");
+	CK(out.n == 2u && out.status == KGENOME_OK);   /* the window is the parent's own distance: no 4096 wall */
+	kgenome_funcs_free(&out);
+
+	/* a function the view does not hold (cut as library) is absent, not a cut search */
+	memset(view, 0x5a, sizeof view);
+	memcpy(view, par, 64);
+	kgenome_funcs_remap(par, sizeof par, &pf, view, sizeof view, &out);
+	CK(out.n == 1u && out.status == KGENOME_OK);
 	kgenome_funcs_free(&out);
 }
 
@@ -602,7 +644,7 @@ static void xref_tables(void)
  * region as U - so U's reference is read as a startup reference. No status, and
  * kgenome_xref_full stays 0 (it only knows USE_MAX).
  */
-static void xref_region_cap(unsigned rets, uint32_t *flags_out)
+static void xref_region_cap(unsigned rets, uint32_t *flags_out, int *full_out)
 {
 	static uint8_t code[8192];
 	struct kgenome_xref *u = kgenome_xref_new();
@@ -619,23 +661,24 @@ static void xref_region_cap(unsigned rets, uint32_t *flags_out)
 	CK(kgenome_xref_startup(u, CODE_VA + t_at));
 	xref_feed(u, code, n, CODE_VA);
 	*flags_out = kgenome_xref_in(u, DATA_VA, 8);
-	CK(kgenome_xref_full(u) == 0);
+	*full_out = kgenome_xref_full(u);
 	kgenome_xref_free(u);
 }
 
 static void xref_regions(void)
 {
 	uint32_t few = 0, many = 0;
+	int few_full = 0, many_full = 0;
 
-	xref_region_cap(5, &few);
-	xref_region_cap(80, &many);
+	xref_region_cap(5, &few, &few_full);
+	xref_region_cap(80, &many, &many_full);
+	CK(few_full == 0);          /* nothing merged: the sweep is complete */
+	CK(many_full == 1);         /* 80 regions: the merge is reported */
 	/* the control: with few regions U is plainly user code */
 	CK(few & KGENOME_XREF_CALL);
 	CK(few & KGENOME_XREF_USER);
 	CK(many & KGENOME_XREF_CALL);
-	KM_CHECK((many & KGENOME_XREF_USER) != 0,
-		 "code outside the startup set that executes a variable is flagged USER, or the sweep says its regions overflowed",
-		 "USE_RGN xref.c:52 lost: the USER fact for code past the 64th region (merged into the startup region), no kgenome_xref_full");
+	CK((many & KGENOME_XREF_USER) != 0 || many_full);   /* code outside the startup set that executes a variable is flagged USER, or the sweep says its regions overflowed */
 }
 
 /* ======================================================================== *
@@ -724,9 +767,7 @@ static void emu_ranges(void)
 			kgenome_emu_hop_add(e, STAGE + 0x1000ull * k, STAGE + 0x1000ull * k + 0x1000u, 0);
 		CK(kgenome_emu_run(e) == KGENOME_EMU_STOP_EXIT);
 		kgenome_emu_last_hop(e, &rip, &hops);
-		KM_CHECK(hops == 20u,
-			 "every stage the run enters is a hop (snapshot), or the table's overflow is signalled",
-			 "KGENOME_EMU_EXEC_WATCH emu_api.c:502 lost: hop ranges past the 16th (a PE with >16 sections, a run that makes >16 mappings)");
+		CK(hops == 20u);   /* every stage the run enters is a hop (snapshot), or the table's overflow is signalled */
 		kgenome_emu_free(e);
 	}
 	e = emu_chain(16);
@@ -745,9 +786,7 @@ static void emu_ranges(void)
 		for (k = 0; k < 16u; k++)
 			kgenome_emu_watch_exec(e, 0x900000ull + 0x1000ull * k, 0x900000ull + 0x1000ull * k + 0x1000u);
 		kgenome_emu_watch_exec(e, STAGE + 0x1000u, STAGE + 0x2000u);
-		KM_CHECK(kgenome_emu_run(e) == KGENOME_EMU_STOP_HANDOFF,
-			 "a watched range past the 16th still stops the run at the handover, or the declaration is refused visibly",
-			 "KGENOME_EMU_EXEC_WATCH emu_private.h:151 lost: exec-watch ranges past the 16th (hollow sections of a packed PE)");
+		CK(kgenome_emu_run(e) == KGENOME_EMU_STOP_HANDOFF);   /* a watched range past the 16th still stops the run at the handover, or the declaration is refused visibly */
 		kgenome_emu_free(e);
 	}
 
@@ -777,9 +816,7 @@ static void emu_ranges(void)
 				kgenome_emu_watch_write(e, 0x900000ull + 0x1000ull * k, 0x900000ull + 0x1000ull * k + 0x1000u);
 			kgenome_emu_watch_write(e, 0x700000, 0x701000);
 			(void)kgenome_emu_run(e);
-			KM_CHECK(kgenome_emu_write_seen(e) != 0,
-				 "a write into a watched range past the 16th is seen, or the declaration is refused visibly",
-				 "KGENOME_EMU_EXEC_WATCH emu_private.h:151 lost: write-watch ranges past the 16th");
+			CK(kgenome_emu_write_seen(e) != 0);   /* a write into a watched range past the 16th is seen, or the declaration is refused visibly */
 			kgenome_emu_free(e);
 		}
 		/* the control: the same range as the only watch is seen */
@@ -817,9 +854,7 @@ static void emu_insn_watch(void)
 
 		kgenome_emu_watch_insn(e, &nop, 1);      /* the ninth pattern */
 	}
-	KM_CHECK(kgenome_emu_run(e) == KGENOME_EMU_STOP_INSN,
-		 "the ninth instruction pattern pauses the run, or the declaration is refused visibly",
-		 "KGENOME_EMU_INSN_WATCH emu_api.c:577 lost: instruction patterns past the 8th (void return)");
+	CK(kgenome_emu_run(e) == KGENOME_EMU_STOP_INSN);   /* the ninth instruction pattern pauses the run, or the declaration is refused visibly */
 	kgenome_emu_free(e);
 	/* the control: the same pattern as the only one pauses the run */
 	e = emu_with(code, n);
@@ -873,10 +908,7 @@ static void emu_snapshots(void)
 	CK(kgenome_emu_run(e) == KGENOME_EMU_STOP_EXIT);
 	while (kgenome_emu_next_snapshot(e, &it, &va, &bytes, &len))
 		got++;
-	CK(got == KGENOME_EMU_MAX_SNAP);
-	KM_CHECK(got == 70u,
-		 "every page the run wrote and then made executable has a snapshot, or the overflow is signalled",
-		 "KGENOME_EMU_MAX_SNAP emu_api.c:630 lost: snapshots past the 64th (the unpacked payload of a stub that mprotects X many times)");
+	CK(got == 70u);   /* every page the run wrote and then made executable has a snapshot, or the overflow is signalled */
 	kgenome_emu_free(e);
 }
 
@@ -943,8 +975,9 @@ static void emu_pages(void)
 	kgenome_emu_free(e);
 }
 
-/* KGENOME_EMU_MAX_VMA (1024): after it mmap says ENOMEM to the guest and to nobody else. */
-static void emu_vma_run(unsigned count, uint64_t *refused, int *said)
+/* The live-mapping ceiling (the page budget, 1024 at the least): past it mmap says ENOMEM to the guest and
+ * kgenome_emu_hit() says it to the caller. */
+static void emu_vma_run(unsigned count, uint64_t *refused, int *said, unsigned *hit)
 {
 	/* r13d = count ; L: mmap(0,0x1000,PROT_READ,MAP_PRIVATE|ANON,-1,0) ; test rax,rax ;
 	 * jns +3 ; inc r12 ; dec r13 ; jnz L ; mov rdi,r12 ; mov eax,60 ; syscall */
@@ -975,6 +1008,7 @@ static void emu_vma_run(unsigned count, uint64_t *refused, int *said)
 	p32(code, 5, count);
 	*refused = 0;
 	*said = 0;
+	*hit = 0;
 	e = emu_with(code, sizeof code);
 	CK(e != NULL);
 	if (!e)
@@ -983,21 +1017,25 @@ static void emu_vma_run(unsigned count, uint64_t *refused, int *said)
 	*refused = kgenome_emu_get_reg(e, KGENOME_EMU_RDI);
 	*said = st != KGENOME_EMU_STOP_EXIT || kgenome_emu_unknown_syscalls(e, unk, 8) > 0u ||
 		kgenome_emu_unhandled(e) > 0u;
+	*hit = kgenome_emu_hit(e);
 	kgenome_emu_free(e);
 }
 
 static void emu_vma(void)
 {
-	uint64_t few, many;
-	int said_few, said_many;
+	uint64_t few, many, flood;
+	int said_few, said_many, said_flood;
+	unsigned hit_few, hit_many, hit_flood;
 
-	emu_vma_run(100, &few, &said_few);
-	emu_vma_run(1100, &many, &said_many);
-	CK(few == 0u);                               /* the control: 100 mappings all succeed */
-	CK(many > 0u);                               /* the ceiling is real: it did refuse */
-	KM_CHECK(many == 0u || said_many,
-		 "an mmap refused for the live-mapping ceiling is visible to the caller, not only to the guest",
-		 "KGENOME_EMU_MAX_VMA emu_mem.c:142 lost: mappings past 1024 are refused (ENOMEM to the guest) with a clean EXIT and no counter");
+	emu_vma_run(100, &few, &said_few, &hit_few);
+	emu_vma_run(1100, &many, &said_many, &hit_many);
+	/* more mappings than the page budget could ever commit: the ceiling is real and says so */
+	emu_vma_run(KGENOME_EMU_DEF_PAGES + 300u, &flood, &said_flood, &hit_flood);
+	CK(few == 0u && hit_few == 0u);              /* the control: 100 mappings all succeed */
+	CK(many == 0u && hit_many == 0u);            /* the ceiling scales with the page budget: 1100 is fine */
+	CK(flood > 0u);                              /* past the budget it refuses ... */
+	CK((hit_flood & KGENOME_EMU_HIT_VMA) != 0u); /* ... and the caller can read that */
+	(void)said_few; (void)said_many; (void)said_flood;
 }
 
 /* The fake kernel32's export list: KGENOME_EMU_UNP_K32_MAX_EXPORTS (192) is a cap on
@@ -1140,26 +1178,74 @@ static unsigned org_stack_run(unsigned depth, int *linked)
 	return n * 8u + (unsigned)st;                /* status folded in: 0 == whole */
 }
 
+/* The OLDEST origin is the one a deep stack loses: [mmap] push rax ; push rcx x depth ; pop rcx x depth ;
+ * pop rsi ; read. Past the ring the link cannot be made, and the scan says so. */
+static unsigned org_stack_bottom(unsigned depth, int *linked)
+{
+	static const uint8_t mm[] = {
+		0x31, 0xff, 0xbe, 0x00, 0x10, 0, 0, 0xba, 7, 0, 0, 0, 0x41, 0xba, 0x22, 0, 0, 0,
+		0x49, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x45, 0x31, 0xc9, 0xb8, 9, 0, 0, 0, 0x0f, 0x05
+	};
+	static const uint8_t rd[] = { 0x5e, 0x31, 0xff, 0xba, 0x00, 0x01, 0, 0, 0x31, 0xc0, 0x0f, 0x05, 0xc3 };
+	uint64_t at = 0x100;
+	struct kgenome_diag_scan *s;
+	const struct kgenome_diag_hit *a, *r;
+	unsigned i, st;
+
+	memset(dimg, 0, sizeof dimg);
+	memcpy(dimg + at, mm, sizeof mm);
+	at += sizeof mm;
+	dimg[at++] = 0x50;                           /* push rax - the mmap's result, at the bottom */
+	for (i = 0; i < depth; i++)
+		dimg[at++] = 0x51;                   /* push rcx */
+	for (i = 0; i < depth; i++)
+		dimg[at++] = 0x59;                   /* pop rcx */
+	memcpy(dimg + at, rd, sizeof rd);
+	at += sizeof rd;
+	s = dscan(at);
+	*linked = -1;
+	if (!s)
+		return 99;
+	a = find_cap(s, KGENOME_NUCLEO_ALLOC_EXEC);
+	if (!a)
+		a = find_cap(s, KGENOME_NUCLEO_ALLOC);
+	r = find_cap(s, KGENOME_NUCLEO_MEM_READ);
+	*linked = a && r && linked_from(r, 0);
+	st = (unsigned)kgenome_diag_scan_status(s);
+	kgenome_diag_scan_free(s);
+	return st;
+}
+
 static void diag_origin_stack(void)
 {
 	int near_l = 0, deep_l = 0;
-	unsigned near_s, deep_s;
+	unsigned near_s;
 
 	near_s = org_stack_run(3, &near_l);
-	deep_s = org_stack_run(40, &deep_l);
+	(void)org_stack_run(40, &deep_l);
 	CK(near_l == 1);                             /* the control: the link is made */
 	CK(near_s % 8u == 0u);
 	{
 		int edge = 0;
+		unsigned st_edge;
 
 		(void)org_stack_run(31, &edge);          /* the 32nd slot (index 31) still holds it */
 		CK(edge == 1);
-		(void)org_stack_run(32, &edge);          /* the 33rd (index 32) does not */
-		CK(edge == 0);
+		(void)org_stack_run(32, &edge);          /* the origin ring keeps the NEWEST pushes: the top is popped first */
+		CK(edge == 1);
+		st_edge = org_stack_run(100, &edge);     /* ... however deep the filler under it is */
+		CK(edge == 1 && st_edge % 8u == 0u);
 	}
-	KM_CHECK(deep_l == 1 || deep_s % 8u != 0u,
-		 "a value pushed and popped through a deep stack keeps its link to the producing call, or the scan says it is partial",
-		 "KGENOME_DIAG_ORG_STK diag_origin.c:74 lost: the producer link of a value pushed past the 32nd stack slot");
+	CK(deep_l == 1);   /* a value pushed and popped through a deep stack keeps its link to the producing call */
+	{
+		int bl = 0;
+		unsigned bs;
+
+		bs = org_stack_bottom(20, &bl);
+		CK(bl == 1 && bs == (unsigned)KGENOME_OK);      /* inside the ring */
+		bs = org_stack_bottom(100, &bl);
+		CK(bl == 1 || bs != (unsigned)KGENOME_OK);      /* the oldest origin fell off the ring: linked, or said */
+	}
 }
 
 
@@ -1224,11 +1310,10 @@ static int rb_rd(void *user, uint64_t va, void *dst, uint32_t n)
 }
 
 /*
- * elf_rebuild.c:155 - "A segment that cannot be read is left as the zeroes calloc gave,
- * rather than failing the whole rebuild". The rebuilt file then holds a segment of zeros
- * INSIDE the span it reports as covered (covered_lo/hi are the min and max of the
- * segments that WERE read), so a caller cannot tell the hole from content. Reported
- * [Inference] as low severity: the guest memory the read failed on was never mapped.
+ * elf_rebuild.c - "A segment that cannot be read is left as the zeroes calloc gave, rather than
+ * failing the whole rebuild". The rebuilt file declares that segment hollow (p_filesz 0), so the
+ * zeros inside the span it reports as covered (covered_lo/hi are the min and max of the segments
+ * that WERE read) are not presented as content.
  */
 static void elf_rebuild_hole(void)
 {
@@ -1272,9 +1357,10 @@ static void elf_rebuild_hole(void)
 	rb_hole_hi = 0x401100;                       /* the middle segment cannot be read */
 	rc = kgenome_elf_rebuild(0x400000, rb_rd, NULL, 0, &out, &len, &lo, &hi);
 	CK(rc == 1 && out && len == 0x2100u);
-	KM_CHECK(!(rc == 1 && out && out[0x1000] == 0u && lo <= 0x401000u && hi >= 0x401100u),
-		 "a segment that could not be read back is not presented as zero bytes inside the covered span",
-		 "elf_rebuild.c:155 lost: the contents of a PT_LOAD the emulated memory could not be read for (zero-filled, covered range still spans it) [Inference: low]");
+	/* the unreadable segment is DECLARED hollow (p_filesz 0), not zero-filled content: segment 1's
+	 * header is at 64 + 56, its p_filesz at +0x20; the readable ones keep theirs */
+	CK(out && kof_ld_le64(out + 64 + 56 * 1 + 0x20) == 0u);
+	CK(out && kof_ld_le64(out + 64 + 56 * 0 + 0x20) == 0x200u && kof_ld_le64(out + 64 + 56 * 2 + 0x20) == 0x100u);
 	free(out);
 }
 
@@ -1369,7 +1455,8 @@ static uint64_t kmod_build(unsigned n_fill, unsigned fill_sym, uint64_t *len_out
 			p64(kmod, at + 8, t[i].flags);
 			p64(kmod, at + 24, t[i].off);
 			p64(kmod, at + 32, t[i].size);
-			p32(kmod, at + 40, i == 3u ? 4u : 0u);
+			p32(kmod, at + 40, i == 3u ? 4u : i == 2u ? 3u : 0u);
+			p32(kmod, at + 44, i == 2u ? 1u : 0u);    /* sh_info: .rela.text applies to .text */
 			p64(kmod, at + 56, i == 3u ? 24u : 0u);
 		}
 	}
@@ -1421,17 +1508,13 @@ static void diag_rel_tables(void)
 	CK(st == (unsigned)KGENOME_OK);
 
 	/*
-	 * KGENOME_DIAG_REL_SEEN (64) diag_emu_sites.c:395,464: one span remembers 64
-	 * (value, node) pairs. The 65th producer of a function is not remembered, so a
-	 * consumer that reads its result back through memory is not linked to it - and
-	 * nothing says the table was full. (The 64th still is: the boundary below.)
+	 * KGENOME_DIAG_REL_SEEN (64): the remembered-values table of a span starts at 64 pairs and grows
+	 * with the function, so the 65th producer is linked like the 64th.
 	 */
 	st = kmod_run(62, 1, &lin, &nodes);
 	CK(lin == 1 && st == (unsigned)KGENOME_OK);
 	st = kmod_run(64, 1, &lin, &nodes);
-	KM_CHECK(lin == 1 || st != (unsigned)KGENOME_OK,
-		 "a value produced by the 65th call of a function and read back through memory is linked to its producer, or the scan says it is partial",
-		 "KGENOME_DIAG_REL_SEEN diag_emu_sites.c:464 lost: the link from any producer past the 64th value remembered in one function (relocatable object)");
+	CK(lin == 1 && st == (unsigned)KGENOME_OK);   /* the 65th producer of a function is linked like the 64th */
 
 	/*
 	 * KGENOME_DIAG_TOK_SPAN (256) diag_emu_sites.c:457: a token is a page of the arena
@@ -1444,11 +1527,9 @@ static void diag_rel_tables(void)
 	st = kmod_run(254, 2, &lin, &nodes);
 	CK(lin == 1 && st == (unsigned)KGENOME_OK);
 	st = kmod_run(256, 2, &lin, &nodes);
-	CK(lin == 0 && st == (unsigned)KGENOME_OK);
+	CK(lin == 1 && st == (unsigned)KGENOME_OK);    /* the arena follows the node count: no page-256 wall */
 	st = kmod_run(300, 2, &lin, &nodes);
-	KM_CHECK(lin == 1 || st != (unsigned)KGENOME_OK,
-		 "a value produced by node 300 and read back through memory is linked to its producer, or the scan says it is partial",
-		 "KGENOME_DIAG_TOK_SPAN diag_emu_sites.c:457 lost: the link from any producer whose node index is >= 256 (relocatable object)");
+	CK(lin == 1 && st == (unsigned)KGENOME_OK);   /* a value produced by node 300 and read back through memory is linked to its producer, or the scan says it is partial */
 }
 
 
@@ -1503,29 +1584,65 @@ static void diag_pe_resolve(void)
 	CK(st == (unsigned)KGENOME_OK);
 
 	/*
-	 * PEB_TTL (8) diag_apihash.c:59 - the load of PEB.Ldr must follow the PEB read
-	 * within 8 instructions or the walk is not recognised and the resolver is not
-	 * run. `nop`s between them are all it takes, and nothing says a PEB read was
-	 * seen and not followed: the scan is whole and has no self-resolve node.
+	 * The window of the PEB pointer is the pointer's own life, not a count: padding of any length
+	 * between the read and the load does not hide the walk, and the walk is not seen where the
+	 * register no longer holds the PEB (overwritten) or the straight line ends (ret).
 	 */
-	for (pad = 0; pad < 8u; pad += 7u) {
+	for (pad = 0; pad <= 100u; pad += pad < 8u ? 7u : pad < 12u ? 4u : 88u) {
 		n = 0;
 		memcpy(code + n, peb, sizeof peb);   n += sizeof peb;
 		memset(code + n, 0x90, pad);         n += pad;
 		memcpy(code + n, ldr, sizeof ldr);   n += sizeof ldr;
 		code[n++] = 0xc3;
 		st = pe_resolve_run(code, n, &self);
-		CK(self == 1u);                  /* within the window: still found */
+		CK(self == 1u);                  /* 0, 7, 11, 99: still found */
+		CK(st == (unsigned)KGENOME_OK);
 	}
-	n = 0;
-	memcpy(code + n, peb, sizeof peb);   n += sizeof peb;
-	memset(code + n, 0x90, 12);          n += 12;
-	memcpy(code + n, ldr, sizeof ldr);   n += sizeof ldr;
-	code[n++] = 0xc3;
-	st = pe_resolve_run(code, n, &self);
-	KM_CHECK(self == 1u || st != (unsigned)KGENOME_OK,
-		 "a PEB read followed by the Ldr load 12 instructions later is a self-resolving program, or the scan says it did not look further",
-		 "PEB_TTL diag_apihash.c:59 lost: the self-resolve node of a program that pads more than 8 instructions between the PEB read and the Ldr load");
+	{
+		static const uint8_t clobber[] = { 0x48, 0xc7, 0xc0, 1, 0, 0, 0 };     /* mov rax, 1 */
+
+		n = 0;
+		memcpy(code + n, peb, sizeof peb);       n += sizeof peb;
+		memcpy(code + n, clobber, sizeof clobber); n += sizeof clobber;
+		memcpy(code + n, ldr, sizeof ldr);       n += sizeof ldr;
+		code[n++] = 0xc3;
+		st = pe_resolve_run(code, n, &self);
+		CK(self == 0u);                  /* the pointer was overwritten: not the PEB any more */
+		n = 0;
+		memcpy(code + n, peb, sizeof peb);       n += sizeof peb;
+		code[n++] = 0xc3;                        /* the function returns: the load is another function's */
+		memcpy(code + n, ldr, sizeof ldr);       n += sizeof ldr;
+		code[n++] = 0xc3;
+		st = pe_resolve_run(code, n, &self);
+		CK(self == 0u);
+	}
+	{
+		/* an unoptimised build spills the PEB pointer and reloads it: still the loader walk */
+		static const uint8_t spill[] = { 0x48, 0x89, 0x44, 0x24, 0x48 };   /* mov [rsp+0x48], rax */
+		static const uint8_t fill[] = { 0x48, 0x8b, 0x44, 0x24, 0x48 };    /* mov rax, [rsp+0x48] */
+
+		n = 0;
+		memcpy(code + n, peb, sizeof peb);       n += sizeof peb;
+		memcpy(code + n, spill, sizeof spill);   n += sizeof spill;
+		memset(code + n, 0x90, 20);              n += 20;
+		memcpy(code + n, fill, sizeof fill);     n += sizeof fill;
+		memcpy(code + n, ldr, sizeof ldr);       n += sizeof ldr;
+		code[n++] = 0xc3;
+		st = pe_resolve_run(code, n, &self);
+		CK(self == 1u);
+		/* ... and the spilled slot overwritten first is not the PEB any more */
+		n = 0;
+		memcpy(code + n, peb, sizeof peb);       n += sizeof peb;
+		memcpy(code + n, spill, sizeof spill);   n += sizeof spill;
+		code[n++] = 0x48; code[n++] = 0xc7; code[n++] = 0x44; code[n++] = 0x24; code[n++] = 0x48;
+		code[n++] = 0; code[n++] = 0; code[n++] = 0; code[n++] = 0;      /* mov qword [rsp+0x48], 0 */
+		code[n++] = 0x48; code[n++] = 0x31; code[n++] = 0xc0;            /* xor rax, rax */
+		memcpy(code + n, fill, sizeof fill);     n += sizeof fill;
+		memcpy(code + n, ldr, sizeof ldr);       n += sizeof ldr;
+		code[n++] = 0xc3;
+		st = pe_resolve_run(code, n, &self);
+		CK(self == 0u);
+	}
 
 	/*
 	 * A run that ends in a FAULT (the guest dereferences null after the walk) sets no
@@ -1614,9 +1731,7 @@ static void emu_pe_sections(void)
 		if (nsec == 16u)
 			CK(hops == 15u);                     /* every section but the entry's */
 		else
-			KM_CHECK(hops == nsec - 1u,
-				 "every section a packed PE's run enters is a hop stage (snapshot), or the table's overflow is signalled",
-				 "KGENOME_EMU_EXEC_WATCH emu_unpack_pe.c:375 lost: hop stages of sections past the 16th of a PE ([Inference] a PE with debug sections can exceed 16)");
+			CK(hops == nsec - 1u);   /* every section a packed PE's run enters is a hop stage (snapshot), or the table's overflow is signalled */
 		kgenome_emu_free(em);
 	}
 }
@@ -1685,7 +1800,8 @@ static unsigned klk_run(unsigned len, uint32_t *kept, uint32_t *refused)
 			p64(kmod, at + 8, t[i].flags);
 			p64(kmod, at + 24, t[i].off);
 			p64(kmod, at + 32, t[i].size);
-			p32(kmod, at + 40, i == 3u ? 4u : 0u);
+			p32(kmod, at + 40, i == 3u ? 4u : i == 2u ? 3u : 0u);
+			p32(kmod, at + 44, i == 2u ? 1u : 0u);    /* sh_info: .rela.text applies to .text */
 			p64(kmod, at + 56, i == 3u ? 24u : 0u);
 		}
 	}
@@ -1720,9 +1836,7 @@ static void diag_guest_name(void)
 	 * kgenome_diag_str_add is refused AND said.)
 	 */
 	st = klk_run(300, &kept, &refused);
-	KM_CHECK(kept == 1u || refused > 0u || st != (unsigned)KGENOME_OK,
-		 "a 300-byte name handed to a kernel resolver is kept, or refused and counted, or the scan says it is partial",
-		 "KGENOME_DIAG_STR_MAX diag_emu_image.c:88 lost: a name over 256 bytes read from the emulated guest (no refused count, no status; kgenome_diag_str_add itself does report)");
+	CK(refused > 0u && st == (unsigned)KGENOME_TRUNCATED);   /* a 300-byte name handed to a kernel resolver is refused, counted and said */
 }
 
 int main(void)

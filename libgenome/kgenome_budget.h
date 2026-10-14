@@ -27,6 +27,7 @@
  * a global allowance overrides max_bytes afterwards.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "kgenome_status.h"
@@ -46,6 +47,23 @@ struct kgenome_budget {
 	/* ---- what an honest object of this size needs: scaled ---------------- */
 	uint32_t max_nodes;     /* nodes of the diagnose graph                       */
 	uint32_t max_names;     /* distinct names kept                               */
+	/*
+	 * THE CALLER'S MEMORY ACCOUNT FOR THE EMULATOR (kgenome_emu_cfg.account), for the
+	 * entry points that build one from a budget (the unpack runs). Asked for bytes
+	 * before they are taken, told (a negative delta) what is given back. NULL
+	 * accounts nothing. APPENDED: a caller that zeroes the struct gets no account.
+	 */
+	int      (*account)(void *user, int64_t bytes);
+	void      *account_user;
+	/*
+	 * THE CALLER'S ACCOUNT OF EMULATED INSTRUCTIONS. When set, every emulator this
+	 * call builds adds the instructions it executed to `*insn_spent` as it is freed,
+	 * so a caller that holds ONE allowance for many calls (the engine: a whole tree of
+	 * objects) reads what a call cost without the lib knowing the allowance. A run's
+	 * own limit stays max_insn / max_insn_resolve; the caller sets those to what its
+	 * allowance has left. APPENDED: a zeroed struct accounts nothing.
+	 */
+	uint64_t  *insn_spent;
 };
 
 /*
@@ -103,6 +121,9 @@ static inline void kgenome_budget_default(struct kgenome_budget *b, uint64_t obj
 	b->obj_size = obj_size;
 	b->code_bytes = code;
 	b->deadline_ms = 0;
+	b->account = NULL;
+	b->account_user = NULL;
+	b->insn_spent = NULL;
 	n = code / 8u;
 	b->max_nodes = n < KGENOME_NODES_MIN ? KGENOME_NODES_MIN
 		     : n > KGENOME_MAX_INDEX ? KGENOME_MAX_INDEX : (uint32_t)n;

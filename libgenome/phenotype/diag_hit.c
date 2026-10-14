@@ -214,9 +214,10 @@ void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *
 	 * FOUR INPUTS A NODE - a read has two that matter (the buffer and the
 	 * descriptor) and nothing measured has needed more than three. A fifth
 	 * DISTINCT link is not kept and is not silent: it sets KGENOME_TRUNCATED.
-	 * The slot count is not raised because the graph block the modules read
-	 * (kofdiagtree.h, KOF_GR_IN_MAX) has four, and a fifth kept here would be
-	 * cut there without a word - a limit moved to a boundary nobody reads.
+	 * The graph block the modules read (kofdiagtree.h) holds two links a record
+	 * (KOF_GR_IN_FIT); kof_diag_graph_build writes the first two of a node's and
+	 * notes the cut on the scan, so a node's third and fourth input are in this
+	 * scan and not in the block - said, not dropped at the boundary.
 	 * This test used to come first, so a repeat of a link was refused as
 	 * "full" on a node that was; it now says "full" only for a real fifth.
 	 */

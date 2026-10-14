@@ -228,8 +228,7 @@ static int buffered_size(struct kof_scanner *sc, uint64_t out_hint,
 			/* The tail will not fit and will be dropped. Sticky only
 			 * when it was residency that ran out. */
 			if (by_policy) {
-				capped = 1;
-				oc_scan_capped(sc, KOF_BROKEN_LIMIT);
+				capped = 1;     /* said once the output is in the sink: buffered_cut */
 			} else {
 				oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 			}
@@ -241,9 +240,8 @@ static int buffered_size(struct kof_scanner *sc, uint64_t out_hint,
 }
 
 /* STEP 2: the ratio clamp, settled before anything is taken. */
-static void buffered_ratio_clamp(struct kof_scanner *sc, uint32_t method,
-				 uint64_t in_len, uint64_t out_hint,
-				 struct bufrun *r)
+static void buffered_ratio_clamp(uint32_t method, uint64_t in_len,
+				 uint64_t out_hint, struct bufrun *r)
 {
 	uint64_t want = r->want;
 	int capped = r->capped;
@@ -277,8 +275,7 @@ static void buffered_ratio_clamp(struct kof_scanner *sc, uint32_t method,
 
 		if (want > lim) {
 			want = lim;
-			capped = 1;
-			oc_scan_capped(sc, KOF_BROKEN_LIMIT);
+			capped = 1;     /* said once the output is in the sink: buffered_cut */
 		}
 	}
 	r->want = want;
@@ -552,12 +549,10 @@ static void buffered_note(struct kof_scanner *sc, enum kuncoat_status st,
 	if (st != KUNCOAT_OK) {
 		uint32_t why = oc_broken_of_status(st);
 
-		/* A buffer the ratio clamp sized, filled: this stream was cut
-		 * short and the next one is unaffected. Recorded, not sticky -
-		 * see oc_scan_capped. */
-		if (capped && why == KOF_BROKEN_LIMIT)
-			oc_scan_capped(sc, why);
-		else
+		/* A buffer the ratio clamp or the object cap sized, filled: this
+		 * stream was cut short and the next one is unaffected. Said on the
+		 * entry by buffered_cut, not sticky. */
+		if (!(capped && why == KOF_BROKEN_LIMIT))
 			oc_scan_broken(sc, why);
 	}
 }
@@ -663,6 +658,23 @@ static uint64_t buffered_deliver(struct kof_scanner *sc,
 	return at == produced ? decoded : at;
 }
 
+/*
+ * A BUFFER THE OBJECT CAP OR THE RATIO CLAMP SIZED: the entry is cut, and says so on
+ * its own child (oc_entry_cut) rather than stopping the walk. Said whether or not the
+ * stream would have fitted, as the clamp always did (it cannot know). A peek is no
+ * entry - it reads a header for its caller - so it keeps the old non-sticky mark on
+ * the object.
+ */
+static void buffered_cut(struct kof_scanner *sc, const struct bufrun *r, int peek)
+{
+	if (!r->capped)
+		return;
+	if (peek)
+		oc_scan_capped(sc, KOF_BROKEN_LIMIT);
+	else
+		oc_entry_cut(sc);
+}
+
 uint64_t oc_unpack_buffered(struct kof_scanner *sc,
 			    const struct kof_obj_ctx *ctx,
 			    const struct oc_buf_req *q)
@@ -679,13 +691,19 @@ uint64_t oc_unpack_buffered(struct kof_scanner *sc,
 
 	if (!buffered_size(sc, out_hint, &r))
 		return 0;
-	buffered_ratio_clamp(sc, method, in_len, out_hint, &r);
-	if (!buffered_place(sc, in, in_len, peek_out, &r))
+	buffered_ratio_clamp(method, in_len, out_hint, &r);
+	if (!buffered_place(sc, in, in_len, peek_out, &r)) {
+		buffered_cut(sc, &r, peek_out != NULL);
 		return 0;
-	if (!buffered_coding(sc, q, &r, &st, &produced))
+	}
+	if (!buffered_coding(sc, q, &r, &st, &produced)) {
+		buffered_cut(sc, &r, peek_out != NULL);
 		return 0;
+	}
 	buffered_note(sc, st, out_hint, &r);
-	return buffered_deliver(sc, ctx, &r, produced, peek_out, peek_cap);
+	produced = buffered_deliver(sc, ctx, &r, produced, peek_out, peek_cap);
+	buffered_cut(sc, &r, peek_out != NULL);
+	return produced;
 }
 
 /*

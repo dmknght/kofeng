@@ -104,16 +104,10 @@ uint8_t *ksb_read_whole(const char *path, size_t cap, size_t *out_len)
 
 int ksb_write_file(const char *path, const uint8_t *data, size_t len)
 {
-	FILE *f = fopen(path, "wb");
-	size_t w;
-
-	if (!f) {
+	/* Temp in the same directory, fsync, rename: a pack that a scanner has
+	 * mapped is never truncated - see kof_write_file_atomic. */
+	if (!kof_write_file_atomic(path, data, len)) {
 		fprintf(stderr, "ksigbuilder: cannot write %s\n", path);
-		return 0;
-	}
-	w = fwrite(data, 1, len, f);
-	if (fclose(f) != 0 || w != len) {
-		fprintf(stderr, "ksigbuilder: short write to %s\n", path);
 		return 0;
 	}
 	return 1;

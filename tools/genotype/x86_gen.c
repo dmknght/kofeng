@@ -11,6 +11,12 @@
  * valid, how its size follows the prefixes - and the runtime decoder is a small
  * generic engine that reads the result.
  *
+ * THE REFERENCE IS MEASURED, NOT TRUSTED BLINDLY. Where it names an instruction wrongly the table would copy the mistake, so
+ * its answers pass through oracle_fix.h on the way in (the one place such corrections live; x86_diff.c reads it too), and
+ * what it says about which registers may coincide is measured by probes that are built not to collide for a reason that has
+ * nothing to do with the opcode (a gather's index, a vvvv that is not in use: probe(), probe_dist(), heal_collisions()).
+ * tests/lib/genome/diff_decode_cover.c is what finds the next mistake: it runs the decoder's encodings through objdump.
+ *
  * THIS IS A DEVELOPMENT TOOL. It links the reference decoder; the decoder that
  * ships does not, and nothing here runs at scan time. The output is checked in.
  * It is re-run only when the table layout changes, and the differential check
@@ -24,6 +30,7 @@
 #include <stdint.h>
 
 #include "bddisasm.h"
+#include "oracle_fix.h"
 
 /* Variant axes of one opcode root. Collapsed or split as the data says. */
 #define NPP   4     /* none, 66, F3, F2                                   */
@@ -274,7 +281,7 @@ static void extract(const INSTRUX *ix, struct rec *r)
 
 	memset(r, 0, sizeof *r);
 	r->valid = 1;
-	r->id = (uint16_t)ix->Instruction;
+	r->id = (uint16_t)oracle_fix_id(ix);
 	r->nops = (uint8_t)ix->OperandsCount;
 	r->has_modrm = ix->HasModRm;
 	r->cond = (uint8_t)ix->Condition;
@@ -285,7 +292,8 @@ static void extract(const INSTRUX *ix, struct rec *r)
 	r->cat = (uint16_t)ix->Category;
 	r->hs = ix->HasSib;
 	r->repeated = ix->IsRepeated;
-	r->mnem = mnem_ix(ix->Mnemonic);
+	/* A corrected identity takes the mnemonic of the instruction it now is. */
+	r->mnem = mnem_ix(r->id == (uint16_t)ix->Instruction ? ix->Mnemonic : insn_name[r->id]);
 	r->pf = (uint8_t)((ix->IsRepEnabled ? 1 : 0) | (ix->IsRepcEnabled ? 2 : 0) |
 			  (ix->IsBndEnabled ? 4 : 0) | (ix->IsXacquireEnabled ? 8 : 0) |
 			  (ix->IsXreleaseEnabled ? 16 : 0) | (ix->HasSae ? 32 : 0) | (ix->HasEr ? 64 : 0));
@@ -378,6 +386,29 @@ static int probe(int mode, int map, unsigned opc, int pp, int osz, int asz,
 			s = NdDecodeEx(&ix, b, 16, cd, dd);
 		}
 		g_vforce = -1;
+	}
+	if (!ND_SUCCESS(s) && SP != SP_LEGACY && (modrm >> 6) != 3u && (modrm & 7u) == 4u && g_sib < 0 &&
+	    g_vforce < 0) {
+		/*
+		 * A GATHER'S INDEX IS A VECTOR REGISTER THE SIB BYTE NAMES, and the probe's default SIB
+		 * byte (zero) names register 0 - which is also the mask register of a gather whose vvvv
+		 * is 1111b ("not in use", register 0), and the reg field of every probe with reg 0. The
+		 * reference refuses a gather whose destination, index and mask are not three different
+		 * registers, so those probes read "invalid" for a reason that has nothing to do with the
+		 * opcode, and the table said that a gather with vvvv = 1111b is not an instruction at all.
+		 * It is one: try the other index registers before calling it invalid.
+		 */
+		const unsigned reg = (modrm >> 3) & 7u;
+		int cand;
+
+		for (cand = 1; cand < 8 && !ND_SUCCESS(s); cand++) {
+			if ((unsigned)cand == reg)
+				continue;
+			g_sib = cand << 3;
+			build(b, mode, &v, map, opc, modrm);
+			s = NdDecodeEx(&ix, b, 16, cd, dd);
+		}
+		g_sib = -1;
 	}
 	if (!ND_SUCCESS(s)) {
 		memset(out, 0, sizeof *out);
@@ -1416,7 +1447,7 @@ static void emit(const char *dir)
  * and see whether the reference stops decoding it.
  *
  *   bit 0  reg == rm (a register form)          bit 3  reg == a gather's index
- *   bit 1  reg == vvvv                          bit 4  vvvv == a gather's index
+ *   bit 1  reg == vvvv (either form)            bit 4  vvvv == a gather's index
  *   bit 2  rm  == vvvv
  */
 static int probe_ok(int mode, int map, unsigned opc, int pp, int osz, int asz,
@@ -1452,12 +1483,36 @@ static void probe_dist(int mode, int map, unsigned opc)
 				dr |= 2u;
 			if (used && !probe_ok(mode, map, opc, pp, osz, asz, rr, 2, -1))
 				dr |= 4u;
+			/* a vvvv that is not in use is register 0: the destination register 0 is the collision,
+			 * provided the sibling variant with a free vvvv decodes it (see the memory form below) */
+			if (!used && probe_ok(mode, map, opc, pp, osz, asz | 1, 0xC0u | 2u, -1, -1) &&
+			    !probe_ok(mode, map, opc, pp, osz, asz, 0xC0u | 2u, -1, -1))
+				dr |= 2u;
 		}
 		if (probe_ok(mode, map, opc, pp, osz, asz, mm, -1, 2 << 3)) {
 			if (!probe_ok(mode, map, opc, pp, osz, asz, mm, -1, 1 << 3))
 				dm |= 8u;
-			if (used && !probe_ok(mode, map, opc, pp, osz, asz, mm, 2, 2 << 3))
-				dm |= 16u;
+			/*
+			 * vvvv against the destination and against the index, for a memory form (a gather
+			 * names its mask in vvvv). A vvvv that is "not in use" is register 0, so for that
+			 * variant the collisions are tried with register 0 as the destination and as the
+			 * index; for one in use, with vvvv forced onto them.
+			 */
+			if (used) {
+				if (!probe_ok(mode, map, opc, pp, osz, asz, mm, 1, 2 << 3))
+					dm |= 2u;
+				if (!probe_ok(mode, map, opc, pp, osz, asz, mm, 2, 2 << 3))
+					dm |= 16u;
+			} else {
+				/* reg 0 can also be invalid because the reg field is an opcode extension
+				 * (the TBM group): it is a collision only if the sibling variant with a
+				 * free vvvv decodes it. */
+				if (probe_ok(mode, map, opc, pp, osz, asz | 1, 0x04u, -1, 2 << 3) &&
+				    !probe_ok(mode, map, opc, pp, osz, asz, 0x04u, -1, 2 << 3))
+					dm |= 2u;
+				if (!probe_ok(mode, map, opc, pp, osz, asz, mm, -1, 0 << 3))
+					dm |= 16u;
+			}
 		}
 		DIST[pp][osz][asz][0] = (uint8_t)dm;
 		DIST[pp][osz][asz][1] = (uint8_t)dr;
@@ -1485,9 +1540,25 @@ static void heal_collisions(void)
 			    REC[pp][osz][asz][2][reg][(reg + 1) & 7].valid)
 				REC[pp][osz][asz][2][reg][reg] = REC[pp][osz][asz][2][reg][(reg + 1) & 7];
 			for (mod = 0; mod < 2; mod++)
-				if ((d & 24u) && reg == 0 && !REC[pp][osz][asz][mod][0][4].valid &&
+				if ((d & 26u) && reg == 0 && !REC[pp][osz][asz][mod][0][4].valid &&
 				    REC[pp][osz][asz][mod][1][4].valid)
 					REC[pp][osz][asz][mod][0][4] = REC[pp][osz][asz][mod][1][4];
+		}
+		/*
+		 * A vvvv that is "not in use" (1111b) names register 0, so a destination of register 0
+		 * is the collision, in every form and every r/m: the leaf of the instruction must not
+		 * read "this variant is not an instruction" because ITS first point is that collision
+		 * (the complex FP16 multiplies, the gathers). It is done after the loop above, so that
+		 * the neighbour it copies (reg 1) has had its own reg == rm collision healed first. The
+		 * decoder refuses the real collision through the distance bit.
+		 */
+		if ((d & 2u) && !(asz & 1) && SP != SP_LEGACY) {
+			int rm2;
+
+			for (mod = 0; mod < 3; mod++)
+				for (rm2 = 0; rm2 < 8; rm2++)
+					if (!REC[pp][osz][asz][mod][0][rm2].valid && REC[pp][osz][asz][mod][1][rm2].valid)
+						REC[pp][osz][asz][mod][0][rm2] = REC[pp][osz][asz][mod][1][rm2];
 		}
 	}
 }

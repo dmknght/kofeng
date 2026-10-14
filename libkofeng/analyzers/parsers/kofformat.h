@@ -51,6 +51,51 @@ struct kof_parser {
 	uint64_t  (*anomalies)(const void *view);
 };
 
+/*
+ * SNIFF AND PARSE AS ONE SCAN, for a row whose parse would repeat the sniff's reading.
+ *
+ * Only the script row has one (kof_parser_keep_of answers NULL for every other format, the
+ * way kof_view_ops_of does, so the table above keeps its shape). The host owns
+ * KOF_PARSER_KEEP bytes and hands the same buffer to `sniff` (which fills it) and then to
+ * `parse` (which reads it), so what the sniff found is not found again. A row without one
+ * is called through its sniff and parse.
+ */
+struct kof_parser_keep {
+	int (*sniff)(kof_buf, void *keep);
+	int (*parse)(kof_buf, void *view, struct kof_obj_ctx *, const void *keep);
+};
+
+#define KOF_PARSER_KEEP 64u
+
+const struct kof_parser_keep *kof_parser_keep_of(uint8_t format);
+
+/*
+ * THE VIEWS THAT OWN MEMORY, and what the host needs of one.
+ *
+ * Zip, PDF, tar, lha, arj, cab, chm, docole, rar and 7z keep tables as long as the file says,
+ * so their views are not plain structs to be zeroed and forgotten: something has to give the engine's per-object
+ * ledger a say before the tables grow, charge what they hold, and give it back. Three
+ * handles, and a format that has no such view has none of them (kof_view_ops_of answers
+ * NULL), which is every format but those:
+ *
+ *   mem      the view's account (struct kof_view_mem, range.h): the host sets `room`
+ *            before the parse and reads `held` and `walked` after it.
+ *   release  frees the tables and zeroes the account. The host calls it when the object
+ *            is done - the end of sx_scan_object - so what is charged is held for one
+ *            object and no longer; a tool calls it before it frees the view.
+ *   next     the walk behind a module's kof_zip_next / kof_pdf_next: row `*cursor` of the
+ *            table, advancing it; and it counts the call, which is how the host knows the
+ *            table was read (struct kof_view_mem.walked).
+ */
+struct kof_view_ops {
+	struct kof_view_mem *(*mem)(void *view);
+	void (*release)(void *view);
+	const void *(*next)(void *view, uint32_t *cursor);
+};
+
+/* The handles for a format's view, or NULL when its view owns no memory. */
+const struct kof_view_ops *kof_view_ops_of(uint8_t format);
+
 /* How many rows. Public so a caller that keeps a table of its own, one row per
  * format, can check its length against this and fail to build rather than fall
  * quietly behind. */
@@ -65,6 +110,33 @@ const struct kof_parser *kof_parser_list(uint32_t *n);
 /* The row for one KOF_FMT_*, or NULL. For a caller that has a format in hand
  * and wants its parser rather than a sniff. */
 const struct kof_parser *kof_parser_of(uint8_t format);
+
+/* The anomaly bits of a format's view that mean a table of the parse was full and
+ * what is past it was not read; zero for a format whose module says so itself. */
+uint64_t kof_parser_cut_bits(const struct kof_parser *p);
+
+/* Non-zero for a format whose parse clears everything it reads: the host skips its own memset. */
+int kof_parser_self_clears(const struct kof_parser *p);
+
+/*
+ * THE REGION BITS OF A FORMAT THAT "ANYWHERE IN THE OBJECT" DOES NOT COVER,
+ * decided by the bit and not by how it is spelled.
+ *
+ * A header describes the object rather than being part of what it does: its
+ * bytes are offsets, sizes and flags that a rebuild rewrites and a compiler
+ * changes between two builds of one source, so a block cut from one measures
+ * the toolchain. The static library a normalised view carries on its tail is
+ * somebody else's code, and what is offered is the author's. The symbol halves
+ * are not bytes of the file at all - the host BUILDS those records while parsing
+ * - so a block cut from them has no offsets in any file.
+ *
+ * Asked in two places that must agree: the carve, which must not offer such a
+ * block, and the whole-object pass, which must not feed such a region to a block
+ * that named no region. A rule may still NAME one of these, and the engine will
+ * look there (mutation_prepass): this is what is offered and swept, not what an
+ * author may ask for. Zero for a format with nothing to leave out.
+ */
+uint32_t kof_parser_region_unoffered(const struct kof_parser *p);
 
 /*
  * The region bit a KOF_SCAN_* SPELLING names, for one format.

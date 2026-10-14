@@ -15,6 +15,17 @@
 int kof_pdf_parse(kof_buf file, struct kof_pdf_info *info,
 		  struct kof_obj_ctx *ctx);
 
+/*
+ * The view's tables are the file's size, so a view owns memory - exactly as zip_parse.h
+ * says for its own: `info->mem.room` is the caller's before the parse, a view starts
+ * zeroed, `info->mem.held` is what the tables hold afterwards, and kof_pdf_release gives
+ * it all back and leaves the view empty and ready to parse again. A table that cannot
+ * grow is not a failed parse: OBJECTS_FULL / EXTENTS_FULL say what was not stored.
+ */
+void kof_pdf_release(struct kof_pdf_info *info);
+struct kof_view_mem *kof_pdf_mem(void *view);
+const void *kof_pdf_row(void *view, uint32_t *cursor);
+
 int kof_pdf_sniff(kof_buf file);
 
 const char *kof_pdf_region_name(uint32_t bit);

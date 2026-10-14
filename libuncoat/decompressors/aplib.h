@@ -57,8 +57,17 @@
  * yields a real prefix, and for a scanner that prefix is usually what
  * identifies the sample.
  *
- * Returns a kuncoat_status. KUNCOAT_STOPPED means the output buffer filled,
- * which is the receiver's limit rather than a failure of the stream.
+ * Returns a kuncoat_status. KUNCOAT_STOPPED means the output buffer filled with
+ * stream left, which is the receiver's limit rather than a failure of the stream;
+ * a buffer that fills exactly where the stream's end marker is (the caller knew the
+ * size) is OK, which costs one look at the next three bits and a byte.
+ *
+ * The input ending first is TRUNCATED, and nothing is written from the zeros the
+ * reader gives past the end: an item (a literal, a match, the end marker itself)
+ * that needed them is dropped. Output before a CORRUPT item is real and `produced`
+ * counts it. An empty input or a zero `out_cap` is CORRUPT (there is no first
+ * byte to decode or no room for it); a NULL `in` with in_len > 0 or a NULL `out`
+ * with out_cap > 0 is KUNCOAT_BAD_ARG. `produced` may be NULL.
  */
 enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 				        uint8_t *out, uint64_t out_cap,

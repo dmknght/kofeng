@@ -100,25 +100,44 @@ static int ap_copy(uint8_t *out, uint64_t *have, uint64_t cap,
 		return 0;                       /* reaches before the output */
 	for (i = 0; i < len; i++) {
 		if (*have >= cap)
-			return 1;               /* the caller's ceiling */
+			return 2;               /* the caller's ceiling, with the match unfinished */
 		out[*have] = out[*have - dist];
 		(*have)++;
 	}
 	return 1;
 }
 
+/* Is what follows the end marker (`110` and a zero byte)? Asked when the output is
+ * full, to tell a stream that ends exactly there from one that has more to say. */
+static int ap_at_end(struct ap *s)
+{
+	if (!ap_bit(s) || !ap_bit(s) || ap_bit(s))
+		return 0;
+	return (ap_byte(s) >> 1) == 0;
+}
+
+/*
+ * NOTHING IS WRITTEN FROM BYTES THAT ARE NOT THERE. Past the end the reader gives
+ * zeros and sets `eof`, so every item is decoded and then `eof` is looked at BEFORE
+ * the item is written: a literal, a length or a distance that came from the fill
+ * is dropped and the stream is TRUNCATED. A complete stream never reads past its
+ * end (the marker is inside it), so this loses nothing a stream said.
+ */
 enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 				        uint8_t *out, uint64_t out_cap,
 				        uint64_t *produced)
 {
 	struct ap s;
 	uint64_t have = 0, r0 = 0;
-	int lwm = 0, ended = 0;
+	int lwm = 0, ended = 0, cut = 0, cp;
+	enum kuncoat_status status = KUNCOAT_OK;
 
 	if (produced)
 		*produced = 0;
-	if (!in || !out || !out_cap || !in_len)
-		return KUNCOAT_CORRUPT;
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
+	if (!in_len || !out_cap)
+		return KUNCOAT_CORRUPT;         /* no stream, or no room for its first byte */
 
 	s.in = in;
 	s.n = in_len;
@@ -131,8 +150,16 @@ enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 	out[have++] = ap_byte(&s);
 
 	while (!ended && have < out_cap && !s.eof) {
-		if (!ap_bit(&s)) {
-			out[have++] = ap_byte(&s);
+		uint32_t b1 = ap_bit(&s);
+
+		if (s.eof)
+			break;
+		if (!b1) {
+			uint8_t lit = ap_byte(&s);
+
+			if (s.eof)
+				break;
+			out[have++] = lit;
 			lwm = 0;
 			continue;
 		}
@@ -163,8 +190,14 @@ enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 					len += 2u;
 				r0 = dist;
 			}
-			if (!ap_copy(out, &have, out_cap, dist, len))
-				return KUNCOAT_CORRUPT;
+			if (s.eof)
+				break;
+			cp = ap_copy(out, &have, out_cap, dist, len);
+			if (!cp) {
+				status = KUNCOAT_CORRUPT;
+				goto done;
+			}
+			cut |= cp == 2;
 			lwm = 1;
 			continue;
 		}
@@ -172,12 +205,18 @@ enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 			uint32_t b = ap_byte(&s);
 			uint64_t dist = b >> 1, len = 2u + (b & 1u);
 
+			if (s.eof)
+				break;
 			if (dist == 0) {
 				ended = 1;      /* the end of the stream */
 				break;
 			}
-			if (!ap_copy(out, &have, out_cap, dist, len))
-				return KUNCOAT_CORRUPT;
+			cp = ap_copy(out, &have, out_cap, dist, len);
+			if (!cp) {
+				status = KUNCOAT_CORRUPT;
+				goto done;
+			}
+			cut |= cp == 2;
 			r0 = dist;
 			lwm = 1;
 			continue;
@@ -188,9 +227,13 @@ enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 
 			for (i = 0; i < 4u; i++)
 				dist = (dist << 1) + ap_bit(&s);
+			if (s.eof)
+				break;
 			if (dist) {
-				if (dist > have)
-					return KUNCOAT_CORRUPT;
+				if (dist > have) {
+					status = KUNCOAT_CORRUPT;
+					goto done;
+				}
 				out[have] = out[have - dist];
 				have++;
 			} else {
@@ -200,11 +243,16 @@ enum kuncoat_status kuncoat_aplib_decode(const uint8_t *in, uint64_t in_len,
 		}
 	}
 
+	if (ended)
+		status = KUNCOAT_OK;
+	else if (s.eof)
+		status = KUNCOAT_TRUNCATED;
+	else if (cut)
+		status = KUNCOAT_STOPPED;       /* the room ended inside a match */
+	else if (have >= out_cap)       /* full: the end of the stream, or more of it? */
+		status = ap_at_end(&s) ? KUNCOAT_OK : s.eof ? KUNCOAT_TRUNCATED : KUNCOAT_STOPPED;
+done:
 	if (produced)
 		*produced = have;
-	if (ended)
-		return KUNCOAT_OK;
-	if (have >= out_cap)
-		return KUNCOAT_STOPPED;
-	return KUNCOAT_TRUNCATED;
+	return status;
 }

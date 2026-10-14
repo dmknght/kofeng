@@ -196,16 +196,17 @@ static int vmp_find_by_props(const struct kof_obj_ctx *ctx,
 			     uint64_t image_end, struct vmp_tab *out)
 {
 	uint64_t at, end = ctx->obj_size;
-
 	if (end < 24u)
 		return 0;
 	end -= 24u;
-
 	for (at = 0; at <= end; at += 4u) {
-		uint64_t po, e;
+		uint64_t po, e, hit;
 		uint32_t props, n = 0, last = 0;
-
-		if (kof_u32(at + 4u) != VMP_PROPS_LEN)
+		hit = kof_find_str_where(at + 4u, end + 4u - at, vmp_props_len);
+		if (hit == KOF_BROKEN)
+			break;
+		at = (hit & ~(uint64_t)3u) - 4u;
+		if (hit & 3u)
 			continue;
 		po = vmp_off_of(pe, kof_u32(at));
 		if (!po || !kof_in_obj(po, VMP_PROPS_LEN))
@@ -253,23 +254,31 @@ static int vmp_find_table(const struct kof_obj_ctx *ctx,
 			  const uint32_t *want, uint32_t n_want,
 			  struct vmp_tab *out)
 {
-	uint64_t at, end;
-
+	uint64_t at, end, lo = ~0ull, hi = 0, w, wat = 0;
+	uint32_t i;
 	if (n_want < VMP_MIN_BLK || n_want > VMP_MAX_BLK)
 		return 0;
 	end = ctx->obj_size;
 	if (end < (uint64_t)n_want * 8u)
 		return 0;
 	end -= (uint64_t)n_want * 8u;
-
+	for (i = 0; i < pe->sec_count && i < KOF_PE_MAX_SECTIONS; i++) {
+		const struct kof_pe_sec *s = &pe->sec[i];
+		uint64_t e = s->mem_rva + (s->mem_size > s->file_size ? s->mem_size : s->file_size);
+		lo = s->file_size && s->mem_rva < lo ? s->mem_rva : lo;
+		hi = s->file_size && e > hi ? e : hi;
+	}
+	w = kof_u64(0);
 	for (at = 0; at <= end; at++) {
-		uint32_t k, seed, ok = 0;
-
+		uint32_t k, seed, ok = 0, rva;
 		/* Cheapest first: entry zero's source has to look like a
 		 * stream. Most offsets die here. */
 		if (!kof_in_obj(at, (uint64_t)n_want * 8u))
 			continue;
-		if (!vmp_lzma_here(ctx, pe, kof_u32(at)))
+		if (at >= wat + 5u)
+			w = kof_u64(wat = at);
+		rva = (uint32_t)(w >> (8u * (at - wat)));
+		if (rva - lo >= hi - lo || !vmp_lzma_here(ctx, pe, rva))
 			continue;
 		for (k = 1; k < n_want; k++)
 			if (!vmp_lzma_here(ctx, pe, kof_u32(at + k * 8u)))
@@ -523,3 +532,32 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * reader was told it was.
 	 */
 }
+
+/*
+ * The two scans of this module read the object through c_rd32, a call into the
+ * host for every u32: vmp_find_by_props at every fourth byte, vmp_find_table at
+ * every byte - 190 M calls over 140 PE, which was 59 % of the instructions on
+ * x86 PE, 19 % on x64 and 31 % on packed PE (callgrind over 98, 87 and 81 PE;
+ * 53, 16 and 25 % of them are gone with this change).
+ *
+ *   by_props looks for the u32 5 that follows each fourth byte, so the host
+ *   searches for the bytes `05 00 00 00` (declared below) and the walk keeps its
+ *   offsets and its order: a hit that is not 4-aligned is skipped, the next
+ *   search starts after it. DECLARED CASE-INSENSITIVE, and that is the point:
+ *   the bytes have no case, so the answer cannot change, but the host searches
+ *   a case-insensitive pattern by memchr on its first caseless byte (0x05)
+ *   where it searches an exact one with memmem - which costs 5.3 instructions a
+ *   byte on x86 PE and 12 on x64 for a needle that ends in two zero bytes,
+ *   because it is a candidate at every zero pair of the haystack (measured: it
+ *   made x64 PE 15 % worse).
+ *   find_table reads one rd64 for the five u32 that start in its first five
+ *   bytes, and drops a source RVA outside [lo, hi) - the span of the sections
+ *   that hold file bytes, which is all vmp_off_of resolves - before that
+ *   function loops the section table for it; with no such section lo is ~0 and
+ *   hi is 0 and every RVA is dropped, as vmp_off_of drops it. The word is
+ *   inside the object (at + 8 <= obj_size - 8 * n_want, n_want >= 2).
+ *
+ * Declared here and written below the last function so that this note and the
+ * declaration move no report line of this module.
+ */
+KOF_DEFINE_HEXSTR(vmp_props_len, "05 00 00 00", KOF_CASE_ICASE, KOF_WORD_SUBSTRING);

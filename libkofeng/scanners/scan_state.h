@@ -45,6 +45,8 @@
  * 32MB presence table out of the per-file path: it belongs to the thread, is allocated
  * once, and is reused for every object.
  */
+struct kof_src_read_io;   /* objsrc.h */
+
 struct kof_scanner {
 	const struct kof_engine *eng;
 	/*
@@ -66,7 +68,30 @@ struct kof_scanner {
 	kof_on_debug debug_cb;
 	void *debug_user;
 	struct kof_stats st;
+	/*
+	 * Scans running on this scanner (nested ones count: a callback may scan), so that a
+	 * trim asked for from inside one is refused instead of freeing what the scan is
+	 * standing on. And how many scanners share the resident allowance of the parallel
+	 * walk this scanner is a worker of - 1 outside it; see kof_scan_budget.
+	 */
+	unsigned busy;
+	unsigned share;
+	/* The host's scratch directory for spills (kof_scan_option.scratch_dir), for the scan in
+	 * progress; NULL is the platform's. Borrowed. */
+	const char *scratch;
+	/* The seam a file is read through (objsrc.h): NULL is read(2); a test's table otherwise
+	 * (kof_scan_read_hook). Borrowed. */
+	const struct kof_src_read_io *read_io;
+	/* What this scanner holds of the engine's budget (kofcore/kofbudget.h): its fixed cost for
+	 * as long as it lives, and its share while an object is being scanned. */
+	uint64_t root_fixed, root_held;
+	/* What the root file in hand holds of the budget (kof_src_charged), for as long as it is
+	 * scanned: the share of the object is cut from what is left after it. */
+	uint64_t file_held;
 
+	/* Products made more than once for one object, per product, over the scanner's
+	 * life - see enum kof_prodkind. Not per object: a test reads it after the scan. */
+	uint32_t prod_repeat[KOF_PROD_COUNT];
 	struct kof_scan_obj obj;   /* per object: wiped by sx_obj_begin */
 	struct kof_scan_mod mod;   /* per module: wiped by sx_mod_begin */
 	struct kof_scan_cur cur;   /* the object in hand */
@@ -74,6 +99,7 @@ struct kof_scanner {
 	struct kof_scan_child child;   /* children collected, drained by the walk */
 	struct kof_scan_emu emu;   /* what an interpreter run left behind */
 	struct kof_scan_sink sink;   /* what a module emitted and has not closed */
+	struct kof_scan_spill spill; /* where a big produced object goes: see objctx_spill.c */
 	struct kof_scan_ledger ledger;   /* the budget ledger: per tree, never per object */
 	struct kof_scan_cache cache;   /* views and decompressor states, kept for the scanner */
 	struct kof_scan_match match;   /* the matchers' state */

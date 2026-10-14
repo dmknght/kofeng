@@ -38,11 +38,11 @@ static uint64_t off_to_va(struct kgenome_cell_cur *k, const struct kgenome_cell_
 	/* Inside the segment the last call established it is one addition -
 	 * see struct kgenome_image_seg for why that is almost always. */
 	if (k->seg_ok && off >= k->seg.lo && off < k->seg.hi)
-		return (uint64_t)((int64_t)off + k->seg.delta);
+		return off + (uint64_t)k->seg.delta;
 	if (!sp->seg_at || !sp->seg_at(sp->priv, off, &k->seg))
 		return KGENOME_BROKEN;
 	k->seg_ok = 1;
-	return (uint64_t)((int64_t)off + k->seg.delta);
+	return off + (uint64_t)k->seg.delta;
 }
 
 /*
@@ -58,11 +58,11 @@ static uint64_t va_to_off(const struct kgenome_cell_cur *k,
 			  const struct kgenome_cell_space *sp, uint64_t va)
 {
 	if (k->seg_ok) {
-		uint64_t lo = (uint64_t)((int64_t)k->seg.lo + k->seg.delta);
-		uint64_t hi = (uint64_t)((int64_t)k->seg.hi + k->seg.delta);
+		uint64_t lo = k->seg.lo + (uint64_t)k->seg.delta;
+		uint64_t hi = k->seg.hi + (uint64_t)k->seg.delta;
 
 		if (va >= lo && va < hi)
-			return (uint64_t)((int64_t)va - k->seg.delta);
+			return va - (uint64_t)k->seg.delta;
 	}
 	return sp->off_of_va ? sp->off_of_va(sp->priv, va) : KGENOME_BROKEN;
 }
@@ -125,7 +125,7 @@ static void resolve_literal(const struct kgenome_cell_cur *k,
 static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
 		      struct kgenome_cell_insn *out)
 {
-	uint64_t left;
+	uint64_t left, va;
 	uint32_t n;
 
 	if (!k || !k->open || !sp || !sp->base || !out || k->at >= sp->size)
@@ -148,8 +148,11 @@ static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
 	 * was zero for every instruction, which is what the constant map needs
 	 * to know which registers an instruction destroys.
 	 */
-	n = kgenome_cell_decode(sp->arch, sp->be, sp->base + k->at, (uint32_t)left,
-			off_to_va(k, sp, k->at), out);
+	va = off_to_va(k, sp, k->at);
+	n = sp->held ? sp->held(sp->held_priv, k->at, va, (uint32_t)left, out) : 0;
+	if (!n)
+		n = kgenome_cell_decode(sp->arch, sp->be && !sp->code_le, sp->base + k->at,
+					(uint32_t)left, va, out);
 	if (!n)
 		return 0;
 	if (sp->arch == KGENOME_ARCH_ARM || sp->arch == KGENOME_ARCH_ARM64)

@@ -10,7 +10,8 @@ int kof_txt_tag_at(kof_buf f, uint64_t at, const char *tag, uint32_t len)
 {
 	uint32_t i;
 
-	if (at + len > f.n)
+	/* `at + len` wrapped for an offset near 2^64 and then read below the buffer */
+	if (at > f.n || len > f.n - at)
 		return 0;
 	/*
 	 * Four comparisons and two branches per byte became two arithmetic
@@ -139,6 +140,20 @@ int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len)
 		return 0;
 	if (!len)
 		return 1;               /* nothing to record, and not full */
+	/*
+	 * The extents are 32 bits and that is the module ABI's layout
+	 * (struct kof_script_info is what a module reads), so the table is not
+	 * widened. An island that does not fit is REFUSED, never wrapped: an
+	 * island at 2^32 + 5 was recorded at 5 and the regions of the page
+	 * were then cut at the wrong place. Refusing answers 0, which ends the
+	 * walk exactly as a full table does, and says so the same way - the
+	 * tail is markup and the anomaly bit is the one the engine already
+	 * reports as a cut table (kof_parser_cut_bits -> broken=LIMIT).
+	 */
+	if (off > UINT32_MAX || len > UINT32_MAX) {
+		info->anomalies |= KOF_SCRIPT_ANOM_ISLANDS_FULL;
+		return 0;
+	}
 	info->island[info->n_island].off = (uint32_t)off;
 	info->island[info->n_island].len = (uint32_t)len;
 	info->n_island++;
@@ -175,6 +190,8 @@ void kof_isl_join_ws(kof_buf f, uint64_t from, struct kof_script_info *info)
 		return;
 	/* The run before the first island. */
 	if (info->island[0].off > from &&
+	    (uint64_t)info->island[0].len + (info->island[0].off - from) <=
+		    UINT32_MAX &&
 	    all_ws(f, from, info->island[0].off)) {
 		info->island[0].len += (uint32_t)(info->island[0].off - from);
 		info->island[0].off = (uint32_t)from;
@@ -185,7 +202,10 @@ void kof_isl_join_ws(kof_buf f, uint64_t from, struct kof_script_info *info)
 		uint64_t end = (uint64_t)info->island[k].off +
 			       info->island[k].len;
 
-		if (end < f.n && all_ws(f, end, f.n))
+		/* The 32-bit extent is the ABI's: a run that would not fit
+		 * stays markup rather than wrap the length. */
+		if (end < f.n && info->island[k].len + (f.n - end) <= UINT32_MAX &&
+		    all_ws(f, end, f.n))
 			info->island[k].len += (uint32_t)(f.n - end);
 	}
 	if (info->n_island < 2u)
@@ -201,10 +221,10 @@ void kof_isl_join_ws(kof_buf f, uint64_t from, struct kof_script_info *info)
 		      info->island[keep - 1u].len;
 		gap = info->island[i].off;
 		if (gap >= end && gap <= f.n) {
-			uint64_t j = end;
-
-			(void)j;
-			if (all_ws(f, end, gap)) {
+			/* merged extent must fit the ABI's 32 bits too */
+			if ((uint64_t)info->island[i].off + info->island[i].len -
+				    info->island[keep - 1u].off <= UINT32_MAX &&
+			    all_ws(f, end, gap)) {
 				/* Nothing but whitespace between them, so they
 				 * are one island and the gap is its middle. */
 				info->island[keep - 1u].len =

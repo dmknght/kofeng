@@ -64,6 +64,22 @@
  *
  * KUNCOAT_UNSUPPORTED means a PPM block or a filter this build does not run, and is
  * the honest answer for both: what came out is not the whole file.
+ *
+ * `out_cap` IS THE DECLARED SIZE of the entry (RAR states it in the file header, and
+ * the format has no length of its own that could say otherwise). Reaching it is OK:
+ * the decoder stops there and does not look at what follows. Ending before it is
+ * TRUNCATED when the input ran out and CORRUPT when the stream ended (or its tables
+ * were not tables) with the declared size unreached - the entry disagrees with its
+ * own header - and the bytes decoded are still reported. A filter block that
+ * extends past `out_cap` is not applied (the entry ended inside it): the bytes in
+ * that block are as decoded, which is also what a cap below the true size gives.
+ *
+ * A PPM block that asks for a larger model than this build allocates
+ * (KUNCOAT_PPMD_ARENA_MAX) is decoded for as long as the smaller model matches the
+ * encoder's and stops, OVER_BUDGET, at the first point where it would not (the model
+ * restarts when its arena is full, and the encoder's arena was bigger); the bytes
+ * before that are exact. A NULL `in` with in_len > 0 or a NULL `out` with
+ * out_cap > 0 is KUNCOAT_BAD_ARG; `produced` may be NULL.
  */
 /* The largest block a RAR3 filter can be attached to: the VM's own memory bound,
  * which the format checks against before it runs one. */

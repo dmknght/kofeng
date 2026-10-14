@@ -715,6 +715,8 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 			if (tag == KDIG_SEC_USERS && len >= 1u) {
 				out->users_known = 1;
 				out->n_users = b[at];
+				out->users_off = (uint32_t)at;
+				out->users_len = len;
 			}
 			/*
 			 * THE SYMBOLS THE CODE MUST REFER INTO - see
@@ -801,10 +803,10 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 	return 1;
 }
 
-uint32_t kof_diag_graph_build(const struct kgenome_diag_scan *s, uint8_t *out,
+uint32_t kof_diag_graph_build(struct kgenome_diag_scan *s, uint8_t *out,
 			      uint32_t cap)
 {
-	uint32_t i, need;
+	uint32_t i, need, cut = 0;
 
 	if (!s || !out || !s->n_hit)
 		return 0;
@@ -819,8 +821,14 @@ uint32_t kof_diag_graph_build(const struct kgenome_diag_scan *s, uint8_t *out,
 	for (i = 0; i < s->n_hit; i++) {
 		const struct kgenome_diag_hit *h = &s->hit[i];
 		uint8_t *r = out + KOF_GR_HDRLEN + i * KOF_GR_RECLEN;
-		uint8_t k, nin = h->n_in > KOF_GR_IN_MAX
-			       ? (uint8_t)KOF_GR_IN_MAX : h->n_in;
+		uint8_t k, nin = h->n_in > KOF_GR_IN_FIT
+			       ? (uint8_t)KOF_GR_IN_FIT : h->n_in;
+
+		/* The record holds KOF_GR_IN_FIT links; link k sits at byte
+		 * 22 + 4k and the guard here is the local one, not the
+		 * arithmetic of kofdiagtree.h held in the reader's head. */
+		if (h->n_in > nin)
+			cut++;
 
 		kof_st_le64(r + KOF_GR_R_AT, h->at);
 		kof_st_le64(r + KOF_GR_R_ATTR, h->attr);
@@ -841,6 +849,11 @@ uint32_t kof_diag_graph_build(const struct kgenome_diag_scan *s, uint8_t *out,
 			     : (uint8_t)KGENOME_DIAG_KIND_PRODUCED;
 		}
 	}
+	/* A node of the scan keeps up to four inputs, the record two. The rest
+	 * are not in the block and that is said where the scan's other limits are
+	 * (rule 4): the status the engine reads for "this graph stops short". */
+	if (cut)
+		kgenome_diag_note(s, KGENOME_TRUNCATED);
 	return need;
 }
 

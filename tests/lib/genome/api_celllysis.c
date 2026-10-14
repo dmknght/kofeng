@@ -306,7 +306,7 @@ static int fam_map_vs_emu(void *arg)
 	return wrong != 0;
 }
 
-/* The 32-bit forms: the map keeps a 64-bit result where the instruction zero-extends a 32-bit one */
+/* The 32-bit forms: a 32-bit result zero-extends */
 static int km_map_32bit(void *arg)
 {
 	struct kgenome_cell_state st;
@@ -329,6 +329,42 @@ static int km_map_32bit(void *arg)
 	return rc;
 }
 
+/* 8 and 16-bit writes keep the rest of the register, and an unknown register stays unknown */
+static int narrow_writes(void)
+{
+	struct kgenome_cell_state st;
+	uint64_t v = 0;
+	/* mov rax,0x1122334455667788 ; add al,0xff ; inc ah ; neg ax */
+	static const uint8_t seq[] = { 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+				       0x04, 0xff, 0xfe, 0xc4, 0x66, 0xf7, 0xd8 };
+	/* xor al,al on an rax nothing is known about */
+	static const uint8_t unk[] = { 0x30, 0xc0 };
+	int rc = 0;
+
+	kgenome_cell_state_reset(&st);
+	track_all(&st, seq, sizeof seq, 0);
+	/* 0x7788 + 0xff in al -> 0x7787, inc ah -> 0x7887, neg ax -> 0x8779 */
+	if (!kgenome_cell_state_reg(&st, 0, &v) || v != 0x1122334455668779ull)
+		rc |= 1;
+	kgenome_cell_state_reset(&st);
+	track_all(&st, unk, sizeof unk, 0);
+	if (kgenome_cell_state_reg(&st, 0, &v))
+		rc |= 2;
+	/* mov rax,0x1122334455667788 ; mov rcx,-1 ; xchg eax,ecx : both halves zero-extend */
+	{
+		static const uint8_t xc[] = { 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+					      0x48, 0xb9, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x91 };
+
+		kgenome_cell_state_reset(&st);
+		track_all(&st, xc, sizeof xc, 0);
+		if (!kgenome_cell_state_reg(&st, 0, &v) || v != 0xffffffffull)
+			rc |= 4;
+		if (!kgenome_cell_state_reg(&st, 1, &v) || v != 0x55667788ull)
+			rc |= 8;
+	}
+	return rc;
+}
+
 static void t_map_vs_emulator(void)
 {
 	static unsigned seeds[2] = { 0, 1 };
@@ -338,16 +374,13 @@ static void t_map_vs_emulator(void)
 
 	for (i = 0; i < 2; i++)
 		CK(hk_isolated(fam_map_vs_emu, (void *)(uintptr_t)seeds[i], 60, &sig) == HK_OK);
-	/* and the shape of the miss, measured: it is the 32-bit forms and only them */
+	/* the 32-bit forms too: a 32-bit result zero-extends, 16/8-bit writes keep the upper bits */
 	wrong = diff_run(77, 300, 1, first, sizeof first);
-	CK(wrong > 0);      /* while the miss stands this is non-zero: the KM below flips with it */
-	KM_CHECK(hk_isolated(km_map_32bit, NULL, 10, &sig) == HK_OK,
-		 "the constant map keeps a 64-bit result for a 32-bit operation on a known register",
-		 "celllysis/cell_state.c kgenome_cell_state_track, the INC/DEC/NOT/NEG/ADD/SUB/AND/OR/XOR arms and "
-		 "the register-to-register MOV (cell_put only narrows sizes 1 and 2): `mov ecx,0xffffffff ; inc ecx` "
-		 "leaves rcx known as 0x100000000 where the instruction leaves 0, and `mov rbx,0x1122334455667788 ; "
-		 "mov ebx,ebx` leaves the upper half. 4466 of 48000 claims disagreed with the interpreter in the "
-		 "random run, every one a 32-bit form (opcodes 89 /r, 81 /r, 83 /r, FF /0-1, F7 /2-3 without REX.W)");
+	if (wrong)
+		printf("  FAIL constant map disagrees with the interpreter on 32-bit forms %u times; first: %s\n", wrong, first);
+	CK(wrong == 0);
+	CK(hk_isolated(km_map_32bit, NULL, 10, &sig) == HK_OK);
+	CK(narrow_writes() == 0);
 }
 
 /* ---- the cursor and the address space ------------------------------------------------------------------- */
@@ -1140,27 +1173,16 @@ int main(int argc, char **argv)
 	t_cursor();
 	t_space_big_endian();
 	r = hk_isolated(km_space_be, NULL, 10, &sig);
-	KM_CHECK(r == HK_OK, "kgenome_cell_space_init decodes big-endian ELF code as little-endian",
-		 "celllysis/space.c:94 sp->be = ((const uint8_t *)obj->file_header)[5] == 2u reads byte 5 of the parsed "
-		 "struct kgenome_elf_info (inside `valid`, always 0), not e_ident[EI_DATA]: kgenome_elf_info.elf_data is "
-		 "BE yet sp.be == 0. Repro: ELF32 big-endian, EM_MIPS, parse, kgenome_cell_space_init");
+	CK(r == HK_OK);   /* regression: kgenome_cell_space_init decodes big-endian ELF code as little-endian */
 	t_nucleo();
 	t_xref();
 	r = hk_isolated(km_xref_wrap, NULL, 10, &sig);
-	KM_CHECK(r == HK_OK, "kgenome_xref_in forgets a variable when asked about it with a size that wraps the address space",
-		 "celllysis/xref.c:581 `u->va[...] < va + n` with n = 2^64-1 (a symbol's st_size): va+n wraps below va, "
-		 "the loop never runs and the answer is 0 flags: the payload variable reads as unreferenced. "
-		 "Repro: mov rax,[rip+0x1ff9]; call rax; kgenome_xref_in(u, 0x3000, UINT64_MAX) == 0");
+	CK(r == HK_OK);   /* regression: kgenome_xref_in forgets a variable when asked about it with a size that wraps the address space */
 	r = hk_isolated(km_xref_stale, NULL, 10, &sig);
-	KM_CHECK(r == HK_OK, "kgenome_xref_in freezes the answers: instructions fed after the first query are never seen",
-		 "celllysis/xref.c:559,568 `u->sorted = 1` is set by the first query (order_build) and never cleared by "
-		 "kgenome_xref_feed/note, so the order index and the region flags keep describing the sweep as it was. "
-		 "Repro: begin; feed `mov rax,[rip+0x1ff9]`; in(0x3000) = READ; feed a load of a NEW address 0x3010; in(0x3010) == 0 (flags of an address already known keep updating, a new one is not in the index); also a query before any feed makes every later answer 0");
+	CK(r == HK_OK);   /* regression: kgenome_xref_in freezes the answers: instructions fed after the first query are never seen */
 	t_true();
 	r = hk_isolated(km_true_touches_wrap, NULL, 10, &sig);
-	KM_CHECK(r == HK_OK, "kgenome_true_touches misses a span when the range's end wraps the address space",
-		 "celllysis/trueline.c kgenome_true_touches: `a < off + len` with len = UINT64_MAX; "
-		 "span {0x1000,0x100}, touches(lib, 0x800, UINT64_MAX) == 0");
+	CK(r == HK_OK);   /* regression: kgenome_true_touches misses a span when the range's end wraps the address space */
 	t_mutation_window();
 	t_mutation_by_function();
 	t_budget();

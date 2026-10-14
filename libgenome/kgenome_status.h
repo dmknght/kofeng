@@ -49,6 +49,13 @@ static inline enum kgenome_status kgenome_status_merge(enum kgenome_status a,
 	return b > a ? b : a;
 }
 
+/* Did a limit cut the answer - the three statuses that say "true and partial".
+ * BAD_INPUT and UNSUPPORTED are about the input and not about a bound. */
+static inline int kgenome_status_is_cut(enum kgenome_status s)
+{
+	return s == KGENOME_TRUNCATED || s == KGENOME_OVER_BUDGET || s == KGENOME_NOMEM;
+}
+
 static inline const char *kgenome_status_name(enum kgenome_status s)
 {
 	switch (s) {

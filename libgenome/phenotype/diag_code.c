@@ -56,18 +56,25 @@ static uint64_t kgenome_diag_code_seg(const struct kgenome_elf_info *e, uint32_t
 uint64_t kgenome_diag_code_range(const struct kgenome_elf_info *e, uint32_t i,
 			     uint64_t size, uint64_t *at)
 {
-	uint64_t have = kgenome_diag_code_seg(e, i, size, at);
-	uint64_t hdr = e->elf_class == KGENOME_ELFCLASS_64 ? 64u : 52u;
-	uint64_t pend = e->phoff + (uint64_t)e->phnum * e->phentsize;
+	uint64_t have, hdr, pend, from = 0;
 
+	if (!e || i >= KGENOME_ELF_MAX_SEGMENTS)        /* the table has this many entries and no more */
+		return 0;
+	have = kgenome_diag_code_seg(e, i, size, &from);
 	if (!have)
 		return 0;
+	hdr = e->elf_class == KGENOME_ELFCLASS_64 ? 64u : 52u;
+	pend = e->phoff + (uint64_t)e->phnum * e->phentsize;
 	if (pend > hdr && pend >= e->phoff)             /* no wrap */
 		hdr = pend;
-	if (*at < hdr && hdr - *at < have) {
-		have -= hdr - *at;
-		*at = hdr;
+	if (from < hdr) {
+		/* what is left of the segment past the headers; none when it is only headers */
+		if (hdr - from >= have)
+			return 0;
+		have -= hdr - from;
+		from = hdr;
 	}
+	*at = from;
 	return have;
 }
 

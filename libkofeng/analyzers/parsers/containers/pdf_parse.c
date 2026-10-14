@@ -97,60 +97,39 @@ static uint32_t stream_class(const struct kof_pdf_object *o)
 
 KOF_RUNS_RESOLVER(pdf, struct kof_pdf_info, pdf_cls_bit, KOF_SCAN_PDF_UNCLAIMED)
 
-/* Everything of the view but its arrays - see the note inside. */
-static void pdf_clear_view(struct kof_pdf_info *p)
-{
 /*
- * EVERYTHING BUT THE 800KB OF ARRAYS: 288 bytes instead of 819488.
- *
- * `memset(p, 0, sizeof *p)` cleared the whole view for every PDF
- * object scanned. Measured on this machine: 13.7us each, against a
- * head that is 168 bytes. The ZIP parser had the same line and the
- * same fix took a 300-file scan from 12ms to 7ms.
- *
- * THREE SPANS RATHER THAN ONE, because unlike ZIP the arrays here are
- * not at the tail - they are interleaved with the scalars:
- *
- *        0 .. 168      head
- *      168 .. 393384   run[]        393216 bytes, skipped
- *   393384 .. 753832   object[]     360448 bytes, skipped
- *   753832 .. 753840   n_entries and its padding
- *   753840 .. 819376   entry[]       65536 bytes, skipped
- *   819376 .. 819488   docinfo[] and the trailer scalars
- *
- * WHAT MAKES IT SAFE: nothing reads past a count. Every loop over
- * these arrays - here, in bases/decomp/pdf.c, in kofviewer - is bounded
- * by n_objects, n_entries or n_runs, and all three counts live in the
- * spans that ARE cleared. A parse that gives up early therefore leaves
- * the arrays dirty and the counts at zero, which reads as "nothing
- * found" and not as the previous file's objects. Each slot is cleared
- * as it is claimed - see the memsets beside `&p->object[p->n_objects]`
- * and `&p->entry[p->n_entries++]`.
- *
- * THE ASSERTS ARE THE GUARD. They pin every boundary above, so a field
- * added or moved breaks the build rather than quietly falling into a
- * gap nothing clears.
+ * What a parse left in the view, given back: the three tables and the account of them.
+ * The caller's room survives it - see kof_pdf_parse.
  */
-	const size_t head_end = offsetof(struct kof_pdf_info, run);
-	const size_t obj_end  = offsetof(struct kof_pdf_info, object) +
-				sizeof p->object;
-	const size_t ent_at   = offsetof(struct kof_pdf_info, entry);
-	const size_t ent_end  = ent_at + sizeof p->entry;
+void kof_pdf_release(struct kof_pdf_info *p)
+{
+	kof_tab_free((void **)&p->run);
+	kof_tab_free((void **)&p->object);
+	kof_tab_free((void **)&p->entry);
+	p->n_runs = 0;
+	p->n_objects = 0;
+	p->n_entries = 0;
+	p->mem.held = 0;
+	p->mem.rows = 0;
+}
 
-	_Static_assert(offsetof(struct kof_pdf_info, object) ==
-		       offsetof(struct kof_pdf_info, run) +
-		       sizeof ((struct kof_pdf_info *)0)->run,
-		       "a field appeared between run[] and object[] "
-		       "and nothing clears it");
-	_Static_assert(offsetof(struct kof_pdf_info, docinfo) >=
-		       offsetof(struct kof_pdf_info, entry) +
-		       sizeof ((struct kof_pdf_info *)0)->entry,
-		       "entry[] and docinfo[] are out of order");
+/* The walk a module's kof_pdf_next reaches, and the account the host charges; see
+ * zip_parse.h for what each is for. */
+const void *kof_pdf_row(void *view, uint32_t *cursor)
+{
+	struct kof_pdf_info *p = (struct kof_pdf_info *)view;
 
-	memset(p, 0, head_end);
-	memset((char *)p + obj_end, 0, ent_at - obj_end);
-	memset((char *)p + ent_end, 0,
-	       sizeof(struct kof_pdf_info) - ent_end);
+	if (!p)
+		return NULL;
+	p->mem.walked++;
+	if (!p->valid || !p->object || *cursor >= p->n_objects)
+		return NULL;
+	return &p->object[(*cursor)++];
+}
+
+struct kof_view_mem *kof_pdf_mem(void *view)
+{
+	return &((struct kof_pdf_info *)view)->mem;
 }
 
 /*
@@ -242,10 +221,12 @@ static void pdf_resolve_refs(kof_buf file, struct kof_pdf_info *p,
  * its font program is the ordinary shape, and so is a catalog at the
  * front pointing at an action at the back.
  *
- * Quadratic in the worst case and that is measured rather than assumed:
- * the outer loop runs only for objects that carry one of these keys,
- * which on the documents to hand is six of a hundred and eighty. The
- * inner scan is paid that many times, not four thousand.
+ * THROUGH AN INDEX BY NUMBER, not a scan from the top for each reference. It was
+ * quadratic and described as "measured rather than assumed" because the outer loop
+ * ran only for objects carrying one of these keys - six in a hundred and eighty on the
+ * documents to hand. A document built to carry one in every object, in a table as long
+ * as the file, is the whole table squared. The first object with the number that
+ * carries a stream is the first row of its key, which is what the scan returned.
  *
  * SET ONLY WHERE THE TARGET DESCRIBED NOTHING BETTER. An object saying
  * /Type /EmbeddedFile that some dictionary also points at with /JS
@@ -253,25 +234,32 @@ static void pdf_resolve_refs(kof_buf file, struct kof_pdf_info *p,
  * another dictionary says about it, and the two disagreeing is worth
  * leaving visible rather than resolving in favour of the second one.
  */
-	uint32_t i, k;
+	struct pdf_index by_num;
+	uint32_t i;
 
-	for (i = 0; i < p->n_objects; i++) {
-		if (!p->object[i].ref_num)
-			continue;
-		for (k = 0; k < p->n_objects; k++) {
-			if (p->object[k].num != p->object[i].ref_num ||
-			    !p->object[k].stream_len)
+	if (pdf_index_build(p, &by_num, PDF_IX_STREAM_NUM)) {
+		for (i = 0; i < p->n_objects; i++) {
+			const struct pdf_key *k;
+			struct kof_pdf_object *t;
+
+			if (!p->object[i].ref_num)
 				continue;
-			if (p->object[k].cat == KOF_PDF_CAT_CONTENT ||
-			    p->object[k].cat == KOF_PDF_CAT_UNKNOWN) {
-				p->object[k].cat = p->object[i].ref_cat;
-				if (p->object[i].ref_cat ==
-				    KOF_PDF_CAT_SCRIPT)
-					p->object[k].flags |=
-					    KOF_PDF_OBJ_JS;
+			k = pdf_index_find(&by_num, p->object[i].ref_num);
+			if (!k)
+				continue;
+			t = &p->object[k->idx];
+			if (t->cat == KOF_PDF_CAT_CONTENT ||
+			    t->cat == KOF_PDF_CAT_UNKNOWN) {
+				t->cat = p->object[i].ref_cat;
+				if (p->object[i].ref_cat == KOF_PDF_CAT_SCRIPT)
+					t->flags |= KOF_PDF_OBJ_JS;
 			}
-			break;
 		}
+		pdf_index_free(p, &by_num);
+	} else {
+		/* No room for the index: the references are not followed and the categories
+		 * stay what each dictionary said of itself - said, not hidden. */
+		p->anomalies |= KOF_PDF_ANOM_OBJECTS_FULL;
 	}
 
 	/*
@@ -293,24 +281,39 @@ static void pdf_resolve_refs(kof_buf file, struct kof_pdf_info *p,
 int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 {
 	struct kof_runs runs;
-	uint64_t hdr;
-	/* 8192 bits for the redefinition filter above. A kilobyte of frame, on
-	 * a path whose caller already hands it a 650KB view. */
-	uint8_t seen_num[1024];
+	struct pdf_tabs tabs;
+	uint64_t hdr, room, runs_limit;
 
-	pdf_clear_view(p);
-	memset(seen_num, 0, sizeof seen_num);
+	/* The whole view is cleared, because it is small now: the 800KB of arrays that made
+	 * a three-span clear worth six asserts are tables the parse allocates. What an
+	 * earlier parse left is let go first; the caller's room is read before the clear
+	 * and put back after it. */
+	room = p->mem.room;
+	kof_pdf_release(p);
+	memset(p, 0, sizeof *p);
+	p->mem.room = room;
 	p->version = KOF_PDF_INFO_VERSION;
 
 	if (!pdf_find_header(file, p, &hdr))
 		return 0;
 
-	kof_runs_init(&runs, p->run, KOF_PDF_MAX_EXTENTS,
-		      KOF_PDF_CLS_COUNT);
+	/*
+	 * WHAT THE FILE CAN HOLD, which bounds every table whatever it says about itself: an
+	 * object is KOF_PDF_OBJECT_MIN bytes at the least, so the rows cannot exceed the
+	 * length over it; a run is made by an object (a dictionary, a stream, a tail), by a
+	 * cross reference section or by one of the %%EOF and startxref lines the last 64 KiB
+	 * can carry - the arithmetic is written out so the pool's bound is read, not trusted.
+	 */
+	memset(&tabs, 0, sizeof tabs);
+	tabs.obj_limit = file.n / KOF_PDF_OBJECT_MIN + 1u;
+	runs_limit = 3u * tabs.obj_limit + file.n / KOF_PDF_XREF_MIN + 1u +
+		     2u * ((1u << 16) / KOF_PDF_XREF_MIN + 1u) + 16u;
+	kof_runs_init_dyn(&runs, &p->mem, KOF_PDF_CLS_COUNT, runs_limit);
 
 	pdf_claim_header(file, &runs, hdr);
 	pdf_read_trailer(file, p, &runs);
-	pdf_walk_objects(file, p, &runs, seen_num, hdr);
+	pdf_walk_objects(file, p, &tabs, &runs, hdr);
+	pdf_mark_redefined(p);
 	pdf_claim_xref(file, p, &runs, hdr);
 	pdf_resolve_refs(file, p, &runs);
 
@@ -323,13 +326,15 @@ int kof_pdf_parse(kof_buf file, struct kof_pdf_info *p, struct kof_obj_ctx *ctx)
 		p->anomalies |= KOF_PDF_ANOM_EXTENTS_FULL;
 	if (runs.overlapped)
 		p->anomalies |= KOF_PDF_ANOM_OVERLAP;
+	p->run = runs.v;
 	p->n_runs = runs.n;
 
-	pdf_build_entries(p, file);
+	pdf_build_entries(p, &tabs, file);
 	/* After the walk, because it looks an object up by number and the table
 	 * has to be there to look in. */
 	pdf_read_docinfo(p, file);
 
+	p->mem.rows = p->n_objects;
 	ctx->obj_size = file.n;
 	ctx->format = KOF_FMT_PDF;
 	ctx->file_header = p;

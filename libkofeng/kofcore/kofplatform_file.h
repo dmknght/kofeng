@@ -734,4 +734,103 @@ static inline int kof_rename_over(const char *from, const char *to)
 #endif
 }
 
+/*
+ * WRITE A FILE SO THAT NO READER EVER SEES IT HALF WRITTEN, AND NO MAPPING OF
+ * THE OLD ONE IS DISTURBED.
+ *
+ * A published database pack is mapped by every engine that opened it
+ * (kof_map_file_ro) and read in place. fopen(path, "wb") on such a file
+ * truncates the SAME inode: a reader that has it mapped faults with SIGBUS on
+ * the next page it touches, and one that opens it mid-write sees a prefix. So
+ * a pack is never written under its final name. It is written to a sibling
+ * temporary in the SAME directory (a rename across file systems is a copy),
+ * flushed to disk, and renamed over the final name. The old inode stays valid
+ * for whoever mapped it - on POSIX until the last unmap - and the new name
+ * points at a file that is complete or does not exist. Power loss leaves the
+ * old file or the new one, never a mixture, because the data is on disk BEFORE
+ * the name moves; the directory is flushed after, so the move itself survives.
+ *
+ * The temporary is created O_EXCL (a stale one from a crashed run is skipped,
+ * not reused) and, unlike kof_fopen_new, with the mode the umask decides: a
+ * pack is read by scanners running as other accounts. Its name never ends in
+ * .ksig or .kdig, so a loader scanning the directory cannot mistake it for a
+ * pack. On every failure it is removed.
+ *
+ * WINDOWS: MoveFileEx(REPLACE_EXISTING) is REFUSED while any process has the
+ * target mapped or open without FILE_SHARE_DELETE. That is not worked around
+ * here; the caller gets 0 and the old file is intact. See install_update_design.md.
+ * [Not compiled on Windows: written against the documented CRT/Win32 calls.]
+ *
+ * Returns 1 when `path` now holds exactly `data`, 0 otherwise (nothing changed).
+ */
+static inline int kof_write_file_atomic(const char *path, const void *data,
+					size_t len)
+{
+	char tmp[4096 + 48];
+	size_t n = path ? strlen(path) : 0;
+	unsigned long pid;
+	int fd = -1, ok = 0, k;
+
+	if (!path || !n || n > 4096u || (len && !data))
+		return 0;
+#ifdef _WIN32
+	pid = (unsigned long)GetCurrentProcessId();
+#else
+	pid = (unsigned long)getpid();
+#endif
+	for (k = 0; k < 16 && fd < 0; k++) {
+		snprintf(tmp, sizeof tmp, "%s.tmp%lu.%d", path, pid, k);
+#ifdef _WIN32
+		fd = _open(tmp, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+			   _S_IREAD | _S_IWRITE);
+#else
+		fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0666);
+#endif
+	}
+	if (fd < 0)
+		return 0;
+	ok = kof_write_all(fd, data, (uint64_t)len);
+#ifdef _WIN32
+	if (ok && _commit(fd) != 0)
+		ok = 0;
+	if (_close(fd) != 0)
+		ok = 0;
+#else
+	if (ok && fsync(fd) != 0)
+		ok = 0;
+	if (close(fd) != 0)
+		ok = 0;
+#endif
+	if (ok && !kof_rename_over(tmp, path))
+		ok = 0;
+	if (!ok) {
+		remove(tmp);
+		return 0;
+	}
+#ifndef _WIN32
+	/* The directory entry, so the rename itself is durable. Best effort: a
+	 * file system that cannot fsync a directory has still done the rename. */
+	{
+		char dir[4096 + 2];
+		const char *sl = strrchr(path, '/');
+		int dfd;
+
+		if (!sl)
+			memcpy(dir, ".", 2);
+		else if (sl == path)
+			memcpy(dir, "/", 2);
+		else {
+			memcpy(dir, path, (size_t)(sl - path));
+			dir[sl - path] = 0;
+		}
+		dfd = open(dir, O_RDONLY);
+		if (dfd >= 0) {
+			(void)fsync(dfd);
+			close(dfd);
+		}
+	}
+#endif
+	return 1;
+}
+
 #endif /* KOFENG_KOFPLATFORM_FILE_H */

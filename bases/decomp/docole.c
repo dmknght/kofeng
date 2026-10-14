@@ -76,8 +76,9 @@ KOF_TARGET_CONTENT("OVBA");
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_docole_info *o = kof_docole(ctx);
-	uint64_t got, raw;
-	uint32_t i, r, opened = 0;
+	const struct kof_docole_entry *e;
+	uint64_t got;
+	uint32_t cur = 0, opened = 0;
 
 	if (!o->valid)
 		return;
@@ -149,15 +150,16 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * compression window, so a signature relying on it works on one sample and
 	 * silently misses its variant.
 	 */
-	for (i = 0; i < o->n_entries; i++) {
-		const struct kof_docole_entry *e = &o->ent[i];
-
+	/* A walk and not an array: the document has as many streams as its directory lists, which
+	 * is not a number this module can know (zip.c). The stream's index - what the host takes to
+	 * find its runs - is the cursor less one. */
+	while ((e = kof_docole_next(ctx, &cur)) != 0) {
 		if (e->cls != KOF_DOCOLE_CLS_MACROS || !e->n_runs)
 			continue;
 
 		if (e->flags & KOF_DOCOLE_ENT_OVBA) {
 			kunp_rcstruct_name(e->name_off, e->name_len);
-			if (kunp_static_entry(KOF_UNP_OVBA, i, 0)) {
+			if (kunp_static_entry(KOF_UNP_OVBA, cur - 1u, 0)) {
 				if (!kunp_rcstruct_done())
 					break;   /* the host will take no more */
 				opened++;
@@ -174,20 +176,18 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		 * they go out as a window rather than being dropped: it costs no
 		 * budget and it is the only way anything sees them.
 		 */
-		raw = 0;
-		for (r = 0; r < e->n_runs; r++)
-			raw += o->ent_run[e->first_run + r].len;
-		if (raw && e->n_runs == 1u) {
+		if (e->run_bytes && e->n_runs == 1u) {
 			kunp_rcstruct_name(e->name_off, e->name_len);
-			if (!kunp_rcstruct_window(o->ent_run[e->first_run].off, raw))
-				break;
-			opened++;
+			/* A refusal is this stream's, not the table's end (see tar.c). */
+			if (kunp_rcstruct_window(e->first_off, e->run_bytes))
+				opened++;
 		}
 	}
 
 	kof_debug("DocOLE.macro_children", opened);
-	if (o->anomalies & KOF_DOCOLE_ANOM_ENTRIES_FULL)
-		kunp_rcstruct_broken(KOF_UNP_LIMIT);
+	/* A table of the parse that could not grow is the engine's to report: it reads
+	 * ENTRIES_FULL, ENT_RUNS_FULL, EXTENTS_FULL and WORK_FULL after the parse
+	 * (kof_parser_cut_bits). */
 
 	if (o->region_bytes[KOF_DOCOLE_CLS_DATA]) {
 		got = kunp_static_gather(KOF_SCAN_DOCOLE_CONTENT_DATA, GATHER_CAP);

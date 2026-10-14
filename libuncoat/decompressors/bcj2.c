@@ -103,12 +103,14 @@ static int is_branch(uint8_t prev, uint8_t b)
 
 uint64_t kuncoat_bcj2_decode(const struct kuncoat_bcj2_io *io)
 {
-	const uint8_t *main_p = io->main_s.p, *call_p = io->call_s.p;
-	const uint8_t *jump_p = io->jump_s.p, *rc_p = io->rc_s.p;
-	const uint64_t main_n = io->main_s.n, call_n = io->call_s.n;
-	const uint64_t jump_n = io->jump_s.n, rc_n = io->rc_s.n;
-	uint8_t *out = io->out;
-	const uint64_t out_cap = io->out_cap;
+	static const struct kuncoat_bcj2_io none;      /* all NULL, zero: answers 0 below */
+	const struct kuncoat_bcj2_io *q = io ? io : &none;
+	const uint8_t *main_p = q->main_s.p, *call_p = q->call_s.p;
+	const uint8_t *jump_p = q->jump_s.p, *rc_p = q->rc_s.p;
+	const uint64_t main_n = q->main_s.n, call_n = q->call_s.n;
+	const uint64_t jump_n = q->jump_s.n, rc_n = q->rc_s.n;
+	uint8_t *out = q->out;
+	const uint64_t out_cap = q->out_cap;
 	uint16_t prob[N_PROBS];
 	struct rc r;
 	uint64_t at = 0, mi = 0, ci = 0, ji = 0;

@@ -105,6 +105,12 @@ uint64_t kof_cfm_find_tag(kof_buf f, uint64_t look, uint32_t *taglen)
 void kof_cfm_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 {
 	uint64_t i = from;
+	/*
+	 * No "</cfscript>" after one block's opening tag means none after any
+	 * later one's, so the search is made once. Asked from each of n unclosed
+	 * "<cfscript>" it walked to the end of the object n times.
+	 */
+	int no_cfscript_close = 0;
 
 	while (i < f.n && info->n_island < KOF_SCRIPT_MAX_ISLAND) {
 		uint64_t open, end;
@@ -145,9 +151,12 @@ void kof_cfm_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 			 * its own, so the length guard that used to stand here
 			 * is gone with the bound it was protecting.
 			 */
-			k = kof_txt_find(f, end, f.n, "</cfscript>", 11u);
+			k = no_cfscript_close ? KOF_TXT_NONE :
+			    kof_txt_find(f, end, f.n, "</cfscript>", 11u);
 			if (k != KOF_TXT_NONE)
 				end = k + 11u;
+			else
+				no_cfscript_close = 1;
 		} else {
 			end = cfm_tag_end(f, open, f.n);
 		}

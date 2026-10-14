@@ -16,97 +16,103 @@
  * one thing that can be shared between the two platforms - see the note on
  * enum kgenome_nucleo_cap.
  */
-static const struct { const char *name; uint16_t cap; }
+/* WHICH ARGUMENT OF A NAMED CALL REFINES ITS CAPABILITY, by the table's own row - see
+ * kgenome_nucleo_cap_of_call. It was three spellings of the same names in a second
+ * function (strcmp against "VirtualAlloc", "VirtualProtect", "socket", "WSASocketA/W"),
+ * so a name added here had to be added there too; one row now says both. */
+enum { REFINE_NONE = 0, REFINE_PROT_ARG3, REFINE_PROT_ARG2, REFINE_SOCK };
+
+static const struct { const char *name; uint16_t cap; uint8_t refine; }
 names[] = {
 	/* POSIX */
-	{ "mmap",           KGENOME_NUCLEO_ALLOC },
-	{ "mmap64",         KGENOME_NUCLEO_ALLOC },
-	{ "mprotect",       KGENOME_NUCLEO_ALLOC },
+	{ .name = "mmap", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "mmap64", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "mprotect", .cap = KGENOME_NUCLEO_ALLOC },
 	/* Not a finding on its own - see KGENOME_NUCLEO_HEAP - and here so that a
 	 * buffer two transfers share has a name. posix_memalign is left
 	 * out: it hands the pointer back THROUGH one, and nothing here
 	 * carries an output argument, so the step would make something
 	 * nothing could hold. */
-	{ "malloc",         KGENOME_NUCLEO_HEAP },
-	{ "calloc",         KGENOME_NUCLEO_HEAP },
-	{ "realloc",        KGENOME_NUCLEO_HEAP },
-	{ "reallocarray",   KGENOME_NUCLEO_HEAP },
-	{ "aligned_alloc",  KGENOME_NUCLEO_HEAP },
-	{ "memalign",       KGENOME_NUCLEO_HEAP },
-	{ "_Znwm",          KGENOME_NUCLEO_HEAP },  /* new    */
-	{ "_Znam",          KGENOME_NUCLEO_HEAP },  /* new[]  */
-	{ "socket",         KGENOME_NUCLEO_NET_OPEN },
-	{ "socketpair",     KGENOME_NUCLEO_NET_OPEN },
+	{ .name = "malloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "calloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "realloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "reallocarray", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "aligned_alloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "memalign", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "_Znwm", .cap = KGENOME_NUCLEO_HEAP },  /* new    */
+	{ .name = "_Znam", .cap = KGENOME_NUCLEO_HEAP },  /* new[]  */
+	{ .name = "socket", .cap = KGENOME_NUCLEO_NET_OPEN, .refine = REFINE_SOCK },
+	{ .name = "socketpair", .cap = KGENOME_NUCLEO_NET_OPEN },
 	/* Not a finding on its own - see KGENOME_NUCLEO_PIPE_OPEN - and here so
 	 * the step has a name and so a dynamically linked object calling
 	 * pipe@plt reaches the same word as a static one. */
-	{ "pipe",           KGENOME_NUCLEO_PIPE_OPEN },
-	{ "pipe2",          KGENOME_NUCLEO_PIPE_OPEN },
-	{ "connect",        KGENOME_NUCLEO_NET_CONNECT },
-	{ "accept",         KGENOME_NUCLEO_NET_ACCEPT },
-	{ "accept4",        KGENOME_NUCLEO_NET_ACCEPT },
-	{ "bind",           KGENOME_NUCLEO_NET_BIND },
-	{ "listen",         KGENOME_NUCLEO_NET_LISTEN },
-	{ "recv",           KGENOME_NUCLEO_NET_READ },
-	{ "recvfrom",       KGENOME_NUCLEO_NET_READ },
-	{ "recvmsg",        KGENOME_NUCLEO_NET_READ },
-	{ "read",           KGENOME_NUCLEO_MEM_READ },
-	{ "send",           KGENOME_NUCLEO_NET_WRITE },
-	{ "sendto",         KGENOME_NUCLEO_NET_WRITE },
-	{ "sendmsg",        KGENOME_NUCLEO_NET_WRITE },
-	{ "write",          KGENOME_NUCLEO_MEM_WRITE },
-	{ "open",           KGENOME_NUCLEO_FILE_OPEN },
-	{ "open64",         KGENOME_NUCLEO_FILE_OPEN },
-	{ "openat",         KGENOME_NUCLEO_FILE_OPEN },
-	{ "fopen",          KGENOME_NUCLEO_FILE_OPEN },
-	{ "memfd_create",   KGENOME_NUCLEO_MEMFD },
-	{ "execve",         KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "execv",          KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "execl",          KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "execlp",         KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "execvp",         KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "system",         KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "popen",          KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "fork",           KGENOME_NUCLEO_SPAWN },
-	{ "vfork",          KGENOME_NUCLEO_SPAWN },
+	{ .name = "pipe", .cap = KGENOME_NUCLEO_PIPE_OPEN },
+	{ .name = "pipe2", .cap = KGENOME_NUCLEO_PIPE_OPEN },
+	{ .name = "connect", .cap = KGENOME_NUCLEO_NET_CONNECT },
+	{ .name = "accept", .cap = KGENOME_NUCLEO_NET_ACCEPT },
+	{ .name = "accept4", .cap = KGENOME_NUCLEO_NET_ACCEPT },
+	{ .name = "bind", .cap = KGENOME_NUCLEO_NET_BIND },
+	{ .name = "listen", .cap = KGENOME_NUCLEO_NET_LISTEN },
+	{ .name = "recv", .cap = KGENOME_NUCLEO_NET_READ },
+	{ .name = "recvfrom", .cap = KGENOME_NUCLEO_NET_READ },
+	{ .name = "recvmsg", .cap = KGENOME_NUCLEO_NET_READ },
+	{ .name = "read", .cap = KGENOME_NUCLEO_MEM_READ },
+	{ .name = "send", .cap = KGENOME_NUCLEO_NET_WRITE },
+	{ .name = "sendto", .cap = KGENOME_NUCLEO_NET_WRITE },
+	{ .name = "sendmsg", .cap = KGENOME_NUCLEO_NET_WRITE },
+	{ .name = "write", .cap = KGENOME_NUCLEO_MEM_WRITE },
+	{ .name = "open", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "open64", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "openat", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "fopen", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "memfd_create", .cap = KGENOME_NUCLEO_MEMFD },
+	{ .name = "execve", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "execv", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "execl", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "execlp", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "execvp", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "system", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "popen", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "fork", .cap = KGENOME_NUCLEO_SPAWN },
+	{ .name = "vfork", .cap = KGENOME_NUCLEO_SPAWN },
 	/* The libc wrapper, whose flags are its THIRD argument rather than its
 	 * first - a different convention from the syscall, and past what is
 	 * refined here. It stays the weaker claim. */
-	{ "clone",          KGENOME_NUCLEO_SPAWN },
+	{ .name = "clone", .cap = KGENOME_NUCLEO_SPAWN },
 	/* No flags to read and no ambiguity: the name IS the claim. */
-	{ "pthread_create", KGENOME_NUCLEO_THREAD },
-	{ "daemon",         KGENOME_NUCLEO_SPAWN },
-	{ "sleep",          KGENOME_NUCLEO_SLEEP },
-	{ "usleep",         KGENOME_NUCLEO_SLEEP },
-	{ "nanosleep",      KGENOME_NUCLEO_SLEEP },
-	{ "ptrace",         KGENOME_NUCLEO_PTRACE },
+	{ .name = "pthread_create", .cap = KGENOME_NUCLEO_THREAD },
+	{ .name = "daemon", .cap = KGENOME_NUCLEO_SPAWN },
+	{ .name = "sleep", .cap = KGENOME_NUCLEO_SLEEP },
+	{ .name = "usleep", .cap = KGENOME_NUCLEO_SLEEP },
+	{ .name = "nanosleep", .cap = KGENOME_NUCLEO_SLEEP },
+	{ .name = "ptrace", .cap = KGENOME_NUCLEO_PTRACE },
 	/* Windows, for the same words */
-	{ "VirtualAlloc",   KGENOME_NUCLEO_ALLOC },
-	{ "VirtualAllocEx", KGENOME_NUCLEO_ALLOC },
-	{ "VirtualProtect", KGENOME_NUCLEO_ALLOC },
-	{ "HeapAlloc",      KGENOME_NUCLEO_HEAP },
-	{ "HeapReAlloc",    KGENOME_NUCLEO_HEAP },
-	{ "RtlAllocateHeap", KGENOME_NUCLEO_HEAP },
-	{ "LocalAlloc",     KGENOME_NUCLEO_HEAP },
-	{ "GlobalAlloc",    KGENOME_NUCLEO_HEAP },
-	{ "CoTaskMemAlloc", KGENOME_NUCLEO_HEAP },
-	{ "WSASocketA",     KGENOME_NUCLEO_NET_OPEN },
-	{ "WSASocketW",     KGENOME_NUCLEO_NET_OPEN },
-	{ "InternetOpenA",  KGENOME_NUCLEO_HTTP_OPEN },
-	{ "InternetOpenW",  KGENOME_NUCLEO_HTTP_OPEN },
-	{ "WSAConnect",     KGENOME_NUCLEO_NET_CONNECT },
-	{ "InternetConnectA", KGENOME_NUCLEO_HTTP_CONNECT },
-	{ "InternetConnectW", KGENOME_NUCLEO_HTTP_CONNECT },
-	{ "CreateFileA",    KGENOME_NUCLEO_FILE_OPEN },
-	{ "CreateFileW",    KGENOME_NUCLEO_FILE_OPEN },
-	{ "WriteFile",      KGENOME_NUCLEO_MEM_WRITE },
-	{ "ReadFile",       KGENOME_NUCLEO_MEM_READ },
-	{ "CreateProcessA", KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "CreateProcessW", KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "WinExec",        KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "ShellExecuteA",  KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "ShellExecuteW",  KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "CreateThread",   KGENOME_NUCLEO_THREAD },
+	{ .name = "VirtualAlloc", .cap = KGENOME_NUCLEO_ALLOC, .refine = REFINE_PROT_ARG3 },
+	{ .name = "VirtualAllocEx", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "VirtualProtect", .cap = KGENOME_NUCLEO_ALLOC, .refine = REFINE_PROT_ARG2 },
+	{ .name = "HeapAlloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "HeapReAlloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "RtlAllocateHeap", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "LocalAlloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "GlobalAlloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "CoTaskMemAlloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "WSASocketA", .cap = KGENOME_NUCLEO_NET_OPEN, .refine = REFINE_SOCK },
+	{ .name = "WSASocketW", .cap = KGENOME_NUCLEO_NET_OPEN, .refine = REFINE_SOCK },
+	{ .name = "InternetOpenA", .cap = KGENOME_NUCLEO_HTTP_OPEN },
+	{ .name = "InternetOpenW", .cap = KGENOME_NUCLEO_HTTP_OPEN },
+	{ .name = "WSAConnect", .cap = KGENOME_NUCLEO_NET_CONNECT },
+	{ .name = "InternetConnectA", .cap = KGENOME_NUCLEO_HTTP_CONNECT },
+	{ .name = "InternetConnectW", .cap = KGENOME_NUCLEO_HTTP_CONNECT },
+	{ .name = "CreateFileA", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "CreateFileW", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "WriteFile", .cap = KGENOME_NUCLEO_MEM_WRITE },
+	{ .name = "ReadFile", .cap = KGENOME_NUCLEO_MEM_READ },
+	{ .name = "CreateProcessA", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "CreateProcessW", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "WinExec", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "ShellExecuteA", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "ShellExecuteW", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "CreateThread", .cap = KGENOME_NUCLEO_THREAD },
 	/*
 	 * THE REST OF THE WINDOWS SURFACE, and it was not a short list.
 	 *
@@ -119,19 +125,19 @@ names[] = {
 	 */
 	/* ws2_32 exports these under their POSIX spellings, which the rows
 	 * above already carry; what is listed here is only what it adds. */
-	{ "WSARecv",        KGENOME_NUCLEO_NET_READ },
-	{ "WSASend",        KGENOME_NUCLEO_NET_WRITE },
-	{ "WSAAccept",      KGENOME_NUCLEO_NET_ACCEPT },
-	{ "closesocket",    KGENOME_NUCLEO_NET_OPEN },
-	{ "InternetOpenUrlA", KGENOME_NUCLEO_HTTP_SEND },
-	{ "InternetOpenUrlW", KGENOME_NUCLEO_HTTP_SEND },
-	{ "InternetReadFile", KGENOME_NUCLEO_HTTP_RECV },
-	{ "HttpSendRequestA", KGENOME_NUCLEO_HTTP_SEND },
-	{ "HttpSendRequestW", KGENOME_NUCLEO_HTTP_SEND },
-	{ "HttpOpenRequestA", KGENOME_NUCLEO_HTTP_CONNECT },
-	{ "HttpOpenRequestW", KGENOME_NUCLEO_HTTP_CONNECT },
-	{ "URLDownloadToFileA", KGENOME_NUCLEO_HTTP_FETCH },
-	{ "URLDownloadToFileW", KGENOME_NUCLEO_HTTP_FETCH },
+	{ .name = "WSARecv", .cap = KGENOME_NUCLEO_NET_READ },
+	{ .name = "WSASend", .cap = KGENOME_NUCLEO_NET_WRITE },
+	{ .name = "WSAAccept", .cap = KGENOME_NUCLEO_NET_ACCEPT },
+	{ .name = "closesocket", .cap = KGENOME_NUCLEO_NET_OPEN },
+	{ .name = "InternetOpenUrlA", .cap = KGENOME_NUCLEO_HTTP_SEND },
+	{ .name = "InternetOpenUrlW", .cap = KGENOME_NUCLEO_HTTP_SEND },
+	{ .name = "InternetReadFile", .cap = KGENOME_NUCLEO_HTTP_RECV },
+	{ .name = "HttpSendRequestA", .cap = KGENOME_NUCLEO_HTTP_SEND },
+	{ .name = "HttpSendRequestW", .cap = KGENOME_NUCLEO_HTTP_SEND },
+	{ .name = "HttpOpenRequestA", .cap = KGENOME_NUCLEO_HTTP_CONNECT },
+	{ .name = "HttpOpenRequestW", .cap = KGENOME_NUCLEO_HTTP_CONNECT },
+	{ .name = "URLDownloadToFileA", .cap = KGENOME_NUCLEO_HTTP_FETCH },
+	{ .name = "URLDownloadToFileW", .cap = KGENOME_NUCLEO_HTTP_FETCH },
 	/*
 	 * THE WINDOWS SPELLING OF A REDIRECTED SHELL, which the table had
 	 * only the POSIX half of.
@@ -142,62 +148,62 @@ names[] = {
 	 * only one of the three in this table. The producer and the
 	 * redirect are what make it a sentence rather than three words.
 	 */
-	{ "CreatePipe",     KGENOME_NUCLEO_PIPE_OPEN },
-	{ "SetStdHandle",   KGENOME_NUCLEO_FD_REDIR },
-	{ "DuplicateHandle", KGENOME_NUCLEO_FD_REDIR },
-	{ "WinHttpOpen",    KGENOME_NUCLEO_HTTP_OPEN },
-	{ "WinHttpConnect", KGENOME_NUCLEO_HTTP_CONNECT },
-	{ "WinHttpOpenRequest", KGENOME_NUCLEO_HTTP_CONNECT },
-	{ "WinHttpSendRequest", KGENOME_NUCLEO_HTTP_SEND },
-	{ "WinHttpReadData", KGENOME_NUCLEO_HTTP_RECV },
+	{ .name = "CreatePipe", .cap = KGENOME_NUCLEO_PIPE_OPEN },
+	{ .name = "SetStdHandle", .cap = KGENOME_NUCLEO_FD_REDIR },
+	{ .name = "DuplicateHandle", .cap = KGENOME_NUCLEO_FD_REDIR },
+	{ .name = "WinHttpOpen", .cap = KGENOME_NUCLEO_HTTP_OPEN },
+	{ .name = "WinHttpConnect", .cap = KGENOME_NUCLEO_HTTP_CONNECT },
+	{ .name = "WinHttpOpenRequest", .cap = KGENOME_NUCLEO_HTTP_CONNECT },
+	{ .name = "WinHttpSendRequest", .cap = KGENOME_NUCLEO_HTTP_SEND },
+	{ .name = "WinHttpReadData", .cap = KGENOME_NUCLEO_HTTP_RECV },
 	/* A mapping is a mapping, whichever name asks for it. */
-	{ "VirtualProtectEx", KGENOME_NUCLEO_ALLOC },
-	{ "NtAllocateVirtualMemory", KGENOME_NUCLEO_ALLOC },
-	{ "NtProtectVirtualMemory", KGENOME_NUCLEO_ALLOC },
-	{ "ZwAllocateVirtualMemory", KGENOME_NUCLEO_ALLOC },
-	{ "ZwProtectVirtualMemory", KGENOME_NUCLEO_ALLOC },
-	{ "CreateFileMappingA", KGENOME_NUCLEO_ALLOC },
-	{ "CreateFileMappingW", KGENOME_NUCLEO_ALLOC },
-	{ "MapViewOfFile",  KGENOME_NUCLEO_ALLOC },
-	{ "MapViewOfFileEx", KGENOME_NUCLEO_ALLOC },
+	{ .name = "VirtualProtectEx", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "NtAllocateVirtualMemory", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "NtProtectVirtualMemory", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "ZwAllocateVirtualMemory", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "ZwProtectVirtualMemory", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "CreateFileMappingA", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "CreateFileMappingW", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "MapViewOfFile", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "MapViewOfFileEx", .cap = KGENOME_NUCLEO_ALLOC },
 	/* The handle, the memory and the execution - see the note on the
 	 * three capabilities in kofmod/kofcap.h. */
-	{ "OpenProcess",    KGENOME_NUCLEO_PTRACE },
-	{ "DebugActiveProcess", KGENOME_NUCLEO_PTRACE },
+	{ .name = "OpenProcess", .cap = KGENOME_NUCLEO_PTRACE },
+	{ .name = "DebugActiveProcess", .cap = KGENOME_NUCLEO_PTRACE },
 	/* A thread handle is the same kind of hold on another execution
 	 * context, and it is what SetThreadContext and ResumeThread are
 	 * handed - they were modelled and the handle they take was not. */
-	{ "OpenThread",     KGENOME_NUCLEO_PTRACE },
-	{ "WriteProcessMemory", KGENOME_NUCLEO_PROC_MEM },
-	{ "ReadProcessMemory", KGENOME_NUCLEO_PROC_MEM },
-	{ "NtWriteVirtualMemory", KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "OpenThread", .cap = KGENOME_NUCLEO_PTRACE },
+	{ .name = "WriteProcessMemory", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "ReadProcessMemory", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "NtWriteVirtualMemory", .cap = KGENOME_NUCLEO_PROC_MEM },
 	/* Reading another thread's registers, and emptying another image
 	 * out of its address space: the two legs of hollowing whose other
 	 * halves - SetThreadContext and WriteProcessMemory - were already
 	 * here. */
-	{ "GetThreadContext", KGENOME_NUCLEO_PROC_MEM },
-	{ "NtUnmapViewOfSection", KGENOME_NUCLEO_PROC_MEM },
-	{ "ZwUnmapViewOfSection", KGENOME_NUCLEO_PROC_MEM },
-	{ "CreateRemoteThread", KGENOME_NUCLEO_PROC_EXEC },
-	{ "CreateRemoteThreadEx", KGENOME_NUCLEO_PROC_EXEC },
-	{ "NtQueueApcThread", KGENOME_NUCLEO_PROC_EXEC },
-	{ "QueueUserAPC",   KGENOME_NUCLEO_PROC_EXEC },
-	{ "SetThreadContext", KGENOME_NUCLEO_PROC_EXEC },
-	{ "NtResumeThread", KGENOME_NUCLEO_PROC_EXEC },
-	{ "SuspendThread",  KGENOME_NUCLEO_PROC_EXEC },
-	{ "NtSuspendThread", KGENOME_NUCLEO_PROC_EXEC },
-	{ "ResumeThread",   KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "GetThreadContext", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "NtUnmapViewOfSection", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "ZwUnmapViewOfSection", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "CreateRemoteThread", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "CreateRemoteThreadEx", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "NtQueueApcThread", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "QueueUserAPC", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "SetThreadContext", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "NtResumeThread", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "SuspendThread", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "NtSuspendThread", .cap = KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "ResumeThread", .cap = KGENOME_NUCLEO_PROC_EXEC },
 	/* The loader pair, which is what a program has INSTEAD of an import
 	 * table entry - see KGENOME_NUCLEO_RESOLVE. */
-	{ "LoadLibraryA",   KGENOME_NUCLEO_LIB_OPEN },
-	{ "LoadLibraryW",   KGENOME_NUCLEO_LIB_OPEN },
-	{ "LoadLibraryExA", KGENOME_NUCLEO_LIB_OPEN },
-	{ "LoadLibraryExW", KGENOME_NUCLEO_LIB_OPEN },
-	{ "GetProcAddress", KGENOME_NUCLEO_RESOLVE },
-	{ "LdrLoadDll",     KGENOME_NUCLEO_LIB_OPEN },
-	{ "LdrGetProcedureAddress", KGENOME_NUCLEO_RESOLVE },
-	{ "dlopen",         KGENOME_NUCLEO_LIB_OPEN },
-	{ "dlsym",          KGENOME_NUCLEO_RESOLVE },
+	{ .name = "LoadLibraryA", .cap = KGENOME_NUCLEO_LIB_OPEN },
+	{ .name = "LoadLibraryW", .cap = KGENOME_NUCLEO_LIB_OPEN },
+	{ .name = "LoadLibraryExA", .cap = KGENOME_NUCLEO_LIB_OPEN },
+	{ .name = "LoadLibraryExW", .cap = KGENOME_NUCLEO_LIB_OPEN },
+	{ .name = "GetProcAddress", .cap = KGENOME_NUCLEO_RESOLVE },
+	{ .name = "LdrLoadDll", .cap = KGENOME_NUCLEO_LIB_OPEN },
+	{ .name = "LdrGetProcedureAddress", .cap = KGENOME_NUCLEO_RESOLVE },
+	{ .name = "dlopen", .cap = KGENOME_NUCLEO_LIB_OPEN },
+	{ .name = "dlsym", .cap = KGENOME_NUCLEO_RESOLVE },
 	/* Writes only; a program reading its own configuration is every
 	 * program - see KGENOME_NUCLEO_REG_SET. */
 	/* And where the handle they are given comes from - see
@@ -205,25 +211,25 @@ names[] = {
 	/* Windows' spelling of rename - the word already existed for the
 	 * POSIX one, see KGENOME_NUCLEO_FILE_RENAME, and only the name was
 	 * missing. 16 of the 128 measured PE import MoveFileW. */
-	{ "MoveFileA",      KGENOME_NUCLEO_FILE_RENAME },
-	{ "MoveFileW",      KGENOME_NUCLEO_FILE_RENAME },
-	{ "MoveFileExA",    KGENOME_NUCLEO_FILE_RENAME },
-	{ "MoveFileExW",    KGENOME_NUCLEO_FILE_RENAME },
-	{ "MoveFileWithProgressW", KGENOME_NUCLEO_FILE_RENAME },
-	{ "RegOpenKeyExA",  KGENOME_NUCLEO_REG_OPEN },
-	{ "RegOpenKeyExW",  KGENOME_NUCLEO_REG_OPEN },
-	{ "RegOpenKeyA",    KGENOME_NUCLEO_REG_OPEN },
-	{ "RegOpenKeyW",    KGENOME_NUCLEO_REG_OPEN },
-	{ "NtOpenKey",      KGENOME_NUCLEO_REG_OPEN },
-	{ "NtOpenKeyEx",    KGENOME_NUCLEO_REG_OPEN },
-	{ "RegSetValueExA", KGENOME_NUCLEO_REG_SET },
-	{ "RegSetValueExW", KGENOME_NUCLEO_REG_SET },
-	{ "RegCreateKeyExA", KGENOME_NUCLEO_REG_SET },
-	{ "RegCreateKeyExW", KGENOME_NUCLEO_REG_SET },
-	{ "RegDeleteValueA", KGENOME_NUCLEO_REG_SET },
-	{ "RegDeleteValueW", KGENOME_NUCLEO_REG_SET },
-	{ "NtSetValueKey",  KGENOME_NUCLEO_REG_SET },
-	{ "Sleep",          KGENOME_NUCLEO_SLEEP },
+	{ .name = "MoveFileA", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "MoveFileW", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "MoveFileExA", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "MoveFileExW", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "MoveFileWithProgressW", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "RegOpenKeyExA", .cap = KGENOME_NUCLEO_REG_OPEN },
+	{ .name = "RegOpenKeyExW", .cap = KGENOME_NUCLEO_REG_OPEN },
+	{ .name = "RegOpenKeyA", .cap = KGENOME_NUCLEO_REG_OPEN },
+	{ .name = "RegOpenKeyW", .cap = KGENOME_NUCLEO_REG_OPEN },
+	{ .name = "NtOpenKey", .cap = KGENOME_NUCLEO_REG_OPEN },
+	{ .name = "NtOpenKeyEx", .cap = KGENOME_NUCLEO_REG_OPEN },
+	{ .name = "RegSetValueExA", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegSetValueExW", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegCreateKeyExA", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegCreateKeyExW", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegDeleteValueA", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegDeleteValueW", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "NtSetValueKey", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "Sleep", .cap = KGENOME_NUCLEO_SLEEP },
 
 	/*
 	 * THE ROWS THE RANKING CHOSE. Measured over the whole corpus here -
@@ -232,19 +238,19 @@ names[] = {
 	 * See KGENOME_NUCLEO_NET_ADDR for the rates and for what the ranking
 	 * rejected.
 	 */
-	{ "htons",          KGENOME_NUCLEO_NET_ADDR },
-	{ "htonl",          KGENOME_NUCLEO_NET_ADDR },
-	{ "ntohs",          KGENOME_NUCLEO_NET_ADDR },
-	{ "ntohl",          KGENOME_NUCLEO_NET_ADDR },
-	{ "inet_addr",      KGENOME_NUCLEO_NET_ADDR },
-	{ "inet_aton",      KGENOME_NUCLEO_NET_ADDR },
-	{ "inet_pton",      KGENOME_NUCLEO_NET_ADDR },
-	{ "inet_ntoa",      KGENOME_NUCLEO_NET_ADDR },
-	{ "inet_network",   KGENOME_NUCLEO_NET_ADDR },
-	{ "gethostbyname",  KGENOME_NUCLEO_DNS },
-	{ "getaddrinfo",    KGENOME_NUCLEO_DNS },
-	{ "prctl",          KGENOME_NUCLEO_SELF_HIDE },
-	{ "setsid",         KGENOME_NUCLEO_BACKGROUND },
+	{ .name = "htons", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "htonl", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "ntohs", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "ntohl", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "inet_addr", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "inet_aton", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "inet_pton", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "inet_ntoa", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "inet_network", .cap = KGENOME_NUCLEO_NET_ADDR },
+	{ .name = "gethostbyname", .cap = KGENOME_NUCLEO_DNS },
+	{ .name = "getaddrinfo", .cap = KGENOME_NUCLEO_DNS },
+	{ .name = "prctl", .cap = KGENOME_NUCLEO_SELF_HIDE },
+	{ .name = "setsid", .cap = KGENOME_NUCLEO_BACKGROUND },
 
 	/*
 	 * THE KERNEL, which is the same kind of table and a different side of
@@ -275,8 +281,8 @@ names[] = {
 	/* Credentials BUILT, then credentials INSTALLED - "give me root" is
 	 * the value passing from the first to the second, so the two halves
 	 * have separate words. See KGENOME_NUCLEO_CRED_PREPARE. */
-	{ "prepare_creds",  KGENOME_NUCLEO_CRED_PREPARE },
-	{ "prepare_kernel_cred", KGENOME_NUCLEO_CRED_PREPARE },
+	{ .name = "prepare_creds", .cap = KGENOME_NUCLEO_CRED_PREPARE },
+	{ .name = "prepare_kernel_cred", .cap = KGENOME_NUCLEO_CRED_PREPARE },
 	/*
 	 * ---- THE KERNEL'S ALLOCATORS ---------------------------------------
 	 *
@@ -300,23 +306,23 @@ names[] = {
 	 * list-surgery row gives: a table that knows only the old name is a
 	 * table about one kernel version.
 	 */
-	{ "__kmalloc",      KGENOME_NUCLEO_HEAP },
-	{ "__kmalloc_noprof", KGENOME_NUCLEO_HEAP },
-	{ "kmalloc",        KGENOME_NUCLEO_HEAP },
-	{ "kmalloc_noprof", KGENOME_NUCLEO_HEAP },
-	{ "kmalloc_trace",  KGENOME_NUCLEO_HEAP },
-	{ "kvmalloc_node",  KGENOME_NUCLEO_HEAP },
-	{ "kvmalloc_node_noprof", KGENOME_NUCLEO_HEAP },
-	{ "krealloc",       KGENOME_NUCLEO_HEAP },
-	{ "krealloc_noprof", KGENOME_NUCLEO_HEAP },
-	{ "kmem_cache_alloc", KGENOME_NUCLEO_HEAP },
-	{ "kmem_cache_alloc_noprof", KGENOME_NUCLEO_HEAP },
-	{ "vmalloc",        KGENOME_NUCLEO_HEAP },
-	{ "vmalloc_noprof", KGENOME_NUCLEO_HEAP },
-	{ "__vmalloc",      KGENOME_NUCLEO_HEAP },
-	{ "__vmalloc_node_range", KGENOME_NUCLEO_HEAP },
-	{ "commit_creds",   KGENOME_NUCLEO_CRED_SET },
-	{ "set_current_groups", KGENOME_NUCLEO_CRED_SET },
+	{ .name = "__kmalloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "__kmalloc_noprof", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kmalloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kmalloc_noprof", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kmalloc_trace", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kvmalloc_node", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kvmalloc_node_noprof", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "krealloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "krealloc_noprof", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kmem_cache_alloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "kmem_cache_alloc_noprof", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "vmalloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "vmalloc_noprof", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "__vmalloc", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "__vmalloc_node_range", .cap = KGENOME_NUCLEO_HEAP },
+	{ .name = "commit_creds", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "set_current_groups", .cap = KGENOME_NUCLEO_CRED_SET },
 	/*
 	 * A KPROBE PUT ON AND A KPROBE TAKEN OFF - two words, and neither of
 	 * them is "hook". See KGENOME_NUCLEO_KPROBE_REG for why this row has now
@@ -325,16 +331,16 @@ names[] = {
 	 * an idiom made of two calls needs two words to be written down.
 	 * Measured at 0 of 900 clean modules on each side.
 	 */
-	{ "register_kprobe", KGENOME_NUCLEO_KPROBE_REG },
-	{ "register_kprobes", KGENOME_NUCLEO_KPROBE_REG },
-	{ "unregister_kprobe", KGENOME_NUCLEO_KPROBE_UNREG },
-	{ "unregister_kprobes", KGENOME_NUCLEO_KPROBE_UNREG },
+	{ .name = "register_kprobe", .cap = KGENOME_NUCLEO_KPROBE_REG },
+	{ .name = "register_kprobes", .cap = KGENOME_NUCLEO_KPROBE_REG },
+	{ .name = "unregister_kprobe", .cap = KGENOME_NUCLEO_KPROBE_UNREG },
+	{ .name = "unregister_kprobes", .cap = KGENOME_NUCLEO_KPROBE_UNREG },
 	/* A RETURN probe cannot read an address and leave; it exists to run
 	 * code on somebody else's return, so it stays hooking. */
-	{ "register_kretprobe", KGENOME_NUCLEO_HOOK },
-	{ "unregister_kretprobe", KGENOME_NUCLEO_HOOK },
+	{ .name = "register_kretprobe", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "unregister_kretprobe", .cap = KGENOME_NUCLEO_HOOK },
 	/* Code of one's own put in the path of somebody else's. */
-	{ "unregister_ftrace_function", KGENOME_NUCLEO_HOOK },
+	{ .name = "unregister_ftrace_function", .cap = KGENOME_NUCLEO_HOOK },
 	/*
 	 * ---- write_cr0 / write_cr4 / mov_cr0 ARE OFF, ON PURPOSE --------
 	 *
@@ -353,8 +359,8 @@ names[] = {
 	 * so the membership cannot be measured yet. The value stays declared
 	 * and nothing produces it until it can be.
 	 */
-	/* { "write_cr0",   KGENOME_NUCLEO_PROT_OFF }, */
-	/* { "write_cr4",   KGENOME_NUCLEO_PROT_OFF }, */
+	/* { .name = "write_cr0", .cap = KGENOME_NUCLEO_PROT_OFF }, */
+	/* { .name = "write_cr4", .cap = KGENOME_NUCLEO_PROT_OFF }, */
 	/*
 	 * AND THE INSTRUCTION ITSELF, AS A NAME.
 	 *
@@ -366,17 +372,17 @@ names[] = {
 	 * can match this row by accident; it is reachable only by the sweep
 	 * naming it directly.
 	 */
-	{ "peb_ldr",        KGENOME_NUCLEO_SELF_RESOLVE },
-	{ "name_hash",      KGENOME_NUCLEO_NAME_HASH },
+	{ .name = "peb_ldr", .cap = KGENOME_NUCLEO_SELF_RESOLVE },
+	{ .name = "name_hash", .cap = KGENOME_NUCLEO_NAME_HASH },
 	/* off with the other two - see the note above them */
-	/* { "mov_cr0",     KGENOME_NUCLEO_PROT_OFF }, */
-	{ "register_ftrace_function", KGENOME_NUCLEO_HOOK },
-	{ "ftrace_set_filter_ip", KGENOME_NUCLEO_HOOK },
-	{ "register_ftrace_direct", KGENOME_NUCLEO_HOOK },
-	{ "text_poke",      KGENOME_NUCLEO_HOOK },
-	{ "text_poke_kgdb", KGENOME_NUCLEO_HOOK },
-	{ "set_memory_rw",  KGENOME_NUCLEO_HOOK },
-	{ "set_memory_x",   KGENOME_NUCLEO_HOOK },
+	/* { .name = "mov_cr0", .cap = KGENOME_NUCLEO_PROT_OFF }, */
+	{ .name = "register_ftrace_function", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "ftrace_set_filter_ip", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "register_ftrace_direct", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "text_poke", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "text_poke_kgdb", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "set_memory_rw", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "set_memory_x", .cap = KGENOME_NUCLEO_HOOK },
 	/*
 	 * An entry taken out of a kernel list, or put into one. EVERY
 	 * SPELLING, because the kernel renamed the check twice and a table
@@ -393,13 +399,13 @@ names[] = {
 	 * self-removal matched Diamorphine and missed it, for no reason to do
 	 * with what either of them does.
 	 */
-	{ "__list_del_entry", KGENOME_NUCLEO_LIST_HIDE },
-	{ "__list_del_entry_valid", KGENOME_NUCLEO_LIST_HIDE },
-	{ "__list_del_entry_valid_or_report", KGENOME_NUCLEO_LIST_HIDE },
-	{ "__list_add_valid", KGENOME_NUCLEO_LIST_HIDE },
-	{ "__list_add_valid_or_report", KGENOME_NUCLEO_LIST_HIDE },
-	{ "list_del",       KGENOME_NUCLEO_LIST_HIDE },
-	{ "list_add",       KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "__list_del_entry", .cap = KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "__list_del_entry_valid", .cap = KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "__list_del_entry_valid_or_report", .cap = KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "__list_add_valid", .cap = KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "__list_add_valid_or_report", .cap = KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "list_del", .cap = KGENOME_NUCLEO_LIST_HIDE },
+	{ .name = "list_add", .cap = KGENOME_NUCLEO_LIST_HIDE },
 	/*
 	 * AND THE WORDS THE KERNEL NEEDS OF ITS OWN.
 	 *
@@ -435,75 +441,75 @@ names[] = {
 	 * prefix: a prefix match would also take __x86_return_thunk, which is
 	 * a return and not a call.
 	 */
-	{ "__x86_indirect_thunk_rax", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_rbx", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_rcx", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_rdx", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_rsi", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_rdi", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_rbp", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r8", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r9", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r10", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r11", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r12", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r13", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r14", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_r15", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_eax", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_ebx", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_ecx", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_edx", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_esi", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_edi", KGENOME_NUCLEO_CALL_REG },
-	{ "__x86_indirect_thunk_ebp", KGENOME_NUCLEO_CALL_REG },
-	{ "kallsyms_lookup_name", KGENOME_NUCLEO_KSYM_LOOKUP },
-	{ "kallsyms_lookup_name_t", KGENOME_NUCLEO_KSYM_LOOKUP },
-	{ "__symbol_get",   KGENOME_NUCLEO_SYMBOL_GET },
+	{ .name = "__x86_indirect_thunk_rax", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_rbx", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_rcx", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_rdx", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_rsi", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_rdi", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_rbp", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r8", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r9", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r10", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r11", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r12", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r13", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r14", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_r15", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_eax", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_ebx", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_ecx", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_edx", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_esi", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_edi", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "__x86_indirect_thunk_ebp", .cap = KGENOME_NUCLEO_CALL_REG },
+	{ .name = "kallsyms_lookup_name", .cap = KGENOME_NUCLEO_KSYM_LOOKUP },
+	{ .name = "kallsyms_lookup_name_t", .cap = KGENOME_NUCLEO_KSYM_LOOKUP },
+	{ .name = "__symbol_get", .cap = KGENOME_NUCLEO_SYMBOL_GET },
 	/* ACROSS THE USER/KERNEL BOUNDARY, which is not a file - see
 	 * KGENOME_NUCLEO_COPY_FROM_USER. The rows under this one take a struct file
 	 * and really are file I/O. */
-	{ "_copy_from_user", KGENOME_NUCLEO_COPY_FROM_USER },
-	{ "copy_from_user", KGENOME_NUCLEO_COPY_FROM_USER },
-	{ "__copy_from_user", KGENOME_NUCLEO_COPY_FROM_USER },
-	{ "_copy_to_user",  KGENOME_NUCLEO_COPY_TO_USER },
-	{ "copy_to_user",   KGENOME_NUCLEO_COPY_TO_USER },
-	{ "__copy_to_user", KGENOME_NUCLEO_COPY_TO_USER },
-	{ "kernel_read",    KGENOME_NUCLEO_READ },
-	{ "kernel_write",   KGENOME_NUCLEO_WRITE },
-	{ "vfs_read",       KGENOME_NUCLEO_READ },
-	{ "vfs_write",      KGENOME_NUCLEO_WRITE },
-	{ "filp_open",      KGENOME_NUCLEO_FILE_OPEN },
-	{ "filp_close",     KGENOME_NUCLEO_FILE_OPEN },
-	{ "call_usermodehelper", KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "call_usermodehelper_exec", KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "kthread_create_on_node", KGENOME_NUCLEO_THREAD },
-	{ "kthread_run",    KGENOME_NUCLEO_THREAD },
-	{ "wake_up_process", KGENOME_NUCLEO_THREAD },
-	{ "sock_create",    KGENOME_NUCLEO_NET_OPEN },
-	{ "sock_create_kern", KGENOME_NUCLEO_NET_OPEN },
-	{ "kernel_connect", KGENOME_NUCLEO_NET_CONNECT },
-	{ "kernel_accept",  KGENOME_NUCLEO_NET_ACCEPT },
-	{ "kernel_sendmsg", KGENOME_NUCLEO_NET_WRITE },
-	{ "kernel_recvmsg", KGENOME_NUCLEO_NET_READ },
+	{ .name = "_copy_from_user", .cap = KGENOME_NUCLEO_COPY_FROM_USER },
+	{ .name = "copy_from_user", .cap = KGENOME_NUCLEO_COPY_FROM_USER },
+	{ .name = "__copy_from_user", .cap = KGENOME_NUCLEO_COPY_FROM_USER },
+	{ .name = "_copy_to_user", .cap = KGENOME_NUCLEO_COPY_TO_USER },
+	{ .name = "copy_to_user", .cap = KGENOME_NUCLEO_COPY_TO_USER },
+	{ .name = "__copy_to_user", .cap = KGENOME_NUCLEO_COPY_TO_USER },
+	{ .name = "kernel_read", .cap = KGENOME_NUCLEO_READ },
+	{ .name = "kernel_write", .cap = KGENOME_NUCLEO_WRITE },
+	{ .name = "vfs_read", .cap = KGENOME_NUCLEO_READ },
+	{ .name = "vfs_write", .cap = KGENOME_NUCLEO_WRITE },
+	{ .name = "filp_open", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "filp_close", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "call_usermodehelper", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "call_usermodehelper_exec", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "kthread_create_on_node", .cap = KGENOME_NUCLEO_THREAD },
+	{ .name = "kthread_run", .cap = KGENOME_NUCLEO_THREAD },
+	{ .name = "wake_up_process", .cap = KGENOME_NUCLEO_THREAD },
+	{ .name = "sock_create", .cap = KGENOME_NUCLEO_NET_OPEN },
+	{ .name = "sock_create_kern", .cap = KGENOME_NUCLEO_NET_OPEN },
+	{ .name = "kernel_connect", .cap = KGENOME_NUCLEO_NET_CONNECT },
+	{ .name = "kernel_accept", .cap = KGENOME_NUCLEO_NET_ACCEPT },
+	{ .name = "kernel_sendmsg", .cap = KGENOME_NUCLEO_NET_WRITE },
+	{ .name = "kernel_recvmsg", .cap = KGENOME_NUCLEO_NET_READ },
 	/*
 	 * AND THE WINDOWS KERNEL, which reaches this table the way every other
 	 * PE import does - the mechanism needs nothing new, only the words.
 	 */
-	{ "ZwCreateFile",   KGENOME_NUCLEO_FILE_OPEN },
-	{ "ZwOpenFile",     KGENOME_NUCLEO_FILE_OPEN },
-	{ "ZwReadFile",     KGENOME_NUCLEO_MEM_READ },
-	{ "ZwWriteFile",    KGENOME_NUCLEO_MEM_WRITE },
-	{ "MmGetSystemRoutineAddress", KGENOME_NUCLEO_RESOLVE },
-	{ "MmMapLockedPagesSpecifyCache", KGENOME_NUCLEO_PROC_MEM },
-	{ "MmMapLockedPages", KGENOME_NUCLEO_PROC_MEM },
-	{ "PsLookupProcessByProcessId", KGENOME_NUCLEO_PTRACE },
-	{ "PsSetCreateProcessNotifyRoutine", KGENOME_NUCLEO_HOOK },
-	{ "PsSetCreateProcessNotifyRoutineEx", KGENOME_NUCLEO_HOOK },
-	{ "PsSetLoadImageNotifyRoutine", KGENOME_NUCLEO_HOOK },
-	{ "ObRegisterCallbacks", KGENOME_NUCLEO_HOOK },
-	{ "PsCreateSystemThread", KGENOME_NUCLEO_THREAD },
-	{ "ZwTerminateProcess", KGENOME_NUCLEO_PROC_EXEC },
+	{ .name = "ZwCreateFile", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "ZwOpenFile", .cap = KGENOME_NUCLEO_FILE_OPEN },
+	{ .name = "ZwReadFile", .cap = KGENOME_NUCLEO_MEM_READ },
+	{ .name = "ZwWriteFile", .cap = KGENOME_NUCLEO_MEM_WRITE },
+	{ .name = "MmGetSystemRoutineAddress", .cap = KGENOME_NUCLEO_RESOLVE },
+	{ .name = "MmMapLockedPagesSpecifyCache", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "MmMapLockedPages", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "PsLookupProcessByProcessId", .cap = KGENOME_NUCLEO_PTRACE },
+	{ .name = "PsSetCreateProcessNotifyRoutine", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "PsSetCreateProcessNotifyRoutineEx", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "PsSetLoadImageNotifyRoutine", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "ObRegisterCallbacks", .cap = KGENOME_NUCLEO_HOOK },
+	{ .name = "PsCreateSystemThread", .cap = KGENOME_NUCLEO_THREAD },
+	{ .name = "ZwTerminateProcess", .cap = KGENOME_NUCLEO_PROC_EXEC },
 	/*
 	 * ===== THE WORDS ADDED WITH THE NINE CAPABILITIES AT THE END OF
 	 * enum kgenome_nucleo_cap. Each entry point here exists to do ONE thing;
@@ -512,58 +518,58 @@ names[] = {
 	 */
 	/* Encryption. Windows has two generations of the same API and both are
 	 * still shipped, so both are here. */
-	{ "CryptEncrypt",   KGENOME_NUCLEO_CRYPTO },
-	{ "CryptDecrypt",   KGENOME_NUCLEO_CRYPTO },
-	{ "CryptAcquireContextA", KGENOME_NUCLEO_CRYPTO },
-	{ "CryptAcquireContextW", KGENOME_NUCLEO_CRYPTO },
-	{ "CryptGenKey",    KGENOME_NUCLEO_CRYPTO },
-	{ "CryptDeriveKey", KGENOME_NUCLEO_CRYPTO },
-	{ "CryptImportKey", KGENOME_NUCLEO_CRYPTO },
-	{ "BCryptEncrypt",  KGENOME_NUCLEO_CRYPTO },
-	{ "BCryptDecrypt",  KGENOME_NUCLEO_CRYPTO },
-	{ "BCryptGenerateSymmetricKey", KGENOME_NUCLEO_CRYPTO },
-	{ "BCryptImportKeyPair", KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptEncrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptDecrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptAcquireContextA", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptAcquireContextW", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptGenKey", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptDeriveKey", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "CryptImportKey", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "BCryptEncrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "BCryptDecrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "BCryptGenerateSymmetricKey", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "BCryptImportKeyPair", .cap = KGENOME_NUCLEO_CRYPTO },
 	/* And the Linux side, which is OpenSSL in practice. The EVP names are
 	 * the ones a program links; the AES_ ones are the older direct calls
 	 * that statically linked malware still carries. */
-	{ "EVP_EncryptInit_ex", KGENOME_NUCLEO_CRYPTO },
-	{ "EVP_EncryptUpdate",  KGENOME_NUCLEO_CRYPTO },
-	{ "EVP_DecryptInit_ex", KGENOME_NUCLEO_CRYPTO },
-	{ "EVP_DecryptUpdate",  KGENOME_NUCLEO_CRYPTO },
-	{ "EVP_CipherInit_ex",  KGENOME_NUCLEO_CRYPTO },
-	{ "AES_set_encrypt_key", KGENOME_NUCLEO_CRYPTO },
-	{ "AES_cbc_encrypt",     KGENOME_NUCLEO_CRYPTO },
-	{ "AES_encrypt",         KGENOME_NUCLEO_CRYPTO },
-	{ "RSA_public_encrypt",  KGENOME_NUCLEO_CRYPTO },
-	{ "RSA_private_decrypt", KGENOME_NUCLEO_CRYPTO },
-	{ "crypto_secretbox_easy", KGENOME_NUCLEO_CRYPTO },
+	{ .name = "EVP_EncryptInit_ex", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "EVP_EncryptUpdate", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "EVP_DecryptInit_ex", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "EVP_DecryptUpdate", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "EVP_CipherInit_ex", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "AES_set_encrypt_key", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "AES_cbc_encrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "AES_encrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "RSA_public_encrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "RSA_private_decrypt", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "crypto_secretbox_easy", .cap = KGENOME_NUCLEO_CRYPTO },
 	/* Taking what the user is doing. */
-	{ "SetWindowsHookExA", KGENOME_NUCLEO_CAPTURE },
-	{ "SetWindowsHookExW", KGENOME_NUCLEO_CAPTURE },
-	{ "GetAsyncKeyState",  KGENOME_NUCLEO_CAPTURE },
-	{ "GetKeyboardState",  KGENOME_NUCLEO_CAPTURE },
-	{ "GetRawInputData",   KGENOME_NUCLEO_CAPTURE },
-	{ "RegisterRawInputDevices", KGENOME_NUCLEO_CAPTURE },
-	{ "GetClipboardData",  KGENOME_NUCLEO_CAPTURE },
-	{ "SetClipboardData",  KGENOME_NUCLEO_CAPTURE },
-	{ "XQueryKeymap",      KGENOME_NUCLEO_CAPTURE },
-	{ "XGrabKeyboard",     KGENOME_NUCLEO_CAPTURE },
+	{ .name = "SetWindowsHookExA", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "SetWindowsHookExW", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "GetAsyncKeyState", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "GetKeyboardState", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "GetRawInputData", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "RegisterRawInputDevices", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "GetClipboardData", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "SetClipboardData", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "XQueryKeymap", .cap = KGENOME_NUCLEO_CAPTURE },
+	{ .name = "XGrabKeyboard", .cap = KGENOME_NUCLEO_CAPTURE },
 	/* Installing itself as a service. */
-	{ "OpenSCManagerA",  KGENOME_NUCLEO_SVC_INSTALL },
-	{ "OpenSCManagerW",  KGENOME_NUCLEO_SVC_INSTALL },
-	{ "CreateServiceA",  KGENOME_NUCLEO_SVC_INSTALL },
-	{ "CreateServiceW",  KGENOME_NUCLEO_SVC_INSTALL },
-	{ "StartServiceA",   KGENOME_NUCLEO_SVC_INSTALL },
-	{ "StartServiceW",   KGENOME_NUCLEO_SVC_INSTALL },
-	{ "ChangeServiceConfigA", KGENOME_NUCLEO_SVC_INSTALL },
-	{ "ChangeServiceConfigW", KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "OpenSCManagerA", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "OpenSCManagerW", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "CreateServiceA", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "CreateServiceW", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "StartServiceA", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "StartServiceW", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "ChangeServiceConfigA", .cap = KGENOME_NUCLEO_SVC_INSTALL },
+	{ .name = "ChangeServiceConfigW", .cap = KGENOME_NUCLEO_SVC_INSTALL },
 	/* Code into the kernel. */
-	{ "init_module",    KGENOME_NUCLEO_MOD_LOAD },
-	{ "finit_module",   KGENOME_NUCLEO_MOD_LOAD },
-	{ "delete_module",  KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf",            KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_load_program", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_prog_load",  KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "init_module", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "finit_module", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "delete_module", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_load_program", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_prog_load", .cap = KGENOME_NUCLEO_MOD_LOAD },
 	/*
 	 * AND THE NAMES libbpf ACTUALLY EXPORTS, which are not the syscall's.
 	 *
@@ -580,55 +586,55 @@ names[] = {
 	 * every eBPF program uses them, so they say nothing about whether
 	 * this process put code in the kernel.
 	 */
-	{ "bpf_object__load", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_object__load_skeleton", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_object__attach_skeleton", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_program__attach", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_program__attach_kprobe", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_program__attach_uprobe", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_program__attach_tracepoint", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_program__attach_xdp", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_prog_attach", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_set_link_xdp_fd", KGENOME_NUCLEO_MOD_LOAD },
-	{ "bpf_tc_attach",  KGENOME_NUCLEO_MOD_LOAD },
-	{ "NtLoadDriver",   KGENOME_NUCLEO_MOD_LOAD },
-	{ "ZwLoadDriver",   KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_object__load", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_object__load_skeleton", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_object__attach_skeleton", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_program__attach", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_program__attach_kprobe", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_program__attach_uprobe", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_program__attach_tracepoint", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_program__attach_xdp", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_prog_attach", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_set_link_xdp_fd", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "bpf_tc_attach", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "NtLoadDriver", .cap = KGENOME_NUCLEO_MOD_LOAD },
+	{ .name = "ZwLoadDriver", .cap = KGENOME_NUCLEO_MOD_LOAD },
 	/* A named pipe, and only a named one. */
-	{ "CreateNamedPipeA", KGENOME_NUCLEO_PIPE },
-	{ "CreateNamedPipeW", KGENOME_NUCLEO_PIPE },
-	{ "ConnectNamedPipe", KGENOME_NUCLEO_PIPE },
-	{ "CallNamedPipeA",   KGENOME_NUCLEO_PIPE },
-	{ "CallNamedPipeW",   KGENOME_NUCLEO_PIPE },
-	{ "mkfifo",           KGENOME_NUCLEO_PIPE },
-	{ "mkfifoat",         KGENOME_NUCLEO_PIPE },
+	{ .name = "CreateNamedPipeA", .cap = KGENOME_NUCLEO_PIPE },
+	{ .name = "CreateNamedPipeW", .cap = KGENOME_NUCLEO_PIPE },
+	{ .name = "ConnectNamedPipe", .cap = KGENOME_NUCLEO_PIPE },
+	{ .name = "CallNamedPipeA", .cap = KGENOME_NUCLEO_PIPE },
+	{ .name = "CallNamedPipeW", .cap = KGENOME_NUCLEO_PIPE },
+	{ .name = "mkfifo", .cap = KGENOME_NUCLEO_PIPE },
+	{ .name = "mkfifoat", .cap = KGENOME_NUCLEO_PIPE },
 	/* Removing a file. */
-	{ "DeleteFileA",    KGENOME_NUCLEO_FILE_DELETE },
-	{ "DeleteFileW",    KGENOME_NUCLEO_FILE_DELETE },
+	{ .name = "DeleteFileA", .cap = KGENOME_NUCLEO_FILE_DELETE },
+	{ .name = "DeleteFileW", .cap = KGENOME_NUCLEO_FILE_DELETE },
 	/* MoveFileEx* used to be here as a DELETE. When KGENOME_NUCLEO_FILE_RENAME
 	 * was split out of KGENOME_NUCLEO_FILE_DELETE the POSIX `rename` moved and
 	 * these two did not, so the page went on saying `file-delete` with
 	 * MoveFileExW beside it - the exact contradiction that split was
 	 * made to end. They are with the other MoveFile rows now. */
-	{ "unlink",         KGENOME_NUCLEO_FILE_DELETE },
-	{ "unlinkat",       KGENOME_NUCLEO_FILE_DELETE },
-	{ "remove",         KGENOME_NUCLEO_FILE_DELETE },
-	{ "rename",         KGENOME_NUCLEO_FILE_RENAME },
-	{ "renameat",       KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "unlink", .cap = KGENOME_NUCLEO_FILE_DELETE },
+	{ .name = "unlinkat", .cap = KGENOME_NUCLEO_FILE_DELETE },
+	{ .name = "remove", .cap = KGENOME_NUCLEO_FILE_DELETE },
+	{ .name = "rename", .cap = KGENOME_NUCLEO_FILE_RENAME },
+	{ .name = "renameat", .cap = KGENOME_NUCLEO_FILE_RENAME },
 	/* Making a dropped file runnable. */
-	{ "chmod",          KGENOME_NUCLEO_PERM_SET },
-	{ "fchmod",         KGENOME_NUCLEO_PERM_SET },
-	{ "fchmodat",       KGENOME_NUCLEO_PERM_SET },
-	{ "SetFileAttributesA", KGENOME_NUCLEO_PERM_SET },
-	{ "SetFileAttributesW", KGENOME_NUCLEO_PERM_SET },
+	{ .name = "chmod", .cap = KGENOME_NUCLEO_PERM_SET },
+	{ .name = "fchmod", .cap = KGENOME_NUCLEO_PERM_SET },
+	{ .name = "fchmodat", .cap = KGENOME_NUCLEO_PERM_SET },
+	{ .name = "SetFileAttributesA", .cap = KGENOME_NUCLEO_PERM_SET },
+	{ .name = "SetFileAttributesW", .cap = KGENOME_NUCLEO_PERM_SET },
 	/* Asking whether it is watched. */
-	{ "IsDebuggerPresent", KGENOME_NUCLEO_ANTI_DEBUG },
-	{ "CheckRemoteDebuggerPresent", KGENOME_NUCLEO_ANTI_DEBUG },
-	{ "NtSetInformationThread", KGENOME_NUCLEO_ANTI_DEBUG },
+	{ .name = "IsDebuggerPresent", .cap = KGENOME_NUCLEO_ANTI_DEBUG },
+	{ .name = "CheckRemoteDebuggerPresent", .cap = KGENOME_NUCLEO_ANTI_DEBUG },
+	{ .name = "NtSetInformationThread", .cap = KGENOME_NUCLEO_ANTI_DEBUG },
 	/* Moving the boundary of what it can see. */
-	{ "chroot",         KGENOME_NUCLEO_JAIL },
-	{ "pivot_root",     KGENOME_NUCLEO_JAIL },
-	{ "setns",          KGENOME_NUCLEO_JAIL },
-	{ "unshare",        KGENOME_NUCLEO_JAIL },
+	{ .name = "chroot", .cap = KGENOME_NUCLEO_JAIL },
+	{ .name = "pivot_root", .cap = KGENOME_NUCLEO_JAIL },
+	{ .name = "setns", .cap = KGENOME_NUCLEO_JAIL },
+	{ .name = "unshare", .cap = KGENOME_NUCLEO_JAIL },
 	/*
 	 * AND WORDS FOR CAPABILITIES THAT ALREADY EXISTED, where only the
 	 * spelling was missing. Changing one's own privileges is CRED_SET
@@ -636,105 +642,57 @@ names[] = {
 	 * setuid; reaching into another process is PROC_MEM whether it is
 	 * WriteProcessMemory or process_vm_writev.
 	 */
-	{ "setuid",         KGENOME_NUCLEO_CRED_SET },
-	{ "setgid",         KGENOME_NUCLEO_CRED_SET },
-	{ "seteuid",        KGENOME_NUCLEO_CRED_SET },
-	{ "setreuid",       KGENOME_NUCLEO_CRED_SET },
-	{ "setresuid",      KGENOME_NUCLEO_CRED_SET },
-	{ "AdjustTokenPrivileges", KGENOME_NUCLEO_CRED_SET },
-	{ "OpenProcessToken",      KGENOME_NUCLEO_CRED_SET },
-	{ "DuplicateTokenEx",      KGENOME_NUCLEO_CRED_SET },
-	{ "ImpersonateLoggedOnUser", KGENOME_NUCLEO_CRED_SET },
-	{ "SetThreadToken",        KGENOME_NUCLEO_CRED_SET },
-	{ "process_vm_readv",      KGENOME_NUCLEO_PROC_MEM },
-	{ "process_vm_writev",     KGENOME_NUCLEO_PROC_MEM },
-	{ "posix_spawn",           KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "CreateProcessAsUserA",  KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "CreateProcessAsUserW",  KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "CreateProcessWithTokenW", KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "CreateProcessWithLogonW", KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "ShellExecuteExA",       KGENOME_NUCLEO_EXEC_IMAGE },
-	{ "ShellExecuteExW",       KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "setuid", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "setgid", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "seteuid", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "setreuid", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "setresuid", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "AdjustTokenPrivileges", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "OpenProcessToken", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "DuplicateTokenEx", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "ImpersonateLoggedOnUser", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "SetThreadToken", .cap = KGENOME_NUCLEO_CRED_SET },
+	{ .name = "process_vm_readv", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "process_vm_writev", .cap = KGENOME_NUCLEO_PROC_MEM },
+	{ .name = "posix_spawn", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "CreateProcessAsUserA", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "CreateProcessAsUserW", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "CreateProcessWithTokenW", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "CreateProcessWithLogonW", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "ShellExecuteExA", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
+	{ .name = "ShellExecuteExW", .cap = KGENOME_NUCLEO_EXEC_IMAGE },
 	/* The three measured ones. */
-	{ "dup2",           KGENOME_NUCLEO_FD_REDIR },
-	{ "dup3",           KGENOME_NUCLEO_FD_REDIR },
-	{ "utime",          KGENOME_NUCLEO_TIMESTOMP },
-	{ "utimes",         KGENOME_NUCLEO_TIMESTOMP },
-	{ "utimensat",      KGENOME_NUCLEO_TIMESTOMP },
-	{ "futimens",       KGENOME_NUCLEO_TIMESTOMP },
-	{ "SetFileTime",    KGENOME_NUCLEO_TIMESTOMP },
-	{ "CreateToolhelp32Snapshot", KGENOME_NUCLEO_PROC_LIST },
-	{ "Process32First", KGENOME_NUCLEO_PROC_LIST },
-	{ "Process32FirstW", KGENOME_NUCLEO_PROC_LIST },
-	{ "Process32Next",  KGENOME_NUCLEO_PROC_LIST },
-	{ "Process32NextW", KGENOME_NUCLEO_PROC_LIST },
-	{ "Module32First",  KGENOME_NUCLEO_PROC_LIST },
-	{ "Module32Next",   KGENOME_NUCLEO_PROC_LIST },
-	{ "Thread32First",  KGENOME_NUCLEO_PROC_LIST },
-	{ "Thread32Next",   KGENOME_NUCLEO_PROC_LIST },
-	{ "EnumProcesses",  KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "dup2", .cap = KGENOME_NUCLEO_FD_REDIR },
+	{ .name = "dup3", .cap = KGENOME_NUCLEO_FD_REDIR },
+	{ .name = "utime", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	{ .name = "utimes", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	{ .name = "utimensat", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	{ .name = "futimens", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	{ .name = "SetFileTime", .cap = KGENOME_NUCLEO_TIMESTOMP },
+	{ .name = "CreateToolhelp32Snapshot", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Process32First", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Process32FirstW", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Process32Next", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Process32NextW", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Module32First", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Module32Next", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Thread32First", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "Thread32Next", .cap = KGENOME_NUCLEO_PROC_LIST },
+	{ .name = "EnumProcesses", .cap = KGENOME_NUCLEO_PROC_LIST },
 	/*
 	 * AND THE GAPS THE SAME MEASUREMENT FOUND IN WORDS THAT ALREADY
 	 * EXISTED - each one a spelling nobody had written down.
 	 */
-	{ "BCryptOpenAlgorithmProvider", KGENOME_NUCLEO_CRYPTO },
-	{ "RegDeleteKeyA",  KGENOME_NUCLEO_REG_SET },
-	{ "RegDeleteKeyW",  KGENOME_NUCLEO_REG_SET },
-	{ "RegDeleteKeyExA", KGENOME_NUCLEO_REG_SET },
-	{ "RegDeleteKeyExW", KGENOME_NUCLEO_REG_SET },
+	{ .name = "BCryptOpenAlgorithmProvider", .cap = KGENOME_NUCLEO_CRYPTO },
+	{ .name = "RegDeleteKeyA", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegDeleteKeyW", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegDeleteKeyExA", .cap = KGENOME_NUCLEO_REG_SET },
+	{ .name = "RegDeleteKeyExW", .cap = KGENOME_NUCLEO_REG_SET },
 	/* An allocation, and incidentally one that fails in some sandboxes -
 	 * which is why a loader picks it. The capability is the allocation. */
-	{ "VirtualAllocExNuma", KGENOME_NUCLEO_ALLOC },
-	{ "NtQueryInformationProcess", KGENOME_NUCLEO_ANTI_DEBUG }
+	{ .name = "VirtualAllocExNuma", .cap = KGENOME_NUCLEO_ALLOC },
+	{ .name = "NtQueryInformationProcess", .cap = KGENOME_NUCLEO_ANTI_DEBUG }
 };
-
-/*
- * A NAMED CALL, REFINED BY THE ARGUMENTS IT WAS MADE WITH - the same job
- * kgenome_nucleo_cap_of_syscall does for a system call, for code that reached an API
- * by name or was observed calling one.
- *
- * VirtualAlloc and VirtualProtect become an executable allocation when the
- * protection asks for execute (PAGE_EXECUTE 0x10, _READ 0x20, _READWRITE 0x40,
- * _WRITECOPY 0x80), and W+X when it also asks for write: the Windows words for
- * what mmap and mprotect say with PROT_EXEC. Measured, the Metasploit stager
- * asks for 0x40.
- *
- * `arg` holds the first four arguments, which is what is carried; a call whose
- * protection is a later argument is left as it was named rather than guessed.
- */
-uint16_t kgenome_nucleo_cap_of_call(const char *name, const uint64_t *arg,
-			      uint8_t *flags)
-{
-	uint16_t cap = kgenome_nucleo_cap_of_name(name);
-
-	if (flags)
-		*flags = 0;
-	if (!arg || cap == KGENOME_NUCLEO_NONE)
-		return cap;
-	if (cap == KGENOME_NUCLEO_ALLOC) {
-		uint64_t prot = 0;
-		int have = 0;
-
-		if (!strcmp(name, "VirtualAlloc")) {
-			prot = arg[3];
-			have = 1;
-		} else if (!strcmp(name, "VirtualProtect")) {
-			prot = arg[2];
-			have = 1;
-		}
-		if (have && (prot & 0xf0u)) {
-			if (flags && (prot & 0xc0u))    /* ..._READWRITE, ..._WRITECOPY */
-				*flags = KGENOME_NUCLEO_F_WX;
-			return KGENOME_NUCLEO_ALLOC_EXEC;
-		}
-		return cap;
-	}
-	if (cap == KGENOME_NUCLEO_NET_OPEN &&
-	    (!strcmp(name, "socket") || !strcmp(name, "WSASocketA") ||
-	     !strcmp(name, "WSASocketW")))
-		return kgenome_nucleo_sock_kind(arg, flags);
-	return cap;
-}
 
 /* The row of `names` that `sym` is, or -1. An ELF import may carry a version
  * suffix - "open64@@GLIBC_2.2.5" is the same function as "open64", and the
@@ -753,6 +711,53 @@ static long names_find(const char *sym)
 			return (long)i;
 	}
 	return -1;
+}
+
+/*
+ * A NAMED CALL, REFINED BY THE ARGUMENTS IT WAS MADE WITH - the same job
+ * kgenome_nucleo_cap_of_syscall does for a system call, for code that reached an API
+ * by name or was observed calling one.
+ *
+ * VirtualAlloc and VirtualProtect become an executable allocation when the
+ * protection asks for execute (PAGE_EXECUTE 0x10, _READ 0x20, _READWRITE 0x40,
+ * _WRITECOPY 0x80), and W+X when it also asks for write: the Windows words for
+ * what mmap and mprotect say with PROT_EXEC. Measured, the Metasploit stager
+ * asks for 0x40.
+ *
+ * `arg` holds the first four arguments, which is what is carried; a call whose
+ * protection is a later argument is left as it was named rather than guessed.
+ */
+uint16_t kgenome_nucleo_cap_of_call(const char *name, const uint64_t *arg,
+			      uint8_t *flags)
+{
+	long row = names_find(name);
+	uint16_t cap = row < 0 ? KGENOME_NUCLEO_NONE : names[row].cap;
+
+	if (flags)
+		*flags = 0;
+	if (!arg || cap == KGENOME_NUCLEO_NONE)
+		return cap;
+	if (cap == KGENOME_NUCLEO_ALLOC) {
+		uint64_t prot = 0;
+		int have = 0;
+
+		if (names[row].refine == REFINE_PROT_ARG3) {
+			prot = arg[3];
+			have = 1;
+		} else if (names[row].refine == REFINE_PROT_ARG2) {
+			prot = arg[2];
+			have = 1;
+		}
+		if (have && (prot & 0xf0u)) {
+			if (flags && (prot & 0xc0u))    /* ..._READWRITE, ..._WRITECOPY */
+				*flags = KGENOME_NUCLEO_F_WX;
+			return KGENOME_NUCLEO_ALLOC_EXEC;
+		}
+		return cap;
+	}
+	if (cap == KGENOME_NUCLEO_NET_OPEN && names[row].refine == REFINE_SOCK)
+		return kgenome_nucleo_sock_kind(arg, flags);
+	return cap;
 }
 
 uint16_t kgenome_nucleo_cap_of_name(const char *sym)
@@ -948,7 +953,14 @@ unsigned kgenome_nucleo_name_arg(uint16_t cap, unsigned *arg)
 }
 
 /* See the note in nucleo.h - this is the vocabulary's own answer, and the
- * only one. */
+ * only one.
+ *
+ * `nm` IS NOT A NAME THE FILE CHOSE. A caller passes either the label of the syscall
+ * NUMBER it decoded (kgenome_nucleo_sys_name: the kernel's own table, so a renamed or
+ * stripped binary gives the same word) or an IMPORT name the loader resolves (the one
+ * OS-defined spelling: change it and the program no longer links). A symbol name taken
+ * from a program's own .symtab never reaches here - see kgenome_diag_sym's sites,
+ * which come from undefined symbols only. Test: names_structural. */
 int kgenome_nucleo_hands_on(uint16_t cap, const char *nm)
 {
 	switch (cap) {
@@ -979,7 +991,9 @@ int kgenome_nucleo_hands_on(uint16_t cap, const char *nm)
 }
 
 /*
- * The names whose success value is zero. Short and explicit rather than
+ * The names whose success value is zero - the labels of the kernel's own syscall table
+ * and the OS-defined import names, with the same provenance as kgenome_nucleo_hands_on's
+ * `nm` (never a name the file spelled for itself). Short and explicit rather than
  * derived: "returns 0 on success" is a per-call fact in the manual page, and
  * a rule that tried to infer it from the capability would get `socket` and
  * `bind` wrong in opposite directions.

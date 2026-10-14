@@ -79,11 +79,15 @@ enum kuncoat_status kuncoat_ovba_decode(const uint8_t *in, uint64_t in_len, kunc
 		    void *user, uint64_t *produced)
 {
 	struct out o;
-	uint64_t at;
+	uint64_t at, pd;
 	int st = KUNCOAT_OK;
 
+	if (!produced)
+		produced = &pd;
 	*produced = 0;
-	if (!in || !sink || in_len < 1u || in[0] != KUNCOAT_OVBA_SIGNATURE)
+	if (!sink || (!in && in_len))
+		return KUNCOAT_BAD_ARG;
+	if (!in || in_len < 1u || in[0] != KUNCOAT_OVBA_SIGNATURE)
 		return KUNCOAT_CORRUPT;
 
 	at = 1u;
@@ -221,6 +225,9 @@ done:
 		at = end;
 	}
 
+	/* One byte left over is half a chunk header: the container ended inside it. */
+	if (at < in_len)
+		st = KUNCOAT_TRUNCATED;
 	return st;
 }
 

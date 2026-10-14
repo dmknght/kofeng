@@ -59,6 +59,10 @@ typedef int (*kgenome_elf_rebuild_rd)(void *user, uint64_t va, void *dst,
  * `covered_lo`/`covered_hi`, when not NULL, come back holding the span of
  * virtual addresses the rebuilt file accounts for, so a caller emitting several
  * images can tell which of them this one has already spoken for.
+ *
+ * A PT_LOAD whose guest bytes could not be read is not left as zeroes under a
+ * header that says they are its content: its p_filesz is written as 0, a declared
+ * segment with nothing behind it. The span above cannot say where it has a hole.
  */
 int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 		    uint64_t cap, uint8_t **out, uint64_t *out_len,

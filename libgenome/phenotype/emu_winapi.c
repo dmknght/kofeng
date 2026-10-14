@@ -62,6 +62,246 @@ static uint64_t win_net(struct kgenome_emu *e, unsigned id, int *mine)
 }
 
 /*
+ * MultiByteToWideChar(CodePage, Flags, MultiByteStr, cbMultiByte, WideCharStr, cchWideChar) and
+ * WideCharToMultiByte(CodePage, Flags, WideCharStr, cchWideChar, MultiByteStr, cbMultiByte, DefaultChar,
+ * UsedDefaultChar), after their documentation:
+ *   - a length of -1 means "up to and including the terminator" and the converted string then has one too;
+ *   - an output size of 0 asks only for the size the result needs; a size too small is 0 with
+ *     ERROR_INSUFFICIENT_BUFFER (122), and nothing is written;
+ *   - CP_UTF8 (65001) is converted exactly (an invalid sequence is U+FFFD, or an error, 1113, under
+ *     MB_ERR_INVALID_CHARS 0x8); any other page is treated as a single byte page whose 0x00-0xFF are U+0000-U+00FF
+ *     (exact for ISO 8859-1, exact for the ASCII half of every ANSI page, and a stand-in for the upper half of
+ *     the others: the interpreter has no code page tables), and in the other direction a character above U+00FF
+ *     becomes the default character ('?') with *UsedDefaultChar set.
+ * The text read is bounded at KGENOME_EMU_WIN_CONV_MAX characters: a source with no terminator cannot run the
+ * conversion over the whole address space, and a request past it fails with ERROR_INSUFFICIENT_BUFFER.
+ */
+#define KGENOME_EMU_WIN_CONV_MAX 0x100000u
+
+/* the characters of a source string: `n` of them read from guest memory as 1 or 2 byte units, or up to and
+ * including a NUL when n is -1. Returns the count, or (uint64_t)-1 when unreadable or past the bound. */
+static uint64_t conv_read(struct kgenome_emu *e, uint64_t va, int64_t n, unsigned unit, uint8_t **out)
+{
+	uint8_t *buf;
+	uint64_t cnt = 0;
+
+	if (n >= 0) {
+		if ((uint64_t)n > KGENOME_EMU_WIN_CONV_MAX)
+			return ~(uint64_t)0;
+		cnt = (uint64_t)n;
+	} else {
+		uint64_t c = 1;
+
+		while (cnt < KGENOME_EMU_WIN_CONV_MAX) {
+			c = 0;
+			if (!kgenome_emu_mem_rd(e, va + cnt * unit, &c, unit))
+				return ~(uint64_t)0;
+			cnt++;
+			if (!c)
+				break;
+		}
+		if (c)
+			return ~(uint64_t)0;
+	}
+	buf = malloc(cnt * unit + 1u);
+	if (!buf)
+		return ~(uint64_t)0;
+	{
+		uint64_t done = 0;
+
+		/* a page at a time: a faulting tail is an unreadable source, and nothing is half converted */
+		while (done < cnt * unit) {
+			uint64_t chunk = cnt * unit - done > 4096u ? 4096u : cnt * unit - done;
+
+			if (!kgenome_emu_mem_rd(e, va + done, buf + done, (unsigned)chunk)) {
+				free(buf);
+				return ~(uint64_t)0;
+			}
+			done += chunk;
+		}
+	}
+	*out = buf;
+	return cnt;
+}
+
+static uint64_t conv_put(struct kgenome_emu *e, uint64_t va, const uint8_t *buf, uint64_t bytes)
+{
+	uint64_t done = 0;
+
+	while (done < bytes) {
+		uint64_t chunk = bytes - done > 4096u ? 4096u : bytes - done;
+
+		if (!kgenome_emu_mem_wr(e, va + done, buf + done, (unsigned)chunk))
+			return 0;
+		done += chunk;
+	}
+	return 1;
+}
+
+static uint64_t win_mb2wc(struct kgenome_emu *e)
+{
+	uint64_t cp = kgenome_emu_win_arg(e, 0) & 0xffffffffu, fl = kgenome_emu_win_arg(e, 1) & 0xffffffffu;
+	uint64_t src = kgenome_emu_win_arg(e, 2), dst = kgenome_emu_win_arg(e, 4);
+	int64_t cb = (int32_t)kgenome_emu_win_arg(e, 3);
+	uint64_t cch = kgenome_emu_win_arg(e, 5) & 0xffffffffu;
+	uint8_t *in = NULL;
+	uint64_t n, i, nout = 0;
+	uint16_t *w = NULL;
+	int utf8 = cp == 65001u, bad = 0;
+
+	if (!src || (cb < 0 && cb != -1)) {
+		e->win_last_error = 87u;                    /* ERROR_INVALID_PARAMETER */
+		return 0;
+	}
+	n = conv_read(e, src, cb, 1u, &in);
+	if (n == ~(uint64_t)0) {
+		e->win_last_error = 87u;                    /* unreadable, or past the bound */
+		return 0;
+	}
+	w = malloc((n + 1u) * 2u * sizeof *w);
+	if (!w) {
+		free(in);
+		return 0;
+	}
+	for (i = 0; i < n; ) {
+		uint8_t c = in[i];
+		uint32_t cpv = c;
+		unsigned take = 1;
+
+		if (utf8 && c >= 0x80u) {
+			static const uint32_t least[4] = { 0, 0x80u, 0x800u, 0x10000u };
+			unsigned need = (c >= 0xc2u && c <= 0xdfu) ? 1u : (c >= 0xe0u && c <= 0xefu) ? 2u :
+					(c >= 0xf0u && c <= 0xf4u) ? 3u : 0u;
+			unsigned k = 1;
+			uint32_t v = need ? (uint32_t)(c & (0x3fu >> need)) : 0u;
+
+			while (k <= need && i + k < n && (in[i + k] & 0xc0u) == 0x80u)
+				v = (v << 6) | (in[i + k++] & 0x3fu);
+			take = k;                               /* the lead byte and the continuation bytes it had */
+			if (need && k == need + 1u && v >= least[need] && v <= 0x10ffffu &&
+			    !(v >= 0xd800u && v <= 0xdfffu)) {
+				cpv = v;
+			} else {
+				cpv = 0xfffdu;                  /* an invalid or truncated sequence */
+				bad = 1;
+			}
+		}
+		i += take;
+		if (cpv >= 0x10000u && cpv != 0xfffdu) {
+			cpv -= 0x10000u;
+			w[nout++] = (uint16_t)(0xd800u | (cpv >> 10));
+			w[nout++] = (uint16_t)(0xdc00u | (cpv & 0x3ffu));
+		} else {
+			w[nout++] = (uint16_t)cpv;
+		}
+	}
+	free(in);
+	if (bad && (fl & 0x8u)) {                           /* MB_ERR_INVALID_CHARS */
+		free(w);
+		e->win_last_error = 1113u;                  /* ERROR_NO_UNICODE_TRANSLATION */
+		return 0;
+	}
+	if (cch && nout > cch) {
+		free(w);
+		e->win_last_error = 122u;                   /* ERROR_INSUFFICIENT_BUFFER */
+		return 0;
+	}
+	if (cch && !conv_put(e, dst, (const uint8_t *)w, nout * 2u)) {
+		free(w);
+		e->win_last_error = 87u;
+		return 0;
+	}
+	free(w);
+	return nout;
+}
+
+static uint64_t win_wc2mb(struct kgenome_emu *e)
+{
+	uint64_t cp = kgenome_emu_win_arg(e, 0) & 0xffffffffu;
+	uint64_t src = kgenome_emu_win_arg(e, 2), dst = kgenome_emu_win_arg(e, 4);
+	int64_t cw = (int32_t)kgenome_emu_win_arg(e, 3);
+	uint64_t cb = kgenome_emu_win_arg(e, 5) & 0xffffffffu;
+	uint64_t defp = kgenome_emu_win_arg(e, 6), usedp = kgenome_emu_win_arg(e, 7);
+	uint8_t *in = NULL, *o;
+	uint64_t n, i, nout = 0;
+	uint8_t dch = '?';
+	uint32_t used = 0;
+	int utf8 = cp == 65001u;
+
+	if (!src || (cw < 0 && cw != -1)) {
+		e->win_last_error = 87u;
+		return 0;
+	}
+	n = conv_read(e, src, cw, 2u, &in);
+	if (n == ~(uint64_t)0) {
+		e->win_last_error = 87u;
+		return 0;
+	}
+	if (defp && !utf8) {
+		uint64_t c = 0;
+
+		if (kgenome_emu_mem_rd(e, defp, &c, 1u))
+			dch = (uint8_t)c;
+	}
+	o = malloc(n * 4u + 4u);
+	if (!o) {
+		free(in);
+		return 0;
+	}
+	for (i = 0; i < n; i++) {
+		uint32_t c = kof_ld_le16(in + 2u * i);
+
+		if (utf8) {
+			if (c >= 0xd800u && c <= 0xdbffu && i + 1u < n) {
+				uint32_t d = kof_ld_le16(in + 2u * (i + 1u));
+
+				if (d >= 0xdc00u && d <= 0xdfffu) {
+					c = 0x10000u + ((c - 0xd800u) << 10) + (d - 0xdc00u);
+					i++;
+				}
+			}
+			if (c >= 0xd800u && c <= 0xdfffu)
+				c = 0xfffdu;                    /* a lone surrogate */
+			if (c < 0x80u) {
+				o[nout++] = (uint8_t)c;
+			} else if (c < 0x800u) {
+				o[nout++] = (uint8_t)(0xc0u | (c >> 6));
+				o[nout++] = (uint8_t)(0x80u | (c & 0x3fu));
+			} else if (c < 0x10000u) {
+				o[nout++] = (uint8_t)(0xe0u | (c >> 12));
+				o[nout++] = (uint8_t)(0x80u | ((c >> 6) & 0x3fu));
+				o[nout++] = (uint8_t)(0x80u | (c & 0x3fu));
+			} else {
+				o[nout++] = (uint8_t)(0xf0u | (c >> 18));
+				o[nout++] = (uint8_t)(0x80u | ((c >> 12) & 0x3fu));
+				o[nout++] = (uint8_t)(0x80u | ((c >> 6) & 0x3fu));
+				o[nout++] = (uint8_t)(0x80u | (c & 0x3fu));
+			}
+		} else if (c < 0x100u) {
+			o[nout++] = (uint8_t)c;
+		} else {
+			o[nout++] = dch;
+			used = 1;
+		}
+	}
+	free(in);
+	if (cb && nout > cb) {
+		free(o);
+		e->win_last_error = 122u;
+		return 0;
+	}
+	if (cb && !conv_put(e, dst, o, nout)) {
+		free(o);
+		e->win_last_error = 87u;
+		return 0;
+	}
+	free(o);
+	if (usedp && !utf8)
+		kgenome_emu_mem_wr(e, usedp, &used, 4u);
+	return nout;
+}
+
+/*
  * modules and virtual memory: the loader's own questions.
  *
  * One arm of the dispatch in kgenome_emu_winapi_do, moved out so the dispatch stays readable.
@@ -91,6 +331,9 @@ static uint64_t win_loader(struct kgenome_emu *e, unsigned id, int *mine)
 		{
 			uint64_t h = kgenome_emu_win_mod_of(e, name);
 
+			/* a library LoadLibrary has made a handle for is loaded from then on */
+			if (!h)
+				h = kgenome_emu_win_fake_find(e, name);
 			kgenome_emu_win_trace(e, "GetModuleHandle", name, h);
 			return h;       /* zero is "not loaded", which is true */
 		}
@@ -362,24 +605,62 @@ static uint64_t win_heap_time(struct kgenome_emu *e, unsigned id, int *mine)
 		/* HEAP_ZERO_MEMORY is bit 3, and the pages are fresh, so the
 		 * flag is already honoured whether it was asked for or not. */
 		(void)fl;
+		if (at)
+			kgenome_emu_win_heap_note(e, at, sz);
 		return at;
 	}
+	/*
+	 * HeapReAlloc(heap, flags, ptr, size): a new block that holds the old contents, up to the smaller of the
+	 * two sizes. The old size is the one HeapAlloc recorded (kgenome_emu_win_heap_note). A pointer this heap did
+	 * not hand out is not a block it can copy from, and gets a fresh block as before. HEAP_REALLOC_IN_PLACE_ONLY
+	 * (0x10) cannot be honoured by a growing block, which is NULL - the documented failure.
+	 */
 	case KGENOME_EMU_WIN_HeapReAlloc: {
-		uint64_t sz = kgenome_emu_win_arg(e, 3);
+		uint64_t fl = kgenome_emu_win_arg(e, 1), old = kgenome_emu_win_arg(e, 2);
+		uint64_t sz = kgenome_emu_win_arg(e, 3), at, keep = 0;
+		struct kgenome_emu_hblk *ob = kgenome_emu_win_heap_find(e, old);
 
-		/* A new block, and the old contents are NOT copied - which is
-		 * wrong, and is left wrong deliberately rather than guessed
-		 * at: the old size is not knowable here, so a copy would be a
-		 * copy of a length this made up. A caller that depends on it
-		 * will fault or read zeroes, and the trace will say where. */
-		return e->bits == 32 ? kgenome_emu_win_alloc32(e, sz, KGENOME_EMU_R | KGENOME_EMU_W)
-				     : kgenome_emu_win_alloc(e, sz, KGENOME_EMU_R | KGENOME_EMU_W);
+		if (ob && ob->size != KGENOME_EMU_HBLK_FREED) {
+			keep = ob->size < sz ? ob->size : sz;
+			if ((fl & 0x10u) && sz > ob->size)
+				return 0;
+		}
+		at = e->bits == 32 ? kgenome_emu_win_alloc32(e, sz, KGENOME_EMU_R | KGENOME_EMU_W)
+				   : kgenome_emu_win_alloc(e, sz, KGENOME_EMU_R | KGENOME_EMU_W);
+		if (!at)
+			return 0;
+		kgenome_emu_win_heap_note(e, at, sz);
+		/* the block is page-granular, so a copy in page bites cannot run past either block */
+		for (uint64_t done = 0; done < keep; ) {
+			uint8_t page[KGENOME_EMU_PAGE];
+			uint64_t chunk = keep - done > sizeof page ? sizeof page : keep - done;
+
+			if (!kgenome_emu_mem_rd(e, old + done, page, (unsigned)chunk) ||
+			    !kgenome_emu_mem_wr(e, at + done, page, (unsigned)chunk))
+				break;
+			done += chunk;
+		}
+		if (ob)
+			ob->size = KGENOME_EMU_HBLK_FREED;     /* the old block is released */
+		return at;
 	}
 	case KGENOME_EMU_WIN_HeapFree:
-	case KGENOME_EMU_WIN_RtlFreeHeap:
+	case KGENOME_EMU_WIN_RtlFreeHeap: {
+		struct kgenome_emu_hblk *b = kgenome_emu_win_heap_find(e, kgenome_emu_win_arg(e, 2));
+
+		if (b)
+			b->size = KGENOME_EMU_HBLK_FREED;      /* memory is never reused (see the note above) */
 		return 1;
-	case KGENOME_EMU_WIN_HeapSize:
-		return 0;
+	}
+	/* HeapSize: the size the block was allocated with; (SIZE_T)-1 for a pointer that is not a live block of
+	 * this heap, which is what Windows answers for one it does not recognise. */
+	case KGENOME_EMU_WIN_HeapSize: {
+		struct kgenome_emu_hblk *b = kgenome_emu_win_heap_find(e, kgenome_emu_win_arg(e, 2));
+
+		if (!b || b->size == KGENOME_EMU_HBLK_FREED)
+			return e->bits == 32 ? 0xffffffffull : ~(uint64_t)0;
+		return b->size;
+	}
 	case KGENOME_EMU_WIN_VirtualQuery: {
 		uint64_t at = kgenome_emu_win_arg(e, 0), out = kgenome_emu_win_arg(e, 1);
 		uint64_t page = at & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
@@ -676,12 +957,9 @@ static uint64_t win_second(struct kgenome_emu *e, unsigned id, int *stop_out, in
 		return i;
 	}
 	case KGENOME_EMU_WIN_MultiByteToWideChar:
+		return win_mb2wc(e);
 	case KGENOME_EMU_WIN_WideCharToMultiByte:
-		/* Nothing is converted and nothing is written. Reporting zero
-		 * characters is the answer for a conversion that did not
-		 * happen; writing a length into a buffer this did not fill
-		 * would be the lie. */
-		return 0;
+		return win_wc2mb(e);
 	case KGENOME_EMU_WIN_OutputDebugStringA:
 		return 0;
 	case KGENOME_EMU_WIN_SetErrorMode:

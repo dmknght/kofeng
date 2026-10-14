@@ -212,6 +212,7 @@ int main(void)
 				      : "not flagged, but a step is missing");
 	}
 
+	kof_pdf_release(info);
 	free(info);
 	printf("pdf chain: %u case(s)%s\n", (unsigned)N_CASES,
 	       fails ? " FAILED" : " ok");

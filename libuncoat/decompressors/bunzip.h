@@ -125,7 +125,12 @@ typedef int (*kuncoat_bunzip_sink)(void *user, const uint8_t *p, uint32_t n);
  * complete streams end to end and every bzip2 reads all of them, so stopping at
  * the first end-of-stream marker would silently drop everything after it. The
  * next stream starts on a BYTE boundary, which is the one place this decoder
- * realigns.
+ * realigns. Bytes after the last stream that do not begin another one are ignored
+ * (trailing bytes are not an error); a stream header that begins there but is cut short is
+ * TRUNCATED.
+ *
+ * `produced` may be NULL. A NULL `st` or `sink`, or a NULL `in` with in_len > 0,
+ * is KUNCOAT_BAD_ARG.
  */
 enum kuncoat_status kuncoat_bunzip_decode(struct kuncoat_bunzip *st,
 					 const uint8_t *in, uint64_t in_len,

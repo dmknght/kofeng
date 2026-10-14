@@ -140,6 +140,8 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	KOF_TIME_BEGIN(KOF_T_UNPACK);
 	m->fn(ctx);
 	KOF_TIME_END(KOF_T_UNPACK);
+		/* A module that has not read a table the object has - see sx_walk_check. */
+		sx_walk_check(sc, ctx, m);
 		/* What a carve produced does not make its host
 		 * a wrapper - see KOF_ANALYZE_CARVE. */
 		if (m->step == KOF_ANALYZE_CARVE &&

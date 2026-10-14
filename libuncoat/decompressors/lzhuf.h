@@ -111,6 +111,21 @@ typedef int (*kuncoat_lzhuf_sink)(void *user, const uint8_t *p, uint32_t n);
  * `out_len` comes from the container's own header: ARJ writes the original
  * size in the local header and LHA in its own. It is the only thing that ends
  * the stream, so a caller that does not know it cannot decode at all.
+ *
+ * STATUS. OK only when `out_len` bytes were produced. The input ending first is
+ * TRUNCATED, and no byte is decoded from bits past the end (the reader pads with
+ * zeros, and a symbol that needs them is not output). A bad table or code is
+ * CORRUPT. In both cases the bytes decoded before the failure are handed to the
+ * sink (the buffered tail of the dictionary included) and counted in `produced`;
+ * the one status that skips that flush is a sink that already refused (STOPPED).
+ * A NULL `st` or `sink`, or a NULL `in` with in_len > 0, is KUNCOAT_BAD_ARG;
+ * `produced` may be NULL.
+ *
+ * HUFFMAN CODES. A set of code lengths that over- or under-fills the code space
+ * is CORRUPT. The accepted gaps are the single-symbol tree spelled with a zero
+ * count, and a set of all-zero lengths (every symbol then decodes as 0, which is
+ * bounded by `out_len`). [Unverified] against the reference decoders: that is what
+ * this code has always done and it is kept.
  */
 enum kuncoat_status kuncoat_lzhuf_decode(struct kuncoat_lzhuf *st,
 					enum kuncoat_lzhuf_variant var,

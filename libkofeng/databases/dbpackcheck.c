@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 
 #include "dbloader_int.h"
+#include "pack/dbcrc.h"
 
 /* ---- validation ------------------------------------------------------------- */
 
@@ -20,7 +21,7 @@
  * again because this arrives as bytes out of a file. A program that passes here
  * cannot make the walk exceed its work bound.
  */
-static int hex_prog_valid(const uint8_t *p, uint32_t len)
+int kof_hex_prog_valid(const uint8_t *p, uint32_t len)
 {
 	const struct kof_hex_hdr *h = (const void *)p;
 	const struct kof_hex_step *st;
@@ -193,24 +194,24 @@ static int hex_prog_valid(const uint8_t *p, uint32_t len)
 }
 
 /*
- * Reachable by name from the pack fuzzer, which corrupts a compiled program and
- * then walks whatever this accepts - see the note in that test. Nothing in the
- * product calls it: the validator's one caller is a few hundred lines below.
- */
-int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len);
-int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len)
-{
-	return hex_prog_valid(p, len);
-}
-
-/*
  * Is this mapping a pack, and does every offset in it stay inside the mapping?
  *
  * One function rather than checks scattered through the loader, so the rule that
  * nothing is dereferenced before it is bounded can be read in one place instead
  * of reconstructed from the order of statements.
  */
-int kof_db_pack_valid(const void *map, uint64_t len, const char *path)
+/*
+ * `len` is how much of the file is MAPPED and every offset is bounded by it; `file_len` is
+ * what the whole file measures, which the header must state. They are the same for a pack
+ * without an index trailer. With one, only the part before the trailer is mapped, so a
+ * section that leaned into the trailer is refused as outside the file, and the checksum is
+ * the footer's `old_crc` over that part, which the caller has already checked by reading the
+ * file (`crc_done`: so the hash pool, four bytes a hash, is never mapped in by the check) - the
+ * header's own CRC covers the trailer too, which is what keeps an engine that does not know it
+ * loading the pack, and is not read here because reading it would be reading the whole index body.
+ */
+static int pack_check(const void *map, uint64_t len, uint64_t file_len,
+		      int crc_fd, const char *path)
 {
 	const struct kof_pack_hdr *h = map;
 	uint64_t i;
@@ -307,12 +308,18 @@ int kof_db_pack_valid(const void *map, uint64_t len, const char *path)
 		REFUSE("holds kind %u, which this engine has no dispatch for",
 		       h->kind);
 	/* Before any offset inside is believed: truncation is caught here. */
-	if (h->file_len != len)
+	if (h->file_len != file_len)
 		REFUSE("declares %llu bytes, the file has %llu",
-		       (unsigned long long)h->file_len, (unsigned long long)len);
-	if (kof_crc32((const uint8_t *)map + KOF_PACK_CRC_FROM,
-		      len - KOF_PACK_CRC_FROM) != h->crc32)
+		       (unsigned long long)h->file_len, (unsigned long long)file_len);
+	/* CRC_DONE: the caller has checked it. CRC_FROM_MAP: read it out of the mapping (every page of the pack
+	 * is then resident until it is dropped). A descriptor: read it with pread in pieces, so a pack of
+	 * hundreds of megabytes is checked by the page cache and not by this process's resident set. */
+	if (crc_fd == KOF_CRC_FROM_MAP) {
+		if (kof_crc32_fast_cont(0, (const uint8_t *)map + KOF_PACK_CRC_FROM, len - KOF_PACK_CRC_FROM) != h->crc32)
+			REFUSE("checksum does not match its contents");
+	} else if (crc_fd >= 0 && !kof_db_crc_holds(crc_fd, KOF_PACK_CRC_FROM, len, h->crc32)) {
 		REFUSE("checksum does not match its contents");
+	}
 
 	for (i = 0; i < KOF_SEC_COUNT; i++) {
 		uint64_t off = h->sec[i].off, n = h->sec[i].len;
@@ -440,7 +447,7 @@ int kof_db_pack_valid(const void *map, uint64_t len, const char *path)
 				 * slow read, it is undefined behaviour. */
 				if (s[k].off % KOF_HEX_PROG_ALIGN)
 					REFUSE("hex program %u is misaligned", k);
-				if (!hex_prog_valid(base + h->sec[KOF_SEC_STR_POOL].off
+				if (!kof_hex_prog_valid(base + h->sec[KOF_SEC_STR_POOL].off
 						    + s[k].off, s[k].len))
 					REFUSE("hex program %u is malformed", k);
 			} else {
@@ -459,8 +466,78 @@ int kof_db_pack_valid(const void *map, uint64_t len, const char *path)
 			if (memchr(np + o, 0, (size_t)(npool - o)) == NULL)
 				REFUSE("name %u is not terminated inside its pool",
 				       k);
+			/* AND NOT LONGER THAN THE ENGINE STORES. KOF_NAME_MAX_LEN was
+			 * kept by the tool that writes packs and by nothing that reads
+			 * them; a pack from another writer carried names a finding then
+			 * cut, with no word. Bounded, so it costs a name's own length
+			 * and not the pool's. */
+			{
+				size_t room = (size_t)(npool - o) < KOF_NAME_MAX_LEN
+					      ? (size_t)(npool - o) : KOF_NAME_MAX_LEN;
+
+				if (memchr(np + o, 0, room) == NULL)
+					REFUSE("name %u is longer than the %u characters "
+					       "the engine stores", k,
+					       KOF_NAME_MAX_LEN - 1u);
+			}
+		}
+		for (k = 0; k < h->n_mods; k++) {
+			uint64_t fo = m[k].family_off;
+			size_t room;
+
+			/* The family a finding is named by: held to the same bound. An
+			 * offset outside the pool is another check's business. */
+			if (fo >= npool)
+				continue;
+			room = (size_t)(npool - fo) < KOF_NAME_MAX_LEN
+			       ? (size_t)(npool - fo) : KOF_NAME_MAX_LEN;
+			if (memchr(np + fo, 0, room) == NULL)
+				REFUSE("module %u has a family longer than the %u "
+				       "characters the engine stores", k,
+				       KOF_NAME_MAX_LEN - 1u);
 		}
 	}
 	return 1;
 #undef REFUSE
+}
+
+int kof_db_pack_valid(const void *map, uint64_t len, const char *path)
+{
+	return pack_check(map, len, len, KOF_CRC_FROM_MAP, path);
+}
+
+int kof_db_pack_valid_fd(const void *map, uint64_t len, int fd, const char *path)
+{
+	return pack_check(map, len, len, fd, path);
+}
+
+int kof_db_pack_valid_old(const void *map, uint64_t map_len, uint64_t file_len, const char *path)
+{
+	return pack_check(map, map_len, file_len, KOF_CRC_DONE, path);
+}
+
+/*
+ * The CRC of [from, to) of a file, checked against `want`, READ with pread in pieces: the hash
+ * pool alone is four bytes a hash, and mapping it in to checksum it would put the database's size into the
+ * resident set of a load that is meant not to depend on it. A file shorter than it was measured is a short
+ * read and the check fails.
+ */
+int kof_db_crc_holds(int fd, uint64_t from, uint64_t to, uint32_t want)
+{
+	/* On the stack and 64 KiB: a megabyte buffer from the heap is a megabyte this process keeps (the allocator
+	 * hands freed memory back late, a sanitiser not at all) for a check that is over in a moment, and pieces of
+	 * 64 KiB cost 25,000 reads for 1.6 GB, which the checksum itself outweighs. */
+	uint8_t buf[1u << 16];
+	uint64_t at = from;
+	uint32_t crc = 0;
+
+	while (at < to) {
+		uint64_t n = to - at < sizeof buf ? to - at : sizeof buf;
+
+		if (kof_pread(fd, buf, (size_t)n, at) != (size_t)n)
+			return 0;
+		crc = kof_crc32_fast_cont(crc, buf, n);
+		at += n;
+	}
+	return crc == want;
 }

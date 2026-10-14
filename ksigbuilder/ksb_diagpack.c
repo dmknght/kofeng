@@ -94,7 +94,6 @@ int ksb_write_krec_pack(const char *path, const char *magic,
 {
 	size_t i, at, total = 8u + n * 8u;
 	unsigned char *out;
-	FILE *f;
 
 	if (n > 0xffffu) {
 		fprintf(stderr, "FAIL: more records than a pack holds (%s)\n", path);
@@ -123,14 +122,10 @@ int ksb_write_krec_pack(const char *path, const char *magic,
 		memcpy(out + at, rec[i], rlen[i]);
 		at += rlen[i];
 	}
-	f = fopen(path, "wb");
-	if (!f || fwrite(out, 1, total, f) != total) {
-		fprintf(stderr, "FAIL: cannot write %s\n", path);
-		if (f) fclose(f);
+	if (!ksb_write_file(path, out, total)) {
 		free(out);
 		return 0;
 	}
-	fclose(f);
 	free(out);
 	*total_out = total;
 	return 1;

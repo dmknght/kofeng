@@ -15,9 +15,9 @@
  *
  * NOT COMPARED: REX2, the APX forms of EVEX and the 3DNow! suffix map are not
  * decoded (see x86.h), so a case the reference reads as one of them is skipped.
- * A short list of families where the reference refuses combinations this decoder
- * accepts (MPX, complex FP16, gathers, a few EVEX conversions) is listed by name,
- * counted and capped; a divergence in any OTHER instruction fails the run.
+ * A short list of families where this decoder and the reference still differ (see
+ * known_divergence: the APX register numbers, two VSIB corners, two AMD forms) is
+ * listed by name, counted and capped; a divergence in any OTHER instruction fails the run.
  */
 
 #include <stdio.h>
@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "bddisasm.h"
+#include "oracle_fix.h"
 #include "x86/x86.h"
 
 static int failures;
@@ -78,29 +79,48 @@ static int not_decoded(const INSTRUX *ix, const uint8_t *p)
 }
 
 /*
- * THE FAMILIES THE REFERENCE REFUSES IN MORE CASES THAN THIS DECODER DOES - see
- * the head of the file. Matched on the reference's identity when it decoded the
- * bytes, on this decoder's when it did not.
+ * WHAT STILL DIFFERS FROM THE REFERENCE, by family, and none of it moves an instruction's LENGTH in code that a
+ * CPU runs. Found by running the differential with this list switched off over 120 million cases (24 divergences,
+ * 0.00002 %); the list used to be the families MPX, UMONITOR, ENQCMD, MOVDIR64B, the complex half-precision
+ * multiplies and the gathers - each of which the generator has since been taught (x86_gen.c: a gather's index
+ * register in the probe, a vvvv that is not in use, the distance rules for a memory form), and which agree now.
+ * What is left, and why it stays:
+ *
+ *   VCVT(T)S[DSH]2(U)SI(S), TCVTROW*   an EVEX encoding whose GENERAL REGISTER (or tile row) operand is extended by
+ *                                      EVEX.R', B4 or X4: the reference reads APX's r16-r31 there, this decoder has
+ *                                      no APX (x86.h) and masks to four bits. The register NUMBER differs; the length
+ *                                      does not, and no code a non-APX CPU runs has those bits set.
+ *   VGATHER*, VPGATHER*, VSCATTER*, VPSCATTER*  two corners: EVEX.V' = 0 on a scatter or gather, which extends the
+ *                                      VSIB index register to 16-31 (the reference accepts, this decoder reads V' = 0
+ *                                      as "vvvv in use" and refuses), and a 16-bit address size on a VSIB form (the
+ *                                      reference refuses, this one takes the 16-bit length). Both need AVX-512 code
+ *                                      that indexes with zmm16-31, or 67h on a gather in a 32-bit program.
+ *   RMPQUERY, RMPUPDATE                an AMD SEV-SNP instruction with a 67h and a REX prefix: the size of the memory
+ *                                      base register differs, not the length.
+ *   VPMAXSW and the other EVEX forms   behind a REX prefix that is not last: the reference decodes the EVEX, this
+ *                                      decoder (like the CPU: #UD) does not.
+ *
+ * Matched on the reference's identity when it decoded the bytes, on this decoder's when it did not.
  */
 static int known_divergence(unsigned id)
 {
 	switch (id) {
-	case KGENOME_X86_I_BNDMOV: case KGENOME_X86_I_BNDLDX: case KGENOME_X86_I_BNDSTX:
-	case KGENOME_X86_I_BNDMK: case KGENOME_X86_I_BNDCL: case KGENOME_X86_I_BNDCU:
-	case KGENOME_X86_I_BNDCN:
-	case KGENOME_X86_I_UMONITOR: case KGENOME_X86_I_RMPUPDATE:
-	case KGENOME_X86_I_VCVTSD2USI: case KGENOME_X86_I_VCVTSS2SI: case KGENOME_X86_I_VCVTSS2USI:
-	case KGENOME_X86_I_VCVTSD2SI:
-	case KGENOME_X86_I_VFCMADDCPH: case KGENOME_X86_I_VFCMADDCSH: case KGENOME_X86_I_VFCMULCPH:
-	case KGENOME_X86_I_VFCMULCSH: case KGENOME_X86_I_VFMADDCPH: case KGENOME_X86_I_VFMADDCSH:
-	case KGENOME_X86_I_VFMULCPH: case KGENOME_X86_I_VFMULCSH:
+	case KGENOME_X86_I_VCVTSD2SI: case KGENOME_X86_I_VCVTSD2USI: case KGENOME_X86_I_VCVTSH2SI:
+	case KGENOME_X86_I_VCVTSH2USI: case KGENOME_X86_I_VCVTSS2SI: case KGENOME_X86_I_VCVTSS2USI:
+	case KGENOME_X86_I_VCVTTSD2SI: case KGENOME_X86_I_VCVTTSD2SIS: case KGENOME_X86_I_VCVTTSD2USI:
+	case KGENOME_X86_I_VCVTTSD2USIS: case KGENOME_X86_I_VCVTTSH2SI: case KGENOME_X86_I_VCVTTSH2USI:
+	case KGENOME_X86_I_VCVTTSS2SI: case KGENOME_X86_I_VCVTTSS2SIS: case KGENOME_X86_I_VCVTTSS2USI:
+	case KGENOME_X86_I_VCVTTSS2USIS:
+	case KGENOME_X86_I_TCVTROWD2PS: case KGENOME_X86_I_TCVTROWPS2BF16H: case KGENOME_X86_I_TCVTROWPS2BF16L:
+	case KGENOME_X86_I_TCVTROWPS2PHH: case KGENOME_X86_I_TCVTROWPS2PHL:
 	case KGENOME_X86_I_VGATHERDPD: case KGENOME_X86_I_VGATHERDPS: case KGENOME_X86_I_VGATHERQPD:
 	case KGENOME_X86_I_VGATHERQPS: case KGENOME_X86_I_VPGATHERDD: case KGENOME_X86_I_VPGATHERDQ:
 	case KGENOME_X86_I_VPGATHERQD: case KGENOME_X86_I_VPGATHERQQ:
 	case KGENOME_X86_I_VSCATTERDPD: case KGENOME_X86_I_VSCATTERDPS: case KGENOME_X86_I_VSCATTERQPD:
 	case KGENOME_X86_I_VSCATTERQPS: case KGENOME_X86_I_VPSCATTERDD: case KGENOME_X86_I_VPSCATTERDQ:
 	case KGENOME_X86_I_VPSCATTERQD: case KGENOME_X86_I_VPSCATTERQQ:
-	case KGENOME_X86_I_ENQCMD: case KGENOME_X86_I_ENQCMDS: case KGENOME_X86_I_MOVDIR64B:
+	case KGENOME_X86_I_RMPQUERY: case KGENOME_X86_I_RMPUPDATE:
+	case KGENOME_X86_I_VPMAXSW:
 		return 1;
 	}
 	return 0;
@@ -114,7 +134,7 @@ static const char *differ(const INSTRUX *ix, const struct kgenome_x86_insn *x)
 
 	if (ix->Length != x->len)
 		return "length";
-	if ((unsigned)ix->Instruction != x->id)
+	if (oracle_fix_id(ix) != x->id)
 		return "identity";
 	if (ix->OperandsCount != kgenome_x86_nops(x))
 		return "operand count";
@@ -260,6 +280,10 @@ static void differential(void)
 	unsigned long k, agree = 0, skipped = 0, known = 0, bad = 0;
 	const char *first_why = NULL;
 	uint8_t first[24];
+	const char *why_of[16];
+	unsigned id_of[16];
+	uint8_t bytes_of[16][24];
+	unsigned n_of = 0;
 
 	printf("differential against the reference decoder (%u cases):\n", CASES);
 	rs = 0x9e3779b97f4a7c15ull;
@@ -279,7 +303,7 @@ static void differential(void)
 		p = buf + 1;
 		s = NdDecodeEx(&ix, p, 16, w ? ND_CODE_64 : ND_CODE_32, w ? ND_DATA_64 : ND_DATA_32);
 		gs = kgenome_x86_decode(&x, p, 16, w ? 64 : 32);
-		id = ND_SUCCESS(s) ? (unsigned)ix.Instruction : gs == KGENOME_OK ? x.id : 0u;
+		id = ND_SUCCESS(s) ? oracle_fix_id(&ix) : gs == KGENOME_OK ? x.id : 0u;
 		if (ND_SUCCESS(s)) {
 			if (not_decoded(&ix, p)) {
 				skipped++;
@@ -299,6 +323,17 @@ static void differential(void)
 				first_why = why;
 				memcpy(first, buf, sizeof first);
 			}
+			{
+				unsigned q;
+
+				for (q = 0; q < n_of && !(id_of[q] == id && why_of[q] == why); q++)
+					;
+				if (q == n_of && n_of < 16) {
+					why_of[n_of] = why;
+					id_of[n_of] = id;
+					memcpy(bytes_of[n_of++], buf, sizeof bytes_of[0]);
+				}
+			}
 		}
 	}
 	printf("    agree %lu, skipped (not decoded) %lu, known divergence %lu, other %lu\n",
@@ -310,6 +345,16 @@ static void differential(void)
 		for (i = 1; i < 17; i++)
 			printf(" %02x", first[i]);
 		printf("\n");
+	}
+	{
+		unsigned q, i;
+
+		for (q = 0; q < n_of; q++) {
+			printf("      other #%u: id %u, %s, %d-bit:", q, id_of[q], why_of[q], bytes_of[q][0] ? 64 : 32);
+			for (i = 1; i < 17; i++)
+				printf(" %02x", bytes_of[q][i]);
+			printf("\n");
+		}
 	}
 	ok("no divergence outside the listed families", bad == 0);
 	/* The list is not a license: if it grows past a few hundredths of a percent

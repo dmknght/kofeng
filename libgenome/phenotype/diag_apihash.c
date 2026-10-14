@@ -31,6 +31,7 @@
 
 #include "diag_scan.h"
 #include "diag_private.h"
+#include <kofdebug.h>
 #include <kofcore.h>
 #include <celllysis/capability.h>
 #include <celllysis/cell.h>
@@ -56,7 +57,126 @@
  * base, the heap, BeingDebugged. MEASURED on 300 PE, the read alone sent 46 of
  * them to the emulator and the walk is a fraction of those.
  */
-#define PEB_TTL 8u
+/*
+ * HOW FAR THE PEB POINTER IS FOLLOWED. It was eight instructions, and that was the whole of the
+ * evidence: a program that put twelve between the read and the load was not seen. The window is
+ * now the pointer's own life. What holds the PEB is tracked - the register it was read into, any
+ * register it is copied to, and a stack slot it is spilled to (an unoptimised build reads
+ * `mov rax, gs:[0x60] ; mov [rsp+0x48], rax ; mov rax, [rsp+0x48] ; mov rax, [rax+0x18]`) - and the
+ * walk ends where nothing holds it any more, or where the straight line ends (a RET or a plain
+ * jump; a call takes the volatile registers with it). Padding is not evidence of anything, so it
+ * cannot end the walk.
+ *
+ * The only bound left is the cost: every step is charged to the scan's instruction budget, shared
+ * by all the candidates of the object (which scales with its code), and a window cut by it says so
+ * through the set's status.
+ */
+#define PEB_SLOTS 16u
+
+struct peb_hold {
+	uint16_t regs;                          /* registers that hold the PEB, one bit each */
+	uint8_t  n_slot;
+	uint8_t  lost;                          /* a spill was forgotten for want of a slot */
+	struct { uint8_t base; int64_t disp; } slot[PEB_SLOTS];
+};
+
+static int is_volatile_reg(unsigned reg, int wide)
+{
+	/* rax rcx rdx everywhere; r8-r11 on 64-bit. rbx rsi rdi rbp and r12-r15 survive a call. */
+	return reg == KGENOME_CELL_REG_AX || reg == KGENOME_CELL_REG_CX || reg == KGENOME_CELL_REG_DX ||
+	       (wide && reg >= 8 && reg <= 11);
+}
+
+/* A stack slot as a key: rsp or rbp plus a displacement, no index. */
+static int peb_slot_of(const struct kgenome_cell_operand *o)
+{
+	return o->kind == KGENOME_CELL_O_MEM && o->index == KGENOME_CELL_REG_NONE &&
+	       !(o->flags & KGENOME_CELL_OF_RIPREL) &&
+	       (o->reg == KGENOME_CELL_REG_SP || o->reg == KGENOME_CELL_REG_BP);
+}
+
+static int peb_slot_find(const struct peb_hold *h, const struct kgenome_cell_operand *o)
+{
+	unsigned i;
+
+	for (i = 0; i < h->n_slot; i++)
+		if (h->slot[i].base == o->reg && h->slot[i].disp == o->disp)
+			return (int)i;
+	return -1;
+}
+
+static void peb_slot_put(struct peb_hold *h, const struct kgenome_cell_operand *o, int on)
+{
+	int i = peb_slot_find(h, o);
+
+	if (!on) {
+		if (i >= 0)
+			h->slot[i] = h->slot[--h->n_slot];
+		return;
+	}
+	if (i >= 0)
+		return;
+	if (h->n_slot == PEB_SLOTS) {
+		h->lost = 1;                    /* the oldest spill is forgotten: the caller says so */
+		h->slot[0] = h->slot[--h->n_slot];
+	}
+	h->slot[h->n_slot].base = o->reg;
+	h->slot[h->n_slot].disp = o->disp;
+	h->n_slot++;
+}
+
+/* After one instruction: what holds the PEB now. */
+static void peb_step(struct peb_hold *h, const struct kgenome_cell_insn *in, int wide)
+{
+	unsigned r;
+
+	if (in->op == KGENOME_CELL_MOV && in->n_op >= 2u) {
+		const struct kgenome_cell_operand *d = &in->o[0], *src = &in->o[1];
+		int on = 0;
+
+		if (src->kind == KGENOME_CELL_O_REG && src->reg < 16u)
+			on = (h->regs >> src->reg) & 1u;
+		else if (peb_slot_of(src))
+			on = peb_slot_find(h, src) >= 0;
+		if (d->kind == KGENOME_CELL_O_REG && d->reg < 16u) {
+			h->regs = (uint16_t)(on ? h->regs | (1u << d->reg) : h->regs & ~(1u << d->reg));
+			return;
+		}
+		if (peb_slot_of(d)) {
+			peb_slot_put(h, d, on);
+			return;
+		}
+	}
+	for (r = 0; r < 16u; r++)
+		if ((in->wmask >> r) & 1u)
+			h->regs = (uint16_t)(h->regs & ~(1u << r));
+	if ((in->wmask >> KGENOME_CELL_REG_SP) & 1u) {
+		unsigned i;
+
+		for (i = 0; i < h->n_slot;)           /* the stack pointer moved: its slots are not these */
+			if (h->slot[i].base == KGENOME_CELL_REG_SP)
+				h->slot[i] = h->slot[--h->n_slot];
+			else
+				i++;
+	}
+	if (in->op == KGENOME_CELL_CALL)
+		for (r = 0; r < 16u; r++)
+			if (is_volatile_reg(r, wide))
+				h->regs = (uint16_t)(h->regs & ~(1u << r));
+}
+
+/* `src` into a field of `cap` bytes, always terminated; 1 when it did not fit. */
+static int copy_name(char *dst, size_t cap, const char *src)
+{
+	size_t n = strlen(src);
+	int cut = n >= cap;
+
+	if (cut)
+		n = cap - 1u;
+	memcpy(dst, src, n);
+	dst[n] = 0;
+	return cut;
+}
 
 static void note_peb(struct kgenome_diag_apihash_set *a, uint64_t at)
 {
@@ -64,8 +184,13 @@ static void note_peb(struct kgenome_diag_apihash_set *a, uint64_t at)
 		uint32_t nc = a->cap_peb ? a->cap_peb * 2u : 16u;
 		uint64_t *nv = realloc(a->peb, (size_t)nc * sizeof *nv);
 
-		if (!nv)
+		if (!nv) {
+			/* a loader walk that was seen (n_ldr counted it) and not kept is a node
+			 * the graph will not have: said in the product's status */
+			a->status = kgenome_status_merge(a->status, KGENOME_NOMEM);
+			KOF_TRACE("[cut] note_peb: %u loader walks kept, growth refused\n", a->n_peb);
 			return;
+		}
 		a->peb = nv;
 		a->cap_peb = nc;
 	}
@@ -117,7 +242,7 @@ static int is_peb_read(const struct kgenome_cell_insn *in, int wide)
 
 static void atoms_in(struct kgenome_diag_apihash_set *a, const struct kgenome_obj *obj,
 		     const uint8_t *base, uint64_t size, uint64_t off,
-		     uint64_t n, int wide)
+		     uint64_t n, int wide, uint64_t *steps)
 {
 	const uint8_t seg = wide ? 0x65u : 0x64u;
 	uint64_t pos = off, end = off + n;
@@ -143,26 +268,46 @@ static void atoms_in(struct kgenome_diag_apihash_set *a, const struct kgenome_ob
 		if (in.n_op && in.o[0].kind == KGENOME_CELL_O_REG) {
 			int reg = in.o[0].reg;
 			uint64_t at = in.at;
-			unsigned ttl;
+			int found = 0;
+			struct peb_hold hold;
 
-			for (ttl = 0; ttl < PEB_TTL && k.at < end; ttl++) {
+			memset(&hold, 0, sizeof hold);
+			if (reg >= 0 && reg < 16)
+				hold.regs = (uint16_t)(1u << reg);
+			while (!found && k.at < end && (hold.regs || hold.n_slot)) {
 				unsigned q;
 
+				if (!*steps) {
+					a->status = kgenome_status_merge(a->status, KGENOME_OVER_BUDGET);
+					return;         /* the budget is spent: said, not silent */
+				}
+				--*steps;
 				if (!kgenome_cell_step(&k, &sp, &in))
 					break;
+				/* a load through whatever holds the PEB, at the offset of PEB.Ldr */
 				for (q = 0; q < in.n_op; q++) {
 					const struct kgenome_cell_operand *o = &in.o[q];
 
-					if (o->kind == KGENOME_CELL_O_MEM &&
-					    (int)o->reg == reg &&
+					if (o->kind == KGENOME_CELL_O_MEM && o->reg < 16u &&
+					    ((hold.regs >> o->reg) & 1u) &&
 					    o->disp == (wide ? 0x18 : 0x0c)) {
 						a->n_ldr++;
 						note_peb(a, at);
-						ttl = PEB_TTL;
+						found = 1;
 						break;
 					}
 				}
+				if (found)
+					break;
+				peb_step(&hold, &in, wide);
+				/* the straight line ends */
+				if (in.op == KGENOME_CELL_RET ||
+				    (in.op == KGENOME_CELL_JMP && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
+				     !(in.flags & KGENOME_CELL_F_FAR)))
+					break;
 			}
+			if (hold.lost)
+				a->status = kgenome_status_merge(a->status, KGENOME_TRUNCATED);
 		}
 	}
 }
@@ -255,6 +400,7 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 
 	memset(&first, 0, sizeof first);
 	first.max_insn = DIAG_PE_SLICE;
+	first.insn_spent = bud->insn_spent;
 	memset(&rep, 0, sizeof rep);
 	em = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
 			.file = base,
@@ -304,6 +450,12 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 		else if (st == KGENOME_EMU_STOP_UNSUPPORTED)
 			a->status = KGENOME_UNSUPPORTED;
 	}
+	/* A page, a table or a library the model refused is a run that is not the whole answer:
+	 * the product's status says so (the emulator keeps it sticky in kgenome_emu_hit). */
+	if (kgenome_emu_hit(em) & KGENOME_EMU_HIT_MEM)
+		a->status = kgenome_status_merge(a->status, KGENOME_NOMEM);
+	if (kgenome_emu_hit(em) & (KGENOME_EMU_HIT_LIB | KGENOME_EMU_HIT_VMA))
+		a->status = kgenome_status_merge(a->status, KGENOME_TRUNCATED);
 	n_ev = kgenome_emu_win_event_count(em);
 	a->call = calloc(n_ev ? n_ev : 1u, sizeof *a->call);
 	if (!a->call) {
@@ -326,8 +478,13 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 		c->site = ev.site;
 		c->ret = ev.ret;
 		memcpy(c->arg, ev.arg, sizeof c->arg);
-		snprintf(c->api, sizeof c->api, "%s", nm);
-		snprintf(c->dll, sizeof c->dll, "%s", dll ? dll : "");
+		/* The names are the emulator's own stub names, which fit (tests/lib/genome/silent_cuts_genome.c
+		 * walks the whole table); a name that did not would no longer be the vocabulary's word, so
+		 * it is said in the product's status and not stored cut. */
+		if (copy_name(c->api, sizeof c->api, nm) | copy_name(c->dll, sizeof c->dll, dll ? dll : "")) {
+			a->status = kgenome_status_merge(a->status, KGENOME_TRUNCATED);
+			KOF_TRACE("[cut] apihash call: a name over the %zu/%zu kept\n", sizeof c->api, sizeof c->dll);
+		}
 		a->n_call++;
 	}
 	a->end_rip = kgenome_emu_get_rip(em);
@@ -343,6 +500,7 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 	const struct kgenome_pe_info *p;
 	struct kgenome_diag_apihash_set *a;
 	struct kgenome_budget bud;
+	uint64_t steps;
 	uint32_t i;
 	int wide;
 
@@ -364,11 +522,13 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 	if (budget && budget->max_insn_resolve)
 		bud.max_insn_resolve = budget->max_insn_resolve;
 	bud.deadline_ms = budget ? budget->deadline_ms : 0;
+	bud.insn_spent = budget ? budget->insn_spent : NULL;
+	steps = bud.max_insn;
 	for (i = 0; i < kgenome_diag_extent_count(obj); i++) {
 		uint64_t at, have = kgenome_diag_extent(obj, i, size, &at);
 
 		if (have)
-			atoms_in(a, obj, base, size, at, have, wide);
+			atoms_in(a, obj, base, size, at, have, wide, &steps);
 	}
 	/* Only a program that read the loader data and then loaded from it is
 	 * worth a run. */
@@ -411,8 +571,16 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 	if (!obj || obj->format != KGENOME_FMT_PE)
 		return;
 	a = kgenome_diag_apihash(s, obj);
-	if (!a)
+	if (!a) {
+		/* NULL for a PE that parsed is the product's own allocation refused */
+		const struct kgenome_pe_info *pi = kgenome_obj_pe(obj);
+
+		if (pi && pi->valid) {
+			kgenome_diag_note(s, KGENOME_NOMEM);
+			KOF_TRACE("[cut] kgenome_diag_run_apihash: product not allocated\n");
+		}
 		return;
+	}
 	for (i = 0; i < a->n_peb; i++)
 		kgenome_diag_hit_add(s, a->peb[i], KGENOME_NUCLEO_SELF_RESOLVE, 0);
 	/* STOPPED WHILE THE PROGRAM WAS STILL RUNNING - at the instruction
@@ -425,8 +593,11 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 	node = calloc(a->n_call, sizeof *node);
 	region = calloc(a->n_call, sizeof *region);
 	rlen = calloc(a->n_call, sizeof *rlen);
-	if (!node || !region || !rlen)
+	if (!node || !region || !rlen) {
+		kgenome_diag_note(s, KGENOME_NOMEM);
+		KOF_TRACE("[cut] kgenome_diag_run_apihash: %u calls not turned into nodes\n", a->n_call);
 		goto out;
+	}
 
 	for (i = 0; i < a->n_call; i++) {
 		const struct kgenome_diag_apihash_call *c = &a->call[i];

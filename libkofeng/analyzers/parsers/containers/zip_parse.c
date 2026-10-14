@@ -47,6 +47,7 @@
 #include <stddef.h>
 #include "zip_parse.h"
 #include "../../../kofcore/runlist.h"
+#include "../../../kofcore/tabgrow.h"
 #include "../../../kofcore/entryname.h"
 
 #include <string.h>
@@ -312,45 +313,58 @@ int kof_zip_sniff(kof_buf file)
 	return sig == SIG_LOCAL || sig == SIG_EOCD || sig == SIG_EOCD64;
 }
 
+void kof_zip_release(struct kof_zip_info *z)
+{
+	kof_tab_free((void **)&z->run);
+	kof_tab_free((void **)&z->entry);
+	z->n_runs = 0;
+	z->n_entries = 0;
+	z->mem.held = 0;
+	z->mem.rows = 0;
+}
+
+/*
+ * The walk of the table a module reads (kof_zip_next): row `*cursor`, and the count of
+ * calls the engine reads to know the table was used. Not const because of that count -
+ * the view is the host's, and a module never reaches this function except through the
+ * vtable slot that calls it.
+ */
+const void *kof_zip_row(void *view, uint32_t *cursor)
+{
+	struct kof_zip_info *z = (struct kof_zip_info *)view;
+
+	if (!z)
+		return NULL;
+	z->mem.walked++;
+	if (!z->valid || !z->entry || *cursor >= z->n_entries)
+		return NULL;
+	return &z->entry[(*cursor)++];
+}
+
+struct kof_view_mem *kof_zip_mem(void *view)
+{
+	return &((struct kof_zip_info *)view)->mem;
+}
+
 int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 {
 	struct zw s;
-	uint64_t eocd, at;
-	uint32_t i;
+	uint64_t eocd, at, room, rows_limit;
+	uint32_t i, cap_entry = 0;
+	int full = 0;
 
 	/*
-	 * THE HEADER ONLY, NOT THE 600KB OF ARRAYS BEHIND IT.
-	 *
-	 * `memset(z, 0, sizeof *z)` cleared 622728 bytes for every ZIP object
-	 * scanned, whatever was in it. Measured on this machine: 9.1us each,
-	 * and a 300-file run of one-entry zips spent 2.75ms of its 12ms there -
-	 * 23% of the scan, zeroing 4096 entry slots and 16384 run slots that
-	 * the file could not possibly fill.
-	 *
-	 * WHAT MAKES IT SAFE TO LEAVE THE TAIL DIRTY: nothing reads past the
-	 * count. Every consumer in the tree - this parser, kofexaminer,
-	 * bases/decomp/zip.c - loops `i < z->n_entries`, and the runs go
-	 * through kof_runs_* which bounds on n_runs. Both counts are IN the
-	 * header, so both start at zero here; a parse that gives up early
-	 * leaves the arrays untouched AND the counts at zero, which reads as
-	 * "no entries" rather than as last file's entries.
-	 *
-	 * Each slot is cleared as it is filled - see the memset beside
-	 * `e = &z->entry[z->n_entries]` below - so a slot that is counted is
-	 * also a slot that was written.
-	 *
-	 * THE ASSERT IS THE GUARD. The two arrays are the last two members and
-	 * this clears everything before them; a field added AFTER them would
-	 * silently stop being cleared, which is the one way this goes wrong.
-	 * Adding one breaks the build instead.
+	 * THE WHOLE VIEW IS CLEARED NOW, because it is small: the 600KB of arrays that
+	 * made a header-only clear worth an assert (9.1us per object, 23% of a scan of
+	 * one-entry zips) are tables the parse allocates, so there is nothing left to
+	 * skip. What the previous parse of this view left behind is let go first; the
+	 * caller's room is the one field that is read before the clear and put back
+	 * after it.
 	 */
-	_Static_assert(offsetof(struct kof_zip_info, run) +
-		       sizeof ((struct kof_zip_info *)0)->run +
-		       sizeof ((struct kof_zip_info *)0)->entry ==
-		       sizeof(struct kof_zip_info),
-		       "kof_zip_info gained a field after its arrays: the "
-		       "header-only clear below would not reach it");
-	memset(z, 0, offsetof(struct kof_zip_info, run));
+	room = z->mem.room;
+	kof_zip_release(z);
+	memset(z, 0, sizeof *z);
+	z->mem.room = room;
 	z->version = KOF_ZIP_INFO_VERSION;
 
 	if (!kof_zip_sniff(file))
@@ -360,8 +374,11 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.z = z;
-	kof_runs_init(&s.runs, z->run, KOF_ZIP_MAX_EXTENTS,
-		      KOF_ZIP_CLS_COUNT);
+	/* What the FILE can make, and not what it says: a central record is at least
+	 * KOF_ZIP_CENTRAL_MIN bytes and an entry makes at most KOF_ZIP_RUNS_PER_ENTRY runs. */
+	kof_runs_init_dyn(&s.runs, &z->mem, KOF_ZIP_CLS_COUNT,
+			  (uint64_t)KOF_ZIP_RUNS_PER_ENTRY *
+			  (file.n / KOF_ZIP_CENTRAL_MIN + 1u) + 8u);
 
 	eocd = find_eocd(file);
 	if (eocd == UINT64_MAX) {
@@ -433,7 +450,25 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 	 * resynchronising walk would invent entries out of whatever bytes followed.
 	 */
 	at = z->cd_off;
-	for (i = 0; i < KOF_ZIP_MAX_ENTRIES; i++) {
+	/*
+	 * HOW MANY RECORDS THE DIRECTORY CAN HOLD, from the bytes it has - not from what
+	 * the end record says. Every record is at least CENTRAL_MIN bytes and the walk
+	 * advances by at least that, so this is also the most iterations the loop can make.
+	 * The table is sized to the claim when the claim is believable (the first growth is
+	 * to the declared count, clipped to this) and grows past it when the directory holds
+	 * more than it declared: a count the file chose never reaches the allocator whole.
+	 */
+	rows_limit = (file.n - z->cd_off) / KOF_ZIP_CENTRAL_MIN;
+	if (z->declared_entries && z->declared_entries <= rows_limit) {
+		void *t = z->entry;
+
+		/* A pre-size, and only that: refused for room it is simply not made and the
+		 * loop below grows row by row and keeps what fits. */
+		if (kof_tab_grow(&z->mem, &t, &cap_entry, sizeof *z->entry,
+				 z->declared_entries, rows_limit))
+			z->entry = (struct kof_zip_entry *)t;
+	}
+	for (;;) {
 		struct kof_zip_entry *e;
 		uint32_t nlen, xlen, clen;
 
@@ -441,6 +476,18 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 		    kof_rd32_or0(file, at) != SIG_CENTRAL)
 			break;
 
+		/* One more row, or the walk stops HERE and says so: the records that follow
+		 * are in the directory and not in the table. */
+		if (z->n_entries >= cap_entry) {
+			void *t = z->entry;
+
+			if (!kof_tab_grow(&z->mem, &t, &cap_entry, sizeof *z->entry,
+					  (uint64_t)z->n_entries + 1u, rows_limit)) {
+				full = 1;
+				break;
+			}
+			z->entry = (struct kof_zip_entry *)t;
+		}
 		e = &z->entry[z->n_entries];
 		memset(e, 0, sizeof *e);
 
@@ -491,7 +538,7 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 
 		at = e->name_off + nlen + xlen + clen;
 	}
-	if (z->n_entries == KOF_ZIP_MAX_ENTRIES)
+	if (full)
 		z->anomalies |= KOF_ZIP_ANOM_ENTRIES_FULL;
 	else if (z->n_entries < z->declared_entries)
 		z->anomalies |= KOF_ZIP_ANOM_CD_SHORT;
@@ -523,7 +570,9 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 
 done:
 	kof_runs_settle(&s.runs, z->region_bytes);
+	z->run = s.runs.v;
 	z->n_runs = s.runs.n;
+	z->mem.rows = z->n_entries;
 	if (s.runs.full)
 		z->anomalies |= KOF_ZIP_ANOM_EXTENTS_FULL;
 	if (s.runs.clipped)

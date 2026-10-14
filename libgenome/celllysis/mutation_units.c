@@ -53,8 +53,9 @@ static int fn_lib(const struct kgenome_true_all *lib, const struct kgenome_func 
 	return lib && kgenome_true_touches(lib, f->off, f->len);
 }
 
-/* A function-region walk. A function the library owns is not offered. */
-static void by_function(const struct kof_range *ext, uint32_t n_ext,
+/* A function-region walk. A function the library owns is not offered. Answers 1 when the
+ * callback said stop, so the caller does not offer it anything else. */
+static int by_function(const struct kof_range *ext, uint32_t n_ext,
 			const struct kgenome_func_set *funcs,
 			const struct kgenome_true_all *lib,
 			kgenome_mutation_unit_fn fn, void *user)
@@ -87,8 +88,9 @@ static void by_function(const struct kof_range *ext, uint32_t n_ext,
 		if (hi - lo < FN_MIN)
 			continue;
 		if (fn(user, lo, hi - lo, KGENOME_MUTATION_SIDE_USER, best))
-			return;
+			return 1;
 	}
+	return 0;
 }
 
 /*
@@ -287,8 +289,8 @@ void kgenome_mutation_units(const struct kgenome_mutation_req *rq)
 	if (!p || !fn)
 		return;
 	if (kgenome_mutation_by_function(format, mask)) {
-		by_function(ext, n_ext, funcs, lib, fn, user);
-		by_string(p, ext, n_ext, n_obj, lib, fn, user);
+		if (!by_function(ext, n_ext, funcs, lib, fn, user))
+			by_string(p, ext, n_ext, n_obj, lib, fn, user);
 		return;
 	}
 	for (k = 0; k < n_ext; k++) {

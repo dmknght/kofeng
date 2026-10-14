@@ -214,8 +214,12 @@ static uint32_t script_form(const struct kof_obj_ctx *ctx,
 	uint32_t n_ext, i, held = 0;
 	uint64_t at = 0;
 
-	ext = sc->cache.ext_gather;
-	n_ext = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_BODY, ext);
+	{
+		struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
+
+		n_ext = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_BODY, eb);
+		ext = eb->v;
+	}
 	if (!n_ext)
 		return 0;
 	/*
@@ -368,11 +372,20 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		cap = (uint32_t)need;
 	}
 	out = malloc((size_t)cap);
-	if (!out)
+	if (!out) {
+		OC_LIMIT(sc, "script pass buffer not allocated");
 		return 0;
+	}
 
 	if (deep) {
-		n = kof_script_fold(lx, b.p, (uint32_t)b.n, out, (uint32_t)b.n);
+		uint32_t flim = 0;
+
+		n = kof_script_fold_ex(lx, b.p, (uint32_t)b.n, out, (uint32_t)b.n,
+				       &flim);
+		/* A bound of the folder fired: what the script builds was read only
+		 * as far as it let us, and the object says so. */
+		if (flim)
+			oc_scan_limit(sc);
 		/*
 		 * A SHORT CONSTANT IS NOT A PROGRAM. Every script builds small
 		 * strings - a path, a message, a separator - and handing each
@@ -444,6 +457,8 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 			n = 0;
 		} else {
 			tmp = malloc((size_t)n);
+			if (!tmp)
+				OC_LIMIT(sc, "script normalisation buffer not allocated");
 			if (tmp) {
 				uint32_t w = kof_script_norm(lx, out, n, tmp, n,
 							     KOF_NORM_ALL);
@@ -470,7 +485,13 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		oc_child_kind(ctx, KOF_ENT_NORMALIZED);
 		/* Said plainly, like the formed view below - see the call
 		 * there for why the decode belongs to this pass. */
-		kof_exe_decode(out, n);
+		{
+			struct kof_exe_decode_res dres;
+
+			kof_exe_decode_ex(out, n, &dres);
+			if (dres.limit)
+				oc_scan_limit(sc);
+		}
 		script_declare(sc, ctx);
 		if (!script_head_emit(ctx) || !oc_emit_exact(ctx, out, n))
 			n = 0;
@@ -518,7 +539,14 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	 * ON THE PRODUCED BUFFER, NOT ON THE FILE: kof_exe_decode rewrites in
 	 * place, and `out` is this pass's own copy.
 	 */
-	decoded = n ? kof_exe_decode(out, n) : 0;
+	decoded = 0;
+	if (n) {
+		struct kof_exe_decode_res dres;
+
+		decoded = kof_exe_decode_ex(out, n, &dres);
+		if (dres.limit)
+			oc_scan_limit(sc);
+	}
 	/*
 	 * A DECODE IS A DIFFERENCE TOO, and the size test cannot see it.
 	 *

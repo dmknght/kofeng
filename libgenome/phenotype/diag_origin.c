@@ -71,8 +71,15 @@ void kgenome_diag_org_step(struct kgenome_diag_orgs *w, const struct kgenome_cel
 
 		if (in->n_op && in->o[0].kind == KGENOME_CELL_O_REG)
 			v = kgenome_diag_org_of(w, in->o[0].reg);
-		if (w->n_stk < KGENOME_DIAG_ORG_STK)
-			w->stk[w->n_stk].node = v;
+		if (w->n_stk >= KGENOME_DIAG_ORG_STK) {
+			/* the slot this push reuses belongs to the push KGENOME_DIAG_ORG_STK below it */
+			if (w->stk[w->n_stk % KGENOME_DIAG_ORG_STK] != KGENOME_DIAG_ORG_NONE &&
+			    w->n_stk - KGENOME_DIAG_ORG_STK >= w->n_lost)
+				w->stk_cut = 1;         /* an origin that is gone for good */
+			if (w->n_stk - KGENOME_DIAG_ORG_STK + 1u > w->n_lost)
+				w->n_lost = w->n_stk - KGENOME_DIAG_ORG_STK + 1u;
+		}
+		w->stk[w->n_stk % KGENOME_DIAG_ORG_STK] = v;
 		w->n_stk++;
 		return;
 	}
@@ -81,8 +88,8 @@ void kgenome_diag_org_step(struct kgenome_diag_orgs *w, const struct kgenome_cel
 
 		if (w->n_stk) {
 			w->n_stk--;
-			if (w->n_stk < KGENOME_DIAG_ORG_STK)
-				v = w->stk[w->n_stk].node;
+			if (w->n_stk >= w->n_lost)
+				v = w->stk[w->n_stk % KGENOME_DIAG_ORG_STK];
 		}
 		/* A popped LIST names no operand; wmask has them all. */
 		for (r = 0; r < 16u; r++)

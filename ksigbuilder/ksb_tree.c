@@ -592,9 +592,11 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
  * verdict that misspells one is a verdict that never fires, and nothing
  * would say so. That is an ERROR.
  *
- * A diagnose nothing calls is not a mistake in the build but is one in
- * the tree: the engine will not run it, which is the point, but whoever
- * wrote it should be told it does nothing yet.
+ * A diagnose nothing calls and that declares no disease is not a mistake in
+ * the build but is one in the tree: the engine will not run it, which is the
+ * point, but whoever wrote it should be told it does nothing yet. One that
+ * declares a disease is read by the verdict (the diseases an object has make
+ * it) and is run.
  *
  * Zero when no call is dangling.
  */
@@ -620,10 +622,12 @@ static int tree_check_uses(const struct ksb_ctx *ksb, const char *base)
 		for (q = 0; q < ksb->diag.n_uses; q++)
 			if (!strcmp(ksb->diag.built[z], ksb->diag.uses[q].diag))
 				break;
-		if (q == ksb->diag.n_uses)
+		/* A diagnose that declares a disease is read by the verdict, which
+		 * is made of the diseases an object has - the engine runs it. */
+		if (q == ksb->diag.n_uses && !ksb->diag.built_dis[z])
 			fprintf(stderr, "ksigbuilder: warning: diagnose "
-				"%s is read by no verdict, so the engine "
-				"will not run it\n", ksb->diag.built[z]);
+				"%s is read by no rule and declares no disease, "
+				"so the engine will not run it\n", ksb->diag.built[z]);
 	}
 	if (dangling)
 		return 1;

@@ -67,7 +67,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_CHM_INFO_VERSION 1
+#define KOF_CHM_INFO_VERSION 2
 
 /*
  * Scan regions.
@@ -109,8 +109,10 @@ enum {
 	/* An entry name holds ".." or begins with a drive or a slash-slash -
 	 * a path that means to escape wherever it is written. */
 	KOF_CHM_ANOM_TRAVERSAL     = 1ull << 5,
-	/* More entries than the table below holds. The ones recorded are real;
-	 * what is past the cap was not examined. */
+	/* A table of the parse could not grow, or the work it is allowed ran out: more
+	 * entries than the entry table took, or coded entries whose pieces no longer fit
+	 * the pool. The ones recorded are real; what was past it was not examined, and
+	 * the object says so. */
 	KOF_CHM_ANOM_ENTRIES_FULL  = 1ull << 6,
 	/*
 	 * The compressed section declares a stream this build cannot enter:
@@ -129,36 +131,36 @@ enum {
 #define KOF_CHM_ANOM_COUNT 8
 
 /*
- * The entries recorded, and the cap.
+ * What bounds the parse, and what does not.
  *
- * A help file with a thousand pages is ordinary, so this is generous; what it
- * bounds is a directory that claims millions, which is a file built to make a
- * parser allocate. Past the cap the walk stops and says so through
- * KOF_CHM_ANOM_ENTRIES_FULL, for the reason tar.h gives about its own: the
- * entries recorded are still true.
+ * NO COUNT IS A LIMIT ON THE FILE. The entry table was 2048 rows, a name over 1024 bytes ended
+ * the rest of its directory chunk, the pool of pieces was 2048 and one entry could take 64 of
+ * them, so a help file with 2100 pages lost the last of them, a long name took its neighbours
+ * with it and a page that spans a hundred reset intervals was not placed. A directory entry is
+ * a name length, a name and three numbers - at least KOF_CHM_ENTRY_MIN bytes of the directory -
+ * so the rows cannot exceed the length of the directory over it; a name is bounded by the chunk
+ * that holds it (a chunk is at most 64 KiB) and the host judges how long a name may be
+ * (oc_name_limit), never cutting one; and the pieces are bounded by the reset table, which has a
+ * row of eight bytes for each: the walk may place twice as many as the table has rows, which a
+ * help file whose pages are disjoint never reaches and a directory whose pages all claim the
+ * whole stream reaches at once - it costs a multiple of the file and no more. Under that sits the
+ * engine's per-object ledger (struct kof_view_mem.room). A table that cannot grow, or work past
+ * its budget, raises ENTRIES_FULL: what was not placed is said, and what was is whole.
  */
-#define KOF_CHM_MAX_ENTRIES 2048u
-
-/* The longest entry name kept as a range. Names are paths inside the help
- * file and real ones are short; this is what stops a length field from
- * naming the whole object. */
-#define KOF_CHM_MAX_NAME 1024u
+#define KOF_CHM_ENTRY_MIN 5u
 
 /*
- * The pieces of every coded entry, in one pool.
+ * THE VIEW, AND WHAT CHANGED IN IT.
  *
- * One per reset interval an entry spans, so a help file whose pages are all
- * smaller than an interval - which is the ordinary shape - uses one per page.
- * What this bounds is a directory of large entries over a stream with a short
- * interval, where the pieces multiply; past it an entry is not placed and is
- * counted in n_unreachable rather than truncated.
+ * Version 2, the same change as the zip view's (zip.h has the long form): `entry[2048]`, the pool
+ * of pieces and the rows that index it - 180 KB - are tables the parse allocates to the size of the
+ * help file, reached through the pointers at the tail. `n_entries` WAS AT OFFSET 144 AND IS NOW
+ * `legacy_n_entries`, ALWAYS ZERO: a module built against version 1 loops over a count of zero,
+ * reads a valid empty table, and the engine - which sees that the walk below was never called while
+ * the help file has rows - reports the object instead of passing it as examined (sx_walk_check).
+ * The real count is `n_entries` at the tail. A module walks the table with kof_chm_next below; it
+ * does not index `entry`.
  */
-#define KOF_CHM_MAX_RUNS 2048u
-
-/* And what one entry may take of that pool. A page is a page: a thousand
- * intervals of one is a file built to consume the pool, not a document. */
-#define KOF_CHM_MAX_ENT_RUNS 64u
-
 struct kof_chm_info {
 	uint32_t version;          /* KOF_CHM_INFO_VERSION */
 	uint32_t valid;            /* "ITSF" was there */
@@ -209,7 +211,7 @@ struct kof_chm_info {
 	uint32_t n_reset;          /* rows in the table: one per frame */
 	uint32_t reserved1;
 
-	uint32_t n_entries;        /* recorded below, at most MAX_ENTRIES */
+	uint32_t legacy_n_entries; /* version 1's count, kept for its offset: always 0 */
 	uint32_t n_compressed;     /* entries that live in the coded section,
 				    * whether or not they were reached */
 	uint32_t n_unreachable;    /* of those, the ones with no restart point
@@ -217,6 +219,10 @@ struct kof_chm_info {
 	uint32_t n_special;        /* names beginning with ':' or '#': the
 				    * format's own bookkeeping, not content */
 	uint32_t reserved0;
+
+	/* ---- version 2: from here the tables are the file's size ----------------------- */
+
+	struct kof_view_mem mem;   /* what the tables hold; see range.h */
 
 	/*
 	 * The entries, in the host's own shape.
@@ -226,7 +232,7 @@ struct kof_chm_info {
 	 * kof_objtree_declared - so an entry that is a plain range becomes a
 	 * named child without this format needing a module at all.
 	 */
-	struct kof_entry entry[KOF_CHM_MAX_ENTRIES];
+	struct kof_entry *entry;   /* n_entries of them */
 
 	/*
 	 * THE PIECES OF THE CODED ENTRIES, in one pool - the arrangement
@@ -239,18 +245,33 @@ struct kof_chm_info {
 	 * since a section-0 entry is a plain range - and an entry with n_run of
 	 * zero is one the reset table could not place.
 	 */
-	uint32_t n_runs;
-	struct {
+	struct kof_chm_run {
 		uint64_t off, len;
-	} run[KOF_CHM_MAX_RUNS];
-	struct {
+	} *run;                    /* n_runs of them */
+	struct kof_chm_split {
 		uint32_t first_run, n_run;
-	} split[KOF_CHM_MAX_ENTRIES];
+	} *split;                  /* one row per entry */
+	uint32_t n_entries;        /* rows in `entry`: every page the walk met that the
+				    * tables could take */
+	uint32_t n_runs;
 };
 
 static inline const struct kof_chm_info *kof_chm(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_chm_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT ENTRY OF THE HELP FILE, in directory order: row `*cursor`, and the cursor is advanced;
+ * NULL at the end. The row's index - what kunp_static_entry takes - is the cursor minus one after
+ * the call. See kof_zip_next, which this is the same walk as.
+ */
+static inline const struct kof_entry *kof_chm_next(const struct kof_obj_ctx *ctx,
+						   uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_CHM_H */

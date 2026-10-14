@@ -210,13 +210,14 @@ static void engine_sweep(void)
 }
 
 /*
- * THE CASE THE ENGINE'S ANSWER RESTS ON A SECOND MECHANISM FOR: a diag scan whose status is
- * TRUNCATED while NO diagnose is marked "cannot say" (diag.unk empty) - e.g. every diagnose
- * that was read answered YES or its gate was closed, so the cut run's missing stops belong to
- * nobody who asked. kof_scan_incomplete reads only OVER_BUDGET and NOMEM (objctx_diag.c:710)
- * and then returns 0, so the verdict path shows a cut run as complete. diag_ledger_e2e.c pins
- * this as the design ("said by diag_unk, not here"); the invariant of CLAUDE.md section 12 is
- * that a caller can tell "nothing there" from "we stopped looking", which this state cannot.
+ * A diag scan whose status is TRUNCATED while NO diagnose is marked "cannot say"
+ * (diag.unk empty) - every diagnose that was read answered YES or its gate was closed, so
+ * the cut run's missing stops belong to nobody who asked. kof_scan_incomplete used to read
+ * only OVER_BUDGET and NOMEM and return 0, so the verdict path showed a cut run as
+ * complete, and a caller could not tell "nothing there" from "we stopped looking" (CLAUDE.md
+ * section 12). It now also reads TRUNCATED when the analysis was demanded (obj.diag.ask: a
+ * rule read the diagnose surface, or a tool asked for every diagnose); a cut analysis nobody
+ * demanded says nothing about the object.
  * Hand-built state, as status_direct does: the status is the one a 40000-site run leaves.
  */
 static void truncated_without_unk(void)
@@ -234,14 +235,18 @@ static void truncated_without_unk(void)
 	ctx.priv = sc;
 	sc->obj.diag.status = KGENOME_TRUNCATED;
 	CK(kof_scan_diag_status(&ctx) == KGENOME_TRUNCATED);
-	KM_CHECK(kof_scan_incomplete(&ctx) == 1,
-		 "a diag scan cut by a limit (TRUNCATED) shows as incomplete to the verdict path "
-		 "even when no read diagnose answered 'cannot say'",
-		 "kof_scan_incomplete objctx_diag.c:710 lost: TRUNCATED (KGENOME_DIAG_EMU_SITES, "
-		 "node/name/site limits) is read only through diag_unk, so stops past the cut that "
-		 "belong to no open diagnose leave the object reading as complete [Inference: low "
-		 "severity, only diagnoses that were not asked about lose anything]");
+	/* Nothing asked for the analysis (the graph was kept for a report nobody
+	 * requested): a cut in it says nothing about the object. */
+	CK(kof_scan_incomplete(&ctx) == 0);
+	/* A rule read the diagnose surface: the cut analysis is not the whole answer for
+	 * it, whether or not any diagnose it read is marked "cannot say" (diag.unk is
+	 * empty here - this is the state the 'yes' of a cut run leaves). */
+	sc->obj.diag.ask = 1;
+	CK(kof_scan_incomplete(&ctx) == 1);
+	/* and a complete analysis stays complete under the same demand */
 	sc->obj.diag.status = KGENOME_OK;
+	CK(kof_scan_incomplete(&ctx) == 0);
+	sc->obj.diag.ask = 0;
 	kscan_free(sc);
 }
 

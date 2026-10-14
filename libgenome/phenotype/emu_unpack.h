@@ -131,6 +131,9 @@ struct kgenome_emu_unp_report {
 	int                  improvised; /* the entry or the mapping was guessed */
 	uint32_t             images;     /* snapshots taken at a W->X mprotect */
 	uint32_t             written;    /* runs of written memory */
+	/* Declared patches, instruction patterns or shims past KGENOME_EMU_PATCH_MAX,
+	 * KGENOME_EMU_INSN_WATCH_MAX or KGENOME_EMU_SHIM_MAX: not applied, and counted here. */
+	uint32_t             decl_cut;
 	/*
 	 * THE STACK THIS RUN WAS GIVEN, so a harvest can leave it alone.
 	 *
@@ -368,7 +371,10 @@ struct kgenome_emu_patch {
 };
 
 struct kgenome_emu_decl {
-	struct kgenome_emu_iwatch iw[KGENOME_EMU_INSN_WATCH];
+	/* As many patterns as the emulator will take (KGENOME_EMU_INSN_WATCH is only where its
+	 * own table starts): a declaration the machine would have kept is not cut in the
+	 * caller's array first. */
+	struct kgenome_emu_iwatch iw[KGENOME_EMU_INSN_WATCH_MAX];
 	uint32_t              n_iw, iw_len;
 	struct kgenome_emu_shim   shim[KGENOME_EMU_SHIM_MAX];
 	uint32_t              n_shim;

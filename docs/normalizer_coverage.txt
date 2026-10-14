@@ -1,0 +1,855 @@
+NORMALISER COVERAGE
+===================
+
+What this is: the normaliser - executables.c (the decode passes and the transform), script_norm.c and
+script_fold.c (the form and the fold of a script), scan_norm.c / scan_norm_text.c / scan_norm_syms.c (the
+view and its maps), objsrc.c and objprod.c (what a view declares and inherits), offmap.c and funcs.c
+(carrying a description and the functions through the transform) - and which test pins each part.
+
+How it was made (scratch scripts, nothing of them is in the tree):
+  1. the ten sources were compiled with --coverage -O0 and linked IN FRONT of libkofeng.a / libkgenome.a,
+     so each test ran the instrumented copy and nothing else changed;
+  2. every test that links against libkofeng.a (tests/unit: 115 programs) or libkgenome.a (tests/lib/genome:
+     51) was run, once together (the "before" column; the eight normalizer_* files are NOT among them) and
+     once each in its own gcda directory (the "tests" column). Not linked: twelve tests of tests/unit that need
+     extra sources (cond_expr, codec_forms, draft_source, fidset, fnprint_gcc, fridge, grille_host, kofscfind,
+     out_clip, proc_rule, report_model, rule_roundtrip) and the platform tests (antarc_*, msf_xor,
+     ko_anomalies, chan_ring, hostile_mem, reg_event, thread_region); none is about the normaliser.
+  3. the eight new files were then added to the first run (the "after" column);
+  4. the behaviour table (section 3) was written by reading each existing test and grepping tests/ for
+     the function and the case; a behaviour no existing test states is marked UNTESTED.
+
+1. LINE AND BRANCH COVERAGE OF THE SOURCES (gcov, all tests of the column together)
+--------------------------------------------------------------------------------
+file                                                            lines      lines   br taken   br taken
+                                                               before      after     before      after
+analyzers/normalize/executables.c                               92.4%      97.7%      81.9%      95.0%
+analyzers/parsers/scripts/script_norm.c                         87.3%      98.8%      73.5%      94.1%
+analyzers/parsers/scripts/script_fold.c                         86.3%      96.0%      68.0%      88.1%
+scanners/scan_norm.c                                            87.2%      93.1%      69.9%      77.0%
+scanners/scan_norm_syms.c                                       82.2%      82.2%      63.9%      63.9%
+scanners/scan_norm_text.c                                       84.3%      97.6%      71.0%      92.1%
+scanners/objprod.c                                              93.8%      95.1%      74.0%      80.0%
+scanners/objsrc.c                                               78.0%      83.9%      55.1%      73.5%
+genotype/image/offmap.c                                         97.4%     100.0%      87.5%     100.0%
+genotype/image/funcs.c                                          89.8%      91.2%      76.7%      80.6%
+ALL TEN (2267 lines, 1977 branches)                             87.8%      94.5%      73.1%      87.3%
+
+"br taken" is branches taken at least once; the compiler counts both sides of every condition, so it is
+the stricter of the two branch numbers and the one to read.
+
+2. EVERY FUNCTION: who runs it today, and what is left
+--------------------------------------------------------------------------------
+columns: lines run before -> after (percent of the function), the status, and the existing tests that are about it
+(named in the test source by grep -w, or one of the normaliser/view/fold/offmap tests) and run a line of it.
+
+libkofeng/analyzers/normalize/executables.c
+  b64_anchor_at                        80% ->   90%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 8 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  b64_run_char                        100% ->  100%  covered    normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile, normalizer_engine
+  dec_grow                             75% ->   83%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  dec_note                             80% ->  100%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  dec_out_init                        100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  decode_in_place                      83% ->   83%  PARTIAL    normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile, normalizer_engine
+  hex_delim                           100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 7 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  hex_letter                          100% ->  100%  covered    normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile
+  hex_text                            100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_hostile, normalizer_engine
+  keep_at                             100% ->  100%  covered    norm_fuzz, normalize_exe, view_equiv
+                                                         also run by 11 other test(s) that scan objects
+                                                         now also: normalizer_transform, normalizer_hostile, normalizer_engine
+  keep_bound                          100% ->  100%  covered    norm_fuzz, normalize_exe, view_equiv
+                                                         also run by 9 other test(s) that scan objects
+                                                         now also: normalizer_transform, normalizer_hostile, normalizer_engine
+  kof_b64_val                         100% ->  100%  covered    normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile, normalizer_engine
+  kof_exe_decode                      100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile
+  kof_exe_decode_ex                    95% ->   97%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  kof_exe_norm                         90% ->  100%  PARTIAL    norm_fuzz, normalize_exe
+                                                         now also: normalizer_transform, normalizer_hostile
+  kof_exe_norm_map                     85% ->  100%  PARTIAL    norm_fuzz, normalize_exe
+                                                         now also: normalizer_transform, normalizer_hostile
+  kof_exe_norm_masked                  99% ->  100%  PARTIAL    norm_fuzz, normalize_exe, view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_transform, normalizer_hostile, normalizer_engine
+  kof_exe_norm_src_of                  92% ->  100%  PARTIAL    normalize_exe
+                                                         now also: normalizer_transform, normalizer_hostile
+  kof_exe_unb64                       100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile
+  kof_exe_unhex                       100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers
+                                                         now also: normalizer_decoders, normalizer_hostile
+  kof_exe_unwide                       65% ->  100%  PARTIAL    norm_fuzz
+                                                         now also: normalizer_transform, normalizer_hostile
+  kof_hex_byte                        100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_hostile, normalizer_engine
+  kof_hex_val                         100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  pct_body                            100% ->  100%  covered    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  span_put                             95% ->  100%  PARTIAL    norm_fuzz, normalize_exe
+                                                         now also: normalizer_transform, normalizer_hostile
+  unb64_range                          90% ->   98%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  unhex_range                          93% ->   95%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  unpct_range                          96% ->   96%  PARTIAL    norm_fuzz, normalize_exe, silent_loss_parsers, view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_decoders, normalizer_transform, normalizer_hostile, normalizer_engine
+  wide_char                           100% ->  100%  covered    norm_fuzz, normalize_exe, view_equiv
+                                                         also run by 9 other test(s) that scan objects
+                                                         now also: normalizer_transform, normalizer_hostile, normalizer_engine
+  wide_run                            100% ->  100%  covered    norm_fuzz, normalize_exe, view_equiv
+                                                         also run by 9 other test(s) that scan objects
+                                                         now also: normalizer_transform, normalizer_hostile, normalizer_engine
+  zero_run                            100% ->  100%  covered    norm_fuzz, normalize_exe, view_equiv
+                                                         also run by 9 other test(s) that scan objects
+                                                         now also: normalizer_transform, normalizer_hostile, normalizer_engine
+
+libkofeng/analyzers/parsers/scripts/script_norm.c
+  at_text                             100% ->  100%  covered    script_islands, script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  glues                                83% ->   92%  PARTIAL    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  has_multiline                       100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  is_word                             100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  is_ws                               100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  kof_is_alnum                        100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  kof_is_alpha                        100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  kof_is_digit                        100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  kof_lex_for                          83% ->  100%  PARTIAL    script_islands, script_norm, silent_loss_parsers
+                                                         also run by 3 other test(s) that scan objects
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  kof_lex_is_code_at                   56% ->  100%  PARTIAL    script_islands
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_script_form
+  kof_script_norm                      95% ->   95%  PARTIAL    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  line_cmt_at                         100% ->  100%  covered    script_islands, script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  ml_at                               100% ->  100%  covered    script_islands, script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  ml_opens_at                          85% ->  100%  PARTIAL    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  norm_join_brace                     100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  norm_measure_line                   100% ->  100%  covered    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  norm_resume_blk                      85% ->   85%  PARTIAL    script_norm
+                                                         now also: normalizer_script_form
+  norm_resume_ml                       92% ->  100%  PARTIAL    script_norm
+                                                         now also: normalizer_script_form
+  norm_resume_string                   81% ->  100%  PARTIAL    script_norm
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_script_form
+  norm_walk_line                       91% ->  100%  PARTIAL    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  norm_whole_comment                   96% ->  100%  PARTIAL    script_norm
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+  text_len                            100% ->  100%  covered    script_islands, script_norm
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_script_form, normalizer_engine
+
+libkofeng/analyzers/parsers/scripts/script_fold.c
+  arena_put                            75% ->   85%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  arena_put_self                       89% ->  100%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_engine
+  do_replace                           83% ->   89%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script
+  eval                                 96% ->  100%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  is_name_byte                        100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  is_ws                               100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  kof_is_alnum                        100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  kof_is_alpha                        100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  kof_is_digit                        100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  kof_script_fold                     100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script
+  kof_script_fold_ex                   94% ->  100%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  lookup                              100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_engine
+  name_hash                           100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  read_literal                         78% ->   96%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  skip_ws                              75% ->  100%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  term                                 81% ->   97%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  var_add                              83% ->  100%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  var_find                            100% ->  100%  covered    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+  var_room                             86% ->   90%  PARTIAL    script_norm, silent_loss_parsers
+                                                         now also: normalizer_script, normalizer_script_form, normalizer_engine
+
+libkofeng/scanners/scan_norm.c
+  kof_buf_make                        100% ->  100%  covered    view_equiv
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_cmp_u64                         100% ->  100%  covered    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_elf                             100% ->  100%  covered    view_equiv
+                                                         also run by 10 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_pe                              100% ->  100%  covered    view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  mark_add                             91% ->   91%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  mark_visit                          100% ->  100%  covered    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_alloc                           58% ->   58%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_append_library                  97% ->   97%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_collapse                        69% ->   83%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_declare                         98% ->   98%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_decode                          46% ->  100%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_drop_build                      90% ->   90%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_emit_work                       90% ->   95%  PARTIAL    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_fits                            71% ->  100%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_gather_regions                 100% ->  100%  covered    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_keep_build                     100% ->  100%  covered    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_marks_build                     96% ->   96%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_send_child                      90% ->  100%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_view_describe                  100% ->  100%  covered    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  norm_wanted                          89% ->   94%  PARTIAL    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  sx_norm_emit                        100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine
+
+libkofeng/scanners/scan_norm_syms.c
+  kof_elf                             100% ->  100%  covered    view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_sym_count                       100% ->  100%  covered    view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_sym_pool_at                     100% ->  100%  covered    view_equiv
+                                                         also run by 3 other test(s) that scan objects
+  kof_sym_rec                          80% ->   80%  PARTIAL    view_equiv
+                                                         also run by 3 other test(s) that scan objects
+  kof_sym_u64                         100% ->  100%  covered    view_equiv
+                                                         also run by 3 other test(s) that scan objects
+  sx_norm_syms                         82% ->   82%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine
+
+libkofeng/scanners/scan_norm_text.c
+  sx_bits_clr                          69% ->   92%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  sx_bits_set                          92% ->  100%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  sx_norm_gather                       87% ->   93%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  sx_norm_keep_bits                    83% ->  100%  PARTIAL    view_equiv
+                                                         also run by 13 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  sx_norm_keep_exec                    89% ->  100%  PARTIAL    view_equiv
+                                                         also run by 10 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  sx_norm_keep_exec_pe                 92% ->  100%  PARTIAL    view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+
+libkofeng/scanners/objprod.c
+  kof_prod_adopt                      100% ->  100%  covered    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_prod_publish                     83% ->   92%  PARTIAL    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_prod_unadopt                    100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_prod_unref                      100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  prod_take                            91% ->   91%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+
+libkofeng/scanners/objsrc.c
+  kof_buf_make                        100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_clip_len                        100% ->  100%  INCIDENTAL -
+                                                         also run by 11 other test(s) that scan objects
+  kof_map_file_ro                     100% ->  100%  covered    scan_bytes_api
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_sat_add                         100% ->  100%  INCIDENTAL -
+                                                         also run by 11 other test(s) that scan objects
+  kof_src_borrow                       86% ->   86%  PARTIAL    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 19 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_src_buf                         100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_desc                 83% ->   92%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_entry               100% ->  100%  covered    view_equiv
+                                                         also run by 20 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_fmt                 100% ->  100%  covered    view_equiv
+                                                         also run by 7 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_funcs                80% ->   90%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_view_state
+  kof_src_declare_kind                100% ->  100%  covered    view_equiv
+                                                         also run by 20 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_lang                 83% ->  100%  PARTIAL    view_equiv
+                                                         also run by 7 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_prod                 80% ->   80%  PARTIAL    view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_regions              78% ->  100%  PARTIAL    view_equiv
+                                                         also run by 8 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_declare_syms                 80% ->   90%  PARTIAL    view_equiv
+                                                         also run by 5 other test(s) that scan objects
+                                                         now also: normalizer_view_state
+  kof_src_desc_of                     100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_entry_of                    100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_fd                           71% ->   71%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_src_file                         64% ->   64%  PARTIAL    scan_bytes_api
+                                                         also run by 14 other test(s) that scan objects
+  kof_src_fmt_of                      100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_funcs_of                    100% ->  100%  covered    view_equiv
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_heap                         80% ->   80%  PARTIAL    view_equiv
+                                                         also run by 17 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_kind_of                     100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_label                        64% ->   96%  PARTIAL    view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_label_of                    100% ->  100%  covered    view_equiv
+                                                         also run by 20 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_lang_of                     100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_on_free                     100% ->  100%  covered    view_equiv
+                                                         also run by 17 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_src_prod_of                     100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_ref                         100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_src_region_fmt_of               100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_regions_of                  100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_syms_of                     100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_tmpdir                        0% ->    0%  UNTESTED   -
+  kof_src_tmpfile                     100% ->  100%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_src_tmpfile_in                   45% ->   45%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_src_unref                       100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  kof_src_window                       85% ->   85%  INCIDENTAL -
+                                                         also run by 11 other test(s) that scan objects
+  kof_tmpdir                          100% ->  100%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_unmap_file                      100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  looks_utf16le                        86% ->  100%  PARTIAL    view_equiv
+                                                         also run by 14 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+  src_new                             100% ->  100%  covered    prod_once, scan_bytes_api, view_equiv
+                                                         also run by 33 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state
+
+libgenome/genotype/image/offmap.c
+  clr_offsets                         100% ->  100%  covered    api_image, view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  kgenome_elf_info_offsets            100% ->  100%  covered    api_image, view_equiv
+                                                         also run by 10 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  kgenome_elf_info_remap              100% ->  100%  covered    api_image, view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  kgenome_offmap_at                    95% ->  100%  PARTIAL    api_image, view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  kgenome_pe_info_offsets             100% ->  100%  covered    api_image, view_equiv
+                                                         also run by 4 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  kgenome_pe_info_remap               100% ->  100%  covered    api_image, view_equiv
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  remap_one                           100% ->  100%  covered    api_image, view_equiv
+                                                         also run by 6 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+
+libgenome/genotype/image/funcs.c
+  find_bytes                           93% ->  100%  PARTIAL    api_diag, fnprint_credit, fnprint_reliability, funcs_remap, silent_loss_genome, view_equiv
+                                                         also run by 1 other test(s) that scan objects
+                                                         now also: normalizer_offmap
+  func_cmp                            100% ->  100%  covered    api_diag, api_image, prod_once, view_equiv
+                                                         also run by 7 other test(s) that scan objects
+  kgenome_elf_funcs_build              79% ->   79%  PARTIAL    api_diag, prod_once, scan_bytes_api, silent_loss_genome, view_equiv
+                                                         also run by 16 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kgenome_elf_funcs_from_entries       91% ->   91%  PARTIAL    api_diag, api_image
+                                                         also run by 4 other test(s) that scan objects
+  kgenome_funcs_build                 100% ->  100%  covered    api_diag, prod_once, scan_bytes_api, silent_loss_genome, view_equiv
+                                                         also run by 16 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kgenome_funcs_finish                100% ->  100%  covered    api_diag, api_image, prod_once, silent_loss_genome, view_equiv
+                                                         also run by 11 other test(s) that scan objects
+  kgenome_funcs_free                   80% ->   80%  PARTIAL    api_diag, api_image, fnprint_credit, fnprint_reliability, funcs_remap, prod_once, scan_bytes_api, silent_loss_genome, view_equiv
+                                                         also run by 49 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_view_state, normalizer_offmap
+  kgenome_funcs_remap                  89% ->   94%  PARTIAL    api_diag, fnprint_credit, fnprint_reliability, funcs_remap, silent_loss_genome, view_equiv
+                                                         also run by 2 other test(s) that scan objects
+                                                         now also: normalizer_engine, normalizer_offmap
+  kgenome_pe_funcs_build               93% ->   93%  PARTIAL    api_diag, prod_once, view_equiv
+                                                         also run by 3 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kgenome_pe_rva_to_off                79% ->   79%  PARTIAL    api_diag
+                                                         also run by 1 other test(s) that scan objects
+  kof_buf_make                        100% ->  100%  covered    api_diag, prod_once, scan_bytes_api, silent_loss_genome, view_equiv
+                                                         also run by 16 other test(s) that scan objects
+                                                         now also: normalizer_engine
+  kof_in_range                         75% ->   75%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+  kof_rd_u32                           78% ->   78%  INCIDENTAL -
+                                                         also run by 1 other test(s) that scan objects
+
+status: covered = a test that is about this part runs every line of it; PARTIAL = such a test runs some;
+INCIDENTAL = only scans of other subjects reach it; UNTESTED = no existing test runs a line.
+functions UNTESTED 1, INCIDENTAL 10, PARTIAL 74.
+
+3. BEHAVIOURS: what an existing test states, and what no test stated
+--------------------------------------------------------------------------------
+status before:  COVERED (an existing test asserts it), PARTIAL (asserts some of it), UNTESTED
+after:          the new test that asserts it now; KNOWN MISS names a contract the code does not meet
+
+
+EXECUTABLES.C - the decode passes
+D1  base64 under `base64 -d`: spellings (-d -D -di --decode), pipe or redirect required, `=` rule, delimiter, 16-character floor
+      before: normalize_exe: b64_decodes_the_mirai_shape, b64_needs_a_pipe,
+      b64_stops_at_an_inner_equals, b64_reads_every_spelling, b64_ignores_a_short_run,
+      b64_touches_only_its_own_run, b64_is_idempotent
+      status: PARTIAL - no padded/unpadded, LF/CRLF wrapped, quoted, parenthesised or `<` form; no
+      per-byte delimiter test (the refusal at line 491 never ran); no 15/16 edge; url-safe untried
+      after:  normalizer_decoders: b64_known_answers (16 forms), b64_refused (url-safe, non-
+      alphabet), b64_needs_a_pipe_and_a_delimiter (all 256 delimiter bytes), b64_floor,
+      b64_equals_rule
+D2  hex run: 24-digit floor, odd tail, printable test on every byte, delimiter, quoted table with the letter count
+      before: normalize_exe: hex_decodes_a_command, hex_refuses_a_hash, hex_needs_a_delimiter,
+      hex_ignores_a_short_run, hex_keeps_an_ip_with_no_letters, hex_decodes_a_quoted_table,
+      hex_leaves_a_lone_quoted_literal, hex_refuses_a_quoted_hash_table,
+      hex_refuses_a_table_of_decimals, hex_decodes_a_letterless_member,
+      hex_needs_the_quotes_to_close
+      status: PARTIAL - no 23/24/25 edge, no sweep of delimiter bytes or of decoded byte values, no
+      separator / 0x / \x form shown to be left alone, no 3-versus-4 literal edge
+      after:  normalizer_decoders: hex_known_answers, hex_delimiters (every byte), hex_printable
+      (every byte value at three positions), hex_floor_and_odd_tail, hex_forms_left_alone,
+      hex_quoted_floor
+D3  percent run: four escapes, printable test, doubled `%`, stray `%`, `+` as a space, delimiter, the 85-byte body set
+      before: normalize_exe: pct_decodes_a_form_body, pct_leaves_a_stray_escape,
+      pct_refuses_a_doubled_percent
+      status: PARTIAL - no 3-versus-4 edge, no %00 / %80 / %0a, no body-set or delimiter sweep
+      after:  normalizer_decoders: pct_known_answers, pct_body_set (every byte; 85 members),
+      pct_delimiters (every byte)
+D4  layers: each round walks only what the one before wrote; rounds end when a round peels nothing
+      before: normalize_exe: decode_follows_the_layers; silent_loss_parsers: case_decode_limit
+      (rounds >= 2)
+      status: PARTIAL - the round count, `scanned`, `dropped` of kof_exe_decode_ex asserted nowhere;
+      mixed kinds in one round (base64 is read before hex in the same range) never shown
+      after:  normalizer_decoders: layers_to_the_bottom (4 nests, depth 1-12, exact rounds),
+      single_pass_peels_one_layer, decode_fixed_point_and_identity
+D5  the work budget: eight times the object over all rounds; `limit` says so, `dropped` counts what was left unread, nothing half-decoded with limit 0
+      before: silent_loss_parsers: case_decode_limit (one object, 900 layers)
+      status: PARTIAL - one object; the first layer count that trips it, "never silent" at every
+      depth, honest layering to 40 deep staying under it: untested
+      after:  normalizer_hostile: group_budget_pct_layers (1..64 against the reference),
+      group_budget_big, group_budget_honest; normalizer_engine: limits_propagate (parent says
+      BROKEN_LIMIT)
+D6  a table that cannot grow is reported (KOF_EXE_DEC_TABLE), not dropped
+      before: none
+      status: UNTESTED - lines 317-318 and 1155-1157 never ran
+      after:  normalizer_hostile: group_table_cannot_grow (address space capped; not under the
+      sanitiser)
+D7  differential: the passes against a slow reference written byte by byte
+      before: none (norm_fuzz asserts only that nothing faults)
+      status: UNTESTED
+      after:  normalizer_decoders: differential_mixed / _noise / _single_passes (about 6500 objects,
+      bytes + return value + rounds + scanned + limit + dropped)
+D8  NULL, zero length, truncated runs, a run ending on the last byte, guard-page buffers
+      before: norm_fuzz (no assertion), api paths
+      status: PARTIAL - faults only under ASAN, no assertion on the answers
+      after:  normalizer_hostile: group_sweep (every cut of generated objects, both guard
+      alignments, all entry points), group_arguments
+D9  a megabyte run, a million small runs, percent of percent
+      before: none
+      status: UNTESTED
+      after:  normalizer_hostile: group_megabyte_runs, group_tiny_runs
+D10  concurrent use on separate buffers
+      before: scan_mt.c (scanners, not the passes)
+      status: PARTIAL
+      after:  normalizer_hostile: group_threads (single-thread answer == threaded answer)
+
+EXECUTABLES.C - the transform
+T1  kof_exe_unwide: layout (packed left, zero fill), 8-character floor, alphabet, idempotence, writes exactly n
+      before: norm_fuzz.c calls it (no assertion); normalize_exe tests the same narrowing through
+      kof_exe_norm
+      status: UNTESTED - lines 248-255 (the packing branch) never ran
+      after:  normalizer_transform: unwide_layout, unwide_alphabet (all 65536 byte pairs),
+      unwide_differential, unwide_arguments
+T2  kof_exe_norm: >= 8 zeros -> 2; exactly 7, 8, 9 at every alignment of the counting word, at both ends of the buffer; each op alone; caps
+      before: normalize_exe: a_short_zero_run_is_left_alone, two_zeros_and_not_one,
+      wide_becomes_ascii, nothing_to_do_costs_nothing, the_view_is_never_longer
+      status: PARTIAL - one length of short run; no alignment sweep; a full span table (line 171)
+      never ran
+      after:  normalizer_transform: zero_floor_everywhere (25 x 41 x 10 shapes), norm_ops_and_caps
+T3  span map and kof_exe_norm_src_of: spans cover output and input, merge copies, every output byte names its source; offsets past 2^32 and at the top of 2^64
+      before: normalize_exe: the_map_covers_the_output
+      status: PARTIAL - no far offsets, no miss answers, no NULL arguments
+      after:  normalizer_transform: span_map_everywhere, src_of_far_offsets; normalizer_hostile:
+      group_arguments
+T4  kof_exe_norm_masked: kept bytes do not move, a run stops at a kept byte, drop beats keep, an emptied view is not an unchanged one, `fired` set on every call
+      before: normalize_exe: kept_regions_do_not_move, a_run_stops_at_the_boundary,
+      a_dropped_span_leaves_the_view, an_empty_view_is_not_an_unchanged_one
+      status: COVERED for the named cases
+      after:  normalizer_transform: masked_semantics (all of them again, plus the refusals),
+      masked_equals_reference (5000 objects with random keep/drop maps)
+T5  the mark carry: sorted marks answered in one pass; inside a run answers just past it; at the end answers the end; duplicates; sentinel values; unsorted marks do not fault
+      before: normalize_exe: map_agrees_with_the_transform
+      status: PARTIAL - no duplicates, no sentinel marks, no unsorted
+      after:  normalizer_transform: marks_are_carried, masked_equals_reference (with marks),
+      map_equals_transform, idempotent_and_monotone; normalizer_hostile: group_arguments
+T6  kof_exe_norm_map with no ops / no input: identity
+      before: none
+      status: UNTESTED - lines 556-560 never ran
+      after:  normalizer_transform: marks_are_carried (KNOWN MISS: the answer past the end)
+T7  a second normalisation changes nothing; a plain object is no view
+      before: normalize_exe: nothing_to_do_costs_nothing (one object)
+      status: PARTIAL
+      after:  normalizer_transform: idempotent_and_monotone, identity_when_nothing_to_do
+
+SCRIPT_NORM.C / SCRIPT_FOLD.C
+S1  kof_script_norm: the six flags one at a time; closing up never makes a longer token; strings are data; comment lines go, trailing comments stay
+      before: script_norm.c: 11 cases (words keep a space, shell, vbs, tcl, lua x5, heredoc)
+      status: PARTIAL - the flags only together; php/js/python/perl/ruby/batch rows (lines 228-231)
+      never asked
+      after:  normalizer_script_form: flags_one_at_a_time, generated_scripts (15 rows x 220 seeds:
+      tokens kept, safe closing, nothing left, idempotent), table_rows
+S2  multi-line literals (python triple quote, lua long bracket) copied verbatim; heredocs refused whole
+      before: script_norm.c: lua literal cases, "sh: a heredoc has no closer"
+      status: PARTIAL - the `<<-` `<<~` and quoted-label spellings (lines 328, 333) never ran
+      after:  normalizer_script_form: flags_one_at_a_time, generated_scripts (ml_literal shape)
+S3  kof_lex_is_code_at: strings and block comments are data, code is code
+      before: none (script_parse.c calls it)
+      status: UNTESTED by name
+      after:  normalizer_script_form: code_or_data (every byte of generated scripts, 15 rows),
+      known_misses
+S4  kof_script_fold: joins, variables, str_replace, escapes (\xHH \XHH \OOO \n ...), first definition wins, longest wins
+      before: script_norm.c (two polymorphic builds fold to one form; phar:// as octal and hex);
+      silent_loss_parsers: case_fold_limit
+      status: PARTIAL - octal/hex corner cases (lines 178-181, 204-207) and "\x" with no digit never
+      ran
+      after:  normalizer_script: fold_known_answers, fold_differential (php, PowerShell, Tcl: 6000
+      generated programs against an interpreter that is given the AST, not the text)
+S5  what is NOT folded: chr(), fromCharCode, base64_decode, request values, languages with no variable sigil, unterminated literals
+      before: script_norm.c ("nothing is run and nothing from outside is followed")
+      status: PARTIAL
+      after:  normalizer_script: fold_not_folded
+S6  N literals joined 1..300, 1..320 variables (hash table), nesting 1..300 (256 folds, 257 reports DEPTH), a 1 MiB literal, a chain of 3000 variables
+      before: silent_loss_parsers: 5000 variables, nesting 300
+      status: PARTIAL - the 256/257 edge, small counts, long literals
+      after:  normalizer_script: fold_counts, fold_depth, fold_long
+S7  the arena and the variable table when memory runs out: `limit` says so
+      before: none
+      status: UNTESTED - lines 93-101, 312-313
+      after:  normalizer_script: group_arena_limit, group_vars_limit
+
+SCAN_NORM*.C - building the view
+V1  a view is made when something is revealed (decode, wide text, library cut) and not for padding
+      before: view_equiv: view_vs_parent (ELF overlay, ELF with a gap before the section table,
+      PE32, PE64)
+      status: PARTIAL - only wide text + zeros together; one encoded payload never
+      after:  normalizer_engine: layout_matrix (3 formats x 8 layouts x 4 encodings), not_made,
+      many_marks
+V2  the regions, the entry and the image description are carried through the collapse (zeros before the code, after it, inside the data, before the next thing; at 7, 8, 9 zeros)
+      before: view_equiv (a gap before the section table)
+      status: PARTIAL - the code never moved
+      after:  normalizer_engine: layout_matrix (the NormViewEntry and NormViewData rules fire on the
+      view only if the entry and the DATA region were carried), same_search
+V3  the view equals the parent for plain bytes: no literal run lost, none invented
+      before: normalize_exe: no_zero_free_match_is_ever_lost (the transform, not the engine)
+      status: PARTIAL
+      after:  normalizer_engine: same_search (every run of the parent outside the tail is in the
+      view; every run of the view is the parent's or decoded)
+V4  the finding is attributed to the view, never to the parent; the view is the only child; no view of a view
+      before: view_equiv (same_findings parent/view)
+      status: PARTIAL - never a rule that fires only on decoded text
+      after:  normalizer_engine: one_matrix_cell (r.n == 2, kind NORMALIZED, name ends :norm),
+      layout_matrix (no product built twice on the scanner: the prod_once counters)
+V5  not made: padding only, under 4096 bytes (4095 vs 4096 exactly), dense code, a decode put back by a kept region, a resident ceiling that cannot hold two copies
+      before: none
+      status: UNTESTED - lines 513-522 (decode with no zeros, the empty view), the floor and entropy
+      gates only by accident
+      after:  normalizer_engine: not_made, dense_code, decode_undone_by_keep, budget_gates,
+      one_for_one_view
+V6  a view that does not fit: object cap, produced-bytes budget, 1 MiB chunks
+      before: none
+      status: UNTESTED - lines 688-689, 836-838
+      after:  normalizer_engine: big_views, produced_budget_under_a_chunk (two KNOWN MISSES)
+V7  the decode budget's limit propagates to the parent (BROKEN_LIMIT, scanner counter)
+      before: none
+      status: UNTESTED
+      after:  normalizer_engine: limits_propagate
+V8  reuse: one scanner over many objects, separate scanners on threads
+      before: prod_once.c (the same object scanned again), scan_mt.c
+      status: PARTIAL
+      after:  normalizer_engine: reuse_and_threads
+V9  script views: base64 / hex / percent in a shell script, the fold at heuristic level 2
+      before: script_islands.c, script_tagless.c (the island carving)
+      status: PARTIAL - no decode-only view asserted
+      after:  normalizer_engine: scripts
+V10  diagnoses inherited by the view with the code moved by a collapse before it
+      before: view_equiv: view_vs_parent
+      status: PARTIAL - code did not move
+      after:  normalizer_engine: inherited_diagnose
+V11  the keep map: headers, executable sections only (ELF with sections), whole segment (stripped), non-writable sections (PE); regions are a partition
+      before: none by name (reached through scans)
+      status: UNTESTED directly - lines 81, 85-87, 151, 164, 213-214 of scan_norm_text.c never ran
+      after:  normalizer_view_state: keep_bits_regions, keep_of_real_objects, keep_exec_edges;
+      normalizer_engine: kept_code (a zero run and a payload inside a kept .text come through; in a
+      writable PE .text they do not)
+V12  sx_bits_set against a bit loop for every pair; a region whose end wraps 2^64
+      before: none
+      status: UNTESTED
+      after:  normalizer_view_state: bits_set_every_pair, keep_bits_regions (KNOWN MISS)
+
+OBJSRC.C / OBJPROD.C - what a view declares and inherits
+O1  kof_src_declare_desc / regions / syms / funcs / kind / lang / entry / label: copied, replaced, NULL-safe, clipped
+      before: none (reached through scans)
+      status: UNTESTED - lines 477, 493, 508 never ran
+      after:  normalizer_view_state: source_declarations
+O2  kof_prod_publish gives the analysis to views that have a description and only those; adopt latches every product; unadopt lets go and leaves the scanner alone; another database size is not adopted
+      before: prod_once.c (counts repeats), view_equiv (same findings)
+      status: PARTIAL - the state machine was never asked
+      after:  normalizer_view_state: products_published_and_adopted
+
+OFFMAP.C / FUNCS.C - carrying places
+M1  kgenome_offmap_at against its contract on random tables, offsets past 2^32 and 2^62, and against a real collapse
+      before: api_image: t_offmap_at (one table, one monotone sweep)
+      status: COVERED for the named cases
+      after:  normalizer_offmap: offmap_differential, table_is_the_transform
+M2  the visitor lists exactly the file-offset fields (PE and ELF), not RVAs or addresses; remap keeps an extent's meaning
+      before: api_image: t_info_offsets
+      status: PARTIAL - the set of visited fields not stated
+      after:  normalizer_offmap: visitor_fields (offsetof), remap_through_a_collapse
+M3  kgenome_funcs_remap: intact functions at the exact new offset, rewritten and cut ones absent, order, fields, hostile extents, OVER_BUDGET
+      before: funcs_remap.c (one object, five functions)
+      status: PARTIAL - no random construction, no budget, no hostile extent beyond one
+      after:  normalizer_offmap: funcs_remap_construction, funcs_remap_hostile, funcs_remap_budget
+
+behaviours: 13 untested, 26 partial, 2 covered before; every one has a test in the "after" line.
+
+4. WHAT IS STILL NOT RUN, AND WHY
+--------------------------------------------------------------------------------
+executables.c
+      lines: 33 (decode refused by the lib), 300 and 302 (growth past an allowance or the
+      allocator), 374, 394, 1082, 1321, 1323 (a range clamp that no caller can need), 1155-1157 (the
+      quoted-literal list refused its allowance), 1466 (a zero-length stretch)
+      why:   allocator failure and clamps behind callers that already clamp; the reachable TABLE
+      lines (317-318) and the span-table-full lines (154, 171, 179) are run by
+      group_table_cannot_grow and norm_ops_and_caps
+script_fold.c
+      lines: 86, 93-94, 156, 211, 271, 284, 287, 339, 344, 368
+      why:   the 512 MB arena bound itself (reached here through the address-space cap, which takes
+      the allocator arm - the quadratic join is the way to the bound: see the known miss); a literal
+      cut by the end of input inside an escape; a term that is not a call
+script_norm.c
+      lines: 400, 686, 691, 1056-1057
+      why:   a comment opener of two different bytes (no row has one); the resume paths for a line
+      that begins inside a string and ends the file there
+scan_norm.c
+      lines: 112 (dead: the guard repeats the one above it), 232-236, 353, 427, 518-522, 810, 968
+      (allocator failure and a view of nothing), 269, 278, 564, 632-633 (clamps on a static-library
+      span; a static binary with a library the marker tier recognises was not built)
+      why:   allocator failure; the static-library cut
+scan_norm_syms.c
+      lines: 48, 50, 83, 102, 127-129, 133, 139
+      why:   the ELF symbol carrier needs a static binary whose library the marker tier recognises
+      (lib_ok)
+scan_norm_text.c
+      lines: 29, 81
+      why:   a zero-length extent from the resolver; the empty-range return of a bit clear
+objprod.c
+      lines: 55, 63-64, 110
+      why:   allocator failure
+objsrc.c
+      lines: file, fd and tmpfile constructors
+      why:   not the normaliser
+funcs.c
+      lines: the symbol-table builders (NOMEM arms, aliases, relocatables)
+      why:   not the normaliser; kgenome_funcs_remap itself is fully run
+
+5. KNOWN MISSES THE NEW TESTS RECORDED - ALL FIXED (stage39c, 2026-10-14)
+--------------------------------------------------------------------------------
+Each is now a plain check in the test that recorded it, and no KM_CHECK is left in the
+normaliser tests:
+  norm_view_prefix_on_produced_cap   scan_norm.c norm_fits asks the produced-bytes budget too
+  fold_join_copies_accumulator       script_fold.c: a join of adjacent extents is not copied
+  fold_partial_expression            script_fold.c: a value is not recorded when the expression goes on
+  fold_stops_at_newline              script_fold.c: a newline is whitespace where ';' ends a statement
+  lex_is_code_at_line_comment        script_norm.c: a line comment holds `at`; block opener first (Lua)
+  norm_decode_exposed_payload        executables.c dec_note_run: the token a fill exposed is walked next round
+  norm_keep_bits_region_wrap         scan_norm_text.c: clipped by the room left, not by off + len
+  norm_map_past_end_identity         executables.c kof_exe_norm_map: a place at or past the end is the end
+  script_norm_batch_rem_case         script_norm.c line_cmt_at: a word opener matches in any case, whole word
+  script_norm_brace_crlf             script_norm.c norm_join_brace: alone means nothing but whitespace after it
+  script_norm_eol_flag_unused        script_norm.c: KOF_NORM_EOL takes a line-ending CR outside a literal
+  script_norm_inline_comment_ungated script_norm.c: a block comment is dropped only when COMMENT is asked
+  script_norm_comment_fuses_words    script_norm.c: a removed comment leaves a gap where tokens would fuse
+
+6. OBSERVATIONS ABOUT THE SOURCES THAT ARE NOT MISSES
+--------------------------------------------------------------------------------
+  - No code in the engine calls kof_exe_unwide, kof_exe_norm, kof_exe_norm_map or
+    kof_exe_norm_src_of: scan_norm.c builds the view with kof_exe_norm_masked and kof_exe_decode_ex
+    only (grep over libkofeng/, kofexamine/, kofscanner/). The four are exercised by tests and
+    nothing else.
+  - scan_norm.c norm_wanted repeats the same NORMALIZED guard twice; the second `return 0` (line
+    112) can never run.
+  - script_norm.c KOF_NORM_EOL is declared and never read.
+  - executables.h still says "norm_emit wants both, in that order" of kof_exe_unwide and
+    kof_exe_norm; the engine no longer makes that call (it builds the view with
+    kof_exe_norm_masked), so the header describes a caller that is not there.
+
+7. THE FILES THAT PIN IT NOW
+--------------------------------------------------------------------------------
+tests/unit/normalizer_ref.h          the references (slow, byte by byte) and the guard-page / fork / generator kit
+tests/unit/normalizer_fx.h           ELF and PE built in memory with stated zeros before, inside and after the code
+tests/unit/normalizer_decoders.c     the decode passes: known answers, refusals, floors, layers, differential
+tests/unit/normalizer_transform.c    unwide, norm, norm_masked, norm_map, src_of: floors, maps, marks, differential
+tests/unit/normalizer_hostile.c      guard pages, a megabyte, a million runs, the budget, allocation failure, threads
+tests/unit/normalizer_script.c       the fold against an interpreter given the program, not the text; limits; misses
+tests/unit/normalizer_script_form.c  the form pass and kof_lex_is_code_at against a lexer and generated scripts
+tests/unit/normalizer_engine.c       the view through kscan_bytes: layouts, gates, budgets, limits, reuse, scripts
+tests/unit/normalizer_view_state.c   bit maps, keep maps of real parses, what a source declares, publish/adopt
+tests/lib/genome/normalizer_offmap.c offmap_at, the offset visitor, remap, kgenome_funcs_remap
+tests/sigs/norm_view_{elf,pe}_{decoded,data,entry}.c, norm_view_script.c
+                                     seven rules for the test database: a string that exists only encoded, two
+                                     markers in DATA, twelve bytes at the entry. They fire on a view or not at all,
+                                     which is what lets a scan say whether the view carried the region and the entry.
+
+Every object is built in memory by the test that uses it; no file in the tree is a fixture. Each program runs in
+under two seconds (under the sanitiser too), is deterministic (seeded from the loop index), and is clean under
+ASAN and UBSAN. A forked group is flushed with -DNR_COVERAGE only in the coverage build described above.

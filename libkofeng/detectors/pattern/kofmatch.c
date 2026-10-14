@@ -89,7 +89,7 @@ static int              gram_ensure(struct kof_match_ctx *);
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data)
 {
 	struct kof_gram *gram = m->gram;
-	uint16_t *memo = m->memo;
+	struct kof_memo_cell *memo = m->memo;
 	uint32_t memo_len = m->memo_len;
 	uint32_t patterns = m->gram_patterns;
 	uint8_t  bits = m->gram_bits;
@@ -464,8 +464,133 @@ static int hex_bound_ok(kof_buf d, uint64_t start, const uint64_t *ends,
 	return 0;
 }
 
+/*
+ * THE WALK WHEN MORE THAN KOF_HEX_MAX_REACH DISTINCT ENDS ARE IN PLAY.
+ *
+ * hex_walk below carries the ends in two arrays of KOF_HEX_MAX_REACH and, past
+ * that, used to DROP the high end - so a pattern that matched only through its
+ * longest path answered "no match" on bytes that hold it, with nothing said. The
+ * set of distinct ends is bounded by the PROGRAM (every end is a sum of one gap and
+ * one alternative per step), not by a number chosen for a table, so this walk is
+ * sized from the program and never drops one. It is only entered when the narrow
+ * walk would have dropped something, so the common candidate pays nothing for it.
+ *
+ * AND ITS COST IS NOT THE NARROW WALK'S FOR MORE POSITIONS. Each step marks, for
+ * every position carried, the interval of places the next part may begin (a
+ * difference array), then walks those places once: the work of a step is the
+ * positions plus the span plus (distinct places x alternatives), where the narrow
+ * walk paid positions x gap width x alternatives with the duplicates among them.
+ * The bound the format gives is KOF_HEX_MAX_STEPS steps of at most
+ * KOF_HEX_MAX_ALTS alternatives over a span of at most steps x (alternative +
+ * gap) bytes.
+ *
+ * When the memory for the arrays cannot be had the walk says so through `cut`
+ * (the caller's counter, which reaches the object as KOF_BROKEN_LIMIT) and
+ * answers no - it was not able to look.
+ */
+static int hex_walk_wide(kof_buf d, uint64_t start, const uint8_t *prog,
+			 uint8_t flags, uint32_t *cut)
+{
+	const struct kof_hex_hdr *h = (const void *)prog;
+	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
+	const struct kof_hex_alt *alts = (const void *)(prog + h->alts_off);
+	uint64_t span = 1;
+	uint32_t i, k, n_cur = 1, *cur, *next;
+	int16_t *diff;
+	uint8_t *seen;
+	void *mem;
+	int ok = 0;
+
+	for (i = 0; i < h->n_steps; i++) {
+		uint32_t j, widest = 0;
+
+		for (j = 0; j < steps[i].n_alts; j++)
+			if (alts[steps[i].alt_first + j].len > widest)
+				widest = alts[steps[i].alt_first + j].len;
+		span += (uint64_t)steps[i].gap_max + widest;
+	}
+	/* One block: two position arrays, the interval marks and the seen bits. */
+	mem = malloc((size_t)(span * 2u * sizeof *cur +
+			      (span + KOF_HEX_MAX_GAP_TOTAL + 2u) * sizeof *diff +
+			      span / 8u + 2u));
+	if (!mem) {
+		if (cut)
+			(*cut)++;
+		return 0;
+	}
+	cur = mem;
+	next = cur + span;
+	diff = (int16_t *)(next + span);
+	seen = (uint8_t *)(diff + span + KOF_HEX_MAX_GAP_TOTAL + 2u);
+	memset(diff, 0, (size_t)(span + KOF_HEX_MAX_GAP_TOTAL + 2u) * sizeof *diff);
+	cur[0] = 0;
+
+	for (i = 0; i < h->n_steps; i++) {
+		const struct kof_hex_step *st = &steps[i];
+		uint32_t n_next = 0, lo = UINT32_MAX, hi = 0, t;
+		int32_t run = 0;
+
+		memset(seen, 0, (size_t)(span / 8u + 2u));
+		for (k = 0; k < n_cur; k++) {
+			diff[cur[k] + st->gap_min]++;
+			diff[cur[k] + st->gap_max + 1u]--;
+			if (cur[k] + st->gap_min < lo)
+				lo = cur[k] + st->gap_min;
+			if (cur[k] + st->gap_max + 1u > hi)
+				hi = cur[k] + st->gap_max + 1u;
+		}
+		for (t = lo; t <= hi; t++) {
+			uint64_t at;
+			uint32_t j;
+
+			run += diff[t];
+			diff[t] = 0;                    /* left clean for the next step */
+			if (run <= 0)
+				continue;
+			at = kof_sat_add(start, t);
+			if (at >= d.n)
+				continue;       /* the marks past it are still cleared */
+			for (j = 0; j < st->n_alts; j++) {
+				const struct kof_hex_alt *a = &alts[st->alt_first + j];
+				uint64_t rel = (uint64_t)t + a->len;
+
+				if (!alt_at(d, at, prog, a, (flags & KOF_STR_ICASE) != 0))
+					continue;
+				if (rel >= span || (seen[rel >> 3] & (uint8_t)(1u << (rel & 7u))))
+					continue;
+				seen[rel >> 3] |= (uint8_t)(1u << (rel & 7u));
+				next[n_next++] = (uint32_t)rel;
+			}
+		}
+		if (n_next == 0)
+			goto out;
+		{
+			uint32_t *tmp = cur;
+
+			cur = next;
+			next = tmp;
+		}
+		n_cur = n_next;
+	}
+	if (!(flags & KOF_STR_BOUNDED)) {
+		ok = 1;
+	} else if (!(start && kof_is_word_byte(d.p[start - 1u]))) {
+		for (k = 0; k < n_cur; k++) {
+			uint64_t end = start + cur[k];
+
+			if (end >= d.n || !kof_is_word_byte(d.p[end])) {
+				ok = 1;
+				break;
+			}
+		}
+	}
+out:
+	free(mem);
+	return ok;
+}
+
 static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog,
-		    uint8_t flags)
+		    uint8_t flags, uint32_t *cut)
 {
 	const struct kof_hex_hdr *h = (const void *)prog;
 	const struct kof_hex_step *steps = (const void *)(prog + h->steps_off);
@@ -539,12 +664,12 @@ static int hex_walk(kof_buf d, uint64_t start, const uint8_t *prog,
 						continue;
 					}
 					if (n_next >= KOF_HEX_MAX_REACH)
-						goto reach_full;
+						return hex_walk_wide(d, start, prog,
+								     flags, cut);
 					next[n_next++] = end;
 				}
 			}
 		}
-reach_full:
 		if (n_next == 0)
 			return 0;
 		memcpy(cur, next, n_next * sizeof cur[0]);
@@ -639,7 +764,7 @@ static int hex_search(struct kof_match_ctx *m, uint64_t off, uint64_t len,
 			 */
 			if (lim.n - start < h->min_span)
 				continue;
-			if (hex_walk(lim, start, prog, flags)) {
+			if (hex_walk(lim, start, prog, flags, &m->n_hex_cut)) {
 				if (hit)
 					*hit = start;
 				return 1;
@@ -662,13 +787,13 @@ int kof_hex_walk(kof_buf d, uint64_t start, const uint8_t *prog)
 	 * question; anything that has a descriptor goes through match_at or
 	 * match_one and gets the flags with it.
 	 */
-	return hex_walk(d, start, prog, 0u);
+	return hex_walk(d, start, prog, 0u, NULL);
 }
 
 int kof_hex_walk_flags(kof_buf d, uint64_t start, const uint8_t *prog,
 		       uint8_t flags)
 {
-	return hex_walk(d, start, prog, flags);
+	return hex_walk(d, start, prog, flags, NULL);
 }
 
 /* ---- searching ranges ----------------------------------------------------- */
@@ -835,6 +960,24 @@ static int gram_ensure(struct kof_match_ctx *m)
 	return m->gram != NULL;
 }
 
+/* The cache's size: the slots the database has, rounded up to a power of two, and never
+ * more than KOF_MEMO_CELLS_MAX. */
+static uint32_t memo_cells(uint32_t slots)
+{
+	uint32_t n = 1;
+
+	if (!slots)
+		return 0;
+	while (n < slots && n < KOF_MEMO_CELLS_MAX)
+		n <<= 1;
+	return n;
+}
+
+uint64_t kof_match_memo_bytes(uint32_t memo_len)
+{
+	return (uint64_t)memo_cells(memo_len) * sizeof(struct kof_memo_cell);
+}
+
 int kof_match_state_init(struct kof_match_ctx *m, uint32_t n_patterns,
 			 uint32_t memo_len)
 {
@@ -842,10 +985,20 @@ int kof_match_state_init(struct kof_match_ctx *m, uint32_t n_patterns,
 	m->gram = NULL;                   /* built on first object that wants it */
 	m->gram_use = NULL;
 	m->gram_patterns = n_patterns;
-	m->memo_len = memo_len;
 	m->memo_gen = 0;
-	m->memo = memo_len ? calloc(memo_len, sizeof *m->memo) : NULL;
+	m->memo_len = memo_cells(memo_len);
+	m->memo = m->memo_len ? calloc(m->memo_len, sizeof *m->memo) : NULL;
 	return !memo_len || m->memo != NULL;
+}
+
+/* Give back what a large object made the matcher grow to: the presence table (up to
+ * 32 MiB, never shrunk by the search itself). The memo is the database's size and stays.
+ * Between objects only. */
+void kof_match_state_trim(struct kof_match_ctx *m)
+{
+	gram_free(m->gram);
+	m->gram = NULL;
+	m->gram_use = NULL;
 }
 
 void kof_match_state_free(struct kof_match_ctx *m)
@@ -899,19 +1052,20 @@ static int gram_admits(const struct kof_gram *g, const uint8_t *bytes, uint16_t 
 	return gram_may_contain(g, bytes, len, (flags & KOF_STR_ICASE) != 0);
 }
 
-static uint16_t *memo_cell(const struct kof_match_ctx *m, uint32_t slot)
+static struct kof_memo_cell *memo_cell(const struct kof_match_ctx *m, uint32_t slot)
 {
-	return (m->memo && slot < m->memo_len) ? &m->memo[slot] : NULL;
+	/* KOF_MEMO_NONE is "no cell", never a slot to be cached. */
+	return (m->memo && slot != KOF_MEMO_NONE) ? &m->memo[slot & (m->memo_len - 1u)] : NULL;
 }
 
 int kof_match_memo_get(const struct kof_match_ctx *m, uint32_t slot)
 {
-	uint16_t *cell = memo_cell(m, slot);
+	const struct kof_memo_cell *cell = memo_cell(m, slot);
 
-	/* Written by an earlier object is the same as not written. */
-	if (!cell || (*cell >> 2) != m->memo_gen)
+	/* Written by an earlier object, or for another slot, is the same as not written. */
+	if (!cell || cell->slot != slot || (cell->v >> 2) != m->memo_gen)
 		return -1;
-	switch (*cell & 3u) {
+	switch (cell->v & 3u) {
 	case KOF_MEMO_PRESENT: return 1;
 	case KOF_MEMO_ABSENT:  return 0;
 	default:               return -1;
@@ -920,17 +1074,18 @@ int kof_match_memo_get(const struct kof_match_ctx *m, uint32_t slot)
 
 void kof_match_memo_put(struct kof_match_ctx *m, uint32_t slot, int found)
 {
-	uint16_t *cell = memo_cell(m, slot);
+	struct kof_memo_cell *cell = memo_cell(m, slot);
 
-	if (cell)
-		*cell = (uint16_t)((m->memo_gen << 2) |
-				   (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
+	if (cell) {
+		cell->slot = slot;
+		cell->v = (uint16_t)((m->memo_gen << 2) |
+				     (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
+	}
 }
 
 int kof_match_lookup(struct kof_match_ctx *m, const struct kof_match_req *rq)
 {
 	const uint32_t slot = rq->slot;
-	uint16_t *cell;
 	int found;
 
 	/*
@@ -944,7 +1099,6 @@ int kof_match_lookup(struct kof_match_ctx *m, const struct kof_match_req *rq)
 	 * slow way. kof_match_state_init already treats memo_len 0 as success,
 	 * so the two now agree.
 	 */
-	cell = memo_cell(m, slot);
 	{
 		int known = kof_match_memo_get(m, slot);
 
@@ -957,15 +1111,12 @@ int kof_match_lookup(struct kof_match_ctx *m, const struct kof_match_req *rq)
 			 rq->pat.flags)) {
 		if (rq->answered)
 			(*rq->answered)++;
-		if (cell)
-			*cell = (uint16_t)((m->memo_gen << 2) | KOF_MEMO_ABSENT);
+		kof_match_memo_put(m, slot, 0);
 		return 0;
 	}
 	found = match_ranges(m, rq->ext, rq->next, rq->pat.bytes, rq->pat.len,
 			     rq->pat.kind, rq->pat.flags);
-	if (cell)
-		*cell = (uint16_t)((m->memo_gen << 2) |
-				   (found ? KOF_MEMO_PRESENT : KOF_MEMO_ABSENT));
+	kof_match_memo_put(m, slot, found);
 	return found;
 }
 
@@ -1005,7 +1156,7 @@ int kof_match_at(struct kof_match_ctx *m, uint64_t off,
 		if (!kof_in_range(m->data, off, h->min_span))
 			return 0;
 		m->n_bytes_scanned += h->min_span;
-		return hex_walk(m->data, off, bytes, flags);
+		return hex_walk(m->data, off, bytes, flags, &m->n_hex_cut);
 	}
 
 	if (!kof_in_range(m->data, off, len))

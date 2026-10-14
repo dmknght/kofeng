@@ -99,19 +99,6 @@ static void hk_args(int argc, char **argv)
 	}
 }
 
-/* Is the process built with UBSAN? A weak reference to one of its runtime entry points: non-null
- * only when the sanitizer's runtime is linked. The hostile families use it to leave out the few
- * INPUTS that reach undefined behaviour the library is KNOWN to have (each is named at its gate and
- * listed in the defect report): in a plain build those inputs run, and wrap as they always have; in
- * a UBSAN build they would abort the whole family and hide everything after them. */
-extern void __ubsan_handle_add_overflow(void) __attribute__((weak));
-
-static int hk_ubsan(void) HK_UNUSED;
-static int hk_ubsan(void)
-{
-	return &__ubsan_handle_add_overflow != NULL;
-}
-
 /* ---- the clock ----------------------------------------------------------- */
 
 static double hk_now(void) HK_UNUSED;

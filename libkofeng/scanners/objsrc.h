@@ -12,7 +12,7 @@
  * So the bytes get a lifetime of their own, separate from whatever produced them,
  * and it is counted rather than scoped. Three kinds, one struct:
  *
- *   file      an mmap of a regular file
+ *   file      a regular file read into memory (kof_src_file)
  *   window    a range inside another source; holds a reference to it
  *   produced  bytes the engine made - a heap buffer, or an unnamed temporary
  *             file mapped back in when it got too large to keep in memory
@@ -51,13 +51,91 @@
 
 struct kof_objsrc;
 
+struct kof_budget;
+
 /*
- * Map a regular file. NULL on failure, and *err is a KOF_ERR_*.
+ * The seam the file read goes through: read(2) when `io` is NULL, a test's table
+ * otherwise (kof_scan_read_hook), the same arrangement as the spill's. `read` answers
+ * the bytes read, 0 at end of file, -1 with errno set on an error.
+ */
+struct kof_src_read_io {
+	int64_t (*read)(void *user, int fd, void *buf, uint64_t n);
+	void     *user;
+};
+
+/*
+ * One request to read a file. `budget` is the engine's memory ceiling: the bytes are
+ * charged to it from before they are read until the source is destroyed (NULL charges
+ * nothing - an engine whose budget could not be allocated, or a test). `room` is the
+ * most the caller wants held in memory for this file when a spill file is the alternative,
+ * `limit` the most it may hold when it is not (never below `room`); see kof_scan_file_room.
+ *
+ * `spill_open` and `spill_write` (both NULL, or both set) are where a file larger than
+ * `room` goes instead: the engine's own unnamed temporary file, as a produced object that
+ * outgrew memory goes (see the note in objsrc.c). `spill_open(user)` answers a new
+ * descriptor, or -1 when no file may be made; `spill_write` answers 1 when all of the
+ * bytes are in it.
+ */
+struct kof_src_file_req {
+	const char                   *path;
+	struct kof_budget            *budget;
+	uint64_t                      room;
+	uint64_t                      limit;
+	const struct kof_src_read_io *io;
+	int                         (*spill_open)(void *user);
+	int                         (*spill_write)(void *user, int fd, const void *p, uint64_t n);
+	void                         *spill_user;
+};
+
+/*
+ * Read a regular file into memory the engine owns. NULL on failure, and *err is a
+ * KOF_ERR_*.
+ *
+ * READ, NOT MAPPED. A mapped file is read through plain pointers for as long as the object
+ * lives and whoever owns the file can truncate it meanwhile: every page past the new end
+ * then faults with SIGBUS inside whichever parser happened to read it. No check before or
+ * after the map closes that race, and the only handler that survives it is a process-wide
+ * one, which a host can replace and which cannot tell this fault from a genuine bug
+ * (stage39a had one; the owner refused it - see the note in objsrc.c). The bytes are
+ * therefore copied once, here, with read(2): a file that shrinks, or fails to read, shows
+ * up as a short count or an error at this call and nowhere else, and the engine takes no
+ * signal from the input at all. Nothing is installed, nothing is chained, nothing can be
+ * swallowed.
+ *
+ * The copy is charged to the engine's budget, so a file is no longer free RSS. A file larger
+ * than `room` is copied to the spill file instead, when the caller offers one that may be
+ * made (a real disk, or a directory the host named); the engine maps that copy, which has no
+ * name and so no writer. When there is none, it is held in memory up to `limit`, and past
+ * that only the first `limit` bytes are read and the source is marked KOF_BROKEN_LIMIT
+ * (kof_src_cut): a cap is a cost bound and it is said, never silent.
+ *
+ * ONLY A REGULAR FILE, and never through a symbolic link: a FIFO, socket, device or
+ * directory is refused without waiting on it (KOF_ERR_OPEN), and a path that is a
+ * symlink - at the last component, whenever the open happens - is refused the same
+ * way. The engine does not follow symlinks anywhere.
  *
  * A zero length file succeeds and yields no bytes: it is a legitimate object that
- * every module will decline, not an error, and mmap cannot represent it.
+ * every module will decline, not an error.
  */
-struct kof_objsrc *kof_src_file(const char *path, int *err);
+struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err);
+
+/*
+ * Why the bytes of this source are not the whole file: 0 when they are, otherwise the
+ * KOF_BROKEN_* reason the objects of this file are reported with. KOF_BROKEN_DAMAGED
+ * is a file that ended before the size the system reported (truncated while it was read)
+ * or whose read failed (EIO); the bytes held are what was read. KOF_BROKEN_LIMIT is a file
+ * larger than the caller's room. Of the root: a window answers 0, and the walk asks the root
+ * of the tree. A produced object answers LIMIT when it met its own bound while it was decoded
+ * (kof_src_mark_cut), and the walk reads that as the object's own result.
+ */
+uint32_t kof_src_cut(const struct kof_objsrc *);
+/* Marks a produced object as cut at its own bound (KOF_BROKEN_*); the walk reads it back
+ * through kof_src_cut as the object's result. */
+void kof_src_mark_cut(struct kof_objsrc *, uint32_t why);
+
+/* The bytes of the engine's budget this source holds until it is destroyed (what
+ * kof_src_file charged); 0 for a mapped or borrowed one. */
+uint64_t kof_src_charged(const struct kof_objsrc *);
 
 /*
  * A range of another source, without copying. The parent is referenced and stays
@@ -66,18 +144,61 @@ struct kof_objsrc *kof_src_file(const char *path, int *err);
  * NULL if the range is empty after clipping - there is no object there.
  */
 /*
- * How much of a child's name is kept for reporting.
- *
- * Names are short in practice - measured over 28316 tar entries the median is 26
- * characters and the format's own field caps at 100 - so this holds nearly all of
- * them whole. A longer one is cut rather than allowed to push the path it belongs
- * to off the line.
+ * HOW WIDE A NAME IS DISPLAYED, for the tools that draw one in a column. It is NOT a
+ * limit on what the engine keeps: a child's label is allocated to the length its
+ * container's standard allows (KOF_SRC_NAME_MAX below) and a name is never cut to fit
+ * a buffer. Names are short in practice - measured over 28316 tar entries the median
+ * is 26 characters - so a tool that truncates for display loses nothing.
  */
 #define KOF_SRC_LABEL_MAX 96u
 
-/* Sanitise `len` bytes at `p` into the source's label. Non-printable bytes become
- * '.', which is what keeps a terminal escape in an archive out of a report. */
+/*
+ * THE LONGEST NAME THE ENGINE WILL HOLD, in bytes of the name as the container wrote
+ * it: 65535, which is the widest length field any container here has (ZIP's file name
+ * length is 16 bits, APPNOTE 4.4.4; RAR 4's name size is 16 bits too). Each format's
+ * own, tighter limit is applied before this is reached (oc_name_limit); this is the
+ * bound that sizes the pending buffer and refuses anything no standard allows.
+ */
+#define KOF_SRC_NAME_MAX 65535u
+
+/*
+ * Sanitise `len` bytes at `p` into the source's label, allocated to the size it needs.
+ * Non-printable bytes become '.', which is what keeps a terminal escape in an archive
+ * out of a report. A name longer than KOF_SRC_NAME_MAX is not cut: the source is
+ * marked name-invalid instead (kof_src_name_bad) and carries no label.
+ */
 void kof_src_label(struct kof_objsrc *, const uint8_t *p, uint64_t len);
+
+/* The bytes the label occupies (0 when there is none): what a caller that charges the
+ * memory ceiling for it asks, and what kof_src_label_account arranges to give back. */
+uint32_t kof_src_label_cost(const struct kof_objsrc *);
+
+/* The caller has taken kof_src_label_cost() bytes from an account: when the source is
+ * destroyed, `release(arg, cost)` is called, so the charge falls on every path a child
+ * can die on. A slot of its own, not on_free's: that one gives back produced bytes to a
+ * different account. */
+void kof_src_label_account(struct kof_objsrc *, void (*release)(void *, uint64_t),
+			   void *arg);
+
+/*
+ * THE RECORD OF A SOURCE IS MEMORY THE SCAN HOLDS, and for a window - a child that is a range
+ * of its parent - it is ALL it holds: no byte of produced budget, no label of any size, only
+ * this struct (several hundred bytes: regions, symbols, the description a producer declares).
+ * A container of tiny members therefore costs its record per member and nothing else the
+ * ledger sees, which let a 5 MB cabinet of 5-byte entries hold 723 MB of children.
+ *
+ * kof_src_record_cost() is what one record occupies; the caller takes that many bytes from
+ * its account and says so here, and when the source is destroyed `release(arg, cost)` is
+ * called on every path a child can die on. A slot of its own, like the label's.
+ */
+uint64_t kof_src_record_cost(void);
+void kof_src_charge_record(struct kof_objsrc *, uint64_t cost,
+			   void (*release)(void *, uint64_t), void *arg);
+
+/* The producer said this member's name is longer than its format's standard allows.
+ * The member itself is still opened (its bytes are evidence), without a name. */
+void kof_src_declare_name_bad(struct kof_objsrc *);
+int  kof_src_name_bad(const struct kof_objsrc *);
 
 /* The label, or "" when the source has none. Never NULL. */
 const char *kof_src_label_of(const struct kof_objsrc *);
@@ -264,6 +385,7 @@ void kof_src_on_free(struct kof_objsrc *, void (*fn)(void *, uint64_t), void *us
  * directory entry's.
  */
 int kof_src_tmpfile(void);
+int kof_src_tmpfile_at(const char *dir);
 
 /*
  * The directory a scratch file may be written in, or NULL when none is usable.

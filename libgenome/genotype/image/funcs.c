@@ -16,6 +16,7 @@
 #include <genotype/image/elf_types.h>
 #include <genotype/image/pe_types.h>
 #include "funcs.h"
+#include "endian.h"
 #include "elf_image.h"
 #include "pe_image.h"
 
@@ -78,6 +79,8 @@ static void kgenome_funcs_finish(struct kgenome_func *v, uint32_t n, struct kgen
 
 void kgenome_funcs_free(struct kgenome_func_set *s)
 {
+	if (!s)
+		return;
 	free(s->v);
 	memset(s, 0, sizeof *s);
 }
@@ -108,17 +111,36 @@ static int find_bytes(const uint8_t *view, uint64_t view_n, uint64_t from,
 	return 0;
 }
 
-/* How far past the last function found the next may begin: collapsed padding
- * only - what was cut is the library's, and a library function is not wanted. */
-#define REMAP_SLACK 4096u
+/*
+ * HOW FAR PAST THE LAST FUNCTION FOUND THE NEXT MAY BEGIN is not a constant. A view is the parent
+ * with bytes REMOVED (a library cut, padding collapsed), in the same order, so a function cannot sit
+ * further from the previous one in the view than it did in the parent: the window is that distance,
+ * from the end of the last function FOUND to the start of this one, plus its length. A fixed 4096
+ * lost every function that followed a long run of data (the parent's own gap was bigger), and a
+ * function that is not within its window is not in the view: it was cut, which is an answer.
+ *
+ * The cost is bounded by the view: a function that is not there is searched for over its whole
+ * window, and a run of them makes the windows grow, so the bytes searched in all are held to
+ * REMAP_WORK per byte of the view. The set says KGENOME_OVER_BUDGET when that ran out.
+ */
+#define REMAP_WORK 64u
 
-void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
-		     const struct kgenome_func_set *pf, const uint8_t *view,
-		     uint64_t view_n, struct kgenome_func_set *out)
+/*
+ * THE SAME SEARCH, FOR A VIEW IN THE OTHER BYTE ORDER. `plan` (endian.h) names what
+ * the view swapped, so the bytes looked for are the parent's function as the plan
+ * leaves it - the same range of the applied object, without the object. NULL is
+ * the plain search, which is what kgenome_funcs_remap is.
+ */
+static void funcs_remap(const uint8_t *par, uint64_t par_n,
+			const struct kgenome_func_set *pf,
+			const struct kgenome_endian_plan *plan, const uint8_t *view,
+			uint64_t view_n, struct kgenome_func_set *out)
 {
 	struct kgenome_func *v;
-	uint64_t cursor = 0;
+	uint8_t *pat = NULL;
+	uint64_t cursor = 0, found_end = 0, work, pat_cap = 0;
 	uint32_t i, n = 0;
+	enum kgenome_status st = KGENOME_OK;
 
 	memset(out, 0, sizeof *out);
 	if (!par || !view || !pf || !pf->n)
@@ -128,26 +150,73 @@ void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
 		out->status = KGENOME_NOMEM;
 		return;
 	}
+	work = (uint64_t)REMAP_WORK * view_n + (1u << 20);
 	for (i = 0; i < pf->n; i++) {
 		const struct kgenome_func *f = &pf->v[i];
-		uint64_t at;
+		uint64_t at, window;
 
 		if (f->off >= par_n || f->len > par_n - f->off)
 			continue;
-		if (!find_bytes(view, view_n, cursor, f->len + REMAP_SLACK,
-				par + f->off, f->len, &at))
-			continue;
+		window = (f->off > found_end ? f->off - found_end : 0u) + f->len;
+		{
+			uint64_t rest = view_n > cursor ? view_n - cursor : 0u;
+			uint64_t charge = window < rest ? window : rest;   /* the search cannot run past the view */
+
+			if (charge > work) {
+				st = KGENOME_OVER_BUDGET;       /* the search is cut, and the set says so */
+				break;
+			}
+			work -= charge;
+		}
+		{
+			const uint8_t *want = par + f->off;
+
+			if (plan && plan->n) {
+				if (f->len > pat_cap) {
+					uint8_t *g = realloc(pat, (size_t)f->len);
+
+					if (!g) {
+						st = kgenome_status_merge(st, KGENOME_NOMEM);
+						break;
+					}
+					pat = g;
+					pat_cap = f->len;
+				}
+				kgenome_endian_range(pat, par, par_n, f->off, f->len, plan);
+				want = pat;
+			}
+			if (!find_bytes(view, view_n, cursor, window, want, f->len, &at))
+				continue;
+		}
 		v[n] = *f;
 		v[n].off = at;
 		n++;
 		cursor = at + f->len;
+		found_end = f->off + f->len;
 	}
+	free(pat);
+	out->status = st;
 	if (!n) {
 		free(v);
 		return;
 	}
 	out->v = v;
 	out->n = n;
+}
+
+void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
+		     const struct kgenome_func_set *pf, const uint8_t *view,
+		     uint64_t view_n, struct kgenome_func_set *out)
+{
+	funcs_remap(par, par_n, pf, NULL, view, view_n, out);
+}
+
+void kgenome_funcs_remap_endian(const uint8_t *par, uint64_t par_n,
+			    const struct kgenome_func_set *pf,
+			    const struct kgenome_endian_plan *plan, const uint8_t *view,
+			    uint64_t view_n, struct kgenome_func_set *out)
+{
+	funcs_remap(par, par_n, pf, plan, view, view_n, out);
 }
 
 

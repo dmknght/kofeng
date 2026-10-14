@@ -6,7 +6,7 @@
  * status.h says what such a request is: KUNCOAT_BAD_ARG, "the request itself is not usable,
  * and nothing was read: a null buffer, ...". Each call runs in a forked child (a crash is a
  * finding and must not end the runner) and the outcome - the status, or a crash - is
- * tabulated. Three questions are then asked of the table, each as one KNOWN-MISS because
+ * tabulated. Three questions are then asked of the table, each as one check because
  * each has one cause:
  *
  *   1. does any entry point CRASH on a NULL `produced` while its siblings accept it?
@@ -286,22 +286,13 @@ int main(void)
 
 		snprintf(what, sizeof what, "%u entry point(s) crash on a NULL `produced` (lzma, aplib, nrv2, lzmat, aspack, bunzip, lzhuf, "
 			 "rar3 and rar5 accept it): %s", crashed_prod, crashed_prod ? crash_prod : "none");
-		KM_CHECK(crashed_prod == 0, what,
-			 "NULL_PRODUCED_CRASH (libuncoat/decoders/textcode.c kuncoat_a85_decode / kuncoat_ahx_decode / kuncoat_rle_decode "
-			 "`*produced = 0;` first line, and libuncoat/decompressors/lzw.c kuncoat_lzw_decode, ovba.c kuncoat_ovba_decode: "
-			 "no NULL test, the other decoders write it under `if (produced)`) [Inference: low, a caller bug, not attacker input]");
+		CKF(crashed_prod == 0, "%s", what);
 		snprintf(what, sizeof what, "%u entry point(s) crash on a NULL state, request, io, sink or output: %s", crashed_obj,
 			 crashed_obj ? crash_obj : "none");
-		KM_CHECK(crashed_obj == 0, what,
-			 "NULL_OBJECT_CRASH (libuncoat/decompressors/inflate.c kuncoat_inflate_seeded reads io->in and io->sink first; "
-			 "lzx.c kuncoat_lzx_decode reads rq->window_bits and io->in before its `!s || !in || !sink` test; lzw.c, rle, a85 "
-			 "likewise; the sink is called without a test) [Inference: low, a caller bug]");
+		CKF(crashed_obj == 0, "%s", what);
 		snprintf(what, sizeof what, "%u of %u NULL-buffer calls return something other than BAD_ARG: %s", not_bad_n, buffer_n,
 			 not_bad_n ? not_bad : "none");
-		KM_CHECK(not_bad_n == 0, what,
-			 "NULL_NOT_BAD_ARG (status.h: KUNCOAT_BAD_ARG is 'a null buffer ... nothing was read'; only kuncoat_transform returns it. "
-			 "The decompressors answer CORRUPT (a verdict on the INPUT, which status.h says BAD_ARG is not), STOPPED or TRUNCATED) "
-			 "[Inference: low: a caller that tests for CORRUPT to mean 'the file is damaged' reports a NULL buffer as a finding]");
+		CKF(not_bad_n == 0, "%s", what);
 	}
 #ifdef HV_ASAN
 	/* AddressSanitizer reports memcpy-param-overlap for a stream the decoder copies with memcpy

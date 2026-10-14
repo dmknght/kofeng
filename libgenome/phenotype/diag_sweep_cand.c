@@ -5,6 +5,9 @@
  */
 #include "diag_scan_private.h"
 
+/* The first window kgenome_diag_cand_at searches; see there. */
+#define CAND_WIN 256u
+
 /*
  * ---- WHERE THE WALK HAS TO LOOK ------------------------------------------
  *
@@ -33,15 +36,33 @@
  */
 uint64_t kgenome_diag_cand_at(const uint8_t *p, uint64_t from, uint64_t n)
 {
-	uint64_t i = from;
+	uint64_t i = from, win = CAND_WIN;
 
+	/*
+	 * THE SEARCH IS BOUNDED BY A WINDOW THAT GROWS ONLY WHEN NOTHING WAS IN IT.
+	 * This was two memchr calls over the WHOLE rest of the object per candidate
+	 * and per false lead: when one of the two lead bytes is absent (all `cd 80`,
+	 * or all `0f 05`, or `0f 0b` with no 0xcd anywhere) the other search ran to
+	 * the end of the object every time, so n/2 positions cost n/2 x n bytes.
+	 * Measured on a hand-built ELF of repeated `ud2`: 0.035 s at 128 KB, 0.67 s at
+	 * 512 KB, 3.2 s at 1 MB, 16 s at 2 MB (quadratic), and the same for `syscall`,
+	 * `int 0x80`, `cpuid` and `rdtsc` repeated. With a window each call costs the
+	 * distance to the hit, within a constant, and the next call starts after it.
+	 * Which positions are returned has not changed: the window only decides how far
+	 * one memchr looks, and an empty window is searched again from its end.
+	 */
 	while (i + 1u < n) {
-		const uint8_t *q = memchr(p + i, 0x0f, (size_t)(n - 1u - i));
-		const uint8_t *r = memchr(p + i, 0xcd, (size_t)(n - 1u - i));
+		uint64_t end = n - 1u - i > win ? i + win : n - 1u;
+		const uint8_t *q = memchr(p + i, 0x0f, (size_t)(end - i));
+		const uint8_t *r = memchr(p + i, 0xcd, (size_t)(end - i));
 		uint64_t at;
 
-		if (!q && !r)
-			break;
+		if (!q && !r) {
+			i = end;
+			if (win < ((uint64_t)1 << 40))
+				win *= 2u;
+			continue;
+		}
 		if (!q || (r && r < q)) {
 			at = (uint64_t)(r - p);
 			if (p[at + 1u] == 0x80u)
@@ -87,8 +108,8 @@ uint64_t kgenome_diag_cand_fixed(const struct kgenome_obj *obj, const uint8_t *p
 			   uint64_t off, uint64_t from, uint64_t n)
 {
 	uint64_t i = from + ((4u - ((off + from) & 3u)) & 3u);
-	int be = obj->arch == KGENOME_ARCH_ARM && obj->format == KGENOME_FMT_ELF &&
-		 obj->file_header && ((const uint8_t *)obj->file_header)[5] == 2u;
+	int be = obj->arch == KGENOME_ARCH_ARM && kgenome_obj_big_endian(obj) &&
+		 !kgenome_obj_code_little_endian(obj);
 
 	for (; i + 4u <= n; i += 4u) {
 		uint32_t x = be ? ((uint32_t)p[i] << 24 | (uint32_t)p[i + 1] << 16 |

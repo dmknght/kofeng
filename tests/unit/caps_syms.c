@@ -36,6 +36,8 @@
  */
 
 #include "caps_fix.h"
+#include "caps_e2e.h"
+#include "../../libkofeng/scanners/scan.h"
 #include "known_miss.h"
 #include "../../libkofeng/kofcore/kofmod/kofsym.h"
 #include "../../libkofeng/analyzers/parsers/binaries/funcs.h"
@@ -168,7 +170,7 @@ static int block_for(uint64_t len, const char *want, unsigned *trunc, unsigned *
 	last_cut = 0;
 	if (!parse_img(len))
 		return -2;
-	gn = kof_syms_build_grow(KOF_FMT_ELF, img, len, kof_elf(&ctx), NULL, &gblk, &gcap);
+	gn = kof_syms_build_grow(KOF_FMT_ELF, img, len, kof_elf(&ctx), NULL, &gblk, &gcap, NULL);
 	*trunc = (unsigned)kof_sym_truncated(gblk, gn);
 	*count = kof_sym_count(gblk, gn);
 	for (i = 0; (r = kof_sym_rec(gblk, gn, i)) != NULL; i++) {
@@ -480,9 +482,61 @@ static void marker_spans(void)
 	}
 }
 
+/*
+ * A TABLE WHOSE NAMES OUTRUN THE POOL'S PLAN is rebuilt larger, and each pass is a build
+ * of the product that the run count sees: kof_syms_build_grow reports its passes and
+ * sym_build ticks kof_prod_ran for every one (it ticked once, before the loop, so the
+ * rebuild was invisible to prod_once). 3000 names of 150 characters are 450 KB of pool
+ * against the 144 KB planned (48 a record), so the first pass is cut for ROOM and a
+ * later one holds it all; an ordinary table is ONE pass.
+ */
+static char longnames[3000][160];
+
+static void rebuild_passes(void)
+{
+	unsigned i, trunc, count;
+	uint32_t passes = 0;
+	uint64_t len;
+	struct e2e r;
+
+	fill_table(100, 99, "commit_creds");
+	len = elf_syms(tab, 100, 0x400);
+	(void)block_for(len, "commit_creds", &trunc, &count);
+	gn = kof_syms_build_grow(KOF_FMT_ELF, img, len, kof_elf(&ctx), NULL, &gblk, &gcap, &passes);
+	CK(passes == 1u && !kof_sym_truncated(gblk, gn));
+
+	for (i = 0; i < 3000u; i++) {
+		memset(longnames[i], 'n', 150);
+		snprintf(longnames[i] + 140, 20, "%010u", i);
+		tab[i].name = longnames[i];
+		tab[i].info = (uint8_t)((1u << 4) | 2u);
+		tab[i].shndx = 1;
+		tab[i].value = VB + TEXT_OFF;
+		tab[i].size = 1;
+	}
+	tab[2999].name = "commit_creds";
+	tab[2999].shndx = 0;
+	tab[2999].value = tab[2999].size = 0;
+	len = elf_syms(tab, 3000, 0x400);
+	CK(parse_img(len));
+	passes = 0;
+	gn = kof_syms_build_grow(KOF_FMT_ELF, img, len, kof_elf(&ctx), NULL, &gblk, &gcap, &passes);
+	CK(passes >= 2u);                               /* the plan was short: it grew */
+	CK(!kof_sym_truncated(gblk, gn) && kof_sym_count(gblk, gn) == 3001u);
+
+	/* through the engine: the passes are runs of the product */
+	if (e2e_open(NULL)) {
+		unsigned before = kof_scan_prod_repeats(e2e_sc, KOF_PROD_SYMS);
+
+		(void)e2e_scan(img, len, &r);
+		CK(kof_scan_prod_repeats(e2e_sc, KOF_PROD_SYMS) >= before + 1u);
+	}
+}
+
 int main(void)
 {
 	sym_recs();
+	rebuild_passes();
 	name_len();
 	sym_spans();
 	marker_spans();

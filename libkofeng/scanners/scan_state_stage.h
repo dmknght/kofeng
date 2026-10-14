@@ -8,6 +8,7 @@
 #define KOFENG_SCAN_STATE_STAGE_H
 
 #include "scan_types.h"
+#include "../detectors/pattern/kofpix.h"
 
 /*
  * sc->ledger: struct kof_scan_ledger
@@ -43,6 +44,48 @@ struct kof_scan_ledger {
 	 * Never above resident_max, or the cap could not be reached.
 	 */
 	uint64_t obj_cap;
+	/*
+	 * HOW MANY INTERPRETER RUNS THIS TREE MAY STILL SPEND - KOF_SCAN_EMU_MAX,
+	 * given again to every top-level object with the rest of its budget. It was
+	 * counted in kof_stats.heur_emu, which never resets, so a scanner that had
+	 * interpreted 512 objects in its LIFETIME refused every later ask with no word
+	 * - a watcher scanning for a month stopped interpreting on the first day. A
+	 * tree is the unit that can be a bomb (an archive of a million members that all
+	 * ask), and that is what this bounds.
+	 */
+	uint32_t emu_left;
+	/*
+	 * THE INSTRUCTIONS THIS TREE MAY STILL EXECUTE, and how many more runs are
+	 * protected from running out of them. `emu_left` above counts RUNS and bounds the
+	 * number of objects that ask; this bounds the CPU they may spend, which a run count
+	 * cannot (one run of a spin loop is the whole of its per-object limit, and a tree
+	 * of 512 of them was 85 s). Sized from the ROOT alone at kof_scan_budget
+	 * (oc_emu_tree_insn), consumed by every emulator of the tree (oc_emu_charge), and
+	 * every run's own limit is the smaller of its per-object limit and what is left
+	 * here (objctx_emu.c, objctx_diag.c). `emu_floor_left` is how many of the tree's
+	 * first runs still get their floor when nothing is left: the root's and the first
+	 * children's, so a packed file that is the whole tree is never denied its unpack.
+	 */
+	uint64_t emu_insn_left;
+	uint32_t emu_floor_left;
+	/*
+	 * THE BYTES THIS TREE MAY STILL OFFER AS WINDOWS. A window is a child that is a view of
+	 * its parent's bytes: it costs no produced byte, no memory and no budget, but it is
+	 * SCANNED, so many windows aimed at one blob multiply the work with nothing charged.
+	 * What a legitimate tree offers is each object's bytes about once, so the sum cannot
+	 * pass the root plus everything the tree may produce - which is the number the
+	 * produced-bytes budget already is (see kof_scan_budget). Past it oc_window refuses and
+	 * the tree says Limit: a bomb of windows is bounded by the same figure as a bomb of
+	 * decoded bytes, and no archive that lists an entry twice is refused for it. This was
+	 * "twice the archive's length", in zip.c alone, and refused a zip that listed every
+	 * member three times.
+	 */
+	uint64_t window_left;
+	/*
+	 * NAMES HELD NOW, AND THE QUOTA (KOF_SCAN_NAMES) - see there. Reset with the rest of
+	 * the ledger by kof_scan_budget; charged by oc_names_take, given back by oc_names_give.
+	 */
+	uint64_t names, names_max;
 };
 
 /*
@@ -56,7 +99,7 @@ struct kof_scan_ledger {
  * scan_feed.c / objctx_child.c / objctx_script.c (extent scratch). Files that
  * touch it: objctx_decomp.c, objctx_decomp_folder.c, scan_facts.c, scan.c,
  * objctx_decomp_entry.c, scan_feed.c, objctx.c, objctx_child.c,
- * objctx_script.c.
+ * objctx_script.c, scan_ext.c.
  */
 struct kof_scan_cache {
 	/*
@@ -93,8 +136,24 @@ struct kof_scan_cache {
 	 * one is not doing the other. Kept apart anyway, because the day one calls the
 	 * other the failure would be silent.
 	 */
+	/*
+	 * The arrays are the FLOOR of those buffers and the storage a caller that asks for a
+	 * fixed KOF_SCAN_MAX_EXTENTS (the presence probe, which only asks whether there is
+	 * one) uses as it always did. The buffers that grow past them are `ext_buf` and
+	 * `gather_buf`, reached through kof_scan_ext_buf and given back by sx_ext_release -
+	 * see scan_ext.c. The pieces of an ENTRY (kof_scan_resolve_entry) go into
+	 * `gather_buf` the same way, and are never cut silently.
+	 */
 	struct kof_range ext[KOF_SCAN_MAX_EXTENTS];
 	struct kof_range ext_gather[KOF_SCAN_MAX_EXTENTS];
+	struct kof_ext_buf ext_buf, gather_buf;
+	/*
+	 * What the tables of the parsed views hold (zip, pdf: see struct kof_view_ops), as the
+	 * ledger was charged for it. Charged when the parse ends and given back when the
+	 * object does (sx_views_release), which is why it is here and not in sc->obj: it is
+	 * released by the scan that charged it, not wiped by the next one.
+	 */
+	uint64_t view_held;
 	/*
 	 * The DEFLATE decoder, allocated the first time one is needed.
 	 *
@@ -176,25 +235,31 @@ struct kof_scan_match {
 	 * by the multi-pattern prepass to decide whether a region is worth one
 	 * pass. One counter per region bit - tens of bytes, not a table.
 	 *
-	 * `found` is the other half: one word per marker in the database, where
-	 * bit b says that marker was seen in region b. The sweeps fill it and
-	 * the fold reads it, which is what lets a mask naming CODE|DATA be
+	 * `pix` is the other half: the pattern sweep's scratch (kofpix.h) - a buffer of
+	 * survivors, a slice of records, a cache of marker bytes and a SPARSE table of what
+	 * the sweeps of this object found, keyed by marker id, where bit b says that marker was
+	 * seen in region b. It was one word per marker of the database, cleared per object:
+	 * 32 MB at eight million markers, memset for every object whatever it was. Now what
+	 * an object touches is what it costs, and the table is bounded by the object's ledger
+	 * (`pix_ledgered` is what it was charged beyond the fixed part). The sweeps fill it
+	 * and a module's question reads it, which is what lets a mask naming CODE|DATA be
 	 * answered by an OR instead of a second pass over the bytes.
 	 *
-	 * NULL when the allocation failed, and that is not an error: no counts
-	 * and no record means no sweep, which is the behaviour this engine had
-	 * before there was one.
+	 * Not initialised when the allocation failed or the database has no table, and that is
+	 * not an error: no sweep, which is the behaviour this engine had before there was one.
 	 */
 	uint32_t *live;
-	uint32_t *found;
+	struct kofpix_ctx pix;
+	uint64_t pix_ledgered;
+	int      pix_ready;
 	/*
 	 * WHICH MASKS A SWEEP CAN ANSWER FOR, THIS OBJECT.
 	 *
 	 * multi_prepass used to hand the answer to every marker under every
-	 * answerable mask - see uid_slot in kofmultimatch.h for the measurement
-	 * that made that untenable at scale. It now records only WHICH masks
-	 * are answerable, and kof_multimatch_answer reads `found` when one is
-	 * asked about. One byte per mask, cleared per object.
+	 * answerable mask (67 million memo cells for nine hundred searches at
+	 * 200,000 rules, 24.8% of that scan). It now records only WHICH masks
+	 * are answerable, and the question reads `pix` when one is asked about.
+	 * One byte per mask, cleared per object.
 	 */
 	uint8_t *mask_ok;
 };

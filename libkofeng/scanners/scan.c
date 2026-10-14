@@ -60,11 +60,13 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
-#include "../detectors/pattern/kofmultimatch.h"
+#include "objctx_int.h"
+#include "../detectors/pattern/kofpix.h"
 /* The rule ABI: the phase ids and what a rule may ask the engine for. The
  * engine-side model next door is a different file with a similar name - see the
  * note at the top of kofmod/heur.h. */
 #include "../detectors/linkage/kofdiag.h"
+#include "../kofcore/kofplatform.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -74,12 +76,57 @@ static void sx_take_infected(struct kof_scanner *sc, struct kof_result *res, int
 
 static void sym_decl_free(struct kof_scanner *sc);
 
-struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
-{
-	struct kof_scanner *sc = calloc(1, sizeof *sc);
+/*
+ * WHAT A SCANNER COSTS BEFORE IT SCANS ANYTHING, reserved from the engine's budget when it is
+ * made: its struct, the parsed views of the formats it may meet (2.7 MB), the decompressor
+ * states (bzip2 3.7 MB, LZX 2.1 MB, the rest 0.2 MB), the symbol and declaration buffers, and
+ * the table the database sizes per thread (the memo, a bounded cache) and the pattern sweep's context. A
+ * round 12 MiB for the first group, measured as the resident cost of a scanner after trim
+ * plus every state it can grow; the database-sized tables are added exactly. The per-thread
+ * similarity counters of the block matcher are NOT in it (they belong to the index builder's
+ * accounting, see kofbudget.h). The names quota (KOF_SCAN_NAMES, scan_types.h, 1 MiB) is inside it,
+ * not on top: the parts that are measured come to 8.9 MB (the struct 0.24 MB including the 64 KiB
+ * pending-name buffer, the views 2.7, the decompressor states 6.0), so the round figure has the
+ * room, and adding it would move every cap-floor test (tests/unit/endian_view.c runs at
+ * KOF_ENGINE_MEM_MIN and loses its view to 2 MiB).
+ */
+#define KOF_SCAN_FIXED (12ull << 20)
 
-	if (!sc)
+uint64_t kof_scan_fixed(const struct kof_engine *eng)
+{
+	/*
+	 * NOTHING HERE FOLLOWS THE NUMBER OF MARKERS. The memo is a cache of at most KOF_MEMO_CELLS_MAX
+	 * cells (it was two bytes for every marker and mask: 48 MB at eight million), and the pattern
+	 * sweep's context is a fixed set of buffers (it was a word for every marker: 32 MB, cleared
+	 * for every object). What the sweep finds beyond its starting table is charged to the object.
+	 */
+	return KOF_SCAN_FIXED + kof_match_memo_bytes(eng->memo_size) +
+	       (eng->pix_regions ? kofpix_ctx_fixed(eng->pix_set) : 0u);
+}
+
+struct kof_scanner *kof_scan_make(const struct kof_engine *eng, int *why)
+{
+	struct kof_scanner *sc;
+	uint64_t fixed = kof_scan_fixed(eng);
+
+	if (why)
+		*why = KSCAN_NEW_NOMEM;
+	if (eng->budget && !kof_budget_charge(eng->budget, fixed)) {
+		if (why)
+			*why = KSCAN_NEW_BUDGET;
+		return NULL;            /* the engine cannot afford another scanner */
+	}
+	if (eng->budget)
+		atomic_fetch_add(&eng->budget->holders, 1u);
+	sc = calloc(1, sizeof *sc);
+	if (!sc) {
+		if (eng->budget) {
+			kof_budget_release(eng->budget, fixed);
+			atomic_fetch_sub(&eng->budget->holders, 1u);
+		}
 		return NULL;
+	}
+	sc->root_fixed = eng->budget ? fixed : 0;
 	sc->eng = eng;
 	sc->sink.fd = -1;   /* 0 is stdin; calloc would have made this a live fd */
 
@@ -142,16 +189,27 @@ struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
 		sc->diag.unk = sc->diag.gate + (sc->diag.bm ? sc->diag.bm : 1u);
 	}
 	sc->match.live = calloc(KOF_MULTIMATCH_BITS, sizeof *sc->match.live);
-	if (eng->multi && eng->multi->n_pat) {
-		sc->match.found = calloc(eng->multi->n_pat, sizeof *sc->match.found);
+	if (eng->pix_regions) {
 		sc->match.mask_ok = calloc(eng->n_masks ? eng->n_masks : 1u,
 				     sizeof *sc->match.mask_ok);
+		sc->match.pix_ready = kofpix_ctx_init(&sc->match.pix, eng->pix_set, 0);
+		if (sc->match.pix_ready && !sc->match.mask_ok) {
+			kofpix_ctx_free(&sc->match.pix);
+			sc->match.pix_ready = 0;
+		}
 	}
+	if (why)
+		*why = KSCAN_NEW_OK;
 	return sc;
 
 fail:
 	kof_scan_free(sc);
 	return NULL;
+}
+
+struct kof_scanner *kof_scan_new(const struct kof_engine *eng)
+{
+	return kof_scan_make(eng, NULL);
 }
 
 void kof_scan_free(struct kof_scanner *sc)
@@ -160,6 +218,10 @@ void kof_scan_free(struct kof_scanner *sc)
 
 	if (!sc)
 		return;
+	if (sc->eng->budget && sc->root_fixed) {
+		kof_budget_release(sc->eng->budget, sc->root_fixed + sc->root_held);
+		atomic_fetch_sub(&sc->eng->budget->holders, 1u);
+	}
 	kof_match_state_free(&sc->match.m);
 	kof_match_state_free(&sc->match.msym);
 	kof_prod_unadopt(sc);
@@ -182,10 +244,11 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc->subject.dis_set);
 	free(sc->diag.gr);
 	free(sc->match.live);
-	free(sc->match.found);
+	if (sc->match.pix_ready)
+		kofpix_ctx_free(&sc->match.pix);
+	sc->match.pix_ready = 0;
 	free(sc->match.mask_ok);
 	sc->match.live = NULL;
-	sc->match.found = NULL;
 	sc->match.mask_ok = NULL;
 	kof_scan_kids_reset(sc);
 	free(sc->child.list);
@@ -231,51 +294,87 @@ void kof_scan_free(struct kof_scanner *sc)
 	free(sc);
 }
 
+/*
+ * WHAT A SCANNER KEEPS BETWEEN OBJECTS, GIVEN BACK ON REQUEST (kscan_trim).
+ *
+ * A scanner is one per thread and lives as long as its host: the parsed view of
+ * every format it has met, the decompressor states, the presence table the
+ * matcher grew for the largest object, the symbol block and the last object's
+ * analysis all stay allocated so the next object does not pay to make them again.
+ * For a daemon that is the high-water mark of the worst object it ever saw (71 MB
+ * steady against a 4.8 MB median object, measured over 700 scans), and the
+ * allocator keeps the freed part too - hence the two flags: CACHES drops what the
+ * scanner holds, HEAP asks the C library to give its free pages back.
+ *
+ * Between scans only: while any scan is running on this scanner (a callback
+ * included) nothing is touched. Idempotent, and everything dropped is made again on
+ * demand, so the findings of the next scan are the ones it would have had.
+ */
+void kof_scan_trim(struct kof_scanner *sc, unsigned flags)
+{
+	uint32_t i;
+	int did = 0;
+
+	if (!sc || sc->busy)
+		return;
+	if (!flags)
+		flags = KOF_TRIM_CACHES | KOF_TRIM_HEAP;
+	if (flags & KOF_TRIM_CACHES) {
+		/* The last object's products (the graph, the decode trace, the symbol
+		 * state) stay until the next object begins; this is that beginning. */
+		kof_scan_emu_release(sc);
+		kof_scan_kids_reset(sc);
+		sx_obj_begin(sc);
+		/* The similarity matcher's state, and what the ledger was charged for it. */
+		did |= sc->mutation.held != 0;
+		oc_scan_release(sc, sc->mutation.ledgered);
+		sc->mutation.ledgered = 0;
+		oc_scan_release(sc, sc->match.pix_ledgered);
+		sc->match.pix_ledgered = 0;
+		kof_mutation_trim(&sc->mutation);
+		for (i = 0; i < KOF_TARGET_COUNT; i++) {
+			did |= sc->cache.view[i] != NULL;
+			free(sc->cache.view[i]);
+			sc->cache.view[i] = NULL;
+		}
+		did |= sc->cache.inf || sc->cache.lzw || sc->cache.bz || sc->cache.lzx ||
+		       sc->cache.lzh || sc->match.m.gram || sc->syms.buf || sc->pend.syms;
+		free(sc->cache.inf);
+		free(sc->cache.lzw);
+		free(sc->cache.bz);
+		free(sc->cache.lzx);
+		free(sc->cache.lzh);
+		sc->cache.inf = NULL;
+		sc->cache.lzw = NULL;
+		sc->cache.bz = NULL;
+		sc->cache.lzx = NULL;
+		sc->cache.lzh = NULL;
+		kof_match_state_trim(&sc->match.m);
+		kof_match_state_trim(&sc->match.msym);
+		free(sc->syms.buf);
+		sc->syms.buf = NULL;
+		sc->syms.cap = 0;
+		free(sc->syms.ext[0]);
+		free(sc->syms.ext[1]);
+		sc->syms.ext[0] = sc->syms.ext[1] = NULL;
+		free(sc->pend.syms);
+		sc->pend.syms = NULL;
+		sc->pend.syms_cap = 0;
+		free(sc->pend.desc_buf);
+		sc->pend.desc_buf = NULL;
+		sc->pend.desc_cap = 0;
+		free(sc->emu.rep_p);
+		sc->emu.rep_p = NULL;
+	}
+	if ((flags & KOF_TRIM_HEAP) && kof_heap_trim())
+		did = 1;
+	if (did)
+		sc->st.scan_trims++;
+}
+
 const struct kof_stats *kof_scan_stats(const struct kof_scanner *sc)
 {
 	return &sc->st;
-}
-
-/* ---- the byte accessors handed to a module --------------------------------- */
-
-/*
- * Turn a named range into extents.
- *
- * Here rather than in objctx.c because only the parse knows where a region is, and this
- * is the file that ran it. KOF_SCAN_ALL needs no parse at all, which is what lets a
- * module naming only that region run against input nothing identified.
- */
-uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *ctx, uint32_t scan_mask,
-				struct kof_range *ext)
-{
-	uint32_t n;
-
-	if (scan_mask & KOF_SCAN_ALL) {
-		ext[0].off = 0;
-		ext[0].len = ctx->obj_size;
-		return ctx->obj_size ? 1u : 0u;
-	}
-	if (!ctx->resolve_scan)
-		return 0;
-	n = ctx->resolve_scan(ctx, scan_mask, ext, KOF_SCAN_MAX_EXTENTS);
-	if (n >= KOF_SCAN_MAX_EXTENTS) {
-		/*
-		 * The region did not fit, so what follows searches part of it.
-		 *
-		 * Said rather than swallowed. A buffer that filled exactly is
-		 * indistinguishable from one that filled and had more to write, and
-		 * the two lead to the same place: a search over some of a region,
-		 * reported as a search over the region. That is the one answer this
-		 * engine must never give quietly, so it is a limit like any other -
-		 * the caller set the size, and the caller can be told it bound.
-		 */
-		struct kof_scanner *sc = kof_scan_of(ctx);
-
-		if (!sc->obj.open.broken)
-			sc->obj.open.broken = KOF_BROKEN_LIMIT;
-		n = KOF_SCAN_MAX_EXTENTS;
-	}
-	return n;
 }
 
 /* ---- deriving per-object facts --------------------------------------------- */
@@ -483,7 +582,8 @@ static void sx_take_repair(struct kof_scanner *sc, struct kof_result *res, int o
 
 /* A disease the object has, once. Linear: the set is as long as the distinct
  * diseases the object's modules found, which is a handful. Out of memory loses
- * the disease and nothing else - the finding is made regardless. */
+ * the disease, says so on the object (it is evidence of the verdict), and the finding is
+ * made regardless. */
 static void sx_disease_add(struct kof_scanner *sc, uint32_t id)
 {
 	uint32_t i;
@@ -495,8 +595,11 @@ static void sx_disease_add(struct kof_scanner *sc, uint32_t id)
 		uint32_t nc = sc->subject.cap_dis_set ? sc->subject.cap_dis_set * 2u : 16u;
 		uint32_t *g = realloc(sc->subject.dis_set, (size_t)nc * sizeof *g);
 
-		if (!g)
+		if (!g) {
+			/* the verdict is composed from this set: a disease lost is said */
+			OC_LIMIT(sc, "disease set not grown");
 			return;
+		}
 		sc->subject.dis_set = g;
 		sc->subject.cap_dis_set = nc;
 	}
@@ -542,7 +645,8 @@ struct kof_finding *sx_mod_report(struct kof_scanner *sc,
 		 * site that makes a finding offers it; a site that forgets makes
 		 * a finding nothing reports, which is what the detector loop once
 		 * did to every signature detection. */
-		f->is_verdict = (uint8_t)sx_verdict_take(sc, f, opt->all_matches);
+		f->is_verdict = (uint8_t)sx_verdict_take(sc, f, opt->all_matches,
+							 sx_finding_covered(m, f));
 	} else {
 		res->dropped++;
 	}
@@ -667,6 +771,44 @@ static void sym_decl_free(struct kof_scanner *sc)
  *   - the verdict slot, which is per SUBJECT - see scan_tree.
  *   - `budget`, which is per tree and never reset: the bomb defence.
  */
+static const char *const prod_names[KOF_PROD_COUNT] = {
+	"syms", "funcs", "walk", "relocs", "pe_imports", "apihash", "diag", "use"
+};
+
+const char *kof_prod_name(enum kof_prodkind p)
+{
+	return (unsigned)p < KOF_PROD_COUNT ? prod_names[p] : "?";
+}
+
+void kof_prod_ran(struct kof_scanner *sc, enum kof_prodkind p)
+{
+	if (sc->obj.prod_runs[p] != 255u)
+		sc->obj.prod_runs[p]++;
+	if (sc->obj.prod_runs[p] > 1u)
+		sc->prod_repeat[p]++;
+}
+
+void kof_prod_again(struct kof_scanner *sc, enum kof_prodkind p)
+{
+	/* The count is the number of builds; a named repeat is one the table
+	 * does not hold against the object. */
+	if (sc->obj.prod_runs[p] != 255u)
+		sc->obj.prod_runs[p]++;
+}
+
+void kof_prod_sync_walk(struct kof_scanner *sc)
+{
+	uint32_t r = kgenome_diag_walk_runs(sc->obj.diag.walk);
+
+	while (sc->obj.prod_runs[KOF_PROD_WALK] < r && sc->obj.prod_runs[KOF_PROD_WALK] < 255u)
+		kof_prod_ran(sc, KOF_PROD_WALK);
+}
+
+uint32_t kof_scan_prod_repeats(const struct kof_scanner *sc, enum kof_prodkind p)
+{
+	return sc && (unsigned)p < KOF_PROD_COUNT ? sc->prod_repeat[p] : 0;
+}
+
 void sx_obj_begin(struct kof_scanner *sc)
 {
 	/*
@@ -692,6 +834,9 @@ void sx_obj_begin(struct kof_scanner *sc)
 	kof_scan_diag_drop(sc);
 	sym_decl_free(sc);
 	kgenome_funcs_free(&sc->obj.sym.funcs);
+	kof_prod_sync_walk(sc);
+	if (kgenome_diag_walk_capped(sc->obj.diag.walk))
+		sc->st.trace_capped++;
 	kgenome_diag_walk_free(sc->obj.diag.walk);
 
 	/* The bitmaps are the scanner's, sized by the database and kept; only their

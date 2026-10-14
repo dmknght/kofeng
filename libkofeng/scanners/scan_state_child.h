@@ -264,7 +264,13 @@ struct kof_scan_pend {
 	 * as it is consumed, and cleared when a module returns, so a name set for a
 	 * child that never appeared cannot drift onto the following one.
 	 */
-	char label[KOF_SRC_LABEL_MAX];
+	char label[KOF_SRC_NAME_MAX + 1u];
+	/*
+	 * The producer named this child with something longer than the standard of the
+	 * container allows (oc_name_limit). The child is opened without a name and its
+	 * object is reported damaged; consumed with the label, cleared with the rest.
+	 */
+	uint8_t name_bad;
 	/*
 	 * How long it is, rather than where its first NUL is.
 	 *
@@ -502,6 +508,17 @@ struct kof_scan_emu {
 		uint32_t       kind;    /* KOF_EMU_RGN_* */
 	}                         rgn[KOF_EMU_RGN_MAX];
 	uint32_t n_rgn;
+	/*
+	 * WHAT THIS RUN HOLDS THAT THE LEDGER KNOWS ABOUT: `held` is the assembled image
+	 * and the copies of the written regions (the gather made them, the engine owns
+	 * them until the module returns), charged when gathered and given back when
+	 * they are freed or handed to the child. The machine's own memory is not in it:
+	 * the emulator asks for that itself (kgenome_emu_cfg.account) and gives it back
+	 * when it is freed.
+	 */
+	uint64_t held;
+	/* What the machine has been granted by emu_account and not yet returned. */
+	uint64_t charged;
 };
 
 /*
@@ -533,6 +550,57 @@ struct kof_scan_sink {
 	 */
 	int fixed;
 	uint64_t at;
+	/*
+	 * AN ENTRY THAT MET ITS OWN BOUND (object cap, declared-ratio clamp), and what
+	 * the walk does about it - see oc_entry_cut.
+	 *
+	 * `cut` is the reason the child being built will carry (KOF_BROKEN_LIMIT, 0
+	 * none): stamped on the source when the sink closes, so the object says it was
+	 * cut and the parent's entry loop is not told to stop. `refuse` is set when the
+	 * sink was closed BY the cut (OC_REFUSE_*): the rest of that entry is refused,
+	 * and a module's own close of it answers "made". Both end where the next entry
+	 * begins (oc_entry_begin, oc_child) and at every discard.
+	 */
+	uint32_t cut;
+	uint8_t  refuse;
+};
+
+/*
+ * sc->spill: struct kof_scan_spill
+ *
+ * WHERE A BIG PRODUCED OBJECT GOES, decided once per scanner (and again if the host
+ * names another directory): see objctx_spill.c for the flow. `state` is 0 until the first
+ * object that wants to spill, then 1 (a file may be made there and holds the object)
+ * or 2 (it may not, and `why` says which: KOF_SPILL_*). `io` is NULL for the real calls and
+ * a test's table otherwise - the same seam either way, so what a test exercises is what runs.
+ *
+ * Owner: objctx_spill.c. Files that touch it: objctx_child_sink.c, objctx_child.c.
+ */
+struct kof_spill_io {
+	/* A new anonymous file, in `first` when it names a directory; -1 on failure. */
+	int (*open)(void *user, const char *first);
+	/* All of the bytes, or 0 (ENOSPC, EIO...). */
+	int (*write)(void *user, int fd, const void *p, uint64_t n);
+	/* Bytes free where the file is, and whether that place is RAM; 0 when unknown. */
+	int (*space)(void *user, int fd, uint64_t *avail, int *ram);
+	void *user;
+};
+
+enum kof_spill_why {
+	KOF_SPILL_NONE = 0,
+	KOF_SPILL_UNAVAILABLE,   /* no directory a file can be made in */
+	KOF_SPILL_RAM,           /* the place is a RAM filesystem and the host did not name it */
+	KOF_SPILL_SMALL,         /* too little free space for an object the size the cap allows */
+	KOF_SPILL_FULL           /* a write failed or the space ran out while writing */
+};
+
+struct kof_scan_spill {
+	int state;                      /* 0 not probed, 1 usable, 2 not */
+	uint32_t why;                   /* enum kof_spill_why, when state is 2 */
+	const char *probed_for;         /* the scratch directory the probe was made for */
+	uint64_t avail;                 /* free bytes at the last look */
+	uint64_t since;                 /* bytes written since that look */
+	const struct kof_spill_io *io;
 };
 
 #endif

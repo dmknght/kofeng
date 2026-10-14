@@ -33,149 +33,161 @@
 #define SYSTAB_N(t) ((uint32_t)(sizeof kgenome_nucleo_##t / sizeof kgenome_nucleo_##t[0]))
 
 /* Linux x86-64. */
+/*
+ * NOTES THAT STOOD BETWEEN THE ROWS OF THE TABLE BELOW, kept whole. It is in
+ * number order now, which no group of rows survives, so they are not beside the
+ * rows they were about.
+ *
+ *
+ * THE REST OF THE READ AND WRITE FAMILY, which was simply absent.
+ *
+ * A table holding read and write and not readv or pread describes a
+ * program nobody writes: the vectored and positional forms are what a
+ * runtime actually emits, and a stager that uses one was invisible -
+ * not misclassified, invisible. They take a descriptor like read does
+ * and say no more about it than read does, so they take the same word.
+ *
+ * sendfile and splice move bytes between TWO descriptors without the
+ * program seeing them. Read as mem-read because that is what is known;
+ * the second descriptor is an argument, and an argument is where that
+ * belongs rather than in a word.
+ *
+ * AND THE REST OF WHAT A PROGRAM CAN ASK FOR. Numbers read out of
+ * /usr/include/x86_64-linux-gnu/asm/unistd_64.h on this machine
+ * rather than remembered, because a wrong one here is not a missed
+ * detection - it is a confident wrong name on whatever syscall does
+ * hold the number.
+ */
 static const struct kgenome_sysrow kgenome_nucleo_sys64[] = {
 	{     0, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "read"  },
 	{     1, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "write"  },
-	/*
-	 * THE REST OF THE READ AND WRITE FAMILY, which was simply absent.
-	 *
-	 * A table holding read and write and not readv or pread describes a
-	 * program nobody writes: the vectored and positional forms are what a
-	 * runtime actually emits, and a stager that uses one was invisible -
-	 * not misclassified, invisible. They take a descriptor like read does
-	 * and say no more about it than read does, so they take the same word.
-	 *
-	 * sendfile and splice move bytes between TWO descriptors without the
-	 * program seeing them. Read as mem-read because that is what is known;
-	 * the second descriptor is an argument, and an argument is where that
-	 * belongs rather than in a word.
-	 */
+	{     2, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "open"  },
+	{   9, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see prot_cap */
+	{  10, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
 	{    17, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "pread64"  },
 	{    18, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwrite64"  },
 	{    19, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "readv"  },
 	{    20, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "writev"  },
-	{    40, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "sendfile"  },
-	{   275, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "splice"  },
-	{   295, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "preadv"  },
-	{   296, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwritev"  },
-	{   327, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "preadv2"  },
-	{   328, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwritev2"  },
-	{    46, KGENOME_NUCLEO_NET_WRITE, KGENOME_NUCLEO_ROLE_NONE, "sendmsg"  },
-	{    47, KGENOME_NUCLEO_NET_READ, KGENOME_NUCLEO_ROLE_NONE, "recvmsg"  },
-	{     2, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "open"  },
-	{   9, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mmap"  },        /* mmap - prot decides, see prot_cap */
-	{  10, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mprotect"  },        /* mprotect - same */
+	{  22, KGENOME_NUCLEO_PIPE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "pipe"  },
+	{  33, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup2"  },
 	{   35, KGENOME_NUCLEO_SLEEP, KGENOME_NUCLEO_ROLE_NONE, "nanosleep"  },
+	{    40, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "sendfile"  },
 	{  41, KGENOME_NUCLEO_NET_OPEN, KGENOME_NUCLEO_ROLE_SOCK, "socket"  },
 	{   42, KGENOME_NUCLEO_NET_CONNECT, KGENOME_NUCLEO_ROLE_NONE, "connect"  },
 	{   43, KGENOME_NUCLEO_NET_ACCEPT, KGENOME_NUCLEO_ROLE_NONE, "accept"  },
 	{   44, KGENOME_NUCLEO_NET_WRITE, KGENOME_NUCLEO_ROLE_NONE, "sendto"  },
 	{   45, KGENOME_NUCLEO_NET_READ, KGENOME_NUCLEO_ROLE_NONE, "recvfrom"  },
+	{    46, KGENOME_NUCLEO_NET_WRITE, KGENOME_NUCLEO_ROLE_NONE, "sendmsg"  },
+	{    47, KGENOME_NUCLEO_NET_READ, KGENOME_NUCLEO_ROLE_NONE, "recvmsg"  },
+	{  53, KGENOME_NUCLEO_NET_OPEN, KGENOME_NUCLEO_ROLE_NONE, "socketpair"  },
 	{  56, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_CLONE, "clone"  },
 	{   57, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_NONE, "fork"  },
 	{   58, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_NONE, "vfork"  },
 	{   59, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execve"  },
-	{ 257, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "openat"  },
-	{ 319, KGENOME_NUCLEO_MEMFD, KGENOME_NUCLEO_ROLE_NONE, "memfd_create"  },
-	{ 322, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execveat"  },
-	/*
-	 * AND THE REST OF WHAT A PROGRAM CAN ASK FOR. Numbers read out of
-	 * /usr/include/x86_64-linux-gnu/asm/unistd_64.h on this machine
-	 * rather than remembered, because a wrong one here is not a missed
-	 * detection - it is a confident wrong name on whatever syscall does
-	 * hold the number.
-	 */
 	{  82, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "rename"  },
 	{  87, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlink"  },
-	{ 263, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlinkat"  },
-	{ 264, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat"  },
-	{ 316, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat2"  },
 	{  90, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "chmod"  },
 	{  91, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmod"  },
-	{ 268, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmodat"  },
+	{ 101, KGENOME_NUCLEO_PTRACE, KGENOME_NUCLEO_ROLE_NONE, "ptrace"  },
 	{ 105, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setuid"  },
 	{ 106, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setgid"  },
 	{ 113, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setreuid"  },
 	{ 117, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setresuid"  },
-	{ 310, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_readv"  },
-	{ 311, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_writev"  },
+	{ 132, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utime"  },
+	{ 155, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "pivot_root"  },
+	{ 161, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "chroot"  },
 	{ 175, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "init_module"  },
 	{ 176, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "delete_module"  },
-	{ 313, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "finit_module"  },
-	{ 321, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "bpf"  },
-	{ 161, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "chroot"  },
-	{ 155, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "pivot_root"  },
-	{ 308, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "setns"  },
-	{ 272, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "unshare"  },
-	{ 101, KGENOME_NUCLEO_PTRACE, KGENOME_NUCLEO_ROLE_NONE, "ptrace"  },
-	{  22, KGENOME_NUCLEO_PIPE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "pipe"  },
-	{  33, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup2"  },
-	{  53, KGENOME_NUCLEO_NET_OPEN, KGENOME_NUCLEO_ROLE_NONE, "socketpair"  },
-	{ 292, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup3"  },
-	{ 132, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utime"  },
 	{ 235, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimes"  },
+	{ 257, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "openat"  },
 	{ 261, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "futimesat"  },
-	{ 280, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimensat"  }
+	{ 263, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlinkat"  },
+	{ 264, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat"  },
+	{ 268, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmodat"  },
+	{ 272, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "unshare"  },
+	{   275, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "splice"  },
+	{ 280, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimensat"  },
+	{ 292, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup3"  },
+	{   295, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "preadv"  },
+	{   296, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwritev"  },
+	{ 308, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "setns"  },
+	{ 310, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_readv"  },
+	{ 311, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_writev"  },
+	{ 313, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "finit_module"  },
+	{ 316, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat2"  },
+	{ 319, KGENOME_NUCLEO_MEMFD, KGENOME_NUCLEO_ROLE_NONE, "memfd_create"  },
+	{ 321, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "bpf"  },
+	{ 322, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execveat"  },
+	{   327, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "preadv2"  },
+	{   328, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwritev2"  }
 };
 
 /* Linux i386. */
+/*
+ * NOTES THAT STOOD BETWEEN THE ROWS OF THE TABLE BELOW, kept whole. It is in
+ * number order now, which no group of rows survives, so they are not beside the
+ * rows they were about.
+ *
+ * The same list on i386, from asm/unistd_32.h and NOT by subtracting
+ * anything from the table above - the two numberings are unrelated. 
+ *
+ * The same family on i386 - see the note in the amd64 table. 
+ *
+ */
 static const struct kgenome_sysrow kgenome_nucleo_sys32[] = {
 	{     2, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_NONE, "fork"  },
 	{     3, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "read"  },
-	/* The same family on i386 - see the note in the amd64 table. */
-	{   180, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "pread64"  },
-	{   181, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwrite64"  },
-	{   145, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "readv"  },
-	{   146, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "writev"  },
-	{   187, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "sendfile"  },
-	{   239, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "sendfile64"  },
-	{   313, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "splice"  },
-	{   333, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "preadv"  },
-	{   334, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwritev"  },
 	{     4, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "write"  },
 	{     5, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "open"  },
+	{  10, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlink"  },
 	{   11, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execve"  },
+	{  15, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "chmod"  },
+	{  23, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setuid"  },
+	{  26, KGENOME_NUCLEO_PTRACE, KGENOME_NUCLEO_ROLE_NONE, "ptrace"  },
+	{  30, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utime"  },
+	{  38, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "rename"  },
+	{  42, KGENOME_NUCLEO_PIPE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "pipe"  },
+	{  46, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setgid"  },
+	{  61, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "chroot"  },
+	{  63, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup2"  },
+	{  70, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setreuid"  },
 	{  90, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mmap"  },
+	{  94, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmod"  },
 	{ 102, KGENOME_NUCLEO_NONE, KGENOME_NUCLEO_ROLE_NONE, "socketcall"  },         /* socketcall - the sub-call is in ebx */
 	{ 120, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_CLONE, "clone"  },
 	{ 125, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mprotect"  },
-	{ 162, KGENOME_NUCLEO_SLEEP, KGENOME_NUCLEO_ROLE_NONE, "nanosleep"  },
-	{ 192, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mmap2"  },
-	{ 295, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "openat"  },
-	{ 356, KGENOME_NUCLEO_MEMFD, KGENOME_NUCLEO_ROLE_NONE, "memfd_create"  },
-	{ 358, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execveat"  },
-	/* The same list on i386, from asm/unistd_32.h and NOT by subtracting
-	 * anything from the table above - the two numberings are unrelated. */
-	{  10, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlink"  },
-	{  38, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "rename"  },
-	{ 301, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlinkat"  },
-	{ 302, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat"  },
-	{ 353, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat2"  },
-	{  15, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "chmod"  },
-	{  94, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmod"  },
-	{ 306, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmodat"  },
-	{  23, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setuid"  },
-	{  46, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setgid"  },
-	{  70, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setreuid"  },
-	{ 164, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setresuid"  },
-	{ 347, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_readv"  },
-	{ 348, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_writev"  },
 	{ 128, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "init_module"  },
 	{ 129, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "delete_module"  },
-	{ 350, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "finit_module"  },
-	{ 357, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "bpf"  },
-	{  61, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "chroot"  },
+	{   145, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "readv"  },
+	{   146, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "writev"  },
+	{ 162, KGENOME_NUCLEO_SLEEP, KGENOME_NUCLEO_ROLE_NONE, "nanosleep"  },
+	{ 164, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setresuid"  },
+	{   180, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "pread64"  },
+	{   181, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwrite64"  },
+	{   187, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "sendfile"  },
+	{ 192, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mmap2"  },
 	{ 217, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "pivot_root"  },
-	{ 346, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "setns"  },
-	{ 310, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "unshare"  },
-	{  26, KGENOME_NUCLEO_PTRACE, KGENOME_NUCLEO_ROLE_NONE, "ptrace"  },
-	{  42, KGENOME_NUCLEO_PIPE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "pipe"  },
-	{  63, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup2"  },
-	{ 330, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup3"  },
-	{  30, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utime"  },
+	{   239, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "sendfile64"  },
 	{ 271, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimes"  },
+	{ 295, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "openat"  },
 	{ 299, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "futimesat"  },
-	{ 320, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimensat"  }
+	{ 301, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlinkat"  },
+	{ 302, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat"  },
+	{ 306, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmodat"  },
+	{ 310, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "unshare"  },
+	{   313, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "splice"  },
+	{ 320, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimensat"  },
+	{ 330, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup3"  },
+	{   333, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "preadv"  },
+	{   334, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "pwritev"  },
+	{ 346, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "setns"  },
+	{ 347, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_readv"  },
+	{ 348, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_writev"  },
+	{ 350, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "finit_module"  },
+	{ 353, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat2"  },
+	{ 356, KGENOME_NUCLEO_MEMFD, KGENOME_NUCLEO_ROLE_NONE, "memfd_create"  },
+	{ 357, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "bpf"  },
+	{ 358, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execveat"  }
 };
 
 /* i386 multiplexes every socket operation through socketcall, with the
@@ -195,17 +207,27 @@ static const struct kgenome_sysrow kgenome_nucleo_sockcall[] = {
 };
 
 
-/* The row of `t` for syscall `nr`, or NULL. One loop; a caller reads the field
- * it wants (cap, name, role) from the row, so there is no per-field twin. */
+/* The row of `t` for syscall `nr`, or NULL. One search; a caller reads the field
+ * it wants (cap, name, role) from the row, so there is no per-field twin.
+ *
+ * EVERY TABLE BELOW IS IN ASCENDING NUMBER ORDER AND HOLDS EACH NUMBER ONCE, and
+ * that is what lets this be a binary search: it was a scan from the top, 482000
+ * times in a 5 MB static binary (the wrapper walk asks per call of a wrapper),
+ * 9% of its instructions. kgenome_nucleo_sys_ordered says it, and a test holds it. */
 static const struct kgenome_sysrow *kgenome_nucleo_sys_row(const struct kgenome_sysrow *t,
 					     uint32_t n, uint32_t nr)
 {
-	uint32_t i;
+	uint32_t lo = 0, hi = n;
 
-	for (i = 0; i < n; i++)
-		if (t[i].nr == nr)
-			return &t[i];
-	return NULL;
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (t[mid].nr < nr)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo < n && t[lo].nr == nr ? &t[lo] : NULL;
 }
 
 
@@ -397,8 +419,14 @@ const char *kgenome_nucleo_sys_name(unsigned bits, uint32_t nr)
 static uint16_t fx_look(const struct kgenome_nucleo_abi *fx, uint32_t nr, uint8_t *role,
 			const char **name)
 {
-	const struct kgenome_sysrow *row = kgenome_nucleo_sys_row(fx->tab, fx->n_tab, nr);
+	const struct kgenome_sysrow *row;
 
+	if (!fx) {                              /* no ABI described: no row, as for a number it lacks */
+		*role = KGENOME_NUCLEO_ROLE_NONE;
+		*name = NULL;
+		return KGENOME_NUCLEO_NONE;
+	}
+	row = kgenome_nucleo_sys_row(fx->tab, fx->n_tab, nr);
 	if (!row)
 		row = kgenome_nucleo_sys_row(fx->tab2, fx->n_tab2, nr);
 	if (!row) {
@@ -613,56 +641,81 @@ static const struct kgenome_sysrow kgenome_nucleo_sys_mips64[] = {
 	{ 5000, KGENOME_NUCLEO_MEM_READ, KGENOME_NUCLEO_ROLE_NONE, "read"  },
 	{ 5001, KGENOME_NUCLEO_MEM_WRITE, KGENOME_NUCLEO_ROLE_NONE, "write"  },
 	{ 5002, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "open"  },
-	{ 5247, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "openat"  },
 	{ 5009, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mmap"  },
 	{ 5010, KGENOME_NUCLEO_ALLOC, KGENOME_NUCLEO_ROLE_MMAP, "mprotect"  },
-	{ 5055, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_CLONE, "clone"  },
-	{ 5056, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_NONE, "fork"  },
-	{ 5057, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execve"  },
-	{ 5316, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execveat"  },
+	{ 5032, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup2"  },
+	{ 5034, KGENOME_NUCLEO_SLEEP, KGENOME_NUCLEO_ROLE_NONE, "nanosleep"  },
 	{ 5040, KGENOME_NUCLEO_NET_OPEN, KGENOME_NUCLEO_ROLE_SOCK, "socket"  },
 	{ 5041, KGENOME_NUCLEO_NET_CONNECT, KGENOME_NUCLEO_ROLE_NONE, "connect"  },
 	{ 5042, KGENOME_NUCLEO_NET_ACCEPT, KGENOME_NUCLEO_ROLE_NONE, "accept"  },
-	{ 5293, KGENOME_NUCLEO_NET_ACCEPT, KGENOME_NUCLEO_ROLE_NONE, "accept4"  },
-	{ 5048, KGENOME_NUCLEO_NET_BIND, KGENOME_NUCLEO_ROLE_NONE, "bind"  },
-	{ 5049, KGENOME_NUCLEO_NET_LISTEN, KGENOME_NUCLEO_ROLE_NONE, "listen"  },
 	{ 5043, KGENOME_NUCLEO_NET_WRITE, KGENOME_NUCLEO_ROLE_NONE, "sendto"  },
 	{ 5044, KGENOME_NUCLEO_NET_READ, KGENOME_NUCLEO_ROLE_NONE, "recvfrom"  },
 	{ 5045, KGENOME_NUCLEO_NET_WRITE, KGENOME_NUCLEO_ROLE_NONE, "sendmsg"  },
 	{ 5046, KGENOME_NUCLEO_NET_READ, KGENOME_NUCLEO_ROLE_NONE, "recvmsg"  },
-	{ 5034, KGENOME_NUCLEO_SLEEP, KGENOME_NUCLEO_ROLE_NONE, "nanosleep"  },
-	{ 5099, KGENOME_NUCLEO_PTRACE, KGENOME_NUCLEO_ROLE_NONE, "ptrace"  },
-	{ 5314, KGENOME_NUCLEO_MEMFD, KGENOME_NUCLEO_ROLE_NONE, "memfd_create"  },
-	{ 5085, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlink"  },
-	{ 5253, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlinkat"  },
+	{ 5048, KGENOME_NUCLEO_NET_BIND, KGENOME_NUCLEO_ROLE_NONE, "bind"  },
+	{ 5049, KGENOME_NUCLEO_NET_LISTEN, KGENOME_NUCLEO_ROLE_NONE, "listen"  },
+	{ 5055, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_CLONE, "clone"  },
+	{ 5056, KGENOME_NUCLEO_SPAWN, KGENOME_NUCLEO_ROLE_NONE, "fork"  },
+	{ 5057, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execve"  },
 	{ 5080, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "rename"  },
-	{ 5254, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat"  },
-	{ 5311, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat2"  },
+	{ 5085, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlink"  },
 	{ 5088, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "chmod"  },
 	{ 5089, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmod"  },
-	{ 5258, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmodat"  },
+	{ 5099, KGENOME_NUCLEO_PTRACE, KGENOME_NUCLEO_ROLE_NONE, "ptrace"  },
 	{ 5103, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setuid"  },
 	{ 5104, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setgid"  },
 	{ 5111, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setreuid"  },
 	{ 5115, KGENOME_NUCLEO_CRED_SET, KGENOME_NUCLEO_ROLE_NONE, "setresuid"  },
-	{ 5304, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_readv"  },
-	{ 5305, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_writev"  },
+	{ 5130, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utime"  },
+	{ 5151, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "pivot_root"  },
+	{ 5156, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "chroot"  },
 	{ 5168, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "init_module"  },
 	{ 5169, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "delete_module"  },
-	{ 5307, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "finit_module"  },
-	{ 5315, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "bpf"  },
-	{ 5156, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "chroot"  },
-	{ 5151, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "pivot_root"  },
-	{ 5303, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "setns"  },
-	{ 5262, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "unshare"  },
-	{ 5032, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup2"  },
-	{ 5286, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup3"  },
-	{ 5130, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utime"  },
 	{ 5226, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimes"  },
+	{ 5247, KGENOME_NUCLEO_FILE_OPEN, KGENOME_NUCLEO_ROLE_NONE, "openat"  },
 	{ 5251, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "futimesat"  },
-	{ 5275, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimensat"  }
+	{ 5253, KGENOME_NUCLEO_FILE_DELETE, KGENOME_NUCLEO_ROLE_NONE, "unlinkat"  },
+	{ 5254, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat"  },
+	{ 5258, KGENOME_NUCLEO_PERM_SET, KGENOME_NUCLEO_ROLE_NONE, "fchmodat"  },
+	{ 5262, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "unshare"  },
+	{ 5275, KGENOME_NUCLEO_TIMESTOMP, KGENOME_NUCLEO_ROLE_NONE, "utimensat"  },
+	{ 5286, KGENOME_NUCLEO_FD_REDIR, KGENOME_NUCLEO_ROLE_NONE, "dup3"  },
+	{ 5293, KGENOME_NUCLEO_NET_ACCEPT, KGENOME_NUCLEO_ROLE_NONE, "accept4"  },
+	{ 5303, KGENOME_NUCLEO_JAIL, KGENOME_NUCLEO_ROLE_NONE, "setns"  },
+	{ 5304, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_readv"  },
+	{ 5305, KGENOME_NUCLEO_PROC_MEM, KGENOME_NUCLEO_ROLE_NONE, "process_vm_writev"  },
+	{ 5307, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "finit_module"  },
+	{ 5311, KGENOME_NUCLEO_FILE_RENAME, KGENOME_NUCLEO_ROLE_NONE, "renameat2"  },
+	{ 5314, KGENOME_NUCLEO_MEMFD, KGENOME_NUCLEO_ROLE_NONE, "memfd_create"  },
+	{ 5315, KGENOME_NUCLEO_MOD_LOAD, KGENOME_NUCLEO_ROLE_NONE, "bpf"  },
+	{ 5316, KGENOME_NUCLEO_EXEC_IMAGE, KGENOME_NUCLEO_ROLE_NONE, "execveat"  }
 };
 
+
+/* Whether every table above is strictly ascending in number: what the search in
+ * kgenome_nucleo_sys_row relies on. Tests only. */
+static int sys_tab_ordered(const struct kgenome_sysrow *t, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 1; i < n; i++)
+		if (t[i - 1u].nr >= t[i].nr)
+			return 0;
+	return 1;
+}
+
+int kgenome_nucleo_sys_ordered(void)
+{
+	return sys_tab_ordered(kgenome_nucleo_sys64, SYSTAB_N(sys64)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys32, SYSTAB_N(sys32)) &&
+	       sys_tab_ordered(kgenome_nucleo_sockcall, SYSTAB_N(sockcall)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys_a64, SYSTAB_N(sys_a64)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys_arm, SYSTAB_N(sys_arm)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys_mips, SYSTAB_N(sys_mips)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys_ppc, SYSTAB_N(sys_ppc)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys_sparc, SYSTAB_N(sys_sparc)) &&
+	       sys_tab_ordered(kgenome_nucleo_sys_mips64, SYSTAB_N(sys_mips64));
+}
 
 #define FXN(t) kgenome_nucleo_##t, SYSTAB_N(t)
 

@@ -58,7 +58,11 @@ uint64_t oc_unpack_bcj2(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	if (!out_len)
 		return 0;
 
-	for (i = 0; i < z->n_pack; i++)
+	/* THE FOLDER'S OWN STREAMS, not a search of every stream of the archive for each folder:
+	 * that was a product of two counts the file chooses. (The streams of a folder are
+	 * consecutive; the parse says where.) */
+	for (i = z->folder[index].first_pack;
+	     i < z->n_pack && i - z->folder[index].first_pack < z->folder[index].n_packs; i++)
 		if (z->pack[i].folder == index && z->pack[i].role < 4u)
 			pk[z->pack[i].role] = &z->pack[i];
 	if (!pk[0] || !pk[1] || !pk[2] || !pk[3])
@@ -232,14 +236,16 @@ uint64_t oc_unpack_mszip(struct kof_scanner *sc,
 			     const struct kof_obj_ctx *ctx, uint32_t index,
 			     uint64_t out_hint)
 {
-	struct kof_range *ext = sc->cache.ext_gather;
+	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
+	struct kof_range *ext;
 	struct mszip_out snk;
 	kof_buf b;
 	uint32_t n, i;
 
 	if (!ctx->resolve_entry || !oc_can_produce(sc))
 		return 0;
-	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	n = kof_scan_resolve_entry(ctx, index, eb);
+	ext = eb->v;
 	if (!n)
 		return 0;
 
@@ -382,7 +388,8 @@ uint64_t oc_unpack_lzx_reset(struct kof_scanner *sc,
 				 const struct kof_obj_ctx *ctx, uint32_t index,
 				 uint32_t window_bits, uint64_t out_hint)
 {
-	struct kof_range *ext = sc->cache.ext_gather;
+	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
+	struct kof_range *ext;
 	struct expand_sink snk;
 	enum kuncoat_status st = KUNCOAT_OK;
 	kof_buf b;
@@ -391,7 +398,8 @@ uint64_t oc_unpack_lzx_reset(struct kof_scanner *sc,
 
 	if (!ctx->resolve_entry || !oc_can_produce(sc))
 		return 0;
-	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	n = kof_scan_resolve_entry(ctx, index, eb);
+	ext = eb->v;
 	if (!n)
 		return 0;
 
@@ -491,7 +499,8 @@ uint64_t oc_unpack_lzx(struct kof_scanner *sc,
 			   const struct kof_obj_ctx *ctx, uint32_t index,
 			   uint32_t window_bits, uint64_t out_hint)
 {
-	struct kof_range *ext = sc->cache.ext_gather;
+	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
+	struct kof_range *ext;
 	struct expand_sink snk;
 	enum kuncoat_status st;
 	kof_buf b;
@@ -505,7 +514,8 @@ uint64_t oc_unpack_lzx(struct kof_scanner *sc,
 	take = out_hint & 0xffffffffu;
 	if (!take)
 		return 0;
-	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	n = kof_scan_resolve_entry(ctx, index, eb);
+	ext = eb->v;
 	if (!n)
 		return 0;
 

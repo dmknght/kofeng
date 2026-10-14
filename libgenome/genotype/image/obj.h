@@ -62,4 +62,32 @@ kgenome_obj_pe(const struct kgenome_obj *obj)
 	return (const struct kgenome_pe_info *)obj->file_header;
 }
 
+/*
+ * Which way the object's code and data are written: the ELF header's
+ * e_ident[EI_DATA], as the parser recorded it. The one place that asks.
+ * PE and an unparsed object are little-endian.
+ */
+static inline int kgenome_obj_big_endian(const struct kgenome_obj *obj)
+{
+	return obj && obj->format == KGENOME_FMT_ELF && obj->file_header &&
+	       kgenome_obj_elf(obj)->elf_data == KGENOME_ELFDATA_BE;
+}
+
+/*
+ * Is the CODE little-endian although the object is big-endian: an ARM EABI
+ * object linked with --be8 (EF_ARM_BE8 in e_flags) keeps its data big-endian
+ * and has its instruction words stored little-endian, which is what the
+ * hardware fetches in that mode. An AArch64 object does not need the question:
+ * its instructions are little-endian in both byte orders, and its decoder
+ * takes no byte-order argument. The ONE place that asks; the cell space carries
+ * the answer (kgenome_cell_space.code_le).
+ */
+#define KGENOME_ELF_EF_ARM_BE8 0x00800000u
+
+static inline int kgenome_obj_code_little_endian(const struct kgenome_obj *obj)
+{
+	return kgenome_obj_big_endian(obj) && obj->arch == KGENOME_ARCH_ARM &&
+	       (kgenome_obj_elf(obj)->e_flags & KGENOME_ELF_EF_ARM_BE8) != 0;
+}
+
 #endif /* KGENOME_IMAGE_OBJ_H */

@@ -243,9 +243,9 @@ static kuncoat_st_t url_write(const uint8_t *p, uint64_t len, uint8_t *out, uint
 	return i < len ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
 }
 
-enum kuncoat_status kuncoat_coding(const struct kuncoat_step *s,
-				   const uint8_t *in, uint64_t n,
-				   uint8_t *out, uint64_t cap, uint64_t *w)
+static enum kuncoat_status coding_run(const struct kuncoat_step *s,
+				      const uint8_t *in, uint64_t n,
+				      uint8_t *out, uint64_t cap, uint64_t *w)
 {
 	switch (s->algo) {
 	case KUNCOAT_ALGO_B64:
@@ -266,4 +266,17 @@ enum kuncoat_status kuncoat_coding(const struct kuncoat_step *s,
 	default:
 		return KUNCOAT_UNSUPPORTED;
 	}
+}
+
+/* Appends at out[*w]; see kuncoat_cipher for why the routines get the tail. */
+enum kuncoat_status kuncoat_coding(const struct kuncoat_step *s,
+				   const uint8_t *in, uint64_t n,
+				   uint8_t *out, uint64_t cap, uint64_t *w)
+{
+	const uint64_t w0 = *w;
+	uint64_t mine = 0;
+	enum kuncoat_status r = coding_run(s, in, n, out + w0, cap > w0 ? cap - w0 : 0, &mine);
+
+	*w = w0 + mine;
+	return r;
 }

@@ -150,11 +150,10 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	}
 
 	/*
-	 * The SSE control word, read and written but never acted on:
-	 * this interprets scalar arithmetic with the host's own double,
-	 * so a rounding mode it stored would change nothing. Kept so
-	 * that a caller which saves it and restores it sees what it
-	 * wrote, which is all any of them check.
+	 * The SSE control word, read and written. Its rounding mode (bits
+	 * 13-14) is acted on by every floating point instruction that
+	 * rounds (emu_vec_fp.c); its exception flags and masks, DAZ and FTZ
+	 * are kept and handed back as written but change nothing.
 	 */
 	case KGENOME_X86_I_STMXCSR:
 		if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], e->mxcsr))
@@ -207,10 +206,7 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	}
 
 	/*
-	 * Unsigned multiply and both divides. The 128-bit dividend a
-	 * 64-bit DIV can take is not representable here, so that one
-	 * case stops rather than returning a wrong quotient - and a
-	 * divide by zero stops too, since there is no #DE to raise.
+	 * Unsigned multiply (and, below, both divides).
 	 */
 	case KGENOME_X86_I_MUL: {
 		uint64_t acc = kgenome_emu_reg_rd(e, KGENOME_EMU_RAX, sz, 0), hi;
@@ -245,91 +241,114 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		break;
 	}
 
+	/*
+	 * DIV and IDIV (Intel SDM Vol. 2). The dividend is AX for a byte divisor (quotient AL,
+	 * remainder AH), DX:AX, EDX:EAX or RDX:RAX for the wider ones (quotient in the low
+	 * register, remainder in the high). The flags are undefined.
+	 *
+	 * A ZERO DIVISOR AND A QUOTIENT THAT DOES NOT FIT THE DESTINATION ARE #DE, A FAULT, AND NOT A
+	 * STOP FOR WANT OF AN INSTRUCTION. The instruction changes nothing, the fault is raised the
+	 * way a failed memory access is (kgenome_emu_fault_de: a Windows guest's handlers are run
+	 * with STATUS_INTEGER_DIVIDE_BY_ZERO or STATUS_INTEGER_OVERFLOW, a guest with none - and
+	 * every ELF guest, because no signal is delivered here - ends the run with a FAULT stop
+	 * that names "divzero" or "divovf"). The 64-bit divide takes the full RDX:RAX dividend
+	 * (kgenome_emu_div128) and does not read it as a 64-bit one. tests/lib/genome/diff_div.c
+	 * runs the cases on the host CPU and compares, SIGFPE included.
+	 */
 	case KGENOME_X86_I_DIV: case KGENOME_X86_I_IDIV: {
-		uint64_t lo = kgenome_emu_reg_rd(e, KGENOME_EMU_RAX, sz, 0);
-		uint64_t hi = kgenome_emu_reg_rd(e, KGENOME_EMU_RDX, sz, 0);
+		const int sgn = ixp->h.id == KGENOME_X86_I_IDIV;
+		const uint64_t lo = kgenome_emu_reg_rd(e, KGENOME_EMU_RAX, sz == 1 ? 2u : sz, 0);
+		const uint64_t hi = sz == 1 ? 0 : kgenome_emu_reg_rd(e, KGENOME_EMU_RDX, sz, 0);
+		uint64_t q, rm;
 
 		if (!kgenome_emu_op_rd(e, ixp, &ixp->op[0], &a))
 			goto unsupported;
 		a &= kgenome_emu_mask_of(sz);
-		if (!a || (sz == 8 && hi))
+		if (!a) {
+			kgenome_emu_fault_de(e, 0);
 			goto unsupported;
-		if (sz == 8) {
-			if (ixp->h.id == KGENOME_X86_I_DIV) {
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, 8, 0, lo / a);
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, 8, 0, lo % a);
-			} else {
-				int64_t n, d = (int64_t)a;
-
-				/*
-				 * hi is 0 here, so the true dividend is the
-				 * non-negative value lo. If lo's top bit is
-				 * set, (int64_t)lo reads back negative and the
-				 * signed division would be wrong - stop rather
-				 * than answer wrongly, as the hi!=0 case above
-				 * already does.
-				 */
-				if ((int64_t)lo < 0)
-					goto unsupported;
-				n = (int64_t)lo;
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, 8, 0, (uint64_t)(n / d));
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, 8, 0, (uint64_t)(n % d));
-			}
+		}
+		if (!kgenome_emu_div(sz, sgn, hi, lo, a, &q, &rm)) {
+			kgenome_emu_fault_de(e, 1);
+			goto unsupported;
+		}
+		if (sz == 1) {
+			/* AL = quotient, AH = remainder, the rest of RAX unchanged */
+			kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, 1, 0, q);
+			kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, 1, 1, rm);
 		} else {
-			uint64_t n = (hi << (sz * 8u)) | (lo & kgenome_emu_mask_of(sz));
-
-			if (ixp->h.id == KGENOME_X86_I_IDIV) {
-				int64_t sn = (int64_t)kgenome_emu_sext(n, sz * 2u);
-				int64_t sd = (int64_t)kgenome_emu_sext(a, sz);
-
-				if (!sd)
-					goto unsupported;
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, sz, 0, (uint64_t)(sn / sd));
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, sz, 0, (uint64_t)(sn % sd));
-			} else {
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, sz, 0, n / a);
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, sz, 0, n % a);
-			}
+			kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, sz, 0, q);
+			kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, sz, 0, rm);
 		}
 		break;
 	}
 
-	/* Bit test and set/reset/complement: CPU feature bitmaps. */
+	/*
+	 * BT, BTS, BTR, BTC (SDM Vol. 2). CF receives the bit. With an immediate offset, or with a
+	 * register destination, the offset is taken modulo the operand width. With a MEMORY operand
+	 * and a REGISTER offset the offset is a signed bit index into a bit string that starts at the
+	 * operand's address: the operand addressed is the one `floor(offset / width)` operand-sizes
+	 * away, and the bit is the offset modulo the width. OF, SF, AF and PF are undefined.
+	 */
 	case KGENOME_X86_I_BT: case KGENOME_X86_I_BTS: case KGENOME_X86_I_BTR: case KGENOME_X86_I_BTC: {
-		uint64_t bit, val;
+		uint64_t bit, val, addr = 0;
 		unsigned w = sz * 8u;
+		int in_mem = ixp->op[0].type == KGENOME_X86_OP_MEM &&
+			     ixp->op[1].type == KGENOME_X86_OP_REG;
 
-		if (!kgenome_emu_op_rd(e, ixp, &ixp->op[0], &val) ||
-		    !kgenome_emu_op_rd(e, ixp, &ixp->op[1], &bit))
+		if (!kgenome_emu_op_rd(e, ixp, &ixp->op[1], &bit))
 			goto unsupported;
+		if (in_mem) {
+			int64_t soff = (int64_t)kgenome_emu_sext(bit, sz);
+			unsigned lg = sz == 8 ? 6u : sz == 4 ? 5u : 4u;
+
+			if (!kgenome_emu_ea_of(e, ixp, &ixp->op[0], &addr))
+				goto unsupported;
+			addr += (uint64_t)((soff >> lg) * (int64_t)sz);
+			if (e->bits == 32)
+				addr &= 0xffffffffu;
+			val = 0;
+			if (!kgenome_emu_mem_rd(e, addr, &val, sz))
+				goto unsupported;
+		} else if (!kgenome_emu_op_rd(e, ixp, &ixp->op[0], &val)) {
+			goto unsupported;
+		}
 		bit &= w - 1u;
 		e->flags = (e->flags & ~KGENOME_EMU_FL_CF) |
 			   (((val >> bit) & 1u) ? KGENOME_EMU_FL_CF : 0u);
 		if (ixp->h.id == KGENOME_X86_I_BTS)      val |=  (uint64_t)1 << bit;
 		else if (ixp->h.id == KGENOME_X86_I_BTR) val &= ~((uint64_t)1 << bit);
 		else if (ixp->h.id == KGENOME_X86_I_BTC) val ^=  (uint64_t)1 << bit;
-		if (ixp->h.id != KGENOME_X86_I_BT &&
-		    !kgenome_emu_op_wr(e, ixp, &ixp->op[0], val))
-			goto unsupported;
+		if (ixp->h.id != KGENOME_X86_I_BT) {
+			if (in_mem ? !kgenome_emu_mem_wr(e, addr, &val, sz)
+				   : !kgenome_emu_op_wr(e, ixp, &ixp->op[0], val))
+				goto unsupported;
+		}
 		break;
 	}
 
-	/* Scan for the first or last set bit; ZF says there was none. */
+	/*
+	 * BSF/BSR (SDM): ZF = 1 when the source is zero (the destination is then left alone),
+	 * else ZF = 0; the other flags are undefined. TZCNT/LZCNT: CF = 1 when the SOURCE is
+	 * zero (the result is then the operand size), ZF = 1 when the RESULT is zero (TZCNT:
+	 * bit 0 set; LZCNT: the top bit set); OF, SF, PF and AF are undefined.
+	 */
 	case KGENOME_X86_I_BSF: case KGENOME_X86_I_BSR:
 	case KGENOME_X86_I_TZCNT: case KGENOME_X86_I_LZCNT: {
 		uint64_t v, k;
 		unsigned w = sz * 8u;
+		int cnt = ixp->h.id == KGENOME_X86_I_TZCNT || ixp->h.id == KGENOME_X86_I_LZCNT;
 
 		if (!kgenome_emu_op_rd(e, ixp, &ixp->op[1], &v))
 			goto unsupported;
 		if (!v) {
-			e->flags |= KGENOME_EMU_FL_ZF;
-			if (ixp->h.id == KGENOME_X86_I_TZCNT ||
-			    ixp->h.id == KGENOME_X86_I_LZCNT) {
-				e->flags |= KGENOME_EMU_FL_CF;
-				if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], w))
-					goto unsupported;
+			if (!cnt) {
+				e->flags |= KGENOME_EMU_FL_ZF;
+				break;
 			}
+			e->flags = (e->flags | KGENOME_EMU_FL_CF) & ~(uint64_t)KGENOME_EMU_FL_ZF;
+			if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], w))
+				goto unsupported;
 			break;
 		}
 		e->flags &= ~(uint64_t)(KGENOME_EMU_FL_ZF | KGENOME_EMU_FL_CF);
@@ -343,6 +362,8 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 			if (ixp->h.id == KGENOME_X86_I_LZCNT)
 				k = w - 1u - k;
 		}
+		if (cnt && !k)
+			e->flags |= KGENOME_EMU_FL_ZF;
 		if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], k))
 			goto unsupported;
 		break;
@@ -414,7 +435,10 @@ int kgenome_emu_run_shift(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		 * and leaves the operand alone.
 		 */
 		rc = n % (w + 1u);
-		if (!rc) break;
+		if (!rc) {                    /* nothing rotates; a 32 bit register is still written */
+			kgenome_emu_op_keep(e, &ixp->op[0], a);
+			break;
+		}
 		a &= m;
 		cf = (e->flags & KGENOME_EMU_FL_CF) ? 1u : 0u;
 		/*
@@ -493,8 +517,10 @@ int kgenome_emu_run_shift(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 		    !kgenome_emu_op_rd(e, ixp, &ixp->op[2], &b))
 			goto unsupported;
 		n = (unsigned)(b & (sz == 8 ? 63u : 31u));
-		if (!n)
+		if (!n) {                     /* count masks to zero: flags kept, 32 bit register zero-extended */
+			kgenome_emu_op_keep(e, &ixp->op[0], a);
 			break;
+		}
 		a &= m;
 		src &= m;
 		/*
@@ -649,6 +675,14 @@ int kgenome_emu_run_bcd(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 				 : (al + 0x60u) & 0xffu;
 			e->flags |= KGENOME_EMU_FL_CF;
 		}
+		/* SDM DAA/DAS: SF, ZF and PF follow the adjusted AL (OF is undefined) */
+		e->flags &= ~(uint64_t)(KGENOME_EMU_FL_SF | KGENOME_EMU_FL_ZF | KGENOME_EMU_FL_PF);
+		if (!al)
+			e->flags |= KGENOME_EMU_FL_ZF;
+		if (al & 0x80u)
+			e->flags |= KGENOME_EMU_FL_SF;
+		if (!(__builtin_popcount(al) & 1))
+			e->flags |= KGENOME_EMU_FL_PF;
 		e->gpr[KGENOME_EMU_RAX] =
 			(e->gpr[KGENOME_EMU_RAX] & ~0xffull) | al;
 		break;

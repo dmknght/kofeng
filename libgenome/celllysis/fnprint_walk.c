@@ -351,8 +351,9 @@ static void units_feed(const struct kgenome_fnprint_req *rq, struct kgenome_fnpr
 		return;
 	sx->n_unit_funcs++;
 	run_piece(rq, st, sx, f->off, f->off + f->len,
-		  sided && f->cls == KGENOME_FNP_LIB ? KGENOME_MUTATION_SIDE_LIB
-						     : KGENOME_MUTATION_SIDE_USER);
+		  sided && f->cls == KGENOME_FNP_LIB &&
+		  (!(f->reason & KGENOME_FNP_R_LIBWIN) || f->n_win_lib == f->n_win)
+		  ? KGENOME_MUTATION_SIDE_LIB : KGENOME_MUTATION_SIDE_USER);
 }
 
 /* ---- the pass ---------------------------------------------------------------- */
@@ -366,6 +367,8 @@ static void count(struct kgenome_fnprint_stat *sx, const struct kgenome_fnprint_
 	if (f->cls == KGENOME_FNP_AUTHOR) sx->n_author++;
 	else if (f->cls == KGENOME_FNP_LIB) sx->n_lib++;
 	else sx->n_unknown++;
+	if (f->reason & KGENOME_FNP_R_ADVISED) sx->n_advised++;
+	if (f->reason & KGENOME_FNP_R_LIBWIN) sx->n_libwin++;
 	if (f->reason & KGENOME_FNP_R_BAD) sx->n_bad++;
 	if (f->reason & KGENOME_FNP_R_OVERLAP) sx->n_overlap++;
 	if (f->reason & KGENOME_FNP_R_HUGE) sx->n_huge++;
@@ -373,8 +376,12 @@ static void count(struct kgenome_fnprint_stat *sx, const struct kgenome_fnprint_
 
 /* One decided piece counted, offered to the unit builder and the visitor. */
 static void emit(const struct kgenome_fnprint_req *rq, struct kgenome_fnprint_state *st,
-		 struct kgenome_fnprint_stat *sx, const struct kgenome_fnprint_fn *f)
+		 struct kgenome_fnprint_stat *sx, const struct kgenome_fnprint_fn *fin)
 {
+	struct kgenome_fnprint_fn fa = *fin;
+	const struct kgenome_fnprint_fn *f = &fa;
+
+	kgenome_fnprint_advise(&rq->opt, &fa);
 	count(sx, f);
 	units_feed(rq, st, sx, f);
 	if (!(f->reason & KGENOME_FNP_R_BAD)) {

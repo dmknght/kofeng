@@ -83,6 +83,13 @@ static uint64_t loader_blob(const struct kgenome_elf_info *info,
  * depending on section headers a hostile object may have stripped. A benign
  * mention in .rodata would match too, but only in concert with an 8 KB
  * ciphertext block, and that pair is what the measurement cleared.
+ *
+ * A NAME DECIDES HERE, AND IS LEFT: the two spellings are libc's own import names (fixed by
+ * the loader for a dynamic file), so renaming a symbol of the program does not hide them -
+ * but a static build carries neither string, and the same fact is in its code as a syscall
+ * number (10 and 319 on x86-64). The structural form is the syscall-number sweep the diagnose
+ * already runs; moving the gate onto it changes which objects reach the emulator, so it needs
+ * its own measurement (docs/silent_loss_audit.txt, SECTION 5, "names").
  */
 static int loader_imports_exec(const uint8_t *file, uint64_t n)
 {

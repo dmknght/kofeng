@@ -112,6 +112,9 @@ struct kgenome_diag_wrapper_slot {
 	struct kgenome_diag_wrapper_val v;
 };
 
+/* The most bytes a frame's stack counter may hold, either way (see frame_step's SUB/ADD). */
+#define KGENOME_DIAG_WRAPPER_SP_LIM (1 << 30)
+
 /* The symbolic state of ONE function. */
 struct kgenome_diag_wrapper_frame {
 	struct kgenome_diag_wrapper_val reg[16];
@@ -200,6 +203,10 @@ struct kgenome_diag_wrapper_insn {
 	uint64_t at, at_va, target;
 	uint16_t wmask;
 	uint8_t  op, len, n_op, flags;
+	/* The condition code (JCC/CMOV/SETCC) or the special register (MOV_SPECIAL): kept so that
+	 * a record serves a cursor with the very instruction the decoder returned. It rides in the
+	 * high nibble of the record's flags byte (flags use three bits), so a record is not longer for it. */
+	uint8_t  cond;
 	struct kgenome_diag_wrapper_op o[3];
 };
 
@@ -231,6 +238,8 @@ struct kgenome_diag_wrapper_seg {
 struct kgenome_diag_walk {
 	const uint8_t *base;            /* what it was made from */
 	uint64_t size;
+	unsigned arch;                  /* KOF_ARCH_* it was decoded as: a record is that mode's */
+	uint32_t runs;                  /* decode passes made, over the walk's life */
 	int      built;                 /* tgt and site are the answer */
 	int      has_trace;             /* the trace was asked for when it was built */
 	int      sites;                 /* x86: kernel entries were recorded */
@@ -253,6 +262,24 @@ struct kgenome_diag_walk {
 	 */
 	struct kgenome_ledger *lg;
 	uint64_t lg_charged;            /* what of the trace `lg` holds charged */
+	/*
+	 * THE MOST THE RECORD STREAM MAY GROW TO, set by the caller from its own
+	 * allowance (0 = W_TRACE_BYTES), and whether the stream was ever refused
+	 * more room - by this cap or by the ledger. The trace is a cache, so a
+	 * refusal changes the time and never the answer; `capped` is what lets the
+	 * caller say it happened. Not part of what the walk holds: walk_reset keeps both.
+	 */
+	uint64_t cap_bytes;
+	uint32_t capped;
+	/*
+	 * THE TRACE AS A DECODE SOURCE FOR A CURSOR (kgenome_diag_walk_hold): the place the last
+	 * answer came from, so the next fetch of the next instruction is one record read, and
+	 * what was asked and answered, which is what says the product is shared. A position
+	 * is a hint and never an answer: a record is only taken when it is AT the offset asked.
+	 */
+	const uint8_t *h_p, *h_end;     /* the next record, and the end of its segment's records */
+	uint64_t h_at, h_delta;         /* where that record is, and its address - offset */
+	uint64_t h_asked, h_served;
 };
 
 struct kgenome_diag_wrapper_ctx {
@@ -268,8 +295,21 @@ struct kgenome_diag_wrapper_ctx {
 	uint8_t  *fmiss;                /* per call target: a call asked before it was set */
 	uint64_t *open;                 /* sites whose NUMBER the sweep could not read */
 	uint32_t n_open, cap_open;
-	struct kgenome_diag_wrapper_summary *ws;                /* the wrappers, by entry */
+	/* The wrappers. `ws` is a pool in the order they were made, never moved;
+	 * `wi` holds the pool indexes sorted by entry, and every lookup goes
+	 * through it. The table used to be kept sorted in place, so each
+	 * insertion into the middle moved a 240-byte record per entry above it:
+	 * 13.7 GB of memmove on a 5 MB static binary. An index is 4 bytes. */
+	struct kgenome_diag_wrapper_summary *ws;
+	uint32_t *wi;
 	uint32_t n_ws, cap_ws;
+	/* The sites some caller made a node for, sorted: made once, when the end of
+	 * the walk first asks (kgenome_diag_wrapper_site_made). `made_state` is 0
+	 * not built, 1 built, 2 the ledger or memory refused - the questions are
+	 * then answered by reading the table, slower and the same. */
+	uint64_t *made;
+	uint32_t n_made;
+	uint8_t  made_state;
 	struct kgenome_diag_wrapper_glob *glob;
 	uint32_t n_glob, cap_glob;
 	/*
@@ -311,6 +351,7 @@ static inline void kgenome_diag_wrapper_winsn_of(struct kgenome_diag_wrapper_ins
 	w->len = in->len;
 	w->n_op = (uint8_t)n;
 	w->flags = in->flags;
+	w->cond = in->cond;
 	for (i = 0; i < 3u; i++) {
 		struct kgenome_diag_wrapper_op *d = &w->o[i];
 
@@ -334,7 +375,56 @@ static inline void kgenome_diag_wrapper_winsn_of(struct kgenome_diag_wrapper_ins
 	}
 }
 
-/* The one place an instruction is decoded in this file. */
+/*
+ * A TRACE INSTRUCTION AS THE CURSOR'S, the one conversion back: every field of
+ * struct kgenome_cell_insn is written (an absent operand arrives from the record as
+ * the decoder leaves it), so the result is what kgenome_cell_decode_x86 writes, with
+ * `target_va` the relative operand added to the end of the instruction at `at_va`.
+ * `target` is the record's - a file offset - and is the cursor's to set when it
+ * wants its own (cell_fetch).
+ */
+static inline void kgenome_diag_wrapper_cinsn(struct kgenome_cell_insn *ci, const struct kgenome_diag_wrapper_insn *w)
+{
+	unsigned i;
+
+	ci->op = w->op;
+	ci->len = w->len;
+	ci->n_op = w->n_op;
+	ci->cond = w->cond;
+	ci->flags = w->flags;
+	ci->wmask = w->wmask;
+	ci->at = w->at;
+	ci->at_va = w->at_va;
+	ci->target = w->target;
+	ci->target_va = KGENOME_BROKEN;
+	for (i = 0; i < 3u; i++) {
+		const struct kgenome_diag_wrapper_op *o = &w->o[i];
+		struct kgenome_cell_operand *d = &ci->o[i];
+
+		d->kind = o->kind;
+		d->reg = o->reg;
+		d->index = o->index;
+		d->scale = o->scale;
+		d->size = o->size;
+		d->flags = o->flags;
+		d->seg = o->seg;
+		d->_pad = 0;
+		d->disp = o->kind == KGENOME_CELL_O_MEM ? o->v : 0;
+		d->imm = o->kind == KGENOME_CELL_O_IMM || o->kind == KGENOME_CELL_O_REL ? (uint64_t)o->v : 0;
+		if (o->kind == KGENOME_CELL_O_REL)
+			ci->target_va = w->at_va + w->len + (uint64_t)(int64_t)(int32_t)d->imm;
+	}
+}
+
+/* An instruction at `at` put to the one kernel-entry test: `vec80` says its first operand is 0x80. */
+static inline int kgenome_diag_wrapper_entry_test(const struct kgenome_diag_wrapper_ctx *c, unsigned op,
+						  int vec80, uint64_t at)
+{
+	return kgenome_diag_kernel_entry(c->obj, op, vec80, c->base + at);
+}
+
+/* An instruction decoded and put in the form the readers use. pass_a does not come through here:
+ * it packs the cell instruction itself (trace_put). */
 static inline int kgenome_diag_wrapper_decode(const struct kgenome_diag_wrapper_ctx *c, struct kgenome_cell_cur *k, struct kgenome_diag_wrapper_insn *w)
 {
 	struct kgenome_cell_insn ci;
@@ -348,13 +438,15 @@ static inline int kgenome_diag_wrapper_decode(const struct kgenome_diag_wrapper_
 /*
  * ---- the record --------------------------------------------------------------
  *
- *   rlen ctl op len flags wmask(2)  [at(4)] [delta(8)] [target(4)]  operand*
+ *   rlen ctl op len fc wmask(2)  [at(4)] [delta(8)] [target(4)]  operand*
  *
  * `at` is the end of the record before unless ctl says otherwise (a walk that
  * stepped over bytes that did not decode, and every WT_EVERY-th record, which
  * must be readable alone because the index points at it). `delta` is
  * at_va - at, repeated from the record before unless ctl says otherwise; an
- * operand is its seven bytes and its value, zigzag-varint.
+ * operand is its seven bytes and its value, zigzag-varint. `fc` is the flags in
+ * the low nibble and the condition (or special register) in the high one - the
+ * two a cursor's instruction carries and a record must give back.
  */
 #define KGENOME_DIAG_WRAPPER_TRACE_HAS_AT    0x01u
 
@@ -439,12 +531,18 @@ int kgenome_diag_wrapper_summary_insert(struct kgenome_diag_wrapper_ctx *c,
 		const struct kgenome_diag_wrapper_summary *t);
 struct kgenome_diag_wrapper_summary *kgenome_diag_wrapper_summary_of(struct kgenome_diag_wrapper_ctx *c,
 		uint64_t entry);
+/* The first position, in entry order, whose entry is not below `entry` (n_ws when
+ * none), and the summary at a position. The variants of one entry are adjacent. */
+uint32_t kgenome_diag_wrapper_summary_pos(const struct kgenome_diag_wrapper_ctx *c, uint64_t entry);
+struct kgenome_diag_wrapper_summary *kgenome_diag_wrapper_summary_at(struct kgenome_diag_wrapper_ctx *c,
+		uint32_t pos);
 int kgenome_diag_wrapper_entry_of(const struct kgenome_diag_wrapper_ctx *c, uint64_t site,
 		uint64_t *entry);
 void kgenome_diag_wrapper_eval_call(const struct kgenome_diag_wrapper_ctx *c,
 		struct kgenome_diag_wrapper_frame *f, const struct kgenome_diag_wrapper_summary *ws,
 		struct kgenome_diag_wrapper_effect *e);
-int kgenome_diag_wrapper_fret_site(const struct kgenome_diag_wrapper_ctx *c, uint64_t at);
+void kgenome_diag_wrapper_supersede(struct kgenome_diag_wrapper_ctx *c);
+int kgenome_diag_wrapper_site_made(struct kgenome_diag_wrapper_ctx *c, uint64_t site);
 int kgenome_diag_wrapper_tgt_index(const struct kgenome_diag_wrapper_ctx *c, uint64_t at);
 void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off,
 		uint64_t n);

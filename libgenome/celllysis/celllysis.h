@@ -64,7 +64,7 @@ struct kgenome_cell_space {
 	const uint8_t *base;    /* the bytes */
 	uint64_t       size;
 	unsigned       arch;    /* KOF_ARCH_* - which decoder */
-	int            be;      /* big-endian code (ARM-BE, MIPS-BE) */
+	int            be;      /* big-endian object: the DATA order (ARM-BE, MIPS-BE) */
 	void          *priv;    /* the owner's, handed back to the callbacks */
 	/*
 	 * The segment containing file offset `off`, or 0. A relocatable
@@ -77,6 +77,26 @@ struct kgenome_cell_space {
 	/* The file offset of an address, or KGENOME_BROKEN - for a target that is
 	 * not in the segment the walk is in. */
 	uint64_t (*off_of_va)(void *priv, uint64_t va);
+	/* The code is little-endian although `be` is set (ARM BE8): 0, the
+	 * default of every existing initialiser, means the code follows `be`.
+	 * APPENDED, so no field above moved. */
+	int      code_le;
+	/*
+	 * A DECODE THE OWNER ALREADY HOLDS, asked before the decoder runs. The owner
+	 * of an object's decode product (the diagnose walk keeps one per object:
+	 * diag_wrapper_walk.c) answers with the instruction at file offset `off`
+	 * when it has decoded exactly that offset in this space, and 0 when it has
+	 * not - "not held" and "does not decode" are both answered by the decoder
+	 * that runs next, so a 0 is never a verdict. `va` is the address the cursor
+	 * gave the offset and `left` the bytes that may be read (at most 16).
+	 * The answer is field for field what kgenome_cell_decode would have written,
+	 * `at` and `target` aside, which cell_fetch sets itself from its own cursor.
+	 * NULL, the default of every existing initialiser, means: always decode.
+	 * APPENDED, so no field above moved.
+	 */
+	uint32_t (*held)(void *priv, uint64_t off, uint64_t va, uint32_t left,
+			 struct kgenome_cell_insn *out);
+	void    *held_priv;
 };
 
 /*

@@ -387,6 +387,7 @@ static void scan_hex_string(struct ksb_ctx *ksb, const struct macro *m,
 		return;
 	}
 	o->kind = KOF_STR_HEX;
+	o->open_gaps = st.open_gaps;
 	/*
 	 * THE OPTIONS, WHEN THEY WERE WRITTEN.
 	 *

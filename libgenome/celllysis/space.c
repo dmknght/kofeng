@@ -90,9 +90,11 @@ void kgenome_cell_space_init(struct kgenome_cell_space *sp, const struct kgenome
 	sp->size = size;
 	sp->arch = obj->arch;
 	/* The ELF header says which way the code is written. */
-	sp->be = obj->format == KGENOME_FMT_ELF && obj->file_header &&
-		 ((const uint8_t *)obj->file_header)[5] == 2u;
+	sp->be = kgenome_obj_big_endian(obj);
+	sp->code_le = kgenome_obj_code_little_endian(obj);
 	sp->priv = (void *)(uintptr_t)obj;
 	sp->seg_at = obj_seg_at;
 	sp->off_of_va = obj_off_of_va;
+	sp->held = NULL;
+	sp->held_priv = NULL;
 }

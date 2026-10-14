@@ -117,7 +117,12 @@
  * from both the image and the stack. */
 #define KGENOME_DIAG_TOK_BASE  0x20000000ull
 
+/* The arena is a reserved range of the guest's address space, one page per producing node, and a
+ * node index is 16 bits: the range is 65536 pages and ends where the per-cpu area begins. How much of
+ * it is MAPPED follows the object's node count and the page budget, never less than
+ * KGENOME_DIAG_TOK_SPAN pages (rel_tok_lim / rel_tok_span in the scan). */
 #define KGENOME_DIAG_TOK_SPAN  256u
+#define KGENOME_DIAG_TOK_MAX   0x10000u
 
 /* One syscall site, and what the run saw there. */
 struct kgenome_diag_emu_site {
@@ -321,7 +326,7 @@ struct kgenome_diag_emu_skipgather {
  * integer and a stack address are shared by half the calls in any program and
  * remembering them would relate everything to everything.
  */
-#define KGENOME_DIAG_REL_SEEN 64u
+#define KGENOME_DIAG_REL_SEEN 64u       /* the table starts with this many; it grows with the node count */
 
 /*
  * HOW MANY TIMES THE SPANS ARE RUN.
@@ -388,9 +393,9 @@ struct kgenome_diag_emu_rel_walk {
 
 /* What the walk of ONE function - one span - holds while it steps. */
 struct kgenome_diag_emu_rel_span {
-	struct kgenome_diag_emu_seenval seen[KGENOME_DIAG_REL_SEEN];
+	struct kgenome_diag_emu_seenval *seen;  /* grown on demand, owned by the walk, freed with it */
 	struct kgenome_emu *em;
-	uint32_t n_seen, anon;
+	uint32_t n_seen, cap_seen, anon, anon_floor;
 	uint64_t n_fd;
 	/* Which sites this span has already been seated at, so one
 	 * pass cannot circle. */
@@ -418,17 +423,18 @@ enum kgenome_diag_emu_force_kind kgenome_diag_emu_cap_force_kind(uint16_t cap);
 void kgenome_diag_emu_fill_buffer(struct kgenome_emu *em, uint64_t at, uint64_t n);
 extern const unsigned kgenome_diag_emu_arg_reg64[6];
 extern const unsigned kgenome_diag_emu_arg_reg32[6];
-unsigned kgenome_diag_emu_guest_name(struct kgenome_emu *em, uint64_t va, char *out);
+unsigned kgenome_diag_emu_guest_name(struct kgenome_diag_scan *s, struct kgenome_emu *em, uint64_t va, char *out);
 void kgenome_diag_emu_capture_names(struct kgenome_diag_scan *s, struct kgenome_emu *em,
 		uint16_t cap, uint16_t node);
 uint64_t kgenome_diag_emu_pages_charge(struct kgenome_diag_scan *s);
 void kgenome_diag_emu_pages_release(struct kgenome_diag_scan *s);
+int kgenome_diag_emu_account(void *user, int64_t bytes);
 void kgenome_diag_emu_stop_status(struct kgenome_diag_scan *s, enum kgenome_emu_stop st);
 struct kgenome_emu *kgenome_diag_emu_build_rel_image(struct kgenome_diag_scan *s,
 		const struct kgenome_obj *obj,
 		const uint8_t *base, uint64_t size);
-void kgenome_diag_emu_gather_skip(void *user, uint64_t at, uint64_t target,
-		const char *name);
+void kgenome_diag_emu_gather_skip(struct kgenome_diag_emu_skipgather *g,
+		const struct kgenome_diag_rcall *rc);
 int kgenome_diag_emu_skip_cmp(const void *a, const void *b);
 uint32_t kgenome_diag_emu_skip_first(const struct kgenome_diag_emu_skipsite *v, uint32_t n, uint64_t at);
 int kgenome_diag_emu_worth_remembering(uint64_t v, uint64_t size);
@@ -452,7 +458,6 @@ enum kgenome_diag_emu_rel_act kgenome_diag_emu_rel_step_emulate(struct kgenome_d
 		uint64_t rip);
 void kgenome_diag_emu_run_rel_gaps(struct kgenome_diag_scan *s,
 		const struct kgenome_obj *obj,
-		const struct kgenome_elf_info *ei,
 		const uint8_t *base, uint64_t size);
 
 #endif /* KGENOME_DIAG_EMU_PRIVATE_H */

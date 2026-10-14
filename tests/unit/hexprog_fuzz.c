@@ -24,7 +24,6 @@
 #include "../../libkofeng/detectors/pattern/kofmatch.h"
 #include "../../libkofeng/databases/pack/dbcore.h"
 
-int kof_hex_prog_valid_for_test(const uint8_t *p, uint32_t len);
 
 static unsigned s = 0xC0FFEEu;
 static unsigned rnd(void){ s = s*1103515245u + 12345u; return s>>8; }
@@ -65,7 +64,7 @@ int main(void)
 			const struct kof_hex_hdr *hh = (const void *)mut;
 			if (hh->steps_off % 4u || hh->alts_off % 4u) misal++;
 		}
-		if (!kof_hex_prog_valid_for_test(mut, plen))
+		if (!kof_hex_prog_valid(mut, plen))
 			continue;
 		accepted++;
 		for (k = 0; k < sizeof data; k++) data[k] = (uint8_t)rnd();

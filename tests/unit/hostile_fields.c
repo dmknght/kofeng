@@ -294,6 +294,15 @@ static void top_add(struct tally *t, double amp, double ms, const char *where)
  * A median because the first parse of an object pays for its page faults and the
  * rest do not, and taking that one as the baseline would hide a factor of ten.
  */
+/* A view that owns tables (struct kof_view_ops) gives them back before it is reused for another format. */
+static void drop_tables(const struct kof_parser *p, void *view)
+{
+	const struct kof_view_ops *o = view ? kof_view_ops_of(p->format) : NULL;
+
+	if (o)
+		o->release(view);
+}
+
 static double baseline_ms(const struct target *tg, uint8_t *obj, void *view)
 {
 	double v[15];
@@ -486,6 +495,10 @@ int main(void)
 		uint64_t seed_len;
 		double base;
 
+		/* The last target's view may own tables (zip, pdf), and the view is one buffer for every
+		 * format here: they are given back before the buffer is cleared or replaced. */
+		if (ti)
+			drop_tables(targets[ti - 1u].p, view);
 		if (tg->p->view_size > view_cap) {
 			free(view);
 			view = malloc(tg->p->view_size);
@@ -565,6 +578,7 @@ int main(void)
 		}
 	}
 
+	drop_tables(targets[sizeof targets / sizeof targets[0] - 1u].p, view);
 	free(view);
 	free(obj);
 

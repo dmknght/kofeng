@@ -367,10 +367,11 @@ static void r5_headers(void)
 	}
 	st = kuncoat_rar5_decode(v5a.in, v5a.n, res, 0, NULL, 0, &p);
 	CK(st == KUNCOAT_CORRUPT && p == 0);
+	/* a NULL buffer with a length: nothing was read (status.h) */
 	st = kuncoat_rar5_decode(NULL, 10, res, 10, NULL, 0, &p);
-	CK(st == KUNCOAT_CORRUPT && p == 0);
+	CK(st == KUNCOAT_BAD_ARG && p == 0);
 	st = kuncoat_rar5_decode(v5a.in, v5a.n, NULL, 10, NULL, 0, &p);
-	CK(st == KUNCOAT_CORRUPT && p == 0);
+	CK(st == KUNCOAT_BAD_ARG && p == 0);
 	st = kuncoat_rar5_decode(v5a.in, v5a.n, res, 10, NULL, 0, NULL);
 	CK(hv_status_ok(st));
 }
@@ -498,6 +499,37 @@ static void r5_filters(void)
 			CKF(hv_status_ok(st), "filter type %u: %s", t, kuncoat_status_name(st));
 		}
 	}
+	/* A filter block that extends past the declared size (the cap): the entry ended inside
+	 * it. OK (the declared size was reached), nothing written past the cap, the bytes
+	 * before the block exactly as decoded, and the block itself NOT filtered - the E8
+	 * filter would have rewritten the operand below, and it is left as the stream had it. */
+	{
+		static const uint8_t e8op[5] = { 0xE8, 0x01, 0x00, 0x00, 0x00 };
+		uint8_t want[100];
+
+		(void)r5_one(out, sizeof out, &e, pay, hist, sizeof hist);
+		hv_r5_filter(&e, 60, 50, 1, 1);                 /* 60..110: the entry is 100 long */
+		for (i = 0; i < 100; i++) {
+			want[i] = (uint8_t)(32 + i % 90);
+			if (i >= 62 && i < 67)
+				want[i] = e8op[i - 62];
+			hv_r5_lit(&e, want[i]);
+		}
+		n = hv_r5_end_block(&e, 1, 1);
+		AT();
+		st = rcall(1, out, n, 100, 1, &p);
+		CKF(st == KUNCOAT_OK && p == 100 && !memcmp(res, want, 100), "filter past the cap: %s %llu",
+		    kuncoat_status_name(st), (unsigned long long)p);
+		/* and the same filter inside the entry IS applied (the operand changes) */
+		(void)r5_one(out, sizeof out, &e, pay, hist, sizeof hist);
+		hv_r5_filter(&e, 60, 40, 1, 1);                 /* 60..100 */
+		for (i = 0; i < 100; i++)
+			hv_r5_lit(&e, want[i]);
+		n = hv_r5_end_block(&e, 1, 1);
+		st = rcall(1, out, n, 100, 1, &p);
+		CKF(st == KUNCOAT_OK && p == 100 && memcmp(res + 62, want + 62, 5) != 0 &&
+		    !memcmp(res, want, 62), "filter inside: %s %llu", kuncoat_status_name(st), (unsigned long long)p);
+	}
 	/* 1025 filters (the table holds 1024): refused, with what was decoded so far */
 	(void)r5_one(out, sizeof out, &e, pay, hist, sizeof hist);
 	for (i = 0; i < 400; i++)
@@ -598,9 +630,9 @@ static void r3_cases(void)
 	st = kuncoat_rar3_decode(out, 10, res, 0, NULL, 0, &p);
 	CK(st == KUNCOAT_CORRUPT && p == 0);
 	st = kuncoat_rar3_decode(NULL, 10, res, 10, NULL, 0, &p);
-	CK(st == KUNCOAT_CORRUPT && p == 0);
+	CK(st == KUNCOAT_BAD_ARG && p == 0);
 	st = kuncoat_rar3_decode(out, 10, NULL, 10, NULL, 0, &p);
-	CK(st == KUNCOAT_CORRUPT && p == 0);
+	CK(st == KUNCOAT_BAD_ARG && p == 0);
 	st = kuncoat_rar3_decode(v3a.in, v3a.n, res, 10, NULL, 0, NULL);
 	CK(hv_status_ok(st));
 }
@@ -617,18 +649,18 @@ static void ppmd_api(void)
 
 	AT();
 	CK(m != NULL);
-	/* arena_want: byte + 1 megabytes, clamped to 64 MB */
+	/* arena_want: byte + 1 megabytes, as the header asks (up to the format's 256) */
 	CK(kuncoat_ppmd_arena_want(0) == 1u << 20);
 	CK(kuncoat_ppmd_arena_want(24) == 25u << 20);
 	CK(kuncoat_ppmd_arena_want(62) == 63u << 20);
 	CK(kuncoat_ppmd_arena_want(63) == 64u << 20);
 	for (i = 64; i < 256; i++)
-		CK(kuncoat_ppmd_arena_want((uint8_t)i) == 64u << 20);
+		CK(kuncoat_ppmd_arena_want((uint8_t)i) == ((uint64_t)i + 1u) << 20);
 	for (i = 0; i < sizeof in; i++)
 		in[i] = (uint8_t)(i * 37u + 11u);
 	/* start: orders 2..64 are accepted, outside them refused; the arena has a floor and a ceiling */
 	for (order = -5; order <= 70; order++) {
-		int r = kuncoat_ppmd_start(m, order, 1u << 20, in, sizeof in, 0);
+		int r = kuncoat_ppmd_start_asked(m, order, 1u << 20, in, sizeof in, 0);
 
 		CKF(r == (order >= 2 && order <= 64), "order %d: %d", order, r);
 	}
@@ -640,15 +672,15 @@ static void ppmd_api(void)
 			int r;
 
 			arena = arenas[i];
-			r = kuncoat_ppmd_start(m, 8, arena, in, sizeof in, 0);
-			if (arena > (64u << 20) || arena < 16u * 12u)
+			r = kuncoat_ppmd_start_asked(m, 8, arena, in, sizeof in, 0);
+			if (arena > (256u << 20) || arena < 16u * 12u)
 				CKF(r == 0, "arena %llu accepted", (unsigned long long)arena);
 			else
 				CKF(r == 1 || r == 0, "arena %llu", (unsigned long long)arena);
 		}
 	}
 	/* NULL model everywhere */
-	CK(kuncoat_ppmd_start(NULL, 8, 1u << 20, in, sizeof in, 0) == 0);
+	CK(kuncoat_ppmd_start_asked(NULL, 8, 1u << 20, in, sizeof in, 0) == 0);
 	CK(kuncoat_ppmd_resume(NULL, in, sizeof in, 0) == 0);
 	CK(kuncoat_ppmd_next(NULL) == -1);
 	CK(kuncoat_ppmd_at(NULL) == 0);
@@ -667,13 +699,13 @@ static void ppmd_api(void)
 		int a[300], b[300];
 		unsigned k;
 
-		CK(kuncoat_ppmd_start(m, 6, 1u << 20, in, sizeof in, 0) == 1);
+		CK(kuncoat_ppmd_start_asked(m, 6, 1u << 20, in, sizeof in, 0) == 1);
 		for (k = 0; k < 300; k++) {
 			a[k] = kuncoat_ppmd_next(m);
 			CKF(a[k] >= -1 && a[k] <= 255, "symbol %d", a[k]);
 			CKF(kuncoat_ppmd_at(m) <= sizeof in + 8u, "at %llu", (unsigned long long)kuncoat_ppmd_at(m));
 		}
-		CK(kuncoat_ppmd_start(m, 6, 1u << 20, in, sizeof in, 0) == 1);
+		CK(kuncoat_ppmd_start_asked(m, 6, 1u << 20, in, sizeof in, 0) == 1);
 		for (k = 0; k < 300; k++)
 			b[k] = kuncoat_ppmd_next(m);
 		CK(!memcmp(a, b, sizeof a));
@@ -685,22 +717,22 @@ static void ppmd_api(void)
 			}
 	}
 	/* in_at past the end, the input NULL with a length, an empty input */
-	got = kuncoat_ppmd_start(m, 6, 1u << 20, in, sizeof in, sizeof in + 100);
+	got = kuncoat_ppmd_start_asked(m, 6, 1u << 20, in, sizeof in, sizeof in + 100);
 	CK(got == 0 || got == 1);
 	for (i = 0; i < 50; i++)
 		got = kuncoat_ppmd_next(m);
 	CK(got >= -1 && got <= 255);
-	got = kuncoat_ppmd_start(m, 6, 1u << 20, NULL, 0, 0);
+	got = kuncoat_ppmd_start_asked(m, 6, 1u << 20, NULL, 0, 0);
 	for (i = 0; i < 50; i++)
 		got = kuncoat_ppmd_next(m);
 	CK(got >= -1 && got <= 255);
-	got = kuncoat_ppmd_start(m, 6, 1u << 20, in, 0, 0);
+	got = kuncoat_ppmd_start_asked(m, 6, 1u << 20, in, 0, 0);
 	(void)got;
 	for (i = 0; i < 50; i++)
 		got = kuncoat_ppmd_next(m);
 	CK(got >= -1 && got <= 255);
 	/* resume continues the model with a fresh range coder */
-	CK(kuncoat_ppmd_start(m, 6, 1u << 20, in, sizeof in, 0) == 1);
+	CK(kuncoat_ppmd_start_asked(m, 6, 1u << 20, in, sizeof in, 0) == 1);
 	for (i = 0; i < 20; i++)
 		(void)kuncoat_ppmd_next(m);
 	CK(kuncoat_ppmd_resume(m, in, sizeof in, 4) == 1);
@@ -714,7 +746,7 @@ static void ppmd_api(void)
 
 		for (f = 0; f < 256; f += 5) {
 			memset(buf, (int)f, sizeof buf);
-			CK(kuncoat_ppmd_start(m, (int)(2u + f % 20u), 1u << 20, hv_in(&gin, buf, sizeof buf), sizeof buf, 0) == 1);
+			CK(kuncoat_ppmd_start_asked(m, (int)(2u + f % 20u), 1u << 20, hv_in(&gin, buf, sizeof buf), sizeof buf, 0) == 1);
 			for (i = 0; i < 400; i++) {
 				got = kuncoat_ppmd_next(m);
 				if (got < 0)
@@ -742,7 +774,7 @@ static int find_empty_block(uint8_t *data, size_t *dn, uint8_t *esc)
 
 		for (i = 0; i < 8; i++)
 			d[i] = (uint8_t)hv_rng32(&rs);
-		if (!kuncoat_ppmd_start(m, 4, 1u << 20, d, 8, 0))
+		if (!kuncoat_ppmd_start_asked(m, 4, 1u << 20, d, 8, 0))
 			continue;
 		c0 = kuncoat_ppmd_next(m);
 		c1 = kuncoat_ppmd_next(m);

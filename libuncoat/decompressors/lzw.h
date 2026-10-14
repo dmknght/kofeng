@@ -72,6 +72,9 @@ typedef int (*kuncoat_lzw_sink)(void *user, const uint8_t *p, uint32_t n);
  * judgement inflate makes about a damaged archive. A code that names a table
  * entry the stream never built IS corrupt - it cannot be decoded into anything,
  * and guessing would be inventing content.
+ *
+ * `produced` may be NULL. A NULL `st` or `sink`, or a NULL `in` with in_len > 0,
+ * is KUNCOAT_BAD_ARG and nothing is read.
  */
 enum kuncoat_status kuncoat_lzw_decode(struct kuncoat_lzw *st, const uint8_t *in,
 				      uint64_t in_len, kuncoat_lzw_sink sink,

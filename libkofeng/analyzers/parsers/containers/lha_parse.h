@@ -27,6 +27,18 @@ int kof_lha_parse(kof_buf file, struct kof_lha_info *info,
 		  struct kof_obj_ctx *ctx);
 
 /*
+ * THE VIEW'S TABLE IS THE FILE'S SIZE, so a view owns memory - zip_parse.h has the contract, which
+ * is the same here: `info->mem.room` is the caller's before the parse, `info->mem.held` is what the
+ * table holds after it, and kof_lha_release gives it back. A table that cannot grow is not a failed
+ * parse: the rows read so far are whole and KOF_LHA_ANOM_ENTRIES_FULL says the rest was not.
+ */
+void kof_lha_release(struct kof_lha_info *info);
+
+/* The host's handles on the view - see struct kof_view_ops in kofformat.h. */
+struct kof_view_mem *kof_lha_mem(void *view);
+const void *kof_lha_row(void *view, uint32_t *cursor);
+
+/*
  * Does this object look like an LHA archive?
  *
  * THE MAGIC IS NOT AT OFFSET ZERO, which is the whole difficulty with this

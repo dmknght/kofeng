@@ -115,6 +115,9 @@ struct kgenome_emu *kgenome_emu_unp_build(const uint8_t *file, uint64_t n,
 	memset(&cfg, 0, sizeof cfg);
 	cfg.max_insn = bud ? bud->max_insn : 0;
 	cfg.max_pages = bud ? (bud->max_bytes + KGENOME_EMU_PAGE - 1u) / KGENOME_EMU_PAGE : 0;
+	cfg.account = bud ? bud->account : NULL;
+	cfg.account_user = bud ? bud->account_user : NULL;
+	cfg.insn_spent = bud ? bud->insn_spent : NULL;
 	/*
 	 * The width comes from the FILE, not from a caller's opinion: an ELF32
 	 * holds i386 code and an ELF64 holds amd64, and the parser has already
@@ -131,6 +134,7 @@ struct kgenome_emu *kgenome_emu_unp_build(const uint8_t *file, uint64_t n,
 	bias = (info->e_type == KGENOME_ELF_DYN && info->min_vaddr == 0) ? DYN_BIAS : 0;
 
 	kgenome_emu_unp_map_init(&m, ~0ull);
+	m.borrow = 1;           /* `file` is the object, kept for the machine's life */
 	for (i = 0; i < info->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++) {
 		const struct kgenome_elf_seg *s = &info->seg[i];
 		struct kgenome_emu_unp_extent x;

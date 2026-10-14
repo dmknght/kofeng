@@ -133,6 +133,9 @@ ASAN_LIB := $(TEST)/libkofeng-asan.a
 # start the process before main() runs, so there is nothing to print. It comes
 # back as exit code 0xC0000135 and no output at all, which reads like a crash
 # in the test rather than a missing DLL.
+# parse_once counts calls into the lib by wrapping them at link time (see tests/unit/parse_once.c);
+# the production code carries no counter for it.
+UNIT_LIBS_parse_once := -Wl,--wrap=kgenome_elf_image_parse -Wl,--wrap=kgenome_pe_image_parse -Wl,--wrap=kgenome_true_find_object -Wl,--wrap=kof_exe_norm_masked -Wl,--wrap=kgenome_elf_symtab_of -Wl,--wrap=kofpix_sweep -Wl,--wrap=kof_exe_decode_ex -Wl,--wrap=kof_exe_decode_would_change -Wl,--wrap=kof_script_sniff -Wl,--wrap=kof_script_sniff_keep -Wl,--wrap=kof_script_parse -Wl,--wrap=kof_script_parse_keep
 ifeq ($(NATIVE_OS),windows)
 UNIT_LIBS_inflate_diff := -Wl,-Bstatic -lz -Wl,-Bdynamic
 UNIT_LIBS_cab_mszip    := -Wl,-Bstatic -lz -Wl,-Bdynamic
@@ -405,12 +408,20 @@ UT_SRC_report_model := $(KOFREPORT_SRC) $(KOFEVT_SRC)
 UT_INC_report_model := -Ilibkoforbit/report -Ilibkoforbit/evt -Ilibkofeng -Ilibkofeng/kofcore
 UT_LIB_report_model := yes
 
+# The module helper headers under kofmod/ and analyzers/diseases/ are tested through a fake host.
+# msf_elf32.h includes <kofshared/msf_pe.h>, which is where the SDK stages the shared
+# declarations (mk/sdk.mk), so the one test that includes it needs the staged include path -
+# the same one codec_forms and kofscfind take. msf_elf64.h and msf_pe.h alone did not.
+UT_INC_api_engine_modhelpers := -I$(SDK)/include
+UT_LIB_api_engine_modhelpers := yes
+UT_DEP_api_engine_modhelpers := $(SDK_HDR)
+
 UT_SRC_grille_host := $(GRILLE_HOST_SRC)
 UT_INC_grille_host := -Ilibkoforbit/grille -Ilibkoforbit/evt
 
 UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr \
               rule_roundtrip draft_source out_clip fidset fridge proc_rule \
-              chan_ring report_model grille_host
+              chan_ring report_model grille_host api_engine_modhelpers
 
 define UNIT_EXTRA_RULES
 $$(TEST)/unit_$(1)$$(EXE): tests/unit/$(1).c $$(UT_SRC_$(1)) $$(if $$(UT_LIB_$(1)),$$(LIB)) \

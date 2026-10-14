@@ -82,12 +82,15 @@ int ksb_write_diseases(struct ksb_ctx *ksb, const char *db)
 	char path[4400];
 	unsigned char *out;
 	size_t i, at, total = 12u;
-	FILE *f;
 
 	snprintf(path, sizeof path, "%s/diseases.kdig", db);
-	(void)remove(path);
-	if (!ksb->diseases.n)
+	/* Nothing registered: the file must not exist. Otherwise it is replaced
+	 * by rename below, never removed first - a name that is absent for a
+	 * moment is a database a scanner opening now would load without it. */
+	if (!ksb->diseases.n) {
+		(void)remove(path);
 		return 1;
+	}
 	/*
 	 * THE TWO WAYS A SYNDROME AND A DETECTOR CAN DISAGREE, read off the one table
 	 * every source registered in. A disease a syndrome names and no detector
@@ -138,14 +141,10 @@ int ksb_write_diseases(struct ksb_ctx *ksb, const char *db)
 		memcpy(out + at, ksb->diseases.ent[i].name, l);
 		at += l;
 	}
-	f = fopen(path, "wb");
-	if (!f || fwrite(out, 1, total, f) != total) {
-		fprintf(stderr, "FAIL: cannot write %s\n", path);
-		if (f) fclose(f);
+	if (!ksb_write_file(path, out, total)) {
 		free(out);
 		return 0;
 	}
-	fclose(f);
 	free(out);
 	printf("== %s  %zu disease(s), %zu bytes\n", path, ksb->diseases.n, total);
 	return 1;

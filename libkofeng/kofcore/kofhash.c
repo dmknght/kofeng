@@ -34,8 +34,16 @@
  * walk, measure before changing this.
  */
 
+/* Before any include: open, fstat and fdopen are POSIX and the build is -std=c11. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <kofhash.h>
 
@@ -247,13 +255,44 @@ int khash_sha256_file(const char *path, char out[65], uint64_t *size)
 	uint8_t  d[32];
 	uint64_t total = 0;
 	FILE    *f;
+	struct stat sb;
 
 	if (!path || !out)
 		return KOF_ERR_ARG;
 
+	/*
+	 * A REGULAR FILE, AS kofhash.h PROMISES (KOF_ERR_OPEN: "or is not a regular
+	 * file"). fopen read whatever the path named: /dev/zero never ends, a FIFO
+	 * blocks the open until a writer shows up. So the open is non-blocking and
+	 * the type is asked of the DESCRIPTOR, not of the name (a check on the name
+	 * is a race with whoever swaps it). Measured by tests/unit/api_engine_bytes.c
+	 * (sha_dev_zero hung until its alarm).
+	 */
+#ifndef _WIN32
+	{
+		int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOCTTY);
+
+		if (fd < 0)
+			return KOF_ERR_OPEN;
+		if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+			close(fd);
+			return KOF_ERR_OPEN;
+		}
+		f = fdopen(fd, "rb");
+		if (!f) {
+			close(fd);
+			return KOF_ERR_OPEN;
+		}
+	}
+#else
 	f = fopen(path, "rb");
 	if (!f)
 		return KOF_ERR_OPEN;
+	if (fstat(fileno(f), &sb) != 0 || !S_ISREG(sb.st_mode)) {
+		fclose(f);
+		return KOF_ERR_OPEN;
+	}
+#endif
 
 	khash_sha256_init(&s);
 	for (;;) {

@@ -106,9 +106,10 @@ void sx_norm_keep_bits(uint8_t *keep, uint64_t n,
 			continue;
 		if (r[i].off >= n)
 			continue;
-		e = r[i].off + r[i].len;
-		if (e > n)
-			e = n;
+		/* Clipped by the room LEFT (off < n here), not by off + len: a length
+		 * near 2^64 wrapped the sum to a small number and kept nothing, where
+		 * the region is meant to be kept to the end of the object. */
+		e = r[i].len > n - r[i].off ? n : r[i].off + r[i].len;
 		sx_bits_set(keep, r[i].off, e);
 	}
 }

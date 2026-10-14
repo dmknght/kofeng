@@ -56,6 +56,8 @@
 #define WIN_EXC_MAX_DEPTH 4u
 
 #define EXC_ACCESS_VIOLATION 0xc0000005u
+#define EXC_INT_DIVIDE_BY_ZERO 0xc0000094u      /* DIV, IDIV: a zero divisor              */
+#define EXC_INT_OVERFLOW       0xc0000095u      /* DIV, IDIV: a quotient that does not fit */
 /* A handle for the process heap: distinct, non-zero, and never dereferenced. */
 /* The process heap handle IS its address: Windows hands back a pointer to the
  * HEAP structure, and a guest that reads Flags through it is reading memory
@@ -337,6 +339,7 @@ int kgenome_emu_win_exc_begin(struct kgenome_emu *e)
 	uint32_t w32;
 	uint64_t w64;
 	int is_write = e->fault_kind[0] == 'w';
+	uint32_t nparam;
 
 	if (!e->win_k32_base)
 		return 0;               /* not a Windows guest */
@@ -360,19 +363,29 @@ int kgenome_emu_win_exc_begin(struct kgenome_emu *e)
 	 * deciding sees the wrong number and declines. exc_code carries what
 	 * RaiseException was given; zero means this is a real fault.
 	 */
-	w32 = e->exc_code ? e->exc_code : EXC_ACCESS_VIOLATION;
+	/* #DE (kgenome_emu_fault_de) is an integer exception with no parameters; every other fault
+	 * is the access violation it always was. */
+	if (e->exc_code)
+		w32 = e->exc_code;
+	else if (!strcmp(e->fault_kind, "divzero"))
+		w32 = EXC_INT_DIVIDE_BY_ZERO;
+	else if (!strcmp(e->fault_kind, "divovf"))
+		w32 = EXC_INT_OVERFLOW;
+	else
+		w32 = EXC_ACCESS_VIOLATION;
+	nparam = w32 == EXC_INT_DIVIDE_BY_ZERO || w32 == EXC_INT_OVERFLOW ? 0u : 2u;
 	kgenome_emu_mem_wr(e, rec, &w32, 4u);
 	w32 = 0;                     kgenome_emu_mem_wr(e, rec + 4u, &w32, 4u);
 	if (e->bits == 32) {
 		w32 = 0;                       kgenome_emu_mem_wr(e, rec + 8u, &w32, 4u);
 		w32 = (uint32_t)e->rip;        kgenome_emu_mem_wr(e, rec + 12u, &w32, 4u);
-		w32 = 2u;                      kgenome_emu_mem_wr(e, rec + 16u, &w32, 4u);
+		w32 = nparam;                  kgenome_emu_mem_wr(e, rec + 16u, &w32, 4u);
 		w32 = is_write ? 1u : 0u;      kgenome_emu_mem_wr(e, rec + 20u, &w32, 4u);
 		w32 = (uint32_t)e->fault_va;   kgenome_emu_mem_wr(e, rec + 24u, &w32, 4u);
 	} else {
 		w64 = 0;                       kgenome_emu_mem_wr(e, rec + 8u, &w64, 8u);
 		w64 = e->rip;                  kgenome_emu_mem_wr(e, rec + 16u, &w64, 8u);
-		w32 = 2u;                      kgenome_emu_mem_wr(e, rec + 24u, &w32, 4u);
+		w32 = nparam;                  kgenome_emu_mem_wr(e, rec + 24u, &w32, 4u);
 		w64 = is_write ? 1u : 0u;      kgenome_emu_mem_wr(e, rec + 32u, &w64, 8u);
 		w64 = e->fault_va;             kgenome_emu_mem_wr(e, rec + 40u, &w64, 8u);
 	}
@@ -455,8 +468,8 @@ int kgenome_emu_win_exc_return(struct kgenome_emu *e)
 uint64_t kgenome_emu_exc_scratch(const struct kgenome_emu *e, uint64_t *len)
 {
 	if (len)
-		*len = e->exc_base ? (uint64_t)WIN_EXC_PAGES * KGENOME_EMU_PAGE : 0;
-	return e->exc_base;
+		*len = e && e->exc_base ? (uint64_t)WIN_EXC_PAGES * KGENOME_EMU_PAGE : 0;
+	return e ? e->exc_base : 0;
 }
 
 /*
@@ -528,12 +541,16 @@ void kgenome_emu_win_event_note(struct kgenome_emu *e, unsigned api, uint64_t re
 		struct kgenome_emu_win_event *nw = realloc(e->wev, (size_t)nc * sizeof *nw);
 		uint32_t *nt;
 
-		if (!nw)
+		if (!nw) {
+			KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_MEM, "API event table not grown, a call is not recorded");
 			return;
+		}
 		e->wev = nw;
 		nt = calloc((size_t)nc * 2u, sizeof *nt);
-		if (!nt)
+		if (!nt) {
+			KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_MEM, "API event index not allocated, a call is not recorded");
 			return;
+		}
 		free(e->wev_tab);
 		e->wev_tab = nt;
 		e->wev_mask = nc * 2u - 1u;

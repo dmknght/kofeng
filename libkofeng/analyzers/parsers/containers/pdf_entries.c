@@ -152,16 +152,18 @@ static void dict_key(kof_buf f, const struct kof_pdf_object *o,
  * has to say.
  */
 static const struct kof_pdf_object *referrer_of(const struct kof_pdf_info *p,
+						const struct pdf_index *by_ref,
 						const struct kof_pdf_object *o)
 {
-	uint32_t i;
+	const struct pdf_key *k;
 
 	if (!o->num)
 		return NULL;
-	for (i = 0; i < p->n_objects; i++)
-		if (p->object[i].ref_num == o->num)
-			return &p->object[i];
-	return NULL;
+	/* The lowest-numbered object whose reference names this one: the first of its key
+	 * in an index sorted by key and then by object, which is what the walk over the
+	 * whole table this replaced returned. */
+	k = pdf_index_find(by_ref, o->num);
+	return k ? &p->object[k->idx] : NULL;
 }
 
 /* See kof_pdf_entry_kind in kofmod/pdf.h: one mapping, because the
@@ -444,16 +446,36 @@ static void read_chain(kof_buf f, const struct kof_pdf_object *o,
 	}
 }
 
-void pdf_build_entries(struct kof_pdf_info *p, kof_buf file)
+void pdf_build_entries(struct kof_pdf_info *p, struct pdf_tabs *t, kof_buf file)
 {
+	/* Built on the first stream that needs it - a script or a font - and not for a
+	 * document whose streams are all pages and pictures. */
+	struct pdf_index by_ref = { NULL, 0, 0 };
+	int have_ref = 0, ref_refused = 0;
 	uint32_t i;
 
-	for (i = 0; i < p->n_objects && p->n_entries < KOF_PDF_MAX_STREAMS; i++) {
+	for (i = 0; i < p->n_objects; i++) {
 		const struct kof_pdf_object *o = &p->object[i];
 		struct kof_entry *e;
 
 		if (!o->stream_len)
 			continue;
+		/*
+		 * ONE ROW PER STREAM, and the table is as long as there are streams: a stream
+		 * needs its own object, so the bound is the object table's and no number of
+		 * its own. A row that cannot be had is the ledger refusing, and the entries
+		 * from here on are not in the table - said, as every table that fills is.
+		 */
+		if (p->n_entries >= t->cap_ent) {
+			void *tab = p->entry;
+
+			if (!kof_tab_grow(&p->mem, &tab, &t->cap_ent, sizeof *p->entry,
+					  (uint64_t)p->n_entries + 1u, p->n_objects)) {
+				p->anomalies |= KOF_PDF_ANOM_EXTENTS_FULL;
+				break;
+			}
+			p->entry = (struct kof_entry *)tab;
+		}
 		e = &p->entry[p->n_entries++];
 		memset(e, 0, sizeof *e);
 		e->off = o->stream_off;
@@ -491,8 +513,16 @@ void pdf_build_entries(struct kof_pdf_info *p, kof_buf file)
 		 * OpenAction exists at all - that is a different question from
 		 * WHICH script it runs, and they are not conflated.
 		 */
+		if ((o->cat == KOF_PDF_CAT_SCRIPT || o->cat == KOF_PDF_CAT_FONT) &&
+		    !have_ref && !ref_refused) {
+			if (pdf_index_build(p, &by_ref, PDF_IX_REF))
+				have_ref = 1;
+			else
+				ref_refused = 1;
+		}
 		if (o->cat == KOF_PDF_CAT_SCRIPT) {
-			const struct kof_pdf_object *r = referrer_of(p, o);
+			const struct kof_pdf_object *r =
+				have_ref ? referrer_of(p, &by_ref, o) : NULL;
 			uint64_t koff;
 			uint32_t klen;
 
@@ -509,7 +539,8 @@ void pdf_build_entries(struct kof_pdf_info *p, kof_buf file)
 			}
 		}
 		if (o->cat == KOF_PDF_CAT_FONT) {
-			const struct kof_pdf_object *r = referrer_of(p, o);
+			const struct kof_pdf_object *r =
+				have_ref ? referrer_of(p, &by_ref, o) : NULL;
 			uint64_t noff;
 			uint32_t nlen;
 
@@ -556,8 +587,12 @@ void pdf_build_entries(struct kof_pdf_info *p, kof_buf file)
 		 * flag stays clear and off/len are the answer. */
 		read_chain(file, o, e->coding, &e->flags);
 	}
-	if (p->n_entries >= KOF_PDF_MAX_STREAMS)
-		p->anomalies |= KOF_PDF_ANOM_EXTENTS_FULL;
+	if (have_ref)
+		pdf_index_free(p, &by_ref);
+	/* A name that could not be looked up is a label that is missing, not a stream that
+	 * is: the entry is still there, and the ledger saying no is still said. */
+	if (ref_refused)
+		p->anomalies |= KOF_PDF_ANOM_OBJECTS_FULL;
 }
 
 uint32_t pdf_entries(const struct kof_obj_ctx *ctx,

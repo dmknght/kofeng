@@ -270,9 +270,42 @@ static void rel_site_names(struct kgenome_diag_emu_rel_walk *R, struct kgenome_d
 		 * with the line above, so a call that
 		 * answers to both is one name.
 		 */
-		if (ch && kgenome_diag_emu_guest_name(em, a0, nm))
+		if (ch && kgenome_diag_emu_guest_name(s, em, a0, nm))
 			kgenome_diag_str_add(s, ch->cap, cn, nm);
 	}
+}
+
+/*
+ * REMEMBER A VALUE A NODE HOLDS, in the span's table. The table starts at KGENOME_DIAG_REL_SEEN
+ * entries and grows with the function: a span can produce as many values as it has call sites,
+ * so the ceiling follows the node count (four a producer, which is what an argument list
+ * holds) and not a constant. Past it, or past the allocator, the scan is told: a relation
+ * dropped here is a link nobody sees.
+ */
+static void rel_seen_put(struct kgenome_diag_emu_rel_walk *R, struct kgenome_diag_emu_rel_span *S,
+			 uint64_t val, uint16_t node, uint8_t produced)
+{
+	uint32_t lim = R->s->rel_tok_lim > KGENOME_DIAG_TOK_SPAN ? R->s->rel_tok_lim : KGENOME_DIAG_TOK_SPAN;
+
+	if (S->n_seen >= 4u * lim + KGENOME_DIAG_REL_SEEN) {
+		kgenome_diag_note(R->s, KGENOME_TRUNCATED);
+		return;
+	}
+	if (S->n_seen == S->cap_seen) {
+		uint32_t nc = S->cap_seen ? S->cap_seen * 2u : KGENOME_DIAG_REL_SEEN;
+		struct kgenome_diag_emu_seenval *t = realloc(S->seen, (size_t)nc * sizeof *t);
+
+		if (!t) {
+			kgenome_diag_note(R->s, KGENOME_NOMEM);
+			return;
+		}
+		S->seen = t;
+		S->cap_seen = nc;
+	}
+	S->seen[S->n_seen].val = val;
+	S->seen[S->n_seen].node = node;
+	S->seen[S->n_seen].produced = produced;
+	S->n_seen++;
 }
 
 /* Every earlier holder of an argument's value is a relation. */
@@ -281,7 +314,6 @@ static void rel_site_args(struct kgenome_diag_emu_rel_walk *R, struct kgenome_di
 	struct kgenome_diag_scan *s = R->s;
 	uint64_t size = R->size;
 	struct kgenome_emu *em = S->em;
-	struct kgenome_diag_emu_seenval *seen = S->seen;
 
 	unsigned k;
 
@@ -318,8 +350,8 @@ static void rel_site_args(struct kgenome_diag_emu_rel_walk *R, struct kgenome_di
 			for (t = 0; t < S->n_seen; t++) {
 				const struct kgenome_diag_hit *o;
 
-				if (seen[t].val != v ||
-				    seen[t].node == node)
+				if (S->seen[t].val != v ||
+				    S->seen[t].node == node)
 					continue;
 				/*
 				 * A SHARED EDGE IS
@@ -351,15 +383,15 @@ static void rel_site_args(struct kgenome_diag_emu_rel_walk *R, struct kgenome_di
 				 * construction.
 				 */
 				o = kgenome_diag_scan_at(s,
-					seen[t].node);
-				if (!seen[t].produced &&
+					S->seen[t].node);
+				if (!S->seen[t].produced &&
 				    o && o->at >= h->at)
 					continue;
 				kgenome_diag_note_in(s,
 					  h,
-					  seen[t].node,
+					  S->seen[t].node,
 					  role,
-					  seen[t].produced
+					  S->seen[t].produced
 					  ? KGENOME_DIAG_KIND_PRODUCED
 					  : KGENOME_DIAG_KIND_SHARED);
 			}
@@ -388,16 +420,11 @@ static void rel_site_args(struct kgenome_diag_emu_rel_walk *R, struct kgenome_di
 				uint32_t e;
 
 				for (e = 0; e < S->n_seen; e++)
-					if (seen[e].val == v &&
-					    seen[e].node == node)
+					if (S->seen[e].val == v &&
+					    S->seen[e].node == node)
 						break;
-				if (e == S->n_seen &&
-				    S->n_seen < KGENOME_DIAG_REL_SEEN) {
-					seen[e].val = v;
-					seen[e].node = node;
-					seen[e].produced = 0;
-					S->n_seen++;
-				}
+				if (e == S->n_seen)
+					rel_seen_put(R, S, v, node, 0);
 			}
 		}
 	}
@@ -413,7 +440,6 @@ static void rel_site_result(struct kgenome_diag_emu_rel_walk *R, struct kgenome_
 	const struct kgenome_func_set fg = R->fg;
 	uint16_t *ret = R->ret;
 	struct kgenome_emu *em = S->em;
-	struct kgenome_diag_emu_seenval *seen = S->seen;
 
 
 	/*
@@ -453,20 +479,17 @@ static void rel_site_result(struct kgenome_diag_emu_rel_walk *R, struct kgenome_
 					fns, fg.n,
 					skips[q].callee);
 		}
+		if (src != 0xffffu && src >= (s->rel_tok_lim > KGENOME_DIAG_TOK_SPAN ? s->rel_tok_lim : KGENOME_DIAG_TOK_SPAN))
+			kgenome_diag_note(s, KGENOME_TRUNCATED);   /* a producer with no page: its links are not made */
 		if (src != 0xffffu &&
-		    src < KGENOME_DIAG_TOK_SPAN) {
+		    src < (s->rel_tok_lim > KGENOME_DIAG_TOK_SPAN ? s->rel_tok_lim : KGENOME_DIAG_TOK_SPAN)) {
 			uint64_t tok = KGENOME_DIAG_TOK_BASE +
 			  (uint64_t)src * KGENOME_EMU_PAGE;
 
 			kgenome_emu_set_reg(em,
 					KGENOME_EMU_RAX,
 					tok);
-			if (S->n_seen < KGENOME_DIAG_REL_SEEN) {
-				seen[S->n_seen].val = tok;
-				seen[S->n_seen].node = src;
-				seen[S->n_seen].produced = 1;
-				S->n_seen++;
-			}
+			rel_seen_put(R, S, tok, src, 1);
 		} else if (kgenome_diag_emu_cap_force_kind(skips[q].cap)
 			   != KGENOME_DIAG_EMU_FORCE_NONE) {
 			/*

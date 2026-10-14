@@ -3,7 +3,9 @@
  *
  * THE RELEVANCE RULES (kgenome_fnprint_decide), in the order they are tried, and what each
  * cannot do - written down because a rule's blind spot is the failure it
- * produces:
+ * produces. They compute the LEGACY class; kgenome_fnprint_advise turns every LIB that is not
+ * grounded in the function's own bytes (R_LIBDB, R_LIBWIN) into advice (UNKNOWN, kept) unless
+ * OPT_LEGACY_EXCLUDE asks for the old behaviour, and the name is read only in that mode:
  *   1. a bogus extent is UNKNOWN, weight 0, no fingerprint (never silently
  *      dropped: it is in the stat);
  *   2. the entry function is LIB (startup);
@@ -52,6 +54,40 @@ void kgenome_fnprint_opts_resolve(struct kgenome_fnprint_opts *o)
 	if (!o->wrapper_insn) o->wrapper_insn = 48;
 	if (!o->thunk_insn) o->thunk_insn = 3;
 	if (!o->region_max) o->region_max = 262144u;
+	if (!o->libwin_pct) o->libwin_pct = 60;
+	if (!o->libwin_min) o->libwin_min = 8;
+	if (!o->w_advised) o->w_advised = 25;
+}
+
+/*
+ * WHAT MAY TAKE A FUNCTION OUT OF THE EVIDENCE. A function is LIB (and weighs nothing as author
+ * code) only on the grounds of its own bytes: its fingerprint is in the library table (R_LIBDB) or
+ * most of its windows are in the library window table (R_LIBWIN, whose residual - the windows that are
+ * not in the table - still weighs as author code, so a payload inside a library function is kept).
+ * A name, the layout, the entry stub, a wrapper's shape, a thunk's size are things an author can
+ * change without touching the function: they are ADVICE (f->advice, R_ADVISED), the function stays
+ * UNKNOWN, kept, and weighed at w_advised. OPT_LEGACY_EXCLUDE restores the old rule for the
+ * measurements that need it.
+ */
+void kgenome_fnprint_advise(const struct kgenome_fnprint_opts *o, struct kgenome_fnprint_fn *f)
+{
+	int dead = (f->reason & (KGENOME_FNP_R_TINY | KGENOME_FNP_R_UNDECODED | KGENOME_FNP_R_OVERLAP)) != 0;
+
+	f->advice = f->cls;
+	if (f->cls != KGENOME_FNP_LIB || (o->flags & KGENOME_FNP_OPT_LEGACY_EXCLUDE))
+		return;
+	if (f->reason & KGENOME_FNP_R_LIBWIN) {
+		/* the residual stays evidence: the share of its sampled windows that no library has */
+		if (!dead && f->n_win && f->n_win_lib < f->n_win)
+			f->weight = (uint32_t)((uint64_t)kgenome_fnprint_weight(o, KGENOME_FNP_AUTHOR, f->n_insn) *
+					       (f->n_win - f->n_win_lib) / f->n_win);
+		return;
+	}
+	if (f->reason & KGENOME_FNP_R_LIBDB)
+		return;
+	f->cls = KGENOME_FNP_UNKNOWN;
+	f->reason |= KGENOME_FNP_R_ADVISED;
+	f->weight = dead ? 0 : (uint32_t)((uint64_t)(f->n_insn < o->wcap ? f->n_insn : o->wcap) * o->w_advised / 100u);
 }
 
 uint32_t kgenome_fnprint_weight(const struct kgenome_fnprint_opts *o, uint8_t cls, uint32_t n_insn)
@@ -111,7 +147,7 @@ void kgenome_fnprint_decide(const struct kgenome_fnprint_req *rq, const struct k
 		int is_entry, int in_diag)
 {
 	const struct kgenome_fnprint_hints *h = &rq->hint;
-	int thunk, wrapper, libdb, strong, anchored;
+	int thunk, wrapper, libdb, libwin = 0, strong, anchored;
 
 	f->cls = KGENOME_FNP_UNKNOWN;
 	if (in_diag)
@@ -136,11 +172,27 @@ void kgenome_fnprint_decide(const struct kgenome_fnprint_req *rq, const struct k
 		  (rq->arch != KGENOME_ARCH_X86_64 || (o->off & KGENOME_FNP_OFF_THUNK_RET))));
 	wrapper = f->n_syscall && f->n_insn <= o->wrapper_insn;
 	libdb = h->n_lib_fp && in_table(h->lib_fp, h->n_lib_fp, f->fp);
+	if (h->libtab && !(f->reason & KGENOME_FNP_R_BAD)) {
+		struct kgenome_fnprint_libvote v;
+
+		kgenome_fnprint_libvote(h->libtab, rq->p + f->off, f->body_len ? f->body_len : f->len, &v);
+		f->n_win = v.n_sampled;
+		f->n_win_lib = v.n_hit;
+		/* library BYTES: most of the sampled windows are in the table, and enough of them to say */
+		libwin = v.n_sampled >= o->libwin_min && (uint64_t)v.n_hit * 100u >= (uint64_t)o->libwin_pct * v.n_sampled;
+		if (libwin)
+			f->reason |= KGENOME_FNP_R_LIBWIN;
+	}
+	/* A NAME IS ADVICE: it is recorded and explained, and only the legacy rules let it decide. An
+	 * author who renames his functions to reserved or libc names, or libc's to his own, changes
+	 * nothing in the walk (fnprint_adv_names.c). */
 	if (name == 1) f->reason |= KGENOME_FNP_R_NAME_LIB;
 	if (name == 2) f->reason |= KGENOME_FNP_R_NAME_AUTHOR;
+	if (!(o->flags & KGENOME_FNP_OPT_LEGACY_EXCLUDE))
+		name = 0;
 	if (libdb) f->reason |= KGENOME_FNP_R_LIBDB;
 	if (wrapper) f->reason |= KGENOME_FNP_R_WRAPPER;
-	strong = name == 1 || libdb || wrapper;
+	strong = name == 1 || libdb || libwin || wrapper;
 
 	anchored = !(o->off & KGENOME_FNP_OFF_ENTRY_ORDER);
 	if (is_entry) {

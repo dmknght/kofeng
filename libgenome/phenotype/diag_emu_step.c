@@ -150,7 +150,7 @@ static enum kgenome_diag_emu_rel_act rel_branches(struct kgenome_diag_emu_rel_sp
 	 */
 	if (clen && ci->op == KGENOME_CELL_CALL && ci->n_op &&
 	    ci->o[0].kind == KGENOME_CELL_O_REL) {
-		if (S->anon)
+		if (S->anon > S->anon_floor)
 			kgenome_emu_set_reg(em, KGENOME_EMU_RAX,
 				KGENOME_DIAG_TOK_BASE +
 				(uint64_t)(--S->anon) *
@@ -190,7 +190,7 @@ static enum kgenome_diag_emu_rel_act rel_branches(struct kgenome_diag_emu_rel_sp
 		 * owned by no node, so it can never be
 		 * mistaken for a link.
 		 */
-		if (S->anon)
+		if (S->anon > S->anon_floor)
 			kgenome_emu_set_reg(em, KGENOME_EMU_RAX,
 				KGENOME_DIAG_TOK_BASE +
 				(uint64_t)(--S->anon) *
@@ -208,7 +208,6 @@ static void rel_field_global(struct kgenome_diag_emu_rel_walk *R, struct kgenome
 			     uint64_t rip)
 {
 	struct kgenome_diag_scan *s = R->s;
-	struct kgenome_diag_emu_seenval *seen = S->seen;
 
 	/*
 	 * ---- A GLOBAL STRUCT, REACHED WITHOUT
@@ -242,8 +241,8 @@ static void rel_field_global(struct kgenome_diag_emu_rel_walk *R, struct kgenome
 		uint32_t z;
 
 		for (z = 0; z < S->n_seen; z++)
-			if (tg >= seen[z].val &&
-			    tg - seen[z].val <
+			if (tg >= S->seen[z].val &&
+			    tg - S->seen[z].val <
 			    KGENOME_DIAG_OBJ_SPAN)
 				break;
 		if (z < S->n_seen) {
@@ -277,14 +276,14 @@ static void rel_field_global(struct kgenome_diag_emu_rel_walk *R, struct kgenome
 				: KGENOME_NUCLEO_ACTION_READ, 0);
 			if (fh) {
 				fh->attr = tg -
-				  seen[z].val;
+				  S->seen[z].val;
 				kgenome_diag_emu_field_value(fh, ci, mi);
 				kgenome_diag_note_in(s, fh,
-				  seen[z].node,
+				  S->seen[z].node,
 				  mi == 0u
 				  ? KGENOME_DIAG_ROLE_BUFFER
 				  : KGENOME_DIAG_ROLE_SOURCE,
-				  seen[z].produced
+				  S->seen[z].produced
 				  ? KGENOME_DIAG_KIND_PRODUCED
 				  : KGENOME_DIAG_KIND_SHARED);
 			}
@@ -298,7 +297,6 @@ static void rel_field_held(struct kgenome_diag_emu_rel_walk *R, struct kgenome_d
 			   uint64_t rip, uint64_t b)
 {
 	struct kgenome_diag_scan *s = R->s;
-	struct kgenome_diag_emu_seenval *seen = S->seen;
 
 	/*
 	 * ---- A FIELD OF AN OBJECT A
@@ -328,12 +326,12 @@ static void rel_field_held(struct kgenome_diag_emu_rel_walk *R, struct kgenome_d
 	 */
 	if (b < KGENOME_DIAG_TOK_BASE ||
 	    b >= KGENOME_DIAG_TOK_BASE +
-		(uint64_t)KGENOME_DIAG_TOK_SPAN *
+		(uint64_t)KGENOME_DIAG_TOK_MAX *
 		KGENOME_EMU_PAGE) {
 		uint32_t z;
 
 		for (z = 0; z < S->n_seen; z++)
-			if (seen[z].val == b)
+			if (S->seen[z].val == b)
 				break;
 		if (z < S->n_seen) {
 			struct kgenome_diag_hit *fh;
@@ -358,11 +356,11 @@ static void rel_field_held(struct kgenome_diag_emu_rel_walk *R, struct kgenome_d
 				  ci->o[mi].disp;
 				kgenome_diag_emu_field_value(fh, ci, mi);
 				kgenome_diag_note_in(s, fh,
-				  seen[z].node,
+				  S->seen[z].node,
 				  mi == 0u
 				  ? KGENOME_DIAG_ROLE_BUFFER
 				  : KGENOME_DIAG_ROLE_SOURCE,
-				  seen[z].produced
+				  S->seen[z].produced
 				  ? KGENOME_DIAG_KIND_PRODUCED
 				  : KGENOME_DIAG_KIND_SHARED);
 			}
@@ -380,7 +378,7 @@ static enum kgenome_diag_emu_rel_act rel_field_token(struct kgenome_diag_emu_rel
 
 	if (b >= KGENOME_DIAG_TOK_BASE &&
 	    b < KGENOME_DIAG_TOK_BASE +
-		(uint64_t)KGENOME_DIAG_TOK_SPAN *
+		(uint64_t)KGENOME_DIAG_TOK_MAX *
 		KGENOME_EMU_PAGE) {
 		uint64_t page = b -
 		  (b - KGENOME_DIAG_TOK_BASE) %

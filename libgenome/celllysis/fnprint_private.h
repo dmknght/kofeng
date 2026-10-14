@@ -123,6 +123,9 @@ uint32_t kgenome_fnprint_weight(const struct kgenome_fnprint_opts *o, uint8_t cl
 /* Is a diagnose node in [off, off+len)? Nodes ascending. */
 int kgenome_fnprint_has_node(const struct kgenome_fnprint_hints *h, uint64_t off, uint64_t len);
 
+/* What the rules said becomes advice unless the function's own bytes say library (fnprint_rel.c). */
+void kgenome_fnprint_advise(const struct kgenome_fnprint_opts *o, struct kgenome_fnprint_fn *f);
+
 /* Fill an opts' zeros with the defaults. */
 void kgenome_fnprint_opts_resolve(struct kgenome_fnprint_opts *o);
 
@@ -146,5 +149,13 @@ void kgenome_fnprint_reach_resolve(struct kgenome_fnprint_reach *r, const struct
 		const struct kgenome_fnprint_opts *o, struct kgenome_fnprint_stat *sx);
 /* Forget the held records (the arrays stay). */
 void kgenome_fnprint_reach_reset(struct kgenome_fnprint_reach *r);
+
+/* The decision state of a context (fnprint_dx.c), called by the window stream (fnprint_wdb.c). */
+void kgenome_fnprint_dx_detach(struct kgenome_fnprint_wctx *c);
+void kgenome_fnprint_dx_begin(struct kgenome_fnprint_wctx *c);
+/* Block b of the context reached `cnt` credited hashes (the policy is KGENOME_FNP_RETIRE_DX). */
+void kgenome_fnprint_dx_credit(struct kgenome_fnprint_wctx *c, uint32_t b, uint32_t cnt);
+/* No live diagnose wants block b: its pairs are no longer looked up (fnprint_wdb.c). */
+void kgenome_fnprint_wctx_kill_block(struct kgenome_fnprint_wctx *c, uint32_t b);
 
 #endif

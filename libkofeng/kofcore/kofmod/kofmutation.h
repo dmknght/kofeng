@@ -184,49 +184,6 @@ static inline int kof_mutation_same_block(const uint32_t *a, uint32_t na,
 }
 
 /*
- * REGIONS A SIMILARITY BLOCK IS NEVER CUT FROM, BY THEIR KOF_SCAN_* SPELLING.
- *
- * A header describes the object rather than being part of what it does: its
- * bytes are offsets, sizes and flags that a rebuild rewrites and a compiler
- * changes between two builds of one source, so a block cut from one measures
- * the toolchain. The symbol regions are not bytes of the file at all - the host
- * BUILDS those records while parsing - so a block cut from them has no offsets
- * in any file and could not be looked for.
- *
- * Asked in two places that must agree: the carve, which must not offer such a
- * block, and the whole-object pass, which must not feed such a region to a
- * block that named no region. They were two tests on two different strings -
- * one on the label a panel shows, one on the enum a rule writes - and they
- * agreed by luck. The enum spelling is the canonical one: it is what a parser
- * publishes and what a rule carries.
- *
- * A rule may still NAME one of these, and the engine will look there - see
- * mutation_prepass. This is about what is offered and what is swept, not about
- * what an author is allowed to ask for.
- */
-static inline int kof_mutation_region_excluded(const char *enum_name)
-{
-	const char *p;
-
-	if (!enum_name)
-		return 1;
-	for (p = enum_name; *p; p++) {
-		if (p[0] == '_' && p[1] == 'H' && p[2] == 'E' && p[3] == 'A' &&
-		    p[4] == 'D')
-			return 1;
-		if (p[0] == '_' && p[1] == 'S' && p[2] == 'Y' && p[3] == 'M')
-			return 1;
-		/* The static library a normalised view carries on its tail: it
-		 * is somebody else's code, and what is offered is the author's. */
-		if (p[0] == '_' && p[1] == 'S' && p[2] == 'L' && p[3] == 'I' &&
-		    p[4] == 'B')
-			return 1;
-	}
-	return 0;
-}
-
-
-/*
  * ONE BLOCK: a slice of the pack's hash pool, plus where it came from and how
  * it was hashed.
  *

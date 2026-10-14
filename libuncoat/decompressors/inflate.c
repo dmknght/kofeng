@@ -605,9 +605,12 @@ static int build_dynamic(struct kuncoat_inflate *s)
 		return KUNCOAT_CORRUPT;
 
 	err = construct(&s->lit, len, nlen);
-	if (err != 0)
-		return KUNCOAT_CORRUPT;   /* incomplete is as bad as over-subscribed
-					   * here: a gap decodes to nothing */
+	/* Incomplete is as bad as over-subscribed here (a gap decodes to nothing),
+	 * with the one exception RFC 1951 and every other decoder make: a block
+	 * whose only literal/length code is EOB, written as a single code of one
+	 * bit. The other bit value decodes to nothing and is refused as CORRUPT. */
+	if (err != 0 && !(err > 0 && s->lit.count[1] == 1 && err == (1 << 14)))
+		return KUNCOAT_CORRUPT;
 	err = construct(&s->dist, len + nlen, ndist);
 	/*
 	 * An incomplete distance code is tolerated, and only here.
@@ -648,17 +651,27 @@ enum kuncoat_status kuncoat_inflate_seeded(struct kuncoat_inflate *s,
 {
 	int status = KUNCOAT_OK, last = 0;
 	uint64_t seed_start;
-	const uint8_t *in = io->in.p;
-	kuncoat_inflate_sink sink = io->sink;
-	void *user = io->user;
+	const uint8_t *in;
+	kuncoat_inflate_sink sink;
+	void *user;
 	uint32_t seed_len = 0;
 
+	if (!s || !io || !io->sink || (!io->in.p && io->in.n)) {
+		if (io)
+			io->consumed = io->produced = 0;
+		return KUNCOAT_BAD_ARG;
+	}
+	in = io->in.p;
+	sink = io->sink;
+	user = io->user;
 	memset(s->win, 0, sizeof s->win);
 	s->wpos = s->wpend = 0;
 	s->produced = 0;
 	if (seed && seed->p && seed->n) {
 		seed_len = seed->n > KUNCOAT_INF_WINDOW ? KUNCOAT_INF_WINDOW : (uint32_t)seed->n;
-		memcpy(s->win, seed->p, seed_len);
+		/* A seed longer than the window keeps its TAIL: the bytes a distance
+		 * can reach are the last ones written. */
+		memcpy(s->win, seed->p + (seed->n - seed_len), seed_len);
 		/*
 		 * wpos is where the next byte goes, which is one past the seed;
 		 * wpend stays zero because NONE OF THE SEED IS OUTPUT - it has

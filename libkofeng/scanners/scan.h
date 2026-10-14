@@ -17,7 +17,8 @@
  * every unit (a decision, not drift: a prefix per file would be nine prefixes for
  * one header):
  *
- *   kof_scan_new, _free, _stats, _resolve_range   scan.c        the scanner and its regions
+ *   kof_scan_new, _free, _stats                   scan.c        the scanner
+ *   kof_scan_resolve_range, _entry, _ext_buf      scan_ext.c     the extents of a region or an entry
  *   kof_scan_walk                                 scan_walk.c   the tree walk
  *   kof_scan_walk_mt                              scan_mt.c     the walk over threads
  *   kof_scan_budget, _kids_reset, _sink_discard   objctx_child.c  budgets and children
@@ -41,6 +42,8 @@
 void kof_scan_budget(struct kof_scanner *, uint64_t obj_size,
 		     const struct kof_scan_option *);
 
+void kof_scan_scratch(struct kof_scanner *, const struct kof_scan_option *);
+
 /* Release anything a module left half-produced, and hand back what it finished. */
 void kof_scan_kids_reset(struct kof_scanner *);
 void kof_scan_sink_discard(struct kof_scanner *);
@@ -63,8 +66,28 @@ void kof_scan_sink_discard(struct kof_scanner *);
 
 
 struct kof_scanner *kof_scan_new(const struct kof_engine *);
+/* The same, and says why it answered NULL (a KSCAN_NEW_* of kofeng.h) in *why when given. */
+struct kof_scanner *kof_scan_make(const struct kof_engine *, int *why);
 void                 kof_scan_free(struct kof_scanner *);
 
+/*
+ * Give back what a scanner keeps between objects (flags: KOF_TRIM_*). See kscan_trim.
+ * Does nothing while a scan is running on this scanner.
+ */
+#define KOF_TRIM_CACHES 1u
+#define KOF_TRIM_HEAP   2u
+void kof_scan_trim(struct kof_scanner *sc, unsigned flags);
+/* The engine's memory budget, per scanner (kofcore/kofbudget.h). */
+uint64_t kof_scan_fixed(const struct kof_engine *eng);
+void kof_scan_root_share(struct kof_scanner *sc);
+void kof_scan_root_release(struct kof_scanner *sc);
+/* What a root file may take in memory before it is read: `room` when a spill file is the
+ * alternative, `limit` when it is not (objsrc.h, kof_src_file_req). */
+void kof_scan_file_room(const struct kof_scanner *sc, uint64_t *room, uint64_t *limit);
+/* A test's table in place of read(2) for the next files this scanner reads; NULL puts
+ * it back. Defined in scan_walk.c, where the files are opened. */
+struct kof_src_read_io;
+void kof_scan_read_hook(struct kof_scanner *sc, const struct kof_src_read_io *io);
 const struct kof_stats *kof_scan_stats(const struct kof_scanner *);
 
 /*
@@ -112,9 +135,28 @@ void     kof_scan_emu_release(struct kof_scanner *sc);
 uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep);
 
 
-/* Turn a named range into extents. objctx.c needs it; the parse is what knows. */
+/*
+ * Turn a named range into extents. objctx.c needs it; the parse is what knows. The answer
+ * goes into `eb` and is read from `eb->v` AFTER the call: a region that fills the buffer
+ * is resolved again into a larger one (scan_ext.c), so the pointer may have moved.
+ * kof_scan_ext_buf is the scanner's own two - the first answers a search, the second
+ * feeds a copy (what they grew to is given back by sx_ext_release, scan_int.h).
+ */
 uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
-				struct kof_range *ext);
+				struct kof_ext_buf *eb);
+struct kof_ext_buf *kof_scan_ext_buf(struct kof_scanner *sc, int gather);
+/* The pieces of one entry (ctx->resolve_entry) into the gather buffer, grown until they fit; zero
+ * pieces and a limit on the object when they cannot (scan_ext.c). */
+uint32_t kof_scan_resolve_entry(const struct kof_obj_ctx *, uint32_t index, struct kof_ext_buf *eb);
+
+/* A buffer the caller owns and the resolve must not grow - a tool's, which has no ledger to
+ * charge. A region that fills it is cut and said, as it always was. */
+static inline struct kof_ext_buf kof_ext_fixed(struct kof_range *buf, uint32_t cap)
+{
+	struct kof_ext_buf eb = { buf, cap, 1u, NULL, 0 };
+
+	return eb;
+}
 
 /*
  * Credit an object's units to a mutation context - the ONE feed, for the scanner
@@ -122,7 +164,7 @@ uint32_t kof_scan_resolve_range(const struct kof_obj_ctx *, uint32_t scan_mask,
  * shows is the one the scanner computes. `present` is the region bits the parse
  * has (all bits for a caller that has not asked); `funcs` and `lib` are the
  * parse's, or NULL for an object whose headers do not describe its own bytes -
- * see kgenome_mutation_units. `ext` is scratch for one region's extents.
+ * see kgenome_mutation_units. `eb` is scratch for one region's extents.
  */
 struct kof_mutation_ctx;
 struct kgenome_func_set;
@@ -133,12 +175,12 @@ typedef int (*kof_scan_unit_fn)(void *user, uint32_t region, uint64_t off,
 				const struct kgenome_func *first);
 void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
 			   uint32_t present, const struct kgenome_func_set *funcs,
-			   const struct kgenome_true_all *lib, struct kof_range *ext,
+			   const struct kgenome_true_all *lib, struct kof_ext_buf *eb,
 			   kof_scan_unit_fn fn, void *user);
 void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ctx *ctx,
 			  kof_buf b, uint32_t present, int from_packer,
 			  const struct kgenome_func_set *funcs,
-			  const struct kgenome_true_all *lib, struct kof_range *ext);
+			  const struct kgenome_true_all *lib, struct kof_ext_buf *eb);
 
 /*
  * Recover the scanner from a context handed to a module.
@@ -195,6 +237,8 @@ int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
  * object, which is the routing a heuristic rule used to do by hand.
  */
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
+/* A diagnose the verdict reads (it declares a disease) is answerable on this object. */
+int kof_scan_diag_feeds_verdict(const struct kof_obj_ctx *ctx);
 /*
  * Could this object's analysis not say everything it was asked: a diagnose that
  * ran returned 'cannot say' (a limit was reached on its scan), or the symbol
@@ -217,6 +261,18 @@ void kof_scan_diag_drop(struct kof_scanner *sc);
 const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n);
 
 void kof_scan_diag_force(const struct kof_obj_ctx *);
+
+/* A product was made for the current object. The second time is a repeat. */
+void kof_prod_ran(struct kof_scanner *sc, enum kof_prodkind p);
+/* A product made again on purpose - a task that was asked for, not a lapse. Not
+ * counted as a repeat; the callers are the exceptions table in
+ * tests/unit/prod_once.c and nothing else. */
+void kof_prod_again(struct kof_scanner *sc, enum kof_prodkind p);
+/* The walk's decode passes, as the lib counted them, brought into the table. */
+void kof_prod_sync_walk(struct kof_scanner *sc);
+/* How often `p` was made more than once for an object, over this scanner's life. */
+uint32_t kof_scan_prod_repeats(const struct kof_scanner *sc, enum kof_prodkind p);
+const char *kof_prod_name(enum kof_prodkind p);
 
 /*
  * WHAT EACH LOADED DIAGNOSE MAKES OF THIS OBJECT, for a tool that reports.

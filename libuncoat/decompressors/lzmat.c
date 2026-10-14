@@ -61,6 +61,14 @@ static uint32_t lz_u4(const uint8_t *in, uint64_t n, uint64_t *at, int *odd)
 	return v;
 }
 
+/* Has the nibble position (`ip` bytes and `odd` nibbles in) gone past the end of the
+ * input? An item whose parse ended there took bits that are not in the stream, so it
+ * is not output. */
+static int lz_over(uint64_t ip, int odd, uint64_t n)
+{
+	return ip * 2u + (uint64_t)(odd != 0) > n * 2u;
+}
+
 enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 					uint8_t *out, uint64_t out_cap,
 					uint64_t *produced)
@@ -70,6 +78,8 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 
 	if (produced)
 		*produced = 0;
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
 	if (!in || !out || in_len < 2u || out_cap < 1u)
 		return KUNCOAT_CORRUPT;
 
@@ -86,6 +96,8 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 		unsigned i;
 
 		ip++;
+		if (lz_over(ip, odd, in_len))
+			goto cut;
 		for (i = 0; i < 8u && ip < in_len && op < out_cap;
 		     i++, ctl = (ctl << 1) & 0xffu) {
 			uint32_t dist, len, tag;
@@ -95,6 +107,8 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 				/* A literal. */
 				if (op >= out_cap)
 					goto full;
+				if (lz_over(ip + 1u, odd, in_len))
+					goto cut;       /* the byte is not in the stream */
 				out[op++] = (uint8_t)lz_u8(in, in_len, ip, odd);
 				ip++;
 				continue;
@@ -153,6 +167,8 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 				} else {
 					len = lz_u16(in, in_len, ip, odd) + 0x111u;
 					ip += 2u;
+					if (lz_over(ip, odd, in_len))
+						goto cut;
 					if (len == 0x10110u) {
 						/*
 						 * THE LONG RUN, which is not a
@@ -185,6 +201,8 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 						if (n > out_cap / 4u ||
 						    op + (uint64_t)n * 4u > out_cap)
 							goto full;
+						if (ip + (uint64_t)n * 4u > in_len)
+							goto cut;       /* the dwords are not all there */
 						while (n--) {
 							uint32_t q;
 
@@ -214,6 +232,8 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 				}
 			}
 
+			if (lz_over(ip, odd, in_len))
+				goto cut;       /* the item needed bits past the end */
 			/* A distance past what exists is not a stream this
 			 * decoder can be reading. */
 			if ((uint64_t)dist > op)
@@ -228,6 +248,11 @@ enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 
 	if (produced)
 		*produced = op;
+	/* NO END MARKER IN THE FORMAT, so a stream that ran out of input before `out_cap`
+	 * bytes cannot be told from one that ended there: a real stream's last control
+	 * group is usually partial, and a cap a little above the true size is the
+	 * caller's. OK is "the input was used up without a partial item"; a short count
+	 * is visible only in `produced`. See lzmat.h. */
 	return KUNCOAT_OK;
 full:
 	if (produced)

@@ -75,6 +75,15 @@ int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len);
  * php_parse.c and svrpage_parse.c had the same twenty lines under two names.
  * The rule is the same because the question is: PHP, ASP and JSP all inherited
  * it from the same idea of a template.
+ *
+ * COST, because the two outward loops (the run of blanks before `open` and
+ * after `end`) have no bound of their own: each stops at the first byte that
+ * is not a blank or a newline, so one call is bounded by the blank run NEXT TO
+ * the island and the loop over the island itself by its length. Islands do not
+ * overlap and a blank run touches at most the island before it and the one
+ * after it, so a walk that asks about every island reads each byte of the
+ * object a bounded number of times: linear, not quadratic. (Checked with 1 MB
+ * of blanks between and around islands, one line, no newline.)
  */
 int kof_script_is_block(kof_buf f, uint64_t open, uint64_t end);
 

@@ -70,7 +70,10 @@ static void usage(const char *argv0)
 		"  --no-cache        trust nothing carried between runs\n"
 		"  --jobs N          scan on N threads (default 1; disables caching)\n"
 		"  --max-produced N  bytes an object may yield before giving up\n"
-		"  --max-resident N  bytes of produced data alive at once\n"
+		"  --max-resident N  bytes of produced data alive at once, for the whole run\n"
+		"                    (shared among --jobs threads, 32 MiB at least each)\n"
+		"  --scratch-dir D   where an object too big for memory is spilled (default: the\n"
+		"                    platform's temp directory; a RAM one is not used)\n"
 		"  --max-object N    bytes any one produced object may reach\n"
 		"\n"
 		"  --stats           report what the prefilter earned\n"
@@ -345,6 +348,9 @@ static int cli_parse(struct cli *c, int argc, char **argv)
 		 * how much of a container is examined and because a decoder that
 		 * cannot stream is sized from what is left under it - neither is
 		 * reachable from outside without being able to set it. */
+		else if (strcmp(argv[i], "--scratch-dir") == 0 && i + 1 < argc) {
+			c->opt.scratch_dir = argv[++i];
+		}
 		else if (strcmp(argv[i], "--max-resident") == 0 && i + 1 < argc) {
 			unsigned long long v;
 
@@ -486,6 +492,16 @@ static int cli_open(struct cli *c)
 			printf("          multi-pattern tables %.2f MB, "
 			       "worst bucket %u marker(s)\n",
 			       (double)mmb / 1048576.0, mmc);
+		/* A database that did not load whole says so, where a reader of the
+		 * scan will see it: a diagnose that is absent reads, from every rule
+		 * naming it, as an object that does not do the thing. Silent at zero. */
+		if (kdb_diag_refused(c->eng) || kdb_diag_packs_refused(c->eng) ||
+		    kdb_diag_full(c->eng) || kdb_diag_collisions(c->eng))
+			fprintf(stderr, "%s: warning: the database did not load whole: "
+				"%u diagnose(s) refused, %u file(s) refused, %u collision(s)%s\n",
+				c->argv0, kdb_diag_refused(c->eng),
+				kdb_diag_packs_refused(c->eng), kdb_diag_collisions(c->eng),
+				kdb_diag_full(c->eng) ? ", the diagnose table is full" : "");
 	}
 	return -1;
 }
@@ -494,16 +510,19 @@ static int cli_open(struct cli *c)
  * among them. Returns -1 to go on, else the exit code. */
 static int cli_scanners(struct cli *c)
 {
+	int why = KSCAN_NEW_OK;
+
 	/*
 	 * -v reports each file as it finishes, and that is only sound on one
 	 * thread - see run.cur_file.
 	 */
 	c->r.stream_v = (c->jobs == 1);
 
-	c->sc = kscan_new(c->eng);
+	c->sc = kscan_new_ex(c->eng, &why);
 	c->r.files = kverdict_filemap_new();
 	if (!c->sc || !c->r.files) {
-		fprintf(stderr, "%s: out of memory\n", c->argv0);
+		fprintf(stderr, "%s: out of memory%s%s\n", c->argv0,
+			c->sc ? "" : ": ", c->sc ? "" : kscan_new_why_str(why));
 		kverdict_filemap_free(c->r.files);
 		kscan_free(c->sc);
 		keng_close(c->eng);
@@ -533,13 +552,11 @@ static int cli_scanners(struct cli *c)
 	 */
 	if (c->jobs > 1) {
 		unsigned k;
-		uint64_t resident_all = c->opt.max_resident_bytes;
-
 		c->scs = calloc(c->jobs, sizeof *c->scs);
 		if (c->scs) {
 			c->scs[0] = c->sc;
 			for (k = 1; k < c->jobs; k++) {
-				c->scs[k] = kscan_new(c->eng);
+				c->scs[k] = kscan_new_ex(c->eng, &why);
 				if (!c->scs[k])
 					break;
 			}
@@ -549,22 +566,20 @@ static int cli_scanners(struct cli *c)
 			/* Fewer scanners than asked for is a scan that did not
 			 * do what it was told; ksn_say so rather than run slower
 			 * and let the number be a mystery. */
-			fprintf(stderr, "%s: could not create %u scanners\n",
-				c->argv0, c->jobs);
+			fprintf(stderr, "%s: could not create %u scanners%s%s\n",
+				c->argv0, c->jobs, c->made < c->jobs && why ? ": " : "",
+				c->made < c->jobs && why ? kscan_new_why_str(why) : "");
 			c->jobs = c->made > 1 ? c->made : 1;
 		} else {
 			c->jobs = c->made;
 		}
 		/*
-		 * SHARED OUT AMONG THE THREADS THERE ARE, not among the ones
-		 * that were asked for. The division used to happen before the
-		 * scanners were made, so a run that wanted eight and got three
-		 * gave each of the three an eighth of the budget and left five
-		 * eighths of it unusable - the scan then met a limit it had
-		 * been configured not to have.
+		 * THE RESIDENT ALLOWANCE IS SHARED OUT BY THE ENGINE (kscan_path_mt divides
+		 * it among the scanners that are running, floored at KOF_SHARE_MIN - see
+		 * kof_scan_option.resident_per_scanner), over the threads there ARE and not
+		 * the ones that were asked for. The tool used to divide an explicit
+		 * --max-resident itself and left the built-in default undivided.
 		 */
-		if (resident_all)
-			c->opt.max_resident_bytes = resident_all / c->jobs;
 	}
 	return -1;
 }
@@ -824,11 +839,15 @@ static void cli_stats(struct cli *c)
 				c->sum.gram_answers   += one->gram_answers;
 				c->sum.searches       += one->searches;
 				c->sum.multi_passes   += one->multi_passes;
-				c->sum.multi_hash4     += one->multi_hash4;
-				c->sum.multi_wumanber += one->multi_wumanber;
+				c->sum.multi_degraded += one->multi_degraded;
+				c->sum.multi_reads    += one->multi_reads;
 				c->sum.multi_bytes    += one->multi_bytes;
 				c->sum.multi_answers    += one->multi_answers;
 				c->sum.heur_emu       += one->heur_emu;
+				c->sum.emu_insn       += one->emu_insn;
+				c->sum.emu_budget_denied += one->emu_budget_denied;
+				c->sum.limit_hits     += one->limit_hits;
+				c->sum.verdict_lost   += one->verdict_lost;
 				c->sum.bytes_searched += one->bytes_searched;
 				if (one->peak_resident > c->sum.peak_resident)
 					c->sum.peak_resident = one->peak_resident;
@@ -1116,6 +1135,11 @@ static void report_notes(struct cli *c)
 	if (c->st && c->st->cached)
 		printf("cached    %llu file(s) unchanged since the last scan\n",
 		       (unsigned long long)c->st->cached);
+	/* The engine's own check (kof_stats.verdict_lost): a file counted above with no
+	 * verdict line is a defect, and it is said as one - never summarised away. */
+	if (c->st && c->st->verdict_lost)
+		printf("ERROR     %llu file(s) counted without a verdict delivered (engine defect)\n",
+		       (unsigned long long)c->st->verdict_lost);
 	if (c->r.dropped)
 		printf("note      %llu finding(s) over the per-object cap\n",
 		       (unsigned long long)c->r.dropped);

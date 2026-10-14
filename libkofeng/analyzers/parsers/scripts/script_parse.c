@@ -896,10 +896,30 @@ static int shebang_line(kof_buf f, uint64_t look, uint64_t *line_end,
 	return lead == 2u || *kind != KOF_SCRIPT_ANY;
 }
 
-int kof_script_sniff(kof_buf file)
+/*
+ * THE SNIFF, AND WHAT IT FOUND KEPT FOR THE PARSE.
+ *
+ * A script is accepted by what find_tag reads from its first SCRIPT_LOOK bytes,
+ * and the parse that follows needs exactly the same answer: it was calling
+ * find_tag a second time over the same bytes (24.8 % of the instructions of a
+ * set of scripts for the sniff, 32.8 % for the parse's find_tag, callgrind). The
+ * engine now asks kof_script_sniff_keep, which fills `keep` with the shebang
+ * and the tag it found, and hands the same buffer to kof_script_parse_keep,
+ * which finds nothing again. The shebang case stays as it was - the sniff
+ * answers from line one and never reads for a tag, so the parse reads once.
+ *
+ * kof_script_sniff and kof_script_parse remain for the callers that have one
+ * without the other (a declared format, a table walked by a test); they call
+ * the same two halves.
+ */
+int kof_script_sniff_keep(kof_buf file, void *keep)
 {
+	struct kof_script_found *f = keep;
 	uint64_t look;
 
+	memset(f, 0, sizeof *f);
+	f->kind = KOF_SCRIPT_ANY;
+	f->fam = FAM_NONE;
 	if (!file.p || file.n < 3u)
 		return 0;
 	look = file.n < SCRIPT_LOOK ? file.n : SCRIPT_LOOK;
@@ -908,25 +928,21 @@ int kof_script_sniff(kof_buf file)
 	 * A "#!" ONLY AT OFFSET ZERO. That is where the kernel looks, so it is
 	 * the only place it means anything; "#!" further in is a comment.
 	 */
-	{
-		uint64_t e;
-		uint8_t k;
+	f->sheb = (uint8_t)shebang_line(file, look, &f->sheb_end, &f->sheb_kind);
+	if (f->sheb)
+		return looks_like_text(file, f->sheb_end);
 
-		if (shebang_line(file, look, &e, &k))
-			return looks_like_text(file, e);
-	}
+	f->tag = find_tag(file, look, &f->kind, &f->tl, &f->hl, &f->fam,
+			  &f->guessed);
+	f->have_tag = 1;
+	return f->tag != (uint64_t)-1 && looks_like_text(file, f->tag + f->tl);
+}
 
-	{
-		uint8_t kind = KOF_SCRIPT_ANY;
-		uint32_t tl = 0, hl = 0;
-		int fam = FAM_NONE;
-		uint64_t tag = find_tag(file, look, &kind, &tl, &hl, &fam, NULL);
+int kof_script_sniff(kof_buf file)
+{
+	struct kof_script_found f;
 
-		if (tag != (uint64_t)-1)
-			return looks_like_text(file, tag + tl);
-	}
-
-	return 0;
+	return kof_script_sniff_keep(file, &f);
 }
 
 /*
@@ -1017,8 +1033,8 @@ static uint8_t kind_of_interp(const char *w)
 	return KOF_SCRIPT_ANY;
 }
 
-int kof_script_parse(kof_buf file, struct kof_script_info *info,
-		     struct kof_obj_ctx *ctx)
+static int script_build(kof_buf file, struct kof_script_info *info,
+			struct kof_obj_ctx *ctx, struct kof_script_found *f)
 {
 	uint64_t look, tag;
 	int obj_fam = FAM_NONE;
@@ -1030,17 +1046,12 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		return 0;
 	look = file.n < SCRIPT_LOOK ? file.n : SCRIPT_LOOK;
 
-	{
-		uint64_t e;
-		uint8_t k;
-
-		if (shebang_line(file, look, &e, &k)) {
-			info->kind = k;
-			info->from_shebang = 1;
-			info->tag_off = 0;
-			info->tag_len = (uint32_t)e;
-			info->head_len = (uint32_t)e;
-		}
+	if (f->sheb) {
+		info->kind = f->sheb_kind;
+		info->from_shebang = 1;
+		info->tag_off = 0;
+		info->tag_len = (uint32_t)f->sheb_end;
+		info->head_len = (uint32_t)f->sheb_end;
 	}
 
 	/*
@@ -1087,13 +1098,17 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 	 * read in, and its tag is the only thing that names one.
 	 */
 	{
-		uint8_t kind = KOF_SCRIPT_ANY;
-		uint32_t tl = 0, hl = 0;
-		int fam = FAM_NONE;
+		uint8_t kind;
+		uint32_t tl, hl;
+		int fam, guessed;
 
-		int guessed = 0;
-
-		tag = find_tag(file, look, &kind, &tl, &hl, &fam, &guessed);
+		if (!f->have_tag)
+			f->tag = find_tag(file, look, &f->kind, &f->tl, &f->hl,
+					  &f->fam, &f->guessed);
+		f->have_tag = 1;
+		tag = f->tag;
+		kind = f->kind; tl = f->tl; hl = f->hl;
+		fam = f->fam; guessed = f->guessed;
 		/*
 		 * A SHEBANG OUTRANKS A GUESS, always. The test below asks
 		 * whether a DECLARED tag sits in code, which is the right
@@ -1285,4 +1300,29 @@ int kof_script_parse(kof_buf file, struct kof_script_info *info,
 	ctx->file_header = info;
 	ctx->resolve_scan = script_resolve_scan;
 	return 1;
+}
+
+int kof_script_parse_keep(kof_buf file, struct kof_script_info *info,
+			  struct kof_obj_ctx *ctx, const void *keep)
+{
+	struct kof_script_found f = *(const struct kof_script_found *)keep;
+
+	return script_build(file, info, ctx, &f);
+}
+
+int kof_script_parse(kof_buf file, struct kof_script_info *info,
+		     struct kof_obj_ctx *ctx)
+{
+	struct kof_script_found f;
+	uint64_t look;
+
+	memset(&f, 0, sizeof f);
+	f.kind = KOF_SCRIPT_ANY;
+	f.fam = FAM_NONE;
+	if (file.p && file.n) {
+		look = file.n < SCRIPT_LOOK ? file.n : SCRIPT_LOOK;
+		f.sheb = (uint8_t)shebang_line(file, look, &f.sheb_end,
+					       &f.sheb_kind);
+	}
+	return script_build(file, info, ctx, &f);
 }

@@ -9,10 +9,12 @@
  * stops being true, and a reader should not have to work out which wins.
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include <kofcore.h>
 
 #include "executables.h"
+#include "executables_private.h"
 #include <uncoat.h>
 
 /*
@@ -31,61 +33,6 @@ static uint64_t decode_in_place(uint32_t algo, uint32_t flags, uint8_t *p, uint6
 	if (kuncoat_transform(&s, p, n, p, n, &got) != KUNCOAT_OK)
 		return 0;
 	return got;
-}
-
-/* Printable ASCII, which is what a widened marker is made of. Control bytes are
- * refused: a run of "02 00 03 00" is a table of small integers, and reading it
- * as text is how structure gets rewritten as prose. */
-static int wide_char(uint8_t lo, uint8_t hi)
-{
-	/*
-	 * ONE RANGE TEST, NOT TWO COMPARES. `lo - 0x20` wraps for anything
-	 * below the range, so the single unsigned compare answers both ends;
-	 * `&` rather than `&&` keeps it branchless, which matters because this
-	 * is read once per byte of every region normalised. Checked against
-	 * the original on all 65536 (lo, hi) pairs.
-	 */
-	return (hi == 0u) & ((uint8_t)(lo - 0x20u) < 0x5fu);
-}
-
-/* How many UTF-16LE characters start at `i`, counted in CHARACTERS. */
-static uint64_t wide_run(const uint8_t *p, uint64_t n, uint64_t i)
-{
-	uint64_t k = 0;
-
-	while (i + 2u * k + 1u < n && wide_char(p[i + 2u * k], p[i + 2u * k + 1u]))
-		k++;
-	return k;
-}
-
-/* How many zero bytes start at `i`. */
-/*
- * A WORD AT A TIME WHILE THERE IS A WORD LEFT.
- *
- * The runs this measures are the zero padding a linker leaves, which is
- * kilobytes at a stretch, and counting them a byte at a time was 456 million
- * instructions - 2.6% of the scan. Eight bytes are all zero exactly when the
- * word holding them is, and that is one compare for eight; the byte loop after
- * it finishes the tail and finds the exact end.
- *
- * Nothing reads a byte's place inside the word, so byte order does not enter
- * into it, and memcpy is how an unaligned 64-bit load is spelled portably.
- */
-static uint64_t zero_run(const uint8_t *p, uint64_t n, uint64_t i)
-{
-	uint64_t k = 0;
-
-	while (i + k + 8u <= n) {
-		uint64_t w;
-
-		memcpy(&w, p + i + k, sizeof w);
-		if (w != 0u)
-			break;
-		k += 8u;
-	}
-	while (i + k < n && p[i + k] == 0u)
-		k++;
-	return k;
 }
 
 /*
@@ -256,6 +203,79 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out)
 	return changed;
 }
 
+/* Grow a table of `esz`-byte entries to hold `need`; the cost is checked against
+ * the allowance before the allocator is asked. 0 when it could not. */
+static int dec_grow(void **v, uint32_t *cap, size_t esz, uint32_t need, uint64_t room)
+{
+	uint64_t ncap = *cap ? 2u * (uint64_t)*cap : 64u;
+	void *nv;
+
+	if (ncap < need)
+		ncap = need;
+	if (ncap > UINT32_MAX / 2u || ncap * esz > room)
+		return 0;
+	nv = realloc(*v, (size_t)(ncap * esz));
+	if (!nv)
+		return 0;
+	*v = nv;
+	*cap = (uint32_t)ncap;
+	return 1;
+}
+
+static void dec_note(struct dec_out *o, uint64_t off, uint64_t len)
+{
+	if (!o || !o->want)
+		return;
+	if (o->n == o->cap &&
+	    !dec_grow((void **)&o->v, &o->cap, sizeof *o->v, o->n + 1u, o->room)) {
+		o->limit |= KOF_EXE_DEC_TABLE;
+		return;
+	}
+	o->v[o->n].off = off;
+	o->v[o->n].len = len;
+	o->n++;
+}
+
+/*
+ * NOTE A STRETCH A PASS WROTE, AND THE NEIGHBOUR ITS FILL EXPOSED.
+ *
+ * A round walks only what the round before it wrote, which is what makes honest
+ * layering walk less every round. But a write is not only new bytes: the decoded
+ * run is shorter than its source and the rest of the source is zero-filled, and a
+ * NUL is a legal delimiter. So the token that FOLLOWS the stretch may have been
+ * refused a round ago for what stood in front of it (`,<hex>SGVs... | base64 -d`:
+ * a comma is not a base64 delimiter, a NUL is) and is readable now, while lying
+ * wholly outside the stretch - the second round never looked at it, and it stayed
+ * encoded until a second whole-object pass.
+ *
+ * So what is noted for the next round is two stretches: what was written (`off` for
+ * `out_n` bytes) and, past the zero fill it left (which holds nothing and is not
+ * walked), the token after it to the next hard delimiter plus the room an anchored
+ * pass needs past a token: a separator run and the decoder's name (B64_SEP_MAX + 16
+ * bytes). That is the whole of what a write can change about its surroundings, so
+ * no rule is written for one payload shape. It costs the bytes of one token a write,
+ * bounded by the same work budget as every other round; honest layering still walks
+ * under two objects' worth.
+ */
+#define DEC_TAIL_ROOM 24u
+
+static void dec_note_run(struct dec_out *o, const uint8_t *p, uint64_t n,
+			 uint64_t off, uint64_t out_n, uint64_t src_end)
+{
+	uint64_t e = src_end;
+
+	if (!o || !o->want)
+		return;
+	dec_note(o, off, out_n);
+	while (e < n && p[e] != 0 && p[e] != ' ' && p[e] != '\t' &&
+	       p[e] != '\n' && p[e] != '\r')
+		e++;
+	e = n - e > DEC_TAIL_ROOM ? e + DEC_TAIL_ROOM : n;
+	/* The zero fill is not walked - it holds nothing - only what follows it. */
+	if (e > src_end)
+		dec_note(o, src_end, e - src_end);
+}
+
 /*
  * THE BASE64 PASS. See the note on kof_exe_unb64 in the header for why it is
  * here at all; what follows is why each test is the test it is, and every one
@@ -268,20 +288,22 @@ int kof_exe_unwide(const uint8_t *in, uint64_t n, uint8_t *out)
  * things that happen to be near each other. */
 #define B64_SEP_MAX   8u
 
-/* The longest payload walked back over. Past every measured dropper one-liner,
- * and small enough that a hostile file cannot make the walk expensive by
- * putting the anchor after a megabyte of printable bytes. */
-#define B64_PAY_MAX   65536u
-
 /* Below this a run is not a payload. Sixteen characters decode to twelve bytes,
  * which is shorter than any second stage worth having and is about where
  * ordinary words stop being mistakable for one. */
 #define B64_RUN_MIN   16u
 
-/* What one pass will rewrite. A command carries one payload; a file with more
- * anchors than this is doing something other than dropping, and the cap is what
- * stops a crafted file turning one normalisation into thousands of 8 KB walks. */
-#define B64_MAX_PAY   8u
+/*
+ * NO CAP ON HOW MANY PAYLOADS, AND NONE ON HOW LONG ONE IS. There was one of each
+ * (8 payloads a pass, 65536 characters walked back) and a file past either kept
+ * its payloads encoded with nothing to say so - a literal no rule could match.
+ * Neither bound was protecting anything: the walk back from an anchor stops at
+ * the first byte that is not part of a run, and the text of the previous anchor
+ * ("base64 -d") always holds a space and a dash, so two anchors never walk the
+ * same bytes and the pass is linear in the object however many there are. A
+ * decoded run is zeroed behind itself, which is also why a second pass finds
+ * nothing.
+ */
 
 /* The alphabet, as comparisons. A table would be faster and this is not the hot
  * path - it runs only where the anchor already matched. */
@@ -314,11 +336,10 @@ static uint32_t b64_anchor_at(const uint8_t *p, uint64_t n, uint64_t i)
 	return 0;
 }
 
-static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
-		       struct kof_exe_span *wrote, uint32_t cap, uint32_t *n_wrote)
+int kof_exe_pass_b64(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		       struct dec_out *wrote)
 {
 	uint64_t i;
-	uint32_t made = 0;
 	int changed = 0;
 
 	if (!p || !n)
@@ -326,7 +347,7 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 	if (to > n)
 		to = n;
 
-	for (i = from; i + 8u < to && made < B64_MAX_PAY; i++) {
+	for (i = from; i + 8u < to; i++) {
 		uint64_t run_end, run_beg, j;
 		uint64_t out_n = 0;
 		uint8_t  before;
@@ -397,11 +418,8 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			continue;
 
 		run_beg = run_end;
-		for (j = 0; j < B64_PAY_MAX && run_beg > 0; j++) {
-			if (!b64_run_char(p[run_beg - 1u]))
-				break;
+		while (run_beg > 0 && b64_run_char(p[run_beg - 1u]))
 			run_beg--;
-		}
 		/*
 		 * PADDING ONLY EVER COMES LAST, so an `=` with a real
 		 * character after it is a SEPARATOR and the payload starts
@@ -432,6 +450,21 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * bytes out per four in - so the output cannot overtake what
 		 * has not been read yet, and no copy is needed.
 		 */
+		if (wrote && wrote->probe) {
+			/* Would it decode, without writing: on a copy of the run. */
+			uint8_t *c = malloc((size_t)(run_end - run_beg));
+			int ok;
+
+			if (!c)
+				return 1;      /* cannot tell: the full pass will */
+			memcpy(c, p + run_beg, (size_t)(run_end - run_beg));
+			ok = decode_in_place(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX, c,
+					     run_end - run_beg) != 0;
+			free(c);
+			if (ok)
+				return 1;
+			continue;
+		}
 		out_n = decode_in_place(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX,
 					p + run_beg, run_end - run_beg);
 		/*
@@ -446,12 +479,7 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * file: a literal cannot contain one, so nothing matches across
 		 * it - and it is also what makes a second pass find nothing. */
 		memset(p + run_beg + out_n, 0, (size_t)(run_end - run_beg - out_n));
-		if (wrote && n_wrote && *n_wrote < cap) {
-			wrote[*n_wrote].off = run_beg;
-			wrote[*n_wrote].len = out_n;
-			(*n_wrote)++;
-		}
-		made++;
+		dec_note_run(wrote, p, n, run_beg, out_n, run_end);
 		changed = 1;
 	}
 	return changed;
@@ -459,7 +487,7 @@ static int unb64_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 
 int kof_exe_unb64(uint8_t *p, uint64_t n)
 {
-	return unb64_range(p, n, 0, n, NULL, 0, NULL);
+	return kof_exe_pass_b64(p, n, 0, n, NULL);
 }
 
 /*
@@ -496,8 +524,12 @@ void kof_exe_norm_map(const uint8_t *in, uint64_t n, uint32_t ops,
 	if (!in || !src || !dst || !k)
 		return;
 	if (!n || !ops) {
+		/* No op: the view is the input, so a place inside it is its own
+		 * answer and a place at or past the end is the end of the view, the
+		 * same as in the replay below. It answered every place with itself,
+		 * so 1000 in a 64 byte input came back 1000 in a view of 64. */
 		for (; q < k; q++)
-			dst[q] = src[q];
+			dst[q] = src[q] < n ? src[q] : n;
 		return;
 	}
 	while (i < n && q < k) {
@@ -626,6 +658,22 @@ static uint64_t keep_bound(const uint8_t *keep, uint64_t n, uint64_t i)
 	return e;
 }
 
+/*
+ * Copy a run of the object to where the view has reached. `dst` may lie in the very buffer
+ * `src` is read from (the collapse runs in place, dst <= src): nothing to do while they are the
+ * same place, memcpy when the two runs do not touch (what the two-buffer call always did), memmove
+ * only when they overlap. A bare memmove cost 2.5 M instructions on a 15 MB PE.
+ */
+static inline void move_run(uint8_t *dst, const uint8_t *src, size_t n)
+{
+	if (dst == src)
+		return;
+	if (dst + n <= src || src + n <= dst)
+		memcpy(dst, src, n);
+	else
+		memmove(dst, src, n);
+}
+
 uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
 			     struct kof_exe_norm_res *res)
 {
@@ -637,7 +685,7 @@ uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
 	uint8_t *out = res->out;
 	const uint64_t cap = res->cap;
 	uint64_t *mark_out = res->mark_out;
-	uint64_t i = 0, o = 0, lim = 0;
+	uint64_t i = 0, o = 0, lim = 0, kn = 0, dn = 0;   /* kn, dn: see "NEXT KEPT" below */
 	uint32_t q = 0, did = 0;
 	int changed = 0;
 	/*
@@ -746,7 +794,7 @@ uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
 			if (next_mark - i < run)
 				run = next_mark - i;
 			if (run) {
-				memcpy(out + o, in + i, (size_t)run);
+				move_run(out + o, in + i, (size_t)run);
 				o += run;
 				i += run;
 				continue;
@@ -774,17 +822,17 @@ uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
 			out[o++] = in[i++];
 			continue;
 		}
-		/* Only when the last answer has been used up - see keep_bound.
-		 * Bounded by the next DROPPED byte as well, for the reason a
-		 * run may not straddle a kept one: collapsing across a hole
-		 * would join two stretches that are not adjacent. */
+		/* NEXT KEPT byte and next DROPPED byte, each held until the walk passes it: a map
+		 * does not change, so the next set bit at or after i is the same bit for every i up
+		 * to it, and finding it again walked the zero map to it each time (MEASURED, 234
+		 * dynamic ELF: 40 811 calls, 294 000 Ir each, 12.0 G of 62.1 G). Bounded by the
+		 * DROPPED byte too: collapsing across a hole would join two stretches not adjacent. */
 		if (i >= lim) {
-			uint64_t d;
-
-			lim = keep_bound(keep, n, i);
-			d = keep_bound(drop, n, i);
-			if (d < lim)
-				lim = d;
+			if (i >= kn)
+				kn = keep_bound(keep, n, i);
+			if (i >= dn)
+				dn = keep_bound(drop, n, i);
+			lim = dn < kn ? dn : kn;
 		}
 
 		/*
@@ -824,7 +872,7 @@ uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
 			if (next_mark < stop)
 				stop = next_mark;
 			if (stop > i) {
-				memcpy(out + o, in + i, (size_t)(stop - i));
+				move_run(out + o, in + i, (size_t)(stop - i));
 				o += stop - i;
 				i = stop;
 				continue;
@@ -873,8 +921,8 @@ uint64_t kof_exe_norm_masked(const struct kof_exe_norm_req *rq,
  * the measurement in executables.h. */
 #define HEX_RUN_MIN   24u
 
-/* What one pass will rewrite, for the reason B64_MAX_PAY gives. */
-#define HEX_MAX_PAY   32u
+/* No count of payloads per pass, for the reason given at the base64 pass: the
+ * walk is forward only, each byte is read once, and a decoded run is zeroed. */
 
 /* The hex digit itself is kof_hex_val in kofcore.h, where the measurement
  * that made it a table is recorded - this loop is what made it. */
@@ -957,11 +1005,20 @@ static int hex_delim(uint8_t c)
  * HEXQ_RUN_MIN and runs between them are stepped over without ever being looked
  * at: no crash, no warning, just encoded payloads that stop being decoded.
  */
+_Static_assert(HEXQ_RUN_MIN % 2u == 0u, "the neighbour test of unhex_range steps half of it");
 _Static_assert(HEXQ_RUN_MIN <= HEX_RUN_MIN,
 	       "unhex_range skips by HEXQ_RUN_MIN and would step over "
 	       "runs that HEX_RUN_MIN still accepts");
 #define HEXQ_MIN      4u    /* literals a range must hold before any decodes */
-#define HEXQ_MAX     64u    /* how many one range will put aside */
+/*
+ * HOW MANY ONE RANGE PUTS ASIDE IS WHATEVER IT FINDS. The list holds one entry
+ * per quoted literal, so it is bounded by the range (a literal is ten bytes with
+ * its quotes) and is grown on demand; it starts on the stack, where nearly every
+ * range stays. A range that cannot grow it - the allowance or the allocator said
+ * no - cannot decode the literals it did not keep, and says so through the
+ * caller's `limit`.
+ */
+#define HEXQ_STACK   64u
 
 /*
  * A QUOTED DECIMAL NUMBER IS ALSO ALL HEX DIGITS, and that is the one false
@@ -996,22 +1053,25 @@ static int hex_letter(const uint8_t *p, uint64_t beg, uint64_t end)
 	return 0;
 }
 
-static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
-		       struct kof_exe_span *wrote, uint32_t cap,
-		       uint32_t *n_wrote)
+struct hex_pend {
+	uint64_t beg, end;
+};
+
+int kof_exe_pass_hex(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		       struct dec_out *wrote)
 {
 	uint64_t i;
-	uint32_t made = 0;
 	int changed = 0;
-	struct { uint64_t beg, end; } pend[HEXQ_MAX];
-	uint32_t n_pend = 0, n_lett = 0;
+	struct hex_pend pend0[HEXQ_STACK];
+	struct hex_pend *pend = pend0;
+	uint32_t n_pend = 0, cap_pend = HEXQ_STACK, n_lett = 0;
 
 	if (!p || !n)
 		return 0;
 	if (to > n)
 		to = n;
 
-	for (i = from; i < to && made < HEX_MAX_PAY; ) {
+	for (i = from; i < to; ) {
 		uint64_t beg, end, j, out_n = 0;
 		int text = 1, even;
 
@@ -1041,8 +1101,22 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		if (kof_hex_val(p[i]) < 0) {
 			uint64_t base = i, probe = i + (HEXQ_RUN_MIN - 1u);
 
-			while (probe < to && kof_hex_val(p[probe]) < 0)
-				probe += HEXQ_RUN_MIN;
+			/*
+			 * A HIT NEEDS A NEIGHBOUR: a run of HEXQ_RUN_MIN digits holding
+			 * the probe holds the byte half of that before or after it, so
+			 * a hit with neither is a run too short to matter and is not
+			 * walked (x86 PE: 10.7 % of probes hit, 4.5 % keep one; x64 PE:
+			 * 7.3 % and 1.5 %; 98 and 87 files). probe - half >= base holds.
+			 */
+			for (;; probe += HEXQ_RUN_MIN) {
+				while (probe < to && kof_hex_val(p[probe]) < 0)
+					probe += HEXQ_RUN_MIN;
+				if (probe >= to ||
+				    kof_hex_val(p[probe - HEXQ_RUN_MIN / 2u]) >= 0 ||
+				    (probe + HEXQ_RUN_MIN / 2u < to &&
+				     kof_hex_val(p[probe + HEXQ_RUN_MIN / 2u]) >= 0))
+					break;
+			}
 			if (probe >= to)
 				break;
 			i = probe;
@@ -1066,7 +1140,7 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			 * run is not the whole body of anything.
 			 */
 			if (!even || end - beg < HEXQ_RUN_MIN ||
-			    n_pend >= HEXQ_MAX || beg == 0 || end >= n)
+			    beg == 0 || end >= n)
 				continue;
 			if ((p[beg - 1u] != '\'' && p[beg - 1u] != '"') ||
 			    p[end] != p[beg - 1u])
@@ -1075,6 +1149,22 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 				text = hex_text((uint8_t)kof_hex_byte(p + j));
 			if (!text)
 				continue;
+			if (n_pend == cap_pend) {
+				void *grown = pend == pend0 ? NULL : pend;
+				uint32_t gcap = cap_pend;
+
+				if (!dec_grow(&grown, &gcap, sizeof *pend, n_pend + 1u,
+					      wrote ? wrote->room : 0u)) {
+					/* Not kept, so not decoded; said, not dropped. */
+					if (wrote)
+						wrote->limit |= KOF_EXE_DEC_TABLE;
+					continue;
+				}
+				if (pend == pend0)
+					memcpy(grown, pend0, sizeof pend0);
+				pend = grown;
+				cap_pend = gcap;
+			}
 			pend[n_pend].beg = beg;
 			pend[n_pend].end = end;
 			n_pend++;
@@ -1093,16 +1183,15 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			text = hex_text((uint8_t)kof_hex_byte(p + j));
 		if (!text)
 			continue;
+		if (wrote && wrote->probe) {
+			changed = 1;
+			break;
+		}
 		/* In place: the write trails the read by half, so it cannot
 		 * overtake what has not been read. */
 		out_n = decode_in_place(KUNCOAT_ALGO_HEX, 0, p + beg, end - beg);
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
-		if (wrote && n_wrote && *n_wrote < cap) {
-			wrote[*n_wrote].off = beg;
-			wrote[*n_wrote].len = out_n;
-			(*n_wrote)++;
-		}
-		made++;
+		dec_note_run(wrote, p, n, beg, out_n, end);
 		changed = 1;
 	}
 	/*
@@ -1118,34 +1207,35 @@ static int unhex_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			uint64_t beg = pend[k].beg, end = pend[k].end;
 			uint64_t out_n;
 
+			if (wrote && wrote->probe) {
+				changed = 1;
+				break;
+			}
 			out_n = decode_in_place(KUNCOAT_ALGO_HEX, 0, p + beg,
 						end - beg);
 			memset(p + beg + out_n, 0,
 			       (size_t)(end - beg - out_n));
-			if (wrote && n_wrote && *n_wrote < cap) {
-				wrote[*n_wrote].off = beg;
-				wrote[*n_wrote].len = out_n;
-				(*n_wrote)++;
-			}
+			dec_note_run(wrote, p, n, beg, out_n, end);
 			changed = 1;
 		}
 	}
+	if (pend != pend0)
+		free(pend);
 	return changed;
 }
 
 int kof_exe_unhex(uint8_t *p, uint64_t n)
 {
-	return unhex_range(p, n, 0, n, NULL, 0, NULL);
+	struct dec_out d;
+
+	/* The room is the allowance the quoted-literal list may grow to. */
+	dec_out_init(&d, n, 0);
+	return kof_exe_pass_hex(p, n, 0, n, &d);
 }
 
-/* How deep the layering is followed. Two is what real samples carry; four is
- * past every one measured and is what stops a crafted file from turning one
- * normalisation into a loop. */
-#define DEC_MAX_ROUND 4u
-
-/* How many decoded stretches are carried into the next round. A file with more
- * than this has been answered enough. */
-#define DEC_MAX_SPAN  64u
+/* The most bytes all the rounds together may walk, as a multiple of the object.
+ * See kof_exe_decode_ex for what it bounds and why this number. */
+#define DEC_WORK_FACTOR 8u
 
 /* ---- percent-encoded text ------------------------------------------------
  *
@@ -1186,7 +1276,6 @@ int kof_exe_unhex(uint8_t *p, uint64_t n)
  */
 #define PCT_MIN       4u      /* escapes a run must carry to be one */
 #define PCT_RUN_MIN   8u      /* and bytes, so a scrap cannot qualify */
-#define PCT_MAX_PAY   32u
 
 /* What may sit between the escapes and still be one run: the characters a URL
  * or a form body is made of. Anything else ends it. */
@@ -1234,12 +1323,10 @@ static int pct_body(uint8_t c)
 	return PCT_BODY[c];
 }
 
-static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
-		       struct kof_exe_span *wrote, uint32_t cap,
-		       uint32_t *n_wrote)
+int kof_exe_pass_pct(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		       struct dec_out *wrote)
 {
-	uint64_t i;
-	uint32_t made = 0;
+	uint64_t i, lo;
 	int changed = 0;
 
 	if (!p || !n)
@@ -1247,44 +1334,30 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 	if (to > n)
 		to = n;
 
-	for (i = from; i < to && made < PCT_MAX_PAY; ) {
+	for (i = lo = from; i < to; ) {
 		uint64_t beg, end, j, out_n = 0;
 		uint32_t esc = 0;
 		int text = 1;
+		const uint8_t *pc = memchr(p + i, '%', (size_t)(to - i));
 
 		/*
-		 * SKIPPING BY PCT_RUN_MIN, the same argument the hex pass
-		 * makes: the floor below discards every run shorter than it,
-		 * so a run worth finding that begins anywhere in
-		 * [i, i + PCT_RUN_MIN - 1] must cover the byte at the far end
-		 * of that window. If that byte is not body, no such run is
-		 * there and the window is stepped over whole.
-		 *
-		 * The set PCT_BODY holds is wider than the hex alphabet - 85
-		 * of 256 - so the probe fails less often than the hex one and
-		 * the saving is smaller. It is still eight table reads
-		 * replaced by one wherever it fails.
-		 *
-		 * Bounded by `base` for the reason written at the hex pass:
-		 * p[base] is not body, so base+1 is the earliest the run can
-		 * start, and the scan cannot walk back over what it has
-		 * already read.
+		 * DRIVEN BY THE '%'. A run is written only with PCT_MIN escapes in it,
+		 * so a run with no '%' cannot be, and walking every run byte by byte
+		 * to learn that was 3.3 instructions a byte on x86 PE (562 M of 1.93 G
+		 * over 98 files). memchr asks it of a cache line at a time; the run
+		 * round each '%' is the maximal body run clipped to [lo, to) (`lo`
+		 * where the last ended: not a body byte, so nothing reaches over it)
+		 * as the walk found it, judged by the same test in the same order.
+		 * Differential: tests/unit/norm_decode_diff.c.
 		 */
-		if (!pct_body(p[i])) {
-			uint64_t base = i, probe = i + (PCT_RUN_MIN - 1u);
-
-			while (probe < to && !pct_body(p[probe]))
-				probe += PCT_RUN_MIN;
-			if (probe >= to)
-				break;
-			i = probe;
-			while (i > base && pct_body(p[i - 1u]))
-				i--;
-		}
-		beg = i;
-		while (i < to && pct_body(p[i]))
-			i++;
-		end = i;
+		if (!pc)
+			break;
+		beg = (uint64_t)(pc - p);
+		for (end = beg + 1u; end < to && pct_body(p[end]); )
+			end++;
+		while (beg > lo && pct_body(p[beg - 1u]))
+			beg--;
+		i = lo = end;
 		if (end - beg < PCT_RUN_MIN)
 			continue;
 		if (!hex_delim(beg ? p[beg - 1u] : 0))
@@ -1333,16 +1406,13 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * after it is an ordinary byte here, and `+` is a space - "wget+http://..."
 		 * left alone would be a command a rule written on the plain text still
 		 * misses. */
+		if (wrote && wrote->probe)
+			return 1;
 		out_n = decode_in_place(KUNCOAT_ALGO_URL, KUNCOAT_F_LAX, p + beg, end - beg);
 		/* The vacated tail. Zeros, for the reason at the top of this
 		 * file. */
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
-		if (wrote && n_wrote && *n_wrote < cap) {
-			wrote[*n_wrote].off = beg;
-			wrote[*n_wrote].len = out_n;
-			(*n_wrote)++;
-		}
-		made++;
+		dec_note_run(wrote, p, n, beg, out_n, end);
 		changed = 1;
 	}
 	return changed;
@@ -1350,43 +1420,81 @@ static int unpct_range(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 
 int kof_exe_decode(uint8_t *p, uint64_t n)
 {
-	struct kof_exe_span cur[DEC_MAX_SPAN], nxt[DEC_MAX_SPAN];
-	uint32_t n_cur = 1, n_nxt, r, k;
-	int changed = 0;
+	return kof_exe_decode_ex(p, n, NULL);
+}
 
+int kof_exe_decode_ex(uint8_t *p, uint64_t n, struct kof_exe_decode_res *res)
+{
+	struct dec_out cur, nxt, tmp;
+	uint64_t work, spent;
+	uint32_t k;
+	int changed = 0;
+	struct kof_exe_decode_res none;
+
+	if (!res)
+		res = &none;
+	memset(res, 0, sizeof *res);
 	if (!p || !n)
 		return 0;
-	cur[0].off = 0;
-	cur[0].len = n;
+	/*
+	 * ROUNDS END WHEN A ROUND PEELS NOTHING, and are bounded by work, not by a
+	 * count. This was `r < 4`: a payload under a fifth layer stayed encoded and
+	 * nothing said so. Each round walks only what the one before produced, and a
+	 * decoded run is shorter than its source, so honest layering walks less every
+	 * round and ends of itself. What is left to bound is the hostile case - the
+	 * percent decode leaves a run nearly as long as it was, so a crafted nest of
+	 * escapes could peel one layer per round over a megabyte for ever - and that
+	 * is a budget on the BYTES WALKED over all rounds: eight times the object.
+	 * Measured honest layering (a payload under six layers) walks under two.
+	 * When the budget is gone the remaining stretches are counted in `dropped`
+	 * and `limit` says so.
+	 */
+	work = DEC_WORK_FACTOR * n;
+	spent = n;                      /* round zero is the whole object */
+	dec_out_init(&cur, n, 1);
+	dec_out_init(&nxt, n, 1);
+	dec_note(&cur, 0, n);
 
-	for (r = 0; r < DEC_MAX_ROUND && n_cur; r++) {
-		n_nxt = 0;
-		for (k = 0; k < n_cur; k++) {
-			uint64_t a = cur[k].off;
-			uint64_t b = a + cur[k].len;
+	while (cur.n) {
+		nxt.n = 0;
+		res->rounds++;
+		for (k = 0; k < cur.n; k++) {
+			uint64_t a = cur.v[k].off;
+			uint64_t b = a + cur.v[k].len;
 
-			if (!cur[k].len)
+			if (!cur.v[k].len)
 				continue;
+			if (res->rounds > 1u) {
+				if (cur.v[k].len > work - spent) {
+					res->limit |= KOF_EXE_DEC_WORK;
+					res->dropped += cur.n - k;
+					break;
+				}
+				spent += cur.v[k].len;
+			}
 			/*
 			 * Base64 first, because its anchor is a decoder named
 			 * in the text and hex has no anchor at all - so where
 			 * both could read the same run, the one that was told
 			 * what it is reads it.
 			 */
-			changed |= unb64_range(p, n, a, b, nxt, DEC_MAX_SPAN,
-					       &n_nxt);
-			changed |= unhex_range(p, n, a, b, nxt, DEC_MAX_SPAN,
-					       &n_nxt);
+			changed |= kof_exe_pass_b64(p, n, a, b, &nxt);
+			changed |= kof_exe_pass_hex(p, n, a, b, &nxt);
 			/* Last of the three: its runs are the widest - a URL
 			 * is mostly ordinary characters - so a base64 or hex
 			 * payload sitting inside one is read as itself first
 			 * and this only sees what is left. */
-			changed |= unpct_range(p, n, a, b, nxt, DEC_MAX_SPAN,
-					       &n_nxt);
+			changed |= kof_exe_pass_pct(p, n, a, b, &nxt);
 		}
-		for (k = 0; k < n_nxt; k++)
-			cur[k] = nxt[k];
-		n_cur = n_nxt;
+		if (res->limit & KOF_EXE_DEC_WORK)
+			break;
+		tmp = cur;
+		cur = nxt;
+		nxt = tmp;
 	}
+	res->limit |= cur.limit | nxt.limit;
+	res->scanned = spent;
+	free(cur.v);
+	free(nxt.v);
 	return changed;
 }

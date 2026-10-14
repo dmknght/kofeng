@@ -256,7 +256,7 @@ static void file_close(struct view *v)
 		free(o->diag);
 		kgenome_funcs_free(&o->funcs);
 		free(o->finding);
-		free(o->info);
+		kof_inspect_free(o->fmt, o->info);
 		free(o->sym);
 		free(o->own);
 		free(o->carve);

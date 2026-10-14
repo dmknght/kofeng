@@ -51,22 +51,41 @@ struct kuncoat_ppmd;
 struct kuncoat_ppmd *kuncoat_ppmd_new(void);
 void kuncoat_ppmd_free(struct kuncoat_ppmd *);
 
+/* The most arena this build allocates for one model. (A test may define a smaller
+ * one before including this to reach the limit without a 64 MB stream.) */
+#ifndef KUNCOAT_PPMD_ARENA_MAX
+#define KUNCOAT_PPMD_ARENA_MAX (64u << 20)
+#endif
+
 /*
- * How much arena a block header asks for, clamped to what this build will give.
- *
- * Separate from the start so a caller can refuse before allocating: the number
- * comes out of the file and 251MB of it is an ordinary value in the wild.
+ * How much arena a block header asks for - the header byte plus one megabytes,
+ * NOT clamped: a request this build will not fully give is not made to look like
+ * one it will. The number comes out of the file and 251MB of it is an ordinary
+ * value in the wild. Compare it with KUNCOAT_PPMD_ARENA_MAX, or hand it to
+ * kuncoat_ppmd_start_asked, which allocates the smaller and remembers the larger.
  */
 uint64_t kuncoat_ppmd_arena_want(uint8_t max_mb_byte);
 
 /*
- * Start a block. `max_order` and `arena` come from the block header the caller
- * read; `in_at` is where in the caller's buffer the range coder should begin.
- * Returns 0 when the model could not be built, which is a refusal rather than a
- * failure - the arena is bounded here and a header may ask for more.
+ * Start a block. `max_order` and `asked` come from the block header the caller
+ * read (`asked` from kuncoat_ppmd_arena_want); `in_at` is where in the caller's
+ * buffer the range coder should begin. Returns 0 when the model could not be
+ * built, which is a refusal rather than a failure: an order outside 2..64, an
+ * arena under the floor or over the format's own 256MB, or memory.
+ *
+ * `asked` may exceed what this build allocates (up to the format's 256MB). The
+ * model gets min(asked, ARENA_MAX).
+ * A stream that fits decodes exactly; the first time the smaller arena runs out
+ * where the asked one would not have, the model stops (kuncoat_ppmd_next answers
+ * -1) and kuncoat_ppmd_over says why, so the caller can report OVER_BUDGET with
+ * what it has instead of decoding on from a model that has diverged. A start
+ * clears only what the previous run wrote.
  */
-int kuncoat_ppmd_start(struct kuncoat_ppmd *, int max_order, uint64_t arena,
-		   const uint8_t *in, uint64_t in_len, uint64_t in_at);
+int kuncoat_ppmd_start_asked(struct kuncoat_ppmd *, int max_order, uint64_t asked,
+			     const uint8_t *in, uint64_t in_len, uint64_t in_at);
+
+/* Non-zero when the model stopped because of the arena allowance above. */
+int kuncoat_ppmd_over(const struct kuncoat_ppmd *);
 
 /* A later block that does not restart the model continues the one already
  * built, with the range coder started afresh at `in_at`. */

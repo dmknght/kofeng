@@ -382,6 +382,8 @@ enum kof_pack_sec_id {
 	KOF_SEC_COUNT      = 16
 };
 
+/* After the last section a pack with blocks carries an index trailer (pack/dbkix.h): inside file_len and the CRC. */
+
 /*
  * Where a section is. Both fields are 64 bit so the format never needs a second
  * version for the day a database outgrows 4GB; the whole table costs 176 bytes.

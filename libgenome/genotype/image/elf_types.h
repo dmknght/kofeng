@@ -311,6 +311,34 @@ struct kgenome_elf_info {
 
 	struct kgenome_elf_seg seg[KGENOME_ELF_MAX_SEGMENTS];
 	struct kgenome_elf_sec sec[KGENOME_ELF_MAX_SECTIONS];
+
+	/*
+	 * e_flags, as the header said it (host order). APPENDED, after the two
+	 * arrays, so no field above moved; and not covered by the parser's front
+	 * memset, so the parse assigns it on every path. What reads it: the byte
+	 * order of the CODE, which is not always the order of the DATA - an
+	 * ARM EABI object with EF_ARM_BE8 holds big-endian data and little-endian
+	 * instructions - and the MIPS ASE bits that make the instruction unit
+	 * two bytes rather than four. See genotype/image/endian.h.
+	 */
+	uint32_t e_flags;
+
+	/*
+	 * sh_link AND sh_info OF EACH SECTION, as the header said it. APPENDED after
+	 * e_flags (no field above moved), assigned by the parse for every section it
+	 * counts and meaningless at an index >= sec_count (the front memset does not
+	 * cover them, like the two arrays above).
+	 *
+	 * WHAT READS THEM, and why a name is not the answer: a symbol table's strings
+	 * are the section sh_link names, and a relocation section's target is the
+	 * section sh_info names. Both used to be found by the section NAME (".strtab",
+	 * ".rela.text"), which is the linker's convention and not the format's, so
+	 * renaming the sections - which breaks nothing that runs - took the symbol
+	 * names and every relocation out of the analysis. kgenome_elf_symtab_of and
+	 * kgenome_elf_reloc_table read these two arrays.
+	 */
+	uint32_t sec_link[KGENOME_ELF_MAX_SECTIONS];
+	uint32_t sec_info[KGENOME_ELF_MAX_SECTIONS];
 };
 
 /*
@@ -360,6 +388,13 @@ int kgenome_elf_seg_is_code(const struct kgenome_elf_seg *g);
 uint64_t kgenome_elf_seg_extent(const struct kgenome_elf_seg *g, uint64_t obj_size,
 			    uint64_t *off);
 int kgenome_elf_sec_is_code(const struct kgenome_elf_sec *s);
+
+/* Is section `i` executable code that is NOT the program's own: a section other
+ * than the one the entry point is in (.init, .fini, the PLT, whatever a linker
+ * put beside the body). Decided by the section's flags and the entry, never by
+ * its name. 0 when the entry is in no executable section (nothing to compare
+ * with) or for a section that is not code. */
+int kgenome_elf_sec_is_stub(const struct kgenome_elf_info *e, uint32_t i);
 uint64_t kgenome_elf_sec_extent(const struct kgenome_elf_sec *s, uint64_t obj_size,
 			    uint64_t *off);
 

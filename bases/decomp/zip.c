@@ -59,7 +59,8 @@ KOF_TARGET_CONTENT("Deflate");
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_zip_info *z = kof_zip(ctx);
-	uint32_t i, unsupported = 0, opened = 0;
+	const struct kof_zip_entry *e;
+	uint32_t cur = 0, unsupported = 0, opened = 0;
 
 	if (!z->valid)
 		return;
@@ -68,9 +69,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	kof_debug("Zip.entries", z->n_entries);
 	kof_debug("Zip.encrypted", z->n_encrypted);
 
-	for (i = 0; i < z->n_entries; i++) {
-		const struct kof_zip_entry *e = &z->entry[i];
-
+	/*
+	 * A WALK AND NOT AN ARRAY: the archive's entries are as many as its directory
+	 * holds, which is not a number this module can know. The host hands them out one
+	 * at a time and ends the walk where its table does.
+	 */
+	while ((e = kof_zip_next(ctx, &cur)) != 0) {
 		/* No local header where the directory said, so there is nothing to
 		 * open. The parse already recorded it; this only has to not act on a
 		 * placement it does not have. */
@@ -85,10 +89,25 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		kunp_rcstruct_name(e->name_off, e->name_len);
 
 		if (e->method == KOF_ZIP_M_STORE) {
-			/* Free: the child is a view of bytes that already exist. */
-			if (!kunp_rcstruct_window(e->data_off, e->csize))
-				break;
-			opened++;
+			/*
+			 * Free: the child is a view of bytes that already exist.
+			 *
+			 * What bounds the windows of an archive is the host's, for
+			 * every container alike (oc_window: the tree may offer the
+			 * root plus its produced-bytes budget as windows, and says
+			 * Limit past it). It was a second bound HERE - the windows
+			 * together at most twice the archive - which refused an
+			 * archive that lists its members three times and covered
+			 * zip only.
+			 *
+			 * A refusal of one window is not the end of the table: the
+			 * entries after it are as readable as before, and when the
+			 * host really has stopped (the tree's quota, the window
+			 * allowance) the next ask is answered at once, so going on
+			 * costs one table row each and the report is the host's.
+			 */
+			if (kunp_rcstruct_window(e->data_off, e->csize))
+				opened++;
 			continue;
 		}
 		/*
@@ -134,9 +153,13 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 			/* Either the stream is not deflate at all, or a limit bound.
 			 * The host records which; carrying on to the next entry is
 			 * right in both cases, because one bad entry says nothing
-			 * about the ones after it. */
+			 * about the ones after it. An entry that outgrew its own
+			 * bound is not this case: it comes back as the bytes decoded
+			 * before the cut, closed below, carrying Limit itself. */
 			continue;
 		}
+		/* 0 here is the TREE's bound (quota, budget, memory): the host
+		 * will take no more, and has said so. */
 		if (!kunp_rcstruct_done())
 			break;
 		opened++;

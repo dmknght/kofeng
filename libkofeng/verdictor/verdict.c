@@ -57,37 +57,81 @@ void kverdict_compose(char *out, size_t cap, const char *target,
  * being searched for afterwards - which is the whole point: nothing downstream
  * should ever have to look for a separator this function just placed.
  */
-static void span_put(struct kof_finding *f, struct kof_name_span *sp,
-		     size_t *at, const char *text)
+/*
+ * `room` is how many characters this part may take, and the name's own end is the
+ * other bound. A part that does not fit sets `name_cut` on the finding - the
+ * name is a fixed array (kof_finding.name, ABI) and a cut must be a thing a
+ * reader can see, not a shorter name that looks whole.
+ */
+static void span_put_n(struct kof_finding *f, struct kof_name_span *sp,
+		       size_t *at, const char *text, size_t room)
 {
 	size_t n = 0;
 
 	sp->at = (uint16_t)*at;
 	if (text)
-		while (text[n] && *at + n + 1u < sizeof f->name) {
+		while (text[n] && n < room && *at + n + 1u < sizeof f->name) {
 			f->name[*at + n] = text[n];
 			n++;
 		}
+	if (text && text[n])
+		f->name_cut = 1;
 	sp->n = (uint16_t)n;
 	*at += n;
+}
+
+static void span_put(struct kof_finding *f, struct kof_name_span *sp,
+		     size_t *at, const char *text)
+{
+	span_put_n(f, sp, at, text, (size_t)-1);
 }
 
 static void sep_put(struct kof_finding *f, size_t *at, char c)
 {
 	if (*at + 1u < sizeof f->name)
 		f->name[(*at)++] = c;
+	else
+		f->name_cut = 1;
+}
+
+static size_t slen(const char *s)
+{
+	return s ? strlen(s) : 0u;
+}
+
+/*
+ * WHAT THE FAMILY MAY TAKE: what is left of the name once every other part and
+ * its separator is written. The family is the part that gives, because it is the
+ * only one whose length the pack builder bounds loosely (KOF_NAME_MAX_LEN, 191
+ * characters) while the variant, the shape and the reason are what tell two rules
+ * of one family apart - the identity of the rule, which a cut at the tail used to
+ * take with no word. `rest` is those other bytes. When even they do not fit the
+ * family gets nothing to keep and the old tail cut applies (and is flagged).
+ */
+static size_t family_room(size_t rest)
+{
+	size_t total = sizeof ((struct kof_finding *)0)->name - 1u;
+
+	return rest < total ? total - rest : 0u;
 }
 
 void kverdict_name(struct kof_finding *f, const char *target,
 		      const char *maltype, const char *family,
 		      const char *variant, const char *shape)
 {
-	size_t at = 0;
+	size_t at = 0, rest;
 
 	if (!f)
 		return;
 	f->target.at = f->target.n = 0;
-	f->maltype = f->family = f->variant = f->shape = f->target;
+	/* The reason too: kof_verdict_name writes it and this one does not, so a finding
+	 * that was named with a reason and then re-named here kept the old span, pointing
+	 * into a name that no longer had that text there (api_engine_verdict.c). */
+	f->maltype = f->family = f->variant = f->shape = f->reason = f->target;
+	f->name_cut = 0;
+	rest = (target && target[0] ? slen(target) + 1u : 0u) + slen(maltype) + 1u +
+	       (variant && variant[0] ? 1u + slen(variant) : 0u) +
+	       (shape && shape[0] ? 1u + slen(shape) : 0u);
 
 	if (target && target[0]) {
 		span_put(f, &f->target, &at, target);
@@ -95,7 +139,7 @@ void kverdict_name(struct kof_finding *f, const char *target,
 	}
 	span_put(f, &f->maltype, &at, maltype);
 	sep_put(f, &at, ':');
-	span_put(f, &f->family, &at, family);
+	span_put_n(f, &f->family, &at, family, family_room(rest) ? family_room(rest) : (size_t)-1);
 	if (variant && variant[0]) {
 		sep_put(f, &at, '#');
 		span_put(f, &f->variant, &at, variant);
@@ -130,12 +174,13 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 		      const char *variant, const char *reason)
 {
 	char tgt[32];
-	size_t at = 0;
+	size_t at = 0, rest;
 
 	if (!f)
 		return;
 	f->target.at = f->target.n = 0;
 	f->maltype = f->family = f->variant = f->shape = f->reason = f->target;
+	f->name_cut = 0;
 
 	/*
 	 * How sure, first, because that is what a reader sorts a log by. No
@@ -156,6 +201,12 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 	sep_put(f, &at, '#');
 
 	kverdict_target(tgt, sizeof tgt, f->fmt, f->arch);
+	/* Everything but the family, so the family is what gives (see family_room). */
+	rest = slen(kof_verdict_word(f->verdict)) + 1u + (tgt[0] ? strlen(tgt) + 1u : 0u) +
+	       slen(f->type_known ? kof_maltype_name(f->type) : "Heur") + 1u +
+	       (variant && variant[0] ? 1u + slen(variant) : 0u) +
+	       (f->engine != (uint8_t)KOF_ENGINE_NONE ? 1u + slen(kof_engine_name(f->engine)) : 0u) +
+	       (reason && reason[0] ? 1u + slen(reason) : 0u);
 	if (tgt[0]) {
 		span_put(f, &f->target, &at, tgt);
 		sep_put(f, &at, '/');
@@ -170,7 +221,7 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 	span_put(f, &f->maltype, &at,
 		 f->type_known ? kof_maltype_name(f->type) : "Heur");
 	sep_put(f, &at, ':');
-	span_put(f, &f->family, &at, family);
+	span_put_n(f, &f->family, &at, family, family_room(rest) ? family_room(rest) : (size_t)-1);
 
 	if (variant && variant[0]) {
 		/*
@@ -418,8 +469,17 @@ struct kverdict_file *kverdict_filemap_fold(kverdict_filemap *m, const char *obj
 		e->kind[0] = 0;
 		if (kverdict_is_heur(w)) {
 			const struct kof_name_span *k = w->shape.n ? &w->shape : &w->family;
+			/*
+			 * THE SPAN IS CLAMPED TO THE NAME. It is two 16-bit numbers a module's
+			 * finding carries, and a finding whose span points outside its name
+			 * made "%.*s" read past the array. The name is NUL-terminated inside
+			 * its own array, so the bound is where that NUL is.
+			 */
+			size_t nl = strnlen(w->name, sizeof w->name);
+			size_t at = k->at < nl ? k->at : nl;
+			size_t n = k->n < nl - at ? k->n : nl - at;
 
-			snprintf(e->kind, sizeof e->kind, "%.*s", (int)k->n, w->name + k->at);
+			snprintf(e->kind, sizeof e->kind, "%.*s", (int)n, w->name + at);
 		}
 	}
 	if (res->broken && !e->broken)

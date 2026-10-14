@@ -398,6 +398,7 @@ EXEMPT = {
         'libkoforbit/grille/wproc.c': 'Windows-only, cannot be compiled or checked on this host',
         'libgenome/celllysis/decode_arm64.c': 'cohesive: the AArch64 decoder, one handler per encoding group; no function is long, nothing in it is read apart from the rest',
         'libgenome/phenotype/emu_interp.c': 'cohesive: the interpreter loop and the inlined step helpers it is kept whole with (the register, flag and operand accessors are emu_state.c)',
+        'libgenome/phenotype/emu_private.h': 'cohesive: the interpreter family\'s ONE private header (the machine, its state, and what each part of the interpreter offers another: the vector, x87, integer and syscall parts all read it); a header per part would be several private headers for one family',
         'libuncoat/decompressors/ppmd.c': 'cohesive: one PPMd variant H decoder (model, range coder, symbol decode share one state)',
         'tools/genotype/x86_gen.c': 'needs the external reference decoder to build or verify a split',
     },

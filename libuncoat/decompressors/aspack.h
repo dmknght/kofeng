@@ -72,7 +72,9 @@
  * compressed stream sits inside the image with its own section around it, so a
  * caller that had to pad would have to copy the block first.
  *
- * `produced` is always set. Returns a kuncoat_status.
+ * `produced` is always set (and may be NULL). Returns a kuncoat_status. A NULL `in`
+ * with in_len > 0 or a NULL `out` with out_cap > 0 is KUNCOAT_BAD_ARG; an empty
+ * input or a zero out_cap is CORRUPT.
  */
 #define KUNCOAT_ASPACK_LOOKAHEAD 0x10eu
 

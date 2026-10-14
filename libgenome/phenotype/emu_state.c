@@ -145,7 +145,17 @@ void kgenome_emu_fl_add(struct kgenome_emu *e, uint64_t a, uint64_t b, uint64_t 
 	uint64_t sign = (uint64_t)1 << (bytes * 8u - 1u);
 
 	kgenome_emu_fl_logic(e, r, bytes);
-	if ((a & m) + (b & m) + cin > m)                       e->flags |= KGENOME_EMU_FL_CF;
+	/*
+	 * CF is the carry out of the top bit (Intel SDM Vol. 1 A.1, ADD/ADC). The sum a+b+cin
+	 * is compared with the width's mask, which cannot be exceeded when the mask is all
+	 * ones (a 64 bit operand): the carry is taken from the wrap of each partial sum.
+	 */
+	{
+		uint64_t am = a & m, s1 = am + (b & m), s2 = s1 + cin;
+
+		if (s1 < am || s2 < s1 || (m != ~(uint64_t)0 && s2 > m))
+			e->flags |= KGENOME_EMU_FL_CF;
+	}
 	if (~((a ^ b)) & (a ^ r) & sign)                       e->flags |= KGENOME_EMU_FL_OF;
 	if (((a & 0xfu) + (b & 0xfu) + cin) > 0xfu)            e->flags |= KGENOME_EMU_FL_AF;
 }
@@ -167,6 +177,147 @@ void kgenome_emu_fl_sub(struct kgenome_emu *e, uint64_t a, uint64_t b, uint64_t 
 	if ((a & 0xfu) < (b & 0xfu) + bin)                     e->flags |= KGENOME_EMU_FL_AF;
 }
 
+
+/*
+ * A destination whose value did not change still has to be written when it is a 32 bit register.
+ * Intel SDM Vol. 1 3.4.1.1: in 64-bit mode a 32 bit operand-size result is zero-extended into the
+ * 64 bit register, and that includes an instruction that computes nothing - a shift, rotate, SHLD
+ * or SHRD whose count masks to zero, and a CMOVcc whose condition is false - so the upper half is
+ * cleared. A memory destination, or a narrower register, is left as it is.
+ */
+void kgenome_emu_op_keep(struct kgenome_emu *e, const struct kgenome_x86_op *op, uint64_t v)
+{
+	if (op->type == KGENOME_X86_OP_REG && op->rtype == KGENOME_X86_REG_GPR && op->rsize == 4)
+		kgenome_emu_reg_wr(e, op->reg, 4, 0, v);
+}
+
+/*
+ * IMUL and MUL define CF and OF only, and set them together: both are 1 when the product does not
+ * fit the destination (SDM Vol. 2, IMUL "Flags Affected"). SF, ZF, AF and PF are undefined and are
+ * left as they were.
+ */
+void kgenome_emu_fl_cfof(struct kgenome_emu *e, int on)
+{
+	if (on)
+		e->flags |= KGENOME_EMU_FL_CF | KGENOME_EMU_FL_OF;
+	else
+		e->flags &= ~(uint64_t)(KGENOME_EMU_FL_CF | KGENOME_EMU_FL_OF);
+}
+
+/*
+ * THE 128 BY 64 BIT DIVIDE a 64-bit DIV is, and the division the narrower ones share with it.
+ *
+ * `hi`:`lo` is the dividend (RDX:RAX, EDX:EAX, DX:AX; AX alone for a byte divisor, with hi 0),
+ * `d` the divisor, already known not to be zero. Returns 0 when the quotient does not fit the
+ * destination - the case the CPU answers with #DE - and leaves *q and *r alone then; a quotient
+ * is never truncated. No 128-bit integer type: this is the shift-and-subtract division, 64 steps
+ * and only when RDX is not zero (a dividend that fits 64 bits takes the machine's own divide).
+ */
+static void div128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *q, uint64_t *r)
+{
+	uint64_t rem = hi, quo = 0;
+	unsigned i;
+
+	for (i = 0; i < 64u; i++) {
+		const uint64_t top = rem >> 63;
+
+		rem = (rem << 1) | (lo >> 63);
+		lo <<= 1;
+		quo <<= 1;
+		if (top || rem >= d) {
+			rem -= d;
+			quo |= 1u;
+		}
+	}
+	*q = quo;
+	*r = rem;
+}
+
+int kgenome_emu_div(unsigned sz, int sgn, uint64_t hi, uint64_t lo, uint64_t d, uint64_t *q, uint64_t *r)
+{
+	const uint64_t mask = kgenome_emu_mask_of(sz);
+
+	if (sz == 8) {
+		uint64_t qm, rm;
+
+		if (!sgn) {
+			if (hi >= d)
+				return 0;
+			if (!hi) {
+				*q = lo / d;
+				*r = lo % d;
+			} else {
+				div128(hi, lo, d, q, r);
+			}
+			return 1;
+		}
+		{
+			const int nneg = (int64_t)hi < 0, dneg = (int64_t)d < 0;
+			uint64_t nh = hi, nl = lo;
+			const uint64_t dm = dneg ? 0 - d : d;
+
+			if (nneg) {                    /* the magnitude of the 128 bit dividend */
+				nl = 0 - lo;
+				nh = ~hi + (lo == 0 ? 1u : 0u);
+			}
+			if (nh >= dm)
+				return 0;
+			div128(nh, nl, dm, &qm, &rm);
+			if (nneg != dneg) {
+				if (qm > 0x8000000000000000ull)
+					return 0;
+				*q = 0 - qm;
+			} else {
+				if (qm > 0x7fffffffffffffffull)
+					return 0;
+				*q = qm;
+			}
+			*r = nneg ? 0 - rm : rm;
+			return 1;
+		}
+	}
+	{
+		const uint64_t n = sz == 1 ? lo : (hi << (sz * 8u)) | (lo & mask);
+
+		if (!sgn) {
+			*q = n / d;
+			*r = n % d;
+			return *q <= mask;
+		}
+		{
+			const int64_t sn = (int64_t)kgenome_emu_sext(n, sz * 2u);
+			const int64_t sd = (int64_t)kgenome_emu_sext(d, sz);
+
+			if (sd == -1) {                /* INT64_MIN / -1 is a trap on the host */
+				*q = 0 - (uint64_t)sn;
+				*r = 0;
+			} else {
+				*q = (uint64_t)(sn / sd);
+				*r = (uint64_t)(sn % sd);
+			}
+			return (int64_t)kgenome_emu_sext(*q, sz) == (int64_t)*q;
+		}
+	}
+}
+
+/*
+ * #DE. Marked the way a failed memory access is, so that the same two places read it: a Windows guest's
+ * handler is run for it (emu_win_exc.c names the status from the kind), and with none - and for every ELF
+ * guest, no signal is delivered here - the run ends with a FAULT stop, not UNSUPPORTED.
+ */
+void kgenome_emu_fault_de(struct kgenome_emu *e, int overflow)
+{
+	memcpy(e->fault_kind, overflow ? "divovf" : "divzero", overflow ? 7u : 8u);
+	e->fault_va = e->rip;
+}
+
+/* The xmm register an operand names, or NULL when it is anything else: a merging write goes to its bytes. */
+uint8_t *kgenome_emu_xmm_of(struct kgenome_emu *e, const struct kgenome_x86_op *op)
+{
+	if (op->type != KGENOME_X86_OP_REG || op->rtype != KGENOME_X86_REG_SSE || op->reg >= 16u)
+		return NULL;
+	return e->xmm[op->reg];
+}
 
 /* ---- operands -------------------------------------------------------------- */
 

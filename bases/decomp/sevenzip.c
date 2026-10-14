@@ -37,7 +37,8 @@ KOF_TARGET_CONTENT("LZMA");
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_7z_info *z = kof_7z(ctx);
-	uint32_t i, opened = 0, unreached = 0, unsized = 0, method;
+	const struct kof_7z_folder *fo;
+	uint32_t cur = 0, i, opened = 0, unreached = 0, unsized = 0, method;
 
 	if (!z->valid)
 		return;
@@ -133,8 +134,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 * which is still named rather than guessed at.
 	 */
 	kof_debug("SevenZip.folders", z->n_folders);
-	for (i = 0; i < z->n_folders; i++) {
-		const struct kof_7z_folder *fo = &z->folder[i];
+	/* A walk and not an array: the archive has as many folders as its header lists, which is
+	 * not a number this module can know (zip.c). The folder's index - what the host takes to
+	 * find its streams - is the cursor less one. */
+	while ((fo = kof_7z_next(ctx, &cur)) != 0) {
+		i = cur - 1u;
 
 		/*
 		 * What each folder actually is, before anything is decided

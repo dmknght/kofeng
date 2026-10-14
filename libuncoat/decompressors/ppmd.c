@@ -43,10 +43,15 @@
  * The size comes from one byte of the file and 251MB is an ordinary value in the
  * wild - measured, not imagined. Refusing outright would lose those archives, and
  * honouring it would let a four byte header ask for a quarter of a gigabyte, so
- * it is clamped and the decode is allowed to fail short instead. A model that
- * runs out of arena restarts itself; that is a normal event in this format.
+ * the arena that is allocated is clamped to KUNCOAT_PPMD_ARENA_MAX and what was
+ * ASKED is kept beside it. A stream that fits in the clamped arena decodes exactly
+ * as the encoder's did. One that does not would restart its model at a different
+ * place from the encoder's, and every byte after is wrong - so that moment is not
+ * decoded through: the model stops and says (kuncoat_ppmd_over), and the caller
+ * reports OVER_BUDGET with the bytes before it, which are right.
  */
-#define ARENA_MAX   (64u << 20)
+#define ARENA_MAX   KUNCOAT_PPMD_ARENA_MAX
+#define ARENA_FORMAT_MAX (256u << 20)    /* the header byte's own range: 1..256 MB */
 
 /*
  * SIX BYTES, AND THE SIX MATTER.
@@ -146,6 +151,16 @@ struct kuncoat_ppmd {
 	const uint8_t *in;
 	uint64_t  in_len, in_at;
 	int       broken;
+
+	/* What the header asked for, against what was allocated; `over` is set when
+	 * the clamped arena ran out mid-stream (see ARENA_MAX). */
+	uint64_t  asked;
+	int       over, started;
+	/* How much of the arena a run has written, so the next start clears that and
+	 * not all of it: the text from 0 up to `dirty_text`, the low units from
+	 * `dirty_us` up to `dirty_lo`, and the high units from `dirty_hi` to the end.
+	 * Everything else has never been touched. */
+	uint32_t  dirty_text, dirty_us, dirty_lo, dirty_hi;
 };
 
 /* ---- arena access, bounds checked ---------------------------------------- */
@@ -576,12 +591,43 @@ static void tables_init(struct kuncoat_ppmd *m)
 
 /* ---- the model ------------------------------------------------------------ */
 
+/* Remember how far the model has written, before a restart or a new start moves the
+ * pointers back. The text grows up and the units' start only moves down, so the
+ * values at this moment are the extremes of the run so far. */
+static void note_dirty(struct kuncoat_ppmd *m)
+{
+	if (m->text > m->dirty_text)
+		m->dirty_text = m->text < m->arena_size ? m->text : m->arena_size;
+	if (m->units_start < m->dirty_us)
+		m->dirty_us = m->units_start;
+	if (m->lo_unit > m->dirty_lo)
+		m->dirty_lo = m->lo_unit < m->arena_size ? m->lo_unit : m->arena_size;
+	if (m->hi_unit < m->dirty_hi)
+		m->dirty_hi = m->hi_unit;
+}
+
+/* The arena as the model needs it at the start of a run: every byte zero. */
+static void dirty_reset(struct kuncoat_ppmd *m)
+{
+	m->dirty_text = m->dirty_lo = 0;
+	m->dirty_us = m->dirty_hi = m->arena_size;
+}
+
 static void restart_model(struct kuncoat_ppmd *m)
 {
 	uint32_t i, k, mc;
 	struct context *c;
 	struct state *s;
 
+	if (m->started && m->asked > m->arena_size) {
+		/* The encoder's arena was larger than the one this build gave: a
+		 * restart here is not where its model restarted. Do not go on. */
+		m->over = 1;
+		m->broken = 1;
+		return;
+	}
+	if (m->started)
+		note_dirty(m);
 	memset(m->free_list, 0, sizeof m->free_list);
 	m->text = UNIT_SIZE;
 	m->hi_unit = m->arena_size - (m->arena_size % UNIT_SIZE);
@@ -1455,9 +1501,7 @@ static int decode_symbol2(struct kuncoat_ppmd *m)
 
 uint64_t kuncoat_ppmd_arena_want(uint8_t max_mb_byte)
 {
-	uint64_t want = ((uint64_t)max_mb_byte + 1u) << 20;
-
-	return want > ARENA_MAX ? ARENA_MAX : want;
+	return ((uint64_t)max_mb_byte + 1u) << 20;
 }
 
 struct kuncoat_ppmd *kuncoat_ppmd_new(void)
@@ -1477,32 +1521,51 @@ void kuncoat_ppmd_free(struct kuncoat_ppmd *m)
 	free(m);
 }
 
-int kuncoat_ppmd_start(struct kuncoat_ppmd *m, int max_order, uint64_t arena,
-		   const uint8_t *in, uint64_t in_len, uint64_t in_at)
+int kuncoat_ppmd_start_asked(struct kuncoat_ppmd *m, int max_order, uint64_t asked,
+			 const uint8_t *in, uint64_t in_len, uint64_t in_at)
 {
-	if (!m || arena < UNIT_SIZE * 16u || arena > ARENA_MAX)
+	uint64_t arena = asked > ARENA_MAX ? ARENA_MAX : asked;
+
+	if (!m || asked < UNIT_SIZE * 16u || asked > ARENA_FORMAT_MAX)
 		return 0;
 	if (max_order < 2 || max_order > (int)MAX_O)
 		return 0;
 	if (m->arena_size != (uint32_t)arena) {
 		free(m->arena);
-		m->arena = malloc((size_t)arena);
+		m->arena = calloc(1, (size_t)arena);       /* zero pages, taken when touched */
 		if (!m->arena) {
 			m->arena_size = 0;
 			return 0;
 		}
 		m->arena_size = (uint32_t)arena;
+		dirty_reset(m);
+	} else if (m->started) {
+		/* The same arena again: clear what the last run wrote, not all of it. */
+		note_dirty(m);
+		memset(m->arena, 0, m->dirty_text);
+		if (m->dirty_lo > m->dirty_us)
+			memset(m->arena + m->dirty_us, 0, m->dirty_lo - m->dirty_us);
+		memset(m->arena + m->dirty_hi, 0, m->arena_size - m->dirty_hi);
+		dirty_reset(m);
 	}
-	memset(m->arena, 0, m->arena_size);
 	m->in = in;
 	m->in_len = in_len;
 	m->in_at = in_at;
 	m->broken = 0;
+	m->over = 0;
+	m->started = 0;
+	m->asked = asked;
 	m->esc_count = 1;
 	sub_init(m);
 	start_model(m, max_order);
+	m->started = 1;
 	rd_init(m);
 	return !m->broken && m->min_context != 0;
+}
+
+int kuncoat_ppmd_over(const struct kuncoat_ppmd *m)
+{
+	return m && m->over;
 }
 
 /* Where the model has read up to, so the caller's own cursor can follow. */

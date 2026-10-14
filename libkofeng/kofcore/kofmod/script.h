@@ -296,6 +296,11 @@ static inline const char *kof_script_type_name(uint8_t v)
  * rule targeting BODY does not see it. The bit exists so that is a thing the
  * examiner prints rather than a thing a reader has to deduce from a region
  * that looks short.
+ *
+ * The same bit says an island was REFUSED because its offset or length does not
+ * fit the 32-bit extents of struct kof_script_info (an object past 4 GiB):
+ * the list is short in that case too, and everything from that island on is
+ * markup.
  */
 #define KOF_SCRIPT_ANOM_ISLANDS_FULL (1u << 0)
 

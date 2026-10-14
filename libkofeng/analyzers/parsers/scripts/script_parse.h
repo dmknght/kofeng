@@ -36,6 +36,26 @@
 int kof_script_sniff(kof_buf file);
 
 /*
+ * WHAT THE SNIFF FOUND, kept for the parse - see kof_script_sniff_keep. The engine owns
+ * `KOF_PARSER_KEEP` bytes for it (kofformat.h) and knows no more than that; this is the
+ * script row's own layout.
+ */
+struct kof_script_found {
+	uint64_t sheb_end;      /* the first line, when it names an interpreter */
+	uint64_t tag;           /* find_tag's offset, or -1; valid when have_tag */
+	uint32_t tl, hl;        /* its tag length and header length */
+	int      fam, guessed;
+	uint8_t  sheb, sheb_kind, kind, have_tag;
+};
+
+/*
+ * kof_script_sniff and kof_script_parse as one scan: the sniff fills `keep` (a
+ * struct kof_script_found) and the parse reads it instead of finding the tag again. Both
+ * are the same code as the plain pair, and are what the engine's parser table carries.
+ */
+int kof_script_sniff_keep(kof_buf file, void *keep);
+
+/*
  * Fills info and sets ctx->format, ctx->subtype and ctx->file_header.
  *
  * NEVER FAILS once the sniff accepted. An interpreter this build has no name
@@ -44,6 +64,8 @@ int kof_script_sniff(kof_buf file);
  */
 int kof_script_parse(kof_buf file, struct kof_script_info *info,
 		     struct kof_obj_ctx *ctx);
+int kof_script_parse_keep(kof_buf file, struct kof_script_info *info,
+			  struct kof_obj_ctx *ctx, const void *keep);
 
 /*
  * IS THIS BLOCK OF CODE EMPTY - nothing but the delimiters that open and close

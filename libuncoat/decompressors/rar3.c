@@ -767,7 +767,10 @@ static int read_tables(struct rar3 *s)
 			if (order == 1) {
 				return -1;
 			}
-			if (!kuncoat_ppmd_start(s->ppm, order,
+			/* The size ASKED goes to the model, which gives what the
+			 * build allows and says (kuncoat_ppmd_over) when the
+			 * stream needs the rest. */
+			if (!kuncoat_ppmd_start_asked(s->ppm, order,
 					    kuncoat_ppmd_arena_want((uint8_t)max_mb),
 					    s->b.p, s->b.n, s->b.byte)) {
 				return -1;
@@ -934,11 +937,13 @@ enum kuncoat_status kuncoat_rar3_decode(const uint8_t *in, uint64_t in_len,
 	 * shared, and everything mutable belongs to the thread that made it.
 	 */
 	struct rar3 s;
-	int t, corrupt = 0;
+	int t, corrupt = 0, over = 0;
 	enum kuncoat_status early = KUNCOAT_OK;
 
 	if (produced)
 		*produced = 0;
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
 	if (!in || !out || out_cap == 0)
 		return KUNCOAT_CORRUPT;
 
@@ -974,8 +979,15 @@ enum kuncoat_status kuncoat_rar3_decode(const uint8_t *in, uint64_t in_len,
 		if (s.ppm_block) {
 			int r = ppm_run(&s);
 
-			if (r < 0)
+			if (r < 0) {
+				/* The model gave out because the arena this build allows
+				 * is smaller than the one asked for: not damage. */
+				if (kuncoat_ppmd_over(s.ppm)) {
+					over = 1;
+					goto done;
+				}
 				goto corrupt;
+			}
 			if (r == 0)
 				break;
 			t = read_tables(&s);
@@ -1169,9 +1181,14 @@ done:
 	 */
 	if (s.at >= out_cap)
 		return KUNCOAT_OK;
+	if (over)
+		return KUNCOAT_OVER_BUDGET;
 	if (corrupt)
 		return KUNCOAT_CORRUPT;
 	if (s.gave_up)
 		return KUNCOAT_UNSUPPORTED;
-	return s.b.out_of_input ? KUNCOAT_TRUNCATED : KUNCOAT_UNSUPPORTED;
+	/* The stream ended (its own end marker, or a table that is not one) before the
+	 * declared size: CORRUPT, as rar5.c says it; UNSUPPORTED is only for the coding
+	 * gaps above. Input that ran out is TRUNCATED. */
+	return s.b.out_of_input ? KUNCOAT_TRUNCATED : KUNCOAT_CORRUPT;
 }

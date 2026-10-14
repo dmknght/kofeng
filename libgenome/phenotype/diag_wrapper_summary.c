@@ -27,6 +27,19 @@ int kgenome_diag_wrapper_site_wrapped(const struct kgenome_diag_scan *s, uint64_
 {
 	uint32_t i;
 
+	if (s->wrap_sorted) {           /* made by kgenome_diag_wrap_settle: a search, not a scan */
+		uint32_t lo = 0, hi = s->n_wrap_sorted;
+
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+
+			if (s->wrap_sorted[mid] < at)
+				lo = mid + 1u;
+			else
+				hi = mid;
+		}
+		return lo < s->n_wrap_sorted && s->wrap_sorted[lo] == at;
+	}
 	for (i = 0; i < s->n_wrap; i++)
 		if (s->wrap[i] == at)
 			return 1;
@@ -168,17 +181,9 @@ int kgenome_diag_wrapper_tseen_retry(const struct kgenome_diag_wrapper_ctx *c, c
 	if (!t->done || t->more)
 		return 1;
 	for (i = 0; i < t->n; i++) {
-		uint32_t lo = 0, hi = c->n_ws;
+		uint32_t lo = kgenome_diag_wrapper_summary_pos(c, t->cal[i]);
 
-		while (lo < hi) {
-			uint32_t mid = lo + (hi - lo) / 2u;
-
-			if (c->ws[mid].entry < t->cal[i])
-				lo = mid + 1u;
-			else
-				hi = mid;
-		}
-		if (lo < c->n_ws && c->ws[lo].entry == t->cal[i])
+		if (lo < c->n_ws && c->ws[c->wi[lo]].entry == t->cal[i])
 			return 1;
 	}
 	return 0;
@@ -350,7 +355,7 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 				break;
 			}
 			if (callee) {
-				uint32_t base = (uint32_t)(callee - c->ws);
+				uint32_t base = kgenome_diag_wrapper_summary_pos(c, in.target);
 
 				/* A jump leaves the return address where it was, so on a
 				 * stack-passed ABI the callee's arguments are one word
@@ -359,12 +364,12 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 					f->sp -= c->w;
 
 				for (v = base; v < c->n_ws &&
-					       c->ws[v].entry == c->ws[base].entry; v++) {
+					       kgenome_diag_wrapper_summary_at(c, v)->entry == in.target; v++) {
 					if (n_out >= var_max) {
 						c->cut = 1;     /* a variant it would have kept */
 						break;
 					}
-					if (summarise_end(c, f, entry, &in, &c->ws[v],
+					if (summarise_end(c, f, entry, &in, kgenome_diag_wrapper_summary_at(c, v),
 							  &out[n_out]))
 						n_out++;
 				}
@@ -418,17 +423,22 @@ unsigned kgenome_diag_wrapper_summarise(struct kgenome_diag_wrapper_ctx *c, uint
 	return n_out;
 }
 
-/* Keeps the table sorted by entry as it grows, so the lookup above is valid at
- * every moment - the level search consults it while it is being extended. */
+/* Keeps the table in entry order as it grows, so the lookup below is valid at
+ * every moment - the level search consults it while it is being extended. The
+ * summary goes to the end of the pool and its index into the sorted run, at the
+ * first place whose entry is not below it: the same place, and so the same order
+ * for the variants of one entry, as when the records themselves were moved. */
 int kgenome_diag_wrapper_summary_insert(struct kgenome_diag_wrapper_ctx *c, const struct kgenome_diag_wrapper_summary *t)
 {
-	uint32_t lo = 0, hi = c->n_ws;
+	uint32_t lo;
 
 	if (c->n_ws == c->cap_ws) {
 		uint32_t nc = c->cap_ws ? c->cap_ws * 2u : 32u;
 		struct kgenome_diag_wrapper_summary *nw;
+		uint32_t *ni;
 
-		if (!kgenome_diag_wrapper_charge(c, (uint64_t)(nc - c->cap_ws) * sizeof *nw))
+		if (!kgenome_diag_wrapper_charge(c, (uint64_t)(nc - c->cap_ws) *
+				(sizeof *nw + sizeof *ni)))
 			return 0;
 		nw = realloc(c->ws, (size_t)nc * sizeof *nw);
 		if (!nw) {
@@ -436,35 +446,47 @@ int kgenome_diag_wrapper_summary_insert(struct kgenome_diag_wrapper_ctx *c, cons
 			return 0;
 		}
 		c->ws = nw;
+		ni = realloc(c->wi, (size_t)nc * sizeof *ni);
+		if (!ni) {
+			kgenome_diag_note(c->s, KGENOME_NOMEM);
+			return 0;
+		}
+		c->wi = ni;
 		c->cap_ws = nc;
 	}
-	while (lo < hi) {
-		uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (c->ws[mid].entry < t->entry)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
-	memmove(&c->ws[lo + 1u], &c->ws[lo], (size_t)(c->n_ws - lo) * sizeof *c->ws);
-	c->ws[lo] = *t;
+	lo = kgenome_diag_wrapper_summary_pos(c, t->entry);
+	memmove(&c->wi[lo + 1u], &c->wi[lo], (size_t)(c->n_ws - lo) * sizeof *c->wi);
+	c->ws[c->n_ws] = *t;
+	c->wi[lo] = c->n_ws;
 	c->n_ws++;
 	return 1;
 }
 
-struct kgenome_diag_wrapper_summary *kgenome_diag_wrapper_summary_of(struct kgenome_diag_wrapper_ctx *c, uint64_t entry)
+uint32_t kgenome_diag_wrapper_summary_pos(const struct kgenome_diag_wrapper_ctx *c, uint64_t entry)
 {
 	uint32_t lo = 0, hi = c->n_ws;
 
 	while (lo < hi) {
 		uint32_t mid = lo + (hi - lo) / 2u;
 
-		if (c->ws[mid].entry < entry)
+		if (c->ws[c->wi[mid]].entry < entry)
 			lo = mid + 1u;
 		else
 			hi = mid;
 	}
-	return lo < c->n_ws && c->ws[lo].entry == entry ? &c->ws[lo] : NULL;
+	return lo;
+}
+
+struct kgenome_diag_wrapper_summary *kgenome_diag_wrapper_summary_at(struct kgenome_diag_wrapper_ctx *c, uint32_t pos)
+{
+	return &c->ws[c->wi[pos]];
+}
+
+struct kgenome_diag_wrapper_summary *kgenome_diag_wrapper_summary_of(struct kgenome_diag_wrapper_ctx *c, uint64_t entry)
+{
+	uint32_t lo = kgenome_diag_wrapper_summary_pos(c, entry);
+
+	return lo < c->n_ws && c->ws[c->wi[lo]].entry == entry ? &c->ws[c->wi[lo]] : NULL;
 }
 
 /* The nearest call target at or before `site`: the function the site is in. No

@@ -402,10 +402,7 @@ static void t_symbol_index_wrap(void)
 	int sig = 0;
 	enum hk_result r = hk_isolated(symbol_wrap_case, NULL, 5, &sig);
 
-	KM_CHECK(r == HK_OK, "kgenome_elf_symbol_at accepts an index whose i*recsize wraps "
-		 "and returns a record of the table",
-		 "elf_image.c:891 kgenome_elf_symbol_at: `at = t->off + i * t->recsize` with i=(2^64+32)/24 "
-		 "(i*24 wraps to 32) returns 1 with record 1's bytes; i is never held to t->n");
+	CK(r == HK_OK);   /* kgenome_elf_symbol_at accepts an index whose i*recsize wraps and returns a record of the table */
 }
 
 static void t_reloc_in(void)

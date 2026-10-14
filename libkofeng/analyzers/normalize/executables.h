@@ -331,6 +331,50 @@ int kof_exe_unhex(uint8_t *p, uint64_t n);
 int kof_exe_decode(uint8_t *p, uint64_t n);
 
 /*
+ * THE SAME, AND WHAT IT COULD NOT DO.
+ *
+ * No decode pass has a count of payloads or a count of layers any more: a file
+ * with a thousand payloads, a payload of a megabyte, a payload under ten layers
+ * are all read to the bottom. What is left is a bound on cost, and a bound that
+ * fires has to be heard, so the answer says whether one did:
+ *
+ *   KOF_EXE_DEC_WORK   the bytes walked over all the rounds reached eight times
+ *                      the object (a crafted nest of escapes, not layering that
+ *                      peels something every round); `dropped` is how many
+ *                      decoded stretches were left unread.
+ *   KOF_EXE_DEC_TABLE  a table of the pass (the stretches to carry to the next
+ *                      round, the quoted literals put aside) could not grow;
+ *                      what it could not hold was not decoded further.
+ *
+ * `rounds` and `scanned` are what the pass did, for a test or a report. A caller
+ * that ignores `limit` gets exactly what kof_exe_decode gives.
+ */
+#define KOF_EXE_DEC_WORK   0x1u
+#define KOF_EXE_DEC_TABLE  0x2u
+
+struct kof_exe_decode_res {
+	uint32_t limit;         /* KOF_EXE_DEC_*; zero when nothing was cut */
+	uint32_t rounds;
+	uint64_t scanned;       /* bytes walked, all rounds */
+	uint64_t dropped;       /* stretches left unread by KOF_EXE_DEC_WORK */
+};
+
+int kof_exe_decode_ex(uint8_t *p, uint64_t n, struct kof_exe_decode_res *res);
+
+/*
+ * Whether kof_exe_decode_ex would change a byte of `p`, answered by READING it: no copy
+ * of the object is needed to know that nothing would be decoded. Non-zero also when a
+ * bound of the decode would fire. See the definition for why "zero" is exact.
+ */
+int kof_exe_decode_would_change(const uint8_t *p, uint64_t n);
+
+/*
+ * Whether `p` holds a run of KOF_EXE_NORM_WIDE_MIN or more wide characters anywhere (an
+ * over-estimate of what the masked collapse narrows; zero is exact for "nothing to narrow").
+ */
+int kof_exe_has_wide(const uint8_t *p, uint64_t n);
+
+/*
  * PARENT OFFSETS TO VIEW OFFSETS, for a sorted list of them, in one pass.
  *
  * What a caller needs to carry a REGION TABLE onto the view. A shortened view

@@ -74,6 +74,36 @@ static const struct curated C[] = {
 	/* Sixteen bytes of prefix and an opcode: past the limit of 15. */
 	{ 64, "more than 15 bytes", { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x90 }, 16, KGENOME_INVALID, 0, 0 },
 	{ 64, "0x0f 0x0f (3DNow!) is reported, not guessed at", { 0x0f, 0x0f, 0xc0, 0x9e }, 4, KGENOME_INVALID, 0, 0 },
+	/*
+	 * WHAT THE REFERENCE DECODER NAMES WRONG, put right where the table is made (tools/genotype/oracle_fix.h): the ModRM mod
+	 * field decides MOVHLPS (register source) from MOVLPS (memory), 0F 12; the same for 0F 16, MOVLHPS and MOVHPS, which the
+	 * reference gets right; and the XOP VPSHLW and VPSHLD with W = 1 are not VPSHLB. Every one was found by running the
+	 * decoder's encodings through objdump (diff_decode_cover.c).
+	 */
+	{ 64, "movlps xmm0,[rax] (0F 12 with a memory operand)", { 0x0f, 0x12, 0x00 }, 3, KGENOME_OK, 3, KGENOME_X86_I_MOVLPS },
+	{ 64, "movhlps xmm0,xmm1 (0F 12 with a register)", { 0x0f, 0x12, 0xc1 }, 3, KGENOME_OK, 3, KGENOME_X86_I_MOVHLPS },
+	{ 64, "movhps xmm0,[rax] (0F 16 with a memory operand)", { 0x0f, 0x16, 0x00 }, 3, KGENOME_OK, 3, KGENOME_X86_I_MOVHPS },
+	{ 64, "movlhps xmm0,xmm1 (0F 16 with a register)", { 0x0f, 0x16, 0xc1 }, 3, KGENOME_OK, 3, KGENOME_X86_I_MOVLHPS },
+	{ 64, "movlpd xmm0,[rax] (66 0F 12)", { 0x66, 0x0f, 0x12, 0x00 }, 4, KGENOME_OK, 4, KGENOME_X86_I_MOVLPD },
+	{ 64, "vmovlps xmm0,xmm0,[rax] (VEX 0F 12 with a memory operand)", { 0xc5, 0xf8, 0x12, 0x00 }, 4, KGENOME_OK, 4, KGENOME_X86_I_VMOVLPS },
+	{ 64, "vmovhlps xmm0,xmm0,xmm1 (VEX 0F 12 with a register)", { 0xc5, 0xf8, 0x12, 0xc1 }, 4, KGENOME_OK, 4, KGENOME_X86_I_VMOVHLPS },
+	{ 64, "xop vpshlw with W = 1 (8F E9 F8 95)", { 0x8f, 0xe9, 0xf8, 0x95, 0xc1 }, 5, KGENOME_OK, 5, KGENOME_X86_I_VPSHLW },
+	{ 64, "xop vpshld with W = 1 (8F E9 F8 96)", { 0x8f, 0xe9, 0xf8, 0x96, 0xc1 }, 5, KGENOME_OK, 5, KGENOME_X86_I_VPSHLD },
+	{ 64, "xop vpshlb with W = 1 (8F E9 F8 94)", { 0x8f, 0xe9, 0xf8, 0x94, 0xc1 }, 5, KGENOME_OK, 5, KGENOME_X86_I_VPSHLB },
+	/*
+	 * A GATHER whose vvvv is 1111b names the mask register xmm0, which is not a collision with a destination, an index
+	 * and a mask that are three different registers. The table said a gather with vvvv not in use is not an instruction.
+	 * The collisions that ARE refused: the mask equal to the destination, to the index, or the destination equal to the index.
+	 */
+	{ 64, "vgatherdps xmm1,[rax+xmm2*4],xmm0 (vvvv = 1111b)", { 0xc4, 0xe2, 0x79, 0x92, 0x0c, 0x90 }, 6, KGENOME_OK, 6, KGENOME_X86_I_VGATHERDPS },
+	{ 64, "vgatherdps with the mask register equal to the destination", { 0xc4, 0xe2, 0x71, 0x92, 0x0c, 0x90 }, 6, KGENOME_INVALID, 0, 0 },
+	{ 64, "vgatherdps with the mask register equal to the index", { 0xc4, 0xe2, 0x69, 0x92, 0x0c, 0x90 }, 6, KGENOME_INVALID, 0, 0 },
+	{ 64, "vgatherdps with the destination equal to the index", { 0xc4, 0xe2, 0x79, 0x92, 0x14, 0x90 }, 6, KGENOME_INVALID, 0, 0 },
+	{ 64, "vgatherdps xmm1,[rax+xmm2*4],xmm3", { 0xc4, 0xe2, 0x61, 0x92, 0x0c, 0x90 }, 6, KGENOME_OK, 6, KGENOME_X86_I_VGATHERDPS },
+	/* the complex half-precision multiply: destination and sources different registers, vvvv 1111b included */
+	{ 64, "vfmaddcph xmm8,xmm0,xmm1 (vvvv = 1111b, a destination that is not register 0)", { 0x62, 0x76, 0x7e, 0x08, 0x56, 0xc1 }, 6, KGENOME_OK, 6, KGENOME_X86_I_VFMADDCPH },
+	{ 64, "vfmaddcph xmm0,xmm0,xmm1 (the destination is vvvv)", { 0x62, 0xf6, 0x7e, 0x08, 0x56, 0xc1 }, 6, KGENOME_INVALID, 0, 0 },
+	{ 64, "vfmaddcph xmm24{k4}{z},xmm0,[r8]", { 0x62, 0x06, 0x7e, 0x8c, 0x56, 0x00 }, 6, KGENOME_OK, 6, KGENOME_X86_I_VFMADDCPH },
 };
 
 static void curated(void)

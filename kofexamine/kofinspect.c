@@ -291,6 +291,30 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
 }
 
 /*
+ * A VIEW MAY OWN TABLES (zip, pdf: struct kof_view_ops), so a tool that parses one has two
+ * duties the scanner does for itself: tell the parse how much it may hold - the engine's own
+ * cap, since a tool has no ledger of a tree - and give the tables back with the view.
+ * kof_inspect_free is that second duty; `fmt` is what identify or declare answered, NULL
+ * for a view that was never parsed.
+ */
+static void inspect_arm(const struct kof_parser *p, void *view)
+{
+	const struct kof_view_ops *o = kof_view_ops_of(p->format);
+
+	if (o)
+		o->mem(view)->room = KOF_ENGINE_MEM_CAP;
+}
+
+void kof_inspect_free(const struct kof_parser *fmt, void *view)
+{
+	const struct kof_view_ops *o = fmt && view ? kof_view_ops_of(fmt->format) : NULL;
+
+	if (o)
+		o->release(view);
+	free(view);
+}
+
+/*
  * Identify the object and parse it.
  *
  * The first format whose sniff claims the bytes wins and no other is tried: a
@@ -298,9 +322,9 @@ const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub)
  * thinks of an object the first recognised is how a tool ends up with two
  * answers and a rule for picking between them.
  *
- * The view is the caller's to free. It is a plain malloc of the format's own
- * info struct - there is nothing to tear down - so free() is the whole of the
- * release and no kof_inspect_release exists to wrap it.
+ * The view is the caller's to free, with kof_inspect_free: a plain malloc of the
+ * format's own info struct, except that zip and pdf views own tables the parse
+ * allocated, which that call gives back before the free.
  */
 /*
  * THE SAME THING FOR AN OBJECT THAT CANNOT BE SNIFFED.
@@ -349,8 +373,9 @@ const struct kof_parser *kof_inspect_declare(kof_buf buf, uint8_t format,
 	 * that was given no input must not find one.
 	 */
 	memset(view, 0, p->view_size);
+	inspect_arm(p, view);
 	if (!p->parse(buf, view, ctx)) {
-		free(view);
+		kof_inspect_free(p, view);
 		return NULL;
 	}
 	*view_out = view;
@@ -376,8 +401,10 @@ const struct kof_parser *kof_inspect_identify(kof_buf buf,
 		view = malloc(parsers[i].view_size);
 		/* Zeroed for the reason kof_inspect_declare's is - a sniffed
 		 * object supplied no inputs, so the parse must not find any. */
-		if (view)
+		if (view) {
 			memset(view, 0, parsers[i].view_size);
+			inspect_arm(&parsers[i], view);
+		}
 		if (view && parsers[i].parse(buf, view, ctx)) {
 			*view_out = view;
 			return &parsers[i];
@@ -401,7 +428,7 @@ const struct kof_parser *kof_inspect_identify(kof_buf buf,
 		 * and ctx is memset once, above, rather than per attempt. The
 		 * honest version resets ctx per candidate.
 		 */
-		free(view);
+		kof_inspect_free(&parsers[i], view);
 		return NULL;
 	}
 	return NULL;
@@ -747,7 +774,11 @@ int kof_touch_object(struct kof_engine *eng, kof_buf buf,
 	/* The object entire, which is what "is this marker here at all" means. One
 	 * extent in practice; resolved rather than assumed because KOF_SCAN_ALL is
 	 * the host's answer and this should not have a second one. */
-	n_whole = kof_scan_resolve_range(ctx, KOF_SCAN_ALL, whole);
+	{
+		struct kof_ext_buf eb = kof_ext_fixed(whole, KOF_SCAN_MAX_EXTENTS);
+
+		n_whole = kof_scan_resolve_range(ctx, KOF_SCAN_ALL, &eb);
+	}
 	kof_region_map_build(&rmap, ctx, fmt);
 	if (n_whole == 0 && buf.n) {
 		/*
@@ -1519,7 +1550,11 @@ int kof_region_map_build(struct kof_region_map *map,
 
 		if (!e)
 			return 0;
-		n = kof_scan_resolve_range(ctx, fmt->regions[k], e);
+		{
+			struct kof_ext_buf eb = kof_ext_fixed(e, KOF_SCAN_MAX_EXTENTS);
+
+			n = kof_scan_resolve_range(ctx, fmt->regions[k], &eb);
+		}
 		if (!n) {
 			free(e);
 			continue;

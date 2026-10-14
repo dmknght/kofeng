@@ -893,10 +893,12 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 /* A NUL-terminated name at a file offset, into the caller's buffer. Zero when
  * nothing could be read, so a caller can tell an empty name from a refused
  * one. */
-static int imp_name_at(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
+static int imp_name_at(kof_buf f, uint64_t at, char *dst, uint32_t dstn, int *cut)
 {
 	uint32_t q;
 
+	if (cut)
+		*cut = 0;
 	if (at == KGENOME_BROKEN || !at)
 		return 0;
 	for (q = 0; q + 1u < dstn; q++) {
@@ -907,8 +909,18 @@ static int imp_name_at(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
 		dst[q] = (char)c8;
 	}
 	dst[q] = 0;
+	/* The buffer was full and the name goes on: it is cut, and the caller says so. */
+	if (cut && q + 1u == dstn) {
+		uint8_t c8 = 0;
+
+		*cut = kof_rd_u8(f, at + q, &c8) && c8;
+	}
 	return q != 0;
 }
+
+/* How long a library or import name is read whole. A name past it is cut AND reported
+ * (KGENOME_TRUNCATED from kgenome_pe_imports): it was 63 bytes and said nothing. */
+#define IMP_NAME_MAX 4096u
 
 uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 			kgenome_pe_import_fn fn, void *user,
@@ -942,7 +954,8 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 	for (k = 0;; k++) {
 		uint64_t desc = d + (uint64_t)k * IMP_DESC_LEN, tbl;
 		uint32_t orig = 0, first = 0, dllrva = 0, t;
-		char dll[64];
+		char dll[IMP_NAME_MAX];
+		int cut = 0;
 
 		if (desc + IMP_DESC_LEN > f.n)
 			break;
@@ -959,8 +972,10 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 		if (!orig && !first && !dllrva)
 			break;
 		if (!imp_name_at(f, kgenome_pe_rva_to_off(p, dllrva), dll,
-				 sizeof dll))
+				 sizeof dll, &cut))
 			dll[0] = 0;
+		if (cut && status)
+			*status = kgenome_status_merge(*status, KGENOME_TRUNCATED);
 		/*
 		 * NO FirstThunk, NO SLOT ADDRESSES.
 		 *
@@ -984,7 +999,7 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 					(uint64_t)t * w;
 			uint32_t lo = 0;
 			uint64_t noff = 0;
-			char nm[64];
+			char nm[IMP_NAME_MAX];
 
 			if (p->pe32_plus) {
 				if (!kof_rd_u64(f, te, 0, &val))
@@ -1028,8 +1043,10 @@ uint32_t kgenome_pe_imports(kof_buf f, const struct kgenome_pe_info *p,
 
 				if (ho == KGENOME_BROKEN || !ho)
 					continue;
-				if (!imp_name_at(f, ho + 2u, nm, sizeof nm))
+				if (!imp_name_at(f, ho + 2u, nm, sizeof nm, &cut))
 					continue;
+				if (cut && status)
+					*status = kgenome_status_merge(*status, KGENOME_TRUNCATED);
 				noff = ho + 2u;
 			}
 			fn(user, slot, dll, nm, 0, noff);
@@ -1058,7 +1075,7 @@ uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
 			kgenome_pe_export_fn fn, void *user,
 			enum kgenome_status *status)
 {
-	uint64_t d;
+	uint64_t d, t_names, t_ords, t_funcs;
 	uint32_t n_names = 0, a_names = 0, a_ords = 0, a_funcs = 0, i, n = 0;
 
 	if (status)
@@ -1066,7 +1083,8 @@ uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
 	if (!f.p || !p || !p->valid || !fn)
 		return 0;
 	d = kgenome_pe_rva_to_off(p, p->dir[KGENOME_PE_DIR_EXPORT].rva);
-	if (!p->dir[KGENOME_PE_DIR_EXPORT].rva || !d)
+	/* KGENOME_BROKEN is "resolves nowhere", and adding to it wraps to a small offset */
+	if (!p->dir[KGENOME_PE_DIR_EXPORT].rva || !d || d >= f.n)
 		return 0;
 	if (!kof_rd_u32(f, d + EXP_N_NAMES, 0, &n_names) ||
 	    !kof_rd_u32(f, d + EXP_NAMES,   0, &a_names) ||
@@ -1078,24 +1096,34 @@ uint32_t kgenome_pe_exports(kof_buf f, const struct kgenome_pe_info *p,
 		if (status)
 			*status = KGENOME_TRUNCATED;
 	}
+	/* The three tables, resolved once; a table that resolves nowhere is absent, and an
+	 * absent one is never indexed (BROKEN + 4*i wraps onto the start of the file). */
+	t_names = a_names ? kgenome_pe_rva_to_off(p, a_names) : KGENOME_BROKEN;
+	t_ords = a_ords ? kgenome_pe_rva_to_off(p, a_ords) : KGENOME_BROKEN;
+	t_funcs = a_funcs ? kgenome_pe_rva_to_off(p, a_funcs) : KGENOME_BROKEN;
+	if (t_names >= f.n)
+		return 0;
 	for (i = 0; i < n_names; i++) {
-		uint64_t no = kgenome_pe_rva_to_off(p, a_names) + (uint64_t)i * 4u;
+		uint64_t no = t_names + (uint64_t)i * 4u, name_off;
 		uint32_t nrva = 0, frva = 0;
 		uint16_t ord = 0;
 
-		if (!a_names || !kof_rd_u32(f, no, 0, &nrva))
+		if (!kof_rd_u32(f, no, 0, &nrva))
 			break;
 		/* The RVA comes through the ordinal table, which is what maps a
 		 * name to its slot in AddressOfFunctions. Skipped rather than
 		 * guessed when either table is missing: a value of zero would
 		 * read as "at the image base". */
-		if (a_ords && a_funcs &&
-		    kof_rd_u16(f, kgenome_pe_rva_to_off(p, a_ords) +
-				  (uint64_t)i * 2u, 0, &ord))
-			(void)kof_rd_u32(f, kgenome_pe_rva_to_off(p, a_funcs) +
-					    (uint64_t)ord * 4u, 0, &frva);
+		if (t_ords < f.n && t_funcs < f.n &&
+		    kof_rd_u16(f, t_ords + (uint64_t)i * 2u, 0, &ord))
+			(void)kof_rd_u32(f, t_funcs + (uint64_t)ord * 4u, 0, &frva);
+		/* A name whose RVA is in no section is not a name the caller can read: it is
+		 * not reported, rather than handed the sentinel as an offset. */
+		name_off = kgenome_pe_rva_to_off(p, nrva);
+		if (name_off == KGENOME_BROKEN)
+			continue;
 		n++;
-		if (!fn(user, kgenome_pe_rva_to_off(p, nrva), frva))
+		if (!fn(user, name_off, frva))
 			break;
 	}
 	return n;
@@ -1125,6 +1153,8 @@ static void imptab_add(void *user, uint64_t slot, const char *dll,
 			t->dll = nv;
 			t->cap_dll = nc;
 		}
+		if (strlen(dll) >= KGENOME_PE_IMP_DLLLEN)       /* the table keeps a short copy: say so */
+			t->status = kgenome_status_merge(t->status, KGENOME_TRUNCATED);
 		snprintf(t->dll[t->n_dll], KGENOME_PE_IMP_DLLLEN, "%s", dll);
 		t->n_dll++;
 	}
@@ -1179,7 +1209,7 @@ uint32_t kgenome_pe_imp_name(kof_buf f, const struct kgenome_pe_imp *e, char *ds
 	if (!dstn)
 		return 0;
 	dst[0] = 0;
-	if (!e || !e->nameoff || !imp_name_at(f, e->nameoff, dst, dstn))
+	if (!e || !e->nameoff || !imp_name_at(f, e->nameoff, dst, dstn, NULL))
 		return 0;
 	return (uint32_t)strlen(dst);
 }

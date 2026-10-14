@@ -187,10 +187,6 @@ static int fam_cursor(void *arg)
 			for (mode = 0; mode < 6; mode++) {
 				struct kgenome_cell_space sp;
 
-				/* KNOWN UNDEFINED BEHAVIOUR (UBSAN only): cursor.c:45,61,62,65 add a signed delta to an offset;
-				 * a segment whose delta is near 2^63 overflows. Modes 1, 2 and 4 return such deltas. */
-				if (hk_ubsan() && (mode == 1 || mode == 2 || mode == 4))
-					continue;
 				struct kgenome_cell_cur k;
 				struct kgenome_cell_insn in;
 				unsigned steps = 0;
@@ -701,11 +697,7 @@ int main(int argc, char **argv)
 		int sig = 0;
 		enum hk_result r = hk_isolated(km_units_stop, NULL, 10, &sig);
 
-		KM_CHECK(r == HK_OK, "kgenome_mutation_units calls its callback again after the callback returned stop",
-			 "celllysis/mutation_units.c kgenome_mutation_units: `by_function(...); by_string(...); return;` - "
-			 "by_function is void and its early `return` on a stop is not seen, so by_string runs and offers the "
-			 "string clusters. Repro: ELF code region, one 200-byte function and one 120-byte string cluster, "
-			 "callback returns 1: called twice");
+		CK(r == HK_OK);   /* kgenome_mutation_units calls its callback again after the callback returned stop */
 	}
 	gb_free(&G);
 	printf("hostile_analysis: %d failure(s)\n", hk_fails);

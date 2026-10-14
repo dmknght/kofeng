@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include "../databases/pack/kofsyndrome.h"
 #include "../verdictor/verdict.h"
 #include "../kofcore/kofmod/heur.h"
@@ -20,9 +21,9 @@
 /*
  * THE DISEASES AN OBJECT HAS - found by its detectors, heuristics and diagnoses - and
  * what they make - see
- * databases/pack/kofsyndrome.h. The same all-diagnoses analysis as
- * kof_scan_diag_report, so asking costs what that costs and a normal scan pays
- * nothing: nothing in a scan reads this yet.
+ * databases/pack/kofsyndrome.h. A normal scan runs the analysis only when a
+ * diagnose that declares a disease can be answered on the object; the report
+ * (kof_scan_option.report_diag) runs every diagnose.
  *
  * kof_scan_diseases writes up to `cap` disease ids to `out` (kof_db_disease turns
  * one into a name and a type) and returns how many matched, which may exceed
@@ -46,10 +47,18 @@ static uint32_t kof_scan_diseases(const struct kof_obj_ctx *ctx, uint32_t *out,
 			out[n] = sc->subject.dis_set[i];
 		n++;
 	}
-	/* What the diagnoses found, when the caller asked for all of them. */
-	if (!sc->obj.diag.all)
+	/*
+	 * What the diagnoses found: all of them when the caller asked for the report,
+	 * otherwise the ones that declare a disease (the verdict reads those). The
+	 * analysis is run for it only when one of them is answerable on this object
+	 * (kof_scan_diag_feeds_verdict); one that already ran - a rule asked - is
+	 * read as it stands.
+	 */
+	if (!sc->obj.diag.all && !sc->obj.diag.graph &&
+	    !kof_scan_diag_feeds_verdict(ctx))
 		return n;
 	kof_scan_diag_force(ctx);
+	oc_diag_trace_scan(sc);
 	if (!sc->obj.diag.graph)
 		return n;
 	lim = kof_scan_diag_count(ctx);
@@ -93,18 +102,43 @@ int kof_scan_syndrome(const struct kof_obj_ctx *ctx, struct kof_synd_result *r)
 	 * so that nothing is cut to fit a table: a disease left out is evidence the
 	 * inference never saw. */
 	cap = sc->obj.n_dis_set + sc->eng->n_diag;
-	dis = malloc(((size_t)cap + 1u) * sizeof *dis);
-	if (!dis)
+	dis = calloc((size_t)cap + 1u, sizeof *dis);
+	if (!dis) {
+		/* no inference at all is not a clean answer: the verdict is made of this */
+		r->incomplete = 1;
+		OC_LIMIT(sc, "disease list for the syndrome not allocated");
 		return 0;
+	}
 	n = kof_scan_diseases(ctx, dis, cap);
-	if (sc->eng->synd)
+	if (sc->eng->synd) {
 		rc = kof_synd_infer(sc->eng->synd, dis, n < cap ? n : cap, r);
-	else
+		/*
+		 * kof_synd_infer answers n_query == 0 for an empty question and ALSO when its
+		 * working set could not be allocated (it has no status to say so, and is not
+		 * this file's to change): diseases were asked and none was counted, which is
+		 * the second.
+		 */
+		if (n && !r->n_query) {
+			r->incomplete = 1;
+			OC_LIMIT(sc, "syndrome inference not allocated");
+		}
+	} else {
 		r->n_query = n < cap ? n : cap;     /* diseases, and nothing to read them by */
+	}
 	free(dis);
 	/* AFTER the inference, which writes the whole result: whether the set it
 	 * read is whole is a fact about the object and not about the profiles. */
-	r->incomplete = (uint32_t)(kof_scan_incomplete(ctx) != 0);
+	r->incomplete = (uint32_t)(r->incomplete || kof_scan_incomplete(ctx) != 0);
+	/*
+	 * MEMORY REFUSED INSIDE THE ANALYSIS THE VERDICT READ is a verdict that may be missing a
+	 * disease, and sx_syndrome_verdict only marks an object with NO finding unfinished (a
+	 * finding already made is not taken back for a diagnose that could not add to it). So the
+	 * object is cut here - broken = LIMIT, limit_hits - for the one status that is no bound of
+	 * the object but an allocation that failed, and which therefore never fires in a normal run
+	 * (the budget statuses are the object's own and stay as they were).
+	 */
+	if (kof_scan_diag_status(ctx) == KGENOME_NOMEM)
+		OC_LIMIT(sc, "diagnose analysis ran out of memory, the verdict may lack a disease");
 	return rc;
 }
 
@@ -131,8 +165,29 @@ void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		 * made "unfinished" by a diagnose that could not add to it - and never
 		 * over a reason an earlier stage already recorded.
 		 */
-		if (r->incomplete && !res->n && !res->broken)
-			res->broken = KOF_BROKEN_LIMIT;
+		if (r->incomplete && !res->n && !res->broken) {
+			/*
+			 * AN OPTIONAL ROUTE THAT RAN OUT ON AN OBJECT THAT OPENED IS NOT A CUT
+			 * OBJECT. The emulate route of the diagnose scan spends its instruction
+			 * budget on a packer's stub - an 811 KB static ELF unpacked by its own
+			 * unpacker, whose child holds the program - and the object then came
+			 * back "Limit reached" over a child that was scanned in full. The
+			 * evidence is the child's (which carries its own status, and a cut of
+			 * its own is reported there), so the wrapper is not marked. It stays
+			 * visible: stats.analysis_moot counts it, the result says so
+			 * (analysis_moot) for -v and an examiner, and DEBUG traces it. An
+			 * object that did NOT open has nothing else to read, and the cut
+			 * stays its LIMIT (rule 4).
+			 */
+			if (sx_opened(sc)) {
+				res->analysis_moot = 1;
+				sc->st.analysis_moot++;
+				KOF_TRACE("[cut] analysis moot (diagnose status %d): the object opened into %u child(ren)\n",
+					  (int)kof_scan_diag_status(ctx), (unsigned)sc->child.n);
+			} else {
+				res->broken = KOF_BROKEN_LIMIT;
+			}
+		}
 		return;
 	}
 	if (res->n >= KOF_MAX_FINDINGS) {
@@ -144,7 +199,18 @@ void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 	in.arch = ctx ? ctx->arch : 0u;
 	f = &res->v[res->n++];
 	kof_verdict_syndrome(&in, f);
-	f->is_verdict = (uint8_t)sx_verdict_take(sc, f, opt->all_matches);
+	f->is_verdict = (uint8_t)sx_verdict_take(sc, f, opt->all_matches, 0);
+}
+
+/*
+ * WHETHER A DISEASE STANDS FOR A MODULE'S FINDING: the module declared one, so the
+ * set the syndromes read holds it (sx_disease_add) and the object's verdict is
+ * composed from the set. An unpacker's report is not read through a disease - it
+ * names what opened - and is never covered.
+ */
+int sx_finding_covered(const struct kof_module *m, const struct kof_finding *f)
+{
+	return m && m->disease && f->engine != (uint8_t)KOF_ENGINE_UNPACKER;
 }
 
 /*
@@ -156,23 +222,26 @@ void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
  * and the slot is what a scan REPORTS. Two different questions, and losing
  * the first to answer the second is what the note above KOF_MAX_FINDINGS
  * warns against.
+ *
+ * `covered` is the one reason a finding stays out of the slot by KIND: a
+ * disease stands for it (sx_finding_covered), so the syndrome verdict of the
+ * object (sx_syndrome_verdict) is what reports it, under the name the
+ * syndromes compose. Every other finding IS its object's answer and takes
+ * the slot by rank. The filter used to be the finding's ENGINE - only the
+ * syndrome's and an unpacker's took - which answered "covered" for every
+ * detector, rule and model of a database that declares no disease at all
+ * (the shipped one): 358 of 358 files the roll-up counted infected, suspected
+ * or heuristic over 791 corpus files delivered no verdict event, and a packed
+ * miner came back "infected 1 file(s)" with nothing above it. The roll-up
+ * (kverdict_filemap_fold) and the events now read one fact: a finding either
+ * has a disease behind it that makes the verdict, or it is the verdict.
  */
 int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f,
-			int all_matches)
+			int all_matches, int covered)
 {
 	int rank, have;
 
-	if (!sc || !f)
-		return 0;
-	/*
-	 * What takes
-	 * the slot is what the syndromes made of the diseases, and the report of a
-	 * module that opens something (a container, a packer). A detector's or a
-	 * rule's finding stays in the array as evidence and is not the answer: its
-	 * disease is in the set the syndromes read, and the name comes from there.
-	 */
-	if (f->engine != (uint8_t)KOF_ENGINE_SYNDROME &&
-	    f->engine != (uint8_t)KOF_ENGINE_UNPACKER)
+	if (!sc || !f || covered)
 		return 0;
 	rank = kverdict_level_rank(f->level);
 	have = sc->subject.have ? kverdict_level_rank(sc->subject.lvl) : -1;

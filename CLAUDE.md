@@ -102,6 +102,32 @@ Where a limit really is a DoS bound, say so at the definition, and make the
 degradation honest: `reaches()` answers UNKNOWN when it runs out of budget,
 which is "this graph cannot establish it" and not a wrong answer.
 
+**An entry's own bound is not the tree's.** A container is walked entry by entry,
+and two kinds of bound meet there. A bound of ONE entry - the object cap, the
+declared-ratio clamp - cuts that entry: the bytes decoded so far are its object,
+it carries `KOF_BROKEN_LIMIT` itself (`kof_src_mark_cut`, read back by the walk as
+the object's result), `limit_hits` counts it, and the parent's loop goes on to the
+next entry (`oc_entry_cut`, `oc_entry_cut_close`; the sink refuses only the rest of
+that entry, `sink.refuse`, and the module's own close of it answers "made"). When
+nothing of the entry was kept there is no child to say so, and the PARENT reports it
+(`oc_scan_limit`: a report, no control flow). A bound of the WHOLE tree - the
+produced-bytes budget, the resident ceiling, the child quota, the window allowance
+(`ledger.window_left`: the root plus the produced-bytes budget, charged by
+`oc_window` for every container), an allocation - is sticky (`oc_scan_broken`:
+`open.stop`) and ends the walk, and the parent says Limit. One sticky stop for both
+was the defect: an 84 MB archive with one 91 MB member lost the 5700 entries after
+it. A module's loop ends on a refusal of the HOST's (`kunp_rcstruct_done` or
+`_window` answering 0 because the tree will take no more), never on one entry's cut.
+
+**A bound of WORK is the tree's too, sized from the ROOT.** A per-object limit with a floor restarts
+for every child, and a file chooses how many children it has: a zip of 100 one-KB spinning PEs cost
+26 s. Emulated instructions are charged to `ledger.emu_insn_left` (64 Mi + 512 per root byte, at most
+4 Gi, or the host's `max_emu_insn`; a child's size buys nothing, it came from the root); a run gets the
+smaller of its own limit and what is left (`oc_emu_afford`, `oc_emu_charge`, objctx_emu.c). Optional
+evidence (the diagnose emulating routes, the API-resolution run) goes first, the first
+`KOF_SCAN_EMU_FLOOR_RUNS` unpack runs keep their floor, and a refusal is said (KOF_BROKEN_LIMIT,
+`limit_hits`, `emu_budget_denied`). A new per-child pass with a floor takes its allowance from the tree.
+
 ## 5. Table lookup, not re-analysis.
 
 Decide a thing once, where the information is, and store it. Do not re-derive
@@ -354,6 +380,86 @@ being asked; do not add code that contradicts it.
   `kgenome_pe_exports`, `genotype/image/pe_image.c`); `analyzers/parsers/binaries/pe/pe_sym.c`
   only decides how an import or an export is spelled in a KSYM record.
 
+**Memory: one number for the whole engine.** The engine never holds more than 512 MiB
+(`KOF_ENGINE_MEM_CAP`, `kofcore/kofbudget.h`; a host may set another with `keng_set_memory_cap`,
+zero means the default, there is no "unlimited"). The database is charged first at load (its index
+and filters; record payloads stay in the mapped read-only pack and are touched on demand); each
+scanner reserves its fixed cost when made (`kscan_new` answers NULL when it cannot be afforded);
+when it starts an object it takes its share, (cap - database) / scanners alive less its fixed cost
+and presence table, and that share is the ledger ceiling everything produced, decoded, emulated or
+copied for the object is charged to. When something does not fit it degrades in this order, each
+step reported and none silent: caches shrink (decode trace, presence table), copies become borrows
+(emulator image pages), optional products are skipped with a status (the view, the emulate route:
+`KOF_BROKEN_LIMIT`, `limit_hits`), the object is refused last. A builder of a big table asks first
+(`kof_budget_ask`) and picks its layout from the answer. **The input file is inside the cap and is
+never mapped**: `kof_src_file` (`scanners/objsrc.c`) reads it with `read(2)` into a buffer charged to
+the budget, so a file truncated while it is scanned is a short read at that call (the object is
+`KOF_BROKEN_DAMAGED`, with the bytes that were read) and not a SIGBUS, and the engine installs and
+chains no signal handler at all: a handler is process-global state (a host's own would be replaced or
+ours would swallow its signals), it would depend on the fault address the OS reports, and it cannot
+tell this fault from a genuine bug, which must kill the process. A file may take a third of the
+scanner's share in the heap (`kof_scan_file_room`); a larger one is copied to the engine's own unnamed
+spill file when one may be made (a real disk or a directory the host named, never a RAM filesystem
+it did not), and otherwise held up to the whole share and, past that, read as far as it goes and
+reported `KOF_BROKEN_LIMIT`. The one map left over input is the engine's own anonymous spill file
+(`kof_src_fd`), which has no name and so no writer. The database packs are mapped by the loader and
+are the remaining exposure (see `dbloader_packs.c`).
+**The block (similarity) index and the pattern table are the model of it: their memory does not follow
+the database.** A pack's tail is one container (`databases/pack/dbkix.h`): a chain of parts that each end
+in the same 64-byte footer (`[old pack][pattern table, KPXF][block index, KIXF]`, either optional, probed
+by `kof_tail_probe`), read with `pread` and never mapped through one sliced reader (`struct kof_slices`: a
+CRC a 64 KiB, checked the first time a slice is read by `kof_crc32_fast_cont` (`dbcrc.c`: eight bytes a step, bit
+for bit `kof_crc32`, which also checks the old part at load), the verdict shared; a short read is `KOF_KIX_E_IO`,
+a wrong byte `KOF_KIX_E_CRC`, never a signal). Both footers carry where the old pack ends and its CRC, so
+an engine that knows only the block index reads the pattern part as a gap, and one that knows neither loads
+the pack as one with a long tail; no record changed and no version moved. **Blocks**: the engine holds only
+the directory (257 KB) and a filter whose size the ledger grants (16 bits a hash by default, at most 16 MiB,
+halved under pressure and reported as `KOF_MTN_B_FILTER_DEGRADED`); 80 hashes and 32,000,000 cost the same
+few megabytes plus that filter. A pack from before the trailer is indexed in memory under half of what the
+ledger has left, or refused with `KOF_MTN_B_OVER_BUDGET` and a stderr line (the engine loads, similarity
+rules do not score). The matcher's per-scanner state follows what the object touches, is capped by the
+scanner's ledger and charged to it (`kof_mutation_limit`, `sc->mutation.ledgered`). A damaged or shortened
+pack file is a status on the object (`KOF_MTN_S_SLICE_CRC`, `KOF_MTN_S_IO_ERROR`, `KOF_MTN_S_IO_BUDGET`),
+never a signal. **Patterns** (`detectors/pattern/kofpix.h`; it replaced five table shapes that were 484
+bytes a rule and a word a marker per scanner): a pack whose table is at least `KOFPIX_EMBED_MIN` (256 KiB,
+about 7000 markers) carries it as a part; the loader opens it, and what is resident is the exact key set (2
+bytes a distinct key), the directory and a filter the ledger grants (8 MiB over every region at most, a
+quarter of what is left; `KOF_PIX_B_DEGRADED`); 8,000, 800,000 and 8,000,000 rules cost 0.07, 5.3 and 21.8 MB
+(`kdb_pattern_status`). The tables of every pack are swept together (`kofpix_set`: a region is read once
+whatever the pack count, the filters merged). A pack without a part - a smaller table, or an older pack -
+has the same table built in memory from its own sections under half of what the ledger leaves
+(`KOF_PIX_B_IN_RAM` when it was big enough to deserve a part, `KOF_PIX_B_OVER_BUDGET` when refused, and then
+that pack's markers are searched one at a time, exactly; an unopenable table is `KOF_PIX_B_OPEN_FAILED`).
+Per scanner: a fixed context (3.1 MB when a table is read from a pack, 0.2 MB when every table is in
+memory: `kofpix_ctx_fixed`), a sparse table of what was found that is bounded by the object's ledger share and
+charged to it (`sc->match.pix_ledgered`), and a memo that is a direct-mapped cache of at most 65536 cells; none
+of it follows the marker count. A sweep that reaches its read bound, its record-visit bound (a base whose
+markers share a key), a full found-table, a short read or a bad checksum STOPS and says so
+(`KOFPIX_S_*`, `kof_stats.multi_degraded`); the region is then not swept and its masks are answered by the
+per-marker path, which is exact. What loading touched of the pack's old part is given back as it goes
+(`kof_map_drop`: after the checksum, every 128K modules while the tables are copied, and at the end of the
+load), so the peak follows the pack no more than the steady state does. **Not yet inside the cap, and the
+largest thing left: the module table**, about 155 bytes a rule at 8,000,000 rules: `struct kof_module` 136
+(`mods`), the code copy (the blob, 16-aligned: 16 here, 75 to 170 in the shipping detector packs),
+`rng_uid` 1 a range, `mod_by_target` 4 a target a module names (and 4 for one that names none: one list,
+`mod_any`, merged with a format's own by `kof_mod_walk`; it was 116, a copy in every format), and
+`blk_tab` 16 a block when several packs carry blocks (`kofexamine/kofinspect.c` reads `e->blk_tab[b]` and
+`e->mods[i]`, so neither can leave memory while it does). The per-object walk over a format's modules is
+O(modules) whatever is resident: past a few million rules the fix is a marker-driven selection (a module
+runs because a declared marker was found), not a smaller record. A host that lives long calls
+`kscan_trim` between objects; the engine never calls `mallopt`. A new allocation class is charged to
+the scanner's ledger (`scan_charge`) or reserved in `kof_scan_fixed`, not added beside them.
+The parsed views of zip, pdf, tar, lha, arj, cab, chm, docole, rar and 7z are the example of a table that follows the file and not a
+constant: their entries, objects, folders, streams and runs are allocated to what the structure holds (bounded by the object's length over the smallest record, and
+by the ledger: `struct kof_view_mem` in `range.h`, `kof_tab_grow` in `tabgrow.h`), charged when the parse ends and given
+back at the end of the object (`sx_views_release`); a table the ledger cannot grow stops the walk and the format's own
+"full" bit says so. The extents a region resolves into start at `KOF_SCAN_MAX_EXTENTS` and grow the same way
+(`scanners/scan_ext.c`). A module walks those tables with `kof_zip_next` / `kof_pdf_next` / `kof_<format>_next`, one vtable slot (`view_next`, the
+format is the object's), so the host sees that it did (`sx_walk_check`): a module that returns before its walk
+must still make one call. What a table's bound is, per format, is written at its `KOF_*_MIN` constant in `kofmod/<format>.h`
+(a cabinet's folder blocks are listed once per folder and searched, and the work of listing them is budgeted at twice the blocks
+the file can hold; a 7z header may decode to sixteen times the bytes it is stored in).
+
 **Names inside libgenome (built, not provisional).** A file name says what the
 file is: `<family>_<part>.c`. The family is the subject (what the symbols in it
 are called), the part is the job of that file in it.
@@ -538,6 +644,26 @@ shown to fail on a deliberate violation before it is trusted.
 Which rules a grep or this script cannot see - "no writable global state", "a tool
 does not compose verdicts" - are checked in review.
 
+**Where the first-hit stops are (the default is pending review).** `kof_scan_option.all_matches`
+(`--all-matches` in kofscanner, always on in kofexamine) keeps BOTH behaviours; the default is off, the
+stops are on, and the owner will decide the default after the normaliser and kofviewer upgrades, because
+it interacts with the syndrome/cluster verdict (a cluster is read off the whole set of what matched).
+Every site is keyed on the one flag - none ignores it: `scan_pipeline.c` `run_modules` (an INFECT ends the
+detect stage when the database declares no disease: `kof_engine.reads_diseases`, which exists only for
+that stop), `sx_pipeline_run` (a detector's verdict, `det_n`, or a rule that `concluded`, ends the open
+chain, so the normalised view and block similarity never run on a detected object; measured: 6 lost
+descendants in 3023 objects), `scan_heur.c` (one HEUR line per object ends the heuristic pass) and
+`scan_unpack.c` (a named finding cancels unpacking). What each protects: the first is cost (a rule that
+reads a diagnose pays for an object already known infected), the second is cost and a verdict that
+contradicts itself, the third is output noise, the fourth is a payload nobody should open twice.
+`tests/unit/match_all.c` pins what each setting does (off: no view, no block rule on a detected object;
+on: both run). Two places look like stops and are not keyed on the flag, deliberately: the scored
+heuristic model stays silent on an object something already named (its score is still published), and a
+rule's HEUR finding on an object that opened moves to the child. `a child replaces its parent as the
+subject` (the unpack stop) is not a first-hit stop. A first-hit policy of the fnprint prototype
+(`KGENOME_FNP_RETIRE_TAG`, `_TAG_STOP`, `_STOP_FIRST`) is opt-in and conflicts with cluster detection;
+`fnprint.h` says so.
+
 **The module ABI is several headers behind one umbrella.** `libkofeng/kofcore/kofmod/kofsig.h`
 is the only ABI header a signature module includes (`bases/*.c` also names the module-side
 helper headers beside it, below); it holds
@@ -579,13 +705,26 @@ callback and reads the files back with `_at` / `_count` / `_files`. The name-to-
 split (the first `//`), the rank of the three levels and the "examined" OR are in it, so
 a tool does not compose a file's verdict; `kofscanner` only prints.
 
+**A finding is either covered by a disease or it IS the verdict** (`sx_verdict_take`, `sx_finding_covered`): a
+module that declares a disease is read through the syndromes (`sx_syndrome_verdict` composes the name); every other
+finding takes the file's verdict slot by rank and reaches `on_event_detected`. The roll-up and the events therefore
+read one fact, and `kof_stats.verdict_lost` (files counted with no event; `kofscanner` prints it as `ERROR`) is the
+engine's own check that they do; `tests/unit/verdict_delivery.c` runs the same check over any corpus. An analysis
+route that ran out on an object that OPENED into a child is `kof_result.analysis_moot`, not `KOF_BROKEN_LIMIT`.
+
+**Which diagnose was called** is said by the engine, not by a diagnose (they are generated and carry no code): one
+line per diagnose and event, `[diag] <name> id=<hex> asked-by=<module|-> gate=<open|closed:<signs>> routes=<declared>
+route=<static|emulate|-> insn=- stop=<scan status> answer=<yes|no|unknown>` (`scanners/objctx_diag_trace.c`), as
+`KOF_TRACE` in a DEBUG build and, in any build, as the debug-callback fact `kverdict_fact_id("diag")` (`what` is the
+line after `[diag] `, `value` 1/0/2) when the host registered `kscan_on_debug`; `tests/unit/diag_trace.c` pins it.
+
 **The big engine units are split by what they serve, with a private header.** `scanners/objctx_decomp.c`
 (sinks and the streaming dispatch) shares `objctx_decomp.h` with `objctx_decomp_buf.c` (codings whose
 whole output must be addressable), `objctx_decomp_text.c`, `objctx_decomp_folder.c` (BCJ2, MSZIP, LZX),
 `objctx_decomp_entry.c` (an entry, a coding chain) and `objctx_decrypt.c`. The PDF parser in
 `analyzers/parsers/containers/` shares `pdf_int.h` between `pdf_parse.c` (the parse), `pdf_walk.c`
 (objects), `pdf_xref.c` (trailer, cross reference), `pdf_dict.c` (one dictionary), `pdf_entries.c`
-(the entry table), `pdf_docinfo.c` and `pdf_names.c`. The small helpers a hot loop calls stay
+(the entry table), `pdf_index.c` (lookups by object number), `pdf_docinfo.c` and `pdf_names.c`. The small helpers a hot loop calls stay
 `static inline` in the private header; what two units call is an extern with the family's prefix
 (`oc_`, `pdf_`). A new file in either family is picked up by the wildcard.
 
@@ -596,7 +735,12 @@ declaration unit is `scanners/objctx_child.c` (close, gather, produced reads, th
 unit is `objctx_emu.c` and `objctx_emu_gather.c` (what a run produced); the diagnose unit
 `objctx_diag.c` and `objctx_diag_query.c`; all share `objctx_int.h`. The pack loader is
 `databases/dbloader.c`, `dbpackcheck.c` (validation) and `dbloader_packs.c` (mapping and
-the side tables), sharing `dbloader_int.h` (`kof_db_`); the diagnose source reader is
+the side tables), sharing `dbloader_int.h` (`kof_db_`); the pack's tail container (the block index, the
+pattern part's footer and the sliced reader both parts are read through) is `databases/pack/dbkix.c`, below
+the detectors because the matchers read it; the pattern table is `detectors/pattern/kofpix.c` (open, the set,
+the sweep), `kofpix_build.c` (the packer's side, and a pack's markers from its own sections) and
+`kofpix_private.h` (the layout), with `kofmultimatch.{c,h}` as what a marker is to it (keyable, the key, the
+verification); the diagnose source reader is
 `diagsrc.c`, `diagsrc_parse.c` and `diagsrc_resolve.c`, sharing `diagsrc_int.h`
 (`kof_dsrc_`). The tools: `kofscanner/` is `kofscanner.c` (arguments, the run),
 `kofscan_out.c` (output) and `kofscan_procs.c` (`--scan-procs`), sharing `kofscanner_int.h`

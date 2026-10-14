@@ -12,6 +12,15 @@
 #define KOF_ERR_OPEN (-1)      /* could not be opened, or is not a regular file */
 #define KOF_ERR_READ (-2)      /* could not be mapped */
 #define KOF_ERR_ARG  (-3)
+#define KOF_ERR_NOMEM (-4)     /* a scan or walk could not allocate its first record: no object was delivered */
+
+/* Why kscan_new_ex answered NULL (kofeng.h). */
+enum kscan_new_status {
+	KSCAN_NEW_OK = 0,
+	KSCAN_NEW_NO_ENGINE,
+	KSCAN_NEW_BUDGET,
+	KSCAN_NEW_NOMEM
+};
 
 /* ------------------------------------------------------------------- digest */
 

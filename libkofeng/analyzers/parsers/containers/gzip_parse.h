@@ -31,6 +31,15 @@ int kof_gzip_parse(kof_buf file, struct kof_gzip_info *info,
 		   struct kof_obj_ctx *ctx);
 
 /*
+ * The header of ONE member, read from the first byte of `file` - the part of
+ * kof_gzip_parse that does not depend on the member being the whole object. Fills
+ * `info` the way the parse does up to data_off (trailer fields stay zero).
+ * Answers 0, with `info` zeroed, when `file` does not open with a gzip header.
+ * The host uses it to find the second and later members of a concatenated file.
+ */
+int kof_gzip_header(kof_buf file, struct kof_gzip_info *info);
+
+/*
  * Does this object look like gzip?
  *
  * The two magic bytes and the compression method, which is three bytes of the ten

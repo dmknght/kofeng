@@ -30,8 +30,12 @@
  * the answer is partial (kgenome_status.h). The ledger's own status (memory
  * refused) is merged in when the status is read.
  */
-void kgenome_diag_note(struct kgenome_diag_scan *s, enum kgenome_status st)
+void kgenome_diag_note_at(struct kgenome_diag_scan *s, enum kgenome_status st,
+			  const char *file, int line)
 {
+	if (st != KGENOME_OK)
+		KOF_TRACE("[cut] %s:%d diagnose scan status %s\n", file, line, kgenome_status_name(st));
+	(void)file; (void)line;
 	if (s)
 		s->status = kgenome_status_merge(s->status, st);
 }
@@ -141,16 +145,52 @@ static void merge_sites(struct kgenome_diag_scan *s)
 		kgenome_diag_note(s, KGENOME_NOMEM);    /* the copies stay: said */
 		return;                 /* duplicates are worse, not fatal */
 	}
-	/* 1. which node each one becomes, and which old node speaks for it */
-	for (i = 0; i < s->n_hit; i++) {
-		for (j = 0; j < n; j++)
-			if (s->hit[i].at != KGENOME_BROKEN &&
-			    s->hit[rep[j]].at == s->hit[i].at &&
-			    s->hit[rep[j]].cap == s->hit[i].cap)
-				break;
-		map[i] = (uint16_t)j;
-		if (j == n)
-			rep[n++] = (uint16_t)i;
+	/*
+	 * 1. which node each one becomes, and which old node speaks for it. The
+	 * first node of a (site, capability) is its representative; it is found
+	 * through a table of the representatives so far - the scan over all of
+	 * them for every node was quadratic, and a static binary with 30000 nodes
+	 * spent 3.5 G instructions here. A node at KGENOME_BROKEN is never
+	 * folded and never looked for. Where the table cannot be had the scan is
+	 * the same one as before.
+	 */
+	{
+		uint32_t tm = 1u, *tab = NULL;
+
+		while (tm < 2u * s->n_hit)
+			tm <<= 1;
+		tab = calloc(tm, sizeof *tab);
+		tm--;
+		for (i = 0; i < s->n_hit; i++) {
+			const uint64_t at = s->hit[i].at;
+			uint32_t hx = 0;
+
+			if (tab && at != KGENOME_BROKEN) {
+				hx = (uint32_t)(((at * 0x9e3779b97f4a7c15ull) ^
+						 ((uint64_t)s->hit[i].cap * 0xff51afd7ed558ccdull)) >> 32) & tm;
+				for (; tab[hx]; hx = (hx + 1u) & tm) {
+					j = tab[hx] - 1u;
+					if (s->hit[rep[j]].at == at &&
+					    s->hit[rep[j]].cap == s->hit[i].cap)
+						break;
+				}
+				j = tab[hx] ? tab[hx] - 1u : n;
+			} else if (at == KGENOME_BROKEN) {
+				j = n;
+			} else {
+				for (j = 0; j < n; j++)
+					if (s->hit[rep[j]].at == at &&
+					    s->hit[rep[j]].cap == s->hit[i].cap)
+						break;
+			}
+			map[i] = (uint16_t)j;
+			if (j == n) {
+				if (tab && at != KGENOME_BROKEN)
+					tab[hx] = n + 1u;
+				rep[n++] = (uint16_t)i;
+			}
+		}
+		free(tab);
 	}
 	if (n == s->n_hit) {            /* nothing to fold - the common case */
 		free(map);
@@ -292,8 +332,12 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 		run &= KGENOME_DIAG_RUN_SYSCALL;
 	}
 	s = calloc(1, sizeof *s);
-	if (!s)
+	if (!s) {
+		if (in && in->refused)
+			*in->refused = KGENOME_NOMEM;
+		KOF_TRACE("[cut] kgenome_diag_scan_with_inputs: scan object not allocated\n");
 		return NULL;
+	}
 	/*
 	 * THE BUDGET: the caller's, with every field it left at zero filled by the
 	 * default for THIS object. The scan never reads engine state to find a limit.
@@ -313,6 +357,7 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 				s->bud.max_insn = b->max_insn;
 			if (b->max_insn_resolve)
 				s->bud.max_insn_resolve = b->max_insn_resolve;
+			s->bud.insn_spent = b->insn_spent;
 			if (b->max_steps)
 				s->bud.max_steps = b->max_steps;
 			if (b->max_nodes)
@@ -364,7 +409,10 @@ struct kgenome_diag_scan *kgenome_diag_scan_with(const struct kgenome_obj *obj,
 const struct kgenome_diag_apihash_set *kgenome_diag_apihash(struct kgenome_diag_scan *s,
 					   const struct kgenome_obj *obj)
 {
+	if (!s)
+		return NULL;
 	if (!s->apihash && !s->apihash_done) {
+		s->own |= KGENOME_DIAG_OWN_APIHASH;
 		s->own_apihash = kgenome_diag_apihash_run(obj, s->base, s->size,
 						 kgenome_diag_imports(s, obj), &s->bud);
 		s->apihash = s->own_apihash;
@@ -394,6 +442,13 @@ void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *
 	const uint64_t *ent;
 	uint32_t n;
 
+	if (!out)
+		return;
+	if (!obj) {
+		memset(out, 0, sizeof *out);
+		out->status = KGENOME_BAD_INPUT;
+		return;
+	}
 	kgenome_funcs_build(obj->format, data, data_n, obj->file_header, out);
 	if (out->n || out->status != KGENOME_OK || obj->format != KGENOME_FMT_ELF || !obj->file_header)
 		return;
@@ -445,6 +500,7 @@ const struct kgenome_func_set *kgenome_diag_funcs(struct kgenome_diag_scan *s,
 {
 	if (!s->funcs) {
 		if (obj && obj->file_header) {
+			s->own |= KGENOME_DIAG_OWN_FUNCS;
 			kgenome_diag_funcs_with_walk(obj, s->base, s->size,
 						 kgenome_diag_scan_walk(s), 0,
 						 &s->own_funcs);
@@ -474,27 +530,101 @@ const struct kgenome_elf_relocs *kgenome_diag_relocs(struct kgenome_diag_scan *s
 	f.n = s->size;
 	if (kind == KGENOME_ELF_RELOC_DATA) {
 		if (!s->data_ready) {
-			if (ei && ei->valid)
+			if (ei && ei->valid) {
 				(void)kgenome_elf_reloc_table(f, ei, KGENOME_ELF_RELOC_DATA,
 							  &s->data_relocs);
+				kgenome_diag_note(s, s->data_relocs.status);
+			}
 			s->data_ready = 1;
 		}
 		return &s->data_relocs;
 	}
 	if (!s->relocs) {
-		if (ei && ei->valid)
+		if (ei && ei->valid) {
+			s->own |= KGENOME_DIAG_OWN_RELOCS;
 			(void)kgenome_elf_reloc_table(f, ei, KGENOME_ELF_RELOC_CODE,
 						  &s->own_relocs);
+			kgenome_diag_note(s, s->own_relocs.status);
+		}
 		/* an empty table is still the answer, and is not asked for again */
 		s->relocs = &s->own_relocs;
 	}
 	return s->relocs;
 }
 
+struct rcall_gather {
+	struct kgenome_diag_rcall *v;
+	uint32_t n, cap;
+	int oom;
+};
+
+static void rcall_put(void *user, uint64_t at, uint64_t target, const char *name)
+{
+	struct rcall_gather *g = user;
+	struct kgenome_diag_rcall *r;
+
+	if (g->n == g->cap) {
+		uint32_t nc = g->cap ? g->cap * 2u : 64u;
+		struct kgenome_diag_rcall *nv = realloc(g->v, (size_t)nc * sizeof *nv);
+
+		if (!nv) {
+			g->oom = 1;
+			return;
+		}
+		g->v = nv;
+		g->cap = nc;
+	}
+	r = &g->v[g->n++];
+	r->at = at;
+	r->target = target;
+	/* An internal call names a capability only by accident. */
+	r->cap = (target || !name) ? (uint16_t)KGENOME_NUCLEO_NONE
+				   : kgenome_nucleo_cap_of_name(name);
+	r->name = r->cap != KGENOME_NUCLEO_NONE ? kgenome_nucleo_name_id(name) : 0u;
+}
+
+const struct kgenome_diag_rcall *kgenome_diag_relcalls(struct kgenome_diag_scan *s,
+						   const struct kgenome_obj *obj,
+						   uint32_t *n)
+{
+	if (!s->rcall_done) {
+		const struct kgenome_elf_info *ei = obj && obj->format == KGENOME_FMT_ELF
+						? kgenome_obj_elf(obj) : NULL;
+		struct rcall_gather g;
+		enum kgenome_status rst = KGENOME_OK;
+		kof_buf f;
+
+		f.p = s->base;
+		f.n = s->size;
+		memset(&g, 0, sizeof g);
+		s->rcall_done = 1;
+		if (ei && ei->valid) {
+			kgenome_elf_relcalls(f, ei, kgenome_diag_relocs(s, obj, KGENOME_ELF_RELOC_CODE),
+					     rcall_put, &g, &rst);
+			/* a name cut at the symbol bound is a name not whole */
+			kgenome_diag_note(s, rst);
+		}
+		if (g.oom) {
+			s->halt = 1;
+			kgenome_diag_note(s, KGENOME_NOMEM);
+		}
+		s->rcall = g.v;
+		s->n_rcall = g.n;
+		(void)kgenome_ledger_charge(&s->led, (uint64_t)g.n * sizeof *g.v);
+	}
+	*n = s->n_rcall;
+	return s->rcall;
+}
+
 struct kgenome_diag_scan *kgenome_diag_scan(const struct kgenome_obj *obj,
 				    const uint8_t *base, uint64_t size)
 {
 	return kgenome_diag_scan_with(obj, base, size, KGENOME_DIAG_RUN_DEFAULT);
+}
+
+unsigned kgenome_diag_scan_own(const struct kgenome_diag_scan *s)
+{
+	return s ? s->own : 0;
 }
 
 unsigned kgenome_diag_scan_ran(const struct kgenome_diag_scan *s)
@@ -559,6 +689,7 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *s)
 	free(s->adj_head);
 	free(s->adj_edge);
 	free(s->wrap);
+	free(s->wrap_sorted);
 	/* The walk may outlive this scan (it is the object's): let go of the ledger
 	 * it was charging before the ledger is gone. */
 	kgenome_diag_walk_bind(s->walk, NULL);
@@ -568,6 +699,7 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *s)
 	kgenome_funcs_free(&s->own_funcs);
 	kgenome_diag_walk_free(s->own_walk);
 	kgenome_elf_reloc_table_free(&s->data_relocs);
+	free(s->rcall);
 	free(s->hit);
 	free(s);
 }

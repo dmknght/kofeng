@@ -1421,6 +1421,27 @@ struct kof_content {
 			    uint32_t a, uint32_t b);
 	int (*diag_str32)(const struct kof_obj_ctx *, uint32_t diag,
 			  const char *name);
+	/*
+	 * view_next   the next row of the table of this object's parsed view, by a
+	 *             cursor the CALLER owns: row *cursor, then *cursor is advanced; NULL
+	 *             at the end, or for a format whose view has no walkable table.
+	 *             The row is the format's own (struct kof_zip_entry for ZIP and DOCZIP,
+	 *             struct kof_pdf_object for PDF) and is read through kof_zip_next /
+	 *             kof_pdf_next, never by hand.
+	 *
+	 *             Why a call and not an array in the view: the tables are as long as the
+	 *             archive (they were fixed arrays of 4096), so a module has no array to
+	 *             index and no count that is a limit; and because the call goes through
+	 *             the host the host KNOWS a module read the table - a module that never
+	 *             does while the archive has rows is one built for the layout before
+	 *             this slot, which would open nothing and say nothing, and the engine
+	 *             reports that object instead (struct kof_view_mem.walked).
+	 *
+	 * AT THE END OF THE TABLE, so a module built against an older header is
+	 * unaffected; a module built against this one needs a host that has the slot,
+	 * which is what KOFSIG_ABI_VERSION is for.
+	 */
+	const void *(*view_next)(const struct kof_obj_ctx *, uint32_t *cursor);
 };
 
 #endif /* KOFENG_KOFCONTENT_H */

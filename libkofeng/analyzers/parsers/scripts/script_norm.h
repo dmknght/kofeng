@@ -206,4 +206,27 @@ int kof_lex_is_code_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
 uint32_t kof_script_fold(const struct kof_lex *lx, const uint8_t *in,
 			 uint32_t n, uint8_t *out, uint32_t cap);
 
+/*
+ * THE SAME, AND WHAT IT COULD NOT FOLD. `limit` (may be NULL) is set to the bounds
+ * that fired, so a caller can say the answer was cut and not that the script
+ * builds nothing more:
+ *
+ *   KOF_FOLD_VARS   the table of variables would not grow (its allowance is
+ *                   sixteen times the input, or the allocator refused); a
+ *                   constant built from a variable that was not remembered was
+ *                   not folded.
+ *   KOF_FOLD_DEPTH  a statement nested past the recursion bound (256 levels of
+ *                   str_replace, which is stack, not a table) was not folded.
+ *   KOF_FOLD_ARENA  the arena every constant lives in would not grow (512 MB, or
+ *                   the allocator refused) - reachable only by a file that doubles
+ *                   a value through variables, which is not a literal it holds.
+ */
+#define KOF_FOLD_VARS   0x1u
+#define KOF_FOLD_DEPTH  0x2u
+#define KOF_FOLD_ARENA  0x4u
+
+uint32_t kof_script_fold_ex(const struct kof_lex *lx, const uint8_t *in,
+			    uint32_t n, uint8_t *out, uint32_t cap,
+			    uint32_t *limit);
+
 #endif /* KOFENG_SCRIPT_NORM_H */

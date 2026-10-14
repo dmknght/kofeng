@@ -2039,7 +2039,7 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 			uint8_t *rb = NULL;
 			struct kof_obj_ctx rctx;
 			void *rview = NULL;
-			const struct kof_parser *rf;
+			const struct kof_parser *rf = NULL;
 
 			if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 &&
 			    fseek(f, 0, SEEK_SET) == 0 && (rb = malloc((size_t)n)) &&
@@ -2055,7 +2055,7 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 							       NULL, buf, &fs);
 				}
 			}
-			free(rview);
+			kof_inspect_free(rf, rview);
 			free(rb);
 			fclose(f);
 		}
@@ -2082,8 +2082,14 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 	       "smallest window hashes%s)\n", C_NOTE,
 	       g_decl_view ? "of a normalised view" : "of the object", C_OFF,
 	       KGENOME_MUTATION_MINHASH_K, g_hashes ? "; pool = all of them" : "");
-	kof_scan_mutation_units(ctx, buf, ~0u, &fs, have_lib ? &lib : NULL, ext,
-			      blk_unit, &c);
+	{
+		/* The size of THIS array, not the engine's usual one: the resolve is told how
+		 * many ranges the buffer holds and cuts there (it used to be told 4096). */
+		struct kof_ext_buf eb = kof_ext_fixed(ext, (uint32_t)(sizeof ext / sizeof ext[0]));
+
+		kof_scan_mutation_units(ctx, buf, ~0u, &fs, have_lib ? &lib : NULL, &eb,
+				      blk_unit, &c);
+	}
 	printf("  units     %u\n", c.units);
 	kgenome_funcs_free(&fs);
 	kgenome_funcs_free(&parent);
@@ -2304,7 +2310,7 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 		rc = 1;
 	}
 out:
-	free(view);
+	kof_inspect_free(f, view);
 	return rc;
 }
 

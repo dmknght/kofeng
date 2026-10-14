@@ -24,11 +24,12 @@
 #include "cab_parse.h"
 #include "cname.h"
 #include "../../../kofcore/rangelist.h"
+#include "../../../kofcore/tabgrow.h"
 
 #define CAB_HDR_MIN    36u      /* through iCabinet */
-#define CAB_FOLDER_LEN 8u
-#define CAB_FILE_MIN   17u      /* the fixed part, plus at least one name byte */
-#define CAB_DATA_HDR   8u       /* csum, cbData, cbUncomp */
+#define CAB_FOLDER_LEN KOF_CAB_FOLDER_MIN
+#define CAB_FILE_MIN   KOF_CAB_FILE_MIN
+#define CAB_DATA_HDR   KOF_CAB_DATA_HDR
 /*
  * THE TWO CEILINGS ON A BLOCK, and they are not the same number.
  *
@@ -97,7 +98,7 @@ static uint32_t cab_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		cl.n = cab_resolve_scan(ctx, KOF_SCAN_CAB_CLAIMED, cv, cl.cap);
 		kof_rl_complement(&l, &cl, ctx->obj_size);
 	}
-	return kof_rl_normalise(&l);
+	return kof_rl_finish(&l);
 }
 
 static uint32_t cab_entries(const struct kof_obj_ctx *ctx,
@@ -142,152 +143,278 @@ static uint32_t cab_resolve_entry(const struct kof_obj_ctx *ctx, uint32_t index,
 	return n;
 }
 
-/*
- * EVERY BLOCK OF ONE FOLDER, as ranges over the coded bytes.
- *
- * For a coding the host decodes block by block - MSZIP - the pieces are the
- * folder's blocks and not the file's extent: a file is a range of what the
- * blocks DECODE to, and a deflate stream cannot be entered part way, so
- * reaching a file means running the folder from its first block.
- *
- * The range covers the block's payload INCLUDING the two byte "CK", because
- * that is what the host checks before decoding - see unpack_mszip.
- */
-static uint32_t cab_blocks(kof_buf f, struct kof_cab_info *c,
-			   const struct kof_cab_folder *fo, uint32_t *first_run)
-{
-	uint64_t at = fo->data_off;
-	uint32_t i, n = 0;
+/* ---- the work the parse needs and the view does not keep --------------------------------------- */
 
-	*first_run = c->n_runs;
+/*
+ * ONE CFDATA BLOCK, as the walk reads it: where its payload is in the object, where its output
+ * begins in the folder's decoded stream, and how long each is.
+ */
+struct cab_blk {
+	uint64_t poff;       /* the payload, past the eight byte header */
+	uint64_t ustart;     /* offset of this block's output in the folder's stream */
+	uint32_t comp, uncomp;
+};
+
+/*
+ * WHAT ONE FOLDER IS, once it has been walked: where its blocks are in `bl` and where its pieces
+ * are in the view's pool when it is coded. A file reaches its bytes through these and not by
+ * walking the folder's block headers from the start - which is what every file did, and what made
+ * a cabinet of N files over B blocks cost N times B of header reads, a product the file chooses.
+ */
+struct cab_fb {
+	uint32_t bl_first, bl_n;
+	uint32_t run_first, run_n;
+	uint8_t  listed;     /* the blocks were walked (to the first one that was not a block) */
+	uint8_t  cut;        /* ... and the list is short because a table or the budget gave out */
+	uint8_t  shared;     /* the pieces of the coded folder are in the pool */
+};
+
+struct cw {
+	kof_buf f;
+	struct kof_cab_info *c;
+	struct cab_blk *bl;
+	struct cab_fb *fb;
+	uint32_t bl_n, bl_cap, fb_cap;
+	uint32_t cap_folder, cap_entry, cap_split, cap_run;
+	/* What the FILE can hold of blocks, and what the walk may visit, which is twice that: the
+	 * budget that keeps folders aimed at the same blocks from costing more than the file is. */
+	uint64_t blk_limit;
+	uint64_t ent_limit;
+};
+
+static void cw_full(struct cw *w)
+{
+	w->c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+}
+
+/*
+ * THE BLOCKS OF ONE FOLDER, walked once. The same checks as ever: a block header that does not
+ * fit the object, or declares more than the format allows, ends the list there - the files past
+ * it are not found, and the callers say so. A table or the budget that gives out is the other
+ * way a list ends short, and that one says FILES_FULL here.
+ */
+static int cab_list(struct cw *w, uint32_t ifold)
+{
+	struct kof_cab_info *c = w->c;
+	struct cab_fb *fb = &w->fb[ifold];
+	const struct kof_cab_folder *fo = &c->folder[ifold];
+	uint64_t at = fo->data_off, ustart = 0;
+	uint32_t i;
+
+	if (fb->listed)
+		return !fb->cut;
+	fb->listed = 1;
+	fb->bl_first = w->bl_n;
 	for (i = 0; i < fo->n_blocks; i++) {
 		uint16_t comp = 0, uncomp = 0;
+		struct cab_blk *b;
 
-		if (!kof_rd_u16(f, at + 4u, 0, &comp) ||
-		    !kof_rd_u16(f, at + 6u, 0, &uncomp))
+		if (!kof_rd_u16(w->f, at + 4u, 0, &comp) ||
+		    !kof_rd_u16(w->f, at + 6u, 0, &uncomp))
 			break;
 		if (comp > CAB_CDATA_MAX || uncomp > CAB_BLOCK_MAX ||
-		    at + CAB_DATA_HDR + comp > f.n)
+		    at + CAB_DATA_HDR + comp > w->f.n)
 			break;
-		if (c->n_runs >= KOF_CAB_MAX_RUNS) {
-			c->n_runs = *first_run;
+		if (w->bl_n >= w->bl_cap) {
+			void *t = w->bl;
+
+			if (!kof_tab_grow(&c->mem, &t, &w->bl_cap, sizeof *w->bl,
+					  (uint64_t)w->bl_n + 1u, w->blk_limit)) {
+				fb->cut = 1;
+				cw_full(w);
+				break;
+			}
+			w->bl = (struct cab_blk *)t;
+		}
+		b = &w->bl[w->bl_n++];
+		b->poff = at + CAB_DATA_HDR;
+		b->ustart = ustart;
+		b->comp = comp;
+		b->uncomp = uncomp;
+		ustart += uncomp;
+		at += CAB_DATA_HDR + comp;
+		fb->bl_n++;
+	}
+	return !fb->cut;
+}
+
+/* The first block of a listed folder whose output ends past `want`: the one a byte of the folder's
+ * stream lands in. A search and not a walk, so a file costs the log of the blocks. fb->bl_n when no
+ * block reaches that far - a cabinet that was cut. */
+static uint32_t cab_block_at(const struct cw *w, const struct cab_fb *fb, uint64_t want)
+{
+	uint32_t lo = 0, hi = fb->bl_n;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+		const struct cab_blk *b = &w->bl[fb->bl_first + mid];
+
+		if (b->ustart + b->uncomp > want)
+			hi = mid;
+		else
+			lo = mid + 1u;
+	}
+	return lo;
+}
+
+/* One more piece in the view's pool, or 0 and the pool is as it was. */
+static int cab_piece(struct cw *w, uint64_t off, uint64_t len)
+{
+	struct kof_cab_info *c = w->c;
+
+	if (c->n_runs >= w->cap_run) {
+		void *t = c->run;
+
+		if (!kof_tab_grow(&c->mem, &t, &w->cap_run, sizeof *c->run,
+				  (uint64_t)c->n_runs + 1u, w->blk_limit)) {
+			cw_full(w);
 			return 0;
 		}
-		c->run[c->n_runs].off = at + CAB_DATA_HDR;
-		c->run[c->n_runs].len = comp;
-		c->n_runs++;
-		n++;
-		at += CAB_DATA_HDR + comp;
+		c->run = (struct kof_cab_run *)t;
 	}
-	return n;
+	c->run[c->n_runs].off = off;
+	c->run[c->n_runs].len = len;
+	c->n_runs++;
+	return 1;
+}
+
+/*
+ * EVERY BLOCK OF ONE FOLDER, as ranges over the coded bytes - and in the pool ONCE, whatever
+ * the number of files that name it.
+ *
+ * For a coding the host decodes block by block - MSZIP - the pieces are the folder's blocks and
+ * not the file's extent: a file is a range of what the blocks DECODE to, and a deflate stream
+ * cannot be entered part way, so reaching a file means running the folder from its first block.
+ * That is the same list for every file of the folder, so the entries of a folder share one
+ * range of the pool (their `split` rows are equal) instead of each carrying a copy: a coded
+ * file used to cost the folder's block count in the pool, which is what made the pool a limit
+ * on how many files of a cabinet could be offered.
+ *
+ * The range covers the block's payload INCLUDING the two byte "CK", because that is what the
+ * host checks before decoding - see unpack_mszip.
+ */
+static uint32_t cab_blocks(struct cw *w, uint32_t ifold, uint32_t *first_run)
+{
+	struct cab_fb *fb = &w->fb[ifold];
+	uint32_t i;
+
+	if (fb->shared) {
+		*first_run = fb->run_first;
+		return fb->run_n;
+	}
+	fb->shared = 1;
+	if (!cab_list(w, ifold))
+		return 0;
+	fb->run_first = w->c->n_runs;
+	for (i = 0; i < fb->bl_n; i++) {
+		const struct cab_blk *b = &w->bl[fb->bl_first + i];
+
+		if (!cab_piece(w, b->poff, b->comp)) {
+			/* The file is not offered, and it is said: the pool is a table and this is
+			 * what a full one costs. */
+			w->c->n_runs = fb->run_first;
+			return 0;
+		}
+	}
+	fb->run_n = fb->bl_n;
+	*first_run = fb->run_first;
+	return fb->run_n;
 }
 
 /*
  * Cut one stored file into the pieces the blocks leave it in.
  *
- * Returns how many pieces were recorded, or zero when they do not fit what is
- * left of the pool - in which case the caller counts the file and does not
- * offer it, which is the honest answer rather than a truncated one.
- *
- * Bounded the same way cab_map is: by the folder's own block count, by each
- * block's declared length against the object, and now by the pool.
+ * Returns how many pieces were recorded, or zero when they do not fit what is left of the pool
+ * or the folder's blocks do not reach the end of the file - in which case the caller counts the
+ * file and does not offer it, which is the honest answer rather than a truncated one.
  */
-static uint32_t cab_cut(kof_buf f, struct kof_cab_info *c,
-			const struct kof_cab_folder *fo, uint64_t want,
-			uint64_t left, uint32_t *first_run)
+static uint32_t cab_cut(struct cw *w, uint32_t ifold, uint64_t want, uint64_t left,
+			uint32_t *first_run)
 {
-	uint64_t at = fo->data_off, seen = 0;
-	uint32_t i, n = 0;
+	const struct cab_fb *fb = &w->fb[ifold];
+	uint32_t k, n = 0;
 
-	*first_run = c->n_runs;
-	for (i = 0; i < fo->n_blocks && left; i++) {
-		uint16_t comp = 0, uncomp = 0;
+	*first_run = w->c->n_runs;
+	for (k = cab_block_at(w, fb, want); k < fb->bl_n && left; k++) {
+		const struct cab_blk *b = &w->bl[fb->bl_first + k];
 		uint64_t take, from;
 
-		if (!kof_rd_u16(f, at + 4u, 0, &comp) ||
-		    !kof_rd_u16(f, at + 6u, 0, &uncomp))
-			break;
-		if (comp > CAB_CDATA_MAX || uncomp > CAB_BLOCK_MAX ||
-		    at + CAB_DATA_HDR + comp > f.n)
-			break;
-		if (want >= seen + uncomp) {
-			seen += uncomp;
-			at += CAB_DATA_HDR + comp;
+		if (want >= b->ustart + b->uncomp)
 			continue;
-		}
-		if (c->n_runs >= KOF_CAB_MAX_RUNS) {
-			c->n_runs = *first_run;       /* give the pieces back */
-			return 0;
-		}
-		from = want > seen ? want - seen : 0;
-		take = (uint64_t)uncomp - from;
+		from = want > b->ustart ? want - b->ustart : 0;
+		take = (uint64_t)b->uncomp - from;
 		if (take > left)
 			take = left;
-		c->run[c->n_runs].off = at + CAB_DATA_HDR + from;
-		c->run[c->n_runs].len = take;
-		c->n_runs++;
+		if (!cab_piece(w, b->poff + from, take)) {
+			w->c->n_runs = *first_run;    /* give the pieces back */
+			return 0;
+		}
 		n++;
 		left -= take;
 		want += take;
-		seen += uncomp;
-		at += CAB_DATA_HDR + comp;
 	}
 	if (left) {
-		c->n_runs = *first_run;               /* incomplete: none of it */
+		w->c->n_runs = *first_run;            /* incomplete: none of it */
 		return 0;
 	}
 	return n;
 }
 
-/* ---- helpers ------------------------------------------------------------------ */
-
-/* A NUL terminated string in the object, as a length - or 0 when it is not
- * terminated inside `cap` bytes, which is the only answer a walk can act on. */
-
 /*
  * WHERE AN OFFSET INSIDE AN UNCOMPRESSED FOLDER LANDS IN THE OBJECT.
  *
- * Walks the folder's blocks accumulating their uncompressed extents, and
- * answers with the object offset and how much of the FILE is contiguous from
- * there. `*ok` is cleared when the block chain runs out, which a truncated
- * cabinet does.
- *
- * Bounded by the folder's own block count and by the object: a block header
- * that claims a huge length moves the walk past the end, and the loop stops
- * there rather than wrapping.
+ * Looks the offset up in the folder's block list and answers with the object offset and how much
+ * of the FILE is contiguous from there. `*ok` is cleared when no block reaches the offset, which a
+ * truncated cabinet does.
  */
-static uint64_t cab_map(kof_buf f, const struct kof_cab_folder *fo,
-			uint64_t want_off, uint64_t want_len,
+static uint64_t cab_map(struct cw *w, uint32_t ifold, uint64_t want_off, uint64_t want_len,
 			uint64_t *avail, int *ok)
 {
-	uint64_t at = fo->data_off, seen = 0;
-	uint32_t i;
+	const struct cab_fb *fb = &w->fb[ifold];
+	uint32_t k = cab_block_at(w, fb, want_off);
 
 	*ok = 0;
 	*avail = 0;
-	for (i = 0; i < fo->n_blocks; i++) {
-		uint16_t comp = 0, uncomp = 0;
+	if (k < fb->bl_n) {
+		const struct cab_blk *b = &w->bl[fb->bl_first + k];
+		uint64_t in_block = want_off - b->ustart;
 
-		if (!kof_rd_u16(f, at + 4u, 0, &comp) ||
-		    !kof_rd_u16(f, at + 6u, 0, &uncomp))
-			return 0;
-		if (comp > CAB_CDATA_MAX || uncomp > CAB_BLOCK_MAX)
-			return 0;
-		if (at + CAB_DATA_HDR + comp > f.n)
-			return 0;
-		if (want_off < seen + uncomp) {
-			uint64_t in_block = want_off - seen;
-
-			*ok = 1;
-			*avail = (uint64_t)uncomp - in_block;
-			if (*avail > want_len)
-				*avail = want_len;
-			return at + CAB_DATA_HDR + in_block;
-		}
-		seen += uncomp;
-		at += CAB_DATA_HDR + comp;
+		*ok = 1;
+		*avail = (uint64_t)b->uncomp - in_block;
+		if (*avail > want_len)
+			*avail = want_len;
+		return b->poff + in_block;
 	}
 	return 0;
+}
+
+/* One more row of the entry table and of its `split` beside it, or 0 and both are as they were:
+ * the file is not offered and the walk of the files stops (FILES_FULL says so). */
+static int cab_row(struct cw *w)
+{
+	struct kof_cab_info *c = w->c;
+
+	if (c->n_entries >= w->cap_entry) {
+		void *t = c->entry;
+
+		if (!kof_tab_grow(&c->mem, &t, &w->cap_entry, sizeof *c->entry,
+				  (uint64_t)c->n_entries + 1u, w->ent_limit)) {
+			cw_full(w);
+			return 0;
+		}
+		c->entry = (struct kof_entry *)t;
+	}
+	if (c->n_entries >= w->cap_split) {
+		void *t = c->split;
+
+		if (!kof_tab_grow(&c->mem, &t, &w->cap_split, sizeof *c->split,
+				  (uint64_t)c->n_entries + 1u, w->ent_limit)) {
+			cw_full(w);
+			return 0;
+		}
+		c->split = (struct kof_cab_split *)t;
+	}
+	return 1;
 }
 
 /* ---- the parse ---------------------------------------------------------------- */
@@ -390,36 +517,53 @@ static int cab_read_optional(kof_buf file, struct kof_cab_info *c, uint8_t *fold
 	return 1;
 }
 
-/* THE FOLDERS: bounded by what the object could hold and by the table's capacity. */
-static void cab_read_folders(kof_buf file, struct kof_cab_info *c, uint8_t fold_res)
+/* THE FOLDERS: bounded by what the object could hold, and the table is as long as they are. */
+static void cab_read_folders(struct cw *w, uint8_t fold_res)
 {
+	kof_buf file = w->f;
+	struct kof_cab_info *c = w->c;
 	uint64_t at = c->folders_off;
 	uint32_t i;
 
 	/*
 	 * The folders. Bounded by what the object could hold as well as by the
 	 * count the header states: the two multiply, and the header's number is
-	 * sixteen bits of somebody else's choosing.
+	 * sixteen bits of somebody else's choosing. The table is allocated to the
+	 * smaller, so what the file says never sizes it past what the file holds.
 	 */
 	{
 		uint64_t each = CAB_FOLDER_LEN + fold_res;
 		uint64_t room = (file.n - at) / each;
 		uint32_t n = c->n_folders;
+		void *t = c->folder;
 
 		if ((uint64_t)n > room) {
 			c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
 			n = (uint32_t)room;
 		}
-		if (n > KOF_CAB_MAX_FOLDERS)
-			n = KOF_CAB_MAX_FOLDERS;
+		/* A table the ledger cannot afford is a shorter one, not none: the files in the
+		 * folders past it are unreachable, and that is said. */
+		w->cap_folder = 0;
+		while (n && !kof_tab_grow(&c->mem, &t, &w->cap_folder, sizeof *c->folder, n, room)) {
+			cw_full(w);
+			n /= 2u;
+		}
+		c->folder = (struct kof_cab_folder *)t;
 		c->n_folders = (uint16_t)n;
 		c->folders_len = (uint64_t)n * each;
+		/* The table is the folders' region only up to where the file table begins: a header that
+		 * says more folders than lie in front of it would put the file table's bytes in two
+		 * regions at once (and the declared count is sixteen bits the file chose). It was clipped
+		 * by the fixed table before; the table is the file's size now, so it is clipped here. */
+		if (c->files_off > at && c->folders_len > c->files_off - at)
+			c->folders_len = c->files_off - at;
 
 		for (i = 0; i < n; i++) {
 			uint64_t fat = at + (uint64_t)i * each;
 			uint32_t off = 0;
 			uint16_t blocks = 0, comp = 0;
 
+			memset(&c->folder[i], 0, sizeof c->folder[i]);
 			kof_rd_u32(file, fat, 0, &off);
 			kof_rd_u16(file, fat + 4u, 0, &blocks);
 			kof_rd_u16(file, fat + 6u, 0, &comp);
@@ -443,9 +587,8 @@ static void cab_read_folders(kof_buf file, struct kof_cab_info *c, uint8_t fold_
  * A FILE IN A CODED FOLDER, offered as a scattered entry over the folder's blocks.
  * Returns 1 when the file table is full and the walk of the files must stop, else 0.
  */
-static int cab_coded_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
-			  uint32_t size, uint32_t foff, uint64_t name_at,
-			  uint32_t nlen)
+static int cab_coded_file(struct cw *w, uint16_t ifold, uint32_t size, uint32_t foff,
+			  uint64_t name_at, uint32_t nlen)
 {
 /*
  * A CODED FOLDER: the pieces are its BLOCKS, not the file's.
@@ -466,6 +609,7 @@ static int cab_coded_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
  * offered, which is the same answer this build gives everywhere
  * it lacks a coding.
  */
+	struct kof_cab_info *c = w->c;
 	const struct kof_cab_folder *fo = &c->folder[ifold];
 	uint32_t first = 0, runs, method = 0;
 
@@ -479,11 +623,9 @@ static int cab_coded_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
 	} else {
 		return 0;
 	}
-	if (c->n_entries >= KOF_CAB_MAX_FILES) {
-		c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+	if (!cab_row(w))
 		return 1;
-	}
-	runs = cab_blocks(file, c, fo, &first);
+	runs = cab_blocks(w, ifold, &first);
 	if (!runs)
 		return 0;
 	{
@@ -514,15 +656,16 @@ static int cab_coded_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
  * scattered entry over the pieces. Returns 1 when the file table is full and the walk
  * of the files must stop, else 0.
  */
-static int cab_stored_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
-			  uint32_t size, uint32_t foff, uint64_t name_at,
-			  uint32_t nlen)
+static int cab_stored_file(struct cw *w, uint16_t ifold, uint32_t size, uint32_t foff,
+			   uint64_t name_at, uint32_t nlen)
 {
+	struct kof_cab_info *c = w->c;
 	uint64_t avail = 0, off;
 	int ok = 0;
 
-	off = cab_map(file, &c->folder[ifold], foff, size,
-		      &avail, &ok);
+	if (!cab_list(w, ifold))
+		return 0;     /* said by FILES_FULL: the folder's blocks were not all had */
+	off = cab_map(w, ifold, foff, size, &avail, &ok);
 	if (!ok) {
 		c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
 		return 0;
@@ -543,12 +686,9 @@ static int cab_stored_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
 		uint32_t first = 0;
 		uint32_t runs;
 
-		if (c->n_entries >= KOF_CAB_MAX_FILES) {
-			c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+		if (!cab_row(w))
 			return 1;
-		}
-		runs = cab_cut(file, c, &c->folder[ifold],
-			       foff, size, &first);
+		runs = cab_cut(w, ifold, foff, size, &first);
 		c->n_split++;
 		if (!runs)
 			return 0;     /* said by the count */
@@ -570,14 +710,12 @@ static int cab_stored_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
 		}
 		return 0;
 	}
-	if (off > file.n || size > file.n - off) {
+	if (off > w->f.n || size > w->f.n - off) {
 		c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
 		return 0;
 	}
-	if (c->n_entries >= KOF_CAB_MAX_FILES) {
-		c->anomalies |= KOF_CAB_ANOM_FILES_FULL;
+	if (!cab_row(w))
 		return 1;
-	}
 	{
 		struct kof_entry *e = &c->entry[c->n_entries];
 
@@ -589,6 +727,10 @@ static int cab_stored_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
 		e->name_len = nlen - 1u;
 		e->off      = off;
 		e->len      = size;
+		/* A plain range has no pieces: the row says so, and says it of this entry and not of
+		 * whatever the table held. */
+		c->split[c->n_entries].first_run = 0;
+		c->split[c->n_entries].n_run = 0;
 		c->n_entries++;
 	}
 	return 0;
@@ -596,8 +738,10 @@ static int cab_stored_file(kof_buf file, struct kof_cab_info *c, uint16_t ifold,
 
 /* THE FILE TABLE: every file's name and place, as entries - single ranges, scattered
  * block lists, or only counted where this build cannot offer them. */
-static void cab_read_files(kof_buf file, struct kof_cab_info *c)
+static void cab_read_files(struct cw *w)
 {
+	kof_buf file = w->f;
+	struct kof_cab_info *c = w->c;
 	uint64_t at;
 	uint32_t i;
 
@@ -607,6 +751,9 @@ static void cab_read_files(kof_buf file, struct kof_cab_info *c)
 	}
 	c->names_off = c->files_off;
 	at = c->files_off;
+	/* A file is at least CAB_FILE_MIN bytes of the table that starts here: the rows cannot
+	 * exceed that, whatever n_files says (it is sixteen bits the file chose). */
+	w->ent_limit = (file.n - at) / CAB_FILE_MIN + 1u;
 
 	for (i = 0; i < c->n_files; i++) {
 		uint32_t size = 0, foff = 0, nlen;
@@ -650,11 +797,11 @@ static void cab_read_files(kof_buf file, struct kof_cab_info *c)
 			continue;      /* an empty file names nothing to open */
 
 		if (c->folder[ifold].compress != KOF_CAB_C_NONE) {
-			if (cab_coded_file(file, c, ifold, size, foff, name_at, nlen))
+			if (cab_coded_file(w, ifold, size, foff, name_at, nlen))
 				break;
 			continue;
 		}
-		if (cab_stored_file(file, c, ifold, size, foff, name_at, nlen))
+		if (cab_stored_file(w, ifold, size, foff, name_at, nlen))
 			break;
 	}
 	c->names_len = at > c->names_off ? at - c->names_off : 0;
@@ -673,22 +820,81 @@ static void cab_attach(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx 
 	 * same note every other container's parse ends on. */
 }
 
+void kof_cab_release(struct kof_cab_info *c)
+{
+	kof_tab_free((void **)&c->folder);
+	kof_tab_free((void **)&c->entry);
+	kof_tab_free((void **)&c->split);
+	kof_tab_free((void **)&c->run);
+	c->n_entries = 0;
+	c->n_runs = 0;
+	c->mem.held = 0;
+	c->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(cab, struct kof_cab_info, entry, n_entries)
+
+/* The legacy count is inside the view and is not the parse's to write: see the end of struct
+ * kof_cab_info. These pin where it is. */
+_Static_assert(offsetof(struct kof_cab_info, legacy_arrays) == KOF_CAB_V2_TAIL_END,
+	       "KOF_CAB_V2_TAIL_END is where the tail ends");
+_Static_assert(offsetof(struct kof_cab_info, legacy_n_entries) == KOF_CAB_V1_ROWS_AT,
+	       "the version 1 row count is not where version 1 had it");
+
 int kof_cab_parse(kof_buf file, struct kof_cab_info *c, struct kof_obj_ctx *ctx)
 {
 	uint8_t fold_res = 0;
+	uint64_t room;
+	struct cw w;
 
-	memset(c, 0, sizeof *c);
+	/*
+	 * THE HEAD OF THE VIEW IS CLEARED, AND NOT THE LEGACY PADDING BEHIND IT: it is 135 KB that
+	 * this version never uses, and clearing it for every cabinet would be the cost the other
+	 * formats' views stopped paying. Its one word that is read - version 1's count - is
+	 * zeroed by name. What the last parse left is let go first and the caller's room is put
+	 * back (zip_parse.c says why).
+	 */
+	room = c->mem.room;
+	kof_cab_release(c);
+	memset(c, 0, offsetof(struct kof_cab_info, legacy_arrays));
+	c->legacy_n_entries = 0;
+	c->mem.room = room;
 	c->version = KOF_CAB_INFO_VERSION;
 
 	if (!kof_in_range(file, 0, CAB_HDR_MIN) || memcmp(file.p, "MSCF", 4) != 0)
 		return 0;
 	c->valid = 1;
 
+	memset(&w, 0, sizeof w);
+	w.f = file;
+	w.c = c;
+	/* What the FILE can hold of blocks, and twice that as the walk's budget (see struct cw). */
+	w.blk_limit = 2u * (file.n / CAB_DATA_HDR) + 64u;
+	w.ent_limit = file.n / CAB_FILE_MIN + 1u;
+
 	cab_read_header(file, c);
 	if (cab_read_optional(file, c, &fold_res)) {
-		cab_read_folders(file, c, fold_res);
-		cab_read_files(file, c);
+		/* The per-folder state is as long as the folder table, and is the parse's own: it
+		 * is charged while it lives and given back below. */
+		cab_read_folders(&w, fold_res);
+		if (c->n_folders) {
+			void *t = NULL;
+
+			if (kof_tab_grow(&c->mem, &t, &w.fb_cap, sizeof *w.fb, c->n_folders,
+					 c->n_folders)) {
+				w.fb = (struct cab_fb *)t;
+				memset(w.fb, 0, (size_t)c->n_folders * sizeof *w.fb);
+				cab_read_files(&w);
+			} else {
+				cw_full(&w);   /* no way to place any file, and that is said */
+			}
+		} else {
+			cab_read_files(&w);
+		}
 	}
+	kof_tab_drop(&c->mem, (void **)&w.bl, &w.bl_cap, sizeof *w.bl);
+	kof_tab_drop(&c->mem, (void **)&w.fb, &w.fb_cap, sizeof *w.fb);
+	c->mem.rows = c->n_entries;
 	cab_attach(file, c, ctx);
 	return 1;
 }

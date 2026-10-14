@@ -185,7 +185,7 @@ static kof_buf buf_of(const uint8_t *p, size_t n)
 
 int main(void)
 {
-	struct kof_chm_info *c = malloc(sizeof *c);
+	struct kof_chm_info *c = calloc(1, sizeof *c);   /* zeroed: a view that owns tables starts so */
 	struct kof_obj_ctx ctx;
 	uint8_t *f;
 	size_t len = 0;
@@ -196,6 +196,8 @@ int main(void)
 	}
 	f = build(&len);
 	if (!f) {
+		if (c)
+		kof_chm_release(c);
 		free(c);
 		printf("chm walk: out of memory\n");
 		return 1;
@@ -386,6 +388,8 @@ int main(void)
 	}
 
 	free(f);
+	if (c)
+		kof_chm_release(c);
 	free(c);
 
 	if (failures) {

@@ -14,6 +14,7 @@
 #include <genotype/image/elf_types.h>
 #include <genotype/image/obj.h>
 #include <kofcore.h>
+#include "../../kgenome_status.h"
 
 /*
  * p_type of the segment that MAPS, which is the only kind an address can be
@@ -138,6 +139,14 @@ struct kgenome_elf_symtab {
 	uint32_t recsize;
 	uint8_t  elf64, be;
 	uint8_t  origin;            /* kof_sym_origin's numbering        */
+	/*
+	 * An ELF64 MIPS object, whose relocation record is not the class's: r_info is
+	 * a 32-bit symbol index then FOUR BYTES (r_ssym, r_type3, r_type2, r_type),
+	 * the same bytes in either byte order - so read as one 64-bit word it gives
+	 * the right symbol in a big-endian object and the type where the symbol is
+	 * in a little-endian one. APPENDED.
+	 */
+	uint8_t  mips64;
 };
 
 int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
@@ -156,10 +165,10 @@ struct kgenome_elf_symbol {
 int kgenome_elf_symbol_at(kof_buf f, const struct kgenome_elf_symtab *t, uint64_t i,
 		      struct kgenome_elf_symbol *s);
 
-/* How much of a symbol's name is reported. A name longer than this is cut,
- * not skipped: every caller so far compares against known words, and the
- * longest in the kernel ABI is nowhere near it. */
-#define KGENOME_SYMNAME_MAX 64u
+/* How much of a symbol's name is reported. A name longer than this is cut, not skipped, and the
+ * cut is REPORTED (kgenome_elf_relcalls' status): it was 64 and silent, which made a long
+ * mangled import look like a different symbol. */
+#define KGENOME_SYMNAME_MAX 4096u
 
 /*
  * A CALL RELOCATION IN A RELOCATABLE OBJECT, which is what a loadable kernel
@@ -231,6 +240,10 @@ struct kgenome_elf_reloc {
 struct kgenome_elf_relocs {
 	struct kgenome_elf_reloc *v;
 	uint32_t              n;
+	/* APPENDED. KGENOME_OK, or KGENOME_NOMEM when the table could not be allocated:
+	 * `n` is then zero and that is "could not build", not "no relocations". A
+	 * caller that folds the answer into a scan notes it (kgenome_diag_note). */
+	enum kgenome_status   status;
 };
 
 /*
@@ -261,7 +274,8 @@ void     kgenome_elf_reloc_table_free(struct kgenome_elf_relocs *t);
  * `at` is kgenome_elf_reloc_call_at. `target` is non-zero when the symbol is one
  * this object DEFINES: the call is internal, and that is where it goes (a file
  * offset). Zero when the symbol is undefined, and then `name` is all that is
- * known about it. Returns how many it reported.
+ * known about it. Returns how many it reported. `status`, when not NULL, is KGENOME_TRUNCATED
+ * when a name was longer than KGENOME_SYMNAME_MAX and was handed over cut.
  *
  * RELA ONLY, like the table. It used to walk SHT_REL sections as well, which
  * is how an i386 or ARM module's relocations are written; its two callers both
@@ -269,7 +283,8 @@ void     kgenome_elf_reloc_table_free(struct kgenome_elf_relocs *t);
  */
 uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 			  const struct kgenome_elf_relocs *t,
-			  kgenome_elf_relcall_fn fn, void *user);
+			  kgenome_elf_relcall_fn fn, void *user,
+			  enum kgenome_status *status);
 
 /*
  * The CODE relocation, with a name, whose patched bytes lie inside the

@@ -41,6 +41,8 @@ struct kof_scan_obj_sym {
  * scan_unpack.c.
  */
 struct kof_scan_obj_diag {
+	/* The scan's diagnose lines were said for this object (oc_diag_trace_scan). */
+	uint8_t traced;
 	/*
 	 * THE OBJECT'S RELOCATIONS, derived once - see struct kgenome_elf_relocs. The
 	 * gate reads them for KOF_DIAG_DECLARE_SYMBOL and the diag routes read the same table
@@ -166,6 +168,12 @@ struct kof_scan_obj_emu {
 	 * Per object, cleared beside packed_here.
 	 */
 	int ran;
+	/* The tree's allowance of runs was spent when this object asked: said once
+	 * for the object (oc_scan_limit), not once per module that asks after. */
+	uint8_t refused;
+	/* Instructions of this object's own unpack run already taken from the tree's
+	 * allowance (oc_emu_charge): a paused run is charged for what it did since. */
+	uint64_t spent;
 	/*
 	 * THE MODULE THAT RAN THE INTERPRETER ON THIS OBJECT, for its own turn.
 	 * The one carrier for "a run produced what this module is about to push":
@@ -213,6 +221,16 @@ struct kof_scan_obj_open {
 	 */
 	char mod_tag[KOF_MOD_TAG];
 	const struct kof_module *mod_tag_of;
+	/*
+	 * A BOUND CUT THIS OBJECT'S EVIDENCE - see oc_scan_limit. Not `broken`: that
+	 * one is read by the open stages, and an unpack loop stops on any value of it
+	 * (a table that filled in the PARSE would have stopped the unpackers before
+	 * they opened the members the table did hold - measured: two cabinets lost
+	 * their children). This is the report and nothing else: it changes no control
+	 * flow, and the verdict stage turns it into KOF_BROKEN_LIMIT on the result
+	 * when no earlier reason is there. Per object, cleared in obj_begin.
+	 */
+	uint8_t cut;
 	/*
 	 * And which module opened THE OBJECT BEING SCANNED - see
 	 * kof_result.opened_by. Set where that module produces a child,
@@ -320,6 +338,8 @@ struct kof_scan_obj_open {
 struct kof_scan_obj {
 	/* See enum kof_obj_latch. Cleared for every object, in obj_begin. */
 	uint8_t latch[KOF_OL_COUNT];
+	/* See enum kof_prodkind: how many times each product was made for this object. */
+	uint8_t prod_runs[KOF_PROD_COUNT];
 	uint32_t n_dis_set;
 	struct kof_scan_obj_sym sym;
 	struct kof_scan_obj_diag diag;

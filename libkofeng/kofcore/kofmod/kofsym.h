@@ -105,13 +105,22 @@
  */
 #define KOF_SYM_KEYLEN  4u
 
+/* The bits of the header's `truncated` byte. ROOM: the buffer the block was built
+ * into ran out, so a larger one holds more (kof_syms_build_grow retries on it).
+ * SOURCE: a bound of the walk that feeds the block cut the list (the export
+ * directory's name bound, an import table that stopped short), so a larger buffer
+ * changes nothing. Both say the block is not the file's whole table: any bit set
+ * is `kof_sym_truncated`. */
+#define KOF_SYM_TRUNC_ROOM   1u
+#define KOF_SYM_TRUNC_SOURCE 2u
+
 /* Header field offsets. */
 #define KOF_SYM_H_MAGIC     0u  /* 4  "KSYM"                                  */
 #define KOF_SYM_H_VERSION   4u  /* 2  KOF_SYM_VERSION                         */
 #define KOF_SYM_H_RECLEN    6u  /* 2  KOF_SYM_RECLEN                          */
 #define KOF_SYM_H_COUNT     8u  /* 4  records that follow                     */
 #define KOF_SYM_H_ORIGIN   12u  /* 1  KOF_SYM_ORIGIN_*                        */
-#define KOF_SYM_H_TRUNC    13u  /* 1  1 when the cap stopped it short         */
+#define KOF_SYM_H_TRUNC    13u  /* 1  KOF_SYM_TRUNC_* bits, 0 when whole      */
 /*
  * THE INDEX OF `_start`, or KOF_SYM_NO_START when the block has none.
  *
@@ -568,6 +577,18 @@ static inline uint32_t kof_sym_extents(const uint8_t *b, uint32_t n,
 		if (!(mask & bit))
 			continue;
 		total = kof_sym_count(b, n);
+		/*
+		 * THE LOOP FOLLOWS THE BLOCK'S LENGTH, NOT THE COUNT IT STATES. The count
+		 * is a 32-bit number in the block's own header and kof_sym_rec refuses
+		 * every record the bytes do not hold, one at a time: a 16 byte block
+		 * claiming 2^32-1 records spun 2^32 times per half. The most the n bytes
+		 * can hold is (n - header) / record, so that bounds it
+		 * (tests/unit/api_engine_modhelpers.c, sym_count_bomb).
+		 */
+		if (n < KOF_SYM_HDRLEN)
+			total = 0;
+		else if (total > (n - KOF_SYM_HDRLEN) / KOF_SYM_RECLEN)
+			total = (n - KOF_SYM_HDRLEN) / KOF_SYM_RECLEN;
 		for (i = total; i-- > 0; ) {
 			const uint8_t *r = kof_sym_rec(b, n, i);
 			uint64_t off, len;

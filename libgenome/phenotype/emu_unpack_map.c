@@ -40,7 +40,7 @@ int kgenome_emu_unp_map_extent(struct kgenome_emu *e, struct kgenome_emu_unp_map
 	msz = x->mem_size > fsz ? x->mem_size : fsz;
 	if (!msz)
 		return 0;
-	if (!kgenome_emu_map(e, x->va, fsz ? file + x->off : NULL, fsz, msz, x->perm))
+	if (!(m->borrow ? kgenome_emu_map_borrow : kgenome_emu_map)(e, x->va, fsz ? file + x->off : NULL, fsz, msz, x->perm))
 		return 0;
 	m->mapped++;
 	if (fsz && m->n_back < KGENOME_EMU_UNP_BACK_MAX) {
@@ -67,7 +67,7 @@ int kgenome_emu_unp_map_extent(struct kgenome_emu *e, struct kgenome_emu_unp_map
 int kgenome_emu_unp_map_flat(struct kgenome_emu *e, struct kgenome_emu_unp_map *m,
 			     uint64_t at, const uint8_t *file, uint64_t n)
 {
-	if (!kgenome_emu_map(e, at, file, n, n,
+	if (!(m->borrow ? kgenome_emu_map_borrow : kgenome_emu_map)(e, at, file, n, n,
 			     KGENOME_EMU_R | KGENOME_EMU_W | KGENOME_EMU_X))
 		return 0;
 	m->base_lo = at;

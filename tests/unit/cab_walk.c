@@ -159,7 +159,7 @@ static kof_buf buf_of(const uint8_t *p, size_t n)
 
 int main(void)
 {
-	struct kof_cab_info *c = malloc(sizeof *c);
+	struct kof_cab_info *c = calloc(1, sizeof *c);   /* zeroed: a view that owns tables starts so */
 	struct kof_obj_ctx ctx;
 	struct built b;
 
@@ -168,6 +168,8 @@ int main(void)
 		return 1;
 	}
 	if (!build(&b)) {
+		if (c)
+		kof_cab_release(c);
 		free(c);
 		printf("cab walk: out of memory\n");
 		return 1;
@@ -358,6 +360,8 @@ int main(void)
 	}
 
 	free(b.p);
+	if (c)
+		kof_cab_release(c);
 	free(c);
 
 	if (failures) {

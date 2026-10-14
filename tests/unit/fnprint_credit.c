@@ -11,6 +11,7 @@
  * Built in memory: functions from fnprint_kit.h, the database from the
  * generator's own minhash. No corpus.
  */
+#define FK_LEGACY_RULES 1
 #include "fnprint_db.h"
 #include "known_miss.h"
 

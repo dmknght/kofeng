@@ -327,7 +327,7 @@ static void disease(void)
 	uint8_t b[128];
 	struct kof_diag d;
 	struct kof_diag_node node[2];
-	char name[KOF_DB_DIAG_NAME], needs[KOF_DB_DIAG_NEEDS];
+	char name[KOF_DB_DIAG_NAME], needs[sizeof b + 1u];   /* a store never needs more than the record */
 	const struct kof_diag_store st = { node, name, needs, sizeof name, sizeof needs, 2 };
 	const uint32_t id = kof_disease_id("cnc/recv-syscall");
 	size_t at;

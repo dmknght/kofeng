@@ -58,6 +58,7 @@ static int diag_share_q(const struct kof_obj_ctx *ctx, uint16_t cap,
 	 * diagnose call was this one read an analysis that never ran. */
 	oc_diag_demand(sc);
 	oc_diag_ready(sc, ctx);
+	oc_diag_trace_scan(sc);
 	ia = diag_slot(sc, a, wide);
 	ib = diag_slot(sc, b, wide);
 	if (ia >= sc->eng->n_diag || ib >= sc->eng->n_diag)
@@ -113,6 +114,7 @@ static int diag_str_q(const struct kof_obj_ctx *ctx, uint32_t id, const char *na
 		return 0;
 	oc_diag_demand(sc);
 	oc_diag_ready(sc, ctx);
+	oc_diag_trace_scan(sc);
 	i = diag_slot(sc, id, wide);
 	if (i >= sc->eng->n_diag || i >= sc->diag.cap)
 		return 0;
@@ -168,6 +170,8 @@ static int diag_q(const struct kof_obj_ctx *ctx, uint32_t id, int wide)
 	i = diag_slot(sc, id, wide);
 	if (i >= sc->eng->n_diag)
 		return 0;
+	oc_diag_trace_scan(sc);
+	oc_diag_trace_ask(sc, i);
 	return (sc->diag.hit[i >> 3] >> (i & 7u)) & 1u;
 }
 

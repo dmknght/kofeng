@@ -156,6 +156,8 @@ struct kgenome_nucleo_abi {
 };
 
 const struct kgenome_nucleo_abi *kgenome_nucleo_abi_of(unsigned arch);
+/* 1 when every syscall table is strictly ascending in number - the search relies on it. Tests only. */
+int kgenome_nucleo_sys_ordered(void);
 
 /* The same two answers as kgenome_nucleo_cap_of_syscall and kgenome_nucleo_sys_name, for a port
  * described by its kgenome_nucleo_abi. `arg` indexes from the port's first argument. */

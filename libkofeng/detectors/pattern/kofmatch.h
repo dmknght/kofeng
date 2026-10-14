@@ -31,6 +31,28 @@
  */
 #define KOF_ENT_MEMO 8u
 
+/*
+ * One memo cell: the question (the slot) and its answer for the current object.
+ *
+ * The memo is a CACHE, and was a table. It had a cell for every (marker, mask) of
+ * the database - two bytes each, calloc'd per scanner - so a million markers and
+ * three masks cost every scanner 6 MB and a base of eight million 48 MB, and the
+ * scanner's reserved cost scaled with the database. What the memo is for is not
+ * asking the same question twice in one object, and an object asks as many
+ * questions as the modules that ran, not as many as there are markers. So it is a
+ * direct-mapped cache of KOF_MEMO_CELLS_MAX cells at most, keyed by the slot: a
+ * cell another slot took is an answer forgotten, which costs the search being done
+ * again and cannot change what the search finds. For a database whose slots all fit
+ * (the shipping one) the map is the identity and nothing is ever evicted.
+ */
+struct kof_memo_cell {
+	uint32_t slot;
+	uint16_t v;          /* generation << 2 | answer */
+	uint16_t pad;
+};
+
+#define KOF_MEMO_CELLS_MAX (1u << 16)
+
 struct kof_match_ctx {
 	kof_buf data;
 
@@ -97,8 +119,8 @@ struct kof_match_ctx {
 	 * bytes a cell rather than one is the price, and it buys back far more than it
 	 * costs the moment the database stops being small.
 	 */
-	uint16_t        *memo;
-	uint32_t         memo_len;  /* cells, not bytes */
+	struct kof_memo_cell *memo;
+	uint32_t         memo_len;  /* cells (a power of two), not bytes */
 	uint16_t         memo_gen;
 
 
@@ -140,6 +162,10 @@ struct kof_match_ctx {
 	uint64_t n_calls;
 	uint64_t n_bytes_scanned;
 	uint64_t n_bytes_indexed;   /* what building the presence set cost */
+	/* Hex walks that could not be done (no memory for the wide walk): each is a
+	 * pattern that answered "no" without having looked. The scanner reads it after
+	 * the detectors and the object says KOF_BROKEN_LIMIT. Zero is normal. */
+	uint32_t n_hex_cut;
 };
 
 void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
@@ -172,7 +198,10 @@ void kof_match_begin(struct kof_match_ctx *m, kof_buf data);
  */
 int  kof_match_state_init(struct kof_match_ctx *, uint32_t n_patterns,
 			  uint32_t memo_len);
+/* What a memo for `memo_len` slots costs: what kof_match_state_init will allocate. */
+uint64_t kof_match_memo_bytes(uint32_t memo_len);
 void kof_match_state_free(struct kof_match_ctx *);
+void kof_match_state_trim(struct kof_match_ctx *);
 
 /*
  * Is a declared pattern present in these ranges? `slot` indexes the memo.

@@ -25,7 +25,8 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 			       uint32_t index, uint64_t out_hint)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range *ext = sc->cache.ext_gather;
+	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
+	struct kof_range *ext;
 	kof_buf b;
 	uint8_t *in;
 	uint64_t total = 0, produced = 0;
@@ -34,6 +35,7 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 
 	if (!oc_can_produce(sc))
 		return 0;
+	oc_entry_begin(sc);
 	if (method == KOF_UNP_BCJ2)
 		return oc_unpack_bcj2(sc, ctx, index);
 	if (!ctx->resolve_entry)
@@ -66,7 +68,8 @@ uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 		return 0;              /* the only codings entries are decoded with */
 
 	b = kof_src_buf(sc->cur.src);
-	n = ctx->resolve_entry(ctx, index, ext, KOF_SCAN_MAX_EXTENTS);
+	n = kof_scan_resolve_entry(ctx, index, eb);
+	ext = eb->v;
 	in = oc_entry_join(sc, b, ext, n, &total);
 	if (!in)
 		return 0;
@@ -145,6 +148,7 @@ uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index)
 
 	if (!e || !oc_can_produce(sc))
 		return 0;
+	oc_entry_begin(sc);
 	/*
 	 * A step this build cannot express means the chain cannot be run at
 	 * all. Reported and not attempted: every step after a missed one

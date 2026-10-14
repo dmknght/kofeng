@@ -729,11 +729,7 @@ static void trunc_fabrication(void)
 	       a.worst > b.worst ? a.worst : b.worst);
 	snprintf(what, sizeof what, "lzma: stream (lc0 lp0 pb0, seed 12, %zu bytes) cut at %zu hands back %zu bytes that are not "
 		 "the real output, status TRUNCATED (%zu of %zu cuts affected)", v_b.n, b.worst_cut, b.worst, b.nbad, v_b.n - 6u);
-	KM_CHECK(total == 0, what,
-		 "LZMA_TRUNC_FABRICATED_TAIL (libuncoat/decompressors/lzma.c lz_run: short_input is tested at the loop top "
-		 "(lzma.c:334), so the symbol under way when the first byte past the end is read is completed from zero fill "
-		 "(rc_byte lzma.c:126) and emitted; a match can fabricate up to 273 bytes; also seen on real xz output) "
-		 "[Inference: low, the status is TRUNCATED]");
+	CK(total == 0);
 }
 
 /* A cap that ends inside the LAST chunk of an LZMA2 stream. */
@@ -763,14 +759,57 @@ static void lzma2_cap_last_chunk(void)
 	/* two chunks: a cap inside the FIRST is STOPPED (the next control byte is not 0) ... */
 	st = lz2(in, n, 99, &p, res);
 	CK(p == 99);
-	KM_CHECK(st != KUNCOAT_OK,
-		 "lzma2: cap 99 of 100 inside the last (only) LZMA chunk reports OK with 99 bytes",
-		 "LZMA2_CAP_LAST_CHUNK (libuncoat/decompressors/lzma.c:710 `if (r_status == STOPPED && at == before + u_len) r_status = OK` "
-		 "compares with the CLIPPED u_len, and :742 `in[p] != 0` takes the end byte as proof the output is complete) "
-		 "[Inference: silent short output, same class as a85/ahx cap in silent_loss_uncoat.c]");
+	CK(st != KUNCOAT_OK);
+}
+
+/* A dictionary reset: a match in the chunk after it may not reach into the chunk before
+ * it, and with no reset (state and properties only) the same bytes decode. */
+static void lzma2_dict_reset(void)
+{
+	struct hv_lz e;
+	uint8_t tmp[200], in[400], res[100];
+	static const uint8_t raw[8] = { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' };
+	unsigned reset;
+	size_t i;
+
+	for (reset = 2; reset <= 3; reset++) {
+		size_t n = 0, cl;
+		uint64_t p;
+		enum kuncoat_status st;
+
+		if (!hv_lz_init(&e, tmp, sizeof tmp, 0, 0, 0, 100)) {
+			CK(0);
+			return;
+		}
+		for (i = 0; i < 8; i++)                 /* the history the encoder will reach into */
+			hv_lz_lit(&e, raw[i]);
+		(void)hv_lz_rc_finish(&e);
+		hv_lz_reset(&e, 0, 0, 0);
+		hv_lz_rc_start(&e, tmp, sizeof tmp);
+		hv_lz_lit(&e, 'z');
+		hv_lz_match(&e, 3, 5);                  /* five back from the 9th byte: 'e' */
+		cl = hv_lz_rc_finish(&e);
+		n += hv_lz2_raw(in + n, raw, sizeof raw, 1);   /* control 1: dictionary reset */
+		n += hv_lz2_head(in + n, 4, cl, reset, 0);
+		memcpy(in + n, tmp, cl);
+		n += cl;
+		in[n++] = 0;
+		hv_lz_free(&e);
+		hv_at(70, reset);
+		st = lz2(in, n, 50, &p, res);
+		if (reset == 3) {
+			/* the chunk reset the dictionary: nothing before it is reachable */
+			CKF(st == KUNCOAT_CORRUPT && p == 9, "dictionary reset: %s %llu", kuncoat_status_name(st),
+			    (unsigned long long)p);
+		} else {
+			CKF(st == KUNCOAT_OK && p == 12 && !memcmp(res + 8, "zefg", 4), "no dictionary reset: %s %llu",
+			    kuncoat_status_name(st), (unsigned long long)p);
+		}
+	}
 }
 
 HV_GROUP(trunc_fabrication)
+HV_GROUP(lzma2_dict_reset)
 HV_GROUP(lzma2_cap_last_chunk)
 HV_GROUP(crafted)
 HV_GROUP(properties)
@@ -803,6 +842,7 @@ int main(void)
 	hv_expect_clean("lzma crafted", hv_grp_crafted, NULL, 10);
 	hv_expect_clean("lzma truncation fabrication", hv_grp_trunc_fabrication, NULL, 10);
 	hv_expect_clean("lzma2 cap in the last chunk", hv_grp_lzma2_cap_last_chunk, NULL, 10);
+	hv_expect_clean("lzma2 dictionary reset", hv_grp_lzma2_dict_reset, NULL, 10);
 	hv_expect_clean("lzma properties", hv_grp_properties, NULL, 10);
 	hv_expect_clean("lzma bomb", hv_grp_bomb, NULL, 20);
 	hv_expect_clean("lzma2 headers", hv_grp_lzma2_headers, NULL, 10);

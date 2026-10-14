@@ -42,6 +42,7 @@
 #include "kofcore.h"   /* kof_clip_len */
 #include "rangelist.h"        /* kof_rlist, for answering a mask */
 #include "heapsort.h"         /* KOF_HEAPSORT */
+#include "tabgrow.h"          /* kof_tab_grow: the pool of a growing list */
 
 /* struct kof_run - one run of bytes and what claims it - is range.h's: the parsers'
  * info structs in kofmod/ hold the same array, so the type is shared. */
@@ -79,7 +80,22 @@ struct kof_runs {
 	 */
 	uint32_t last[KOF_RUNS_MAX_CLS];
 
-	/* Set when a run was dropped for want of room. The caller turns it into
+	/*
+	 * A POOL THAT GROWS, for the formats whose run count follows the file.
+	 *
+	 * NULL for the fixed pools (tar, rar, docole, reg, xz, rtf), whose arrays are
+	 * in their views and whose cap is the format's own limit. Set by
+	 * kof_runs_init_dyn for zip and pdf: the pool then starts empty, is grown by
+	 * kof_tab_grow against the view's account (`mem`) and is bounded by `limit`,
+	 * the most runs the file can physically make. `full` is then set only when
+	 * the file's own bound or the ledger refused, which is the cost bound and is
+	 * reported; a pool that merely filled up is a pool that grew.
+	 */
+	struct kof_view_mem *mem;
+	uint64_t limit;
+
+	/* Set when a run was dropped for want of room - the pool was full, or its
+	 * class is past the classes the list carries. The caller turns it into
 	 * whatever its format calls that, because it is a fact about the file. */
 	uint32_t full;
 	/* Set when a run had to be clipped to the object: the file named bytes it
@@ -104,12 +120,40 @@ static inline void kof_runs_init(struct kof_runs *l, struct kof_run *buf,
 	l->v = buf;
 	l->n = 0;
 	l->cap = cap;
+	l->mem = NULL;
+	l->limit = cap;
 	l->ncls = ncls < KOF_RUNS_MAX_CLS ? ncls : KOF_RUNS_MAX_CLS;
 	l->full = 0;
 	l->clipped = 0;
 	l->overlapped = 0;
 	for (i = 0; i < KOF_RUNS_MAX_CLS; i++)
 		l->last[i] = 0;
+}
+
+/*
+ * The same list with a pool that grows. `mem` is the view's account, `limit` the most
+ * runs the file can make (see struct kof_runs.limit), and the pool is the caller's to
+ * take over once the list is settled: `l->v` / `l->n`, released with the view.
+ */
+static inline void kof_runs_init_dyn(struct kof_runs *l, struct kof_view_mem *mem,
+				     uint32_t ncls, uint64_t limit)
+{
+	kof_runs_init(l, NULL, 0, ncls);
+	l->mem = mem;
+	l->limit = limit;
+}
+
+/* One more run's room, or 0 and the list is as it was. Out of line of the add below
+ * because it is the rare path of it. */
+static inline int kof_runs_grow(struct kof_runs *l)
+{
+	void *t = l->v;
+
+	if (!l->mem || !kof_tab_grow(l->mem, &t, &l->cap, sizeof *l->v,
+				     (uint64_t)l->n + 1u, l->limit))
+		return 0;
+	l->v = (struct kof_run *)t;
+	return 1;
 }
 
 /*
@@ -124,8 +168,22 @@ static inline void kof_runs_add(struct kof_runs *l, uint64_t obj_size,
 {
 	uint64_t got = kof_clip_len(obj_size, off, n);
 
-	if (n == 0 || cls >= l->ncls)
+	if (n == 0)
 		return;
+	/*
+	 * A CLASS THE LIST WAS NOT MADE FOR is a run that cannot be recorded, and that
+	 * is the same fact as the pool being full: bytes the file claims that the
+	 * table does not hold. It was a bare return with no flag, so a parser asking
+	 * for more than KOF_RUNS_MAX_CLS classes (kof_runs_init clamps ncls to it,
+	 * because the callers' per-class totals are sized to it) lost those bytes with
+	 * nothing saying so. Every caller already turns `full` into its format's
+	 * limit anomaly. No parser passes a class past the clamp today: PDF, the
+	 * widest, asserts it at compile time.
+	 */
+	if (cls >= l->ncls) {
+		l->full = 1;
+		return;
+	}
 	if (got != n)
 		l->clipped = 1;
 	if (got == 0)
@@ -139,7 +197,7 @@ static inline void kof_runs_add(struct kof_runs *l, uint64_t obj_size,
 			return;
 		}
 	}
-	if (l->n >= l->cap) {
+	if (l->n >= l->cap && !kof_runs_grow(l)) {
 		l->full = 1;
 		return;
 	}
@@ -261,7 +319,7 @@ static inline uint32_t kof_runs_resolve(const struct kof_run *v, uint32_t n,
 		if (cursor < obj_size)
 			kof_rl_add(&l, obj_size, cursor, obj_size - cursor);
 	}
-	return kof_rl_normalise(&l);
+	return kof_rl_finish(&l);
 }
 
 /*

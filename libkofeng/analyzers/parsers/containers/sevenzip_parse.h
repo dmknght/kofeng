@@ -20,6 +20,19 @@
 
 int kof_7z_parse(kof_buf file, struct kof_7z_info *info, struct kof_obj_ctx *ctx);
 
+/*
+ * THE VIEW'S TABLES ARE THE HEADER'S SIZE, so a view owns memory - zip_parse.h has the contract,
+ * which is the same here: `info->mem.room` is the caller's before the parse, `info->mem.held` is
+ * what the tables hold after it, and kof_7z_release gives it all back. A table that cannot grow is
+ * not a failed parse: the folders read so far are whole and KOF_7Z_ANOM_FOLDERS_FULL says the rest
+ * were not.
+ */
+void kof_7z_release(struct kof_7z_info *info);
+
+/* The host's handles on the view - see struct kof_view_ops in kofformat.h. */
+struct kof_view_mem *kof_7z_mem(void *view);
+const void *kof_7z_row(void *view, uint32_t *cursor);
+
 /* The six byte magic. Unlike a tar there is nothing else to confirm it with at
  * offset zero, and unlike a zip there is no second copy of the structure to check
  * against - so the magic is the whole test and the parse records what it finds. */

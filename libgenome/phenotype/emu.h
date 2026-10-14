@@ -50,6 +50,8 @@ struct kgenome_emu;
 /* The pages a run may touch when its config says nothing: 64 MiB of guest
  * space. A caller with a smaller allowance passes fewer (kgenome_budget). */
 #define KGENOME_EMU_DEF_PAGES (16u * 1024u)
+/* Private pages the caller's account (cfg.account) is asked for at a time: 64 pages, 256 KiB. */
+#define KGENOME_EMU_GRANT_PAGES 64u
 
 /* General purpose registers, in the decoder's encoding order so a decoded operand
  * indexes this array directly rather than through a translation nobody would
@@ -120,14 +122,16 @@ enum kgenome_emu_stop {
  *                  per REP iteration, so a repeat over a megabyte costs a
  *                  megabyte of budget rather than one instruction's worth
  *   pages          cfg.max_pages - guest address space that has been touched
- *   live mappings  KGENOME_EMU_MAX_VMA - mmap costs the host a record even when it
- *                  commits no page, so a loop of reservations needs a ceiling
- *   snapshots      KGENOME_EMU_MAX_SNAP and a byte total - these are COPIES, the
- *                  one thing here that can cost the host more than the guest
- *                  was given
+ *   live mappings  KGENOME_EMU_MAX_VMA, or the page budget when that is larger - mmap
+ *                  costs the host a record even when it commits no page, so a loop of
+ *                  reservations needs a ceiling
+ *   snapshots      a byte total of the page budget - these are COPIES, the one thing
+ *                  here that can cost the host more than the guest was given
  *
  * Hitting any of them is answered the way a kernel answers it - a refusal the
- * guest can see and carry on from - and never by growing.
+ * guest can see and carry on from - and never by growing. THE CALLER CAN SEE IT TOO:
+ * kgenome_emu_hit() says which bound refused something, so a run that ended
+ * cleanly with a refusal behind it is not read as a complete one.
  *
  * The instruction budget is a CPU bound rather than a time bound on purpose: a
  * wall-clock limit would make the same scan answer differently on a loaded
@@ -178,8 +182,22 @@ enum kgenome_emu_stop {
  */
 #define KGENOME_EMU_QUIET     1500u
 
-#define KGENOME_EMU_MAX_VMA   1024u
-#define KGENOME_EMU_MAX_SNAP  64u
+#define KGENOME_EMU_MAX_VMA   1024u       /* the floor of the live-mapping ceiling, see above */
+
+/* WHICH BOUND REFUSED SOMETHING, kgenome_emu_hit(): a set of these, sticky for the life of
+ * the emulator. A bound that is hit is a run that is not the whole answer. */
+enum kgenome_emu_hit_bit {
+	KGENOME_EMU_HIT_DECL = 1u,        /* a declared range or instruction pattern was refused */
+	KGENOME_EMU_HIT_SNAP = 2u,        /* a snapshot was refused: the byte budget was full */
+	KGENOME_EMU_HIT_VMA  = 4u,        /* an mmap was refused for the live-mapping ceiling */
+	KGENOME_EMU_HIT_RUN  = 8u,        /* kgenome_emu_next_written declined a run: buffers full */
+	KGENOME_EMU_HIT_MEM  = 16u,       /* memory was refused: the caller's allowance (cfg.account) or the
+	                                   * allocator itself - a page, a mapping record, a snapshot, a run
+	                                   * buffer, a table of the Windows model was not made */
+	KGENOME_EMU_HIT_LIB  = 32u        /* a LoadLibrary was refused: the table of 16 modelled libraries a
+	                                   * guest may ask for is full (appended) */
+};
+unsigned kgenome_emu_hit(const struct kgenome_emu *e);
 
 struct kgenome_emu_cfg {
 	uint64_t max_insn;    /* instruction budget; 0 takes the default */
@@ -211,6 +229,33 @@ struct kgenome_emu_cfg {
 	 * for an ELF32 and an ELF64.
 	 */
 	unsigned bits;
+	/*
+	 * APPENDED LAST, so a positional initialiser written before it still means what it did.
+	 *
+	 * MEMORY IS CHARGED AS IT IS TAKEN, NOT AS IT MIGHT BE.
+	 *
+	 * max_pages is the structure's own bound (the guest address space, the
+	 * snapshot and run budgets): a number of the OBJECT, not of the caller's
+	 * allowance, so that the same object gives the same answer under any
+	 * allowance. The allowance is `account`: a callback that is asked for bytes
+	 * BEFORE the machine takes them - the page table and the instruction cache
+	 * at creation, a private page in chunks of KGENOME_EMU_GRANT_PAGES (a run
+	 * touches ~15 of the 16384 it may own), a snapshot or a run buffer exactly -
+	 * and told what is given back, once, when the machine is freed (a negative
+	 * delta). Answering 0 refuses: the page, snapshot or buffer is not made and
+	 * kgenome_emu_hit() carries KGENOME_EMU_HIT_MEM, which a caller reads as "this
+	 * run is not the whole answer". A page borrowed from the caller's own bytes,
+	 * or shared zeroes, costs no private memory and is not charged. NULL (a
+	 * zeroed cfg) accounts nothing.
+	 */
+	int (*account)(void *user, int64_t bytes);
+	void *account_user;
+	/*
+	 * APPENDED: the caller's count of executed instructions. When set, the machine
+	 * adds its own total to it once, when it is freed (kgenome_emu_fork copies the
+	 * pointer, and a fork has not run). A zeroed cfg counts nothing.
+	 */
+	uint64_t *insn_spent;
 };
 
 /* Page protection, as PT_LOAD's p_flags spells it. */
@@ -229,6 +274,9 @@ struct kgenome_emu *kgenome_emu_fork(const struct kgenome_emu *t);
  * be NULL for a region that is all zero, which is how a stack is made.
  */
 int kgenome_emu_map(struct kgenome_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
+		uint64_t memsz, unsigned prot);
+/* The same, for an image whose bytes outlive the machine: whole pages are borrowed, not copied. */
+int kgenome_emu_map_borrow(struct kgenome_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
 		uint64_t memsz, unsigned prot);
 
 /*
@@ -630,13 +678,15 @@ int kgenome_emu_write(struct kgenome_emu *e, uint64_t va, const void *src, unsig
  * decompresses into the section its own entry point is in, so "being in one"
  * ended the run at instruction 0.
  *
- * Ranges are half open. At most KGENOME_EMU_EXEC_WATCH of them; more are dropped,
- * since a file declaring dozens of hollow sections is describing something
- * other than a packed program.
+ * Ranges are half open. KGENOME_EMU_EXEC_WATCH is how many the table starts with: it
+ * GROWS, bounded by the page budget (a range is memory the guest has or will have), and a
+ * range refused for that bound answers 0 and sets KGENOME_EMU_HIT_DECL. A packed PE
+ * declares one per section, and the loader's own mappings add more; neither is a reason
+ * to stop watching.
  */
 #define KGENOME_EMU_EXEC_WATCH 16u
 
-void kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
+int kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
 
 /*
  * ---- STOPPING ON WHAT IS ABOUT TO RUN, RATHER THAN ON WHERE ----------------
@@ -666,15 +716,20 @@ void kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
  * one-byte C3, read [ESP] and check what is there - expressed without a hook.
  * See THIRD-PARTY.md.
  *
- * `n` is 1 to KGENOME_EMU_INSN_WATCH_LEN bytes. Up to KGENOME_EMU_INSN_WATCH patterns.
+ * `n` is 1 to KGENOME_EMU_INSN_WATCH_LEN bytes. KGENOME_EMU_INSN_WATCH patterns is what
+ * the table starts with and what a kgenome_emu_decl carries; it grows to
+ * KGENOME_EMU_INSN_WATCH_MAX. The cost of a pattern is a compare per instruction run, so
+ * that ceiling is a CPU bound; a pattern past it, or one longer than the LEN, answers 0
+ * and sets KGENOME_EMU_HIT_DECL. Answers 1 when kept (or when the call disarms).
  */
 #define KGENOME_EMU_INSN_WATCH     8u
+#define KGENOME_EMU_INSN_WATCH_MAX 256u
 /* Declared API return values per run - a bound on a module's declaration, not
  * on anything the file supplies. */
 #define KGENOME_EMU_SHIM_MAX       16u
 #define KGENOME_EMU_INSN_WATCH_LEN 8u
 
-void kgenome_emu_watch_insn(struct kgenome_emu *e, const uint8_t *bytes, unsigned n);
+int kgenome_emu_watch_insn(struct kgenome_emu *e, const uint8_t *bytes, unsigned n);
 
 /*
  * AND WHETHER THE WHOLE INSTRUCTION IS THAT LONG, which is what tells `C3`
@@ -693,7 +748,7 @@ void kgenome_emu_watch_insn_len(struct kgenome_emu *e, unsigned len);
  * themida-dumper polls the same sections from outside the process for the same
  * reason; see THIRD-PARTY.md.
  */
-void kgenome_emu_watch_write(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
+int kgenome_emu_watch_write(struct kgenome_emu *e, uint64_t lo, uint64_t hi);
 int  kgenome_emu_write_seen(const struct kgenome_emu *e);
 
 /*
@@ -751,7 +806,7 @@ void kgenome_emu_set_oep_watch(struct kgenome_emu *e, int on);
  * makes section hopping the ordinary mechanism; its source was read to
  * understand that and none of it is reproduced here. See THIRD-PARTY.md.
  */
-void kgenome_emu_hop_add(struct kgenome_emu *e, uint64_t lo, uint64_t hi, int seen);
+int kgenome_emu_hop_add(struct kgenome_emu *e, uint64_t lo, uint64_t hi, int seen);
 
 /*
  * WATCH ONE ADDRESS, so "nothing ever wrote it" can be told apart from "the
@@ -837,5 +892,8 @@ int kgenome_emu_next_snapshot(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
  */
 int kgenome_emu_next_written(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 			 const uint8_t **bytes, uint64_t *len);
+
+/* A walk that ends early because the buffers it holds filled the page budget says so:
+ * kgenome_emu_hit() has KGENOME_EMU_HIT_RUN. */
 
 #endif /* KGENOME_EMU_H */

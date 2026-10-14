@@ -148,9 +148,19 @@ enum { KGENOME_CA_INPUT_CAPTURE = 1 };
 enum { KGENOME_CA_NS_CHANGE = 1 };
 enum { KGENOME_CA_SERVICE_INSTALL = 1 };
 
+/*
+ * THE FIELDS: context in bits 13-15, group in bits 8-12, action in bits 0-7.
+ *
+ * The group field is FIVE bits and not four. KGENOME_CG_IO is the seventeenth group (16), and
+ * a four-bit field carried it into the context bit: mem-read (0x1001) read back as context
+ * KERNEL, group BARE, one dense slot with `sleep`. Every value that was ever built keeps its
+ * number - they are all context USER and a group below 17 - so the context moved up instead
+ * of the group being renumbered, and nothing a module or a pack holds changes.
+ */
 #define KGENOME_NUCLEO_MK(ctx, grp, act) \
-	((uint16_t)(((uint16_t)(ctx) << 12) | ((uint16_t)(grp) << 8) | (uint16_t)(act)))
-#define KGENOME_NUCLEO_GROUP(c) ((unsigned)(((c) >> 8) & 0xfu))
+	((uint16_t)(((uint16_t)(ctx) << 13) | ((uint16_t)(grp) << 8) | (uint16_t)(act)))
+#define KGENOME_NUCLEO_CTX(c)   ((unsigned)(((c) >> 13) & 0x7u))
+#define KGENOME_NUCLEO_GROUP(c) ((unsigned)(((c) >> 8) & 0x1fu))
 #define KGENOME_NUCLEO_ACT(c)   ((unsigned)((c) & 0xffu))
 
 
@@ -178,7 +188,7 @@ enum { KGENOME_CA_SERVICE_INSTALL = 1 };
  * that bound is checked here rather than discovered by a profile entry
  * landing on its neighbour.
  */
-typedef char kgenome_cap_groups_fit[(KGENOME_CG_COUNT <= 64) ? 1 : -1];
+typedef char kgenome_cap_groups_fit[(KGENOME_CG_COUNT <= 32) ? 1 : -1];     /* the five-bit group field */
 
 /*
  * A DENSE SLOT PER CAPABILITY, for the arrays that cannot be sparse.
@@ -189,7 +199,7 @@ typedef char kgenome_cap_groups_fit[(KGENOME_CG_COUNT <= 64) ? 1 : -1];
  * does not catch that, so every table that fills a group is written against
  * it and KGENOME_NUCLEO_ACT_MAX says so out loud.
  */
-#define KGENOME_NUCLEO_ACT_MAX   16u
+#define KGENOME_NUCLEO_ACT_MAX   32u        /* net-hdrincl is action 16 of its group: 16 was one short */
 #define KGENOME_NUCLEO_DENSE(c)  ((unsigned)(KGENOME_NUCLEO_GROUP(c) * KGENOME_NUCLEO_ACT_MAX \
 			   + KGENOME_NUCLEO_ACT(c)))
 /* A value that could have come from KGENOME_NUCLEO_MK and nothing else. Replaces

@@ -102,9 +102,13 @@ uint64_t kgenome_emu_do_syscall(struct kgenome_emu *e, int *stop_out)
 unsigned kgenome_emu_syscall_log(const struct kgenome_emu *e,
 			     struct kgenome_emu_syscall *out, unsigned n)
 {
-	unsigned k, got = e->n_syslog < KGENOME_EMU_SYSLOG ? e->n_syslog : KGENOME_EMU_SYSLOG;
-	uint32_t first = e->n_syslog - got;
+	unsigned k, got;
+	uint32_t first;
 
+	if (!e || !out)
+		return 0;
+	got = e->n_syslog < KGENOME_EMU_SYSLOG ? e->n_syslog : KGENOME_EMU_SYSLOG;
+	first = e->n_syslog - got;
 	if (got > n)
 		got = n;
 	for (k = 0; k < got; k++)
@@ -115,8 +119,11 @@ unsigned kgenome_emu_syscall_log(const struct kgenome_emu *e,
 unsigned kgenome_emu_unknown_syscalls(const struct kgenome_emu *e, uint32_t *out,
 				  unsigned n)
 {
-	unsigned k, got = e->n_unksys < n ? e->n_unksys : n;
+	unsigned k, got;
 
+	if (!e || !out)
+		return 0;
+	got = e->n_unksys < n ? e->n_unksys : n;
 	for (k = 0; k < got; k++)
 		out[k] = e->unksys[k];
 	return got;
@@ -294,6 +301,27 @@ static uint64_t self_read(struct kgenome_emu *e, uint64_t va, uint64_t off,
  * for, so a stub that stores a returned pointer cannot be confused with one
  * that computed an address inside its own image. */
 #define EMU_MMAP_BASE  0x00007f0000000000ull
+/* A 32 bit guest has a 32 bit address space: its eax is all it reads back from mmap, so an arena above 4 GiB
+ * would hand it 0 (or a truncated pointer). i386 Linux maps shared objects and anonymous memory just below
+ * the stack (about 0xb7e00000 with the stack at 0xbffff000); this arena starts a little below that, grows
+ * upward with a guard page between mappings like the 64 bit one, and stops short of the stack. */
+#define EMU_LINUX_MMAP_BASE_32  0xb7000000ull
+#define EMU_MMAP_LIMIT_32 0xf0000000ull
+
+static uint64_t mmap_alloc(struct kgenome_emu *e, uint64_t len)
+{
+	uint64_t at;
+
+	if (!e->mmap_next)
+		e->mmap_next = e->bits == 32 ? EMU_LINUX_MMAP_BASE_32 : EMU_MMAP_BASE;
+	at = e->mmap_next;
+	if (e->bits == 32 && (at + len + KGENOME_EMU_PAGE > EMU_MMAP_LIMIT_32 || len > EMU_MMAP_LIMIT_32))
+		return 0;                                   /* the 32 bit arena is full: ENOMEM */
+	/* A guard page between mappings, so a stub that runs off the end of one faults here rather than
+	 * silently scribbling on the next. */
+	e->mmap_next += len + KGENOME_EMU_PAGE;
+	return at;
+}
 
 /*
  * THE i386 SYSCALL NUMBERS THE STUBS HERE ACTUALLY USE, translated to the
@@ -340,9 +368,14 @@ static uint64_t i386_nr(uint64_t nr)
 	 * believes it. The 16-bit id calls are absent for the same reason in
 	 * reverse - nothing modern asks for them.
 	 */
-	case 21:  return EMU_SYS_ACCESS;
-	case 22:  return EMU_SYS_PIPE;
-	case 25:  return EMU_SYS_GETPID;        /* stime; not ours to set */
+	/*
+	 * 21, 22 AND 25 ARE NOT HERE, and used to be. i386 21 is mount, 22 umount and 25 stime, none of them
+	 * access, pipe or getpid, which is what they were mapped to: a guest that mounted a file system was told
+	 * it worked (access answered 0), one that called umount got a pipe, and stime answered with a pid. They are
+	 * privileged calls an ordinary user is refused; unmapped, they are -ENOSYS and listed once like any other
+	 * call the interpreter does not know (the amd64 numbers 21 and 22 are access and pipe, which is what
+	 * the rows were copied from).
+	 */
 	case 33:  return EMU_SYS_ACCESS;
 	case 41:  return EMU_SYS_DUP;
 	case 42:  return EMU_SYS_PIPE;
@@ -462,7 +495,8 @@ static uint64_t sys_proc_mem(struct kgenome_emu *e, uint64_t nr, uint64_t a0, ui
 		 */
 		int32_t  fd    = (int32_t)sysarg(e, 1);
 		uint64_t flags = sysarg(e, 0);
-		uint64_t off = sysarg(e, 2);
+		/* mmap2 (i386 192) counts its offset in 4096 byte pages; the amd64 call and old_mmap count bytes */
+		uint64_t off = sysarg(e, 2) << ((e->bits == 32 && (e->gpr[KGENOME_EMU_RAX] & 0xffffffffu) == 192u) ? 12 : 0);
 		uint64_t at;
 
 		if (!len)
@@ -470,13 +504,9 @@ static uint64_t sys_proc_mem(struct kgenome_emu *e, uint64_t nr, uint64_t a0, ui
 		if (a0) {
 			at = a0 & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
 		} else {
-			if (!e->mmap_next)
-				e->mmap_next = EMU_MMAP_BASE;
-			at = e->mmap_next;
-			/* A guard page between mappings, so a stub that runs off
-			 * the end of one faults here rather than silently
-			 * scribbling on the next. */
-			e->mmap_next += len + KGENOME_EMU_PAGE;
+			at = mmap_alloc(e, len);
+			if (!at)
+				return (uint64_t)-12;               /* ENOMEM */
 		}
 		/*
 		 * PROT_NONE is a reservation and never becomes memory: nothing
@@ -802,9 +832,9 @@ static uint64_t sys_files(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint6
 		gw_put(e, sf, &at, 13107200u);        /* f_bavail            */
 		gw_put(e, sf, &at, 6553600u);         /* f_files             */
 		gw_put(e, sf, &at, 6000000u);         /* f_ffree             */
-		if (!kgenome_emu_mem_wr(e, (nr == EMU_SYS_FSTATFS) ? a1
-						      : e->gpr[KGENOME_EMU_RSI],
-			    sf, at))
+		/* statfs(path, buf) and fstatfs(fd, buf): the buffer is the SECOND argument in both ABIs (rsi on
+		 * amd64, ecx on i386); reading it from RSI answered a 32 bit guest into whatever esi held. */
+		if (!kgenome_emu_mem_wr(e, a1, sf, at))
 			return (uint64_t)-14;
 		return 0;
 	}
@@ -894,26 +924,33 @@ static uint64_t sys_ident(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint6
 		 */
 		uint8_t si[128];
 		unsigned at = 0;
+		/*
+		 * A 32 bit guest's unsigned long cannot hold 8 GiB: written as it was, totalram was 0 - a machine with
+		 * no memory, the very tell this call is answered to avoid. The kernel's own answer (sys_sysinfo) when
+		 * RAM and swap together overflow the word is to count in mem_unit, a page: so does this.
+		 */
+		uint64_t unit = gw(e) == 4u ? 4096u : 1u;
 
 		memset(si, 0, sizeof si);
 		gw_put(e, si, &at, 987654u);                  /* uptime, s    */
 		gw_put(e, si, &at, 12000u);                   /* loads[0]     */
 		gw_put(e, si, &at, 14000u);
 		gw_put(e, si, &at, 16000u);
-		gw_put(e, si, &at, 8ull * 1024 * 1024 * 1024);/* totalram     */
-		gw_put(e, si, &at, 3ull * 1024 * 1024 * 1024);/* freeram      */
+		gw_put(e, si, &at, 8ull * 1024 * 1024 * 1024 / unit);/* totalram     */
+		gw_put(e, si, &at, 3ull * 1024 * 1024 * 1024 / unit);/* freeram      */
 		gw_put(e, si, &at, 0);                        /* sharedram    */
-		gw_put(e, si, &at, 512ull * 1024 * 1024);     /* bufferram    */
-		gw_put(e, si, &at, 2ull * 1024 * 1024 * 1024);/* totalswap    */
-		gw_put(e, si, &at, 2ull * 1024 * 1024 * 1024);/* freeswap     */
+		gw_put(e, si, &at, 512ull * 1024 * 1024 / unit);     /* bufferram    */
+		gw_put(e, si, &at, 2ull * 1024 * 1024 * 1024 / unit);/* totalswap    */
+		gw_put(e, si, &at, 2ull * 1024 * 1024 * 1024 / unit);/* freeswap     */
 		si[at++] = 214; si[at++] = 0;                 /* procs        */
 		at += 2u;                                     /* pad          */
 		if (gw(e) == 8u)
 			at += 4u;                             /* alignment    */
 		gw_put(e, si, &at, 0);                        /* totalhigh    */
 		gw_put(e, si, &at, 0);                        /* freehigh     */
-		at += 4u;                                     /* mem_unit = 1 */
-		si[at - 4u] = 1;
+		at += 4u;                                     /* mem_unit     */
+		si[at - 4u] = (uint8_t)(unit & 0xffu);
+		si[at - 3u] = (uint8_t)(unit >> 8);
 		if (!kgenome_emu_mem_wr(e, a0, si, at))
 			return (uint64_t)-14;
 		return 0;
@@ -1068,9 +1105,12 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 				}
 				done += len;
 			} else {
-				uint64_t got = self_read(e, base, len,
-							 e->self_pos);
+				/* self_read(e, va, off, len): the position is the OFFSET and the vector's length the
+				 * count (the arguments were in the other order, so nothing was ever read) */
+				uint64_t got = self_read(e, base, e->self_pos, len);
 
+				if (got > len)                      /* -EFAULT: the bytes before it were read */
+					return done ? done : got;
 				e->self_pos += got;
 				done += got;
 				if (got < len)
@@ -1103,10 +1143,9 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 			return a0;                    /* shrink in place */
 		if (!(flags & 1u))
 			return (uint64_t)-12;                   /* ENOMEM */
-		if (!e->mmap_next)
-			e->mmap_next = EMU_MMAP_BASE;
-		at = e->mmap_next;
-		e->mmap_next += new_len + KGENOME_EMU_PAGE;
+		at = mmap_alloc(e, new_len);
+		if (!at)
+			return (uint64_t)-12;
 		if (!kgenome_emu_vma_add(e, at, new_len, 0,
 			     KGENOME_EMU_R | KGENOME_EMU_W, 0))
 			return (uint64_t)-12;
@@ -1220,8 +1259,39 @@ static uint64_t sys_io(struct kgenome_emu *e, uint64_t nr, uint64_t a0, uint64_t
 	}
 }
 
+/*
+ * i386 old_mmap (90): ONE argument, a pointer to six 32 bit words (addr, len, prot, flags, fd, offset in bytes)
+ * - the call glibc made before mmap2. Served by laying the words out as mmap2 reads its registers and
+ * running that, then putting the guest's own registers back: nothing else is touched. An unreadable block is -EFAULT.
+ */
+static uint64_t old_mmap(struct kgenome_emu *e, int *stop_out)
+{
+	static const unsigned reg[6] = { KGENOME_EMU_RBX, KGENOME_EMU_RCX, KGENOME_EMU_RDX,
+					 KGENOME_EMU_RSI, KGENOME_EMU_RDI, KGENOME_EMU_RBP };
+	uint32_t w[6];
+	uint64_t save[6], rax = e->gpr[KGENOME_EMU_RAX], r;
+	unsigned k;
+
+	if (!kgenome_emu_mem_rd(e, e->gpr[KGENOME_EMU_RBX] & 0xffffffffu, w, sizeof w))
+		return (uint64_t)-14;                           /* EFAULT */
+	for (k = 0; k < 6u; k++) {
+		save[k] = e->gpr[reg[k]];
+		e->gpr[reg[k]] = w[k];
+	}
+	e->gpr[KGENOME_EMU_RBP] = w[5] >> 12;                   /* mmap2's unit is a page */
+	e->gpr[KGENOME_EMU_RAX] = 192u;
+	r = syscall_do(e, stop_out);
+	for (k = 0; k < 6u; k++)
+		e->gpr[reg[k]] = save[k];
+	e->gpr[KGENOME_EMU_RAX] = rax;
+	return r;
+}
+
 static uint64_t syscall_do(struct kgenome_emu *e, int *stop_out)
 {
+	if (e->bits == 32 && (e->gpr[KGENOME_EMU_RAX] & 0xffffffffu) == 90u)
+		return old_mmap(e, stop_out);
+
 	/*
 	 * i386 passes the number in eax and the arguments in ebx, ecx, edx,
 	 * esi, edi, ebp - a different register for every one of them than amd64

@@ -108,30 +108,62 @@ uint32_t    kdb_diagnoses(const kof_engine *);
  */
 int         kdb_diag_full(const kof_engine *);
 uint32_t    kdb_diag_collisions(const kof_engine *);
+/*
+ * WHAT THE LOADER REFUSED, AS COUNTS. kdb_diag_refused is the diagnose records
+ * that did not read (a field this build does not accept, a record that runs past
+ * its pack): each is a diagnose that is not there. kdb_diag_packs_refused is the
+ * .kdig files (diagnoses, syndromes, diseases) not read whole - a header that does
+ * not add up, or a file past the allowance of the load. Both are also written to
+ * stderr when met; these are what a host linked to the library can read. Zero is
+ * the normal value.
+ */
+uint32_t    kdb_diag_refused(const kof_engine *);
+uint32_t    kdb_diag_packs_refused(const kof_engine *);
+/*
+ * WHAT BUILDING THE SIMILARITY INDEX SAID. The KOF_MTN_B_* word (kofmutation.h):
+ * 0 is clean, KOF_MTN_B_FILTER_DEGRADED means the filter in front of the index holds
+ * fewer than 12 bits a hash because the engine's memory ledger (or the filter's cap) gave
+ * it less (slower, not less accurate), KOF_MTN_B_IN_RAM means a pack with no index trailer
+ * had its index built in memory (repack it), and an OVER_BUDGET bit means the index did not
+ * fit the ledger and similarity rules score nothing. `bytes` is what the index holds
+ * resident - directories and the filter, plus the bodies of packs without a trailer - shared
+ * by all scanners; `keys` its distinct hashes.
+ */
+uint32_t    kdb_mutation_status(const kof_engine *, uint64_t *bytes, uint32_t *keys);
 
 /*
- * WHAT THE MULTI-PATTERN TABLES COST, AND HOW BAD THEIR WORST BUCKET IS.
+ * WHAT THE PATTERN TABLES COST, AND HOW BAD THEIR WORST KEY IS.
  *
  * Two numbers this design rests on, and neither is visible from anywhere else.
  *
- * `bytes` is the memory the tables took. It is CHOSEN and not incurred - the
- * bucket counts are derived from the marker count and bounded - and the claim
- * that a base can grow without the matcher's footprint following it is only
- * checkable if the footprint can be read.
+ * `bytes` is the memory the tables hold - for every pack together, and it does not follow the
+ * number of markers: the markers themselves stay in the pack (detectors/pattern/kofpix.h), and what
+ * is resident is a filter whose size the engine's ledger grants and the exact set of the distinct
+ * keys (about two bytes a key). The claim that a base can grow without the matcher's footprint
+ * following it is only checkable if the footprint can be read.
  *
- * `max_chain` is the longest bucket in any of them, which is what bounds the
- * worst case: a bucket hit costs one verify per marker on its chain, so a base
- * where many markers share their first four bytes turns a file full of those
- * bytes into a slow scan. Four on the shipping base. Nothing in the engine acts
- * on it yet - a threshold cannot be fitted on a hundred markers - so it is
- * reported rather than enforced, which is the honest state of it.
+ * `max_chain` is the longest run of markers that share their key hash, which is what bounds the
+ * worst case: a hit on that key costs one record check per marker of the run, so a base where
+ * many markers share the key a file is full of makes a scan slow. The scan's reads of the pack are
+ * bounded per object (the sweep stops, says so, and the exact per-marker path answers instead), so
+ * it is reported rather than enforced.
  *
- * Either pointer may be NULL. Zero-filled and non-zero return when the database
- * has no tables, which is not an error: it means every marker is searched one
- * at a time, as this engine did before 2.0.
+ * Either pointer may be NULL. Zero-filled and non-zero return when the database has no tables,
+ * which is not an error: it means every marker is searched one at a time, as this engine did before
+ * 2.0.
  */
 int         kmatch_tables(const kof_engine *, uint64_t *bytes,
 				  uint32_t *max_chain);
+
+/*
+ * WHAT LOADING THE PATTERN TABLES SAID. The KOF_PIX_B_* word (detectors/pattern/kofpix.h): 0 is
+ * clean; DEGRADED means the filter in front of the key set is coarser than its default because
+ * the engine's memory ledger gave less (slower, as exact); IN_RAM that a pack with a large table
+ * and no table in its tail had one built in memory (repack it); OVER_BUDGET, OPEN_FAILED and NOMEM
+ * that a pack's table is not in use and its markers are searched one at a time (exact, and slower).
+ * `bytes` is what the tables hold in memory, `markers` how many markers they key. Either may be NULL.
+ */
+uint32_t    kdb_pattern_status(const kof_engine *, uint64_t *bytes, uint64_t *markers);
 
 /*
  * WHAT THE LOADED DATABASE ACTUALLY SAYS ABOUT ITSELF.
@@ -342,11 +374,80 @@ int         kdb_version(const kof_engine *, struct kof_db_version *);
  */
 uint64_t    kdb_stamp(const kof_engine *);
 
-/* One scanner per thread. The engine it is made from must outlive it. */
+/*
+ * THE ENGINE'S MEMORY BUDGET: the whole engine - the database, every scanner, every buffer -
+ * stays under one number, 512 MiB unless the host sets another; there is no "unlimited".
+ * The model is in kofcore/kofbudget.h. keng_set_memory_cap takes effect for scanners made and
+ * objects started afterwards, and is refused (0) below what is already held or below 16 MiB; zero restores the
+ * default. keng_memory_db is what the loaded database holds privately (charged first),
+ * keng_memory_peak the most the budget ever held. kscan_new answers NULL when the budget
+ * cannot afford another scanner (the fixed cost of one, see kofbudget.h) - a caller that asked
+ * for more jobs than that gets fewer, and says so.
+ */
+uint64_t keng_memory_cap(const kof_engine *);
+int      keng_set_memory_cap(kof_engine *, uint64_t bytes);
+uint64_t keng_memory_db(const kof_engine *);
+uint64_t keng_memory_peak(const kof_engine *);
+
+/*
+ * One scanner per thread. The engine it is made from must outlive it.
+ *
+ * kscan_new is the short form: NULL says the scanner was not made, and nothing about why.
+ * kscan_new_ex says it, in *why (when not NULL), with no state shared between calls and
+ * so none between threads:
+ *
+ *   KSCAN_NEW_OK         made (the result is not NULL)
+ *   KSCAN_NEW_NO_ENGINE  the engine was NULL
+ *   KSCAN_NEW_BUDGET     the engine's memory budget cannot afford the fixed cost of another
+ *                        scanner (the cap, the database and the scanners already made leave
+ *                        less): free one, or raise the cap - asking again changes nothing
+ *   KSCAN_NEW_NOMEM      the C library refused an allocation: asking again may work
+ *
+ * kscan_new_why_str is the one spelling of each, for a tool that prints it. The values are
+ * enum kscan_new_status (kofcore/kofhash.h, beside the KOF_ERR_* codes, because the scanner
+ * unit that answers them cannot include this header).
+ */
 kof_scanner *kscan_new(const kof_engine *);
+kof_scanner *kscan_new_ex(const kof_engine *, int *why);
+const char  *kscan_new_why_str(int why);
 void         kscan_free(kof_scanner *);
 
 const struct kof_stats *kscan_stats(const kof_scanner *);
+
+/*
+ * GIVE BACK WHAT THIS SCANNER KEEPS BETWEEN OBJECTS - for a host that lives a long time.
+ *
+ * A scanner keeps, for the next object, the parsed view of every format it has met, its
+ * decompressor states, the matcher's presence table (up to 32 MiB), the symbol block and the
+ * last object's analysis; and the C library keeps what was freed. A process that scanned one
+ * 30 MB object holds that much for the rest of its life (measured: 71 MB steady after 700
+ * scans against 4.8 MB for the median object; 9.9 MB with the heap handed back between
+ * objects). The engine does not call mallopt or malloc_trim on its own - allocator policy is
+ * the process's - so the host asks:
+ *
+ *   KSCAN_TRIM_CACHES  free the scanner's own caches and the last object's products. Cheap
+ *                      (a few frees, no system call): fit to call after every object.
+ *   KSCAN_TRIM_HEAP    ask the C library to return its free pages to the OS (malloc_trim
+ *                      where there is one). Costs a walk of the heap: measured +2.6% CPU
+ *                      when done after every one of 3000 scans, so once per batch or per
+ *                      idle moment is the usual use.
+ *   0                  both.
+ *
+ * Between scans only, on the thread that owns the scanner: a call made while a scan is
+ * running on it (from a callback) is a no-op. Idempotent; thread-safe across DIFFERENT
+ * scanners (nothing here is shared, and the heap call is the C library's own). Everything it
+ * drops is made again on demand, so the next scan finds what it would have found.
+ * `kof_stats.scan_trims` counts the calls that had something to give back.
+ *
+ * Within one scan the engine already lets go at its own stage boundaries, with nothing for
+ * the host to do: the decode trace before the normaliser builds its view; the normaliser's
+ * working buffer when the view has been handed to the sink; the emulator and the image it
+ * rebuilt when the module that asked for the run returns; the diagnose graph, symbol
+ * state and analysis products when the next object begins.
+ */
+#define KSCAN_TRIM_CACHES 1u
+#define KSCAN_TRIM_HEAP   2u
+void kscan_trim(kof_scanner *, unsigned flags);
 
 
 
@@ -374,7 +475,9 @@ void kscan_on_debug(kof_scanner *, kof_on_debug, void *user);
  * object rather than the one that was asked about.
  *
  * The bytes are borrowed and must outlive the call. Returns the number of
- * objects scanned, or a KOF_ERR_*.
+ * objects scanned, or a KOF_ERR_*: KOF_ERR_NOMEM when memory ran out before any object reached
+ * the callback; a tree cut short by it after that keeps its count and moves
+ * kof_stats.limit_hits.
  */
 int kscan_bytes(kof_scanner *, const void *bytes, uint64_t n,
 		   const char *name, const struct kof_scan_option *,

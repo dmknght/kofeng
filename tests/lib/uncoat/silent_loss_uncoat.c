@@ -204,15 +204,11 @@ static void textcode_caps(void)
 	st = kuncoat_a85_decode((const uint8_t *)a85, sizeof a85 - 1u, out, sizeof out, &n);
 	CK(st == KUNCOAT_OK && n == 8u);
 	st = kuncoat_a85_decode((const uint8_t *)a85, sizeof a85 - 1u, out, 4, &n);
-	KM_CHECK(!(st == KUNCOAT_OK && n < 8u),
-		 "kuncoat_a85_decode with cap 4 of 8 reports OK (4 bytes, no signal)",
-		 "a85 cap textcode.c:60 lost: output past `cap` is dropped, status OK");
+	CK(!(st == KUNCOAT_OK && n < 8u));
 	st = kuncoat_ahx_decode((const uint8_t *)ahx, sizeof ahx - 1u, out, sizeof out, &n);
 	CK(st == KUNCOAT_OK && n == 8u);
 	st = kuncoat_ahx_decode((const uint8_t *)ahx, sizeof ahx - 1u, out, 3, &n);
-	KM_CHECK(!(st == KUNCOAT_OK && n < 8u),
-		 "kuncoat_ahx_decode with cap 3 of 8 reports OK (3 bytes, no signal)",
-		 "ahx cap textcode.c:123 lost: output past `cap` is dropped, status OK");
+	CK(!(st == KUNCOAT_OK && n < 8u));
 
 	/* RunLength is a sink: the receiver saying stop is STOPPED; no 128 is TRUNCATED. */
 	{
@@ -333,9 +329,7 @@ static void inflate_signals(void)
 	memset(&r, 0, sizeof r); r.buf = sink_buf; r.cap = sizeof sink_buf;
 	st = run_inflate(&sp, w.b, w.n, &r, &produced);
 	CK(st == KUNCOAT_OK && produced == 3u && r.got == 3u);
-	KM_CHECK(sink_buf[0] == seed[sizeof seed - 1u],
-		 "inflate_seeded with a 40000-byte seed copies the seed's HEAD, so a distance-1 match yields seed[32767], not seed[39999]",
-		 "KUNCOAT_INF_WINDOW inflate.c:661 lost: seed longer than the window keeps its head, not its tail; wrong bytes, status OK");
+	CK(sink_buf[0] == seed[sizeof seed - 1u]);
 	/* With a seed that fits, the same stream is right (control). */
 	sp.n = 30000;
 	memset(&r, 0, sizeof r); r.buf = sink_buf; r.cap = sizeof sink_buf;
@@ -440,9 +434,7 @@ static void lzhuf_signals(void)
 				  &r, &produced);
 	CK(st == KUNCOAT_CORRUPT);
 	CK(produced == 5u);
-	KM_CHECK(r.got == produced,
-		 "lzhuf CORRUPT after 5 decoded bytes: produced says 5, the sink got none",
-		 "KUNCOAT_LZHUF_DICT lzhuf.c:436 lost: bytes buffered in the dictionary are not flushed on CORRUPT (only on TRUNCATED); up to dict-1 bytes dropped, status CORRUPT");
+	CK(r.got == produced);
 }
 
 /* ===================================================================== *
@@ -468,9 +460,7 @@ static void ovba_signals(void)
 	memset(&r, 0, sizeof r); r.buf = b; r.cap = sizeof b;
 	st = kuncoat_ovba_decode(stray, sizeof stray, rec_sink, &r, &n);
 	CK(n == 4u);
-	KM_CHECK(st != KUNCOAT_OK,
-		 "ovba container with a stray byte (half a chunk header) after the last chunk reports OK",
-		 "ovba trailing-header ovba.c:90 lost: `while (at + 2 <= in_len)` ignores 1 trailing byte; a cut chunk header is not TRUNCATED [Inference: low]");
+	CK(st != KUNCOAT_OK);
 }
 
 /* ===================================================================== *
@@ -499,9 +489,7 @@ static void aplib_signals(void)
 	st = kuncoat_aplib_decode(bad, sizeof bad, out, sizeof out, &n);
 	CK(st == KUNCOAT_CORRUPT);
 	CK(out[0] == 'A');
-	KM_CHECK(n == 1u,
-		 "aplib CORRUPT after one literal: produced is 0 although out[0] holds the decoded byte",
-		 "kuncoat_aplib_decode aplib.c:166,179,193 lost: the early `return KUNCOAT_CORRUPT` paths leave *produced at 0, discarding the decoded prefix (signal CORRUPT present) [Inference: low]");
+	CK(n == 1u);
 }
 
 static void lzmat_signals(void)
@@ -519,7 +507,7 @@ static void lzmat_signals(void)
 	st = kuncoat_lzmat_decode(in, sizeof in, out, sizeof out, &n);
 	KM_CHECK(!(st == KUNCOAT_OK && n < sizeof out),
 		 "lzmat input exhausted at 3 of a declared 100 bytes reports OK",
-		 "lzmat out_cap lzmat.c:231 lost: the loop ends on `ip < in_len` and returns OK with produced < out_cap (no end marker in the format, so a cut stream is indistinguishable) [Inference: low-medium]");
+		 "lzmat out_cap: the format has no end marker and an encoder's last control group is usually partial, so a stream cut at an item boundary reads exactly like a complete one under a cap a little above its size - which hostile_lzbit's sweeps require to be OK. Documented in lzmat.h; only `produced` shows the short count. NOT FIXABLE without breaking that contract");
 }
 
 static void nrv2_signals(void)
@@ -576,9 +564,7 @@ static void lzma2_signals(void)
 	/* No 0x00 end byte: the stream was cut exactly at a chunk boundary. */
 	st = kuncoat_lzma2_decode(chunk, sizeof chunk, out, sizeof out, &n);
 	CK(n == 3u);
-	KM_CHECK(st != KUNCOAT_OK,
-		 "LZMA2 stream with no 0x00 end byte (cut at a chunk boundary), room left, reports OK",
-		 "kuncoat_lzma2_decode lzma.c:575 lost: `while (p < in_len && at < out_cap)` leaves on input end with status OK; a missing end marker is never TRUNCATED [Inference: low]");
+	CK(st != KUNCOAT_OK);
 }
 
 /* ===================================================================== *
@@ -618,9 +604,7 @@ static void bunzip_signals(void)
 	memcpy(in, empty, sizeof empty);
 	memcpy(in + sizeof empty, "BZh9\x31\x41\x59\x26\x53", 9);
 	st = kuncoat_bunzip_decode(bz_state, in, sizeof empty + 9u, bz_sink, &got, &n);
-	KM_CHECK(st != KUNCOAT_OK,
-		 "bunzip: a concatenated second stream cut after 9 bytes reports OK",
-		 "kuncoat_bunzip_decode bunzip.c:506 lost: `if (at + 10 > in_len) break;` drops a cut member header silently; the reference tool at least warns [Inference: low]");
+	CK(st != KUNCOAT_OK);
 	free(bz_state);
 }
 
@@ -762,14 +746,13 @@ static void ppmd_signals(void)
 	/* RAR's block header: the arena in MB less one. The sample set measured in
 	 * ppmd.h has blocks that ask for 251 MB; the build clamps to 64 MB. A model
 	 * with less memory than the encoder's restarts at a DIFFERENT point and the
-	 * bytes after it are wrong. rar3.c:770 passes the clamped number straight to
-	 * kuncoat_ppmd_start; nothing records that the request was cut. */
+	 * bytes after it are wrong. arena_want does not clamp: rar3.c hands the asked
+	 * number to kuncoat_ppmd_start_asked, which remembers it and says
+	 * (kuncoat_ppmd_over) when the stream needed the rest (ppmd_over.c). */
 	uint64_t asked = (250u + 1u) << 20;
 
 	CK(kuncoat_ppmd_arena_want(24) == 25u << 20);       /* the default: honoured */
-	KM_CHECK(kuncoat_ppmd_arena_want(250) == asked,
-		 "PPMd block asking for 251 MB is given 64 MB with no signal",
-		 "ARENA_MAX ppmd.c:49 lost: kuncoat_ppmd_arena_want clamps silently and rar3.c:770 never compares; output after the first model restart diverges from the encoder's [Inference: needs a >64MB model to show]");
+	CK(kuncoat_ppmd_arena_want(250) == asked);
 }
 
 int main(void)

@@ -144,15 +144,8 @@ static void t_code_range(void)
 		enum hk_result r = hk_isolated(code_range_index_case, NULL, 10, &sig);
 		enum hk_result rh = hk_isolated(code_range_headers_case, NULL, 10, &sig);
 
-		KM_CHECK(rh == HK_OK, "kgenome_diag_code_range returns the ELF header as code when the object is only headers",
-			 "diag_code.c:67 `if (*at < hdr && hdr - *at < have)`: for an object whose size equals the end of the "
-			 "program header table (hdr - at == have) the start is not moved and `have` bytes of ELF header are "
-			 "returned as code; a shorter object keeps its 10 header bytes the same way. "
-			 "Repro: kgenome_diag_code_range(&info, 0, e_phoff + e_phnum*e_phentsize, &at) != 0");
-		KM_CHECK(r == HK_OK, "kgenome_diag_code_range reads seg[i] for any i the caller passes",
-			 "diag_code.c kgenome_diag_code_seg: `&e->seg[i]` with no `i < KGENOME_ELF_MAX_SEGMENTS`; "
-			 "kgenome_diag_extent_count clamps for the loops that call it, the public function does not. "
-			 "Repro: kgenome_diag_code_range(&info, 100000, size, &at) with info at the end of a page");
+		CK(rh == HK_OK);   /* kgenome_diag_code_range returns the ELF header as code when the object is only headers */
+		CK(r == HK_OK);   /* kgenome_diag_code_range reads seg[i] for any i the caller passes */
 	}
 }
 

@@ -14,6 +14,7 @@
  * bytes themselves, which is the part worth sharing.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,9 @@
 #include "dbpacker.h"
 #include "pack/dbcore.h"
 #include "pack/hexprog.h"
+#include "pack/dbkix.h"
+#include "../detectors/mutations/kofmutflt.h"   /* the pre-built block filter */
+#include "../detectors/pattern/kofpix.h"
 #include "../kofcore/kofcore.h"
 
 /* A growable byte buffer, alive only while building. */
@@ -326,6 +330,13 @@ static int collect_alloc(struct collect_cx *cx, const struct kof_pw_mod *mods,
 	return 1;
 }
 
+/* A text a finding's name is made of: shorter than KOF_NAME_MAX_LEN, terminator
+ * included. NULL is no text and fits. */
+static int name_fits(const char *s)
+{
+	return !s || memchr(s, 0, KOF_NAME_MAX_LEN) != NULL;
+}
+
 /* THE CALLER'S ARRAYS AND PER-MODULE MAXIMA, refused before any of them is walked. */
 static int collect_check(const struct kof_pw_mod *m)
 {
@@ -357,6 +368,23 @@ static int collect_check(const struct kof_pw_mod *m)
 	if (m->n_str > KOF_MAX_STR_PER_MODULE ||
 	    m->n_rng > KOF_MAX_RANGE_PER_MODULE)
 		return 0;
+	/*
+	 * A NAME THE ENGINE CANNOT STORE IS REFUSED HERE, not only by ksigbuilder.
+	 * KOF_NAME_MAX_LEN was enforced by the tool that happens to write most packs;
+	 * this is the library entry point, and a pack made through it with a
+	 * 300-character family used to be accepted, loaded, and reported cut. Every
+	 * text a finding is composed from is held to it: the family, the family a
+	 * rule predicts, and each detection name.
+	 */
+	if (!name_fits(m->family) || !name_fits(m->heur_predict))
+		return 0;
+	{
+		uint32_t k;
+
+		for (k = 0; k < m->n_names; k++)
+			if (!m->name[k].text || !name_fits(m->name[k].text))
+				return 0;
+	}
 	return 1;
 }
 
@@ -633,8 +661,177 @@ out:
 	return ok;
 }
 
+/*
+ * THE PATTERN TABLE of this pack, as a part of its tail (kofpix_build_pack says what a table holds;
+ * the loader builds the same one in memory from the same sections for a pack that has none).
+ * A table smaller than `embed_min` (KOFPIX_EMBED_MIN unless the caller asked otherwise) is not written:
+ * building it at load costs less than opening a part, and a pack of a few kilobytes does not grow by tens.
+ *
+ * Returns the part's image (kof_pix_make: the table, its slice CRCs and the footer) or NULL, with
+ * *nomem set when NULL is an allocation failure and not "nothing to write".
+ */
+static uint8_t *make_pix_part(const struct built *b, uint64_t at, uint64_t old_len,
+			      uint64_t embed_min, uint64_t *len, int *nomem)
+{
+	struct kofpix_pack_view v;
+	struct kofpix_build_stat st;
+	uint64_t sec_len = 0;
+	uint8_t *sec, *part = NULL;
+
+	*nomem = 0;
+	*len = 0;
+	memset(&v, 0, sizeof v);
+	v.mod = b->mod; v.n_mod = b->n_mods;
+	v.str = b->str; v.n_str = b->n_str;
+	v.rng = b->rng; v.n_rng = b->n_rng;
+	v.pool = b->str_pool.p; v.pool_len = b->str_pool.len;
+	sec = kofpix_build_pack(&v, &sec_len, &st);
+	if (!sec) {
+		*nomem = sec_len == ~(uint64_t)0;
+		return NULL;
+	}
+	if (sec_len >= embed_min) {
+		part = kof_pix_make(sec, sec_len, (uint32_t)(st.n_rec > 0xffffffffu ? 0xffffffffu : st.n_rec),
+				    at, old_len, 0, len);
+		if (!part)
+			*nomem = 1;
+	}
+	free(sec);
+	return part;
+}
+
+static int cmp_u32_asc(const void *a, const void *b)
+{
+	uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+/*
+ * The pre-built filter of the blocks' keys (detectors/mutations/kofmutflt.h): the DISTINCT multiplied hashes, ascending,
+ * stored at KOF_MFLT_R_DEFAULT bits. The loader keeps it at the width its ledger grants and builds nothing. Peak
+ * memory here is 4 bytes a hash of the pool and the largest partition's scratch (30 MB). NULL (and the pack
+ * gets the bloom filter it always had) when the pack has no blocks or an allocation fails.
+ */
+static uint8_t *build_xf(const struct built *b, uint64_t *len)
+{
+	uint32_t *keys, i, j, m = 0, st = 0;
+	uint64_t n = 0;
+	uint8_t *reg;
+
+	for (i = 0; i < b->n_blk; i++)
+		n += b->blk[i].n_hash;
+	if (!n || n > 0xfffffff0ull)
+		return NULL;
+	keys = malloc((size_t)n * sizeof *keys);
+	if (!keys)
+		return NULL;
+	for (i = 0; i < b->n_blk; i++)
+		for (j = 0; j < b->blk[i].n_hash; j++)
+			keys[m++] = b->pool[b->blk[i].first_hash + j] * KOF_KIX_MULT;
+	qsort(keys, m, sizeof *keys, cmp_u32_asc);
+	for (i = 0, j = 0; i < m; i++)
+		if (!j || keys[i] != keys[j - 1u])
+			keys[j++] = keys[i];
+	reg = kof_mflt_build(keys, j, KOF_MFLT_R_DEFAULT, len, &st);
+	free(keys);
+	return reg;
+}
+
+/*
+ * Append the tail of the pack to the image: the pattern table when the pack has keyable markers and
+ * the block index when it has blocks (see pack/dbkix.h for the container). Returns 0 only on an
+ * allocation failure; a set a part cannot describe (more than 256 distinct region/normalizer/side
+ * combinations, an entry count past 32 bits) is SAID on stderr and the pack is written without that
+ * part - the loader then builds the structure in memory under its ledger, or refuses it loudly
+ * (KOF_MTN_B_OVER_BUDGET for the blocks, KOF_PIX_B_OVER_BUDGET for the markers).
+ *
+ * Nothing before the tail moves: every record keeps its layout and the format version is untouched.
+ * What changes is the length the header states and the CRC over it, which is what lets an engine
+ * that does not know the tail load the pack as one with a long tail. Both footers carry the CRC of
+ * the OLD part as the file will hold it - which includes the header's new file_len - so a newer engine
+ * can check the part it reads at load without reading the tail.
+ */
+static int append_tail(uint8_t **imgp, uint64_t *offp, const struct built *b, uint64_t embed_min)
+{
+	struct kof_kix_build_in in;
+	struct kof_kix_build_res res;
+	uint64_t old_len = *offp, at = kof_round_up(old_len, KOF_KIX_ALIGN), plen = 0, tlen = 0, total;
+	struct kof_pack_hdr *h;
+	uint8_t *tr = NULL, *pix = NULL, *img, *xf;
+	uint64_t xf_len = 0;
+	uint32_t crc;
+	int nomem = 0;
+
+	if (b->n_str) {
+		pix = make_pix_part(b, at, old_len, embed_min, &plen, &nomem);
+		if (nomem)
+			return 0;
+	}
+	if (b->n_blk) {
+		memset(&in, 0, sizeof in);
+		in.blk = b->blk; in.n_blk = b->n_blk;
+		in.pool = b->pool; in.n_pool = b->n_pool;
+		xf = build_xf(b, &xf_len);
+		if (xf) {
+			in.xf = xf; in.xf_bytes = xf_len; in.xf_kind = KOF_KIX_XF_FUSE;
+		}
+		tr = kof_kix_make(&in, at + plen, old_len, 0, &tlen, &res);
+		free(xf);
+		if (!tr) {
+			if (res.status & KOF_KIX_B_NOMEM) {
+				free(pix);
+				return 0;
+			}
+			fprintf(stderr, "dbpacker: no similarity index in this pack (status 0x%x: %s); "
+				"the loader will build one in memory\n", res.status,
+				(res.status & KOF_KIX_B_TOO_MANY_CLASSES) ? "more than 256 region/normalizer/side classes"
+				: (res.status & KOF_KIX_B_TOO_BIG) ? "more entries than 32 bits address"
+				: "the blocks do not describe a set");
+		}
+	}
+	if (!pix && !tr)
+		return 1;
+	total = at + plen + tlen;
+	if (total > (uint64_t)((size_t)-1) / 2u) {
+		free(pix);
+		free(tr);
+		return 0;
+	}
+	img = realloc(*imgp, (size_t)total);
+	if (!img) {
+		free(pix);
+		free(tr);
+		return 0;
+	}
+	memset(img + old_len, 0, (size_t)(total - old_len));
+	h = (struct kof_pack_hdr *)img;
+	h->file_len = total;
+	/* The old part as the file will hold it, header included. */
+	crc = kof_crc32(img + KOF_PACK_CRC_FROM, old_len - KOF_PACK_CRC_FROM);
+	if (pix) {
+		kof_kix_seal(pix, plen, crc);
+		memcpy(img + at, pix, (size_t)plen);
+	}
+	if (tr) {
+		kof_kix_seal(tr, tlen, crc);
+		memcpy(img + at + plen, tr, (size_t)tlen);
+	}
+	free(pix);
+	free(tr);
+	*imgp = img;
+	*offp = total;
+	return 1;
+}
+
 uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n,
 			size_t *out_len)
+{
+	return kof_pack_build_opt(kind, mods, n, NULL, out_len);
+}
+
+uint8_t *kof_pack_build_opt(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n,
+			    const struct kof_pack_opt *opt, size_t *out_len)
 {
 	struct built b;
 	struct kof_pack_hdr *h;
@@ -759,8 +956,13 @@ uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n
 		h->sec[i].len = len[i];
 	}
 
+	/* The tail: the pattern table and the block index (append_tail). */
+	if (!append_tail(&img, &off, &b, opt && opt->pix_embed_min ? opt->pix_embed_min : KOFPIX_EMBED_MIN))
+		goto out;
+
 	/* Last, and over everything after itself, so it covers the header it is
 	 * written into. */
+	h = (struct kof_pack_hdr *)img;
 	h->crc32 = kof_crc32(img + KOF_PACK_CRC_FROM, off - KOF_PACK_CRC_FROM);
 
 	*out_len = (size_t)off;

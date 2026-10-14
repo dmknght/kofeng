@@ -30,6 +30,7 @@
 
 #include "elf_image.h"
 #include <kofcmp.h>
+#include <kofdebug.h>
 #include <rangelist.h>
 
 #include <stddef.h>
@@ -102,6 +103,28 @@ uint64_t kgenome_elf_seg_extent(const struct kgenome_elf_seg *g, uint64_t obj_si
 int kgenome_elf_sec_is_code(const struct kgenome_elf_sec *s)
 {
 	return s->type == KGENOME_ELF_SHT_PROGBITS && (s->flags & KGENOME_ELF_SHF_EXEC) != 0;
+}
+
+int kgenome_elf_sec_is_stub(const struct kgenome_elf_info *e, uint32_t i)
+{
+	uint32_t k, home = e->sec_count;
+
+	if (!e->valid || !e->entry_addr || i >= e->sec_count ||
+	    i >= KGENOME_ELF_MAX_SECTIONS || !kgenome_elf_sec_is_code(&e->sec[i]))
+		return 0;
+	/* The program's own code is the executable section the entry point is in; the
+	 * others are the loader's and the linker's (.init, .fini, the PLT, ...). An
+	 * entry in no executable section says nothing about which is which. */
+	for (k = 0; k < e->sec_count && k < KGENOME_ELF_MAX_SECTIONS; k++) {
+		const struct kgenome_elf_sec *s = &e->sec[k];
+
+		if (kgenome_elf_sec_is_code(s) && e->entry_addr >= s->mem_addr &&
+		    e->entry_addr - s->mem_addr < s->file_size) {
+			home = k;
+			break;
+		}
+	}
+	return home < e->sec_count && home != i;
 }
 
 uint64_t kgenome_elf_sec_extent(const struct kgenome_elf_sec *s, uint64_t obj_size,
@@ -232,10 +255,22 @@ static int read_phdr(kof_buf ph, int is64, int be, struct kgenome_elf_seg *s,
 	}
 }
 
+/* sh_link and sh_info, which sit after the fields the section needs to be counted at
+ * all: a header cut off before them is still a section (it was one before they were read
+ * and stays one), with the two words zero, which no consumer reads as a link. */
+static int link_info(kof_buf sh, uint64_t at, int be, uint32_t *link, uint32_t *info)
+{
+	if (!kof_rd_u32(sh, at, be, link))
+		*link = 0;
+	if (!kof_rd_u32(sh, at + 4u, be, info))
+		*info = 0;
+	return 1;
+}
+
 /* Read one section header. Returns the name index separately: resolving it
  * needs the string table, which is itself one of the sections. */
 static int read_shdr(kof_buf sh, int is64, int be, struct kgenome_elf_sec *s,
-		     uint32_t *out_name_idx)
+		     uint32_t *out_name_idx, uint32_t *out_link, uint32_t *out_info)
 {
 	if (is64) {
 		return kof_rd_u32(sh,  0, be, out_name_idx)  &&
@@ -243,7 +278,8 @@ static int read_shdr(kof_buf sh, int is64, int be, struct kgenome_elf_sec *s,
 		       kof_rd_u64(sh,  8, be, &s->flags)     &&
 		       kof_rd_u64(sh, 16, be, &s->mem_addr)  &&
 		       kof_rd_u64(sh, 24, be, &s->file_off)  &&
-		       kof_rd_u64(sh, 32, be, &s->file_size);
+		       kof_rd_u64(sh, 32, be, &s->file_size) &&
+		       link_info(sh, 40, be, out_link, out_info);
 	}
 	{
 		uint32_t flags32, addr32, off32, size32;
@@ -252,7 +288,8 @@ static int read_shdr(kof_buf sh, int is64, int be, struct kgenome_elf_sec *s,
 		      kof_rd_u32(sh,  8, be, &flags32)     &&
 		      kof_rd_u32(sh, 12, be, &addr32)      &&
 		      kof_rd_u32(sh, 16, be, &off32)       &&
-		      kof_rd_u32(sh, 20, be, &size32)))
+		      kof_rd_u32(sh, 20, be, &size32)      &&
+		      link_info(sh, 24, be, out_link, out_info)))
 			return 0;
 		s->flags     = flags32;
 		s->mem_addr  = addr32;
@@ -316,7 +353,9 @@ static void parse_sections(kof_buf file, struct kgenome_elf_info *info,
 			break;
 		}
 		memset(s, 0, sizeof *s);
-		if (!read_shdr(sh, is64, be, s, &name_idx[info->sec_count])) {
+		if (!read_shdr(sh, is64, be, s, &name_idx[info->sec_count],
+			       &info->sec_link[info->sec_count],
+			       &info->sec_info[info->sec_count])) {
 			*anom |= KGENOME_ELF_ANOM_SEC_PAST_EOF;
 			break;
 		}
@@ -618,6 +657,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 	kof_rd_u16(file, 18, be, &info->e_machine);
 	kof_rd_u32(file, 20, be, &info->e_version);
 
+	info->e_flags = 0;
 	if (is64) {
 		kof_rd_u64(file, 24, be, &info->entry_addr);
 		kof_rd_u64(file, 32, be, &info->phoff);
@@ -627,6 +667,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 		kof_rd_u16(file, 58, be, &info->shentsize);
 		kof_rd_u16(file, 60, be, &info->shnum_claimed);
 		kof_rd_u16(file, 62, be, &info->shstrndx);
+		kof_rd_u32(file, 48, be, &info->e_flags);
 	} else {
 		uint32_t v;
 		if (kof_rd_u32(file, 24, be, &v)) info->entry_addr = v;
@@ -637,6 +678,7 @@ int kgenome_elf_image_parse(kof_buf file, struct kgenome_elf_info *info,
 		kof_rd_u16(file, 46, be, &info->shentsize);
 		kof_rd_u16(file, 48, be, &info->shnum_claimed);
 		kof_rd_u16(file, 50, be, &info->shstrndx);
+		kof_rd_u32(file, 36, be, &info->e_flags);
 	}
 
 	obj->arch = arch_from_machine(info->e_machine, is64);
@@ -807,14 +849,26 @@ int kgenome_elf_sniff(kof_buf file)
  * any name MEANS.
  */
 
+/* The string section a symbol table's sh_link names, or NULL when it names none (zero,
+ * past the table, or a section that is not a string table). */
+static const struct kgenome_elf_sec *sec_strtab_of(const struct kgenome_elf_info *p, uint32_t i)
+{
+	uint32_t l = p->sec_link[i];
+
+	if (!l || l >= p->sec_count || l >= KGENOME_ELF_MAX_SECTIONS ||
+	    p->sec[l].type != KGENOME_ELF_SHT_STRTAB)
+		return NULL;
+	return &p->sec[l];
+}
+
 int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 		      enum kgenome_elf_symtab_want want,
 		      struct kgenome_elf_symtab *t)
 {
-	static const struct { uint32_t sht; const char *str; uint8_t origin; }
+	static const struct { uint32_t sht; uint8_t origin; }
 	tab[2] = {
-		{ KGENOME_ELF_SHT_SYMTAB, ".strtab", 1u },   /* KOF_SYM_ORIGIN_SYMTAB */
-		{ KGENOME_ELF_SHT_DYNSYM, ".dynstr", 2u }    /* KOF_SYM_ORIGIN_DYNSYM */
+		{ KGENOME_ELF_SHT_SYMTAB, 1u },   /* KOF_SYM_ORIGIN_SYMTAB */
+		{ KGENOME_ELF_SHT_DYNSYM, 2u }    /* KOF_SYM_ORIGIN_DYNSYM */
 	};
 	uint32_t k, lo = want == KGENOME_ELF_SYMTAB_DYN ? 1u : 0u;
 	uint32_t hi = want == KGENOME_ELF_SYMTAB_FULL ? 0u : 1u;
@@ -826,6 +880,7 @@ int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 		return 0;
 	t->elf64 = p->elf_class == KGENOME_ELFCLASS_64;
 	t->be = p->elf_data == KGENOME_ELFDATA_BE;
+	t->mips64 = t->elf64 && p->e_machine == EM_MIPS;
 	t->recsize = t->elf64 ? 24u : 16u;
 
 	/*
@@ -835,11 +890,16 @@ int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 	 * must have one or the other says so.
 	 *
 	 * A TABLE WITHOUT ITS STRINGS IS STILL A TABLE, and `strn` zero is
-	 * how that is said. The pairing is by name (.symtab with .strtab,
-	 * .dynsym with .dynstr) because sh_link is not in the parsed section
-	 * and the ABI fixes it either way - but a file that renamed or
-	 * dropped the string section still has addresses, sizes and types,
-	 * and a caller after function BOUNDARIES needs none of the names.
+	 * how that is said. The pairing is by sh_link, which is what the
+	 * format says a symbol table's strings are (info->sec_link), and NOT by
+	 * the section's name: ".strtab" and ".dynstr" are the linker's
+	 * spelling, a file that renames them runs the same, and a pairing by
+	 * name lost every symbol name of such a file (measured by the test
+	 * names_structural: the same object with its string sections renamed
+	 * gave strn 0). A file that dropped the string section, or whose
+	 * sh_link names something that is not one, still has addresses, sizes
+	 * and types, and a caller after function BOUNDARIES needs none of the
+	 * names.
 	 *
 	 * It is still the weaker find, so a nameless .symtab does not beat a
 	 * complete .dynsym: the loop remembers it and only falls back to it
@@ -852,11 +912,11 @@ int kgenome_elf_symtab_of(kof_buf f, const struct kgenome_elf_info *p,
 		const struct kgenome_elf_sec *sym = 0, *str = 0;
 
 		for (i = 0; i < p->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
-			if (p->sec[i].type == tab[k].sht && !sym)
+			if (p->sec[i].type == tab[k].sht) {
 				sym = &p->sec[i];
-			else if (p->sec[i].type == KGENOME_ELF_SHT_STRTAB &&
-				 !strcmp(p->sec[i].name, tab[k].str))
-				str = &p->sec[i];
+				str = sec_strtab_of(p, i);
+				break;
+			}
 		}
 		if (!sym)
 			continue;
@@ -888,8 +948,12 @@ int kgenome_elf_symbol_at(kof_buf f, const struct kgenome_elf_symtab *t, uint64_
 
 	if (!t || !s || !t->off)
 		return 0;
-	at = t->off + i * t->recsize;
 	memset(s, 0, sizeof *s);
+	/* The record's offset is table + i*recsize and an index near 2^64 wraps it onto a
+	 * record of the table: refuse what does not fit in the address space. */
+	if (t->recsize && i > (UINT64_MAX - t->off) / t->recsize)
+		return 0;
+	at = t->off + i * t->recsize;
 	/*
 	 * TWO ORDERS, NOT TWO WIDTHS. Elf64_Sym is name,info,other,shndx,
 	 * value,size; Elf32_Sym is name,value,size,info,other,shndx. The
@@ -923,9 +987,10 @@ int kgenome_elf_symbol_at(kof_buf f, const struct kgenome_elf_symtab *t, uint64_
 /* A NUL-terminated name out of a string table, into the caller's buffer.
  * Empty rather than absent on a read that is refused: a visitor is never
  * handed a pointer that has not been written. */
-static void str_read(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
+static int str_read(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
 {
 	uint32_t q;
+	int cut = 0;
 
 	for (q = 0; q + 1u < dstn; q++) {
 		uint8_t c8 = 0;
@@ -935,6 +1000,12 @@ static void str_read(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
 		dst[q] = (char)c8;
 	}
 	dst[q] = 0;
+	if (dstn && q + 1u == dstn) {           /* full, and the name goes on: cut */
+		uint8_t c8 = 0;
+
+		cut = kof_rd_u8(f, at + q, &c8) && c8;
+	}
+	return cut;
 }
 
 /*
@@ -945,7 +1016,18 @@ static void str_read(kof_buf f, uint64_t at, char *dst, uint32_t dstn)
 static int rel_at(kof_buf f, const struct kgenome_elf_symtab *t, uint64_t base,
 		  uint64_t *roff, uint32_t *rty, uint32_t *si)
 {
-	if (t->elf64) {
+	if (t->mips64) {
+		/* The symbol is a word in the file's order; the type is the last byte, which
+		 * is the same byte in both orders. r_type2 and r_type3 compose further
+		 * relocations on the same site and are not read. */
+		uint8_t ty = 0;
+
+		if (!kof_rd_u64(f, base, t->be, roff) ||
+		    !kof_rd_u32(f, base + 8u, t->be, si) ||
+		    !kof_rd_u8(f, base + 15u, &ty))
+			return 0;
+		*rty = ty;
+	} else if (t->elf64) {
 		uint64_t info = 0;
 
 		if (!kof_rd_u64(f, base, t->be, roff) ||
@@ -970,60 +1052,39 @@ static int rel_at(kof_buf f, const struct kgenome_elf_symtab *t, uint64_t base,
 				  : ((t)->elf64 ? 16u : 8u))
 
 /*
- * WHICH SECTION A RELOCATION SECTION APPLIES TO comes from its NAME and not
- * from sh_info, which the parse does not publish: `.rela.text` relocates
- * `.text`. That is a convention rather than a guarantee, and it is the one
- * every toolchain that produces these follows.
+ * WHICH SECTION A RELOCATION SECTION APPLIES TO is its sh_info (info->sec_info),
+ * which is what the format says - and not its NAME. `.rela.text` relocating
+ * `.text` was a convention of the linker, read off the spelling; renaming the
+ * sections (which breaks nothing that runs) emptied the relocation table, and
+ * with it every call to an import of a relocatable object (measured by the test
+ * names_structural).
  *
  * Returns the target's FILE OFFSET and says whether it holds code, so a
  * caller picks its own reading - a call graph wants code only, an image that
  * must run wants the tables too. A target with no bytes in the file (.bss) is
- * refused: there is nothing to patch at a file offset that does not exist.
+ * refused: there is nothing to patch at a file offset that does not exist. A
+ * section that names itself, or none (sh_info 0), or one past the table, has no
+ * target.
  */
-static uint64_t rel_target(const struct kgenome_elf_info *p, const char *nm,
-			   int *is_code)
+static uint64_t rel_target(const struct kgenome_elf_info *p, uint32_t i, int *is_code)
 {
-	uint32_t j;
+	uint32_t j = p->sec_info[i];
 
-	if (!strncmp(nm, ".rela", 5u))
-		nm += 5;
-	else if (!strncmp(nm, ".rel", 4u))
-		nm += 4;
-	else
+	if (!j || j == i || j >= p->sec_count || j >= KGENOME_ELF_MAX_SECTIONS)
 		return 0;
-	if (!*nm)
+	if (p->sec[j].type == KGENOME_ELF_SHT_NOBITS)
 		return 0;
-	for (j = 0; j < p->sec_count && j < KGENOME_ELF_MAX_SECTIONS; j++)
-		if (!strcmp(p->sec[j].name, nm)) {
-			if (p->sec[j].type == KGENOME_ELF_SHT_NOBITS)
-				return 0;
-			*is_code = kgenome_elf_sec_is_code(&p->sec[j]);
-			return p->sec[j].file_off;
-		}
-	return 0;
+	*is_code = kgenome_elf_sec_is_code(&p->sec[j]);
+	return p->sec[j].file_off;
 }
 
-/*
- * THE RELOCATION TABLE - see struct kgenome_elf_relocs for what it is and why it is
- * one table and not a walk per reader.
- *
- * FILE OFFSETS ON BOTH SIDES. An ET_REL has sh_addr of zero everywhere; the
- * linker has not placed anything. The file is the only address space it has,
- * which is the same reading kgenome_elf_relcalls takes for its sites. `sym` is the
- * file offset the symbol resolves to, and `defined` says whether it resolves at
- * all - an undefined symbol is a promise to the loader and there is nothing
- * here to point at.
- *
- * TWO PASSES OVER THE SECTION TABLE AND NOT A GROWING ARRAY: the first only
- * counts, so the allocation is exact and one record is never moved.
- */
 static int reloc_section(const struct kgenome_elf_info *p, uint32_t i,
 			 unsigned want, uint64_t *tgt_off, int *is_code)
 {
 	*is_code = 0;
 	if (p->sec[i].type != KGENOME_ELF_SHT_RELA)
 		return 0;               /* REL has no addend to report */
-	*tgt_off = rel_target(p, p->sec[i].name, is_code);
+	*tgt_off = rel_target(p, i, is_code);
 	if (!*tgt_off)
 		return 0;
 	return (want & (*is_code ? KGENOME_ELF_RELOC_CODE : KGENOME_ELF_RELOC_DATA)) != 0;
@@ -1090,6 +1151,7 @@ uint32_t kgenome_elf_reloc_table(kof_buf f, const struct kgenome_elf_info *p,
 
 	out->v = NULL;
 	out->n = 0;
+	out->status = KGENOME_OK;
 	if (!p || !p->valid || !kgenome_elf_symtab_of(f, p, KGENOME_ELF_SYMTAB_FULL, &t))
 		return 0;
 
@@ -1106,8 +1168,14 @@ uint32_t kgenome_elf_reloc_table(kof_buf f, const struct kgenome_elf_info *p,
 	if (!total)
 		return 0;
 	out->v = malloc((size_t)total * sizeof *out->v);
-	if (!out->v)
+	if (!out->v) {
+		/* "could not build" is not "no relocations": an ET_REL's every call to an
+		 * import is in this table, and an empty one reads as a program that calls
+		 * nothing. */
+		out->status = KGENOME_NOMEM;
+		KOF_TRACE("[cut] kgenome_elf_reloc_table: %u records not allocated\n", total);
 		return 0;
+	}
 
 	for (i = 0; i < p->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
 		uint64_t k, step, have, tgt_off;
@@ -1132,6 +1200,10 @@ uint32_t kgenome_elf_reloc_table(kof_buf f, const struct kgenome_elf_info *p,
 						t.be, &add))
 					break;
 			}
+			/* A site is a place in the object. r_offset is the file's number: past the
+			 * end it names nothing, and the sum with the section's offset must not wrap. */
+			if (tgt_off >= f.n || roff >= f.n - tgt_off)
+				continue;
 			r->where = tgt_off + roff;
 			r->type = rty;
 			r->addend = (int64_t)add;
@@ -1209,10 +1281,13 @@ static uint64_t kgenome_elf_reloc_call_at(const struct kgenome_elf_info *p,
 
 uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 			  const struct kgenome_elf_relocs *t,
-			  kgenome_elf_relcall_fn fn, void *user)
+			  kgenome_elf_relcall_fn fn, void *user,
+			  enum kgenome_status *status)
 {
 	uint32_t i, n = 0;
 
+	if (status)
+		*status = KGENOME_OK;
 	if (!f.p || !p || !t || !fn)
 		return 0;
 	for (i = 0; i < t->n; i++) {
@@ -1221,7 +1296,8 @@ uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 
 		if (!r->call)
 			continue;
-		str_read(f, r->nameoff, nm, sizeof nm);
+		if (str_read(f, r->nameoff, nm, sizeof nm) && status)
+			*status = kgenome_status_merge(*status, KGENOME_TRUNCATED);
 		/* `sym` is the symbol's section plus its value when this
 		 * object defines it - an ET_REL section declares address zero,
 		 * so the file offset is the address - and zero when it does

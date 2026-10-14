@@ -36,10 +36,10 @@
 
 
 
-void kgenome_diag_emu_gather_skip(void *user, uint64_t at, uint64_t target,
-			const char *name)
+void kgenome_diag_emu_gather_skip(struct kgenome_diag_emu_skipgather *g,
+			const struct kgenome_diag_rcall *rc)
 {
-	struct kgenome_diag_emu_skipgather *g = user;
+	uint64_t at = rc->at, target = rc->target;
 
 	if (at < DIAG_REL_CALLLEN)
 		return;
@@ -59,9 +59,7 @@ void kgenome_diag_emu_gather_skip(void *user, uint64_t at, uint64_t target,
 	g->site[g->n].callee = target;
 	/* An internal call names a capability only by accident; it is here to
 	 * be skipped, not to be a node. */
-	g->site[g->n].cap = target ? KGENOME_NUCLEO_NONE
-				   : (name ? kgenome_nucleo_cap_of_name(name)
-					   : KGENOME_NUCLEO_NONE);
+	g->site[g->n].cap = target ? KGENOME_NUCLEO_NONE : rc->cap;
 	g->n++;
 }
 
@@ -123,7 +121,7 @@ int kgenome_diag_emu_worth_remembering(uint64_t v, uint64_t size)
 	 * a relocation - and that is known without running at all.
 	 */
 	if (v >= KGENOME_DIAG_TOK_BASE &&
-	    v < KGENOME_DIAG_TOK_BASE + (uint64_t)KGENOME_DIAG_TOK_SPAN * KGENOME_EMU_PAGE)
+	    v < KGENOME_DIAG_TOK_BASE + (uint64_t)KGENOME_DIAG_TOK_MAX * KGENOME_EMU_PAGE)
 		return 1;
 	return v > KGENOME_DIAG_REL_BASE &&
 	       v < KGENOME_DIAG_REL_BASE + size + KGENOME_DIAG_REL_SLACK;

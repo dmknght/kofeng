@@ -224,10 +224,6 @@ static int fam_programs(void *arg)
 			const struct prog *p = &progs[i];
 			struct run_res r;
 
-			/* KNOWN UNDEFINED BEHAVIOUR (UBSAN only): emu_interp.c:2003 multiplies two int64_t for a
-			 * one-operand IMUL, so INT64_MIN * INT64_MIN overflows; in a plain build it wraps */
-			if (hk_ubsan() && p->code == p_imul_ovf)
-				continue;
 			r = run_code(p->code, p->n, p->budget, bits, NULL, NULL);
 
 			if (!stop_known(r.stop)) {
@@ -319,21 +315,6 @@ static int fam_random_code(void *arg)
 		} else {
 			for (k = 0; k < sizeof code; k++)
 				code[k] = hk_below(&r, 3) ? hot[hk_below(&r, sizeof hot)] : (uint8_t)hk_next(&r);
-		}
-		if (hk_ubsan()) {
-			/* the same known UB as above: a decoded IMUL is replaced by NOPs, see emu_interp.c:2003 */
-			unsigned at = 0;
-			while (at < sizeof code) {
-				struct kgenome_x86_insn di;
-				unsigned l = 1;
-
-				if (kgenome_x86_decode(&di, code + at, sizeof code - at, (int)ra->bits) == KGENOME_OK) {
-					l = di.len ? di.len : 1u;
-					if (di.id == KGENOME_X86_I_IMUL)
-						memset(code + at, 0x90, l);
-				}
-				at += l;
-			}
 		}
 		e = mk(code, sizeof code, budget, 64, ra->bits);
 		if (!e)
@@ -506,25 +487,30 @@ static int fam_windows(void *arg)
 
 /* ---- one-operand 64-bit IMUL: RDX:RAX is the 128-bit product ------------------------------------------------ */
 
-static int km_imul64(void *arg)
+static int imul64_case(uint64_t x, uint64_t y, uint64_t want_hi, uint64_t want_lo)
 {
-	/* imul rbx ; hlt  with rax = 2^62, rbx = 4: the product is 2^64, rdx:rax = 1:0 */
 	static const uint8_t code[] = { 0x48, 0xf7, 0xeb, 0xf4 };
 	struct kgenome_emu *e = mk(code, sizeof code, 100, 16, 64);
-	uint64_t hi, lo;
 	int rc;
 
-	(void)arg;
-	if (hk_ubsan())
-		return 0;                       /* the same instruction is the UB site; see the gate in fam_programs */
-	kgenome_emu_set_reg(e, KGENOME_EMU_RAX, 1ull << 62);
-	kgenome_emu_set_reg(e, KGENOME_EMU_RBX, 4);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RAX, x);
+	kgenome_emu_set_reg(e, KGENOME_EMU_RBX, y);
 	(void)kgenome_emu_run(e);
-	lo = kgenome_emu_get_reg(e, KGENOME_EMU_RAX);
-	hi = kgenome_emu_get_reg(e, KGENOME_EMU_RDX);
-	rc = lo == 0 && hi == 1 ? 0 : 1;
+	rc = kgenome_emu_get_reg(e, KGENOME_EMU_RDX) == want_hi && kgenome_emu_get_reg(e, KGENOME_EMU_RAX) == want_lo ? 0 : 1;
 	kgenome_emu_free(e);
 	return rc;
+}
+
+static int km_imul64(void *arg)
+{
+	(void)arg;
+	return imul64_case(1ull << 62, 4, 1, 0) |                      /* 2^64 */
+	       imul64_case(1ull << 40, 1ull << 40, 0x10000, 0) |       /* 2^80 */
+	       imul64_case((uint64_t)-3, 5, UINT64_MAX, (uint64_t)-15) |
+	       imul64_case((uint64_t)INT64_MIN, (uint64_t)INT64_MIN, 1ull << 62, 0) |   /* 2^126 */
+	       imul64_case((uint64_t)INT64_MIN, 2, UINT64_MAX, 0) |    /* -2^64 */
+	       imul64_case((uint64_t)-1, (uint64_t)-1, 0, 1);
+
 }
 
 /* ---- 5: the public calls with values no honest caller passes -------------------------------------------- */
@@ -790,21 +776,11 @@ static void known_null_cases(void)
 	n = null_sweep(handle_null, sizeof handle_null / sizeof handle_null[0], names, sizeof names);
 	if (n)
 		printf("  (crash on a NULL emulator handle: %s)\n", names);
-	KM_CHECK(n == 0, "29 public emulator calls dereference a NULL handle while 34 sibling calls guard it",
-		 "emu_api.c and friends: no `if (!e)` in set_self set_seg_base win_set_module win_set_heap "
-		 "count_mod_reads mod_reads first_hop last_hop win_setup last_calls set_rip set_reg get_reg rip "
-		 "run last_write set_icache snap_written insn_count exc_counts exc_scratch trace write watch "
-		 "watch_hits unknown_syscalls syscall_log next_snapshot next_written; kgenome_emu_new returns "
-		 "NULL on OOM (emu_api.c:25), so an unchecked result crashes in the first of them. "
-		 "Repro: kgenome_emu_run(NULL)");
+	CK(n == 0);   /* 29 public emulator calls dereference a NULL handle while 34 sibling calls guard it */
 	n = null_sweep(param_null, sizeof param_null / sizeof param_null[0], names, sizeof names);
 	if (n)
 		printf("  (crash on a NULL parameter: %s)\n", names);
-	KM_CHECK(n == 0, "6 public emulator calls dereference a NULL in/out parameter their siblings accept",
-		 "kgenome_emu_win_addr_of / win_resolve (name NULL -> strcmp, emu_win.c:415), "
-		 "kgenome_emu_write (src NULL, n > 0), kgenome_emu_last_calls (out NULL), "
-		 "kgenome_emu_next_snapshot / next_written (it NULL); kgenome_emu_read(dst NULL) and "
-		 "kgenome_emu_itrace_get(NULL outs) are guarded. Repro: kgenome_emu_last_calls(e, NULL)");
+	CK(n == 0);   /* 6 public emulator calls dereference a NULL in/out parameter their siblings accept */
 }
 
 /* ---- the driver ---------------------------------------------------------------------------------------- */
@@ -852,13 +828,9 @@ int main(int argc, char **argv)
 			hk_fails++;
 		}
 	}
-	if (!hk_ubsan()) {
+	{
 		int sig = 0;
-		KM_CHECK(hk_isolated(km_imul64, NULL, 10, &sig) == HK_OK,
-			 "the interpreter's one-operand 64-bit IMUL leaves RDX as the sign of the product, not its high half",
-			 "emu_interp.c:2008-2009 `(uint64_t)((x < 0) != (y < 0) ? -1 : 0)` for sz == 8 (and :2003 `x * y` is a "
-			 "signed overflow). Repro: rax = 2^62, rbx = 4, `imul rbx` -> rdx:rax = 0:0, the CPU's is 1:0; "
-			 "rax = rbx = 2^40 -> rdx 0, the CPU's is 0x10000. MUL and the 32-bit IMUL are right");
+		CK(hk_isolated(km_imul64, NULL, 10, &sig) == HK_OK);   /* the interpreter's one-operand 64-bit IMUL leaves RDX as the sign of the product, not its high half */
 	}
 	known_null_cases();
 	printf("hostile_emu: %d failure(s)\n", hk_fails);

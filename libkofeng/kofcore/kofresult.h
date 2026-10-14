@@ -133,6 +133,16 @@ struct kof_finding {
 	 */
 	uint8_t  sim_pct;
 	uint8_t  sim_kind;          /* enum kof_sim_kind */
+	/*
+	 * NON-ZERO WHEN `name` HAD TO BE CUT. The name is a fixed array and the parts
+	 * of one are bounded loosely (a family is up to 191 characters, a variant as
+	 * many); the part that gives is the FAMILY, so the variant, the shape and the
+	 * reason - what tell two rules of one family apart - are kept whole and
+	 * `family.n` is shorter than the family the rule declared. The flag says so.
+	 * Lives in the two bytes the layout already padded between sim_kind and
+	 * sim_of: no field moved and the struct did not grow.
+	 */
+	uint8_t  name_cut;
 	uint32_t sim_of;
 
 	/*
@@ -314,7 +324,9 @@ struct kof_diag_report {
 	const char *name;
 	uint32_t    id;                     /* kof_diag_id32_(name) */
 	uint8_t     state;                  /* enum kof_diag_state */
-	uint8_t     n_node;                 /* nodes the diagnose declares */
+	uint8_t     n_node;                 /* nodes the diagnose declares, at most
+					 * KOF_DIAG_REPORT_NODES: a diagnose of more
+					 * reports its first ones (it matches on all) */
 	uint8_t     n_bound;                /* nodes found: n_node on MATCH, else 0 */
 	uint16_t    cap[KOF_DIAG_REPORT_NODES];  /* what node k is */
 	uint64_t    at[KOF_DIAG_REPORT_NODES];   /* where, as an offset into the object */
@@ -643,6 +655,15 @@ struct kof_result {
 	uint8_t  subtype;
 	uint8_t  subfamily;
 	uint8_t  lang_known;
+	/*
+	 * APPENDED: the object's own diagnose analysis ran out of its budget and the
+	 * object is NOT marked broken, because it opened into a child that carries the
+	 * evidence (a packer's stub: the emulate route spent its instructions on it).
+	 * What would have been `KOF_BROKEN_LIMIT` is said here instead, for -v and an
+	 * examiner; kof_stats.analysis_moot counts them. Zero for every other object,
+	 * and always zero on one whose cut was its ONLY analysis (that one is LIMIT).
+	 */
+	uint8_t  analysis_moot;
 };
 
 /*
@@ -738,12 +759,17 @@ struct kof_stats {
 	 * first does not is a build where the sweep stopped working, and there is
 	 * no other way to see that from outside.
 	 *
-	 * `multi_hash4` and `multi_wumanber` say which routine the router picked,
-	 * split because they are picked for opposite reasons - short markers and
-	 * long ones - and a base drifting from one to the other is worth seeing.
+	 * `multi_degraded` is the sweeps that could NOT finish: the object reached its read bound
+	 * (a hostile file makes every position a candidate), a read of the pack failed or came
+	 * back short (a truncated pack), a slice of the table failed its checksum, or the table of
+	 * what was found was full. Each is reported here and the region is then answered by the
+	 * per-marker path, which is exact - so a nonzero count is time lost, never a detection.
+	 * `multi_reads` is the reads of the pack those sweeps made: the table's records and the
+	 * markers' bytes, which stay in the pack and are read as a candidate needs them.
 	 */
 	uint64_t multi_passes;           /* regions read once for all their markers */
-	uint64_t multi_hash4, multi_wumanber;   /* which routine did it */
+	uint64_t multi_degraded;         /* sweeps that did not finish (see above) */
+	uint64_t multi_reads;            /* reads of the pack made by sweeps */
 	uint64_t multi_bytes;            /* bytes those passes walked */
 	uint64_t multi_answers;            /* answers written without a search */
 
@@ -787,6 +813,88 @@ struct kof_stats {
 	 * how close a scan came to it. See KOF_HEUR_WANT in kofmod/heur.h.
 	 */
 	uint64_t heur_emu;
+
+	/*
+	 * HOW MANY OBJECTS A BOUND CUT, AND SAID SO.
+	 *
+	 * A bound that exists to stop a hostile object (a table of a parser, the
+	 * rounds of a decode, a pending list) may cut a real one short. It never does
+	 * so quietly: the object it cut is marked KOF_BROKEN_LIMIT (unless an earlier
+	 * reason is there) and this counts the object, so a scan of a tree can tell a
+	 * clean answer from one that was bounded. Zero is the normal value.
+	 */
+	uint64_t limit_hits;
+
+	/*
+	 * THE SIMILARITY MATCHER'S WORK, and whether its bound cut any.
+	 * `mutation_visits` is the entries of shared block lists this scanner walked,
+	 * `mutation_trunc_objects` the objects on which the per-object visit budget
+	 * refused a walk (their block counts are lower bounds; zero is normal).
+	 */
+	uint64_t mutation_visits;
+	uint64_t mutation_trunc_objects;
+	/*
+	 * APPENDED FIELDS (memory work; struct kof_stats is read through a pointer
+	 * the engine owns, so a host built against the older header never reads
+	 * past the old end).
+	 *
+	 * `trace_capped`: objects whose decode trace was refused room - by the cap that
+	 * follows the caller's allowance (a quarter of max_resident_bytes, at most
+	 * 32 MiB) or by the ledger. The trace is a cache; the code is decoded again and
+	 * the answer is the same, so this is a cost report and never an incompleteness.
+	 * `peak_norm`: the most the normaliser's working buffers held at once.
+	 * `scan_trims`: calls of kscan_trim that found something to give back.
+	 */
+	uint64_t trace_capped;
+	uint64_t peak_norm;
+	uint64_t scan_trims;
+	/*
+	 * A produced object that could not be spilled to a file, said by reason. Each counts an
+	 * event where the engine fell back to memory under the ceiling (or refused the object):
+	 * `spill_unavailable` no directory a file can be made in, `spill_small` too little
+	 * free space, `spill_full` a write failed mid-object (the object is dropped, not
+	 * cut), `spill_ram` the default directory is a RAM filesystem so the object stayed in
+	 * heap, `spill_ceiling` the memory ceiling was reached while the file was not an option
+	 * (the object is refused and marked KOF_BROKEN_LIMIT, limit_hits moves).
+	 */
+	uint64_t spill_unavailable, spill_small, spill_full, spill_ram, spill_ceiling;
+	/* Assembled images the emulator run handed to the child instead of copying into it. */
+	uint64_t emu_adopted;
+	/* APPENDED: container members whose NAME was longer than the container's format
+	 * allows (see oc_name_limit in scanners/objctx_child.c for the limit of each and its
+	 * standard). Such a member is opened without a name, its object is reported
+	 * KOF_BROKEN_DAMAGED and this counts it; zero is the normal value. */
+	uint64_t names_invalid;
+	/*
+	 * APPENDED (similarity index in the pack): `mutation_io_objects` is the objects on
+	 * which the matcher could not read all it needed from the pack's index file - the
+	 * object's read allowance ran out (KOF_MTN_S_IO_BUDGET), a read failed because the
+	 * file is shorter than it was (KOF_MTN_S_IO_ERROR), or a 64 KiB slice did not match its
+	 * checksum (KOF_MTN_S_SLICE_CRC). Their block counts are lower bounds; zero is normal.
+	 * `mutation_io_bytes` is what this scanner has read from that file.
+	 */
+	uint64_t mutation_io_objects;
+	uint64_t mutation_io_bytes;
+	/*
+	 * APPENDED (tree-wide interpreter allowance, kof_scan_option.max_emu_insn):
+	 * `emu_insn` is the instructions the interpreter executed for the trees this scanner
+	 * has scanned (unpack runs, heuristic runs, the diagnose scan's emulations);
+	 * `emu_budget_denied` is the objects whose run or emulating route was refused or cut
+	 * because their tree had spent its allowance. Those objects read KOF_BROKEN_LIMIT and
+	 * are in limit_hits as well. Zero is the normal value of the second.
+	 */
+	uint64_t emu_insn;
+	uint64_t emu_budget_denied;
+	/* APPENDED: objects whose own analysis was cut by its budget while a child they
+	 * opened into carries the evidence - not broken, counted here and in
+	 * kof_result.analysis_moot (scanners/scan_verdict.c, sx_syndrome_verdict). */
+	uint64_t analysis_moot;
+	/* APPENDED: the engine's check, per top-level file, of a host that registered
+	 * on_event_detected: `verdicts_counted` files had a finding (a roll-up counts
+	 * them), `verdicts_delivered` of those were given a verdict event, and
+	 * `verdict_lost` is the difference. Zero is the only correct value; a nonzero
+	 * one is a defect of the engine and kofscanner prints it as an error. */
+	uint64_t verdicts_counted, verdicts_delivered, verdict_lost;
 };
 
 #endif /* KOFRESULT_H */

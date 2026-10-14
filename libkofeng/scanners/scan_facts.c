@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include "../kofcore/kofmod/kofsym.h"
 #include "../analyzers/parsers/kofformat.h"
 #include "../kofcore/kofmod/elf.h"
@@ -179,10 +180,17 @@ int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 	p = kof_parser_of(d->fmt);
 	if (!p || d->info_len > p->view_size)
 		return 0;
+	/* A view that owns tables cannot be adopted from bytes: it holds pointers. The image of a
+	 * container is not one that a transform could have produced, and the object stays raw. */
+	if (kof_view_ops_of(d->fmt))
+		return 0;
 	if (!sc->cache.view[d->fmt]) {
 		sc->cache.view[d->fmt] = malloc(p->view_size);
-		if (!sc->cache.view[d->fmt])
+		if (!sc->cache.view[d->fmt]) {
+			/* raw is the answer for an object that cannot be described, and it is SAID */
+			OC_LIMIT(sc, "image view not allocated, the object stays raw");
 			return 0;
+		}
 	}
 	memset(sc->cache.view[d->fmt], 0, p->view_size);
 	memcpy(sc->cache.view[d->fmt], d->info, d->info_len);
@@ -194,10 +202,127 @@ int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx)
 	return 1;
 }
 
+/*
+ * A format whose modules read no view of it: kofmod has no accessor for these
+ * four, so the id is the whole claim. Every other format has a view-struct
+ * accessor (`kof_zip(ctx)` for ZIP and DOCZIP, `kof_pe`, `kof_pdf` ...), which is
+ * a cast of ctx->file_header with no null check - see sx_identify.
+ */
+static int fmt_is_viewless(uint8_t fmt)
+{
+	return fmt == KOF_FMT_TEXT || fmt == KOF_FMT_MACHO ||
+	       fmt == KOF_FMT_IMAGE || fmt == KOF_FMT_FONT;
+}
+
+/*
+ * THE LEDGER AND A VIEW THAT OWNS TABLES (zip, pdf: struct kof_view_ops).
+ *
+ * Before the parse: the room it may take is what the per-object ledger has left, because
+ * the parse allocates to the size of the file and must be told what the engine can afford
+ * - the one number it cannot work out. After it: what it holds is charged, and stays
+ * charged until sx_views_release gives it back at the end of the object. A parse that
+ * cannot grow a table says so itself (the format's "full" anomaly, read by
+ * kof_parser_cut_bits below), so nothing here decides what is lost.
+ */
+static void view_arm(const struct kof_scanner *sc, uint8_t fmt, void *view)
+{
+	const struct kof_view_ops *o = kof_view_ops_of(fmt);
+
+	if (o) {
+		uint64_t room = oc_scan_room(sc);
+
+		/* Never zero: zero is a caller that keeps no account, which this one does. */
+		o->mem(view)->room = room ? room : 1u;
+	}
+}
+
+static void view_charge(struct kof_scanner *sc, uint8_t fmt, void *view)
+{
+	const struct kof_view_ops *o = kof_view_ops_of(fmt);
+	uint64_t held;
+
+	if (!o)
+		return;
+	held = o->mem(view)->held;
+	if (held) {
+		scan_charge(sc, held);
+		sc->cache.view_held += held;
+	}
+}
+
+/*
+ * THE WALK A MODULE'S kof_zip_next / kof_pdf_next REACHES: the next row of this object's
+ * view, through the format's own handle (kof_view_ops). NULL when the format has no
+ * walkable table, when the object was not parsed, and at the end. It is the host's call
+ * and not an array in the view so that the host counts it - see sx_walk_check.
+ */
+const void *oc_view_next(const struct kof_obj_ctx *ctx, uint32_t *cursor)
+{
+	const struct kof_view_ops *o = kof_view_ops_of(ctx->format);
+
+	if (!o || !ctx->file_header || !cursor)
+		return NULL;
+	return o->next((void *)(uintptr_t)ctx->file_header, cursor);
+}
+
+void sx_views_release(struct kof_scanner *sc)
+{
+	uint32_t i;
+
+	for (i = 0; i < KOF_TARGET_COUNT; i++) {
+		const struct kof_view_ops *o;
+
+		if (!sc->cache.view[i])
+			continue;
+		o = kof_view_ops_of((uint8_t)i);
+		if (o)
+			o->release(sc->cache.view[i]);
+	}
+	oc_scan_release(sc, sc->cache.view_held);
+	sc->cache.view_held = 0;
+	sx_ext_release(sc);
+}
+
+/*
+ * AN UNPACK MODULE FOR A FORMAT WITH A WALKABLE TABLE THAT NEVER WALKED IT.
+ *
+ * The one thing that tells a module built for the layout before the tables were dynamic
+ * from one that simply had nothing to do: such a module reads `z->n_entries` /
+ * `p->n_objects` at the offsets its build put them, finds the legacy field - zero, kept
+ * for exactly this - runs no loop, and returns having produced nothing and said nothing. A
+ * pack built before the change and loaded by this engine would otherwise turn every archive
+ * and document into one that was "examined". The walk is a vtable slot, so the host counts
+ * its calls (struct kof_view_mem.walked); a view with rows and no calls is that module.
+ *
+ * Asked after a module that NAMES the object's format as its target and unwraps it - a
+ * module for another format, or one that targets anything, was not written to read this
+ * table and is not held to it. UNSUPPORTED is the reason because it is the one a later
+ * build closes: the fix is to rebuild the database. The first reason recorded is the one
+ * kept, so a module that reported its own better one is not overwritten.
+ */
+void sx_walk_check(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		   const struct kof_module *m)
+{
+	const struct kof_view_ops *o = kof_view_ops_of(ctx->format);
+	const struct kof_view_mem *vm;
+	uint32_t k;
+
+	if (!o || !ctx->file_header || m->step != KOF_ANALYZE_UNWRAP)
+		return;
+	for (k = 0; k < m->n_target && m->target[k] != ctx->format; k++)
+		;
+	if (k == m->n_target)
+		return;
+	vm = o->mem((void *)(uintptr_t)ctx->file_header);
+	if (vm->rows && !vm->walked)
+		oc_scan_broken(sc, KOF_BROKEN_UNSUPPORTED);
+}
+
 void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		     uint8_t as_format, const void *as_view, uint32_t as_view_len)
 {
 	const struct kof_parser *parsers;
+	uint64_t keep[KOF_PARSER_KEEP / sizeof(uint64_t)];
 	uint32_t i, n;
 
 	/*
@@ -240,7 +365,7 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		/*
 		 * SAID WHEN THERE IS NOTHING TO PARSE - AND ONLY THEN.
 		 *
-		 * KOF_FMT_TEXT and KOF_FMT_SCRIPT have no row in the parser
+		 * KOF_FMT_TEXT, MACHO, IMAGE and FONT have no row in the parser
 		 * table: there is no header to read and no region to carve, so
 		 * there is nothing for a parser to do. For those the id IS the
 		 * whole claim, and it matters because ctx->format is what
@@ -271,56 +396,95 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		 * cannot happen. With a parser present it is set below, after
 		 * the parse agreed.
 		 */
-		if (!p)
-			ctx->format = as_format;
-		if (p) {
-			if (!sc->cache.view[as_format]) {
-				sc->cache.view[as_format] = malloc(p->view_size);
-				if (!sc->cache.view[as_format])
-					return;
-			}
-			/*
-			 * ZEROED EVERY TIME, not once when it was allocated.
-			 *
-			 * A view is reused across objects, and the sniff path
-			 * can do that because each of those parsers fills every
-			 * field it later reads. This path cannot: the fields the
-			 * CALLER supplies are exactly the ones the parse does
-			 * not compute, so a view left as the last object found
-			 * it hands this object the last one's answers. That was
-			 * the bug - the first event in a run resolved its
-			 * regions from a zero extent and every event after it
-			 * from the previous event's.
-			 */
-			memset(sc->cache.view[as_format], 0, p->view_size);
-			if (as_view && as_view_len &&
-			    as_view_len <= p->view_size)
-				memcpy(sc->cache.view[as_format], as_view,
-				       as_view_len);
-			/*
-			 * The parse sets ctx->format itself when it succeeds -
-			 * every collector does, and one row even chooses
-			 * between two formats while doing it. So there is
-			 * nothing to set here on success, and nothing to undo
-			 * on failure: an object whose declared parse refused is
-			 * unidentified, which is the same answer a failed sniff
-			 * gives and is the honest one.
-			 */
-			(void)p->parse(buf, sc->cache.view[as_format], ctx);
+		/*
+		 * A ROW-LESS FORMAT KEEPS ITS ID ONLY WHEN NO MODULE READS A VIEW OF IT.
+		 *
+		 * The line this replaces set ctx->format for EVERY format without a
+		 * row, on the reading above that "there is nothing to parse". True for
+		 * four of them and false for the rest: KOF_FMT_DOCZIP has no row of its
+		 * own (the ZIP row's parse chooses between ZIP and DOCZIP), yet the
+		 * module that targets it begins `kof_zip(ctx)->valid`, a cast of the
+		 * NULL file_header - SIGSEGV for kscan_bytes(..., as_format =
+		 * KOF_FMT_DOCZIP) (tests/unit/hostile_engine_scan.c, c_as_doczip).
+		 * The rule is the one stated for a refused parse just above, applied
+		 * to the case with no parse: an id without its view is never left
+		 * standing, and the object is unidentified, which is what a failed
+		 * sniff gives.
+		 */
+		if (!p) {
+			if (fmt_is_viewless(as_format))
+				ctx->format = as_format;
+			return;
 		}
+		if (!sc->cache.view[as_format]) {
+			sc->cache.view[as_format] = malloc(p->view_size);
+			if (!sc->cache.view[as_format]) {
+				OC_LIMIT(sc, "format view not allocated, the object is unidentified");
+				return;
+			}
+		}
+		/*
+		 * ZEROED EVERY TIME, not once when it was allocated.
+		 *
+		 * A view is reused across objects, and the sniff path
+		 * can do that because each of those parsers fills every
+		 * field it later reads. This path cannot: the fields the
+		 * CALLER supplies are exactly the ones the parse does
+		 * not compute, so a view left as the last object found
+		 * it hands this object the last one's answers. That was
+		 * the bug - the first event in a run resolved its
+		 * regions from a zero extent and every event after it
+		 * from the previous event's.
+		 */
+		memset(sc->cache.view[as_format], 0, p->view_size);
+		/*
+		 * NEVER OVER A VIEW THAT OWNS TABLES: its first bytes after the clear are not fields the
+		 * caller knows but the pointers the parse lets go of before it clears them, and a caller's
+		 * bytes there are a free() of whatever it wrote. A container computes everything its view
+		 * holds (the declared view exists for the fields a parse does NOT compute: a PE's
+		 * layout), so there is nothing to supply.
+		 */
+		if (as_view && as_view_len && !kof_view_ops_of(as_format) &&
+		    as_view_len <= p->view_size)
+			memcpy(sc->cache.view[as_format], as_view,
+			       as_view_len);
+		/*
+		 * The parse sets ctx->format itself when it succeeds -
+		 * every collector does, and one row even chooses
+		 * between two formats while doing it. So there is
+		 * nothing to set here on success, and nothing to undo
+		 * on failure: an object whose declared parse refused is
+		 * unidentified, which is the same answer a failed sniff
+		 * gives and is the honest one.
+		 */
+		view_arm(sc, as_format, sc->cache.view[as_format]);
+		(void)p->parse(buf, sc->cache.view[as_format], ctx);
+		view_charge(sc, as_format, sc->cache.view[as_format]);
+		/* A parse that agreed sets its own id AND its view; one that left the
+		 * id without the view (a half-built row) must not hand a module a
+		 * format whose accessor casts NULL. */
+		if (ctx->format && !ctx->file_header && !fmt_is_viewless(ctx->format))
+			ctx->format = KOF_FMT_UNKNOWN;
 		return;
 	}
 
 	parsers = kof_parser_list(&n);
 	for (i = 0; i < n; i++) {
 		const struct kof_parser *p = &parsers[i];
+		const struct kof_parser_keep *kp = kof_parser_keep_of(p->format);
 
-		if (!p->sniff(buf))
+		/* A row with a keep buffer reads the object once for both questions
+		 * (struct kof_parser_keep); the others sniff and then parse. */
+		if (kp ? !kp->sniff(buf, keep) : !p->sniff(buf))
 			continue;
 		if (!sc->cache.view[p->format]) {
-			sc->cache.view[p->format] = malloc(p->view_size);
-			if (!sc->cache.view[p->format])
+			/* calloc: a view the parse clears by itself is then touched only where it
+			 * is written, so its arrays cost resident memory for what was used. */
+			sc->cache.view[p->format] = calloc(1, p->view_size);
+			if (!sc->cache.view[p->format]) {
+				OC_LIMIT(sc, "format view not allocated, the object is unidentified");
 				return;
+			}
 		}
 		/*
 		 * ZEROED HERE TOO, AND THE REASON THE SNIFF PATH WAS EXEMPT HAS
@@ -346,9 +510,19 @@ void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		 * the mapped image and once on the file-layout copy un-mapped
 		 * from it, which cannot be mapped and said it was.
 		 */
-		memset(sc->cache.view[p->format], 0, p->view_size);
-		if (p->parse(buf, sc->cache.view[p->format], ctx))
+		if (!kof_parser_self_clears(p))
+			memset(sc->cache.view[p->format], 0, p->view_size);
+		view_arm(sc, p->format, sc->cache.view[p->format]);
+		if (kp ? kp->parse(buf, sc->cache.view[p->format], ctx, keep)
+		       : p->parse(buf, sc->cache.view[p->format], ctx)) {
+			view_charge(sc, p->format, sc->cache.view[p->format]);
+			/* A table of the parse was full: the members past it were
+			 * not read, and the object says so (see kof_parser_cut_bits). */
+			if (p->anomalies(sc->cache.view[p->format]) &
+			    kof_parser_cut_bits(p))
+				oc_scan_limit(sc);
 			return;
+		}
 	}
 }
 

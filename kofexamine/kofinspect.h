@@ -68,6 +68,10 @@ const struct kof_parser *kof_inspect_declare(kof_buf, uint8_t format,
 const struct kof_parser *kof_inspect_identify(kof_buf, struct kof_obj_ctx *,
 						   void **view_out);
 
+/* Free a view identify or declare handed back - its tables first, for the formats whose
+ * view owns any (zip, pdf). `fmt` is what they answered, NULL when there is no view. */
+void kof_inspect_free(const struct kof_parser *fmt, void *view);
+
 /* The subtype in the format's own vocabulary - ET_EXEC, DLL - or NULL. A number
  * would be no use: the same value means REL for an ELF and DLL for a PE. */
 const char *kof_inspect_subtype_name(uint8_t fmt, uint8_t sub);

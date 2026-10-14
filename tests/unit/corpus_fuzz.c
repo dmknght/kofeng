@@ -199,6 +199,19 @@ static void one(kof_buf buf, void *view, const char *what,
 		pc_check(what, &ctx, buf.n, fmts[k].regions, fmts[k].n_regions, rep);
 		t->checked++;
 		poke_accessors(&ctx, buf.n, what, rep);
+		/*
+		 * ONE VIEW FOR EVERY FORMAT, so a view that owns tables (zip, pdf: struct kof_view_ops)
+		 * gives them back and is cleared before the next object parses another format into the
+		 * same bytes - the pointers of one view are not the fields of another.
+		 */
+		{
+			const struct kof_view_ops *vo = kof_view_ops_of(fmts[k].format);
+
+			if (vo) {
+				vo->release(view);
+				memset(view, 0, fmts[k].view_size);
+			}
+		}
 		return;
 	}
 }

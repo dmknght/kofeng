@@ -5,12 +5,18 @@
  * Runs last in the object's steps, and only when nothing was opened: a view of a
  * wrapper is a view of noise. Gate, regions, keep map, text transform, library cut,
  * symbol view and publish are the sub-steps, in that order.
+ *
+ * A big-endian ELF's view is also its canonical form, in little-endian order - see
+ * scan_norm_endian.c. It is decided before the gate (so a refusal can be reported
+ * against it), swaps UTF-16BE text before the decode passes, and swaps the
+ * instruction words and the tables once the kept bytes are back.
  */
 
 #define _GNU_SOURCE
 
 #include "scan_int.h"
 #include "objctx_int.h"
+#include "scan_norm_endian.h"
 #include "../kofcore/kofcmp.h"
 #include "../detectors/linkage/kofdiag.h"
 #include "../kofcore/kofmod/kofsym.h"
@@ -32,6 +38,11 @@
  * every step reads what the one before it left, so they travel together.
  */
 struct norm_work {
+	struct kof_scanner *sc;
+	/* What the working buffers hold, charged to the scan's ledger as they are taken
+	 * and given back as they are freed - see norm_alloc. `charged` is the sum. */
+	uint64_t sz_out, sz_bits, charged;
+	int adopted;            /* the sink owns `out` now: it is not freed here */
 	uint8_t *out, *tmp, *keep, *drop;
 	const struct kgenome_true_all *lib;
 	uint64_t n;
@@ -47,12 +58,17 @@ struct norm_work {
 	 */
 	uint64_t *mk, *mk_to;
 	uint32_t n_mark, cap_mark;
+	/* A table of the boundary work could not be allocated: the view's places are not all
+	 * carried through the collapse, and norm_declare says so on the object. */
+	int cut;
 	/* The parent's info struct, copied; its offsets are carried through the
 	 * table once the collapse has run. `img` is NULL for a parent with none. */
 	uint8_t *img;
 	uint32_t img_len;
 	uint64_t entry_off;
 	uint32_t nr, n_rgn0, fired;
+	/* The canonical byte order of a big-endian object - scan_norm_endian.c. */
+	struct sx_endian en;
 };
 
 /*
@@ -153,9 +169,8 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * caller set and two buffers is what this costs. An object over that is
 	 * left unnormalised - it is still parsed, still scanned, still carved.
 	 */
-	if (sc->ledger.resident > sc->ledger.resident_max ||
-	    buf.n > (sc->ledger.resident_max - sc->ledger.resident) / 2u)
-		return 0;
+	/* (The question of whether twice the object fits is asked in norm_emit_work, after
+	 * the probes: an object that could not have had a view anyway is not a loss.) */
 	/*
 	 * AND NOT AN OBJECT WHOSE CODE IS STILL COMPRESSED.
 	 *
@@ -219,23 +234,91 @@ static void norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
 }
 
 /*
- * The two working buffers and the two bitmaps, all sized from the object.
- * Zero means nothing was allocated and nothing is left to free.
+ * The working buffer and the two bitmaps, all sized from the object, and CHARGED to
+ * the scan's ledger for as long as they live. Zero means nothing was allocated and
+ * nothing is left to free.
+ *
+ * They were not charged at all: the sink charges the view when it is handed over,
+ * and the work before that - an object's size and a bit per byte twice - was
+ * invisible to the ceiling and to peak_resident (13.8 MB reported where 49.9 was
+ * resident, on a 31 MB PE). The charge cannot refuse: norm_wanted has already asked
+ * whether twice the object fits, and what is charged here is at most that.
  */
-static int norm_alloc(struct norm_work *w, kof_buf buf)
+static int norm_alloc(struct kof_scanner *sc, struct norm_work *w, kof_buf buf)
 {
+	const uint64_t bits = (buf.n + 7u) / 8u;
+
+	/*
+	 * ONE WORKING BUFFER, NOT TWO. The decode runs in place over a copy of
+	 * the object and the collapse then compacts that same buffer in place:
+	 * kof_exe_norm_masked never writes past what it has read (o <= i in every
+	 * branch), so `tmp` and `out` may be one allocation. `tmp` stays an alias
+	 * so the passes keep their names; it is never freed on its own.
+	 */
+	w->sc = sc;
 	w->out = malloc((size_t)buf.n);
-	w->tmp = malloc((size_t)buf.n);
-	w->keep = w->nr ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
-	w->drop = w->lib->n ? malloc((size_t)((buf.n + 7u) / 8u)) : NULL;
-	if (!w->out || !w->tmp || (w->nr && !w->keep) || (w->lib->n && !w->drop)) {
+	w->tmp = w->out;
+	w->keep = w->nr ? malloc((size_t)bits) : NULL;
+	w->drop = w->lib->n ? malloc((size_t)bits) : NULL;
+	if (!w->out || (w->nr && !w->keep) || (w->lib->n && !w->drop)) {
 		free(w->out);
-		free(w->tmp);
 		free(w->keep);
 		free(w->drop);
+		w->out = w->tmp = NULL;
+		w->keep = w->drop = NULL;
 		return 0;
 	}
+	w->sz_out = buf.n;
+	w->sz_bits = bits;
+	w->charged = buf.n + (w->keep ? bits : 0u) + (w->drop ? bits : 0u);
+	scan_charge(sc, w->charged);
+	if (w->charged > sc->st.peak_norm)
+		sc->st.peak_norm = w->charged;
 	return 1;
+}
+
+/* Free one working buffer and give back what it was charged. */
+static void norm_free_keep(struct norm_work *w)
+{
+	if (w->keep) {
+		oc_scan_release(w->sc, w->sz_bits);
+		w->charged -= w->sz_bits;
+	}
+	free(w->keep);
+	w->keep = NULL;
+}
+
+static void norm_free_drop(struct norm_work *w)
+{
+	if (w->drop) {
+		oc_scan_release(w->sc, w->sz_bits);
+		w->charged -= w->sz_bits;
+	}
+	free(w->drop);
+	w->drop = NULL;
+}
+
+static void norm_free_out(struct norm_work *w)
+{
+	if (w->adopted) {               /* the sink has it, and what it cost was given back then */
+		w->out = w->tmp = NULL;
+		w->adopted = 0;
+		return;
+	}
+	if (w->out) {
+		oc_scan_release(w->sc, w->sz_out);
+		w->charged -= w->sz_out;
+	}
+	free(w->out);
+	w->out = w->tmp = NULL;
+}
+
+/* Everything the work holds that the ledger knows about. Idempotent. */
+static void norm_free_all(struct norm_work *w)
+{
+	norm_free_out(w);
+	norm_free_keep(w);
+	norm_free_drop(w);
 }
 
 /* What may not be rewritten: the kept regions, and the instructions in code. */
@@ -284,11 +367,39 @@ static void norm_drop_build(struct norm_work *w, kof_buf buf)
 }
 
 /*
+ * Can a view result at all, decided by reading the object. A view needs one of
+ * three things (see norm_collapse): the decode changes a byte, a wide run is
+ * narrowed, or the static library is cut. The decode and the narrowing are asked of
+ * the object as it is: when the decode changes nothing the bytes the collapse reads
+ * are the object's own. The cut needs a span that falls inside the object.
+ */
+static int norm_view_possible(const struct norm_work *w, kof_buf buf)
+{
+	uint32_t a;
+
+	/* A big-endian object that has a twin is a view by its plan alone: the
+	 * swap changes the bytes the probes below read as they are, so they cannot
+	 * be asked about it. */
+	if (w->en.eligible && w->en.plan.n)
+		return 1;
+	for (a = 0; a < w->lib->n; a++)
+		if (w->lib->span[a].off < buf.n && w->lib->span[a].len)
+			return 1;
+	/* The cheaper question first, and each stops at its first yes: an object that makes a
+	 * view pays for the part of it read before the evidence. */
+	if (kof_exe_has_wide(buf.p, buf.n))
+		return 1;
+	return kof_exe_decode_would_change(buf.p, buf.n);
+}
+
+/*
  * The decode passes over a copy, and the answer about whether they changed
  * anything.
  */
-static void norm_decode(struct norm_work *w, kof_buf buf)
+static void norm_decode(struct kof_scanner *sc, struct norm_work *w, kof_buf buf)
 {
+	struct kof_exe_decode_res dres;
+
 	/*
 	 * THE DECODE PASSES, THEN THE KEPT BYTES PUT BACK.
 	 *
@@ -304,7 +415,14 @@ static void norm_decode(struct norm_work *w, kof_buf buf)
 	 * decode has to happen while offsets still mean what the bitmap says.
 	 */
 	memcpy(w->tmp, buf.p, (size_t)buf.n);
-	w->changed = kof_exe_decode(w->tmp, buf.n);
+	/* UTF-16BE text first, so what follows reads it as the text it is. */
+	if (w->nr)
+		sx_endian_wide(&w->en, w->tmp, buf.n, w->keep);
+	w->changed = kof_exe_decode_ex(w->tmp, buf.n, &dres);
+	/* A bound of the decode fired: layers under what it left were not read, and
+	 * the parent says so rather than reading as fully decoded. */
+	if (dres.limit)
+		oc_scan_limit(sc);
 	if (w->nr && w->changed) {
 		uint64_t j;
 		const uint8_t *keep = w->keep;
@@ -333,6 +451,9 @@ static void norm_decode(struct norm_work *w, kof_buf buf)
 		 */
 		w->changed = memcmp(w->tmp, buf.p, (size_t)buf.n) != 0;
 	}
+	/* The kept bytes are back: now the instruction words and the tables. */
+	if (w->nr && sx_endian_apply(&w->en, w->tmp, buf.n))
+		w->changed = 1;
 }
 
 static void mark_add(struct norm_work *w, uint64_t off, uint64_t n)
@@ -343,8 +464,10 @@ static void mark_add(struct norm_work *w, uint64_t off, uint64_t n)
 		uint32_t nc = w->cap_mark ? w->cap_mark * 2u : 64u;
 		uint64_t *g = realloc(w->mk, (size_t)nc * sizeof *g);
 
-		if (!g)
-			return;         /* a place not asked about maps to itself */
+		if (!g) {
+			w->cut = 1;     /* a place not asked about maps to itself - and it is said */
+			return;
+		}
 		w->mk = g;
 		w->cap_mark = nc;
 	}
@@ -403,6 +526,8 @@ static void norm_marks_build(struct norm_work *w, struct kof_obj_ctx *ctx,
 		w->img_len = ctx->format == KOF_FMT_PE ? (uint32_t)sizeof(struct kgenome_pe_info)
 						       : (uint32_t)sizeof(struct kgenome_elf_info);
 		w->img = malloc(w->img_len);
+		if (!w->img)
+			w->cut = 1;     /* the view is declared without its image description */
 		if (w->img) {
 			memcpy(w->img, ctx->file_header, w->img_len);
 			if (ctx->format == KOF_FMT_PE)
@@ -417,8 +542,10 @@ static void norm_marks_build(struct norm_work *w, struct kof_obj_ctx *ctx,
 			w->mk[b++] = w->mk[a];
 	w->n_mark = b;
 	w->mk_to = calloc(b ? b : 1u, sizeof *w->mk_to);
-	if (!w->mk_to)
+	if (!w->mk_to) {
 		w->n_mark = 0;          /* nothing is asked and nothing is carried */
+		w->cut = 1;
+	}
 }
 
 /*
@@ -475,10 +602,7 @@ static int norm_collapse(struct norm_work *w, kof_buf buf)
 	 * proved to create no match that the parent does not already have.
 	 */
 	if (!(w->fired & (KOF_EXE_NORM_UNWIDE | KOF_EXE_NORM_CUTLIB)) && !w->changed) {
-		free(w->out);
-		free(w->tmp);
-		free(w->keep);
-		free(w->drop);
+		norm_free_all(w);
 		return 0;
 	}
 	/*
@@ -504,21 +628,16 @@ static int norm_collapse(struct norm_work *w, kof_buf buf)
 	 * building a copy of the parent and calling it a view.
 	 */
 	if (!w->fired) {
-		memcpy(w->out, w->tmp, (size_t)buf.n);
+		/* tmp and out are one buffer: the view is what it already holds */
 		w->n = buf.n;
 		if (w->n_mark)
 			memcpy(w->mk_to, w->mk, (size_t)w->n_mark * sizeof *w->mk);
 	} else if (!w->n) {
-		free(w->out);
-		free(w->tmp);
-		free(w->keep);
-		free(w->drop);
+		norm_free_all(w);
 		return 0;
 	}
-	free(w->tmp);
 	w->tmp = NULL;
-	free(w->drop);
-	w->drop = NULL;
+	norm_free_drop(w);
 	return 1;
 }
 
@@ -569,9 +688,9 @@ static void norm_view_describe(struct norm_work *w, struct kof_obj_ctx *ctx)
 			kgenome_pe_info_remap((struct kgenome_pe_info *)w->img, &m);
 		else
 			kgenome_elf_info_remap((struct kgenome_elf_info *)w->img, &m);
+		sx_endian_describe(&w->en, w->img);
 	}
-	free(w->keep);
-	w->keep = NULL;
+	norm_free_keep(w);
 }
 
 /* The library, appended in file order under regions of its own. */
@@ -652,7 +771,7 @@ static void norm_append_library(struct norm_work *w, kof_buf buf)
 	w->n = n;
 }
 
-/* Does the view fit under both ceilings. Zero means no, and `out` is freed. */
+/* Does the view fit under the three ceilings. Zero means no, and `out` is freed. */
 static int norm_fits(struct kof_scanner *sc, struct norm_work *w)
 {
 	/*
@@ -676,10 +795,19 @@ static int norm_fits(struct kof_scanner *sc, struct norm_work *w)
 	 * Both ceilings are asked about, in the same terms c_emit uses, because
 	 * either of them produces the same half object.
 	 */
-	if (w->n > sc->ledger.obj_cap ||
+	/*
+	 * The produced-bytes budget is the third ceiling and was the one not asked: a
+	 * budget smaller than the view let the sink take whole chunks until it was
+	 * reached and hand over what it held as the view - the first 2 MiB of 3, marked
+	 * NORMALIZED, with the parent's header over it and the decoded payload (near the
+	 * end) not in it. Under one chunk the sink refused the lot, so the same budget
+	 * gave no view or a damaged one depending on the object's size.
+	 */
+	if (w->n > sc->ledger.obj_cap || w->n > sc->ledger.budget ||
 	    sc->ledger.resident > sc->ledger.resident_max ||
 	    w->n > sc->ledger.resident_max - sc->ledger.resident) {
-		free(w->out);
+		norm_free_all(w);
+		oc_scan_limit(sc);      /* a view was made and cannot be offered: said */
 		return 0;
 	}
 	return 1;
@@ -691,6 +819,8 @@ static int norm_fits(struct kof_scanner *sc, struct norm_work *w)
 static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 struct norm_work *w)
 {
+	if (w->cut)
+		OC_LIMIT(sc, "boundary table of the view not allocated");
 	/*
 	 * DECLARED BEFORE THE FIRST BYTE, NOT AFTER THE LAST.
 	 *
@@ -729,6 +859,8 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			if (g) {
 				sc->pend.desc_buf = g;
 				sc->pend.desc_cap = w->img_len;
+			} else {
+				OC_LIMIT(sc, "view image description not allocated");
 			}
 		}
 		if (sc->pend.desc_cap >= w->img_len) {
@@ -809,6 +941,8 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			if (g) {
 				sc->pend.syms = g;
 				sc->pend.syms_cap = need;
+			} else {
+				OC_LIMIT(sc, "view symbol block not allocated");
 			}
 		}
 	}
@@ -823,6 +957,16 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 {
 	uint64_t sent = 0;
 
+	/* The buffer IS the view: the sink takes it (what the work was charged for goes back, the
+	 * sink charges the view), or - a file is the place, or a ceiling says no - it is emitted. */
+	if (oc_sink_adopt(sc, w->out, (size_t)w->sz_out, (size_t)w->n)) {
+		oc_scan_release(sc, w->sz_out);
+		w->charged -= w->sz_out;
+		w->adopted = 1;
+		sent = w->n;
+	}
+	if (!w->adopted)
+		oc_sink_reserve(sc, w->n);
 	while (sent < w->n) {
 		uint64_t take = w->n - sent;
 
@@ -837,16 +981,29 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * bytes just produced - see kgenome_funcs_remap. Only for an object whose
 	 * functions are known (symbols, or the entries diagnose recovers), and
 	 * only when the view went out whole.
+	 *
+	 * ONLY WHEN SOMETHING WILL READ THEM, and the one reader of a view's
+	 * functions is the block feed (sx_mutation_feed): a view is raw, no
+	 * diagnose is served on it (diag_servable), and no module reads a
+	 * function table. Asking for the parent's functions here is not free -
+	 * for an object nothing else analysed it is a decode of the whole code,
+	 * measured at 2/3 of a scan - so a database with no block rule does not
+	 * ask. The parent's functions are still built the moment a diagnose or a
+	 * block feed wants them (funcs_of latches the one build).
 	 */
 	kgenome_funcs_free(&sc->pend.funcs);
-	if (sent == w->n && ctx->file_header) {
+	if (sent == w->n && ctx->file_header && sx_mutation_loaded(sc)) {
 		struct kgenome_obj pobj;
 
 		kof_genome_obj(ctx, &pobj);
-		kgenome_diag_funcs_of_view(&pobj, buf, oc_funcs(ctx),
-				       kof_buf_make(w->out, w->n), &sc->pend.funcs);
+		if (w->en.plan.n)
+			sx_endian_funcs(ctx, buf, &w->en, kof_buf_make(w->out, w->n),
+					&sc->pend.funcs);
+		else
+			kgenome_diag_funcs_of_view(&pobj, buf, oc_funcs(ctx),
+					       kof_buf_make(w->out, w->n), &sc->pend.funcs);
 	}
-	free(w->out);
+	norm_free_out(w);
 	if (sent == w->n) {
 		/*
 		 * AND DECLARED RAW, WHICH IS WHAT IT NOW IS.
@@ -893,6 +1050,9 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			   kof_buf buf, struct norm_work *w)
 {
 
+	/* A big-endian object's canonical form is decided first: the stage's own
+	 * refusals are then something it can be reported against. */
+	(void)sx_endian_begin(sc, ctx, buf, &w->en);
 	if (!norm_wanted(sc, ctx, buf))
 		return;
 
@@ -949,11 +1109,34 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * static build and the symbol tier of everything.
 	 */
 	w->lib = &sc->cur.lib;
-	if (!norm_alloc(w, buf))
+	/*
+	 * THE BUFFER IS TAKEN WHEN A VIEW IS KNOWN TO BE POSSIBLE, NOT BEFORE.
+	 *
+	 * A view is made only when the decode changes something, a wide run is
+	 * narrowed or the library is cut (norm_collapse says so at the end), and the
+	 * working buffer used to be taken, filled and walked to find out: about a
+	 * fifth of the normaliser's bytes went to objects that came out with no view
+	 * at all. All three are answered by reading the object. The answer "no" is
+	 * exact (see the probes), "yes" is the old path unchanged.
+	 */
+	if (!norm_view_possible(w, buf))
+		return;
+	/*
+	 * AND NOT AN OBJECT TOO LARGE TO HOLD TWICE - asked here, where a view is known to be
+	 * possible, so that saying no is saying a view was LOST to the allowance: the object
+	 * is marked incomplete (a view is evidence the matchers would have read). It was silent.
+	 */
+	if (sc->ledger.resident > sc->ledger.resident_max ||
+	    buf.n > (sc->ledger.resident_max - sc->ledger.resident) / 2u) {
+		oc_scan_limit(sc);
+		return;
+	}
+	oc_diag_trim(sc);
+	if (!norm_alloc(sc, w, buf))
 		return;
 	norm_keep_build(w, ctx, buf);
 	norm_drop_build(w, buf);
-	norm_decode(w, buf);
+	norm_decode(sc, w, buf);
 	norm_marks_build(w, ctx, buf);
 	if (!norm_collapse(w, buf))
 		return;
@@ -987,11 +1170,16 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		      kof_buf buf)
 {
 	struct norm_work w;
+	uint32_t views0 = sc->child.n_views;
 
 	memset(&w, 0, sizeof w);
+	w.sc = sc;
 	norm_emit_work(sc, ctx, buf, &w);
+	sx_endian_finish(sc, ctx, buf, &w.en, sc->child.n_views > views0);
+	kgenome_endian_plan_free(&w.en.plan);
 	/* The boundary table and the description's copy outlive every early
 	 * return above; they are released here, once. */
+	norm_free_all(&w);
 	free(w.mk);
 	free(w.mk_to);
 	free(w.img);

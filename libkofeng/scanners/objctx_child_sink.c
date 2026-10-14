@@ -44,6 +44,7 @@ void oc_pend_clear(struct kof_scanner *sc)
 {
 	sc->pend.label[0] = 0;
 	sc->pend.label_len = 0;
+	sc->pend.name_bad = 0;
 	sc->pend.kind = 0;
 	sc->pend.entry = KOF_ENTRY_NONE;
 	sc->pend.want = 0;
@@ -352,10 +353,35 @@ if (sc->pend.label_len) {
 	 * declares the kind NORMALIZED, and the two together came
 	 * out as `//0:NORMALIZED norm`.
 	 */
-	kof_src_label(kid, (const uint8_t *)sc->pend.label,
-		      sc->pend.label_len);
+	/*
+	 * THE LABEL IS ALLOCATED TO ITS REAL LENGTH AND CHARGED, not cut to a fixed
+	 * room: it is memory the scan holds for as long as the child lives, taken from
+	 * the names quota (KOF_SCAN_NAMES) and given back by the child wherever it
+	 * dies. The quota is asked for the length it could be at most - the
+	 * pending bytes and a NUL; the label is never longer - and the unused part
+	 * goes straight back.
+	 *
+	 * A quota that is full does not cut a name: the child is opened without one
+	 * (its index still tells it apart) and the object that held it is said to have
+	 * hit a limit.
+	 */
+	if (oc_names_take(sc, (uint64_t)sc->pend.label_len + 1u)) {
+		kof_src_label(kid, (const uint8_t *)sc->pend.label,
+			      sc->pend.label_len);
+		oc_names_give(sc, (uint64_t)sc->pend.label_len + 1u -
+				  kof_src_label_cost(kid));
+		if (kof_src_label_cost(kid))
+			kof_src_label_account(kid, oc_names_give_cb, sc);
+	} else {
+		oc_scan_limit(sc);
+	}
 	sc->pend.label[0] = 0;
 	sc->pend.label_len = 0;
+}
+/* A name past its format's standard: said on the child, consumed like the label. */
+if (sc->pend.name_bad) {
+	kof_src_declare_name_bad(kid);
+	sc->pend.name_bad = 0;
 }
 /*
  * AND THE KIND TRAVELS ON ITS OWN - the only carrier of that fact,
@@ -583,6 +609,7 @@ static void kid_note_run(struct kof_scanner *sc)
  */
 if (sc->obj.emu.run_by && sc->obj.emu.run_by == sc->mod.cur)
 	sc->obj.emu.produced = 1;
+
 /*
  * AND A CHILD BUILT OUT OF A RUN'S REGIONS IS DERIVED, exactly as one
  * built with `derive` is - see scan.c, which skips a module for an
@@ -607,6 +634,48 @@ if (sc->obj.emu.run_by && sc->obj.emu.run_by == sc->mod.cur)
 if (sc->obj.emu.run_by && sc->obj.emu.run_by == sc->mod.cur &&
     !sc->pend.derived_by)
 	sc->pend.derived_by = sc->mod.cur;
+}
+
+/*
+ * WHAT ONE COLLECTED CHILD COSTS, taken from the resident ceiling and given back when the
+ * child dies (kof_src_charge_record, on every path). Its record, and its row in the parallel
+ * tables of sc->child: the list slot, the producer byte, the family and `derived_by`
+ * pointers, want and level, and the emulator watch (KGENOME_EMU_EXEC_WATCH pairs). The
+ * tables' doubling headroom is not counted - they are one set per scanner and kept between
+ * objects - so this is the live rows, not the allocation.
+ *
+ * It was charged nowhere. A child that is a window holds no produced byte and no label of
+ * any size, so a cabinet of 5-byte entries opened a million of them for 5 MB of file and
+ * held 723 MB, past the engine's 512 MiB, with every ledger saying there was room. A child
+ * the ceiling cannot take is refused and the parent says Limit (the caller): reported, never
+ * a table that grows past what the tree may hold.
+ */
+static uint64_t kid_row_bytes(void)
+{
+	const struct kof_scan_child *c = NULL;
+
+	return sizeof *c->list + sizeof *c->packer + sizeof *c->want + sizeof *c->want_level +
+	       sizeof *c->n_xw + (uint64_t)KGENOME_EMU_EXEC_WATCH * 2u * sizeof *c->xw +
+	       sizeof *c->family + sizeof *c->derived_by;
+}
+
+/* What one collected child costs besides its bytes: the one number kof_scan_budget needs to keep
+ * "the object in hand and the object being built both fit" true once the record is charged. */
+uint64_t oc_kid_cost(void)
+{
+	return kof_src_record_cost() + kid_row_bytes();
+}
+
+static int kid_charge(struct kof_scanner *sc, struct kof_objsrc *kid)
+{
+	uint64_t cost = oc_kid_cost();
+
+	if (sc->ledger.resident > sc->ledger.resident_max ||
+	    cost > sc->ledger.resident_max - sc->ledger.resident)
+		return 0;
+	scan_charge(sc, cost);
+	kof_src_charge_record(kid, cost, oc_scan_release_cb, sc);
+	return 1;
 }
 
 int oc_kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
@@ -638,6 +707,11 @@ int oc_kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		/* Refused, and recorded: a container that yields more children than
 		 * the caller allows has not been fully examined, and saying so is
 		 * the difference between "nothing else here" and "stopped looking". */
+		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+		kof_src_unref(kid);
+		return 0;
+	}
+	if (!kid_charge(sc, kid)) {
 		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
 		kof_src_unref(kid);
 		return 0;
@@ -717,6 +791,25 @@ uint64_t oc_scan_room(const struct kof_scanner *sc)
 	     ? sc->ledger.resident_max - sc->ledger.resident : 0;
 }
 
+int oc_names_take(struct kof_scanner *sc, uint64_t n)
+{
+	if (sc->ledger.names > sc->ledger.names_max ||
+	    n > sc->ledger.names_max - sc->ledger.names)
+		return 0;
+	sc->ledger.names += n;
+	return 1;
+}
+
+void oc_names_give(struct kof_scanner *sc, uint64_t n)
+{
+	sc->ledger.names = n < sc->ledger.names ? sc->ledger.names - n : 0;
+}
+
+void oc_names_give_cb(void *sc, uint64_t n)
+{
+	oc_names_give(sc, n);
+}
+
 void oc_scan_charge_(struct kof_scanner *sc, uint64_t n)
 {
 	sc->ledger.resident += n;
@@ -775,25 +868,153 @@ int oc_window(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
+	struct kof_objsrc *kid;
+	uint64_t span;
+
 	if (!oc_can_produce(sc))
 		return 0;
-	return oc_kid_push(sc, ctx, kof_src_window(sc->cur.src, off, len));
+	/*
+	 * THE TREE'S ALLOWANCE OF WINDOWS, charged by the part of the range the object holds
+	 * (a size the container states for itself is not a reason to be stopped) - see
+	 * kof_scan_ledger.window_left. It is the tree's, not the entry's: past it every later
+	 * window is the same bomb, so the walk ends, sticky, and says Limit.
+	 */
+	span = sc->cur.src ? kof_clip_len(kof_src_buf(sc->cur.src).n, off, len) : 0;
+	if (span > sc->ledger.window_left) {
+		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+		oc_pend_clear(sc);
+		return 0;
+	}
+	kid = kof_src_window(sc->cur.src, off, len);
+	/*
+	 * A NULL FOR A RANGE THE OBJECT HOLDS IS THE ALLOCATOR REFUSING, and it is a limit.
+	 *
+	 * oc_kid_push cannot tell that from kof_src_window turning down a range that is not
+	 * in the object - an ordinary answer for a parser's hostile offsets - and says so in
+	 * its own note: whoever can tell the two apart reports. This is the one that can, and
+	 * it did not: the module's walk ended at the first window the allocator refused (a zip
+	 * loop breaks on a window that is not made) and the archive's remaining members were
+	 * gone with no word anywhere - found by refusing each allocation of a scan in turn
+	 * (tests/unit/view_tables.c).
+	 */
+	if (!kid && sc->cur.src && kof_clip_len(kof_src_buf(sc->cur.src).n, off, len))
+		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+	if (kid)
+		sc->ledger.window_left -= span;
+	return oc_kid_push(sc, ctx, kid);
 }
 
-/* Move whatever is in memory out to the descriptor, and keep writing there. */
+/* Move whatever is in memory out to the descriptor, and keep writing there. A failed
+ * write drops the object whole (oc_spill_write): the answer is 0 and the sink is empty. */
 int oc_sink_spill(struct kof_scanner *sc)
 {
-	if (sc->sink.fd < 0) {
-		sc->sink.fd = kof_src_tmpfile();
-		if (sc->sink.fd < 0)
-			return 0;
-	}
+	if (sc->sink.fd < 0)
+		return 0;
 	if (sc->sink.len) {
-		if (!kof_write_all(sc->sink.fd, sc->sink.mem, sc->sink.len))
+		if (!oc_spill_write(sc, sc->sink.mem, sc->sink.len))
 			return 0;
 		sc->sink.spilled += sc->sink.len;
 		sc->sink.len = 0;
 	}
+	return 1;
+}
+
+/*
+ * The object has outgrown the heap's comfortable size: start spilling it if a file is
+ * an option (objctx_spill.c has the flow). 1 = now in a file, 0 = stays in memory under
+ * the ceilings, -1 = the attempt failed and the object is gone.
+ */
+static int sink_begin_spill(struct kof_scanner *sc)
+{
+	int fd;
+
+	if (!oc_spill_usable(sc))
+		return 0;
+	fd = oc_spill_open(sc);
+	if (fd < 0)
+		return 0;
+	sc->sink.fd = fd;
+	if (!oc_sink_spill(sc)) {
+		/* oc_spill_write discarded the sink, which closed the descriptor */
+		return -1;
+	}
+	return 1;
+}
+
+/*
+ * ROOM FOR AN OBJECT WHOSE SIZE IS KNOWN, taken once. The sink grows by doubling, which for
+ * a 20 MB view is a 32 MB buffer and a copy at every step; when the object is going to stay
+ * in memory (no file is an option) and its size is known, the exact size is taken first.
+ * Only for a fresh, growing sink; the ceilings are asked by the emit that follows, as always.
+ */
+void oc_sink_reserve(struct kof_scanner *sc, uint64_t n)
+{
+	uint8_t *m;
+
+	if (sc->sink.fixed || sc->sink.fd >= 0 || sc->sink.mem || sc->sink.len ||
+	    n <= SINK_SPILL || n > sc->ledger.obj_cap || oc_spill_peek(sc))
+		return;
+	m = malloc((size_t)n);
+	if (m) {
+		sc->sink.mem = m;
+		sc->sink.cap = (size_t)n;
+	}
+}
+
+/*
+ * AN ENTRY MET ITS OWN BOUND - see the note at OC_REFUSE_CUT in objctx_int.h for the rule.
+ *
+ * Said once per entry: the emit that refuses, the decoder that is told so and the
+ * ratio clamp may all arrive here for the same entry. What the sink holds becomes the
+ * child (stamped LIMIT when it closes) and is counted in limit_hits; with nothing held
+ * there is no child to say it, and the parent reports it as a cut (`cut`, no stop).
+ */
+void oc_entry_cut(struct kof_scanner *sc)
+{
+	/* The tree already said it (sticky): nothing more to add about this entry. */
+	if (!oc_can_produce(sc) || sc->sink.cut || sc->sink.refuse)
+		return;
+	if (sc->sink.len + sc->sink.spilled) {
+		sc->sink.cut = KOF_BROKEN_LIMIT;
+		sc->st.limit_hits++;
+	} else {
+		oc_scan_limit(sc);
+	}
+}
+
+/* THE NEXT ENTRY BEGINS: what the last one's cut decided is over. */
+void oc_entry_begin(struct kof_scanner *sc)
+{
+	sc->sink.cut = 0;
+	sc->sink.refuse = 0;
+}
+
+/*
+ * A BUFFER THE ENGINE HAS JUST BUILT, TAKEN AS THE OBJECT INSTEAD OF COPIED INTO IT.
+ *
+ * The normaliser's view is already one flat buffer of the right size, and emitting it was a copy
+ * of it into the sink: the view twice for as long as the copy took, and the memcpy besides.
+ * When the object will stay in memory (a file is not an option, or it is small) and the same
+ * ceilings oc_emit applies allow it, the sink takes the buffer itself. 1 when taken - the caller
+ * no longer owns `mem` and must not free it, and what it had charged for it is its to give back;
+ * 0 when not, and then nothing has changed: the caller emits as before.
+ */
+int oc_sink_adopt(struct kof_scanner *sc, uint8_t *mem, size_t cap, size_t n)
+{
+	if (!oc_can_produce(sc) || sc->sink.fixed || sc->sink.fd >= 0 || sc->sink.mem ||
+	    sc->sink.len || sc->sink.spilled || !n || n > cap)
+		return 0;
+	if (n > sc->ledger.budget || n > sc->ledger.obj_cap ||
+	    sc->ledger.resident > sc->ledger.resident_max ||
+	    n > sc->ledger.resident_max - sc->ledger.resident)
+		return 0;
+	if (n > SINK_SPILL && oc_spill_peek(sc))
+		return 0;
+	sc->sink.mem = mem;
+	sc->sink.cap = cap;
+	sc->sink.len = n;
+	sc->ledger.budget -= n;
+	scan_charge(sc, n);
 	return 1;
 }
 
@@ -811,7 +1032,7 @@ int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 
-	if (!oc_can_produce(sc))
+	if (!oc_can_produce(sc) || sc->sink.refuse)
 		return 0;
 	if (n == 0)
 		return 1;
@@ -902,26 +1123,50 @@ int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n)
 	 * is the one part of this test that a single bogus length can turn
 	 * from a refusal into a pass.
 	 */
-	if (sc->sink.len + sc->sink.spilled > sc->ledger.obj_cap ||
-	    n > sc->ledger.obj_cap - (sc->sink.len + sc->sink.spilled) ||
-	    sc->ledger.resident > sc->ledger.resident_max ||
-	    n > sc->ledger.resident_max - sc->ledger.resident) {
-		oc_child(ctx);
-		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
-		return 0;
-	}
-	if (sc->sink.len + n > SINK_SPILL && !oc_sink_spill(sc)) {
-		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
-		return 0;
-	}
-	if (sc->sink.fd >= 0) {
-		if (write(sc->sink.fd, bytes, n) != (ssize_t)n) {
-			/* A short write is almost always a full tmpfs. Recorded, not
-			 * swallowed: silently keeping a truncated object would report
-			 * a prefix of a file as if it were the file. */
-			oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+	{
+		int over_obj = sc->sink.len + sc->sink.spilled > sc->ledger.obj_cap ||
+			       n > sc->ledger.obj_cap - (sc->sink.len + sc->sink.spilled);
+		int over_res = sc->ledger.resident > sc->ledger.resident_max ||
+			       n > sc->ledger.resident_max - sc->ledger.resident;
+
+		if (over_obj || over_res) {
+			/* In memory because no file was an option: the ceiling is the answer
+			 * (the object cap too: tests/unit/mem_spill.c pins the count for it). */
+			if (sc->sink.fd < 0 && sc->sink.len + n > SINK_SPILL && !oc_spill_peek(sc)) {
+				sc->st.spill_ceiling++;
+				/* counted in limit_hits too: an entry was refused. The object cap's
+				 * entry is counted by oc_entry_cut and says so on its own child. */
+				if (over_res)
+					oc_scan_limit(sc);
+			}
+			/*
+			 * THE OBJECT CAP IS THIS ENTRY'S BOUND; THE RESIDENT CEILING IS THE
+			 * TREE'S. Memory that is full is full for the entry after this one
+			 * too (its siblings are still pending), so that one ends the walk -
+			 * sticky, as before. The object cap says only that this entry is
+			 * bigger than one object may be: it is cut, carries LIMIT itself, and
+			 * the module is told no for the REST OF THIS ENTRY (the latch in
+			 * oc_entry_cut_close), not for the next one. It was one sticky stop
+			 * for both, and the 91 MB member of an 84 MB archive ended the walk
+			 * with the 700 entries after it unopened.
+			 */
+			if (over_res) {
+				oc_child(ctx);
+				oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+			} else {
+				oc_entry_cut_close(ctx);
+			}
 			return 0;
 		}
+	}
+	if (sc->sink.fd < 0 && sc->sink.len + n > SINK_SPILL &&
+	    sink_begin_spill(sc) < 0)
+		return 0;       /* dropped, and said (broken, spill_full) */
+	if (sc->sink.fd >= 0) {
+		/* A short write is almost always a full disk. The object is dropped, not
+		 * kept as a prefix that would read as the file: oc_spill_write says so. */
+		if (!oc_spill_write(sc, bytes, n))
+			return 0;
 		sc->sink.spilled += n;
 	} else {
 		if (sc->sink.len > sc->sink.cap ||

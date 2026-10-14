@@ -31,6 +31,19 @@ int kof_docole_parse(kof_buf file, struct kof_docole_info *info,
 		     struct kof_obj_ctx *ctx);
 
 /*
+ * THE VIEW'S TABLES ARE THE FILE'S SIZE, so a view owns memory - zip_parse.h has the contract, which
+ * is the same here: `info->mem.room` is the caller's before the parse, `info->mem.held` is what the
+ * tables hold after it, and kof_docole_release gives it all back. A table that cannot grow is not a
+ * failed parse: what was read is whole and the format's own "full" bit (ENTRIES_FULL,
+ * ENT_RUNS_FULL, EXTENTS_FULL, WORK_FULL) says the rest was not.
+ */
+void kof_docole_release(struct kof_docole_info *info);
+
+/* The host's handles on the view - see struct kof_view_ops in kofformat.h. */
+struct kof_view_mem *kof_docole_mem(void *view);
+const void *kof_docole_row(void *view, uint32_t *cursor);
+
+/*
  * Does this object look like a compound file?
  *
  * The eight byte signature alone. Unlike gzip there is no second field with a

@@ -29,7 +29,7 @@ uint64_t kgenome_image_off_to_addr(const struct kgenome_obj *obj, uint64_t off)
 
 	if (!kgenome_image_seg_at(obj, off, &g))
 		return KGENOME_BROKEN;
-	return (uint64_t)((int64_t)off + g.delta);
+	return off + (uint64_t)g.delta;            /* modular: a delta is a signed offset in two's complement */
 }
 
 int kgenome_image_seg_at(const struct kgenome_obj *obj, uint64_t off,
@@ -48,7 +48,7 @@ int kgenome_image_seg_at(const struct kgenome_obj *obj, uint64_t off,
 			return 0;
 		out->lo = s->file_off;
 		out->hi = s->file_off + s->file_size;
-		out->delta = (int64_t)(p->image_base + s->mem_rva) - (int64_t)s->file_off;
+		out->delta = (int64_t)((p->image_base + s->mem_rva) - s->file_off);
 		return 1;
 	}
 	if (obj->format == KGENOME_FMT_ELF) {
@@ -58,7 +58,7 @@ int kgenome_image_seg_at(const struct kgenome_obj *obj, uint64_t off,
 			return 0;
 		out->lo = s->file_off;
 		out->hi = s->file_off + s->file_size;
-		out->delta = (int64_t)s->mem_addr - (int64_t)s->file_off;
+		out->delta = (int64_t)(s->mem_addr - s->file_off);
 		return 1;
 	}
 	return 0;

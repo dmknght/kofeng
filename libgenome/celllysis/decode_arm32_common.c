@@ -59,7 +59,7 @@ void kgenome_arm_dp(struct kgenome_cell_insn *o, unsigned opc, unsigned s, unsig
 	const struct kgenome_cell_operand *const tp = srcp;
 	int is_imm = tp->kind == KGENOME_CELL_O_IMM;
 
-	o->op = g_dpcls[opc];
+	o->op = opc < sizeof g_dpcls ? g_dpcls[opc] : KGENOME_CELL_OTHER;   /* the table has 17 rows */
 
 	if (opc >= 8u && opc <= 11u) {
 		/* a comparison: reads rn, writes the flags and no register */

@@ -71,6 +71,22 @@
 #define KOFSIG_ABI_MIN     3
 
 /*
+ * A BUMP IS OWED, AND IT IS THE OWNER'S: the zip and pdf views became tables the file sizes
+ * (zip.h, pdf.h; KOF_ZIP_INFO_VERSION and KOF_PDF_INFO_VERSION are 2) and the vtable gained
+ * `view_next` at its end, so by the rule above both numbers move - VERSION to 5 (a module that
+ * walks with kof_zip_next calls a slot an engine of ABI 4 does not have: the slot past the end of
+ * its table is read, and what it holds is not defined) and MIN to 5 (a module of ABI 4 reads the
+ * views' version 1 layout).
+ *
+ * What holds without it, and what a test pins (tests/unit/view_oldpack.c): the version 1 head of
+ * each view keeps its offsets and the field that counted the rows reads zero, so a module of ABI 4
+ * in this engine reads a valid empty table, opens nothing, and the engine reports the object
+ * (sx_walk_check) instead of passing it as examined. Raising MIN refuses such a pack at load
+ * instead, which is the stronger answer and the one for a view whose fields past the head a
+ * third-party module may read.
+ */
+
+/*
  * How strongly a finding is asserted.
  *
  * A level rather than a separate verdict, because the difference between "this is

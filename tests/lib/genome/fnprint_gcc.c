@@ -16,6 +16,7 @@
  *   - what the rules cannot do, as KM_CHECK with the cause: a function only a data table names, an
  *     author cold part before the entry, a function behind a switch with no bounds check.
  */
+#define FK_LEGACY_RULES 1
 #include "fnprint_kit.h"
 #include "../../unit/known_miss.h"
 

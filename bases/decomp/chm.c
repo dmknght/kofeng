@@ -48,10 +48,22 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_chm_info *c = kof_chm(ctx);
-	uint32_t i, opened = 0, done = 0, skipped = 0;
+	const struct kof_entry *e;
+	uint32_t cur = 0, opened = 0, done = 0, skipped = 0;
 
-	if (!c->valid || !c->lzx_window_bits)
+	if (!c->valid)
 		return;
+	if (!c->lzx_window_bits) {
+		/*
+		 * A help file that stores everything: the host opens its plain ranges and there
+		 * is nothing for this module to decode. It still READS the table - one call of the
+		 * walk - because the host tells a module that knows the table is walked from one
+		 * built before it (struct kof_view_mem.walked), and one that returns without a
+		 * look is reported as not having examined the object.
+		 */
+		(void)kof_chm_next(ctx, &cur);
+		return;
+	}
 
 	/* Everything the section holds, and the part of it no restart point
 	 * reaches. Facts and not damage - see the note at the top. Said before
@@ -59,9 +71,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	kof_debug("Chm.coded", c->n_compressed);
 	kof_debug("Chm.unreachable", c->n_unreachable);
 
-	for (i = 0; i < c->n_entries; i++) {
-		const struct kof_entry *e = &c->entry[i];
-
+	/* A walk and not an array: the help file has as many entries as its directory lists
+	 * (zip.c). */
+	while ((e = kof_chm_next(ctx, &cur)) != 0) {
 		/* A plain range is the host's to open - see
 		 * kof_objtree_declared - and only a coded entry is scattered. */
 		if (!(e->flags & KOF_ENT_F_SCATTERED) || !e->coding[0])
@@ -88,4 +100,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	kof_debug("Chm.pages", opened);
 	kof_debug("Chm.skipped", skipped);
+	/* Pages past the cap above: a bound on WORK, and so it says it bound - the object reads
+	 * LIMIT and not clean (what is lost: the decoded pages past the 256th). */
+	if (skipped)
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

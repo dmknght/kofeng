@@ -89,13 +89,15 @@ static kof_buf buf_of(const uint8_t *p, size_t n)
 
 int main(void)
 {
-	struct kof_lha_info *l = malloc(sizeof *l);
+	struct kof_lha_info *l = calloc(1, sizeof *l);   /* zeroed: a view that owns tables starts so */
 	struct kof_obj_ctx ctx;
 	uint8_t *f = calloc(1, 512);
 	uint32_t at = 0, first_len;
 	size_t len;
 
 	if (!l || !f) {
+		if (l)
+		kof_lha_release(l);
 		free(l);
 		free(f);
 		printf("lha walk: out of memory\n");
@@ -240,6 +242,8 @@ int main(void)
 	}
 
 	free(f);
+	if (l)
+		kof_lha_release(l);
 	free(l);
 
 	if (failures) {

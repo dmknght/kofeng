@@ -239,10 +239,12 @@ int main(void)
 		return 0;
 	}
 
-	a = malloc(sizeof *a);
+	a = calloc(1, sizeof *a);   /* zeroed: a view that owns tables starts so */
 	lz = malloc(sizeof *lz);
 	rows = malloc(sizeof *rows * 256u);
 	if (!a || !lz || !rows) {
+		if (a)
+			kof_arj_release(a);
 		free(a); free(lz); free(rows); free(f);
 		printf("lzhuf arj: out of memory\n");
 		return 1;
@@ -374,6 +376,8 @@ done:
 	free(outbuf);
 	free(rows);
 	free(lz);
+	if (a)
+		kof_arj_release(a);
 	free(a);
 	free(f);
 

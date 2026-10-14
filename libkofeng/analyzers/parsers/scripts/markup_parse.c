@@ -55,7 +55,12 @@ static int mk_doc(const char *n)
 	       !strcmp(n, "style");
 }
 
-/* The tag's name, lowered, and where the tag ends. 0 when this is not a tag. */
+/*
+ * The tag's name, lowered, and where the tag ends. 0 when this is not a tag,
+ * and -1 when it is not because no ">" follows before `end`: that holds for
+ * every later "<" of the same run too, so the caller stops asking (it was
+ * a walk to `end` from each "<a" of a run that never closes one).
+ */
 static int mk_tag(kof_buf f, uint64_t at, uint64_t end, int *close,
 		  char *name, uint32_t cap, uint64_t *tag_end)
 {
@@ -84,7 +89,7 @@ static int mk_tag(kof_buf f, uint64_t at, uint64_t end, int *close,
 	while (i < end && f.p[i] != '>')
 		i++;
 	if (i >= end)
-		return 0;
+		return -1;
 	*tag_end = i + 1u;
 	/* "<x ... />" closes itself and never opens a span. */
 	if (!*close && i > at && f.p[i - 1u] == '/')
@@ -160,14 +165,16 @@ void kof_markup_merge(kof_buf f, uint64_t from, struct kof_script_info *info)
 		for (j = at; j + 1u < end; j++) {
 			char nm[16];
 			uint64_t te;
-			int cl;
+			int cl, t;
 
 			if (f.p[j] != '<')
 				continue;
-			if (!mk_tag(f, j, end, &cl, nm, (uint32_t)sizeof nm,
-				    &te)) {
+			t = mk_tag(f, j, end, &cl, nm, (uint32_t)sizeof nm,
+				   &te);
+			if (t < 0)
+				break;
+			if (!t)
 				continue;
-			}
 			j = te - 1u;
 			if (mk_void(nm) || mk_doc(nm))
 				continue;

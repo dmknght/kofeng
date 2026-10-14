@@ -58,11 +58,11 @@ static void imp_cb(void *u, uint64_t slot, const char *dll, const char *name,
 
 	(void)slot; (void)ordinal;
 	c->calls++;
-	if (!dll || strlen(dll) > 64u)
+	if (!dll || strlen(dll) > 4095u)               /* names are read whole to 4096 */
 		c->viol++;
 	if (nameoff && nameoff != KGENOME_BROKEN && nameoff >= c->n)
 		c->viol++;
-	if (nameoff && (!name || strlen(name) > 1024u))
+	if (nameoff && (!name || strlen(name) > 4095u))
 		c->viol++;
 }
 
@@ -113,37 +113,6 @@ static void funcs_check(const struct kgenome_func_set *fs, size_t n, const char 
 static struct kgenome_elf_info eiA;
 static struct kgenome_true_all tall;
 static struct kgenome_true_result tres;
-
-/* KNOWN UNDEFINED BEHAVIOUR, left out under UBSAN only (hk_ubsan): image_addr.c:32 and :49 add a
- * signed 64-bit delta (mem_addr - file_off, image_base + rva - file_off) to an offset; a segment or a
- * section that sits at 2^62 or above overflows it. In a plain build the sum wraps and the answer is
- * the same as with unsigned arithmetic. */
-static int elf_addr_math_safe(const struct kgenome_elf_info *e)
-{
-	uint32_t i;
-
-	if (!hk_ubsan())
-		return 1;
-	for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++)
-		if (e->seg[i].mem_addr >= 1ull << 62 || e->seg[i].file_off >= 1ull << 62 ||
-		    e->seg[i].file_size >= 1ull << 62)
-			return 0;
-	return 1;
-}
-
-static int pe_addr_math_safe(const struct kgenome_pe_info *p)
-{
-	uint32_t i;
-
-	if (!hk_ubsan())
-		return 1;
-	if (p->image_base >= 1ull << 62)
-		return 0;
-	for (i = 0; i < p->sec_count && i < KGENOME_PE_MAX_SECTIONS; i++)
-		if (p->sec[i].mem_rva >= 1ull << 62 || p->sec[i].file_off >= 1ull << 62)
-			return 0;
-	return 1;
-}
 
 static void walk_elf(const uint8_t *p, size_t n, const struct kgenome_elf_info *use,
 		     int diag)
@@ -199,12 +168,12 @@ static void walk_elf(const uint8_t *p, size_t n, const struct kgenome_elf_info *
 		if (nr != rt.n)
 			bad("reloc_table count != table n", n);
 		for (i = 0; i < rt.n; i++) {
-			/* a site or a name offset beyond the buffer is KNOWN (km_reloc_site
+			/* a site or a name offset beyond the buffer is KNOWN (reloc_site
 			 * below); the readers that take them are bounded by kof_rd_* */
 			if (i && rt.v[i].where < rt.v[i - 1u].where)
 				bad("relocations not sorted by where", n);
 		}
-		(void)kgenome_elf_relcalls(f, e, &rt, rc_cb, &rc);
+		(void)kgenome_elf_relcalls(f, e, &rt, rc_cb, &rc, NULL);
 		for (i = 0; i < 6 && i < rt.n; i++)
 			(void)kgenome_elf_reloc_in(&rt, rt.v[i].where, 4);
 		(void)kgenome_elf_reloc_in(&rt, UINT64_MAX - 2u, 255);
@@ -228,8 +197,6 @@ static void walk_elf(const uint8_t *p, size_t n, const struct kgenome_elf_info *
 		static const uint64_t probe[8] = { 0, 1, 0x40, 0x400000, 0x401000,
 			UINT64_MAX, UINT64_MAX - 1, 0x7fffffffffffffffull };
 		(void)kgenome_elf_va_to_off(e, probe[i], probe[(i + 3u) & 7u], &off);
-		if (!elf_addr_math_safe(e))
-			continue;
 		(void)kgenome_image_seg_at(&o, probe[i], &(struct kgenome_image_seg){ 0, 0, 0 });
 		(void)kgenome_image_off_to_addr(&o, probe[i]);
 		(void)kgenome_image_addr_to_off(&o, probe[i]);
@@ -367,8 +334,6 @@ static void walk_pe(const uint8_t *p, size_t n, const struct kgenome_pe_info *us
 		static const uint64_t probe[6] = { 0, 0x1000, 0x2000, UINT64_MAX, 0x80000000u,
 			0x140000000ull };
 		(void)kgenome_pe_rva_to_off(e, probe[i]);
-		if (!pe_addr_math_safe(e))
-			continue;
 		(void)kgenome_image_off_to_addr(&o, probe[i]);
 		(void)kgenome_image_addr_to_off(&o, probe[i]);
 		(void)kgenome_image_seg_at(&o, probe[i], &(struct kgenome_image_seg){ 0, 0, 0 });
@@ -1189,7 +1154,7 @@ static int sentinel_cb(void *u, uint64_t nameoff, uint32_t rva)
 }
 
 /* a name RVA that resolves nowhere must not reach the callback as an offset */
-static int km_export_sentinel(void *arg)
+static int export_sentinel(void *arg)
 {
 	static struct hk_pe pe;
 	struct kgenome_pe_info pi;
@@ -1209,7 +1174,7 @@ static int km_export_sentinel(void *arg)
 }
 
 /* an export directory whose RVA resolves nowhere is no export directory */
-static int km_export_dir_unresolved(void *arg)
+static int export_dir_unresolved(void *arg)
 {
 	static struct hk_pe pe;
 	struct kgenome_pe_info pi;
@@ -1234,7 +1199,7 @@ static int km_export_dir_unresolved(void *arg)
 }
 
 /* every relocation site is a place in the object */
-static int km_reloc_site(void *arg)
+static int reloc_site(void *arg)
 {
 	static struct hk_elf e;
 	struct kgenome_elf_info ei;
@@ -1267,23 +1232,12 @@ static int fam_known(void *arg)
 		int sig = 0;
 		enum hk_result r;
 
-		r = hk_isolated(km_export_sentinel, NULL, 10, &sig);
-		KM_CHECK(r == HK_OK, "kgenome_pe_exports hands the callback KGENOME_BROKEN as a name offset "
-			 "when a name RVA resolves nowhere",
-			 "pe_image.c:1098 fn(user, kgenome_pe_rva_to_off(p, nrva), frva): the sentinel is passed "
-			 "on; the import walk (pe_image.c:1027) checks BROKEN, the export walk does not. "
-			 "Repro: PE32+, AddressOfNames[0] = 0x9000");
-		r = hk_isolated(km_export_dir_unresolved, NULL, 10, &sig);
-		KM_CHECK(r == HK_OK, "kgenome_pe_exports reads an export directory from file offset 22 when "
-			 "its RVA resolves nowhere",
-			 "pe_image.c:1068-1075: d = rva_to_off() is KGENOME_BROKEN (2^64-2), `!d` does not catch it, "
-			 "d + EXP_N_NAMES wraps to 22. Repro: DataDirectory[0] = {0x9000,0x80}, DOS header bytes "
-			 "22..37 = {1, x, 0x2000, x}");
-		r = hk_isolated(km_reloc_site, NULL, 10, &sig);
-		KM_CHECK(r == HK_OK, "kgenome_elf_reloc_table reports a relocation site beyond the object",
-			 "elf_image.c:1135 r->where = tgt_off + roff, roff = r_offset unbounded (and the sum can "
-			 "wrap); diag_emu_image.c:171 apply_reloc then tests `where + 4u > size`, which wraps for "
-			 "where >= 2^64-3. Repro: ET_REL, first RELA r_offset = 0x8000000000000000");
+		r = hk_isolated(export_sentinel, NULL, 10, &sig);
+		CK(r == HK_OK);   /* kgenome_pe_exports hands the callback KGENOME_BROKEN as a name offset when a name RVA resolves nowhere */
+		r = hk_isolated(export_dir_unresolved, NULL, 10, &sig);
+		CK(r == HK_OK);   /* kgenome_pe_exports reads an export directory from file offset 22 when its RVA resolves nowhere */
+		r = hk_isolated(reloc_site, NULL, 10, &sig);
+		CK(r == HK_OK);   /* kgenome_elf_reloc_table reports a relocation site beyond the object */
 	}
 	return km_failed();
 }

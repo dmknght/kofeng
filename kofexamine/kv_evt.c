@@ -886,7 +886,7 @@ void evt_load(struct view *v)
 				 * row is picked, so a kept view would describe
 				 * the previous one.
 				 */
-				free(c->info);
+				kof_inspect_free(c->fmt, c->info);
 				c->info = NULL;
 				c->fmt = kof_inspect_identify(c->buf, &c->ctx,
 							      &c->info);

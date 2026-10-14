@@ -117,6 +117,8 @@ static void cell_put(struct kgenome_cell_state *k, uint8_t d, const struct kgeno
 	if (d >= 16u)
 		return;
 	if (o->size >= 4u || o->size == 0u) {
+		if (o->size == 4u)
+			v &= 0xffffffffu;       /* x86-64 and A64 zero-extend a 32-bit write */
 		k->reg[d] = v;
 		k->known |= (uint16_t)(1u << d);
 		return;
@@ -153,6 +155,8 @@ static int src_val(const struct kgenome_cell_state *k, const struct kgenome_cell
 	if (o->kind == KGENOME_CELL_O_REG && o->reg < 16u && !o->scale &&
 	    (k->known & (1u << o->reg))) {
 		*v = k->reg[o->reg];
+		if (o->size == 1u && (o->flags & KGENOME_CELL_OF_HIGH8))
+			*v >>= 8;       /* AH/CH/DH/BH: the byte is bits 8..15 */
 		return 1;
 	}
 	return 0;
@@ -170,6 +174,7 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 	uint8_t d;
 	uint64_t a, b;
 	int have_b;
+	uint16_t known0;
 
 	/*
 	 * THE STACK FIRST, because the idiom that matters most goes through
@@ -267,6 +272,7 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 	 * hypothetical: it cost `inc ebx` the zero that `xor ebx,ebx` had
 	 * just put there.
 	 */
+	known0 = k->known;      /* before the forgetting: an exchange reads BOTH of its registers */
 	cell_forget_written(k, in, (int)d);
 
 	/* One source, and only three kinds of it can be a number. */
@@ -275,6 +281,8 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 	if (in->n_op > 1u)
 		have_b = src_val(k, &in->o[1], &b);
 	a = k->reg[d];
+	if (in->o[0].size == 1u && (in->o[0].flags & KGENOME_CELL_OF_HIGH8))
+		a >>= 8;
 
 	/*
 	 * THE THREE-OPERAND FORM, `d = x op y`, which ARM spells whenever the
@@ -328,9 +336,14 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 		    in->o[1].reg < 16u) {
 			uint8_t e = in->o[1].reg;
 			uint64_t va = k->reg[d], ve = k->reg[e];
-			uint16_t ka = (uint16_t)(k->known & (1u << d));
-			uint16_t ke = (uint16_t)(k->known & (1u << e));
+			uint16_t ka = (uint16_t)(known0 & (1u << d));
+			uint16_t ke = (uint16_t)(known0 & (1u << e));
 
+			/* a 32-bit exchange zero-extends BOTH halves, like any 32-bit write */
+			if (in->o[0].size == 4u) {
+				ve &= 0xffffffffu;
+				va &= 0xffffffffu;
+			}
 			k->reg[d] = ve; k->reg[e] = va;
 			k->known = (uint16_t)(k->known & ~((1u << d) | (1u << e)));
 			if (ke) k->known |= (uint16_t)(1u << d);
@@ -350,8 +363,7 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 		 */
 		if (in->n_op > 1u && in->o[1].kind == KGENOME_CELL_O_REG &&
 		    in->o[1].reg == d) {
-			k->reg[d] = 0;
-			k->known |= (uint16_t)(1u << d);
+			cell_put(k, d, &in->o[0], 0);
 			cell_forget_written(k, in, d);
 			return;
 		}
@@ -363,27 +375,28 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 			return;
 		}
 		switch (in->op) {
-		case KGENOME_CELL_ADD: k->reg[d] = a + b; break;
-		case KGENOME_CELL_SUB: k->reg[d] = a - b; break;
-		case KGENOME_CELL_AND: k->reg[d] = a & b; break;
-		case KGENOME_CELL_OR:  k->reg[d] = a | b; break;
-		default:       k->reg[d] = a ^ b; break;
+		case KGENOME_CELL_ADD: a = a + b; break;
+		case KGENOME_CELL_SUB: a = a - b; break;
+		case KGENOME_CELL_AND: a = a & b; break;
+		case KGENOME_CELL_OR:  a = a | b; break;
+		default:       a = a ^ b; break;
 		}
+		cell_put(k, d, &in->o[0], a);   /* the operand's width decides what is replaced */
 		cell_forget_written(k, in, d);
 		return;
 	case KGENOME_CELL_INC: case KGENOME_CELL_DEC:
 		if (k->known & (1u << d))
-			k->reg[d] = in->op == KGENOME_CELL_INC ? a + 1u : a - 1u;
+			cell_put(k, d, &in->o[0], in->op == KGENOME_CELL_INC ? a + 1u : a - 1u);
 		cell_forget_written(k, in, d);
 		return;
 	case KGENOME_CELL_NOT:
 		if (k->known & (1u << d))
-			k->reg[d] = ~a;
+			cell_put(k, d, &in->o[0], ~a);
 		cell_forget_written(k, in, d);
 		return;
 	case KGENOME_CELL_NEG:
 		if (k->known & (1u << d))
-			k->reg[d] = (uint64_t)0 - a;
+			cell_put(k, d, &in->o[0], (uint64_t)0 - a);
 		cell_forget_written(k, in, d);
 		return;
 	case KGENOME_CELL_MUL:

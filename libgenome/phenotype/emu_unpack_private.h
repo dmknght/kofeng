@@ -109,6 +109,7 @@ struct kgenome_emu_unp_map {
 	uint32_t n_back, mapped;
 	int      improvised;    /* the entry is a guess */
 	int      flat;          /* the file was mapped whole, for want of a header */
+	int      borrow;        /* the bytes outlive the machine: whole pages are borrowed, not copied */
 };
 
 struct kgenome_emu_unp_extent {

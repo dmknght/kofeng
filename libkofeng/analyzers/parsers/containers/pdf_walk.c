@@ -263,11 +263,11 @@ static uint64_t pdf_claim_object(kof_buf file, struct kof_runs *runs,
 	 * 240 UNCLAIMED extents were four bytes or fewer of this, and
 	 * OBJECTS resolved to 238 extents where 58 say the same thing.
 	 *
-	 * Not a cosmetic count. A region resolves into KOF_SCAN_MAX_EXTENTS
-	 * ranges and one that does not fit is searched IN PART, with the
-	 * scan saying KOF_BROKEN_LIMIT - and a benign PDF was reaching it.
-	 * Whitespace between two structures is structure, so it goes to
-	 * OBJECTS and consecutive objects coalesce into one run.
+	 * Not a cosmetic count. Every extent is a range a search has to be
+	 * given and a row of the run pool, and a benign PDF was reaching the
+	 * cap that once bounded both. Whitespace between two structures is
+	 * structure, so it goes to OBJECTS and consecutive objects coalesce
+	 * into one run.
 	 */
 	stop = end;
 	while (stop < file.n && pdf_is_ws(file.p[stop]))
@@ -309,47 +309,9 @@ static uint64_t pdf_claim_object(kof_buf file, struct kof_runs *runs,
 	return stop;
 }
 
-/* This number and generation, seen before. */
-static void pdf_note_redefined(struct kof_pdf_info *p, struct kof_pdf_object *o,
-			       uint8_t *seen_num)
-{
-	/*
-	 * THIS NUMBER AND GENERATION, SEEN BEFORE.
-	 *
-	 * Through an 8192 bit filter rather than a scan of the table,
-	 * because the table holds four thousand objects and comparing
-	 * against every earlier one is eight million compares per
-	 * document - milliseconds, per object, on the scan path. A
-	 * collision in the filter costs the walk it saved and only
-	 * then; a duplicate is rare and a false hit on 13 bits rarer.
-	 *
-	 * See KOF_PDF_ANOM_OBJ_REDEFINED for why this is recorded and
-	 * not resolved: an incrementally updated document does it on
-	 * purpose, and which definition a viewer picks is a question
-	 * only the cross reference table answers.
-	 */
-	uint32_t b = o->num & 8191u;
-
-	if (seen_num[b >> 3] & (uint8_t)(1u << (b & 7u))) {
-		uint32_t k;
-
-		for (k = 0; k < p->n_objects; k++)
-			if (p->object[k].num == o->num &&
-			    p->object[k].gen == o->gen) {
-				p->anomalies |=
-				    KOF_PDF_ANOM_OBJ_REDEFINED;
-				o->flags |=
-				    KOF_PDF_OBJ_REDEFINED;
-				break;
-			}
-	}
-	seen_num[b >> 3] |= (uint8_t)(1u << (b & 7u));
-}
-
 /* The objects: every "obj" confirmed by the two numbers before it. */
-void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p,
-			     struct kof_runs *runs, uint8_t *seen_num,
-			     uint64_t hdr)
+void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p, struct pdf_tabs *t,
+		      struct kof_runs *runs, uint64_t hdr)
 {
 	uint64_t at;
 
@@ -388,18 +350,26 @@ void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p,
 		}
 
 		/*
-		 * Past the cap the walk CONTINUES; what it stops producing is rows.
+		 * A ROW THE TABLE CANNOT TAKE, and the walk CONTINUES.
 		 *
-		 * Breaking out was the obvious thing and it cost two: the rest of
-		 * the document became one UNCLAIMED region, so a signature aimed at
-		 * an object dictionary could not reach anything past the four
-		 * thousandth object - and declared_objects, which this view promises
-		 * is what the walk found BEFORE any cap, could never differ from
-		 * n_objects because the walk stopped at the same moment the count
-		 * did. A row is written into `spill` and discarded, so the regions
-		 * and the count are still right when the table is not.
+		 * The table grows with the file (the bound is what the file can hold, see
+		 * struct pdf_tabs), so this is the ledger refusing, or the allocator; it is not
+		 * a number of objects. Breaking out was the obvious thing and it cost two: the
+		 * rest of the document became one UNCLAIMED region, so a signature aimed at an
+		 * object dictionary could not reach anything past the last stored object - and
+		 * declared_objects, which this view promises is what the walk found whatever
+		 * the tables took, could never differ from n_objects because the walk stopped
+		 * at the same moment the count did. A row is written into `spill` and
+		 * discarded, so the regions and the count are still right when the table is not.
 		 */
-		if (p->n_objects >= KOF_PDF_MAX_OBJECTS) {
+		if (p->n_objects >= t->cap_obj) {
+			void *tab = p->object;
+
+			if (kof_tab_grow(&p->mem, &tab, &t->cap_obj, sizeof *p->object,
+					 (uint64_t)p->n_objects + 1u, t->obj_limit))
+				p->object = (struct kof_pdf_object *)tab;
+		}
+		if (p->n_objects >= t->cap_obj) {
 			p->anomalies |= KOF_PDF_ANOM_OBJECTS_FULL;
 			o = &spill;
 		} else {
@@ -438,8 +408,6 @@ void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p,
 						declared);
 
 		stop = pdf_claim_object(file, runs, o, start, end);
-
-		pdf_note_redefined(p, o, seen_num);
 
 		if (o != &spill)
 			p->n_objects++;

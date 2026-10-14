@@ -76,7 +76,10 @@ typedef int (*kuncoat_ovba_sink)(void *user, const uint8_t *p, uint32_t n);
  *
  * `in` points at the SignatureByte. `produced` is always set, whatever the status -
  * a container that fails part way still yields real source, and for a scanner that
- * prefix is usually the part that identifies the sample.
+ * prefix is usually the part that identifies the sample. `produced` may be NULL.
+ * A NULL `sink`, or a NULL `in` with in_len > 0, is KUNCOAT_BAD_ARG. A container
+ * that ends inside a chunk header (one byte left after the last chunk) is
+ * TRUNCATED, like a chunk that claims more than the container holds.
  */
 enum kuncoat_status kuncoat_ovba_decode(const uint8_t *in, uint64_t in_len, kuncoat_ovba_sink sink,
 		    void *user, uint64_t *produced);

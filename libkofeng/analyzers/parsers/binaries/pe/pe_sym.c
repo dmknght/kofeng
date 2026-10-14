@@ -164,8 +164,10 @@ static void do_imports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_im
 			len = spell_import(sym, dll, clean);
 		}
 		/* A name past KOF_SYM_NAME_MAX is cut by the writer, which says so
-		 * on the record. */
-		if (!sym_put(w, KOF_SYM_F_UNDEFINED, 0, sym, len, 0))
+		 * on the record. The MODULE part is cut here, at DLL_ROOM bytes ("api-ms-win-
+		 * core-synch-l1-2-0.dll" is 31): the record says so too, so a name that
+		 * does not match "dll!func" can be told from one that was never there. */
+		if (!sym_put(w, KOF_SYM_F_UNDEFINED, 0, sym, len, strlen(dll) > DLL_ROOM))
 			break;
 	}
 }
@@ -195,9 +197,11 @@ static int export_put(void *user, uint64_t nameoff, uint32_t frva)
 		       frva, fn, len, cut);
 }
 
-static void do_exports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_info *p)
+static enum kgenome_status do_exports(struct kof_symw *w, kof_buf f,
+				      const struct kgenome_pe_info *p)
 {
 	struct exp_ctx x = { w, f };
+	enum kgenome_status st = KGENOME_OK;
 
 	/*
 	 * The NAMED exports only.
@@ -210,7 +214,8 @@ static void do_exports(struct kof_symw *w, kof_buf f, const struct kgenome_pe_in
 	 * how many records there are, so nothing pretends the block is the
 	 * whole directory.
 	 */
-	(void)kgenome_pe_exports(f, p, export_put, &x, NULL);
+	(void)kgenome_pe_exports(f, p, export_put, &x, &st);
+	return st;
 }
 
 uint32_t kof_pe_syms(kof_buf file, const struct kgenome_pe_info *p,
@@ -225,6 +230,7 @@ uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
 {
 	struct kgenome_pe_imptab own;
 	struct kof_symw w;
+	enum kgenome_status src;
 	uint32_t bytes;
 
 	if (!out || cap < KOF_SYM_HDRLEN)
@@ -255,11 +261,17 @@ uint32_t kof_pe_syms_with(kof_buf file, const struct kgenome_pe_info *p,
 		tab = &own;
 	}
 	do_imports(&w, file, tab);
+	src = tab->status;
 	if (tab == &own)
 		kgenome_pe_imptab_free(&own);
-	do_exports(&w, file, p);
+	src = kgenome_status_merge(src, do_exports(&w, file, p));
 
 	bytes = kof_symw_end(&w);
+	/* A bound of the walks that feed the block (the thunk budget, the export
+	 * name bound, memory) is a cut the buffer's size does not change: it has
+	 * its own bit, so kof_syms_build_grow does not rebuild for it. */
+	if (kgenome_status_is_cut(src))
+		out[KOF_SYM_H_TRUNC] |= KOF_SYM_TRUNC_SOURCE;
 	/*
 	 * The origin, said rather than left as NONE.
 	 *
@@ -351,12 +363,12 @@ uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 	 * once and the records already there are never at risk. */
 	room = kof_pe_syms_add_room(dll, name, n);
 	if ((uint64_t)n_bytes + room > cap) {
-		blk[KOF_SYM_H_TRUNC] = 1;
+		blk[KOF_SYM_H_TRUNC] |= KOF_SYM_TRUNC_ROOM;
 		return n_bytes;
 	}
 	old = malloc(n_bytes);
 	if (!old) {
-		blk[KOF_SYM_H_TRUNC] = 1;
+		blk[KOF_SYM_H_TRUNC] |= KOF_SYM_TRUNC_ROOM;
 		return n_bytes;
 	}
 	memcpy(old, blk, n_bytes);
@@ -403,8 +415,7 @@ uint32_t kof_pe_syms_add_imports(uint8_t *blk, uint32_t n_bytes, uint32_t cap,
 		(void)kof_symw_put_from(&w, old, n_bytes, kof_sym_rec(old, n_bytes, k));
 	n_bytes = kof_symw_end(&w);
 	blk[KOF_SYM_H_ORIGIN] = (uint8_t)(added ? KOF_SYM_ORIGIN_PE_RESOLVED : origin);
-	if (old_trunc)
-		blk[KOF_SYM_H_TRUNC] = 1;
+	blk[KOF_SYM_H_TRUNC] |= (uint8_t)old_trunc;     /* the parent's bits, ROOM and SOURCE */
 	free(old);
 	return n_bytes;
 }

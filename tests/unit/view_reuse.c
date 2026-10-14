@@ -4,33 +4,34 @@
  * WHAT THIS GUARDS, AND WHY IT NEEDS GUARDING NOW.
  *
  * A format view - struct kof_zip_info and its siblings - is allocated ONCE per
- * scanner and reused for every object of that format. It is 608KB for ZIP and
- * 800KB for PDF, almost all of it two arrays sized for the worst case, and the
- * parsers used to begin with `memset(view, 0, sizeof *view)`.
+ * scanner and reused for every object of that format. The scalar formats' views are
+ * still plain structs that the parse clears as far as it reads; the tar case below
+ * guards that the way it always did, with the arrays left dirty ("nothing reads past
+ * the count, and the count is in the header").
  *
- * That was 9.1us of memset per ZIP object and 13.7us per PDF one, measured, to
- * zero four thousand entry slots that a two-entry archive cannot reach. The
- * parsers now clear the HEADER and leave the arrays dirty, which is sound for
- * exactly one reason: nothing reads past the count, and the count is in the
- * header. A parse that stops early leaves the tail holding the last file's
- * entries and the count at zero, so it reads as "no entries".
- *
- * THE FAILURE THAT REASONING ALLOWS is the one this file exists to catch: a
- * parser that sets its count BEFORE filling the slots, or that leaves the count
- * from a previous object, hands a consumer somebody else's data. Nothing about
- * that looks wrong - no crash, no overflow, no sanitizer report - and the
- * result is a scanner reporting entry names that belong to a file it finished
- * with. A _Static_assert catches a field added after the arrays; only a run
- * catches this.
+ * Zip and pdf are not plain structs any more: their entries, objects and runs are
+ * tables the parse allocates to the size of the file. So a reused view has a second
+ * thing to get right besides the count - what the PREVIOUS parse left. It must be let
+ * go (or the next parse leaks it), and it must not be read: a parse that sets its
+ * count BEFORE filling the rows, or leaves the count from a previous object, hands a
+ * consumer somebody else's data, and nothing about that looks wrong - no crash, no
+ * sanitizer report. Under ASAN the leak half of it is a failure of this test, which is
+ * the point of running it there.
  *
  * SO THE SHAPE OF EVERY CASE IS THE SAME: parse a BIG object, then a SMALL one
- * through the SAME view, and demand that the small one's answers are its own.
- * The big one goes first on purpose - it is what leaves the tail dirty.
+ * through the SAME view, and demand that the small one's answers are its own. The big
+ * one goes first on purpose - it is what leaves the tables full.
  *
  * AND ONE CASE PARSES RUBBISH between the two, because the interesting failure
  * is not "the second parse is wrong" but "the second parse gave up early and
  * kept what it found last time". A parse that refuses must leave a count of
- * zero, not the previous count.
+ * zero, not the previous count - and tables of zero rows, not the old ones.
+ *
+ * A VIEW STARTS ZEROED. That is the contract of a view that owns memory: the parse
+ * reads the pointers it finds to let them go, so a view out of malloc is not a view.
+ * (This file used to fill it with 0xAB to catch a parser that clears too little; for
+ * the owning views that is a different test - the count and the rows are asserted
+ * below instead, and a stale pointer is asserted released by the leak check.)
  */
 
 #include <stdio.h>
@@ -143,7 +144,7 @@ static uint64_t make_zip(uint8_t *out, size_t cap, uint32_t n, char tag)
 static void zip_case(void)
 {
 	static uint8_t big[1u << 20], small[4096], junk[512];
-	struct kof_zip_info *view = malloc(sizeof *view);
+	struct kof_zip_info *view = calloc(1, sizeof *view);
 	struct kof_obj_ctx ctx;
 	uint64_t nbig, nsmall;
 	uint32_t i;
@@ -153,13 +154,6 @@ static void zip_case(void)
 		fails++;
 		return;
 	}
-	/*
-	 * A DELIBERATELY DIRTY VIEW, so a parser that clears nothing at all is
-	 * caught as surely as one that clears too little. Without this the
-	 * malloc could hand back zeroed pages and the test would pass on a
-	 * parser that never writes the count.
-	 */
-	memset(view, 0xAB, sizeof *view);
 
 	nbig = make_zip(big, sizeof big, 300u, 'B');
 	nsmall = make_zip(small, sizeof small, 2u, 'S');
@@ -179,7 +173,7 @@ static void zip_case(void)
 	ok(kof_zip_parse(kof_buf_make(small, nsmall), view, &ctx) != 0,
 	   "zip: the 2-entry archive parses");
 	ok(view->n_entries == 2u,
-	   "zip: 2 entries, NOT the 300 left in the tail");
+	   "zip: 2 entries, NOT the 300 the table held a parse ago");
 
 	/*
 	 * And the two it reports are ITS OWN. A count that was reset while the
@@ -200,8 +194,17 @@ static void zip_case(void)
 	memset(junk, 0x5A, sizeof junk);
 	memset(&ctx, 0, sizeof ctx);
 	(void)kof_zip_parse(kof_buf_make(junk, sizeof junk), view, &ctx);
-	ok(view->n_entries == 0u,
-	   "zip: a refused parse reports no entries, not the last file's");
+	ok(view->n_entries == 0u && view->n_runs == 0u && view->mem.held == 0u,
+	   "zip: a refused parse reports no entries, no runs and holds nothing - not the last file's");
+
+	/* Parsed again after the refusal: the view is as good as new. */
+	memset(&ctx, 0, sizeof ctx);
+	ok(kof_zip_parse(kof_buf_make(small, nsmall), view, &ctx) != 0 && view->n_entries == 2u &&
+	   view->mem.held > 0u && view->mem.rows == 2u,
+	   "zip: a view that was refused parses again, and says what it holds");
+	kof_zip_release(view);
+	ok(view->n_entries == 0u && view->mem.held == 0u && !view->entry && !view->run,
+	   "zip: a released view is empty and holds nothing");
 
 	free(view);
 }
@@ -249,7 +252,7 @@ static uint64_t make_tar(uint8_t *out, size_t cap, uint32_t n, char tag)
 static void tar_case(void)
 {
 	static uint8_t big[1u << 19], small[8192];
-	struct kof_tar_info *view = malloc(sizeof *view);
+	struct kof_tar_info *view = calloc(1, sizeof *view);   /* zeroed: a view that owns tables starts so */
 	struct kof_obj_ctx ctx;
 	uint64_t nbig, nsmall;
 
@@ -258,12 +261,12 @@ static void tar_case(void)
 		fails++;
 		return;
 	}
-	memset(view, 0xAB, sizeof *view);
 
 	nbig = make_tar(big, sizeof big, 200u, 'B');
 	nsmall = make_tar(small, sizeof small, 1u, 'S');
 	ok(nbig > 0 && nsmall > 0, "tar fixtures built");
 	if (!nbig || !nsmall) {
+		kof_tar_release(view);
 		free(view);
 		return;
 	}
@@ -279,6 +282,7 @@ static void tar_case(void)
 	ok(view->n_entries == 1u,
 	   "tar: 1 entry, NOT the 200 left in the tail");
 
+	kof_tar_release(view);
 	free(view);
 }
 

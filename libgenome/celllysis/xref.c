@@ -266,7 +266,10 @@ void kgenome_xref_begin(struct kgenome_xref *u, unsigned arch)
 		u->run_slot[i].base = NGPR;
 	u->run_next_slot = 0;
 	/* A run of code starts a region, and every RET ends one. */
+	if (u->n_rgn >= USE_RGN)
+		u->full = 1;            /* regions merged: the sweep says it is partial */
 	u->run_rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
+	u->sorted = 0;
 	/* Each run starts knowing nothing: a register left over from the end of
 	 * one section says nothing about the start of the next. */
 	memset(u->run_reg, 0, sizeof u->run_reg);
@@ -290,6 +293,7 @@ void kgenome_xref_feed(void *user, const struct kgenome_cell_insn *in)
 	slot = u->run_slot;
 	next_slot = &u->run_next_slot;
 	rgn = u->run_rgn;
+	u->sorted = 0;                  /* what is fed after a query must be seen by the next one */
 	if (!in) {
 		/*
 		 * One byte on rather than giving up.
@@ -346,6 +350,8 @@ void kgenome_xref_feed(void *user, const struct kgenome_cell_insn *in)
 			u->edge_from[u->n_edge] = (uint8_t)rgn;
 			u->edge_to[u->n_edge] = t;
 			u->n_edge++;
+		} else if (is_call) {
+			u->full = 1;    /* an edge not kept: the answer is partial */
 		}
 	}
 	if (indirect && is_call)
@@ -481,6 +487,8 @@ void kgenome_xref_feed(void *user, const struct kgenome_cell_insn *in)
 	 * that follows it.
 	 */
 	if (in->op == KGENOME_CELL_RET) {
+		if (u->n_rgn >= USE_RGN)
+			u->full = 1;    /* the regions are merged from here: say so */
 		rgn = u->n_rgn < USE_RGN ? u->n_rgn++ : USE_RGN - 1u;
 		if (rgn < USE_RGN)
 			u->rgn_at[rgn] = rip + len;
@@ -499,6 +507,7 @@ static void order_build(struct kgenome_xref *u)
 	uint32_t i, j;
 	uint64_t reach = 0;
 
+	u->startup = 0;                 /* derived afresh: a rebuild must not widen the one-level reach */
 	for (i = 0; i < u->n; i++)
 		u->order[i] = (uint16_t)i;
 	for (i = 1; i < u->n; i++) {
@@ -578,7 +587,7 @@ uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n)
 		else
 			hi = mid;
 	}
-	for (; lo < u->n && u->va[u->order[lo]] < va + n; lo++) {
+	for (; lo < u->n && u->va[u->order[lo]] - va < n; lo++) {
 		uint32_t e = u->order[lo], r;
 
 		f |= u->flag[e];
@@ -613,8 +622,10 @@ int kgenome_xref_startup(struct kgenome_xref *u, uint64_t va)
 {
 	if (!u || u->n_start >= USE_RGN)
 		return 0;              /* no room: see the note in xref.h */
-	if (va)
+	if (va) {
 		u->start_at[u->n_start++] = va;
+		u->sorted = 0;
+	}
 	return 1;
 }
 

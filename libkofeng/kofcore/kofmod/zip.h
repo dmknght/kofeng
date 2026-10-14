@@ -46,7 +46,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_ZIP_INFO_VERSION 1
+#define KOF_ZIP_INFO_VERSION 2
 
 /*
  * Scan regions.
@@ -138,33 +138,30 @@ enum {
 };
 
 /*
- * Bounds the parse holds itself to.
+ * What bounds the parse, and what does not.
  *
- * The entry count is the one that matters and it is sized from measurement rather
- * than from the specification, which allows 65535 per disk and unbounded with
- * ZIP64.
+ * NO COUNT OF ENTRIES IS A LIMIT ON THE FILE. The tables of this view (the entries and
+ * the runs that partition the object) were arrays of 4096 and 16384 until 2100 members
+ * were enough to lose all of them (their NAMES region needs two extents each against the
+ * 4096 a resolve could hold) and an APK with 5242 class files was cut at the 4096th.
+ * Measured over 707 archives the median is 8 entries, the 99th percentile 4041 and the
+ * largest 41659 - a distribution whose tail is the interesting part, and no number
+ * chosen from it would be right for the next archive.
  *
- * The first measurement was 280 archives with a median of 2 entries and a largest
- * of 991, and it was drawn before this engine could tell a JAR or an APK from a
- * plain zip. Those change the distribution completely: over 707 archives the median
- * is 8, the 99th percentile is 4041 and the largest holds 41659 - an APK is a zip
- * with every class file in it, and 5242 entries is an ordinary one.
- *
- * So 4096 covers 99% of them. It is not enough for the largest and nothing
- * reasonable would be; what matters is that falling short is RECORDED - the entries
- * beyond it are not scanned, and an archive that hit the cap says so rather than
- * reporting the part it read as the whole.
+ * They are allocated to what the central directory holds. What bounds an allocation is
+ * therefore not a count the file states (the end record says 65535, ZIP64 says 2^64) but
+ * the bytes the file really has: a central record is at least KOF_ZIP_CENTRAL_MIN bytes,
+ * so the rows cannot exceed the length of the directory divided by it, and a row makes at
+ * most KOF_ZIP_RUNS_PER_ENTRY runs. Under that sits the engine's per-object ledger
+ * (struct kof_view_mem.room): when a table cannot grow the walk stops, ENTRIES_FULL or
+ * EXTENTS_FULL is raised, and the object reads KOF_BROKEN_LIMIT - what was not read is
+ * said, and what was read is whole.
  */
-#define KOF_ZIP_MAX_ENTRIES  4096u
-/*
- * Runs recorded, across all classes.
- *
- * Four per entry is the shape: a local header and a central record, each split by
- * the name sitting inside it. The entry cap above is what this is derived from, so
- * the two move together - a run pool that did not grow with the entries would make
- * the extra entries describable and not locatable.
- */
-#define KOF_ZIP_MAX_EXTENTS  (KOF_ZIP_MAX_ENTRIES * 4u)
+#define KOF_ZIP_CENTRAL_MIN  46u
+/* The runs one entry can make: central header, name, extra and comment; local header,
+ * name, extra; the data; the descriptor. Two more cover the end record and its comment,
+ * two the ZIP64 records. A bound on the pool, not a count anyone relies on. */
+#define KOF_ZIP_RUNS_PER_ENTRY 8u
 
 /* How far back from the end the end-of-central-directory record is looked for: its
  * own 22 bytes plus the largest comment a 16 bit length can describe. */
@@ -177,8 +174,9 @@ enum {
 	KOF_ZIP_ANOM_BAD_LOCAL      = 1ull << 3,  /* a local header is not one */
 	KOF_ZIP_ANOM_LOCAL_MISMATCH = 1ull << 4,  /* the two copies of a name differ */
 	KOF_ZIP_ANOM_DATA_PAST_EOF  = 1ull << 5,
-	KOF_ZIP_ANOM_ENTRIES_FULL   = 1ull << 6,  /* more entries than examined */
-	KOF_ZIP_ANOM_EXTENTS_FULL   = 1ull << 7,
+	KOF_ZIP_ANOM_ENTRIES_FULL   = 1ull << 6,  /* the entry table could not grow: the
+						   * directory has entries not read */
+	KOF_ZIP_ANOM_EXTENTS_FULL   = 1ull << 7,  /* the run table could not grow */
 	KOF_ZIP_ANOM_ENCRYPTED      = 1ull << 8,
 	KOF_ZIP_ANOM_TRAVERSAL      = 1ull << 9,  /* a name escapes the extract root */
 	KOF_ZIP_ANOM_RATIO_ABSURD   = 1ull << 10, /* a declared expansion no file reaches */
@@ -226,13 +224,35 @@ enum {
 	KOF_ZIP_ENT_RATIO      = 1u << 3   /* declares an absurd expansion */
 };
 
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2. The two arrays that used to end this struct - `run[16384]` and
+ * `entry[4096]`, 622728 bytes - are tables the parse allocates to the size of the
+ * archive, reached through the pointers at the tail. Everything before them is where
+ * it was.
+ *
+ * `n_entries` WAS AT OFFSET 12 AND IS NOW `legacy_n_entries`, ALWAYS ZERO, and that is
+ * the whole of the compatibility story, so it is spelled out. A module built against
+ * version 1 reads `z->entry[i]` for `i < z->n_entries` at the offsets its build put
+ * them; in this layout there is nothing there. Leaving the count would make it read
+ * whatever lives at those addresses - no crash, no refusal, a scan deciding on the
+ * wrong bytes. With the count at zero the loop does not run: such a module reads a valid
+ * empty table, opens nothing, and the engine - which sees that the walk below was never
+ * called while the archive has rows - reports the object instead of passing it as
+ * examined (sx_walk_check). The way to REFUSE such a module outright is the floor,
+ * KOFSIG_ABI_MIN, raised by whoever owns it; see kofabi.h. The real count is
+ * `n_entries` at the tail.
+ *
+ * A module walks the table with kof_zip_next below; it does not index `entry`.
+ */
 struct kof_zip_info {
 	uint32_t version;         /* KOF_ZIP_INFO_VERSION */
 	uint32_t valid;
 	uint64_t anomalies;
 
 	uint32_t kind;            /* enum kof_zip_kind */
-	uint32_t n_entries;       /* examined, which is at most MAX_ENTRIES */
+	uint32_t legacy_n_entries;/* version 1's count, kept for its offset: always 0 */
 	uint32_t declared_entries;/* what the end record claimed */
 	uint32_t n_encrypted;
 
@@ -259,14 +279,45 @@ struct kof_zip_info {
 	 * of them. struct kof_run is range.h's. */
 	uint32_t n_runs;
 	uint32_t reserved0;
-	struct kof_run run[KOF_ZIP_MAX_EXTENTS];   /* cls is enum kof_zip_class */
 
-	struct kof_zip_entry entry[KOF_ZIP_MAX_ENTRIES];
+	/* ---- version 2: from here the tables are the file's size ---------------------- */
+
+	struct kof_view_mem mem;  /* what the tables hold; see range.h */
+	struct kof_run *run;      /* n_runs of them; cls is enum kof_zip_class */
+	struct kof_zip_entry *entry;
+	uint32_t n_entries;       /* rows in `entry`: every record the directory held that
+				   * the tables could take, which is all of them unless
+				   * ENTRIES_FULL is raised */
+	uint32_t reserved1;
 };
 
 static inline const struct kof_zip_info *kof_zip(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_zip_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT ENTRY OF THE ARCHIVE, in the order the central directory lists them.
+ *
+ *     uint32_t cur = 0;
+ *     const struct kof_zip_entry *e;
+ *
+ *     while ((e = kof_zip_next(ctx, &cur)) != 0)
+ *             ...
+ *
+ * A walk with a cursor the module owns, which is what lets the table be as long as the
+ * archive: there is no `entry[4096]` to index and no count to trust. NULL at the end. The
+ * host sees every call (it is a vtable slot), which is how it knows a module read the
+ * table - see struct kof_view_mem.walked. An archive that declares more entries than
+ * the engine could hold says so (KOF_ZIP_ANOM_ENTRIES_FULL) and the walk ends where the
+ * table does.
+ */
+static inline const struct kof_zip_entry *kof_zip_next(const struct kof_obj_ctx *ctx,
+						       uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_zip_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_ZIP_H */

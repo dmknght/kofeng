@@ -152,8 +152,24 @@ static struct kgenome_diag_wrapper_val emit_call_node(struct kgenome_diag_wrappe
 
 /* ---- pass B: the functions, in address order ------------------------------ */
 
-/* Whether the node at `at` is one a function hands back to its callers. */
-int kgenome_diag_wrapper_fret_site(const struct kgenome_diag_wrapper_ctx *c, uint64_t at)
+static int has_u64(const uint64_t *v, uint32_t n, uint64_t x)
+{
+	uint32_t lo = 0, hi = n;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (v[mid] < x)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return lo < n && v[lo] == x;
+}
+
+/* Whether the node at `at` is one a function hands back to its callers, read
+ * from the table - the question the sorted set below answers in one lookup. */
+static int fret_site(const struct kgenome_diag_wrapper_ctx *c, uint64_t at)
 {
 	uint32_t i;
 
@@ -164,6 +180,92 @@ int kgenome_diag_wrapper_fret_site(const struct kgenome_diag_wrapper_ctx *c, uin
 		    c->s->hit[c->fret[i] - 1u].at == at)
 			return 1;
 	return 0;
+}
+
+/* The sites some caller made a node for, sorted. The table is not read again
+ * once pass B has ended, so the set is made once, at the first question. */
+static void made_build(struct kgenome_diag_wrapper_ctx *c)
+{
+	uint32_t i;
+
+	c->made_state = 2;
+	if (c->n_ws) {
+		if (!kgenome_diag_wrapper_charge(c, (uint64_t)c->n_ws * sizeof *c->made))
+			return;
+		c->made = malloc((size_t)c->n_ws * sizeof *c->made);
+		if (!c->made)
+			return;
+	}
+	for (i = 0; i < c->n_ws; i++)
+		if (c->ws[i].node_made)
+			c->made[c->n_made++] = c->ws[i].site;
+	if (c->n_made)
+		qsort(c->made, c->n_made, sizeof *c->made, kof_cmp_u64);
+	c->made_state = 1;
+}
+
+/* Whether a summary at `site` has a node a caller made. */
+int kgenome_diag_wrapper_site_made(struct kgenome_diag_wrapper_ctx *c, uint64_t site)
+{
+	uint32_t i;
+
+	if (!c->made_state)
+		made_build(c);
+	if (c->made_state == 1)
+		return has_u64(c->made, c->n_made, site);
+	for (i = 0; i < c->n_ws; i++)
+		if (c->ws[i].site == site && c->ws[i].node_made)
+			return 1;
+	return 0;
+}
+
+/* A wrapper some caller made a node for is answered at its callers; the node
+ * the sweep made at the syscall inside it spoke for every caller at once and
+ * for none of them, and is set aside - unless a helper hands that node back,
+ * which is then the one callers use. One pass over the nodes against the sorted
+ * set of such sites; it used to be a pass over the nodes, and one over the call
+ * targets, for each wrapper. */
+void kgenome_diag_wrapper_supersede(struct kgenome_diag_wrapper_ctx *c)
+{
+	struct kgenome_diag_scan *s = c->s;
+	uint64_t *back = NULL, *set = NULL;
+	uint32_t n_back = 0, n_set = 0, i, j;
+
+	if (c->made_state == 0)
+		made_build(c);
+	if (!c->n_made && c->made_state == 1)
+		return;
+	if (c->made_state == 1 && kgenome_diag_wrapper_charge(c, (uint64_t)(c->n_made +
+			(c->fret ? c->wk->n_tgt : 0)) * sizeof *set)) {
+		set = malloc((size_t)c->n_made * sizeof *set);
+		back = malloc((size_t)(c->wk->n_tgt ? c->wk->n_tgt : 1u) * sizeof *back);
+	}
+	if (set && back) {
+		/* the nodes a function hands back, by site */
+		for (i = 0; c->fret && i < c->wk->n_tgt; i++)
+			if (c->fret[i] && c->fret[i] - 1u < s->n_hit)
+				back[n_back++] = s->hit[c->fret[i] - 1u].at;
+		if (n_back)
+			qsort(back, n_back, sizeof *back, kof_cmp_u64);
+		for (i = 0; i < c->n_made; i++)         /* `made` is sorted, so is `set` */
+			if (!has_u64(back, n_back, c->made[i]))
+				set[n_set++] = c->made[i];
+		for (j = 0; j < s->n_hit; j++)
+			if (has_u64(set, n_set, s->hit[j].at))
+				s->hit[j].bits |= KGENOME_DIAG_H_SUPERSEDED;
+		free(set);
+		free(back);
+		return;
+	}
+	free(set);
+	free(back);
+	for (i = 0; i < c->n_ws; i++) {
+		if (!c->ws[i].node_made || fret_site(c, c->ws[i].site))
+			continue;
+		for (j = 0; j < s->n_hit; j++)
+			if (s->hit[j].at == c->ws[i].site)
+				s->hit[j].bits |= KGENOME_DIAG_H_SUPERSEDED;
+	}
 }
 
 /* The index of a call target, or -1. */
@@ -243,11 +345,12 @@ void kgenome_diag_wrapper_pass_b(struct kgenome_diag_wrapper_ctx *c, unsigned se
 				struct kgenome_diag_wrapper_val ret = kgenome_diag_wrapper_unk;
 
 				if (ws) {
-					uint32_t v, base = (uint32_t)(ws - c->ws);
+					uint32_t v, base = kgenome_diag_wrapper_summary_pos(c, in.target);
 
 					for (v = base; v < c->n_ws &&
-						       c->ws[v].entry == c->ws[base].entry; v++) {
-						struct kgenome_diag_wrapper_val r = emit_call_node(c, &f, &c->ws[v], &in);
+						       kgenome_diag_wrapper_summary_at(c, v)->entry == in.target; v++) {
+						struct kgenome_diag_wrapper_val r = emit_call_node(c, &f,
+							kgenome_diag_wrapper_summary_at(c, v), &in);
 
 						if (r.t != KGENOME_DIAG_WRAPPER_V_UNK && ret.t == KGENOME_DIAG_WRAPPER_V_UNK)
 							ret = r;

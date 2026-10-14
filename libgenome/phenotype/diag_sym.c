@@ -125,18 +125,15 @@ struct relgather {
 
 /* Does this call hand something on that a later one could be holding. */
 
-static void gather(void *user, uint64_t at, uint64_t target, const char *name)
+static void gather(struct relgather *g, const struct kgenome_diag_rcall *rc)
 {
-	struct relgather *g = user;
-	uint16_t cap;
+	uint64_t at = rc->at;
+	uint16_t cap = rc->cap;
 	unsigned i;
 
 	/* An internal call goes to code this object defines; it imports
 	 * nothing and names no capability. */
-	if (target || !name)
-		return;
-	cap = kgenome_nucleo_cap_of_name(name);
-	if (cap == KGENOME_NUCLEO_NONE)
+	if (rc->target || cap == KGENOME_NUCLEO_NONE)
 		return;
 	if (g->n == g->cap_n) {
 		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
@@ -151,7 +148,7 @@ static void gather(void *user, uint64_t at, uint64_t target, const char *name)
 	}
 	g->site[g->n].at = at;
 	g->site[g->n].cap = cap;
-	g->site[g->n].name = kgenome_nucleo_name_id(name);
+	g->site[g->n].name = rc->name;
 	for (i = 0; i < 6u; i++)
 		g->site[g->n].argrole[i] = kgenome_diag_role_of_arg(cap, i);
 	g->n++;
@@ -197,7 +194,6 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	struct relgather g;
 	const struct kgenome_func_set *fg;
 	const struct kgenome_elf_info *ei;
-	kof_buf f;
 	uint32_t i, j;
 
 	/* A PE has an import table and not a relocation table; its half of this
@@ -219,15 +215,19 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	if (!ei || !ei->valid)
 		return;
 
-	f.p = base;
-	f.n = size;
 	memset(&g, 0, sizeof g);
 	/* The object's relocations - one table, read by every route - see
 	 * struct kgenome_elf_relocs. The call sites are the records of it flagged
 	 * `call`, and kgenome_elf_reloc_in answers only for a CODE relocation with
 	 * a name, which is what an operand can stand for. */
 	rt = kgenome_diag_relocs(s, obj, KGENOME_ELF_RELOC_CODE);
-	kgenome_elf_relcalls(f, ei, rt, gather, &g);
+	{
+		uint32_t nrc, k;
+		const struct kgenome_diag_rcall *rc = kgenome_diag_relcalls(s, obj, &nrc);
+
+		for (k = 0; k < nrc; k++)
+			gather(&g, &rc[k]);
+	}
 	sites = g.site;
 	if (g.oom) {
 		s->halt = 1;
@@ -324,6 +324,10 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 			 */
 			if (in.op != KGENOME_CELL_CALL && in.op != KGENOME_CELL_JMP) {
 				kgenome_diag_org_step(&w, &in);
+				if (w.stk_cut) {
+					w.stk_cut = 0;
+					kgenome_diag_note(s, KGENOME_TRUNCATED);
+				}
 				note_symref(&w, rt, &in);
 				continue;
 			}
@@ -388,6 +392,10 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 				}
 			}
 			kgenome_diag_org_step(&w, &in);
+			if (w.stk_cut) {
+				w.stk_cut = 0;
+				kgenome_diag_note(s, KGENOME_TRUNCATED);
+			}
 			/*
 			 * AND WHAT IT HANDS BACK, after the step - which
 			 * clears rax as a call's clobber. The result is the

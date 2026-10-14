@@ -18,6 +18,7 @@
 
 
 #include "objctx_decomp.h"
+#include "../analyzers/parsers/containers/gzip_parse.h"
 #include <stdlib.h>
 
 int oc_inflate_sink(void *user, const uint8_t *p, uint32_t n)
@@ -55,10 +56,118 @@ void oc_stream_note(struct kof_scanner *sc, enum kuncoat_status st,
 {
 	if (st != KUNCOAT_OK &&
 	    !(st == KUNCOAT_TRUNCATED && (ordinary & STREAM_PARTIAL)) &&
-	    !(st == KUNCOAT_STOPPED && (ordinary & STREAM_FILLED)))
-		oc_scan_broken(sc, oc_broken_of_status(st));
-	else if (snk->left == 0)
-		oc_scan_broken(sc, KOF_BROKEN_LIMIT);
+	    !(st == KUNCOAT_STOPPED && (ordinary & STREAM_FILLED))) {
+		/*
+		 * STOPPED is the sink saying no, and what the sink says no to is
+		 * decided where it says it: the tree's budget and memory stop the
+		 * walk at oc_emit (sticky), the entry's own object cap cuts the
+		 * entry (oc_entry_cut_close). Making it sticky HERE again would turn
+		 * every entry that hit its own bound back into the end of the walk.
+		 */
+		if (st == KUNCOAT_STOPPED)
+			oc_entry_cut(sc);
+		else
+			oc_scan_broken(sc, oc_broken_of_status(st));
+	} else if (snk->left == 0) {
+		/* The declared-ratio clamp: one stream's own header, said on that entry. */
+		oc_entry_cut(sc);
+	}
+}
+
+/*
+ * IS THIS DEFLATE CALL THE FIRST STREAM OF A GZIP FILE.
+ *
+ * The gzip module asks for the stream at the parse's data_off, and nothing else
+ * in the tree names that offset of a gzip object, so the pair (format, offset)
+ * is what says "a member of a gzip file" without the module having to.
+ */
+static int oc_is_gzip_first(const struct kof_obj_ctx *ctx, uint64_t off)
+{
+	const struct kof_gzip_info *g;
+
+	if (ctx->format != KOF_FMT_GZIP || !ctx->file_header)
+		return 0;
+	g = kof_gzip(ctx);
+	return g->valid && g->method == KOF_GZIP_DEFLATE && g->data_off == off;
+}
+
+/*
+ * ONE DEFLATE STREAM, OR EVERY MEMBER OF A GZIP FILE.
+ *
+ * RFC 1952 section 2.2 lets a gzip file be several members one after another and
+ * `gzip -dc` writes all their outputs as one stream. This decoded the first and
+ * stopped at its end-of-stream marker, so a payload in the second member was
+ * never opened and nothing said so: an evasion that cost the attacker one
+ * `cat a.gz b.gz`. Every member's output now continues the SAME object, charged
+ * to the same sink, so the object cap, the produced-bytes budget and the memory
+ * ceiling bound the lot, and one more than they allow is reported as LIMIT by
+ * the usual route (the sink refuses, the decoder answers STOPPED).
+ *
+ * WHAT ENDS IT, each of which says why unless it is the ordinary end:
+ *   - the last member ends exactly at the object's end: nothing to say.
+ *   - the stream is cut, corrupt or refused: oc_stream_note reports it, and what
+ *     was produced before stays real output.
+ *   - the trailer (eight bytes) or the next member's header is cut short: DAMAGED.
+ *   - bytes follow a member and are not a gzip header: gzip tools decode what
+ *     came before and warn "trailing garbage ignored"; this does the same and
+ *     reports DAMAGED, so appended data is a visible fact about the file and not
+ *     a silent one. Bytes that are ALL ZERO are tape padding, which gzip also
+ *     tolerates, and carry nothing to look at: not reported.
+ *
+ * Every step moves `off` forward by at least a header and a trailer (18 bytes),
+ * so the loop is bounded by the object's size and not by anything it states.
+ * The CRC and ISIZE of a trailer are not checked, as before: a mismatch is a
+ * property of the container and the bytes were decoded either way.
+ */
+static uint64_t oc_inflate_members(struct kof_scanner *sc,
+				   const struct kof_obj_ctx *ctx, kof_buf b,
+				   uint64_t off, uint64_t len,
+				   uint64_t out_hint, int members)
+{
+	struct expand_sink e;
+	uint64_t produced = 0;
+
+	e.ctx = ctx;
+	e.left = expand_limit(len, out_hint);
+	for (;;) {
+		struct kuncoat_io io = {
+			.in = { b.p + off, len },
+			.sink = oc_expand_sink_fn, .user = &e,
+		};
+		enum kuncoat_status st = kuncoat_inflate(sc->cache.inf, &io);
+		struct kof_gzip_info g;
+		kof_buf rest;
+		uint64_t p, i;
+
+		produced += io.produced;
+		oc_stream_note(sc, st, STREAM_STRICT, &e);
+		if (!members || st != KUNCOAT_OK || e.left == 0)
+			break;
+		p = off + io.consumed;
+		if (b.n - p < 8u) {             /* the trailer is cut short */
+			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
+			break;
+		}
+		p += 8u;
+		if (p >= b.n)
+			break;
+		rest = kof_buf_make(b.p + p, b.n - p);
+		if (!kof_gzip_sniff(rest)) {
+			for (i = 0; i < rest.n && !rest.p[i]; i++)
+				;
+			if (i < rest.n)
+				oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
+			break;
+		}
+		kof_gzip_header(rest, &g);
+		if (g.data_off >= rest.n) {     /* a header with no stream behind it */
+			oc_scan_broken(sc, KOF_BROKEN_DAMAGED);
+			break;
+		}
+		off = p + g.data_off;
+		len = b.n - off;
+	}
+	return produced;
 }
 
 uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
@@ -67,10 +176,11 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	kof_buf b;
 	uint64_t produced = 0;
-	int variant, bits;
+	int variant, bits, members;
 
 	if (!sc->cur.src)
 		return 0;
+	oc_entry_begin(sc);             /* a decode is an entry: the last one's cut is over */
 	b = kof_src_buf(sc->cur.src);
 	/*
 	 * Clipped to what the object holds, not refused.
@@ -84,6 +194,7 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 	len = kof_clip_len(b.n, off, len);
 	if (!len)
 		return 0;
+	members = method == KOF_UNP_DEFLATE && oc_is_gzip_first(ctx, off);
 
 	/*
 	 * ZLIB IS DEFLATE WITH TWO BYTES IN FRONT, so it is answered by moving
@@ -115,21 +226,8 @@ uint64_t oc_unpack(const struct kof_obj_ctx *ctx, uint32_t method,
 		 * the last block is missing throws away the part that identifies
 		 * it. It is recorded as an incomplete examination, not a clean one.
 		 */
-		{
-			struct expand_sink e;
-			enum kuncoat_status st;
-
-			struct kuncoat_io io = {
-				.in = { b.p + off, len },
-				.sink = oc_expand_sink_fn, .user = &e,
-			};
-
-			e.ctx = ctx;
-			e.left = expand_limit(len, out_hint);
-			st = kuncoat_inflate(sc->cache.inf, &io);
-			produced = io.produced;
-			oc_stream_note(sc, st, STREAM_STRICT, &e);
-		}
+		produced = oc_inflate_members(sc, ctx, b, off, len, out_hint,
+					      members);
 		return produced;
 	}
 

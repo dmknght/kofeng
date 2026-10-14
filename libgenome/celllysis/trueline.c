@@ -322,16 +322,15 @@ static void marker_span(const uint8_t *p, uint64_t n, uint64_t base,
 static int reserved_name(const char *s, uint64_t n);
 
 /* The same test applied to a name still in the string table. */
-static int sym_reserved(kof_buf file, const struct kgenome_elf_sec *str,
-			uint32_t nm)
+static int sym_reserved(kof_buf file, const struct kgenome_elf_symtab *t, uint32_t nm)
 {
 	const char *s;
 	uint64_t room, len = 0;
 
-	if (!nm || nm >= str->file_size)
+	if (!nm || nm >= t->strn)
 		return 0;
-	s = (const char *)file.p + str->file_off + nm;
-	room = str->file_size - nm;
+	s = (const char *)file.p + t->str + nm;
+	room = t->strn - nm;
 	while (len < room && s[len])
 		len++;
 	return reserved_name(s, len);
@@ -445,17 +444,6 @@ static int hits_marker(const struct kof_rlist *l, uint32_t n,
  */
 #define GRP_MAX 4096u
 
-static const struct kgenome_elf_sec *sec_named(const struct kgenome_elf_info *e,
-					   const char *name)
-{
-	uint32_t i;
-
-	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++)
-		if (!strcmp(e->sec[i].name, name))
-			return &e->sec[i];
-	return NULL;
-}
-
 /* The same, for a FILE offset, which is what the span lists hold. */
 static uint32_t sec_at_off(const struct kgenome_elf_info *e, uint64_t off)
 {
@@ -549,16 +537,15 @@ static void symbol_spans(kof_buf file, const struct kgenome_elf_info *e,
 			 struct kof_rlist *l, struct kof_rlist *mine)
 {
 	struct kgenome_elf_symtab t;
-	const struct kgenome_elf_sec *str;
 	uint8_t grp_lib[GRP_MAX / 8u];
 	uint64_t si;
 	uint32_t pass, n_mark = l->n;
 
-	str = sec_named(e, ".strtab");
-	/* Stripped: the markers are all there is. */
-	if (!str || !kgenome_elf_symtab_of(file, e, KGENOME_ELF_SYMTAB_FULL, &t) || !t.n)
+	/* Stripped: the markers are all there is. The strings are the ones the symbol
+	 * table's sh_link names (kgenome_elf_symtab_of), not a section called ".strtab". */
+	if (!kgenome_elf_symtab_of(file, e, KGENOME_ELF_SYMTAB_FULL, &t) || !t.n || !t.strn)
 		return;
-	if (str->file_off >= file.n || str->file_size > file.n - str->file_off)
+	if (t.str >= file.n || t.strn > file.n - t.str)
 		return;
 
 	memset(grp_lib, 0, sizeof grp_lib);
@@ -608,7 +595,7 @@ static void symbol_spans(kof_buf file, const struct kgenome_elf_info *e,
 					continue;   /* it convicts no group */
 				if (!sy.shndx)
 					continue;   /* referenced, not written */
-				lib = sym_reserved(file, str, nm);
+				lib = sym_reserved(file, &t, nm);
 				/*
 				 * OR IT SITS IN WHAT THE MARKERS ALREADY PROVED.
 				 *
@@ -646,7 +633,7 @@ static void symbol_spans(kof_buf file, const struct kgenome_elf_info *e,
 							   hi - lo);
 					continue;
 				}
-			} else if (!sym_reserved(file, str, nm)) {
+			} else if (!sym_reserved(file, &t, nm)) {
 				/*
 				 * A global has no group, so its own name is the
 				 * only thing that can speak for it - and when
@@ -701,11 +688,42 @@ int kgenome_true_touches(const struct kgenome_true_all *lib, uint64_t off, uint6
 
 	if (!lib || !lib->n || !len)
 		return 0;
+	if (lib->sorted) {
+		/*
+		 * A SORTED LIST HAS ONE SPAN THAT CAN ANSWER: the last one that starts before
+		 * off + len. Every span before it starts before off + len as well, and their
+		 * ends do not decrease, so if any of them ends after `off` this one does.
+		 * The test is the loop's own, term for term (the same wrap rule), so the answer is.
+		 */
+		uint32_t lo = 0, hi = lib->n;
+
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2u;
+			uint64_t a = lib->span[mid].off;
+
+			if (a <= off || a - off < len)
+				lo = mid + 1u;
+			else
+				hi = mid;
+		}
+		if (!lo)
+			return 0;
+		{
+			uint64_t a = lib->span[lo - 1u].off;
+			uint64_t b = a + lib->span[lo - 1u].len;
+
+			if (b < a)
+				b = UINT64_MAX;
+			return off < b;
+		}
+	}
 	for (i = 0; i < lib->n; i++) {
 		uint64_t a = lib->span[i].off;
 		uint64_t b = a + lib->span[i].len;
 
-		if (off < b && a < off + len)
+		if (b < a)
+			b = UINT64_MAX;         /* a span that ends past the address space */
+		if (off < b && (a <= off || a - off < len))     /* a < off + len, without the wrap */
 			return 1;
 	}
 	return 0;
@@ -761,6 +779,7 @@ static void lib_find_tiered(kof_buf file, const struct kgenome_elf_info *e,
 	if (!out)
 		return;
 	memset(out, 0, sizeof *out);
+	out->sorted = 1;        /* empty, then the marker spans (normalised), then the list below (normalised) */
 	if (with_markers) {
 		struct kgenome_true_result marks;
 

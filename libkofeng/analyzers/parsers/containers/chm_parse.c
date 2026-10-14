@@ -25,6 +25,7 @@
 
 #include "chm_parse.h"
 #include "../../../kofcore/rangelist.h"
+#include "../../../kofcore/tabgrow.h"
 #include "../../../kofcore/entryname.h"
 
 #define CHM_ITSF_MIN   0x60u     /* through the v3 content offset */
@@ -34,6 +35,18 @@
 #define CHM_CHUNK_MAX  0x10000u
 #define CHM_RESET_MIN  0x28u     /* the reset table header, through block size */
 #define CHM_FRAME      0x8000u   /* what the block size is when it is not said */
+
+/*
+ * The parse's own state: the view, and what its tables hold room for. The tables are the view's
+ * (`entry`, `split`, `run`) and grow one row at a time against its account; `ent_limit` and
+ * `run_limit` are what the FILE can hold, which no row count the file states can raise.
+ */
+struct chw {
+	struct kof_chm_info *c;
+	uint32_t cap_entry, cap_split, cap_run;
+	uint64_t ent_limit, run_limit;
+	int stop;                /* a table could not grow: the walk of the directory ends */
+};
 
 /* ---- the variable length integer the directory is written in ----------------
  *
@@ -118,7 +131,7 @@ static uint32_t chm_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		cl.n = chm_resolve_scan(ctx, KOF_SCAN_CHM_CLAIMED, cv, cl.cap);
 		kof_rl_complement(&l, &cl, ctx->obj_size);
 	}
-	return kof_rl_normalise(&l);
+	return kof_rl_finish(&l);
 }
 
 static uint32_t chm_entries(const struct kof_obj_ctx *ctx,
@@ -201,8 +214,6 @@ static int chm_traversal(kof_buf f, uint64_t off, uint64_t len)
 {
 	uint8_t b;
 
-	if (len > KOF_CHM_MAX_NAME)
-		len = KOF_CHM_MAX_NAME;
 	if (len && kof_rd_u8(f, off, &b) && b == '/') {
 		off++;
 		len--;
@@ -260,17 +271,51 @@ static void chm_note_special(kof_buf f, struct kof_chm_info *c, uint64_t name_at
  * into it decodes the quickref's offsets as if they were entries. Stated here
  * because the failure is quiet - it produces entries with plausible numbers.
  */
-static void chm_chunk(kof_buf f, struct kof_chm_info *c, uint64_t at,
-		      uint64_t end)
+/* One more row of the entry table and of the `split` row beside it (zeroed: a plain range has no
+ * pieces), or 0 and both are as they were - the walk of the directory ends and says so. */
+static int chm_row(struct chw *w)
 {
-	while (at < end && c->n_entries < KOF_CHM_MAX_ENTRIES) {
+	struct kof_chm_info *c = w->c;
+
+	if (c->n_entries >= w->cap_entry) {
+		void *t = c->entry;
+
+		if (!kof_tab_grow(&c->mem, &t, &w->cap_entry, sizeof *c->entry,
+				  (uint64_t)c->n_entries + 1u, w->ent_limit))
+			goto full;
+		c->entry = (struct kof_entry *)t;
+	}
+	if (c->n_entries >= w->cap_split) {
+		void *t = c->split;
+
+		if (!kof_tab_grow(&c->mem, &t, &w->cap_split, sizeof *c->split,
+				  (uint64_t)c->n_entries + 1u, w->ent_limit))
+			goto full;
+		c->split = (struct kof_chm_split *)t;
+	}
+	c->split[c->n_entries].first_run = 0;
+	c->split[c->n_entries].n_run = 0;
+	return 1;
+full:
+	c->anomalies |= KOF_CHM_ANOM_ENTRIES_FULL;
+	w->stop = 1;
+	return 0;
+}
+
+static void chm_chunk(kof_buf f, struct chw *w, uint64_t at, uint64_t end)
+{
+	struct kof_chm_info *c = w->c;
+
+	while (at < end) {
 		uint64_t name_len = 0, sect = 0, off = 0, len = 0, name_at;
 		struct kof_entry *e;
 
 		if (!chm_encint(f, &at, end, &name_len))
 			return;
-		if (!name_len || name_len > KOF_CHM_MAX_NAME ||
-		    at + name_len > end)
+		/* NO BOUND ON A NAME BUT THE CHUNK THAT HOLDS IT: a name that ran to the end of the
+		 * chunk is not one (the check below), and one that fits is recorded as the range it is
+		 * - the host decides how long a name may be, and never cuts one. */
+		if (!name_len || at + name_len > end)
 			return;
 		name_at = at;
 		at += name_len;
@@ -313,6 +358,8 @@ static void chm_chunk(kof_buf f, struct kof_chm_info *c, uint64_t at,
 		 */
 		if (sect != 0) {
 			c->n_compressed++;
+			if (!chm_row(w))
+				return;
 			e = &c->entry[c->n_entries];
 			memset(e, 0, sizeof *e);
 			e->index    = c->n_entries;
@@ -327,6 +374,8 @@ static void chm_chunk(kof_buf f, struct kof_chm_info *c, uint64_t at,
 			continue;
 		}
 
+		if (!chm_row(w))
+			return;
 		e = &c->entry[c->n_entries];
 		memset(e, 0, sizeof *e);
 		e->index    = c->n_entries;
@@ -345,8 +394,6 @@ static void chm_chunk(kof_buf f, struct kof_chm_info *c, uint64_t at,
 		}
 		c->n_entries++;
 	}
-	if (c->n_entries == KOF_CHM_MAX_ENTRIES)
-		c->anomalies |= KOF_CHM_ANOM_ENTRIES_FULL;
 }
 
 /*
@@ -368,8 +415,30 @@ static void chm_chunk(kof_buf f, struct kof_chm_info *c, uint64_t at,
  * start and how large a frame is are all written in the file, and the loop
  * below multiplies and divides by them.
  */
-static void chm_place_coded(kof_buf f, struct kof_chm_info *c)
+/* One more piece in the pool, or 0 and the pool is as it was (ENTRIES_FULL says so). */
+static int chm_piece(struct chw *w, uint64_t off, uint64_t len)
 {
+	struct kof_chm_info *c = w->c;
+
+	if (c->n_runs >= w->cap_run) {
+		void *t = c->run;
+
+		if (!kof_tab_grow(&c->mem, &t, &w->cap_run, sizeof *c->run,
+				  (uint64_t)c->n_runs + 1u, w->run_limit)) {
+			c->anomalies |= KOF_CHM_ANOM_ENTRIES_FULL;
+			return 0;
+		}
+		c->run = (struct kof_chm_run *)t;
+	}
+	c->run[c->n_runs].off = off;
+	c->run[c->n_runs].len = len;
+	c->n_runs++;
+	return 1;
+}
+
+static void chm_place_coded(kof_buf f, struct chw *w)
+{
+	struct kof_chm_info *c = w->c;
 	uint64_t tab;
 	uint32_t n = 0, esz = 0, toff = 0, i;
 
@@ -399,6 +468,11 @@ static void chm_place_coded(kof_buf f, struct kof_chm_info *c)
 		n = 0;
 	}
 	c->n_reset = n;
+	/* The pieces: one per reset interval an entry spans, and the rows of the reset table say how
+	 * many intervals there are. Entries that do not overlap place about one piece a row; twice
+	 * the rows, and a piece for each entry, is the most a file that is not built to cost more
+	 * ever needs, and the bound on one that is. */
+	w->run_limit = 2u * (uint64_t)n + 2u * (uint64_t)c->n_entries + 64u;
 
 	for (i = 0; i < c->n_entries; i++) {
 		struct kof_entry *e = &c->entry[i];
@@ -473,12 +547,8 @@ static void chm_place_coded(kof_buf f, struct kof_chm_info *c)
 				cend = c->lzx_len;
 			if (cend <= coff)
 				break;
-			if (runs >= KOF_CHM_MAX_ENT_RUNS ||
-			    c->n_runs >= KOF_CHM_MAX_RUNS)
+			if (!chm_piece(w, c->lzx_off + coff, cend - coff))
 				break;
-			c->run[c->n_runs].off = c->lzx_off + coff;
-			c->run[c->n_runs].len = cend - coff;
-			c->n_runs++;
 			runs++;
 			want = want > per ? want - per : 0;
 		}
@@ -516,13 +586,34 @@ int kof_chm_sniff(kof_buf file)
 	return v == 2u || v == 3u;
 }
 
+void kof_chm_release(struct kof_chm_info *c)
+{
+	kof_tab_free((void **)&c->entry);
+	kof_tab_free((void **)&c->run);
+	kof_tab_free((void **)&c->split);
+	c->n_entries = 0;
+	c->n_runs = 0;
+	c->mem.held = 0;
+	c->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(chm, struct kof_chm_info, entry, n_entries)
+
 int kof_chm_parse(kof_buf file, struct kof_chm_info *c, struct kof_obj_ctx *ctx)
 {
-	uint64_t s1_off = 0, s1_len = 0, at, end;
+	uint64_t s1_off = 0, s1_len = 0, at, end, room;
 	uint32_t hdr_len = 0, itsp_len = 0, i;
+	struct chw w;
 
+	/* The whole view is cleared (it is small); what the last parse left is let go first and
+	 * the caller's room is put back - zip_parse.c says why. */
+	room = c->mem.room;
+	kof_chm_release(c);
 	memset(c, 0, sizeof *c);
+	c->mem.room = room;
 	c->version = KOF_CHM_INFO_VERSION;
+	memset(&w, 0, sizeof w);
+	w.c = c;
 
 	if (!kof_in_range(file, 0, 8) || memcmp(file.p, "ITSF", 4) != 0)
 		return 0;
@@ -585,16 +676,18 @@ int kof_chm_parse(kof_buf file, struct kof_chm_info *c, struct kof_obj_ctx *ctx)
 		goto done;
 	}
 	{
-		uint64_t room = (file.n - c->dir_off) / c->chunk_size;
+		uint64_t fit = (file.n - c->dir_off) / c->chunk_size;
 
-		if ((uint64_t)c->n_chunks > room) {
+		if ((uint64_t)c->n_chunks > fit) {
 			c->anomalies |= KOF_CHM_ANOM_TRUNCATED;
-			c->n_chunks = (uint32_t)room;
+			c->n_chunks = (uint32_t)fit;
 		}
 	}
 	c->dir_len = (uint64_t)c->n_chunks * c->chunk_size;
+	/* What the FILE can hold: an entry is at least KOF_CHM_ENTRY_MIN bytes of the directory. */
+	w.ent_limit = c->dir_len / KOF_CHM_ENTRY_MIN + 1u;
 
-	for (i = 0; i < c->n_chunks && c->n_entries < KOF_CHM_MAX_ENTRIES; i++) {
+	for (i = 0; i < c->n_chunks && !w.stop; i++) {
 		uint64_t base = c->dir_off + (uint64_t)i * c->chunk_size;
 		uint32_t free_space = 0;
 
@@ -619,7 +712,7 @@ int kof_chm_parse(kof_buf file, struct kof_chm_info *c, struct kof_obj_ctx *ctx)
 			end = at;
 		if (end > file.n)
 			end = file.n;
-		chm_chunk(file, c, at, end);
+		chm_chunk(file, &w, at, end);
 	}
 
 	/*
@@ -659,9 +752,10 @@ int kof_chm_parse(kof_buf file, struct kof_chm_info *c, struct kof_obj_ctx *ctx)
 	/* The entries in the coded section are still holding decoded offsets -
 	 * turn those into restart points now that all three describing entries
 	 * have been seen. */
-	chm_place_coded(file, c);
+	chm_place_coded(file, &w);
 
 done:
+	c->mem.rows = c->n_entries;
 	ctx->format = KOF_FMT_CHM;
 	ctx->obj_size = file.n;
 	ctx->file_header = c;

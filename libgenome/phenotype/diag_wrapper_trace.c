@@ -31,7 +31,8 @@ void kgenome_diag_wrapper_trace_get(struct kgenome_diag_wrapper_reader *r, struc
 
 	w->op = p[2];
 	w->len = p[3];
-	w->flags = p[4];
+	w->flags = p[4] & 0x0fu;
+	w->cond = (uint8_t)(p[4] >> 4);
 	w->wmask = kof_ld_le16(p + 5);
 	if (ctl & KGENOME_DIAG_WRAPPER_TRACE_HAS_AT) {
 		uint32_t a;
@@ -126,12 +127,12 @@ int kgenome_diag_wrapper_trace_lower(const struct kgenome_diag_walk *wk, const s
 }
 
 /* The record the trace of segment `g` holds AT `off`, if it holds one. */
-static int trace_find(const struct kgenome_diag_wrapper_ctx *c, const struct kgenome_diag_wrapper_seg *g, uint64_t off,
+static int trace_find(const struct kgenome_diag_walk *wk, const struct kgenome_diag_wrapper_seg *g, uint64_t off,
 		      struct kgenome_diag_wrapper_reader *r)
 {
 	struct kgenome_diag_wrapper_reader t;
 
-	if (off < g->lo || off >= g->hi || !kgenome_diag_wrapper_trace_lower(c->wk, g, off, &t) ||
+	if (off < g->lo || off >= g->hi || !kgenome_diag_wrapper_trace_lower(wk, g, off, &t) ||
 	    t.at != off)
 		return 0;
 	*r = t;
@@ -164,7 +165,7 @@ void kgenome_diag_wrapper_isrc_seek(struct kgenome_diag_wrapper_isrc *it, uint64
 	it->kat = 0;
 	it->rend = NULL;
 	for (i = 0; i < KGENOME_ELF_MAX_SEGMENTS; i++)
-		if (trace_find(c, &c->wk->tseg[i], off, &it->rd)) {
+		if (trace_find(c->wk, &c->wk->tseg[i], off, &it->rd)) {
 			it->rend = c->wk->tr + c->wk->tseg[i].end;
 			return;
 		}
@@ -217,4 +218,86 @@ int kgenome_diag_wrapper_isrc_next(struct kgenome_diag_wrapper_isrc *it, struct 
 		it->k.at++;                     /* data in the code: step over it */
 		it->at = it->k.at;
 	}
+}
+
+/*
+ * ---- THE TRACE AS THE DECODE SOURCE OF A CURSOR -----------------------------------
+ *
+ * The sweep (diag_sweep.c) reads windows of code through a celllysis cursor and used to
+ * decode every instruction of them, though the walk had decoded and kept the same offsets:
+ * MEASURED over 254 static ELF, 3.85 M of the 5.08 M decodes the sweep made were offsets
+ * the walk held. A cursor given this as its space's `held` answers from the record at the
+ * offset it is asked for, and from the decoder when there is none - a window that starts
+ * out of step with the walk's alignment, bytes that did not decode, a trace cut at its cap.
+ * Nothing is read that decoding would not have returned: the record must be AT the offset, and
+ * what is not in it (the address, the branch target computed from it) is made from the address
+ * the cursor gives the offset, field for field as decode_x86.c makes it - the bytes are the
+ * same under any load address, and the address is not part of what was decoded.
+ * (tests/lib/genome/decode_held.c compares every offset of real code and of random bytes.)
+ *
+ * The cost of an answer is one record read (trace_get, ~125 Ir) and the fill (~140 Ir),
+ * against ~420 Ir for the decode and its translation: MEASURED on a 5.9 MB static ELF, 225 k
+ * sweep decodes, of which all but about a hundred were answered from the trace. `h_p` is the
+ * record after the last answer, so reading on in order costs no search; any other offset is
+ * found through the index. A sweep that runs BEFORE the walk exists (an object whose functions
+ * came from its symbols, so nothing made the walk first) decodes, and the walk the wrapper
+ * resolution makes after it decodes the same offsets once more: 1.22 M of the 55 M decodes of
+ * 254 static ELF, left because the sweep cannot tell before it runs whether a wrapper
+ * resolution will follow, and a walk made for nothing costs the whole text.
+ */
+static uint32_t walk_held(void *priv, uint64_t off, uint64_t va, uint32_t left, struct kgenome_cell_insn *out)
+{
+	struct kgenome_diag_walk *wk = priv;
+	struct kgenome_diag_wrapper_reader t;
+	struct kgenome_diag_wrapper_insn w;
+	unsigned i;
+
+	wk->h_asked++;
+	if (wk->h_p && wk->h_p < wk->h_end && wk->h_at == off) {
+		t.p = wk->h_p;
+		t.at = wk->h_at;
+		t.delta = wk->h_delta;
+	} else {
+		for (i = 0; i < KGENOME_ELF_MAX_SEGMENTS; i++) {
+			if (trace_find(wk, &wk->tseg[i], off, &t)) {
+				wk->h_end = wk->tr + wk->tseg[i].end;
+				break;
+			}
+		}
+		if (i == KGENOME_ELF_MAX_SEGMENTS) {
+			wk->h_p = NULL;
+			return 0;
+		}
+	}
+	kgenome_diag_wrapper_trace_get(&t, &w);
+	if (w.at != off || w.len > left)
+		return 0;
+	wk->h_p = t.p;
+	wk->h_at = t.at;
+	wk->h_delta = t.delta;
+	/* The address is the cursor's, not the record's: the bytes decode the same under any load address
+	 * and what depends on it (the branch target) is made from the one the cursor gives. */
+	w.at_va = va;
+	kgenome_diag_wrapper_cinsn(out, &w);
+	out->at = va;                   /* as the decoder leaves it; cell_fetch sets the offset */
+	out->target = out->target_va;   /* likewise: an address until cell_fetch makes it an offset */
+	wk->h_served++;
+	return w.len;
+}
+
+int kgenome_diag_walk_hold(struct kgenome_cell_space *sp, struct kgenome_diag_walk *wk)
+{
+	if (!wk || !wk->built || !wk->has_trace || !wk->tr || wk->base != sp->base || wk->size != sp->size ||
+	    wk->arch != sp->arch || (sp->arch != KGENOME_ARCH_X86 && sp->arch != KGENOME_ARCH_X86_64))
+		return 0;
+	sp->held = walk_held;
+	sp->held_priv = wk;
+	return 1;
+}
+
+uint64_t kgenome_diag_walk_held_count(const struct kgenome_diag_walk *wk, uint64_t *asked)
+{
+	if (asked)
+		*asked = wk ? wk->h_asked : 0;
+	return wk ? wk->h_served : 0;
 }

@@ -110,7 +110,7 @@ static uint32_t elf_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		c.n = elf_resolve_scan(ctx, KGENOME_SCAN_ELF_CLAIMED, cv, c.cap);
 		kof_rl_complement(&l, &c, ctx->obj_size);
 	}
-	return kof_rl_normalise(&l);
+	return kof_rl_finish(&l);
 }
 
 /*

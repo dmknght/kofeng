@@ -579,7 +579,7 @@ int main(void)
 		"samples"
 	};
 	static const char *db = "build/release/databases";
-	struct kof_chm_info *c = malloc(sizeof *c);
+	struct kof_chm_info *c = calloc(1, sizeof *c);   /* zeroed: a view that owns tables starts so */
 	struct kuncoat_lzx *lz = malloc(sizeof *lz);
 	struct kof_engine *eng;
 	size_t d;
@@ -589,6 +589,8 @@ int main(void)
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	if (!c || !lz) {
+		if (c)
+		kof_chm_release(c);
 		free(c);
 		free(lz);
 		printf("lzx chm: out of memory\n");
@@ -625,6 +627,8 @@ int main(void)
 
 	if (eng)
 		keng_close(eng);
+	if (c)
+		kof_chm_release(c);
 	free(c);
 	free(lz);
 

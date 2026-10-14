@@ -265,6 +265,26 @@ static void mentions(void)
 	free(d);
 }
 
+/* A declaration after column 2047 of its line is read, and the newlines the condition
+ * parse needs are still there afterwards. The reader copied each line into 2048 bytes. */
+static void long_line(void)
+{
+	static const char decl[] = "KOF_DIAG_NAME(DIAG_T);\nKOF_DIAG_DECLARE_HEAD(KOF_NUCLEO_NET_OPEN, 0);\n";
+	size_t pad = 70000, n = pad + sizeof decl - 1u;
+	char *t = malloc(pad + sizeof decl);
+	struct kof_dsrc *d = calloc(1, sizeof *d);
+
+	CHECK(t && d, "out of memory");
+	if (t && d) {
+		memset(t, ' ', pad);
+		memcpy(t + pad, decl, sizeof decl - 1u);
+		/* the name declaration itself starts at column 70000 */
+		CHECK(kof_dsrc_parse(t, n, d, NULL) == 0 && d->n == 2, "declarations after 70000 blanks: %u read", d->n);
+	}
+	free(t);
+	free(d);
+}
+
 /* ---- a verdict that reads diagnoses ------------------------------------------- */
 
 static const char vsrc[] =
@@ -494,6 +514,76 @@ static void disease(void)
 	}
 }
 
+/*
+ * THE LIMITS OF A VERDICT'S CONDITION, at exactly their size: KOF_DSRC_MAX_TERM terms are read and one more is
+ * refused with a reason; a term of KOF_DSRC_MAX_STR strings is read and a ninth is refused; a string of
+ * KOF_DSRC_STR_LEN - 1 bytes is read and one more is refused; a name of KOF_DSRC_NAME_LEN - 1 bytes is read.
+ * A limit that refuses is stated, never a quiet cut: the parse fails and the source is not read at all.
+ */
+static void cond_limits(void)
+{
+	static char csrc[8192];
+	struct kof_dsrc *d = calloc(1, sizeof *d);
+	unsigned nt, ns, at;
+	char big[KOF_DSRC_STR_LEN + 8u];
+
+	CHECK(d != NULL, "memory");
+	if (!d)
+		return;
+	for (nt = KOF_DSRC_MAX_TERM - 1u; nt <= KOF_DSRC_MAX_TERM + 1u; nt++) {
+		unsigned k;
+
+		at = (unsigned)snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (");
+		for (k = 0; k < nt; k++)
+			at += (unsigned)snprintf(csrc + at, sizeof csrc - at, "%skof_diag(DIAG_T%u)", k ? " && " : "", k);
+		snprintf(csrc + at, sizeof csrc - at, ")\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n");
+		memset(d, 0, sizeof *d);
+		if (nt <= KOF_DSRC_MAX_TERM)
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && d->has_cond && d->cond.n == nt,
+			      "%u terms are read (KOF_DSRC_MAX_TERM is %u): n=%u", nt, KOF_DSRC_MAX_TERM, d->cond.n);
+		else
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0 && !d->has_cond,
+			      "%u terms are refused, and the condition is not taken as read", nt);
+	}
+	for (ns = KOF_DSRC_MAX_STR - 1u; ns <= KOF_DSRC_MAX_STR + 1u; ns++) {
+		unsigned k;
+
+		at = (unsigned)snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag_str_any(DIAG_S");
+		for (k = 0; k < ns; k++)
+			at += (unsigned)snprintf(csrc + at, sizeof csrc - at, ", \"s%u\"", k);
+		snprintf(csrc + at, sizeof csrc - at, "))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n");
+		memset(d, 0, sizeof *d);
+		if (ns <= KOF_DSRC_MAX_STR)
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && d->has_cond && d->cond.t[0].n_str == ns,
+			      "%u strings are read (KOF_DSRC_MAX_STR is %u)", ns, KOF_DSRC_MAX_STR);
+		else
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0 && !d->has_cond, "%u strings are refused", ns);
+	}
+	for (ns = KOF_DSRC_STR_LEN - 1u; ns <= KOF_DSRC_STR_LEN; ns++) {
+		memset(big, 'x', ns);
+		big[ns] = 0;
+		snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag_str_any(DIAG_S, \"%s\"))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n", big);
+		memset(d, 0, sizeof *d);
+		if (ns < KOF_DSRC_STR_LEN)
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && strlen(d->cond.t[0].str[0]) == ns, "a string of %u bytes is read (KOF_DSRC_STR_LEN is %u)", ns, KOF_DSRC_STR_LEN);
+		else
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0, "a string of %u bytes is refused", ns);
+	}
+	for (ns = KOF_DSRC_NAME_LEN - 1u; ns <= KOF_DSRC_NAME_LEN; ns++) {
+		char nm[KOF_DSRC_NAME_LEN + 8u];
+
+		memset(nm, 'N', ns);
+		nm[ns] = 0;
+		snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag(%s))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n", nm);
+		memset(d, 0, sizeof *d);
+		if (ns < KOF_DSRC_NAME_LEN)
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && strlen(d->cond.t[0].a) == ns, "a name of %u bytes is read (KOF_DSRC_NAME_LEN is %u)", ns, KOF_DSRC_NAME_LEN);
+		else
+			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0 && !d->has_cond, "a name of %u bytes is refused, not cut", ns);
+	}
+	free(d);
+}
+
 int main(void)
 {
 	static const char *const dirs[] = { "bases/diagnoses", "tests/sigs/diagnoses" };
@@ -502,8 +592,10 @@ int main(void)
 	tables();
 	disease();
 	mentions();
+	long_line();
 	edits();
 	verdicts();
+	cond_limits();
 	for (k = 0; k < sizeof dirs / sizeof dirs[0]; k++) {
 		DIR *dir = opendir(dirs[k]);
 		struct dirent *de;

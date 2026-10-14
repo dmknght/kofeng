@@ -258,10 +258,21 @@ int kof_dsrc_arg(const char *p, int i, char *out, size_t cap)
 	 */
 	while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
 		q++;
-	while (*q && *q != ',' && *q != ')' && (size_t)n + 1 < cap) {
+	/*
+	 * THE ARGUMENT ENDS AT THE ',' OR ')' OF ITS OWN DEPTH. The condition used to
+	 * stop at the first ',' or ')' whatever the depth, so the depth counting inside
+	 * the loop never ran and `f(x)` came back as `f(x`. An argument that does not fit
+	 * `cap` is REFUSED (0), not cut: two names that agree for cap-1 bytes were one
+	 * name, and the caller's "wants ..." error is what reports it.
+	 */
+	depth = 0;
+	for (; *q; q++) {
 		if (*q == '(') depth++;
-		if (*q == ')') { if (!depth) break; depth--; }
-		out[n++] = *q++;
+		else if (*q == ')') { if (!depth) break; depth--; }
+		else if (*q == ',' && !depth) break;
+		if ((size_t)n + 1 >= cap)
+			return 0;
+		out[n++] = *q;
 	}
 	while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t' ||
 			 out[n - 1] == '\n' || out[n - 1] == '\r'))

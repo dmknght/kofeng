@@ -396,9 +396,11 @@ static void pe_set_run_state(struct kgenome_emu *e, const uint8_t *file, uint64_
 }
 
 /* Step 6: what a module asked to be paused on, set last. */
-static void pe_declare_watches(struct kgenome_emu *e, const struct kgenome_emu_decl *decl)
+static void pe_declare_watches(struct kgenome_emu *e, const struct kgenome_emu_decl *decl,
+			       struct kgenome_emu_unp_report *rep)
 {
 	unsigned k;
+	uint32_t n_iw, n_shim;
 
 	/*
 	 * AND WHAT A MODULE ASKED TO BE PAUSED ON, set last so that everything
@@ -406,11 +408,18 @@ static void pe_declare_watches(struct kgenome_emu *e, const struct kgenome_emu_d
 	 */
 	if (!decl)
 		return;
-	for (k = 0; k < decl->n_iw; k++)
+	/* The counts are the caller's and the arrays are not: read no further than they go,
+	 * and say how many declarations that left out. */
+	n_iw = decl->n_iw < KGENOME_EMU_INSN_WATCH_MAX ? decl->n_iw : KGENOME_EMU_INSN_WATCH_MAX;
+	n_shim = decl->n_shim < KGENOME_EMU_SHIM_MAX ? decl->n_shim : KGENOME_EMU_SHIM_MAX;
+	if (rep)
+		rep->decl_cut += (decl->n_iw - n_iw) + (decl->n_shim - n_shim) +
+				 (decl->n_patch > KGENOME_EMU_PATCH_MAX ? decl->n_patch - KGENOME_EMU_PATCH_MAX : 0u);
+	for (k = 0; k < n_iw; k++)
 		kgenome_emu_watch_insn(e, decl->iw[k].b, decl->iw[k].n);
-	if (decl->n_iw)
+	if (n_iw)
 		kgenome_emu_watch_insn_len(e, decl->iw_len);
-	for (k = 0; k < decl->n_shim; k++)
+	for (k = 0; k < n_shim; k++)
 		(void)kgenome_emu_shim_api(e, decl->shim[k].name, decl->shim[k].ret);
 }
 
@@ -482,6 +491,9 @@ struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *
 	memset(&cfg, 0, sizeof cfg);
 	cfg.max_insn = bud ? bud->max_insn : 0;
 	cfg.max_pages = bud ? (bud->max_bytes + KGENOME_EMU_PAGE - 1u) / KGENOME_EMU_PAGE : 0;
+	cfg.account = bud ? bud->account : NULL;
+	cfg.account_user = bud ? bud->account_user : NULL;
+	cfg.insn_spent = bud ? bud->insn_spent : NULL;
 	/*
 	 * The width comes from the FILE, exactly as on the ELF side: PE32
 	 * holds i386 code and PE32+ holds amd64, and the parser has already
@@ -503,6 +515,7 @@ struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *
 			        : (cfg.bits == 64 ? KGENOME_EMU_UNP_PE_BASE_64 : KGENOME_EMU_UNP_PE_BASE_32);
 
 	kgenome_emu_unp_map_init(&m, ~0ull);
+	m.borrow = img == file;         /* a patched copy is freed below: its pages must own their bytes */
 	if (!pe_map_image(e, img, n, info, base, &m)) {
 		free(patched);
 		kgenome_emu_free(e);
@@ -530,7 +543,9 @@ struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *
 	}
 	pe_watch_handover(e, info, base, oep, n_oep);
 	pe_set_run_state(e, file, n, info, base, cfg.bits, idle, entry);
-	pe_declare_watches(e, decl);
+	pe_declare_watches(e, decl, rep);
 	pe_report(e, rep, kgenome_emu_unp_emu_run_while_producing(e, bud ? bud->max_insn : 0, hand_back, extensions), entry, m.improvised);
+	if (rep && (kgenome_emu_hit(e) & KGENOME_EMU_HIT_DECL))
+		rep->decl_cut++;        /* a range or pattern the emulator's own bound refused */
 	return e;
 }

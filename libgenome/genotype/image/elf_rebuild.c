@@ -29,6 +29,7 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 	uint64_t bias;
 	uint16_t phentsize, phnum, shentsize, shnum;
 	uint32_t i, loads = 0;
+	uint8_t hole[MAX_PHNUM / 8u];
 	int have_sh;
 
 	if (!rd || !out || !out_len)
@@ -146,6 +147,7 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 	file = calloc(1, (size_t)end);
 	if (!file)
 		goto no;
+	memset(hole, 0, sizeof hole);
 
 	memcpy(file, eh, EHDR64);
 	if (phoff + (uint64_t)phnum * PHENT64 <= end)
@@ -167,9 +169,16 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 		 * gave, rather than failing the whole rebuild. A run stopped
 		 * partway has some of its segments and not others, and a file
 		 * holding the ones it does have is worth more than no file.
+		 *
+		 * BUT THE ZEROES ARE NOT PRESENTED AS ITS CONTENT: its program header is rewritten
+		 * below to say p_filesz 0 - declared, with no bytes behind it, as a .bss is - so a
+		 * reader of the rebuilt file sees a hollow segment and not a zero-filled one, and
+		 * covered_lo/covered_hi (a span, which cannot hold a hole) are not the only word.
 		 */
-		if (!rd(user, bias + vaddr, file + off, (uint32_t)fsz))
+		if (!rd(user, bias + vaddr, file + off, (uint32_t)fsz)) {
+			hole[i / 8u] = (uint8_t)(hole[i / 8u] | (1u << (i % 8u)));
 			continue;
+		}
 		if (bias + vaddr < lo)
 			lo = bias + vaddr;
 		if (bias + vaddr + fsz > hi)
@@ -179,6 +188,16 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 		free(file);
 		goto no;                        /* nothing could be read back */
 	}
+	/* The holes are declared AFTER the segments are laid down: the first PT_LOAD covers file
+	 * offset zero and a copy of it puts the guest's own header back over anything written
+	 * here first (the same ordering the section table below depends on). */
+	for (i = 0; i < phnum; i++)
+		if ((hole[i / 8u] >> (i % 8u)) & 1u) {
+			uint64_t at = phoff + (uint64_t)i * PHENT64 + 0x20u;
+
+			if (at + 8u <= end)
+				memset(file + at, 0, 8);        /* p_filesz */
+		}
 	if (have_sh && shoff + (uint64_t)shnum * SHENT64 <= end)
 		rd(user, bias + shoff, file + shoff,
 		   (uint32_t)((uint64_t)shnum * SHENT64));

@@ -1420,6 +1420,19 @@ int main(int argc, char **argv)
 			while (c--)
 				obj[at[c]] = save[c];
 		}
+		/*
+		 * THE VIEW IS ONE BUFFER FOR EVERY FORMAT, so a view that owns tables (zip,
+		 * pdf) has to give them back before the next round parses another format into
+		 * the same bytes - its pointers are not another format's fields. The release
+		 * is the format's own; the zero is what every parse of a fresh view starts from.
+		 */
+		{
+			const struct kof_view_ops *vo = kof_view_ops_of(f->format);
+
+			if (vo)
+				vo->release(view);
+			memset(view, 0, big);
+		}
 	}
 
 	free(view);

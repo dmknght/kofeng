@@ -214,6 +214,12 @@ static void one_file(const char *path, struct tally *t)
 					t[k].failures += (uint64_t)r;
 				}
 			}
+			{
+				const struct kof_view_ops *vo = kof_view_ops_of(fmts[k].format);
+
+				if (vo)
+					vo->release(view);     /* zip and pdf views own tables */
+			}
 			free(view);
 		}
 		break;

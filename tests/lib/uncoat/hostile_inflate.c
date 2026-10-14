@@ -503,7 +503,7 @@ static void deep_codes(void)
 	/* (that is the control above: dl = {1} is incomplete) */
 }
 
-/* KNOWN-MISS: a dynamic block whose literal/length code is the single symbol EOB. */
+/* A dynamic block whose literal/length code is the single symbol EOB (RFC 1951: valid). */
 static void single_eob(void)
 {
 	uint8_t ll[257], dl[1], b[64];
@@ -520,10 +520,7 @@ static void single_eob(void)
 	AT();
 	r = inf(b, hv_defl_end(&w), 0, 0, NULL);
 	CK(r.produced == 0);
-	KM_CHECK(r.st == KUNCOAT_OK,
-		 "a dynamic block whose only literal/length code is EOB (one 1-bit code) is refused as CORRUPT",
-		 "INFLATE_SINGLE_EOB_CODE (libuncoat/decompressors/inflate.c build_dynamic: err != 0 for an incomplete literal code; "
-		 "zlib's inflate_table accepts a single code of length 1) [Inference: low, an empty block some encoders write]");
+	CK(r.st == KUNCOAT_OK);
 }
 
 /* ---- symbols, distances, stored blocks ------------------------------------------------ */

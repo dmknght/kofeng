@@ -36,14 +36,34 @@ struct kgenome_emu *kgenome_emu_new(const struct kgenome_emu_cfg *cfg)
 	e->tab_mask = pow2_at_least((uint32_t)pages * 2u) - 1u;
 	e->tab = calloc((size_t)e->tab_mask + 1u, sizeof *e->tab);
 	if (!e->tab) {
+		free(e->ic);
 		free(e);
 		return NULL;
+	}
+	/*
+	 * THE TABLE AND THE INSTRUCTION CACHE ARE CHARGED WHOLE, at creation: they are
+	 * allocated once and their slots are spread by a hash, so the pages of them a
+	 * run touches cannot be known in advance and the honest figure is the
+	 * ceiling. (Virtual until touched; resident is what the run reaches.)
+	 */
+	if (cfg && cfg->account) {
+		e->account = cfg->account;
+		e->account_user = cfg->account_user;
+		if (!kgenome_emu_acct(e, ((uint64_t)e->tab_mask + 1u) * sizeof *e->tab +
+				    (e->ic ? KGENOME_EMU_ICACHE * sizeof *e->ic : 0u))) {
+			free(e->tab);
+			free(e->ic);
+			free(e);
+			return NULL;
+		}
 	}
 	/* Not a page base - page bases are aligned - so the first fetch always
 	 * takes the slow path and checks execute permission. See the fetch. */
 	e->fetch_page = ~(uint64_t)0;
 	e->mxcsr = 0x1f80u;             /* the reset value: all exceptions masked */
+	e->fcw = 0x037fu;               /* the x87 reset value: all exceptions masked, 64 bit precision, round to nearest */
 	e->max_insn = cfg && cfg->max_insn ? cfg->max_insn : KGENOME_EMU_DEF_MAX_INSN;
+	e->insn_spent = cfg ? cfg->insn_spent : NULL;
 	e->idle = KGENOME_EMU_IDLE;
 	e->stop_on_written_jump = cfg ? cfg->stop_on_written_jump : 0;
 	/* 0 means 64: a caller written before the field existed asks for what
@@ -83,12 +103,20 @@ struct kgenome_emu *kgenome_emu_new(const struct kgenome_emu_cfg *cfg)
 
 void kgenome_emu_last_calls(const struct kgenome_emu *e, uint64_t out[2])
 {
+	if (!out)
+		return;
+	if (!e) {
+		out[0] = out[1] = 0;
+		return;
+	}
 	out[0] = e->last_call_at;
 	out[1] = e->prev_call_at;
 }
 
 void kgenome_emu_set_icache(struct kgenome_emu *e, int on)
 {
+	if (!e)
+		return;
 	free(e->ic);
 	e->ic = on ? calloc(KGENOME_EMU_ICACHE, sizeof *e->ic) : NULL;
 }
@@ -101,8 +129,12 @@ void kgenome_emu_free(struct kgenome_emu *e)
 
 	if (!e)
 		return;
+	/* The caller's account of instructions, told once what this machine executed. */
+	if (e->insn_spent)
+		*e->insn_spent += e->insn;
 	free(e->wev);
 	free(e->wev_tab);
+	free(e->hblk);
 	if (e->hot) {
 		uint64_t tot = 0, top = 0, best;
 		uint32_t q, n_used = 0, j, k, bi;
@@ -149,13 +181,35 @@ void kgenome_emu_free(struct kgenome_emu *e)
 		if (!e->tab[i].shared)
 			free(e->tab[i].data);
 	free(e->tab);
+	free(e->iw);
+	free(e->xwatch);
+	free(e->wwatch);
+	free(e->hop);
 	free(e->sorted);
-	free(e->run_buf);
+	for (i = 0; i < e->n_runs; i++)
+		free(e->runs[i].buf);
+	free(e->runs);
 	free(e->vma);
 	for (i = 0; i < e->n_snap; i++)
 		free(e->snap[i].bytes);
 	free(e->snap);
+	/* Everything the caller was asked for comes back in one answer. */
+	if (e->account && e->acct)
+		e->account(e->account_user, -(int64_t)e->acct);
 	free(e);
+}
+
+/* A private copy of one of the declared tables, for a fork: n entries, capacity n. */
+static int dup_table(void **dst, uint32_t *cap, const void *src, uint32_t n, size_t esz)
+{
+	if (!n)
+		return 1;
+	*dst = malloc((size_t)n * esz);
+	if (!*dst)
+		return 0;
+	memcpy(*dst, src, (size_t)n * esz);
+	*cap = n;
+	return 1;
 }
 
 /*
@@ -179,7 +233,7 @@ struct kgenome_emu *kgenome_emu_fork(const struct kgenome_emu *t)
 	struct kgenome_emu *e;
 	uint32_t i;
 
-	if (!t || t->insn || t->itr || t->wev || t->hot || t->run_buf ||
+	if (!t || t->insn || t->itr || t->wev || t->hot || t->runs ||
 	    t->snap || t->n_snap)
 		return NULL;
 	e = malloc(sizeof *e);
@@ -189,12 +243,30 @@ struct kgenome_emu *kgenome_emu_fork(const struct kgenome_emu *t)
 	e->cache_base = 0;
 	e->cache_page = NULL;
 	e->sorted = NULL;
+	e->acct = 0;                    /* a fork is charged for what it takes itself */
+	e->page_credit = 0;
 	e->vma = NULL;
 	e->max_vma = 0;
+	/* the declared tables are the template's to own: a copy gets its own */
+	e->iw = NULL; e->cap_iw = 0;
+	e->xwatch = NULL; e->cap_xwatch = 0;
+	e->wwatch = NULL; e->cap_wwatch = 0;
+	e->hop = NULL; e->cap_hop = 0;
+	if (!dup_table((void **)&e->iw, &e->cap_iw, t->iw, t->n_iw, sizeof *t->iw) ||
+	    !dup_table((void **)&e->xwatch, &e->cap_xwatch, t->xwatch, t->n_xwatch, sizeof *t->xwatch) ||
+	    !dup_table((void **)&e->wwatch, &e->cap_wwatch, t->wwatch, t->n_wwatch, sizeof *t->wwatch) ||
+	    !dup_table((void **)&e->hop, &e->cap_hop, t->hop, t->n_hop, sizeof *t->hop))
+		goto bad;
 	e->ic = t->ic ? calloc(KGENOME_EMU_ICACHE, sizeof *e->ic) : NULL;
 	e->tab = calloc((size_t)t->tab_mask + 1u, sizeof *e->tab);
 	if (!e->tab)
 		goto bad;
+	if (!kgenome_emu_acct(e, ((uint64_t)t->tab_mask + 1u) * sizeof *e->tab +
+			    (e->ic ? KGENOME_EMU_ICACHE * sizeof *e->ic : 0u))) {
+		free(e->tab);
+		e->tab = NULL;
+		goto bad;
+	}
 	memcpy(e->tab, t->tab, ((size_t)t->tab_mask + 1u) * sizeof *e->tab);
 	/* PAGES ARE SHARED, NOT COPIED: a span writes a stack page and a few
 	 * others, and copying the whole file per span was 1.4 of 7.6 billion
@@ -211,9 +283,15 @@ struct kgenome_emu *kgenome_emu_fork(const struct kgenome_emu *t)
 	}
 	return e;
 bad:
+	if (e->account && e->acct)
+		e->account(e->account_user, -(int64_t)e->acct);
 	free(e->tab);
 	free(e->ic);
 	free(e->vma);
+	free(e->iw);
+	free(e->xwatch);
+	free(e->wwatch);
+	free(e->hop);
 	free(e);
 	return NULL;
 }
@@ -256,7 +334,62 @@ int kgenome_emu_map(struct kgenome_emu *e, uint64_t va, const uint8_t *src, uint
 
 		if (chunk > n - off)
 			chunk = n - off;
-		if (!p || !kgenome_emu_page_own(p))
+		if (!p || !kgenome_emu_page_own(e, p))
+			return 0;
+		if (src)
+			memcpy(p->data + in, src + off, (size_t)chunk);
+		else
+			memset(p->data + in, 0, (size_t)chunk);
+		off += chunk;
+	}
+	return 1;
+}
+
+/*
+ * kgenome_emu_map for an image whose bytes outlive the machine: every page the
+ * bytes cover whole is BORROWED (see kgenome_emu_page_add_borrow) and only the
+ * partial first and last page, and the zero tail, are made as kgenome_emu_map makes
+ * them. What a run reads is the same bytes; what it writes lands in a private copy
+ * taken at the first store. */
+int kgenome_emu_map_borrow(struct kgenome_emu *e, uint64_t va, const uint8_t *src, uint64_t n,
+		uint64_t memsz, unsigned prot)
+{
+	uint64_t base = va & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
+	uint64_t end, off;
+
+	if (!e || memsz < n)
+		memsz = n;
+	if (!e || !memsz)
+		return 0;
+	end = va + memsz;
+	if (end < va)
+		return 0;
+	for (off = base; off < end; off += KGENOME_EMU_PAGE) {
+		struct kgenome_emu_page *p;
+
+		if (src && off >= va && off + KGENOME_EMU_PAGE <= va + n)
+			p = kgenome_emu_page_add_borrow(e, off, prot, src + (off - va));
+		else if (off < va + n)
+			p = kgenome_emu_page_add(e, off, prot);
+		else
+			p = kgenome_emu_page_add_zero(e, off, prot);
+		if (!p)
+			return 0;
+	}
+	for (off = 0; off < n; ) {
+		struct kgenome_emu_page *p = kgenome_emu_page_find(e, va + off);
+		uint64_t in = (va + off) & (KGENOME_EMU_PAGE - 1u);
+		uint64_t chunk = KGENOME_EMU_PAGE - in;
+
+		if (chunk > n - off)
+			chunk = n - off;
+		if (!p)
+			return 0;
+		if (src && p->shared && chunk == KGENOME_EMU_PAGE && p->data == src + off) {
+			off += chunk;           /* borrowed: nothing to copy */
+			continue;
+		}
+		if (!kgenome_emu_page_own(e, p))
 			return 0;
 		if (src)
 			memcpy(p->data + in, src + off, (size_t)chunk);
@@ -269,19 +402,23 @@ int kgenome_emu_map(struct kgenome_emu *e, uint64_t va, const uint8_t *src, uint
 
 void kgenome_emu_set_self(struct kgenome_emu *e, const uint8_t *b, uint64_t n)
 {
+	if (!e)
+		return;
 	e->self = b;
 	e->self_n = n;
 	e->self_pos = 0;
 }
 
-void kgenome_emu_set_rip(struct kgenome_emu *e, uint64_t rip) { e->rip = rip; }
+void kgenome_emu_set_rip(struct kgenome_emu *e, uint64_t rip) { if (e) e->rip = rip; }
 void kgenome_emu_set_reg(struct kgenome_emu *e, unsigned g, uint64_t v)
 {
-	if (g < KGENOME_EMU_NGPR)
+	if (e && g < KGENOME_EMU_NGPR)
 		e->gpr[g] = v;
 }
 void kgenome_emu_set_seg_base(struct kgenome_emu *e, unsigned seg, uint64_t base)
 {
+	if (!e)
+		return;
 	if (seg == 4u)
 		e->fs_base = base;
 	else if (seg == 5u)
@@ -289,14 +426,14 @@ void kgenome_emu_set_seg_base(struct kgenome_emu *e, unsigned seg, uint64_t base
 }
 uint64_t kgenome_emu_get_reg(const struct kgenome_emu *e, unsigned g)
 {
-	return g < KGENOME_EMU_NGPR ? e->gpr[g] : 0;
+	return e && g < KGENOME_EMU_NGPR ? e->gpr[g] : 0;
 }
 
 uint64_t kgenome_emu_get_rip(const struct kgenome_emu *e)
 {
 	return e ? e->rip : 0;
 }
-uint64_t kgenome_emu_rip(const struct kgenome_emu *e) { return e->rip; }
+uint64_t kgenome_emu_rip(const struct kgenome_emu *e) { return e ? e->rip : 0; }
 /*
  * How many faults were offered to a guest handler, and how many a handler
  * actually took. The pair is the measurement that says whether exception
@@ -307,14 +444,14 @@ uint64_t kgenome_emu_rip(const struct kgenome_emu *e) { return e->rip; }
 void kgenome_emu_exc_counts(const struct kgenome_emu *e, uint32_t *raised,
 			uint32_t *taken, uint32_t *veh)
 {
-	if (raised) *raised = e->exc_raised;
-	if (taken)  *taken  = e->exc_taken;
-	if (veh)    *veh    = e->n_veh;
+	if (raised) *raised = e ? e->exc_raised : 0;
+	if (taken)  *taken  = e ? e->exc_taken : 0;
+	if (veh)    *veh    = e ? e->n_veh : 0;
 }
 
 uint64_t kgenome_emu_last_write(const struct kgenome_emu *e)
 {
-	return e->last_new_page;
+	return e ? e->last_new_page : 0;
 }
 
 uint64_t kgenome_emu_now_ms(void)
@@ -400,11 +537,13 @@ void kgenome_emu_set_max_insn(struct kgenome_emu *e, uint64_t n)
 		e->max_insn = n;
 }
 
-uint64_t kgenome_emu_insn_count(const struct kgenome_emu *e) { return e->insn; }
+uint64_t kgenome_emu_insn_count(const struct kgenome_emu *e) { return e ? e->insn : 0; }
 const char *kgenome_emu_stop_detail(const struct kgenome_emu *e) { return e->detail; }
 
 void kgenome_emu_watch(struct kgenome_emu *e, uint64_t va)
 {
+	if (!e)
+		return;
 	e->watch_va = va;
 	e->watch_on = 1;
 	e->watch_n = 0;
@@ -413,8 +552,11 @@ void kgenome_emu_watch(struct kgenome_emu *e, uint64_t va)
 unsigned kgenome_emu_watch_hits(const struct kgenome_emu *e, uint64_t *rip,
 			    uint64_t *val, unsigned n)
 {
-	unsigned k, got = e->watch_n < n ? e->watch_n : n;
+	unsigned k, got;
 
+	if (!e || !rip || !val)
+		return 0;
+	got = e->watch_n < n ? e->watch_n : n;
 	for (k = 0; k < got; k++) { rip[k] = e->watch_rip[k]; val[k] = e->watch_val[k]; }
 	return got;
 }
@@ -474,6 +616,33 @@ int kgenome_emu_read(struct kgenome_emu *e, uint64_t va, void *dst, unsigned n)
  */
 int kgenome_emu_write(struct kgenome_emu *e, uint64_t va, const void *src, unsigned n)
 {
+	uint64_t pg, last;
+
+	if (!e || (!src && n))
+		return 0;
+	if (!n)
+		return 1;
+	if (va + n < va)                        /* the span wraps */
+		return 0;
+	/*
+	 * THE PAGES ARE CHECKED BEFORE ANY BYTE LANDS, as kgenome_emu_read does: mem_wr copies
+	 * byte by byte and stops at the first page the guest does not have, which leaves the
+	 * bytes before the hole written. A write that is refused is a write that did not
+	 * happen. (During a run the soft-write path may give a missing page, so it is not
+	 * refused here: mem_wr decides, as it always did.)
+	 */
+	if (!(e->softwrite && e->running)) {
+		last = (va + n - 1u) & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
+		for (pg = va & ~(uint64_t)(KGENOME_EMU_PAGE - 1u);; pg += KGENOME_EMU_PAGE) {
+			if (!kgenome_emu_page_lookup(e, pg)) {
+				e->fault_va = pg < va ? va : pg;
+				memcpy(e->fault_kind, "write", 6);
+				return 0;
+			}
+			if (pg == last)
+				break;
+		}
+	}
 	return kgenome_emu_mem_wr(e, va, src, n);
 }
 
@@ -497,15 +666,39 @@ void kgenome_emu_hop_bounds(struct kgenome_emu *e)
 	}
 }
 
-void kgenome_emu_hop_add(struct kgenome_emu *e, uint64_t lo, uint64_t hi, int seen)
+int kgenome_emu_hop_add(struct kgenome_emu *e, uint64_t lo, uint64_t hi, int seen)
 {
-	if (!e || hi <= lo || e->n_hop >= KGENOME_EMU_EXEC_WATCH)
-		return;
+	if (!e)
+		return 0;
+	if (hi <= lo)
+		return 1;
+	/* The same growing table as the watch ranges, bounded by the page budget. */
+	if (e->n_hop >= (e->max_pages > KGENOME_EMU_EXEC_WATCH ? e->max_pages : KGENOME_EMU_EXEC_WATCH)) {
+		e->hit |= KGENOME_EMU_HIT_DECL;
+		return 0;
+	}
+	if (e->n_hop == e->cap_hop) {
+		uint32_t m = e->cap_hop ? e->cap_hop * 2u : KGENOME_EMU_EXEC_WATCH;
+		struct kgenome_emu_hop *t = realloc(e->hop, (size_t)m * sizeof *t);
+
+		if (!t) {
+			e->hit |= KGENOME_EMU_HIT_DECL;
+			return 0;
+		}
+		e->hop = t;
+		e->cap_hop = m;
+	}
 	e->hop[e->n_hop].lo = lo;
 	e->hop[e->n_hop].hi = hi;
 	e->hop[e->n_hop].seen = (uint8_t)(seen != 0);
 	e->n_hop++;
 	kgenome_emu_hop_bounds(e);
+	return 1;
+}
+
+unsigned kgenome_emu_hit(const struct kgenome_emu *e)
+{
+	return e ? e->hit : 0u;
 }
 
 
@@ -545,10 +738,14 @@ void kgenome_emu_set_stub_range(struct kgenome_emu *e, uint64_t lo, uint64_t hi)
 
 /* Where the ciphertext is, so the run can tell when it stops being ciphertext.
  * See the write path for what happens then. */
-void kgenome_emu_watch_write(struct kgenome_emu *e, uint64_t lo, uint64_t hi)
+int kgenome_emu_watch_write(struct kgenome_emu *e, uint64_t lo, uint64_t hi)
 {
-	if (e)
-		kgenome_emu_wrange_add(e->wwatch, &e->n_wwatch, lo, hi);
+	if (!e)
+		return 0;
+	if (kgenome_emu_wrange_add(&e->wwatch, &e->n_wwatch, &e->cap_wwatch, e->max_pages, lo, hi))
+		return 1;
+	e->hit |= KGENOME_EMU_HIT_DECL;
+	return 0;
 }
 
 /* 1 once anything has been written into one of those ranges. */
@@ -557,10 +754,10 @@ int kgenome_emu_write_seen(const struct kgenome_emu *e)
 	return e ? e->wwatch_hit : 0;
 }
 
-void kgenome_emu_watch_insn(struct kgenome_emu *e, const uint8_t *bytes, unsigned n)
+int kgenome_emu_watch_insn(struct kgenome_emu *e, const uint8_t *bytes, unsigned n)
 {
 	if (!e)
-		return;
+		return 0;
 	/*
 	 * NO BYTES DISARMS, and a module needs that as much as it needs the
 	 * watch. A run paused more times than the module is willing to look at
@@ -572,13 +769,27 @@ void kgenome_emu_watch_insn(struct kgenome_emu *e, const uint8_t *bytes, unsigne
 	if (!bytes || !n) {
 		e->n_iw = 0;
 		e->iw_len = 0;
-		return;
+		return 1;
 	}
-	if (n > KGENOME_EMU_INSN_WATCH_LEN || e->n_iw >= KGENOME_EMU_INSN_WATCH)
-		return;
+	if (n > KGENOME_EMU_INSN_WATCH_LEN || e->n_iw >= KGENOME_EMU_INSN_WATCH_MAX) {
+		e->hit |= KGENOME_EMU_HIT_DECL;
+		return 0;
+	}
+	if (e->n_iw == e->cap_iw) {
+		uint32_t m = e->cap_iw ? e->cap_iw * 2u : KGENOME_EMU_INSN_WATCH;
+		struct kgenome_emu_iw *t = realloc(e->iw, (size_t)m * sizeof *t);
+
+		if (!t) {
+			e->hit |= KGENOME_EMU_HIT_DECL;
+			return 0;
+		}
+		e->iw = t;
+		e->cap_iw = m;
+	}
 	memcpy(e->iw[e->n_iw].b, bytes, n);
 	e->iw[e->n_iw].n = (uint8_t)n;
 	e->n_iw++;
+	return 1;
 }
 
 void kgenome_emu_watch_insn_len(struct kgenome_emu *e, unsigned len)
@@ -588,10 +799,14 @@ void kgenome_emu_watch_insn_len(struct kgenome_emu *e, unsigned len)
 }
 
 
-void kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi)
+int kgenome_emu_watch_exec(struct kgenome_emu *e, uint64_t lo, uint64_t hi)
 {
-	if (e)
-		kgenome_emu_wrange_add(e->xwatch, &e->n_xwatch, lo, hi);
+	if (!e)
+		return 0;
+	if (kgenome_emu_wrange_add(&e->xwatch, &e->n_xwatch, &e->cap_xwatch, e->max_pages, lo, hi))
+		return 1;
+	e->hit |= KGENOME_EMU_HIT_DECL;
+	return 0;
 }
 
 /*
@@ -627,22 +842,29 @@ void kgenome_emu_snap_take(struct kgenome_emu *e, uint64_t va, uint64_t len)
 	 * alone leaves the other free - a thousand small ones, or one enormous
 	 * one repeated.
 	 */
-	if (e->n_snap >= KGENOME_EMU_MAX_SNAP ||
-	    e->snap_bytes + n > (uint64_t)e->max_pages * KGENOME_EMU_PAGE)
+	if (e->snap_bytes + n > (uint64_t)e->max_pages * KGENOME_EMU_PAGE) {
+		e->hit |= KGENOME_EMU_HIT_SNAP;         /* the byte budget is the bound; it says so */
 		return;
+	}
 	if (e->n_snap == e->max_snap) {
 		uint32_t m = e->max_snap ? e->max_snap * 2u : 8u;
 		struct snap *t = realloc(e->snap, (size_t)m * sizeof *t);
 
-		if (!t)
+		if (!t) {
+			KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_SNAP | KGENOME_EMU_HIT_MEM, "snapshot table not grown");
 			return;
+		}
 		e->snap = t;
 		e->max_snap = m;
 	}
 	s = &e->snap[e->n_snap];
-	s->bytes = malloc((size_t)n);
-	if (!s->bytes)
+	if (!kgenome_emu_acct(e, n))
 		return;
+	s->bytes = malloc((size_t)n);
+	if (!s->bytes) {
+		KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_SNAP | KGENOME_EMU_HIT_MEM, "snapshot bytes not allocated");
+		return;
+	}
 	for (off = 0; off < n; off += KGENOME_EMU_PAGE) {
 		p = kgenome_emu_page_find(e, base + off);
 		if (p)
@@ -689,6 +911,9 @@ void kgenome_emu_snap_written(struct kgenome_emu *e)
 	uint64_t va, len;
 	const uint8_t *b;
 
+	if (!e)
+		return;
+
 	while (kgenome_emu_next_written(e, &it, &va, &b, &len))
 		kgenome_emu_snap_take(e, va, len);
 }
@@ -697,7 +922,7 @@ void kgenome_emu_snap_written(struct kgenome_emu *e)
 int kgenome_emu_next_snapshot(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 			  const uint8_t **bytes, uint64_t *len)
 {
-	if (*it >= e->n_snap)
+	if (!e || !it || !va || !bytes || !len || *it >= e->n_snap)
 		return 0;
 	*va    = e->snap[*it].va;
 	*bytes = e->snap[*it].bytes;
@@ -709,9 +934,13 @@ int kgenome_emu_next_snapshot(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 
 unsigned kgenome_emu_trace(const struct kgenome_emu *e, uint64_t *out, unsigned n)
 {
-	uint64_t have = e->trace_n < KGENOME_EMU_TRACE ? e->trace_n : KGENOME_EMU_TRACE;
-	unsigned k, got = (unsigned)(have < n ? have : n);
+	uint64_t have;
+	unsigned k, got;
 
+	if (!e || !out)
+		return 0;
+	have = e->trace_n < KGENOME_EMU_TRACE ? e->trace_n : KGENOME_EMU_TRACE;
+	got = (unsigned)(have < n ? have : n);
 	for (k = 0; k < got; k++)
 		out[k] = e->trace[(e->trace_n - got + k) % KGENOME_EMU_TRACE];
 	return got;
@@ -736,17 +965,69 @@ const char *kgenome_emu_stop_name(enum kgenome_emu_stop s)
 
 /* ---- what came out --------------------------------------------------------- */
 
+/*
+ * THE BUFFER FOR ONE RUN OF WRITTEN PAGES, owned by the emulator until it is freed - which is
+ * what emu.h promises and what a caller that keeps two runs (or a pointer across a second
+ * call) relies on. A run asked for again (same start, same length) is the same buffer,
+ * refreshed; a new one is a new buffer, bounded by the guest's own page budget in total, the
+ * bound the snapshots keep. Past it the call answers 0 and sets KGENOME_EMU_HIT_RUN, so a
+ * walk that ends there says why.
+ */
+static uint8_t *run_buffer(struct kgenome_emu *e, uint64_t va, uint32_t n)
+{
+	uint32_t i;
+	uint8_t *buf;
+
+	for (i = 0; i < e->n_runs; i++)
+		if (e->runs[i].va == va && e->runs[i].npg == n)
+			return e->runs[i].buf;
+	if (e->runs_bytes + (uint64_t)n * KGENOME_EMU_PAGE > (uint64_t)e->max_pages * KGENOME_EMU_PAGE) {
+		e->hit |= KGENOME_EMU_HIT_RUN;
+		return NULL;
+	}
+	if (e->n_runs == e->max_runs) {
+		uint32_t m = e->max_runs ? e->max_runs * 2u : 8u;
+		struct kgenome_emu_runbuf *t = realloc(e->runs, (size_t)m * sizeof *t);
+
+		if (!t) {
+			KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_RUN | KGENOME_EMU_HIT_MEM, "run table not grown");
+			return NULL;
+		}
+		e->runs = t;
+		e->max_runs = m;
+	}
+	if (!kgenome_emu_acct(e, (uint64_t)n * KGENOME_EMU_PAGE))
+		return NULL;
+	buf = malloc((size_t)n * KGENOME_EMU_PAGE);
+	if (!buf) {
+		KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_RUN | KGENOME_EMU_HIT_MEM, "run buffer not allocated");
+		return NULL;
+	}
+	e->runs[e->n_runs].va = va;
+	e->runs[e->n_runs].npg = n;
+	e->runs[e->n_runs].buf = buf;
+	e->n_runs++;
+	e->runs_bytes += (uint64_t)n * KGENOME_EMU_PAGE;
+	return buf;
+}
+
+
 int kgenome_emu_next_written(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 			 const uint8_t **bytes, uint64_t *len)
 {
 	uint32_t i;
 
+	if (!e || !it || !va || !bytes || !len)
+		return 0;
 	if (!e->sorted) {
 		uint32_t n = 0;
 
 		e->sorted = calloc(e->n_pages ? e->n_pages : 1u, sizeof *e->sorted);
-		if (!e->sorted)
+		if (!e->sorted) {
+			/* "no more written memory" would be the answer: it is not, and is said */
+			KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_RUN | KGENOME_EMU_HIT_MEM, "written-page index not allocated");
 			return 0;
+		}
 		for (i = 0; i <= e->tab_mask; i++)
 			if (e->tab[i].va && e->tab[i].written)
 				e->sorted[n++] = e->tab[i].va;
@@ -770,7 +1051,7 @@ int kgenome_emu_next_written(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 		while (s + n < e->n_sorted &&
 		       e->sorted[s + n] == e->sorted[s + n - 1u] + KGENOME_EMU_PAGE)
 			n++;
-		buf = malloc((size_t)n * KGENOME_EMU_PAGE);
+		buf = run_buffer(e, e->sorted[s], n);
 		if (!buf)
 			return 0;
 		for (k = 0; k < n; k++) {
@@ -787,10 +1068,6 @@ int kgenome_emu_next_written(struct kgenome_emu *e, uint32_t *it, uint64_t *va,
 		p = kgenome_emu_page_find(e, e->sorted[s + n - 1u]);
 		trim = (uint64_t)(n - 1u) * KGENOME_EMU_PAGE +
 		       (p && p->wr_hi ? p->wr_hi : KGENOME_EMU_PAGE);
-		/* Owned by the emulator, replaced on the next call. One live run
-		 * at a time is all a caller needs and all this has to track. */
-		free(e->run_buf);
-		e->run_buf = buf;
 		*va = e->sorted[s];
 		*bytes = buf;
 		*len = trim;

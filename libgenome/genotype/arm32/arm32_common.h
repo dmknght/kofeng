@@ -23,10 +23,15 @@ static inline uint32_t kgenome_arm_ror(uint32_t v, uint32_t n)
 /* Sign-extend the low `bits` of v. */
 static inline int32_t kgenome_arm_sext(uint32_t v, unsigned bits)
 {
-	uint32_t m = 1u << (bits - 1u);
+	uint32_t m;
 
-	v &= (bits >= 32u) ? 0xffffffffu : ((1u << bits) - 1u);
-	return (int32_t)(v ^ m) - (int32_t)m;
+	if (!bits)
+		return 0;                       /* no bits, no value (and no shift by -1) */
+	if (bits >= 32u)
+		return (int32_t)v;              /* all of it: already the value */
+	m = 1u << (bits - 1u);
+	v &= (1u << bits) - 1u;
+	return (int32_t)((v ^ m) - m);          /* unsigned: no signed overflow at the top bit */
 }
 
 #endif /* KGENOME_GENOTYPE_ARM32_COMMON_H */

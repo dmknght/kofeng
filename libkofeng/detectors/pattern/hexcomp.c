@@ -209,6 +209,8 @@ static struct hx_step *hx_new_step(uint32_t gap_min, uint32_t gap_max)
 /* "[4]", "[4-6]", "[4-]", "[-]". The open forms are clamped rather than taken as
  * infinite: two parts that may be arbitrarily far apart are two patterns and a
  * kof_find_str_all, not one pattern. */
+static uint32_t hx_open_gaps;   /* open jumps of the pattern being compiled */
+
 static int hex_jump(const char **pp, uint32_t *lo, uint32_t *hi)
 {
 	const char *p = *pp + 1;   /* past '[' */
@@ -237,6 +239,7 @@ static int hex_jump(const char **pp, uint32_t *lo, uint32_t *hi)
 			p++;
 		if (*p == ']') {
 			b = KOF_HEX_GAP_OPEN;    /* [n-] and [-] */
+			hx_open_gaps++;          /* said, not silent: see kof_hex_stat */
 			p++;
 		} else {
 			b = 0;
@@ -635,6 +638,7 @@ static int hex_emit(uint8_t *img, uint32_t cap, struct kof_hex_stat *stat)
 	stat->min_span   = min_span;
 	stat->max_span   = max_span;
 	stat->anchor_len = anchor_len;
+	stat->open_gaps  = hx_open_gaps;
 	return 1;
 }
 
@@ -651,6 +655,7 @@ uint32_t kof_hex_compile(const char *text, uint8_t *out, uint32_t cap,
 	struct kof_hex_stat local;
 
 	hex_msg[0] = 0;
+	hx_open_gaps = 0;
 	if (!stat)
 		stat = &local;
 	memset(stat, 0, sizeof *stat);
@@ -1202,6 +1207,7 @@ uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
 	struct kof_hex_stat local;
 
 	hex_msg[0] = 0;
+	hx_open_gaps = 0;
 	if (!stat)
 		stat = &local;
 	memset(stat, 0, sizeof *stat);

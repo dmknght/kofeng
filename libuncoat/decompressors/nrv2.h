@@ -79,7 +79,10 @@ enum kuncoat_nrv2_bits {
  * that identifies the sample.
  *
  * Returns a kuncoat_status. KUNCOAT_STOPPED means the output buffer filled -
- * the receiver's limit, not the stream's failure.
+ * the receiver's limit, not the stream's failure. A variant that is not one of the
+ * three above, a NULL `in` with in_len > 0 or a NULL `out` with out_cap > 0 is
+ * KUNCOAT_BAD_ARG (nothing is read); a bit width other than 8, 16 or 32 is CORRUPT,
+ * and out_cap 0 is STOPPED. `produced` may be NULL.
  */
 enum kuncoat_status kuncoat_nrv2_decode(int variant, int bits, const uint8_t *in, uint64_t in_len,
 		    uint8_t *out, uint64_t out_cap, uint64_t *produced);

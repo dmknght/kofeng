@@ -29,6 +29,25 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *info,
 		  struct kof_obj_ctx *ctx);
 
 /*
+ * THE VIEW'S TABLES ARE THE FILE'S SIZE, so a view owns memory.
+ *
+ * `info->mem.room` is set by the caller before the parse: the bytes the tables may hold
+ * (the engine passes what its per-object ledger has left; a test or a tool passes what it
+ * is willing to spend). The parse clears the view, and a view must therefore start zeroed
+ * - what an earlier parse left in it is let go first, so a zeroed view and a used one are
+ * the same to it. After the parse `info->mem.held` is what the tables hold, for the
+ * caller to charge, and kof_zip_release gives it all back: the view is then empty and
+ * parses again. A table that cannot grow is not a failed parse - the rows read so far are
+ * whole and KOF_ZIP_ANOM_ENTRIES_FULL / _EXTENTS_FULL say the rest was not.
+ */
+void kof_zip_release(struct kof_zip_info *info);
+
+/* The host's three handles on a view that has tables - see struct kof_view_ops in
+ * kofformat.h: its account, its release, and the walk a module's kof_zip_next reaches. */
+struct kof_view_mem *kof_zip_mem(void *view);
+const void *kof_zip_row(void *view, uint32_t *cursor);
+
+/*
  * Does this object look like a zip?
  *
  * A local header or an end record at offset zero, and nothing else. In particular

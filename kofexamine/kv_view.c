@@ -128,11 +128,16 @@ void view_select(struct view *v)
 			v->ext[0].len = len;
 			v->n_ext = len ? 1u : 0u;
 		}
-	} else
+	} else {
+		/* The viewer's own buffer, fixed: it is never grown (the viewer has no ledger
+		 * to charge) and a region that fills it is cut, as it always was. */
+		struct kof_ext_buf eb = kof_ext_fixed(v->ext, KOF_SCAN_MAX_EXTENTS);
+
 		v->n_ext = kof_scan_resolve_range(&o->ctx,
 						  v->node[v->sel_node].mask ?
 						  v->node[v->sel_node].mask :
-						  KOF_SCAN_ALL, v->ext);
+						  KOF_SCAN_ALL, &eb);
+	}
 	if (!v->n_ext && o->buf.n) {
 		v->ext[0].off = 0;
 		v->ext[0].len = o->buf.n;
@@ -411,8 +416,11 @@ uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 		 * in it and the resolver has nothing to say about the bit. */
 		if (v->node[k].mask & KOF_SCAN_SYM)
 			continue;
-		n = kof_scan_resolve_range(&v->obj[obj].ctx, v->node[k].mask,
-					   v->probe);
+		{
+			struct kof_ext_buf eb = kof_ext_fixed(v->probe, KOF_SCAN_MAX_EXTENTS);
+
+			n = kof_scan_resolve_range(&v->obj[obj].ctx, v->node[k].mask, &eb);
+		}
 		for (j = 0; j < n; j++)
 			if (file_off >= v->probe[j].off &&
 			    file_off < v->probe[j].off + v->probe[j].len)

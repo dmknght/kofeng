@@ -345,7 +345,7 @@ static int fam_cell_entries(void *arg)
 
 /* An architecture the front end has no decoder for answers 0 ("a decoder that cannot answer
  * says so by returning 0 - it does not guess a length", decode.h), whatever the number. */
-static int km_unknown_arch(void *arg)
+static int unknown_arch(void *arg)
 {
 	static const unsigned arches[] = { KGENOME_ARCH_ANY, KGENOME_ARCH_RISCV64, KGENOME_ARCH_PPC64,
 		KGENOME_ARCH_SH, KGENOME_ARCH_SPARC, KGENOME_ARCH_OR1K, 0xffffu, ~0u };
@@ -522,12 +522,9 @@ int main(int argc, char **argv)
 	}
 	{
 		int sig = 0;
-		enum hk_result r = hk_isolated(km_unknown_arch, NULL, 10, &sig);
+		enum hk_result r = hk_isolated(unknown_arch, NULL, 10, &sig);
 
-		KM_CHECK(r == HK_OK, "kgenome_cell_decode decodes the bytes of an architecture it has no decoder for as x86-32",
-			 "celllysis/decode.c:28-30 `default:` falls to kgenome_cell_decode_x86(..., 32u) for every arch but "
-			 "X86_64/ARM/ARM64/MIPS/MIPS64 (RISCV, PPC, SH, SPARC, ANY, and values outside the enum): "
-			 "kgenome_cell_decode(KGENOME_ARCH_RISCV64, 0, \"\\x90\\x90\\x90\\x90\", 4, 0, &in) returns 1");
+		CK(r == HK_OK);   /* kgenome_cell_decode decodes the bytes of an architecture it has no decoder for as x86-32 */
 	}
 	gb_free(&G);
 	gb_free(&T);

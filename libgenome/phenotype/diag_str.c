@@ -140,7 +140,7 @@ int kgenome_diag_str_at_node(const struct kgenome_diag_scan *s, uint16_t cap,
 {
 	uint32_t h, p;
 
-	if (!s->str_tab)
+	if (!s || !name || !s->str_tab)
 		return 0;
 	h = str_hash(cap, node, name);
 	for (p = h & s->str_tmask; s->str_tab[p]; p = (p + 1u) & s->str_tmask) {

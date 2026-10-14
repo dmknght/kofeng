@@ -57,7 +57,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_LHA_INFO_VERSION 1
+#define KOF_LHA_INFO_VERSION 2
 
 /*
  * Scan regions.
@@ -92,7 +92,7 @@ enum {
 	KOF_LHA_ANOM_CODED       = 1ull << 3,
 	/* A name holds ".." or an absolute path. */
 	KOF_LHA_ANOM_TRAVERSAL   = 1ull << 4,
-	/* More entries than the table below holds. */
+	/* The entry table could not grow: the archive has entries not read. */
 	KOF_LHA_ANOM_ENTRIES_FULL = 1ull << 5,
 	/* There is no end mark: the chain ran into the end of the object
 	 * instead of stopping at a zero length header. */
@@ -101,16 +101,38 @@ enum {
 
 #define KOF_LHA_ANOM_COUNT 7
 
-#define KOF_LHA_MAX_ENTRIES 1024u
+/*
+ * What bounds the parse, and what does not.
+ *
+ * NO COUNT OF ENTRIES IS A LIMIT ON THE FILE. The entry table was 1024 rows, so the 1025th
+ * member of an archive was not there. The table is allocated to what the chain holds, and what
+ * bounds an allocation is the file: a header is at least KOF_LHA_HEADER_MIN bytes, so the rows
+ * cannot exceed the length of the file over it. Under that sits the engine's per-object ledger
+ * (struct kof_view_mem.room): when the table cannot grow the walk stops, ENTRIES_FULL is raised
+ * and the object reads KOF_BROKEN_LIMIT - what was not read is said, and what was read is whole.
+ */
+#define KOF_LHA_HEADER_MIN  22u
 /* The format's own limit: the name length is one byte. */
 #define KOF_LHA_MAX_NAME    255u
 
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2, the same change as the zip view's (zip.h has the long form): `entry[1024]` is a table
+ * the parse allocates to the size of the archive, reached through the pointer at the tail, and the
+ * scalars before it are where they were. `n_entries` WAS AT OFFSET 16 AND IS NOW
+ * `legacy_n_entries`, ALWAYS ZERO: a module built against version 1 loops over a count of zero,
+ * reads a valid empty table, and the engine - which sees that the walk below was never called
+ * while the archive has rows - reports the object instead of passing it as examined
+ * (sx_walk_check). The real count is `n_entries` at the tail. A module walks the table with
+ * kof_lha_next below; it does not index `entry`.
+ */
 struct kof_lha_info {
 	uint32_t version;         /* KOF_LHA_INFO_VERSION */
 	uint32_t valid;
 	uint64_t anomalies;
 
-	uint32_t n_entries;       /* recorded below */
+	uint32_t legacy_n_entries;/* version 1's count, kept for its offset: always 0 */
 	uint32_t n_coded;         /* entries behind a coding, opened or not */
 	uint32_t n_dirs;          /* "-lhd-": a directory, which has no data */
 	uint8_t  level;           /* of the first header */
@@ -119,12 +141,30 @@ struct kof_lha_info {
 	uint64_t names_off, names_len;   /* first name to last, as one range */
 	uint64_t data_off, data_len;     /* first body to last */
 
-	struct kof_entry entry[KOF_LHA_MAX_ENTRIES];
+	/* ---- version 2: from here the table is the file's size ------------------------ */
+
+	struct kof_view_mem mem;  /* what the table holds; see range.h */
+	struct kof_entry *entry;
+	uint32_t n_entries;       /* rows in `entry`: all of the archive's unless ENTRIES_FULL */
+	uint32_t reserved1;
 };
 
 static inline const struct kof_lha_info *kof_lha(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_lha_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT ENTRY OF THE ARCHIVE, in chain order: row `*cursor`, and the cursor is advanced; NULL
+ * at the end. The row's index is the cursor minus one after the call. See kof_zip_next, which this
+ * is the same walk as.
+ */
+static inline const struct kof_entry *kof_lha_next(const struct kof_obj_ctx *ctx,
+						   uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_LHA_H */

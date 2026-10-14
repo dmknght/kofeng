@@ -22,6 +22,16 @@ uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total)
 		if (!c)
 			continue;
 		/*
+		 * A BUCKET CANNOT HOLD MORE THAN THE TOTAL - `total` is the sum of them, and
+		 * a caller that passes less (a sliding window whose total was not kept in
+		 * step) used to get scaled below 256, a negative per-bucket term in unsigned
+		 * arithmetic and an average near 2^64 / n: an astronomically large number no
+		 * caller can tell from "very high entropy" (8 bits is 64 eighths). Clamped,
+		 * the term is zero for that bucket, so the answer stays within 0..64.
+		 */
+		if (c > n)
+			c = n;
+		/*
 		 * -log2(c/n) = log2(n) - log2(c), computed on n*256/c so the
 		 * fraction survives the integer log.
 		 */
@@ -49,7 +59,11 @@ uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total)
 		frac = ((scaled - base) << 3) / base;
 		acc += c * (((uint64_t)lg << 3) + frac - (8u << 3));
 	}
-	return (uint32_t)(acc / n);
+	/* 8 bits per byte is the most any byte string holds. Buckets that add up to MORE
+	 * than `total` (the clamp above bounds one bucket, not their sum) could still
+	 * push the average past it. */
+	acc /= n;
+	return acc > 64u ? 64u : (uint32_t)acc;
 }
 
 uint32_t kentropy_eighths(const void *bytes, uint64_t n)

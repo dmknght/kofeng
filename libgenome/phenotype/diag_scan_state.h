@@ -31,6 +31,10 @@ struct kgenome_diag_scan {
 	 */
 	uint64_t            *wrap;
 	uint32_t             n_wrap, cap_wrap;
+	/* The same sites, sorted and without repeats, made by kgenome_diag_wrap_settle for
+	 * the membership question (kgenome_diag_wrapper_site_wrapped); NULL until then. */
+	uint64_t            *wrap_sorted;
+	uint32_t             n_wrap_sorted;
 	/* Syscall sites whose first argument was not a constant the sweep could
 	 * read - the candidates for a wrapper. See kgenome_diag_run_wrappers. */
 	uint32_t             n_unread;
@@ -51,6 +55,9 @@ struct kgenome_diag_scan {
 	const struct kgenome_elf_relocs *relocs;            /* CODE relocations */
 	struct kgenome_elf_relocs        own_relocs;
 	struct kgenome_elf_relocs        data_relocs;       /* DATA: the image builder's alone */
+	struct kgenome_diag_rcall       *rcall;             /* the call sites, see kgenome_diag_relcalls */
+	uint32_t                         n_rcall;
+	int                              rcall_done;
 	int                          data_ready;
 	/*
 	 * THE OBJECT'S FUNCTIONS, one set for every route - see kgenome_diag_funcs.
@@ -63,6 +70,9 @@ struct kgenome_diag_scan {
 	 * scanner's latch when it passed one, owned here otherwise. */
 	struct kgenome_diag_walk        *walk;
 	struct kgenome_diag_walk        *own_walk;
+	/* KGENOME_DIAG_OWN_*: what this scan had to build itself because the caller
+	 * did not hand it over - see kgenome_diag_scan_own. */
+	unsigned                     own;
 	/*
 	 * WHETHER THE ANSWER IS WHOLE - see kgenome_status.h. Every limit that fires
 	 * in any routine of this scan notes a value here (kgenome_diag_note), and
@@ -91,6 +101,10 @@ struct kgenome_diag_scan {
 	struct kgenome_ledger led;
 	uint32_t             n_str_refused;     /* names refused: too long, or the store full */
 	uint64_t             emu_charged;       /* guest pages charged for a live emulator */
+	/* The token arena of the relocatable-object walk: producers whose node index is below
+	 * `rel_tok_lim` have a page of their own, `rel_tok_span` pages are mapped. Set where the
+	 * image is built, from the node count and the page budget. */
+	uint32_t             rel_tok_lim, rel_tok_span;
 	/* Which analysis routines actually ran - see KOF_DIAG_RUN_* and the
 	 * scenario table. Asked for and not written counts as not run. */
 	unsigned             ran;

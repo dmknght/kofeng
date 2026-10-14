@@ -50,10 +50,11 @@ struct kgenome_diag_hit *kgenome_diag_hit_of(struct kgenome_diag_scan *s, uint32
 
 /* Record that one of `h`'s inputs came from node `from`, in `role`. A link
  * already recorded is not recorded twice - a loop that arrives at the same
- * call again has not found a second link. A node holds four (the module ABI's
- * graph block has four slots, KOF_GR_IN_MAX, so a fifth kept here would be cut
- * silently at the next boundary); a fifth DISTINCT link sets the scan's status
- * to KGENOME_TRUNCATED, which is why the scan is an argument. */
+ * call again has not found a second link. A node holds four; the module ABI's
+ * graph block record has room for two (KOF_GR_IN_FIT), and the block builder
+ * (kof_diag_graph_build) says so on the scan when a node has more. A fifth
+ * DISTINCT link sets the scan's status to KGENOME_TRUNCATED, which is why the
+ * scan is an argument. */
 /* The second node a socket call makes when its type says SOCK_NONBLOCK: a
  * non-blocking mark on descriptor `open_idx`, at the same instruction. */
 void kgenome_diag_hit_nonblock(struct kgenome_diag_scan *s, uint64_t at, uint16_t open_idx);
@@ -98,8 +99,17 @@ struct kgenome_diag_org {
 
 struct kgenome_diag_orgs {
 	struct kgenome_diag_org reg[16];
-	struct kgenome_diag_org stk[KGENOME_DIAG_ORG_STK];
-	uint32_t   n_stk;
+	/*
+	 * THE PUSHED VALUES' ORIGINS, as a ring of the newest KGENOME_DIAG_ORG_STK pushes: slot i of the
+	 * stack is stk[i % KGENOME_DIAG_ORG_STK]. A pop takes the TOP, so what a deep stack loses is
+	 * the oldest slots, the ones that are popped last - the table used to drop the NEWEST pushes
+	 * once it was full, which are the ones popped first. Slots below `n_lost` have been
+	 * overwritten; popping one answers "no origin", and overwriting a slot that held one sets
+	 * `stk_cut` for the caller to report.
+	 */
+	uint16_t   stk[KGENOME_DIAG_ORG_STK];
+	uint32_t   n_stk, n_lost;
+	uint8_t    stk_cut;
 	uint64_t   carry_to;
 	uint8_t    carry_armed, carry_live, ax_stale;
 	/*
@@ -148,6 +158,26 @@ const struct kgenome_elf_relocs *kgenome_diag_relocs(struct kgenome_diag_scan *s
 					     const struct kgenome_obj *obj,
 					     unsigned kind);
 
+/*
+ * THE CALL SITES OF A RELOCATABLE OBJECT, derived ONCE per scan from its CODE
+ * relocations (kgenome_elf_relcalls) and read by every route that wants them: the
+ * symbol route (a node per call of a named capability) and the emulate route's gap
+ * walk (what to step over). `at` is a file offset (kgenome_elf_reloc_call_at),
+ * `target` non-zero for a call into code this object defines, `cap` the
+ * capability the callee's NAME stands for (KGENOME_NUCLEO_NONE for an internal
+ * call or an unknown name) and `name` its id (kgenome_nucleo_name_id) when `cap`
+ * is known. NULL with *n = 0 when there are none or memory was refused (noted on
+ * the scan, which is also halted). Owned by the scan.
+ */
+struct kgenome_diag_rcall {
+	uint64_t at, target;
+	uint16_t cap;
+	uint16_t name;
+};
+const struct kgenome_diag_rcall *kgenome_diag_relcalls(struct kgenome_diag_scan *s,
+						   const struct kgenome_obj *obj,
+						   uint32_t *n);
+
 /* The symbol route's PE half: calls through the import address table. */
 /* Syscall wrappers of a static libc: nodes at their callers, linked - see
  * diag_wrapper_walk.c. */
@@ -160,6 +190,7 @@ struct kgenome_diag_walk *kgenome_diag_scan_walk(struct kgenome_diag_scan *s);
  * (NULL) - see diag_wrapper_walk.c. */
 void kgenome_diag_walk_bind(struct kgenome_diag_walk *wk, struct kgenome_ledger *lg);
 const uint64_t *kgenome_diag_walk_entries(const struct kgenome_diag_walk *wk, uint32_t *n);
+void kgenome_diag_wrap_settle(struct kgenome_diag_scan *s);   /* the socketcall site list: once each, plus a sorted copy */
 void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s, const struct kgenome_obj *obj,
 			   const uint8_t *base, uint64_t size);
 void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,

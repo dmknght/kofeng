@@ -52,6 +52,45 @@ struct kof_run {
 	uint32_t reserved;
 };
 
+/*
+ * THE MEMORY OF A VIEW'S TABLES, which are as long as the file says and not a
+ * number chosen when the header was written.
+ *
+ * A parser view (struct kof_zip_info, struct kof_pdf_info) used to carry its
+ * entries, objects and runs as fixed arrays - 4096, 4096 and 16384 - so a zip with
+ * 2100 members lost every one of them (its NAMES region needed 4200 extents against
+ * a buffer of 4096) and a PDF past its 4096th object lost the rest. The tables are
+ * now allocated to the size the file's own structure needs, and this is the account
+ * of them, in the view, so that whoever owns the view can charge what the parse
+ * holds and give it back:
+ *
+ *   room    IN.  The bytes the parse may hold in tables, set by the caller before
+ *           the parse (the engine passes what its per-object ledger has left, and
+ *           never zero: one byte is how it says "nothing fits"). A table that would
+ *           pass it is not grown and the parse says so with the format's own "table
+ *           full" anomaly - the entries past it are reported as not read, never
+ *           dropped in silence. ZERO IS A CALLER THAT KEEPS NO ACCOUNT (a test, a
+ *           tool reading one file): the file's own bound is then the only one, and
+ *           that bound is the file's length over the smallest record, so it is still
+ *           a multiple of the input and never a count the file states.
+ *   held    OUT. The bytes the tables hold now. The caller charges it and gives it
+ *           back with the format's release function.
+ *   rows    OUT. How many rows a module can walk (kof_zip_next, kof_pdf_next).
+ *   walked  OUT. Bumped by every call of that walk. The engine reads it after an
+ *           unpack module has run: rows > 0 and walked == 0 is a module built for
+ *           the layout before the tables were dynamic, which would read nothing
+ *           and say nothing - the object is then reported, not passed as examined.
+ *
+ * Module ABI: a module never writes it. Appended at the tail of the views that use
+ * it; see the layout notes in zip.h and pdf.h.
+ */
+struct kof_view_mem {
+	uint64_t room;
+	uint64_t held;
+	uint32_t rows;
+	uint32_t walked;
+};
+
 _Static_assert(offsetof(struct kof_run, len) == offsetof(struct kof_range, len) &&
 	       offsetof(struct kof_run, off) == offsetof(struct kof_range, off),
 	       "a kof_run begins with a kof_range");

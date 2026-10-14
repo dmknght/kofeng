@@ -167,18 +167,42 @@ static int lzx_build(struct kuncoat_lzx_huff *h, const uint8_t *len, uint32_t n)
 static uint32_t lzx_sym(struct kuncoat_lzx *s, const struct kuncoat_lzx_huff *h, int *bad)
 {
 	int32_t code = 0, first = 0, index = 0;
-	uint32_t l;
+	uint32_t l, buf, used = 16u, sym = 0;
 
+	/*
+	 * ONE FILL, THEN THE WALK READS THE BUFFER AND TAKES THE BITS IT USED.
+	 *
+	 * The walk used to call lzx_bits(s, 1) for every bit of the code - a refill
+	 * test, a pad test and a call each, up to sixteen times a symbol - which was
+	 * most of what this decoder spent. A fill leaves at least 17 bits in the
+	 * buffer and a code is at most 16, so the bits can be looked at in a local
+	 * and the ones the code used taken once. The result is the same, bit for
+	 * bit: the bits come off the top of the same buffer, and a bit taken from the
+	 * pad sets `eof` exactly when the per-bit read would have (the pad is the
+	 * low end, so the real bits are always taken first).
+	 */
+	lzx_fill(s);
+	buf = s->bitbuf;
 	for (l = 1; l < 17u; l++) {
-		code |= (int32_t)lzx_bits(s, 1);
-		if (code - first < h->count[l])
-			return (uint32_t)h->symbol[index + (code - first)];
+		code |= (int32_t)(buf >> 31);
+		buf <<= 1;
+		if (code - first < h->count[l]) {
+			sym = (uint32_t)h->symbol[index + (code - first)];
+			used = l;
+			break;
+		}
 		index += h->count[l];
 		first = (first + h->count[l]) << 1;
 		code <<= 1;
 	}
-	*bad = 1;
-	return 0;
+	if (l == 17u)
+		*bad = 1;
+	if (s->bitcnt - s->pad < used)
+		s->eof = 1;
+	s->bitbuf <<= used;
+	s->bitcnt -= used;
+	lzx_took(s);
+	return sym;
 }
 
 /* ---- the position slot tables ------------------------------------------------
@@ -403,9 +427,9 @@ static int lzx_flush(struct kuncoat_lzx *s, struct lzx_out *o, uint64_t *flushed
 
 /* ---- the decode --------------------------------------------------------------- */
 
-enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s,
-				      const struct kuncoat_lzx_req *rq,
-				      struct kuncoat_io *io)
+static enum kuncoat_status lzx_run(struct kuncoat_lzx *s,
+				   const struct kuncoat_lzx_req *rq,
+				   struct kuncoat_io *io)
 {
 	const uint32_t window_bits = rq->window_bits;
 	const uint8_t *in = io->in.p;
@@ -421,10 +445,6 @@ enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s,
 	uint32_t fsize = 0;          /* what the header says the file comes to */
 	int status = KUNCOAT_OK, bad = 0, intel = 0;
 
-	io->consumed = 0;
-	io->produced = 0;
-	if (!s || !in || !sink)
-		return KUNCOAT_CORRUPT;
 	if (window_bits < KUNCOAT_LZX_MIN_BITS || window_bits > KUNCOAT_LZX_MAX_BITS)
 		return KUNCOAT_UNSUPPORTED;
 
@@ -661,9 +681,12 @@ enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s,
 			/* A distance further back than the stream has produced
 			 * would read the window's previous contents - refused,
 			 * for the reason inflate.c gives about the same check. */
+			/* The same test refuses a match whose extra length bits, footer or
+			 * aligned symbol came from the zeroes fed past the end: not output,
+			 * and the input ran out rather than the stream being wrong. */
 			if (!off || (uint64_t)off > out.seen ||
-			    off > (s->wmask + 1u)) {
-				status = KUNCOAT_CORRUPT;
+			    off > (s->wmask + 1u) || s->eof) {
+				status = s->eof ? KUNCOAT_TRUNCATED : KUNCOAT_CORRUPT;
 				break;
 			}
 			{
@@ -697,11 +720,24 @@ enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s,
 	 * of every file - up to a frame of it - is decoded and never handed
 	 * over.
 	 */
-	if (!out.stopped)
-		lzx_flush(s, &out, &flushed, intel, fsize);
+	if (!out.stopped && !lzx_flush(s, &out, &flushed, intel, fsize))
+		status = KUNCOAT_STOPPED;   /* the receiver refused the last frame: its refusal, not the stream's state */
 	(void)want;
 	if (out.stopped && status == KUNCOAT_OK)
 		status = KUNCOAT_STOPPED;
 	io->produced = out.given;
 	return status;
+}
+
+enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *s,
+				      const struct kuncoat_lzx_req *rq,
+				      struct kuncoat_io *io)
+{
+	if (!s || !rq || !io)
+		return KUNCOAT_BAD_ARG;
+	io->consumed = 0;
+	io->produced = 0;
+	if (!io->sink || (!io->in.p && io->in.n))
+		return KUNCOAT_BAD_ARG;
+	return lzx_run(s, rq, io);
 }

@@ -24,15 +24,16 @@ int kof_ssrc_parse(const char *text, size_t n, struct kof_ssrc *p,
 	code[n] = 0;
 	kof_dsrc_blank_comments(code, n);
 	while (at < n) {
-		size_t e = at, len;
-		char line[512];
-		const char *q;
+		size_t e = at;
+		const char *line = code + at, *q;
 
+		/* THE LINE IS READ WHERE IT IS: ended at its newline in the private
+		 * copy, not copied into a buffer. It was copied into 512 bytes and cut
+		 * there, so a declaration after column 511 was never seen and nothing
+		 * said so. */
 		while (e < n && code[e] != '\n')
 			e++;
-		len = e - at < sizeof line - 1u ? e - at : sizeof line - 1u;
-		memcpy(line, code + at, len);
-		line[len] = 0;
+		code[e] = 0;
 		if ((q = strstr(line, "KOF_DECLARE_SYNDROME_TYPE(")) != NULL) {
 			int t = 0;
 

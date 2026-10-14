@@ -72,4 +72,22 @@ struct kof_engine *kof_db_load(const char *path);
 
 void               kof_db_free(struct kof_engine *);
 
+/*
+ * THE SAME LOAD WITH THE CALLER'S LEDGER. Every size the similarity index chooses comes from
+ * `budget` (kofcore/kofbudget.h): the filter is the default for the number of hashes, halved
+ * until the ledger grants it, and what stays resident - directories, the filter, and the
+ * bodies of packs that carry no index trailer - may take at most half of what is left. With
+ * no ledger the default cap (KOF_ENGINE_MEM_CAP) stands in for one; there is no "unlimited"
+ * and no flat allowance of its own. `max_index_bytes` lowers it further (0: the ledger's).
+ * An index that does not fit is refused - the engine loads, `mutation` is NULL and
+ * kdb_mutation_status says KOF_MTN_B_OVER_BUDGET, and a line goes to stderr - because the
+ * alternative was an allocation the engine never agreed to. The load only ASKS the ledger;
+ * keng_open charges what the whole load left in memory.
+ */
+struct kof_db_load_opt {
+	uint64_t                 max_index_bytes;
+	const struct kof_budget *budget;
+};
+struct kof_engine *kof_db_load_opt(const char *path, const struct kof_db_load_opt *opt);
+
 #endif /* KOFENG_DBLOADER_H */

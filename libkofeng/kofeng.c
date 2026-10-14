@@ -9,21 +9,100 @@
  * a file small enough to read in one go, there is nowhere for it to be quietly broken.
  */
 
+#define _GNU_SOURCE
+
 #include "kofeng.h"
 #include "databases/dbloader.h"
-#include "detectors/pattern/kofmultimatch.h"
+#include "detectors/pattern/kofpix.h"
 #include "scanners/scan.h"
+#include "kofcore/kofplatform.h"
 
+/*
+ * OPEN A DATABASE UNDER THE ENGINE'S MEMORY BUDGET (kofcore/kofbudget.h): 512 MiB unless
+ * keng_set_memory_cap says otherwise. What the load left in private memory is what the
+ * database costs and is charged first; it is measured as the growth of the allocator's own
+ * count across the load (the load is single-threaded work of this call), because the loader
+ * builds its index from many small blocks and a sum of its own sizes would be a second
+ * accounting to keep in step. Where the allocator cannot say, the figure is 0 and the budget is
+ * simply not reduced - which the doc below says.
+ */
 kof_engine *keng_open(const char *db_path)
 {
+	kof_engine *e;
+	struct kof_db_load_opt opt;
+	struct kof_budget *b;
+	uint64_t before, after;
+
 	if (!db_path)
 		return NULL;
-	return kof_db_load(db_path);
+	/*
+	 * THE LEDGER EXISTS BEFORE THE LOAD, because the load asks it: the similarity index
+	 * chooses its filter and its allowance from what the ledger has left (kof_db_load_opt).
+	 * Asking takes nothing; what the load left in memory is charged below, once.
+	 */
+	b = calloc(1, sizeof *b);
+	if (!b)
+		return NULL;
+	kof_budget_init(b, KOF_ENGINE_MEM_CAP);
+	memset(&opt, 0, sizeof opt);
+	opt.budget = b;
+	before = kof_heap_in_use();
+	e = kof_db_load_opt(db_path, &opt);
+	if (!e) {
+		free(b);
+		return NULL;
+	}
+	after = kof_heap_in_use();
+	e->budget = b;
+	e->budget->db = after > before ? after - before : 0;
+	(void)kof_budget_charge(e->budget, e->budget->db);
+	return e;
 }
 
 void keng_close(kof_engine *e)
 {
+	if (e)
+		free(e->budget);
 	kof_db_free(e);
+}
+
+uint32_t kdb_mutation_status(const kof_engine *e, uint64_t *bytes, uint32_t *keys)
+{
+	if (bytes)
+		*bytes = e ? e->mutation_bytes : 0;
+	if (keys)
+		*keys = e ? e->mutation_keys : 0;
+	return e ? e->mutation_status : 0;
+}
+
+uint64_t keng_memory_cap(const kof_engine *e)
+{
+	return e && e->budget ? e->budget->cap : 0;
+}
+
+int keng_set_memory_cap(kof_engine *e, uint64_t bytes)
+{
+	uint64_t used;
+
+	if (!e || !e->budget)
+		return 0;
+	if (!bytes)
+		bytes = KOF_ENGINE_MEM_CAP;
+	used = atomic_load(&e->budget->used);
+	if (bytes < used || bytes < KOF_ENGINE_MEM_MIN)
+		return 0;       /* below what is held, or below the least that works: refused, nothing changes */
+	e->budget->cap = bytes;
+	return 1;
+}
+
+uint64_t keng_memory_db(const kof_engine *e)
+{
+	return e && e->budget ? e->budget->db : 0;
+}
+
+uint64_t keng_memory_peak(const kof_engine *e)
+{
+	return e && e->budget ? atomic_load(&e->budget->peak) : 0;
 }
 
 uint32_t kdb_records(const kof_engine *e)
@@ -67,25 +146,39 @@ uint32_t kdb_diag_collisions(const kof_engine *e)
 {
 	return e ? e->diag_collide : 0u;
 }
+
+uint32_t kdb_diag_refused(const kof_engine *e)
+{
+	return e ? e->diag_refused : 0u;
+}
+
+uint32_t kdb_diag_packs_refused(const kof_engine *e)
+{
+	return e ? e->diag_packs_refused : 0u;
+}
 int kmatch_tables(const kof_engine *e, uint64_t *bytes,
 			  uint32_t *max_chain)
 {
-	uint32_t i, worst = 0;
-
 	if (bytes)
 		*bytes = 0;
 	if (max_chain)
 		*max_chain = 0;
-	if (!e || !e->multi)
+	if (!e || !e->pix_markers)
 		return -1;
 	if (bytes)
-		*bytes = (uint64_t)e->multi->bytes;
-	for (i = 0; i < KOF_MULTIMATCH_BITS; i++)
-		if (e->multi->tab[i].max_chain > worst)
-			worst = e->multi->tab[i].max_chain;
+		*bytes = e->pix_bytes;
 	if (max_chain)
-		*max_chain = worst;
+		*max_chain = e->pix_max_run;
 	return 0;
+}
+
+uint32_t kdb_pattern_status(const kof_engine *e, uint64_t *bytes, uint64_t *markers)
+{
+	if (bytes)
+		*bytes = e ? e->pix_bytes : 0;
+	if (markers)
+		*markers = e ? e->pix_markers : 0;
+	return e ? e->pix_status : 0;
 }
 
 
@@ -214,9 +307,28 @@ int kdb_version(const kof_engine *e, struct kof_db_version *out)
 
 kof_scanner *kscan_new(const kof_engine *e)
 {
-	if (!e)
+	return kscan_new_ex(e, NULL);
+}
+
+kof_scanner *kscan_new_ex(const kof_engine *e, int *why)
+{
+	if (!e) {
+		if (why)
+			*why = KSCAN_NEW_NO_ENGINE;
 		return NULL;
-	return kof_scan_new(e);
+	}
+	return kof_scan_make(e, why);
+}
+
+const char *kscan_new_why_str(int why)
+{
+	switch (why) {
+	case KSCAN_NEW_OK:        return "made";
+	case KSCAN_NEW_NO_ENGINE: return "no engine";
+	case KSCAN_NEW_BUDGET:    return "the engine's memory budget cannot afford another scanner";
+	case KSCAN_NEW_NOMEM:     return "out of memory";
+	default:                  return "unknown";
+	}
 }
 
 /*
@@ -236,6 +348,11 @@ void kscan_on_debug(kof_scanner *sc, kof_on_debug cb, void *user)
 void kscan_free(kof_scanner *sc)
 {
 	kof_scan_free(sc);
+}
+
+void kscan_trim(kof_scanner *sc, unsigned flags)
+{
+	kof_scan_trim(sc, flags);
 }
 
 const struct kof_stats *kscan_stats(const kof_scanner *sc)

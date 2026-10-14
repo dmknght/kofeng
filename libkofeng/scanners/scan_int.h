@@ -26,7 +26,8 @@
  * number picked here, and putting the limit on the C stack makes the failure mode a
  * stack overflow - a crash, in a library, out of a directory tree. On the heap, running
  * out is reported instead. max_depth is policy for callers who want it, not a safety
- * net.
+ * net: with 0 the walk ends where the kernel refuses a path (PATH_MAX), and that
+ * refusal is counted in `unreadable`.
  *
  * Paths grow rather than living in a fixed buffer, so an over-long one fails visibly
  * instead of being skipped without a word.
@@ -73,6 +74,9 @@ struct walk {
 	int      aborted;
 	int      out_of_memory;
 	uint64_t objects;
+	/* Of `objects`, the ones whose name could not be allocated: counted, scanned, and
+	 * never handed to the callback - see walk_result. */
+	uint64_t undelivered;
 	/* Unreadable names the PRODUCER of a parallel walk met. It may not write a
 	 * worker's scanner while that worker is scanning with it, so it counts here
 	 * and the total is added to scs[0] once the workers have joined. Zero and
@@ -87,17 +91,35 @@ struct walk {
 	 * Read across one file by scan_file - see the note there on why a file
 	 * with either is never remembered. */
 	uint64_t found;
+	/* Of the file being scanned: whether an object reported a finding, and how many
+	 * verdict events the host was given - the engine's check that what a roll-up
+	 * counts was delivered (sx_scan_file, kof_stats.verdict_lost). */
+	int      file_reported;
+	uint64_t file_events;
 
 	/* Set only on the producer of a parallel walk: where a regular file goes
 	 * instead of being scanned here. NULL in every single threaded walk, and
 	 * the one branch that tests it is the whole difference between them. */
 	struct mtq *q;
+
+	/* The file whose tree is being scanned, for the duration of scan_tree: what
+	 * kof_src_cut is asked about. NULL between files. */
+	struct kof_objsrc *root;
 };
 
 /* ---- the walk (scan_walk.c, for now scan.c) ------------------------------- */
 int  sx_push_dir(struct walk *w, const char *path, size_t len, uint32_t depth);
 void sx_read_dir(struct walk *w, const char *dir, uint32_t depth);
 void sx_scan_file(struct walk *w, const char *path);
+
+/* Whether the object in hand opened into something - a container's member, an
+ * unpacked image - and so is not the subject: a normalised view is the object
+ * written down again and a carve is a file glued on, neither counts. The one
+ * place this is asked. */
+static inline int sx_opened(const struct kof_scanner *sc)
+{
+	return sc->child.n > sc->child.n_views + sc->child.n_carved;
+}
 
 /* A module's report, taken: finding, verdict slot, repair, infected spans. */
 struct kof_finding *sx_mod_report(struct kof_scanner *sc,
@@ -116,7 +138,9 @@ void sx_scan_object(struct kof_scanner *sc, kof_buf buf,
 void sx_mtq_put(struct walk *w, const char *path, size_t len);
 
 /* ---- the verdict (verdictor/verdict.c) ---- */
-int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f, int all_matches);
+int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f, int all_matches,
+		    int covered);
+int sx_finding_covered(const struct kof_module *m, const struct kof_finding *f);
 /* The object's verdict from the diseases it has (verdictor/syndrome.c). */
 void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			 const struct kof_scan_option *opt, struct kof_result *res,
@@ -250,6 +274,18 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 int sx_inherit_image(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
 void sx_identify(struct kof_scanner *sc, kof_buf buf, struct kof_obj_ctx *ctx,
 		      uint8_t as_format, const void *as_view, uint32_t as_view_len);
+/*
+ * What an object held in memory the FILE sized - the tables of its parsed view (zip, pdf:
+ * struct kof_view_ops) and the extent buffers that grew for it - given back when the object
+ * is done, so what the ledger was charged is held for one object and no longer.
+ * sx_walk_check is asked after an unpack module of such a format has run: was its table
+ * read? A module built for the layout before the tables were dynamic reads an empty one
+ * and opens nothing; the object is reported, not passed as examined.
+ */
+void sx_views_release(struct kof_scanner *sc);
+void sx_ext_release(struct kof_scanner *sc);
+void sx_walk_check(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		   const struct kof_module *m);
 void sx_lib_facts(struct kof_scanner *sc, struct kof_obj_ctx *ctx,       kof_buf buf);
 uint32_t sx_declared_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t scan_mask,
 				  struct kof_range *out, uint32_t max_out);
@@ -258,6 +294,8 @@ uint32_t sx_sym_halves_present(const struct kof_obj_ctx *ctx, uint32_t wanted);
 void sx_dense_code_unread(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx, uint32_t present,
 		      int from_packer);
+/* Is any block rule loaded: the one reader of a rendering's functions. */
+int sx_mutation_loaded(const struct kof_scanner *sc);
 void sx_mod_begin(struct kof_scanner *sc, const struct kof_module *m);
 const struct kof_module *sx_derived_by(const struct kof_scanner *sc);
 

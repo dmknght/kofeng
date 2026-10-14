@@ -93,8 +93,13 @@ int kof_diag_match_known(const struct kgenome_diag_scan *, const struct kof_diag
  * and grows while the analysis runs, while a rule reads a block that does not
  * move under it. The cost is bounded by the DATABASE rather than the object -
  * the graph has already been pruned to the capabilities some diagnose named.
+ *
+ * A RECORD CARRIES TWO LINKS (KOF_GR_IN_FIT), a node of the scan up to four. A
+ * node with more has its first two written and the scan is noted
+ * KGENOME_TRUNCATED: the scan is therefore not const, and the cut is read where
+ * every other cut of the graph is (kof_scan_incomplete).
  */
-uint32_t kof_diag_graph_build(const struct kgenome_diag_scan *s, uint8_t *out,
+uint32_t kof_diag_graph_build(struct kgenome_diag_scan *s, uint8_t *out,
 			      uint32_t cap);
 
 /*

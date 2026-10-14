@@ -7,20 +7,24 @@
 
 /*
  * A SYSCALL WHOSE ARGUMENT THE WALK COULD NOT READ BECAUSE IT IS THE CALLER'S.
- * Kept as file offsets; the list grows with the input and is bounded by it,
- * since there cannot be more of these than there are `int 0x80` in the object.
+ * Kept as file offsets in the order the sweep found them. A site a later window
+ * walks over again is noted again: repeats are removed ONCE, by
+ * kgenome_diag_wrap_settle, when the list is read, because asking "have I this one"
+ * at every note was a scan of the list, and n notes cost n^2/2 comparisons.
+ * Measured on a hand-built i386 ELF of `mov eax,0x66; int 0x80` repeated (every
+ * one a candidate): 0.07 s at 128 KB, 0.93 s at 512 KB, 3.2 s at 1 MB, 12.4 s at
+ * 2 MB and 59 s at 4 MB, nearly all of it this loop and the one in
+ * kgenome_diag_wrapper_site_wrapped. The list is bounded by the number of times the
+ * sweep decoded an `int 0x80`, which the sweep's own limits bound.
  */
 static void wrap_note(struct kgenome_diag_scan *s, uint64_t at)
 {
-	uint32_t i;
-
-	for (i = 0; i < s->n_wrap; i++)
-		if (s->wrap[i] == at)
-			return;
 	if (s->n_wrap == s->cap_wrap) {
 		uint32_t nc = s->cap_wrap ? s->cap_wrap * 2u : 8u;
 		uint64_t *nw;
 
+		if (nc <= s->cap_wrap)
+			return;         /* 2^32 sites: nothing a walk bounded by the budget reaches */
 		if (!kgenome_ledger_charge(&s->led,
 					   (uint64_t)(nc - s->cap_wrap) * sizeof *nw))
 			return;         /* noted: KGENOME_OVER_BUDGET */
@@ -35,6 +39,68 @@ static void wrap_note(struct kgenome_diag_scan *s, uint64_t at)
 		s->cap_wrap = nc;
 	}
 	s->wrap[s->n_wrap++] = at;
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+/*
+ * THE LIST AS THE ANALYSIS READS IT: each site once, in the order it was first found,
+ * and a sorted copy to ask membership of. Made once, before the wrapper analysis; a
+ * later call has nothing to do. Without memory for the copy the list keeps its repeats
+ * and the question is answered by a scan (kgenome_diag_wrapper_site_wrapped), which is
+ * the old cost and the old answer.
+ */
+void kgenome_diag_wrap_settle(struct kgenome_diag_scan *s)
+{
+	uint64_t *srt;
+	uint8_t *seen;
+	uint32_t i, m, keep;
+
+	if (s->wrap_sorted || s->n_wrap == 0)
+		return;
+	if (!kgenome_ledger_charge(&s->led, (uint64_t)s->n_wrap * sizeof *srt))
+		return;
+	srt = malloc((size_t)s->n_wrap * sizeof *srt);
+	if (!srt) {
+		kgenome_ledger_release(&s->led, (uint64_t)s->n_wrap * sizeof *srt);
+		return;
+	}
+	memcpy(srt, s->wrap, (size_t)s->n_wrap * sizeof *srt);
+	qsort(srt, s->n_wrap, sizeof *srt, cmp_u64);
+	for (m = 0, i = 0; i < s->n_wrap; i++)
+		if (m == 0 || srt[m - 1u] != srt[i])
+			srt[m++] = srt[i];
+	if (m != s->n_wrap) {
+		/* repeats: keep the first of each, in discovery order */
+		seen = calloc(m, 1u);
+		if (seen) {
+			for (keep = 0, i = 0; i < s->n_wrap; i++) {
+				uint32_t lo = 0, hi = m;
+
+				while (lo < hi) {
+					uint32_t mid = lo + (hi - lo) / 2u;
+
+					if (srt[mid] < s->wrap[i])
+						lo = mid + 1u;
+					else
+						hi = mid;
+				}
+				if (!seen[lo]) {
+					seen[lo] = 1;
+					s->wrap[keep++] = s->wrap[i];
+				}
+			}
+			s->n_wrap = keep;
+			free(seen);
+		}
+	}
+	s->wrap_sorted = srt;
+	s->n_wrap_sorted = m;
 }
 
 /*

@@ -12,6 +12,7 @@
  *   pdf_entries.c  what the host reads: the entry table and each stream's chain
  *   pdf_docinfo.c  what the document says about itself
  *   pdf_names.c    region and anomaly names, for tools
+ *   pdf_index.c    the lookups by object number the passes above share
  *
  * The lexical primitives below are inline for the reason they were `static`: a
  * scan that reads a name or a number at every key of every object pays for a
@@ -27,6 +28,8 @@
 #include <string.h>
 #include "../../../kofcore/kofcore.h"
 #include "../../../kofcore/runlist.h"
+#include "../../../kofcore/tabgrow.h"
+#include "../../../kofcore/heapsort.h"
 #include "pdf_parse.h"
 
 /* ---- lexical primitives ------------------------------------------------------- */
@@ -208,9 +211,74 @@ void pdf_dict_scan(kof_buf f, uint64_t off, uint64_t len,
 int pdf_find_filter(const uint8_t *name, uint32_t nm);
 uint32_t pdf_filter_bit(int i);
 
+/* ---- the tables, and what bounds them ----------------------------------------- */
+
+/*
+ * THE GROWTH STATE of the two tables the parse fills one row at a time, and the bound the
+ * FILE puts on the first of them. Capacities live here and not in the view because they
+ * mean nothing once the parse is over: the view says how many rows there are.
+ * `obj_limit` is the length of the file over KOF_PDF_OBJECT_MIN - the most objects a file
+ * of that size can hold - which is what keeps a count the document merely states (or a
+ * walk fed padding) from sizing an allocation.
+ */
+struct pdf_tabs {
+	uint32_t cap_obj;
+	uint32_t cap_ent;
+	uint64_t obj_limit;
+};
+
+/* ---- lookups by number (pdf_index.c) ------------------------------------------ */
+
+/*
+ * AN INDEX OVER THE OBJECT TABLE, because three passes asked "which object has this
+ * number" with a loop over every object: the references (every object that carries one),
+ * the referrer of a script or font stream (every such stream) and the redefinition test.
+ * Each was quadratic, and "fine" only because the table held 4096 rows and the documents
+ * measured six references in a hundred and eighty objects; with the table as long as the
+ * file a document of 20000 objects and as many references is 4e8 compares - milliseconds
+ * per object, which is a PDF made to stop a scanner.
+ *
+ * Rows of (key, object index) sorted by key then index, so the FIRST of a key is the
+ * lowest-numbered object - the one the loops it replaces returned. Built from the object
+ * table once per question that needs it, charged to the view's account while it lives, and
+ * given back at once: a table that is not there is a pass that is not made, said as
+ * OBJECTS_FULL, and never a pass made the slow way.
+ */
+struct pdf_key {
+	uint64_t key;
+	uint32_t idx;
+	uint32_t pad;
+};
+
+static inline int pdf_key_before(const struct pdf_key *a, const struct pdf_key *b)
+{
+	return a->key < b->key || (a->key == b->key && a->idx < b->idx);
+}
+KOF_HEAPSORT(pdf_keys, struct pdf_key, pdf_key_before)
+
+enum pdf_ix_kind {
+	PDF_IX_STREAM_NUM,   /* objects that carry a stream, keyed by their number */
+	PDF_IX_REF,          /* objects that reference another, keyed by that number */
+	PDF_IX_NUM_GEN       /* every object, keyed by number and generation */
+};
+
+struct pdf_index {
+	struct pdf_key *v;
+	uint32_t n;
+	uint64_t bytes;      /* charged to the view's account while this lives */
+};
+
+/* 1 and `ix` is built, or 0 and nothing was taken (no room, or the allocator said no). */
+int pdf_index_build(struct kof_pdf_info *p, struct pdf_index *ix, enum pdf_ix_kind kind);
+void pdf_index_free(struct kof_pdf_info *p, struct pdf_index *ix);
+/* The first row whose key is `key`, or NULL. */
+const struct pdf_key *pdf_index_find(const struct pdf_index *ix, uint64_t key);
+/* Flag every object whose number and generation an earlier one already had. */
+void pdf_mark_redefined(struct kof_pdf_info *p);
+
 /* ---- the entry table (pdf_entries.c) ------------------------------------------ */
 
-void pdf_build_entries(struct kof_pdf_info *p, kof_buf file);
+void pdf_build_entries(struct kof_pdf_info *p, struct pdf_tabs *t, kof_buf file);
 uint32_t pdf_entries(const struct kof_obj_ctx *ctx,
 		     const struct kof_entry **out);
 
@@ -220,8 +288,8 @@ void pdf_read_docinfo(struct kof_pdf_info *p, kof_buf file);
 
 /* ---- the objects (pdf_walk.c) ------------------------------------------------- */
 
-void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p,
-		      struct kof_runs *runs, uint8_t *seen_num, uint64_t hdr);
+void pdf_walk_objects(kof_buf file, struct kof_pdf_info *p, struct pdf_tabs *t,
+		      struct kof_runs *runs, uint64_t hdr);
 
 /* ---- the trailer and the cross reference sections (pdf_xref.c) ---------------- */
 

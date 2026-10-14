@@ -104,11 +104,9 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 	const uint32_t *prng = (const void *)(base + h->sec[KOF_SEC_RANGE].off);
 	const struct kof_mutation_block *pblk =
 		(const void *)(base + h->sec[KOF_SEC_MUTATION_BLK].off);
-	const uint32_t *ppool =
-		(const void *)(base + h->sec[KOF_SEC_MUTATION_POOL].off);
 
 	uint32_t rng0 = e->n_rng;
-	uint32_t blk0 = e->n_blk, pool0 = e->n_blk_pool;
+	uint32_t blk0 = e->n_blk;
 	uint32_t i;
 	int unpack = (h->kind == KOF_PACK_UNPACK);
 	int heur   = (h->kind == KOF_PACK_HEUR);
@@ -120,18 +118,22 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 	for (i = 0; i < h->n_rng; i++)
 		e->rng_tab[e->n_rng++] = prng[i];
 	/*
-	 * The blocks and their hashes, REBASED into the engine's tables the way
-	 * the packer rebased them into the pack's. Two levels of the same move,
-	 * because there are two levels of pooling: a module's blocks share a
-	 * pack's pool, and a pack's blocks share the engine's.
+	 * THE BLOCKS. A pack's hashes are not copied: the matcher's index is the pack's own
+	 * (pack/dbkix.h) and the hash pool is read from it when a block's name is asked for.
+	 * The block TABLE is borrowed from the mapping when one pack carries blocks and copied
+	 * when several do - see kof_engine.blk_tab. A module's blocks are numbered from the
+	 * pack's first (block_base below), which is why the copy keeps the packs in order.
 	 */
-	for (i = 0; i < h->n_pool; i++)
-		e->blk_pool[e->n_blk_pool++] = ppool[i];
-	for (i = 0; i < h->n_blk; i++) {
-		e->blk_tab[e->n_blk] = pblk[i];
-		e->blk_tab[e->n_blk].first_hash += pool0;
-		e->n_blk++;
+	if (h->n_blk) {
+		if (e->blk_owned) {
+			for (i = 0; i < h->n_blk; i++)
+				e->blk_tab[blk0 + i] = pblk[i];
+		} else {
+			e->blk_tab = (struct kof_mutation_block *)(uintptr_t)pblk;
+		}
+		e->n_blk += h->n_blk;
 	}
+	e->n_blk_pool += h->n_pool;
 
 	for (i = 0; i < h->n_mods; i++) {
 		struct kof_module *m = unpack ? &e->unp[e->n_unp++]
@@ -192,6 +194,10 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->kind       = (uint8_t)h->kind;
 		m->src_off    = pm[i].src_off;
 
+		/* A pack of millions of modules is not read whole before it is given back: the pages the copy has
+		 * passed are dropped as it goes, so the load's peak does not follow the pack's size. */
+		if ((i & 0x1ffffu) == 0x1ffffu)
+			kof_map_drop(mp->map, mp->len);
 
 		/*
 		 * Only a detector's regions go into the union the scanner
@@ -217,7 +223,9 @@ struct db_load {
 	const char *single[1];
 	uint32_t n_paths, n_ok;
 	uint64_t n_mods, n_str, n_rng, code;
+	uint64_t n_det, n_unp, n_heur;   /* n_mods by what the pack holds: each table is allocated for its own */
 	uint64_t n_blk, n_pool;
+	uint32_t n_blk_packs;      /* packs that carry blocks: one is borrowed, several are copied */
 	int owned;
 	const char *dir_for_diag;
 };
@@ -266,10 +274,17 @@ static void db_map_packs(struct db_load *L)
 			continue;
 		h = L->mp[L->n_ok].map;
 		L->n_mods += h->n_mods;
+		if (h->kind == KOF_PACK_UNPACK)
+			L->n_unp += h->n_mods;
+		else if (h->kind == KOF_PACK_HEUR)
+			L->n_heur += h->n_mods;
+		else
+			L->n_det += h->n_mods;
 		L->n_str  += h->n_str;
 		L->n_rng  += h->n_rng;
 		L->n_blk  += h->n_blk;
 		L->n_pool += h->n_pool;
+		L->n_blk_packs += h->n_blk != 0;
 		/* Padded to the same boundary the packer used inside each pool, so
 		 * an aligned offset stays aligned once the pools are concatenated. */
 		/* Each pack's blobs keep the offsets its own header gives them, so
@@ -310,20 +325,23 @@ static int db_totals_fit(const struct db_load *L, const char *path)
 static int db_alloc_tables(struct db_load *L)
 {
 	struct kof_engine *e;
-	uint64_t n_mods = L->n_mods, n_rng = L->n_rng, n_blk = L->n_blk;
-	uint64_t n_pool = L->n_pool, code = L->code;
+	uint64_t n_rng = L->n_rng, n_blk = L->n_blk;
+	uint64_t code = L->code;
 
 	e = calloc(1, sizeof *e);
 	L->e = e;
 	if (!e)
 		return 0;
-	e->mods     = calloc(n_mods ? n_mods : 1, sizeof *e->mods);
-	e->unp      = calloc(n_mods ? n_mods : 1, sizeof *e->unp);
-	e->heur     = calloc(n_mods ? n_mods : 1, sizeof *e->heur);
+	/* Each table for the modules it will hold: the three kinds were each allocated for ALL of them, and the
+	 * ledger charges what the allocator holds, mapped or not (800,000 rules: 235 MB charged, 138 MB used). */
+	e->mods     = calloc(L->n_det  ? L->n_det  : 1, sizeof *e->mods);
+	e->unp      = calloc(L->n_unp  ? L->n_unp  : 1, sizeof *e->unp);
+	e->heur     = calloc(L->n_heur ? L->n_heur : 1, sizeof *e->heur);
 	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
-	e->blk_tab  = calloc(n_blk  ? n_blk  : 1, sizeof *e->blk_tab);
-	e->blk_pool = calloc(n_pool ? n_pool : 1, sizeof *e->blk_pool);
-	if (!e->mods || !e->unp || !e->heur || !e->rng_tab ||
+	e->blk_owned = L->n_blk_packs > 1;
+	if (e->blk_owned)
+		e->blk_tab = calloc(n_blk ? n_blk : 1, sizeof *e->blk_tab);
+	if (!e->mods || !e->unp || !e->heur || !e->rng_tab || (e->blk_owned && !e->blk_tab) ||
 	    !kof_db_arena_open(e, (size_t)code)) {
 		kof_db_free_tables(e);
 		L->e = NULL;
@@ -348,6 +366,9 @@ static void db_absorb_packs(struct db_load *L)
 
 		at = (size_t)kof_round_up(at, KOF_PACK_BLOB_ALIGN);
 		absorb(e, &mp[i], at, i);
+		/* Copying a pack's tables reads every page of its module records and columns; they are given back
+		 * once copied (the pages come back from the file when a name or a string is asked for). */
+		kof_map_drop(mp[i].map, mp[i].len);
 		at += (size_t)h->sec[KOF_SEC_CODE].len;
 	}
 }
@@ -453,8 +474,17 @@ static int db_rng_masks(struct db_load *L)
 				}
 				seen[e->n_masks++] = e->rng_tab[i2];
 			}
-			e->rng_uid[i2] = j2;
+			e->rng_uid[i2] = (uint8_t)j2;     /* j2 < KOF_MAX_DISTINCT_MASKS == 256, checked above */
 		}
+		/* The raw bits behind each dense id (see kof_engine.mask_bits). */
+		e->mask_bits = calloc(e->n_masks ? e->n_masks : 1u, sizeof *e->mask_bits);
+		if (!e->mask_bits) {
+			kof_db_free_tables(e);
+			L->e = NULL;
+			return 0;
+		}
+		for (j2 = 0; j2 < e->n_masks; j2++)
+			e->mask_bits[j2] = seen[j2];
 	}
 	return 1;
 }
@@ -479,44 +509,15 @@ static void db_memo_size(struct kof_engine *e)
 		e->memo_size = 0;
 }
 
-/* Give back the unpacker table nobody filled. */
-static void db_shrink_unp(struct kof_engine *e)
-{
 /*
- * Give back the unpacker table nobody filled.
+ * The per-format index of modules, by counting sort. Returns the entries in it.
  *
- * It was allocated for n_mods because which modules unpack is not known
- * until the packs have been walked, and one array sized for the worst case
- * is simpler than counting twice. The worst case is also absurd - a database
- * is detection records with a handful of unpackers beside them, so this holds
- * eleven entries out of however many were reserved.
- *
- * ADDRESS SPACE, NOT RESIDENT MEMORY - measured, having first assumed
- * otherwise. At four million records the slack is 64 bytes a record, and the
- * quarter gigabyte that suggests never becomes resident: calloc serves a block
- * that size from mmap, and a page of it costs nothing until something writes
- * to it. tests/unit/db_scale.c reports the same bytes per module with this
- * shrink and without it.
- *
- * It is still worth the four lines. The reservation is real at sizes the
- * allocator serves from the heap, where the pages ARE touched, and a mapping
- * whose size has nothing to do with its contents is a thing the next reader
- * has to work out from scratch. What it is not is the saving it looks like.
- *
- * A failed shrink is not an error. realloc declining to make a block smaller
- * leaves the original intact, which is exactly the state this started in.
- */
-	struct kof_module *sm;
-	size_t want = e->n_unp ? e->n_unp : 1u;
-
-	sm = realloc(e->unp, want * sizeof *sm);
-	if (sm)
-		e->unp = sm;
-}
-
-/*
- * The per-format index of modules, by counting sort. Returns the entries in
- * it.
+ * TWO KINDS OF LIST, because a module that names no target names every one (kof_module.n_target of
+ * zero): written into every format's list it was 29 entries, 116 bytes a module resident for a rule
+ * that is "generic". So a module that names targets is in the list of each of them, and a module that names
+ * none is in ONE list, `mod_any`, which every format's walk merges with its own (kof_mod_walk): the
+ * order is the same as when each format had its own copy, because both lists are in (tier, module) order.
+ * A module naming one target costs 4 bytes here, a generic one 4 bytes, whatever the target count.
  */
 static uint32_t db_index_by_target(struct kof_engine *e)
 {
@@ -529,86 +530,105 @@ static uint32_t db_index_by_target(struct kof_engine *e)
  */
 	/* `m` rather than `i`: it indexes modules, and an `i` here
 	 * shadowed the loader's own. */
-	uint32_t b, m, total = 0, *fill;
+	uint32_t b, m, total = 0, *fill, any = 0;
 
 	for (b = 0; b <= KOF_TARGET_COUNT; b++)
 		e->mod_at[b] = 0;
-	for (m = 0; m < e->n_mods; m++)
+	for (m = 0; m < e->n_mods; m++) {
+		if (!e->mods[m].n_target) {
+			any++;
+			continue;
+		}
 		for (b = 0; b < KOF_TARGET_COUNT; b++)
 			if (kof_module_targets(&e->mods[m], (uint8_t)b))
 				e->mod_at[b + 1u]++;
+	}
 	for (b = 0; b < KOF_TARGET_COUNT; b++)
 		e->mod_at[b + 1u] += e->mod_at[b];
 	total = e->mod_at[KOF_TARGET_COUNT];
+	e->n_mod_any = any;
 
 	fill = calloc(KOF_TARGET_COUNT, sizeof *fill);
-	e->mod_by_target = total ? calloc(total, sizeof *e->mod_by_target)
-				 : NULL;
-	if (fill && (e->mod_by_target || !total)) {
-		for (m = 0; m < e->n_mods; m++)
+	/* one allocation: the lists of the formats, then the one list of the modules that name none */
+	e->mod_by_target = (total || any) ? calloc((size_t)total + any, sizeof *e->mod_by_target) : NULL;
+	if (fill && (e->mod_by_target || !(total || any))) {
+		uint32_t na = 0;
+
+		e->mod_any = e->mod_by_target ? e->mod_by_target + total : NULL;
+		for (m = 0; m < e->n_mods; m++) {
+			if (!e->mods[m].n_target) {
+				e->mod_any[na++] = m;
+				continue;
+			}
 			for (b = 0; b < KOF_TARGET_COUNT; b++)
-				if (kof_module_targets(&e->mods[m],
-						       (uint8_t)b))
-					e->mod_by_target[e->mod_at[b] +
-							 fill[b]++] = m;
+				if (kof_module_targets(&e->mods[m], (uint8_t)b))
+					e->mod_by_target[e->mod_at[b] + fill[b]++] = m;
+		}
 	} else {
 		free(e->mod_by_target);
 		e->mod_by_target = NULL;
+		e->mod_any = NULL;
+		e->n_mod_any = 0;
 	}
 	free(fill);
 	return total;
 }
 
-/* Within each format, the cheap questions first. */
+/* Within each list, the cheap questions first (a stable sort by kof_module_tier: the module order is kept
+ * inside a tier, which is what makes a rebuild of the same packs report the same module first). */
 static void db_index_tier_order(struct kof_engine *e, uint32_t total)
 {
 	uint32_t b;
 
 	/*
-	 * AND WITHIN EACH FORMAT, THE CHEAP QUESTIONS FIRST.
+	 * AND WITHIN EACH LIST, THE CHEAP QUESTIONS FIRST.
 	 *
 	 * The scan loop stops at the first module that reports, so the
 	 * order inside a bucket decides what a verdict costs. A module
 	 * is sorted by THE KIND OF DATA IT ASKS FOR, which is the one
-	 * thing the loader knows without running it:
+	 * thing the loader knows without running it - kof_module_tier in
+	 * dbtables.h says which:
 	 *
 	 *   0  neither markers nor blocks - it reads what the parse
 	 *      already established, so it needs no pass over the bytes
 	 *   1  blocks - it needs the similarity feed
-	 *   2  markers - it needs the multi-pattern sweep, the most
-	 *      expensive of the three
+	 *   2  markers - it needs the multi-pattern sweep
+	 *   3  a diagnose - a diagnose names it as its reader, so it asks for
+	 *      the diagnose analysis: a decode of the object's code, the
+	 *      system call sweep and what follows from it, which on a static
+	 *      binary costs more than every search together. It was tier 0
+	 *      under the model above (no markers, no blocks, so "no pass over
+	 *      the bytes"), and so it ran FIRST.
 	 *
 	 * Paired with the deferred passes in the scanner (see
 	 * need_multi and need_mutation there), this is what makes a
 	 * structural verdict cost no sweep at all: the module that
-	 * answers first is the one that asked for least.
+	 * answers first is the one that asked for least. The stop
+	 * after an infection is the scan's (run_modules) and holds only
+	 * where nothing reads what a later module would add.
 	 *
 	 * STABLE WITHIN A TIER, so two modules that ask for the same
 	 * data keep the order the database gave them and a rebuild of
 	 * the same packs cannot reshuffle which of them reports.
 	 *
 	 * Best effort: without the scratch the index is simply left in
-	 * database order, which is what it was before this existed.
+	 * database order, which is what it was before this existed - and
+	 * the walk merges the lists by (tier, module), so it is tier order
+	 * either way; only the lists themselves are not pre-sorted.
 	 */
-	if (e->mod_by_target && total) {
-		uint32_t *tmp = calloc(total, sizeof *tmp);
+	if (e->mod_by_target && (total || e->n_mod_any)) {
+		uint32_t *tmp = calloc((size_t)total + e->n_mod_any, sizeof *tmp);
 
 		if (tmp) {
-			for (b = 0; b < KOF_TARGET_COUNT; b++) {
-				uint32_t lo = e->mod_at[b];
-				uint32_t hi = e->mod_at[b + 1u];
+			for (b = 0; b <= KOF_TARGET_COUNT; b++) {
+				uint32_t lo = b < KOF_TARGET_COUNT ? e->mod_at[b] : total;
+				uint32_t hi = b < KOF_TARGET_COUNT ? e->mod_at[b + 1u] : total + e->n_mod_any;
 				uint32_t n = 0, t, k;
 
-				for (t = 0; t < 3u; t++)
-					for (k = lo; k < hi; k++) {
-						const struct kof_module *md =
-							&e->mods[e->mod_by_target[k]];
-						uint32_t tier = md->n_str ? 2u
-							      : (md->n_block ? 1u : 0u);
-
-						if (tier == t)
+				for (t = 0; t < 4u; t++)
+					for (k = lo; k < hi; k++)
+						if (kof_module_tier(&e->mods[e->mod_by_target[k]]) == t)
 							tmp[n++] = e->mod_by_target[k];
-					}
 				for (k = 0; k < n; k++)
 					e->mod_by_target[lo + k] = tmp[k];
 			}
@@ -739,6 +759,23 @@ static void db_any_target(struct kof_engine *e)
 		any_target_add(&e->any_target, &e->heur[j]);
 }
 
+/* Whether any module of any kind, or any diagnose, declares a disease - see
+ * kof_engine.reads_diseases. */
+static void db_disease_readers(struct kof_engine *e)
+{
+	uint32_t i;
+
+	e->reads_diseases = 0;
+	for (i = 0; i < e->n_mods && !e->reads_diseases; i++)
+		e->reads_diseases = e->mods[i].disease != 0u;
+	for (i = 0; i < e->n_heur && !e->reads_diseases; i++)
+		e->reads_diseases = e->heur[i].disease != 0u;
+	for (i = 0; i < e->n_unp && !e->reads_diseases; i++)
+		e->reads_diseases = e->unp[i].disease != 0u;
+	for (i = 0; i < e->n_diag && !e->reads_diseases; i++)
+		e->reads_diseases = e->diag[i].disease != 0u;
+}
+
 /* Make the code executable and hand the mappings to the engine. */
 static void db_finish(struct db_load *L)
 {
@@ -782,6 +819,7 @@ static void db_finish(struct db_load *L)
 			kof_db_load_syndromes(L->e, L->dir_for_diag);
 			kof_db_load_diseases(L->e, L->dir_for_diag);
 		}
+		db_disease_readers(L->e);
 	}
 }
 
@@ -821,11 +859,19 @@ struct kof_engine *kof_db_load_tables(const char *path)
 	if (!db_rng_masks(&L))
 		goto out;
 	db_memo_size(L.e);
-	db_shrink_unp(L.e);
 	total = db_index_by_target(L.e);
-	db_index_tier_order(L.e, total);
 	db_live_caps(L.e);
+	/* The raw masks served the two walks above and are not needed again: the dense ids and the bits behind
+	 * them say the same in a byte a range. */
+	free(L.e->rng_tab);
+	L.e->rng_tab = NULL;
 	db_finish(&L);
+	/* After the diagnoses are loaded: the order below puts the modules that read one
+	 * last, and which they are is only known from them. */
+	if (L.e) {
+		kof_db_mark_diag_readers(L.e);
+		db_index_tier_order(L.e, total);
+	}
 out:
 	if (L.mp) {
 		for (i = 0; i < L.n_ok; i++)
@@ -851,12 +897,18 @@ void kof_db_free_tables(struct kof_engine *e)
 	free(e->heur);
 	free(e->rng_tab);
 	free(e->rng_uid);
-	free(e->blk_tab);
-	free(e->blk_pool);
+	free(e->mask_bits);
+	if (e->blk_owned)
+		free(e->blk_tab);
+	while (e->n_diag_user)                  /* the scratch of a load that did not end */
+		free(e->diag_user[--e->n_diag_user]);
+	free(e->diag_user);
 	free(e->diag);
 	free(e->diag_node);
 	free(e->diag_name);
-	free(e->diag_needs);
+	while (e->n_diag_arena)
+		free(e->diag_arena[--e->n_diag_arena]);
+	free(e->diag_arena);
 	kof_synd_free(e->synd);
 	free(e->disease);
 	free(e->disease_pool);
@@ -864,7 +916,7 @@ void kof_db_free_tables(struct kof_engine *e)
 		uint32_t i;
 
 		for (i = 0; i < e->n_packs; i++)
-			kof_unmap_file(e->packs[i].map, e->packs[i].len);
+			kof_db_unmap_pack(&e->packs[i]);
 		free(e->packs);
 	}
 	kof_unmap_anon(e->code, e->code_cap);

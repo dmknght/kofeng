@@ -557,13 +557,67 @@ static void case_emu_ceiling(void)
 	       (unsigned long long)asked_at_first, (unsigned long long)last,
 	       KOF_SCAN_EMU_MAX + 40u, (unsigned long long)stuck_from, sig_after);
 	CK(asked_at_first == 1u);
-	/* The same object, asked the same way: either the interpreter still runs
-	 * (the counter advances) or the scan says it stopped. The counter parking
-	 * at the ceiling is not that - it reads the same as a clean object. */
-	KM_CHECK(stuck_from == 0 || sig_after > 0,
-		 "the 513th scan on one scanner no longer asks the interpreter and says nothing",
-		 "KOF_SCAN_EMU_MAX objctx_emu.c:422 lost: interpreter runs past 512 per scanner lifetime, "
-		 "refusal is silent (kof_stats.heur_emu just stops at 512)");
+	/* The ceiling is per TREE, not per scanner lifetime: the same object scanned
+	 * 552 times is 552 trees, and every one of them still asks. */
+	CK(stuck_from == 0);
+	CK(last >= KOF_SCAN_EMU_MAX + 40u);
+}
+
+/* A tree of more members than it may interpret: the ones past the allowance are
+ * refused AND SAID - broken=LIMIT on them, and the scanner's counter moves. */
+static void case_emu_tree(void)
+{
+	enum { N = KOF_SCAN_EMU_MAX + 88 };
+	static uint8_t elf[512];
+	size_t at = 0, len;
+	unsigned i, k;
+	uint8_t *f = calloc((size_t)N + 2u, 1024u);
+	const struct kof_stats *st;
+	uint64_t emu0, lim0;
+	struct seen s;
+
+	CK(f != NULL);
+	if (!f)
+		return;
+	(void)shell_elf(elf);
+	for (i = 0; i < N; i++) {
+		uint8_t *h = f + at;
+		unsigned sum = 0;
+
+		snprintf((char *)h, 100, "e%05u", i);
+		memcpy(h + 100, "0000644", 8);
+		memcpy(h + 108, "0000000", 8);
+		memcpy(h + 116, "0000000", 8);
+		memcpy(h + 124, "00000000262", 12);      /* 178 bytes */
+		memcpy(h + 136, "00000000000", 12);
+		memset(h + 148, ' ', 8);
+		h[156] = '0';
+		memcpy(h + 257, "ustar", 6);
+		memcpy(h + 263, "00", 2);
+		for (k = 0; k < 512; k++)
+			sum += h[k];
+		snprintf((char *)h + 148, 8, "%06o", sum);
+		h[155] = ' ';
+		/* distinct members: the ident padding differs, nothing else does */
+		elf[9] = (uint8_t)i;
+		elf[10] = (uint8_t)(i >> 8);
+		memcpy(f + at + 512, elf, 512);
+		at += 1024u;
+	}
+	len = at + 1024u;
+	st = kscan_stats(sc);
+	emu0 = st->heur_emu;
+	lim0 = st->limit_hits;
+	scan(f, len, "many.tar", &s);
+	st = kscan_stats(sc);
+	printf("  emu tree: %u members, interpreted=%llu, limit_hits=%llu, broken=%u (why %u)\n",
+	       (unsigned)N, (unsigned long long)(st->heur_emu - emu0),
+	       (unsigned long long)(st->limit_hits - lim0), s.broken, s.first_why);
+	/* the tree's allowance is spent exactly, and the refusals are counted and seen */
+	CK(st->heur_emu - emu0 == KOF_SCAN_EMU_MAX);
+	CK(st->limit_hits > lim0);
+	CK(s.broken >= 1u);
+	free(f);
 }
 
 
@@ -733,7 +787,8 @@ struct cont {
 
 /*
  * One container, N = cap + `over` members, the marker in the last one.
- * `lost` says whether the engine loses the marker silently today.
+ * `lost` is 1 while the engine loses the marker silently, 0 when something says so,
+ * and 2 when that is also counted in kof_stats.limit_hits.
  */
 static void over_cap(const struct cont *c, unsigned over, int lost, const char *cap)
 {
@@ -741,15 +796,18 @@ static void over_cap(const struct cont *c, unsigned over, int lost, const char *
 	uint8_t *f = c->build(c->cap + over, &len);
 	struct seen s;
 	char what[160];
+	uint64_t hits0 = kscan_stats(sc)->limit_hits;
 
 	CK(f != NULL);
 	if (!f)
 		return;
 	scan(f, len, c->name, &s);
+	if (lost == 2)          /* said through the scanner's own counter as well */
+		CK(kscan_stats(sc)->limit_hits > hits0);
 	printf("  %s: n=%u objs=%u marker=%u broken=%u(why %u) finds=%u anom=%u\n", c->name,
 	       c->cap + over, s.objs, s.marker, s.broken, s.first_why, s.finds, s.anom);
 	snprintf(what, sizeof what, "%s: the marker member past the cap is neither opened nor flagged", c->name);
-	if (lost)
+	if (lost == 1)
 		KM_CHECK(held(&s), what, cap);
 	else
 		CK(held(&s));
@@ -800,16 +858,18 @@ static void case_max_children(void)
 
 static void case_containers(void)
 {
-	static const struct cont zip  = { "zip", build_zip, KOF_ZIP_MAX_ENTRIES };
-	static const struct cont tar  = { "tar", build_tar, KOF_TAR_MAX_ENTRIES };
-	static const struct cont arj  = { "arj", build_arj, KOF_ARJ_MAX_ENTRIES };
-	static const struct cont lha  = { "lha", build_lha, KOF_LHA_MAX_ENTRIES };
-	static const struct cont cab  = { "cab", build_cab, KOF_CAB_MAX_FILES };
-	static const struct cont chm  = { "chm", build_chm, KOF_CHM_MAX_ENTRIES };
-	static const struct cont sz   = { "7z", build_7z, KOF_7Z_MAX_FOLDERS };
-	static const struct cont pdf  = { "pdf", build_pdf, KOF_PDF_MAX_OBJECTS };
-	static const struct cont pdfs = { "pdf-streams", build_pdf, KOF_PDF_MAX_STREAMS };
-	static const struct cont cabf = { "cab-folders", build_cab_folders, KOF_CAB_MAX_FOLDERS };
+	/* zip and pdf had fixed tables (4096 entries; 4096 objects and 1024 streams): past
+	 * those sizes they are now OPENED WHOLE, which is what under_cap asserts below. */
+	static const struct cont zip  = { "zip", build_zip, 4096u };
+	static const struct cont tar  = { "tar", build_tar, 2048u };
+	static const struct cont arj  = { "arj", build_arj, 1024u };
+	static const struct cont lha  = { "lha", build_lha, 1024u };
+	static const struct cont cab  = { "cab", build_cab, 2048u };
+	static const struct cont chm  = { "chm", build_chm, 2048u };
+	static const struct cont sz   = { "7z", build_7z, 64u };
+	static const struct cont pdf  = { "pdf", build_pdf, 4096u };
+	static const struct cont pdfs = { "pdf-streams", build_pdf, 1024u };
+	static const struct cont cabf = { "cab-folders", build_cab_folders, 256u };
 	static const struct cont cabr = { "cab-runs", build_cab_runs, 1800u };
 	static const struct cont rtf  = { "rtf", build_rtf, KOF_RTF_MAX_OBJECTS };
 	static const struct cont chmn = { "chm-name", build_chm_longname, 0u };
@@ -823,26 +883,31 @@ static void case_containers(void)
 	under_cap(&chm, 1000);
 	under_cap(&sz, 32);
 	under_cap(&pdf, 1000);
+	under_cap(&zip, 4096u + 40u);     /* the old caps, and past them: the marker member is opened */
+	under_cap(&pdf, 4096u + 40u);
+	under_cap(&pdfs, 1024u + 40u);
 	under_cap(&cabf, 100);
 	under_cap(&cabr, 600);
 	under_cap(&rtf, 100);
 
-	/* reported: the scan says so */
-	over_cap(&zip, 40, 0, "");     /* KOF_SCAN_MAX_EXTENTS binds first: broken=LIMIT */
-	over_cap(&tar, 40, 0, "");     /* tar.c: ENTRIES_FULL -> KOF_UNP_LIMIT          */
+	/*
+	 * THE OLD CAPS OF THE OTHER EIGHT FORMATS, AND PAST THEM: tar, arj, lha, cab (files, folders
+	 * and the piece pool), chm (entries and a name past 1024 bytes) and 7z (folders) had tables of
+	 * a size chosen in advance, and the member past each was reported. They are tables the size of
+	 * the file now, so the marker member past the old cap is OPENED - what under_cap asserts. (What
+	 * is still bound, by the ledger and the file's own length, reports with the format's full bit;
+	 * tests/unit/view_tables_arch.c drives that.)
+	 */
+	under_cap(&tar, 2048u + 40u);
+	under_cap(&arj, 1024u + 40u);
+	under_cap(&lha, 1024u + 40u);
+	under_cap(&cab, 2048u + 40u);
+	under_cap(&chm, 2048u + 40u);
+	under_cap(&sz, 64u + 40u);
+	under_cap(&cabf, 256u + 40u);
+	under_cap(&cabr, 1800u + 40u);
+	under_cap(&chmn, 0u);
 	over_cap(&rtf, 40, 0, "");     /* rtf.c: OBJECTS_FULL -> KOF_UNP_LIMIT            */
-	over_cap(&sz, 1, 0, "");       /* 7z: broken=UNSUPPORTED (a signal, mislabelled) */
-	over_cap(&pdfs, 40, 0, "");    /* KOF_PDF_MAX_STREAMS is not the binding one      */
-
-	/* silent: the member is gone and nothing says so */
-	over_cap(&arj, 40, 1, "KOF_ARJ_MAX_ENTRIES arj_parse.c:291 lost: entries past the cap, no signal (bases/decomp/arj.c ignores ENTRIES_FULL)");
-	over_cap(&lha, 40, 1, "KOF_LHA_MAX_ENTRIES lha_parse.c:303 lost: entries past the cap, no signal (bases/decomp/lha.c ignores ENTRIES_FULL)");
-	over_cap(&cab, 40, 1, "KOF_CAB_MAX_FILES cab_parse.c:482 lost: files past the cap, no signal (bases/decomp/cab.c ignores FILES_FULL)");
-	over_cap(&chm, 40, 1, "KOF_CHM_MAX_ENTRIES chm_parse.c:267 lost: entries past the cap, no signal (no module reports ENTRIES_FULL)");
-	over_cap(&pdf, 40, 1, "KOF_PDF_MAX_OBJECTS pdf_walk.c:402 lost: stream objects past the cap, no signal (bases/decomp/pdf.c ignores OBJECTS_FULL)");
-	over_cap(&cabf, 40, 1, "KOF_CAB_MAX_FOLDERS cab_parse.c:413 lost: files in folders past the 256th, no anomaly at all");
-	over_cap(&cabr, 40, 1, "KOF_CAB_MAX_RUNS cab_parse.c:172 lost: files whose pieces no longer fit the run pool, only a private counter");
-	over_cap(&chmn, 0, 1, "KOF_CHM_MAX_NAME chm_parse.c:272 lost: a name over the bound ends the whole directory chunk, no anomaly");
 }
 
 int main(int argc, char **argv)
@@ -861,6 +926,7 @@ int main(int argc, char **argv)
 	case_max_children();
 	case_emu_budget();
 	case_emu_ceiling();
+	case_emu_tree();
 	kscan_free(sc);
 	keng_close(eng);
 	return fails != 0 || km_failed();

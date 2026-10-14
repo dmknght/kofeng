@@ -110,6 +110,7 @@ int main(void)
 		printf("mutation match: block yielded %u hashes, too few to test\n", n0);
 		return 1;
 	}
+	memset(blocks, 0, sizeof blocks);        /* `side` and the padding were stack garbage: the verdicts followed the stack */
 	blocks[0].first_hash = 0; blocks[0].n_hash = n0;
 	blocks[0].scan_mask = RGN_A; blocks[0].norm = KGENOME_MUTATION_RAW;
 	memset(blocks[0].reserved, 0, sizeof blocks[0].reserved);

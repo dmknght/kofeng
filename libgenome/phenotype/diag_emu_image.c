@@ -79,7 +79,7 @@ struct relapply { struct kgenome_emu *em; uint64_t size; };
  * and dollar the kernel and the linker really use. A compiler version string
  * lands on a register by accident and is not accepted for it.
  */
-unsigned kgenome_diag_emu_guest_name(struct kgenome_emu *em, uint64_t va, char *out)
+unsigned kgenome_diag_emu_guest_name(struct kgenome_diag_scan *s, struct kgenome_emu *em, uint64_t va, char *out)
 {
 	unsigned i;
 
@@ -101,7 +101,11 @@ unsigned kgenome_diag_emu_guest_name(struct kgenome_emu *em, uint64_t va, char *
 		if (i < KGENOME_DIAG_STR_MAX)
 			out[i] = (char)c;
 	}
-	return 0;               /* too long to be a symbol */
+	/* Too long to be a symbol - and THAT IS SAID: a diagnose that would have matched the name
+	 * cannot, which is "cannot say" and not "absent". Counted as kgenome_diag_str_add counts it. */
+	s->n_str_refused++;
+	kgenome_diag_note(s, KGENOME_TRUNCATED);
+	return 0;
 }
 
 /*
@@ -133,7 +137,7 @@ void kgenome_diag_emu_capture_names(struct kgenome_diag_scan *s, struct kgenome_
 		return;
 	a = kgenome_emu_get_reg(em, kgenome_diag_sysv_arg[arg]);
 	if (kind == KGENOME_NAME_DIRECT) {
-		if (kgenome_diag_emu_guest_name(em, a, nm))
+		if (kgenome_diag_emu_guest_name(s, em, a, nm))
 			kgenome_diag_str_add(s, cap, node, nm);
 		return;
 	}
@@ -149,7 +153,7 @@ void kgenome_diag_emu_capture_names(struct kgenome_diag_scan *s, struct kgenome_
 				break;
 			for (b = 0; b < 8u; b++)
 				p |= (uint64_t)q[b] << (8u * b);
-			if (kgenome_diag_emu_guest_name(em, p, nm))
+			if (kgenome_diag_emu_guest_name(s, em, p, nm))
 				kgenome_diag_str_add(s, cap, node, nm);
 		}
 	}
@@ -168,7 +172,7 @@ static int apply_reloc(void *user, uint64_t where, uint32_t type,
 	unsigned n = 0, i;
 	uint64_t v = 0;
 
-	if (!defined || where + 4u > a->size)
+	if (!defined || a->size < 4u || where > a->size - 4u)      /* where + 4 wraps for a huge where */
 		return 1;
 	switch (type) {
 	case 1u:                                /* R_X86_64_64   S + A      */
@@ -181,7 +185,7 @@ static int apply_reloc(void *user, uint64_t where, uint32_t type,
 	default:
 		return 1;
 	}
-	if (where + n > a->size)
+	if (a->size < n || where > a->size - n)
 		return 1;
 	for (i = 0; i < n; i++)
 		b[i] = (uint8_t)(v >> (8u * i));
@@ -190,28 +194,49 @@ static int apply_reloc(void *user, uint64_t where, uint32_t type,
 }
 
 /*
- * THE PAGES A RUN MAY TOUCH, charged to the scan's ledger before the emulator
- * is made: the emulator's own default (KGENOME_EMU_DEF_PAGES) or what the
- * allowance has left, whichever is less, and at least one. A run is charged for
- * the most it may take and not for what it takes, so the ledger can refuse it
- * before it exists. Released when the emulator is freed.
+ * THE PAGES A RUN MAY OWN - a bound of the structure, and not of the allowance.
+ *
+ * It used to be the lesser of the emulator's default and what the allowance had
+ * left, charged to the ledger whole before the run existed: a run was billed for
+ * the most it could take (64 MiB) and a real one takes about fifteen pages, so
+ * every allowance under 64 MiB plus the scan's own state refused it, and the
+ * emulator that was made with the pages that were left changed what the run could
+ * map - the same object, a different answer under a different allowance. Measured:
+ * --max-resident 64 MiB turned 5 of 554 infected files into "Limit reached", one
+ * of them 309 bytes long.
+ *
+ * Now the bound is the emulator's own default under any allowance, and the memory
+ * is charged as it is TAKEN (kgenome_diag_emu_account, handed to the emulator as
+ * cfg.account): the table at creation, private pages in chunks, snapshots and run
+ * buffers exactly. A refusal sets KGENOME_EMU_HIT_MEM on the machine and
+ * KGENOME_OVER_BUDGET on the scan, so a run the allowance cut says so.
  */
 uint64_t kgenome_diag_emu_pages_charge(struct kgenome_diag_scan *s)
 {
-	uint64_t pg = kgenome_ledger_room(&s->led) / KGENOME_EMU_PAGE;
-
-	if (pg > KGENOME_EMU_DEF_PAGES)
-		pg = KGENOME_EMU_DEF_PAGES;
-	if (!pg) {
-		kgenome_diag_note(s, KGENOME_OVER_BUDGET);
-		pg = 1;
-	}
-	if (kgenome_ledger_charge(&s->led, pg * KGENOME_EMU_PAGE))
-		s->emu_charged += pg * KGENOME_EMU_PAGE;
-	return pg;
+	(void)s;
+	return KGENOME_EMU_DEF_PAGES;
 }
 
-/* The run is over (its emulator freed): give its pages back. */
+/* The emulator asks before it takes memory and says what it gives back (cfg.account). */
+int kgenome_diag_emu_account(void *user, int64_t bytes)
+{
+	struct kgenome_diag_scan *s = user;
+
+	if (bytes < 0) {
+		const uint64_t back = (uint64_t)-bytes;
+
+		kgenome_ledger_release(&s->led, back);
+		s->emu_charged = back > s->emu_charged ? 0u : s->emu_charged - back;
+		return 1;
+	}
+	if (!kgenome_ledger_charge(&s->led, (uint64_t)bytes))
+		return 0;
+	s->emu_charged += (uint64_t)bytes;
+	return 1;
+}
+
+/* The run is over (its emulator freed, which has already returned what it was granted):
+ * whatever a failed construction left charged goes back too. */
 void kgenome_diag_emu_pages_release(struct kgenome_diag_scan *s)
 {
 	kgenome_ledger_release(&s->led, s->emu_charged);
@@ -258,6 +283,9 @@ struct kgenome_emu *kgenome_diag_emu_build_rel_image(struct kgenome_diag_scan *s
 	memset(&cfg, 0, sizeof cfg);
 	cfg.max_insn = s->bud.max_insn;
 	cfg.max_pages = kgenome_diag_emu_pages_charge(s);
+	cfg.account = kgenome_diag_emu_account;
+	cfg.account_user = s;
+	cfg.insn_spent = s->bud.insn_spent;
 	cfg.bits = obj->arch == KGENOME_ARCH_X86_64 ? 64u : 32u;
 	em = kgenome_emu_new(&cfg);
 	if (!em) {
@@ -315,8 +343,30 @@ struct kgenome_emu *kgenome_diag_emu_build_rel_image(struct kgenome_diag_scan *s
 	 * came from, and so that a program adding a field offset to it stays
 	 * inside that page and stays attributable.
 	 */
+	/*
+	 * HOW MUCH OF THE ARENA TO MAP follows the object: a producer is a node, and a node past the
+	 * last page has no token, so a module with more call sites than the old fixed 256 pages
+	 * lost the links of every producer after the 256th. Pages are the page budget, so the arena
+	 * takes up to half of what the image and the stack leave, never less than the old 256.
+	 */
+	{
+		uint64_t img_pages = (size + KGENOME_DIAG_REL_SLACK) / KGENOME_EMU_PAGE + 1u + 16u + 8u;
+		uint64_t left = cfg.max_pages > img_pages ? cfg.max_pages - img_pages : 0u;
+		uint64_t nodes = kgenome_diag_scan_count(s);
+		uint64_t want = nodes + nodes / 4u + 64u, lim = KGENOME_DIAG_TOK_SPAN;
+
+		if (want > lim && left / 2u >= want + KGENOME_DIAG_TOK_SPAN)
+			lim = want;
+		else if (want > lim && left / 2u > 2u * KGENOME_DIAG_TOK_SPAN)
+			lim = left / 2u - KGENOME_DIAG_TOK_SPAN;
+		if (lim > KGENOME_DIAG_TOK_MAX - KGENOME_DIAG_TOK_SPAN)
+			lim = KGENOME_DIAG_TOK_MAX - KGENOME_DIAG_TOK_SPAN;
+		s->rel_tok_lim = (uint32_t)lim;
+		s->rel_tok_span = lim > KGENOME_DIAG_TOK_SPAN ? (uint32_t)lim + KGENOME_DIAG_TOK_SPAN
+							      : KGENOME_DIAG_TOK_SPAN;
+	}
 	if (!kgenome_emu_map(em, KGENOME_DIAG_TOK_BASE, 0, 0,
-			 KGENOME_DIAG_TOK_SPAN * KGENOME_EMU_PAGE,
+			 (uint64_t)s->rel_tok_span * KGENOME_EMU_PAGE,
 			 KGENOME_EMU_R | KGENOME_EMU_W)) {
 		rel_image_fail(s, em);
 		return 0;

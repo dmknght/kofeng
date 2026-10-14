@@ -699,6 +699,20 @@ static void emu_gather_regions(struct kof_scanner *sc,
 			sc->emu.n_rgn++;
 		}
 	}
+	/* What the engine now holds for this run: the assembled image and the copies
+	 * of the written regions. Charged here, once, and given back when freed or
+	 * handed to the child (oc_emu_take). */
+	{
+		uint64_t held = sc->emu.own && g->img_p == sc->emu.own ? g->img_n : 0u;
+		uint32_t q;
+
+		for (q = 0; q < sc->emu.n_rgn; q++)
+			if (sc->emu.rgn[q].own)
+				held += sc->emu.rgn[q].n;
+		oc_scan_release(sc, sc->emu.held);
+		sc->emu.held = held;
+		scan_charge(sc, held);
+	}
 	if (KOF_TRACING) {
 		uint32_t q;
 
@@ -812,6 +826,19 @@ uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx,
 	 * would have found the same thing. The flag is worth more kept for the
 	 * case it is true of.
 	 */
+	/*
+	 * WHICH BOUND OF THE MACHINE REFUSED SOMETHING, said to the object.
+	 *
+	 * kgenome_emu_hit is the set of bounds that cut the run's answer: a declared
+	 * range or pattern it would not take, a snapshot the byte budget would not
+	 * hold, a mapping past the live ceiling, a written run it had no buffer for.
+	 * Each is a run that is not the whole answer, and none of them was visible to
+	 * the object - only the budget STOP was, and that is the one that is not a
+	 * loss (see above). `decl_cut` is the same for what the declaration held
+	 * past its arrays.
+	 */
+	if (kgenome_emu_hit(e) || rep.decl_cut)
+		oc_scan_limit(sc);
 	/* KEPT, not freed: the regions above point into it. */
 	sc->emu.live = e;
 	sc->emu.paused = 0;

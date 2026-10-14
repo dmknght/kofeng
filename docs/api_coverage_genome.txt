@@ -648,6 +648,8 @@ phenotype/diag_scan.h              func   kgenome_diag_str_at                   
 phenotype/diag_scan.h              func   kgenome_diag_str_at_node                     caps_sweep.c                       hostile_lifetime.c
 phenotype/diag_scan.h              func   kgenome_diag_str_count                       diag_str.c, silent_loss_genome.c   hostile_lifetime.c
 phenotype/diag_scan.h              func   kgenome_diag_walk_free                       diag_code_run.c                    api_diag.c, hostile_lifetime.c
+phenotype/diag_scan.h              func   kgenome_diag_walk_held_count                 UNTESTED (new)                     decode_held.c
+phenotype/diag_scan.h              func   kgenome_diag_walk_hold                       UNTESTED (new)                     decode_held.c
 phenotype/diag_scan.h              func   kgenome_diag_walk_new                        diag_code_run.c                    api_diag.c
 phenotype/diag_scan.h              macro  KGENOME_DIAG_FROM_STACK                      diag_nodes.c                       api_constants.c
 phenotype/diag_scan.h              macro  KGENOME_DIAG_H_ARG_UNKNOWN                   diag_nodes.c                       api_constants.c

@@ -155,6 +155,20 @@ struct kuncoat_lzx_req {
  * decoded - because a caller that was stopped or truncated still needs to know
  * how much of its file it got. `io->consumed` is always 0: an LZX stream is
  * framed by its container, which knows where it ends.
+ *
+ * STATUS. OK when `rq->take` bytes were handed on. The input ending first is
+ * TRUNCATED, and nothing is decoded from the zeroes the reader feeds past the end
+ * (a match whose length or offset bits came from them is not output). A sink that
+ * refuses, including at the final flush of a stream that had already run out of
+ * input, is STOPPED: the receiver's refusal outranks the stream's state. A NULL
+ * `st`, `rq` or `io`, a NULL sink, or a NULL input with a length is BAD_ARG.
+ *
+ * HUFFMAN CODES. Over-subscribed lengths are CORRUPT. Incomplete sets are accepted,
+ * as they always were: the walk refuses a bit pattern no code owns as CORRUPT, so
+ * an accepted gap is reachable only by a stream that uses it. [Unverified] whether
+ * the LZX specification lets a conforming encoder emit one; no check was made
+ * against it, and the behaviour is kept rather than guessed at. A slice that ends
+ * inside the last frame is complete (`take` is honoured to the byte).
  */
 enum kuncoat_status kuncoat_lzx_decode(struct kuncoat_lzx *st,
 				      const struct kuncoat_lzx_req *rq,

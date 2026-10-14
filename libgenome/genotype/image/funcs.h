@@ -87,6 +87,17 @@ void kgenome_funcs_remap(const uint8_t *par, uint64_t par_n,
 		     const struct kgenome_func_set *pf, const uint8_t *view,
 		     uint64_t view_n, struct kgenome_func_set *out);
 
+/*
+ * The same, for a view whose byte order was changed (endian.h): each function is
+ * looked for as the plan leaves it. A function that straddles nothing the plan
+ * claims is found exactly as in kgenome_funcs_remap.
+ */
+struct kgenome_endian_plan;
+void kgenome_funcs_remap_endian(const uint8_t *par, uint64_t par_n,
+			    const struct kgenome_func_set *pf,
+			    const struct kgenome_endian_plan *plan, const uint8_t *view,
+			    uint64_t view_n, struct kgenome_func_set *out);
+
 
 /*
  * The builders of the two formats, which kgenome_funcs_build chooses between.

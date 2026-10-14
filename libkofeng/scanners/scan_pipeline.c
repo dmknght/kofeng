@@ -12,6 +12,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include "../kofcore/kofmod/heur.h"
 #include <stdlib.h>
 #include <string.h>
@@ -62,13 +63,13 @@ static void st_facts(struct kof_pipeline *p)
 	kof_mod_attach(&p->ctx, sc);
 	sx_obj_begin(sc);
 	/*
-	 * A CALLER THAT WANTS THE REPORT WANTS EVERY DIAGNOSE COMPUTED IN THE ONE
-	 * ANALYSIS, so it is said at the start of the object and not discovered
-	 * at the end. Decided late, the scan that had already run without the
-	 * diagnoses no verdict reads would have to be thrown away and run again -
-	 * the same object analysed twice for one answer.
+	 * EVERY DIAGNOSE ONLY WHEN THE CALLER ASKED FOR THE REPORT, and it is
+	 * said at the start of the object so the one analysis covers them all and
+	 * is not run twice. A scan that did not ask computes what some reader
+	 * needs: a rule that names a diagnose, or a diagnose that declares a
+	 * disease the verdict reads - see diag_has_reader.
 	 */
-	sc->obj.diag.all = 1;
+	sc->obj.diag.all = opt && opt->report_diag != 0;
 
 	/*
 	 * How big the object is, before anything tries to sx_identify it.
@@ -195,6 +196,12 @@ static void st_facts(struct kof_pipeline *p)
 	 * kof_mutation_begin - and it is what makes "this object fed nothing" read
 	 * as nothing rather than as whatever the last object fed.
 	 */
+	/* What the last object's state was charged to the ledger is given back with it. */
+	oc_scan_release(sc, sc->mutation.ledgered);
+	sc->mutation.ledgered = 0;
+	/* And what the last object's found-table grew to (scan_feed.c, sx_multi_prepass). */
+	oc_scan_release(sc, sc->match.pix_ledgered);
+	sc->match.pix_ledgered = 0;
 	kof_mutation_begin(&sc->mutation);
 	/*
 	 * THIS OBJECT'S DESCRIPTOR IS NOT THE LAST ONE'S.
@@ -231,22 +238,18 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 	 */
 	{
 		const struct kof_engine *e = sc->eng;
-		uint32_t lo = 0, hi = e->n_mods, k;
-		const uint32_t *ix = NULL;
+		struct kof_mod_walk walk;
+		uint32_t mi;
 
-		if (e->mod_by_target && p->ctx.format < KOF_TARGET_COUNT) {
-			ix = e->mod_by_target;
-			lo = e->mod_at[p->ctx.format];
-			hi = e->mod_at[p->ctx.format + 1u];
+		kof_mod_walk_begin(&walk, e, p->ctx.format);
+		if (walk.indexed && !similarity) {
 			/* Once per object: the second call is the same run's other half. */
-			if (!similarity) {
-				sc->st.considered += e->n_mods - (hi - lo);
-				sc->st.by_target  += e->n_mods - (hi - lo);
-			}
+			sc->st.considered += e->n_mods - kof_mod_walk_count(&walk);
+			sc->st.by_target  += e->n_mods - kof_mod_walk_count(&walk);
 		}
 
-	for (k = lo; k < hi; k++) {
-		const struct kof_module *m = &e->mods[ix ? ix[k] : k];
+	while (kof_mod_walk_next(&walk, &mi)) {
+		const struct kof_module *m = &e->mods[mi];
 		struct kof_finding *f;
 
 		if ((m->n_block != 0) != (similarity != 0))
@@ -311,29 +314,31 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 		f = sx_mod_report(sc, &p->ctx, opt, out, m, sc->mod.rep_level);
 
 		/*
-		 * Stop unless the caller asked for everything - AND ONLY AT AN
-		 * INFECTION. The remaining modules can only lengthen a list that
-		 * already says the object is not clean, and on a database of any size
-		 * that is most of the work; but a SUSPECTED is not that answer, it is a
-		 * weaker one, and stopping on it hid the INFECTED further down the
-		 * database: an object carrying both was reported as merely suspected
-		 * because the weaker rule sorted first (tests/unit/scan_logic.c). A
-		 * result with no room left for another finding is also the end.
+		 * AN INFECTION ENDS THE STAGE unless the caller asked for everything, or
+		 * the database has something that reads what the rest would add - and
+		 * ONLY AN INFECTION: a SUSPECTED is a weaker answer, and stopping on it
+		 * hid the INFECTED further down the database (tests/unit/scan_logic.c).
 		 *
-		 * It saves nothing on a clean object, which is nearly every object -
-		 * this is a bound on the worst case, not a throughput win.
+		 * The stop was dropped with the legacy verdict, for a reason that holds
+		 * where diseases are declared: the verdict is read off the SET of them,
+		 * a detector found first is not the answer, and a result with no room
+		 * left for another finding is not the end either - the disease is added
+		 * to the set before its finding is counted as dropped (sx_mod_report;
+		 * tests/unit/verdict_branches.c: the disease sorted after sixteen
+		 * fillers was never run).
+		 *
+		 * It does not hold where no module and no diagnose declares one: the set
+		 * is empty for every object, no detector reached from here can change the
+		 * verdict, and each module after the first infection only adds a finding
+		 * to a list the caller did not ask for - while a rule that reads a
+		 * diagnose pays for the analysis of an object already known to be
+		 * infected. So the stop depends on the DATABASE (kof_engine.reads_diseases)
+		 * and never on the object, and a caller that wants every finding says so
+		 * (all_matches).
 		 */
-		/*
-		 * The diseases are a SET and the verdict is read off all of it: a
-		 * detector found first is not the answer. A result with no room left
-		 * for another FINDING is not the end either - a detector that reports
-		 * still adds its disease to the set before its finding is counted as
-		 * dropped (sx_mod_report), and stopping here made every detector
-		 * after the sixteenth finding invisible to the verdict
-		 * (tests/unit/verdict_branches.c: the disease sorted after the
-		 * fillers was never run). Only a request to stop, above, ends it.
-		 */
-		(void)f;
+		if (f && f->level == KOF_LEVEL_INFECT && !opt->all_matches &&
+		    !e->reads_diseases)
+			break;
 	}
 	}
 
@@ -362,6 +367,10 @@ static void st_detect(struct kof_pipeline *p)
 	sc->st.searches       += sc->match.m.n_calls;
 	sc->st.bytes_searched += sc->match.m.n_bytes_scanned;
 	sc->st.gram_bytes     += sc->match.m.n_bytes_indexed;
+	/* A hex walk that could not look (no memory for the wide walk) is a "no" that
+	 * is not evidence: the object says so (the result at the verdict stage). */
+	if (sc->match.m.n_hex_cut)
+		oc_scan_limit(sc);
 }
 
 /*
@@ -552,8 +561,10 @@ static void st_verdict(struct kof_pipeline *p)
 	 * nothing would otherwise read it until the VERDICT phase, and a
 	 * rule there would find a graph that had never been built.
 	 */
-	if (sc->obj.diag.ask)
+	if (sc->obj.diag.ask) {
 		kof_scan_diag_force(&p->ctx);
+		oc_diag_trace_scan(sc);
+	}
 
 	(void)sx_heur_run(sc, &p->ctx, opt, out, KOF_HEUR_VERDICT, p->present, NULL);
 }
@@ -720,6 +731,10 @@ static void st_syndrome(struct kof_pipeline *p)
 {
 	p->out->has_syndrome = (uint8_t)(kof_scan_syndrome(&p->ctx, &p->out->syndrome) != 0);
 	sx_syndrome_verdict(p->sc, &p->ctx, p->opt, p->out, &p->out->syndrome);
+	/* A bound cut this object's evidence (oc_scan_limit): the result says so, over
+	 * no earlier reason - and a clean answer is not given for it. */
+	if (p->sc->obj.open.cut && !p->out->broken)
+		p->out->broken = KOF_BROKEN_LIMIT;
 }
 
 static void st_report(struct kof_pipeline *p)
@@ -993,4 +1008,12 @@ void sx_scan_object(struct kof_scanner *sc, kof_buf buf,
 	sx_pipeline_run(&p);
 	/* What this object learned is shared with the renderings of it it made. */
 	kof_prod_publish(sc);
+	/*
+	 * AND WHAT THE FILE SIZED IS GIVEN BACK: the tables of its parsed view (zip, pdf) and
+	 * the extent buffers that grew for it. Nothing reads either after the pipeline - the
+	 * children are already collected, and the next object parses its own - so holding
+	 * them would charge the ledger, for the rest of the tree, for the structure of an
+	 * object that is finished.
+	 */
+	sx_views_release(sc);
 }

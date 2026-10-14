@@ -113,8 +113,9 @@ static void run_one(const char *what, uint8_t *code, uint32_t n)
 		fail("the run went past its instruction budget");
 	if (st == KGENOME_EMU_STOP_UNSUPPORTED || st == KGENOME_EMU_STOP_DECODE)
 		fail("the stub did not assemble to what this test meant");
-	if (snaps > KGENOME_EMU_MAX_SNAP)
-		fail("more snapshots were kept than the ceiling allows");
+	/* A ceiling that was reached says so: the run's exit is clean, so this is the only signal. */
+	if (code == snap_loop && !(kgenome_emu_hit(e) & KGENOME_EMU_HIT_SNAP))
+		fail("the snapshot byte budget refused a copy without kgenome_emu_hit saying so");
 	/* Copies must not outgrow the address space the guest was given. */
 	if (held > (uint64_t)PAGES * KGENOME_EMU_PAGE)
 		fail("snapshots hold more than the guest's whole address space");

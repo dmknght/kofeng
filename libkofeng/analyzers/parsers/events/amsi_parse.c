@@ -160,12 +160,20 @@ int kof_amsi_parse(kof_buf b, void *view, struct kof_obj_ctx *ctx)
 	return 1;
 }
 
+/*
+ * The enumerator is the name, like every other parser's row: kof_region_mask_of
+ * finds a region by the word a signature source spells, and METADATA/OBJDATA
+ * were words no source spells, so a lookup by enumerator answered KOF_SCAN_ALL
+ * for a region this format has. An unknown bit is NULL, as everywhere else
+ * (tests/unit/api_engine_parsers.c).
+ */
+#define X_CASE(b) case (b): return #b;
 const char *kof_amsi_region_name(uint32_t bit)
 {
 	switch (bit) {
-	case KOF_SCAN_AMSI_META: return "METADATA";
-	case KOF_SCAN_AMSI_OBJ:  return "OBJDATA";
-	default:                 return "?";
+	AMSI_REGIONS(X_CASE)
+	default: return NULL;
 	}
 }
+#undef X_CASE
 

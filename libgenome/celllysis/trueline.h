@@ -58,6 +58,16 @@ struct kgenome_true_result {
 struct kgenome_true_all {
 	struct kof_range span[KGENOME_TRUE_MAX_SPANS_ALL];
 	uint32_t n;
+	/*
+	 * 1 WHEN span[0..n) IS SORTED BY OFFSET WITH THE ENDS NON-DECREASING - what
+	 * kof_rl_normalise leaves, and every producer below ends in it. The question
+	 * kgenome_true_touches is asked once per RECORD of a symbol block (531 717
+	 * times over 234 dynamic ELF, 22 500 instructions each, 19 % of the whole
+	 * scan) and a sorted list answers it by a binary search. A list a caller
+	 * filled by hand leaves this 0 and is read the long way, which is the same
+	 * answer. Appended: no field above moved.
+	 */
+	uint8_t  sorted;
 };
 
 /*

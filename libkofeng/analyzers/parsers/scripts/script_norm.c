@@ -279,15 +279,40 @@ static uint32_t text_len(const char *t)
 	return l;
 }
 
-/* Does a line comment start here, and how long is its opener. */
+/*
+ * Does a line comment start here, and how long is its opener.
+ *
+ * AN OPENER THAT IS A WORD (REM) IS A KEYWORD, not a byte string: it is matched in
+ * any case - `rem` is as much a comment in cmd and VBScript as `REM` - and only as a
+ * whole word, which the exact compare was not asking: `REMOTE=1` read as a comment,
+ * and so did the `REM` inside `PREMIUM`. Symbol openers ("//", "#", "::", "'") stay
+ * an exact compare.
+ */
 static uint32_t line_cmt_at(const struct kof_lex *lx, const uint8_t *p,
 			    uint32_t n, uint32_t i)
 {
 	int k;
 
-	for (k = 0; k < 3; k++)
-		if (at_text(p, n, i, lx->line_cmt[k]))
-			return text_len(lx->line_cmt[k]);
+	for (k = 0; k < 3; k++) {
+		const char *t = lx->line_cmt[k];
+		uint32_t l = text_len(t), q;
+
+		if (!l)
+			continue;
+		if (!kof_is_alpha((uint8_t)t[0])) {
+			if (at_text(p, n, i, t))
+				return l;
+			continue;
+		}
+		if (i + l > n || (i && is_word(p[i - 1u])) ||
+		    (i + l < n && is_word(p[i + l])))
+			continue;
+		for (q = 0; q < l; q++)
+			if (kof_lower_byte(p[i + q]) != kof_lower_byte((uint8_t)t[q]))
+				break;
+		if (q == l)
+			return l;
+	}
 	return 0;
 }
 
@@ -467,21 +492,28 @@ int kof_lex_is_code_at(const struct kof_lex *lx, const uint8_t *p, uint32_t n,
 				st = ST_OUT;
 			continue;
 		}
-		cl = line_cmt_at(lx, p, n, i);
-		if (cl) {
-			/* Skip the rest of the comment line in one step - the
-			 * same stopping point the byte loop reached: the first
-			 * '\n' at or after i, or `at`. The for above holds
-			 * i < at, so the length is never zero. */
-			const uint8_t *e = memchr(p + i, '\n',
-						  (size_t)(at - i));
-
-			i = e ? (uint32_t)(e - p) : at;
-			continue;
-		}
+		/* The block opener first, as the pass itself asks: Lua's "--[[" begins
+		 * with its own line comment "--", and read the other way round a block
+		 * comment was a line comment that ended at the newline. */
 		if (lx->blk_open && at_text(p, n, i, lx->blk_open)) {
 			i += text_len(lx->blk_open) - 1u;
 			st = ST_BLK;
+			continue;
+		}
+		cl = line_cmt_at(lx, p, n, i);
+		if (cl) {
+			/* Skip the rest of the comment line in one step. The for above holds
+			 * i < at, so the length is never zero. A comment with no newline
+			 * before `at` runs past it: the byte is IN the comment (the newline
+			 * that ends the line is not). It left `st` at ST_OUT, so
+			 * `# <?php` in a python script and `// eval(` in a php one read
+			 * as code, and the sniff took a file that talks about php for one. */
+			const uint8_t *e = memchr(p + i, '\n',
+						  (size_t)(at - i));
+
+			if (!e)
+				return p[at] == '\n';
+			i = (uint32_t)(e - p);
 			continue;
 		}
 		k = ml_at(lx, p, n, i);
@@ -667,6 +699,36 @@ static int norm_resume_blk(struct norm_pass *N, struct norm_line *L)
 	uint32_t j = L->ls;
 
 	/*
+	 * A BLOCK COMMENT KEPT (no KOF_NORM_COMMENT) IS COPIED, like any other bytes
+	 * of the line - newline included while it stays open.
+	 */
+	if (!(N->what & KOF_NORM_COMMENT)) {
+		uint32_t w = N->w;
+
+		while (j < L->le) {
+			if (at_text(N->in, N->n, j, N->lx->blk_close)) {
+				uint32_t t = text_len(N->lx->blk_close);
+
+				while (t--)
+					N->out[w++] = N->in[j++];
+				N->st = ST_OUT;
+				break;
+			}
+			N->out[w++] = N->in[j++];
+		}
+		if (N->st == ST_BLK || j >= L->le) {
+			if (L->le < N->n)
+				N->out[w++] = '\n';
+			N->i = L->le < N->n ? L->le + 1u : L->le;
+			N->w = w;
+			return 1;
+		}
+		L->ls = j;
+		N->w = w;
+		return 0;
+	}
+
+	/*
 	 * A BLOCK COMMENT THAT IS STILL OPEN OWNS THE WHOLE LINE.
 	 * Nothing on it is code, so it is dropped with the comment
 	 * lines - and the close is looked for as the line is walked.
@@ -801,9 +863,20 @@ static void norm_join_brace(struct norm_pass *N, struct norm_line *L)
 	 * became "...$destination)// Thanks to Alix Axel{", and every
 	 * brace after it was one level out.
 	 */
+	/*
+	 * ALONE MEANS NOTHING BUT WHITESPACE AFTER IT, not that the line is one byte
+	 * long: a Windows copy of the file has a carriage return behind the brace
+	 * ("{\r"), as does any brace with a blank behind it, and those never joined - so
+	 * the LF copy of an Allman-braced file formed to `if(x){` and its CRLF copy to
+	 * `if(x)` and `{` on two lines, and a marker written on one missed the other.
+	 */
+	uint32_t ce = L->le;
+
+	while (ce > L->body && is_ws(in[ce - 1u]))
+		ce--;
 	if ((what & KOF_NORM_BRACE) && !lx->ws_significant && !L->resumed &&
 	    !N->cmt_tail &&
-	    L->le == L->body + 1u && in[L->body] == '{' && w > 0 &&
+	    ce == L->body + 1u && in[L->body] == '{' && w > 0 &&
 	    out[w - 1u] == '\n') {
 		w--;                    /* take back the newline */
 		/*
@@ -837,6 +910,7 @@ static void norm_walk_line(struct norm_pass *N, struct norm_line *L)
 	uint32_t le = L->le;
 	int tail = L->tail;
 	uint32_t j = L->ls;
+	uint32_t w0 = w;
 
 	/* ---- the line itself ---- */
 
@@ -847,8 +921,19 @@ static void norm_walk_line(struct norm_pass *N, struct norm_line *L)
 				uint32_t cl;
 
 				if (at_text(in, n, j, lx->blk_open)) {
+					uint32_t t = text_len(lx->blk_open);
+
 					st = ST_BLK;
-					j += text_len(lx->blk_open);
+					/* KOF_NORM_COMMENT is what drops comments; without it
+					 * the comment is copied like any other bytes. The walk
+					 * took inline block comments out whatever was asked,
+					 * so a caller that wanted only SPACE lost them. */
+					if (what & KOF_NORM_COMMENT) {
+						j += t;
+					} else {
+						while (t--)
+							out[w++] = in[j++];
+					}
 					continue;
 				}
 				cl = line_cmt_at(lx, in, n, j);
@@ -946,9 +1031,34 @@ static void norm_walk_line(struct norm_pass *N, struct norm_line *L)
 				continue;
 			}
 			if (st == ST_BLK) {
+				if (!(what & KOF_NORM_COMMENT)) {
+					/* kept: its bytes and its closer are copied */
+					if (at_text(in, n, j, lx->blk_close)) {
+						uint32_t t = text_len(lx->blk_close);
+
+						while (t--)
+							out[w++] = in[j++];
+						st = ST_OUT;
+					} else {
+						out[w++] = in[j++];
+					}
+					continue;
+				}
 				if (at_text(in, n, j, lx->blk_close)) {
 					st = ST_OUT;
 					j += text_len(lx->blk_close);
+					/*
+					 * A COMMENT TAKEN OUT IS A GAP, not nothing: `if`, a block
+					 * comment, `then` fused into `ifthen` and `var`, a comment, `x`
+					 * into `varx`, the very thing closing up must never do - two
+					 * tokens in the form that are one program in the file. When the bytes either side would
+					 * make one token (two word bytes, or a longer operator), one
+					 * space stands where the comment was.
+					 */
+					if (w && j < le &&
+					    ((is_word(out[w - 1u]) && is_word(in[j])) ||
+					     glues(lx, out[w - 1u], in[j])))
+						out[w++] = ' ';
 				} else {
 					j++;
 				}
@@ -977,6 +1087,15 @@ static void norm_walk_line(struct norm_pass *N, struct norm_line *L)
 		 * case out - it had not, and the reset is what let a
 		 * string's second line be walked as code.
 		 */
+	/*
+	 * KOF_NORM_EOL: a carriage return that ends a line is not part of the line. Only
+	 * where the line ended outside a literal - inside a string, a heredoc or a
+	 * multi-line literal the bytes are the value. (It was declared and never read: the
+	 * carriage return went only as trailing whitespace, and only with SPACE asked.)
+	 */
+	if ((what & KOF_NORM_EOL) && (st == ST_OUT || st == ST_BLK) && w > w0 &&
+	    out[w - 1u] == '\r')
+		w--;
 	N->w = w;
 	N->st = st;
 	N->ml_k = ml_k;

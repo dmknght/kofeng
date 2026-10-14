@@ -14,6 +14,11 @@
 
 #include <stdio.h>
 #include <kofdebug.h>
+
+/* A bound or an allocation of the machine refused: sticky in kgenome_emu_hit(), and in a DEBUG
+ * build one "[cut]" line naming the place and the thing. `bit` is a KGENOME_EMU_HIT_* word. */
+#define KGENOME_EMU_REFUSED(e, bit, what) \
+	do { (e)->hit |= (bit); KOF_TRACE("[cut] %s: %s\n", __func__, (what)); } while (0)
 #include <kofcore.h>   /* kof_ld_le16/32 */
 #include <kofcmp.h>
 #include <stdlib.h>
@@ -146,13 +151,29 @@ struct kgenome_emu_page {
  */
 struct kgenome_emu_wrange { uint64_t lo, hi; };
 
-static inline void kgenome_emu_wrange_add(struct kgenome_emu_wrange *r, uint32_t *n, uint64_t lo, uint64_t hi)
+/* A growing table of ranges: `*r` has room for `*cap`, `*n` are in use, and `max` is the ceiling
+ * (the page budget). 1 when the range is kept or there was nothing to keep (empty), 0 when the
+ * ceiling or the allocator refused it - the caller records that, it is not a silent drop. */
+static inline int kgenome_emu_wrange_add(struct kgenome_emu_wrange **r, uint32_t *n, uint32_t *cap,
+					 uint32_t max, uint64_t lo, uint64_t hi)
 {
-	if (hi <= lo || *n >= KGENOME_EMU_EXEC_WATCH)
-		return;
-	r[*n].lo = lo;
-	r[*n].hi = hi;
+	if (hi <= lo)
+		return 1;
+	if (*n >= (max > KGENOME_EMU_EXEC_WATCH ? max : KGENOME_EMU_EXEC_WATCH))
+		return 0;
+	if (*n == *cap) {
+		uint32_t m = *cap ? *cap * 2u : KGENOME_EMU_EXEC_WATCH;
+		struct kgenome_emu_wrange *t = realloc(*r, (size_t)m * sizeof **r);
+
+		if (!t)
+			return 0;
+		*r = t;
+		*cap = m;
+	}
+	(*r)[*n].lo = lo;
+	(*r)[*n].hi = hi;
 	(*n)++;
+	return 1;
 }
 
 static inline int kgenome_emu_wrange_has(const struct kgenome_emu_wrange *r, uint32_t n, uint64_t va)
@@ -169,6 +190,11 @@ struct kgenome_emu {
 	struct kgenome_emu_page *tab;
 	uint32_t     tab_mask;        /* size - 1; size is a power of two */
 	uint32_t     n_pages, max_pages;
+	/* The caller's accounting (cfg.account): what it has been asked for, and the
+	 * part of that granted for private pages and not yet used. */
+	int        (*account)(void *user, int64_t bytes);
+	void        *account_user;
+	uint64_t     acct, page_credit;
 
 	/*
 	 * THE LAST PAGE LOOKED UP, so a run of bytes in one page pays for one
@@ -189,6 +215,7 @@ struct kgenome_emu {
 	uint64_t flags;               /* only the six that matter, see FL_* */
 
 	uint64_t max_insn, insn;
+	uint64_t *insn_spent;   /* kgenome_emu_cfg.insn_spent: added to once, at free */
 	uint64_t idle;          /* KGENOME_EMU_IDLE unless set */
 	uint64_t deadline_ms;   /* wall clock; 0 for none */
 	uint64_t started_ms;
@@ -196,8 +223,8 @@ struct kgenome_emu {
 	/* Instruction patterns a module asked to be paused on - see
 	 * kgenome_emu_watch_insn. `iw_len` is the whole instruction's length when
 	 * the module pinned it, 0 when it did not. */
-	struct { uint8_t b[KGENOME_EMU_INSN_WATCH_LEN]; uint8_t n; } iw[KGENOME_EMU_INSN_WATCH];
-	uint32_t n_iw;
+	struct kgenome_emu_iw { uint8_t b[KGENOME_EMU_INSN_WATCH_LEN]; uint8_t n; } *iw;
+	uint32_t n_iw, cap_iw;
 	unsigned iw_len;
 	/* Whether guest code is what is executing - see `gwritten`. The host
 	 * prepares the image before this is set and after it is cleared. */
@@ -378,7 +405,10 @@ struct kgenome_emu {
 	 * as that relative index already, so a case here never computes it.
 	 */
 	double   st[8];
-	uint8_t  st_tag[8];     /* 0 empty, 1 valid */
+	/* 0 empty; 1 in use, its tag read off the value (valid, zero or special); 2-4 in use with the tag a restore loaded
+	 * (FLDENV, FRSTOR): valid, zero, special - 2 + the architectural 2-bit tag. The next write of the register makes
+	 * it 1 again. */
+	uint8_t  st_tag[8];
 	uint8_t  st_top;
 	/*
 	 * The status word's condition codes. C0, C2 and C3 are what a compare
@@ -386,6 +416,13 @@ struct kgenome_emu {
 	 * the stack-fault direction and nothing here reads it.
 	 */
 	uint16_t fsw;
+	/*
+	 * The control word (FLDCW sets it, FNSTCW, FNSTENV and FXSAVE report it, FINIT resets it to 037FH) and
+	 * the opcode of the last non-control x87 instruction (FOP, 11 bits). Only its RC field is acted on, by
+	 * FIST/FISTP and FRNDINT; every exception stays masked and the arithmetic rounds to nearest.
+	 */
+	uint16_t fcw;
+	uint16_t fop;
 
 	/* The thread pointer, as arch_prctl set it - or, for a Windows guest,
 	 * as emu_unpack_pe_teb.c's thread block builder set it. */
@@ -398,8 +435,8 @@ struct kgenome_emu {
 	 * run cannot reach any of it.
 	 */
 	/* Regions where ENTERING means the loader has handed over. */
-	struct kgenome_emu_wrange xwatch[KGENOME_EMU_EXEC_WATCH];
-	uint32_t n_xwatch;
+	struct kgenome_emu_wrange *xwatch;
+	uint32_t n_xwatch, cap_xwatch;
 	/*
 	 * Whether the last instruction fetched was already inside one of them.
 	 *
@@ -411,8 +448,8 @@ struct kgenome_emu {
 	int xw_was_in, xw_have_prev;
 	/* Ranges whose first WRITE means the loader is decrypting the program
 	 * - see kgenome_emu_watch_write. */
-	struct kgenome_emu_wrange wwatch[KGENOME_EMU_EXEC_WATCH];
-	uint32_t n_wwatch;
+	struct kgenome_emu_wrange *wwatch;
+	uint32_t n_wwatch, cap_wwatch;
 	int      wwatch_hit;
 	uint64_t stub_lo, stub_hi;
 	uint64_t img_lo, img_hi;   /* the image, for the dump at the handover */
@@ -423,8 +460,10 @@ struct kgenome_emu {
 	uint64_t oep_cand_insn, oep_cand_rip;
 	int      img_dumped;
 	uint64_t stack_lo, stack_hi;
-	struct { uint64_t lo, hi; uint8_t seen; } hop[KGENOME_EMU_EXEC_WATCH];
-	uint32_t n_hop;
+	struct kgenome_emu_hop { uint64_t lo, hi; uint8_t seen; } *hop;
+	uint32_t n_hop, cap_hop;
+	/* Which bounds refused something: enum kgenome_emu_hit_bit, sticky. */
+	unsigned hit;
 	/*
 	 * THE SPAN OF THE HOPS NOT YET ENTERED, so the per-instruction test is one
 	 * range compare and not a walk of the table. MEASURED on a 5.5 MB PE with
@@ -443,6 +482,15 @@ struct kgenome_emu {
 	uint32_t n_shim;
 	char     win_fake[16][32]; /* libraries handed a handle with no image - see win_fake_lib */
 	uint32_t n_win_fake;
+	/*
+	 * The size of every block HeapAlloc/RtlAllocateHeap/HeapReAlloc handed out, for HeapSize and for the copy
+	 * HeapReAlloc owes. The arena only grows, so blocks are appended in address order and found by binary
+	 * search; a freed block keeps its entry with `size` = KGENOME_EMU_HBLK_FREED. One entry (16 bytes) per
+	 * block, and a block is at least a page of guest memory that the run is already charged for, so the table
+	 * follows the guest's allocations and needs no cap of its own.
+	 */
+	struct kgenome_emu_hblk { uint64_t va, size; } *hblk;
+	uint32_t hblk_n, hblk_cap;
 	uint64_t cmdline[2];   /* [0] ANSI, [1] UTF-16; 0 until asked for */
 	uint64_t hop_last_rip;
 	uint32_t hop_count;
@@ -572,6 +620,8 @@ struct kgenome_emu {
 	 * FNSTENV reports it, and that report is the only reason x87 is here at
 	 * all - see the note on the FPU cases in the run loop. */
 	uint64_t fpu_rip;
+	/* The operand address of the last x87 instruction that had a memory operand (FDP). */
+	uint64_t fpu_dp;
 
 	/* When a page was last written to for the first time - the clock the
 	 * idle test below runs on. */
@@ -652,12 +702,16 @@ struct kgenome_emu {
 	 * is 102 bytes with the NUL; at 96 it could be cut, and the compiler said so. */
 	char     detail[112];
 
-	/* Sorted page list, built on demand by kgenome_emu_next_written, and the
-	 * one run handed out at a time - freed when the next is asked for, so a
-	 * caller never has to. */
+	/* Sorted page list, built on demand by kgenome_emu_next_written (dropped when a page
+	 * is added or first written, so the next walk sees it), and the runs handed out:
+	 * every one stays owned here until the emulator is freed, as emu.h says. A run asked
+	 * for again is the same buffer, refreshed; `runs_bytes` is bounded by the page
+	 * budget, as the snapshots are, and `runs_refused` counts what that bound refused. */
 	uint64_t *sorted;
 	uint32_t  n_sorted;
-	uint8_t  *run_buf;
+	struct kgenome_emu_runbuf { uint64_t va; uint32_t npg; uint8_t *buf; } *runs;
+	uint32_t  n_runs, max_runs;
+	uint64_t  runs_bytes;
 };
 
 #define KGENOME_EMU_FL_CF  (1u << 0)
@@ -834,9 +888,12 @@ enum {
 
 /* ---- what one file offers another ---- */
 
-int kgenome_emu_page_own(struct kgenome_emu_page *p);
+int kgenome_emu_page_own(struct kgenome_emu *e, struct kgenome_emu_page *p);
 struct kgenome_emu_page *kgenome_emu_page_find(struct kgenome_emu *e, uint64_t va);
 struct kgenome_emu_page *kgenome_emu_page_add(struct kgenome_emu *e, uint64_t base, unsigned prot);
+int kgenome_emu_acct(struct kgenome_emu *e, uint64_t bytes);
+struct kgenome_emu_page *kgenome_emu_page_add_borrow(struct kgenome_emu *e, uint64_t base,
+				  unsigned prot, const uint8_t *src);
 struct kgenome_emu_page *kgenome_emu_page_add_zero(struct kgenome_emu *e, uint64_t base,
 		unsigned prot);
 int kgenome_emu_vma_add(struct kgenome_emu *e, uint64_t base, uint64_t len,
@@ -856,6 +913,10 @@ uint64_t kgenome_emu_tsc_read(struct kgenome_emu *e);
 uint64_t kgenome_emu_do_syscall(struct kgenome_emu *e, int *stop_out);
 uint64_t kgenome_emu_win_miss_thunk(struct kgenome_emu *e);
 uint64_t kgenome_emu_win_fake_lib(struct kgenome_emu *e, const char *name);
+uint64_t kgenome_emu_win_fake_find(const struct kgenome_emu *e, const char *name);
+#define KGENOME_EMU_HBLK_FREED (~(uint64_t)0)
+int kgenome_emu_win_heap_note(struct kgenome_emu *e, uint64_t va, uint64_t size);
+struct kgenome_emu_hblk *kgenome_emu_win_heap_find(const struct kgenome_emu *e, uint64_t va);
 int kgenome_emu_win_is_fake(const struct kgenome_emu *e, uint64_t h);
 uint64_t kgenome_emu_win_mod_of(struct kgenome_emu *e, const char *name);
 uint64_t kgenome_emu_win_arg(struct kgenome_emu *e, unsigned i);
@@ -886,6 +947,11 @@ void kgenome_emu_fl_add(struct kgenome_emu *e, uint64_t a, uint64_t b, uint64_t 
 		unsigned bytes);
 void kgenome_emu_fl_sub(struct kgenome_emu *e, uint64_t a, uint64_t b, uint64_t bin,
 		unsigned bytes);
+void kgenome_emu_op_keep(struct kgenome_emu *e, const struct kgenome_x86_op *op, uint64_t v);
+void kgenome_emu_fl_cfof(struct kgenome_emu *e, int on);
+int kgenome_emu_div(unsigned sz, int sgn, uint64_t hi, uint64_t lo, uint64_t d, uint64_t *q, uint64_t *r);
+void kgenome_emu_fault_de(struct kgenome_emu *e, int overflow);
+uint8_t *kgenome_emu_xmm_of(struct kgenome_emu *e, const struct kgenome_x86_op *op);
 int kgenome_emu_ea_of(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
 		uint64_t *out);
 int kgenome_emu_op_rd(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
@@ -915,8 +981,23 @@ int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 int kgenome_emu_run_shift(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 int kgenome_emu_run_sys(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 int kgenome_emu_run_vec(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
+int kgenome_emu_run_vec_int(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
+int kgenome_emu_run_vec_fp(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
+
+/* One lane of SSE floating point (emu_vec_fp.c): the operation, the operands as bits, MXCSR.RC. The answers
+ * are the architecture's for NaN, infinity, zero and the rounding; see that file. */
+enum { KGENOME_EMU_FP_ADD, KGENOME_EMU_FP_SUB, KGENOME_EMU_FP_MUL, KGENOME_EMU_FP_DIV, KGENOME_EMU_FP_MIN,
+       KGENOME_EMU_FP_MAX, KGENOME_EMU_FP_SQRT };
+uint64_t kgenome_emu_fpd(unsigned op, uint64_t ub, uint64_t vb, unsigned rc);
+uint32_t kgenome_emu_fps(unsigned op, uint32_t ub, uint32_t vb, unsigned rc);
+uint64_t kgenome_emu_f2d(uint32_t b);
+uint32_t kgenome_emu_d2f(uint64_t b, unsigned rc);
+uint32_t kgenome_emu_i2f(int64_t n, unsigned rc);
+uint64_t kgenome_emu_i2d(int64_t n, unsigned rc);
+uint64_t kgenome_emu_f2i(double d, unsigned w, int trunc_to_zero, unsigned rc);
 int kgenome_emu_run_x87(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 int kgenome_emu_run_bcd(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
+int kgenome_emu_run_ext(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 
 static inline struct kgenome_emu_page *kgenome_emu_page_lookup(struct kgenome_emu *e, uint64_t va)
 {

@@ -90,16 +90,20 @@ enum kuncoat_status kuncoat_lzw_decode(struct kuncoat_lzw *st, const uint8_t *in
 				      void *user, uint64_t *produced)
 {
 	struct out o;
-	uint64_t bitpos = 0, nbits = in_len * 8u;
+	uint64_t bitpos = 0, nbits = in_len * 8u, pd;
 	uint32_t next = LZW_FIRST, width = 9u, prev = KUNCOAT_LZW_CODES;
 	int ended = 0;
 
+	if (!produced)
+		produced = &pd;
+	*produced = 0;
+	if (!st || !sink || (!in && in_len))
+		return KUNCOAT_BAD_ARG;
 	o.sink = sink;
 	o.user = user;
 	o.held = 0;
 	o.total = 0;
 	o.stopped = 0;
-	*produced = 0;
 
 	while (bitpos + width <= nbits && !o.stopped) {
 		uint32_t code = 0, k;

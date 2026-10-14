@@ -4,11 +4,12 @@ Every entry below was checked by reading, not assumed: a name with no reference 
 definition and declaration, over .c .h .py .sh Makefile and the docs, with kofexamine/ counted
 as a user.
 
-1. TESTS-ONLY EXPORTS (62). Public functions whose only callers are tests. They are the
+1. TESTS-ONLY EXPORTS (73). Public functions whose only callers are tests. They are the
    surface a test drives (a boundary of the lib or the engine unit), and a function the test
    reaches by a name cannot be made static. Listed by defining file:
 
   libgenome/celllysis/mutation_pool.c: kgenome_mutation_core, kgenome_mutation_member
+  libgenome/celllysis/nucleo_sys.c: kgenome_nucleo_sys_ordered
   libgenome/celllysis/trueline.c: kgenome_true_find_all
   libgenome/genotype/arm32/arm32_index.c: kgenome_arm32_stats
   libgenome/genotype/arm64/arm64.c: kgenome_arm64_decode_tree, kgenome_arm64_name
@@ -16,21 +17,25 @@ as a user.
   libgenome/genotype/x86/x86.c: kgenome_x86_nexp, kgenome_x86_wgpr
   libgenome/phenotype/diag_scan.c: kgenome_diag_scan_full, kgenome_diag_scan_ran
   libgenome/phenotype/diag_str.c: kgenome_diag_str_at, kgenome_diag_str_count
-  libgenome/phenotype/emu_api.c: kgenome_emu_stop_name
+  libgenome/phenotype/diag_wrapper_trace.c: kgenome_diag_walk_held_count
+  libgenome/phenotype/emu_api.c: kgenome_emu_set_icache, kgenome_emu_stop_name
   libgenome/phenotype/emu_sys.c: kgenome_emu_unknown_syscalls
   libkofeng/analyzers/diseases/kofdisease.c: kof_disease_decl_same
+  libkofeng/analyzers/parsers/scripts/script_fold.c: kof_script_fold
   libkofeng/analyzers/normalize/executables.c: kof_exe_norm, kof_exe_norm_map, kof_exe_norm_src_of, kof_exe_unb64, kof_exe_unhex
-  libkofeng/databases/dbloader.c: kof_hex_prog_valid_for_test
+  libkofeng/databases/dbpacker.c: kof_pack_build_opt
   libkofeng/databases/diagsrc.c: kof_dsrc_cap_at, kof_dsrc_cap_of, kof_dsrc_cond_same, kof_dsrc_patch, kof_dsrc_print, kof_dsrc_same, kof_dsrc_verdict_check, kof_dsrc_verdict_new
   libkofeng/databases/pack/dbaccess.c: kof_db_disease, kof_db_disease_at, kof_db_disease_count
   libkofeng/databases/pack/kofsyndrome.c: kof_synd_count, kof_synd_get, kof_synd_name
   libkofeng/databases/syndsrc.c: kof_ssrc_print_dis, kof_ssrc_print_type, kof_ssrc_source
   libkofeng/detectors/linkage/kofdiag.c: kof_diag_match
-  libkofeng/detectors/mutations/kofmutation.c: kof_mutation_block_hashes
+  libkofeng/detectors/mutations/kofmutation.c: kof_mutation_block_hashes, kof_mutation_block_copy, kof_mutation_probe, kof_mutation_set_info
   libkofeng/detectors/pattern/kofmatch.c: kof_hex_walk
+  libkofeng/detectors/pattern/kofpix.c: kofpix_region_n
   libkofeng/kofcore/kofhash.c: khash_sha256_final, khash_sha256_hex, khash_sha256_init, khash_sha256_update
   libkofeng/kofeng.c: kdb_diag_collisions, kdb_diag_full, kdb_diagnoses
   libkofeng/scanners/objctx_diag.c: kof_scan_diag_status
+  libkofeng/scanners/scan.c: kof_prod_again, kof_prod_name, kof_scan_prod_repeats (the counters tests/unit/prod_once.c reads)
   libkoforbit/antarc/afan.c: kofa_fan_mode_name, kofa_fan_watch_count
   libkoforbit/antarc/aproc.c: kofa_pmem_read
   libkoforbit/fridge/koffridge.c: koffridge_clear, koffridge_db_stamp, koffridge_describe, koffridge_load, koffridge_save, koffridge_seen_clear, koffridge_stats
@@ -87,3 +92,24 @@ as a user.
         kgenome_elf_hdr_write in elf_rebuild.h, because kofexamine/kofscfind.c calls it and
         kofexamine moves to the struct form in its own upgrade. It is the one EXEMPT entry of
         the parameter count pass in tools/check_layers.py.
+
+5. THE FNPRINT PROTOTYPE (libgenome/celllysis/fnprint*.c, declared in fnprint.h: 84 kgenome_fnprint_
+   names, 47 of them functions, and 75 KGENOME_FNP_ macros and enumerators). Nothing in
+   the scan path calls it (grep over libkofeng, libkoforbit, kofscanner, ksigbuilder, kofexamine,
+   kofwatcher, bases, tools: no file); the tests under tests/lib/genome/fnprint_* drive it. It stays
+   exported because the tests reach it by name and because it is the design under evaluation for the
+   block-similarity redesign; the functions, by defining file:
+  libgenome/celllysis/fnprint_bsketch.c: kgenome_fnprint_bsketch_build, kgenome_fnprint_bsketch_find, kgenome_fnprint_bsketch_free, kgenome_fnprint_bsketch_main
+  libgenome/celllysis/fnprint_dx.c: kgenome_fnprint_dx_attach, kgenome_fnprint_dx_cluster, kgenome_fnprint_dx_full, kgenome_fnprint_dx_open, kgenome_fnprint_dx_remain, kgenome_fnprint_dx_state, kgenome_fnprint_dxdb_build, kgenome_fnprint_dxdb_free
+  libgenome/celllysis/fnprint_libtab.c: kgenome_fnprint_bstat, kgenome_fnprint_bstat_is_data, kgenome_fnprint_libtab_add, kgenome_fnprint_libtab_free, kgenome_fnprint_libtab_has, kgenome_fnprint_libtab_init, kgenome_fnprint_libtab_sampled, kgenome_fnprint_libvote, kgenome_fnprint_wsketch
+  libgenome/celllysis/fnprint_match.c: kgenome_fnprint_match_done, kgenome_fnprint_match_feed, kgenome_fnprint_match_init, kgenome_fnprint_match_strong_pm, kgenome_fnprint_match_visit, kgenome_fnprint_ref_build, kgenome_fnprint_ref_free
+  libgenome/celllysis/fnprint_sel.c: kgenome_fnprint_sel_plan
+  libgenome/celllysis/fnprint_token.c: kgenome_fnprint_equal
+  libgenome/celllysis/fnprint_walk.c: kgenome_fnprint_collect, kgenome_fnprint_set_free, kgenome_fnprint_walk
+  libgenome/celllysis/fnprint_wdb.c: kgenome_fnprint_wctx_begin, kgenome_fnprint_wctx_count, kgenome_fnprint_wctx_credit, kgenome_fnprint_wctx_done, kgenome_fnprint_wctx_init, kgenome_fnprint_wctx_retire, kgenome_fnprint_wdb_build, kgenome_fnprint_wdb_free, kgenome_fnprint_wpass
+   No caller anywhere, not even a test (prototype entry points awaiting the integration, to be wired or
+   deleted with it): kgenome_fnprint_libtab_put, kgenome_fnprint_match_any_pm, kgenome_fnprint_relmask,
+   kgenome_fnprint_runs, kgenome_fnprint_sorted.
+   The measurement switches of the prototype (opts.off, KGENOME_FNP_OPT_LEGACY_EXCLUDE) and the
+   first-verdict retirement policies (KGENOME_FNP_RETIRE_TAG, _TAG_STOP, _STOP_FIRST) are not part of
+   a default and are removed or kept opt-in before integration (fnprint.h says so).

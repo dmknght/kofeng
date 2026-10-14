@@ -102,13 +102,15 @@ static kof_buf buf_of(const uint8_t *p, size_t n)
 
 int main(void)
 {
-	struct kof_arj_info *a = malloc(sizeof *a);
+	struct kof_arj_info *a = calloc(1, sizeof *a);   /* zeroed: a view that owns tables starts so */
 	struct kof_obj_ctx ctx;
 	uint8_t *f = calloc(1, 512);
 	uint32_t at = 0, second;
 	size_t len;
 
 	if (!a || !f) {
+		if (a)
+		kof_arj_release(a);
 		free(a);
 		free(f);
 		printf("arj walk: out of memory\n");
@@ -263,6 +265,8 @@ int main(void)
 	}
 
 	free(f);
+	if (a)
+		kof_arj_release(a);
 	free(a);
 
 	if (failures) {

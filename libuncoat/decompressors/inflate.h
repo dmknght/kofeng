@@ -166,6 +166,15 @@ struct kuncoat_inflate {
 /*
  * Decode a DEFLATE stream at `in`, handing output to `sink`.
  *
+ * A NULL `st`, `io` or `io->sink`, or a NULL input with a length, is
+ * KUNCOAT_BAD_ARG and nothing is read (`io->consumed` and `io->produced` are zeroed
+ * when `io` is there). A dynamic block whose only literal/length code is the end of
+ * block, written as one code of one bit, is accepted and decodes as an empty block
+ * [Unverified against the RFC text: it follows the one-code rule the RFC states for
+ * the distance code, and the requirement that asked for it]; any other incomplete
+ * literal/length code is CORRUPT, while an incomplete distance code stays tolerated
+ * (a block of literals with one distance code).
+ *
  * `st` is caller-owned and needs no initialisation: everything is set here. It is
  * 32KB and is meant to be allocated once per thread and reused, not per stream.
  *
@@ -187,8 +196,8 @@ enum kuncoat_status kuncoat_inflate(struct kuncoat_inflate *st, struct kuncoat_i
  * and the wrong BYTES, with no failure reported anywhere - see the note on the
  * definition.
  *
- * `seed` is NULL or empty for none; longer than the window, only its tail matters
- * and only a window of it is kept. The seed is not emitted: it was already handed to the sink by whoever
+ * `seed` is NULL or empty for none; longer than the window, only its TAIL matters
+ * (the last KUNCOAT_INF_WINDOW bytes are kept, the ones a distance can reach). The seed is not emitted: it was already handed to the sink by whoever
  * produced it. `produced` counts only what this call made.
  */
 enum kuncoat_status kuncoat_inflate_seeded(struct kuncoat_inflate *st,

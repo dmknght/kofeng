@@ -41,7 +41,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_RAR_INFO_VERSION 1
+#define KOF_RAR_INFO_VERSION 2
 
 /*
  * Scan regions, the same five a zip has and for the same reasons: the names are
@@ -156,18 +156,29 @@ enum {
 #define KOF_RAR_M_STORE 0x30u
 
 /*
- * Bounds, from measurement. Across 787 RAR3 archives holding 28848 entries the
- * median holds 12 and the largest 1458, so the entry cap is not close to binding on
- * anything real and reaching it is worth reporting.
+ * What bounds the parse, and what does not.
+ *
+ * NO COUNT OF ENTRIES IS A LIMIT ON THE FILE. The entry table was 2048 rows and the run list
+ * 8192: "across 787 RAR3 archives holding 28848 entries the median holds 12 and the largest
+ * 1458", which is what is common and says nothing about what a builder emits - an archive of
+ * 3000 small files lost the last thousand of them. The tables are allocated to what the block
+ * chain holds, and what bounds an allocation is the file: a file block is at least
+ * KOF_RAR_ENTRY_MIN bytes (RAR3's fixed part is 32, RAR5's header is a dozen at the least), so
+ * the rows cannot exceed the length of the file over it, and an entry makes at most
+ * KOF_RAR_RUNS_PER_ENTRY runs. Under that sits the engine's per-object ledger (struct
+ * kof_view_mem.room): when a table cannot grow the walk goes on classifying what follows into
+ * regions - the bytes are still the archive's - and ENTRIES_FULL or EXTENTS_FULL says the entries
+ * past it were not listed, so the object reads KOF_BROKEN_LIMIT.
  */
-#define KOF_RAR_MAX_ENTRIES 2048u
-#define KOF_RAR_MAX_EXTENTS 8192u
+#define KOF_RAR_ENTRY_MIN       12u
+#define KOF_RAR_RUNS_PER_ENTRY   5u
 
 enum {
 	KOF_RAR_ANOM_BAD_BLOCK    = 1ull << 0, /* a header shorter than a header */
 	KOF_RAR_ANOM_TRUNCATED    = 1ull << 1, /* a block or its data runs past the end */
-	KOF_RAR_ANOM_ENTRIES_FULL = 1ull << 2,
-	KOF_RAR_ANOM_EXTENTS_FULL = 1ull << 3,
+	KOF_RAR_ANOM_ENTRIES_FULL = 1ull << 2, /* the entry table could not grow: the
+						* archive has entries not listed */
+	KOF_RAR_ANOM_EXTENTS_FULL = 1ull << 3, /* the run table could not grow */
 	KOF_RAR_ANOM_ENCRYPTED    = 1ull << 4,
 	KOF_RAR_ANOM_TRAVERSAL    = 1ull << 5,
 	KOF_RAR_ANOM_RATIO_ABSURD = 1ull << 6,
@@ -208,13 +219,25 @@ enum {
 	KOF_RAR_ENT_SOLID     = 1u << 5   /* continues the previous entry's window */
 };
 
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2, the same change as the zip view's (zip.h has the long form): `run[8192]` and
+ * `entry[2048]`, 311 KB, are tables the parse allocates to the size of the archive, reached through
+ * the pointers at the tail. Everything before them is where it was. `n_entries` WAS AT OFFSET 20 AND
+ * IS NOW `legacy_n_entries`, ALWAYS ZERO: a module built against version 1 loops over a count of
+ * zero, reads a valid empty table, and the engine - which sees that the walk below was never called
+ * while the archive has rows - reports the object instead of passing it as examined
+ * (sx_walk_check). The real count is `n_entries` at the tail. A module walks the table with
+ * kof_rar_next below; it does not index `entry`.
+ */
 struct kof_rar_info {
 	uint32_t version;         /* KOF_RAR_INFO_VERSION */
 	uint32_t valid;
 	uint64_t anomalies;
 
 	uint32_t rar_version;     /* enum kof_rar_version */
-	uint32_t n_entries;
+	uint32_t legacy_n_entries;/* version 1's count, kept for its offset: always 0 */
 	uint32_t n_encrypted;
 	uint32_t n_stored;
 
@@ -223,14 +246,32 @@ struct kof_rar_info {
 
 	uint32_t n_runs;
 	uint32_t reserved0;
-	struct kof_run run[KOF_RAR_MAX_EXTENTS];   /* cls is enum kof_rar_class */
 
-	struct kof_rar_entry entry[KOF_RAR_MAX_ENTRIES];
+	/* ---- version 2: from here the tables are the file's size ----------------------- */
+
+	struct kof_view_mem mem;  /* what the tables hold; see range.h */
+	struct kof_run *run;      /* n_runs of them; cls is enum kof_rar_class */
+	struct kof_rar_entry *entry;
+	uint32_t n_entries;       /* rows in `entry`: every file block the walk met that the
+				   * tables could take */
+	uint32_t reserved1;
 };
 
 static inline const struct kof_rar_info *kof_rar(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_rar_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT ENTRY OF THE ARCHIVE, in the order the blocks follow one another: row `*cursor`, and the
+ * cursor is advanced; NULL at the end. See kof_zip_next, which this is the same walk as.
+ */
+static inline const struct kof_rar_entry *kof_rar_next(const struct kof_obj_ctx *ctx,
+						       uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_rar_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_RAR_H */

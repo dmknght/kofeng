@@ -433,7 +433,7 @@ static void hex_compile_limits(void)
  */
 /* The pattern of `steps` groups, and whether the walk finds the B that only the
  * longest path (every group taking its 120-byte alternative) reaches. */
-static int reach_walk(unsigned steps)
+static int reach_walk(unsigned steps, int with_b)
 {
 	static const unsigned lens[5] = { 1u, 30u, 60u, 90u, 120u };
 	static char t[40000];
@@ -462,7 +462,7 @@ static int reach_walk(unsigned steps)
 	n_data = 4u + steps * 120u;
 	memset(data, 0x41, sizeof data);
 	memcpy(data, "\xde\xad\xbe\xef", 4);
-	data[n_data] = 0x42;
+	data[n_data] = with_b ? 0x42 : 0x43;
 	return kof_hex_walk(kof_buf_make(data, n_data + 1u), 0, prog);
 }
 
@@ -480,12 +480,12 @@ static int reach_walk(unsigned steps)
  */
 static void hex_reach(void)
 {
-	CK(reach_walk(10) == 1);       /* well under the cap: found */
-	/* The pattern IS in the data: 21 steps of 120 bytes, then B. */
-	KM_CHECK(reach_walk(21) == 1,
-		 "a hex pattern with more than 512 distinct reachable ends finds its match",
-		 "KOF_HEX_MAX_REACH kofmatch.c:541 lost: ends past the 512th are dropped, "
-		 "no signal; only the longest path reaches the B");
+	CK(reach_walk(10, 1) == 1);    /* well under the cap: found */
+	/* The pattern IS in the data: 21 steps of 120 bytes, then B - found through
+	 * the wide walk, which is sized by the program and drops no end. */
+	CK(reach_walk(21, 1) == 1);
+	/* and the same data without the B is still a no, by the same walk */
+	CK(reach_walk(21, 0) == 0);
 }
 
 /*
@@ -514,10 +514,14 @@ static void hex_open_gap(void)
 	found = plen ? kof_match_in(&m, 0, sizeof data, prog, (uint16_t)plen,
 				    KOF_STR_HEX, 0) : 0;
 	kof_match_state_free(&m);
-	KM_CHECK(found == 1,
-		 "an open hex gap [4-] matches a second half 300 bytes on, or the compile says it is clipped",
-		 "KOF_HEX_GAP_OPEN hexprog.h:130 / hexcomp.c:239 lost: [n-] is [n-256], no warning; "
-		 "documented as intent (two patterns), so severity low [Inference]");
+	/* The meaning is kept (a clip at 256, as documented) and the clip is SAID:
+	 * the compile counts the open jump for the build tool to warn about. */
+	CK(found == 1 || st.open_gaps == 1u);
+	CK(found == 0 && st.open_gaps == 1u);
+	plen = kof_hex_compile("de ad be ef [4-8] ca fe ba be", prog, sizeof prog, &st);
+	CK(plen != 0 && st.open_gaps == 0u);
+	plen = kof_hex_compile("de ad [250-] be ef [250-] ca", prog, sizeof prog, &st);
+	CK(plen != 0 && st.open_gaps == 2u);
 }
 
 /* ---- 5. the memo's generation wraps -------------------------------------------- */
@@ -635,13 +639,15 @@ static size_t rec_variant(uint8_t *b, enum variant v)
 	case V_NAME48: {
 		char nm[64];
 
-		memset(nm, 'n', KOF_DB_DIAG_NAME);      /* the store holds 47 + NUL */
-		nm[KOF_DB_DIAG_NAME] = 0;
+		/* 48 characters, which the store held 47 of; the record's own length
+		 * byte is the bound now (255) and the store is sized to it */
+		memset(nm, 'n', 48);
+		nm[48] = 0;
 		return rec_base(b, nm, 1, 0);
 	}
 	default: {
-		/* nine nodes each naming a 47-character symbol: 9 x 48 bytes in a
-		 * store of 8 x 48 */
+		/* more nodes than there were signs, each naming a 47-character symbol:
+		 * a store sized per record holds them whatever their number */
 		at = rec_base(b, "dg_syms", KOF_DIAG_MAX_NEED + 1u, KOF_DIAG_NEED_LEN - 1u);
 		return at;
 	}
@@ -686,20 +692,21 @@ static struct kof_engine *load_diag(const char *tag, uint8_t *pk, size_t len)
 
 static void diag_record_caps(void)
 {
+	/*
+	 * A record over a bound the loader keeps (more signs, symbols or conditions
+	 * than the array holds) is refused AND COUNTED - kdb_diag_refused, which a host
+	 * can read - and one that only the old fixed slots refused (a long name, many
+	 * long symbols) now loads.
+	 */
 	static const struct {
-		const char *cap;
 		const char *what;
+		int loads;
 	} row[V_COUNT] = {
-		{ "KOF_DIAG_MAX_NEED kofdiag.c:696 lost: a diagnose declaring 9 needed capabilities is not loaded; stderr only",
-		  "a diagnose with nine needed capabilities is loaded or counted" },
-		{ "KOF_DIAG_MAX_WHEN kofdiag.c:768 lost: a diagnose declaring 9 conditions is not loaded; stderr only",
-		  "a diagnose with nine conditions is loaded or counted" },
-		{ "KOF_DIAG_MAX_NEED kofdiag.c:730 lost: a diagnose naming 9 symbols is not loaded; stderr only",
-		  "a diagnose naming nine symbols is loaded or counted" },
-		{ "KOF_DB_DIAG_NAME kofdiag.c:554 lost: a diagnose whose name is 48 characters is not loaded; stderr only",
-		  "a diagnose with a 48-character name is loaded or counted" },
-		{ "KOF_DB_DIAG_NEEDS kofdiag.c:609 lost: a diagnose whose node symbols overfill the string store is not loaded; stderr only",
-		  "a diagnose whose node symbols overfill the store is loaded or counted" },
+		{ "a diagnose past the bound of needed capabilities is refused and counted", 0 },
+		{ "a diagnose past the bound of conditions is refused and counted", 0 },
+		{ "a diagnose past the bound of declared symbols is refused and counted", 0 },
+		{ "a diagnose with a 48-character name is loaded", 1 },
+		{ "a diagnose whose node symbols filled the old string store is loaded", 1 },
 	};
 	char tag[32];
 	int v;
@@ -715,14 +722,16 @@ static void diag_record_caps(void)
 		CK(e != NULL);
 		if (!e)
 			continue;
-		/* the plain record loads, the bad one does not */
+		/* the plain record always loads */
 		CK(e->n_diag >= 1u);
-		/* THE SIGNAL TODAY: one line on stderr, naming the diagnose by position */
-		CK(strstr(errtext, "not one this build can read") != NULL);
-		/* what a caller of the API can see: kdb_diagnoses says 1 of 2, and
-		 * kdb_diag_full is for the count bound only */
-		KM_CHECK(e->n_diag == 2u || kdb_diag_full(e),
-			 row[v].what, row[v].cap);
+		if (row[v].loads) {
+			CK(e->n_diag == 2u && kdb_diag_refused(e) == 0u);
+		} else {
+			/* a line on stderr for a person, and a count a host can read */
+			CK(strstr(errtext, "not one this build can read") != NULL);
+			CK(e->n_diag == 1u && kdb_diag_refused(e) == 1u);
+		}
+		printf("  diag_record_caps: %s\n", row[v].what);
 		kof_db_free(e);
 	}
 }
@@ -756,10 +765,24 @@ static void diag_pack_size(void)
 	CK(e != NULL);
 	if (!e)
 		return;
-	CK(strstr(errtext, "is not a diagnose pack") != NULL);   /* said on stderr */
-	KM_CHECK(e->n_diag == 1u || kdb_diag_full(e),
-		 "a valid diagnose pack larger than 4 MiB is loaded or counted",
-		 "KOF_DIAG_PACK_MAX dbloader_packs.c:149 lost: the whole pack is refused; stderr only");
+	/* No size bound for one pack: a valid pack past the old 4 MiB loads. */
+	CK(e->n_diag == 1u && kdb_diag_packs_refused(e) == 0u);
+	kof_db_free(e);
+}
+
+/* A file that is not a diagnose pack at all is refused whole and COUNTED. */
+static void diag_pack_refused(void)
+{
+	uint8_t junk[32];
+	struct kof_engine *e;
+
+	memset(junk, 'x', sizeof junk);
+	e = load_diag("junkpack", junk, sizeof junk);
+	CK(e != NULL);
+	if (!e)
+		return;
+	CK(strstr(errtext, "is not a diagnose pack") != NULL);   /* for a person */
+	CK(kdb_diag_packs_refused(e) == 1u);                    /* for a host */
 	kof_db_free(e);
 }
 
@@ -810,12 +833,9 @@ static void source_limits(void)
 		if (k == 0)
 			CK(errs == 0 && v.n_nd == (int)KOF_DB_MAX_DIAG_NODE);
 		else if (k == 1)
-			/* 64 nodes: the source layer takes it ... */
-			KM_CHECK(errs > 0,
-				 "a diagnose the loader cannot read (33..64 nodes) is an error at build",
-				 "KOF_DSRC_MAX_NODE diagsrc.h:34 vs KOF_DB_MAX_DIAG_NODE dbtables.h:371 "
-				 "lost: the source reader accepts 64 nodes, the loader refuses more than 32 "
-				 "and the diagnose is silently absent at run time");
+			/* the source layer takes exactly what the loader reads: one carrier */
+			CK(errs == 0 && v.n_nd == (int)KOF_DB_MAX_DIAG_NODE &&
+			   KOF_DSRC_MAX_NODE == KOF_DB_MAX_DIAG_NODE);
 		else
 			CK(errs > 0);          /* ... and its own bound is an error */
 	}
@@ -846,6 +866,7 @@ int main(void)
 	memo_wrap();
 	diag_record_caps();
 	diag_pack_size();
+	diag_pack_refused();
 	source_limits();
 	rm_all(root);
 	printf("silent loss db: %u known miss(es) recorded, %s\n", km_known(),

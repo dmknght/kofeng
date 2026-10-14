@@ -120,6 +120,11 @@ uint8_t kof_svr_kind(kof_buf f, uint64_t look)
  *
  * So the magic is the PAIR, not the opener. That keeps every real page and
  * drops the prose, and it needs no guess about what the bytes in between are.
+ *
+ * MONOTONE IN `at`: a "%>" after a later opener is also after an earlier one,
+ * so once one opener has no closer none after it has either. kof_svr_find_tag
+ * relies on that to stop at the first failure; asked again from each of 32768
+ * "<%" in a 64 KB window it was 32768 walks of the window.
  */
 static int pct_closed(kof_buf f, uint64_t at, uint64_t look)
 {
@@ -213,26 +218,60 @@ static uint32_t pct_directives(kof_buf f, uint64_t at, uint64_t look)
  */
 static uint64_t svr_element(kof_buf f, uint64_t i, uint64_t *body, uint64_t *end)
 {
+	/*
+	 * THREE ANSWERS REMEMBERED, SO NO BYTE IS READ FOR EACH CANDIDATE.
+	 * Every one is a fact about the bytes AFTER the candidate, and a later
+	 * candidate only has fewer of them:
+	 *
+	 *   gt   the next ">" at or after the opening tag's end. Candidates
+	 *        that sit inside one tag's attribute list ("<script <script
+	 *        <script ... >") share it. None at all means none for every
+	 *        later candidate, which ends the search.
+	 *   rp   the first "runat" before that ">". Found once and kept while it
+	 *        is still ahead; "none before gt" holds for any later start.
+	 *   no "</script" after one candidate's ">" means none after any later
+	 *        candidate's, so an unclosed element ends the search too.
+	 *
+	 * Without them each of n unclosed or unterminated "<script" openers
+	 * walked to the end of the object: 46 s for 512 KB.
+	 */
+	uint64_t gt = 0, rp = KOF_TXT_NONE;
+	int have_gt = 0, have_rp = 0;
+
 	for (; i + 7u <= f.n; i++) {
-		uint64_t gt, k;
-		int need = 0;
+		uint64_t k, s = i + 7u;
 
 		if (!kof_txt_tag_at(f, i, "<script", 7u))
 			continue;
-		for (gt = i + 7u; gt < f.n && f.p[gt] != '>'; gt++)
-			if (!need && kof_txt_tag_at(f, gt, "runat", 5u))
-				need = 1;
+		if (!have_gt || gt < s) {
+			const uint8_t *h = memchr(f.p + s, '>',
+						  (size_t)(f.n - s));
+
+			gt = h ? (uint64_t)(h - f.p) : f.n;
+			have_gt = 1;
+			have_rp = 0;
+		}
+		if (gt >= f.n)
+			return f.n;
 		/*
 		 * No "runat" is CLIENT-SIDE JAVASCRIPT - the browser runs it
 		 * and the server copies it out. Left in the markup on purpose:
 		 * forming it by the server language's rules would be the same
 		 * mistake as forming html.
+		 *
+		 * The search is [s, gt) for a match that ends before the ">":
+		 * one that crossed it would contain a ">", which no letter of
+		 * the word is.
 		 */
-		if (gt >= f.n || !need)
+		if (!have_rp || (rp != KOF_TXT_NONE && rp < s)) {
+			rp = kof_txt_find(f, s, gt, "runat", 5u);
+			have_rp = 1;
+		}
+		if (rp == KOF_TXT_NONE)
 			continue;
 		k = kof_txt_find(f, gt + 1u, f.n, "</script", 8u);
 		if (k == KOF_TXT_NONE)
-			continue;
+			return f.n;
 		*body = gt + 1u;
 		*end = k;
 		return i;
@@ -250,10 +289,11 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
 		if (f.p[i] != '<')
 			continue;
 		if (kof_txt_tag_at(f, i, "<%@", 3u)) {
-			/* Not `break`: an unclosed one earlier in the window
-			 * must not hide a real page later in it. */
+			/* An unclosed one here is unclosed for every opener
+			 * after it too - see pct_closed - so the answer is
+			 * "none", reached without asking again from each. */
 			if (!pct_closed(f, i, look))
-				continue;
+				return (uint64_t)-1;
 			*taglen = pct_directives(f, i, look);
 			/* The directives declare the page and nothing runs
 			 * them - see the header note on this function. */
@@ -262,7 +302,7 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
 		}
 		if (kof_txt_tag_at(f, i, "<%", 2u)) {
 			if (!pct_closed(f, i, look))
-				continue;
+				return (uint64_t)-1;
 			/* A bare "<%" opens code, so it has no header and the
 			 * island walk must start ON it, not after it. */
 			*taglen = 2u;
@@ -301,17 +341,40 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
 void kof_svr_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 {
 	uint64_t i = from;
+	/*
+	 * WHERE THE NEXT "<%" AND THE NEXT SERVER <script> ARE, kept while they
+	 * are still ahead of the cursor. Each step takes whichever comes first
+	 * and leaves the other where it is; asking again from the cursor made
+	 * every "<% %>" of a page walk to the one <script> at its foot (and
+	 * every <script> to the one "<%"), which is quadratic in the number of
+	 * islands. A position found from an earlier cursor and still at or past
+	 * this one is the answer from this one: nothing was skipped between.
+	 */
+	uint64_t open_c = 0, el_open_c = 0, el_body_c = 0, el_end_c = 0;
+	int have_open = 0, have_el = 0;
 
 	while (i < f.n && info->n_island < KOF_SCRIPT_MAX_ISLAND) {
 		uint64_t open, close, next;
-		uint64_t e_open, e_body = 0, e_end = 0;
+		uint64_t e_open, e_body, e_end;
 
-		for (open = i; open + 2u <= f.n; open++)
-			if (kof_txt_tag_at(f, open, "<%", 2u))
-				break;
-		if (open + 2u > f.n)
-			open = f.n;
-		e_open = svr_element(f, i, &e_body, &e_end);
+		if (!have_open || open_c < i) {
+			for (open = i; open + 2u <= f.n; open++)
+				if (kof_txt_tag_at(f, open, "<%", 2u))
+					break;
+			if (open + 2u > f.n)
+				open = f.n;
+			open_c = open;
+			have_open = 1;
+		}
+		open = open_c;
+		if (!have_el || el_open_c < i) {
+			el_body_c = el_end_c = 0;
+			el_open_c = svr_element(f, i, &el_body_c, &el_end_c);
+			have_el = 1;
+		}
+		e_open = el_open_c;
+		e_body = el_body_c;
+		e_end = el_end_c;
 		if (open == f.n && e_open == f.n)
 			break;
 

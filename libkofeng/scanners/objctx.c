@@ -49,7 +49,7 @@
  * abstraction with exactly one user, invented to avoid naming the thing it is for.
  */
 
-#include "../detectors/pattern/kofmultimatch.h"
+#include "../detectors/pattern/kofpix.h"
 #include <celllysis/space.h>
 #include "../analyzers/genome_obj.h"
 #include <stdlib.h>
@@ -278,14 +278,14 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	const struct kof_module *m = sc->mod.cur;
 	const uint8_t *bytes;
 	const struct kof_str_ent *e = str_of(sc, str_id, &bytes);
-	struct kof_range *ext = sc->cache.ext;
+	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 0);
 	uint32_t n;
 
 	uint32_t mask, slot, uid;
 
 	if (!e || range_id >= m->n_rng || m->rng_base + range_id >= sc->eng->n_rng)
 		return 0;
-	mask = sc->eng->rng_tab[m->rng_base + range_id];
+	mask = sc->eng->mask_bits[sc->eng->rng_uid[m->rng_base + range_id]];
 
 	/*
 	 * The memo slot is the QUESTION, not the asker.
@@ -346,9 +346,9 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		mask &= ~KOF_SCAN_SYM;
 		if (!mask)
 			return 0;
-		n = kof_scan_resolve_range(ctx, mask, ext);
+		n = kof_scan_resolve_range(ctx, mask, eb);
 		return str_found(sc, kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
-				.slot = KOF_MEMO_NONE, .ext = ext, .next = n,
+				.slot = KOF_MEMO_NONE, .ext = eb->v, .next = n,
 				.pat = { bytes, e->len, e->kind, e->flags },
 				.answered = &sc->st.gram_answers }));
 	}
@@ -364,25 +364,27 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		 * having been told.
 		 *
 		 * multi_prepass records which masks a sweep can answer for;
-		 * the answer itself stays in sc->found until this asks. See
-		 * uid_slot in kofmultimatch.h for what distributing it instead
-		 * cost at scale.
+		 * the answer itself stays in the sweep's table of found markers
+		 * until this asks (kofpix_found_get). Only for an object whose
+		 * prepass ran (the latch is per object, the marks are not), for a
+		 * marker the sweep could key (the same test the pack's table was
+		 * built with, so a marker it left out is searched), and for a
+		 * pack whose table is open: a pack with none was never swept, and
+		 * "not found" would mean "not looked".
 		 */
-		if (sc->match.mask_ok && mask_uid < sc->eng->n_masks &&
-		    sc->match.mask_ok[mask_uid]) {
-			int a = kof_multimatch_answer(sc->eng->multi, uid,
-						      mask_uid, sc->match.found);
-
-			if (a >= 0) {
-				sc->st.multi_answers++;
-				return str_found(sc, a);
-			}
+		if (sc->obj.latch[KOF_OL_MULTI] && sc->match.mask_ok &&
+		    mask_uid < sc->eng->n_masks && sc->match.mask_ok[mask_uid] &&
+		    sc->eng->packs[m->pack_id].pix &&
+		    kof_multimatch_keyable(e->kind, e->len, bytes)) {
+			sc->st.multi_answers++;
+			return str_found(sc, (kofpix_found_get(&sc->match.pix, uid) &
+					      sc->eng->mask_bits[mask_uid]) != 0);
 		}
 	}
 
-	n = kof_scan_resolve_range(ctx, mask, ext);
+	n = kof_scan_resolve_range(ctx, mask, eb);
 	return str_found(sc, kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
-			.slot = slot, .ext = ext, .next = n, .pat = { bytes, e->len, e->kind, e->flags },
+			.slot = slot, .ext = eb->v, .next = n, .pat = { bytes, e->len, e->kind, e->flags },
 			.answered = &sc->st.gram_answers }));
 }
 
@@ -457,8 +459,10 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
  * that met an unsupported coding stops producing, and the budget it then fails to
  * spend is a consequence rather than a second problem.
  */
-void oc_scan_broken(struct kof_scanner *sc, uint32_t reason)
+void oc_scan_broken_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line)
 {
+	KOF_TRACE("[cut] %s:%d broken=%u\n", file, line, (unsigned)reason);
+	(void)file; (void)line;
 	if (!sc->obj.open.broken)
 		sc->obj.open.broken = reason;
 	if (reason == KOF_BROKEN_LIMIT)
@@ -479,8 +483,10 @@ void oc_scan_broken(struct kof_scanner *sc, uint32_t reason)
  * attempted. Eleven more archives in the same collection fail the same way, and
  * the reported reason was a budget the caller had not actually run out of.
  */
-void oc_scan_capped(struct kof_scanner *sc, uint32_t reason)
+void oc_scan_capped_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line)
 {
+	KOF_TRACE("[cut] %s:%d capped=%u\n", file, line, (unsigned)reason);
+	(void)file; (void)line;
 	if (!sc->obj.open.broken)
 		sc->obj.open.broken = reason;
 }
@@ -588,15 +594,6 @@ static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t va
 	sc->debug_cb(kof_fact_id(text), text, value, sc->debug_user);
 }
 
-
-/* Section names are fixed length and may be truncated; comparing the whole of
- * a short literal against them is all this needs. */
-static int kof_str_ne(const char *a, const char *b)
-{
-	while (*a && *a == *b) { a++; b++; }
-	return *a != *b;
-}
-
 /*
  * ONE RUN OF CODE FOR THE XREF SWEEP: where its bytes are in the file, how many
  * of them there are, and the address the first one is mapped at.
@@ -695,6 +692,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 		uint32_t i;
 
 		sc->obj.latch[KOF_OL_USE] = 1;
+		kof_prod_ran(sc, KOF_PROD_USE);
 		/*
 		 * NOTHING KNOWN IS NOT THE SAME AS NOTHING FOUND.
 		 *
@@ -752,8 +750,8 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 			 *   the entry point               _start
 			 *   .init_array, .fini_array      frame_dummy and
 			 *                                 __do_global_dtors_aux
-			 *   every executable section
-			 *   that is not .text             .init .fini .plt
+			 *   every executable section the
+			 *   entry is not in (flags, no name) .init .fini .plt
 			 *
 			 * What those regions call is startup as well, resolved
 			 * inside the map - which is the only way the tm_clones
@@ -767,8 +765,7 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
 				uint32_t w = ctx->arch == KGENOME_ARCH_X86 ? 4u : 8u;
 				uint64_t k, have;
 
-				if (kgenome_elf_sec_is_code(sec) &&
-				    kof_str_ne(sec->name, ".text"))
+				if (kgenome_elf_sec_is_stub(e, i))
 					kgenome_xref_startup(sc->obj.diag.use, sec->mem_addr);
 				if (sec->type != 14u && sec->type != 15u)
 					continue;   /* INIT_ARRAY, FINI_ARRAY */
@@ -947,7 +944,7 @@ static int c_region_shape(const struct kof_obj_ctx *ctx, uint32_t mask,
 			  struct kof_region_shape *out)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range *ext;
+	struct kof_ext_buf *eb;
 	uint32_t n, i;
 
 	if (!out)
@@ -955,14 +952,14 @@ static int c_region_shape(const struct kof_obj_ctx *ctx, uint32_t mask,
 	memset(out, 0, sizeof *out);
 	if (!sc)
 		return 0;
-	ext = sc->cache.ext_gather;
-	n = kof_scan_resolve_range(ctx, mask, ext);
+	eb = kof_scan_ext_buf(sc, 1);
+	n = kof_scan_resolve_range(ctx, mask, eb);
 	out->runs = n;
 	for (i = 0; i < n; i++) {
-		out->bytes += ext[i].len;
-		if (ext[i].len > out->widest) {
-			out->widest = ext[i].len;
-			out->widest_off = ext[i].off;
+		out->bytes += eb->v[i].len;
+		if (eb->v[i].len > out->widest) {
+			out->widest = eb->v[i].len;
+			out->widest_off = eb->v[i].off;
 		}
 	}
 	return n != 0;
@@ -976,7 +973,7 @@ static int c_region_shape(const struct kof_obj_ctx *ctx, uint32_t mask,
 static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range *ext;
+	struct kof_ext_buf *eb;
 	uint32_t hist[256];
 	kof_buf b;
 	uint64_t total = 0;
@@ -987,8 +984,8 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 	b = oc_mc(ctx)->data;
 	if (!b.p || !b.n)
 		return 0;
-	ext = sc->cache.ext_gather;
-	n = kof_scan_resolve_range(ctx, mask, ext);
+	eb = kof_scan_ext_buf(sc, 1);
+	n = kof_scan_resolve_range(ctx, mask, eb);
 	if (!n)
 		return 0;
 
@@ -1005,7 +1002,7 @@ static uint32_t c_region_entropy(const struct kof_obj_ctx *ctx, uint32_t mask)
 
 	memset(hist, 0, sizeof hist);
 	for (i = 0; i < n; i++) {
-		kof_buf s2 = kof_slice(b, ext[i].off, ext[i].len);
+		kof_buf s2 = kof_slice(b, eb->v[i].off, eb->v[i].len);
 
 		kentropy_count(hist, s2.p, s2.n);
 		total += s2.n;
@@ -1224,7 +1221,6 @@ static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
 	return kof_pz_unmask(b.p + off, n, mask, key, out, cap);
 }
 
-
 /*
  * ---- THE CODE READER'S THREE ENTRY POINTS --------------------------------
  *
@@ -1257,6 +1253,8 @@ static int c_dis_next(const struct kof_obj_ctx *ctx, struct kgenome_cell_insn *o
 		return 0;
 	kof_genome_obj(ctx, &gobj);
 	kgenome_cell_space_init(&sp, &gobj, b.p, b.n);
+	/* A module walking code reads what the walk already decoded, when it holds this object's. */
+	kgenome_diag_walk_hold(&sp, sc->obj.diag.walk);
 	return kgenome_cell_next(&sc->cur.cell, &sp, out);
 }
 
@@ -1435,7 +1433,8 @@ static const struct kof_content kof_detect_vtable = {
 	/* capsid_apply - arithmetic over the module's own bytes, so a detector may. */
 	oc_capsid_apply,
 	/* diag32, diag_share32, diag_str32 - the diagnose questions by full id. */
-	oc_diag32, oc_diag_share32, oc_diag_str32
+	oc_diag32, oc_diag_share32, oc_diag_str32,
+	oc_view_next
 };
 
 static const struct kof_content kof_unpack_vtable = {
@@ -1470,7 +1469,8 @@ static const struct kof_content kof_unpack_vtable = {
 	oc_decrypt, oc_decrypt_peek,
 	oc_capsid_apply,
 	/* diag32 is unplugged here as diag is; the other two are asked by name. */
-	NULL, oc_diag_share32, oc_diag_str32
+	NULL, oc_diag_share32, oc_diag_str32,
+	oc_view_next
 };
 
 /*

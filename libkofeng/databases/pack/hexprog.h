@@ -126,7 +126,10 @@
 
 /* An unbounded jump - "[4-]" or "[-]" - compiles to this rather than to infinity.
  * A pattern whose parts may be arbitrarily far apart is not a pattern, it is two
- * patterns and a kof_find_str_all. */
+ * patterns and a kof_find_str_all. The semantics are kept (changing them would
+ * change what every pattern written with one matches) and the clip is SAID: the
+ * compiler counts the open jumps in kof_hex_stat.open_gaps and ksigbuilder warns
+ * on each pattern that has one. */
 #define KOF_HEX_GAP_OPEN      256u
 
 /*
@@ -243,6 +246,11 @@ struct kof_hex_stat {
 	uint32_t n_steps, n_alts;
 	uint32_t min_span, max_span;
 	uint32_t anchor_len;
+	/* How many jumps were written open - "[n-]" or "[-]" - and compiled to the
+	 * clamp KOF_HEX_GAP_OPEN. The build tool says so (a warning), because the
+	 * pattern does not mean what it reads as: its parts may be no further apart
+	 * than the clamp. */
+	uint32_t open_gaps;
 };
 
 /*
@@ -270,6 +278,15 @@ const char *kof_hex_error(void);
  */
 uint32_t kof_regex_compile(const char *text, uint8_t *out, uint32_t cap,
 			   struct kof_hex_stat *stat);
+
+/*
+ * Is `p[0..len)` a program the walk may be handed: every table inside it, aligned, every
+ * count bounded, the anchor last (checked after the tables it indexes). 1 = yes. The loader
+ * checks every program of a pack with it; whoever reads a program AFTER the load (the pattern
+ * table reads them from the pack with pread) checks it again, because a file can change under
+ * an open descriptor and the walk trusts what it is given. Defined in databases/dbpackcheck.c.
+ */
+int kof_hex_prog_valid(const uint8_t *p, uint32_t len);
 
 _Static_assert(sizeof(struct kof_hex_hdr)  == 48, "hex header changed size");
 _Static_assert(sizeof(struct kof_hex_step) == 8,  "hex step grew padding");

@@ -136,7 +136,7 @@ struct kuncoat_ppmd                      struct(opaque) decompressors/ppmd.h    
 kuncoat_ppmd_new                         function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
 kuncoat_ppmd_free                        function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
 kuncoat_ppmd_arena_want                  function       decompressors/ppmd.h           SMOKE-ONLY: silent_loss_uncoat.c   hostile_rar.c
-kuncoat_ppmd_start                       function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
+kuncoat_ppmd_start_asked                 function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
 kuncoat_ppmd_resume                      function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
 kuncoat_ppmd_next                        function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c
 kuncoat_ppmd_at                          function       decompressors/ppmd.h           UNTESTED                           hostile_rar.c

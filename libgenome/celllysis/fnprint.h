@@ -27,18 +27,28 @@
  * `fp` keeps registers and small immediates; `fw` is the opcode-class sequence
  * only and survives a changed register allocation or constant.
  *
- * RELEVANCE uses the function's own signals (a library name, membership of a
- * known-library fingerprint table, a syscall wrapper, a thunk, size), two scalars
- * of state - the function the entry stub hands to the C runtime as `main` and the
- * address where library code is first seen after it (the frontier; a static link
- * puts the runtime's start, the target of the entry's call, there at the latest) -
- * and, for the stretch between the entry and the frontier, the CALL GRAPH from
- * main: who reaches whom decides what the layout cannot (the crtbegin helpers and
- * libc-start's own static functions lie between the entry and the program's
- * code, and behind it). That stretch is HELD until it is decided (fnprint_reach.c);
- * what is held is bounded by the stretch, charged to the ledger, and reported when
- * it does not fit. The rules and their blind spots are written where they are
- * (fnprint_rel.c, fnprint_reach.c) and measured in fnprint_gcc_eval.md.
+ * RELEVANCE, AND WHAT MAY TAKE CODE OUT OF THE EVIDENCE. The evidence is every function (and every window)
+ * except what the object's own BYTES prove is library: a fingerprint in the known-library table, or most
+ * of the function's windows in the known-library window table (fnprint_libtab.c, built from library bytes).
+ * Everything else the rules can say - a symbol's name, a marker string, the layout (the entry stub, the
+ * frontier, the order of the link), reachability from main, a thunk's or a wrapper's shape, a size - is
+ * ADVICE: it orders work and explains a report (f->advice, R_ADVISED), and the function stays UNKNOWN,
+ * kept and counted (stat.n_advised). Reason: an author who patches the file (renames a function, strips
+ * it, rewrites a string, relinks in another order, puts his code behind a libc-looking prologue)
+ * changes every one of those signals and none of his function's bytes; a filter that excludes on them
+ * creates blind spots an adversary steers (fnprint_adv_names.c, fnprint_adv_stream.c; the scan path's
+ * own trueline tiers are pinned as known misses in tests/unit/fnprint_adv_trueline.c). The old
+ * behaviour is kept behind KGENOME_FNP_OPT_LEGACY_EXCLUDE so the measurements of the rules in
+ * fnprint_gcc_eval.md stay reproducible. Two scalars of state - the function the entry stub hands to the
+ * C runtime as `main` and the address where library code is first seen after it (the frontier) - and the
+ * CALL GRAPH from main still decide the ADVICE for the stretch between the entry and the frontier
+ * (fnprint_reach.c); what is held there is bounded by the stretch, charged to the ledger, and reported
+ * when it does not fit.
+ *
+ * THE WINDOW STREAM (fnprint_wdb.c) is the same idea one level down and without a decode: one rolling
+ * pass over the code bytes, each window credited to the LIB side if it is in the library window table and
+ * to the USER side otherwise, against a database of blocks. It is the cheaper path (no second decode,
+ * fnprint_pred_eval.md) and it cannot be steered by anything but the bytes.
  *
  * CODE THE SET DID NOT ENTER. When the caller says the extents are runs from one
  * entry to the next (KGENOME_FNP_EXT_ENTRY_WALK), the code left after a body's
@@ -98,6 +108,8 @@ enum kgenome_fnprint_link {
 #define KGENOME_FNP_R_ISLAND       (1u << 23)  /* not reached, but between two reached functions: the program's own */
 #define KGENOME_FNP_R_ZEROES       (1u << 25)  /* a quarter of its instructions are `add [rax],al`: zero bytes, not code */
 #define KGENOME_FNP_R_UNREACHED    (1u << 24)  /* between the entry and the program's code, or behind it: startup code */
+#define KGENOME_FNP_R_ADVISED      (1u << 26)  /* a rule that reads a name, layout or shape said LIB: advice, the function stays UNKNOWN (see advice) */
+#define KGENOME_FNP_R_LIBWIN       (1u << 27)  /* most of its windows are in the known-library window table: library BYTES */
 
 struct kgenome_fnprint_fn {
 	uint64_t off, len;
@@ -110,7 +122,17 @@ struct kgenome_fnprint_fn {
 	uint32_t weight;                /* what it adds to a signature */
 	uint8_t  cls;                   /* enum kgenome_fnprint_class */
 	uint8_t  last_op;               /* class of its last instruction */
+	/*
+	 * ADVICE: what the rules an adversary can steer (a name, the layout, the entry stub's shape,
+	 * size, a raw kernel entry) say. It orders work and explains a report; it never removes a
+	 * function from the evidence: cls is LIB only on grounds of the function's own bytes
+	 * (R_LIBDB, R_LIBWIN) unless the caller asks for the legacy behaviour (OPT_LEGACY_EXCLUDE).
+	 */
+	uint8_t  advice;                /* enum kgenome_fnprint_class */
+	uint32_t n_win, n_win_lib;      /* non-flat windows of the body, and how many are in the library table (0,0: no table) */
 };
+
+struct kgenome_fnprint_libtab;
 
 /* The name of function `i` of the set: 0 unknown, 1 library, 2 not library. */
 typedef int (*kgenome_fnprint_name_fn)(void *user, uint32_t i);
@@ -131,6 +153,9 @@ struct kgenome_fnprint_hints {
 	 * is not ascending is refused with KGENOME_BAD_INPUT and no node is used).
 	 */
 	const uint64_t *node_at;       uint32_t n_node;
+	/* Windows of known library BYTES (built from bytes, never from names): a function most of
+	 * whose windows are in it is LIB by its own content. NULL: none. */
+	const struct kgenome_fnprint_libtab *libtab;
 };
 
 /* Zero in any field means the default. */
@@ -148,7 +173,20 @@ struct kgenome_fnprint_opts {
 	/* Ablation: the rules added for gcc-built objects, off one by one so the
 	 * measurement can say what each one is worth. Zero is "all on". */
 	uint32_t off;           /* KGENOME_FNP_OFF_* bits */
+	uint32_t flags;         /* KGENOME_FNP_OPT_* bits */
+	uint32_t libwin_pct;    /* percent of a function's windows that must be in the library table (60) */
+	uint32_t libwin_min;    /* ...and at least this many windows must be known (8): a stub proves nothing */
+	uint32_t w_advised;     /* percent of its size an UNKNOWN function the advice calls LIB weighs (25) */
 };
+
+/*
+ * THE LEGACY BEHAVIOUR: a name, the layout, the entry stub, a syscall wrapper or a thunk may call a
+ * function LIB and so take it out of the evidence. Kept so the measurements of the rules stay
+ * reproducible (fnprint_gcc_eval.md); not the default, because every one of those grounds can be
+ * flipped by an author who patches the file without changing the function's bytes (see
+ * docs and fnprint_adv_*.c).
+ */
+#define KGENOME_FNP_OPT_LEGACY_EXCLUDE (1u << 0)
 
 #define KGENOME_FNP_OFF_SPLIT_TAILS  (1u << 0)  /* do not read code left after a body's first terminal */
 #define KGENOME_FNP_OFF_SPLIT_MAIN   (1u << 1)  /* do not cut an extent at main */
@@ -199,6 +237,8 @@ struct kgenome_fnprint_stat {
 	uint32_t n_reached, n_island;
 	uint32_t region_peak;
 	uint32_t n_region_over;         /* decided without reachability: the region or its edges did not fit */
+	uint32_t n_advised;             /* UNKNOWN functions a name, the layout or a shape called library: kept, weighed at w_advised */
+	uint32_t n_libwin;              /* functions library by their own windows */
 	uint32_t n_units, n_unit_funcs;
 	uint64_t n_insn;                /* decoded */
 	uint64_t unit_bytes;
@@ -336,5 +376,460 @@ uint32_t kgenome_fnprint_match_any_pm(const struct kgenome_fnprint_match *m);
 
 /* Visitor adapter: user is a struct kgenome_fnprint_match *. */
 int kgenome_fnprint_match_visit(void *user, const struct kgenome_fnprint_fn *f);
+
+/*
+ * ---- KNOWN-LIBRARY WINDOWS: the one exclusion ground that is made of bytes ---------------------
+ *
+ * A table of window values (the same 8-byte rolling window, mixed, that the block similarity
+ * hashes: mutation_window.h) taken from the BYTES of library code. A window in it is library by its
+ * content; an author cannot put a window in it without writing library bytes, and a payload placed
+ * inside a library function keeps its own windows out of the table, so it stays evidence. Names,
+ * markers, layout and shape are not consulted. [Inference] windows that cover a relocated field
+ * (a rel32 whose value depends on the link) differ between two links, so the table recognises the
+ * part of the library the relocations do not touch; fnprint_pred_eval.md measures how much.
+ *
+ * `sel_bits`: keep and ask only the windows whose mixed value has its low `sel_bits` bits zero
+ * (1 in 2^sel_bits): a smaller table, and a vote instead of a verdict per window.
+ * NO SILENT LIMIT: the table grows by doubling, charged to the ledger; an add the ledger refuses is
+ * counted (n_refused) and the table says KGENOME_OVER_BUDGET: it is then INCOMPLETE (a miss is not
+ * proof of "not library") and the caller is told so.
+ */
+struct kgenome_fnprint_libtab {
+	uint32_t *slot;                 /* open addressing; 0 is empty (a value 0 is stored as 1) */
+	uint64_t  cap;                  /* power of two, or 0 */
+	uint64_t  n;                    /* distinct values held */
+	uint64_t  n_seen;               /* windows offered to add */
+	uint64_t  n_refused;            /* values that did not fit: the table is incomplete */
+	uint64_t  bytes;                /* charged to the ledger */
+	uint32_t  sel_bits;
+	enum kgenome_status status;
+	struct kgenome_ledger *led;     /* may be NULL */
+};
+
+int  kgenome_fnprint_libtab_init(struct kgenome_fnprint_libtab *t, uint32_t sel_bits, struct kgenome_ledger *led);
+void kgenome_fnprint_libtab_free(struct kgenome_fnprint_libtab *t);
+/* Add the windows of library bytes p[0,n) (flat windows are not content and are left out). */
+void kgenome_fnprint_libtab_add(struct kgenome_fnprint_libtab *t, const uint8_t *p, uint64_t n);
+/* Add one window value (a table loaded from a list, or mined from a corpus); 1 when held, 0 when not sampled or refused. */
+int  kgenome_fnprint_libtab_put(struct kgenome_fnprint_libtab *t, uint32_t v);
+/* Does the table keep this value (a sampled one)? */
+int  kgenome_fnprint_libtab_sampled(const struct kgenome_fnprint_libtab *t, uint32_t v);
+/* Is this value in the table? 0 for a value the table does not sample. */
+int  kgenome_fnprint_libtab_has(const struct kgenome_fnprint_libtab *t, uint32_t v);
+
+struct kgenome_fnprint_libvote {
+	uint32_t n_win;                 /* non-flat windows of the bytes */
+	uint32_t n_sampled;             /* ...of them the table samples */
+	uint32_t n_hit;                 /* ...of them in the table */
+};
+void kgenome_fnprint_libvote(const struct kgenome_fnprint_libtab *t, const uint8_t *p, uint64_t n,
+			     struct kgenome_fnprint_libvote *out);
+
+/*
+ * THE RELOCATION MASK: bytes in, the same bytes out with every 32-bit displacement that points
+ * somewhere inside the object (plus or minus `slack`) zeroed - the rel32 of `call`, `jmp`, `jcc`, and the
+ * disp32 of the RIP-relative forms of the common one-byte and `0F xx` opcodes - found by the opcode byte
+ * and the plausibility of the target, no decode. WHY: a window that covers such a field holds a number
+ * the LINK chose, so the same library function is a different set of windows in every binary (measured
+ * in fnprint_pred_eval.md: 5-14% of the library's windows miss the table for that reason, and the
+ * residue is exactly what makes library blocks credit across unrelated programs). A displacement that
+ * is not an instruction's is masked too (a false mask costs a window of discrimination, the same
+ * on both sides of every comparison, because the table, the blocks and the object are all masked by this
+ * one function). out == p is allowed (in place). Returns the number of fields masked.
+ */
+uint64_t kgenome_fnprint_relmask(const uint8_t *p, uint64_t n, uint8_t *out, uint64_t slack);
+
+/*
+ * ---- CHEAP PREDICTION WITHOUT DECODING (candidates (b) and (d)) ----------------------------------
+ *
+ * Statistics of a chunk of bytes, in one pass: is it data? Zero bytes, printable ASCII and the
+ * number of distinct byte values among the first 64. Bounded and reported; used as a PRIOR (a
+ * caller that skips what it says is data must say so: fnprint_wpass_stat.n_skip_chunks / skip_bytes).
+ */
+struct kgenome_fnprint_bstat {
+	uint32_t n, zero, ascii, hi;    /* bytes, zero bytes, 0x20..0x7e, >= 0x80 */
+};
+void kgenome_fnprint_bstat(const uint8_t *p, uint32_t n, struct kgenome_fnprint_bstat *out);
+int  kgenome_fnprint_bstat_is_data(const struct kgenome_fnprint_bstat *s);
+
+/*
+ * THE BYTE-LEVEL CALL-GRAPH SKETCH: edges from `call rel32`, `jmp rel32`, `jcc rel32` and
+ * `lea r,[rip+rel32]` found by looking for the opcode bytes whose displacement lands inside the
+ * text [lo,hi) - no instruction is decoded. A function is the stretch from a call or lea target to the
+ * next one; the closure from `root` marks the stretches a chain of edges reaches. The chain is an
+ * approximation (indirect calls, tables and data pointers are not edges; a byte that only looks like
+ * an opcode can add one) and it is only a PRIOR: reached means "plausibly the program's or a library
+ * function the program calls", never "author", and unreached is never an exclusion.
+ */
+struct kgenome_fnprint_bsketch {
+	uint64_t *start;                /* ascending: candidate function starts (call and lea targets, root) */
+	uint32_t  n_start;
+	uint64_t *from, *to;            /* edges, ascending by from */
+	uint32_t  n_edge;
+	uint8_t  *reached;              /* per start */
+	uint32_t  n_reached;
+	uint64_t  scanned;              /* bytes looked at */
+	uint64_t  bytes;                /* charged */
+	enum kgenome_status status;
+	struct kgenome_ledger *led;
+};
+void kgenome_fnprint_bsketch_build(struct kgenome_fnprint_bsketch *g, const uint8_t *p, uint64_t lo, uint64_t hi,
+				   int64_t va_delta, uint64_t root, struct kgenome_ledger *led);
+void kgenome_fnprint_bsketch_free(struct kgenome_fnprint_bsketch *g);
+/* The index of the stretch holding `off`, or UINT32_MAX. */
+uint32_t kgenome_fnprint_bsketch_find(const struct kgenome_fnprint_bsketch *g, uint64_t off);
+/* The entry stub's `main`: the lea/mov of an address into rdi (edi) in the first 160 bytes at `entry`
+ * that precedes the stub's first call; KGENOME_BROKEN if the stub has none of that shape. */
+uint64_t kgenome_fnprint_bsketch_main(const uint8_t *p, uint64_t n, uint64_t entry, int64_t va_delta, uint64_t lo, uint64_t hi);
+
+/*
+ * ---- THE WINDOW STREAM: one rolling pass, no decode --------------------------------------------
+ *
+ * The database side. A block is `n` hashes (<= KGENOME_FNP_WDB_MAXN) of one side with a tag (the
+ * rule or family it belongs to). Built once, read-only afterwards, shared by threads; the mutable
+ * counters are a kgenome_fnprint_wctx, one per scan.
+ *
+ * STRUCTURE (measured against the matcher's sorted pair array in fnprint_pred_eval.md): the hashes
+ * sorted, as parallel arrays (key, block, slot), a bucket index over the top bits of the key (one
+ * load to the equal range instead of a binary search), a bit filter sized from a bits-per-hash the
+ * caller chooses. A run of equal keys is credited once per object per side whatever the number of
+ * windows that produce it (a hot key is not quadratic in the number of its windows).
+ * NO SILENT LIMIT: a block count or hash count that does not fit the index widths, or the ledger,
+ * refuses the build with a status and a count; nothing is truncated.
+ */
+#define KGENOME_FNP_WDB_MAXN 128u
+/* A key held by this many pairs is HOT: its run is walked once per object and side, however many windows repeat it. */
+#define KGENOME_FNP_WDB_HOT  32u
+
+struct kgenome_fnprint_wblock {
+	uint32_t first;                 /* index of its first hash in the pool */
+	uint32_t n;                     /* hashes: 1 .. KGENOME_FNP_WDB_MAXN */
+	uint32_t side;                  /* enum kgenome_mutation_side */
+	uint32_t tag;                   /* the rule/family it belongs to (< n_tag) */
+};
+
+struct kgenome_fnprint_wdb_opts {
+	uint32_t filter_bits_per_hash;  /* 32 when 0; 0xFFFFFFFF: no filter */
+	uint32_t bucket_bits;           /* 0: from the number of keys (about 4 keys per bucket) */
+	uint32_t n_tag;                 /* tags in use (>= 1 + the largest tag) */
+	struct kgenome_ledger *led;
+};
+
+struct kgenome_fnprint_wdb {
+	const struct kgenome_fnprint_wblock *blk;
+	const uint32_t *pool;
+	uint32_t  n_blk, n_tag;
+	uint64_t  n_pair;
+	uint32_t *key;                  /* ascending, one per pair */
+	uint32_t *ref;                  /* block << 7 | slot of the pair (KGENOME_FNP_WDB_MAXN is 128) */
+	uint32_t *bucket;               /* [(top >> shift) + 2]: first pair with key >> shift >= b */
+	uint32_t *hot_first;            /* first pair of each key held by KGENOME_FNP_WDB_HOT blocks or more */
+	uint32_t  n_hot;
+	uint32_t  bucket_bits, shift;
+	uint64_t *filter; uint64_t filter_mask;     /* bits - 1 (0: none) */
+	uint32_t  words;                /* 32-bit words per block in a context's seen mask */
+	uint32_t  top;                  /* the largest key: a value above it is in no block */
+	uint64_t  n_key;                /* distinct keys */
+	uint64_t  max_run;              /* the longest run of one key: the hottest hash */
+	uint64_t *tag_pairs;            /* [n_tag] pairs of each tag */
+	uint32_t  filter_bpk;           /* bits per hash the filter was sized with (0xFFFFFFFF: none) */
+	uint64_t  bytes;                /* charged */
+	enum kgenome_status status;
+	struct kgenome_ledger *led;
+};
+
+/* A block count the (block << 7 | slot) word holds: 2^25. A larger set is refused, not cut. */
+#define KGENOME_FNP_WDB_MAX_BLOCKS (1u << 25)
+
+int  kgenome_fnprint_wdb_build(struct kgenome_fnprint_wdb *d, const struct kgenome_fnprint_wblock *blk, uint32_t n_blk,
+			       const uint32_t *pool, uint64_t n_pool, const struct kgenome_fnprint_wdb_opts *o);
+void kgenome_fnprint_wdb_free(struct kgenome_fnprint_wdb *d);
+
+/*
+ * THE CONTEXT: per-scan counters. A generation stamp per block replaces the clear and a bit per
+ * slot replaces a stamp per pair (4 bytes per block instead of 4 per hash). A small direct-mapped
+ * cache of (key, generation, sides) makes the repeat of a hot key one load.
+ *
+ * RETIREMENT (opt-in, default OFF): `kgenome_fnprint_wctx_retire(c, tag)` makes lookups skip the
+ * tag's blocks; the filter is rebuilt from the live keys once `rebuild_pct` percent of the pairs
+ * went dead. It is a METHOD to measure: a retired tag's credit stops growing, which conflicts with a
+ * detection that weighs several evidence items together; nothing retires unless the caller calls it
+ * or sets a policy in the pass request.
+ */
+#define KGENOME_FNP_KC 4096u
+
+struct kgenome_fnprint_kc {
+	uint32_t key, tag;              /* tag: generation << 2 | sides done */
+};
+
+struct kgenome_fnprint_dxrun;           /* the decision state of one context (fnprint_dx.c) */
+
+struct kgenome_fnprint_wctx {
+	const struct kgenome_fnprint_wdb *db;
+	uint32_t *stamp;                /* per block: generation of its count */
+	uint32_t *count;                /* per block: distinct slots credited */
+	uint32_t *mask;                 /* [n_blk * words] */
+	struct kgenome_fnprint_kc kc[KGENOME_FNP_KC];
+	uint32_t *hstamp;               /* per hot key: generation << 2 | sides done (exact, no collisions) */
+	uint8_t  *dead;                 /* per tag: retired */
+	uint8_t  *decided;              /* per tag: a block reached decide_pct this object */
+	uint32_t  gen, n_dead, n_decided, n_tag_used;   /* n_tag_used: tags that hold at least one block */
+	uint32_t  policy, decide_pct;   /* enum kgenome_fnprint_retire_policy; the percent that decides a tag */
+	int       stop;                 /* the policy says: stop the pass */
+	uint64_t  n_lookup, n_search, n_credit, n_skip_dead, n_hot_repeat, n_dead_pairs, n_rebuild;
+	uint64_t  n_walked;             /* pairs examined by the equal-range walks (the cost of a hot key, in pairs) */
+	uint64_t  bytes;
+	uint64_t *rfilter;              /* the rebuilt filter once retirement shrank the live set (NULL: db's) */
+	uint64_t  rfilter_mask;
+	uint32_t  rtop;
+	uint32_t  rebuild_pct;
+	uint64_t  rebuilt_at;           /* n_dead_pairs when the filter was last rebuilt */
+	struct kgenome_fnprint_dxrun *dxr;  /* NULL: no decision state (the default) */
+	uint8_t  *bdead;                /* dxr's per-block flags: a block no live diagnose wants any more (NULL: none) */
+	const uint32_t *dx_need_min;    /* dxr's index: the fewest credited hashes at which any diagnose counts block b (the hot path's one test) */
+	uint64_t  n_bdead;
+	uint64_t  rem;                  /* DX: windows still to come, as last told (a rebuild of the filter is worth it only when many are) */
+	enum kgenome_status status;
+	struct kgenome_ledger *led;
+};
+
+int  kgenome_fnprint_wctx_init(struct kgenome_fnprint_wctx *c, const struct kgenome_fnprint_wdb *d, struct kgenome_ledger *led);
+void kgenome_fnprint_wctx_done(struct kgenome_fnprint_wctx *c);
+/* A new object: counters restart and retirement is per object, so it is cleared here. */
+void kgenome_fnprint_wctx_begin(struct kgenome_fnprint_wctx *c);
+/* Credit one window value to the live blocks of this side that hold it. */
+void kgenome_fnprint_wctx_credit(struct kgenome_fnprint_wctx *c, uint32_t v, uint32_t side);
+/* Distinct hashes of block b credited this object. */
+uint32_t kgenome_fnprint_wctx_count(const struct kgenome_fnprint_wctx *c, uint32_t b);
+/* Retire a tag (opt-in): its blocks are no longer looked up. */
+void kgenome_fnprint_wctx_retire(struct kgenome_fnprint_wctx *c, uint32_t tag, uint32_t rebuild_pct);
+
+/*
+ * RETIREMENT POLICIES. NONE and DX are the ones a scan may use. TAG, TAG_STOP and
+ * STOP_FIRST are FIRST-HIT policies (a tag is dropped, or the pass ends, at the first
+ * verdict): they are opt-in prototype code for measuring what stopping early would cost,
+ * and they CONFLICT WITH CLUSTER DETECTION - a cluster is read off the whole set of
+ * blocks that matched, and a pass that ended at the first tag hides the rest of the set
+ * from it. They are not for the default, and the default (NONE) never uses them. The
+ * decision-complete policy (DX) is the one that cannot change an answer: it stops only for
+ * what is already MET or provably IMPOSSIBLE.
+ */
+enum kgenome_fnprint_retire_policy {
+	KGENOME_FNP_RETIRE_NONE = 0,    /* the default: every tag keeps being evaluated */
+	KGENOME_FNP_RETIRE_TAG = 1,     /* a tag whose block reaches `decide_pct` is retired */
+	KGENOME_FNP_RETIRE_TAG_STOP = 2,/* ...and the pass stops when every tag is retired (first-verdict policy) */
+	KGENOME_FNP_RETIRE_STOP_FIRST = 3,/* the pass stops at the first tag detected */
+	/*
+	 * DECISION-COMPLETE (needs kgenome_fnprint_dx_attach): work stops for a diagnose only when its
+	 * outcome can no longer change - MET (its required blocks already reached their percent) or
+	 * IMPOSSIBLE (what is still to be seen cannot reach it) - and the pass stops when every consumer
+	 * (a cluster, or a diagnose on its own) is decided. A single hit decides nothing.
+	 */
+	KGENOME_FNP_RETIRE_DX = 4
+};
+
+struct kgenome_fnprint_wpass_stat {
+	uint64_t n_win;                 /* windows rolled */
+	uint64_t n_cand;                /* passed the cheap rejects (top, filter) */
+	uint64_t n_lib;                 /* ...of them in the library table: credited to the LIB side */
+	uint64_t n_flat;
+	uint64_t n_skip_chunks, skip_bytes;     /* chunks the statistics called data and skipped (opt-in) */
+	uint32_t n_bad_ext;             /* ranges that run past rq->n: skipped, the pass is incomplete and says so */
+	uint64_t bytes_in;              /* bytes of the ranges given */
+	uint64_t n_stop_bytes;          /* bytes not rolled because the policy stopped the pass */
+	uint32_t n_decided;             /* tags decided (retirement policies) */
+	int      stopped;
+	uint64_t n_win_rolled;          /* windows actually rolled (n_win minus what a stop left) */
+	uint64_t n_win_unvisited;       /* windows of ranges never started because the pass was already decided */
+	enum kgenome_status status;     /* KGENOME_BAD_INPUT: a policy that needs state it was not given */
+};
+
+#define KGENOME_FNP_WP_SKIP_DATA   (1u << 0)   /* opt-in: skip chunks the byte statistics call data */
+
+struct kgenome_fnprint_wpass_req {
+	const uint8_t *p;
+	uint64_t       n;               /* bytes at p: a range that does not fit is skipped and counted (stat.n_bad_ext), never read */
+	const struct kof_range *ext;   /* ranges to roll (code segments, units) */
+	uint32_t n_ext;
+	const struct kgenome_fnprint_libtab *lib;  /* NULL: every window is USER */
+	struct kgenome_fnprint_wctx *c;
+	uint32_t flags;                 /* KGENOME_FNP_WP_* */
+	uint32_t policy;                /* enum kgenome_fnprint_retire_policy; 0 (the default) retires nothing */
+	uint32_t decide_pct;            /* a block at this percent of its hashes decides its tag (70) */
+	struct kgenome_fnprint_wpass_stat *stat;
+};
+void kgenome_fnprint_wpass(const struct kgenome_fnprint_wpass_req *rq);
+
+/*
+ * UNITS FROM WINDOWS, no decode and no function set: the runs of p[0,n) whose windows are NOT in the
+ * library table. A run is closed when more than `gap` consecutive windows are library; a run with fewer
+ * than `min_win` non-library windows is dropped (boundary windows of library code: the few windows
+ * that straddle the edge of a library function or hold padding are not in any table and are common to
+ * every program that links the same library, so a unit made of them would credit across unrelated
+ * programs - measured in fnprint_pred_eval.md). Each run is handed to `fn` once, in order; non-zero
+ * stops. Returns the number of runs offered; `*dropped` counts the runs under the floor.
+ */
+typedef int (*kgenome_fnprint_run_fn)(void *user, uint64_t off, uint64_t len, uint32_t n_win);
+uint32_t kgenome_fnprint_runs(const uint8_t *p, uint64_t n, const struct kgenome_fnprint_libtab *lib,
+			      uint32_t gap, uint32_t min_win, kgenome_fnprint_run_fn fn, void *user, uint32_t *dropped);
+
+/*
+ * The block a unit of bytes makes, by the same rule as the generator (kgenome_mutation_minhash):
+ * the `k` smallest distinct non-flat window values of p[0,n) that are NOT in the library table.
+ * Returns how many (<= k), ascending in out.
+ */
+uint32_t kgenome_fnprint_wsketch(const uint8_t *p, uint64_t n, const struct kgenome_fnprint_libtab *lib,
+				 uint32_t *out, uint32_t k);
+
+/*
+ * ---- DECISION-COMPLETE INTERRUPT -------------------------------------------------------------
+ *
+ * A DIAGNOSE here is the evidence a detection asks the block credit for: a list of blocks of the
+ * database, `need` of which must each hold `pct` percent of their hashes. A CLUSTER is a list of
+ * diagnoses of which `k` must hold. A consumer (what the engine finally reads) is a cluster; a diagnose
+ * that stands alone is a cluster of one (k = n = 1). Credit only grows during a pass, so
+ *
+ *   diagnose MET        a block count crossed its percent: `need` blocks have. Final: no later window
+ *                       can undo it.
+ *   diagnose IMPOSSIBLE the blocks not yet at their percent cannot get there: a block with `c` of its
+ *                       `n` hashes credited, `m` of them still missing, can gain at most
+ *                       min(m, windows_left x dup) more, where dup is the most slots of the block that
+ *                       share one value (a window credits all of them at once). With no window left
+ *                       (windows_left 0, the end of the pass) every diagnose that is not MET is
+ *                       IMPOSSIBLE, so a finished pass decides everything: no outcome is left open.
+ *   cluster MET         k members MET.   cluster IMPOSSIBLE   more than n-k members IMPOSSIBLE.
+ *
+ * What stops, and when. A diagnose that is decided (or that no undecided cluster lists any more: RELEASED)
+ * stops taking credit: its blocks are dropped from the lookup once no wanted diagnose lists them (a block may
+ * be listed by several), and the filter is rebuilt from the live keys. When every cluster is decided
+ * the pass stops. The state, not the growing credit, is what a consumer reads afterwards: a block of a
+ * decided diagnose is dropped only when enough windows are still to come for that to pay (at least 16 per
+ * pair of the database; `rem`, as the pass or the caller last said it), and a dropped block keeps the count it
+ * had, a LOWER BOUND of its credit in the full computation; every other block has its full count unless the
+ * pass stopped. A consumer that wants the exact credit (a report that prints the percent) must not turn the
+ * policy on.
+ * Nothing is dropped on a single hit: a block reaching its percent counts towards `need`, and `need`
+ * blocks are what decide. The sweep for IMPOSSIBLE runs when the windows left fall under the largest
+ * count any block needs (<= 128): on a clean object nothing is decided before that, so the saving
+ * of this interrupt is on the objects that match, never on the ones that do not (stated in
+ * fnprint_sel_eval.md).
+ */
+enum kgenome_fnprint_dstate {
+	KGENOME_FNP_D_UNDECIDED = 0,
+	KGENOME_FNP_D_MET,
+	KGENOME_FNP_D_IMPOSSIBLE,
+	KGENOME_FNP_D_RELEASED          /* no undecided cluster lists it: nobody reads it */
+};
+
+struct kgenome_fnprint_dx {
+	uint32_t first, n;              /* its blocks: ref[first .. first+n) */
+	uint32_t need;                  /* blocks that must reach pct (0: met at once) */
+	uint32_t pct;                   /* percent of a block's hashes (0: 70) */
+};
+
+struct kgenome_fnprint_cl {
+	uint32_t first, n;              /* its members: mem[first .. first+n), diagnose indices */
+	uint32_t k;                     /* members that must hold (0: held at once) */
+};
+
+struct kgenome_fnprint_dxdesc {
+	const struct kgenome_fnprint_dx *dx;  uint32_t n_dx;
+	const uint32_t *ref;                  uint64_t n_ref;       /* block indices of the wdb */
+	const struct kgenome_fnprint_cl *cl;  uint32_t n_cl;        /* NULL: every diagnose is a consumer on its own */
+	const uint32_t *mem;                  uint64_t n_mem;
+};
+
+/* The read-only index of a description: shared by every context of the database, any number of threads. */
+struct kgenome_fnprint_dxdb {
+	const struct kgenome_fnprint_wdb *db;
+	struct kgenome_fnprint_dxdesc desc;     /* borrowed, except the singleton clusters it makes itself */
+	struct kgenome_fnprint_cl *own_cl;
+	uint32_t *own_mem;
+	uint32_t *rv_first, *rv_dx;             /* block -> the diagnoses that list it, one entry per listing */
+	uint32_t *need_min;                     /* per block: the fewest credited hashes at which any diagnose counts it */
+	uint8_t  *dup;                          /* per block: the most slots that share one value */
+	uint32_t *dxc_first, *dxc_cl;           /* diagnose -> the clusters that list it, one entry per listing */
+	uint32_t  trigger;                      /* windows left at or under which IMPOSSIBLE can hold */
+	uint64_t  bytes;
+	enum kgenome_status status;
+	struct kgenome_ledger *led;
+};
+
+int  kgenome_fnprint_dxdb_build(struct kgenome_fnprint_dxdb *x, const struct kgenome_fnprint_wdb *d,
+				const struct kgenome_fnprint_dxdesc *desc, struct kgenome_ledger *led);
+void kgenome_fnprint_dxdb_free(struct kgenome_fnprint_dxdb *x);
+
+/* Give a context its decision state (before the first wctx_begin; the context's ledger is charged). */
+int  kgenome_fnprint_dx_attach(struct kgenome_fnprint_wctx *c, const struct kgenome_fnprint_dxdb *x);
+/*
+ * At most `remaining` windows can still arrive: the pass calls it after each range, a caller that feeds
+ * values itself calls it when it knows (0 = the object is exhausted). Decides what the bound decides.
+ */
+void kgenome_fnprint_dx_remain(struct kgenome_fnprint_wctx *c, uint64_t remaining);
+enum kgenome_fnprint_dstate kgenome_fnprint_dx_state(const struct kgenome_fnprint_wctx *c, uint32_t dx);
+enum kgenome_fnprint_dstate kgenome_fnprint_dx_cluster(const struct kgenome_fnprint_wctx *c, uint32_t cl);
+/* Clusters still undecided (0: the pass has nothing left to do). */
+uint32_t kgenome_fnprint_dx_open(const struct kgenome_fnprint_wctx *c);
+/* The reference answer: the outcome of a description from FINAL counts of a run that retired nothing. */
+int  kgenome_fnprint_dx_full(const struct kgenome_fnprint_dxdb *x, const struct kgenome_fnprint_wctx *c, uint32_t cl);
+
+/*
+ * ---- WHICH FUNCTIONS ARE ROLLED --------------------------------------------------------------
+ *
+ * kgenome_fnprint_sel_plan turns the function extents of an object into the ranges a pass rolls, by
+ * bytes alone (a name is not evidence). Each policy bit says what it may remove and whether that is exact:
+ *
+ *   FLAT    a function of one repeated byte, or shorter than a window: every window is flat. EXACT.
+ *   DUP     a function whose bytes equal an earlier one's (verified, not trusted to the hash): its
+ *           windows are a set already credited. EXACT, and it carries the object's repeated stubs.
+ *   TINY    shorter than `tiny` bytes. NOT exact (a block can be cut from a small function).
+ *   SAMPLE  none of `k` sampled windows is a key of the database. NOT exact: a window that was not
+ *           sampled is not looked at. The skipped windows are counted (n_skip_win) so that the bound
+ *           "credit lost <= windows skipped" is stated, and a caller can re-roll the skipped ranges.
+ *   ORDER   (exact: it only changes the order) functions whose sample hits rare keys go first.
+ *   LIB     most of `k` sampled windows are in the library window table (bytes decide, never a name):
+ *           the function is library bytes. NOT exact: the residual windows of a mostly-library
+ *           function are not looked at; counted (n_lib) like the others.
+ */
+#define KGENOME_FNP_SEL_FLAT    (1u << 0)
+#define KGENOME_FNP_SEL_DUP     (1u << 1)
+#define KGENOME_FNP_SEL_TINY    (1u << 2)
+#define KGENOME_FNP_SEL_SAMPLE  (1u << 3)
+#define KGENOME_FNP_SEL_ORDER   (1u << 4)
+#define KGENOME_FNP_SEL_LIB     (1u << 5)
+#define KGENOME_FNP_SEL_EXACT   (KGENOME_FNP_SEL_FLAT | KGENOME_FNP_SEL_DUP | KGENOME_FNP_SEL_ORDER)
+
+struct kgenome_fnprint_sel_stat {
+	enum kgenome_status status;
+	uint32_t n_in, n_out;
+	uint32_t n_bad;                 /* extents outside the object: dropped and counted */
+	uint32_t n_flat, n_dup, n_tiny, n_sample, n_lib;        /* removed, by policy */
+	uint32_t n_hit;                 /* kept because a sampled window is a key */
+	uint64_t win_in, win_out;       /* windows of the extents given / of the ranges returned */
+	uint64_t n_probe;               /* sampled windows computed */
+	uint64_t bytes_hashed;          /* bytes read to nominate duplicates (at most 48 per function) */
+	uint64_t bytes_compared;        /* length of the candidates compared to verify a nomination (an upper bound: a compare stops at the first difference) */
+	uint32_t n_dup_cap;             /* functions kept because DUP_TRIES candidates did not match: counted, never silent */
+	uint64_t scratch_bytes;
+};
+
+struct kgenome_fnprint_sel_req {
+	const uint8_t *p;
+	uint64_t       n;
+	const struct kof_range *fn;     /* the function extents */
+	uint32_t       n_fn;
+	uint32_t       policy;          /* KGENOME_FNP_SEL_* bits */
+	uint32_t       tiny;            /* TINY: bytes under which a function is dropped (64) */
+	uint32_t       sample_k;        /* SAMPLE/ORDER: windows probed per function (8) */
+	const struct kgenome_fnprint_wdb *db;   /* SAMPLE/ORDER: the keys; NULL: every probe misses */
+	const struct kgenome_fnprint_libtab *lib;   /* LIB: the library window table */
+	uint32_t       lib_pct;         /* LIB: percent of the probed windows the table must hold (90) */
+	uint32_t       lib_min;         /* LIB: probed windows the table must sample at least (8): a stub proves nothing */
+	struct kof_range *out;          /* room for n_fn ranges */
+	uint32_t        *out_fn;        /* may be NULL: the index in `fn` of each returned range */
+	struct kgenome_ledger *led;
+	struct kgenome_fnprint_sel_stat *stat;
+};
+void kgenome_fnprint_sel_plan(const struct kgenome_fnprint_sel_req *rq);
 
 #endif /* KGENOME_FNPRINT_H */

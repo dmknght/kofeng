@@ -397,6 +397,8 @@ enum kuncoat_status kuncoat_aspack_decode(const uint8_t *in, uint64_t in_len,
 
 	if (produced)
 		*produced = 0;
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
 	if (!in || !out || !out_cap || !in_len)
 		return KUNCOAT_CORRUPT;
 

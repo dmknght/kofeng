@@ -21,6 +21,14 @@
 #include <genotype/image/elf_rebuild.h>
 
 #include "objctx_int.h"
+#include <kofmod/arj.h>
+#include <kofmod/cab.h>
+#include <kofmod/chm.h>
+#include <kofmod/docole.h>
+#include <kofmod/lha.h>
+#include <kofmod/pdf.h>
+#include <kofmod/rar.h>
+#include <kofmod/zip.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,12 +105,16 @@
  * whose sink stops accepting, and it costs the same as any other stream that is
  * cut short.
  */
-/* Close the object being emitted and start the next. */
-int oc_child(const struct kof_obj_ctx *ctx)
+/*
+ * Close the object being emitted and start the next: the body of oc_child, shared with
+ * the close a cut makes (oc_entry_cut_close), which must not clear the cut latch.
+ */
+static int child_close(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	struct kof_objsrc *kid;
 	uint64_t held;
+	uint32_t cut;
 
 	if (!sc->cur.src)
 		return 0;
@@ -270,6 +282,8 @@ int oc_child(const struct kof_obj_ctx *ctx)
 	sc->sink.len = 0;
 	sc->sink.fixed = 0;
 	sc->sink.at = 0;
+	cut = sc->sink.cut;
+	sc->sink.cut = 0;
 
 	/*
 	 * The bytes were charged to the sink and are now the child's. Ownership of
@@ -293,7 +307,50 @@ int oc_child(const struct kof_obj_ctx *ctx)
 		return 0;
 	}
 	kof_src_on_free(kid, oc_scan_release_cb, sc);
+	/* An entry that met its own bound carries the fact itself - see oc_entry_cut. */
+	if (cut)
+		kof_src_mark_cut(kid, cut);
 	return oc_kid_push(sc, ctx, kid);
+}
+
+/*
+ * THE CLOSE A MODULE ASKS FOR: "this entry is finished".
+ *
+ * An entry that met its own bound was closed already, at the emit that met it
+ * (oc_entry_cut_close), with the bytes decoded so far and a LIMIT of its own. The
+ * module's close then finds an empty sink, which used to answer 0 - and every
+ * module reads 0 as "the host will take no more" and ENDS ITS WALK, so the entries
+ * after the oversize one were never opened (an 84 MB zip with one 91 MB member
+ * came back with 6 of its objects). The cut entry's child exists, so the answer is
+ * 1. A close that really cannot make a child (quota, allocation) leaves the latch
+ * unset and answers 0 as before.
+ */
+int oc_child(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	int made = child_close(ctx);
+
+	if (!made && sc->sink.refuse == OC_REFUSE_CUT_OPENED)
+		made = 1;
+	sc->sink.refuse = 0;
+	return made;
+}
+
+/*
+ * THE CLOSE OF AN ENTRY THAT MET ITS OWN BOUND, from the emit that met it: what was
+ * decoded so far becomes the child and carries LIMIT, and the sink refuses the rest of
+ * this entry (oc_emit) until the module starts the next one (oc_entry_begin, or its own
+ * close). Never sticky: nothing here says anything about the entry after it.
+ */
+void oc_entry_cut_close(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+
+	oc_entry_cut(sc);
+	if (child_close(ctx))
+		sc->sink.refuse = OC_REFUSE_CUT_OPENED;
+	else
+		sc->sink.refuse = OC_REFUSE_CUT;
 }
 
 /*
@@ -316,7 +373,8 @@ int oc_child(const struct kof_obj_ctx *ctx)
 uint64_t oc_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
-	struct kof_range *ext = sc->cache.ext_gather;
+	struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
+	struct kof_range *ext;
 	kof_buf b = oc_mc(ctx)->data;
 	uint64_t done = 0;
 	uint32_t n, i;
@@ -324,7 +382,8 @@ uint64_t oc_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap)
 	if (!oc_can_produce(sc))
 		return 0;
 
-	n = kof_scan_resolve_range(ctx, mask, ext);
+	n = kof_scan_resolve_range(ctx, mask, eb);
+	ext = eb->v;
 	for (i = 0; i < n; i++) {
 		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
 		uint64_t at = 0;
@@ -386,6 +445,62 @@ void oc_child_entry(const struct kof_obj_ctx *ctx, uint32_t index)
 	kof_scan_of(ctx)->pend.entry = index;
 }
 
+/*
+ * HOW LONG A MEMBER'S NAME MAY BE, in bytes as the container wrote it, from the
+ * container's own standard. A longer name is not a name that has to be cut to fit: it
+ * is INVALID, and a member that carries one is opened without a name and its object
+ * is reported damaged (kof_stats.names_invalid). The limit of each, and where it
+ * comes from:
+ *
+ *   ZIP, DocZip  65535  file name length is a 16-bit field (APPNOTE.TXT 4.4.4)
+ *   7z           65535  names are UTF-16 units with no field of their own (7zFormat.txt);
+ *                       32767 units is the longest path Windows takes, 65534 bytes
+ *   RAR          65535  RAR 4 FILE_HEAD name size is 16 bits; RAR 5 writes a vint with
+ *                       no stated bound, held to the same
+ *   TAR           4096  ustar's fields give 100 + 155 + '/' = 256 (POSIX.1-1988), but
+ *                       pax `path` and GNU @LongLink have no field limit: bounded by
+ *                       the longest path the system stores, PATH_MAX 4096 with its NUL
+ *   CAB            255  szName is at most 255 characters and a NUL ([MS-CAB] 2.3.3,
+ *                       KOF_CAB_MAX_NAME 256 with the NUL)
+ *   ARJ           2600  the name lives in the basic header, which ARJ bounds at 2600
+ *                       bytes (technical.txt, "basic header size")
+ *   LHA            255  the level 0/1 name length is one byte (KOF_LHA_MAX_NAME)
+ *   OLE             64  a directory entry holds 64 bytes of UTF-16, NUL included, so 31
+ *                       characters ([MS-CFB] 2.6.1)
+ *   PDF          32767  a string is at most 32767 bytes (ISO 32000-1, Annex C.2; a
+ *                       name is 127, but an embedded file's name is a string)
+ *   CHM           1024  [MS-ITS] gives the name length as a variable integer with no
+ *                       bound, and the parser puts none on it (a name is as long as the
+ *                       chunk that holds it, chm_parse.c); 1024 is this host's own, a
+ *                       name past it is marked bad on the child, never cut
+ *   anything else 4096  PATH_MAX: a name the file system cannot hold is not a name
+ *                       (gzip's FNAME and RTF/other producers have no stated limit)
+ */
+static uint64_t oc_name_limit(uint8_t fmt)
+{
+	switch (fmt) {
+	case KOF_FMT_ZIP:
+	case KOF_FMT_DOCZIP:
+	case KOF_FMT_7Z:
+	case KOF_FMT_RAR:
+		return 65535u;
+	case KOF_FMT_CAB:
+		return 255u;
+	case KOF_FMT_ARJ:
+		return 2600u;
+	case KOF_FMT_LHA:
+		return 255u;
+	case KOF_FMT_DOCOLE:
+		return 64u;
+	case KOF_FMT_PDF:
+		return 32767u;
+	case KOF_FMT_CHM:
+		return 1024u;
+	default:
+		return 4096u;
+	}
+}
+
 void oc_note_next(const struct kof_obj_ctx *ctx, const char *text)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -393,9 +508,14 @@ void oc_note_next(const struct kof_obj_ctx *ctx, const char *text)
 
 	if (!text || !*text)
 		return;
-	n = strlen(text);
-	if (n > KOF_SRC_LABEL_MAX - 1u)
-		n = KOF_SRC_LABEL_MAX - 1u;
+	/* Bounded by the pending buffer, not by trusting the module's terminator. */
+	n = strnlen(text, KOF_SRC_NAME_MAX + 1u);
+	if (n > oc_name_limit(ctx->format)) {
+		sc->pend.label[0] = 0;
+		sc->pend.label_len = 0;
+		sc->pend.name_bad = 1;
+		return;
+	}
 	memcpy(sc->pend.label, text, n);
 	sc->pend.label[n] = 0;
 	sc->pend.label_len = (uint32_t)n;
@@ -476,9 +596,21 @@ void oc_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
 
 	sc->pend.label[0] = 0;
 	sc->pend.label_len = 0;
+	sc->pend.name_bad = 0;
+	/*
+	 * Judged by the length the CONTAINER gave, not by what is left of it once the
+	 * object has clipped the range: a name field that runs past its format's limit
+	 * is invalid whether or not the bytes are all there. Nothing is copied for it -
+	 * a name cut at a limit looks like a different, valid name, and two members
+	 * cut at the same place look like one.
+	 */
+	if (len > oc_name_limit(ctx->format)) {
+		sc->pend.name_bad = 1;
+		return;
+	}
 	if (!s.n)
 		return;
-	n = s.n < KOF_SRC_LABEL_MAX - 1u ? s.n : KOF_SRC_LABEL_MAX - 1u;
+	n = s.n;                /* <= len <= the limit <= KOF_SRC_NAME_MAX */
 	memcpy(sc->pend.label, s.p, (size_t)n);
 	sc->pend.label[n] = 0;
 	sc->pend.label_len = (uint32_t)n;
@@ -494,6 +626,128 @@ void oc_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
  */
 
 
+/* What a scanner's fair share leaves to the object once its fixed cost and the presence
+ * table's allowance (`gram`, given back) are paid: the one figure the share of the objects it
+ * produces and the room of the file it reads are both cut from. Needs a budget. */
+static uint64_t root_want(const struct kof_scanner *sc, uint64_t *gram_out)
+{
+	struct kof_budget *b = sc->eng->budget;
+	uint64_t fair, gram;
+	uint32_t holders;
+
+	holders = atomic_load(&b->holders);
+	if (!holders)
+		holders = 1u;
+	fair = b->cap > b->db ? (b->cap - b->db) / holders : 0;
+	gram = fair / 8u;
+	if (gram < (1ull << 20))
+		gram = 1ull << 20;
+	if (gram > (32ull << 20))
+		gram = 32ull << 20;
+	*gram_out = gram;
+	return fair > sc->root_fixed + gram ? fair - sc->root_fixed - gram : 0;
+}
+
+/*
+ * THIS SCANNER'S SHARE OF THE ENGINE'S MEMORY BUDGET for the object about to be scanned
+ * (kofcore/kofbudget.h, points 3 and 4).
+ *
+ * The share is what is left of the cap after the database, divided among the scanners
+ * alive, less this scanner's fixed cost and its presence table (an eighth of the share,
+ * between 1 and 32 MiB: the table follows the share instead of its own 32 MiB). It is taken
+ * from the engine's count for the length of the object (kof_scan_root_release) and lowers
+ * the scanner's resident ceiling when the caller's allowance is the larger of the two - never
+ * raises it. A share too small for an object does not stop the scan: the object is refused or
+ * loses an optional product through the ordinary ledger, with the ordinary status.
+ */
+void kof_scan_root_share(struct kof_scanner *sc)
+{
+	struct kof_budget *b = sc->eng->budget;
+	uint64_t gram, want, room, share;
+	uint32_t bits;
+
+	if (!b || !sc->root_fixed)
+		return;
+	kof_scan_root_release(sc);
+	want = root_want(sc, &gram);
+	/* The file in hand is part of this scanner's fair share, not on top of it: charged on
+	 * top, the scanners that took their share last were left a sliver (16 jobs on the corpus:
+	 * 40 objects Limit reached became 93, and which ones depended on timing). */
+	want = want > sc->file_held ? want - sc->file_held : 0;
+	/*
+	 * NOT MORE THAN THE LEDGER CAN USE. resident_max, just below, is the smaller of the
+	 * allowance and this share, so a share past the allowance is held from the engine and
+	 * used by nothing. A lone scanner took the whole fair share all the same - 490 of 512
+	 * MiB for a 64 KiB object whose allowance is 128 - and the scanners the host made while
+	 * it scanned took what was left: a chain of four, each made inside the previous one's
+	 * scan beside an idle one, wanted 1/2 + 1/3 + 1/4 + 1/5 of the room and the fourth was
+	 * refused or starved (scan_share.c, formerly ROOT_SHARE_TAKES_ALL_ROOM). Capped, the
+	 * ceiling of every object is the same number as before - resident_max is unchanged by
+	 * construction, and so is every limit cut from it (obj_cap, the diagnose walk) - and
+	 * what the object could not use stays in the budget. The allowance is the host's own
+	 * (max_resident_bytes, divided among a parallel walk's workers), or 128 MiB.
+	 */
+	if (want > sc->ledger.resident_max)
+		want = sc->ledger.resident_max;
+	room = kof_budget_room(b);
+	share = want;
+	if (room < share + gram)
+		share = room > gram ? room - gram : 0;
+	if (kof_budget_charge(b, share + gram))
+		sc->root_held = share + gram;
+	else
+		share = 0;
+	if (share < sc->ledger.resident_max)
+		sc->ledger.resident_max = share ? share : 1u;
+	/* the presence table's cap: 2 bytes a stamp, so 2^(bits+1) <= gram */
+	for (bits = 12u; bits < 24u && (1ull << (bits + 2u)) <= gram; bits++)
+		;
+	sc->match.m.gram_bits = (uint8_t)bits;
+}
+
+/*
+ * THE ROOM OF A FILE THAT IS READ INTO MEMORY (objsrc.c, kof_src_file), asked before it is
+ * read, so before this scanner's share of the budget has been taken for the object. Two
+ * figures, both cut from the share the object would have (root_want):
+ *
+ *   room   a third of it. What a file may take in the heap WHEN a spill file is the
+ *          alternative: the file and what is produced from it are resident together, and
+ *          a view and one child are each about the size of the file, so a file past a
+ *          third leaves the products less than they need. Measured on the 300 PE corpus
+ *          with 16 jobs and a disk scratch directory: a half left 181 files broken
+ *          (Limit reached), a third 50, a quarter 49, and the mapped file, uncounted, 40.
+ *   limit  all of it. What a file may take when there is NO spill file (the default
+ *          directory here is a RAM filesystem, where a spill is the same memory): the
+ *          file is held whole and the products shrink instead, which is the engine's
+ *          own degrade order - an optional product is skipped with a status before an
+ *          object is refused - and not the other way round.
+ *
+ * A file larger than `limit` is read as far as `limit` goes and reported
+ * KOF_BROKEN_LIMIT; it is never refused silently and never read past what the budget has.
+ * Without a budget (the allocation of it failed when the engine was opened) there is no
+ * share to cut: 64 MiB for both, half of the default resident allowance.
+ */
+void kof_scan_file_room(const struct kof_scanner *sc, uint64_t *room, uint64_t *limit)
+{
+	uint64_t gram, want;
+
+	if (!sc->eng->budget) {
+		*room = *limit = 64ull << 20;
+		return;
+	}
+	want = root_want(sc, &gram);
+	*room = want / 3u;
+	*limit = want;
+}
+
+void kof_scan_root_release(struct kof_scanner *sc)
+{
+	if (sc->eng->budget && sc->root_held) {
+		kof_budget_release(sc->eng->budget, sc->root_held);
+		sc->root_held = 0;
+	}
+}
+
 /*
  * The budget for one top level object, inherited by everything below it.
  *
@@ -504,6 +758,83 @@ void oc_name_next(const struct kof_obj_ctx *ctx, uint64_t off, uint64_t len)
  * One budget for the whole tree. Per-child limits are how a container full of
  * entries that are each individually reasonable adds up to something that is not.
  */
+/* The host's scratch directory for this scan, set before anything is read or spilled: the
+ * file read decides between the heap and a spill file before the budget of the tree exists. */
+void kof_scan_scratch(struct kof_scanner *sc, const struct kof_scan_option *opt)
+{
+	sc->scratch = opt->scratch_dir && *opt->scratch_dir ? opt->scratch_dir : NULL;
+}
+
+/*
+ * HOW MANY CHILDREN A TREE MAY HAVE WHEN THE HOST SAYS NOTHING: what the root can hold.
+ *
+ * It was 4096 for every file, and a zip of 2100 members, a PDF of 5000 streams and an APK
+ * of 5242 classes each came back with their members unopened or cut - a quota that is a
+ * property of the scanner applied to a property of the file. A container's children are
+ * made of its own bytes, and each takes some, so what a file can possibly yield is bounded
+ * by its length over the SMALLEST RECORD of any format here, KOF_KID_RECORD_MIN, and that is
+ * the default - the floor stays 4096 so a small file, which a bomb is, gets what it always
+ * got. The quota is tree-wide, so it is the ROOT's length that sizes it: nothing a child
+ * states about itself can raise it.
+ *
+ * The divisor was 32, "a zip entry is 76 bytes", and it was above the record of three
+ * formats: a cab file is 17 bytes plus its name (23 in a measured archive), a chm entry 5
+ * plus its name (21), a 7z folder 26 in an archive that does not code its header. Past
+ * about 4500-5000 members they came back Limit with children cut (cab opened 4846 of 5000,
+ * chm and 7z 4096), a quota that deleted evidence the file really held. The number is now
+ * the smallest stored record in this table, each from the format's own header
+ * (kofmod/<format>.h, so a parser's bound and this one cannot drift apart):
+ *
+ *   chm      5   a name length, one name byte, section, offset, length (KOF_CHM_ENTRY_MIN)
+ *   pdf     13   "N G obj" and "endobj" (KOF_PDF_OBJECT_MIN)
+ *   rar     12   KOF_RAR_ENTRY_MIN
+ *   cab     17   the fixed part of a CFFILE and one name byte (KOF_CAB_FILE_MIN)
+ *   lha     22   KOF_LHA_HEADER_MIN
+ *   arj     40   KOF_ARJ_HEADER_MIN
+ *   zip     46   a central record (KOF_ZIP_CENTRAL_MIN); a local header shared by the
+ *                records adds nothing
+ *   docole 128   a directory entry (KOF_DOCOLE_DIR_ENT)
+ *   tar    512   a header block
+ *   7z       -   a header may be LZMA-coded and the parser lets it decode to sixteen times
+ *                the bytes it is stored in (HDR_DECODE_RATIO), so no stored record bounds
+ *                it: a coded header of repeated one-letter names is below one byte a
+ *                file. That format is bounded by the ledger (the resident ceiling, which is
+ *                what a tree of tiny windows reaches first: a 5-byte-entry chm of 200000
+ *                members opened 54049 children and then said Limit, 165 MB peak, 0.25 s,
+ *                with the quota raised to the maximum), and by what it says: FOLDERS_FULL
+ *                and Limit, never a silent cut.
+ *
+ * What the quota bounds is therefore a count, and the COST of a bomb of tiny entries is
+ * bounded by the other budgets, none of which this number moves: a child that is a window
+ * costs no byte of produced budget, so oc_window charges it against the tree's window
+ * allowance (kof_scan_ledger.window_left: the root plus the produced-bytes budget, for every
+ * container alike), decoded children are charged to the produced-bytes and resident ceilings
+ * as ever, and a label comes out of the names quota. Measured on the 5-byte chm above with
+ * the divisor at 32, at 5 and with no quota at all: the resident ceiling ends the tree at the
+ * same 54049 children whatever the divisor, so lowering it to 5 changes what a legitimate
+ * archive gets and not what a bomb costs. A host that wants a tighter or looser tree sets
+ * max_children.
+ */
+#define KID_MIN2(a, b) ((a) < (b) ? (a) : (b))
+#define KOF_KID_RECORD_MIN                                                       \
+	KID_MIN2(KOF_CHM_ENTRY_MIN,                                              \
+	KID_MIN2(KOF_RAR_ENTRY_MIN,                                              \
+	KID_MIN2(KOF_PDF_OBJECT_MIN,                                             \
+	KID_MIN2(KOF_CAB_FILE_MIN,                                               \
+	KID_MIN2(KOF_LHA_HEADER_MIN,                                             \
+	KID_MIN2(KOF_ARJ_HEADER_MIN,                                             \
+	KID_MIN2(KOF_ZIP_CENTRAL_MIN, KOF_DOCOLE_DIR_ENT)))))))
+#define KOF_KID_FLOOR      4096u
+
+static uint32_t kids_default(uint64_t obj_size)
+{
+	uint64_t k = obj_size / KOF_KID_RECORD_MIN;
+
+	if (k < KOF_KID_FLOOR)
+		k = KOF_KID_FLOOR;
+	return k > 0xffffffffu ? 0xffffffffu : (uint32_t)k;
+}
+
 void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 		     const struct kof_scan_option *opt)
 {
@@ -518,10 +849,27 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 			want = 64ull << 20;
 	}
 	sc->ledger.budget = want;
-	sc->ledger.kids_left = opt->max_children ? opt->max_children : 4096u;
+	sc->ledger.kids_left = opt->max_children ? opt->max_children : kids_default(obj_size);
+	sc->ledger.window_left = kof_sat_add(obj_size, want);
+	sc->ledger.emu_left = KOF_SCAN_EMU_MAX;
+	sc->ledger.emu_insn_left = oc_emu_tree_insn(obj_size, opt->max_emu_insn);
+	sc->ledger.emu_floor_left = KOF_SCAN_EMU_FLOOR_RUNS;
 	sc->ledger.resident = 0;
+	sc->ledger.names = 0;
+	sc->ledger.names_max = KOF_SCAN_NAMES;
 	sc->ledger.resident_max = opt->max_resident_bytes ? opt->max_resident_bytes
 						   : (128ull << 20);
+	/*
+	 * SHARED OUT AMONG THE WORKERS OF A PARALLEL WALK, the given allowance or the
+	 * built-in one alike (see kof_scan_option.resident_per_scanner), and floored.
+	 */
+	if (sc->share > 1u && !opt->resident_per_scanner) {
+		sc->ledger.resident_max /= sc->share;
+		if (sc->ledger.resident_max < KOF_SHARE_MIN)
+			sc->ledger.resident_max = KOF_SHARE_MIN;
+	}
+	kof_scan_scratch(sc, opt);
+	kof_scan_root_share(sc);
 	/*
 	 * Half the ceiling, at most.
 	 *
@@ -529,11 +877,19 @@ void kof_scan_budget(struct kof_scanner *sc, uint64_t obj_size,
 	 * resident, so a cap the size of the ceiling leaves no room to produce
 	 * anything and the tree stops one level down. Half means the object in hand
 	 * and the object being built both fit, which is what lets a container be
-	 * unpacked one entry at a time.
+	 * unpacked one entry at a time. Less the record of the object in hand (oc_kid_cost): a
+	 * collected child is charged its record as well as its bytes, so an entry cut AT the cap
+	 * (tests/unit/budget.c, bomb-roomy: an 8 MB ceiling and 4 MB entries) must leave that
+	 * much, or the second of the two is refused by a kilobyte and the tree stops after one.
 	 */
 	sc->ledger.obj_cap = opt->max_object_bytes ? opt->max_object_bytes : KOF_OBJ_CAP;
-	if (sc->ledger.obj_cap > sc->ledger.resident_max / 2)
-		sc->ledger.obj_cap = sc->ledger.resident_max / 2;
+	{
+		const uint64_t half = sc->ledger.resident_max / 2;
+		const uint64_t room = half > oc_kid_cost() ? half - oc_kid_cost() : 0u;
+
+		if (sc->ledger.obj_cap > room)
+			sc->ledger.obj_cap = room;
+	}
 	if (sc->ledger.obj_cap == 0)
 		sc->ledger.obj_cap = 1;
 	sc->obj.open.broken = 0;
@@ -573,5 +929,29 @@ void kof_scan_sink_discard(struct kof_scanner *sc)
 	sc->sink.spilled = 0;
 	sc->sink.fixed = 0;
 	sc->sink.at = 0;
+	sc->sink.cut = 0;
+	sc->sink.refuse = 0;
 }
 
+/*
+ * A bound that cut evidence of THIS object, said and counted.
+ *
+ * For a limit that exists against a hostile input and was met by one the engine
+ * could still read the rest of (a parser's table, the rounds of a decode, a table
+ * of a declaration): the object reads as incomplete - the verdict stage gives its
+ * result KOF_BROKEN_LIMIT when nothing earlier explained it - and the scanner's
+ * counter moves once for the object, so neither the verdict path nor a caller
+ * reading the stats can take the answer for a complete one.
+ *
+ * It sets `cut` and not `broken`, on purpose: `broken` also ENDS the open stages
+ * (an unpack loop stops on any value), and a bound that fires in the parse or the
+ * normaliser must not stop the unpackers that would open what the table did hold.
+ */
+void oc_scan_limit_at(struct kof_scanner *sc, const char *file, int line)
+{
+	KOF_TRACE("[cut] %s:%d limit\n", file, line);
+	(void)file; (void)line;
+	if (!sc->obj.open.cut)
+		sc->st.limit_hits++;
+	sc->obj.open.cut = 1;
+}

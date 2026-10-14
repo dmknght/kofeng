@@ -337,8 +337,47 @@ struct kgenome_elf_relocs;
  */
 struct kgenome_diag_walk;
 struct kgenome_diag_walk *kgenome_diag_walk_new(void);
+/* How many times the walk decoded the object, over its whole life. A walk is a
+ * product of the object and is meant to decode it once: a second pass is a
+ * defect or a request for more than the first kept (the trace). */
+uint32_t kgenome_diag_walk_runs(const struct kgenome_diag_walk *wk);
 void kgenome_diag_walk_free(struct kgenome_diag_walk *);
+/* Give back the decode trace (a cache: a later reader that wants it decodes again, the
+ * answer unchanged) and what the walk charged for it. The entries and the sites stay. */
+void kgenome_diag_walk_trim(struct kgenome_diag_walk *);
+/* The most the trace may grow to, from the caller's own allowance (0 = the default,
+ * 32 MiB; a larger number is cut to it). `capped` says the trace was refused room, by
+ * this cap or by the ledger: a cache that was cut, the answer unchanged. */
+void kgenome_diag_walk_set_cap(struct kgenome_diag_walk *, uint64_t trace_bytes);
+uint32_t kgenome_diag_walk_capped(const struct kgenome_diag_walk *);
+/*
+ * THE WALK'S DECODE AS THE DECODE SOURCE OF A CURSOR (celllysis's kgenome_cell_space.held). A cursor over
+ * the object the walk decoded - the same bytes, the same size, the same architecture - is answered with
+ * the instruction the walk already decoded at an offset it holds, and by the decoder at every other
+ * offset, so that code is decoded once however many readers walk it. 1 when `sp` now takes its decodes
+ * from the walk's trace, 0 and `sp` untouched when the walk holds none of these bytes (no walk made, no
+ * trace asked for or given back, other bytes - a normalised view is another buffer - or another mode).
+ * The answer is the decoder's to the field (tests/lib/genome/decode_held.c). Single-threaded, like the
+ * walk. kgenome_diag_walk_held_count: how many answers the trace gave (the return) of how many asked.
+ */
+struct kgenome_cell_space;
+int kgenome_diag_walk_hold(struct kgenome_cell_space *sp, struct kgenome_diag_walk *wk);
+uint64_t kgenome_diag_walk_held_count(const struct kgenome_diag_walk *wk, uint64_t *asked);
 struct kgenome_pe_imptab;
+struct kgenome_diag_scan;
+/*
+ * THE PRODUCTS A SCAN BUILT FOR ITSELF. The caller hands a scan the products of
+ * the object it already holds (the relocations, the functions, the walk, the
+ * imports, the API-hash set); one it does not hand over is built here, once, and
+ * the bit says so. The engine reads it to count a product that ran twice on one
+ * object: it built it, and so did the scan.
+ */
+#define KGENOME_DIAG_OWN_RELOCS   (1u << 0)
+#define KGENOME_DIAG_OWN_FUNCS    (1u << 1)
+#define KGENOME_DIAG_OWN_WALK     (1u << 2)
+#define KGENOME_DIAG_OWN_IMPORTS  (1u << 3)
+#define KGENOME_DIAG_OWN_APIHASH  (1u << 4)
+unsigned kgenome_diag_scan_own(const struct kgenome_diag_scan *s);
 /* A head, and the two calls it is made of - see KOF_DIAG_DECLARE_SEQUENCE. */
 struct kgenome_diag_seq {
 	uint16_t made;
@@ -374,6 +413,14 @@ struct kgenome_diag_inputs {
 	 * knows its memory allowance sets max_bytes and nothing else.
 	 */
 	const struct kgenome_budget     *budget;
+	/*
+	 * APPENDED. NULL return of the scan means "nothing this can read" (no code, an
+	 * architecture the model does not have) - and also, before this, "the scan object
+	 * could not be allocated", which a caller could not tell apart. When this points at a
+	 * status the call writes KGENOME_NOMEM there for the second and leaves it alone for the
+	 * first. Not read when NULL (the ordinary answer for a tool).
+	 */
+	enum kgenome_status             *refused;
 };
 struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj *obj,
 						const uint8_t *base,
@@ -539,7 +586,11 @@ uint64_t kgenome_diag_code_range(const struct kgenome_elf_info *e, uint32_t i,
 
 /* A limit fired: say so on the scan. The one way a routine reports that its
  * answer is partial - see kgenome_status.h. */
-void kgenome_diag_note(struct kgenome_diag_scan *s, enum kgenome_status st);
+/* Note a status on the scan. The macro carries the place that said it, so a DEBUG build
+ * prints one "[cut] file:line status" line per report (a release build prints nothing). */
+void kgenome_diag_note_at(struct kgenome_diag_scan *s, enum kgenome_status st,
+			  const char *file, int line);
+#define kgenome_diag_note(s, st) kgenome_diag_note_at((s), (st), __FILE__, __LINE__)
 
 /* Does the node `b` of capability `cap` carry the name `name`: a place that name
  * was seen. The matcher asks it; the scan owns the table it reads. */

@@ -303,15 +303,9 @@ static void whole(void)
 			CK(hv_status_ok(r.st));
 		}
 	}
-	/* take == the stream's length: satisfied in full, and reported TRUNCATED because take is
-	 * only counted down at a frame flush and the next block header is past the end */
 	/* a sink that refuses the final flush: the receiver said no, so STOPPED (status.h) */
 	r = lx(v15.in, v15.n, 15, 0, v15.wn, REFUSE_ALL);
-	KM_CHECK(r.st == KUNCOAT_STOPPED,
-		 "lzx: a sink that refuses the first (final) flush of a stream that ends mid-frame gets TRUNCATED, not STOPPED",
-		 "LZX_STOPPED_MASKED (libuncoat/decompressors/lzx.c kuncoat_lzx_decode: `if (out.stopped && status == KUNCOAT_OK) "
-		 "status = KUNCOAT_STOPPED` is skipped when the stream had already run out of input, and the final "
-		 "lzx_flush's refusal only sets out.stopped) [Inference: low, the status of a receiver's refusal is wrong]");
+	CK(r.st == KUNCOAT_STOPPED);
 	/* take beyond the stream: TRUNCATED with everything there is */
 	r = lx(v15.in, v15.n, 15, 0, v15.wn + 1000, 0);
 	CK(r.st == KUNCOAT_TRUNCATED && r.produced == v15.wn);
@@ -669,11 +663,7 @@ static int trunc_fab(void *arg)
 	       a.nbad, a.cuts, b.nbad, b.cuts, c.nbad, c.cuts, a.worst > b.worst ? a.worst : b.worst);
 	snprintf(what, sizeof what, "lzx: stream (%zu bytes) cut at %zu hands back %zu bytes that are not the real output "
 		 "(%zu of %zu cuts affected), status TRUNCATED", v15.n, a.worst_cut, a.worst, a.nbad, a.cuts);
-	KM_CHECK(a.nbad + b.nbad + c.nbad == 0, what,
-		 "LZX_TRUNC_FABRICATED (libuncoat/decompressors/lzx.c kuncoat_lzx_decode: after `mlen += ex` and after the "
-		 "position extra bits (lzx_bits) only `bad` is tested, not s->eof, so a match whose length or offset bits "
-		 "came from the zero pad is copied and emitted; eof is tested at the top of the next symbol) "
-		 "[Inference: low, the status is TRUNCATED]");
+	CK(a.nbad + b.nbad + c.nbad == 0);
 	return 0;
 }
 

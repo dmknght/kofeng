@@ -65,16 +65,60 @@
 
 /* How many regions one run may report, and what each one is. */
 /*
- * How many interpreter runs one scan will spend, whatever asks (the rule's ask for the emulator).
+ * How many interpreter runs one TREE (a top-level object and what it holds) will
+ * spend, whatever asks (the rule's ask for the emulator).
  *
  * A number and not a fraction of the tree, because the thing being bounded is
  * wall time on a tree of any size. 512 is what the measured population supports
  * with room to spare: the rule that asks today fires on 18 of 4398 malware
- * objects and on none of 5252 clean ones, so a scan that reaches this ceiling
+ * objects and on none of 5252 clean ones, so a tree that reaches this ceiling
  * is looking at something no measured corpus resembles - and the honest thing
- * then is to stop interpreting, not to keep going.
+ * then is to stop interpreting, say so (the object that was refused reads
+ * KOF_BROKEN_LIMIT, and kof_stats.limit_hits moves), and not to keep going. It
+ * was per scanner LIFETIME, which a long-lived scanner reached and then refused
+ * every ask in silence.
  */
 #define KOF_SCAN_EMU_MAX 512u
+
+/* How many of a tree's first interpreter runs keep their floor when the tree's
+ * instruction allowance (kof_scan_ledger.emu_insn_left) is spent: the root's and the first
+ * four children's. See the block above emu_grant in objctx_emu.c. */
+#define KOF_SCAN_EMU_FLOOR_RUNS 5u
+
+/*
+ * WHAT THE NAMES OF ONE TREE MAY HOLD, in bytes: the labels of the children and the
+ * composed names of the layers waiting to be walked. A name is allocated to its real
+ * length (a member name is up to 65535 bytes, and a layer's name is the whole of its
+ * parent's, then its own), so what bounds them is this quota, which is RESERVED in the
+ * scanner's fixed cost (kof_scan_fixed, inside its round 12 MiB) and so is charged to the
+ * engine's budget when the scanner is made. It is a quota of its own and not part of the resident ceiling
+ * (kof_scan_ledger.resident) for a measured reason: a name is charged at the moment a
+ * child exists, when the ceiling is by construction nearly full of the children
+ * themselves, so charging it there pushed the peak past the ceiling (tests/unit/
+ * budget.c, child_fuzz.c). 1 MiB holds 4096 children (the default per tree) of 250
+ * bytes each; past it a name is refused and SAID - the label is dropped and the object
+ * reads KOF_BROKEN_LIMIT, a layer whose name does not fit is not walked and the file is
+ * not cached as clean.
+ */
+#define KOF_SCAN_NAMES (1ull << 20)
+
+/*
+ * WHERE A REGION RESOLVE PUTS ITS EXTENTS - a buffer that can grow (scan_ext.c).
+ *
+ * `v` is the buffer in use and `cap` its length in ranges. For the scanner's own two it
+ * starts as the arrays in struct kof_scan_cache (KOF_SCAN_MAX_EXTENTS ranges, the size
+ * the scan used to be limited to) and is replaced by a heap buffer, charged to the
+ * ledger, when a resolve fills it: `heap` is what it points at once grown and `charged`
+ * what the ledger holds for it. A caller that owns its buffer (a tool's) sets `fixed` and
+ * is never grown. Read the answer from `v` after the call.
+ */
+struct kof_ext_buf {
+	struct kof_range *v;
+	uint32_t cap;
+	uint32_t fixed;
+	struct kof_range *heap;
+	uint64_t charged;
+};
 
 #define KOF_EMU_RGN_MAX 64u
 /* KOF_EMU_RGN_IMAGE / _EXEC / _WRITTEN, the kinds of a region, are defined once
@@ -94,6 +138,29 @@
  * A latch says "has been computed for THIS object". What it guards - a buffer, a
  * table - is released by obj_begin as well, and that is the only place.
  */
+/*
+ * THE PRODUCTS OF AN OBJECT AND HOW OFTEN EACH WAS MADE.
+ *
+ * Every product below is the object's: made once, from the object's bytes, and
+ * read by everyone who needs it. kof_prod_ran counts a build in sc->obj.prod_runs
+ * (per object, wiped with the rest of sc->obj) and a build past the first in
+ * sc->prod_repeat (the scanner's whole life), which a test reads. A repeat is a
+ * defect, or it is one of the tasks that exist to run again - see kof_prod_again,
+ * which names those and is the only way to run a product a second time without
+ * being counted.
+ */
+enum kof_prodkind {
+	KOF_PROD_SYMS,          /* the symbol block                         */
+	KOF_PROD_FUNCS,         /* the functions                            */
+	KOF_PROD_WALK,          /* the decode walk of the code              */
+	KOF_PROD_RELOCS,        /* the relocation table                     */
+	KOF_PROD_PE_IMPORTS,    /* the PE's import directory                */
+	KOF_PROD_APIHASH,       /* what a PE resolves for itself            */
+	KOF_PROD_DIAG,          /* the diagnose scan                        */
+	KOF_PROD_USE,           /* the address-use map of the code          */
+	KOF_PROD_COUNT
+};
+
 enum kof_obj_latch {
 	KOF_OL_SYM,             /* the symbol block                         */
 	KOF_OL_FUNCS,           /* the functions those symbols name         */

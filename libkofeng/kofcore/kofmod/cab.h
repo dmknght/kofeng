@@ -61,7 +61,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_CAB_INFO_VERSION 1
+#define KOF_CAB_INFO_VERSION 2
 
 /*
  * Scan regions.
@@ -122,19 +122,37 @@ enum {
 	/* A name holds ".." or an absolute path - what it means to do when it
 	 * is extracted, recorded rather than refused. */
 	KOF_CAB_ANOM_TRAVERSAL    = 1ull << 6,
-	/* More files than the table below holds. */
+	/* A table of the parse could not grow, or the work it is allowed ran out: more
+	 * files than the entry table took, folders past the folder table, a file whose
+	 * pieces no longer fit the run pool, a folder whose blocks the walk would not
+	 * revisit again. Each is a file that was not offered, and the object says so. */
 	KOF_CAB_ANOM_FILES_FULL   = 1ull << 7
 };
 
 /* How many of the above there are, so the name table cannot fall behind. */
 #define KOF_CAB_ANOM_COUNT 8
 
-#define KOF_CAB_MAX_FILES   2048u
-#define KOF_CAB_MAX_FOLDERS 256u
-/* The pieces of every scattered entry, pooled - see `run` below. A stored file
- * is one piece per 32KB block, so this covers about 32MB of stored content
- * spread over however many files; past it, entries stay counted and unopened. */
-#define KOF_CAB_MAX_RUNS    1024u
+/*
+ * What bounds the parse, and what does not.
+ *
+ * NO COUNT IS A LIMIT ON THE FILE. The tables were 2048 files, 256 folders and 1024 pieces, so
+ * the 2049th file of a cabinet was not there, the 257th folder took its files with it, and one
+ * coded file in a folder of fifty blocks used up a twentieth of the pool - the pieces of a
+ * coded entry are its folder's blocks, so every file in the folder paid for them again. The
+ * tables are allocated to what the cabinet holds, and what bounds an allocation is the file:
+ * a CFFILE is at least KOF_CAB_FILE_MIN bytes and a CFFOLDER KOF_CAB_FOLDER_MIN, so neither
+ * count can exceed the length of the file over it, and a CFDATA block is at least
+ * KOF_CAB_DATA_HDR bytes, which bounds the pieces. The folder's blocks are listed ONCE however
+ * many files it holds and a block header is not walked again for each file: the walk is
+ * budgeted at twice the blocks the file can physically hold (a cabinet whose folders all point
+ * at the same blocks costs that and no more), so the cost of a hostile cabinet is a multiple of
+ * its length. Under that sits the engine's per-object ledger (struct kof_view_mem.room). A
+ * table that cannot grow, or work past its budget, raises FILES_FULL: the files not offered
+ * are said, and what was offered is whole.
+ */
+#define KOF_CAB_FILE_MIN    17u   /* the fixed part of a CFFILE, plus at least one name byte */
+#define KOF_CAB_FOLDER_MIN  8u
+#define KOF_CAB_DATA_HDR    8u    /* csum, cbData, cbUncomp */
 /* The format's own limit on a name is 256 bytes including the terminator. */
 #define KOF_CAB_MAX_NAME    256u
 
@@ -153,6 +171,21 @@ struct kof_cab_folder {
 	uint16_t window;
 };
 
+/* Where version 1 kept `n_entries` (offsetof of it in the version 1 struct), and where this
+ * version's own tail ends: the difference is the padding in front of the legacy word. */
+#define KOF_CAB_V1_ROWS_AT   135272u
+#define KOF_CAB_V2_TAIL_END  168u
+
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2, the same change as the zip view's (zip.h has the long form): the four arrays that
+ * ended this struct - 168 KB - are tables the parse allocates to the size of the cabinet,
+ * reached through the pointers at the tail. Everything before them is where it was. The row
+ * count of version 1 is `legacy_n_entries`, always zero, and see the note at the end for why it
+ * is where it is. The real count is `n_entries` at the tail. A module walks the files with
+ * kof_cab_next below; it does not index `entry`.
+ */
 struct kof_cab_info {
 	uint32_t version;       /* KOF_CAB_INFO_VERSION */
 	uint32_t valid;         /* "MSCF" was there */
@@ -184,22 +217,24 @@ struct kof_cab_info {
 	uint64_t folders_off, folders_len;
 	uint64_t data_off;      /* the first CFDATA in the cabinet */
 
-	struct kof_cab_folder folder[KOF_CAB_MAX_FOLDERS];
+	/* ---- version 2: from here the tables are the file's size ----------------------- */
+
+	struct kof_view_mem mem;         /* what the tables hold; see range.h */
+	struct kof_cab_folder *folder;   /* n_folders of them */
 
 	/*
 	 * The files, in the host's own shape - struct kof_entry, so a file that
 	 * is a plain range becomes a named child with no module involved. See
 	 * kof_objtree_declared.
 	 */
-	struct kof_entry entry[KOF_CAB_MAX_FILES];
-	uint32_t n_entries;
+	struct kof_entry *entry;         /* n_entries of them */
 
 	/* Which pieces in the pool below belong to entry i, when it is
 	 * scattered: [first_run, first_run + n_run). Zero of them means the
 	 * entry is one range and `off`/`len` say where. */
-	struct {
+	struct kof_cab_split {
 		uint32_t first_run, n_run;
-	} split[KOF_CAB_MAX_FILES];
+	} *split;                        /* one per entry */
 
 	/*
 	 * THE PIECES OF THE SCATTERED ENTRIES, in one pool.
@@ -214,21 +249,55 @@ struct kof_cab_info {
 	 * handed a view and not the object's bytes, so an answer that needed to
 	 * read block headers could not be given at all.
 	 *
-	 * ONE POOL rather than an array per entry: a cabinet with one large
-	 * file and a hundred small ones would otherwise size every row for the
-	 * largest. An entry whose pieces do not fit what is left is not
-	 * recorded - it stays counted in n_split, which is the honest answer
-	 * for "there is more here than this build described".
+	 * ONE POOL rather than an array per entry. The pieces of a CODED entry
+	 * are its folder's blocks, listed once and shared by every file of the
+	 * folder (their `split` rows name the same range). An entry whose pieces
+	 * cannot be had is not recorded - it stays counted in n_split and the
+	 * parse says FILES_FULL, which is the honest answer for "there is more
+	 * here than this build described".
 	 */
-	uint32_t n_runs;
-	struct {
+	struct kof_cab_run {
 		uint64_t off, len;
-	} run[KOF_CAB_MAX_RUNS];
+	} *run;                          /* n_runs of them */
+	uint32_t n_entries;              /* rows in `entry`: every file the walk could offer
+					  * and the tables could take */
+	uint32_t n_runs;
+
+	/*
+	 * VERSION 1'S ROW COUNT LIVES HERE, AND THE PADDING IS WHAT KEEPS IT SAFE.
+	 *
+	 * Version 1 ended in the arrays `folder[256]`, `entry[2048]`, `split[2048]` and
+	 * `run[1024]`, and its `n_entries` sat AFTER the first two of them, at byte 135272 of the
+	 * view - not in the head every other format keeps its count in. A module built against
+	 * that header reads `c->n_entries` there. This struct is smaller than that now, so
+	 * without the padding such a module would read past the end of the view: a count that is
+	 * whatever the heap holds, and a scan that indexes `entry[]` by it. With the padding the
+	 * word is inside the view, the parse never writes it, and it is zero - so the module's
+	 * loop does not run, the view reads as a valid empty table, and the engine reports the
+	 * object because the walk below was never called (sx_walk_check). The bytes in between are
+	 * never read or written by this version; they are address space, not memory, in a
+	 * view the scanner allocates once and which the parse clears from its head only.
+	 */
+	uint8_t  legacy_arrays[KOF_CAB_V1_ROWS_AT - KOF_CAB_V2_TAIL_END];
+	uint32_t legacy_n_entries;       /* version 1's count: always 0 */
 };
 
 static inline const struct kof_cab_info *kof_cab(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_cab_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT FILE OF THE CABINET, in the order the file table lists them: row `*cursor`, and the
+ * cursor is advanced; NULL at the end. The row's index - what kunp_static_entry takes - is the
+ * cursor minus one after the call. See kof_zip_next, which this is the same walk as.
+ */
+static inline const struct kof_entry *kof_cab_next(const struct kof_obj_ctx *ctx,
+						   uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_CAB_H */

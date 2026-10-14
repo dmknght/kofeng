@@ -473,6 +473,26 @@ int kuncoat_bunzip_sniff(const uint8_t *p, uint64_t n)
 	       p[7] == 0x38u && p[8] == 0x50u && p[9] == 0x90u;
 }
 
+/* Do the `n` (< 10) bytes at `p` begin a stream header ("BZh", a level digit and
+ * then, as far as they go, a block or end-of-stream marker)? At least the four
+ * bytes of the magic must be there to call it a cut stream and not trailing
+ * bytes. */
+static int bz_cut_header(const uint8_t *p, uint64_t n)
+{
+	static const uint8_t blk[6] = { 0x31, 0x41, 0x59, 0x26, 0x53, 0x59 };
+	static const uint8_t end[6] = { 0x17, 0x72, 0x45, 0x38, 0x50, 0x90 };
+	uint64_t i;
+	int is_blk = 1, is_end = 1;
+
+	if (n < 4u || p[0] != 'B' || p[1] != 'Z' || p[2] != 'h' || p[3] < '1' || p[3] > '9')
+		return 0;
+	for (i = 4u; i < n; i++) {
+		is_blk &= p[i] == blk[i - 4u];
+		is_end &= p[i] == end[i - 4u];
+	}
+	return is_blk || is_end;
+}
+
 enum kuncoat_status kuncoat_bunzip_decode(struct kuncoat_bunzip *st,
 					 const uint8_t *in, uint64_t in_len,
 					 kuncoat_bunzip_sink sink, void *user,
@@ -485,8 +505,8 @@ enum kuncoat_status kuncoat_bunzip_decode(struct kuncoat_bunzip *st,
 
 	if (produced)
 		*produced = 0;
-	if (!st || !in || !sink)
-		return KUNCOAT_CORRUPT;
+	if (!st || !sink || (!in && in_len))
+		return KUNCOAT_BAD_ARG;
 
 	memset(&br, 0, sizeof br);
 	br.p = in;
@@ -503,8 +523,14 @@ enum kuncoat_status kuncoat_bunzip_decode(struct kuncoat_bunzip *st,
 
 		/* A stream starts on a byte boundary: the first at offset zero,
 		 * a concatenated one wherever the previous ended. */
-		if (at + 10u > in_len)
+		if (at + 10u > in_len) {
+			/* Fewer than ten bytes left: either trailing bytes that are
+			 * not a stream (ignored) or a stream header that
+			 * was cut, which is the input ending early. */
+			if (streams && bz_cut_header(in + at, in_len - at))
+				last = KUNCOAT_TRUNCATED;
 			break;
+		}
 		if (!kuncoat_bunzip_sniff(in + at, in_len - at))
 			break;
 		br.pos = at + 4u;

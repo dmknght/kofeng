@@ -13,6 +13,7 @@
  * without a fingerprint table; a few raw-syscall helpers of the author's own
  * latch the frontier early.
  */
+#define FK_LEGACY_RULES 1
 #include "fnprint_kit.h"
 #include "../../unit/known_miss.h"
 

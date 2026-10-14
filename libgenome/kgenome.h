@@ -67,6 +67,7 @@
 #include "genotype/image/clr_types.h"
 #include "genotype/image/clr_image.h"
 #include "genotype/image/funcs.h"
+#include "genotype/image/endian.h"
 
 /* celllysis: reading code without running it */
 #include "celllysis/arch.h"

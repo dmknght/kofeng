@@ -63,6 +63,7 @@ void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s,
 	wk = kgenome_diag_scan_walk(s);
 	if (!wk)
 		return;
+	kgenome_diag_wrap_settle(s);
 	memset(&c, 0, sizeof c);
 	c.s = s;
 	c.obj = obj;
@@ -114,12 +115,13 @@ void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s,
 	 * syscall is three; the step budget is the bound).
 	 */
 	c.cap_ws = wk->n_site + 64u;
-	if (!kgenome_diag_wrapper_charge(&c, (uint64_t)c.cap_ws * sizeof *c.ws)) {
+	if (!kgenome_diag_wrapper_charge(&c, (uint64_t)c.cap_ws * (sizeof *c.ws + sizeof *c.wi))) {
 		c.cap_ws = 0;
 		goto out;
 	}
 	c.ws = calloc(c.cap_ws, sizeof *c.ws);
-	if (!c.ws) {
+	c.wi = calloc(c.cap_ws, sizeof *c.wi);
+	if (!c.ws || !c.wi) {
 		kgenome_diag_note(s, KGENOME_NOMEM);
 		goto out;
 	}
@@ -230,28 +232,13 @@ void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s,
 	/* A wrapper some caller made a node for is answered at its callers; the
 	 * node the sweep made at the syscall inside it spoke for every caller at
 	 * once and for none of them, and is set aside. */
-	for (i = 0; i < c.n_ws; i++) {
-		uint32_t j;
-
-		if (!c.ws[i].node_made || kgenome_diag_wrapper_fret_site(&c, c.ws[i].site))
-			continue;       /* a helper's own node is the one callers use */
-		for (j = 0; j < s->n_hit; j++)
-			if (s->hit[j].at == c.ws[i].site &&
-			    !(s->hit[j].bits & KGENOME_DIAG_H_SUPERSEDED))
-				s->hit[j].bits |= KGENOME_DIAG_H_SUPERSEDED;
-	}
+	kgenome_diag_wrapper_supersede(&c);
 opaque:
 	/* A socketcall of an unknown kind is a different statement from no
 	 * socketcall at all: a site nobody called with a value this could read
 	 * says so, once, rather than saying nothing. */
 	for (i = 0; i < s->n_wrap; i++) {
-		uint32_t j;
-		int made = 0;
-
-		for (j = 0; j < c.n_ws; j++)
-			if (c.ws[j].site == s->wrap[i] && c.ws[j].node_made)
-				made = 1;
-		if (!made) {
+		if (!kgenome_diag_wrapper_site_made(&c, s->wrap[i])) {
 			struct kgenome_diag_hit *h = kgenome_diag_hit_add(s, s->wrap[i],
 								  KGENOME_NUCLEO_NONE, 0);
 
@@ -275,6 +262,8 @@ out:
 	free(c.fret);
 	free(c.fmiss);
 	free(c.ws);
+	free(c.wi);
+	free(c.made);
 	free(c.glob);
 	kgenome_ledger_release(&s->led, c.charged);
 }

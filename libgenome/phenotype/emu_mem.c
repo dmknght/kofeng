@@ -14,16 +14,55 @@ static uint32_t page_hash(uint64_t pn)
 	return (uint32_t)(pn ^ (pn >> 32));
 }
 
-/* The first store to a page forked from a template takes its own copy. */
-int kgenome_emu_page_own(struct kgenome_emu_page *p)
+/*
+ * Ask the caller's allowance for `bytes` the machine is about to take (cfg.account).
+ * 1 when there is no allowance to ask or it agrees; 0 when it refuses, and the
+ * machine says so - KGENOME_EMU_HIT_MEM - because what it then does not make is
+ * a part of the answer.
+ */
+int kgenome_emu_acct(struct kgenome_emu *e, uint64_t bytes)
+{
+	if (!e->account)
+		return 1;
+	if (!e->account(e->account_user, (int64_t)bytes)) {
+		e->hit |= KGENOME_EMU_HIT_MEM;
+		return 0;
+	}
+	e->acct += bytes;
+	return 1;
+}
+
+/* One private page's worth of what the caller granted, asking for the next chunk when it
+ * is spent: a run takes a dozen pages and is charged for a dozen, not for the most it
+ * may own. */
+static int page_credit_take(struct kgenome_emu *e)
+{
+	if (!e->account)
+		return 1;
+	if (e->page_credit < KGENOME_EMU_PAGE) {
+		if (!kgenome_emu_acct(e, (uint64_t)KGENOME_EMU_GRANT_PAGES * KGENOME_EMU_PAGE))
+			return 0;
+		e->page_credit += (uint64_t)KGENOME_EMU_GRANT_PAGES * KGENOME_EMU_PAGE;
+	}
+	e->page_credit -= KGENOME_EMU_PAGE;
+	return 1;
+}
+
+/* The first store to a page forked from a template, or borrowed from the caller's bytes,
+ * takes its own copy. */
+int kgenome_emu_page_own(struct kgenome_emu *e, struct kgenome_emu_page *p)
 {
 	uint8_t *d;
 
 	if (!p->shared)
 		return 1;
-	d = malloc(KGENOME_EMU_PAGE);
-	if (!d)
+	if (!page_credit_take(e))
 		return 0;
+	d = malloc(KGENOME_EMU_PAGE);
+	if (!d) {
+		KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_MEM, "page copy not allocated");
+		return 0;
+	}
 	memcpy(d, p->data, KGENOME_EMU_PAGE);
 	p->data = d;
 	p->shared = 0;
@@ -65,9 +104,13 @@ struct kgenome_emu_page *kgenome_emu_page_add(struct kgenome_emu *e, uint64_t ba
 		if (p->va == base)
 			return p;
 		if (!p->va) {
-			p->data = calloc(1, KGENOME_EMU_PAGE);
-			if (!p->data)
+			if (!page_credit_take(e))
 				return NULL;
+			p->data = calloc(1, KGENOME_EMU_PAGE);
+			if (!p->data) {
+				KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_MEM, "page not allocated");
+				return NULL;
+			}
 			p->va = base;
 			p->prot = prot;
 			e->n_pages++;
@@ -124,6 +167,42 @@ struct kgenome_emu_page *kgenome_emu_page_add_zero(struct kgenome_emu *e, uint64
 	return NULL;
 }
 
+/*
+ * A page whose bytes are the CALLER'S, borrowed: it points at `src` and is marked
+ * shared, so the first store takes a private copy exactly as a forked page does.
+ * For an image that is mapped from bytes the caller keeps for as long as the
+ * machine lives (the object being run): a page nobody stores to costs a table
+ * slot instead of 4 KiB. An existing page is returned as it is - the caller then
+ * copies into it the ordinary way.
+ */
+struct kgenome_emu_page *kgenome_emu_page_add_borrow(struct kgenome_emu *e, uint64_t base,
+				  unsigned prot, const uint8_t *src)
+{
+	uint32_t i, n = 0;
+
+	if (e->n_pages >= e->max_pages || !base)
+		return NULL;
+	i = page_hash(base) & e->tab_mask;
+	while (n++ <= e->tab_mask) {
+		struct kgenome_emu_page *p = &e->tab[i];
+
+		if (p->va == base)
+			return p;
+		if (!p->va) {
+			p->data = (uint8_t *)(uintptr_t)src;
+			p->shared = 1;
+			p->va = base;
+			p->prot = prot;
+			e->n_pages++;
+			free(e->sorted);
+			e->sorted = NULL;
+			return p;
+		}
+		i = (i + 1u) & e->tab_mask;
+	}
+	return NULL;
+}
+
 /* Record a mapping without committing any of it. */
 int kgenome_emu_vma_add(struct kgenome_emu *e, uint64_t base, uint64_t len,
 		   uint64_t off, unsigned prot, int backed)
@@ -139,14 +218,20 @@ int kgenome_emu_vma_add(struct kgenome_emu *e, uint64_t base, uint64_t len,
 	 * Real programs use tens; a Go runtime reserving its arenas uses a few
 	 * hundred.
 	 */
-	if (e->n_vma >= KGENOME_EMU_MAX_VMA)
+	if (e->n_vma >= (e->max_pages > KGENOME_EMU_MAX_VMA ? e->max_pages : KGENOME_EMU_MAX_VMA)) {
+		/* the page budget is what a mapping may eventually cost, so it scales this bound;
+		 * past it the guest is told no, and so is the caller */
+		e->hit |= KGENOME_EMU_HIT_VMA;
 		return 0;
+	}
 	if (e->n_vma == e->max_vma) {
 		uint32_t m = e->max_vma ? e->max_vma * 2u : 8u;
 		struct vma *t = realloc(e->vma, (size_t)m * sizeof *t);
 
-		if (!t)
+		if (!t) {
+			KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_MEM, "mapping table not grown");
 			return 0;
+		}
 		e->vma = t;
 		e->max_vma = m;
 	}
@@ -356,7 +441,7 @@ int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsi
 			uint32_t po = (uint32_t)((va + i) &
 						 (KGENOME_EMU_PAGE - 1u));
 
-			if (p->shared && !kgenome_emu_page_own(p)) {
+			if (p->shared && !kgenome_emu_page_own(e, p)) {
 				e->fault_va = va + i;
 				memcpy(e->fault_kind, "write", 6);
 				return 0;
@@ -419,6 +504,12 @@ int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsi
 		if (!p->written) {
 			e->last_new_page = e->insn;
 			e->idle_credit = 0;
+			/* a page written for the first time joins the written list: a walk
+			 * made earlier is stale */
+			if (e->sorted) {
+				free(e->sorted);
+				e->sorted = NULL;
+			}
 		} else if (e->running && e->idle_credit < KGENOME_EMU_IDLE_CREDIT_MAX) {
 			/*
 			 * A STORE TO A NEW CACHE LINE OF A PAGE ALREADY WRITTEN

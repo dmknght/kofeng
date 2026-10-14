@@ -22,10 +22,15 @@ enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
 				      uint8_t *out, uint64_t cap,
 				      uint64_t *produced)
 {
-	uint64_t i, w = 0;
+	uint64_t i, w = 0, pd;
 	uint32_t acc = 0, have = 0;
+	int over = 0;
 
+	if (!produced)
+		produced = &pd;
 	*produced = 0;
+	if ((!in && n) || (!out && cap))
+		return KUNCOAT_BAD_ARG;
 	for (i = 0; i < n; i++) {
 		uint8_t c = in[i];
 
@@ -34,8 +39,10 @@ enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
 		if (c == '~')
 			break;                 /* "~>", and only the ~ matters */
 		if (c == 'z' && have == 0) {
-			if (w + 4u > cap)
+			if (w + 4u > cap) {
+				over = 1;
 				break;
+			}
 			out[w] = out[w + 1u] = out[w + 2u] = out[w + 3u] = 0;
 			w += 4u;
 			continue;
@@ -57,14 +64,20 @@ enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
 		acc = acc * 85u + (uint32_t)(c - '!');
 		if (++have < 5u)
 			continue;
-		if (w + 4u > cap)
+		if (w + 4u > cap) {
+			over = 1;
 			break;
+		}
 		out[w++] = (uint8_t)(acc >> 24);
 		out[w++] = (uint8_t)(acc >> 16);
 		out[w++] = (uint8_t)(acc >> 8);
 		out[w++] = (uint8_t)acc;
 		acc = 0;
 		have = 0;
+	}
+	if (over) {
+		*produced = w;      /* the room ended first: what is here is the start */
+		return KUNCOAT_OVER_BUDGET;
 	}
 	/*
 	 * A PARTIAL GROUP IS THE ORDINARY ENDING, not damage: the encoding pads
@@ -81,7 +94,11 @@ enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
 
 		for (j = have; j < 5u; j++)
 			acc = acc * 85u + 84u;      /* 'u', the pad digit */
-		for (j = 0; j + 1u < have && w < cap; j++)
+		if (w + (have - 1u) > cap) {
+			*produced = w;
+			return KUNCOAT_OVER_BUDGET;
+		}
+		for (j = 0; j + 1u < have; j++)
 			out[w++] = (uint8_t)(acc >> (24u - 8u * j));
 	}
 	*produced = w;
@@ -99,10 +116,14 @@ enum kuncoat_status kuncoat_ahx_decode(const uint8_t *in, uint64_t n,
 				      uint8_t *out, uint64_t cap,
 				      uint64_t *produced)
 {
-	uint64_t i, w = 0;
+	uint64_t i, w = 0, pd;
 	int hi = -1;
 
+	if (!produced)
+		produced = &pd;
 	*produced = 0;
+	if ((!in && n) || (!out && cap))
+		return KUNCOAT_BAD_ARG;
 	for (i = 0; i < n; i++) {
 		uint8_t c = in[i];
 		int v;
@@ -120,8 +141,10 @@ enum kuncoat_status kuncoat_ahx_decode(const uint8_t *in, uint64_t n,
 			hi = v;
 			continue;
 		}
-		if (w >= cap)
-			break;
+		if (w >= cap) {
+			*produced = w;      /* the room ended with digits left */
+			return KUNCOAT_OVER_BUDGET;
+		}
 		out[w++] = (uint8_t)((hi << 4) | v);
 		hi = -1;
 	}
@@ -130,8 +153,13 @@ enum kuncoat_status kuncoat_ahx_decode(const uint8_t *in, uint64_t n,
 	 * speaking rather than this code being lenient: 7.4.2 says so in as
 	 * many words. Treating it as damage would reject files that are correct.
 	 */
-	if (hi >= 0 && w < cap)
+	if (hi >= 0) {
+		if (w >= cap) {
+			*produced = w;
+			return KUNCOAT_OVER_BUDGET;
+		}
 		out[w++] = (uint8_t)(hi << 4);
+	}
 	*produced = w;
 	return KUNCOAT_OK;
 }
@@ -142,10 +170,14 @@ enum kuncoat_status kuncoat_rle_decode(const uint8_t *in, uint64_t n,
 {
 	uint8_t buf[RLE_CHUNK];
 	uint32_t held = 0;
-	uint64_t at = 0, out = 0;
+	uint64_t at = 0, out = 0, pd;
 	int ended = 0;
 
+	if (!produced)
+		produced = &pd;
 	*produced = 0;
+	if ((!in && n) || !sink)
+		return KUNCOAT_BAD_ARG;
 	while (at < n) {
 		uint32_t len = in[at++];
 		uint32_t k;

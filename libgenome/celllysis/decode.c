@@ -25,8 +25,11 @@ uint32_t kgenome_cell_decode(unsigned arch, int be, const uint8_t *p, uint32_t n
 	case KGENOME_ARCH_MIPS:
 	case KGENOME_ARCH_MIPS64:
 		return kgenome_cell_decode_mips(p, n, va, be, out);
-	default:
+	case KGENOME_ARCH_X86:
+	case KGENOME_ARCH_X86_64:
 		return kgenome_cell_decode_x86(p, n, va,
 				       arch == KGENOME_ARCH_X86_64 ? 64u : 32u, out);
+	default:
+		return 0;       /* no decoder for it: "cannot answer", never another ISA's reading */
 	}
 }

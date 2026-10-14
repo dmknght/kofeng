@@ -39,6 +39,7 @@
 
 #include "diag_scan.h"
 #include "diag_private.h"
+#include <kofdebug.h>
 #include <kofcore.h>
 #include <kofcmp.h>
 #include <celllysis/capability.h>
@@ -68,7 +69,7 @@ struct pe_call {
 /* The imports the vocabulary has a word for, out of the object's import
  * table. The table is the scanner's when it handed one over - the symbol block
  * is built from the same - and this scan's own otherwise. */
-static void gather_imports(struct pe_acc *a, kof_buf f,
+static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_buf f,
 			   const struct kgenome_pe_imptab *t)
 {
 	uint32_t k;
@@ -88,8 +89,12 @@ static void gather_imports(struct pe_acc *a, kof_buf f,
 			uint32_t nc = a->cap_n ? a->cap_n * 2u : 64u;
 			struct pe_imp *nv = realloc(a->v, (size_t)nc * sizeof *nv);
 
-			if (!nv)
+			if (!nv) {
+				/* the imports from here on are not looked at: said */
+				kgenome_diag_note(s, KGENOME_NOMEM);
+				KOF_TRACE("[cut] gather_imports: %u imports kept, growth refused\n", a->n);
 				return;
+			}
 			a->v = nv;
 			a->cap_n = nc;
 		}
@@ -153,7 +158,7 @@ struct pe_walk {
 	uint32_t       n_call, cap_call;
 };
 
-static int grow(void **v, uint32_t *cap, uint32_t n, size_t each)
+static int grow(struct kgenome_diag_scan *s, void **v, uint32_t *cap, uint32_t n, size_t each)
 {
 	if (n < *cap)
 		return 1;
@@ -161,8 +166,12 @@ static int grow(void **v, uint32_t *cap, uint32_t n, size_t each)
 		uint32_t nc = *cap ? *cap * 2u : 256u;
 		void *nv = realloc(*v, (size_t)nc * each);
 
-		if (!nv)
+		if (!nv) {
+			/* a stub or a call that is not recorded is an import call never matched */
+			kgenome_diag_note(s, KGENOME_NOMEM);
+			KOF_TRACE("[cut] diag_pe grow: %u entries kept, growth refused\n", n);
 			return 0;
+		}
 		*v = nv;
 		*cap = nc;
 	}
@@ -212,7 +221,7 @@ static void walk_code(struct kgenome_diag_scan *s, const struct kgenome_obj *obj
 			if (in.op == KGENOME_CELL_CALL) {
 				add_node(s, in.at, im);
 			} else if (in.at_va != KGENOME_BROKEN &&
-				   grow((void **)&w->thunk, &w->cap_thunk,
+				   grow(s, (void **)&w->thunk, &w->cap_thunk,
 					w->n_thunk, sizeof *w->thunk)) {
 				struct pe_imp *t = &w->thunk[w->n_thunk++];
 
@@ -221,7 +230,7 @@ static void walk_code(struct kgenome_diag_scan *s, const struct kgenome_obj *obj
 			}
 		} else if (in.op == KGENOME_CELL_CALL && !(in.flags & KGENOME_CELL_F_INDIRECT) &&
 			   in.target_va != KGENOME_BROKEN &&
-			   grow((void **)&w->call, &w->cap_call, w->n_call,
+			   grow(s, (void **)&w->call, &w->cap_call, w->n_call,
 				sizeof *w->call)) {
 			struct pe_call *c = &w->call[w->n_call++];
 
@@ -241,14 +250,21 @@ static void walk_code(struct kgenome_diag_scan *s, const struct kgenome_obj *obj
 const struct kgenome_pe_imptab *kgenome_diag_imports(struct kgenome_diag_scan *s,
 					     const struct kgenome_obj *obj)
 {
-	if (s->imports)
+	if (s->imports) {
+		/* The scanner's table that stopped short is a partial import list, whoever
+		 * asks: the scan says so here and not only in the route that happens to run. */
+		kgenome_diag_note(s, s->imports->status);
 		return s->imports;
+	}
 	if (!s->imports_done) {
 		const struct kgenome_pe_info *p = obj ? kgenome_obj_pe(obj) : NULL;
 
-		if (p && p->valid)
+		if (p && p->valid) {
+			s->own |= KGENOME_DIAG_OWN_IMPORTS;
 			kgenome_pe_imptab_build(kof_buf_make(s->base, s->size), p,
 					    &s->own_imports);
+			kgenome_diag_note(s, s->own_imports.status);
+		}
 		(void)kgenome_ledger_charge(&s->led, (uint64_t)s->own_imports.n *
 					    sizeof *s->own_imports.v);
 		s->imports_done = 1;
@@ -277,10 +293,8 @@ void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 	f.p = base;
 	f.n = size;
 	tab = kgenome_diag_imports(s, obj);
-	/* A table that stopped short - the thunk budget, memory - is a partial
-	 * import list, whoever built it, and the scan says so. */
-	kgenome_diag_note(s, tab->status);
-	gather_imports(&w.imp, f, tab);
+	/* (A table that stopped short is noted by kgenome_diag_imports.) */
+	gather_imports(s, &w.imp, f, tab);
 	/* No imports does not end it: a stager has none worth the name, and what
 	 * it calls is named by the analysis in diag_apihash.c. */
 	if (w.imp.n)

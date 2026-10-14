@@ -63,6 +63,7 @@
 #include "docole_parse.h"
 #include <decompressors/ovba.h>
 #include "../../../kofcore/runlist.h"
+#include "../../../kofcore/tabgrow.h"
 
 #include <string.h>
 
@@ -112,6 +113,12 @@ static const uint8_t CFB_SIG[8] = {
  * per-class totals are the same job in every container format, and were written
  * twice before they were written once.
  */
+/* A growing table of sector numbers: rows, count, capacity. */
+struct u32tab {
+	uint32_t *v;
+	uint32_t n, cap;
+};
+
 struct ole {
 	kof_buf f;
 	struct kof_docole_info *o;
@@ -139,6 +146,19 @@ struct ole {
 	uint64_t steps, step_max;             /* mini sectors */
 	uint64_t fat_steps, fat_step_max;     /* ordinary sectors */
 	struct kof_runs runs;
+
+	/* The tables the parse works with, and gives back: no module reads them, each is a chain of the
+	 * file's sectors (so at most `sec_limit` rows; a chain that wants more loops), and each is charged
+	 * to the view's account while it lives. */
+	struct u32tab dif, mfat, mini, dirsec;
+	uint32_t *seen;                       /* a bit per directory entry */
+	uint32_t cap_seen;
+	struct dstk { uint32_t idx, cls, depth; } *stack;
+	uint32_t sp, cap_stack;
+	uint64_t sec_limit;                   /* sectors the file holds */
+	uint64_t ent_limit;                   /* directory entries the file holds */
+	uint64_t entrun_limit;                /* runs the walk's steps can make */
+	uint32_t cap_ent, cap_ent_run;
 };
 
 static uint64_t sec_off(const struct kof_docole_info *o, uint32_t sec)
@@ -209,17 +229,27 @@ static void ent_run_add(struct ole *s, struct kof_docole_entry *e, uint64_t off,
 
 		if (last->off + last->len == off) {
 			last->len += len;
+			e->run_bytes += len;
 			return;
 		}
 	}
-	if (o->n_ent_runs >= KOF_DOCOLE_MAX_ENT_RUNS) {
-		e->flags |= KOF_DOCOLE_ENT_RUNS_FULL;
-		o->anomalies |= KOF_DOCOLE_ANOM_ENT_RUNS_FULL;
-		return;
+	if (o->n_ent_runs >= s->cap_ent_run) {
+		void *t = o->ent_run;
+
+		if (!kof_tab_grow(&o->mem, &t, &s->cap_ent_run, sizeof *o->ent_run,
+				  (uint64_t)o->n_ent_runs + 1u, s->entrun_limit)) {
+			e->flags |= KOF_DOCOLE_ENT_RUNS_FULL;
+			o->anomalies |= KOF_DOCOLE_ANOM_ENT_RUNS_FULL;
+			return;
+		}
+		o->ent_run = (struct kof_docole_ent_run *)t;
 	}
 	o->ent_run[o->n_ent_runs].off = off;
 	o->ent_run[o->n_ent_runs].len = len;
 	o->n_ent_runs++;
+	if (!e->n_runs)
+		e->first_off = off;
+	e->run_bytes += len;
 	e->n_runs++;
 }
 
@@ -229,11 +259,11 @@ static uint32_t fat_next(struct ole *s, uint32_t sec)
 	uint32_t per = o->sector_size / 4u;
 	uint32_t blk = sec / per, idx = sec % per, v;
 
-	if (blk >= o->n_dif) {
+	if (blk >= s->dif.n) {
 		o->anomalies |= KOF_DOCOLE_ANOM_FAT_UNMAPPED;
 		return SEC_MAXREG + 1u;
 	}
-	if (!kof_rd_u32(s->f, sec_off(o, o->dif[blk]) + (uint64_t)idx * 4u, 0, &v)) {
+	if (!kof_rd_u32(s->f, sec_off(o, s->dif.v[blk]) + (uint64_t)idx * 4u, 0, &v)) {
 		o->anomalies |= KOF_DOCOLE_ANOM_TRUNCATED;
 		return SEC_MAXREG + 1u;
 	}
@@ -246,11 +276,11 @@ static uint32_t mfat_next(struct ole *s, uint32_t msec)
 	uint32_t per = o->sector_size / 4u;
 	uint32_t blk = msec / per, idx = msec % per, v;
 
-	if (blk >= o->n_mfat) {
+	if (blk >= s->mfat.n) {
 		o->anomalies |= KOF_DOCOLE_ANOM_MINI_UNMAPPED;
 		return SEC_MAXREG + 1u;
 	}
-	if (!kof_rd_u32(s->f, sec_off(o, o->mfat[blk]) + (uint64_t)idx * 4u, 0, &v)) {
+	if (!kof_rd_u32(s->f, sec_off(o, s->mfat.v[blk]) + (uint64_t)idx * 4u, 0, &v)) {
 		o->anomalies |= KOF_DOCOLE_ANOM_TRUNCATED;
 		return SEC_MAXREG + 1u;
 	}
@@ -270,11 +300,11 @@ static int mini_off(struct ole *s, uint32_t msec, uint64_t *out)
 	uint64_t byte = (uint64_t)msec * o->mini_sector_size;
 	uint64_t blk = byte / o->sector_size;
 
-	if (blk >= o->n_mini) {
+	if (blk >= s->mini.n) {
 		o->anomalies |= KOF_DOCOLE_ANOM_MINI_UNMAPPED;
 		return 0;
 	}
-	*out = sec_off(o, o->mini[(uint32_t)blk]) + byte % o->sector_size;
+	*out = sec_off(o, s->mini.v[(uint32_t)blk]) + byte % o->sector_size;
 	return 1;
 }
 
@@ -423,83 +453,100 @@ static void claim_mini_chain(struct ole *s, uint32_t start, uint64_t size,
 	}
 }
 
-/* Collect a chain's sector numbers without claiming their bytes. Used for the
- * structures that are read through rather than searched: the mini stream's
- * container, whose bytes belong to the streams inside it. */
-static uint32_t collect_chain(struct ole *s, uint32_t start, uint32_t *out,
-			      uint32_t max, uint32_t claim_cls)
+/* One more row of a table of sector numbers, or 0 and it is as it was (WORK_FULL says so). */
+static int u32_push(struct ole *s, struct u32tab *t, uint32_t v)
 {
-	uint32_t sec = start, n = 0;
+	void *p = t->v;
 
-	while (sec <= SEC_MAXREG && n < max && step_fat(s)) {
+	if (t->n >= t->cap) {
+		if (!kof_tab_grow(&s->o->mem, &p, &t->cap, sizeof *t->v,
+				  (uint64_t)t->n + 1u, s->sec_limit + 1u)) {
+			s->o->anomalies |= KOF_DOCOLE_ANOM_WORK_FULL;
+			return 0;
+		}
+		t->v = (uint32_t *)p;
+	}
+	t->v[t->n++] = v;
+	return 1;
+}
+
+/*
+ * Collect a chain's sector numbers without claiming their bytes (the mini stream's container, whose
+ * bytes belong to the streams inside it). Only the file's count bounds it: a chain of distinct sectors
+ * has at most as many as the file holds, one that wants more loops (FAT_CYCLE), and the step budget
+ * ends the walk before that in any case. The tables used to stop at 256, 1024 and 2048 rows.
+ */
+static void collect_chain(struct ole *s, uint32_t start, struct u32tab *t,
+			  uint32_t claim_cls)
+{
+	uint32_t sec = start;
+
+	while (sec <= SEC_MAXREG && step_fat(s)) {
+		if (t->n >= s->sec_limit) {
+			s->o->anomalies |= KOF_DOCOLE_ANOM_FAT_CYCLE;
+			break;
+		}
 		if (claim_cls < KOF_DOCOLE_CLS_COUNT)
 			add_run(s, sec_off(s->o, sec), s->o->sector_size, claim_cls);
-		out[n++] = sec;
+		if (!u32_push(s, t, sec))
+			break;
 		sec = fat_next(s, sec);
 	}
-	return n;
 }
 
 /* ---- the directory ------------------------------------------------------------ */
 
 #define DIR_NONE UINT64_MAX
 
-static uint64_t dir_ent_off(const struct kof_docole_info *o, uint32_t idx)
+static uint64_t dir_ent_off(const struct ole *s, uint32_t idx)
 {
+	const struct kof_docole_info *o = s->o;
 	uint32_t per = o->sector_size / DIR_ENT_LEN;
 	uint32_t blk = idx / per;
 
-	if (per == 0 || blk >= o->n_dirsec)
+	if (per == 0 || blk >= s->dirsec.n)
 		return DIR_NONE;
-	return sec_off(o, o->dirsec[blk]) + (uint64_t)(idx % per) * DIR_ENT_LEN;
+	return sec_off(o, s->dirsec.v[blk]) + (uint64_t)(idx % per) * DIR_ENT_LEN;
 }
 
-static int seen_test_set(struct kof_docole_info *o, uint32_t idx)
+/* A bit per directory entry, so a tree that revisits one is NOTICED. */
+static int seen_test_set(struct ole *s, uint32_t idx)
 {
 	uint32_t w = idx / 32u, b = 1u << (idx % 32u);
 
-	if (o->seen[w] & b)
+	if (s->seen[w] & b)
 		return 1;
-	o->seen[w] |= b;
+	s->seen[w] |= b;
 	return 0;
 }
 
-/* idx, class and depth in one word: the walk pushes thousands of these and a
- * struct would triple the stack this format already has to carry. */
-#define ST_PACK(idx, cls, depth) \
-	((uint32_t)(idx) | ((uint32_t)(cls) << 16) | ((uint32_t)(depth) << 24))
-#define ST_IDX(v)   ((v) & 0xffffu)
-#define ST_CLS(v)   (((v) >> 16) & 0xffu)
-#define ST_DEPTH(v) (((v) >> 24) & 0xffu)
-
-static void push(struct ole *s, uint32_t *sp, uint32_t idx, uint32_t cls,
-		 uint32_t depth)
+/*
+ * One entry on the walk's stack. The stack holds what has been pushed and not yet entered, and an
+ * entry is pushed at most as often as a pointer names it - three a visited entry, one more for the
+ * root, and in the linear walk every entry once up front - so four a directory entry is the most
+ * it can ever hold: a file cannot make it hold more, and that is the bound the table grows to.
+ */
+static void push(struct ole *s, uint32_t idx, uint32_t cls, uint32_t depth)
 {
-	if (idx > SEC_MAXREG || idx >= s->o->dir_count)
+	struct kof_docole_info *o = s->o;
+
+	if (idx > SEC_MAXREG || idx >= o->dir_count)
 		return;
-	/*
-	 * AND INSIDE THE TWO ARRAYS THIS INDEX IS ABOUT TO REACH, said here
-	 * rather than inferred three hundred lines away.
-	 *
-	 * dir_count cannot exceed KOF_DOCOLE_MAX_DIR today: max_dirsec is
-	 * MAX_DIR / per and dir_count is n_dirsec * per, so the floor division
-	 * caps the product. That is correct and it is also invisible - the
-	 * arrays it protects are o->seen, which is MAX_DIR BITS and not bytes,
-	 * and the entry table. Change the sector sizes this parser accepts, or
-	 * how the cap is spread over the chain, and the first symptom is
-	 * seen_test_set writing past a 64-word array with an index a file
-	 * chose. One compare on a path that runs a few thousand times per
-	 * document buys the invariant outright.
-	 */
-	if (idx >= KOF_DOCOLE_MAX_DIR) {
-		s->o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
-		return;
+	if (s->sp >= s->cap_stack) {
+		void *t = s->stack;
+
+		if (!kof_tab_grow(&o->mem, &t, &s->cap_stack, sizeof *s->stack,
+				  (uint64_t)s->sp + 1u, 4u * (uint64_t)o->dir_count + 8u)) {
+			/* The entries not entered are in the directory and not in the walk. */
+			o->anomalies |= KOF_DOCOLE_ANOM_WORK_FULL;
+			return;
+		}
+		s->stack = (struct dstk *)t;
 	}
-	if (*sp >= KOF_DOCOLE_MAX_DIR) {
-		s->o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
-		return;
-	}
-	s->o->stack[(*sp)++] = ST_PACK(idx, cls, depth);
+	s->stack[s->sp].idx = idx;
+	s->stack[s->sp].cls = cls;
+	s->stack[s->sp].depth = depth;
+	s->sp++;
 }
 
 static void add_declared(struct kof_docole_info *o, uint32_t cls, uint64_t size)
@@ -546,21 +593,24 @@ static void add_declared(struct kof_docole_info *o, uint32_t cls, uint64_t size)
 static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 {
 	struct kof_docole_info *o = s->o;
-	uint32_t sp = 0;
 
+	/* The bitmap is the walk's own and is read before it is written, so it starts clear -
+	 * and the second walk (the linear one) starts clear again. */
+	memset(s->seen, 0, (size_t)s->cap_seen * sizeof *s->seen);
+	s->sp = 0;
 	if (linear) {
 		uint32_t idx;
 
-		for (idx = 0; idx < o->dir_count && sp < KOF_DOCOLE_MAX_DIR; idx++)
-			push(s, &sp, idx, KOF_DOCOLE_CLS_COUNT, 0);
+		for (idx = 0; idx < o->dir_count; idx++)
+			push(s, idx, KOF_DOCOLE_CLS_COUNT, 0);
 	} else {
-		push(s, &sp, root_child, KOF_DOCOLE_CLS_COUNT, 0);
+		push(s, root_child, KOF_DOCOLE_CLS_COUNT, 0);
 	}
 
-	while (sp) {
-		uint32_t v = o->stack[--sp];
-		uint32_t idx = ST_IDX(v), up = ST_CLS(v), depth = ST_DEPTH(v);
-		uint64_t eoff = dir_ent_off(o, idx);
+	while (s->sp) {
+		const struct dstk v = s->stack[--s->sp];
+		uint32_t idx = v.idx, up = v.cls, depth = v.depth;
+		uint64_t eoff = dir_ent_off(s, idx);
 		char nm[CFB_NAME_MAX / 2u + 1u];
 		struct kof_docole_entry *e;
 		uint32_t own, cls, left, right, child, start;
@@ -569,7 +619,7 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 
 		if (eoff == DIR_NONE)
 			continue;
-		if (seen_test_set(o, idx)) {
+		if (seen_test_set(s, idx)) {
 			o->anomalies |= KOF_DOCOLE_ANOM_DIR_CYCLE;
 			continue;
 		}
@@ -581,9 +631,9 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 
 		/* Siblings share this entry's context, whatever this entry is. */
 		if (kof_rd_u32(s->f, eoff + D_LEFT, 0, &left))
-			push(s, &sp, left, up, depth);
+			push(s, left, up, depth);
 		if (kof_rd_u32(s->f, eoff + D_RIGHT, 0, &right))
-			push(s, &sp, right, up, depth);
+			push(s, right, up, depth);
 
 		if (type == KOF_DOCOLE_T_STORAGE) {
 			uint32_t sub = own < KOF_DOCOLE_CLS_COUNT ? own : up;
@@ -591,10 +641,11 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 			o->storage_count++;
 			if (kof_rd_u32(s->f, eoff + D_CHILD, 0, &child) &&
 			    child <= SEC_MAXREG) {
-				if (depth + 1u < KOF_DOCOLE_MAX_DEPTH)
-					push(s, &sp, child, sub, depth + 1u);
-				else
+				/* Noted past a depth no producer writes, not stopped at: each level is
+				 * an entry entered once, so a deep tree costs what a wide one does. */
+				if (depth + 1u >= KOF_DOCOLE_MAX_DEPTH)
 					o->anomalies |= KOF_DOCOLE_ANOM_DIR_DEPTH;
+				push(s, child, sub, depth + 1u);
 			}
 			continue;
 		}
@@ -636,7 +687,14 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 		 * emptied as much as one that was filled.
 		 */
 		e = 0;
-		if (o->n_entries < KOF_DOCOLE_MAX_ENTRIES) {
+		if (o->n_entries >= s->cap_ent) {
+			void *t = o->ent;
+
+			if (kof_tab_grow(&o->mem, &t, &s->cap_ent, sizeof *o->ent,
+					 (uint64_t)o->n_entries + 1u, s->ent_limit))
+				o->ent = (struct kof_docole_entry *)t;
+		}
+		if (o->n_entries < s->cap_ent) {
 			uint16_t nlen = 0;
 
 			e = &o->ent[o->n_entries++];
@@ -651,6 +709,8 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 			e->cls       = cls;
 			e->flags     = size < o->mini_cutoff ? KOF_DOCOLE_ENT_MINI : 0u;
 			e->data_off  = 0;
+			e->run_bytes = 0;
+			e->first_off = 0;
 		} else {
 			o->anomalies |= KOF_DOCOLE_ANOM_ENTRIES_FULL;
 		}
@@ -672,10 +732,17 @@ static void walk_dir(struct ole *s, uint32_t root_child, int linear)
 #define VBA_REC_MODULESTREAMNAME 0x001au
 #define VBA_REC_MODULEOFFSET     0x0031u
 
-/* What decompressing `dir` is allowed to produce. Measured over 50 documents the
- * largest was 12KB; this is an order of magnitude above it and bounds a file that
- * declares a project record it does not have. */
-#define VBA_DIR_MAX 131072u
+/*
+ * What decompressing `dir` is allowed to produce: a floor of 128 KB (measured over 50
+ * documents the largest was 12KB) and, above it, VBA_DIR_RATIO times the bytes of the stream
+ * itself - the one number that ties the output to the file. A compressed container expands a
+ * chunk of 4096 bytes from a handful at best (a flag byte, a literal and a copy token, six
+ * bytes: about 680 to one), so a ratio of 1024 is above anything an encoder writes and below a
+ * bomb. It was a flat 131072 - a project of a thousand modules fills it, and what lay past it
+ * lost its offsets with nothing said. Reaching it now says so: WORK_FULL.
+ */
+#define VBA_DIR_MIN   131072u
+#define VBA_DIR_RATIO 1024u
 
 struct dirbuf {
 	uint8_t *p;
@@ -762,7 +829,7 @@ static void vba_module_offsets(struct ole *s)
 	struct kof_docole_info *o = s->o;
 	struct dirbuf d;
 	uint8_t *raw = 0;
-	uint32_t i, at, name_at = 0, name_len = 0;
+	uint32_t i, at, got = 0, name_at = 0, name_len = 0;
 
 	if (!o->has_macros)
 		return;
@@ -789,19 +856,41 @@ static void vba_module_offsets(struct ole *s)
 	if (i >= o->n_entries)
 		return;
 
-	raw = malloc(VBA_DIR_MAX);
-	d.p = malloc(VBA_DIR_MAX);
-	if (!raw || !d.p)
-		goto out;
-	d.cap = VBA_DIR_MAX;
-	d.n = 0;
+	/* The stream's own bytes bound what it may decode to - and what the engine can afford
+	 * bounds both: a buffer the ledger would not give is a project directory not read. */
 	{
-		uint32_t got = ent_bytes(s, &o->ent[i], raw, VBA_DIR_MAX);
-		uint64_t produced = 0;
+		uint64_t want = o->ent[i].run_bytes;
+		uint64_t cap = want * VBA_DIR_RATIO;
+		uint64_t room = kof_view_room(&o->mem);
 
+		if (cap < VBA_DIR_MIN)
+			cap = VBA_DIR_MIN;
+		if (want + cap > room || want > 0xffffffffu || cap > 0xffffffffu) {
+			o->anomalies |= KOF_DOCOLE_ANOM_WORK_FULL;
+			return;
+		}
+		raw = malloc((size_t)want + 1u);
+		d.p = malloc((size_t)cap);
+		if (!raw || !d.p) {
+			o->anomalies |= KOF_DOCOLE_ANOM_WORK_FULL;
+			goto out;
+		}
+		d.cap = (uint32_t)cap;
+		d.n = 0;
+		o->mem.held += want + cap;      /* while the buffers live; given back below */
+		got = ent_bytes(s, &o->ent[i], raw, (uint32_t)want);
+		if (got) {
+			uint64_t produced = 0;
+
+			kuncoat_ovba_decode(raw, got, dirbuf_sink, &d, &produced);
+			/* The decoder stopped because the buffer was full, and not because the
+			 * stream ended: the modules past this point have no offsets. */
+			if (d.n >= d.cap)
+				o->anomalies |= KOF_DOCOLE_ANOM_WORK_FULL;
+		}
+		o->mem.held -= want + cap;
 		if (!got)
 			goto out;
-		kuncoat_ovba_decode(raw, got, dirbuf_sink, &d, &produced);
 	}
 
 	/*
@@ -896,12 +985,12 @@ static void vba_module_offsets(struct ole *s)
 	for (i = 0; i < o->n_entries; i++) {
 		struct kof_docole_entry *e = &o->ent[i];
 		uint8_t head[3];
-		uint32_t got;
+		uint32_t n;
 
 		if (e->cls != KOF_DOCOLE_CLS_MACROS || !e->n_runs)
 			continue;
-		got = ent_bytes_at(s, e, e->data_off, head, sizeof head);
-		if (got == sizeof head && kuncoat_ovba_plausible(head, got))
+		n = ent_bytes_at(s, e, e->data_off, head, sizeof head);
+		if (n == sizeof head && kuncoat_ovba_plausible(head, n))
 			e->flags |= KOF_DOCOLE_ENT_OVBA;
 	}
 out:
@@ -980,62 +1069,29 @@ struct ole_head {
 	uint32_t dir_start, mfat_start, dif_start;
 };
 
-/*
- * A VIEW CLEARED FOR A NEW DOCUMENT - the head, the counts and the one bitmap that is
- * read before it is written, and nothing else.
- */
+void kof_docole_release(struct kof_docole_info *o)
+{
+	kof_tab_free((void **)&o->run);
+	kof_tab_free((void **)&o->ent);
+	kof_tab_free((void **)&o->ent_run);
+	o->n_runs = 0;
+	o->n_entries = 0;
+	o->n_ent_runs = 0;
+	o->mem.held = 0;
+	o->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(docole, struct kof_docole_info, ent, n_entries)
+
+/* A view cleared for a new document: what the last parse left is let go first, and the caller's
+ * room is put back after the clear (zip_parse.c says why). */
 static void docole_clear_view(struct kof_docole_info *o)
 {
-	/*
-	 * THE HEADER, THE SCALARS BETWEEN THE ARRAYS, AND THE ONE BITMAP:
-	 * 424 bytes instead of 62888. Same change as zip_parse.c, and the
-	 * fiddliest of the set because this view interleaves nine arrays with
-	 * the counts that bound them.
-	 *
-	 *        0 ..   152   head                    <- cleared
-	 *      152 .. 39064   run[] ent[] ent_run[]   <- skipped, count-bound
-	 *    39064 .. 39076   a count and padding     <- cleared
-	 *    39076 .. 52388   dif[] mfat[] mini[]     <- skipped, count-bound
-	 *    52388 .. 52644   seen[]                  <- CLEARED, see below
-	 *    52644 .. 60836   stack[]                 <- skipped, sp-bound
-	 *    60836 .. 60840   a count and padding     <- cleared
-	 *    60840 .. 62888   dirsec[]                <- skipped, count-bound
-	 *
-	 * seen[] IS THE EXCEPTION AND IT IS NOT OPTIONAL. It is a bitmap of
-	 * directory entries already visited, and it is READ BEFORE IT IS
-	 * WRITTEN - `if (o->seen[w] & b)`. Left dirty it carries the previous
-	 * document's visited set, and the walk then declares entries already
-	 * seen and stops early: a truncated object list with nothing to say it
-	 * was truncated. Every other array here is written before it is read
-	 * and bounded by a count that IS cleared.
-	 *
-	 * stack[] is skipped for exactly that reason - it is pushed before it
-	 * is popped and bounded by sp, which lives in the head.
-	 */
-	{
-		const size_t run_at  = offsetof(struct kof_docole_info, run);
-		const size_t ent_end = offsetof(struct kof_docole_info, ent_run)
-				       + sizeof o->ent_run;
-		const size_t dif_at  = offsetof(struct kof_docole_info, dif);
-		const size_t stk_end = offsetof(struct kof_docole_info, stack)
-				       + sizeof o->stack;
-		const size_t dir_at  = offsetof(struct kof_docole_info, dirsec);
+	uint64_t room = o->mem.room;
 
-		_Static_assert(offsetof(struct kof_docole_info, dirsec) +
-			       sizeof ((struct kof_docole_info *)0)->dirsec ==
-			       sizeof(struct kof_docole_info),
-			       "kof_docole_info gained a field after dirsec[]: "
-			       "nothing below clears it");
-		_Static_assert(offsetof(struct kof_docole_info, seen) >
-			       offsetof(struct kof_docole_info, dif),
-			       "the docole view was reordered; the spans "
-			       "below no longer describe it");
-
-		memset(o, 0, run_at);
-		memset((char *)o + ent_end, 0, dif_at - ent_end);
-		memset(o->seen, 0, sizeof o->seen);
-		memset((char *)o + stk_end, 0, dir_at - stk_end);
-	}
+	kof_docole_release(o);
+	memset(o, 0, sizeof *o);
+	o->mem.room = room;
 	o->version = KOF_DOCOLE_INFO_VERSION;
 }
 
@@ -1045,8 +1101,13 @@ static void ole_begin(struct ole *s, kof_buf file, struct kof_docole_info *o)
 	memset(s, 0, sizeof *s);
 	s->f = file;
 	s->o = o;
-	kof_runs_init(&s->runs, o->run, KOF_DOCOLE_MAX_EXTENTS,
-		      KOF_DOCOLE_CLS_COUNT);
+	/* Runs and listed streams are bounded by the file: every run is made by a step or by a
+	 * structure claimed outright, and the step budgets below are sized from the file's length. */
+	s->sec_limit = file.n / CFB_HEADER_LEN;      /* sectors are 512 or 4096: at most this */
+	s->ent_limit = file.n / DIR_ENT_LEN + 1u;
+	s->entrun_limit = file.n / 32u + 4096u + file.n / CFB_HEADER_LEN * 2u + 1024u +
+			  s->sec_limit + 16u;
+	kof_runs_init_dyn(&s->runs, &o->mem, KOF_DOCOLE_CLS_COUNT, s->entrun_limit);
 	/*
 	 * How many sector steps an honest file can need - one bound per
 	 * granularity, see struct ole.
@@ -1128,6 +1189,9 @@ static int ole_read_header(struct ole *s, struct ole_head *h)
 
 		if (want > s->fat_step_max)
 			s->fat_step_max = want;
+		/* And the sectors the file holds, exactly: a table of a chain's sectors cannot have
+		 * more rows than this. (The floor set in ole_begin was for a 512 byte sector.) */
+		s->sec_limit = file.n / o->sector_size;
 	}
 	if ((o->major == 3 && ss != 9) || (o->major == 4 && ss != 12))
 		o->anomalies |= KOF_DOCOLE_ANOM_BAD_HEADER;
@@ -1168,46 +1232,50 @@ static void ole_read_fat(struct ole *s, uint32_t dif_start, uint32_t mfat_start)
 
 	/* ---- the DIFAT: which sector holds which block of the FAT ---- */
 
-	for (i = 0; i < H_DIFAT_N && o->n_dif < KOF_DOCOLE_MAX_FAT; i++) {
+	for (i = 0; i < H_DIFAT_N; i++) {
 		uint32_t v;
 
 		if (!kof_rd_u32(file, H_DIFAT + (uint64_t)i * 4u, 0, &v))
 			break;
 		if (v > SEC_MAXREG)
 			continue;
-		o->dif[o->n_dif++] = v;
+		if (!u32_push(s, &s->dif, v))
+			break;
 	}
-
 	per = o->sector_size / 4u;
-	while (dif_start <= SEC_MAXREG && o->n_dif < KOF_DOCOLE_MAX_FAT && step_fat(s)) {
+	while (dif_start <= SEC_MAXREG && step_fat(s)) {
 		uint64_t base = sec_off(o, dif_start);
 		uint32_t v;
 
 		add_run(s, base, o->sector_size, KOF_DOCOLE_CLS_HEADERS);
-		for (i = 0; i + 1u < per && o->n_dif < KOF_DOCOLE_MAX_FAT; i++) {
+		for (i = 0; i + 1u < per; i++) {
 			if (!kof_rd_u32(file, base + (uint64_t)i * 4u, 0, &v))
 				break;
 			if (v > SEC_MAXREG)
 				continue;
-			o->dif[o->n_dif++] = v;
+			/* A FAT block is a sector of the file, so a DIFAT that lists more of them
+			 * than the file has sectors lists one twice: a loop, and said as one. */
+			if (s->dif.n >= s->sec_limit) {
+				o->anomalies |= KOF_DOCOLE_ANOM_FAT_CYCLE;
+				break;
+			}
+			if (!u32_push(s, &s->dif, v))
+				break;
 		}
 		/* The last slot of a DIFAT sector is the next one, not a FAT sector. */
 		if (!kof_rd_u32(file, base + (uint64_t)(per - 1u) * 4u, 0, &v))
 			break;
 		dif_start = v;
 	}
-	if (o->n_dif >= KOF_DOCOLE_MAX_FAT)
-		o->anomalies |= KOF_DOCOLE_ANOM_FAT_UNMAPPED;
 
 	/* The FAT itself is structure: it says where bytes are and holds none. */
-	for (i = 0; i < o->n_dif; i++)
-		add_run(s, sec_off(o, o->dif[i]), o->sector_size,
+	for (i = 0; i < s->dif.n; i++)
+		add_run(s, sec_off(o, s->dif.v[i]), o->sector_size,
 			KOF_DOCOLE_CLS_HEADERS);
 
 	/* ---- the MiniFAT ---- */
 
-	o->n_mfat = collect_chain(s, mfat_start, o->mfat, KOF_DOCOLE_MAX_MINIFAT,
-				  KOF_DOCOLE_CLS_HEADERS);
+	collect_chain(s, mfat_start, &s->mfat, KOF_DOCOLE_CLS_HEADERS);
 }
 
 /* THE DIRECTORY: its sectors, the entry count bounded by what the file could hold.
@@ -1216,27 +1284,22 @@ static int ole_read_directory(struct ole *s, uint32_t dir_start)
 {
 	kof_buf file = s->f;
 	struct kof_docole_info *o = s->o;
-	uint32_t per, max_dirsec;
+	uint32_t per;
 
 	/* ---- the directory ---- */
 
 	per = o->sector_size / DIR_ENT_LEN;
-	max_dirsec = KOF_DOCOLE_MAX_DIR / (per ? per : 1u);
-	if (max_dirsec > KOF_DOCOLE_MAX_DIR / 4u)
-		max_dirsec = KOF_DOCOLE_MAX_DIR / 4u;
-
-	o->n_dirsec = collect_chain(s, dir_start, o->dirsec, max_dirsec,
-				    KOF_DOCOLE_CLS_DIRECTORY);
-	o->dir_count = o->n_dirsec * per;
+	collect_chain(s, dir_start, &s->dirsec, KOF_DOCOLE_CLS_DIRECTORY);
+	o->dir_count = s->dirsec.n * per;
 	/*
 	 * AND NO MORE ENTRIES THAN THE FILE COULD HOLD.
 	 *
 	 * collect_chain follows the FAT and records a sector number per step.
 	 * It has no visited set - this parser will not spend memory
 	 * proportional to the file, see the note at the top - so a chain that
-	 * loops hands back the SAME sector as many times as the cap allows.
-	 * n_dirsec is then 512 for a file with one directory sector, every
-	 * index below 512*per resolves through dir_ent_off to a real offset
+	 * loops hands back the SAME sector as many times as the file has sectors.
+	 * n_dirsec is then that many for a file with one directory sector, every
+	 * index below it resolves through dir_ent_off to a real offset
 	 * inside that one sector, and the walk reads and decodes a name for
 	 * each of them.
 	 *
@@ -1255,11 +1318,20 @@ static int ole_read_directory(struct ole *s, uint32_t dir_start)
 		o->dir_count = (uint32_t)(file.n / DIR_ENT_LEN);
 		o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
 	}
-	if (o->n_dirsec == max_dirsec)
-		o->anomalies |= KOF_DOCOLE_ANOM_DIR_OVERFLOW;
 	if (o->dir_count == 0) {
 		o->anomalies |= KOF_DOCOLE_ANOM_NO_STREAMS;
 		return 0;
+	}
+	/* The walk's bitmap, now that the entries it covers are counted. */
+	{
+		void *t = NULL;
+		uint64_t words = ((uint64_t)o->dir_count + 31u) / 32u;
+
+		if (!kof_tab_grow(&o->mem, &t, &s->cap_seen, sizeof *s->seen, words, words)) {
+			o->anomalies |= KOF_DOCOLE_ANOM_WORK_FULL;
+			return 0;
+		}
+		s->seen = (uint32_t *)t;
 	}
 	return 1;
 }
@@ -1276,7 +1348,7 @@ static void ole_read_streams(struct ole *s)
 
 	/* ---- the root, and through it the mini stream ---- */
 
-	eoff = dir_ent_off(o, 0);
+	eoff = dir_ent_off(s, 0);
 	if (eoff == DIR_NONE)
 		return;
 	kof_rd_u8(file, eoff + D_TYPE, &root_type);
@@ -1294,11 +1366,7 @@ static void ole_read_streams(struct ole *s)
 	 * macro in two regions at once.
 	 */
 	if (root_size)
-		o->n_mini = collect_chain(s, root_start, o->mini,
-					  KOF_DOCOLE_MAX_MINI_SEC,
-					  KOF_DOCOLE_CLS_COUNT);
-	if (o->n_mini == KOF_DOCOLE_MAX_MINI_SEC)
-		o->anomalies |= KOF_DOCOLE_ANOM_MINI_UNMAPPED;
+		collect_chain(s, root_start, &s->mini, KOF_DOCOLE_CLS_COUNT);
 
 	walk_dir(s, root_child, 0);
 
@@ -1323,7 +1391,6 @@ static void ole_read_streams(struct ole *s)
 	 */
 	if (o->stream_count == 0 && o->dir_count) {
 		o->anomalies |= KOF_DOCOLE_ANOM_DIR_RECOVERED;
-		memset(o->seen, 0, sizeof o->seen);
 		walk_dir(s, 0, 1);
 	}
 
@@ -1339,6 +1406,7 @@ static void ole_finish(struct ole *s, kof_buf file, struct kof_docole_info *o,
 		       struct kof_obj_ctx *ctx)
 {
 	kof_runs_settle(&s->runs, o->region_bytes);
+	o->run = s->runs.v;
 	o->n_runs = s->runs.n;
 	if (s->runs.full)
 		o->anomalies |= KOF_DOCOLE_ANOM_EXTENTS_FULL;
@@ -1349,6 +1417,15 @@ static void ole_finish(struct ole *s, kof_buf file, struct kof_docole_info *o,
 
 	ctx->format = KOF_FMT_DOCOLE;
 	vba_module_offsets(s);
+	/* The work tables are the parse's and are given back; what stays is what a module and a
+	 * region read. */
+	kof_tab_drop(&o->mem, (void **)&s->dif.v, &s->dif.cap, sizeof *s->dif.v);
+	kof_tab_drop(&o->mem, (void **)&s->mfat.v, &s->mfat.cap, sizeof *s->mfat.v);
+	kof_tab_drop(&o->mem, (void **)&s->mini.v, &s->mini.cap, sizeof *s->mini.v);
+	kof_tab_drop(&o->mem, (void **)&s->dirsec.v, &s->dirsec.cap, sizeof *s->dirsec.v);
+	kof_tab_drop(&o->mem, (void **)&s->seen, &s->cap_seen, sizeof *s->seen);
+	kof_tab_drop(&o->mem, (void **)&s->stack, &s->cap_stack, sizeof *s->stack);
+	o->mem.rows = o->n_entries;
 
 	ctx->obj_size = file.n;
 	ctx->file_header = o;
@@ -1410,7 +1487,7 @@ const char *kof_docole_anomaly_name(unsigned index)
 		"DIR_DEPTH", "DIR_OVERFLOW", "BAD_DIR_ENTRY", "EXTENTS_FULL",
 		"FAT_UNMAPPED", "MINI_UNMAPPED", "STREAM_PAST_EOF",
 		"MACRO_OVERSIZE", "NO_STREAMS", "ENCRYPTED", "OVERLAP",
-		"ENTRIES_FULL", "ENT_RUNS_FULL", "DIR_RECOVERED"
+		"ENTRIES_FULL", "ENT_RUNS_FULL", "DIR_RECOVERED", "WORK_FULL"
 	};
 
 

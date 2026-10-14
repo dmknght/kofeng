@@ -69,7 +69,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_DOCOLE_INFO_VERSION 1
+#define KOF_DOCOLE_INFO_VERSION 2
 
 /*
  * Scan regions.
@@ -132,20 +132,27 @@ enum {
 };
 
 /*
- * Bounds the parse holds itself to.
+ * What bounds the parse, and what does not.
  *
- * Every one of them exists because the structure it bounds cannot be trusted to
- * end on its own, and each has an anomaly bit so that reaching one is visible
- * rather than silent. Sized from measurement, not from the specification's maxima:
- * across 77 real OLE documents the largest directory held 96 entries and the most
- * fragmented stream came apart into 15 runs.
+ * NO COUNT IS A LIMIT ON THE FILE. The directory was 2048 entries, the runs a region resolves
+ * from 512, the listed streams 256 with 1024 runs between them, the FAT 1024 sectors (64 MB), the
+ * MiniFAT 256 and the mini stream 2048 - "sized from measurement": 77 documents, a directory of 96
+ * entries at most. A document past any of them lost what lay beyond, and the FAT and the mini
+ * stream said so in two anomaly bits nothing read. Each is now a table the parse allocates to what
+ * the file holds, and what bounds an allocation is the file: a directory entry is KOF_DOCOLE_DIR_ENT
+ * (128) bytes, a sector of the FAT, the MiniFAT, the directory or the mini stream is a sector of the
+ * file, and the claims a chain makes are bounded by the walk's own step budgets, which are sized
+ * from the file (docole_parse.c: struct ole). Under that sits the engine's per-object ledger (struct
+ * kof_view_mem.room). A table that cannot grow raises WORK_FULL (the work tables of the parse) or
+ * ENTRIES_FULL / ENT_RUNS_FULL / EXTENTS_FULL (the tables a module reads): what was not read is
+ * said, and what was read is whole.
+ *
+ * ONE LIMIT IS KEPT AS A NUMBER AND IS NOT ONE ANY MORE: storages nested deeper than
+ * KOF_DOCOLE_MAX_DEPTH are noted (DIR_DEPTH), and walked all the same - nesting costs nothing, an
+ * entry is entered once.
  */
-#define KOF_DOCOLE_MAX_DIR       2048u  /* directory entries examined */
-#define KOF_DOCOLE_MAX_DEPTH     32u    /* storage nesting */
-#define KOF_DOCOLE_MAX_EXTENTS   512u   /* runs recorded, across all classes */
-#define KOF_DOCOLE_MAX_FAT       1024u  /* FAT sectors reachable, so 64MB at 512 */
-#define KOF_DOCOLE_MAX_MINIFAT   256u   /* MiniFAT sectors reachable */
-#define KOF_DOCOLE_MAX_MINI_SEC  2048u  /* sectors of mini stream mapped */
+#define KOF_DOCOLE_DIR_ENT       128u   /* bytes of one directory entry, the format's own */
+#define KOF_DOCOLE_MAX_DEPTH     32u    /* storage nesting that is worth a note */
 
 /*
  * Streams described one by one, and the runs it takes to describe them.
@@ -156,12 +163,10 @@ enum {
  * stream's bytes - to decompress it, which is a thing done to a stream and never to
  * a region - needs the unsettled form, so both are kept.
  *
- * Sized from measurement over 50 macro-bearing documents: 1208 streams across them,
- * so 24 per document, and a stream is one run 76.4% of the time because its sectors
- * are consecutive. 256 and 1024 are an order of magnitude above that.
+ * Measured over 50 macro-bearing documents: 1208 streams across them, so 24 per
+ * document, and a stream is one run 76.4% of the time because its sectors are
+ * consecutive. Said for what is common, and not as a bound on anything.
  */
-#define KOF_DOCOLE_MAX_ENTRIES   256u
-#define KOF_DOCOLE_MAX_ENT_RUNS  1024u
 
 /*
  * The size past which a macro is worth saying something about.
@@ -177,7 +182,7 @@ enum {
 enum {
 	KOF_DOCOLE_ENT_MINI     = 1u << 0,  /* lives in the mini stream */
 	KOF_DOCOLE_ENT_SHORT    = 1u << 1,  /* fewer bytes recorded than declared */
-	KOF_DOCOLE_ENT_RUNS_FULL = 1u << 2, /* the run pool bound before it ended */
+	KOF_DOCOLE_ENT_RUNS_FULL = 1u << 2, /* the run table could not grow before it ended */
 	/*
 	 * The bytes at data_off begin a compressed container.
 	 *
@@ -198,20 +203,25 @@ enum {
 	KOF_DOCOLE_ANOM_FAT_CYCLE     = 1ull << 3,  /* chains ran longer than the
 						     * file can hold, so one loops */
 	KOF_DOCOLE_ANOM_DIR_CYCLE     = 1ull << 4,  /* the tree revisits an entry */
-	KOF_DOCOLE_ANOM_DIR_DEPTH     = 1ull << 5,
-	KOF_DOCOLE_ANOM_DIR_OVERFLOW  = 1ull << 6,  /* more entries than examined */
+	KOF_DOCOLE_ANOM_DIR_DEPTH     = 1ull << 5,  /* storages nested past MAX_DEPTH: noted,
+						     * not a limit - they are walked */
+	KOF_DOCOLE_ANOM_DIR_OVERFLOW  = 1ull << 6,  /* the directory's chain names more
+						     * entries than the file can hold, so it
+						     * loops: read as far as the file goes */
 	KOF_DOCOLE_ANOM_BAD_DIR_ENTRY = 1ull << 7,  /* name length or type invalid */
-	KOF_DOCOLE_ANOM_EXTENTS_FULL  = 1ull << 8,  /* more runs than recorded */
-	KOF_DOCOLE_ANOM_FAT_UNMAPPED  = 1ull << 9,  /* FAT past MAX_FAT */
-	KOF_DOCOLE_ANOM_MINI_UNMAPPED = 1ull << 10, /* mini stream past MAX_MINI_SEC */
+	KOF_DOCOLE_ANOM_EXTENTS_FULL  = 1ull << 8,  /* the run table could not grow */
+	KOF_DOCOLE_ANOM_FAT_UNMAPPED  = 1ull << 9,  /* a chain reached a sector whose FAT
+						     * block the DIFAT does not list */
+	KOF_DOCOLE_ANOM_MINI_UNMAPPED = 1ull << 10, /* ... or whose mini stream sector the
+						     * root's chain does not reach */
 	KOF_DOCOLE_ANOM_STREAM_PAST_EOF = 1ull << 11,
 	KOF_DOCOLE_ANOM_MACRO_OVERSIZE  = 1ull << 12, /* past MACRO_SUSPECT */
 	KOF_DOCOLE_ANOM_NO_STREAMS      = 1ull << 13, /* a directory with nothing in it */
 	KOF_DOCOLE_ANOM_ENCRYPTED       = 1ull << 14, /* content is ciphertext */
 	KOF_DOCOLE_ANOM_OVERLAP         = 1ull << 15, /* two structures claimed the
 						       * same bytes */
-	KOF_DOCOLE_ANOM_ENTRIES_FULL    = 1ull << 16, /* more streams than listed */
-	KOF_DOCOLE_ANOM_ENT_RUNS_FULL   = 1ull << 17, /* the per-entry run pool bound */
+	KOF_DOCOLE_ANOM_ENTRIES_FULL    = 1ull << 16, /* the stream table could not grow */
+	KOF_DOCOLE_ANOM_ENT_RUNS_FULL   = 1ull << 17, /* the per-entry run table could not grow */
 	/*
 	 * The directory tree reached nothing and the directory was read straight
 	 * through instead.
@@ -222,14 +232,86 @@ enum {
 	 * relying on "this stream is under the VBA storage" is relying on something
 	 * this file did not supply.
 	 */
-	KOF_DOCOLE_ANOM_DIR_RECOVERED   = 1ull << 18
+	KOF_DOCOLE_ANOM_DIR_RECOVERED   = 1ull << 18,
+	/*
+	 * A table or buffer the parse works with could not grow, or hit its bound: the
+	 * FAT, the MiniFAT, the map of the mini stream, the directory's sectors, the walk's
+	 * own stack, or the buffer the project directory is decoded into. What lies past it
+	 * was not read - a document that cannot be walked to its end - and the object says
+	 * so. Its own bit, not FAT_UNMAPPED's: a file whose chains run off its FAT is damaged,
+	 * and one the engine could not afford to read is not.
+	 */
+	KOF_DOCOLE_ANOM_WORK_FULL       = 1ull << 19
 };
 
 /* How many of the above there are, so the name table cannot fall behind
  * them - three of 7z's bits went unnamed until a checklist pass found it. */
-#define KOF_DOCOLE_ANOM_COUNT 19
+#define KOF_DOCOLE_ANOM_COUNT 20
 
 
+/*
+ * ONE STREAM of the directory.
+ *
+ * A name here is a range in the OBJECT - a CFB stores directory names as UTF-16 in the directory
+ * entry - so it is an offset and a length like every other name in this engine, and not a copy.
+ * `first_run` and `n_runs` index ent_run, which is where the stream's bytes actually are; empty
+ * streams get no runs and are still listed.
+ */
+struct kof_docole_ent_run {
+	uint64_t off, len;
+};
+
+struct kof_docole_entry {
+	uint64_t name_off;    /* UTF-16 name, in the object */
+	uint32_t name_len;    /* bytes, so twice the character count */
+	uint32_t size_lo;     /* declared size, split so the struct packs */
+	uint32_t size_hi;
+	uint32_t first_run;   /* into ent_run */
+	uint32_t n_runs;
+	uint32_t cls;         /* enum kof_docole_class, or COUNT for none */
+	uint32_t flags;       /* KOF_DOCOLE_ENT_* */
+
+	/*
+	 * Where this stream's DECODABLE content starts, counted from the
+	 * start of the stream rather than of the object.
+	 *
+	 * Zero for every stream but one kind. A VBA module stream begins
+	 * with the compiled p-code and the compressed source follows it,
+	 * at an offset that is stated in the project's `dir` stream and
+	 * nowhere else - so the parse decompresses `dir` and puts the
+	 * answer here. Guessing instead was measured: scanning the stream
+	 * for something that looks like the start of a compressed
+	 * container finds the right place first only 57% of the time.
+	 */
+	uint32_t data_off;
+
+	/*
+	 * WHAT THE STREAM'S RUNS ADD UP TO, and where the first one is - the two facts a module
+	 * asks of the run table without walking it. A projection of ent_run and not a second
+	 * source: the module read the runs by index to sum them, which made the table an array
+	 * it indexed; this is the sum, kept as the runs are made. `run_bytes` is the bytes the
+	 * chain really reaches (never more than the declared size) and `first_off` where the first
+	 * of them is, which is the stream when `n_runs` is one.
+	 */
+	uint64_t run_bytes;
+	uint64_t first_off;
+};
+
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2, the same change as the zip view's (zip.h has the long form). The arrays that ended
+ * this struct - the settled runs, the listed streams, their runs and six tables the parse keeps for
+ * itself, 62 KB in all - are tables the parse allocates to the size of the document, reached
+ * through the pointers at the tail; the six that no module and no tool reads (the DIFAT, the
+ * MiniFAT, the map of the mini stream, the directory's sectors and the walk's bitmap and stack) are
+ * the parse's own work and are gone from the view. Everything before them is where it was.
+ * `n_entries` WAS AT OFFSET 136 AND IS NOW `legacy_n_entries`, ALWAYS ZERO: a module built against
+ * version 1 loops over a count of zero, reads a valid empty table, and the engine - which sees that
+ * the walk below was never called while the document has rows - reports the object instead of
+ * passing it as examined (sx_walk_check). The real count is `n_entries` at the tail. A module walks
+ * the streams with kof_docole_next below; it does not index `ent`.
+ */
 struct kof_docole_info {
 	uint32_t version;         /* KOF_DOCOLE_INFO_VERSION */
 	uint32_t valid;           /* the signature and the header agreed */
@@ -284,6 +366,23 @@ struct kof_docole_info {
 	uint32_t encrypted;
 
 	/*
+	 * The streams, listed one by one - see `ent` below.
+	 */
+	uint32_t legacy_n_entries;/* version 1's count, kept for its offset: always 0 */
+	uint32_t n_ent_runs;      /* rows in `ent_run` */
+
+	/* Runs, classified, joined where consecutive and settled so that no byte is
+	 * in two of them. struct kof_run is the shared shape, defined once in
+	 * range.h (core, types only, re-exported by kofsig.h). */
+	uint32_t n_runs;
+	uint32_t reserved1;
+
+	/* ---- version 2: from here the tables are the file's size ----------------------- */
+
+	struct kof_view_mem mem;  /* what the tables hold; see range.h */
+	struct kof_run *run;      /* n_runs of them; cls is enum kof_docole_class */
+
+	/*
 	 * The streams, named and locatable one at a time.
 	 *
 	 * A name here is a range in the OBJECT - a CFB stores directory names as
@@ -295,82 +394,29 @@ struct kof_docole_info {
 	 * bytes actually are. Empty streams get no runs and are still listed: a
 	 * module deciding what a document contains cares that a stream is there.
 	 */
-	uint32_t n_entries;
-	uint32_t n_ent_runs;
-
-	/* Runs, classified, joined where consecutive and settled so that no byte is
-	 * in two of them. struct kof_run is the shared shape, defined once in
-	 * range.h (core, types only, re-exported by kofsig.h). */
-	uint32_t n_runs;
-	uint32_t reserved1;
-	struct kof_run run[KOF_DOCOLE_MAX_EXTENTS];   /* cls is enum kof_docole_class */
-
-	struct kof_docole_entry {
-		uint64_t name_off;    /* UTF-16 name, in the object */
-		uint32_t name_len;    /* bytes, so twice the character count */
-		uint32_t size_lo;     /* declared size, split so the struct packs */
-		uint32_t size_hi;
-		uint32_t first_run;   /* into ent_run */
-		uint32_t n_runs;
-		uint32_t cls;         /* enum kof_docole_class, or COUNT for none */
-		uint32_t flags;       /* KOF_DOCOLE_ENT_* */
-
-		/*
-		 * Where this stream's DECODABLE content starts, counted from the
-		 * start of the stream rather than of the object.
-		 *
-		 * Zero for every stream but one kind. A VBA module stream begins
-		 * with the compiled p-code and the compressed source follows it,
-		 * at an offset that is stated in the project's `dir` stream and
-		 * nowhere else - so the parse decompresses `dir` and puts the
-		 * answer here. Guessing instead was measured: scanning the stream
-		 * for something that looks like the start of a compressed
-		 * container finds the right place first only 57% of the time.
-		 */
-		uint32_t data_off;
-	} ent[KOF_DOCOLE_MAX_ENTRIES];
-
-	struct kof_docole_ent_run {
-		uint64_t off, len;
-	} ent_run[KOF_DOCOLE_MAX_ENT_RUNS];
-
-	/*
-	 * Host bookkeeping past this point.
-	 *
-	 * The lookup tables the parse builds so that following a chain is a table
-	 * read rather than a walk from the beginning - without them, resolving n
-	 * streams over n sectors is quadratic and a hand-built file makes that the
-	 * whole scan. No module has a reason to read them; they are here rather than
-	 * on the stack because a view is allocated once per scanner and 30KB of stack
-	 * inside a parse is not.
-	 */
-	uint32_t n_dif, n_mfat, n_mini;
-	uint32_t dif[KOF_DOCOLE_MAX_FAT];        /* sector holding each FAT block */
-	uint32_t mfat[KOF_DOCOLE_MAX_MINIFAT];   /* sectors of the MiniFAT */
-	uint32_t mini[KOF_DOCOLE_MAX_MINI_SEC];  /* sectors of the mini stream */
-
-	/*
-	 * The directory walk's own stack, and what it has already been to.
-	 *
-	 * Explicit rather than the C stack because the thing being walked is a
-	 * red-black tree whose sibling links can degenerate into a list as long as the
-	 * directory: recursion over them is a stack depth the file chooses. The bitmap
-	 * is what makes a cycle terminate rather than merely be bounded - an entry is
-	 * entered once, so a tree pointing back at itself is noticed and named instead
-	 * of being run into a budget.
-	 */
-	uint32_t seen[(KOF_DOCOLE_MAX_DIR + 31u) / 32u];
-	uint32_t stack[KOF_DOCOLE_MAX_DIR];
-
-	/* Sectors of the directory chain, so reaching entry n is a table read. Four
-	 * entries fit a 512 byte sector, which is what sizes this. */
-	uint32_t n_dirsec;
-	uint32_t dirsec[KOF_DOCOLE_MAX_DIR / 4u];
+	struct kof_docole_entry *ent;           /* n_entries of them */
+	struct kof_docole_ent_run *ent_run;     /* n_ent_runs of them */
+	uint32_t n_entries;       /* rows in `ent`: every stream the walk found that the table
+				   * could take */
+	uint32_t reserved2;
 };
 
 static inline const struct kof_docole_info *kof_docole(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_docole_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT STREAM OF THE DOCUMENT, in the order the directory walk found them: row `*cursor`,
+ * and the cursor is advanced; NULL at the end. The row's index - what kunp_static_entry takes -
+ * is the cursor minus one after the call. See kof_zip_next, which this is the same walk as.
+ */
+static inline const struct kof_docole_entry *kof_docole_next(const struct kof_obj_ctx *ctx,
+							     uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_docole_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_DOCOLE_H */

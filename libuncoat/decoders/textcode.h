@@ -67,7 +67,10 @@ typedef int (*kuncoat_textcode_sink)(void *user, const uint8_t *p, uint32_t n);
  *
  * Filling `cap` exactly is OK and is not truncation: the caller sized the
  * buffer from the input, so a full buffer means the input decoded to precisely
- * what it should.
+ * what it should. Output that would go past `cap` is KUNCOAT_OVER_BUDGET, with
+ * `produced` bytes written (the start of the answer, never a silent short OK).
+ * `produced` may be NULL; a NULL `in` with n > 0, or a NULL `out` with
+ * cap > 0, is KUNCOAT_BAD_ARG.
  */
 enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
 				      uint8_t *out, uint64_t cap,
@@ -79,7 +82,8 @@ enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
  * Whitespace is skipped and '>' ends the data. A trailing ODD digit is not an
  * error: PDF 32000-1 7.4.2 says the last digit is paired with a zero. That is
  * what the format MEANS rather than a repair of a broken file, so following it
- * is decoding, and refusing it would be wrong.
+ * is decoding, and refusing it would be wrong. Cap, NULL `produced` and BAD_ARG
+ * as for kuncoat_a85_decode.
  */
 enum kuncoat_status kuncoat_ahx_decode(const uint8_t *in, uint64_t n,
 				      uint8_t *out, uint64_t cap,
@@ -94,7 +98,8 @@ enum kuncoat_status kuncoat_ahx_decode(const uint8_t *in, uint64_t n,
  * Input that ends mid-run is TRUNCATED rather than CORRUPT - what was decoded
  * before it is real output and is the part worth scanning, which is the same
  * judgement inflate makes about a damaged archive. Input with no 128 at all is
- * also TRUNCATED: the data ran out before the end marker.
+ * also TRUNCATED: the data ran out before the end marker. `produced` may be NULL;
+ * a NULL `in` with n > 0 or a NULL `sink` is KUNCOAT_BAD_ARG.
  */
 enum kuncoat_status kuncoat_rle_decode(const uint8_t *in, uint64_t n,
 				      kuncoat_textcode_sink sink, void *user,

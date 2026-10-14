@@ -21,6 +21,7 @@
 #include "objprod.h"
 #include "../kofcore/koftypes.h"
 #include "../kofcore/kofhash.h"   /* KOF_ERR_* */
+#include "../kofcore/kofbudget.h"
 
 
 #include "../kofcore/kofplatform.h"
@@ -30,6 +31,25 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
+
+/* Windows has no FIFO to block on and no symlink to follow through open(); its reparse
+ * points are refused by the walk's own check (kofplatform_file.h says where the two
+ * platforms differ), and a mapped file cannot be truncated under a view. */
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0
+#endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
+#ifndef O_NOCTTY
+#define O_NOCTTY 0
+#endif
+/* The file is read with read(2): on Windows a descriptor opened without this translates
+ * CRLF, and the engine would be scanning bytes that are not the file's. */
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 
 struct kof_objsrc {
 	const uint8_t *p;
@@ -39,6 +59,9 @@ struct kof_objsrc {
 	/* Each set field is a resource this source owns. */
 	void              *map;      /* munmap(map, map_len) */
 	size_t             map_len;
+	/* Why these bytes are not the whole file (KOF_BROKEN_*, 0 when they are): set by
+	 * kof_src_file on the root, read through kof_src_cut. */
+	uint8_t            cut;
 	uint8_t           *heap;     /* free() */
 	struct kof_objsrc *parent;   /* unref: a window keeps its parent alive */
 
@@ -51,8 +74,19 @@ struct kof_objsrc {
 	void             (*on_free)(void *, uint64_t);
 	void              *on_free_arg;
 
-	/* What this object is called, sanitised, or empty. Reporting only. */
-	char               label[KOF_SRC_LABEL_MAX];
+	/* What this object is called, sanitised, or NULL. Reporting only. Allocated to the
+	 * name's own length (label_cost bytes with the NUL), never cut to a fixed room. */
+	char              *label;
+	uint32_t           label_cost;
+	void             (*label_release)(void *, uint64_t);   /* gives label_cost back */
+	void              *label_arg;
+	uint8_t            name_bad;   /* the producer's name was past its standard's limit */
+
+	/* What the scan took from its ledger for this record (kof_src_charge_record), given
+	 * back when the source dies. */
+	uint64_t           rec_cost;
+	void             (*rec_release)(void *, uint64_t);
+	void              *rec_arg;
 
 	/* What the producer declared this is, or KOF_FMT_UNKNOWN. NOT reporting
 	 * only: it decides which modules are even offered the object. */
@@ -251,48 +285,225 @@ uint8_t kof_src_fmt_of(const struct kof_objsrc *s)
 	return s ? s->fmt : 0u;
 }
 
+/* Character `i` of a name that may be UTF-16LE: the low byte of each unit. */
+static inline uint8_t name_ch(const uint8_t *p, int wide, uint64_t i)
+{
+	return wide ? p[i * 2u] : p[i];
+}
+
 void kof_src_label(struct kof_objsrc *s, const uint8_t *p, uint64_t len)
 {
-	uint8_t narrow[KOF_SRC_LABEL_MAX];
-	uint64_t i, base = 0, n;
+	uint64_t i, base = 0, n, cnt;
+	int wide;
+	char *lab;
 
 	if (!s)
 		return;
-	s->label[0] = 0;
+	free(s->label);
+	s->label = NULL;
+	s->label_cost = 0;
 	if (!p || !len)
 		return;
-
-	if (looks_utf16le(p, len)) {
-		n = len / 2u;
-		if (n > sizeof narrow)
-			n = sizeof narrow;
-		for (i = 0; i < n; i++)
-			narrow[i] = p[i * 2u];
-		p = narrow;
-		len = n;
+	if (len > KOF_SRC_NAME_MAX) {
+		/* Past anything a container's standard allows: invalid, not truncated. */
+		s->name_bad = 1;
+		return;
 	}
 
-	for (i = 0; i < len; i++)
-		if (p[i] == '/' || p[i] == '\\')
+	wide = looks_utf16le(p, len);
+	cnt = wide ? len / 2u : len;
+	for (i = 0; i < cnt; i++) {
+		uint8_t c = name_ch(p, wide, i);
+
+		if (c == '/' || c == '\\')
 			base = i + 1;
-	if (base >= len)
+	}
+	if (base >= cnt)
 		return;                 /* the name was all separators */
 
-	len -= base;
-	p += base;
-	n = len < KOF_SRC_LABEL_MAX - 1u ? len : KOF_SRC_LABEL_MAX - 1u;
-	for (i = 0; i < n; i++)
-		s->label[i] = (p[i] >= 0x20 && p[i] < 0x7f) ? (char)p[i] : '.';
-	s->label[n] = 0;
+	n = cnt - base;
+	lab = malloc((size_t)n + 1u);
+	if (!lab) {
+		/* UNNAMED, AND THE OBJECT SAYS SO. The child's index still tells it apart, but a name that was
+		 * there and was not kept is a limit that fired (an allocation the engine could not get), and a
+		 * refusal is reported and never a silent change of the answer (CLAUDE.md rule 4): the child
+		 * carries KOF_BROKEN_LIMIT, which the walk reads back as its result, the same as the names
+		 * quota being full (oc_names_take, whose caller says oc_scan_limit). The sweep that found this
+		 * is tests/unit/cov_oom_formats.c. */
+		kof_src_mark_cut(s, KOF_BROKEN_LIMIT);
+		return;
+	}
+	for (i = 0; i < n; i++) {
+		uint8_t c = name_ch(p, wide, base + i);
+
+		lab[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+	}
+	lab[n] = 0;
 
 	/* "." and ".." are directory references, not names. */
-	if (strcmp(s->label, ".") == 0 || strcmp(s->label, "..") == 0)
-		s->label[0] = 0;
+	if (strcmp(lab, ".") == 0 || strcmp(lab, "..") == 0) {
+		free(lab);
+		return;
+	}
+	s->label = lab;
+	s->label_cost = (uint32_t)n + 1u;
+}
+
+uint32_t kof_src_label_cost(const struct kof_objsrc *s)
+{
+	return s ? s->label_cost : 0u;
+}
+
+void kof_src_label_account(struct kof_objsrc *s, void (*release)(void *, uint64_t),
+			   void *arg)
+{
+	if (s) {
+		s->label_release = release;
+		s->label_arg = arg;
+	}
+}
+
+uint64_t kof_src_record_cost(void)
+{
+	return sizeof(struct kof_objsrc);
+}
+
+void kof_src_charge_record(struct kof_objsrc *s, uint64_t cost,
+			   void (*release)(void *, uint64_t), void *arg)
+{
+	if (s) {
+		s->rec_cost = cost;
+		s->rec_release = release;
+		s->rec_arg = arg;
+	}
+}
+
+void kof_src_declare_name_bad(struct kof_objsrc *s)
+{
+	if (s)
+		s->name_bad = 1;
+}
+
+int kof_src_name_bad(const struct kof_objsrc *s)
+{
+	return s && s->name_bad;
 }
 
 const char *kof_src_label_of(const struct kof_objsrc *s)
 {
-	return s && s->label[0] ? s->label : "";
+	return s && s->label ? s->label : "";
+}
+
+/*
+ * A FILE THAT SHRINKS WHILE IT IS SCANNED, and why there is no signal handler for it.
+ *
+ * The scan used to read a mapped file through plain pointers for as long as the object
+ * lived, and whoever owned the file could truncate it meanwhile: every page past the new
+ * end then faulted with SIGBUS, in whatever parser or matcher happened to be reading it,
+ * and the process died (tests/unit/hostile_engine_scan.c, c_trunc0). Nothing about the
+ * size can be checked in advance: an fstat before the map, after it, or on every read is
+ * a race with the very writer being defended against, so a map is safe only if a fault
+ * is survived.
+ *
+ * stage39a survived it with a process-wide SIGBUS handler that replaced the faulting page
+ * with a zero page. The owner refused that design, for three reasons that are this
+ * file's rules now: the handling must not depend on the host (a handler is process-global
+ * state: a host that installs its own silently brings the crash back, and ours swallows
+ * signals the host expected); it must not depend on data the OS supplies (the fault
+ * address of a signal); and it must never swallow a real SIGBUS or SIGSEGV, which is a
+ * bug and has to kill the process.
+ *
+ * WHAT IS DONE INSTEAD: THE ENGINE NEVER TOUCHES A FILE-BACKED PAGE IT DOES NOT OWN. A file
+ * is read with read(2) into a heap buffer charged to the engine's budget, once, when the
+ * walk meets it. A file that is cut short is a short read at that call, an EIO is an error
+ * at that call, and both are an ordinary return value: the object is reported
+ * KOF_BROKEN_DAMAGED (kof_src_cut) with the bytes that were read, which are real bytes of
+ * the file. No signal can arrive, so none is handled, and there is no table, no flag and
+ * no chain to the previous handler. A file that GROWS is read to the size fstat reported
+ * when it was opened (the bytes are one consistent prefix); one that is replaced by
+ * rename keeps the descriptor on the old inode, so the bytes are the old file's.
+ *
+ * WHAT WAS WEIGHED:
+ *   - mmap only when the file is stable (O_RDONLY, fstat size, fstat again after the scan)
+ *     is NOT safe: the second fstat runs after the pages were read, so a truncation in
+ *     between still faults. There is no portable way to stop another process truncating
+ *     a file it may write (no mandatory lock, no immutable bit without privilege, a seal
+ *     only on memfd), so no condition under which a map of someone else's file cannot
+ *     fault exists.
+ *   - A sliding window needs a consumer that accepts one. Every parser, matcher and module
+ *     here takes a whole flat buffer (kof_buf), and the module ABI hands a module the
+ *     object as one pointer and one length; a window is a rewrite of the pipeline, not of
+ *     this unit.
+ *   - Mapping a COPY the engine made in its own unnamed temporary file (as a produced object
+ *     is, kof_src_fd) cannot be truncated by anyone, so it is what a file past the heap room
+ *     goes to (spill_copy). It is not the default: every file would be written once more,
+ *     and on a RAM filesystem (this host's /tmp) the copy is the same memory as the heap, so
+ *     the caller does not offer one there (oc_spill_usable).
+ *
+ * COST, measured on this tree against the mapped file it replaces (254 ELF + 300 PE, 2.4 GB,
+ * one scanner, hot cache, best of 7 alternating runs): ELF 12.89 s -> 12.74 s, PE 5.58 s ->
+ * 5.77 s (+3.4%, all of it system time: the copy out of the page cache, 0.13 s -> 0.41 s);
+ * verdict output identical; peak RSS 79.7 -> 89.1 MB and 124.1 -> 122.4 MB; the 90 MB
+ * file 94.1 -> 94.4 MB (the scan reads all of it either way). What changes is accounting: the
+ * bytes are charged to the 512 MiB ceiling instead of being free clean pages, so with many
+ * scanners the share of each shrinks (kof_scan_file_room says how, and what it cost).
+ */
+
+/* The budget gets its bytes back when the source dies, on every path it can die on. */
+static void file_release(void *budget, uint64_t n)
+{
+	kof_budget_release((struct kof_budget *)budget, n);
+}
+
+/* read(2) behind the seam. */
+static int64_t sys_read(void *user, int fd, void *buf, uint64_t n)
+{
+	(void)user;
+	return (int64_t)read(fd, buf, n > (1u << 30) ? (1u << 30) : (unsigned)n);
+}
+
+static const struct kof_src_read_io SYS_READ = { sys_read, NULL };
+
+/*
+ * `n` bytes into `dst`. The count that arrived: n when the file held them, fewer when it
+ * ended first (it was truncated since fstat) or a read failed. Every failure is a count
+ * and the caller says so; nothing here is silent and nothing is retried but EINTR.
+ */
+static uint64_t read_full(const struct kof_src_read_io *io, int fd, uint8_t *dst, uint64_t n)
+{
+	uint64_t off = 0;
+
+	while (off < n) {
+		int64_t r = io->read(io->user, fd, dst + off, n - off);
+
+		if (r > 0) {
+			if ((uint64_t)r > n - off)
+				break;          /* a hook that claims more than was asked: a bug, not data */
+			off += (uint64_t)r;
+		} else if (r < 0 && errno == EINTR) {
+			continue;
+		} else {
+			break;                  /* EOF (0) or an error: the file is not n bytes long */
+		}
+	}
+	return off;
+}
+
+uint32_t kof_src_cut(const struct kof_objsrc *s)
+{
+	return s ? s->cut : 0u;
+}
+
+/* An object that met its own bound (oc_entry_cut) says so; the first reason stays. */
+void kof_src_mark_cut(struct kof_objsrc *s, uint32_t why)
+{
+	if (s && !s->cut)
+		s->cut = (uint8_t)why;
+}
+
+uint64_t kof_src_charged(const struct kof_objsrc *s)
+{
+	return s && s->on_free == file_release ? s->produced : 0u;
 }
 
 static struct kof_objsrc *src_new(void)
@@ -314,15 +525,87 @@ static struct kof_objsrc *src_new(void)
 	return s;
 }
 
-struct kof_objsrc *kof_src_file(const char *path, int *err)
+/*
+ * The file, copied to the engine's own unnamed temporary file and mapped from there.
+ * 1 when `s` now holds it; 0 when no file could be made, and then nothing was read.
+ *
+ * Nothing is charged: the pages are clean file pages the kernel can drop, which is what the
+ * mapped input always was, and the offer of a file is the caller's statement that it is not
+ * RAM (oc_spill_usable). The copy goes through a small buffer, so the peak is one chunk and
+ * not the file. A source that ends early is DAMAGED with the part copied; a write that fails
+ * (ENOSPC, EIO) is a LIMIT - the disk could not hold it - with the part that is in the file.
+ * Either way the bytes mapped are bytes that were written and are in the file.
+ */
+#define COPY_CHUNK (1u << 20)
+
+static int spill_copy(struct kof_objsrc *s, const struct kof_src_file_req *rq,
+		      const struct kof_src_read_io *io, int fd, uint64_t size)
 {
+	uint8_t *chunk;
+	uint64_t done = 0;
+	int out = rq->spill_open(rq->spill_user);
+
+	if (out < 0)
+		return 0;
+	chunk = malloc(COPY_CHUNK);
+	if (!chunk) {
+		close(out);
+		return 0;
+	}
+	while (done < size) {
+		uint64_t want = size - done < COPY_CHUNK ? size - done : COPY_CHUNK;
+		uint64_t got = read_full(io, fd, chunk, want);
+
+		if (got && !rq->spill_write(rq->spill_user, out, chunk, got)) {
+			s->cut = KOF_BROKEN_LIMIT;
+			break;
+		}
+		done += got;
+		if (got < want) {
+			s->cut = KOF_BROKEN_DAMAGED;
+			break;
+		}
+	}
+	free(chunk);
+	if (done) {
+		s->map = kof_map_file_ro(out, done);
+		if (s->map) {
+			s->map_len = (size_t)done;
+			s->p = s->map;
+			s->n = done;
+		}
+	}
+	close(out);
+	if (done && !s->map)
+		s->cut = KOF_BROKEN_LIMIT;      /* no address space for it: nothing of it is held */
+	if (done < size && !s->cut)
+		s->cut = KOF_BROKEN_LIMIT;
+	return 1;
+}
+
+struct kof_objsrc *kof_src_file(const struct kof_src_file_req *rq, int *err)
+{
+	const struct kof_src_read_io *io = rq->io ? rq->io : &SYS_READ;
 	struct kof_objsrc *s;
 	struct stat sb;
+	uint64_t want, got;
+	uint8_t *buf;
 	int fd;
 
 	*err = KOF_ERR_OPEN;
 
-	fd = open(path, O_RDONLY);
+	/*
+	 * O_NONBLOCK: open() of a FIFO with no writer blocks forever, and the type test
+	 * below can only be made on a descriptor that exists (tests/unit/
+	 * hostile_engine_scan.c, c_fifo). A regular file is unaffected by the flag.
+	 * O_NOFOLLOW: THE ENGINE NEVER FOLLOWS A SYMLINK (the owner's decision, against
+	 * a link swapped in between the walk's lstat and this open): a link here is
+	 * ELOOP, which is KOF_ERR_OPEN like any other path that is not a regular file.
+	 * O_NOCTTY: a terminal device named as the path must not become ours.
+	 * Everything that is not a regular file - FIFO, socket, device, directory - is
+	 * refused by the fstat, with KOF_ERR_OPEN as kofhash.h defines it.
+	 */
+	fd = open(rq->path, O_RDONLY | O_BINARY | O_NONBLOCK | O_NOFOLLOW | O_NOCTTY);
 	if (fd < 0)
 		return NULL;
 	if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
@@ -334,23 +617,63 @@ struct kof_objsrc *kof_src_file(const char *path, int *err)
 		close(fd);
 		return NULL;
 	}
-	if (sb.st_size > 0) {
-		s->map = kof_map_file_ro(fd, (uint64_t)sb.st_size);
-		if (!s->map) {
-			close(fd);
-			free(s);
-			*err = KOF_ERR_READ;
-			return NULL;
-		}
-		s->map_len = (size_t)sb.st_size;
-		s->p = s->map;
-		s->n = (uint64_t)sb.st_size;
-	}
-	/* The descriptor is closed at once: a mapping keeps the file alive on its
-	 * own, and one open descriptor per object in flight would be a descriptor
-	 * spent on nothing. */
-	close(fd);
 	*err = 0;
+	if (sb.st_size <= 0) {
+		close(fd);
+		return s;               /* an empty file: a legitimate object with no bytes */
+	}
+
+	/*
+	 * HOW MUCH TO HOLD. The size fstat reported is the bound - never what the file says
+	 * about itself. What fits the caller's room and the budget right now is held in the
+	 * heap; a larger file goes to the spill file when there is one; failing both, the head
+	 * of it is held and the source is marked LIMIT, so the part that was not read is a
+	 * stated loss and not a clean answer.
+	 */
+	want = (uint64_t)sb.st_size;
+	if (want > SIZE_MAX)
+		want = SIZE_MAX;
+	if (want > rq->room || (rq->budget && kof_budget_ask(rq->budget, want) < want)) {
+		if (rq->spill_open && rq->spill_write &&
+		    spill_copy(s, rq, io, fd, (uint64_t)sb.st_size)) {
+			close(fd);
+			return s;
+		}
+		if (want > rq->limit)
+			want = rq->limit;
+		if (rq->budget && want)
+			want = kof_budget_ask(rq->budget, want);
+	}
+	/* Atomic against the other scanners: a charge that loses the race holds nothing. */
+	if (rq->budget && want && !kof_budget_charge(rq->budget, want))
+		want = 0;
+	if ((uint64_t)sb.st_size > want)
+		s->cut = KOF_BROKEN_LIMIT;
+	if (want == 0) {
+		close(fd);
+		return s;               /* nothing affordable: an empty object marked LIMIT */
+	}
+	buf = malloc((size_t)want);
+	if (!buf) {
+		if (rq->budget)
+			kof_budget_release(rq->budget, want);
+		s->cut = KOF_BROKEN_LIMIT;
+		close(fd);
+		return s;
+	}
+	got = read_full(io, fd, buf, want);
+	close(fd);
+	if (got < want)
+		s->cut = KOF_BROKEN_DAMAGED;    /* ended early or failed: said, whatever else was cut */
+	s->heap = buf;
+	s->p = buf;
+	s->n = got;
+	/* Charged for what was taken, given back for what was taken - not for what was read. */
+	s->produced = want;
+	if (rq->budget) {
+		s->on_free = file_release;
+		s->on_free_arg = rq->budget;
+	}
 	return s;
 }
 
@@ -413,6 +736,13 @@ struct kof_objsrc *kof_src_borrow(const void *bytes, uint64_t len)
 	return s;
 }
 
+/*
+ * THE ONE MAP THAT IS LEFT, and why it is not the file problem above: `fd` is the engine's
+ * own unnamed temporary file (O_TMPFILE, or unlinked at once), written in full by this
+ * scanner before it gets here. It has no name for anyone to open and truncate, so no
+ * writer exists to race. The only fault it can still raise is the disk failing under a
+ * page, which is a genuine fault and is left to kill the process like any other.
+ */
 struct kof_objsrc *kof_src_fd(int fd, uint64_t len)
 {
 	struct kof_objsrc *s = src_new();
@@ -553,14 +883,28 @@ void kof_src_unref(struct kof_objsrc *s)
 		void (*on_free)(void *, uint64_t) = s->on_free;
 		void *arg = s->on_free_arg;
 		uint64_t produced = s->produced;
+		uint64_t rec_cost;
+		void (*rec_release)(void *, uint64_t);
+		void *rec_arg;
 
 		kof_unmap_file(s->map, s->map_len);
 		free(s->heap);
+		/* The label's bytes were taken from a quota by whoever labelled the child
+		 * (kof_src_label_account); they go back on every path the child can die on. */
+		if (s->label_cost && s->label_release)
+			s->label_release(s->label_arg, s->label_cost);
+		free(s->label);
 		free(s->syms);
 		free(s->funcs);
 		free(s->desc_info);
 		kof_prod_unref(s->prod);
+		/* The record's own charge, read before the free and given back after it. */
+		rec_cost = s->rec_cost;
+		rec_release = s->rec_release;
+		rec_arg = s->rec_arg;
 		free(s);
+		if (rec_cost && rec_release)
+			rec_release(rec_arg, rec_cost);
 		/* After the free, not before: the account should reflect memory
 		 * that has already been handed back. */
 		if (on_free)
@@ -585,7 +929,7 @@ void kof_src_on_free(struct kof_objsrc *s, void (*fn)(void *, uint64_t), void *u
 	}
 }
 
-static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap);
+static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap, const char *first);
 
 /*
  * The first directory in the list above that a file can actually be made in.
@@ -602,7 +946,7 @@ const char *kof_src_tmpdir(void)
 
 	if (kept[0])
 		return kept;
-	fd = kof_src_tmpfile_in(kept, sizeof kept);
+	fd = kof_src_tmpfile_in(kept, sizeof kept, NULL);
 	if (fd < 0) {
 		kept[0] = 0;
 		return NULL;
@@ -613,10 +957,17 @@ const char *kof_src_tmpdir(void)
 
 int kof_src_tmpfile(void)
 {
-	return kof_src_tmpfile_in(NULL, 0);
+	return kof_src_tmpfile_in(NULL, 0, NULL);
 }
 
-static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap)
+/* The same, in the host's own directory when it named one and one can be made there;
+ * the platform's otherwise (kof_scan_option.scratch_dir). */
+int kof_src_tmpfile_at(const char *dir)
+{
+	return kof_src_tmpfile_in(NULL, 0, dir);
+}
+
+static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap, const char *first)
 {
 	/*
 	 * THE PLATFORM IS ASKED, NOT THE ENVIRONMENT.
@@ -636,8 +987,9 @@ static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap)
 	const char *env = kof_tmpdir();
 	uint32_t i;
 
-	for (i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
-		const char *d = dirs[i] ? dirs[i] : env;
+	/* `first`, when the host named one, before the platform's list. */
+	for (i = 0; i < 1u + sizeof dirs / sizeof dirs[0]; i++) {
+		const char *d = i == 0 ? first : dirs[i - 1u] ? dirs[i - 1u] : env;
 
 		char path[4096];
 		int fd;

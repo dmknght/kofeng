@@ -305,11 +305,64 @@ static inline void *kof_map_file_ro(int fd, uint64_t len)
 	return view;
 }
 
+/*
+ * Read `n` bytes at byte offset `off` of an open descriptor WITHOUT touching its file
+ * position, so threads share one descriptor. Returns the bytes read: fewer than `n`
+ * only at the end of the file (a file shorter than it was when it was measured) or on an
+ * error, and the caller treats either as a failed read - this is what the database index
+ * uses instead of a mapping, because a truncated file makes a read come back short
+ * where a mapping raises a signal. 0 on error, never negative.
+ */
+static inline size_t kof_pread(int fd, void *buf, size_t n, uint64_t off)
+{
+	HANDLE fh = (HANDLE)_get_osfhandle(fd);
+	size_t got = 0;
+
+	if (fh == INVALID_HANDLE_VALUE)
+		return 0;
+	while (got < n) {
+		OVERLAPPED ov;
+		DWORD r = 0, ask = (n - got) > 0x40000000u ? 0x40000000u : (DWORD)(n - got);
+
+		memset(&ov, 0, sizeof ov);
+		ov.Offset = (DWORD)((off + got) & 0xffffffffu);
+		ov.OffsetHigh = (DWORD)((off + got) >> 32);
+		if (!ReadFile(fh, (char *)buf + got, ask, &r, &ov) || r == 0)
+			break;
+		got += r;
+	}
+	return got;
+}
+
+/*
+ * Ask the system to read [off, off + len) of an open file into its cache, in the background, so a
+ * later pread of it does not wait for the disk. A HINT: nothing waits on it, nothing depends on it
+ * being taken, and it has no result. Windows has no advice call for a descriptor opened without
+ * overlapped I/O (PrefetchVirtualMemory wants a mapping, which the engine does not make of these
+ * parts), so there it does nothing and the first reads page the data in.
+ */
+static inline void kof_prefetch(int fd, uint64_t off, uint64_t len)
+{
+	(void)fd;
+	(void)off;
+	(void)len;
+}
+
 static inline void kof_unmap_file(void *p, uint64_t len)
 {
 	(void)len;
 	if (p)
 		UnmapViewOfFile(p);
+}
+
+/* Tell the system the pages of a read-only file mapping are not needed now: it may take them
+ * back and they come from the file again on the next touch. No effect on what the mapping
+ * says, only on what it holds resident. Windows has no equivalent that keeps the view, so this
+ * does nothing there. */
+static inline void kof_map_drop(void *p, uint64_t len)
+{
+	(void)p;
+	(void)len;
 }
 
 /* Anonymous, read-write, for the code arena before anything is copied into it. */
@@ -465,6 +518,7 @@ static inline const void *kof_memmem(const void *hay_, size_t hlen,
 #include <unistd.h>
 #include <pwd.h>
 #include <fcntl.h>           /* open, O_RDONLY - kof_map_file_ro below */
+#include <errno.h>           /* EINTR - kof_pread */
 #include <string.h>
 
 /* The real one - see the header comment on why this side just calls it. Needs
@@ -559,10 +613,47 @@ static inline void *kof_map_file_ro(int fd, uint64_t len)
 	return p == MAP_FAILED ? NULL : p;
 }
 
+/* See the Windows spelling above for what this promises. pread does not move the file
+ * position and retries a short read until the end of the file. */
+static inline size_t kof_pread(int fd, void *buf, size_t n, uint64_t off)
+{
+	size_t got = 0;
+
+	while (got < n) {
+		ssize_t r = pread(fd, (char *)buf + got, n - got, (off_t)(off + got));
+
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			break;
+		got += (size_t)r;
+	}
+	return got;
+}
+
+/* See the Windows spelling above for what this promises. posix_fadvise(WILLNEED) queues the read
+ * and returns; where the call does not exist (macOS) it does nothing. */
+static inline void kof_prefetch(int fd, uint64_t off, uint64_t len)
+{
+#ifdef POSIX_FADV_WILLNEED
+	(void)posix_fadvise(fd, (off_t)off, (off_t)len, POSIX_FADV_WILLNEED);
+#else
+	(void)fd;
+	(void)off;
+	(void)len;
+#endif
+}
+
 static inline void kof_unmap_file(void *p, uint64_t len)
 {
 	if (p)
 		munmap(p, (size_t)len);
+}
+
+static inline void kof_map_drop(void *p, uint64_t len)
+{
+	if (p && len)
+		(void)madvise(p, (size_t)len, MADV_DONTNEED);
 }
 
 static inline void *kof_map_anon_rw(uint64_t len)
@@ -583,6 +674,55 @@ static inline void kof_unmap_anon(void *p, uint64_t len)
 		munmap(p, (size_t)len);
 }
 
+#endif
+
+/*
+ * Hand the C library's free heap back to the OS, where the library has a call for it.
+ *
+ * glibc keeps what a large free released (its mmap threshold rises to 32 MiB after the
+ * first big free, so later buffers of that size come from the brk heap and stay): a
+ * process that scanned one 31 MB object keeps that much resident for ever. malloc_trim
+ * is the call that returns it. Nowhere else this builds for has one that does the same, and
+ * there the call does nothing. Answers 1 when it asked the library, 0 when there was
+ * nothing to ask. Never called by the engine on its own account: a host asks for it
+ * (kscan_trim), because whether a long-lived process wants the CPU cost (measured +2.6%
+ * when done after every scan) is its decision, and the engine must not change process-wide
+ * allocator policy behind the host's back.
+ */
+#if defined(__GLIBC__) && !defined(_WIN32)
+#include <malloc.h>
+static inline int kof_heap_trim(void)
+{
+	malloc_trim(0);
+	return 1;
+}
+#else
+static inline int kof_heap_trim(void)
+{
+	return 0;
+}
+#endif
+
+/*
+ * Bytes the C library says are allocated right now, or 0 where it cannot say. Read twice
+ * around a single-threaded step to learn what the step kept (keng_open: the database).
+ */
+#if defined(__GLIBC__) && !defined(_WIN32) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 33)
+static inline uint64_t kof_heap_in_use(void)
+{
+	struct mallinfo2 m = mallinfo2();
+
+	return (uint64_t)m.uordblks + (uint64_t)m.hblkhd;
+}
+#else
+static inline uint64_t kof_heap_in_use(void) { return 0; }
+#endif
+#else
+static inline uint64_t kof_heap_in_use(void)
+{
+	return 0;
+}
 #endif
 
 #endif /* KOFENG_KOFPLATFORM_OS_H */

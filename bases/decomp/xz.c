@@ -9,6 +9,9 @@
  * One child per block rather than one for the stream: blocks are independently
  * coded and a stream is split into them precisely so they can be handled apart,
  * so joining them here would undo the only structure the format has.
+ *
+ * The parser walks every stream of a concatenated file (xz_parse.c) and lists their
+ * blocks in file order, so one loop opens them all, as `xz -dc` decodes them.
  */
 
 #include <kofmod/kofsig.h>
@@ -72,8 +75,11 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	if (unreached)
 		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
+	/* BAD_HEADER too: with several streams it is a stream whose own header disagrees with its
+	 * footer, and its blocks are opened but the file is not the one the format describes. */
 	if (x->anomalies & (KOF_XZ_ANOM_TRUNCATED | KOF_XZ_ANOM_BAD_BLOCK |
-			    KOF_XZ_ANOM_NO_INDEX | KOF_XZ_ANOM_BAD_FOOTER))
+			    KOF_XZ_ANOM_NO_INDEX | KOF_XZ_ANOM_BAD_FOOTER |
+			    KOF_XZ_ANOM_BAD_HEADER))
 		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
 	if (x->anomalies & (KOF_XZ_ANOM_BLOCKS_FULL | KOF_XZ_ANOM_EXTENTS_FULL))
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);

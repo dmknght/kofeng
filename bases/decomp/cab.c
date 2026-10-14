@@ -48,7 +48,8 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_cab_info *c = kof_cab(ctx);
-	uint32_t i, opened = 0, coded_done = 0, skipped = 0;
+	const struct kof_entry *e;
+	uint32_t cur = 0, opened = 0, coded_done = 0, skipped = 0;
 
 	if (!c->valid)
 		return;
@@ -59,9 +60,8 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	kof_debug("Cab.coded", c->n_coded);
 	kof_debug("Cab.split", c->n_split);
 
-	for (i = 0; i < c->n_entries; i++) {
-		const struct kof_entry *e = &c->entry[i];
-
+	/* A walk and not an array: the cabinet has as many files as its table lists (zip.c). */
+	while ((e = kof_cab_next(ctx, &cur)) != 0) {
 		/* The contiguous ones are the host's - opening them here would
 		 * produce every small file twice. */
 		if (!(e->flags & KOF_ENT_F_SCATTERED))
@@ -105,6 +105,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 	kof_debug("Cab.joined", opened);
 	/* Coded files past the cap above: present, describable, and not opened
-	 * by this pass. */
+	 * by this pass. A bound on WORK, and so it says it bound: the object reads
+	 * LIMIT and not clean (what is lost: the decoded files past the sixteenth). */
 	kof_debug("Cab.skipped", skipped);
+	if (skipped)
+		kunp_rcstruct_broken(KOF_UNP_LIMIT);
 }

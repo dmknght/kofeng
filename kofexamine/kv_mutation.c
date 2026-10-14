@@ -494,11 +494,15 @@ void mtn_segment(struct view *v)
 	 */
 	memset(&cut, 0, sizeof cut);
 	cut.v = v; cut.o = o; cut.fp = fp;
-	kof_scan_mutation_units(&o->ctx, o->buf, ~0u, mtn_funcs(v, o),
-			      &lib, v->ext2, mtn_count_cb, &cut);
-	mtn_share(&cut, o->ctx.format);
-	kof_scan_mutation_units(&o->ctx, o->buf, ~0u, mtn_funcs(v, o),
-			      &lib, v->ext2, mtn_take_cb, &cut);
+	{
+		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
+
+		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, mtn_funcs(v, o),
+				      &lib, &eb, mtn_count_cb, &cut);
+		mtn_share(&cut, o->ctx.format);
+		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, mtn_funcs(v, o),
+				      &lib, &eb, mtn_take_cb, &cut);
+	}
 	/*
 	 * AND KEPT, so arriving here again costs nothing - see object.carve.
 	 * Only the rows this carve produced: a ticked one is the draft's and
@@ -621,9 +625,13 @@ void mtn_rescore(struct view *v)
 	memset(&slib, 0, sizeof slib);
 	if (!o->n_rgn)
 		obj_lib_find(o, &slib);
-	kof_scan_mutation_feed(&ctx, &o->ctx, o->buf, ~0u, 0,
-			     mtn_funcs(v, o),
-			     o->n_rgn ? NULL : &slib, v->ext2);
+	{
+		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
+
+		kof_scan_mutation_feed(&ctx, &o->ctx, o->buf, ~0u, 0,
+				     mtn_funcs(v, o),
+				     o->n_rgn ? NULL : &slib, &eb);
+	}
 	for (i = 0, nb = 0; i < v->ed.dr.n_blk; i++) {
 		if (v->ed.dr.blk[i].n_hash < KGENOME_MUTATION_MIN_HASH)
 			continue;

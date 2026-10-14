@@ -25,10 +25,11 @@
 #include "arj_parse.h"
 #include "cname.h"
 #include "../../../kofcore/rangelist.h"
+#include "../../../kofcore/tabgrow.h"
 
 #define ARJ_MAGIC0 0x60u
 #define ARJ_MAGIC1 0xeau
-#define ARJ_BASIC_MIN 30u     /* through the file access field */
+#define ARJ_BASIC_MIN KOF_ARJ_BASIC_MIN     /* through the file access field */
 #define ARJ_NAME_AT   0u      /* relative to the end of first_hdr_size */
 
 /* arj_flags, the bits this parse reads. */
@@ -76,7 +77,7 @@ static uint32_t arj_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		cl.n = arj_resolve_scan(ctx, KOF_SCAN_ARJ_CLAIMED, cv, cl.cap);
 		kof_rl_complement(&rl, &cl, ctx->obj_size);
 	}
-	return kof_rl_normalise(&rl);
+	return kof_rl_finish(&rl);
 }
 
 static uint32_t arj_entries(const struct kof_obj_ctx *ctx,
@@ -98,15 +99,16 @@ static uint32_t arj_entries(const struct kof_obj_ctx *ctx,
  * Past the extended headers that follow a basic one.
  *
  * Each is a two byte length and, when it is non-zero, that many bytes plus a
- * four byte CRC. A zero length ends the chain. Bounded by a count as well as by
- * the object: the list is a chain of lengths from the file, and a file that
- * repeats a small one forever is a walk that does not end.
+ * four byte CRC. A zero length ends the chain. NO COUNT BOUNDS IT: every step
+ * consumes at least the two bytes of its own length, so the walk ends within
+ * the object whatever the file chains, and its cost is the object's length. It
+ * had a guard of 64 steps, which made an archive with a sixty-fifth extended
+ * header (a hostile one, and a legitimate one has none or one) read as cut and
+ * lose every entry after it.
  */
 static int arj_skip_ext(kof_buf f, uint64_t *at)
 {
-	int guard;
-
-	for (guard = 0; guard < 64; guard++) {
+	for (;;) {
 		uint16_t n = 0;
 
 		if (!kof_rd_u16(f, *at, 0, &n))
@@ -118,7 +120,6 @@ static int arj_skip_ext(kof_buf f, uint64_t *at)
 			return 0;
 		*at += (uint64_t)n + 4u;
 	}
-	return 0;
 }
 
 /* ---- the parse ---------------------------------------------------------------- */
@@ -143,13 +144,31 @@ int kof_arj_sniff(kof_buf file)
 	return first >= ARJ_BASIC_MIN && first <= basic;
 }
 
+void kof_arj_release(struct kof_arj_info *a)
+{
+	kof_tab_free((void **)&a->entry);
+	a->n_entries = 0;
+	a->mem.held = 0;
+	a->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(arj, struct kof_arj_info, entry, n_entries)
+
 int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 {
-	uint64_t at = 0;
+	uint64_t at = 0, room, rows_limit;
+	uint32_t cap_entry = 0;
 	int first_header = 1;
 
+	/* The whole view is cleared (it is small); what the last parse left is let go first and
+	 * the caller's room is put back - zip_parse.c says why. */
+	room = a->mem.room;
+	kof_arj_release(a);
 	memset(a, 0, sizeof *a);
+	a->mem.room = room;
 	a->version = KOF_ARJ_INFO_VERSION;
+	/* What the FILE can hold, and not what it says: a header is at least KOF_ARJ_HEADER_MIN. */
+	rows_limit = file.n / KOF_ARJ_HEADER_MIN;
 
 	if (!kof_in_range(file, 0, 4u) ||
 	    file.p[0] != ARJ_MAGIC0 || file.p[1] != ARJ_MAGIC1)
@@ -288,9 +307,17 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 				a->anomalies |= KOF_ARJ_ANOM_CODED;
 			continue;
 		}
-		if (a->n_entries >= KOF_ARJ_MAX_ENTRIES) {
-			a->anomalies |= KOF_ARJ_ANOM_ENTRIES_FULL;
-			break;
+		if (a->n_entries >= cap_entry) {
+			void *t = a->entry;
+
+			/* The walk stops HERE and says so: the headers that follow are in the archive
+			 * and not in the table. */
+			if (!kof_tab_grow(&a->mem, &t, &cap_entry, sizeof *a->entry,
+					  (uint64_t)a->n_entries + 1u, rows_limit)) {
+				a->anomalies |= KOF_ARJ_ANOM_ENTRIES_FULL;
+				break;
+			}
+			a->entry = (struct kof_entry *)t;
 		}
 		{
 			struct kof_entry *e = &a->entry[a->n_entries];
@@ -317,6 +344,7 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 	a->anomalies |= KOF_ARJ_ANOM_NO_END;
 
 ended:
+	a->mem.rows = a->n_entries;
 	ctx->format = KOF_FMT_ARJ;
 	ctx->obj_size = file.n;
 	ctx->file_header = a;

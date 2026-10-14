@@ -114,7 +114,8 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);
 KOF_DEFINE_UNPACK
 {
 	const struct kof_pdf_info *p = kof_pdf(ctx);
-	uint32_t i, opened = 0, windowed = 0, unsupported = 0, failed = 0;
+	const struct kof_pdf_object *o;
+	uint32_t cur = 0, i, opened = 0, windowed = 0, unsupported = 0, failed = 0;
 	uint32_t carried = 0, in_region = 0, images = 0, unwanted = 0;
 	uint32_t structural = 0;
 	/* Where the entry walk got to - see the note beside kunp_rcstruct_name. */
@@ -154,8 +155,14 @@ KOF_DEFINE_UNPACK
 	kof_debug("Pdf.streams", p->n_streams);
 	kof_debug("Pdf.encrypted", (uint32_t)encrypted);
 
-	for (i = 0; i < p->n_objects; i++) {
-		const struct kof_pdf_object *o = &p->object[i];
+	/*
+	 * A WALK AND NOT AN ARRAY, for the reason zip.c gives: a document has as many
+	 * objects as it has, and the host hands them out one at a time. `i` is the
+	 * object's own index - the cursor is one past it after each call - which is what
+	 * the entry table and the decode chain are keyed on.
+	 */
+	while ((o = kof_pdf_next(ctx, &cur)) != 0) {
+		i = cur - 1u;
 
 		if (!(o->flags & KOF_PDF_OBJ_STREAM) || !o->stream_len)
 			continue;

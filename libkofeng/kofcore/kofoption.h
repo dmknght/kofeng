@@ -107,6 +107,9 @@ enum kof_emu_use {
  */
 #define KOF_HEUR_LEVEL_MAX 2u
 
+/* The smallest share of a divided resident allowance one scanner is given. */
+#define KOF_SHARE_MIN (32ull << 20)
+
 struct kof_scan_option {
 	/*
 	 * Where a verdict goes when the engine reaches one - see
@@ -147,7 +150,10 @@ struct kof_scan_option {
 	 * was the bug". This is the third axis and it gets its own field for
 	 * the same reason.
 	 */
-	uint32_t max_depth;        /* 0 -> a built-in ceiling applies */
+	/* 0 -> no limit of the engine's own. The walk is still finite: it hands every
+	 * directory to opendir by its full path, the kernel refuses a path past PATH_MAX,
+	 * and a directory it refuses is counted in kof_stats.unreadable. */
+	uint32_t max_depth;
 	/*
 	 * THERE IS NO SEPARATE DEEP-SCAN FLAG. It is heur_off, below.
 	 *
@@ -178,8 +184,15 @@ struct kof_scan_option {
 	 * ceiling.
 	 */
 	uint32_t max_object_depth;
-	int      follow_symlinks;  /* off is the only safe default: a link into an
-				    * ancestor turns a walk into a loop */
+	/*
+	 * DEPRECATED AND IGNORED. THE ENGINE NEVER FOLLOWS A SYMBOLIC LINK, whatever this
+	 * says: the directory walk skips links, and a path that is a link is refused when
+	 * it is opened (a symlink-attack defence - a link swapped in for a file between the
+	 * walk and the open must not be read - and the end of the loops a link to an
+	 * ancestor made). The field stays so that the layout of this struct does not move
+	 * for a host built against an earlier header; writing it has no effect.
+	 */
+	int      follow_symlinks;
 
 	/*
 	 * Keep going after the first finding on an object.
@@ -374,7 +387,7 @@ struct kof_scan_option {
 	uint64_t max_resident_bytes;
 	uint64_t max_produced_bytes;
 	uint64_t max_object_bytes;
-	uint32_t max_children;     /* 0 -> a built-in ceiling applies */
+	uint32_t max_children;     /* 0 -> the root's length over the smallest stored record of any format (5 bytes, a chm entry), at least 4096 */
 
 	/*
 	 * ALREADY ANSWERED, AND THE ENGINE NEVER LEARNS WHAT ANSWERED IT.
@@ -455,6 +468,45 @@ struct kof_scan_option {
 	 */
 	int  (*should_stop)(void *user);
 	void  *stop_user;
+
+	/*
+	 * APPENDED (memory work): both zero in a caller that predates them.
+	 *
+	 * HOW max_resident_bytes IS SHARED OUT. Every scanner of a parallel walk
+	 * (kscan_path_mt) holds its own heap, so one allowance given to each of N
+	 * workers bounds nothing: N workers were measured at 822 MB against 89 MB for
+	 * one, with the same allowance. Left at zero, the allowance - the one given, or
+	 * the built-in 128 MiB when none was - is therefore the ceiling of the WHOLE
+	 * walk and each worker's share is allowance / workers, but never below
+	 * KOF_SHARE_MIN (32 MiB): a share smaller than that cannot unpack an ordinary
+	 * object, so a walk with so many workers that the floor binds holds
+	 * workers x 32 MiB. A host that has already worked out what each of its
+	 * scanners may hold (or that scans with kscan_path / kscan_bytes on threads of
+	 * its own, where nothing is divided) sets this non-zero, and
+	 * max_resident_bytes is then taken per scanner exactly as given.
+	 */
+	uint32_t resident_per_scanner;
+	/*
+	 * WHERE AN OBJECT TOO BIG FOR MEMORY IS SPILLED: a directory the host
+	 * chooses, tried before the platform's own (kof_tmpdir, which is /tmp on
+	 * POSIX and so is very often a RAM filesystem). The engine reads no
+	 * environment, so this is the one way a host puts the spill somewhere that is
+	 * disk. The bytes spilled are still counted against max_resident_bytes: a
+	 * spill is not a promise that the place is not memory. NULL - the default -
+	 * is the platform's directory. The string must stay valid for the scan.
+	 */
+	const char *scratch_dir;
+	/*
+	 * APPENDED: HOW MANY INSTRUCTIONS THE INTERPRETER MAY EXECUTE FOR ONE WHOLE TREE (a
+	 * top-level object and everything under it), the unpack runs, the heuristic runs and
+	 * the diagnose scan's emulations together. Zero - the default - derives it from the
+	 * ROOT object's size alone (64 Mi instructions plus 512 per byte of the root, at most
+	 * 4 Gi): what a child holds was produced from the root, so its size buys no time, and
+	 * an archive of a thousand tiny programs that spin costs what its one file may, not a
+	 * thousand per-object floors. What a run is denied is said (the object reads
+	 * KOF_BROKEN_LIMIT, kof_stats.limit_hits and emu_budget_denied move).
+	 */
+	uint64_t max_emu_insn;
 };
 
 /*

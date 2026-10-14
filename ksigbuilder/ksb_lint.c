@@ -360,6 +360,20 @@ void ksb_lint_report(struct ksb_ctx *ksb)
 			      "cannot rule it out, so every eligible object is "
 			      "scanned for it", ksb->decl.pats[i].name, ksb->decl.pats[i].len);
 	}
+	/*
+	 * AN OPEN JUMP IS NOT OPEN. "[n-]" compiles to "[n-256]" (KOF_HEX_GAP_OPEN): two
+	 * parts that may be arbitrarily far apart are two patterns, and the match is
+	 * not made when the second sits further on. The compile does not change what
+	 * the pattern means - every rule written with one would match differently -
+	 * so the author is told, per pattern, which is what this was missing.
+	 */
+	for (i = 0; i < ksb->decl.npats; i++)
+		if (ksb->decl.pats[i].kind == KOF_STR_HEX && ksb->decl.pats[i].open_gaps)
+			lwarn(ksb, ksb->decl.pats[i].line,
+			      "'%s' has %u open jump(s) \"[n-]\", which match at most %u "
+			      "bytes apart; for parts further apart write two patterns",
+			      ksb->decl.pats[i].name, ksb->decl.pats[i].open_gaps,
+			      KOF_HEX_GAP_OPEN);
 	for (i = 0; i < ksb->decl.nrngs; i++)
 		if (!ksb->lint.rng_used[i])
 			lwarn(ksb, ksb->decl.rngs[i].line,

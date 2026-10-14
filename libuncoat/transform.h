@@ -65,7 +65,11 @@ enum kuncoat_algo {
 	 * Decode only. */
 	KUNCOAT_ALGO_PLACEHOLDER_SUB = 4,
 	/* A chain of `sub eax, imm32` that pushes its result: the payload dwords in
-	 * REVERSE order. `in` and `out` must not overlap. Decode only. */
+	 * REVERSE order. `in` and `out` must not overlap. Decode only. OK when a
+	 * terminator (any byte that is not part of the chain) was reached and every
+	 * dword fits; exactly filling `cap` is complete. When the room is short the
+	 * output is the BEGINNING of the payload (its first dwords), OVER_BUDGET. The
+	 * chain running to the end of the input with no terminator is TRUNCATED. */
 	KUNCOAT_ALGO_X86_SUB_CHAIN = 5,
 	/* RC4 keyed by key/key_len (at least 1). Its own inverse. */
 	KUNCOAT_ALGO_RC4 = 6,

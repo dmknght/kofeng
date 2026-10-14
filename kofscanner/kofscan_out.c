@@ -500,6 +500,11 @@ int ksn_on_object(const char *name, const void *bytes, uint64_t len,
 			ksn_say(r, C_CYN, kverdict_broken_name(res->broken), name);
 	}
 
+	/* Said under -v what the engine did NOT mark broken: the analysis of a wrapper
+	 * ran out and the child it opened into carries the evidence. */
+	if (r->verbose && res->analysis_moot)
+		ksn_say(r, C_CYN, "Analysis cut, child is the subject", name);
+
 	/*
 	 * Roll this object's verdict up into its top-level file. Non-clean objects
 	 * always get an entry so the file is counted; a clean object touches one
@@ -588,12 +593,12 @@ void ksn_print_stats(const struct kof_stats *st)
 	 * the symbol halves - appears there. The second number growing with the
 	 * database while the first does not is the shape to watch for.
 	 */
-	printf("multi      %llu pass(es) (%llu hash4, %llu wu-manber), "
-	       "%.2f MB read\n",
+	printf("multi      %llu pass(es), %.2f MB read\n",
 	       (unsigned long long)st->multi_passes,
-	       (unsigned long long)st->multi_hash4,
-	       (unsigned long long)st->multi_wumanber,
 	       (double)st->multi_bytes / 1048576.0);
+	printf("  pack reads %llu, sweeps that did not finish %llu\n",
+	       (unsigned long long)st->multi_reads,
+	       (unsigned long long)st->multi_degraded);
 	printf("  answers written without a search %llu\n",
 	       (unsigned long long)st->multi_answers);
 	printf("searches   %llu, %.2f MB read\n",
@@ -609,4 +614,15 @@ void ksn_print_stats(const struct kof_stats *st)
 	 */
 	printf("heur emu   %llu object(s) interpreted at a rule's request\n",
 	       (unsigned long long)st->heur_emu);
+	/* What the interpreter executed for the trees scanned, and the objects a tree's
+	 * allowance refused (they read Limit): the cost a file's contents can choose. */
+	printf("emulated   %llu instruction(s); %llu object(s) refused by the tree's allowance\n",
+	       (unsigned long long)st->emu_insn, (unsigned long long)st->emu_budget_denied);
+	/* Only when it moved: a bound that cut evidence is news, and zero is not. */
+	if (st->limit_hits)
+		printf("limits     %llu bound(s) cut evidence (the object says so: Limit)\n",
+		       (unsigned long long)st->limit_hits);
+	if (st->analysis_moot)
+		printf("moot       %llu object(s) whose own analysis ran out of budget but opened into a child (not Limit)\n",
+		       (unsigned long long)st->analysis_moot);
 }

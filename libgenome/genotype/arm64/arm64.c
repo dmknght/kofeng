@@ -239,7 +239,7 @@ uint64_t kgenome_arm64_logical_imm(const struct kgenome_arm64_insn *in)
 	s = imms & levels;
 	r = immr & levels;
 	emask = esize == 64u ? ~0ull : (1ull << esize) - 1u;
-	w = (1ull << (s + 1u)) - 1u;
+	w = s + 1u >= 64u ? ~0ull : (1ull << (s + 1u)) - 1u;      /* a shift by 64 is undefined */
 	if (r)
 		w = ((w >> r) | (w << (esize - r))) & emask;
 	for (e = esize; e < dsz; e <<= 1)

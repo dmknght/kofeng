@@ -28,7 +28,8 @@ KOF_TARGET_CONTENT("Stored");
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_tar_info *t = kof_tar(ctx);
-	uint32_t i, opened = 0;
+	const struct kof_tar_entry *e;
+	uint32_t cur = 0, opened = 0;
 
 	if (!t->valid)
 		return;
@@ -36,9 +37,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	kof_debug("Tar.entries", t->n_entries);
 	kof_debug("Tar.files", t->n_files);
 
-	for (i = 0; i < t->n_entries; i++) {
-		const struct kof_tar_entry *e = &t->entry[i];
-
+	/* A walk and not an array: the archive has as many entries as its headers say, which is
+	 * not a number this module can know (zip.c says the same). */
+	while ((e = kof_tar_next(ctx, &cur)) != 0) {
 		if (!e->size)
 			continue;               /* a directory, or an empty file */
 		switch (e->typeflag) {
@@ -59,9 +60,12 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		/* What this entry is called, for the report. */
 		kunp_rcstruct_name(e->name_off, e->name_len);
 
-		if (!kunp_rcstruct_window(e->data_off, e->size))
-			break;                  /* a host limit bound: stop, do not spin */
-		opened++;
+		/* A refused window is this entry's and not the table's end: the entries after it
+		 * are as readable as before, and when the host has really stopped (the tree's
+		 * quota or window allowance) the next ask is answered at once and the report is
+		 * the host's - the same as zip.c. */
+		if (kunp_rcstruct_window(e->data_off, e->size))
+			opened++;
 	}
 
 	kof_debug("Tar.opened", opened);
@@ -76,6 +80,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	 */
 	if (t->anomalies & (KOF_TAR_ANOM_TRUNCATED | KOF_TAR_ANOM_BAD_SIZE))
 		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
-	if (t->anomalies & KOF_TAR_ANOM_ENTRIES_FULL)
-		kunp_rcstruct_broken(KOF_UNP_LIMIT);
+	/* A table of the parse that could not grow is the engine's to report: it reads
+	 * KOF_TAR_ANOM_ENTRIES_FULL and _EXTENTS_FULL after the parse (kof_parser_cut_bits). */
 }

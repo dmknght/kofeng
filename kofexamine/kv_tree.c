@@ -167,7 +167,11 @@ static void region_row(struct view *v, const struct object *o, uint32_t i,
 	 * row and the symbol rows below were the two places still borrowing the
 	 * pane's own buffer.
 	 */
-	n = kof_scan_resolve_range(&o->ctx, bit, v->ext2);
+	{
+		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
+
+		n = kof_scan_resolve_range(&o->ctx, bit, &eb);
+	}
 	for (j = 0; j < n; j++)
 		total += v->ext2[j].len;
 	if (!total)
@@ -686,7 +690,7 @@ void log_window(struct view *v)
 							 sizeof c->label,
 							 "%llu Img ?",
 							 (unsigned long long)id);
-					free(ti);
+					kof_inspect_free(tf, ti);
 				}
 				c->depth = 2;
 				c->ctx.obj_size = pe_bytes;

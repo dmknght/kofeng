@@ -500,10 +500,7 @@ static int trunc_fab(void *arg)
 	       b.nbad, b.cuts, a.worst > b.worst ? a.worst : b.worst);
 	snprintf(what, sizeof what, "lzhuf: lh5 stream (%zu bytes) cut at %zu hands back %zu bytes that are not the real output "
 		 "(%zu of %zu cuts affected), status TRUNCATED", v_a[1].n, a.worst_cut, a.worst, a.nbad, a.cuts);
-	KM_CHECK(a.nbad + b.nbad == 0, what,
-		 "LZHUF_TRUNC_FABRICATED (libuncoat/decompressors/lzhuf.c lh_fill: reads 0 past the end and sets eof only when "
-		 "`used > in_len * 8 + 16`, so up to 16 bits of fabricated codes are decoded and flushed with TRUNCATED) "
-		 "[Inference: low]");
+	CK(a.nbad + b.nbad == 0);
 	return 0;
 }
 

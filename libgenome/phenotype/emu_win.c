@@ -284,16 +284,22 @@ unsigned kgenome_emu_win_api_slot(unsigned i)
 
 void kgenome_emu_win_setup(struct kgenome_emu *e, uint64_t image_base)
 {
+	if (!e)
+		return;
 	e->win_image_base = image_base;
 }
 
 void kgenome_emu_win_set_heap(struct kgenome_emu *e, uint64_t heap)
 {
+	if (!e)
+		return;
 	e->win_heap = heap;
 }
 
 void kgenome_emu_count_mod_reads(struct kgenome_emu *e, int on)
 {
+	if (!e)
+		return;
 	e->count_mod_reads = (uint8_t)(on != 0);
 }
 
@@ -312,8 +318,10 @@ int kgenome_emu_itrace(struct kgenome_emu *e, unsigned n)
 	if (n > KGENOME_EMU_ITRACE_MAX)
 		n = KGENOME_EMU_ITRACE_MAX;
 	e->itr = calloc(n, sizeof *e->itr);
-	if (!e->itr)
+	if (!e->itr) {
+		KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_MEM, "instruction trace not allocated");
 		return 0;
+	}
 	e->itr_cap = n;
 	e->itr_frozen = 0;
 	return 1;
@@ -367,8 +375,8 @@ int kgenome_emu_itrace_get(const struct kgenome_emu *e, unsigned k, uint64_t *ri
 
 void kgenome_emu_first_hop(const struct kgenome_emu *e, uint64_t *insn, uint64_t *rip)
 {
-	if (insn) *insn = e->hop_first_insn;
-	if (rip)  *rip  = e->hop_first_rip;
+	if (insn) *insn = e ? e->hop_first_insn : 0;
+	if (rip)  *rip  = e ? e->hop_first_rip : 0;
 }
 
 /* And the last one, which is where execution had got to when the run ended:
@@ -376,17 +384,19 @@ void kgenome_emu_first_hop(const struct kgenome_emu *e, uint64_t *insn, uint64_t
  * hop_count says how many stages there were, so one hop can be told from ten. */
 void kgenome_emu_last_hop(const struct kgenome_emu *e, uint64_t *rip, uint32_t *count)
 {
-	if (rip)   *rip   = e->hop_last_rip;
-	if (count) *count = e->hop_count;
+	if (rip)   *rip   = e ? e->hop_last_rip : 0;
+	if (count) *count = e ? e->hop_count : 0;
 }
 
 uint64_t kgenome_emu_mod_reads(const struct kgenome_emu *e, unsigned i)
 {
-	return i < KGENOME_EMU_WIN_MOD_COUNT ? e->mod_reads[i] : 0;
+	return e && i < KGENOME_EMU_WIN_MOD_COUNT ? e->mod_reads[i] : 0;
 }
 
 void kgenome_emu_win_set_module(struct kgenome_emu *e, unsigned i, uint64_t base)
 {
+	if (!e)
+		return;
 	if (i < KGENOME_EMU_WIN_MOD_COUNT)
 		e->win_mod_base[i] = base;
 	if (i == KGENOME_EMU_WIN_MOD_K32)
@@ -415,6 +425,9 @@ static int win_eq_nocase(const char *a, const char *b)
 uint64_t kgenome_emu_win_addr_of(struct kgenome_emu *e, const char *name)
 {
 	unsigned i;
+
+	if (!e || !name)
+		return 0;
 
 	for (i = 0; i < KGENOME_EMU_WIN_API_COUNT; i++) {
 		uint64_t base;
@@ -462,9 +475,13 @@ uint64_t kgenome_emu_win_miss_thunk(struct kgenome_emu *e)
 
 uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
 {
-	uint64_t a = kgenome_emu_win_addr_of(e, name);
-	size_t i, n = strlen(name);
+	uint64_t a;
+	size_t i, n;
 
+	if (!e || !name)
+		return 0;
+	a = kgenome_emu_win_addr_of(e, name);
+	n = strlen(name);
 	if (a)
 		return a;
 	if (n < 3u || n > 64u || !(isalpha((unsigned char)name[0]) || name[0] == '_'))
@@ -494,16 +511,16 @@ uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
  * recognised by what it has loaded, and a stub that asks for one of those
  * expects a failure; those names still fail.
  */
-uint64_t kgenome_emu_win_fake_lib(struct kgenome_emu *e, const char *name)
+/*
+ * A library name as the table of modelled libraries keys it: lower case, without the ".dll" a guest may leave
+ * off or put on (the loader supplies it), so LoadLibrary("comctl32") and GetModuleHandle("COMCTL32.DLL") name
+ * one library. Returns 0 for a name this table does not model (too short or long, odd characters).
+ */
+static int fake_key(const char *name, char *low, size_t cap)
 {
-	static const char *const deny[] = {
-		"sbiedll", "snxhk", "cmdvrt", "api_log", "dir_watch", "pstorec",
-		"vmcheck", "wpespy", "dbghelp_wine", "vboxhook", "vboxmrxnp"
-	};
 	size_t i, n = strlen(name);
-	char low[32];
 
-	if (n < 3u || n >= sizeof low)
+	if (n < 3u || n >= cap)
 		return 0;
 	for (i = 0; i < n; i++) {
 		unsigned char c = (unsigned char)name[i];
@@ -513,16 +530,96 @@ uint64_t kgenome_emu_win_fake_lib(struct kgenome_emu *e, const char *name)
 		low[i] = (char)tolower(c);
 	}
 	low[n] = 0;
-	for (i = 0; i < sizeof deny / sizeof deny[0]; i++)
-		if (strstr(low, deny[i]))
-			return 0;
+	if (n > 4u && !strcmp(low + n - 4u, ".dll"))
+		low[n - 4u] = 0;
+	return 1;
+}
+
+/* The handle a library of the modelled kind already has, or 0: what GetModuleHandle answers for a library
+ * LoadLibrary made a handle for (it is "loaded" from then on). */
+uint64_t kgenome_emu_win_fake_find(const struct kgenome_emu *e, const char *name)
+{
+	char low[32];
+	uint32_t i;
+
+	if (!fake_key(name, low, sizeof low))
+		return 0;
 	for (i = 0; i < e->n_win_fake; i++)
 		if (!strcmp(e->win_fake[i], low))
 			return WIN_FAKE_BASE + (uint64_t)i * WIN_FAKE_STEP;
-	if (e->n_win_fake >= 16u)
+	return 0;
+}
+
+uint64_t kgenome_emu_win_fake_lib(struct kgenome_emu *e, const char *name)
+{
+	static const char *const deny[] = {
+		"sbiedll", "snxhk", "cmdvrt", "api_log", "dir_watch", "pstorec",
+		"vmcheck", "wpespy", "dbghelp_wine", "vboxhook", "vboxmrxnp"
+	};
+	size_t i, n;
+	char low[32];
+	uint64_t h;
+
+	if (!fake_key(name, low, sizeof low))
 		return 0;
+	n = strlen(low);
+	for (i = 0; i < sizeof deny / sizeof deny[0]; i++)
+		if (strstr(low, deny[i]))
+			return 0;
+	h = kgenome_emu_win_fake_find(e, name);
+	if (h)
+		return h;
+	if (e->n_win_fake >= 16u) {
+		/* the 17th distinct library a guest loads is told "absent", which ends a loader
+		 * that expected it: the run is not the whole answer, and says so */
+		KGENOME_EMU_REFUSED(e, KGENOME_EMU_HIT_LIB, "table of 16 modelled libraries is full");
+		return 0;
+	}
 	memcpy(e->win_fake[e->n_win_fake], low, n + 1u);
 	return WIN_FAKE_BASE + (uint64_t)e->n_win_fake++ * WIN_FAKE_STEP;
+}
+
+/*
+ * The heap's block table (see `hblk` in struct kgenome_emu). Both arenas hand out ascending addresses, so a
+ * new block always sorts last; a block that is not above the last one (a guest that mapped over it) is not
+ * recorded and the call says so.
+ */
+int kgenome_emu_win_heap_note(struct kgenome_emu *e, uint64_t va, uint64_t size)
+{
+	if (!va)
+		return 1;
+	if (e->hblk_n && va <= e->hblk[e->hblk_n - 1u].va)
+		return 0;
+	if (e->hblk_n == e->hblk_cap) {
+		uint32_t cap = e->hblk_cap ? e->hblk_cap * 2u : 64u;
+		struct kgenome_emu_hblk *t = realloc(e->hblk, (size_t)cap * sizeof *t);
+
+		if (!t)
+			return 0;
+		e->hblk = t;
+		e->hblk_cap = cap;
+	}
+	e->hblk[e->hblk_n].va = va;
+	e->hblk[e->hblk_n].size = size;
+	e->hblk_n++;
+	return 1;
+}
+
+struct kgenome_emu_hblk *kgenome_emu_win_heap_find(const struct kgenome_emu *e, uint64_t va)
+{
+	uint32_t lo = 0, hi = e->hblk_n;
+
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (e->hblk[mid].va == va)
+			return &e->hblk[mid];
+		if (e->hblk[mid].va < va)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	return NULL;
 }
 
 int kgenome_emu_win_is_fake(const struct kgenome_emu *e, uint64_t h)

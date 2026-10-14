@@ -20,6 +20,7 @@
 #include "lha_parse.h"
 #include "cname.h"
 #include "../../../kofcore/rangelist.h"
+#include "../../../kofcore/tabgrow.h"
 
 #define LHA_METHOD_AT   2u
 #define LHA_METHOD_LEN  5u
@@ -76,7 +77,18 @@ static uint32_t lha_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		cl.n = lha_resolve_scan(ctx, KOF_SCAN_LHA_CLAIMED, cv, cl.cap);
 		kof_rl_complement(&rl, &cl, ctx->obj_size);
 	}
-	return kof_rl_normalise(&rl);
+	return kof_rl_finish(&rl);
+}
+
+/* One more row of the table, or 0 and it is as it was (kof_tab_grow). */
+static int kof_lha_grow(struct kof_lha_info *l, uint32_t *cap, uint64_t limit)
+{
+	void *t = l->entry;
+
+	if (!kof_tab_grow(&l->mem, &t, cap, sizeof *l->entry, (uint64_t)l->n_entries + 1u, limit))
+		return 0;
+	l->entry = (struct kof_entry *)t;
+	return 1;
 }
 
 static uint32_t lha_entries(const struct kof_obj_ctx *ctx,
@@ -154,14 +166,32 @@ int kof_lha_sniff(kof_buf file)
 	return level <= 2u;
 }
 
+void kof_lha_release(struct kof_lha_info *l)
+{
+	kof_tab_free((void **)&l->entry);
+	l->n_entries = 0;
+	l->mem.held = 0;
+	l->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(lha, struct kof_lha_info, entry, n_entries)
+
 int kof_lha_parse(kof_buf file, struct kof_lha_info *l, struct kof_obj_ctx *ctx)
 {
 	char m[LHA_METHOD_LEN + 1];
-	uint64_t at = 0;
+	uint64_t at = 0, room, rows_limit;
+	uint32_t cap_entry = 0;
 	int first = 1;
 
+	/* The whole view is cleared (it is small); what the last parse left is let go first and
+	 * the caller's room is put back - zip_parse.c says why. */
+	room = l->mem.room;
+	kof_lha_release(l);
 	memset(l, 0, sizeof *l);
+	l->mem.room = room;
 	l->version = KOF_LHA_INFO_VERSION;
+	/* What the FILE can hold, and not what it says: a header is at least KOF_LHA_HEADER_MIN. */
+	rows_limit = file.n / KOF_LHA_HEADER_MIN;
 
 	if (!kof_in_range(file, 0, LHA_L0_MIN) ||
 	    !lha_method(file, LHA_METHOD_AT, m))
@@ -300,7 +330,10 @@ int kof_lha_parse(kof_buf file, struct kof_lha_info *l, struct kof_obj_ctx *ctx)
 				   (!lha_stored(m) && (!coding || !osize))) {
 				l->n_coded++;
 				l->anomalies |= KOF_LHA_ANOM_CODED;
-			} else if (l->n_entries >= KOF_LHA_MAX_ENTRIES) {
+			} else if (l->n_entries >= cap_entry &&
+				   !kof_lha_grow(l, &cap_entry, rows_limit)) {
+				/* The walk stops HERE and says so: the headers that follow are in the
+				 * archive and not in the table. */
 				l->anomalies |= KOF_LHA_ANOM_ENTRIES_FULL;
 				break;
 			} else {
@@ -336,6 +369,7 @@ int kof_lha_parse(kof_buf file, struct kof_lha_info *l, struct kof_obj_ctx *ctx)
 	l->anomalies |= KOF_LHA_ANOM_NO_END;
 
 ended:
+	l->mem.rows = l->n_entries;
 	ctx->format = KOF_FMT_LHA;
 	ctx->obj_size = file.n;
 	ctx->file_header = l;

@@ -495,6 +495,8 @@ static int route_stop(struct route *R)
 
 	if (st != KGENOME_EMU_STOP_INSN) {
 		kgenome_diag_emu_stop_status(R->s, st);      /* exited, faulted, or ran out */
+		if (kgenome_emu_hit(R->em))
+			kgenome_diag_note(R->s, KGENOME_TRUNCATED);     /* a bound refused something */
 		return 0;
 	}
 
@@ -648,7 +650,7 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 	 * kgenome_diag_emu_run_rel_gaps.
 	 */
 	if (!ei->seg_count) {
-		kgenome_diag_emu_run_rel_gaps(s, obj, ei, base, size);
+		kgenome_diag_emu_run_rel_gaps(s, obj, base, size);
 		return;
 	}
 
@@ -659,6 +661,9 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 		memset(&eb, 0, sizeof eb);
 		eb.max_insn = s->bud.max_insn;
 		eb.max_bytes = kgenome_diag_emu_pages_charge(s) * KGENOME_EMU_PAGE;
+		eb.account = kgenome_diag_emu_account;
+		eb.account_user = s;
+		eb.insn_spent = s->bud.insn_spent;
 		R.em = kgenome_emu_unp_build(base, size, ei, &eb, &rep);
 	}
 	if (!R.em) {

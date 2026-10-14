@@ -44,7 +44,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_7Z_INFO_VERSION 1
+#define KOF_7Z_INFO_VERSION 2
 
 /*
  * Scan regions.
@@ -89,19 +89,23 @@ enum {
 };
 
 /*
- * Folders described, and why a cap this small is the right one.
+ * What bounds the parse, and what does not.
  *
- * A folder is 7z's unit of decompression: one coder chain over one run of packed
- * bytes, yielding the concatenation of every file in it. Most archives use one for
- * everything, which is what "solid" means and why extracting a single file from a
- * 7z means decoding everything before it.
- *
- * Reaching this cap is recorded rather than silently truncating.
+ * NO COUNT OF FOLDERS IS A LIMIT ON THE FILE. A folder is 7z's unit of decompression: one coder
+ * chain over one run of packed bytes, yielding the concatenation of every file in it. Most
+ * archives use one for everything, which is what "solid" means and why extracting a single file
+ * from a 7z means decoding everything before it - and an archive made without solid mode, or with
+ * a block size, has one per file or per block. The folder table was 64 rows and the pool of packed
+ * streams 256, so the 65th folder of an archive was not there and its content was never offered.
+ * Both are tables the parse allocates to what the header holds, and what bounds an allocation is
+ * the header's own length: a folder is at least KOF_7Z_FOLDER_MIN bytes of it (a coder count, a
+ * flags byte and an id) and a packed stream at least the one byte that states its size, so a
+ * count the header claims past what it could physically hold is not a count at all. Under that
+ * sits the engine's per-object ledger (struct kof_view_mem.room): when a table cannot grow, or
+ * the header is too large to be decoded within it, the walk stops, FOLDERS_FULL is raised and the
+ * object reads KOF_BROKEN_LIMIT - the folders not listed are said, and those listed are whole.
  */
-#define KOF_7Z_MAX_FOLDERS 64u
-/* Four inputs is the widest coder this format defines, so a folder cannot own more
- * than four packed streams and sixty four folders cannot own more than this. */
-#define KOF_7Z_MAX_PACK   256u
+#define KOF_7Z_FOLDER_MIN 3u
 
 /*
  * How the header was stored.
@@ -137,7 +141,9 @@ enum {
 	KOF_7Z_ANOM_UNKNOWN_CODER = 1ull << 4,
 	KOF_7Z_ANOM_BAD_VERSION   = 1ull << 5,
 	KOF_7Z_ANOM_OVERLAP       = 1ull << 6,
-	KOF_7Z_ANOM_FOLDERS_FULL  = 1ull << 7,  /* more folders than listed */
+	KOF_7Z_ANOM_FOLDERS_FULL  = 1ull << 7,  /* the folder list is not whole: a table could
+						 * not grow, or the header that holds it was too
+						 * large to be decoded */
 	KOF_7Z_ANOM_HDR_UNREAD    = 1ull << 8,  /* the coded header did not decode */
 	KOF_7Z_ANOM_CODER_CHAIN   = 1ull << 9   /* a folder chains coders: not decoded */
 };
@@ -148,6 +154,77 @@ enum {
 	KOF_7Z_ANOM_COUNT = 10
 };
 
+/*
+ * ONE FOLDER.
+ */
+struct kof_7z_folder {
+	uint64_t pack_off;     /* absolute, of the coded bytes */
+	uint64_t pack_size;
+	uint64_t unpack_size;  /* what the archive says the decode yields */
+	uint32_t coder;        /* KOF_7Z_CODER_* */
+	uint8_t  lc, lp, pb;   /* meaningful for LZMA */
+	uint8_t  n_coders;
+	/*
+	 * The transform in front of the coder, zero when there is none.
+	 *
+	 * A folder may run a filter over its bytes before compressing them,
+	 * and undoing it is a separate step after the decode. Measured over
+	 * the archives here: 342 folders use no filter, 76 use BCJ x86 and
+	 * 8 use BCJ2 - so one filter is 90% of them and the rest are named
+	 * rather than guessed at.
+	 */
+	uint32_t filter;
+	uint32_t out_first;    /* index of this folder's first output stream */
+
+	/*
+	 * WHERE THIS FOLDER'S PACKED STREAMS ARE in the pack table: [first_pack, first_pack +
+	 * n_packs). The streams of a folder are consecutive there, and the host (the BCJ2 decode)
+	 * asks for them by folder, which used to be a search of the whole table for each - a product
+	 * of two counts the file chooses. Appended after the fields a module already reads.
+	 */
+	uint32_t first_pack;
+	uint32_t n_packs;
+};
+
+struct kof_7z_pack {
+	uint64_t off;          /* absolute, of the coded bytes */
+	uint64_t size;
+	uint32_t folder;       /* index into folder[] */
+	/*
+	 * Which BCJ2 input this stream feeds: 0 main, 1 call, 2 jump,
+	 * 3 the range coder. 0xffffffff when the folder is not BCJ2,
+	 * which is every folder with a single coder.
+	 */
+	uint32_t role;
+	/*
+	 * What this stream decodes to on its own, and with which settings.
+	 *
+	 * A BCJ2 folder is four coders, and three of them are separate LZMA
+	 * streams with separate properties and separate output lengths. The
+	 * folder record carries one of each because a folder used to be one
+	 * coder; carrying the rest here is what makes the three decodable
+	 * apart from one another.
+	 *
+	 * out_size is zero for a stream that is packed straight into its
+	 * consumer - the range coder's control bytes are not compressed.
+	 */
+	uint64_t out_size;
+	uint32_t coder;        /* KOF_7Z_CODER_* feeding this stream */
+	uint8_t  lc, lp, pb, reserved5;
+};
+
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2, the same change as the zip view's (zip.h has the long form): `folder[64]` and
+ * `pack[256]` are tables the parse allocates to the size of the header, reached through the
+ * pointers at the tail. Everything before them is where it was. `n_folders` WAS AT OFFSET 96 AND IS
+ * NOW `legacy_n_folders`, ALWAYS ZERO: a module built against version 1 loops over a count of zero,
+ * reads a valid empty table, and the engine - which sees that the walk below was never called while
+ * the archive has folders - reports the object instead of passing it as examined (sx_walk_check).
+ * The real count is `n_folders` at the tail, and so is `n_pack`. A module walks the folders with
+ * kof_7z_next below; it does not index `folder`.
+ */
 struct kof_7z_info {
 	uint32_t version;         /* KOF_7Z_INFO_VERSION */
 	uint32_t valid;
@@ -204,81 +281,49 @@ struct kof_7z_info {
 	 * 355 headers. Four use LZMA2 and eleven are encrypted. So the folder list
 	 * is what stands between the parse and 95% of the content.
 	 */
-	uint32_t n_folders;
+	uint32_t legacy_n_folders;/* version 1's count, kept for its offset: always 0 */
 	uint32_t reserved3;
-	struct kof_7z_folder {
-		uint64_t pack_off;     /* absolute, of the coded bytes */
-		uint64_t pack_size;
-		uint64_t unpack_size;  /* what the archive says the decode yields */
-		uint32_t coder;        /* KOF_7Z_CODER_* */
-		uint8_t  lc, lp, pb;   /* meaningful for LZMA */
-		uint8_t  n_coders;
-		/*
-		 * The transform in front of the coder, zero when there is none.
-		 *
-		 * A folder may run a filter over its bytes before compressing them,
-		 * and undoing it is a separate step after the decode. Measured over
-		 * the archives here: 342 folders use no filter, 76 use BCJ x86 and
-		 * 8 use BCJ2 - so one filter is 90% of them and the rest are named
-		 * rather than guessed at.
-		 */
-		uint32_t filter;
-		uint32_t out_first;    /* index of this folder's first output stream */
 
-	} folder[KOF_7Z_MAX_FOLDERS];
+	/* ---- version 2: from here the tables are the header's size ---------------------- */
 
+	struct kof_view_mem mem;  /* what the tables hold; see range.h */
+	struct kof_7z_folder *folder;   /* n_folders of them */
 	/*
 	 * Every packed stream in the archive, and which folder owns it.
 	 *
-	 * APPENDED AFTER folder[] ON PURPOSE. A folder used to be one packed stream,
-	 * so pack_off and pack_size above said all there was to say. BCJ2 breaks that:
-	 * it takes FOUR inputs - the main stream, the call addresses, the jump
-	 * addresses, and the range coder's control bytes - and three of them are
-	 * themselves the output of other coders in the same folder. Only the ones not
-	 * fed by a bind pair are packed streams, and there are four of them.
+	 * A folder used to be one packed stream, so pack_off and pack_size in the folder said all
+	 * there was to say. BCJ2 breaks that: it takes FOUR inputs - the main stream, the call
+	 * addresses, the jump addresses, and the range coder's control bytes - and three of them are
+	 * themselves the output of other coders in the same folder. Only the ones not fed by a bind
+	 * pair are packed streams, and there are four of them. A table of their own, beside folder[],
+	 * because widening kof_7z_folder for them would have changed its stride; the folder's own
+	 * `first_pack` / `n_packs` say which rows are its.
 	 *
-	 * Widening kof_7z_folder would have moved every field after the one that grew
-	 * and changed the stride of the array, which is an ABI break for every module
-	 * compiled against the old layout. A table after the last member is not: the
-	 * offsets a module already reads stay where they were, and the struct simply
-	 * gets longer.
-	 *
-	 * pack_off and pack_size keep meaning the folder's FIRST packed stream, which
-	 * for every single-coder folder is still its only one.
+	 * pack_off and pack_size keep meaning the folder's FIRST packed stream, which for every
+	 * single-coder folder is still its only one.
 	 */
-	uint32_t n_pack;
-	uint32_t reserved4;
-	struct kof_7z_pack {
-		uint64_t off;          /* absolute, of the coded bytes */
-		uint64_t size;
-		uint32_t folder;       /* index into folder[] */
-		/*
-		 * Which BCJ2 input this stream feeds: 0 main, 1 call, 2 jump,
-		 * 3 the range coder. 0xffffffff when the folder is not BCJ2,
-		 * which is every folder with a single coder.
-		 */
-		uint32_t role;
-		/*
-		 * What this stream decodes to on its own, and with which settings.
-		 *
-		 * A BCJ2 folder is four coders, and three of them are separate LZMA
-		 * streams with separate properties and separate output lengths. The
-		 * folder record carries one of each because a folder used to be one
-		 * coder; carrying the rest here is what makes the three decodable
-		 * apart from one another.
-		 *
-		 * out_size is zero for a stream that is packed straight into its
-		 * consumer - the range coder's control bytes are not compressed.
-		 */
-		uint64_t out_size;
-		uint32_t coder;        /* KOF_7Z_CODER_* feeding this stream */
-		uint8_t  lc, lp, pb, reserved5;
-	} pack[KOF_7Z_MAX_PACK];
+	struct kof_7z_pack *pack;       /* n_pack of them */
+	uint32_t n_folders;       /* rows in `folder`: every folder the header lists that the
+				   * tables could take */
+	uint32_t n_pack;          /* rows in `pack` */
 };
 
 static inline const struct kof_7z_info *kof_7z(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_7z_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT FOLDER OF THE ARCHIVE, in the order the header lists them: row `*cursor`, and the
+ * cursor is advanced; NULL at the end. The folder's index - what kunp_static_entry takes - is the
+ * cursor minus one after the call. See kof_zip_next, which this is the same walk as.
+ */
+static inline const struct kof_7z_folder *kof_7z_next(const struct kof_obj_ctx *ctx,
+						      uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_7z_folder *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_SEVENZIP_H */

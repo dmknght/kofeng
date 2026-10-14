@@ -908,6 +908,8 @@ static inline int run_landed(struct kgenome_emu *e, int jumped, uint64_t next,
 
 enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 {
+	if (!e)
+		return KGENOME_EMU_STOP_FAULT;  /* as kgenome_emu_step answers it */
 	e->stop = KGENOME_EMU_STOP_BUDGET;
 	e->detail[0] = 0;
 	e->running = 1;
@@ -1105,8 +1107,10 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 		/*
 		 * Nothing to do, for a reason rather than by omission. The
 		 * fences order accesses between threads and there is one
-		 * thread; PAUSE hints at a spin loop; the prefetches move no
-		 * architectural state; ENDBR is a landing pad.
+		 * thread; PAUSE hints at a spin loop; the prefetches and the cache
+		 * writebacks move no architectural state; ENDBR is a landing pad;
+		 * SERIALIZE orders instructions on a machine that has no pipeline;
+		 * FWAIT waits for an x87 exception that is never pending here.
 		 */
 		case KGENOME_X86_I_NOP:
 		case KGENOME_X86_I_LFENCE: case KGENOME_X86_I_SFENCE: case KGENOME_X86_I_MFENCE:
@@ -1114,6 +1118,10 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 		case KGENOME_X86_I_PREFETCHT0: case KGENOME_X86_I_PREFETCHT1:
 		case KGENOME_X86_I_PREFETCHT2: case KGENOME_X86_I_PREFETCHNTA:
 		case KGENOME_X86_I_PREFETCHW:
+		case KGENOME_X86_I_PREFETCH: case KGENOME_X86_I_PREFETCHE: case KGENOME_X86_I_PREFETCHM:
+		case KGENOME_X86_I_PREFETCHWT1: case KGENOME_X86_I_PREFETCHIT0: case KGENOME_X86_I_PREFETCHIT1:
+		case KGENOME_X86_I_CLFLUSH: case KGENOME_X86_I_CLFLUSHOPT: case KGENOME_X86_I_CLWB:
+		case KGENOME_X86_I_CLDEMOTE: case KGENOME_X86_I_SERIALIZE: case KGENOME_X86_I_WAIT:
 			break;
 
 
@@ -1234,7 +1242,10 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 			    !kgenome_emu_op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
-			if (!n) break;                    /* no shift, no flags */
+			if (!n) {                         /* no shift, no flags, but a 32 bit register is still written */
+				kgenome_emu_op_keep(e, &ixp->op[0], a);
+				break;
+			}
 			a &= m;
 			switch (ixp->h.id) {
 			case KGENOME_X86_I_SAL:
@@ -1256,9 +1267,16 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 			    ixp->h.id == KGENOME_X86_I_SAL) {
 				if (n <= w && (a >> (w - n)) & 1u)
 					e->flags |= KGENOME_EMU_FL_CF;
+				/* SDM SHL: for a count of 1, OF = MSB(result) XOR CF. */
+				if (n == 1 && (((r >> (w - 1u)) & 1u) != ((e->flags & KGENOME_EMU_FL_CF) ? 1u : 0u)))
+					e->flags |= KGENOME_EMU_FL_OF;
 			} else if (ixp->h.id == KGENOME_X86_I_SHR) {
 				if (n <= w && (a >> (n - 1u)) & 1u)
 					e->flags |= KGENOME_EMU_FL_CF;
+				/* SDM SHR: for a count of 1, OF = MSB of the original operand.
+				 * (SAR by one clears OF, which fl_logic did.) */
+				if (n == 1 && ((a >> (w - 1u)) & 1u))
+					e->flags |= KGENOME_EMU_FL_OF;
 			} else {   /* SAR: bit n-1, or the sign once past the width */
 				unsigned cb = n <= w ? n - 1u : w - 1u;
 
@@ -1278,7 +1296,10 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 			    !kgenome_emu_op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
 			n = (unsigned)(b & (sz == 8 ? 63u : 31u));
-			if (!n) break;                    /* masked count 0: no flags */
+			if (!n) {                         /* masked count 0: no flags, a 32 bit register is still written */
+				kgenome_emu_op_keep(e, &ixp->op[0], a);
+				break;
+			}
 			a &= m;
 			rc = n % w;                       /* a rotate is modulo width */
 			if (ixp->h.id == KGENOME_X86_I_ROL)
@@ -1469,12 +1490,17 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 				goto unsupported;
 			break;
 
+		/* SDM CMOVcc: a 32 bit destination is zero-extended into the 64 bit register even
+		 * when the condition is false and nothing moves. */
 		case KGENOME_X86_I_CMOVcc:
 			if (!kgenome_emu_op_rd(e, ixp, &ixp->op[1], &b))
 				goto unsupported;
-			if (cond_true(e, kgenome_x86_cond(&ixp->h)) &&
-			    !kgenome_emu_op_wr(e, ixp, &ixp->op[0], b))
-				goto unsupported;
+			if (cond_true(e, kgenome_x86_cond(&ixp->h))) {
+				if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], b))
+					goto unsupported;
+			} else if (kgenome_emu_op_rd(e, ixp, &ixp->op[0], &a)) {
+				kgenome_emu_op_keep(e, &ixp->op[0], a);
+			}
 			break;
 
 		/* Sign of the accumulator into the whole of RDX/DX. */
@@ -1576,32 +1602,70 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 		 * the flags register as its multiplier.
 		 */
 		case KGENOME_X86_I_IMUL:
-			if (kgenome_x86_nform(&ixp->h) >= 3) {
-				if (!kgenome_emu_op_rd(e, ixp, &ixp->op[1], &a) ||
-				    !kgenome_emu_op_rd(e, ixp, &ixp->op[2], &b) ||
-				    !kgenome_emu_op_wr(e, ixp, &ixp->op[0], a * b))
+			/*
+			 * SDM IMUL two and three operand forms: the product is truncated to the
+			 * operand size, and CF = OF = 1 when the SIGNED product does not fit it.
+			 */
+			if (kgenome_x86_nform(&ixp->h) >= 3 || kgenome_x86_nform(&ixp->h) == 2) {
+				int three = kgenome_x86_nform(&ixp->h) >= 3;
+				int64_t sx, sy, prod;
+				int over;
+
+				if (!kgenome_emu_op_rd(e, ixp, &ixp->op[three ? 1 : 0], &a) ||
+				    !kgenome_emu_op_rd(e, ixp, &ixp->op[three ? 2 : 1], &b))
 					goto unsupported;
-			} else if (kgenome_x86_nform(&ixp->h) == 2) {
-				if (!kgenome_emu_op_rd(e, ixp, &ixp->op[0], &a) ||
-				    !kgenome_emu_op_rd(e, ixp, &ixp->op[1], &b) ||
-				    !kgenome_emu_op_wr(e, ixp, &ixp->op[0], a * b))
+				sx = (int64_t)kgenome_emu_sext(a, sz);
+				sy = (int64_t)kgenome_emu_sext(b, sz);
+				over = __builtin_mul_overflow(sx, sy, &prod);
+				if (!over && sz < 8)
+					over = (int64_t)kgenome_emu_sext((uint64_t)prod, sz) != prod;
+				if (!kgenome_emu_op_wr(e, ixp, &ixp->op[0], (uint64_t)sx * (uint64_t)sy))
 					goto unsupported;
+				kgenome_emu_fl_cfof(e, over);
 			} else {
 				/* One operand: the widening form, into RDX:RAX. */
 				uint64_t acc = kgenome_emu_reg_rd(e, KGENOME_EMU_RAX, sz, 0);
 				int64_t  x, y;
+				uint64_t ux, uy, hi;
 
 				if (!kgenome_emu_op_rd(e, ixp, &ixp->op[0], &b))
 					goto unsupported;
+
 				x = (int64_t)kgenome_emu_sext(acc, sz);
 				y = (int64_t)kgenome_emu_sext(b, sz);
-				kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, sz, 0, (uint64_t)(x * y));
-				if (sz < 8)
-					kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, sz, 0,
-					       (uint64_t)((x * y) >> (sz * 8u)));
+				ux = (uint64_t)x;
+				uy = (uint64_t)y;
+				hi = sz < 8 ? (ux * uy) >> (sz * 8u) : 0;      /* the product's upper half */
+				if (sz == 8) {
+					/* The high half of the signed 128-bit product: the unsigned
+					 * high half, less each operand's other factor when it is negative. */
+					uint64_t al = ux & 0xffffffffu, ah = ux >> 32;
+					uint64_t bl = uy & 0xffffffffu, bh = uy >> 32;
+					uint64_t m0 = al * bl, m1 = al * bh, m2 = ah * bl;
+					uint64_t carry = ((m0 >> 32) + (m1 & 0xffffffffu) +
+							  (m2 & 0xffffffffu)) >> 32;
+
+					hi = ah * bh + (m1 >> 32) + (m2 >> 32) + carry;
+					if (x < 0)
+						hi -= uy;
+					if (y < 0)
+						hi -= ux;
+				}
+				/* SDM IMUL one operand: CF = OF = 1 when the product is not the sign
+				 * extension of its low half (RDX:RAX, DX:AX, EDX:EAX, or AX for a byte). */
+				if (sz == 8)
+					kgenome_emu_fl_cfof(e, hi != ((int64_t)(ux * uy) < 0 ? ~(uint64_t)0 : 0));
 				else
-					kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, 8, 0,
-					       (uint64_t)((x < 0) != (y < 0) ? -1 : 0));
+					kgenome_emu_fl_cfof(e, (int64_t)kgenome_emu_sext(ux * uy, sz) != (int64_t)(ux * uy));
+				if (sz == 1) {
+					/* 8-bit: the whole 16-bit product lands in AX (AL
+					 * and AH), as MUL does - RDX is not written. It was
+					 * AL and DL, which left AH stale and clobbered DL. */
+					kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, 2, 0, ux * uy);
+				} else {
+					kgenome_emu_reg_wr(e, KGENOME_EMU_RAX, sz, 0, ux * uy);
+					kgenome_emu_reg_wr(e, KGENOME_EMU_RDX, sz, 0, hi);
+				}
 			}
 			break;
 
@@ -1673,6 +1737,8 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 				rc = kgenome_emu_run_x87(e, ixp);
 			if (rc == KGENOME_EMU_RUN_NOT_MINE)
 				rc = kgenome_emu_run_bcd(e, ixp);
+			if (rc == KGENOME_EMU_RUN_NOT_MINE)
+				rc = kgenome_emu_run_ext(e, ixp);
 			if (rc == KGENOME_EMU_RUN_FAULT)
 				goto fault;
 			if (rc == KGENOME_EMU_RUN_DONE)

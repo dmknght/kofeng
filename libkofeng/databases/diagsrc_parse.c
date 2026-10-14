@@ -596,7 +596,6 @@ static void dsrc_line(struct dsrc_cx *x, char *line)
 int kof_dsrc_parse(const char *text, size_t n, struct kof_dsrc *d,
 		   const struct kof_dsrc_report *r)
 {
-	char line[2048];
 	struct dsrc_cx x;
 	size_t at = 0;
 	char *code = kof_dsrc_blanked(text, n);
@@ -611,19 +610,21 @@ int kof_dsrc_parse(const char *text, size_t n, struct kof_dsrc *d,
 		return x.errs;
 	}
 	while (at < n) {
-		size_t e = at, len;
+		size_t e = at;
+		char ended;
 
 		while (e < n && text[e] != '\n')
 			e++;
-		len = e - at;
 		x.lineno++;
-		if (len >= sizeof line)
-			len = sizeof line - 1u;
-		memcpy(line, code + at, len);
-		line[len] = 0;
+		/* THE LINE IS READ IN PLACE, ended at its newline and restored: the
+		 * condition parse below wants the newlines. It was copied into 2048
+		 * bytes and cut there, so a declaration after column 2047 was never
+		 * seen and nothing said so. */
+		ended = code[e];
+		code[e] = 0;
+		dsrc_line(&x, code + at);
+		code[e] = ended;
 		at = e < n ? e + 1u : e;
-
-		dsrc_line(&x, line);
 	}
 	d->lines = x.lineno;
 	x.errs += cond_parse(code, n, d, r);

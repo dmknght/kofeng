@@ -123,13 +123,8 @@ static void case_b64_quota(unsigned n)
 	}
 	CK(kof_exe_unb64(t.p, t.n) != 0);
 	/* Every command carries its payload, so every payload has to come out plain -
-	 * a payload left encoded is a literal no rule can match, and nothing said so. */
-	if (n <= 6u)
-		CK(count_of(t.p, t.n, "KOFB64", n) == n);     /* the fixture decodes under the quota */
-	else
-		KM_CHECK(count_of(t.p, t.n, "KOFB64", n) == n,
-			 "12 `base64 -d` commands in one object: all 12 payloads decoded",
-			 "B64_MAX_PAY executables.c:284 lost: payloads after the 8th in a range stay encoded, no signal");
+	 * a payload left encoded is a literal no rule can match. There is no quota. */
+	CK(count_of(t.p, t.n, "KOFB64", n) == n);
 	free(t.p);
 }
 
@@ -150,12 +145,7 @@ static void case_b64_long(size_t plen)
 	tb_put(&t, e, strlen(e));
 	tb_puts(&t, " | base64 -d | sh\n");
 	(void)kof_exe_unb64(t.p, t.n);
-	if (plen < 40000u)
-		CK(count_of(t.p, t.n, "KOFLONG", 1) == 1);     /* the fixture decodes under the bound */
-	else
-		KM_CHECK(count_of(t.p, t.n, "KOFLONG", 1) == 1,
-			 "a 90000 byte payload piped to `base64 -d` is decoded",
-			 "B64_PAY_MAX executables.c:274 lost: a payload over 65536 characters is not decoded, no signal");
+	CK(count_of(t.p, t.n, "KOFLONG", 1) == 1);     /* no bound on how long a payload is */
 	free(e);
 	free(plain);
 	free(t.p);
@@ -179,12 +169,7 @@ static void case_hex_quota(unsigned n)
 		tb_puts(&t, line);
 	}
 	CK(kof_exe_unhex(t.p, t.n) != 0);
-	if (n <= 20u)
-		CK(count_of(t.p, t.n, "KOFHEX", n) == n);
-	else
-		KM_CHECK(count_of(t.p, t.n, "KOFHEX", n) == n,
-			 "40 hex-spelled strings in one object: all 40 decoded",
-			 "HEX_MAX_PAY executables.c:877 lost: bare hex payloads after the 32nd stay encoded, no signal");
+	CK(count_of(t.p, t.n, "KOFHEX", n) == n);
 	free(t.p);
 }
 
@@ -208,12 +193,7 @@ static void case_hex_quoted(unsigned n)
 	}
 	tb_puts(&t, "];\n");
 	CK(kof_exe_unhex(t.p, t.n) != 0);
-	if (n <= 40u)
-		CK(count_of(t.p, t.n, "kofq", n) == n);
-	else
-		KM_CHECK(count_of(t.p, t.n, "kofq", n) == n,
-			 "80 hex-spelled quoted literals: all 80 decoded",
-			 "HEXQ_MAX executables.c:964 lost: quoted hex literals after the 64th in a range stay encoded, no signal");
+	CK(count_of(t.p, t.n, "kofq", n) == n);
 	free(t.p);
 }
 
@@ -235,12 +215,7 @@ static void case_pct_quota(unsigned n)
 		tb_puts(&t, line);
 	}
 	CK(kof_exe_decode(t.p, t.n) != 0);
-	if (n <= 20u)
-		CK(count_of(t.p, t.n, "KOFPCT", n) == n);
-	else
-		KM_CHECK(count_of(t.p, t.n, "KOFPCT", n) == n,
-			 "40 percent-escaped strings in one object: all 40 decoded",
-			 "PCT_MAX_PAY executables.c:1189 lost: percent-escaped runs after the 32nd stay encoded, no signal");
+	CK(count_of(t.p, t.n, "KOFPCT", n) == n);
 	free(t.p);
 }
 
@@ -275,9 +250,56 @@ static void case_rounds(void)
 	/* The first layer is the command line itself; each decode peels one. */
 	CK(layered(3) == 1u);
 	CK(layered(4) == 1u);     /* four rounds are enough for four layers */
-	KM_CHECK(layered(5) == 1u,
-		 "a payload wrapped in five base64 layers is peeled to the bottom",
-		 "DEC_MAX_ROUND executables.c:1144 lost: layers past the 4th round stay encoded, no signal");
+	CK(layered(5) == 1u);     /* no count of rounds: a round that peels nothing ends it */
+	CK(layered(12) == 1u);
+}
+
+/* ---- the one bound the layered decode keeps is a WORK bound, and it speaks ------- */
+
+/* "%" + "25" * (depth - 1) + "41", four of them joined by "-" (a "+" would decode to a space and split the run): one percent decode peels one "25" and leaves the
+ * run nearly as long, which is the shape a bound on rounds exists for. */
+static void nest_pct(struct tb *t, unsigned depth)
+{
+	unsigned i;
+
+	tb_puts(t, "%");
+	for (i = 1; i < depth; i++)
+		tb_puts(t, "25");
+	tb_puts(t, "41");
+}
+
+static void pct_nest_fixture(struct tb *t, unsigned depth, unsigned filler)
+{
+	unsigned i;
+
+	tb_puts(t, "x ");
+	for (i = 0; i < 4; i++) {
+		nest_pct(t, depth);
+		tb_puts(t, "-");
+	}
+	for (i = 0; i < filler; i++)
+		tb_puts(t, "a");
+	tb_puts(t, "\n");
+}
+
+static void case_decode_limit(void)
+{
+	struct kof_exe_decode_res r;
+	struct tb t = { 0 };
+	struct tb u = { 0 };
+
+	/* Honest layering ends of itself and reports nothing. */
+	pct_nest_fixture(&t, 4, 2000);
+	CK(kof_exe_decode_ex(t.p, t.n, &r) != 0);
+	CK(r.limit == 0u && r.dropped == 0u && r.rounds >= 2u);
+	/* A nest as deep as the object is long peels a layer a round over the whole
+	 * run: the budget (eight times the object) ends it, and says so. */
+	pct_nest_fixture(&u, 900, 20000);
+	CK(kof_exe_decode_ex(u.p, u.n, &r) != 0);
+	CK((r.limit & KOF_EXE_DEC_WORK) != 0u);
+	CK(r.dropped > 0u && r.scanned <= 8u * u.n);
+	free(t.p);
+	free(u.p);
 }
 
 /* ---- script folding: FOLD_MAX_VARS = 64 ---------------------------------------- */
@@ -299,12 +321,7 @@ static void case_fold_vars(unsigned fill)
 	tb_puts(&t, "$p='KOFFOLD';$q='MARKER!';$r=$p.$q;\n");
 	n = kof_script_fold(lx, t.p, (uint32_t)t.n, out, sizeof out);
 	CK(lx != NULL);
-	if (fill < 20u) {
-		CK(n >= 14u && memmem(out, n, "KOFFOLDMARKER!", 14) != NULL);
-	} else
-	KM_CHECK(n >= 14u && memmem(out, n, "KOFFOLDMARKER!", 14) != NULL,
-		 "a constant built from two variables defined after 64 other variables is folded",
-		 "FOLD_MAX_VARS script_norm.c:1077 lost: the 65th and later variable is not remembered, the join built from it is not folded, no signal");
+	CK(n >= 14u && memmem(out, n, "KOFFOLDMARKER!", 14) != NULL);
 	free(t.p);
 }
 
@@ -327,13 +344,48 @@ static void case_fold_depth(unsigned levels)
 		tb_puts(&t, ")");
 	tb_puts(&t, ";\n");
 	n = kof_script_fold(lx, t.p, (uint32_t)t.n, out, sizeof out);
-	if (levels <= 8u)
-		CK(n == 14u && memmem(out, n, "KOFDEPTHMARKER", 14) != NULL);
-	else
-		KM_CHECK(n == 14u && memmem(out, n, "KOFDEPTHMARKER", 14) != NULL,
-			 "str_replace nested 24 deep around a constant is folded",
-			 "FOLD_MAX_DEPTH script_norm.c:1078 lost: a statement nested past 16 levels is not folded, no signal");
+	CK(n == 14u && memmem(out, n, "KOFDEPTHMARKER", 14) != NULL);
 	free(t.p);
+}
+
+/* ---- folding: what the folder keeps as a bound speaks, and the table is not one -- */
+
+static void case_fold_limit(void)
+{
+	const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
+	struct tb t = { 0 };
+	struct tb u = { 0 };
+	uint8_t out[512];
+	uint32_t n, lim = 0;
+	unsigned i;
+	char line[64];
+
+	/* Five thousand variables ahead of the join: a table, not a bound. */
+	tb_puts(&t, "<?php\n");
+	for (i = 0; i < 5000u; i++) {
+		snprintf(line, sizeof line, "$f%04u='x';\n", i);
+		tb_puts(&t, line);
+	}
+	tb_puts(&t, "$p='KOFFOLD';$q='MARKER!';$r=$p.$q;\n");
+	n = kof_script_fold_ex(lx, t.p, (uint32_t)t.n, out, sizeof out, &lim);
+	CK(n >= 14u && memmem(out, n, "KOFFOLDMARKER!", 14) != NULL);
+	CK(lim == 0u);
+	/* A redefinition does not displace the first, as before. */
+	tb_puts(&t, "$p='OTHER';$s=$p.$q;\n");
+	n = kof_script_fold_ex(lx, t.p, (uint32_t)t.n, out, sizeof out, &lim);
+	CK(n >= 14u && lim == 0u);
+	/* The recursion bound is stack, kept, and said when it is met. */
+	tb_puts(&u, "<?php $a=");
+	for (i = 0; i < 300u; i++)
+		tb_puts(&u, "str_replace('~','',");
+	tb_puts(&u, "'KOF~DEPTH'");
+	for (i = 0; i < 300u; i++)
+		tb_puts(&u, ")");
+	tb_puts(&u, ";\n");
+	n = kof_script_fold_ex(lx, u.p, (uint32_t)u.n, out, sizeof out, &lim);
+	CK(n == 0u && (lim & KOF_FOLD_DEPTH) != 0u);
+	free(t.p);
+	free(u.p);
 }
 
 /* ---- reg: KOF_REG_MAX_EXTENTS = 2048 -------------------------------------------- */
@@ -368,7 +420,7 @@ static void le32(uint8_t *p, uint32_t v) { le16(p, v & 0xffffu); le16(p + 2, v >
 
 static void case_zip_tar_flag(void)
 {
-	unsigned n = KOF_ZIP_MAX_ENTRIES + 10u, i;
+	unsigned n = 4106u, i;      /* the fixed table was 4096 */
 	size_t cap = (size_t)n * 160u + 64u, at = 0, cd;
 	uint8_t *f = calloc(1, cap);
 	struct kof_zip_info *z = calloc(1, sizeof *z);
@@ -412,15 +464,28 @@ static void case_zip_tar_flag(void)
 	le32(f + at + 12, (uint32_t)(at - cd));
 	le32(f + at + 16, (uint32_t)cd);
 	at += 22u;
+	/*
+	 * The table is as long as the directory, so no count of entries is a limit: with no
+	 * ledger set (a caller that keeps no account) every one is read and nothing is "full".
+	 * What can stop the walk is the ledger, and it REPORTS: the room below holds a couple of thousand
+	 * hundred rows, so the walk ends there with ENTRIES_FULL and the account never
+	 * passed what it was given.
+	 */
 	CK(kof_zip_parse(kof_buf_make(f, at), z, &ctx) != 0);
-	CK(z->n_entries == KOF_ZIP_MAX_ENTRIES);
+	CK(z->n_entries == n && !(z->anomalies & KOF_ZIP_ANOM_ENTRIES_FULL));
+	z->mem.room = 128u * 1024u;
+	CK(kof_zip_parse(kof_buf_make(f, at), z, &ctx) != 0);
+	CK(z->n_entries > 0u && z->n_entries < n);
 	CK((z->anomalies & KOF_ZIP_ANOM_ENTRIES_FULL) != 0);   /* REPORTS: the parse flag */
+	CK(z->mem.held <= 128u * 1024u);
+	kof_zip_release(z);
 	free(z);
 	free(f);
 
 	{
+		/* tar, the same way: no count is a limit, the ledger is, and it REPORTS */
 		struct kof_tar_info *t = calloc(1, sizeof *t);
-		unsigned m = KOF_TAR_MAX_ENTRIES + 10u, k, sum, j;
+		unsigned m = 2048u + 10u, k, sum, j;
 		uint8_t *g = calloc((size_t)m + 2u, 1024u);
 
 		memset(&ctx, 0, sizeof ctx);
@@ -442,7 +507,13 @@ static void case_zip_tar_flag(void)
 		}
 		k = m * 1024u + 1024u;
 		CK(kof_tar_parse(kof_buf_make(g, k), t, &ctx) != 0);
-		CK((t->anomalies & KOF_TAR_ANOM_ENTRIES_FULL) != 0);  /* REPORTS */
+		CK(t->n_entries == m && !(t->anomalies & (KOF_TAR_ANOM_ENTRIES_FULL | KOF_TAR_ANOM_EXTENTS_FULL)));
+		t->mem.room = 64u * 1024u;
+		CK(kof_tar_parse(kof_buf_make(g, k), t, &ctx) != 0);
+		CK(t->n_entries > 0u && t->n_entries < m);
+		CK((t->anomalies & (KOF_TAR_ANOM_ENTRIES_FULL | KOF_TAR_ANOM_EXTENTS_FULL)) != 0);  /* REPORTS */
+		CK(t->mem.held <= 64u * 1024u);
+		kof_tar_release(t);
 		free(g);
 		free(t);
 	}
@@ -465,6 +536,8 @@ int main(void)
 	case_fold_vars(70);
 	case_fold_depth(6);
 	case_fold_depth(24);
+	case_fold_limit();
+	case_decode_limit();
 	case_reg_extents();
 	case_zip_tar_flag();
 	return fails != 0 || km_failed();

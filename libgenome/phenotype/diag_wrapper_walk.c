@@ -23,12 +23,13 @@ int kgenome_diag_wrapper_push_u64(uint64_t **v, uint32_t *n, uint32_t *cap, uint
 	return 1;
 }
 
-/* The one kernel-entry test is kgenome_diag_kernel_entry (nodes.c). */
+/* The one kernel-entry test is kgenome_diag_kernel_entry (sweep_cand.c); how an instruction is
+ * put to it - `int 0x80` is the vector in the first operand - is kgenome_diag_wrapper_entry_test
+ * (private header), for the walk's cell instruction and for a trace instruction alike. */
 int kgenome_diag_wrapper_is_kernel_entry(const struct kgenome_diag_wrapper_ctx *c, const struct kgenome_diag_wrapper_insn *in)
 {
-	return kgenome_diag_kernel_entry(c->obj, in->op,
-				     in->n_op && in->o[0].kind == KGENOME_CELL_O_IMM &&
-				     in->o[0].v == 0x80, c->base + in->at);
+	return kgenome_diag_wrapper_entry_test(c, in->op, in->n_op && in->o[0].kind == KGENOME_CELL_O_IMM &&
+					  in->o[0].v == 0x80, in->at);
 }
 
 /*
@@ -51,13 +52,27 @@ int kgenome_diag_wrapper_is_kernel_entry(const struct kgenome_diag_wrapper_ctx *
  * stream cut to 4 KiB, 150 KiB, 2 MiB and 8 MiB, which makes the prefix, the
  * seek-into-the-middle and the decode-after-the-end paths carry most of it. An
  * offset the trace does not hold is decoded exactly as before. The code below has
- * ONE decoder entry, kgenome_diag_wrapper_decode(), for both.
+ * ONE decoder, kgenome_cell_step: pass_a takes the instruction it returns and packs it
+ * into the record as it stands (trace_put reads a struct kgenome_cell_insn; nothing is
+ * converted to another form first), and kgenome_diag_wrapper_decode() is the same
+ * call turned into the form the readers use, for an offset the trace does not hold.
  *
- * WHAT A winsn LEAVES OUT of struct kgenome_cell_insn: `cond` and `target_va`, which
- * nothing here reads, `wmask` above bit 15 (only the sixteen general registers
- * are tracked), and the displacement/immediate that the operand's kind makes
+ * WHO READS IT. The wrapper resolution (pass_b, summarise: diag_wrapper_trace.c, isrc),
+ * the xref sweep (kgenome_diag_code_run) and the syscall sweep (diag_sweep.c), which gets
+ * it as the decode source of its own cursor (kgenome_diag_walk_hold). MEASURED over 254
+ * static ELF before the sweep read it: 66.6 M decode calls, 59.9 M distinct offsets, and
+ * 5.08 M of the repeats were the sweep decoding what this walk held.
+ *
+ * WHAT A winsn LEAVES OUT of struct kgenome_cell_insn: `target_va`, which nothing here
+ * reads (it is the relative operand added to the end of the instruction, and is made
+ * again where it is wanted), `wmask` above bit 15 (only the sixteen general registers
+ * are tracked) and the displacement/immediate that the operand's kind makes
  * meaningless. Leaving them out is what lets it be packed; reading one would
- * not compile.
+ * not compile. `cond` is kept (it rides in the record's flags byte) because a record also
+ * answers a cursor, which must get the instruction the decoder returns: an instruction
+ * whose wmask has a bit above 15, or whose flags or cond do not fit a nibble, is not
+ * recorded at all and its segment's trace ends there (trace_put) - none of the x86
+ * decoder's outputs is such, and decode_held.c reads every offset of random code to say so.
  *
  * THE BOUND IS ON MEMORY, NOT ON WHAT IS FOUND. The record stream is limited to
  * W_TRACE_BYTES and its index (one entry per W_TRACE_EVERY records, 8 bytes, at
@@ -107,7 +122,7 @@ static void trace_give_up(struct kgenome_diag_wrapper_seg *g)
 
 /* Keep what pass_a saw. Once a segment has been given up it stays given up: a
  * trace is a prefix of the walk and never has a hole in it. */
-static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const struct kgenome_diag_wrapper_insn *w)
+static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const struct kgenome_cell_insn *w)
 {
 	struct kgenome_diag_wrapper_seg *g = &c->wk->tseg[seg];
 	uint8_t rec[W_REC_MAX], *p = rec + 7;
@@ -117,6 +132,11 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 
 	if (g->given_up)
 		return;
+	/* The record could not say what was decoded: it is not made, and the segment's trace ends here. */
+	if ((w->wmask >> 16) || w->n_op > 3u || w->cond > 15u || w->flags > 15u) {
+		trace_give_up(g);
+		return;
+	}
 	first = !(g->n % W_TRACE_EVERY);
 	/* An offset or a target that does not fit 32 bits: the image is not one
 	 * this record can hold (size is checked at open, a target is not). */
@@ -142,17 +162,21 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 	}
 	ctl |= (unsigned)w->n_op << KGENOME_DIAG_WRAPPER_TRACE_NOP_SHIFT;
 	for (i = 0; i < w->n_op; i++) {
-		const struct kgenome_diag_wrapper_op *o = &w->o[i];
+		const struct kgenome_cell_operand *o = &w->o[i];
 
+		/* What a consumer of the walk reads of an operand: the value is the displacement of a
+		 * memory operand, the immediate of an immediate or a relative offset, nothing of a register. */
 		p[0] = o->kind; p[1] = o->reg; p[2] = o->index; p[3] = o->scale;
 		p[4] = o->size; p[5] = o->flags; p[6] = o->seg;
-		p = put_vz(p + 7, o->v);
+		p = put_vz(p + 7, o->kind == KGENOME_CELL_O_MEM ? o->disp
+				: o->kind == KGENOME_CELL_O_IMM || o->kind == KGENOME_CELL_O_REL
+				  ? (int64_t)o->imm : 0);
 	}
 	rec[0] = (uint8_t)(p - rec);
 	rec[1] = (uint8_t)ctl;
 	rec[2] = w->op;
 	rec[3] = w->len;
-	rec[4] = w->flags;
+	rec[4] = (uint8_t)(w->flags | (w->cond << 4));
 	rec[5] = (uint8_t)w->wmask;
 	rec[6] = (uint8_t)(w->wmask >> 8);
 
@@ -160,11 +184,15 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 		size_t nc = c->wk->cap_tr ? (size_t)c->wk->cap_tr * 2u : 1u << 16;
 		uint8_t *nt;
 
-		if (nc > W_TRACE_BYTES)
-			nc = W_TRACE_BYTES;
+		const size_t lim = c->wk->cap_bytes && c->wk->cap_bytes < W_TRACE_BYTES
+				 ? (size_t)c->wk->cap_bytes : (size_t)W_TRACE_BYTES;
+
+		if (nc > lim)
+			nc = lim;
 		if (c->wk->n_tr + rec[0] > nc ||
 		    !wtrace_charge(c->wk, nc - c->wk->cap_tr) ||
 		    !(nt = realloc(c->wk->tr, nc))) {
+			c->wk->capped = 1;
 			trace_give_up(g);
 			return;
 		}
@@ -227,50 +255,12 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
  * position is decoded afresh. Rule 4: a bound on memory, never on what the
  * sweep sees.
  *
- * WHAT A TRACE RECORD LEAVES OUT of a kgenome_cell_insn is put back here: `cond` is not
- * read by the observer, `target_va` is the one decode_x86.c computes (the
- * relative operand added to the end of the instruction - the trace is x86's, and
- * only x86's), and operands beyond the three a kgenome_cell_insn holds do not exist.
+ * WHAT A TRACE RECORD LEAVES OUT of a kgenome_cell_insn is put back by
+ * kgenome_diag_wrapper_cinsn (private header): `target_va` is the one decode_x86.c
+ * computes (the relative operand added to the end of the instruction - the trace is
+ * x86's, and only x86's), and operands beyond the three a kgenome_cell_insn holds do not
+ * exist. The sweep's cursor is answered by the same function (diag_wrapper_trace.c).
  */
-static void cinsn_of(struct kgenome_cell_insn *ci, const struct kgenome_diag_wrapper_insn *w)
-{
-	unsigned i;
-
-	memset(ci, 0, sizeof *ci);
-	ci->op = w->op;
-	ci->len = w->len;
-	ci->n_op = w->n_op;
-	ci->flags = w->flags;
-	ci->wmask = w->wmask;
-	ci->at = w->at;
-	ci->at_va = w->at_va;
-	ci->target = w->target;
-	ci->target_va = KGENOME_BROKEN;
-	for (i = 0; i < w->n_op; i++) {
-		const struct kgenome_diag_wrapper_op *o = &w->o[i];
-		struct kgenome_cell_operand *d = &ci->o[i];
-
-		d->kind = o->kind;
-		d->reg = o->reg;
-		d->index = o->index;
-		d->scale = o->scale;
-		d->size = o->size;
-		d->flags = o->flags;
-		d->seg = o->seg;
-		if (o->kind == KGENOME_CELL_O_MEM)
-			d->disp = o->v;
-		else if (o->kind == KGENOME_CELL_O_IMM || o->kind == KGENOME_CELL_O_REL)
-			d->imm = (uint64_t)o->v;
-		if (o->kind == KGENOME_CELL_O_REL)
-			ci->target_va = w->at_va + w->len +
-					(uint64_t)(int64_t)(int32_t)d->imm;
-	}
-	for (; i < 3u; i++) {
-		ci->o[i].kind = KGENOME_CELL_O_NONE;
-		ci->o[i].reg = ci->o[i].index = ci->o[i].seg = KGENOME_CELL_REG_NONE;
-	}
-}
-
 void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 {
 	struct kgenome_diag_walk *wk = rq->wk;
@@ -320,7 +310,7 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 		}
 		if (pk_ok && pk.at == at && at + pk.len <= end &&
 		    pk.at_va == at + (uint64_t)delta) {
-			cinsn_of(&ci, &pk);
+			kgenome_diag_wrapper_cinsn(&ci, &pk);
 			fn(user, &ci);
 			at += pk.len;
 			if (st)
@@ -384,7 +374,7 @@ void kgenome_diag_code_run(const struct kgenome_diag_code_req *rq)
 static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off, uint64_t n)
 {
 	struct kgenome_cell_cur k;
-	struct kgenome_diag_wrapper_insn in;
+	struct kgenome_cell_insn in;
 	struct kgenome_diag_wrapper_seg *g = &c->wk->tseg[seg];
 
 	/* Whether the instruction before ended a function's straight line. */
@@ -401,7 +391,7 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 	if (!kgenome_cell_seek(&k, off, 0))
 		return 1;
 	while (k.at < off + n) {
-		if (!kgenome_diag_wrapper_decode(c, &k, &in)) {
+		if (!kgenome_cell_step(&k, &c->sp, &in)) {
 			k.at++;                 /* data in the code: step over it */
 			continue;
 		}
@@ -424,7 +414,9 @@ static int pass_a(struct kgenome_diag_wrapper_ctx *c, unsigned seg, uint64_t off
 			 */
 			if (!kgenome_diag_wrapper_push_u64(&c->wk->tgt, &c->wk->n_tgt, &c->wk->cap_tgt, in.target))
 				return 0;
-		} else if (c->wk->sites && kgenome_diag_wrapper_is_kernel_entry(c, &in)) {
+		} else if (c->wk->sites &&
+			   kgenome_diag_wrapper_entry_test(c, in.op, in.n_op && in.o[0].kind == KGENOME_CELL_O_IMM &&
+						     in.o[0].imm == 0x80u, in.at)) {
 			if (!kgenome_diag_wrapper_push_u64(&c->wk->site, &c->wk->n_site, &c->wk->cap_site, in.at))
 				return 0;
 		}
@@ -466,18 +458,25 @@ void kgenome_diag_wrapper_walk_drop_trace(struct kgenome_diag_walk *wk)
 	wk->ix = NULL;
 	wk->n_tr = wk->cap_tr = wk->n_ix = wk->cap_ix = 0;
 	wk->has_trace = 0;
+	wk->h_p = wk->h_end = NULL;     /* the cursor's place in a stream that is gone */
 	memset(wk->tseg, 0, sizeof wk->tseg);
 }
 
 static void walk_reset(struct kgenome_diag_walk *wk)
 {
 	struct kgenome_ledger *lg = wk->lg;
+	uint32_t runs = wk->runs;
+	const uint64_t cap_bytes = wk->cap_bytes;
+	const uint32_t capped = wk->capped;
 
 	kgenome_diag_wrapper_walk_drop_trace(wk);
 	free(wk->tgt);
 	free(wk->site);
 	memset(wk, 0, sizeof *wk);
 	wk->lg = lg;                    /* who holds the walk is not part of what it holds */
+	wk->runs = runs;                /* nor how many times it has been made */
+	wk->cap_bytes = cap_bytes;      /* nor what its caller allows it */
+	wk->capped = capped;
 }
 
 /*
@@ -510,6 +509,27 @@ void kgenome_diag_walk_free(struct kgenome_diag_walk *wk)
 	free(wk);
 }
 
+void kgenome_diag_walk_trim(struct kgenome_diag_walk *wk)
+{
+	kgenome_diag_wrapper_walk_drop_trace(wk);
+}
+
+void kgenome_diag_walk_set_cap(struct kgenome_diag_walk *wk, uint64_t trace_bytes)
+{
+	if (wk)
+		wk->cap_bytes = trace_bytes;
+}
+
+uint32_t kgenome_diag_walk_capped(const struct kgenome_diag_walk *wk)
+{
+	return wk ? wk->capped : 0;
+}
+
+uint32_t kgenome_diag_walk_runs(const struct kgenome_diag_walk *wk)
+{
+	return wk ? wk->runs : 0;
+}
+
 /* The walk of the executable segments of an ELF, through celllysis, whichever
  * architecture it has a decoder for. Kernel-entry sites are x86's and are
  * recorded for x86 only. 1 when it holds the answer. */
@@ -527,6 +547,7 @@ int kgenome_diag_walk_ensure(struct kgenome_diag_walk *wk, const struct kgenome_
 	    (wk->has_trace || !want_trace))
 		return 1;
 	walk_reset(wk);
+	wk->runs++;
 	memset(&c, 0, sizeof c);
 	c.obj = obj;
 	c.base = base;
@@ -537,6 +558,7 @@ int kgenome_diag_walk_ensure(struct kgenome_diag_walk *wk, const struct kgenome_
 	c.wk = wk;
 	wk->base = base;
 	wk->size = size;
+	wk->arch = obj->arch;
 	wk->sites = x86;
 	wk->has_trace = want_trace && x86;
 	wk->tr_on = wk->has_trace && size <= 0xffffffffu;
@@ -564,6 +586,7 @@ struct kgenome_diag_walk *kgenome_diag_scan_walk(struct kgenome_diag_scan *s)
 {
 	if (!s->walk) {
 		s->own_walk = kgenome_diag_walk_new();
+		s->own |= KGENOME_DIAG_OWN_WALK;
 		s->walk = s->own_walk;
 		kgenome_diag_walk_bind(s->walk, &s->led);
 	}

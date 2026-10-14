@@ -41,6 +41,7 @@
 #include <stddef.h>
 #include "tar_parse.h"
 #include "../../../kofcore/runlist.h"
+#include "../../../kofcore/tabgrow.h"
 #include "../../../kofcore/entryname.h"
 
 #include <string.h>
@@ -217,38 +218,34 @@ int kof_tar_sniff(kof_buf file)
 	       memcmp(file.p + KOF_TAR_MAGIC_AT, "ustar", 5) == 0;
 }
 
+void kof_tar_release(struct kof_tar_info *t)
+{
+	kof_tab_free((void **)&t->run);
+	kof_tab_free((void **)&t->entry);
+	t->n_runs = 0;
+	t->n_entries = 0;
+	t->mem.held = 0;
+	t->mem.rows = 0;
+}
+
+KOF_VIEW_HANDLES(tar, struct kof_tar_info, entry, n_entries)
+
 int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 {
 	struct tw s;
-	uint64_t at = 0;
+	uint64_t at = 0, room, rows_limit;
+	uint32_t cap_entry = 0;
 
 	/*
-	 * THE HEADER ONLY, NOT THE 229448 BYTES OF ARRAYS BEHIND IT.
-	 *
-	 * The same change, for the same reason, as the one at the top of
-	 * zip_parse.c: this cleared the whole view for every TAR object
-	 * scanned, whatever was in it, and the two arrays at the tail are all
-	 * but a few hundred bytes of it.
-	 *
-	 * WHAT MAKES IT SAFE TO LEAVE THE TAIL DIRTY: nothing reads past the
-	 * count. Every consumer - this parser, kofexaminer, bases/decomp - loops
-	 * `i < t->n_entries`, and the runs go through kof_runs_* which bounds
-	 * on n_runs. Both counts are IN the header, so both start at zero here:
-	 * a parse that gives up early leaves the arrays untouched AND the counts
-	 * at zero, which reads as "no entries" rather than as the last file's.
-	 * Each slot is cleared as it is claimed.
-	 *
-	 * THE ASSERT IS THE GUARD. The two arrays are the last two members and
-	 * this clears everything before them; a field added AFTER them would
-	 * silently stop being cleared. Adding one breaks the build instead.
+	 * THE WHOLE VIEW IS CLEARED, because it is small now: the 229448 bytes of arrays that made
+	 * a header-only clear worth an assert are tables the parse allocates. What the previous
+	 * parse of this view left behind is let go first; the caller's room is the one field read
+	 * before the clear and put back after it (zip_parse.c says the same).
 	 */
-	_Static_assert(offsetof(struct kof_tar_info, run) +
-		       sizeof ((struct kof_tar_info *)0)->run +
-		       sizeof ((struct kof_tar_info *)0)->entry ==
-		       sizeof(struct kof_tar_info),
-		       "kof_tar_info gained a field after its arrays: the header-only "
-		       "clear below would not reach it");
-	memset(t, 0, offsetof(struct kof_tar_info, run));
+	room = t->mem.room;
+	kof_tar_release(t);
+	memset(t, 0, sizeof *t);
+	t->mem.room = room;
 	t->version = KOF_TAR_INFO_VERSION;
 
 	if (!kof_tar_sniff(file))
@@ -258,11 +255,14 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 	memset(&s, 0, sizeof s);
 	s.f = file;
 	s.t = t;
-	kof_runs_init(&s.runs, t->run, KOF_TAR_MAX_EXTENTS,
-		      KOF_TAR_CLS_COUNT);
+	/* What the FILE can hold, and not what it says: an entry costs at least one header block
+	 * and makes at most KOF_TAR_RUNS_PER_ENTRY runs. */
+	rows_limit = file.n / KOF_TAR_BLOCK;
+	kof_runs_init_dyn(&s.runs, &t->mem, KOF_TAR_CLS_COUNT,
+			  (uint64_t)KOF_TAR_RUNS_PER_ENTRY * rows_limit + 1u);
 
 	/*
-	 * No bound on the loop beyond the object and the entry cap.
+	 * No bound on the loop beyond the object.
 	 *
 	 * Every iteration advances `at` by at least one block, so this reaches the
 	 * end of the object whatever the headers say - which is what makes tar the
@@ -289,9 +289,17 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 		    memcmp(file.p + at + KOF_TAR_MAGIC_AT, "ustar", 5) != 0)
 			break;      /* not a header: the archive ends here */
 
-		if (t->n_entries >= KOF_TAR_MAX_ENTRIES) {
-			t->anomalies |= KOF_TAR_ANOM_ENTRIES_FULL;
-			break;
+		/* One more row, or the walk stops HERE and says so: the headers that follow are in
+		 * the archive and not in the table. */
+		if (t->n_entries >= cap_entry) {
+			void *tab = t->entry;
+
+			if (!kof_tab_grow(&t->mem, &tab, &cap_entry, sizeof *t->entry,
+					  (uint64_t)t->n_entries + 1u, rows_limit)) {
+				t->anomalies |= KOF_TAR_ANOM_ENTRIES_FULL;
+				break;
+			}
+			t->entry = (struct kof_tar_entry *)tab;
 		}
 
 		e = &t->entry[t->n_entries];
@@ -367,8 +375,17 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 			 * claimed as a name here: this pseudo entry has none. */
 			t->anomalies |= KOF_TAR_ANOM_LONGNAME;
 			s.pend_off = e->data_off;
-			s.pend_len = size > T_NAME_LEN * 4u
-				     ? T_NAME_LEN * 4u : (uint32_t)size;
+			/*
+			 * THE WHOLE LONG NAME, NOT ITS FIRST 400 BYTES. A GNU @LongLink / pax
+			 * path has no field limit, and cutting it here (it was cut at
+			 * T_NAME_LEN * 4) made two members that differ only after byte 400 one
+			 * name, with nothing to say so. The range is where the name already is
+			 * in the file, so recording all of it costs nothing; what a name may
+			 * be is the engine's to judge (oc_name_limit: 4096, a name past that
+			 * is invalid and reported as such, never cut). A size that does not
+			 * fit 32 bits is saturated: it is invalid at any limit.
+			 */
+			s.pend_len = size > 0xffffffffull ? 0xffffffffu : (uint32_t)size;
 			break;
 		case KOF_TAR_T_PAX:
 		case KOF_TAR_T_PAX_GLOB:
@@ -411,7 +428,9 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 		t->anomalies |= KOF_TAR_ANOM_NO_END;
 
 	kof_runs_settle(&s.runs, t->region_bytes);
+	t->run = s.runs.v;
 	t->n_runs = s.runs.n;
+	t->mem.rows = t->n_entries;
 	if (s.runs.full)
 		t->anomalies |= KOF_TAR_ANOM_EXTENTS_FULL;
 	if (s.runs.clipped)

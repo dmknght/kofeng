@@ -58,6 +58,15 @@
  */
 #define KUNCOAT_RAR5_SCRATCH 0x400000u
 
+/*
+ * Decode one RAR5 entry into `out`. `out_cap` is the DECLARED SIZE of the entry and
+ * reaching it is OK (see rar3.h, which states the same contract for both: the
+ * decoder stops at the declared size; a filter block extending past it is not
+ * applied; ending short of it is TRUNCATED when the input ran out and CORRUPT
+ * otherwise; a NULL `in` with in_len > 0 or a NULL `out` with out_cap > 0 is
+ * KUNCOAT_BAD_ARG; `produced` may be NULL and is set in every case).
+ */
+
 enum kuncoat_status kuncoat_rar5_decode(const uint8_t *in, uint64_t in_len,
 				       uint8_t *out, uint64_t out_cap,
 				       uint8_t *scratch, uint64_t scratch_len,

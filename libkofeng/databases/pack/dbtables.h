@@ -27,6 +27,8 @@
 #include <kofmod/script.h>   /* kof_script_fam_mask - the subfamily test below */
 #include "../../kofcore/kofcore.h"   /* kof_crc32, kof_round_up */
 #include "dbcore.h"       /* KOF_STR_MAX_LEN, KOF_BLOB_MAX_CODE */
+#include "dbkix.h"        /* struct kof_kix: the block index a pack may carry */
+#include "../../kofcore/kofbudget.h"   /* struct kof_budget */
 
 struct kof_synd_set;   /* databases/pack/kofsyndrome.h - only a pointer is held */
 
@@ -57,7 +59,8 @@ typedef void (*kof_scan_fn)(const struct kof_obj_ctx *);
  * to kilobytes, and sizing every slot for the largest would have made the table
  * 131MB.
  */
-struct kof_multimatch_set;
+struct kofpix;
+struct kofpix_set;
 
 struct kof_str_ent {
 	uint32_t off;             /* into the pack's string pool */
@@ -114,6 +117,35 @@ struct kof_db_pack {
 	uint32_t                  n_desc; /* entries in it */
 	const uint8_t            *pool;   /* STR_POOL */
 	uint64_t                  pool_len;
+
+	/*
+	 * THE BLOCK INDEX TRAILER (pack/dbkix.h), when the pack has one.
+	 *
+	 * `fd` stays open for it, because the index is READ with pread and not mapped: a pack
+	 * truncated after load is then a short read and a status, never a signal. -1 when the pack
+	 * has no trailer and the descriptor was closed. `len` is what is MAPPED: the whole file for
+	 * a pack without a trailer, and only the part before it for one with - the index body is
+	 * never mapped. `kix` is the opened index until the matcher takes it (it is NULL after, and
+	 * the matcher closes it); `file_size` is the whole file.
+	 */
+	int                       fd;
+	uint64_t                  file_size;
+	int                       has_kix;
+	struct kof_kix_footer     foot;
+	struct kof_kix           *kix;
+	/*
+	 * THE PATTERN TABLE (detectors/pattern/kofpix.h), the same way: a part of the tail, read with pread
+	 * through `pix_sl` (sliced, checksummed), the descriptor shared with the block index. `pix` is
+	 * the open table, made after the load once the ledger can say how big its filter may be, from the
+	 * part when the pack has one and built in memory when it has not; NULL when there is none (the
+	 * pack declares no markers, or the ledger could not afford one: reported, and those markers are
+	 * answered by the exact per-marker path). `pix_in_ram` says which.
+	 */
+	int                       has_pix;
+	struct kof_kix_footer     pix_foot;
+	struct kof_slices         pix_sl;
+	struct kofpix            *pix;
+	int                       pix_in_ram;
 };
 
 /*
@@ -172,9 +204,11 @@ struct kof_module {
 	uint8_t  n_target;
 	uint8_t  target[KOF_TARGET_LIST_MAX];
 
-	uint32_t scan_mask;   /* 0: names no region, so cannot be skipped that way */
+	/* size_min before scan_mask, so that no padding sits between them: 144 bytes a module became 136 (a
+	 * module is the one record that is resident for every rule). */
 	uint64_t size_min;    /* 0: no minimum. No maximum by design - see
 			       * KOF_TARGET_SIZE_MIN in kofsig.h. */
+	uint32_t scan_mask;   /* 0: names no region, so cannot be skipped that way */
 	uint32_t arch_mask;   /* 0: any architecture */
 	uint32_t subtype_mask;/* 0: any kind of that format - see ctx->subtype */
 
@@ -237,6 +271,15 @@ struct kof_module {
 	 * a detector's is its maltype.
 	 */
 	uint8_t  kind;
+	/*
+	 * Does a diagnose name this module as a reader (KDIG_SEC_USERS carries the
+	 * source of each rule that calls it): it asks for the diagnose analysis,
+	 * which costs more than any search, so it is run after the cheap questions -
+	 * see db_index_tier_order. Worked out when the database is loaded, from the
+	 * source each module already carries; 0 when no diagnose names it, and for a
+	 * module whose source is unknown.
+	 */
+	uint8_t  reads_diag;
 
 	/* Where this module's source lives inside the bases tree, or 0. Read
 	 * with kof_db_source(). */
@@ -280,6 +323,16 @@ static inline int kof_module_targets(const struct kof_module *m, uint8_t target)
 		if (m->target[i] == target)
 			return 1;
 	return 0;
+}
+
+/*
+ * The kind of data a module asks for, which is the order the scan runs them in (cheapest first): 0 neither
+ * markers nor blocks, 1 blocks, 2 markers, 3 a diagnose names it as its reader. The one place the rule is
+ * written: the loader sorts the per-format lists by it and the walk merges two lists by it.
+ */
+static inline uint32_t kof_module_tier(const struct kof_module *m)
+{
+	return m->reads_diag ? 3u : m->n_str ? 2u : m->n_block ? 1u : 0u;
 }
 
 enum kof_precond {
@@ -368,10 +421,13 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
  * database of 300 lost the last 44 silently - tests/unit/caps_db.c. A database
  * over it is reported (kdb_diag_full), not silently truncated. */
 #define KOF_DB_MAX_DIAG       4096u
-#define KOF_DB_MAX_DIAG_NODE   32u
-#define KOF_DB_DIAG_NAME       48u
-/* Room for one diagnose's signs - see struct kof_diag.need. */
-#define KOF_DB_DIAG_NEEDS      (KOF_DIAG_MAX_NEED * KOF_DIAG_NEED_LEN)
+/* Nodes one diagnose may have: KOF_DIAG_MAX_NODE, which the source reader takes too. */
+#define KOF_DB_MAX_DIAG_NODE   KOF_DIAG_MAX_NODE
+/*
+ * A DIAGNOSE'S NAME IS WHAT THE RECORD CAN HOLD: its length is one byte, so 255
+ * characters and the terminator. It was 48, while the source reader accepted 63.
+ */
+#define KOF_DB_DIAG_NAME       256u
 
 /* One disease in the names table; `type` is a kof_maltype, or 0xff when only a
  * syndrome mentions the name and no detector declared it. */
@@ -396,7 +452,12 @@ struct kof_engine {
 	struct kof_diag      *diag;
 	struct kof_diag_node *diag_node;
 	char                 *diag_name;
-	char                 *diag_needs;
+	/* The string stores of the diagnoses (their signs and symbols), ONE BLOCK PER
+	 * PACK sized by the records it carries: a string takes no more store than the
+	 * record bytes it was read from, so no record overflows it. Freed with the
+	 * engine. */
+	char                **diag_arena;
+	uint32_t              n_diag_arena;
 	uint32_t              n_diag;
 	uint32_t              diag_room;   /* what the tables were allocated for */
 	int                   diag_full;   /* some diagnose was not loaded: over the bound */
@@ -404,6 +465,20 @@ struct kof_engine {
 	 * already loaded. Each is also named on stderr when met; this is what an
 	 * API caller can read - kdb_diag_collisions. */
 	uint32_t              diag_collide;
+	/*
+	 * WHAT THE LOADER COULD NOT READ, said where a caller can read it - the stderr
+	 * line each one also gets is for a person at a terminal, and a host linked to
+	 * the library never sees it.
+	 *   diag_refused   records that did not parse (a count, a length or a field
+	 *                  this build does not accept) or ran past their pack: each
+	 *                  is a diagnose that is absent, which a rule naming it reads
+	 *                  as an object that does not do the thing.
+	 *   diag_packs_refused  .kdig files not read whole: a header that does not add
+	 *                  up, a file past the allowance, a store it could not
+	 *                  allocate. Their records are in no count above.
+	 */
+	uint32_t              diag_refused;
+	uint32_t              diag_packs_refused;
 	/*
 	 * THE PROFILES, from syndromes.kdig beside the diagnoses: what a set of
 	 * diseases makes - see databases/pack/kofsyndrome.h. NULL when the
@@ -419,6 +494,18 @@ struct kof_engine {
 	struct kof_disease_ent *disease;
 	char                 *disease_pool;
 	uint32_t              n_disease;
+	/*
+	 * DOES ANYTHING THIS DATABASE HOLDS DECLARE A DISEASE - a module of any kind or
+	 * a diagnose. The verdict is read off the set of diseases an object has, so
+	 * only then can a detector reached after a detection add to it. Without one
+	 * no object has a set, and a scan that did not ask for every finding has
+	 * nothing to continue for. Worked out once, when the database is loaded.
+	 */
+	uint8_t               reads_diseases;
+	/* Scratch of the load, freed when it ends: the names the diagnoses' USERS
+	 * sections carried, to match against the modules' sources once. */
+	char                **diag_user;
+	uint32_t              n_diag_user, cap_diag_user;
 
 	/*
 	 * Detectors and unpackers, in separate arrays.
@@ -458,6 +545,10 @@ struct kof_engine {
 	 */
 	uint32_t            *mod_by_target;
 	uint32_t             mod_at[KOF_TARGET_COUNT + 1u];
+	/* The modules that name NO target (every format), once, at the end of mod_by_target's allocation;
+	 * kof_mod_walk merges this list with a format's own. NULL / 0 when there is none. */
+	uint32_t            *mod_any;
+	uint32_t             n_mod_any;
 
 	/*
 	 * HOW MANY MARKERS EACH REGION COULD HAVE LIVE, PER FORMAT - decided
@@ -465,7 +556,7 @@ struct kof_engine {
 	 *
 	 * multi_prepass needs one thing from the module list: whether a region
 	 * has at least KOF_MULTIMATCH_MIN_LIVE markers behind it, which is the
-	 * only question kof_multimatch_pick asks. It used to answer that by
+	 * only question the sweep's router asks (sx_multi_prepass). It used to answer that by
 	 * walking every module in the database, per object. At 200 000 modules
 	 * that walk measured 4,158,329,009 instructions - 15.4% of the scan and
 	 * the largest single item in the profile - to compare a total against
@@ -530,28 +621,49 @@ struct kof_engine {
 	 */
 	uint32_t             n_str;
 
-	uint32_t            *rng_tab;   /* a range is just a region mask, but named */
+	/*
+	 * The raw region masks of every range of every module, concatenated: SCRATCH OF THE LOAD (the loader
+	 * numbers the distinct masks from it, sums the live-marker caps and gives it back), NULL once the load
+	 * is over. What stays is one BYTE a range, rng_uid below, and the bits behind it, mask_bits: a range is
+	 * just a region mask, but named, and 4 bytes of mask per range was 4 bytes per rule in memory for a
+	 * handful of distinct values.
+	 */
+	uint32_t            *rng_tab;
 	uint32_t             n_rng;
 
 	/*
-	 * Every loaded pack's similarity blocks, laid end to end, and the
-	 * hashes they slice.
+	 * Every loaded pack's similarity blocks, laid end to end. A module's block_base says
+	 * where its own slice starts.
 	 *
-	 * One table for all packs rather than one per pack, because the matcher
-	 * builds a single inverted index over it - which is what makes a scan
-	 * cost the same whether one pack is loaded or twelve. A module's
-	 * block_base says where its own slice starts.
+	 * BORROWED from the pack's mapping when exactly one pack carries blocks (the usual case:
+	 * nothing is copied, and the table is the pack's own section), and a heap copy when
+	 * several do (16 bytes a block; their `first_hash` stay local to their own pack, since
+	 * the hash pools are not concatenated any more). The hashes themselves are NOT held:
+	 * the matcher's index lives in the pack (pack/dbkix.h) and reads them from there, so
+	 * what a database with blocks costs in memory does not follow its hash count. Only the
+	 * viewer reads this table (kof_inspect_mutation: mask, normalizer and count of each
+	 * block). `blk_owned` says whether it is to be freed.
 	 *
 	 * Empty in every build with no mutation rules, and an empty set costs an
 	 * index that is never consulted.
 	 */
 	struct kof_mutation_block *blk_tab;
 	uint32_t                 n_blk;
-	uint32_t                *blk_pool;
-	uint32_t                 n_blk_pool;
+	int                      blk_owned;
+	uint32_t                 n_blk_pool;   /* hashes in all of them: a count, the pool itself is not held */
 	/* The index built over the two above - see detectors/mutations/kofmutation.h. NULL
 	 * when there are no blocks. */
 	struct kof_mutation_set   *mutation;
+	/*
+	 * APPENDED: what building that index said, where a host can read it - see
+	 * kdb_mutation_status. `mutation_status` is the KOF_MTN_B_* word (0 is clean;
+	 * a REFUSED bit means `mutation` is NULL and similarity rules score nothing),
+	 * `mutation_bytes` what the index holds resident, shared by every scanner, and
+	 * `mutation_keys` its distinct hash values.
+	 */
+	uint32_t                   mutation_status;
+	uint32_t                   mutation_keys;
+	uint64_t                   mutation_bytes;
 
 	/*
 	 * The distinct region masks, densely numbered, and the id of each rng_tab
@@ -563,25 +675,35 @@ struct kof_engine {
 	 * so numbering them densely turns the second half of the key into something
 	 * small enough to multiply by.
 	 */
-	uint32_t            *rng_uid;   /* parallel to rng_tab */
+	uint8_t             *rng_uid;   /* one byte a range: the dense id of its mask (KOF_MAX_DISTINCT_MASKS is 256) */
 	uint32_t             n_masks;
 
 	/* Patterns the whole database declares, after identical ones are merged. */
 	uint32_t             n_uid;
 
 	/*
-	 * The multi-pattern matchers, one per region mask.
+	 * THE PATTERN TABLES, one per pack (kof_db_pack.pix), and what they say together.
 	 *
-	 * Owned here rather than by the scanner because the marker set is the
-	 * DATABASE's: built once when the packs are loaded, read-only after, and
-	 * therefore shared by every scanner thread. Building it per scanner would
-	 * duplicate a table sized by the base once per thread - the same mistake
-	 * the memo already refuses to make for the symbol block.
+	 * The marker set is the DATABASE's: opened once when the packs are loaded, read-only after, and
+	 * therefore shared by every scanner thread. Each scanner holds only a bounded context against
+	 * them (kofpix_ctx), so what a scanner costs does not follow the number of markers.
 	 *
-	 * NULL is not an error. It means every mask is answered the way it was
-	 * before this existed, one search per (marker, region).
+	 * `mask_bits` is the raw region bits behind each dense mask id, so a scan knows which regions a
+	 * mask is asking about (rng_uid is parallel to rng_tab, so the first entry carrying an id is as
+	 * good as any - they all carry the same bits, which is what made them one id).
+	 * `pix_regions` is the regions some table can sweep; `pix_status` is KOF_PIX_B_* (zero is clean),
+	 * `pix_bytes` what the tables hold in memory, `pix_markers` how many markers they key and
+	 * `pix_max_run` the longest run of markers sharing a key hash - kmatch_tables reads the last
+	 * two and kdb_pattern_status the others. NULL tables are not an error: every mask is then answered
+	 * one marker at a time, exactly.
 	 */
-	struct kof_multimatch_set *multi;
+	uint32_t            *mask_bits;      /* [n_masks] */
+	struct kofpix_set   *pix_set;        /* every pack's table, swept together (NULL: none) */
+	uint32_t             pix_regions;
+	uint32_t             pix_status;
+	uint32_t             pix_max_run;
+	uint64_t             pix_bytes;
+	uint64_t             pix_markers;
 
 	/*
 	 * The packs, kept mapped for their names alone.
@@ -647,7 +769,80 @@ struct kof_engine {
 	 * Diamorphine builds and the identical heuristic matched neither.
 	 */
 	uint32_t heur_scan_mask;
+
+	/* APPENDED (memory work): the engine's memory budget, the root of every ledger - see
+	 * kofcore/kofbudget.h. Allocated and freed by keng_open / keng_close (kofeng.c), NULL
+	 * for an engine made any other way, which then has no engine-level cap. */
+	struct kof_budget *budget;
 };
+
+/*
+ * THE MODULES FOR ONE FORMAT, in the order the scan runs them: the format's own list and the list of the
+ * modules that name no target, merged by (tier, module) - exactly the order each format had when a generic
+ * module was copied into all of them. With no index (it could not be allocated) it is the flat array, and
+ * the scan's own precondition drops what does not apply, as it always did.
+ */
+struct kof_mod_walk {
+	const struct kof_engine *e;
+	const uint32_t *a, *a_end, *b, *b_end;
+	uint32_t        flat, n_flat;
+	int             indexed;
+};
+
+static inline void kof_mod_walk_begin(struct kof_mod_walk *w, const struct kof_engine *e, uint32_t format)
+{
+	w->e = e;
+	w->a = w->a_end = w->b = w->b_end = NULL;
+	w->indexed = e->mod_by_target && format < KOF_TARGET_COUNT;
+	w->flat = 0;
+	w->n_flat = e->n_mods;
+	if (w->indexed) {
+		w->a = e->mod_by_target + e->mod_at[format];
+		w->a_end = e->mod_by_target + e->mod_at[format + 1u];
+		w->b = e->mod_any;
+		w->b_end = e->mod_any ? e->mod_any + e->n_mod_any : NULL;
+	}
+}
+
+/* How many modules the walk will yield: what the scan counts as not considered for the others. */
+static inline uint32_t kof_mod_walk_count(const struct kof_mod_walk *w)
+{
+	return w->indexed ? (uint32_t)(w->a_end - w->a) + (w->b ? (uint32_t)(w->b_end - w->b) : 0u) : w->n_flat;
+}
+
+/* The next module index; 0 at the end. */
+static inline int kof_mod_walk_next(struct kof_mod_walk *w, uint32_t *idx)
+{
+	if (!w->indexed) {
+		if (w->flat >= w->n_flat)
+			return 0;
+		*idx = w->flat++;
+		return 1;
+	}
+	if (w->a < w->a_end && (!w->b || w->b >= w->b_end)) {
+		*idx = *w->a++;
+		return 1;
+	}
+	if (w->b && w->b < w->b_end && w->a >= w->a_end) {
+		*idx = *w->b++;
+		return 1;
+	}
+	if (w->a < w->a_end) {
+		uint32_t x = *w->a, y = *w->b;
+		uint32_t tx = kof_module_tier(&w->e->mods[x]), ty = kof_module_tier(&w->e->mods[y]);
+
+		if (tx < ty || (tx == ty && x < y)) {
+			*idx = x;
+			w->a++;
+		} else {
+			*idx = y;
+			w->b++;
+		}
+		return 1;
+	}
+	return 0;
+}
+
 
 /* The name and type of a disease, from its id; NULL when the database does not
  * name it. The pointer lives as long as the engine. */

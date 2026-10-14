@@ -150,7 +150,8 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	if (n_sc == 1)
 		return kof_scan_walk(scs[0], path, opt, cb, user);
 
-	if ((opt->follow_symlinks ? stat : kof_lstat)(path, &sb) != 0)
+	/* lstat, never stat: the engine does not follow symlinks (kofoption.h). */
+	if (kof_lstat(path, &sb) != 0)
 		return KOF_ERR_OPEN;
 	/* A single file has nothing to spread. */
 	if (!S_ISDIR(sb.st_mode))
@@ -185,6 +186,8 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 		wk[i].cb       = cb;
 		wk[i].user     = user;
 		wk[i].w.sc     = scs[i] ? scs[i] : scs[0];
+		/* This scanner is one of n_sc that share the resident allowance. */
+		wk[i].w.sc->share = n_sc;
 		wk[i].w.opt    = opt;
 		wk[i].w.cb     = worker_cb;
 		wk[i].w.user   = &wk[i];
@@ -203,6 +206,9 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	prod.opt = opt;
 	prod.q   = started ? &q : NULL;
 	if (!started) {
+		for (i = 0; i < n_sc; i++)
+			if (scs[i])
+				scs[i]->share = 1;
 		/* No thread could be created: scan on this thread rather than
 		 * returning nothing, which is the answer a caller can still use. */
 		free(wk);
@@ -262,6 +268,12 @@ int kof_scan_walk_mt(struct kof_scanner **scs, unsigned n_sc, const char *path,
 	pthread_cond_destroy(&q.can_put);
 	pthread_cond_destroy(&q.can_take);
 	pthread_mutex_destroy(&cb_lock);
+
+	/* The walk is over: the scanners go back to holding an allowance of their own. */
+	for (i = 0; i < n_sc; i++)
+		if (scs[i])
+			scs[i]->share = 1;
+	scs[0]->share = 1;
 
 	rc = (int)total;
 	return rc;

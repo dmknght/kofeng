@@ -55,7 +55,8 @@ KOF_TARGET_CONTENT("RAR3/RAR5");
 void kof_unpack(const struct kof_obj_ctx *ctx)
 {
 	const struct kof_rar_info *r = kof_rar(ctx);
-	uint32_t i, opened = 0, packed = 0;
+	const struct kof_rar_entry *e;
+	uint32_t cur = 0, opened = 0, packed = 0;
 	/*
 	 * WHY an entry was not opened, one counter per reason.
 	 *
@@ -75,9 +76,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	kof_debug("Rar.entries", r->n_entries);
 	kof_debug("Rar.stored", r->n_stored);
 
-	for (i = 0; i < r->n_entries; i++) {
-		const struct kof_rar_entry *e = &r->entry[i];
-
+	/* A walk and not an array: the archive has as many entries as its blocks hold, which is
+	 * not a number this module can know (zip.c). */
+	while ((e = kof_rar_next(ctx, &cur)) != 0) {
 		if (!e->csize || !e->data_off)
 			continue;                /* a directory, or an empty file */
 		if (e->suspicious & KOF_RAR_ENT_PAST_EOF)
@@ -113,9 +114,9 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 
 		if (e->method == KOF_RAR_M_STORE) {
 			/* Free: the child is a view of bytes that already exist. */
-			if (!kunp_rcstruct_window(e->data_off, e->csize))
-				break;           /* a host limit bound: stop, do not spin */
-			opened++;
+			/* A refusal is this entry's, not the table's end (see tar.c). */
+			if (kunp_rcstruct_window(e->data_off, e->csize))
+				opened++;
 			continue;
 		}
 
@@ -211,6 +212,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		kunp_rcstruct_broken(KOF_UNP_UNSUPPORTED);
 	if (r->anomalies & (KOF_RAR_ANOM_TRUNCATED | KOF_RAR_ANOM_BAD_BLOCK))
 		kunp_rcstruct_broken(KOF_UNP_DAMAGED);
-	if (r->anomalies & (KOF_RAR_ANOM_ENTRIES_FULL | KOF_RAR_ANOM_EXTENTS_FULL))
-		kunp_rcstruct_broken(KOF_UNP_LIMIT);
+	/* A table of the parse that could not grow is the engine's to report: it reads
+	 * KOF_RAR_ANOM_ENTRIES_FULL and _EXTENTS_FULL after the parse (kof_parser_cut_bits). */
 }

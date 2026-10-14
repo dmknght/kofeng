@@ -64,8 +64,8 @@ static int origins_live(const struct kgenome_diag_orgs *w)
 	for (i = 0; i < 16u; i++)
 		if (w->reg[i].node != KGENOME_DIAG_ORG_NONE)
 			return 1;
-	for (i = 0; i < w->n_stk && i < KGENOME_DIAG_ORG_STK; i++)
-		if (w->stk[i].node != KGENOME_DIAG_ORG_NONE)
+	for (i = w->n_lost; i < w->n_stk; i++)
+		if (w->stk[i % KGENOME_DIAG_ORG_STK] != KGENOME_DIAG_ORG_NONE)
 			return 1;
 	return 0;
 }
@@ -264,6 +264,10 @@ static int sweep_window(const struct sweep_rgn *rg, uint64_t c, uint64_t at,
 			w.ax_stale = 0; /* something wrote it since */
 		wrote |= (uint16_t)in.wmask;
 		kgenome_diag_org_step(&w, &in);
+		if (w.stk_cut) {
+			w.stk_cut = 0;
+			kgenome_diag_note(s, KGENOME_TRUNCATED);        /* an origin fell off the end of the stack ring */
+		}
 		if (s->halt)
 			return 0;
 	}
@@ -285,6 +289,8 @@ static void sweep_region(struct kgenome_diag_scan *s, const struct kgenome_obj *
 	if (off + n > size)
 		n = size - off;
 	kgenome_cell_space_init(&sp, obj, base, size);
+	/* The walk already decoded this code and kept it: read it from there. */
+	kgenome_diag_walk_hold(&sp, s->walk);
 	rg.s = s; rg.obj = obj; rg.base = base; rg.sp = &sp; rg.off = off; rg.n = n;
 	memset(&susp, 0, sizeof susp);
 	memset(&nxt, 0, sizeof nxt);

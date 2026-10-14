@@ -55,22 +55,22 @@
  * never drop: overshooting a range loses precision, dropping one loses a detection.
  */
 /*
- * How many extents one region resolve may return.
+ * How many extents a region resolve starts with room for.
  *
- * Sized from the worst real container rather than from what looked generous. It was
- * 256, which is ample for an executable - an ELF's CODE is a handful of ranges -
- * and nowhere near enough for an archive: a zip stores each entry's name between
- * two pieces of header, twice over, so its NAMES and HEADERS regions fragment at
- * roughly two runs per entry EACH. Measured over 280 archives the largest holds 991
- * entries, which is about four thousand runs, and at 256 the regions of nineteen of
- * them did not cover the file at all.
+ * NOT A LIMIT ON WHAT A REGION MAY HOLD, any more. It was: 256, which is ample for an
+ * executable - an ELF's CODE is a handful of ranges - and nowhere near enough for an archive,
+ * so it became 4096, and a zip of 2100 entries still did not fit it (a zip stores each name
+ * between two pieces of header, twice over, so its NAMES region is two extents an entry: 4200)
+ * and lost every member to the report that said so. How many extents a region has is a
+ * property of the FILE.
  *
- * The buffers this sizes live in the scanner rather than on the stack, which is what
- * makes a number this large affordable - see kof_scanner.
- *
- * It is still a bound, and a hostile archive will still exceed it. That is handled
- * rather than assumed away: a resolve that fills the buffer records a limit, so a
- * region that could not be described in full is never quietly searched in part.
+ * So this is the size of the buffers the scanner owns (see kof_scan_cache; they live in the
+ * scanner and not on the stack, which is what makes a number this large affordable) and of
+ * the resolves that cannot grow - a tool's, which has no ledger. The scanner's own buffer is
+ * grown when a resolve fills it (scanners/scan_ext.c), up to one extent a byte of the
+ * object, charged to the per-object ledger and given back with the object; a region the
+ * ledger cannot afford is cut, the object is reported cut, and nothing is searched in part
+ * without saying so.
  */
 #define KOF_SCAN_MAX_EXTENTS 4096
 

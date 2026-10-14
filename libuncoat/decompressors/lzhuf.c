@@ -320,8 +320,8 @@ enum kuncoat_status kuncoat_lzhuf_decode(struct kuncoat_lzhuf *s,
 
 	if (produced)
 		*produced = 0;
-	if (!s || !in || !sink)
-		return KUNCOAT_CORRUPT;
+	if (!s || !sink || (!in && in_len))
+		return KUNCOAT_BAD_ARG;
 	if ((unsigned)var >= (unsigned)KUNCOAT_LZHUF_VARIANTS)
 		return KUNCOAT_UNSUPPORTED;
 	if (!out_len)
@@ -410,6 +410,10 @@ enum kuncoat_status kuncoat_lzhuf_decode(struct kuncoat_lzhuf *s,
 				}
 				j = (1u << j) + lh_bits(s, j);
 			}
+			if (s->eof) {   /* the offset came from past the end: not output */
+				status = KUNCOAT_TRUNCATED;
+				break;
+			}
 			if (j >= dict) {
 				status = KUNCOAT_CORRUPT;
 				break;
@@ -433,10 +437,10 @@ enum kuncoat_status kuncoat_lzhuf_decode(struct kuncoat_lzhuf *s,
 		}
 	}
 
-	if (r && status == KUNCOAT_OK && !sink(user, s->dict, r))
+	/* What was decoded before a failure is real output, so the buffered tail goes
+	 * out on every ending but a refusal; a refusal here is the receiver's. */
+	if (r && status != KUNCOAT_STOPPED && !sink(user, s->dict, r))
 		status = KUNCOAT_STOPPED;
-	else if (r && status == KUNCOAT_TRUNCATED)
-		(void)sink(user, s->dict, r);   /* what was reached is real */
 	if (produced)
 		*produced = done;
 	if (status == KUNCOAT_OK && done < out_len)

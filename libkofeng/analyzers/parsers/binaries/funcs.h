@@ -24,6 +24,6 @@ struct kgenome_pe_imptab;
 uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data_n,
 			     const void *info,
 			     const struct kgenome_pe_imptab *imports,
-			     uint8_t **buf, uint32_t *cap);
+			     uint8_t **buf, uint32_t *cap, uint32_t *passes);
 
 #endif /* KOFENG_BINARIES_FUNCS_H */

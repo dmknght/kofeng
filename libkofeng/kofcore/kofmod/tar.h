@@ -62,7 +62,7 @@
 #include <stdint.h>
 #include <kofmod/kofsig.h>
 
-#define KOF_TAR_INFO_VERSION 1
+#define KOF_TAR_INFO_VERSION 2
 
 enum kof_scan_tar {
 	KOF_SCAN_TAR_HEADERS   = 1u << 1,  /* the 512 byte blocks, whole */
@@ -101,17 +101,23 @@ enum {
 };
 
 /*
- * Bounds, sized from measurement rather than from the format, which has none: a tar
- * is a stream and may hold any number of entries.
+ * What bounds the parse, and what does not.
  *
- * 2048 is what the extent budget allows. Each entry costs two runs - its header
- * block and its content - and KOF_SCAN_MAX_EXTENTS is 4096, so an archive past this
- * cannot have its regions described in full. The largest archive measured here
- * holds 2007, which is close enough to the ceiling to be worth saying out loud:
- * this is not generous headroom, it is the real worst case.
+ * NO COUNT OF ENTRIES IS A LIMIT ON THE FILE. The entry table was 2048 rows and the run
+ * list 4096 (two runs an entry: the header block and the content) - "the largest archive
+ * measured here holds 2007, which is close enough to the ceiling to be worth saying out
+ * loud" - so the 2049th member of a tar was not there, and an archive of 5000 small files
+ * lost three quarters of them. A tar is a stream and has no count to disbelieve; what a
+ * file can hold is bounded by its own bytes.
+ *
+ * The tables are allocated to what the walk finds, and what bounds an allocation is the
+ * file: every entry costs at least one KOF_TAR_BLOCK header block, so the rows cannot
+ * exceed the length of the file over it, and an entry makes at most KOF_TAR_RUNS_PER_ENTRY
+ * runs. Under that sits the engine's per-object ledger (struct kof_view_mem.room): when a
+ * table cannot grow the walk stops, ENTRIES_FULL or EXTENTS_FULL is raised, and the object
+ * reads KOF_BROKEN_LIMIT - what was not read is said, and what was read is whole.
  */
-#define KOF_TAR_MAX_ENTRIES 2048u
-#define KOF_TAR_MAX_EXTENTS 4096u
+#define KOF_TAR_RUNS_PER_ENTRY 2u
 
 #define KOF_TAR_BLOCK    512u
 #define KOF_TAR_MAGIC_AT 257u    /* "ustar", the only thing that identifies a tar */
@@ -120,8 +126,9 @@ enum {
 	KOF_TAR_ANOM_BAD_CHECKSUM = 1ull << 0, /* a header does not sum to its field */
 	KOF_TAR_ANOM_BAD_SIZE     = 1ull << 1, /* the size field is not a number */
 	KOF_TAR_ANOM_TRUNCATED    = 1ull << 2, /* an entry runs past the end */
-	KOF_TAR_ANOM_ENTRIES_FULL = 1ull << 3,
-	KOF_TAR_ANOM_EXTENTS_FULL = 1ull << 4,
+	KOF_TAR_ANOM_ENTRIES_FULL = 1ull << 3, /* the entry table could not grow: the
+						* archive has entries not read */
+	KOF_TAR_ANOM_EXTENTS_FULL = 1ull << 4, /* the run table could not grow */
 	KOF_TAR_ANOM_NO_END       = 1ull << 5, /* no pair of zero blocks closes it */
 	KOF_TAR_ANOM_TRAVERSAL    = 1ull << 6, /* a name escapes the extract root */
 	KOF_TAR_ANOM_LONGNAME     = 1ull << 7, /* GNU long name or link used */
@@ -172,12 +179,29 @@ enum {
 	KOF_TAR_ENT_BAD_SUM   = 1u << 3
 };
 
+/*
+ * THE VIEW, AND WHAT CHANGED IN IT.
+ *
+ * Version 2, the same change as the zip view's (zip.h has the long form). The two arrays that
+ * used to end this struct - `run[4096]` and `entry[2048]`, 229448 bytes - are tables the
+ * parse allocates to the size of the archive, reached through the pointers at the tail.
+ * Everything before them is where it was.
+ *
+ * `n_entries` WAS AT OFFSET 16 AND IS NOW `legacy_n_entries`, ALWAYS ZERO: a module built
+ * against version 1 loops `i < t->n_entries` over `t->entry[i]`, finds zero, runs nothing and
+ * reads a valid empty table - never the bytes that happen to lie where its array was - and
+ * the engine, which sees that the walk below was never called while the archive has rows,
+ * reports the object instead of passing it as examined (sx_walk_check). The real count is
+ * `n_entries` at the tail.
+ *
+ * A module walks the table with kof_tar_next below; it does not index `entry`.
+ */
 struct kof_tar_info {
 	uint32_t version;         /* KOF_TAR_INFO_VERSION */
 	uint32_t valid;
 	uint64_t anomalies;
 
-	uint32_t n_entries;
+	uint32_t legacy_n_entries;/* version 1's count, kept for its offset: always 0 */
 	uint32_t n_dirs, n_links, n_files;
 	uint64_t total_size;      /* declared, summed over the entries examined */
 	uint64_t end_off;         /* where the zero blocks start, 0 if absent */
@@ -187,14 +211,35 @@ struct kof_tar_info {
 	/* Runs, classified and settled. struct kof_run is range.h's. */
 	uint32_t n_runs;
 	uint32_t reserved0;
-	struct kof_run run[KOF_TAR_MAX_EXTENTS];   /* cls is enum kof_tar_class */
 
-	struct kof_tar_entry entry[KOF_TAR_MAX_ENTRIES];
+	/* ---- version 2: from here the tables are the file's size ---------------------- */
+
+	struct kof_view_mem mem;  /* what the tables hold; see range.h */
+	struct kof_run *run;      /* n_runs of them; cls is enum kof_tar_class */
+	struct kof_tar_entry *entry;
+	uint32_t n_entries;       /* rows in `entry`: every header the walk met that the
+				   * tables could take, which is all of them unless
+				   * ENTRIES_FULL is raised */
+	uint32_t reserved1;
 };
 
 static inline const struct kof_tar_info *kof_tar(const struct kof_obj_ctx *ctx)
 {
 	return (const struct kof_tar_info *)ctx->file_header;
+}
+
+/*
+ * THE NEXT ENTRY OF THE ARCHIVE, in the order the headers follow one another: row `*cursor`,
+ * and the cursor is advanced; NULL at the end. The cursor is the module's (the row's index is
+ * the cursor minus one after the call), the table is as long as the archive, and the host sees
+ * every call - see kof_zip_next, which this is the same walk as.
+ */
+static inline const struct kof_tar_entry *kof_tar_next(const struct kof_obj_ctx *ctx,
+						       uint32_t *cursor)
+{
+	return ctx->content->view_next
+	       ? (const struct kof_tar_entry *)ctx->content->view_next(ctx, cursor)
+	       : 0;
 }
 
 #endif /* KOFENG_TAR_H */

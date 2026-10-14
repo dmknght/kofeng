@@ -84,67 +84,71 @@ static kuncoat_st_t placeholder_sub(const struct kuncoat_step *s, const uint8_t 
 	return kuncoat_room_end(*w, n);
 }
 
-static kuncoat_st_t sub_chain(const uint8_t *in, uint64_t n, uint8_t *out, uint64_t cap,
-		      uint64_t *w)
+/* Walk the chain once. With `out` NULL it only counts the pushes; with `out` set
+ * the push number j (in push order) is stored as dword `total - 1 - j` when that
+ * dword is below `room`, so the dwords kept are the FIRST `room` of the payload
+ * (the last pushes) and no more than `room` dwords are ever written. */
+static uint32_t chain_walk(const uint8_t *in, uint64_t n, uint8_t *out, uint64_t room,
+			   uint32_t total, int *ended, int *cut)
 {
-	uint32_t eax = 0, k, b, m = 0;
+	uint32_t eax = 0, b, m = 0;
 	uint64_t at = 0;
-	int zeroed = 0, ended = 0, cut = 0;
-	const uint64_t room = cap / 4u;
+	int zeroed = 0;
 
-	/* The pushed dwords are written into the output as they come and reversed in
-	 * place at the end, so nothing is held but the output: `room` dwords never
-	 * overrun `cap`. `in` and `out` must not overlap. */
-	if (!room)
-		return KUNCOAT_OVER_BUDGET;
-	while (at < n && m < room) {
+	*ended = *cut = 0;
+	while (at < n) {
 		uint8_t op = in[at];
 
-		if (op == 0x2du) {              /* sub eax, imm32 */
+		if (op == 0x2du || op == 0x25u) {       /* sub / and eax, imm32 */
 			if (at + 5u > n) {
-				cut = 1;
+				*cut = 1;
 				break;
 			}
-			eax -= kof_ld_le32(in + at + 1u);
-			at += 5u;
-		} else if (op == 0x25u) {       /* and eax, imm32 */
-			if (at + 5u > n) {
-				cut = 1;
-				break;
+			if (op == 0x2du) {
+				eax -= kof_ld_le32(in + at + 1u);
+			} else {
+				eax &= kof_ld_le32(in + at + 1u);
+				if (!eax)
+					zeroed = 1;
 			}
-			eax &= kof_ld_le32(in + at + 1u);
-			if (!eax)
-				zeroed = 1;
 			at += 5u;
-		} else if (op == 0x50u) {       /* push eax */
+		} else if (op == 0x50u) {               /* push eax */
 			if (zeroed) {
-				/* Written in order, reversed below. */
-				for (b = 0; b < 4u; b++)
-					out[4u * m + b] = (uint8_t)(eax >> (b * 8));
+				uint64_t d = (uint64_t)total - 1u - m;
+
+				if (out && d < room)
+					for (b = 0; b < 4u; b++)
+						out[4u * d + b] = (uint8_t)(eax >> (b * 8));
 				m++;
 			}
 			at += 1u;
 		} else if (op == 0x54u || op == 0x58u || op == 0x5cu) {
 			at += 1u;               /* push esp / pop eax / pop esp */
 		} else {
-			ended = 1;              /* not part of the chain */
+			*ended = 1;             /* not part of the chain */
 			break;
 		}
 	}
-	/* The payload is built down the stack: the last push is its first dword. */
-	for (k = 0; k < m / 2u; k++)
-		for (b = 0; b < 4u; b++) {
-			uint8_t t = out[4u * k + b];
+	return m;
+}
 
-			out[4u * k + b] = out[4u * (m - 1u - k) + b];
-			out[4u * (m - 1u - k) + b] = t;
-		}
-	*w = (uint64_t)m * 4u;
-	if (ended)
-		return KUNCOAT_OK;
-	if (!cut && at < n)
-		return KUNCOAT_OVER_BUDGET;     /* the room filled with chain left */
-	return KUNCOAT_TRUNCATED;               /* the data ended with the chain open */
+static kuncoat_st_t sub_chain(const uint8_t *in, uint64_t n, uint8_t *out, uint64_t cap,
+		      uint64_t *w)
+{
+	int ended, cut;
+	uint32_t total = chain_walk(in, n, NULL, 0, 0, &ended, &cut);
+	const uint64_t room = cap / 4u;
+	const uint64_t kept = total < room ? total : room;
+
+	/* The payload is built down the stack: the last push is its first dword. The
+	 * second walk stores each dword where it belongs, so what is kept when the room
+	 * is short is the BEGINNING of the payload. `in` and `out` must not overlap. */
+	if (kept)
+		(void)chain_walk(in, n, out, room, total, &ended, &cut);
+	*w = kept * 4u;
+	if (!ended)
+		return KUNCOAT_TRUNCATED;       /* the data ended with the chain open */
+	return total > room ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
 }
 
 static kuncoat_st_t rc4(const struct kuncoat_step *s, const uint8_t *in, uint64_t n,
@@ -175,9 +179,9 @@ static kuncoat_st_t rc4(const struct kuncoat_step *s, const uint8_t *in, uint64_
 }
 
 
-enum kuncoat_status kuncoat_cipher(const struct kuncoat_step *s,
-				   const uint8_t *in, uint64_t n,
-				   uint8_t *out, uint64_t cap, uint64_t *w)
+static enum kuncoat_status cipher_run(const struct kuncoat_step *s,
+				      const uint8_t *in, uint64_t n,
+				      uint8_t *out, uint64_t cap, uint64_t *w)
 {
 	switch (s->algo) {
 	case KUNCOAT_ALGO_XOR_KEY:
@@ -195,4 +199,19 @@ enum kuncoat_status kuncoat_cipher(const struct kuncoat_step *s,
 	default:
 		return KUNCOAT_UNSUPPORTED;
 	}
+}
+
+/* Appends at out[*w]. The routines above count from the start of what they are
+ * given, so "did the room cut the answer" compares what THIS call wrote with `n`,
+ * not the absolute index: they get the tail of the buffer and a cap to match. */
+enum kuncoat_status kuncoat_cipher(const struct kuncoat_step *s,
+				   const uint8_t *in, uint64_t n,
+				   uint8_t *out, uint64_t cap, uint64_t *w)
+{
+	const uint64_t w0 = *w;
+	uint64_t mine = 0;
+	enum kuncoat_status r = cipher_run(s, in, n, out + w0, cap > w0 ? cap - w0 : 0, &mine);
+
+	*w = w0 + mine;
+	return r;
 }

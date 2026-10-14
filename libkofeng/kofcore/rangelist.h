@@ -43,12 +43,25 @@ struct kof_rlist {
 	 * only happens when there was room.
 	 */
 	uint8_t  packed;
+	/*
+	 * STICKY: A RANGE WAS DROPPED. kof_rl_add past `cap`, and a kof_rl_subtract
+	 * split with no room for its second half, used to discard a range with no
+	 * word - a list that was FULL and a list that was cut read the same, and the
+	 * caller searched part of a region as if it were the region. Set by those two,
+	 * cleared by nothing but kof_rl_init, and read by kof_rl_finish, which is how a
+	 * region resolver hands it to the engine (as "did not fit": count == cap).
+	 * A list whose bound cannot be reached by construction (a few singletons, a
+	 * table sized by the parser's own count) never sets it. Appended: it sits in
+	 * the padding after `packed`.
+	 */
+	uint8_t  overflow;
 };
 
 static inline void kof_rl_init(struct kof_rlist *l, struct kof_range *buf,
 			       uint32_t cap)
 {
 	l->packed = 0;
+	l->overflow = 0;
 	l->v = buf;
 	l->n = 0;
 	l->cap = cap;
@@ -66,8 +79,12 @@ static inline void kof_rl_add(struct kof_rlist *l, uint64_t obj_size,
 {
 	uint64_t got = kof_clip_len(obj_size, o, n);
 
-	if (got == 0 || l->n >= l->cap)
+	if (got == 0)
 		return;
+	if (l->n >= l->cap) {
+		l->overflow = 1;        /* dropped, and the list says so */
+		return;
+	}
 	l->v[l->n].off = o;
 	l->v[l->n].len = got;
 	l->n++;
@@ -125,6 +142,34 @@ static inline uint32_t kof_rl_normalise(struct kof_rlist *l)
 	l->n = w;
 	l->packed = (uint8_t)(w >= l->cap);
 	return w;
+}
+
+/*
+ * THE COUNT A REGION RESOLVER HANDS BACK: the list, normalised, and "it did not fit"
+ * when a range was dropped.
+ *
+ * The engine reads a resolver's answer as `n >= max_out means the region was cut`
+ * (kof_scan_resolve_range) - a list that filled exactly cannot be told from one that
+ * filled and had more, so it is said as a limit. A dropped range is that case, and
+ * normalising may merge the list back under `cap`, which would hide it; so on
+ * overflow the answer is `cap` and the entries after the real ones are zero-length
+ * ranges at the end of the last (offsets stay ascending, and nothing searches
+ * nothing). The caller then reports KOF_BROKEN_LIMIT, as for a full list.
+ */
+static inline uint32_t kof_rl_finish(struct kof_rlist *l)
+{
+	uint32_t n = kof_rl_normalise(l);
+	uint64_t end;
+
+	if (!l->overflow)
+		return n;
+	end = n ? l->v[n - 1u].off + l->v[n - 1u].len : 0u;
+	while (n < l->cap) {
+		l->v[n].off = end;
+		l->v[n].len = 0;
+		n++;
+	}
+	return l->cap;
 }
 
 /*
@@ -214,6 +259,8 @@ static inline void kof_rl_subtract(struct kof_rlist *l,
 				l->v[l->n].off = ce;
 				l->v[l->n].len = re - ce;
 				l->n++;
+			} else {
+				l->overflow = 1;        /* the upper half is dropped */
 			}
 		}
 	}

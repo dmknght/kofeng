@@ -214,4 +214,45 @@ static void fk_req(struct kgenome_fnprint_req *rq, const struct fk_obj *o, enum 
 	rq->stat = st;
 }
 
+
+/*
+ * THE LEGACY RULES. A name, the layout, the entry stub, a wrapper's shape or a thunk's size may
+ * take a function out of the evidence in the rules this prototype was first measured with; the
+ * default no longer does (an author can change every one of those without touching the function's
+ * bytes: fnprint_adv_*.c). A test that pins those rules asks for them by defining FK_LEGACY_RULES
+ * before it includes this header; every walk and collect in that file then runs with
+ * KGENOME_FNP_OPT_LEGACY_EXCLUDE.
+ */
+#ifdef FK_LEGACY_RULES
+static void fk_walk_legacy(const struct kgenome_fnprint_req *rq) HK_UNUSED;
+static void fk_walk_legacy(const struct kgenome_fnprint_req *rq)
+{
+	struct kgenome_fnprint_req r;
+
+	if (!rq) {
+		kgenome_fnprint_walk(NULL);
+		return;
+	}
+	r = *rq;
+	r.opt.flags |= KGENOME_FNP_OPT_LEGACY_EXCLUDE;
+	kgenome_fnprint_walk(&r);
+}
+
+static void fk_collect_legacy(const struct kgenome_fnprint_req *rq, struct kgenome_fnprint_set *out) HK_UNUSED;
+static void fk_collect_legacy(const struct kgenome_fnprint_req *rq, struct kgenome_fnprint_set *out)
+{
+	struct kgenome_fnprint_req r;
+
+	if (!rq) {
+		kgenome_fnprint_collect(NULL, out);
+		return;
+	}
+	r = *rq;
+	r.opt.flags |= KGENOME_FNP_OPT_LEGACY_EXCLUDE;
+	kgenome_fnprint_collect(&r, out);
+}
+#define kgenome_fnprint_walk fk_walk_legacy
+#define kgenome_fnprint_collect fk_collect_legacy
+#endif
+
 #endif /* KGENOME_TESTS_FNPRINT_KIT_H */

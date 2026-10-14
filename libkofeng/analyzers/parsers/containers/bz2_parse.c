@@ -14,6 +14,7 @@
 
 #define BZ2_HDR 4u          /* "BZh" and the level digit */
 #define BZ2_MARK 6u         /* either marker, right behind the header */
+#define BZ2_EMPTY 14u       /* an empty stream whole: header, end marker, CRC (4 + 6 + 4) */
 
 /* The two markers, as the bytes they are when they land on a boundary - which
  * is only ever here, immediately after the header. */
@@ -52,7 +53,7 @@ static uint32_t bz2_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		c.n = bz2_resolve_scan(ctx, KOF_SCAN_BZ2_CLAIMED, cv, c.cap);
 		kof_rl_complement(&l, &c, ctx->obj_size);
 	}
-	return kof_rl_normalise(&l);
+	return kof_rl_finish(&l);
 }
 
 /* ---- the parse ---------------------------------------------------------------- */
@@ -105,7 +106,18 @@ int kof_bz2_parse(kof_buf file, struct kof_bz2_info *b, struct kof_obj_ctx *ctx)
 	if (file.n < BZ2_HDR + BZ2_MARK) {
 		b->anomalies |= KOF_BZ2_ANOM_TRUNCATED;
 	} else if (memcmp(file.p + BZ2_HDR, bz2_end_mark, BZ2_MARK) == 0) {
-		b->anomalies |= KOF_BZ2_ANOM_EMPTY;
+		/*
+		 * EMPTY MEANS NOTHING FOLLOWS, not that the first stream is. An empty
+		 * stream is exactly BZ2_EMPTY bytes (header, end marker, a CRC of zero),
+		 * and `bzip2 -dc` decodes every stream after it into the same output, so
+		 * a 14-byte empty stream put in front of a real one hid the whole payload:
+		 * the module returns on this bit and no child was made (measured:
+		 * `bz2(b"") + bz2(payload)` came back as one object, nothing to open).
+		 * When a stream header follows, the decoder is told to run and the later
+		 * streams are the child.
+		 */
+		if (file.n < BZ2_EMPTY || !kof_bz2_sniff(kof_buf_make(file.p + BZ2_EMPTY, file.n - BZ2_EMPTY)))
+			b->anomalies |= KOF_BZ2_ANOM_EMPTY;
 	} else if (memcmp(file.p + BZ2_HDR, bz2_block_mark, BZ2_MARK) != 0) {
 		b->anomalies |= KOF_BZ2_ANOM_NO_BLOCK;
 	}

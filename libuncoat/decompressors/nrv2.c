@@ -168,11 +168,16 @@ enum kuncoat_status kuncoat_nrv2_decode(int variant, int bits, const uint8_t *in
 	uint32_t last_dist = 1;
 	int status = KUNCOAT_OK;
 
-	if (bits != 8 && bits != 16 && bits != 32) {
-		if (produced)
-			*produced = 0;
+	if (produced)
+		*produced = 0;
+	/* A variant this build does not have is a request that cannot be served,
+	 * not a stream that is damaged: it must not decode as NRV2E by default. */
+	if (variant != KUNCOAT_NRV2B && variant != KUNCOAT_NRV2D && variant != KUNCOAT_NRV2E)
+		return KUNCOAT_BAD_ARG;
+	if ((!in && in_len) || (!out && out_cap))
+		return KUNCOAT_BAD_ARG;
+	if (bits != 8 && bits != 16 && bits != 32)
 		return KUNCOAT_CORRUPT;
-	}
 	s.p = in;
 	s.n = in ? in_len : 0;
 	s.at = 0;
@@ -181,11 +186,8 @@ enum kuncoat_status kuncoat_nrv2_decode(int variant, int bits, const uint8_t *in
 	s.top = (unsigned)bits - 1u;
 	s.left = (1u << s.top) - 1u;
 
-	if (!out || out_cap == 0) {
-		if (produced)
-			*produced = 0;
-		return KUNCOAT_STOPPED;
-	}
+	if (out_cap == 0)
+		return KUNCOAT_STOPPED;         /* no room for anything */
 
 	for (;;) {
 		uint32_t prefix = 1, dist, len, carry = 0;

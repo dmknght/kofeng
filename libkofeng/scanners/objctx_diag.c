@@ -109,11 +109,23 @@ const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		 * 4096 records would have refused every graph past it whole. It is
 		 * allocated once per object, here, after the scan that produced it.
 		 */
-		if (!sc->diag.gr) {
+		{
 			uint32_t nn = kgenome_diag_scan_count(sc->obj.diag.graph);
+			uint64_t need = (uint64_t)KOF_GR_HDRLEN + (uint64_t)nn * KOF_GR_RECLEN;
 
-			sc->diag.gr_cap = KOF_GR_HDRLEN + nn * KOF_GR_RECLEN;
-			sc->diag.gr = nn ? malloc(sc->diag.gr_cap) : NULL;
+			/* GROWN FOR THE OBJECT THAT NEEDS MORE: it was sized once, by the first
+			 * object with nodes, and a larger later one made the builder refuse whole
+			 * and the graph read as absent (silent_loss_audit.txt, SECTION 5). */
+			if (nn && (!sc->diag.gr || sc->diag.gr_cap < need)) {
+				uint8_t *g = need <= UINT32_MAX ? realloc(sc->diag.gr, (size_t)need) : NULL;
+
+				if (g) {
+					sc->diag.gr = g;
+					sc->diag.gr_cap = (uint32_t)need;
+				} else {
+					OC_LIMIT(sc, "graph block not allocated");
+				}
+			}
 		}
 		sc->obj.diag.gr_n = sc->diag.gr ? kof_diag_graph_build(sc->obj.diag.graph,
 							 sc->diag.gr,
@@ -161,6 +173,8 @@ static void sym_declared(struct kof_scanner *sc, uint32_t from)
 	if (!dll || !name) {
 		free(dll);
 		free(name);
+		/* the imports a module reported are not in the block: said */
+		OC_LIMIT(sc, "reported imports not merged into the symbol block");
 		return;
 	}
 	for (i = 0; i < n; i++) {
@@ -193,7 +207,7 @@ static void sym_declared(struct kof_scanner *sc, uint32_t from)
 	/* The list the module reported may be short, and the block's own byte
 	 * says so: the run it came from was stopped while still going. */
 	if (sc->obj.diag.apihash && sc->obj.diag.apihash->status != KGENOME_OK && sc->obj.sym.n >= KOF_SYM_HDRLEN)
-		sc->syms.buf[KOF_SYM_H_TRUNC] = 1;
+		sc->syms.buf[KOF_SYM_H_TRUNC] |= KOF_SYM_TRUNC_ROOM;
 	if (sc->obj.sym.n != before)
 		sc->obj.sym.served = 1;
 	free(dll);
@@ -221,6 +235,7 @@ uint32_t oc_api_resolved(const struct kof_obj_ctx *ctx, uint32_t i,
 	if (!d || !nm) {
 		free(d);
 		free(nm);
+		OC_LIMIT(sc, "resolved-API list not allocated");
 		return 0;
 	}
 	n = kgenome_diag_apihash_distinct(a, d, nm);
@@ -252,8 +267,10 @@ uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 		uint32_t nc = sc->syms.cap_decl ? sc->syms.cap_decl * 2u : 32u;
 		struct kof_sym_decl *nv = realloc(sc->syms.decl, (size_t)nc * sizeof *nv);
 
-		if (!nv)
+		if (!nv) {
+			OC_LIMIT(sc, "import declaration table not grown");
 			return 0;
+		}
 		sc->syms.decl = nv;
 		sc->syms.cap_decl = nc;
 	}
@@ -263,6 +280,7 @@ uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 	if (!d->dll || !d->fn) {
 		free(d->dll);
 		free(d->fn);
+		OC_LIMIT(sc, "import declaration name not allocated");
 		return 0;
 	}
 	sc->obj.sym.n_decl++;
@@ -327,9 +345,20 @@ static void sym_build(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	const struct kgenome_pe_imptab *imp =
 		ctx->format == KOF_FMT_PE ? oc_pe_imports(sc, ctx) : NULL;
 
+	uint32_t passes = 0;
+
 	sc->obj.sym.n = kof_syms_build_grow(ctx->format, sc->match.m.data.p, sc->match.m.data.n,
 					ctx->file_header, imp, &sc->syms.buf,
-					&sc->syms.cap);
+					&sc->syms.cap, &passes);
+	/* Each pass is a build of the product: a rebuild is counted, not hidden. */
+	do
+		kof_prod_ran(sc, KOF_PROD_SYMS);
+	while (passes-- > 1u);
+	/* A bound of the walk that feeds the block cut it (the export name bound, an
+	 * import table that stopped short): the object's evidence is partial. */
+	if (sc->obj.sym.n > KOF_SYM_H_TRUNC &&
+	    (sc->syms.buf[KOF_SYM_H_TRUNC] & KOF_SYM_TRUNC_SOURCE))
+		oc_scan_limit(sc);
 }
 
 const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
@@ -393,8 +422,15 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 /* The object's walk, empty until the first reader fills it. */
 static struct kgenome_diag_walk *oc_walk(struct kof_scanner *sc)
 {
-	if (!sc->obj.diag.walk)
+	if (!sc->obj.diag.walk) {
 		sc->obj.diag.walk = kgenome_diag_walk_new();
+		/* A quarter of the caller's allowance, never above the lib's 32 MiB:
+		 * the trace is a cache and must not be the one thing that eats a small
+		 * allowance (the default 128 MiB gives the lib's own figure). Of the
+		 * allowance and not of what is left: what is left is the ledger's to
+		 * answer, softly, on every growth. */
+		kgenome_diag_walk_set_cap(sc->obj.diag.walk, sc->ledger.resident_max / 4u);
+	}
 	return sc->obj.diag.walk;
 }
 
@@ -422,9 +458,11 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 			struct kgenome_obj gobj;
 
 			kof_genome_obj(ctx, &gobj);
+			kof_prod_ran(sc, KOF_PROD_FUNCS);
 			kgenome_diag_funcs_with_walk(&gobj, sc->match.m.data.p, sc->match.m.data.n,
 						 oc_walk(sc), want_trace,
 						 &sc->obj.sym.funcs);
+			kof_prod_sync_walk(sc);
 		} else {
 			/* A normalised view: its producer mapped them over - see
 			 * kgenome_funcs_remap. */
@@ -441,6 +479,11 @@ static const struct kgenome_func_set *funcs_of(const struct kof_obj_ctx *ctx,
 				}
 			}
 		}
+		/* The set feeds the plague units and the view's remap, and a set a limit
+		 * cut (the function bound, memory) is a partial list of the object's
+		 * functions: the object says so. */
+		if (kgenome_status_is_cut(sc->obj.sym.funcs.status))
+			oc_scan_limit(sc);
 	}
 	return &sc->obj.sym.funcs;
 }
@@ -648,19 +691,31 @@ static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 			  uint32_t i);
 
 /*
- * DOES ANY RULE READ THIS DIAGNOSE. A rule (a signature module that names it
- * with kof_diag) is what ASKS: asking means the object is worth the analysis
- * and worth interpreting. The count is what the database build wrote for the
- * modules it read (KDIG_SEC_USERS); a diagnose whose count was never written
- * down is unknown, and unknown counts as read.
+ * DOES ANYTHING READ THIS DIAGNOSE - the one relation that decides whether it
+ * runs, and it has two ways to be true:
+ *
+ *   a rule (a signature module that names it with kof_diag, kof_diag_share or a
+ *   string reader) - the count the database build wrote for the modules it read
+ *   (KDIG_SEC_USERS);
+ *
+ *   a disease it declares (KOF_DECLARE_DISEASE) - the verdict is made of the
+ *   diseases an object has, so a diagnose that can find one is read by the
+ *   verdict whether or not any syndrome names it (a disease no syndrome names
+ *   still types the file as unresolved) and whether or not any rule asks. The
+ *   cluster of several diagnoses that only together make a syndrome needs no
+ *   count of its own: each of them declares its disease and each is read.
+ *
+ * A diagnose whose count was never written down is unknown, and unknown counts
+ * as read. What is NOT read is skipped: a diagnose with neither a user nor a
+ * disease has nobody to collect its answer.
  */
 static int diag_has_reader(const struct kof_diag *d)
 {
-	return !d->users_known || d->n_users != 0u;
+	return !d->users_known || d->n_users != 0u || d->disease != 0u;
 }
 
-/* Is it RUN: when a rule reads it - or when a tool asked about all of them, see
- * kof_scan_diag_report. */
+/* Is it RUN: when something reads it - or when the caller asked for the report
+ * on every diagnose, see kof_scan_diag_report. */
 static int diag_used(const struct kof_scanner *sc, const struct kof_diag *d)
 {
 	return sc->obj.diag.all || diag_has_reader(d);
@@ -690,6 +745,28 @@ void kof_scan_diag_drop(struct kof_scanner *sc)
 	sc->obj.diag.refused = 0;
 }
 
+/*
+ * THE WALK'S TRACE, GIVEN BACK BEFORE THE VIEW IS BUILT. The trace is a decode
+ * cache (up to 32 MiB) and its last reader is the detect stage; the normaliser
+ * that follows holds two buffers of the object's size, and the two peaks used to
+ * stack. What the lib no longer holds is given back to this scanner's ceiling too.
+ */
+void oc_diag_trim(struct kof_scanner *sc)
+{
+	uint64_t peak, now;
+
+	if (!sc->obj.diag.walk)
+		return;
+	kgenome_diag_walk_trim(sc->obj.diag.walk);
+	if (!sc->obj.diag.graph)
+		return;
+	now = kgenome_diag_scan_bytes(sc->obj.diag.graph, &peak);
+	if (now < sc->obj.diag.charged) {
+		oc_scan_release(sc, sc->obj.diag.charged - now);
+		sc->obj.diag.charged = now;
+	}
+}
+
 int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
@@ -709,6 +786,20 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 	 * 'cannot say' through diag_unk. */
 	st = kof_scan_diag_status(ctx);
 	if (st == KGENOME_OVER_BUDGET || st == KGENOME_NOMEM)
+		return 1;
+	/*
+	 * A CUT ANALYSIS THAT SOMETHING ASKED FOR. KGENOME_TRUNCATED is the status of
+	 * every per-scan limit (the run's site bound, the node, name and link stores):
+	 * stops past the cut exist that the graph does not hold. diag_unk above says so
+	 * for each read diagnose that answered "no"; what it cannot say is that the
+	 * graph as a whole stops short, which matters to a diagnose that answered "yes"
+	 * (its sibling's evidence is past the cut) and to everything that reads the
+	 * graph after the gates (the syndrome's disease set). So: truncated AND the
+	 * analysis was demanded (obj.diag.ask: a rule read the diagnose surface, or a
+	 * tool asked for every diagnose). A cut analysis nobody demanded - the graph
+	 * kept for a report that was not requested - says nothing about the object.
+	 */
+	if (st == KGENOME_TRUNCATED && sc->obj.diag.ask)
 		return 1;
 	/* The block counts only when it was built for this object: forcing it here
 	 * would make every clean object pay for a table nothing asked for. */
@@ -750,6 +841,27 @@ int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx)
 		if (diag_gate_open(sc, ctx, i))
 			return 1;
 	}
+	return 0;
+}
+
+/*
+ * DOES THE VERDICT NEED THE ANALYSIS OF THIS OBJECT: a diagnose that declares a
+ * disease (so the verdict reads it) and whose gate is open here - the file is the
+ * shape it states, imports what it needs, and offers the analysis it is written
+ * for. Asked once, at the stage that infers the verdict, so an object no such
+ * diagnose can be answered on does not pay for the analysis; the answer rests on
+ * the loaded database and on facts of the file's structure, never on a name in it.
+ */
+int kof_scan_diag_feeds_verdict(const struct kof_obj_ctx *ctx)
+{
+	struct kof_scanner *sc = kof_scan_of(ctx);
+	uint32_t i;
+
+	if (!sc || !sc->eng)
+		return 0;
+	for (i = 0; i < sc->eng->n_diag; i++)
+		if (sc->eng->diag[i].disease && diag_gate_open(sc, ctx, i))
+			return 1;
 	return 0;
 }
 
@@ -814,15 +926,16 @@ static const struct kgenome_diag_apihash_set *sc_apihash(struct kof_scanner *sc,
 
 		sc->obj.latch[KOF_OL_APIHASH] = 1;
 		if (ctx->format == KOF_FMT_PE && b.p && b.n) {
+			kof_prod_ran(sc, KOF_PROD_APIHASH);
 			struct kgenome_obj gobj;
 
 			kof_genome_obj(ctx, &gobj);
-			struct kgenome_budget kb;
-
-			kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(&gobj, b.n));
-			kb.max_bytes = oc_scan_room(sc);
-			sc->obj.diag.apihash = kgenome_diag_apihash_run(&gobj, b.p, b.n,
-						      oc_pe_imports(sc, ctx), &kb);
+			sc->obj.diag.apihash = oc_emu_apihash(sc, &gobj, b, oc_pe_imports(sc, ctx));
+			/* NULL for a valid PE, or NOMEM, is memory refused and is said; the run's
+			 * other cuts (budget, stall) are read where the product is used. */
+			if ((!sc->obj.diag.apihash && kof_pe(ctx) && kof_pe(ctx)->valid) ||
+			    (sc->obj.diag.apihash && sc->obj.diag.apihash->status == KGENOME_NOMEM))
+				OC_LIMIT(sc, "API-resolution product not made or built with memory refused");
 		}
 	}
 	return sc->obj.diag.apihash;
@@ -840,8 +953,14 @@ const struct kgenome_pe_imptab *oc_pe_imports(struct kof_scanner *sc,
 		kof_buf b = oc_mc(ctx)->data;
 
 		sc->obj.latch[KOF_OL_PE_IMPORTS] = 1;
-		if (ctx->format == KOF_FMT_PE && ctx->file_header && b.p)
+		if (ctx->format == KOF_FMT_PE && ctx->file_header && b.p) {
+			kof_prod_ran(sc, KOF_PROD_PE_IMPORTS);
 			kgenome_pe_imptab_build(b, kof_pe(ctx), &sc->obj.diag.pe_imp);
+			/* A thunk budget or memory that stopped the walk leaves the table -
+			 * and the symbol block and the graph built from it - short: say so. */
+			if (kgenome_status_is_cut(sc->obj.diag.pe_imp.status))
+				oc_scan_limit(sc);
+		}
 	}
 	return &sc->obj.diag.pe_imp;
 }
@@ -861,10 +980,16 @@ static const struct kgenome_elf_relocs *sc_relocs(struct kof_scanner *sc,
 
 		sc->obj.latch[KOF_OL_RELOCS] = 1;
 		if (ei && ei->valid && b.p) {
+			kof_prod_ran(sc, KOF_PROD_RELOCS);
 			sc->obj.diag.relocs = calloc(1, sizeof *sc->obj.diag.relocs);
-			if (sc->obj.diag.relocs)
+			if (!sc->obj.diag.relocs) {
+				OC_LIMIT(sc, "relocation table header not allocated");
+			} else {
 				(void)kgenome_elf_reloc_table(b, ei, KGENOME_ELF_RELOC_CODE,
 						  sc->obj.diag.relocs);
+				if (sc->obj.diag.relocs->status != KGENOME_OK)
+					OC_LIMIT(sc, "relocation table not allocated");
+			}
 		}
 	}
 	return sc->obj.diag.relocs;
@@ -945,10 +1070,11 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	unmet = calloc(n, 3u);
 	hit = calloc(n, 2u * sizeof *hit);
 	if (!unmet || !hit) {
-		/* No gate is a closed gate: nothing runs for an object this scan
-		 * could not even look at. */
+		/* No gate is a closed gate, and a closed gate is said: a diagnose that
+		 * never ran is not one that found nothing. */
 		free(unmet);
 		free(hit);
+		OC_LIMIT(sc, "diagnose gate working set not allocated");
 		return;
 	}
 	ok = unmet + n;
@@ -1162,6 +1288,8 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		struct kgenome_diag_inputs in;
 		struct kgenome_obj gobj;
 		struct kgenome_budget kb;
+		struct oc_emu_diag emu_acct;
+		enum kgenome_status refused = KGENOME_OK;
 
 		in.relocs = sc_relocs(sc, ctx);
 		/* Read from the same table the symbol block is, once - and only
@@ -1192,8 +1320,34 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 		 */
 		kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(&gobj, b.n));
 		kb.max_bytes = oc_scan_room(sc);
+		oc_emu_diag_begin(sc, &emu_acct, &kb, &run);
+		if (!run)
+			return;
 		in.budget = &kb;
+		in.refused = &refused;
+		kof_prod_ran(sc, KOF_PROD_DIAG);
 		ds = kgenome_diag_scan_with_inputs(&gobj, b.p, b.n, run, &in);
+		oc_emu_diag_end(sc, &emu_acct, ds);
+		/* NULL for want of memory is not "nothing to read": said. */
+		if (!ds && refused != KGENOME_OK)
+			OC_LIMIT(sc, "diagnose scan not allocated");
+		/* What the scan built for itself, because it was not handed it: the
+		 * object's own product, made a second time. */
+		{
+			const unsigned own = kgenome_diag_scan_own(ds);
+
+			if (own & KGENOME_DIAG_OWN_RELOCS)
+				kof_prod_ran(sc, KOF_PROD_RELOCS);
+			if (own & KGENOME_DIAG_OWN_FUNCS)
+				kof_prod_ran(sc, KOF_PROD_FUNCS);
+			if (own & KGENOME_DIAG_OWN_IMPORTS)
+				kof_prod_ran(sc, KOF_PROD_PE_IMPORTS);
+			if (own & KGENOME_DIAG_OWN_APIHASH)
+				kof_prod_ran(sc, KOF_PROD_APIHASH);
+			if (own & KGENOME_DIAG_OWN_WALK)
+				kof_prod_ran(sc, KOF_PROD_WALK);
+		}
+		kof_prod_sync_walk(sc);
 		/*
 		 * READ BACK WHAT THE LIB SAYS ABOUT ITS OWN WORK. The budget went in
 		 * with this call (max_bytes is what the scanner has left); the ledger
@@ -1279,8 +1433,9 @@ void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
 	oc_diag_ready(sc, ctx);
 }
 
-_Static_assert(KOF_DIAG_REPORT_NODES >= KOF_DB_MAX_DIAG_NODE,
-	       "a report must hold every node a diagnose may bind");
+/* A report holds KOF_DIAG_REPORT_NODES nodes (its layout is the result's ABI), and a
+ * diagnose may have more: it reports the first of them, `n_node` saying how many
+ * the report holds. The match itself binds every node. */
 
 uint32_t kof_scan_diag_count(const struct kof_obj_ctx *ctx)
 {
@@ -1314,8 +1469,8 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 	memset(out, 0, sizeof *out);
 	out->name = d->name;
 	out->id = d->id;
-	out->n_node = d->n_node > KOF_DB_MAX_DIAG_NODE
-		      ? (uint8_t)KOF_DB_MAX_DIAG_NODE : d->n_node;
+	out->n_node = d->n_node > KOF_DIAG_REPORT_NODES
+		      ? (uint8_t)KOF_DIAG_REPORT_NODES : d->n_node;
 	/* The order the gate applies them in - see diag_gates. */
 	if (!diag_when_met(ctx, d)) {
 		out->state = KOF_DIAG_ST_SHAPE;

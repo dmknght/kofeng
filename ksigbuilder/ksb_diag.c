@@ -319,6 +319,7 @@ int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv)
 	/* Remembered so the tree build can check that every call names a
 	 * diagnose that exists - see the end of ksb_tree_main. */
 	if (ksb->diag.n_built < 64u) {
+		ksb->diag.built_dis[ksb->diag.n_built] = (unsigned char)(v.disease[0] != 0);
 		snprintf(ksb->diag.built[ksb->diag.n_built++], sizeof ksb->diag.built[0], "%s", v.name);
 	}
 	o = fopen(out, "wb");

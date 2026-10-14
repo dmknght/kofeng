@@ -6,6 +6,7 @@
  * a different function or where a field that carries meaning changed. And the
  * relevance decision says AUTHOR / LIB / UNKNOWN for the reasons it reports.
  */
+#define FK_LEGACY_RULES 1
 #include "fnprint_kit.h"
 #include "../../unit/known_miss.h"
 

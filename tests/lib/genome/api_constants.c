@@ -72,7 +72,7 @@ static void t_format_numbers(void)
 	   (unsigned)KGENOME_PE_PERM_R == (unsigned)KGENOME_PERM_R);
 	CK(KGENOME_ELF_MAX_SEGMENTS == 64 && KGENOME_ELF_MAX_SECTIONS == 128 && KGENOME_ELF_SECNAME_MAX == 32);
 	CK(KGENOME_ELF_SECNAME_SCAN >= KGENOME_ELF_SECNAME_MAX);
-	CK(KGENOME_SYMNAME_MAX == 64);
+	CK(KGENOME_SYMNAME_MAX == 4096);
 	CK(KGENOME_ELF_INFO_VERSION == 1);
 	/* the claimed regions of an ELF are the four it names and nothing else */
 	CK(KGENOME_SCAN_ELF_CLAIMED == (KGENOME_SCAN_ELF_HEADERS | KGENOME_SCAN_ELF_CODE | KGENOME_SCAN_ELF_DATA | KGENOME_SCAN_ELF_NOLOAD));
@@ -293,7 +293,7 @@ static void t_arch_table(void)
 
 /* ---- the capability word --------------------------------------------------------------------------------------------- */
 
-static int km_cap_valid(void *arg)
+static int cap_valid(void *arg)
 {
 	/* every capability the vocabulary names is a VALID word */
 	unsigned c, bad = 0;
@@ -308,7 +308,7 @@ static int km_cap_valid(void *arg)
 	return bad ? 1 : 0;
 }
 
-static int km_cap_group_io(void *arg)
+static int cap_group_io(void *arg)
 {
 	/* a word's group is the group it was made with, and no two words share a dense slot */
 	int seen[(KGENOME_CG_COUNT + 1) * KGENOME_NUCLEO_ACT_MAX];
@@ -334,23 +334,28 @@ static void t_capability_word(void)
 	unsigned c, named = 0, valid = 0;
 	int sig = 0;
 
-	/* the field layout: context in bits 12-15, group in 8-11, action in 0-7 */
+	/* the field layout: context in bits 13-15, group in 8-12, action in 0-7 */
 	CK(KGENOME_NUCLEO_MK(0, 0, 0) == 0);
-	CK(KGENOME_NUCLEO_MK(1, 0, 0) == 0x1000 && KGENOME_NUCLEO_MK(0, 1, 0) == 0x100 && KGENOME_NUCLEO_MK(0, 0, 1) == 1);
-	CK(KGENOME_NUCLEO_MK(0xf, 0xf, 0xff) == 0xffff);
-	CK(KGENOME_NUCLEO_MK(0x10, 0, 0) == 0);                          /* a context past four bits wraps out of the 16-bit word */
-	CK(KGENOME_NUCLEO_GROUP(0xffff) == 15 && KGENOME_NUCLEO_ACT(0xffff) == 255);
+	CK(KGENOME_NUCLEO_MK(1, 0, 0) == 0x2000 && KGENOME_NUCLEO_MK(0, 1, 0) == 0x100 && KGENOME_NUCLEO_MK(0, 0, 1) == 1);
+	CK(KGENOME_NUCLEO_MK(7, 31, 0xff) == 0xffff);
+	CK(KGENOME_NUCLEO_MK(8, 0, 0) == 0);                             /* a context past three bits wraps out of the 16-bit word */
+	CK(KGENOME_NUCLEO_GROUP(0xffff) == 31 && KGENOME_NUCLEO_ACT(0xffff) == 255 && KGENOME_NUCLEO_CTX(0xffff) == 7);
+	/* the numbers modules and packs hold do not move with the layout */
+	CK(KGENOME_NUCLEO_MEM_READ == 0x1001 && KGENOME_NUCLEO_MEM_WRITE == 0x1002 && KGENOME_NUCLEO_FD_NONBLOCK == 0x1003);
+	CK(KGENOME_NUCLEO_NET_HDRINCL == 0x310 && KGENOME_NUCLEO_SLEEP == 0x1 && KGENOME_NUCLEO_NET_OPEN == 0x301);
+	CK(KGENOME_NUCLEO_CTX(KGENOME_NUCLEO_MEM_READ) == KGENOME_CCTX_USER &&
+	   KGENOME_NUCLEO_GROUP(KGENOME_NUCLEO_MEM_READ) == KGENOME_CG_IO);
 	CK(KGENOME_CG_BARE == 0 && KGENOME_CG_COUNT == 17 && KGENOME_CG_IO == KGENOME_CG_COUNT - 1);
 	CK(KGENOME_CCTX_USER == 0 && KGENOME_CCTX_KERNEL == 1);
-	CK(KGENOME_NUCLEO_ACT_MAX == 16);
+	CK(KGENOME_NUCLEO_ACT_MAX == 32);
 	CK(KGENOME_NUCLEO_GROUP(KGENOME_NUCLEO_MK(0, KGENOME_CG_MEM, 1)) == KGENOME_CG_MEM);
 	CK(KGENOME_NUCLEO_GROUP(KGENOME_NUCLEO_MK(0, KGENOME_CG_SERVICE, 1)) == KGENOME_CG_SERVICE);
 	/* round trip of every (group, action) of the vocabulary's own groups */
-	for (c = 0; c < 16; c++) {
+	for (c = 0; c < 32; c++) {
 		unsigned a;
 		for (a = 0; a < 256; a++) {
 			uint16_t w = KGENOME_NUCLEO_MK(0, c, a);
-			CK(KGENOME_NUCLEO_GROUP(w) == c && KGENOME_NUCLEO_ACT(w) == a);
+			CK(KGENOME_NUCLEO_GROUP(w) == c && KGENOME_NUCLEO_ACT(w) == a && KGENOME_NUCLEO_CTX(w) == 0);
 			CK(KGENOME_NUCLEO_DENSE(w) == c * KGENOME_NUCLEO_ACT_MAX + a);
 		}
 	}
@@ -394,23 +399,9 @@ static void t_capability_word(void)
 	CK(!strcmp(kgenome_nucleo_cap_name(0), "?"));
 	CK(!strcmp(kgenome_nucleo_cap_name(0xffff), "?"));
 
-	KM_CHECK(hk_isolated(km_cap_valid, NULL, 10, &sig) == HK_OK,
-		 "a capability the vocabulary names is not a valid capability word: net-hdrincl is action 16 of its group",
-		 "celllysis/capability_word.h: KGENOME_CA_NET_HDRINCL is the sixteenth action of KGENOME_CG_NET, so "
-		 "KGENOME_NUCLEO_ACT(KGENOME_NUCLEO_NET_HDRINCL) == KGENOME_NUCLEO_ACT_MAX: KGENOME_NUCLEO_VALID is 0 for it "
-		 "(libkofeng/databases/diagsrc.c:105 skips it in the table check; tests/lib/genome/diag_roles.c skips it) and "
-		 "KGENOME_NUCLEO_DENSE gives 64, the slot of action 0 of the next group. The same class of defect the comment "
-		 "in capability_word.h records for mem-action-read/write. Repro: KGENOME_NUCLEO_VALID(0x310) == 0 while "
-		 "kgenome_nucleo_cap_name(0x310) == \"net-hdrincl\"");
+	CK(hk_isolated(cap_valid, NULL, 10, &sig) == HK_OK);   /* a capability the vocabulary names is not a valid capability word: net-hdrincl is action 16 of its group */
 	(void)valid;
-	KM_CHECK(hk_isolated(km_cap_group_io, NULL, 10, &sig) == HK_OK,
-		 "the I/O capabilities do not fit the capability word: mem-read is context KERNEL, group BARE, and shares a dense slot with sleep",
-		 "celllysis/capability_word.h: KGENOME_CG_IO is 16 and KGENOME_CG_COUNT is 17, but KGENOME_NUCLEO_MK keeps a group in 4 "
-		 "bits (8-11) and KGENOME_NUCLEO_GROUP masks with 0xf, so KGENOME_NUCLEO_MK(USER, CG_IO, 1) = 0x1001 carries 16 into the "
-		 "context field: KGENOME_NUCLEO_GROUP(KGENOME_NUCLEO_MEM_READ) == 0 (BARE), its context is KERNEL, and "
-		 "KGENOME_NUCLEO_DENSE gives 1, the slot of `sleep` (0x0001); mem-write/anti-debug likewise. The guard "
-		 "`typedef char kgenome_cap_groups_fit[(KGENOME_CG_COUNT <= 64) ? 1 : -1]` states the wrong limit (16). "
-		 "Repro: KGENOME_NUCLEO_GROUP(0x1001) != KGENOME_CG_IO");
+	CK(hk_isolated(cap_group_io, NULL, 10, &sig) == HK_OK);   /* the I/O capabilities do not fit the capability word: mem-read is context KERNEL, group BARE, and shares a dense slot with sleep */
 }
 
 /* ---- the sizes and limits the headers publish ------------------------------------------------------------------------- */
@@ -432,7 +423,7 @@ static void t_limits(void)
 	CK(KGENOME_EMU_PAGE == 4096u && (KGENOME_EMU_PAGE & (KGENOME_EMU_PAGE - 1u)) == 0);
 	CK(KGENOME_EMU_DEF_PAGES == 16u * 1024u);
 	CK(KGENOME_EMU_IDLE == 4u << 20 && KGENOME_EMU_QUIET == 1500u);
-	CK(KGENOME_EMU_MAX_VMA == 1024u && KGENOME_EMU_MAX_SNAP == 64u && KGENOME_EMU_SAY == 4096u);
+	CK(KGENOME_EMU_MAX_VMA == 1024u && KGENOME_EMU_INSN_WATCH_MAX == 256u && KGENOME_EMU_SAY == 4096u);
 	CK(KGENOME_EMU_EXEC_WATCH == 16u && KGENOME_EMU_WATCH_MAX == 16u && KGENOME_EMU_INSN_WATCH == 8u &&
 	   KGENOME_EMU_INSN_WATCH_LEN == 8u && KGENOME_EMU_SHIM_MAX == 16u && KGENOME_EMU_SHIM_NAME == 48u);
 	CK(KGENOME_EMU_TRACE == 256u && KGENOME_EMU_SYSLOG == 64u && KGENOME_EMU_UNKSYS == 8u && KGENOME_EMU_ITRACE_MAX == 262144u);

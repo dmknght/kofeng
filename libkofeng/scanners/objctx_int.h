@@ -26,6 +26,7 @@
 #define KOF_OBJCTX_INT_H
 
 #include "scan.h"
+#include "../kofcore/kofdebug.h"
 
 /* ---- the boundary (objctx.c) -------------------------------------------- */
 
@@ -44,6 +45,21 @@ int oc_emit_exact(const struct kof_obj_ctx *ctx, const uint8_t *p, uint64_t n);
 
 /* ---- the interpreter (objctx_emu.c) ---- */
 uint32_t oc_emu_run(const struct kof_obj_ctx *ctx, uint32_t vouch);
+/* The TREE's interpreter allowance, in instructions, from the ROOT's size and the host's
+ * option (kof_scan_budget calls it); what a run may take of it and what it gives back. */
+uint64_t oc_emu_tree_insn(uint64_t root_size, uint64_t host_max);
+uint64_t oc_emu_afford(struct kof_scanner *sc, uint64_t own);
+void oc_emu_charge(struct kof_scanner *sc, uint64_t insn);
+/* The diagnose scan's emulating routes against the tree's allowance: begin trims the
+ * budget and the routes to what is left (or drops them, said), end charges what ran and
+ * marks a scan that lost a route incomplete. The PE API-resolution product likewise. */
+struct oc_emu_diag { uint64_t spent; int skipped; };
+void oc_emu_diag_begin(struct kof_scanner *sc, struct oc_emu_diag *acct,
+		       struct kgenome_budget *kb, unsigned *run);
+void oc_emu_diag_end(struct kof_scanner *sc, const struct oc_emu_diag *acct,
+		     struct kgenome_diag_scan *ds);
+struct kgenome_diag_apihash_set *oc_emu_apihash(struct kof_scanner *sc,
+		const struct kgenome_obj *gobj, kof_buf b, const struct kgenome_pe_imptab *imports);
 /* Takes ownership of the finished run, gathers what it produced (objctx_emu_gather.c). */
 uint32_t oc_emu_gather(const struct kof_obj_ctx *ctx, struct kof_scanner *sc,
 		       struct kgenome_emu *e, struct kgenome_emu_unp_report rep);
@@ -72,10 +88,35 @@ uint32_t oc_sym_import(const struct kof_obj_ctx *ctx, const char *dll,
 uint64_t oc_scan_room(const struct kof_scanner *sc);
 uint64_t oc_emit_all(const struct kof_obj_ctx *ctx, const uint8_t *p,
 			 uint64_t n);
-void oc_scan_capped(struct kof_scanner *sc, uint32_t reason);
-
-/* ---- shared helpers (objctx.c) ---- */
-void oc_scan_broken(struct kof_scanner *sc, uint32_t reason);
+/*
+ * THE THREE WAYS AN OBJECT IS SAID TO BE CUT, each with the place that said it. The macros
+ * pass __FILE__ and __LINE__ so a `make DEBUG=1` run prints one "[cut] file:line ..." line
+ * for every report - the list of what a bound took from this object, without a debugger -
+ * and a release build carries no string (KOF_TRACE compiles to nothing; the two arguments
+ * are the only cost, and only at a place that is already the slow path of a refusal).
+ * OC_LIMIT adds the reason in words, for a report that has no other name.
+ */
+void oc_scan_capped_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line);
+void oc_scan_limit_at(struct kof_scanner *sc, const char *file, int line);
+void oc_scan_broken_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line);
+#define oc_scan_capped(sc, reason) oc_scan_capped_at((sc), (reason), __FILE__, __LINE__)
+#define oc_scan_limit(sc)          oc_scan_limit_at((sc), __FILE__, __LINE__)
+#define oc_scan_broken(sc, reason) oc_scan_broken_at((sc), (reason), __FILE__, __LINE__)
+/*
+ * AN ENTRY'S OWN BOUND IS NOT THE TREE'S. A child that exceeds its own object cap or
+ * its declared-ratio clamp is CUT: the bytes decoded so far are its content and it
+ * carries LIMIT itself (kof_src_cut), the entry is counted in limit_hits, and the
+ * parent's loop goes on to the next entry. Only a bound of the whole tree - the
+ * produced-bytes budget, the resident ceiling, the child quota, the window allowance,
+ * an allocation - is sticky (oc_scan_broken: `stop`) and ends the walk, and says so.
+ * When nothing of the entry was kept there is no child to carry it, and the PARENT
+ * reports it (oc_scan_limit: a report, no control flow).
+ */
+enum { OC_REFUSE_CUT = 1, OC_REFUSE_CUT_OPENED = 2 };
+void oc_entry_cut(struct kof_scanner *sc);
+void oc_entry_cut_close(const struct kof_obj_ctx *ctx);
+void oc_entry_begin(struct kof_scanner *sc);
+#define OC_LIMIT(sc, why) do { KOF_TRACE("[cut] %s:%d %s\n", __FILE__, __LINE__, (why)); oc_scan_limit(sc); } while (0)
 
 /* ---- the diagnose analysis and symbols (objctx_diag.c) ---- */
 const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes);
@@ -124,6 +165,8 @@ uint32_t oc_unpack_peek(const struct kof_obj_ctx *ctx, uint32_t method,
 uint64_t oc_unpack_entry(const struct kof_obj_ctx *ctx, uint32_t method,
 			       uint32_t index, uint64_t out_hint);
 uint64_t oc_unpack_chain(const struct kof_obj_ctx *ctx, uint32_t index);
+/* The walk behind kof_zip_next / kof_pdf_next (scan_facts.c). */
+const void *oc_view_next(const struct kof_obj_ctx *ctx, uint32_t *cursor);
 
 /* ---- shared helpers (objctx.c) ---- */
 void oc_scan_release(struct kof_scanner *sc, uint64_t produced);
@@ -133,6 +176,13 @@ int oc_emit(const struct kof_obj_ctx *ctx, const void *bytes, uint32_t n);
 
 /* ---- memory ceiling (objctx.c) ---- */
 void oc_scan_charge_(struct kof_scanner *sc, uint64_t n);
+
+/* The names quota (KOF_SCAN_NAMES): take `n` bytes of it, 0 when they do not fit; give
+ * them back (saturating). The _cb spelling is the one a source holds for its label
+ * (kof_src_label_account), for the reason oc_scan_release_cb exists. */
+int  oc_names_take(struct kof_scanner *sc, uint64_t n);
+void oc_names_give(struct kof_scanner *sc, uint64_t n);
+void oc_names_give_cb(void *sc, uint64_t n);
 
 /* Charge the memory ceiling, recording WHICH function asked so a refusal can say
  * who ran out of room (kof_scanner.ledger.res_why). A macro for __func__. */
@@ -206,7 +256,21 @@ int oc_child_is64(const struct kof_obj_ctx *ctx);
 int oc_kid_push(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		    struct kof_objsrc *kid);
 void oc_scan_release_cb(void *sc, uint64_t produced);
+/* What one collected child costs besides its bytes (its record and its row in sc->child), charged to the
+ * resident ceiling when it is pushed - see kid_charge, objctx_child_sink.c. */
+uint64_t oc_kid_cost(void);
+void oc_diag_trim(struct kof_scanner *sc);
 int oc_sink_spill(struct kof_scanner *sc);
+/* objctx_spill.c: where a big object goes, and what happens when that place is not there. */
+int oc_spill_usable(struct kof_scanner *sc);
+int oc_spill_peek(struct kof_scanner *sc);
+void oc_sink_reserve(struct kof_scanner *sc, uint64_t n);
+int oc_sink_adopt(struct kof_scanner *sc, uint8_t *mem, size_t cap, size_t n);
+int oc_spill_open(struct kof_scanner *sc);
+int oc_spill_write(struct kof_scanner *sc, const void *p, uint64_t n);
+int oc_spill_file_open(void *scanner);
+int oc_spill_file_write(void *scanner, int fd, const void *p, uint64_t n);
+void kof_scan_spill_hook(struct kof_scanner *sc, const struct kof_spill_io *io);
 
 /* ---- what the emulator units share (objctx_emu*.c) ---- */
 /*
@@ -249,5 +313,8 @@ struct emu_extra {
 /* ---- what the diagnose units share (objctx_diag*.c) ---- */
 void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
 void oc_diag_demand(struct kof_scanner *sc);
+/* Which diagnose was called, in one greppable line (objctx_diag_trace.c). */
+void oc_diag_trace_scan(struct kof_scanner *sc);
+void oc_diag_trace_ask(struct kof_scanner *sc, uint32_t i);
 
 #endif /* KOF_OBJCTX_INT_H */

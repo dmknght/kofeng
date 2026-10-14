@@ -278,6 +278,7 @@ static int decl_case(void *arg)
 	struct kgenome_emu_decl *d;
 	struct hk_gb g;
 	struct kgenome_emu *em;
+	struct kgenome_emu_unp_report rep;
 
 	hk_pe(&pe, 1);
 	memset(&pi, 0, sizeof pi);
@@ -300,10 +301,13 @@ static int decl_case(void *arg)
 	rq.info = &pi;
 	rq.bud = &bud;
 	rq.decl = d;
+	rq.rep = &rep;
 	em = kgenome_emu_unp_run_pe(&rq);
 	kgenome_emu_free(em);
 	gb_free(&g);
-	return 0;
+	/* what the arrays cannot hold is counted, not read past and not forgotten */
+	return rep.decl_cut == 1000u - (which == 0 ? KGENOME_EMU_PATCH_MAX : which == 1 ? KGENOME_EMU_INSN_WATCH_MAX
+								 : KGENOME_EMU_SHIM_MAX) ? 0 : 3;
 }
 
 static void t_decl_counts(void)
@@ -314,12 +318,7 @@ static void t_decl_counts(void)
 	enum hk_result r2 = hk_isolated(decl_case, (void *)2, 10, &sig);
 
 	CK(r0 == HK_OK);               /* the patch table is clamped to KGENOME_EMU_PATCH_MAX */
-	KM_CHECK(r1 == HK_OK && r2 == HK_OK,
-		 "kgenome_emu_unp_run_pe reads past a declaration's arrays when n_iw or n_shim exceeds them",
-		 "emu_unpack_pe.c:409,413 pe_declare_watches loops `k < decl->n_iw` / `k < decl->n_shim` reading "
-		 "decl->iw[k] / decl->shim[k] with no clamp to KGENOME_EMU_INSN_WATCH (8) / KGENOME_EMU_SHIM_MAX (16), "
-		 "where apply_patches (emu_unpack_pe.c:36) clamps n_patch. Repro: n_iw or n_shim = 1000 in a "
-		 "struct kgenome_emu_decl at the end of a page");
+	CK(r1 == HK_OK && r2 == HK_OK);   /* kgenome_emu_unp_run_pe reads past a declaration's arrays when n_iw or n_shim exceeds them */
 }
 
 /* ---- hostile objects: the builders over every length and every field ---------------------------------------- */

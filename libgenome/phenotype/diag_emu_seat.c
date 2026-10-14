@@ -210,7 +210,7 @@ static void rel_span_finish(struct kgenome_diag_emu_rel_walk *R, struct kgenome_
 
 	if (rv >= KGENOME_DIAG_TOK_BASE &&
 	    rv < KGENOME_DIAG_TOK_BASE +
-		 (uint64_t)KGENOME_DIAG_TOK_SPAN * KGENOME_EMU_PAGE)
+		 (uint64_t)KGENOME_DIAG_TOK_MAX * KGENOME_EMU_PAGE)
 		ret[j] = (uint16_t)((rv - KGENOME_DIAG_TOK_BASE) /
 				    KGENOME_EMU_PAGE);
 	if (ret[j] != was) {
@@ -246,6 +246,8 @@ static void run_rel_gaps_in(const struct kgenome_diag_emu_rel_walk *init)
 	struct kgenome_diag_emu_rel_span S;
 	uint32_t j, pass;
 
+	S.seen = NULL;
+	S.cap_seen = 0;
 	R.n = kgenome_diag_scan_count(s);
 
 	kgenome_diag_emu_promote_wrappers(s, R.fns, R.fg.n);
@@ -297,7 +299,6 @@ static void run_rel_gaps_in(const struct kgenome_diag_emu_rel_walk *init)
 				continue;
 
 			S.n_seen = 0;
-			S.anon = KGENOME_DIAG_TOK_SPAN - 1u;
 			S.n_fd = 0;
 			S.n_seat = 0;
 			S.gap_steps = 0;
@@ -316,8 +317,15 @@ static void run_rel_gaps_in(const struct kgenome_diag_emu_rel_walk *init)
 			if (kgenome_diag_emu_rel_span_no_producer(&R, &S))
 				continue;
 
-			if (!kgenome_diag_emu_rel_span_open(&R, &S))
+			if (!kgenome_diag_emu_rel_span_open(&R, &S)) {
+				free(S.seen);
 				return;
+			}
+			/* Anonymous pages come from the top of the mapped arena (known now: the template
+			 * that maps it exists): above the producers' pages when the arena was grown,
+			 * anywhere in it - the old layout - when it was not. */
+			S.anon = s->rel_tok_span - 1u;
+			S.anon_floor = s->rel_tok_lim > KGENOME_DIAG_TOK_SPAN ? s->rel_tok_lim : 0u;
 
 			for (step = 0; step < KGENOME_DIAG_REL_STEPS; step++) {
 				uint64_t rip = kgenome_emu_get_rip(S.em) -
@@ -350,6 +358,7 @@ static void run_rel_gaps_in(const struct kgenome_diag_emu_rel_walk *init)
 	 * reached, and what depends on it is a pass short. */
 	if (pass >= KGENOME_DIAG_REL_PASSES)
 		kgenome_diag_note(s, KGENOME_TRUNCATED);
+	free(S.seen);
 }
 
 /*
@@ -359,7 +368,6 @@ static void run_rel_gaps_in(const struct kgenome_diag_emu_rel_walk *init)
  */
 void kgenome_diag_emu_run_rel_gaps(struct kgenome_diag_scan *s,
 			 const struct kgenome_obj *obj,
-			 const struct kgenome_elf_info *ei,
 			 const uint8_t *base, uint64_t size)
 {
 	struct kgenome_diag_emu_skipgather sg;
@@ -367,16 +375,18 @@ void kgenome_diag_emu_run_rel_gaps(struct kgenome_diag_scan *s,
 	uint16_t *ret = NULL;
 	uint8_t *flags = NULL;
 	struct kgenome_emu *tmpl = NULL;
-	kof_buf f;
 
 	if (obj->arch != KGENOME_ARCH_X86_64 || !kgenome_diag_scan_count(s))
 		return;
 
-	f.p = base;
-	f.n = size;
 	memset(&sg, 0, sizeof sg);
-	kgenome_elf_relcalls(f, ei, kgenome_diag_relocs(s, obj, KGENOME_ELF_RELOC_CODE),
-			 kgenome_diag_emu_gather_skip, &sg);
+	{
+		uint32_t nrc, k;
+		const struct kgenome_diag_rcall *rc = kgenome_diag_relcalls(s, obj, &nrc);
+
+		for (k = 0; k < nrc; k++)
+			kgenome_diag_emu_gather_skip(&sg, &rc[k]);
+	}
 	fgp = kgenome_diag_funcs(s, obj);
 	if (sg.n > 1u)
 		qsort(sg.site, sg.n, sizeof *sg.site, kgenome_diag_emu_skip_cmp);

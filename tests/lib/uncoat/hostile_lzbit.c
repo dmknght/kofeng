@@ -413,10 +413,7 @@ static int ap_fab(void *arg)
 	       a.nbad, a.cuts, b.nbad, b.cuts, a.worst > b.worst ? a.worst : b.worst);
 	snprintf(what, sizeof what, "aplib: stream cut at %zu of %zu bytes hands back %zu bytes that are not the real output "
 		 "(%zu of %zu cuts affected), status TRUNCATED", b.worst_cut, v_ap[1].n, b.worst, b.nbad, b.cuts);
-	KM_CHECK(a.nbad + b.nbad == 0, what,
-		 "APLIB_TRUNC_FABRICATED_BYTE (libuncoat/decompressors/aplib.c kuncoat_aplib_decode: the literal path "
-		 "`out[have++] = ap_byte(&s)` and the match copy run before `s.eof` is tested at the loop top; "
-		 "ap_byte returns 0 past the end, inbyte.h) [Inference: low, the status is TRUNCATED]");
+	CK(a.nbad + b.nbad == 0);
 	return 0;
 }
 
@@ -431,10 +428,7 @@ static int lm_fab(void *arg)
 	       a.nbad, a.cuts, b.nbad, b.cuts, a.worst > b.worst ? a.worst : b.worst);
 	snprintf(what, sizeof what, "lzmat: stream cut at %zu of %zu bytes hands back %zu bytes that are not the real output "
 		 "(%zu of %zu cuts affected)", b.worst_cut, v_lm[1].n, b.worst, b.nbad, b.cuts);
-	KM_CHECK(a.nbad + b.nbad == 0, what,
-		 "LZMAT_TRUNC_FABRICATED (libuncoat/decompressors/lzmat.c kuncoat_lzmat_decode: lz_at/lz_u8/lz_u16 read 0 past "
-		 "the end and the item under way is completed and written; the loop tests `ip < in_len` only between items) "
-		 "[Inference: low-medium: a truncated stream is OK or STOPPED with fabricated bytes in the output]");
+	CK(a.nbad + b.nbad == 0);
 	return 0;
 }
 
@@ -615,23 +609,20 @@ static void nrv_crafted(void)
 				st = call(0, &np, b, w.n, 100, &p);
 				accepted += st == KUNCOAT_OK;
 			}
-			KM_CHECK(accepted == 0, "nrv2: an unknown variant (3, 4, -1, 99) decodes as NRV2E and says OK",
-				 "NRV2_UNKNOWN_VARIANT (libuncoat/decompressors/nrv2.c kuncoat_nrv2_decode: `variant != KUNCOAT_NRV2B` and "
-				 "`variant == KUNCOAT_NRV2D` select D and E, any other int is E; no range check, unlike `bits`) "
-				 "[Inference: low, the caller maps UPX method numbers to the enum]");
+			CK(accepted == 0);
 		}
 	}
-	/* NULL out or cap 0 is STOPPED at once; NULL in with a length is TRUNCATED (nothing to read) */
+	/* cap 0 is STOPPED at once; a NULL buffer with a length is BAD_ARG (status.h: nothing was read) */
 	{
 		struct nrvp np = { HV_NRV2B, 8 };
 
 		p = 99;
 		st = kuncoat_nrv2_decode(np.variant, np.bits, b, 10, NULL, 100, &p);
-		CK(st == KUNCOAT_STOPPED && p == 0);
+		CK(st == KUNCOAT_BAD_ARG && p == 0);
 		st = kuncoat_nrv2_decode(np.variant, np.bits, b, 10, res, 0, &p);
 		CK(st == KUNCOAT_STOPPED && p == 0);
 		st = kuncoat_nrv2_decode(np.variant, np.bits, NULL, 10, res, 100, &p);
-		CK(st == KUNCOAT_TRUNCATED && p == 0);
+		CK(st == KUNCOAT_BAD_ARG && p == 0);
 		st = kuncoat_nrv2_decode(np.variant, np.bits, b, 0, res, 100, &p);
 		CK(st == KUNCOAT_TRUNCATED && p == 0);
 		st = kuncoat_nrv2_decode(np.variant, np.bits, b, 10, res, 100, NULL);
@@ -723,11 +714,7 @@ static void ap_crafted(void)
 
 		st = call(1, NULL, cut, 2, 100, &p);
 		CK(p == 1 && res[0] == 'A');
-		KM_CHECK(st != KUNCOAT_OK,
-			 "aplib: {0x41, 0xC0} (the end marker without its zero byte) reports OK, and so do many other cut streams",
-			 "APLIB_TRUNC_OK (libuncoat/decompressors/aplib.c kuncoat_aplib_decode: `if (ended) return KUNCOAT_OK` "
-			 "ignores s.eof; ap_byte reads 0 past the end, so a cut before the end marker's byte is the end marker; "
-			 "13 of 257 cuts of a 258 byte stream) [Inference: medium, silent short output with status OK]");
+		CK(st != KUNCOAT_OK);
 	}
 	/* the first byte alone; no input; no room */
 	st = call(1, NULL, b, 1, 100, &p);

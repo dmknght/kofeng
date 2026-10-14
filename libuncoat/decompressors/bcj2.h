@@ -72,7 +72,8 @@ struct kuncoat_bcj2_io {
  * Returns the number of bytes produced. Short of out_cap means a stream ran out -
  * a truncated archive, or a size the header stated and the streams cannot supply -
  * and the caller decides whether that is damage or a limit. Zero means nothing could
- * be produced at all.
+ * be produced at all - which is also the answer to a NULL `io`, a NULL stream or
+ * output, or an out_cap of 0 (this entry point returns a count, not a status).
  *
  * No stream is optional. An archive whose call or jump channel is empty is legal -
  * code with no branches of that kind - but the pointer must still be valid, because

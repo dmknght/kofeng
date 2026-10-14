@@ -27,8 +27,18 @@
  * yields a real prefix, and for a scanner that prefix is usually what
  * identifies the sample.
  *
- * Returns a kuncoat_status. KUNCOAT_STOPPED means the output buffer filled,
- * which is the receiver's limit rather than a failure of the stream.
+ * Returns a kuncoat_status. The format has NO END MARKER: the stream ends where the
+ * output reaches the size the container declared, and that is what `out_cap` is. OK
+ * is "the input was consumed item by item to its end" - `out_cap` bytes produced, or
+ * fewer when the input ran out first. THE TWO CANNOT BE TOLD APART: an encoder's last
+ * control group is usually partial, so a stream cut at an item boundary reads exactly
+ * like a complete one under a cap a little above its size. A caller that knows the
+ * size compares `produced` with it. What IS reported: STOPPED is an item that does
+ * not fit in the room left (nothing past `produced` is written), TRUNCATED is an item
+ * whose bits lie past the end of the input - it is dropped, never written from the
+ * zeros the reader would give. A NULL `in` with in_len > 0, or a NULL `out` with
+ * out_cap > 0, is KUNCOAT_BAD_ARG; a stream shorter than two bytes or a zero out_cap
+ * is CORRUPT. `produced` may be NULL.
  */
 enum kuncoat_status kuncoat_lzmat_decode(const uint8_t *in, uint64_t in_len,
 					uint8_t *out, uint64_t out_cap,

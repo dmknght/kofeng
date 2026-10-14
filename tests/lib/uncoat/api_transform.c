@@ -487,12 +487,9 @@ static void kat_chain(void)
 	}
 	n = enc_chain(pt, 5, chain);
 	chain[n] = 0xC3;                        /* ret: not part of the chain, ends it */
-	/* The cap is exactly the payload. Every dword is out and the chain is complete, but
-	 * the loop leaves at m == room before it has read the terminator, so it cannot
-	 * tell "ended" from "more chain" and says OVER_BUDGET. */
-	KM_CHECK(T(&s, chain, n + 1, 20, &p) == KUNCOAT_OK,
-		 "X86_SUB_CHAIN whose payload exactly fills cap is reported OVER_BUDGET (complete answer)",
-		 "SUB_CHAIN_EXACT_CAP (libuncoat/decryptors/ciphers.c sub_chain: while (at < n && m < room) exits before the terminator is read)");
+	/* The cap is exactly the payload: every dword is out and the chain is complete, so
+	 * the answer is OK and not OVER_BUDGET. */
+	CK(T(&s, chain, n + 1, 20, &p) == KUNCOAT_OK);
 	CK(p == 20 && same(res, want, 20));
 	CK(T(&s, chain, n + 1, 24, &p) == KUNCOAT_OK && p == 20 && same(res, want, 20));
 	CK(T(&s, chain, n + 1, 64, &p) == KUNCOAT_OK && p == 20 && same(res, want, 20));
@@ -503,11 +500,9 @@ static void kat_chain(void)
 	/* Room for 4 of 5 dwords with chain left: OVER_BUDGET; room below one dword too. */
 	CK(T(&s, chain, n + 1, 16, &p) == KUNCOAT_OVER_BUDGET && p == 16);
 	/* transform.h: OVER_BUDGET output is "the real beginning" of the answer. The chain
-	 * builds the payload downward, so the dwords it has when the room ends are the LAST
-	 * of the payload, reversed: the 16 bytes are not the first 16 of the 20. */
-	KM_CHECK(same(res, want, 16),
-		 "X86_SUB_CHAIN OVER_BUDGET output is not the beginning of the payload (it is its tail)",
-		 "SUB_CHAIN_CAP_TAIL (libuncoat/decryptors/ciphers.c sub_chain: stops after `room` pushes, which are the payload's last dwords)");
+	 * builds the payload downward, so the walk places each push where it belongs and
+	 * keeps the first 16 bytes of the 20. */
+	CK(same(res, want, 16));
 	CK(T(&s, chain, n + 1, 3, &p) == KUNCOAT_OVER_BUDGET && p == 0);
 	CK(T(&s, chain, n + 1, 19, &p) == KUNCOAT_OVER_BUDGET && p == 16);
 	/* The accepted dwords are the LAST pushed, reversed: a prefix of the push order. */
@@ -837,7 +832,7 @@ static void direct_entries(void)
 	CK(out[0] == 0x77 && out[4] == 0x77);
 }
 
-/* KNOWN-MISS: the status of an entry called with *w preset. */
+/* The status of an entry called with *w preset. */
 static void direct_append_status(void)
 {
 	static const uint8_t key[1] = { 0x11 };
@@ -847,14 +842,11 @@ static void direct_append_status(void)
 	enum kuncoat_status r;
 
 	/* ten input bytes, appended at out[5], with 12 bytes of room: the loop stops when
-	 * *w reaches 12, after seven of the ten, and the answer should be OVER_BUDGET.
-	 * transform_private.h's kuncoat_room_end(w, n) compares the ABSOLUTE write index
-	 * with n, so 12 < 10 is false and the answer is OK for a cut result. */
+	 * *w reaches 12, after seven of the ten, and the answer is OVER_BUDGET. The room
+	 * check counts what this call wrote, not the absolute index. */
 	r = kuncoat_cipher(&s, in, 10, out, 12, &w);
 	CK(w == 12);
-	KM_CHECK(r == KUNCOAT_OVER_BUDGET,
-		 "kuncoat_cipher(*w=5, n=10, cap=12) reports OK for a result cut at 7 of 10 bytes",
-		 "ROOM_END_ABSOLUTE_INDEX (libuncoat/transform_private.h kuncoat_room_end)");
+	CK(r == KUNCOAT_OVER_BUDGET);
 }
 
 int main(void)

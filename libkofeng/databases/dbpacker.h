@@ -128,4 +128,15 @@ struct kof_pw_mod {
 uint8_t *kof_pack_build(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n,
 			size_t *out_len);
 
+/*
+ * The same with the caller's choices. `pix_embed_min` is the smallest pattern table (bytes) the pack
+ * carries in its tail: below it the loader builds the table in memory (0: KOFPIX_EMBED_MIN, about
+ * 7000 markers). 1 means "always", which is how a test makes a small pack read its table with pread.
+ */
+struct kof_pack_opt {
+	uint64_t pix_embed_min;
+};
+uint8_t *kof_pack_build_opt(uint32_t kind, const struct kof_pw_mod *mods, uint32_t n,
+			    const struct kof_pack_opt *opt, size_t *out_len);
+
 #endif /* KOFENG_DBPACKER_H */

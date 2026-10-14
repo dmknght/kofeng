@@ -31,7 +31,9 @@
 #include <kofmod/kofdiagtree.h>
 
 #define KOF_DSRC_MAX_ITEM   96u
-#define KOF_DSRC_MAX_NODE   64u
+/* The node bound is the loader's: ONE carrier (KOF_DIAG_MAX_NODE, kofdiagtree.h), so a
+ * diagnose the builder accepts is one the loader reads. */
+#define KOF_DSRC_MAX_NODE   KOF_DIAG_MAX_NODE
 #define KOF_DSRC_NAME_LEN   64u
 
 enum kof_dsrc_kind {

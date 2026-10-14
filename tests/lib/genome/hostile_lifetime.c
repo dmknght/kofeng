@@ -184,11 +184,7 @@ static void t_free_rules(void)
 	CK(hk_isolated(free_twice_relocs, NULL, 10, &sig) == HK_OK);
 	CK(hk_isolated(free_misc_null, NULL, 10, &sig) == HK_OK);
 	CK(hk_isolated(free_unmap_ownership, NULL, 10, &sig) == HK_OK);
-	KM_CHECK(hk_isolated(free_null_funcs, NULL, 10, &sig) == HK_OK,
-		 "kgenome_funcs_free(NULL) faults while kgenome_pe_imptab_free, kgenome_elf_reloc_table_free, "
-		 "kgenome_diag_apihash_free, kgenome_xref_free and kgenome_emu_free ignore NULL",
-		 "genotype/image/funcs.c:79-83 `free(s->v); memset(s, 0, sizeof *s);` with no `if (!s)`. "
-		 "Repro: kgenome_funcs_free(NULL)");
+	CK(hk_isolated(free_null_funcs, NULL, 10, &sig) == HK_OK);   /* kgenome_funcs_free(NULL) faults while kgenome_pe_imptab_free, kgenome_elf_reloc_table_free, kgenome_diag_apihash_free, kgenome_xref_free and kgenome_emu_free ignore NULL */
 }
 
 /* ---- 2: borrowed buffers ------------------------------------------------------------------------------ */
@@ -317,19 +313,8 @@ static void t_borrowed_buffers(void)
 	kgenome_emu_snap_written(e);
 	kgenome_emu_free(e);
 
-	KM_CHECK(hk_isolated(borrowed_lifetime_case, NULL, 10, &sig) == HK_OK,
-		 "the bytes kgenome_emu_next_written hands out are freed by the next call, though emu.h says they stay "
-		 "valid until the emulator is freed",
-		 "emu_api.c:792 `free(e->run_buf); e->run_buf = buf;` on every call (the comment beside it says \"replaced "
-		 "on the next call\"); emu.h next_written: \"The bytes stay owned by the emulator and are valid until it is "
-		 "freed\". Repro: take the first run's pointer, call kgenome_emu_next_written again, read the first "
-		 "pointer: a use after free (ASAN)");
-	KM_CHECK(hk_isolated(stale_walk_case, NULL, 10, &sig) == HK_OK,
-		 "kgenome_emu_next_written lists the pages written when it was FIRST called, whatever the run writes after",
-		 "emu_api.c:744 `if (!e->sorted)` caches the list on the first walk; only kgenome_emu_page_add / "
-		 "page_add_zero (emu_mem.c:74,118) free it, and a first write into an already mapped page does not. "
-		 "Repro: map two data pages, run to the first store, walk (1 run), set_max_insn, run on to the second store, "
-		 "walk: still 1 run");
+	CK(hk_isolated(borrowed_lifetime_case, NULL, 10, &sig) == HK_OK);   /* the bytes kgenome_emu_next_written hands out are freed by the next call, though emu.h says they stay valid until the emulator is freed */
+	CK(hk_isolated(stale_walk_case, NULL, 10, &sig) == HK_OK);   /* kgenome_emu_next_written lists the pages written when it was FIRST called, whatever the run writes after */
 }
 
 /* ---- 3: NULL handles on the diagnose scan and the tables ------------------------------------------------- */
@@ -391,12 +376,7 @@ static void t_null_handles(void)
 	}
 	if (bad_n)
 		printf("  (crash on a NULL handle: %s)\n", names);
-	KM_CHECK(bad_n == 0, "6 public diagnose and capability-table calls dereference a NULL handle their siblings accept",
-		 "kgenome_diag_str_at_node and kgenome_diag_apihash (scan: diag_scan.c:364 `s->apihash`), "
-		 "kgenome_diag_funcs_of / _with_walk (obj: diag_scan.c:397 `obj->format`), kgenome_diag_code_range "
-		 "(info), kgenome_nucleo_sys_name_abi / kgenome_nucleo_cap_of_syscall_abi (abi: nucleo.c fx_look `fx->tab`); "
-		 "scan_count/_at/_status/... answer 0 for NULL. kgenome_diag_scan_with returns NULL on OOM, so an "
-		 "unchecked result faults in the first of them. Repro: kgenome_diag_apihash(NULL, &obj)");
+	CK(bad_n == 0);   /* 6 public diagnose and capability-table calls dereference a NULL handle their siblings accept */
 }
 
 /* ---- 4: threads --------------------------------------------------------------------------------------- */

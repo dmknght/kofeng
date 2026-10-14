@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include "objtree.h"
 #include <dirent.h>
 #include "../kofcore/kofplatform.h"
@@ -124,6 +125,43 @@ static uint32_t depth_allowance(uint64_t size)
 	if (n < CHAIN_MIN)
 		return CHAIN_MIN;
 	return (uint32_t)n;
+}
+
+/*
+ * THE NAME OF A LAYER IS ALLOCATED TO ITS REAL LENGTH AND CHARGED.
+ *
+ * It is the parent's whole name, then "//", the index, ":" and the label, and it was
+ * composed into a char[512] first: a parent path of a few hundred bytes (a deep
+ * directory, or an archive inside an archive) pushed the index and the label off the
+ * end, and two different members came out with ONE name - the thing the index is
+ * there to prevent. Now it is as long as it is. The bytes are taken from the names
+ * quota (KOF_SCAN_NAMES, reserved in the scanner's fixed cost, so charged to the
+ * engine's budget) and given back when the name is freed: a name too long to afford
+ * is a child that is not walked and is SAID (tree_mark_refused, limit_hits), not a
+ * silent cut. The charge is recomputed from the string at free time, which is safe
+ * because a layer's name is never edited.
+ */
+static char *layer_name_alloc(struct walk *w, size_t chars, int *refused)
+{
+	char *nm;
+
+	if (!oc_names_take(w->sc, (uint64_t)chars + 1u)) {
+		if (refused)
+			*refused = 1;
+		return NULL;
+	}
+	nm = malloc(chars + 1u);
+	if (!nm)
+		oc_names_give(w->sc, (uint64_t)chars + 1u);
+	return nm;
+}
+
+static void layer_name_free(struct walk *w, char *nm)
+{
+	if (!nm)
+		return;
+	oc_names_give(w->sc, strlen(nm) + 1u);
+	free(nm);
 }
 
 struct layer {
@@ -269,8 +307,122 @@ static void tree_scan_object(struct walk *w, const struct layer *cur,
 	}
 	sx_scan_object(w->sc, kof_src_buf(src), w->opt, res, cur->pdepth,
 		    cur->from_packer, cur->inherit_predict, kof_src_fmt_of(src));
+	/*
+	 * A FILE THAT WAS NOT READ IN FULL: it ended before the size the system reported
+	 * (truncated while it was read) or a read failed - DAMAGED - or it was larger than
+	 * the scanner's room for a file and only a head of it was held - LIMIT (objsrc.c,
+	 * kof_src_file). Nothing this object, or anything unpacked from these bytes, said
+	 * about the part that is missing is the file's. Asked of the ROOT, not of this source:
+	 * an object decoded from the bytes is a heap buffer that no longer remembers where it
+	 * came from. First reason wins, as every other reason is recorded, and found++ in
+	 * tree_report keeps the file out of the clean cache.
+	 */
+	if (w->root && !res->broken)
+		res->broken = kof_src_cut(w->root);
+	/*
+	 * AND THIS OBJECT'S OWN: a member that met its own bound while it was decoded
+	 * (oc_entry_cut - the object cap, the declared-ratio clamp) is the bytes up to the
+	 * cut and says Limit itself, so the parent's walk could go on to the entries after it.
+	 */
+	if (!res->broken)
+		res->broken = kof_src_cut(src);
+	/*
+	 * A MEMBER WHOSE NAME IS PAST ITS FORMAT'S STANDARD (oc_name_limit). The member
+	 * was opened - its bytes are evidence - but without the name, and the object
+	 * says so: damaged, and counted in kof_stats.names_invalid, because a name that
+	 * cannot be real is a structure that does not hold together.
+	 */
+	if (kof_src_name_bad(src)) {
+		w->sc->st.names_invalid++;
+		if (!res->broken)
+			res->broken = KOF_BROKEN_DAMAGED;
+	}
 	w->sc->cur.src = NULL;
 	w->sc->cur.derived_by = NULL;
+}
+
+/* "<parent>//<index>:<label>", or "<parent>//<index>" for a child with no label. */
+static size_t kid_name_chars(const char *parent, uint32_t index, const char *label)
+{
+	char digits[16];
+	size_t ll = strlen(label);
+
+	return strlen(parent ? parent : "?") + 2u +
+	       (size_t)snprintf(digits, sizeof digits, "%u", index) +
+	       (ll ? 1u + ll : 0u);
+}
+
+static char *kid_name(struct walk *w, const char *parent, uint32_t index,
+		      const char *label, int *refused)
+{
+	char digits[16];
+	size_t pl, ll, dl;
+	char *nm;
+
+	if (!parent)
+		parent = "?";
+	pl = strlen(parent);
+	ll = strlen(label);
+	dl = (size_t)snprintf(digits, sizeof digits, "%u", index);
+	nm = layer_name_alloc(w, pl + 2u + dl + (ll ? 1u + ll : 0u), refused);
+	if (!nm)
+		return NULL;
+	memcpy(nm, parent, pl);
+	memcpy(nm + pl, "//", 2u);
+	memcpy(nm + pl + 2u, digits, dl);
+	if (ll) {
+		nm[pl + 2u + dl] = ':';
+		memcpy(nm + pl + 3u + dl, label, ll);
+	}
+	nm[pl + 2u + dl + (ll ? 1u + ll : 0u)] = 0;
+	return nm;
+}
+
+
+/*
+ * WHETHER THE CHILDREN OF `cur` GO ONTO THE STACK: the walk was not interrupted, the host
+ * has not said "do not descend" (kof_objtree_may_open) and the depth bound lets them in.
+ * One answer for tree_mark_refused, which has to know before the verdict is out, and
+ * tree_take_kids, which does it - two spellings of this condition would be two policies.
+ */
+static int tree_descends(const struct walk *w, const struct layer *cur)
+{
+	return !w->aborted && !w->out_of_memory && kof_objtree_may_open(w->opt) &&
+	       (!w->opt->max_object_depth || cur->depth + 1 <= w->opt->max_object_depth);
+}
+
+/*
+ * ROOM FOR `need` LAYERS on the stack, taken BEFORE the callback of the object that produced
+ * them. Doubling first, the exact size when that is refused; 0 and the stack is as it was.
+ *
+ * The growth used to happen as each child was pushed, after the object's result had gone to
+ * the host: a refusal there dropped the children that did not fit with `w->incomplete` as the
+ * only trace, and the object that held them had already been reported clean (a sweep that
+ * refused each allocation of 4 KiB and up lost members silently in 8 of the 32 it refused,
+ * whatever the format - tests/unit/view_tables_arch.c). Asked here, the refusal is the
+ * object's Limit, said with the verdict.
+ */
+static int stack_reserve(struct layer_stack *sk, uint64_t need)
+{
+	uint64_t nc = sk->cap ? sk->cap : 16u;
+	struct layer *nv;
+
+	if (need <= sk->cap)
+		return 1;
+	if (need > 0x7fffffffu)
+		return 0;
+	while (nc < need)
+		nc *= 2u;
+	nv = realloc(sk->v, (size_t)nc * sizeof *nv);
+	if (!nv && nc > need) {
+		nc = need;
+		nv = realloc(sk->v, (size_t)nc * sizeof *nv);
+	}
+	if (!nv)
+		return 0;
+	sk->v = nv;
+	sk->cap = (uint32_t)nc;
+	return 1;
 }
 
 /*
@@ -278,7 +430,7 @@ static void tree_scan_object(struct walk *w, const struct layer *cur,
  * as not fully examined when a child of the object just scanned is too costly to
  * descend into.
  */
-static void tree_mark_refused(struct walk *w, const struct layer *cur,
+static void tree_mark_refused(struct walk *w, struct layer_stack *sk, const struct layer *cur,
 			      struct kof_result *res)
 {
 	uint32_t i;
@@ -307,6 +459,43 @@ static void tree_mark_refused(struct walk *w, const struct layer *cur,
 				res->broken = KOF_BROKEN_LIMIT;
 				break;
 			}
+	}
+	/*
+	 * AND A CHILD WHOSE NAME DOES NOT FIT THE NAMES QUOTA, for the same reason:
+	 * tree_take_kids refuses it (a name is never cut to fit), and refusing in
+	 * silence would report this object as examined when a layer of it was not
+	 * looked at. Counted the way take_kids will charge, child by child, so the two
+	 * agree on which children are refused; the layers already waiting hold their
+	 * names in the account.
+	 */
+	if (!res->broken && tree_descends(w, cur)) {
+		uint64_t room = w->sc->ledger.names < w->sc->ledger.names_max
+			      ? w->sc->ledger.names_max - w->sc->ledger.names : 0u;
+
+		for (i = 0; i < w->sc->child.n; i++) {
+			uint64_t need;
+
+			if (cur->depth + 1u >
+			    depth_allowance(kof_src_buf(w->sc->child.list[i]).n))
+				continue;
+			need = (uint64_t)kid_name_chars(cur->name, i,
+				kof_src_label_of(w->sc->child.list[i])) + 1u;
+			if (need > room) {
+				res->broken = KOF_BROKEN_LIMIT;
+				break;
+			}
+			room -= need;
+		}
+	}
+	/*
+	 * AND THE STACK THEY WILL STAND ON: every child that is not skipped above takes a layer,
+	 * so the room for all of them is taken now (stack_reserve). A refusal is the object's
+	 * Limit, counted once; the children that fit are still walked.
+	 */
+	if (!res->broken && w->sc->child.n && tree_descends(w, cur) &&
+	    !stack_reserve(sk, (uint64_t)sk->n + w->sc->child.n)) {
+		res->broken = KOF_BROKEN_LIMIT;
+		w->sc->st.limit_hits++;
 	}
 }
 
@@ -360,22 +549,28 @@ static void tree_report(struct walk *w, const struct layer *cur,
 		 * and that is checked here rather than trusted to
 		 * every module.
 		 */
+		if (!cur->name)
+			w->undelivered++;
 		/*
 		 * THE VERDICTS FIRST, each already composed - see
 		 * kof_on_event_detected. The engine says which findings it
 		 * is reporting and hands them over decoded, so a
 		 * host never walks the array deciding for itself.
 		 */
+		if (res->n && cur->name && !(w->sc->obj.open.superseded && cur->depth))
+			w->file_reported = 1;
 		if (w->opt->on_event_detected && cur->name &&
 		    !(w->sc->obj.open.superseded && cur->depth)) {
 			uint32_t q;
 
 			for (q = 0; q < res->n; q++)
-				if (res->v[q].is_verdict)
+				if (res->v[q].is_verdict) {
+					w->file_events++;
 					w->opt->on_event_detected(cur->name,
 						res->v[q].name,
 						&res->v[q],
 						w->opt->event_user);
+				}
 		}
 		if (w->cb && cur->name && !(w->sc->obj.open.superseded && cur->depth) &&
 		    w->cb(cur->name, ob.p, ob.n, res, w->user) != 0)
@@ -405,10 +600,7 @@ static void tree_take_kids(struct walk *w, struct layer_stack *sk,
 	 * before - the difference is only that it can now bound one
 	 * axis without the other.
 	 */
-	if (!w->aborted && !w->out_of_memory &&
-	    kof_objtree_may_open(w->opt) &&
-	    (!w->opt->max_object_depth ||
-	     cur->depth + 1 <= w->opt->max_object_depth)) {
+	if (tree_descends(w, cur)) {
 		/*
 		 * PUSHED BACKWARDS SO THEY COME OUT FORWARDS.
 		 *
@@ -422,8 +614,6 @@ static void tree_take_kids(struct walk *w, struct layer_stack *sk,
 		 * were walked in was backwards.
 		 */
 		for (i = w->sc->child.n; i-- > 0; ) {
-			char kid[512];
-
 			if (sk->n == sk->cap) {
 				uint32_t nc = sk->cap ? sk->cap * 2 : 16;
 				struct layer *nv = realloc(sk->v,
@@ -447,18 +637,6 @@ static void tree_take_kids(struct walk *w, struct layer_stack *sk,
 			 * them into one string. Together they are always
 			 * exactly one entry.
 			 */
-			{
-				const char *lab =
-					kof_src_label_of(w->sc->child.list[i]);
-
-				if (*lab)
-					snprintf(kid, sizeof kid,
-						 "%s//%u:%s",
-						 cur->name ? cur->name : "?", i, lab);
-				else
-					snprintf(kid, sizeof kid, "%s//%u",
-						 cur->name ? cur->name : "?", i);
-			}
 			/*
 			 * The cost limit, asked about the CHILD rather
 			 * than about this object: what a layer costs is
@@ -471,10 +649,23 @@ static void tree_take_kids(struct walk *w, struct layer_stack *sk,
 			if (cur->depth + 1u >
 			    depth_allowance(kof_src_buf(w->sc->child.list[i]).n))
 				continue;   /* said above, before the verdict */
+			{
+				int refused = 0;
+
+				sk->v[sk->n].name = kid_name(w, cur->name, i,
+					kof_src_label_of(w->sc->child.list[i]), &refused);
+				if (!sk->v[sk->n].name && refused) {
+					/* The names quota is full: this child is not walked, and the
+					 * file is not clean (tree_mark_refused said so before the
+					 * verdict, and the counter moves). */
+					w->incomplete = 1;
+					w->sc->st.limit_hits++;
+					continue;
+				}
+				if (!sk->v[sk->n].name)
+					w->out_of_memory = 1;
+			}
 			sk->v[sk->n].src = kof_src_ref(w->sc->child.list[i]);
-			sk->v[sk->n].name = kof_strdup_n(kid, strlen(kid));
-			if (!sk->v[sk->n].name)
-				w->out_of_memory = 1;
 			sk->v[sk->n].depth = cur->depth + 1;
 			sk->v[sk->n].from_packer = w->sc->child.packer &&
 					       w->sc->child.packer[i];
@@ -524,7 +715,18 @@ static void tree_take_kids(struct walk *w, struct layer_stack *sk,
  * tree_mark_refused, tree_report, tree_take_kids - and this is the loop that
  * hands them the layer in hand and then takes the next one off the stack.
  */
+static void scan_tree_body(struct walk *w, struct kof_objsrc *root, const char *path);
+
+/* A scan is running on this scanner for as long as this call is: kof_scan_trim reads it. */
 static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
+{
+	w->sc->busy++;
+	scan_tree_body(w, root, path);
+	if (--w->sc->busy == 0)
+		kof_scan_root_release(w->sc);
+}
+
+static void scan_tree_body(struct walk *w, struct kof_objsrc *root, const char *path)
 {
 	struct layer_stack sk = { NULL, 0, 0 };
 	/* The root is not copied into the stack; it is scanned first and its
@@ -533,15 +735,20 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	 * prediction and nothing derived it - all of which is the zero value. */
 	struct layer cur;
 
+	w->root = root;
 	memset(&cur, 0, sizeof cur);
 	cur.src = kof_src_ref(root);
-	cur.name = kof_strdup_n(path, strlen(path));
 
 	/* The root begins a scope - see the reset beside sx_scan_object below,
 	 * which is where the rule is stated. */
 	w->sc->subject.have = 0;
 	w->sc->subject.lvl  = 0;
 
+	kof_scan_budget(w->sc, kof_src_buf(root).n, w->opt);
+	/* After the budget, which starts the resident account: the name is charged to it. */
+	cur.name = layer_name_alloc(w, strlen(path), NULL);
+	if (cur.name)
+		memcpy(cur.name, path, strlen(path) + 1u);
 	/* Every other allocation failure in this function sets out_of_memory so
 	 * the walk is reported incomplete rather than clean - this one didn't,
 	 * which meant an OOM here dropped the root's finding silently instead
@@ -550,14 +757,12 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	if (!cur.name)
 		w->out_of_memory = 1;
 
-	kof_scan_budget(w->sc, kof_src_buf(root).n, w->opt);
-
 	for (;;) {
 		struct kof_result res;
 
 		tree_scan_object(w, &cur, &res);
 		if (!res.broken)
-			tree_mark_refused(w, &cur, &res);
+			tree_mark_refused(w, &sk, &cur, &res);
 		tree_report(w, &cur, &res);
 		tree_take_kids(w, &sk, &cur);
 		kof_scan_kids_reset(w->sc);
@@ -567,7 +772,7 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 		 * child cap, an aborted walk - accounts for it without knowing that
 		 * it has to. */
 		kof_src_unref(cur.src);
-		free(cur.name);
+		layer_name_free(w, cur.name);
 
 		if (w->aborted || sk.n == 0) {
 			/* Children still waiting are children nobody looked at. */
@@ -582,9 +787,10 @@ static void scan_tree(struct walk *w, struct kof_objsrc *root, const char *path)
 	while (sk.n > 0) {
 		sk.n--;
 		kof_src_unref(sk.v[sk.n].src);
-		free(sk.v[sk.n].name);
+		layer_name_free(w, sk.v[sk.n].name);
 	}
 	free(sk.v);
+	w->root = NULL;
 }
 
 /*
@@ -680,6 +886,11 @@ static void scan_streams(struct walk *w, const char *path)
  * scan would make that stream invisible for as long as the cache held, which
  * is exactly the silence this whole feature exists to end.
  */
+void kof_scan_read_hook(struct kof_scanner *sc, const struct kof_src_read_io *io)
+{
+	sc->read_io = io;
+}
+
 void sx_scan_file(struct walk *w, const char *path)
 {
 	scan_one(w, path);
@@ -714,15 +925,52 @@ static void scan_one(struct walk *w, const char *path)
 		return;
 	}
 
-	src = kof_src_file(path, &err);
+	{
+		struct kof_src_file_req rq;
+
+		kof_scan_scratch(w->sc, w->opt);
+		rq.path = path;
+		rq.budget = w->sc->eng->budget;
+		kof_scan_file_room(w->sc, &rq.room, &rq.limit);
+		rq.io = w->sc->read_io;
+		rq.spill_open = oc_spill_file_open;
+		rq.spill_write = oc_spill_file_write;
+		rq.spill_user = w->sc;
+		src = kof_src_file(&rq, &err);
+	}
 	if (!src) {
 		sx_note_unreadable(w);
 		return;
 	}
+	/* A head of a larger file is a limit that fired, and counted like the others. */
+	if (kof_src_cut(src) == KOF_BROKEN_LIMIT)
+		w->sc->st.limit_hits++;
 	before = w->found;
 	w->incomplete = 0;
+	w->file_reported = 0;
+	w->file_events = 0;
+	w->sc->file_held = kof_src_charged(src);
 	scan_tree(w, src, path);
+	w->sc->file_held = 0;
 	kof_src_unref(src);
+	/*
+	 * THE ENGINE'S OWN CHECK THAT A COUNTED FILE WAS TOLD. A file whose objects
+	 * reported a finding is one a roll-up counts (kverdict_filemap_fold reads the
+	 * worst finding), and the host was owed a verdict event for it. A file that
+	 * is counted and had none is a verdict LOST - it can only be a defect in what
+	 * takes the slot (sx_verdict_take) - so it is counted where a host can read it
+	 * (kof_stats.verdict_lost, shown by kofscanner as an error) and not left to a
+	 * test to find. Only a host that asked for events can be owed any.
+	 */
+	if (w->opt->on_event_detected && w->file_reported) {
+		w->sc->st.verdicts_counted++;
+		if (w->file_events)
+			w->sc->st.verdicts_delivered++;
+		else {
+			w->sc->st.verdict_lost++;
+			KOF_TRACE("[verdict] LOST: %s was counted and no event was delivered\n", path);
+		}
+	}
 	/*
 	 * A STOP THAT ARRIVED DURING THE SCAN. should_stop is asked between modules
 	 * and between children, where the callback cannot reach, and when it says
@@ -804,9 +1052,14 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
 		w->path_buf[dir_len] = '/';
 		memcpy(w->path_buf + dir_len + 1, de->d_name, nl + 1);
 
-		/* lstat, not stat: a symlink is not followed unless asked for, so a link
-		 * pointing at an ancestor cannot turn this into a loop. */
-		if ((w->opt->follow_symlinks ? stat : kof_lstat)(w->path_buf, &sb) != 0) {
+		/*
+		 * lstat, never stat: THE ENGINE DOES NOT FOLLOW SYMLINKS (the owner's
+		 * decision, a symlink-attack defence), so a link is neither a file nor a
+		 * directory here and is skipped like a socket or a device. That is also
+		 * what makes this walk finite: a link to an ancestor was the one way a tree
+		 * became a loop. kof_scan_option.follow_symlinks is ignored (kofoption.h).
+		 */
+		if (kof_lstat(w->path_buf, &sb) != 0) {
 			sx_note_unreadable(w);
 			continue;
 		}
@@ -814,6 +1067,13 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
 		if (S_ISDIR(sb.st_mode)) {
 			if (!w->opt->recurse_dirs)
 				continue;
+			/*
+			 * max_depth 0 is "no limit of ours", and it is bounded all the same: every
+			 * level is a full path handed to opendir, the kernel refuses a path past
+			 * PATH_MAX (4096 bytes, so about 2000 levels of "/x"), and a directory it
+			 * refuses is counted in `unreadable` above, not skipped quietly. Measured
+			 * by tests/unit/hostile_engine_scan.c (2100 levels made by chdir).
+			 */
 			if (w->opt->max_depth && depth + 1 > w->opt->max_depth)
 				continue;
 			sx_push_dir(w, w->path_buf, dir_len + 1 + nl, depth + 1);
@@ -826,6 +1086,22 @@ void sx_read_dir(struct walk *w, const char *dir, uint32_t depth)
 		/* anything else - socket, device, fifo - is not an object */
 	}
 	closedir(d);
+}
+
+/*
+ * WHAT A WALK ANSWERS when memory ran out in it (out_of_memory): no object reached the callback
+ * - the root's record or name was refused - is KOF_ERR_NOMEM, not a count; a tree that was
+ * delivered in part keeps its count and the cut is counted in limit_hits, as every other
+ * budget that ends a tree early is. Measured by silent_oom_sweep (OOM_WALK_ROOT).
+ */
+static int walk_result(struct walk *w, int none)
+{
+	if (w->out_of_memory) {
+		if (w->objects == w->undelivered)
+			return KOF_ERR_NOMEM;
+		w->sc->st.limit_hits++;
+	}
+	return w->objects ? (int)w->objects : none;
 }
 
 /*
@@ -872,7 +1148,7 @@ int kof_scan_bytes(struct kof_scanner *sc, const void *bytes, uint64_t n,
 	scan_tree(&w, src, name ? name : "");
 	kof_src_unref(src);
 	free(w.path_buf);
-	return w.objects ? (int)w.objects : 0;
+	return walk_result(&w, 0);
 }
 
 int kof_scan_walk(struct kof_scanner *sc, const char *path,
@@ -888,7 +1164,9 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 	w.cb   = cb;
 	w.user = user;
 
-	if ((opt->follow_symlinks ? stat : kof_lstat)(path, &sb) != 0)
+	/* lstat: a path that IS a symlink is not a directory and not a file, so it falls to
+	 * the single-file branch below, where the open refuses it (O_NOFOLLOW). */
+	if (kof_lstat(path, &sb) != 0)
 		return KOF_ERR_OPEN;
 
 	if (!S_ISDIR(sb.st_mode)) {
@@ -900,7 +1178,7 @@ int kof_scan_walk(struct kof_scanner *sc, const char *path,
 			sx_scan_file(&w, sq);
 		else
 			sx_scan_file(&w, path);
-		rc = w.objects ? (int)w.objects : KOF_ERR_OPEN;
+		rc = walk_result(&w, KOF_ERR_OPEN);
 		free(w.path_buf);
 		return rc;
 	}
@@ -935,5 +1213,5 @@ done:
 	free(w.path_buf);
 	/* Running out of heap mid-walk is reported, not fatal: what was scanned before
 	 * it is still a result, and the caller can tell the walk was cut short. */
-	return (int)w.objects;
+	return walk_result(&w, 0);
 }

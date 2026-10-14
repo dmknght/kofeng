@@ -424,7 +424,7 @@ uint32_t kgenome_pe_layout_of(kof_buf img, struct kgenome_sec_decl *out, uint32_
 	for (i = 0; i < nsec && n < cap; i++) {
 		uint64_t e = sec_tab + (uint64_t)i * KGENOME_PE_SEC_LEN;
 		uint32_t vsz = 0, rva = 0, chars = 0;
-		unsigned k;
+		unsigned k, j;
 
 		if (!kof_rd_u32(img, e + 8, 0, &vsz) ||
 		    !kof_rd_u32(img, e + 12, 0, &rva) ||
@@ -432,23 +432,26 @@ uint32_t kgenome_pe_layout_of(kof_buf img, struct kgenome_sec_decl *out, uint32_
 			break;
 		if (!vsz || !rva)
 			continue;
-		/* The table is in address order in every image a loader will
-		 * take, and the declaration has to be - so one that is not is
-		 * where this stops rather than where it starts guessing. */
-		if (n && rva < out[n - 1u].rva + out[n - 1u].vsize)
-			break;
-		for (k = 0; k < 8u; k++)
-			out[n].name[k] = (char)img.p[e + k];
-		out[n].name[8] = 0;
-		out[n].rva = rva;
-		out[n].vsize = vsz;
-		out[n].perm = kgenome_pe_sec_perm(chars);
+		/*
+		 * THE DECLARATION IS IN ADDRESS ORDER, so a table that is not is SORTED, never cut at
+		 * the first entry that is out of place (which dropped every section after it and
+		 * returned a count that looked whole). Sections that overlap once sorted are all
+		 * declared: the image says so, and a reader sees it as it is.
+		 */
+		for (k = n; k > 0u && out[k - 1u].rva > rva; k--)
+			out[k] = out[k - 1u];
+		for (j = 0; j < 8u; j++)
+			out[k].name[j] = (char)img.p[e + j];
+		out[k].name[8] = 0;
+		out[k].rva = rva;
+		out[k].vsize = vsz;
+		out[k].perm = kgenome_pe_sec_perm(chars);
 		/*
 		 * REBUILT, not READ. These ranges were recovered by
 		 * decompressing a stub's output; the file on disk declared no
 		 * such thing. A reader has to be able to tell the two apart.
 		 */
-		out[n].flags = ((out[n].perm & KGENOME_PE_PERM_X) ? KGENOME_SECF_CODE
+		out[k].flags = ((out[k].perm & KGENOME_PE_PERM_X) ? KGENOME_SECF_CODE
 								  : KGENOME_SECF_DATA) |
 			       KGENOME_SECF_REBUILT;
 		n++;

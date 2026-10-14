@@ -113,7 +113,7 @@ static void unique_names(unsigned n, unsigned first)
 static uint8_t *pack_n(size_t *len, unsigned n, unsigned n_node)
 {
 	unique_names(n, 0);
-	uint8_t *b = calloc(1, 8u + (size_t)n * (8u + 16u + 8u * 40u));
+	uint8_t *b = calloc(1, 8u + (size_t)n * (8u + 32u + 8u * (n_node + 4u)));
 	size_t at = 8u + (size_t)n * 8u;
 	unsigned i;
 
@@ -285,25 +285,35 @@ int main(int argc, char **argv)
 	if (e)
 		kof_db_free(e);
 
-	/* nodes: 32 are read, 33 are not */
-	e = load("node32", 1, KOF_DB_MAX_DIAG_NODE);
+	/* nodes: the bound is ONE number (KOF_DIAG_MAX_NODE) that the source reader
+	 * shares; 32 and 33 are read, the last one is, and one past it is refused AND
+	 * counted. */
+	e = load("node32", 1, 32u);
 	CK(e && e->n_diag == 1u);
 	if (e)
 		kof_db_free(e);
-	e = load("node33", 1, KOF_DB_MAX_DIAG_NODE + 1u);
+	e = load("node33", 1, 33u);
 	CK(e != NULL);
-	KM_CHECK(e && e->n_diag == 1u,
-		 "a diagnose of 33 nodes is loaded", "KOF_DB_MAX_DIAG_NODE");
+	CK(e && e->n_diag == 1u && kdb_diag_refused(e) == 0u);
+	if (e)
+		kof_db_free(e);
+	e = load("nodemax", 1, KOF_DB_MAX_DIAG_NODE);
+	CK(e && e->n_diag == 1u && kdb_diag_refused(e) == 0u);
+	if (e)
+		kof_db_free(e);
+	e = load("nodeover", 1, KOF_DB_MAX_DIAG_NODE + 1u);
+	CK(e != NULL);
+	CK(e && e->n_diag == 0u && kdb_diag_refused(e) == 1u);
 	if (e)
 		kof_db_free(e);
 
-	/* 64 pack files fit, the 65th is not read */
+	/* 64 pack files, the 65th, and a hundred: there is no count of packs */
 	{
 		char dir[640];
 		unsigned i;
 
-		for (i = 0; i < 2; i++) {
-			unsigned n_pack = i ? 65u : 64u, k;
+		for (i = 0; i < 3; i++) {
+			unsigned n_pack = i == 0 ? 64u : i == 1 ? 65u : 100u, k;
 
 			snprintf(dir, sizeof dir, "%s/packs%u", root, n_pack);
 			CK(kof_mkdir(dir, 0700) == 0 && copy_good_pack(dir));
@@ -322,12 +332,7 @@ int main(int argc, char **argv)
 			}
 			e = kof_db_load(dir);
 			CK(e != NULL);
-			if (!i)
-				CK(e && e->n_diag == 64u);
-			else
-				KM_CHECK(e && e->n_diag == 65u,
-					 "all 65 diagnose packs of a directory are read",
-					 "KOF_DIAG_PACKS_MAX");
+			CK(e && e->n_diag == n_pack && kdb_diag_packs_refused(e) == 0u);
 			if (e)
 				kof_db_free(e);
 			rm_all(dir);

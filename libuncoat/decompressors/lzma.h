@@ -57,8 +57,22 @@
  * `produced` is always set, whatever the status: a stream cut short still yields a
  * real prefix, and for a scanner that prefix is usually what identifies the sample.
  *
- * Returns a kuncoat_status. KUNCOAT_STOPPED means the output buffer filled,
- * which is the receiver's limit rather than a failure of the stream.
+ * Returns a kuncoat_status. KUNCOAT_STOPPED means the output buffer filled with
+ * stream left to decode, which is the receiver's limit rather than a failure of the
+ * stream. A buffer that fills exactly where the stream ends is OK: with input left,
+ * the decoder looks at whether that is the end marker, and a stream that has no
+ * marker (the container knew the size) ends with its last byte.
+ *
+ * INPUT THAT ENDS EARLY IS TRUNCATED, and what comes back is only what the stream
+ * said. The range coder is given zeros past the end so the symbol under way finishes
+ * in a defined state, but a symbol whose bits came from them is dropped, never
+ * written (a match could otherwise invent 273 bytes). [Inference] A complete stream
+ * never needs them: the coder normalises after each bit, so its last normalisation
+ * takes exactly the bytes the encoder flushed; the differential tests against an
+ * independent encoder's output (hostile_lzma) decode whole streams without ever setting the flag.
+ *
+ * A NULL `in` with in_len > 0, or a NULL `out` with out_cap > 0, is KUNCOAT_BAD_ARG;
+ * out_cap 0 is STOPPED (nothing can be produced). `produced` may be NULL.
  */
 enum kuncoat_status kuncoat_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
 		    const uint8_t *in, uint64_t in_len,
@@ -71,6 +85,25 @@ enum kuncoat_status kuncoat_lzma_decode(unsigned lc, unsigned lp, unsigned pb,
  * it. The dictionary is the output buffer, so out_cap bounds both how much is
  * produced and how far a match may reach - the same arrangement plain LZMA uses
  * here and for the same reason.
+ *
+ * STATUS. OK is a complete answer: the end byte (0x00) was reached, or the buffer is
+ * full and the stream has no more chunks. The buffer full with a chunk (or part of
+ * one) left is STOPPED, never a short OK. The end byte missing with room left, a
+ * chunk cut short, and every symbol that would have come from past the end are
+ * TRUNCATED. A chunk must be exactly its declared length: ending short of it (an end
+ * marker inside a chunk, or nothing decoded) is CORRUPT.
+ *
+ * DICTIONARY RESET (control 1, or an LZMA chunk with reset 3) is honoured: a match
+ * may not reach before it, and the position the model keeps (for pb, lp and the
+ * literal context) counts from it. What is NOT enforced is any ordering rule between
+ * chunks (that the first chunk resets the dictionary, that a chunk after an
+ * uncompressed dictionary reset resets state) [Unverified] against the format
+ * specification: a stream that breaks them decodes the way its chunk headers say,
+ * and no byte is read from outside the buffer in either case.
+ *
+ * A state reset does work in proportion to the model it uses: the fixed part is
+ * rewritten and a literal context is initialised when first used, so a chunk header
+ * cannot make the decoder rewrite megabytes it will not read.
  */
 enum kuncoat_status kuncoat_lzma2_decode(const uint8_t *in, uint64_t in_len, uint8_t *out,
 		     uint64_t out_cap, uint64_t *produced);
