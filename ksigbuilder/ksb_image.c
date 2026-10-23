@@ -143,19 +143,14 @@ int ksb_coff_read(const char *path, struct img_facts *out)
 		if (sect == 0) {
 			if (!out->undef[0] &&
 			    (!strcmp(name, "kof_scan") ||
-			     !strcmp(name, "kof_unpack") ||
-			     !strcmp(name, "kof_heur") ||
-			     !strcmp(name, "kof_cure")) == 0)
+			     !strcmp(name, "kof_unpack")) == 0)
 				snprintf(out->undef, sizeof out->undef, "%s",
 					 name);
 			goto next;
 		}
-		if (!strcmp(name, "kof_cure")) {
-			out->have_cure = 1;
-			out->cure_off = value;
-		}
-		if (!strcmp(name, "kof_scan") || !strcmp(name, "kof_unpack") ||
-		    !strcmp(name, "kof_heur")) {
+		if (!strcmp(name, "kof_cure") || !strcmp(name, "kof_heur"))
+			snprintf(out->retired, sizeof out->retired, "%.31s", name);
+		if (!strcmp(name, "kof_scan") || !strcmp(name, "kof_unpack")) {
 			out->n_entry++;
 			/* Bounded explicitly: the three names it can be are
 			 * all shorter than the field, and saying so is what
@@ -359,12 +354,9 @@ int ksb_img_read(const char *path, const char *want_blob,
 						 "%s", nm);
 				continue;
 			}
-			if (!strcmp(nm, "kof_cure")) {
-				out->have_cure = 1;
-				out->cure_off = value;
-			}
-			if (!strcmp(nm, "kof_scan") || !strcmp(nm, "kof_unpack") ||
-			    !strcmp(nm, "kof_heur")) {
+			if (!strcmp(nm, "kof_cure") || !strcmp(nm, "kof_heur"))
+				snprintf(out->retired, sizeof out->retired, "%.31s", nm);
+			if (!strcmp(nm, "kof_scan") || !strcmp(nm, "kof_unpack")) {
 				out->n_entry++;
 				snprintf(out->entry_name, sizeof out->entry_name,
 					 "%s", nm);

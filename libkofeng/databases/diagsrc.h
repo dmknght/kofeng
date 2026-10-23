@@ -50,9 +50,7 @@ enum kof_dsrc_kind {
 	KDS_ACTION,     /* a  = the head's capability, b = the action, v = value */
 	KDS_FIELD,      /* a  = capability, s1 = the symbol's label           */
 	KDS_SEQUENCE,   /* a  = first capability, b = then                    */
-	KDS_DISEASE,    /* a  = kof_maltype, s1 = the disease                  */
-	/* A VERDICT'S OWN DECLARATION - see kof_dsrc_cond. */
-	KDS_VNAME       /* s1 = KOF_MALTYPE_* word, s2 = the family name       */
+	KDS_DISEASE     /* a  = kof_maltype, s1 = the disease                  */
 };
 
 /*
@@ -69,53 +67,8 @@ struct kof_dsrc_item {
 	char     s2[KOF_DSRC_NAME_LEN];
 };
 
-/*
- * THE CONDITION OF A VERDICT THAT READS DIAGNOSES: a conjunction of terms,
- *
- *     if (kof_diag(A) && kof_diag(B) && kof_diag_share(CAP, A, B))
- *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
- *
- * which is the whole of what the five verdicts of this kind say. It is one
- * unit and not a list of lines, because a wrapped `if` has no line of its own
- * to keep or drop; `at`..`end` is its byte span in the text it was read from,
- * so a patch replaces exactly that and nothing around it.
- *
- * ANYTHING ELSE IN THE FUNCTION IS NOT READ, and a file the reader cannot
- * follow is refused rather than guessed at: an `||`, a count, a second
- * statement. The editor then leaves that verdict alone.
- */
-#define KOF_DSRC_MAX_TERM 16u
-
-enum kof_dsrc_term_kind {
-	KVT_DIAG = 0,   /* kof_diag(a)                                        */
-	KVT_SHARE,      /* kof_diag_share(cap, a, b)                          */
-	KVT_STR_ANY,    /* kof_diag_str_any(a, "s", ...) - one of the names   */
-	KVT_STR_ALL     /* kof_diag_str_all(a, "s", ...) - every one of them  */
-};
-
-#define KOF_DSRC_MAX_STR 8u
-#define KOF_DSRC_STR_LEN 48u
-
-struct kof_dsrc_term {
-	uint8_t  kind;                  /* enum kof_dsrc_term_kind                    */
-	uint16_t cap;                   /* share: the node both must meet at          */
-	char     a[KOF_DSRC_NAME_LEN];  /* a diagnose, as the source spells it        */
-	char     b[KOF_DSRC_NAME_LEN];  /* share: the other                           */
-	uint8_t  n_str;                 /* str_*: the names it asks about             */
-	char     str[KOF_DSRC_MAX_STR][KOF_DSRC_STR_LEN];
-};
-
-struct kof_dsrc_cond {
-	uint32_t n;
-	struct kof_dsrc_term t[KOF_DSRC_MAX_TERM];
-	char     infect[48];            /* the KOF_MALVAR_* word it reports           */
-	size_t   at, end;               /* "if" .. its closing ")", in the source     */
-};
-
 struct kof_dsrc {
 	struct kof_dsrc_item item[KOF_DSRC_MAX_ITEM];
-	struct kof_dsrc_cond cond;
-	int      has_cond;              /* the file is a verdict that reads diagnoses */
 	uint32_t n;
 	uint32_t lines;         /* lines in the text it was read from */
 	uint32_t bad;           /* declarations it could not read */
@@ -130,7 +83,7 @@ struct kof_dsrc_report {
 };
 
 /* One error: count it in *n and tell the caller. Shared by the diagnose and the
- * syndrome source readers, which report the same way. */
+ * disease declaration reader, which reports the same way. */
 void kof_dsrc_say_err(const struct kof_dsrc_report *r, int *n, int line,
 		      const char *msg);
 
@@ -180,32 +133,19 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap);
 
 /* Two declarations that say the same thing, wherever they were read from. */
 int kof_dsrc_same(const struct kof_dsrc_item *a, const struct kof_dsrc_item *b);
-int kof_dsrc_cond_same(const struct kof_dsrc_cond *a, const struct kof_dsrc_cond *b);
 
 /* Every comment blanked in place, newlines kept - see the definition. */
 void kof_dsrc_blank_comments(char *s, size_t n);
 
 /*
- * THE DIAGNOSES A VERDICT SOURCE READS, from the condition kof_dsrc_parse read:
- * each term's names, in order, `a` and then `b` for a join. Calls `fn` once per
- * name. Nothing for a source with no condition.
+ * THE DIAGNOSES A MODULE SOURCE READS, from the calls it makes - kof_diag(A),
+ * kof_diag_share(CAP, A, B), kof_diag_str_any/all(A, ...): calls `fn` once per name,
+ * in source order, over the text with its comments blanked. The build uses it to say
+ * which diagnoses somebody reads (the engine runs only those and the ones that declare
+ * a disease). No shape is required of the module.
  */
-void kof_dsrc_cond_names(const struct kof_dsrc_cond *c,
-			 void (*fn)(void *ud, const char *diag), void *ud);
-
-/*
- * WHAT A VERDICT MUST SAY, checked where the diagnose's own rules are: a
- * format, a name, at least one term, and a join whose two diagnoses are terms
- * of the same condition (a join of something the verdict never asked is a
- * statement about nothing). Returns the number of errors. That each name is a
- * diagnose that exists is the build's to check - it has the database.
- */
-int kof_dsrc_verdict_check(const struct kof_dsrc *d,
-			   const struct kof_dsrc_report *r);
-
-/* A whole verdict file for `d` - includes, declarations, the function - for a
- * verdict that does not exist yet. malloc'd, or NULL. */
-char *kof_dsrc_verdict_new(const struct kof_dsrc *d, size_t *out_n);
+void kof_dsrc_reads(const char *text, size_t n,
+		    void (*fn)(void *ud, const char *diag), void *ud);
 
 /*
  * THE SOURCE WITH `edited` IN PLACE OF ITS DECLARATIONS, as described above.
@@ -217,8 +157,27 @@ char *kof_dsrc_verdict_new(const struct kof_dsrc *d, size_t *out_n);
 char *kof_dsrc_patch(const char *text, size_t n, const struct kof_dsrc *edited,
 		     size_t *out_n);
 
+/*
+ * THE SAME PATCH FOR ANOTHER KIND OF SOURCE. `parse` reads the original text
+ * (the number of errors, 0 when it can be patched) and `print` writes one
+ * declaration as a line, without the newline (0 when it cannot be written);
+ * `ud` is handed to `print`. Items are `struct kof_dsrc_item`s, and an item kept
+ * whole is recognised by kof_dsrc_same, so a kind of file picks its own `kind`
+ * values and the loop does not care what they mean.
+ */
+struct kof_dsrc_ops {
+	int    (*parse)(const char *text, size_t n, struct kof_dsrc *d);
+	size_t (*print)(const struct kof_dsrc_item *it, void *ud, char *out,
+			size_t cap);
+	void   *ud;
+};
+
+char *kof_dsrc_patch_with(const struct kof_dsrc_ops *ops, const char *text,
+			  size_t n, const struct kof_dsrc *edited,
+			  size_t *out_n);
+
 /* The i-th argument of "MACRO(a, b, c)" - the splitter every reader of a
- * diagnose call shares, a verdict's call to kof_diag_share included. */
+ * diagnose call shares. */
 int kof_dsrc_arg(const char *p, int i, char *out, size_t cap);
 
 /* The vocabulary, both ways. A capability is written as its enumerator. */

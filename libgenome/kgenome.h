@@ -11,7 +11,7 @@
  * never a `_private.h`. tools/check_layers.py enforces that (LIB PUBLIC HEADERS),
  * and tests/unit/kgenome_header.c compiles a unit that includes only this.
  *
- * FOUR PARTS and the two headers they share:
+ * FIVE PARTS and the two headers they share:
  *
  *   kgenome_status.h  enum kgenome_status - whether an answer is complete. Every
  *                     limit in the lib sets it; none is silent (CLAUDE.md rule 4).
@@ -25,6 +25,8 @@
  *   celllysis/        the analysis of code without running it: the decoder front
  *                     end (cell), the capability vocabulary (nucleo), address
  *                     spaces, cross-references, the library-span lines.
+ *   textual/          the analysis of text with a grammar: the lexer, one directory a
+ *                     language (php/), the API in the files beside them.
  *   phenotype/        the analysis that runs it: the emulator, the unpacking run,
  *                     the diagnose walk and its products (the diagnose graph).
  *
@@ -69,6 +71,9 @@
 #include "genotype/image/funcs.h"
 #include "genotype/image/endian.h"
 
+/* textual: text that has a grammar - the lexer of a script */
+#include "textual/textual.h"
+
 /* celllysis: reading code without running it */
 #include "celllysis/arch.h"
 #include "celllysis/capability.h"
@@ -88,6 +93,9 @@
 #include "phenotype/emu_unpack.h"
 #include "phenotype/diag_vocab.h"
 #include "phenotype/diag_scan.h"
+#include "phenotype/diag_text_names.h"
 #include "phenotype/diag_scan_state.h"
+#include "phenotype/diag_lineage.h"
+#include "phenotype/codemap.h"
 
 #endif /* KGENOME_H */

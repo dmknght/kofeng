@@ -13,30 +13,16 @@ static void cseq_put(struct view *v, int kind, uint32_t idx)
 
 static void cnd_seq(struct view *v)
 {
-	uint32_t t, c;
+	uint32_t t;
 
 	v->n_cseq = 0;
 	for (t = 0; t < v->ed.dr.n_cnd; t++) {
-		if (v->ed.dr.cnd[t].parent >= 0)
+		/* Only the open tab's conditions: each tab has its own list,
+		 * and each condition is a block of its own. */
+		if (v->ed.dr.cnd[t].tab != v->ed.dr.tab)
 			continue;
 		cseq_put(v, CS_MATCH, t);
-		cseq_put(v, CS_VAR, t);
 		cseq_put(v, CS_COND, t);
-		for (c = 0; c < v->ed.dr.n_cnd; c++) {
-			if (v->ed.dr.cnd[c].parent != (int)t)
-				continue;
-			cseq_put(v, CS_MATCH, c);
-			cseq_put(v, CS_VAR, c);
-			cseq_put(v, CS_COND, c);
-			if (cnd_more_siblings(&v->ed, c))
-				cseq_put(v, CS_JOIN, c);
-		}
-		/* The end of the block, and the way to extend it. Only where
-		 * there is a block to extend - a condition has to exist before
-		 * anything can be put inside it. */
-		cseq_put(v, CS_ADD, t);
-		if (cnd_more_siblings(&v->ed, t))
-			cseq_put(v, CS_JOIN, t);
 	}
 }
 
@@ -47,6 +33,93 @@ static void prow_add(struct view *v, int kind, uint32_t idx)
 	v->prow_kind[v->n_prow] = (uint8_t)kind;
 	v->prow_idx[v->n_prow] = idx;
 	v->n_prow++;
+}
+
+/*
+ * THE ROWS OF EACH TAB'S TABLES, in the order draw_decl draws them. Split out
+ * of prow_build only to keep that one short; each is the count of one drawer.
+ */
+static void prow_strings(struct view *v)
+{
+	uint32_t i;
+
+	/*
+	 * THE HEADING IS ALWAYS A ROW, BECAUSE IT IS ALWAYS DRAWN.
+	 *
+	 * draw_decl_strings paints it whether or not the table has anything in
+	 * it - an empty table is exactly when the button that fills it has to
+	 * be reachable, see BTN_ADDSTR - and this counted it only when there
+	 * was a string, so a draft with no declared strings painted one row
+	 * more than the model held and every row below was one out.
+	 */
+	prow_add(v, RW_STRHDR, 0);
+	for (i = 0; i < v->ed.dr.n_decl; i++)
+		prow_add(v, RW_STR, i);
+	prow_add(v, RW_ADDS, 0);
+}
+
+static void prow_lineage(struct view *v)
+{
+	struct object *dob = cur_obj(v);
+	uint32_t i, n = diag_shown_n(v);
+
+	prow_add(v, RW_DIAGHDR, 0);
+	prow_add(v, RW_DIAGCOL, 0);
+	if (v->diag_fold)
+		return;
+	/* An empty table says why on one row of its own. */
+	if (!n)
+		prow_add(v, RW_DIAG, 0);
+	for (i = 0; n && i < dob->n_diag; i++)
+		if (dob->diag[i].state == KOF_DIAG_ST_MATCH)
+			prow_add(v, RW_DIAG, i);
+}
+
+static void prow_blocks(struct view *v)
+{
+	uint32_t i;
+
+	prow_add(v, RW_BLKHDR, 0);
+	/* Two rows: the heading and the column names, or the heading and the
+	 * reason an object that has no code has no table. */
+	prow_add(v, RW_BLKCOL, 0);
+	if (!blk_section_shown(v))
+		return;
+	for (i = 0; i < v->ed.dr.n_blk; i++)
+		if (blk_row_shown(v, i))
+			prow_add(v, RW_BLK, i);
+}
+
+static void prow_matchers(struct view *v)
+{
+	uint32_t i;
+
+	prow_add(v, RW_MATHDR, 0);
+	for (i = 0; i < v->ed.dr.n_grp; i++) {
+		if (grp_tab(&v->ed, i) != v->ed.dr.tab)
+			continue;
+		prow_add(v, RW_MATCH, i);
+		/* A search matcher is two rows: what it IS, and the markers it
+		 * searches for. A block matcher is one - the hash and the
+		 * threshold. */
+		if (v->ed.dr.grp[i].kind != GRP_KIND_SIM)
+			prow_add(v, RW_MARKERS, i);
+	}
+	/* [+ Matcher] is the Patterns tab's: a block's matcher is made by
+	 * ticking the block. */
+	if (v->ed.dr.tab == DT_PATTERNS)
+		prow_add(v, RW_ADDM, 0);
+}
+
+static void prow_conds(struct view *v)
+{
+	uint32_t i;
+
+	prow_add(v, RW_CNDHDR, 0);
+	cnd_seq(v);
+	for (i = 0; i < v->n_cseq; i++)
+		prow_add(v, RW_COND, i);
+	prow_add(v, RW_ADDC, 0);
 }
 
 /* Every row the panel would show, in order, before deciding which fit. */
@@ -105,78 +178,30 @@ void prow_build(struct view *v)
 	for (i = 0; i < (uint32_t)OPT_COUNT; i++)
 		if (v->ed.dr.opt_on[i])
 			prow_add(v, RW_OPT, i);
-	/*
-	 * THE HEADING IS ALWAYS A ROW, BECAUSE IT IS ALWAYS DRAWN.
-	 *
-	 * draw_decl_strings paints it whether or not the table has anything in
-	 * it - an empty table is exactly when the button that fills it has to
-	 * be reachable, see BTN_ADDSTR - and this counted it only when there
-	 * was a string. So a draft with no declared strings, which is every
-	 * mutation rule, painted one row more than the model held: "panel rows
-	 * 18, model 17", and every row below was one out, so the last of them
-	 * could not be scrolled to and a click landed on its neighbour. The
-	 * Conditions section is where a reader sees it, being last.
-	 */
-	prow_add(v, RW_STRHDR, 0);
-	for (i = 0; i < v->ed.dr.n_decl; i++)
-		prow_add(v, RW_STR, i);
-	prow_add(v, RW_ADDS, 0);
-	/*
-	 * THE DIAGNOSES THIS FILE CARRIES, under the strings: both are things
-	 * the rule is written from, and a researcher choosing what to match on
-	 * looks at the two together. Same count draw_decl_diag emits.
-	 */
-	if (diag_shown_n(v)) {
-		prow_add(v, RW_DIAGHDR, 0);
-		prow_add(v, RW_DIAGCOL, 0);
-		if (!v->diag_fold) {
-			struct object *dob = cur_obj(v);
-
-			for (i = 0; i < dob->n_diag; i++)
-				if (dob->diag[i].state == KOF_DIAG_ST_MATCH)
-					prow_add(v, RW_DIAG, i);
-		}
+	/* The title bar of tabs: everything above it is shared by every
+	 * diagnose the draft generates, everything below is the open tab's. */
+	prow_add(v, RW_TABS, 0);
+	switch (v->ed.dr.tab) {
+	case DT_BLOCKS:
+		prow_blocks(v);
+		prow_matchers(v);
+		prow_conds(v);
+		break;
+	case DT_GRAPHS:
+		prow_lineage(v);
+		prow_add(v, RW_CNDHDR, 0);
+		prow_add(v, RW_COND, 0);
+		break;
+	default:
+		prow_strings(v);
+		prow_matchers(v);
+		prow_conds(v);
+		break;
 	}
-	/*
-	 * THE BLOCKS THE ENGINE OFFERS, between the markers and the matchers.
-	 *
-	 * Where they belong in reading order: the markers and the blocks are
-	 * both things the rule is written FROM, and the matchers below name
-	 * them. A block table at the foot of the panel would have the matchers
-	 * referring upwards to something that had not been shown yet.
-	 */
-	if (blk_section_shown(v)) {
-		prow_add(v, RW_BLKHDR, 0);
-		prow_add(v, RW_BLKCOL, 0);
-		for (i = 0; i < v->ed.dr.n_blk; i++)
-			if (blk_row_shown(v, i))
-				prow_add(v, RW_BLK, i);
-	}
-	/*
-	 * THE ADD BUTTON AFTER THE THINGS IT ADDS TO, not before them.
-	 *
-	 * It sat under the heading, so the list a reader is building grew
-	 * DOWNWARDS FROM UNDER THE BUTTON: the thing just added appeared below
-	 * it, the button stayed where it was, and the eye had to go back up to
-	 * add the next one. At the foot of the block the button is where the
-	 * last thing added is, which is where the reader is already looking -
-	 * and it is the shape the condition block has always had, where
-	 * CS_ADD closes the block.
-	 */
-	prow_add(v, RW_MATHDR, 0);
-	for (i = 0; i < v->ed.dr.n_grp; i++) {
-		prow_add(v, RW_MATCH, i);
-		/* Both kinds are two rows: what the matcher IS, and what it is
-		 * about - the markers it searches for, or the block it scores
-		 * against. */
-		prow_add(v, RW_MARKERS, i);
-	}
-	prow_add(v, RW_ADDM, 0);
-	prow_add(v, RW_CNDHDR, 0);
-	cnd_seq(v);
-	for (i = 0; i < v->n_cseq; i++)
-		prow_add(v, RW_COND, i);
-	prow_add(v, RW_ADDC, 0);
+	/* The output pane, when Generate has been pressed: the same count the
+	 * drawing uses. */
+	for (i = 0; i < preview_rows(v); i++)
+		prow_add(v, RW_PREV, i);
 }
 
 void sec_bar(struct out *o, struct view *v, int row, const char *text)

@@ -79,6 +79,9 @@ FIND_DEPS = if exist "$(subst /,\,$(BUILD))" dir /s /b "$(subst /,\,$(BUILD))\*.
 # PowerShell recipe cannot run a .sh - Windows hands it to a file association,
 # so nothing runs and the recipe succeeds. -File, not a bare path, so the same
 # is not true of the .ps1 on a host whose execution policy is restricted.
+# The interpreter for the repository's own scripts (tools/*.py, tests/tui). `python3` is a
+# POSIX name: the Windows installers put `python` on PATH and no `python3`.
+PYTHON   ?= python
 MKFIXTURES = powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/mkfixtures.ps1
 else
 MKDIR    = mkdir -p '$(1)'
@@ -91,5 +94,6 @@ NOOP     = :
 SILENCE  = 2>/dev/null
 NOW_UTC  = date -u +%Y%m%d%H
 FIND_DEPS = find $(BUILD) -name '*.d' 2>/dev/null
+PYTHON   ?= python3
 MKFIXTURES = tests/mkfixtures.sh
 endif

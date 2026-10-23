@@ -673,58 +673,162 @@ static void t_nucleo(void)
 	CK(kgenome_nucleo_cap_of_syscall_abi(fx, 198, a, &fl) == KGENOME_NUCLEO_NET_RAW);
 
 	/* names (imports) */
-	CK(kgenome_nucleo_cap_of_name("mmap") == KGENOME_NUCLEO_ALLOC);
-	CK(kgenome_nucleo_cap_of_name("mmap64@@GLIBC_2.2.5") == KGENOME_NUCLEO_ALLOC);       /* a version suffix is the same function */
-	CK(kgenome_nucleo_cap_of_name("mmapx") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name("mma") == KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_name("") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name(NULL) == KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_name("@") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name("@@x") == KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_name("malloc") == KGENOME_NUCLEO_HEAP);
-	CK(kgenome_nucleo_cap_of_name("recv") != KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name("recvfrom") != KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_name("VirtualAlloc") == KGENOME_NUCLEO_ALLOC);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "mmap") == KGENOME_NUCLEO_ALLOC);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "mmap64@@GLIBC_2.2.5") == KGENOME_NUCLEO_ALLOC);       /* a version suffix is the same function */
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "mmapx") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "mma") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, NULL) == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "@") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "@@x") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "malloc") == KGENOME_NUCLEO_HEAP);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "recv") != KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "recvfrom") != KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "VirtualAlloc") == KGENOME_NUCLEO_ALLOC);
 	{
 		char big[5000];
 		memset(big, 'm', sizeof big - 1u);
 		big[sizeof big - 1u] = 0;
-		CK(kgenome_nucleo_cap_of_name(big) == KGENOME_NUCLEO_NONE);
+		CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, big) == KGENOME_NUCLEO_NONE);
 	}
 	/* name ids: 0 is "none", every id round-trips, past the end is NULL */
-	CK(kgenome_nucleo_name_id("mmap") != 0 && !strcmp(kgenome_nucleo_name_of(kgenome_nucleo_name_id("mmap")), "mmap"));
-	CK(kgenome_nucleo_name_id("mmap@@GLIBC_2.2.5") == kgenome_nucleo_name_id("mmap"));
-	CK(kgenome_nucleo_name_id("nonexistent_function") == 0 && kgenome_nucleo_name_id(NULL) == 0 && kgenome_nucleo_name_id("") == 0);
+	CK(kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "mmap") != 0 && !strcmp(kgenome_nucleo_name_of(kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "mmap")), "mmap"));
+	CK(kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "mmap@@GLIBC_2.2.5") == kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "mmap"));
+	CK(kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "nonexistent_function") == 0 && kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, NULL) == 0 && kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "") == 0);
 	CK(kgenome_nucleo_name_of(0) == NULL && kgenome_nucleo_name_of(0xffffu) == NULL);
 	{
-		unsigned id, last = 0;
+		unsigned id, last = 0, t;
 		for (id = 1; id < 0x10000u; id++) {
 			const char *nm = kgenome_nucleo_name_of((uint16_t)id);
+			int own = 0;
 			if (!nm)
 				break;
 			last = id;
-			if (kgenome_nucleo_name_id(nm) != id && kgenome_nucleo_cap_of_name(nm) == KGENOME_NUCLEO_NONE)
-				CK(0);
-			CK(kgenome_nucleo_cap_of_name(nm) != KGENOME_NUCLEO_NONE);
+			/* the id says the table it came from: asked of that target, the name gives the id back and has a word */
+			for (t = KGENOME_NUCLEO_T_ELF; t <= KGENOME_NUCLEO_T_CFML; t++)
+				if (kgenome_nucleo_name_id(t, nm) == id && kgenome_nucleo_cap_of_name(t, nm) != KGENOME_NUCLEO_NONE)
+					own = 1;
+			CK(own);
 		}
 		CK(last > 50);
 		CK(kgenome_nucleo_name_of((uint16_t)(last + 1u)) == NULL);
 	}
+	/*
+	 * ONE TABLE PER TARGET: a name means something only to the target that has it. An ELF object has no VirtualAlloc, a PE has no
+	 * mmap (it keeps Winsock, whose names are lowercase and are Windows API), and a php script has neither.
+	 */
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "VirtualAlloc") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "mmap") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "kallsyms_lookup_name") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "socket") == KGENOME_NUCLEO_NET_OPEN);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "system") == KGENOME_NUCLEO_NONE && kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "CreateProcessA") != KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "mmap") == KGENOME_NUCLEO_NONE &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "VirtualAlloc") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, "base64_decode") == KGENOME_NUCLEO_NONE &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "eval") == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(99u, "mmap") == KGENOME_NUCLEO_NONE);        /* a target nobody has */
+	/* php: the words a shell is made of, names that do not care about case, and a variable named like a call */
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "base64_decode") == KGENOME_NUCLEO_DECODE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "Base64_Decode") == KGENOME_NUCLEO_DECODE);
+	/* text run now is data-eval; text made into a function is data-create; a callee that is a value is data-call (the row "(dynamic)"
+	 * is the call of a value, not a php name) */
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "eval") == KGENOME_NUCLEO_EVAL &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "assert") == KGENOME_NUCLEO_EVAL &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "create_function") == KGENOME_NUCLEO_CREATE &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "call_user_func") == KGENOME_NUCLEO_DYNCALL &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "Call_User_Func_Array") == KGENOME_NUCLEO_DYNCALL &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, KGENOME_NUCLEO_DYNAMIC_NAME) == KGENOME_NUCLEO_DYNCALL &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "unserialize") == KGENOME_NUCLEO_DYNLOAD &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "ReflectionClass") == KGENOME_NUCLEO_DYNLOAD &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, KGENOME_NUCLEO_DYNLOAD_NAME) == KGENOME_NUCLEO_DYNLOAD);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, KGENOME_NUCLEO_DYNAMIC_NAME) == KGENOME_NUCLEO_NONE &&
+	   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, KGENOME_NUCLEO_DYNAMIC_NAME) == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "_GET") == KGENOME_NUCLEO_REQUEST);
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "shell_exec") == KGENOME_NUCLEO_EXEC_IMAGE);
+	/*
+	 * THE OTHER SCRIPTING LANGUAGES, one table each (the rows of each are pinned by tests/lib/genome/nucleo_<language>_names.c): the target
+	 * numbers are distinct and follow PHP's, every script table has the row of a call of a value, a name means something only to the
+	 * language that has it, and the case rule is each table's own (VBScript, batch, PowerShell, .NET and CFML fold; the others do not).
+	 */
+	{
+		static const struct { unsigned target; const char *name; uint16_t cap; } sc[] = {
+			{ KGENOME_NUCLEO_T_JS, "child_process.exec", KGENOME_NUCLEO_EXEC_IMAGE },
+			{ KGENOME_NUCLEO_T_PY, "os.system", KGENOME_NUCLEO_EXEC_IMAGE },
+			{ KGENOME_NUCLEO_T_PERL, "decode_base64", KGENOME_NUCLEO_DECODE },
+			{ KGENOME_NUCLEO_T_RUBY, "Base64.decode64", KGENOME_NUCLEO_DECODE },
+			{ KGENOME_NUCLEO_T_LUA, "os.execute", KGENOME_NUCLEO_EXEC_IMAGE },
+			{ KGENOME_NUCLEO_T_TCL, "uplevel", KGENOME_NUCLEO_EVAL },
+			{ KGENOME_NUCLEO_T_SH, "nohup", KGENOME_NUCLEO_BACKGROUND },
+			{ KGENOME_NUCLEO_T_BAT, "certutil", KGENOME_NUCLEO_DECODE },
+			{ KGENOME_NUCLEO_T_PSH, "Invoke-Expression", KGENOME_NUCLEO_EVAL },
+			{ KGENOME_NUCLEO_T_VBS, "ExecuteGlobal", KGENOME_NUCLEO_EVAL },
+			{ KGENOME_NUCLEO_T_DOTNET, "Process.Start", KGENOME_NUCLEO_EXEC_IMAGE },
+			{ KGENOME_NUCLEO_T_JAVA, "Runtime.exec", KGENOME_NUCLEO_EXEC_IMAGE },
+			{ KGENOME_NUCLEO_T_CFML, "cfexecute", KGENOME_NUCLEO_EXEC_IMAGE },
+		};
+		static const char fold_of[] = { 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1 };   /* in the order of sc[] */
+		size_t si;
+		unsigned t;
+
+		CK(sizeof sc / sizeof sc[0] == sizeof fold_of);
+		CK(KGENOME_NUCLEO_T_JS == KGENOME_NUCLEO_T_PHP + 1u && KGENOME_NUCLEO_T_CFML == KGENOME_NUCLEO_T_JS + 12u);
+		for (si = 0; si < sizeof sc / sizeof sc[0]; si++) {
+			const char *nm = sc[si].name;
+			char up[64];
+			size_t j, n = strlen(nm);
+
+			CK(kgenome_nucleo_cap_of_name(sc[si].target, nm) == sc[si].cap);
+			CK(kgenome_nucleo_name_id(sc[si].target, nm) != 0 && !strcmp(kgenome_nucleo_name_of(kgenome_nucleo_name_id(sc[si].target, nm)), nm));
+			/* the call of a value is a row of every script table, and of neither native one */
+			CK(kgenome_nucleo_cap_of_name(sc[si].target, KGENOME_NUCLEO_DYNAMIC_NAME) == KGENOME_NUCLEO_DYNCALL);
+			/* case: the swapped-case spelling is the same name in a folding table and nothing in the others */
+			CK(n < sizeof up);
+			for (j = 0; j < n; j++)
+				up[j] = (char)(nm[j] >= 'a' && nm[j] <= 'z' ? nm[j] - 32 : nm[j] >= 'A' && nm[j] <= 'Z' ? nm[j] + 32 : nm[j]);
+			up[n] = 0;
+			CK((kgenome_nucleo_cap_of_name(sc[si].target, up) == sc[si].cap) == (fold_of[si] != 0));
+			/* a name is the language's own: the others' tables do not answer for it (checked against the two native tables and PHP) */
+			CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, nm) == KGENOME_NUCLEO_NONE);
+			CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, nm) == KGENOME_NUCLEO_NONE);
+		}
+		/* a target one past the last has no table, and the ids of the script tables are all inside the run the loop above walked */
+		CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_CFML + 1u, "cfexecute") == KGENOME_NUCLEO_NONE);
+		for (t = KGENOME_NUCLEO_T_JS; t <= KGENOME_NUCLEO_T_CFML; t++)
+			CK(kgenome_nucleo_name_id(t, KGENOME_NUCLEO_DYNAMIC_NAME) != 0);
+		/* one platform's name is not another language's: POSIX and Windows API names are not rows of the languages that call neither */
+		CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PSH, "system") == KGENOME_NUCLEO_NONE &&
+		   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_VBS, "unlink") == KGENOME_NUCLEO_NONE &&
+		   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_BAT, "CreateProcessA") == KGENOME_NUCLEO_NONE &&
+		   kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PY, "system") == KGENOME_NUCLEO_NONE);
+	}
+	CK(kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PHP, "md5") == KGENOME_NUCLEO_NONE);   /* every program: left out */
+	CK(!strcmp(kgenome_nucleo_cap_name(KGENOME_NUCLEO_DECODE), "data-decode") &&
+	   !strcmp(kgenome_nucleo_cap_name(KGENOME_NUCLEO_EVAL), "data-eval") &&
+	   !strcmp(kgenome_nucleo_cap_name(KGENOME_NUCLEO_CREATE), "data-create") &&
+	   !strcmp(kgenome_nucleo_cap_name(KGENOME_NUCLEO_DYNCALL), "data-call") &&
+	   !strcmp(kgenome_nucleo_cap_name(KGENOME_NUCLEO_DYNLOAD), "data-load") &&
+	   !strcmp(kgenome_nucleo_cap_name(KGENOME_NUCLEO_REQUEST), "input-request"));
+	/* an id says its table: the same spelling in two targets is two ids, and either gives its own name back */
+	CK(kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, "system") != kgenome_nucleo_name_id(KGENOME_NUCLEO_T_PE, "system") &&
+	   kgenome_nucleo_name_id(KGENOME_NUCLEO_T_PE, "system") != kgenome_nucleo_name_id(KGENOME_NUCLEO_T_PHP, "system"));
+	CK(!strcmp(kgenome_nucleo_name_of(kgenome_nucleo_name_id(KGENOME_NUCLEO_T_PHP, "system")), "system"));
+	CK(KGENOME_NUCLEO_VALID(KGENOME_NUCLEO_DECODE) && KGENOME_NUCLEO_VALID(KGENOME_NUCLEO_EVAL) &&
+	   KGENOME_NUCLEO_VALID(KGENOME_NUCLEO_REQUEST) && kgenome_nucleo_cap_named(KGENOME_NUCLEO_DECODE));
 	/* a named call refined by its arguments: VirtualAlloc(addr, size, type, protect) */
 	memset(a, 0, sizeof a);
 	a[3] = 0x40;                                    /* PAGE_EXECUTE_READWRITE */
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", a, &fl) == KGENOME_NUCLEO_ALLOC_EXEC && fl == KGENOME_NUCLEO_F_WX);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", a, &fl) == KGENOME_NUCLEO_ALLOC_EXEC && fl == KGENOME_NUCLEO_F_WX);
 	a[3] = 0x20;                                    /* PAGE_EXECUTE_READ */
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", a, &fl) == KGENOME_NUCLEO_ALLOC_EXEC && fl == 0);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", a, &fl) == KGENOME_NUCLEO_ALLOC_EXEC && fl == 0);
 	a[3] = 0x04;                                    /* PAGE_READWRITE */
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", a, &fl) == KGENOME_NUCLEO_ALLOC);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", a, &fl) == KGENOME_NUCLEO_ALLOC);
 	a[2] = 0x40;
-	CK(kgenome_nucleo_cap_of_call("VirtualProtect", a, &fl) == KGENOME_NUCLEO_ALLOC_EXEC);
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", NULL, &fl) == KGENOME_NUCLEO_ALLOC && fl == 0);
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", a, NULL) != KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_call("nothing_here", a, &fl) == KGENOME_NUCLEO_NONE && fl == 0);
-	CK(kgenome_nucleo_cap_of_call(NULL, a, &fl) == KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_call("", a, &fl) == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualProtect", a, &fl) == KGENOME_NUCLEO_ALLOC_EXEC);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", NULL, &fl) == KGENOME_NUCLEO_ALLOC && fl == 0);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", a, NULL) != KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "nothing_here", a, &fl) == KGENOME_NUCLEO_NONE && fl == 0);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, NULL, a, &fl) == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "", a, &fl) == KGENOME_NUCLEO_NONE);
 	a[0] = 2; a[1] = 3;
-	CK(kgenome_nucleo_cap_of_call("socket", a, &fl) == KGENOME_NUCLEO_NET_RAW);
-	CK(kgenome_nucleo_cap_of_call("WSASocketA", a, &fl) == KGENOME_NUCLEO_NET_RAW);
-	CK(kgenome_nucleo_cap_of_call("mprotect", a, &fl) == KGENOME_NUCLEO_ALLOC);     /* named: no PROT argument is read */
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "socket", a, &fl) == KGENOME_NUCLEO_NET_RAW);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "WSASocketA", a, &fl) == KGENOME_NUCLEO_NET_RAW);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "mprotect", a, &fl) == KGENOME_NUCLEO_ALLOC);     /* named: no PROT argument is read */
 
 	/* the generic level: net-recv is a kind of mem-read; nothing else has one */
 	CK(kgenome_nucleo_cap_generic(KGENOME_NUCLEO_NET_READ) == KGENOME_NUCLEO_MEM_READ);

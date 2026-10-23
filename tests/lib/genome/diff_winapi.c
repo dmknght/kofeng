@@ -231,7 +231,8 @@ enum kind {
 	K_PTR,      /* some non-zero pointer */
 	K_ANY,      /* not pinned: no return value, or a NULL argument Windows leaves undefined */
 	K_EXIT,     /* ends the run */
-	K_UNH       /* reaches the guest's exception dispatcher; unhandled when the guest has none */
+	K_UNH,      /* reaches the guest's exception dispatcher; unhandled when the guest has none */
+	K_HAND      /* ends the run as a hand-over: the runtime (mscoree) takes the program from here */
 };
 
 struct doc {
@@ -379,6 +380,10 @@ static const struct doc DOC[] = {
 	{ "shutdown", 2, K_VAL, 0x0, "0 (success)" },
 	{ "setsockopt", 5, K_VAL, 0x0, "0 (success)" },
 	{ "ioctlsocket", 3, K_VAL, 0x0, "0 (success)" },
+	{ "RtlAddVectoredExceptionHandler", 2, K_VAL, 0x0, "ntdll's name for AddVectoredExceptionHandler, same handler: NULL handler: NULL" },
+	{ "RtlRemoveVectoredExceptionHandler", 1, K_VAL, 0x0, "as RemoveVectoredExceptionHandler: a handle that is not registered: 0" },
+	{ "_CorExeMain", 0, K_HAND, 0, "ends the run as a hand-over (stop HANDOFF): the CLR starts the assembly, which nothing here interprets" },
+	{ "_CorDllMain", 3, K_HAND, 0, "as _CorExeMain, for a managed DLL" },
 };
 
 #define NDOC (sizeof DOC / sizeof DOC[0])
@@ -430,6 +435,10 @@ static void t_handlers(unsigned bits)
 		case K_EXIT:
 			CK(r.stop == KGENOME_EMU_STOP_EXIT && !r.done, "%s (%u bit): ends the run (stop %s)", DOC[i].name, bits,
 			   kgenome_emu_stop_name(r.stop));
+			break;
+		case K_HAND:
+			CK(r.stop == KGENOME_EMU_STOP_HANDOFF && !r.done, "%s (%u bit): ends the run as a hand-over (stop %s)", DOC[i].name,
+			   bits, kgenome_emu_stop_name(r.stop));
 			break;
 		case K_UNH:
 			CK(r.done && kgenome_emu_unhandled(e) == unh0 + 1u, "%s (%u bit): an exception nobody handles is counted (%u)", DOC[i].name,

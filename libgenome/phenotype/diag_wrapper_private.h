@@ -183,7 +183,24 @@ struct kgenome_diag_wrapper_summary {
 	int      has_arr;
 	struct kgenome_diag_wrapper_val arr[6];
 	int      node_made;     /* a call-site node was made for it */
+	/*
+	 * THE SAME RECORD, AS A FUNCTION'S FLOW SUMMARY (diag_lineage_summ.c). A wrapper says what a call
+	 * to `entry` means as a system call: which, and which of the caller's values are its arguments.
+	 * A flow summary says what a call to `entry` means for the VALUES that pass through it - one
+	 * record for each parameter that reaches an argument of a node (`site` the node's call, `role` the
+	 * argument, `param` the parameter) and one for each thing
+	 * the function may return (`ret`, a node, a parameter or - V_UNK - something no token names). The pool and its lookups are
+	 * the wrapper's own; the flow stage keeps its table in a pool of its own, so a wrapper's walk
+	 * never meets one of these. APPENDED: a wrapper record carries flow == KGENOME_DIAG_WRAPPER_FLOW_NONE.
+	 */
+	uint8_t  flow;
+	uint8_t  role;
+	uint8_t  param;
+	struct kgenome_diag_wrapper_val ret;
 };
+
+enum { KGENOME_DIAG_WRAPPER_FLOW_NONE = 0, KGENOME_DIAG_WRAPPER_FLOW_SINK, KGENOME_DIAG_WRAPPER_FLOW_RET,
+       KGENOME_DIAG_WRAPPER_FLOW_DEAD };
 
 /* What a call to a wrapper means at one call site, in the caller's values. */
 struct kgenome_diag_wrapper_effect {

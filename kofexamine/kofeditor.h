@@ -1,21 +1,18 @@
 /*
- * kofeditor.h - the signature generator's own state, apart from the viewer's.
+ * kofeditor.h - the diagnose panel's draft model, apart from the viewer's.
  *
- * WHY THIS IS A FILE OF ITS OWN.
+ * WHY THIS IS A FILE OF ISOLATED STATE.
  *
- * The generator - the draft a researcher builds, the source it writes, the
- * source it reads back - had grown to sixty-nine functions and three thousand
- * lines inside kofviewer.c, where they sat beside the panes, the tree, the
- * input handling and the disassembler. Nothing forced them apart, so nothing
+ * The draft a researcher builds - strings, blocks, matchers, conditions and
+ * the tag each condition finds - is a model, and the panes, the tree, the input
+ * handling and the disassembler are not. Nothing forced them apart, so nothing
  * kept them apart: a draft function reached into the selection, a drawing
  * function reached into the draft, and "what is the model" had no answer that
- * could be checked.
+ * could be checked. The functions here touch no viewer state at all, or only
+ * the draft and the object a marker was taken from.
  *
- * The measurement that decided the boundary: of those sixty-nine, twenty-two
- * touch no viewer state at all and thirty-eight touch only the draft, the
- * object a marker was taken from, and where a generated rule is to be written.
- * Nine are left, and those really are UI - they read the byte selection, the
- * click position, the tree cursor - so they stay with the UI.
+ * Nothing here writes a file. The panel previews the diagnose a draft stands
+ * for; it does not save one.
  *
  * WHAT IS NOT HERE.
  *
@@ -23,9 +20,9 @@
  * clicked, is the same tangle under a new name.
  *
  * Anything the engine already answers. Where a marker is and which region that
- * is come from kof_locate_str in kofinspect.h - the same call the status line's
- * marker list makes - because two answers to one question is how the panel came
- * to call a marker absent that the scan finds every time.
+ * is come from kof_locate_str in kofinspect.h, because two answers to one
+ * question is how the panel came to call a marker absent that the scan finds
+ * every time.
  */
 
 #ifndef KOF_KOFEDITOR_H
@@ -40,8 +37,9 @@
 #include <kofmod/kofmutation.h>
 #include <kofeng.h>
 #include "kofinspect.h"
-#include "../libkofeng/databases/diagsrc.h"
 #include "../libkofeng/analyzers/parsers/binaries/funcs.h"
+#include "../libkofeng/analyzers/codenotes.h"
+#include "../libkofeng/databases/tagsrc.h"
 
 
 #define MAX_DECL  32
@@ -174,12 +172,9 @@ struct decl {
 	 * selection in this session - those really are concrete bytes and
 	 * printing them from `bytes` is exact.
 	 *
-	 * The bug this exists for: a signature opened WITHOUT its source - the
-	 * database keeps strings, not logic - arrived through draft_from_touch,
-	 * which copied the pack's (bytes, len) verbatim. For a hex marker those
-	 * are the COMPILED PROGRAM and its total length, so ZipSlip's three byte
-	 * "2E2E5C" showed as 67 bytes of 010001000300... and, far worse,
-	 * Generate wrote that program back out as the pattern. Opening a rule
+	 * The bug this exists for: a pack's (bytes, len) copied verbatim. For a
+	 * hex marker those are the COMPILED PROGRAM and its total length, so
+	 * ZipSlip's three byte "2E2E5C" showed as 67 bytes of 010001000300...
 	 * and saving it replaced it with a different rule.
 	 */
 	char     hexs[DECL_HEXS_CAP];   /* the pattern, when bytes cannot say it */
@@ -327,59 +322,12 @@ struct range {
 };
 
 
-/*
- * A condition, and the markers it is about.
- *
- * The group is the thing that is created first: somebody decides "any of these"
- * before deciding which these. What is NOT free is the region - kof_find_str_all
- * and its siblings take ONE range for every string in the call, so a group is a
- * condition over markers that share a region. "Two of these three, in the code
- * section" is a sentence the engine can say; "two of these three, wherever they
- * are" is not.
- *
- * So the region is not chosen, it is learnt: it is fixed by the first marker put
- * into the group, and a marker from anywhere else has to go in a different one.
- * Saying that at the moment of adding beats discovering it at build time.
- */
-/*
- * A matcher: one search call, and nothing else.
- *
- * find_all / find_any / find_multi over some markers in one range. It says
- * whether those bytes are there and takes no position on what that means - so
- * it carries no verdict, and the same matcher can be used by two different
- * conclusions.
- */
-/*
- * The suffix kof_find_str_ takes for a group's rule.
- *
- * One spelling for both readers of the field: the emitter writes it into the
- * generated source and the chooser shows the author which call a group will
- * become, and those two have to agree or the preview lies.
- */
-static inline const char *grp_rule_word(int rule)
-{
-	/*
-	 * "str_at" reads oddly and is still what goes in the file: this word
-	 * is pasted after kof_find_str_ to make the call, so it is the ABI's
-	 * spelling and not a label. What the author is shown is
-	 * grp_rule_label, which says find_at.
-	 */
-	return rule == 1 ? "any" : rule == 2 ? "multi"
-	     : rule == 3 ? "str_at" : "all";
-}
 
 /*
  * The same four rules, as the author is shown them.
  *
- * Separate from grp_rule_word because the two disagree on one row and only
- * one: the AT rule emits kof_find_str_at and is shown as find_at. It reads
- * better - the rule is about a PLACE, and the place is the whole of what
- * distinguishes it - and the "str" in the middle is doubly wrong now that the
- * place itself need not be a number: "find_str_at ctx->entry_off" says string
- * twice and position once, for a row whose subject is the position.
- *
- * The emitted name is left alone because it is not ours to choose. It is a
- * macro in kofsig.h with call sites in bases/ and in the test rules.
+ * The AT rule is the one that is about a PLACE, and the place is the whole of
+ * what distinguishes it, so it is shown as find_at.
  */
 static inline const char *grp_rule_label(int rule)
 {
@@ -395,8 +343,7 @@ static inline const char *grp_rule_label(int rule)
  * column now carries both, so there are two spellings of one pair and they
  * are here rather than in the panel that draws them: kofexaminer prints a
  * declaration too, and a second set of words for the same fact is a second
- * vocabulary to disagree with the first - the reason grp_rule_word is here
- * and not in the chooser that shows it.
+ * vocabulary to disagree with the first.
  *
  * THE CELL IS "<case>:<word>" - e:pattern, i:fword, e:token. Case first
  * because it is one character and the eye reads the column as a pair with a
@@ -487,7 +434,7 @@ static inline void decl_attr_text(const struct decl *d, char *out, size_t cap)
 /*
  * THE THREE PARTS A PLACE IS MADE OF, so that the row which makes each one
  * clickable and the text that writes the whole thing out cannot spell them
- * differently. The row draws these; grp_at_text below joins them.
+ * differently.
  */
 static inline char grp_at_sign(int64_t off) { return off < 0 ? '-' : '+'; }
 
@@ -519,137 +466,7 @@ static inline int grp_at_sign_free(int anchor)
 	return anchor == KOF_ANCHOR_ENTRY;
 }
 
-static inline void grp_at_text(int base, int64_t off, char *out, size_t cap,
-			       int as_c)
-{
-	const char *b = as_c ? kof_anchor_expr(base) : kof_anchor_word(base);
-	const char *u = as_c ? "u" : "";
-	unsigned long long mag = grp_at_mag(off);
 
-	if (!*b) {
-		snprintf(out, cap, "%s0x%llx%s", off < 0 ? "-" : "", mag, u);
-		return;
-	}
-	/*
-	 * A BASE WITH NOTHING ADDED IS THE BASE, IN C - "ctx->entry_off" and
-	 * not "ctx->entry_off + 0x0u". It is the commonest AT rule there is,
-	 * see rst_00.c, and the zero is noise in a file.
-	 *
-	 * ON SCREEN IT IS NOT NOISE, because the step is a control now: it is
-	 * typed into and its sign is pressed, and a field that disappears
-	 * when it reaches zero is a control an author cannot get back. So the
-	 * displayed form always carries it, which is what `as_c` is for -
-	 * one function, two audiences, no second spelling to drift.
-	 */
-	if (!off && as_c)
-		snprintf(out, cap, "%s", b);
-	else
-		snprintf(out, cap, "%s %c 0x%llx%s", b, grp_at_sign(off),
-			 mag, u);
-}
-
-/*
- * AND READING ONE BACK, which is where this started.
- *
- * The importer read the first argument of kof_find_str_at with strtoull and
- * nothing else, so `ctx->entry_off + 236u` read as 0 - strtoull stops at the
- * `c` and reports no digits. Both shipped AT rules are entry-relative, so
- * opening either of them in the editor showed a matcher at offset 0, and
- * saving it wrote that back: a rule that matched an infector's stub became a
- * rule that compares at the start of the file. Nothing warned, because "0" is
- * a valid offset and strtoull's failure is only visible in `end`.
- *
- * Returns where it stopped, so the caller goes on to the marker list.
- */
-static inline const char *grp_at_parse(const char *s, int *base, int64_t *off)
-{
-	int b = KOF_ANCHOR_BOF;
-	int64_t v = 0;
-	char *end = NULL;
-	int i, named = 0;
-
-	while (*s == ' ' || *s == '\t')
-		s++;
-	/*
-	 * The anchor first, and by its C text, because that is the spelling
-	 * generated source carries. `ctx->` is optional so that a hand
-	 * written rule that took the context by another name, or wrote the
-	 * field bare, is still understood rather than silently read as zero -
-	 * which is the whole fault being fixed.
-	 *
-	 * FROM ZERO AND NOT FROM ONE. BOF has a word now - "bof" - which is
-	 * what the row prints for a plain offset, so the loop has to be able
-	 * to read it back. Its C text is empty and is skipped below, because
-	 * an empty prefix matches everything.
-	 */
-	for (i = 0; i < KOF_ANCHOR_COUNT; i++) {
-		const char *e = kof_anchor_expr(i);
-		size_t n = strlen(e);
-		const char *f = strncmp(e, "ctx->", 5) ? e : e + 5;
-		const char *w = kof_anchor_word(i);
-
-		if (n && !strncmp(s, e, n)) { b = i; s += n; named = 1; break; }
-		if (n && !strncmp(s, f, strlen(f))) {
-			b = i; s += strlen(f); named = 1; break;
-		}
-		/*
-		 * AND THE SHORT NAME THE PANEL SHOWS - "entry", "eof", "bof".
-		 *
-		 * Read here so one syntax serves both directions: the row
-		 * prints "entry + 0x10" and the box the author types into
-		 * takes that back. Without it the field would show one
-		 * spelling and demand another, which is a control that
-		 * disagrees with its own label.
-		 *
-		 * Last, because "entry" is a prefix of "entry_off" and taking
-		 * it first would leave "_off" behind for the displacement
-		 * reader to choke on.
-		 */
-		if (*w && !strncmp(s, w, strlen(w))) {
-			b = i;
-			s += strlen(w);
-			named = 1;
-			break;
-		}
-	}
-	while (*s == ' ' || *s == '\t')
-		s++;
-	/*
-	 * WHETHER A NAME WAS CONSUMED, and not which anchor it was.
-	 *
-	 * This asked `b != KOF_ANCHOR_BOF`, which held while base zero had no
-	 * spelling. It has one now, so "bof + 0x10" and a bare "0x10" are
-	 * both BOF and they are read differently: after a name the step needs
-	 * its sign, without one the number IS the step.
-	 */
-	if (named) {
-		/* A displacement, if there is one. `+` and `-` only: anything
-		 * else is the end of the argument, and a base on its own is a
-		 * complete answer. */
-		int neg = *s == '-';
-
-		if (*s != '+' && *s != '-')
-			goto done;
-		s++;
-		v = (int64_t)strtoull(s, &end, 0);
-		if (end == s)
-			goto done;
-		s = end;
-		if (neg)
-			v = -v;
-	} else {
-		v = (int64_t)strtoull(s, &end, 0);
-		s = end && end != s ? end : s;
-	}
-	/* The `u` or `ul` the emitter writes is part of the number, not the
-	 * next thing. strtoull leaves it. */
-	while (*s == 'u' || *s == 'U' || *s == 'l' || *s == 'L')
-		s++;
-done:
-	*base = b;
-	*off = v;
-	return s;
-}
 
 /* Whether a matcher compares at one offset rather than searching a range. */
 static inline int grp_is_at(int rule) { return rule == 3; }
@@ -666,33 +483,23 @@ static inline int grp_is_at(int rule) { return rule == 3; }
  * them read as three unrelated things rather than as three ways of asking one
  * question.
  *
- * IT IS SHAPED LIKE A SEARCH MATCHER AND NOTHING ELSE. It holds ITEMS the way
- * a string matcher holds markers - one row naming them, with the button that
- * adds one at the end of it - and it has ONE threshold, on its own row, where a
- * find_multi keeps its own. `pct` is that threshold and every item has to reach
- * it.
+ * IT IS MADE BY TICKING A BLOCK AND DROPPED BY UNTICKING IT (blk_set_picked),
+ * so there is no choosing it as a kind: the diagnose panel calls it find_sim
+ * and its one row says the block's hash and the threshold. It holds that one
+ * block as an ITEM, and `pct` is the one threshold the item has to reach. A
+ * rule read from an older file may name several blocks in one matcher; the
+ * items stay a list for that, and every item has to reach `pct`.
  *
- * Wanting two measures at two thresholds is two matchers, and wanting either of
+ * Wanting two blocks at two thresholds is two matchers, and wanting either of
  * two is two conditions; that is how the rest of the editor already says both,
  * and a second way of saying them inside one matcher would be a second grammar.
  *
  * `rule`, `thresh`, `at_off` and `mask` mean nothing to one.
  */
 #define GRP_KIND_SIM    1u
-/*
- * A TERM OF A VERDICT THAT READS DIAGNOSES - kof_diag(A), kof_diag_share(...),
- * kof_diag_str_any(...) - as a matcher, so it is listed under Matchers and
- * combined under Conditions like any other, by the same expression over matcher
- * numbers. It carries the term as diagsrc read it. `rule`, `thresh`, `at_off`,
- * `mask` and the rest mean nothing to one, and nothing here writes one back: a
- * verdict of this kind is shown, not edited - see draft_missing_of.
- */
-#define GRP_KIND_DIAG   2u
 
 /*
- * THE MEASURES AN ITEM CAN NAME. Each is computed by the engine, and which
- * call the generated module makes is decided from `what` alone - see
- * emit_matcher.
+ * THE MEASURES AN ITEM CAN NAME. Each is computed by the engine.
  */
 /*
  * ONE NAMED RUN OF BYTES, region-anchored and fuzzy: kof_mutation_score. The
@@ -772,7 +579,7 @@ struct group {
 	 * A matcher with this rule does not search: it is one comparison the
 	 * length of the pattern, at a place the author names. So it carries an
 	 * offset where the others carry a range, and `mask` means nothing to
-	 * it - see grp_same_set, which has to ask about this instead.
+	 * it.
 	 *
 	 * Seeded from the marker's own `at` when the rule is chosen, because
 	 * the offset a researcher wants is almost always the one they are
@@ -829,15 +636,20 @@ struct group {
 	 */
 	uint8_t  kind;
 	/*
-	 * WHAT A SIMILARITY MATCHER IS ABOUT - one entry per measure, all of
-	 * which have to reach `pct`. Empty until the [+ Similarity] button
-	 * puts something in it, the same way a fresh string matcher holds no
-	 * markers.
+	 * WHAT A SIMILARITY MATCHER IS ABOUT - one entry per block, all of
+	 * which have to reach `pct`. The tick that made the matcher put its
+	 * block here, so a matcher made by the panel holds exactly one.
 	 */
-	struct kof_dsrc_term term;  /* GRP_KIND_DIAG only */
 	struct grp_sim_item sim[GRP_SIM_MAX];
 	uint8_t  n_sim;
 	uint8_t  pct;               /* how much of each the rule demands */
+	/*
+	 * THE TAG OF A BLOCK MATCHER THAT NO CONDITION USES - zero while none is
+	 * chosen. Such a matcher is a diagnose of its own and says what it
+	 * finds itself; one a condition names takes the condition's tag, and
+	 * this is not read for it (grp_standalone).
+	 */
+	uint64_t tag;
 };
 
 static inline void grp_at_fix_sign(struct group *q)
@@ -861,19 +673,27 @@ static inline void grp_at_fix_sign(struct group *q)
 struct cond {
 	char     expr[64];          /* over matcher ids */
 	/*
-	 * Two different combinations, and they are not the same question.
+	 * WHAT THE CONDITION FINDS, as the ID of a tag of the tag sources; zero
+	 * is "not chosen yet". The panel offers the tags that exist (a table
+	 * with a search box) and nothing else, so no spelling can be wrong, and
+	 * the id is what a diagnose will say - a rename of the tag moves no
+	 * reference.
 	 *
-	 * `op` joins the matcher ids INSIDE this condition - "1 and 2" against
-	 * "1 or 2". `join` says how the next condition at this level attaches
-	 * to this one - see enum cnd_join. A join has nothing to combine unless
-	 * there is a sibling below, so it exists only when there is one.
+	 * THE CONDITION'S OWN, NOT SHARED: nothing else in the draft - not the
+	 * shared Type - changes it. The file name is made from the tag's own
+	 * type, family and name (cnd_file_name).
 	 */
+	uint64_t tag;
+	/*
+	 * WHICH TAB OF THE DIAGNOSE PANEL THE CONDITION IS WRITTEN ON - enum
+	 * draft_tab. Set when it is made, from the tab that was open: a
+	 * condition over strings and one over blocks are two kinds of diagnose,
+	 * each with its own list, and an empty condition has no matcher to say
+	 * which it is. `expr` is over this tab's matcher numbers (grp_loc).
+	 */
+	uint8_t  tab;
+	/* Matcher ids this condition joins: "1 and 2" against "1 or 2". */
 	int      op;                /* 0 and, 1 or - between this one's ids */
-	int      join;              /* enum cnd_join */
-	int      level;             /* enum cnd_level */
-	int      var_kind;          /* 0 AUTO, 1 GENERIC, 2 custom */
-	char     variant[48];
-	int      parent;            /* -1 for a top level block */
 };
 
 /*
@@ -1054,6 +874,13 @@ struct kof_draft {
 	uint32_t     n_grp, cur_grp;
 	struct cond  cnd[MAX_GROUP];
 	uint32_t     n_cnd, cur_cnd;
+	/*
+	 * THE TAB THE PANEL SHOWS - enum draft_tab. A fact about the draft and
+	 * not about the screen: a matcher is added to it by ticking a block, a
+	 * condition is made on it and the output is listed by it, none of which
+	 * may reach the viewer to find out.
+	 */
+	uint8_t      tab;
 	char         warn[120];
 	int          warn_bad;
 	int         opt_on[OPT_COUNT];
@@ -1079,16 +906,6 @@ struct kof_draft {
 	char        family[64];
 	uint32_t    maltype;
 	/*
-	 * A VERDICT THAT READS DIAGNOSES, as diagsrc read it, and the text it came
-	 * from. NULL for every other rule. Kept whole - not copied into fields -
-	 * because writing it back is a patch of THIS text by THIS list: whatever the
-	 * panel does not model stays exactly as the author wrote it. See
-	 * draft_from_source.
-	 */
-	struct kof_dsrc *vd;
-	char        *vtext;
-	size_t       vtext_n;
-	/*
 	 * WHICH OBJECT FORMATS THE RULE APPLIES TO, as a bit per format.
 	 *
 	 * A MASK AND NOT ONE VALUE, because the engine's target always was one:
@@ -1108,10 +925,6 @@ struct kof_draft {
 	 * about; everything after that is theirs to add and remove.
 	 */
 	uint32_t    fmt_mask;
-	char        expr[96];
-	int         gen_ok;
-	int         from_rule;
-	char        gen_path[600];
 	uint32_t    rng_mask;
 	uint32_t    rng_add[MAX_GROUP];
 	uint32_t    n_rng_add;
@@ -1121,76 +934,7 @@ struct kof_draft {
 };
 
 
-/* ---- reading a signature back out of its source ---------------------------
- *
- * The pack has the strings and the names; it does not have the logic, because
- * the logic is compiled code. So a rule shown in the panel has to come from the
- * file it was written in, and the file has to be found: the family names it,
- * except that a family may name several - bases/signatures/mirai.c and
- * mirai_42bb.c both declare "Mirai" on purpose - so the line each detection
- * carries is what settles it.
- *
- * Read the restricted way ksigbuilder reads them. Anything this cannot parse is
- * left out of the draft rather than guessed at, and the panel says how much of
- * the file it understood.
- */
-#define SRC_MAX_LINES  64u
-#define SRC_MAX        512u
 
-
-struct src_ent {
-	char     family[80];
-	char     path[512];
-	uint32_t line[SRC_MAX_LINES];
-	uint32_t n_line;
-	/*
-	 * What this file searches for, independent of how it is written.
-	 *
-	 * A sum of per-string hashes, so reordering the declarations does not
-	 * change it - which is the point: two signatures that look different
-	 * only because their KOF_DEFINE_STRs are in another order are one
-	 * signature written twice, and the database pays for both.
-	 */
-	uint32_t pat;
-	uint32_t n_pat;
-
-	/*
-	 * What this file targets, folded the same way.
-	 *
-	 * Separate from the patterns because it answers a different question.
-	 * Two modules can look for exactly the same bytes and still be two
-	 * modules: the rootkit itself is a relocatable object and the thing
-	 * that installs it is an executable, so the same five kernel symbol
-	 * names mean a different family, a different malware type and a
-	 * different subtype. Comparing patterns alone called that pair a
-	 * duplicate and greyed out Save As on the second one.
-	 */
-	uint32_t tgt;
-
-	/*
-	 * AND WHAT IT SCORES AGAINST, counted the same way.
-	 *
-	 * A rule may be nothing but blocks - see draft_uses_blocks - and such a
-	 * rule has no patterns at all, so a duplicate test that reads only
-	 * KOF_DEFINE_STR saw two block rules as two empty files and refused to
-	 * compare them. A block's name IS its content (the fold of its hashes),
-	 * so summing the names answers the same question for blocks that
-	 * summing pat_of answers for strings, and in the same order-independent
-	 * way.
-	 */
-	uint32_t blk;
-	uint32_t n_blk;
-};
-
-extern struct src_ent *g_src;
-extern uint32_t g_n_src;
-extern int g_src_done;
-
-/* A name the generated source uses for a marker, paired with its index - how a
- * rule read back off disk is matched up with the draft's own strings. */
-struct sname { char id[40]; uint32_t idx; };
-
-uint32_t tgt_mix(uint32_t h, const char *tok);
 
 
 struct object {
@@ -1298,8 +1042,6 @@ struct object {
 	struct kof_obj_ctx            ctx;
 	void                         *info;
 
-	struct kof_finding *finding;   /* as the engine handed them over */
-	uint32_t          n_finding;
 	/*
 	 * WHAT OPENED THIS OBJECT, in the engine's own words and in one field:
 	 * "PE:MPRESS 2.12-2.19 LZMA" where the module could name a build,
@@ -1369,8 +1111,6 @@ struct object {
 	 * it. enum kof_broken, KOF_BROKEN_NONE when it finished.
 	 */
 	uint32_t          broken;
-	struct kof_touch *touch;
-	uint32_t          n_touch;
 	/*
 	 * WHAT EACH DIAGNOSE MADE OF THIS OBJECT - an owned copy of
 	 * kof_result.diag, which the engine lends only for the callback. Empty
@@ -1385,6 +1125,9 @@ struct object {
 	 */
 	struct kgenome_func_set     funcs;
 	uint8_t                 funcs_done;
+	/* What Analysis > Analyze disassembly found: labels and comments by file offset, from the engine (kof_codenotes_build). Empty until asked. */
+	struct kof_codenotes        notes;
+	uint8_t                 notes_done;
 
 	/*
 	 * The object's symbol records, in the KSYM layout kofsym.h fixes.
@@ -1413,6 +1156,10 @@ struct object {
 	 */
 	uint8_t          *sym;
 	uint32_t          sym_n;
+	/* THE UNITS OF THE PARENT'S CUT THAT THIS VIEW'S DECODE REWROTE, in its offsets - copied
+	 * from kof_result.fixed, and handed to the cut so the table shows the scanner's units. */
+	struct kof_range *fixed;
+	uint32_t          n_fixed;
 
 	/*
 	 * WHERE THIS OBJECT'S LOADER KEEPS ITS PAYLOAD, from the tool's own
@@ -1453,15 +1200,6 @@ struct object {
 	 */
 	uint32_t          proc_path;
 	/*
-	 * THE MARKER PASS HAS BEEN RUN ON THIS OBJECT.
-	 *
-	 * Its own flag and not `n_touch != 0`, because "no marker of any rule
-	 * is in these bytes" is a real answer and a common one - a heap page
-	 * usually has none - and treating it as "not asked yet" would re-run
-	 * the search over the same megabytes on every selection.
-	 */
-	uint8_t           touched;
-	/*
 	 * WHICH VARIABLE IT CAME OUT OF, and what was wrapped round it.
 	 *
 	 * Kept on the child rather than left in its name: the name says what
@@ -1491,27 +1229,7 @@ struct kof_editor {
 
 	struct object     *obj;      /* the host's array, not owned */
 	const uint32_t    *n_obj;    /* live: objects appear as children are found */
-	const uint32_t    *foreign;  /* live: set per file that is opened */
 	struct kof_engine *eng;
-	const char        *basedir;  /* where a generated rule is written */
-	const char        *path;     /* the sample the draft is written against */
-	/* What a generated rule says about itself: which samples it was written
-	 * from and who wrote it. Live, because a session opens more files. */
-	/* Written as well as read: recording which sample a rule came from and
-	 * who wrote it is the editor's job, not the pane's. */
-	char             (*sample)[128];
-	uint32_t          *n_sample;
-	char             (*who)[48];
-	uint32_t          *n_who;
-	/*
-	 * A POINTER TO THE ARRAY, not to its first byte.
-	 *
-	 * As `char *` this compiled and `sizeof e->made` silently became eight
-	 * - the pointer's size - so the date was written into a 24 byte buffer
-	 * through a bound of 8. Pointing at the array keeps the size with it.
-	 */
-	char             (*made)[24];
-	uint32_t          *foreign_w;   /* the same flag, writable */
 	struct kof_range  *scratch;  /* KOF_SCAN_MAX_EXTENTS, the host's */
 	/*
 	 * WHICH FIELD THE HOST HAS OPEN, borrowed the way the tables above are.
@@ -1528,6 +1246,12 @@ struct kof_editor {
 	 * reason, at the one level that can see every removal.
 	 */
 	int               *edit;
+	/*
+	 * THE TAG SOURCES, borrowed from the host like the tables above: what a
+	 * tag id in the draft means. NULL when the host has none, and then no
+	 * tag has a name.
+	 */
+	const struct kof_tagset *tags;
 	/*
 	 * WHICH OBJECT THE DRAFT IS BEING WRITTEN ABOUT.
 	 *
@@ -1546,12 +1270,7 @@ void    obj_sha256(struct object *o);
 uint8_t obj_emu_why(const struct object *o);
 
 void say_note(struct kof_editor *e, const char *fmt, ...);
-int meta_has_sample(struct kof_editor *e);
-int name_chars_ok(const char *s);
 
-int grp_same_call(struct kof_editor *e, uint32_t a, uint32_t b);
-uint32_t grp_lead(struct kof_editor *e, uint32_t g);
-const char *draft_missing(struct kof_editor *e);
 void decl_locate(struct kof_editor *e, struct decl *d);
 uint32_t decl_free(struct kof_editor *e);
 uint32_t grp_mask(struct kof_editor *e, uint32_t g);
@@ -1560,19 +1279,13 @@ int grp_has_range(struct kof_editor *e, uint32_t g);
 void grp_add(struct kof_editor *e);
 void cnd_label(struct kof_editor *e, uint32_t i, char *out, size_t cap);
 void cnd_canon(struct kof_editor *e, uint32_t g, char *out, size_t cap);
-int cnd_more_siblings(struct kof_editor *e, uint32_t i);
-int cnd_depth(struct kof_editor *e, uint32_t i);
 void grp_remove(struct kof_editor *e, uint32_t g);
-void cnd_add(struct kof_editor *e, int nested);
+void cnd_add(struct kof_editor *e);
 void cnd_set_op(struct kof_editor *e, uint32_t i, int op);
 void cnd_remove(struct kof_editor *e, uint32_t i);
-uint32_t cnd_children(struct kof_editor *e, uint32_t i);
 uint32_t grp_thresh_eff(struct kof_editor *e, uint32_t g);
 void grp_seed_at(struct kof_editor *e, uint32_t g);
-int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b);
-int grp_shared(struct kof_editor *e, uint32_t g);
 uint32_t draft_hash(struct kof_editor *e);
-const char *draft_sample(struct kof_editor *e);
 
 /*
  * THE SAMPLE LINE: its name AND the hash of the bytes it was written from.
@@ -1592,19 +1305,10 @@ const char *draft_sample(struct kof_editor *e);
  * takes the rest of the line as the entry, so the pair survives a round trip
  * without a second list to keep in step with the first.
  */
-void meta_sample_line(struct kof_editor *e, char *out, size_t cap);
 int draft_edited(struct kof_editor *e);
-int draft_dirty(struct kof_editor *e);
-/* Whether anything in the draft was put there by the author - see the note. */
-int draft_started(struct kof_editor *e);
-void src_index(struct kof_editor *e);
-const char *src_of(struct kof_editor *e, const struct kof_touch *t);
-uint32_t draft_tgt(struct kof_editor *e);
 /* `near_miss` and not `near`: mingw's headers still #define near and far as the
  * empty macros 16-bit compilers needed, so a parameter with that name compiles
  * everywhere except Windows, where it vanishes and the call site stops parsing. */
-const char *draft_dup(struct kof_editor *e, int *near_miss);
-const char *draft_missing_of(struct kof_editor *e, int as_new);
 void rng_retarget(struct kof_editor *e, uint32_t was, uint32_t now);
 uint32_t rng_removable(struct kof_editor *e, uint32_t *mask, int *unused, uint32_t cap);
 uint32_t rng_all(struct kof_editor *e, uint32_t *mask, int *unused, uint32_t cap);
@@ -1658,101 +1362,11 @@ extern const char *const proc_sub[];
 extern const uint32_t proc_sub_n;
 /* The identifier for a target value - "KOF_FMT_ZIP" - out of the engine's own
  * list rather than a copy here. See fmt_word in kofeditor.c. */
-const char *fmt_word(uint32_t fmt);
 extern const uint32_t fmt_word_n;
 extern const char *const maltype_word[];
 extern const uint32_t maltype_word_n;
 
-void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi);
-void emit_call(FILE *f, struct kof_editor *e, uint32_t g);
-void emit_call_multi(FILE *f, struct kof_editor *e, uint32_t g);
-void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g);
-void emit_expr(FILE *f, struct kof_editor *e, const char *expr);
-void emit_note(FILE *f, const char *note, int depth);
-void emit_verdict(FILE *f, const struct cond *c, int depth);
-/*
- * Emits the condition at `i` AND the rest of its JN_AND run, and answers the
- * last index it wrote - so a caller walking siblings continues from there
- * rather than emitting a run member a second time on its own.
- */
-uint32_t emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth);
-
-/* The last member of the JN_AND run that starts at `i`, which is `i` itself
- * when this condition is joined to the next by anything else. */
-uint32_t cnd_and_run(struct kof_editor *e, uint32_t i);
 void draft_reset(struct kof_editor *e);
-int draft_from_source(struct kof_editor *e, const char *path);
-void draft_from_touch(struct kof_editor *e, const struct kof_touch *t);
-void generate(struct kof_editor *e, int as_new);
-
-/*
- * ONE BLOCK OF A SIMILARITY RULE, as the caller holds it.
- *
- * The editor does not carve blocks and does not score them - that is the
- * engine's and the viewer's - so it is handed the finished description and
- * writes the source. Same division generate() has with the draft: the model is
- * the caller's, the file format is this file's.
- */
-struct kof_mutation_decl {
-	uint32_t    id;            /* what the block is called in the source */
-	const char *region;        /* the KOF_SCAN_* spelling, or NULL for ALL */
-	/*
-	 * Where that spelling LIVES when the decl was read from a file rather
-	 * than built from a panel: a reader has nowhere else to keep it, and a
-	 * pointer into a line buffer would dangle the moment the next line was
-	 * read. Unused by the writer, which is handed names that outlive it.
-	 */
-	char        region_buf[48];
-	uint32_t    norm;          /* enum kgenome_mutation_norm */
-	/* Which half of the object the block was cut from - see enum
-	 * kgenome_mutation_side. It is the difference between KOF_MUTATION_BLOCK and
-	 * KOF_MUTATION_BLOCK_LIB in the source, and it decides who may score it. */
-	uint8_t     side;
-	uint8_t     thr;           /* the percentage the rule will demand */
-	/*
-	 * WHICH CONDITION ASKED ABOUT IT, counted as draft_from_source counts
-	 * them: one per `if (` line, in file order. 0 when the reader saw the
-	 * call before any `if`.
-	 *
-	 * WHY IT IS HERE. The two readers parse the same file independently,
-	 * and this one used to recover a block's join but not which branch
-	 * used it - so a rule with more than one condition came back with its
-	 * block matchers built and wired into nothing, and the panel showed
-	 * one matcher under a rule that had two. Counting the same lines the
-	 * other reader counts is not a full reader over kof_scan, which is
-	 * still the right answer; it is the part of it that this costs
-	 * nothing.
-	 *
-	 * APPROXIMATE IN ONE NAMED WAY: draft_from_source also opens a
-	 * condition for a bare `{` grouping, which is not an `if` and is not
-	 * counted here. A rule that uses one puts its blocks one index out.
-	 * Nothing the editor generates is of that shape.
-	 */
-	uint8_t     cnd;
-	/*
-	 * How this block joins the one BEFORE it - 0 is or, 1 is and, which is
-	 * enum cnd_join's order. Not read for the first block, which has
-	 * nothing before it.
-	 */
-	uint8_t     join;
-	uint64_t    off, len;      /* where it was cut from, for the comment */
-	const uint32_t *hash;
-	uint32_t    n_hash;
-};
-
-/*
- * THE VERDICT A RULE REPORTS, as the source spells it.
- *
- * Read back rather than assumed: a reader that invented one wrote the family
- * name into the variant and called it custom, so a rule whose source said
- * KOF_MALVAR_AUTO came back as a hand-typed string and went out again that way.
- * `kind` is enum cnd_var's - 0 AUTO, 1 GENERIC, 2 the literal in `text`.
- */
-struct kof_verdict_decl {
-	int  level;                /* enum cnd_level */
-	int  kind;
-	char text[48];
-};
 
 /*
  * Does this draft name a similarity block at all, and which matcher names one.
@@ -1761,10 +1375,8 @@ struct kof_verdict_decl {
  * what it includes, which block declarations are emitted, what the matcher menu
  * may offer, and whether a ticked block is still waiting for a matcher.
  */
-int draft_uses_blocks(const struct kof_editor *e);
 uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk);
 void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap);
-int blk_usable(const struct kof_editor *e, uint32_t i);
 int grp_make_sim(struct kof_editor *e, uint32_t g);
 
 /*
@@ -1783,48 +1395,15 @@ int grp_sim_has(const struct kof_editor *e, uint32_t g, uint32_t what,
 		uint32_t blk);
 /* Which matcher holds this item, or MAX_GROUP when none does. */
 uint32_t grp_sim_of(const struct kof_editor *e, uint32_t what, uint32_t blk);
-/* Does any matcher measure this way at all - blk ignored, so it answers for
- * the whole-object measure and for "any block". */
-int draft_uses_sim(const struct kof_editor *e, uint32_t what);
 /* The default threshold for a measure: where each was measured, not one
  * number for all. See the notes on the SIM_IT_* kinds. */
 uint32_t sim_pct_default(uint32_t what);
 /* What a measure is called on the panel and in a menu. */
-const char *sim_it_word(uint32_t what);
 void blk_set_picked(struct kof_editor *e, uint32_t i, int on);
 int blk_clears(const struct kof_editor *e, uint32_t i);
 void blk_moved(struct kof_editor *e, uint32_t from, uint32_t to);
 void blk_permute(struct kof_editor *e, const uint32_t *to, uint32_t n);
 
-/*
- * READ A MUTATION RULE BACK, so an infected file opens the rule that caught it.
- *
- * The same division of labour draft_from_source has with the draft: this turns
- * the FILE into the model, and what the model means is the caller's. It fills
- * the type, the family and the target format straight into the draft, and hands
- * the blocks back through `blk`, whose hashes are written into `pool`.
- *
- * `blk[i].hash` points into `pool`, so the pool must outlive the blocks. Blocks
- * past `max_blk`, or hashes past `pool_max`, are DROPPED rather than truncated:
- * half a block is a block that scores wrongly, which is worse than a block that
- * is not shown.
- *
- * Non-zero when the file was read and held at least one block.
- */
-int mutation_from_source(struct kof_editor *e, const char *path,
-		       struct kof_mutation_decl *blk, uint32_t max_blk,
-		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
-		       struct kof_verdict_decl *verdict);
-
-
-/*
- * How long a scan_range_ identifier can get: the prefix, plus the longest
- * region name rng_name_of produces (a join of every region word - for ELF
- * "headers_code_data_noload" is 24 characters on its own), plus the terminator.
- * Named so the two callers and this function cannot be sized differently -
- * which is how the identifier came to be cut in the first place.
- */
-#define RNG_IDENT_MAX 64
 
 
 /*
@@ -1838,119 +1417,88 @@ int mutation_from_source(struct kof_editor *e, const char *path,
 
 
 /*
- * A condition: what some combination of matchers MEANS.
- *
- * This is where the flexibility lives, and where bases/signatures already puts
- * it. lkm_rootkit_general.c is the shape: one matcher gates the file as a
- * rootkit at all, and three more each name a different family inside that gate.
- * Neither half of that is expressible if a verdict is welded to a search -
- * the gate concludes nothing on its own, and the three share it.
- *
- * So a condition is an expression over matcher ids ("1", "1&2", "(1&2)|3"), a
- * verdict, and optionally a parent it sits inside. A condition with children
- * concludes nothing itself: it is the gate, and its children are what happens
- * once it holds.
+ * A condition: what some combination of matchers MEANS - an expression over
+ * matcher ids ("1", "1&2", "(1&2)|3") and the diagnose tag it finds.
  */
-/*
- * What a condition concludes.
- *
- * LV_NONE is not "undecided" - it is a branch that matched and reports nothing
- * on purpose, which is the only way to say "these bytes are here and they are
- * fine" in a chain of alternatives. It also lets a gate stay a gate.
- */
-enum cnd_level { LV_INFECT = 0, LV_SUSPECT, LV_NONE, LV_COUNT };
 
 /*
- * HOW THE NEXT CONDITION AT THIS LEVEL ATTACHES TO THIS ONE.
+ * THE THREE TABS OF THE DIAGNOSE PANEL, and what each one writes.
  *
- * TWO ANSWERS, BECAUSE THERE ARE TWO THINGS TO SAY.
+ *   DT_PATTERNS  strings, their matchers (find_str, find_at) and conditions
+ *   DT_BLOCKS    similarity blocks, one find_similar matcher per ticked block
+ *   DT_GRAPHS    on hold: the diagnoses table and conditions over it
  *
- *   JN_OR    a separate branch. Either can fire, and each is written as its
- *            own "if".
- *   JN_AND   one test with this one: BOTH have to hold, and the pair
- *            concludes once - "if (this && next)".
- *
- * THERE IS NO THIRD, AND THERE WAS FOR A WHILE. It was "also" - a fresh "if"
- * as against "else if" - and it is not a distinction: A VERDICT RETURNS. A
- * branch that concluded never reaches the next one, whichever way the next one
- * is written, so "tried only when this missed" and "tried anyway" are the same
- * branch spelt two ways. A menu that offers both makes the reader choose
- * between two words that do the same thing.
- *
- * SO NOTHING GENERATED SAYS "else". Every branch is its own "if", which is
- * also the only form that stays correct for a GATE - a branch with children
- * and no verdict of its own concludes nothing when its children all decline,
- * and an "else if" after one would skip a detection that was meant to be
- * tried. A hand-written "else if" reads back as JN_OR, because that is what it
- * means.
- *
- * JN_AND used to be spelt as that third value and drawn as the word "and",
- * which generated
- *
- *     if (A) INFECT;
- *     if (B) INFECT;
- *
- * for two blocks the panel said were ANDed - two detections either of which
- * fires on its own, which is an OR. The word now means what it says.
- *
- * ONLY LEAVES CAN BE CONJOINED. A gate is a brace around branches rather than
- * a test with a value, and there is nothing to "&&" it with; a run that reaches
- * one ends there and the gate is emitted as itself.
- *
- * THE RUN'S VERDICT IS ITS LAST MEMBER'S, because that is the one reached when
- * the whole conjunction holds. The verdicts of the members before it cannot
- * fire - the panel says so on their rows rather than keeping a control that
- * does nothing.
- *
- * A saved run comes back as ONE condition over both matchers, which is the
- * same rule written the way this format already had for it: the reader builds
- * a condition per "if", and "if (A && B)" is one if.
+ * The type, the family and the options are declared once for the whole draft.
  */
-enum cnd_join { JN_OR = 0, JN_AND, JN_COUNT };
+enum draft_tab { DT_PATTERNS = 0, DT_BLOCKS, DT_GRAPHS, DT_COUNT };
+
+/* The tab a matcher belongs to, which follows from its kind alone, and how many
+ * matchers a tab holds - what a condition on that tab can be made of. */
+uint8_t grp_tab(const struct kof_editor *e, uint32_t g);
+uint32_t grp_tab_count(const struct kof_editor *e, uint8_t tab);
+/*
+ * THE TAGS, as the panel reads them: the tag sources the host loaded (`tags` of
+ * the editor), asked by id. tag_name is the tag's name, "" for no tag or one
+ * that is not there. tag_label is what a Tag cell shows: the name, and - only
+ * when more than one tag has that name - its family and types, to tell them
+ * apart.
+ */
+const struct kof_tagent *tag_find(const struct kof_editor *e, uint64_t id);
+const char *tag_name(const struct kof_editor *e, uint64_t id);
+void tag_label(const struct kof_editor *e, uint64_t id, char *out, size_t cap);
+
+/*
+ * WHAT THE DRAFT WRITES: one diagnose per condition, and one per block matcher
+ * that no condition uses. grp_standalone says which matchers are the second
+ * kind.
+ */
+int grp_standalone(const struct kof_editor *e, uint32_t g);
+
+/*
+ * THE FILE NAME a diagnose would have, in the form
+ * `<first type>_<family>_<tag>_<id>.c`, every word the tag's own: its first
+ * type in the order the tag declares them, its family, its name. Lower case,
+ * only [a-z0-9_-]; a type or family a tag does not have is left out, so no
+ * underscore is doubled. The id is a running number per prefix, at least two
+ * digits, counted over the conditions in order and then the standalone block
+ * matchers in order - the order a Save would write them in. A diagnose with no
+ * tag has `<tag>` in its place, so the gap is in the name itself. Nothing is
+ * written anywhere.
+ */
+void cnd_file_name(const struct kof_editor *e, uint32_t ci, char *out,
+		   size_t cap);
+void grp_file_name(const struct kof_editor *e, uint32_t g, char *out,
+		   size_t cap);
 
 void draft_clear(struct kof_editor *e);
-int meta_take(struct kof_editor *e, const char *t);
 
-/*
- * The banner this tool opens its own header block with.
- *
- * One string, tested only against the first line of a block, and it identifies
- * a whole block rather than a line: what the tool generates and what the author
- * wrote are separate comments, so recognising the banner is enough to tell them
- * apart and nothing has to guess at the prose inside either one.
- */
-#define HEAD_BANNER "Generated by KOFViewer"
 
-void head_put(char *dst, size_t cap, size_t *n, const char *s, size_t len);
 
-int body_modelled(const char *line);
 
-/* How many samples and authors one rule's history holds. Past this the oldest
- * are dropped rather than the file growing without bound - a rule tested against
- * forty samples is a rule whose first ten no longer say much. */
-#define MAX_META  16
 
 /* ---- what kofeditor.c answers ------------------------------------------- */
 
-void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n);
 int decl_pattern(const struct decl *d, uint8_t *prog,
 			const uint8_t **pat, uint32_t *plen,
 			uint8_t *kind, uint8_t *flags);
 int rng_holds(uint32_t rmask, uint32_t region);
-int cnd_uses(const struct cond *c, uint32_t g);
+/*
+ * The matcher numbers of a condition's expression are the numbers of its own
+ * tab: grp_loc is the number of matcher `g` on its tab (0 if there is none),
+ * cnd_has_id the
+ * plain question "is this number written in the expression" and cnd_uses the
+ * one the panel asks - is matcher `g` one this condition names. cnd_foreign is
+ * 0 for an expression whose every number is on the condition's tab, else the
+ * first number that is not, plus one: a reference to another tab's matcher or
+ * to none, which is refused rather than read as something else.
+ */
+uint32_t grp_loc(const struct kof_editor *e, uint32_t g);
+int cnd_has_id(const struct cond *c, uint32_t id);
+int cnd_uses(const struct kof_editor *e, const struct cond *c, uint32_t g);
+unsigned long cnd_foreign(const struct kof_editor *e, const struct cond *c);
 void rng_name_of(const struct kof_parser *fmt, uint32_t mask,
 			char *out, size_t cap);
-void rng_ident(const struct kof_parser *fmt, uint32_t mask,
-		      char *out, size_t cap);
-const char *src_ident(const char *p, char *out, size_t cap);
-uint32_t decl_pat(const struct decl *d);
-void src_forget(void);
-int src_read(const char *path, struct src_ent *out);
-void src_scan(const char *dir, int depth);
-uint32_t src_mask_of(const struct kof_parser *fmt, const char *e);
 int decl_from_hexs(struct decl *d);
-int src_quoted(const char *p, char *out, size_t cap);
-uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id);
 int decl_text_editable(const struct decl *d);
 /*
  * The three edits a condition's id row can make to one of its matchers, and
@@ -1961,9 +1509,10 @@ int decl_text_editable(const struct decl *d);
  * flag would be a second place the same fact lived - and the two would part
  * company the first time somebody edited the text by hand.
  */
-int  cnd_neg(const struct cond *c, uint32_t g);
-void cnd_drop_matcher(struct cond *c, uint32_t g);
-void cnd_negate_matcher(struct cond *c, uint32_t g);
+int  cnd_neg(const struct kof_editor *e, const struct cond *c, uint32_t g);
+void cnd_drop_matcher(const struct kof_editor *e, struct cond *c, uint32_t g);
+void cnd_negate_matcher(const struct kof_editor *e, struct cond *c,
+			uint32_t g);
 void cnd_swap_matcher(struct kof_editor *e, uint32_t ci, uint32_t g,
 		      uint32_t to);
 

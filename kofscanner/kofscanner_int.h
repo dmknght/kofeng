@@ -46,8 +46,6 @@
  * release, green the one that does not.
  */
 #define C_RED "\033[1;31m"      /* INFECTED  */
-#define C_YEL "\033[1;33m"      /* SUSPECT   */
-#define C_MAG "\033[1;35m"      /* HEURISTIC */
 #define C_CYN "\033[36m"        /* BROKEN    */
 #define C_GRN "\033[32m"        /* OK        */
 #define C_DIM "\033[2m"         /* secondary context */
@@ -66,12 +64,7 @@
 struct run {
 	/* No object counter: the engine already keeps one, and a second copy is a
 	 * second thing that can disagree with it. */
-	uint64_t dropped;
 	uint64_t by_reason[KOF_BROKEN_COUNT];
-	/* Files a rule repaired. Counted here rather than derived from
-	 * `files` because a verdict says what a file WAS, not what was done
-	 * about it - a repaired file is still reported infected. */
-	uint64_t repaired;
 	/* Files the clean set answered for, counted where the skip happens
 	 * so the progress line can ksn_say so. kof_stats counts them too, but
 	 * that arrives at the END of the scan and this is needed during
@@ -134,8 +127,7 @@ struct run {
 	/*
 	 * THE ENGINE, held only to turn a diagnose id back into its name.
 	 *
-	 * A result carries ids, because an id is what a rule names a diagnose
-	 * by and so an id is what travels; the name exists for a person to
+	 * A verdict carries ids, because an id is what travels; the name exists for a person to
 	 * read and lives in the database. Keeping a copy of the table here
 	 * would be a second carrier for one fact, and it would be the one that
 	 * is stale after a database reload - so the engine is asked.

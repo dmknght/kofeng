@@ -38,18 +38,10 @@ void editor_attach(struct view *v)
 {
 	v->ed.obj      = v->obj;
 	v->ed.n_obj    = &v->n_obj;
-	v->ed.foreign  = &v->foreign;
-	v->ed.basedir  = v->basedir;
-	v->ed.path     = v->path;
-	v->ed.sample   = v->meta_sample;
-	v->ed.n_sample = &v->n_meta_sample;
-	v->ed.who      = v->meta_who;
-	v->ed.n_who    = &v->n_meta_who;
-	v->ed.made     = &v->meta_made;
-	v->ed.foreign_w= &v->foreign;
 	v->ed.edit     = &v->edit;
 	v->ed.scratch  = v->probe;
 	v->ed.eng      = v->eng;
+	v->ed.tags     = v->syn ? &v->syn->set : NULL;
 }
 
 /*
@@ -147,7 +139,6 @@ void emu_here(struct view *v)
 		}
 	}
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.report_diag = 1;
 	/* The same level as the ordinary collect - see the note there. A node
 	 * re-examined through the interpreter must not lose the heuristics the
@@ -798,10 +789,8 @@ void rebuild_db(struct view *v)
 	/*
 	 * THE ORDER HERE IS THE WHOLE OF THE CARE.
 	 *
-	 * A kof_touch holds borrowed pointers into the engine - the module, the
-	 * family, every variant name - so the old engine must outlive everything
-	 * derived from it, and the swap must not leave the view holding either
-	 * half of a torn state.
+	 * The old engine must outlive everything derived from it, and the swap
+	 * must not leave the view holding either half of a torn state.
 	 *
 	 * So: build the new engine first; hand it to file_open, which tears the
 	 * old view down only after it has successfully mapped the new file; and
@@ -816,9 +805,6 @@ void rebuild_db(struct view *v)
 			 "Built, but %.50s will not load", v->dbdir);
 		return;
 	}
-	/* The sources were just recompiled: whatever this knew about where each
-	 * detection name sits is a fact about the tree before the build. */
-	src_forget();
 	old = v->eng;
 	if (!file_open(v, here, fresh)) {
 		keng_close(fresh);

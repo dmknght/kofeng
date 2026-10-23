@@ -57,7 +57,8 @@
 
 #define EXC_ACCESS_VIOLATION 0xc0000005u
 #define EXC_INT_DIVIDE_BY_ZERO 0xc0000094u      /* DIV, IDIV: a zero divisor              */
-#define EXC_INT_OVERFLOW       0xc0000095u      /* DIV, IDIV: a quotient that does not fit */
+#define EXC_INT_OVERFLOW       0xc0000095u
+#define EXC_PRIVILEGED_INSTRUCTION 0xc0000096u  /* IN, OUT, CLI, STI at ring 3 */      /* DIV, IDIV: a quotient that does not fit */
 /* A handle for the process heap: distinct, non-zero, and never dereferenced. */
 /* The process heap handle IS its address: Windows hands back a pointer to the
  * HEAP structure, and a guest that reads Flags through it is reading memory
@@ -144,11 +145,15 @@ static void ctx_save(struct kgenome_emu *e, uint64_t ctx)
 		return;
 	}
 	{
-		uint32_t flags = 0x0010000bu;   /* CONTEXT_FULL, amd64 */
+		uint32_t flags = 0x0010001fu;   /* what the kernel delivers: full, segments, floating point, debug registers */
 		uint32_t ef = (uint32_t)e->flags;
+		uint32_t mx = 0x1f80u;          /* MxCsr's power-on value */
+		uint16_t seg[6] = { 0x33u, 0x2bu, 0x2bu, 0x53u, 0x2bu, 0x2bu };  /* cs ds es fs gs ss of a 64-bit process */
 		uint64_t v;
 
 		kgenome_emu_mem_wr(e, ctx + CTX64_FLAGS, &flags, 4u);
+		kgenome_emu_mem_wr(e, ctx + 0x34u, &mx, 4u);
+		kgenome_emu_mem_wr(e, ctx + 0x38u, seg, sizeof seg);
 		kgenome_emu_mem_wr(e, ctx + CTX64_EFLAGS, &ef, 4u);
 		for (i = 0; i < 16u; i++) {
 			v = e->gpr[ctx64_ord[i]];
@@ -371,23 +376,52 @@ int kgenome_emu_win_exc_begin(struct kgenome_emu *e)
 		w32 = EXC_INT_DIVIDE_BY_ZERO;
 	else if (!strcmp(e->fault_kind, "divovf"))
 		w32 = EXC_INT_OVERFLOW;
+	else if (!strcmp(e->fault_kind, "priv"))
+		w32 = EXC_PRIVILEGED_INSTRUCTION;
 	else
 		w32 = EXC_ACCESS_VIOLATION;
-	nparam = w32 == EXC_INT_DIVIDE_BY_ZERO || w32 == EXC_INT_OVERFLOW ? 0u : 2u;
+	nparam = w32 == EXC_INT_DIVIDE_BY_ZERO || w32 == EXC_INT_OVERFLOW || w32 == EXC_PRIVILEGED_INSTRUCTION ? 0u : 2u;
+	if (e->exc_code)
+		nparam = e->exc_np;     /* what RaiseException was given, not a fault's pair */
 	kgenome_emu_mem_wr(e, rec, &w32, 4u);
-	w32 = 0;                     kgenome_emu_mem_wr(e, rec + 4u, &w32, 4u);
+	w32 = e->exc_code ? e->exc_flags : 0u;  kgenome_emu_mem_wr(e, rec + 4u, &w32, 4u);
 	if (e->bits == 32) {
 		w32 = 0;                       kgenome_emu_mem_wr(e, rec + 8u, &w32, 4u);
-		w32 = (uint32_t)e->rip;        kgenome_emu_mem_wr(e, rec + 12u, &w32, 4u);
+		w32 = e->exc_code ? (uint32_t)kgenome_emu_win_addr_of(e, "RaiseException") : (uint32_t)e->rip;
+		kgenome_emu_mem_wr(e, rec + 12u, &w32, 4u);
 		w32 = nparam;                  kgenome_emu_mem_wr(e, rec + 16u, &w32, 4u);
-		w32 = is_write ? 1u : 0u;      kgenome_emu_mem_wr(e, rec + 20u, &w32, 4u);
-		w32 = (uint32_t)e->fault_va;   kgenome_emu_mem_wr(e, rec + 24u, &w32, 4u);
+		if (e->exc_code) {
+			unsigned k;
+
+			for (k = 0; k < nparam; k++) {
+				w32 = (uint32_t)e->exc_info[k];
+				kgenome_emu_mem_wr(e, rec + 20u + 4u * k, &w32, 4u);
+			}
+		} else {
+			w32 = is_write ? 1u : 0u;      kgenome_emu_mem_wr(e, rec + 20u, &w32, 4u);
+			w32 = (uint32_t)e->fault_va;   kgenome_emu_mem_wr(e, rec + 24u, &w32, 4u);
+		}
 	} else {
 		w64 = 0;                       kgenome_emu_mem_wr(e, rec + 8u, &w64, 8u);
-		w64 = e->rip;                  kgenome_emu_mem_wr(e, rec + 16u, &w64, 8u);
+		/*
+		 * A RAISED EXCEPTION IS AT THE FUNCTION THAT RAISED IT. RaiseException
+		 * builds its record with ExceptionAddress set to its own address, not to
+		 * the instruction after the call; a handler that places the exception by
+		 * the function it came from (a protector's does) reads this to decide
+		 * whether it is looking at one of its own.
+		 */
+		w64 = e->exc_code ? kgenome_emu_win_addr_of(e, "RaiseException") : e->rip;
+		kgenome_emu_mem_wr(e, rec + 16u, &w64, 8u);
 		w32 = nparam;                  kgenome_emu_mem_wr(e, rec + 24u, &w32, 4u);
-		w64 = is_write ? 1u : 0u;      kgenome_emu_mem_wr(e, rec + 32u, &w64, 8u);
-		w64 = e->fault_va;             kgenome_emu_mem_wr(e, rec + 40u, &w64, 8u);
+		if (e->exc_code) {
+			unsigned k;
+
+			for (k = 0; k < nparam; k++)
+				kgenome_emu_mem_wr(e, rec + 32u + 8u * k, &e->exc_info[k], 8u);
+		} else {
+			w64 = is_write ? 1u : 0u;      kgenome_emu_mem_wr(e, rec + 32u, &w64, 8u);
+			w64 = e->fault_va;             kgenome_emu_mem_wr(e, rec + 40u, &w64, 8u);
+		}
 	}
 
 	ctx_save(e, ctx);

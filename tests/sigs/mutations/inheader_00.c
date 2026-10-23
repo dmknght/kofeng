@@ -29,5 +29,5 @@ KOF_MUTATION_BLOCK(blk_hdr, KOF_SCAN_ELF_HEADERS, KOF_MUTATION_RAW,
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	if (kof_mutation_score(blk_hdr) >= 90u)
-		KOF_SCAN_INFECT("InHeader");
+		{ kof_debug("InHeader#InHeader", 0); return; }
 }

@@ -1,189 +1,8 @@
 /*
- * diagsrc_parse.c - reading a diagnose source: the condition parser and the line handlers. Split from diagsrc.c; the text is unchanged. See diagsrc.h.
+ * diagsrc_parse.c - reading a diagnose source: the line handlers. Split from diagsrc.c; the text is unchanged. See diagsrc.h.
  */
 
 #include "diagsrc_int.h"
-
-/* ---- the verdict's condition ------------------------------------------------ */
-
-static int is_id(char c)
-{
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
-	       (c >= '0' && c <= '9');
-}
-
-/* The literal `w` after any whitespace, and not as the front of a longer word. */
-static int lit(const char **pp, const char *w)
-{
-	const char *p = kof_skip_blank(*pp);
-	size_t L = strlen(w);
-
-	if (strncmp(p, w, L))
-		return 0;
-	if (is_id(w[L - 1u]) && is_id(p[L]))
-		return 0;
-	*pp = p + L;
-	return 1;
-}
-
-static int word(const char **pp, char *out, size_t cap)
-{
-	const char *p = kof_skip_blank(*pp);
-	size_t n = 0;
-
-	while (is_id(p[n]))
-		n++;
-	if (!n || n >= cap || (p[0] >= '0' && p[0] <= '9'))
-		return 0;
-	memcpy(out, p, n);
-	out[n] = 0;
-	*pp = p + n;
-	return 1;
-}
-
-static unsigned line_at(const char *code, size_t pos)
-{
-	unsigned l = 1;
-	size_t i;
-
-	for (i = 0; i < pos; i++)
-		if (code[i] == '\n')
-			l++;
-	return l;
-}
-
-/*
- * THE CONDITION, READ STRICTLY. The shape is the whole grammar:
- *
- *     void kof_scan(...) { if ( term && term ... ) KOF_SCAN_INFECT(word); }
- *
- * and a file that reads kof_diag anywhere but in it is not read at all, with the
- * reason. `code` has its comments blanked and is the same length as the source,
- * so the positions it yields are the source's.
- */
-static int cond_parse(const char *code, size_t n, struct kof_dsrc *d,
-		      const struct kof_dsrc_report *r)
-{
-	const char *p, *q;
-	struct kof_dsrc_cond *c = &d->cond;
-	int errs = 0;
-	unsigned line;
-
-	(void)n;
-	if (!strstr(code, "kof_diag(") && !strstr(code, "kof_diag_share(") &&
-	    !strstr(code, "kof_diag_str_"))
-		return 0;
-	p = strstr(code, "kof_scan");
-	if (!p) {
-		kof_dsrc_say_err(r, &errs, 0, "a verdict that reads a diagnose has no kof_scan");
-		return errs;
-	}
-	q = strchr(p, '{');
-	if (!q) {
-		kof_dsrc_say_err(r, &errs, (int)line_at(code, (size_t)(p - code)),
-			"kof_scan has no body");
-		return errs;
-	}
-	p = q + 1;
-	line = line_at(code, (size_t)(p - code));
-	{
-		const char *ifp = kof_skip_blank(p);
-
-		if (!lit(&p, "if") || !lit(&p, "(")) {
-			kof_dsrc_say_err(r, &errs, (int)line,
-				"the body must be one if over kof_diag terms");
-			return errs;
-		}
-		c->at = (size_t)(ifp - code);
-	}
-	line = line_at(code, c->at);
-	for (;;) {
-		struct kof_dsrc_term *t;
-		char capw[KOF_DSRC_NAME_LEN];
-
-		if (c->n >= KOF_DSRC_MAX_TERM) {
-			kof_dsrc_say_err(r, &errs, (int)line, "too many terms");
-			return errs;
-		}
-		t = &c->t[c->n];
-		memset(t, 0, sizeof *t);
-		if (lit(&p, "kof_diag_share")) {
-			if (!lit(&p, "(") || !word(&p, capw, sizeof capw) ||
-			    !kof_dsrc_cap_of(capw, &t->cap) || !lit(&p, ",") ||
-			    !word(&p, t->a, sizeof t->a) || !lit(&p, ",") ||
-			    !word(&p, t->b, sizeof t->b) || !lit(&p, ")")) {
-				kof_dsrc_say_err(r, &errs, (int)line,
-					"kof_diag_share(KOF_NUCLEO_*, A, B)");
-				return errs;
-			}
-			t->kind = KVT_SHARE;
-		} else if (lit(&p, "kof_diag_str_any") || lit(&p, "kof_diag_str_all")) {
-			t->kind = p[-1] == 'y' ? KVT_STR_ANY : KVT_STR_ALL;
-			if (!lit(&p, "(") || !word(&p, t->a, sizeof t->a)) {
-				kof_dsrc_say_err(r, &errs, (int)line,
-					"kof_diag_str_any(NAME, \"string\", ...)");
-				return errs;
-			}
-			while (lit(&p, ",")) {
-				const char *e;
-				size_t L;
-
-				p = kof_skip_blank(p);
-				if (*p != '"' || t->n_str >= KOF_DSRC_MAX_STR) {
-					kof_dsrc_say_err(r, &errs, (int)line,
-						"a quoted string, at most eight");
-					return errs;
-				}
-				e = strchr(p + 1, '"');
-				L = e ? (size_t)(e - p - 1) : 0u;
-				if (!e || !L || L >= KOF_DSRC_STR_LEN ||
-				    memchr(p + 1, '\\', L) || memchr(p + 1, '\n', L)) {
-					kof_dsrc_say_err(r, &errs, (int)line,
-						"a plain string of up to 47 bytes");
-					return errs;
-				}
-				memcpy(t->str[t->n_str], p + 1, L);
-				t->str[t->n_str][L] = 0;
-				t->n_str++;
-				p = e + 1;
-			}
-			if (!t->n_str || !lit(&p, ")")) {
-				kof_dsrc_say_err(r, &errs, (int)line,
-					"kof_diag_str_any(NAME, \"string\", ...)");
-				return errs;
-			}
-		} else if (lit(&p, "kof_diag")) {
-			if (!lit(&p, "(") || !word(&p, t->a, sizeof t->a) ||
-			    !lit(&p, ")")) {
-				kof_dsrc_say_err(r, &errs, (int)line, "kof_diag(NAME)");
-				return errs;
-			}
-		} else {
-			kof_dsrc_say_err(r, &errs, (int)line,
-				"a term is kof_diag, kof_diag_share or kof_diag_str_*");
-			return errs;
-		}
-		c->n++;
-		if (lit(&p, "&&"))
-			continue;
-		if (lit(&p, ")"))
-			break;
-		kof_dsrc_say_err(r, &errs, (int)line,
-			"terms are joined by && and nothing else");
-		return errs;
-	}
-	c->end = (size_t)(p - code);
-	if (!lit(&p, "KOF_SCAN_INFECT") || !lit(&p, "(") ||
-	    !word(&p, c->infect, sizeof c->infect) || !lit(&p, ")") ||
-	    !lit(&p, ";") || !lit(&p, "}")) {
-		kof_dsrc_say_err(r, &errs, (int)line_at(code, c->end),
-			"the if must be followed by KOF_SCAN_INFECT(word); and "
-			"the end of the function");
-		return errs;
-	}
-	d->has_cond = 1;
-	return 0;
-}
 
 static struct kof_dsrc_item *add_item(struct kof_dsrc *d, int *errs,
 				      const struct kof_dsrc_report *r,
@@ -276,6 +95,8 @@ static void dsrc_analysis(struct dsrc_cx *x, char *p)
 			"nodes: write KOF_DIAG_USE_EMU()");
 	if (strstr(p, "KOF_DIAG_ANALYSIS_APIHASH"))
 		bits |= KOF_DIAG_ANALYSIS_APIHASH;
+	if (strstr(p, "KOF_DIAG_ANALYSIS_TEXT"))
+		bits |= KOF_DIAG_ANALYSIS_TEXT;
 	if (!bits) {
 		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
 			"KOF_DIAG_ANALYSIS names no analysis");
@@ -505,35 +326,6 @@ static void dsrc_attrb(struct dsrc_cx *x, char *p)
 	x->d->n++;
 }
 
-/* KOF_TARGET_NAME(maltype, "family") */
-static void dsrc_vname(struct dsrc_cx *x, char *p)
-{
-	struct kof_dsrc_item *it;
-
-	size_t L;
-
-	if (!kof_dsrc_arg(p, 0, x->a[0], sizeof x->a[0]) ||
-	    !kof_dsrc_arg(p, 1, x->a[1], sizeof x->a[1])) {
-		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
-			"KOF_TARGET_NAME(KOF_MALTYPE_*, \"family\")");
-		return;
-	}
-	L = strlen(x->a[1]);
-	if (L < 2u || x->a[1][0] != '"' || x->a[1][L - 1u] != '"' ||
-	    L - 2u >= KOF_DSRC_NAME_LEN ||
-	    strlen(x->a[0]) >= KOF_DSRC_NAME_LEN) {
-		kof_dsrc_say_err(x->r, &x->errs, (int)x->lineno,
-			"KOF_TARGET_NAME wants a type and a quoted family");
-		return;
-	}
-	if (!(it = add_item(x->d, &x->errs, x->r, x->lineno, KDS_VNAME)))
-		return;
-	memcpy(it->s1, x->a[0], strlen(x->a[0]) + 1u);
-	memcpy(it->s2, x->a[1] + 1, L - 2u);
-	it->s2[L - 2u] = 0;
-	x->d->n++;
-}
-
 /* KOF_DIAG_DECLARE_SEQUENCE(first, then) */
 static void dsrc_sequence(struct dsrc_cx *x, char *p)
 {
@@ -586,8 +378,6 @@ static void dsrc_line(struct dsrc_cx *x, char *line)
 		dsrc_target(x, p, line);
 	} else if ((p = strstr(line, "KOF_DIAG_HAS_ATTRB(")) != NULL) {
 		dsrc_attrb(x, p);
-	} else if ((p = strstr(line, "KOF_TARGET_NAME(")) != NULL) {
-		dsrc_vname(x, p);
 	} else if ((p = strstr(line, "KOF_DIAG_DECLARE_SEQUENCE(")) != NULL) {
 		dsrc_sequence(x, p);
 	}
@@ -616,10 +406,9 @@ int kof_dsrc_parse(const char *text, size_t n, struct kof_dsrc *d,
 		while (e < n && text[e] != '\n')
 			e++;
 		x.lineno++;
-		/* THE LINE IS READ IN PLACE, ended at its newline and restored: the
-		 * condition parse below wants the newlines. It was copied into 2048
-		 * bytes and cut there, so a declaration after column 2047 was never
-		 * seen and nothing said so. */
+		/* THE LINE IS READ IN PLACE, ended at its newline and restored. It
+		 * was copied into 2048 bytes and cut there, so a declaration after
+		 * column 2047 was never seen and nothing said so. */
 		ended = code[e];
 		code[e] = 0;
 		dsrc_line(&x, code + at);
@@ -627,7 +416,6 @@ int kof_dsrc_parse(const char *text, size_t n, struct kof_dsrc *d,
 		at = e < n ? e + 1u : e;
 	}
 	d->lines = x.lineno;
-	x.errs += cond_parse(code, n, d, r);
 	free(code);
 	d->bad = (uint32_t)x.errs;
 	return x.errs;

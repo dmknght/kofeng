@@ -344,7 +344,7 @@ static uint64_t win_loader(struct kgenome_emu *e, unsigned id, int *mine)
 
 		kgenome_emu_win_str(e, p, name, sizeof name, id == KGENOME_EMU_WIN_LoadLibraryW);
 		{
-			uint64_t h = kgenome_emu_win_mod_of(e, name);
+			uint64_t h = kgenome_emu_win_mod_load(e, name);
 
 			if (!h)
 				h = kgenome_emu_win_fake_lib(e, name);
@@ -462,9 +462,25 @@ static uint64_t win_loader(struct kgenome_emu *e, unsigned id, int *mine)
 			       ~(uint64_t)(KGENOME_EMU_PAGE - 1u);
 		uint32_t four = 0x40u;
 
-		(void)base; (void)len;
+		uint64_t pg;
+
 		if (!sz)
 			return 0;
+		/*
+		 * AN UNMAPPED RANGE IS REFUSED, AS WINDOWS REFUSES IT.
+		 *
+		 * VirtualProtect on pages that do not exist fails, returns FALSE and
+		 * leaves ERROR_INVALID_ADDRESS (487). This answered 1 for anything, so a
+		 * caller that probes - a protector tests the call on an address it knows is
+		 * bad and expects to be told so - was told the page was there and went
+		 * on to use it. The check is the same for any range: every page has to be
+		 * mapped, and the first that is not ends the call.
+		 */
+		for (pg = base; pg < base + len; pg += KGENOME_EMU_PAGE)
+			if (!kgenome_emu_page_lookup(e, pg)) {
+				e->win_last_error = 487u;
+				return 0;
+			}
 		/*
 		 * THIS IS THE ONE THAT MATTERS TO A SCAN, and it does exactly
 		 * what EMU_SYS_MPROTECT does a few cases down - takes a
@@ -508,6 +524,20 @@ static uint64_t win_process(struct kgenome_emu *e, unsigned id, int *stop_out, i
 	case KGENOME_EMU_WIN_ExitProcess:
 		*stop_out = KGENOME_EMU_STOP_EXIT + 1;
 		return 0;
+	case KGENOME_EMU_WIN_CorExeMain:
+	case KGENOME_EMU_WIN_CorDllMain:
+		/*
+		 * THE RUNTIME TAKES OVER. A managed program is not run by its own
+		 * entry point: the stub there calls into the CLR, which loads
+		 * the assembly the headers describe and runs it. When a
+		 * protector's loader has decrypted the assembly this is the call
+		 * it ends in, so it is the moment the image is worth taking -
+		 * and the only one, because nothing here can interpret the IL.
+		 */
+		*stop_out = KGENOME_EMU_STOP_HANDOFF + 1;
+		snprintf(e->detail, sizeof e->detail, "entered %s: the runtime takes over",
+			 kgenome_emu_win_api_name(id));
+		return 0;
 	case KGENOME_EMU_WIN_GetCurrentProcess:
 		return (uint64_t)-1;            /* the pseudo handle */
 	case KGENOME_EMU_WIN_IsDebuggerPresent:
@@ -534,7 +564,8 @@ static uint64_t win_process(struct kgenome_emu *e, unsigned id, int *stop_out, i
 		return (19045u << 16) | (0u << 8) | 10u;
 	case KGENOME_EMU_WIN_GetCurrentProcessId:
 		return 0x1000u;
-	case KGENOME_EMU_WIN_AddVectoredExceptionHandler: {
+	case KGENOME_EMU_WIN_AddVectoredExceptionHandler:
+	case KGENOME_EMU_WIN_RtlAddVectoredExceptionHandler: {
 		uint64_t first = kgenome_emu_win_arg(e, 0), h = kgenome_emu_win_arg(e, 1);
 		unsigned i;
 
@@ -556,7 +587,8 @@ static uint64_t win_process(struct kgenome_emu *e, unsigned id, int *stop_out, i
 		 * simplest value that round-trips is the right one. */
 		return h;
 	}
-	case KGENOME_EMU_WIN_RemoveVectoredExceptionHandler: {
+	case KGENOME_EMU_WIN_RemoveVectoredExceptionHandler:
+	case KGENOME_EMU_WIN_RtlRemoveVectoredExceptionHandler: {
 		uint64_t h = kgenome_emu_win_arg(e, 0);
 		unsigned i, j;
 
@@ -1044,6 +1076,30 @@ static uint64_t win_second(struct kgenome_emu *e, unsigned id, int *stop_out, in
 		e->fault_va = kgenome_emu_win_arg(e, 0);
 		memcpy(e->fault_kind, "raise", 6);
 		e->exc_code = (uint32_t)kgenome_emu_win_arg(e, 0);
+		/*
+		 * THE RECORD IS WHAT THE GUEST ASKED FOR: RaiseException(code,
+		 * flags, count, arguments) puts exactly those four things in the
+		 * EXCEPTION_RECORD, and a handler that tells its own exception from
+		 * a fault does it by the count. This wrote the two parameters of an
+		 * access violation (kind, address) whatever was raised, so a handler
+		 * looking for NumberParameters == 0 saw 2 and declined it.
+		 */
+		{
+			const unsigned w = e->bits == 32 ? 4u : 8u;
+			uint64_t n = kgenome_emu_win_arg(e, 2), args = kgenome_emu_win_arg(e, 3);
+			unsigned k;
+
+			e->exc_flags = (uint32_t)kgenome_emu_win_arg(e, 1);
+			e->exc_np = n > 15u ? 15u : (uint32_t)n;
+			memset(e->exc_info, 0, sizeof e->exc_info);
+			for (k = 0; k < e->exc_np && args; k++) {
+				uint64_t v = 0;
+
+				if (!kgenome_emu_mem_rd(e, args + (uint64_t)k * w, &v, w))
+					break;
+				e->exc_info[k] = v;
+			}
+		}
 		{
 			uint64_t back = 0;
 
@@ -1051,10 +1107,34 @@ static uint64_t win_second(struct kgenome_emu *e, unsigned id, int *stop_out, in
 				   e->bits == 32 ? 4u : 8u))
 				e->exc_rip = back;
 		}
-		if (kgenome_emu_win_exc_begin(e)) {
-			e->exc_code = 0;
-			e->exc_rip = 0;
-			return 0;
+		/*
+		 * THE CONTEXT A HANDLER IS GIVEN IS THE STATE AFTER RaiseException
+		 * RETURNS, because that is where "continue execution" resumes: Windows
+		 * captures it inside RtlRaiseException, and carrying on from there walks
+		 * back out through the call. Left as it was at the trap it would be the
+		 * stub's own `syscall`, which a handler that returns -1 would run again
+		 * and raise the same exception from, for ever. So the return is made in
+		 * the registers first (the address popped, a 32-bit callee's four
+		 * arguments with it) and undone when nobody takes the exception, in which
+		 * case the stub returns on its own.
+		 */
+		{
+			const uint64_t rip0 = e->rip, rsp0 = e->gpr[KGENOME_EMU_RSP], rax0 = e->gpr[KGENOME_EMU_RAX];
+			const unsigned w = e->bits == 32 ? 4u : 8u;
+
+			if (e->exc_rip) {
+				e->rip = e->exc_rip;
+				e->gpr[KGENOME_EMU_RSP] = rsp0 + w + (e->bits == 32 ? 4u * 4u : 0u);
+				e->gpr[KGENOME_EMU_RAX] = 0;
+			}
+			if (kgenome_emu_win_exc_begin(e)) {
+				e->exc_code = 0;
+				e->exc_rip = 0;
+				return 0;
+			}
+			e->rip = rip0;
+			e->gpr[KGENOME_EMU_RSP] = rsp0;
+			e->gpr[KGENOME_EMU_RAX] = rax0;
 		}
 		e->exc_code = 0;
 		e->exc_rip = 0;

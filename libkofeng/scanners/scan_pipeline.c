@@ -5,15 +5,15 @@
  * A stage is a function over the object's kof_pipeline and a row in `pipeline` below;
  * the order of the rows is the order things happen to an object, and it is
  * stated here once and nowhere else. The chain rows (the opening steps and the
- * host's own NORMZ) are subject to the chain's stops - a detection, a rule's
- * conclusion, a child that came out, a cancel - and the rows around them are not.
+ * host's own NORMZ) are subject to the chain's stops - a child that came out, a
+ * cancel - and the rows around them are not. Nothing a module says is a stop: the
+ * verdict is read off every disease the object has.
  */
 
 #define _GNU_SOURCE
 
 #include "scan_int.h"
 #include "objctx_int.h"
-#include "../kofcore/kofmod/heur.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +62,8 @@ static void st_facts(struct kof_pipeline *p)
 	memset(&p->ctx, 0, sizeof p->ctx);
 	kof_mod_attach(&p->ctx, sc);
 	sx_obj_begin(sc);
+	/* the constants of a script are asked for at this level: the one scan of its text collects them with the names (objctx_textscan.c) */
+	sc->obj.text.deep = (uint8_t)(opt && opt->heur_level >= 2);
 	/*
 	 * EVERY DIAGNOSE ONLY WHEN THE CALLER ASKED FOR THE REPORT, and it is
 	 * said at the start of the object so the one analysis covers them all and
@@ -157,15 +159,8 @@ static void st_facts(struct kof_pipeline *p)
 		out->region_fmt = sc->cur.rgn_fmt;
 	}
 
-	/*
-	 * BOTH UNIONS, because a region has to be RESOLVED for whoever is
-	 * going to read it - see kof_engine.heur_scan_mask. The detector
-	 * union alone left a heuristic scoped to a region reading "absent"
-	 * on every object, which is the worst shape a fault can have: the
-	 * rule is loaded, it runs, and it answers no.
-	 */
 	{
-		uint32_t resolve = sc->eng->scan_mask | sc->eng->heur_scan_mask;
+		uint32_t resolve = sc->eng->scan_mask;
 
 		p->present = sx_regions_present(&p->ctx, resolve);
 		p->present |= sx_sym_halves_present(&p->ctx, resolve);
@@ -209,10 +204,10 @@ static void st_facts(struct kof_pipeline *p)
 	 * Here and not inside sx_mutation_feed, which returns early when no pack
 	 * carried a block: a database with no mutation rules would then have left
 	 * the previous object's descriptor in place, and every kof_mutation_blocks
-	 * rule would have measured the wrong file. Built on the first ask - see
-	 * ovl_of - so this costs a store.
+	 * rule would have measured the wrong file. Built on the first ask, so
+	 * this costs a store.
 	 */
-	/* What the two gated measures compare themselves against - see
+	/* What the gated measures compare themselves against - see
 	 * kof_scanner.cur.heur_lvl. Unstated is level 1, exactly as sx_heur_object
 	 * reads it, so the two cannot drift. */
 	sc->cur.heur_lvl = opt->heur_off ? 0u
@@ -250,7 +245,6 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 
 	while (kof_mod_walk_next(&walk, &mi)) {
 		const struct kof_module *m = &e->mods[mi];
-		struct kof_finding *f;
 
 		if ((m->n_block != 0) != (similarity != 0))
 			continue;
@@ -283,85 +277,23 @@ static void run_modules(struct kof_pipeline *p, int similarity)
 
 		sx_mod_begin(sc, m);
 		m->fn(&p->ctx);
-
-		/*
-		 * AND, IF IT BOTH FOUND SOMETHING AND KNOWS HOW TO UNDO IT,
-		 * ASK IT WHAT THE REPAIR WOULD BE.
-		 *
-		 * Three conditions and every one of them is needed. The module
-		 * has to have REPORTED, because a repair with no detection
-		 * behind it is a file being rewritten for no stated reason. It
-		 * has to have OFFERED - KOF_SCAN_CURABLE - because finding a
-		 * family says nothing about where its payload starts and a
-		 * repair without an offset has nothing to act on. And it has
-		 * to HAVE a cure at all, which nearly no module does.
-		 *
-		 * WHAT COMES BACK IS A DESCRIPTION, not a changed file: see
-		 * kof_content.cure_patch. Nothing on disk is touched here, by
-		 * anybody, ever. A scan that repaired what it found would be a
-		 * scan nobody could run twice.
-		 */
-		if (sc->mod.rep_valid && sc->mod.cure_have && m->cure)
-			m->cure(&p->ctx);
 		sc->mod.cur   = NULL;
-
-		if (!sc->mod.rep_valid)
-			continue;
-
-		/* Accumulate. Keeping only the last would drop a finding whenever two
-		 * families match one object, and the cap is counted rather than
-		 * silently applied. */
-		f = sx_mod_report(sc, &p->ctx, opt, out, m, sc->mod.rep_level);
-
-		/*
-		 * AN INFECTION ENDS THE STAGE unless the caller asked for everything, or
-		 * the database has something that reads what the rest would add - and
-		 * ONLY AN INFECTION: a SUSPECTED is a weaker answer, and stopping on it
-		 * hid the INFECTED further down the database (tests/unit/scan_logic.c).
-		 *
-		 * The stop was dropped with the legacy verdict, for a reason that holds
-		 * where diseases are declared: the verdict is read off the SET of them,
-		 * a detector found first is not the answer, and a result with no room
-		 * left for another finding is not the end either - the disease is added
-		 * to the set before its finding is counted as dropped (sx_mod_report;
-		 * tests/unit/verdict_branches.c: the disease sorted after sixteen
-		 * fillers was never run).
-		 *
-		 * It does not hold where no module and no diagnose declares one: the set
-		 * is empty for every object, no detector reached from here can change the
-		 * verdict, and each module after the first infection only adds a finding
-		 * to a list the caller did not ask for - while a rule that reads a
-		 * diagnose pays for the analysis of an object already known to be
-		 * infected. So the stop depends on the DATABASE (kof_engine.reads_diseases)
-		 * and never on the object, and a caller that wants every finding says so
-		 * (all_matches).
-		 */
-		if (f && f->level == KOF_LEVEL_INFECT && !opt->all_matches &&
-		    !e->reads_diseases)
-			break;
+		/* What it marked goes out; nothing it did names the object. */
+		sx_mod_end(sc, out);
 	}
 	}
 
 }
 
 /*
- * DETECT: the detectors, in database order, cheapest test first. A detector
- * that names a family ends the stage unless the caller asked for everything.
+ * DETECT: the detectors, in database order, cheapest test first. Every one that
+ * fires reports: nothing a detector says ends the stage.
  */
 static void st_detect(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
-	struct kof_result *out = p->out;
 
 	run_modules(p, 0);
-
-	/*
-	 * WHAT THE DETECTORS ALONE FOUND, taken here because this is the last
-	 * moment at which it is still true: sx_heur_run appends below, and once it
-	 * has, nothing downstream can tell a rule's guess from a detection. See
-	 * analyze_arg.det_n for what reads it and why the distinction matters.
-	 */
-	p->det_n = out->n;
 
 	/* Before the next kof_match_begin clears them. */
 	sc->st.searches       += sc->match.m.n_calls;
@@ -397,39 +329,16 @@ static void st_similar(struct kof_pipeline *p)
 }
 
 /*
- * EXAMINE: the rules that read the parse, asked before the object is opened.
- * What they predict and what they ask the engine for is collected here and
- * read by every stage below.
+ * EXAMINE: what the object asks of the engine, before it is opened.
+ * What a diagnose's own declaration asks for is collected here and read by every
+ * stage below.
  */
 static void st_examine(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
-	const struct kof_scan_option *opt = p->opt;
-	struct kof_result *out = p->out;
 
 	/*
-	 * EXAMINE: what the object IS, asked before it is opened.
-	 *
-	 * Here and not earlier so a rule knows whether a family was named, and
-	 * here and not later because this is the last moment at which what it
-	 * asks for can still change what happens to the object.
-	 */
-	p->want = sx_heur_run(sc, &p->ctx, opt, out, KOF_HEUR_EXAMINE, p->present, &p->predict);
-	/*
-	 * ---- AND AN ASK FROM THIS PASS COUNTS -----------------------------
-	 *
-	 * KOF_ENG_USE_DIAGNOSE was being read in the open stage and nowhere
-	 * else, so an object that is not unpacked never saw it. MEASURED:
-	 * the msf stager asked and was analysed because a decoder produced a
-	 * child; a kernel module - which no unpacker touches - asked through
-	 * the same declaration and was never analysed at all.
-	 *
-	 * The two are OR-ed rather than assigned: a producer's ask and this
-	 * object's own are both asks, and neither may cancel the other.
-	 */
-	sc->obj.diag.ask |= (p->want & KOF_ENG_USE_DIAGNOSE) != 0;
-	/*
-	 * ---- AND A DIAGNOSE'S OWN DECLARATION IS AN ASK -------------------
+	 * ---- A DIAGNOSE'S OWN DECLARATION IS AN ASK -----------------------
 	 *
 	 * A diagnose states which files it is worth running on; this is where
 	 * the engine reads that and routes. Two things follow from a match and
@@ -442,30 +351,21 @@ static void st_examine(struct kof_pipeline *p)
 	 *   finds nothing. Measured: without it, x86_alpha_upper's decoded
 	 *   child is never produced and the one detection on that file goes.
 	 *
-	 * THIS REPLACED A HEURISTIC RULE that carried the shape test and asked
-	 * on the diagnose's behalf. It had to publish a verdict to be allowed
-	 * to ask - 12 Heur lines across the msfvenom corpus saying only that
-	 * the engine had decided to look - and the test lived in a different
-	 * module from the declaration it was gating.
+	 * The ask is OR-ed into what a producer asked: neither may cancel the
+	 * other.
 	 */
 	if (kof_scan_diag_sign_asks(&p->ctx)) {
 		sc->obj.diag.ask = 1;
 		p->want |= KOF_ENG_USE_EMU;
 	}
 	/*
-	 * A rule's own guess wins; the inherited one is the fallback.
-	 *
-	 * A heuristic firing on THIS object knows more about it than its parent
-	 * did - so its prediction takes precedence. The inherited family is for
-	 * the case no rule fired at all, which is exactly the formatless
-	 * intermediate layer a decoder peels: nothing recognises it, but its
-	 * parent was a Meterp payload, so it very probably is one too, and
-	 * trying that decoder first is the whole point of carrying the guess
-	 * down.
+	 * The family the producer decodes is the prediction, when there is one:
+	 * the formatless intermediate layer a decoder peels is something
+	 * nothing recognises, but its parent was a Meterp payload, so it very
+	 * probably is one too, and trying that decoder first is the whole point
+	 * of carrying the guess down.
 	 */
-	if (!p->predict)
-		p->predict = p->inherit_predict;
-	p->concluded = (p->want & (uint32_t)KOF_ENG_CONCLUDE) ? 1 : 0;
+	p->predict = p->inherit_predict;
 }
 
 /*
@@ -506,185 +406,46 @@ static void st_serve(struct kof_pipeline *p)
 		uint32_t ns = 0;
 		const uint8_t *sb = kof_scan_served_syms(&p->ctx, &ns);
 
-		if (sb && sc->cur.src)
-			kof_src_declare_syms(sc->cur.src, sb, ns);
+		if (sb && sc->cur.src && !kof_src_declare_syms(sc->cur.src, sb, ns))
+			oc_scan_limit(sc);      /* the result carries no served symbols: said (engine_defect2 E2) */
 	}
 }
 
 /*
- * VERDICT: the rules that read what the other stages produced - and, first, the
- * analysis a rule asked for by DECLARATION, built now so a rule here finds it.
- * It is a feed like the pattern and similarity feeds, demanded and built on
- * demand (see diag_ready), and not a stage of its own: nothing happens to the
- * object in it.
+ * ANALYSE: the analysis a declaration asked for, built now so that whatever reads
+ * it finds it. It is a feed like the pattern and similarity feeds, demanded and
+ * built on demand (see diag_ready), and not a stage of its own: nothing happens to
+ * the object in it.
  */
-static void st_verdict(struct kof_pipeline *p)
+static void st_analyse(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
-	const struct kof_scan_option *opt = p->opt;
-	struct kof_result *out = p->out;
 
 	/*
-	 * ---- AND THE DIAGNOSE ANALYSIS RUNS, IF ANYTHING ASKED -----------
+	 * ---- THE DIAGNOSE ANALYSIS RUNS, IF ANYTHING ASKED ---------------
 	 *
 	 * ONE ASKER, AND IT IS THE DATABASE. A diagnose declares the symbols
 	 * or the file attributes that make an object worth the walk and the
-	 * EXAMINE pass sets sc->obj.diag.ask from that; a rule reaching for a
-	 * diagnose or the graph sets it too, at the moment it asks.
+	 * EXAMINE stage sets sc->obj.diag.ask from that; a module reaching for
+	 * a diagnose or the graph sets it too, at the moment it asks.
 	 *
-	 * There was a second asker - a caller's want_diag, which turned the
-	 * analysis on for every object so a tool could list what it found.
-	 * It is gone with the listing: a switch that makes the engine do its
-	 * most expensive work on files nothing recognised is not a reporting
-	 * mode, it is the gate turned off.
-	 *
-	 * WHY IT IS RUN HERE RATHER THAN WAITED FOR. The analysis used to
-	 * happen only when a signature asked a question that needed it, which
-	 * means an object nobody questioned was never analysed at all - and
-	 * the findings are wanted by the verdict layer, which has not been
-	 * written yet and so asks nothing. A rule's ask is the decision; this
-	 * is where the decision is acted on.
+	 * A module does not have to wait for this. It runs before this point,
+	 * and reaching for a diagnose or the graph runs the analysis there and
+	 * then - see diag_ready. This is for the object whose analysis was
+	 * asked for by a DECLARATION rather than by a question.
 	 *
 	 * The latch inside makes it once per object however many times it is
 	 * reached, and an object nobody asked about still does no work.
-	 *
-	 * BETWEEN THE TWO HEURISTIC PHASES, which is the only place it can
-	 * be. EXAMINE is where a rule ASKS; VERDICT is where a rule reads
-	 * what the analysis found and concludes. Run after VERDICT - which
-	 * is where it was - the graph existed only once nothing was left to
-	 * read it, and a rule asking kof_diag_graph() got nothing at all.
-	 *
-	 * A SIGNATURE DOES NOT HAVE TO WAIT FOR THIS. It runs before this
-	 * point, and reaching for a diagnose or the graph runs the analysis
-	 * there and then - see diag_ready. This is for the object whose
-	 * analysis was asked for by a DECLARATION rather than by a question:
-	 * nothing would otherwise read it until the VERDICT phase, and a
-	 * rule there would find a graph that had never been built.
 	 */
 	if (sc->obj.diag.ask) {
 		kof_scan_diag_force(&p->ctx);
 		oc_diag_trace_scan(sc);
 	}
-
-	(void)sx_heur_run(sc, &p->ctx, opt, out, KOF_HEUR_VERDICT, p->present, NULL);
 }
 
 /*
- * RECONCILE: a parent whose children were opened does not keep a guess about
- * itself that its payload may contradict.
- */
-static void st_reconcile(struct kof_pipeline *p)
-{
-	struct kof_scanner *sc = p->sc;
-	struct kof_result *out = p->out;
-
-	/*
-	 * A RULE'S HEUR IS A LAST RESORT, and an object that OPENED is not the
-	 * last resort - its children are.
-	 *
-	 * A rule says "I could not sx_identify this, but here is its shape". When
-	 * the object unpacks, the thing worth identifying is what came out, not
-	 * the wrapper: rc4_1 is an encrypted stager, and the reader wants the
-	 * Trojan:Meterp on the payload three layers down, not a Heur:Shellcode
-	 * on the ciphertext that carried it. So a rule's heur on an object that
-	 * produced children is dropped.
-	 *
-	 * THE SIGNAL IS NOT LOST, it MOVES. The same shape rule fires on the
-	 * decoded child; if nothing can name that child either, the child
-	 * produces no children of its own, so its heur is kept. The prediction
-	 * ends up on the leaf that nothing could open or name, which is where
-	 * "I could not sx_identify this" belongs.
-	 *
-	 * DONE BEFORE sx_heur_object, so only the RULE heur is dropped. The scored
-	 * model that follows is about the object's own structure - a truncated
-	 * header is truncated whether or not the object unpacked - so it is
-	 * added after this and stays. Only children this object PRODUCED count;
-	 * sc->child.n is reset before it was scanned, and a container's members
-	 * are its children too, but a container carries no rule heur to drop.
-	 */
-	/*
-	 * A RULE MAY SAY ITS FINDING IS ABOUT THIS OBJECT.
-	 *
-	 * The assumption above - that a rule heur on an object which opened is
-	 * always a failure to sx_identify the wrapper - holds for every rule that
-	 * guesses at a payload and for none that recognises a CARRIER. "This
-	 * executable has a second executable glued to it" is true of the parent
-	 * and of nothing else, and the child it names is an ordinary file that
-	 * no shape rule fires on - so there is no leaf for the signal to move
-	 * to and the drop would simply delete it.
-	 *
-	 * KOF_ENG_KEEP_ON_OPEN is how such a rule says so, per finding rather
-	 * than per object: two rules may fire here and only one of them mean
-	 * it. See sc->obj.open.heur_keep and the note in kofmod/heur.h.
-	 */
-	/*
-	 * VIEWS DO NOT COUNT, because nothing came out of the object when one
-	 * was made - see kof_scanner.child.n_views. Subtracted rather than tested
-	 * separately so the question stays the one it always was: did this
-	 * object YIELD anything.
-	 *
-	 * AND NEITHER DOES A CARVE, for the reason that decides the same
-	 * question in analyze_object and in the family pass: a carved child
-	 * was not declared by anything, so the host did not turn out to be a
-	 * wrapper around it. The drop above rests on "the finding belongs to
-	 * the child that came out" - true of a container's member and of an
-	 * unpacked image, and false of a file glued past the last segment. A
-	 * shape rule that says "this object is packed" is not answered by
-	 * finding something appended to it, and dropping it there deletes a
-	 * verdict about the host with nowhere for it to go: the carved child
-	 * is an ordinary file that no shape rule fires on.
-	 *
-	 * That is what KOF_ENG_KEEP_ON_OPEN was carrying on its own - see the
-	 * note in bases/heur/appended_00.c, where the bit was added because
-	 * three samples came back clean with the carried ELF extracted. The
-	 * bit is still right for what it says, and it is still honoured below;
-	 * it is simply no longer the only thing standing between a carve and
-	 * a deleted finding, which would have needed every future rule to
-	 * remember it.
-	 */
-	_Static_assert(KOF_MAX_FINDINGS <= 32, "heur_keep is a 32-bit mask of finding slots");
-	if (p->yielded && out->n > 0) {
-		uint32_t r, w = 0, keep = sc->obj.open.heur_keep;
-
-		for (r = 0; r < out->n; r++)
-			if (out->v[r].level != KOF_LEVEL_HEUR ||
-			    (keep & (1u << r)))
-				out->v[w++] = out->v[r];
-			else if (out->v[r].is_verdict && sc->subject.have &&
-				 out->v[r].level == sc->subject.lvl &&
-				 !strcmp(out->v[r].name, sc->subject.slot.name)) {
-				/*
-				 * AND THE SLOT GOES WITH IT - but only if it
-				 * is still the one in the slot.
-				 *
-				 * This finding MOVES to the leaf, and it had
-				 * already been taken into the subject's one
-				 * verdict slot; a slot holding a finding
-				 * nobody reports is a subject with no verdict
-				 * at all. Measured: 007 Spy.exe reported
-				 * nothing, because the rule fired on the
-				 * parent, took the slot, was dropped, and the
-				 * identical finding at the leaf was then
-				 * refused for equal rank.
-				 *
-				 * `is_verdict` SAYS IT TOOK THE SLOT ONCE,
-				 * NOT THAT IT STILL HOLDS IT. On the Sality
-				 * samples the rule takes it, the unpacker
-				 * then takes it with `Virus:Sality#Body`, and
-				 * clearing on the stale bit threw the named
-				 * verdict away - the file came back with the
-				 * shape that led to it instead. So the slot
-				 * is compared before it is given up.
-				 */
-				sc->subject.have = 0;
-				sc->subject.lvl  = 0;
-			}
-		out->n = w;
-	}
-}
-
-/*
- * MODEL: the scored model over the whole object.
+ * MODEL: the scored model's measurement over the whole object - published for an
+ * examiner (kof_result.heur_*); it names nothing.
  */
 static void st_model(struct kof_pipeline *p)
 {
@@ -703,14 +464,32 @@ static void st_model(struct kof_pipeline *p)
 	 * about it - measured before this, an ordinary view came back
 	 * ELF-other/Heur:Appended, which is a finding about the normaliser.
 	 *
-	 * The RULE heuristics still run: those read bytes, and the bytes are
-	 * the point of having a view. Only the model that reasons about layout
-	 * is skipped, because the layout belongs to the parent and the parent
-	 * is scanned too.
+	 * Only the model that reasons about layout is skipped, because the
+	 * layout belongs to the parent and the parent is scanned too.
+	 *
+	 * A VIEW IS KNOWN BY ITS KIND (KOF_ENT_NORMALIZED, the one carrier), not by
+	 * having declared regions: a script view used to be told apart by the one BODY
+	 * region it declared, which made a region the carrier of a different fact.
 	 */
-	if (!sc->cur.n_rgn)
+	if (!sc->cur.n_rgn && kof_src_kind_of(sc->cur.src) != KOF_ENT_NORMALIZED)
 		sx_heur_object(sc, &p->ctx, opt, p->pdepth,
 			    out->broken == KOF_BROKEN_DAMAGED, out);
+}
+
+/*
+ * VERDICT: what the diseases the object has make.
+ *
+ * ONCE, after everything that can find a disease has run, and the answer is kept
+ * in the result: the set is read and the name composed from it one time and
+ * nothing downstream reads it again.
+ */
+static void st_verdict(struct kof_pipeline *p)
+{
+	sx_verdict_make(p->sc, &p->ctx, p->out);
+	/* A bound cut this object's evidence (oc_scan_limit): the result says so, over
+	 * no earlier reason - and a clean answer is not given for it. */
+	if (p->sc->obj.open.cut && !p->out->broken)
+		p->out->broken = KOF_BROKEN_LIMIT;
 }
 
 /*
@@ -720,23 +499,6 @@ static void st_model(struct kof_pipeline *p)
  * verdict reads and rebuilds the graph with them: whatever it changes is not
  * something a verdict can have read.
  */
-/*
- * SYNDROME: what the diseases the object has make - the verdict.
- *
- * ONCE, after everything that can find a disease has run, and the answer is kept
- * in the result for st_report and for a caller that asked for it: the set is read
- * and inferred from one time and nothing downstream reads it again.
- */
-static void st_syndrome(struct kof_pipeline *p)
-{
-	p->out->has_syndrome = (uint8_t)(kof_scan_syndrome(&p->ctx, &p->out->syndrome) != 0);
-	sx_syndrome_verdict(p->sc, &p->ctx, p->opt, p->out, &p->out->syndrome);
-	/* A bound cut this object's evidence (oc_scan_limit): the result says so, over
-	 * no earlier reason - and a clean answer is not given for it. */
-	if (p->sc->obj.open.cut && !p->out->broken)
-		p->out->broken = KOF_BROKEN_LIMIT;
-}
-
 static void st_report(struct kof_pipeline *p)
 {
 	struct kof_scanner *sc = p->sc;
@@ -763,7 +525,7 @@ static void st_report(struct kof_pipeline *p)
 
 static void st_recover(struct kof_pipeline *p)
 {
-	sx_recover(p->sc, &p->ctx, p->opt, p->out, p->want);
+	sx_recover(p->sc, &p->ctx, p->opt, p->out);
 }
 
 static void st_open(struct kof_pipeline *p)
@@ -826,10 +588,9 @@ static const struct stage_row {
 	{ KOF_STAGE_SIMILAR,   KOF_ANALYZE_UNWRAP,  ROW_CHAIN | ROW_GROUP_END,      st_similar },
 	{ KOF_STAGE_SCRIPT,    KOF_ANALYZE_UNWRAP,  0,                              st_script },
 	{ KOF_STAGE_SERVE,     KOF_ANALYZE_UNWRAP,  0,                              st_serve },
-	{ KOF_STAGE_VERDICT,   KOF_ANALYZE_UNWRAP,  0,                              st_verdict },
-	{ KOF_STAGE_RECONCILE, KOF_ANALYZE_UNWRAP,  0,                              st_reconcile },
+	{ KOF_STAGE_ANALYSE,     KOF_ANALYZE_UNWRAP,  0,                              st_analyse },
 	{ KOF_STAGE_MODEL,     KOF_ANALYZE_UNWRAP,  0,                              st_model },
-	{ KOF_STAGE_SYNDROME,  KOF_ANALYZE_UNWRAP,  0,                              st_syndrome },
+	{ KOF_STAGE_VERDICT,   KOF_ANALYZE_UNWRAP,  0,                              st_verdict },
 	{ KOF_STAGE_REPORT,    KOF_ANALYZE_UNWRAP,  0,                              st_report }
 };
 
@@ -859,66 +620,6 @@ static void sx_pipeline_run(struct kof_pipeline *p)
 			p->carved0 = sc->child.n_carved;
 			chain_begun = 1;
 		}
-		/*
-		 * AND A DETECTION STOPS THE CHAIN, for the same reason a
-		 * produced child does: the question the later steps exist to
-		 * answer has been answered.
-		 *
-		 * ANALYSIS IS NOT SKIPPED - IT IS ENDED. The step that had not
-		 * run yet is the one that does not run; everything up to and
-		 * including the step that led here still ran, and the verdict
-		 * still rests on a parse rather than on a guess about one. That
-		 * is the difference between this and asking the detectors first
-		 * and the analysers never.
-		 *
-		 * WHAT IT COSTS, MEASURED. Over 5248 real ELF samples, 1341 of
-		 * which were detected: 1092 files carry a detector's verdict on
-		 * a parent, and stopping there loses a differently-named
-		 * descendant in 6 of them - 6 objects out of 3023. Four of the
-		 * six are the same family under a second signature id; two name
-		 * another family. Every one of the six is a NORMALISED VIEW and
-		 * not an unpacked payload, which is the weakest thing the chain
-		 * produces: a view is a rendering of bytes already searched, and
-		 * 852 of the 858 views that reported were repeating a name their
-		 * parent had already been given.
-		 *
-		 * ONLY WITH all_matches OFF. A caller that asked for every
-		 * finding has said that the first one is not the answer.
-		 */
-		if (p->det_n && !opt->all_matches) {
-			chain_over = 1;
-			open_finish(p);
-			continue;
-		}
-		/*
-		 * A RULE THAT REACHED A VERDICT STOPS THE CHAIN, exactly as a
-		 * detector's verdict does above.
-		 *
-		 * This was scoped to the NORMZ step for one revision, on the
-		 * argument that a conclusion only makes RE-READING pointless
-		 * and unwrapping is still worth doing. That is a patch and
-		 * not a rule: the engine's flow is "a verdict ends the
-		 * search", and a finding that claims the file is malware
-		 * while the search continues produces a result that
-		 * contradicts the verdict it just gave.
-		 *
-		 * SO A RULE CHOOSES. One that has decided declares
-		 * KOF_ENG_CONCLUDE and interrupts; one that is surveying -
-		 * "this looks like a loader", "this has something appended" -
-		 * declares nothing and the chain runs on. The two are
-		 * different kinds of statement and the rule author is who
-		 * knows which one was made.
-		 *
-		 * all_matches overrides it, for the reason it overrides the
-		 * detector stop: that caller said the first answer is not the
-		 * answer.
-		 */
-		if (p->concluded && !opt->all_matches) {
-			chain_over = 1;
-			open_finish(p);
-			continue;
-		}
-
 		/* The OPEN stage ends where the host's own step begins. */
 		if (r->stage == KOF_STAGE_NORMZ)
 			open_finish(p);

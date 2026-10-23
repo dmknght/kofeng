@@ -28,5 +28,5 @@ KOF_MUTATION_BLOCK(blk_maskor, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_NOLOAD, KOF_MUTA
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	if (kof_mutation_score(blk_maskor) >= 90u)
-		KOF_SCAN_INFECT("MaskOr");
+		{ kof_debug("MaskOr#MaskOr", 0); return; }
 }

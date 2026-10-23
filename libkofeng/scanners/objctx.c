@@ -33,7 +33,6 @@
 
 #include "../kofcore/kofentropy.h"   /* kentropy_eighths, kentropy_hist */
 #include "../analyzers/parsers/binaries/pe/pe_sym.h"
-#include "pzero.h"
 #include <phenotype/diag_scan.h>      /* kgenome_diag_code_range, kgenome_diag_code_run */
 #include "objctx_int.h"
 
@@ -92,38 +91,6 @@ static uint32_t c_csum(const struct kof_obj_ctx *ctx, uint64_t off, uint32_t len
 	if (s.n != len)
 		return 0;
 	return kof_crc32(s.p, s.n);
-}
-
-/*
- * A MODULE'S VERDICT, IN THE HOST'S VOCABULARY.
- *
- * The level crosses the module ABI like every other argument here, and it was
- * the one that was stored without being read. There are four values; anything
- * else reaches the result array as a number no host can place, and what a host
- * does with one is not "show it oddly" - kverdict_level_rank answers 0 for an
- * unknown level, the same as for nothing at all, so the finding is counted in
- * no bucket, does not raise the file's verdict, and the file is reported
- * CLEAN with a detection sitting in its result. A stale database, a build that
- * renumbered, or a module that computed a level rather than naming one all
- * arrive here.
- *
- * Clamped to the least specific value rather than dropped, which is exactly
- * what oc_incomplete does with a reason outside its own vocabulary and for the
- * same reason: the module found SOMETHING, and the level is how sure it is,
- * not whether it is there.
- */
-static void c_report(const struct kof_obj_ctx *ctx, uint32_t level,
-		     uint32_t name_id)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-
-	if (level != (uint32_t)KOF_LVL_INFECT &&
-	    level != (uint32_t)KOF_LVL_HEUR &&
-	    level != (uint32_t)KOF_LVL_ACT)
-		level = (uint32_t)KOF_LVL_SUSPECT;
-	sc->mod.rep_level   = level;
-	sc->mod.rep_name_id = name_id;
-	sc->mod.rep_valid   = 1;
 }
 
 /* ---- searching a declared string ------------------------------------------- */
@@ -256,21 +223,6 @@ static int c_find_str_sym(const struct kof_obj_ctx *ctx, uint32_t mask,
 	return 0;
 }
 
-/*
- * A DECLARED STRING WAS FOUND IN THIS OBJECT - see kof_scanner.mod.str_hit.
- *
- * Recorded at the four hooks that answer a marker search rather than at the
- * one that looks the fastest, because a rule reaches them by different names -
- * kof_find_str, _at, _in, _where - and a fact recorded at some of them is a
- * fact that is wrong the first time a rule uses another.
- */
-static int str_found(struct kof_scanner *sc, int r)
-{
-	if (r && sc)
-		sc->mod.str_hit = 1;
-	return r;
-}
-
 static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		      uint32_t range_id)
 {
@@ -336,18 +288,18 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 				sc->eng->rng_uid[m->rng_base + range_id];
 			found = kof_match_memo_get(&sc->match.m, sslot);
 			if (found >= 0)
-				return str_found(sc, found);
+				return found;
 		}
 		found = c_find_str_sym(ctx, mask, bytes, e);
 		if (sslot != KOF_MEMO_NONE)
 			kof_match_memo_put(&sc->match.m, sslot, found);
 		if (found)
-			return str_found(sc, 1);
+			return 1;
 		mask &= ~KOF_SCAN_SYM;
 		if (!mask)
 			return 0;
 		n = kof_scan_resolve_range(ctx, mask, eb);
-		return str_found(sc, kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
+		return (kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
 				.slot = KOF_MEMO_NONE, .ext = eb->v, .next = n,
 				.pat = { bytes, e->len, e->kind, e->flags },
 				.answered = &sc->st.gram_answers }));
@@ -377,13 +329,13 @@ static int c_find_str(const struct kof_obj_ctx *ctx, uint32_t str_id,
 		    sc->eng->packs[m->pack_id].pix &&
 		    kof_multimatch_keyable(e->kind, e->len, bytes)) {
 			sc->st.multi_answers++;
-			return str_found(sc, (kofpix_found_get(&sc->match.pix, uid) &
+			return ((kofpix_found_get(&sc->match.pix, uid) &
 					      sc->eng->mask_bits[mask_uid]) != 0);
 		}
 	}
 
 	n = kof_scan_resolve_range(ctx, mask, eb);
-	return str_found(sc, kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
+	return (kof_match_lookup(&sc->match.m, &(const struct kof_match_req){
 			.slot = slot, .ext = eb->v, .next = n, .pat = { bytes, e->len, e->kind, e->flags },
 			.answered = &sc->st.gram_answers }));
 }
@@ -410,7 +362,7 @@ static int c_find_str_at(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return 0;
-	return str_found(sc, kof_match_at(&sc->match.m, off, bytes, e->len,
+	return (kof_match_at(&sc->match.m, off, bytes, e->len,
 					  e->kind, e->flags));
 }
 
@@ -423,7 +375,7 @@ static int c_find_str_in(const struct kof_obj_ctx *ctx, uint32_t str_id,
 
 	if (!e)
 		return 0;
-	return str_found(sc, kof_match_in(&sc->match.m, off, len, bytes, e->len,
+	return (kof_match_in(&sc->match.m, off, len, bytes, e->len,
 					  e->kind, e->flags));
 }
 
@@ -443,12 +395,8 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
 	if (!e)
 		return KGENOME_BROKEN;
 	{
-		uint64_t at = kof_match_where(&sc->match.m, off, len, bytes, e->len,
-					      e->kind, e->flags);
-
-		/* Answering WHERE is answering WHETHER - see str_found. */
-		str_found(sc, at != KGENOME_BROKEN);
-		return at;
+		return kof_match_where(&sc->match.m, off, len, bytes, e->len,
+				       e->kind, e->flags);
 	}
 }
 
@@ -539,15 +487,14 @@ void oc_incomplete(const struct kof_obj_ctx *ctx, uint32_t reason)
 	if (reason != KOF_BROKEN_UNSUPPORTED && reason != KOF_BROKEN_DAMAGED &&
 	    reason != KOF_BROKEN_ENCRYPTED)
 		reason = KOF_BROKEN_LIMIT;
-	kof_scan_of(ctx)->mod.rep_reason = reason;
 	oc_scan_broken(kof_scan_of(ctx), reason);
 }
 
 /*
  * A note on its way out.
  *
- * Resolved through the same name table a finding uses - a note and a detection are
- * both authored text keyed by the line that wrote them - and dropped entirely when
+ * Resolved through the name table the build wrote beside the blob - a note is
+ * authored text keyed by the line that wrote it - and dropped entirely when
  * nobody is listening, which is the normal case.
  */
 static void c_debug(const struct kof_obj_ctx *ctx, uint32_t name_id, uint64_t value)
@@ -893,13 +840,10 @@ static uint32_t c_data_xref(const struct kof_obj_ctx *ctx, uint64_t va,
  * WOULD ANYTHING LOOK INSIDE A CHILD OF THIS FORMAT - see fmt_wanted in
  * kofmod/kofsig.h for what this is and why it is not a policy.
  *
- * Four yeses before the database is consulted at all, and each is a case where
+ * Three yeses before the database is consulted at all, and each is a case where
  * "no" would be an answer this cannot support:
  *
  *   NO SCANNER OR NO ENGINE - there is nobody to have an opinion.
- *
- *   A RULE ASKED. Evidence on this object beats what the database targets in
- *   general; that is the whole point of the ask.
  *
  *   KOF_FMT_UNKNOWN, which means the producer will not say what the child is.
  *   Nothing can be concluded from "no rule targets unknown" because the child
@@ -917,8 +861,6 @@ static int c_fmt_wanted(const struct kof_obj_ctx *ctx, uint8_t fmt)
 	const struct kof_scanner *sc = kof_scan_of(ctx);
 
 	if (!sc || !sc->eng)
-		return 1;
-	if (sc->cur.raise_carried)
 		return 1;
 	if (fmt == KOF_FMT_UNKNOWN || fmt >= KOF_FMT_COUNT)
 		return 1;
@@ -1076,50 +1018,9 @@ static uint32_t c_mutation_score(const struct kof_obj_ctx *ctx, uint32_t block_i
 	 * module that asked with a raw index would be asking about whatever
 	 * block of whatever other pack happened to sit there.
 	 */
-	{
-		uint32_t b, pct, seen = 0, n_hash = 0, id, i;
-
-		if (!sc || !sc->mod.cur)
-			return 0;
-		b = sc->mod.cur->block_base + block_id;
-		pct = kof_mutation_pct(&sc->mutation, b);
-		if (sc->mod.mutation_asked < 0)
-			sc->mod.mutation_asked = 0;
-
-		/*
-		 * EVERY BLOCK THE RULE ASKS ABOUT IS PART OF ITS VERDICT.
-		 *
-		 * It used to keep only the highest-scoring one, which named a
-		 * "block A and block B" rule after whichever half happened to
-		 * score better and reported that half's percentage as the
-		 * whole rule's. Both are now the set's: the name is the fold of
-		 * the set (see kof_mutation_name_of) and the score is the set's
-		 * own containment, matched hashes over declared hashes, which
-		 * is the same measurement one block's score already is.
-		 *
-		 * ONCE EACH. A module may ask about the same block repeatedly
-		 * and in any order - see the note above - and counting a block
-		 * twice would weight it twice.
-		 */
-		/* The best any one block reached, which is what the verdict
-		 * reports - see kof_scanner.mod.mutation_best. Before the
-		 * already-counted return below, because a block asked about
-		 * twice scores the same twice and this is a maximum. */
-		if (pct > sc->mod.mutation_best)
-			sc->mod.mutation_best = pct;
-		id = kof_mutation_block_id(sc->eng->mutation, b);
-		for (i = 0; i < sc->mod.n_mutation_blk; i++)
-			if (sc->mod.mutation_blk[i] == id)
-				return pct;
-		if (sc->mod.n_mutation_blk < KOF_MUTATION_NAME_MAX) {
-			sc->mod.mutation_blk[sc->mod.n_mutation_blk++] = id;
-			if (kof_mutation_counts(&sc->mutation, b, &seen, &n_hash)) {
-				sc->mod.mutation_hit += seen;
-				sc->mod.mutation_tot += n_hash;
-			}
-		}
-		return pct;
-	}
+	if (!sc || !sc->mod.cur)
+		return 0;
+	return kof_mutation_pct(&sc->mutation, sc->mod.cur->block_base + block_id);
 }
 
 /*
@@ -1135,91 +1036,6 @@ static uint32_t c_mutation_score(const struct kof_obj_ctx *ctx, uint32_t block_i
  * which is the same answer as "none of it was there": a rule cannot tell those
  * apart and must not try.
  */
-
-/* Remember what a similarity measure answered, for the name - see
- * kof_scanner.ovl_asked. The highest of them, because a rule may ask twice
- * and the reader wants the measurement the verdict could have rested on. */
-
-/*
- * The two halves of a described repair - see kof_content.cure_patch.
- *
- * BOUNDS CHECKED HERE and not in the module: a module is a rule, and a rule
- * that could name an offset past the end of the object would be a rule that
- * could corrupt a file the engine was asked to look at. A request outside the
- * object is refused and the cure is told so.
- */
-static int c_cure_patch(const struct kof_obj_ctx *ctx, uint64_t off,
-			const uint8_t *bytes, uint32_t n)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	kof_buf b = oc_mc(ctx)->data;
-
-	if (!sc || !bytes || !n || n > 16u)
-		return 0;
-	if (off > b.n || b.n - off < n)
-		return 0;
-	if (sc->mod.n_cure_fix >= sizeof sc->mod.cure_fix / sizeof sc->mod.cure_fix[0])
-		return 0;
-	sc->mod.cure_fix[sc->mod.n_cure_fix].off = off;
-	sc->mod.cure_fix[sc->mod.n_cure_fix].n = n;
-	memcpy(sc->mod.cure_fix[sc->mod.n_cure_fix].b, bytes, n);
-	sc->mod.n_cure_fix++;
-	return 1;
-}
-
-static int c_cure_truncate(const struct kof_obj_ctx *ctx, uint64_t len)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	kof_buf b = oc_mc(ctx)->data;
-
-	/* Cutting to nothing, or to more than there is, is not a repair. */
-	if (!sc || !len || len >= b.n)
-		return 0;
-	sc->mod.cure_trunc = len;
-	sc->mod.cure_trunc_set = 1;
-	return 1;
-}
-
-/*
- * THE DISINFECT STAGE, REACHED FROM A RULE - see libkofeng/scanners/pzero.h.
- *
- * Thin on purpose. The arithmetic is pzero's and the bounds are this file's,
- * which is the same division cure_patch draws: a rule may name any offset it
- * likes and the host is what decides whether the object has one.
- */
-static uint64_t c_pz_clean_end(const struct kof_obj_ctx *ctx)
-{
-	return kof_pz_clean_end(ctx);
-}
-
-static int c_pz_is_code(const struct kof_obj_ctx *ctx, uint64_t off)
-{
-	return kof_pz_is_code(ctx, off);
-}
-
-static uint64_t c_pz_addr_to_off(const struct kof_obj_ctx *ctx, uint64_t addr)
-{
-	struct kgenome_obj gobj;
-
-	kof_genome_obj(ctx, &gobj);
-	return kgenome_image_addr_to_off(&gobj, addr);
-}
-
-/*
- * THE INPUT IS AN OFFSET AND NOT A POINTER, so the bytes being unmasked are
- * bounded by this object the way every other read a rule makes is. A module
- * hands over its own output buffer, which is its own stack.
- */
-static uint32_t c_pz_unmask(const struct kof_obj_ctx *ctx, uint64_t off,
-			    uint32_t n, uint32_t mask, uint32_t key,
-			    uint8_t *out, uint32_t cap)
-{
-	kof_buf b = oc_mc(ctx)->data;
-
-	if (!out || !n || off > b.n || b.n - off < n)
-		return 0;
-	return kof_pz_unmask(b.p + off, n, mask, key, out, cap);
-}
 
 /*
  * ---- THE CODE READER'S THREE ENTRY POINTS --------------------------------
@@ -1293,17 +1109,6 @@ static void c_infected(const struct kof_obj_ctx *ctx, uint64_t off,
 	sc->mod.n_infect++;
 }
 
-/* See kof_content.cure_offer: the module located the damage and says so. */
-static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
-{
-	struct kof_scanner *sc = kof_scan_of(ctx);
-
-	if (sc) {
-		sc->mod.cure_have = 1;
-		sc->mod.cure_at = at;
-	}
-}
-
 /*
  * WHAT A MEASURE COSTS IS WHAT GATES IT.
  *
@@ -1320,13 +1125,6 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * rule that could tell them apart would start reporting on the scanner's
  * settings rather than on the object.
  */
-/*
- * The overlord LEVEL GATE went with the chain surface: ovl_level_ok and
- * ovl_note had no other caller. The idea is still needed - a scan and a
- * researcher opening one sample must not pay the same price - and comes back
- * with the replacement, which is where the two modes are decided.
- */
-
 /*
  * WHICH ADDRESS MEANS WHICH CAPABILITY IN THIS OBJECT.
  *
@@ -1367,7 +1165,7 @@ static void c_cure_offer(const struct kof_obj_ctx *ctx, uint64_t at)
  * WHICH DIAGNOSES THIS OBJECT CARRIES - read once, on the first ask.
  *
  * The walk over the code regions is the expensive half and it happens
- * here, behind the same demand gate the overlord descriptor and the
+ * here, behind the same demand gate the mutation descriptor and the
  * multi-pattern sweep sit behind: an object whose verdict comes from a
  * rule naming no diagnose does not pay for it.
  *
@@ -1388,10 +1186,9 @@ static const struct kof_content kof_detect_vtable = {
 	 * neighbours care about a format is asking a fair question. */
 	c_fmt_wanted, c_region_shape, c_region_entropy, c_entropy_at,
 	/* The block vector is gone - see the note in kofsig.h. The SLOT
-	 * stays so no other entry moves, exactly as ovl_strings' did. */
+	 * stays so no other entry moves. */
 	c_mutation_score, NULL, NULL /* was c_pth_match */, NULL /* was c_mutation_shape */,
-	c_cure_offer, c_cure_patch, c_cure_truncate,
-	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL /* the repair, retired */,
 	/* supersede - a detector produces nothing to be superseded by. */
 	NULL,
 	/* as_format - nor an image to write a header for. */
@@ -1449,9 +1246,8 @@ static const struct kof_content kof_unpack_vtable = {
 	oc_emu_run, oc_emu_region, oc_emu_take, oc_opened_already, oc_incomplete,
 	oc_unpack_entry, oc_syms, c_data_xref, c_fmt_wanted, c_region_shape,
 	c_region_entropy, c_entropy_at, c_mutation_score,
-	NULL, NULL /* was c_pth_match */, NULL /* was c_mutation_shape */, c_cure_offer, c_cure_patch,
-	c_cure_truncate,
-	c_pz_clean_end, c_pz_is_code, c_pz_addr_to_off, c_pz_unmask,
+	NULL, NULL /* was c_pth_match */, NULL /* was c_mutation_shape */,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL /* the repair, retired */,
 	oc_supersede, oc_as_format, oc_packer_build, oc_emu_reg, oc_emu_read,
 	oc_emu_watch_insn, oc_emu_resume,
 	oc_import, oc_import_bytes, oc_import_at,
@@ -1482,7 +1278,7 @@ static const struct kof_content kof_unpack_vtable = {
 void kof_mod_attach(struct kof_obj_ctx *ctx, struct kof_scanner *sc)
 {
 	ctx->content = &kof_detect_vtable;
-	ctx->report  = c_report;
+	ctx->reserved_0 = NULL;
 	ctx->debug   = c_debug;
 	ctx->priv    = sc;
 }

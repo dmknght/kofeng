@@ -297,14 +297,19 @@ static void levels(void)
 	CK(alloc_exec(chain(5, 0)) == 1 && alloc_status == KGENOME_OK);
 	/* THE DEPTH IS NOT CAPPED (it was 64): a chain of 70 is found, and so is one of
 	 * 600. What ends a chain is the step budget the walk is given (64 steps per
-	 * byte of code, at least 1M), each level paying for a pass over the call
-	 * targets - so a chain of 3000, which needs three thousand passes over three
-	 * thousand targets, is stopped where the budget runs out, and it is said. */
+	 * byte of code, at least 1M). It used to be spent a pass over EVERY call target
+	 * per level, so a chain of 3000 (three thousand passes over three thousand
+	 * targets) ran out of it and was reported OVER_BUDGET with no node: a quadratic
+	 * cost asserted as if it were the limit. A level now asks only the functions
+	 * that met the wrapper just found (diag_wrapper.c, wl_levels), so the chain
+	 * costs what it holds and one of 3000 is found with the scan whole.
+	 * That the step budget still ends a chain, and says so, is held in
+	 * tests/lib/genome/diag_graph_bin.c (t_chain_work: a small allowance, OVER_BUDGET,
+	 * no node; a sufficient one, the node). */
 	CK(alloc_exec(chain(63, 0)) == 1 && alloc_status == KGENOME_OK);
 	CK(alloc_exec(chain(70, 0)) == 1 && alloc_status == KGENOME_OK);
 	CK(alloc_exec(chain(600, 0)) == 1 && alloc_status == KGENOME_OK);
-	(void)alloc_exec(chain(3000, 0));
-	CK(alloc_status == KGENOME_OVER_BUDGET);
+	CK(alloc_exec(chain(3000, 0)) == 1 && alloc_status == KGENOME_OK);
 
 	/* W_LEVELS_MAX_TGT is gone: ONE wrapper of the syscall wrapper, in an object
 	 * with few call targets and in ones with 19000 and 25000 */

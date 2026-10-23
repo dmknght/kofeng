@@ -61,7 +61,6 @@ static void usage(const char *argv0)
 		"  --heur N          0 gather nothing  1 score and descend (default)\n"
 		"                    2 also interpret what no unpacker opened\n"
 		"  --emu MODE        never | auto | only; overrides what --heur chose\n"
-		"  --all-matches     keep scanning an object after the first finding\n"
 		"  --max-depth N     directory depth limit\n"
 		"  --object-depth N  how deep to descend INSIDE a file\n"
 		"  --follow-links    follow symbolic links (off by default)\n"
@@ -77,10 +76,8 @@ static void usage(const char *argv0)
 		"  --max-object N    bytes any one produced object may reach\n"
 		"\n"
 		"  --stats           report what the prefilter earned\n"
-		"  -v                also report objects that came back clean\n"
-		"\n"
-		"An infected file is repaired where a rule knows how; there is no\n"
-		"flag for it and no backup is taken.\n"
+		"  -v                also report objects that came back clean, and the\n"
+		"                    diagnoses a verdict was made of\n"
 		"\n"
 		"exit: 0 nothing found, 1 something found, 2 could not scan\n",
 		argv0, argv0);
@@ -248,7 +245,7 @@ struct cli {
 	uint64_t      unreadable;
 	/* The file-level tallies, computed from the per-file map for the summary and read
 	 * again by the exit code after the map is gone. */
-	uint64_t      inf_f, sus_f, broken_objs;
+	uint64_t      inf_f, broken_objs;
 	struct timespec t0, t1;
 };
 
@@ -295,8 +292,6 @@ static int cli_parse(struct cli *c, int argc, char **argv)
 		}
 		else if (strcmp(argv[i], "--follow-links") == 0)
 			c->opt.follow_symlinks = 1;
-		else if (strcmp(argv[i], "--all-matches") == 0)
-			c->opt.all_matches = 1;
 
 		/*
 		 * One number, because the three settings are a ladder and an
@@ -481,10 +476,10 @@ static int cli_open(struct cli *c)
 
 		kdb_version(c->eng, &dv);
 		printf("database: format %u.%u build %u, %u record(s), "
-		       "%u unpacker(s), %u heur rule(s)\n",
+		       "%u unpacker(s), %u diagnose(s)\n",
 		       (unsigned)dv.major, (unsigned)dv.minor, dv.build,
 		       kdb_records(c->eng), kdb_unpackers(c->eng),
-		       kmatch_rules(c->eng));
+		       kdb_diagnoses(c->eng));
 		/* The matcher's footprint is a design claim - bucket counts are
 		 * derived from the marker count and bounded - so it is printed
 		 * where a reader will see it rather than left to be inferred. */
@@ -866,8 +861,8 @@ static void report_files(struct cli *c)
 	/*
 	 * Under -v, the files that came back clean, at the file level.
 	 *
-	 * The findings above already named every infected, suspected, heuristic or
-	 * broken file where it was found, so only the clean ones are left to
+	 * The verdicts above already named every infected or broken file where it
+	 * was found, so only the clean ones are left to
 	 * mention - and a scanner that says nothing about a file a person asked it
 	 * to look at reads as a scanner that skipped it. One line per file, not per
 	 * object, so a container and the layers it unpacked to are one "OK".
@@ -889,7 +884,7 @@ static void report_files(struct cli *c)
 
 			if (e->host)
 				continue;
-			if (e->level < 0 && !e->broken && e->examined) {
+			if (!e->has_verdict && !e->broken && e->examined) {
 				e->host = 1;
 				ksn_say(&c->r, C_GRN, "OK", e->file);
 			}
@@ -926,7 +921,7 @@ static void report_files(struct cli *c)
 		for (fi = 0; fi < kverdict_filemap_count(c->r.files); fi++) {
 			const struct kverdict_file *e = kverdict_filemap_at(c->r.files, fi);
 
-			if (e->level < 0 && !e->broken && !e->examined)
+			if (!e->has_verdict && !e->broken && !e->examined)
 				ksn_say(&c->r, C_DIM, "No module targets this format",
 				    e->file);
 		}
@@ -952,12 +947,7 @@ static void report_summary(struct cli *c)
 	 * roll-up is what stops that.
 	 */
 	{
-		/* Heuristic files broken down by the WORD each finding carries, so
-		 * the summary can ksn_say "Shellcode" and "Truncated" apart rather than
-		 * calling a well-formed shellcode shape "broken structure". */
-		struct { char kind[48]; uint64_t n; } hk[16];
-		int n_hk = 0, j;
-		uint64_t heur_f = 0, broken_f = 0, clean_f;
+		uint64_t broken_f = 0, clean_f;
 		uint64_t skip_f = 0;
 		uint64_t rf[KOF_BROKEN_COUNT];   /* broken FILES, by their reason */
 		size_t fi;
@@ -967,28 +957,8 @@ static void report_summary(struct cli *c)
 		for (fi = 0; fi < kverdict_filemap_count(c->r.files); fi++) {
 			const struct kverdict_file *e = kverdict_filemap_at(c->r.files, fi);
 
-			if (e->level == KOF_LEVEL_INFECT) {
+			if (e->has_verdict) {
 				c->inf_f++;
-			} else if (e->level == KOF_LEVEL_SUSPECT) {
-				c->sus_f++;
-			} else if (e->level == KOF_LEVEL_HEUR) {
-				const char *kd = e->kind[0] ? e->kind : NULL;
-
-				heur_f++;
-				if (kd) {
-					for (j = 0; j < n_hk; j++)
-						if (!strcmp(hk[j].kind, kd))
-							break;
-					if (j == n_hk &&
-					    n_hk < (int)(sizeof hk / sizeof hk[0])) {
-						snprintf(hk[n_hk].kind,
-							 sizeof hk[n_hk].kind, "%s", kd);
-						hk[n_hk].n = 0;
-						n_hk++;
-					}
-					if (j < n_hk)
-						hk[j].n++;
-				}
 			} else if (e->broken) {
 				broken_f++;
 				if (e->broken < KOF_BROKEN_COUNT)
@@ -1015,8 +985,7 @@ static void report_summary(struct cli *c)
 		 * underflow there would print a clean count in the billions.
 		 */
 		{
-			uint64_t nonclean = c->inf_f + c->sus_f + heur_f + broken_f +
-					    skip_f;
+			uint64_t nonclean = c->inf_f + broken_f + skip_f;
 
 			clean_f = kverdict_filemap_files(c->r.files) > nonclean
 				  ? kverdict_filemap_files(c->r.files) - nonclean : 0;
@@ -1029,55 +998,6 @@ static void report_summary(struct cli *c)
 		printf("infected  %s%llu%s file(s)\n",
 		       c->inf_f ? ksn_col(&c->r, C_RED) : "", (unsigned long long)c->inf_f,
 		       c->inf_f ? ksn_col(&c->r, C_RST) : "");
-		printf("suspected %s%llu%s file(s)\n",
-		       c->sus_f ? ksn_col(&c->r, C_YEL) : "", (unsigned long long)c->sus_f,
-		       c->sus_f ? ksn_col(&c->r, C_RST) : "");
-		/*
-		 * REPAIRED, AND ONLY WHEN SOMETHING WAS.
-		 *
-		 * A scan that cured nothing is almost every scan, and a line
-		 * reading "repaired 0" on all of them is the kind of noise that
-		 * trains a reader to stop looking at this block. When it is not
-		 * zero it is the one line here that says the scanner CHANGED the
-		 * disk, so it appears directly under the verdict counts rather
-		 * than at the end, and in the same green the per-file line used.
-		 *
-		 * It is NOT subtracted from `infected`. A repaired file was
-		 * infected and is still reported as such - the verdict says what
-		 * was found, this says what was done about it.
-		 */
-		if (c->r.repaired)
-			printf("repaired  %s%llu%s file(s)\n",
-			       ksn_col(&c->r, C_GRN), (unsigned long long)c->r.repaired,
-			       ksn_col(&c->r, C_RST));
-		/*
-		 * HEURISTIC, split by KIND. Printed even at zero when the heuristic
-		 * ran, so a reader can tell "found nothing" from "was switched off".
-		 * The old single line said "with broken structure", which is true of
-		 * the scored model - truncated, overlapping, an entry that is not
-		 * executable - and wrong about a rule that recognised a shellcode
-		 * SHAPE in a perfectly well-formed file. Each kind now speaks for
-		 * itself.
-		 */
-		if (!c->opt.heur_off) {
-			printf("heuristic %s%llu%s file(s)\n",
-			       heur_f ? ksn_col(&c->r, C_MAG) : "",
-			       (unsigned long long)heur_f,
-			       heur_f ? ksn_col(&c->r, C_RST) : "");
-		/*
-		 * Only when there are any. A line reading "skipped 0" on every
-		 * scan is noise; the interesting case is the one where it is
-		 * not zero, and then it has to be impossible to miss.
-		 */
-			/* Each kind on its own line, read the same way as the
-			 * totals above it: the count right after the label and
-			 * then "file(s)", not pushed out to a far column, and
-			 * indented so it sits under the heuristic total. */
-			for (j = 0; j < n_hk; j++)
-				printf("  %-8s %s%llu%s file(s)\n", hk[j].kind,
-				       ksn_col(&c->r, C_MAG),
-				       (unsigned long long)hk[j].n, ksn_col(&c->r, C_RST));
-		}
 		/*
 		 * Broken files, split by reason. The reasons are counted per object
 		 * because that is where they happen - one file may hold several - and
@@ -1140,9 +1060,6 @@ static void report_notes(struct cli *c)
 	if (c->st && c->st->verdict_lost)
 		printf("ERROR     %llu file(s) counted without a verdict delivered (engine defect)\n",
 		       (unsigned long long)c->st->verdict_lost);
-	if (c->r.dropped)
-		printf("note      %llu finding(s) over the per-object cap\n",
-		       (unsigned long long)c->r.dropped);
 	if (c->r.stats && c->st)
 		ksn_print_stats(c->st);
 }
@@ -1190,7 +1107,7 @@ static int cli_exit(const struct cli *c)
 	fflush(stdout);
 	KOF_TIME_REPORT();
 
-	if (c->inf_f || c->sus_f)
+	if (c->inf_f)
 		return 1;
 	/* "Could not finish" belongs with "could not look", not with "found
 	 * nothing": a caller that treats an exhausted budget as a clean scan has

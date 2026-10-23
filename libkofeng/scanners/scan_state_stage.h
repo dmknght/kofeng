@@ -1,5 +1,5 @@
 /*
- * scan_state_stage.h - the scanner's state that belongs to one stage or lives for the whole scanner: ledger, cache, match, syms, diag, subject.
+ * scan_state_stage.h - the scanner's state that belongs to one stage or lives for the whole scanner: ledger, cache, match, syms, diag.
  *
  * Part of struct kof_scanner (scan_state.h); include scan.h, not this file.
  */
@@ -397,59 +397,6 @@ struct kof_scan_diag {
 	/* The report for the object being finished, built by kof_scan_diag_report and
 	 * lent to the caller for the length of its callback. */
 	struct kof_diag_report *rep;
-};
-
-/*
- * sc->subject: struct kof_scan_subject
- *
- * THE SUBJECT'S VERDICT SLOT, per subject (a top-level file with its tree) and
- * not per object, and the set of diseases an object has. The slot is reset by
- * scan_tree, the set by sx_obj_begin (its count is in obj).
- *
- * Owner: scan_verdict.c (take, diseases), scan_walk.c (reset per subject),
- * scan_pipeline.c. Files that touch it: scan_verdict.c, scan.c,
- * scan_pipeline.c, scan_walk.c, scan_int.h.
- */
-struct kof_scan_subject {
-	/*
-	 * ---- THE ONE PLACE A FILE'S VERDICT IS KEPT ----------------------
-	 *
-	 * One file, one verdict. The findings array is per OBJECT, and a
-	 * file is many objects: itself, what unpacked out of it, the
-	 * normalised view of that. Those are REPRESENTATIONS of the same
-	 * bytes, not separate things that are infected, and printing one
-	 * line each said `Heur:Infected` twice for one program.
-	 *
-	 * So the name belongs to the file, and the representations share it
-	 * - which is also why the variant is the parent's: a child is the
-	 * same sample decoded, and naming it separately would be naming the
-	 * engine's own steps.
-	 *
-	 * HOW IT IS REPLACED. By rank, kverdict_level_rank: a named
-	 * detection beats a rule's guess, so `Virus:Sality#Body` takes the
-	 * slot a `Heur:Infected` was holding. EQUAL RANK KEEPS THE FIRST -
-	 * whichever matcher the engine happened to reach first is the one
-	 * that answered, and that is a question about call order rather
-	 * than about naming. Under all_matches there is no interrupt, so
-	 * the later one overwrites and the caller gets what it asked for.
-	 *
-	 * `verdict_lvl` of 0 means the slot is empty. Reset per FILE, in
-	 * scan_tree, because that is the scope it belongs to.
-	 */
-	struct kof_finding slot;
-	uint32_t lvl;
-	uint8_t have;
-	/*
-	 * THE DISEASES THE OBJECT'S MODULES FOUND - the ids of the diseases of every
-	 * detector or heuristic that reported on it, once each. Per object, cleared
-	 * in obj_begin; the array is kept and only grows, so an object that matches
-	 * nothing costs nothing and one that matches many is never cut short: a
-	 * disease dropped to keep a table small is evidence deleted.
-	 *
-	 * The diagnoses add theirs when a caller asks - see kof_scan_diseases.
-	 */
-	uint32_t *dis_set;
-	uint32_t cap_dis_set;
 };
 
 #endif

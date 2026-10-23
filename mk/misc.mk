@@ -8,10 +8,14 @@
 # to build/pop unless DIR is given - pass it to `make databases BASEDIR=...`.
 .PHONY: tui-test population
 tui-test: kofviewer
-	python3 tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) $(TUI_ARGS)
+	$(PYTHON) tests/tui/run_all.py --viewer $(abspath $(OUT)/bin/kofviewer$(EXE)) $(TUI_ARGS)
 
 population:
+ifeq ($(KOF_CMD_SHELL),yes)
+	$(error population runs tests/gen_population.sh, a POSIX shell script: run it from an sh, or use a make with one)
+else
 	tests/gen_population.sh $(or $(COUNT),100) $(DIR)
+endif
 
 #
 # EVERYTHING `all` BUILDS, WITH THE SYMBOLS IN.

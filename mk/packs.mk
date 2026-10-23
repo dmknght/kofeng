@@ -9,11 +9,11 @@
 # bases/ is the content tree: everything that compiles to a module and ships in a
 # database. The directories differ in what the module DOES, not merely in name:
 #
-#   bases/signatures/  detections about a FILE. Name a family. Change weekly.
-#   bases/heur/        the heuristic modules.
-#   bases/diagnoses/   what a program DOES - one diagnose per file, over the
-#                      analysis of the object (ksigbuilder packs them apart, as
-#                      a .kdig record, not as a module).
+#   (signatures, heuristic modules and the diagnoses that were written by hand
+#   are not here: they belonged to the verdict model that named an object from one
+#   module's report, and are in docs/disabled/ - see CLAUDE.md. A diagnose is
+#   packed apart from the modules, as a .kdig record, from a `diagnoses/` directory
+#   of a content tree.)
 #   bases/decomp/      the CONTAINER unpackers - gzip, zip, tar, rar, 7z, xz,
 #                      docole, rtf, overlay. A file that carried other files.
 #   bases/unp/         the PACKER unpackers - UPX, Ezuri, midgetpack.

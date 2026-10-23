@@ -5,6 +5,7 @@
 
 
 #include "scan_int.h"
+#include "objctx_int.h"
 #include <phenotype/diag_scan.h>
 #include "objprod.h"
 #include <stdlib.h>
@@ -106,8 +107,14 @@ void kof_prod_publish(struct kof_scanner *sc)
 			continue;
 		if (!p) {
 			p = prod_take(sc);
-			if (!p)
-				return;         /* the view arrives with none */
+			if (!p) {
+				/* The view arrives with none of the parent's analysis, and it is not re-derived
+				 * from the view's bytes (objprod.h): that is evidence withheld, and it is said.
+				 * The parent's result is already built, so this reaches kof_stats.limit_hits
+				 * (norm_defect_engine N7). */
+				oc_scan_limit(sc);
+				return;
+			}
 		} else {
 			p->refs++;
 		}

@@ -1,15 +1,14 @@
 /*
  * api_engine_db.c - the database side of the engine's API: kof_pack_build
  * (dbpacker.h), kof_db_load_tables / kof_db_free_tables (dbloader.h), the
- * diagnose source reader the builder and the editor share (diagsrc.h) and the
- * syndrome source reader (syndsrc.h).
+ * diagnose source reader the builder and the editor share (diagsrc.h).
  *
  * What the loader tests already cover (pack_load, pack_fuzz) is not repeated:
  * those damage a pack and ask the loader to refuse it. These are the contracts
  * of the API around it - what the packer refuses to write, that a table-only load
  * is the same database without the indexes, and the small functions the source
  * readers are built from: the argument splitter, the comment blanker, the error
- * reporter, the condition's name walk.
+ * reporter, the read-names walk.
  *
  * The source readers take TEXT from a file anyone can edit, so they are also
  * given every prefix of a valid source and a bit flipped at every position, from
@@ -24,7 +23,6 @@
 #include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/databases/pack/dbcore.h"
 #include "../../libkofeng/databases/diagsrc.h"
-#include "../../libkofeng/databases/syndsrc.h"
 #include <kofmod/kofsig.h>
 
 static char tmp[300];
@@ -280,28 +278,24 @@ static void names_cb(void *ud, const char *d)
 	a->n++;
 }
 
-static void t_cond_names(void)
+static void t_reads(void)
 {
-	struct kof_dsrc_cond c;
 	struct names_acc a;
+	static const char src[] =
+		"/* kof_diag(IN_COMMENT) is a mention, not a read */\n"
+		"void kof_scan(const struct kof_obj_ctx *ctx)\n{\n"
+		"\tif (kof_diag(DIAG_A) && kof_diag_share(KOF_NUCLEO_READ, DIAG_B, DIAG_C))\n"
+		"\t\tkof_debug(\"x\", 0);\n"
+		"\tif (kof_diag_str_any(DIAG_D, \"name\") || kof_diag_str_all(DIAG_E, \"p\", \"q\"))\n"
+		"\t\treturn;\n}\n";
 
-	memset(&c, 0, sizeof c);
 	memset(&a, 0, sizeof a);
-	kof_dsrc_cond_names(&c, names_cb, &a);
-	CK(a.n == 0, "a condition with no terms names nothing");
-	c.n = 3;
-	c.t[0].kind = KVT_DIAG;
-	snprintf(c.t[0].a, sizeof c.t[0].a, "DIAG_A");
-	c.t[1].kind = KVT_SHARE;
-	snprintf(c.t[1].a, sizeof c.t[1].a, "DIAG_B");
-	snprintf(c.t[1].b, sizeof c.t[1].b, "DIAG_C");
-	c.t[2].kind = KVT_STR_ANY;
-	snprintf(c.t[2].a, sizeof c.t[2].a, "DIAG_D");
-	kof_dsrc_cond_names(&c, names_cb, &a);
-	CK(a.n == 4 && !strcmp(a.seen[0], "DIAG_A") && !strcmp(a.seen[1], "DIAG_B") && !strcmp(a.seen[2], "DIAG_C") &&
-	   !strcmp(a.seen[3], "DIAG_D"), "each term's names in order, a then b for a join (%u)", a.n);
-	kof_dsrc_cond_names(NULL, names_cb, &a);
-	CK(a.n == 4, "a NULL condition names nothing");
+	kof_dsrc_reads("", 0, names_cb, &a);
+	CK(a.n == 0, "a source with no call names nothing");
+	kof_dsrc_reads(src, sizeof src - 1u, names_cb, &a);
+	CK(a.n == 5 && !strcmp(a.seen[0], "DIAG_A") && !strcmp(a.seen[1], "DIAG_B") && !strcmp(a.seen[2], "DIAG_C") &&
+	   !strcmp(a.seen[3], "DIAG_D") && !strcmp(a.seen[4], "DIAG_E"),
+	   "each call's diagnoses in order, a then b for a join, and none from a comment (%u)", a.n);
 }
 
 struct errs {
@@ -418,113 +412,6 @@ static void t_dsrc_hostile(void)
 	CK(he_ok(st), "every flipped bit of a diagnose source: %s", he_how(st));
 }
 
-/* ---- the syndrome source ------------------------------------------------------------------------------ */
-
-static void t_ssrc(void)
-{
-	struct kof_ssrc p;
-	struct errs e;
-	struct kof_dsrc_report r;
-	char out[512], line[128];
-	size_t n;
-	static const char good[] =
-		"/* a fixture */\n"
-		"KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n"
-		"KOF_DECLARE_SYNDROME_HAS(\"flood-network/udp\");\n"
-		"KOF_DECLARE_SYNDROME_HAS(\"c2/beacon\");\n";
-
-	memset(&e, 0, sizeof e);
-	r.error = on_err;
-	r.warn = NULL;
-	r.ud = &e;
-	CK(kof_ssrc_parse(good, sizeof good - 1u, &p, &r) == 0, "a valid syndrome source (%s)", e.msg);
-	CK(p.type_mask == 1u << KOF_MALTYPE_BOTNET && p.n_dis == 2 && !strcmp(p.dis[0], "flood-network/udp") &&
-	   !strcmp(p.dis[1], "c2/beacon"), "type mask and behaviours in order");
-	CK(kof_ssrc_parse("", 0, &p, &r) == 2 && p.type_mask == 0 && p.n_dis == 0, "an empty source lacks a type and a behaviour: two errors");
-	CK(kof_ssrc_parse("// KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n", strlen("// KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n"), &p, NULL) == 2, "a declaration in a comment is a mention");
-	memset(&e, 0, sizeof e);
-	{
-		static const char dup[] = "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"a/b\");\n"
-					  "KOF_DECLARE_SYNDROME_HAS(\"a/b\");\n";
-
-		CK(kof_ssrc_parse(dup, sizeof dup - 1u, &p, &r) == 1 && strstr(e.msg, "already") != NULL && e.last_line == 3,
-		   "a behaviour listed twice is an error on its line (%d errors, '%s' line %d)", e.n, e.msg, e.last_line);
-	}
-	CK(kof_ssrc_parse("KOF_DECLARE_SYNDROME_TYPE(NOT_A_TYPE);\n", strlen("KOF_DECLARE_SYNDROME_TYPE(NOT_A_TYPE);\n"), &p, NULL) >= 1, "an unknown type word");
-	CK(kof_ssrc_parse("KOF_DECLARE_SYNDROME_HAS(unquoted);\n", strlen("KOF_DECLARE_SYNDROME_HAS(unquoted);\n"), &p, NULL) >= 1, "an unquoted behaviour");
-	{
-		char text[4000];
-		unsigned i;
-		size_t at = 0;
-
-		at += (size_t)snprintf(text + at, sizeof text - at, "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n");
-		for (i = 0; i < KOF_SSRC_MAX_DIS + 8u; i++)
-			at += (size_t)snprintf(text + at, sizeof text - at, "KOF_DECLARE_SYNDROME_HAS(\"d%02u/x\");\n", i);
-		memset(&e, 0, sizeof e);
-		CK(kof_ssrc_parse(text, at, &p, &r) == 8 && p.n_dis == KOF_SSRC_MAX_DIS,
-		   "behaviours past the table are errors, one each, none dropped silently (%d errors, %u kept)", e.n, p.n_dis);
-	}
-	{
-		/* A declaration that begins past column 511 of its line is read: the line is no longer copied into a buffer. */
-		char text[1200];
-		size_t at = 0;
-		static const char tail[] = "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"a/b\");\n";
-
-		memset(text, ' ', 600);
-		at = 600;
-		memcpy(text + at, "KOF_DECLARE_SYNDROME_HAS(\"c/d\");\n", 33);
-		at += 33;
-		memcpy(text + at, tail, sizeof tail - 1u);
-		at += sizeof tail - 1u;
-		memset(&e, 0, sizeof e);
-		kof_ssrc_parse(text, at, &p, &r);
-		CK(p.n_dis == 2, "a declaration that starts after 600 blanks on its line is read");
-	}
-	{
-		/* and far past any buffer a reader might have picked: 70000 blanks */
-		size_t pad = 70000, at = pad;
-		static const char decl[] = "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\nKOF_DECLARE_SYNDROME_HAS(\"a/b\");\n";
-		char *text = malloc(pad + sizeof decl);
-
-		if (text) {
-			memset(text, ' ', pad);
-			memcpy(text + at, decl, sizeof decl - 1u);
-			at += sizeof decl - 1u;
-			memset(&e, 0, sizeof e);
-			CK(kof_ssrc_parse(text, at, &p, &r) == 0 && p.n_dis == 1 && p.type_mask != 0,
-			   "a declaration after 70000 blanks is read, with no error");
-			free(text);
-		}
-	}
-
-	CK(kof_ssrc_print_type(KOF_MALTYPE_BOTNET, line, sizeof line) > 0 &&
-	   strcmp(line, "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);") == 0, "print type");
-	CK(kof_ssrc_print_type(KOF_MALTYPE_COUNT, line, sizeof line) == 0 && kof_ssrc_print_type(0xffffffffu, line, sizeof line) == 0,
-	   "a value past the types does not print");
-	CK(kof_ssrc_print_dis("flood-network/udp", line, sizeof line) > 0 &&
-	   strcmp(line, "KOF_DECLARE_SYNDROME_HAS(\"flood-network/udp\");") == 0, "print behaviour");
-	CK(kof_ssrc_print_dis("not valid!", line, sizeof line) == 0 && kof_ssrc_print_dis("", line, sizeof line) == 0, "a name the disease check refuses does not print");
-	n = kof_ssrc_print_dis("flood-network/udp", line, 10);
-	CK(n > 10 && line[9] == 0, "a too-small buffer is cut, terminated, and the full length returned");
-
-	kof_ssrc_parse(good, sizeof good - 1u, &p, NULL);
-	n = kof_ssrc_source(&p, "why this\nis here", out, sizeof out);
-	CK(n > 0 && n < sizeof out && strstr(out, "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);") && strstr(out, "c2/beacon"),
-	   "source writes the declarations");
-	CK(strstr(out, "why this") != NULL && strstr(out, "* is here") != NULL, "and the reason as a comment, one star per line");
-	{
-		char two[512];
-		struct kof_ssrc q;
-
-		CK(kof_ssrc_parse(out, n, &q, NULL) == 0 && q.type_mask == p.type_mask && q.n_dis == p.n_dis, "what source wrote reads back the same");
-		n = kof_ssrc_source(&p, "end */ here", two, sizeof two);
-		CK(n > 0 && kof_ssrc_parse(two, n, &q, NULL) == 0, "a reason that contains a comment close cannot end its own comment early");
-	}
-	CK(kof_ssrc_source(&p, NULL, out, 20) > 20, "a too-small buffer reports the length it needed");
-	memset(&p, 0, sizeof p);
-	CK(kof_ssrc_source(&p, "x", out, sizeof out) == 0, "no type and no behaviour: nothing to write");
-}
-
 int main(void)
 {
 	snprintf(tmp, sizeof tmp, "build/test/api_engine_db_%d", (int)getpid());
@@ -536,10 +423,9 @@ int main(void)
 	t_tables();
 	t_arg();
 	t_blank();
-	t_cond_names();
+	t_reads();
 	t_say_err();
 	t_dsrc_hostile();
-	t_ssrc();
 	he_rmtree(tmp);
 	printf("api_engine_db: %u checks, %u failed\n", he_checks, he_fails);
 	return he_fails != 0;

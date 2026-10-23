@@ -97,9 +97,9 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		s->v->packed   = (res->heur_depth || res->from_packer) ? 1u : 0u;
 		if (bytes && len)
 			s->v->entropy8 = kentropy_eighths(bytes, len);
-		if (res->n)
+		if (res->has_verdict)
 			snprintf(s->v->finding, sizeof s->v->finding, "%s",
-				 res->v[0].name);
+				 res->verdict.name);
 	} else {
 		s->v->children++;
 		/* A CHILD IS WHAT PROVES THE PARENT WAS PACKED, and the parent's
@@ -108,15 +108,15 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		if (res->from_packer)
 			s->v->packed = 1;
 		/*
-		 * A FINDING ON A CHILD IS THE FINDING, when the parent had
+		 * A VERDICT ON A CHILD IS THE VERDICT, when the parent had
 		 * none. That is the normal shape of a packed sample: the stub
 		 * matches nothing and the payload matches a family, and a
 		 * report that showed only the parent's verdict would say
 		 * "nothing known" about a recognised trojan.
 		 */
-		if (!s->v->finding[0] && res->n)
+		if (!s->v->finding[0] && res->has_verdict)
 			snprintf(s->v->finding, sizeof s->v->finding, "%s",
-				 res->v[0].name);
+				 res->verdict.name);
 	}
 	return 0;
 }

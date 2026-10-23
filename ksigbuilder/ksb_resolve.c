@@ -1,13 +1,12 @@
 /*
  * ksb_resolve.c - The one-per-module declarations (format, arch, subtype,
- *    size, step, heuristic) and what they resolve to.
+ *    size, step) and what they resolve to.
  */
 
 #include "ksb.h"
 
 #include <ctype.h>
 #include <kofmod/elf.h>      /* the ELF region names a range may be built from */
-#include <kofmod/heur.h>     /* the phases and want-bits a rule may declare */
 #include <analyzers/parsers/scripts/script_parse.h>
 #include <kofmod/pe.h>       /* and the PE ones */
 #include <kofmod/amsi.h>   /* an event's two regions */
@@ -453,68 +452,6 @@ static void resolve_analyze_step(struct ksb_ctx *ksb)
 				      "_RECOVER (NORMZ is the host's own)");
 }
 
-static void resolve_heur(struct ksb_ctx *ksb)
-{
-	const struct simple_decl *ph = &ksb->decl.simple[SD_HEUR_PHASE];
-	const struct simple_decl *lv = &ksb->decl.simple[SD_HEUR_LEVEL];
-	const struct simple_decl *wt = &ksb->decl.simple[SD_HEUR_WANT];
-
-	if (ph->count > 1) {
-		ksb_err(ksb, ph->line, "more than one KOF_HEUR_PHASE; a rule runs at "
-				       "one point");
-	} else if (ph->count) {
-		if (names_ident(ph->arg, "KOF_HEUR_VERDICT"))
-			ksb->decl.heur_phase = KOF_HEUR_VERDICT;
-		else if (names_ident(ph->arg, "KOF_HEUR_EXAMINE"))
-			ksb->decl.heur_phase = KOF_HEUR_EXAMINE;
-		else
-			ksb_err(ksb, ph->line, "KOF_HEUR_PHASE names no known phase; use "
-					       "KOF_HEUR_EXAMINE or KOF_HEUR_VERDICT");
-	}
-
-	if (lv->count > 1) {
-		ksb_err(ksb, lv->line, "more than one KOF_HEUR_LEVEL; a rule has one "
-				       "level");
-	} else if (lv->count) {
-		uint64_t v = 0;
-
-		if (!decl_uint(lv->arg, &v) || v < 1u || v > 2u)
-			ksb_err(ksb, lv->line, "KOF_HEUR_LEVEL is not a level; use 1 or "
-					       "2 - level 0 gathers nothing, so no rule "
-					       "can opt into it");
-		else
-			ksb->decl.heur_level = (int)v;
-	}
-
-	if (wt->count > 1) {
-		ksb_err(ksb, wt->line, "more than one KOF_HEUR_WANT; use one "
-				       "declaration with '|'");
-	} else if (wt->count) {
-		/*
-		 * Independent tests and not a chain, because the declaration
-		 * takes a MASK - the error above says so - and an else-if
-		 * chain took the first name and silently dropped the rest.
-		 */
-		uint32_t before = (uint32_t)ksb->decl.heur_want;
-
-		if (names_ident(wt->arg, "KOF_ENG_USE_EMU"))
-			ksb->decl.heur_want |= KOF_ENG_USE_EMU;
-		if (names_ident(wt->arg, "KOF_ENG_OPEN_CARRIED"))
-			ksb->decl.heur_want |= KOF_ENG_OPEN_CARRIED;
-		if (names_ident(wt->arg, "KOF_ENG_KEEP_ON_OPEN"))
-			ksb->decl.heur_want |= KOF_ENG_KEEP_ON_OPEN;
-		if (names_ident(wt->arg, "KOF_ENG_CONCLUDE"))
-			ksb->decl.heur_want |= KOF_ENG_CONCLUDE;
-		if (names_ident(wt->arg, "KOF_ENG_USE_DIAGNOSE") ||
-		    names_ident(wt->arg, "KOF_ENG_USE_PATHOGEN"))
-			ksb->decl.heur_want |= KOF_ENG_USE_DIAGNOSE;
-
-		if ((uint32_t)ksb->decl.heur_want == before)
-			ksb_err(ksb, wt->line, "KOF_HEUR_WANT names nothing the engine "
-					       "offers");
-	}
-}
-
 /* The quoted text of a string declaration, without its quotes. Empty when the
  * declaration is absent, which is what an optional one looks like. */
 static void decl_text(const struct simple_decl *d, char *out, size_t cap)
@@ -533,16 +470,12 @@ static void decl_text(const struct simple_decl *d, char *out, size_t cap)
 
 void ksb_resolve_decls(struct ksb_ctx *ksb)
 {
-	decl_text(&ksb->decl.simple[SD_HEUR_NAME], ksb->decl.heur_name, sizeof ksb->decl.heur_name);
-	decl_text(&ksb->decl.simple[SD_HEUR_PREDICT], ksb->decl.heur_predict,
-		  sizeof ksb->decl.heur_predict);
 	decl_text(&ksb->decl.simple[SD_CONTENT], ksb->decl.content, sizeof ksb->decl.content);
 	resolve_format(ksb);
 	resolve_arch(ksb);
 	resolve_subtype(ksb);
 	resolve_size_min(ksb);
 	resolve_analyze_step(ksb);
-	resolve_heur(ksb);
 }
 
 /*
@@ -557,11 +490,6 @@ void ksb_decl_init(struct ksb_ctx *ksb)
 		{ "KOF_TARGET_SUBTYPE", NULL, 0, 0, { 0 } },
 		{ "KOF_TARGET_SIZE_MIN",NULL, 0, 0, { 0 } },
 		{ "KOF_ANALYZE_STEP",    NULL, 0, 0, { 0 } },
-		{ "KOF_HEUR_PHASE",     NULL, 0, 0, { 0 } },
-		{ "KOF_HEUR_LEVEL",     NULL, 0, 0, { 0 } },
-		{ "KOF_HEUR_WANT",      NULL, 0, 0, { 0 } },
-		{ "KOF_HEUR_NAME",      NULL, 0, 0, { 0 } },
-		{ "KOF_HEUR_PREDICT",   NULL, 0, 0, { 0 } },
 		{ "KOF_TARGET_CONTENT", NULL, 0, 0, { 0 } }
 	};
 

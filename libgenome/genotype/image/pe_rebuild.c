@@ -580,14 +580,21 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 	 * IAT belongs to the program and the table is somewhere the module
 	 * reserved for it.
 	 *
+	 * The slot's start is compared with the end of the table FIRST: it is a caller-supplied
+	 * 64-bit value, and `iat_rva + step` of one near 2^64 wraps to a small number that
+	 * passes the other test. Once it is below the end of the table (which fits the image)
+	 * the sum cannot wrap. The same value is checked against the image below as
+	 * `iat_rva <= img_n - step`, never as a sum: a slot at 2^64 - 4 was written at img - 4
+	 * (norm_defect_image N1).
+	 *
 	 * Checked before the memset, so a refusal leaves the image untouched -
 	 * which is what the caller relies on to hand the child over without
 	 * imports instead of with half a table. imports_fuzz holds it to that.
 	 */
 	for (i = 0; i < n; i++)
 		if (imp[i].iat_rva &&
-		    imp[i].iat_rva + step > base &&
-		    imp[i].iat_rva < base + str + strn)
+		    imp[i].iat_rva < base + str + strn &&
+		    imp[i].iat_rva + step > base)
 			return 0;
 	memset(img + base, 0, (size_t)(str + strn));
 
@@ -668,7 +675,7 @@ static uint64_t pi_walk(uint8_t *img, uint64_t img_n, uint64_t base,
 		 * matched byte for byte, and the one that did not was this
 		 * table.
 		 */
-		if (imp[i].iat_rva && imp[i].iat_rva + step <= img_n) {
+		if (imp[i].iat_rva && imp[i].iat_rva <= img_n - step) {
 			if (is64)
 				kof_st_le64(img + imp[i].iat_rva, ent);
 			else

@@ -23,8 +23,8 @@
  * and a verdict line - so the field refuses what the build would refuse, as it
  * is typed, rather than letting a draft be finished and then rejected.
  */
-static int field_key(struct view *v, char *buf, size_t cap, int k,
-		     int (*accept)(int))
+int field_key(struct view *v, char *buf, size_t cap, int k,
+	      int (*accept)(int))
 {
 	size_t n;
 
@@ -1014,9 +1014,7 @@ int handle_chooser_key(struct view *v, int k)
 			buf = v->ed.dr.cnd[(v->edit - 103) % MAX_GROUP].expr;
 			cap = sizeof v->ed.dr.cnd[0].expr;
 		} else {
-			buf = v->ed.dr.cnd[(v->edit - 4) % MAX_GROUP].variant;
-			cap = sizeof v->ed.dr.cnd[0].variant;
-			accept = kof_name_char;
+			return -1;      /* no other box is open here */
 		}
 		return field_key(v, buf, cap, k, accept);
 		}

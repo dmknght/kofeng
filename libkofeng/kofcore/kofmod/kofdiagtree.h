@@ -101,6 +101,13 @@
  */
 #define KOF_DIAG_USES_EMU (1u << 2)
 #define KOF_DIAG_ANALYSIS_APIHASH (1u << 3)
+/*
+ * TEXT  a script's calls, by the names its language's table has, and the values that flow between them (nesting and
+ *       assignment). The text is read by its lexer, so a name in a comment or a literal is not a call. Served by a script
+ *       in a language the lib lexes AND has a table for (php); the gate is derived like SYMBOL's, from the capabilities the
+ *       diagnose names, which a script "imports" by calling them.
+ */
+#define KOF_DIAG_ANALYSIS_TEXT    (1u << 4)
 
 /* The role an argument plays at a diagnose node (KOF_DIAG_ROLE_*) and how far a
  * link was established (KOF_DIAG_LINK_*): defined by libgenome with the diagnose
@@ -483,14 +490,6 @@ struct kof_diag {
  * joined to another - see the note on kof_diag_node.bits.
  */
 #define KOF_DIAG_NAME(id)
-/*
- * KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET) and KOF_DECLARE_SYNDROME_HAS("cnc/recv-syscall") -
- * a syndrome source, one verified sample: the types it was and the behaviours
- * that fired on it. Read by ksigbuilder into syndromes.kdig. See
- * databases/syndsrc.h.
- */
-#define KOF_DECLARE_SYNDROME_TYPE(t)
-#define KOF_DECLARE_SYNDROME_HAS(s)
 #define KOF_DIAG_ANALYSIS(mask)
 /*
  * KOF_DIAG_USE_EMU() - run the emulator for this diagnose. Written, it is
@@ -682,7 +681,7 @@ struct kof_diag {
  * max_nodes: max(4096, code / 8), at most 65534 - the 16-bit node index). It was
  * a constant block of 4096 records, and a graph past it was refused WHOLE. What
  * keeps a 40 MB binary from paying for this is not being asked about at all, see
- * KOF_ENG_USE_DIAGNOSE.
+ * the demand gate (oc_diag_demand).
  */
 
 #define KOF_GR_HDRLEN   8u

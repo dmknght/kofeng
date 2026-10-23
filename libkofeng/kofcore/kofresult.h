@@ -1,6 +1,6 @@
 /*
- * kofresult.h - what a scan answers with: the level words, a finding, a repair, the
- * diagnose report, kof_result, the verdictor's input and the statistics. *
+ * kofresult.h - what a scan answers with: the verdict (a finding), the diagnose report,
+ * kof_result, the verdictor's input and the statistics. *
  * A part of <koftypes.h>, which includes it: a host still includes koftypes.h (or
  * kofeng.h) and nothing else. Split from it by purpose; nothing was changed.
  */
@@ -13,61 +13,7 @@
 #include "kofobjname.h"
 #include <kofmod/infected.h>
 
-
-/* How strongly a finding is asserted. Mirrors enum kof_level on the module side; a
- * host must not have to include the module ABI to read a result. */
-#define KOF_LEVEL_SUSPECT 0
-#define KOF_LEVEL_INFECT  1
-/*
- * Decided by structure rather than by a signature, and counted apart from both.
- *
- * Its own level and not a kind of SUSPECT, because the two answer differently to
- * an operator: a SUSPECT came from a module that names a family and chose the
- * weaker verdict, while this came from traces that name nothing. Folding them
- * together meant a heuristic could not be measured, tuned or switched off in the
- * report - which is most of what anyone wants to do with one.
- */
-#define KOF_LEVEL_HEUR    2
-
-/*
- * WHICH VERDICT IS STRONGER.
- *
- * The numbers above do not say. SUSPECT is 0, INFECT is 1 and HEUR is 2, so
- * comparing the constants gets the order exactly wrong, and every host that
- * needed to pick the worst of several findings worked the order out for itself
- * - the scanner in a switch returning 3/2/1, the viewer in a chain of ifs
- * beside a comment restating the same rule. Two spellings of one fact, neither
- * of them here, where the constants are.
- *
- * Higher is stronger. The values are ranks and nothing else: do not store them,
- * do not send them anywhere, and do not assume the gaps mean anything.
- */
-static inline int kverdict_level_rank(uint32_t level)
-{
-	if (level == KOF_LEVEL_INFECT)
-		return 3;
-	if (level == KOF_LEVEL_SUSPECT)
-		return 2;
-	return level == KOF_LEVEL_HEUR ? 1 : 0;
-}
-
-
-/*
- * Findings are accumulated, not overwritten: two families can match one object, and
- * keeping only the last silently drops one. Over the cap they are counted, because a
- * truncated list that says nothing about being truncated reads as a complete list.
- */
-#define KOF_MAX_FINDINGS 16
-
-/*
- * THE LAST SLOT IS THE VERDICT'S. Evidence (a detector's, a rule's, a
- * heuristic's finding) stops one short of the array, so the syndrome verdict,
- * which is added after every detector has run, always has a place: with the
- * array full of evidence the verdict was the one dropped, and an object with
- * sixteen findings had no verdict at all (tests/unit/verdict_branches.c).
- * kof_result.dropped still counts the evidence that did not fit.
- */
-#define KOF_MAX_EVIDENCE (KOF_MAX_FINDINGS - 1)
+struct kof_range;
 
 /*
  * WHERE ONE PART OF A NAME SITS INSIDE IT.
@@ -81,143 +27,79 @@ struct kof_name_span {
 	uint16_t at, n;
 };
 
-struct kof_finding {
-	uint32_t level;                  /* KOF_LEVEL_* */
+/* The ids a verdict lists of the diagnoses and of the diseases (kof_finding.diag,
+ * .disease). Over it the list is cut and the total says so. */
+#define KOF_VERDICT_TRACE 16u
 
+/*
+ * THE VERDICT OF AN OBJECT - the only finding there is. It is made from the diseases the
+ * object has (kof_verdict_make) and says which diagnoses matched; nothing else in a
+ * result is named like it.
+ */
+struct kof_finding {
 	/*
-	 * <target>/<maltype>:<family>#<variant>, composed by the engine - for
-	 * example "ELF-x64/Botnet:Mirai#Gen", and for a heuristic
-	 * "ELF-x64/Heur:Meterp#g7q2x?Shellcode". The target is not authored, so
-	 * a module cannot claim a format it was not run against.
+	 * <verdict word>#<target>/<Type>:<behaviour>[!<engine>][?<other types>], composed
+	 * by the verdictor from the diseases - see kof_verdict_make. The target is
+	 * not authored, so a module cannot claim a format it was not run against.
 	 */
 	char     name[224];
 
 	/*
 	 * THE SAME NAME, ALREADY TAKEN APART.
 	 *
-	 * Because the alternative was every reader taking it apart again. The
-	 * scanner walked the string for the '!' and then for the '#' to group
-	 * heuristics by shape; the examiner cut at the '/' to compare the rest;
-	 * each knew the punctuation the engine had just finished writing. A
-	 * separator that changed - and one has, '-' to '#' - broke them
-	 * silently, one at a time.
-	 *
-	 * The engine knows all five parts before it joins them, so it says so.
-	 * `shape` is the word after the '!': a heuristic's shape, or the word
-	 * Mutation on a similarity verdict. It is
-	 * what the rule actually recognised, where `family` is only what it
-	 * guesses the object is.
+	 * Because the alternative was every reader taking it apart again, each
+	 * knowing the punctuation the engine had just finished writing. The engine
+	 * knows every part before it joins them, so it says where each landed.
+	 * `family` is the behaviour path of the lead disease, `shape` the word after
+	 * the '!' (the engine that answered), `reason` what follows the '?'.
 	 */
-	struct kof_name_span target, maltype, family, variant, shape;
-	/* The optional tail of the formula: why, for a finding that has a
-	 * why to give. Empty for the ones that do not. */
+	struct kof_name_span target, maltype, family, shape;
 	struct kof_name_span reason;
 
 	/*
-	 * WHAT A SIMILARITY VERDICT MEASURED, AS A NUMBER.
-	 *
-	 * The engine works this out and then writes it into the name -
-	 * "#20a2ecee!Mutation?74" - and for a while that text was the only place
-	 * it existed. A host that wanted the number had to parse the name it
-	 * had just been handed, which is the thing the spans above exist to
-	 * stop; and a panel that wanted to show the engine's number instead
-	 * measured the object again for itself.
-	 *
-	 * So the number comes first and the name is crafted from it. `sim_pct`
-	 * is 0..100 and zero for every finding that is not a similarity one -
-	 * which is also what a similarity verdict that measured nothing would
-	 * be, and that verdict is never reported, so the two cannot be
-	 * confused. `sim_of` is the fold that names the SET it was measured
-	 * over, the same value the variant carries, so a host can tell which
-	 * blocks the number is about.
-	 */
-	uint8_t  sim_pct;
-	uint8_t  sim_kind;          /* enum kof_sim_kind */
-	/*
-	 * NON-ZERO WHEN `name` HAD TO BE CUT. The name is a fixed array and the parts
-	 * of one are bounded loosely (a family is up to 191 characters, a variant as
-	 * many); the part that gives is the FAMILY, so the variant, the shape and the
-	 * reason - what tell two rules of one family apart - are kept whole and
-	 * `family.n` is shorter than the family the rule declared. The flag says so.
-	 * Lives in the two bytes the layout already padded between sim_kind and
-	 * sim_of: no field moved and the struct did not grow.
+	 * NON-ZERO WHEN `name` HAD TO BE CUT. The name is a fixed array; the part that
+	 * gives is the FAMILY, so the engine word and the reason are kept whole and
+	 * `family.n` is shorter than the behaviour the disease declared. The flag says so.
 	 */
 	uint8_t  name_cut;
-	uint32_t sim_of;
-
-	/*
-	 * IS THIS THE SUBJECT'S VERDICT, or one of the things that led to it.
-	 *
-	 * A subject - a file, or one member of an archive - gets ONE verdict,
-	 * and the engine keeps it in one place; see kof_scanner.verdict. The
-	 * findings array still holds everything that fired, because an
-	 * examiner wants to see the working, and this bit says which of them
-	 * the scan is actually reporting.
-	 *
-	 * WHY IT IS A BIT AND NOT A FILTER. Dropping the others would make
-	 * the array lie about what matched, and the note above
-	 * KOF_MAX_FINDINGS is there because that has been tried: two families
-	 * can match one object and keeping only one silently loses the other.
-	 * Nothing is lost here - a reader that wants the verdict reads this,
-	 * a reader that wants the evidence reads the array.
-	 *
-	 * Set when the finding took the slot. A later, stronger finding takes
-	 * it in turn, and the earlier object has already been reported by
-	 * then - which is what streaming output means and not a defect in the
-	 * slot.
-	 */
-	uint8_t  is_verdict;
 
 	/*
 	 * ---- WHAT THE ENGINE STORES, AS VALUES ---------------------------
 	 *
-	 * The name above is a STRING, and a string is a decoded thing: it
-	 * has a word order, separators and spellings, and every one of those
-	 * is a presentation decision that does not belong in a result. These
-	 * are the facts behind it, each an enum, and kof_verdict_name is the
-	 * one place that turns them into the line a person reads.
-	 *
-	 * `name` is still here and still filled - by that same function, so
-	 * there is one spelling and not two. A reader that wants the line
-	 * takes it; a reader that wants to GROUP or FILTER takes these and
-	 * does not parse anything.
-	 *
-	 * `family`, `variant` and `reason` stay as spans into `name`. They
-	 * are not enums and cannot be: a family is a word a researcher
-	 * chose, and the anomaly model's and mutation's are computed per
-	 * object. What is enumerable is enumerated.
+	 * The name above is a STRING, and a string is a decoded thing: it has a word
+	 * order, separators and spellings. These are the facts behind it, each an enum,
+	 * and kof_verdict_name is the one place that turns them into the line a person
+	 * reads. A reader that wants to GROUP or FILTER takes these and parses nothing.
 	 */
 	uint8_t  verdict;        /* enum kof_verdict_id - how sure      */
-	uint8_t  engine;         /* enum kof_engine_id  - what looked   */
+	uint8_t  engine;         /* enum kof_engine_id  - what answered */
 	uint8_t  type;           /* enum kof_maltype    - what it is    */
 	uint8_t  fmt;            /* enum kof_format     - of the object */
 	uint8_t  arch;           /* enum kgenome_arch                       */
+	uint8_t  type_known;     /* 0 when a disease the database does not name led it */
+
 	/*
-	 * The type is not always one of enum kof_maltype: a rule that
-	 * recognised a shape has not established a class, and the anomaly
-	 * model never does. This says so, rather than a sentinel inside the
-	 * type - KOF_MALTYPE_VIRUS is 0 and "nothing declared" must not read
-	 * as "virus".
+	 * ---- WHAT THE VERDICT IS MADE OF -------------------------------------
+	 *
+	 * A verdict is the diseases the object has and the diagnoses that matched and
+	 * declare them; the name is composed from the diseases (kof_verdict_make), and
+	 * these are the way back from the name to its causes:
+	 *
+	 *   diag[]     ids of the matched diagnoses that declared a disease, in
+	 *              database order; kdb_diagnose_name turns one into its name and
+	 *              kdb_diagnose_disease into the disease it declares
+	 *   disease[]  ids of every disease of the verdict, each once;
+	 *              kdb_disease_name / kdb_disease_type
+	 *
+	 * BOUNDED, AND SAYING SO. `n_*` is how many ids are stored (at most
+	 * KOF_VERDICT_TRACE), `*_total` how many there were: total > n is a verdict
+	 * that was composed from every disease and lists only the first n of them.
 	 */
-	uint8_t  type_known;
+	uint32_t n_diag, diag_total;
+	uint32_t diag[KOF_VERDICT_TRACE];
+	uint32_t n_disease, disease_total;
+	uint32_t disease[KOF_VERDICT_TRACE];
 };
-
-/* Which measure a finding's sim_pct came from. */
-enum kof_sim_kind {
-	KOF_SIM_NONE = 0,
-	KOF_SIM_MUTATION              /* the declared blocks - kof_mutation_score */
-};
-
-/* Non-zero when this finding is a heuristic's - the maltype word is "Heur",
- * which is the engine's and never a module's family. */
-static inline int kverdict_is_heur(const struct kof_finding *f)
-{
-	return f->maltype.n == 4 &&
-	       f->name[f->maltype.at + 0] == 'H' &&
-	       f->name[f->maltype.at + 1] == 'e' &&
-	       f->name[f->maltype.at + 2] == 'u' &&
-	       f->name[f->maltype.at + 3] == 'r';
-}
 
 /*
  * "This object did not come from an entry" - the root of a walk, a payload an
@@ -231,54 +113,18 @@ static inline int kverdict_is_heur(const struct kof_finding *f)
 #define KOF_ENTRY_NONE 0xffffffffu
 
 /*
- * A REPAIR A MODULE DESCRIBED, and did not perform.
- *
- * A rule that recognised an infected file may also know how to undo the
- * infection - see KOF_SCAN_CURABLE in kofmod/kofsig.h. What it produces is
- * this: a list of byte ranges to overwrite and, optionally, a length to cut
- * the object to. Nothing has been written; the caller decides whether to.
- *
- * SEPARATE FROM THE FINDINGS because it is not one. The verdict stands
- * whether or not anybody repairs anything, and a caller that ignores this
- * field gets exactly the scanner it had before.
- *
- * `n_fix` of zero means nothing was offered, which is the ordinary case.
- */
-#define KOF_MAX_FIX 64u
-
-struct kof_repair {
-	struct {
-		uint64_t off;
-		uint32_t n;
-		uint8_t  b[16];
-	}        fix[KOF_MAX_FIX];
-	uint32_t n_fix;
-	/* Where the object should end, or 0 for "leave the length alone". */
-	uint64_t truncate;
-};
-
-/*
  * ---- WHERE THE INFECTION IS ----------------------------------------------
  *
- * A MODULE THAT CAN CURE ALREADY KNOWS THIS, which is the whole argument for
- * carrying it. Nothing can describe a repair without having located the
- * damage first - the Sality module computes where the virus body begins and
- * how many of the host's bytes it overwrote in order to put them back - and
- * until now that knowledge went into `kof_repair` as a list of patches and
- * was otherwise thrown away.
+ * A module that has located damage can say where, and a reader that is looking
+ * at the file wants it: BODY is the malware's own bytes, DAMAGE is the host's own
+ * bytes that were overwritten. Marking them the same colour would tell a reader to
+ * delete the program's entry point.
  *
- * A patch is not the same statement. "Write these 382 bytes at offset 0x1d9d"
- * says how to undo the damage; it does not say that the 65 KB at the end of
- * the file are the virus. A reader wants both, and a reader that only repairs
- * wants the first while a reader that is looking at the file wants the second.
+ * A FACT ABOUT A PLACE, not a verdict: the object is named by its diseases
+ * (kof_result.verdict) whether or not a module marks anything here.
  *
- * TWO KINDS, BECAUSE THEY CALL FOR OPPOSITE ACTIONS. BODY is the malware's own
- * bytes - what a removal would cut out. DAMAGE is the host's own bytes that
- * were overwritten - what a repair puts back. Marking them the same colour
- * would tell a reader to delete the program's entry point.
- *
- * DECLARED, NEVER INFERRED. The engine does not guess a range from a finding;
- * a module says so or nothing is said.
+ * DECLARED, NEVER INFERRED. The engine does not guess a range; a module says so or
+ * nothing is said.
  */
 #define KOF_MAX_INFECTED 16u
 
@@ -333,38 +179,7 @@ struct kof_diag_report {
 };
 
 
-/*
- * WHAT THE DIAGNOSES THAT MATCHED MAKE, by type - delivered in kof_result.syndrome
- * to a caller that asked for kof_scan_option.report_diag, when at least one
- * diagnose that names a disease matched and the database carries syndromes. Types are bits of
- * 1u << kof_maltype. See databases/pack/kofsyndrome.h for what each means and
- * for the name it renders to.
- */
-struct kof_synd_result {
-	uint32_t guaranteed;    /* types the evidence proves */
-	uint32_t possible;      /* types still compatible and not proven */
-	uint32_t n_compat;      /* verified samples the evidence is no more than */
-	uint32_t n_query;       /* diseases asked about */
-	uint32_t n_unknown;     /* ...that no verified sample carries */
-	/*
-	 * NON-ZERO WHEN THE ANSWER IS NOT WHOLE: at least one diagnose that was
-	 * going to be asked could not say, because a limit was reached on the
-	 * analysis it reads (a node store full, a run stopped while still going) or
-	 * the symbol block was cut short. A 'no' from such a diagnose is not
-	 * evidence, so the set above may be missing diseases. Appended: the fields
-	 * above keep their layout.
-	 */
-	uint32_t incomplete;
-};
-
 struct kof_result {
-	struct kof_finding v[KOF_MAX_FINDINGS];
-	uint32_t n;
-	uint32_t dropped;
-
-	/* What a module offered to put back - see struct kof_repair. */
-	struct kof_repair repair;
-
 	/* And where it found the infection - see struct kof_infected. */
 	struct kof_infected infected[KOF_MAX_INFECTED];
 	uint32_t n_infected;
@@ -374,8 +189,8 @@ struct kof_result {
 	 * array that used to be was removed rather than left empty.
 	 *
 	 * A diagnose is a STEP, not an answer: it says a shape is present,
-	 * which is true of a packer and a stager alike, and the rule that
-	 * reads it is where the verdict lives. Publishing the step made the
+	 * which is true of a packer and a stager alike, and the disease it
+	 * declares is where the verdict comes from. Publishing the step made the
 	 * engine narrate its own routine - every scan that happened to run
 	 * the analysis printed lines a reader could do nothing with - and it
 	 * gave a second, weaker way to ask what a file does, beside the
@@ -585,6 +400,20 @@ struct kof_result {
 	uint32_t n_syms;
 
 	/*
+	 * THE UNITS OF THE PARENT'S CUT THAT A VIEW'S DECODE REWROTE, in this object's own
+	 * offsets, sorted and apart. A view is cut again by what its bytes hold, and a decoded
+	 * payload is not what the parent's strings were, so the cut would come out different -
+	 * these are the units it leaves whole. A host that cuts a view into blocks passes them
+	 * to the cut (kof_scan_cut.fixed) for the reason every field here exists: the units it
+	 * shows are the ones the scanner credits.
+	 *
+	 * BORROWED FOR THE CALL, like syms. NULL and 0 for everything but a view whose decode
+	 * rewrote something.
+	 */
+	const struct kof_range *fixed;
+	uint32_t n_fixed;
+
+	/*
 	 * WHAT EACH DIAGNOSE MADE OF THIS OBJECT, when the caller asked - see
 	 * kof_scan_option.report_diag. NULL and 0 otherwise.
 	 *
@@ -602,10 +431,6 @@ struct kof_result {
 	 */
 	const struct kof_diag_report *diag;
 	uint32_t n_diag;
-	/* What the matched diagnoses make, with the same opt-in and the same
-	 * cost as `diag`. `has_syndrome` is 1 when `syndrome` was computed. */
-	struct kof_synd_result syndrome;
-	uint8_t has_syndrome;
 
 	/*
 	 * REGIONS THE PRODUCER DECLARED, when nothing could parse them out.
@@ -664,6 +489,25 @@ struct kof_result {
 	 * and always zero on one whose cut was its ONLY analysis (that one is LIMIT).
 	 */
 	uint8_t  analysis_moot;
+
+	/*
+	 * THE OBJECT'S VERDICT, when it has diseases: `has_verdict` is 1 and
+	 * `verdict` is the finding composed from them (kof_verdict_make), carrying the
+	 * ids of the diagnoses that matched and of the diseases they and the modules
+	 * declared - see the last fields of struct kof_finding. Detection is at least
+	 * one disease; the name is a function of the diseases' type and behaviour and
+	 * nothing else.
+	 */
+	struct kof_finding verdict;
+	uint8_t has_verdict;
+	/*
+	 * NON-ZERO WHEN THE SET OF DISEASES THE VERDICT WAS READ FROM MAY BE MISSING ONE:
+	 * an allocation failed, or a diagnose that was going to be asked could not say
+	 * because a limit was reached on the analysis it reads. A 'no' from such a diagnose
+	 * is not evidence. With no verdict and nothing else found the object is marked
+	 * broken; this says so for an object that has findings or a verdict already.
+	 */
+	uint8_t verdict_incomplete;
 };
 
 /*
@@ -708,12 +552,26 @@ enum kof_broken {
 };
 
 /*
- * WHAT THE VERDICTOR IS GIVEN to name an object from its diseases: the
- * inference's result and the two facts about the object a name carries. The
- * scanner fills it; the verdictor reads nothing else of the scan.
+ * WHAT THE VERDICTOR IS GIVEN to name an object: the diseases it has, resolved to
+ * their type and behaviour, the ids of the diagnoses that matched, and the two
+ * facts about the object a name carries. The scanner fills it; the verdictor reads
+ * nothing else of the scan.
+ *
+ * `name` is the behaviour as the database spells it ("flood-network/raw-header"),
+ * NULL when the database does not name the id; `type` is a kof_maltype, or 0xff
+ * when it is not known.
  */
+struct kof_verdict_disease {
+	uint32_t    id;
+	uint8_t     type;
+	const char *name;
+};
+
 struct kof_verdict_in {
-	const struct kof_synd_result *synd;
+	const struct kof_verdict_disease *dis;
+	uint32_t n_dis;
+	const uint32_t *diag;   /* ids of the matched diagnoses that declare a disease */
+	uint32_t n_diag;
 	uint8_t fmt;            /* enum kof_format of the object */
 	uint8_t arch;           /* enum kgenome_arch */
 };
@@ -805,12 +663,12 @@ struct kof_stats {
 	uint64_t decode_scratch;
 
 	/*
-	 * How many times a heuristic rule's ask for the emulator was honoured.
+	 * How many times an ask for the emulator was honoured.
 	 *
-	 * Reported because it is a cost a FILE's contents can choose - a rule
-	 * fires on what it finds, and interpreting is the most expensive thing
+	 * Reported because it is a cost a FILE's contents can choose - a diagnose
+	 * asks on what it finds, and interpreting is the most expensive thing
 	 * this engine does. There is a ceiling on it; this is how a reader sees
-	 * how close a scan came to it. See KOF_HEUR_WANT in kofmod/heur.h.
+	 * how close a scan came to it. See KOF_ENG_USE_EMU in kofmod/kofmodemu.h.
 	 */
 	uint64_t heur_emu;
 
@@ -887,10 +745,10 @@ struct kof_stats {
 	uint64_t emu_budget_denied;
 	/* APPENDED: objects whose own analysis was cut by its budget while a child they
 	 * opened into carries the evidence - not broken, counted here and in
-	 * kof_result.analysis_moot (scanners/scan_verdict.c, sx_syndrome_verdict). */
+	 * kof_result.analysis_moot (scanners/scan_verdict.c, sx_verdict_make). */
 	uint64_t analysis_moot;
 	/* APPENDED: the engine's check, per top-level file, of a host that registered
-	 * on_event_detected: `verdicts_counted` files had a finding (a roll-up counts
+	 * on_event_detected: `verdicts_counted` files had a verdict (a roll-up counts
 	 * them), `verdicts_delivered` of those were given a verdict event, and
 	 * `verdict_lost` is the difference. Zero is the only correct value; a nonzero
 	 * one is a defect of the engine and kofscanner prints it as an error. */

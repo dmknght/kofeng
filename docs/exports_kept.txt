@@ -4,7 +4,7 @@ Every entry below was checked by reading, not assumed: a name with no reference 
 definition and declaration, over .c .h .py .sh Makefile and the docs, with kofexamine/ counted
 as a user.
 
-1. TESTS-ONLY EXPORTS (73). Public functions whose only callers are tests. They are the
+1. TESTS-ONLY EXPORTS (79). Public functions whose only callers are tests. They are the
    surface a test drives (a boundary of the lib or the engine unit), and a function the test
    reaches by a name cannot be made static. Listed by defining file:
 
@@ -15,25 +15,29 @@ as a user.
   libgenome/genotype/arm64/arm64.c: kgenome_arm64_decode_tree, kgenome_arm64_name
   libgenome/genotype/image/funcs.c: kgenome_pe_funcs_build
   libgenome/genotype/x86/x86.c: kgenome_x86_nexp, kgenome_x86_wgpr
+  libgenome/phenotype/codemap.c: kgenome_codemap_at
+  libgenome/phenotype/diag_lineage_chain.c: kgenome_diag_lineage_stats_of, kgenome_diag_oblig_at, kgenome_diag_oblig_count (what the selection did and which inputs stay unresolved: read by tests/lib/genome/lineage_chain.c)
   libgenome/phenotype/diag_scan.c: kgenome_diag_scan_full, kgenome_diag_scan_ran
+  libgenome/phenotype/diag_text_lang.c: kgenome_diag_text_target (the table of names a language is read against: driven by tests/lib/genome/diag_text_langs.c)
   libgenome/phenotype/diag_str.c: kgenome_diag_str_at, kgenome_diag_str_count
   libgenome/phenotype/diag_wrapper_trace.c: kgenome_diag_walk_held_count
   libgenome/phenotype/emu_api.c: kgenome_emu_set_icache, kgenome_emu_stop_name
   libgenome/phenotype/emu_sys.c: kgenome_emu_unknown_syscalls
+  libgenome/textual/textual_api.c: kgenome_textual_lex, kgenome_textual_kind_name (the lexer is called by the form, which the engine calls; the two names here are what tests drive directly)
+  libgenome/textual/textual_value.c: kgenome_textual_value (the form reads the same hooks; a tool asking what a literal holds calls it)
   libkofeng/analyzers/diseases/kofdisease.c: kof_disease_decl_same
-  libkofeng/analyzers/parsers/scripts/script_fold.c: kof_script_fold
-  libkofeng/analyzers/normalize/executables.c: kof_exe_norm, kof_exe_norm_map, kof_exe_norm_src_of, kof_exe_unb64, kof_exe_unhex
+  libkofeng/analyzers/parsers/kofformat.c: kof_region_mask_of
+  libkofeng/analyzers/normalize/executables.c: kof_exe_norm, kof_exe_norm_map, kof_exe_norm_src_of, kof_exe_unb64, kof_exe_unhex, kof_exe_unwide
+  libkofeng/analyzers/normalize/executables_esc.c: kof_exe_unesc
   libkofeng/databases/dbpacker.c: kof_pack_build_opt
-  libkofeng/databases/diagsrc.c: kof_dsrc_cap_at, kof_dsrc_cap_of, kof_dsrc_cond_same, kof_dsrc_patch, kof_dsrc_print, kof_dsrc_same, kof_dsrc_verdict_check, kof_dsrc_verdict_new
+  libkofeng/databases/diagsrc.c: kof_dsrc_cap_at, kof_dsrc_cap_of, kof_dsrc_patch, kof_dsrc_print, kof_dsrc_same
   libkofeng/databases/pack/dbaccess.c: kof_db_disease, kof_db_disease_at, kof_db_disease_count
-  libkofeng/databases/pack/kofsyndrome.c: kof_synd_count, kof_synd_get, kof_synd_name
-  libkofeng/databases/syndsrc.c: kof_ssrc_print_dis, kof_ssrc_print_type, kof_ssrc_source
   libkofeng/detectors/linkage/kofdiag.c: kof_diag_match
-  libkofeng/detectors/mutations/kofmutation.c: kof_mutation_block_hashes, kof_mutation_block_copy, kof_mutation_probe, kof_mutation_set_info
+  libkofeng/detectors/mutations/kofmutation.c: kof_mutation_block_hashes, kof_mutation_block_copy, kof_mutation_block_id, kof_mutation_probe, kof_mutation_set_info
   libkofeng/detectors/pattern/kofmatch.c: kof_hex_walk
   libkofeng/detectors/pattern/kofpix.c: kofpix_region_n
   libkofeng/kofcore/kofhash.c: khash_sha256_final, khash_sha256_hex, khash_sha256_init, khash_sha256_update
-  libkofeng/kofeng.c: kdb_diag_collisions, kdb_diag_full, kdb_diagnoses
+  libkofeng/kofeng.c: kdb_diag_collisions, kdb_diag_full
   libkofeng/scanners/objctx_diag.c: kof_scan_diag_status
   libkofeng/scanners/scan.c: kof_prod_again, kof_prod_name, kof_scan_prod_repeats (the counters tests/unit/prod_once.c reads)
   libkoforbit/antarc/afan.c: kofa_fan_mode_name, kofa_fan_watch_count
@@ -113,3 +117,27 @@ as a user.
    The measurement switches of the prototype (opts.off, KGENOME_FNP_OPT_LEGACY_EXCLUDE) and the
    first-verdict retirement policies (KGENOME_FNP_RETIRE_TAG, _TAG_STOP, _STOP_FIRST) are not part of
    a default and are removed or kept opt-in before integration (fnprint.h says so).
+
+6. NAMES THAT STAY BECAUSE A POSITION, A LAYOUT OR AN OLD PACK CARRIES THEM, and that nothing acts on:
+     reserved_0 .. reserved_9 (struct kof_content, kofmod/kofcontent.h): vtable positions of three
+        measures that were taken out (0-2) and of the cure and image-address slots that went with the
+        old verdict (3-9: cure_offer, cure_patch, cure_truncate, pz_clean_end, pz_is_code,
+        pz_addr_to_off, pz_unmask). NULL by design; the order of the vtable is the module ABI.
+     reserved_0 (struct kof_obj_ctx, kofmod/kofctx.h): the position of the module's report slot.
+     reserved_heur_phase, reserved_heur_want, reserved_heur_level, reserved_heur_predict,
+        reserved_cure, reserved_disease, reserved_disease_type (struct kof_pack_mod,
+        databases/pack/dbcore.h): fields of a pack record that carried the old verdict's level, a
+        heuristic rule's stage and the module's own disease. Written as zero, read by nothing; the
+        record layout is the pack format and does not move.
+     KOF_PACK_RETIRED_HEUR (databases/pack/dbcore.h): the kind value 2 of a heuristic module. A
+        pack that holds one is refused by the validator and says so; the value is kept so that it
+        is never given a second meaning.
+     reserved_level (struct koffridge_verdict, libkoforbit/fridge/koffridge.h): the position of the
+        finding level in the cache file; the file layout and its FILE_VERSION do not move.
+     "syndromes.kdig" (databases/dbloader_packs.c, kof_db_refuse_retired): the one name of a removed
+        pack kind that survives, because a database directory built before it was removed may still
+        hold the file. The loader refuses it with a stderr line and counts it in diag_packs_refused
+        (kdb_diag_packs_refused): it is never taken for an absent file.
+     "kof_cure", "kof_heur" (ksigbuilder/ksb_image.c): the two entry names of a module that the
+        build refuses by name. An image that still defines one is not built, with a line saying
+        the entry is retired; the name is what is refused.

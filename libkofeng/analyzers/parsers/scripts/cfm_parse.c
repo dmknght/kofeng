@@ -21,34 +21,12 @@ static int cfm_is_tag(kof_buf f, uint64_t at, uint64_t end)
 	return kof_is_alpha(c);
 }
 
-/*
- * THE END OF A TAG, past any quoted attribute.
- *
- * An attribute may hold a ">" - "arguments=\"/c dir > out.txt\"" is the shape a
- * shell in a page has - and a walk that stopped at the first one would cut the
- * tag in half and leave the rest of the command in the markup.
- */
+/* The end of a tag, past any quoted attribute (kof_txt_tag_gt): the offset after its ">", or `end`. */
 static uint64_t cfm_tag_end(kof_buf f, uint64_t at, uint64_t end)
 {
-	uint64_t i = at;
-	uint8_t q = 0;
+	uint64_t gt = kof_txt_tag_gt(f, at, end);
 
-	for (; i < end; i++) {
-		uint8_t c = f.p[i];
-
-		if (q) {
-			if (c == q)
-				q = 0;
-			continue;
-		}
-		if (c == '"' || c == '\'') {
-			q = c;
-			continue;
-		}
-		if (c == '>')
-			return i + 1u;
-	}
-	return end;
+	return gt < end ? gt + 1u : end;
 }
 
 /* "<!--- ... --->", which is markup - see the header. Answers where it ends. */

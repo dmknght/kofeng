@@ -220,7 +220,7 @@ int kgenome_emu_unp_build_teb_pe(struct kgenome_emu *e, unsigned bits, uint64_t 
 		 * Windows only lists it after LoadLibrary: a resolver walks the
 		 * list, and the environment has no loader to add to it later.
 		 */
-		static const unsigned load_order[KGENOME_EMU_WIN_MOD_COUNT] = {
+		static const unsigned load_order[KGENOME_EMU_WIN_MOD_RESIDENT] = {
 			KGENOME_EMU_WIN_MOD_NTDLL, KGENOME_EMU_WIN_MOD_K32,
 			KGENOME_EMU_WIN_MOD_KBASE,
 			KGENOME_EMU_WIN_MOD_USER32, KGENOME_EMU_WIN_MOD_ADVAPI32,
@@ -234,7 +234,7 @@ int kgenome_emu_unp_build_teb_pe(struct kgenome_emu *e, unsigned bits, uint64_t 
 		unsigned fulln = bits == 32u ? 0x24u : 0x48u;
 		unsigned basen = bits == 32u ? 0x2cu : 0x58u;
 		unsigned nptr  = bits == 32u ? 4u : 8u;   /* Buffer within it */
-		uint64_t ent[KGENOME_EMU_WIN_MOD_COUNT + 1u];
+		uint64_t ent[KGENOME_EMU_WIN_MOD_RESIDENT + 1u];
 		unsigned n_ent = 0, m, ni = LDR_NAMES_OFF;
 
 		/* The image itself, with no name: this file does not know what
@@ -279,7 +279,7 @@ int kgenome_emu_unp_build_teb_pe(struct kgenome_emu *e, unsigned bits, uint64_t 
 			ni += 2u * (ilen + 1u);
 		}
 
-		for (m = 0; m < KGENOME_EMU_WIN_MOD_COUNT; m++) {
+		for (m = 0; m < KGENOME_EMU_WIN_MOD_RESIDENT; m++) {
 			unsigned mi = load_order[m];
 			uint64_t mb = kgenome_emu_win_mod_base(mi, bits);
 			const char *nm = kgenome_emu_win_mod_name(mi);

@@ -1,0 +1,207 @@
+The text pipeline: which stage calls which, and where the order is decided
+==========================================================================
+
+A script is read by ONE chain of stages. Each stage has ONE API in the lib (libgenome/textual and the evaluator in libgenome/phenotype); the ORDER
+of the stages is decided in one place, the engine's routine kof_scan_script_forms (libkofeng/scanners/objctx_script.c), and the engine owns what
+the lib must not: the algorithms (kuncoat), the budget, the memory ceiling and the child object that comes out.
+
+  stage       API (lib)                                       reads                    what it gives
+  ----------  ----------------------------------------------  -----------------------  ---------------------------------------------------------
+  lex         kgenome_textual_lex       (textual.h)           the bytes                spans that partition the text: markup, tag, code, string,
+                                                                                       comment (open or closed)
+  islands     kgenome_textual_islands   (textual.h)           lex                      where the code of a page is: tag to closing tag
+  value       kgenome_textual_value     (textual.h)           one literal's span       the bytes the literal holds (escapes read as the language
+                                                                                       reads them), or "no value"
+  fn          kgenome_textual_fn_find / _fn_run               arguments as bytes       the answer of one string function (str_replace, chr ...)
+  constants   kgenome_diag_scan_text with on_const            lex, value, fn           for every right side that is computed: its range and the
+              (phenotype/diag_scan.h)                                                  value it comes to
+  heads       the same scan, on_head                          constants                a call whose head is a variable with ONE producer holding a
+                                                                                       plain name (php): the variable's range and the name
+  quote       kgenome_textual_subst_can / _subst_cap          a value                  can the language write it as ONE literal, and how long
+  subst       kgenome_textual_subst     (textual.h)           text + ranges + values   the text with each value written where it was computed (a
+                                                                                       literal in the language's own spelling, or - `bare` - a name);
+                                                                                       kgenome_textual_subst_order puts ranges from two sources in order
+  form        kgenome_textual_form      (textual.h)           lex, value, fn           the text as one canonical form: comments, indent and spacing
+                                                                                       gone, spelled-out bytes written as themselves, a literal
+                                                                                       under a decoder decoded (decode hook), a call on literals
+                                                                                       written as its value (apply hook), joins of literals as one
+
+Hooks the lib calls and the engine answers: kgenome_textual_decode_fn (the decoder chain over a literal: objctx_script_dec.c, which runs kuncoat's
+inflate and the one table of string functions, script_apply.c) and kgenome_textual_apply_fn (a function of bytes: kof_script_apply). The lib never
+includes the engine and never reaches kuncoat.
+
+The order (objctx_script.c, kof_scan_script_forms; the decode and the fold are the SAME call for php and for every other language):
+
+  1. script_pass_open       an object that is a script, a language the lib lexes (kof_script_textual_lang), not already a view
+  2. constants + heads + subst   deep only (heuristic level 2): oc_script_consts (objctx_script_consts.c) runs the evaluator over the whole object, collects
+                            (range, value) within the allowance oc_script_dec_room gives a script's computed text, and writes them with
+                            kgenome_textual_subst. Asked for every language the evaluator serves AND whose row has a quote
+                            (oc_script_consts_serves): php js py perl ruby lua tcl vbs asp aspx jsp cfm psh. sh and batch write no literal. The heads
+                            (php: `$l('', $c)` with `$l` assigned once to 'create_function' - however it was built: str_replace, chr, strrev, a join - is written
+                            `create_function('', $c)`, a bare name) are collected by the same call, put in order with the constants, and written by the same subst.
+  3. form                   oc_script_form (objctx_script_dec.c) = kgenome_textual_form over the text of step 2, with the decode hook (layers of decoded
+                            text are formed in turn, depth 32) and the apply hook
+  4. byte decode            kof_exe_decode_ex over the formed view (percent, base64 and hex spans a script spells its strings in), then the squeeze of what it vacated
+  5. one child              declared KOF_ENT_NORMALIZED with the object's language; nothing is emitted when the result differs from the object by less than 16 bytes
+                            and decoded nothing
+
+  A bound that fires is said, never silent: the evaluator's nesting bound (EV_NEST) reaches the engine as kgenome_diag_scan_eval_cut -> oc_scan_limit; the
+  decode allowance and the buffer ceiling set limit as before.
+
+Where each stage is written once (and what was written twice and is gone)
+-------------------------------------------------------------------------
+  lex       the lexers of libgenome/textual. The engine's own readers of the same question - php_close / php_skip_str / php_skip_heredoc, svr_element and the
+            "<%" walk, kof_lex_is_code_at - are replaced by kgenome_textual_islands and kof_script_is_code_at (script_route.c), which lex.
+            NOT replaced, and why: markup_parse.c (html <script> elements: no lib language reads html) and cfm_parse.c (a cf TAG is an island: the lib delivers it
+            as TAG, code, TAG with no island of its own, and kof_cfm_find_tag asks where a tag ends past a quoted attribute, which the lib's cfm
+            reader (kgenome_textual_cfm_closer) is private to) - 4 cfm files in the corpora.
+  value     kgenome_textual_value, one row per language (the `value` hook, built on kgenome_textual_esc_value and the shared readers).
+  fn        kgenome_textual_fn_run: the form's call stage and the evaluator both call it, so substr('abc', -1) cannot differ.
+  constants kgenome_diag_scan_text / diag_text_eval.c. script_fold.c (a second evaluator, php-shaped, reading perl, powershell and tcl with a str_replace they do
+            not have) is deleted.
+  quote     the row's `quote` (data, textual_lang.h), written by ONE function (kgenome_textual_quote_write, textual_subst.c): the form's call stage and
+            subst both call it.
+
+What is walked once, and what is still walked twice
+---------------------------------------------------
+  The symbol block's names, the constants stage and the diagnose stage used to run kgenome_diag_scan_text over the object each: the graph does not depend on the callbacks (tests/lib/genome/diag_text_scan_same.c),
+  so the first stage to ask makes ONE scan (objctx_textscan.c) - telling the names (on_node = kgenome_diag_text_names_node) and, at heuristic level 2 for an object the constants stage will take,
+  collecting the constants (on_const, on_head) - and keeps it in sc->obj.text. The symbol block is built from its names (oc_syms_build), the constants stage reads its constants (oc_text_consts)
+  and the diagnose stage takes its graph (oc_text_take) when it reads the very same text. Measured (callgrind, heuristic level 2, 71 php / 299 js / 297 sh scripts): php 2.14 G -> 1.47 G,
+  js 1.51 G -> 1.05 G, sh 1.05 G -> 0.78 G Ir. A view of a script is its own text: its names and its graph share one scan, and it has no constants.
+  Still walked separately: the form, which lexes the text the constants produced (a different text; sharing that walk would mean applying subst to the token stream), and a script whose scan could
+  not be made (memory refused), which gets its names, constants and graph from scans of their own as before. A lex is 1.4-3.3 ns/byte, the evaluator walk 6-19 ns/byte on top.
+
+Differences between the old constants path (script_fold.c, php excluded - it was never reached for php) and this one, found on real files
+-------------------------------------------------------------------------------------------------------------------------------------
+  - the old folder handed back ONE value, the longest, as the file; this writes every computed right side where it was computed and the file stays
+  - first definition of a name wins -> the evaluator keeps no control flow: a variable is its LAST assignment (php); for the typed languages it is followed only
+    when it is a top-level name assigned exactly once (nothing else is a value that does not depend on the order the program runs in)
+  - chr() is read; strrev(), base64_decode and the other decoders are the decode hook's and stay as written
+  - a name defined later in the file is read (php)
+  - escapes: \X4b, a dropped backslash of an unknown escape and a bare \x are php's ("\q" is two bytes) and not the folder's generic reading
+  - a chain of dependent variables is followed 8 deep (EV_DEPTH); the folder's table followed 3000
+  - a literal whose TEXT is past 1 MiB is not read (the folder read 300k escapes = 1.2 MB)
+  - "+" joins two strings and nothing else; `1 + 2`, `"4" + 5`, `5 + "4"` are not constants (a sum or a join by the language); a bytes literal (python b"x") is
+    not written back as a str; a name inside a function (a parameter is no assignment) is not followed
+
+Language classification of the lexers (strings, comments, escapes, heredoc, regex, interpolation)
+--------------------------------------------------------------------------------------------------
+  A  pure data a generic scanner can read       none of the fifteen is only data: every one has at least one position-dependent rule
+  B  data + a small named hook                  lua (long bracket, \z, numerals), vbscript (statement start for Rem, date, [name], encoded block), php (heredoc,
+                                                brace interpolation, ?> ends a line comment, __halt_compiler), cfm (tags, #expr#), c# bodies in asp/aspx
+  C  its own loop                               sh, python (f-string machine), perl, ruby, tcl, bat, powershell, javascript (regex vs divide, template literals
+                                                that nest), java in jsp (the source is translated by \uXXXX before it is lexed), the page host
+  The generic scanner (one loop, a row of rules, named hooks) was built and lua migrated to it: formhash identical over 357 files and the lua tests pass, and it costs
+  more than it saves - lua_lex.c 200 -> 175 lines but textual_scan.c is 73 lines plus its private header, of lua's 175 lines 71 are hooks (the first line, long
+  brackets, numerals, "\z" and the CR LF pairs, the unclosed-string rule) and the loop they leave is 38 lines, and the lex goes from 1.42 to 2.16 ns/byte
+  (a hook call for every byte). Stopped at lua; not in the tree: generic_scanner_experiment.patch.
+
+Rows added with this change (data in libgenome/textual/<lang>/<lang>_fn.c, the shapes in textual_private.h)
+-----------------------------------------------------------------------------------------------------------
+  vbs   chr (0..127), chrw (0..65535), lcase, ucase (ASCII subject), replace (3 arguments), mid (from 1, no negative number, ASCII subject)
+  js    String.fromCharCode (UTF-16 unit, many arguments), String.fromCodePoint
+  py    chr (code point 0..0x10FFFF, utf-8)
+  lua   string.char (0..255, many arguments)
+  perl  chr (0..255), lcfirst, ucfirst
+  A name with a "." in it is a function spelt with its receiver and the form's call stage reads it whole; a "." in front of a name is member access in js, python, lua
+  and vbscript (`member_dot`): `obj.chr(65)` is not the builtin. kgenome_textual_chr says what each language's chr is; python and perl were asked about every number.
+  What was NOT added in that change - methods, slices, operators, casts, vbscript's Left/Right/Trim/StrReverse and perl's lc/uc - is the next section's.
+
+Methods, operators, suffixes, casts and lists (the second change)
+-----------------------------------------------------------------
+  ONE TABLE, ONE EVALUATOR, ONE SET OF ALGORITHMS. php's str_replace('a', 'b', $s), python's s.replace('a', 'b') and powershell's $s -replace 'a', 'b' are one operation on
+  three strings, so they are one row each in the language's table with the SAME op. A row now has a SHAPE (textual.h, enum kgenome_textual_shape): CALL (name(args), what
+  it always was), METHOD (".replace": the receiver is argument 0), OP ("-replace", "x", "*": between its operands; `prec` says whether it binds looser or tighter than the
+  language's join), SUFFIX ("[::-1]") and CAST ("[char]", the unary "-join"). Reading a spelling is phenotype/diag_text_eval_ops.c's and nothing else is: it collects the
+  arguments by where the language writes them (a bracket's, a comma list's, the right side of an operator) and runs the row through kgenome_textual_fn_run and the
+  engine's hook (kof_script_apply), as php's rows are run. Every string ALGORITHM is a libuncoat op (libuncoat/decoders/strfn.c, transform.h): REPLACE (with FIRST and
+  ICASE), TRANSLATE, SLICE, CASE, TRIM (with the language's own set), REVERSE, REPEAT, and SPLIT and JOIN, which work on a LIST in the one-buffer form of kofcore/kofstrlist.h.
+  The evaluator keeps only which values are lists. What a language does that the op does not - an empty search that inserts between every character, "$" in a javascript
+  replacement, a regular expression's metacharacters in powershell's -replace, ruby's backslashes, a lua pattern's magic bytes, a locale's case, UTF-16 units,
+  a start or length past the end that is an exception - is data in the row (struct kgenome_textual_fn: flags, bad[], set, list), applied in ONE place
+  (kgenome_textual_fn_run: args_ok and cut_numbers); a call that breaks one is not evaluated and stays as written.
+
+  Where the form and the evaluator read a row: the form's call stage reads CALL rows whose `form` is ALWAYS or PRINTABLE (a call on literals written as its value);
+  METHOD, OP, SUFFIX and CAST rows and the CALL rows marked EVAL (a banner's `string.rep("-", 40)`, perl's two-letter lc and uc, anything that answers a list or two
+  values) are the evaluator's alone. The evaluator is asked for the right side of every assignment, and for every string literal a method or a suffix follows
+  (ev_floating_cands: `f("a-b".replace("-", ""))` is a value where it stands, as php's str_replace is rewritten wherever it stands); the answers are written back by
+  kgenome_textual_subst, as for php.
+
+  Rows (data in libgenome/textual/<lang>/<lang>_fn.c; the spellings and the rule behind each flag are in the file's header, with [Unverified] where no interpreter was
+  at hand - only python 3 and perl are on the machine, and those were run over every case a row accepts):
+    py    .replace .lower .upper .strip .lstrip .rstrip .split .join  [::-1]  *            (python 3: tests/unit/script_methods.c, 19,178 cases)
+    perl  lc uc join x (and the lcfirst, ucfirst, chr of before)                            (perl 5.44: the same file)
+    js    .replace .replaceAll .split .join .substring .slice .substr .toLowerCase .toUpperCase .trim .trimStart .trimEnd .repeat
+    ruby  .gsub .sub .reverse .upcase .downcase .tr .join .split  *                        (written with no brackets where ruby does: NOPAREN)
+    psh   .Replace .Split .Substring .ToLower .ToUpper .ToLowerInvariant .ToUpperInvariant .Trim .TrimStart .TrimEnd  -replace -ireplace -creplace -split -isplit -csplit
+          -join (binary and unary)  [char]  [string]::Join
+    lua   string.rep string.reverse string.lower string.upper string.sub string.gsub
+    vbs   Left Right Trim LTrim RTrim StrReverse String (and chr chrw lcase ucase replace mid of before); "&" joins literals (the lexer test that pinned it the other way, and
+          four form cases of script_fn_rows.c, were changed on purpose)
+    php   explode implode join (a list is `array(...)` or `[...]`)
+  NOT done, with the reason: perl's reverse (its answer depends on the context it is called in); python's bytes.fromhex(..).decode() (a value has no bytes type); a
+  regular expression in any language (no regex anywhere: the owner's rule); the asp page row (its island is vbscript or jscript and the row cannot tell which).
+  sh, batch and tcl are the next section's.
+  A list is no string constant: a list left at the end of an expression, or an operator on one that is not a join, makes the expression not constant. A powershell [char] is no
+  string either ("a" + [char]66 is a string, [char]65 + [char]66 is the number 131), and a lua gsub (two values) is read only where one is taken.
+
+Command languages: sh, batch and tcl (the third change)
+-------------------------------------------------------
+  The same operations on constants, through the SAME path: rows -> evaluator -> kgenome_textual_fn_run -> the engine's hook -> libuncoat. What these languages lacked was a
+  READER: a shell word is not an expression, `set` is a command, and batch's `%v:a=b%` is text macro expansion before the line is parsed. The reader is a part of the language's
+  row layer (libgenome/textual/<lang>/<lang>_cmd.c, hooked as `cmd` in the language row) and the evaluator over it is one file for the three
+  (libgenome/phenotype/diag_text_cmdval.c, `cmd_vals` in the language's diag row).
+  Two new row shapes. CMD is a command whose OUTPUT is the value (the name is the words: "string map"; shell echo, printf, rev, tr); EXPAND is an operator spelled after a
+  variable's name (sh `${x//a/b}` `${x#p}` `${x:o:l}` `${x^^}` `${#x}`; batch `%v:a=b%` `%v:~o,l%`). New row fields `sep` (the byte between operands) and `opflags` (the
+  KGENOME_TEXTUAL_CALL_* flags the op runs with); new row flags STDIN SETARG ENDWORD INCL ECHOOPT COLLECT_ALL COLLECT_REST NODASH NOEDGE PREFIXOP PLAINNUM BASHSLICE.
+  New libuncoat ops, each ONE algorithm used by every language that needs it: CUTHEAD and CUTTAIL (${x#p}, ${x%p}), LENGTH, FORMAT (printf; tcl format), MAP (string map: the
+  first pair of the list wins), TRANSLATE with F_RANGES (tr's "a-z"), JOIN with F_WSLIST (a tcl list written as text). The same REPLACE op serves sh `${x//a/b}`, batch
+  `%v:a=b%` (ICASE) and php str_replace; the row says only which flags.
+  Readers (textual.h): kgenome_textual_word_read (one word, as events: literal piece, variable, expansion with operands, command substitution), kgenome_textual_cmd_read (one
+  simple command: words, terminator, pipe, and-or, redirection, paren delta, batch's raw rest, here-document state) and kgenome_textual_cmd_assigns (`x=`, `export x=`, `local`,
+  `+=`, `x=1 cmd`; batch `set v=`, `set "v="`, `set /a`, `call set`; tcl `set`, `append`). The shell's `kgenome_textual_value` now reads the shell's literals with the same word reader.
+  The evaluator: a name is trusted only when it is assigned ONCE, at the top level, to a text this reads, and nothing else writes it (the census is a raw scan, so a name that
+  is only MENTIONED in a comment is not trusted: conservative) and the file has no command that runs text (eval, source, ".", tcl's uplevel/upvar/subst/trace/...). An
+  unquoted expansion in a shell argument is told only when the answer is one plain word (the shell would split and glob otherwise). A command substitution is a pipeline of
+  pure rows, the first a producer, the others filters on the pipe; the shell strips its trailing line breaks through the same RTRIM row.
+  Refused, never guessed: a glob in a pattern, `&` or a backslash in a replacement (bash 5.2), `:-` `:=` `:+` (defaults, not offsets: PLAINNUM), a negative length, arithmetic,
+  `$'..'`, `~`, brace expansion, positional parameters, arrays, indirection, echo -e/-E, printf widths or %d, tr classes/-s/-d/escapes, tcl `[list]`, an empty tcl
+  separator, a tcl format with another conversion or a wrong count, batch `^`, `!`, `%1`, `%*`, `%v:*a=b%`, `set /a`, `set /p`, a block or `if`/`for` that sets.
+  Verified against bash 5.3 (script_cmds.c: 3,000 generated operator cases and every fixed case; strfn_shell.c: the ops exhaustively against bash and GNU tr; python's % for tcl's
+  strict format). tclsh and cmd.exe are not on the machine: tcl and batch are [Unverified] against the real interpreters, and the quirks relied on are listed in the tests'
+  headers (tests/unit/script_cmds.c) and in bat_fn.c / tcl_fn.c.
+
+Differences found when the engine's parsers read through the lib (kgenome_textual_islands, kof_script_is_code_at), measured over 18,425 script files and 52,199 php files
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+  - A "?>" inside a `/** ... */` docblock, after an apostrophe in a `//` comment, or in a double quoted string with `{$a['?>']}` no longer closes the island: the engine's own
+    walk took the apostrophe for a string and lost its place (335 of 52,105 php files change their islands; 7 distinct files in the lists of the engine's corpora, among them
+    two of the benfarm set; the detection lists of all eleven corpora are identical).
+  - "<?php" must be followed by white space to be a tag (the lexer's rule, php's): a js, python or ruby file that mentions `<?php'` in a string is no longer claimed as php (6 files).
+  - A "<%@ ... %>" directive after the first is markup and no longer a code island (DefaultWsdlHelpGenerator.aspx, cmd.asmx, browser.jsp, svg-htc.jsp).
+  - Data after php's __halt_compiler is markup: the island ends where the code did (hehe.php: it was no island, being one line with the data after it).
+  - A php double quoted string that is not closed runs to the end of the text (php's rule) where the table ended it at the line: a "<?php" after one is data to the sniff.
+  - A heredoc body counts as code to the sniff, as it did (a pinned test: tests/unit/script_islands.c).
+
+The relation layer over the TEXT route's graph (functions, objects, paths)
+---------------------------------------------------------------------------
+The walk (diag_text.c) links a value to the call that takes it by nesting and assignment, in textual order. Three stages add the links it could not make. Which a language gets is a
+table keyed by its row, with the measurement beside each (diag_text_stages.c); a stage a language was not given costs it nothing.
+
+  SUM (diag_text_sum.c)   a function the text defines has a SLOT for each parameter and one for its return; a call records what its arguments held, a `return` what it returned, and a link whose
+                          producer is a slot is made when the whole text has been read, from every producer the slot reaches (recursion ends: a slot is followed once). The link is MAY
+                          (KGENOME_DIAG_LINK_MAY in `how`, not in the pack or the graph block: `how` is written by the lib and read by no matcher); nodes the walk links by nesting stay PROVEN.
+                          Context insensitive, no control flow: a producer overwritten by a literal still reaches (killing it without a CFG lost 331 php links, 18 of 24 read real).
+  FIELD                   `obj.field = v` gives the object what v holds (aspx, vbscript: `psi.Arguments = "/c " + arg; Process.Start(psi)`), the object's class is left alone.
+  PATH (diag_text_ident.c) two nodes that name the same constant path are about one object: a SHARED link (the second kind, see link-has-two-kinds) of role PATH, from the last node that held
+                          the path, once a node that makes a file has held it (so `/bin/sh` in two reverse shells links nothing). A bare name is a path only where the row's `pathsem` says
+                          the call takes a file there (wget -O, chmod's last word, an interpreter's script, curl -O / wget keeping the last piece of the URL).
+
+Row data the stages read: `ret_kw`, `ret_name` (vbscript returns by assigning the function's name; read bare, the name calls it), `fn_kw2` + `BLK_PAIR` (Function/Sub up to End Function/Sub),
+`local_kw` and `global_default` (vbscript: `Dim` makes a name the function's, any other is the top's), `pathsem`. A scope pass fix under them: a method written `name(...)` with its brace on
+the next line (the lexer's 'T' stands between) is a function, and a js `function f(a) {` is ONE scope (it was two: the keyword's and the brace's).
+
+What is not done: a call through a member or by a value that is not a constant name; perl's `@_`; a sh function or a tcl proc (a command, called without a bracket); a file made by a command
+that is no node (`echo > f`, `tee`); a path held in an interpolated string; a command run by its own name (`./f`) makes no node, so nothing links to it.
+Tests: tests/lib/genome/diag_text_sum_gen.c (random programs in seven dialects against an independent model, link for link), diag_text_ident_gen.c (random droppers for sh, powershell, batch),
+tests/unit/diag_text_relations.c (the expected relations of the real samples, tests/data/diag_text_expect.tsv: found / not found, no rate).

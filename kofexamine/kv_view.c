@@ -34,9 +34,6 @@ void view_select(struct view *v)
 	struct object *o;
 	uint32_t i;
 
-	/* Before anything reads o->touch: this is the one place every path
-	 * that changes the selection goes through. */
-	object_touch(v, v->node[v->sel_node].obj);
 	o = cur_obj(v);
 
 	/* The one UI fact the model is told - see kof_editor.cur. */
@@ -86,23 +83,6 @@ void view_select(struct view *v)
 			b2--;
 			v->ext[a] = v->ext[b2];
 			v->ext[b2] = t;
-		}
-	} else if (v->node[v->sel_node].piece) {
-		/*
-		 * ONE RUN, THE ROW'S OWN. Resolving its mask would answer about
-		 * every run of that region at once, which is the concatenation
-		 * this row exists to take apart.
-		 */
-		uint64_t off = v->node[v->sel_node].ent_off;
-		uint64_t len = v->node[v->sel_node].ent_len;
-		uint64_t n = o->buf.n ? o->buf.n : o->ctx.obj_size;
-
-		if (off < n) {
-			if (len > n - off)
-				len = n - off;
-			v->ext[0].off = off;
-			v->ext[0].len = len;
-			v->n_ext = len ? 1u : 0u;
 		}
 	} else if (v->node[v->sel_node].ent) {
 		/*
@@ -179,7 +159,6 @@ void view_select(struct view *v)
  */
 void goto_node(struct view *v, uint32_t k)
 {
-	uint32_t was;
 
 	/*
 	 * WALKING OFF THE END OF THE WINDOW SCROLLS THE LOG, rather than
@@ -242,7 +221,6 @@ void goto_node(struct view *v, uint32_t k)
 
 	if (k >= v->n_node || k == v->sel_node)
 		return;
-	was = v->node[v->sel_node].obj;
 	v->node[v->sel_node].at = v->rgn_at;
 	v->sel_node = k;
 	v->sel_a = v->sel_b = KGENOME_BROKEN;
@@ -250,11 +228,6 @@ void goto_node(struct view *v, uint32_t k)
 	 * another region makes them about different ones. */
 	v->dis_have = 0;
 	v->dragging = 0;
-	if (v->node[k].obj != was) {
-		/* touch_default reads the list, so the list has to exist. */
-		object_touch(v, v->node[k].obj);
-		v->sel_touch = touch_default(&v->obj[v->node[k].obj]);
-	}
 	view_select(v);
 }
 
@@ -400,7 +373,7 @@ uint32_t node_at(struct view *v, uint32_t obj, uint64_t file_off)
 		 * one region: the reader was thrown out to the object row
 		 * because that was the only answer left.
 		 */
-		if (v->node[k].piece || v->node[k].ent) {
+		if (v->node[k].ent) {
 			if (file_off >= v->node[k].ent_off &&
 			    file_off < v->node[k].ent_off +
 				       v->node[k].ent_len)

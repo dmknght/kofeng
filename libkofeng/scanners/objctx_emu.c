@@ -463,7 +463,7 @@ uint32_t kof_scan_emu_unpack(const struct kof_obj_ctx *ctx, int force)
 				/*
 				 * ASKED FOR, BY WHOEVER ASKED. `force` is set
 				 * when a producer declared KOF_ENG_USE_EMU on
-				 * this child and when a heuristic rule asked
+				 * this child and when a diagnose or a module asked
 				 * for the object in front of it; it is clear
 				 * when nothing asked and the engine is trying
 				 * the interpreter on its own guess. Reading

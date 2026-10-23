@@ -428,6 +428,11 @@ void kgenome_diag_emu_capture_names(struct kgenome_diag_scan *s, struct kgenome_
 		uint16_t cap, uint16_t node);
 uint64_t kgenome_diag_emu_pages_charge(struct kgenome_diag_scan *s);
 void kgenome_diag_emu_pages_release(struct kgenome_diag_scan *s);
+/* An image that could not be built, and the reason that is TRUE: `refused` (what the builder said, or NULL) is the
+ * object's own - there is nothing to run, KGENOME_BAD_INPUT; the allowance said no - the ledger already holds
+ * KGENOME_OVER_BUDGET and it is not worded again; otherwise a plain allocation failed, KGENOME_NOMEM. Also gives
+ * back whatever the failed construction had charged. */
+void kgenome_diag_emu_build_failed(struct kgenome_diag_scan *s, const char *refused);
 int kgenome_diag_emu_account(void *user, int64_t bytes);
 void kgenome_diag_emu_stop_status(struct kgenome_diag_scan *s, enum kgenome_emu_stop st);
 struct kgenome_emu *kgenome_diag_emu_build_rel_image(struct kgenome_diag_scan *s,

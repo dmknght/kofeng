@@ -51,16 +51,16 @@ KOF_DEFINE_SCAN
 	/* Anchored: one comparison at a computed offset, no search at all. */
 	if (kof_find_str_at(0, elf_magic64) &&
 	    kof_find_str_multi(code, call_then_pop, spaced, jcc) >= 2)
-		KOF_SCAN_INFECT("HexCombo");
+		{ kof_debug("HexTest#HexCombo", 0); return; }
 
 	/* A window rather than a point: the same call sequence somewhere in the
 	 * first part of the entry point's code, when there is an entry point. */
 	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN &&
 	    kof_find_str_in(ctx->entry_off, 256, call_then_pop))
-		KOF_SCAN_SUSPECT("HexAtEntry");
+		{ kof_debug("HexTest#HexAtEntry", 0); return; }
 
 	/* Scalars read directly, the way a structural check reads them. */
 	if (kof_in_obj(0, 4) && kof_u32(0) == 0x464c457fu &&
 	    kof_find_str(loaded, spaced))
-		KOF_SCAN_SUSPECT("HexSpaced");
+		{ kof_debug("HexTest#HexSpaced", 0); return; }
 }

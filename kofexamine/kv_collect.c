@@ -191,7 +191,6 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 {
 	struct view *v = user;
 	struct object *o;
-	uint32_t i;
 
 	if (v->n_obj >= MAX_OBJ || !len)
 		return 0;
@@ -248,22 +247,10 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 	if (v->into_obj >= 0) {
 		o = &v->obj[v->into_obj];
 		v->into_obj = -1;
-		free(o->finding);
-		o->finding = NULL;
-		o->n_finding = 0;
 		o->heur = *res;
 		diag_keep(o, res);
 		o->broken = res->broken;
 		o->emu_done |= res->emu_unpacked;
-		for (i = 0; i < res->n; i++) {
-			struct kof_finding *g = realloc(o->finding,
-						(o->n_finding + 1) * sizeof *g);
-
-			if (!g)
-				break;
-			o->finding = g;
-			o->finding[o->n_finding++] = res->v[i];
-		}
 		return 0;
 	}
 
@@ -273,6 +260,7 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 	free(o->carve);
 	free(o->diag);
 	kgenome_funcs_free(&o->funcs);
+	kof_codenotes_free(&o->notes);
 	memset(o, 0, sizeof *o);
 	snprintf(o->name, sizeof o->name, "%s", name);
 	o->broken = res->broken;
@@ -358,6 +346,16 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 			o->sym_n = 0;
 		}
 	}
+	free(o->fixed);
+	o->fixed = NULL;
+	o->n_fixed = 0;
+	if (res && res->fixed && res->n_fixed) {
+		o->fixed = malloc(res->n_fixed * sizeof *o->fixed);
+		if (o->fixed) {
+			memcpy(o->fixed, res->fixed, res->n_fixed * sizeof *o->fixed);
+			o->n_fixed = res->n_fixed;
+		}
+	}
 	o->n_rgn = 0;
 	if (res && res->n_region) {
 		uint32_t g;
@@ -431,18 +429,6 @@ int on_object(const char *name, const void *bytes, uint64_t len,
 		v->obj_held += len;
 	}
 
-	for (i = 0; i < res->n; i++) {
-		struct kof_finding *g = realloc(o->finding,
-						(o->n_finding + 1) * sizeof *g);
-
-		if (!g)
-			break;
-		o->finding = g;
-		/* The whole finding, by value: it carries the name AND where
-		 * each part of it starts, so nothing downstream has to take the
-		 * name apart again. strdup of the name alone threw that away. */
-		o->finding[o->n_finding++] = res->v[i];
-	}
 	v->n_obj++;
 	return 0;
 }
@@ -474,7 +460,6 @@ void proc_collect(struct view *v, kof_engine *eng, uint32_t pid)
 	uint64_t     t0;
 
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.heur_level = v->heur_off ? 0u : KOF_HEUR_LEVEL_MAX;
 	opt.heur_off = v->heur_off ? 1u : 0u;
 	opt.emu_use = KOF_EMU_NEVER;
@@ -708,7 +693,6 @@ void objects_collect(struct view *v, kof_engine *eng)
 	kof_scanner *sc;
 
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	/* The table under Strings - see draw_decl_diag. */
 	opt.report_diag = 1;
 	/*
@@ -1102,7 +1086,7 @@ static void payload_tag(struct view *v, uint32_t at)
 		 * same symbol. The address is kofscfind's and the block is
 		 * the engine's.
 		 */
-		kof_inspect_sym_name(par->sym, par->sym_n, par->payload_at, -1,
+		kof_sym_name_at(par->sym, par->sym_n, par->payload_at, -1,
 			    o->payload_sym, sizeof o->payload_sym);
 		return;
 	}
@@ -1117,8 +1101,7 @@ static void payload_tag(struct view *v, uint32_t at)
  * second view for each and leak the first.
  */
 /* `eng` is the view's, taken as an argument only so the two call sites read
- * the same; nothing here needs it since the marker pass moved to
- * object_touch. */
+ * the same. */
 /* Returns non-zero when kofscfind found a payload in this very call, which is
  * the only time `sc_find` holds it. */
 static struct kofscfind sc_find;
@@ -1227,17 +1210,6 @@ static int examine_one(struct view *v, uint32_t i)
 		    (o->ctx.format == KOF_FMT_ELF ||
 		     o->ctx.format == KOF_FMT_PE))
 			sym_build(o);
-		/*
-		 * THE MARKER PASS IS NOT DONE HERE - see object_touch.
-		 *
-		 * It searches the object for every marker in the database, and
-		 * it was the whole cost of opening a process: measured at 330
-		 * ms per megabyte, 6.8 of the 6.9 seconds a 350 MB python took
-		 * to open, over fifty objects of which the reader looks at one.
-		 * Collecting that process takes 90 ms; this was the rest, and
-		 * it was spent before the first frame was drawn on forty-nine
-		 * objects nobody had asked about yet.
-		 */
 		found = scfind_object(o, &sc_find);
 		payload_tag(v, i);
 	}
@@ -1316,80 +1288,6 @@ void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from)
 	for (i = from; i < v->n_obj; i++)
 		if (examine_one(v, i))
 			payload_derive(v, i);
-}
-
-/*
- * WHICH SIGNATURE THE PANE LIGHTS BY DEFAULT, and why it is not the first one.
- *
- * The hex pane marks where the SELECTED signature's markers sit, which is what
- * makes the pane useful while authoring one: pick a rule, see where its bytes
- * land. Defaulting that selection to index zero meant an arbitrary rule's
- * markers lit up on every file opened - and a short marker lands somewhere by
- * chance in almost any header. A reader reads a highlight as "this matched",
- * so the pane was reporting a match that had not happened.
- *
- * The default is now the first rule that FIRED. When nothing fired the
- * selection is past the end, which hit_kind already reads as "light nothing" -
- * so an unlit pane means no rule matched, and a lit one means one did.
- */
-/*
- * The marker pass, for one object, once.
- *
- * "Which of the database's markers are in these bytes, and for the rules that
- * did not fire, why" - the question the markers list and the status line ask,
- * and both ask it about the object the reader is LOOKING at. So it is answered
- * when that object is selected rather than for every object a view collected:
- * a file view has one object and notices nothing, and a process view has fifty
- * and opens in a tenth of the time.
- *
- * Idempotent: the flag is the record that it ran, so selecting back and forth
- * between two rows searches each of them once.
- */void object_touch(struct view *v, uint32_t at)
-{
-	struct object *o;
-
-	if (at >= v->n_obj)
-		return;
-	o = &v->obj[at];
-	if (o->touched || !v->eng || !o->buf.p || !o->buf.n)
-		return;
-	o->touched = 1;
-	if (!kof_touch_object(v->eng, o->buf, &o->ctx, o->fmt,
-			      o->finding, o->n_finding,
-			      &o->touch, &o->n_touch))
-		o->n_touch = 0;
-}
-
-/*
- * THE STRONGEST THING THAT FIRED, not the first.
- *
- * Rows are in database order, so "the first that fired" is whichever pack
- * happened to load first - and a heuristic pack loading before a signature pack
- * meant a file with a real detection opened showing a guess. Measured on a
- * Gafgyt sample the scanner names ELF-x64/Botnet:Gafgyt#100!Mutation: the panel
- * opened on Heur:Truncated, the status line said so, and the rule that actually
- * caught the file was not the one loaded for editing.
- *
- * INFECT beats SUSPECT beats HEUR, and within a level the first still wins -
- * two signatures firing is a thing a reader settles by looking at both.
- */
-uint32_t touch_default(const struct object *ob)
-{
-	uint32_t i, best = ob->n_touch, best_rank = 0;
-
-	for (i = 0; i < ob->n_touch; i++) {
-		uint32_t rank;
-
-		if (!ob->touch[i].fired)
-			continue;
-		rank = ob->touch[i].fired_level == KOF_LEVEL_INFECT ? 3u
-		     : ob->touch[i].fired_level == KOF_LEVEL_SUSPECT ? 2u : 1u;
-		if (rank > best_rank) {
-			best_rank = rank;
-			best = i;
-		}
-	}
-	return best;                    /* nothing fired: select nothing */
 }
 
 void objects_examine(struct view *v, kof_engine *eng)

@@ -92,8 +92,15 @@ enum kuncoat_status kuncoat_a85_decode(const uint8_t *in, uint64_t n,
 	if (have > 1u) {
 		uint32_t j;
 
-		for (j = have; j < 5u; j++)
-			acc = acc * 85u + 84u;      /* 'u', the pad digit */
+		for (j = have; j < 5u; j++) {
+			/* 'u', the pad digit, and the bound is the format's own as for a full group: a group that carries past 2^32 once padded cannot have
+			 * come from the bytes it stands for (L12 of the lexer audit: "uu" wrapped and gave a byte) */
+			if (acc > (UINT32_MAX - 84u) / 85u) {
+				*produced = w;
+				return KUNCOAT_CORRUPT;
+			}
+			acc = acc * 85u + 84u;
+		}
 		if (w + (have - 1u) > cap) {
 			*produced = w;
 			return KUNCOAT_OVER_BUDGET;

@@ -1,5 +1,5 @@
 """Seeded random input (fuzz.py) as test cases: the viewer must not crash,
-exit, or hang.  Replay a failure with:  python3 fuzz.py <sample> <seed> <events> [bias]"""
+exit by any way but its Quit item, or hang.  Replay a failure with:  python3 fuzz.py <sample> <seed> <events> [bias]"""
 from tui import *
 import fuzz
 
@@ -28,7 +28,7 @@ def fuzz_ko_panel_biased():
 
 
 @case(A)
-def fuzz_gafgyt_loaded_draft_biased():
+def fuzz_gafgyt_biased():
     go('gafgyt', 103, bias=True)
 
 

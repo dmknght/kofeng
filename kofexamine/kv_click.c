@@ -240,8 +240,9 @@ static int click_disasm(struct view *v, int rclick)
 			 * copy one line of what they had selected, and the rest
 			 * of the highlight went out as the menu came up.
 			 */
+			idx = dis_real_row(v, idx);
 			if (!v->dis_have && !dis_hex_sel(v) &&
-			    idx < v->dis_lines) {
+			    idx >= 0 && idx < v->dis_lines) {
 				int ln = (int)strlen(v->dis_line[idx]);
 
 				v->dis_a_at = v->dis_b_at = v->dis_line_at[idx];
@@ -265,7 +266,8 @@ static int click_disasm(struct view *v, int rclick)
 		 * reason anybody could see. The panel is text, and text is
 		 * selected where it is.
 		 */
-		if (idx < v->dis_lines &&
+		idx = dis_real_row(v, idx);
+		if (idx >= 0 && idx < v->dis_lines &&
 		    g_mx >= TREE_W + 3 &&
 		    g_mx < TREE_W + 3 + (int)strlen(v->dis_line[idx])) {
 			int c = g_mx - (TREE_W + 3);
@@ -291,100 +293,6 @@ static int click_disasm(struct view *v, int rclick)
 	 * Before the hex hit test, because the heading sits inside the hex
 	 * column and a click there is about the panel rather than about a byte.
 	 */
-	return 0;
-}
-
-/*
- * click_list - a click in the marker list.
- *
- * Lifted out of click() whole. It answers 1 when it has dealt with the
- * click and 0 to let the chain carry on, which is exactly what the `return`
- * and the fall-through meant where this used to sit.
- */
-static int click_list(struct view *v, struct object *ob)
-{
-	if (v->show_list) {
-		int row = g_my - list_top(v) - 1;
-		int on = g_my > list_top(v) &&
-			 g_my <= list_top(v) + (int)list_shown(v);
-
-		if (on && !v->list_depth) {
-			uint32_t k = list_nth(v, v->list_off + (uint32_t)row);
-
-			/*
-			 * A signature row shows that signature in the draft
-			 * panel, the way opening a file in an editor shows the
-			 * file. Its markers are reachable from the status bar,
-			 * which is where somebody looking for one goes.
-			 */
-			if (k < ob->n_touch) {
-				v->show_list = 0;
-				v->list_depth = 0;
-				/*
-				 * ASKED WHENEVER THERE IS A DRAFT, not when a
-				 * hash says it changed.
-				 *
-				 * This is the same draft_dirty the Save gate
-				 * used, and the same objection applies with a
-				 * worse consequence: a hash that misses an
-				 * edited field answers "not dirty", the switch
-				 * happens without asking, and the edit is
-				 * gone. The prompt's first answer is "Keep
-				 * editing", so asking once too often costs a
-				 * keystroke and never costs work.
-				 */
-				if (v->ed.dr.n_decl)
-					ch_open(v, CH_SWITCH, k,
-						g_rows - 6, 4);
-				else
-					draft_show(v, k);
-			}
-			return 1;
-		}
-		if (on) {
-			/* A marker row moves the hex pane to it. That is the
-			 * whole point of listing where each one is. */
-			const struct kof_touch *t = &ob->touch[v->sel_touch];
-			uint32_t k = v->str_off + (uint32_t)row;
-
-			if (v->sel_touch < ob->n_touch && k < t->n_str) {
-				v->sel_str = k;
-				if (t->str[k].at != KGENOME_BROKEN) {
-					v->ed.dr.warn[0] = 0;
-					/* Through view_show_in: a marker found
-					 * in the symbol block has a block
-					 * offset, and view_show would place it
-					 * in the file. */
-					view_show_in(v,
-						     v->node[v->sel_node].obj,
-						     sym_which_of(
-							t->str[k].sym),
-						     t->str[k].at, 1);
-				} else {
-					/*
-					 * A marker the module declares and
-					 * this object does not have.
-					 *
-					 * The row prints its bytes in full, so
-					 * it reads as present; the only thing
-					 * that said otherwise was a dash in a
-					 * numeric column, and clicking it did
-					 * nothing and said nothing. Silence is
-					 * the bug - there is a real answer
-					 * here and it is worth a line.
-					 */
-					say_note(&v->ed, "Marker %u is not in this "
-					 "object", k + 1u);
-				}
-			}
-			return 1;
-		}
-		/* Anywhere off the dialog closes it - one that only closes on
-		 * the right key is one people leave open. */
-		v->show_list = 0;
-		v->list_depth = 0;
-		return 1;
-	}
 	return 0;
 }
 
@@ -491,13 +399,14 @@ void hit_row_none(struct view *v, uint32_t arg)
 void hit_row_addcond(struct view *v, uint32_t arg)
 {
 	(void)arg;
-	if (v->ed.dr.n_grp && g_mx >= v->a_c0 && g_mx <= v->a_c1)
-		cnd_add(&v->ed, 0);
+	if (grp_tab_count(&v->ed, v->ed.dr.tab) && g_mx >= v->a_c0 &&
+	    g_mx <= v->a_c1)
+		cnd_add(&v->ed);
 }
 
 /*
- * One row of the condition tree. `g` is the row's place in the drawn
- * sequence, which is what says which of the four shapes it is; cseq_idx turns
+ * One row of a condition's block. `g` is the row's place in the drawn
+ * sequence, which is what says which of the two shapes it is; cseq_idx turns
  * that into the condition it is about.
  */
 void hit_row_cond(struct view *v, uint32_t g)
@@ -509,25 +418,6 @@ void hit_row_cond(struct view *v, uint32_t g)
 	ci = v->cseq_idx[g];
 	v->ed.dr.cur_cnd = ci;
 
-	if (v->cseq_kind[g] == CS_JOIN) {
-		/*
-		 * Only on the word itself, and through a list.
-		 *
-		 * A whole row that flips the meaning of a signature when it is
-		 * clicked anywhere is a row that gets flipped by accident, and
-		 * the accident leaves nothing behind to notice.
-		 */
-		if (v->cnd_jn[ci][0] > 0 && g_mx >= v->cnd_jn[ci][0] &&
-		    g_mx <= v->cnd_jn[ci][1])
-			ch_open(v, CH_LOGIC, ci, g_my, g_mx);
-		return;
-	}
-	if (v->cseq_kind[g] == CS_ADD) {
-		if (v->ed.dr.n_grp && v->cnd_kid[ci][0] > 0 &&
-		    g_mx >= v->cnd_kid[ci][0] && g_mx <= v->cnd_kid[ci][1])
-			cnd_add(&v->ed, 1);
-		return;
-	}
 	if (v->cseq_kind[g] == CS_MATCH) {
 		/* The block's first row, so it carries the block's remove
 		 * button - see the drawing. */
@@ -552,24 +442,10 @@ void hit_row_cond(struct view *v, uint32_t g)
 		return;
 	}
 
-	if (v->cseq_kind[g] == CS_VAR) {
-		/* The variant row - see cseq_kind for why it is its own. */
-		if (v->cnd_vr[ci][0] > 0 && g_mx >= v->cnd_vr[ci][0] &&
-		    g_mx <= v->cnd_vr[ci][1])
-			ch_open(v, CH_VARIANT, ci, g_my, g_mx);
-		else if (v->cnd_nm[ci][0] > 0 && g_mx >= v->cnd_nm[ci][0] &&
-			 g_mx <= v->cnd_nm[ci][1])
-			v->edit = 4 + (int)ci;
-		return;
-	}
-
-	/* CS_COND. The remove button is on the block's first row - see
-	 * CS_MATCH above - so this row has nothing at its right hand end. */
-	/* -1 is a row that drew no control - a block ANDed to the next one has
-	 * no verdict of its own to pick. */
-	if (v->cnd_lv[ci][0] > 0 && g_mx >= v->cnd_lv[ci][0] &&
-	    g_mx <= v->cnd_lv[ci][1])
-		ch_open(v, CH_LEVEL, ci, g_my, g_mx);
+	/* CS_COND: the tag row. */
+	if (v->cnd_tg[ci][0] > 0 && g_mx >= v->cnd_tg[ci][0] &&
+	    g_mx <= v->cnd_tg[ci][1])
+		syn_pick_tag(v, PK_TAG_COND, ci);
 }
 
 /*
@@ -585,32 +461,8 @@ void hit_row_cond(struct view *v, uint32_t g)
 static int click_marker_line(struct view *v, struct object *ob)
 {
 	if (g_my == mark_row()) {
-		if (!ob->n_touch)
-			return 1;
-		/* Three words, three answers. "hit" and "skip" open the dialog
-		 * filtered to what they just counted; the name opens that
-		 * signature's markers, which is the thing the name is about. */
-		if (g_mx >= v->hit_c0 && g_mx <= v->hit_c1) {
-			v->list_filter = 1;
-			v->list_depth = 0;
-			v->list_off = 0;
-		} else if (g_mx >= v->skip_c0 && g_mx <= v->skip_c1) {
-			v->list_filter = 2;
-			v->list_depth = 0;
-			v->list_off = 0;
-		} else if (g_mx >= v->name_c0 && g_mx <= v->name_c1) {
-			v->list_filter = 0;
-			v->list_depth = 1;
-			v->str_off = 0;
-			v->sel_str = 0;
-		} else {
-			/* The rest of the line is a readout, not a control. The
-			 * pane indicator lives there, and clicking it used to
-			 * open the signature dialog - which is not what the
-			 * word says and not what anyone would expect it to do. */
-			return 1;
-		}
-		v->show_list = 1;
+		/* The status line is a readout, not a control. */
+		(void)v; (void)ob;
 		return 1;
 	}
 	return 0;
@@ -759,10 +611,10 @@ void click(struct view *v, int rclick)
 	 * it - see hit_zone in redraw - so the two cannot disagree, and a pane
 	 * that forgets is broken only in itself.
 	 *
-	 * show_list and menu_open stay here: they are not a property of any
+	 * menu_open stays here: it is not a property of any
 	 * pane but of what is on top of all of them.
 	 */
-	if (rclick && (v->show_list || v->menu_open || !hit_probe(v, HIT_R)))
+	if (rclick && (v->menu_open || !hit_probe(v, HIT_R)))
 		return;
 
 	/*
@@ -825,38 +677,9 @@ void click(struct view *v, int rclick)
 	}
 	if (click_bar_menu(v))
 		return;
-	/*
-	 * THE SIGNATURE LIST IS A MODAL AND IS ASKED WITH THE OTHER MODALS.
-	 *
-	 * It used to be asked three hundred lines below, after the handlers for
-	 * the event heading, the disassembly heading and the DRAFT PANEL'S
-	 * RESIZE GRIP - and those are geometry tests with no notion of anything
-	 * being drawn over them.
-	 *
-	 * The grip is the one that bit. It is the whole row at hex_bot() + 1,
-	 * which is g_rows - g_decl_rows - 1, and the list occupies
-	 * g_rows - 1 - list_shown(v) up to g_rows - 2. So whenever the panel is
-	 * open and the list is taller than the panel, the grip's row falls
-	 * INSIDE the list - and clicking that row started a panel resize
-	 * instead of picking the signature drawn on it. From the reader's side
-	 * the click simply went to the thing behind the dialog.
-	 *
-	 * Here it cannot: a dialog that is on the screen gets the click before
-	 * anything it is covering, which is what help_open and bar_open above
-	 * already do and the rule this was missing from.
-	 *
-	 * THE RULE IS THE PLACEMENT, and there is deliberately no predicate for
-	 * it. A modal_up() helper was written and taken out again: once every
-	 * overlay is asked here, nothing below has a modal left to test for, so
-	 * the helper had no caller that changed an answer - and the one call
-	 * site that looked like it wanted it, the right-button guard above,
-	 * means something narrower. It asks which overlays use the RIGHT
-	 * button, not which are on screen, and widening it stopped right-click
-	 * reaching the help page's close button.
-	 */
-	if (click_list(v, ob))
-		return;
 	if (click_field(v))
+		return;
+	if (syn_modal(v) && syn_click(v))
 		return;
 	/*
 	 * A DIALOG'S TEXT SELECTION, whichever dialog is up.
@@ -1191,6 +1014,7 @@ void click(struct view *v, int rclick)
 		 * change nobody asked for. */
 		if (g_mx >= TREE_W + 5 && g_mx <= TREE_W + 24) {
 			v->dis_bits = v->dis_bits == 64 ? 32 : 64;
+			dis_drop_analysis(v);   /* it was made reading the other width */
 			return;
 		}
 		return;

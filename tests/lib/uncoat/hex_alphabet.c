@@ -89,6 +89,15 @@ int main(void)
 		CK(run(KUNCOAT_ALGO_HEX, KUNCOAT_DECODE, 0, enc, en, out, sizeof out, &dn) == KUNCOAT_OK &&
 		   dn == 1u && out[0] == (uint8_t)i);
 		CK(kof_hex_byte(enc) == (int)i);
+		/* the encoder's digits are core's one writer table, upper case (the url encoder's too: %XX) */
+		CK(enc[0] == kof_hex_digit(i >> 4, 1) && enc[1] == kof_hex_digit(i & 15u, 1));
+		{
+			uint8_t one[1] = { (uint8_t)i }, esc[8];
+			uint64_t ew = 0;
+
+			if (run(KUNCOAT_ALGO_URL, KUNCOAT_ENCODE, 0, one, 1, esc, sizeof esc, &ew) == KUNCOAT_OK && ew == 3u)
+				CK(esc[0] == '%' && esc[1] == kof_hex_digit(i >> 4, 1) && esc[2] == kof_hex_digit(i & 15u, 1));
+		}
 	}
 
 	{

@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <kofmod/kofsig.h>
+#include "../../libkofeng/analyzers/parsers/scripts/script_route.h"
 
 struct pc_report {
 	uint64_t checked, failed;
@@ -88,6 +89,14 @@ static int pc_check(const char *what, const struct kof_obj_ctx *ctx,
 			}
 			all[n_all++] = ext[k];
 		}
+	}
+
+	/* A script in a language the lib lexes has no regions: the lexer reads the whole object, KOF_SCAN_ALL is that, and a
+	 * cut made first by tag would be a second reading (see script_resolve_scan). Nothing to partition. */
+	if (ctx->format == KOF_FMT_SCRIPT && kof_script_textual_lang(ctx->subtype)) {
+		if (n_all)
+			why = "a script the lib lexes declares regions";
+		goto done;
 	}
 
 	qsort(all, n_all, sizeof all[0], pc_cmp);

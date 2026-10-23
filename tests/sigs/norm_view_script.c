@@ -13,7 +13,8 @@
 KOF_TARGET_FORMAT(KOF_FMT_SCRIPT);
 KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "NormViewScript");
 
-KOF_TARGET_RANGE(body, KOF_SCAN_SCRIPT_BODY);
+/* a language the lib lexes has no regions: the whole object */
+KOF_TARGET_RANGE(body, KOF_SCAN_ALL);
 
 KOF_DEFINE_STR(from_b64, "NormScriptB64-a1f0c2", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_STR(from_hex, "NormScriptHEX-77d5e8", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
@@ -23,5 +24,5 @@ KOF_DEFINE_STR(from_fold, "NormScriptFOLD-9e61d3-built-from-pieces", KOF_CASE_EX
 KOF_DEFINE_SCAN
 {
 	if (kof_find_str_multi(body, from_b64, from_hex, from_pct, from_fold) >= 1)
-		KOF_SCAN_INFECT("NormViewScript");
+		{ kof_debug("NormViewScript#NormViewScript", 0); return; }
 }

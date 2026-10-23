@@ -20,7 +20,7 @@
  *
  * The kind is the first word of the source's name - net_, pe_, syscall_,
  * kernel_ - the same type_family_NN.c convention the signatures follow, so a
- * pack is named for what its diagnoses are about the way sigs-elf and heur-pe
+ * pack is named for what its diagnoses are about the way sigs-elf and unpack-pe
  * are named for theirs: diag-net.kdig, diag-syscall.kdig. One file per diagnose
  * made the set a database held depend on a directory listing; one file for all
  * of them made a change to one diagnose a change to every pack consumer's file.
@@ -84,8 +84,8 @@ static void clear_diag_packs(const char *db)
 /*
  * A PACK OF RECORDS, written: the header every .kdig of this shape has - the
  * magic, version 1, a u16 count and a table of { u32 offset, u32 length } - then
- * the records, in the order given. The diagnose packs and the syndrome pack are
- * this one shape, so the layout is written here once. Returns the file's size in
+ * the records, in the order given. The diagnose packs are
+ * this shape, and the layout is written here once. Returns the file's size in
  * `*total`, or 0 on failure with the reason on stderr.
  */
 int ksb_write_krec_pack(const char *path, const char *magic,

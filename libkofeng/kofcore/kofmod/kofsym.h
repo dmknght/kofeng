@@ -536,11 +536,10 @@ static inline uint32_t kof_sym_first(const uint8_t *b, uint32_t n)
 /*
  * ONE ANSWER TO "WHERE DOES A SYMBOL MASK POINT", FOR EVERY CALLER.
  *
- * Three places need it - the scan (kof_find_str), the marker pane
- * (kof_touch_object) and the draft panel (kofviewer) - and while each had its
- * own version they disagreed, which is exactly the shape of bug that is
- * invisible: the scan detected a marker in SYM_EXP, the panel called the same
- * marker absent, and the status line counted it as one of two. So the decision
+ * Two places need it - the scan (kof_find_str) and the draft panel (kofviewer)
+ * - and while each had its own version they disagreed, which is exactly the
+ * shape of bug that is invisible: the scan detected a marker in SYM_EXP and the
+ * panel called the same marker absent. So the decision
  * lives here and the callers only run the matcher over what it returns.
  *
  * The extents index the BLOCK, not the object - the block is built, and none of

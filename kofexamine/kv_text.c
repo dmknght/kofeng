@@ -13,50 +13,6 @@
  */
 #define TXT_GUTTER 6
 
-/*
- * WHERE A RUN OF CODE OR OF MARKUP BEGINS, so the gutter can say so.
- *
- * A page alternates all the way down and the text alone does not show it: a
- * reader scrolling through eighty runs cannot see where one ended and the next
- * started without reading the tags. The LINE NUMBER is marked instead of the
- * line, because the line is the file's bytes and colouring those would be this
- * pane inventing emphasis the file does not have - the same reason a tab is
- * drawn as one space rather than expanded.
- *
- * Only the starts are collected, and only the first KOF_SCRIPT_MAX_ISLAND of
- * each: they are the boundaries, and a boundary is a point rather than a span.
- */
-struct txt_marks {
-	uint64_t body[KOF_SCRIPT_MAX_ISLAND + 2u];
-	uint64_t mark[KOF_SCRIPT_MAX_ISLAND + 2u];
-	uint32_t n_body, n_mark;
-};
-
-/*
- * The two marks. Backgrounds rather than foregrounds, so they read as a mark on
- * the number and not as a different KIND of number - the gutter already uses
- * colour to mean "this is a place".
- *
- * AND OUT OF THE VERDICT FAMILY, which is the constraint that picks them. A
- * reader is looking for where a marker matched, and those are red, yellow and
- * magenta:
- *
- *     A_HIT1  41   counted by the module
- *     A_HIT2  43   present, outside its regions
- *     A_HIT3  45   declared by the draft
- *
- * so 41, 43, 45 and their bright forms 101, 103, 105 are spoken for. A mark in
- * one of them says "something matched here" to an eye that has learnt the pane,
- * and these two say nothing of the kind - they are structure. The first choice
- * here was 105, one shade off A_HIT3, which is exactly that mistake.
- *
- * Two cool colours, neither of them any hit's, and far enough apart in hue to
- * tell code from markup at a glance.
- */
-#define A_T_BODY "\033[46;30m"   /* cyan - a run of code starts here */
-#define A_T_MARK "\033[104;30m"  /* blue - a run of markup starts here */
-
-
 /* ---- the symbol view -------------------------------------------------------
  *
  * The rows of the KSYM block, one record to a line, in place of the hex pane.
@@ -126,7 +82,7 @@ void sym_shn_str(const uint8_t *r, char *out, size_t n)
  *
  * The bytes pane, drawn for something a person reads. Everything structural is
  * the hex pane's and is reached through the same calls - view_map for the file
- * offset of a region offset, in_sel/hit_kind/decl_kind for what a byte is
+ * offset of a region offset, in_sel/decl_kind for what a byte is
  * wearing, rgn_at for where the top of the pane is. What differs is two things
  * and no more: a row is a LINE rather than a fixed run of bytes, and the number
  * in the gutter counts lines rather than bytes.
@@ -301,35 +257,6 @@ static char txt_glyph(uint8_t c)
 	return (c >= 32 && c < 127) ? (char)c : '.';
 }
 
-static void txt_marks_of(struct view *v, struct txt_marks *m)
-{
-	struct object *ob = cur_obj(v);
-	struct kof_range r[KOF_SCRIPT_MAX_ISLAND + 2u];
-	uint32_t cap = KOF_SCRIPT_MAX_ISLAND + 2u, n, i;
-
-	m->n_body = m->n_mark = 0;
-	if (ob->ctx.format != KOF_FMT_SCRIPT || !ob->ctx.resolve_scan ||
-	    !kof_script_islands_of(&ob->ctx))
-		return;
-	n = ob->ctx.resolve_scan(&ob->ctx, KOF_SCAN_SCRIPT_BODY, r, cap);
-	for (i = 0; i < n && i < cap; i++)
-		m->body[m->n_body++] = r[i].off;
-	n = ob->ctx.resolve_scan(&ob->ctx, KOF_SCAN_SCRIPT_MARKUP, r, cap);
-	for (i = 0; i < n && i < cap; i++)
-		m->mark[m->n_mark++] = r[i].off;
-}
-
-/* Does a run of this kind begin inside [lo, hi)? */
-static int txt_mark_in(const uint64_t *p, uint32_t n, uint64_t lo, uint64_t hi)
-{
-	uint32_t i;
-
-	for (i = 0; i < n; i++)
-		if (p[i] >= lo && p[i] < hi)
-			return 1;
-	return 0;
-}
-
 void draw_text(struct out *o, struct view *v)
 {
 	struct object *ob = cur_obj(v);
@@ -340,11 +267,9 @@ void draw_text(struct out *o, struct view *v)
 	const uint8_t *base = ob->buf.p;
 	uint64_t at, ln, maxtop;
 	int row, vbar, hbar;
-	struct txt_marks marks;
 
 	if (!base)
 		base_n = 0;
-	txt_marks_of(v, &marks);
 
 	/*
 	 * THE TWO BARS, AND EACH ONLY WHEN THERE IS SOMETHING OFF SCREEN.
@@ -393,23 +318,8 @@ void draw_text(struct out *o, struct view *v)
 		}
 		end = txt_line_end(v, base, base_n, at);
 		{
-			/*
-			 * Through view_map, because `at` counts along the
-			 * REGION being shown and a run's offset is into the
-			 * object. On the whole-file row the two are the same
-			 * number; on any other row they are not, and comparing
-			 * them raw would mark whichever line sat at the same
-			 * distance from zero.
-			 */
-			uint64_t fo = view_map(v, at, 0);
 			const char *a = A_LOC;
 
-			if (txt_mark_in(marks.body, marks.n_body, fo,
-					fo + (end - at)))
-				a = A_T_BODY;
-			else if (txt_mark_in(marks.mark, marks.n_mark, fo,
-					     fo + (end - at)))
-				a = A_T_MARK;
 			out_fmt(o, "%s%*llu" A_OFF " ", a, TXT_GUTTER,
 				(unsigned long long)(ln + 1u));
 		}
@@ -440,24 +350,21 @@ void draw_text(struct out *o, struct view *v)
 		for (c = 0; c < wide && k < end; c++, k++) {
 			uint64_t fo = view_map(v, k, 0);
 			uint8_t bv = fo < base_n ? base[fo] : 0;
-			int h;
 			const char *ec, *pl;
 
 			if (bv == '\n' || bv == '\r')
 				break;
-			h = hit_kind(v, fo);
 			ec = evt_byte_colour(v, k);
 			/* The same ladder the hex pane paints a byte with, in
 			 * the same order: what the reader picked beats what the
-			 * engine found beats what the draft declared. */
+			 * draft declared. */
 			/* A lit block sits below the selection and above
 			 * everything else: it is what the reader asked to see
 			 * on this frame, and the engine's markers are what was
 			 * there before they asked. */
 			out_str(o, in_sel(v, k) ? A_SELB :
 				(pl = mtn_lit_at(v, k)) ? pl :
-				h ? (h == 1 ? A_HIT1 : A_HIT2)
-				  : ec ? ec
+				ec ? ec
 				  : decl_kind(v, fo) ? A_HIT3
 				  : byte_colour(bv));
 			out_fmt(o, "%c", txt_glyph(bv));

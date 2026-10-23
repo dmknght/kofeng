@@ -67,6 +67,6 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
 
 /* The code islands of a page, filled into info. `from` is the end of the
  * header, so the directives are not code. */
-void kof_svr_islands(kof_buf f, uint64_t from, struct kof_script_info *info);
+void kof_svr_islands(kof_buf f, uint64_t from, uint8_t kind, struct kof_script_info *info);
 
 #endif /* KOFENG_SCRIPTS_SVRPAGE_PARSE_H */

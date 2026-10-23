@@ -20,6 +20,7 @@
 #include <kofmod/script.h>
 
 #include "../../../kofcore/kofcore.h"
+#include <textual/textual.h>
 
 /* Case-insensitive compare of a fixed-length tag, for "<?PHP" and friends. */
 int kof_txt_tag_at(kof_buf f, uint64_t at, const char *tag, uint32_t len);
@@ -55,6 +56,44 @@ uint64_t kof_txt_find(kof_buf f, uint64_t from, uint64_t to,
 		      const char *tag, uint32_t len);
 
 /*
+ * THE ">" THAT ENDS A TAG whose attributes begin at `at`, a ">" inside a quoted attribute value not counting ("arguments=\"/c dir > out.txt\""
+ * is the shape a shell in a page has, and a walk that stopped at the first ">" would cut the tag in half). The offset of the ">", or `end`
+ * when there is none before it. The one reader of a tag's end for the html and coldfusion carvers.
+ */
+uint64_t kof_txt_tag_gt(kof_buf f, uint64_t at, uint64_t end);
+
+/*
+ * WHICH OF UP TO 32 MARKERS A TEXT HOLDS, in ONE walk of the window and not one walk each. What a tag-driven kind test (a server page's
+ * jsp/aspx/asp, a Windows script's psh/js/vbs) depends on is WHICH markers are present somewhere in [0, look) - never where or how many - so the
+ * presences are collected together and the caller's few tests are applied to them afterwards.
+ *
+ *   tag[]    the markers, matched with the fold of kof_txt_tag_at; `grp` 0 is the group that decides on its own.
+ *   first[]  by byte, which markers can BEGIN there (both cases of a letter), so a byte that begins none costs one load and a test.
+ *   n        how many markers `tag` holds (at most 32).
+ *   veto     optional: asked for a marker of `veto_mask` that matched at `at`; 1 says that match is no evidence, it is not recorded
+ *            (a marker that said nothing must not count towards anything later).
+ * A position whose first byte begins markers is tested against their SECOND and THIRD bytes through two small tables built from `tag` at the head of each call (so the
+ * marker list is the one source: no table of the pairs to keep in step with it), and only a marker that agrees on all three is compared in full - the 14 " -x " markers
+ * of the tagless list begin at every space of a shell script, and each used to be a call that failed on its second byte.
+ * Answers the bitmask of the markers seen. `*decided` is set - and the walk stops - at the first group-0 marker; the others do NOT stop it,
+ * because a group-0 marker later in the text still outranks a group-1 one found first.
+ */
+struct kof_txt_tag {
+	const char *s;
+	uint8_t     len, grp;
+};
+
+struct kof_txt_tags {
+	const struct kof_txt_tag *tag;
+	uint32_t                  n;
+	const uint32_t           *first;        /* 256 entries */
+	uint32_t                  veto_mask;
+	int                     (*veto)(kof_buf f, uint64_t at);
+};
+
+uint32_t kof_txt_tags_seen(kof_buf f, uint64_t look, const struct kof_txt_tags *ts, int *decided);
+
+/*
  * Record one code island, in file order.
  *
  * Answers 0 when the table is full, which is a caller's signal to stop rather
@@ -86,6 +125,16 @@ int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len);
  * of blanks between and around islands, one line, no newline.)
  */
 int kof_script_is_block(kof_buf f, uint64_t open, uint64_t end);
+
+/*
+ * THE ISLANDS OF A PAGE, AS THE LIB'S LEXER READS THEM (kgenome_textual_islands): the one reader of where code is in php, asp, aspx and jsp. A "<?php ... ?>" or
+ * "<% ... %>" island is recorded with its delimiters when it is a block (kof_script_is_block) or does not close; a server <script> element is recorded
+ * as its BODY (the attributes of its tag are markup: running the server language's spacing rules over `Language="c#" runat="server"` would close it
+ * into one token) and only when it closes. `from` is where code may begin: nothing before it is an island. Stops when the table is full.
+ * php_parse.c and svrpage_parse.c each walked the bytes for this themselves; they read strings, comments and heredocs differently from the lexer the form
+ * is made with, and from each other (docs/textual_pipeline.txt lists where, measured).
+ */
+void kof_isl_lex(kof_buf f, uint64_t from, struct kof_script_info *info, uint32_t lang);
 
 /*
  * Close the list against the end of the object.

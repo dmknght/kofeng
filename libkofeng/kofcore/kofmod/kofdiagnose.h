@@ -15,16 +15,15 @@
  * DOES THIS OBJECT CARRY A DIAGNOSE.
  *
  *     if (kof_diag(DIAG_RWX_EXEC))
- *             KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
+ *             kof_debug("rwx-exec", 0);
  *
- * A diagnose describes WHAT THE CODE DOES and names no family; the rule
- * that reads it is where the verdict and the name live. That split is the
+ * A diagnose describes WHAT THE CODE DOES and names no family; the disease it
+ * declares is where the verdict and the name come from. That split is the
  * whole point of the two: the shape of a self-unpacking loader has not
  * changed in twenty years, and a family name changes weekly.
  *
- * ONE DIAGNOSE IS A GENERIC DETECTION. Several named together is a
- * narrower one, and no new mechanism is needed for either - `&&` is the
- * same `&&` every other rule uses.
+ * Several diagnoses named together are a narrower question, and no new
+ * mechanism is needed - `&&` is the same `&&` every other condition uses.
  *
  * THE NAME IS WRITTEN AS AN IDENTIFIER, not as a string: the macro
  * stringifies it and hashes it the same way the loader hashed the
@@ -43,7 +42,7 @@
  * THE ID OF A DIAGNOSE, FROM ITS NAME.
  *
  *     if (kof_diag(KOF_DIAG_ID("trojan_meterp_00")))
- *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *             kof_debug("trojan-meterp", 0);
  *
  * A HASH AND NOT A REGISTRY, which is the convention this tree already
  * settled on for heuristic variants: "stable across rebuilds without a
@@ -90,7 +89,7 @@ static inline uint16_t kof_diag_id_(const char *s)
  *
  *     if (kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_MEM_EXECSYSCALL,
  *                        DIAG_NET_RECVSYSCALL))
- *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *             kof_debug("stager", 0);
  *
  * Both matched AND one node of capability `cap` was bound by both.
  *
@@ -108,7 +107,7 @@ static inline uint16_t kof_diag_id_(const char *s)
  * DOES THIS DIAGNOSE CARRY THESE NAMES.
  *
  *     if (kof_diag_str_any(DIAG_LKM_KPROBE_RESOLVE, "sys_call_table"))
- *             KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
+ *             kof_debug("kprobe-resolve", 0);
  *
  *     kof_diag_str_all(DIAG_X, "a", "b")
  *

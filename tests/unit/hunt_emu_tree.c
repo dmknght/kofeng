@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "asking_db.h"
 
 static int fails;
 
@@ -281,7 +282,7 @@ static void scan(struct kof_engine *eng, const uint8_t *p, size_t n, uint64_t ma
 
 int main(void)
 {
-	struct kof_engine *eng = keng_open("build/release/databases");
+	struct kof_engine *eng = keng_open(ad_db_asking());
 	struct run one, flat, nested, big, host;
 	size_t n;
 	uint8_t *z, *inner[10];

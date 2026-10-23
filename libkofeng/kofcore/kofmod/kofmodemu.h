@@ -12,6 +12,14 @@
 #include "kofctx.h"
 
 /*
+ * What a producer may ask the engine to do with the child it is about to make: a
+ * mask, so the vocabulary can grow without moving a value.
+ */
+enum kof_eng_want {
+	KOF_ENG_USE_EMU = 1u << 0   /* interpret this object's entry point */
+};
+
+/*
  * Declare what the next child needs and from what --heur level up.
  *
  *     kunp_emu_want(KOF_ENG_USE_EMU, 2);

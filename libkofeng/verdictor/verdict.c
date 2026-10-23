@@ -1,12 +1,11 @@
 /*
- * verdictor/verdict.c - naming a finding: the verdict word, the target, the family
- * and what the engine says about how it was reached.
+ * verdictor/verdict.c - how a verdict is spelled: the verdict word, the target, the type
+ * and behaviour and what the engine says about how it was reached.
  *
- * kverdict_* compose the string once, forward, and record where each part landed, so
- * nothing downstream searches for a separator. Nothing here reads the scanner: what a
- * name is made of is passed in. Which method word a finding carries and which finding
- * owns the object's one verdict slot are decided where the scan state is - see
- * scanners/scan_verdict.c.
+ * kof_verdict_name composes the string once, forward, and records where each part
+ * landed, so nothing downstream searches for a separator. Nothing here reads the scanner: what a
+ * name is made of is passed in. Which diseases an object has and which diagnoses
+ * matched are collected where the scan state is - see scanners/scan_verdict.c.
  */
 
 #define _GNU_SOURCE
@@ -20,43 +19,9 @@
 #include "verdict.h"
 #include "../kofcore/kofmod/kofsig.h"
 #include "../kofcore/kofmod/script.h"
+#include "../kofcore/kofmod/kofdiagtree.h"   /* KOF_DIAG_DISEASE_LEN */
 #include "../analyzers/parsers/kofformat.h"
 
-/*
- * The one spelling. See kverdict_compose in kofeng.h for why it is a function.
- *
- * "#" between the family and the variant, not "-": a family name may contain a
- * hyphen and several in bases/ do, so the old separator could not be told from
- * the name around it by eye or by anything reading the string back. "#" appears
- * in no family and in no variant.
- */
-void kverdict_compose(char *out, size_t cap, const char *target,
-		      const char *maltype, const char *family,
-		      const char *variant)
-{
-	int has_t = target && target[0];
-	int has_v = variant && variant[0];
-
-	if (!out || !cap)
-		return;
-	if (has_t && has_v)
-		snprintf(out, cap, "%s/%s:%s#%s", target, maltype, family,
-			 variant);
-	else if (has_t)
-		snprintf(out, cap, "%s/%s:%s", target, maltype, family);
-	else if (has_v)
-		snprintf(out, cap, "%s:%s#%s", maltype, family, variant);
-	else
-		snprintf(out, cap, "%s:%s", maltype, family);
-}
-
-/*
- * Compose onto a finding, and say where each part went.
- *
- * Written once, forward, so the offsets fall out of the writing rather than
- * being searched for afterwards - which is the whole point: nothing downstream
- * should ever have to look for a separator this function just placed.
- */
 /*
  * `room` is how many characters this part may take, and the name's own end is the
  * other bound. A part that does not fit sets `name_cut` on the finding - the
@@ -103,10 +68,10 @@ static size_t slen(const char *s)
  * WHAT THE FAMILY MAY TAKE: what is left of the name once every other part and
  * its separator is written. The family is the part that gives, because it is the
  * only one whose length the pack builder bounds loosely (KOF_NAME_MAX_LEN, 191
- * characters) while the variant, the shape and the reason are what tell two rules
- * of one family apart - the identity of the rule, which a cut at the tail used to
- * take with no word. `rest` is those other bytes. When even they do not fit the
- * family gets nothing to keep and the old tail cut applies (and is flagged).
+ * characters) while the engine word and the reason are what say how the verdict was
+ * reached, which a cut at the tail would take with no word. `rest` is those other
+ * bytes. When even they do not fit the family gets nothing to keep and the tail cut
+ * applies (and is flagged).
  */
 static size_t family_room(size_t rest)
 {
@@ -115,63 +80,16 @@ static size_t family_room(size_t rest)
 	return rest < total ? total - rest : 0u;
 }
 
-void kverdict_name(struct kof_finding *f, const char *target,
-		      const char *maltype, const char *family,
-		      const char *variant, const char *shape)
-{
-	size_t at = 0, rest;
-
-	if (!f)
-		return;
-	f->target.at = f->target.n = 0;
-	/* The reason too: kof_verdict_name writes it and this one does not, so a finding
-	 * that was named with a reason and then re-named here kept the old span, pointing
-	 * into a name that no longer had that text there (api_engine_verdict.c). */
-	f->maltype = f->family = f->variant = f->shape = f->reason = f->target;
-	f->name_cut = 0;
-	rest = (target && target[0] ? slen(target) + 1u : 0u) + slen(maltype) + 1u +
-	       (variant && variant[0] ? 1u + slen(variant) : 0u) +
-	       (shape && shape[0] ? 1u + slen(shape) : 0u);
-
-	if (target && target[0]) {
-		span_put(f, &f->target, &at, target);
-		sep_put(f, &at, '/');
-	}
-	span_put(f, &f->maltype, &at, maltype);
-	sep_put(f, &at, ':');
-	span_put_n(f, &f->family, &at, family, family_room(rest) ? family_room(rest) : (size_t)-1);
-	if (variant && variant[0]) {
-		sep_put(f, &at, '#');
-		span_put(f, &f->variant, &at, variant);
-	}
-	if (shape && shape[0]) {
-		/*
-		 * "!" AND NOT "?".
-		 *
-		 * The mark says HOW the verdict was reached - a shape a
-		 * heuristic recognised, a similarity measurement - and "?"
-		 * reads as doubt about the whole name rather than as a label on
-		 * the part after it. A reader scanning a log sees
-		 * "Heur:Meterp#3!Shellcode" as a finding with its method
-		 * attached, where the same line with a question mark reads as
-		 * the engine being unsure it found anything.
-		 */
-		sep_put(f, &at, '!');
-		span_put(f, &f->shape, &at, shape);
-	}
-	f->name[at] = 0;
-}
-
 /*
  * GET THE VERDICT NAME - see kofeng.h for the form and why it lives here.
  *
  * Written once, forward, so every span falls out of the writing. The fields
- * it reads are the enums on the finding; the three it is handed are the ones
- * that cannot be enums - a family a researcher chose, a variant, and a
- * reason some findings have and most do not.
+ * it reads are the enums on the finding; the two it is handed are the ones
+ * that cannot be enums - a behaviour a researcher chose, and a reason some
+ * verdicts have and most do not.
  */
 void kof_verdict_name(struct kof_finding *f, const char *family,
-		      const char *variant, const char *reason)
+		      const char *reason)
 {
 	char tgt[32];
 	size_t at = 0, rest;
@@ -179,7 +97,7 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 	if (!f)
 		return;
 	f->target.at = f->target.n = 0;
-	f->maltype = f->family = f->variant = f->shape = f->reason = f->target;
+	f->maltype = f->family = f->shape = f->reason = f->target;
 	f->name_cut = 0;
 
 	/*
@@ -195,7 +113,7 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 	 * rather than semantic: '#' is the wider glyph, so it makes the
 	 * stronger break, and the strongest break in this name is between
 	 * how sure the engine is and everything else. What follows -
-	 * family, variant, engine - is one run about one thing, and the
+	 * family, engine - is one run about one thing, and the
 	 * narrow '!' keeps it reading as a run.
 	 */
 	sep_put(f, &at, '#');
@@ -203,8 +121,7 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 	kverdict_target(tgt, sizeof tgt, f->fmt, f->arch);
 	/* Everything but the family, so the family is what gives (see family_room). */
 	rest = slen(kof_verdict_word(f->verdict)) + 1u + (tgt[0] ? strlen(tgt) + 1u : 0u) +
-	       slen(f->type_known ? kof_maltype_name(f->type) : "Heur") + 1u +
-	       (variant && variant[0] ? 1u + slen(variant) : 0u) +
+	       slen(kof_maltype_name(f->type)) + 1u +
 	       (f->engine != (uint8_t)KOF_ENGINE_NONE ? 1u + slen(kof_engine_name(f->engine)) : 0u) +
 	       (reason && reason[0] ? 1u + slen(reason) : 0u);
 	if (tgt[0]) {
@@ -213,26 +130,13 @@ void kof_verdict_name(struct kof_finding *f, const char *family,
 	}
 
 	/*
-	 * WHAT IT IS. A rule that recognised a shape has not established a
-	 * class and says so - `type_known` is 0 - and then the word is the
-	 * one the vocabulary already has for "a rule, not a signature".
-	 * Writing a maltype there would be claiming something nobody did.
+	 * WHAT IT IS. A type the database does not name reads "Malware" - see
+	 * kof_maltype_name - and is never left out.
 	 */
-	span_put(f, &f->maltype, &at,
-		 f->type_known ? kof_maltype_name(f->type) : "Heur");
+	span_put(f, &f->maltype, &at, kof_maltype_name(f->type));
 	sep_put(f, &at, ':');
 	span_put_n(f, &f->family, &at, family, family_room(rest) ? family_room(rest) : (size_t)-1);
 
-	if (variant && variant[0]) {
-		/*
-		 * A DOT, because a variant is part of the family's name and
-		 * not a mark against it: "Mirai.01" reads as one name with a
-		 * generation, where "Mirai!01" reads as two things stuck
-		 * together.
-		 */
-		sep_put(f, &at, '.');
-		span_put(f, &f->variant, &at, variant);
-	}
 	if (f->engine != (uint8_t)KOF_ENGINE_NONE) {
 		/* Attached, not separated: how it was found is an addition
 		 * to the name above it, not a new field of equal weight. */
@@ -285,6 +189,104 @@ void kof_object_label(uint32_t entry_kind, const char *packer, uint8_t format,
 	else
 		w = kof_format_name(format);
 	snprintf(out, cap, "%s", w);
+}
+
+/* ---- the verdict of an object, from its diseases ------------------------------ */
+
+/* How many parts a behaviour path has: "flood-network/raw-header" is two. */
+static unsigned dis_parts(const struct kof_verdict_disease *d)
+{
+	unsigned n = 1;
+	const char *p;
+
+	if (!d->name || !d->name[0])
+		return 0;
+	for (p = d->name; *p; p++)
+		n += *p == '/';
+	return n;
+}
+
+/* Whether `a` leads `b`: more parts, then the lower type, then the lower id. */
+static int dis_leads(const struct kof_verdict_disease *a, const struct kof_verdict_disease *b)
+{
+	unsigned pa = dis_parts(a), pb = dis_parts(b);
+
+	if (pa != pb)
+		return pa > pb;
+	if (a->type != b->type)
+		return a->type < b->type;
+	return a->id < b->id;
+}
+
+/*
+ * THE OBJECT'S VERDICT, from the diseases it has. Detection is one disease or more
+ * (an OR: the first is enough). The name is a function of the diseases' type and
+ * behaviour and of nothing else, so the same set of diseases is always called the
+ * same thing:
+ *
+ *   <Type>:<behaviour>[?<other types>]
+ *
+ * The LEAD disease is the most specific - the behaviour path with the most parts,
+ * then the lower type, then the lower id. Its type is the Type, its behaviour (the
+ * path, '/' written '.') the family slot. Types the other diseases carry that the
+ * lead's does not are the reason, joined with '+', in the order the types are
+ * listed. A disease the database does not name is typed "Malware" and called
+ * "unnamed" rather than left out: nothing found is dropped from the name's inputs.
+ *
+ * The finding carries what it was made of - the diseases and the diagnoses that
+ * matched, each bounded by KOF_VERDICT_TRACE and with its true total beside it.
+ */
+void kof_verdict_make(const struct kof_verdict_in *in, struct kof_finding *f)
+{
+	const struct kof_verdict_disease *lead = NULL;
+	char family[KOF_DIAG_DISEASE_LEN + 2u], rest[96];
+	uint32_t i, others = 0, t;
+	size_t at = 0;
+
+	memset(f, 0, sizeof *f);
+	f->fmt = in->fmt;
+	f->arch = in->arch;
+	f->engine = (uint8_t)(in->n_diag ? KOF_ENGINE_DIAGNOSE : KOF_ENGINE_NONE);
+	f->verdict = (uint8_t)KOF_VERDICT_INFECTED;
+	for (i = 0; i < in->n_dis; i++)
+		if (!lead || dis_leads(&in->dis[i], lead))
+			lead = &in->dis[i];
+	f->type = (uint8_t)(lead && lead->type < (uint8_t)KOF_MALTYPE_COUNT
+			    ? lead->type : (uint8_t)KOF_MALTYPE_COUNT);
+	snprintf(family, sizeof family, "%s", lead && lead->name && lead->name[0]
+		 ? lead->name : "unnamed");
+	for (i = 0; family[i]; i++)
+		if (family[i] == '/')
+			family[i] = '.';
+	for (i = 0; i < in->n_dis; i++)
+		if (in->dis[i].type < (uint8_t)KOF_MALTYPE_COUNT &&
+		    in->dis[i].type != f->type)
+			others |= 1u << in->dis[i].type;
+	rest[0] = 0;
+	for (t = 0; t < (uint32_t)KOF_MALTYPE_COUNT; t++) {
+		const char *w;
+
+		if (!((others >> t) & 1u))
+			continue;
+		w = kof_maltype_name(t);
+		if (at + strlen(w) + 2u >= sizeof rest)
+			break;
+		if (at)
+			rest[at++] = '+';
+		memcpy(rest + at, w, strlen(w));
+		at += strlen(w);
+		rest[at] = 0;
+	}
+	kof_verdict_name(f, family, rest[0] ? rest : NULL);
+
+	f->disease_total = in->n_dis;
+	f->n_disease = in->n_dis < KOF_VERDICT_TRACE ? in->n_dis : KOF_VERDICT_TRACE;
+	for (i = 0; i < f->n_disease; i++)
+		f->disease[i] = in->dis[i].id;
+	f->diag_total = in->n_diag;
+	f->n_diag = in->n_diag < KOF_VERDICT_TRACE ? in->n_diag : KOF_VERDICT_TRACE;
+	for (i = 0; i < f->n_diag; i++)
+		f->diag[i] = in->diag[i];
 }
 
 /* ---- one verdict per top-level file ---------------------------------------- */
@@ -418,23 +420,9 @@ static struct kverdict_file *file_get(kverdict_filemap *m, const char *file, siz
 	e = &m->arr[m->n];
 	memset(e, 0, sizeof *e);
 	e->file = copy;
-	e->level = -1;
 	m->idx[slot] = (uint32_t)(m->n + 1u);
 	m->n++;
 	return e;
-}
-
-/* The worst of an object's findings, by rank - never by the numbers of the levels. */
-static const struct kof_finding *worst_finding(const struct kof_result *res)
-{
-	const struct kof_finding *w = NULL;
-	uint32_t i;
-
-	for (i = 0; i < res->n; i++)
-		if (!w || kverdict_level_rank(res->v[i].level) >
-			  kverdict_level_rank(w->level))
-			w = &res->v[i];
-	return w;
 }
 
 struct kverdict_file *kverdict_filemap_fold(kverdict_filemap *m, const char *object,
@@ -442,7 +430,6 @@ struct kverdict_file *kverdict_filemap_fold(kverdict_filemap *m, const char *obj
 					    int keep_clean)
 {
 	size_t flen;
-	const struct kof_finding *w;
 	struct kverdict_file *e;
 
 	if (!m || !object || !res)
@@ -452,35 +439,25 @@ struct kverdict_file *kverdict_filemap_fold(kverdict_filemap *m, const char *obj
 	 * separator, the one the engine puts between a parent and what it produced. */
 	if (flen == strlen(object))
 		m->files++;
-	/* Non-clean objects always get an entry so the file is counted, and so does an
-	 * object nothing was eligible for - it is not clean, and without an entry it would
-	 * vanish into the clean count by subtraction. */
-	if (!(res->n || res->broken || !res->examined || keep_clean))
+	/* An object with a verdict, a broken reason or no module eligible for it always
+	 * gets an entry: it is not clean, and without one it would vanish into the clean
+	 * count by subtraction. Evidence alone (kof_result.v) is not a verdict and
+	 * does not make an entry. */
+	if (!(res->has_verdict || res->broken || !res->examined || keep_clean))
 		return NULL;
 	e = file_get(m, object, flen);
 	if (!e)
 		return NULL;
-	w = worst_finding(res);
-	if (w && kverdict_level_rank(w->level) > kverdict_level_rank((uint32_t)e->level)) {
-		e->level = (int)w->level;
-		snprintf(e->name, sizeof e->name, "%s", w->name);
-		/* The shape when the rule offered one, the family when it did not - the choice
-		 * made on the engine's spans and not on the punctuation between them. */
-		e->kind[0] = 0;
-		if (kverdict_is_heur(w)) {
-			const struct kof_name_span *k = w->shape.n ? &w->shape : &w->family;
-			/*
-			 * THE SPAN IS CLAMPED TO THE NAME. It is two 16-bit numbers a module's
-			 * finding carries, and a finding whose span points outside its name
-			 * made "%.*s" read past the array. The name is NUL-terminated inside
-			 * its own array, so the bound is where that NUL is.
-			 */
-			size_t nl = strnlen(w->name, sizeof w->name);
-			size_t at = k->at < nl ? k->at : nl;
-			size_t n = k->n < nl - at ? k->n : nl - at;
+	/* The file's verdict is the first one made in its tree: the walk is parent
+	 * first, and a verdict has no rank - what an object is called is a function
+	 * of its diseases and of nothing else. */
+	if (res->has_verdict && !e->has_verdict) {
+		/* bounded by the array the name lives in: a finding handed in from elsewhere
+		 * need not be terminated */
+		size_t nl = strnlen(res->verdict.name, sizeof res->verdict.name);
 
-			snprintf(e->kind, sizeof e->kind, "%.*s", (int)n, w->name + at);
-		}
+		e->has_verdict = 1;
+		snprintf(e->name, sizeof e->name, "%.*s", (int)nl, res->verdict.name);
 	}
 	if (res->broken && !e->broken)
 		e->broken = res->broken;

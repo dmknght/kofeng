@@ -168,14 +168,14 @@ celllysis/nucleo.h                 func   kgenome_nucleo_arg_is_flags           
 celllysis/nucleo.h                 func   kgenome_nucleo_cap_generic                   UNTESTED                           api_celllysis.c, api_constants.c
 celllysis/nucleo.h                 func   kgenome_nucleo_cap_named                     UNTESTED                           api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_cap_of_call                   UNTESTED                           api_celllysis.c
-celllysis/nucleo.h                 func   kgenome_nucleo_cap_of_name                   diag_pe.c                          api_celllysis.c, hostile_lifetime.c
+celllysis/nucleo.h                 func   kgenome_nucleo_cap_of_name                   diag_pe.c                          api_celllysis.c, hostile_lifetime.c, nucleo_<language>_names.c (13 tests, through nucleo_names_check.h)
 celllysis/nucleo.h                 func   kgenome_nucleo_cap_of_sockcall               UNTESTED                           api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_cap_of_syscall                cell_const.c, diag_entry.c         api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_cap_of_syscall_abi            UNTESTED                           api_celllysis.c, hostile_lifetime.c
 celllysis/nucleo.h                 func   kgenome_nucleo_hands_on                      UNTESTED                           api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_name_arg                      UNTESTED                           api_celllysis.c
-celllysis/nucleo.h                 func   kgenome_nucleo_name_id                       UNTESTED                           api_celllysis.c
-celllysis/nucleo.h                 func   kgenome_nucleo_name_of                       UNTESTED                           api_celllysis.c
+celllysis/nucleo.h                 func   kgenome_nucleo_name_id                       UNTESTED                           api_celllysis.c, nucleo_<language>_names.c (13 tests, through nucleo_names_check.h)
+celllysis/nucleo.h                 func   kgenome_nucleo_name_of                       UNTESTED                           api_celllysis.c, nucleo_<language>_names.c (13 tests, through nucleo_names_check.h)
 celllysis/nucleo.h                 func   kgenome_nucleo_sock_nonblock                 UNTESTED                           api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_sockcall_nonblock             UNTESTED                           api_celllysis.c
 celllysis/nucleo.h                 func   kgenome_nucleo_sys_name                      UNTESTED                           api_celllysis.c
@@ -817,3 +817,81 @@ phenotype/emu_unpack.h             type   struct kgenome_emu_patch              
 phenotype/emu_unpack.h             type   struct kgenome_emu_shim                      UNTESTED                           (through its members)
 phenotype/emu_unpack.h             type   struct kgenome_emu_unp_pe_req                emu_decl.c, emu_imptab.c, emu_oep.c... api_unpack.c
 phenotype/emu_unpack.h             type   struct kgenome_emu_unp_report                emu_decl.c, emu_gate.c, emu_imptab.c... api_unpack.c
+textual/textual.h                  func   kgenome_textual_lex                          UNTESTED                           api_textual.c
+textual/textual.h                  func   kgenome_textual_kind_name                    UNTESTED                           api_textual.c
+textual/textual_status.h           type   enum kgenome_textual_status                  UNTESTED                           api_textual.c
+textual/textual_span.h             type   enum kgenome_textual_kind                    UNTESTED                           api_textual.c
+textual/textual.h                  type   enum kgenome_textual_lang_id                 UNTESTED                           api_textual.c
+textual/textual_span.h             type   struct kgenome_textual_span                  UNTESTED                           api_textual.c
+textual/textual.h                  type   struct kgenome_textual_lex_req               UNTESTED                           api_textual.c
+textual/textual.h                  type   struct kgenome_textual_lex_res               UNTESTED                           api_textual.c
+textual/textual.h                  type   kgenome_textual_sink                         UNTESTED                           api_textual.c
+textual/textual_span.h             macro  KGENOME_TEXTUAL_F_INTERP                     UNTESTED                           api_textual.c
+textual/textual_span.h             macro  KGENOME_TEXTUAL_F_OPEN                       UNTESTED                           api_textual.c
+textual/textual_span.h             macro  KGENOME_TEXTUAL_F_HERE                       UNTESTED                           api_textual.c
+textual/textual.h                  func   kgenome_textual_form                         UNTESTED                           api_textual.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_FORM_CAP                     UNTESTED                           api_textual.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_FRAGMENT                     UNTESTED                           api_textual.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_CHAIN_MAX                    UNTESTED                           api_textual.c
+textual/textual.h                  type   enum kgenome_textual_decoder                 UNTESTED                           api_textual.c
+textual/textual.h                  type   kgenome_textual_decode_fn                    UNTESTED                           api_textual.c
+textual/textual.h                  type   struct kgenome_textual_form_req              UNTESTED                           api_textual.c
+textual/textual.h                  type   struct kgenome_textual_form_res              UNTESTED                           api_textual.c
+textual/textual_span.h             macro  KGENOME_TEXTUAL_F_CLOSE                      UNTESTED                           api_textual.c
+textual/textual.h                  func   kgenome_textual_value                        UNTESTED                           textual_value.c
+textual/textual.h                  type   struct kgenome_textual_value_req             UNTESTED                           textual_value.c
+textual/textual.h                  type   struct kgenome_textual_value_res             UNTESTED                           textual_value.c
+textual/textual_status.h           type   enum kgenome_textual_status                  UNTESTED                           textual_value.c
+textual/textual.h                  type   kgenome_textual_decode_fn                    UNTESTED                           textual_value.c
+
+phenotype/diag_scan.h              func   kgenome_diag_scan_text                          objctx_diag_text.c                 diag_text.c
+phenotype/diag_scan.h              func   kgenome_diag_text_names                         script_sym.c                       diag_text.c
+phenotype/diag_scan.h              macro  KGENOME_DIAG_RUN_TEXT                           diag_scan.c                        diag_text.c
+phenotype/diag_vocab.h             enum   KGENOME_DIAG_ROLE_VALUE                         diag_hit.c, diag_text.c            diag_text.c, diag_roles.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_ELF                            nucleo.c, objctx_diag_text.c       api_celllysis.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_PE                             nucleo.c, diag_pe.c                api_celllysis.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_PHP                            nucleo.c, diag_text.c              api_celllysis.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_JS                             UNTESTED                           api_celllysis.c, nucleo_js_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_PY                             UNTESTED                           api_celllysis.c, nucleo_py_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_PERL                           UNTESTED                           api_celllysis.c, nucleo_perl_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_RUBY                           UNTESTED                           api_celllysis.c, nucleo_ruby_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_LUA                            UNTESTED                           api_celllysis.c, nucleo_lua_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_TCL                            UNTESTED                           api_celllysis.c, nucleo_tcl_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_SH                             UNTESTED                           api_celllysis.c, nucleo_sh_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_BAT                            UNTESTED                           api_celllysis.c, nucleo_bat_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_PSH                            UNTESTED                           api_celllysis.c, nucleo_psh_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_VBS                            UNTESTED                           api_celllysis.c, nucleo_vbs_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_DOTNET                         UNTESTED                           api_celllysis.c, nucleo_dotnet_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_JAVA                           UNTESTED                           api_celllysis.c, nucleo_java_names.c
+celllysis/nucleo.h                 enum   KGENOME_NUCLEO_T_CFML                           UNTESTED                           api_celllysis.c, nucleo_cfml_names.c
+textual/textual.h                  enum   KGENOME_TEXTUAL_DEC_RAWURL                    objctx_script_dec.c, script_apply.c  diag_text_built.c, textual_php_strings.c (through the engine)
+textual/textual.h                  enum   KGENOME_TEXTUAL_DEC_REPLACE..RTRIM            script_apply.c, php_fn.c           diag_text_built.c
+textual/textual.h                  type   struct kgenome_textual_call                   script_apply.c, diag_text_eval.c   diag_text_built.c
+textual/textual.h                  type   kgenome_textual_apply_fn                      diag_text_eval.c                   diag_text_built.c (with the engine's hook), diag_text.c (without: no call is followed)
+textual/textual.h                  type   struct kgenome_textual_fn                     textual_fn.c, diag_text_eval.c     diag_text_built.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_FN_NONE                       php_fn.c, diag_text_eval.c         diag_text_built.c
+textual/textual.h                  func   kgenome_textual_fn_find                       diag_text_eval.c                   diag_text_built.c (every row of the php table, any case; calls the table has no place for)
+textual/textual.h                  func   kgenome_textual_fn_shapes                     diag_text_eval_ops.c               script_methods.c (every language's shapes), textual_fn_rules.c
+textual/textual.h                  func   kgenome_textual_fn_row                        diag_text_eval_ops.c               script_methods.c (the table walked to its end, a language with none)
+textual/textual.h                  enum   KGENOME_TEXTUAL_SHAPE_CALL..CAST              php_fn.c .. psh_fn.c, diag_text_eval_ops.c   script_methods.c (a row of each shape in a table), textual_fn_rules.c
+textual/textual.h                  enum   KGENOME_TEXTUAL_DEC_REPEAT..JOIN              script_apply.c, the <lang>_fn.c tables       script_methods.c, strfn_lists.c (through the engine's hook)
+textual/textual.h                  macro  KGENOME_TEXTUAL_FN_ENDIDX..NOGROUP (the row flags: ASCII BASE1 NONNEG ENDIDX SWAP FROMEND NOEMPTY FIRST ICASE UNIQUE ONECHAR STRICT NUMTYPED MULTI LIST_RECV ONESEP NOPAREN NOGROUP)   textual_fn.c, diag_text_eval_ops.c   textual_fn_rules.c (every start and end -3..9 against each language's rule), script_methods.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_CALL_FIRST, _ICASE, _SET, _DROPTRAIL   textual_fn.c, script_apply.c   script_methods.c, strfn_lists.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_LIST_RIGHT, _DROP_TRAILING, _VARIADIC    textual_fn.c, diag_text_eval_ops.c   script_methods.c
+kofcore/kofbytes.h                 func   kof_bytes_has_any, kof_bytes_has_twice, kof_bytes_ascii   textual_fn.c                 textual_fn_rules.c (every string over three bytes to length 5, every set)
+kofcore/kofstrlist.h               func   kof_strlist_size, kof_strlist_put, kof_strlist_next       strfn.c, diag_text_eval_ops.c   strfn_lists.c (every cut of a list), script_methods.c
+phenotype/diag_scan.h              type   struct kgenome_diag_text_req .apply            diag_text.c                        diag_text.c, diag_text_built.c
+phenotype/diag_scan.h              func   kgenome_diag_text_names (apply argument)      script_sym.c                       diag_text.c
+
+ADDED 2026-10-20 (third change; the totals above are not recounted): the readers of the command languages and their rows.
+textual/textual.h                  func   kgenome_textual_word_read                    sh_cmd.c, bat_cmd.c, tcl_cmd.c     textual_cmd.c (events per word, refusals, every cut), script_cmds.c
+textual/textual.h                  func   kgenome_textual_cmd_read                     sh_cmd.c, bat_cmd.c, tcl_cmd.c     textual_cmd.c (terminators, pipes, and-or, redirections, here-documents, comments, blocks), script_cmds.c
+textual/textual.h                  func   kgenome_textual_cmd_assigns                  sh_cmd.c, bat_cmd.c, tcl_cmd.c     textual_cmd.c (ENV, LOCAL, UNREAD, CALL, RAW, WORDS), script_cmds.c
+textual/textual.h                  func   kgenome_textual_has_words                    textual_cmd.c                      textual_cmd.c
+textual/textual.h                  type   struct kgenome_textual_word_sink, _cmd, _assign, _range   (through the functions)   textual_cmd.c
+textual/textual.h                  enum   KGENOME_TEXTUAL_SHAPE_CMD, _EXPAND           sh_fn.c, bat_fn.c, tcl_fn.c        textual_cmd.c, script_cmds.c
+textual/textual.h                  macro  KGENOME_TEXTUAL_FN_STDIN..BASHSLICE (STDIN SETARG ENDWORD INCL ECHOOPT COLLECT_ALL COLLECT_REST NODASH NOEDGE PREFIXOP PLAINNUM BASHSLICE)   textual_fn.c, diag_text_cmdval.c   script_cmds.c (each flag has a case a mutant of it fails)
+textual/textual.h                  macro  KGENOME_TEXTUAL_CALL_RANGES, _WSLIST, _REUSE, _ESC   textual_fn.c, script_apply.c   script_cmds.c, strfn_shell.c (through the engine's hook)
+textual/textual.h                  macro  KGENOME_TEXTUAL_DEC_CUTHEAD..MAP           script_apply.c, the <lang>_fn.c tables   script_cmds.c
+textual/textual_lang.h             type   struct kgenome_textual_cmd_syntax, kgenome_textual_expand_at   textual_cmd.c   textual_cmd.c
+kofcore/kofbytes.h                 func   kof_bytes_plain_word, kof_bytes_edge_blank, kof_bytes_option   diag_text_cmdval.c   script_cmds.c

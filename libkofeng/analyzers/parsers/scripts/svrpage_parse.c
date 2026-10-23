@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "svrpage_parse.h"
+#include "script_route.h"
 #include "scantext.h"
 
 /*
@@ -42,9 +43,7 @@
  * from these very tags, their upper-case spellings and noise - at every value
  * of `look`.
  */
-struct svr_tag { const char *s; uint8_t len, grp; };
-
-static const struct svr_tag SVR_TAG[16] = {
+static const struct kof_txt_tag SVR_TAG[16] = {
 	/* group 0 - JSP */
 	{ "<jsp:", 5, 0 }, { "<%@ taglib", 10, 0 },
 	{ "language=\"java\"", 15, 0 }, { "java.lang", 9, 0 },
@@ -73,27 +72,15 @@ static const uint32_t SVR_FIRST[256] = {
 	['c'] = SVR_M(13),           ['C'] = SVR_M(13)
 };
 
+static const struct kof_txt_tags SVR_TAGS = { .tag = SVR_TAG, .n = sizeof SVR_TAG / sizeof SVR_TAG[0], .first = SVR_FIRST };
+
 uint8_t kof_svr_kind(kof_buf f, uint64_t look)
 {
-	uint32_t seen = 0;
-	uint64_t i, cap = look < f.n ? look : f.n;
+	int jsp;
+	uint32_t seen = kof_txt_tags_seen(f, look, &SVR_TAGS, &jsp);
 
-	for (i = 0; i < cap; i++) {
-		uint32_t m = SVR_FIRST[f.p[i]] & ~seen;
-
-		while (m) {
-			uint32_t t = (uint32_t)__builtin_ctz(m);
-
-			m &= m - 1u;
-			if (i + SVR_TAG[t].len > cap)
-				continue;
-			if (!kof_txt_tag_at(f, i, SVR_TAG[t].s, SVR_TAG[t].len))
-				continue;
-			seen |= SVR_M(t);
-			if (SVR_TAG[t].grp == 0)
-				return KOF_SCRIPT_JSP;
-		}
-	}
+	if (jsp)
+		return KOF_SCRIPT_JSP;
 	if (seen & SVR_G1)
 		return KOF_SCRIPT_ASPX;
 	if (seen & SVR_G2)
@@ -128,12 +115,7 @@ uint8_t kof_svr_kind(kof_buf f, uint64_t look)
  */
 static int pct_closed(kof_buf f, uint64_t at, uint64_t look)
 {
-	uint64_t j;
-
-	for (j = at + 2u; j + 2u <= look; j++)
-		if (f.p[j] == '%' && f.p[j + 1u] == '>')
-			return 1;
-	return 0;
+	return kof_txt_find(f, at + 2u, look, "%>", 2u) != KOF_TXT_NONE;
 }
 
 /*
@@ -173,15 +155,12 @@ static uint32_t pct_directives(kof_buf f, uint64_t at, uint64_t look)
 	for (;;) {
 		uint64_t j;
 
-		while (i < look && (f.p[i] == ' ' || f.p[i] == '\t' ||
-				    f.p[i] == '\r' || f.p[i] == '\n'))
+		while (i < look && kof_is_blank_byte(f.p[i]))
 			i++;
 		if (!kof_txt_tag_at(f, i, "<%@", 3u))
 			break;
-		for (j = i + 3u; j + 2u <= look; j++)
-			if (f.p[j] == '%' && f.p[j + 1u] == '>')
-				break;
-		if (j + 2u > look)
+		j = kof_txt_find(f, i + 3u, look, "%>", 2u);
+		if (j == KOF_TXT_NONE)
 			break;          /* unterminated - the run stops here */
 		i = j + 2u;
 		/*
@@ -197,86 +176,6 @@ static uint32_t pct_directives(kof_buf f, uint64_t at, uint64_t look)
 		end = i;
 	}
 	return end > at ? (uint32_t)(end - at) : 3u;
-}
-
-/*
- * A SERVER <script> ELEMENT at or after `i`, or f.n when there is none.
- *
- * Reports the CODE, not the element: *body is the byte after the opening tag's
- * ">" and *end is the "<" of the closing tag, so the tags themselves fall into
- * the markup around it.
- *
- * That is deliberate and it is where this differs from "<% ... %>", whose
- * delimiters ARE part of the island. "<%" and "%>" are punctuation the form
- * pass leaves alone; an opening <script> tag is a list of attributes, and
- * running the server language's spacing rules over it would close
- * `Language="c#" runat="server"` up into one token. The attributes are markup
- * and they are treated as markup.
- *
- * WITHOUT A CLOSING TAG IT IS NOT AN ISLAND. Same discipline as pct_closed: the
- * pair is the evidence, not the opener.
- */
-static uint64_t svr_element(kof_buf f, uint64_t i, uint64_t *body, uint64_t *end)
-{
-	/*
-	 * THREE ANSWERS REMEMBERED, SO NO BYTE IS READ FOR EACH CANDIDATE.
-	 * Every one is a fact about the bytes AFTER the candidate, and a later
-	 * candidate only has fewer of them:
-	 *
-	 *   gt   the next ">" at or after the opening tag's end. Candidates
-	 *        that sit inside one tag's attribute list ("<script <script
-	 *        <script ... >") share it. None at all means none for every
-	 *        later candidate, which ends the search.
-	 *   rp   the first "runat" before that ">". Found once and kept while it
-	 *        is still ahead; "none before gt" holds for any later start.
-	 *   no "</script" after one candidate's ">" means none after any later
-	 *        candidate's, so an unclosed element ends the search too.
-	 *
-	 * Without them each of n unclosed or unterminated "<script" openers
-	 * walked to the end of the object: 46 s for 512 KB.
-	 */
-	uint64_t gt = 0, rp = KOF_TXT_NONE;
-	int have_gt = 0, have_rp = 0;
-
-	for (; i + 7u <= f.n; i++) {
-		uint64_t k, s = i + 7u;
-
-		if (!kof_txt_tag_at(f, i, "<script", 7u))
-			continue;
-		if (!have_gt || gt < s) {
-			const uint8_t *h = memchr(f.p + s, '>',
-						  (size_t)(f.n - s));
-
-			gt = h ? (uint64_t)(h - f.p) : f.n;
-			have_gt = 1;
-			have_rp = 0;
-		}
-		if (gt >= f.n)
-			return f.n;
-		/*
-		 * No "runat" is CLIENT-SIDE JAVASCRIPT - the browser runs it
-		 * and the server copies it out. Left in the markup on purpose:
-		 * forming it by the server language's rules would be the same
-		 * mistake as forming html.
-		 *
-		 * The search is [s, gt) for a match that ends before the ">":
-		 * one that crossed it would contain a ">", which no letter of
-		 * the word is.
-		 */
-		if (!have_rp || (rp != KOF_TXT_NONE && rp < s)) {
-			rp = kof_txt_find(f, s, gt, "runat", 5u);
-			have_rp = 1;
-		}
-		if (rp == KOF_TXT_NONE)
-			continue;
-		k = kof_txt_find(f, gt + 1u, f.n, "</script", 8u);
-		if (k == KOF_TXT_NONE)
-			return f.n;
-		*body = gt + 1u;
-		*end = k;
-		return i;
-	}
-	return f.n;
 }
 
 uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
@@ -313,95 +212,17 @@ uint64_t kof_svr_find_tag(kof_buf f, uint64_t look, uint32_t *taglen,
 }
 
 /*
- * The walk. Over the WHOLE object and not just the sniff window: where a page's
- * code is is not a property of the first sixty-four kilobytes, and a shell at
- * the foot of a long template is the case that matters.
- *
- * BOTH FORMS, IN FILE ORDER. Each step asks where the next delimiter run starts
- * and where the next server <script> starts, and takes whichever comes first -
- * so a page that uses both, which is the ordinary ASP.NET shape, comes out as
- * one list of islands rather than as whichever form was looked for.
- *
- * "<%--" IS NOT AN ISLAND. It opens a JSP comment, and a comment is not what the
- * server runs; recorded as code it would be formed by Java's rules and offered
- * to every rule about the program. Skipped, it falls into the gap either side,
- * which is MARKUP - where a comment belongs.
- *
- * An unterminated run takes the rest of the object, for the reason kof_isl_seal
- * gives about the cap.
+ * The walk. Over the WHOLE object and not just the sniff window: where a page's code is is not a property of the first sixty-four kilobytes, and a shell
+ * at the foot of a long template is the case that matters. BOTH FORMS, IN FILE ORDER, as the lib's page lexer reads them (kof_isl_lex): "<% ... %>"
+ * with its delimiters, "<script runat=server>" as its body. "<%--" is not an island: it is a JSP comment, a comment is not what the server runs, and
+ * it falls into the markup gap either side. Interpolation ("<%= total %>" dropped into a table cell) is a value and not a program: a closed island that
+ * does not own its line is not recorded (kof_script_is_block); an element is never glue.
  */
-/*
- * IS THIS ISLAND THE PROGRAM, OR GLUE - the same question php_block answers and
- * the same shape answers it. "<%= total %>" dropped into a table cell is a
- * value, not a program; "<% ... %>" owning its lines is a program.
- *
- * An element island is never glue: <script runat="server"> is how a page
- * carries a whole program, and it is already only the code between the tags.
- */
-void kof_svr_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
+void kof_svr_islands(kof_buf f, uint64_t from, uint8_t kind, struct kof_script_info *info)
 {
-	uint64_t i = from;
-	/*
-	 * WHERE THE NEXT "<%" AND THE NEXT SERVER <script> ARE, kept while they
-	 * are still ahead of the cursor. Each step takes whichever comes first
-	 * and leaves the other where it is; asking again from the cursor made
-	 * every "<% %>" of a page walk to the one <script> at its foot (and
-	 * every <script> to the one "<%"), which is quadratic in the number of
-	 * islands. A position found from an earlier cursor and still at or past
-	 * this one is the answer from this one: nothing was skipped between.
-	 */
-	uint64_t open_c = 0, el_open_c = 0, el_body_c = 0, el_end_c = 0;
-	int have_open = 0, have_el = 0;
+	uint32_t lang = kof_script_textual_lang(kind);
 
-	while (i < f.n && info->n_island < KOF_SCRIPT_MAX_ISLAND) {
-		uint64_t open, close, next;
-		uint64_t e_open, e_body, e_end;
-
-		if (!have_open || open_c < i) {
-			for (open = i; open + 2u <= f.n; open++)
-				if (kof_txt_tag_at(f, open, "<%", 2u))
-					break;
-			if (open + 2u > f.n)
-				open = f.n;
-			open_c = open;
-			have_open = 1;
-		}
-		open = open_c;
-		if (!have_el || el_open_c < i) {
-			el_body_c = el_end_c = 0;
-			el_open_c = svr_element(f, i, &el_body_c, &el_end_c);
-			have_el = 1;
-		}
-		e_open = el_open_c;
-		e_body = el_body_c;
-		e_end = el_end_c;
-		if (open == f.n && e_open == f.n)
-			break;
-
-		if (e_open < open) {
-			/* The tags are markup; the code between them is the
-			 * island. `next` leaves the closing tag in the gap. */
-			if (!kof_isl_add(info, e_body, e_end - e_body))
-				break;
-			next = e_end;
-		} else {
-			for (close = open + 2u; close + 2u <= f.n; close++)
-				if (f.p[close] == '%' && f.p[close + 1u] == '>')
-					break;
-			if (close + 2u > f.n) {
-				if (!kof_txt_tag_at(f, open, "<%--", 4u))
-					kof_isl_add(info, open, f.n - open);
-				break;
-			}
-			if (!kof_txt_tag_at(f, open, "<%--", 4u) &&
-			    kof_script_is_block(f, open, close + 2u) &&
-			    !kof_isl_add(info, open, close + 2u - open))
-				break;
-			next = close + 2u;
-		}
-		if (next <= i)
-			break;          /* no progress: stop rather than spin */
-		i = next;
-	}
-	kof_isl_seal(info, f.n);
+	/* A page that names no language of its own (kind ANY: "<%" and nothing that says asp, aspx or jsp) is read by the row with the most to read - the
+	 * dash comment and the server <script> element, which is what the walk this replaced took every page to be. */
+	kof_isl_lex(f, from, info, lang ? lang : KGENOME_TEXTUAL_LANG_ASPX);
 }

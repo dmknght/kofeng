@@ -172,6 +172,10 @@ struct kgenome_emu_unp_report {
 	 * path, where returning is not how a stub ends.
 	 */
 	int                  returned;
+	/* Calls to names the Windows model lists and does not implement, each answered 0 - see
+	 * kgenome_emu_unmodelled_calls. A run with many of them is not a run of the real environment. */
+	uint32_t             unmodelled;
+	uint32_t             unmodelled_guessed;  /* of them, i386 calls of unknown stdcall count */
 	const char          *detail;     /* the emulator's own last word */
 	/*
 	 * Why no run was attempted at all, or NULL if one was.

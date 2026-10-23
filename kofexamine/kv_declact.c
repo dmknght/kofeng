@@ -121,10 +121,9 @@ uint8_t evt_decl_target(const struct view *v, uint32_t *mask)
 	 * AND THE REGION BIT, from the same classifier the drawer uses, so the
 	 * field the reader dragged text out of is the field this names.
 	 *
-	 * The BIT and not a word. What the row shows and what the emitter
-	 * writes are both derived from it by the editor - rng_name_of for one,
-	 * draft_region_word for the other - so a region word spelled in this
-	 * file would be a third copy, and the one nothing checks.
+	 * The BIT and not a word. What the row shows is derived from it by the
+	 * editor (rng_name_of), so a region word spelled in this file would be a
+	 * second copy, and the one nothing checks.
 	 */
 	box = evt_zones(v, meta, &nm, warn, &nw);
 	if (box >= 0 && kof_evt_field(&v->evt, (unsigned)box, fname,
@@ -223,10 +222,8 @@ void decl_add_text(struct view *v, const char *text, size_t n,
 	 * LOOKED FOR AT ONCE, and said so when it is not there.
 	 *
 	 * Nothing downstream asks whether a declared string is actually IN the
-	 * object: draft_missing_of checks ten things and presence is not one of
-	 * them, so a string that is nowhere still gets a matcher, a condition,
-	 * a generated source and a module that compiles - and never fires. The
-	 * failure has no symptom at all.
+	 * object, so a string that is nowhere still gets a matcher and a
+	 * condition - and never matches. The failure has no symptom at all.
 	 *
 	 * It cannot bite a marker dragged out of the hex pane, because those
 	 * bytes came from the object. It bites every time on text this program

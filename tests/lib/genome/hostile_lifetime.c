@@ -345,7 +345,7 @@ NT(d_funcs,    kgenome_diag_funcs_of(NULL, e.b, e.n, (struct kgenome_func_set *)
 NT(d_code,     kgenome_diag_code_range(NULL, 0, 10, (uint64_t *)&ei))
 NT(n_abi,      kgenome_nucleo_sys_name_abi(NULL, 1))
 NT(n_abi2,     kgenome_nucleo_cap_of_syscall_abi(NULL, 1, NULL, NULL))
-NT(l_cap_none, kgenome_nucleo_cap_of_name(NULL))
+NT(l_cap_none, kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, NULL))
 
 static const struct nt guarded[] = {
 	{ "scan_with(NULL obj)", d_with }, { "scan_with(NULL bytes)", d_with_b }, { "scan_with(size 0)", d_with_z },

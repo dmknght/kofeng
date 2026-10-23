@@ -18,7 +18,6 @@
  *   sc->match    the matchers' state, one set per thread
  *   sc->syms     the symbol block's allocations
  *   sc->diag     the diagnose pools
- *   sc->subject  the subject's verdict slot and the diseases an object has
  *
  * `mutation` (the similarity counters) is the one field that stays at the top
  * level although it belongs in sc->match: kofexamine's inspector reads
@@ -105,7 +104,6 @@ struct kof_scanner {
 	struct kof_scan_match match;   /* the matchers' state */
 	struct kof_scan_syms syms;   /* the symbol block's allocations */
 	struct kof_scan_diag diag;   /* the diagnose pools */
-	struct kof_scan_subject subject;   /* the subject's verdict slot */
 };
 
 #endif

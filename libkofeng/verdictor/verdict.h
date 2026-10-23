@@ -1,5 +1,5 @@
 /*
- * verdict.h - how the verdictor spells a detection, and what an object is called.
+ * verdict.h - how the verdictor spells a verdict, and what an object is called.
  *
  * The functions of verdictor/: the one place the standard name form
  * is written (kofeng.h includes this, so a host still needs only <kofeng.h>).
@@ -18,66 +18,29 @@
 #include <koftypes.h>
 
 /*
- * HOW A DETECTION IS SPELLED, IN ONE PLACE.
- *
- *     kverdict_compose(buf, sizeof buf, "ELF-x64", "Botnet", "Mirai", "Gen")
- *     -> "ELF-x64/Botnet:Mirai#Gen"
- *
- * The engine composes this for every finding, and three other things reproduce
- * it: kofexaminer and kofviewer to show a marker row, and kofinspect to decide
- * WHICH module a scan result belongs to. That last one is not display - it is
- * one half of a string comparison whose other half the engine wrote - so a
- * spelling that drifts there does not look wrong, it silently stops matching.
- *
- * It drifted exactly that way: the family/variant separator moved from "-" to
- * "#" in the engine, kofinspect kept the "-", and every detected sample
- * reported "Hit 0, Skip 1" in the viewer and no verdict at all in kofexaminer
- * while the scanner called the same file infected.
- *
- * `target` and `variant` may be NULL or empty and are left out when they are.
- */
-void kverdict_compose(char *out, size_t cap, const char *target,
-		      const char *maltype, const char *family,
-		      const char *variant);
-
-/*
- * The same composition, onto a finding, recording where each part landed.
- *
- * This is what the engine itself uses; kverdict_compose above stays for a
- * caller that only wants the string - kofinspect builds one to compare against
- * a result it did not produce.
- *
- * `shape` is the heuristic's, appended after a '!'. NULL or empty for a
- * detector's finding, which has no such thing to admit.
- */
-void kverdict_name(struct kof_finding *f, const char *target,
-		      const char *maltype, const char *family,
-		      const char *variant, const char *shape);
-
-/*
  * GET THE VERDICT NAME: the one place the standard form is written.
  *
- *     <verdict>#<target>-<arch>/<Type>:<Family>.<variant>!<engine>?<reason>
+ *     <verdict>#<target>-<arch>/<Type>:<behaviour>!<engine>?<reason>
  *
- *     Infected#PE-x86/Virus:Sality.01!Pattern
- *     Heur#PE-x86/Anomalies:WriteExec!Analyzer
+ * (the word is kof_verdict_word of the finding's verdict; the behaviour is the lead
+ * disease's path with '.' for '/'; the engine word is there only when a diagnose
+ * matched.)
  *
- * EVERY FIELD IS OPTIONAL EXCEPT THE TYPE AND THE FAMILY, and an absent one
- * takes its separator with it - a trailing `#` or a bare `?` would read as a
- * field the engine failed to fill rather than one it had nothing to say in.
+ * EVERY FIELD IS OPTIONAL EXCEPT THE TYPE AND THE BEHAVIOUR, and an absent one
+ * takes its separator with it - a trailing `?` would read as a field the engine
+ * failed to fill rather than one it had nothing to say in.
  *
- * WHY A FUNCTION AND NOT A CONVENTION. The order, the separators and the
- * words were decided in five places in scan.c, each composing the string it
- * needed; a sixth would have decided again. The engine now stores VALUES -
- * see the enums on kof_finding - and this is the only code that knows how
- * they are written down. Change the form here and every reader changes with
- * it, including the ones in other programs.
+ * WHY A FUNCTION AND NOT A CONVENTION. The order, the separators and the words were
+ * once decided in five places, each composing the string it needed. The engine now
+ * stores VALUES - see the enums on kof_finding - and this is the only code that knows
+ * how they are written down. Change the form here and every reader changes with it,
+ * including the ones in other programs.
  *
  * Writes into `f->name` and sets the spans, so a caller that wants a part
  * rather than the line does not search for a separator this just placed.
  */
 void kof_verdict_name(struct kof_finding *f, const char *family,
-		      const char *variant, const char *reason);
+		      const char *reason);
 
 /*
  * WHAT TO CALL AN OBJECT, from the state the engine holds about it.
@@ -105,9 +68,13 @@ void kof_object_label(uint32_t entry_kind, const char *packer, uint8_t format,
  */
 void kverdict_target(char *out, size_t cap, uint8_t format, uint8_t arch);
 
-/* The syndrome verdict as a finding: "Infected <type>:Agent", the Predict and
- * Ambiguous forms, or Unresolved. Call only when synd->n_query is non-zero. */
-void kof_verdict_syndrome(const struct kof_verdict_in *in, struct kof_finding *f);
+/*
+ * THE OBJECT'S VERDICT, from the diseases it has: "<Type>:<behaviour>[?<types>]" as
+ * a finding that also carries the ids of the diagnoses that matched and of the
+ * diseases (kof_finding.diag, .disease). Call only with in->n_dis non-zero. The rule
+ * is written where the function is, and in CLAUDE.md.
+ */
+void kof_verdict_make(const struct kof_verdict_in *in, struct kof_finding *f);
 
 /*
  * ONE VERDICT PER TOP-LEVEL FILE, rolled up from every object inside it.
@@ -115,10 +82,10 @@ void kof_verdict_syndrome(const struct kof_verdict_in *in, struct kof_finding *f
  * A packed or carrying file is scanned as a tree - the file, then whatever the
  * unpackers made of it - and the malware is usually in a child, not the root, so
  * the root's own result is not the file's verdict: reporting it as such calls an
- * infected file clean. A file's verdict is the WORST thing found anywhere in its
- * tree, and a host that wants it should not have to work out how objects belong to
- * files (the name up to the first KOF_OBJ_SEP) or which of three levels outranks
- * which (kverdict_level_rank) - both were rewritten by every tool that wanted one.
+ * infected file clean. A file's verdict is the first verdict made anywhere in its
+ * tree (kof_result.verdict; the walk is parent first), and a host that wants it
+ * should not have to work out how objects belong to files (the name up to the
+ * first KOF_OBJ_SEP). Evidence (kof_result.v) is not read: it is not a verdict.
  *
  * Fed one object at a time, from the on-object callback:
  *
@@ -135,29 +102,24 @@ void kof_verdict_syndrome(const struct kof_verdict_in *in, struct kof_finding *f
  */
 typedef struct kverdict_filemap kverdict_filemap;
 
-#define KVERDICT_FILE_NAME 224u    /* room for a finding's composed name */
-#define KVERDICT_FILE_KIND 48u     /* room for a heuristic's shape or family word */
+#define KVERDICT_FILE_NAME 224u    /* room for a verdict's composed name */
 
 struct kverdict_file {
 	/* The top-level file's name: "a.zip" for the object "a.zip//3:x". Owned by the map. */
 	const char *file;
-	/* The worst KOF_LEVEL_* any object of the file reported, or -1 for none. Ordered by
-	 * kverdict_level_rank - the constants themselves are not in rank order. */
-	int         level;
+	/* 1 when any object of the file had a verdict. */
+	int         has_verdict;
 	/* The first KOF_BROKEN_* reason any object of the file reported, or 0. */
 	uint32_t    broken;
 	/*
 	 * Whether ANY module ran on any object of the file. A file every applicable module
-	 * cleared and a file nothing was eligible for both have no findings, and are not the
+	 * cleared and a file nothing was eligible for both have no verdict, and are not the
 	 * same answer. An OR across the file's objects: a container whose members were
 	 * examined has been examined, even if its own bytes matched nothing.
 	 */
 	int         examined;
-	/* The worst finding's composed name, or empty. */
+	/* The verdict's composed name, or empty. */
 	char        name[KVERDICT_FILE_NAME];
-	/* For a heuristic's worst finding: the shape it recognised, or the family when it
-	 * offered none ("Shellcode", "Truncated"); empty otherwise. */
-	char        kind[KVERDICT_FILE_KIND];
 	/* The caller's own bookkeeping, zero when the entry is made. The engine never reads
 	 * or writes it. */
 	int         host;
@@ -172,7 +134,7 @@ void              kverdict_filemap_free(kverdict_filemap *);
  * `object` is the name the callback was given, `res` what it was given. Returns the
  * file's entry, or NULL when the object left none: an object that is clean and was
  * examined has nothing to roll up, so it touches no entry unless `keep_clean` asks for
- * one (a host that lists every file, clean ones included). An object with a finding, a
+ * one (a host that lists every file, clean ones included). An object with a verdict, a
  * broken reason or no module eligible for it always gets one - it is not clean - and
  * NULL is also what an allocation failure returns.
  *

@@ -62,16 +62,29 @@ static const uint8_t stager32[] = {
 	0x00, 0xcd, 0x80
 };
 
+/* The anomaly model reads the parent's own layout and is not run on a view, so its
+ * finding is the parent's alone; every other finding must be the view's too. */
+static int is_model(const char *name)
+{
+	return strstr(name, "/Anomalies:") != NULL;
+}
+
 static int same_findings(const struct e2e_obj *a, const struct e2e_obj *b)
 {
-	uint32_t i;
+	uint32_t i, j = 0;
 
-	if (a->n != b->n)
-		return 0;
-	for (i = 0; i < a->n && i < E2E_MAX_FIND; i++)
-		if (strcmp(a->find[i], b->find[i]))
+	for (i = 0; i < a->n && i < E2E_MAX_FIND; i++) {
+		if (is_model(a->find[i]))
+			continue;
+		while (j < b->n && j < E2E_MAX_FIND && is_model(b->find[j]))
+			j++;
+		if (j >= b->n || j >= E2E_MAX_FIND || strcmp(a->find[i], b->find[j]))
 			return 0;
-	return 1;
+		j++;
+	}
+	while (j < b->n && j < E2E_MAX_FIND && is_model(b->find[j]))
+		j++;
+	return j == b->n || j >= E2E_MAX_FIND;
 }
 
 static const struct e2e_obj *child_of(const struct e2e *r, uint32_t kind)

@@ -47,6 +47,7 @@
 
 #include <uncoat.h>
 #include "../../unit/known_miss.h"
+#include "../fuzz_kit.h"
 
 /* Built with AddressSanitizer? (gcc defines the macro, clang answers __has_feature.) */
 #if defined(__SANITIZE_ADDRESS__)
@@ -86,15 +87,10 @@ static inline int hv_status_ok(enum kuncoat_status st)
 
 /* ---- the generator ------------------------------------------------------------ */
 
+/* The kit's generator (fuzz_kit.h), the stream this harness has always used. */
 static inline uint64_t hv_rng(uint64_t *s)
 {
-	uint64_t x = *s;
-
-	x ^= x >> 12;
-	x ^= x << 25;
-	x ^= x >> 27;
-	*s = x;
-	return x * 0x2545F4914F6CDD1Dull;
+	return fz_rng_star(s);
 }
 
 static inline uint32_t hv_rng32(uint64_t *s)
@@ -106,11 +102,9 @@ static inline uint32_t hv_rng32(uint64_t *s)
 
 #define HV_CANARY_BYTES 64u
 
+/* The kit's guard buffer with a PROT_NONE page in front as well as behind and a canary margin (fuzz_kit.h). */
 struct hv_gb {
-	uint8_t *map;       /* the whole mapping */
-	size_t   maplen;
-	uint8_t *data;      /* first usable byte (page aligned) */
-	size_t   dlen;      /* usable bytes (whole pages) */
+	struct fz_gb g;
 };
 
 static inline size_t hv_pagesz(void)
@@ -126,53 +120,24 @@ static inline size_t hv_pagesz(void)
  * PROT_NONE page (and one before it). Returns 0 on failure. */
 static inline int hv_gb_init(struct hv_gb *g, size_t cap)
 {
-	size_t pg = hv_pagesz();
-	size_t need = cap + HV_CANARY_BYTES;
-
-	g->dlen = (need + pg - 1u) / pg * pg;
-	g->maplen = g->dlen + 2u * pg;
-#ifdef _WIN32
-	g->map = malloc(g->maplen);
-	if (!g->map)
-		return 0;
-	g->data = g->map + pg;
-#else
-	g->map = mmap(NULL, g->maplen, PROT_READ | PROT_WRITE,
-		      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (g->map == MAP_FAILED) {
-		g->map = NULL;
-		return 0;
-	}
-	g->data = g->map + pg;
-	if (mprotect(g->map, pg, PROT_NONE) || mprotect(g->data + g->dlen, pg, PROT_NONE)) {
-		munmap(g->map, g->maplen);
-		g->map = NULL;
-		return 0;
-	}
-#endif
-	return 1;
+	return fz_gb_init(&g->g, cap, 1, HV_CANARY_BYTES);
 }
 
 static inline void hv_gb_free(struct hv_gb *g)
 {
-	if (!g->map)
-		return;
-#ifdef _WIN32
-	free(g->map);
-#else
-	munmap(g->map, g->maplen);
-#endif
-	g->map = NULL;
+	fz_gb_free(&g->g);
 }
 
 /* The `len` bytes that END at the guard page. */
 static inline uint8_t *hv_gb_at(const struct hv_gb *g, size_t len)
 {
-	if (len + HV_CANARY_BYTES > g->dlen) {
-		printf("  TEST BUG: a guard buffer of %zu bytes was asked for %zu\n", g->dlen - HV_CANARY_BYTES, len);
+	uint8_t *p = fz_gb_end(&g->g, len);
+
+	if (!p) {
+		printf("  TEST BUG: a guard buffer of %zu bytes was asked for %zu\n", g->g.dlen - HV_CANARY_BYTES, len);
 		abort();
 	}
-	return g->data + g->dlen - len;
+	return p;
 }
 
 /* An input of exactly `len` bytes copied from `src`, a read past it faults. */
@@ -221,23 +186,31 @@ static inline double hv_wall(void)
 
 /* ---- isolation ---------------------------------------------------------------- */
 
-struct hv_prog {
-	volatile uint64_t a, b;
-};
-
-static struct hv_prog *hv_prog_p;
-static struct hv_prog hv_prog_local;
-
-/* Say which case is running: shown by the parent if the child dies in it. */
+/* Say which case is running: shown by the parent if the child dies in it (the kit's mailbox). */
 static inline void hv_at(uint64_t a, uint64_t b)
 {
-	if (!hv_prog_p)
-		hv_prog_p = &hv_prog_local;
-	hv_prog_p->a = a;
-	hv_prog_p->b = b;
+	fz_at(a, b);
 }
 
+/* A test reads which case it was in as hv_prog_p->a / ->b: that is the kit's mailbox. */
+#define hv_prog_p fz_mb
+
 enum { HV_OK = 0, HV_FAILED = 1, HV_CRASHED = 2, HV_HUNG = 3 };
+
+struct hv_iso_arg {
+	int (*fn)(void *);
+	void *arg;
+};
+
+static inline int hv_iso_child(void *a)
+{
+	struct hv_iso_arg *x = (struct hv_iso_arg *)a;
+	int r;
+
+	hv_fails = 0;
+	r = x->fn(x->arg);
+	return r || hv_fails || km_failed() ? 77 : 0;
+}
 
 /*
  * Run fn(arg) in a child with `secs` to finish. fn returns non-zero for a failed
@@ -252,48 +225,26 @@ static inline int hv_isolate(const char *name, int (*fn)(void *), void *arg, uns
 	(void)name;
 	return fn(arg) || hv_fails || km_failed() ? HV_FAILED : HV_OK;
 #else
-	pid_t pid;
-	int status = 0;
+	struct hv_iso_arg x = { fn, arg };
+	struct fz_iso iso;
 
-	if (!hv_prog_p || hv_prog_p == &hv_prog_local) {
-		void *m = mmap(NULL, sizeof *hv_prog_p, PROT_READ | PROT_WRITE,
-			       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
-		hv_prog_p = m == MAP_FAILED ? &hv_prog_local : m;
-	}
-	hv_prog_p->a = hv_prog_p->b = 0;
-	fflush(stdout);
-	pid = fork();
-	if (pid < 0) {
+	fz_mail_share();
+	if (fz_isolate(hv_iso_child, &x, secs, NULL, &iso) < 0) {
 		printf("  FAIL %s: fork failed\n", name);
 		return HV_FAILED;
 	}
-	if (pid == 0) {
-		int r;
-
-		alarm(secs);
-		hv_fails = 0;
-		r = fn(arg);
-		fflush(stdout);
-		_exit(r || hv_fails || km_failed() ? 77 : 0);
-	}
-	if (waitpid(pid, &status, 0) < 0) {
-		printf("  FAIL %s: waitpid failed\n", name);
-		return HV_FAILED;
-	}
-	if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+	if (iso.kind == FZ_EXITED && iso.code == 0)
 		return HV_OK;
-	if (WIFEXITED(status) && WEXITSTATUS(status) == 77)
+	if (iso.kind == FZ_EXITED && iso.code == 77)
 		return HV_FAILED;
-	if (WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM) {
+	if (iso.kind == FZ_TIMEOUT) {
 		printf("  HANG %s after %us (case %llu, %llu)\n", name, secs,
-		       (unsigned long long)hv_prog_p->a, (unsigned long long)hv_prog_p->b);
+		       (unsigned long long)fz_mb->a, (unsigned long long)fz_mb->b);
 		return HV_HUNG;
 	}
 	printf("  CRASH %s: %s %d (case %llu, %llu)\n", name,
-	       WIFSIGNALED(status) ? "signal" : "exit", WIFSIGNALED(status) ?
-	       WTERMSIG(status) : WEXITSTATUS(status),
-	       (unsigned long long)hv_prog_p->a, (unsigned long long)hv_prog_p->b);
+	       iso.kind == FZ_SIGNALED ? "signal" : "exit", iso.kind == FZ_SIGNALED ? iso.sig : iso.code,
+	       (unsigned long long)fz_mb->a, (unsigned long long)fz_mb->b);
 	return HV_CRASHED;
 #endif
 }
@@ -324,42 +275,12 @@ static inline void hv_expect_clean(const char *name, int (*fn)(void *), void *ar
 
 /* ---- the receiver ------------------------------------------------------------- */
 
-struct hv_sink {
-	uint64_t total;         /* bytes accepted */
-	uint64_t calls;
-	uint64_t cap;           /* the most the caller asked for; 0 = no statement */
-	uint64_t refuse_at;     /* refuse once this many have been accepted; 0 = never */
-	uint64_t refused_calls; /* calls that came after the refusal */
-	int      over;          /* accepted more than `cap` */
-	int      zero_call;     /* a call with n == 0 */
-	uint32_t sum;           /* every byte was read */
-	uint8_t *keep;          /* copy of the first keep_cap bytes, or NULL */
-	size_t   keep_cap;
-};
+/* The kit's receiver (fuzz_kit.h): `struct hv_sink` IS `struct fz_sink`, with the same fields. */
+#define hv_sink fz_sink
 
 static inline int hv_sink_fn(void *user, const uint8_t *p, uint32_t n)
 {
-	struct hv_sink *s = user;
-	uint32_t i;
-
-	s->calls++;
-	if (s->refuse_at && s->total >= s->refuse_at) {
-		s->refused_calls++;
-		return 0;
-	}
-	if (!n)
-		s->zero_call = 1;
-	for (i = 0; i < n; i++)
-		s->sum += p[i];
-	if (s->keep && s->total < s->keep_cap) {
-		size_t room = s->keep_cap - (size_t)s->total;
-
-		memcpy(s->keep + s->total, p, n < room ? n : room);
-	}
-	s->total += n;
-	if (s->cap && s->total > s->cap)
-		s->over = 1;
-	return 1;
+	return fz_sink_fn(user, p, n);
 }
 
 /* ---- tools: produce real streams without a file ------------------------------- */

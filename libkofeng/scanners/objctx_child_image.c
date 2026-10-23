@@ -82,6 +82,24 @@ static int imp_intern(struct kof_scanner *sc, const char *s, uint32_t *off)
 	return 1;
 }
 
+/*
+ * A SLOT IS AN RVA OF THE CHILD'S OWN IMAGE, and the module that declares one is not trusted to say so.
+ *
+ * The slot goes two places: the thunk the writer fills in the image, and the descriptor's FirstThunk,
+ * which is 32 bits wide. A slot near 2^64 wrapped past the library's bounds check (norm_defect_image
+ * N1, fixed at the call), one above 2^32 was cut to 32 bits and described a slot somewhere else, and one
+ * past the image was silently not written while its descriptor still pointed there. So the slot is
+ * checked HERE against the image, where the refusal reaches the module as a 0 (engine_defect2 E3):
+ * zero is "no slot" and is always fine; otherwise the whole thunk must lie inside the image, tested as
+ * `slot <= image - width`, never as a sum, so it cannot wrap.
+ */
+static int imp_slot_fits(uint64_t iat_rva, uint64_t img_n, uint32_t width)
+{
+	if (!iat_rva)
+		return 1;
+	return iat_rva <= 0xffffffffull && img_n >= width && iat_rva <= img_n - width;
+}
+
 /* Defined with kof_scan_emu_unpack, which is the other caller. */
 
 int oc_import(const struct kof_obj_ctx *ctx, const char *dll,
@@ -99,11 +117,32 @@ int oc_import(const struct kof_obj_ctx *ctx, const char *dll,
 		return 0;
 	if (ordinal > 0xffffu)
 		return 0;
-	if (!sc->pend.imp) {
-		sc->pend.imp = calloc(DECL_IMP_MAX, sizeof *sc->pend.imp);
-		sc->pend.imp_pool = calloc(DECL_POOL_MAX, 1u);
-		if (!sc->pend.imp || !sc->pend.imp_pool)
+	{
+		const uint32_t width = oc_child_is64(ctx) ? 8u : 4u;
+
+		/* Whatever the image is, a slot of more than 32 bits is not an RVA. With the image in hand
+		 * (declared before the imports, as a producer that places the table does) the slot must
+		 * also lie in it; without it the placement of the table checks again (oc_import_at). */
+		if (iat_rva > 0xffffffffull - width)
 			return 0;
+		if (sc->sink.fixed && sc->sink.mem && !imp_slot_fits(iat_rva, sc->sink.len, width))
+			return 0;
+	}
+	if (!sc->pend.imp) {
+		/* Both or neither: one made and the other refused left a half that the next call used
+		 * (a NULL pool) or overwrote (a leak) - engine_defect2 E3. A refusal is said, as a full
+		 * table is. */
+		struct kgenome_imp_decl *tab = calloc(DECL_IMP_MAX, sizeof *tab);
+		char *pool = tab ? calloc(DECL_POOL_MAX, 1u) : NULL;
+
+		if (!tab || !pool) {
+			free(tab);
+			free(pool);
+			oc_scan_capped(sc, KOF_BROKEN_LIMIT);
+			return 0;
+		}
+		sc->pend.imp = tab;
+		sc->pend.imp_pool = pool;
 	}
 	/* Refused for room, and said: a module building an import table that
 	 * does not fit gets 0 back and the child would otherwise be written with
@@ -188,6 +227,26 @@ int oc_import_at(const struct kof_obj_ctx *ctx, uint64_t rva)
 	end = rva + need;
 	if (end < rva)
 		return 0;
+	/*
+	 * THE SLOTS AGAINST THE IMAGE AS IT WILL BE, and against the table: a slot declared before the
+	 * image existed could not be checked then (oc_import), and one on the table would be written
+	 * twice, which the writer refuses whole - both are refused HERE, where the module can still be
+	 * told, and before anything is grown (engine_defect2 E3).
+	 */
+	{
+		const uint32_t width = oc_child_is64(ctx) ? 8u : 4u;
+		const uint64_t img_n = sc->sink.len > end ? sc->sink.len : end;
+		uint32_t i;
+
+		for (i = 0; i < sc->pend.n_imp; i++) {
+			const uint64_t slot = sc->pend.imp[i].iat_rva;
+
+			if (!imp_slot_fits(slot, img_n, width))
+				return 0;
+			if (slot && slot < end && slot + width > rva)
+				return 0;
+		}
+	}
 	if (end > sc->sink.cap) {
 		uint64_t add = end - sc->sink.cap;
 		uint8_t *mem;
@@ -219,6 +278,29 @@ int oc_import_at(const struct kof_obj_ctx *ctx, uint64_t rva)
 	return 1;
 }
 
+/*
+ * WHERE THE DECLARED IMAGE ENDS: the largest rva + size over the table, 0 when there is none or one of
+ * them wraps 2^64. It was the end of the LAST section declared, which is the largest only while the
+ * table is ordered and disjoint - and a table recovered from a decoded payload (oc_layout_of_produced)
+ * is sorted but may overlap, so the header said SizeOfImage was smaller than a section it described
+ * (engine_defect2 E6). One answer for the allocation, the layout and the close.
+ */
+uint64_t oc_sec_span(const struct kof_scanner *sc)
+{
+	uint64_t span = 0;
+	uint32_t k;
+
+	for (k = 0; k < sc->pend.n_sec; k++) {
+		const uint64_t end = sc->pend.sec[k].rva + sc->pend.sec[k].vsize;
+
+		if (end < sc->pend.sec[k].rva)
+			return 0;
+		if (end > span)
+			span = end;
+	}
+	return span;
+}
+
 int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 		     uint64_t rva, uint64_t vsize, uint32_t perm,
 		     uint32_t flags)
@@ -226,15 +308,16 @@ int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	struct kgenome_sec_decl *d;
 	uint32_t k;
-	unsigned q;
 
 	if (!sc->pend.sec) {
 		sc->pend.sec = calloc(DECL_SEC_MAX, sizeof *sc->pend.sec);
-		if (!sc->pend.sec)
+		if (!sc->pend.sec) {
+			oc_scan_capped(sc, KOF_BROKEN_LIMIT);   /* said, as a full table is */
 			return -1;
+		}
 	}
-	if (vsize == 0)
-		return -1;
+	if (vsize == 0 || rva + vsize < rva)
+		return -1;              /* empty, or the end wraps 2^64 (engine_defect2 E6) */
 	/*
 	 * A REGION IS UNIQUE BY ITS ADDRESS, SO DECLARING IT AGAIN REPLACES IT.
 	 *
@@ -255,7 +338,6 @@ int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 	for (k = 0; k < sc->pend.n_sec; k++)
 		if (sc->pend.sec[k].rva == rva) {
 			struct kgenome_sec_decl *e = &sc->pend.sec[k];
-			unsigned w;
 
 			/* An extent may be corrected, but not over its
 			 * neighbour: the table stays ordered and disjoint or
@@ -263,17 +345,26 @@ int oc_section(const struct kof_obj_ctx *ctx, const char *name,
 			if (k + 1u < sc->pend.n_sec &&
 			    rva + vsize > sc->pend.sec[k + 1u].rva)
 				return -1;
-			(void)w;
 			sec_name_copy(e->name, name);
 			e->vsize = vsize;
 			e->perm = perm;
 			e->flags = flags;
 			return (int)k;
 		}
-	if (sc->pend.n_sec >= DECL_SEC_MAX)
+	if (sc->pend.n_sec >= DECL_SEC_MAX) {
+		/* A table that is full is a cap, and a cap is reported: the imports say so when theirs is
+		 * (oc_import), and a module that ignores the -1 would otherwise build a child without
+		 * the sections it declared and call it whole (engine_defect2 E6). */
+		oc_scan_capped(sc, KOF_BROKEN_LIMIT);
+		return -1;
+	}
+	/* THE TABLE STAYS ORDERED AND DISJOINT, as the comment above has always said: a correction was held to
+	 * it and an append was not, so a descending or overlapping declaration was stored, and the engine laid
+	 * the child out from a table it could not lay out from (engine_defect2 E6). Touching is fine. */
+	if (sc->pend.n_sec &&
+	    rva < sc->pend.sec[sc->pend.n_sec - 1u].rva + sc->pend.sec[sc->pend.n_sec - 1u].vsize)
 		return -1;
 	d = &sc->pend.sec[sc->pend.n_sec];
-	(void)q;
 	sec_name_copy(d->name, name);
 	d->rva = rva;
 	d->vsize = vsize;
@@ -304,8 +395,10 @@ uint64_t oc_layout_of_produced(const struct kof_obj_ctx *ctx)
 		return 0;
 	if (!sc->pend.sec) {
 		sc->pend.sec = calloc(DECL_SEC_MAX, sizeof *sc->pend.sec);
-		if (!sc->pend.sec)
+		if (!sc->pend.sec) {
+			oc_scan_capped(sc, KOF_BROKEN_LIMIT);
 			return 0;
+		}
 	}
 	n = kgenome_pe_layout_of(kof_buf_make(sc->sink.mem, sc->sink.len),
 			     sc->pend.sec, DECL_SEC_MAX, &entry, &base,
@@ -328,8 +421,10 @@ uint64_t oc_layout_of_produced(const struct kof_obj_ctx *ctx)
 	 * remainder at all.
 	 */
 	{
-		uint64_t end = sc->pend.sec[n - 1u].rva +
-			       sc->pend.sec[n - 1u].vsize;
+		uint64_t end;
+
+		sc->pend.n_sec = n;
+		end = oc_sec_span(sc);
 
 		/*
 		 * ONLY PADDING IS DROPPED. The bytes past the last section were
@@ -422,12 +517,7 @@ int oc_image(const struct kof_obj_ctx *ctx)
 		return 0;
 	if (sc->sink.len || sc->sink.spilled || !sc->pend.n_sec)
 		return 0;
-	{
-		const struct kgenome_sec_decl *last =
-			&sc->pend.sec[sc->pend.n_sec - 1u];
-
-		span = last->rva + last->vsize;
-	}
+	span = oc_sec_span(sc);
 	if (!span || span > sc->ledger.budget || span > sc->ledger.obj_cap ||
 	    sc->ledger.resident > sc->ledger.resident_max ||
 	    span > sc->ledger.resident_max - sc->ledger.resident) {

@@ -363,41 +363,26 @@ int koffridge_get(struct koffridge *f, const void *id, uint32_t id_len,
 }
 
 /*
- * Which finding to keep, when the scan produced more than one.
- *
- * The worst, by kverdict_level_rank - which is the engine's own ordering and not a
- * second one invented here. A cache that kept the first would keep whichever
- * module happened to sit earliest in the database, and the answer would change
- * with a database update for no reason anybody could see.
+ * What to keep of a scan: the object's verdict, which the engine made
+ * (kof_result.verdict). `findings` is 1 for an object that has one, so an object
+ * with a verdict is never mistaken for a clean one.
  */
 static void fill_verdict(struct koffridge_verdict *v,
 			 const struct kof_result *res)
 {
-	uint32_t i, best = 0;
-	int best_rank = -1;
-
 	memset(v, 0, sizeof *v);
 	if (!res)
 		return;
 	v->broken = res->broken;
-	v->findings = res->n;
-	if (!res->n)
+	v->findings = res->has_verdict ? 1u : 0u;
+	if (!res->has_verdict)
 		return;
-	for (i = 0; i < res->n && i < KOF_MAX_FINDINGS; i++) {
-		int r = kverdict_level_rank(res->v[i].level);
-
-		if (r > best_rank) {
-			best_rank = r;
-			best = i;
-		}
-	}
-	v->level = res->v[best].level;
 	/*
 	 * COPIED TO THE NUL AND NOT BY THE FIELD'S SIZE.
 	 *
 	 * Both arrays are 224 bytes, so a memcpy of the whole field read
 	 * nothing it should not - but it copied the TAIL as well as the name.
-	 * kverdict_name terminates at the length it wrote and leaves
+	 * kof_verdict_name terminates at the length it wrote and leaves
 	 * everything after it as whatever the result buffer held, and that
 	 * buffer is reused from object to object. The entry then goes to disk
 	 * whole, so the previous object's verdict name travelled into the
@@ -406,7 +391,7 @@ static void fill_verdict(struct koffridge_verdict *v,
 	 * The struct was zeroed at the top of this function; a bounded string
 	 * copy leaves those zeros in place.
 	 */
-	snprintf(v->name, sizeof v->name, "%s", res->v[best].name);
+	snprintf(v->name, sizeof v->name, "%s", res->verdict.name);
 }
 
 /*

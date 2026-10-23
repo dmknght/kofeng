@@ -1,0 +1,15 @@
+# Functions waiting for WP8. function<TAB>reason. Work package 8 deletes a line when it adds the adapter row (.covers) for it;
+# a function that is covered and still listed fails make check-rules. Move a function to permanent.txt only with a reason.
+kgenome_mtn_win_flat	pending WP8 (kgenome/mutation window, shape S5)
+kgenome_mtn_win_value	pending WP8 (kgenome/mutation window, shape S5)
+kgenome_mutation_by_function	pending WP8 (kgenome/mutation, shape S3)
+kgenome_mutation_byte	pending WP8 (kgenome/mutation window, shape S5)
+kgenome_mutation_core	pending WP8 (kgenome/mutation, shape S3)
+kgenome_mutation_cut	pending WP8 (kgenome/mutation, shape S3)
+kgenome_mutation_drop_weight	pending WP8 (kgenome/mutation window, shape S5)
+kgenome_mutation_flat	pending WP8 (kgenome/mutation window, shape S5)
+kgenome_mutation_member	pending WP8 (kgenome/mutation, shape S3)
+kgenome_mutation_minhash	pending WP8 (kgenome/mutation, shape S3)
+kgenome_mutation_mix	pending WP8 (kgenome/mutation window, shape S5)
+kgenome_mutation_pool	pending WP8 (kgenome/mutation, shape S3)
+kgenome_mutation_units	pending WP8 (kgenome/mutation, shape S3)

@@ -155,7 +155,7 @@ static int diag_q(const struct kof_obj_ctx *ctx, uint32_t id, int wide)
 	if (!sc || !id)
 		return 0;
 	/*
-	 * THE RULE ASKING IS THE ASKER - see KOF_ENG_USE_DIAGNOSE.
+	 * THE MODULE ASKING IS THE ASKER - see oc_diag_demand.
 	 *
 	 * A signature runs before any heuristic does, so a rule reading a
 	 * diagnose cannot wait for one to turn the analysis on: it would

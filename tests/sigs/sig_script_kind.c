@@ -27,5 +27,5 @@ KOF_DEFINE_STR(ev, "eval(", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_SCAN
 {
 	if (kof_find_str(body, ev))
-		KOF_SCAN_SUSPECT("PhpEval");
+		{ kof_debug("ScriptKindTest#PhpEval", 0); return; }
 }

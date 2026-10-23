@@ -8,8 +8,7 @@
  *
  * OPEN: "reading is asking" (oc_diag_demand) infers the demand for the analysis
  * from which accessor a rule called. A rule that touches the diagnose surface
- * should declare it (KOF_ENG_USE_DIAGNOSE) and the loader refuse one that does
- * not; removing the inference first makes every such rule read an empty analysis
+ * should declare it and the loader refuse one that does not; removing the inference first makes every such rule read an empty analysis
  * (twelve detections, measured). The relocation bias in ref_note is x86's and is
  * applied only to x86 machines.
  */
@@ -55,13 +54,11 @@ static int diag_when_met(const struct kof_obj_ctx *ctx,
  * accessors each wrote the two stores out themselves, one bug at a time - "twelve
  * detections disappearing the moment the rule stopped naming a diagnose and
  * started reading nodes", "a rule whose only diagnose call was this one read an
- * analysis that never ran" - and each fix added one more copy. `diag_read` is
- * also what labels the finding Diagnose rather than Pattern.
+ * analysis that never ran" - and each fix added one more copy.
  */
 void oc_diag_demand(struct kof_scanner *sc)
 {
 	sc->obj.diag.ask = 1;
-	sc->mod.diag_read = 1;
 }
 
 /*
@@ -77,7 +74,7 @@ void oc_diag_demand(struct kof_scanner *sc)
  *
  * Serialised once per object from the analysis that already ran, and NULL
  * when none did. Reading it cannot make it run: that is what
- * KOF_ENG_USE_DIAGNOSE is for, and an object nobody asked about has no graph
+ * the demand (oc_diag_demand) is for, and an object nobody asked about has no graph
  * to hand over.
  */
 const uint8_t *oc_graph(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
@@ -347,9 +344,7 @@ static void sym_build(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 
 	uint32_t passes = 0;
 
-	sc->obj.sym.n = kof_syms_build_grow(ctx->format, sc->match.m.data.p, sc->match.m.data.n,
-					ctx->file_header, imp, &sc->syms.buf,
-					&sc->syms.cap, &passes);
+	sc->obj.sym.n = oc_syms_build(sc, ctx, imp, &passes);
 	/* Each pass is a build of the product: a rebuild is counted, not hidden. */
 	do
 		kof_prod_ran(sc, KOF_PROD_SYMS);
@@ -400,7 +395,7 @@ const uint8_t *oc_syms(const struct kof_obj_ctx *ctx, uint32_t *nbytes)
 		 * the answer - see objprod.h. */
 		if (!sc->cur.prod && ctx->file_header &&
 		    (ctx->format == KOF_FMT_ELF ||
-		     ctx->format == KOF_FMT_PE)) {
+		     ctx->format == KOF_FMT_PE || oc_text_served(ctx))) {
 			sym_build(sc, ctx);
 			if (sc->syms.buf)
 				sym_declared(sc, 0);
@@ -594,87 +589,6 @@ static int fact_holds(const struct kof_obj_ctx *ctx, uint16_t fact,
 	}
 }
 
-/*
- * WHICH ANALYSES THIS FILE CAN SERVE, read off the file.
- *
- * The analyses differ by an order of cost and by what each can see. A diagnose
- * says which it is written for (KOF_DIAG_ANALYSIS) and the route that runs is the
- * INTERSECTION of what it declared and what the object can serve - what the
- * object's format and content make possible, never an exclusive class chosen by
- * what evidence the file happens to carry:
- *
- *   an object file (a kernel module)  its names - SYMBOL. No program entry, no
- *                                     system call to find.
- *   an ELF with PT_INTERP             SYMBOL. The loader's own test for "this
- *                                     needs a dynamic linker": its calls are
- *                                     imports, and it contains no system call.
- *   any other ELF (static)            SYMBOL and SYSCALL. A static program says
- *                                     what it calls by name when it has symbols,
- *                                     and enters the kernel by an instruction in
- *                                     its own code whether it has them or not -
- *                                     a section table and a .symtab are
- *                                     evidence of how it was LINKED, not a
- *                                     reason the sweep has nothing to find. The
- *                                     old selection switched SYSCALL off for any
- *                                     static ELF with a section table or a
- *                                     symbol, so a diagnose that declared SYSCALL
- *                                     only (rwx_exec, the botnet net diagnoses)
- *                                     was NO_ROUTE on a stripped static bot that
- *                                     still had section headers
- *                                     (tests/unit/view_equiv.c route matrix).
- *   a PE                              its names, and what it resolves for itself
- *                                     - APIHASH
- *
- * THE COST IS NOT DECIDED HERE. The sweep was MEASURED to be 90% of the scan on
- * 254 ELF files when every static one was offered it, and what keeps it from being
- * that again is the gate (diag_gates): a diagnose whose file-shape conditions or
- * imports are unmet asks for no route, and a diagnose no rule reads is not run.
- * The route runs when a diagnose that passed its gate declared it.
- *
- * Anything else serves none, so no diagnose is asked.
- */
-static unsigned diag_servable(const struct kof_obj_ctx *ctx)
-{
-	if (ctx->format == KOF_FMT_PE)
-		return KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_APIHASH;
-	if (ctx->format == KOF_FMT_ELF) {
-		const struct kgenome_elf_info *ei = kof_elf(ctx);
-		uint32_t i;
-
-		if (!ei || !ei->valid)
-			return 0;
-		if (ei->e_type == KGENOME_ELF_REL)
-			return KGENOME_DIAG_RUN_SYMBOL;
-		for (i = 0; i < ei->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++)
-			if (ei->seg[i].type == 3u)
-				return KGENOME_DIAG_RUN_SYMBOL;
-		return KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_SYSCALL;
-	}
-	return 0;
-}
-
-/* The analyses a diagnose DECLARED, as the routines the scan runs. */
-static unsigned analysis_runs(unsigned analysis)
-{
-	unsigned r = 0;
-
-	if (analysis & KOF_DIAG_ANALYSIS_SYSCALL)
-		r |= KGENOME_DIAG_RUN_SYSCALL;
-	if (analysis & KOF_DIAG_ANALYSIS_SYMBOL)
-		r |= KGENOME_DIAG_RUN_SYMBOL;
-	if (analysis & KOF_DIAG_ANALYSIS_APIHASH)
-		r |= KGENOME_DIAG_RUN_APIHASH;
-	return r;
-}
-
-/* The routines to run for diagnose `d` on this file: what it declared, where the
- * file offers it. Zero means the file has nothing for this diagnose. */
-static unsigned diag_routes(const struct kof_diag *d,
-			    const struct kof_obj_ctx *ctx)
-{
-	return analysis_runs(d->analysis) & diag_servable(ctx);
-}
-
 /* Every condition a diagnose stated - see KOF_DIAG_HAS_ATTRB. */
 static int diag_when_met(const struct kof_obj_ctx *ctx,
 			 const struct kof_diag *d)
@@ -700,10 +614,9 @@ static int diag_gate_open(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
  *
  *   a disease it declares (KOF_DECLARE_DISEASE) - the verdict is made of the
  *   diseases an object has, so a diagnose that can find one is read by the
- *   verdict whether or not any syndrome names it (a disease no syndrome names
- *   still types the file as unresolved) and whether or not any rule asks. The
- *   cluster of several diagnoses that only together make a syndrome needs no
- *   count of its own: each of them declares its disease and each is read.
+ *   verdict whether or not any rule asks. Several diagnoses whose diseases are
+ *   named together need no count of their own: each of them declares its disease
+ *   and each is read.
  *
  * A diagnose whose count was never written down is unknown, and unknown counts
  * as read. What is NOT read is skipped: a diagnose with neither a user nor a
@@ -794,7 +707,7 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 	 * for each read diagnose that answered "no"; what it cannot say is that the
 	 * graph as a whole stops short, which matters to a diagnose that answered "yes"
 	 * (its sibling's evidence is past the cut) and to everything that reads the
-	 * graph after the gates (the syndrome's disease set). So: truncated AND the
+	 * graph after the gates (the verdict's disease set). So: truncated AND the
 	 * analysis was demanded (obj.diag.ask: a rule read the diagnose surface, or a
 	 * tool asked for every diagnose). A cut analysis nobody demanded - the graph
 	 * kept for a report that was not requested - says nothing about the object.
@@ -1101,7 +1014,7 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 			continue;               /* the file is not the shape */
 		/* The analysis this diagnose is written for is not one the file
 		 * offers, so there is nothing for it to find. */
-		if (!diag_routes(d, ctx))
+		if (!oc_diag_routes(d, ctx))
 			continue;
 		if (!d->n_needcap) {
 			ok[i] = 1;
@@ -1120,10 +1033,8 @@ static void diag_gates(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 
 			if (!rec || !(rec[KOF_SYM_R_FLAGS] & KOF_SYM_F_UNDEFINED))
 				continue;
-			/* WHICH CAPABILITY THIS IMPORT IS, said once by nucleo's one
-			 * name table - a diagnose names the capability, never the
-			 * spelling. */
-			cap = kgenome_nucleo_cap_of_name(kof_sym_name(sb, sn, rec, NULL));
+			/* WHICH CAPABILITY THIS IMPORT IS, by the object's own table of names. */
+			cap = oc_name_cap(ctx, kof_sym_name(sb, sn, rec, NULL));
 			if (cap == KGENOME_NUCLEO_NONE)
 				continue;
 			for (i = 0; i < n; i++) {
@@ -1213,7 +1124,7 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 	if (sc->obj.latch[KOF_OL_DIAG])
 		return;
 	/*
-	 * NOBODY ASKED, SO NOBODY PAYS - see KOF_ENG_USE_DIAGNOSE. The sweep
+	 * NOBODY ASKED, SO NOBODY PAYS - see oc_diag_demand. The sweep
 	 * is proportional to the object and this is the one place that can
 	 * decline it; a rule that recognised something turns it on for the
 	 * object it fired on, and a tool reporting rather than scanning turns
@@ -1273,61 +1184,66 @@ void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx)
 				n_seq++;
 			}
 			/* what it declared, where the file can serve it */
-			run |= diag_routes(&sc->eng->diag[i], ctx);
+			run |= oc_diag_routes(&sc->eng->diag[i], ctx);
 			if (sc->eng->diag[i].analysis & KOF_DIAG_USES_EMU)
 				run |= KGENOME_DIAG_RUN_EMULATE;
 		}
 		if (!run)
 			return;
+		/* THE LINEAGE STAGES follow the routes that make nodes: which of them run is the class table's. */
+		if (run & (KGENOME_DIAG_RUN_SYSCALL | KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_APIHASH))
+			run |= KGENOME_DIAG_RUN_LINEAGE;
 		/*
-		 * NOTHING NARROWS WHICH CAPABILITIES ARE RECORDED, and a loop
-		 * that built such a set per object was removed with the
-		 * parameter that ignored it - see kgenome_diag_scan_with. The set
-		 * cannot be derived: a verdict reads nodes no diagnose names.
+		 * NOTHING NARROWS WHICH CAPABILITIES ARE RECORDED: a verdict reads nodes no diagnose names, so no set can be
+		 * derived (see kgenome_diag_scan_with).
 		 */
-		struct kgenome_diag_inputs in;
-		struct kgenome_obj gobj;
 		struct kgenome_budget kb;
-		struct oc_emu_diag emu_acct;
 		enum kgenome_status refused = KGENOME_OK;
 
-		in.relocs = sc_relocs(sc, ctx);
-		/* Read from the same table the symbol block is, once - and only
-		 * for a route that walks functions. */
-		in.funcs = (run & (KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_EMULATE))
-			   ? funcs_of(ctx, (run & KGENOME_DIAG_RUN_SYSCALL) != 0) : NULL;
-		/* The same walk finds the entries and, for the syscall route, the
-		 * kernel-entry sites: one decode of the code. */
-		in.walk = oc_walk(sc);
-		in.seq = seqv;
-		in.n_seq = n_seq;
-		/* The analysis result, from the latch: the normaliser may have
-		 * asked already, and whichever asks first pays once. Only
-		 * computed here when the database wants the route. */
-		in.apihash = (run & KGENOME_DIAG_RUN_APIHASH)
-			     ? sc_apihash(sc, ctx) : NULL;
-		/* The import directory is walked once: the symbol block is
-		 * built from the same table. */
-		in.imports = ((run & KGENOME_DIAG_RUN_SYMBOL) &&
-			      ctx->format == KOF_FMT_PE && ctx->file_header)
-			     ? oc_pe_imports(sc, ctx) : NULL;
-		kof_genome_obj(ctx, &gobj);
-		/*
-		 * WHAT THE SCAN MAY COST, from this scanner's own ceiling: the
-		 * lib scales every limit with the object (kgenome_budget_default) and
-		 * is told the one number it cannot know - how much of the scan's
-		 * resident allowance is left - which is the bound on a hostile object.
-		 */
-		kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(&gobj, b.n));
-		kb.max_bytes = oc_scan_room(sc);
-		oc_emu_diag_begin(sc, &emu_acct, &kb, &run);
-		if (!run)
-			return;
-		in.budget = &kb;
-		in.refused = &refused;
-		kof_prod_ran(sc, KOF_PROD_DIAG);
-		ds = kgenome_diag_scan_with_inputs(&gobj, b.p, b.n, run, &in);
-		oc_emu_diag_end(sc, &emu_acct, ds);
+		if (oc_text_served(ctx)) {
+			ds = oc_diag_scan_text(sc, ctx, b, &kb, &refused);
+		} else {
+			struct kgenome_diag_inputs in;
+			struct kgenome_obj gobj;
+			struct oc_emu_diag emu_acct;
+			in.relocs = sc_relocs(sc, ctx);
+			/* Read from the same table the symbol block is, once - and only
+			 * for a route that walks functions. */
+			in.funcs = (run & (KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_EMULATE))
+				   ? funcs_of(ctx, (run & KGENOME_DIAG_RUN_SYSCALL) != 0) : NULL;
+			/* The same walk finds the entries and, for the syscall route, the
+			 * kernel-entry sites: one decode of the code. */
+			in.walk = oc_walk(sc);
+			in.seq = seqv;
+			in.n_seq = n_seq;
+			/* The analysis result, from the latch: the normaliser may have
+			 * asked already, and whichever asks first pays once. Only
+			 * computed here when the database wants the route. */
+			in.apihash = (run & KGENOME_DIAG_RUN_APIHASH)
+				     ? sc_apihash(sc, ctx) : NULL;
+			/* The import directory is walked once: the symbol block is
+			 * built from the same table. */
+			in.imports = ((run & KGENOME_DIAG_RUN_SYMBOL) &&
+				      ctx->format == KOF_FMT_PE && ctx->file_header)
+				     ? oc_pe_imports(sc, ctx) : NULL;
+			kof_genome_obj(ctx, &gobj);
+			/*
+			 * WHAT THE SCAN MAY COST, from this scanner's own ceiling: the
+			 * lib scales every limit with the object (kgenome_budget_default) and
+			 * is told the one number it cannot know - how much of the scan's
+			 * resident allowance is left - which is the bound on a hostile object.
+			 */
+			kgenome_budget_default(&kb, b.n, kgenome_diag_code_bytes(&gobj, b.n));
+			kb.max_bytes = oc_scan_room(sc);
+			oc_emu_diag_begin(sc, &emu_acct, &kb, &run);
+			if (!run)
+				return;
+			in.budget = &kb;
+			in.refused = &refused;
+			kof_prod_ran(sc, KOF_PROD_DIAG);
+			ds = kgenome_diag_scan_with_inputs(&gobj, b.p, b.n, run, &in);
+			oc_emu_diag_end(sc, &emu_acct, ds);
+		}
 		/* NULL for want of memory is not "nothing to read": said. */
 		if (!ds && refused != KGENOME_OK)
 			OC_LIMIT(sc, "diagnose scan not allocated");
@@ -1427,7 +1343,7 @@ void kof_scan_diag_force(const struct kof_obj_ctx *ctx)
 
 	if (!sc)
 		return;
-	/* The caller IS the asker here - see KOF_ENG_USE_DIAGNOSE. Setting it
+	/* The caller IS the asker here - see oc_diag_demand. Setting it
 	 * rather than bypassing the test keeps one gate on this work. */
 	sc->obj.diag.ask = 1;
 	oc_diag_ready(sc, ctx);
@@ -1474,7 +1390,7 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 	/* The order the gate applies them in - see diag_gates. */
 	if (!diag_when_met(ctx, d)) {
 		out->state = KOF_DIAG_ST_SHAPE;
-	} else if (!diag_routes(d, ctx)) {
+	} else if (!oc_diag_routes(d, ctx)) {
 		out->state = KOF_DIAG_ST_NO_ROUTE;
 	} else if (!diag_gate_open(sc, ctx, i)) {
 		out->state = KOF_DIAG_ST_SIGNS;

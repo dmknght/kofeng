@@ -423,7 +423,7 @@ static void source_declarations(void)
 	kof_src_declare_desc(s, NULL);
 	CK(kof_src_desc_of(s)->entry_off == 99u);
 
-	/* regions: copied, clipped to the table's size, with the vocabulary they are in */
+	/* regions: copied, whatever their number, with the vocabulary they are in */
 	for (i = 0; i < 3u; i++) {
 		reg[i].mask = 1u << (i + 1u);
 		reg[i].off = 10u * i;
@@ -441,11 +441,12 @@ static void source_declarations(void)
 			many[i].off = i;
 			many[i].len = 1;
 		}
-		kof_src_declare_regions(s, KOF_FMT_ELF, many, 40);
-		CK(kof_src_regions_of(s, &rp) == KOF_SRC_MAX_REGIONS && rp[KOF_SRC_MAX_REGIONS - 1u].off ==
-		   KOF_SRC_MAX_REGIONS - 1u);
-		kof_src_declare_regions(s, KOF_FMT_PE, NULL, 3);        /* no table: unchanged */
-		CK(kof_src_regions_of(s, NULL) == KOF_SRC_MAX_REGIONS && kof_src_region_fmt_of(s) == KOF_FMT_ELF);
+		/* a table is as long as the producer's: it used to be clipped to sixteen, silently, and the
+		 * extents past them were not in the view (norm_defect_engine N3) */
+		CK(kof_src_declare_regions(s, KOF_FMT_ELF, many, 40) == 1);
+		CK(kof_src_regions_of(s, &rp) == 40u && rp[39].off == 39u && rp[0].off == 0u);
+		CK(kof_src_declare_regions(s, KOF_FMT_PE, NULL, 3) == 1);       /* no table: unchanged */
+		CK(kof_src_regions_of(s, NULL) == 40u && kof_src_region_fmt_of(s) == KOF_FMT_ELF);
 	}
 
 	/* symbols and functions: copied, replaced, refused when empty */

@@ -1,6 +1,6 @@
 /*
- * kofdefine.h - the entry points of a module (kof_scan, kof_unpack, kof_cure),
- * the macros that define them, and the analysis step a module declares.
+ * kofdefine.h - the entry points of a module (kof_scan, kof_unpack), the macros
+ * that define them, and the analysis step a module declares.
  *
  * Part of the module ABI; a module includes <kofmod/kofsig.h>, never this file.
  */
@@ -15,14 +15,13 @@
  * Entry point. Defined by the module, called by the loader - through
  * KOF_DEFINE_SCAN below, which is what puts `ctx` in scope for the macros.
  *
- * Returns nothing. A module's output is what it reports, so there is no verdict
- * to return, and a module with nothing to say simply ends - which is why no
- * trailing "return clean" has to be written. Bailing out early is a bare return.
+ * Returns nothing. A module does not name the object: that is the diseases it has
+ * (kof_verdict_make). What it can say is a mark (kof_mark_infected) or a note
+ * (kof_debug); bailing out early is a bare return.
  *
  * The linker script places this first, so its offset inside the blob is zero and
- * the loader needs no symbol table at runtime. Other module roles will follow the
- * same pattern with their own header and their own entry: kof_unpack() from
- * kofunp.h, kof_cure() from kofcure.h.
+ * the loader needs no symbol table at runtime. The other module role has its own
+ * entry: kof_unpack() from kofunp.h.
  */
 void kof_scan(const struct kof_obj_ctx *ctx);
 
@@ -35,9 +34,7 @@ void kof_scan(const struct kof_obj_ctx *ctx);
  * disagree with the code and an exported symbol cannot.
  *
  * The two are dispatched from different points and never see each other's records:
- * detectors run while an object is being scanned, unpackers afterwards, once the
- * engine has a verdict on the container itself. That ordering is what lets an
- * archive already identified as an exploit be left unopened.
+ * detectors run while an object is being scanned, unpackers afterwards.
  */
 void kof_unpack(const struct kof_obj_ctx *ctx);
 
@@ -190,11 +187,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx);
  * does, not what a module is. The old kind PACKER named the module and five
  * different jobs ended up wearing it - UPX, an AES decryptor, three shellcode
  * decoders and a payload finder - because it was the only label there was.
- *
- * NOT SPELLED KOF_HEUR_PHASE AND NOT CALLED ONE. That name is taken, by
- * EXAMINE and VERDICT, which are about when a heuristic gets to speak. These
- * are steps of opening an object and the two have nothing to do with each
- * other.
  */
 enum kof_analyze {
 	KOF_ANALYZE_UNWRAP = 0,
@@ -231,7 +223,7 @@ static inline const char *kof_analyze_word(uint32_t step)
  *     KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);    - UPX, Ezuri: it hid a program
  *     KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP);    - zip, tar, rar: it carried files
  *
- * Required of every unpack module and meaningless on a detector or a rule. One
+ * Required of every unpack module and meaningless on a detector. One
  * word replaces two: there was a KOF_UNPACK_KIND with PACKER, CONTAINER and
  * CARVE beside the step enum above, saying the same thing in a coarser
  * vocabulary, and a module that moved had to be changed in both. The step is
@@ -259,12 +251,5 @@ static inline const char *kof_analyze_word(uint32_t step)
  * chain stopped at the first step that produced a child.
  */
 #define KOF_ANALYZE_STEP(step)
-
-/*
- * The other entry point a DETECTOR may export: how to undo what kof_scan
- * found. Called by the host, never from inside the module, and only on an
- * object whose scan offered one - see KOF_SCAN_CURABLE.
- */
-void kof_cure(const struct kof_obj_ctx *ctx);
 
 #endif /* KOFENG_KOFDEFINE_H */

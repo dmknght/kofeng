@@ -34,7 +34,7 @@ static void direct_cb(void *user, uint64_t at, uint64_t target, const char *name
 	if (d->n >= 8u)
 		return;
 	d->at[d->n] = at;
-	d->cap[d->n] = (target || !name) ? (uint16_t)KGENOME_NUCLEO_NONE : kgenome_nucleo_cap_of_name(name);
+	d->cap[d->n] = (target || !name) ? (uint16_t)KGENOME_NUCLEO_NONE : kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, name);
 	d->n++;
 }
 

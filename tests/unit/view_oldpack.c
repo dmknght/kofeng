@@ -254,7 +254,6 @@ static void scan(kof_scanner *sc, const void *b, uint64_t n, struct seen *s)
 
 	memset(s, 0, sizeof *s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	(void)kscan_bytes(sc, b, n, "x", &opt, on_object, s);
 }
 

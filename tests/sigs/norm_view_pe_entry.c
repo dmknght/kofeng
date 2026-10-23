@@ -19,5 +19,5 @@ KOF_DEFINE_SCAN
 {
 	if (ctx->entry_off != KOF_NA && ctx->entry_off != KOF_BROKEN &&
 	    kof_find_str_at(ctx->entry_off, entry_sig))
-		KOF_SCAN_INFECT("NormViewEntryPe");
+		{ kof_debug("NormViewEntryPe#NormViewEntryPe", 0); return; }
 }

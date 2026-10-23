@@ -28,5 +28,5 @@ KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, "DiagRwxTest");
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	if (kof_diag(rwx_exec))
-		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+		{ kof_debug("DiagRwxTest#00", 0); return; }
 }

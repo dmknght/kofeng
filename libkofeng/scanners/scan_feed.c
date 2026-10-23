@@ -91,9 +91,9 @@ static int region_in_all(const struct kof_parser *fp, uint32_t rm,
 	return (present & rm) && !(rm & kof_parser_region_unoffered(fp));
 }
 
-static int has_regions(const struct kof_parser *fp)
+static int has_regions(const struct kof_obj_ctx *ctx, const struct kof_parser *fp)
 {
-	return fp && fp->regions && fp->n_regions && fp->region_name;
+	return fp && fp->regions && fp->n_regions && fp->region_name && !kof_obj_regionless(ctx);
 }
 
 static int is_region_of(const struct kof_parser *fp, uint32_t m)
@@ -106,21 +106,23 @@ static int is_region_of(const struct kof_parser *fp, uint32_t m)
 	return 0;
 }
 
-void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
-			   uint32_t present, const struct kgenome_func_set *funcs,
-			   const struct kgenome_true_all *lib, struct kof_ext_buf *eb,
+void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b, uint32_t present,
+			   const struct kof_scan_cut *cut, struct kof_ext_buf *eb,
 			   kof_scan_unit_fn fn, void *user)
 {
+	static const struct kof_scan_cut none;
 	const struct kof_parser *fp = kof_parser_of(ctx->format);
 	struct obj_units u;
 	uint32_t ri, n;
 
 	if (!b.p || !fn)
 		return;
+	if (!cut)
+		cut = &none;
 	u.fn = fn;
 	u.user = user;
 	u.stopped = 0;
-	if (!has_regions(fp)) {
+	if (!has_regions(ctx, fp)) {
 		struct kof_range whole;
 
 		whole.off = 0;
@@ -133,8 +135,10 @@ void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
 				.mask = KOF_SCAN_ALL,
 				.ext = &whole,
 				.n_ext = 1,
-				.funcs = funcs,
-				.lib = lib,
+				.funcs = cut->funcs,
+				.lib = cut->lib,
+				.fixed = cut->fixed,
+				.n_fixed = cut->n_fixed,
 				.fn = obj_unit_cb,
 				.user = &u,
 			});
@@ -154,8 +158,10 @@ void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
 				.mask = rm,
 				.ext = eb->v,
 				.n_ext = n,
-				.funcs = funcs,
-				.lib = lib,
+				.funcs = cut->funcs,
+				.lib = cut->lib,
+				.fixed = cut->fixed,
+				.n_fixed = cut->n_fixed,
 				.fn = obj_unit_cb,
 				.user = &u,
 			});
@@ -166,15 +172,17 @@ void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
 
 void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ctx *ctx,
 			  kof_buf b, uint32_t present, int from_packer,
-			  const struct kgenome_func_set *funcs,
-			  const struct kgenome_true_all *lib, struct kof_ext_buf *eb)
+			  const struct kof_scan_cut *cut, struct kof_ext_buf *eb)
 {
+	static const struct kof_scan_cut none;
 	const struct kof_parser *fp;
 	struct mutation_feed f;
 	uint32_t mi;
 
 	if (!pc || !pc->set || !b.p)
 		return;
+	if (!cut)
+		cut = &none;
 	fp = kof_parser_of(ctx->format);
 	f.pc = pc;
 	f.p  = b.p;
@@ -232,7 +240,7 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 	 * the regions of the parse except the ones that are not hashed - see
 	 * region_in_all. A parse with no regions is one region, ALL.
 	 */
-	if (!has_regions(fp)) {
+	if (!has_regions(ctx, fp)) {
 		uint32_t n;
 
 		f.mask  = KOF_SCAN_ALL;
@@ -246,8 +254,10 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 					.mask = KOF_SCAN_ALL,
 					.ext = eb->v,
 					.n_ext = n,
-					.funcs = funcs,
-					.lib = lib,
+					.funcs = cut->funcs,
+					.lib = cut->lib,
+					.fixed = cut->fixed,
+					.n_fixed = cut->n_fixed,
 					.fn = mutation_feed_unit,
 					.user = &f,
 				});
@@ -283,8 +293,10 @@ void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ct
 				.mask = m,
 				.ext = eb->v,
 				.n_ext = n,
-				.funcs = funcs,
-				.lib = lib,
+				.funcs = cut->funcs,
+				.lib = cut->lib,
+				.fixed = cut->fixed,
+				.n_fixed = cut->n_fixed,
 				.fn = mutation_feed_unit,
 				.user = &f,
 			});
@@ -307,7 +319,7 @@ static int feed_wants_funcs(const struct kof_mutation_set *set,
 	const struct kof_parser *fp = kof_parser_of(ctx->format);
 	uint32_t i;
 
-	if (!set || !has_regions(fp))
+	if (!set || !has_regions(ctx, fp))
 		return 0;
 	for (i = 0; i < fp->n_regions; i++) {
 		uint32_t rm = fp->regions[i];
@@ -330,6 +342,7 @@ int sx_mutation_loaded(const struct kof_scanner *sc)
 void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			   uint32_t present, int from_packer)
 {
+	struct kof_scan_cut cut;
 	kof_buf b;
 
 	if (!sc->eng->mutation || !sc->mutation.set)
@@ -341,18 +354,20 @@ void sx_mutation_feed(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * functions cannot be read from them (oc_funcs is NULL for it) and
 	 * its library is already moved to the SLIB regions, which are not
 	 * hashed. What is cut from it is what the bytes hold: string clusters
-	 * and pieces. The parent is fed as well - the view is known only after
-	 * the detectors have run - so a block can be met in either.
+	 * and pieces - except the units the decode rewrote, which are the
+	 * parent's and are given whole (cut.fixed). The parent is fed as well - the
+	 * view is known only after the detectors have run - so a block can be met
+	 * in either.
 	 */
 	b = kof_src_buf(sc->cur.src);
 	/* What the matcher's state may take is what the object's ledger has left on top of
 	 * what it already holds for this object; it is charged below, once the feed has run. */
 	kof_mutation_limit(&sc->mutation, kof_mutation_held(&sc->mutation) + oc_scan_room(sc));
-	kof_scan_mutation_feed(&sc->mutation, ctx, b, present, from_packer,
-			     (!from_packer &&
-			      feed_wants_funcs(sc->mutation.set, ctx, present))
-				     ? oc_funcs(ctx) : NULL,
-			     sc->cur.lib_ok ? &sc->cur.lib : NULL,
+	cut.funcs = !from_packer && feed_wants_funcs(sc->mutation.set, ctx, present)
+			    ? oc_funcs(ctx) : NULL;
+	cut.lib = sc->cur.lib_ok ? &sc->cur.lib : NULL;
+	cut.fixed = kof_src_fixed_of(sc->cur.src, &cut.n_fixed);
+	kof_scan_mutation_feed(&sc->mutation, ctx, b, present, from_packer, &cut,
 			     kof_scan_ext_buf(sc, 1));
 	/* The matcher's counters, read where its bound would be noticed: see
 	 * kof_stats.mutation_trunc_objects. The object in hand is counted too. */
@@ -379,8 +394,8 @@ static void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			  uint32_t present)
 {
 	const struct kof_engine *e = sc->eng;
-	const struct kof_module *arrays[3];
-	uint32_t counts[3], a, i, r, b, u;
+	const struct kof_module *arrays[2];
+	uint32_t counts[2], a, i, r, b, u;
 	struct kof_ext_buf *eb;
 	uint32_t swept = 0;
 
@@ -413,18 +428,17 @@ static void sx_multi_prepass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 	arrays[0] = e->mods; counts[0] = e->n_mods;
 	arrays[1] = e->unp;  counts[1] = e->n_unp;
-	arrays[2] = e->heur; counts[2] = e->n_heur;
 
 	/*
-	 * All three arrays, because all three run against THIS object and share
-	 * THIS memo. Counting only detectors would under-report a region that
-	 * the unpackers and the rules between them make worth sweeping.
+	 * Both arrays, because both run against THIS object and share THIS memo.
+	 * Counting only detectors would under-report a region that the unpackers
+	 * make worth sweeping.
 	 *
 	 * Counted per REGION rather than per mask: a module naming CODE|DATA
 	 * makes both of them worth sweeping, and it is the regions that get
 	 * swept.
 	 */
-	for (a = 0; a < 3; a++) {
+	for (a = 0; a < 2; a++) {
 		for (i = 0; i < counts[a]; i++) {
 			const struct kof_module *m = &arrays[a][i];
 			uint32_t bits = 0;
@@ -550,8 +564,8 @@ counted:;
  * THE TWO BATCHED PASSES, ON FIRST ASK.
  *
  * Both were called unconditionally at the top of sx_scan_object. They are called
- * from the three module loops now - detectors, heuristics and unpackers - by
- * the first module in each that declares it needs one. See the note on
+ * from the module loops now - detectors and unpackers - by the first module in
+ * each that declares it needs one. See the note on
  * kof_scanner.multi_ready for what that buys and why a declaration is the
  * right test.
  *

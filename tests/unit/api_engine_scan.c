@@ -20,6 +20,12 @@
 
 #include "hostile_engine.h"
 #include "known_miss.h"
+#include "notes.h"
+#pragma push_macro("CK")
+#undef CK
+#include "caps_fix.h"
+#undef CK
+#pragma pop_macro("CK")
 
 #include <dirent.h>
 #include <errno.h>
@@ -90,14 +96,14 @@ static void t_open(void)
 	}
 	CK(a != b, "each open is its own engine");
 	CK(kdb_records(a) == kdb_records(b) && kdb_unpackers(a) == kdb_unpackers(b) &&
-	   kmatch_rules(a) == kmatch_rules(b) && kdb_diagnoses(a) == kdb_diagnoses(b),
+	   kdb_diagnoses(a) == kdb_diagnoses(b),
 	   "two opens of one database count the same");
 	CK(kdb_unpackers(a) > 0 && kdb_unpackers(c) > 0, "unpackers are counted");
 	CK(kdb_records(c) > 0, "the test set holds detections");
 	CK(kdb_stamp(a) != 0 && kdb_stamp(a) == kdb_stamp(b), "the stamp is stable across opens");
 	CK(kdb_stamp(a) != kdb_stamp(c), "and differs between databases");
 	CK(kdb_stamp(NULL) == 0, "no engine, no stamp");
-	CK(kdb_records(NULL) == 0 && kdb_unpackers(NULL) == 0 && kmatch_rules(NULL) == 0 &&
+	CK(kdb_records(NULL) == 0 && kdb_unpackers(NULL) == 0 &&
 	   kdb_diagnoses(NULL) == 0 && kdb_diag_full(NULL) == 0 && kdb_diag_collisions(NULL) == 0 &&
 	   kdb_diag_refused(NULL) == 0 && kdb_diag_packs_refused(NULL) == 0, "a NULL engine counts zero everywhere");
 	CK(kdb_diag_full(a) == 0 && kdb_diag_collisions(a) == 0 && kdb_diag_refused(a) == 0 &&
@@ -128,7 +134,7 @@ static void t_open(void)
 		   "a NULL engine is -1 and zero-filled");
 	}
 	keng_close(a);
-	CK(kdb_records(b) > 0, "closing one engine leaves the other");
+	CK(kdb_unpackers(b) > 0, "closing one engine leaves the other");
 	keng_close(b);
 	keng_close(c);
 	rmdir(empty);
@@ -204,6 +210,9 @@ static void t_scanner(void)
 
 /* ---- kscan_bytes ------------------------------------------------------------------ */
 
+/* What the test modules said while an object was scanned - see notes.h. */
+static struct note_list pend;
+
 struct rec {
 	char     name[8][300];
 	uint64_t len[8];
@@ -219,12 +228,14 @@ static int on_rec(const char *name, const void *bytes, uint64_t len,
 		  const struct kof_result *res, void *user)
 {
 	struct rec *r = (struct rec *)user;
+	struct note_list got;
 
+	notes_take(&pend, &got);
 	if (r->n < 8) {
 		snprintf(r->name[r->n], sizeof r->name[0], "%s", name ? name : "(null)");
 		r->len[r->n] = len;
 		r->ptr[r->n] = bytes;
-		r->n_find[r->n] = res ? res->n : 99u;
+		r->n_find[r->n] = res ? got.n : 99u;
 		r->examined[r->n] = res ? res->examined : 99u;
 	}
 	r->n++;
@@ -245,10 +256,12 @@ static void t_bytes(void)
 		CK(0, "scanner");
 		return;
 	}
+	kscan_on_debug(sc, notes_on, &pend);
 	mkobj(buf, sizeof buf, 1);
 	memset(&o, 0, sizeof o);
 
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_bytes(sc, buf, sizeof buf, "obj.bin", &o, on_rec, &r);
 	CK(rc == 1 && r.n == 1, "one object scanned, one callback");
 	CK(strcmp(r.name[0], "obj.bin") == 0, "the caller's name is what is reported");
@@ -257,6 +270,7 @@ static void t_bytes(void)
 
 	mkobj(buf, sizeof buf, 0);
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_bytes(sc, buf, sizeof buf, "clean.bin", &o, on_rec, &r);
 	CK(rc == 1 && r.n == 1 && r.n_find[0] == 0, "an object with no findings is still reported");
 
@@ -265,6 +279,7 @@ static void t_bytes(void)
 	CK(kscan_bytes(NULL, buf, sizeof buf, "x", &o, on_rec, &r) == KOF_ERR_ARG, "NULL scanner is KOF_ERR_ARG");
 
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_bytes(sc, buf, sizeof buf, NULL, NULL, on_rec, &r);
 	CK(rc == 1 && r.n == 1 && r.name[0][0] == 0, "NULL name reports an empty name, NULL option is the zero option");
 	CK(kscan_bytes(sc, buf, sizeof buf, "x", &o, NULL, NULL) == 1, "a NULL callback still scans and counts");
@@ -276,6 +291,7 @@ static void t_bytes(void)
 	/* The scanner is reusable after the refusals above. */
 	mkobj(buf, sizeof buf, 1);
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	CK(kscan_bytes(sc, buf, sizeof buf, "again", &o, on_rec, &r) == 1 && r.n_find[0] == 1,
 	   "the scanner works after refused calls");
 	kscan_free(sc);
@@ -302,6 +318,7 @@ static void t_callback_abort(void)
 	he_zip(&z, m, 3);
 
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_bytes(sc, z.p, z.n, "z.zip", &o, on_rec, &r);
 	CK(rc == 4 && r.n == 4, "a three member zip is four objects (rc %d, callbacks %u)", rc, r.n);
 	CK(strcmp(r.name[0], "z.zip") == 0, "the container is reported before its members");
@@ -312,6 +329,7 @@ static void t_callback_abort(void)
 	CK(r.ptr[1] != NULL && r.ptr[1] != r.ptr[2], "each member has its own bytes");
 
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	r.ret = 1;
 	rc = kscan_bytes(sc, z.p, z.n, "z.zip", &o, on_rec, &r);
 	CK(r.n == 1 && r.calls_after_abort == 1, "a non-zero return abandons the walk: no callback after it");
@@ -319,6 +337,7 @@ static void t_callback_abort(void)
 
 	/* heur_off: look, do not open. */
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	o.heur_off = 1;
 	rc = kscan_bytes(sc, z.p, z.n, "z.zip", &o, on_rec, &r);
 	CK(rc == 1 && r.n == 1, "heur_off scans the container and does not descend (rc %d)", rc);
@@ -326,10 +345,12 @@ static void t_callback_abort(void)
 
 	/* max_object_depth 1: the members, not their members. */
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	o.max_object_depth = 1;
 	rc = kscan_bytes(sc, z.p, z.n, "z.zip", &o, on_rec, &r);
 	CK(rc == 4, "depth 1 still opens the members of the zip (rc %d)", rc);
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	o.max_object_depth = 0;
 	{
 		/* children cap */
@@ -347,6 +368,8 @@ static void t_callback_abort(void)
 static void t_path(void)
 {
 	kof_scanner *sc = kscan_new(eng_sigs);
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	static uint8_t buf[300];
 	struct kof_scan_option o;
 	struct rec r;
@@ -366,6 +389,7 @@ static void t_path(void)
 	tpath(p, sizeof p, "one.bin");
 
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_path(sc, p, &o, on_rec, &r);
 	CK(rc == 1 && r.n == 1 && strcmp(r.name[0], p) == 0 && r.len[0] == sizeof buf && r.n_find[0] == 1,
 	   "a file is one object under its own path");
@@ -385,6 +409,7 @@ static void t_path(void)
 	put_file("empty.bin", "", 0);
 	tpath(d, sizeof d, "empty.bin");
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	CK(kscan_path(sc, d, &o, on_rec, &r) == 1 && r.len[0] == 0 && r.n_find[0] == 0,
 	   "a zero length file is one empty object");
 
@@ -428,10 +453,12 @@ static void t_path(void)
 	}
 	o.recurse_dirs = 1;
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_path(sc, sub, &o, on_rec, &r);
 	CK(rc == 3 && r.n == 3, "a tree of three files is three objects (rc %d)", rc);
 	o.max_depth = 1;
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_path(sc, sub, &o, on_rec, &r);
 	CK(rc == 2, "max_depth 1 reaches a/ and not a/b/ (rc %d)", rc);
 	o.max_depth = 0;
@@ -439,6 +466,7 @@ static void t_path(void)
 	/* Trailing and doubled separators are squashed; the names are single-slashed. */
 	snprintf(d, sizeof d, "%s//", sub);
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_path(sc, d, &o, on_rec, &r);
 	CK(rc == 3, "a directory given with a trailing // (rc %d)", rc);
 	{
@@ -456,11 +484,13 @@ static void t_path(void)
 	snprintf(d, sizeof d, "%s/a", sub);
 	if (symlink("a", lnk) == 0) {
 		memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 		rc = kscan_path(sc, sub, &o, on_rec, &r);
 		CK(rc == 3, "a symlink to a directory is not followed (rc %d)", rc);
 		/* follow_symlinks is deprecated and ignored: the engine never follows a link. */
 		o.follow_symlinks = 1;
 		memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 		rc = kscan_path(sc, sub, &o, on_rec, &r);
 		CK(rc == 3, "and it is not followed when asked either (rc %d)", rc);
 		o.follow_symlinks = 0;
@@ -516,7 +546,7 @@ static int stop_after(void *u)
 static void t_cache(void)
 {
 	kof_scanner *sc = kscan_new(eng_sigs);
-	static uint8_t buf[300];
+	static uint8_t buf[300], kmod[4096];
 	struct kof_scan_option o;
 	struct cache c;
 	struct rec r;
@@ -530,8 +560,8 @@ static void t_cache(void)
 	}
 	mkobj(buf, sizeof buf, 0);
 	put_file("clean.bin", buf, sizeof buf);
-	mkobj(buf, sizeof buf, 1);
-	put_file("dirty.bin", buf, sizeof buf);
+	/* a file with a verdict: a kernel module the fixture diagnose kmod_give_root names */
+	put_file("dirty.bin", kmod, (size_t)cf_kmod(kmod, sizeof kmod, 0, 0));
 	tpath(clean, sizeof clean, "clean.bin");
 	tpath(dirty, sizeof dirty, "dirty.bin");
 	memset(&o, 0, sizeof o);
@@ -542,6 +572,7 @@ static void t_cache(void)
 
 	memset(&c, 0, sizeof c);
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	rc = kscan_path(sc, clean, &o, on_rec, &r);
 	CK(rc == 1 && c.seen == 1 && c.keep == 1 && c.drop == 0 && strcmp(c.last_keep, clean) == 0,
 	   "a clean file: asked, scanned, then kept (rc %d)", rc);
@@ -549,11 +580,12 @@ static void t_cache(void)
 	memset(&c, 0, sizeof c);
 	rc = kscan_path(sc, dirty, &o, on_rec, &r);
 	CK(rc == 1 && c.seen == 1 && c.keep == 0 && c.drop == 1 && strcmp(c.last_drop, dirty) == 0,
-	   "a file with a finding is never kept and is dropped");
+	   "a file with a verdict is never kept and is dropped");
 
 	memset(&c, 0, sizeof c);
 	c.answer = 1;
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	cached = kscan_stats(sc)->cached;
 	rc = kscan_path(sc, clean, &o, on_rec, &r);
 	CK(r.n == 0 && c.keep == 0 && c.drop == 0, "a file the cache already answered is not opened or reported");
@@ -642,13 +674,15 @@ static void t_events(void)
 	memset(&o, 0, sizeof o);
 	memset(&e, 0, sizeof e);
 	memset(&r, 0, sizeof r);
+	memset(&pend, 0, sizeof pend);
 	o.on_event_detected = on_event;
 	o.event_user = &e;
 	CK(kscan_bytes(sc, buf, sizeof buf, "ev.bin", &o, on_rec, &r) == 1, "scan");
 	CK(r.n == 1, "the object callback fires");
-	/* This detector declares no disease, so no syndrome can carry its finding: it IS the
-	 * verdict and the event channel delivers it (sx_verdict_take). */
-	CK(e.n == 1 && strcmp(e.object, "ev.bin") == 0, "an event names the object it was found in");
+	/* This detector declares no disease, so its finding is evidence and makes no verdict:
+	 * the event channel delivers verdicts only (tests/unit/verdict_delivery.c has the
+	 * object that does carry a disease, and the event it makes). */
+	CK(e.n == 0, "a finding that is only evidence is not delivered as an event");
 	kscan_free(sc);
 }
 

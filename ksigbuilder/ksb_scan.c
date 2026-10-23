@@ -5,8 +5,6 @@
 
 #include "ksb.h"
 
-#include <kofmod/heur.h>     /* the phases and want-bits a rule may declare */
-
 /* ============================================================================
  * EXTRACT - read the declarations out of a signature source
  *
@@ -29,7 +27,6 @@ enum decl_kind {
 	DECL_HEXSTR,
 	DECL_REGEX,
 	DECL_NAME,
-	DECL_HEUR_CLASS,
 	DECL_MUTATION,
 	DECL_DISEASE
 };
@@ -43,7 +40,6 @@ static const struct macro macros[] = {
 	{ "KOF_TARGET_RANGE",  DECL_RANGE   },
 	{ "KOF_TARGET_NAME",   DECL_NAME    },
 	{ "KOF_DECLARE_DISEASE", DECL_DISEASE },
-	{ "KOF_HEUR_SCAN_CLASS", DECL_HEUR_CLASS },
 	{ "KOF_DEFINE_HEXSTR", DECL_HEXSTR  },
 	{ "KOF_DEFINE_REGEX",  DECL_REGEX   },
 	/* BEFORE KOF_DEFINE_STR, which is a prefix of it - see the note on the
@@ -112,13 +108,10 @@ static int widen(struct ksb_ctx *ksb, struct pat *o, int line)
 	return 1;
 }
 
-/* What one source line names: the macro (NULL for a detection name) and the
- * spelling of a detection name. */
+/* What one source line names: the macro (NULL for a note name, which is kof_debug). */
 struct scan_hit {
 	const struct macro *m;
 	char *p;                   /* where the macro name starts */
-	int   is_variant;          /* KOF_SCAN_INFECT / KOF_SCAN_SUSPECT */
-	int   is_heur_hit;         /* KOF_HEUR_HIT */
 };
 
 /* Find, within the line, the macro the line names. Zero when it names none. */
@@ -126,24 +119,14 @@ static int scan_find(char *at, size_t line_len, struct scan_hit *h)
 {
 	const struct macro *m = NULL;
 	char *p;
-	int is_variant = 0, is_heur_hit = 0;
 	char saved = at[line_len];
 
 	/* Find within the line; read arguments from the full buffer. Comments were
 	 * blanked before this ran, so anything found here is code. */
 	at[line_len] = 0;
 
-	/* kof_debug names go in the same table and are keyed the same way: both use
-	 * __LINE__ as the id, so the host resolves either through one lookup. */
-	p = strstr(at, "KOF_SCAN_INFECT");
-	if (!p)
-		p = strstr(at, "KOF_SCAN_SUSPECT");
-	if (p)
-		is_variant = 1;
-	if (!p && (p = strstr(at, "KOF_HEUR_HIT")) != NULL)
-		is_heur_hit = 1;
-	if (!p)
-		p = strstr(at, "kof_debug");
+	/* A note's name is keyed by __LINE__, so the host resolves it through one lookup. */
+	p = strstr(at, "kof_debug");
 	if (!p)
 		for (m = macros; m->name; m++) {
 			p = strstr(at, m->name);
@@ -154,12 +137,10 @@ static int scan_find(char *at, size_t line_len, struct scan_hit *h)
 
 	h->m = m;
 	h->p = p;
-	h->is_variant = is_variant;
-	h->is_heur_hit = is_heur_hit;
 	return p != NULL;
 }
 
-/* A detection name: the report macros and kof_debug. */
+/* A note's name: kof_debug. */
 static void scan_name_hit(struct ksb_ctx *ksb, const struct scan_hit *h,
 			  int lineno)
 {
@@ -167,37 +148,18 @@ static void scan_name_hit(struct ksb_ctx *ksb, const struct scan_hit *h,
 	struct dname *nm;
 
 	if (ksb->decl.nnames >= MAX_NAMES) {
-		ksb_err(ksb, lineno, "too many detection names in one source file");
+		ksb_err(ksb, lineno, "too many note names in one source file");
 		return;
 	}
 	nm = &ksb->decl.names[ksb->decl.nnames];
 	nm->line = lineno;
-	if (h->is_heur_hit) {
-		/*
-		 * A rule has one name and it is declared, so what
-		 * varies between two hits in one rule is nothing.
-		 * The id is the file's, like every other variant -
-		 * it used to be a hash of the rule's own source
-		 * text, which changed whenever the source was
-		 * touched.
-		 */
-		if (!ksb->decl.name_id[0]) {
-			ksb_err(ksb, lineno, "a rule needs the id at the end "
-					     "of its file name");
-			return;
-		}
-		snprintf(nm->text, sizeof nm->text, "%s", ksb->decl.name_id);
-	} else if (h->is_variant) {
-		if (!ksb_read_variant(ksb, p, lineno, nm->text, sizeof nm->text))
-			return;
-	} else if (!ksb_read_name(ksb, p, lineno, nm->text, sizeof nm->text)) {
+	if (!ksb_read_name(ksb, p, lineno, nm->text, sizeof nm->text))
 		return;
-	}
 	/* The engine's slot is the smallest thing on the way through, so
 	 * it is the limit. Refused here, where the message can name the
 	 * line, rather than cut silently in two places downstream. */
 	if (strlen(nm->text) >= KOF_NAME_MAX_LEN) {
-		fprintf(stderr, "%s:%d: error: detection name is %zu "
+		fprintf(stderr, "%s:%d: error: note name is %zu "
 			"characters; the engine stores %u\n", ksb->src_name,
 			lineno, strlen(nm->text), KOF_NAME_MAX_LEN - 1u);
 		ksb->errors++;
@@ -245,44 +207,14 @@ static void scan_decl_name(struct ksb_ctx *ksb, char *p, int lineno)
 	ksb->decl.have_name = 1;
 }
 
-/* KOF_DECLARE_DISEASE: what this detector's match finds. */
+/* KOF_DECLARE_DISEASE in a module: refused. What a match FINDS is a diagnose's to
+ * say - a module names no object - so a declaration here would be one nothing
+ * reads. */
 static void scan_decl_disease(struct ksb_ctx *ksb, char *p, int lineno)
 {
-	struct kof_disease_decl dd;
-	const char *why;
-
-	if (ksb->decl.have_dis) {
-		ksb_err(ksb, lineno, "KOF_DECLARE_DISEASE declared more than once; a "
-				     "detector finds one disease");
-		return;
-	}
-	/* The one parser - see kofdisease.h - the diagnose reader and any
-	 * tool that writes the declaration use it too. */
-	why = kof_disease_decl_parse(p, &dd);
-	if (why) {
-		ksb_err(ksb, lineno, why);
-		return;
-	}
-	memcpy(ksb->decl.dis_name, dd.name, strlen(dd.name) + 1u);
-	ksb->decl.dis_type = dd.type;
-	ksb->decl.have_dis = 1;
-}
-
-/* KOF_HEUR_SCAN_CLASS: the one class a rule narrows to. */
-static void scan_decl_heur_class(struct ksb_ctx *ksb, char *p, int lineno)
-{
-	int type_idx;
-
-	if (KOF_ENG_CLASS_OF((uint32_t)ksb->decl.heur_want)) {
-		ksb_err(ksb, lineno, "KOF_HEUR_SCAN_CLASS declared more than "
-				     "once; a rule narrows to one class");
-		return;
-	}
-	if (!ksb_read_maltype(ksb, p, lineno, &type_idx))
-		return;
-	/* Into the high byte of the ask mask, plus one - see
-	 * KOF_HEUR_SCAN_CLASS in kofmod/heur.h. */
-	ksb->decl.heur_want |= (int)KOF_ENG_CLASS_PUT(type_idx);
+	(void)p;
+	ksb_err(ksb, lineno, "KOF_DECLARE_DISEASE in a module; only a diagnose "
+			     "declares a disease");
 }
 
 /* KOF_TARGET_RANGE: a named set of regions. */
@@ -494,9 +426,6 @@ void ksb_scan_line(struct ksb_ctx *ksb, char *at, size_t line_len, int lineno)
 		break;
 	case DECL_DISEASE:
 		scan_decl_disease(ksb, h.p, lineno);
-		break;
-	case DECL_HEUR_CLASS:
-		scan_decl_heur_class(ksb, h.p, lineno);
 		break;
 	case DECL_RANGE:
 		scan_decl_range(ksb, h.p, lineno);

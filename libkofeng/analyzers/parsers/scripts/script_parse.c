@@ -33,73 +33,17 @@
 
 #include "../../../kofcore/kofcore.h"
 #include "script_parse.h"
-#include "script_norm.h"
 #include "scantext.h"
 #include "php_parse.h"
 #include "svrpage_parse.h"
 #include "markup_parse.h"
 #include "cfm_parse.h"
+#include "script_route.h"
+#include "../kofformat.h"
 
 const uint32_t kof_script_region_bits[] = {
 	KOF_SCAN_SCRIPT_HEADER, KOF_SCAN_SCRIPT_BODY, KOF_SCAN_SCRIPT_MARKUP
 };
-
-/*
- * THE DELIMITERS OF ONE CODE BLOCK, longest first.
- *
- * Longest first because "<%" is a prefix of "<%=" and of "<%@": matching the
- * short one would leave a stray "=" behind and call a block that prints a value
- * something other than empty.
- */
-static const char *const bare_php[] = { "<?php", "<?=", "<?", "?>", NULL };
-static const char *const bare_pct[] = { "<%=", "<%@", "<%", "%>", NULL };
-
-int kof_script_block_bare(uint8_t kind, const uint8_t *p, uint32_t n)
-{
-	const char *const *d;
-	kof_buf b;
-	uint32_t i;
-
-	if (!p || !n)
-		return 0;
-	switch (kind) {
-	case KOF_SCRIPT_PHP:                     d = bare_php; break;
-	case KOF_SCRIPT_ASP:
-	case KOF_SCRIPT_ASPX:
-	case KOF_SCRIPT_JSP:                     d = bare_pct; break;
-	default:                                 return 0;
-	}
-	b.p = p;
-	b.n = n;
-	/*
-	 * EVERY delimiter in the run, not just the first and the last, because
-	 * the join pass puts neighbours separated by nothing but whitespace
-	 * into one island: two emptied blocks arrive here as "<%\n%>\n<%\n%>",
-	 * and that is as empty as one of them.
-	 */
-	for (i = 0; i < n; ) {
-		uint8_t c = p[i];
-		uint32_t k;
-		int hit = 0;
-
-		if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-			i++;
-			continue;
-		}
-		for (k = 0; d[k]; k++) {
-			uint32_t dl = (uint32_t)strlen(d[k]);
-
-			if (kof_txt_tag_at(b, i, d[k], dl)) {
-				i += dl;
-				hit = 1;
-				break;
-			}
-		}
-		if (!hit)
-			return 0;
-	}
-	return 1;
-}
 
 const char *kof_script_region_name(uint32_t bit)
 {
@@ -133,6 +77,15 @@ static uint32_t script_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask
 	uint64_t hdr, end, lead;
 
 	if (!s || !out || max_out == 0)
+		return 0;
+	/*
+	 * A LANGUAGE THE LIB LEXES HAS NO REGIONS. Header, body and markup were the parser's cut of a page along its tags,
+	 * and the lexer reads the page by what each byte is (code, string, comment, markup) in one pass: a cut of the file
+	 * made first is a second reading of the same thing, and for a webshell, which is mostly string literals, a
+	 * partition along its HTML says little. What such an object has is the whole of it (KOF_SCAN_ALL, which the host
+	 * answers without a parser). A language with no lexer keeps the cut.
+	 */
+	if (kof_obj_regionless(ctx))
 		return 0;
 	/*
 	 * THREE MARKS: what the page opened with before its tag, where the
@@ -516,10 +469,8 @@ static int psh_cmdlet(kof_buf f, uint64_t look)
  *                     reading new ActiveXObject("WScript.Shell") was called
  *                     VBScript until this order.
  */
-struct tl_tag { const char *s; uint8_t len, grp; };
-
 /* generated: 29 markers, 3 groups */
-static const struct tl_tag TL_TAG[29] = {
+static const struct kof_txt_tag TL_TAG[29] = {
 	{ "[cmdletbinding", 14, 0 },
 	{ "$psversiontable", 15, 0 },
 	{ "$env:", 5, 0 },
@@ -581,7 +532,7 @@ static const uint32_t TL_FIRST[256] = {
  * written. One of them decided the language outright, and kof_script_norm then
  * rewrote a `#!/bin/sh` file under PowerShell's whitespace rule, where space
  * between tokens means nothing: `case "$ARCH" in` became `case"$ARCH"in`.
- * script_norm.h names that exact trap at the top of the file - "ls -la" and
+ * script_norm.h (removed with the lexers' form) named that exact trap at the top of its file - "ls -la" and
  * "ls-la" are different commands.
  *
  * DEMANDING TWO OF THEM WAS TRIED HERE AND IS WRONG. tests/unit/script_tagless.c
@@ -679,35 +630,18 @@ static int shell_test_operator(kof_buf f, uint64_t at)
 	return 0;
 }
 
+/* A `test` operator is not evidence of PowerShell - see shell_test_operator - so a match that is one is not recorded either: it said
+ * nothing, and must not count towards anything later. */
+static const struct kof_txt_tags TL_TAGS = { .tag = TL_TAG, .n = sizeof TL_TAG / sizeof TL_TAG[0], .first = TL_FIRST, .veto_mask = TL_GSH,
+					      .veto = shell_test_operator };
+
 static uint8_t tagless_kind(kof_buf f, uint64_t look)
 {
-	uint32_t seen = 0;
-	uint64_t i, cap = look < f.n ? look : f.n;
+	int psh;
+	uint32_t seen = kof_txt_tags_seen(f, look, &TL_TAGS, &psh);
 
-	for (i = 0; i < cap; i++) {
-		uint32_t m = TL_FIRST[f.p[i]] & ~seen;
-
-		while (m) {
-			uint32_t t = (uint32_t)__builtin_ctz(m);
-
-			m &= m - 1u;
-			if (i + TL_TAG[t].len > cap)
-				continue;
-			if (!kof_txt_tag_at(f, i, TL_TAG[t].s, TL_TAG[t].len))
-				continue;
-			/*
-			 * A `test` operator is not evidence of PowerShell -
-			 * see shell_test_operator. Not recorded in `seen`
-			 * either: it said nothing, so it must not count
-			 * towards anything later.
-			 */
-			if (((1u << t) & TL_GSH) && shell_test_operator(f, i))
-				continue;
-			seen |= 1u << t;
-			if (TL_TAG[t].grp == 0)
-				return KOF_SCRIPT_PSH;
-		}
-	}
+	if (psh)
+		return KOF_SCRIPT_PSH;
 	if (seen & TL_G1)
 		return KOF_SCRIPT_JS;
 	if (seen & TL_G2)
@@ -722,9 +656,14 @@ static uint8_t tagless_kind(kof_buf f, uint64_t look)
 	return KOF_SCRIPT_ANY;
 }
 
+/*
+ * `guess` says whether the tagless inference below may run. It is the one reader that walks the whole window (a third of the instructions of a shell script's
+ * parse, callgrind over 297 scripts), and its answer is an INFERENCE that a shebang naming an interpreter always overrules (script_build: "a shebang outranks a
+ * guess"), so a caller that has such a shebang passes 0 and the walk is not made: the tag it would have reported as guessed is the tag script_build then throws away.
+ */
 static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 			 uint32_t *taglen, uint32_t *headlen, int *fam,
-			 int *guessed)
+			 int *guessed, int guess)
 {
 	uint64_t php, svr;
 	uint32_t pl = 0, sl = 0, sh = 0;
@@ -807,7 +746,7 @@ static uint64_t find_tag(kof_buf f, uint64_t look, uint8_t *kind,
 		*fam = FAM_HTML;
 		return 0;
 	}
-	{
+	if (guess) {
 		uint8_t k = tagless_kind(f, look);
 
 		if (k != KOF_SCRIPT_ANY) {
@@ -933,7 +872,7 @@ int kof_script_sniff_keep(kof_buf file, void *keep)
 		return looks_like_text(file, f->sheb_end);
 
 	f->tag = find_tag(file, look, &f->kind, &f->tl, &f->hl, &f->fam,
-			  &f->guessed);
+			  &f->guessed, 1);
 	f->have_tag = 1;
 	return f->tag != (uint64_t)-1 && looks_like_text(file, f->tag + f->tl);
 }
@@ -1104,7 +1043,8 @@ static int script_build(kof_buf file, struct kof_script_info *info,
 
 		if (!f->have_tag)
 			f->tag = find_tag(file, look, &f->kind, &f->tl, &f->hl,
-					  &f->fam, &f->guessed);
+					  &f->fam, &f->guessed,
+					  !(f->sheb && f->sheb_kind != KOF_SCRIPT_ANY));
 		f->have_tag = 1;
 		tag = f->tag;
 		kind = f->kind; tl = f->tl; hl = f->hl;
@@ -1150,8 +1090,8 @@ static int script_build(kof_buf file, struct kof_script_info *info,
 		if (tag != (uint64_t)-1 && info->from_shebang &&
 		    info->kind != KOF_SCRIPT_ANY && info->kind != kind &&
 		    file.n <= 0xffffffffu &&
-		    !kof_lex_is_code_at(kof_lex_for(info->kind), file.p,
-					(uint32_t)file.n, (uint32_t)tag))
+		    !kof_script_is_code_at(info->kind, file.p,
+					   (uint32_t)file.n, (uint32_t)tag))
 			tag = (uint64_t)-1;
 		if (tag != (uint64_t)-1) {
 			/*
@@ -1227,7 +1167,7 @@ static int script_build(kof_buf file, struct kof_script_info *info,
 						kof_php_islands(file, from,
 								info);
 				} else if (fam == FAM_SVR) {
-					kof_svr_islands(file, from, info);
+					kof_svr_islands(file, from, kind, info);
 				} else if (fam == FAM_CFM) {
 					kof_cfm_islands(file, from, info);
 				} else if (fam == FAM_HTML) {

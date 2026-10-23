@@ -27,6 +27,8 @@ int main(int argc, char **argv)
 		rc = ksb_tree_main(ksb, argc, argv);
 	else if (argc > 1 && strcmp(argv[1], "--diagnose") == 0)
 		rc = ksb_diagnose_main(ksb, argc, argv);
+	else if (argc > 1 && strcmp(argv[1], "--tags") == 0)
+		rc = ksb_tags_main(argc, argv);
 	else
 		rc = ksb_pack_main(ksb, argc, argv);
 	free(ksb);

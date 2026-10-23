@@ -49,6 +49,7 @@
 
 #include "caps_fix.h"
 #include "caps_e2e.h"
+#include "notes.h"
 #include "normalizer_ref.h"
 #include "normalizer_fx.h"
 #include "../../libkofeng/scanners/scan.h"
@@ -63,6 +64,8 @@ struct eo {
 	char     find[10][120];
 	uint8_t *bytes;
 	uint64_t len;
+	struct kof_range *fixed;        /* kof_result.fixed, copied */
+	uint32_t n_fixed;
 };
 
 struct er {
@@ -75,8 +78,10 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 {
 	struct er *r = user;
 	struct eo *o;
+	struct note_list got;
 	uint32_t i;
 
+	notes_here(&got);
 	if (r->n >= MAXO)
 		return 0;
 	o = &r->o[r->n++];
@@ -84,14 +89,21 @@ static int collect(const char *name, const void *bytes, uint64_t len, const stru
 	snprintf(o->name, sizeof o->name, "%s", name ? name : "");
 	o->kind = res->entry_kind;
 	o->broken = res->broken;
-	o->n = res->n;
-	for (i = 0; i < res->n && i < 10u; i++)
-		snprintf(o->find[i], sizeof o->find[i], "%s", res->v[i].name);
+	o->n = got.n;
+	for (i = 0; i < got.n && i < 10u; i++)
+		snprintf(o->find[i], sizeof o->find[i], "%s", got.name[i]);
 	if (len && len < (8u << 20)) {
 		o->bytes = malloc((size_t)len);
 		if (o->bytes) {
 			memcpy(o->bytes, bytes, (size_t)len);
 			o->len = len;
+		}
+	}
+	if (res->fixed && res->n_fixed) {
+		o->fixed = malloc(res->n_fixed * sizeof *o->fixed);
+		if (o->fixed) {
+			memcpy(o->fixed, res->fixed, res->n_fixed * sizeof *o->fixed);
+			o->n_fixed = res->n_fixed;
 		}
 	}
 	return 0;
@@ -101,15 +113,16 @@ static void er_free(struct er *r)
 {
 	unsigned i;
 
-	for (i = 0; i < r->n; i++)
+	for (i = 0; i < r->n; i++) {
 		free(r->o[i].bytes);
+		free(r->o[i].fixed);
+	}
 	r->n = 0;
 }
 
 static void defaults(struct kof_scan_option *opt, unsigned heur)
 {
 	memset(opt, 0, sizeof *opt);
-	opt->all_matches = 1;
 	opt->max_produced_bytes = 64u << 20;
 	opt->max_resident_bytes = 256u << 20;
 	opt->max_object_bytes = 64u << 20;
@@ -613,7 +626,7 @@ static void budget_gates(void)
 	struct fx_at at;
 	struct er r;
 	struct kof_scan_option opt;
-	kof_scanner *sc = kscan_new(e2e_eng);
+	kof_scanner *sc = notes_scanner(e2e_eng);
 
 	CK(sc != NULL);
 	if (!sc)
@@ -668,7 +681,7 @@ static void big_views(void)
 	struct kof_scan_option opt;
 	uint64_t n;
 	uint8_t *o = big_object(3u << 20, &at, &n);
-	kof_scanner *sc = kscan_new(e2e_eng);
+	kof_scanner *sc = notes_scanner(e2e_eng);
 
 	CK(sc != NULL && o != NULL);
 	if (!sc || !o)
@@ -737,7 +750,7 @@ static void produced_budget_under_a_chunk(void)
 	struct fx_at at;
 	struct er r;
 	struct kof_scan_option opt;
-	kof_scanner *sc = kscan_new(e2e_eng);
+	kof_scanner *sc = notes_scanner(e2e_eng);
 	uint64_t n;
 
 	CK(sc != NULL);
@@ -812,6 +825,104 @@ static void one_for_one_view(void)
 	NCKF(r.n == 2u && view_of(&r) && view_of(&r)->len <= n && has(view_of(&r), "NormViewDecodedPe"),
 	     "a tiny-payload PE view: %u objects", r.n);
 	er_free(&r);
+}
+
+/*
+ * THE UNITS A VIEW KEEPS WHOLE. A unit of the parent's block cut that the decode rewrote is
+ * declared to the view in the view's own offsets, so the view's cut gives it as one unit and does
+ * not find other units in the rewritten bytes. The parent declares none.
+ */
+static void fixed_units(void)
+{
+	struct fx f;
+	struct fx_at at;
+	struct er r;
+	struct kof_scan_option opt;
+	char enc[64];
+	uint8_t tail[128];
+	size_t el, o = 0;
+	uint64_t n;
+	const struct eo *v;
+
+	el = nr_b64_enc((const uint8_t *)"NormTiny-9ab", 12u, enc, 1, 0, 0);
+	tail[o++] = '\n';
+	memcpy(tail + o, "echo ", 5u);
+	o += 5u;
+	memcpy(tail + o, enc, el);
+	o += el;
+	memcpy(tail + o, " | base64 -d\n", 13u);
+	o += 13u;
+	base_fx(&f);
+	f.tail = tail;
+	f.tail_n = o;
+	defaults(&opt, 0);
+	n = fx_elf(img, &f, &at);
+	scan(e2e_sc, img, n, &opt, &r);
+	v = view_of(&r);
+	NCKF(r.n == 2u && v, "fixed units: %u objects", r.n);
+	if (v && v->bytes) {
+		const uint8_t *p = memmem(v->bytes, v->len, "NormTiny-9ab", 12u);
+		uint32_t k, hit = 0;
+
+		NCK(r.o[0].n_fixed == 0u);
+		NCKF(v->n_fixed >= 1u, "the decode rewrote a unit and the view declares none");
+		for (k = 0; k < v->n_fixed; k++) {
+			NCK(v->fixed[k].len > 0u && v->fixed[k].off + v->fixed[k].len <= v->len);
+			NCK(!k || v->fixed[k].off >= v->fixed[k - 1u].off + v->fixed[k - 1u].len);
+			if (p && (uint64_t)(p - v->bytes) >= v->fixed[k].off &&
+			    (uint64_t)(p - v->bytes) + 12u <= v->fixed[k].off + v->fixed[k].len)
+				hit++;
+		}
+		NCKF(p && hit == 1u, "the decoded text lies in one kept-whole unit, not %u", hit);
+	}
+	er_free(&r);
+}
+
+/*
+ * ESCAPES. `\xNN` and `/xNN` runs are read into the view like the other encodings, and a run
+ * below the floor is not: the plain text is in the view and not in the parent, the unit that held
+ * it is declared kept whole, and a run of seven stays as written.
+ */
+static void escape_view(void)
+{
+	static const char canary[] = "NormCanaryESC-7a31c0 and then some more text";
+	struct kof_scan_option opt;
+	unsigned sep, count;
+
+	defaults(&opt, 0);
+	for (sep = 0; sep < 2; sep++)
+		for (count = 7; count <= strlen(canary); count += strlen(canary) - 7u) {
+			struct fx f;
+			struct fx_at at;
+			struct er r;
+			uint8_t tail[400];
+			char enc[300];
+			size_t el, o = 0;
+			uint64_t n;
+			const struct eo *v;
+
+			el = nr_esc_enc((const uint8_t *)canary, count, enc, sep ? '/' : '\\', 2);
+			tail[o++] = '\n';
+			memcpy(tail + o, enc, el);
+			o += el;
+			tail[o++] = '\n';
+			base_fx(&f);
+			f.tail = tail;
+			f.tail_n = o;
+			n = fx_elf(img, &f, &at);
+			scan(e2e_sc, img, n, &opt, &r);
+			v = view_of(&r);
+			if (count == 7u) {
+				/* under the floor nothing is read, so nothing makes a view of it */
+				NCKF(!v || !memmem(v->bytes, v->len, canary, 7u), "sep %u: seven escapes read", sep);
+			} else {
+				NCKF(r.n == 2u && v, "sep %u: %u objects", sep, r.n);
+				NCKF(v && memmem(v->bytes, v->len, canary, count), "sep %u: the text is not in the view", sep);
+				NCKF(!memmem(img, n, canary, 7u), "sep %u: the parent holds the plain text", sep);
+				NCKF(v && v->n_fixed >= 1u, "sep %u: the view declares no kept unit", sep);
+			}
+			er_free(&r);
+		}
 }
 
 /*
@@ -990,7 +1101,7 @@ static void limits_propagate(void)
 	struct kof_scan_option opt;
 	unsigned layers, first = 0;
 	static uint8_t tl[1u << 16];
-	kof_scanner *sc = kscan_new(e2e_eng);
+	kof_scanner *sc = notes_scanner(e2e_eng);
 
 	CK(sc != NULL);
 	if (!sc)
@@ -1072,6 +1183,7 @@ static void *worker(void *p)
 	unsigned rep;
 	static const unsigned pay[4] = { P_B64, P_HEX, P_PCT, P_WIDE };
 
+	notes_watch(sc);      /* on this thread: the pending list is the thread's */
 	j->ok = sc != NULL;
 	for (rep = 0; sc && rep < 24u; rep++) {
 		struct fx f;
@@ -1111,7 +1223,7 @@ static void reuse_and_threads(void)
 	struct fx_at at;
 	struct er r;
 	struct kof_scan_option opt;
-	kof_scanner *sc = kscan_new(e2e_eng);
+	kof_scanner *sc = notes_scanner(e2e_eng);
 
 	/* one scanner, objects of every kind in a row: no state leaks from one to the next */
 	CK(sc != NULL);
@@ -1219,6 +1331,41 @@ static void scripts(void)
 		NCKF(v && has(v, "NormViewScript") && !has(&r.o[0], "NormViewScript"),
 		     "the fold at heuristic level 2: %u objects", r.n);
 	}
+	er_free(&r);	/* a CALL on literals is its literal in the php view, at every level: the name is built by kuncoat's str_replace and by chr, through the
+	 * hook of the lib's form, and is nowhere in the file whole */
+	snprintf(text, sizeof text,
+		 "<?php\n$f = str_replace('Q', '', 'NormScriptQFOLD-9e61d3-built-fromQ-pieces');\n"
+		 "// pad pad pad pad pad pad pad pad pad pad\n");
+	for (heur = 0; heur <= 2u; heur++) {
+		const struct eo *v;
+
+		script_scan(text, heur, &r);
+		v = view_of(&r);
+		NCKF(v && has(v, "NormViewScript") && !has(&r.o[0], "NormViewScript"), "php str_replace on literals, heur %u: %u objects", heur, r.n);
+		er_free(&r);
+	}
+	snprintf(text, sizeof text,
+		 "<?php\n$f = 'NormScriptFOLD' . chr(45) . '9e61d3' . chr(45) . 'built' . chr(45) . 'from' . chr(45) . 'pieces';\n"
+		 "// pad pad pad pad pad pad pad pad pad pad\n");
+	script_scan(text, 1, &r);
+	{
+		const struct eo *v = view_of(&r);
+
+		NCKF(v && has(v, "NormViewScript") && !has(&r.o[0], "NormViewScript"), "php chr joined with literals: %u objects", r.n);
+	}
+	er_free(&r);
+	/* and the same call over a variable is not folded: nothing to say */
+	snprintf(text, sizeof text,
+		 "<?php\n$f = str_replace('Q', '', $x . 'NormScriptQFOLD-9e61d3-built-fromQ-pieces');\n"
+		 "// pad pad pad pad pad pad pad pad pad pad\n");
+	script_scan(text, 1, &r);
+	{
+		unsigned i, found = 0;
+
+		for (i = 0; i < r.n; i++)
+			found |= (unsigned)has(&r.o[i], "NormViewScript");
+		NCKF(!found, "a call with a variable in it was folded");
+	}
 	er_free(&r);
 }
 
@@ -1240,6 +1387,8 @@ int main(void)
 	big_views();
 	produced_budget_under_a_chunk();
 	one_for_one_view();
+	fixed_units();
+	escape_view();
 	limits_propagate();
 	reuse_and_threads();
 	scripts();

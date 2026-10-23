@@ -270,18 +270,18 @@ static void t_call_refine(void)
 	uint64_t arg[4] = { 0, 0, 0, 0x40 };
 	uint8_t fl = 0;
 
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", arg, &fl) == KGENOME_NUCLEO_ALLOC_EXEC);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", arg, &fl) == KGENOME_NUCLEO_ALLOC_EXEC);
 	CK(fl == KGENOME_NUCLEO_F_WX);
 	arg[3] = 0x04;                                  /* PAGE_READWRITE */
-	CK(kgenome_nucleo_cap_of_call("VirtualAlloc", arg, &fl) == KGENOME_NUCLEO_ALLOC && fl == 0);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualAlloc", arg, &fl) == KGENOME_NUCLEO_ALLOC && fl == 0);
 	arg[2] = 0x20;                                  /* VirtualProtect: protection is argument 3 (index 2) */
-	CK(kgenome_nucleo_cap_of_call("VirtualProtect", arg, &fl) == KGENOME_NUCLEO_ALLOC_EXEC && fl == 0);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, "VirtualProtect", arg, &fl) == KGENOME_NUCLEO_ALLOC_EXEC && fl == 0);
 	arg[0] = 2; arg[1] = 3;                         /* socket(AF_INET, SOCK_RAW) */
-	CK(kgenome_nucleo_cap_of_call("socket", arg, &fl) == KGENOME_NUCLEO_NET_RAW);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "socket", arg, &fl) == KGENOME_NUCLEO_NET_RAW);
 	/* an ELF import carries a version suffix; the row is the same row */
-	CK(kgenome_nucleo_cap_of_call("socket@@GLIBC_2.2.5", arg, &fl) == KGENOME_NUCLEO_NET_RAW);
-	CK(kgenome_nucleo_cap_of_call("nonexistent_function", arg, &fl) == KGENOME_NUCLEO_NONE);
-	CK(kgenome_nucleo_cap_of_call(NULL, arg, &fl) == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "socket@@GLIBC_2.2.5", arg, &fl) == KGENOME_NUCLEO_NET_RAW);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, "nonexistent_function", arg, &fl) == KGENOME_NUCLEO_NONE);
+	CK(kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_ELF, NULL, arg, &fl) == KGENOME_NUCLEO_NONE);
 }
 
 

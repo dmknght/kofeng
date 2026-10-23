@@ -253,11 +253,14 @@ def nested_container_gz_tar_child_selectable():
 @case(A)
 def tree_survives_selection_during_draft_edit():
     with Viewer(SAMPLES['ko']) as v:
-        v.click(*v.find('[?]', rows=(36, 38)))
+        # The draft's head row is not at a fixed line: the panel is as tall as
+        # the open tab's rows, so it is found by its Type box.
+        head = v.find('Type [Virus]')[1]
+        v.click(*v.find('[?]', rows=(head, head)))
         v.type('abc')
         v.click(10, 4)       # click away from an open field: commits, selects
         check('CODE' in sel_label(v), sel_label(v))
-        check('Family [abc]' in v.row(36), 'field edit was lost: %r' % v.row(36)[:60])
+        check('Family [abc]' in v.row(head), 'field edit was lost: %r' % v.row(head)[:60])
 
 
 @case(A)

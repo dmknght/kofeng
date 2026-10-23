@@ -108,7 +108,9 @@ static int read_hdr(kof_buf img, struct hdr *h)
 
 		if (h->optsz > cnt_off &&
 		    kof_rd_u32(img, h->opt + cnt_off, 0, &n))
-			h->n_dirs = n > 16u ? 16u : n;
+			/* what the header holds is decided in one place - see kgenome_pe_dirs_in_header
+			 * (norm_defect_image N10, image_defect2 E1) */
+			h->n_dirs = kgenome_pe_dirs_in_header((uint32_t)h->optsz, h->plus, n);
 		h->dir_base = h->opt + dir_off;
 	}
 

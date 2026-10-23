@@ -312,8 +312,8 @@ struct kof_fp_verdict {
 	 * artefact to look at first. */
 	uint32_t entropy8;
 
-	/* The engine's composed name, "PE-x64/Trojan:Emotet#Gen", or "" for an
-	 * object with no finding - which is a RESULT and not a failure. */
+	/* The engine's composed verdict name, or "" for an
+	 * object with no verdict - which is a RESULT and not a failure. */
 	char     finding[224];
 
 	/*

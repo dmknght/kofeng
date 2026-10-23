@@ -57,6 +57,7 @@ void oc_pend_clear(struct kof_scanner *sc)
 	sc->pend.rgn_fmt = 0;
 	sc->pend.n_syms = 0;
 	kgenome_funcs_free(&sc->pend.funcs);
+	sc->pend.n_fixed = 0;
 	sc->pend.desc_set = 0;
 	sc->pend.derived_by = NULL;
 	sc->pend.superseded = 0;
@@ -81,12 +82,11 @@ void oc_pend_clear(struct kof_scanner *sc)
 /*
  * The declared sections, as a region partition.
  *
- * ONE MASK PER SECTION, COALESCED WHERE NEIGHBOURS AGREE. The region table has
- * room for KOF_SRC_MAX_REGIONS entries and a split image easily declares more
- * sections than that - mp_split draws up to twelve and a real PE may have
- * ninety-six - so runs of the same kind are joined. They are adjacent by
- * construction: oc_section refuses a section that starts before the previous one
- * ends.
+ * ONE MASK PER SECTION, COALESCED WHERE NEIGHBOURS AGREE. A split image easily declares
+ * many sections - mp_split draws up to twelve and a real PE may have ninety-six - and runs
+ * of the same kind are joined: one region is one extent, and what a rule scoped to CODE
+ * reads is fewer, longer ranges. They are adjacent by construction: oc_section refuses a
+ * section that starts before the previous one ends.
  *
  * PAD AND HOLLOW BECOME UNCLAIMED, which is the whole point of having them.
  * Alignment fill is not DATA - it was being counted as 3972 bytes of it on one
@@ -106,6 +106,26 @@ void oc_pend_clear(struct kof_scanner *sc)
  * Which is why this takes the format rather than assuming PE, and why
  * pend_rgn_fmt is set from the same answer.
  */
+/*
+ * ROOM FOR `need` REGIONS in the pending table: grown to what the producer declares and kept for the
+ * next child. There is no count it may not pass - the table was sixteen entries, a producer's own was
+ * clipped to them and a PE with more disjoint code extents lost the later ones (norm_defect_engine N3).
+ * 0 is a failed allocation, and the caller says so.
+ */
+int oc_pend_regions(struct kof_scanner *sc, uint32_t need)
+{
+	struct kof_src_region *g;
+
+	if (need <= sc->pend.rgn_cap)
+		return 1;
+	g = realloc(sc->pend.rgn, (size_t)need * sizeof *g);
+	if (!g)
+		return 0;
+	sc->pend.rgn = g;
+	sc->pend.rgn_cap = need;
+	return 1;
+}
+
 static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 {
 	uint32_t i, n = 0;
@@ -114,6 +134,11 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 
 	if (!sc->pend.sec || !sc->pend.n_sec)
 		return;
+	/* One region for the header and at most one a section: the room is known before the loop. */
+	if (!oc_pend_regions(sc, sc->pend.n_sec + 1u)) {
+		oc_scan_limit(sc);      /* the partition is not declared, and a rule scoped to a region cannot see */
+		return;
+	}
 	if (fmt == KOF_FMT_ELF) {
 		m_hdr = KGENOME_SCAN_ELF_HEADERS;
 		m_code = KGENOME_SCAN_ELF_CODE;
@@ -128,7 +153,7 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 	/* Everything before the first section is the header, which no module
 	 * declares and every consumer expects. */
 	hdr_end = sc->pend.sec[0].rva;
-	if (hdr_end && n < KOF_SRC_MAX_REGIONS) {
+	if (hdr_end) {
 		sc->pend.rgn[n].mask = m_hdr;
 		sc->pend.rgn[n].off = 0;
 		sc->pend.rgn[n].len = hdr_end;
@@ -136,8 +161,22 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 	}
 	for (i = 0; i < sc->pend.n_sec; i++) {
 		const struct kgenome_sec_decl *d = &sc->pend.sec[i];
+		uint64_t from = d->rva, to = d->rva + d->vsize;
 		uint32_t mask;
 
+		/*
+		 * A PARTITION, whatever the table says. The sections a module declares one by one are ordered
+		 * and disjoint (oc_section refuses anything else), but the ones recovered from a decoded
+		 * payload's own header (oc_layout_of_produced) are the payload's claim, sorted, and may
+		 * overlap: declared as they stood, two regions held the same bytes and a rule scoped to CODE
+		 * and one scoped to DATA both read them (engine_defect2 E6). The earlier claimant keeps the
+		 * bytes, as everywhere else the engine settles ownership (kof_rl_settle); a section with nothing
+		 * left owns no region.
+		 */
+		if (n && from < sc->pend.rgn[n - 1u].off + sc->pend.rgn[n - 1u].len)
+			from = sc->pend.rgn[n - 1u].off + sc->pend.rgn[n - 1u].len;
+		if (to <= from)
+			continue;
 		if (d->flags & (KGENOME_SECF_PAD | KGENOME_SECF_HOLLOW))
 			mask = m_unclaimed;
 		else if (d->flags & KGENOME_SECF_CODE)
@@ -145,20 +184,13 @@ static void decl_sec_to_regions(struct kof_scanner *sc, uint8_t fmt)
 		else
 			mask = m_data;
 		if (n && sc->pend.rgn[n - 1u].mask == mask &&
-		    sc->pend.rgn[n - 1u].off + sc->pend.rgn[n - 1u].len ==
-		    d->rva) {
-			sc->pend.rgn[n - 1u].len += d->vsize;
+		    sc->pend.rgn[n - 1u].off + sc->pend.rgn[n - 1u].len == from) {
+			sc->pend.rgn[n - 1u].len += to - from;
 			continue;
 		}
-		if (n >= KOF_SRC_MAX_REGIONS) {
-			/* The tail of the section table is not in any region, and a
-			 * rule scoped to CODE or DATA cannot see it: said, not dropped. */
-			oc_scan_capped(sc, KOF_BROKEN_LIMIT);
-			break;
-		}
 		sc->pend.rgn[n].mask = mask;
-		sc->pend.rgn[n].off = d->rva;
-		sc->pend.rgn[n].len = d->vsize;
+		sc->pend.rgn[n].off = from;
+		sc->pend.rgn[n].len = to - from;
 		n++;
 	}
 	sc->pend.n_rgn = n;
@@ -437,21 +469,30 @@ if (!sc->pend.n_rgn && sc->pend.n_sec && sc->pend.image)
 	decl_sec_to_regions(sc, sc->pend.as_fmt ? sc->pend.as_fmt
 						: sc->pend.img_fmt);
 if (sc->pend.n_rgn) {
-	kof_src_declare_regions(kid, sc->pend.rgn_fmt, sc->pend.rgn,
-				sc->pend.n_rgn);
+	if (!kof_src_declare_regions(kid, sc->pend.rgn_fmt, sc->pend.rgn,
+				     sc->pend.n_rgn))
+		oc_scan_limit(sc);      /* the child carries no table: said, not dropped */
 	sc->pend.n_rgn = 0;
 	sc->pend.rgn_fmt = 0;
 }
 if (sc->pend.n_syms) {
-	kof_src_declare_syms(kid, sc->pend.syms, sc->pend.n_syms);
+	if (!kof_src_declare_syms(kid, sc->pend.syms, sc->pend.n_syms))
+		oc_scan_limit(sc);      /* the child carries no symbols: said, not dropped (engine_defect2 E2) */
 	sc->pend.n_syms = 0;
 }
 if (sc->pend.funcs.n) {
-	kof_src_declare_funcs(kid, sc->pend.funcs.v, sc->pend.funcs.n);
+	if (!kof_src_declare_funcs(kid, sc->pend.funcs.v, sc->pend.funcs.n))
+		oc_scan_limit(sc);      /* the child carries no functions: said, not dropped */
 	kgenome_funcs_free(&sc->pend.funcs);
 }
+if (sc->pend.n_fixed) {
+	if (!kof_src_declare_fixed(kid, sc->pend.fixed, sc->pend.n_fixed))
+		oc_scan_limit(sc);      /* the child carries no fixed units: said, not dropped */
+	sc->pend.n_fixed = 0;
+}
 if (sc->pend.desc_set) {
-	kof_src_declare_desc(kid, &sc->pend.desc);
+	if (!kof_src_declare_desc(kid, &sc->pend.desc))
+		oc_scan_limit(sc);      /* the child carries no image description, and is raw: said */
 	sc->pend.desc_set = 0;
 }
 }

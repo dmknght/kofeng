@@ -24,9 +24,6 @@
  *                     length 0, a NULL key with a length, an unknown algorithm
  *   probe_entry_00    unpack_entry and child_entry on a cabinet's parsed entries,
  *                     with an entry that does not exist and a size hint of 2^64-1
- *   probe_heur_00/01  the heuristic half: KOF_HEUR_PHASE/NAME/PREDICT/LEVEL,
- *                     KOF_DEFINE_HEUR, KOF_HEUR_HIT and KOF_HEUR_ACT, and the
- *                     level a rule asks to run at
  */
 
 #include "hostile_engine.h"
@@ -370,80 +367,6 @@ static void t_probe_unpack(kof_engine *e)
 	kscan_free(sc);
 }
 
-/* ---- probe_heur_00 / probe_heur_01 --------------------------------------------------------------------- */
-
-struct hres {
-	unsigned n;
-	uint32_t level;
-	char name[256];
-};
-
-static int on_heur(const char *name, const void *b, uint64_t n, const struct kof_result *r, void *user)
-{
-	struct hres *h = (struct hres *)user;
-
-	(void)name; (void)b; (void)n;
-	h->n = r->n;
-	if (r->n) {
-		h->level = r->v[0].level;
-		snprintf(h->name, sizeof h->name, "%s", r->v[0].name);
-	}
-	return 0;
-}
-
-static struct hres heur_scan(kof_scanner *sc, char magic, uint8_t mode, uint32_t level, uint32_t off)
-{
-	uint8_t o[64];
-	struct kof_scan_option op;
-	struct hres h;
-
-	memset(&h, 0, sizeof h);
-	memset(o, 0x41, sizeof o);
-	memcpy(o, "KOFPRB0", 7);
-	o[7] = (uint8_t)magic;
-	o[8] = mode;
-	memset(&op, 0, sizeof op);
-	op.heur_level = level;
-	op.heur_off = off;
-	kscan_bytes(sc, o, sizeof o, "h", &op, on_heur, &h);
-	return h;
-}
-
-static void t_probe_heur(kof_engine *e)
-{
-	kof_scanner *sc = kscan_new(e);
-	struct hres h;
-
-	if (!sc) {
-		CK(0, "scanner");
-		return;
-	}
-	h = heur_scan(sc, '3', 1, 1, 0);
-	CK(h.n == 1 && h.level == KOF_LEVEL_HEUR, "a hit is a heuristic finding (%u findings, level %u)", h.n, h.level);
-	CK(strstr(h.name, "Heur:ProbeFam") != NULL && strstr(h.name, "?ProbeHeur") != NULL,
-	   "named by what the rule predicted, with the rule's own name as the reason: %s", h.name);
-	CK(strncmp(h.name, "Heur#", 5) == 0, "and read as a heuristic verdict: %s", h.name);
-	h = heur_scan(sc, '3', 2, 1, 0);
-	CK(h.n == 0, "an act reports nothing of its own");
-	h = heur_scan(sc, '3', 3, 1, 0);
-	CK(h.n == 0, "a rule that sees no reason is silent");
-	h = heur_scan(sc, '3', 0, 1, 0);
-	CK(h.n == 0, "mode 0 is silent too");
-	h = heur_scan(sc, '4', 1, 1, 0);
-	CK(h.n == 0, "a rule that asked for level 2 is not entered at level 1");
-	h = heur_scan(sc, '4', 0, 2, 0);
-	CK(h.n == 1 && strstr(h.name, "Heur:ProbeLvl2") != NULL, "and is at level 2: %s", h.name);
-	h = heur_scan(sc, '4', 0, KOF_HEUR_LEVEL_MAX + 5u, 0);
-	CK(h.n == 1, "and at a level past the highest the build knows (it means everything)");
-	h = heur_scan(sc, '3', 1, 0, 1);
-	CK(h.n == 0, "heur_off runs no heuristic at all");
-	h = heur_scan(sc, '4', 0, 2, 1);
-	CK(h.n == 0, "at any level");
-	h = heur_scan(sc, '3', 1, 0, 0);
-	CK(h.n == 1, "heur_level 0 with heur_off clear means unstated, read as 1");
-	kscan_free(sc);
-}
-
 /* ---- probe_crypt_00 ------------------------------------------------------------------------------------ */
 
 static uint64_t pack8(const uint8_t *b)
@@ -625,7 +548,6 @@ int main(void)
 	}
 	t_probe_read(e);
 	t_probe_unpack(e);
-	t_probe_heur(e);
 	t_probe_crypt(e);
 	t_probe_entry(e);
 	keng_close(e);

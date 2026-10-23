@@ -33,14 +33,18 @@
 
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "failalloc.h"
+#include "asking_db.h"
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/analyzers/parsers/containers/zip_parse.h"
 #include "../../libkofeng/analyzers/parsers/containers/pdf_parse.h"
@@ -733,7 +737,6 @@ static void scan(const uint8_t *b, uint64_t n, struct seen *s)
 
 	memset(s, 0, sizeof *s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	(void)kscan_bytes(sc, b, n, "x", &opt, on_object, s);
 	s->secs = now() - t0;
 }
@@ -851,7 +854,6 @@ static void ledger_sweep(const char *what, const uint8_t *f, size_t len, unsigne
 
 		memset(&s, 0, sizeof s);
 		memset(&opt, 0, sizeof opt);
-		opt.all_matches = 1;
 		opt.max_resident_bytes = ladder[k];
 		opt.resident_per_scanner = 1;
 		(void)kscan_bytes(sc, f, len, "x", &opt, on_object, &s);
@@ -872,7 +874,7 @@ static void ledger_sweep(const char *what, const uint8_t *f, size_t len, unsigne
 
 int main(int argc, char **argv)
 {
-	const char *db = argc > 1 ? argv[1] : "build/release/databases";
+	const char *db = argc > 1 ? argv[1] : ad_db_script();
 	static const unsigned zn[] = { 2100, 4096, 5000, 20000, 65535 };
 	static const unsigned pn[] = { 4200, 5000, 20000 };
 	unsigned i;

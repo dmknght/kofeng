@@ -139,9 +139,14 @@ static int pack_image_main(int argc, char **argv)
 				"%s\n", f.extra_sec);
 		return 1;
 	}
+	if (strict && f.retired[0]) {
+		fprintf(stderr, "FAIL: image defines %s, which the module ABI no "
+				"longer has\n", f.retired);
+		return 1;
+	}
 	if (strict && f.n_entry != 1) {
 		fprintf(stderr, "FAIL: image exports %d of kof_scan, "
-				"kof_unpack, kof_heur; a module is "
+				"kof_unpack; a module is "
 				"one kind\n", f.n_entry);
 		return 1;
 	}
@@ -251,7 +256,7 @@ static int pack_args(int argc, char **argv, const char **workdir,
 
 /* Every .blob in the directory, loaded. Zero when one cannot be, or none is
  * there. */
-static int pack_load(const char *workdir, struct pack_run *r)
+static int pack_load(const struct ksb_ctx *ksb, const char *workdir, struct pack_run *r)
 {
 	DIR *d;
 	struct dirent *de;
@@ -288,7 +293,9 @@ static int pack_load(const char *workdir, struct pack_run *r)
 	}
 	closedir(d);
 
-	if (r->n_arts == 0) {
+	/* No module is a database too when the tree held diagnoses (a set of fixtures, or
+	 * a product that ships only those); with neither it is a run that forgot to build. */
+	if (r->n_arts == 0 && !ksb->diag.n_built) {
 		fprintf(stderr, "ksigbuilder: no .blob artefacts in %s\n", workdir);
 		return 0;
 	}
@@ -426,10 +433,9 @@ static int pack_group(struct pack_run *r)
 	return 1;
 }
 
-/* The modules of one group, as the pack writer takes them. Zero when a disease
- * is refused. */
-static int pack_fill(struct ksb_ctx *ksb, const struct pack_run *r,
-		     const struct group *g, struct kof_pw_mod *pm)
+/* The modules of one group, as the pack writer takes them. */
+static void pack_fill(const struct pack_run *r,
+		      const struct group *g, struct kof_pw_mod *pm)
 {
 	uint32_t a;
 
@@ -445,10 +451,6 @@ static int pack_fill(struct ksb_ctx *ksb, const struct pack_run *r,
 			pm[a].arch_mask   = s->arch_mask;
 			pm[a].subtype_mask = s->subtype_mask;
 			pm[a].step         = s->step;
-			pm[a].heur_phase   = s->heur_phase;
-			pm[a].heur_want    = s->heur_want;
-			pm[a].heur_level   = s->heur_level;
-			pm[a].cure_off     = s->cure_off;
 			pm[a].src          = s->srcpath;
 			pm[a].size_min    = s->size_min;
 			pm[a].str         = s->str;
@@ -463,19 +465,8 @@ static int pack_fill(struct ksb_ctx *ksb, const struct pack_run *r,
 			pm[a].n_names     = s->n_names;
 			pm[a].family      = s->family;
 			pm[a].maltype     = s->maltype;
-			/* THE DISEASE, registered here where the whole database is seen:
-			 * the same name with two types, or two names that hash alike, are
-			 * caught across detectors of every kind - see ksb_disease_note. */
-			if (s->disease && s->disease[0]) {
-				if (!ksb_disease_note(ksb, s->disease, s->disease_type, DIS_BY_DETECTOR))
-					return 0;
-				pm[a].disease      = kof_disease_id(s->disease);
-				pm[a].disease_type = s->disease_type;
-			}
-			pm[a].heur_predict = s->heur_predict;
 			pm[a].content = s->content;
 	}
-	return 1;
 }
 
 /* The path a group is written to. */
@@ -614,8 +605,7 @@ static int pack_claim(struct pack_run *r, const char *path)
 }
 
 /* One group: its modules, the pack built from them, its name, and the file. */
-static int pack_write_group(struct ksb_ctx *ksb, struct pack_run *r,
-			    uint32_t j, const char *outdir)
+static int pack_write_group(struct pack_run *r, uint32_t j, const char *outdir)
 {
 	struct group *g = &r->groups[j];
 	struct kof_pw_mod *pm;
@@ -626,10 +616,7 @@ static int pack_write_group(struct ksb_ctx *ksb, struct pack_run *r,
 	pm = calloc(g->n, sizeof *pm);
 	if (!pm)
 		return 0;
-	if (!pack_fill(ksb, r, g, pm)) {
-		free(pm);
-		return 0;
-	}
+	pack_fill(r, g, pm);
 
 	img = kof_pack_build(g->kind, pm, g->n, &img_len);
 	free(pm);
@@ -660,17 +647,17 @@ static int pack_run(struct ksb_ctx *ksb, const char *workdir,
 {
 	uint32_t j;
 
-	if (!pack_load(workdir, r) || !pack_group(r))
+	if (!pack_load(ksb, workdir, r) || !pack_group(r))
 		return 0;
 	for (j = 0; j < r->n_groups; j++)
-		if (!pack_write_group(ksb, r, j, outdir))
+		if (!pack_write_group(r, j, outdir))
 			return 0;
 
 	/*
 	 * THE TABLE OF DISEASES, LAST: the modules register theirs while their packs
-	 * are made - above - and the diagnoses and syndromes registered before this
-	 * ran, so only here is the whole registry known. Written before it, a
-	 * detector's disease had no entry and a syndrome's showed no type.
+	 * are made - above - and the diagnoses registered before this ran, so only
+	 * here is the whole registry known. Written before it, a detector's disease
+	 * had no entry.
 	 */
 	if (!ksb_write_diseases(ksb, outdir))
 		return 0;

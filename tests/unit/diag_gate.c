@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "caps_fix.h"
+#include "notes.h"
 #include "../../libkofeng/databases/dbloader.h"
 #include "../../libkofeng/scanners/scan.h"
 
@@ -44,7 +45,7 @@ struct got {
 	unsigned all[KOF_PROD_COUNT];  /* summed over the object and what it produced */
 	char     verdict[112];
 	uint32_t n_diag;               /* res->n_diag, the report */
-	uint32_t n_find;               /* res->n, the findings of the object */
+	uint32_t n_find;               /* the notes the test modules made on the object */
 	int      hit_root, hit_commit, hit_rwx;
 };
 
@@ -65,25 +66,27 @@ static int hit(const char *name)
 	return i >= 0 && ((sc->diag.hit[(unsigned)i >> 3] >> ((unsigned)i & 7u)) & 1u);
 }
 
+/* What the test modules said while the object was scanned - see notes.h. */
+static struct note_list pend;
+
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct got *g = user;
-	uint32_t i;
-
+	struct note_list got;
 	unsigned p;
 
 	(void)name; (void)bytes; (void)len;
+	notes_take(&pend, &got);
 	for (p = 0; p < KOF_PROD_COUNT; p++)
 		g->all[p] += sc->obj.prod_runs[p];
 	if (g->n_obj++)
 		return 0;                       /* the top-level object only below */
 	memcpy(g->runs, sc->obj.prod_runs, sizeof g->runs);
 	g->n_diag = res->n_diag;
-	g->n_find = res->n;
-	for (i = 0; i < res->n; i++)
-		if (res->v[i].is_verdict)
-			snprintf(g->verdict, sizeof g->verdict, "%s", res->v[i].name);
+	g->n_find = got.n;
+	if (res->has_verdict)
+		snprintf(g->verdict, sizeof g->verdict, "%s", res->verdict.name);
 	g->hit_root = hit("kmod_give_root");
 	g->hit_commit = hit("kmod_commit_only");
 	g->hit_rwx = hit("rwx_exec");
@@ -97,8 +100,8 @@ static struct got scan(const uint8_t *b, uint64_t n, const char *name, int repor
 
 	memset(&opt, 0, sizeof opt);
 	memset(&g, 0, sizeof g);
+	memset(&pend, 0, sizeof pend);
 	opt.report_diag = report;
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -119,12 +122,12 @@ static void rename_import(uint8_t *b, uint64_t n, const char *from, const char *
 		}
 }
 
-static void syndrome_only(void)
+static void verdict_only(void)
 {
 	uint64_t len = cf_kmod(img, sizeof img, 4, 0);
 	struct got a = scan(img, len, "x", 0);
 
-	/* 1. read by a verdict only: analysed, and the verdict is the syndrome's */
+	/* 1. read by a verdict only: analysed, and the verdict is made of its disease */
 	CK(a.n_obj >= 1u);
 	CK(a.runs[KOF_PROD_DIAG] == 1u);
 	CK(a.hit_root == 1);
@@ -237,6 +240,8 @@ static void only_unread_is_answerable(const char *db)
 	keng_close(eng);
 	eng = keng_open(tmpdb);
 	sc = eng ? kscan_new(eng) : NULL;
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	CK(eng && sc);
 	if (!eng || !sc)
 		return;
@@ -249,13 +254,13 @@ static void only_unread_is_answerable(const char *db)
 	CK(p.runs[KOF_PROD_WALK] == 0u);        /* (the function table is not asserted: this
 						 * database has block rules, which read it) */
 	CK(p.hit_commit == 0 && p.hit_root == 0);
-	/* the fixture's own pattern detector (no disease) is the object's verdict; what must not
-	 * exist is a SYNDROME verdict - nothing was read */
-	CK(strstr(p.verdict, "!Syndrome") == NULL);
+	/* the fixture's own pattern detector declares no disease, so it is evidence and not a
+	 * verdict: nothing was read, so there is none */
+	CK(p.verdict[0] == 0);
 	r = scan(img, len, "x", 1);
 	CK(r.runs[KOF_PROD_DIAG] == 1u);        /* the report is the asker */
 	CK(r.hit_commit == 1);
-	CK(strstr(r.verdict, "!Syndrome") == NULL); /* a diagnose with no disease types nothing */
+	CK(strstr(r.verdict, "commit") == NULL);   /* a diagnose with no disease names nothing */
 	/* nothing carried over: a plain scan again is as before */
 	p = scan(img, len, "x", 0);
 	CK(p.runs[KOF_PROD_DIAG] == 0u && p.hit_commit == 0 && p.n_diag == 0u);
@@ -362,6 +367,8 @@ static void verdict_asks(const char *db)
 	}
 	eng = keng_open(tmpdb);
 	sc = eng ? kscan_new(eng) : NULL;
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	CK(eng && sc);
 	if (eng && sc) {
 		len = cf_kmod(img, sizeof img, 4, 0);
@@ -385,25 +392,20 @@ static void verdict_asks(const char *db)
 }
 
 /*
- * AN INFECTION ENDS THE DETECT STAGE WHEN NOTHING READS WHAT THE REST WOULD ADD, and
- * the rule that reads a diagnose (the expensive one) is the LAST of the stage, so a
- * cheap detection ends the scan before the analysis is asked for:
+ * THE RULE THAT READS A DIAGNOSE (the expensive one) is the LAST of the detect stage:
  *   - the loader marks the module a diagnose names as its reader (reads_diag) and
- *     sorts it after every other module of its format;
- *   - on a database that declares no disease (modelled by clearing
- *     kof_engine.reads_diseases, which the loader sets from the modules and the
- *     diagnoses - this database has both), a scan that did not ask for every finding
- *     stops at the first infection: of two detectors that both fire, one reports;
- *   - with all_matches, or with diseases declared, both do.
+ *     sorts it after every other module of its format, so the cheap detectors have
+ *     reported before the analysis is asked for;
+ *   - no finding ends the stage: of two detectors that both fire, both report, because
+ *     what they found is evidence and the verdict is read off every disease.
  */
-static struct got scan_with(const uint8_t *b, uint64_t n, int all)
+static struct got scan_with(const uint8_t *b, uint64_t n)
 {
 	struct kof_scan_option opt;
 	struct got g;
 
 	memset(&opt, 0, sizeof opt);
 	memset(&g, 0, sizeof g);
-	opt.all_matches = all;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -411,11 +413,10 @@ static struct got scan_with(const uint8_t *b, uint64_t n, int all)
 	return g;
 }
 
-static void stop_at_infection(void)
+static void reader_order(void)
 {
 	uint32_t i, seen_reader = 0, bad = 0;
-	uint8_t reads = eng->reads_diseases;
-	struct got a, b, c;
+	struct got b;
 	static uint8_t blob[512];
 
 	/* the mark and the order, in the walk of ELF (the format's list merged with the generic one) */
@@ -439,23 +440,14 @@ static void stop_at_infection(void)
 	for (i = 0; i < eng->n_mods; i++)       /* only modules a diagnose names */
 		if (eng->mods[i].reads_diag)
 			CK(eng->mods[i].n_str == 0u);
-	CK(eng->reads_diseases == 1u);          /* this database declares diseases */
 
-	/* two detectors that both infect: the disease fixture's marker and the any-format
+	/* two detectors that both match: the layer fixture's word and the any-format
 	 * fixture's comment string, in a blob of no format */
 	memset(blob, 'a', sizeof blob);
-	memcpy(blob + 16, "DISEASE_FIXTURE_MARKER", 22);
+	memcpy(blob + 16, "CONVICT", 7);
 	memcpy(blob + 64, "GCC: (GNU)", 10);
-	b = scan_with(blob, sizeof blob, 1);
-	CK(b.n_find >= 2u);                     /* the caller asked for every finding */
-	c = scan_with(blob, sizeof blob, 0);
-	CK(c.n_find >= 2u);                     /* diseases are declared: the set is whole */
-	eng->reads_diseases = 0;
-	a = scan_with(blob, sizeof blob, 0);
-	CK(a.n_find == 1u);                     /* nothing reads the rest: it ended at the first */
-	b = scan_with(blob, sizeof blob, 1);
-	CK(b.n_find >= 2u);                     /* and all_matches still asks for all */
-	eng->reads_diseases = reads;
+	b = scan_with(blob, sizeof blob);
+	CK(b.n_find >= 2u);                     /* both say so: nothing ends the stage */
 }
 
 static void closed_gate(void)
@@ -502,15 +494,17 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	sc = kscan_new(eng);
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	if (!sc || slot_of("kmod_commit_only") < 0 || slot_of("kmod_give_root") < 0 ||
 	    slot_of("rwx_exec") < 0) {
 		printf("diag_gate: the database lacks the fixtures\n");
 		return 2;
 	}
-	syndrome_only();
+	verdict_only();
 	report_asks_for_all();
 	closed_gate();
-	stop_at_infection();
+	reader_order();
 	evidence_under_a_harmless_name();
 	only_unread_is_answerable(db);
 	verdict_asks(db);

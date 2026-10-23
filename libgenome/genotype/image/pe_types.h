@@ -252,6 +252,27 @@ enum {
 };
 
 /*
+ * HOW MANY DIRECTORY ENTRIES THE OPTIONAL HEADER REALLY HOLDS, which is the one place this is decided.
+ *
+ * NumberOfRvaAndSizes is the file's claim and SizeOfOptionalHeader is where the header ends: past it the
+ * "directories" are the section table, whose fields (PointerToRelocations, PointerToLinenumbers ...)
+ * read as an RVA and a size. The unmapper read a relocation directory out of them (norm_defect_image
+ * N10) and the parser, which has the same two fields, did the same (image_defect2 E1); both now ask
+ * here. The answer is the claim, at most KGENOME_PE_DIR_COUNT, at most what fits in `optsz`, and 0 when
+ * the optional header ends before the count field itself.
+ */
+static inline uint32_t kgenome_pe_dirs_in_header(uint32_t optsz, int pe32_plus, uint32_t claimed)
+{
+	const uint32_t cnt_off = pe32_plus ? 108u : 92u, dir_off = pe32_plus ? 112u : 96u;
+	uint32_t room, n = claimed > (uint32_t)KGENOME_PE_DIR_COUNT ? (uint32_t)KGENOME_PE_DIR_COUNT : claimed;
+
+	if (optsz <= cnt_off)
+		return 0;
+	room = optsz > dir_off ? (optsz - dir_off) / 8u : 0u;
+	return n > room ? room : n;
+}
+
+/*
  * Anomalies.
  *
  * Facts, not failures. The parser never refuses to describe an object: it reports

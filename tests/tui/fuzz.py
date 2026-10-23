@@ -74,12 +74,16 @@ def run(path, seed, n=300, rows=50, cols=170, cwd=None, verbose=False):
     try:
         for i in range(n):
             ev = gen(rng, v.rows, v.cols)
-            # never fuzz the quit chord/menu item: a clean exit is not a crash
+            # the quit chord is not fuzzed; the Quit menu item can be chosen, see below
             evs.append(ev)
             apply(v, ev)
             if not v.alive():
                 if v.crashed():
                     return ('CRASH', v.exit_desc(), evs)
+                if v.exit_desc() == 'exit 0':
+                    # File > Quit is the one item File has, so F10 and Enter choose it: a
+                    # clean exit by the program's own menu is not a fault
+                    return ('OK', 'quit chosen from the menu', evs)
                 return ('EXIT', v.exit_desc(), evs)
         return ('OK', '', evs)
     finally:

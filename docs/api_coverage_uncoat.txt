@@ -35,6 +35,7 @@ KUNCOAT_ALGO_URL                         enumerator     transform.h             
 KUNCOAT_ALGO_ADD                         enumerator     transform.h                    SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c, api_transform.c, hostile_transform.c
 KUNCOAT_ALGO_CAESAR                      enumerator     transform.h                    silent_loss_uncoat.c, transform_st api_constants.c, api_transform.c, hostile_transform.c
 KUNCOAT_ALGO_REVERSE                     enumerator     transform.h                    SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c, api_transform.c, hostile_transform.c
+KUNCOAT_ALGO_ESCAPE                      enumerator     transform.h                    SMOKE-ONLY: silent_loss_uncoat.c   api_constants.c, api_transform.c, hostile_transform.c
 enum kuncoat_dir                         enum           transform.h                    UNTESTED                           api_constants.c
 KUNCOAT_DECODE                           enumerator     transform.h                    b64_alphabet.c, decoders_capsid.c, api_constants.c, api_transform.c, hostile_transform.c
 KUNCOAT_ENCODE                           enumerator     transform.h                    b64_alphabet.c, decoders_capsid.c, api_constants.c, api_transform.c, hostile_transform.c
@@ -151,3 +152,33 @@ kuncoat_a85_decode                       function       decoders/textcode.h     
 kuncoat_ahx_decode                       function       decoders/textcode.h            SMOKE-ONLY: silent_loss_uncoat.c,  hostile_api_misuse.c, hostile_text.c
 kuncoat_rle_decode                       function       decoders/textcode.h            SMOKE-ONLY: silent_loss_uncoat.c,  api_constants.c, hostile_api_misuse.c, hostile_text.c
 kuncoat_aspack_tab                       data           decompressors/aspack_tab.h     UNTESTED                           api_constants.c
+
+ADDED 2026-10-20 (the TOTALS above are not recounted): the string functions of kuncoat_transform and the url RAW flag.
+KUNCOAT_F_RAW                            macro          transform.h                    strfn.c (url_raw)
+KUNCOAT_F_TOEND                          macro          transform.h                    strfn.c (slice_exhaustive)
+KUNCOAT_ALGO_REPLACE                     enumerator     transform.h                    strfn.c (exhaustive over {a,b}), diag_text_built.c
+KUNCOAT_ALGO_TRANSLATE                   enumerator     transform.h                    strfn.c (exhaustive over {a,b,c}), diag_text_built.c
+KUNCOAT_ALGO_SLICE                       enumerator     transform.h                    strfn.c (every start and length -12..12, INT32 extremes), diag_text_built.c
+KUNCOAT_ALGO_CASE                        enumerator     transform.h                    strfn.c (all 256 bytes), diag_text_built.c
+KUNCOAT_ALGO_TRIM                        enumerator     transform.h                    strfn.c (all 256 bytes, every end), diag_text_built.c
+struct kuncoat_step .k32b                field          transform.h                    strfn.c (SLICE's length)
+
+ADDED 2026-10-20 (second change; the TOTALS above are not recounted): the ops that serve the methods and operators of every language.
+KUNCOAT_ALGO_REPEAT                      enumerator     transform.h                    strfn.c (repeat_run), script_apply.c   strfn_lists.c (against python 3 s * n and perl x), script_methods.c
+KUNCOAT_ALGO_SPLIT                       enumerator     transform.h                    strfn.c (split_run), script_apply.c    strfn_lists.c (533,100 cases against python 3 str.split and re.split, perl split)
+KUNCOAT_ALGO_JOIN                        enumerator     transform.h                    strfn.c (join_run), script_apply.c     strfn_lists.c (against python 3 str.join and perl join), the cut lists
+KUNCOAT_F_FIRST                          macro          transform.h                    strfn.c (replace_run)                  strfn_lists.c (against python 3 str.replace(.., 1), perl s///)
+KUNCOAT_F_ICASE                          macro          transform.h                    strfn.c (replace_run, split_run)       strfn_lists.c (against python 3 re.sub and re.split with IGNORECASE, perl s///i)
+KUNCOAT_F_DROPTRAIL                      macro          transform.h                    strfn.c (split_run)                    strfn_lists.c (against python 3 and perl's split without a limit)
+struct kuncoat_step .key (TRIM)          field          transform.h                    strfn.c (is_trim)                      strfn_lists.c (against python 3 strip(chars))
+
+ADDED 2026-10-20 (third change; the TOTALS above are not recounted): the ops that serve sh, batch and tcl.
+KUNCOAT_ALGO_CUTHEAD                     enumerator     transform.h                    strfn.c (cut_run), script_apply.c      strfn_shell.c (against bash ${x#p}, ${x##p} over every word of {a,b} to length 6), script_cmds.c
+KUNCOAT_ALGO_CUTTAIL                     enumerator     transform.h                    strfn.c (cut_run), script_apply.c      strfn_shell.c (against bash ${x%p}, ${x%%p}), script_cmds.c
+KUNCOAT_ALGO_LENGTH                      enumerator     transform.h                    strfn.c (length_run), script_apply.c   strfn_shell.c (against bash ${#x}), script_cmds.c
+KUNCOAT_ALGO_FORMAT                      enumerator     transform.h                    strfn.c (format_run), script_apply.c   strfn_shell.c (10,360 printf cases against bash; tcl's strict format against python's % operator), script_cmds.c
+KUNCOAT_ALGO_MAP                         enumerator     transform.h                    strfn.c (map_run), script_apply.c      strfn_shell.c (15,120 cases against a reference written from the tcl manual: [Unverified] against tclsh), script_cmds.c
+KUNCOAT_F_RANGES                         macro          transform.h                    strfn.c (translate_run, tr_expand)     strfn_shell.c (GNU tr over every pair of sets of up to three bytes from {a,b,-} and {x,y,-})
+KUNCOAT_F_WSLIST                         macro          transform.h                    strfn.c (join_run, ws_word, map_run)   strfn_shell.c (58,593 cases of join of a tcl list written as text, {} elements)
+KUNCOAT_F_REUSE                          macro          transform.h                    strfn.c (format_run)                   strfn_shell.c (against bash printf's run-again rule)
+KUNCOAT_F_ESC                            macro          transform.h                    strfn.c (format_run)                   strfn_shell.c (\n \t \\ against bash; a stray backslash refused for tcl)

@@ -28,5 +28,5 @@ KOF_MUTATION_BLOCK(blk_any, KOF_SCAN_ALL, KOF_MUTATION_RAW,
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	if (kof_mutation_score(blk_any) >= 90u)
-		KOF_SCAN_INFECT("AnyRegion");
+		{ kof_debug("AnyRegion#AnyRegion", 0); return; }
 }

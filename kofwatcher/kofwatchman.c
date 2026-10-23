@@ -146,19 +146,17 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct hit_ctx *c = user;
-	uint32_t i;
 
 	(void)bytes;
 	(void)len;
 	if (!res || !c)
 		return 0;
 
-	for (i = 0; i < res->n; i++) {
-		if (res->v[i].level != KOF_LEVEL_INFECT &&
-		    res->v[i].level != KOF_LEVEL_SUSPECT)
-			continue;
+	/* The engine's verdict for the object: made of its diseases, not chosen here
+	 * from the evidence. */
+	if (res->has_verdict) {
 		c->n++;
-		printf("MALICIOUS  %s\n", res->v[i].name);
+		printf("MALICIOUS  %s\n", res->verdict.name);
 		/*
 		 * WHOSE NUMBER IS THE SECOND ONE, and it is not the same
 		 * question on every verb.
@@ -263,7 +261,6 @@ static void scan_submission(kof_scanner *sc, struct kof_evt_join *j,
 	 * name rather than as something the event carried.
 	 */
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.as_format = KOF_EVT_AMSI;
 	(void)kscan_bytes(sc, j->buf, (uint64_t)j->len, name, &opt,
 			     on_object, hits);
@@ -354,7 +351,6 @@ static void scan_proc_event(kof_scanner *sc, const struct kof_evt *e, int do_sca
 
 	hits->e = e;
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	/* DECLARED, like a submission: a record has no magic and never sniffs
 	 * as anything - see the note in amsi_parse.h that scan_submission
 	 * points at. */

@@ -1,0 +1,17 @@
+# Functions waiting for WP4. function<TAB>reason. Work package 4 deletes a line when it adds the adapter row (.covers) for it;
+# a function that is covered and still listed fails make check-rules. Move a function to permanent.txt only with a reason.
+kgenome_cell_decode	pending WP4 (kgenome/cell decode, shape S1)
+kgenome_cell_decode_arm32	pending WP4 (kgenome/cell decode, shape S1)
+kgenome_cell_decode_arm64	pending WP4 (kgenome/cell decode, shape S1)
+kgenome_cell_decode_mips	pending WP4 (kgenome/cell decode, shape S1)
+kgenome_cell_decode_thumb	pending WP4 (kgenome/cell decode, shape S1)
+kgenome_cell_decode_x86	pending WP4 (kgenome/cell decode, shape S1)
+kgenome_cell_state_reg	pending WP4 (kgenome/cell_state, shape S4)
+kgenome_cell_state_reset	pending WP4 (kgenome/cell_state, shape S4)
+kgenome_cell_state_stack_top	pending WP4 (kgenome/cell_state, shape S4)
+kgenome_cell_state_track	pending WP4 (kgenome/cell_state, shape S4)
+kgenome_nucleo_cap_name	pending WP4 (kgenome/nucleo, shape S5)
+kuncoat_cipher	pending WP4 (kuncoat/transform, shape S1)
+kuncoat_coding	pending WP4 (kuncoat/transform, shape S1)
+kuncoat_status_name	pending WP4 (kuncoat/status, shape S5)
+kuncoat_transform	pending WP4 (kuncoat/transform, shape S1)

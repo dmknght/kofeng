@@ -23,6 +23,8 @@
  *   7  limits          a view the ceiling refuses is reported for a big-endian object that
  *                      needed it, and for none that did not
  *   8  plan bound      a plan past its span bound is reported as a limit of the object
+ *   8b plan dropped    a plan that refused spans on bytes an earlier span owns (tables that overlap)
+ *                      is reported too: the view is the object half in each order (fix_engine2 E8)
  *   9  threads         four scanners over one engine give one answer
  */
 
@@ -38,6 +40,7 @@
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofentry.h"
 #include "../../libkofeng/kofcore/kofbudget.h"
+#include "notes.h"
 
 #define MAXV 12288u
 
@@ -54,10 +57,11 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = user;
-	uint32_t i;
+	struct note_list got;
 	int is_view = res && res->entry_kind == KOF_ENT_NORMALIZED;
 
 	(void)name;
+	notes_here(&got);
 	s->objects++;
 	if (!res)
 		return 0;
@@ -72,12 +76,10 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		if (memmem(bytes, (size_t)len, "cmd.exe /c wget", 15))
 			s->view_wide = 1;
 	}
-	for (i = 0; i < res->n; i++) {
-		if (strstr(res->v[i].name, "EndianMips"))
-			is_view ? (void)(s->view_mips = 1) : (void)(s->parent_mips = 1);
-		if (strstr(res->v[i].name, "EndianPpc64"))
-			is_view ? (void)(s->view_ppc = 1) : (void)(s->parent_ppc = 1);
-	}
+	if (notes_has(&got, "EndianMips"))
+		is_view ? (void)(s->view_mips = 1) : (void)(s->parent_mips = 1);
+	if (notes_has(&got, "EndianPpc64"))
+		is_view ? (void)(s->view_ppc = 1) : (void)(s->parent_ppc = 1);
 	return 0;
 }
 
@@ -87,8 +89,8 @@ static int scan(kof_scanner *sc, const uint8_t *b, uint32_t n, struct seen *s,
 	struct kof_scan_option opt;
 
 	memset(s, 0, sizeof *s);
+	notes_clear();
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = max_resident ? max_resident : 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -236,6 +238,7 @@ static void limits(const char *db)
 		return;
 	CK(keng_set_memory_cap(e, KOF_ENGINE_MEM_MIN) == 1);
 	sc = kscan_new(e);
+	notes_watch(sc);
 	CK(sc != NULL);
 	ek_build(&be, arch_named("mips32"), 1, 1);
 	ek_build(&le, arch_named("mips32"), 0, 1);
@@ -299,6 +302,7 @@ static void small_object(const char *db)
 			continue;
 		CK(keng_set_memory_cap(e, caps[k]) == 1);
 		sc = kscan_new(e);
+		notes_watch(sc);
 		CK(sc != NULL);
 		if (sc) {
 			CK(scan(sc, be.b, be.n, &s, 0));
@@ -358,13 +362,12 @@ static int fixture_found(const char *name, const void *bytes, uint64_t len,
 			 const struct kof_result *res, void *user)
 {
 	int *hit = user;
-	uint32_t i;
+	struct note_list got;
 
 	(void)name; (void)bytes; (void)len;
-	for (i = 0; res && i < res->n; i++)
-		if (strstr(res->v[i].name, "EndianBlock")) {
-			hit[res->entry_kind == KOF_ENT_NORMALIZED ? 1 : 0] = 1;
-		}
+	notes_here(&got);
+	if (res && notes_has(&got, "EndianBlock"))
+		hit[res->entry_kind == KOF_ENT_NORMALIZED ? 1 : 0] = 1;
 	return 0;
 }
 
@@ -382,7 +385,6 @@ static void block_path(kof_scanner *sc)
 		struct kof_scan_option opt;
 
 		memset(&opt, 0, sizeof opt);
-		opt.all_matches = 1;
 		opt.max_produced_bytes = 64u << 20;
 		opt.max_resident_bytes = 256u << 20;
 		opt.max_object_bytes = 64u << 20;
@@ -391,12 +393,14 @@ static void block_path(kof_scanner *sc)
 		put_block_function(&be, a, 1, blk);
 		put_block_function(&le, a, 0, blk);
 		hit[0] = hit[1] = 0;
+		notes_clear();
 		CK(kscan_bytes(sc, le.b, le.n, "block-le", &opt, fixture_found, hit) > 0);
 		/* The little-endian object holds the block. (Where the engine scores it is its own
 		 * business and not this test's: measured on the unmodified engine, the parent of
 		 * this object is not credited and its ordinary view is.) */
 		CK(hit[0] || hit[1]);
 		hit[0] = hit[1] = 0;
+		notes_clear();
 		CK(kscan_bytes(sc, be.b, be.n, "block-be", &opt, fixture_found, hit) > 0);
 		CK(!hit[0]);                            /* the big-endian object does not */
 		CK(hit[1]);                             /* its canonical view does */
@@ -431,6 +435,28 @@ static void plan_bound(kof_scanner *sc)
 	CK(s.parent_broken == 0);
 }
 
+/* The object's tables overlap: a span the plan refuses is bytes left in the file's order, so the view
+ * is the object half in each order. The plan counted them (`dropped`) and nothing read the count, so the
+ * object came back complete. The little-endian twin has no plan to refuse anything. */
+static void plan_dropped(kof_scanner *sc)
+{
+	static struct ek_obj be, le, ctl;
+	struct seen s;
+	uint32_t shent = 40;
+
+	ek_build(&ctl, arch_named("mips32"), 1, 1);
+	CK(scan(sc, ctl.b, ctl.n, &s, 0));
+	CK(s.parent_broken == 0);                       /* control: the same object, tables apart */
+	ek_build(&be, arch_named("mips32"), 1, 1);
+	ek_put(be.b + be.sh + 3u * shent + 16, be.text + 8u, 4, 1);   /* .symtab starts inside .text */
+	CK(scan(sc, be.b, be.n, &s, 0));
+	CK(s.parent_broken == KOF_BROKEN_LIMIT);
+	ek_build(&le, arch_named("mips32"), 0, 1);
+	ek_put(le.b + le.sh + 3u * shent + 16, le.text + 8u, 4, 0);
+	CK(scan(sc, le.b, le.n, &s, 0));
+	CK(s.parent_broken == 0);
+}
+
 struct tj {
 	kof_engine *eng;
 	const uint8_t *b;
@@ -445,6 +471,8 @@ static void *worker(void *arg)
 	struct tj *t = arg;
 	kof_scanner *sc = kscan_new(t->eng);
 	unsigned i;
+
+	notes_watch(sc);
 
 	t->ok = sc != NULL;
 	for (i = 0; sc && i < 40; i++) {
@@ -528,9 +556,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	sc = kscan_new(eng);
+	notes_watch(sc);
 	eng2 = engine_of_pack(db, "sigs-script.ksig");
 	CK(eng2 != NULL);
 	sc2 = eng2 ? kscan_new(eng2) : NULL;
+	notes_watch(sc2);
 	CK(sc && sc2);
 	if (sc && sc2) {
 		differential(sc, "mips32", 0);
@@ -541,6 +571,7 @@ int main(int argc, char **argv)
 		limits(db);
 		small_object(db);
 		plan_bound(sc);
+		plan_dropped(sc);
 		threads(eng);
 	}
 	if (sc)

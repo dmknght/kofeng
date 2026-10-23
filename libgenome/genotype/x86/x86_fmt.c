@@ -369,3 +369,46 @@ size_t kgenome_x86_format(const struct kgenome_x86_insn *I, uint64_t rip, char *
 	}
 	return o.bad ? 0 : o.n;
 }
+
+/*
+ * SHORTEN THE IMMEDIATES, IN PLACE.
+ *
+ * the formatter prints them at the operand's full width, so a push of 34 comes out
+ * as 0x0000000000000022 - eighteen characters of which two carry the value. On a
+ * row that also holds an offset and seven bytes of hex that is most of the line
+ * spent on zeroes, and the number a reader is looking for is the hardest thing
+ * on it to find.
+ *
+ * Done to the TEXT, so whoever shows an instruction - a panel, a clipboard, a comment - shows the same short form. Leading zeroes only: nothing else about the number
+ * changes, and a value that really is zero keeps one digit rather than becoming
+ * an empty 0x.
+ */
+void kgenome_x86_shorten(char *t)
+{
+	char *r = t, *w = t;
+
+	while (*r) {
+		if (r[0] == '0' && r[1] == 'x') {
+			char *d = r + 2, *keep;
+
+			*w++ = *r++;            /* 0 */
+			*w++ = *r++;            /* x */
+			while (*d == '0')
+				d++;
+			keep = d;
+			while ((*keep >= '0' && *keep <= '9') ||
+			       (*keep >= 'a' && *keep <= 'f') ||
+			       (*keep >= 'A' && *keep <= 'F'))
+				keep++;
+			if (keep == d)
+				*w++ = '0';     /* the value was zero */
+			while (d < keep)
+				*w++ = *d++;
+			r = keep;
+			continue;
+		}
+		*w++ = *r++;
+	}
+	*w = 0;
+}
+

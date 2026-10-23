@@ -1,6 +1,6 @@
 /*
  * silent_loss_db - the limits of the DATABASE side (pack builder, pack loader,
- * diagnose/syndrome packs, hex programs, mutation set, source readers) held to
+ * diagnose packs, hex programs, mutation set, source readers) held to
  * one invariant: a database or rule that is over a limit gives the FULL result
  * or a SIGNAL a caller can see. "Nothing there" must be told from "we stopped
  * looking".
@@ -47,7 +47,6 @@
 #include "../../libkofeng/databases/pack/dbcore.h"
 #include "../../libkofeng/databases/dbpacker.h"
 #include "../../libkofeng/databases/diagsrc.h"
-#include "../../libkofeng/databases/syndsrc.h"
 #include "../../libkofeng/detectors/mutations/kofmutation.h"
 #include "../../libkofeng/detectors/pattern/kofmatch.h"
 #include "../../libkofeng/detectors/pattern/kofmultimatch.h"
@@ -792,26 +791,10 @@ static void source_limits(void)
 {
 	static const struct kof_dsrc_report quiet = { NULL, NULL, NULL };
 	static char text[16384];
-	static struct kof_ssrc sp;
 	static struct kof_dsrc d;
 	static struct kof_dsrc_view v;
 	size_t at;
 	unsigned i, k;
-
-	/* a syndrome source: 64 behaviours fit, the 65th is an ERROR (counted) */
-	for (k = 0; k < 2; k++) {
-		at = (size_t)snprintf(text, sizeof text,
-				      "KOF_DECLARE_SYNDROME_TYPE(KOF_MALTYPE_BOTNET);\n");
-		for (i = 0; i < KOF_SSRC_MAX_DIS + k; i++)
-			at += (size_t)snprintf(text + at, sizeof text - at,
-					       "KOF_DECLARE_SYNDROME_HAS(\"cnc/b%u\");\n", i);
-		memset(&sp, 0, sizeof sp);
-		if (k)
-			CK(kof_ssrc_parse(text, at, &sp, &quiet) > 0);
-		else
-			CK(kof_ssrc_parse(text, at, &sp, &quiet) == 0 &&
-			   sp.n_dis == KOF_SSRC_MAX_DIS);
-	}
 
 	/* a diagnose source: tails to the node bound, the node count past it */
 	for (k = 0; k < 3; k++) {
@@ -847,7 +830,7 @@ static void source_limits(void)
 				       "KOF_DIAG_DECLARE_TAIL(KOF_NUCLEO_MEM_READ);\n");
 	memset(&d, 0, sizeof d);
 	CK(kof_dsrc_parse(text, at, &d, &quiet) > 0);
-	printf("  source_limits: syndrome and diagnose source bounds are counted errors\n");
+	printf("  source_limits: diagnose source bounds are counted errors\n");
 }
 
 int main(void)

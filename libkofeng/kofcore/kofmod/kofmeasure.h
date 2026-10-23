@@ -95,7 +95,7 @@
  *     static const uint32_t ref_blocks[] = { 0x..., 0x..., };
  *
  *     if (kof_mutation_blocks(ref_blocks) >= 60u)
- *             KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+ *             kof_debug("reference", 0);
  *
  * The hashes are the selected windows of the reference's loadable regions after
  * its static library was subtracted - the same windows mutation selects, over the
@@ -107,7 +107,7 @@
  * its own. This is one set, one containment, one threshold.
  */
 /*
- * THE BLOCK VECTOR IS GONE, and the vtable slot behind it stays NULL.
+ * THE BLOCK VECTOR IS GONE, and the vtable slot behind it (reserved_0) stays NULL.
  *
  * It asked how alike an object was across a reference's WHOLE set of selected
  * windows rather than how much of one named run it carried. The measurement
@@ -116,8 +116,7 @@
  * answer on were ones a named block already had. Carrying a second set-shaped
  * measure for that is cost without reach.
  *
- * The slot is left where it is for the reason ovl_strings' was - see the note
- * at the head of this file - so that no entry after it moves and a module
+ * The slot is left where it is so that no entry after it moves and a module
  * built against an older header cannot call the wrong one.
  */
 

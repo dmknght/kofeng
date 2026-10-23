@@ -144,6 +144,16 @@ static unsigned build_cases(struct kase *k)
 		add(k, &nk, i ? "caesar_enc" : "caesar_dec", KUNCOAT_ALGO_CAESAR,
 		    i ? KUNCOAT_ENCODE : KUNCOAT_DECODE, 0x80000007u, NULL, 0, 1);
 		memcpy(k[nk - 1].in, plain, 200); k[nk - 1].n = 200;
+		add(k, &nk, i ? "escape_enc" : "escape_dec", KUNCOAT_ALGO_ESCAPE,
+		    i ? KUNCOAT_ENCODE : KUNCOAT_DECODE, 0, NULL, 0, i == 0);
+		c = &k[nk - 1];
+		if (i) {
+			memcpy(c->in, plain, 200); c->n = 200;
+		} else {
+			const char *t = "\\x48\\x65\\x6c\\x6C\\x6f\\x00\\xff\\xA5\\x20";
+
+			c->n = strlen(t); memcpy(c->in, t, c->n);
+		}
 		add(k, &nk, i ? "reverse_enc" : "reverse_dec", KUNCOAT_ALGO_REVERSE,
 		    i ? KUNCOAT_ENCODE : KUNCOAT_DECODE, 0, NULL, 0, 0);
 		memcpy(k[nk - 1].in, plain, 200); k[nk - 1].n = 200;

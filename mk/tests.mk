@@ -136,15 +136,64 @@ ASAN_LIB := $(TEST)/libkofeng-asan.a
 # parse_once counts calls into the lib by wrapping them at link time (see tests/unit/parse_once.c);
 # the production code carries no counter for it.
 UNIT_LIBS_parse_once := -Wl,--wrap=kgenome_elf_image_parse -Wl,--wrap=kgenome_pe_image_parse -Wl,--wrap=kgenome_true_find_object -Wl,--wrap=kof_exe_norm_masked -Wl,--wrap=kgenome_elf_symtab_of -Wl,--wrap=kofpix_sweep -Wl,--wrap=kof_exe_decode_ex -Wl,--wrap=kof_exe_decode_would_change -Wl,--wrap=kof_script_sniff -Wl,--wrap=kof_script_sniff_keep -Wl,--wrap=kof_script_parse -Wl,--wrap=kof_script_parse_keep
+# diag_graph_bin counts work and NULL arguments at link time, with no counter or hook in the production code:
+# how many times the wrapper fixpoint asked whether a function could come out differently (C1), and every
+# mem*/qsort call that was handed a NULL pointer, whatever the length (U1: memcmp(NULL, NULL, 0)).
+UNIT_LIBS_diag_graph_bin := -Wl,--wrap=kgenome_diag_wrapper_tseen_retry -Wl,--wrap=memcmp -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memset -Wl,--wrap=qsort
+# The normalise-defect tests count work and inject faults at link time, with no counter or hook in the
+# production code: norm_defect_image counts the bytes any compare is asked for (N2), norm_defect_plan the bytes
+# memmove is asked to move (N4), norm_defect_engine makes the decode of one escape run fail (N8).
+UNIT_LIBS_norm_defect_image := -Wl,--wrap=memcmp -Wl,--wrap=bcmp
+UNIT_LIBS_norm_defect_plan := -Wl,--wrap=memmove
+UNIT_LIBS_norm_defect_engine := -Wl,--wrap=kof_exe_decode_run
+# diag_text_oom refuses every allocation of a scan in turn (G9: an allocation that fails must not leave a shorter graph with a clean status); -rdynamic so that the
+# trace it prints for an allocation whose refusal was silent has the names of the functions that made it.
+UNIT_LIBS_diag_text_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -rdynamic
+# diag_text_ops refuses every allocation of a scan over the list, cast and operator shapes in turn (the evaluator's lists: a refusal must be said, never a shorter set of constants with a clean
+# status): malloc, calloc and realloc wrapped, armed only around the scan. text_scan_once counts, at the one call every stage makes, how many times the TEXT route scans a script through the
+# whole pipeline (scans per distinct text: 1): kgenome_diag_scan_text wrapped, no counter in the engine.
+UNIT_LIBS_diag_text_ops := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc
+UNIT_LIBS_text_scan_once := -Wl,--wrap=kgenome_diag_scan_text
+# diag_text_nullargs counts the memory-function calls that are handed a NULL pointer (memcpy(d, NULL, 0) is undefined) over texts that make an empty value reach a copy
+UNIT_LIBS_diag_text_nullargs := -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memcmp -Wl,--wrap=memset
+# diag_text_work counts the basic blocks the TEXT route executes on its hostile shapes (tests/lib/work_count.h). The route is in the archive, uninstrumented, so the test is
+# built with the route's own sources compiled with the instrumentation and linked AHEAD of the archive (every symbol an archive member of them defines is defined by these
+# objects, so the member is not pulled in). An explicit rule: the pattern rule above links the archive alone.
+DTX_WORK_SRC := $(wildcard libgenome/phenotype/diag_text*.c)
+$(TEST)/libtest_genome_diag_text_work$(EXE): tests/lib/genome/diag_text_work.c $(DTX_WORK_SRC) $(KGENOME_LIB) $(STAMP) | $(TEST)
+	$(CC) $(CFLAGS) -fsanitize-coverage=trace-pc $< $(DTX_WORK_SRC) $(KGENOME_LIB) -o $@ $(LDFLAGS)
+
+# The lexer WORK tests (tests/lib/*/*_work_*.c, *_defect_work_*.c) count the basic blocks a lexer executes and assert a bound on them, not a time: gcc's
+# trace-pc instrumentation calls __sanitizer_cov_trace_pc at every block of the test's own translation unit, and the test #includes the lexer under test (see
+# tests/lib/genome/textual_work.h). A test that counts libc's memchr too wraps it.
+LEXWORK_FLAGS := -fsanitize-coverage=trace-pc
+UNIT_LIBS_textual_defect_work_sh_lex := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_vb := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_clike := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_perl_lex := $(LEXWORK_FLAGS) -Wl,--wrap=memchr
+UNIT_LIBS_textual_defect_work_ruby := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_py := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_tcl := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_psh := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_cfm := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_lua := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_bat := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_php := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_ecma := $(LEXWORK_FLAGS)
+UNIT_LIBS_textual_defect_work_page := $(LEXWORK_FLAGS)
+UNIT_LIBS_strfn_defect_work := $(LEXWORK_FLAGS) -Wl,--wrap=memcmp -Wl,--wrap=memmem
+UNIT_LIBS_textual_defect_work_form := $(LEXWORK_FLAGS) -Wl,--wrap=kgenome_textual_c_block_end
 ifeq ($(NATIVE_OS),windows)
 UNIT_LIBS_inflate_diff := -Wl,-Bstatic -lz -Wl,-Bdynamic
 UNIT_LIBS_cab_mszip    := -Wl,-Bstatic -lz -Wl,-Bdynamic
+UNIT_LIBS_script_decode_inflate := -Wl,-Bstatic -lz -Wl,-Bdynamic
 else
 UNIT_LIBS_inflate_diff := -lz
 # The same oracle, used the other way round: cab_mszip COMPRESSES its fixture
 # with zlib, so what the engine hands back is compared against the bytes that
 # went in. Nothing else on this host writes a cabinet.
 UNIT_LIBS_cab_mszip    := -lz
+UNIT_LIBS_script_decode_inflate := -lz
 endif
 
 #
@@ -338,6 +387,8 @@ UT_INC_antarc_walk := $(ANTARC_INC)
 UT_SRC_codec_forms := kofexamine/kofinspect.c kofexamine/codec_ui.c $(KOFEVT_SRC)
 UT_INC_codec_forms := -I$(SDK)/include
 UT_LIB_codec_forms := yes
+UT_INC_code_notes   := -Ilibkofeng -Ilibkofeng/kofcore -Ilibgenome
+UT_LIB_code_notes   := yes
 UT_DEP_codec_forms := $(SDK_HDR)
 
 # The examiner's shellcode-loader finder is tool code, not library code, so the
@@ -347,22 +398,11 @@ UT_INC_kofscfind := -I$(SDK)/include
 UT_LIB_kofscfind := yes
 UT_DEP_kofscfind := $(SDK_HDR)
 
-# Three tests over the editor's model: the condition parser, the round trip over
-# the rules that ship (see the test's own note for the three silent losses that
-# motivated it), and the reader and writer of a signature source, which are two
-# walks over one format.
+# One test over the editor's model: the condition parser, the tabs and the tag.
 UT_SRC_cond_expr      := $(EDITOR_SRC)
-UT_SRC_rule_roundtrip := $(EDITOR_SRC)
-UT_SRC_draft_source   := $(EDITOR_SRC)
 UT_INC_cond_expr      := -I$(SDK)/include
-UT_INC_rule_roundtrip := -I$(SDK)/include
-UT_INC_draft_source   := -I$(SDK)/include
 UT_LIB_cond_expr      := yes
-UT_LIB_rule_roundtrip := yes
-UT_LIB_draft_source   := yes
 UT_DEP_cond_expr      := $(SDK_HDR)
-UT_DEP_rule_roundtrip := $(SDK_HDR)
-UT_DEP_draft_source   := $(SDK_HDR)
 
 # The terminal writer is a tool source: kofview.c is the viewer's drawing layer, it
 # lives beside the tool because nothing that scans needs it, so a test over it
@@ -420,8 +460,8 @@ UT_SRC_grille_host := $(GRILLE_HOST_SRC)
 UT_INC_grille_host := -Ilibkoforbit/grille -Ilibkoforbit/evt
 
 UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr \
-              rule_roundtrip draft_source out_clip fidset fridge proc_rule \
-              chan_ring report_model grille_host api_engine_modhelpers
+              out_clip fidset fridge proc_rule \
+              chan_ring report_model grille_host api_engine_modhelpers code_notes
 
 define UNIT_EXTRA_RULES
 $$(TEST)/unit_$(1)$$(EXE): tests/unit/$(1).c $$(UT_SRC_$(1)) $$(if $$(UT_LIB_$(1)),$$(LIB)) \
@@ -442,8 +482,14 @@ $(foreach t,$(UNIT_EXTRA),$(eval $(call UNIT_EXTRA_RULES,$(t))))
 # missed it went unnoticed until somebody tried. A signature set that is never
 # built is a signature set that has already rotted; building it with the tests is
 # what keeps the module ABI's own examples honest about the ABI.
+#
+# AND A SECOND, tests/shape: the diagnoses whose own declaration ASKS for the
+# interpreter on a stager's shape. They are kept out of tests/sigs because that shape is
+# every synthetic stager's, and a database that asks about all of them moves every other
+# test's counts (see tests/shape/diagnoses/stager_shape.c).
 test-sigs:
 	@$(MAKE) --no-print-directory databases BASEDIR=tests/sigs
+	@$(MAKE) --no-print-directory databases BASEDIR=tests/shape
 
 #
 # ONE TARGET PER TEST, rather than one recipe looping over all of them.

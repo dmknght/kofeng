@@ -381,8 +381,7 @@ enum kof_pdf_cat {
  * producer asks fmt_wanted, the database now says yes, and the streams are
  * opened again with no engine change. Until then the bytes are still in the
  * file, still inside KOF_SCAN_PDF_RESOURCE_FONT, and still searchable where
- * they lie; and a rule that fires on the document raises the whole of it -
- * see KOF_ENG_OPEN_CARRIED.
+ * they lie.
  */
 /*
  * WHAT A CATEGORY IS, in the engine's own vocabulary.

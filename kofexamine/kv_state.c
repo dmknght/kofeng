@@ -78,10 +78,6 @@ const char *const opt_word[OPT_COUNT] = {
 	"Architecture", "File subtype"
 };
 
-const char *const lvl_word[LV_COUNT] = {
-	"INFECT", "SUSPECT", "No verdict"
-};
-
 /* Where the last click was. Declared here because the row callbacks are
  * written beside the rows that register them, which is above its definition. */
 int g_mx, g_my;

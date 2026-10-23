@@ -101,11 +101,19 @@ static inline void dec_out_init(struct dec_out *o, uint64_t n, uint32_t want)
 	o->room = 4u * n + 4096u;
 }
 
-/* The three decode passes over [from, to) of `p`, in place; `wrote` records what they wrote
+/* What the passes share, one definition each: decode a run where it sits (the step's number is
+ * `k32`, the separator for the escape coding), and note what a pass wrote for the next round. */
+uint64_t kof_exe_decode_run(uint32_t algo, uint32_t flags, uint32_t k32, uint8_t *p, uint64_t n);
+void kof_exe_dec_note(struct dec_out *o, uint64_t off, uint64_t len);
+void kof_exe_dec_note_run(struct dec_out *o, const uint8_t *p, uint64_t n,
+			  uint64_t off, uint64_t out_n, uint64_t src_end);
+
+/* The four decode passes over [from, to) of `p`, in place; `wrote` records what they wrote
  * (NULL for the single-pass entry points). With wrote->probe set a pass answers 1 at the
  * point where it would write, and writes nothing. */
 int kof_exe_pass_b64(uint8_t *p, uint64_t n, uint64_t from, uint64_t to, struct dec_out *wrote);
 int kof_exe_pass_hex(uint8_t *p, uint64_t n, uint64_t from, uint64_t to, struct dec_out *wrote);
 int kof_exe_pass_pct(uint8_t *p, uint64_t n, uint64_t from, uint64_t to, struct dec_out *wrote);
+int kof_exe_pass_esc(uint8_t *p, uint64_t n, uint64_t from, uint64_t to, struct dec_out *wrote);
 
 #endif /* KOF_EXECUTABLES_PRIVATE_H */

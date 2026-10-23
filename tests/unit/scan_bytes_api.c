@@ -43,9 +43,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	(void)bytes; (void)len;
 	if (!s->n) {
 		snprintf(s->name0, sizeof s->name0, "%s", name ? name : "(null)");
-		for (i = 0; i < res->n; i++)
-			if (res->v[i].is_verdict)
-				snprintf(s->verdict0, sizeof s->verdict0, "%s", res->v[i].name);
+		if (res->has_verdict)
+			snprintf(s->verdict0, sizeof s->verdict0, "%s", res->verdict.name);
 	}
 	s->n++;
 	return 0;
@@ -54,7 +53,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 static void opts(struct kof_scan_option *o)
 {
 	memset(o, 0, sizeof *o);
-	o->all_matches = 1;
 	o->max_produced_bytes = 64u << 20;
 	o->max_resident_bytes = 256u << 20;
 	o->max_object_bytes = 64u << 20;

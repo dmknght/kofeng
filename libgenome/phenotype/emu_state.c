@@ -311,6 +311,18 @@ void kgenome_emu_fault_de(struct kgenome_emu *e, int overflow)
 	e->fault_va = e->rip;
 }
 
+/*
+ * A PRIVILEGED INSTRUCTION IN USER MODE. IN, OUT, CLI and STI are #GP at ring 3 and Windows turns that into
+ * STATUS_PRIVILEGED_INSTRUCTION (0xc0000096) for the process's handlers. A protector executes `in eax, dx` on
+ * purpose: on VMware port 0x5658 answers 'VMXh' and anywhere else it is this exception, and the handler's
+ * continuing is the "no hypervisor" answer. Marked as a fault so the same two places read it as for #DE.
+ */
+void kgenome_emu_fault_priv(struct kgenome_emu *e)
+{
+	memcpy(e->fault_kind, "priv", 5u);
+	e->fault_va = e->rip;
+}
+
 /* The xmm register an operand names, or NULL when it is anything else: a merging write goes to its bytes. */
 uint8_t *kgenome_emu_xmm_of(struct kgenome_emu *e, const struct kgenome_x86_op *op)
 {

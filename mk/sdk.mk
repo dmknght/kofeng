@@ -44,10 +44,8 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofmod/basic.h \
            $(SDK)/include/kofmod/cell.h \
            $(SDK)/include/kofmod/infected.h \
-           $(SDK)/include/kofmod/kofcure.h \
            $(SDK)/include/kofmod/kofmutation.h \
            $(SDK)/include/kofmod/kofcap.h \
-           $(SDK)/include/kofmod/heur.h \
            $(SDK)/include/kofmod/kofsym.h \
            $(SDK)/include/kofmod/kofdiagtree.h \
            $(SDK)/include/kofmod/disease.h \

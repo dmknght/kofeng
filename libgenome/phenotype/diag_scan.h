@@ -21,6 +21,7 @@
 #include <phenotype/diag_vocab.h>   /* KOF_DIAG_ROLE_*, KOF_DIAG_LINK_* */
 #include <celllysis/capability.h>   /* KOF_NUCLEO_*, KOF_FLOWF_* */
 #include <celllysis/celllysis.h>    /* kgenome_cell_insn_fn */
+#include <textual/textual.h>        /* kgenome_textual_apply_fn */
 
 /*
  * ONE NODE FOUND IN AN OBJECT.
@@ -254,8 +255,22 @@ struct kgenome_diag_scan;
 #define KGENOME_DIAG_RUN_SYMBOL  (1u << 1)  /* imports and their call sites   */
 #define KGENOME_DIAG_RUN_EMULATE (1u << 2)  /* run the gaps, to link nodes    */
 #define KGENOME_DIAG_RUN_APIHASH (1u << 3)  /* name what a PE resolves itself */
+/*
+ * A SCRIPT'S CALLS, and not part of RUN_ALL: it reads text, not an object model, and has its own entry point
+ * (kgenome_diag_scan_text) because what it needs is the language, which no kgenome_obj holds.
+ */
+#define KGENOME_DIAG_RUN_TEXT    (1u << 4)
+/*
+ * THE LINEAGE STAGES (diag_lineage.h): which node's value reaches which node's argument through the program,
+ * by following control flow. A stage over the nodes the other routes made - it makes none and runs after
+ * they are folded - so it is a bit of its own for the reason the others are: it must be switchable off
+ * without the others changing their answer, and the cost of it is not theirs. Which stages run is the class
+ * table's (kgenome_diag_lineage_plan) unless the caller names them (kgenome_diag_inputs.lineage_stages).
+ */
+#define KGENOME_DIAG_RUN_LINEAGE (1u << 5)
 #define KGENOME_DIAG_RUN_ALL     (KGENOME_DIAG_RUN_SYSCALL | KGENOME_DIAG_RUN_SYMBOL | \
-			      KGENOME_DIAG_RUN_EMULATE | KGENOME_DIAG_RUN_APIHASH)
+			      KGENOME_DIAG_RUN_EMULATE | KGENOME_DIAG_RUN_APIHASH | \
+			      KGENOME_DIAG_RUN_LINEAGE)
 /*
  * WHAT kgenome_diag_scan RUNS, WHICH IS NOT EVERYTHING THAT EXISTS.
  *
@@ -303,7 +318,7 @@ struct kgenome_diag_scan *kgenome_diag_scan(const struct kgenome_obj *obj,
  * had been filtered. A scanner was still paying a loop per object to build
  * the set.
  *
- * WHAT BOUNDS THE COST IS THE DEMAND GATE - see KOF_ENG_USE_DIAGNOSE. An
+ * WHAT BOUNDS THE COST IS THE DEMAND GATE, which the engine owns. An
  * object no rule asks about pays nothing at all, which is a bigger saving
  * than any filter inside the walk, and it is the only one that cannot cost
  * a detection.
@@ -421,7 +436,80 @@ struct kgenome_diag_inputs {
 	 * first. Not read when NULL (the ordinary answer for a tool).
 	 */
 	enum kgenome_status             *refused;
+	/*
+	 * THE LINEAGE STAGES TO RUN (KGENOME_LINEAGE_S_*), when KGENOME_DIAG_RUN_LINEAGE is asked: zero is the
+	 * ordinary answer and means the class table's plan for this object; a measurement that wants one stage
+	 * on or off names it here. APPENDED to the struct: a caller built before it left it zero.
+	 */
+	unsigned                     lineage_stages;
 };
+/*
+ * THE SAME SCAN OF A SCRIPT: its nodes are the calls whose names its language's table (nucleo_names_<lang>.c) has, its links are
+ * a value flowing into an argument - see diag_text.c. `lang` is an enum kgenome_textual_lang_id; a language the table does
+ * not cover gives a scan with no nodes. NULL for no text or no memory (`refused` says which, as for the other entry).
+ */
+struct kgenome_diag_text_work {
+	uint64_t probes;        /* slots looked at by the open-addressing lookups and rehashes of every table of the route (variables, functions, paths, keys, the shell reader's variables) */
+	uint64_t edges;         /* the edges the summaries kept (a function's parameter or return slot and a producer that flowed into it) */
+	uint64_t steps;         /* tokens the constant evaluator spent */
+	uint64_t listed;        /* tokens the scope pass read for the names of `global` and `Dim` lists (each token of a list once: a list is not read again by the one after it) */
+};
+struct kgenome_diag_text_req {
+	const uint8_t                 *base;
+	uint64_t                       size;
+	uint32_t                       lang;
+	const struct kgenome_budget   *budget;
+	enum kgenome_status           *refused;
+	/* Told the table's spelling of each node as it is made, when set (kgenome_diag_text_names): the names a script "imports",
+	 * found by the walk that makes the nodes, so the two cannot differ. */
+	void                         (*on_node)(void *user, const char *name);
+	void                          *user;
+	/* What a call on constants does (str_replace, base64_decode ...): the engine's algorithms, run through this hook so that the
+	 * evaluator and the form read the same bytes. NULL: a name a script builds with a call is not followed, and is not found. */
+	kgenome_textual_apply_fn       apply;
+	void                          *apply_user;
+	/*
+	 * THE CONSTANTS THE SCRIPT COMPUTES, told once the walk is over: every assignment of the file whose right side is not one literal and
+	 * that the evaluator followed to a constant text - `$u = str_replace('T|', '', $a . $b . $c)`. `off`/`len` are the right side's bytes in
+	 * the file and `value` what it comes to (valid for the call only). The ranges are in order and none holds another. This is the evaluator
+	 * the route reads names and code with, handed to whoever needs the value - the engine's view puts it where it was computed - so there
+	 * is one place that knows what str_replace and a join come to. NULL: not asked for.
+	 */
+	void                         (*on_const)(void *user, uint64_t off, uint64_t len, const uint8_t *value, uint32_t n);
+	void                          *const_user;
+	/*
+	 * THE NAMES A CALL IS MADE WITH, told once the walk is over (php): a call whose head is a variable - `$l('', $c)` - where the variable has ONE producer
+	 * (assigned once, never appended to) and the evaluator follows it to a constant that is a plain name (kgenome_textual_name_ok): `off`/`len` are the
+	 * variable's bytes with its "$" and `value` the name. Written where it stands as a BARE name (kgenome_textual_subst, `bare`), so that the view says
+	 * `create_function('', $c)`. A variable with two possible producers, or whose value is not a name, is left. NULL: not asked for. Same `const_user`.
+	 */
+	void                         (*on_head)(void *user, uint64_t off, uint64_t len, const uint8_t *value, uint32_t n);
+	/* WHAT THE SCAN COST, when set (APPENDED: a caller built before it leaves it NULL): the work counters of the route, written when the scan ends. A bound of work is
+	 * asserted on these and not on a clock - a table whose entries share a hash is quadratic in a count and invisible to a timer on a small input. */
+	struct kgenome_diag_text_work *work;
+};
+struct kgenome_diag_scan *kgenome_diag_scan_text(const struct kgenome_diag_text_req *rq);
+
+/*
+ * CAN THE TEXT ROUTE READ THIS LANGUAGE, and against which table of names (an enum kgenome_nucleo_target; 0 for a language that is not served).
+ * The one question the engine's gate, its symbol block and the route's own selection ask - every served language has a profile row
+ * (diag_text_lang.c), so the answer is the same everywhere and a language is added in one place.
+ */
+int kgenome_diag_text_serves(uint32_t lang);
+/* Does the route read the normalised view of a script of this language as well as the script (php), or only the script (the others: see the row's `reads_view`). */
+int kgenome_diag_text_reads_view(uint32_t lang);
+unsigned kgenome_diag_text_target(uint32_t lang);
+/* The capability of a name the route told for a script of this language: by the language's own table and then by the tables of the objects it makes (COM: the VBS table). KGENOME_NUCLEO_NONE when no table has it. */
+uint16_t kgenome_diag_text_cap_of_name(uint32_t lang, const char *name);
+
+/*
+ * THE NAMES A SCRIPT CALLS THAT ITS LANGUAGE'S TABLE HAS, each once, spelled as the table spells it: what a binary's import table
+ * is to the gate that decides whether a diagnose is worth the analysis. `fn` is called for each; the bytes are the library's
+ * and are not kept.
+ */
+void kgenome_diag_text_names(const uint8_t *base, uint64_t size, uint32_t lang, kgenome_textual_apply_fn apply,
+			     void (*fn)(void *user, const char *name, uint32_t len), void *user);
+
 struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj *obj,
 						const uint8_t *base,
 						uint64_t size, unsigned run,
@@ -514,6 +602,10 @@ uint32_t    kgenome_diag_str_count(const struct kgenome_diag_scan *, uint16_t ca
  * A NULL scan is KGENOME_BAD_INPUT.
  */
 enum kgenome_status kgenome_diag_scan_status(const struct kgenome_diag_scan *);
+/* Expressions the constant evaluator (on_const, the names a script builds) left unread because a bound of it fired - nesting past its bound, a value past 1 MiB, a chain of
+ * variables past its depth (a variable that is its own right side is no chain), the work it may spend on a text, a call with more arguments than it is run with, the
+ * shell reader's own bounds: the answer is true and partial for them. What a caller that writes the constants into a text reports as a cut. */
+uint32_t kgenome_diag_scan_eval_cut(const struct kgenome_diag_scan *);
 /* Names refused because they were too long or the store was at its limit. */
 uint32_t kgenome_diag_scan_refused(const struct kgenome_diag_scan *);
 /* Bytes charged to the scan's ledger now (the most it held: *peak). A caller

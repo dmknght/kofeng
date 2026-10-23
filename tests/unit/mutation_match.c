@@ -423,34 +423,6 @@ int main(void)
 	}
 
 	/*
-	 * THE NAME OF A SET OF BLOCKS.
-	 *
-	 * A rule whose condition is "block A and block B" is named after both.
-	 * The order the two are asked in is the order a C expression evaluates
-	 * them, which is not part of the rule - so the name must not depend on
-	 * it. And a rule with one block keeps that block's own name: every
-	 * verdict already written says so.
-	 */
-	{
-		const uint32_t ab[2] = { 0xdded9322u, 0x6fad1193u };
-		const uint32_t ba[2] = { 0x6fad1193u, 0xdded9322u };
-		const uint32_t ac[2] = { 0xdded9322u, 0x00000001u };
-		const uint32_t one[1] = { 0xdded9322u };
-
-		ok_(kof_mutation_name_of(one, 1u) == 0xdded9322u,
-		    "one block is named after itself");
-		ok_(kof_mutation_name_of(ab, 2u) == kof_mutation_name_of(ba, 2u),
-		    "the set's name does not depend on the order asked");
-		ok_(kof_mutation_name_of(ab, 2u) != kof_mutation_name_of(ac, 2u),
-		    "a different set is a different name");
-		ok_(kof_mutation_name_of(ab, 2u) != 0xdded9322u &&
-		    kof_mutation_name_of(ab, 2u) != 0x6fad1193u,
-		    "a pair is not named after either half");
-		ok_(kof_mutation_name_of(NULL, 0u) == 0u,
-		    "no blocks, no name");
-	}
-
-	/*
 	 * THE BLOCK INSIDE MORE. The block's 32 hashes are the smallest of its own
 	 * span; a unit four times as long carries the whole span and three others,
 	 * and its own 32 smallest are mostly not the block's. Compared as sketches

@@ -24,6 +24,7 @@
  */
 
 #include "diag_scan_private.h"
+#include "diag_lineage.h"
 
 /*
  * kgenome_diag_note sets a status on the scan: the one way a limit reports that
@@ -66,17 +67,21 @@ struct diag_scenario {
 	unsigned    bit;
 	const char *name;
 	diag_fn     fn;
+	/* Runs after the nodes are folded (merge_sites): it names a node by its index, which is only final then. */
+	int         after_merge;
 };
 
 static const struct diag_scenario diag_scenarios[] = {
 	{ KOF_T_DIAG_SYSCALL, KGENOME_DIAG_RUN_SYSCALL, "syscall",
-	  kgenome_diag_run_syscall },
+	  kgenome_diag_run_syscall, 0 },
 	{ KOF_T_DIAG_SYMBOL,  KGENOME_DIAG_RUN_SYMBOL,  "symbol",
-	  kgenome_diag_run_symbol },
+	  kgenome_diag_run_symbol, 0 },
 	{ KOF_T_DIAG_EMULATE, KGENOME_DIAG_RUN_EMULATE, "emulate",
-	  kgenome_diag_run_emulate },
+	  kgenome_diag_run_emulate, 0 },
 	{ KOF_T_DIAG_APIHASH, KGENOME_DIAG_RUN_APIHASH, "apihash",
-	  kgenome_diag_run_apihash }
+	  kgenome_diag_run_apihash, 0 },
+	{ KOF_T_DIAG_LINEAGE, KGENOME_DIAG_RUN_LINEAGE, "lineage",
+	  kgenome_diag_run_lineage, 1 }
 };
 
 /*
@@ -97,7 +102,7 @@ static const struct diag_scenario diag_scenarios[] = {
  * before it was found.
  *
  * SO THE GRAPH IS KEPT WHOLE. What bounds it is the analysis not running -
- * see KOF_ENG_USE_DIAGNOSE and the signs on a diagnose - and not what is
+ * see the engine's demand gate and the signs on a diagnose - and not what is
  * thrown away afterwards.
  */
 
@@ -259,10 +264,20 @@ static void merge_sites(struct kgenome_diag_scan *s)
 			h->symref = s->hit[i].symref;
 			h->symadd = s->hit[i].symadd;
 		}
-		for (k = 0; k < s->hit[i].n_in; k++)
-			kgenome_diag_note_in(s, h, s->hit[i].in[k].from,
-					 s->hit[i].in[k].role,
-					 s->hit[i].in[k].kind);
+		/*
+		 * A FOLDED LINK KEEPS HOW SURE IT WAS. This went through kgenome_diag_note_in, which says PROVEN
+		 * whatever the link was, so a MAY (two arms joined, a callee not read) became PROVEN the moment
+		 * its node was folded into another route's. And the stronger statement wins a repeat: a link the
+		 * run saw arrive is not kept out by the code-only route's MAY of the same relation.
+		 */
+		for (k = 0; k < s->hit[i].n_in; k++) {
+			const struct kgenome_diag_in *fi = &s->hit[i].in[k];
+
+			if (fi->how == KGENOME_DIAG_LINK_PROVEN)
+				(void)kgenome_diag_note_in_seen(s, h, fi->from, fi->role, fi->kind);
+			else
+				(void)kgenome_diag_note_in_how(s, h, fi->from, fi->role, fi->kind, fi->how);
+		}
 	}
 	/*
 	 * 3b. THE NAMES FOLLOW THE NODES. Each kept name carries the index of
@@ -312,43 +327,27 @@ static void merge_sites(struct kgenome_diag_scan *s)
 
 #undef DOUBT
 
-struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj *obj,
-						const uint8_t *base,
-						uint64_t size, unsigned run,
-						const struct kgenome_diag_inputs *in)
+/*
+ * A SCAN OBJECT WITH ITS BUDGET AND LEDGER, for a route to fill: the caller's budget with every field it left at zero
+ * filled by the default for THIS object, and the one number only the caller knows (the memory allowance) as given.
+ * `code_bytes` is what the object's code is, 0 for one that has none (a script: its size is its text).
+ */
+static struct kgenome_diag_scan *scan_new(const uint8_t *base, uint64_t size, uint64_t code_bytes,
+					  const struct kgenome_budget *b, enum kgenome_status *refused)
 {
-	struct kgenome_diag_scan *s;
-	unsigned i;
+	struct kgenome_diag_scan *s = calloc(1, sizeof *s);
 
-	if (!obj || !base || !size)
-		return NULL;
-	if (obj->arch != KGENOME_ARCH_X86 && obj->arch != KGENOME_ARCH_X86_64) {
-		/*
-		 * The value model reads x86 outside the syscall route; the
-		 * fixed-width ports have that one only, so it is the one run.
-		 */
-		if (!kgenome_diag_fixed_arch(obj))
-			return NULL;
-		run &= KGENOME_DIAG_RUN_SYSCALL;
-	}
-	s = calloc(1, sizeof *s);
 	if (!s) {
-		if (in && in->refused)
-			*in->refused = KGENOME_NOMEM;
-		KOF_TRACE("[cut] kgenome_diag_scan_with_inputs: scan object not allocated\n");
+		if (refused)
+			*refused = KGENOME_NOMEM;
+		KOF_TRACE("[cut] kgenome_diag_scan: scan object not allocated\n");
 		return NULL;
 	}
-	/*
-	 * THE BUDGET: the caller's, with every field it left at zero filled by the
-	 * default for THIS object. The scan never reads engine state to find a limit.
-	 */
 	{
 		struct kgenome_budget dflt;
-		const struct kgenome_budget *b = in ? in->budget : NULL;
 
 		kgenome_budget_default(&dflt, b && b->obj_size ? b->obj_size : size,
-				       b && b->code_bytes ? b->code_bytes
-							  : kgenome_diag_code_bytes(obj, size));
+				       b && b->code_bytes ? b->code_bytes : code_bytes);
 		s->bud = dflt;
 		if (b) {
 			if (b->max_bytes)
@@ -375,6 +374,32 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 	}
 	s->base = base;
 	s->size = size;
+	return s;
+}
+
+struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj *obj,
+						const uint8_t *base,
+						uint64_t size, unsigned run,
+						const struct kgenome_diag_inputs *in)
+{
+	struct kgenome_diag_scan *s;
+	unsigned i, pass;
+
+	if (!obj || !base || !size)
+		return NULL;
+	if (obj->arch != KGENOME_ARCH_X86 && obj->arch != KGENOME_ARCH_X86_64) {
+		/*
+		 * The value model reads x86 outside the syscall route; the
+		 * fixed-width ports have that one only, so it is the one run.
+		 */
+		if (!kgenome_diag_fixed_arch(obj))
+			return NULL;
+		run &= KGENOME_DIAG_RUN_SYSCALL;
+	}
+	s = scan_new(base, size, kgenome_diag_code_bytes(obj, size), in ? in->budget : NULL,
+		     in ? in->refused : NULL);
+	if (!s)
+		return NULL;
 	s->relocs = in ? in->relocs : NULL;
 	s->funcs = in ? in->funcs : NULL;
 	s->walk = in ? in->walk : NULL;
@@ -383,19 +408,46 @@ struct kgenome_diag_scan *kgenome_diag_scan_with_inputs(const struct kgenome_obj
 	s->imports = in ? in->imports : NULL;
 	s->seq = in ? in->seq : NULL;
 	s->n_seq = in ? in->n_seq : 0;
-	for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
-		const struct diag_scenario *d = &diag_scenarios[i];
+	s->lineage_stages = in ? in->lineage_stages : 0;
+	for (pass = 0; pass < 2u; pass++) {
+		for (i = 0; i < sizeof diag_scenarios / sizeof diag_scenarios[0]; i++) {
+			const struct diag_scenario *d = &diag_scenarios[i];
 
-		if (!(run & d->bit) || !d->fn)
-			continue;
-		KOF_TIME_BEGIN(d->slot);
-		d->fn(s, obj, base, size);
-		KOF_TIME_END(d->slot);
-		s->ran |= d->bit;
-		if (s->halt)
-			break;
+			if (!(run & d->bit) || !d->fn || d->after_merge != (int)pass)
+				continue;
+			KOF_TIME_BEGIN(d->slot);
+			d->fn(s, obj, base, size);
+			KOF_TIME_END(d->slot);
+			s->ran |= d->bit;
+			if (s->halt)
+				break;
+		}
+		if (!pass) {
+			merge_sites(s);
+			if (s->halt)
+				break;
+		}
 	}
-	merge_sites(s);
+	/* A walk the scan made for itself has no other reader once the stages are done: its trace goes now
+	 * (a tool that keeps a scan alive to show it must not keep an object's worth of decode with it). */
+	if (s->own_walk)
+		kgenome_diag_walk_trim(s->own_walk);
+	return s;
+}
+
+struct kgenome_diag_scan *kgenome_diag_scan_text(const struct kgenome_diag_text_req *rq)
+{
+	struct kgenome_diag_scan *s;
+
+	if (!rq || !rq->base || !rq->size)
+		return NULL;
+	s = scan_new(rq->base, rq->size, 0, rq->budget, rq->refused);
+	if (!s)
+		return NULL;
+	KOF_TIME_BEGIN(KOF_T_DIAG_TEXT);
+	kgenome_diag_run_text(s, rq);
+	KOF_TIME_END(KOF_T_DIAG_TEXT);
+	s->ran |= KGENOME_DIAG_RUN_TEXT;
 	return s;
 }
 
@@ -579,8 +631,8 @@ static void rcall_put(void *user, uint64_t at, uint64_t target, const char *name
 	r->target = target;
 	/* An internal call names a capability only by accident. */
 	r->cap = (target || !name) ? (uint16_t)KGENOME_NUCLEO_NONE
-				   : kgenome_nucleo_cap_of_name(name);
-	r->name = r->cap != KGENOME_NUCLEO_NONE ? kgenome_nucleo_name_id(name) : 0u;
+				   : kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, name);
+	r->name = r->cap != KGENOME_NUCLEO_NONE ? kgenome_nucleo_name_id(KGENOME_NUCLEO_T_ELF, name) : 0u;
 }
 
 const struct kgenome_diag_rcall *kgenome_diag_relcalls(struct kgenome_diag_scan *s,
@@ -655,6 +707,11 @@ uint32_t kgenome_diag_scan_refused(const struct kgenome_diag_scan *s)
 	return s ? s->n_str_refused : 0u;
 }
 
+uint32_t kgenome_diag_scan_eval_cut(const struct kgenome_diag_scan *s)
+{
+	return s ? s->eval_cut : 0u;
+}
+
 uint64_t kgenome_diag_scan_bytes(const struct kgenome_diag_scan *s, uint64_t *peak)
 {
 	if (peak)
@@ -700,6 +757,8 @@ void kgenome_diag_scan_free(struct kgenome_diag_scan *s)
 	kgenome_diag_walk_free(s->own_walk);
 	kgenome_elf_reloc_table_free(&s->data_relocs);
 	free(s->rcall);
+	free(s->oblig);
+	free(s->noret_at);
 	free(s->hit);
 	free(s);
 }

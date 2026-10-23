@@ -199,8 +199,8 @@ static void t_other_vocab(void)
 	for (i = 0; i < KOF_VERDICT_COUNT; i++)
 		CK(kof_verdict_word(i)[0] != 0, "verdict %u has a word", i);
 	CK(strcmp(kof_verdict_word(KOF_VERDICT_COUNT), "clean") == 0, "a verdict from outside reads clean");
-	CK(strcmp(kof_verdict_word(KOF_VERDICT_INFECTED), "Infected") == 0 && strcmp(kof_verdict_word(KOF_VERDICT_SUSPECTED), "Suspected") == 0,
-	   "the words a finding's name begins with");
+	CK(strcmp(kof_verdict_word(KOF_VERDICT_INFECTED), "Infected") == 0 && strcmp(kof_verdict_word(KOF_VERDICT_CLEAN), "Clean") == 0,
+	   "the words a verdict's name can begin with");
 }
 
 static void t_script_fam(void)

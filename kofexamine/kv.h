@@ -20,17 +20,16 @@
  *   kv_tree_draw   painting the tree pane and the frame
  *   kv_hex         the hex pane
  *   kv_text        the text pane, symbol cell strings
- *   kv_hit         what a byte under the cursor is (owner / hit / declared)
+ *   kv_hit         what a byte under the cursor is (declared)
  *   kv_disasm      the disassembler panel
  *   kv_evt         the event-log view (load, boxes, the event panel)
  *   kv_decl        the draft panel: head, strings, matchers, conditions, blocks
- *   kv_marker      the marker line
+ *   kv_marker      the status line
  *   kv_mutation    mutation blocks: segment, mark, rescore
- *   kv_draft       draft lifecycle: wipe, load a rule, show, save gates
+ *   kv_draft       draft lifecycle: wipe
  *   kv_declact     adding a declaration from a selection
  *   kv_chooser     the chooser popup (every pick-one list)
  *   kv_field       text fields and the panel rows around them
- *   kv_list        the markers list
  *   kv_menu        the context menus and menu_run
  *   kv_bar         the menu bar: items, enabled/shown rules, run
  *   kv_clip        copy and paste
@@ -330,8 +329,7 @@
 #define A_HEAD  "\033[100;97m"
 
 #define A_SELB  "\033[44;97m"   /* the drag selection */
-#define A_HIT1  "\033[41;97m"   /* counted by the module */
-#define A_HIT2  "\033[43;30m"   /* present, but outside its regions */
+#define A_HIT1  "\033[41;97m"   /* a row that has a verdict */
 /*
  * A string the draft itself declares, lit where it sits in the object.
  *
@@ -424,14 +422,11 @@
 #define FAM_W     14
 #define NOTE_W    40    /* the comment box - a remark, not a paragraph */
 #define GEN_BTN_W 12    /* "[ Generate ]" */
-/* "[ Save ]" + two + "[ Save As ]" - what replaces Generate once the draft has
- * a file behind it. */
-#define SAVE_BTN_W (8 + 2 + 11)
 /*
  * Where the string editor's codes live in view.edit.
  *
  * One code per declaration, in a band of its own well clear of every other
- * field's. The bands below it are 1, 4+i, 103+i, 200+i, 300+i, 400+i, 500 and
+ * field's. The bands below it are 1, 103+i, 200+i, 300+i, 400+i, 500 and
  * 501, and each is tested as a band rather than as "at least" - a rule this
  * file learned the hard way when the size editor claimed everything from 200
  * up and swallowed the boxes added above it.
@@ -450,6 +445,14 @@
  * same fault in a smaller place.
  */
 #define ED_SYMFILT 900
+/*
+ * The tag sources' text boxes: the table's search, a form's name and comment,
+ * the chooser's search. A band of four above every other, tested as codes.
+ */
+#define ED_SYN_SEARCH  1000
+#define ED_SYN_NAME    1001
+#define ED_SYN_COMMENT 1002
+#define ED_SYN_PICK    1003
 
 /* Every row the draft panel can ever hold, spelled from the limits rather than
  * counted once: the panel grew three kinds of row after this array was sized,
@@ -543,12 +546,7 @@
 
 enum ch_what {
 	CH_NONE = 0,
-	CH_RULE,        /* find all / any / multi, for a new or existing group */
-	CH_SIM,         /* which measure a find_similar takes next */
-/* Rows past this one in a CH_RULE menu are the ticked blocks - see where it is
- * built. TWO search rules come first now: find_str, which is the three
- * threshold spellings under one name, and find_at. */
-#define CH_RULE_BLOCK0 2
+	CH_RULE,        /* find_str or find_at, for a string matcher */
 	/*
 	 * WHICH OCCURRENCE an AT matcher compares at.
 	 *
@@ -578,8 +576,6 @@ enum ch_what {
 	CH_FMT_LANG,    /* which scripting language - format and subtype at once */
 	CH_RANGE_EXT,   /* which region to extend the subject range with */
 	CH_RANGE_DROP,  /* which region to drop off the subject range */
-	CH_LEVEL,       /* infect or suspect */
-	CH_VARIANT,     /* how the finding names itself */
 	CH_TYPE,        /* enum kof_maltype */
 	CH_MARKER,      /* which unused marker to put in a matcher */
 	CH_THRESH,      /* how many of the matcher's markers must be present */
@@ -610,8 +606,6 @@ enum ch_what {
 	CH_CMATCH,      /* which matcher to put into a condition */
 	CH_CMATCH2,     /* what to do to one matcher a condition already names */
 	CH_CSWAP,       /* which other matcher to put in its place */
-	CH_SWITCH,      /* what to do about unsaved work before switching */
-	CH_LOGIC,       /* how the next condition at this level attaches */
 	CH_DECLKIND     /* string, hex or regex - what [+ String] adds */
 };
 
@@ -786,25 +780,8 @@ struct node {
 	 * once.
 	 */
 	uint8_t  ent;               /* the row IS an entry */
-	/*
-	 * THE ROW IS ONE RUN OF A REGION, not the region.
-	 *
-	 * A page's code is not one extent and neither is its markup: they
-	 * alternate down the file, and one row per KIND showed them
-	 * concatenated - every island of a php shell joined end to end, with
-	 * the html that sits between them spliced out. What a reader is reading
-	 * is a RUN, so a run is a row.
-	 *
-	 * It keeps its region `mask`, unlike `sym` and `ent` which have none:
-	 * the run really is part of that region, so a marker taken here still
-	 * declares the right scan target. What it does not do is resolve that
-	 * mask for its bytes - see view_select - because resolving would answer
-	 * about every run at once, which is the thing being undone.
-	 */
-	uint8_t  piece;
 	uint32_t ent_i;             /* which row of ctx->entries */
-	/* The exact bytes of an entry row or of a piece row. Shared because the
-	 * two ask the same thing of them: these bytes, not a resolve. */
+	/* The exact bytes of an entry row: these bytes, not a resolve. */
 	uint64_t ent_off, ent_len;
 	uint64_t bytes;
 
@@ -891,6 +868,12 @@ struct hit {
 
 /* The two generator buttons on the Mutation blocks heading, as drawn. */
 
+
+struct kv_syn;                  /* the tag sources - see kv_syn.c */
+
+/* The longest row of the disassembly panel as text, and the longest instruction text with its comments. A comment is the engine's words about the instruction and is not cut to the width of a screen. */
+#define DIS_LINE_MAX 320
+#define DIS_TEXT_MAX 300
 
 struct view {
 	/* The scanner that is running RIGHT NOW, so on_object can ask it what
@@ -982,38 +965,7 @@ struct view {
 	struct object obj[MAX_OBJ];
 	uint32_t      n_obj;
 
-	/*
-	 * THE GENERATED BLOCK'S CONTENTS, CARRIED ACROSS A LOAD AND A SAVE.
-	 *
-	 * A rule is written once and then tested again, against a second sample
-	 * and a third. The block used to hold one "Test sample" line and the
-	 * save rewrote it, so testing an existing rule against a new file
-	 * ERASED the record of what it had been tested against before - the one
-	 * fact in the file that cannot be recovered from anywhere else. The
-	 * samples accumulate now, and so do the names of the people who wrote
-	 * them.
-	 *
-	 * `made` is the date the block was first written, kept from whatever is
-	 * already in the file; a save only ever sets the "updated" date. Empty
-	 * means this rule is new and today is both.
-	 */
-	/* 128, because samples are routinely named by their hash: a 64 character
-	 * digest plus the collection's suffix is 82, and 80 cut it mid word. */
-	char        meta_sample[MAX_META][128];
-	uint32_t    n_meta_sample;
-	char        meta_who[MAX_META][48];
-	uint32_t    n_meta_who;
-	char        meta_made[24];
 
-	/*
-	 * Lines of kof_scan this panel cannot hold - see body_modelled.
-	 *
-	 * Not an error and not a parse failure: the file is a valid module, and
-	 * the draft beside it is a truthful view of the part that IS modelled.
-	 * What it costs is the right to write the file back, because writing it
-	 * back would write only that part.
-	 */
-	uint32_t    foreign;
 
 	struct node node[MAX_TREE];
 	/* Whether a row was refused for want of space. A truncated list that
@@ -1377,7 +1329,15 @@ struct view {
 	 * this panel. A selection made in the hex pane does.
 	 */
 	int         sel_from_dis;
-	char        dis_line[64][120];
+	/*
+	 * The last instruction that set the flags (a CMP or a TEST) and where the next instruction would start, so a conditional jump read right after
+	 * it - or after instructions that leave the flags alone - is explained as the comparison it is. Kept by dis_format as it goes; a row that is not
+	 * the next of the last one starts from nothing known.
+	 */
+	struct kgenome_x86_insn dis_fl;
+	uint64_t    dis_fl_rip, dis_next;
+	uint8_t     dis_fl_ok;
+	char        dis_line[64][DIS_LINE_MAX];
 	/*
 	 * The bytes each drawn line stands for.
 	 *
@@ -1388,32 +1348,10 @@ struct view {
 	 * need a second implementation to say so.
 	 */
 	uint64_t    dis_line_at[64], dis_line_len[64];
+	uint8_t     dis_line_lbl[64];       /* the row is a label: no bytes, not selectable */
 	int         dis_lines;
-
 	int         dragging;
 	int         dragged;        /* the pointer moved off the pressed byte */
-
-	uint32_t    sel_touch, list_off;
-	int         show_list;
-	/* 0: the signatures. 1: the markers of the selected one. Two depths of
-	 * one dialog rather than two dialogs, because the second is only ever
-	 * reached from a row of the first. */
-	int         list_depth;
-	uint32_t    str_off, sel_str;
-
-	/*
-	 * Which signatures the dialog is showing: all of them, the ones that
-	 * fired, or the ones that did not. The status line says "hit 3 skip 5"
-	 * and both numbers are clickable, so the filter is the answer to which
-	 * of them was clicked.
-	 */
-	int         list_filter;    /* 0 all, 1 fired, 2 skipped */
-
-	/* Where the clickable words ended up on the status line. Recorded while
-	 * drawing rather than computed twice: the line is built from variable
-	 * length pieces and a second copy of that arithmetic would be a second
-	 * thing to keep right. */
-	int         hit_c0, hit_c1, skip_c0, skip_c1, name_c0, name_c1;
 
 	/* Which half of the hex pane the menu was opened on. */
 	int         menu_ctx;       /* 1 bytes, 2 the offset column,
@@ -1434,7 +1372,7 @@ struct view {
 	 * design: it reflows, fitting fewer bytes per row rather than running
 	 * off the edge.
 	 */
-	uint32_t    tree_hoff, list_hoff, decl_hoff;
+	uint32_t    tree_hoff, decl_hoff;
 
 	/* The region column's width for this frame - see draw_decl. */
 	int         rgn_w;
@@ -1514,27 +1452,12 @@ struct view {
 
 	int         edit;           /* 0 none, 1 family, 2 variant */
 
-	/*
-	 * WAS THIS DRAFT READ OUT OF A SIGNATURE THAT ALREADY EXISTS.
-	 *
-	 * Set by draft_show on BOTH of its paths - the .c source when it can be
-	 * found, the database when it cannot - because either way the reader is
-	 * looking at a rule somebody already wrote, not writing one. gen_path
-	 * cannot answer this: it is only set on the source path, so a rule
-	 * loaded from the database (which is the usual case, since --bases has
-	 * to point at the tree for the source to be found) looked exactly like
-	 * a fresh draft.
-	 *
-	 * What it changes is what a marker's colour MEANS - see the region
-	 * column in draw_decl.
-	 */
 
 
 
 	/* Where the header's controls landed, recorded as they are drawn. */
 	int         f_c0, f_c1, t_c0, t_c1, v_c0, v_c1, g_c0, g_c1;
 	int         n_c0, n_c1;     /* the "+ condition" button */
-	int         sv_c0, sv_c1;   /* "Save As", when there is a file */
 	int         nw_c0, nw_c1;   /* "New" - empty the panel */
 	int         nt_c0, nt_c1;   /* the module's own note */
 	int         nt_len, nt_room;/* its length and the width it is shown in */
@@ -2052,7 +1975,7 @@ struct view {
 	 * because they scroll independently: a caret in one says nothing about
 	 * where another is being read from. */
 	uint32_t    fam_off, num_off;
-	uint32_t    cnd_off[MAX_GROUP], cnd_eoff[MAX_GROUP];
+	uint32_t    cnd_eoff[MAX_GROUP];
 	/* The search's own message. Shared with the draft panel's it produced
 	 * a bare "not found" beside the Generate button, which is an answer to
 	 * a question that panel never asked. */
@@ -2064,8 +1987,17 @@ struct view {
 	char        num[24];        /* the size being typed */
 	int         num_fresh;      /* nothing typed into it yet */
 	int         row_cnd, row_str;
-	int         cnd_lv[MAX_GROUP][2], cnd_vr[MAX_GROUP][2];
-	int         cnd_nm[MAX_GROUP][2];
+	int         cnd_tg[MAX_GROUP][2];   /* the tag of each condition */
+	int         grp_tg[MAX_GROUP][2];   /* the tag of a standalone block matcher */
+	/*
+	 * THE TAG SOURCES AND THE VIEWS OVER THEM, owned by the session: they
+	 * outlive the file being looked at, so the clear that opens another one
+	 * keeps the pointer (file_open, proc_open).
+	 */
+	struct kv_syn *syn;
+	/* Whether the output pane is listed under the tables - what the
+	 * Generate button toggles. Nothing is written either way. */
+	int         gen_preview;
 	/* The comment boxes, and the condition's own "+ matcher". Recorded per
 	 * row as they are drawn, because a row that is scrolled out has no
 	 * columns and must not answer a click meant for the one in its place. */
@@ -2091,12 +2023,10 @@ struct view {
 	char        at_buf[24];     /* the step being typed, as written */
 	uint32_t    at_buf_off;
 	int         grp_th[MAX_GROUP][2];
-	int         cnd_kid[MAX_GROUP][2];
-	int         cnd_jn[MAX_GROUP][2], cnd_op[MAX_GROUP][2];
-	/* Six per condition: its three rows, a JOIN, an ADD and a spare - a
-	 * block is three lines now, not two. */
-	uint8_t     cseq_kind[6 * MAX_GROUP];
-	uint32_t    cseq_idx[6 * MAX_GROUP];
+	int         cnd_op[MAX_GROUP][2];
+	/* Two per condition: its matcher row and its tag row. */
+	uint8_t     cseq_kind[2 * MAX_GROUP];
+	uint32_t    cseq_idx[2 * MAX_GROUP];
 	uint32_t    n_cseq;
 	/*
 	 * WHERE EACH MATCHER ID ON A CONDITION'S ROW WAS DRAWN.
@@ -2415,15 +2345,11 @@ struct fmt_cat {
  * children rather than below them, which is where it belonged.
  */
 /*
- * A CONDITION IS THREE LINES, IN THE ORDER IT IS DECIDED.
- *
- * It was two - the verdict and its variant on one row, the matchers on the
- * next - which reads backwards. The rows now go matchers, variant name,
- * verdict: what the condition IS, what its answer will be CALLED, and the
- * answer. Each row says one thing, and the conclusion is at the foot of the
- * block where a conclusion belongs.
+ * A CONDITION IS TWO LINES, IN THE ORDER IT IS DECIDED: the matchers it is made
+ * of, and then the tag it finds. A condition no longer names a verdict level or
+ * a variant - what an object is called is made from the diseases that matched.
  */
-enum cseq_kind { CS_COND = 0, CS_MATCH, CS_VAR, CS_JOIN, CS_ADD };
+enum cseq_kind { CS_COND = 0, CS_MATCH };
 
 enum prow_kind {
 	RW_OPT = 0, RW_RANGES, RW_STRHDR, RW_STR, RW_ADDS, RW_ADDM,
@@ -2439,7 +2365,10 @@ enum prow_kind {
 	/* THE DIAGNOSES this file carries - see draw_decl_diag. */
 	RW_DIAGHDR, RW_DIAGCOL, RW_DIAG,
 	/* The format row and the [+ Options] button - see prow_build. */
-	RW_FMTS, RW_OPTBTN
+	RW_FMTS, RW_OPTBTN,
+	/* The title bar of tabs, and the output pane's rows - see
+	 * draw_decl_tabs and draw_decl_preview. */
+	RW_TABS, RW_PREV
 };
 
 #define MENU_W 24
@@ -2492,8 +2421,15 @@ struct page {
 	int               tab_sel;
 	struct prop_line *line;
 	uint32_t          n;
+	/* The first `fixed` lines stay where they are while the rest scrolls:
+	 * a table's tabs, controls and column headings. */
+	uint32_t          fixed;
 	uint32_t         *off;          /* the caller's scroll; clamped by the draw */
 	int               full;         /* fill the screen, or fit the text */
+	/* At least this wide, when the lines are narrower: a page whose lines
+	 * change as the reader moves must not change its width with them, or
+	 * what it was drawn over shows through where it was. */
+	int               width;
 	int               close;        /* draw a close control */
 	int               record;       /* record rows for selection and copy */
 	const char       *foot;         /* bottom-rule hint, or NULL */
@@ -2562,7 +2498,7 @@ enum bar_menu {
  * to do one thing.
  */
 enum bar_item {
-	BI_SAVE = 0, BI_SAVE_AS, BI_QUIT,
+	BI_QUIT = 0,
 	BI_FIND, BI_GOTO,
 	/*
 	 * Analysis is what the tool does TO an object, as against File which is
@@ -2578,9 +2514,15 @@ enum bar_item {
 	 */
 	BI_DASH,
 	BI_SYMS,
+	/* The tag sources, as four tables: Analysis is where the tool shows
+	 * what it knows, and this is what the diagnose panel's Tag cells pick
+	 * from. It needs no object: it is about the directory. */
+	BI_SYNTAB,
 	/* Label replaced at draw time by the mode's own wording - a menu that
 	 * offers "Show" and "Hide" side by side always has one of them wrong. */
 	BI_DISASM,
+	/* Reads the whole object's code once and names what it finds - see dis_analyse. The panel then shows labels and comments from it. */
+	BI_DISANALYSE,
 	/*
 	 * Where a shellcode loader keeps its payload, shown on demand.
 	 *
@@ -2877,7 +2819,6 @@ struct dframe {
 
 /* ===== what the units share: functions ===== */
 const char *byte_colour(uint8_t c);
-void dis_shorten(char *t);
 void dis_paint(struct out *o, const char *text);
 int hex_top(void);
 int hex_bot(void);
@@ -2890,6 +2831,7 @@ int literal_safe(const uint8_t *b, uint32_t n);
 uint32_t obj_region_bits(const struct object *o, uint32_t *out,
 				uint32_t cap);
 struct object *cur_obj(struct view *v);
+const struct kgenome_func_set *mtn_funcs(struct view *v, struct object *o);
 int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user);
 void proc_collect(struct view *v, kof_engine *eng, uint32_t pid);
@@ -2906,11 +2848,8 @@ uint32_t sym_half_recs(const struct object *o, uint32_t mask,
 			      uint32_t *idx, uint32_t idx_cap);
 const char *sc_kind(const uint8_t *b, uint32_t n);
 void objects_examine_from(struct view *v, kof_engine *eng, uint32_t from);
-void object_touch(struct view *v, uint32_t at);
-uint32_t touch_default(const struct object *ob);
 void objects_examine(struct view *v, kof_engine *eng);
 int decl_top(void);
-void cnd_rail(struct out *o, int depth, int bar);
 const struct kof_parser *obj_region_vocab(const struct object *o);
 void obj_label(const struct object *o, char *out, size_t cap);
 void log_scan_verbs(struct view *v);
@@ -2940,7 +2879,6 @@ void goto_node(struct view *v, uint32_t k);
 const uint8_t *view_bytes(const struct view *v, uint64_t *n);
 uint64_t view_map(const struct view *v, uint64_t at, uint64_t *run);
 uint64_t view_unmap(const struct view *v, uint64_t off);
-uint32_t mtn_mask_of_enum(const struct object *o, const char *word);
 int mtn_kept_any(const struct view *v);
 uint32_t mtn_at_byte(const struct view *v);
 const char *mtn_lit_at(const struct view *v, uint64_t rgn_off);
@@ -2950,8 +2888,6 @@ void row_start(struct out *o, int row, int col);
 void draw_frame(struct out *o, struct view *v);
 void draw_tree(struct out *o, struct view *v);
 int in_sel(const struct view *v, uint64_t at);
-int hit_owner(struct view *v, uint64_t off);
-int hit_kind(struct view *v, uint64_t off);
 int decl_kind(struct view *v, uint64_t off);
 void sym_flag_str(uint8_t f, char *out);
 void sym_shn_str(const uint8_t *r, char *out, size_t n);
@@ -2974,13 +2910,8 @@ int view_can_text(struct view *v);
 void view_toggle_text(struct view *v);
 int text_pane(struct view *v);
 void draw_hex(struct out *o, struct view *v);
-const char *touch_colour(const struct kof_touch *t);
-void touch_head(const struct kof_touch *t, char *out, size_t cap);
 int cmatch_ok(struct view *v, uint32_t c, uint32_t m);
 void draft_wipe(struct view *v);
-void draft_show(struct view *v, uint32_t idx);
-int save_ok(struct view *v);
-int save_as_ok(struct view *v);
 void ch_open(struct view *v, int what, uint32_t arg, int row, int col);
 void ch_follow(struct chooser *c);
 void ch_take(struct view *v);
@@ -3009,6 +2940,7 @@ int dis_hex_sel(const struct view *v);
 int dis_cols(const struct view *v, uint64_t at, uint64_t alen, int len,
 		    int *from, int *to);
 void dis_sync_bytes(struct view *v);
+int dis_real_row(const struct view *v, int idx);
 unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 			   uint8_t *bytes_out, unsigned *ix_len_out,
 			   int *ok_out, char *text_out, size_t text_cap);
@@ -3016,10 +2948,12 @@ uint64_t dis_sync(struct view *v, uint64_t want);
 void draw_evt(struct out *o, struct view *v);
 void draw_disasm(struct out *o, struct view *v);
 void dis_toggle(struct view *v, uint64_t at, uint64_t len);
+void dis_analyse(struct view *v);
+void dis_drop_analysis(struct view *v);
 int blk_row_shown(const struct view *v, uint32_t i);
 int blk_section_shown(struct view *v);
-uint32_t sim_offer(struct view *v, uint32_t g,
-			  struct grp_sim_item *out, uint32_t cap);
+/* The open tab of the diagnose panel, and how tall its output pane is. */
+uint32_t preview_rows(const struct view *v);
 int mtn_digit(int c);
 int at_digit(int c);
 void mtn_sync(struct view *v);
@@ -3028,11 +2962,6 @@ void draw_decl(struct out *o, struct view *v);
 const char *emu_why_tag(uint8_t why);
 const char *emu_why_reason(uint8_t why);
 void draw_marker_line(struct out *o, struct view *v);
-uint32_t list_nth(struct view *v, uint32_t i);
-uint32_t list_total(struct view *v);
-uint32_t list_shown(struct view *v);
-int list_top(struct view *v);
-void draw_list(struct out *o, struct view *v);
 int menu_enabled(struct view *v, int a);
 int menu_rows(struct view *v);
 int menu_at_row(struct view *v, int row);
@@ -3165,7 +3094,6 @@ extern int g_decl_rows;
 extern int g_disasm_rows;
 extern int g_evt_rows;
 extern const char *const opt_word[OPT_COUNT];
-extern const char *const lvl_word[LV_COUNT];
 extern int g_mx, g_my;
 extern int g_wheel;
 struct kv_g_fld {
@@ -3187,5 +3115,165 @@ extern int      g_prop_tab_scroll_h[PROP_TAB_COUNT];
 extern int g_mod_shift;
 extern int g_mod_ctrl;
 extern struct dframe g_goto_f, g_find_f, g_enc_f;
+
+/* ---- the tag sources: the Syndrome table and the tag chooser ----------------
+ *
+ * The data is databases/tagsrc.h's - one set of entities loaded from a
+ * directory, edited in memory, written back by Save. What is here is the
+ * views over it: the table page with a tab for each kind of entity, the
+ * Add/Edit form, the pick list (one widget: the tag chooser of the diagnose
+ * panel and every multi-select of the tag form), and the result box a Check or
+ * a refused Delete speaks in. All four are pages of lines (page_draw) with the
+ * clickable spans of each line recorded as it is built (syn_hit).
+ */
+enum syn_tab { SYN_ACT = 0, SYN_TYP, SYN_FAM, SYN_TAG, SYN_TABS };
+
+/* What a recorded span does. */
+enum syn_act {
+	SYA_NONE = 0, SYA_TAB, SYA_ROW, SYA_ADD, SYA_EDIT, SYA_DEL, SYA_CHECK,
+	SYA_SAVE, SYA_SEARCH, SYA_OK, SYA_CANCEL, SYA_FIELD,
+	SYA_PICK, SYA_NEW, SYA_PROW
+};
+
+struct syn_hit {
+	uint32_t line;          /* the line of the layer */
+	int16_t  c0, c1;        /* its printable columns, inclusive */
+	uint8_t  act;           /* enum syn_act */
+	uint32_t arg;
+};
+
+/* One page: its lines, the spans on them and where it was drawn. */
+struct syn_layer {
+	struct prop_line *line;
+	uint32_t          n, cap;
+	uint32_t          fixed;        /* lines at the top that do not scroll */
+	uint32_t          off;          /* scroll of the rest */
+	struct syn_hit   *hit;
+	uint32_t          nh, caph;
+	int               top, left, w, h;
+	uint32_t          shown;
+	int               btn_y, btn_x0, btn_x1;
+};
+
+/* What a pick list is for. */
+enum syn_pick_what {
+	PK_NONE = 0, PK_TAG_COND, PK_TAG_GRP, PK_ACT, PK_TYP, PK_FAM, PK_FMT,
+	PK_ARCH, PK_SUB
+};
+
+#define SYN_FILT 64u
+
+struct syn_prow {
+	char     col[4][KOF_TAGSRC_COMMENT_LEN];
+	uint64_t id;            /* the entity's, for the tag fields */
+	uint16_t idx;           /* the word's, for the attribute fields */
+	uint32_t pos;           /* 0 unticked, else the order it was ticked in */
+};
+
+struct syn_pick {
+	int      open;
+	int      what;          /* enum syn_pick_what */
+	uint32_t arg;           /* the condition or matcher the tag is for */
+	int      multi;
+	int      ncol;
+	uint32_t ticks;
+	char     title[40];
+	char     head[4][16];
+	char     filt[SYN_FILT];
+	uint32_t foff;
+	struct syn_prow *row;
+	uint32_t n, cap;
+	uint32_t *vis, n_vis, cap_vis;  /* the rows the filter lets through */
+	uint32_t n_real;        /* of them, the ones that are not "(none)" */
+	uint32_t sel;           /* the cursor, in `vis` */
+	/* A row (not a `vis` place) the cursor is to start on, or UINT32_MAX:
+	 * the filter decides where it is, so it is placed when `vis` is built. */
+	uint32_t want;
+	struct syn_layer ly;
+};
+
+/* The Add/Edit form: a working copy, which the entity gets on OK. */
+struct syn_form {
+	int      open;
+	uint8_t  kind;          /* enum kof_tagsrc_kind */
+	int      edit;          /* an existing entity, set index `ent`, or new */
+	size_t   ent;
+	struct kof_tagent e;
+	char     name[KOF_TAGSRC_NAME_LEN];
+	char     cmt[KOF_TAGSRC_COMMENT_LEN];
+	uint32_t name_off, cmt_off;
+	char     err[160];
+};
+
+struct kv_syn {
+	struct kof_tagset set;
+	char     dir[256];
+	char     diag_dir[256];
+	int      open;          /* the table page is up */
+	int      tab;           /* enum syn_tab */
+	char     filt[SYN_FILT];
+	uint32_t foff;
+	uint32_t sel[SYN_TABS];
+	uint32_t *rows;         /* set indices the open tab shows */
+	uint32_t n_rows, cap_rows;
+	struct syn_layer page, res, frm;
+	char     res_title[40];
+	int      res_open;
+	struct syn_form form, parent;   /* parent: the tag form a [+ New] hides */
+	int      has_parent;
+	struct syn_pick pick;
+};
+
+/* kv_syn.c: the lines of a layer and the spans on them. */
+void syn_ly_reset(struct syn_layer *ly);
+uint32_t syn_ly_line(struct syn_layer *ly);
+int  syn_ly_col(const struct syn_layer *ly, uint32_t li);
+void syn_ly_put(struct syn_layer *ly, uint32_t li, const char *sgr,
+		const char *text);
+void syn_ly_hit(struct syn_layer *ly, uint32_t li, int c0, int c1, int act,
+		uint32_t arg);
+
+/* kv_syn.c: the model and what the buttons do. */
+struct kv_syn *syn_new(const char *dir, const char *diag_dir);
+void syn_free(struct kv_syn *s);
+void syn_open(struct view *v);
+void syn_close(struct view *v);
+int  syn_modal(const struct view *v);
+int  syn_page_up(const struct view *v);
+void syn_rows(struct view *v);
+void syn_tab_set(struct view *v, int tab);
+void syn_form_open(struct view *v, int kind, int edit);
+void syn_form_ok(struct view *v);
+void syn_form_cancel(struct view *v);
+void syn_form_new(struct view *v, int kind);
+void syn_form_pick(struct view *v, int what);
+void syn_delete(struct view *v);
+void syn_check(struct view *v);
+void syn_save(struct view *v);
+void syn_pick_tag(struct view *v, int what, uint32_t arg);
+void syn_pick_vis(struct view *v);
+void syn_pick_home(struct view *v);
+void syn_pick_toggle(struct view *v, uint32_t vi);
+void syn_pick_ok(struct view *v);
+void syn_pick_cancel(struct view *v);
+void syn_say(struct view *v, int ok, const char *fmt, ...);
+uint32_t syn_dirty(const struct kv_syn *s);
+void syn_row_cells(const struct kv_syn *s, const struct kof_tagent *e,
+		   int tab, char cell[][160]);
+
+/* kv_syntable.c: drawing, the mouse and the keys. */
+void draw_syn(struct out *o, struct view *v);
+int  handle_syn_key(struct view *v, int k);
+int  syn_click(struct view *v);
+void syn_layer_free(struct syn_layer *ly);
+int  field_key(struct view *v, char *buf, size_t cap, int k,
+	       int (*accept)(int));
+
+/* The title-bar cells of the diagnose panel and of the Syndrome table: one
+ * widget. ` Name ` cells with " | " between, the open one reversed; the
+ * printable columns of each cell (1-based, inclusive) go to c0 and c1.
+ * Returns the length of the text. */
+size_t tabbar_text(char *out, size_t cap, const char *const *word, uint32_t n,
+		   uint32_t active, int *c0, int *c1);
 
 #endif /* KV_H */

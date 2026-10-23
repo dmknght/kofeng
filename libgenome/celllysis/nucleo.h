@@ -17,7 +17,7 @@
  * one include; inverting the dependency costs a callback on the hot path and
  * a reader who cannot tell which way the arrows go.
  *
- * ADDING AN ABI IS ADDING A TABLE HERE. Nothing in flow.c has to change -
+ * ADDING AN ABI IS ADDING A TABLE HERE. Nothing that reads the code has to change -
  * which is the whole point, and it was not true while MIPS n64 was missing:
  * the numbers had to go into the middle of a six thousand line file.
  */
@@ -116,6 +116,79 @@ enum kgenome_nucleo_arch {
 /* CLONE_THREAD: the bit that makes a clone a thread and not a process. */
 #define KGENOME_NUCLEO_CLONE_THREAD  0x00010000u
 
+/*
+ * WHICH TARGET A NAME IS READ AGAINST. An ELF object and a PE object do not spell what they ask the system for the same way,
+ * and a script does not call the system at all: each has its own table of names, in the one vocabulary of capabilities.
+ * What the caller holds is the object's format, which is the target.
+ */
+enum kgenome_nucleo_target {
+	KGENOME_NUCLEO_T_ELF = 1,
+	KGENOME_NUCLEO_T_PE,
+	KGENOME_NUCLEO_T_PHP,
+	/*
+	 * THE OTHER SCRIPTING LANGUAGES, one table each (nucleo_names_<name>.c), in the order the tables are laid end to end. A language
+	 * has its own table when it has its own runtime API: the names of one are not the names of another (python's os.system is not
+	 * perl's system), and a row copied between two tables is a name that means something in a language that does not have it. Two
+	 * lexer ids share a table when they are one API: VBS and ASP (classic asp runs vbscript; its Request/Response/Server objects are
+	 * COM and are written the same in JScript), ASPX's C# and VB.NET (the .NET class library), JSP (Java) is its own.
+	 *
+	 *   JS     javascript: node, the browser and wsh/jscript. One table: the three share a lexer and a syntax and their names do not
+	 *          collide (child_process.exec, document.cookie), so one lookup answers all of them; what WSH adds is COM, which is VBS's
+	 *   PY     python                          PERL   perl                         RUBY   ruby
+	 *   LUA    lua                             TCL    tcl                          SH     posix shell / bash
+	 *   BAT    windows batch (cmd.exe)         PSH    powershell
+	 *   VBS    vbscript, and the vbscript of a classic asp page (KGENOME_TEXTUAL_LANG_VBS and _ASP)
+	 *   DOTNET c# and vb.net, as asp.net runs them (KGENOME_TEXTUAL_LANG_ASPX)
+	 *   JAVA   java, as a jsp page runs it (KGENOME_TEXTUAL_LANG_JSP)
+	 *   CFML   coldfusion: the functions and the tags (KGENOME_TEXTUAL_LANG_CFM)
+	 */
+	KGENOME_NUCLEO_T_JS,
+	KGENOME_NUCLEO_T_PY,
+	KGENOME_NUCLEO_T_PERL,
+	KGENOME_NUCLEO_T_RUBY,
+	KGENOME_NUCLEO_T_LUA,
+	KGENOME_NUCLEO_T_TCL,
+	KGENOME_NUCLEO_T_SH,
+	KGENOME_NUCLEO_T_BAT,
+	KGENOME_NUCLEO_T_PSH,
+	KGENOME_NUCLEO_T_VBS,
+	KGENOME_NUCLEO_T_DOTNET,
+	KGENOME_NUCLEO_T_JAVA,
+	KGENOME_NUCLEO_T_CFML
+};
+
+/*
+ * HOW A ROW OF A SCRIPT TABLE IS SPELLED - one rule for all of them, because the step that reads call syntax reads it by this.
+ *
+ * A row's name is spelled the way the language spells it AT THE POINT OF THE CALL. Where the qualifier is part of the identity it is
+ * in the row, joined with '.' whatever the language uses between them ("os.system", "subprocess.Popen", "WScript.Shell.Run",
+ * "Request.Form", "System.Diagnostics.Process.Start" without its namespace as "Process.Start", "Runtime.exec"; perl's
+ * `Socket::inet_aton` is "Socket.inet_aton", ruby's `Net::HTTP.get` is "Net.HTTP.get"); where the bare name is unambiguous the row is
+ * bare ("eval", "exec", "system", "decode_base64"). A call on the result of a factory call is written without the factory:
+ * `Runtime.getRuntime().exec(c)` is "Runtime.exec". For an object a program holds in a variable the qualifier is the CLASS of the
+ * object (VBScript: the ProgID given to CreateObject, written without its version number, so `o.Run` after
+ * `Set o = CreateObject("WScript.Shell")` is "WScript.Shell.Run", and "MSXML2.XMLHTTP.6.0" is "MSXML2.XMLHTTP"; .NET and Java: the
+ * type; python: "socket.socket.connect" for `s.connect()` after `s = socket.socket()`). COM IS WRITTEN ONCE, in the VBS table, and is
+ * looked up there by every language that reaches a COM object (JScript's `new ActiveXObject`, PowerShell's `New-Object -ComObject`,
+ * ASP's Server.CreateObject): the other tables do not repeat it.
+ *
+ * A request source that is a variable or a member and not a call is a row too ("Request", "Request.QueryString", "request.args",
+ * "form", "ENV.QUERY_STRING"); a CFML scope is the scope and its key is the matcher's. A language whose programs run COMMANDS and not
+ * functions (sh, bat, and tcl's and powershell's commands) has a row per command word as written, without the extension of the
+ * program (.exe, .com, .bat, .cmd), where a command is the first word of a command line; the ensemble commands of tcl are the
+ * command and its subcommand joined ("file.delete"); powershell writes a static member as "Class.Member" without "System."
+ * ("Convert.FromBase64String"). A CFML tag is its name without the angle brackets ("cfexecute", "cfinclude", "cffile") and a function
+ * is its name. Case is the table's `fold`: VBScript, batch, PowerShell, CFML and .NET do not care, the rest do.
+ *
+ * WHERE ONE NAME IS TWO CAPABILITIES BY ITS ARGUMENTS (python's eval and exec of a literal or of a value, os.system, certutil,
+ * cffile, `sh -c`) the row holds the dominant or the weaker one and says so at the row; the argument is the matcher's.
+ */
+/* The row every script table has for a call whose callee is a value (data-call): not a name in any language, so it cannot be written
+ * by a program and cannot collide with one. */
+#define KGENOME_NUCLEO_DYNAMIC_NAME "(dynamic)"
+/* And the one for a class that is a value (data-load). */
+#define KGENOME_NUCLEO_DYNLOAD_NAME "(load)"
+
 struct kgenome_sysrow { uint16_t nr; uint16_t cap; uint8_t role; const char *name; };
 
 /*
@@ -182,8 +255,8 @@ const char *kgenome_nucleo_sys_name_abi(const struct kgenome_nucleo_abi *fx, uin
  * rax and never write it: msfvenom's reverse_tcp does exactly that -
  * `connect` returns 0, the branch that continues is the one taken on
  * success, and the `syscall` three instructions later is therefore
- * `read` with nothing anywhere setting the 0. See the note on the success
- * branch in flow.c.
+ * `read` with nothing anywhere setting the 0. The sweep (diag_site.c) and the wrapper
+ * analysis (diag_wrapper_calls.c) read this table for it; the old note in flow.c went with the chain backend.
  */
 int kgenome_nucleo_sys_zero_on_success(const char *name);
 /* Whether argument `idx` is a flag set for which "this bit is set" is enough
@@ -206,6 +279,13 @@ uint16_t kgenome_nucleo_cap_of_sockcall(uint32_t sub, const uint64_t *arg,
  */
 const char *kgenome_nucleo_sys_name(unsigned bits, uint32_t nr);
 
+/*
+ * THE NAME OF ANY LINUX SYSCALL NUMBER, x86-64 (`bits` 64) or i386 (anything else), or NULL for a number the kernel does not have. Not the
+ * vocabulary's: kgenome_nucleo_sys_name answers only for the syscalls that carry a capability, and this one for every number, from the
+ * kernel's own table (nucleo_sysnames.c, generated). What a reader of code asks about a number; what a matcher asks is the other.
+ */
+const char *kgenome_nucleo_sys_name_all(unsigned bits, uint32_t nr);
+
 
 /*
  * THE LOOKUPS THEMSELVES, declared here because flow.h is gone.
@@ -226,7 +306,7 @@ uint16_t kgenome_nucleo_cap_of_syscall(unsigned bits, uint32_t nr,
 /* Imported or exported name -> capability, and KGENOME_NUCLEO_NONE when the name is
  * not one of the words. An `@` ends the comparison, so "socket@GLIBC_2.4"
  * reads as "socket". */
-uint16_t kgenome_nucleo_cap_of_name(const char *sym);
+uint16_t kgenome_nucleo_cap_of_name(unsigned target, const char *sym);
 /* Does any name in that table mean this capability (or a case of it)? A
  * capability nobody can name can never be found by its imports. */
 int kgenome_nucleo_cap_named(uint16_t cap);
@@ -282,12 +362,15 @@ int kgenome_nucleo_hands_on(uint16_t cap, const char *nm);
 #define KGENOME_NAME_OBJECT 2u
 unsigned kgenome_nucleo_name_arg(uint16_t cap, unsigned *arg);
 
-/* The name's index in the table, 1-based, or 0. Carried instead of the
- * string so a node is fixed width. */
-uint16_t kgenome_nucleo_name_id(const char *sym);
+/* The name's index, 1-based, or 0 - counted over the tables laid end to end, so the id says the target too and
+ * kgenome_nucleo_name_of needs none. Carried instead of the string so a node is fixed width. */
+uint16_t kgenome_nucleo_name_id(unsigned target, const char *sym);
+/* The capability AND the id of a name from ONE lookup (kgenome_nucleo_cap_of_name and kgenome_nucleo_name_id are two searches of the same table): `*id` is the
+ * name's id or 0, and the return is the capability or KGENOME_NUCLEO_NONE. `id` may be NULL. */
+uint16_t kgenome_nucleo_name_lookup(unsigned target, const char *sym, uint16_t *id);
 
 /* A named call refined by its first four arguments - see the .c. */
-uint16_t kgenome_nucleo_cap_of_call(const char *name, const uint64_t *arg,
+uint16_t kgenome_nucleo_cap_of_call(unsigned target, const char *name, const uint64_t *arg,
 			      uint8_t *flags);
 
 

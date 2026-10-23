@@ -28,6 +28,6 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 			if (nm[k] != want[k])
 				break;
 		if (k == sizeof want)
-			KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+			{ kof_debug("SymCapTest#00", 0); return; }
 	}
 }

@@ -15,9 +15,8 @@
  *     kof_engine  *eng = keng_open("/var/lib/kofeng/db");
  *     kof_scanner *sc  = kscan_new(eng);          // one per thread
  *
- *     struct kof_result r;
- *     if (kscan_path(sc, path, &r) > 0)
- *             for (i = 0; i < r.n; i++) ... r.v[i].name ...
+ *     // the callback gets a struct kof_result per object:
+ *     //     if (res->has_verdict) ... res->verdict.name ...
  *
  *     kscan_free(sc);
  *     keng_close(eng);
@@ -69,8 +68,7 @@ void        keng_close(kof_engine *);
 /*
  * What the database holds, counted as two numbers because it is two things.
  *
- * A RECORD is one detection: something that names a family and can call an object
- * bad. An UNPACKER opens containers and names nothing. Adding them gives a number
+ * A RECORD is one detector module. An UNPACKER opens containers and names nothing. Adding them gives a number
  * that answers no question anybody has - "how much do I detect" is the records,
  * and "what can I see inside" is the unpackers - and a database of ten unpackers
  * and no detections would report ten and find nothing.
@@ -81,19 +79,27 @@ void        keng_close(kof_engine *);
  */
 uint32_t    kdb_records(const kof_engine *);
 uint32_t    kdb_unpackers(const kof_engine *);
-/* How many heuristic rules the database holds. Its own count because a rule is
- * neither a record nor an unpacker, and a database whose rules were invisible in
- * the banner is one nobody checks the loading of. */
-uint32_t    kmatch_rules(const kof_engine *);
 /*
- * HOW MANY DIAGNOSES THE DATABASE HOLDS. Introspection, like kmatch_rules
- * beside it: a database whose diagnoses failed to load is one nobody checks.
+ * HOW MANY DIAGNOSES THE DATABASE HOLDS. Introspection, like the two counts above:
+ * a database whose diagnoses failed to load is one nobody checks.
  *
- * THERE IS NO kdb_diag_name. It existed to turn an id out of
- * kof_result.diag back into a word, and nothing reports diagnoses to a
- * caller any more - see the note there. A rule names a diagnose by its own
- * name through kof_diag(), which the build hashes; no string travels.
+ * THE WAY BACK FROM A VERDICT. kof_result.verdict lists the ids of the diagnoses that
+ * matched (kof_finding.diag) and of the diseases they and the modules declared
+ * (kof_finding.disease); these turn an id into what a person reads.
+ *
+ *   kdb_diagnose_name     the diagnose's name, or NULL for an id the database does not hold
+ *   kdb_diagnose_disease  the id of the disease it declares, 0 when it declares none
+ *   kdb_disease_name      the disease's behaviour ("flood-network/raw-header"), or NULL
+ *   kdb_disease_type      the kof_maltype it was declared with, -1 when the id is not named
+ *
+ * The strings are the engine's own, read out of the loaded packs, and live as long as
+ * it does. A rule still names a diagnose by its own name through kof_diag(), which
+ * the build hashes; no string travels to a module.
  */
+const char *kdb_diagnose_name(const kof_engine *, uint32_t id);
+uint32_t    kdb_diagnose_disease(const kof_engine *, uint32_t id);
+const char *kdb_disease_name(const kof_engine *, uint32_t id);
+int         kdb_disease_type(const kof_engine *, uint32_t id);
 uint32_t    kdb_diagnoses(const kof_engine *);
 /*
  * DID EVERY DIAGNOSE THE PACKS CARRY LOAD. kdb_diagnoses counts what loaded and
@@ -112,7 +118,7 @@ uint32_t    kdb_diag_collisions(const kof_engine *);
  * WHAT THE LOADER REFUSED, AS COUNTS. kdb_diag_refused is the diagnose records
  * that did not read (a field this build does not accept, a record that runs past
  * its pack): each is a diagnose that is not there. kdb_diag_packs_refused is the
- * .kdig files (diagnoses, syndromes, diseases) not read whole - a header that does
+ * .kdig files (diagnoses, diseases, and the one an older build wrote) not read whole - a header that does
  * not add up, or a file past the allowance of the load. Both are also written to
  * stderr when met; these are what a host linked to the library can read. Zero is
  * the normal value.
@@ -297,14 +303,8 @@ uint32_t    kdb_pattern_status(const kof_engine *, uint64_t *bytes, uint64_t *ma
  *   could not compute them: the bytes are scattered and a module has no
  *   writable data to keep a histogram in.
  *
- *   SAY THAT A FINDING IS ABOUT THIS OBJECT. KOF_ENG_KEEP_ON_OPEN. A rule's
- *   heuristic is dropped when the object produces children, which is right for
- *   a rule that means "I could not identify this" and deletes the finding of
- *   one that means "this carries something" - the child is an ordinary file
- *   that nothing fires on, so there is no leaf for the signal to move to.
- *
  * THE DATABASE FORMAT DID NOT MOVE HERE EITHER, and for the same reason: a bit
- * in heur_want, bits in the scan mask that no format used, values in the
+ * in a rule's want-mask, bits in the scan mask that no format used, values in the
  * subtype mask, and fields appended to view structs that only grow at the end.
  * KOF_PACK_MINOR stayed at 1 through all of it. A rebuild is needed; a refusal
  * is not.

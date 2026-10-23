@@ -26,6 +26,7 @@ def head(v):
 
 def ko(rows=60):
     v = Viewer(SAMPLES['ko'], rows=rows, cols=200)
+    open_tab(v, 'Blocks')              # the table is the Blocks tab's
     v.wait_for('[ ]  0x', t=10)        # the table is filled in a moment after the first frame
     return v
 
@@ -71,18 +72,18 @@ def tick_toggles_and_updates_status():
 
 
 @case(A)
-def tick_alone_does_not_create_matchers_but_folded_view_lists_it():
-    # Observed: ticking only marks the block; a matcher is added by hand.
+def tick_makes_a_find_sim_matcher_and_the_folded_view_lists_the_row():
+    # Ticking a block makes its matcher (and unticking drops it): see t_diagnose.
     with ko(rows=70) as v:
         enlarge(v, 10)
         r = blk_rows(v)
-        y = r[3][0]
+        y, off, h = r[3][0], r[3][2], r[3][4]
         v.click(v.row(y).index('[ ]') + 2, y)
         fold_mutation(v)
         t = '\n'.join(v.row(yy) for yy in panel(v))
         check('1 ticked' in t, 'summary does not count the tick')
-        check('find_similar' not in t, 'a matcher appeared by itself')
-        check(re.search(r'\[x\]\s+0x00036aa0', t), 'ticked row not listed in the folded view')
+        check(re.search(r'1\.\s+find_sim\s+# hash %s' % h, t), 'the tick made no matcher: %r' % t[-300:])
+        check(re.search(r'\[x\]\s+0x%08x' % off, t), 'ticked row not listed in the folded view')
 
 
 @case(A)
@@ -248,43 +249,11 @@ def right_click_in_table_is_harmless():
 def pe_file_has_mutation_table():
     p = pick(SAMPLES['pe'], 1, 30000, 200000)[0]
     with Viewer(p, rows=60, cols=200) as v:
+        open_tab(v, 'Blocks')
         r = blk_rows(v)
         check(r, 'no mutation rows for a PE: %r' % [v.row(y)[:50] for y in panel(v)][:12])
         v.click(v.row(r[0][0]).index('[ ]') + 2, r[0][0])
         check(v.row(r[0][0]).lstrip().startswith('[x]'))
-
-
-@case(A)
-def loaded_rule_table_has_score_column_and_ticks():
-    with Viewer(SAMPLES['gafgyt'], rows=70, cols=200) as v:
-        y = head(v)
-        check(y and '57 block(s), 3 ticked' in v.row(y), v.row(y or 2)[:50])
-        v.click(2, y)
-        h = v.row(head(v))
-        check('score' in h, 'unfolded table has no score column: %r' % h[:150])
-        r = blk_rows(v)
-        check(any(b[1] for b in r) or True)
-
-
-@case(A)
-def loaded_rule_ticked_rows_show_100_percent_score():
-    with Viewer(SAMPLES['gafgyt'], rows=70, cols=200) as v:
-        rows = [v.row(y) for y in panel(v) if re.match(r'\s+\[x\]', v.row(y))]
-        check(len(rows) == 3, 'expected 3 ticked rows: %r' % rows)
-        for r in rows:
-            check('100%' in r, 'ticked row without a self score: %r' % r[:100])
-
-
-@case(A)
-def loaded_rule_untick_makes_draft_dirty():
-    with Viewer(SAMPLES['gafgyt'], rows=70, cols=200) as v:
-        rows = [(y, v.row(y)) for y in panel(v) if re.match(r'\s+\[x\]', v.row(y))]
-        y = rows[0][0]
-        v.click(v.row(y).index('[x]') + 2, y)
-        v.menu_open('Switch-File')
-        it = v.popup_item('Next')
-        check(it and not it[3], 'Next must be disabled once the loaded draft is edited: %r' % (it,))
-        v.esc()
 
 
 @case(A)
@@ -296,9 +265,10 @@ def table_survives_resize():
             check(blk_rows(v) or head(v), 'table gone at %dx%d' % (r, c))
 
 
-
 def norm_pe():
-    return Viewer(pick(SAMPLES['pe'], 1, 30000, 200000)[0], rows=60, cols=200)
+    v = Viewer(pick(SAMPLES['pe'], 1, 30000, 200000)[0], rows=60, cols=200)
+    open_tab(v, 'Blocks')
+    return v
 
 
 def mutation_count(v):
@@ -348,6 +318,7 @@ def normalised_view_does_not_offer_the_static_library():
         y = [y for y in range(2, 30) if '//0:norm' in v.row(y)[:31]]
         if not y:
             raise Skip('no norm child')
+        open_tab(v, 'Blocks')
         v.click(10, y[0])
         v.pump_quiet()
         for _ in range(12):
@@ -359,7 +330,6 @@ def normalised_view_does_not_offer_the_static_library():
         regs = all_block_regions(v)
         check(regs, 'norm child lists no block at all')
         check(not [r for r in regs if r.startswith('SLIB')], 'library offered: %r' % sorted(set(regs)))
-
 
 
 def open_table(v):
@@ -394,6 +364,7 @@ def normalised_view_lists_the_parents_function_blocks():
         y = [y for y in range(2, 30) if '//0:norm' in v.row(y)[:31]]
         if not y:
             raise Skip('no norm child')
+        open_tab(v, 'Blocks')
         open_table(v)
         parent = {h for (r, h) in table_rows(v) if r == 'CODE'}
         check(parent, 'parent lists no CODE function block')
@@ -404,7 +375,6 @@ def normalised_view_lists_the_parents_function_blocks():
         both = parent & child
         check(len(both) >= max(1, len(parent) // 2),
               'view carries %d of the parent\'s %d function blocks' % (len(both), len(parent)))
-
 
 
 def unnamed_code_rows(v, limit=40):
@@ -428,6 +398,7 @@ def data_inside_the_code_region_is_offered_as_blocks():
     flags it is CODE and only functions used to be offered there: its strings
     were never a block. Clusters of strings are, found from the bytes."""
     with Viewer(SAMPLES['gafgyt'], rows=60, cols=200) as v:
+        open_tab(v, 'Blocks')
         open_table(v)
         rows = unnamed_code_rows(v)
         check([r for r in rows if r[1] >= 1000], 'no data block in CODE: %r' % rows[:8])

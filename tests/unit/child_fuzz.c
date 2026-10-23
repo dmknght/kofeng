@@ -142,7 +142,6 @@ static void one_round(uint64_t round)
 	opt.max_produced_bytes = 1024 + rnd() % (1024u * 1024u);
 	opt.max_children       = (uint32_t)(rnd() % 40);
 	opt.max_depth          = (uint32_t)(rnd() % 8);
-	opt.all_matches        = (int)(rnd() & 1);
 
 	m.fn = mod_random;
 	m.n_target = 0;      /* every target - see n_target in dbloader.h */

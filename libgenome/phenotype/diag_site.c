@@ -181,8 +181,7 @@ static void note_node(struct kgenome_diag_scan *s, struct kgenome_diag_orgs *w,
 			uint8_t role = kgenome_diag_role_of_arg(cap, k);
 
 			if (role != KGENOME_DIAG_ROLE_NONE)
-				kgenome_diag_note_in(s, h, kgenome_diag_org_of(w, ar[k]),
-						 role, KGENOME_DIAG_KIND_PRODUCED);
+				kgenome_diag_org_link(s, h, w, ar[k], role, KGENOME_DIAG_KIND_PRODUCED);
 		}
 	}
 

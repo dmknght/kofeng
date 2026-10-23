@@ -87,6 +87,8 @@ enum kof_time_slot {
 	KOF_T_DIAG_SYMBOL,      /* the import walk                       */
 	KOF_T_DIAG_EMULATE,     /* the span runner                       */
 	KOF_T_DIAG_APIHASH,     /* naming what a PE resolves itself      */
+	KOF_T_DIAG_TEXT,        /* a script's calls and what flows between them */
+	KOF_T_DIAG_LINEAGE,     /* which node reaches which, through the program */
 	KOF_T_DIAG_MATCH,       /* fitting diagnoses to what was found   */
 	KOF_T_COUNT
 };

@@ -203,16 +203,22 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 		return;
 	}
 
-	/*
-	 * x86-64 ONLY, and said here rather than left to fail quietly: the
-	 * argument registers above are that ABI's, and i386 passes a
-	 * module's arguments differently.
-	 */
-	if (!obj || obj->format != KGENOME_FMT_ELF ||
-	    obj->arch != KGENOME_ARCH_X86_64)
+	if (!obj || obj->format != KGENOME_FMT_ELF)
 		return;
 	ei = kgenome_obj_elf(obj);
 	if (!ei || !ei->valid)
+		return;
+	/* A LINKED object has no relocation table to read its calls from: its imports are the GOT's
+	 * slots, and its half of this route (x86-64 and i386) is in diag_elfimp.c. */
+	if (ei->e_type != KGENOME_ELF_REL) {
+		kgenome_diag_run_elf_symbol(s, obj, base, size);
+		return;
+	}
+	/*
+	 * A RELOCATABLE OBJECT IS x86-64 ONLY, and said here rather than left to fail quietly: the
+	 * argument registers above are that ABI's, and i386 passes a module's arguments differently.
+	 */
+	if (obj->arch != KGENOME_ARCH_X86_64)
 		return;
 
 	memset(&g, 0, sizeof g);

@@ -37,10 +37,6 @@
  * node by construction - see the note on anchors in kofmod/kofdiagtree.h.
  */
 
-/* A node satisfies a spec when it has the capability, carries every flag the
- * spec demands, and is not one whose meaning the walk could not read. The
- * last is the point of KGENOME_DIAG_H_ARG_UNKNOWN: a `mmap` whose prot could not
- * be followed is not evidence of a buffer OR of a code region. */
 /* The NUL-terminated name a hit pointed at, or NULL. */
 static const char *hit_sym(const struct kgenome_diag_scan *s,
 			   const struct kgenome_diag_hit *h)
@@ -57,6 +53,10 @@ static const char *hit_sym(const struct kgenome_diag_scan *s,
 	return NULL;
 }
 
+/* A node satisfies a spec when it has the capability, carries every flag the
+ * spec demands, and is not one whose meaning the walk could not read. The
+ * last is the point of KGENOME_DIAG_H_ARG_UNKNOWN: a `mmap` whose prot could not
+ * be followed is not evidence of a buffer OR of a code region. */
 static int spec_ok(const struct kgenome_diag_scan *s,
 		   const struct kgenome_diag_hit *h,
 		   const struct kof_diag_node *sp)
@@ -118,6 +118,14 @@ static int spec_ok(const struct kgenome_diag_scan *s,
  * returns zero and names the region in an argument. A diagnose that had to
  * say which would need two copies of itself, so it says neither and this
  * accepts either.
+ *
+ * AND `how` IS NOT READ - A DECISION, NOT AN OMISSION (audit R4). A link the routes keep is one the program can
+ * produce: PROVEN says the walk or the run showed it on every path it read, MAY says it is on some path or
+ * through a callee that was not read (kgenome_diag_link, diag_vocab.h). The diagnose asks whether the relation
+ * exists, so a MAY link satisfies it exactly as a PROVEN one does; a diagnose that had to choose would be two
+ * diagnoses, and the choice would hide a stager behind a branch. How sure a link is, is REPORTED (the dump,
+ * the viewer, kgenome_diag_in.how). tests/unit/diag_linked_how.c pins this: if the decision changes, that test
+ * changes with it and the corpus identity counts move.
  */
 static int linked(const struct kgenome_diag_hit *child, uint16_t parent_idx,
 		  const struct kgenome_diag_hit *parent, uint8_t role,
@@ -156,25 +164,196 @@ static int linked(const struct kgenome_diag_hit *child, uint16_t parent_idx,
 	return 0;
 }
 
-/* Bind spec[k] and everything under it. `bound` holds the node index chosen
- * for each spec so far. Depth is the diagnose's own, which is a handful. */
-static int bind_from(const struct kgenome_diag_scan *s, const struct kof_diag *d,
-		     uint8_t k, uint16_t *bound)
+/*
+ * A GRAPH OVER THE NODES, AS OFFSETS AND ONE FLAT LIST - the form both graphs of this file take (the matcher's index of successors below and the value-flow graph the joins walk):
+ * `head` holds nsrc + 1 offsets and the targets of source u are edge[head[u] .. head[u + 1]), in the order the edges were produced. The caller says only WHICH edges there
+ * are, by a walk that calls `emit(src, dst)` for each; it is run twice, once to count per source and once to fill, so the two passes cannot disagree about what an edge is.
+ * 1 and the two arrays (the caller's to free), or 0 for want of memory with nothing allocated.
+ */
+typedef void (*csr_emit)(void *c, uint32_t src, uint32_t dst);
+typedef void (*csr_edges)(const struct kgenome_diag_scan *s, csr_emit emit, void *c);
+
+struct csr_pass {
+	uint32_t *head, *cur;
+	uint16_t *edge;
+	uint32_t  n;
+};
+
+static void csr_count(void *c, uint32_t src, uint32_t dst)
 {
-	uint8_t c;
+	struct csr_pass *p = c;
+
+	(void)dst;
+	p->head[src + 1u]++;
+	p->n++;
+}
+
+static void csr_fill(void *c, uint32_t src, uint32_t dst)
+{
+	struct csr_pass *p = c;
+
+	p->edge[p->head[src] + p->cur[src]++] = (uint16_t)dst;
+}
+
+static int csr_build(const struct kgenome_diag_scan *s, uint32_t nsrc, csr_edges edges, uint32_t **head, uint16_t **edge)
+{
+	struct csr_pass p = { NULL, NULL, NULL, 0 };
 	uint32_t i;
 
+	p.head = calloc((size_t)nsrc + 1u, sizeof *p.head);
+	if (!p.head)
+		return 0;
+	edges(s, csr_count, &p);
+	for (i = 0; i < nsrc; i++)
+		p.head[i + 1u] += p.head[i];
+	p.edge = malloc(((size_t)p.n + 1u) * sizeof *p.edge);
+	p.cur = calloc((size_t)nsrc + 1u, sizeof *p.cur);
+	if (!p.edge || !p.cur) {
+		free(p.head);
+		free(p.edge);
+		free(p.cur);
+		return 0;
+	}
+	edges(s, csr_fill, &p);
+	free(p.cur);
+	*head = p.head;
+	*edge = p.edge;
+	return 1;
+}
+
+/*
+ * THE CHILDREN OF A BOUND NODE, found by what points at it and not by reading every node for each question.
+ *
+ * bind_from asked, for every spec under a bound parent, every node of the object whether it was that spec and linked to the parent
+ * (callgrind over 71 php files: 35 M spec_ok calls for 78.5 k binds, 1.5 G of 4.1 G instructions). A node that is linked to the parent
+ * has an input taken FROM it (linked() reads exactly that), so the candidates are the nodes that name the parent in `in[]`, plus - for a
+ * parent that established the stack region - the nodes whose input is the stack. This index lists both, in ascending node order, and
+ * the candidates are walked in that order, so the first node that passes is the one the full scan found first: the same spec_ok and
+ * linked decide, over a smaller set that holds every node they could accept.
+ *
+ * Built when the first root has matched (a diagnose with no root pays nothing), once per match_each call. When memory is refused
+ * the candidates are every node in turn, as before.
+ */
+struct succ_idx {
+	uint32_t *head;         /* n_hit + 2: the nodes with an input from p are edge[head[p] .. head[p + 1]); the stack is the source n_hit */
+	uint16_t *edge;         /* each list ascending, each node once */
+	int       tried;        /* the build was attempted (and head is NULL when it failed) */
+};
+
+/* Is input `k` of the hit the first of its inputs to name that source (a node that names the same parent twice is one candidate, not two). */
+static int first_from(const struct kgenome_diag_hit *h, uint8_t k)
+{
+	uint8_t j;
+
+	for (j = 0; j < k; j++)
+		if (h->in[j].from == h->in[k].from)
+			return 0;
+	return 1;
+}
+
+/* The edges of the index: a node that takes an input from a node is that node's successor, and one that takes an input from the stack is the stack's (the source n_hit). */
+static void succ_edges(const struct kgenome_diag_scan *s, csr_emit emit, void *c)
+{
+	uint32_t i;
+	uint8_t k;
+
+	for (i = 0; i < s->n_hit; i++)
+		for (k = 0; k < s->hit[i].n_in && k < 4u; k++) {
+			uint16_t p = s->hit[i].in[k].from;
+
+			if (!first_from(&s->hit[i], k))
+				continue;
+			if (p < s->n_hit)
+				emit(c, p, i);
+			else if (p == KGENOME_DIAG_FROM_STACK)
+				emit(c, s->n_hit, i);
+		}
+}
+
+static void succ_free(struct succ_idx *x)
+{
+	free(x->head);
+	free(x->edge);
+	memset(x, 0, sizeof *x);
+}
+
+static void succ_build(const struct kgenome_diag_scan *s, struct succ_idx *x)
+{
+	x->tried = 1;
+	if (!csr_build(s, s->n_hit + 1u, succ_edges, &x->head, &x->edge))
+		succ_free(x);
+	x->tried = 1;
+}
+
+/* The walk over the candidates of one bound parent: the two ascending lists merged, or every node when there is no index. */
+struct cand {
+	const uint16_t *a, *ae, *b, *be;
+	uint32_t        all, n;
+	int             indexed;
+};
+
+static void cand_begin(struct cand *c, const struct kgenome_diag_scan *s, struct succ_idx *x, uint16_t parent)
+{
+	memset(c, 0, sizeof *c);
+	if (!x->tried)
+		succ_build(s, x);
+	c->n = s->n_hit;
+	if (!x->head)
+		return;
+	c->indexed = 1;
+	c->a = x->edge + x->head[parent];
+	c->ae = x->edge + x->head[parent + 1u];
+	if (s->hit[parent].bits & KGENOME_DIAG_H_REGION_STACK) {
+		c->b = x->edge + x->head[s->n_hit];
+		c->be = x->edge + x->head[s->n_hit + 1u];
+	}
+}
+
+/* The next candidate node, or n_hit when there is none. */
+static uint32_t cand_next(struct cand *c)
+{
+	uint32_t v;
+
+	if (!c->indexed)
+		return c->all < c->n ? c->all++ : c->n;
+	if (c->a < c->ae && (c->b >= c->be || *c->a <= *c->b)) {
+		v = *c->a++;
+		if (c->b < c->be && *c->b == v)
+			c->b++;         /* in both lists: once */
+		return v;
+	}
+	return c->b < c->be ? *c->b++ : c->n;
+}
+
+struct bind_ctx {
+	const struct kgenome_diag_scan *s;
+	const struct kof_diag *d;
+	struct succ_idx idx;
+};
+
+/* Bind spec[k] and everything under it. `bound` holds the node index chosen
+ * for each spec so far. Depth is the diagnose's own, which is a handful. */
+static int bind_from(struct bind_ctx *m, uint8_t k, uint16_t *bound)
+{
+	const struct kgenome_diag_scan *s = m->s;
+	const struct kof_diag *d = m->d;
+	uint8_t c;
+
 	for (c = 0; c < d->n_node; c++) {
+		struct cand cd;
+		uint32_t i;
+
 		if (d->node[c].parent != k)
 			continue;
-		for (i = 0; i < s->n_hit; i++) {
+		cand_begin(&cd, s, &m->idx, bound[k]);
+		for (i = cand_next(&cd); i < s->n_hit; i = cand_next(&cd)) {
 			if (!spec_ok(s, &s->hit[i], &d->node[c]))
 				continue;
 			if (!linked(&s->hit[i], bound[k], &s->hit[bound[k]],
 				    d->node[c].role, d->node[c].bits))
 				continue;
 			bound[c] = (uint16_t)i;
-			if (bind_from(s, d, c, bound))
+			if (bind_from(m, c, bound))
 				goto next;
 		}
 		return 0;               /* a branch of the tree has no match */
@@ -212,10 +391,27 @@ next:
  * directed chain, and a read whose buffer is a scratch page instead of the
  * region extends it by exactly the copy node in between.
  */
-static int diag_flow_build(struct kgenome_diag_scan *s)
+/* The edges of the value-flow graph: an input from a node is an edge parent -> here, except where this call WRITES INTO the parent (the BUFFER role), which is here -> parent. */
+static void flow_edges(const struct kgenome_diag_scan *s, csr_emit emit, void *c)
 {
 	uint32_t i;
 	uint8_t k;
+
+	for (i = 0; i < s->n_hit; i++)
+		for (k = 0; k < s->hit[i].n_in; k++) {
+			uint16_t p = s->hit[i].in[k].from;
+
+			if (p >= s->n_hit)
+				continue;       /* NONE / STACK, not a node */
+			if (s->hit[i].in[k].role == KGENOME_DIAG_ROLE_BUFFER)
+				emit(c, i, p);
+			else
+				emit(c, p, i);
+		}
+}
+
+static int diag_flow_build(struct kgenome_diag_scan *s)
+{
 	uint64_t bytes, tmp;
 
 	if (s->adj_built)
@@ -236,57 +432,10 @@ static int diag_flow_build(struct kgenome_diag_scan *s)
 	tmp = (uint64_t)s->n_hit * sizeof(uint32_t);
 	if (!kgenome_ledger_charge(&s->led, bytes + tmp))
 		return 0;
-	s->adj_head = calloc((size_t)s->n_hit + 1u, sizeof *s->adj_head);
-	s->adj_edge = malloc((size_t)s->n_hit * 4u * sizeof *s->adj_edge);
-	if (!s->adj_head || !s->adj_edge) {
-		free(s->adj_head); free(s->adj_edge);
-		s->adj_head = NULL; s->adj_edge = NULL;
+	if (!csr_build(s, s->n_hit, flow_edges, &s->adj_head, &s->adj_edge)) {
 		kgenome_ledger_release(&s->led, bytes + tmp);
 		kgenome_diag_note(s, KGENOME_NOMEM);
 		return 0;
-	}
-	/* Two passes: count per source, then fill. The source of an edge is
-	 * not always `from` - a BUFFER edge runs from the writing node. */
-	for (i = 0; i < s->n_hit; i++)
-		for (k = 0; k < s->hit[i].n_in; k++) {
-			uint16_t p = s->hit[i].in[k].from;
-			uint8_t  ro = s->hit[i].in[k].role;
-
-			if (p >= s->n_hit)
-				continue;       /* NONE / STACK, not a node */
-			if (ro == KGENOME_DIAG_ROLE_BUFFER)
-				s->adj_head[i + 1u]++;      /* i -> p */
-			else
-				s->adj_head[p + 1u]++;      /* p -> i */
-		}
-	for (i = 0; i < s->n_hit; i++)
-		s->adj_head[i + 1u] += s->adj_head[i];
-	{
-		uint32_t *cur = calloc((size_t)s->n_hit, sizeof *cur);
-
-		if (!cur) {
-			free(s->adj_head); free(s->adj_edge);
-			s->adj_head = NULL; s->adj_edge = NULL;
-			kgenome_ledger_release(&s->led, bytes + tmp);
-			kgenome_diag_note(s, KGENOME_NOMEM);
-			return 0;
-		}
-		for (i = 0; i < s->n_hit; i++)
-			for (k = 0; k < s->hit[i].n_in; k++) {
-				uint16_t p = s->hit[i].in[k].from;
-				uint8_t  ro = s->hit[i].in[k].role;
-				uint16_t from, to;
-
-				if (p >= s->n_hit)
-					continue;
-				if (ro == KGENOME_DIAG_ROLE_BUFFER) {
-					from = (uint16_t)i; to = p;
-				} else {
-					from = p; to = (uint16_t)i;
-				}
-				s->adj_edge[s->adj_head[from] + cur[from]++] = to;
-			}
-		free(cur);
 	}
 	/* The cursor was scratch: only the graph stays charged. */
 	kgenome_ledger_release(&s->led, tmp);
@@ -392,6 +541,7 @@ static void match_each(const struct kgenome_diag_scan *s, const struct kof_diag 
 	uint16_t bound[256];
 	uint32_t i;
 	uint8_t root;
+	struct bind_ctx m = { s, d, { NULL, NULL, 0 } };
 
 	/* n_node is a uint8_t, so 255 is its ceiling already - the bound that
 	 * matters is `bound[]` below holding one slot per node, and 256 is
@@ -409,11 +559,14 @@ static void match_each(const struct kgenome_diag_scan *s, const struct kof_diag 
 			continue;
 		memset(bound, 0xff, sizeof bound);
 		bound[root] = (uint16_t)i;
-		if (!bind_from(s, d, root, bound))
+		if (!bind_from(&m, root, bound))
 			continue;
-		if (!fn(user, bound, d->n_node))
+		if (!fn(user, bound, d->n_node)) {
+			succ_free(&m.idx);
 			return;
+		}
 	}
+	succ_free(&m.idx);
 }
 
 struct first_match {

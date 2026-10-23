@@ -29,5 +29,5 @@ KOF_DEFINE_SCAN
 		return;
 	g = kof_diag_graph(&n);
 	if (kof_gr_count(g, n) >= 20u)
-		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+		{ kof_debug("GraphGrowTest#00", 0); return; }
 }

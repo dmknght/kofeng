@@ -16,7 +16,7 @@
  *                   room is a cut that says so
  *   DIAGNOSE STATE  kof_scan_diag_status reads the graph's own status live; kof_scan_incomplete says
  *                   incomplete for NOMEM / OVER_BUDGET, for TRUNCATED only when an analysis was asked
- *                   for; kof_scan_diag_drop gives the state back; kof_scan_syndrome carries the flag
+ *                   for; kof_scan_diag_drop gives the state back; kof_scan_verdict carries the flag
  *   NOTHING TO ASK  an object of no format, a context with no scanner: every one answers "nothing"
  *   EMULATE/SCRIPT  no source, wrong format: nothing attempted, nothing made; release is idempotent
  *   MUTATION        units of a plain buffer: sum within the buffer, a callback that stops the walk stops it
@@ -32,6 +32,8 @@
 #include "../../libkofeng/scanners/scan_state.h"
 #include "../../libkofeng/scanners/scan_int.h"
 #include "../../libkofeng/detectors/mutations/kofmutation.h"
+#include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
+#include "../../libkofeng/analyzers/parsers/kofformat.h"
 #include "../../libkofeng/databases/pack/dbtables.h"
 #include <phenotype/diag_scan_state.h>
 
@@ -53,10 +55,10 @@ static void t_attach(void)
 	memset(&b, 0, sizeof b);
 	kof_mod_attach(&a, sc);
 	CK(a.priv == sc && kof_scan_of(&a) == sc, "priv is the scanner and kof_scan_of recovers it");
-	CK(a.content != NULL && a.report != NULL && a.debug != NULL, "vtable, report and debug are set");
+	CK(a.content != NULL && a.reserved_0 == NULL && a.debug != NULL, "vtable and debug are set, the report slot is reserved");
 	detect = a.content;
 	kof_mod_attach(&b, sc);
-	CK(b.content == a.content && b.report == a.report && b.debug == a.debug, "attach is the same for every context");
+	CK(b.content == a.content && b.reserved_0 == a.reserved_0 && b.debug == a.debug, "attach is the same for every context");
 
 	/* a name left pending dies with the module that set it */
 	sc->pend.label_len = 7;
@@ -193,7 +195,8 @@ static void t_diag_state(void)
 	struct kof_scanner *sc = kof_scan_new(eng);
 	struct kof_obj_ctx c;
 	struct kgenome_diag_scan g;
-	struct kof_synd_result r;
+	struct kof_finding vf;
+	int incomplete;
 	uint32_t n = 99;
 
 	CK(sc != NULL, "a scanner");
@@ -223,14 +226,14 @@ static void t_diag_state(void)
 	   "a status the graph noted AFTER the scan is seen at once");
 	sc->obj.diag.graph = NULL;
 
-	/* the syndrome carries the same flag, whatever else it reads */
-	memset(&r, 0xee, sizeof r);
+	/* the verdict carries the same flag, whatever else it reads */
+	memset(&vf, 0xee, sizeof vf);
 	sc->obj.diag.status = KGENOME_NOMEM;
-	(void)kof_scan_syndrome(&c, &r);
-	CK(r.incomplete == 1, "kof_scan_syndrome.incomplete follows kof_scan_incomplete");
+	(void)kof_scan_verdict(&c, &vf, &incomplete);
+	CK(incomplete == 1, "kof_scan_verdict's incomplete follows kof_scan_incomplete");
 	sc->obj.diag.status = KGENOME_OK;
-	CK(kof_scan_syndrome(&c, &r) == 0 && r.incomplete == 0 && r.n_query == 0,
-	   "no disease found: nothing inferred, whole (%u queried)", r.n_query);
+	CK(kof_scan_verdict(&c, &vf, &incomplete) == 0 && incomplete == 0 && vf.n_disease == 0,
+	   "no disease found: no verdict, whole (%u diseases)", vf.n_disease);
 
 	/* drop gives the state back */
 	sc->obj.diag.status = KGENOME_TRUNCATED;
@@ -312,6 +315,25 @@ static int diag_nothing(void *arg)
 
 /* ---- mutation units ------------------------------------------------------------------------- */
 
+struct fixed_seen {
+	uint64_t off, len;
+	unsigned whole, straddle;
+};
+
+/* A unit that is exactly the fixed extent, and any that has an edge of it inside. */
+static int fixed_cb(void *user, uint32_t region, uint64_t off, uint64_t len, uint32_t side,
+		    const struct kgenome_func *first)
+{
+	struct fixed_seen *f = user;
+	uint64_t end = off + len;
+
+	(void)region; (void)side; (void)first;
+	f->whole += off == f->off && len == f->len;
+	f->straddle += (off < f->off && end > f->off) ||
+		       (off < f->off + f->len && end > f->off + f->len);
+	return 0;
+}
+
 struct units {
 	unsigned n, stop_at;
 	uint64_t sum, bad;
@@ -355,28 +377,66 @@ static void t_mutation_units(void)
 	b.n = sizeof buf;
 	memset(&u, 0, sizeof u);
 	u.limit = sizeof buf;
-	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, NULL, &ext, unit_cb, &u);
+	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, &ext, unit_cb, &u);
 	CK(u.n > 0 && u.bad == 0 && u.sum <= sizeof buf, "units of a plain buffer: %u of them, %llu bytes, none outside", u.n,
 	   (unsigned long long)u.sum);
 	all = u.n;
+	/*
+	 * A SCRIPT THE LIB LEXES HAS NO REGIONS, AND STILL HAS UNITS. The format lists HEADER, BODY and MARKUP, and an
+	 * object that resolves none of them is one region, ALL: walking the format's list over it fed the matcher
+	 * nothing, and every block on a php or shell file would have stopped matching with no error anywhere.
+	 */
+	{
+		static uint8_t text[6000];
+		struct kof_script_info info;
+		struct kof_obj_ctx s;
+		static const char word[] = "$value=base64_decode($input);if(isset($_POST['x'])){eval($value);}\n";
+		size_t k;
+
+		memcpy(text, "<?php\n", 6);
+		for (k = 6; k < sizeof text; k++)
+			text[k] = (uint8_t)word[(k * 7u + k / 13u) % (sizeof word - 1u)];
+		memset(&s, 0, sizeof s);
+		kof_mod_attach(&s, sc);
+		CK(kof_script_parse(kof_buf_make(text, sizeof text), &info, &s) == 1 && kof_obj_regionless(&s),
+		   "a php file is a script the lib lexes, and has no region");
+		memset(&u, 0, sizeof u);
+		u.limit = sizeof text;
+		b.p = text;
+		b.n = sizeof text;
+		kof_scan_mutation_units(&s, b, 0xffffffffu, NULL, &ext, unit_cb, &u);
+		CK(u.n > 0 && u.bad == 0, "units of a script with no region: %u of them, none outside", u.n);
+		b.p = buf;
+		b.n = sizeof buf;
+	}
+	/* the cut that a producer made is given whole, and nothing is cut across it */
+	{
+		const struct kof_range fx = { 1000, 700 };
+		const struct kof_scan_cut cut = { NULL, NULL, &fx, 1 };
+		struct fixed_seen seen = { 1000, 700, 0, 0 };
+
+		kof_scan_mutation_units(&c, b, 0xffffffffu, &cut, &ext, fixed_cb, &seen);
+		CK(seen.whole == 1u && seen.straddle == 0u,
+		   "a fixed extent is one unit (%u whole, %u across an edge)", seen.whole, seen.straddle);
+	}
 	/* the callback stopping the walk stops it */
 	if (all > 1u) {
 		memset(&u, 0, sizeof u);
 		u.limit = sizeof buf;
 		u.stop_at = 1;
-		kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, NULL, &ext, unit_cb, &u);
+		kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, &ext, unit_cb, &u);
 		CK(u.n == 1u, "a callback that answers non-zero ends the walk (%u of %u units)", u.n, all);
 	}
 	/* no bytes, no callback: nothing happens */
 	memset(&u, 0, sizeof u);
 	u.limit = sizeof buf;
 	b.p = NULL;
-	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, NULL, &ext, unit_cb, &u);
+	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, &ext, unit_cb, &u);
 	b.p = buf;
-	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, NULL, &ext, NULL, &u);
+	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, &ext, NULL, &u);
 	CK(u.n == 0, "no buffer, or no callback: no unit");
 	b.n = 0;
-	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, NULL, &ext, unit_cb, &u);
+	kof_scan_mutation_units(&c, b, 0xffffffffu, NULL, &ext, unit_cb, &u);
 	CK(u.n == 0 && u.bad == 0, "an empty buffer has no unit");
 
 	/* the feed has nothing to credit to: refused before it reads anything */
@@ -386,9 +446,9 @@ static void t_mutation_units(void)
 		memset(&pc, 0, sizeof pc);
 		b.p = buf;
 		b.n = sizeof buf;
-		kof_scan_mutation_feed(NULL, &c, b, 0xffffffffu, 0, NULL, NULL, &ext);
-		kof_scan_mutation_feed(&pc, &c, b, 0xffffffffu, 0, NULL, NULL, &ext);
-		kof_scan_mutation_feed(&pc, &c, b, 0xffffffffu, 1, NULL, NULL, &ext);
+		kof_scan_mutation_feed(NULL, &c, b, 0xffffffffu, 0, NULL, &ext);
+		kof_scan_mutation_feed(&pc, &c, b, 0xffffffffu, 0, NULL, &ext);
+		kof_scan_mutation_feed(&pc, &c, b, 0xffffffffu, 1, NULL, &ext);
 		CK(pc.set == NULL && pc.bs == NULL, "a feed to a context with no set changes nothing");
 	}
 	kof_scan_free(sc);
@@ -402,7 +462,6 @@ static int slots_without_macro(void *arg)
 {
 	struct kof_scanner *sc = kof_scan_new(eng);
 	struct kof_obj_ctx c;
-	static const uint32_t ref[3] = { 1, 2, 3 };
 	int bad = 0;
 
 	(void)arg;
@@ -410,11 +469,8 @@ static int slots_without_macro(void *arg)
 		return 9;
 	memset(&c, 0, sizeof c);
 	kof_mod_attach(&c, sc);
-	if (c.content->ovl_blocks) {
-		bad += c.content->ovl_blocks(&c, ref, 0) != 0;      /* nothing to compare against */
-		bad += c.content->ovl_blocks(&c, ref, 3) != 0;      /* blocks no set holds, an object nothing was found in */
-		bad += c.content->ovl_blocks(&c, NULL, 0) != 0;
-	}
+	bad += c.content->reserved_0 != NULL || c.content->reserved_1 != NULL ||
+	       c.content->reserved_2 != NULL;                      /* the slots nobody implements are NULL */
 	if (c.content->diag_share) {
 		bad += c.content->diag_share(&c, 1, 1, 2) != 0;     /* the 16 bit form: two diagnoses that do not exist */
 		bad += c.content->diag_share(&c, 0xffff, 0xffff, 0xffff) != 0;
@@ -422,8 +478,6 @@ static int slots_without_macro(void *arg)
 	if (c.content->diag_share32)
 		bad += c.content->diag_share32(&c, 1, 1u, 2u) != 0;
 	kof_mod_unpack_mode(&c, 1);
-	if (c.content->ovl_blocks)
-		bad += c.content->ovl_blocks(&c, ref, 3) != 0;
 	kof_scan_free(sc);
 	return bad ? 1 : 0;
 }
@@ -460,7 +514,7 @@ int main(int argc, char **argv)
 	st = he_child(diag_nothing, NULL, 20);
 	CK(he_ok(st), "the diagnose, emulate and script entries on an object that is nothing: %s", he_how(st));
 	st = he_child(slots_without_macro, NULL, 20);
-	CK(he_ok(st), "ovl_blocks and diag_share asked of an object with nothing: %s", he_how(st));
+	CK(he_ok(st), "the reserved slots and diag_share asked of an object with nothing: %s", he_how(st));
 	t_mutation_units();
 	t_prod_sync();
 	keng_close(eng);

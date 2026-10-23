@@ -8,6 +8,8 @@
  */
 
 #include "pdf_int.h"
+#include <kofcmp.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 int pdf_index_build(struct kof_pdf_info *p, struct pdf_index *ix, enum pdf_ix_kind kind)
@@ -65,16 +67,8 @@ void pdf_index_free(struct kof_pdf_info *p, struct pdf_index *ix)
 
 const struct pdf_key *pdf_index_find(const struct pdf_index *ix, uint64_t key)
 {
-	uint32_t lo = 0, hi = ix->n;
+	const uint32_t lo = kof_lower_bound_u64(ix->v, ix->n, sizeof *ix->v, offsetof(struct pdf_key, key), key);
 
-	while (lo < hi) {
-		uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (ix->v[mid].key < key)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
 	return lo < ix->n && ix->v[lo].key == key ? &ix->v[lo] : NULL;
 }
 

@@ -82,7 +82,7 @@ static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_bu
 
 		if (!kgenome_pe_imp_name(f, im, name, sizeof name))
 			continue;               /* by ordinal: no word to match */
-		cap = kgenome_nucleo_cap_of_name(name);
+		cap = kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, name);
 		if (cap == KGENOME_NUCLEO_NONE)
 			continue;
 		if (a->n == a->cap_n) {

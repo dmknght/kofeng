@@ -73,7 +73,6 @@ static void scan_it(const char *what, const uint8_t *b, uint64_t len, int times)
 	if (!sc)
 		return;
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;

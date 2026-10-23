@@ -16,9 +16,15 @@
  * real stagers in the notes beside kgenome_diag_run_pe_symbol.
  */
 
+#define _GNU_SOURCE
+
+#include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "../../libkofeng/kofeng.h"
 #include "../../libkofeng/kofcore/kofmod/kofsig.h"
@@ -33,6 +39,7 @@
 #include "../../libkofeng/analyzers/parsers/binaries/sym_pool.h"
 #include "../../libkofeng/kofcore/kofmod/pe.h"
 #include "../../libkofeng/analyzers/genome_obj.h"
+#include "asking_db.h"
 
 static int fails;
 
@@ -242,7 +249,7 @@ struct seen_syms {
 	uint32_t       n;
 	uint8_t        copy[KOF_SYM_MAX_BYTES];
 	int            views;
-	int            convicted;       /* findings naming Meterp on any object */
+	int            convicted;       /* objects that came back with a verdict */
 };
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
@@ -252,13 +259,8 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 
 	(void)bytes;
 	(void)len;
-	{
-		uint32_t f;
-
-		for (f = 0; f < res->n; f++)
-			if (strstr(res->v[f].name, "Meterp"))
-				k->convicted++;
-	}
+	if (res->has_verdict)
+		k->convicted++;
 	if (strstr(name, ":norm") && res->syms && res->n_syms &&
 	    res->n_syms <= sizeof k->copy) {
 		memcpy(k->copy, res->syms, res->n_syms);
@@ -552,7 +554,7 @@ int main(int argc, char **argv)
 	 * nothing more.
 	 */
 	{
-		const char *db = argc > 1 ? argv[1] : "build/release/databases";
+		const char *db = argc > 1 ? argv[1] : ad_db_asking();
 		static uint8_t b2[0x2000];
 		const unsigned o = 0x80 + 24, sec2 = o + 0xf0 + 40;
 		static struct seen_syms seen;
@@ -579,9 +581,8 @@ int main(int argc, char **argv)
 		if (sc) {
 			memset(&opt, 0, sizeof opt);
 			opt.heur_level = 2;
-			/* the stager IS convicted by the graph verdict, and an object the
-			 * scan stopped at is not normalised; this asks about the view */
-			opt.all_matches = 1;
+			/* the stager has a verdict from the graph (the fixture diagnose
+			 * rwx_exec_pe declares the disease); this asks about the view */
 			{
 				/* a scan needs a path to give a view its name */
 				FILE *tf = fopen("build/test/pe_serves.tmp", "wb");
@@ -595,9 +596,8 @@ int main(int argc, char **argv)
 					remove("build/test/pe_serves.tmp");
 				}
 			}
-			/* THE VERDICT: the stager is read off the graph - the byte
-			 * rules for PE x86 and x64 are gone, and the synthetic code
-			 * contains no byte any other rule knows. */
+			/* THE VERDICT: the stager is read off the graph - the synthetic
+			 * code contains no byte any byte rule knows. */
 			CK(seen.convicted >= 1);
 			CK(seen.views >= 1);
 			CK(has_sym(&seen, "ws2_32.dll!connect"));

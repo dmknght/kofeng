@@ -18,8 +18,10 @@
  */
 #include "fnprint_private.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <kofcmp.h>
 
 #define WEAK_SCAN 8u
 
@@ -141,16 +143,8 @@ void kgenome_fnprint_match_done(struct kgenome_fnprint_match *m)
 
 static uint32_t find_fp(const struct kgenome_fnprint_ref *r, uint64_t fp)
 {
-	uint32_t lo = 0, hi = r->n;
+	const uint32_t lo = kof_lower_bound_u64(r->e, r->n, sizeof *r->e, offsetof(struct kgenome_fnprint_ref_ent, fp), fp);
 
-	while (lo < hi) {
-		uint32_t mid = lo + (hi - lo) / 2u;
-
-		if (r->e[mid].fp < fp)
-			lo = mid + 1u;
-		else
-			hi = mid;
-	}
 	return lo < r->n && r->e[lo].fp == fp ? lo : UINT32_MAX;
 }
 

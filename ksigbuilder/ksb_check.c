@@ -26,14 +26,6 @@
  * ---------------------------------------------------------------------------
  */
 
-/* Whether the source, comments already blanked, contains `needle`. The buffer
- * is the one ksb_extract_main scanned, so a match here is code. */
-
-static int src_has(struct ksb_ctx *ksb, const char *needle)
-{
-	return ksb->decl.src_text && strstr(ksb->decl.src_text, needle) != NULL;
-}
-
 /* `#include <kofmod/NAME.h>`, allowing the spaces the preprocessor allows. */
 static int src_includes(struct ksb_ctx *ksb, const char *name)
 {
@@ -128,24 +120,14 @@ int ksb_check_format_headers(struct ksb_ctx *ksb)
 /*
  * WHAT EACH KIND MAY NOT BE, checked in the source rather than hoped for.
  *
- * heur.h includes kofsig.h, so a rule has the detector's macros in scope and
- * every one of these WOULD compile. They are refused because the difference
- * between a heuristic and a signature is not a matter of degree: a family name
- * is a claim about identity, and a rule that made one would be a signature
- * filed in the wrong place and reported in the wrong words.
+ * A detector is not an unpacker and does not describe one; an unpacker has to say
+ * which step of opening an object it is.
  */
 int ksb_kind_checks(struct ksb_ctx *ksb, int kind)
 {
-	int n_phase = ksb->decl.simple[SD_HEUR_PHASE].count;
 	int n_kind = ksb->decl.simple[SD_ANALYZE_STEP].count;
 
 	if (kind == 0) {                        /* detector */
-		if (n_phase || ksb->decl.heur_name[0] || ksb->decl.heur_want) {
-			fprintf(stderr, "FAIL: heuristic declarations on a "
-					"detector; a rule exports kof_heur and "
-					"includes kofmod/heur.h\n");
-			return 0;
-		}
 		if (n_kind) {
 			fprintf(stderr, "FAIL: KOF_ANALYZE_STEP on a detector; "
 					"it describes an unpacker\n");
@@ -154,56 +136,14 @@ int ksb_kind_checks(struct ksb_ctx *ksb, int kind)
 		return 1;
 	}
 
-	if (kind == 1) {                        /* unpacker */
-		if (!n_kind) {
-			fprintf(stderr, "FAIL: an unpack module must declare "
-				"KOF_ANALYZE_STEP\n"
-				"      KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK)  - it "
-				"hid a program\n"
-				"      KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP)   - it "
-				"carried files\n");
-			return 0;
-		}
-		return 1;
-	}
-	/* heuristic */
-	if (!n_phase) {
-		fprintf(stderr, "FAIL: a heuristic rule must declare "
-			"KOF_HEUR_PHASE\n"
-			"      KOF_HEUR_PHASE(KOF_HEUR_EXAMINE) - what it IS\n"
-			"      KOF_HEUR_PHASE(KOF_HEUR_VERDICT) - how it was "
-			"reached\n");
-		return 0;
-	}
-	if (!ksb->decl.heur_name[0]) {
-		fprintf(stderr, "FAIL: a heuristic rule must declare "
-				"KOF_HEUR_NAME(\"word\")\n");
-		return 0;
-	}
-	if (ksb->decl.heur_want && ksb->decl.heur_phase != 0) {
-		fprintf(stderr, "FAIL: KOF_HEUR_WANT at KOF_HEUR_VERDICT; the "
-				"object is already open by then\n");
-		return 0;
-	}
-	if (src_has(ksb, "KOF_SCAN_INFECT(") || src_has(ksb, "KOF_SCAN_SUSPECT(") ||
-	    src_has(ksb, "KOF_SCAN_MATCH(")) {
-		fprintf(stderr, "FAIL: a heuristic rule reports KOF_HEUR_HIT "
-				"and nothing above it\n");
-		return 0;
-	}
-	if (src_has(ksb, "KOF_TARGET_NAME(")) {
-		fprintf(stderr, "FAIL: KOF_TARGET_NAME on a heuristic rule; a "
-				"rule names a shape, not a family\n");
-		return 0;
-	}
-	if (src_has(ksb, "kunp_rcstruct_write(") || src_has(ksb, "kunp_rcstruct_done(") ||
-	    src_has(ksb, "kunp_rcstruct_window(") || src_has(ksb, "kunp_static_gather_all(")) {
-		fprintf(stderr, "FAIL: a heuristic rule produces no child "
-				"objects; that is what an unpacker is for\n");
-		return 0;
-	}
-	if (n_kind) {
-		fprintf(stderr, "FAIL: KOF_ANALYZE_STEP on a heuristic rule\n");
+	/* unpacker */
+	if (!n_kind) {
+		fprintf(stderr, "FAIL: an unpack module must declare "
+			"KOF_ANALYZE_STEP\n"
+			"      KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK)  - it "
+			"hid a program\n"
+			"      KOF_ANALYZE_STEP(KOF_ANALYZE_UNWRAP)   - it "
+			"carried files\n");
 		return 0;
 	}
 	return 1;

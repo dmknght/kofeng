@@ -6,9 +6,8 @@
  * no symbol table. ld resolves every internal reference here, which is the
  * whole reason the runtime has no relocation code.
  *
- * A module exports exactly one of kof_scan, kof_unpack and kof_heur, so all
- * three are named here and only one of the three input sections will ever
- * exist.
+ * A module exports exactly one of kof_scan and kof_unpack, so both are named here
+ * and only one of the two input sections will ever exist.
  *
  * KEEP, and no ENTRY. The two are connected:
  *
@@ -38,23 +37,6 @@ SECTIONS
 	.blob : {
 		KEEP(*(.text.kof_scan))
 		KEEP(*(.text.kof_unpack))
-		KEEP(*(.text.kof_heur))
-		/*
-		 * AND THE SECOND ENTRY, WHICH NOTHING REFERENCES.
-		 *
-		 * kof_cure is called by the HOST, at an offset the build
-		 * records - see kof_pack_mod.cure_off - so no code inside the
-		 * blob ever names it and --gc-sections collected it. The
-		 * symptom was quiet: the module linked, the offset came out
-		 * zero, and a rule that plainly had a cure appeared to have
-		 * none. It is a root like the three above, and for the same
-		 * reason.
-		 *
-		 * AFTER them, deliberately. Whichever of the three exists has
-		 * to be at offset zero, and a root placed before it would take
-		 * that place.
-		 */
-		KEEP(*(.text.kof_cure))
 		*(.text .text.*)
 		*(.rodata .rodata.* .rodata1)
 	}

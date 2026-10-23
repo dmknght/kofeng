@@ -163,7 +163,7 @@ static void t_attach(kof_scanner *sc)
 	memset(&ctx, 0, sizeof ctx);
 	kof_mod_attach(&ctx, sc);
 	CK(ctx.priv == (void *)sc && kof_scan_of(&ctx) == sc, "attach binds the context to the scanner");
-	CK(ctx.content != NULL && ctx.report != NULL && ctx.debug != NULL, "and gives it the vtable, the report and the note channel");
+	CK(ctx.content != NULL && ctx.reserved_0 == NULL && ctx.debug != NULL, "and gives it the vtable and the note channel (the report slot is reserved)");
 	det = ctx.content;
 	CK(det->rd8 && det->rd16 && det->rd32 && det->rd64 && det->memeq && det->csum && det->find_str && det->find_str_at && det->find_str_in &&
 	   det->find_str_where, "a detector can read and search");

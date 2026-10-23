@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 
 static int fails;
 
@@ -76,6 +77,9 @@ static uint64_t wrap(uint8_t *b, uint64_t cap, const uint8_t *code, uint64_t n)
 }
 
 
+/* What the test modules said while the object was scanned - see notes.h. */
+static struct note_list pend;
+
 struct got {
 	int      n_obj;
 	uint32_t n_find;
@@ -97,7 +101,12 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	(void)len;
 	if (g->n_obj++)
 		return 0;               /* the top-level object only */
-	g->n_find = res->n;
+	{
+		struct note_list got;
+
+		notes_take(&pend, &got);
+		g->n_find = got.n;
+	}
 	g->n_diag = res->n_diag;
 	for (i = 0; i < res->n_diag; i++) {
 		const struct kof_diag_report *r = &res->diag[i];
@@ -125,6 +134,7 @@ static struct got run(kof_scanner *sc, const uint8_t *b, uint64_t n, int report)
 
 	memset(&opt, 0, sizeof opt);
 	memset(&g, 0, sizeof g);
+	memset(&pend, 0, sizeof pend);
 	opt.report_diag = report;
 	kscan_bytes(sc, b, n, "x", &opt, on_object, &g);
 	return g;
@@ -181,6 +191,8 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	sc = kscan_new(eng);
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	if (!sc) {
 		keng_close(eng);
 		return 2;

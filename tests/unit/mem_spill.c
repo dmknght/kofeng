@@ -110,7 +110,6 @@ static struct e2e scan(kof_scanner *sc, uint64_t resident, const char *scratch)
 
 	memset(&r, 0, sizeof r);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 1ull << 40;
 	opt.max_resident_bytes = resident;
 	opt.max_object_bytes = 64u << 20;

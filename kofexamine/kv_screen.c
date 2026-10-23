@@ -247,7 +247,9 @@ void redraw(struct view *v)
 	{
 		int modal = v->prop_open   ? 1
 			  : v->sym_open    ? 3
-			  : v->help_open   ? 4 : 0;
+			  : v->help_open   ? 4
+			  : syn_page_up(v) ? 5
+			  : syn_modal(v)   ? 6 : 0;
 
 		/* A bar menu opened over the dialog is another picture: it has to be
 		 * erased when it moves or closes, and only the panes can do that. */
@@ -255,6 +257,13 @@ void redraw(struct view *v)
 			modal = modal * 100 + (v->bar_open + 2);
 
 		under = !modal || wiped || g_modal_drawn != modal;
+		/*
+		 * A POP-UP LIST OVER THE PANES, NOT A PAGE: the tag chooser covers
+		 * part of them and changes size as its search narrows it, so what
+		 * it uncovers has to be painted again on every frame.
+		 */
+		if (syn_modal(v) && !syn_page_up(v))
+			under = 1;
 		g_modal_drawn = modal;
 	}
 
@@ -440,8 +449,6 @@ void redraw(struct view *v)
 		cl = out_clip_set(&o, mark_row() - 1, 1, mark_row(), g_cols);
 		draw_marker_line(&o, v);
 		out_clip_restore(&o, cl);
-		if (v->show_list)
-			draw_list(&o, v);
 	}
 	/*
 	 * THE DIALOGS ARE PAINTED ON EVERY FRAME, under the panes or not.
@@ -496,6 +503,8 @@ void redraw(struct view *v)
 	draw_bar(&o, v);
 	if (v->prop_open)
 		draw_prop(&o, v);
+	if (syn_modal(v))
+		draw_syn(&o, v);
 	if (v->help_open)
 		draw_help(&o, v);
 	draw_chooser(&o, v);

@@ -839,6 +839,38 @@ enum kgenome_nucleo_cap {
 	 */
 	KGENOME_NUCLEO_REG_OPEN = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_REG, KGENOME_CA_REG_OPEN),
 	/*
+	 * WHAT A SCRIPT DOES WITH DATA, which no native program has a word for.
+	 *
+	 * data-decode: bytes made out of other bytes by an algorithm that has no key - base64, gzip, rot13, hex, percent. The
+	 * one step a webshell puts between where its code is kept and where it runs, and the reason a literal is not the code.
+	 * data-eval: text run as code, now - eval, assert. What the decode is for. (create_function and the callbacks a string names are
+	 * data-create and data-call, below: they were this word until they had to be told apart.)
+	 * input-request: what the sender of the request chose - $_GET, $_POST, $_REQUEST, $_COOKIE, $_FILES. Named by a variable,
+	 * not a call, and still the one fact a webshell is built around: somebody else decides what runs.
+	 *
+	 * Words, not behaviour: a diagnose joins them (a decode whose result is evaluated, a request that reaches an eval).
+	 */
+	KGENOME_NUCLEO_DECODE = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_DATA, KGENOME_CA_DATA_DECODE),
+	KGENOME_NUCLEO_EVAL = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_DATA, KGENOME_CA_DATA_EVAL),
+	KGENOME_NUCLEO_REQUEST = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_INPUT, KGENOME_CA_INPUT_REQUEST),
+	/*
+	 * data-create, data-call and data-load: the other ways a script makes data run, which data-eval used to stand for alone.
+	 *
+	 * data-eval is text run NOW: eval, assert, ExecuteGlobal, exec of a string. data-create is text that BECOMES A FUNCTION, to be
+	 * called later by whatever name or handle it is given: create_function, a new Function(text), compile(), loadstring, a scriptblock
+	 * built from a string, an assembly defined from bytes. data-call is a call whose CALLEE is chosen by a value and not written where
+	 * it is called: call_user_func and its kin, `$f()` with $f a string, getattr(o, name)(), window[name](), Method.invoke.
+	 * data-load is a CLASS, an object or a loader named by a value: `new $cls`, `$cls::make()`, `new ReflectionClass($name)`,
+	 * unserialize($data) (the classes it instantiates are chosen by the data), spl_autoload_register($cb); the same act is a
+	 * library's plugin routing and a backdoor's way to run a class the sender names, and the word does not say which: a diagnose does,
+	 * by what reaches it. Different acts, different links: a decode that reaches an eval is a packed script; one that reaches a create
+	 * is a packed script run in two steps (hoho.php builds the function and calls it by its handle); a request that reaches the
+	 * CALLEE of a data-call is a backdoor that runs whatever function the sender names.
+	 */
+	KGENOME_NUCLEO_CREATE = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_DATA, KGENOME_CA_DATA_CREATE),
+	KGENOME_NUCLEO_DYNCALL = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_DATA, KGENOME_CA_DATA_CALL),
+	KGENOME_NUCLEO_DYNLOAD = KGENOME_NUCLEO_MK(KGENOME_CCTX_USER, KGENOME_CG_DATA, KGENOME_CA_DATA_LOAD),
+	/*
 	 * ================= AND WHAT WAS LEFT OUT, WITH WHY =================
 	 *
 	 * These are events too, and each was considered and rejected because

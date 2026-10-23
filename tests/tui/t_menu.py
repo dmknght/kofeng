@@ -4,7 +4,7 @@ from dl import status  # noqa
 
 A = 'menu'
 EXPECT = {
-    'File': ['Save', 'Save As...', 'Quit'],
+    'File': ['Quit'],
     'Edit': ['Find...', 'Go to...'],
     'Analysis': ['Dashboard', 'Symbols', 'Find shellcode in variables',
                  'Find infected data', 'Decode string', 'Unpack', 'Dump',
@@ -48,22 +48,21 @@ def esc_closes_menu_and_repaints():
 
 
 @case(A)
-def file_menu_disabled_without_draft():
+def file_menu_has_only_quit_and_it_is_enabled():
     with ko() as v:
         v.menu_open('File')
-        s = v.popup_item('Save')
-        sa = v.popup_item('Save As')
         q = v.popup_item('Quit')
-        check(s and not s[3], 'Save should be disabled on a clean/unmatched object: %r' % (s,))
-        check(sa and not sa[3], 'Save As should be disabled: %r' % (sa,))
         check(q and q[3], 'Quit must be enabled')
+        check(not v.popup_item('Save') and not v.popup_item('Save As'),
+              'File offers a Save: the draft is not written')
 
 
 @case(A)
 def disabled_item_click_does_nothing():
     with ko() as v:
-        v.menu_open('File')
-        s = v.popup_item('Save As')
+        v.menu_open('Analysis')
+        s = v.popup_item('Find infected data')
+        check(s and not s[3], 'expected disabled: %r' % (s,))
         v.click(s[1] + 2, s[0])
         check(v.alive(), 'viewer died')
         check(not v.dialog(), 'a dialog opened from a disabled item')
@@ -315,17 +314,6 @@ def menu_hover_highlight_follows_mouse_motion():
         v.mouse(35, 24, y0 + 2, True)       # motion without button (viewer sees a drag)
         check(v.alive())
         v.esc()
-
-
-@case(A)
-def file_save_as_item_opens_prompt_when_enabled():
-    with Viewer(SAMPLES['gafgyt']) as v:
-        v.menu_open('File')
-        sa = v.popup_item('Save As')
-        check(sa and sa[3], 'Save As disabled for a loaded rule: %r' % (sa,))
-        v.click(sa[1] + 2, sa[0])
-        check(v.alive())
-        check('same markers' in last_line(v) or 'signatures' in last_line(v) or v.dialog() or True)
 
 
 @case(A, known_bug='BUG-17 say_note() messages are drawn only while the draft panel has focus: Ctrl+O / Ctrl+\\ / Ctrl+] refusals are invisible from the tree or hex pane')

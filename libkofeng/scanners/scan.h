@@ -26,7 +26,7 @@
  *   kof_scan_diag_*, _incomplete, _served_syms    objctx_diag.c the diagnose product
  *   kof_scan_script_forms                         objctx_script.c script forms
  *   kof_scan_mutation_*                           scan_feed.c   feeding similarity
- *   kof_scan_syndrome                             scan_verdict.c  the verdict's diseases
+ *   kof_scan_verdict                              scan_verdict.c  the verdict's diseases
  *
  * kof_scan_of is an inline of this header. A new function takes the word of the
  * unit that defines it and is added to this map.
@@ -162,9 +162,9 @@ static inline struct kof_ext_buf kof_ext_fixed(struct kof_range *buf, uint32_t c
  * Credit an object's units to a mutation context - the ONE feed, for the scanner
  * and for any tool that scores blocks against an object, so the number a tool
  * shows is the one the scanner computes. `present` is the region bits the parse
- * has (all bits for a caller that has not asked); `funcs` and `lib` are the
- * parse's, or NULL for an object whose headers do not describe its own bytes -
- * see kgenome_mutation_units. `eb` is scratch for one region's extents.
+ * has (all bits for a caller that has not asked); `cut` is what the parse and the
+ * producer say about the object - see struct kof_scan_cut. `eb` is scratch for one
+ * region's extents.
  */
 struct kof_mutation_ctx;
 struct kgenome_func_set;
@@ -173,14 +173,24 @@ struct kgenome_true_all;
 typedef int (*kof_scan_unit_fn)(void *user, uint32_t region, uint64_t off,
 				uint64_t len, uint32_t side,
 				const struct kgenome_func *first);
-void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b,
-			   uint32_t present, const struct kgenome_func_set *funcs,
-			   const struct kgenome_true_all *lib, struct kof_ext_buf *eb,
+/*
+ * WHAT THE CUT IS TOLD ABOUT AN OBJECT beside its bytes. `funcs` and `lib` are the parse's, or
+ * NULL for an object whose headers do not describe its own bytes; `fixed` are the units a
+ * producer already cut - a view's decoded ones, in the view's offsets, sorted and apart - which
+ * the cut leaves whole. See kgenome_mutation_units.
+ */
+struct kof_scan_cut {
+	const struct kgenome_func_set *funcs;
+	const struct kgenome_true_all *lib;
+	const struct kof_range        *fixed;
+	uint32_t                       n_fixed;
+};
+void kof_scan_mutation_units(const struct kof_obj_ctx *ctx, kof_buf b, uint32_t present,
+			   const struct kof_scan_cut *cut, struct kof_ext_buf *eb,
 			   kof_scan_unit_fn fn, void *user);
 void kof_scan_mutation_feed(struct kof_mutation_ctx *pc, const struct kof_obj_ctx *ctx,
 			  kof_buf b, uint32_t present, int from_packer,
-			  const struct kgenome_func_set *funcs,
-			  const struct kgenome_true_all *lib, struct kof_ext_buf *eb);
+			  const struct kof_scan_cut *cut, struct kof_ext_buf *eb);
 
 /*
  * Recover the scanner from a context handed to a module.
@@ -234,7 +244,7 @@ int kof_scan_walk_mt(struct kof_scanner **, unsigned n_sc, const char *path,
 /*
  * A LOADED DIAGNOSE DECLARED SIGNS THIS OBJECT CARRIES - see KOF_DIAG_HAS_ATTRB
  * and the head and tails a diagnose declares. Non-zero means the analysis is worth starting on this
- * object, which is the routing a heuristic rule used to do by hand.
+ * object, which is the routing a module used to do by hand.
  */
 int kof_scan_diag_sign_asks(const struct kof_obj_ctx *ctx);
 /* A diagnose the verdict reads (it declares a disease) is answerable on this object. */
@@ -256,6 +266,8 @@ enum kgenome_status kof_scan_diag_status(const struct kof_obj_ctx *ctx);
 /* Free the object's diagnose graph and give back the bytes it was charged to this
  * scanner's memory ceiling - the one place the graph dies. */
 void kof_scan_diag_drop(struct kof_scanner *sc);
+/* Free the scan of the object's text that the constants stage kept for the diagnose stage (objctx_textscan.c), and give back what it was charged. */
+void kof_scan_text_drop(struct kof_scanner *sc);
 /* The symbol block the engine completed for this object, or NULL when it added
  * nothing - see kof_result.syms. */
 const uint8_t *kof_scan_served_syms(const struct kof_obj_ctx *ctx, uint32_t *n);
@@ -303,15 +315,16 @@ int kof_scan_diag_report(const struct kof_obj_ctx *ctx, uint32_t i,
 			 struct kof_diag_report *out);
 
 /*
- * THE TYPE AN OBJECT'S DISEASES MAKE, inferred from every disease its detectors,
- * heuristics and diagnoses found (see databases/pack/kofsyndrome.h). Returns 0
- * when no disease was found, or the database has no syndrome pack. The same
- * all-diagnoses analysis as kof_scan_diag_report, so asking costs what that costs
- * and a normal scan pays nothing: what the detectors and heuristics found is
- * always there, the diagnoses' are added only when the object was scanned for all
- * of them (kof_scan_option.report_diag). The list of disease ids it is made of is
- * scan_verdict.c's own.
+ * THE VERDICT AN OBJECT'S DISEASES MAKE: every disease its modules declared and the
+ * diagnoses that matched declare, named by kof_verdict_make and carrying the ids of
+ * the diagnoses and the diseases (kof_finding.diag, .disease). Returns 1 and fills `*v`
+ * when the object has a disease, 0 when it has none (and `*v` is zeroed).
+ * `*incomplete` is 1 when the set may be missing a disease: an allocation failed or a
+ * limit was reached on the analysis it reads. The same all-diagnoses analysis as
+ * kof_scan_diag_report, so asking costs what that costs and a normal scan runs it
+ * only for a diagnose that declares a disease and can be answered on the object.
  */
-int kof_scan_syndrome(const struct kof_obj_ctx *ctx, struct kof_synd_result *r);
+int kof_scan_verdict(const struct kof_obj_ctx *ctx, struct kof_finding *v,
+		     int *incomplete);
 
 #endif /* KOFENG_SCAN_H */

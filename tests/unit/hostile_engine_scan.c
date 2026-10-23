@@ -92,6 +92,7 @@ static int env_open(struct env *v, const char *db)
 {
 	v->e = keng_open(db);
 	v->sc = v->e ? kscan_new(v->e) : NULL;
+	notes_watch(v->sc);
 	return v->sc != NULL;
 }
 
@@ -710,6 +711,7 @@ static int c_reenter_other(void)
 	if (!env_open(&v, DB_SIGS))
 		return 9;
 	other = kscan_new(v.e);
+	notes_watch(other);
 	memset(&s, 0, sizeof s);
 	s.other = other;
 	s.mode = 1;
@@ -735,7 +737,9 @@ static int c_reenter_same(void)
 	s.mode = 2;
 	marked(buf, sizeof buf);
 	rc = kscan_bytes(v.sc, buf, sizeof buf, "outer", NULL, cb_reenter, &s);
-	/* whatever the nested call did, the scanner still answers afterwards */
+	/* whatever the nested call did, the scanner still answers afterwards; the
+	 * notes the two scans before it left are not this scan's */
+	notes_clear();
 	rc2 = he_scan(v.sc, buf, sizeof buf, "after", NULL, &t);
 	printf("  nested scan on the same scanner: outer %d inner %d after %d findings %llu\n", rc, s.inner_rc,
 	       rc2, (unsigned long long)t.findings);
@@ -786,11 +790,14 @@ struct bag {
 static int bag_cb(const char *name, const void *b, uint64_t n, const struct kof_result *r, void *u)
 {
 	struct bag *g = (struct bag *)u;
+	struct note_list got;
 
 	(void)b;
+	(void)r;
+	notes_here(&got);
 	if (g->n < 512) {
 		snprintf(g->name[g->n], sizeof g->name[0], "%s", name);
-		g->finds[g->n] = r->n;
+		g->finds[g->n] = got.n;
 		g->len[g->n] = n;
 	}
 	g->n++;
@@ -850,8 +857,10 @@ static int c_parallel(void)
 		marked(buf, sizeof buf);
 		put(p, buf, i % 3 ? sizeof buf : 20 + i % 50);
 	}
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < 8; i++) {
 		sc[i] = kscan_new(e);
+		notes_watch(sc[i]);
+	}
 	rc1 = kscan_path_mt(sc, 1, d, &o, bag_cb, &serial);
 	for (k = 2; k <= 8; k += 2) {
 		uint64_t before[8];
@@ -1022,7 +1031,6 @@ static int c_options(void)
 			o.max_resident_bytes = u64s[b];
 			o.max_produced_bytes = u64s[(b + 1u) % 6u];
 			o.max_object_bytes = u64s[(b + 2u) % 6u];
-			o.all_matches = (int)u32s[(a + 6u) % 7u];
 			o.report_diag = (int)u32s[a];
 			o.recurse_dirs = (int)u32s[b % 7u];
 			memset(&t, 0, sizeof t);

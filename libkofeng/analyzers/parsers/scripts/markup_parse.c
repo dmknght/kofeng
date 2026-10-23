@@ -248,43 +248,12 @@ void kof_markup_merge(kof_buf f, uint64_t from, struct kof_script_info *info)
 
 /* ---- a document nobody serves: its <script> bodies are its code ---------- */
 
-/*
- * The end of the opening tag, or f.n. `at` is where "<script" starts.
- *
- * Attributes are skipped rather than parsed: what is wanted is where the body
- * begins, and a quoted ">" inside an attribute value would be the only way to
- * be wrong about that. The loop honours quotes for exactly that reason.
- */
-static uint64_t mk_tag_end(kof_buf f, uint64_t at)
-{
-	uint8_t q = 0;
-	uint64_t i;
-
-	for (i = at; i < f.n; i++) {
-		uint8_t c = f.p[i];
-
-		if (q) {
-			if (c == q)
-				q = 0;
-			continue;
-		}
-		if (c == '"' || c == '\'') {
-			q = c;
-			continue;
-		}
-		if (c == '>')
-			return i;
-	}
-	return f.n;
-}
-
 /* The next "<script" at or after `i`, or f.n. */
 static uint64_t mk_next_script(kof_buf f, uint64_t i)
 {
-	for (; i + 7u <= f.n; i++)
-		if (kof_txt_tag_at(f, i, "<script", 7u))
-			return i;
-	return f.n;
+	uint64_t at = kof_txt_find(f, i, f.n, "<script", 7u);
+
+	return at == KOF_TXT_NONE ? f.n : at;
 }
 
 uint8_t kof_html_script_kind(kof_buf f, uint64_t look)
@@ -294,7 +263,7 @@ uint8_t kof_html_script_kind(kof_buf f, uint64_t look)
 
 	if (at >= f.n)
 		return KOF_SCRIPT_JS;
-	gt = mk_tag_end(f, at + 7u);
+	gt = kof_txt_tag_gt(f, at + 7u, f.n);
 	if (gt > look)
 		gt = look;
 	/*
@@ -321,7 +290,7 @@ void kof_html_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 
 		if (at >= f.n)
 			break;
-		gt = mk_tag_end(f, at + 7u);
+		gt = kof_txt_tag_gt(f, at + 7u, f.n);
 		if (gt >= f.n)
 			break;
 		k = kof_txt_find(f, gt + 1u, f.n, "</script", 8u);

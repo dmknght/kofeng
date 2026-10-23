@@ -105,6 +105,7 @@ void on_drag(struct view *v)
 				idx = 0;
 			if (idx >= v->dis_lines)
 				idx = v->dis_lines - 1;
+			idx = dis_real_row(v, idx);
 			if (idx < 0)
 				return;
 			/* Clamped to the row's own text: a pointer past the end
@@ -204,24 +205,6 @@ void on_release(struct view *v)
 		}
 		if (v->menu_open)
 			return;
-		/*
-		 * A press and a release on one byte is a click, and on a lit
-		 * byte it also says whose marker that byte is - the pane
-		 * relights around the signature it belongs to.
-		 *
-		 * What it does NOT do is drop the caret. It used to, and the
-		 * result was that the lit bytes - the ones a researcher is
-		 * most likely to want to take - were the only place in the
-		 * pane where clicking selected nothing: press, release,
-		 * selection gone. Identifying the marker and putting the caret
-		 * down are not alternatives.
-		 */
-		if (v->dragging && !v->dragged && v->sel_a != KGENOME_BROKEN) {
-			int who = hit_owner(v, view_map(v, v->sel_a, 0));
-
-			if (who >= 0)
-				v->sel_touch = (uint32_t)who;
-		}
 		v->dragging = 0;
 }
 
@@ -319,10 +302,7 @@ static void on_wheel(struct view *v, int k)
 				txt_hscroll(v, down ? 4 : -4);
 				return;
 			}
-			h = (v->show_list && g_my > list_top(v) &&
-			     g_my <= list_top(v) + (int)list_shown(v))
-			    ? &v->list_hoff :
-			    (g_decl_rows && g_my > decl_top() &&
+			h = (g_decl_rows && g_my > decl_top() &&
 			     g_my < mark_row())
 			    ? &v->decl_hoff :
 			    (g_mx <= TREE_W) ? &v->tree_hoff : NULL;
@@ -380,62 +360,8 @@ static void on_wheel(struct view *v, int k)
 				v->dis_bias = dis_max_bias(v);
 			return;
 		}
-		if (v->show_list && g_my > list_top(v) &&
-		    g_my <= list_top(v) + (int)list_shown(v)) {
-			/*
-			 * Which list the wheel is over, which is not always
-			 * the list of signatures.
-			 *
-			 * This branch only ever moved sel_touch, so over the
-			 * MARKERS of one signature the wheel quietly changed
-			 * which signature was selected - and the markers of a
-			 * six marker rule past the fourth row could not be
-			 * reached with a mouse at all. The arrow keys had the
-			 * depth case and the wheel did not, so the list looked
-			 * like it was hiding half its rows: the ones on screen
-			 * said absent, the one below the fold was the marker
-			 * that is actually there.
-			 */
-			if (v->list_depth) {
-				struct object *lo = cur_obj(v);
-				const struct kof_touch *lt =
-					v->sel_touch < lo->n_touch
-					? &lo->touch[v->sel_touch] : NULL;
-
-				if (lt) {
-					if (down && v->sel_str + 1 < lt->n_str)
-						v->sel_str++;
-					else if (!down && v->sel_str)
-						v->sel_str--;
-					if (v->sel_str < v->str_off)
-						v->str_off = v->sel_str;
-					if (v->sel_str >= v->str_off +
-							  list_shown(v))
-						v->str_off = v->sel_str -
-							list_shown(v) + 1u;
-					if (lt->str[v->sel_str].at != KGENOME_BROKEN)
-						view_show_in(v,
-						  v->node[v->sel_node].obj,
-						  sym_which_of(
-						   lt->str[v->sel_str].sym),
-						  lt->str[v->sel_str].at, 1);
-				}
-			} else if (down && v->sel_touch >=
-					   cur_obj(v)->n_touch) {
-				/* Out of "nothing selected" and onto the first
-				 * rule: the state is entered by opening a file
-				 * that matched nothing, and a state the wheel
-				 * cannot leave is a state that reads as a
-				 * frozen list. */
-				v->sel_touch = 0;
-			} else if (down && v->sel_touch + 1 <
-					   cur_obj(v)->n_touch) {
-				v->sel_touch++;
-			} else if (!down && v->sel_touch) {
-				v->sel_touch--;
-			}
-		} else if (g_mx <= TREE_W && g_my >= hex_top() &&
-			   g_my <= hex_bot()) {
+		if (g_mx <= TREE_W && g_my >= hex_top() &&
+		    g_my <= hex_bot()) {
 			/*
 			 * THE WHEEL SCROLLS THE PANEL. IT DOES NOT SELECT.
 			 *
@@ -495,27 +421,7 @@ static void on_cursor_down(struct view *v)
 			menu_step(v, 1);
 			return;
 		}
-		/* The list takes the keys while it is open, whatever pane has
-		 * focus underneath: it is in front, and a cursor that moves
-		 * something behind an open list is a cursor nobody can see. */
-		if (v->show_list && v->list_depth &&
-		    v->sel_touch < cur_obj(v)->n_touch) {
-			struct object *o2 = cur_obj(v);
-			const struct kof_touch *t2 = &o2->touch[v->sel_touch];
-
-			if (v->sel_str + 1 < list_total(v))
-				v->sel_str++;
-			if (v->sel_str >= v->str_off + list_shown(v))
-				v->str_off = v->sel_str - list_shown(v) + 1u;
-			if (t2->str[v->sel_str].at != KGENOME_BROKEN)
-				view_show_in(v, v->node[v->sel_node].obj,
-					     sym_which_of(
-						t2->str[v->sel_str].sym),
-					     t2->str[v->sel_str].at, 1);
-		} else if (v->show_list) {
-			if (v->sel_touch + 1 < cur_obj(v)->n_touch)
-				v->sel_touch++;
-		} else if (v->pane == 0 &&
+		if (v->pane == 0 &&
 			   (v->sel_node + 1 < v->n_node ||
 			    (v->log && v->n_node))) {
 			/*
@@ -533,9 +439,6 @@ static void on_cursor_down(struct view *v)
 			goto_node(v, v->sel_node + 1u);
 		} else if (v->pane == 1) {
 			hex_step(v, 1);
-		} else if (v->pane == 2 &&
-			   v->sel_touch + 1 < cur_obj(v)->n_touch) {
-			v->sel_touch++;
 		}
 }
 
@@ -551,32 +454,13 @@ static void on_cursor_up(struct view *v)
 			menu_step(v, -1);
 			return;
 		}
-		if (v->show_list && v->list_depth &&
-		    v->sel_touch < cur_obj(v)->n_touch) {
-			struct object *o2 = cur_obj(v);
-			const struct kof_touch *t2 = &o2->touch[v->sel_touch];
-
-			if (v->sel_str)
-				v->sel_str--;
-			if (v->sel_str < v->str_off)
-				v->str_off = v->sel_str;
-			if (t2->str[v->sel_str].at != KGENOME_BROKEN)
-				view_show_in(v, v->node[v->sel_node].obj,
-					     sym_which_of(
-						t2->str[v->sel_str].sym),
-					     t2->str[v->sel_str].at, 1);
-		} else if (v->show_list) {
-			if (v->sel_touch)
-				v->sel_touch--;
-		} else if (v->pane == 0 && (v->sel_node || v->log)) {
+		if (v->pane == 0 && (v->sel_node || v->log)) {
 			/* And back, the same way: at the top of a log's window
 			 * there is a page before it. goto_node reads the
 			 * wrapped -1 as that request. */
 			goto_node(v, v->sel_node - 1u);
 		} else if (v->pane == 1) {
 			hex_step(v, -1);
-		} else if (v->pane == 2 && v->sel_touch) {
-			v->sel_touch--;
 		}
 }
 
@@ -619,6 +503,13 @@ int handle(struct view *v, int k)
 	}
 	{
 		int r = handle_bar_key(v, k);
+
+		if (r >= 0)
+			return r;
+	}
+	/* The tag sources' page and pick list own the keyboard while up. */
+	{
+		int r = handle_syn_key(v, k);
 
 		if (r >= 0)
 			return r;
@@ -822,14 +713,6 @@ int handle(struct view *v, int k)
 			v->menu_open = 0;
 			break;
 		}
-		if (v->show_list && !v->list_depth) {
-			v->list_depth = 1;
-			v->str_off = 0;
-			v->sel_str = 0;
-			break;
-		}
-		v->show_list = 0;
-		v->list_depth = 0;
 		break;
 	/*
 	 * TAB IS A CHARACTER TOO, and it went with the letters.
@@ -857,15 +740,8 @@ case K_RELEASE:
 			v->menu_open = 0;
 			break;
 		}
-		/* Back one depth before out: Esc in a sub-list means "up". */
-		if (v->show_list && v->list_depth) {
-			v->list_depth = 0;
-			break;
-		}
 		v->sel_a = v->sel_b = KGENOME_BROKEN;
 		dis_bias_to_sel(v);
-		v->show_list = 0;
-		v->list_depth = 0;
 		break;
 	/*
 	 * The wheel turns whatever the pointer is over.

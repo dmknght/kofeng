@@ -59,7 +59,7 @@ KOF_DEFINE_SCAN
 	}
 
 	if (zero_raw && wx)
-		KOF_SCAN_INFECT(KOF_MALVAR_GENERIC);
+		{ kof_debug("Packed#Generic", 0); return; }
 	if (zero_raw || wx)
-		KOF_SCAN_SUSPECT("Weak");
+		{ kof_debug("Packed#Weak", 0); return; }
 }

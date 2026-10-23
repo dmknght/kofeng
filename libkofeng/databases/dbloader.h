@@ -24,7 +24,6 @@
 #include <stdint.h>
 
 #include "pack/dbtables.h"   /* struct kof_engine and what it holds - see there */
-#include "../databases/pack/kofsyndrome.h"   /* kof_synd_build: the loader reads syndromes.kdig */
 
 /*
  * Load from a single .ksig pack or a directory of them.

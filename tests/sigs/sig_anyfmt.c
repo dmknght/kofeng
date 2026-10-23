@@ -34,5 +34,5 @@ KOF_DEFINE_SCAN
 		return;
 
 	if (kof_find_str(everything, gcc_comment))
-		KOF_SCAN_INFECT("GccComment");
+		{ kof_debug("AnyFmtTest#GccComment", 0); return; }
 }

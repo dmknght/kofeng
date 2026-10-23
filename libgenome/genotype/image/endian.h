@@ -123,6 +123,10 @@ struct kgenome_endian_span {
 struct kgenome_endian_plan {
 	struct kgenome_endian_span *v;  /* sorted by off, disjoint; malloc'd */
 	uint32_t n, cap;
+	/* While the plan is being BUILT the array has a gap of `gap_n` free slots at index
+	 * `gap_at`, where the next span goes (endian_plan.c span_add). Both are zero in a
+	 * finished plan, whose v[0..n) is contiguous; nothing outside the builder sees a gap. */
+	uint32_t gap_at, gap_n;
 	uint8_t  code_unit;     /* 0, 2 or 4: the instruction unit swapped in code */
 	uint8_t  ident;         /* 1: e_ident[EI_DATA] is turned to little-endian too */
 	/* How many spans were refused because the object's own structure put them on

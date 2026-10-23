@@ -24,5 +24,5 @@ KOF_DEFINE_STR(mark2, "NormDataMarkTwo-3d78", KOF_CASE_EXACT, KOF_WORD_SUBSTRING
 KOF_DEFINE_SCAN
 {
 	if (kof_find_str_multi(data, mark1, mark2) >= 2)
-		KOF_SCAN_INFECT("NormViewDataPe");
+		{ kof_debug("NormViewDataPe#NormViewDataPe", 0); return; }
 }

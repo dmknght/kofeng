@@ -34,6 +34,11 @@
  * twice and leaves none unreachable. Bits with no region behind them are ignored,
  * because the mask reaches the host as bytes out of a database.
  *
+ * An object may declare no region at all, and then KOF_SCAN_ALL is its only part: a script in a language the
+ * lib lexes is read whole by the lexer, and a cut by tag made before it would be a second reading of the same text
+ * (script_resolve_scan). A rule scoped to a region such an object has none of finds nothing; one that is meant for it
+ * names KOF_SCAN_ALL.
+ *
  * The ranges are filled by whichever parser identified the object, since working out
  * where the code is is format specific work and the parser already has the tables.
  */

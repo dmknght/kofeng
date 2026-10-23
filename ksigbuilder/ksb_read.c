@@ -731,35 +731,34 @@ int ksb_read_hashes(struct ksb_ctx *ksb, const char *p, int line,
 	return 1;
 }
 
-/* Read the detection name into a NUL terminated buffer. */
+/* Read a note's name (kof_debug) into a NUL terminated buffer. */
 int ksb_read_name(struct ksb_ctx *ksb, const char *p, int line, char *out,
 		  size_t cap)
 {
 	const char *q;
 	size_t n = 0;
 
-	/* Argument 1 of KOF_SCAN_MATCH("name", LEVEL), located the same way as a pattern
-	 * rather than by scanning for a quote: the level argument is a macro and
-	 * could contain one. */
+	/* Argument 1 of kof_debug("name", value), located the same way as a pattern
+	 * rather than by scanning for a quote: the value argument could contain one. */
 	q = nth_arg(ksb, p, 1, line);
 	if (!q)
 		return 0;
 	while (*q == ' ' || *q == '\t')
 		q++;
 	if (*q != '"') {
-		ksb_err(ksb, line, "first argument of KOF_SCAN_MATCH must be a name literal");
+		ksb_err(ksb, line, "first argument of kof_debug must be a name literal");
 		return 0;
 	}
 	q++;
 	while (*q && *q != '"') {
 		if (n + 1 >= cap) {
-			ksb_err(ksb, line, "detection name too long");
+			ksb_err(ksb, line, "note name too long");
 			return 0;
 		}
 		out[n++] = *q++;
 	}
 	if (*q != '"' || n == 0) {
-		ksb_err(ksb, line, "malformed detection name");
+		ksb_err(ksb, line, "malformed note name");
 		return 0;
 	}
 	out[n] = 0;
@@ -834,147 +833,12 @@ int ksb_read_family(struct ksb_ctx *ksb, const char *p, int line, char *out,
 	 *
 	 * kofviewer refuses them as they are typed, but a source written by
 	 * hand never goes through the panel - and the name reaches a filesystem
-	 * path, a C literal and a verdict line, so "anything between the
+	 * path and a C literal, so "anything between the
 	 * quotes" was never the rule anyone meant. See kof_name_ok in kofsig.h.
 	 */
 	if (!kof_name_ok(out)) {
 		ksb_err(ksb, line, "family name must be letters, digits, '-' or '_', "
 				   "and at most 63 of them");
-		return 0;
-	}
-	return 1;
-}
-
-/* A heuristic rule hashes its declared traits as text - see g_heur_sig. */
-/* A detector hashes the RESOLVED content of the call it guards, not the text. */
-/*
- * Argument 1 of KOF_SCAN_INFECT/SUSPECT(variant): a quoted custom variant,
- * KOF_MALVAR_GENERIC, or KOF_MALVAR_AUTO. Composes the full detection name with the
- * KOF_TARGET_NAME this file already declared - see kofsig.h for why the three forms
- * exist and what AUTO hashes.
- */
-int ksb_read_variant(struct ksb_ctx *ksb, const char *p, int line, char *out,
-		     size_t cap)
-{
-	const char *q;
-	char raw[128];
-	size_t rn = 0;
-	int n;
-
-	if (!ksb->decl.have_name) {
-		ksb_err(ksb, line, "KOF_SCAN_INFECT/SUSPECT before KOF_TARGET_NAME");
-		return 0;
-	}
-
-	q = nth_arg(ksb, p, 1, line);
-	if (!q)
-		return 0;
-	while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
-		q++;
-
-	if (*q == '"') {
-		q++;
-		while (*q && *q != '"') {
-			if (rn + 1 >= sizeof raw) {
-				ksb_err(ksb, line, "detection variant too long");
-				return 0;
-			}
-			/*
-			 * A NAME, AND ONLY THE CHARACTERS A NAME HAS.
-			 *
-			 * This becomes part of a detection string a scanner
-			 * prints - "ELF-x64/Botnet:Mirai-0i0bq" - so letters,
-			 * digits, '-' and '_' are the whole of it - the same
-			 * set kof_name_ok fixes for a family, because they end
-			 * up in the same detection string. Anything else
-			 * is refused rather than carried, and the reason is
-			 * what a quote does on the way IN to a file rather
-			 * than out of it: a tool that generates signatures
-			 * writes this variant back as a quoted literal, and a
-			 * quote inside it ends that literal early, leaving
-			 * whatever follows as C the build compiles. Checking
-			 * here rather than only in the generator means a file
-			 * written by hand is checked too.
-			 */
-			if (!kof_name_char((unsigned char)*q)) {
-				ksb_err(ksb, line, "detection variant may hold letters, "
-						   "digits, '-' and '_' only");
-				return 0;
-			}
-			raw[rn++] = *q++;
-		}
-		if (*q != '"' || rn == 0) {
-			ksb_err(ksb, line, "malformed detection variant");
-			return 0;
-		}
-		raw[rn] = 0;
-	} else {
-		while (*q && *q != ',' && *q != ')' && *q != ' ' && *q != '\t' &&
-		       *q != '\n' && *q != '\r') {
-			if (rn + 1 >= sizeof raw) {
-				ksb_err(ksb, line, "argument too long");
-				return 0;
-			}
-			raw[rn++] = *q++;
-		}
-		raw[rn] = 0;
-
-		if (strcmp(raw, "KOF_MALVAR_GENERIC") == 0) {
-			/* Generic means exactly one thing: the family's one
-			 * undifferentiated bucket. Nothing is appended to it -
-			 * appending anything would make it stop meaning that. */
-			strcpy(raw, "Generic");
-		} else if (strcmp(raw, "KOF_MALVAR_AUTO") == 0) {
-			/*
-			 * AUTO IS THE FILE'S ID, and it used to be a hash of
-			 * the find call this verdict guarded.
-			 *
-			 * The hash was specific, which was the point, and it
-			 * was specific to the WRONG THING: a variant names
-			 * the SAMPLE a signature was written from, and one
-			 * sample can be matched by a pattern, by a block
-			 * similarity and by a capability chain. Tying the
-			 * name to one matcher's text meant the same sample
-			 * had three unrelated names, and meant that EDITING
-			 * THE PATTERN RENAMED THE FINDING.
-			 *
-			 * It was worse than that in practice: the hash was
-			 * taken over source text, so a comment moved the
-			 * line and the variant changed with it - measured in
-			 * one sitting, u7f0z then q4rmk then dohf6 for a
-			 * rule nobody had touched.
-			 *
-			 * The id in the file name is the sample's, it is
-			 * chosen once, and it costs nothing to compute.
-			 */
-			if (!ksb->decl.name_id[0]) {
-				ksb_err(ksb, line, "KOF_MALVAR_AUTO needs the id at "
-						   "the end of the file name");
-				return 0;
-			}
-			snprintf(raw, sizeof raw, "%s", ksb->decl.name_id);
-		} else {
-			fprintf(stderr, "%s:%d: error: \"%s\" is not a verdict "
-				"argument: want a quoted name, "
-				"KOF_MALVAR_AUTO or KOF_MALVAR_GENERIC\n",
-				ksb->src_name, line, raw);
-			ksb->errors++;
-			return 0;
-		}
-	}
-
-	/*
-	 * The variant only - not composed with family or type here anymore.
-	 * KOF_TARGET_NAME is one declaration per file; composing its family and
-	 * type into every finding's text repeated that declaration once per
-	 * finding in the name pool. The host composes the full string at
-	 * report time instead, from this variant plus the module's own
-	 * family_off/maltype record - see struct kof_pack_mod in dbcore.h and
-	 * finding_str in scan.c.
-	 */
-	n = snprintf(out, cap, "%s", raw);
-	if (n < 0 || (size_t)n >= cap) {
-		ksb_err(ksb, line, "detection variant too long");
 		return 0;
 	}
 	return 1;

@@ -43,6 +43,13 @@ enum kgenome_diag_role {
 	 * be precise enough that no call has two inputs wearing one.
 	 */
 	KGENOME_DIAG_ROLE_SOURCE,
+	/*
+	 * THE VALUE A CALL IS APPLIED TO, in a script. A decode takes bytes and gives bytes; an eval takes text and runs it. Neither
+	 * has a descriptor or a path or a buffer in memory - the argument IS the value - so no other word fits, and a script's
+	 * diagnose says "the decode's result was what the eval ran" with this one. Appended: a role is a field of every pack
+	 * record and a renumbering breaks every diagnose.
+	 */
+	KGENOME_DIAG_ROLE_VALUE,
 	KGENOME_DIAG_ROLE_COUNT
 };
 
@@ -59,7 +66,13 @@ enum kgenome_diag_role {
 enum kgenome_diag_link {
 	KGENOME_DIAG_LINK_PROVEN = 0,
 	KGENOME_DIAG_LINK_BROKEN,
-	KGENOME_DIAG_LINK_UNKNOWN
+	KGENOME_DIAG_LINK_UNKNOWN,
+	/*
+	 * TRUE FOR AT LEAST ONE CALL, NOT SHOWN FOR ALL. A script's link made through a function the text defines: the producers of every call of the
+	 * function reach what its parameter feeds (a summary is the union over the call sites, and no control flow is read). Appended: a value
+	 * of this byte is read by no matcher and written to no pack, so a new one moves nothing.
+	 */
+	KGENOME_DIAG_LINK_MAY
 };
 
 #endif /* KGENOME_DIAG_VOCAB_H */

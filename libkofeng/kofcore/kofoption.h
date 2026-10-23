@@ -60,10 +60,12 @@ typedef int (*kof_on_object)(const char *name, const void *bytes, uint64_t len,
  * enums on kof_finding - and `object` is where it was found, which is the
  * object's name and not the file's.
  *
- * WHEN IT FIRES. Once per finding the engine is reporting: one per subject
- * normally, and once per match when the caller asked for all of them. A
- * finding that fired and was superseded does not reach here; it is still in
- * kof_result for an examiner that wants to see the working.
+ * WHEN IT FIRES. Once per object that has a verdict (kof_result.verdict), with
+ * the verdict itself as `f`: its name is composed from the diseases the object
+ * has, and `f` carries the ids of the diagnoses that matched and of the diseases
+ * (kof_finding.diag, .disease) so the host can walk back from the verdict to what
+ * made it. A detector's, rule's or unpacker's finding is evidence: it stays in
+ * kof_result for an examiner and never reaches here.
  */
 typedef void (*kof_on_event_detected)(const char *object,
 				      const char *verdict,
@@ -195,26 +197,6 @@ struct kof_scan_option {
 	int      follow_symlinks;
 
 	/*
-	 * Keep going after the first finding on an object.
-	 *
-	 * Off by default, which is both the cheap answer and the conservative one:
-	 * once an object has been named, running the rest of the database on it buys
-	 * a longer list and nothing else. An on-access hook only ever needs to know
-	 * whether to block.
-	 *
-	 * On costs the whole database per infected object and is what a report wants:
-	 * an object can belong to two families, and a list that stops at one is a
-	 * list that says nothing about the other.
-	 *
-	 * The trade to know about: with this off, which name is reported depends on
-	 * where the matching module happens to sit in the database, because the scan
-	 * stops at the first one that fires. Every scanner that stops early has this
-	 * property; naming it here is cheaper than rediscovering it from a bug report
-	 * about a sample that changed its name after a database update.
-	 */
-	int      all_matches;
-
-	/*
 	 * SCAN THESE BYTES AS THIS FORMAT, skipping the sniff chain.
 	 *
 	 * Zero - what a memset gives - identifies the object the ordinary way,
@@ -297,8 +279,7 @@ struct kof_scan_option {
 	 * caller that has not been updated.
 	 *
 	 * Level 0 is not spelled here either; it is heur_off above. A rule
-	 * declaring KOF_HEUR_LEVEL higher than this is not entered. See
-	 * kofmod/heur.h.
+	 * of a level higher than this is not entered.
 	 */
 	uint32_t heur_level;
 
@@ -329,7 +310,7 @@ struct kof_scan_option {
 	uint32_t emu_use;
 
 	/*
-	 * The caller said never and means it, so a heuristic rule may not ask
+	 * The caller said never and means it, so no module or diagnose may ask
 	 * for the emulator on any object.
 	 *
 	 * A separate flag because emu_use cannot tell the two apart: --heur 1

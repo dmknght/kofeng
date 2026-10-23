@@ -48,10 +48,10 @@ KOF_DEFINE_SCAN
 		return;
 
 	if (kof_find_str(toolchain, gcc_comment))
-		KOF_SCAN_INFECT("GccComment");
+		{ kof_debug("StrTest#GccComment", 0); return; }
 
 	/* Suspicion carries a reason, not a name. The host composes the string from
 	 * the format and architecture it already knows plus this code. */
 	if (kof_find_str(loaded_data, glibc))
-		KOF_SCAN_SUSPECT("AnomCombo");
+		{ kof_debug("StrTest#AnomCombo", 0); return; }
 }

@@ -150,7 +150,6 @@ VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_hit.c \
                 kofexamine/kv_input.c \
                 kofexamine/kv_keys.c \
-                kofexamine/kv_list.c \
                 kofexamine/kv_main.c \
                 kofexamine/kv_marker.c \
                 kofexamine/kv_menu.c \
@@ -161,6 +160,8 @@ VIEWER_UNITS := kofexamine/kv_actions.c \
                 kofexamine/kv_screen.c \
                 kofexamine/kv_state.c \
                 kofexamine/kv_symd.c \
+                kofexamine/kv_syn.c \
+                kofexamine/kv_syntable.c \
                 kofexamine/kv_text.c \
                 kofexamine/kv_tree.c \
                 kofexamine/kv_tree_draw.c \

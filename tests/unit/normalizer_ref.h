@@ -256,6 +256,24 @@ static size_t nr_hex_enc(const uint8_t *in, size_t n, char *out, int upper)
 	return 2u * n;
 }
 
+/* `<sep>xNN` for every byte, the digits upper case, lower case, or alternating (`mode` 0, 1, 2). */
+static size_t nr_esc_enc(const uint8_t *in, size_t n, char *out, char sep, int mode) NR_UNUSED;
+static size_t nr_esc_enc(const uint8_t *in, size_t n, char *out, char sep, int mode)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		const char *d = mode == 1 || (mode == 2 && (i & 1u)) ? "0123456789abcdef"
+								    : "0123456789ABCDEF";
+
+		out[4u * i] = sep;
+		out[4u * i + 1u] = 'x';
+		out[4u * i + 2u] = d[in[i] >> 4];
+		out[4u * i + 3u] = d[in[i] & 15u];
+	}
+	return 4u * n;
+}
+
 /* Percent-encode every byte that is not a letter or a digit; ' ' as '+' when
  * `plus`. Returns length. */
 static size_t nr_pct_enc(const uint8_t *in, size_t n, char *out, int plus) NR_UNUSED;
@@ -795,6 +813,57 @@ static int nr_unpct(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 	return changed;
 }
 
+/* One whole escape at `at`: the run's separator, a lower case x, two hex digits. */
+static int nr_esc_whole(const uint8_t *p, uint64_t at, uint8_t sep)
+{
+	return p[at] == sep && p[at + 1u] == 'x' && nr_hexv(p[at + 2u]) >= 0 &&
+	       nr_hexv(p[at + 3u]) >= 0;
+}
+
+/* The escape pass read one byte at a time: no memchr for the x, every offset tried as a start. */
+static int nr_unesc(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
+		    struct nr_notes *nt)
+{
+	uint64_t i = from;
+	int changed = 0;
+
+	if (!p || !n)
+		return 0;
+	if (to > n)
+		to = n;
+	while (i + 4u <= to) {
+		uint64_t e, k = 0, w = 0, j;
+		uint32_t count = 0;
+		uint8_t sep = p[i];
+
+		if ((sep != '\\' && sep != '/') || !nr_esc_whole(p, i, sep)) {
+			i++;
+			continue;
+		}
+		if (sep == '\\') {             /* a backslash that is itself escaped is no start */
+			while (k < i && p[i - 1u - k] == '\\')
+				k++;
+			if (k & 1u) {
+				i++;
+				continue;
+			}
+		}
+		for (e = i; e + 4u <= to && nr_esc_whole(p, e, sep); e += 4u)
+			count++;
+		if (count < 8u) {
+			i = e;
+			continue;
+		}
+		for (j = i; j < e; j += 4u)
+			p[i + w++] = (uint8_t)((nr_hexv(p[j + 2u]) << 4) | nr_hexv(p[j + 3u]));
+		memset(p + i + w, 0, e - i - w);
+		nr_note_run(nt, p, n, i, w, e);
+		changed = 1;
+		i = e;
+	}
+	return changed;
+}
+
 /*
  * THE LAYER LOOP, with the same budget the header states: round zero is the
  * whole object, each round walks only what the one before wrote, and the bytes
@@ -837,6 +906,7 @@ static void nr_decode(uint8_t *p, uint64_t n, struct nr_dec *r)
 			}
 			r->changed |= nr_unb64(p, n, a, b, &nxt);
 			r->changed |= nr_unhex(p, n, a, b, &nxt);
+			r->changed |= nr_unesc(p, n, a, b, &nxt);
 			r->changed |= nr_unpct(p, n, a, b, &nxt);
 		}
 		if (r->limit & KOF_EXE_DEC_WORK)
@@ -897,7 +967,7 @@ static size_t nr_mix(struct nrng *r, uint8_t *b, size_t cap)
 	char cmd[96], enc[400], enc2[900];
 
 	while (at + 200u < cap) {
-		uint32_t kind = nr_below(r, 12u);
+		uint32_t kind = nr_below(r, 15u);
 		size_t k, l, l2;
 
 		switch (kind) {
@@ -978,6 +1048,30 @@ static size_t nr_mix(struct nrng *r, uint8_t *b, size_t cap)
 			at = nr_put(b, at, cap, " ", 1u);
 			at = nr_put(b, at, cap, enc, l2);
 			at = nr_put(b, at, cap, "\n", 1u);
+			break;
+		case 11:
+		case 12:                        /* an escaped command, either separator */
+			l = nr_cmd(r, cmd, 8u + nr_below(r, 40u));
+			l2 = nr_esc_enc((const uint8_t *)cmd, l, enc, kind == 11u ? '\\' : '/',
+					(int)nr_below(r, 3u));
+			{
+				const char *q = nr_below(r, 2u) ? "\"" : " ";
+				const char *t = nr_below(r, 2u) ? "\"\n" : "\n";
+
+				at = nr_put(b, at, cap, q, 1u);
+				at = nr_put(b, at, cap, enc, l2);
+				at = nr_put(b, at, cap, t, strlen(t));
+			}
+			break;
+		case 13:                        /* escapes that are not a run: short, mixed, broken */
+			k = nr_below(r, 4u);
+			l = nr_cmd(r, cmd, 4u + nr_below(r, 8u));
+			l2 = nr_esc_enc((const uint8_t *)cmd, l > 7u ? 7u : l, enc, '\\', 0);
+			if (k == 1u)
+				enc[8] = '/';           /* a second separator in the middle */
+			else if (k == 2u && l2 > 6u)
+				enc[l2 - 2u] = 'Z';     /* a digit that is not */
+			at = nr_put(b, at, cap, enc, l2);
 			break;
 		default:                        /* decoy: runs that look like payloads */
 			k = 8u + nr_below(r, 40u);

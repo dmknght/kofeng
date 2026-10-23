@@ -302,9 +302,9 @@ static int pack_check(const void *map, uint64_t len, uint64_t file_len,
 		       (unsigned)KOF_PACK_MACH_HOST);
 	/* The kind decides which list the modules go into and which point they are
 	 * entered from, so a kind the engine has no list for is refused rather
-	 * than guessed at. */
-	if (h->kind != KOF_PACK_DETECT && h->kind != KOF_PACK_UNPACK &&
-	    h->kind != KOF_PACK_HEUR)
+	 * than guessed at - the retired heuristic-rule kind (KOF_PACK_RETIRED_HEUR)
+	 * with the rest. */
+	if (h->kind != KOF_PACK_DETECT && h->kind != KOF_PACK_UNPACK)
 		REFUSE("holds kind %u, which this engine has no dispatch for",
 		       h->kind);
 	/* Before any offset inside is believed: truncation is caught here. */

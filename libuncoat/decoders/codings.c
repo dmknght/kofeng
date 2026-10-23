@@ -1,6 +1,6 @@
 /*
  * codings.c - the text codings behind kuncoat_transform: base64, hex, url, add,
- * caesar, reverse, both directions. See codings.h, and transform.h for the
+ * caesar, reverse, escape, both directions. See codings.h, and transform.h for the
  * contract.
  */
 
@@ -10,8 +10,8 @@
 #include "codings.h"
 #include "../transform_private.h"
 
-/* Upper case digits, for hex_write and url_write alike. */
-static const char hexd[] = "0123456789ABCDEF";
+/* Upper case digits (kof_hex_digit, core's one writer table), for hex_write, url_write and esc_write alike. */
+#define HEXD(v) kof_hex_digit((v), 1)
 
 static int b64_skip(uint8_t c)
 {
@@ -73,7 +73,7 @@ static kuncoat_st_t b64_read(const struct kuncoat_step *s, const uint8_t *in, ui
  * either function and puts a branch on every digit.
  */
 static kuncoat_st_t hex_read(const uint8_t *in, uint64_t n, uint8_t *out, uint64_t cap,
-		     uint64_t *w)
+		     uint64_t *w, int strict)
 {
 	uint32_t acc = 0, have = 0;
 	uint64_t i;
@@ -82,7 +82,7 @@ static kuncoat_st_t hex_read(const uint8_t *in, uint64_t n, uint8_t *out, uint64
 		int v = kof_hex_val(in[i]);
 
 		if (v < 0) {
-			if (hex_skip(in[i]))
+			if (!strict && hex_skip(in[i]))
 				continue;
 			return KUNCOAT_CORRUPT;
 		}
@@ -96,9 +96,72 @@ static kuncoat_st_t hex_read(const uint8_t *in, uint64_t n, uint8_t *out, uint64
 	if (have)
 		return KUNCOAT_TRUNCATED;       /* an odd digit is not a byte string */
 	for (; i < n; i++)
-		if (!hex_skip(in[i]))
+		if (strict || !hex_skip(in[i]))
 			return KUNCOAT_OVER_BUDGET;
 	return KUNCOAT_OK;
+}
+
+/*
+ * `<s>xHH` repeated, the whole input and nothing else. The separator is the caller's (a backslash
+ * for a C or Python literal, a slash for what one dropper writes), and it is one byte for the whole
+ * run: an escape with another separator in the middle is not this text.
+ *
+ * Not hex_read with a prefix: that one skips what is between the digits, and the point here is the
+ * reverse - a byte that is not part of an escape means the text is not this coding, so it is
+ * CORRUPT, which a reader that was told the run is escapes (the normaliser, after it has found the
+ * run) uses to refuse a run it found wrongly. The digits are read in either case; 'x' is the one
+ * lower case letter, as in C.
+ */
+static int esc_sep(const struct kuncoat_step *s)
+{
+	uint32_t c = s->k32 ? s->k32 : (uint32_t)'\\';
+
+	if (c > 0xffu || c == 'x' || kof_hex_val((uint8_t)c) >= 0 ||
+	    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+		return -1;
+	return (int)c;
+}
+
+static kuncoat_st_t esc_read(const struct kuncoat_step *s, const uint8_t *in, uint64_t n,
+			     uint8_t *out, uint64_t cap, uint64_t *w)
+{
+	int sep = esc_sep(s);
+	uint64_t i = 0;
+
+	if (sep < 0)
+		return KUNCOAT_BAD_ARG;
+	while (i < n && *w < cap) {
+		int hi, lo;
+
+		if (in[i] != (uint8_t)sep)
+			return KUNCOAT_CORRUPT;
+		if (n - i < 4u)
+			return KUNCOAT_TRUNCATED;       /* an escape cut short */
+		hi = kof_hex_val(in[i + 2u]);
+		lo = kof_hex_val(in[i + 3u]);
+		if (in[i + 1u] != 'x' || hi < 0 || lo < 0)
+			return KUNCOAT_CORRUPT;
+		out[(*w)++] = (uint8_t)(hi << 4 | lo);
+		i += 4u;
+	}
+	return i < n ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
+}
+
+static kuncoat_st_t esc_write(const struct kuncoat_step *s, const uint8_t *p, uint64_t len,
+			      uint8_t *out, uint64_t cap, uint64_t *w)
+{
+	int sep = esc_sep(s);
+	uint64_t i;
+
+	if (sep < 0)
+		return KUNCOAT_BAD_ARG;
+	for (i = 0; i < len && *w + 4u <= cap; i++) {
+		out[(*w)++] = (uint8_t)sep;
+		out[(*w)++] = 'x';
+		out[(*w)++] = HEXD(p[i] >> 4);
+		out[(*w)++] = HEXD(p[i] & 15u);
+	}
+	return i < len ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
 }
 
 static kuncoat_st_t url_read(const struct kuncoat_step *s, const uint8_t *p, uint64_t len,
@@ -124,7 +187,7 @@ static kuncoat_st_t url_read(const struct kuncoat_step *s, const uint8_t *p, uin
 				return len - i < 3u ? KUNCOAT_TRUNCATED   /* a cut escape */
 						    : KUNCOAT_CORRUPT;
 		}
-		out[(*w)++] = p[i] == '+' ? (uint8_t)' ' : p[i];
+		out[(*w)++] = p[i] == '+' && !(s->flags & KUNCOAT_F_RAW) ? (uint8_t)' ' : p[i];
 	}
 	/* Text carrying no escape at all is not encoded text. */
 	if (!esc && !lax)
@@ -209,8 +272,8 @@ static kuncoat_st_t hex_write(const uint8_t *p, uint64_t len, uint8_t *out, uint
 
 	/* UPPER CASE AND NO SEPARATOR, the form a pattern is written in. */
 	for (i = 0; i < len && *w + 2u <= cap; i++) {
-		out[(*w)++] = (uint8_t)hexd[p[i] >> 4];
-		out[(*w)++] = (uint8_t)hexd[p[i] & 15u];
+		out[(*w)++] = HEXD(p[i] >> 4);
+		out[(*w)++] = HEXD(p[i] & 15u);
 	}
 	return i < len ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
 }
@@ -237,8 +300,8 @@ static kuncoat_st_t url_write(const uint8_t *p, uint64_t len, uint8_t *out, uint
 		if (*w + 3u > cap)
 			break;
 		out[(*w)++] = '%';
-		out[(*w)++] = (uint8_t)hexd[ch >> 4];
-		out[(*w)++] = (uint8_t)hexd[ch & 15u];
+		out[(*w)++] = HEXD(ch >> 4);
+		out[(*w)++] = HEXD(ch & 15u);
 	}
 	return i < len ? KUNCOAT_OVER_BUDGET : KUNCOAT_OK;
 }
@@ -253,7 +316,7 @@ static enum kuncoat_status coding_run(const struct kuncoat_step *s,
 						: b64_read(s, in, n, out, cap, w);
 	case KUNCOAT_ALGO_HEX:
 		return s->dir == KUNCOAT_ENCODE ? hex_write(in, n, out, cap, w)
-						: hex_read(in, n, out, cap, w);
+						: hex_read(in, n, out, cap, w, (s->flags & KUNCOAT_F_STRICT) != 0);
 	case KUNCOAT_ALGO_URL:
 		return s->dir == KUNCOAT_ENCODE ? url_write(in, n, out, cap, w)
 						: url_read(s, in, n, out, cap, w);
@@ -263,6 +326,9 @@ static enum kuncoat_status coding_run(const struct kuncoat_step *s,
 		return caesar(s, in, n, out, cap, w);
 	case KUNCOAT_ALGO_REVERSE:
 		return reverse(in, n, out, cap, w);
+	case KUNCOAT_ALGO_ESCAPE:
+		return s->dir == KUNCOAT_ENCODE ? esc_write(s, in, n, out, cap, w)
+						: esc_read(s, in, n, out, cap, w);
 	default:
 		return KUNCOAT_UNSUPPORTED;
 	}

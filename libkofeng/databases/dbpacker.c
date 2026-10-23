@@ -298,14 +298,12 @@ static int collect_alloc(struct collect_cx *cx, const struct kof_pw_mod *mods,
 	if (!b->mod || !b->str || !b->name || !b->rng)
 		return 0;
 	/*
-	 * dn interns, per module, a family AND (when present) a heur_predict and
-	 * a source path, plus one entry per finding name - so up to n_name + 3n
-	 * distinct strings, and one more for the empty string reserved below. It
-	 * is sized for all of them up front: dedup_init takes an expected count
-	 * rather than growing, so a table that fills mid-build is a build error,
-	 * not a silent wrong answer. Sizing it for only n_name + n - which is
-	 * what it was before predict and src were interned into it - overflowed
-	 * on a HEUR pack with more rules than names and aborted the whole build.
+	 * dn interns, per module, a family AND (when present) a content and a
+	 * source path, plus one entry per name - so up to n_name + 3n distinct
+	 * strings, and one more for the empty string reserved below. It is sized
+	 * for all of them up front: dedup_init takes an expected count rather
+	 * than growing, so a table that fills mid-build is a build error, not a
+	 * silent wrong answer.
 	 */
 	if (!dedup_init(&cx->ds, b->n_str ? b->n_str : 1) ||
 	    !dedup_init(&cx->dn, (b->n_name ? b->n_name : 1) + 3u * (n ? n : 1) + 1u))
@@ -313,13 +311,12 @@ static int collect_alloc(struct collect_cx *cx, const struct kof_pw_mod *mods,
 
 	/*
 	 * RESERVE POOL OFFSET ZERO for the empty string, so nothing else lands
-	 * there. heur_predict_off and src_off use 0 to mean "absent", and the
-	 * loader reads it back that way (kof_db_heur_predict, kof_db_source) -
-	 * but offset 0 is otherwise whatever string was interned first, module
-	 * 0's family. Without this, a rule that predicts a family equal to that
-	 * string dedups to offset 0 and its prediction is silently read as none.
-	 * Both fields are only ever set for a non-empty value, so pinning ""
-	 * here means a real predict or src can never collide with the sentinel.
+	 * there. content_off and src_off use 0 to mean "absent", and the loader
+	 * reads it back that way (kof_db_content, kof_db_source) - but offset 0 is
+	 * otherwise whatever string was interned first, module 0's family. Without
+	 * this, a content equal to that string dedups to offset 0 and is silently
+	 * read as none. Both fields are only ever set for a non-empty value, so
+	 * pinning "" here means a real one can never collide with the sentinel.
 	 */
 	{
 		uint32_t empty_off, empty_uid;
@@ -376,7 +373,7 @@ static int collect_check(const struct kof_pw_mod *m)
 	 * text a finding is composed from is held to it: the family, the family a
 	 * rule predicts, and each detection name.
 	 */
-	if (!name_fits(m->family) || !name_fits(m->heur_predict))
+	if (!name_fits(m->family))
 		return 0;
 	{
 		uint32_t k;
@@ -442,22 +439,11 @@ static int collect_head(struct collect_cx *cx, const struct kof_pw_mod *m,
 			return 0;
 	}
 	o->maltype = m->maltype;
-	o->disease = m->disease;
-	o->disease_type = m->disease_type;
 	o->step = m->step;
-	o->heur_phase = m->heur_phase;
-	o->heur_level = m->heur_level;
-	o->cure_off   = m->cure_off;
-	o->heur_want  = m->heur_want;
+	/* The record's reserved fields (see struct kof_pack_mod) stay as the array
+	 * was made: zero. */
 	/* Interned like the family and the source path: the text lives
 	 * once in the pool and the record carries an offset. */
-	if (m->heur_predict && m->heur_predict[0]) {
-		uint32_t predict_uid;
-
-		if (!name_intern(&cx->dn, &b->name_pool, m->heur_predict,
-				 &o->heur_predict_off, &predict_uid))
-			return 0;
-	}
 	if (m->content && m->content[0]) {
 		uint32_t content_uid;
 

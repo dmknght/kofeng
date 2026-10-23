@@ -26,8 +26,9 @@
 
 /* The script folding pass and the lexical table it is driven from - see
  * kof_scan_script_forms below. */
-#include "../analyzers/parsers/scripts/script_norm.h"
 #include "../analyzers/parsers/scripts/script_parse.h"
+#include "../analyzers/parsers/scripts/script_route.h"
+#include <textual/textual.h>
 /*
  * The one format header the scan path includes, and it is not a shortcut.
  *
@@ -48,13 +49,12 @@
  * The one setup both passes below need, and the one place their refusals are
  * written down.
  *
- * `b` comes back as the object's bytes and `lx` as the table for its language.
+ * `b` comes back as the object's bytes.
  * Answers 0 when there is nothing to do, and the reasons are all of the form
  * "this is not a script this build can read", never "this script is clean".
  */
 static int script_pass_open(const struct kof_obj_ctx *ctx,
-			    struct kof_scanner **psc, const struct kof_lex **plx,
-			    kof_buf *b)
+			    struct kof_scanner **psc, kof_buf *b)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);
 	const struct kof_script_info *si;
@@ -73,9 +73,8 @@ static int script_pass_open(const struct kof_obj_ctx *ctx,
 	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
 		return 0;
 	si = (const struct kof_script_info *)ctx->file_header;
-	*plx = kof_lex_for(si->kind);
-	if (!*plx)
-		return 0;       /* no table for the kind: nothing is guessed */
+	if (!kof_script_textual_lang(si->kind))
+		return 0;       /* no lexer for the kind: nothing is guessed */
 
 	*b = kof_src_buf(sc->cur.src);
 	if (!b->p || !b->n || b->n > sc->ledger.obj_cap || b->n > 0xffffffffu)
@@ -105,246 +104,80 @@ static void script_declare(struct kof_scanner *sc,
 }
 
 /*
- * THE TAG THE FILE OPENED WITH, IN FRONT OF WHAT THE PASS PRODUCED.
+ * WHAT A DECODE LEFT BEHIND, CLOSED UP.
  *
- * A produced form has to be READABLE AS THE LANGUAGE IT IS, and this is not a
- * nicety - it is the difference between the child being scanned and not.
- * kof_script_sniff accepts a script on a shebang at offset zero or on an
- * opening tag, and it has nothing else to go on: a bare "$k="4e4d..." is a
- * fragment that no sniff claims, so the child came out KOF_FMT_UNKNOWN and
- * every rule written about a PHP script was filtered out before it ran. That
- * was measured, not feared - the folded form of a real shell examined as
- * "unrecognised, 160 bytes".
- *
- * THE TAG FROM THE PARSE, NOT THE HEADER REGION. It used to resolve
- * KOF_SCAN_SCRIPT_HEADER, which worked only while php was credited with a
- * header; it has none now - its tag opens a body block - so the region is
- * empty and the wrapper would have been too. tag_off and tag_len are the fact
- * itself and are right for all three shapes: "<?php", a "<%@ ... %>" directive
- * run, and a "#!" line.
+ * kof_exe_decode rewrites a run where it sits and fills what it vacates with zeros, which a binary's
+ * normaliser collapses. A script's view is text, and a run of zeros in the middle of it is a gap in
+ * a string - 'https://host/path<zeros>', - that no marker written on the string can match across.
+ * They go, so the decoded text sits where the encoded text was. Only after a decode that fired,
+ * and only the zeros the decode made: a script that holds a NUL of its own keeps it (the
+ * function removed every zero of the view, its own included: L19 of the lexer audit). `own` is
+ * a bit for each byte that was zero BEFORE the decode, or NULL when none was.
  */
-static int script_head_emit(const struct kof_obj_ctx *ctx)
+static uint32_t script_squeeze(uint8_t *p, uint32_t n, const uint8_t *own)
 {
-	struct kof_scanner *sc = kof_scan_of(ctx);
-	const struct kof_script_info *si = kof_script(ctx);
-	kof_buf b = kof_src_buf(sc->cur.src);
-	kof_buf s;
+	uint32_t i, w = 0;
 
-	if (!si || !si->tag_len)
-		return 1;               /* nothing named it; nothing to put back */
-	s = kof_slice(b, si->tag_off, si->tag_len);
-	if (!s.p || !s.n)
-		return 1;
-	if (!oc_emit_exact(ctx, s.p, s.n))
-		return 0;
-	/*
-	 * AND A NEWLINE AFTER IT, WHICH THE LANGUAGE REQUIRES.
-	 *
-	 * "<?php" is not a tag php accepts on its own - it has to be followed
-	 * by whitespace, and the first thing the form pass removes is the blank
-	 * line under it. Joining the two produced "<?php$p='...", which sniffs
-	 * as php, parses as php here, and is a syntax error in php.
-	 *
-	 * Only when the tag did not already end in one, so a shebang - which
-	 * carries its line ending with it - does not gain a blank line the pass
-	 * would have taken out.
-	 */
-	if (s.p[s.n - 1u] != '\n' &&
-	    !oc_emit_exact(ctx, (const uint8_t *)"\n", 1u))
-		return 0;
-	return 1;
+	for (i = 0; i < n; i++)
+		if (p[i] || (own && ((own[i >> 3] >> (i & 7u)) & 1u)))
+			p[w++] = p[i];
+	return w;
 }
 
-/* Copy bytes the pass must not touch. Answers `held` unchanged when there is no
- * room, which cannot happen while the output is bounded by the input. */
-static uint32_t verbatim(uint8_t *out, uint32_t held, uint32_t cap,
-			 const uint8_t *p, uint64_t n)
+/* Give back the text `oc_script_consts` made, and what it was charged. */
+static void consts_end(struct kof_scanner *sc, uint8_t *text, uint64_t charged)
 {
-	if (!p || !n || held + n > cap)
-		return held;
-	memcpy(out + held, p, (size_t)n);
-	return held + (uint32_t)n;
-}
-
-/*
- * HOW THE PROGRAM WAS TYPED, TAKEN OUT OF IT - the form pass, over the WHOLE
- * object.
- *
- * A signature is bytes, and bytes carry the indentation, the blank lines, the
- * comments and the spacing of whichever copy the researcher had. Every one of
- * those is free for an author to change and none of them changes what the
- * program does, so a marker cut from one copy misses the next. This produces
- * the same file with all of that removed, once, and a marker taken from THAT
- * copy matches every way of typing it.
- *
- * THE PASS RUNS ON BODY AND ON NOTHING ELSE, AND THE REST IS COPIED.
- *
- * Those are two rules, not one, and the second is what this used to get wrong.
- * It walked the BODY extents and emitted only those, so a page came out as its
- * code with the html deleted - and the result was no longer the file. It could
- * not be shown as one either: re-parsed it had one BODY and no MARKUP, so the
- * reader lost where the code had been cut into the page, which is the first
- * thing worth seeing about a page.
- *
- * So the walk is over the whole object. What lies between the BODY extents is
- * the complement of them - the header, the markup gaps, the closing tag - and
- * every byte of it is copied exactly as the parse found it. That is not
- * conservatism, it is correctness: the rules here are the LANGUAGE's, and
- * applied to markup they are wrong in both directions - "//" in an unquoted
- * href is not a comment, and closing up the spaces in a sentence changes it.
- *
- * Because the complement is copied, the result re-parses into the same regions
- * the input had, and the viewer draws a page as a page.
- *
- * A NEWLINE AT A BOUNDARY THAT WOULD OTHERWISE GLUE. The first thing the pass
- * removes from a body is the blank line under the tag that opened it, so
- * "<?php" and the first statement ran together into "<?php$u=" - which sniffs
- * as php, parses as php here, and is a syntax error in php. One rule covers it
- * and the closing tag at the other end: at a boundary between a copied run and
- * a formed one, in either direction, put back a newline unless one of the two
- * sides already has one.
- *
- * Writes into `out`, which must hold b.n, and answers how long the result is.
- */
-static uint32_t script_form(const struct kof_obj_ctx *ctx,
-			    struct kof_scanner *sc, const struct kof_lex *lx,
-			    kof_buf b, uint8_t *out, uint32_t cap)
-{
-	struct kof_range *ext;
-	uint32_t n_ext, i, held = 0;
-	uint64_t at = 0;
-
-	{
-		struct kof_ext_buf *eb = kof_scan_ext_buf(sc, 1);
-
-		n_ext = kof_scan_resolve_range(ctx, KOF_SCAN_SCRIPT_BODY, eb);
-		ext = eb->v;
-	}
-	if (!n_ext)
-		return 0;
-	/*
-	 * Built whole before anything is emitted, because whether to emit at
-	 * all is a question about the whole of it: an extent that formed to
-	 * itself says nothing about the next one.
-	 */
-	for (i = 0; i < n_ext; i++) {
-		kof_buf s = kof_slice(b, ext[i].off, ext[i].len);
-		uint32_t w;
-
-		/* Everything since the last body extent, exactly as it is. */
-		if (ext[i].off > at)
-			held = verbatim(out, held, cap, b.p + at,
-					ext[i].off - at);
-		at = ext[i].off + ext[i].len;
-		if (!s.p || !s.n || s.n > 0xffffffffu)
-			continue;
-		if (held + 1u >= cap)
-			break;
-		/*
-		 * FORMED ONE BYTE ALONG, SO THE BOUNDARY IS DECIDED ON WHAT
-		 * CAME OUT.
-		 *
-		 * Whether a separator is needed is a question about the first
-		 * byte of the FORMED run, not of the input's - and the two
-		 * differ exactly where it matters. A body opens with the
-		 * newline under its tag, which reads as "already separated";
-		 * the pass then removes that newline as a blank line and the
-		 * tag ends up welded to the first statement. Measured as
-		 * "<?php$u=" - sniffs as php, parses as php here, and is a
-		 * syntax error in php.
-		 *
-		 * So a byte is reserved, the pass writes past it, and the byte
-		 * is either filled in or closed up once there is something to
-		 * look at.
-		 */
-		w = kof_script_norm(lx, s.p, (uint32_t)s.n, out + held + 1u,
-				    cap - held - 1u, KOF_NORM_ALL);
-		/*
-		 * A REFUSAL KEEPS THE BYTES. kof_script_norm answers 0 when it
-		 * will not touch an extent - a heredoc in it, no room - and the
-		 * contract there is that the caller uses the input as it
-		 * stands. Dropping the extent instead would hand over a program
-		 * with a hole in it and call it the same program.
-		 */
-		if (!w) {
-			held = verbatim(out, held, cap, s.p, s.n);
-			continue;
-		}
-		/*
-		 * AND A BLOCK THAT CAME OUT EMPTY GOES WITH WHAT EMPTIED IT.
-		 *
-		 * A block holding one comment forms to "<%\n%>" - a code
-		 * region with no code in it. The comment was how the file was
-		 * typed, the block around it was typed to hold the comment, and
-		 * the pass that removes the one removes the other. Dropped
-		 * whole: `at` is already past it, so the markup either side
-		 * joins up and the partition stays exact.
-		 */
-		if (kof_script_block_bare(ctx->subtype, out + held + 1u, w))
-			continue;
-		if (held && out[held - 1] != '\n' && out[held + 1u] != '\n') {
-			out[held] = '\n';
-			held += w + 1u;
-		} else {
-			memmove(out + held, out + held + 1u, (size_t)w);
-			held += w;
-		}
-	}
-	/* The closing tag, the markup after the last island, or nothing. */
-	if (at < b.n) {
-		if (held && out[held - 1] != '\n' && b.p[at] != '\n')
-			held = verbatim(out, held, cap,
-					(const uint8_t *)"\n", 1u);
-		held = verbatim(out, held, cap, b.p + at, b.n - at);
-	}
-	return held;
+	free(text);
+	oc_scan_release(sc, charged);
 }
 
 /*
  * THE SCRIPT IN THE FORM A SIGNATURE SHOULD BE WRITTEN ON - one child, and the
  * last form, not every form on the way to it.
  *
- * Two passes make that form and they compose in one direction:
+ * Two stages make that form and they compose in one direction (the order is decided HERE, and each stage is the lib's one API for it - docs/textual_pipeline.txt):
  *
- *   form    how the program was TYPED, removed. Indentation, blank lines,
- *           comment-only lines, spacing outside strings. Always run.
- *   fold    what the program BUILDS out of its own literals, built. A
- *           generator that cuts a shell into pieces, scatters them over
- *           variables and joins them at run time leaves no byte string that
- *           survives two builds - the separator, the names, the cut points and
- *           the join order all change. Measured on two builds of one php
- *           obfuscator: not one shared substring in the raw files, and the
- *           same 65 bytes after folding. Costs a walk over every assignment,
- *           so it is `deep` - level 2 - only.
+ *   constants  what the program BUILDS out of its own literals, written where it was built (deep only: it costs a walk over every assignment). A
+ *              generator that cuts a shell into pieces, scatters them over variables and joins them at run time leaves no byte string that
+ *              survives two builds - the separator, the names, the cut points and the join order all change. Measured on two builds of one php
+ *              obfuscator: not one shared substring in the raw files, and the same 65 bytes after folding. The lib's evaluator
+ *              (kgenome_diag_scan_text, on_const) says what each right side comes to and kgenome_textual_subst writes it: oc_script_consts.
+ *              Every language the evaluator serves and whose row can write a literal (oc_script_consts_serves) takes this path; it replaced a folder
+ *              (script_fold.c) that read only php, perl, powershell and tcl and handed over the one largest value as the file.
+ *   form       how the program was TYPED, removed, and every literal under a decoder decoded (kgenome_textual_form with the decode hook,
+ *              objctx_script_dec.c). Always run, over the text the constants stage produced.
  *
- * WHEN THE FOLD FIRES, THE FORM OF THE FOLD IS THE ONLY CHILD. Emitting both
- * put two nodes in the viewer's tree for one file and left the reader to work
- * out which one to take a marker from - and the answer was always the same one,
- * the last. So the fold's output goes through the form pass and that is what is
- * handed over; the intermediate never becomes an object.
- *
- * THE FOLD READS THE WHOLE OBJECT, the form pass only its BODY. The pieces of a
- * built program are literals wherever they were assigned, and a server page
- * that assigns one in an island and joins it in the next has a join that
- * folding island by island would miss.
- *
- * A PACKER'S SHAPE, HERE AND NOT IN A DATABASE MODULE. An unpacker in bases/ is
- * a compiled blob that reaches the host through ctx->content, and both passes
- * need the parser's own lexical table - kof_lex_for - which is not in that
- * vocabulary and should not be: adding it would put a language table in the
- * module ABI.
+ * THE CONSTANTS READ THE WHOLE OBJECT. The pieces of a built program are literals wherever they were assigned, and a server page that assigns
+ * one in an island and joins it in the next has a join that folding island by island would miss. There is ONE child: the form of the text with
+ * its constants written, never the intermediate text.
  */
 uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 {
 	struct kof_scanner *sc = NULL;
-	const struct kof_lex *lx = NULL;
-	uint8_t *out = NULL, *tmp = NULL;
+	uint8_t *out = NULL;
 	kof_buf b;
-	uint32_t n = 0, raw = 0, cap;
+	uint32_t n = 0, raw = 0, cap, lang, n_dec = 0;
+	uint64_t room = 0, charged = 0;
 	int decoded = 0;
+	/* The text the form reads: the object's own, or - for a language the evaluator knows, deep - the object with what it computes written where
+	 * it was computed. */
+	uint8_t *text2 = NULL;
+	const uint8_t *in_p;
+	uint64_t in_n, charged2 = 0;
+	uint32_t n2 = 0, n_sub = 0;
 
-	if (!script_pass_open(ctx, &sc, &lx, &b))
+	if (!script_pass_open(ctx, &sc, &b))
 		return 0;
+	lang = kof_script_textual_lang(ctx->subtype);
+	in_p = b.p;
+	in_n = b.n;
+	if (deep && oc_script_consts_serves(lang)) {
+		n_sub = oc_script_consts(sc, lang, b, &text2, &n2, &charged2);
+		if (n_sub) {
+			in_p = text2;
+			in_n = n2;
+		}
+	}
 	/*
 	 * Neither pass can make anything longer than what it was given - every
 	 * rule in both removes bytes or leaves them - except the ONE newline
@@ -365,143 +198,60 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	 * a bound.
 	 */
 	{
-		uint64_t need = b.n + 2ull * KOF_SCRIPT_MAX_ISLAND + 2ull;
+		uint64_t need = in_n + 2ull * KOF_SCRIPT_MAX_ISLAND + 2ull;
+		uint64_t lib = KGENOME_TEXTUAL_FORM_CAP(in_n);
 
+		/* The lib's form may add a line break in front of each closing tag. */
+		if (lang && lib > need)
+			need = lib;
 		if (need > 0xffffffffu)
+			{
+				consts_end(sc, text2, charged2);
+				return 0;
+			}
+		/* The buffer is the scanner's memory like any other: it has to fit under the ceiling. */
+		if (need > oc_scan_room(sc)) {
+			OC_LIMIT(sc, "script pass buffer over the memory ceiling");
+			consts_end(sc, text2, charged2);
 			return 0;
+		}
+		/*
+		 * AND, WHERE LITERALS ARE DECODED, ROOM FOR WHAT THEY BECOME: the allowance of
+		 * oc_script_dec_room, never past what 32 bits can address and never more than half of
+		 * what the ceiling has left after the buffer for the text itself.
+		 */
+		if (lang) {
+			uint64_t avail = oc_scan_room(sc) - need;
+
+			room = oc_script_dec_room(sc, in_n);
+			if (room > avail / 2u)
+				room = avail / 2u;
+			if (need + room > 0xffffffffu)
+				room = 0xffffffffu - need;
+			need += room;
+		}
 		cap = (uint32_t)need;
 	}
 	out = malloc((size_t)cap);
 	if (!out) {
 		OC_LIMIT(sc, "script pass buffer not allocated");
-		return 0;
-	}
-
-	if (deep) {
-		uint32_t flim = 0;
-
-		n = kof_script_fold_ex(lx, b.p, (uint32_t)b.n, out, (uint32_t)b.n,
-				       &flim);
-		/* A bound of the folder fired: what the script builds was read only
-		 * as far as it let us, and the object says so. */
-		if (flim)
-			oc_scan_limit(sc);
-		/*
-		 * A SHORT CONSTANT IS NOT A PROGRAM. Every script builds small
-		 * strings - a path, a message, a separator - and handing each
-		 * one over as an object would bury the one that matters under
-		 * them. Sixty-four bytes is shorter than the smallest of the
-		 * shells this was built against and longer than the strings
-		 * ordinary code assembles.
-		 */
-		/*
-		 * AND IT ONLY DISPLACES THE FORMED FILE WHEN IT IS MOST OF THE
-		 * FILE.
-		 *
-		 * The fold answers "what does this script build out of its own
-		 * literals", and there are two very different files that
-		 * answer it:
-		 *
-		 *   A BUILDER, whose whole purpose is to assemble a program -
-		 *   the pieces ARE the file, and what they build is the thing
-		 *   worth signing.
-		 *   A PROGRAM THAT HOLDS A CONSTANT - a blob, a page, a config
-		 *   string - which is incidental to it.
-		 *
-		 * Handing the second one over as the object replaced the file
-		 * with a scrap of it. Measured on Ani-Shell.php: 87075 bytes of
-		 * shell, and the child was the 3144-byte base64 python backdoor
-		 * it carries - so all 87 KB of the code a researcher came to
-		 * read was not in the tree at all.
-		 *
-		 * TWO TESTS, AND THE SHARE IS THE WEAKER ONE.
-		 *
-		 * WAS IT ASSEMBLED AT ALL. The fold hands back the largest
-		 * value the script builds, and "builds" is doing no work when
-		 * that value is ONE LITERAL copied out of the file - the
-		 * generator joined nothing, and what came back is a constant
-		 * the program happens to hold. So: if the folded bytes occur
-		 * VERBATIM in the object, this is not a build.
-		 *
-		 * Measured over the sample tree, of the seven scripts whose
-		 * fold covers more than a third of the file:
-		 *
-		 *   hoho.php, hoho_1, hoho_2   assembled - a real generator,
-		 *                              and the fold is the shell
-		 *   sym403.php, vhost.php,     ONE literal, copied. 99%, 90%,
-		 *   b374k-mini, B374k Beta     68% of the file - and handing
-		 *                              the literal over deleted the
-		 *                              php around it, which is the
-		 *                              whole of what those files are
-		 *
-		 * The share alone called all seven builders. It is kept as the
-		 * second test, because an ASSEMBLED value can still be
-		 * incidental: itsecteam_shell and alfa assemble something that
-		 * is 1% of the file, and handing that over would lose the shell
-		 * for the same reason Ani-Shell.php did - 87075 bytes of code
-		 * replaced by the 3144-byte blob it carries.
-		 *
-		 * Over 30 php shells that fold to anything the coverage is
-		 * 0-16% for twenty-three and 57-99% for seven, with NOTHING in
-		 * between; a third is the middle of that empty band.
-		 *
-		 * AND NOTHING HERE LOOKS INSIDE THE VALUE. There was a test for
-		 * "does this look like html". It is gone: deciding what a value
-		 * CONTAINS is parsing data, and a pass that cuts on its own
-		 * reading of data is a pass that can corrupt it. "Does this
-		 * appear in the file" is not a reading of the bytes - it is the
-		 * same question the fold already answered, asked backwards.
-		 */
-		if (n < 64u || (uint64_t)n * 3u < b.n ||
-		    kof_memmem(b.p, (size_t)b.n, out, (size_t)n)) {
-			n = 0;
-		} else {
-			tmp = malloc((size_t)n);
-			if (!tmp)
-				OC_LIMIT(sc, "script normalisation buffer not allocated");
-			if (tmp) {
-				uint32_t w = kof_script_norm(lx, out, n, tmp, n,
-							     KOF_NORM_ALL);
-
-				/* 0 is "I will not touch this", and the
-				 * contract there is to keep the input. */
-				if (w) {
-					free(out);
-					out = tmp;
-					n = w;
-				} else {
-					free(tmp);
-				}
-			}
-		}
-	}
-	if (n) {
-		/*
-		 * THE FOLD'S OUTPUT IS NOT A FILE, so it is given the tag its
-		 * parent opened with. The form pass below needs none of this -
-		 * it produces the whole object, header and markup and closing
-		 * tag included, because it copied them.
-		 */
-		oc_child_kind(ctx, KOF_ENT_NORMALIZED);
-		/* Said plainly, like the formed view below - see the call
-		 * there for why the decode belongs to this pass. */
 		{
-			struct kof_exe_decode_res dres;
-
-			kof_exe_decode_ex(out, n, &dres);
-			if (dres.limit)
-				oc_scan_limit(sc);
+			consts_end(sc, text2, charged2);
+			return 0;
 		}
-		script_declare(sc, ctx);
-		if (!script_head_emit(ctx) || !oc_emit_exact(ctx, out, n))
-			n = 0;
-		else
-			oc_child(ctx);
-		free(out);
-		return n;
 	}
+	scan_charge(sc, cap);           /* given back wherever `out` is freed */
+	charged = cap;
 
-	n = script_form(ctx, sc, lx, b, out, cap);
+	/* Every kind a script object has is a language the lib lexes (script_pass_open said so): the form is the lib's, whole. */
+	{
+		struct oc_script_dec *dec = oc_script_dec_new(sc, lang, room);
+		struct oc_script_form_req fq = { .lang = lang, .in = in_p, .n = (uint32_t)in_n, .out = out,
+						 .cap = cap, .dec = dec };
+
+		n = oc_script_form(&fq, &n_dec);
+		oc_script_dec_end(dec);
+	}
 	/*
 	 * ONLY WHEN THE FORM WAS ACTUALLY DIFFERENT, and by more than a byte.
 	 *
@@ -542,8 +292,35 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	decoded = 0;
 	if (n) {
 		struct kof_exe_decode_res dres;
+		uint8_t *own = NULL;
+		uint64_t own_bytes = 0;
+		int squeeze = 1;
+		uint32_t k;
 
+		/* A NUL the script holds is told from the zeros of the decode by where it was before the decode: a bit for each, charged to the scanner for as long as it is held.
+		 * Most scripts hold none and pay nothing. When the map cannot be afforded the zeros stay (a gap in a decoded string, which is what a view without the squeeze
+		 * had) and the object says a bound fired. */
+		if (memchr(out, 0, n)) {
+			own_bytes = ((uint64_t)n + 7u) / 8u;
+			own = own_bytes > oc_scan_room(sc) ? NULL : calloc((size_t)own_bytes, 1u);
+			if (!own) {
+				squeeze = 0;
+				own_bytes = 0;
+				OC_LIMIT(sc, "script view: the map of the script's own NULs over the memory ceiling");
+			} else {
+				scan_charge(sc, own_bytes);
+				for (k = 0; k < n; k++)
+					if (!out[k])
+						own[k >> 3] = (uint8_t)(own[k >> 3] | (1u << (k & 7u)));
+			}
+		}
 		decoded = kof_exe_decode_ex(out, n, &dres);
+		if (decoded && squeeze)
+			n = script_squeeze(out, n, own);
+		if (own) {
+			free(own);
+			oc_scan_release(sc, own_bytes);
+		}
 		if (dres.limit)
 			oc_scan_limit(sc);
 	}
@@ -558,7 +335,10 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 	 * say anything the parent did not", and a decode always does.
 	 */
 	raw = (uint32_t)b.n;
-	if (n < 32u || raw < n || (!decoded && raw - n < 16u))
+	/* A literal a decoder was put over is a difference as well, and makes the view longer than the object. */
+	n_dec += n_sub;                 /* a value written where it was computed is a difference as well */
+	decoded |= n_dec != 0;
+	if (n < 32u || (raw < n && !n_dec) || (!decoded && raw - n < 16u))
 		n = 0;
 	if (n) {
 		oc_child_kind(ctx, KOF_ENT_NORMALIZED);
@@ -581,11 +361,14 @@ uint32_t kof_scan_script_forms(const struct kof_obj_ctx *ctx, int deep)
 		 * this reason; so does this.
 		 */
 		script_declare(sc, ctx);
-		if (oc_emit_exact(ctx, out, n))
+		if (oc_emit_exact(ctx, out, n)) {
 			oc_child(ctx);
-		else
+		} else {
 			n = 0;
+		}
 	}
 	free(out);
+	oc_scan_release(sc, charged);
+	consts_end(sc, text2, charged2);
 	return n;
 }

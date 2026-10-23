@@ -179,7 +179,7 @@ void page_draw(struct out *o, struct view *v, struct page *p)
 	static const char close[] = "[ Close ]";
 	struct out_clip cl;
 	int room, inner, y, i, title_used = 0;
-	uint32_t k;
+	uint32_t k, fx, body, nb;
 	char pos[48];
 
 	p->btn_y = -1;
@@ -204,6 +204,8 @@ void page_draw(struct out *o, struct view *v, struct page *p)
 			if (len > p->w)
 				p->w = len;
 		}
+		if (p->width > p->w)
+			p->w = p->width;
 		if (p->w > g_cols - 4)
 			p->w = g_cols - 4;
 		/* Centred, now that it is not the width of the screen: a box
@@ -249,15 +251,22 @@ void page_draw(struct out *o, struct view *v, struct page *p)
 	if (room < 1)
 		room = 1;
 	inner = p->w - 4;
-	if (p->n > (uint32_t)room) {
-		if (*p->off > p->n - (uint32_t)room)
-			*p->off = p->n - (uint32_t)room;
+	/* The lines that do not scroll take their rows first; what scrolls is
+	 * the rest, in what is left. */
+	fx = p->fixed < p->n ? p->fixed : p->n;
+	if (fx > (uint32_t)room)
+		fx = (uint32_t)room;
+	body = (uint32_t)room - fx;
+	nb = p->n - fx;
+	if (nb > body) {
+		if (*p->off > nb - body)
+			*p->off = nb - body;
 	} else {
 		*p->off = 0;
 	}
-	p->shown = p->n - *p->off;
-	if (p->shown > (uint32_t)room)
-		p->shown = (uint32_t)room;
+	p->shown = nb - *p->off;
+	if (p->shown > body)
+		p->shown = body;
 
 	/*
 	 * THE TOP RULE, COUNTED RATHER THAN GUESSED.
@@ -339,9 +348,9 @@ void page_draw(struct out *o, struct view *v, struct page *p)
 	 * it is about something the reader can no longer see.
 	 */
 	snprintf(pos, sizeof pos, "%u-%u of %u", *p->off + 1u,
-		 *p->off + p->shown, p->n);
+		 *p->off + p->shown, nb);
 	{
-		const char *foot = p->n > (uint32_t)room
+		const char *foot = nb > body
 				 ? pos : (p->foot ? p->foot : pos);
 		int used;
 
@@ -383,8 +392,11 @@ void page_draw(struct out *o, struct view *v, struct page *p)
 		out_str(o, A_DIM);
 		out_glyph(o, G_V);
 		out_str(o, A_OFF " ");
-		if (y < (int)p->shown) {
-			uint32_t idx = *p->off + (uint32_t)y;
+		if ((uint32_t)y < fx ||
+		    (uint32_t)y - fx < p->shown) {
+			uint32_t idx = (uint32_t)y < fx
+				       ? (uint32_t)y
+				       : fx + *p->off + ((uint32_t)y - fx);
 
 			prop_put(o, p->line[idx].text, inner, -1, -1);
 			if (p->record) {

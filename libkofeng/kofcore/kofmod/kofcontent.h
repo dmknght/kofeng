@@ -219,15 +219,14 @@ struct kof_content {
 	 * to exist, and it cannot be erased by what is done to the object
 	 * afterwards.
 	 *
-	 * `want` is a KOF_ENG_* mask, the same vocabulary a heuristic rule
-	 * uses. `level` is the lowest --heur the ask is honoured at, so a
-	 * module can say "this is worth the emulator, but only for a caller
+	 * `want` is a KOF_ENG_* mask (enum kof_eng_want). `level` is the lowest
+	 * --heur the ask is honoured at, so a module can say "this is worth the emulator, but only for a caller
 	 * who asked for that much work" - the engine compares it and drops the
 	 * ask rather than the module testing a level it cannot see.
 	 *
 	 * The engine still bounds what it grants: the packer depth ceiling and
-	 * the whole-scan emulation ceiling apply exactly as they do to a
-	 * rule's ask, so a directory of crafted files cannot spend a scan.
+	 * the whole-scan emulation ceiling apply to it, so a directory of crafted
+	 * files cannot spend a scan.
 	 */
 	void (*child_want)(const struct kof_obj_ctx *, uint32_t want,
 			   uint32_t level);
@@ -668,14 +667,6 @@ struct kof_content {
 	 * because nothing targets "unknown" would be refusing to look at
 	 * exactly the thing a container is used to hide.
 	 *
-	 * EVIDENCE OVERRIDES IT. A heuristic that fired on THIS object may ask
-	 * for everything it carries to be opened - KOF_ENG_OPEN_CARRIED in
-	 * kofmod/heur.h - and then this answers yes whatever the database
-	 * targets. A document with an /OpenAction a rule recognised is worth
-	 * opening the pictures of; a clean one is not. The ask is per object
-	 * and cannot leak into the next, because it is recomputed from that
-	 * object's own findings.
-	 *
 	 * ADVICE AND NOT A GATE: nothing refuses a child whose format this
 	 * answered no for. A producer that asks saves its own work; one that
 	 * does not spends it. Enforcing it at the push would be the bug this
@@ -782,107 +773,26 @@ struct kof_content {
 
 	
 	/*
-	 * THE SAME QUESTION OVER BLOCK HASHES - see kof_mutation_blocks.
-	 *
-	 * Beside mutation_score and not instead of it: that one asks how much of
-	 * ONE declared run of bytes is here and is anchored to the region the
-	 * run was cut from; this asks how much of a reference's WHOLE set is
-	 * here and is anchored to nothing. A rule that means "that exact run"
-	 * wants the first; one that means "built like that object" wants this.
+	 * THREE SLOTS NOBODY IMPLEMENTS, kept so that no entry after them moves (the
+	 * vtable's order is the module ABI). Each is NULL by design; a module that
+	 * reads one reads NULL.
 	 */
-	uint32_t (*ovl_blocks)(const struct kof_obj_ctx *,
-			       const uint32_t *ref, uint32_t n_ref);
+	void *reserved_0;
+	void *reserved_1;
+	void *reserved_2;
 
 	/*
-	 * A THIRD SIMILARITY MEASURE STOOD HERE, over what the code DOES
-	 * rather than over bytes: how much of a reference's sequence of
-	 * capabilities this object carries. The idea holds - a variant
-	 * recompiled for another target shares none of the byte measures and
-	 * all of the behaviour - but a PERCENTAGE OVER A SEQUENCE was the
-	 * wrong shape for it, for the reasons under "THE BEHAVIOUR MACROS
-	 * ARE GONE".
-	 *
-	 * What behaviour is measured with now is nodes and the proven links
-	 * between them; it is not a percentage and does not belong in this
-	 * row of three.
-	 *
-	 * The SLOT stays so no entry after it moves.
+	 * SEVEN SLOTS NOBODY IMPLEMENTS - they carried the repair of an object and
+	 * the address arithmetic it was made from - kept so that no entry after them
+	 * moves. NULL by design, like the three above.
 	 */
-	void *ovl_chain_unused;
-
-	/*
-	 * A STRUCTURE TRACK STOOD HERE: the ELF header and the object's size, compared
-	 * with a reference's. It was taken out. Measured, it identifies nothing on its
-	 * own - an unrelated program of the same size answered 100% - and as a filter
-	 * its detection rate was too low to keep a measure, a header, a descriptor and
-	 * an editor path alive for it.
-	 *
-	 * The SLOT stays so no entry after it moves, as ovl_chain_unused's did.
-	 */
-	void *ovl_shape_unused;
-
-	/*
-	 * THE MODULE CAN UNDO WHAT IT FOUND, AND HERE IS WHERE THE DAMAGE
-	 * STARTS.
-	 *
-	 * Detection and repair are different claims and only one of them is
-	 * usually available. "This object holds the family's payload" is what
-	 * a block or an unanchored pattern says, and it is not enough to
-	 * repair anything: a repair needs to know WHERE - what to put back
-	 * and what to cut - and a percentage carries no offset at all.
-	 *
-	 * So a module that DID locate the damage says so, with the offset it
-	 * located. The host records it and may call the module's kof_cure()
-	 * afterwards; the verdict is reported exactly as it would have been,
-	 * because being repairable is not a different detection.
-	 *
-	 * A module that found the family but not the place simply does not
-	 * call this, and the object is reported and left alone.
-	 */
-	void (*cure_offer)(const struct kof_obj_ctx *, uint64_t at);
-
-	/*
-	 * WHAT THE REPAIR IS, described rather than performed.
-	 *
-	 * A module is freestanding position-independent code with no way to
-	 * reach a file, and giving it one would be the wrong answer anyway: a
-	 * repair rewrites somebody's binary, and the decision to do that
-	 * belongs to whoever runs the engine, not to a rule in a database.
-	 *
-	 * So kof_cure() says what to change and the host decides whether to.
-	 * Both calls are bounds checked and both may be refused; a module
-	 * that is refused has still said what it would have done, which is
-	 * what a caller offering to show a repair before applying it needs.
-	 *
-	 *   patch     put these bytes at this offset
-	 *   truncate  the object ends here
-	 *
-	 * Nothing else. Between them they express "put the entry point back
-	 * and cut the appended payload", which is what an appending infector
-	 * needs undone, and they express it in a form a caller can print,
-	 * log, or apply.
-	 */
-	int (*cure_patch)(const struct kof_obj_ctx *, uint64_t off,
-			  const uint8_t *bytes, uint32_t n);
-	int (*cure_truncate)(const struct kof_obj_ctx *, uint64_t len);
-
-	/*
-	 * THE DISINFECT STAGE'S ARITHMETIC, reached the way everything else
-	 * is - see libkofeng/scanners/pzero.h for what each one answers and
-	 * kofcure.h for the spellings a rule writes.
-	 *
-	 * Through the vtable and not as inline code in the header, for the
-	 * same reason find_str_at is: a module is a freestanding blob that
-	 * links to nothing, so an implementation in the header is a copy per
-	 * module, and a copy per module is a version per module.
-	 */
-	uint64_t (*pz_clean_end)(const struct kof_obj_ctx *);
-	int      (*pz_is_code)(const struct kof_obj_ctx *, uint64_t off);
-	uint64_t (*pz_addr_to_off)(const struct kof_obj_ctx *, uint64_t addr);
-	uint32_t (*pz_unmask)(const struct kof_obj_ctx *, uint64_t off,
-			      uint32_t n, uint32_t mask, uint32_t key,
-			      uint8_t *out, uint32_t cap);
-
+	void *reserved_3;
+	void *reserved_4;
+	void *reserved_5;
+	void *reserved_6;
+	void *reserved_7;
+	void *reserved_8;
+	void *reserved_9;
 
 	/*
 	 * THE NEXT CHILD REPLACES THIS OBJECT - it is not a thing this object
@@ -1176,10 +1086,9 @@ struct kof_content {
 	/*
 	 * ---- SAYING WHERE THE INFECTION IS ---------------------------------
 	 *
-	 * See `struct kof_infected` in kofeng.h. A module that can repair has
-	 * already located the damage - it could not describe a patch
-	 * otherwise - and this is how that location leaves the module instead
-	 * of being thrown away with it.
+	 * See `struct kof_infected` in kofeng.h. A module that has located
+	 * damage says where, and this is how that location leaves the module
+	 * instead of being thrown away with it.
 	 *
 	 * Bounds-checked against the object, like every other range a module
 	 * hands over, and silently ignored once the cap is reached.

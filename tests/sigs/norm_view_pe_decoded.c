@@ -31,5 +31,5 @@ KOF_DEFINE_STR(from_tiny, "NormTiny-9ab", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_SCAN
 {
 	if (kof_find_str_multi(plain, from_b64, from_hex, from_pct, from_wide, from_tiny) >= 1)
-		KOF_SCAN_INFECT("NormViewDecodedPe");
+		{ kof_debug("NormViewDecodedPe#NormViewDecodedPe", 0); return; }
 }

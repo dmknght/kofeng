@@ -173,7 +173,7 @@ int main(void)
 	static uint8_t b[0x1000], code[0x100];
 	struct kof_obj_ctx ctx;
 	struct kgenome_diag_scan *s;
-	const uint16_t want = kgenome_nucleo_cap_of_name("VirtualAlloc");
+	const uint16_t want = kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_PE, "VirtualAlloc");
 	uint32_t i, hits;
 	uint64_t n;
 

@@ -89,34 +89,11 @@ void draw_frame(struct out *o, struct view *v)
  */
 static const char *tree_colour(const struct view *v, const struct node *n)
 {
-	const struct object *ob;
-	uint32_t i;
-	int worst = -1;
-
 	if (n->obj >= v->n_obj)
 		return A_BOLD;
-	ob = &v->obj[n->obj];
-	if (!ob->n_finding && !ob->heur.n)
-		return A_BOLD;
-	/* The strongest thing said about it - a row that matched a family and
-	 * also scored on structure is a match. The order is the engine's, asked
-	 * for rather than restated: the constants do not carry it. */
-	for (i = 0; i < ob->heur.n; i++) {
-		int lv = (int)ob->heur.v[i].level;
-
-		if (worst < 0 || kverdict_level_rank((uint32_t)lv) >
-				 kverdict_level_rank((uint32_t)worst))
-			worst = lv;
-	}
-	if (worst == KOF_LEVEL_INFECT)
-		return A_HIT1;                  /* the same red a match is */
-	if (worst == KOF_LEVEL_SUSPECT)
-		return A_HIT2;
-	if (worst == KOF_LEVEL_HEUR)
-		return A_WARN;
-	/* A finding was recorded but its level is not in the result any more -
-	 * still not a plain row. */
-	return ob->n_finding ? A_HIT1 : A_BOLD;
+	/* The engine's verdict for the object, painted the red a match is. Evidence
+	 * (what a module reported) is not a verdict and does not colour the row. */
+	return v->obj[n->obj].heur.has_verdict ? A_HIT1 : A_BOLD;
 }
 
 /*

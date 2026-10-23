@@ -144,7 +144,13 @@ enum { KGENOME_CA_KMOD_LOAD = 1, KGENOME_CA_KMOD_HOOK, KGENOME_CA_KMOD_LIST_EDIT
        KGENOME_CA_KMOD_COPY_TO_USER, KGENOME_CA_KMOD_KSYM_LOOKUP,
        KGENOME_CA_KMOD_SYMBOL_GET };
 enum { KGENOME_CA_CRYPTO_ANY = 1 };
-enum { KGENOME_CA_INPUT_CAPTURE = 1 };
+enum { KGENOME_CA_INPUT_CAPTURE = 1,
+       /* what a request brings in ($_GET, $_POST...): appended, a renumbering breaks every rule that named a word */
+       KGENOME_CA_INPUT_REQUEST };
+/* What a script does with data that no native program has a word for. Appended to a group that had no actions; the later words are
+ * appended after the first two, never inserted: a renumbering breaks every rule that named a word. */
+enum { KGENOME_CA_DATA_DECODE = 1, KGENOME_CA_DATA_EVAL, KGENOME_CA_DATA_CREATE, KGENOME_CA_DATA_CALL,
+       KGENOME_CA_DATA_LOAD };
 enum { KGENOME_CA_NS_CHANGE = 1 };
 enum { KGENOME_CA_SERVICE_INSTALL = 1 };
 

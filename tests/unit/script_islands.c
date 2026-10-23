@@ -38,6 +38,22 @@
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
 
+/*
+ * The carve, asked of the parser as it stands for a language with no lexer. For a language the lib lexes (every page this
+ * file builds is php, asp, aspx or jsp) the parser declares no regions at all - see script_resolve_scan - so the geometry
+ * these checks are about, islands cut into body and markup, is exercised under a kind that has no lexer.
+ */
+static uint32_t carve(struct kof_obj_ctx *ctx, uint32_t mask, struct kof_range *r, uint32_t cap)
+{
+	uint8_t kind = ctx->subtype;
+	uint32_t n;
+
+	ctx->subtype = KOF_SCRIPT_ANY;
+	n = ctx->resolve_scan(ctx, mask, r, cap);
+	ctx->subtype = kind;
+	return n;
+}
+
 static int fails;
 
 static void fail(const char *what, const char *why)
@@ -78,7 +94,7 @@ static void check_partition(const char *what, const char *src)
 		fail(what, "the parse refused it");
 		return;
 	}
-	n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_HEADER |
+	n = carve(&ctx, KOF_SCAN_SCRIPT_HEADER |
 				   KOF_SCAN_SCRIPT_BODY |
 				   KOF_SCAN_SCRIPT_MARKUP,
 			     r, (uint32_t)(sizeof r / sizeof r[0]));
@@ -151,7 +167,7 @@ static void check_per_bit(const char *what, const char *src)
 		return;
 	}
 	for (b = 0; b < n_bit; b++) {
-		uint32_t got = ctx.resolve_scan(&ctx, bit[b], r + n,
+		uint32_t got = carve(&ctx, bit[b], r + n,
 						(uint32_t)(sizeof r /
 							   sizeof r[0]) - n);
 
@@ -312,7 +328,7 @@ int main(void)
 		f.p = (const uint8_t *)leading_markup;
 		f.n = strlen(leading_markup);
 		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx)) {
-			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_MARKUP, r,
+			n = carve(&ctx, KOF_SCAN_SCRIPT_MARKUP, r,
 					     (uint32_t)(sizeof r / sizeof r[0]));
 			/*
 			 * What a page opens with before its tag is MARKUP. It
@@ -438,7 +454,7 @@ int main(void)
 		f.p = (const uint8_t *)in_str;
 		f.n = strlen(in_str);
 		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx)) {
-			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_BODY, r,
+			n = carve(&ctx, KOF_SCAN_SCRIPT_BODY, r,
 					     (uint32_t)(sizeof r / sizeof r[0]));
 			/*
 			 * The @system call has to be INSIDE the body. Ended at
@@ -507,7 +523,7 @@ int main(void)
 		f.p = (const uint8_t *)php_page;
 		f.n = strlen(php_page);
 		if (kof_script_sniff(f) && kof_script_parse(f, &info, &ctx)) {
-			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_MARKUP, r,
+			n = carve(&ctx, KOF_SCAN_SCRIPT_MARKUP, r,
 					     (uint32_t)(sizeof r / sizeof r[0]));
 			for (i = 0; i < n; i++) {
 				const char *p = php_page + r[i].off;
@@ -668,41 +684,6 @@ int main(void)
 			fail("block in <p>",
 			     "a multi line block inside <p> became markup");
 		check_partition("block in <p>", block_in_p);
-	}
-
-	/*
-	 * AND A BLOCK THE FORM PASS EMPTIED IS EMPTY.
-	 *
-	 * A block holding one comment forms to "<%\n%>" - a code region with
-	 * no code in it. The comment was how the file was typed and so was the
-	 * block that was opened to hold it.
-	 */
-	{
-		if (!kof_script_block_bare(KOF_SCRIPT_ASP,
-					   (const uint8_t *)"<%\n%>", 5u))
-			fail("bare block", "\"<%\\n%>\" is not empty");
-		if (!kof_script_block_bare(KOF_SCRIPT_PHP,
-					   (const uint8_t *)"<?php\n?>", 8u))
-			fail("bare block", "\"<?php\\n?>\" is not empty");
-		/* Joined neighbours, which is what the whitespace join makes
-		 * of two emptied blocks. */
-		if (!kof_script_block_bare(KOF_SCRIPT_ASP,
-					   (const uint8_t *)"<%\n%>\n<%\n%>",
-					   11u))
-			fail("bare block", "two emptied blocks are not empty");
-		/* And nothing that has a program in it. */
-		if (kof_script_block_bare(KOF_SCRIPT_ASP,
-					  (const uint8_t *)"<%Next%>", 8u))
-			fail("bare block", "\"<%Next%>\" was called empty");
-		if (kof_script_block_bare(KOF_SCRIPT_ASP,
-					  (const uint8_t *)"<%=x%>", 6u))
-			fail("bare block", "a value block was called empty");
-		/* A kind with no delimiter pair is never bare: its island is
-		 * code with nothing wrapped around it. */
-		if (kof_script_block_bare(KOF_SCRIPT_SHELL,
-					  (const uint8_t *)"", 0u))
-			fail("bare block", "an empty buffer was called a "
-			     "block");
 	}
 
 	/*

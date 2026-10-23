@@ -6,9 +6,11 @@ database is a `memcpy` into one arena and a single `mprotect` — there is no
 object format to parse at run time, and the build refuses any module that would
 need one.
 
-A signature is therefore not a byte string. It is a function that can follow a
+A module is therefore not a byte string. It is a function that can follow a
 header, resolve an offset out of the file, walk a structure, and decide for
-itself what it has found.
+itself what it has seen. It does not name what it saw: it leaves a note
+(`kof_debug`) and a mark (`kof_mark_infected`), and the verdict is made from the
+diseases the matched diagnoses declare.
 
 ```c
 KOF_TARGET_FORMAT(KOF_FMT_ELF);
@@ -20,7 +22,7 @@ KOF_DEFINE_STR(s0, "4r3s b0tn3t", KOF_CASE_EXACT, KOF_WORD_FULLWORD);
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
         if (kof_find_str_any(scan_range_data, s0))
-                KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+                kof_debug("found the marker", 0);
 }
 ```
 
@@ -79,8 +81,8 @@ map to it.
               └───────────┘          └───────────┘
                                 ↓
                          ┌─────────────┐
-                         │    Cure     │
-                         │  (planned)  │
+                         │  Diagnose   │
+                         │  + Verdict  │
                          └─────────────┘
 ```
 

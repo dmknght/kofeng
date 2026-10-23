@@ -40,49 +40,6 @@ static const char *dis_token_colour(const char *t, size_t n)
 }
 
 /*
- * SHORTEN THE IMMEDIATES, IN PLACE.
- *
- * genotype prints them at the operand's full width, so a push of 34 comes out
- * as 0x0000000000000022 - eighteen characters of which two carry the value. On a
- * row that also holds an offset and seven bytes of hex that is most of the line
- * spent on zeroes, and the number a reader is looking for is the hardest thing
- * on it to find.
- *
- * Done to the TEXT rather than while painting, so the clipboard gets the same
- * short form the screen does. Leading zeroes only: nothing else about the number
- * changes, and a value that really is zero keeps one digit rather than becoming
- * an empty 0x.
- */
-void dis_shorten(char *t)
-{
-	char *r = t, *w = t;
-
-	while (*r) {
-		if (r[0] == '0' && r[1] == 'x') {
-			char *d = r + 2, *keep;
-
-			*w++ = *r++;            /* 0 */
-			*w++ = *r++;            /* x */
-			while (*d == '0')
-				d++;
-			keep = d;
-			while ((*keep >= '0' && *keep <= '9') ||
-			       (*keep >= 'a' && *keep <= 'f') ||
-			       (*keep >= 'A' && *keep <= 'F'))
-				keep++;
-			if (keep == d)
-				*w++ = '0';     /* the value was zero */
-			while (d < keep)
-				*w++ = *d++;
-			r = keep;
-			continue;
-		}
-		*w++ = *r++;
-	}
-	*w = 0;
-}
-
-/*
  * Paint one instruction's text: the mnemonic, then its operands token by token.
  *
  * Emitted into the frame directly rather than built into a string, because the
@@ -92,7 +49,8 @@ void dis_shorten(char *t)
  */
 void dis_paint(struct out *o, const char *text)
 {
-	size_t i = 0, n = strlen(text);
+	const char *note = strstr(text, "  ; ");
+	size_t i = 0, n = note ? (size_t)(note - text) : strlen(text);
 
 	/* The mnemonic is everything up to the first space. */
 	while (i < n && text[i] != ' ')
@@ -131,6 +89,12 @@ void dis_paint(struct out *o, const char *text)
 		out_add(o, text + i, j - i);
 		out_str(o, A_OFF);
 		i = j;
+	}
+	/* The annotation is the panel's own commentary, not the instruction. */
+	if (note) {
+		out_str(o, A_DIM);
+		out_str(o, note);
+		out_str(o, A_OFF);
 	}
 }
 

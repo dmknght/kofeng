@@ -4,8 +4,8 @@
  */
 
 #include "ksb.h"
+#include <databases/diagsrc.h>
 
-#include <databases/syndsrc.h>
 
 int ksb_extract_main(struct ksb_ctx *ksb, int argc, char **argv)
 {
@@ -75,12 +75,12 @@ int ksb_extract_main(struct ksb_ctx *ksb, int argc, char **argv)
 	 * THE ENTRY POINT AT OFFSET ZERO, WITHOUT A LINKER SCRIPT.
 	 *
 	 * module.ld gives the ELF build this for free by naming
-	 * .text.kof_scan/.text.kof_unpack/.text.kof_heur first, so whichever
-	 * one the source defines lands at zero. COFF has no such script; what
+	 * .text.kof_scan/.text.kof_unpack first, so whichever one the source
+	 * defines lands at zero. COFF has no such script; what
 	 * it has instead is section grouping by name - sections called
 	 * "name$suffix" are concatenated into "name" in ascending suffix
 	 * order. A digit sorts before every letter a C identifier can start
-	 * with, so declaring the three entry points into ".text$0" here forces
+	 * with, so declaring the two entry points into ".text$0" here forces
 	 * whichever one the source goes on to define into the leading slot,
 	 * without the source ever seeing this.
 	 *
@@ -95,8 +95,6 @@ int ksb_extract_main(struct ksb_ctx *ksb, int argc, char **argv)
 		     "void kof_scan(const struct kof_obj_ctx *);\n");
 	fprintf(out, "__attribute__((section(\".text$0\"))) "
 		     "void kof_unpack(const struct kof_obj_ctx *);\n");
-	fprintf(out, "__attribute__((section(\".text$0\"))) "
-		     "void kof_heur(const struct kof_obj_ctx *);\n");
 #endif
 	for (i = 0; i < ksb->decl.nrngs; i++)
 		ksb_emit_rng_id(out, &ksb->decl.rngs[i], i);
@@ -148,26 +146,14 @@ int ksb_extract_main(struct ksb_ctx *ksb, int argc, char **argv)
 	fprintf(out, "subtype_mask=%u\n", ksb->decl.subtype_mask);
 	fprintf(out, "size_min=%llu\n", (unsigned long long)ksb->decl.size_min);
 	fprintf(out, "step=%d\n", ksb->decl.step);
-	fprintf(out, "heur_phase=%d\n", ksb->decl.heur_phase);
-	fprintf(out, "heur_level=%d\n", ksb->decl.heur_level);
-	fprintf(out, "heur_want=%d\n", ksb->decl.heur_want);
-	fprintf(out, "heur_name=%s\n", ksb->decl.heur_name);
-	fprintf(out, "heur_predict=%s\n", ksb->decl.heur_predict);
 	fprintf(out, "content=%s\n", ksb->decl.content);
-	/* The COUNTS as well as the values, because whether a declaration is
+	/* The COUNT as well as the value, because whether a declaration is
 	 * present is a different question from what it says - and the checks
 	 * that ask it run after the entry point is known, which is later than
-	 * this. A heuristic with no KOF_HEUR_PHASE and one that declares
-	 * EXAMINE both resolve to 0. */
-	fprintf(out, "n_phase=%d\n", ksb->decl.simple[SD_HEUR_PHASE].count);
+	 * this. */
 	fprintf(out, "n_kind=%d\n", ksb->decl.simple[SD_ANALYZE_STEP].count);
-	fprintf(out, "n_level=%d\n", ksb->decl.simple[SD_HEUR_LEVEL].count);
 	fprintf(out, "family=%s\n", ksb->decl.have_name ? ksb->decl.family : "");
 	fprintf(out, "maltype=%d\n", ksb->decl.have_name ? ksb->decl.maltype : 0);
-	fprintf(out, "disease=%s\n", ksb->decl.have_dis ? ksb->decl.dis_name : "");
-	fprintf(out, "disease_type=%d\n", ksb->decl.have_dis ? ksb->decl.dis_type : 0);
-	/* The variant - see decl.name_id. */
-	fprintf(out, "nameid=%s\n", ksb->decl.name_id);
 	fclose(out);
 
 	/* The strings and ranges, for the packer to put in the pack. */

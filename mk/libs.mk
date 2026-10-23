@@ -60,6 +60,12 @@ GT_OBJ := $(patsubst libgenome/genotype/%.c,$(INT)/gt_%.o,$(GT_SRC))
 CL_SRC := $(wildcard libgenome/celllysis/*.c)
 CL_OBJ := $(patsubst libgenome/celllysis/%.c,$(INT)/cl_%.o,$(CL_SRC))
 
+#
+# textual: the analysis of text that has a grammar. The API is the files at the top of
+# libgenome/textual/, and each language is a directory beside them (php/).
+TX_SRC := $(wildcard libgenome/textual/*.c libgenome/textual/*/*.c)
+TX_OBJ := $(patsubst libgenome/textual/%.c,$(INT)/tx_%.o,$(TX_SRC))
+
 # ---- libuncoat: the algorithms that grow without a forecast ---------------
 #
 # Decompression, decoding and decryption on bytes: buffers and a budget in,
@@ -75,8 +81,8 @@ UC_OBJ := $(patsubst libuncoat/%.c,$(INT)/uc_%.o,$(UC_SRC))
 
 # THE OBJECT RULES OF THE ENGINE AND THE TWO LIBS, ONE DEFINITION. An object is
 # $(INT)/<prefix>_<path under its source directory>.o: lib_ is libkofeng/,
-# gt_ / cl_ / ph_ are the three parts of libgenome/ (genotype, celllysis,
-# phenotype), uc_ is libuncoat/. Only the include path differs, and EMU_INC is what
+# gt_ / cl_ / ph_ / tx_ are the parts of libgenome/ (genotype, celllysis,
+# phenotype, textual), uc_ is libuncoat/. Only the include path differs, and EMU_INC is what
 # the three genome parts need to find the decoder's headers.
 define OBJ_RULE
 $$(INT)/$(1)_%.o: $(2)/%.c $$(STAMP) | $$(INT)
@@ -87,6 +93,7 @@ $(eval $(call OBJ_RULE,lib,libkofeng,))
 $(eval $(call OBJ_RULE,gt,libgenome/genotype,$$(EMU_INC)))
 $(eval $(call OBJ_RULE,cl,libgenome/celllysis,$$(EMU_INC)))
 $(eval $(call OBJ_RULE,ph,libgenome/phenotype,$$(EMU_INC)))
+$(eval $(call OBJ_RULE,tx,libgenome/textual,))
 $(eval $(call OBJ_RULE,uc,libuncoat,))
 
 
@@ -107,7 +114,7 @@ CS_ARM64_SRC := libgenome/celllysis/decode_arm64.c $(wildcard libgenome/genotype
 celllysis-arm32-diff: CS_SRC = $(CS_ARM32_SRC)
 celllysis-arm64-diff: CS_SRC = $(CS_ARM64_SRC)
 celllysis-arm32-diff celllysis-arm64-diff: celllysis-%-diff:
-	@test -n "$(CS_INC)" -a -n "$(CS_LIB)" || { echo "pass CS_INC=<capstone include dir> CS_LIB=<libcapstone.a>"; exit 1; }
+	@$(if $(and $(CS_INC),$(CS_LIB)),$(NOOP),$(error pass CS_INC=<capstone include dir> CS_LIB=<libcapstone.a>))
 	@$(call MKDIR,$(TEST))
 	$(CC) -O2 -std=gnu11 -pthread -Ilibkofeng/kofcore -Ilibgenome -Ilibgenome/genotype -I$(CS_INC) tools/celllysis/$*_diff.c $(CS_SRC) $(CS_LIB) -o $(TEST)/$*_diff$(EXE)
 
@@ -123,16 +130,16 @@ X86_SRC = $(wildcard libgenome/genotype/x86/*.c)
 
 .PHONY: genotype-x86 genotype-x86-diff
 genotype-x86:
-	@test -n "$(REF)" || { echo "genotype-x86: pass REF=<reference decoder checkout>"; exit 1; }
+	@$(if $(REF),$(NOOP),$(error genotype-x86: pass REF=<reference decoder checkout>))
 	@$(call MKDIR,$(TEST))
 	$(CC) $(REF_FLAGS) tools/genotype/x86_gen.c tools/genotype/ref_shim.c $(REF_SRC) $(X86_SRC) -Ilibgenome/genotype -o $(TEST)/x86_gen$(EXE)
-	$(TEST)/x86_gen$(EXE) $(REF)/inc/bdx86_constants.h libgenome/genotype/x86
+	@$(call EXEC,$(TEST)/x86_gen$(EXE)) $(REF)/inc/bdx86_constants.h libgenome/genotype/x86
 
 genotype-x86-diff:
-	@test -n "$(REF)" || { echo "genotype-x86-diff: pass REF=<reference decoder checkout>"; exit 1; }
+	@$(if $(REF),$(NOOP),$(error genotype-x86-diff: pass REF=<reference decoder checkout>))
 	@$(call MKDIR,$(TEST))
 	$(CC) $(REF_FLAGS) tools/genotype/x86_diff.c tools/genotype/ref_shim.c $(REF_SRC) $(X86_SRC) -Ilibgenome/genotype -o $(TEST)/x86_diff$(EXE)
-	$(TEST)/x86_diff$(EXE)
+	@$(call EXEC,$(TEST)/x86_diff$(EXE))
 
 #
 # THE ARCHIVE IS REMOVED FIRST, AND THAT IS A FIX RATHER THAN TIDINESS.
@@ -149,7 +156,7 @@ genotype-x86-diff:
 # built from empty every time. It costs one unlink; ar then writes the same
 # members it was going to write anyway.
 #
-$(LIB): $(LIB_OBJ) $(PH_OBJ) $(GT_OBJ) $(CL_OBJ) $(UC_OBJ)
+$(LIB): $(LIB_OBJ) $(PH_OBJ) $(GT_OBJ) $(CL_OBJ) $(TX_OBJ) $(UC_OBJ)
 	@$(call MKDIR,$(dir $@))
 	@$(call RM,$@)
 	$(AR) rcs $@ $^
@@ -173,7 +180,7 @@ KGENOME_CORE_OBJ := $(INT)/lib_kofcore/kofentropy.o
 KGENOME_LIB := $(INT)/libkgenome.a
 KUNCOAT_LIB := $(INT)/libkuncoat.a
 
-$(KGENOME_LIB): $(PH_OBJ) $(GT_OBJ) $(CL_OBJ) $(KGENOME_CORE_OBJ)
+$(KGENOME_LIB): $(PH_OBJ) $(GT_OBJ) $(CL_OBJ) $(TX_OBJ) $(KGENOME_CORE_OBJ)
 	@$(call MKDIR,$(dir $@))
 	@$(call RM,$@)
 	$(AR) rcs $@ $^

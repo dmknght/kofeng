@@ -35,7 +35,7 @@ int kof_db_map_pack(struct kof_db_pack *mp, const char *path);
 void kof_db_unmap_pack(struct kof_db_pack *mp);
 int kof_db_arena_open(struct kof_engine *e, size_t want);
 void kof_db_load_diagnoses(struct kof_engine *e, const char *dir);
-void kof_db_load_syndromes(struct kof_engine *e, const char *dir);
+void kof_db_refuse_retired(struct kof_engine *e, const char *dir);
 void kof_db_load_diseases(struct kof_engine *e, const char *dir);
 /* Mark the modules the loaded diagnoses name as their readers, and free the scratch. */
 void kof_db_mark_diag_readers(struct kof_engine *e);

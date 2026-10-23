@@ -106,7 +106,7 @@
  */
 
 #include <kofmod/kofsig.h>
-#include <kofmod/heur.h>
+/* (this file includes no heuristic header) */
 #include <kofmod/pe.h>
 #include <kofmod/pe_reassemble.h>
 
@@ -142,9 +142,20 @@ KOF_ANALYZE_STEP(KOF_ANALYZE_UNPACK);
 KOF_TARGET_FORMAT(KOF_FMT_PE);
 KOF_TARGET_CONTENT("Themida");
 
-/* Where the stream is, measured from the entry point, by stub width. */
-#define TH_OFF_64   0x1d4u
-#define TH_OFF_32   0x197u
+/*
+ * WHERE THE STREAM IS IS READ OUT OF THE LOADER, NOT KNOWN. The setup the entry calls says it in an immediate -
+ *
+ *     b9 imm32          mov ecx, imm32
+ *     83 e9 05          sub ecx, 5
+ *     [48] 01 c1        add ecx, eax / add rcx, rax   (eax is the return address, entry + 5)
+ *
+ * so the stream is `imm32` bytes past the entry point. It was 0x1d4 and 0x197 here as constants, which were the
+ * two values of the four samples measured; a fifth (a larger build, 502 MB of instructions to its program)
+ * says 0x1f0, and the constant made it "Damaged". Measured on five: 0x1d4, 0x1d4, 0x1f0 (x64), 0x197, 0x197
+ * (x86). The setup is searched for in the first TH_SETUP_SPAN bytes of the stub and when that bit pattern is not
+ * there nothing is guessed: the module reports KOF_UNP_UNSUPPORTED and stays out of it.
+ */
+#define TH_SETUP_SPAN  0x200u
 
 /*
  * Below this a VirtualSize is not a statement. The four samples decompress to
@@ -230,8 +241,52 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	if (pe->entry_rva < boot->mem_rva)
 		return;
 	ep_off = pe->entry_rva - boot->mem_rva;
-	stream = boot->file_off + ep_off +
-		 (pe->pe32_plus ? TH_OFF_64 : TH_OFF_32);
+	{
+		const uint64_t ep = boot->file_off + ep_off;
+		uint32_t k, imm = 0;
+		uint64_t at_setup_end = 0;
+		int found = 0;
+
+		for (k = 0; k + 11u <= TH_SETUP_SPAN && !found; k++) {
+			uint64_t at = ep + k;
+			uint32_t tail = 0;
+
+			if (!kof_in_obj(at, 12) || kof_u8(at) != 0xb9u ||
+			    kof_u8(at + 5) != 0x83u || kof_u8(at + 6) != 0xe9u || kof_u8(at + 7) != 0x05u)
+				continue;
+			tail = kof_u8(at + 8) == 0x48u ? 9u : 8u;
+			if (kof_u8(at + tail) != 0x01u || kof_u8(at + tail + 1u) != 0xc1u)
+				continue;
+			imm = kof_u32(at + 1);
+			at_setup_end = at + tail + 2u;
+			found = 1;
+		}
+		/* An immediate that puts the stream outside the section is not the stream. */
+		if (!found || imm < 0x20u || ep_off + imm >= boot->file_size) {
+			KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
+		}
+		stream = ep + imm;
+		/*
+		 * A BLOCK COUNT CAN SIT IN FRONT OF THE STREAM. The larger build (fis_0D43BB34: `.themida`
+		 * 6.7 MB, its stub 0x1f0 past the entry) follows the immediate with a loop - `53 48 89 ce` push
+		 * rbx / mov rsi, rcx, then `mov cl,[rsi] ; inc rsi ; test cl,cl ; ... call rax` - that reads a
+		 * count byte and calls the depacker once per block. The count there is 1 and the aPLib stream is
+		 * the byte after it: decoded from the immediate itself it yields nothing, decoded one byte on it
+		 * yields 6,758,400 bytes, exactly the declared 0x672000. More than one block is a layout this
+		 * has not been measured on, so it is refused rather than guessed.
+		 */
+		{
+			const uint64_t after = at_setup_end;
+
+			if (kof_u8(after) == 0x53u && kof_u8(after + 1) == 0x48u &&
+			    kof_u8(after + 2) == 0x89u && kof_u8(after + 3) == 0xceu) {
+				if (!kof_in_obj(stream, 1) || kof_u8(stream) != 1u) {
+					KUNP_RCSTRUCT_BROKEN(KOF_UNP_UNSUPPORTED);
+				}
+				stream += 1u;
+			}
+		}
+	}
 
 	if (!kof_in_obj(stream, 1) ||
 	    stream >= boot->file_off + boot->file_size)
@@ -388,45 +443,6 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 	}
 
 	/*
-	 * AND THE CHILD IS WHAT TO RUN. See the kind above for the measurement:
-	 * the child starts where the parent arrives after tens of millions of
-	 * instructions, so this is the same request made tens of millions of
-	 * instructions cheaper.
-	 */
-	/*
-	 * THE RUN IS NOT ASKED FOR, AND THAT IS A MEASUREMENT.
-	 *
-	 * The child was handed to the interpreter for a long time and the
-	 * numbers never justified it. Two real faults were found and fixed on
-	 * the way - this reconstruction had no import directory, so the host
-	 * could not bind a thunk and the first call jumped to an RVA; and
-	 * VirtualAlloc succeeded over a mapped library image, which Windows
-	 * refuses and which this protector probes for deliberately. Each fix
-	 * bought distance:
-	 *
-	 *     kiskis    378,361 -> 16,963,436 -> 25,842,536 instructions
-	 *     vdr       334,806 -> 14,914,139 -> 22,964,999
-	 *
-	 * and NOT ONE of them bought a byte of program. The run still ends in
-	 * the loader building a pointer out of a table it has not initialised,
-	 * every sample's code section stays at 8.00 bits, and what comes back
-	 * is one 8 KB page. Seventy times the instructions for the same
-	 * nothing: four seconds across the corpus, and the whole of a Themida
-	 * file's scan time.
-	 *
-	 * SO THE STATIC HALF STAYS AND THE RUN GOES. Decompressing `.themida`
-	 * recovers the loader, which is real content, costs nothing and is
-	 * worth searching - and the object is still reported as not fully
-	 * examined, which is the honest answer about the program beside it.
-	 *
-	 * WHAT WOULD BRING IT BACK is a run that produces a decrypted section.
-	 * The walls are recorded in the memory notes and in THIRD-PARTY.md;
-	 * the next one is the uninitialised table at rbp+0x21, reached at
-	 * rip 0x4b2cef. Until that is answered this is a capability test, not
-	 * a scanner feature.
-	 */
-
-	/*
 	 * AND WHERE THE PROGRAM WILL BE, FOR THE INTERPRETER.
 	 *
 	 * Everything that is not this protector's own two sections. The loader
@@ -485,6 +501,18 @@ void kof_unpack(const struct kof_obj_ctx *ctx)
 		kunp_emu_oep_range(t->mem_rva, t->mem_size);
 	}
 
+
+	/*
+	 * AND THE CHILD IS RUN, which this stopped asking for and now does, because the run now ends
+	 * somewhere that is the program. It did not before: the loader's own jump into `.themida` ended it
+	 * (the generic handover test), then a wild store at 48 M instructions, and a 4 MB section stayed at 8.00
+	 * bits. With the declared ranges deciding the end and the libraries carrying the names the loader walks for,
+	 * five samples end at the program's own entry (fis: .text, 502 M instructions) or, for a .NET assembly, at
+	 * the call into mscoree!_CorExeMain (vdr 512 M, kiskis 1.41 G) with the metadata in memory in the clear.
+	 * That is 12-31 seconds of interpreter, which is why it is asked for from --heur 2 (interpret what no unpacker finished) and not by default: the
+	 * file is one the engine otherwise reads as ciphertext.
+	 */
+	kunp_emu_want(KOF_ENG_USE_EMU, 2u);
 
 	if (!kunp_rcstruct_done())
 		kunp_rcstruct_broken(KOF_UNP_LIMIT);

@@ -350,9 +350,9 @@ def string_attr_popup_token_fullword_icase():
         x = v.row(y).index('e:pattern') + 3
         v.click(x, y)
         for t in ('ignore case', 'token', 'fullword', 'pattern', 'Apply'):
-            check(v.has(t, rows=(y, v.rows)), 'attr popup missing %r' % t)
-        v.click(*v.find('fullword', rows=(y, v.rows)))
-        v.click(*v.find('Apply', rows=(y, v.rows)))
+            check(v.has(t, rows=(2, v.rows)), 'attr popup missing %r' % t)
+        v.click(*v.find('fullword', rows=(2, v.rows)))
+        v.click(*v.find('Apply', rows=(2, v.rows)))
         check('e:fword' in v.row(y), 'fullword not applied: %r' % v.row(y)[:50])
 
 
@@ -363,9 +363,9 @@ def string_attr_icase_sets_flag_in_row():
         y = str_rows(v)[0]
         x = v.row(y).index('e:pattern') + 3
         v.click(x, y)
-        v.click(*v.find('[ ] ignore case', rows=(y, v.rows)))
+        v.click(*v.find('[ ] ignore case', rows=(2, v.rows)))
         check('[x] ignore case' in v.text(), 'checkbox did not flip')
-        v.click(*v.find('Apply', rows=(y, v.rows)))
+        v.click(*v.find('Apply', rows=(2, v.rows)))
         check('i:pattern' in v.row(y), 'icase flag not shown: %r' % v.row(y)[:50])
 
 
@@ -483,6 +483,7 @@ def tree_selection_scopes_string_region_default():
 @case(A)
 def panel_grip_drag_resizes_panel_and_clamps():
     with ko() as v:
+        open_tab(v, 'Blocks')           # a panel only grows as far as it has rows: this tab is long
         g0 = grip(v)
         enlarge(v, 8)
         g1 = grip(v)
@@ -571,7 +572,7 @@ def popup_menus_stay_inside_the_screen_near_the_bottom_and_right():
         add_string(v, 'GCC')
         for i in range(6):
             add_string(v, 'more%d' % i)
-        p = prow(v, '[+ String]')
+        p = prow_scroll(v, '[+ String]')
         v.click(*p)
         check(v.alive())
         check(v.has('Hex'), 'add-string menu not visible near the bottom edge')

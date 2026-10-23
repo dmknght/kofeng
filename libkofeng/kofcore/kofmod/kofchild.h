@@ -465,8 +465,8 @@ enum kunp_rcstruct_broken {
  * KUNP_RCSTRUCT_BROKEN records the reason and RETURNS, which is what nearly every site
  * wants: the module has found out it cannot go on, and the `return` underneath was
  * a line that only ever said so again. Upper case because it changes control flow -
- * the same rule KOF_SCAN_MATCH follows, and the reason a reader can tell which
- * macros end a function without looking any of them up.
+ * the same rule the other macros that end a function follow, and the reason a
+ * reader can tell which ones do without looking any of them up.
  *
  * kunp_rcstruct_broken records and carries on, for the module that has recovered
  * something and means to keep it. That is now the commoner of the two - 37 call

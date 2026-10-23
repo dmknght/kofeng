@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 #include "../../libkofeng/analyzers/parsers/events/amsi_parse.h"
 
 #include <kofmod/kofsig.h>
@@ -104,16 +105,21 @@ struct seen {
 	int  n, rc;
 };
 
+/* What the module said while an object was scanned - see notes.h. */
+static struct note_list pend;
+
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = (struct seen *)user;
+	struct note_list got;
 
-	(void)name; (void)bytes; (void)len;
-	if (res && res->n) {
+	(void)name; (void)bytes; (void)len; (void)res;
+	notes_take(&pend, &got);
+	if (got.n) {
 		if (!s->n)
-			snprintf(s->name, sizeof s->name, "%s", res->v[0].name);
-		s->n += (int)res->n;
+			snprintf(s->name, sizeof s->name, "%s", got.name[0]);
+		s->n += (int)got.n;
 	}
 	return 0;
 }
@@ -134,9 +140,9 @@ static const char *scan_as_amsi(kof_scanner *sc, const void *obj, uint64_t n,
 	struct kof_amsi_view decl;
 
 	memset(s, 0, sizeof *s);
+	memset(&pend, 0, sizeof pend);
 	memset(&opt, 0, sizeof opt);
 	opt.as_format = KOF_EVT_AMSI;   /* DECLARED - an event never sniffs */
-	opt.all_matches = 1;
 	if (tell) {
 		memset(&decl, 0, sizeof decl);
 		decl.obj_off = obj_off;
@@ -261,6 +267,8 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	sc = kscan_new(eng);
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	if (!sc) {
 		keng_close(eng);
 		return 2;

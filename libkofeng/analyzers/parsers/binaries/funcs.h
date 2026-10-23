@@ -13,6 +13,8 @@
 
 #include <genotype/image/funcs.h>
 
+#include "../scripts/script_sym.h"
+
 /* The PE import table a caller may already hold for this object. */
 struct kgenome_pe_imptab;
 
@@ -25,5 +27,13 @@ uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data
 			     const void *info,
 			     const struct kgenome_pe_imptab *imports,
 			     uint8_t **buf, uint32_t *cap, uint32_t *passes);
+/* The same block, grown the same way, for a script whose names the engine took from a scan it made (script_sym.h: kof_script_syms_with). */
+uint32_t kof_syms_build_grow_script(kof_script_names_fn feed, void *feed_user, uint8_t **buf, uint32_t *cap, uint32_t *passes);
+
+/*
+ * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block. `shndx` of -1 matches any section; a relocatable object's values are
+ * section-relative, so there the section is part of the answer. `out` is empty when no record matches.
+ */
+void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value, int shndx, char *out, size_t cap);
 
 #endif /* KOFENG_BINARIES_FUNCS_H */

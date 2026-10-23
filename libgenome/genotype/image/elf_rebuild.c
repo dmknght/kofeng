@@ -175,7 +175,19 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 		 * reader of the rebuilt file sees a hollow segment and not a zero-filled one, and
 		 * covered_lo/covered_hi (a span, which cannot hold a hole) are not the only word.
 		 */
-		if (!rd(user, bias + vaddr, file + off, (uint32_t)fsz)) {
+		/*
+		 * THE READER TAKES A 32-BIT LENGTH, so a segment of 4 GiB or more cannot be read in
+		 * one call and is not read at all: `(uint32_t)fsz` read its low bits, answered yes and
+		 * the segment was declared whole (norm_defect_image N11). It is a hole, like one the
+		 * reader refuses - a cap above 4 GiB lets such a size through the check above.
+		 */
+		/*
+		 * AND A RANGE THAT WRAPS 2^64 IS NO RANGE (image_defect2 E7): bias + vaddr + fsz past the top of
+		 * the address space was read at the wrapped address, taken for the segment and declared whole,
+		 * and its end poisoned the covered span. A hole, like one the reader refuses.
+		 */
+		if (fsz > UINT32_MAX || bias + vaddr < bias || fsz > UINT64_MAX - (bias + vaddr) ||
+		    !rd(user, bias + vaddr, file + off, (uint32_t)fsz)) {
 			hole[i / 8u] = (uint8_t)(hole[i / 8u] | (1u << (i % 8u)));
 			continue;
 		}
@@ -198,11 +210,13 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 			if (at + 8u <= end)
 				memset(file + at, 0, 8);        /* p_filesz */
 		}
-	if (have_sh && shoff + (uint64_t)shnum * SHENT64 <= end)
-		rd(user, bias + shoff, file + shoff,
-		   (uint32_t)((uint64_t)shnum * SHENT64));
-	else if (!have_sh) {
-		/*
+	if (!(have_sh && shoff + (uint64_t)shnum * SHENT64 <= end &&
+	      rd(user, bias + shoff, file + shoff,
+		 (uint32_t)((uint64_t)shnum * SHENT64)))) {
+		/* NOT READ: never probed as a table, or the second read of it failed after the first
+		 * (section header zero) answered - a header that still names a table over the zeroes
+		 * calloc left there names a table that is not one.
+		 *
 		 * Say stripped rather than carry a table that is not one - and
 		 * say it AFTER the segments are laid down, not before. The
 		 * first PT_LOAD covers file offset zero in every ordinary ELF,

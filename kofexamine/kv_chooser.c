@@ -268,8 +268,8 @@ static void fmt_swap(struct view *v, uint32_t which, uint8_t pick)
 	/*
 	 * A SWAP KEEPS THE COUNT, so the ambiguity warning that an add needs is
 	 * not needed here - see the note where CH_FMT_ADD raises it. Removing
-	 * is allowed to empty the set: draft_missing_of refuses an empty one in
-	 * words, which beats a control that will not respond.
+	 * is allowed to empty the set: the panel says "Format None" in words,
+	 * which beats a control that will not respond.
 	 */
 }
 /* The removable scan ranges, listed the same way where the menu is built and
@@ -423,68 +423,16 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * kof_find_str_all, _any or _multi, an old rule still reads
 		 * back, and the short-circuit that && and || give is still
 		 * there where it applies.
+		 *
+		 * THESE TWO ARE THE STRING MATCHERS. A similarity matcher is
+		 * not a kind to choose here: ticking a block makes its find_sim
+		 * and unticking drops it - see blk_set_picked.
 		 */
 		ch_add(c, "find_str");
 		/* Last, because it is the one that is not a search: it compares
 		 * at one offset, and it is the only rule that constrains the
 		 * matcher to a single marker. */
 		ch_add(c, "find_at (offset)");
-		/*
-		 * AND find_similar - ALWAYS, because it covers four measures
-		 * and three of them are about the object itself.
-		 *
-		 * One row, because this menu chooses what KIND of matcher this
-		 * is - the four above are the four searches, and this is the
-		 * fifth. WHICH measures it is about are chosen on the matcher's
-		 * own row afterwards, the same way a search matcher takes its
-		 * markers afterwards. A row per measure here would be two
-		 * questions in one menu.
-		 *
-		 * It used to be offered only while a block was ticked, from
-		 * when a block was the only thing it could be about. Withheld
-		 * on that test, a rule written from the object's shape alone -
-		 * which reads no content at all, and is the point of the shape
-		 * measure - could not be started.
-		 */
-		ch_add(c, "find_similar");
-	} else if (what == CH_SIM) {
-		/*
-		 * BOTH KINDS OF THING AT ONCE - the ticked blocks and the
-		 * whole-object measures, in one list, because they are one
-		 * question: what else does this matcher measure? The backend
-		 * decides which engine call each one becomes; the reader does
-		 * not have to know that they are different.
-		 *
-		 * sim_offer is what decides; the labels are written from what
-		 * it returns so the take below cannot disagree with the menu
-		 * about which row is which.
-		 */
-		struct grp_sim_item off[MAX_DECL + 4];
-		uint32_t n = sim_offer(v, c->arg, off,
-				       (uint32_t)(sizeof off / sizeof off[0]));
-		uint32_t oi;
-
-		if (n > sizeof off / sizeof off[0])
-			n = (uint32_t)(sizeof off / sizeof off[0]);
-		/*
-		 * THE NAME AND NOTHING ELSE. Each row is one thing to pick,
-		 * and how much of it there is belongs to the table the tick
-		 * was made in - a menu that repeats it makes the reader
-		 * compare three columns to pick one of two.
-		 */
-		for (oi = 0; oi < n; oi++) {
-			char t[CH_W];
-
-			if (off[oi].what == SIM_IT_BLOCK)
-				snprintf(t, sizeof t, "block %08x",
-					 v->ed.dr.blk[off[oi].blk].id);
-			else
-				snprintf(t, sizeof t, "%s",
-					 sim_it_word(off[oi].what));
-			ch_add(c, t);
-		}
-		if (!c->n)
-			return;
 	} else if (what == CH_RANGE) {
 		/*
 		 * WHICH DEFINED RANGE THIS MATCHER SEARCHES.
@@ -625,31 +573,6 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		if (!c->n)
 			return;
-	} else if (what == CH_LEVEL) {
-		/*
-		 * Two menus, not one of six.
-		 *
-		 * The level and the variant are independent - every level works
-		 * with every naming - so one list of their combinations makes
-		 * the reader find their own answer among products of two
-		 * questions, and grows by multiplication the moment either
-		 * side gains an option.
-		 */
-		ch_add(c, lvl_word[LV_INFECT]);
-		ch_add(c, lvl_word[LV_SUSPECT]);
-		/*
-		 * A branch that concludes nothing, on purpose.
-		 *
-		 * Reads as a gap in the list until it is needed, and then it is
-		 * the only thing that will do: a gate wants it so its children
-		 * are the whole answer, and a chain wants it so one case can be
-		 * ruled out before the else catches everything left.
-		 */
-		ch_add(c, lvl_word[LV_NONE]);
-	} else if (what == CH_VARIANT) {
-		ch_add(c, "Auto");
-		ch_add(c, "Generic");
-		ch_add(c, "Custom");
 	} else if (what == CH_TYPE) {
 		for (i = 0; i < MALTYPE_N; i++)
 			ch_add(c, maltype_word[i]);
@@ -711,7 +634,7 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		if (ci >= v->ed.dr.n_cnd || m >= v->ed.dr.n_grp)
 			return;
 		cc = &v->ed.dr.cnd[ci];
-		if (!cnd_uses(cc, m))
+		if (!cnd_uses(&v->ed, cc, m))
 			return;
 		/*
 		 * ONE VERB FOR BOTH DIRECTIONS, in the notation the row is
@@ -724,9 +647,10 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		 * instead - "must be absent" - makes them translate between two
 		 * vocabularies for it, and the "!" is the one on screen.
 		 */
-		snprintf(t, sizeof t, cnd_neg(cc, m)
+		snprintf(t, sizeof t, cnd_neg(&v->ed, cc, m)
 			 ? "Invert !%u to %u"
-			 : "Invert %u to !%u", m + 1u, m + 1u);
+			 : "Invert %u to !%u", grp_loc(&v->ed, m),
+			 grp_loc(&v->ed, m));
 		ch_add_verb(c, t, 0);
 		/*
 		 * Only while there is another matcher to switch TO. A row that
@@ -739,7 +663,7 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 				break;
 		if (i < v->ed.dr.n_grp)
 			ch_add_verb_sub(c, "Switch to another matcher", 1);
-		snprintf(t, sizeof t, "Remove matcher %u", m + 1u);
+		snprintf(t, sizeof t, "Remove matcher %u", grp_loc(&v->ed, m));
 		ch_add_verb(c, t, 2);
 	} else if (what == CH_CSWAP) {
 		/*
@@ -766,19 +690,6 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		}
 		if (!c->n)
 			return;
-	} else if (what == CH_LOGIC) {
-		/*
-		 * TWO, IN THE ORDER OF enum cnd_join.
-		 *
-		 * There were three for a while, and the third - "also" - said
-		 * nothing the first did not: a verdict returns, so two blocks
-		 * either of which can fire are two branches however the second
-		 * one is written. The pair that is left is the pair that
-		 * differs, and each is glossed because "or" and "and" between
-		 * two BLOCKS is exactly what was being read wrong.
-		 */
-		ch_add(c, "or    either one can fire");
-		ch_add(c, "and   both must hold, fires once");
 	} else if (what == CH_FMT) {
 		/*
 		 * ONE FORMAT'S OWN MENU: swap it for another, or drop it.
@@ -904,23 +815,6 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 		for (t = 0; t < (uint32_t)KOF_CODEC_COUNT; t++)
 			ch_add(c, kof_codec_name(t));
 		c->sel = (int)v->enc_type;
-	} else if (what == CH_SWITCH) {
-		/*
-		 * Three answers, and the one that loses work is not the first.
-		 *
-		 * Named by what happens rather than by yes and no: "discard"
-		 * is a word people read before clicking, "OK" is not.
-		 */
-		/*
-		 * Capitalised, like every other row that is an ACTION. The
-		 * lowercase rows in these menus are values a signature can
-		 * hold - fullword, ignore-case, and, or, find_all - and the
-		 * difference is worth keeping visible: one row sets a field,
-		 * the other does something to the draft.
-		 */
-		ch_add(c, "Keep editing");
-		ch_add(c, "Write it, then switch");
-		ch_add(c, "Discard it and switch");
 	} else if (what == CH_OPT) {
 		/* Only the ones this object can answer for, and only the ones
 		 * not already there: a list that offers what it will refuse is
@@ -1044,10 +938,10 @@ void ch_open(struct view *v, int what, uint32_t arg, int row, int col)
 	 */
 	c->open = 1;
 	c->row = row + 1;
-	if (c->row + c->n - 1 > g_rows)
+	if (c->row + c->n - 1 > g_rows - 1)
 		c->row = row - c->n;
-	if (c->row + c->n - 1 > g_rows)
-		c->row = g_rows - c->n + 1;
+	if (c->row + c->n - 1 > g_rows - 1)
+		c->row = g_rows - c->n;
 	if (c->row < 1)
 		c->row = 1;
 	/*
@@ -1190,7 +1084,7 @@ static void at_warn_if_multi(struct view *v)
 				say_err(&v->ed,
 					"matcher %u searches nothing in %s - "
 					"that format has no such region",
-					g + 1u, kof_format_name(f));
+					grp_loc(&v->ed, g), kof_format_name(f));
 				return;
 			}
 			rng_name_of(kof_parser_of(f), want, other,
@@ -1203,7 +1097,8 @@ static void at_warn_if_multi(struct view *v)
 			if (strcmp(first, other)) {
 				say_err(&v->ed,
 					"matcher %u: that region is %s in %s "
-					"and %s in %s", g + 1u, first,
+					"and %s in %s", grp_loc(&v->ed, g),
+					first,
 					kof_format_name(ff), other,
 					kof_format_name(f));
 				return;
@@ -1589,17 +1484,9 @@ void ch_take(struct view *v)
 		if (!v->ed.dr.n_grp)
 			return;
 		q = &v->ed.dr.grp[v->ed.dr.n_grp - 1u];
-		/*
-		 * find_similar is a KIND and not a search rule, so it is taken
-		 * the same way here as for an existing matcher - see the branch
-		 * below. Both paths ask ch_rule_of_row rather than writing
-		 * c->sel into `rule`: this one used to do that, and choosing
-		 * find_similar on a NEW matcher produced a find_all.
-		 */
-		if (c->sel >= CH_RULE_BLOCK0) {
-			grp_make_sim(&v->ed, v->ed.dr.n_grp - 1u);
-			return;
-		}
+		/* Through ch_rule_of_row rather than writing c->sel into
+		 * `rule`: this used to do that, and the row number is not the
+		 * rule. */
 		q->rule = ch_rule_of_row(c->sel);
 		/* Nothing in it yet, so there is no marker to seed from - the
 		 * offset arrives with the first one. See grp_seed_at. */
@@ -1713,19 +1600,6 @@ void ch_take(struct view *v)
 		}
 		return;
 	}
-	if (c->what == CH_LOGIC) {
-		if (c->arg < v->ed.dr.n_cnd)
-			v->ed.dr.cnd[c->arg].join = c->sel;
-		return;
-	}
-	if (c->what == CH_SWITCH) {
-		if (c->sel == 0)
-			return;                 /* stay where the work is */
-		if (c->sel == 1)
-			generate(&v->ed, 0);
-		draft_show(v, c->arg);
-		return;
-	}
 	if (c->what == CH_CMATCH) {
 		struct cond *cc;
 		uint32_t i, n = 0;
@@ -1749,7 +1623,8 @@ void ch_take(struct view *v)
 			 */
 			l = strlen(cc->expr);
 			snprintf(cc->expr + l, sizeof cc->expr - l, "%s%u",
-				 l ? (cc->op ? "|" : "&") : "", i + 1u);
+				 l ? (cc->op ? "|" : "&") : "",
+				 grp_loc(&v->ed, i));
 			break;
 		}
 		return;
@@ -1767,7 +1642,7 @@ void ch_take(struct view *v)
 		if (ci >= v->ed.dr.n_cnd || m >= v->ed.dr.n_grp)
 			return;
 		if (verb == 0) {
-			cnd_negate_matcher(&v->ed.dr.cnd[ci], m);
+			cnd_negate_matcher(&v->ed, &v->ed.dr.cnd[ci], m);
 			return;
 		}
 		if (verb == 1) {
@@ -1779,7 +1654,7 @@ void ch_take(struct view *v)
 			v->ch_up = up;
 			return;
 		}
-		cnd_drop_matcher(&v->ed.dr.cnd[ci], m);
+		cnd_drop_matcher(&v->ed, &v->ed.dr.cnd[ci], m);
 		return;
 	}
 	if (c->what == CH_CSWAP) {
@@ -1798,24 +1673,6 @@ void ch_take(struct view *v)
 				continue;
 			cnd_swap_matcher(&v->ed, ci, m, i);
 			break;
-		}
-		return;
-	}
-	if (c->what == CH_LEVEL || c->what == CH_VARIANT) {
-		struct cond *cc;
-
-		if (c->arg >= v->ed.dr.n_cnd)
-			return;
-		cc = &v->ed.dr.cnd[c->arg];
-		if (c->what == CH_LEVEL) {
-			cc->level = c->sel;
-		} else {
-			cc->var_kind = c->sel;
-			/* "custom" is a promise of a name, so the caret goes
-			 * where the name will be typed rather than leaving the
-			 * word "custom" standing in for one. */
-			if (c->sel == 2)
-				v->edit = 4 + (int)c->arg;
 		}
 		return;
 	}
@@ -1926,19 +1783,6 @@ void ch_take(struct view *v)
 		 * correction that matters on the other one. */
 		grp_at_fix_sign(q);
 	} else if (c->what == CH_RULE) {
-		/* Past the two search rows is find_similar - see where the
-		 * menu is built. */
-		if (c->sel >= CH_RULE_BLOCK0) {
-			grp_make_sim(&v->ed, c->arg < MAX_GROUP ? c->arg
-					   : v->ed.dr.n_grp - 1u);
-			return;
-		}
-		/* Turning a similarity matcher back into a search drops what
-		 * it measured: a search rule has no items, and leaving them in
-		 * place would have them emitted again the moment it was turned
-		 * back. */
-		q->kind = (uint8_t)GRP_KIND_STR;
-		q->n_sim = 0;
 		q->rule = ch_rule_of_row(c->sel);
 		/* Chosen now, from whatever marker the matcher already holds -
 		 * see grp_seed_at. Switching away and back does not lose it,
@@ -1947,22 +1791,6 @@ void ch_take(struct view *v)
 			grp_seed_at(&v->ed, c->arg);
 			at_warn_if_multi(v);
 		}
-	} else if (c->what == CH_SIM) {
-		/*
-		 * The same list the menu was built from, in the same order -
-		 * see the note there.
-		 *
-		 * A block needs nothing taken off the object: the carve already
-		 * found it.
-		 */
-		struct grp_sim_item off[MAX_DECL + 4];
-		uint32_t n = sim_offer(v, c->arg, off,
-				       (uint32_t)(sizeof off / sizeof off[0]));
-
-		if (c->sel < 0 || (uint32_t)c->sel >= n)
-			return;
-		grp_sim_add(&v->ed, c->arg, off[c->sel].what, off[c->sel].blk);
-		v->mtn_scored = 0;
 	} else if (c->what == CH_RANGE) {
 		/*
 		 * The same list the menu was built from, walked in the same
@@ -1984,7 +1812,7 @@ void ch_take(struct view *v)
 /* How many rows of this list the screen has room for, from where it opened. */
 int ch_vis(const struct chooser *c)
 {
-	int room = g_rows - c->row + 1;
+	int room = g_rows - c->row;     /* the status line stays uncovered */
 
 	if (room < 1)
 		room = 1;

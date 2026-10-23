@@ -331,7 +331,7 @@ void dis_copy(struct view *v)
 
 			while (at <= hi && at < v->rgn_len &&
 			       guard++ < (1u << 20)) {
-				char line[120];
+				char line[DIS_LINE_MAX];
 
 				if (!dis_format(v, &at, line, sizeof line,
 						NULL, NULL, NULL, NULL, 0))

@@ -123,7 +123,7 @@
  */
 
 #include <kofmod/kofsig.h>
-#include <kofmod/heur.h>
+/* (this file includes no heuristic header) */
 #include <kofmod/pe.h>
 #include <kofmod/pe_reassemble.h>
 

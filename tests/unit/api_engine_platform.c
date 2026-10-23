@@ -132,8 +132,6 @@ static void t_files(void)
 	CK(symlink(p, lnk) == 0, "symlink");
 	CK(kof_fopen_new(lnk) == NULL, "fopen_new refuses a symlink, even a dangling-or-live one");
 	CK(kof_fopen_trunc(lnk) == NULL, "fopen_trunc does not write through a symlink");
-	CK(kof_fopen_rw(lnk) == NULL, "fopen_rw does not open a symlink");
-	CK(kof_truncate_file(lnk, 0) == 0, "truncate_file does not follow a symlink");
 	CK(slurp(p, buf, sizeof buf) == 3 && strcmp(buf, "one") == 0,
 	   "the file behind the symlink is untouched");
 
@@ -162,21 +160,6 @@ static void t_files(void)
 		   "the mode is the one asked for (less umask)");
 	}
 	CK(kof_fopen_trunc("build/test/no-such-dir/x") == NULL, "missing directory");
-
-	f = kof_fopen_rw(p);
-	CK(f != NULL, "fopen_rw opens an existing file");
-	if (f) {
-		fwrite("abcdefgh", 1, 8, f);
-		fflush(f);
-		CK(kof_fseek64(f, 2) == 1 && fgetc(f) == 'c', "fseek64 positions");
-		CK(kof_fseek64(f, 0) == 1, "fseek64 to 0");
-		fclose(f);
-	}
-	CK(kof_fopen_rw("build/test/no-such-file") == NULL, "fopen_rw does not create");
-	CK(kof_truncate_file(p, 3) == 1, "truncate_file shrinks");
-	CK(slurp(p, buf, sizeof buf) == 3 && strcmp(buf, "abc") == 0, "to the length asked");
-	CK(kof_truncate_file(p, 10) == 1 && stat(p, &st) == 0 && st.st_size == 10, "and extends");
-	CK(kof_truncate_file("build/test/no-such-file", 0) == 0, "truncate of a missing file fails");
 
 	path_of(q, sizeof q, "renamed.bin");
 	CK(kof_rename_over(p, q) == 1 && stat(p, &st) != 0 && stat(q, &st) == 0, "rename_over moves");
@@ -369,7 +352,7 @@ static void t_debug(void)
 	KOF_TIME_BEGIN(KOF_T_PARSE);
 	KOF_TIME_END(KOF_T_PARSE);
 	KOF_TIME_REPORT();
-	CK(KOF_TRACING == 0 && KOF_T_COUNT == 11 && KOF_T_DB_LOAD == 0, "time slots");
+	CK(KOF_TRACING == 0 && KOF_T_COUNT == 13 && KOF_T_DB_LOAD == 0, "time slots");
 	CK(KOFENG_BUILD >= 0u, "the build stamp has a default");
 }
 

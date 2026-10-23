@@ -96,21 +96,14 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *e,
  * out of whatever followed it in the file.
  */
 /*
- * One of a module's names, by id or by position.
+ * One of a module's names, by id.
  *
- * Two questions with one body of bounds checks between them. A finding reports an
- * id and wants the text for it; a tool that lists what a module can report has no
- * id to offer and wants them in order. Splitting the two would be two copies of
- * the checks, which is the one thing this function is careful about - see the
- * note on kof_db_name for why a mapping is re-validated on every call rather than
- * trusted from load time.
- *
- * `by_index` picks which: non-zero and `key` is a position in the module's slice,
- * zero and it is the id the module reports.
+ * A name reports an id and the caller wants the text for it. The bounds checks are
+ * made on every call - see the note on kof_db_name for why a mapping is
+ * re-validated rather than trusted from load time.
  */
 static const char *db_name_lookup(const struct kof_engine *e,
-				  const struct kof_module *m, uint32_t key,
-				  int by_index, uint32_t *id_out)
+				  const struct kof_module *m, uint32_t key)
 {
 	const struct kof_pack_hdr *h;
 	const struct kof_pack_name *pn;
@@ -147,10 +140,8 @@ static const char *db_name_lookup(const struct kof_engine *e,
 	for (i = 0; i < m->n_names; i++) {
 		const struct kof_pack_name *d = &pn[m->name_base + i];
 
-		if (by_index ? i != key : d->id != key)
+		if (d->id != key)
 			continue;
-		if (id_out)
-			*id_out = d->id;
 		if (d->off >= pool_len)
 			return NULL;
 		/* Terminated inside the pool, or it is not a string this may hand
@@ -165,14 +156,7 @@ static const char *db_name_lookup(const struct kof_engine *e,
 const char *kof_db_name(const struct kof_engine *e, const struct kof_module *m,
 			uint32_t name_id)
 {
-	return db_name_lookup(e, m, name_id, 0, NULL);
-}
-
-const char *kof_db_name_at(const struct kof_engine *e,
-			   const struct kof_module *m, uint32_t index,
-			   uint32_t *id_out)
-{
-	return db_name_lookup(e, m, index, 1, id_out);
+	return db_name_lookup(e, m, name_id);
 }
 
 /*
@@ -228,22 +212,8 @@ const char *kof_db_family(const struct kof_engine *e, const struct kof_module *m
 	return db_pool_str(e, m, m ? m->family_off : 0);
 }
 
-/*
- * The family a heuristic rule PREDICTS, or NULL when it predicts nothing.
- *
- * Zero is "no prediction" and not "offset zero": the packer interns nothing for
- * a rule without KOF_HEUR_PREDICT, and offset zero in the pool belongs to
- * whatever string happened to be interned first.
- */
-const char *kof_db_heur_predict(const struct kof_engine *e,
-				const struct kof_module *m)
-{
-	if (!m || !m->heur_predict_off)
-		return NULL;
-	return db_pool_str(e, m, m->heur_predict_off);
-}
-
-/* Zero is "none declared", for the same reason as above. */
+/* Zero is "none declared": offset zero in the pool belongs to whatever string
+ * happened to be interned first. */
 const char *kof_db_content(const struct kof_engine *e,
 			   const struct kof_module *m)
 {

@@ -48,6 +48,7 @@
 #   tests     fixtures and unit tests
 #   deps      dependency files and the source-move guards
 #   asan      the sanitised twins of the tests
+#   fuzz      the fuzz kit's binaries, make fuzz-smoke (needs asan's flags and NL)
 #   misc      tui-test, population, debug, clean
 #   checks    check-rules
 #
@@ -73,5 +74,6 @@ include mk/packs.mk
 include mk/tests.mk
 include mk/deps.mk
 include mk/asan.mk
+include mk/fuzz.mk
 include mk/misc.mk
 include mk/checks.mk

@@ -54,14 +54,14 @@ static const struct {
 	 */
 	int         sep;
 } bar_item[BI_COUNT] = {
-	{ "Save",           BM_FILE, -1, 0 },
-	{ "Save As...",     BM_FILE, -1, 0 },
 	{ "Quit",           BM_FILE, -1, 0 },
 	{ "Find...",        BM_EDIT, -1, 0 },
 	{ "Go to...",       BM_EDIT, -1, 0 },
 	{ "Dashboard",         BM_ANALYSIS, -1, 0 },
 	{ "Symbols",           BM_ANALYSIS, -1, 0 },
+	{ "Syndrome table",    BM_ANALYSIS, -1, 0 },
 	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
+	{ "Analyze disassembly", BM_ANALYSIS, -1, 0 },
 	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
 	{ "Find infected data",       BM_ANALYSIS, -1, 0 },
 	{ "Decode string",            BM_ANALYSIS, -1, 0 },
@@ -446,6 +446,7 @@ static int bar_shown(struct view *v, int i)
 			return 0;
 		return kof_sym_count(o->sym, o->sym_n) != 0;
 	}
+	case BI_DISANALYSE:
 	case BI_DISASM: {
 		const struct object *ob = cur_obj(v);
 
@@ -567,6 +568,7 @@ case BI_UNPACKER: {
 		switch (i) {
 		case BI_SYMS:
 		case BI_DISASM:
+		case BI_DISANALYSE:
 		case BI_FINDSC:
 		case BI_FINDINF:
 		case BI_UNPACKER:
@@ -600,8 +602,6 @@ int dump_needs_rebuild(const struct view *v, int use_emu)
 int bar_enabled(struct view *v, int i)
 {
 	switch (i) {
-	case BI_SAVE:      return save_ok(v);
-	case BI_SAVE_AS:   return save_as_ok(v);
 	/* Off for a viewer that has no file behind it, which is the one case
 	 * where there is nowhere for a dump to go: the directory is named after
 	 * the file and placed beside it. */
@@ -636,6 +636,7 @@ case BI_UNPACKER:
 	 * of an encoder are exactly what this is for, and the mode is then the
 	 * reader's to pick.
 	 */
+	case BI_DISANALYSE:
 	case BI_DISASM: {
 		const struct object *ob = cur_obj(v);
 
@@ -646,6 +647,8 @@ case BI_UNPACKER:
 		return ob && ob->buf.p && v->rgn_len != 0;
 	}
 	case BI_DASH:      return 1;
+	/* A directory of files, not a property of the object: always. */
+	case BI_SYNTAB:    return v->syn != NULL;
 	/* Needs a file to step from, and nothing the reader typed that would be
 	 * lost - moving on is the one action here that throws work away. */
 	case BI_NEXT:
@@ -976,29 +979,17 @@ void bar_move_item(struct view *v, int dir)
  * read them side by side when either changes.
  *
  * NULL for an item whose greyness explains itself: an item disabled because no
- * file is open is answered by the empty screen, and a draft that is short of a
- * matcher or a name is described by draft_missing_of where it is written out.
- *
- * Save is the exception, and it is why the two Save cases return NULL for every
- * other reason: "nowhere to put it" is not a fact about the draft, so nothing
- * the author does to the draft will explain it, and it has to be said here.
+ * file is open is answered by the empty screen.
  */
 static const char *bar_why_off(struct view *v, int i)
 {
 	switch (i) {
-	case BI_SAVE:
-	case BI_SAVE_AS:
-		/* First, because it is not about the draft: with no tree named
-		 * there is nowhere to put one however complete it is. */
-		if (!v->ed.basedir[0])
-			return "No signature tree given - start with "
-			       "--bases <dir>";
-		return NULL;
 	case BI_SYMS:
 		/* Both readings are true of the same object and neither can be
 		 * told from the other: a table that was stripped and one that
 		 * was never written both arrive as no records. */
 		return "No symbols in this object - it is stripped or declares none";
+	case BI_DISANALYSE:
 	case BI_DISASM: {
 		/*
 		 * TWO REASONS, AND ONE OF THEM WAS BEING TOLD AS THE OTHER.
@@ -1041,7 +1032,7 @@ static const char *bar_why_off(struct view *v, int i)
 		if (draft_edited(&v->ed))
 			return "Finish or undo the draft first - rebuilding "
 			       "examines the file again";
-		return "Set both a database and a signature tree first";
+		return "Set both a database and a content tree first";
 	default:
 		return NULL;
 	}
@@ -1054,42 +1045,15 @@ void bar_run(struct view *v, int i)
 		/*
 		 * A GREYED ITEM THAT DOES NOTHING WHEN CLICKED TEACHES NOTHING.
 		 *
-		 * Save and Save As have their own two messages, and they go to
-		 * the draft panel's note because that is where the reader is
-		 * when they press them. Everything else can be pressed from any
-		 * pane, so it answers through act_msg - the slot that shows
-		 * wherever the reader is and fades on its own. Putting one of
-		 * those in dr.warn is how a reply gets written and never read.
+		 * Any item can be pressed from any pane, so it answers through
+		 * act_msg - the slot that shows wherever the reader is and fades
+		 * on its own.
 		 */
-		if (i == BI_SAVE || i == BI_SAVE_AS) {
-			/*
-			 * bar_why_off FIRST, and it matters which order.
-			 *
-			 * draft_missing describes the DRAFT, and until there is
-			 * a tree to write into no draft is complete enough to
-			 * change that - so asking it first answered a greyed
-			 * Save with "add a marker" on a draft that had plenty,
-			 * and the reason it was really grey was never said.
-			 */
-			const char *why = bar_why_off(v, i);
+		const char *why = bar_why_off(v, i);
 
-			if (!why)
-				why = draft_missing(&v->ed);
-			if (why)
-				say_err(&v->ed, "%s", why);
-			else
-				/* Nothing is wrong and nothing is missing -
-				 * the file on disk already says this. */
-				say_note(&v->ed, "Already saved - no change "
-					 "since the last write");
-		} else {
-			const char *why = bar_why_off(v, i);
-
-			if (why) {
-				snprintf(v->act_msg, sizeof v->act_msg, "%s",
-					 why);
-				v->act_ok = 0;
-			}
+		if (why) {
+			snprintf(v->act_msg, sizeof v->act_msg, "%s", why);
+			v->act_ok = 0;
 		}
 		return;
 	}
@@ -1160,8 +1124,6 @@ void bar_run(struct view *v, int i)
 			v->act_ok = 1;
 		}
 		break;
-	case BI_SAVE:    generate(&v->ed, 0); break;
-	case BI_SAVE_AS: generate(&v->ed, 1); break;
 	/*
 	 * IT HAD NO CASE, so it fell to `default: break;` - the menu closed and
 	 * the program stayed open. That is the failure the note further down
@@ -1185,6 +1147,9 @@ void bar_run(struct view *v, int i)
 	 * is exactly how BI_GOTO looked before the dialog existed. */
 	case BI_SYMS:
 		symd_open(v);
+		return;
+	case BI_SYNTAB:
+		syn_open(v);
 		return;
 	/*
 	 * SHOW what the analysis found, or say plainly that it found nothing.
@@ -1350,6 +1315,7 @@ void bar_run(struct view *v, int i)
 	case BI_DUMP_EMU:    dump_all(v, 1); break;
 	case BI_UNPACKER: emu_here(v); break;
 	case BI_DISASM:   dis_toggle(v, 0, KGENOME_BROKEN); break;
+	case BI_DISANALYSE: dis_analyse(v); break;
 	case BI_NEXT:    open_step(v, +1); break;
 	case BI_PREV:    open_step(v, -1); break;
 	case BI_SEPARATE: separate_now(v); break;

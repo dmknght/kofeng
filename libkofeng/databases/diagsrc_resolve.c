@@ -214,7 +214,7 @@ int kof_dsrc_resolve(const struct kof_dsrc *d, struct kof_dsrc_view *v,
 	if (!v->name[0])
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs KOF_DIAG_NAME");
 	if (!(v->analysis & (KOF_DIAG_ANALYSIS_SYSCALL | KOF_DIAG_ANALYSIS_SYMBOL |
-			     KOF_DIAG_ANALYSIS_APIHASH)))
+			     KOF_DIAG_ANALYSIS_APIHASH | KOF_DIAG_ANALYSIS_TEXT)))
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs KOF_DIAG_ANALYSIS");
 	if (!v->n_nd)
 		kof_dsrc_say_err(r, &errs, last, "a diagnose needs a head");

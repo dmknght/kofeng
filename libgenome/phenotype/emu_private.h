@@ -482,6 +482,9 @@ struct kgenome_emu {
 	uint32_t n_shim;
 	char     win_fake[16][32]; /* libraries handed a handle with no image - see win_fake_lib */
 	uint32_t n_win_fake;
+	uint32_t unmodelled_guess; /* of them, i386 calls of a name with no known stdcall count */
+	uint32_t unmodelled;   /* calls to a name that has a stub and no model (emu_win_names.c) */
+	uint32_t win_loaded;   /* bit per module past KGENOME_EMU_WIN_MOD_RESIDENT that a LoadLibrary brought in */
 	/*
 	 * The size of every block HeapAlloc/RtlAllocateHeap/HeapReAlloc handed out, for HeapSize and for the copy
 	 * HeapReAlloc owes. The arena only grows, so blocks are appended in address order and found by binary
@@ -538,6 +541,9 @@ struct kgenome_emu {
 	uint32_t null_reads;   /* fields read off a null pointer */
 	uint32_t exc_unhandled; /* raises nobody took, and we carried on */
 	uint32_t exc_code;     /* what to put in the record; 0 = a fault */
+	uint32_t exc_flags;    /* ExceptionFlags and the parameters, for a code a guest raised itself */
+	uint32_t exc_np;
+	uint64_t exc_info[15];
 	uint64_t exc_rip;      /* the guest address to blame; 0 = e->rip */
 	uint32_t exc_raised, exc_taken;   /* faults offered, and faults handled */
 	uint64_t win_tls[64];
@@ -864,6 +870,13 @@ enum {
 	KGENOME_EMU_WIN_shutdown,
 	KGENOME_EMU_WIN_setsockopt,
 	KGENOME_EMU_WIN_ioctlsocket,
+	/* mscoree: the runtime's two entry points - see KGENOME_EMU_WIN_MOD_MSCOREE. */
+	KGENOME_EMU_WIN_RtlAddVectoredExceptionHandler,
+	KGENOME_EMU_WIN_RtlRemoveVectoredExceptionHandler,
+
+	KGENOME_EMU_WIN_CorExeMain,
+	KGENOME_EMU_WIN_CorDllMain,
+
 	/*
 	 * THE COUNT COMES FROM THE ENUM AND THE ENUM IS CHECKED AGAINST THE
 	 * TABLE, because writing it by hand is how this broke.
@@ -919,6 +932,8 @@ int kgenome_emu_win_heap_note(struct kgenome_emu *e, uint64_t va, uint64_t size)
 struct kgenome_emu_hblk *kgenome_emu_win_heap_find(const struct kgenome_emu *e, uint64_t va);
 int kgenome_emu_win_is_fake(const struct kgenome_emu *e, uint64_t h);
 uint64_t kgenome_emu_win_mod_of(struct kgenome_emu *e, const char *name);
+uint64_t kgenome_emu_win_mod_load(struct kgenome_emu *e, const char *name);
+
 uint64_t kgenome_emu_win_arg(struct kgenome_emu *e, unsigned i);
 void kgenome_emu_win_str(struct kgenome_emu *e, uint64_t va, char *out, unsigned cap,
 		int wide);
@@ -951,6 +966,7 @@ void kgenome_emu_op_keep(struct kgenome_emu *e, const struct kgenome_x86_op *op,
 void kgenome_emu_fl_cfof(struct kgenome_emu *e, int on);
 int kgenome_emu_div(unsigned sz, int sgn, uint64_t hi, uint64_t lo, uint64_t d, uint64_t *q, uint64_t *r);
 void kgenome_emu_fault_de(struct kgenome_emu *e, int overflow);
+void kgenome_emu_fault_priv(struct kgenome_emu *e);
 uint8_t *kgenome_emu_xmm_of(struct kgenome_emu *e, const struct kgenome_x86_op *op);
 int kgenome_emu_ea_of(struct kgenome_emu *e, const struct kgenome_emu_insn *ix, const struct kgenome_x86_op *op,
 		uint64_t *out);
@@ -974,7 +990,9 @@ enum {
 	KGENOME_EMU_RUN_UNSUPPORTED,
 	KGENOME_EMU_RUN_FAULT,
 	KGENOME_EMU_RUN_DONE,
-	KGENOME_EMU_RUN_NOT_MINE
+	KGENOME_EMU_RUN_NOT_MINE,
+	/* the instruction started a guest handler and left rip at its entry: the loop must not step to `next` */
+	KGENOME_EMU_RUN_REDIRECT
 };
 int kgenome_emu_run_str(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);
 int kgenome_emu_run_misc(struct kgenome_emu *e, struct kgenome_emu_insn *ixp);

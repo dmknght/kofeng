@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "diag_scan.h"
+#include "diag_lineage.h"
 #include "../kgenome_budget.h"
 #include <celllysis/celllysis.h>
 #include <celllysis/cell.h>
@@ -52,6 +53,8 @@ struct kgenome_diag_scan {
 	int                          imports_done;
 	const struct kgenome_diag_seq   *seq;               /* see kgenome_diag_inputs */
 	uint32_t                     n_seq;
+	/* KGENOME_LINEAGE_S_*: the stages to run, or 0 for the class's plan - see kgenome_diag_inputs. */
+	unsigned                     lineage_stages;
 	const struct kgenome_elf_relocs *relocs;            /* CODE relocations */
 	struct kgenome_elf_relocs        own_relocs;
 	struct kgenome_elf_relocs        data_relocs;       /* DATA: the image builder's alone */
@@ -100,6 +103,7 @@ struct kgenome_diag_scan {
 	struct kgenome_budget bud;
 	struct kgenome_ledger led;
 	uint32_t             n_str_refused;     /* names refused: too long, or the store full */
+	uint32_t             eval_cut;          /* expressions the constant evaluator left unread because one of its bounds fired (nesting, alias depth, value size, work; kgenome_dtx_ev_cut in diag_text_eval.c) */
 	uint64_t             emu_charged;       /* guest pages charged for a live emulator */
 	/* The token arena of the relocatable-object walk: producers whose node index is below
 	 * `rel_tok_lim` have a page of their own, `rel_tok_span` pages are mapped. Set where the
@@ -172,6 +176,13 @@ struct kgenome_diag_scan {
 	uint32_t            *adj_head;  /* n_hit + 1 offsets, or NULL       */
 	uint16_t            *adj_edge;  /* flattened successors             */
 	int                  adj_built;
+	/* THE LINEAGE STAGES' RESULT besides the links: the inputs they could not account for, each with its reason, and what
+	 * the selection did (diag_lineage.h). Owned by the scan. */
+	uint64_t                         *noret_at;   /* the calls (offsets, ascending) to an import that never returns: exit, abort ... */
+	uint32_t                          n_noret, cap_noret;
+	struct kgenome_diag_oblig        *oblig;
+	uint32_t                          n_oblig;
+	struct kgenome_diag_lineage_stats lstats;
 };
 
 /*

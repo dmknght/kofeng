@@ -35,6 +35,8 @@
 #include "../../libkofeng/kofcore/kofmod/chm.h"
 #include "../../libkofeng/scanners/scan.h"
 #include "known_miss.h"
+#include "notes.h"
+#include "asking_db.h"
 #include "chmgen.h"
 
 static int fails;
@@ -57,7 +59,7 @@ struct seen {
 	unsigned objs;       /* every object the callback saw, the top one too   */
 	unsigned broken;     /* objects with a non-zero kof_result.broken        */
 	unsigned first_why;  /* the first reason                                 */
-	unsigned finds;      /* findings on any object                           */
+	unsigned finds;      /* notes the test modules made on any object        */
 	unsigned marker;     /* children whose bytes are the marker              */
 	unsigned anom;       /* objects carrying a format anomaly word           */
 };
@@ -66,8 +68,10 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = user;
+	struct note_list got;
 
 	(void)name;
+	notes_here(&got);
 	s->objs++;
 	if (bytes && len == 8u && memcmp(bytes, MARKER, 8) == 0)
 		s->marker++;
@@ -76,7 +80,7 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 			s->first_why = res->broken;
 		s->broken++;
 	}
-	s->finds += res->n;
+	s->finds += got.n;
 	if (res->heur_anomalies)
 		s->anom++;
 	return 0;
@@ -88,7 +92,6 @@ static void scan(const uint8_t *b, uint64_t n, const char *name, struct seen *s)
 
 	memset(s, 0, sizeof *s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 256u << 20;
 	opt.max_resident_bytes = 512u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -844,7 +847,6 @@ static void case_max_children(void)
 		return;
 	memset(&s, 0, sizeof s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_children = 100;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
@@ -912,14 +914,14 @@ static void case_containers(void)
 
 int main(int argc, char **argv)
 {
-	const char *db = argc > 1 ? argv[1] : "build/release/databases";
+	const char *db = argc > 1 ? argv[1] : ad_db_asking();
 
 	eng = keng_open(db);
 	if (!eng) {
 		printf("silent_loss_scan: no database at %s - nothing tested\n", db);
 		return 0;
 	}
-	sc = kscan_new(eng);
+	sc = notes_scanner(eng);
 	if (!sc)
 		return 1;
 	case_containers();

@@ -437,10 +437,14 @@ static int build_check_image(const char *img, struct img_facts *f)
 				"%s\n", f->extra_sec);
 		return 0;
 	}
+	if (f->retired[0]) {
+		fprintf(stderr, "FAIL: image defines %s, which the module ABI no "
+				"longer has\n", f->retired);
+		return 0;
+	}
 	if (f->n_entry != 1) {
 		fprintf(stderr, "FAIL: image exports %d of kof_scan, "
-				"kof_unpack, kof_heur; a module is one "
-				"kind\n", f->n_entry);
+				"kof_unpack; a module is one kind\n", f->n_entry);
 		return 0;
 	}
 	if (f->entry_off != 0) {
@@ -485,7 +489,6 @@ int ksb_do_build(struct ksb_ctx *ksb, const char *src, const char *pat,
 	if (!emit_raw(ld, lds, obj, img, raw, &f))
 		return 0;
 
-	ksb->kept.cure = f.have_cure ? f.cure_off : 0u;
 	snprintf(ksb->kept.entry, sizeof ksb->kept.entry, "%.31s", f.entry_name);
 	*entry_out = ksb->kept.entry;
 	return 1;

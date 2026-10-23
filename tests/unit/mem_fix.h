@@ -138,7 +138,7 @@ static void mf_sig_of(const struct e2e *r, struct mf_sig *s)
 			h = (h ^ 0xffu) * 1099511628211ull;
 		}
 		h = (h ^ o->n) * 1099511628211ull;
-		if (o->broken || o->syn.incomplete)
+		if (o->broken || o->vf_incomplete)
 			s->incomplete++;
 		h = (h ^ o->entry_kind) * 1099511628211ull;
 	}

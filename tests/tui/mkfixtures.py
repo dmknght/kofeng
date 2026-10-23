@@ -68,6 +68,44 @@ def build():
         subprocess.run(['cc', '-std=gnu11', '-I' + ev, os.path.join(here, 'evtgen.c'),
                         os.path.join(ev, 'kofevt.c'), os.path.join(ev, 'kofevtlog.c'),
                         os.path.join(ev, 'kofevtfmt.c'), '-o', gen], check=True)
+    # a relocatable kernel module a test diagnose (tests/sigs/diagnoses/kmod_give_root.c)
+    # matches: built from the unit tests' own image builder
+    kgen = os.path.join(FX, 'kmodgen')
+    if not os.path.exists(kgen):
+        subprocess.run(['cc', '-std=gnu11', '-I' + os.path.join(REPO, 'libkofeng', 'kofcore'),
+                        '-I' + os.path.join(REPO, 'libgenome'), '-I' + os.path.join(REPO, 'libuncoat'),
+                        '-I' + REPO, os.path.join(here, 'kmodgen.c'), '-o', kgen], check=True)
+    p = os.path.join(FX, 'giveroot.ko')
+    if os.path.exists(p):
+        os.chmod(p, 0o644)
+    subprocess.run([kgen, p], check=True)
+    os.chmod(p, 0o444)
+    out['giveroot_ko'] = p
+    # a raw 32-bit stager-shaped blob (no header, no symbols): a counted loop, `call $+5; pop`, an int 0x80 execve.
+    # The same bytes as tests/unit/code_notes.c.
+    out['stager32'] = _w('stager32.bin', bytes([
+        0x31, 0xc9, 0xb9, 0x03, 0, 0, 0, 0x90, 0x49, 0x75, 0xfc, 0xe8, 0, 0, 0, 0, 0x5e,
+        0x31, 0xc0, 0xb8, 0x0b, 0, 0, 0, 0xcd, 0x80, 0xc3]))
+    # `cmp eax, ebx`, sixty nops, `jz $+2`, `nop` (the blob ends in an instruction that leaves the flags alone, so the walk that ends it does not clear them): the jump is far from its comparison, so a window that shows the jump but not the comparison
+    # must not borrow the comparison of the window before it.
+    out['condgap'] = _w('condgap.bin', bytes([0x39, 0xd8]) + bytes([0x90] * 60) + bytes([0x74, 0x00, 0x90]))
+    # a static freestanding x86-64 ELF for the disassembly annotations: a loop, a
+    # named callee, and raw write(1) / exit(60) syscalls
+    p = os.path.join(FX, 'disfix.elf')
+    if os.path.exists(p):
+        os.chmod(p, 0o644)
+    subprocess.run(['cc', '-O1', '-static', '-nostdlib', '-fno-pic', '-no-pie',
+                    '-fcf-protection=none', '-o', p, os.path.join(here, 'disfix.c')], check=True)
+    os.chmod(p, 0o444)
+    out['disfix_elf'] = p
+    # the same program linked stripped: no symbol names anything
+    p = os.path.join(FX, 'disfix_stripped.elf')
+    if os.path.exists(p):
+        os.chmod(p, 0o644)
+    subprocess.run(['cc', '-O1', '-static', '-nostdlib', '-fno-pic', '-no-pie', '-s',
+                    '-fcf-protection=none', '-o', p, os.path.join(here, 'disfix.c')], check=True)
+    os.chmod(p, 0o444)
+    out['disfix_stripped_elf'] = p
     for nm, cnt in (('events.ktr', 40), ('events_many.ktr', 600), ('events_one.ktr', 1)):
         p = os.path.join(FX, nm)
         if os.path.exists(p):

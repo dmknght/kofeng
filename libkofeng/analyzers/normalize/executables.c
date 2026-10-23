@@ -18,16 +18,18 @@
 #include <uncoat.h>
 
 /*
- * Decode the run `p[0..n)` where it sits, through libuncoat's one transform. The
- * write trails the read for both codings used here, so no copy is needed.
+ * Decode the run `p[0..n)` where it sits, through libuncoat's one transform, with `k32` as the
+ * step's number (the separator, for the escape coding). The write trails the read for every
+ * coding used here, so no copy is needed.
  *
  * Returns the bytes written, or 0 unless the lib says the decode is COMPLETE -
  * the contract these call sites were written against: a run the coding cannot
  * read whole is left to the caller as "decoded to nothing".
  */
-static uint64_t decode_in_place(uint32_t algo, uint32_t flags, uint8_t *p, uint64_t n)
+uint64_t kof_exe_decode_run(uint32_t algo, uint32_t flags, uint32_t k32, uint8_t *p, uint64_t n)
 {
-	struct kuncoat_step s = { algo, KUNCOAT_DECODE, flags, 0, NULL, 0, 0 };
+	struct kuncoat_step s = { .algo = algo, .dir = KUNCOAT_DECODE, .flags = flags, .k32 = k32, .key = NULL, .key_len = 0,
+				  .max_out = 0 };
 	uint64_t got = 0;
 
 	if (kuncoat_transform(&s, p, n, p, n, &got) != KUNCOAT_OK)
@@ -222,7 +224,7 @@ static int dec_grow(void **v, uint32_t *cap, size_t esz, uint32_t need, uint64_t
 	return 1;
 }
 
-static void dec_note(struct dec_out *o, uint64_t off, uint64_t len)
+void kof_exe_dec_note(struct dec_out *o, uint64_t off, uint64_t len)
 {
 	if (!o || !o->want)
 		return;
@@ -259,21 +261,21 @@ static void dec_note(struct dec_out *o, uint64_t off, uint64_t len)
  */
 #define DEC_TAIL_ROOM 24u
 
-static void dec_note_run(struct dec_out *o, const uint8_t *p, uint64_t n,
-			 uint64_t off, uint64_t out_n, uint64_t src_end)
+void kof_exe_dec_note_run(struct dec_out *o, const uint8_t *p, uint64_t n,
+			  uint64_t off, uint64_t out_n, uint64_t src_end)
 {
 	uint64_t e = src_end;
 
 	if (!o || !o->want)
 		return;
-	dec_note(o, off, out_n);
+	kof_exe_dec_note(o, off, out_n);
 	while (e < n && p[e] != 0 && p[e] != ' ' && p[e] != '\t' &&
 	       p[e] != '\n' && p[e] != '\r')
 		e++;
 	e = n - e > DEC_TAIL_ROOM ? e + DEC_TAIL_ROOM : n;
 	/* The zero fill is not walked - it holds nothing - only what follows it. */
 	if (e > src_end)
-		dec_note(o, src_end, e - src_end);
+		kof_exe_dec_note(o, src_end, e - src_end);
 }
 
 /*
@@ -458,14 +460,14 @@ int kof_exe_pass_b64(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 			if (!c)
 				return 1;      /* cannot tell: the full pass will */
 			memcpy(c, p + run_beg, (size_t)(run_end - run_beg));
-			ok = decode_in_place(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX, c,
+			ok = kof_exe_decode_run(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX, 0, c,
 					     run_end - run_beg) != 0;
 			free(c);
 			if (ok)
 				return 1;
 			continue;
 		}
-		out_n = decode_in_place(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX,
+		out_n = kof_exe_decode_run(KUNCOAT_ALGO_B64, KUNCOAT_F_LAX, 0,
 					p + run_beg, run_end - run_beg);
 		/*
 		 * A run that decoded to nothing is left exactly as it was.
@@ -479,7 +481,7 @@ int kof_exe_pass_b64(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * file: a literal cannot contain one, so nothing matches across
 		 * it - and it is also what makes a second pass find nothing. */
 		memset(p + run_beg + out_n, 0, (size_t)(run_end - run_beg - out_n));
-		dec_note_run(wrote, p, n, run_beg, out_n, run_end);
+		kof_exe_dec_note_run(wrote, p, n, run_beg, out_n, run_end);
 		changed = 1;
 	}
 	return changed;
@@ -1189,9 +1191,13 @@ int kof_exe_pass_hex(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		}
 		/* In place: the write trails the read by half, so it cannot
 		 * overtake what has not been read. */
-		out_n = decode_in_place(KUNCOAT_ALGO_HEX, 0, p + beg, end - beg);
+		out_n = kof_exe_decode_run(KUNCOAT_ALGO_HEX, 0, 0, p + beg, end - beg);
+		/* A run that decoded to nothing is left as it was, as the base64 pass leaves it: zeroing it
+		 * would delete the bytes and say nothing changed (norm_defect_engine N8). */
+		if (!out_n)
+			continue;
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
-		dec_note_run(wrote, p, n, beg, out_n, end);
+		kof_exe_dec_note_run(wrote, p, n, beg, out_n, end);
 		changed = 1;
 	}
 	/*
@@ -1211,11 +1217,13 @@ int kof_exe_pass_hex(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 				changed = 1;
 				break;
 			}
-			out_n = decode_in_place(KUNCOAT_ALGO_HEX, 0, p + beg,
+			out_n = kof_exe_decode_run(KUNCOAT_ALGO_HEX, 0, 0, p + beg,
 						end - beg);
+			if (!out_n)
+				continue;       /* left as it was: see the loose run above */
 			memset(p + beg + out_n, 0,
 			       (size_t)(end - beg - out_n));
-			dec_note_run(wrote, p, n, beg, out_n, end);
+			kof_exe_dec_note_run(wrote, p, n, beg, out_n, end);
 			changed = 1;
 		}
 	}
@@ -1232,10 +1240,6 @@ int kof_exe_unhex(uint8_t *p, uint64_t n)
 	dec_out_init(&d, n, 0);
 	return kof_exe_pass_hex(p, n, 0, n, &d);
 }
-
-/* The most bytes all the rounds together may walk, as a multiple of the object.
- * See kof_exe_decode_ex for what it bounds and why this number. */
-#define DEC_WORK_FACTOR 8u
 
 /* ---- percent-encoded text ------------------------------------------------
  *
@@ -1408,93 +1412,14 @@ int kof_exe_pass_pct(uint8_t *p, uint64_t n, uint64_t from, uint64_t to,
 		 * misses. */
 		if (wrote && wrote->probe)
 			return 1;
-		out_n = decode_in_place(KUNCOAT_ALGO_URL, KUNCOAT_F_LAX, p + beg, end - beg);
+		out_n = kof_exe_decode_run(KUNCOAT_ALGO_URL, KUNCOAT_F_LAX, 0, p + beg, end - beg);
+		if (!out_n)
+			continue;               /* left as it was: see the hex pass */
 		/* The vacated tail. Zeros, for the reason at the top of this
 		 * file. */
 		memset(p + beg + out_n, 0, (size_t)(end - beg - out_n));
-		dec_note_run(wrote, p, n, beg, out_n, end);
+		kof_exe_dec_note_run(wrote, p, n, beg, out_n, end);
 		changed = 1;
 	}
-	return changed;
-}
-
-int kof_exe_decode(uint8_t *p, uint64_t n)
-{
-	return kof_exe_decode_ex(p, n, NULL);
-}
-
-int kof_exe_decode_ex(uint8_t *p, uint64_t n, struct kof_exe_decode_res *res)
-{
-	struct dec_out cur, nxt, tmp;
-	uint64_t work, spent;
-	uint32_t k;
-	int changed = 0;
-	struct kof_exe_decode_res none;
-
-	if (!res)
-		res = &none;
-	memset(res, 0, sizeof *res);
-	if (!p || !n)
-		return 0;
-	/*
-	 * ROUNDS END WHEN A ROUND PEELS NOTHING, and are bounded by work, not by a
-	 * count. This was `r < 4`: a payload under a fifth layer stayed encoded and
-	 * nothing said so. Each round walks only what the one before produced, and a
-	 * decoded run is shorter than its source, so honest layering walks less every
-	 * round and ends of itself. What is left to bound is the hostile case - the
-	 * percent decode leaves a run nearly as long as it was, so a crafted nest of
-	 * escapes could peel one layer per round over a megabyte for ever - and that
-	 * is a budget on the BYTES WALKED over all rounds: eight times the object.
-	 * Measured honest layering (a payload under six layers) walks under two.
-	 * When the budget is gone the remaining stretches are counted in `dropped`
-	 * and `limit` says so.
-	 */
-	work = DEC_WORK_FACTOR * n;
-	spent = n;                      /* round zero is the whole object */
-	dec_out_init(&cur, n, 1);
-	dec_out_init(&nxt, n, 1);
-	dec_note(&cur, 0, n);
-
-	while (cur.n) {
-		nxt.n = 0;
-		res->rounds++;
-		for (k = 0; k < cur.n; k++) {
-			uint64_t a = cur.v[k].off;
-			uint64_t b = a + cur.v[k].len;
-
-			if (!cur.v[k].len)
-				continue;
-			if (res->rounds > 1u) {
-				if (cur.v[k].len > work - spent) {
-					res->limit |= KOF_EXE_DEC_WORK;
-					res->dropped += cur.n - k;
-					break;
-				}
-				spent += cur.v[k].len;
-			}
-			/*
-			 * Base64 first, because its anchor is a decoder named
-			 * in the text and hex has no anchor at all - so where
-			 * both could read the same run, the one that was told
-			 * what it is reads it.
-			 */
-			changed |= kof_exe_pass_b64(p, n, a, b, &nxt);
-			changed |= kof_exe_pass_hex(p, n, a, b, &nxt);
-			/* Last of the three: its runs are the widest - a URL
-			 * is mostly ordinary characters - so a base64 or hex
-			 * payload sitting inside one is read as itself first
-			 * and this only sees what is left. */
-			changed |= kof_exe_pass_pct(p, n, a, b, &nxt);
-		}
-		if (res->limit & KOF_EXE_DEC_WORK)
-			break;
-		tmp = cur;
-		cur = nxt;
-		nxt = tmp;
-	}
-	res->limit |= cur.limit | nxt.limit;
-	res->scanned = spent;
-	free(cur.v);
-	free(nxt.v);
 	return changed;
 }

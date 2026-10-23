@@ -111,6 +111,14 @@ const struct kof_parser *kof_parser_list(uint32_t *n);
  * and wants its parser rather than a sniff. */
 const struct kof_parser *kof_parser_of(uint8_t format);
 
+/*
+ * Does THIS OBJECT have no regions although its format has some. A script in a language the lib lexes is read whole by
+ * its lexer: the parser declares nothing for it and KOF_SCAN_ALL is its only part. The one answer, read by the
+ * parser's resolver and by whoever walks a format's regions to feed blocks - a walk of the format's list over an object
+ * that resolves to nothing would hand the matcher no unit at all.
+ */
+int kof_obj_regionless(const struct kof_obj_ctx *ctx);
+
 /* The anomaly bits of a format's view that mean a table of the parse was full and
  * what is past it was not read; zero for a format whose module says so itself. */
 uint64_t kof_parser_cut_bits(const struct kof_parser *p);

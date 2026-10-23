@@ -112,7 +112,6 @@ static void scan(kof_scanner *sc, const uint8_t *b, size_t n, uint64_t ceiling, 
 
 	memset(s, 0, sizeof *s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	if (ceiling) {
 		opt.max_resident_bytes = ceiling;
 		opt.resident_per_scanner = 1;

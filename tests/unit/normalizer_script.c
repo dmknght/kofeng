@@ -1,40 +1,32 @@
 #define _GNU_SOURCE
 /*
- * normalizer_script - what kof_script_fold builds out of a script's own
- * literals, against a reference interpreter that is handed the PROGRAM and not
- * its text.
+ * normalizer_script - what the lib's constants path builds out of a script's own literals (the evaluator of the TEXT route, kgenome_diag_scan_text
+ * with on_const, and the writer kgenome_textual_subst), against a reference interpreter that is handed the PROGRAM and not its text.
  *
- * THE REFERENCE IS NOT A SECOND PARSER. A generated corpus starts as a list of
- * statements - `name = term . term . ...`, where a term is a literal, a
- * variable or `str_replace(expr, expr, expr)` - and the expected answer is
- * computed from that list by evaluating it, straight. Only afterwards is the
- * list written out as source, with the quote style, the escape spelling of
- * every byte (raw, \xHH, \OOO, \n, \', \\), the spacing and the junk between
- * statements chosen at random. So a mistake in reading the TEXT - a quote, an
- * escape, a variable name, a nesting - shows as a difference from a value that
- * never went through any text.
+ * THIS REPLACED THE TESTS OF script_fold.c. That folder read php, perl, powershell and tcl (the rows with a variable sigil), with a str_replace those
+ * languages do not have, and handed back the ONE largest value; the engine now asks the lib for every language its evaluator serves and writes each
+ * computed right side where it was computed (objctx_script_consts.c). What the old tests pinned is ported here, and where the new path answers
+ * differently the test says so at the case (marked DIFFERENCE, and listed in docs/textual_pipeline.txt): first definition wins -> the last one does
+ * (php, which keeps no control flow); chr() and strrev() are read now; a name defined later is read; the languages that had no sigil are served.
  *
- *   differential   thousands of generated programs, php (`.`), PowerShell (`+`)
- *                  and Tcl (no join: only the first term of an expression)
- *   known answers  N literals joined (1..300), str_replace chains, every escape
- *                  form, 1..300 variables (a hash table now), the first
- *                  definition of a name wins, a cap smaller than the answer
- *   not folded     chr() and fromCharCode are programs, not literals; so is a
- *                  language with no variable sigil - the answer is zero and
- *                  says so
- *   limits         nesting 1..300 (256 is the bound and the limit field says
- *                  so), the table of variables and the arena when the address
- *                  space cannot hold them (not under the sanitiser)
- *   KNOWN MISSES   each is a way the folder reads a statement that is not the
- *                  statement the program has; the cause is on the line
+ * THE REFERENCE IS NOT A SECOND PARSER. A generated corpus starts as a list of statements - `name = term . term ...`, where a term is a literal,
+ * a variable or (php) `str_replace(expr, expr, expr)` - and the expected answer is computed from that list by evaluating it, straight. Only
+ * afterwards is the list written out as source in the language's own spelling (quote style, the escapes of every byte, the spacing and the junk between
+ * statements chosen at random). So a mistake in reading the TEXT - a quote, an escape, a name, a nesting - shows as a difference from a value that
+ * never went through any text. The answer is the LIST of values the path reports, in order, one per statement whose right side is more than one term.
+ *
+ *   differential   thousands of generated programs: php (`.`), javascript, python and powershell (`+`)
+ *   property       the text written with those values has no computed right side left (a second run reports nothing)
+ *   known answers  N literals joined (1..300), N variables, str_replace chains, escapes, the bounds (a value of 1 MiB exactly and one byte more, nesting)
+ *   not constant   a request value, a decoder, an unterminated literal; numbers are not strings (js `1 + 2`), a name assigned twice is not one value
+ *   regressions    each a way this path first read a statement that is not the statement the program has (found on real files; the cause is on the line)
  */
 
 #include <sys/resource.h>
 
 #include "normalizer_ref.h"
-#include <kofmod/script.h>
+#include "normalizer_consts.h"
 #include "../../libkofeng/kofcore/kofcore.h"
-#include "../../libkofeng/analyzers/parsers/scripts/script_norm.h"
 
 #if defined(__SANITIZE_ADDRESS__)
 #define UNDER_ASAN 1
@@ -47,7 +39,10 @@
 #define UNDER_ASAN 0
 #endif
 
-/* ---- the program, as data ------------------------------------------------------ */
+#define EV_VMAX (1u << 20)      /* diag_text_eval.c: the most bytes one value holds */
+#define EV_NEST 256u            /* the most expressions open inside one another */
+
+/* ---- the program, as data -------------------------------------------------------------- */
 
 struct bytes {
 	uint8_t *p;
@@ -66,11 +61,6 @@ struct tm {
 struct ex {
 	struct tm *t;
 	unsigned   n;
-};
-
-struct stmt {
-	int        name;                        /* index into the name pool */
-	struct ex *e;
 };
 
 #define NAMES 24u
@@ -115,13 +105,30 @@ static void ex_free(struct ex *e)
 	free(e);
 }
 
-static struct bytes random_literal(struct nrng *r, unsigned max, int nonempty)
+/* The languages the generator writes: how a literal is spelled and what joins. */
+enum esc { ESC_PHP, ESC_C, ESC_PSH };
+
+struct lg {
+	const char *name;
+	uint32_t    lang;
+	char        join;
+	uint8_t     sigil;          /* a variable is written with "$" */
+	uint8_t     fn;             /* str_replace exists (php) */
+	const char *head;
+	const char *eos;            /* what ends a statement */
+	enum esc    esc;
+};
+
+static const struct lg PHP = { "php", KGENOME_TEXTUAL_LANG_PHP, '.', 1, 1, "<?php\n", ";", ESC_PHP };
+static const struct lg JS = { "js", KGENOME_TEXTUAL_LANG_JS, '+', 0, 0, "", ";", ESC_C };
+static const struct lg PY = { "py", KGENOME_TEXTUAL_LANG_PY, '+', 0, 0, "", "", ESC_C };
+static const struct lg PSH = { "psh", KGENOME_TEXTUAL_LANG_PSH, '+', 1, 0, "", "", ESC_PSH };
+
+static struct bytes random_literal(struct nrng *r, const struct lg *g, unsigned max)
 {
 	struct bytes b;
 	unsigned i, n = nr_below(r, max + 1u);
 
-	if (nonempty && !n)
-		n = 1;
 	b.p = malloc(n + 1u);
 	b.n = n;
 	for (i = 0; i < n; i++) {
@@ -132,24 +139,18 @@ static struct bytes random_literal(struct nrng *r, unsigned max, int nonempty)
 		else if (k < 8u)
 			b.p[i] = (uint8_t)"'\"\\\n\t.;(){}/*#<>=-"[nr_below(r, 17u)];
 		else
-			b.p[i] = (uint8_t)(1u + nr_below(r, 254u));
+			b.p[i] = (uint8_t)(1u + nr_below(r, g->esc == ESC_PHP ? 254u : 126u));
 		if (b.p[i] == '$')
 			b.p[i] = 'S';
 	}
 	return b;
 }
 
-static struct ex *random_ex(struct nrng *r, unsigned depth, const int *defined,
-			    unsigned n_defined);
+static struct ex *random_ex(struct nrng *r, const struct lg *g, unsigned depth, const int *defined, unsigned n_defined);
 
-/* How much of the grammar a generated program uses: out of ten, the share of
- * terms that are variables, whether str_replace appears, and whether an
- * expression may have more than one term. The classes of the differential
- * switch them on one at a time, so a difference names the feature. */
 static unsigned feat_var = 2, feat_repl = 1, feat_join = 1;
 
-static void random_term(struct nrng *r, struct tm *t, unsigned depth, const int *defined,
-			unsigned n_defined)
+static void random_term(struct nrng *r, const struct lg *g, struct tm *t, unsigned depth, const int *defined, unsigned n_defined)
 {
 	uint32_t k = nr_below(r, 10u);
 
@@ -157,18 +158,17 @@ static void random_term(struct nrng *r, struct tm *t, unsigned depth, const int 
 	if (k < feat_var && n_defined) {
 		t->kind = 1;
 		t->var = defined[nr_below(r, n_defined)];
-	} else if (k == 9u && feat_repl && depth < 3u) {
+	} else if (k == 9u && feat_repl && g->fn && depth < 3u) {
 		t->kind = 2;
-		t->a = random_ex(r, depth + 1u, defined, n_defined);
-		t->b = random_ex(r, depth + 1u, defined, n_defined);
-		t->c = random_ex(r, depth + 1u, defined, n_defined);
+		t->a = random_ex(r, g, depth + 1u, defined, n_defined);
+		t->b = random_ex(r, g, depth + 1u, defined, n_defined);
+		t->c = random_ex(r, g, depth + 1u, defined, n_defined);
 	} else {
-		t->lit = random_literal(r, 14u, 0);
+		t->lit = random_literal(r, g, 14u);
 	}
 }
 
-static struct ex *random_ex(struct nrng *r, unsigned depth, const int *defined,
-			    unsigned n_defined)
+static struct ex *random_ex(struct nrng *r, const struct lg *g, unsigned depth, const int *defined, unsigned n_defined)
 {
 	struct ex *e = calloc(1, sizeof *e);
 	unsigned i;
@@ -176,7 +176,7 @@ static struct ex *random_ex(struct nrng *r, unsigned depth, const int *defined,
 	e->n = feat_join ? 1u + nr_below(r, depth ? 2u : 4u) : 1u;
 	e->t = calloc(e->n, sizeof *e->t);
 	for (i = 0; i < e->n; i++)
-		random_term(r, &e->t[i], depth, defined, n_defined);
+		random_term(r, g, &e->t[i], depth, defined, n_defined);
 	return e;
 }
 
@@ -211,14 +211,10 @@ static struct val val_of(const uint8_t *p, size_t n)
 	return v;
 }
 
-/* Set when a top-level expression lost a LATER term: the folder keeps what it had
- * and the statement is then not the statement the program holds (see
- * fold_statements), so the generator does not emit such a program. */
-static int ref_dirty;
+static struct val ref_eval(const struct ex *e, const struct env *env);
 
-static struct val ref_eval(const struct ex *e, const struct env *env, unsigned concat, int strict);
-
-static struct val ref_term(const struct tm *t, const struct env *env, unsigned concat)
+/* One term; any term that cannot be evaluated makes the whole expression not constant (the evaluator takes all of it or none). */
+static struct val ref_term(const struct tm *t, const struct env *env)
 {
 	struct val bad = { NULL, 0, 0 };
 
@@ -230,24 +226,28 @@ static struct val ref_term(const struct tm *t, const struct env *env, unsigned c
 		return d->ok ? val_of(d->p, d->n) : bad;
 	}
 	{
-		struct val a = ref_eval(t->a, env, concat, 1), b = ref_eval(t->b, env, concat, 1);
-		struct val c = ref_eval(t->c, env, concat, 1), o;
+		struct val a = ref_eval(t->a, env), b = ref_eval(t->b, env), c = ref_eval(t->c, env), o;
 		size_t i, w = 0;
 
-		if (!a.ok || !b.ok || !c.ok || !a.n) {
+		if (!a.ok || !b.ok || !c.ok) {
 			val_free(&a);
 			val_free(&b);
 			val_free(&c);
 			return bad;
 		}
-		o.p = malloc(c.n * (b.n > a.n ? b.n : 1u) + b.n + 1u);
-		for (i = 0; i < c.n;) {
-			if (i + a.n <= c.n && !memcmp(c.p + i, a.p, a.n)) {
-				memcpy(o.p + w, b.p, b.n);
-				w += b.n;
-				i += a.n;
-			} else {
-				o.p[w++] = c.p[i++];
+		o.p = malloc(c.n * (b.n > a.n ? b.n : 1u) + b.n + c.n + 1u);
+		if (!a.n) {                     /* php: a search of nothing leaves the subject as it is */
+			memcpy(o.p, c.p, c.n);
+			w = c.n;
+		} else {
+			for (i = 0; i < c.n;) {
+				if (i + a.n <= c.n && !memcmp(c.p + i, a.p, a.n)) {
+					memcpy(o.p + w, b.p, b.n);
+					w += b.n;
+					i += a.n;
+				} else {
+					o.p[w++] = c.p[i++];
+				}
 			}
 		}
 		o.n = w;
@@ -259,28 +259,18 @@ static struct val ref_term(const struct tm *t, const struct env *env, unsigned c
 	}
 }
 
-/*
- * An expression is its terms joined; with no join operator (Tcl) it is the first.
- * An ARGUMENT of str_replace must be followed by its comma or bracket, so a term
- * lost inside one loses the call (`strict`); a statement's own expression just
- * stops, which `ref_dirty` records.
- */
-static struct val ref_eval(const struct ex *e, const struct env *env, unsigned concat, int strict)
+static struct val ref_eval(const struct ex *e, const struct env *env)
 {
-	struct val acc = ref_term(&e->t[0], env, concat);
+	struct val acc = ref_term(&e->t[0], env);
 	unsigned i;
 
-	for (i = 1; concat && acc.ok && i < e->n; i++) {
-		struct val r = ref_term(&e->t[i], env, concat);
+	for (i = 1; acc.ok && i < e->n; i++) {
+		struct val r = ref_term(&e->t[i], env);
 
 		if (!r.ok) {
+			val_free(&acc);
 			val_free(&r);
-			if (strict) {
-				val_free(&acc);
-				return acc;
-			}
-			ref_dirty = 1;
-			break;
+			return acc;
 		}
 		acc.p = realloc(acc.p, acc.n + r.n + 1u);
 		memcpy(acc.p + acc.n, r.p, r.n);
@@ -319,8 +309,8 @@ static void ws(struct src *s, struct nrng *r)
 	src_str(s, w[nr_below(r, sizeof w / sizeof w[0])]);
 }
 
-/* One literal, in quote `q`, each byte spelled one of the ways the folder reads. */
-static void write_literal(struct src *s, const struct bytes *b, char q, struct nrng *r)
+/* One literal in quote `q`, each byte spelled one of the ways the language reads. */
+static void write_literal(struct src *s, const struct lg *g, const struct bytes *b, char q, struct nrng *r)
 {
 	size_t i;
 	char tmp[8];
@@ -332,7 +322,15 @@ static void write_literal(struct src *s, const struct bytes *b, char q, struct n
 		const char *letter = c == '\n' ? "\\n" : c == '\r' ? "\\r" : c == '\t' ? "\\t" :
 				     c == '\v' ? "\\v" : c == '\f' ? "\\f" : NULL;
 
-		if (c == (uint8_t)q || c == '\\' || c < 0x20 || c >= 0x7f || how < 2u) {
+		if (g->esc == ESC_PSH) {                        /* single quotes only: the quote is written twice */
+			if (c == (uint8_t)q)
+				src_put(s, &c, 1u);
+			src_put(s, &c, 1u);
+		} else if (g->esc == ESC_PHP && q == '\'') {    /* php's single quotes read two escapes and nothing else */
+			if (c == (uint8_t)q || c == '\\')
+				src_put(s, "\\", 1u);
+			src_put(s, &c, 1u);
+		} else if (c == (uint8_t)q || c == '\\' || c < 0x20 || c >= 0x7f || how < 2u) {
 			if (letter && how & 1u) {
 				src_str(s, letter);
 			} else if ((c == (uint8_t)q || c == '\\') && how & 1u) {
@@ -341,9 +339,6 @@ static void write_literal(struct src *s, const struct bytes *b, char q, struct n
 				src_put(s, tmp, 2u);
 			} else if (how & 2u) {
 				snprintf(tmp, sizeof tmp, "\\x%02x", c);
-				src_str(s, tmp);
-			} else if (how & 4u) {
-				snprintf(tmp, sizeof tmp, "\\X%02X", c);
 				src_str(s, tmp);
 			} else {
 				snprintf(tmp, sizeof tmp, "\\%03o", c);
@@ -356,336 +351,380 @@ static void write_literal(struct src *s, const struct bytes *b, char q, struct n
 	src_put(s, &q, 1u);
 }
 
-static void write_ex(struct src *s, const struct ex *e, int tcl, char concat, struct nrng *r);
+static void write_ex(struct src *s, const struct lg *g, const struct ex *e, struct nrng *r);
 
-static void write_term(struct src *s, const struct tm *t, int tcl, char concat, struct nrng *r)
+static void write_term(struct src *s, const struct lg *g, const struct tm *t, struct nrng *r)
 {
-	char q = tcl || nr_below(r, 2u) ? '"' : '\'';
+	char q = g->esc == ESC_PSH ? '\'' : nr_below(r, 2u) ? '"' : '\'';
 
 	if (t->kind == 0) {
-		write_literal(s, &t->lit, q, r);
+		write_literal(s, g, &t->lit, q, r);
 	} else if (t->kind == 1) {
-		src_str(s, "$");
+		if (g->sigil)
+			src_str(s, "$");
 		src_str(s, name_of[t->var]);
 	} else {
 		src_str(s, "str_replace(");
 		ws(s, r);
-		write_ex(s, t->a, tcl, concat, r);
+		write_ex(s, g, t->a, r);
 		ws(s, r);
 		src_str(s, ",");
 		ws(s, r);
-		write_ex(s, t->b, tcl, concat, r);
+		write_ex(s, g, t->b, r);
 		ws(s, r);
 		src_str(s, ",");
 		ws(s, r);
-		write_ex(s, t->c, tcl, concat, r);
+		write_ex(s, g, t->c, r);
 		ws(s, r);
 		src_str(s, ")");
 	}
 }
 
-static void write_ex(struct src *s, const struct ex *e, int tcl, char concat, struct nrng *r)
+static void write_ex(struct src *s, const struct lg *g, const struct ex *e, struct nrng *r)
 {
 	unsigned i;
 
 	for (i = 0; i < e->n; i++) {
 		if (i) {
 			ws(s, r);
-			src_put(s, &concat, 1u);
+			src_put(s, &g->join, 1u);
 			ws(s, r);
 		}
-		write_term(s, &e->t[i], tcl, concat, r);
+		write_term(s, g, &e->t[i], r);
 	}
 }
 
 /* Statements between statements that an assignment reader must step over. */
-static void junk(struct src *s, struct nrng *r)
+static void junk(struct src *s, const struct lg *g, struct nrng *r)
 {
-	static const char *const j[] = {
-		"\n", "\n", "echo $v7;\n", "if ($v14 == 'x') { }\n", "\n\n", "$Var_0 == 1;\n",
-		"  \n", "foo($v21, $v0);\n", "return;\n", "?>\n<html>\n<?php\n"
+	static const char *const php[] = {
+		"\n", "\n", "echo $v7;\n", "if ($v14 == 'x') { }\n", "\n\n", "$Var_0 == 1;\n", "  \n", "foo($v21, $v0);\n", "return;\n",
+		"?>\n<html>\n<?php\n"
 	};
+	static const char *const js[] = {
+		"\n", "\n", "foo(v7);\n", "\n\n", "  \n", "bar(v21, v0);\n", "// a comment\n"
+	};
+	static const char *const py[] = { "\n", "\n", "foo(v7)\n", "\n\n", "  \n", "# a comment\n" };
+	static const char *const psh[] = { "\n", "\n", "Write-Host $v7\n", "\n\n", "  \n", "# a comment\n" };
 
-	src_str(s, j[nr_below(r, sizeof j / sizeof j[0])]);
+	if (g == &PHP)
+		src_str(s, php[nr_below(r, sizeof php / sizeof php[0])]);
+	else if (g == &PY)
+		src_str(s, py[nr_below(r, sizeof py / sizeof py[0])]);
+	else if (g == &PSH)
+		src_str(s, psh[nr_below(r, sizeof psh / sizeof psh[0])]);
+	else
+		src_str(s, js[nr_below(r, sizeof js / sizeof js[0])]);
 }
 
 /* ---- one generated program ---------------------------------------------------------------- */
 
 struct prog {
 	struct src  text;
-	struct val  best;
-	unsigned    n_stmt;
+	struct val *want;       /* the values the path must report, in order */
+	unsigned    n_want, n_stmt;
 };
 
 static void prog_free(struct prog *g)
 {
+	unsigned i;
+
 	free(g->text.p);
-	val_free(&g->best);
+	for (i = 0; i < g->n_want; i++)
+		val_free(&g->want[i]);
+	free(g->want);
 	memset(g, 0, sizeof *g);
 }
 
 /*
- * Generate, evaluate and write one program. `concat` is the language's join
- * (0 for Tcl). The answer is the longest value any statement built, the first of
- * equals, and a name keeps its FIRST value.
+ * Generate, evaluate and write one program. Every statement has a name of its own (a name assigned twice is not one value to a language with no
+ * control flow, and the path says so by not following it). A statement is REPORTED when its right side is more than one term, or a call: a single
+ * literal or variable is not computed.
  */
-static void make_program(struct nrng *r, char concat, int tcl, struct prog *g)
+static void make_program(struct nrng *r, const struct lg *g, struct prog *p)
 {
 	struct env env;
 	int defined[NAMES];
-	unsigned n_def = 0, i, ns = 2u + nr_below(r, 9u);
+	unsigned n_def = 0, i, ns = 2u + nr_below(r, 10u);
 
 	memset(&env, 0, sizeof env);
-	memset(g, 0, sizeof *g);
-	src_str(&g->text, "<?php\n");
-	for (i = 0; i < ns; i++) {
-		int name = (int)nr_below(r, 12u);        /* a small pool: names repeat */
-		struct ex *e;
-		struct val v;
-		int fail_first = nr_below(r, 12u) == 0u;
+	memset(p, 0, sizeof *p);
+	p->want = calloc(NAMES, sizeof *p->want);
+	src_str(&p->text, g->head);
+	for (i = 0; i < ns && i < NAMES - 1u; i++) {
+		struct ex *e = random_ex(r, g, 0, defined, n_def);
+		struct val v = ref_eval(e, &env);
+		int reported = e->n >= 2u || e->t[0].kind == 2;
 
-		if (fail_first) {
-			/* a statement whose FIRST term cannot be evaluated builds nothing */
-			src_str(&g->text, "$");
-			src_str(&g->text, name_of[name]);
-			ws(&g->text, r);
-			src_str(&g->text, "=");
-			ws(&g->text, r);
-			src_str(&g->text, nr_below(r, 2u) ? "$undefined_one" : "str_replace(\"\",\"x\",\"abc\")");
-			ws(&g->text, r);
-			src_str(&g->text, concat ? (concat == '.' ? ". \"tail\"" : "+ \"tail\"") : "");
-			src_str(&g->text, ";");
-			junk(&g->text, r);
-			continue;
+		if (nr_below(r, 12u) == 0u) {
+			/* a statement whose value is not constant: a name no one defined */
+			ex_free(e);
+			e = calloc(1, sizeof *e);
+			e->n = 2;
+			e->t = calloc(2, sizeof *e->t);
+			e->t[0].kind = 1;
+			e->t[0].var = (int)(NAMES - 1u);        /* never defined */
+			e->t[1].lit = random_literal(r, g, 6u);
+			val_free(&v);
+			v = ref_eval(e, &env);
+			reported = 0;
 		}
-		{
-			unsigned tries = 0;
-
-			do {
-				e = random_ex(r, 0, defined, n_def);
-				ref_dirty = 0;
-				v = ref_eval(e, &env, (unsigned)(unsigned char)concat, 0);
-				if (!ref_dirty)
-					break;
-				val_free(&v);
-				ex_free(e);
-			} while (++tries < 8u);
-			if (ref_dirty) {                /* give up on this one: a plain literal */
-				e = calloc(1, sizeof *e);
-				e->n = 1;
-				e->t = calloc(1, sizeof *e->t);
-				e->t[0].lit = random_literal(r, 14u, 1);
-				v = ref_eval(e, &env, (unsigned)(unsigned char)concat, 0);
-			}
-		}
-		src_str(&g->text, "$");
-		src_str(&g->text, name_of[name]);
-		ws(&g->text, r);
-		src_str(&g->text, "=");
-		ws(&g->text, r);
-		write_ex(&g->text, e, tcl, concat, r);
-		src_str(&g->text, ";");
-		junk(&g->text, r);
-		if (v.ok && v.n) {
-			if (v.n > g->best.n) {
-				val_free(&g->best);
-				g->best = val_of(v.p, v.n);
-			}
-			if (!env.v[name].ok) {
-				env.v[name] = v;
-				defined[n_def++] = name;
-				v.p = NULL;
-			}
+		if (g->sigil)
+			src_str(&p->text, "$");
+		src_str(&p->text, name_of[i]);
+		ws(&p->text, r);
+		src_str(&p->text, "=");
+		ws(&p->text, r);
+		write_ex(&p->text, g, e, r);
+		src_str(&p->text, g->eos);
+		src_str(&p->text, "\n");
+		junk(&p->text, g, r);
+		if (v.ok) {
+			if (reported)
+				p->want[p->n_want++] = val_of(v.p, v.n);
+			env.v[i] = v;
+			defined[n_def++] = (int)i;
+			v.p = NULL;
 		}
 		val_free(&v);
 		ex_free(e);
 	}
-	g->n_stmt = ns;
+	p->n_stmt = i;
 	for (i = 0; i < NAMES; i++)
 		val_free(&env.v[i]);
 }
 
 /* ---- differential ---------------------------------------------------------------------------- */
 
-static void fold_differential(uint8_t kind, char concat, int tcl, unsigned seeds, unsigned base)
+static void differential(const struct lg *g, unsigned seeds, unsigned base)
 {
-	/* (the feature switches are read by the generator above) */
-	const struct kof_lex *lx = kof_lex_for(kind);
 	struct nrng r;
-	unsigned seed, nonempty = 0, longest = 0;
-	static uint8_t out[1u << 16];
+	unsigned seed, reported = 0, longest = 0;
 
 	for (seed = 1; seed <= seeds; seed++) {
-		struct prog g;
-		uint32_t got, limit = 99, cap = (uint32_t)sizeof out;
+		struct prog p;
+		struct cset s;
+		unsigned i;
+		int same;
+		uint8_t *view = NULL;
+		uint32_t vw;
 
 		nr_seed(&r, base + seed);
-		make_program(&r, concat, tcl, &g);
-		memset(out, 0xee, 64);
-		if (g.best.n && nr_below(&r, 6u) == 0u)
-			cap = 1u + nr_below(&r, (uint32_t)g.best.n);
-		got = kof_script_fold_ex(lx, g.text.p, (uint32_t)g.text.n, out, cap, &limit);
-		{
-			size_t want = g.best.n > cap ? cap : g.best.n;
+		make_program(&r, g, &p);
+		consts_of(g->lang, p.text.p, p.text.n, &s);
+		same = s.n == p.n_want;
+		for (i = 0; same && i < s.n; i++)
+			same = s.c[i].n == p.want[i].n && !memcmp(s.c[i].v, p.want[i].p, p.want[i].n);
+		NCKF(same, "seed %u (%s): reported %u values, want %u (first differing: %u)\n%.*s", seed, g->name, s.n, p.n_want, i,
+		     (int)p.text.n, (char *)p.text.p);
+		NCKF(s.st == KGENOME_OK, "seed %u (%s): status %d", seed, g->name, (int)s.st);
+		/* the text with them written has none left */
+		vw = consts_text(g->lang, p.text.p, p.text.n, &s, &view);
+		if (s.n) {
+			struct cset again;
 
-			NCKF(got == want && (!want || !memcmp(out, g.best.p, want)) && limit == 0,
-			     "seed %u (%s): got %u want %zu limit %u\n%.*s", seed,
-			     tcl ? "tcl" : concat == '.' ? "php" : "psh", got, want, limit,
-			     (int)g.text.n, (char *)g.text.p);
-			if (!want)
-				NCK(out[0] == 0xee);              /* nothing written for nothing */
+			NCKF(vw != 0, "seed %u (%s): the values were not written\n%.*s", seed, g->name, (int)p.text.n, (char *)p.text.p);
+			if (vw) {
+				consts_of(g->lang, view, vw, &again);
+				NCKF(again.n == 0u, "seed %u (%s): the written text still has %u computed right sides\n%.*s", seed, g->name, again.n,
+				     (int)vw, (char *)view);
+				cset_free(&again);
+			}
 		}
-		nonempty += g.best.n != 0;
-		if (g.best.n > longest)
-			longest = (unsigned)g.best.n;
-		prog_free(&g);
+		free(view);
+		reported += s.n != 0;
+		for (i = 0; i < p.n_want; i++)
+			if (p.want[i].n > longest)
+				longest = (unsigned)p.want[i].n;
+		cset_free(&s);
+		prog_free(&p);
 	}
-	NCKF(nonempty > seeds / 2u, "generator reach: %u of %u built something", nonempty, seeds);
-	NCKF(longest > (feat_join ? 20u : 8u), "generator reach: longest %u", longest);
+	NCKF(reported > seeds / 2u || !feat_join, "%s generator reach: %u of %u built something", g->name, reported, seeds);
+	NCKF(!feat_join || longest > 20u, "%s generator reach: longest %u", g->name, longest);
 }
 
 /* ---- known answers --------------------------------------------------------------------------- */
 
-static uint32_t fold_text(const char *src, uint8_t kind, uint8_t *out, uint32_t cap,
-			  uint32_t *limit)
+/* The values `src` reports in `lang`, compared with the NULL-ended list `want` (strings; a value with a NUL is not written this way). */
+static int reports(uint32_t lang, const char *src, const char *const *want, struct cset *s)
 {
-	return kof_script_fold_ex(kof_lex_for(kind), (const uint8_t *)src, (uint32_t)strlen(src),
-				  out, cap, limit);
+	unsigned i, nw = 0;
+	int ok;
+	/* php is read from its tag: a text with none is markup */
+	char *own = lang == KGENOME_TEXTUAL_LANG_PHP && strncmp(src, "<?", 2) ? malloc(strlen(src) + 8u) : NULL;
+
+	if (own) {
+		memcpy(own, "<?php ", 6u);
+		strcpy(own + 6, src);
+		src = own;
+	}
+	consts_of(lang, (const uint8_t *)src, strlen(src), s);
+	free(own);
+	while (want[nw])
+		nw++;
+	ok = s->n == nw;
+	for (i = 0; ok && i < nw; i++)
+		ok = s->c[i].n == strlen(want[i]) && !memcmp(s->c[i].v, want[i], s->c[i].n);
+	return ok;
 }
 
-#define FOLDS(src, want) do { \
-	uint8_t o_[4096]; \
-	uint32_t l_ = 0, n_ = fold_text((src), KOF_SCRIPT_PHP, o_, sizeof o_, &l_); \
-	NCKF(n_ == strlen(want) && !memcmp(o_, (want), n_) && l_ == 0, \
-	     "fold of [%s]: got %u bytes [%.*s] limit %u, want [%s]", (src), n_, (int)n_, \
-	     (char *)o_, l_, (want)); \
+#define PHPL KGENOME_TEXTUAL_LANG_PHP
+
+/* `want` is the whole list, in order; with none the path reports nothing (the macro's own NULL ends the list). */
+#define REPORTS(lang, src, ...) do { \
+	static const char *const w_[] = { __VA_ARGS__ __VA_OPT__(,) NULL }; \
+	struct cset s_; \
+	int ok_ = reports((lang), (src), w_, &s_); \
+	NCKF(ok_, "[%s]: reported %u values, first [%.*s]", (src), s_.n, s_.n ? (int)s_.c[0].n : 0, s_.n ? (char *)s_.c[0].v : ""); \
+	cset_free(&s_); \
 } while (0)
 
-static void fold_known_answers(void)
+static void known_answers(void)
 {
 	/* a join, a variable, str_replace, in the shape of a generator */
-	FOLDS("$a='fun'; $b='ction x('; $c=str_replace('|','',$a.'|'.$b);", "function x(");
-	FOLDS("$a = \"ab\" . \"cd\" . 'ef';", "abcdef");
-	FOLDS("$a=\"x\";$b=$a.$a;$c=$b.$b.$a;", "xxxxx");
-	FOLDS("$a=str_replace('a','bb','banana');", "bbbnbbnbb");
-	FOLDS("$a=str_replace('ab','','ababab-ab');", "-");
-	FOLDS("$a=str_replace('aa','b','aaaaa');", "bba");              /* left to right, no overlap */
-	FOLDS("$x=str_replace('1','2',str_replace('0','1','0101'));", "2222");
-	/* the first definition of a name wins */
-	FOLDS("$a='one'; $a='two'; $b=$a.'!';", "one!");
+	REPORTS(PHPL, "$a='fun'; $b='ction x('; $c=str_replace('|','',$a.'|'.$b);", "function x(");
+	REPORTS(PHPL, "$a = \"ab\" . \"cd\" . 'ef';", "abcdef");
+	REPORTS(PHPL, "$a=\"x\";$b=$a.$a;$c=$b.$b.$a;", "xx", "xxxxx");
+	REPORTS(PHPL, "$a=str_replace('a','bb','banana');", "bbbnbbnbb");
+	REPORTS(PHPL, "$a=str_replace('ab','','ababab-ab');", "-");
+	REPORTS(PHPL, "$a=str_replace('aa','b','aaaaa');", "bba");                       /* left to right, no overlap */
+	REPORTS(PHPL, "$x=str_replace('1','2',str_replace('0','1','0101'));", "2222");
 	/* a comparison is not an assignment */
-	FOLDS("$a=='long literal value here'; $b='ok';", "ok");
-	/* every escape form, in both quotes */
-	FOLDS("$a=\"\\x41\\x42\\103\\x4a\\X4b\\n\";", "ABCJK\n");
-	FOLDS("$a='\\x70\\150\\x70\\72\\57\\57';", "php://");
-	FOLDS("$a='it\\'s \\\"q\\\" \\\\ done';", "it's \"q\" \\ done");
-	FOLDS("$a=\"a\\tb\\vc\\fd\\re\";", "a\tb\vc\fd\re");
-	FOLDS("$a=\"\\q\\z\";", "qz");                                  /* an unknown escape is the byte */
-	FOLDS("$a=\"x\\x\";", "x");                                     /* \x with no digit is dropped */
-	FOLDS("$a=\"\\x4\" . 'Z';", "\x04Z");                            /* one digit is a byte */
-	FOLDS("$a=\"\\1018\";", "A8");                                  /* octal stops at three digits */
-	FOLDS("$a=\"\\60\\4\";", "0\x04");
-	/* the longest wins, and the first of equals */
-	FOLDS("$a='abc'; $b='abcd'; $c='wxyz';", "abcd");
-	FOLDS("$a='1234'; $b='abcd';", "1234");
+	REPORTS(PHPL, "$a=='long literal value here'; $b='ok';");
+	/* every escape the php reader knows, in dq: joined with a 'Z' so that the right side is computed (a single literal is the form's, not this path's).
+	 * DIFFERENCE from the folder, which read "\X4b", dropped the backslash of an unknown escape ("\q" was q) and dropped a "\x" with no digit: php keeps all
+	 * three as they are, and so does the value reader (tests/lib/genome/textual_value.c pins it). */
+	REPORTS(PHPL, "$a=\"\\x41\\x42\\103\\x4a\\n\" . 'Z';", "ABCJ\nZ");
+	REPORTS(PHPL, "$a='\\x70\\150' . 'Z';", "\\x70\\150Z");                        /* single quotes read two escapes */
+	REPORTS(PHPL, "$a='it\\'s \\\\ done' . 'Z';", "it's \\ doneZ");
+	REPORTS(PHPL, "$a=\"a\\tb\\vc\\fd\\re\" . 'Z';", "a\tb\vc\fd\reZ");
+	REPORTS(PHPL, "$a=\"\\q\\z\" . 'Z';", "\\q\\zZ");                               /* DIFFERENCE: the folder said "qzZ" */
+	REPORTS(PHPL, "$a=\"\\x4\" . 'Z';", "\x04Z");                                    /* one digit is a byte */
+	REPORTS(PHPL, "$a=\"\\1018\" . 'Z';", "A8Z");                                    /* octal stops at three digits */
+	REPORTS(PHPL, "$a=\"\\60\\4\" . 'Z';", "0\x04Z");
 	/* spacing and sigils */
-	FOLDS("$a=\t'x'\t.\t'y'\t;", "xy");
-	FOLDS("   $a   =   'x'.'y' ;  ", "xy");
-	FOLDS("$a_1='p'; $A1='q'; $r=$a_1.$A1.$a_1;", "pqp");
-	FOLDS("$$a='x'; $b='yy';", "yy");                               /* a sigil alone is not a name */
-	/* an assignment whose value is empty builds nothing and defines nothing */
-	FOLDS("$a=''; $b=$a.'k';", "");
-	FOLDS("$a=str_replace('x','','xx'); $b='z';", "z");
+	REPORTS(PHPL, "$a=\t'x'\t.\t'y'\t;", "xy");
+	REPORTS(PHPL, "   $a   =   'x'.'y' ;  ", "xy");
+	REPORTS(PHPL, "$a_1='p'; $A1='q'; $r=$a_1.$A1.$a_1;", "pqp");
+	/* an assignment whose value is empty is a constant too, now: the path writes it where it was computed */
+	REPORTS(PHPL, "$a=''; $b=$a.'k';", "k");
+	REPORTS(PHPL, "$a=str_replace('x','','xx'); $b='z';", "");
+	/* DIFFERENCE: the folder kept the FIRST definition of a name ($a.'!' was "one!"); the evaluator keeps no control flow and a variable is its LAST
+	 * assignment, for every use of it in the file */
+	REPORTS(PHPL, "$a='one'; $a='two'; $b=$a.'!';", "two!");
+	/* a join across lines, a comment, the close tag, a bracket, the end of the input */
+	REPORTS(PHPL, "$a = 'ab' .\n    'cd';", "abcd");
+	REPORTS(PHPL, "$a = 'ab'\n  . 'cd';", "abcd");
+	REPORTS(PHPL, "$a = 'ab' . 'cd' ; // c\n", "abcd");
+	REPORTS(PHPL, "<?php $a = 'ab' . 'cd' ?>", "abcd");
+	REPORTS(PHPL, "f($a = 'ab' . 'cd')", "abcd");
+	REPORTS(PHPL, "$a = 'ab' . 'cd'", "abcd");
+	/* DIFFERENCE: functions the folder did not run */
+	REPORTS(PHPL, "$a=chr(65).chr(66).chr(67);", "ABC");
+	/* strrev is a decoder (the table says the form never rewrites a call of it): the decode hook shows what it makes, with the call kept, and this path
+	 * leaves it alone, as it did */
+	REPORTS(PHPL, "$a=strrev('cba') . 'Z';");
+	/* DIFFERENCE: a name defined LATER is read (no control flow); the folder answered nothing for the first statement */
+	REPORTS(PHPL, "$a=$b.'x'; $b='y';", "yx");
 }
 
-static void fold_not_folded(void)
+static void not_constant(void)
 {
-	uint8_t o[256];
-	uint32_t l = 5;
-
-	/* what the header says it does NOT do: it runs nothing */
-	NCK(fold_text("$a=chr(65).chr(66).chr(67);", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0 && l == 0);
-	NCK(fold_text("$a=String.fromCharCode(65,66);", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0);
-	NCK(fold_text("$a=base64_decode('QUJD');", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0);
-	NCK(fold_text("$a=$_GET['p'];", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0);
-	NCK(fold_text("$a=strrev('cba');", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0);
-	/* an unterminated literal is not a constant, and does not hide the next one */
-	NCK(fold_text("$a='abc", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0);
-	NCK(fold_text("$a=\"abc\\", KOF_SCRIPT_PHP, o, sizeof o, &l) == 0);
-	NCK(fold_text("$a='abc\n$b='xy';", KOF_SCRIPT_PHP, o, sizeof o, &l) == 7);   /* "abc\n$b=" */
-	/* a name that is not defined yet is not a value */
-	NCK(fold_text("$a=$b.'x'; $b='y';", KOF_SCRIPT_PHP, o, sizeof o, &l) == 1 && o[0] == 'y');
-	/* a language with no variable sigil is declined, whatever it says */
-	{
-		static const uint8_t kinds[] = { KOF_SCRIPT_JS, KOF_SCRIPT_PYTHON, KOF_SCRIPT_RUBY,
-						 KOF_SCRIPT_SHELL, KOF_SCRIPT_BAT, KOF_SCRIPT_LUA,
-						 KOF_SCRIPT_CFM, KOF_SCRIPT_VBS, KOF_SCRIPT_ASP,
-						 KOF_SCRIPT_ASPX, KOF_SCRIPT_JSP };
-		unsigned i;
-
-		for (i = 0; i < sizeof kinds; i++) {
-			const struct kof_lex *lx = kof_lex_for(kinds[i]);
-
-			NCKF(lx && !lx->var_sigil, "kind %u row", kinds[i]);
-			NCKF(fold_text("$a='x'.'y'; var a = 'x' + 'y';", kinds[i], o, sizeof o, &l) == 0 &&
-			     l == 0, "kind %u folded", kinds[i]);
-		}
-	}
-	/* no language row at all */
-	NCK(kof_lex_for(KOF_SCRIPT_ANY) == NULL && kof_lex_for(250) == NULL);
-	NCK(kof_script_fold_ex(NULL, (const uint8_t *)"$a='x';", 7, o, sizeof o, &l) == 0 && l == 0);
-	NCK(kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), NULL, 7, o, sizeof o, &l) == 0);
-	NCK(kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), (const uint8_t *)"$a='x';", 0, o,
-			       sizeof o, &l) == 0);
-	NCK(kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), (const uint8_t *)"$a='x';", 7, NULL,
-			       sizeof o, &l) == 0);
-	NCK(kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), (const uint8_t *)"$a='x';", 7, o, 0,
-			       &l) == 0);
-	NCK(kof_script_fold(kof_lex_for(KOF_SCRIPT_PHP), (const uint8_t *)"$a='xy';", 8, o, 1) == 1);
-	/* Tcl has no join: the first term is the whole value */
-	NCK(fold_text("$a=\"ab\" . \"cd\";", KOF_SCRIPT_TCL, o, sizeof o, &l) == 2 && !memcmp(o, "ab", 2));
-	/* Tcl has one quote */
-	NCK(fold_text("$a='ab';", KOF_SCRIPT_TCL, o, sizeof o, &l) == 0);
-	/* PowerShell joins with + */
-	NCK(fold_text("$a='ab' + 'cd'; $b='ef'.'gh';", KOF_SCRIPT_PSH, o, sizeof o, &l) == 4 &&
-	    !memcmp(o, "abcd", 4));
-	/* Perl joins with '.' */
-	NCK(fold_text("$a='ab' . 'cd';", KOF_SCRIPT_PERL, o, sizeof o, &l) == 4);
+	/* what the path does NOT do: it follows no value from outside the file, and a decoder is the decode hook's, not this path's */
+	REPORTS(PHPL, "$a=$_GET['p'] . 'x';");
+	REPORTS(PHPL, "$a=base64_decode('QUJD') . 'x';");
+	REPORTS(PHPL, "$x=$_GET['p']; $a = 'ab' . $x; $b = $a . 'cd';");
+	/* `$v = $k[1]` is not $k, and nothing is joined on it */
+	REPORTS(PHPL, "$k='abc'; $v = $k[1]; $w = $v . 'z';");
+	/* an unterminated literal is not a constant */
+	REPORTS(PHPL, "$a='abc' . 'def");
+	REPORTS(PHPL, "$a=\"abc\\");
+	/* a language whose newline ends the statement: it still does */
+	REPORTS(KGENOME_TEXTUAL_LANG_PSH, "$a = 'ab'\n + 'cd'\n");
+	/* a language with no join (tcl: two words are two words) */
+	REPORTS(KGENOME_TEXTUAL_LANG_TCL, "set a \"ab\" \"cd\"\n");
 }
+
+/*
+ * THE LANGUAGES THE FOLDER HAD NO SIGIL FOR are served now, each in its own spelling, and "+" is a join of two STRINGS and nothing else:
+ * `1 + 2` is a sum in every one of them and the written literal would have said "12". And a variable is followed only where its value cannot depend on
+ * the order the program runs in, which the evaluator does not know: a top-level name assigned exactly once.
+ */
+static void typed_languages(void)
+{
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var a = 'x' + 'y';", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var a = 1 + 2;");
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var a = (5);");
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var a = 'x' + 1;");                           /* "x1" in js, a TypeError in python, a number elsewhere */
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var p = 'zap-'; var a = p + 'left';", "zap-left");
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var p = 'zap-'; p = 'other'; var a = p + 'left';");           /* assigned twice: not one value */
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "var p = 'zap-'; p += 'x'; var a = p + 'left';");
+	REPORTS(KGENOME_TEXTUAL_LANG_JS, "function f(p) { var a = p + 'left'; }\nvar p = 'x';");    /* a parameter is no assignment */
+	REPORTS(KGENOME_TEXTUAL_LANG_PY, "a = 'x' + 'y'\n", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_PY, "a = b'x' + b'y'\n");                          /* bytes is not str: not written back as a str */
+	REPORTS(KGENOME_TEXTUAL_LANG_PY, "a = ('x' 'y')\n", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_PY, "new = ''\ndef f():\n    new = new + b' '\n");        /* found on quopri.py: came out new = ' ' */
+	REPORTS(KGENOME_TEXTUAL_LANG_RUBY, "a = 'x' + 'y'\n", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_LUA, "a = 'x' .. 'y'\n", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_VBS, "a = \"x\" & \"y\"\n", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_VBS, "a = \"4\" + 5\n");                           /* vbscript: 9 */
+	REPORTS(KGENOME_TEXTUAL_LANG_VBS, "a = \"x\" & \"\"\"\" & \"y\"\n", "x\"y");     /* a quote is written twice */
+	REPORTS(KGENOME_TEXTUAL_LANG_PSH, "$a = 'x' + 'y'\n", "xy");
+	REPORTS(KGENOME_TEXTUAL_LANG_PSH, "$a = 5 + \"4\"\n");                          /* powershell: 9 */
+	/* a decimal number is one number: the walk's tokens are `2` `.` `58`, and php's join read them as the string "258" */
+	REPORTS(PHPL, "$a = 2.58;");
+	REPORTS(PHPL, "$a = 2.58 . 'x'; $b = 0.0; $c = 1 . 2;", "2.58x", "12");
+	/* the byte in front of a bare variable is not part of it: javascript's `var a=b+c` came out `var a'..'` */
+	{
+		struct cset t;
+		uint8_t *v = NULL;
+		const char *in = "var p='x';var a=p+'y';", *want = "var p='x';var a='xy';";
+		uint32_t w;
+
+		consts_of(KGENOME_TEXTUAL_LANG_JS, (const uint8_t *)in, strlen(in), &t);
+		w = consts_text(KGENOME_TEXTUAL_LANG_JS, (const uint8_t *)in, strlen(in), &t, &v);
+		NCKF(w == strlen(want) && !memcmp(v, want, w), "bare variable: [%.*s]", (int)w, v ? (char *)v : "");
+		free(v);
+		cset_free(&t);
+	}
+}
+
+/* ---- counts, the bounds ---------------------------------------------------------------------- */
 
 /* N literals joined, N variables, each against the string that must come out. */
-static void fold_counts(void)
+static void counts(void)
 {
-	static uint8_t src[1u << 20], out[1u << 16], want[1u << 16];
+	static uint8_t src[1u << 20], want[1u << 16];
 	unsigned n;
 
 	for (n = 1; n <= 300u; n++) {
 		size_t at = 0, w = 0;
 		unsigned i;
-		uint32_t limit = 9, got;
+		struct cset s;
 
-		/* $a = 'p0' . 'p1' . ... . 'p(n-1)'; */
-		at += (size_t)snprintf((char *)src + at, sizeof src - at, "$a = ");
+		at += (size_t)snprintf((char *)src + at, sizeof src - at, "<?php $a = ");
 		for (i = 0; i < n; i++) {
 			char piece[8];
 			size_t l = (size_t)snprintf(piece, sizeof piece, "%x", i);
 
-			at += (size_t)snprintf((char *)src + at, sizeof src - at, "%s'%s'", i ? " . " : "",
-					       piece);
+			at += (size_t)snprintf((char *)src + at, sizeof src - at, "%s'%s'", i ? " . " : "", piece);
 			memcpy(want + w, piece, l);
 			w += l;
 		}
 		at += (size_t)snprintf((char *)src + at, sizeof src - at, ";");
-		got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out,
-					 sizeof out, &limit);
-		NCKF(got == w && !memcmp(out, want, w) && !limit, "%u literals: %u vs %zu", n, got, w);
+		consts_of(PHPL, src, at, &s);
+		if (n == 1u)
+			NCKF(s.n == 0u, "one literal is not computed");
+		else
+			NCKF(s.n == 1u && s.c[0].n == w && !memcmp(s.c[0].v, want, w) && s.st == KGENOME_OK, "%u literals: %u values", n, s.n);
+		cset_free(&s);
 	}
 	for (n = 1; n <= 320u; n += n < 300u ? 1u : 20u) {
 		size_t at = 0, w = 0;
 		unsigned i;
-		uint32_t limit = 9, got;
+		struct cset s;
 
-		/* $v0 = 'q0'; ... ; $all = $v0 . $v1 ... ; names collide by prefix on purpose */
+		at += (size_t)snprintf((char *)src, sizeof src, "<?php\n");
 		for (i = 0; i < n; i++)
 			at += (size_t)snprintf((char *)src + at, sizeof src - at, "$v%u='q%x';\n", i, i);
 		at += (size_t)snprintf((char *)src + at, sizeof src - at, "$all=");
@@ -698,86 +737,144 @@ static void fold_counts(void)
 			w += l;
 		}
 		at += (size_t)snprintf((char *)src + at, sizeof src - at, ";");
-		got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out,
-					 sizeof out, &limit);
-		NCKF(got == w && !memcmp(out, want, w) && !limit, "%u variables: %u vs %zu limit %u", n,
-		     got, w, limit);
+		consts_of(PHPL, src, at, &s);
+		if (n == 1u)
+			NCKF(s.n == 0u, "one variable is not computed");
+		else
+			NCKF(s.n == 1u && s.c[0].n == w && !memcmp(s.c[0].v, want, w), "%u variables: %u values", n, s.n);
+		cset_free(&s);
 	}
 }
 
-/* a long literal, and a chain of variables each built from the one before */
-static void fold_long(void)
+/* The bound of one value, on both sides, and a long run of escapes. */
+static void long_values(void)
 {
-	size_t n = 1u << 20, i, at = 0;
-	uint8_t *src = malloc(2u * n + 64u), *out = malloc(2u * n + 64u);
-	uint32_t limit = 9, got;
+	uint8_t *src = malloc(2u * EV_VMAX + 4096u);
+	size_t at, i;
+	struct cset s;
 
-	/* one megabyte in one literal: the folder returns the first `cap` bytes of it */
-	at += (size_t)snprintf((char *)src, 64, "$a = '");
-	for (i = 0; i < n; i++)
+	/* EV_VMAX - 1 bytes in one literal and one more: exactly the bound; one byte more is not a constant */
+	at = (size_t)snprintf((char *)src, 64, "<?php $a = '");
+	for (i = 0; i < EV_VMAX - 1u; i++)
 		src[at++] = (uint8_t)('a' + i % 26u);
 	src[at++] = '\'';
-	src[at++] = ';';
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, (uint32_t)n, &limit);
-	NCKF(got == n && !limit && out[0] == 'a' && out[n - 1u] == (uint8_t)('a' + (n - 1u) % 26u),
-	     "a 1 MiB literal: %u", got);
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, 1000u, &limit);
-	NCKF(got == 1000u && !memcmp(out, src + 6, 1000u), "a 1 MiB literal into 1000 bytes: %u", got);
-	/* 300k escapes in one literal: 1.2 MB of source, 300k bytes of answer */
-	at = (size_t)snprintf((char *)src, 64, "$a = \"");
+	memcpy(src + at, " . 'y';", 7u);
+	consts_of(PHPL, src, at + 7u, &s);
+	NCKF(s.n == 1u && s.c[0].n == EV_VMAX && s.c[0].v[EV_VMAX - 1u] == 'y' && s.c[0].v[EV_VMAX - 2u] == (uint8_t)('a' + (EV_VMAX - 2u) % 26u),
+	     "a value of exactly 1 MiB: %u values", s.n);
+	cset_free(&s);
+	at = (size_t)snprintf((char *)src, 64, "<?php $a = '");
+	for (i = 0; i < EV_VMAX; i++)
+		src[at++] = (uint8_t)('a' + i % 26u);
+	src[at++] = '\'';
+	memcpy(src + at, " . 'y';", 7u);
+	consts_of(PHPL, src, at + 7u, &s);
+	NCKF(s.n == 0u, "a value of 1 MiB and a byte is not constant (%u values)", s.n);
+	cset_free(&s);
+	/* 200k escapes in one literal: 800 KB of source, 200k bytes of value. DIFFERENCE: the folder read 300k escapes (1.2 MB of source); a literal whose TEXT is
+	 * past EV_VMAX is not read here (the bound is on the text the evaluator holds while it decodes, not on the value), and 300k is not constant. */
+	at = (size_t)snprintf((char *)src, 64, "<?php $a = \"");
+	for (i = 0; i < 200000u; i++) {
+		memcpy(src + at, "\\x41", 4u);
+		at += 4u;
+	}
+	memcpy(src + at, "\" . 'z';", 8u);
+	at += 8u;
+	consts_of(PHPL, src, at, &s);
+	NCKF(s.n == 1u && s.c[0].n == 200001u && s.c[0].v[0] == 'A' && s.c[0].v[199999] == 'A' && s.c[0].v[200000] == 'z', "200k escapes: %u values", s.n);
+	cset_free(&s);
+	at = (size_t)snprintf((char *)src, 64, "<?php $a = \"");
 	for (i = 0; i < 300000u; i++) {
 		memcpy(src + at, "\\x41", 4u);
 		at += 4u;
 	}
-	src[at++] = '"';
-	src[at++] = ';';
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, (uint32_t)n, &limit);
-	NCKF(got == 300000u && !limit && out[0] == 'A' && out[299999] == 'A', "300k escapes: %u", got);
-	/* $v1 = $v0 . 'b'; $v2 = $v1 . 'b'; ... a chain of 3000, each variable looked up once */
-	at = (size_t)snprintf((char *)src, 64, "$v0 = 'a';\n");
-	for (i = 1; i <= 3000u; i++)
-		at += (size_t)snprintf((char *)src + at, 64, "$v%zu = $v%zu . 'b';\n", i, i - 1u);
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, (uint32_t)n, &limit);
-	NCKF(got == 3001u && !limit && out[0] == 'a' && out[3000] == 'b', "a chain of 3000 variables: %u", got);
+	memcpy(src + at, "\" . 'z';", 8u);
+	at += 8u;
+	consts_of(PHPL, src, at, &s);
+	NCKF(s.n == 0u, "300k escapes (1.2 MB of text) are not constant: %u values", s.n);
+	cset_free(&s);
 	free(src);
-	free(out);
 }
 
-/* str_replace nested `depth` deep: 256 folds and 257 says it did not. */
-static void fold_depth(void)
+/* A chain of variables each built from the one before: a variable is evaluated through the variables it names, and that recursion is bounded
+ * (EV_DEPTH, 32: it was 8 until G5 - a name behind nine aliases was lost without a word - and a chain past it is now said, see diag_text_defects.c). DIFFERENCE: the folder's table was a hash and a chain of 3000 folded. */
+static void chain_depth(void)
 {
-	static uint8_t src[1u << 16], out[256];
-	unsigned depth;
-	unsigned first_limit = 0;
+	static uint8_t src[1u << 16];
+	unsigned depth, first_cut = 0;
+
+	for (depth = 2; depth <= 40u; depth++) {
+		size_t at = (size_t)snprintf((char *)src, 64, "<?php $v0 = 'a';\n");
+		unsigned i;
+		struct cset s;
+
+		for (i = 1; i <= depth; i++)
+			at += (size_t)snprintf((char *)src + at, 64, "$v%u = $v%u . 'b';\n", i, i - 1u);
+		consts_of(PHPL, src, at, &s);
+		/* every statement is its own constant, so the count is how many resolved */
+		if (s.n != depth && !first_cut)
+			first_cut = depth;
+		NCKF(s.n <= depth, "chain %u: %u values", depth, s.n);
+		cset_free(&s);
+	}
+	printf("  a chain of dependent variables first loses a link at %u variables (EV_DEPTH 32)\n", first_cut);
+	NCKF(first_cut >= 32u && first_cut <= 34u, "the variable-depth bound first cuts a chain at %u variables", first_cut);
+}
+
+/* str_replace nested `depth` deep: EV_NEST levels evaluate and the next says it did not, and the scan says it was cut. */
+static void nest_depth(void)
+{
+	static uint8_t src[1u << 16];
+	unsigned depth, first_cut = 0;
 
 	for (depth = 1; depth <= 300u; depth++) {
-		size_t at = 0;
+		size_t at = (size_t)snprintf((char *)src, 64, "<?php $d=");
 		unsigned i;
-		uint32_t limit = 0, got;
+		struct cset s;
 
-		/* $ok = 'safe-value'; $d = str_replace('x','x', ... str_replace('x','x','xyz') ...); */
-		at += (size_t)snprintf((char *)src + at, sizeof src - at, "$ok='safe-value'; $d=");
 		for (i = 0; i < depth; i++)
 			at += (size_t)snprintf((char *)src + at, sizeof src - at, "str_replace('x','x',");
 		at += (size_t)snprintf((char *)src + at, sizeof src - at, "'xyz-longer-than-ok'");
 		for (i = 0; i < depth; i++)
 			src[at++] = ')';
 		src[at++] = ';';
-		got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, sizeof out,
-					 &limit);
-		if (depth <= 256u) {
-			NCKF(got == 18u && !memcmp(out, "xyz-longer-than-ok", 18) && !limit,
-			     "depth %u: got %u limit %u", depth, got, limit);
+		consts_of(PHPL, src, at, &s);
+		if (s.n == 1u) {
+			NCKF(s.c[0].n == 18u && !memcmp(s.c[0].v, "xyz-longer-than-ok", 18) && s.st == KGENOME_OK && !s.cut, "depth %u: %u bytes, status %d", depth,
+			     s.c[0].n, (int)s.st);
 		} else {
-			/* the statement is not folded, the limit says so, and the plain constant
-			 * before it is still the answer - the bound is a cost bound, not silence */
-			NCKF((limit & KOF_FOLD_DEPTH) && got == 10u && !memcmp(out, "safe-value", 10),
-			     "depth %u: got %u limit %u", depth, got, limit);
-			if (!first_limit)
-				first_limit = depth;
+			NCKF(s.n == 0u && s.st == KGENOME_TRUNCATED && s.cut >= 1u, "depth %u: %u values, status %d, cut %u", depth, s.n, (int)s.st, s.cut);
+			if (!first_cut)
+				first_cut = depth;
 		}
+		cset_free(&s);
 	}
-	NCKF(first_limit == 257u, "the depth bound first fires at %u", first_limit);
+	NCKF(first_cut == EV_NEST, "the nesting bound first fires at %u (EV_NEST %u)", first_cut, EV_NEST);
+}
+
+/* A file that opens a million calls chose to overflow the C stack once (a segmentation fault at 20000 levels, in the evaluator's recursion). */
+static int group_nest_million(void *arg)
+{
+	size_t n = 1000000, at = 0, i;
+	uint8_t *src = malloc(n * 22u + 64u);
+	struct cset s;
+
+	(void)arg;
+	at += (size_t)snprintf((char *)src, 64, "<?php $d=");
+	for (i = 0; i < n; i++) {
+		memcpy(src + at, "str_replace('x','x',", 20u);
+		at += 20u;
+	}
+	memcpy(src + at, "'k'", 3u);
+	at += 3u;
+	for (i = 0; i < n; i++)
+		src[at++] = ')';
+	src[at++] = ';';
+	consts_of(PHPL, src, at, &s);
+	NCKF(s.n == 0u && s.st == KGENOME_TRUNCATED && s.cut >= 1u, "a million nested calls: %u values, status %d, cut %u", s.n, (int)s.st, s.cut);
+	cset_free(&s);
+	free(src);
+	return (int)nr_bad;
 }
 
 /* ---- allocation failure ------------------------------------------------------------------------ */
@@ -803,84 +900,20 @@ static int cap_address_space(long headroom)
 	return setrlimit(RLIMIT_AS, &rl) == 0;
 }
 
-/* A value doubled through variables reaches the arena's bound; with the address
- * space capped the bound is reached sooner, and the limit field says so. */
-static int group_arena_limit(void *arg)
-{
-	static uint8_t src[4096], out[1u << 20];
-	size_t at = 0;
-	unsigned i;
-	uint32_t limit = 0, got;
-
-	(void)arg;
-	at += (size_t)snprintf((char *)src + at, sizeof src - at, "$a0='%s';\n", "0123456789abcdef");
-	for (i = 1; i <= 28u; i++)
-		at += (size_t)snprintf((char *)src + at, sizeof src - at, "$a%u=$a%u.$a%u;\n", i, i - 1u,
-				       i - 1u);
-	if (!cap_address_space(48L << 20)) {
-		printf("  cannot cap the address space: group skipped\n");
-		return 0;
-	}
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, sizeof out,
-				 &limit);
-	NCKF(limit & KOF_FOLD_ARENA, "no arena limit (limit %x)", limit);
-	/* what was built before the bound is still the answer, and the cap holds it */
-	NCKF(got == sizeof out, "got %u", got);
-	return (int)nr_bad;
-}
-
-/* A hundred thousand variables need a table the address space cannot give. */
-static int group_vars_limit(void *arg)
-{
-	static uint8_t out[64];
-	uint8_t *src = malloc(3u << 20);
-	size_t at = 0;
-	unsigned i;
-	uint32_t limit = 0, got;
-
-	(void)arg;
-	for (i = 0; i < 100000u; i++)
-		at += (size_t)snprintf((char *)src + at, (3u << 20) - at, "$v%u='x';", i);
-	at += (size_t)snprintf((char *)src + at, (3u << 20) - at, "$z=$v0.$v99999.'end';");
-	if (!cap_address_space(1L << 20)) {
-		printf("  cannot cap the address space: group skipped\n");
-		return 0;
-	}
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, sizeof out,
-				 &limit);
-	NCKF(limit & KOF_FOLD_VARS, "no variable limit (limit %x)", limit);
-	/* the variables that did not fit were not remembered, so what joins them did not
-	 * fold; the answer is whatever the first of them held */
-	NCKF(got <= 3u, "got %u", got);
-	free(src);
-	return (int)nr_bad;
-}
-
 /*
- * A JOIN COPIES THE WHOLE ACCUMULATOR EVERY TIME.
- *
- * 'x'.'x'.'x'... of N terms is N joins, and each one appends a copy of everything
- * before it to the arena: N*N/2 bytes for an answer of N. Measured here: N = 16000
- * (64 KB of source) takes 125 MB; N = 32768 (128 KB) reaches the arena's own bound
- * of 512 MB and the statement is not folded. The header says a join is "a third
- * copy, which is what keeps the total bounded by the literals the file contains" -
- * the result is, the working set is not - and that the arena bound is "reachable
- * only by a file that doubles a value through variables", which this is not.
- *
- * Asked at 160 MB of headroom (the sanitiser cannot run capped, so it does not ask):
- * a 30000-term chain must fold to its 30000 bytes. It does not.
+ * A JOIN OF N ONE-BYTE TERMS appends to ONE value (the buffer doubles): linear. The folder's arena copied the accumulator at every join (N*N/2 bytes:
+ * a 30000-term chain reached 125 MB and 32768 terms its 512 MB bound), which this asks of the path at 160 MB of headroom: 30000 terms are 30000 bytes.
  */
-static int group_chain_quadratic(void *arg)
+static int group_chain_linear(void *arg)
 {
-	static uint8_t out[40000];
 	const unsigned N = 30000u;
 	uint8_t *src = malloc((size_t)N * 4u + 64u);
 	size_t at = 0;
 	unsigned i;
-	uint32_t limit = 0, got;
+	struct cset s;
 
 	(void)arg;
-	at += (size_t)snprintf((char *)src, 64, "$a = ");
+	at += (size_t)snprintf((char *)src, 64, "<?php $a = ");
 	for (i = 0; i < N; i++) {
 		memcpy(src + at, i ? ".'x'" : "'x'", i ? 4u : 3u);
 		at += i ? 4u : 3u;
@@ -888,87 +921,67 @@ static int group_chain_quadratic(void *arg)
 	src[at++] = ';';
 	if (!cap_address_space(160L << 20))
 		return 0;
-	got = kof_script_fold_ex(kof_lex_for(KOF_SCRIPT_PHP), src, (uint32_t)at, out, sizeof out,
-				 &limit);
+	consts_of(PHPL, src, at, &s);
+	NCKF(s.n == 1u && s.c[0].n == N, "30000 terms under capped address space: %u values", s.n);
+	cset_free(&s);
 	free(src);
-	return got == N && !limit ? 0 : 42;
+	return (int)nr_bad;
 }
 
-/* ---- statements across lines, and statements that do not end where the constant does -------- */
-
-static void fold_statements(void)
+/* A hundred thousand variables, address space capped: the answer is right or the status says it was cut - never a wrong value without it. */
+static int group_vars_capped(void *arg)
 {
-	uint8_t o[256];
-	uint32_t l = 0, n;
-	/*
-	 * A STATEMENT THAT CONTINUES ON THE NEXT LINE IS READ AS ONE.
-	 *
-	 * Where the language ends a statement with a token (php, perl: ';') a newline inside
-	 * an expression is whitespace, so `$a = 'ab' .\n 'cd';` is the constant 'abcd'. Where
-	 * the newline ends the statement (PowerShell, Tcl) it stays a boundary.
-	 */
-	n = fold_text("$a = 'ab' .\n    'cd';", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 4u && !memcmp(o, "abcd", 4), "a join continued on the next line folds across it");
-	n = fold_text("$a = 'ab'\n  . 'cd';", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 4u && !memcmp(o, "abcd", 4), "a join that begins on the next line is joined");
-	n = fold_text("$a = 'ab'\n . 'cd'\n", KOF_SCRIPT_PSH, o, sizeof o, &l);
-	NCKF(n == 2u && !memcmp(o, "ab", 2), "where a newline ends the statement it still does");
+	uint8_t *src = malloc(3u << 20);
+	size_t at = 0;
+	unsigned i;
+	struct cset s;
 
-	/*
-	 * A STATEMENT THAT ENDS IN SOMETHING THE FOLDER CANNOT EVALUATE IS NOT RECORDED.
-	 *
-	 * eval() takes terms while it can and gives back what it had; `$a = 'ab' . $x;`
-	 * was recorded as 'ab' and `$b = $a . 'cd';` as 'abcd' - a value the program never
-	 * holds (it holds 'ab', then the contents of $x, then 'cd'). A marker taken from
-	 * that output matches nothing in the program. An index after a variable is the same:
-	 * `$v = $k[1]` is not `$k`.
-	 */
-	n = fold_text("$x=$_GET['p']; $a = 'ab' . $x; $b = $a . 'cd';", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 0u, "a statement ending in a non-constant term builds nothing (%u)", n);
-	n = fold_text("$k='abc'; $v = $k[1]; $w = $v . 'z';", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 3u && !memcmp(o, "abc", 3), "$k[1] is not read as $k, and nothing is joined on it");
-	/* what still folds: the statement ends */
-	n = fold_text("$a = 'ab' . 'cd' ; // c\n", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 4u, "a statement closed by a semicolon and a comment");
-	n = fold_text("<?php $a = 'ab' . 'cd' ?>", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 4u, "a statement closed by the php close tag");
-	n = fold_text("f($a = 'ab' . 'cd')", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 4u, "a statement closed by a bracket");
-	n = fold_text("$a = 'ab' . 'cd'", KOF_SCRIPT_PHP, o, sizeof o, &l);
-	NCKF(n == 4u, "a statement closed by the end of the input");
+	(void)arg;
+	at += (size_t)snprintf((char *)src, 16, "<?php ");
+	for (i = 0; i < 100000u; i++)
+		at += (size_t)snprintf((char *)src + at, (3u << 20) - at, "$v%u='x';", i);
+	at += (size_t)snprintf((char *)src + at, (3u << 20) - at, "$z=$v0.$v99999.'end';");
+	if (!cap_address_space(8L << 20))
+		return 0;
+	consts_of(PHPL, src, at, &s);
+	NCKF((s.n == 1u && s.c[0].n == 5u && !memcmp(s.c[0].v, "xxend", 5)) || (s.n == 0u && s.st != KGENOME_OK),
+	     "100000 variables, capped: %u values, status %d", s.n, (int)s.st);
+	cset_free(&s);
+	free(src);
+	return (int)nr_bad;
 }
 
 int main(void)
 {
 	names_init();
-	fold_known_answers();
-	fold_not_folded();
-	fold_counts();
-	fold_long();
-	fold_depth();
+	known_answers();
+	not_constant();
+	typed_languages();
+	counts();
+	long_values();
+	chain_depth();
+	nest_depth();
 	/* one feature at a time, then all of them */
 	feat_var = 0; feat_repl = 0; feat_join = 0;
-	fold_differential(KOF_SCRIPT_PHP, '.', 0, 500u, 0x11000u);
+	differential(&PHP, 500u, 0x11000u);
 	feat_join = 1;
-	fold_differential(KOF_SCRIPT_PHP, '.', 0, 500u, 0x12000u);
+	differential(&PHP, 500u, 0x12000u);
 	feat_var = 2;
-	fold_differential(KOF_SCRIPT_PHP, '.', 0, 500u, 0x13000u);
+	differential(&PHP, 500u, 0x13000u);
 	feat_var = 0; feat_repl = 1;
-	fold_differential(KOF_SCRIPT_PHP, '.', 0, 500u, 0x14000u);
+	differential(&PHP, 500u, 0x14000u);
 	feat_var = 2;
-	fold_differential(KOF_SCRIPT_PHP, '.', 0, 2500u, 0x10000u);
-	fold_differential(KOF_SCRIPT_PSH, '+', 0, 1000u, 0x20000u);
-	feat_join = 0;                  /* Tcl has no join to write */
-	fold_differential(KOF_SCRIPT_TCL, 0, 1, 1000u, 0x30000u);
-	fold_statements();
+	differential(&PHP, 2500u, 0x10000u);
+	differential(&JS, 1000u, 0x20000u);
+	differential(&PY, 1000u, 0x30000u);
+	differential(&PSH, 1000u, 0x40000u);
+	NCK(nr_group("nest-million", group_nest_million, NULL) == 0);
 	if (!UNDER_ASAN)
-		NCK(nr_group("chain", group_chain_quadratic, NULL) == 0);       /* 30000 one-byte terms: linear arena */
+		NCK(nr_group("chain", group_chain_linear, NULL) == 0);
 	if (UNDER_ASAN) {
-		printf("  allocation-failure groups skipped: the sanitiser cannot run with the address "
-		       "space capped\n");
+		printf("  allocation-failure groups skipped: the sanitiser cannot run with the address space capped\n");
 	} else {
-		NCK(nr_group("arena", group_arena_limit, NULL) == 0);
-		NCK(nr_group("vars", group_vars_limit, NULL) == 0);
+		NCK(nr_group("vars", group_vars_capped, NULL) == 0);
 	}
 	printf("normalizer_script: %u checks, %u failed\n", nr_ok + nr_bad, nr_bad);
 	return nr_bad != 0;

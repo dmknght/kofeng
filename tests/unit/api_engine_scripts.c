@@ -23,6 +23,7 @@
 
 #include <time.h>
 
+#include "../../libkofeng/analyzers/parsers/scripts/script_route.h"
 #include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
 #include "../../libkofeng/analyzers/parsers/scripts/php_parse.h"
 #include "../../libkofeng/analyzers/parsers/scripts/svrpage_parse.h"
@@ -120,7 +121,11 @@ static void t_pages(void)
 			n = ctx.resolve_scan(&ctx, KOF_SCAN_SCRIPT_HEADER | KOF_SCAN_SCRIPT_BODY | KOF_SCAN_SCRIPT_MARKUP, out, 64);
 			for (k = 0; k < n; k++)
 				total += (uint32_t)out[k].len;
-			CK(total == pages[i].n, "%s: the three regions together are the whole object (%u of %zu)", pages[i].name, total, pages[i].n);
+			/* a language the lib lexes has no regions (the lexer reads the whole object); one that has none is cut */
+			if (kof_script_textual_lang(s->kind))
+				CK(total == 0, "%s: a lexed language declares no region (%u)", pages[i].name, total);
+			else
+				CK(total == pages[i].n, "%s: the three regions together are the whole object (%u of %zu)", pages[i].name, total, pages[i].n);
 		}
 	}
 	CK(s->from_shebang == 1, "python: named by its shebang");
@@ -169,7 +174,7 @@ static void t_walks(void)
 	CK(kof_svr_find_tag(kof_buf_make("<% x %>", 7), 7, &tl, &hl) == 0 && tl == 2 && hl == 0, "a bare tag is no header");
 	CK(kof_svr_find_tag(kof_buf_make("plain", 5), 5, &tl, &hl) == KOF_TXT_NONE, "no tag");
 	memset(s, 0, sizeof *s);
-	kof_svr_islands(b, 24, s);
+	kof_svr_islands(b, 24, KOF_SCRIPT_ANY, s);
 	CK(s->n_island == 1 && islands_ok(s, b.n), "asp island");
 
 	b = kof_buf_make(pg_cfm, sizeof pg_cfm - 1u);
@@ -299,7 +304,7 @@ static void t_scantext(void)
 		unsigned i;
 
 		memset(s, 0, sizeof *s);
-		kof_svr_islands(kof_buf_make(pg, sizeof pg - 1u), 0, s);
+		kof_svr_islands(kof_buf_make(pg, sizeof pg - 1u), 0, KOF_SCRIPT_ANY, s);
 		kof_isl_join_ws(kof_buf_make(pg, sizeof pg - 1u), 0, s);
 		CK(s->n_island == 5, "a page with both forms keeps all five islands: %u", s->n_island);
 		for (i = 0; i < s->n_island && i < 5; i++)
@@ -309,7 +314,7 @@ static void t_scantext(void)
 		{
 			static const char un[] = "<% a %>\n<script runat=server>never closed\n<script runat=server>nor this";
 
-			kof_svr_islands(kof_buf_make(un, sizeof un - 1u), 0, s);
+			kof_svr_islands(kof_buf_make(un, sizeof un - 1u), 0, KOF_SCRIPT_ANY, s);
 			CK(s->n_island == 1 && s->island[0].off == 0 && s->island[0].len == 7,
 			   "an unclosed server element is not an island and ends the search for later ones");
 		}
@@ -317,7 +322,7 @@ static void t_scantext(void)
 			static const char ng[] = "<script <script runat=server>x</script>";
 
 			memset(s, 0, sizeof *s);
-			kof_svr_islands(kof_buf_make(ng, sizeof ng - 1u), 0, s);
+			kof_svr_islands(kof_buf_make(ng, sizeof ng - 1u), 0, KOF_SCRIPT_ANY, s);
 			CK(s->n_island == 1 && s->island[0].off == 29 && s->island[0].len == 1,
 			   "an opener inside another's attribute list shares its '>' and its runat");
 		}
@@ -332,9 +337,6 @@ static void t_scantext(void)
 	CK(kof_script_is_block(kof_buf_make("a <?= $x ?> b", 13), 2, 11) == 0, "an insertion in a sentence is not");
 	CK(kof_script_is_block(kof_buf_make("  <?= $x ?>  \n", 14), 2, 12) == 1, "one that owns its line is");
 	CK(kof_script_is_block(kof_buf_make("x", 1), 0, 0) == 1 || kof_script_is_block(kof_buf_make("x", 1), 0, 0) == 0, "an empty island answers (callers give islands inside the object)");
-	CK(kof_script_block_bare(KOF_SCRIPT_ASP, (const uint8_t *)"<%\n%>", 5) == 1 && kof_script_block_bare(KOF_SCRIPT_ASP, (const uint8_t *)"<% x %>", 7) == 0 &&
-	   kof_script_block_bare(KOF_SCRIPT_SHELL, (const uint8_t *)"   ", 3) == 0 && kof_script_block_bare(KOF_SCRIPT_ASP, NULL, 0) == 0,
-	   "bare: only the delimiters of a kind that has them");
 	CK(strcmp(kof_script_region_name(KOF_SCAN_SCRIPT_BODY), "KOF_SCAN_SCRIPT_BODY") == 0 && kof_script_region_name(0xdead) == NULL, "region names: the enumerator spelling, NULL for a bit the format does not have");
 	CK(kof_script_anomaly_name(0) != NULL && kof_script_anomaly_name(1000) == NULL, "anomaly names: NULL past the last");
 	free(s);

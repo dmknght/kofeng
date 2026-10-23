@@ -157,7 +157,7 @@ static void arg_rules(void)
 
 	/* unknown algorithm / direction. */
 	{
-		static const uint32_t bad[] = { 0, 7, 8, 15, 22, 23, 24, 100, 0x10000u, 0xFFFFFFFFu };
+		static const uint32_t bad[] = { 0, 7, 8, 15, 23, 24, 25, 100, 0x10000u, 0xFFFFFFFFu };
 		struct kuncoat_step u;
 
 		for (a = 0; a < sizeof bad / sizeof bad[0]; a++) {
@@ -167,7 +167,7 @@ static void arg_rules(void)
 			    "algo %u", bad[a]);
 			CK(kuncoat_transform(&u, in, 0, out, 8, &p) == KUNCOAT_UNSUPPORTED);
 		}
-		for (a = 1; a <= 21; a++) {
+		for (a = 1; a <= 22; a++) {
 			static const uint32_t dirs[] = { 2, 3, 0x80000000u, 0xFFFFFFFFu };
 			unsigned d;
 
@@ -193,7 +193,7 @@ static void arg_rules(void)
 		}
 	}
 	/* n == 0 is complete and empty, for every algorithm that is usable. */
-	for (a = 1; a <= 21; a++) {
+	for (a = 1; a <= 22; a++) {
 		struct kuncoat_step u = mk(a, KUNCOAT_DECODE, 3, key, 4);
 
 		if (a > 6 && a < 16)
@@ -204,7 +204,7 @@ static void arg_rules(void)
 		CKF(kuncoat_transform(&u, in, 0, out, 8, &p) == KUNCOAT_OK && p == 0, "algo %u", a);
 	}
 	/* cap 0 with input: OVER_BUDGET and nothing written. */
-	for (a = 1; a <= 21; a++) {
+	for (a = 1; a <= 22; a++) {
 		struct kuncoat_step u = mk(a, KUNCOAT_DECODE, 3, key, 4);
 
 		if (a > 6 && a < 16)
@@ -634,6 +634,62 @@ static void kat_hex(void)
 	}
 }
 
+static void kat_escape(void)
+{
+	uint64_t p;
+	struct kuncoat_step e = mk(KUNCOAT_ALGO_ESCAPE, KUNCOAT_ENCODE, 0, NULL, 0);
+	struct kuncoat_step d = mk(KUNCOAT_ALGO_ESCAPE, KUNCOAT_DECODE, 0, NULL, 0);
+	static const uint8_t raw[] = { 0x00, 0x0f, 0xa5, 0xff, 0x10 };
+	uint8_t all[256], enc[1024], buf[16];
+	unsigned i, k;
+
+	/* The default separator is a backslash, the digits are upper case on the way out. */
+	CK(T(&e, raw, 5, 20, &p) == KUNCOAT_OK && p == 20 && same(res, "\\x00\\x0F\\xA5\\xFF\\x10", 20));
+	CK(T(&e, raw, 5, 19, &p) == KUNCOAT_OVER_BUDGET && p == 16);    /* whole escapes only */
+	CK(T(&d, "\\x00\\x0F\\xA5\\xFF\\x10", 20, 5, &p) == KUNCOAT_OK && p == 5 && same(res, raw, 5));
+	CK(T(&d, "\\x00\\x0F\\xA5\\xFF\\x10", 20, 4, &p) == KUNCOAT_OVER_BUDGET && p == 4);
+	/* The digits are read in either case, and mixed within one run - a sample does. */
+	CK(T(&d, "\\xa5\\xFf\\xA5", 12, 3, &p) == KUNCOAT_OK && p == 3 && same(res, "\xa5\xff\xa5", 3));
+	/* The slash is the caller's choice, and it is one separator for the whole run. */
+	d.k32 = '/';
+	e.k32 = '/';
+	CK(T(&d, "/x41/x62", 8, 2, &p) == KUNCOAT_OK && p == 2 && same(res, "Ab", 2));
+	CK(T(&e, "Ab", 2, 8, &p) == KUNCOAT_OK && p == 8 && same(res, "/x41/x62", 8));
+	CK(T(&d, "/x41\\x62", 8, 8, &p) == KUNCOAT_CORRUPT && p == 1);
+	/* Anything that is not a whole escape is CORRUPT, with the real prefix; a cut one TRUNCATED. */
+	CK(T(&d, "/x41/xZZ", 8, 8, &p) == KUNCOAT_CORRUPT && p == 1);
+	CK(T(&d, "/x41/y42", 8, 8, &p) == KUNCOAT_CORRUPT && p == 1);
+	CK(T(&d, "/X41", 4, 8, &p) == KUNCOAT_CORRUPT && p == 0);       /* the x is lower case, as in C */
+	CK(T(&d, "/x41 ", 5, 8, &p) == KUNCOAT_CORRUPT && p == 1);
+	CK(T(&d, "a/x41", 5, 8, &p) == KUNCOAT_CORRUPT && p == 0);
+	CK(T(&d, "/x4", 3, 8, &p) == KUNCOAT_TRUNCATED && p == 0);
+	CK(T(&d, "/x41/x4", 7, 8, &p) == KUNCOAT_TRUNCATED && p == 1);
+	CK(T(&d, "/x41/", 5, 8, &p) == KUNCOAT_TRUNCATED && p == 1);
+	CK(T(&d, "/x41", 0, 8, &p) == KUNCOAT_OK && p == 0);            /* no input is complete and empty */
+	/* A separator that cannot be one: a letter, a digit, `x`, or more than a byte. */
+	for (k = 0; k < 5; k++) {
+		static const uint32_t bad[5] = { 'a', 'F', '7', 'x', 0x12fu };
+
+		d.k32 = bad[k];
+		e.k32 = bad[k];
+		CKF(T(&d, "/x41", 4, 8, &p) == KUNCOAT_BAD_ARG && p == 0, "decode separator %#x", bad[k]);
+		CKF(T(&e, "A", 1, 8, &p) == KUNCOAT_BAD_ARG && p == 0, "encode separator %#x", bad[k]);
+	}
+	/* Every byte value round-trips, under both separators. */
+	for (i = 0; i < 256; i++)
+		all[i] = (uint8_t)i;
+	for (k = 0; k < 2; k++) {
+		e.k32 = d.k32 = k ? '/' : 0;
+		CK(T(&e, all, 256, 1024, &p) == KUNCOAT_OK && p == 1024);
+		memcpy(enc, res, 1024);
+		CK(T(&d, enc, 1024, 256, &p) == KUNCOAT_OK && p == 256 && same(res, all, 256));
+	}
+	/* In place: the write is a quarter of the read, so it never overtakes it. */
+	d.k32 = 0;
+	memcpy(buf, "\\x41\\x42\\x43", 12);
+	CK(kuncoat_transform(&d, buf, 12, buf, 12, &p) == KUNCOAT_OK && p == 3 && same(buf, "ABC", 3));
+}
+
 static void kat_url(void)
 {
 	uint64_t p;
@@ -866,6 +922,7 @@ int main(void)
 	kat_chain();
 	kat_b64();
 	kat_hex();
+	kat_escape();
 	kat_url();
 	kat_simple();
 	direct_entries();

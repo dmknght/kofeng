@@ -312,6 +312,15 @@ int kof_exe_unb64(uint8_t *p, uint64_t n);
 int kof_exe_unhex(uint8_t *p, uint64_t n);
 
 /*
+ * `\xNN` AND `/xNN` RUNS said as the bytes they spell, in place and length preserving like the
+ * others: four characters carry one byte, so the vacated three are zeroed. A run is eight or more
+ * escapes with ONE separator, every one whole - see executables_esc.c for why eight, and what ends
+ * a run. Not asked: that the bytes are printable, because the syntax is the evidence. Returns
+ * non-zero if a run was decoded.
+ */
+int kof_exe_unesc(uint8_t *p, uint64_t n);
+
+/*
  * EVERY LAYER, not just the first, and each round looking only where the last
  * one wrote.
  *

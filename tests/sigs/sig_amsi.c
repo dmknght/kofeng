@@ -82,12 +82,12 @@ KOF_DEFINE_SCAN
 	 */
 	if (ctx->subtype == (uint8_t)KOF_AMSI_COMMAND) {
 		if (kof_find_str(submitted, enc_hello))
-			KOF_SCAN_INFECT("EncHello");
+			{ kof_debug("AmsiTest#EncHello", 0); return; }
 		if (kof_find_str(submitted, b64_hello_w) ||
 		    kof_find_str(submitted, b64_hello))
-			KOF_SCAN_INFECT("B64Hello");
+			{ kof_debug("AmsiTest#B64Hello", 0); return; }
 	}
 
 	if (kof_find_str(collected, meta_probe))
-		KOF_SCAN_SUSPECT("MetaProbe");
+		{ kof_debug("AmsiTest#MetaProbe", 0); return; }
 }

@@ -22,6 +22,7 @@
 #include "caps_fix.h"
 #include "caps_e2e.h"
 #include "mem_fix.h"
+#include "asking_db.h"
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -36,7 +37,6 @@ static struct e2e run_with(kof_scanner *sc, const uint8_t *b, uint64_t n, uint64
 
 	memset(&r, 0, sizeof r);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 1ull << 40;
 	opt.max_resident_bytes = resident;
 	opt.max_object_bytes = 64u << 20;
@@ -263,7 +263,6 @@ static void adopted_image(void)
 		cd[n++] = pay[k] ^ (uint8_t)key;
 	len = cf_elf64(img, sizeof img, cd, n);
 	memset(&o, 0, sizeof o);
-	o.all_matches = 1;
 	o.heur_level = 2;
 	CK(sc != NULL);
 	(void)kscan_bytes(sc, img, len, "stub", &o, hash_cb, NULL);
@@ -404,7 +403,6 @@ static void trimming(void)
 
 	/* inside a callback: refused */
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	cb_sc = sc;
 	(void)kscan_bytes(sc, img, len, "cb", &opt, trim_cb, NULL);
 	CK(cb_busy_seen);
@@ -452,7 +450,7 @@ int main(int argc, char **argv)
 		printf("mem engine: no database\n");
 		return 1;
 	}
-	zeng = keng_open("build/release/databases");
+	zeng = keng_open(ad_db_asking());
 	if (!zeng) {
 		printf("mem engine: no shipped database\n");
 		return 1;

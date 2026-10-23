@@ -241,9 +241,11 @@ int     kof_src_lang_of(const struct kof_objsrc *, uint8_t *subtype,
  * So the producer says. It knew the parent's regions and it knew what it did to
  * each of them, which is exactly what is needed and is knowable nowhere else.
  *
- * Sixteen is past what either format yields: an ELF names five kinds of region
- * and a PE seven, and a view carries one span per kind because that is how it
- * was built - region by region, in file order.
+ * A TABLE IS AS LONG AS THE PRODUCER'S. This said "sixteen is past what either format
+ * yields - one span per kind", and it was wrong: a kind has one span per DISJOINT extent,
+ * and a PE with seventeen separate code sections lost the later ones from the view's regions
+ * (norm_defect_engine N3). Nothing in the engine is bounded by this any more; it is the size
+ * of the fixed scratch tables of the tools that cannot allocate (kofexaminer's extents).
  */
 #define KOF_SRC_MAX_REGIONS 16u
 
@@ -274,7 +276,9 @@ struct kof_src_region {
  * once from the file and once from its view.
  */
 
-void     kof_src_declare_regions(struct kof_objsrc *, uint8_t fmt,
+/* Returns 0 when the table could not be allocated (the object carries none and the caller says so),
+ * 1 otherwise. There is no bound on `n` but what the producer declares. */
+int      kof_src_declare_regions(struct kof_objsrc *, uint8_t fmt,
 				 const struct kof_src_region *, uint32_t n);
 uint8_t  kof_src_region_fmt_of(const struct kof_objsrc *);
 /*
@@ -283,11 +287,21 @@ uint8_t  kof_src_region_fmt_of(const struct kof_objsrc *);
  * definition. Declared before the child is pushed, read wherever the engine
  * would otherwise build a block.
  */
-void     kof_src_declare_syms(struct kof_objsrc *, const uint8_t *, uint32_t);
+/* The four declarations below answer 0 when their copy could not be allocated (the child then carries
+ * none of it) and 1 otherwise, nothing to declare included: a caller that gets 0 says so
+ * (oc_scan_limit), because a view that arrives without its parent's symbols is not complete. */
+int      kof_src_declare_syms(struct kof_objsrc *, const uint8_t *, uint32_t);
 const uint8_t *kof_src_syms_of(const struct kof_objsrc *, uint32_t *);
 struct kgenome_func;
-void     kof_src_declare_funcs(struct kof_objsrc *, const struct kgenome_func *, uint32_t);
+int      kof_src_declare_funcs(struct kof_objsrc *, const struct kgenome_func *, uint32_t);
 const struct kgenome_func *kof_src_funcs_of(const struct kof_objsrc *, uint32_t *);
+/*
+ * The units of the parent's cut that a view's decode rewrote, in the view's offsets: what the
+ * view's own cut leaves whole instead of finding again - see kgenome_mutation_req.fixed.
+ */
+struct kof_range;
+int      kof_src_declare_fixed(struct kof_objsrc *, const struct kof_range *, uint32_t);
+const struct kof_range *kof_src_fixed_of(const struct kof_objsrc *, uint32_t *);
 
 
 uint32_t kof_src_regions_of(const struct kof_objsrc *,
@@ -314,7 +328,7 @@ struct kof_src_desc {
 	const void *info;
 	uint32_t    info_len;
 };
-void kof_src_declare_desc(struct kof_objsrc *, const struct kof_src_desc *);
+int kof_src_declare_desc(struct kof_objsrc *, const struct kof_src_desc *);
 const struct kof_src_desc *kof_src_desc_of(const struct kof_objsrc *);
 
 /* The parent's analysis, shared with the rendering - see objprod.h. The source

@@ -243,13 +243,22 @@ void kgenome_diag_emu_pages_release(struct kgenome_diag_scan *s)
 	s->emu_charged = 0;
 }
 
+void kgenome_diag_emu_build_failed(struct kgenome_diag_scan *s, const char *refused)
+{
+	kgenome_diag_emu_pages_release(s);
+	if (refused)
+		kgenome_diag_note(s, KGENOME_BAD_INPUT);
+	else if (s->led.status == KGENOME_OK)
+		kgenome_diag_note(s, KGENOME_NOMEM);
+	/* else: the allowance refused it, and the ledger's own status (merged into the scan's) says so */
+}
+
 /* The relocatable image could not be built - a map the emulator refused, for
  * want of pages or memory. The run does not happen, and the scan says why. */
 static void rel_image_fail(struct kgenome_diag_scan *s, struct kgenome_emu *em)
 {
 	kgenome_emu_free(em);
-	kgenome_diag_emu_pages_release(s);
-	kgenome_diag_note(s, KGENOME_NOMEM);
+	kgenome_diag_emu_build_failed(s, NULL);
 }
 
 /*
@@ -289,8 +298,7 @@ struct kgenome_emu *kgenome_diag_emu_build_rel_image(struct kgenome_diag_scan *s
 	cfg.bits = obj->arch == KGENOME_ARCH_X86_64 ? 64u : 32u;
 	em = kgenome_emu_new(&cfg);
 	if (!em) {
-		kgenome_diag_emu_pages_release(s);
-		kgenome_diag_note(s, KGENOME_NOMEM);
+		kgenome_diag_emu_build_failed(s, NULL);
 		return 0;
 	}
 	if (s->bud.deadline_ms)

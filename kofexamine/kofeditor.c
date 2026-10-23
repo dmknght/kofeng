@@ -4,11 +4,13 @@
 #define _GNU_SOURCE
 
 /*
- * kofeditor.c - the signature generator, apart from the viewer that drives it.
+ * kofeditor.c - the draft model of the diagnose panel, apart from the viewer
+ * that drives it.
  *
  * See kofeditor.h for why this file exists and where the boundary was drawn.
- * What is here answers questions about a DRAFT and about the source a draft is
- * written to and read from. Nothing here knows a pane is on screen.
+ * What is here answers questions about a DRAFT: its strings, blocks, matchers
+ * and conditions. Nothing here knows a pane is on screen, and nothing writes a
+ * file.
  */
 
 #include <stdio.h>
@@ -17,17 +19,6 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <strings.h>
-#include <errno.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#ifdef _WIN32
-/* For GetUserNameA - see meta_user. */
-#include <windows.h>
-#else
-#include <pwd.h>
-#include <unistd.h>
-#endif
-#include <time.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/script.h>
@@ -42,115 +33,9 @@
 #include "../libkofeng/detectors/pattern/kofmatch.h"
 #include "../libkofeng/kofcore/kofplatform.h"
 
-/* The macro and the call the generated source is read back by: their lengths
- * are what the reader skips past to reach the name, so they are taken from the
- * strings and never typed. */
-#define MBLK_LEN   (sizeof "KOF_MUTATION_BLOCK" - 1u)
-#define MSCORE_LEN (sizeof "kof_mutation_score(" - 1u)
 
 
 
-
-/*
- * Who is at this machine.
- *
- * The account name, because it is the one identifier that is already there and
- * already means a person to the team that shares the machine. Not a real name:
- * this tool has no way to know one and inventing a field for somebody to fill in
- * would leave it empty in every file.
- */
-/*
- * WHO IS WRITING THIS SIGNATURE, for the researcher line in the generated file.
- *
- * THE ACCOUNT THE TOOL IS RUNNING AS, ASKED OF THE SYSTEM, AND NOTHING ELSE.
- *
- * It read $USER and $LOGNAME once, and on Windows $USERNAME. Every one of
- * those describes whoever SET it - the parent process - and a parent can set
- * it to anything, so a draft could be stamped with an author who never touched
- * it. That is not a security boundary here, it is provenance, and provenance
- * taken from a string somebody else chose is not provenance. Nothing in this
- * tree takes behaviour from the environment; see the note on trace_on in
- * libkoforbit/grille/wwalk.c for where that rule was written down.
- *
- * The two halves are split rather than papered over because the question has
- * a different answer per platform and both are asked of the system: getpwuid
- * is the POSIX account database, GetUserName is the name on the caller's own
- * token. Guarded at the include as well as at the use - <pwd.h> and
- * <unistd.h> do not exist on the Windows side at all, and a build that stops
- * at a missing header stops for the whole tool.
- *
- * NO FALLBACK, AND THE EMPTY ANSWER IS THE HONEST ONE. A container with no
- * passwd entry for the running uid has no name to give; saying so leaves the
- * researcher line for a person to fill in, where a guess would have signed it
- * for them.
- *
- * geteuid, not getuid, so the name is the account the tool is ACTING as. See
- * libkoforbit/path/kofpath.h for the same argument where it does decide a
- * security boundary.
- */
-static const char *meta_user(void)
-{
-	static char namebuf[256];
-
-#ifdef _WIN32
-	DWORD n = (DWORD)sizeof namebuf;
-
-	if (GetUserNameA(namebuf, &n) && namebuf[0])
-		return namebuf;
-#else
-	struct passwd pw, *res = NULL;
-	char buf[4096];
-
-	if (getpwuid_r(geteuid(), &pw, buf, sizeof buf, &res) == 0 &&
-	    res && pw.pw_name && pw.pw_name[0]) {
-		snprintf(namebuf, sizeof namebuf, "%s", pw.pw_name);
-		return namebuf;
-	}
-#endif
-	return "";
-}
-
-/* Today, as the one date format that sorts and cannot be read two ways. */
-static void meta_today(char *out, uint32_t cap)
-{
-	time_t now = time(NULL);
-	struct tm tmv;
-	int have;
-
-	/*
-	 * localtime_r is POSIX and absent on Windows. Its MSVC-shaped
-	 * replacement, localtime_s, is NOT reached for here: mingw follows
-	 * MSVC's argument order (struct tm * first) while C11 Annex K specifies
-	 * the opposite, so the same call spells two different things depending
-	 * on which declaration wins - a portability fix that compiles either
-	 * way and is wrong in one of them.
-	 *
-	 * Plain localtime is unambiguous, and the reason localtime_r exists -
-	 * a shared static buffer - does not apply: Windows returns thread-local
-	 * storage, and the result is copied out before anything else can run.
-	 *
-	 * Local rather than in kofplatform.h because this is the only caller in
-	 * the tree. It belongs there the moment there is a second.
-	 */
-#ifdef _WIN32
-	{
-		const struct tm *lt = localtime(&now);
-
-		have = lt != NULL;
-		if (have)
-			tmv = *lt;
-	}
-#else
-	have = localtime_r(&now, &tmv) != NULL;
-#endif
-	if (have)
-		strftime(out, cap, "%Y-%m-%d", &tmv);
-	else
-		snprintf(out, cap, "unknown");
-}
-static void meta_add(char tab[][128], uint32_t *n, uint32_t cap, const char *w);
-static void meta_add_who(char tab[][48], uint32_t *n, uint32_t cap,
-			 const char *w);
 
 /*
  * The architectures to offer, generated from the engine's list.
@@ -204,99 +89,8 @@ const uint32_t proc_sub_n = sizeof proc_sub / sizeof proc_sub[0];
 
 
 
-/*
- * THE SUBTYPE VOCABULARY OF A FORMAT: the prefix its identifiers carry, and the
- * words that may follow it.
- *
- * One function because two places need it and they disagreed: generate() wrote
- * "KOF_TARGET_SUBTYPE(KOF_SCRIPT_PHP)" and draft_from_source knew only ELF and
- * PE, so a saved rule reopened with its subtype silently missing. Asking one
- * function makes a format that can be written a format that can be read.
- *
- * A function rather than a table because the counts are const variables built
- * from the X-macro lists, which C will not put in a static initialiser.
- */
-/*
- * Is this identifier in the line, as a WHOLE identifier?
- *
- * strstr alone would match KOF_FMT_PE inside a longer name, and the format
- * table is generated from a list that anyone may add to - so the test is
- * written to survive the addition rather than to work on today's names.
- */
-static int src_word_in(const char *line, const char *word)
-{
-	size_t n = strlen(word);
-	const char *p = line;
-
-	while ((p = strstr(p, word)) != NULL) {
-		char before = p == line ? ' ' : p[-1];
-		char after = p[n];
-
-		if (!isalnum((unsigned char)before) && before != '_' &&
-		    !isalnum((unsigned char)after) && after != '_')
-			return 1;
-		p += n;
-	}
-	return 0;
-}
-
-static const char *const *sub_vocab(uint8_t fmt, const char **prefix,
-				    uint32_t *n)
-{
-	if (fmt == KOF_FMT_ELF) {
-		*prefix = "KOF_ELF_";
-		*n = elf_sub_n;
-		return elf_sub;
-	}
-	if (fmt == KOF_FMT_PE) {
-		*prefix = "KOF_PE_";
-		*n = pe_sub_n;
-		return pe_sub;
-	}
-	if (fmt == KOF_FMT_SCRIPT) {
-		*prefix = "KOF_SCRIPT_";
-		*n = script_sub_n;
-		return script_sub;
-	}
-	if (fmt == KOF_EVT_PROC) {
-		*prefix = "KOF_PROC_OS_";
-		*n = proc_sub_n;
-		return proc_sub;
-	}
-	*prefix = NULL;
-	*n = 0;
-	return NULL;
-}
-
 /* The subtypes, per format. The values overlap between formats, which is why
  * naming one format's values while targeting another is a build error. */
-/*
- * THE IDENTIFIERS ARE THE ENGINE'S NOW, and this is where a hand copy of them
- * used to be.
- *
- * It was the third copy in the tree, after kof_format_from_name and
- * kof_format_name, and the one nothing checked. KOF_FMT_COUNT went from 16 to
- * 18 when IMAGE and FONT were added and this list did not, so a draft that
- * targeted an image had those bits dropped out of the KOF_TARGET_FORMAT line
- * it wrote: a rule narrower than the panel said, with nothing failing and
- * nothing printed. The note that stood here called the durable fix one X-macro
- * list in kofsig.h that every copy expands - that is KOF_TARGET_LIST, the enum
- * is asserted against it, and kof_format_ident reads it.
- *
- * A format added to the engine therefore appears in this panel by itself.
- */
-const char *fmt_word(uint32_t fmt)
-{
-	const char *s = fmt < KOF_TARGET_COUNT
-		      ? kof_format_ident((uint8_t)fmt) : NULL;
-
-	/*
-	 * Never NULL to a caller: this feeds snprintf and a string compare, and
-	 * a value with no identifier is a target this build cannot name - which
-	 * reads correctly as the formatless one rather than as a crash.
-	 */
-	return s ? s : "KOF_FMT_UNKNOWN";
-}
 
 
 /*
@@ -323,158 +117,11 @@ const char *fmt_word(uint32_t fmt)
  * signature's declarations do not care about order at all.
  */
 /* The display words, from the engine's list. The menu offers exactly the types
- * a signature may declare, and the emitted KOF_MALTYPE_<WORD> is built by
- * upper-casing what is shown. */
+ * a diagnose may declare. */
 #define MALTYPE_X_WORD(name, word) word,
 const char *const maltype_word[] = { KOF_MALTYPE_LIST(MALTYPE_X_WORD) };
 #undef MALTYPE_X_WORD
-/*
- * Write text into a C comment, keeping only what a comment can hold.
- *
- * `*` and `/` are dropped rather than the pair being looked for - see
- * kof_comment_char in kofsig.h for why that is the only guard that holds.
- * Everything outside printable ASCII goes too: a newline would end the ` * `
- * line the block is built from, and a control character in a source file is
- * not something a researcher typed on purpose.
- *
- * What comes through here is not prose alone. The sample name comes from a
- * path on the command line, the researcher from $USER, and the "Created" date
- * is read back out of a file's own comment when a rule is reopened - so a
- * source crafted by hand carries a payload that would only become code the
- * next time the rule was generated.
- */
-static void comment_put(FILE *f, const char *s)
-{
-	for (; *s; s++)
-		if (kof_comment_char((unsigned char)*s))
-			fputc(*s, f);
-}
 
-
-/*
- * THE SOURCE TREE, READ ONCE.
- *
- * Every draft question that involves other rules - does this family already
- * exist, which file holds it, do these markers duplicate somebody else's -
- * needs the sources, and reading a tree of them per keystroke is not
- * affordable. Scanned on the first ask and kept; src_forget throws it away when
- * the tree on disk has changed under it.
- */
-struct src_ent *g_src;
-uint32_t g_n_src;
-int g_src_done;
-
-
-
-
-/*
- * One target declaration into a fingerprint.
- *
- * Case folded, because the two sides spell these from different places - the
- * panel holds "Rootkit" and the source says KOF_MALTYPE_ROOTKIT - and folded
- * by addition so the order the declarations appear in does not matter.
- */
-uint32_t tgt_mix(uint32_t h, const char *tok)
-{
-	uint32_t k = 2166136261u;
-
-	for (; *tok; tok++) {
-		uint8_t c = (uint8_t)*tok;
-
-		if (c >= 'a' && c <= 'z')
-			c = (uint8_t)(c - 'a' + 'A');
-		/* The engine's step - see kofcore.h. The (uint64_t) cast was
-		 * noise: the multiply is unsigned, so it cannot be UB. */
-		k = kof_hash_step(k, c);
-	}
-	return h + k;
-}
-
-
-
-/*
- * One spelling for one pattern, so a hash of it means something.
- *
- * The same marker is written three ways: "2E 2E 5C" in a source file, "2e2e5c"
- * by somebody who prefers lower case, and "2E2E5C" when the panel rebuilds it
- * from a pack that kept the compiled program and not the text. They are the
- * same pattern, so the duplicate check has to see one string, not three.
- */
-static void hex_canon(const char *in, char *out, size_t cap)
-{
-	size_t n = 0;
-
-	for (; *in && n + 1u < cap; in++) {
-		if (*in == ' ' || *in == '\t')
-			continue;
-		out[n++] = (char)toupper((unsigned char)*in);
-	}
-	out[n] = 0;
-}
-
-
-static uint32_t pat_of(const uint8_t *b, uint32_t n, int hex)
-{
-	uint32_t h = 2166136261u, i;
-
-	for (i = 0; i < n; i++) {
-		h = kof_hash_step(h, b[i]);
-	}
-	h ^= (uint32_t)hex;
-	return h ? h : 1u;
-}
-
-
-/*
- * One marker's bytes, as the inside of a C string literal.
- *
- * THREE THAT CANNOT BE WRITTEN RAW: a quote and a backslash because C would
- * otherwise read the literal differently, and "?" because two of them in a row
- * form a trigraph. Escaping every "?" rather than only the pairs keeps this a
- * property of the byte instead of a property of its neighbour - the pair rule is
- * the kind that is right until somebody edits the string next to it.
- *
- * AND THREE THAT ARE WHITESPACE, which used to be refused instead of written.
- *
- * A marker is bytes, and a marker that crosses a line has a newline in it. It
- * was not declarable at all: literal_safe took anything outside printable ASCII
- * as "cannot be a literal", so a selection that happened to include the line
- * ending was greyed out while the same text without it was not. The reader saw
- * one string that could sometimes be declared and sometimes not, with nothing
- * on screen either way.
- *
- * Written as \t \n \r rather than as a hex escape on purpose. They are
- * standard C, they mean the same bytes to a compiler and to ksigbuilder, and
- * they leave the literal READABLE - which is the whole reason a marker is a
- * literal and not a hex program. \x is not usable here even if it were wanted:
- * it is greedy, so "\x41BC" is one escape rather than a byte and three
- * letters.
- *
- * Anything else outside printable ASCII is still not a literal, and hex is the
- * honest form for it.
- */
-void decl_put_literal(FILE *f, const uint8_t *b, uint32_t n)
-{
-	uint32_t i;
-
-	for (i = 0; i < n; i++) {
-		if (b[i] == '\t') {
-			fputs("\\t", f);
-			continue;
-		}
-		if (b[i] == '\n') {
-			fputs("\\n", f);
-			continue;
-		}
-		if (b[i] == '\r') {
-			fputs("\\r", f);
-			continue;
-		}
-		if (b[i] == '"' || b[i] == '\\' || b[i] == '?')
-			fputc('\\', f);
-		fputc(b[i], f);
-	}
-}
 
 /*
  * The pattern a declaration stands for, compiled the way the database will.
@@ -592,16 +239,54 @@ static int cnd_next_id(const char **pp, unsigned long *id, int *neg)
 	return 0;
 }
 
-int cnd_uses(const struct cond *c, uint32_t g)
+/*
+ * THE NUMBER A CONDITION NAMES A MATCHER BY IS ITS PLACE ON ITS OWN TAB.
+ *
+ * Each tab numbers its matchers from 1, and a condition's expression is over
+ * those numbers and nothing else. `grp_loc` is the number of matcher `g` on its
+ * tab (0 for one that is not there). A matcher on another tab has no number a condition
+ * could write, so no expression can reach it.
+ */
+uint32_t grp_loc(const struct kof_editor *e, uint32_t g)
+{
+	uint32_t k, n = 0;
+
+	if (g >= e->dr.n_grp)
+		return 0;
+	for (k = 0; k <= g; k++)
+		n += grp_tab(e, k) == grp_tab(e, g);
+	return n;
+}
+
+
+int cnd_has_id(const struct cond *c, uint32_t id)
 {
 	const char *p = c->expr;
 	unsigned long n;
 	int neg;
 
 	while (cnd_next_id(&p, &n, &neg))
-		if (n == (unsigned long)g + 1ul)
+		if (n == (unsigned long)id)
 			return 1;
 	return 0;
+}
+
+unsigned long cnd_foreign(const struct kof_editor *e, const struct cond *c)
+{
+	const char *p = c->expr;
+	unsigned long n;
+	int neg;
+
+	while (cnd_next_id(&p, &n, &neg))
+		if (n < 1ul || n > (unsigned long)grp_tab_count(e, c->tab))
+			return n + 1ul;
+	return 0;
+}
+
+int cnd_uses(const struct kof_editor *e, const struct cond *c, uint32_t g)
+{
+	return g < e->dr.n_grp && grp_tab(e, g) == c->tab &&
+	       cnd_has_id(c, grp_loc(e, g));
 }
 
 /*
@@ -611,14 +296,16 @@ int cnd_uses(const struct cond *c, uint32_t g)
  * asks both: an id is drawn when the condition uses it, and drawn with a "!"
  * when the condition wants it missing.
  */
-int cnd_neg(const struct cond *c, uint32_t g)
+int cnd_neg(const struct kof_editor *e, const struct cond *c, uint32_t g)
 {
 	const char *p = c->expr;
 	unsigned long n;
 	int neg;
 
+	if (!cnd_uses(e, c, g))
+		return 0;
 	while (cnd_next_id(&p, &n, &neg))
-		if (n == (unsigned long)g + 1ul)
+		if (n == (unsigned long)grp_loc(e, g))
 			return neg;
 	return 0;
 }
@@ -705,451 +392,19 @@ void rng_name_of(const struct kof_parser *fmt, uint32_t mask,
 		snprintf(out, cap, "WHOLE-FILE");
 }
 
-void rng_ident(const struct kof_parser *fmt, uint32_t mask,
-		      char *out, size_t cap)
-{
-	/* Forty, like every other rng_name_of caller. At 24 the display name of
-	 * a mask over enough regions was cut before it became an identifier, so
-	 * two different masks could have produced one scan_range_ name - two
-	 * KOF_TARGET_RANGE declarations of the same identifier, which does not
-	 * compile, in a file the tool reported as written. */
-	char w[40];
-	size_t i;
-
-	/* Named the way bases/ names them - scan_range_data, not DATA. A bare
-	 * region word at file scope is a short lowercase-able identifier in a
-	 * translation unit that includes engine headers, which is how a draft
-	 * ends up colliding with something it never mentioned. */
-	/*
-	 * Every separator the display name can hold becomes an underscore.
-	 *
-	 * This turns a string meant for a person into a C identifier, so it has
-	 * to survive that string being reworded. It did not: the join moved
-	 * from "|" to "&" and this still mapped only "|", so a range over two
-	 * regions was declared as scan_range_code&data - a name no compiler
-	 * accepts, in a file the tool reported as written.
-	 */
-	rng_name_of(fmt, mask, w, sizeof w);
-	for (i = 0; w[i]; i++) {
-		if (!((w[i] >= 'A' && w[i] <= 'Z') ||
-		      (w[i] >= 'a' && w[i] <= 'z') ||
-		      (w[i] >= '0' && w[i] <= '9')))
-			w[i] = '_';
-		else if (w[i] >= 'A' && w[i] <= 'Z')
-			w[i] = (char)(w[i] - 'A' + 'a');
-	}
-	snprintf(out, cap, "scan_range_%s", w);
-}
 
 
 
-/* One identifier out of a comma list, trimmed. Returns where to carry on. */
-const char *src_ident(const char *p, char *out, size_t cap)
-{
-	size_t n = 0;
 
-	while (*p == ' ' || *p == '\t' || *p == ',')
-		p++;
-	while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
-	       (*p >= '0' && *p <= '9') || *p == '_') {
-		if (n + 1 < cap)
-			out[n++] = *p;
-		p++;
-	}
-	out[n] = 0;
-	return p;
-}
 
-/*
- * WHAT A DECLARATION HASHES TO - THE SPELLING, NOT THE BYTES.
- *
- * The source side of the duplicate check reads a .c file and hashes the text
- * between the quotes. So the draft side has to hash the text it WOULD write
- * between those quotes, or the two never agree. They never did for a hex
- * marker: the file says "2E 2E 5C" and the draft hashed the three decoded
- * bytes, so a rule was never reported as a duplicate of itself.
- *
- * And now it cannot even try, because a hex pattern with a wildcard has no
- * decoded bytes at all - which is what turned a wrong answer into a null
- * dereference.
- */
-uint32_t decl_pat(const struct decl *d)
-{
-	char t[DECL_HEXS_CAP];
-	size_t n = 0;
-	uint32_t k;
 
-	if (!d->hex)
-		return pat_of(d->bytes, d->nbytes, 0);
-	if (d->hexs[0]) {
-		hex_canon(d->hexs, t, sizeof t);
-		return pat_of((const uint8_t *)t, (uint32_t)strlen(t), 1);
-	}
-	/* Declared from a selection: generation writes it as plain pairs, so
-	 * that is the spelling this has to hash. */
-	for (k = 0; k < d->nbytes && n + 3u < sizeof t; k++)
-		n += (size_t)snprintf(t + n, sizeof t - n, "%02X",
-				      d->bytes[k]);
-	t[n] = 0;
-	return pat_of((const uint8_t *)t, (uint32_t)n, 1);
-}
 
-/*
- * DROP THE SOURCE INDEX, BECAUSE THE TREE UNDER IT HAS MOVED.
- *
- * The index is a cache of the bases tree, built once on first use and matched
- * against a fired module by the SOURCE LINE each of its detection names sits
- * on. That is a fine key while the sources hold still, and rebuilding is
- * exactly the moment they do not.
- *
- * The bug it exists for: generate a signature, press Rebuild database, and the
- * viewer showed every matcher as find_all. The new database carries the new
- * line numbers, the index still held the old ones, no source matched - so the
- * draft was rebuilt from the DATABASE, which keeps a module's strings and not
- * its logic, and a draft with no logic defaults to find_all. Closing and
- * reopening was fine because that scanned the tree again.
- *
- * Called wherever the tree changes: after a rebuild, and after a save writes a
- * source into it.
- */
-void src_forget(void)
-{
-	free(g_src);
-	g_src = NULL;
-	g_n_src = 0;
-	g_src_done = 0;
-}
 
-int src_read(const char *path, struct src_ent *out)
-{
-	FILE *f = fopen(path, "r");
-	char line[1024];
-	uint32_t lineno = 0;
 
-	if (!f)
-		return 0;
-	out->family[0] = 0;
-	out->n_line = 0;
-	out->pat = 0;
-	out->n_pat = 0;
-	out->blk = 0;
-	out->n_blk = 0;
-	out->tgt = 0;
-	while (fgets(line, sizeof line, f)) {
-		char *p, *q;
-		size_t n = 0;
 
-		lineno++;
-		if (!out->family[0] &&
-		    (p = strstr(line, "KOF_TARGET_NAME(")) != NULL &&
-		    (p = strchr(p, ',')) != NULL &&
-		    (q = strchr(p, '"')) != NULL) {
-			for (q++; *q && *q != '"' &&
-			     n + 1 < sizeof out->family; q++)
-				out->family[n++] = *q;
-			out->family[n] = 0;
-		}
-		if ((strstr(line, "KOF_SCAN_INFECT(") ||
-		     strstr(line, "KOF_SCAN_SUSPECT(")) &&
-		    out->n_line < SRC_MAX_LINES)
-			out->line[out->n_line++] = lineno;
-		/* What it targets, as the identifiers the file actually
-		 * spells - no table lookup needed on this side, and none that
-		 * could drift out of step with the emitter's. */
-		{
-			static const char *const decl[] = {
-				"KOF_TARGET_FORMAT(", "KOF_TARGET_EVENT(",
-				"KOF_TARGET_NAME(",
-				"KOF_TARGET_ARCH(", "KOF_TARGET_SUBTYPE("
-			};
-			size_t d;
 
-			for (d = 0; d < sizeof decl / sizeof decl[0]; d++)
-				if ((p = strstr(line, decl[d])) != NULL) {
-					char w[64];
 
-					src_ident(p + strlen(decl[d]), w,
-						  sizeof w);
-					if (w[0])
-						out->tgt = tgt_mix(out->tgt, w);
-				}
-			if ((p = strstr(line, "KOF_TARGET_SIZE_MIN(")) != NULL) {
-				char w[48];
 
-				snprintf(w, sizeof w, "SIZE_MIN=%llu",
-					 (unsigned long long)
-					 strtoull(p + 20, NULL, 0));
-				out->tgt = tgt_mix(out->tgt, w);
-			}
-		}
-		/* A block is named by the fold of its hashes - see generate -
-		 * so the name is all that has to be read to know which block
-		 * this is. */
-		/* Either spelling: a library block is still a block, and a
-		 * source index that counted only one of them would call two
-		 * different rules the same. */
-		if ((p = strstr(line, "KOF_MUTATION_BLOCK_LIB(")) != NULL ||
-		    (p = strstr(line, "KOF_MUTATION_BLOCK(")) != NULL) {
-			char w[48];
-
-			/* Past the name, and past "_LIB(" or just "(" - the lengths
-			 * are the strings' own, so renaming the macro moves them. */
-			src_ident(p + MBLK_LEN + (strncmp(p + MBLK_LEN, "_LIB(", 5) ? 1 : 5),
-				  w, sizeof w);
-			if (w[0]) {
-				out->blk += (uint32_t)strtoul(
-					strncmp(w, "blk_", 4) ? w : w + 4,
-					NULL, 16);
-				out->n_blk++;
-			}
-		}
-		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
-		    (p = strstr(line, "KOF_DEFINE_HEXSTR(")) != NULL) {
-			int hex = strstr(line, "KOF_DEFINE_HEXSTR(") != NULL;
-			char text[512];
-
-			if ((q = strchr(p, '"')) != NULL) {
-				size_t m = 0;
-
-				for (q++; *q && *q != '"' &&
-				     m + 1 < sizeof text; q++)
-					text[m++] = *q;
-				text[m] = 0;
-				if (hex) {
-					char c[sizeof text];
-
-					hex_canon(text, c, sizeof c);
-					m = strlen(c);
-					memcpy(text, c, m + 1u);
-				}
-				out->pat += pat_of((const uint8_t *)text,
-						   (uint32_t)m, hex);
-				out->n_pat++;
-			}
-		}
-	}
-	fclose(f);
-	return out->family[0] != 0;
-}
-
-void src_scan(const char *dir, int depth)
-{
-	DIR *d = opendir(dir);
-	struct dirent *e;
-
-	if (!d || depth > 4)
-		return;
-	while ((e = readdir(d)) != NULL) {
-		char path[512];
-		struct stat st;
-		size_t n;
-
-		if (e->d_name[0] == '.')
-			continue;
-		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir,
-				     e->d_name) >= sizeof path)
-			continue;
-		if (stat(path, &st) != 0)
-			continue;
-		if (S_ISDIR(st.st_mode)) {
-			src_scan(path, depth + 1);
-			continue;
-		}
-		n = strlen(e->d_name);
-		if (n < 3 || strcmp(e->d_name + n - 2, ".c") != 0)
-			continue;
-		if (g_n_src >= SRC_MAX)
-			break;
-		snprintf(g_src[g_n_src].path, sizeof g_src[0].path, "%s", path);
-		if (src_read(path, &g_src[g_n_src]))
-			g_n_src++;
-	}
-	closedir(d);
-}
-
-/*
- * THE FORMAT A RULE DECLARES, read before the rest of the file.
- *
- * WHY THIS IS A PASS OF ITS OWN. Region names are a FORMAT'S vocabulary -
- * "KGENOME_SCAN_ELF_CODE" means something to the ELF parser and nothing to any
- * other - so reading a range needs the format first. It used to be taken from
- * the OBJECT the viewer happened to have open, and the failure was silent and
- * total: open an ELF rule while looking at a php file, save it, and
- *
- *     KOF_TARGET_RANGE(scan_range_code, KGENOME_SCAN_ELF_CODE);
- *
- * came back as
- *
- *     KOF_TARGET_RANGE(scan_range_whole_file, KOF_SCAN_ALL);
- *
- * because the name resolved to an empty mask and an empty mask is written as
- * whole-file. The rule still compiled, still loaded and still found things -
- * it just searched everywhere, which is the one property its author had
- * chosen. 49 of the 52 rules in bases/signatures are region-scoped.
- *
- * A pre-pass rather than "read the format line before the range line", because
- * that is an ORDER the generator happens to write and a hand-written rule owes
- * nobody.
- */
-/*
- * THE TARGET DECLARATION, WHICHEVER OF ITS TWO NAMES A SOURCE SPELLS.
- *
- * KOF_TARGET_FORMAT and KOF_TARGET_EVENT are one declaration - kofsig.h says
- * so and ksigbuilder reads them into one slot - so a reader that knew only the
- * first would open a rule about a collected record with NO target, show an
- * empty Format row, and write the emptiness back out on save. One place to ask
- * rather than the three that each did their own strstr.
- */
-static char *src_target_line(char *line)
-{
-	char *p = strstr(line, "KOF_TARGET_FORMAT(");
-
-	return p ? p : strstr(line, "KOF_TARGET_EVENT(");
-}
-
-static const struct kof_parser *src_rule_fmt(FILE *f, uint32_t *mask_out)
-{
-	char line[1024];
-	uint32_t mask = 0, fi;
-
-	while (fgets(line, sizeof line, f)) {
-		const char *p = src_target_line(line);
-
-		if (!p)
-			continue;
-		for (fi = 0; fi < FMT_WORD_N; fi++)
-			if (src_word_in(p, fmt_word(fi)))
-				mask |= 1u << fi;
-	}
-	rewind(f);
-	*mask_out = mask;
-	for (fi = 0; fi < FMT_WORD_N; fi++)
-		if (mask & (1u << fi)) {
-			const struct kof_parser *pr =
-				kof_parser_of((uint8_t)fi);
-
-			if (pr)
-				return pr;
-		}
-	return NULL;
-}
-
-uint32_t src_mask_of(const struct kof_parser *fmt, const char *e)
-{
-	uint32_t m = 0, k;
-
-	if (strstr(e, "KOF_SCAN_ALL"))
-		return KOF_SCAN_ALL;
-	/* Before the format's own words and independently of them: these two
-	 * are in kofsig.h, so a rule can name them with no format header at
-	 * all, and reopening such a rule must give back the range it declared
-	 * rather than an empty mask. */
-	if (strstr(e, "KOF_SCAN_SYM_IMP"))
-		m |= KOF_SCAN_SYM_IMP;
-	if (strstr(e, "KOF_SCAN_SYM_EXP"))
-		m |= KOF_SCAN_SYM_EXP;
-	if (!fmt)
-		return m;
-	for (k = 0; k < fmt->n_regions; k++) {
-		const char *w = fmt->region_name(fmt->regions[k]);
-
-		if (w && strstr(e, w))
-			m |= fmt->regions[k];
-	}
-	return m;
-}
-
-/*
- * A RANGE EXPRESSION, resolved against every format the rule declares.
- *
- * A rule may target more than one - "KOF_FMT_ELF | KOF_FMT_PE" - and then its
- * range names both vocabularies. Each name belongs to one of them, so the masks
- * are OR-ed: a name no declared format knows contributes nothing, which is the
- * same answer it would get from the format that does not have it.
- *
- * `fallback` is the open object's parser and is used only when the rule
- * declares no format at all, which is a draft being written rather than a rule
- * being read.
- */
-static uint32_t src_mask_decl(uint32_t fmt_mask,
-			      const struct kof_parser *fallback, const char *e)
-{
-	uint32_t m = 0, fi;
-	int any = 0;
-
-	for (fi = 0; fi < FMT_WORD_N; fi++) {
-		const struct kof_parser *pr;
-
-		if (!(fmt_mask & (1u << fi)))
-			continue;
-		pr = kof_parser_of((uint8_t)fi);
-		if (!pr)
-			continue;
-		any = 1;
-		m |= src_mask_of(pr, e);
-	}
-	return any ? m : src_mask_of(fallback, e);
-}
-
-/*
- * THE FORMAT THIS DRAFT SPEAKS, for turning a region mask back into a name.
- *
- * The draft's own KOF_TARGET_FORMAT when it declares one, and the object under
- * the cursor when it does not - a draft being written from a sample has no
- * declared format until the sample gives it one.
- *
- * THE READER AND THE WRITER HAVE TO AGREE ABOUT THIS. src_rule_fmt fixed the
- * half that reads a rule; a writer still asking the OBJECT could resolve
- * KGENOME_SCAN_ELF_CODE on the way in and then fail to spell it on the way out,
- * which is the same loss one step later: the mask is right in the panel and
- * the file says KOF_SCAN_ALL.
- */
-static const struct kof_parser *draft_fmt(const struct kof_editor *e,
-					  const struct kof_parser *fallback)
-{
-	uint32_t fi;
-
-	for (fi = 0; fi < FMT_WORD_N; fi++)
-		if (e->dr.fmt_mask & (1u << fi)) {
-			const struct kof_parser *pr =
-				kof_parser_of((uint8_t)fi);
-
-			if (pr)
-				return pr;
-		}
-	return fallback;
-}
-
-/*
- * What one region BIT is called, asked of every format the draft declares.
- *
- * A rule may target two - "KOF_FMT_ELF | KOF_FMT_PE" - and then a mask holds
- * bits from both vocabularies. Asking one format spells its own bits and drops
- * the rest, and a dropped bit is a range written narrower than the draft says.
- */
-static const char *draft_region_word(const struct kof_editor *e,
-				     const struct kof_parser *fallback,
-				     uint32_t bit)
-{
-	uint32_t fi, q;
-
-	for (fi = 0; fi <= FMT_WORD_N; fi++) {
-		const struct kof_parser *pr;
-
-		if (fi == FMT_WORD_N)
-			pr = fallback;       /* last, and only then */
-		else if (!(e->dr.fmt_mask & (1u << fi)))
-			continue;
-		else
-			pr = kof_parser_of((uint8_t)fi);
-		if (!pr)
-			continue;
-		for (q = 0; q < pr->n_regions; q++)
-			if (pr->regions[q] == bit)
-				return pr->region_name(bit);
-	}
-	return NULL;
-}
 
 /*
  * A hex pattern's concrete leading bytes, for locating it in the object.
@@ -1201,47 +456,7 @@ int decl_from_hexs(struct decl *d)
 	return 1;
 }
 
-int src_quoted(const char *p, char *out, size_t cap)
-{
-	const char *q = strchr(p, '"');
-	size_t n = 0;
 
-	if (!q)
-		return 0;
-	/* The same six escapes decl_put_literal writes and ksigbuilder reads.
-	 * A marker holding a newline comes back as a newline here or a saved
-	 * draft reopens with the letter "n" where its line break was. */
-	for (q++; *q && *q != '"'; q++) {
-		char c = *q;
-
-		if (c == '\\' && q[1]) {
-			switch (q[1]) {
-			case '"': case '\\': case '?': c = q[1]; q++; break;
-			case 't': c = '\t'; q++; break;
-			case 'n': c = '\n'; q++; break;
-			case 'r': c = '\r'; q++; break;
-			/* Anything else is passed through as written: this is a
-			 * reader, and the build is where a bad escape is an
-			 * error. */
-			default: break;
-			}
-		}
-		if (n + 1 < cap)
-			out[n++] = c;
-	}
-	out[n] = 0;
-	return *q == '"';
-}
-
-uint32_t src_str_idx(struct sname *tab, uint32_t n, const char *id)
-{
-	uint32_t i;
-
-	for (i = 0; i < n; i++)
-		if (!strcmp(tab[i].id, id))
-			return tab[i].idx;
-	return 0xffffffffu;
-}
 
 /*
  * Take the selection into the draft.
@@ -1319,7 +534,7 @@ int decl_text_editable(const struct decl *d)
  */
 enum { CND_DROP = 0, CND_NEG, CND_SWAP };
 
-static void cnd_rewrite(struct cond *c, uint32_t g, uint32_t to, int verb)
+static void cnd_rewrite(struct cond *c, uint32_t id, uint32_t to, int verb)
 {
 	char out[sizeof c->expr];
 	size_t at = 0;
@@ -1331,13 +546,13 @@ static void cnd_rewrite(struct cond *c, uint32_t g, uint32_t to, int verb)
 	while (cnd_next_id(&p, &n, &neg)) {
 		int w;
 
-		if (n == (unsigned long)g + 1ul) {
+		if (n == (unsigned long)id) {
 			if (verb == CND_DROP)
 				continue;
 			if (verb == CND_NEG)
 				neg = !neg;
 			else
-				n = (unsigned long)to + 1ul;
+				n = (unsigned long)to;
 		}
 		if (at + 22u >= sizeof out)
 			break;
@@ -1353,10 +568,12 @@ static void cnd_rewrite(struct cond *c, uint32_t g, uint32_t to, int verb)
 	snprintf(c->expr, sizeof c->expr, "%s", out);
 }
 
-/* Take one matcher out of a condition's expression. */
-void cnd_drop_matcher(struct cond *c, uint32_t g)
+/* Take one matcher out of a condition's expression. A matcher that is not on
+ * the condition's tab has no number in it, so nothing happens. */
+void cnd_drop_matcher(const struct kof_editor *e, struct cond *c, uint32_t g)
 {
-	cnd_rewrite(c, g, 0, CND_DROP);
+	if (g < e->dr.n_grp && grp_tab(e, g) == c->tab)
+		cnd_rewrite(c, grp_loc(e, g), 0, CND_DROP);
 }
 
 /*
@@ -1366,9 +583,11 @@ void cnd_drop_matcher(struct cond *c, uint32_t g)
  * shows which way round it is and the menu names the other one. Two calls -
  * negate, then un-negate - leave the expression exactly as they found it.
  */
-void cnd_negate_matcher(struct cond *c, uint32_t g)
+void cnd_negate_matcher(const struct kof_editor *e, struct cond *c,
+			uint32_t g)
 {
-	cnd_rewrite(c, g, 0, CND_NEG);
+	if (g < e->dr.n_grp && grp_tab(e, g) == c->tab)
+		cnd_rewrite(c, grp_loc(e, g), 0, CND_NEG);
 }
 
 /*
@@ -1393,31 +612,23 @@ void cnd_swap_matcher(struct kof_editor *e, uint32_t ci, uint32_t g,
 	struct cond *c;
 	char canon[sizeof e->dr.cnd[0].expr];
 
-	if (ci >= e->dr.n_cnd || to >= e->dr.n_grp)
+	if (ci >= e->dr.n_cnd || g >= e->dr.n_grp || to >= e->dr.n_grp)
 		return;
 	c = &e->dr.cnd[ci];
-	cnd_rewrite(c, g, to, CND_SWAP);
+	/* Both ends are on the condition's own tab, or nothing is done: the
+	 * other tabs' matchers are not ones it can name. */
+	if (grp_tab(e, g) != c->tab || grp_tab(e, to) != c->tab)
+		return;
+	cnd_rewrite(c, grp_loc(e, g), grp_loc(e, to), CND_SWAP);
 	cnd_canon(e, ci, canon, sizeof canon);
 	snprintf(c->expr, sizeof c->expr, "%s", canon);
 }
 
 
 /*
- * Write the draft out as a signature source.
- *
- * One KOF_TARGET_RANGE per distinct region, one search call per range, and the
- * calls joined with && - which is the shape every hand-written signature in
- * bases/ already has. The range comes from where each marker was found, so the
- * one thing a hand-written signature usually gets wrong is the one thing this
- * cannot get wrong.
- *
- * Never into bases/. That directory is the content that ships, and a draft is
- * not content until somebody has looked at it.
- */
-/*
  * The draft, as one number.
  *
- * Compared against the number at the last save to answer "has this changed" -
+ * Compared against the number when the panel was last emptied to answer "has this changed" -
  * the same trick the frame repaint uses, and for the same reason: a flag set by
  * hand at every place that mutates the draft is a flag that gets missed at the
  * next place, and the one that gets missed is the one that loses somebody's
@@ -1427,15 +638,8 @@ void cnd_swap_matcher(struct kof_editor *e, uint32_t ci, uint32_t g,
  * The status line's two voices.
  *
  * Red is for something that went wrong and stopped what was asked for: a
- * required field absent, a file that could not be written. Yellow is for
- * something worth knowing that stopped nothing - a rule already in the tree
- * carrying these markers, a draft that came back only partly read, a string
- * that is not in this object.
- *
- * They shared one colour, and the case that showed it up is "same markers as
- * HCRootkit.c": it appears AFTER a Save As that worked, because the file just
- * written now has a sibling with the same patterns. Painted red it reads as
- * the save having failed.
+ * refused edit. Yellow is for something worth knowing that stopped nothing -
+ * a string that is not in this object.
  */
 void say_err(struct kof_editor *e, const char *fmt, ...)
 {
@@ -1465,9 +669,9 @@ void say_err(struct kof_editor *e, const char *fmt, ...)
 /*
  * The digest, worked out the first time the pane that prints it is built.
  *
- * Not on touch: it reads every byte of the object - see the note in
- * object_touch - and only the properties pane prints it, which the reader
- * opens. Cached in the object, so a pane that stays open pays once.
+ * Not on selection: it reads every byte of the object, and only the
+ * properties pane prints it, which the reader opens. Cached in the object, so a
+ * pane that stays open pays once.
  */
 void obj_sha256(struct object *o)
 {
@@ -1507,110 +711,14 @@ void say_note(struct kof_editor *e, const char *fmt, ...)
 	e->dr.warn_bad = 0;
 }
 
-/* Is this sample already in the rule's history. */
-/* Defined with draft_sample, which it shares its reasoning with. */
-static const struct object *draft_norm_parent(struct kof_editor *e);
 
-void meta_sample_line(struct kof_editor *e, char *out, size_t cap)
-{
-	const char *base = draft_sample(e);
-	const struct object *ob = &e->obj[e->cur];
-	const struct object *par = draft_norm_parent(e);
 
-	/*
-	 * A VIEW NAMES WHAT IT WAS MADE FROM, and carries that object's
-	 * digest rather than its own.
-	 *
-	 * The line said "0:norm" with no hash at all: the name of a thing
-	 * that exists only inside a scan, and nothing to identify the bytes
-	 * it came from. Whoever reads the rule later needs the sample and the
-	 * digest that says it is the same sample - see draft_norm_parent.
-	 */
-	if (par) {
-		const char *pn = kobj_leaf(par->name);
-
-		if (pn == par->name)
-			pn = kof_path_base(par->name);
-		if (par->sha256[0])
-			snprintf(out, cap, "normalized:%s  sha256:%s",
-				 pn, par->sha256);
-		else
-			snprintf(out, cap, "normalized:%s", pn);
-		return;
-	}
-	if (ob->sha256[0])
-		snprintf(out, cap, "%s  sha256:%s", base, ob->sha256);
-	else
-		snprintf(out, cap, "%s", base);
-}
-
-int meta_has_sample(struct kof_editor *e)
-{
-	char w[128];
-	uint32_t i;
-
-	/*
-	 * COMPARED WHOLE, hash included. A file of the same name holding
-	 * different bytes is a different sample, and a rule confirmed against
-	 * it has something new to record - which is exactly what this answer
-	 * decides.
-	 */
-	meta_sample_line(e, w, sizeof w);
-	for (i = 0; i < *e->n_sample; i++)
-		if (!strcmp(e->sample[i], w))
-			return 1;
-	return 0;
-}
-
-/*
- * Why the draft cannot be generated yet, or NULL when it can.
- *
- * Checked as a whole rather than at the button, because the answer is also the
- * thing to say: a greyed control with no reason beside it is a control people
- * click repeatedly. The order is the order the work is done in, so the message
- * names the next thing to do rather than the last thing missing.
- */
 /* The vocabulary a family or variant name is allowed to be spelled in. Empty is
  * not this function's business - a name that has not been typed yet is a
  * different message from one typed wrongly. */
-/*
- * A wrapper, deliberately: the rule is kof_name_ok's in kofsig.h, where
- * ksigbuilder reads it too. Two spellings of "what a name may hold" is how the
- * panel came to accept names the build then refused.
- */
-int name_chars_ok(const char *s)
-{
-	return kof_name_ok(s);
-}
 
-/* Same question AND same answer to it: a copy, whatever the two are spelled as. */
-int grp_same_call(struct kof_editor *e, uint32_t a, uint32_t b)
-{
-	return grp_same_set(e, a, b) &&
-	       grp_thresh_eff(e, a) == grp_thresh_eff(e, b);
-}
 
-/*
- * The lowest numbered matcher asking the same thing as this one - the one whose
- * number names the shared variable, so the name does not move when a later
- * matcher is removed.
- */
-uint32_t grp_lead(struct kof_editor *e, uint32_t g)
-{
-	uint32_t i;
 
-	for (i = 0; i < g; i++)
-		if (grp_same_set(e, i, g))
-			return i;
-	return g;
-}
-
-/* The strict question, for every caller that is describing the draft to a
- * reader rather than deciding whether one particular button works. */
-const char *draft_missing(struct kof_editor *e)
-{
-	return draft_missing_of(e, 0);
-}
 
 
 void decl_locate(struct kof_editor *e, struct decl *d)
@@ -1637,14 +745,8 @@ void decl_locate(struct kof_editor *e, struct decl *d)
 		return;
 
 	/*
-	 * THE SAME CALL THE MARKER LIST MAKES.
-	 *
-	 * This used to be its own walk - two of them, one for the file and one
-	 * for the symbol halves - with its own rule for which occurrence to
-	 * report. kof_touch_object had a different rule, so the two lists named
-	 * different offsets in different regions for one marker on one object.
-	 * The rule is kof_locate_str's now and this only presents what it
-	 * returns; see the note above it in kofinspect.h.
+	 * ONE CALL FOR WHERE A MARKER IS: the rule is kof_locate_str's and this
+	 * only presents what it returns; see the note above it in kofinspect.h.
 	 */
 	memset(&m, 0, sizeof m);
 	memset(&msym, 0, sizeof msym);
@@ -1753,34 +855,19 @@ void grp_add(struct kof_editor *e)
 }
 
 /*
- * What a condition is called on screen: "1)" at the top level, "1-2)" for the
- * second thing nested inside the first.
+ * What a condition is called on screen: "1." for the first one of its tab.
  *
- * Numbered by position among its siblings rather than by its index in the
- * array, because the array is creation order and the screen is reading order.
- * A child called "2)" because it happened to be added second read as a sibling
- * of "1)" no matter how far it was indented.
+ * Numbered by position among the conditions of its own tab, in creation order:
+ * the conditions are independent blocks, one file each, and the other tabs'
+ * are on another list.
  */
 void cnd_label(struct kof_editor *e, uint32_t i, char *out, size_t cap)
 {
-	uint32_t k, mine = 0, pos = 0;
+	uint32_t k, pos = 0;
 
-	if (e->dr.cnd[i].parent < 0) {
-		for (k = 0; k < i; k++)
-			pos += e->dr.cnd[k].parent < 0;
-		snprintf(out, cap, "%u.", pos + 1u);
-		return;
-	}
-	for (k = 0; k < e->dr.n_cnd; k++) {
-		if (e->dr.cnd[k].parent >= 0)
-			continue;
-		pos++;
-		if (k == (uint32_t)e->dr.cnd[i].parent)
-			break;
-	}
 	for (k = 0; k < i; k++)
-		mine += e->dr.cnd[k].parent == e->dr.cnd[i].parent;
-	snprintf(out, cap, "%u.%u.", pos, mine + 1u);
+		pos += e->dr.cnd[k].tab == e->dr.cnd[i].tab;
+	snprintf(out, cap, "%u.", pos + 1u);
 }
 
 /*
@@ -1800,7 +887,7 @@ void cnd_canon(struct kof_editor *e, uint32_t g, char *out, size_t cap)
 
 	out[0] = 0;
 	for (m = 0; m < e->dr.n_grp; m++) {
-		if (!cnd_uses(c, m))
+		if (!cnd_uses(e, c, m))
 			continue;
 		/*
 		 * `at` MUST STOP ADVANCING AT THE END OF THE BUFFER.
@@ -1822,7 +909,8 @@ void cnd_canon(struct kof_editor *e, uint32_t g, char *out, size_t cap)
 		 * would fall back to the text box the moment it was negated. */
 		at += (size_t)snprintf(out + at, cap - at, "%s%s%u",
 				       at ? (c->op ? "|" : "&") : "",
-				       cnd_neg(c, m) ? "!" : "", m + 1u);
+				       cnd_neg(e, c, m) ? "!" : "",
+				       grp_loc(e, m));
 	}
 }
 
@@ -1853,65 +941,9 @@ void cnd_set_op(struct kof_editor *e, uint32_t i, int op)
 	snprintf(e->dr.cnd[i].expr, sizeof e->dr.cnd[i].expr, "%s", canon);
 }
 
-/* Is another condition still to come at this one's level, under this parent.
- * The connector below it is drawn or not drawn on the answer. */
-int cnd_more_siblings(struct kof_editor *e, uint32_t i)
-{
-	uint32_t k;
 
-	for (k = i + 1u; k < e->dr.n_cnd; k++)
-		if (e->dr.cnd[k].parent == e->dr.cnd[i].parent)
-			return 1;
-	return 0;
-}
 
-/* The next condition at this one's level, or n_cnd. */
 
-static uint32_t cnd_sib_next(struct kof_editor *e, uint32_t i)
-{
-	uint32_t k;
-
-	for (k = i + 1u; k < e->dr.n_cnd; k++)
-		if (e->dr.cnd[k].parent == e->dr.cnd[i].parent)
-			return k;
-	return e->dr.n_cnd;
-}
-
-/*
- * THE LAST MEMBER OF THE "AND" RUN THAT STARTS AT `i` - see enum cnd_join.
- *
- * A run extends while each member says JN_AND and BOTH ends of the link are a
- * leaf with a test of its own. A gate has no value to conjoin - it is a brace
- * around branches - and a leaf with no expression tests nothing, so either one
- * ends the run rather than being written into it as "1 && ...".
- */
-uint32_t cnd_and_run(struct kof_editor *e, uint32_t i)
-{
-	uint32_t cur = i;
-
-	if (i >= e->dr.n_cnd)
-		return i;
-	for (;;) {
-		uint32_t nx;
-
-		if (e->dr.cnd[cur].join != JN_AND ||
-		    cnd_children(e, cur) || !e->dr.cnd[cur].expr[0])
-			return cur;
-		nx = cnd_sib_next(e, cur);
-		if (nx >= e->dr.n_cnd || cnd_children(e, nx) ||
-		    !e->dr.cnd[nx].expr[0])
-			return cur;
-		cur = nx;
-	}
-}
-
-/* How deep a condition sits. Two levels is the whole of it: a third would be a
- * tree to navigate, and the logic it would express is already sayable in one
- * expression box. */
-int cnd_depth(struct kof_editor *e, uint32_t i)
-{
-	return e->dr.cnd[i].parent >= 0 ? 1 : 0;
-}
 
 /*
  * Take a matcher out, and put every reference to it right.
@@ -1928,10 +960,13 @@ void grp_remove(struct kof_editor *e, uint32_t g)
 	 * row - see kof_editor.edit. */
 	if (e->edit)
 		*e->edit = 0;
-	uint32_t i, k;
+	uint32_t i, k, gl;
+	uint8_t gt;
 
 	if (g >= e->dr.n_grp)
 		return;
+	gl = grp_loc(e, g);
+	gt = grp_tab(e, g);
 	for (i = 0; i < e->dr.n_decl; i++) {
 		uint32_t lo = e->dr.decl[i].grp & ((1u << g) - 1u);
 		uint32_t hi = e->dr.decl[i].grp >> (g + 1u);
@@ -1940,6 +975,8 @@ void grp_remove(struct kof_editor *e, uint32_t g)
 		 * the same renumbering the matcher array itself gets. */
 		e->dr.decl[i].grp = lo | (hi << g);
 	}
+	/* The numbers move within the matcher's own tab, and only the
+	 * conditions of that tab name them. */
 	for (k = 0; k < e->dr.n_cnd; k++) {
 		struct cond *c = &e->dr.cnd[k];
 		char out[sizeof c->expr];
@@ -1948,13 +985,15 @@ void grp_remove(struct kof_editor *e, uint32_t g)
 		unsigned long n;
 		int neg, first = 1;
 
+		if (c->tab != gt)
+			continue;
 		out[0] = 0;
 		while (cnd_next_id(&p, &n, &neg)) {
 			int w;
 
-			if (n == (unsigned long)g + 1ul)
+			if (n == (unsigned long)gl)
 				continue;
-			if (n > (unsigned long)g + 1ul)
+			if (n > (unsigned long)gl)
 				n--;
 			/* The id moves down; whether it was negated does not.
 			 * See cnd_rewrite for why the room is checked. */
@@ -1978,7 +1017,7 @@ void grp_remove(struct kof_editor *e, uint32_t g)
 		e->dr.cur_grp = e->dr.n_grp - 1u;
 }
 
-void cnd_add(struct kof_editor *e, int nested)
+void cnd_add(struct kof_editor *e)
 {
 	struct cond *c;
 
@@ -1986,91 +1025,28 @@ void cnd_add(struct kof_editor *e, int nested)
 		return;
 	c = &e->dr.cnd[e->dr.n_cnd];
 	memset(c, 0, sizeof *c);
-	c->parent = nested && e->dr.n_cnd ? (int)e->dr.cur_cnd : -1;
+	c->tab = e->dr.tab;
 	e->dr.cur_cnd = e->dr.n_cnd++;
 	e->dr.warn[0] = 0;
 }
 
-/*
- * Drop a condition.
- *
- * Its children are lifted to the top rather than deleted with it: they are
- * separate conclusions that happened to share a gate, and taking the gate away
- * is a reason to re-read them, not a reason to lose them.
- */
+/* Drop a condition. */
 void cnd_remove(struct kof_editor *e, uint32_t i)
 {
 	/* A box open on a row that is about to move is a box on the wrong
 	 * row - see kof_editor.edit. */
 	if (e->edit)
 		*e->edit = 0;
-	uint32_t k;
 
 	if (i >= e->dr.n_cnd)
 		return;
-	for (k = 0; k < e->dr.n_cnd; k++)
-		if (e->dr.cnd[k].parent == (int)i)
-			e->dr.cnd[k].parent = -1;
 	memmove(&e->dr.cnd[i], &e->dr.cnd[i + 1u],
 		(e->dr.n_cnd - i - 1u) * sizeof e->dr.cnd[0]);
 	e->dr.n_cnd--;
-	for (k = 0; k < e->dr.n_cnd; k++)
-		if (e->dr.cnd[k].parent > (int)i)
-			e->dr.cnd[k].parent--;
 	if (e->dr.cur_cnd >= e->dr.n_cnd && e->dr.n_cnd)
 		e->dr.cur_cnd = e->dr.n_cnd - 1u;
 }
 
-uint32_t cnd_children(struct kof_editor *e, uint32_t i)
-{
-	uint32_t k, n = 0;
-
-	for (k = 0; k < e->dr.n_cnd; k++)
-		n += e->dr.cnd[k].parent == (int)i;
-	return n;
-}
-
-
-/*
- * TWO MATCHERS, ONE SCAN.
- *
- * "at least three of these five, otherwise at least two" is one question asked
- * once, not two questions. Written as two matchers it used to compile to two
- * kof_find_str_multi calls over the same markers in the same region - the same
- * work twice, and the second one only to compare its answer against a smaller
- * number.
- *
- * So matchers that ASK THE SAME THING - same kind of call, same range, same
- * markers - share one call in the generated body, and each keeps its own
- * threshold to compare against it:
- *
- *     uint32_t m1 = kof_find_str_multi(scan_range_code, s0, s1, s2, s3, s4);
- *
- *     if (m1 >= 3)
- *             KOF_SCAN_INFECT("Strong");
- *     else if (m1 >= 2)
- *             KOF_SCAN_SUSPECT("Weak");
- *
- * Only find_multi shares. all and any carry no threshold, so two of them that
- * asked the same thing would be the same matcher written twice - which is a
- * mistake the panel refuses rather than a shape to optimise.
- */
-/*
- * WHAT A MATCHER'S THRESHOLD REALLY IS.
- *
- * The three kinds are three spellings of one comparison against a count:
- * find_any is "at least one", find_all is "all of them", find_multi says the
- * number itself. Measured rather than argued - a rule written each way over the
- * same four markers agrees on every sample, including the one where none are
- * present.
- *
- * What differs is the WORK, not the answer, and that is the whole constraint on
- * folding them together: kofsig.h folds any to `a || b || c` and all to
- * `a && b && c`, so they stop at the first marker that settles the question,
- * while multi has to look for all of them to produce a count. Turning an any
- * into a count would therefore make a rule slower - unless the count is already
- * being computed for something else, which is exactly and only when this folds.
- */
 /*
  * The offset an AT matcher should start at: the one its marker is sitting on.
  *
@@ -2128,73 +1104,9 @@ uint32_t grp_thresh_eff(struct kof_editor *e, uint32_t g)
 	return grp_count(e, g);                 /* all: every one of them */
 }
 
-/* The same question - same range, same markers - whatever it is spelled as. */
-int grp_same_set(struct kof_editor *e, uint32_t a, uint32_t b)
-{
-	uint32_t i;
-
-	if (a == b)
-		return 1;
-	/*
-	 * AN AT MATCHER IS KEYED ON ITS OFFSET, NOT ON A RANGE.
-	 *
-	 * `mask` is meaningless to it - it names no range - so comparing masks
-	 * would make every AT matcher over one marker identical to every other,
-	 * whatever offsets they name. "the stub at the entry point" and "the
-	 * stub at 0x400" are two different questions and the duplicate check
-	 * has to see them that way. An AT and a search are never the same
-	 * question either, however the markers line up.
-	 */
-	if (grp_is_at(e->dr.grp[a].rule) != grp_is_at(e->dr.grp[b].rule))
-		return 0;
-	if (grp_is_at(e->dr.grp[a].rule)) {
-		if (e->dr.grp[a].at_off != e->dr.grp[b].at_off)
-			return 0;
-		/* And the base: "entry" and "0x0" print differently, mean
-		 * different things and must not fold into one call. */
-		if (e->dr.grp[a].at_anchor != e->dr.grp[b].at_anchor)
-			return 0;
-	} else if (grp_mask(e, a) != grp_mask(e, b)) {
-		return 0;
-	}
-	/* The same markers, and no others. Order is not part of the question:
-	 * a matcher is a set. */
-	for (i = 0; i < e->dr.n_decl; i++) {
-		int in_a = (e->dr.decl[i].grp >> a) & 1u;
-		int in_b = (e->dr.decl[i].grp >> b) & 1u;
-
-		if (in_a != in_b)
-			return 0;
-	}
-	return 1;
-}
 
 
 
-/* Does this matcher's call get a variable: multi, and asked more than once. */
-int grp_shared(struct kof_editor *e, uint32_t g)
-{
-	uint32_t i, n = 0, multi = 0;
-
-	/* An AT matcher has no count to share: kof_find_str_at answers whether,
-	 * and the fold that makes sharing worth anything is over find_multi. */
-	if (grp_is_at(e->dr.grp[g].rule))
-		return 0;
-	for (i = 0; i < e->dr.n_grp; i++) {
-		if (!grp_same_set(e, i, g))
-			continue;
-		n++;
-		multi += e->dr.grp[i].rule == 2;
-	}
-	/*
-	 * At least two asking it, and at least one of them a find_multi - that
-	 * second half is what keeps the fold honest. A group of any/all
-	 * matchers alone short circuits today; giving them a count would be
-	 * work they currently avoid. Once ANY of them needs the number, every
-	 * other one in the group gets to compare against it for free.
-	 */
-	return n > 1u && multi > 0u;
-}
 
 
 
@@ -2249,18 +1161,17 @@ uint32_t draft_hash(struct kof_editor *e)
 	}
 	for (i = 0; i < e->dr.n_grp; i++) {
 		MIX(e->dr.grp[i].rule); MIX(e->dr.grp[i].thresh); MIX(e->dr.grp[i].mask);
+		MIX(e->dr.grp[i].tag); MIX(e->dr.grp[i].tag >> 32);
 		for (j = 0; e->dr.grp[i].note[j]; j++)
 			MIX((uint8_t)e->dr.grp[i].note[j]);
 	}
 	for (i = 0; i < e->dr.n_cnd; i++) {
 		const struct cond *c = &e->dr.cnd[i];
 
-		MIX(c->level); MIX(c->var_kind); MIX(c->parent);
-		MIX(c->op); MIX(c->join);
+		MIX(c->tag); MIX(c->tag >> 32); MIX(c->tab);
+		MIX(c->op);
 		for (j = 0; c->expr[j]; j++)
 			MIX((uint8_t)c->expr[j]);
-		for (j = 0; c->variant[j]; j++)
-			MIX((uint8_t)c->variant[j]);
 	}
 	/*
 	 * AND THE BLOCKS THE RULE IS MADE OF.
@@ -2356,127 +1267,18 @@ uint32_t draft_hash(struct kof_editor *e)
 	return h;
 }
 
-/* The sample in front of the reader, as the metadata block names it. */
-/*
- * The sample this rule was tested against: THE FILE, not the object.
- *
- * It used to name the selected object, and inside a container that is the
- * child's name - which for an unpacked payload is its index, so a rule drafted
- * against something UPX had just produced recorded "Test sample: 0".
- *
- * The file is the right answer even when the draft was written against a child,
- * because the line exists so that somebody can reproduce this: what they need
- * is the thing to feed the engine, and the engine reaches the child by itself.
- * Which child it was is not lost either - it is what the rule's target format
- * and its ranges say.
- */
-const char *draft_sample(struct kof_editor *e)
-{
-	static char buf[256];
-	const char *n;
 
-	if (e->path && e->path[0])
-		return kof_path_base(e->path);
-	/*
-	 * FALLING BACK TO THE OBJECT'S NAME, CUT THE ENGINE'S WAY.
-	 *
-	 * This ran kof_path_base over the whole thing, which is a PATH cutter
-	 * pointed at an OBJECT name: "sample.bin//0:norm" has a '/' inside
-	 * its separator, so the last one leaves "0:norm" and the file - the
-	 * one thing this line exists to record - is gone. That is exactly the
-	 * mistake kobj_leaf's note describes, made from the other side.
-	 *
-	 * The top level segment IS the file; see kobj_toplevel_len.
-	 */
-	n = (&e->obj[e->cur])->name;
-	{
-		size_t k = kobj_toplevel_len(n);
-
-		if (k >= sizeof buf)
-			k = sizeof buf - 1u;
-		memcpy(buf, n, k);
-		buf[k] = 0;
-	}
-	return kof_path_base(buf);
-}
-
-/*
- * THE OBJECT A VIEW WAS MADE OUT OF, or NULL when this is not a view.
- *
- * A normalised view is not a sample. The engine built it out of one - see
- * norm_emit - and what somebody needs in order to reproduce a rule is the
- * thing they can feed the engine, not the thing the engine produced on the
- * way. So the line names the PARENT and says the rule was written against
- * its normalised form.
- *
- * FOUND BY NAME, and the name is the engine's: a view's is its parent's plus
- * the separator and the label kobj_label reads back. The parent is the
- * object whose whole name is that prefix, which is a comparison rather than a
- * guess - two objects cannot share a name at one depth.
- */
-static const struct object *draft_norm_parent(struct kof_editor *e)
-{
-	const struct object *ob = &e->obj[e->cur];
-	const char *leaf = kobj_leaf(ob->name);
-	const char *lab = kobj_label(leaf);
-	size_t cut;
-	uint32_t i;
-
-	if (!lab || strcmp(lab, KOF_OBJ_LABEL_NORM) != 0)
-		return NULL;
-	if (leaf <= ob->name + KOF_OBJ_SEP_LEN)
-		return NULL;                    /* no parent in the name */
-	cut = (size_t)(leaf - ob->name) - KOF_OBJ_SEP_LEN;
-	for (i = 0; i < *e->n_obj; i++) {
-		const struct object *o = &e->obj[i];
-
-		if (strlen(o->name) == cut && !strncmp(o->name, ob->name, cut))
-			return o;
-	}
-	return NULL;
-}
 
 
 /*
- * HAS THE READER CHANGED ANYTHING.
- *
- * Narrower than draft_dirty, and the two are not interchangeable. draft_dirty
- * also answers yes when the draft is fine but this sample is not yet recorded in
- * it - which is a reason to offer Save, and NOT a reason to say there is work to
- * lose. Opening a file loads the signature that matched it, so on any detected
- * sample draft_dirty is true before the reader has touched a key, and using it to
- * guard "move on" made Next file dead on exactly the files somebody is stepping
- * through.
+ * HAS THE READER CHANGED ANYTHING since the panel was last emptied: the draft's
+ * hash against the one taken then.
  */
 int draft_edited(struct kof_editor *e)
 {
 	return draft_hash(e) != e->dr.saved_hash;
 }
 
-int draft_dirty(struct kof_editor *e)
-{
-	/*
-	 * A RULE TESTED AGAINST A NEW SAMPLE HAS CHANGED.
-	 *
-	 * Not its logic - not one byte of what it matches - but the file on
-	 * disk does not yet record that this rule was checked against this
-	 * sample, and that is the fact the metadata block exists to keep. Left
-	 * out, Save stayed greyed on exactly the case worth saving: open a rule,
-	 * confirm it fires on a second sample, and there was no way to write
-	 * that down.
-	 */
-	/*
-	 * An EMPTY draft is not dirty, whatever the metadata says.
-	 *
-	 * The test below asks whether this sample has been recorded, and on a
-	 * draft with nothing in it the answer is no and always will be - there
-	 * is nothing to record it against. Read as dirty it made a viewer that
-	 * had written nothing refuse to move on, which is how this was found.
-	 */
-	if (e->dr.n_decl && !meta_has_sample(e))
-		return 1;
-	return draft_hash(e) != e->dr.saved_hash;
-}
 
 
 
@@ -2486,603 +1288,7 @@ int draft_dirty(struct kof_editor *e)
 
 
 
-/*
- * The file a fired module was written in - ASKED, NOT DERIVED.
- *
- * The database carries it now (kof_db_source), because the build knew it and
- * used to discard it. What stood here re-derived it: scan the bases tree once,
- * read every source, and match a module to a file on the LINE NUMBERS its
- * detection names sit on.
- *
- * That key is correct exactly while the sources hold still, and it was cached
- * for the life of the process. So pressing Rebuild database - the one action
- * whose whole purpose is that the sources changed - left an index describing
- * the tree as it had been: nothing matched, the draft fell back to the
- * database, and because a database keeps a module's strings and not its logic
- * every rule redrew as a single find_all.
- *
- * A duplicate of something the engine can answer is not just more code. It is a
- * second thing to keep true, and it goes false quietly.
- */
-/*
- * Build the index of the bases tree, once, for the ONE question that still
- * needs it: does some existing source already declare this exact set of
- * markers. That is a content question over the whole tree, and no single scan
- * result answers it - unlike "which file was this module written in", which the
- * database now carries and which used to be answered from here by matching line
- * numbers. See src_of.
- */
-void src_index(struct kof_editor *e)
-{
-	if (g_src_done)
-		return;
-	g_src_done = 1;
-	g_src = calloc(SRC_MAX, sizeof *g_src);
-	if (g_src)
-		/* Nothing to scan when no tree was named, and src_scan would
-		 * walk the working directory if handed an empty path. */
-		if (e->basedir && e->basedir[0])
-			src_scan(e->basedir, 0);
-}
 
-const char *src_of(struct kof_editor *e, const struct kof_touch *t)
-{
-	static char path[KOF_DUMP_PATH_ROOM];
-	const char *rel;
-
-	if (!e->eng || !t->mod)
-		return NULL;
-	rel = kof_db_source(e->eng, t->mod);
-	if (!rel || !rel[0])
-		return NULL;
-	/*
-	 * The database records the path INSIDE the tree; where the tree is, is
-	 * this viewer's own --bases. An absolute path in the database would be a
-	 * fact about the machine that built it.
-	 */
-	if ((size_t)snprintf(path, sizeof path, "%s/%s",
-			     e->basedir[0] ? e->basedir : ".", rel) >= sizeof path)
-		return NULL;
-	return path;
-}
-
-/*
- * A signature in the tree that searches for the same thing as this draft.
- *
- * Order independent, and independent of the names and the comments, because a
- * duplicate rarely looks like one: the usual way to make one is to write the
- * same markers again from the same sample under a slightly different family.
- * Its own file does not count as a duplicate of itself.
- *
- * Returns the path, or NULL. Also reports a near miss - the same patterns bar
- * one - because that is a variant that should have been a branch of the
- * existing rule rather than a second rule.
- */
-/*
- * The same fingerprint for the draft, spelled from the same words the file
- * would be written with - so a rule saved and then read back matches itself.
- */
-uint32_t draft_tgt(struct kof_editor *e)
-{
-	struct object *ob = &e->obj[e->dr.n_decl && e->dr.decl[0].obj < (*e->n_obj)
-				    ? e->dr.decl[0].obj : 0];
-	uint8_t fm = ob->ctx.format;
-	uint8_t sub_fm = fm;
-	uint32_t only = e->dr.fmt_mask;
-	uint32_t h = 0;
-	char w[64];
-
-	/* The one format the draft declares, when it declares exactly one -
-	 * the same resolution the subtype is emitted against. */
-	if (only && (only & (only - 1u)) == 0) {
-		uint8_t b = 0;
-
-		while (!(only & 1u)) {
-			only >>= 1;
-			b++;
-		}
-		sub_fm = b;
-	}
-
-	h = tgt_mix(h, (ob->fmt && fm < FMT_WORD_N) ? fmt_word(fm)
-						    : "KOF_FMT_ANY");
-	snprintf(w, sizeof w, "KOF_MALTYPE_%s",
-		 e->dr.maltype < MALTYPE_N ? maltype_word[e->dr.maltype] : "VIRUS");
-	h = tgt_mix(h, w);
-	if (e->dr.opt_on[OPT_ARCH]) {
-		snprintf(w, sizeof w, "KOF_ARCH_%s",
-			 arch_word[e->dr.opt_val[OPT_ARCH] < ARCH_N
-				   ? e->dr.opt_val[OPT_ARCH] : 0].word);
-		h = tgt_mix(h, w);
-	}
-	if (e->dr.opt_on[OPT_SUBTYPE]) {
-		/*
-		 * SPELLED THE WAY THE FILE SPELLS IT, or this fingerprint does
-		 * not match the file it just wrote.
-		 *
-		 * The two subtype tables written out here were a third hand
-		 * copy of the emitter's, and they were the executable ones
-		 * only, so a script rule hashed NO subtype while its own source
-		 * line said KOF_SCRIPT_PHP. The source side reads whatever
-		 * identifier the line holds, so the draft and the file it saved
-		 * disagreed, and a rule stopped being a duplicate of itself the
-		 * moment it named a language.
-		 *
-		 * Through sub_vocab, which is the table generate() writes from,
-		 * and against the format generate() writes it against - see the
-		 * subtype block there for why that is the DECLARED format
-		 * rather than the object's.
-		 */
-		const char *pre;
-		uint32_t n;
-		const char *const *tab = sub_vocab(sub_fm, &pre, &n);
-
-		if (tab) {
-			snprintf(w, sizeof w, "%s%s", pre,
-				 tab[e->dr.opt_val[OPT_SUBTYPE] < n
-				     ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
-			h = tgt_mix(h, w);
-		}
-	}
-	if (e->dr.opt_on[OPT_SIZE_MIN]) {
-		snprintf(w, sizeof w, "SIZE_MIN=%llu",
-			 (unsigned long long)e->dr.opt_val[OPT_SIZE_MIN]);
-		h = tgt_mix(h, w);
-	}
-	return h;
-}
-
-const char *draft_dup(struct kof_editor *e, int *near_miss)
-{
-	uint32_t pat = 0, n = 0, i, tgt;
-	uint32_t blk = 0, n_blk = 0;
-
-	if (near_miss)
-		*near_miss = 0;
-	/* A rule made of blocks alone is still a rule, and two of them are
-	 * still a duplicate - see struct src_ent. */
-	if (!e->dr.n_decl && !draft_uses_blocks(e))
-		return NULL;
-	src_index(e);
-	if (!g_src)
-		return NULL;
-	tgt = draft_tgt(e);
-	for (i = 0; i < e->dr.n_decl; i++) {
-		pat += decl_pat(&e->dr.decl[i]);
-		n++;
-	}
-	for (i = 0; i < e->dr.n_blk; i++) {
-		if (!e->dr.blk[i].picked)
-			continue;
-		blk += e->dr.blk[i].id;
-		n_blk++;
-	}
-	for (i = 0; i < g_n_src; i++) {
-		if (e->dr.gen_path[0] && !strcmp(g_src[i].path, e->dr.gen_path))
-			continue;
-		if (!g_src[i].n_pat && !g_src[i].n_blk)
-			continue;
-		/* Same bytes AND the same thing to run them against. Same
-		 * bytes aimed at another format, another subtype or another
-		 * malware type is a sibling rule, not a copy of this one. */
-		if (g_src[i].tgt != tgt)
-			continue;
-		if (g_src[i].pat == pat && g_src[i].n_pat == n &&
-		    g_src[i].blk == blk && g_src[i].n_blk == n_blk)
-			return g_src[i].path;
-	}
-	/*
-	 * Nothing identical. A file with all but one of these patterns is worth
-	 * naming too, and is found by dropping each of ours in turn - cheap at
-	 * these sizes, and the answer a researcher wants before adding a rule
-	 * that mostly repeats one.
-	 */
-	for (i = 0; i < g_n_src && near_miss; i++) {
-		uint32_t k;
-
-		if (e->dr.gen_path[0] && !strcmp(g_src[i].path, e->dr.gen_path))
-			continue;
-		/*
-		 * THE SAME TARGET TEST THE EXACT MATCH ABOVE MAKES, which this
-		 * loop did not make at all.
-		 *
-		 * So a php draft was compared against every rule in the tree
-		 * and named whichever one happened to share all but one
-		 * pattern - an msf shellcode rule aimed at a binary, say. The
-		 * reading offered is "you are about to write something that
-		 * mostly repeats this", and that is only true of a rule run
-		 * against the same kind of object: the same bytes aimed at
-		 * another format are a sibling rule, which is exactly what the
-		 * note above the exact-match test says.
-		 *
-		 * It surfaced when the panel began seeding the subtype from the
-		 * object, because that made `tgt` narrower: the exact loop
-		 * started declining rules this one still accepted.
-		 */
-		if (g_src[i].tgt != tgt)
-			continue;
-		/*
-		 * n_pat == n + 1 passes here and matches nothing below - the
-		 * inner test only covers a source with one pattern FEWER than
-		 * the draft. "They have one we do not" is a question worth
-		 * asking and is not asked; left as it stands rather than
-		 * guessed at, because answering it means deciding which of
-		 * THEIR patterns to drop and that is a different search.
-		 */
-		if (g_src[i].n_pat + 1u != n && g_src[i].n_pat != n + 1u)
-			continue;
-		for (k = 0; k < e->dr.n_decl; k++) {
-			uint32_t less = pat - decl_pat(&e->dr.decl[k]);
-
-			if (g_src[i].pat == less &&
-			    g_src[i].n_pat + 1u == n) {
-				*near_miss = 1;
-				return g_src[i].path;
-			}
-		}
-	}
-	return NULL;
-}
-
-
-/*
- * HAS THE AUTHOR STARTED ONE?
- *
- * Not "is it finished" and not "has it changed since it was saved" - just
- * whether anything in the panel was put there by a person. The carve fills the
- * block table on arrival at every object, so a table with rows in it is not a
- * draft; a ticked row is.
- *
- * The status line asks, because what stops a draft being written is not a
- * complaint worth making about a draft nobody has begun: a file opened and not
- * touched showed "Name the family" in the colour of a fault.
- */
-int draft_started(struct kof_editor *e)
-{
-	if (!e)
-		return 0;
-	if (e->dr.n_decl || e->dr.n_grp || e->dr.family[0] || e->dr.note[0])
-		return 1;
-	return draft_uses_blocks(e);
-}
-
-/*
- * What stops this draft being written, or NULL. `as_new` asks about Save As,
- * which is allowed in one case Save is not - see the note on (*e->foreign) below.
- */
-const char *draft_missing_of(struct kof_editor *e, int as_new)
-{
-	/*
-	 * A VERDICT THAT READS DIAGNOSES CAN BE OPENED AND SHOWN, NOT YET CHANGED:
-	 * what Save would write is built from strings, blocks and matchers, none of
-	 * which this verdict has, and the generic refusal below would send the
-	 * author looking for a string to declare.
-	 */
-	if (e->dr.vd)
-		return "This verdict reads diagnoses; its condition cannot be "
-		       "edited here yet.";
-	uint32_t i;
-
-	/*
-	 * LOGIC THIS PANEL DOES NOT CARRY STOPS SAVE, AND ONLY SAVE.
-	 *
-	 * First, before anything about the draft's completeness, because it is
-	 * not a complaint about the draft: the draft is fine and is a truthful
-	 * view of the modelled part. It is a statement about the FILE - it
-	 * holds more than this can write back, so writing it back would delete
-	 * the rest.
-	 *
-	 * SAVE AS is a different act and used to be refused with it, which was
-	 * wrong. Overwriting destroys the unmodelled logic; writing a NEW file
-	 * destroys nothing, and deriving a rule from the part that is modelled
-	 * is a thing a researcher does on purpose. The original stays exactly
-	 * as it is, one directory entry away, to compare against.
-	 *
-	 * So this is asked with `as_new`, and the caller says which act it is.
-	 */
-	if ((*e->foreign) && !as_new)
-		return "Custom logic - Save As to derive a new rule from it";
-	/*
-	 * A RULE WHOSE BLOCKS THIS OBJECT DOES NOT PRODUCE IS NOT EDITED HERE,
-	 * AND THAT IS ABOUT THE RULE AND NOT ABOUT THE DRAFT.
-	 *
-	 * Opening a mutation rule loads its blocks as CARRIED rows - hashes from
-	 * the file, offsets belonging to whatever sample it was cut from. The
-	 * panel then scores them against the object in front of it, and a
-	 * carried block that scores ZERO is one this object does not contain:
-	 * the rule was cut from another build, or from another carve of this
-	 * one. Either way the rows on screen describe bytes that are not here,
-	 * so every offset a reader clicks, every region a block claims and
-	 * every cut the panel would make next is about a file that is not open.
-	 * Writing that back produces a rule assembled from two objects.
-	 *
-	 * EVERY BLOCK, not some. A variant scores its blocks low and a rule is
-	 * meant to be checked against variants - that is the whole use of
-	 * opening one - so a rule with any block still reaching this object is
-	 * a rule about it. Nothing reaching it at all is the case this refuses.
-	 *
-	 * The SCORE is the engine's own - see mtn_rescore, which runs the
-	 * matcher the generated module will run. Nothing here re-decides what
-	 * matching means.
-	 */
-	{
-		uint32_t carried = 0, scored = 0;
-
-		for (i = 0; i < e->dr.n_blk; i++) {
-			if (!e->dr.blk[i].kept)
-				continue;
-			carried++;
-			if (e->dr.blk[i].score)
-				scored++;
-		}
-		if (carried && carried == e->dr.n_blk && !scored)
-			return "These blocks are not in this object - open the "
-			       "file they were cut from";
-	}
-	if (!e->dr.family[0])
-		return "Name the family";
-	/*
-	 * A NAME, AND ONLY THE CHARACTERS A NAME HAS.
-	 *
-	 * The family and every custom variant become part of a detection string
-	 * - "ELF-x64/Botnet:Mirai-0i0bq" - and the variant is also written into
-	 * the generated C as a quoted literal. Written straight, a quote in it
-	 * ends that literal and everything after it is code the build compiles:
-	 *
-	 *     KOF_SCAN_INFECT("x", 0); system("id"); //");
-	 *
-	 * Refused here rather than escaped, because escaping would preserve a
-	 * name nobody can have meant. ksigbuilder refuses the same set for the
-	 * same reason, so a file written by hand is stopped too - this is the
-	 * early, legible half of that check, not the whole of it.
-	 */
-	if (!name_chars_ok(e->dr.family))
-		return "Family: letters, digits, - and _ only";
-	/*
-	 * A CUSTOM VARIANT IS A PROMISE OF A NAME, so an empty one is refused
-	 * rather than quietly ignored.
-	 *
-	 * The check used to skip an empty box, and the emit below skips it too -
-	 * so picking Custom and typing nothing produced exactly what Auto
-	 * produces, with nothing on screen saying the choice had been dropped.
-	 * kof_name_ok refuses an empty name for the family already; the same
-	 * rule, applied here, says so.
-	 */
-	for (i = 0; i < e->dr.n_cnd; i++)
-		if (e->dr.cnd[i].var_kind == 2 &&
-		    !name_chars_ok(e->dr.cnd[i].variant))
-			return e->dr.cnd[i].variant[0]
-			       ? "Variant: letters, digits, - and _ only"
-			       : "Custom variant needs a name";
-	if (!e->dr.fmt_mask)
-		return "Name at least one target format";
-	/*
-	 * A RULE MADE OF BLOCKS DECLARES NO STRINGS, and is not unfinished for
-	 * it.
-	 *
-	 * The two are the same kind of thing - something the rule is written
-	 * from - so the demand is that there be one of EITHER, not that there
-	 * be a string. A draft with a block matcher and no markers is a
-	 * similarity rule, which is a whole rule.
-	 */
-	if (!e->dr.n_decl && !draft_uses_blocks(e))
-		return "Declare a string, tick a block, or add a matcher";
-	if (!e->dr.n_grp)
-		return "Add a matcher";
-	/*
-	 * A SIMILARITY MATCHER THAT NAMES NO MEASURE.
-	 *
-	 * It is created empty on purpose - which measures it is about is the
-	 * question its own row asks - so the half-finished state is reachable
-	 * and has to be named. Left alone it would emit a comparison against
-	 * nothing; refused here, the panel says which matcher is waiting.
-	 */
-	{
-		static char why_sim[64];
-		uint32_t g;
-
-		for (g = 0; g < e->dr.n_grp; g++)
-			if (e->dr.grp[g].kind == GRP_KIND_SIM &&
-			    !e->dr.grp[g].n_sim) {
-				snprintf(why_sim, sizeof why_sim,
-					 "matcher %u names no measure", g + 1u);
-				return why_sim;
-			}
-	}
-	/*
-	 * A DECLARED BLOCK NOTHING NAMES, which is the same fault as an unused
-	 * marker and is refused for the same reason.
-	 *
-	 * Ticking a block declares it; a matcher is what asks a question about
-	 * it. A draft holding one and not the other is a rule whose author
-	 * chose something and then did not say what it was for - and the block
-	 * would be written into the file and never read.
-	 */
-	{
-		static char why[64];
-		uint32_t b;
-
-		for (b = 0; b < e->dr.n_blk; b++)
-			if (blk_usable(e, b) &&
-			    grp_of_block(e, b) >= MAX_GROUP) {
-				snprintf(why, sizeof why,
-					 "block %08x has no matcher",
-					 e->dr.blk[b].id);
-				return why;
-			}
-		/* And a ticked MEASURE nobody names, which is the same fault
-		 * one step out: the tick chose it and no matcher asked
-		 * anything about it, so it would be written into the file and
-		 * never read. */
-		for (b = 0; b < SIM_IT_COUNT; b++)
-			if (e->dr.sim_use[b] &&
-			    grp_sim_of(e, b, 0) >= MAX_GROUP) {
-				snprintf(why, sizeof why,
-					 "%s has no matcher", sim_it_word(b));
-				return why;
-			}
-	}
-	/*
-	 * TWO MATCHERS THAT ASK THE SAME THING, INCLUDING THE THRESHOLD.
-	 *
-	 * Sharing a call is what makes two thresholds over one marker set
-	 * cheap, and it is exactly what makes an accidental copy invisible:
-	 * a duplicate no longer costs a second scan, so nothing about the
-	 * generated code would look wrong. It is still a matcher that decides
-	 * nothing the other one has not already decided, and the condition
-	 * naming it is dead weight - so it is refused here rather than found
-	 * later by wondering which of the two a branch meant.
-	 *
-	 * The threshold is part of the comparison on purpose: differing there
-	 * is the whole point of the shape, and only matchers that agree on it
-	 * too are copies.
-	 *
-	 * Compared as questions rather than as spellings - see grp_thresh_eff.
-	 * find_any over a set and find_multi >= 1 over the same set are one
-	 * matcher written two ways, and the generated body makes that plain by
-	 * emitting "m1 >= 1" twice: the second branch is unreachable. The old
-	 * test compared the rule kinds first and so let that pair through.
-	 */
-	for (i = 0; i < e->dr.n_grp; i++) {
-		uint32_t j;
-
-		/* A block matcher holds no markers, so the question "do these
-		 * two search for the same thing" is not about it - what it
-		 * cannot be is two matchers over one block, which the menu
-		 * already refuses at the point of choosing. */
-		/* Only a search matcher searches: a block matcher scores one
-		 * block and a shape matcher reads the object's geometry, and
-		 * neither can ask the same question as another. */
-		if (e->dr.grp[i].kind != GRP_KIND_STR)
-			continue;
-		for (j = i + 1u; j < e->dr.n_grp; j++)
-			if (e->dr.grp[j].kind == GRP_KIND_STR &&
-			    grp_same_call(e, i, j))
-				return "Two matchers ask the same thing - "
-				       "remove one or change a threshold";
-	}
-	/*
-	 * NAMED, because "every matcher" makes a reader check all of them.
-	 *
-	 * A draft holds up to eight and the row numbers are on the screen, so
-	 * saying which one is the difference between a sentence that is read
-	 * and one that is acted on. Same buffer discipline as the string
-	 * message below.
-	 */
-	{
-		static char why[64];
-
-		for (i = 0; i < e->dr.n_grp; i++)
-			if (e->dr.grp[i].kind == GRP_KIND_STR &&
-			    !grp_count(e, i)) {
-				snprintf(why, sizeof why,
-					 "matcher %u has no string", i + 1u);
-				return why;
-			}
-	}
-	/*
-	 * AND AN AT MATCHER NEEDS EXACTLY ONE.
-	 *
-	 * kof_find_str_at takes a single str_id - there is no _at_any and no
-	 * _at_all, because "these four, all at the same offset" is a question
-	 * only one of them can answer yes to. The emit takes the first marker
-	 * it finds, so without this a second one would be dropped silently and
-	 * the panel would show a matcher the generated code does not contain.
-	 */
-	for (i = 0; i < e->dr.n_grp; i++)
-		if (grp_is_at(e->dr.grp[i].rule) && grp_count(e, i) != 1u)
-			return "find_str_at takes exactly one string";
-	/*
-	 * What one call can hold.
-	 *
-	 * KOF_FS_FOLD stops at sixteen names and the cap shows up as an
-	 * undefined KOF_FS_17 - a compile error, which is the right place for
-	 * it in a hand written module and the wrong place for one this tool
-	 * generated. Refused here so the failure lands where the decision was
-	 * made rather than in a build log.
-	 */
-	for (i = 0; i < e->dr.n_grp; i++)
-		if (grp_count(e, i) > 16u)
-			return "A matcher holds at most 16 markers - "
-			       "split it in two";
-	if (!e->dr.n_cnd)
-		return "Add a condition";
-	for (i = 0; i < e->dr.n_cnd; i++) {
-		/*
-		 * A condition with children and no matchers of its own is a
-		 * grouping, not an omission.
-		 *
-		 * It is how a shape like "(1) or (2 and 3)" gets written
-		 * without a free text expression: the outer one tests nothing
-		 * and exists to hold the two that do. Only a branch that has to
-		 * decide something needs something to decide it on.
-		 */
-		if (!e->dr.cnd[i].expr[0] && !cnd_children(e, i))
-			return "Every condition needs a matcher";
-	}
-
-	/*
-	 * Nothing declared and then left out.
-	 *
-	 * A string in no matcher still gets a KOF_DEFINE_STR and is never
-	 * searched for; a matcher no condition names is never written into the
-	 * body at all, which quietly takes its strings with it. Both compile,
-	 * both look finished on screen, and neither does what the panel appears
-	 * to say - so they are caught here rather than found later by wondering
-	 * why a marker never fires.
-	 *
-	 * What is deliberately NOT checked is a matcher named more than once. It
-	 * reads like a redundancy and sometimes is, but "(M1|M2) & (M1|M3)" is a
-	 * real shape - the same search meaning different things on two branches
-	 * - and refusing it would cost more than the tidiness is worth.
-	 */
-	{
-		static char why[64];
-
-		for (i = 0; i < e->dr.n_decl; i++)
-			if (e->dr.decl[i].grp == 0) {
-				snprintf(why, sizeof why,
-					 "string %u is in no matcher", i + 1u);
-				return why;
-			}
-		for (i = 0; i < e->dr.n_grp; i++) {
-			uint32_t k, used = 0;
-
-			for (k = 0; k < e->dr.n_cnd; k++)
-				used += (uint32_t)cnd_uses(&e->dr.cnd[k], i);
-			if (!used) {
-				snprintf(why, sizeof why,
-					 "matcher %u is in no condition",
-					 i + 1u);
-				return why;
-			}
-		}
-		/*
-		 * A range nothing searches.
-		 *
-		 * Same rule as the two above and for the same reason: a
-		 * KOF_TARGET_RANGE no kof_find_str names compiles, reads as
-		 * part of the signature, and does nothing.
-		 */
-		for (i = 0; i < e->dr.n_rng_add; i++) {
-			uint32_t k, used = 0;
-			char nm[24];
-
-			for (k = 0; k < e->dr.n_grp; k++)
-				used += (uint32_t)(grp_has_range(e, k) &&
-						   grp_mask(e, k) ==
-						   e->dr.rng_add[i]);
-			if (used)
-				continue;
-			rng_name_of((&e->obj[e->cur])->fmt, e->dr.rng_add[i], nm,
-				    sizeof nm);
-			snprintf(why, sizeof why,
-				 "scan range %.12s is in no matcher", nm);
-			return why;
-		}
-	}
-	return NULL;
-}
 
 /*
  * Give every matcher searching `was` the mask `now`.
@@ -3557,81 +1763,27 @@ const uint32_t pe_sub_n       = sizeof pe_sub        / sizeof pe_sub[0];
 const uint32_t fmt_word_n     = KOF_TARGET_COUNT;
 const uint32_t maltype_word_n = sizeof maltype_word  / sizeof maltype_word[0];
 
-/* The call itself, without whatever is compared against it. `force_multi` asks
- * for the counting form whatever the matcher is spelled as, which is what a
- * shared call has to be. */
-void emit_call_as(FILE *f, struct kof_editor *e, uint32_t g, int force_multi)
-{
-	const struct group *q = &e->dr.grp[g];
-	char nm[RNG_IDENT_MAX];
-	uint32_t i;
 
-	/*
-	 * AN OFFSET WHERE THE OTHERS TAKE A RANGE, and one marker where they
-	 * take a list.
-	 *
-	 * kof_find_str_at(off, s) is the whole shape: no range identifier is
-	 * emitted, because the call names none, and exactly one marker goes in
-	 * - which draft_missing_of refuses to let be anything else. The place
-	 * is written by grp_at_text, and the panel draws the same three parts
-	 * through the same helpers - the anchor's word, grp_at_sign and
-	 * grp_at_mag - so the row and the file cannot say different things
-	 * about one place. They differ in one thing only and deliberately: a
-	 * step of zero is left out here and shown there, because on screen it
-	 * is a control somebody types into. See grp_at_text.
-	 *
-	 * force_multi cannot reach here: it exists to give a shared call a
-	 * count, and grp_shared already refuses an AT.
-	 */
-	if (grp_is_at(q->rule)) {
-		char at[64];
 
-		grp_at_text(q->at_anchor, q->at_off, at, sizeof at, 1);
-		fprintf(f, "kof_find_str_at(%s", at);
-		for (i = 0; i < e->dr.n_decl; i++)
-			if (e->dr.decl[i].grp & (1u << g)) {
-				fprintf(f, ", s%u", i);
-				break;
-			}
-		fprintf(f, ")");
-		return;
-	}
-	rng_ident(draft_fmt(e, e->obj[e->cur].fmt), grp_mask(e, g), nm,
-		  sizeof nm);
-	fprintf(f, "kof_find_str_%s(%s",
-		force_multi ? "multi" : grp_rule_word(q->rule), nm);
-	for (i = 0; i < e->dr.n_decl; i++)
-		if (e->dr.decl[i].grp & (1u << g))
-			fprintf(f, ", s%u", i);
-	fprintf(f, ")");
-}
-
-void emit_call(FILE *f, struct kof_editor *e, uint32_t g)
-{
-	emit_call_as(f, e, g, 0);
-}
-
-void emit_call_multi(FILE *f, struct kof_editor *e, uint32_t g)
-{
-	emit_call_as(f, e, g, 1);
-}
 
 /*
- * TICK OR UNTICK A BLOCK, and take the matcher with it.
+ * TICK OR UNTICK A BLOCK, and the find_similar matcher for it comes and goes
+ * with the tick.
  *
- * The tick is what DECLARES a block, so untickng it undeclares one - and a
- * matcher over a block nobody declared is the same fault as a matcher over a
- * marker that was deleted, which decl_remove has always fixed by taking the
- * marker out of it.
- *
- * Here it removes the matcher outright, because a block matcher holds exactly
- * one block and one with none is a matcher that asks nothing. grp_remove then
- * fixes the conditions that named it, which is why this is one call and not
+ * A block is ticked to be used, and the one thing a block can be used for is a
+ * similarity matcher over it, so choosing the matcher by hand was a second
+ * gesture that said the same thing - and a ticked block with no matcher was a
+ * state the panel then had to warn about. Ticking adds the matcher, holding
+ * that one block at the default threshold; unticking drops it, and grp_remove
+ * renumbers the conditions that named it, which is why this is one call and not
  * three.
  *
- * Without it the block simply vanished at the next carve - unticked blocks are
- * not kept - and its index was reused by whatever moved down into it, so the
- * matcher came back about a different block and the rule still built.
+ * A rule read from a file brings its own matchers and sets the tick itself,
+ * not through here, so what a rule declared is never added twice.
+ *
+ * AN OLDER RULE'S MATCHER MAY HOLD SEVERAL BLOCKS. Unticking takes this block
+ * out of it and removes the matcher only when nothing is left in it: the other
+ * blocks are the author's and stay measured.
  */
 void blk_set_picked(struct kof_editor *e, uint32_t i, int on)
 {
@@ -3640,18 +1792,14 @@ void blk_set_picked(struct kof_editor *e, uint32_t i, int on)
 	if (i >= e->dr.n_blk)
 		return;
 	e->dr.blk[i].picked = (uint8_t)(on != 0);
-	if (on)
+	if (on) {
+		if (grp_of_block(e, i) < MAX_GROUP || e->dr.n_grp >= MAX_GROUP)
+			return;
+		grp_add(e);
+		grp_make_sim(e, e->dr.n_grp - 1u);
+		grp_sim_add(e, e->dr.n_grp - 1u, SIM_IT_BLOCK, i);
 		return;
-	/*
-	 * UNTICKING TAKES THE BLOCK OUT OF THE MATCHERS THAT NAME IT, and
-	 * leaves the matchers alone.
-	 *
-	 * It used to remove the whole matcher, which was the same thing back
-	 * when a matcher was one block. A similarity matcher names several
-	 * measures now, so removing it would throw away the others - and the
-	 * matcher is the author's: they added it by hand and it is theirs to
-	 * remove. An emptied one is refused at Save, which is where it matters.
-	 */
+	}
 	while ((g = grp_of_block(e, i)) < MAX_GROUP) {
 		uint32_t k;
 
@@ -3659,6 +1807,8 @@ void blk_set_picked(struct kof_editor *e, uint32_t i, int on)
 			if (e->dr.grp[g].sim[k].what == SIM_IT_BLOCK &&
 			    e->dr.grp[g].sim[k].blk == i)
 				grp_sim_del(e, g, k);
+		if (!e->dr.grp[g].n_sim)
+			grp_remove(e, g);
 	}
 }
 
@@ -3693,11 +1843,6 @@ uint32_t sim_pct_default(uint32_t what)
 	return GRP_PCT_DEFAULT;
 }
 
-const char *sim_it_word(uint32_t what)
-{
-	(void)what;
-	return "block";
-}
 
 int grp_sim_has(const struct kof_editor *e, uint32_t g, uint32_t what,
 		uint32_t blk)
@@ -3729,26 +1874,6 @@ uint32_t grp_sim_of(const struct kof_editor *e, uint32_t what, uint32_t blk)
 	return MAX_GROUP;
 }
 
-int draft_uses_sim(const struct kof_editor *e, uint32_t what)
-{
-	uint32_t g, i;
-
-	for (g = 0; g < e->dr.n_grp; g++) {
-		if (e->dr.grp[g].kind != GRP_KIND_SIM)
-			continue;
-		for (i = 0; i < e->dr.grp[g].n_sim; i++)
-			if (e->dr.grp[g].sim[i].what == what) {
-				/* A block item naming a block the carve no
-				 * longer has is not a use of one: the
-				 * declaration emitter would have nothing to
-				 * write and draft_missing_of has to see it. */
-				if (what != SIM_IT_BLOCK ||
-				    e->dr.grp[g].sim[i].blk < e->dr.n_blk)
-					return 1;
-			}
-	}
-	return 0;
-}
 
 int grp_sim_add(struct kof_editor *e, uint32_t g, uint32_t what, uint32_t blk)
 {
@@ -3791,7 +1916,7 @@ void grp_sim_del(struct kof_editor *e, uint32_t g, uint32_t i)
 /*
  * HOW A MATCHER IS NAMED IN A LIST, which is not always its search rule.
  *
- * grp_rule_word answers for the four search rules and means nothing to a block
+ * grp_rule_label answers for the four search rules and means nothing to a block
  * matcher, whose `rule` field is zero - so a menu built from it alone listed a
  * find_similar as "find_all", which is a different matcher that this one is
  * not. Written once because two menus offer the same list and a third would
@@ -3808,27 +1933,24 @@ void grp_label(const struct kof_editor *e, uint32_t g, char *out, size_t cap)
 		snprintf(out, cap, "%u", g + 1u);
 		return;
 	}
-	if (e->dr.grp[g].kind == GRP_KIND_SIM)
-		snprintf(out, cap, "%u  find_similar", g + 1u);
-	else
-		snprintf(out, cap, "%u  %s", g + 1u,
-			 grp_rule_label(e->dr.grp[g].rule));
+	/*
+	 * THE WORDS THE MATCHERS TABLE USES: find_str, find_at and find_sim,
+	 * and a block matcher by its hash, since two of them differ in nothing
+	 * else. The three threshold spellings of find_str are one matcher on
+	 * screen.
+	 */
+	if (e->dr.grp[g].kind == GRP_KIND_SIM) {
+		uint32_t b = e->dr.grp[g].n_sim ? e->dr.grp[g].sim[0].blk
+						: e->dr.n_blk;
+
+		snprintf(out, cap, "%u  find_sim  %08x", grp_loc(e, g),
+			 b < e->dr.n_blk ? e->dr.blk[b].id : 0u);
+	} else {
+		snprintf(out, cap, "%u  %s", grp_loc(e, g),
+			 grp_is_at(e->dr.grp[g].rule) ? "find_at" : "find_str");
+	}
 }
 
-/*
- * IS THIS BLOCK ONE A RULE CAN BE WRITTEN FROM.
- *
- * Two facts, and both have to hold: the author TICKED it, and it yields enough
- * hashes to be scored at all. The menu that offers blocks to a matcher, the
- * check that refuses a ticked block nothing uses, the emitter and the panel all
- * ask it - and asked it in five places with the test written out each time,
- * which is five chances for one of them to drift from the others.
- */
-int blk_usable(const struct kof_editor *e, uint32_t i)
-{
-	return i < e->dr.n_blk && e->dr.blk[i].picked &&
-	       e->dr.blk[i].n_hash >= KGENOME_MUTATION_MIN_HASH;
-}
 
 /*
  * Does this block clear what the rule demands of it.
@@ -3914,436 +2036,199 @@ uint32_t grp_of_block(const struct kof_editor *e, uint32_t blk)
 	return grp_sim_of(e, SIM_IT_BLOCK, blk);
 }
 
-/*
- * Does this draft name a similarity block at all.
- *
- * Asked by three things that must agree: where the rule is written, what it
- * includes, and whether the block declarations are emitted. A block nobody
- * named is not used - the tick declares it, the matcher uses it, and
- * draft_missing_of refuses a draft where the two disagree.
- */
-int draft_uses_blocks(const struct kof_editor *e)
+
+uint8_t grp_tab(const struct kof_editor *e, uint32_t g)
 {
-	return draft_uses_sim(e, SIM_IT_BLOCK);
+	if (g >= e->dr.n_grp)
+		return DT_PATTERNS;
+	switch (e->dr.grp[g].kind) {
+	case GRP_KIND_SIM:  return DT_BLOCKS;
+	default:            return DT_PATTERNS;
+	}
 }
 
-void emit_matcher(FILE *f, struct kof_editor *e, uint32_t g)
+uint32_t grp_tab_count(const struct kof_editor *e, uint8_t tab)
 {
-	const struct group *q = &e->dr.grp[g];
+	uint32_t g, n = 0;
 
-	/*
-	 * A SIMILARITY MATCHER IS ITS ITEMS, ONE COMPARISON APIECE, ALL OF
-	 * THEM AGAINST THE SAME THRESHOLD.
-	 *
-	 * WHICH CALL IS DECIDED BY THE ITEM, not by the matcher: that is the
-	 * whole point of holding them together. Every one of the four is a
-	 * single comparison against a number the engine already has, so there
-	 * is no call to share between them and no count to compare - what the
-	 * item names only says which number.
-	 *
-	 * ANDed, and bracketed whenever there is more than one, because this
-	 * text is dropped into a larger expression whose own operators must not
-	 * reach inside it. Either-of-two is two conditions - see the note on
-	 * GRP_KIND_SIM - and is written that way by the condition editor.
-	 */
-	if (q->kind == GRP_KIND_SIM) {
-		uint32_t i, wrote = 0;
-
-		if (!q->n_sim) {
-			/* Unreachable from the panel - draft_missing_of
-			 * refuses an empty one - so this is what a rule that
-			 * got here another way reads as, rather than an empty
-			 * expression that would not compile. */
-			fprintf(f, "0");
-			return;
-		}
-		if (q->n_sim > 1u)
-			fputc('(', f);
-		for (i = 0; i < q->n_sim; i++) {
-			const struct grp_sim_item *it = &q->sim[i];
-
-			if (it->what == SIM_IT_BLOCK && it->blk >= e->dr.n_blk)
-				continue;
-			/* An item this build cannot write is skipped BEFORE the
-			 * operator that would have joined it. */
-			if (it->what != SIM_IT_BLOCK)
-				continue;
-			if (wrote)
-				fputs(" && ", f);
-			switch (it->what) {
-			case SIM_IT_BLOCK:
-				fprintf(f, "kof_mutation_score(blk_%08x) >= %uu",
-					e->dr.blk[it->blk].id, q->pct);
-				break;
-			/*
-			 * THE BLOCK VECTOR AND THE CALL CHAIN ARE GONE - see
-			 * the note on its slot in kofsig.h. Nothing can tick
-			 * it any more, so a measure that reaches here is one
-			 * this build does not know how to write; it is
-			 * skipped rather than emitted as a call that would
-			 * not compile.
-			 */
-			default:
-				continue;
-			}
-			wrote++;
-		}
-		if (!wrote)
-			fprintf(f, "0");
-		if (q->n_sim > 1u)
-			fputc(')', f);
-		return;
-	}
-
-	/* The call happened once, above; this is only the comparison - and any
-	 * and all become comparisons here too, which is what they are. */
-	if (grp_shared(e, g)) {
-		fprintf(f, "m%u >= %u", grp_lead(e, g) + 1u,
-			grp_thresh_eff(e, g));
-		return;
-	}
-	emit_call(f, e, g);
-	if (q->rule == 2)
-		fprintf(f, " >= %u", q->thresh);
+	for (g = 0; g < e->dr.n_grp; g++)
+		n += grp_tab(e, g) == tab;
+	return n;
 }
 
-/*
- * The expression, with each matcher id replaced by its call.
- *
- * Anything that is not a digit, a space, "!", "&", "|" or a bracket is dropped
- * rather than passed through: this text becomes C, and the one thing it must
- * not do is carry something the person typing did not mean as code.
- */
-void emit_expr(FILE *f, struct kof_editor *e, const char *expr)
-{
-	int any = 0;
 
-	if (!expr[0]) {
-		/*
-		 * Nothing to test.
-		 *
-		 * It used to mean every matcher ANDed together - a whole
-		 * signature's worth of meaning attached to an empty field. It
-		 * is unreachable now anyway: a branch that decides something is
-		 * refused until it names a matcher, and a grouping with none is
-		 * written as a block rather than as an if.
-		 */
-		(void)any;
-		fprintf(f, "1");
+const struct kof_tagent *tag_find(const struct kof_editor *e, uint64_t id)
+{
+	return e->tags && id ? kof_tagset_find(e->tags, KOF_TAGSRC_K_TAG, id)
+			     : NULL;
+}
+
+const char *tag_name(const struct kof_editor *e, uint64_t id)
+{
+	const struct kof_tagent *t = tag_find(e, id);
+
+	return t ? t->name : "";
+}
+
+/* How many tags carry this name. */
+static uint32_t tag_same_name(const struct kof_tagset *s, const char *name)
+{
+	size_t i;
+	uint32_t n = 0;
+
+	for (i = 0; i < s->n; i++)
+		n += !s->e[i].removed && s->e[i].kind == KOF_TAGSRC_K_TAG &&
+		     !strcmp(s->e[i].name, name);
+	return n;
+}
+
+void tag_label(const struct kof_editor *e, uint64_t id, char *out, size_t cap)
+{
+	const struct kof_tagent *t = tag_find(e, id);
+	size_t n;
+
+	if (!cap)
+		return;
+	out[0] = 0;
+	if (!t)
+		return;
+	n = (size_t)snprintf(out, cap, "%s", t->name);
+	if (tag_same_name(e->tags, t->name) < 2u || n + 1u >= cap)
+		return;
+	/* Another tag has this name: which one is told by what it is about. */
+	n += (size_t)snprintf(out + n, cap - n, " (");
+	if (t->has_fam && n + 1u < cap) {
+		const char *f = kof_tagset_name(e->tags, KOF_TAGSRC_K_FAMILY,
+						t->fam);
+
+		n += (size_t)snprintf(out + n, cap - n, "family %s",
+				      f ? f : "?");
+	}
+	if (t->n_typ && n + 1u < cap) {
+		n += (size_t)snprintf(out + n, cap - n, "%stypes ",
+				      t->has_fam ? ", " : "");
+		if (n + 1u < cap)
+			n += kof_tagset_join(e->tags, KOF_TAGSRC_K_TYPE, t->typ,
+					     t->n_typ, out + n, cap - n);
+	}
+	if (n + 2u < cap)
+		snprintf(out + n, cap - n, ")");
+}
+
+/* A block matcher no condition uses is a diagnose of its own. */
+int grp_standalone(const struct kof_editor *e, uint32_t g)
+{
+	uint32_t ci;
+
+	if (g >= e->dr.n_grp || e->dr.grp[g].kind != GRP_KIND_SIM)
+		return 0;
+	for (ci = 0; ci < e->dr.n_cnd; ci++)
+		if (cnd_uses(e, &e->dr.cnd[ci], g))
+			return 0;
+	return 1;
+}
+
+/* One word of a file name: lower case, [a-z0-9_-] kept and the rest dropped. */
+static size_t name_word(char *out, size_t cap, size_t n, const char *w)
+{
+	for (; *w && n + 1u < cap; w++) {
+		unsigned char ch = (unsigned char)*w;
+
+		if (isalnum(ch) || ch == '_' || ch == '-')
+			out[n++] = (char)tolower(ch);
+	}
+	return n;
+}
+
+/* `<first type>_<family>_<tag>` of tag `id`: what a running id is counted
+ * within. Every word is the tag's own - the first type it declares, its
+ * family, its name - and a part it has not got is left out, so no underscore
+ * is doubled. No tag has `<tag>` where the name goes, so the gap shows. */
+static void tag_prefix(const struct kof_editor *e, uint64_t id, char *out,
+		       size_t cap)
+{
+	const struct kof_tagent *t = tag_find(e, id);
+	const char *w;
+	size_t n = 0;
+
+	if (!t) {
+		snprintf(out, cap, "<tag>");
 		return;
 	}
-	while (*expr) {
-		if (*expr == '!') {
-			/*
-			 * A "!" belongs to whatever comes after it.
-			 *
-			 * Before an id it is WRAPPED, and the brackets are the
-			 * whole point: a threshold matcher emits "m1 >= 3", and
-			 * "!m1 >= 3" is "(!m1) >= 3" - which compiles, always
-			 * reads false, and looks exactly like what was asked
-			 * for. Before a parenthesis it is the author negating a
-			 * group they typed themselves, and it goes through as
-			 * written. Anywhere else it negates nothing and is
-			 * dropped with the rest of what is not code.
-			 */
-			const char *q = expr + 1;
+	if (t->n_typ && (w = kof_tagset_name(e->tags, KOF_TAGSRC_K_TYPE,
+					     t->typ[0])) != NULL)
+		n = name_word(out, cap, n, w);
+	if (t->has_fam && (w = kof_tagset_name(e->tags, KOF_TAGSRC_K_FAMILY,
+					       t->fam)) != NULL) {
+		if (n && n + 1u < cap)
+			out[n++] = '_';
+		n = name_word(out, cap, n, w);
+	}
+	if (n && n + 1u < cap)
+		out[n++] = '_';
+	n = name_word(out, cap, n, t->name);
+	out[n] = 0;
+}
 
-			while (*q == ' ')
-				q++;
-			if (*q >= '0' && *q <= '9') {
-				uint32_t id = 0;
+/* The prefix of the diagnose `i` of the output order: the conditions first,
+ * then the standalone block matchers - see cnd_file_name. */
+static uint32_t prefix_run(const struct kof_editor *e, const char *mine,
+			   uint32_t n_cond, uint32_t n_grp)
+{
+	char other[160];
+	uint32_t k, id = 1;
 
-				while (*q >= '0' && *q <= '9')
-					id = id * 10u + (uint32_t)(*q++ - '0');
-				fprintf(f, "!(");
-				if (id >= 1u && id <= e->dr.n_grp)
-					emit_matcher(f, e, id - 1u);
-				else
-					fprintf(f, "0");
-				fprintf(f, ")");
-				expr = q;
-				continue;
-			}
-			if (*q == '(') {
-				fputc('!', f);
-				expr = q;
-				continue;
-			}
-			expr++;
+	for (k = 0; k < n_cond; k++) {
+		tag_prefix(e, e->dr.cnd[k].tag, other, sizeof other);
+		id += !strcmp(mine, other);
+	}
+	for (k = 0; k < n_grp; k++) {
+		if (!grp_standalone(e, k))
 			continue;
-		}
-		if (*expr >= '0' && *expr <= '9') {
-			uint32_t id = 0;
-
-			while (*expr >= '0' && *expr <= '9')
-				id = id * 10u + (uint32_t)(*expr++ - '0');
-			if (id >= 1u && id <= e->dr.n_grp)
-				emit_matcher(f, e, id - 1u);
-			else
-				fprintf(f, "0");
-			continue;
-		}
-		if (*expr == '&')
-			fprintf(f, " && ");
-		else if (*expr == '|')
-			fprintf(f, " || ");
-		else if (*expr == '(' || *expr == ')')
-			fputc(*expr, f);
-		expr++;
+		tag_prefix(e, e->dr.grp[k].tag, other, sizeof other);
+		id += !strcmp(mine, other);
 	}
+	return id;
 }
 
-/*
- * The author's note for a matcher or a condition, as a C comment.
- *
- * On its own line above the code it belongs to, indented with it, and only when
- * there is one: a blank comment above every branch is noise, and noise in a
- * generated file is what teaches people to stop reading generated files.
- * Newlines cannot appear in these boxes and the text is bounded, so the only
- * thing to guard is a sequence that would close the comment early.
- */
-void emit_note(FILE *f, const char *note, int depth)
+void cnd_file_name(const struct kof_editor *e, uint32_t ci, char *out,
+		   size_t cap)
 {
-	const char *p;
-	int d;
+	char mine[160];
 
-	if (!note[0])
+	if (!out || !cap)
 		return;
-	for (d = 0; d < depth; d++)
-		fputc('\t', f);
-	fputs("/* ", f);
-	for (p = note; *p; p++)
-		fputc((*p == '*' && p[1] == '/') ? ' ' : *p, f);
-	fputs(" */\n", f);
+	out[0] = 0;
+	if (ci >= e->dr.n_cnd)
+		return;
+	tag_prefix(e, e->dr.cnd[ci].tag, mine, sizeof mine);
+	snprintf(out, cap, "%s_%02u.c", mine,
+		 prefix_run(e, mine, ci, 0));
 }
 
-/* The verdict a condition reports, or nothing when it reports none. */
-void emit_verdict(FILE *f, const struct cond *c, int depth)
+void grp_file_name(const struct kof_editor *e, uint32_t g, char *out,
+		   size_t cap)
 {
-	int d;
+	char mine[160];
 
-	for (d = 0; d < depth; d++)
-		fputc('\t', f);
-	if (c->level == LV_NONE) {
-		/*
-		 * Matched, reports nothing, and stops.
-		 *
-		 * The stop is the whole of it. Verdicts return, so everything
-		 * after a branch runs only when that branch declined - and a
-		 * branch that declines without returning declines nothing: the
-		 * gate's verdict below would fire anyway. Returning is what
-		 * makes this say "these bytes are here and they are fine".
-		 */
-		fprintf(f, "/* matched, and deliberately reports nothing */\n");
-		for (d = 0; d < depth; d++)
-			fputc('\t', f);
-		fprintf(f, "return;\n");
+	if (!out || !cap)
 		return;
-	}
-	fprintf(f, "KOF_SCAN_%s(", c->level == LV_SUSPECT ? "SUSPECT"
-							  : "INFECT");
-	if (c->var_kind == 2)
-		fprintf(f, "\"%s\"", c->variant);
-	else if (c->var_kind == 1)
-		fprintf(f, "KOF_MALVAR_GENERIC");
-	else
-		fprintf(f, "KOF_MALVAR_AUTO");
-	fprintf(f, ");\n");
+	out[0] = 0;
+	if (!grp_standalone(e, g))
+		return;
+	tag_prefix(e, e->dr.grp[g].tag, mine, sizeof mine);
+	snprintf(out, cap, "%s_%02u.c", mine,
+		 prefix_run(e, mine, e->dr.n_cnd, g));
 }
 
 /*
- * One branch, and the ones nested under it.
+ * Empty the panel and call that the baseline state.
  *
- * EVERY BRANCH IS ITS OWN "if" AND NOTHING HERE CHAINS - see enum cnd_join.
- * A verdict returns, so a branch that concluded is the last thing that runs;
- * "else if" after it would say the same as "if" and say it less directly. It
- * also has a case where it is WRONG: a gate that matched and whose children
- * all declined concludes nothing, and an "else if" after that gate would skip
- * a branch that was meant to be tried.
- *
- * The gate's own verdict follows its children for the same reason - not as an
- * else, which bound to the last child alone.
- */
-/*
- * A RUN OF CONDITIONS CONJOINED - "if (A && B)", once, with one verdict.
- *
- * Each member's expression is a term, and a term holding a "|" is bracketed:
- * "&&" binds tighter than "||" in C, so "m1 || m2 && m3" is not the condition
- * the panel drew.
- *
- * The verdict is the LAST member's - see enum cnd_join.
- */
-static void emit_and_run(FILE *f, struct kof_editor *e, uint32_t i,
-			 uint32_t last, int depth)
-{
-	uint32_t k, g;
-	int d, first = 1;
-
-	/* Every matcher any member uses, named once: the notes describe the
-	 * searches this one branch now makes. */
-	for (g = 0; g < e->dr.n_grp; g++) {
-		char t[120];
-		uint32_t m;
-		int used = 0;
-
-		if (!e->dr.grp[g].note[0])
-			continue;
-		for (m = i; m <= last; m++)
-			if (e->dr.cnd[m].parent == e->dr.cnd[i].parent &&
-			    cnd_uses(&e->dr.cnd[m], g))
-				used = 1;
-		if (!used)
-			continue;
-		snprintf(t, sizeof t, "matcher %u: %s", g + 1u,
-			 e->dr.grp[g].note);
-		emit_note(f, t, depth);
-	}
-	for (d = 0; d < depth; d++)
-		fputc('\t', f);
-	fprintf(f, "if (");
-	for (k = i; k <= last; k++) {
-		const struct cond *m = &e->dr.cnd[k];
-
-		if (m->parent != e->dr.cnd[i].parent)
-			continue;
-		if (!first)
-			fprintf(f, " && ");
-		first = 0;
-		if (strchr(m->expr, '|')) {
-			fputc('(', f);
-			emit_expr(f, e, m->expr);
-			fputc(')', f);
-		} else {
-			emit_expr(f, e, m->expr);
-		}
-	}
-	fprintf(f, ")");
-	if (e->dr.cnd[last].level == LV_NONE) {
-		fprintf(f, " {\n");
-		emit_verdict(f, &e->dr.cnd[last], depth + 1);
-		for (d = 0; d < depth; d++)
-			fputc('\t', f);
-		fprintf(f, "}\n");
-		return;
-	}
-	fprintf(f, "\n");
-	emit_verdict(f, &e->dr.cnd[last], depth + 1);
-}
-
-uint32_t emit_cond(FILE *f, struct kof_editor *e, uint32_t i, int depth)
-{
-	const struct cond *c = &e->dr.cnd[i];
-	uint32_t k, last = cnd_and_run(e, i);
-	int d;
-
-	if (last != i) {
-		emit_and_run(f, e, i, last, depth);
-		return last;
-	}
-
-	/*
-	 * A matcher's note goes above the branch that uses it, not beside the
-	 * call: the call is one term of an expression inside an if, and a
-	 * comment there would break the line that has to stay readable. Named
-	 * by number so it can be told from the condition's own note when a
-	 * branch carries several.
-	 *
-	 * A GROUPING GETS NONE OF THEM. It has no test of its own - it is a
-	 * brace around some branches - so it uses no matcher, and its children
-	 * carry their own notes a line or two below. The filter below used to be
-	 * gated on the condition HAVING an expression, and a grouping has none,
-	 * so it printed every matcher's note in the file and then each child
-	 * printed its own again. Prometei_00.c came out with three notes above
-	 * the brace and the same three repeated inside it.
-	 *
-	 * An empty expression on a LEAF is a different thing: it means the
-	 * default, every matcher joined by &, so there every note belongs.
-	 */
-	if (!(!c->expr[0] && cnd_children(e, i)))
-		for (k = 0; k < e->dr.n_grp; k++) {
-			char t[120];
-
-			if (!e->dr.grp[k].note[0])
-				continue;
-			if (c->expr[0] && !cnd_uses(c, k))
-				continue;
-			snprintf(t, sizeof t, "matcher %u: %s", k + 1u,
-				 e->dr.grp[k].note);
-			emit_note(f, t, depth);
-		}
-	for (d = 0; d < depth; d++)
-		fputc('\t', f);
-	if (!c->expr[0] && cnd_children(e, i)) {
-		/*
-		 * A grouping: no test of its own, so no if of its own.
-		 *
-		 * Written as a bare block rather than "if (1)", because that is
-		 * what it is - a brace around some branches so the statement
-		 * after them belongs to the group and not to whatever came
-		 * before it. Verdicts return, so that statement is reached
-		 * exactly when none of the branches inside concluded.
-		 */
-		fprintf(f, "{\n");
-	} else {
-		fprintf(f, "if (");
-		emit_expr(f, e, c->expr);
-		fprintf(f, ")");
-	}
-
-	if (!cnd_children(e, i)) {
-		if (c->level == LV_NONE) {
-			fprintf(f, " {\n");
-			emit_verdict(f, c, depth + 1);
-			for (d = 0; d < depth; d++)
-				fputc('\t', f);
-			fprintf(f, "}\n");
-			return i;
-		}
-		fprintf(f, "\n");
-		emit_verdict(f, c, depth + 1);
-		return i;
-	}
-
-	if (c->expr[0])
-		fprintf(f, " {\n");
-	for (k = 0; k < e->dr.n_cnd; k++) {
-		if (e->dr.cnd[k].parent != (int)i)
-			continue;
-		/* Each child is its own "if" - see enum cnd_join for why
-		 * nothing here chains. `k` moves to the last member of a
-		 * conjoined run so it is not emitted twice. */
-		k = emit_cond(f, e, k, depth + 1);
-	}
-	/*
-	 * The gate's own verdict, after the children rather than as an else.
-	 *
-	 * Every KOF_SCAN_INFECT and KOF_SCAN_SUSPECT reports and returns, so a
-	 * child that concluded anything has already left the function - which
-	 * means the statement after the children is reached exactly when none
-	 * of them concluded, which is what a gate's own verdict means.
-	 *
-	 * Written as "else" it bound to the LAST child's if and nothing more:
-	 * with two children it fired whenever the second missed, whatever the
-	 * first had done.
-	 */
-	if (c->level != LV_NONE)
-		emit_verdict(f, c, depth + 1);
-	for (d = 0; d < depth; d++)
-		fputc('\t', f);
-	fprintf(f, "}\n");
-	return i;
-}
-
-/*
- * Empty the panel and call that the saved state.
- *
- * draft_clear on its own leaves the panel looking unsaved: saved_hash still
+ * draft_clear on its own leaves the panel looking edited: saved_hash still
  * describes whatever was in it, so an empty draft reads as work in progress and
  * the guards that ask "is there something to lose" all answer yes.
  *
- * This is what the New button does, and what a signature examined and then
- * abandoned needs - opening a rule to look at it loads it into the panel, and
- * the way back to a blank one should not be closing the program.
+ * This is what the New button does.
  */
 void draft_reset(struct kof_editor *e)
 {
@@ -4355,2130 +2240,32 @@ void draft_reset(struct kof_editor *e)
 	say_note(e, "Panel cleared");
 }
 
-/*
- * Is the call at `at` negated in the source it is being read out of.
- *
- * generate writes "!(...)" around a negated matcher - the brackets are there so
- * that "!" cannot bind tighter than a threshold's ">=" - and a hand-written
- * "!kof_find_str_any(...)" says the same thing. Both are one "!" reached by
- * stepping back over spaces and at most one "(", so both are read the same way.
- *
- * Without this the ROUND TRIP INVERTS THE FILE: a negated matcher generates
- * "!(...)", comes back as an ordinary one, and the next save writes a signature
- * meaning the opposite of the one that was opened - with nothing on screen to
- * say so, because the panel would be showing what it read.
- */
-static int src_negated(const char *line, const char *at)
-{
-	int par = 0;
 
-	while (at > line) {
-		char ch = at[-1];
 
-		if (ch == ' ' || ch == '\t') {
-			at--;
-			continue;
-		}
-		if (ch == '(' && !par) {
-			par = 1;
-			at--;
-			continue;
-		}
-		return ch == '!';
-	}
-	return 0;
-}
 
-/*
- * A BLANK LINE INSIDE A BLOCK COMMENT, which is not code and was counted as it.
- *
- * The comment skip below tests for an opener, a closer, and an asterisk with
- * text after it. The paragraph breaks in these files are an asterisk with
- * NOTHING after it, so they fell through to the body test, failed it, and were
- * counted as logic the panel cannot model.
- *
- * What that cost: the editor refuses Save on a rule with unmodelled logic and
- * says "Custom logic - Save As to derive a new rule from it". mirai_00.c is
- * written entirely from the panel - one kof_find_str_any and one verdict - and
- * it was refused, because its explanatory comment has one empty line in it. The
- * refusal is right about rules that really do carry hand-written code; it was
- * saying so about a comment.
- *
- * ONLY THE BARE ASTERISK, because a dereferencing assignment is a line of code
- * that begins with one. A line holding nothing but blanks and a single `*` cannot be C - there
- * is no statement of that shape - so this is exact rather than a guess about
- * what the line probably was.
- */
-static int comment_blank(const char *line)
-{
-	while (*line == ' ' || *line == '\t')
-		line++;
-	if (*line != '*')
-		return 0;
-	for (line++; *line; line++)
-		if (*line != ' ' && *line != '\t' && *line != '\r' &&
-		    *line != '\n')
-			return 0;
-	return 1;
-}
 
-/*
- * THE FORMATS A TARGET LINE NAMES, into the draft's mask. `p` is the words of
- * the declaration - the argument of KOF_TARGET_FORMAT, however the reader got
- * hold of it - and this is the one place that turns them into bits, for the
- * pattern reader and the verdict reader alike.
- */
-static void draft_set_format(struct kof_editor *e, const char *p)
-{
-	uint32_t fi;
 
-	for (fi = 0; fi < FMT_WORD_N; fi++)
-		if (src_word_in(p, fmt_word(fi)))
-			e->dr.fmt_mask |= 1u << fi;
-}
 
-/*
- * THE SUBTYPE A TARGET LINE NAMES.
- *
- * EVERY FORMAT THAT HAS A SUBTYPE, from the same table the writer uses.
- *
- * This knew KOF_ELF_ and KOF_PE_ and was written when those were the only
- * two. KOF_SCRIPT_ was added to the WRITER and not here, so a rule saved with a
- * script subtype reopened without one - the field was simply gone from the
- * panel, and saving again dropped it from the file. A reader that knows a
- * smaller vocabulary than the writer loses exactly what the writer was added
- * for.
- */
-static void draft_set_subtype(struct kof_editor *e, const char *p)
-{
-	char w[32];
-	uint32_t n = 0, k, fi;
 
-	for (fi = 0; fi < KOF_FMT_COUNT; fi++) {
-		const char *pre;
-		const char *const *tab = sub_vocab((uint8_t)fi, &pre, &n);
-		const char *sub;
 
-		if (!tab)
-			continue;
-		sub = strstr(p, pre);
-		if (!sub)
-			continue;
-		src_ident(sub + strlen(pre), w, sizeof w);
-		for (k = 0; k < n; k++)
-			if (!strcmp(tab[k], w)) {
-				e->dr.opt_on[OPT_SUBTYPE] = 1;
-				e->dr.opt_val[OPT_SUBTYPE] = k;
-				break;
-			}
-		if (e->dr.opt_on[OPT_SUBTYPE])
-			break;
-	}
-}
 
-/* The whole of an open file, NUL terminated, or NULL. The caller keeps it. */
-static char *src_read_all(FILE *f, size_t *n_out)
-{
-	long n;
-	char *b;
 
-	if (fseek(f, 0, SEEK_END) || (n = ftell(f)) < 0)
-		return NULL;
-	rewind(f);
-	b = malloc((size_t)n + 1u);
-	if (!b || fread(b, 1, (size_t)n, f) != (size_t)n) {
-		free(b);
-		return NULL;
-	}
-	b[n] = 0;
-	*n_out = (size_t)n;
-	return b;
-}
 
-/* The type and family a KOF_TARGET_NAME declares, into the draft. */
-static void draft_set_name(struct kof_editor *e, const char *ident,
-			   const char *family)
-{
-	uint32_t k;
 
-	for (k = 0; k < MALTYPE_N; k++) {
-		char t[48];
 
-		snprintf(t, sizeof t, "KOF_MALTYPE_%s", maltype_word[k]);
-		if (!strcasecmp(t, ident))
-			e->dr.maltype = k;
-	}
-	snprintf(e->dr.family, sizeof e->dr.family, "%s", family);
-}
 
-/*
- * A VERDICT THAT READS DIAGNOSES - read by diagsrc, the one reader of that
- * source, and not by the line scan below, which knows patterns and brace depth
- * and nothing about kof_diag. The declarations go into the draft through the
- * same helpers the pattern reader uses; the condition is not copied anywhere,
- * it stays in `vd` for the panel to show and for a later patch to write.
- */
-static void draft_from_verdict(struct kof_editor *e, char *text, size_t n,
-			       struct kof_dsrc *d)
-{
-	uint32_t i;
 
-	free(e->dr.vtext);
-	free(e->dr.vd);
-	e->dr.vtext = text;
-	e->dr.vtext_n = n;
-	e->dr.vd = d;
-	for (i = 0; i < d->n; i++) {
-		const struct kof_dsrc_item *it = &d->item[i];
 
-		switch (it->kind) {
-		case KDS_FORMAT:
-			draft_set_format(e, it->s1);
-			break;
-		case KDS_SUBTYPE:
-			draft_set_subtype(e, it->s1);
-			break;
-		case KDS_VNAME:
-			draft_set_name(e, it->s1, it->s2);
-			break;
-		default:
-			break;
-		}
-	}
-	/*
-	 * THE CONDITION IS THE PANEL'S OWN: each term a matcher, the `if` one
-	 * condition over their numbers - "1&2&3" - exactly as a rule of strings
-	 * says it. Nothing new is drawn for it; the matchers and conditions the
-	 * panel already has show it.
-	 */
-	e->dr.n_grp = 0;
-	memset(&e->dr.cnd[0], 0, sizeof e->dr.cnd[0]);
-	for (i = 0; i < d->cond.n &&
-	     e->dr.n_grp < sizeof e->dr.grp / sizeof e->dr.grp[0]; i++) {
-		struct group *q = &e->dr.grp[e->dr.n_grp++];
-		size_t l = strlen(e->dr.cnd[0].expr);
 
-		memset(q, 0, sizeof *q);
-		q->kind = GRP_KIND_DIAG;
-		q->term = d->cond.t[i];
-		snprintf(e->dr.cnd[0].expr + l, sizeof e->dr.cnd[0].expr - l,
-			 "%s%u", i ? "&" : "", i + 1u);
-	}
-	if (e->dr.n_grp) {
-		struct cond *c = &e->dr.cnd[0];
 
-		c->op = 0;
-		c->parent = -1;
-		c->level = LV_INFECT;
-		c->var_kind = !strcmp(d->cond.infect, "KOF_MALVAR_GENERIC") ? 1 : 0;
-		e->dr.n_cnd = 1;
-		e->dr.cur_grp = e->dr.cur_cnd = 0;
-	}
-}
 
-int draft_from_source(struct kof_editor *e, const char *path)
-{
-	FILE *f = fopen(path, "r");
-	char line[1024], pend[160];
-	struct sname str[MAX_DECL];
-	struct { char id[48]; uint32_t mask; } rng[8];
-	uint32_t n_str = 0, n_rng = 0, i;
-	/*
-	 * THE RULE'S OWN FORMAT, not the one the reader happens to be looking
-	 * at - see src_rule_fmt for what taking the object's cost.
-	 *
-	 * `obj_fmt` stays for the things that really are about the object:
-	 * where a marker was found in it, and what to call a region when the
-	 * rule named none.
-	 */
-	const struct kof_parser *obj_fmt = e->obj[e->cur].fmt;
-	uint32_t decl_fmt = 0;
-	const struct kof_parser *fmt;
-	/*
-	 * Which condition owns each brace depth, so a verdict lands on the one
-	 * whose body it is in.
-	 *
-	 * A bare KOF_SCAN_ line after the children is the enclosing condition's
-	 * own verdict; one that follows an if with no brace belongs to that if.
-	 * Attaching every verdict to the last condition seen put the gate's
-	 * fallback onto its final child, which reads as the wrong branch of the
-	 * wrong rule.
-	 */
-	int owner[8];
-	int depth = 0, body = 0, cur = -1, parent = -1, skipped = 0;
-	int just_opened = 0;
-	/*
-	 * THE SHARED CALLS, READ BACK.
-	 *
-	 * The generator writes "at least three, otherwise at least two" as one
-	 * call into a variable and two comparisons against it. Reading that
-	 * back needs the variable remembered: the call says what to look for
-	 * and where, and each "m1 >= N" is a matcher over exactly that with its
-	 * own threshold. Without this the ifs referred to a name that meant
-	 * nothing here and the rule came back with no matchers at all.
-	 */
-	struct { char id[16]; int rule; uint32_t mask, decls; } shc[8];
-	uint32_t n_shc = 0;
-	int pend_if = -1;
-	char head[sizeof e->dr.note];
-	size_t head_n = 0;
-	int in_head = 0, head_done = 0, mine = 0;
 
-	if (!f)
-		return 0;
-	/*
-	 * A VERDICT THAT READS DIAGNOSES IS NOT A PATTERN RULE, and the reader
-	 * below would take its name and its format and then call the body custom
-	 * logic. The one reader of that source says first whether this is one.
-	 */
-	{
-		size_t tn = 0;
-		char *text = src_read_all(f, &tn);
-		struct kof_dsrc *d = calloc(1, sizeof *d);
 
-		if (d && text && kof_dsrc_parse(text, tn, d, NULL) == 0 &&
-		    d->has_cond) {
-			draft_from_verdict(e, text, tn, d);
-			fclose(f);
-			return 1;
-		}
-		free(text);
-		free(d);
-		rewind(f);
-	}
-	/* Before anything else is read, because every region name in the file
-	 * is read against it - see src_rule_fmt. */
-	fmt = src_rule_fmt(f, &decl_fmt);
-	if (!fmt)
-		fmt = obj_fmt;
-	pend[0] = 0;
-	head[0] = 0;
-	for (i = 0; i < sizeof owner / sizeof owner[0]; i++)
-		owner[i] = -1;
-	while (fgets(line, sizeof line, f)) {
-		char *p;
 
-		/*
-		 * The file's own leading comment, back into the note field.
-		 *
-		 * The rules below treat every block comment as punctuation and
-		 * skip it, which is right for the ones that annotate a branch
-		 * and wrong for this one: the generator writes the author's own
-		 * line about the module into the header. Skipping it meant
-		 * opening a signature showed an empty note, and saving it then
-		 * deleted the one sentence in the file a person had written.
-		 */
-		if (!head_done) {
-			char *t = line, *eol;
-			size_t n;
 
-			while (*t == ' ' || *t == '\t' || *t == '\n' ||
-			       *t == '\r')
-				t++;
-			if (!in_head) {
-				if (!*t)
-					continue;       /* between blocks */
-				if (t[0] != '/' || t[1] != '*') {
-					/* Code: the header is over, and
-					 * nothing below should see this line
-					 * twice. */
-					head_done = 1;
-					goto no_head;
-				}
-				in_head = 1;
-				mine = 0;
-				t += 2;
-			}
-			if ((eol = strstr(t, "*/")) != NULL)
-				*eol = 0;
-			while (*t == ' ' || *t == '\t' || *t == '*')
-				t++;
-			n = strlen(t);
-			while (n && (t[n - 1] == '\n' || t[n - 1] == '\r' ||
-				     t[n - 1] == ' ' || t[n - 1] == '\t'))
-				n--;
-			if (n) {
-				/* Cut here, not just measured: what follows is
-				 * stored and compared, and a trailing newline
-				 * made every entry differ from the same entry
-				 * read back - so nothing deduplicated and the
-				 * block grew a blank line per item. */
-				t[n] = 0;
-				/* The banner only counts as one where it is
-				 * written - opening the block. A line of prose
-				 * quoting it further down is prose. */
-				if (!head_n && !mine &&
-				    !strncmp(t, HEAD_BANNER,
-					     sizeof HEAD_BANNER - 1))
-					mine = 1;
-				/* Inside our own block the recognised lines
-				 * are the rule's history and are kept; the
-				 * author's block is prose and goes to the
-				 * note. */
-				if (mine)
-					meta_take(e, t);
-				else
-					head_put(head, sizeof head, &head_n,
-						 t, n);
-			}
-			if (eol)
-				in_head = 0;    /* the next block may follow */
-			continue;
-		}
-no_head:
 
-		/* A comment on its own line belongs to whatever comes next -
-		 * which is how the generator wrote it and how the modules in
-		 * bases/ are written by hand. */
-		/*
-		 * A COMMENT AFTER CODE DOES NOT MAKE THE LINE A COMMENT.
-		 *
-		 * The two branches below treat any line holding a comment opener
-		 * as one, and that dropped whole declarations. bases/ has them:
-		 * ZipSlip writes its Windows marker as
-		 * KOF_DEFINE_HEXSTR(path_on_ntwin, "2E 2E 5C") with a trailing
-		 * comment spelling out the three bytes.
-		 *
-		 * That marker was never declared when the rule was opened, its
-		 * matcher came up with no markers, and the comment text became
-		 * the pending note that attached to the NEXT matcher - so the
-		 * panel showed a rule that was not the rule in the file.
-		 *
-		 * So: code before the opener means the code is the line, and
-		 * the comment is cut off it. Only a line that begins with the
-		 * comment is a comment, which is what the branches below now
-		 * see. The trailing text is dropped rather than kept, because
-		 * the only place this model has to put it is "the next thing",
-		 * and the next thing is not what it was written about.
-		 */
-		{
-			char *c = strstr(line, "/*");
-			char *t;
-			int code = 0;
 
-			for (t = line; c && t < c; t++)
-				if (*t != ' ' && *t != '\t') {
-					code = 1;
-					break;
-				}
-			if (code) {
-				char *ep = strstr(c, "*/");
 
-				/* One that does not close here takes the rest
-				 * of the line with it. */
-				if (ep)
-					memmove(c, ep + 2, strlen(ep + 2) + 1);
-				else
-					*c = 0;
-			}
-		}
-		if ((p = strstr(line, "/*")) != NULL &&
-		    strstr(line, "*/") != NULL) {
-			char *q = strstr(p, "*/");
-			size_t n = 0;
-
-			for (p += 2; p < q && n + 1 < sizeof pend; p++)
-				if (n || (*p != ' ' && *p != '\t'))
-					pend[n++] = *p;
-			while (n && (pend[n - 1] == ' ' || pend[n - 1] == '\t'))
-				n--;
-			pend[n] = 0;
-			continue;
-		}
-		if (strstr(line, "/*") || strstr(line, "*/") ||
-		    strstr(line, " * ") || comment_blank(line)) {
-			continue;               /* a block comment; skip it */
-		}
-		/*
-		 * A DECLARATION IS NOT A MATCHER'S NOTE, and a comment above
-		 * one does not become one.
-		 *
-		 * `pend` is the last single-line comment seen and it is spent
-		 * by the next matcher built, however far below it that is.
-		 * generate writes the block's own description above its
-		 * KOF_MUTATION_BLOCK - "+0xd245, 13305 bytes, 128 hash(es)" -
-		 * and nothing cleared it, so opening a mutation rule gave its
-		 * first matcher that line as a comment and the next Save wrote
-		 * it into kof_scan as "matcher 1: +0xd245, 13305 bytes, 128
-		 * hash(es)". The panel showed it in the comment box, which is
-		 * where it was seen.
-		 *
-		 * A note only ever belongs to the branch immediately below it,
-		 * so anything that declares something in between ends it.
-		 */
-		if (strstr(line, "KOF_MUTATION_BLOCK") ||
-		    strstr(line, "KOF_DEFINE_STR") ||
-		    strstr(line, "KOF_TARGET_"))
-			pend[0] = 0;
-
-		if ((p = strstr(line, "KOF_TARGET_NAME(")) != NULL) {
-			char w[48], fam[sizeof e->dr.family];
-
-			src_ident(p + 16, w, sizeof w);
-			src_quoted(p, fam, sizeof fam);
-			draft_set_name(e, w, fam);
-			continue;
-		}
-		if ((p = strstr(line, "KOF_TARGET_RANGE(")) != NULL &&
-		    n_rng < sizeof rng / sizeof rng[0]) {
-			const char *q = src_ident(p + 17, rng[n_rng].id,
-						  sizeof rng[0].id);
-
-			rng[n_rng].mask = src_mask_decl(decl_fmt, obj_fmt, q);
-			n_rng++;
-			continue;
-		}
-		if ((p = strstr(line, "KOF_TARGET_SIZE_MIN(")) != NULL) {
-			e->dr.opt_on[OPT_SIZE_MIN] = 1;
-			e->dr.opt_val[OPT_SIZE_MIN] = strtoull(p + 20, NULL, 0);
-			continue;
-		}
-		/*
-		 * The optional declarations are read back because they are
-		 * written out: a rule opened, changed in one place and saved
-		 * would otherwise come back without its arch or its subtype,
-		 * and a signature that quietly stops being prefiltered is a
-		 * signature that quietly starts running on everything.
-		 */
-		if ((p = strstr(line, "KOF_TARGET_ARCH(KOF_ARCH_")) != NULL) {
-			char w[32];
-			uint32_t k;
-
-			src_ident(p + 25, w, sizeof w);
-			for (k = 0; k < ARCH_N; k++)
-				if (!strcmp(arch_word[k].word, w)) {
-					e->dr.opt_on[OPT_ARCH] = 1;
-					e->dr.opt_val[OPT_ARCH] = k;
-				}
-			continue;
-		}
-		/*
-		 * THE FORMATS THE RULE DECLARES, which were written and never
-		 * read.
-		 *
-		 * generate() emits KOF_TARGET_FORMAT as an OR of names and
-		 * nothing here parsed it, so every draft reopened with an EMPTY
-		 * format mask: the panel had no format to key its rows on, the
-		 * subtype row it gates went with it, and saving again wrote
-		 * whatever the object under the cursor happened to be. A rule
-		 * came back narrower or wider than the one that was saved.
-		 *
-		 * Read as a set of names rather than a single one, because that
-		 * is what the line is - see the note over the writer.
-		 */
-		if ((p = src_target_line(line)) != NULL) {
-			draft_set_format(e, p);
-			continue;
-		}
-		if ((p = strstr(line, "KOF_TARGET_SUBTYPE(")) != NULL) {
-			draft_set_subtype(e, p);
-			continue;
-		}
-		if ((p = strstr(line, "KOF_DEFINE_STR(")) != NULL ||
-		    (p = strstr(line, "KOF_DEFINE_HEXSTR(")) != NULL) {
-			int hex = strstr(line, "KOF_DEFINE_HEXSTR(") != NULL;
-			char text[512];
-			struct decl *d;
-
-			if (e->dr.n_decl >= MAX_DECL || n_str >= MAX_DECL)
-				continue;
-			d = &e->dr.decl[e->dr.n_decl];
-			memset(d, 0, sizeof *d);
-			src_ident(strchr(p, '(') + 1, str[n_str].id,
-				  sizeof str[0].id);
-			if (!src_quoted(p, text, sizeof text))
-				continue;
-			if (hex) {
-				size_t n = strlen(text) / 2u, k;
-
-				/* Verbatim, because the file already holds the
-				 * pattern in the one form that can express it -
-				 * and the byte conversion below turns a "??"
-				 * into a 00, which is a different pattern. */
-				snprintf(d->hexs, sizeof d->hexs, "%s", text);
-				decl_from_hexs(d);
-				(void)n; (void)k;
-				d->hex = 1;
-			} else {
-				d->len = (uint32_t)strlen(text);
-				d->bytes = malloc(d->len ? d->len : 1u);
-				if (!d->bytes)
-					continue;
-				memcpy(d->bytes, text, d->len);
-				d->nbytes = d->len;
-			}
-			/*
-			 * THE OPTIONS, FOR EITHER KIND, and they used to be
-			 * read on the literal branch alone.
-			 *
-			 * A hex pattern could not carry them when this was
-			 * written. Now that it can, reading them on one branch
-			 * means a rule declaring an ICASE hex marker opens as
-			 * an exact-case one and Generate writes that back: the
-			 * option survives a build and does not survive being
-			 * looked at, which is the worse of the two.
-			 *
-			 * Only the option reading is shared. The bytes are not:
-			 * a hex declaration's text is a PATTERN and converting
-			 * it the way a literal is converted turns "??" into a
-			 * zero byte, which is a different pattern.
-			 */
-			d->icase = strstr(line, "KOF_CASE_ICASE") != 0;
-			/* TOKEN first: it is the newer spelling and neither
-			 * string contains the other, so the order is only
-			 * about reading the specific answer before the general
-			 * one. */
-			d->fullword = strstr(line, "KOF_WORD_TOKEN")
-				    ? KOF_WORD_TOKEN
-				    : strstr(line, "KOF_WORD_FULLWORD")
-				    ? KOF_WORD_FULLWORD
-				    : KOF_WORD_SUBSTRING;
-			d->obj = e->cur;
-			d->grp = 0;
-			snprintf(d->rgn, sizeof d->rgn, "-");
-			str[n_str].idx = e->dr.n_decl;
-			n_str++;
-			e->dr.n_decl++;
-			continue;
-		}
-
-		{
-			/*
-			 * The line that opens the body is not IN the body.
-			 *
-			 * It trips the foreign test otherwise - it is a
-			 * function signature, which is code and is none of the
-			 * three modelled constructs - so every ordinary rule
-			 * came back read only.
-			 */
-			int opens = strstr(line, "kof_scan(") != NULL ||
-				    strstr(line, "KOF_DEFINE_SCAN") != NULL;
-
-			if (opens)
-				body = 1;
-			if (!body)
-				continue;
-			just_opened = opens;
-		}
-
-		{
-			/*
-			 * A brace with nothing testing it is a grouping, and
-			 * has to come back as one: read as plain punctuation
-			 * its branches would surface as siblings of whatever
-			 * came before, which is a different signature.
-			 */
-			const char *t = line;
-
-			while (*t == ' ' || *t == '\t')
-				t++;
-			if (*t == '{' && body && depth >= 1 &&
-			    e->dr.n_cnd < MAX_GROUP) {
-				struct cond *c = &e->dr.cnd[e->dr.n_cnd];
-
-				memset(c, 0, sizeof *c);
-				c->parent = parent;
-				c->level = LV_NONE;
-				if (cur >= 0 && e->dr.cnd[cur].parent == parent)
-					e->dr.cnd[cur].join = JN_OR;
-				cur = (int)e->dr.n_cnd;
-				pend_if = -1;
-				e->dr.n_cnd++;
-			}
-		}
-		if (strstr(line, "if (") || strstr(line, "if(")) {
-			struct cond *c;
-
-			if (e->dr.n_cnd >= MAX_GROUP) {
-				skipped++;
-				continue;
-			}
-			c = &e->dr.cnd[e->dr.n_cnd];
-			memset(c, 0, sizeof *c);
-			c->parent = parent;
-			c->level = LV_NONE;
-			c->op = strstr(line, "||") != NULL;
-			/*
-			 * A SEPARATE BRANCH, whichever way the source wrote it.
-			 *
-			 * This used to read the word "else" and keep the answer
-			 * apart from a plain "if". It is not a difference worth
-			 * a field: a verdict returns, so a branch that
-			 * concluded never reaches this one either way - see
-			 * enum cnd_join. A conjunction is not read here at all,
-			 * because "if (A && B)" is ONE if and comes back as one
-			 * condition over both matchers.
-			 */
-			if (cur >= 0 && e->dr.cnd[cur].parent == parent)
-				e->dr.cnd[cur].join = JN_OR;
-			cur = (int)e->dr.n_cnd;
-			pend_if = cur;
-			e->dr.n_cnd++;
-			/* `pend` is left alone: the comment above a branch
-			 * describes the search it makes, and the search is the
-			 * matcher on the same line. */
-		}
-		/*
-		 * "uint32_t mN = <call>;" - the call, kept under its name. It
-		 * is not a matcher on its own: nothing is compared against it
-		 * yet, and the comparisons below are what carry the thresholds.
-		 */
-		if ((p = strstr(line, "kof_find_str_")) != NULL &&
-		    memchr(line, '=', (size_t)(p - line)) != NULL &&
-		    !strstr(line, "if (") && !strstr(line, "if(")) {
-			const char *q;
-			char id[48];
-
-			if (n_shc >= sizeof shc / sizeof shc[0])
-				goto shc_done;
-			memset(&shc[n_shc], 0, sizeof shc[0]);
-			shc[n_shc].rule = !strncmp(p + 13, "any", 3) ? 1
-					: !strncmp(p + 13, "multi", 5) ? 2 : 0;
-			/* The variable's own name, the identifier before "=". */
-			{
-				const char *ep = memchr(line, '=',
-						       (size_t)(p - line));
-				const char *b2 = ep;
-
-				while (b2 > line && (b2[-1] == ' ' ||
-						     b2[-1] == '\t'))
-					b2--;
-				{
-					const char *st2 = b2;
-
-					while (st2 > line &&
-					       (isalnum((unsigned char)st2[-1])
-						|| st2[-1] == '_'))
-						st2--;
-					snprintf(shc[n_shc].id,
-						 sizeof shc[0].id, "%.*s",
-						 (int)(b2 - st2), st2);
-				}
-			}
-			q = strchr(p, '(');
-			if (!q)
-				goto shc_done;
-			q = src_ident(q + 1, id, sizeof id);
-			for (i = 0; i < n_rng; i++)
-				if (!strcmp(rng[i].id, id))
-					shc[n_shc].mask = rng[i].mask;
-			while (*q == ',' || *q == ' ') {
-				char sid[48];
-				uint32_t k;
-
-				q = src_ident(q, sid, sizeof sid);
-				if (!sid[0])
-					break;
-				k = src_str_idx(str, n_str, sid);
-				if (k < e->dr.n_decl && k < 32u)
-					shc[n_shc].decls |= 1u << k;
-				while (*q == ' ')
-					q++;
-			}
-			if (shc[n_shc].id[0])
-				n_shc++;
-shc_done:
-			continue;
-		}
-		/* "mN >= K" - one matcher over the remembered call. */
-		if (cur >= 0 && n_shc && !strstr(line, "kof_find_str_")) {
-			uint32_t si;
-
-			for (si = 0; si < n_shc; si++) {
-				const char *at = strstr(line, shc[si].id);
-				const char *ge;
-				struct group *g;
-				uint32_t k;
-
-				if (!at)
-					continue;
-				ge = strstr(at, ">=");
-				if (!ge || e->dr.n_grp >= MAX_GROUP)
-					continue;
-				g = &e->dr.grp[e->dr.n_grp];
-				memset(g, 0, sizeof *g);
-				g->rule = shc[si].rule;
-				g->mask = shc[si].mask;
-				g->thresh = (uint32_t)strtoul(ge + 2, NULL, 10);
-				for (k = 0; k < e->dr.n_decl && k < 32u; k++)
-					if (shc[si].decls & (1u << k))
-						e->dr.decl[k].grp |= 1u << e->dr.n_grp;
-				{
-					size_t l = strlen(e->dr.cnd[cur].expr);
-
-					snprintf(e->dr.cnd[cur].expr + l,
-						 sizeof e->dr.cnd[0].expr - l,
-						 "%s%s%u",
-						 l ? (e->dr.cnd[cur].op ? "|" : "&")
-						   : "",
-						 src_negated(line, at) ? "!" : "",
-						 e->dr.n_grp + 1u);
-				}
-				e->dr.n_grp++;
-				break;
-			}
-		}
-		/*
-		 * EVERY CALL ON THE LINE, not the first one.
-		 *
-		 * One call is one matcher - that is the rule the panel is built
-		 * on - but one CONDITION may name several, and the generator
-		 * writes those as one line: "if (A && B)". Reading only the
-		 * first left the second matcher and the "&" between them behind,
-		 * so a rule written through [+ Matcher] inside a condition came
-		 * back as half of itself, and saving it again wrote that half
-		 * over the whole. Measured on a webshell rule: two find_str_any
-		 * calls in, one matcher out.
-		 *
-		 * The appends below already put the separator in from the
-		 * condition's `op`, so what was missing was only ever the
-		 * walk.
-		 */
-		if (strstr(line, "kof_find_str_") && cur >= 0 &&
-		    strstr(line, "||") && !strstr(line, "&&"))
-			e->dr.cnd[cur].op = 1;
-		for (p = strstr(line, "kof_find_str_"); p;
-		     p = strstr(p + 13, "kof_find_str_")) {
-			const char *q = p + 13;
-			char id[48];
-			struct group *g;
-			int rule = 0;
-
-			if (!strncmp(q, "any", 3))
-				rule = 1;
-			else if (!strncmp(q, "multi", 5))
-				rule = 2;
-			/*
-			 * "at" cannot be confused with "all": the two differ at
-			 * the second character. It has to be read, and reading
-			 * it wrong is not a cosmetic fault - left out, a
-			 * generated kof_find_str_at came back as find_all over
-			 * a range named "0x400", which names no range, so the
-			 * matcher silently became "all of these, anywhere" and
-			 * Generate wrote that back. Opening a rule and saving
-			 * it would have replaced it with a different rule.
-			 */
-			else if (!strncmp(q, "at", 2))
-				rule = 3;
-			if (e->dr.n_grp >= MAX_GROUP || cur < 0) {
-				skipped++;
-				continue;
-			}
-			g = &e->dr.grp[e->dr.n_grp];
-			memset(g, 0, sizeof *g);
-			g->rule = rule;
-			q = strchr(p, '(');
-			if (!q)
-				continue;
-			/*
-			 * THE FIRST ARGUMENT IS A PLACE, NOT A RANGE, for this
-			 * one call - see group.at_off and grp_at_parse, which
-			 * reads both a literal and an engine value such as
-			 * ctx->entry_off. It used to be a bare strtoull, and
-			 * both shipped AT rules are entry-relative, so both of
-			 * them imported as "offset 0".
-			 */
-			if (grp_is_at(rule)) {
-				int base = KOF_ANCHOR_BOF;
-				int64_t off = 0;
-
-				q = grp_at_parse(q + 1, &base, &off);
-				g->at_anchor = (uint8_t)base;
-				g->at_off = off;
-			} else {
-				q = src_ident(q + 1, id, sizeof id);
-				for (i = 0; i < n_rng; i++)
-					if (!strcmp(rng[i].id, id))
-						g->mask = rng[i].mask;
-			}
-			while (*q == ',' || *q == ' ') {
-				char sid[48];
-				uint32_t k;
-
-				q = src_ident(q, sid, sizeof sid);
-				if (!sid[0])
-					break;
-				k = src_str_idx(str, n_str, sid);
-				if (k < e->dr.n_decl)
-					e->dr.decl[k].grp |= 1u << e->dr.n_grp;
-				while (*q == ' ')
-					q++;
-			}
-			if (rule == 2) {
-				const char *ge = strstr(p, ">=");
-
-				g->thresh = ge ? (uint32_t)strtoul(ge + 2, NULL,
-								   10) : 2u;
-			}
-			if (pend[0]) {
-				/*
-				 * The LABEL is not part of the note.
-				 *
-				 * generate writes "matcher N: <note>", and this
-				 * kept the whole line - so the next generate
-				 * prefixed a label that was already there and
-				 * the file grew "matcher 1: matcher 1: ..." one
-				 * layer per save. The number is derived from
-				 * where the matcher sits, so reading it back is
-				 * reading back something this side already
-				 * knows.
-				 */
-				const char *note = pend;
-
-				if (strncmp(note, "matcher ", 8) == 0) {
-					const char *colon = strchr(note + 8, ':');
-
-					if (colon) {
-						note = colon + 1;
-						while (*note == ' ')
-							note++;
-					}
-				}
-				snprintf(g->note, sizeof g->note, "%s", note);
-				pend[0] = 0;
-			}
-			{
-				size_t l = strlen(e->dr.cnd[cur].expr);
-
-				snprintf(e->dr.cnd[cur].expr + l,
-					 sizeof e->dr.cnd[0].expr - l, "%s%s%u",
-					 l ? (e->dr.cnd[cur].op ? "|" : "&") : "",
-					 src_negated(line, p) ? "!" : "",
-					 e->dr.n_grp + 1u);
-			}
-			e->dr.n_grp++;
-		}
-
-		if (strstr(line, "KOF_SCAN_INFECT(") ||
-		    strstr(line, "KOF_SCAN_SUSPECT(")) {
-			/*
-			 * An "else" on its own before it is the old shape this
-			 * tool used to write, where the gate's fallback was
-			 * bound to the last child's if. It was meant as the
-			 * gate's, so that is where it goes.
-			 */
-			int at = pend_if >= 0 ? pend_if
-				 : (depth > 0 && depth < 8 ? owner[depth] : -1);
-
-			if (at < 0)
-				at = cur;
-			if (at >= 0) {
-				struct cond *c = &e->dr.cnd[at];
-
-				c->level = strstr(line, "SUSPECT")
-					   ? LV_SUSPECT : LV_INFECT;
-				if (strstr(line, "KOF_MALVAR_GENERIC"))
-					c->var_kind = 1;
-				else if (strchr(line, '"')) {
-					c->var_kind = 2;
-					src_quoted(line, c->variant,
-						   sizeof c->variant);
-				}
-			}
-			pend_if = -1;
-		}
-		/* Whatever this line was, was it something the panel can hold. */
-		if (body && !just_opened && !body_modelled(line))
-			(*e->foreign_w)++;
-
-		for (p = line; *p; p++) {
-			if (*p == '{' && body) {
-				depth++;
-				if (depth >= 0 && depth < 8)
-					owner[depth] = cur;
-				if (depth > 1 && cur >= 0)
-					parent = cur;
-				pend_if = -1;   /* it opened a block */
-			} else if (*p == '}' && body) {
-				if (depth < 8 && depth >= 0)
-					owner[depth] = -1;
-				if (depth > 0)
-					depth--;        /* a stray '}' is not a level below the file */
-				if (depth <= 1)
-					parent = -1;
-			}
-		}
-	}
-	fclose(f);
-
-	/*
-	 * A string's region column, filled from the matcher that searches it.
-	 *
-	 * The source says where each matcher looks, not where each string is -
-	 * and where it looks is the fact the table is for. A string no matcher
-	 * claimed keeps its dash, which is the truthful answer.
-	 */
-	for (i = 0; i < e->dr.n_decl; i++) {
-		struct decl *d = &e->dr.decl[i];
-
-		uint32_t g2;
-
-		if (!d->grp || d->mask)
-			continue;
-		/* Every matcher that searches for it contributes its range. */
-		for (g2 = 0; g2 < e->dr.n_grp; g2++)
-			if (d->grp & (1u << g2))
-				d->mask |= e->dr.grp[g2].mask;
-		if (d->mask)
-			rng_name_of(fmt, d->mask, d->rgn, sizeof d->rgn);
-	}
-	/* The source says what to look for, not where it was found. */
-	for (i = 0; i < e->dr.n_decl; i++)
-		decl_locate(e, &e->dr.decl[i]);
-	if (head_n)
-		snprintf(e->dr.note, sizeof e->dr.note, "%s", head);
-	return skipped ? -1 : 1;
-}
-
-/*
- * Is this path a file of THIS family - "<family>_<number>.c"?
- *
- * By the name alone, because that is the whole of what is being asked: the
- * contents are the draft in hand. The number is not read here; see
- * gen_path_num, which is the other half and is kept separate so a name that
- * does not parse simply is not this family rather than being half of it.
- */
-/*
- * DOES THIS PATH ALREADY CARRY THIS RULE'S NAME - <type>_<family>_<id>.c.
- *
- * `stem` is the type word and the family joined, because BOTH are part of
- * the name now and either one changing has to rename the file. Reading only
- * the family would leave a rule reclassified from botnet to trojan sitting
- * in a file that still says botnet, which is the thing the naming exists to
- * prevent.
- *
- * A file written before the type prefix answers NO, and that is the
- * migration: open an old rule, save it, and it is written under the new
- * name while the old one goes - the same path a renamed family takes.
- */
-static int path_is_family(const char *path, const char *stem)
-{
-	const char *b = strrchr(path, '/');
-	size_t n = strlen(stem);
-
-	b = b ? b + 1 : path;
-	if (strncmp(b, stem, n) || b[n] != '_')
-		return 0;
-	for (b += n + 1; *b && *b != '.'; b++)
-		if (*b < '0' || *b > '9')
-			return 0;
-	return *b == '.';
-}
-
-/* The digits between the underscore and the suffix, or "" when the name is
- * not of that shape. Kept as TEXT, so the width a file was numbered at is the
- * width it is renamed at. */
-static void gen_path_num(const char *path, char *out, size_t max)
-{
-	const char *b = strrchr(path, '/');
-	const char *u, *p;
-	size_t n = 0;
-
-	out[0] = 0;
-	b = b ? b + 1 : path;
-	u = strrchr(b, '_');
-	if (!u)
-		return;
-	for (p = u + 1; *p && *p != '.' && n + 1 < max; p++) {
-		if (*p < '0' || *p > '9')
-			return;
-		out[n++] = *p;
-	}
-	out[n] = 0;
-	if (*p != '.')
-		out[0] = 0;
-}
-
-
-/*
- * Fill the draft from a signature that fired on this object.
- *
- * The point is a starting position, not a copy: a researcher writing a variant
- * begins from what the existing rule already knows about the family, and typing
- * its strings back in by hand is the tedious half of that.
- *
- * What comes across is everything the database holds - the family, the type,
- * each declared string with its case and word handling, and the region each one
- * was actually found in. What does not is the logic. A module's conditions are
- * compiled code; the pack keeps the strings and the names, not which of them
- * were required together or in what combination. So they all land in one
- * find_all and the row says so, for the researcher to take apart.
- */
-void draft_from_touch(struct kof_editor *e, const struct kof_touch *t)
-{
-	uint32_t i;
-
-	if (!t)
-		return;
-	{
-		/* Through a local: the family may be a pointer into the very
-		 * object being written to, and snprintf may not overlap. */
-		char fam[64];
-
-		snprintf(fam, sizeof fam, "%s", t->family ? t->family : "");
-		snprintf(e->dr.family, sizeof e->dr.family, "%s", fam);
-	}
-	for (i = 0; i < MALTYPE_N; i++)
-		if (t->maltype == i)
-			e->dr.maltype = i;
-
-	for (i = 0; i < t->n_str && e->dr.n_decl < MAX_DECL; i++) {
-		const struct kof_touch_str *st = &t->str[i];
-		struct decl *d = &e->dr.decl[e->dr.n_decl];
-
-		if (!st->pool_len)
-			continue;
-		memset(d, 0, sizeof *d);
-		d->hex = st->kind == KOF_STR_HEX;
-		if (d->hex) {
-			/*
-			 * The pack holds a hex marker as a COMPILED PROGRAM.
-			 * Turned back into what its author wrote, because that
-			 * is the only form a person can read and the only one
-			 * that can be written back out - see decl.hexs.
-			 *
-			 * And then read the same way the source loader reads
-			 * the same spelling out of a file, deliberately: a
-			 * signature opened without its source and the same
-			 * signature opened with it must produce the same draft,
-			 * or "is this a duplicate of a rule in the tree" gets
-			 * two answers for one rule.
-			 */
-			size_t hn, k;
-
-			snprintf(d->hexs, sizeof d->hexs, "%s", st->text);
-			if (!d->hexs[0])
-				continue;
-			decl_from_hexs(d);
-			(void)hn; (void)k;
-		} else {
-			d->bytes = malloc(st->pool_len);
-			if (!d->bytes)
-				break;
-			memcpy(d->bytes, st->pool, st->pool_len);
-			d->len = st->pool_len;
-			d->nbytes = d->len;
-		}
-		d->icase = (st->flags & KOF_STR_ICASE) != 0;
-		d->fullword = (st->flags & KOF_STR_TOKEN) ? KOF_WORD_TOKEN
-			    : (st->flags & KOF_STR_FULLWORD) ? KOF_WORD_FULLWORD
-			    : KOF_WORD_SUBSTRING;
-		d->obj = e->cur;
-		/*
-		 * THE RANGE THE MODULE DECLARED, which the pack does keep.
-		 *
-		 * This used to derive a region from where the bytes turned out
-		 * to be, on the grounds that "the module's range is not in the
-		 * pack either". That was wrong: the pack stores each module's
-		 * scan_mask, the engine reads it on every search, and
-		 * kof_touch_object now carries it through.
-		 *
-		 * Deriving it was not merely roundabout, it was unsound. A
-		 * marker declared in SYM_EXP is not in the file at all - the
-		 * block's records are built - so node_at found nothing, the
-		 * range came out "-", decl_locate then searched the file
-		 * instead of the block, and the row called a marker absent
-		 * that the scan finds every time. The engine and the panel
-		 * disagreeing about one object is the one answer this pane
-		 * must never give.
-		 *
-		 * Zero stays zero: a module that names no region cannot be
-		 * skipped by region, and widening it to whole-file here would
-		 * be inventing a range it never declared.
-		 */
-		d->mask = t->scan_mask;
-		d->mask0 = t->scan_mask;
-		if (d->mask)
-			rng_name_of(e->obj[d->obj].fmt, d->mask, d->rgn,
-				    sizeof d->rgn);
-		else
-			snprintf(d->rgn, sizeof d->rgn, "-");
-		d->grp = 1u;             /* matcher 1, the only one here */
-		d->at = st->at;
-		e->dr.n_decl++;
-	}
-	if (!e->dr.n_decl)
-		return;
-	/*
-	 * The pack says where ONE occurrence is; the pane wants them all.
-	 *
-	 * st->at is what the scan happened to stop on. Re-running the search
-	 * here fills the occurrence list and settles at/at_rgn the same way the
-	 * source path does, so a draft built from a database and a draft built
-	 * from a file light the same bytes. The declared region above is left
-	 * alone: the pack kept the strings and not the logic, so where the
-	 * bytes are IS the only reading of where the module would look.
-	 */
-	{
-		uint32_t di;
-
-		for (di = 0; di < e->dr.n_decl; di++)
-			decl_locate(e, &e->dr.decl[di]);
-	}
-
-	memset(&e->dr.grp[0], 0, sizeof e->dr.grp[0]);
-	e->dr.n_grp = 1;
-	e->dr.cur_grp = 0;
-	/*
-	 * THE PRECONDITIONS, restored the same way the range is.
-	 *
-	 * They are in the pack - the host tests them on every object - and the
-	 * panel writes them back out on Generate. Not reading them meant a rule
-	 * opened from the database and saved again lost every KOF_TARGET_ line
-	 * it declared: an x86-only rule became any-architecture, a rule that
-	 * skipped small files stopped skipping them. Nothing said so, because
-	 * the generated file simply had fewer lines than it used to.
-	 *
-	 * An architecture or subtype mask with more than one bit in it cannot
-	 * be shown by a panel that offers one choice, so it is left off rather
-	 * than shown wrong - and draft_missing refuses to generate over it, so
-	 * the rule is not quietly widened instead.
-	 */
-	if (t->size_min) {
-		e->dr.opt_on[OPT_SIZE_MIN] = 1;
-		e->dr.opt_val[OPT_SIZE_MIN] = t->size_min;
-	}
-	if (t->arch_mask && (t->arch_mask & (t->arch_mask - 1u)) == 0u) {
-		uint32_t k;
-
-		for (k = 0; k < ARCH_N; k++)
-			if (t->arch_mask == (1u << arch_word[k].val)) {
-				e->dr.opt_on[OPT_ARCH] = 1;
-				e->dr.opt_val[OPT_ARCH] = k;
-				break;
-			}
-	}
-	if (t->subtype_mask && (t->subtype_mask & (t->subtype_mask - 1u)) == 0u) {
-		uint32_t k;
-
-		for (k = 0; k < 32u; k++)
-			if (t->subtype_mask == (1u << k)) {
-				e->dr.opt_on[OPT_SUBTYPE] = 1;
-				e->dr.opt_val[OPT_SUBTYPE] = k;
-				break;
-			}
-	}
-
-	/* The range is the module's own, so the matcher shows what the rule
-	 * actually searches rather than WHOLE-FILE. */
-	e->dr.grp[0].mask = t->scan_mask;
-	snprintf(e->dr.grp[0].note, sizeof e->dr.grp[0].note,
-		 "from %s - the database keeps the strings, not the logic",
-		 t->family[0] ? t->family : "the database");
-
-	memset(&e->dr.cnd[0], 0, sizeof e->dr.cnd[0]);
-	snprintf(e->dr.cnd[0].expr, sizeof e->dr.cnd[0].expr, "1");
-	e->dr.cnd[0].parent = -1;
-	e->dr.cnd[0].level = LV_INFECT;
-	e->dr.n_cnd = 1;
-	e->dr.cur_cnd = 0;
-	say_note(e, "Loaded %u string(s) from %s - markers only, no logic",
-		 e->dr.n_decl,
-		 t->family[0] ? t->family : "the database");
-	e->dr.saved_hash = draft_hash(e);
-}
-
-
-/*
- * IS EVERY TARGET THIS DRAFT NAMES A COLLECTED RECORD - asked by generate(),
- * which has to pick a directory, and by the emitter inside it, which has to
- * pick between KOF_TARGET_EVENT and KOF_TARGET_FORMAT. One answer, because the
- * two decisions are the same question, and a rule written as an event rule but
- * filed with the file rules is exactly the drift this prevents.
- *
- * False for an empty mask: a draft with no target is not an event rule, it is
- * a draft that cannot be written at all - draft_missing_of refuses it.
- */
-static int draft_all_events(const struct kof_editor *e)
-{
-	uint32_t fi;
-	int n_ev = 0, n_all = 0;
-
-	for (fi = 0; fi < FMT_WORD_N; fi++) {
-		if (!(e->dr.fmt_mask & (1u << fi)))
-			continue;
-		n_all++;
-		if (kof_format_group((uint8_t)fi) == KOF_FGRP_EVENT)
-			n_ev++;
-	}
-	return n_all && n_ev == n_all;
-}
-
-void generate(struct kof_editor *e, int as_new)
-{
-	{
-		/*
-		 * The button is greyed when this returns something, but the
-		 * key that also runs it is not - and a draft that is short of
-		 * a matcher would otherwise be written out as a module that
-		 * searches for nothing.
-		 */
-		/* The same question the button asked, with the same argument:
-		 * a key runs this too, and the two must not disagree about
-		 * whether Save As is allowed on a read-only rule. */
-		const char *why = draft_missing_of(e, as_new);
-		int near_miss = 0;
-		const char *dup;
-
-		if (why) {
-			/* A reason is a thing still to do and takes "first"; one that
-			 * ends in a full stop is a whole sentence - a refusal, not a
-			 * to-do - and is shown as it stands. */
-			size_t wl = strlen(why);
-
-			say_err(e, wl && why[wl - 1u] == '.' ? "%s" : "%s first", why);
-			return;
-		}
-		dup = draft_dup(e, &near_miss);
-		/* draft_dup never names the file this draft came from (Save rewrites it),
-		 * but Save As of a draft nobody changed writes an identical copy of it. */
-		if (!dup && as_new && e->dr.gen_path[0] && !draft_dirty(e)) {
-			say_note(e, "Same markers as %s - edit that instead",
-				 e->dr.gen_path);
-			return;
-		}
-		if (dup && !near_miss) {
-			say_note(e, "Same markers as %s - edit that instead",
-				 dup);
-			return;
-		}
-		/*
-		 * NO "NOTHING CHANGED" REFUSAL - see save_ok in kofviewer.c.
-		 *
-		 * This asked draft_dirty, which is a hash of the fields the
-		 * editor knows to hash. A field it does not cover changes
-		 * nothing about the hash, so an edit to one came back as
-		 * "nothing changed since the last save" and the write did not
-		 * happen. Rewriting a file that is already identical costs one
-		 * write; refusing a write the reader asked for costs them the
-		 * edit, and they only find out later.
-		 */
-	}
-	struct object *ob = &e->obj[e->dr.decl[0].obj];
-	char path[400], safe[48], fname[48], stem[80];
-	/* The file this Save is replacing because the family was renamed, or
-	 * empty - removed only after the new one is written whole. */
-	char rename_from[400] = { 0 };
-	uint32_t i, k;
-	FILE *f;
-	size_t j = 0;
-
-	/* Kept, not cleared: it is the answer to "which file is this draft's",
-	 * and clearing it here made every generate look like the first one -
-	 * so a draft opened from a file wrote a numbered copy beside it. */
-	/*
-	 * NOTHING TO WRITE, AND IT SAYS SO BY WRITING NOTHING.
-	 *
-	 * A SECOND COPY of a rule draft_missing_of already states, and the copy
-	 * was left behind when blocks became a thing a rule can be made of: a
-	 * block-only draft has no markers, so this returned - silently, with
-	 * the button green and the status line showing the rule's path, which
-	 * reads exactly like a Save that worked.
-	 *
-	 * It stays because the key that runs generate is not gated by the
-	 * button, but it asks the same question the button asked.
-	 */
-	if ((!e->dr.n_decl && !draft_uses_blocks(e)) || !e->dr.family[0])
-		return;
-
-	for (i = 0; e->dr.family[i] && j + 1u < sizeof safe; i++)
-		if (isalnum((unsigned char)e->dr.family[i]) || e->dr.family[i] == '_')
-			safe[j++] = e->dr.family[i];
-	safe[j] = 0;
-	/*
-	 * THE FILE NAME IS LOWER CASE; THE FAMILY NAME IS NOT.
-	 *
-	 * They share their letters and nothing else. A signature tree sorted by
-	 * a tool that folds case, or read on a filesystem that does, should not
-	 * depend on how a researcher typed the family into the panel - so the
-	 * name on disk is settled here, once.
-	 *
-	 * What the module DECLARES itself to be keeps the spelling it was
-	 * given: KOF_TARGET_NAME below writes `safe`, and that string is the
-	 * verdict a user reads. "mirai" is not how the family is written. The
-	 * two used to be one variable, which is why lowering the path lowered
-	 * the verdict with it.
-	 */
-	for (i = 0; safe[i]; i++)
-		fname[i] = (char)tolower((unsigned char)safe[i]);
-	fname[i] = 0;
-	if (!j)
-		return;
-
-	/*
-	 * THE FILE NAME LEADS WITH THE TYPE: <type>_<family>_<id>.c.
-	 *
-	 * ksigbuilder reads it back and refuses a file whose prefix
-	 * disagrees with KOF_TARGET_NAME, so the name is checked rather
-	 * than merely conventional - see nameform_read. The id stays the
-	 * TRAILING number, which is what the detection variant is made of,
-	 * so adding the prefix renames no finding.
-	 */
-	snprintf(stem, sizeof stem, "%s_%s",
-		 e->dr.maltype < MALTYPE_N ? maltype_word[e->dr.maltype]
-					   : maltype_word[0], fname);
-	for (i = 0; stem[i]; i++)
-		stem[i] = (char)tolower((unsigned char)stem[i]);
-
-	/*
-	 * One directory serves as both the source tree and the output, because
-	 * they are the same thing: what this writes IS a signature source.
-	 *
-	 * A content root and one of its kind-directories are both reasonable
-	 * things to be given. "bases" holds signatures/, decomp/ and unp/ and a
-	 * detection does not belong loose at its top; "bases/signatures" is
-	 * already the right place. So a signatures/ subdirectory, where one
-	 * exists, is where the file goes.
-	 */
-	{
-		char dir[300];
-		struct stat st;
-
-		if (!e->basedir || !e->basedir[0]) {
-			/* The buttons are greyed for this, but a key runs
-			 * generate too - see the note at the top of this
-			 * function about the two not being allowed to
-			 * disagree. */
-			say_err(e, "%s", "No signature tree given - start "
-				"with --bases <dir>");
-			return;
-		}
-		/*
-		 * A SIMILARITY BLOCK NO LONGER PICKS A DIRECTORY.
-		 *
-		 * Block rules had bases/mutation to themselves, on the argument
-		 * that one block made a rule a different kind of content.
-		 * That argument does not survive reading the files: a mutation
-		 * rule declares KOF_TARGET_FORMAT and KOF_TARGET_NAME and
-		 * KOF_SCAN_INFECT like any other, names a family like any
-		 * other, and most of them carry ordinary strings beside the
-		 * block. It is a detection that happens to measure a block,
-		 * which is what dbcore.h says about why the blocks are a
-		 * section and not a pack kind.
-		 *
-		 * The split also cost something real: two directories meant
-		 * two files could be called gafgyt_00.c, and the number in
-		 * the name IS the variant - so the database shipped two rules
-		 * both saying Gafgyt.00. Eleven such pairs.
-		 */
-		/*
-		 * A RULE ABOUT A COLLECTED RECORD LIVES IN bases/evts.
-		 *
-		 * The same argument as mutation, one axis over: bases/signatures
-		 * holds detections about FILES, and a rule whose target is a
-		 * process start or a submission is not about a file at all. It
-		 * is prefiltered apart by the engine - the target byte sees to
-		 * that - packed apart by ksigbuilder, into sigs-proc and
-		 * sigs-amsi, and it changes for different reasons. A directory
-		 * is what says so to the person reading the tree.
-		 *
-		 * EVERY target, not any: a draft naming a script AND a
-		 * submission is a rule about files as well, and it goes where
-		 * file rules go.
-		 */
-		if (draft_all_events(e)) {
-			snprintf(dir, sizeof dir, "%s/evts", e->basedir);
-		} else {
-			snprintf(dir, sizeof dir, "%s/signatures", e->basedir);
-			if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
-				snprintf(dir, sizeof dir, "%s", e->basedir);
-		}
-		if (kof_mkdir(dir, 0777) != 0 && errno != EEXIST) {
-			say_err(e, "Cannot create %.60s - %s", dir,
-				strerror(errno));
-			return;
-		}
-		/*
-		 * A file this session created, or a name nothing is using.
-		 *
-		 * Two families are often written from the same sample and a
-		 * researcher writes several drafts for one family, so a name
-		 * colliding is normal rather than exceptional - and silently
-		 * overwriting somebody's signature because the family matched
-		 * is not a thing to do quietly.
-		 *
-		 * So: whatever this draft has already been written to stays
-		 * its file, and generate keeps updating it. Otherwise a new
-		 * one is numbered.
-		 *
-		 * ALWAYS NUMBERED, even when the bare name is free.
-		 *
-		 * A family is written more than once - a variant, a second
-		 * sample, a rule for the loader beside the rule for the payload
-		 * - so Mirai.c is not the name of a signature, it is the name
-		 * of the first one somebody happened to write. Numbering from
-		 * the start means the second file is not a special case, the
-		 * set reads as a set, and no name has to be renamed later to
-		 * make room. Nothing this session did not create is touched.
-		 */
-		e->dr.gen_ok = 0;
-		/*
-		 * RENAMING THE FAMILY RENAMES THE FILE.
-		 *
-		 * The file is named after the family, so a rule whose family is
-		 * corrected keeps a name that says the old one - and the tree
-		 * is then a set of files whose names no longer say what is in
-		 * them, which is the one thing the naming was for. Save writes
-		 * the new name and the old file goes; the number is kept where
-		 * it is free, so a family's rules stay in the order they were
-		 * written.
-		 *
-		 * SAVE AS IS NOT A RENAME. It derives a new rule and leaves the
-		 * original alone, so it takes the branch below like any other
-		 * new file.
-		 */
-		if (!as_new && e->dr.gen_path[0] &&
-		    !strncmp(e->dr.gen_path, dir, strlen(dir)) &&
-		    !path_is_family(e->dr.gen_path, stem)) {
-			char num[16];
-			struct stat es;
-
-			/* The file this Save replaces. Removed at the end, and
-			 * only if the write came out whole. */
-			snprintf(rename_from, sizeof rename_from, "%.*s",
-				 (int)sizeof rename_from - 1, e->dr.gen_path);
-			/* Its own number first, so a family's rules keep the
-			 * order they were written in. Taken, it is numbered
-			 * afresh below like any other new name. */
-			gen_path_num(e->dr.gen_path, num, sizeof num);
-			if (num[0]) {
-				snprintf(path, sizeof path, "%s/%s_%s.c", dir,
-					 stem, num);
-				if (stat(path, &es) != 0)
-					goto have_path;
-			}
-		}
-		if (!rename_from[0] && !as_new && e->dr.gen_path[0] &&
-		    !strncmp(e->dr.gen_path, dir, strlen(dir))) {
-			snprintf(path, sizeof path, "%.*s",
-				 (int)sizeof path - 1, e->dr.gen_path);
-		} else {
-			/*
-			 * The first number nothing is using, and the number
-			 * gets WIDER rather than running out.
-			 *
-			 * Two digits is the everyday width and reads well: a
-			 * family with a handful of rules gets _00 to _09. A
-			 * family with more than a hundred is not an error to
-			 * refuse, it is a family somebody has worked on, so the
-			 * width grows instead. Falling off the end of a fixed
-			 * width would leave the last name - which exists -
-			 * about to be overwritten, and not overwriting is the
-			 * whole reason these are numbered.
-			 */
-			static const unsigned wide[] = { 2u, 4u, 5u };
-			unsigned lim[] = { 100u, 10000u, 100000u };
-			size_t w;
-			int free_one = 0;
-
-			for (w = 0; w < sizeof wide / sizeof wide[0] &&
-				    !free_one; w++) {
-				unsigned n;
-
-				for (n = 0; n < lim[w]; n++) {
-					struct stat es;
-
-					snprintf(path, sizeof path,
-						 "%s/%s_%0*u.c", dir, stem,
-						 (int)wide[w], n);
-					if (stat(path, &es) != 0) {
-						free_one = 1;
-						break;
-					}
-				}
-			}
-			if (!free_one) {
-				say_err(e, "%.40s_00 to _99999 are all taken",
-					stem);
-				return;
-			}
-		}
-have_path:
-		;
-	}
-	/*
-	 * THE stat ABOVE SAID THE NAME WAS FREE; THIS IS WHAT OPENS IT.
-	 *
-	 * Those are not the same statement. Between the probe that picked
-	 * "<family>_07.c" and the open, the name can be made a symlink, and
-	 * fopen(,"w") follows one - so the draft is written wherever the link
-	 * points. kofrepart.c says the same of its own lstat-then-fopen and
-	 * closes it the same way: the race is LOST rather than won.
-	 *
-	 * The mode is the umask's, not 0600 - see kof_fopen_trunc_mode. This
-	 * file is a .c to be built and committed, and an owner-only source
-	 * file is a build failure waiting for the next account in the tree.
-	 * Truncating, not refusing, because re-saving a draft over its own
-	 * previous file is the ordinary case here.
-	 */
-	f = kof_fopen_trunc_mode(path, 0666);
-	if (!f) {
-		say_err(e, "Cannot write %.60s - %s", path, strerror(errno));
-		return;
-	}
-
-	{
-		/*
-		 * The sample's name, not the path it happened to be at.
-		 *
-		 * A path names a machine as much as a file - somebody's home
-		 * directory, a mount that will not exist next week - and none
-		 * of that helps whoever reads this file later. The name is the
-		 * part that identifies the sample.
-		 */
-		const char *base = draft_sample(e);
-		char today[24], line[128];
-		uint32_t m;
-
-		/*
-		 * This sample and this author join what the file already
-		 * recorded rather than replacing it - the list was read back
-		 * out of the block when the rule was opened. Testing a rule
-		 * against a second sample used to erase the first.
-		 */
-		meta_sample_line(e, line, sizeof line);
-		/*
-		 * An entry this build wrote before hashes were recorded is the
-		 * SAME sample, so it is replaced rather than joined: two lines
-		 * for one file, one of them saying less, is not a record of two
-		 * samples.
-		 */
-		for (m = 0; m < (*e->n_sample); m++)
-			if (!strcmp(e->sample[m], base)) {
-				snprintf(e->sample[m], 128, "%s", line);
-				break;
-			}
-		meta_add(e->sample, &(*e->n_sample), MAX_META, line);
-		meta_add_who(e->who, &(*e->n_who), MAX_META,
-			     meta_user());
-		meta_today(today, sizeof today);
-		if (!(*e->made)[0])
-			snprintf(*e->made, sizeof *e->made, "%s",
-				 today);
-
-		fprintf(f, "/*\n * Generated by KOFViewer.\n *\n");
-		for (m = 0; m < (*e->n_sample); m++)
-		{
-			fputs(" * Test sample: ", f);
-			comment_put(f, e->sample[m]);
-			fputc('\n', f);
-		}
-		if (ob->packer[0])
-		{
-			fputs(" * Unpacked by: ", f);
-			comment_put(f, ob->packer);
-			fputc('\n', f);
-		}
-		for (m = 0; m < (*e->n_who); m++)
-		{
-			fputs(" * Researcher:  ", f);
-			comment_put(f, e->who[m]);
-			fputc('\n', f);
-		}
-		fputs(" * Created ", f);
-		comment_put(f, (*e->made));
-		fputs(", updated ", f);
-		comment_put(f, today);
-		fputc('\n', f);
-		/*
-		 * The two version numbers that exist and that decide whether
-		 * this file still works: the pack format a database must be in
-		 * for this build to load it, and the module ABI the compiled
-		 * signature must present. The engine has no version string of
-		 * its own yet - kofeng.h says so beside kdb_version -
-		 * and inventing one here would put a number in every file that
-		 * nothing else in the tree could confirm.
-		 */
-		/* Metadata: when this source was written and against what. The
-		 * db format is the one this build WRITES, which is the honest
-		 * thing to record here - the file is a source, not a pack. */
-		fprintf(f, " * Engine:      db format %u.%u, module ABI %u\n",
-			(unsigned)KOF_PACK_MAJOR, (unsigned)KOF_PACK_MINOR,
-			(unsigned)KOFSIG_ABI_VERSION);
-		fprintf(f, " */\n");
-	}
-	/*
-	 * The author's own line about the module, in a block of its own.
-	 *
-	 * Separate from the one above deliberately. Both are leading comments
-	 * and both come back through the same reader, so what tells them apart
-	 * has to be structure rather than wording: the block that opens with
-	 * the banner is this tool's, everything else in the header is the
-	 * author's. Sharing one block meant the reader had to recognise the
-	 * generated lines by their English, and anything a person wrote that
-	 * happened to start "Test sample:" would have gone missing.
-	 *
-	 * Guarded the way every other emitted comment is: the text cannot hold
-	 * a newline, so the only thing to stop is a sequence that would close
-	 * the comment early.
-	 */
-	if (e->dr.note[0]) {
-		const char *q;
-
-		fprintf(f, "\n/*\n * ");
-		for (q = e->dr.note; *q; q++)
-			fputc((*q == '*' && q[1] == '/') ? ' ' : *q, f);
-		fprintf(f, "\n */\n");
-	}
-	fprintf(f, "\n#include <kofmod/kofsig.h>\n");
-	if (draft_uses_blocks(e))
-		fprintf(f, "#include <kofmod/kofmutation.h>\n");
-	fprintf(f, "\n");
-
-	/* The format the object actually is, so the host can rule the module
-	 * out without entering it - and so the regions above mean something. */
-	/*
-	 * EVERY FORMAT THE DRAFT NAMES, as the OR ksigbuilder reads.
-	 *
-	 * It used to be the format of whatever object the draft happened to be
-	 * built on - one value, because this emitter had one, not because the
-	 * engine does: KOF_TARGET_FORMAT has always taken a mask and
-	 * resolve_format loops over the names, erroring with "use one
-	 * declaration with '|'". The same marker lives in an ELF that carries a
-	 * command, in the script that is one, and in the plaintext decoded out
-	 * of a base64 run, and a rule pinned to one of those missed the others.
-	 */
-	/*
-	 * KOF_TARGET_EVENT WHEN EVERY TARGET IS ONE, and it is the same
-	 * declaration - ksigbuilder reads the two names into one slot. The
-	 * spelling is for the reader: a rule about a process start is not
-	 * about a file format, and asking an author to call a collected record
-	 * a format is the thing that second name exists to avoid.
-	 *
-	 * Every one of them, not any: a draft naming a script AND a submission
-	 * is a rule about both, and there is no honest word for that pair
-	 * other than the one the axis is called by.
-	 */
-	{
-		uint32_t m = e->dr.fmt_mask;
-		int fi, first = 1;
-
-		fprintf(f, "%s(", draft_all_events(e) ? "KOF_TARGET_EVENT"
-						      : "KOF_TARGET_FORMAT");
-		for (fi = 0; fi < (int)FMT_WORD_N; fi++) {
-			if (!(m & (1u << fi)))
-				continue;
-			fprintf(f, "%s%s", first ? "" : " | ",
-				fmt_word((uint32_t)fi));
-			first = 0;
-		}
-		/* An empty mask cannot be written - draft_missing_of refuses it
-		 * - so this is the belt on a draft that reached here anyway. */
-		if (first)
-			fprintf(f, "KOF_FMT_ANY");
-		fprintf(f, ");\n");
-	}
-	fprintf(f, "KOF_TARGET_NAME(%s, \"%s\");\n\n",
-		kof_maltype_ident(e->dr.maltype), safe);
-
-	/* One declaration per declared range, spelled as the OR of the region
-	 * names it holds - which is what a source has to write and what
-	 * somebody grepping for it will search for. */
-	if (e->dr.opt_on[OPT_SIZE_MIN])
-		fprintf(f, "KOF_TARGET_SIZE_MIN(%llu);\n",
-			(unsigned long long)e->dr.opt_val[OPT_SIZE_MIN]);
-	if (e->dr.opt_on[OPT_ARCH])
-		fprintf(f, "KOF_TARGET_ARCH(KOF_ARCH_%s);\n",
-			arch_word[e->dr.opt_val[OPT_ARCH] < ARCH_N
-				  ? e->dr.opt_val[OPT_ARCH] : 0].word);
-	if (e->dr.opt_on[OPT_SUBTYPE]) {
-		/*
-		 * THE FORMAT THE SUBTYPE IS ABOUT IS THE DECLARED ONE, and it
-		 * was the OBJECT's.
-		 *
-		 * Those agreed for as long as a subtype could only be set from
-		 * the object - seeded from its own parse, or picked from a
-		 * menu that only offered it for executables. Both now have a
-		 * second source: Format > Scripts names a language, which sets
-		 * the format and the subtype together, and it can be used while
-		 * looking at something that is not a script.
-		 *
-		 * Keyed on the object, that wrote the script language's INDEX
-		 * through the PE table - "KOF_TARGET_SUBTYPE(KGENOME_PE_DLL)" on a
-		 * rule the researcher wrote for php, which compiles and targets
-		 * the wrong thing. The subtype axis is per format, so the
-		 * format it is read against has to be the one the rule
-		 * DECLARES.
-		 *
-		 * Only when the rule declares exactly one. A subtype means
-		 * nothing across two formats - the values overlap - and the
-		 * object is the best remaining answer for a draft that names
-		 * none.
-		 */
-		uint8_t fm = ob->ctx.format;
-		uint32_t only = e->dr.fmt_mask;
-
-		if (only && (only & (only - 1u)) == 0) {
-			uint8_t b = 0;
-
-			while (!(only & 1u)) {
-				only >>= 1;
-				b++;
-			}
-			fm = b;
-		}
-
-		/* Through the same vocabulary the reader uses - see sub_vocab
-		 * for what it cost when these were two separate lists. */
-		{
-			const char *pre;
-			uint32_t n;
-			const char *const *tab = sub_vocab(fm, &pre, &n);
-
-			if (tab)
-				fprintf(f, "KOF_TARGET_SUBTYPE(%s%s);\n", pre,
-					tab[e->dr.opt_val[OPT_SUBTYPE] < n
-					    ? e->dr.opt_val[OPT_SUBTYPE] : 0]);
-		}
-	}
-	if (e->dr.opt_on[OPT_SIZE_MIN] || e->dr.opt_on[OPT_ARCH] ||
-	    e->dr.opt_on[OPT_SUBTYPE])
-		fprintf(f, "\n");
-
-	/*
-	 * One declaration per distinct range the matchers actually search.
-	 *
-	 * Derived here rather than kept as a list, for the same reason the
-	 * panel derives the summary: a range has no existence apart from a
-	 * matcher naming one, and a kept list goes stale the moment a marker
-	 * moves between matchers. This used to walk a list that nothing filled
-	 * any more, so every generated module declared no range at all and then
-	 * searched one.
-	 */
-	{
-		uint32_t seen[MAX_GROUP], n_seen = 0, g2;
-
-		for (g2 = 0; g2 < e->dr.n_grp; g2++) {
-			uint32_t m, b, q;
-			char nm[RNG_IDENT_MAX];
-			int first = 1;
-
-			if (!grp_count(e, g2))
-				continue;
-			m = grp_mask(e, g2);
-			for (q = 0; q < n_seen; q++)
-				if (seen[q] == m)
-					break;
-			if (q < n_seen)
-				continue;
-			seen[n_seen++] = m;
-
-			rng_ident(draft_fmt(e, ob->fmt), m, nm, sizeof nm);
-			fprintf(f, "KOF_TARGET_RANGE(%s, ", nm);
-			/*
-			 * The symbol halves first, and by their own names.
-			 *
-			 * The loop below spells a bit by asking the FORMAT for
-			 * it, and these two belong to no format - so they came
-			 * out unnamed, `first` stayed set, and the range was
-			 * written as KOF_SCAN_ALL. A rule meaning "search the
-			 * exports" would have compiled, shipped, and searched
-			 * the whole file.
-			 */
-			if (!(m & KOF_SCAN_ALL) && (m & KOF_SCAN_SYM_IMP)) {
-				fprintf(f, "KOF_SCAN_SYM_IMP");
-				first = 0;
-			}
-			if (!(m & KOF_SCAN_ALL) && (m & KOF_SCAN_SYM_EXP)) {
-				fprintf(f, "%sKOF_SCAN_SYM_EXP",
-					first ? "" : " | ");
-				first = 0;
-			}
-			if (!(m & KOF_SCAN_ALL))
-				for (b = 0; b < 30u; b++) {
-					const char *w;
-
-					if (!(m & (1u << b)))
-						continue;
-					w = draft_region_word(e, ob->fmt,
-							      1u << b);
-					if (!w)
-						continue;
-					fprintf(f, "%s%s",
-						first ? "" : " | ", w);
-					first = 0;
-				}
-			if (first)
-				fprintf(f, "KOF_SCAN_ALL");
-			fprintf(f, ");\n");
-		}
-		if (n_seen)
-			fprintf(f, "\n");
-	}
-
-	for (i = 0; i < e->dr.n_decl; i++) {
-		const struct decl *d = &e->dr.decl[i];
-
-		if (d->hex) {
-			fprintf(f, "KOF_DEFINE_HEXSTR(s%u, \"", i);
-			/* The spelling, when the pattern has one that bytes
-			 * cannot hold. Otherwise the bytes, which for a
-			 * pattern declared from a selection is exact. */
-			if (d->hexs[0])
-				fputs(d->hexs, f);
-			else
-				for (j = 0; j < d->nbytes; j++)
-					fprintf(f, "%02X", d->bytes[j]);
-			/*
-			 * THE OPTIONS, AND ONLY WHEN THEY SAY SOMETHING.
-			 *
-			 * The short form means exact case, matching anywhere,
-			 * and that is what most hex patterns are - a byte
-			 * pattern has no case and no word to be part of.
-			 * Writing the defaults onto all of them would be noise
-			 * on the majority to serve the few, so the long form
-			 * appears exactly where a choice was made.
-			 */
-			if (d->icase || d->fullword)
-				fprintf(f, "\", %s, %s);\n",
-					d->icase ? "KOF_CASE_ICASE"
-						 : "KOF_CASE_EXACT",
-					d->fullword == KOF_WORD_TOKEN
-						? "KOF_WORD_TOKEN"
-						: d->fullword == KOF_WORD_FULLWORD
-						? "KOF_WORD_FULLWORD"
-						: "KOF_WORD_SUBSTRING");
-			else
-				fprintf(f, "\");\n");
-		} else {
-			fprintf(f, "KOF_DEFINE_STR%s(s%u, \"",
-				d->wide ? "_WIDE" : "", i);
-			decl_put_literal(f, d->bytes, d->nbytes);
-			fprintf(f, "\", %s, %s);\n",
-				d->icase ? "KOF_CASE_ICASE" : "KOF_CASE_EXACT",
-				d->fullword == KOF_WORD_TOKEN
-					? "KOF_WORD_TOKEN"
-					: d->fullword == KOF_WORD_FULLWORD
-					? "KOF_WORD_FULLWORD"
-					: "KOF_WORD_SUBSTRING");
-		}
-	}
-
-	/*
-	 * AND THE SIMILARITY BLOCKS, after the markers and for the same reason
-	 * they are here at all: a declaration is what the rule is written FROM,
-	 * and the body below names them.
-	 *
-	 * Only the blocks a matcher actually names. A ticked block nothing uses
-	 * is a draft that is not finished - draft_missing_of says so, and the
-	 * button is grey until it is - so one cannot reach here; emitting only
-	 * the used ones is what keeps that true rather than assumed.
-	 *
-	 * Each carries where it was cut from as a comment, which is the one
-	 * thing a reader cannot recover from the numbers.
-	 */
-	{
-		uint32_t g, w, wrote = 0;
-
-		for (g = 0; g < e->dr.n_grp * GRP_SIM_MAX; g++) {
-			const struct group *q = &e->dr.grp[g / GRP_SIM_MAX];
-			const struct grp_sim_item *it;
-			const struct mtn_block *b;
-
-			/*
-			 * ONE DECLARATION PER BLOCK ITEM, walked as matcher
-			 * then item so the order is the order they are read
-			 * in. A matcher naming three blocks declares three,
-			 * which is what emit_matcher then scores.
-			 */
-			if (q->kind != GRP_KIND_SIM ||
-			    g % GRP_SIM_MAX >= q->n_sim)
-				continue;
-			it = &q->sim[g % GRP_SIM_MAX];
-			if (it->what != SIM_IT_BLOCK || it->blk >= e->dr.n_blk)
-				continue;
-			b = &e->dr.blk[it->blk];
-			/* A blank line BETWEEN blocks, not before the first -
-			 * whatever came above has already left one. */
-			if (wrote)
-				fputc('\n', f);
-			fprintf(f, "/* +0x%llx, %llu bytes, %u hash(es) */\n",
-				(unsigned long long)b->off,
-				(unsigned long long)b->len, b->n_hash);
-			/* The library half is a macro of its own - see
-			 * KOF_MUTATION_BLOCK_LIB. The rest of the declaration is
-			 * identical, so only the name changes here. */
-			fprintf(f, "KOF_MUTATION_BLOCK%s(blk_%08x, %s, "
-				"KOF_MUTATION_%s,\n",
-				b->side == KGENOME_MUTATION_SIDE_LIB ? "_LIB" : "",
-				b->id,
-				b->anywhere ? "KOF_SCAN_ALL"
-				: b->rgn_enum[0] ? b->rgn_enum : "KOF_SCAN_ALL",
-				b->norm == KGENOME_MUTATION_XOR ? "XOR"
-				: b->norm == KGENOME_MUTATION_SUB ? "SUB" : "RAW");
-			for (w = 0; w < b->n_hash; w++)
-				fprintf(f, "%s0x%08xu%s", w % 4u ? " " : "\t",
-					b->hash[w],
-					w + 1u == b->n_hash ? ");\n"
-					: w % 4u == 3u ? ",\n" : ",");
-			wrote = 1;
-		}
-		if (wrote)
-			fprintf(f, "\n");
-	}
-
-	/* Spelled out rather than through KOF_DEFINE_SCAN. The macro expands to
-	 * exactly this, and every module in bases/ writes it this way - a
-	 * generated file that does not look like the hand written ones is a
-	 * file people hesitate to edit. */
-	fprintf(f, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n");
-	/*
-	 * A maximum size is a line in the body, not a declaration.
-	 *
-	 * kofsig.h refuses to have one at KOF_TARGET_SIZE_MIN and says why: an
-	 * upper bound declared to the host is escaped by appending bytes nothing
-	 * reads, which would turn padding into a way of not being scanned. In
-	 * the body it is the module's own logic and costs what any other check
-	 * costs.
-	 */
-	if (e->dr.opt_on[OPT_SIZE_MAX])
-		fprintf(f, "\tif (ctx->obj_size > %lluull)\n\t\treturn;\n\n",
-			(unsigned long long)e->dr.opt_val[OPT_SIZE_MAX]);
-	/*
-	 * Conditions, nested the way they were built.
-	 *
-	 * A condition with children is a gate: it concludes nothing itself and
-	 * its children are what happens once it holds. That is exactly the
-	 * shape bases/signatures/lkm_rootkit_general.c is written in, and it is
-	 * only sayable because a matcher carries no verdict of its own.
-	 */
-	/*
-	 * The shared calls, once each, before anything tests them.
-	 *
-	 * Named by the matcher that leads the group - see grp_same_call - so
-	 * the name does not move when a later matcher is removed.
-	 */
-	{
-		uint32_t g, wrote = 0;
-
-		for (g = 0; g < e->dr.n_grp; g++) {
-			if (!grp_shared(e, g) || grp_lead(e, g) != g)
-				continue;
-			/* The shared call always counts: the group's members
-			 * compare against a number, so the leader's own
-			 * spelling does not decide the call's kind. */
-			/*
-			 * uint8_t, because the value cannot exceed 16: the
-			 * count is a sum of 0/1 terms and KOF_FS_FOLD takes
-			 * at most sixteen names in one call. Measured rather
-			 * than assumed - the same module built both ways came
-			 * out 165 bytes with uint32_t and 159 with uint8_t,
-			 * the 8 bit form comparing in %al instead of loading
-			 * and zero extending. Small, and it is also the type
-			 * that states the bound.
-			 */
-			fprintf(f, "\tuint8_t m%u = ", g + 1u);
-			emit_call_multi(f, e, g);
-			fprintf(f, ";\n");
-			wrote++;
-		}
-		if (wrote)
-			fprintf(f, "\n");
-	}
-	/*
-	 * TOP LEVEL CONDITIONS, STRONGEST VERDICT FIRST.
-	 *
-	 * Every KOF_SCAN_INFECT and KOF_SCAN_SUSPECT reports AND RETURNS, so
-	 * the first condition that holds is the only one that ever speaks. In
-	 * source order that means a draft whose SUSPECT was written first can
-	 * never reach its own INFECT - the weaker answer silently wins, on
-	 * exactly the files where the stronger one was right.
-	 *
-	 * enum cnd_level already numbers them that way - INFECT 0, SUSPECT 1 -
-	 * so this is ascending order, and it is stable within a level so a
-	 * draft that has only one level is emitted exactly as it was built.
-	 *
-	 * A CONJOINED RUN IS STILL ONE if: emit_cond answers with the last
-	 * member it consumed, and those are marked off so the reorder cannot
-	 * emit a member of a run a second time on its own.
-	 */
-	{
-		unsigned char done[MAX_GROUP];
-		int lvl;
-
-		memset(done, 0, sizeof done);
-		for (lvl = 0; lvl < LV_COUNT; lvl++)
-			for (k = 0; k < e->dr.n_cnd; k++) {
-				uint32_t last;
-
-				if (e->dr.cnd[k].parent >= 0 || done[k])
-					continue;
-				if (e->dr.cnd[k].level != lvl)
-					continue;
-				last = emit_cond(f, e, k, 1);
-				for (; k <= last && k < e->dr.n_cnd; k++)
-					done[k] = 1;
-				k = last;
-			}
-	}
-	fprintf(f, "}\n");
-
-	e->dr.gen_ok = ferror(f) == 0;
-	fclose(f);
-	/*
-	 * The PATH, not a sentence about it.
-	 *
-	 * This used to hold "wrote /some/file.c", which reads well on the
-	 * status line and is not a path - so the next Save could not recognise
-	 * the file it had just written, fell through to "pick a name nothing is
-	 * using", and produced a new numbered copy on every click. Save now
-	 * overwrites, which is what Save has always meant; Save As is the one
-	 * that starts a new file.
-	 */
-	snprintf(e->dr.gen_path, sizeof e->dr.gen_path, "%.*s",
-		 (int)sizeof e->dr.gen_path - 1, path);
-	if (!e->dr.gen_ok) {
-		/* The file exists and is short - naming it is the difference
-		 * between "try again" and "go and look at what is there". */
-		say_err(e, "Write failed partway - %.60s is incomplete", path);
-		return;
-	}
-	/* A source has just appeared in the tree, or an existing one has moved
-	 * its lines. Either way what the index knows about where each detection
-	 * name sits is now about the file that was there before. */
-	/*
-	 * AND THE OLD NAME GOES, now that the new one is whole.
-	 *
-	 * After the write and after gen_ok, so a Save that failed leaves both
-	 * files rather than neither: what is being removed is the only other
-	 * copy of this rule.
-	 */
-	if (rename_from[0] && strcmp(rename_from, path))
-		remove(rename_from);
-	src_forget();
-	e->dr.warn[0] = 0;
-	/* What was written is now what is saved. Without this the draft stayed
-	 * dirty forever: the panel kept saying "(unsaved)" and the guard that
-	 * refuses a pointless Save never fired. */
-	e->dr.saved_hash = draft_hash(e);
-}
-
-
-
-
-
-
-
-
-
-
-
-/*
- * Write one matcher as the call it is.
- *
- * _all and _any short-circuit and _multi cannot - kofsig.h says so at the fold -
- * so the extremes get the macro that stops early rather than a threshold that
- * happens to equal them.
- */
-/*
- * The C identifier for a range, spelled from the region words.
- *
- * Both the KOF_TARGET_RANGE that declares it and the search call that names it
- * go through here, because a range that is declared under one name and searched
- * under another is a build error found by the compiler rather than by this - and
- * that used to happen, since the caller passed no format and got WHOLE_FILE for
- * everything.
- */
 
 
 
@@ -6507,11 +2294,6 @@ void draft_clear(struct kof_editor *e)
 	memset(e->dr.opt_val, 0, sizeof e->dr.opt_val);
 	memset(e->dr.opt_auto, 0, sizeof e->dr.opt_auto);
 	e->dr.n_decl = e->dr.n_grp = e->dr.n_cnd = 0;
-	free(e->dr.vd);
-	free(e->dr.vtext);
-	e->dr.vd = NULL;
-	e->dr.vtext = NULL;
-	e->dr.vtext_n = 0;
 	/*
 	 * THE TICKS GO WITH THE MATCHERS THAT USED THEM.
 	 *
@@ -6530,109 +2312,6 @@ void draft_clear(struct kof_editor *e)
 	 * it followed the researcher from one rule into the next and got
 	 * written into that one's file on the next save. */
 	e->dr.note[0] = 0;
-	(*e->foreign_w) = 0;
-	(*e->n_sample) = 0;
-	(*e->n_who) = 0;
-	(*e->made)[0] = 0;
-	e->dr.gen_path[0] = 0;
-	e->dr.gen_ok = 0;
-	e->dr.from_rule = 0;
-}
-
-static void meta_add(char tab[][128], uint32_t *n, uint32_t cap, const char *w)
-{
-	uint32_t i;
-
-	if (!w || !w[0])
-		return;
-	/* `cap - 1u` below - see meta_add. */
-	if (!cap)
-		return;
-	/*
-	 * `cap - 1u` BELOW, SO A ZERO CAP IS REFUSED FIRST.
-	 *
-	 * With cap 0 the eviction test `*n == cap` is true on an empty table
-	 * and the memmove is handed (0 - 1) * 128 - a length of nearly 2^64 -
-	 * which is not a bounds error the compiler or the caller can see. Both
-	 * callers pass MAX_META and cannot reach it today; the guard is here
-	 * because the next one may pass a variable, and because this is the
-	 * same shape already refused in aproc.c, wproc.c and kofviewer.c.
-	 */
-	if (!cap)
-		return;
-	for (i = 0; i < *n; i++)
-		if (!strcmp(tab[i], w))
-			return;
-	if (*n == cap) {
-		memmove(tab[0], tab[1], (cap - 1u) * 128u);
-		(*n)--;
-	}
-	snprintf(tab[*n], 128, "%.127s", w);
-	(*n)++;
-}
-
-static void meta_add_who(char tab[][48], uint32_t *n, uint32_t cap,
-			 const char *w)
-{
-	uint32_t i;
-
-	if (!w || !w[0])
-		return;
-	for (i = 0; i < *n; i++)
-		if (!strcmp(tab[i], w))
-			return;
-	if (*n == cap) {
-		memmove(tab[0], tab[1], (cap - 1u) * 48u);
-		(*n)--;
-	}
-	snprintf(tab[*n], 48, "%.47s", w);
-	(*n)++;
-}
-
-/*
- * One line of an existing generated block, back into the fields it came from.
- *
- * Only the lines this writes are read back; anything else in the block is a
- * line an older build wrote or a person added, and it is dropped rather than
- * guessed at. Returns 1 when the line was one of ours.
- */
-int meta_take(struct kof_editor *e, const char *t)
-{
-	static const struct { const char *tag; int what; } tab[] = {
-		{ "Test sample:", 0 }, { "Researcher:", 1 }, { "Created", 2 }
-	};
-	uint32_t i;
-
-	for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
-		size_t n = strlen(tab[i].tag);
-
-		if (strncmp(t, tab[i].tag, n))
-			continue;
-		t += n;
-		while (*t == ' ' || *t == '\t')
-			t++;
-		if (!*t)
-			return 1;
-		if (tab[i].what == 0)
-			meta_add(e->sample, &(*e->n_sample), MAX_META,
-				 t);
-		else if (tab[i].what == 1)
-			meta_add_who(e->who, &(*e->n_who), MAX_META, t);
-		else {
-			/* "Created <date>, updated <date>" - the first date is
-			 * the one worth keeping; the second is rewritten on
-			 * every save and is read back only to be discarded. */
-			uint32_t k = 0;
-
-			while (t[k] && t[k] != ',' &&
-			       k + 1u < sizeof *e->made)
-				k++;
-			snprintf(*e->made, sizeof *e->made, "%.*s",
-				 (int)k, t);
-		}
-		return 1;
-	}
-	return 0;
 }
 
 
@@ -6641,398 +2320,17 @@ int meta_take(struct kof_editor *e, const char *t)
 
 
 
-/*
- * One line of the file's leading comment onto the note.
- *
- * Joined with a single space rather than kept as lines, because the note is one
- * field of one line - the shape it is written in and the shape it is edited in.
- */
-void head_put(char *dst, size_t cap, size_t *n, const char *s, size_t len)
-{
-	if (*n && *n + 1 < cap)
-		dst[(*n)++] = ' ';
-	while (len-- && *n + 1 < cap)
-		dst[(*n)++] = *s++;
-	dst[*n] = 0;
-}
 
 
 
 
 
-/*
- * IS THIS LINE OF kof_scan SOMETHING THE EDITOR CAN ACTUALLY HOLD.
- *
- * The panel models one shape: matchers made of kof_find_str_* calls, conditions
- * made of ifs, and verdicts. That is most rules and it is not all of them - a
- * hand written module may compute something, loop, call a parser accessor, or
- * do arithmetic on an offset, and none of that has a control on the panel.
- *
- * The old behaviour on such a file was the dangerous one: the unrecognised
- * lines were ignored, a draft was built from whatever was left, `gen_path` was
- * pointed at the original, and Save was offered - so saving a rule the editor
- * had only partly understood REPLACED it with the editor's reduced version.
- * The custom logic was gone and nothing had said so.
- *
- * So the line is checked instead. Punctuation, else, return and the three
- * modelled constructs are accounted for; anything else means this file holds
- * logic the panel does not carry, and the rule opens read only.
- *
- * Deliberately conservative in the safe direction: a construct this does not
- * know costs a save that has to be done in an editor, and the opposite mistake
- * costs somebody's work.
- */
-int body_modelled(const char *line)
-{
-	const char *t = line;
-
-	if (strstr(line, "kof_find_str") || strstr(line, "KOF_SCAN_") ||
-	    strstr(line, "if (") || strstr(line, "if("))
-		return 1;
-	for (; *t; t++) {
-		if (*t == ' ' || *t == '\t' || *t == '\r' || *t == '\n')
-			continue;
-		if (*t == '{' || *t == '}' || *t == ';')
-			continue;
-		if (!strncmp(t, "else", 4)) {
-			t += 3;
-			continue;
-		}
-		if (!strncmp(t, "return", 6)) {
-			t += 5;
-			continue;
-		}
-		return 0;
-	}
-	return 1;
-}
-
-/* ---- similarity rules ------------------------------------------------------ */
-
-/*
- * mutation_from_source - a mutation rule read back out of its source.
- *
- * Line-based, exactly as draft_from_source is, and for the same reason: the
- * file is C and the thing being read out of it is a handful of macros, so a
- * parser that understood C would be a large amount of machinery to answer
- * "which identifiers are on this line". A line it does not recognise is a line
- * it ignores, which is what lets a rule carry hand-written code beside its
- * blocks - see the note in kofmutation.h about an anchor written by hand.
- *
- * The block's NAME carries its identity: generate() writes blk_<the fold of
- * its hashes>, so the name and the hashes say the same thing and the panel can
- * show the value without recomputing it. The hashes are read anyway, because
- * they are what the rule actually matches with.
- */
 
 
-/* Whether `what` occurs in [a, b) - the text between two calls on one line.
- * Both point into one NUL terminated line, so a plain search bounded by the
- * end is enough and no copy is needed. */
-static int seg_has(const char *a, const char *b, const char *what)
-{
-	const char *q = strstr(a, what);
 
-	return q != NULL && q < b;
-}
 
-static int mtn_src_norm(const char *line)
-{
-	if (strstr(line, "KOF_MUTATION_XOR"))
-		return KGENOME_MUTATION_XOR;
-	if (strstr(line, "KOF_MUTATION_SUB"))
-		return KGENOME_MUTATION_SUB;
-	return KGENOME_MUTATION_RAW;
-}
 
-int mutation_from_source(struct kof_editor *e, const char *path,
-		       struct kof_mutation_decl *blk, uint32_t max_blk,
-		       uint32_t *n_blk, uint32_t *pool, uint32_t pool_max,
-		       struct kof_verdict_decl *verdict)
-{
-	FILE *f;
-	char line[1024];
-	char name[MAX_DECL][48];
-	uint32_t n = 0, np = 0, i;
-	int in_block = -1;
-	int got_score;          /* this line held a score call - see below */
-	const char *seg;        /* where the operator for the next call starts */
-	unsigned pending = 0;   /* 1: a block call was read and a verdict is awaited */
-	/* Conditions as the other reader counts them - see
-	 * kof_mutation_decl.cnd. */
-	unsigned n_if = 0;
-	int trunc_said = 0;
 
-	if (!e || !path || !blk || !n_blk || !pool || !verdict)
-		return 0;
-	*n_blk = 0;
-	memset(verdict, 0, sizeof *verdict);
-	verdict->level = LV_INFECT;
-	f = fopen(path, "r");
-	if (!f)
-		return 0;
-	if (max_blk > MAX_DECL)
-		max_blk = MAX_DECL;
 
-	while (fgets(line, sizeof line, f)) {
-		const char *p;
 
-		if ((p = strstr(line, "KOF_TARGET_NAME(")) != NULL) {
-			char w[48];
-			uint32_t k;
 
-			src_ident(p + 16, w, sizeof w);
-			for (k = 0; k < MALTYPE_N; k++) {
-				char t[48];
-
-				snprintf(t, sizeof t, "KOF_MALTYPE_%s",
-					 maltype_word[k]);
-				if (!strcasecmp(t, w))
-					e->dr.maltype = k;
-			}
-			src_quoted(p, e->dr.family, sizeof e->dr.family);
-			continue;
-		}
-		if ((p = src_target_line(line)) != NULL) {
-			uint32_t fi;
-
-			for (fi = 0; fi < FMT_WORD_N; fi++)
-				if (src_word_in(p, fmt_word(fi)))
-					e->dr.fmt_mask |= 1u << fi;
-			continue;
-		}
-		/*
-		 * EITHER SPELLING, and which one is the block's side.
-		 *
-		 * "_LIB(" is tested first because "KOF_MUTATION_BLOCK(" is not a
-		 * prefix of it - the parenthesis differs - but reading them in
-		 * one place keeps the two from drifting, and the offset past
-		 * the name differs by four.
-		 */
-		if ((p = strstr(line, "KOF_MUTATION_BLOCK_LIB(")) != NULL ||
-		    (p = strstr(line, "KOF_MUTATION_BLOCK(")) != NULL) {
-			int is_lib = strncmp(p + MBLK_LEN, "_LIB(", 5) == 0;
-			char w[48];
-			const char *q;
-
-			if (n >= max_blk) {
-				if (!trunc_said) {
-					say_note(e, "this rule has more blocks than the "
-						 "panel holds (%u): the rest are not shown "
-						 "and Save would drop them", max_blk);
-					trunc_said = 1;
-				}
-				in_block = -1;
-				continue;
-			}
-			q = src_ident(p + MBLK_LEN + (is_lib ? 5 : 1), w, sizeof w);
-			memset(&blk[n], 0, sizeof blk[n]);
-			blk[n].side = is_lib ? (uint8_t)KGENOME_MUTATION_SIDE_LIB
-					     : (uint8_t)KGENOME_MUTATION_SIDE_USER;
-			snprintf(name[n], sizeof name[0], "%s", w);
-			blk[n].id = (uint32_t)strtoul(
-				strncmp(w, "blk_", 4) ? w : w + 4, NULL, 16);
-			{
-				char rgn[48];
-
-				src_ident(q, rgn, sizeof rgn);
-				snprintf(blk[n].region_buf,
-					 sizeof blk[n].region_buf, "%s", rgn);
-				blk[n].region = blk[n].region_buf;
-			}
-			blk[n].norm = (uint32_t)mtn_src_norm(line);
-			blk[n].thr  = 50;
-			blk[n].join = 1;
-			blk[n].hash = pool + np;
-			in_block = (int)n;
-			n++;
-			/* The first hashes may already be on this line. */
-			p = strchr(p, ',');
-		}
-		if (in_block >= 0) {
-			const char *q = p ? p : line;
-
-			while ((q = strstr(q, "0x")) != NULL) {
-				if (np < pool_max) {
-					pool[np++] = (uint32_t)
-						strtoul(q + 2, NULL, 16);
-					blk[in_block].n_hash++;
-				}
-				q += 2;
-			}
-			if (strchr(line, ';'))
-				in_block = -1;
-			continue;
-		}
-		/*
-		 * THE CONDITION, which is where the thresholds and the joins
-		 * are. One term to a block, in the order the panel shows them,
-		 * and the operator BEFORE a term is how it attaches to the one
-		 * above - the same ownership the panel draws.
-		 */
-		/*
-		 * WHAT THE RULE REPORTS, taken from the line that reports it.
-		 *
-		 * The three shapes emit_verdict writes, read back as the three
-		 * it writes them from - see struct kof_verdict_decl.
-		 */
-		if ((p = strstr(line, "KOF_SCAN_INFECT(")) != NULL ||
-		    (p = strstr(line, "KOF_SCAN_SUSPECT(")) != NULL) {
-			int lvl = strstr(line, "SUSPECT") ? LV_SUSPECT
-							  : LV_INFECT;
-
-			pending = 0;
-			verdict->level = lvl;
-			if (strstr(p, "KOF_MALVAR_GENERIC"))
-				verdict->kind = 1;
-			else if (strstr(p, "KOF_MALVAR_AUTO"))
-				verdict->kind = 0;
-			else {
-				verdict->kind = 2;
-				src_quoted(p, verdict->text,
-					   sizeof verdict->text);
-			}
-			continue;
-		}
-		if (strstr(line, "if (") || strstr(line, "if("))
-			n_if++;
-		/*
-		 * EVERY CALL ON THE LINE, NOT THE FIRST ONE.
-		 *
-		 * This ran strstr once and continued, so a condition that
-		 * asked about two blocks on one line -
-		 *
-		 *   if (kof_mutation_score(a) >= 75u || kof_mutation_score(b) >= 70u)
-		 *
-		 * - gave the first block its threshold and left the second at
-		 * the default the declaration parser writes, which is 50.
-		 * Reopening billgates_00.c showed its second
-		 * matcher at 50 where the file says 70, and saving wrote that
-		 * back: a rule quietly loosened by having been looked at.
-		 *
-		 * `>=` is searched FROM EACH CALL, so each one finds its own
-		 * comparison and not the line's first.
-		 */
-		p = line;
-		got_score = 0;
-		seg = line;
-		while ((p = strstr(p, "kof_mutation_score(")) != NULL) {
-			char w[48];
-			const char *ge = strstr(p, ">=");
-			int is_or;
-
-			/*
-			 * THE OPERATOR IS A FACT ABOUT A PAIR, so it is read
-			 * from the text BETWEEN the previous call and this
-			 * one rather than from the whole line.
-			 *
-			 * One condition holds several matchers joined by
-			 * `||`, and one matcher holds several blocks joined
-			 * by `&&`, so the emitter writes both on one line:
-			 *
-			 *   if (score(a) >= 91u || (score(b) >= 82u &&
-			 *                           score(c) >= 82u))
-			 *
-			 * Asking the line gave every block the same answer -
-			 * `||` is somewhere on it, so all three read as "or"
-			 * - and the grouping was lost.
-			 *
-			 * The FIRST call on the line keeps the old question,
-			 * because what precedes it is not on this line at
-			 * all. See the note on kof_mutation_decl.join: nothing
-			 * reads it for the first block.
-			 */
-			if (seg == line)
-				is_or = strstr(line, "||") != NULL;
-			else
-				is_or = seg_has(seg, p, "||");
-
-			src_ident(p + MSCORE_LEN, w, sizeof w);
-			for (i = 0; i < n; i++)
-				if (!strcmp(name[i], w)) {
-					if (ge)
-						blk[i].thr = (uint8_t)
-							strtoul(ge + 2, NULL, 10);
-					blk[i].join = (uint8_t)(is_or ? 0 : 1);
-					/* And which branch asked - see
-					 * kof_mutation_decl.cnd. */
-					blk[i].cnd = (uint8_t)(n_if ? n_if - 1u
-								    : 0u);
-					break;
-				}
-			got_score = 1;
-			p += 17;
-			seg = p;
-		}
-		/*
-		 * A LOCAL FLAG AND NOT `pending`, which outlives the line:
-		 * bit 0 stays set until a verdict clears it, so testing it
-		 * here would have skipped every later line that holds no call
-		 * at all.
-		 */
-		if (got_score) {
-			pending |= 1u;
-			continue;
-		}
-	}
-	fclose(f);
-	/*
-	 * A block whose hashes did not survive the pool is not a block - see
-	 * the header. DROPPED ON ITS OWN, not along with everything after it:
-	 * the loop used to cut the list at the first short one, so a rule whose
-	 * second block ran the pool dry lost its third and fourth as well, and
-	 * the panel showed a rule smaller than the file it came from.
-	 */
-	{
-		uint32_t keep = 0;
-
-		for (i = 0; i < n; i++) {
-			if (blk[i].n_hash < KGENOME_MUTATION_MIN_HASH)
-				continue;
-			if (keep != i) {
-				blk[keep] = blk[i];
-				memcpy(name[keep], name[i], sizeof name[0]);
-			}
-			keep++;
-		}
-		/*
-		 * AND A DROPPED BLOCK MAKES THIS DRAFT A PARTIAL VIEW OF THE
-		 * FILE, WHICH IS EXACTLY WHAT `foreign` MEANS.
-		 *
-		 * The file still declares the block and still tests it; what
-		 * this cannot do is hold it - so the panel comes back with one
-		 * matcher fewer than the rule has, and the `if` that named it
-		 * has nothing left to belong to. Silently, the reader saw a
-		 * rule whose remaining evidence was the file-structure measure
-		 * and concluded the rule was written on structure.
-		 *
-		 * Saying so through `foreign` rather than through a warning of
-		 * its own, because the consequence is the one `foreign` already
-		 * governs: Save would write back a rule with the block gone,
-		 * and Save As - deriving a new rule from the part that IS
-		 * modelled - is still a thing a researcher does on purpose.
-		 */
-		if (keep != n && e) {
-			if (e->foreign_w)
-				(*e->foreign_w)++;
-			/*
-			 * AND SAID, not only flagged.
-			 *
-			 * The flag governs saving; this governs understanding.
-			 * Without it the panel showed a rule with one block fewer
-			 * than the file, and the only reading available was that
-			 * the author had written it that way
-			 * - when what happened is that a block this build
-			 * cannot hold was left out. Naming the count is enough
-			 * to tell the two apart, and it is a fact rather than a
-			 * guess at which block it was.
-			 */
-			say_note(e, "%u block(s) in this rule are not in this "
-				 "build - the draft is part of the file",
-				 n - keep);
-		}
-		n = keep;
-	}
-	*n_blk = n;
-	return n != 0;
-}

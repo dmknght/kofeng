@@ -1,7 +1,7 @@
 /*
  * api_engine_slots.c - the module ABI's wrapper macros, against a vtable that RECORDS.
  *
- * A module never calls the engine: it calls a macro (kofchild.h, kofmodemu.h, kofcure.h, ...) that reads a
+ * A module never calls the engine: it calls a macro (kofchild.h, kofmodemu.h, ...) that reads a
  * slot of `ctx->content` and calls it, and every one of them has two behaviours a module is written against:
  *
  *   SURFACE WITHOUT THE SLOT   the slot is NULL - a detector's vtable has no producing slots, an old host has
@@ -12,7 +12,7 @@
  *                              slot returned, whole.
  *
  * api_engine_modabi.c reaches a few of the slots through probe modules that run inside a scan; the ones that
- * need an emulator or a producing host (emu_*, dis_*, import*, pz_*, section, derive, ...) cannot be reached
+ * need an emulator or a producing host (emu_*, dis_*, import*, section, derive, ...) cannot be reached
  * that way without building each of those machines, and the arithmetic of the macro is the same on a fake.
  * The libs behind the real slots are tested where they live (tests/lib/genome, tests/lib/uncoat).
  *
@@ -139,13 +139,6 @@ static uint32_t s_emu_write(const struct kof_obj_ctx *c, uint64_t va, const uint
 	(void)c; REC("emu_write"); R.a[0] = va; R.p[0] = b; R.a[1] = n; return 0x700au;
 }
 
-static uint64_t s_pz_clean_end(const struct kof_obj_ctx *c) { (void)c; REC("pz_clean_end"); return BIG; }
-static int s_pz_is_code(const struct kof_obj_ctx *c, uint64_t off) { (void)c; REC("pz_is_code"); R.a[0] = off; return 26; }
-static uint64_t s_pz_addr_to_off(const struct kof_obj_ctx *c, uint64_t a) { (void)c; REC("pz_addr_to_off"); R.a[0] = a; return BIG; }
-static uint32_t s_pz_unmask(const struct kof_obj_ctx *c, uint64_t off, uint32_t n, uint32_t mask, uint32_t key, uint8_t *out, uint32_t cap)
-{
-	(void)c; REC("pz_unmask"); R.a[0] = off; R.a[1] = n; R.a[2] = mask; R.a[3] = key; R.p[0] = out; R.a[4] = cap; return 0x700bu;
-}
 static void s_infected(const struct kof_obj_ctx *c, uint64_t off, uint64_t len, uint32_t kind)
 {
 	(void)c; REC("infected"); R.a[0] = off; R.a[1] = len; R.a[2] = kind;
@@ -188,7 +181,6 @@ static const struct kof_content full = {
 	.emu_run = s_emu_run, .emu_set_ip = s_emu_set_ip, .emu_set_reg = s_emu_set_reg, .emu_slice = s_emu_slice,
 	.emu_stop = s_emu_stop, .emu_take = s_emu_take, .child_want = s_child_want, .emu_watch_insn = s_emu_watch_insn,
 	.emu_write = s_emu_write,
-	.pz_clean_end = s_pz_clean_end, .pz_is_code = s_pz_is_code, .pz_addr_to_off = s_pz_addr_to_off, .pz_unmask = s_pz_unmask,
 	.infected = s_infected, .data_xref = s_data_xref, .graph = s_graph, .diag_str32 = s_diag_str32,
 	.view_next = s_view_next,
 };
@@ -307,16 +299,7 @@ static void forwarded(const struct kof_obj_ctx *ctx)
 	ARM();
 	CK(cell_seek(BIG, 1) == 23 && CALLED("dis_seek") && R.a[0] == BIG && R.a[1] == 1u, "cell_seek");
 
-	/* cure and report */
-	ARM();
-	CK(kof_cure_addr(BIG) == BIG && CALLED("pz_addr_to_off") && R.a[0] == BIG, "cure_addr");
-	ARM();
-	CK(kof_cure_clean_end() == BIG && CALLED("pz_clean_end"), "cure_clean_end");
-	ARM();
-	CK(kof_cure_is_code(BIG) == 26 && CALLED("pz_is_code") && R.a[0] == BIG, "cure_is_code");
-	ARM();
-	CK(kof_cure_unmask(BIG, 8, 0xff, 0x1234, buf, sizeof buf) == 0x700bu && CALLED("pz_unmask") && R.a[0] == BIG && R.a[1] == 8u &&
-	   R.a[2] == 0xffu && R.a[3] == 0x1234u && R.p[0] == buf && R.a[4] == sizeof buf, "cure_unmask: offset, length, mask, key, out, capacity");
+	/* the mark */
 	ARM();
 	kof_mark_infected(BIG, 5, 2);
 	CK(CALLED("infected") && R.a[0] == BIG && R.a[1] == 5u && R.a[2] == 2u, "mark_infected");
@@ -376,7 +359,6 @@ static void defaults(const struct kof_obj_ctx *ctx)
 	ARM();
 	/* the defaults are not all 0: a refused section is -1, an address that is not in the file is KOF_BROKEN */
 	CK(kunp_rcstruct_section("s", 1, 2, 3, 4) == -1, "no section slot: -1, the same as a refusal");
-	CK(kof_cure_addr(1) == (uint64_t)KOF_BROKEN && kof_cure_clean_end() == (uint64_t)KOF_BROKEN, "no cure slots: KOF_BROKEN, not offset 0");
 	bad += kunp_rcstruct_at(1) != 0 || kunp_rcstruct_derive() != 0 || kunp_rcstruct_dir(1, 2, 3) != 0 || kunp_rcstruct_entry(1) != 0;
 	bad += kunp_rcstruct_image() != 0 || kunp_rcstruct_import("a", "b", 1, 2) != 0 || kunp_rcstruct_import_at(1) != 0;
 	bad += kunp_rcstruct_import_bytes() != 0 || kunp_rcstruct_reset() != 0 || kunp_static_decode_chain(1) != 0;
@@ -398,9 +380,9 @@ static void defaults(const struct kof_obj_ctx *ctx)
 	CK(!bad && va == 5u && len == 6u && kind == 8u, "the emulator macros on a surface without it: 0, and the out parameters are left alone");
 	bad = cell_next(&ins) != 0 || cell_reg(1, &reg) != 0 || cell_seek(1, 0) != 0;
 	CK(!bad && reg == 7u, "the disassembler macros: 0, out parameter untouched");
-	bad = kof_cure_is_code(1) != 0 || kof_cure_unmask(1, 2, 3, 4, buf, 5) != 0 || kof_data_xref(1, 2) != 0 ||
+	bad = kof_data_xref(1, 2) != 0 ||
 	      kof_diag_graph(&nb) != NULL || kof_diag_str_one(x_00, "y") != 0;
-	CK(!bad && nb == 9u, "cure, data_xref, graph, diag_str_one: 0 or NULL");
+	CK(!bad && nb == 9u, "data_xref, graph, diag_str_one: 0 or NULL");
 	{
 		uint32_t cur = 5;
 

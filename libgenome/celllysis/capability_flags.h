@@ -121,5 +121,8 @@
  * rather than deciding it.
  */
 #define KGENOME_NUCLEO_F_BY_NAME  (1u << 7)
+/* The NAME of what was called was made by the program (a join, str_replace, strrev, chr, $GLOBALS), not written: the node
+ * is found through a name that was kept from being found. A script's fact, set by the text route. */
+#define KGENOME_NUCLEO_F_BUILT    (1u << 8)
 
 #endif /* KGENOME_CAPABILITY_FLAGS_H */

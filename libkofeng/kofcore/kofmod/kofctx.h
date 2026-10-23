@@ -107,26 +107,20 @@ struct kof_obj_ctx {
 
 
 	/*
-	 * Attach a finding: a level, and an index into the name table the build
-	 * emitted beside the blob.
-	 *
-	 * The name string never enters the blob. A family gets renamed on
-	 * reclassification far more often than its logic changes, and resolving
-	 * through a table fails visibly - a stale table yields "unknown" rather than
-	 * some other family's name. The authored name is only the family part; the
-	 * host prefixes the format and architecture it already established.
-	 *
-	 * Called through KOF_SCAN_MATCH, so reporting and returning cannot come apart.
+	 * NOT A SLOT ANY MORE. A module used to attach a finding here - a level and a
+	 * name - and an object was named by the strongest one. An object is named by the
+	 * diseases it has (kof_verdict_make) and a module no longer names anything, so
+	 * the call is gone. The position stays so that no member after it moves: NULL
+	 * by design. A module built before this calls NULL: refusing it is the ABI
+	 * floor's job (KOFSIG_ABI_MIN, see the note in kofabi.h on the bump that is owed).
 	 */
-	void (*report)(const struct kof_obj_ctx *ctx, uint32_t level,
-		       uint32_t name_id);
+	void *reserved_0;
 
 	/*
 	 * The same thing said without deciding anything: what the module worked
 	 * out, for whoever is watching.
 	 *
-	 * A finding changes a verdict and ends the module. A note changes nothing
-	 * and the module carries on - "this is UPX 1.3 with NRV2E", "the block
+	 * A note changes nothing and the module carries on - "this is UPX 1.3 with NRV2E", "the block
 	 * chain stopped after four of them" - which is the difference between an
 	 * answer and the reasoning behind it. Nothing in a normal scan looks at
 	 * these; a host that wants them says so, and a host that does not pays one
@@ -136,10 +130,7 @@ struct kof_obj_ctx {
 	 * the blob either, and a note carries one number because the interesting
 	 * ones are nearly always "which version" or "how many".
 	 *
-	 * Called through kof_debug, which does not return - and is spelled in lower
-	 * case for that reason. The upper case macros in this header are the ones
-	 * that change control flow; KOF_SCAN_MATCH reports AND returns, and a reader
-	 * should be able to tell the two apart without looking either of them up.
+	 * Called through kof_debug, which returns: the module carries on.
 	 */
 	void (*debug)(const struct kof_obj_ctx *ctx, uint32_t name_id,
 		      uint64_t value);

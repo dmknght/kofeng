@@ -92,16 +92,17 @@ static void enumerators(void)
 	CK(KUNCOAT_ALGO_NONE == 0 && KUNCOAT_ALGO_XOR_KEY == 1 && KUNCOAT_ALGO_XOR_COUNTER == 2 && KUNCOAT_ALGO_XOR_ADD32 == 3 &&
 	   KUNCOAT_ALGO_PLACEHOLDER_SUB == 4 && KUNCOAT_ALGO_X86_SUB_CHAIN == 5 && KUNCOAT_ALGO_RC4 == 6);
 	CK(KUNCOAT_ALGO_B64 == 16 && KUNCOAT_ALGO_HEX == 17 && KUNCOAT_ALGO_URL == 18 && KUNCOAT_ALGO_ADD == 19 &&
-	   KUNCOAT_ALGO_CAESAR == 20 && KUNCOAT_ALGO_REVERSE == 21);
+	   KUNCOAT_ALGO_CAESAR == 20 && KUNCOAT_ALGO_REVERSE == 21 && KUNCOAT_ALGO_ESCAPE == 22);
 	CK(KUNCOAT_DECODE == 0 && KUNCOAT_ENCODE == 1 && KUNCOAT_F_LAX == 1u);
 	CK(KUNCOAT_NRV2B == 0 && KUNCOAT_NRV2D == 1 && KUNCOAT_NRV2E == 2);
 	CK(KUNCOAT_NRV2_BITS_8 == 8 && KUNCOAT_NRV2_BITS_16 == 16 && KUNCOAT_NRV2_BITS_32 == 32);
 	CK(KUNCOAT_LZHUF_ARJ == 0 && KUNCOAT_LZHUF_LH5 == 1 && KUNCOAT_LZHUF_LH6 == 2 && KUNCOAT_LZHUF_LH7 == 3);
 	/* every algorithm id is either run or refused by kuncoat_transform, none is silently ignored */
-	for (a = KUNCOAT_ALGO_NONE; a <= KUNCOAT_ALGO_REVERSE; a++)
+	for (a = KUNCOAT_ALGO_NONE; a <= KUNCOAT_ALGO_ESCAPE; a++)
 		for (d = KUNCOAT_DECODE; d <= KUNCOAT_ENCODE; d++) {
 			static const uint8_t key[2] = { 1, 2 };
-			struct kuncoat_step s = { (uint32_t)a, (uint32_t)d, 0, 3, key, 2, 0 };
+			struct kuncoat_step s = { .algo = (uint32_t)a, .dir = (uint32_t)d, .flags = 0, .k32 = 3, .key = key, .key_len = 2,
+						  .max_out = 0 };
 			uint8_t in[8] = "abcdefg", out[32];
 			uint64_t p = 99;
 			enum kuncoat_status st = kuncoat_transform(&s, in, 7, out, sizeof out, &p);
@@ -112,7 +113,7 @@ static void enumerators(void)
 			else
 				seen++;
 		}
-	CKF(seen == 2u * 12u, "%u (algo, dir) pairs ran", seen);
+	CKF(seen == 2u * 13u, "%u (algo, dir) pairs ran", seen);
 }
 
 static void sink_types(void)

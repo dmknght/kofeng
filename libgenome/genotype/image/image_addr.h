@@ -5,8 +5,6 @@
 
 struct kgenome_obj;
 
-/* Moved from scanners/pzero.h, which includes this header and so keeps both
- * names reachable for its callers. */
 /*
  * AN ADDRESS THE FILE USES, AS AN OFFSET INTO IT.
  *

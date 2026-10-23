@@ -13,30 +13,6 @@
  * panel that scrolls away from the mouse that is scrolling it.
  */
 
-/*
- * The left edge of a condition's rows.
- *
- * A condition's number sits at a column decided by its depth, and every row
- * that belongs to it puts a bar in that same column - a tick under the number,
- * not a bracket drawn around a block. Nesting is shown by the indent alone,
- * which is what makes it possible to draw a child without any line art in front
- * of it at all.
- */
-void cnd_rail(struct out *o, int depth, int bar)
-{
-	int i, at = depth ? 6 : 1;
-
-	out_str(o, A_DIM);
-	for (i = 0; i < at; i++)
-		out_str(o, " ");
-	out_str(o, bar ? "|" : " ");
-	for (i = 0; i < 5; i++)
-		out_str(o, " ");
-	out_str(o, A_OFF);
-}
-
-
-
 /* ---- the tree -------------------------------------------------------------- */
 
 static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
@@ -66,7 +42,6 @@ static void tree_add(struct view *v, uint32_t depth, uint32_t obj,
 	 * flag that is only ever SET would stay set on whatever row inherited
 	 * the slot. */
 	n->ent = 0;
-	n->piece = 0;
 	n->ent_i = 0;
 	n->ent_off = n->ent_len = 0;
 	n->bytes = bytes;
@@ -92,26 +67,6 @@ static void tree_add_ent(struct view *v, uint32_t depth, uint32_t obj,
 
 		n->ent = 1;
 		n->ent_i = index;
-		n->ent_off = off;
-		n->ent_len = len;
-	}
-}
-
-/*
- * One RUN of a region, as a row of its own - see node.piece.
- *
- * The mask is the real region bit, so the row is still a scan target a marker
- * can be declared against; the offset and length are this run's alone.
- */
-static void tree_add_piece(struct view *v, uint32_t depth, uint32_t obj,
-			   uint32_t mask, uint64_t off, uint64_t len,
-			   const char *label)
-{
-	tree_add(v, depth, obj, mask, len, label);
-	if (v->n_node) {
-		struct node *n = &v->node[v->n_node - 1u];
-
-		n->piece = 1;
 		n->ent_off = off;
 		n->ent_len = len;
 	}
@@ -951,81 +906,7 @@ void tree_build(struct view *v)
 		 * kinds of region this object has. See obj_region_bits. */
 		if ((!o->fmt && !o->n_rgn) || !v->ext2)
 			continue;
-		/*
-		 * A PAGE IS SHOWN AS IT IS LAID OUT: code, markup, code.
-		 *
-		 * One row per region KIND is right for a file whose regions are
-		 * each one run - an ELF's CODE, a zip's NAMES - and wrong for a
-		 * page, where code and markup alternate all the way down. There
-		 * the two rows showed CONCATENATIONS: every island of a php
-		 * shell joined end to end with the html between them spliced
-		 * out, and the html likewise. A reader stepping through that is
-		 * reading a thing the file does not contain.
-		 *
-		 * So when a script has islands the two are walked together in
-		 * FILE ORDER and each run gets its own row. The tree gets long -
-		 * a real shell is 120 islands, so 241 rows - and that is the
-		 * trade: a long list of real runs beats two short rows of
-		 * something assembled.
-		 *
-		 * Every other format, and a script that is one program, are
-		 * unchanged: the else branch is what this has always done.
-		 */
-		if (o->ctx.format == KOF_FMT_SCRIPT && o->ctx.resolve_scan &&
-		    kof_script_islands_of(&o->ctx)) {
-			/*
-			 * BOUNDED LOCALS, AND resolve_scan CALLED DIRECTLY.
-			 *
-			 * kof_scan_resolve_range writes into an array it
-			 * assumes is KOF_SCAN_MAX_EXTENTS long, so it cannot be
-			 * given a small one - and the two scratch arrays this
-			 * file owns are both spoken for, v->probe being the
-			 * editor's scratch as well. A page has at most
-			 * KOF_SCRIPT_MAX_ISLAND islands and one gap either side
-			 * of each, so the two lists have a real bound and it is
-			 * cheap to stand them on the stack. Neither bit is
-			 * KOF_SCAN_ALL, which is the only thing the wrapper
-			 * adds.
-			 */
-			struct kof_range bo[KOF_SCRIPT_MAX_ISLAND + 2u];
-			struct kof_range mk[KOF_SCRIPT_MAX_ISLAND + 2u];
-			uint32_t cap = KOF_SCRIPT_MAX_ISLAND + 2u;
-			uint32_t nb = o->ctx.resolve_scan(&o->ctx,
-					KOF_SCAN_SCRIPT_BODY, bo, cap);
-			uint32_t nm = o->ctx.resolve_scan(&o->ctx,
-					KOF_SCAN_SCRIPT_MARKUP, mk, cap);
-			uint32_t a = 0, b = 0;
-
-			/* The header first, where the format has one - it is
-			 * one run, so it gains nothing from being split. php
-			 * has none: its tag opens a body block. */
-			region_row(v, o, i, KOF_SCAN_SCRIPT_HEADER);
-			/*
-			 * A two way merge, because both lists are already
-			 * sorted - the resolver emits them in file order and
-			 * the partition says they do not overlap. So the row
-			 * order is the file's order, with no sort to get wrong.
-			 */
-			while (a < nb || b < nm) {
-				int take_body = b >= nm ||
-						(a < nb &&
-						 bo[a].off < mk[b].off);
-
-				if (take_body) {
-					tree_add_piece(v, o->depth + 1u, i,
-						       KOF_SCAN_SCRIPT_BODY,
-						       bo[a].off, bo[a].len,
-						       "BODY");
-					a++;
-				} else {
-					tree_add_piece(v, o->depth + 1u, i,
-						       KOF_SCAN_SCRIPT_MARKUP,
-						       mk[b].off, mk[b].len,
-						       "MARKUP");
-					b++;
-				}
-			}
-		} else {
+		{
 			uint32_t bits[KOF_MAX_REGIONS], nb;
 
 			nb = obj_region_bits(o, bits, KOF_MAX_REGIONS);

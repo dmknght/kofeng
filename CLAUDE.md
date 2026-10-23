@@ -55,10 +55,10 @@ the same logic is a second thing to keep correct, and it will drift.
 Measured in this tree:
 
 - A detection's name was spelled in the engine and again in the examiner. The
-  family/variant separator moved from "-" to "#" in the engine, the examiner's
-  copy kept the "-", and every detected sample showed no verdict in the examiner
-  while the scanner called the same file infected. One spelling now,
-  `kverdict_compose` (`libkofeng/verdictor/verdict.h`).
+  separator moved from "-" to "#" in the engine, the examiner's copy kept the
+  "-", and every detected sample showed no verdict in the examiner while the
+  scanner called the same file infected. One spelling now, `kof_verdict_name`
+  (`libkofeng/verdictor/verdict.h`), and the tools quote `kof_result.verdict`.
 - The scanner's own name-matching guess at "did a packer produce this" was
   retired by the engine publishing `from_packer`.
 - A verdict was composed in the tool and in the engine; the tool's copy went.
@@ -153,8 +153,8 @@ Every claim about cost or coverage carries a number from this tree.
   listed. A detection count that cannot move proves nothing, so do not quote
   one as a result.
 - Change one variable at a time. Two at once is not a measurement.
-- Freeze the binary and the corpus. The scanner repairs in place, so scan
-  copies and `chmod a-w` them.
+- Freeze the binary and the corpus. Scan copies and `chmod a-w` them: the scanner
+  no longer repairs a file, but a corpus that moves under a measurement is not one.
 - Check for a runaway from an earlier run before trusting a timing - two were
   found here holding a core, one with four days of CPU.
 
@@ -202,7 +202,7 @@ Finish the swap in the same change, or do not start it.
 
 `kofscanner` and `kofviewer` take input from the person and display what the
 engine returned. They do not compose verdicts, re-derive what a module meant,
-or filter findings by logic of their own. When a tool needs something the
+or filter the engine's results by logic of their own. When a tool needs something the
 engine does not expose, add it to the engine - including the callback the
 tool registers to be told.
 
@@ -308,10 +308,8 @@ being asked; do not add code that contradicts it.
 - Words: one concept has one word in new text, and the old spellings stay where
   the ABI fixes them. SIMILARITY is `mutation` (`detectors/mutations/`,
   `kofmod/kofmutation.h`, `kgenome_mutation_*`); what a program DOES is a
-  DIAGNOSE (`bases/diagnoses/`; `kofmod/kofdiagtree.h` holds its graph layout;
-  `KOF_ENGINE_PATHOGEN` and `KOF_ENG_USE_PATHOGEN` are aliases of
-  `KOF_ENGINE_DIAGNOSE` / `KOF_ENG_USE_DIAGNOSE`, same values, kept for
-  kofexamine and old module sources); a module asking
+  DIAGNOSE (a generated `.c` under `diagnoses/` of a content tree; `kofmod/kofdiagtree.h` holds its graph layout); a
+  module asking
   the host to undo a coding says `kunp_*` (the unpack ABI) while the algorithm it
   asks for lives in kuncoat. Rename the file or directory when it is free to
   move; leave an ABI name until the ABI version moves.
@@ -353,7 +351,7 @@ being asked; do not add code that contradicts it.
   a macro that DEFINES it, invoked where the module had the function**
   (`KOF_STUB_DEFINE_IS`, `KOF_UPX_DEFINE_METHOD_OF`): a blob is linked with
   `-ffunction-sections`, so its bytes follow the order the functions were emitted
-  in, and every report (`KOF_SCAN_INFECT`, `kof_debug`) carries the source line it
+  in, and every report (`kof_debug`, `kof_mark_infected`) carries the source line it
   was made on. Moving a function up into a header, or deleting lines above a
   report, changes the pack with no change of behaviour - measured, and the packs
   were no longer byte-identical. The analysis that is specific
@@ -547,14 +545,36 @@ decrypt splits from decompress when it grows.
   parameter, `ksb`: a function that takes none touches no run state. What one unit
   offers another is declared in `ksb.h` with a `ksb_` prefix; everything else is
   `static`. A new `ksb_*.c` is picked up by the Makefile's wildcard.
-- `scanners/pzero.{c,h}` is the cure stage (what a file was before it was
-  infected). It is a stage of the pipeline: it takes the object context and the
-  cure request, so it lives with `scanners/` and not in `analyzers/`.
-  `analyzers/diseases/` is the disease units - name checks, the id, the `msf_*.h`
+- `analyzers/diseases/` is the disease units - name checks, the id, the `msf_*.h`
   declarations - which the loader, the builder and the modules share.
-- `docs/disabled/` holds a module that is switched off: a `.c` whose header says
-  why, kept out of `bases/` so that nothing walking `bases/` has to know to skip
-  it. To turn one on, copy it back.
+- `bases/` now holds the unpackers, decompressors and decoders only (`bases/unp`,
+  `bases/decomp`, `bases/decoders`). The signatures, the diagnoses and the heuristic rules
+  were written against a verdict model that named an object from what ONE module reported
+  (`KOF_SCAN_INFECT`/`SUSPECT`/`HEUR` and their levels); that model is removed, and the
+  verdict is made from the diseases the matched diagnoses declare (the diagnoses are
+  generated, by kofviewer/kofeditor). A module's whole voice is a note (`kof_debug`) and
+  a mark (`kof_mark_infected`); a module that names a packer or a cure through the old
+  macros has no place in `bases/`.
+- `bases/syndromes/` holds the TAG SOURCES: the unit of classification is the tag, a tag has a
+  name, activities, types and a family with file attributes, and each of those is an entity with
+  an id of its own (a 64-bit random number the tool generates once and never changes; ids below
+  0x10000 are the seeds'), written in a file of its own named `<kind>_<name>_<first 8 hex of
+  id>.c`. They are DATA: no pack carries them, `ksigbuilder --tree` skips the directory, and the
+  verdictor and the engine do not read them. The tools do, through `databases/tagsrc.h` and
+  nothing else (it patches a file by the same loop as a diagnose source, `kof_dsrc_patch_with`):
+  kofviewer's Analysis > Syndrome table and the diagnose panel's Tag cells, and `ksigbuilder
+  --tags <dir>`, which prints the Check and exits non-zero on an error. **The only place for the
+  word "syndrome" is this directory's name**: so in a path that names it (`bases/syndromes`,
+  kofviewer's `--syndromes`) and in the menu item `Syndrome table`; every other name,
+  comment and document says tag, activity, type or family. `make check-rules` fails on any other
+  use (the retired pack name `syndromes.kdig` is the one older exception, named in the check).
+- `docs/disabled/` holds what is switched off: a `.c` whose first lines say why, kept out
+  of `bases/` so that nothing walking `bases/` has to know to skip it. It has one
+  subdirectory per kind - `signatures/`, `diagnoses/`, `heur/` - and each file opens with
+  `Disabled <date>: <why>; copy back to bases/ to enable`. The old signatures and heur rules
+  also say that enabling them needs the removed macros back. Nothing builds from here, and
+  nothing here is a test fixture (those are `tests/sigs` and `tests/shape`). To turn one on,
+  copy it back.
 - The Makefile is a short list of `include mk/<part>.mk` lines, in dependency order
   (platform, shell, flags, entry, stamp, libs, sdk, sources, tools, grille, packs, tests,
   deps, asan, misc, checks); a variable is set by an earlier fragment than the first rule
@@ -584,7 +604,7 @@ layout of a loaded pack and its accessors, which the matchers read) <
 `detectors` < `databases` (the loader and packer, which BUILD matchers) <
 `verdictor` (`verdictor/`: the names, `verdict.h`) < `scanners` < the public API
 (`libkofeng/kofeng.{c,h}`); a file may include its own class and lower ones
-(the scan's types live in `libkofeng/kofcore/koftypes.h`, which `kofeng.h` includes, the syndrome set the loader builds is `databases/pack/kofsyndrome.*`, and the verdictor is handed a `struct kof_verdict_in` by the scanners). **The core closure**: no file of core proper
+(the scan's types live in `libkofeng/kofcore/koftypes.h`, which `kofeng.h` includes, and the verdictor is handed a `struct kof_verdict_in` by the scanners). **The core closure**: no file of core proper
 may reach `libgenome/` or `libuncoat/` through a chain of includes, because
 a direct-include check cannot see `rangelist.h -> kofsig.h -> libgenome`
 (`kofmod/` re-exports the libs' types on
@@ -644,38 +664,26 @@ shown to fail on a deliberate violation before it is trusted.
 Which rules a grep or this script cannot see - "no writable global state", "a tool
 does not compose verdicts" - are checked in review.
 
-**Where the first-hit stops are (the default is pending review).** `kof_scan_option.all_matches`
-(`--all-matches` in kofscanner, always on in kofexamine) keeps BOTH behaviours; the default is off, the
-stops are on, and the owner will decide the default after the normaliser and kofviewer upgrades, because
-it interacts with the syndrome/cluster verdict (a cluster is read off the whole set of what matched).
-Every site is keyed on the one flag - none ignores it: `scan_pipeline.c` `run_modules` (an INFECT ends the
-detect stage when the database declares no disease: `kof_engine.reads_diseases`, which exists only for
-that stop), `sx_pipeline_run` (a detector's verdict, `det_n`, or a rule that `concluded`, ends the open
-chain, so the normalised view and block similarity never run on a detected object; measured: 6 lost
-descendants in 3023 objects), `scan_heur.c` (one HEUR line per object ends the heuristic pass) and
-`scan_unpack.c` (a named finding cancels unpacking). What each protects: the first is cost (a rule that
-reads a diagnose pays for an object already known infected), the second is cost and a verdict that
-contradicts itself, the third is output noise, the fourth is a payload nobody should open twice.
-`tests/unit/match_all.c` pins what each setting does (off: no view, no block rule on a detected object;
-on: both run). Two places look like stops and are not keyed on the flag, deliberately: the scored
-heuristic model stays silent on an object something already named (its score is still published), and a
-rule's HEUR finding on an object that opened moves to the child. `a child replaces its parent as the
-subject` (the unpack stop) is not a first-hit stop. A first-hit policy of the fnprint prototype
-(`KGENOME_FNP_RETIRE_TAG`, `_TAG_STOP`, `_STOP_FIRST`) is opt-in and conflicts with cluster detection;
-`fnprint.h` says so.
+**Nothing a module says stops the scan.** A module's note and mark are EVIDENCE: they go to the
+debug callback and to `kof_result.infected` and are not the answer, so nothing they say ends a stage.
+There is no first-hit option: a detection does not end the detect stage, the open chain (the normalised
+view and block similarity run on an object a detector marked), the heuristic pass or the unpacking of
+its object. The one stop that remains is the chain's own: a step that PRODUCED a child (not a carve)
+ends it. A disease a diagnose needs from a later module is therefore always reached, which is the
+point: the verdict is read off the whole set of what matched.
 
 **The module ABI is several headers behind one umbrella.** `libkofeng/kofcore/kofmod/kofsig.h`
 is the only ABI header a signature module includes (`bases/*.c` also names the module-side
 helper headers beside it, below); it holds
 the module contract, the alias block for the libs' types, and `#include`s the parts, each of which
-has one purpose and carries its own docs: `kofabi.h` (ABI version, finding level), `kofobjfmt.h`
+has one purpose and carries its own docs: `kofabi.h` (ABI version), `kofobjfmt.h`
 (format enum, target axis, format and arch names), `kofname.h` (what a name or comment may hold),
 `kofregion.h` (region masks, extent bound, region shape), `kofcontent.h` (`struct kof_content`, the
 vtable), `kofentry.h` (decoder ids, entry kinds, `struct kof_entry`), `kofctx.h` (`struct
-kof_obj_ctx`), `kofdefine.h` (`kof_scan`/`kof_unpack`/`kof_cure` and the macros defining them),
+kof_obj_ctx`), `kofdefine.h` (`kof_scan`/`kof_unpack` and the macros defining them),
 `kofsearch.h`, `kofmeasure.h`, `kofdiagnose.h`, `kofread.h`, `kofchild.h`, `kofmodemu.h` (the macros a
 module calls, by what they ask the host), `kofverdict.h` (engine, verdict, malware type lists),
-`kofdeclare.h` (what the build reads out of a source), `kofhit.h` (report, mark, cure). A new
+`kofdeclare.h` (what the build reads out of a source), `kofhit.h` (the note and the mark a module may leave). A new
 macro goes in the part whose question it asks, not in the umbrella; a new part is added to
 `SDK_HDR` (`mk/sdk.mk`) and to the list in the umbrella's header comment. The parts are not
 included by modules directly, so the freestanding-blob rule is unchanged.
@@ -698,19 +706,28 @@ files touch it. A new field gets the lifetime it has; if it has none of these it
 stage and gets a struct with the same header comment. `mutation` stays at the top level
 because `kofexamine` reads it; it moves into `sc->match` with that tool's upgrade.
 
-**One verdict per top-level file is the engine's** (`kverdict_filemap_*` in
-`verdictor/verdict.h`, reached through `kofeng.h`): a host calls
-`kverdict_filemap_fold(map, object_name, result, keep_clean)` from its on-object
-callback and reads the files back with `_at` / `_count` / `_files`. The name-to-file
-split (the first `//`), the rank of the three levels and the "examined" OR are in it, so
-a tool does not compose a file's verdict; `kofscanner` only prints.
-
-**A finding is either covered by a disease or it IS the verdict** (`sx_verdict_take`, `sx_finding_covered`): a
-module that declares a disease is read through the syndromes (`sx_syndrome_verdict` composes the name); every other
-finding takes the file's verdict slot by rank and reaches `on_event_detected`. The roll-up and the events therefore
-read one fact, and `kof_stats.verdict_lost` (files counted with no event; `kofscanner` prints it as `ERROR`) is the
-engine's own check that they do; `tests/unit/verdict_delivery.c` runs the same check over any corpus. An analysis
-route that ran out on an object that OPENED into a child is `kof_result.analysis_moot`, not `KOF_BROKEN_LIMIT`.
+**The verdict is made of diseases, not of findings** (`kof_result.verdict`, `scanners/scan_verdict.c`,
+`verdictor/verdict.c`). A DISEASE is what a diagnose finds, `(maltype, behaviour)`
+(`KOF_DECLARE_DISEASE`, in a diagnose only: a module that declares one is refused by the build). An object's verdict exists when at least one disease matched (an OR: one matched
+diagnose is enough) and its name is a function of the diseases alone, `kof_verdict_make`: the LEAD disease
+is the most specific one (the behaviour path with the most `/` parts, then the lower type, then the lower
+id); the name is `<verdict word>#<target>/<Type of the lead>:<its behaviour, '/' written '.'>` and
+`!Diagnose` when a diagnose matched, with the types the other diseases carry as the reason, `?A+B`;
+the verdict word is Infected. The finding carries what
+it was made of - the ids of the matched diagnoses (`diag[]`) and of the diseases (`disease[]`), each
+bounded by `KOF_VERDICT_TRACE` with its true total beside it - and `kdb_diagnose_name`,
+`kdb_diagnose_disease`, `kdb_disease_name` and `kdb_disease_type` turn an id back into what a person
+reads (kofscanner `-v` prints one `diagnose <name>` line per matched diagnose under the verdict).
+`on_event_detected` fires once per object that has a verdict; the evidence never reaches it.
+`kof_result.verdict_incomplete` says the set may be missing a disease; with nothing else found the object
+is marked broken instead. **One verdict per top-level file is the engine's** (`kverdict_filemap_*` in
+`verdictor/verdict.h`): a host calls `kverdict_filemap_fold(map, object_name, result, keep_clean)` from
+its on-object callback; the file's verdict is the first made in its tree, the name-to-file split (the
+first `//`) and the "examined" OR are in it, so a tool does not compose one. `kof_stats.verdict_lost`
+(files counted with a verdict and no event) is the engine's own check that the two read one fact, and
+`tests/unit/verdict_delivery.c` runs it over any corpus. An analysis route that ran out on an object that
+OPENED into a child is `kof_result.analysis_moot`, not `KOF_BROKEN_LIMIT`. The shipped database
+holds no diagnose, so it reports no verdict.
 
 **Which diagnose was called** is said by the engine, not by a diagnose (they are generated and carry no code): one
 line per diagnose and event, `[diag] <name> id=<hex> asked-by=<module|-> gate=<open|closed:<signs>> routes=<declared>
@@ -758,9 +775,10 @@ member order is the ABI, so no cut by purpose exists that is not an ABI move.
 
 - **Scratch files go in `/mnt/games/`, never `/tmp`.** `/tmp` is a 3.2 GB
   tmpfs here and filling it has broken the build twice.
-- **A scan is not read-only.** The scanner repairs infected files in place.
-  Copy a sample before scanning it and `chmod a-w` the copy; four originals
-  were destroyed learning this.
+- **Scan copies.** The scanner repaired infected files in place until the cure
+  stage was removed with the old verdict, and four originals were destroyed
+  learning that. It writes nothing now; keep copying a sample and `chmod a-w` the
+  copy, because the habit is cheaper than the next mistake.
 - **`make tui-test` and `make population` are not part of `make unit`.** The
   first drives the real viewer (python3 and pyte); the second writes N synthetic
   signature sources for a scale measurement - not evidence about detection.

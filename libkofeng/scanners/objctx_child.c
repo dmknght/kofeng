@@ -133,9 +133,18 @@ static int child_close(const struct kof_obj_ctx *ctx)
 	if (sc->pend.image && sc->sink.mem && sc->pend.n_sec) {
 		const struct kgenome_pe_info *tmpl =
 			(const struct kgenome_pe_info *)ctx->file_header;
-		uint64_t span = sc->pend.sec[sc->pend.n_sec - 1u].rva +
-				sc->pend.sec[sc->pend.n_sec - 1u].vsize;
+		uint64_t span = oc_sec_span(sc);
 		uint64_t entry = sc->pend.entry_set ? sc->pend.entry_rva : 0;
+		/*
+		 * THE ROOM IN FRONT OF THE FIRST SECTION IS THE HEADER'S, and it cannot be more than the buffer
+		 * the child lives in. The writers zero what they are given as `cap`, and a table recovered from
+		 * the decoded payload names its first section wherever the payload says (engine_defect2 E6):
+		 * 0x30000000 made this zero 768 MB of a 12 KB allocation. A header that does not fit is the
+		 * refusal below, as it always was - and the room is then 0, not "as much as there is":
+		 * clamped to the buffer the writer zeroed the whole decoded payload and the child came out
+		 * made, empty and clean.
+		 */
+		const uint64_t room = sc->pend.sec[0].rva > sc->sink.cap ? 0 : sc->pend.sec[0].rva;
 		int ok;
 
 		/*
@@ -175,6 +184,11 @@ static int child_close(const struct kof_obj_ctx *ctx)
 					sc->pend.imp_at;
 				sc->pend.dir[KGENOME_PE_DIR_IMPORT].size = n;
 				sc->pend.dir[KGENOME_PE_DIR_IMPORT].set = 1;
+			} else {
+				/* The child goes out with no imports: said, as the comment above promised
+				 * and the code did not (engine_defect2 E3 - a table that grew after its
+				 * place was reserved, or imports added after it). */
+				oc_scan_limit(sc);
 			}
 		}
 
@@ -194,7 +208,7 @@ static int child_close(const struct kof_obj_ctx *ctx)
 
 			ok = kgenome_elf_hdr_write(&(const struct kgenome_elf_hdr_req){
 					.out = sc->sink.mem,
-					.cap = sc->pend.sec[0].rva,
+					.cap = room,
 					.is64 = is64,
 					.machine = mach,
 					.base = sc->pend.as_base,
@@ -250,7 +264,7 @@ static int child_close(const struct kof_obj_ctx *ctx)
 							   KOF_FMT_PE) &&
 			     use && use->valid &&
 			     kgenome_pe_write_hdr(sc->sink.mem,
-					      sc->pend.sec[0].rva, use,
+					      room, use,
 					      sc->pend.sec, sc->pend.n_sec,
 					      entry, span, sc->pend.dir) != 0;
 		}

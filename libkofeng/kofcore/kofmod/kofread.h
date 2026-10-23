@@ -82,8 +82,8 @@ static inline uint32_t kof_bswap32(uint32_t v)
  *
  * NULL and zero when the analysis did not run on this object, which is a
  * normal answer and stops the loop on its first test. Reading this cannot
- * make it run: a rule that wants the analysis says so with
- * KOF_HEUR_WANT(KOF_ENG_USE_DIAGNOSE).
+ * make it run: the analysis runs when a diagnose that declares a disease can be
+ * answered on the object, or when a module asks kof_diag.
  */
 #define kof_diag_graph(np) ((ctx)->content->graph ? \
 			    (ctx)->content->graph((ctx), (np)) : 0)

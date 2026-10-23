@@ -22,6 +22,7 @@
 #include "../kofcore/koftypes.h"
 #include "../kofcore/kofhash.h"   /* KOF_ERR_* */
 #include "../kofcore/kofbudget.h"
+#include "../kofcore/range.h"
 
 
 #include "../kofcore/kofplatform.h"
@@ -120,7 +121,7 @@ struct kof_objsrc {
 
 	/* What the producer said this object's regions are - see the note in
 	 * objsrc.h. Empty for every source but a normalised view. */
-	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
+	struct kof_src_region *rgn;       /* owned, n_rgn entries: allocated to what was declared */
 	uint32_t              n_rgn;
 	uint8_t               rgn_fmt;   /* whose vocabulary rgn[].mask uses */
 
@@ -135,6 +136,10 @@ struct kof_objsrc {
 	 * kof_src_declare_funcs. Owned, freed with the source. */
 	struct kgenome_func      *funcs;
 	uint32_t              n_funcs;
+	/* THE UNITS OF THE PARENT'S CUT THAT THE DECODE REWROTE, in this object's offsets -
+	 * see kof_src_declare_fixed. Owned, freed with the source. */
+	struct kof_range     *fixed;
+	uint32_t              n_fixed;
 
 	/*
 	 * WHAT THE PRODUCER SAYS THE OBJECT IS - the image description carried
@@ -228,24 +233,38 @@ uint8_t kof_src_region_fmt_of(const struct kof_objsrc *s)
 	return s ? s->rgn_fmt : 0u;
 }
 
-void kof_src_declare_regions(struct kof_objsrc *s, uint8_t fmt,
-			     const struct kof_src_region *r, uint32_t n)
+int kof_src_declare_regions(struct kof_objsrc *s, uint8_t fmt,
+			    const struct kof_src_region *r, uint32_t n)
 {
-	uint32_t i;
+	struct kof_src_region *own = NULL;
 
 	if (!s || !r)
-		return;
-	if (n > KOF_SRC_MAX_REGIONS)
-		n = KOF_SRC_MAX_REGIONS;
+		return 1;
 	/*
 	 * Copied rather than pointed at. The caller's table is a local in the
 	 * function that built the view, and the source outlives it by the whole
 	 * of the child's scan.
+	 *
+	 * ALLOCATED TO WHAT WAS DECLARED. The table was sixteen entries and a producer's own was
+	 * clipped to them, silently: a PE with more disjoint code extents than that lost the later
+	 * ones from the view's regions (norm_defect_engine N3). A table is as long as the producer's
+	 * is. 0 is a failed allocation, and the caller says so (the view carries no table).
 	 */
-	for (i = 0; i < n; i++)
-		s->rgn[i] = r[i];
+	if (n) {
+		own = malloc((size_t)n * sizeof *own);
+		if (!own) {
+			free(s->rgn);
+			s->rgn = NULL;
+			s->n_rgn = 0;
+			return 0;
+		}
+		memcpy(own, r, (size_t)n * sizeof *own);
+	}
+	free(s->rgn);
+	s->rgn = own;
 	s->n_rgn = n;
 	s->rgn_fmt = fmt;
+	return 1;
 }
 
 uint32_t kof_src_regions_of(const struct kof_objsrc *s,
@@ -796,52 +815,71 @@ struct kof_objsrc *kof_src_ref(struct kof_objsrc *s)
  * COPIED, because the caller's buffer is the scanner's working one and is
  * rebuilt for the next object. Freed with the source.
  */
-void kof_src_declare_syms(struct kof_objsrc *s, const uint8_t *b, uint32_t n)
+int kof_src_declare_syms(struct kof_objsrc *s, const uint8_t *b, uint32_t n)
 {
 	uint8_t *own;
 
 	if (!s || !b || !n)
-		return;
+		return 1;
 	own = malloc(n);
 	if (!own)
-		return;         /* the view simply arrives without them */
+		return 0;       /* the view arrives without them, and the caller says so (engine_defect2 E2) */
 	memcpy(own, b, n);
 	free(s->syms);
 	s->syms = own;
 	s->n_syms = n;
+	return 1;
 }
 
-void kof_src_declare_funcs(struct kof_objsrc *s, const struct kgenome_func *v,
-			   uint32_t n)
+int kof_src_declare_funcs(struct kof_objsrc *s, const struct kgenome_func *v,
+			  uint32_t n)
 {
 	struct kgenome_func *own;
 
 	if (!s || !v || !n)
-		return;
-	own = malloc(n * sizeof *own);
+		return 1;
+	own = malloc((size_t)n * sizeof *own);
 	if (!own)
-		return;         /* the view simply arrives without them */
-	memcpy(own, v, n * sizeof *own);
+		return 0;       /* the view arrives without them, and the caller says so (engine_defect2 E2) */
+	memcpy(own, v, (size_t)n * sizeof *own);
 	free(s->funcs);
 	s->funcs = own;
 	s->n_funcs = n;
+	return 1;
 }
 
-void kof_src_declare_desc(struct kof_objsrc *s, const struct kof_src_desc *d)
+int kof_src_declare_fixed(struct kof_objsrc *s, const struct kof_range *v, uint32_t n)
+{
+	struct kof_range *own;
+
+	if (!s || !v || !n)
+		return 1;
+	own = malloc((size_t)n * sizeof *own);
+	if (!own)
+		return 0;       /* the view arrives cut as its own bytes say, and the caller says so (E2) */
+	memcpy(own, v, (size_t)n * sizeof *own);
+	free(s->fixed);
+	s->fixed = own;
+	s->n_fixed = n;
+	return 1;
+}
+
+int kof_src_declare_desc(struct kof_objsrc *s, const struct kof_src_desc *d)
 {
 	void *own;
 
 	if (!s || !d || !d->info || !d->info_len)
-		return;
+		return 1;
 	own = malloc(d->info_len);
 	if (!own)
-		return;         /* the view simply arrives without it, and is raw */
+		return 0;       /* the view arrives without it, and is raw: the caller says so (E2) */
 	memcpy(own, d->info, d->info_len);
 	free(s->desc_info);
 	s->desc = *d;
 	s->desc.info = own;
 	s->desc_info = own;
 	s->has_desc = 1;
+	return 1;
 }
 
 const struct kof_src_desc *kof_src_desc_of(const struct kof_objsrc *s)
@@ -869,6 +907,13 @@ const struct kgenome_func *kof_src_funcs_of(const struct kof_objsrc *s, uint32_t
 	return s ? s->funcs : NULL;
 }
 
+const struct kof_range *kof_src_fixed_of(const struct kof_objsrc *s, uint32_t *n)
+{
+	if (n)
+		*n = s ? s->n_fixed : 0u;
+	return s ? s->fixed : NULL;
+}
+
 const uint8_t *kof_src_syms_of(const struct kof_objsrc *s, uint32_t *n)
 {
 	if (n)
@@ -894,8 +939,10 @@ void kof_src_unref(struct kof_objsrc *s)
 		if (s->label_cost && s->label_release)
 			s->label_release(s->label_arg, s->label_cost);
 		free(s->label);
+		free(s->rgn);
 		free(s->syms);
 		free(s->funcs);
+		free(s->fixed);
 		free(s->desc_info);
 		kof_prod_unref(s->prod);
 		/* The record's own charge, read before the free and given back after it. */

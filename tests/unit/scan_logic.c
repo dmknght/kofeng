@@ -1,20 +1,19 @@
 /*
- * scan_logic - what the scan does when more than one thing is true, and when it
- * is told to stop. Each case is a way to LOSE a detection or to keep a thing
- * nobody should keep.
+ * scan_logic - what the scan does when it is told to stop. Each case is a way to LOSE
+ * a detection or to keep a thing nobody should keep. A file is DETECTED when it has a
+ * verdict, and the one that has here is a kernel module that imports the two credential
+ * functions (the fixture diagnose tests/sigs/diagnoses/kmod_give_root.c declares the
+ * disease; caps_fix.h builds the image).
  *
- *   1. two detectors report on one object. The object's repair has to be the one
- *      that belongs to the finding it is reported under, not the one that
- *      happened to run first.
- *   2. the first detector to report is the weaker. Without all_matches the engine
- *      stops at "enough", and enough must not be a SUSPECTED that hides an
- *      INFECTED further down the database.
- *   3. a host asks to stop in the middle of an object. The object was not fully
+ *   1. (that two detectors may both match one object, and that nothing one of them says
+ *      ends the scan, is match_all.c's.)
+ *   2. a host asks to stop in the middle of an object. The object was not fully
  *      examined, so it must not be handed to the cache as clean: a cache that
  *      remembers it skips the file for ever, and the detection that would have
  *      been found is gone.
- *   4. the same without a stop, as the control: a clean file IS remembered and a
+ *   3. the same without a stop, as the control: a clean file IS remembered and a
  *      detected one is not.
+ *   4. told to stop with the children of a container still waiting.
  */
 
 #define _GNU_SOURCE
@@ -24,6 +23,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "caps_fix.h"
 #include "../../libkofeng/kofeng.h"
 
 static int fails;
@@ -33,17 +33,6 @@ static void ok(const char *what, int cond)
 	printf("  %s %s\n", cond ? "ok  " : "FAIL", what);
 	if (!cond)
 		fails++;
-}
-
-/* 64 bytes carrying both markers: the weak one at 0, the strong one at 16. */
-static void build_both(uint8_t *b)
-{
-	unsigned i;
-
-	for (i = 0; i < 64u; i++)
-		b[i] = (uint8_t)(0x40u + i);
-	memcpy(b, "KOFREPWEAK!", 11);
-	memcpy(b + 16, "KOFREPSTRONG!", 13);
 }
 
 static int write_file(const char *path, const void *p, size_t n)
@@ -57,15 +46,12 @@ static int write_file(const char *path, const void *p, size_t n)
 	return 1;
 }
 
-static struct kof_result first_res;
 static int n_obj;
 
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
-	(void)name; (void)bytes; (void)len; (void)user;
-	if (n_obj == 0)
-		first_res = *res;
+	(void)name; (void)bytes; (void)len; (void)user; (void)res;
 	n_obj++;
 	return 0;
 }
@@ -82,16 +68,6 @@ static int on_object_abort(const char *name, const void *bytes, uint64_t len,
 	(void)name; (void)bytes; (void)len; (void)res; (void)user;
 	n_obj++;
 	return idx == abort_at;
-}
-
-static int has_named(const struct kof_result *r, const char *word)
-{
-	uint32_t i;
-
-	for (i = 0; i < r->n; i++)
-		if (strstr(r->v[i].name, word))
-			return 1;
-	return 0;
 }
 
 /* ---- the cache and stop hooks ----------------------------------------- */
@@ -132,8 +108,10 @@ int main(int argc, char **argv)
 {
 	const char *db = argc > 1 ? argv[1] : "build/test/databases-sigs";
 	char dir[] = "build/test/scanlogic_XXXXXX";
-	char pa[256], pb[256], pboth[256];
-	uint8_t both[64], marker[48];
+	char pa[256], pb[256];
+	static uint8_t kmod[4096];
+	uint64_t kmod_n;
+	uint8_t marker[48];
 	kof_engine *e;
 	kof_scanner *sc;
 	struct kof_scan_option opt;
@@ -146,14 +124,9 @@ int main(int argc, char **argv)
 	}
 	snprintf(pa, sizeof pa, "%s/a_detected.bin", dir);
 	snprintf(pb, sizeof pb, "%s/b_clean.bin", dir);
-	snprintf(pboth, sizeof pboth, "%s/both.bin", dir);
 
-	build_both(both);
-	write_file(pboth, both, sizeof both);
-	for (i = 0; i < sizeof marker; i++)
-		marker[i] = (uint8_t)(0x40u + i);
-	memcpy(marker, "KOFCURETEST!", 12);        /* sig_cure's marker */
-	write_file(pa, marker, sizeof marker);
+	kmod_n = cf_kmod(kmod, sizeof kmod, 4, 0);
+	write_file(pa, kmod, (size_t)kmod_n);
 	for (i = 0; i < sizeof marker; i++)
 		marker[i] = (uint8_t)(0x90u + i);     /* nothing matches this */
 	write_file(pb, marker, sizeof marker);
@@ -169,23 +142,6 @@ int main(int argc, char **argv)
 		keng_close(e);
 		return 1;
 	}
-
-	/* ---- 1. the repair belongs to the finding it is reported under ---- */
-	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
-	n_obj = 0;
-	(void)kscan_path(sc, pboth, &opt, on_object, NULL);
-	ok("both detectors reported", has_named(&first_res, "RepairWeak") &&
-				      has_named(&first_res, "RepairStrong"));
-	ok("the weak one reported FIRST (the case is set up)",
-	   first_res.n >= 2 && strstr(first_res.v[0].name, "RepairWeak"));
-
-	/* ---- 2. the first to report must not hide a stronger one ---------- */
-	memset(&opt, 0, sizeof opt);            /* all_matches OFF */
-	n_obj = 0;
-	(void)kscan_path(sc, pboth, &opt, on_object, NULL);
-	ok("without all_matches an INFECTED later in the database is still found",
-	   has_named(&first_res, "RepairStrong"));
 
 	/* ---- 4. the control: no stop -------------------------------------- */
 	memset(&opt, 0, sizeof opt);
@@ -218,14 +174,14 @@ int main(int argc, char **argv)
 	/* ---- 5. told to stop with children still waiting ------------------ */
 	{
 		char pm[256];
-		uint8_t multi[56];
+		static uint8_t multi[40 + 4096];
 
 		snprintf(pm, sizeof pm, "%s/m_multi.bin", dir);
-		memset(multi, 0x70, sizeof multi);
+		memset(multi, 0x70, 40);
 		memcpy(multi, "KOFMULTI", 8);
-		/* The LAST child is the one with something in it. */
-		memcpy(multi + 40, "KOFCURETEST!", 12);
-		write_file(pm, multi, sizeof multi);
+		/* The LAST child is the one with something in it: it runs to the end. */
+		memcpy(multi + 40, kmod, (size_t)kmod_n);
+		write_file(pm, multi, 40u + (size_t)kmod_n);
 
 		memset(&opt, 0, sizeof opt);
 		opt.cache_seen = cb_seen; opt.cache_keep = cb_keep;

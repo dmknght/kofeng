@@ -21,7 +21,7 @@
 # a shell glob would need a shell that globs - which PowerShell, for a native
 # command, does not.
 asan_obj = $(TEST)/asan-obj/$(subst /,_,$(1:.c=.o))
-ASAN_OBJ := $(foreach f,$(LIB_SRC) $(PH_SRC) $(GT_SRC) $(CL_SRC) $(UC_SRC),$(call asan_obj,$(f)))
+ASAN_OBJ := $(foreach f,$(LIB_SRC) $(PH_SRC) $(GT_SRC) $(CL_SRC) $(TX_SRC) $(UC_SRC),$(call asan_obj,$(f)))
 
 # A literal newline, so $(foreach) can put each command on its own recipe line
 # - which is what makes make run them one at a time and stop at the first that
@@ -37,7 +37,7 @@ endef
 # payload snapshots - so leaving it out would exempt exactly what most needs
 # checking.
 #
-$(ASAN_LIB): $(LIB_SRC) $(PH_SRC) $(GT_SRC) $(CL_SRC) $(UC_SRC) $(SDK_HDR) | $(TEST)
+$(ASAN_LIB): $(LIB_SRC) $(PH_SRC) $(GT_SRC) $(CL_SRC) $(TX_SRC) $(UC_SRC) $(SDK_HDR) | $(TEST)
 	@$(call RMRF,$(TEST)/asan-obj)
 	@$(call MKDIR,$(TEST)/asan-obj)
 	@# EMU_INC on every loop: libkofeng's own sources include the decoder's
@@ -49,6 +49,8 @@ $(ASAN_LIB): $(LIB_SRC) $(PH_SRC) $(GT_SRC) $(CL_SRC) $(UC_SRC) $(SDK_HDR) | $(T
 	@$(foreach f,$(GT_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(CL_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) \
+		-c $(f) -o $(call asan_obj,$(f))$(NL))
+	@$(foreach f,$(TX_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
 	@$(foreach f,$(UC_SRC),$(CC) $(CFLAGS) $(ASAN_FLAGS) \
 		-c $(f) -o $(call asan_obj,$(f))$(NL))
@@ -79,7 +81,7 @@ ASAN_KUNCOAT_LIB := $(TEST)/libkuncoat-asan.a
 
 $(ASAN_KGENOME_LIB): $(ASAN_LIB)
 	@$(call RM,$@)
-	@$(AR) rcs $@ $(foreach f,$(PH_SRC) $(GT_SRC) $(CL_SRC) libkofeng/kofcore/kofentropy.c,$(call asan_obj,$(f)))
+	@$(AR) rcs $@ $(foreach f,$(PH_SRC) $(GT_SRC) $(CL_SRC) $(TX_SRC) libkofeng/kofcore/kofentropy.c,$(call asan_obj,$(f)))
 
 $(ASAN_KUNCOAT_LIB): $(ASAN_LIB)
 	@$(call RM,$@)
@@ -87,6 +89,10 @@ $(ASAN_KUNCOAT_LIB): $(ASAN_LIB)
 
 $(TEST)/asan_libtest_genome_%$(EXE): tests/lib/genome/%.c $(ASAN_KGENOME_LIB) $(STAMP) | $(TEST)
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $< $(ASAN_KGENOME_LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)
+
+# the same explicit rule as the plain build (mk/tests.mk): the route's own sources carry the block counter, sanitised as well
+$(TEST)/asan_libtest_genome_diag_text_work$(EXE): tests/lib/genome/diag_text_work.c $(DTX_WORK_SRC) $(ASAN_KGENOME_LIB) $(STAMP) | $(TEST)
+	@$(CC) $(CFLAGS) $(ASAN_FLAGS) -fsanitize-coverage=trace-pc $< $(DTX_WORK_SRC) $(ASAN_KGENOME_LIB) -o $@ $(LDFLAGS)
 
 $(TEST)/asan_libtest_uncoat_%$(EXE): tests/lib/uncoat/%.c $(ASAN_KUNCOAT_LIB) $(STAMP) | $(TEST)
 	@$(CC) $(CFLAGS) $(ASAN_FLAGS) $< $(ASAN_KUNCOAT_LIB) -o $@ $(LDFLAGS) $(UNIT_LIBS_$*)

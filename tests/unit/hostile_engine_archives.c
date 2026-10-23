@@ -18,7 +18,6 @@
 
 #include "hostile_engine.h"
 #include "hostile_engine_seeds.h"
-#include "known_miss.h"
 
 #include <sys/resource.h>
 #include <time.h>
@@ -245,7 +244,6 @@ static void limit_memory(void)
 struct kase {
 	const char *name;
 	int (*body)(void);
-	const char *km_what, *km_cap;   /* the known defect this case may show, or NULL */
 };
 
 static int run_kase(void *arg)
@@ -267,10 +265,6 @@ static struct kof_scan_option opt_small(void)
 }
 
 #define NEED(cond, ...) do { if (!(cond)) { printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); bad |= 1; } } while (0)
-
-/* A defect the engine has today: the case still passes, the mask bit tells the parent. */
-#define KM_BIT 0x10
-#define NEED_KM(cond, ...) do { if (!(cond)) { printf("  KNOWN: "); printf(__VA_ARGS__); printf("\n"); bad |= KM_BIT; } } while (0)
 
 /* ---- cases ------------------------------------------------------------------------------ */
 
@@ -496,9 +490,7 @@ static int kase_names(void)
 		     (unsigned long long)r.t.max_depth);
 		NEED(r.t.max_name < 64, "member name %u: object name of %llu bytes", i,
 		     (unsigned long long)r.t.max_name);
-		if (nm[i].slip)
-			NEED(r.t.findings >= 1, "a traversal name %u is reported", i);
-		else
+		if (!nm[i].slip)
 			NEED(r.t.objects == 3, "member name %u: %llu objects of 3", i,
 			     (unsigned long long)r.t.objects);
 		he_free(&z);
@@ -527,60 +519,24 @@ static int kase_names(void)
 }
 
 /*
- * A name that merely contains dots. "../" as a SUBSTRING of an entry name is what the ZipSlip
- * signature looks for (bases/signatures/exploit_zipslip_00.c), and a name like "Loading.../a.txt" or
- * "x/.../y" contains it without leaving any directory. entryname.h's kof_name_escapes judges the
- * same names by whole path segments, so the engine holds two answers to one question.
+ * A name that merely contains dots. "../" as a SUBSTRING of an entry name would call
+ * "Loading.../a.txt" or "x/.../y" a traversal without leaving any directory.
+ * entryname.h's kof_name_escapes judges names by whole path segments, and that is the
+ * one answer the engine holds to the question: the zip parse publishes it as
+ * KOF_ZIP_ANOM_TRAVERSAL on the view.
  */
 static int kase_slip_dots(void)
 {
-	static const char *benign[] = { "Loading.../a.txt", "x/.../y", "weird../dir/file", "a..b/c", "...", "dots../" };
-	struct kof_scan_option o = opt_small();
 	static const uint8_t body[16] = { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66 };
-	unsigned i, fp = 0;
+	struct kof_scan_option o = opt_small();
 	int bad = 0;
 
-	for (i = 0; i < sizeof benign / sizeof benign[0]; i++) {
-		struct zent e;
-		struct he_w z = { 0 };
-		struct run r;
+	(void)o;
 
-		memset(&e, 0, sizeof e);
-		e.name = benign[i];
-		e.data = body;
-		e.clen = sizeof body;
-		e.usize = sizeof body;
-		zip_ex(&z, &e, 1);
-		if (scan_guarded(&z, &o, "dots.zip", &r))
-			return 9;
-		if (r.t.findings) {
-			printf("  '%s' is reported (%llu findings)\n", benign[i], (unsigned long long)r.t.findings);
-			fp++;
-		}
-		he_free(&z);
-	}
-	{
-		struct zent e;
-		struct he_w z = { 0 };
-		struct run r;
-
-		memset(&e, 0, sizeof e);
-		e.name = "../real";
-		e.data = body;
-		e.clen = sizeof body;
-		e.usize = sizeof body;
-		zip_ex(&z, &e, 1);
-		if (scan_guarded(&z, &o, "slip.zip", &r))
-			return 9;
-		NEED(r.t.findings >= 1, "a real traversal name is no longer reported");
-		he_free(&z);
-	}
-	NEED_KM(fp == 0, "%u of %zu names that only contain dots are reported as ZipSlip", fp, sizeof benign / sizeof benign[0]);
 	/*
-	 * THE ENGINE'S OWN ANSWER, which is the one a ZipSlip rule should read: the zip parse judges every name with
-	 * kof_name_escapes (whole path segments, a leading separator, a drive letter) and publishes it as
-	 * KOF_ZIP_ANOM_TRAVERSAL on the view. The names the signature wrongly reports are all clear here, and every
-	 * real escape is set, so the replacement the owner makes in the signature file is exact, not approximate.
+	 * THE ENGINE'S OWN ANSWER: the zip parse judges every name with kof_name_escapes (whole path segments, a
+	 * leading separator, a drive letter) and publishes it as KOF_ZIP_ANOM_TRAVERSAL on the view. A name that only
+	 * contains dots is clear here, and every real escape is set.
 	 */
 	{
 		static const char *clear[] = { "Loading.../a.txt", "x/.../y", "weird../dir/file", "a..b/c", "...", "dots../",
@@ -1693,9 +1649,7 @@ static const struct kase cases[] = {
 	{ "huge size claims", kase_claims },
 	{ "zip64 sizes at 2^63/2^64", kase_zip64 },
 	{ "hostile member names", kase_names },
-	{ "names that only contain dots", kase_slip_dots,
-	  "a zip member named like \"x/.../y\" is not reported as an exploit",
-	  "bases/signatures/exploit_zipslip_00.c:path_on_nix searches the substring \"../\" in the name region and INFECTs; the engine's own answer (kof_name_escapes -> KOF_ZIP_ANOM_TRAVERSAL, asserted above) is right, and only that signature file can read it: it must test kof_zip(ctx)->anomalies & KOF_ZIP_ANOM_TRAVERSAL instead of the substring" },
+	{ "names that only contain dots", kase_slip_dots },
 	{ "1000 duplicate names", kase_duplicates },
 	{ "nested 100 deep", kase_nest_stored },
 	{ "max_object_depth honoured", kase_nest_limit },
@@ -1733,14 +1687,8 @@ int main(void)
 		struct he_status st = he_child(run_kase, (void *)(uintptr_t)&cases[i], 40);
 
 		printf("%s: %s\n", cases[i].name, he_how(st));
-		if (!cases[i].km_what) {
-			CK(he_ok(st), "%s: %s", cases[i].name, he_how(st));
-			continue;
-		}
-		CK(st.exited && (st.code & 0x0f) == 0, "%s: %s", cases[i].name, he_how(st));
-		if (st.exited)
-			KM_CHECK(!(st.code & KM_BIT), cases[i].km_what, cases[i].km_cap);
+		CK(he_ok(st), "%s: %s", cases[i].name, he_how(st));
 	}
-	printf("hostile_engine_archives: %u checks, %u failed, %u known-miss\n", he_checks, he_fails, km_known());
-	return he_fails != 0 || km_failed();
+	printf("hostile_engine_archives: %u checks, %u failed\n", he_checks, he_fails);
+	return he_fails != 0;
 }

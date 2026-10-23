@@ -199,6 +199,16 @@ enum kgenome_emu_hit_bit {
 };
 unsigned kgenome_emu_hit(const struct kgenome_emu *e);
 
+/* HOW MANY CALLS WENT TO A NAME THAT HAS A STUB AND NO MODEL (emu_win_names.c), each answered 0. It is the
+ * count of what the run asked of the environment and was not told: a run with a large one has taken
+ * its decisions on answers that were not real. */
+unsigned kgenome_emu_unmodelled_calls(const struct kgenome_emu *e);
+
+/* Of those, how many were i386 calls to a name whose stdcall argument count nobody knows: the stub returned with
+ * no cleanup, which is a guess about the guest's stack. Not a bound that cut the run (kgenome_emu_hit is for
+ * those, and a verdict reads it); a number a reader of the report weighs. */
+unsigned kgenome_emu_unmodelled_guessed(const struct kgenome_emu *e);
+
 struct kgenome_emu_cfg {
 	uint64_t max_insn;    /* instruction budget; 0 takes the default */
 	uint64_t max_pages;   /* pages this emulation may own; 0 takes the default */
@@ -360,7 +370,19 @@ void     kgenome_emu_set_seg_base(struct kgenome_emu *e, unsigned seg, uint64_t 
  * to the end, whatever hash it uses.
  */
 #define KGENOME_EMU_WIN_MOD_WS2      9u
-#define KGENOME_EMU_WIN_MOD_COUNT 10u
+/*
+ * MSCOREE, THE ONE LIBRARY A PROCESS DOES NOT START WITH. The modules before
+ * it are in the loader lists of a process that has just begun; this one is
+ * there only after somebody LoadLibrary's it, and a program that asks
+ * GetModuleHandle first is told no, as it would be. What it is here for: a
+ * protected .NET executable's loader loads it, takes _CorExeMain and
+ * _CorDllMain and then hooks the first of them. With no image behind the
+ * handle the addresses it was handed were null-page thunks, and the hook went
+ * to address zero - see kgenome_emu_win_mod_load.
+ */
+#define KGENOME_EMU_WIN_MOD_MSCOREE  10u
+#define KGENOME_EMU_WIN_MOD_RESIDENT 10u  /* modules present at the start: the first of them */
+#define KGENOME_EMU_WIN_MOD_COUNT 11u
 
 /*
  * How much address space one synthetic library occupies. The builder in
@@ -378,6 +400,24 @@ unsigned    kgenome_emu_win_api_argc(unsigned i);
 unsigned    kgenome_emu_win_api_mod(unsigned i);
 unsigned    kgenome_emu_win_api_slot(unsigned i);
 uint32_t    kgenome_emu_win_api_trap(unsigned i);
+
+/* A name a modelled library exports and nothing models: emu_win_names.c. `argc` is the i386 stdcall count of
+ * its arguments, KGENOME_EMU_WIN_ARGC_UNKNOWN where nobody knows it. */
+struct kgenome_emu_win_name {
+	const char *name;
+	uint8_t     argc;
+};
+#define KGENOME_EMU_WIN_ARGC_UNKNOWN 255u
+unsigned kgenome_emu_win_export_names(unsigned mod, const struct kgenome_emu_win_name **names, unsigned *first);
+unsigned kgenome_emu_win_export_total(void);
+/* The i386 stdcall argument count of an API by NAME - the modelled ones and the listed exports - or
+ * KGENOME_EMU_WIN_ARGC_UNKNOWN. */
+unsigned kgenome_emu_win_argc_of_name(const char *name);
+/* The number an export-only stub traps with (past the modelled ids) and what it says for itself. */
+uint32_t kgenome_emu_win_export_trap(unsigned flat);
+uint64_t kgenome_emu_win_export_answer(unsigned flat);
+unsigned kgenome_emu_win_export_argc(unsigned flat);
+const struct kgenome_emu_win_name *kgenome_emu_win_export_at(unsigned flat, unsigned *mod);
 
 unsigned    kgenome_emu_win_mod_count(void);
 const char *kgenome_emu_win_mod_name(unsigned i);

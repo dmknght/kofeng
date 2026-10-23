@@ -1,10 +1,8 @@
 /*
  * image_addr.c - an address the file uses, as an offset into it, and back.
  *
- * Moved from libkofeng/scanners/pzero.c (as kgenome_pz_*, renamed to the image
- * family when the file was): the translation is read from the program headers or
- * the section table, which is the genome's knowledge of the image; the cure
- * arithmetic around it (pzero.c) stays with the engine.
+ * The translation is read from the program headers or the section table, which
+ * is the genome's knowledge of the image.
  */
 
 #include <kofcore.h>

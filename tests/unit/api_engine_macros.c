@@ -2,7 +2,7 @@
  * api_engine_macros.c - macros of the public headers that have a value or an expansion a caller depends on,
  * checked against what the engine does with them.
  *
- *   LIMITS      the sizes of the result's tables (KOF_MAX_FIX, KOF_MAX_INFECTED, KOF_MAX_REGIONS,
+ *   LIMITS      the sizes of the result's tables (KOF_MAX_INFECTED, KOF_MAX_REGIONS,
  *               KOF_DIAG_REPORT_NODES), what a top level object's entry is (KOF_ENTRY_NONE) and a child's is not,
  *               the room a symbol block is planned with (KOF_SYM_BYTES_FOR)
  *   X-LISTS     the lists an enum and a name table are both generated from (KOF_ENGINE_LIST, KOF_VERDICT_LIST,
@@ -13,13 +13,13 @@
  *   SEARCH      KOF_FS_ONE / PICK / FOLD and KOF_DFS_FOLD / kof_diag_str_all, against a find_str that records:
  *               one call per string, `&&` stops at the first miss and `||` at the first hit, the ids are the
  *               module's own names pasted
- *   CODING      KOF_ENG_CLASS_PUT / OF round trip, KOF_UNP_ASPACK_MARK, KOF_UNP_LZMA_MPRESS_PROPS give a
+ *   CODING      KOF_UNP_ASPACK_MARK, KOF_UNP_LZMA_MPRESS_PROPS give a
  *               distinct method for every lc/lp/pb the LZMA header can carry
  *   WRITE       KOF_WRITE_CHUNK is a size one write(2) takes and the chunks of a write add up (a write that
  *               crosses a chunk would need 256 MB of buffer: the value is checked, the loop is not run)
  *
  * What is NOT here, and why: KOF_MEMMEM_FAIL_MAX / KOF_MEMMEM_GIVE_UP exist only in the Windows branch of
- * kofplatform_os.h (the POSIX build calls the C library's memmem); KOF_DSRC_NAME_LEN / KOF_DSRC_STR_LEN,
+ * kofplatform_os.h (the POSIX build calls the C library's memmem); KOF_DSRC_NAME_LEN,
  * KOF_MULTIMATCH_* and KOF_ENT_MEMO are limits inside the loader / the pattern tables whose only observable is
  * a refusal at exactly that size (tests/unit/diagsrc.c and api_engine_detect.c pin the behaviour by value).
  */
@@ -33,7 +33,6 @@
 #include <kofmod/proc.h>
 #include <kofmod/amsi.h>
 #include <kofmod/script.h>
-#include <kofmod/heur.h>
 #include <kofmod/kofverdict.h>
 #include <kofmod/kofdiagnose.h>
 
@@ -46,7 +45,6 @@ static void limits(void)
 	struct kof_result res;
 	struct kof_diag_report rep;
 
-	CK(ELEMS(res.repair.fix) == KOF_MAX_FIX, "the fix table holds KOF_MAX_FIX (%zu)", ELEMS(res.repair.fix));
 	CK(ELEMS(res.infected) == KOF_MAX_INFECTED, "the infected table holds KOF_MAX_INFECTED (%zu)", ELEMS(res.infected));
 	CK(ELEMS(res.region) == KOF_MAX_REGIONS, "the region table holds KOF_MAX_REGIONS (%zu)", ELEMS(res.region));
 	CK(ELEMS(rep.cap) == KOF_DIAG_REPORT_NODES && ELEMS(rep.at) == KOF_DIAG_REPORT_NODES,
@@ -137,7 +135,6 @@ static void entry_none(const char *db)
 		return;
 	}
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	memset(z, 0, sizeof z);
 	n = pdf3(z);
 	memset(&ent, 0, sizeof ent);
@@ -369,20 +366,8 @@ static void search(void)
 
 static void codings(void)
 {
-	uint32_t t, w;
 	unsigned lc, lp, pb, n = 0, dup = 0;
 	static uint8_t seen[1024];
-
-	/* the class is stored plus one, so that the empty word means "no class" and class 0 is a class */
-	for (t = 0; t < 255u; t++) {
-		w = KOF_ENG_CLASS_PUT(t);
-		if (KOF_ENG_CLASS_OF(w) != t + 1u || (w & ((1u << KOF_ENG_CLASS_SHIFT) - 1u)))
-			break;
-	}
-	CK(t == 255u, "a class put into a word comes out as class + 1, touching no bit below the shift (stopped at %u)", t);
-	CK(KOF_ENG_CLASS_PUT(0) != 0 && KOF_ENG_CLASS_OF(0) == 0, "class 0 is not the empty word, and the empty word has no class");
-	CK(KOF_ENG_CLASS_OF(0xabu | KOF_ENG_CLASS_PUT(9)) == 10u, "other bits of the word do not move the class");
-	CK(KOF_ENG_CLASS_OF(KOF_ENG_CLASS_PUT(255)) == 0, "class 255 does not fit the byte and reads as none (classes are 0..254)");
 
 	CK(KOF_UNP_ASPACK_MARK(0) == (uint32_t)KOF_UNP_ASPACK_E8E9 && KOF_UNP_ASPACK_MARK(0x1e8) == (uint32_t)KOF_UNP_ASPACK_E8E9 + 0xe8u &&
 	   KOF_UNP_ASPACK_MARK(0xff) == (uint32_t)KOF_UNP_ASPACK_E8E9 + 0xffu, "the ASPack mark is the base plus the mark byte, and only the byte");

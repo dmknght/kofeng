@@ -1,31 +1,26 @@
 /*
- * cond_expr - what a condition's matcher list means, read and written.
+ * cond_expr - what a condition's matcher list means, read and rewritten.
  *
- * The property under test: the four readers of a condition's expression agree
- * about it. The panel asks which matchers a condition names and which of them
- * are negated; the buttons rewrite the list; the canonical form decides whether
- * the row is drawn as a list at all; and the emitter turns it into C. They are
- * separate walks over one string, and nothing at run time compares them.
+ * The property under test: the readers of a condition's expression agree about
+ * it. The panel asks which matchers a condition names and which of them are
+ * negated; the buttons rewrite the list; the canonical form decides whether the
+ * row is drawn as a list at all. They are separate walks over one string, and
+ * nothing at run time compares them.
  *
- * It matters because the failure is SILENT and it INVERTS A SIGNATURE. A "!"
- * dropped by one of the four leaves a panel showing "!1" over a file that tests
- * for 1, or the other way about - and the rule still compiles, still loads, and
- * still reports findings, just the wrong ones. No corpus run catches that,
- * because a corpus cannot say what the author meant.
+ * It matters because the failure is SILENT: a "!" dropped by one of them leaves
+ * a panel showing "!1" over a draft that tests for 1, or the other way about.
  *
- * The brackets around a negated matcher get their own cases for the same
- * reason: a threshold matcher emits "m1 >= 3", and "!m1 >= 3" is "(!m1) >= 3",
- * which compiles, is always false, and reads exactly like what was asked for.
+ * The rest is the draft model of the diagnose panel: tabs, tags, names and the
+ * per-tab numbering of matchers and conditions.
  *
- * Nothing here touches the filesystem or the engine, so it runs anywhere.
+ * Nothing here writes a file or needs the engine, so it runs anywhere: the tag
+ * sources the names are made from are built in memory.
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-/* Beside the build output, never in /tmp: see tools/check_layers.py. */
-#define SCRATCH_FILE "build/kof_cond_expr.tmp"
+#include <ctype.h>
 
 #include "../../kofexamine/kofeditor.h"
 #include "../../kofexamine/kofinspect.h"
@@ -51,85 +46,67 @@ static int fails;
 
 static struct kof_editor E;
 
-/* emit_expr's output, as a string. */
-static const char *emit(const char *expr)
-{
-	static char buf[512];
-	FILE *f;
-	long n;
-
-	memset(buf, 0, sizeof buf);
-	f = fopen(SCRATCH_FILE, "w+b");
-	if (!f)
-		return "";
-	emit_expr(f, &E, expr);
-	n = ftell(f);
-	if (n < 0 || (size_t)n >= sizeof buf)
-		n = 0;
-	rewind(f);
-	if (fread(buf, 1u, (size_t)n, f) != (size_t)n)
-		n = 0;
-	buf[n] = 0;
-	fclose(f);
-	remove(SCRATCH_FILE);
-	return buf;
-}
-
 static void reading(void)
 {
 	struct cond c;
 
+	memset(&E.dr, 0, sizeof E.dr);
+	/* All Patterns: number == place. The editor holds MAX_GROUP matchers and the group table has that
+	 * many rows: this said 14, and grp_tab indexed the ninth row and the rest (UBSAN: index 12 out of
+	 * bounds for type 'group [8]') - the test was building a state the editor cannot be in. The
+	 * multi-digit id is still in the expression: 13 names no matcher of eight. */
+	E.dr.n_grp = MAX_GROUP;
 	memset(&c, 0, sizeof c);
 	snprintf(c.expr, sizeof c.expr, "%s", "!1&2&!13");
-	CK(cnd_uses(&c, 0) && cnd_uses(&c, 1) && cnd_uses(&c, 12));
+	CK(cnd_uses(&E, &c, 0) && cnd_uses(&E, &c, 1));
 	/* 1 and 13 share a digit, and 3 is a substring of 13: an id is a
 	 * NUMBER here, not a character somewhere in the text. */
-	CK(!cnd_uses(&c, 2));
-	CK(cnd_neg(&c, 0) == 1);
-	CK(cnd_neg(&c, 1) == 0);
-	CK(cnd_neg(&c, 12) == 1);
+	CK(!cnd_uses(&E, &c, 2));
+	CK(!cnd_uses(&E, &c, 7));
+	CK(!cnd_uses(&E, &c, 12));      /* past the table: no matcher, not a read of the ninth row */
+	CK(cnd_neg(&E, &c, 0) == 1);
+	CK(cnd_neg(&E, &c, 1) == 0);
 	/* A matcher the condition does not name is not negated either. */
-	CK(cnd_neg(&c, 2) == 0);
+	CK(cnd_neg(&E, &c, 2) == 0);
 
-	/* A run of "!" is one negation - the same reading the emitter gives
-	 * it, which is the point rather than the value. */
+	/* A run of "!" is one negation. */
 	snprintf(c.expr, sizeof c.expr, "%s", "!!1");
-	CK(cnd_uses(&c, 0) && cnd_neg(&c, 0) == 1);
-	EQ(emit("!!1"), emit("!1"));
+	CK(cnd_uses(&E, &c, 0) && cnd_neg(&E, &c, 0) == 1);
 
 	/* "!(" negates a GROUP the author typed. The list does not own it, so
-	 * no id inside it reads as negated - and the emitter passes it
-	 * through, so the two still agree. */
+	 * no id inside it reads as negated. */
 	snprintf(c.expr, sizeof c.expr, "%s", "!(1&2)");
-	CK(cnd_uses(&c, 0) && cnd_neg(&c, 0) == 0);
+	CK(cnd_uses(&E, &c, 0) && cnd_neg(&E, &c, 0) == 0);
 }
 
 static void rewriting(void)
 {
 	struct cond c;
 
+	memset(&E.dr, 0, sizeof E.dr);
+	E.dr.n_grp = 5;
 	memset(&c, 0, sizeof c);
 	snprintf(c.expr, sizeof c.expr, "%s", "!1&2&3");
-	cnd_drop_matcher(&c, 1);
+	cnd_drop_matcher(&E, &c, 1);
 	EQ(c.expr, "!1&3");
-	cnd_negate_matcher(&c, 2);
+	cnd_negate_matcher(&E, &c, 2);
 	EQ(c.expr, "!1&!3");
 	/* Negating twice leaves the expression as it was found. */
-	cnd_negate_matcher(&c, 0);
+	cnd_negate_matcher(&E, &c, 0);
 	EQ(c.expr, "1&!3");
-	cnd_drop_matcher(&c, 0);
+	cnd_drop_matcher(&E, &c, 0);
 	EQ(c.expr, "!3");
-	cnd_drop_matcher(&c, 2);
+	cnd_drop_matcher(&E, &c, 2);
 	EQ(c.expr, "");
 	/* Dropping something that is not there changes nothing. */
-	cnd_drop_matcher(&c, 4);
+	cnd_drop_matcher(&E, &c, 4);
 	EQ(c.expr, "");
 
 	/* The join is the condition's own operator, not whatever was typed. */
 	memset(&c, 0, sizeof c);
 	c.op = 1;
 	snprintf(c.expr, sizeof c.expr, "%s", "1&!2&3");
-	cnd_drop_matcher(&c, 2);
+	cnd_drop_matcher(&E, &c, 2);
 	EQ(c.expr, "1|!2");
 }
 
@@ -184,151 +161,6 @@ static void canon(void)
 	EQ(out, "!1|3");
 }
 
-static void emitting(void)
-{
-	static struct object obs[2];
-
-	memset(&E, 0, sizeof E);
-	memset(obs, 0, sizeof obs);
-	/* The editor points at the host's object array, and emit_call asks one
-	 * of them what its regions are called. A WHOLE-FILE mask never reaches
-	 * the format, so a zeroed object is all this needs. */
-	E.obj = obs;
-
-	E.dr.n_grp = 2;
-	E.dr.n_decl = 2;
-	E.dr.decl[0].grp = 1u;                  /* s0 is matcher 1's */
-	E.dr.decl[1].grp = 2u;                  /* s1 is matcher 2's */
-	E.dr.grp[0].mask = KOF_SCAN_ALL;
-	E.dr.grp[1].mask = KOF_SCAN_ALL;
-	E.dr.grp[0].rule = 1;                   /* find_any */
-	E.dr.grp[1].rule = 2;                   /* find_multi, >= 2 */
-	E.dr.grp[1].thresh = 2;
-
-	EQ(emit("1"), "kof_find_str_any(scan_range_whole_file, s0)");
-	EQ(emit("!1"), "!(kof_find_str_any(scan_range_whole_file, s0))");
-	/* THE CASE THE BRACKETS EXIST FOR. */
-	EQ(emit("2"), "kof_find_str_multi(scan_range_whole_file, s1) >= 2");
-	EQ(emit("!2"),
-	   "!(kof_find_str_multi(scan_range_whole_file, s1) >= 2)");
-	EQ(emit("1&!2"),
-	   "kof_find_str_any(scan_range_whole_file, s0) && "
-	   "!(kof_find_str_multi(scan_range_whole_file, s1) >= 2)");
-	EQ(emit("!(1|2)"),
-	   "!(kof_find_str_any(scan_range_whole_file, s0) || "
-	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2)");
-	/* An id past the end of the draft is a 0, not a call. */
-	EQ(emit("!9"), "!(0)");
-	/* An empty expression tests nothing, and says so. */
-	EQ(emit(""), "1");
-	/* Nothing that is not code survives - a "!" that negates nothing
-	 * included. */
-	EQ(emit("1;drop"), "kof_find_str_any(scan_range_whole_file, s0)");
-	EQ(emit("!;1"), "kof_find_str_any(scan_range_whole_file, s0)");
-}
-
-/*
- * HOW TWO BLOCKS JOIN, AND THE ONE THAT IS NOT AN OR.
- *
- * The panel drew "logic [and]" between two conditions and the generator wrote
- * two separate ifs - which is two detections, either of which fires on its own.
- * The word said the opposite of the file, and nothing compares the two.
- *
- * So the property here is the conjunction itself: one if, both terms, one
- * verdict, and the OTHER two words still producing what they always did.
- */
-static const char *emit_block(void)
-{
-	static char buf[1024];
-	FILE *f;
-	long n;
-	uint32_t k;
-
-	memset(buf, 0, sizeof buf);
-	f = fopen(SCRATCH_FILE, "w+b");
-	if (!f)
-		return "";
-	for (k = 0; k < E.dr.n_cnd; k++) {
-		if (E.dr.cnd[k].parent >= 0)
-			continue;
-		k = emit_cond(f, &E, k, 0);
-	}
-	n = ftell(f);
-	if (n < 0 || (size_t)n >= sizeof buf)
-		n = 0;
-	rewind(f);
-	if (fread(buf, 1u, (size_t)n, f) != (size_t)n)
-		n = 0;
-	buf[n] = 0;
-	fclose(f);
-	remove(SCRATCH_FILE);
-	return buf;
-}
-
-static void joining(void)
-{
-	/* emitting() left two matchers declared; two leaf conditions over
-	 * them, each concluding, is the shape that was generated wrong. */
-	E.dr.n_cnd = 2;
-	memset(E.dr.cnd, 0, sizeof E.dr.cnd[0] * 2u);
-	E.dr.cnd[0].parent = E.dr.cnd[1].parent = -1;
-	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
-	snprintf(E.dr.cnd[1].expr, sizeof E.dr.cnd[1].expr, "%s", "2");
-	E.dr.cnd[0].level = E.dr.cnd[1].level = LV_INFECT;
-
-	/* ONE if, BOTH terms, ONE verdict. */
-	E.dr.cnd[0].join = JN_AND;
-	EQ(emit_block(),
-	   "if (kof_find_str_any(scan_range_whole_file, s0) && "
-	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2)\n"
-	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n");
-
-	/*
-	 * AND "or" IS TWO BRANCHES, WITH NO "else" IN IT.
-	 *
-	 * A verdict returns, so the second if is reached exactly when the first
-	 * declined - which is what an else would have said, less directly and
-	 * wrongly for a gate. There is no third join value to test because
-	 * there is nothing a third one could mean.
-	 */
-	E.dr.cnd[0].join = JN_OR;
-	EQ(emit_block(),
-	   "if (kof_find_str_any(scan_range_whole_file, s0))\n"
-	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
-	   "if (kof_find_str_multi(scan_range_whole_file, s1) >= 2)\n"
-	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n");
-	CK(strstr(emit_block(), "else") == NULL);
-
-	/* A TERM HOLDING AN "or" IS BRACKETED: "&&" binds tighter than "||",
-	 * so without them the second block would swallow half the first. */
-	E.dr.cnd[0].join = JN_AND;
-	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1|2");
-	EQ(emit_block(),
-	   "if ((kof_find_str_any(scan_range_whole_file, s0) || "
-	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2) && "
-	   "kof_find_str_multi(scan_range_whole_file, s1) >= 2)\n"
-	   "\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n");
-
-	/* THE RUN'S VERDICT IS ITS LAST MEMBER'S - the one reached when the
-	 * whole conjunction holds. */
-	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
-	E.dr.cnd[1].level = LV_SUSPECT;
-	CK(strstr(emit_block(), "KOF_SCAN_SUSPECT(KOF_MALVAR_AUTO);") != NULL);
-	CK(strstr(emit_block(), "KOF_SCAN_INFECT") == NULL);
-
-	/* AND A GATE IS NOT A TERM. cnd[1] gains a child, so it is a brace
-	 * around branches rather than a value to "&&" - the run ends at
-	 * cnd[0] and both are emitted as themselves. */
-	E.dr.cnd[1].level = LV_INFECT;
-	E.dr.n_cnd = 3;
-	memset(&E.dr.cnd[2], 0, sizeof E.dr.cnd[2]);
-	E.dr.cnd[2].parent = 1;
-	E.dr.cnd[2].level = LV_INFECT;
-	snprintf(E.dr.cnd[2].expr, sizeof E.dr.cnd[2].expr, "%s", "2");
-	CK(cnd_and_run(&E, 0) == 0);
-	CK(strstr(emit_block(), " && ") == NULL);
-	E.dr.n_cnd = 0;
-}
 
 /*
  * A ZEROED VIEW MEANS FILE LAYOUT, AND A MAPPED ONE SURVIVES THE PARSE.
@@ -485,7 +317,8 @@ static void block_indices(void)
 	E.dr.n_blk = 3;
 	E.dr.n_grp = 2;
 	blk[0].picked = blk[1].picked = blk[2].picked = 1;
-	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash = KGENOME_MUTATION_MIN_HASH;
+	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash =
+		KGENOME_MUTATION_MIN_HASH;
 	E.dr.grp[0].kind = (uint8_t)GRP_KIND_SIM;
 	E.dr.grp[1].kind = (uint8_t)GRP_KIND_SIM;
 	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 2));
@@ -537,31 +370,305 @@ static void block_indices(void)
 	 * nothing holds them. */
 	CK(grp_sim_of(&E, 1u, 0) == MAX_GROUP);
 	CK(grp_sim_of(&E, 3u, 0) == MAX_GROUP);
-	CK(!draft_uses_sim(&E, 1u));
-	CK(!draft_uses_sim(&E, 3u));
 	/* Taking one out closes the gap rather than leaving a hole for the
 	 * list row to draw. */
 	grp_sim_del(&E, 0, 0);
 	CK(E.dr.grp[0].n_sim == 1 && E.dr.grp[0].sim[0].what == SIM_IT_BLOCK &&
 	   E.dr.grp[0].sim[0].blk == 0);
-	CK(!draft_uses_sim(&E, SIM_IT_BLOCK) || grp_of_block(&E, 2) == 1);
+	CK(grp_of_block(&E, 2) == 1);
 	CK(grp_sim_add(&E, 0, SIM_IT_BLOCK, 1) && E.dr.grp[0].n_sim == 2);
 
-	/* A block is usable when it was TICKED and can be scored - both, and
-	 * the four menus that offer blocks ask this one question. */
-	CK(blk_usable(&E, 0) && blk_usable(&E, 1));
-	blk[1].picked = 0;
-	CK(!blk_usable(&E, 1));
-	blk[1].picked = 1;
-	blk[1].n_hash = KGENOME_MUTATION_MIN_HASH - 1u;
-	CK(!blk_usable(&E, 1));
-	CK(!blk_usable(&E, 99));
+}
 
-	/* And a draft uses blocks when a MATCHER names one - a ticked block
-	 * nobody named is not use, which is what draft_missing_of refuses. */
-	CK(draft_uses_blocks(&E));
-	E.dr.n_grp = 0;
-	CK(!draft_uses_blocks(&E));
+/*
+ * THE DIAGNOSE PANEL'S MODEL: a tick makes the block's matcher and unticking
+ * drops it. The tags a diagnose is labelled with, and the names built from
+ * them, are checked in names_and_tags.
+ */
+static void tabs_tags_names(void)
+{
+	static struct mtn_block blk[3];
+
+	/* Ticking a block makes its find_similar matcher; unticking drops it
+	 * and renumbers the condition that named it. */
+	memset(&E.dr, 0, sizeof E.dr);
+	E.dr.blk = blk;
+	E.dr.n_blk = 3;
+	blk[0].n_hash = blk[1].n_hash = blk[2].n_hash =
+		KGENOME_MUTATION_MIN_HASH;
+	blk[0].id = 0x11u; blk[1].id = 0x22u; blk[2].id = 0x33u;
+	E.dr.tab = DT_BLOCKS;
+	blk_set_picked(&E, 1, 1);
+	blk_set_picked(&E, 2, 1);
+	CK(E.dr.n_grp == 2);
+	CK(E.dr.grp[0].kind == GRP_KIND_SIM && E.dr.grp[0].n_sim == 1 &&
+	   E.dr.grp[0].sim[0].blk == 1 && E.dr.grp[0].pct == GRP_PCT_DEFAULT);
+	CK(grp_of_block(&E, 2) == 1);
+	/* Ticking it again does not make a second one. */
+	blk_set_picked(&E, 2, 1);
+	CK(E.dr.n_grp == 2);
+	CK(grp_tab(&E, 0) == DT_BLOCKS && grp_tab_count(&E, DT_BLOCKS) == 2u);
+	CK(grp_tab_count(&E, DT_PATTERNS) == 0u);
+	cnd_add(&E);
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
+	CK(E.dr.cnd[0].tab == DT_BLOCKS);
+	blk_set_picked(&E, 1, 0);
+	CK(E.dr.n_grp == 1 && grp_of_block(&E, 1) == MAX_GROUP &&
+	   grp_of_block(&E, 2) == 0);
+	EQ(E.dr.cnd[0].expr, "1");
+	blk_set_picked(&E, 2, 0);
+	CK(E.dr.n_grp == 0);
+	EQ(E.dr.cnd[0].expr, "");
+}
+
+/* ---- tags, built in memory ------------------------------------------------- */
+
+static struct kof_tagset TS;
+
+/* An entity of the set; its id is the one the set generated. */
+static uint64_t make(uint8_t kind, const char *name, const uint64_t *typ,
+		     uint32_t n_typ, uint64_t fam)
+{
+	struct kof_tagent p;
+	const struct kof_tagent *e;
+	const char *why = NULL;
+	uint32_t i;
+
+	memset(&p, 0, sizeof p);
+	p.kind = kind;
+	snprintf(p.name, sizeof p.name, "%s", name);
+	for (i = 0; i < n_typ; i++)
+		p.typ[p.n_typ++] = typ[i];
+	if (fam) {
+		p.has_fam = 1;
+		p.fam = fam;
+	}
+	e = kof_tagset_add(&TS, &p, NULL, NULL, &why);
+	CK(e != NULL);
+	return e ? e->id : 0;
+}
+
+/* Two types, a family and four tags - two of them named alike - and the editor
+ * pointed at them. */
+static uint64_t t_botnet, t_trojan, t_rootkit, f_mirai;
+static uint64_t g_flood, g_c2, g_flood2, g_bare;
+
+static void tags_build(void)
+{
+	uint64_t a[2];
+
+	kof_tagset_free(&TS);
+	kof_tagset_init(&TS);
+	snprintf(TS.dir, sizeof TS.dir, "build/kof_cond_expr_unused");
+	t_botnet = make(KOF_TAGSRC_K_TYPE, "botnet", NULL, 0, 0);
+	t_trojan = make(KOF_TAGSRC_K_TYPE, "trojan", NULL, 0, 0);
+	t_rootkit = make(KOF_TAGSRC_K_TYPE, "rootkit", NULL, 0, 0);
+	f_mirai = make(KOF_TAGSRC_K_FAMILY, "mirai", NULL, 0, 0);
+	a[0] = t_botnet;
+	g_flood = make(KOF_TAGSRC_K_TAG, "flood", a, 1, 0);
+	a[0] = t_trojan;
+	a[1] = t_botnet;
+	g_c2 = make(KOF_TAGSRC_K_TAG, "c2", a, 2, f_mirai);
+	a[0] = t_rootkit;
+	g_flood2 = make(KOF_TAGSRC_K_TAG, "flood", a, 1, 0);
+	g_bare = make(KOF_TAGSRC_K_TAG, "bare", NULL, 0, 0);
+	E.tags = &TS;
+}
+
+/*
+ * THE TAG IS THE DIAGNOSE'S OWN, AND SO IS EVERY WORD OF ITS FILE NAME:
+ * `<first type>_<family>_<tag>_<id>.c`, the type the first the tag declares,
+ * the family the tag's, nothing from the draft's shared Type or Family. A part
+ * a tag has not got is left out without a doubled underscore, an untagged
+ * diagnose has `<tag>` in its place, and the id runs per prefix over the
+ * conditions and then the block matchers no condition uses.
+ */
+static void names_and_tags(void)
+{
+	char fn[160], lab[160];
+
+	tags_build();
+	memset(&E.dr, 0, sizeof E.dr);
+	E.tags = &TS;
+	E.dr.maltype = KOF_MALTYPE_ROOTKIT;             /* shared: no effect */
+	snprintf(E.dr.family, sizeof E.dr.family, "%s", "gafgyt");
+	E.dr.n_cnd = 4;
+	E.dr.cnd[0].tag = g_flood;
+	E.dr.cnd[1].tag = g_c2;
+	E.dr.cnd[2].tag = g_flood;
+	E.dr.cnd[3].tag = g_bare;
+	cnd_file_name(&E, 0, fn, sizeof fn);
+	EQ(fn, "botnet_flood_01.c");
+	cnd_file_name(&E, 1, fn, sizeof fn);
+	EQ(fn, "trojan_mirai_c2_01.c");
+	cnd_file_name(&E, 2, fn, sizeof fn);
+	EQ(fn, "botnet_flood_02.c");          /* running per prefix */
+	cnd_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "bare_01.c");                  /* no type and no family */
+	CK(strstr(fn, "__") == NULL);
+	E.dr.maltype = KOF_MALTYPE_BOTNET;
+	E.dr.family[0] = 0;
+	cnd_file_name(&E, 1, fn, sizeof fn);
+	EQ(fn, "trojan_mirai_c2_01.c");       /* the shared Type and Family */
+	E.dr.cnd[3].tag = 0;
+	cnd_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "<tag>_01.c");
+	E.dr.cnd[3].tag = 0x7777;             /* a tag that is not there */
+	cnd_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "<tag>_01.c");
+	cnd_file_name(&E, 7, fn, sizeof fn);
+	EQ(fn, "");
+
+	/* The Tag cell: the name, and what tells two tags of one name apart. */
+	tag_label(&E, g_c2, lab, sizeof lab);
+	EQ(lab, "c2");
+	tag_label(&E, g_flood, lab, sizeof lab);
+	EQ(lab, "flood (types botnet)");
+	tag_label(&E, g_flood2, lab, sizeof lab);
+	EQ(lab, "flood (types rootkit)");
+	tag_label(&E, 0, lab, sizeof lab);
+	EQ(lab, "");
+	EQ(tag_name(&E, g_c2), "c2");
+	EQ(tag_name(&E, 0x7777), "");
+	E.tags = NULL;
+	EQ(tag_name(&E, g_c2), "");
+	cnd_file_name(&E, 0, fn, sizeof fn);
+	EQ(fn, "<tag>_01.c");
+	E.tags = &TS;
+}
+
+/*
+ * A BLOCK MATCHER NO CONDITION USES IS A DIAGNOSE OF ITS OWN, with its own tag,
+ * and its file name runs on from the conditions'. One a condition names takes
+ * the condition's tag and is not standalone.
+ */
+static void standalone_matchers(void)
+{
+	char fn[160];
+
+	tags_build();
+	memset(&E.dr, 0, sizeof E.dr);
+	E.tags = &TS;
+	E.dr.n_grp = 4;
+	E.dr.grp[0].kind = (uint8_t)GRP_KIND_STR;       /* a string matcher */
+	E.dr.grp[1].kind = E.dr.grp[2].kind = E.dr.grp[3].kind =
+		(uint8_t)GRP_KIND_SIM;
+	CK(!grp_standalone(&E, 0));           /* only a block matcher is */
+	CK(grp_standalone(&E, 1) && grp_standalone(&E, 2) &&
+	   grp_standalone(&E, 3));
+	CK(!grp_standalone(&E, 9));
+	/* A condition over the Blocks tab's matcher 1 (grp 1) takes it. */
+	E.dr.n_cnd = 1;
+	E.dr.cnd[0].tab = DT_BLOCKS;
+	E.dr.cnd[0].tag = g_flood;
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1");
+	CK(!grp_standalone(&E, 1) && grp_standalone(&E, 2));
+	/* Two standalone ones: the first shares the condition's prefix. */
+	E.dr.grp[2].tag = g_flood;
+	E.dr.grp[3].tag = g_flood;
+	cnd_file_name(&E, 0, fn, sizeof fn);
+	EQ(fn, "botnet_flood_01.c");
+	grp_file_name(&E, 2, fn, sizeof fn);
+	EQ(fn, "botnet_flood_02.c");
+	grp_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "botnet_flood_03.c");
+	grp_file_name(&E, 1, fn, sizeof fn);
+	EQ(fn, "");                           /* not standalone: no name */
+	E.dr.grp[3].tag = 0;
+	grp_file_name(&E, 3, fn, sizeof fn);
+	EQ(fn, "<tag>_01.c");
+	/* A tag change is a change of the draft. */
+	E.dr.saved_hash = draft_hash(&E);
+	E.dr.grp[3].tag = g_c2;
+	CK(draft_hash(&E) != E.dr.saved_hash);
+}
+
+/*
+ * EACH TAB NUMBERS ITS OWN MATCHERS FROM 1, AND A CONDITION NAMES ONLY ITS
+ * OWN TAB'S. Two Patterns matchers then two Blocks ones: the first Blocks
+ * matcher is 1, a number past the end of a tab is refused, and removing a
+ * matcher renumbers its own tab and no other.
+ */
+static void tab_numbers(void)
+{
+	static struct mtn_block blk[2];
+	char fn[160], out[64];
+	struct cond c;
+
+	memset(&E.dr, 0, sizeof E.dr);
+	E.dr.blk = blk;
+	E.dr.n_blk = 2;
+	E.dr.n_grp = 4;
+	E.dr.grp[2].kind = E.dr.grp[3].kind = (uint8_t)GRP_KIND_SIM;
+	CK(grp_loc(&E, 0) == 1 && grp_loc(&E, 1) == 2);
+	CK(grp_loc(&E, 2) == 1 && grp_loc(&E, 3) == 2);
+	CK(grp_loc(&E, 9) == 0);
+	/* Which tab is open renumbers nothing. */
+	E.dr.tab = DT_BLOCKS;
+	CK(grp_loc(&E, 2) == 1);
+	E.dr.tab = DT_PATTERNS;
+	CK(grp_loc(&E, 2) == 1);
+
+	/* A Blocks condition's "1" is the first Blocks matcher (2 in the
+	 * list), and it does not name the Patterns matcher that is first in
+	 * the list. */
+	memset(&c, 0, sizeof c);
+	c.tab = DT_BLOCKS;
+	snprintf(c.expr, sizeof c.expr, "%s", "1&!2");
+	CK(cnd_uses(&E, &c, 2) && cnd_uses(&E, &c, 3));
+	CK(!cnd_uses(&E, &c, 0) && !cnd_uses(&E, &c, 1));
+	CK(cnd_neg(&E, &c, 3) == 1 && cnd_neg(&E, &c, 2) == 0);
+	CK(cnd_foreign(&E, &c) == 0);
+	E.dr.cnd[0] = c;
+	E.dr.n_cnd = 1;
+	cnd_canon(&E, 0, out, sizeof out);
+	EQ(out, "1&!2");
+
+	/* A reference past the tab's own list is refused: matcher 3 exists in
+	 * the list but is not on the Blocks tab. */
+	snprintf(c.expr, sizeof c.expr, "%s", "1&3");
+	CK(cnd_foreign(&E, &c) == 4ul);
+	CK(!cnd_uses(&E, &c, 0) && !cnd_uses(&E, &c, 1));
+	snprintf(c.expr, sizeof c.expr, "%s", "0");
+	CK(cnd_foreign(&E, &c) != 0);
+	/* And no edit can bring another tab's matcher in. */
+	snprintf(c.expr, sizeof c.expr, "%s", "1");
+	cnd_drop_matcher(&E, &c, 0);
+	EQ(c.expr, "1");
+	cnd_negate_matcher(&E, &c, 1);
+	EQ(c.expr, "1");
+	E.dr.cnd[0] = c;
+	cnd_swap_matcher(&E, 0, 2, 0);
+	EQ(E.dr.cnd[0].expr, "1");
+	cnd_swap_matcher(&E, 0, 0, 2);
+	EQ(E.dr.cnd[0].expr, "1");
+	cnd_swap_matcher(&E, 0, 2, 3);
+	EQ(E.dr.cnd[0].expr, "2");
+
+	E.dr.n_decl = 0;
+
+	/* Removing the first Patterns matcher renumbers Patterns conditions
+	 * and leaves a Blocks condition's numbers alone. */
+	memset(&E.dr.cnd, 0, sizeof E.dr.cnd);
+	E.dr.n_cnd = 2;
+	E.dr.cnd[0].tab = DT_PATTERNS;
+	E.dr.cnd[1].tab = DT_BLOCKS;
+	snprintf(E.dr.cnd[0].expr, sizeof E.dr.cnd[0].expr, "%s", "1&2");
+	snprintf(E.dr.cnd[1].expr, sizeof E.dr.cnd[1].expr, "%s", "1&2");
+	grp_remove(&E, 0);
+	EQ(E.dr.cnd[0].expr, "1");
+	EQ(E.dr.cnd[1].expr, "1&2");
+	CK(E.dr.n_grp == 3 && grp_loc(&E, 0) == 1 && grp_loc(&E, 1) == 1);
+
+
+	/* Conditions are numbered within their own tab. */
+	memset(&E.dr, 0, sizeof E.dr);
+	E.dr.n_cnd = 3;
+	E.dr.cnd[1].tab = DT_BLOCKS;
+	cnd_label(&E, 2, fn, sizeof fn);
+	EQ(fn, "2.");
+	cnd_label(&E, 1, fn, sizeof fn);
+	EQ(fn, "1.");
 }
 
 int main(void)
@@ -570,14 +677,18 @@ int main(void)
 	rewriting();
 	switching();
 	canon();
-	emitting();
-	joining();
 	view_inputs();
 	operator_word();
 	block_indices();
+	tabs_tags_names();
+	names_and_tags();
+	standalone_matchers();
+	tab_numbers();
 
-	printf("condition expressions: read, rewrite, switch, canon, emit, "
-	       "joins, view inputs, the operator word, block indices%s\n",
+	kof_tagset_free(&TS);
+	printf("condition expressions: read, rewrite, switch, canon, "
+	       "view inputs, the operator word, block indices, tabs, "
+	       "tags, names and per-tab numbers%s\n",
 	       fails ? "" : " - ok");
 	return fails != 0;
 }

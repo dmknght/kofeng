@@ -12,7 +12,7 @@
 /*
  * WOULD kof_exe_decode_ex CHANGE ANYTHING - answered without a copy of the object.
  *
- * The first round of the decode is the whole object read by the three passes in
+ * The first round of the decode is the whole object read by the four passes in
  * order, each writing in place; a pass that finds nothing leaves the bytes as they
  * were, so the next reads the original, and a round that peeled nothing ends the
  * decode. So "nothing would be decoded" is exactly "the first round reaches no
@@ -34,6 +34,7 @@ int kof_exe_decode_would_change(const uint8_t *p, uint64_t n)
 	/* The passes take a writable pointer and never write in probe mode. */
 	changed = kof_exe_pass_b64((uint8_t *)(uintptr_t)p, n, 0, n, &nxt) ||
 		  kof_exe_pass_hex((uint8_t *)(uintptr_t)p, n, 0, n, &nxt) ||
+		  kof_exe_pass_esc((uint8_t *)(uintptr_t)p, n, 0, n, &nxt) ||
 		  kof_exe_pass_pct((uint8_t *)(uintptr_t)p, n, 0, n, &nxt);
 	changed = changed || nxt.limit != 0;
 	free(nxt.v);

@@ -463,6 +463,16 @@ uint64_t kgenome_emu_now_ms(void)
 	return (uint64_t)t.tv_sec * 1000ull + (uint64_t)(t.tv_nsec / 1000000);
 }
 
+unsigned kgenome_emu_unmodelled_calls(const struct kgenome_emu *e)
+{
+	return e ? e->unmodelled : 0u;
+}
+
+unsigned kgenome_emu_unmodelled_guessed(const struct kgenome_emu *e)
+{
+	return e ? e->unmodelled_guess : 0u;
+}
+
 unsigned kgenome_emu_null_calls(const struct kgenome_emu *e)
 {
 	return e ? e->null_calls : 0u;

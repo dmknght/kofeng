@@ -37,7 +37,7 @@
  *   ksb_diag.c      --diagnose: one diagnose source in, one record out.
  *   ksb_diagpack.c  The diagnoses of a database, in packs by kind:
  *                   diag-<kind>.kdig.
- *   ksb_disease.c   The diseases and the syndromes of a database.
+ *   ksb_disease.c   The diseases of a database.
  *   ksb_emit.c      --extract, the output: the generated header and the record
  *                   lines for one declaration.
  *   ksb_extract.c   --extract: one source in, the header, names, preconditions
@@ -198,29 +198,17 @@ struct simple_decl {
 
 enum {
 	SD_FORMAT = 0, SD_ARCH, SD_SUBTYPE, SD_SIZE_MIN, SD_ANALYZE_STEP,
-	SD_HEUR_PHASE, SD_HEUR_LEVEL, SD_HEUR_WANT,
-	SD_HEUR_NAME, SD_HEUR_PREDICT, SD_CONTENT, SD_COUNT
+	SD_CONTENT, SD_COUNT
 };
 
 struct img_facts {
 	int      have_reloc;
 	char     extra_sec[128];   /* first unexpected section, or empty */
 	char     undef[128];       /* first undefined symbol, or empty */
-	char     entry_name[32];   /* kof_scan / kof_unpack / kof_heur */
+	char     entry_name[32];   /* kof_scan / kof_unpack */
+	char     retired[32];      /* a retired entry the image defines (kof_cure, kof_heur), or empty */
 	uint64_t entry_off;
 	int      n_entry;
-	/*
-	 * AND THE SECOND ENTRY, WHICH IS NOT A KIND.
-	 *
-	 * kof_cure is not one of the three above and must not be counted as
-	 * one: a module is still exactly one kind, and a cure is something a
-	 * DETECTOR may additionally know how to do. The loader finds the
-	 * first entry at offset zero and needs no symbols; this one has no
-	 * such place, so its offset is resolved here, once, and written into
-	 * the module's record - see kof_pack_mod.cure_off.
-	 */
-	uint64_t cure_off;
-	int      have_cure;
 	uint64_t blob_off, blob_len;
 	uint64_t data_bytes, bss_bytes;
 };
@@ -252,23 +240,12 @@ struct artefact {
 	uint8_t  n_target;
 	int      any_target;
 	uint32_t scan_mask, arch_mask, subtype_mask, step;
-	uint32_t heur_phase, heur_want, heur_level;
-	/* Where kof_cure() sits inside the blob, 0 when there is none. Known
-	 * only once the image is linked, so it travels in the metadata file
-	 * beside the blob rather than out of the source. */
-	uint32_t cure_off;
 	uint64_t size_min;
 
 	/* What KOF_TARGET_NAME declared - empty family / maltype 0 for an
 	 * unpack-kind module, where it is not required. */
 	char    *family;
 	uint32_t maltype;
-	/* What KOF_DECLARE_DISEASE declared; empty and 0 when it did not. */
-	char    *disease;
-	uint32_t disease_type;
-
-	/* What KOF_HEUR_PREDICT declared, or NULL. Only a rule has one. */
-	char    *heur_predict;
 	/* What KOF_TARGET_CONTENT declared, or NULL. */
 	char    *content;
 
@@ -352,19 +329,9 @@ struct diag_use {
 	char user[DIAG_USER_LEN];
 };
 
-#define DIS_TYPE_UNKNOWN 0xffu
-
-/* Who named a disease: a detector declared it, a syndrome mentions it. A name only
- * a syndrome mentions can never be found, and a disease no syndrome mentions is
- * never typed by anything - both are what a database looks like part way through
- * being written, and both are warned about from this one table. */
-#define DIS_BY_DETECTOR 1u
-#define DIS_BY_SYNDROME 2u
-
 struct dis_ent {
 	uint32_t id;
 	unsigned type;
-	unsigned by;
 	char     name[KOF_DIAG_DISEASE_LEN + 1u];
 };
 
@@ -404,38 +371,12 @@ struct ksb_decl {
 	unsigned long scan_mask;
 	/*
 	 * KOF_TARGET_NAME's two fields, held like the target list and its siblings: one
-	 * file, one family. Unlike those, read at this level rather than by the caller, because
-	 * composing a detection name is this program's job already - see read_variant.
+	 * file, one family.
 	 */
 	char family[80];
 	int  maltype;
-	/*
-	 * KOF_DECLARE_DISEASE(TYPE, "layer/behaviour"): what this detector's match finds,
-	 * and the type of malware it belongs to. One per file, like KOF_TARGET_NAME and
-	 * for the same reason: the module is one detector. Read at this level so the
-	 * extract file can carry it to the packer, which is where it is registered.
-	 */
-	char dis_name[KOF_DIAG_DISEASE_LEN + 1u];
-	int  dis_type;
-	int  have_dis;
 	/* The type the FILE NAME says, or -1 - see nameform_read. */
 	int  name_type;
-	/*
-	 * The id at the end of the file name - "01" out of virus_sality_01.c - and
-	 * empty when the name is of the old form.
-	 *
-	 * THIS IS THE VARIANT. KOF_MALVAR_AUTO resolves to it; see the note there for
-	 * what it replaced and why. A variant names the SAMPLE a signature was
-	 * written from, and one sample may be matched by a pattern, by a block
-	 * similarity or by a capability chain - so it cannot belong to any one
-	 * matcher, and retiring a matcher must not rename the finding.
-	 *
-	 * AND A RETIRED ID LEAVES A GAP, on purpose. 01 then 03 is the evidence that
-	 * 02 was not handed to something else; closing the gap would make an old
-	 * name mean a new sample, which is the one thing this scheme exists to
-	 * prevent.
-	 */
-	char name_id[16];
 	int  have_name;
 	/* What the resolution below produces, for the caller that writes .pre. */
 	/*
@@ -446,12 +387,12 @@ struct ksb_decl {
 	uint8_t  target[KOF_TARGET_LIST_MAX];
 	uint32_t arch_mask, subtype_mask;
 	uint64_t size_min;
-	int      step, heur_phase, heur_level, heur_want;
+	int      step;
 	int      n_targets;
 	/* KOF_FMT_ANY was written out, as opposed to nothing being written at all -
 	 * both are an empty list, and only one of them is a module saying so. */
 	int      any_target;
-	char heur_name[64], heur_predict[64], content[48];
+	char content[48];
 	/* What the module mode needs from the extract pass, which computes them. */
 	unsigned long scan_mask_out;
 	int           nstr_out;
@@ -494,9 +435,6 @@ struct ksb_opts {
 /* What the last module build leaves for its caller. */
 struct ksb_kept {
 	char entry[32];
-	/* And where kof_cure() landed, 0 when the module has none - see
-	 * img_facts.cure_off. */
-	uint64_t cure;
 };
 
 /* The diagnoses each source reads, and the diagnoses this run has built. */
@@ -568,10 +506,8 @@ int ksb_write_diag_packs(const char *db, char **recs, char **kinds,
 			 size_t n_recs);
 
 /* ksb_disease.c */
-int ksb_disease_note(struct ksb_ctx *ksb, const char *name, unsigned type,
-		     unsigned by);
+int ksb_disease_note(struct ksb_ctx *ksb, const char *name, unsigned type);
 int ksb_write_diseases(struct ksb_ctx *ksb, const char *db);
-int ksb_build_syndromes(struct ksb_ctx *ksb, const char *base, const char *db);
 
 /* ksb_emit.c */
 void ksb_emit_str_id(FILE *out, const struct pat *p, int idx);
@@ -646,8 +582,6 @@ int ksb_read_name(struct ksb_ctx *ksb, const char *p, int line, char *out,
 int ksb_read_maltype(struct ksb_ctx *ksb, const char *p, int line, int *out);
 int ksb_read_family(struct ksb_ctx *ksb, const char *p, int line, char *out,
 		    size_t cap);
-int ksb_read_variant(struct ksb_ctx *ksb, const char *p, int line, char *out,
-		     size_t cap);
 
 /* ksb_resolve.c */
 void ksb_decl_collect(struct ksb_ctx *ksb, const char *at, int lineno);
@@ -657,6 +591,9 @@ void ksb_resolve_decls(struct ksb_ctx *ksb);
 
 /* ksb_scan.c */
 void ksb_scan_line(struct ksb_ctx *ksb, char *at, size_t line_len, int lineno);
+
+/* ksb_tags.c */
+int ksb_tags_main(int argc, char **argv);
 
 /* ksb_tree.c */
 int ksb_is_c_source(const char *name);

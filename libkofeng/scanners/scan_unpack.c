@@ -3,7 +3,7 @@
  * object is a wrapper around something, and decide whether the interpreter may be
  * started on what nothing opened.
  *
- * A family a rule predicted goes first; the rest follow in database order, carves
+ * A family the producer predicted goes first; the rest follow in database order, carves
  * last. What comes out is a child, and a child goes round the whole pipeline again.
  */
 
@@ -11,7 +11,7 @@
 
 #include "scan_int.h"
 #include "objtree.h"
-#include "../kofcore/kofmod/heur.h"
+#include "../kofcore/kofmod/kofsig.h"
 #include "../kofcore/kofdebug.h"
 #include <string.h>
 
@@ -19,39 +19,8 @@
 static int sx_unp_eligible(const struct kof_scanner *sc,
 			const struct kof_module *m,
 			const struct kof_obj_ctx *ctx,
-			const struct kof_scan_option *opt,
-			uint32_t want)
+			const struct kof_scan_option *opt)
 {
-	/*
-	 * A RULE SAID WHAT CLASS THIS IS, SO ONLY THE MODULES THAT KNOW THAT
-	 * CLASS ARE ASKED - see KOF_HEUR_SCAN_CLASS.
-	 *
-	 * The narrowing is here and not at the call sites because there are
-	 * two loops over the same modules and a test written twice is a test
-	 * that will disagree with itself.
-	 *
-	 * WHAT IS DROPPED IS A MODULE THAT NAMED A DIFFERENT CLASS, and
-	 * nothing else. The first version of this kept only the modules that
-	 * declared a virus family, and that threw out the PACKERS with
-	 * everything else - which is wrong, because an infected file is
-	 * routinely packed as well, and the body the virus modules are
-	 * looking for is underneath. A packer is generic machinery: it
-	 * declares no family, so it is not a competing answer to "which
-	 * malware is this" and there is nothing to narrow away.
-	 *
-	 * THE FAMILY IS THE TEST AND THE TYPE CANNOT BE.
-	 * KOF_MALTYPE_VIRUS is the first entry of its enum and therefore
-	 * zero, so a module that declared nothing has a maltype that reads
-	 * as "Virus". Keying on family_off makes "declared nothing" mean
-	 * exactly that - which is the distinction `Virus:unknown#unknown`
-	 * was printed for want of.
-	 */
-	{
-		uint32_t cls = KOF_ENG_CLASS_OF(want);
-
-		if (cls && m->family_off && m->maltype != cls - 1u)
-			return 0;
-	}
 	/*
 	 * KOF_EMU_ONLY replaces the packer modules and only those. A container
 	 * still has to be opened by the code that knows its format - there is
@@ -89,7 +58,7 @@ static int sx_unp_eligible(const struct kof_scanner *sc,
 	return kof_module_precond(m, ctx, ctx->obj_size) == KOF_PRECOND_OK;
 }
 
-/* Whether an unpacker's declared family is the one a rule predicted. Both are
+/* Whether an unpacker's declared family is the one that was predicted. Both are
  * strings; NULL on either side is "no", so an unpacker that declares no family
  * never matches and an object with no prediction never has a family pass. */
 static int sx_unp_is_family(const struct kof_scanner *sc,
@@ -108,31 +77,17 @@ static int sx_unp_is_family(const struct kof_scanner *sc,
  * what comes of it.
  *
  * The family pass and the general pass each spelled this out and had drifted
- * (one of them lost a reset and a finding was credited to a module that contains
- * no report at all - measured on 007 Spy.exe, below). It is the detector loop's
- * turn too, in sx_mod_report's terms: a module runs, and what it reported becomes
- * a finding in one place.
+ * (one of them lost a reset); it is the detector loop's turn too, in sx_mod_end's
+ * terms: a module runs, and what it marked goes out in one place.
  */
 static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-			const struct kof_scan_option *opt,
 			struct kof_result *res, const struct kof_module *m)
 {
 	if (m->n_str)
 		sx_need_multi(sc, ctx);
 	if (m->n_block)
 		sx_need_mutation(sc, ctx);
-	/*
-	 * WHAT THIS MODULE REPORTED, AND NOT WHAT THE LAST
-	 * ONE DID.
-	 *
-	 * The detector loop clears this before every module
-	 * and says why; these two loops did not, so a report
-	 * left behind by an earlier module was composed with
-	 * the NEXT one's identity. Measured on 007 Spy.exe:
-	 * `PE-x86/Virus:unknown#unknown`, credited to
-	 * unp/aspack_pe.c - a module that contains no report
-	 * at all and declares no target name.
-	 */
+	/* What this module marked, and not what the last one did. */
 	sx_mod_begin(sc, m);
 	{
 		uint32_t k0 = sc->child.n;
@@ -149,27 +104,9 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			sc->child.n_carved += sc->child.n - k0;
 	}
 	sc->mod.cur = NULL;
-	/*
-	 * AND WHAT IT FOUND, WHICH WAS BEING THROWN AWAY.
-	 *
-	 * ctx->report is on the CONTEXT and not on the content
-	 * table, so an unpack module has always been able to
-	 * call it - and nothing here read the answer. Only the
-	 * detector loop did, so a family that can only be
-	 * named by RUNNING it had nowhere to say so: Sality's
-	 * decryptor is polymorphic, the name is earned when
-	 * the interpreter reaches the body, and the module
-	 * that reached it could produce a child but not a
-	 * verdict.
-	 *
-	 * Appended on the same terms the detector loop uses,
-	 * including the cap and the count of what the cap
-	 * dropped, because it is the same kind of statement
-	 * about the same object.
-	 */
-	if (sc->mod.rep_valid && res)
-		(void)sx_mod_report(sc, ctx, opt, res, m,
-				    sc->mod.rep_level);
+	/* What it marked goes out; nothing it did names the object. */
+	if (res)
+		sx_mod_end(sc, res);
 	/* A build claimed by a module that opened nothing is
 	 * a guess about somebody else's file - see
 	 * kof_scanner.obj.open.pend_build. */
@@ -190,32 +127,11 @@ static void unpack_turn(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * stance is set here, in one value, for oc_emu_run to read.
  */
 static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		     const struct kof_scan_option *opt,
-		     struct kof_result *res, uint32_t pdepth, uint32_t want)
+		     const struct kof_scan_option *opt, uint32_t pdepth,
+		     uint32_t want)
 {
 	if (sc->eng->n_unp == 0)
 		return 0;
-	/*
-	 * A NAMED OBJECT NEED NOT BE OPENED. A GUESSED ONE MUST BE.
-	 *
-	 * The findings are counted, not just tested: a heuristic says the object
-	 * has a shape, which is the opposite of knowing what is in it - and the
-	 * one rule that exists says "this is a payload and I cannot read it",
-	 * which is a reason to open the object rather than to stop. Testing
-	 * res->n alone made a rule firing at EXAMINE cancel the unpacking of the
-	 * very object it fired on, so a sample that used to yield three children
-	 * yielded none and the payload inside was never scanned.
-	 */
-	if (res->n && !opt->all_matches) {
-		uint32_t k, named = 0;
-
-		for (k = 0; k < res->n; k++)
-			if (res->v[k].level != KOF_LEVEL_HEUR)
-				named++;
-		if (named)
-			return 0;
-	}
-
 	/*
 	 * A fresh attempt for every object.
 	 *
@@ -231,39 +147,21 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 
 	/*
-	 * AND WHETHER A RULE ASKED FOR WHAT THIS OBJECT CARRIES.
-	 *
-	 * From `want`, which the EXAMINE pass in the caller already collected -
-	 * the same mask KOF_ENG_USE_EMU rides in. Assigned rather than or-ed,
-	 * which is what makes it per object: the object being opened now either
-	 * had a rule fire that asked, or it did not.
-	 *
-	 * IN THIS BLOCK, above the early return below, because that is what
-	 * hygiene means here - see the note on the three fields above. A scan
-	 * that refused to open one object must not leave it looking as though
-	 * the next object's rules had asked for anything.
-	 */
-	sc->cur.raise_carried = (want & KOF_ENG_OPEN_CARRIED) != 0;
-	/* OR, NOT ASSIGN: two passes can ask on one object and neither may
-	 * silence the other - see the note where the EXAMINE pass sets it. */
-	sc->obj.diag.ask |= (want & KOF_ENG_USE_DIAGNOSE) != 0;
-
-	/*
 	 * AND WHETHER ANYBODY SPOKE FOR THE INTERPRETER ON THIS OBJECT.
 	 *
-	 * Resolved here because every term is the host's: a rule's ask rides in
-	 * `want` from this object's EXAMINE pass, a producer's ask rides in
+	 * Resolved here because every term is the host's: a diagnose's ask rides in
+	 * `want` from this object's EXAMINE stage, a producer's ask rides in
 	 * cur_want from the module that made the object, and both are bounded
 	 * by options a module cannot see. c_emu_run or-s the result into the
 	 * vouch the asking module passes - see emu_stance in scan.h.
 	 *
-	 * The heur gate applies to the PRODUCER's ask only. A rule's ask came
-	 * from a rule that ran, so the level that let it run has already been
-	 * paid; the producer's is a declaration carried with the child and is
-	 * honoured at the level the producer named.
+	 * The heur gate applies to the PRODUCER's ask only. A diagnose's ask
+	 * came from a declaration that matched this object; the producer's is a
+	 * declaration carried with the child and is honoured at the level the
+	 * producer named.
 	 */
 	/*
-	 * A RULE'S ASK DOES NOT LOOK AT emu_use, AND THAT IS NOT AN OVERSIGHT.
+	 * A DIAGNOSE'S ASK DOES NOT LOOK AT emu_use, AND THAT IS NOT AN OVERSIGHT.
 	 *
 	 * The option word cannot tell an explicit "--emu never" apart from the
 	 * NEVER a default or `--heur 1` leaves behind, and turning the second
@@ -273,8 +171,8 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * the one a rule may not talk past.
 	 *
 	 * A PRODUCER's ask is bounded more tightly - it is a declaration
-	 * carried with a child rather than a rule that fired on the object in
-	 * front of us - so it yields to emu_use and to the heuristic level the
+	 * carried with a child rather than a declaration that matched the object
+	 * in front of us - so it yields to emu_use and to the heuristic level the
 	 * producer named.
 	 */
 	{
@@ -358,10 +256,10 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 }
 
 	/*
-	 * FAMILY FIRST, when a rule predicted one.
+	 * FAMILY FIRST, when one was predicted.
 	 *
-	 * A heuristic that fired on this object may have named the family it
-	 * expects - see KOF_HEUR_PREDICT. The decoders of that family are tried
+	 * The producer of this object may have named the family it expects
+	 * (the family it declares with KOF_TARGET_NAME). The decoders of that family are tried
 	 * before any other, so an object correctly predicted is opened by the
 	 * one module written for it and the rest are never entered.
 	 *
@@ -377,7 +275,7 @@ static int open_gate(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 */
 static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		       const struct kof_scan_option *opt,
-		       struct kof_result *res, uint32_t want,
+		       struct kof_result *res,
 		       const char *predict, int *applies)
 {
 	uint32_t i;
@@ -387,11 +285,11 @@ static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	for (i = 0; i < sc->eng->n_unp && !sc->obj.open.broken; i++) {
 		const struct kof_module *m = &sc->eng->unp[i];
 
-		if (!sx_unp_eligible(sc, m, ctx, opt, want) ||
+		if (!sx_unp_eligible(sc, m, ctx, opt) ||
 		    !sx_unp_is_family(sc, m, predict))
 			continue;
 		*applies = 1;
-		unpack_turn(sc, ctx, opt, res, m);
+		unpack_turn(sc, ctx, res, m);
 	}
 	/*
 	 * OPENED, AND A CARVE DID NOT OPEN ANYTHING - the same rule
@@ -440,7 +338,7 @@ static int open_family(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * order. Returns 0 when the tree's budget is gone and the caller must not go on. */
 static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		     const struct kof_scan_option *opt,
-		     struct kof_result *res, uint32_t want,
+		     struct kof_result *res,
 		     const char *predict, enum kof_analyze step, int *applies)
 {
 	uint32_t i;
@@ -450,7 +348,7 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 
 		if (m->step != (uint32_t)step)
 			continue;
-		if (!sx_unp_eligible(sc, m, ctx, opt, want))
+		if (!sx_unp_eligible(sc, m, ctx, opt))
 			continue;
 		/* Skip what the family pass already tried. Guarded on `predict`
 		 * so the resolve-and-compare is not paid on the overwhelming
@@ -477,7 +375,7 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		 */
 		if (sc->obj.open.broken == KOF_BROKEN_LIMIT)
 			return 0;       /* nothing left to spend on this tree */
-		unpack_turn(sc, ctx, opt, res, m);
+		unpack_turn(sc, ctx, res, m);
 	}
 	return 1;
 }
@@ -492,8 +390,7 @@ static int open_pass(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
  * child, so there is nothing for a later step to be spared.
  */
 void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		const struct kof_scan_option *opt, struct kof_result *res,
-		uint32_t want)
+		const struct kof_scan_option *opt, struct kof_result *res)
 {
 	int applies = 0;
 
@@ -502,7 +399,7 @@ void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	/* The producing surface for the length of the step, and not after: the
 	 * gate that turns it on for the opening steps is the one this skips. */
 	kof_mod_unpack_mode(ctx, 1);
-	(void)open_pass(sc, ctx, opt, res, want, NULL, KOF_ANALYZE_RECOVER,
+	(void)open_pass(sc, ctx, opt, res, NULL, KOF_ANALYZE_RECOVER,
 			&applies);
 	kof_mod_unpack_mode(ctx, 0);
 }
@@ -530,15 +427,15 @@ void sx_open_step(struct kof_pipeline *p)
 	struct kof_open *o = &p->open;
 
 	if (o->state == KOF_OPEN_FRESH) {
-		o->state = open_gate(sc, ctx, opt, res, pdepth, want)
+		o->state = open_gate(sc, ctx, opt, pdepth, want)
 			   ? KOF_OPEN_ACTIVE : KOF_OPEN_REFUSED;
 		if (o->state == KOF_OPEN_ACTIVE && predict &&
-		    open_family(sc, ctx, opt, res, want, predict, &o->applies))
+		    open_family(sc, ctx, opt, res, predict, &o->applies))
 			o->state = KOF_OPEN_FAMILY;
 	}
 	if (o->state != KOF_OPEN_ACTIVE)
 		return;
-	(void)open_pass(sc, ctx, opt, res, want, predict, step, &o->applies);
+	(void)open_pass(sc, ctx, opt, res, predict, step, &o->applies);
 }
 
 /*
@@ -586,15 +483,6 @@ uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * cost that made the old one wrong, whatever declared it. What comes
 	 * instead is per studied case - a rule's ASK honoured here rather than
 	 * a search performed here.
-	 *
-	 * THE PLACE FOR THAT ASK NOW EXISTS, which is worth saying because it
-	 * was the missing half. A rule that fires at EXAMINE can declare
-	 * KOF_ENG_OPEN_CARRIED and the engine honours it on THIS object - see
-	 * that bit in kofmod/heur.h. What is still unwritten is the search
-	 * itself: an object whose structure names nothing, where a rule has
-	 * said the bytes are worth looking through anyway. The ask is the hook
-	 * it will hang on, and the reason to write it per case is unchanged -
-	 * whoever knows a family knows where in it to look.
 	 *
 	 * What remains is step 4 below: the carried files the STRUCTURE named,
 	 * which needs no search at all.

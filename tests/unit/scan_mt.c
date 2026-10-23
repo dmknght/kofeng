@@ -47,6 +47,7 @@
 
 #include "../../libkofeng/kofcore/kofplatform.h"
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 
 #define FILES     64u
 #define SUBDIRS    4u
@@ -72,11 +73,13 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = user;
+	struct note_list got;
 
-	(void)bytes; (void)len;
+	(void)bytes; (void)len; (void)res;
+	notes_here(&got);
 	if (s->n < MAX_SEEN) {
 		snprintf(s->name[s->n], sizeof s->name[0], "%s", name);
-		s->level[s->n] = res ? res->n : 0u;   /* how many findings, as the verdict */
+		s->level[s->n] = got.n;   /* how many notes the test modules made on it */
 		s->n++;
 	} else {
 		s->overflow = 1;
@@ -206,7 +209,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	for (i = 0; i < n_sc; i++) {
-		scs[i] = kscan_new(eng);
+		scs[i] = notes_scanner(eng);
 		if (!scs[i]) {
 			printf("scan mt: out of memory\n");
 			keng_close(eng);

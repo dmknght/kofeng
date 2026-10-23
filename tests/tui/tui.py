@@ -145,7 +145,10 @@ class Viewer:
         self.log = []
         argv = ['kofviewer']
         if db:
-            argv += ['--db', (REPO + '/build/release/databases') if cwd else 'build/release/databases']
+            if isinstance(db, str):
+                argv += ['--db', (REPO + '/' + db) if cwd else db]
+            else:
+                argv += ['--db', (REPO + '/build/release/databases') if cwd else 'build/release/databases']
         if bases:
             argv += ['--bases', bases if isinstance(bases, str) else bases_dir()]
         argv += list(extra) + [path]

@@ -87,9 +87,8 @@
  *
  * The only engine type here is `const struct kof_result *` on koffridge_put -
  * a POINTER, so the compiler needs to know the name and nothing else. Every
- * other field of a verdict is a plain uint32_t or a char array; the KOF_LEVEL_*
- * and kof_broken mentioned in the comments below are the VALUES stored in
- * those, not the types.
+ * other field of a verdict is a plain uint32_t or a char array; the kof_broken
+ * mentioned in the comments below is the VALUE stored in one, not the type.
  *
  * WHY IT MATTERS HERE. The Windows collector compiles this file, because the
  * duplicate table at the bottom of it is on the path of every record. Including
@@ -173,19 +172,16 @@ struct kof_result;
 /*
  * THE ANSWER, WHICH IS THE VERDICT AND NOT THE REPORT.
  *
- * One name, not the list. The engine's default is to stop at the first finding
- * - see kof_scan_option.all_matches - so in the shape this cache is for there
- * IS only one, and carrying sixteen would multiply the table by fifteen to hold
- * what nothing wrote.
+ * One name: the object's verdict (kof_result.verdict).
  *
- * `findings` is the count the scan produced, so a caller can see when there
- * were more than the one kept. A caller that needs the whole list of an
- * infected object rescans it, and that is cheap for the reason it sounds like:
- * infected objects are rare, and it happens once each.
+ * `findings` is 1 when the object has a verdict and 0 when it has none. A caller that
+ * needs the diagnoses behind an infected object rescans it, and that is cheap for the
+ * reason it sounds like: infected objects are rare, and it happens once each.
  */
 struct koffridge_verdict {
-	/* KOF_LEVEL_*, and only meaningful when findings is non-zero. */
-	uint32_t level;
+	/* RESERVED: the level of the verdict, which an object no longer has. Kept so
+	 * the entry (written to the cache file whole) keeps its layout; always 0. */
+	uint32_t reserved_level;
 
 	/* How many findings the scan produced. 0 is the clean answer, and it
 	 * is the answer this cache exists to serve. */
@@ -196,7 +192,7 @@ struct koffridge_verdict {
 	 * being remembered as clean. */
 	uint32_t broken;
 
-	/* The worst finding's name, or "" when clean. Same text as
+	/* The verdict's name, or "" when there is none. Same text as
 	 * kof_finding.name. */
 	char name[224];
 };

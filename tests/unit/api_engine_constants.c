@@ -71,7 +71,6 @@
 #include "../../libkofeng/analyzers/parsers/scripts/scantext.h"
 #include "../../libkofeng/analyzers/parsers/scripts/script_parse.h"
 #include "../../libkofeng/databases/diagsrc.h"
-#include "../../libkofeng/databases/syndsrc.h"
 #include "../../libkofeng/detectors/linkage/kofdiag.h"
 #include "../../libkofeng/detectors/pattern/kofmatch.h"
 #include "../../libkofeng/detectors/pattern/kofmultimatch.h"
@@ -90,12 +89,10 @@
 #include "../../libkofeng/kofcore/kofmod/emu_harvest.h"
 #include "../../libkofeng/kofcore/kofmod/ep_shape.h"
 #include "../../libkofeng/kofcore/kofmod/gzip.h"
-#include "../../libkofeng/kofcore/kofmod/heur.h"
 #include "../../libkofeng/kofcore/kofmod/infected.h"
 #include "../../libkofeng/kofcore/kofmod/kofabi.h"
 #include "../../libkofeng/kofcore/kofmod/kofcap.h"
 #include "../../libkofeng/kofcore/kofmod/kofchild.h"
-#include "../../libkofeng/kofcore/kofmod/kofcure.h"
 #include "../../libkofeng/kofcore/kofmod/kofdeclare.h"
 #include "../../libkofeng/kofcore/kofmod/kofdiagnose.h"
 #include "../../libkofeng/kofcore/kofmod/kofdiagtree.h"
@@ -285,9 +282,6 @@ static const struct kc g056[] = {
 static const struct kc g058[] = {
 	K(KOF_SCAN_GZIP_CLAIMED),
 };
-static const struct kc g059[] = {
-	K(KOF_ENG_USE_PATHOGEN),
-};
 static const struct kc g060[] = {
 	K(KOF_INF_BODY), K(KOF_INF_DAMAGE),
 };
@@ -398,10 +392,6 @@ static const struct kc g092[] = {
 static const struct kc g093[] = {
 	K(KUNP_PERM_R), K(KUNP_PERM_W), K(KUNP_PERM_X),
 };
-static const struct kc g094[] = {
-	K(KOF_CURE_MASK_ADD8), K(KOF_CURE_MASK_NONE), K(KOF_CURE_MASK_ROL8),
-	K(KOF_CURE_MASK_XOR16), K(KOF_CURE_MASK_XOR8),
-};
 static const struct kc g097[] = {
 	K(KOF_DIAG_STR_MAX),
 };
@@ -463,9 +453,6 @@ static const struct kc g116[] = {
 };
 static const struct kc g117[] = {
 	K(KOF_MUTATION_MAX_HASH),
-};
-static const struct kc g118[] = {
-	K(KOF_MUTATION_NAME_MAX),
 };
 static const struct kc g119[] = {
 	K(KOF_MUTATION_RAW),
@@ -533,7 +520,6 @@ static const struct kc g141[] = {
 	K(KOF_SYM_R_VALUE), K(KOF_SYM_R_VIS),
 };
 static const struct kc g142[] = {
-	K(KOF_ENGINE_PATHOGEN),
 };
 static const struct kc g143[] = {
 	K(KOF_LHA_ANOM_COUNT),
@@ -710,14 +696,11 @@ static const struct kc g217[] = {
 static const struct kc g219[] = {
 	K(KOF_ZIP_INFO_VERSION),
 };
-static const struct kc g222[] = {
-	K(KOF_LEVEL_HEUR), K(KOF_LEVEL_INFECT), K(KOF_LEVEL_SUSPECT),
-};
 static const struct kc g223[] = {
 	K(KOFENG_MAJOR), K(KOFENG_MINOR),
 };
 static const struct kc g224[] = {
-	K(KVERDICT_FILE_KIND), K(KVERDICT_FILE_NAME),
+	K(KVERDICT_FILE_NAME),
 };
 
 static const struct group groups[] = {
@@ -765,7 +748,6 @@ static const struct group groups[] = {
 	{ "kofcore/kofmod/gzip.h: KOF_GZIP", g055, 1, 2 },
 	{ "kofcore/kofmod/gzip.h: KOF_GZIP_INFO", g056, 1, 2 },
 	{ "kofcore/kofmod/gzip.h: KOF_SCAN_GZIP", g058, 1, 2 },
-	{ "kofcore/kofmod/heur.h: KOF_ENG_USE", g059, 1, 2 },
 	{ "kofcore/kofmod/infected.h: KOF_INF", g060, 2, 1 },
 	{ "kofcore/kofmod/kofabi.h: KOFSIG_ABI", g061, 2, 1 },
 	{ "kofcore/kofmod/kofcap.h: KOF_FLOWF", g062, 1, 2 },
@@ -800,7 +782,6 @@ static const struct group groups[] = {
 	{ "kofcore/kofmod/kofcap.h: kof_flow_cap", g091, 1, 2 },
 	{ "kofcore/kofmod/kofchild.h: KUNP_HDR", g092, 2, 1 },
 	{ "kofcore/kofmod/kofchild.h: KUNP_PERM", g093, 3, 0 },
-	{ "kofcore/kofmod/kofcure.h: KOF_CURE_MASK", g094, 5, 1 },
 	{ "kofcore/kofmod/kofdiagnose.h: KOF_DIAG_STR", g097, 1, 2 },
 	{ "kofcore/kofmod/kofdiagtree.h: KDIG_ATTR", g098, 2, 0 },
 	{ "kofcore/kofmod/kofdiagtree.h: KDIG_SEC", g099, 6, 1 },
@@ -820,7 +801,6 @@ static const struct group groups[] = {
 	{ "kofcore/kofmod/kofmodemu.h: KOF_EMU_RGN", g115, 3, 1 },
 	{ "kofcore/kofmod/kofmodemu.h: KUNP_REG", g116, 9, 1 },
 	{ "kofcore/kofmod/kofmutation.h: KOF_MUTATION_MAX", g117, 1, 2 },
-	{ "kofcore/kofmod/kofmutation.h: KOF_MUTATION_NAME", g118, 1, 2 },
 	{ "kofcore/kofmod/kofmutation.h: KOF_MUTATION", g119, 1, 2 },
 	{ "kofcore/kofmod/kofmutation.h: kof_mutation", g120, 1, 2 },
 	{ "kofcore/kofmod/kofname.h: KOF_NAME", g121, 1, 2 },
@@ -897,9 +877,8 @@ static const struct group groups[] = {
 	{ "kofcore/kofmod/zip.h: KOF_SCAN_ZIP", g216, 3, 1 },
 	{ "kofcore/kofmod/zip.h: KOF_ZIP_ANOM", g217, 1, 2 },
 	{ "kofcore/kofmod/zip.h: KOF_ZIP_INFO", g219, 1, 2 },
-	{ "kofcore/kofresult.h: KOF_LEVEL", g222, 3, 1 },
 	{ "kofeng.h: KOFENG", g223, 2, 1 },
-	{ "verdictor/verdict.h: KVERDICT_FILE", g224, 2, 1 },
+	{ "verdictor/verdict.h: KVERDICT_FILE", g224, 1, 2 },
 };
 
 /* the module ABI values this tree carries */
@@ -944,7 +923,7 @@ static const struct pin pins[] = {
 	{ "KOF_SCAN_ELF_NOLOAD", (uint64_t)(KOF_SCAN_ELF_NOLOAD), 16ull }, { "KOF_SCAN_ELF_SLIB_CODE", (uint64_t)(KOF_SCAN_ELF_SLIB_CODE), 64ull },
 	{ "KOF_SCAN_ELF_SLIB_DATA", (uint64_t)(KOF_SCAN_ELF_SLIB_DATA), 128ull }, { "KOF_SCAN_ELF_UNCLAIMED", (uint64_t)(KOF_SCAN_ELF_UNCLAIMED), 32ull },
 	{ "KOF_GZIP_DEFLATE", (uint64_t)(KOF_GZIP_DEFLATE), 8ull }, { "KOF_GZIP_INFO_VERSION", (uint64_t)(KOF_GZIP_INFO_VERSION), 1ull },
-	{ "KOF_SCAN_GZIP_CLAIMED", (uint64_t)(KOF_SCAN_GZIP_CLAIMED), 30ull }, { "KOF_ENG_USE_PATHOGEN", (uint64_t)(KOF_ENG_USE_PATHOGEN), 16ull },
+	{ "KOF_SCAN_GZIP_CLAIMED", (uint64_t)(KOF_SCAN_GZIP_CLAIMED), 30ull },
 	{ "KOF_INF_BODY", (uint64_t)(KOF_INF_BODY), 0ull }, { "KOF_INF_DAMAGE", (uint64_t)(KOF_INF_DAMAGE), 1ull },
 	{ "KOFSIG_ABI_MIN", (uint64_t)(KOFSIG_ABI_MIN), 3ull }, { "KOFSIG_ABI_VERSION", (uint64_t)(KOFSIG_ABI_VERSION), 4ull },
 	{ "KOF_FLOWF_WX", (uint64_t)(KOF_FLOWF_WX), 16ull }, { "KOF_NUCLEO_ACTION_READ", (uint64_t)(KOF_NUCLEO_ACTION_READ), 262ull },
@@ -984,9 +963,7 @@ static const struct pin pins[] = {
 	{ "KOF_NUCLEO_TIMESTOMP", (uint64_t)(KOF_NUCLEO_TIMESTOMP), 519ull }, { "KOF_NUCLEO_WRITE", (uint64_t)(KOF_NUCLEO_WRITE), 515ull },
 	{ "KUNP_HDR_ELF32", (uint64_t)(KUNP_HDR_ELF32), 84ull }, { "KUNP_HDR_ELF64", (uint64_t)(KUNP_HDR_ELF64), 120ull },
 	{ "KUNP_PERM_R", (uint64_t)(KUNP_PERM_R), 4ull }, { "KUNP_PERM_W", (uint64_t)(KUNP_PERM_W), 2ull },
-	{ "KUNP_PERM_X", (uint64_t)(KUNP_PERM_X), 1ull }, { "KOF_CURE_MASK_ADD8", (uint64_t)(KOF_CURE_MASK_ADD8), 3ull },
-	{ "KOF_CURE_MASK_NONE", (uint64_t)(KOF_CURE_MASK_NONE), 0ull }, { "KOF_CURE_MASK_ROL8", (uint64_t)(KOF_CURE_MASK_ROL8), 4ull },
-	{ "KOF_CURE_MASK_XOR16", (uint64_t)(KOF_CURE_MASK_XOR16), 2ull }, { "KOF_CURE_MASK_XOR8", (uint64_t)(KOF_CURE_MASK_XOR8), 1ull },
+	{ "KUNP_PERM_X", (uint64_t)(KUNP_PERM_X), 1ull },
 	{ "KDIG_ATTR_SYM", (uint64_t)(KDIG_ATTR_SYM), 2ull }, { "KDIG_ATTR_VALUE", (uint64_t)(KDIG_ATTR_VALUE), 1ull },
 	{ "KDIG_SEC_DISEASE", (uint64_t)(KDIG_SEC_DISEASE), 8ull }, { "KDIG_SEC_NEEDS", (uint64_t)(KDIG_SEC_NEEDS), 6ull },
 	{ "KDIG_SEC_REFS", (uint64_t)(KDIG_SEC_REFS), 4ull }, { "KDIG_SEC_SEQUENCE", (uint64_t)(KDIG_SEC_SEQUENCE), 7ull },
@@ -1031,7 +1008,7 @@ static const struct pin pins[] = {
 	{ "KOF_SYM_R_SHNDX", (uint64_t)(KOF_SYM_R_SHNDX), 10ull }, { "KOF_SYM_R_SIZE", (uint64_t)(KOF_SYM_R_SIZE), 16ull },
 	{ "KOF_SYM_R_TYPE", (uint64_t)(KOF_SYM_R_TYPE), 0ull }, { "KOF_SYM_R_VALUE", (uint64_t)(KOF_SYM_R_VALUE), 24ull },
 	{ "KOF_SYM_R_VIS", (uint64_t)(KOF_SYM_R_VIS), 2ull }, { "KOF_SYM_VERSION", (uint64_t)(KOF_SYM_VERSION), 4ull },
-	{ "KOF_ENGINE_PATHOGEN", (uint64_t)(KOF_ENGINE_PATHOGEN), 4ull }, { "KOF_LHA_INFO_VERSION", (uint64_t)(KOF_LHA_INFO_VERSION), 2ull },
+	{ "KOF_LHA_INFO_VERSION", (uint64_t)(KOF_LHA_INFO_VERSION), 2ull },
 	{ "KOF_SCAN_LHA_CLAIMED", (uint64_t)(KOF_SCAN_LHA_CLAIMED), 14ull }, { "KOF_LNK_INFO_VERSION", (uint64_t)(KOF_LNK_INFO_VERSION), 2ull },
 	{ "KOF_LNK_SIG_CONSOLE", (uint64_t)(KOF_LNK_SIG_CONSOLE), 2684354562ull }, { "KOF_LNK_SIG_CONSOLE_FE", (uint64_t)(KOF_LNK_SIG_CONSOLE_FE), 2684354564ull },
 	{ "KOF_LNK_SIG_DARWIN", (uint64_t)(KOF_LNK_SIG_DARWIN), 2684354566ull }, { "KOF_LNK_SIG_ENV", (uint64_t)(KOF_LNK_SIG_ENV), 2684354561ull },

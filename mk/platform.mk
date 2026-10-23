@@ -89,7 +89,7 @@ AR      ?= ar
 #
 # THE SANITISED BUILDS KEEP IT. A sanitiser report without file and line is a
 # stack of addresses, which is the difference between "there is a leak" and
-# "draft_from_source, kofeditor.c:4478" - so -g moves to SAN_CFLAGS and
+# "a function name, kofeditor.c:4478" - so -g moves to SAN_CFLAGS and
 # ASAN_FLAGS rather than disappearing. It is `?=`, so a developer who wants it
 # back for a release build says CFLAGS='-O2 -g' and gets it.
 #

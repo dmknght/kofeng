@@ -352,6 +352,16 @@ static void route_link_args(struct route *R, struct kgenome_diag_hit *h,
 	 * in between. kgenome_diag_note_in ignores a repeat, so a loop
 	 * records the link once.
 	 */
+	/*
+	 * A PARTIAL WRITE OF A REGISTER (audit W6, decided). `xor edi,edi; mov di,ax` hands the call the low
+	 * sixteen bits of what ax held. The sweep forgets the origin at any write narrower than the register
+	 * (diag_origin.c: it is not a copy), so it makes no link. THIS route compares VALUES: the descriptor
+	 * the run was given equals what the call received, so the value DID travel there on this run, and the
+	 * link is PROVEN in the only sense this route has - demonstrated. It is not an inference about
+	 * every path and it cannot be wrong about this one; a coincidence of equal values is the one way it
+	 * could, and is the same for every argument this route links. tests/lib/genome/diag_graph_bin.c
+	 * (t_partial) pins both answers so that the difference stays a decision.
+	 */
 	for (k = 0; k < 6u && h; k++) {
 		uint8_t role = kgenome_diag_role_of_arg(cap, k);
 
@@ -483,10 +493,19 @@ static void route_remember(struct route *R, uint16_t cap, uint64_t nr,
 	}
 }
 
+/* The run is over, and why: the ordinary endings say nothing, a limit or a gap says so. */
+static void route_end(struct route *R, enum kgenome_emu_stop st)
+{
+	kgenome_diag_emu_stop_status(R->s, st);      /* exited, faulted, or ran out */
+	if (kgenome_emu_hit(R->em))
+		kgenome_diag_note(R->s, KGENOME_TRUNCATED);     /* a bound refused something */
+}
+
 /* One stop at a syscall. Zero ends the run. */
 static int route_stop(struct route *R)
 {
-	enum kgenome_emu_stop st = kgenome_emu_run(R->em);
+	enum kgenome_emu_stop st = kgenome_emu_run(R->em), sst;
+	int over;
 	uint64_t rip, off, arg[6], nr, ret;
 	struct kgenome_diag_hit *h;
 	uint16_t cap, node;
@@ -494,9 +513,7 @@ static int route_stop(struct route *R)
 	unsigned i;
 
 	if (st != KGENOME_EMU_STOP_INSN) {
-		kgenome_diag_emu_stop_status(R->s, st);      /* exited, faulted, or ran out */
-		if (kgenome_emu_hit(R->em))
-			kgenome_diag_note(R->s, KGENOME_TRUNCATED);     /* a bound refused something */
+		route_end(R, st);
 		return 0;
 	}
 
@@ -528,8 +545,17 @@ static int route_stop(struct route *R)
 	 * the watch pauses BEFORE the instruction and resuming would
 	 * pause on it again.
 	 */
-	kgenome_emu_step(R->em);
+	sst = kgenome_emu_step(R->em);
 	ret = kgenome_emu_get_reg(R->em, KGENOME_DIAG_EMU_RET);
+	/*
+	 * THE STEP IS THE ONE INSTRUCTION THAT CAN END THE RUN: an exit or an exit_group, an execve, a fault in
+	 * the call. Its answer was dropped, so a program that ended in exit went on from the instruction after
+	 * the syscall - into whatever bytes follow - until the "nothing new" bound fired and the scan said
+	 * KGENOME_TRUNCATED for a three-instruction program (MEASURED, 69 of 294 corpus files). The step stops
+	 * at its own one-instruction budget when it ends nothing; any other word is the run's end, and the node
+	 * of this very call is still made first (an execve is a node).
+	 */
+	over = sst != KGENOME_EMU_STOP_BUDGET && sst != KGENOME_EMU_STOP_INSN;
 
 	cap = kgenome_nucleo_cap_of_syscall(R->bits, (uint32_t)nr, arg, &fl);
 
@@ -539,7 +565,7 @@ static int route_stop(struct route *R)
 	case ROUTE_STOP:
 		return 0;
 	case ROUTE_SKIP:
-		return 1;
+		goto done;
 	default:
 		break;
 	}
@@ -547,6 +573,11 @@ static int route_stop(struct route *R)
 	route_link_args(R, h, cap, arg);
 	ret = route_force(R, cap, arg, ret);
 	route_remember(R, cap, nr, ret, arg, node);
+done:
+	if (over) {
+		route_end(R, sst);
+		return 0;
+	}
 	return 1;
 }
 
@@ -667,8 +698,9 @@ void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 		R.em = kgenome_emu_unp_build(base, size, ei, &eb, &rep);
 	}
 	if (!R.em) {
-		kgenome_diag_emu_pages_release(s);
-		kgenome_diag_note(s, KGENOME_NOMEM);
+		/* WHICH reason: the entry is past the bytes the file holds (the input's), the allowance said
+		 * no (the budget's), or an allocation failed. It was always reported as the last. */
+		kgenome_diag_emu_build_failed(s, rep.refused);
 		return;
 	}
 	if (s->bud.deadline_ms)

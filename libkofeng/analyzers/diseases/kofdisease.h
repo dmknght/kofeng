@@ -4,15 +4,12 @@
  *
  * A diagnose is a test; what it finds is a DISEASE, written as a path of
  * lower-case words: the layer first, then what narrows it
- * ("flood-network/raw-header"). Syndromes (../syndrome) are sets of these, read
- * against verified samples, so the spelling is compared BYTE FOR BYTE in three
- * places - the diagnose that carries it, the syndrome that names it, and the
- * engine that matches the two. A spelling that differs by case or a stray slash
- * would be a different behaviour that nothing carries, so ONE function decides
- * what a well-formed disease is, and every reader asks it.
- *
- * It used to be written twice - once in the diagnose reader and once in the
- * syndrome reader - and the two had already drifted by one rule.
+ * ("flood-network/raw-header"). The verdict of an object is named from the
+ * diseases it has (kof_verdict_make), so the spelling is compared BYTE FOR BYTE
+ * by the diagnose that carries it, the detector that declares it and the engine
+ * that matches the two. A spelling that differs by case or a stray slash would be
+ * a different behaviour that nothing carries, so ONE function decides what a
+ * well-formed disease is, and every reader asks it.
  */
 
 #ifndef KOFENG_DISEASES_KOFDISEASE_H

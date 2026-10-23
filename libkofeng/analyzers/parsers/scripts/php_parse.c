@@ -7,63 +7,48 @@
 #include "../../../kofcore/kofcore.h"
 #include "php_parse.h"
 #include "scantext.h"
+#include <textual/textual.h>
 
 /*
- * THE TAGS - how long the one at `at` is, or 0 for no tag.
+ * THE TAGS - where the first one is and how long it is, or none. WHAT A TAG IS, AND WHERE A "?>" REALLY CLOSES, IS THE LIB'S: the php lexer
+ * (libgenome/textual/php/php_lex.c) is the one reader of both, asked through kgenome_textual_lex / kgenome_textual_islands. This file used to read them
+ * a second time - the tag rule (php_open_at) and a walk for the close that skipped strings, heredocs and block comments (php_close, php_skip_str,
+ * php_skip_heredoc) - and the two readers disagreed (docs/textual_pipeline.txt lists where, measured on the corpora): the engine's walk took a quote
+ * in a `//` or `#` comment for the start of a string, read a backslash in a double quoted string without its interpolation, and ended a heredoc at a
+ * label that a longer name begins. The question this file asks is the one the engine's parsers carve the object by, so it takes the lexer's answer.
  *
- * "<?php" is five bytes that do not occur in passing and "<?=" is the echo
- * shorthand. The third is the bare "<?" SHORT TAG, and it needs a rule because
- * it is three quarters of "<?xml".
- *
- * THE RULE IS THE WHITESPACE AFTER IT, and it comes from XML rather than from
- * php: a processing instruction is "<?target ... ?>" and the TARGET FOLLOWS THE
- * "<?" IMMEDIATELY - no space is allowed there. So "<?xml", "<?xml-stylesheet"
- * and every other PI carry a letter in the third byte, and "<? " or "<?\n"
- * cannot be one.
- *
- * MEASURED BEFORE IT WAS BELIEVED. Over 6264 files of real documentation, XML,
- * desktop entries and this source tree, five hold "<?" followed by whitespace
- * and every one of them is BINARY - four git objects and an object file - so
- * the sniff's own text test refuses them and the rule claims nothing it should
- * not. In the sample tree the only file it newly claims is the one it is for:
- * Cyber Shell.php, a 2006 shell that opens with a bare "<?" and was coming back
- * as an object no module targets.
- *
- * It is ONE rule in one place because two callers ask - the sniff and the
- * island walk - and a short tag recognised by one and not the other would make
- * a page whose blocks nothing can find.
+ * THE SHORT TAG "<?" IS THE LEXER'S RULE TOO: white space after it, which keeps "<?xml" markup (measured on 6264 files before it was believed: the
+ * only file it newly claims is Cyber Shell.php, a 2006 shell that opens with a bare "<?").
  */
-static uint32_t php_open_at(kof_buf f, uint64_t at, uint64_t end)
-{
-	if (kof_txt_tag_at(f, at, "<?php", 5u))
-		return 5u;
-	if (kof_txt_tag_at(f, at, "<?=", 3u))
-		return 3u;
-	if (at + 3u <= end && f.p[at] == '<' && f.p[at + 1u] == '?') {
-		uint8_t c = f.p[at + 2u];
+struct first_tag {
+	uint64_t off;
+	uint32_t len;
+	int      found;
+};
 
-		if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
-			return 2u;
-	}
-	return 0;
+static int first_tag_sink(void *u, const struct kgenome_textual_island *is)
+{
+	struct first_tag *t = u;
+
+	t->off = is->off;
+	t->len = is->open_len;          /* the tag's own bytes: not the white space php takes after "<?php" */
+	t->found = 1;
+	return 0;                       /* the first is the answer: the lexer stops */
 }
 
 uint64_t kof_php_find_tag(kof_buf f, uint64_t look, uint32_t *taglen)
 {
-	uint64_t i;
+	struct first_tag t = { 0, 0, 0 };
+	struct kgenome_textual_islands_req rq = { .in = f.p, .n = look > f.n ? (uint32_t)f.n : (uint32_t)look, .lang = KGENOME_TEXTUAL_LANG_PHP,
+						  .sink = first_tag_sink, .user = &t };
 
-	for (i = 0; i + 2u <= look; i++) {
-		uint32_t n;
-
-		if (f.p[i] != '<')
-			continue;
-		n = php_open_at(f, i, look);
-		if (n) {
-			*taglen = n;
-			return i;
-		}
-	}
-	return (uint64_t)-1;
+	if (f.n > 0xffffffffu || !f.p)
+		return (uint64_t)-1;
+	(void)kgenome_textual_islands(&rq);
+	if (!t.found)
+		return (uint64_t)-1;
+	*taglen = t.len;
+	return t.off;
 }
 
 int kof_php_is_page(kof_buf f, uint64_t from)
@@ -76,118 +61,11 @@ int kof_php_is_page(kof_buf f, uint64_t from)
 		if (f.p[i] != '?' || f.p[i + 1u] != '>')
 			continue;
 		for (j = i + 2u; j < f.n; j++)
-			if (f.p[j] != '\n' && f.p[j] != '\r' &&
-			    f.p[j] != ' ' && f.p[j] != '\t')
+			if (!kof_is_blank_byte(f.p[j]))
 				return 1;
 		return 0;
 	}
 	return 0;
-}
-
-/*
- * THE "?>" THAT REALLY CLOSES, walked as php rather than searched for.
- *
- * Looking for the two bytes finds them wherever they are, and in a webshell
- * they are very often somewhere that does not close anything:
- *
- *     $tpl = "<?php eval($_POST[x]); ?>";     a dropper writing a file
- *     preg_match('/\?>/', $s)                  a pattern about the tag
- *
- * Measured on this corpus: 66 of them, in 15 of 75 php files. Each one ended an
- * island early, so the code after it was called markup - and with the form pass
- * running the language's rules over BODY and leaving MARKUP alone, a wrong
- * boundary is not just a wrong label any more.
- *
- * WHAT IS SKIPPED, and the list is short because php's own rule is:
- *
- *   '...' "..."   a value. The tag inside one is text.
- *   <<<LABEL      likewise, and the body may hold anything at all.
- *   a block comment  likewise - "?>" inside one is commented out.
- *
- * AND WHAT IS NOT. A "//" or "#" comment does NOT protect it - php ends such a
- * comment at the end of the line OR at "?>", whichever comes first, and breaks
- * out of php mode there. So the naive scan was RIGHT about those, and making
- * them a special case would have introduced the bug it was meant to fix.
- * Measured too: zero occurrences in this corpus either way.
- */
-static uint64_t php_skip_str(kof_buf f, uint64_t i)
-{
-	uint8_t q = f.p[i];
-
-	for (i++; i < f.n; i++) {
-		if (f.p[i] == '\\' && i + 1u < f.n) {
-			/* In '...' a backslash escapes only a quote and itself;
-			 * everything else is a literal backslash. Reading it as
-			 * a general escape would swallow the closing quote. */
-			if (q == '"' || f.p[i + 1u] == '\'' ||
-			    f.p[i + 1u] == '\\')
-				i++;
-			continue;
-		}
-		if (f.p[i] == q)
-			return i + 1u;
-	}
-	return f.n;
-}
-
-/* A heredoc or nowdoc body, which ends at its label alone on a line. */
-static uint64_t php_skip_heredoc(kof_buf f, uint64_t i)
-{
-	uint8_t label[64];
-	uint32_t n = 0;
-	uint64_t j = i + 3u;
-
-	while (j < f.n && (f.p[j] == ' ' || f.p[j] == '\t'))
-		j++;
-	if (j < f.n && (f.p[j] == '"' || f.p[j] == '\''))
-		j++;
-	while (j < f.n && n < sizeof label &&
-	       (kof_is_alnum(f.p[j]) || f.p[j] == '_'))
-		label[n++] = f.p[j++];
-	if (!n)
-		return i + 3u;          /* not a heredoc after all */
-	for (; j + n < f.n; j++) {
-		if (f.p[j] != '\n')
-			continue;
-		{
-			uint64_t k = j + 1u;
-
-			while (k < f.n && (f.p[k] == ' ' || f.p[k] == '\t'))
-				k++;
-			if (k + n <= f.n && !memcmp(f.p + k, label, n))
-				return k + n;
-		}
-	}
-	return f.n;
-}
-
-static uint64_t php_close(kof_buf f, uint64_t i)
-{
-	while (i + 1u < f.n) {
-		uint8_t c = f.p[i];
-
-		if (c == '?' && f.p[i + 1u] == '>')
-			return i;
-		if (c == '\'' || c == '"') {
-			i = php_skip_str(f, i);
-			continue;
-		}
-		if (c == '/' && f.p[i + 1u] == '*') {
-			uint64_t k = i + 2u;
-
-			while (k + 1u < f.n &&
-			       !(f.p[k] == '*' && f.p[k + 1u] == '/'))
-				k++;
-			i = k + 1u < f.n ? k + 2u : f.n;
-			continue;
-		}
-		if (c == '<' && kof_txt_tag_at(f, i, "<<<", 3u)) {
-			i = php_skip_heredoc(f, i);
-			continue;
-		}
-		i++;
-	}
-	return f.n;
 }
 
 /*
@@ -236,50 +114,6 @@ static uint64_t php_close(kof_buf f, uint64_t i)
  */
 void kof_php_islands(kof_buf f, uint64_t from, struct kof_script_info *info)
 {
-	uint64_t i = from;
-
-	/*
-	 * ONE BRANCH, BECAUSE THE FIRST ISLAND IS NOT SPECIAL ANY MORE.
-	 *
-	 * It used to be: the header ended after the opening tag, so the first
-	 * island began where the tag stopped and every other one began at its
-	 * own tag. That asymmetry needed a second variable to find the tag
-	 * again for php_block, and it existed only because php was credited
-	 * with a header it does not have. With the header gone every island is
-	 * "<?php ... ?>" including its delimiters, which is also what the "<%"
-	 * family has always been.
-	 */
-	while (i < f.n && info->n_island < KOF_SCRIPT_MAX_ISLAND) {
-		uint64_t open, body, close;
-		uint32_t o_len = 0;
-
-		/* Forward from where the last run ended, and not through
-		 * kof_php_find_tag: that searches from the start of the object
-		 * and would keep answering with a run already passed. */
-		for (open = i; open + 3u <= f.n; open++) {
-			o_len = php_open_at(f, open, f.n);
-			if (o_len)
-				break;
-		}
-		if (open + 3u > f.n)
-			break;
-		body = open + o_len;
-		close = php_close(f, body);
-		if (close + 2u > f.n) {
-			kof_isl_add(info, open, f.n - open);
-			break;
-		}
-		/*
-		 * Interpolation is passed over rather than recorded, which
-		 * leaves it in the markup gap either side - see php_block. The
-		 * walk still steps past it, or the next pass would find the
-		 * same opener again.
-		 */
-		if (kof_script_is_block(f, open, close + 2u) &&
-		    !kof_isl_add(info, open, close + 2u - open))
-			break;
-		i = close + 2u;
-	}
-	kof_isl_seal(info, f.n);
+	kof_isl_lex(f, from, info, KGENOME_TEXTUAL_LANG_PHP);
 }
 

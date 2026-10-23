@@ -1,6 +1,5 @@
 /*
- * kofabi.h - the ABI version a module is built against, and the level a
- * finding is asserted at.
+ * kofabi.h - the ABI version a module is built against.
  *
  * Part of the module ABI; a module includes <kofmod/kofsig.h>, never this file.
  */
@@ -49,15 +48,15 @@
 /*
  * 3 - THE STRING MEASURE WAS TAKEN OUT, AND WITH IT A VTABLE SLOT.
  *
- * `ovl_strings` sat between mutation_score and ovl_blocks and is gone, so every
- * slot after it moved up one; `ovl_shape` was appended at the end in the same
- * change. Both halves of this number move because the first of those is the
- * removal the note above describes, and a module built against ABI 2 would
- * call ovl_blocks where it meant ovl_strings.
+ * The string-measure slot sat between mutation_score and the block-set slot and is
+ * gone, so every slot after it moved up one; a shape slot was appended at the end
+ * in the same change. Both halves of this number move because the first of those
+ * is the removal the note above describes, and a module built against ABI 2 would
+ * call the block-set slot where it meant the string measure.
  *
  * The view structs moved too, which would have been reason enough on its own:
  * struct kof_mutation_desc lost its string pool, struct kof_mutation_region lost the
- * slice that indexed it, struct kof_ovl_vec lost the two string dimensions,
+ * slice that indexed it, the block-vector struct lost the two string dimensions,
  * and struct kof_mutation_shape (since removed) gained lib_cut.
  *
  * WHY THE MEASURE WENT is recorded where a researcher will look for it - see
@@ -71,7 +70,16 @@
 #define KOFSIG_ABI_MIN     3
 
 /*
- * A BUMP IS OWED, AND IT IS THE OWNER'S: the zip and pdf views became tables the file sizes
+ * A BUMP IS OWED, AND IT IS THE OWNER'S, a SECOND TIME (2026-10-15, the old verdict
+ * removal): the module context lost `report` (struct kof_obj_ctx, the slot kept as
+ * reserved_0) and the vtable lost seven slots to reserved_3..reserved_9 (the repair
+ * and its arithmetic). Nothing moved, so by the rule above only VERSION would need to
+ * go up - but a module built before still CALLS those slots and reads NULL, which is a
+ * wild call out of a file, so MIN has to equal VERSION as well. And the pack side: the
+ * heuristic-rule kind (KOF_PACK_RETIRED_HEUR) is gone and the loader refuses a pack that has
+ * one, which is the other half of the same reason.
+ *
+ * Earlier, and still owed: the zip and pdf views became tables the file sizes
  * (zip.h, pdf.h; KOF_ZIP_INFO_VERSION and KOF_PDF_INFO_VERSION are 2) and the vtable gained
  * `view_next` at its end, so by the rule above both numbers move - VERSION to 5 (a module that
  * walks with kof_zip_next calls a slot an engine of ABI 4 does not have: the slot past the end of
@@ -85,44 +93,5 @@
  * instead, which is the stronger answer and the one for a view whose fields past the head a
  * third-party module may read.
  */
-
-/*
- * How strongly a finding is asserted.
- *
- * A level rather than a separate verdict, because the difference between "this is
- * the family" and "this looks like it" is a property of the finding and not of the
- * control flow. Both are reported the same way and named the same way, so there is
- * one mechanism and one table instead of two that must agree.
- */
-enum kof_level {
-	KOF_LVL_SUSPECT = 0, /* worth noting; not a detection */
-	KOF_LVL_INFECT  = 1, /* the family is identified */
-	/*
-	 * A shape clean software does not have, with nothing identified.
-	 *
-	 * Reported only by a heuristic rule - see kofmod/heur.h - and a detector
-	 * that tried would be refused by the build. The value matches
-	 * KOF_LEVEL_HEUR in kofeng.h because the host passes the module's level
-	 * straight through; the two enums are one enum written twice, once for
-	 * each side of the ABI.
-	 */
-	KOF_LVL_HEUR    = 2,
-
-	/*
-	 * FIRED FOR THE ACTION, NOT FOR A VERDICT - see KOF_HEUR_ACT.
-	 *
-	 * The rule's ask is honoured and NOTHING is reported. It is a LEVEL and
-	 * not a declaration on the module because the same rule needs both
-	 * answers on different objects: an ELF carrying a second file is a
-	 * reason to carve every time and a reason to conclude only when the
-	 * passenger is most of the file. One rule, one measurement, two
-	 * outcomes - which cannot be said in KOF_HEUR_WANT, because that is
-	 * read out of the source at build time and is the same on every object.
-	 *
-	 * Above KOF_LVL_HEUR in value and below it in meaning; nothing orders
-	 * these, the host branches on them.
-	 */
-	KOF_LVL_ACT     = 3
-};
 
 #endif /* KOFENG_KOFABI_H */

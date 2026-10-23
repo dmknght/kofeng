@@ -166,6 +166,16 @@ uint8_t kgenome_diag_role_of_arg(uint16_t cap, unsigned i)
 		return i == 0u ? KGENOME_DIAG_ROLE_FD : KGENOME_DIAG_ROLE_NONE;
 	case KGENOME_NUCLEO_EXEC_IMAGE:
 		return i == 0u ? KGENOME_DIAG_ROLE_PATH : KGENOME_DIAG_ROLE_NONE;
+	/* A script's decode and eval: the first argument is the value they act on - see KGENOME_DIAG_ROLE_VALUE. */
+	case KGENOME_NUCLEO_DECODE:
+	case KGENOME_NUCLEO_EVAL:
+	case KGENOME_NUCLEO_CREATE:
+		return i == 0u ? KGENOME_DIAG_ROLE_VALUE : KGENOME_DIAG_ROLE_NONE;
+	/* A data-call's first argument is the CALLEE: what the call runs is chosen by it, which is a target and not a value it acts on.
+	 * The same for what a data-load loads: the name is what decides. */
+	case KGENOME_NUCLEO_DYNCALL:
+	case KGENOME_NUCLEO_DYNLOAD:
+		return i == 0u ? KGENOME_DIAG_ROLE_TARGET : KGENOME_DIAG_ROLE_NONE;
 	/* The credentials being installed are the ones that were built. */
 	case KGENOME_NUCLEO_CRED_SET:
 	/* Both halves of the probe take the same struct kprobe. */
@@ -187,10 +197,38 @@ struct kgenome_diag_hit *kgenome_diag_hit_of(struct kgenome_diag_scan *s, uint32
 void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
 		      uint16_t from, uint8_t role, uint8_t kind)
 {
+	kgenome_diag_note_in_how(s, h, from, role, kind, KGENOME_DIAG_LINK_PROVEN);
+}
+
+/*
+ * A LINK THE RUN SAW ARRIVE. The run (the emulate route) and the code-only routes can find the same relation,
+ * and kgenome_diag_note_in_how keeps the FIRST statement of it: a sweep that said MAY (two arms joined, or a
+ * callee that was not read) would keep the run's proof out. A link the run demonstrated is PROVEN, and
+ * replaces a MAY that is already there. Only the fold of two nodes at one site asks for it (merge_sites, where
+ * the run's node meets the sweep's); a route recording its own links keeps the first statement, as the
+ * script route's oracle (tests/lib/genome/diag_text_sum_gen.c) holds.
+ */
+int kgenome_diag_note_in_seen(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
+			      uint16_t from, uint8_t role, uint8_t kind)
+{
+	uint8_t i;
+
+	if (h && from != KGENOME_DIAG_ORG_NONE)
+		for (i = 0; i < h->n_in; i++)
+			if (h->in[i].from == from && h->in[i].role == role && h->in[i].kind == kind) {
+				h->in[i].how = KGENOME_DIAG_LINK_PROVEN;
+				return 0;
+			}
+	return kgenome_diag_note_in_how(s, h, from, role, kind, KGENOME_DIAG_LINK_PROVEN);
+}
+
+int kgenome_diag_note_in_how(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
+			  uint16_t from, uint8_t role, uint8_t kind, uint8_t how)
+{
 	uint8_t i;
 
 	if (!h || from == KGENOME_DIAG_ORG_NONE)
-		return;
+		return 0;
 	/*
 	 * THE SAME LINK TWICE IS ONE LINK.
 	 *
@@ -209,7 +247,7 @@ void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *
 	for (i = 0; i < h->n_in; i++)
 		if (h->in[i].from == from && h->in[i].role == role &&
 		    h->in[i].kind == kind)
-			return;
+			return 0;
 	/*
 	 * FOUR INPUTS A NODE - a read has two that matter (the buffer and the
 	 * descriptor) and nothing measured has needed more than three. A fifth
@@ -222,12 +260,13 @@ void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *
 	 * "full" on a node that was; it now says "full" only for a real fifth.
 	 */
 	if (h->n_in >= 4u) {
-		kgenome_diag_note(s, KGENOME_TRUNCATED);
-		return;
+		kgenome_diag_note(s, KGENOME_TRUNCATED);        /* the same for every link, as for the text route's */
+		return 1;
 	}
 	h->in[h->n_in].from = from;
 	h->in[h->n_in].role = role;
-	h->in[h->n_in].how  = KGENOME_DIAG_LINK_PROVEN;
+	h->in[h->n_in].how  = how;
 	h->in[h->n_in].kind = kind;
 	h->n_in++;
+	return 0;
 }

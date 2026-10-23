@@ -1478,35 +1478,6 @@ static void prop_object_rows(struct view *v, const struct object *ob, int full)
 }
 
 /*
- * The colour a verdict is painted in - the scanner's, so the two tools agree.
- *
- * Ranked through the engine rather than compared as numbers: KOF_LEVEL_HEUR is
- * 2 and INFECT is 1, so ">" on the constants puts them the wrong way round.
- */
-static const char *level_attr(uint32_t level)
-{
-	if (level == KOF_LEVEL_INFECT)
-		return A_BAD;
-	return level == KOF_LEVEL_HEUR ? A_HEUR : A_WARN;
-}
-
-/* The strongest thing anything said about this object, for the summary line. */
-static const char *worst_attr(const struct object *ob)
-{
-	uint32_t i, worst = 0;
-	int have = 0;
-
-	for (i = 0; i < ob->n_touch; i++)
-		if (ob->touch[i].fired &&
-		    (!have || kverdict_level_rank(ob->touch[i].fired_level) >
-			      kverdict_level_rank(worst))) {
-			worst = ob->touch[i].fired_level;
-			have = 1;
-		}
-	return have ? level_attr(worst) : A_BAD;
-}
-
-/*
  * The dashboard for one event: where it came from, and what it says.
  *
  * The field rows are the SAME ones the panel shows, from kof_evt_field, for the
@@ -1602,13 +1573,12 @@ void prop_build(struct view *v)
 	 *
 	 * It reads every byte of the object. Worked out when an object was
 	 * merely SELECTED, it faulted a spilled view into memory in full to
-	 * fill one row of a pane that may be closed - see the note in
-	 * object_touch. draw_prop reaches this only when the pane is open, and
+	 * fill one row of a pane that may be closed. draw_prop reaches this only when the pane is open, and
 	 * the object caches it, so it is still computed once.
 	 */
 	obj_sha256(ob);
 	const char *base = kof_path_sep_last(ob->name);
-	uint32_t i, hit = 0;
+	uint32_t i;
 	uint64_t total = 0;
 
 	g_n_prop = 0;
@@ -1848,7 +1818,7 @@ no_regions:
 	}
 
 	/*
-	 * WHAT THE HEURISTIC WOULD SAY, SHOWN BESIDE WHAT THE SIGNATURES SAID.
+	 * WHAT THE HEURISTIC WOULD SAY.
 	 *
 	 * Scored here rather than read back from a scan, because the scan the
 	 * viewer ran may have had the heuristic switched off - and a page that
@@ -1870,19 +1840,46 @@ no_regions:
 	 * code is hidden" beside "the file is truncated" as though they were
 	 * two readings of one measurement.
 	 */
-	if (ob->packer[0] || emu_why_tag(ob->emu_why)) {
+	/*
+	 * EVERY MODULE THE CHAIN WENT THROUGH, NOT ONLY THE LAST.
+	 *
+	 * `packer` is one object's own opener or producer, so a payload under
+	 * MPRESS, then VMProtect, then a string decryptor said the last of them
+	 * and nothing of the two that had to come off first. The enclosing
+	 * objects are the same list the chain above is drawn from (obj_ancestors),
+	 * outermost first; a name is dropped when the line before it said it
+	 * already, because the file's "opened by" and its child's "unpacked by"
+	 * are the two ends of one edge (see the note at prop_object_rows).
+	 */
+	const struct object *up[MAX_OBJ];
+	const char *step[MAX_OBJ + 1u];
+	uint32_t n_up = obj_ancestors(v, ob, up, MAX_OBJ), n_step = 0, ks;
+
+	for (ks = 0; ks <= n_up; ks++) {
+		const char *name = ks < n_up ? up[ks]->packer : ob->packer;
+
+		if (name[0] && !(n_step && strcmp(step[n_step - 1u], name) == 0))
+			step[n_step++] = name;
+	}
+	if (n_step || emu_why_tag(ob->emu_why)) {
 		prop_head("Packer");
-		if (ob->packer[0])
-			prop_add("  %-11s " A_BAD "%s" A_OFF,
-				 "unpacker", ob->packer);
-		else
+		for (ks = 0; ks < n_step; ks++) {
+			char lab[16];
+
+			if (n_step > 1u)
+				snprintf(lab, sizeof lab, "module %u", ks + 1u);
+			else
+				snprintf(lab, sizeof lab, "module");
+			prop_add("  %-11s " A_BAD "%s" A_OFF, lab, step[ks]);
+		}
+		if (!n_step)
 			prop_add("  %-11s %s%s" A_OFF A_DIM "  %s" A_OFF,
 				 "verdict",
 				 ob->emu_why == KGENOME_EMU_UNP_WHY_DENSE
 				 ? A_BAD : A_WARN,
 				 emu_why_tag(ob->emu_why),
 				 emu_why_reason(ob->emu_why));
-		if (!ob->packer[0])
+		if (!n_step)
 			prop_add(A_DIM "  %-11s Analysis > Examine with "
 				 "emulator" A_OFF, "try");
 	}
@@ -1925,32 +1922,5 @@ no_regions:
 						 hm->flag[k].centinats,
 						 hm->flag[k].guess);
 		}
-	}
-
-	prop_head("Signatures");
-	for (i = 0; i < ob->n_touch; i++)
-		hit += (uint32_t)(ob->touch[i].fired != 0);
-	/*
-	 * "matched" and "skipped", not "fired" and "did not".
-	 *
-	 * The old pair said what happened to the MODULE; these say what happened
-	 * to the object, which is what a reader of this page is asking. "did not"
-	 * was worse still - it ended mid-sentence and left the reader to guess
-	 * whether the module ran and declined, or never ran at all.
-	 */
-	prop_add("  %s%u" A_OFF A_DIM " matched, " A_OFF A_SIZE "%u"
-		 A_OFF A_DIM " skipped" A_OFF, hit ? worst_attr(ob) : A_SIZE,
-		 hit, ob->n_touch - hit);
-	for (i = 0; i < ob->n_touch; i++) {
-		const struct kof_touch *t = &ob->touch[i];
-		char name[80], head[24];
-
-		kof_touch_name(t, name, sizeof name);
-		touch_head(t, head, sizeof head);
-		prop_add("  %s%-44s" A_OFF A_SIZE "%-10s" A_OFF A_WARN
-			 "%s" A_OFF, t->fired ? level_attr(t->fired_level)
-					      : A_ID, name, head,
-			 t->kind == KOF_TOUCH_INELIGIBLE && t->ruled_out
-			 ? t->ruled_out : "");
 	}
 }

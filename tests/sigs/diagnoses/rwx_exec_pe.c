@@ -13,7 +13,7 @@
  * and route-equivalence tests (tests/unit/view_equiv.c, flag_readers.c) can put
  * one payload through an ELF and a PE and compare what comes out. The disease
  * is the same one - exec/rwx-region - on purpose: it is the same behaviour, and
- * the syndrome that reads it must not care which format showed it.
+ * the verdict made of it must not care which format showed it.
  */
 
 KOF_DIAG_NAME(rwx_exec_pe);

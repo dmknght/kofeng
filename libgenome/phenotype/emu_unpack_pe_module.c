@@ -43,74 +43,98 @@
 /*
  * THE EXPORT DIRECTORY LIVES IN A SECTION, which is not decoration.
  *
- * It was at rva 0x200 - inside the headers, below SizeOfHeaders, and covered
- * by no section header. In a loaded image an RVA is an offset so a naive
- * walker still finds it, and a careful one does not: a resolver that converts
- * the directory's RVA through the section table, the way it would for a file
- * on disk, finds nothing there. A real DLL keeps its exports in .rdata, so
- * this does too, on the page after the stubs and aligned like everything else.
+ * A real DLL keeps its exports in .rdata and a resolver that converts the directory's RVA through the section
+ * table, the way it would for a file on disk, finds nothing for an RVA inside the headers. So the directory is
+ * after the stubs, page aligned, inside the one section the header declares.
+ *
+ * THE STUBS COME FIRST AND ARE ONE TABLE. A module's functions are the ones win_api[] models, in that order,
+ * and then the names emu_win_names.c lists with no model, in theirs: one array of names, one array of stubs,
+ * so a name has exactly one address whether it is found by GetProcAddress, by an import thunk or by a
+ * resolver walking the directory (rule 10 of CLAUDE.md: a second list of names would be a second answer).
+ *
+ * THE IMAGE IS AS BIG AS ITS NAMES. It was sixteen pages because the table was eighty names; a library with
+ * a thousand needs its stubs, its three arrays and its strings, and a guest reads around all of them
+ * (a loader reads far past the header; see the zero fill of the rest of SPAN below).
  */
 #define K32_STUB_RVA   0x1000u
-#define K32_EXPORT_RVA 0x2000u
-/*
- * SIXTEEN PAGES AND NOT THE TWO THIS FILLS. A loader that has the base reads
- * around it - section headers, a directory it does not find, a checksum over a
- * range the header declares - and every one of those reads is against an image
- * it believes is megabytes long. Measured: one sample faulted reading
- * base+0xdc97, which is past two pages and inside nothing. The extra fourteen
- * are zeroes, which is what a read of an unwritten part of a real image would
- * find often enough; the point is that it is a read and not a fault.
- */
-#define K32_PAGES      16u
+
+struct exp_ent {
+	const char *name;
+	unsigned    mod_idx;        /* index into win_api for a modelled name, else ~0u */
+	unsigned    flat;           /* first of export-only numbering + position, for the trap number */
+	uint8_t     argc;
+};
+
+static int exp_cmp(const void *x, const void *y)
+{
+	return strcmp(((const struct exp_ent *)x)->name, ((const struct exp_ent *)y)->name);
+}
 
 int kgenome_emu_unp_build_module_pe(struct kgenome_emu *e, unsigned bits, unsigned mi)
 {
-	uint8_t img[K32_PAGES * KGENOME_EMU_PAGE];
 	uint64_t base = kgenome_emu_win_mod_base(mi, bits);
 	unsigned all = kgenome_emu_win_api_count();
-	unsigned mine[KGENOME_EMU_UNP_K32_MAX_EXPORTS], n = 0;
-	unsigned ord[KGENOME_EMU_UNP_K32_MAX_EXPORTS];
-	uint32_t name_rva[KGENOME_EMU_UNP_K32_MAX_EXPORTS];
-	uint8_t *ex, *fns, *nms, *ords, *strs, *stub;
+	/* kernelbase exports what kernel32 does, and has an image of its own so that a guest which patches one
+	 * does not touch the other; only the LIST is shared. */
+	const unsigned src = mi == KGENOME_EMU_WIN_MOD_KBASE ? KGENOME_EMU_WIN_MOD_K32 : mi;
+	const struct kgenome_emu_win_name *xnames = NULL;
+	unsigned xfirst = 0, nx, n = 0, nm = 0, i, j, pe, opt, ex_rva, str_rva_end;
+	struct exp_ent *ent = NULL, *sorted = NULL;
+	uint8_t *img = NULL, *ex, *fns, *nms, *ords, *strs;
+	size_t img_len;
+	uint32_t *name_rva = NULL;
 	uint32_t str_rva;
-	unsigned i, j, opt, pe;
+	int ok = 0;
 
 	if (!base)
 		return 0;
-	/* The functions this module owns, in the order the table lists them -
-	 * which is the order kgenome_emu_win_api_slot counts in, so the n-th here
-	 * is the n-th stub there. */
-	{
-		/*
-		 * KERNELBASE EXPORTS WHAT KERNEL32 DOES, which is the truth
-		 * about it: a modern kernel32 is mostly forwarders into
-		 * kernelbase, so a resolver that goes looking there for a
-		 * kernel32 name is right to. It has its own image - see
-		 * KGENOME_EMU_WIN_MOD_KBASE - so a guest that patches one does not
-		 * touch the other; only the LIST is shared.
-		 */
-		unsigned src = mi == KGENOME_EMU_WIN_MOD_KBASE
-			     ? KGENOME_EMU_WIN_MOD_K32 : mi;
-
-		for (i = 0; i < all && n < KGENOME_EMU_UNP_K32_MAX_EXPORTS; i++)
-			if (kgenome_emu_win_api_mod(i) == src)
-				mine[n++] = i;
+	nx = kgenome_emu_win_export_names(src, &xnames, &xfirst);
+	for (i = 0; i < all; i++)
+		if (kgenome_emu_win_api_mod(i) == src)
+			nm++;
+	n = nm + nx;
+	/* The names plus the headroom of the stubs must leave room in the image the header declares. */
+	if ((uint64_t)K32_STUB_RVA + (uint64_t)n * KGENOME_EMU_WIN_STUB + 0x1000u >= KGENOME_EMU_UNP_K32_SPAN)
+		return 0;
+	/* a library with no names (msvcrt here) still has an image: n + 1 keeps the allocations non-empty */
+	ent = calloc((size_t)n + 1u, sizeof *ent);
+	sorted = calloc((size_t)n + 1u, sizeof *sorted);
+	name_rva = calloc((size_t)n + 1u, sizeof *name_rva);
+	if (!ent || !sorted || !name_rva)
+		goto out;
+	/* The modelled functions in the order kgenome_emu_win_api_slot counts in, so the n-th here is the
+	 * n-th stub there. */
+	for (i = 0, j = 0; i < all; i++)
+		if (kgenome_emu_win_api_mod(i) == src) {
+			ent[j].name = kgenome_emu_win_api_name(i);
+			ent[j].mod_idx = i;
+			ent[j].argc = (uint8_t)kgenome_emu_win_api_argc(i);
+			j++;
+		}
+	for (i = 0; i < nx; i++, j++) {
+		ent[j].name = xnames[i].name;
+		ent[j].mod_idx = ~0u;
+		ent[j].flat = xfirst + i;
+		ent[j].argc = xnames[i].argc;
 	}
-	/*
-	 * A CAP THAT BITES IS A MISSING EXPORT, and a missing export is
-	 * invisible from the outside: kgenome_emu_win_addr_of searches the whole
-	 * table, so GetProcAddress still answers for a name past the cap and
-	 * only a guest WALKING the directory ever notices. Measured, that is
-	 * what an MPRESS stub does, and with the cap at 64 against 81 kernel32
-	 * entries its search ran off the end of the list and resolved to zero.
-	 */
-	if (n == KGENOME_EMU_UNP_K32_MAX_EXPORTS)
-		KOF_TRACE("[mod] %s: export list capped at %u\n",
-			kgenome_emu_win_mod_name(mi), n);
-	memset(img, 0, sizeof img);
+	/* The export directory goes after the last stub, on a page of its own. */
+	ex_rva = (K32_STUB_RVA + n * KGENOME_EMU_WIN_STUB + KGENOME_EMU_PAGE - 1u) & ~(KGENOME_EMU_PAGE - 1u);
+	{
+		size_t strsz = strlen(kgenome_emu_win_mod_name(mi)) + 1u;
+
+		for (i = 0; i < n; i++)
+			strsz += strlen(ent[i].name) + 1u;
+		img_len = (size_t)ex_rva + 40u + 10u * n + strsz;
+		img_len = (img_len + KGENOME_EMU_PAGE - 1u) & ~(size_t)(KGENOME_EMU_PAGE - 1u);
+	}
+	if (img_len >= KGENOME_EMU_UNP_K32_SPAN)
+		goto out;
+	img = calloc(1, img_len);
+	if (!img)
+		goto out;
 
 	/* ---- the export arrays, and the strings they point at ---- */
-	ex   = img + K32_EXPORT_RVA;
+	ex   = img + ex_rva;
 	fns  = ex + 40u;                       /* AddressOfFunctions */
 	nms  = fns + 4u * n;                   /* AddressOfNames */
 	ords = nms + 4u * n;                   /* AddressOfNameOrdinals */
@@ -127,36 +151,26 @@ int kgenome_emu_unp_build_module_pe(struct kgenome_emu *e, unsigned bits, unsign
 		strs += len;
 		str_rva += len;
 	}
-
 	for (i = 0; i < n; i++) {
-		const char *nm = kgenome_emu_win_api_name(mine[i]);
-		unsigned len = (unsigned)strlen(nm) + 1u;
+		unsigned len = (unsigned)strlen(ent[i].name) + 1u;
 
-		memcpy(strs, nm, len);
+		memcpy(strs, ent[i].name, len);
 		name_rva[i] = str_rva;
 		strs += len;
 		str_rva += len;
-		kof_st_le32(fns + 4u * i,
-		      (uint32_t)(K32_STUB_RVA + i * KGENOME_EMU_WIN_STUB));
-		ord[i] = i;
+		kof_st_le32(fns + 4u * i, (uint32_t)(K32_STUB_RVA + i * KGENOME_EMU_WIN_STUB));
+		sorted[i] = ent[i];
+		sorted[i].mod_idx = i;          /* the ordinal: where its stub is */
 	}
+	str_rva_end = str_rva;
 
-	/* Sort the NAME array - the function array stays in ordinal order and
-	 * the ordinal array is what ties the two together. */
-	for (i = 1; i < n; i++) {
-		unsigned k = ord[i];
-
-		for (j = i; j > 0 &&
-		     strcmp(kgenome_emu_win_api_name(mine[ord[j - 1]]),
-			    kgenome_emu_win_api_name(mine[k])) > 0; j--)
-			ord[j] = ord[j - 1];
-		ord[j] = k;
-	}
+	/* The NAME array is sorted - a resolver may binary search it - while the function array stays in
+	 * ordinal order and the ordinal array ties the two together. */
+	qsort(sorted, n, sizeof *sorted, exp_cmp);
 	for (i = 0; i < n; i++) {
-		kof_st_le32(nms + 4u * i, name_rva[ord[i]]);
-		kof_st_le16(ords + 2u * i, (uint16_t)ord[i]);
+		kof_st_le32(nms + 4u * i, name_rva[sorted[i].mod_idx]);
+		kof_st_le16(ords + 2u * i, (uint16_t)sorted[i].mod_idx);
 	}
-
 	kof_st_le32(ex + 16u, 1u);                    /* Base: ordinals start at 1 */
 	kof_st_le32(ex + 20u, n);                     /* NumberOfFunctions */
 	kof_st_le32(ex + 24u, n);                     /* NumberOfNames */
@@ -165,13 +179,19 @@ int kgenome_emu_unp_build_module_pe(struct kgenome_emu *e, unsigned bits, unsign
 	kof_st_le32(ex + 36u, (uint32_t)(ords - img));
 
 	/* ---- the stubs ---- */
-	stub = img + K32_STUB_RVA;
 	for (i = 0; i < n; i++) {
-		uint8_t *p = stub + i * KGENOME_EMU_WIN_STUB;
-		unsigned argc = kgenome_emu_win_api_argc(mine[i]);
+		uint8_t *p = img + K32_STUB_RVA + i * KGENOME_EMU_WIN_STUB;
+		unsigned argc = ent[i].argc;
+		uint32_t trap = ent[i].mod_idx == ~0u
+			? kgenome_emu_win_export_trap(ent[i].flat)
+			: kgenome_emu_win_api_trap(ent[i].mod_idx);
 
+		/* An export-only name of unknown stdcall count returns with no cleanup; its call says so (see
+		 * kgenome_emu_unmodelled_guessed) rather than pretending the stack came back right. */
+		if (argc == KGENOME_EMU_WIN_ARGC_UNKNOWN)
+			argc = 0;
 		p[0] = 0xb8;                            /* mov eax, imm32 */
-		kof_st_le32(p + 1, kgenome_emu_win_api_trap(mine[i]));
+		kof_st_le32(p + 1, trap);
 		if (bits == 32u) {
 			p[5] = 0xcd; p[6] = 0x80;       /* int 0x80 */
 			if (argc) {
@@ -216,15 +236,14 @@ int kgenome_emu_unp_build_module_pe(struct kgenome_emu *e, unsigned bits, unsign
 		kof_st_le32(o + 36u, 0x200u);                         /* FileAlignment */
 		kof_st_le32(o + 56u, KGENOME_EMU_UNP_K32_SPAN);                       /* SizeOfImage */
 		kof_st_le32(o + 60u, KGENOME_EMU_PAGE);                   /* SizeOfHeaders */
-		kof_st_le32(o + dd, K32_EXPORT_RVA);
-		kof_st_le32(o + dd + 4u, (uint32_t)(str_rva - K32_EXPORT_RVA));
+		kof_st_le32(o + dd, ex_rva);
+		kof_st_le32(o + dd + 4u, str_rva_end - ex_rva);
 
 		{
 			uint8_t *sec = o + opt;
 
-			/* One section from the stubs to the end of the image,
-			 * so both the code and the export directory are inside
-			 * something the section table accounts for. */
+			/* One section from the stubs to the end of the image, so both the code and the export
+			 * directory are inside something the section table accounts for. */
 			memcpy(sec, ".text", 6u);
 			kof_st_le32(sec + 8u, KGENOME_EMU_UNP_K32_SPAN - K32_STUB_RVA);
 			kof_st_le32(sec + 12u, K32_STUB_RVA);         /* VirtualAddress */
@@ -235,31 +254,34 @@ int kgenome_emu_unp_build_module_pe(struct kgenome_emu *e, unsigned bits, unsign
 	}
 
 	/*
-	 * THE HEADER IS NOT EXECUTABLE, and mapping it as if it were costs a
-	 * whole run.
-	 *
-	 * A guest that walks this export directory for a name kernel32 really
-	 * exports but this table does not gets 0 back, adds it to the base and
-	 * calls the module's own MZ header. Under one R|X mapping that is not
-	 * an error: the zeroes decode as `add [rax],al` and the run marches
-	 * forward two bytes at a time until something faults. Measured on an
-	 * MPRESS sample, that was 310701 instructions ending in a fault at an
-	 * address built out of header bytes, which says nothing about what went
-	 * wrong.
-	 *
-	 * Windows maps a module's headers read-only, so doing the same turns it
-	 * into an immediate fault AT THE BASE - which names the module and says
-	 * the miss was an export lookup. The cost is one extra mapping and
-	 * nothing per instruction.
+	 * THE HEADER IS NOT EXECUTABLE, and mapping it as if it were costs a whole run: a guest that walks this
+	 * export directory for a name that is not here gets 0 back, adds it to the base and calls the module's own
+	 * MZ header; under one R|X mapping the zeroes decode as `add [rax],al` and the run marches on until
+	 * something faults far away (measured, 310701 instructions). Windows maps headers read-only, so this is
+	 * an immediate fault AT THE BASE, which names the module.
 	 */
 	if (!kgenome_emu_map(e, base, img, K32_STUB_RVA, K32_STUB_RVA, KGENOME_EMU_R))
-		return 0;
+		goto out;
+	/*
+	 * A library nobody has loaded yet is mapped as big as its names and no bigger. The resident ones keep the
+	 * whole span (a loader probes how far an image runs by VirtualAlloc'ing past it); mscoree is there for the one
+	 * program in a thousand that asks for it, and a megabyte of private pages for it on every run was
+	 * measured to push a small object over its memory allowance (two plain x64 files read "limit reached").
+	 */
 	if (!kgenome_emu_map(e, base + K32_STUB_RVA, img + K32_STUB_RVA,
-			 sizeof img - K32_STUB_RVA, KGENOME_EMU_UNP_K32_SPAN - K32_STUB_RVA,
+			 img_len - K32_STUB_RVA,
+			 mi >= KGENOME_EMU_WIN_MOD_RESIDENT ? img_len - K32_STUB_RVA
+							    : KGENOME_EMU_UNP_K32_SPAN - K32_STUB_RVA,
 			 KGENOME_EMU_R | KGENOME_EMU_X))
-		return 0;
+		goto out;
 	kgenome_emu_win_set_module(e, mi, base);
-	return 1;
+	ok = 1;
+out:
+	free(img);
+	free(ent);
+	free(sorted);
+	free(name_rva);
+	return ok;
 }
 
 /*

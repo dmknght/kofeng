@@ -47,6 +47,270 @@
 
 #include "diag_wrapper_private.h"
 
+
+/*
+ * ---- THE LEVELS, AS A WORKLIST -------------------------------------------------------------------
+ *
+ * A level adds the functions whose straight line ends in a call to a wrapper found by the one before.
+ * It was a pass over EVERY call target per level, each asking "could this function come out differently
+ * now" (kgenome_diag_wrapper_tseen_retry): a chain of D functions that each call the next, laid out in
+ * ascending address order, finds one function per pass, so D passes of D questions - D*D, charged to the
+ * step budget a pass at a time, which a chain of 2000 spent whole: the answer was lost (OVER_BUDGET, no
+ * node) for a program of twelve kilobytes. MEASURED: 31,376 / 125,251 / 500,501 questions at depth 250 /
+ * 500 / 1000 (tests/lib/genome/diag_graph_bin.c counts them).
+ *
+ * The question can only come out differently for a function when one of the targets ITS WALK MET has since
+ * become a wrapper (that is what tseen records), so a function is asked again exactly then: every function
+ * records who met it (`dep`, a list per target), and a wrapper that is added puts the functions that met it on
+ * the worklist. The ORDER is the old one, so the answers are the same: a level visits its functions in
+ * ascending address order, a function that meets a wrapper added EARLIER IN THE SAME LEVEL is asked in this
+ * level (it is further on in the order), one that met a wrapper added after its turn is asked in the next.
+ * The first level is still a pass over every target (nothing has been asked yet); a function that met more
+ * targets than a record holds (`more`) is asked again every level that follows an addition, as before.
+ *
+ * What bounds it is what bounded it: the step budget (kgenome_budget.max_steps), charged one step a function
+ * asked, and a level that cannot be paid for says KGENOME_OVER_BUDGET.
+ */
+struct wl_edge {
+	uint32_t who;
+	int32_t  next;
+};
+
+struct wl {
+	int32_t  *head;                 /* per target: its first dependent edge, -1 for none */
+	struct wl_edge *edge;
+	uint32_t n_edge, cap_edge;
+	uint32_t *heap;                 /* this level's targets, a min-heap by index */
+	uint32_t n_heap;
+	uint32_t *next;                 /* the next level's, unordered, once each */
+	uint32_t n_next;
+	uint32_t *more;                 /* targets that met more than a record holds */
+	uint32_t n_more;
+	uint8_t  *flag;                 /* per target: WL_HEAP, WL_NEXT, WL_MORE */
+};
+#define WL_HEAP 1u
+#define WL_NEXT 2u
+#define WL_MORE 4u
+
+static void wl_free(struct wl *l)
+{
+	free(l->head);
+	free(l->edge);
+	free(l->heap);
+	free(l->next);
+	free(l->more);
+	free(l->flag);
+	memset(l, 0, sizeof *l);
+}
+
+static int wl_init(struct kgenome_diag_wrapper_ctx *c, struct wl *l)
+{
+	const uint32_t n = c->wk->n_tgt;
+	uint32_t i;
+
+	if (!kgenome_diag_wrapper_charge(c, (uint64_t)n * (sizeof *l->head + 3u * sizeof *l->heap + sizeof *l->flag)))
+		return 0;
+	l->head = malloc((size_t)n * sizeof *l->head);
+	l->heap = malloc((size_t)n * sizeof *l->heap);
+	l->next = malloc((size_t)n * sizeof *l->next);
+	l->more = malloc((size_t)n * sizeof *l->more);
+	l->flag = calloc(n, sizeof *l->flag);
+	if (!l->head || !l->heap || !l->next || !l->more || !l->flag) {
+		kgenome_diag_note(c->s, KGENOME_NOMEM);
+		wl_free(l);
+		return 0;
+	}
+	for (i = 0; i < n; i++)
+		l->head[i] = -1;
+	return 1;
+}
+
+static void heap_push(uint32_t *h, uint32_t *n, uint32_t v)
+{
+	uint32_t i = (*n)++;
+
+	while (i && h[(i - 1u) / 2u] > v) {
+		h[i] = h[(i - 1u) / 2u];
+		i = (i - 1u) / 2u;
+	}
+	h[i] = v;
+}
+
+static uint32_t heap_pop(uint32_t *h, uint32_t *n)
+{
+	const uint32_t top = h[0], last = h[--(*n)];
+	uint32_t i = 0;
+
+	for (;;) {
+		uint32_t c = 2u * i + 1u;
+
+		if (c >= *n)
+			break;
+		if (c + 1u < *n && h[c + 1u] < h[c])
+			c++;
+		if (h[c] >= last)
+			break;
+		h[i] = h[c];
+		i = c;
+	}
+	if (*n)
+		h[i] = last;
+	return top;
+}
+
+/* function `who` met target `callee` and it was not a wrapper: ask `who` again when it becomes one */
+static int wl_depend(struct kgenome_diag_wrapper_ctx *c, struct wl *l, uint32_t callee, uint32_t who)
+{
+	if (l->n_edge == l->cap_edge) {
+		uint32_t nc = l->cap_edge ? l->cap_edge * 2u : 256u;
+		struct wl_edge *ne;
+
+		if (!kgenome_diag_wrapper_charge(c, (uint64_t)(nc - l->cap_edge) * sizeof *ne))
+			return 0;
+		ne = realloc(l->edge, (size_t)nc * sizeof *ne);
+		if (!ne) {
+			kgenome_diag_note(c->s, KGENOME_NOMEM);
+			return 0;
+		}
+		l->edge = ne;
+		l->cap_edge = nc;
+	}
+	l->edge[l->n_edge].who = who;
+	l->edge[l->n_edge].next = l->head[callee];
+	l->head[callee] = (int32_t)l->n_edge++;
+	return 1;
+}
+
+/* After an attempt at target `i`: who it met, and whether it met too many to record. 0: an edge could not be kept. */
+static int wl_record(struct kgenome_diag_wrapper_ctx *c, struct wl *l, uint32_t i)
+{
+	const struct kgenome_diag_wrapper_tseen *t = &c->tseen[i];
+	uint8_t k;
+
+	for (k = 0; k < t->n; k++) {
+		int ti = kgenome_diag_wrapper_tgt_index(c, t->cal[k]);
+
+		if (ti >= 0 && !wl_depend(c, l, (uint32_t)ti, i))
+			return 0;
+	}
+	if (t->more && !(l->flag[i] & WL_MORE)) {
+		l->flag[i] = (uint8_t)(l->flag[i] | WL_MORE);
+		l->more[l->n_more++] = i;
+	}
+	return 1;
+}
+
+/* target `i` became a wrapper: the functions that met it are asked, in this level when they are further on */
+static void wl_notify(struct wl *l, uint32_t i)
+{
+	int32_t e;
+
+	for (e = l->head[i]; e >= 0; e = l->edge[e].next) {
+		const uint32_t j = l->edge[e].who;
+
+		if (l->flag[j] & (WL_HEAP | WL_NEXT))
+			continue;
+		if (j > i) {
+			l->flag[j] = (uint8_t)(l->flag[j] | WL_HEAP);
+			heap_push(l->heap, &l->n_heap, j);
+		} else {
+			l->flag[j] = (uint8_t)(l->flag[j] | WL_NEXT);
+			l->next[l->n_next++] = j;
+		}
+	}
+}
+
+/* One function asked: 1 when it became a wrapper. */
+static int wl_attempt(struct kgenome_diag_wrapper_ctx *c, struct wl *l, uint32_t i, uint32_t *added)
+{
+	struct kgenome_diag_wrapper_summary *t;
+	unsigned nt, v;
+	int got = 0;
+
+	if (kgenome_diag_wrapper_summary_of(c, c->wk->tgt[i]) || !kgenome_diag_wrapper_tseen_retry(c, &c->tseen[i]))
+		return 0;
+	nt = kgenome_diag_wrapper_summarise(c, c->wk->tgt[i], &c->tseen[i], 0);
+	t = c->var;
+	for (v = 0; v < nt; v++) {
+		if (!kgenome_diag_wrapper_summary_insert(c, &t[v]))
+			break;
+		(*added)++;
+		got = 1;
+	}
+	if (!wl_record(c, l, i))
+		c->over_steps = 1;              /* an edge could not be kept: the ledger or memory has said so */
+	return got;
+}
+
+static void wl_levels(struct kgenome_diag_wrapper_ctx *c)
+{
+	struct kgenome_diag_scan *s = c->s;
+	struct wl l;
+	uint32_t i, added, k;
+
+	memset(&l, 0, sizeof l);
+	if (!wl_init(c, &l))
+		return;
+	/* what the first level (the functions that hold a site) already met */
+	for (i = 0; i < c->wk->n_tgt; i++)
+		if (c->tseen[i].done && !wl_record(c, &l, i))
+			goto out;
+	/* LEVEL ONE: every target, in order - nothing has been asked yet */
+	if (s->bud.max_steps && c->steps + c->wk->n_tgt > s->bud.max_steps) {
+		kgenome_diag_note(s, KGENOME_OVER_BUDGET);
+		goto out;
+	}
+	c->steps += c->wk->n_tgt;
+	added = 0;
+	for (i = 0; i < c->wk->n_tgt; i++) {
+		/* this pass reaches every j > i by itself: the heap is for the levels after it */
+		l.flag[i] = (uint8_t)(l.flag[i] & ~WL_HEAP);
+		if (wl_attempt(c, &l, i, &added))
+			wl_notify(&l, i);
+		l.n_heap = 0;
+	}
+	for (i = 0; i < c->wk->n_tgt; i++)
+		l.flag[i] = (uint8_t)(l.flag[i] & ~WL_HEAP);
+	/* LATER LEVELS: what the additions of the one before reach, and the targets that met too many to record */
+	while (added && !c->over_steps) {
+		uint32_t n_cand;
+
+		added = 0;
+		for (k = 0; k < l.n_more; k++)
+			if (!(l.flag[l.more[k]] & WL_NEXT) && !kgenome_diag_wrapper_summary_of(c, c->wk->tgt[l.more[k]])) {
+				l.flag[l.more[k]] = (uint8_t)(l.flag[l.more[k]] | WL_NEXT);
+				l.next[l.n_next++] = l.more[k];
+			}
+		n_cand = l.n_next;
+		if (!n_cand)
+			break;
+		if (s->bud.max_steps && c->steps + n_cand > s->bud.max_steps) {
+			/* another level cannot be paid for: whatever it would have added was never looked for */
+			kgenome_diag_note(s, KGENOME_OVER_BUDGET);
+			break;
+		}
+		c->steps += n_cand;
+		/* this level is what was queued; the additions of THIS level reach further functions of it */
+		for (k = 0; k < l.n_next; k++) {
+			l.flag[l.next[k]] = (uint8_t)((l.flag[l.next[k]] & ~WL_NEXT) | WL_HEAP);
+			heap_push(l.heap, &l.n_heap, l.next[k]);
+		}
+		l.n_next = 0;
+		while (l.n_heap && !c->over_steps) {
+			i = heap_pop(l.heap, &l.n_heap);
+			l.flag[i] = (uint8_t)(l.flag[i] & ~WL_HEAP);
+			if (wl_attempt(c, &l, i, &added))
+				wl_notify(&l, i);
+			if (s->bud.max_steps && ++c->steps > s->bud.max_steps) {
+				c->over_steps = 1;
+				kgenome_diag_note(s, KGENOME_OVER_BUDGET);
+			}
+		}
+	}
+out:
+	wl_free(&l);
+}
+
 void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s,
 			   const struct kgenome_obj *obj,
 			   const uint8_t *base, uint64_t size)
@@ -164,37 +428,8 @@ void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s,
 		for (v = 0; v < nt; v++)
 			(void)kgenome_diag_wrapper_summary_insert(&c, &t[v]);
 	}
-	if (c.n_ws) {
-		uint32_t added = 0;
-
-		/* TO A FIXPOINT, bounded by the step budget: see the note on levels. */
-		for (;;) {
-			added = 0;
-			if (s->bud.max_steps && c.steps + wk->n_tgt > s->bud.max_steps) {
-				/* another pass cannot be paid for: whatever it would have added
-				 * was never looked for, and the scan says so. */
-				kgenome_diag_note(s, KGENOME_OVER_BUDGET);
-				break;
-			}
-			c.steps += wk->n_tgt;
-			for (i = 0; i < wk->n_tgt; i++) {
-				struct kgenome_diag_wrapper_summary *t;
-				unsigned nt, v;
-
-				if (kgenome_diag_wrapper_summary_of(&c, wk->tgt[i]) || !kgenome_diag_wrapper_tseen_retry(&c, &c.tseen[i]))
-					continue;
-				nt = kgenome_diag_wrapper_summarise(&c, wk->tgt[i], &c.tseen[i], 0);
-				t = c.var;
-				for (v = 0; v < nt; v++) {
-					if (!kgenome_diag_wrapper_summary_insert(&c, &t[v]))
-						break;
-					added++;
-				}
-			}
-			if (!added || c.over_steps)
-				break;
-		}
-	}
+	if (c.n_ws)
+		wl_levels(&c);
 	if (!c.n_ws)
 		goto opaque;
 	/*

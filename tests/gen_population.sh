@@ -65,7 +65,7 @@ for i in $(seq 1 "$count"); do
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	if (kof_find_str(all, m))"
-			echo "		KOF_SCAN_INFECT(\"Any$i\");"
+			echo "		kof_debug(\"Any$i#0\", 0);"
 			echo "}"
 		elif [ "$bucket" -ge 15 ]; then
 			# Size-constrained: the precondition the host can act on.
@@ -79,7 +79,7 @@ for i in $(seq 1 "$count"); do
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	if (kof_find_str(d, m))"
-			echo "		KOF_SCAN_INFECT(\"Sized$i\");"
+			echo "		kof_debug(\"Sized$i#0\", 0);"
 			echo "}"
 		elif [ "$bucket" -ge 12 ]; then
 			# Scalar only: no search, so nothing to skip it by region.
@@ -90,7 +90,7 @@ for i in $(seq 1 "$count"); do
 			echo "{"
 			echo "	const struct kof_elf_info *e = kof_elf(ctx);"
 			echo "	if (e->e_machine == $(( i % 200 )) && e->seg_count == $(( i % 9 )))"
-			echo "		KOF_SCAN_SUSPECT(\"Struct$i\");"
+			echo "		kof_debug(\"Struct$i#0\", 0);"
 			echo "}"
 		elif [ "$bucket" -ge 8 ]; then
 			# Sections that are never loaded: absent on stripped objects, which is
@@ -103,7 +103,7 @@ for i in $(seq 1 "$count"); do
 			echo "KOF_DEFINE_SCAN"
 			echo "{"
 			echo "	if (kof_find_str(nl, m))"
-			echo "		KOF_SCAN_INFECT(\"NoLoad$i\");"
+			echo "		kof_debug(\"NoLoad$i#0\", 0);"
 			echo "}"
 		else
 			# The common case: two searches over loaded content.
@@ -118,7 +118,7 @@ for i in $(seq 1 "$count"); do
 			echo "{"
 			echo "	if (kof_find_str(loaded, a)) {"
 			echo "		if (kof_find_str(d, b))"
-			echo "			KOF_SCAN_INFECT(\"Pair$i\");"
+			echo "			kof_debug(\"Pair$i#0\", 0);"
 			echo "	}"
 			echo "}"
 		fi

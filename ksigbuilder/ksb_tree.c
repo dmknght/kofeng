@@ -469,8 +469,15 @@ static int tree_collect(const char *base, char (**srcs)[TREE_SRC_MAX],
 			 * not have. They are built below, by name, into a
 			 * file of their own.
 			 */
-			if (strcmp(e->d_name, "diagnoses") == 0 ||
-			    strcmp(e->d_name, "syndromes") == 0)
+			if (strcmp(e->d_name, "diagnoses") == 0)
+				continue;
+			/*
+			 * AND THE TAG SOURCES ARE DATA, not modules: files of
+			 * declarations the tools read (databases/tagsrc.h),
+			 * which no pack carries. Walked as modules they would
+			 * be compiled, and refused for naming no target.
+			 */
+			if (strcmp(e->d_name, "syndromes") == 0)
 				continue;
 			sd = opendir(path);
 			if (!sd)
@@ -510,7 +517,7 @@ static int tree_collect(const char *base, char (**srcs)[TREE_SRC_MAX],
  * database directory, which made the database a pack plus however many
  * loose files a build happened to produce.
  *
- * Zero, or the exit code; the syndromes are built here too.
+ * Zero, or the exit code.
  */
 static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
 			  const char *artefacts, const char *db)
@@ -572,8 +579,6 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
 		closedir(dd);
 	if (!ksb_write_diag_packs(db, recs, kinds, n_recs))
 		return 1;
-	if (!ksb_build_syndromes(ksb, base, db))
-		return 1;
 	while (n_recs > 0) {
 		free(recs[--n_recs]);
 		free(kinds[n_recs]);
@@ -589,7 +594,7 @@ static int tree_diagnoses(struct ksb_ctx *ksb, char *argv0, const char *base,
  *
  * A call to a diagnose that does not exist answers no, always and
  * silently - kof_diag returns zero for a name nobody carries - so a
- * verdict that misspells one is a verdict that never fires, and nothing
+ * module that misspells one reads an answer that is always no, and nothing
  * would say so. That is an ERROR.
  *
  * A diagnose nothing calls and that declares no disease is not a mistake in
@@ -682,14 +687,17 @@ int ksb_tree_main(struct ksb_ctx *ksb, int argc, char **argv)
 	}
 	free(srcs);
 	srcs = NULL;
-	if (!built) {
-		fprintf(stderr, "ksigbuilder: no sources in %s\n", base);
-		return 2;
-	}
 	printf("   %d source(s) from %s -> %s\n", built, base, artefacts);
 	rc = tree_diagnoses(ksb, argv[0], base, artefacts, db);
 	if (rc)
 		return rc;
+	/* Nothing at all - no module and no diagnose - is a tree with no content. A tree of
+	 * diagnoses alone is a database too (a set of fixtures, or the day a product ships
+	 * only the diagnoses). */
+	if (!built && !ksb->diag.n_built) {
+		fprintf(stderr, "ksigbuilder: no sources in %s\n", base);
+		return 2;
+	}
 
 	if (tree_check_uses(ksb, base))
 		return 1;

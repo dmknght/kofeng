@@ -75,16 +75,6 @@ struct kof_pw_mod {
 	uint64_t size_min;
 	/* enum kof_analyze, for an unpack-kind module; unread for a detector. */
 	uint32_t step;
-	/* A heuristic rule's phase and its declared engine request; see
-	 * kofmod/heur.h. Zero on every other kind. */
-	uint32_t heur_phase;
-	uint32_t heur_level;
-	/* Where kof_cure() sits inside the blob, or 0 - see
-	 * kof_pack_mod.cure_off. */
-	uint32_t cure_off;
-	uint32_t heur_want;
-	/* The family this rule predicts, or NULL. See KOF_HEUR_PREDICT. */
-	const char *heur_predict;
 	/* The kind of content this module takes out, or NULL. See
 	 * KOF_TARGET_CONTENT. */
 	const char *content;
@@ -112,10 +102,6 @@ struct kof_pw_mod {
 	 * interns whatever it is given either way. */
 	const char *family;
 	uint32_t    maltype;      /* enum kof_maltype */
-	/* What KOF_DECLARE_DISEASE declared: the id and its kof_maltype, 0 and 0 for
-	 * none. See struct kof_pack_mod in dbcore.h. */
-	uint32_t    disease;
-	uint32_t    disease_type;
 };
 
 /*

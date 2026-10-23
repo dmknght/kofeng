@@ -233,7 +233,7 @@ static void t_table(void)
 	struct kgenome_emu *e = mk(64);
 	unsigned per_mod[16] = { 0 };
 
-	CK(n == 136, "the table has %u APIs", n);
+	CK(n == 140, "the table has %u APIs", n);
 	CK(kgenome_emu_win_mod_count() == KGENOME_EMU_WIN_MOD_COUNT, "module count %u", kgenome_emu_win_mod_count());
 	for (i = 0; i < n; i++) {
 		const char *nm = kgenome_emu_win_api_name(i);

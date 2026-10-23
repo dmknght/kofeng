@@ -23,5 +23,5 @@ KOF_MUTATION_BLOCK(blk_maskmiss, KOF_SCAN_ELF_CODE | KOF_SCAN_ELF_DATA, KOF_MUTA
 void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	if (kof_mutation_score(blk_maskmiss) >= 90u)
-		KOF_SCAN_INFECT("MaskMiss");
+		{ kof_debug("MaskMiss#MaskMiss", 0); return; }
 }

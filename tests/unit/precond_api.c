@@ -176,39 +176,34 @@ static int span_is(const struct kof_finding *f,
 static void name_parts(void)
 {
 	struct kof_finding f;
-	char want[224];
+	char want[128];
 
-	kverdict_name(&f, "ELF-x64", "Botnet", "Mirai", "Gen", NULL);
-	ok(strcmp(f.name, "ELF-x64/Botnet:Mirai#Gen") == 0, "detector name");
+	memset(&f, 0, sizeof f);
+	f.verdict = KOF_VERDICT_INFECTED;
+	f.fmt = KOF_FMT_ELF;
+	f.arch = KGENOME_ARCH_X86_64;
+	f.type = KOF_MALTYPE_BOTNET;
+	f.engine = KOF_ENGINE_DIAGNOSE;
+	kof_verdict_name(&f, "flood-network.raw-header", NULL);
+	snprintf(want, sizeof want, "%s#ELF-x64/Botnet:flood-network.raw-header!Diagnose",
+		 kof_verdict_word(KOF_VERDICT_INFECTED));
+	ok(strcmp(f.name, want) == 0, "verdict name");
 	ok(span_is(&f, &f.target, "ELF-x64"), "target span");
 	ok(span_is(&f, &f.maltype, "Botnet"), "maltype span");
-	ok(span_is(&f, &f.family, "Mirai"), "family span");
-	ok(span_is(&f, &f.variant, "Gen"), "variant span");
-	ok(f.shape.n == 0, "a detector has no shape");
-	ok(!kverdict_is_heur(&f), "Botnet is not Heur");
-
-	/* The two must agree: kofinspect builds one with kverdict_compose to
-	 * compare against a finding the engine composed. */
-	kverdict_compose(want, sizeof want, "ELF-x64", "Botnet", "Mirai", "Gen");
-	ok(strcmp(want, f.name) == 0, "compose and finding_name agree");
-
-	kverdict_name(&f, "ELF-x64", "Heur", "Meterp", "g7q2x", "Shellcode");
-	ok(strcmp(f.name, "ELF-x64/Heur:Meterp#g7q2x!Shellcode") == 0,
-	   "heuristic name");
-	ok(span_is(&f, &f.family, "Meterp"), "the guessed family");
-	ok(span_is(&f, &f.shape, "Shellcode"), "the shape actually recognised");
-	ok(kverdict_is_heur(&f), "Heur is Heur");
+	ok(span_is(&f, &f.family, "flood-network.raw-header"), "behaviour span");
+	ok(span_is(&f, &f.shape, "Diagnose"), "the engine that answered");
+	ok(f.reason.n == 0, "no reason was given");
 
 	/* Absent parts are absent, not empty text in the middle of the name. */
-	kverdict_name(&f, NULL, "Trojan", "Unknown", NULL, NULL);
-	ok(strcmp(f.name, "Trojan:Unknown") == 0, "no target, no variant");
-	ok(f.target.n == 0 && f.variant.n == 0, "both spans empty");
-	ok(span_is(&f, &f.maltype, "Trojan"), "maltype still found");
+	f.engine = KOF_ENGINE_NONE;
+	kof_verdict_name(&f, "unknown", NULL);
+	ok(strstr(f.name, "Botnet:unknown") != NULL && f.shape.n == 0, "no engine");
+	ok(span_is(&f, &f.maltype, "Botnet"), "maltype still found");
 
-	/* A family with a hyphen in it: the reason the separator became '#'. */
-	kverdict_name(&f, "ELF-x64", "Trojan", "Some-Family", "v1", NULL);
-	ok(span_is(&f, &f.family, "Some-Family"), "hyphen inside a family name");
-	ok(span_is(&f, &f.variant, "v1"), "and the variant after it");
+	/* A behaviour with a hyphen in it: the reason the path separator became '.'. */
+	kof_verdict_name(&f, "some-family", "why");
+	ok(span_is(&f, &f.family, "some-family"), "hyphen inside a behaviour");
+	ok(span_is(&f, &f.reason, "why"), "and the reason after it");
 }
 
 static void target_word(void)
@@ -224,24 +219,7 @@ static void target_word(void)
 	   "an unidentified object names no architecture");
 }
 
-/* ---- verdicts and object paths ------------------------------------------- */
-
-/*
- * The constants are 0, 1, 2 in an order that is not their strength, so anything
- * comparing them as numbers gets it backwards. Two hosts worked the real order
- * out for themselves before this.
- */
-static void levels(void)
-{
-	ok(kverdict_level_rank(KOF_LEVEL_INFECT) > kverdict_level_rank(KOF_LEVEL_SUSPECT),
-	   "INFECT outranks SUSPECT");
-	ok(kverdict_level_rank(KOF_LEVEL_SUSPECT) > kverdict_level_rank(KOF_LEVEL_HEUR),
-	   "SUSPECT outranks HEUR");
-	ok(kverdict_level_rank(KOF_LEVEL_HEUR) > kverdict_level_rank(99u),
-	   "any verdict outranks none");
-	ok(KOF_LEVEL_HEUR > KOF_LEVEL_INFECT,
-	   "and the raw values really are in the wrong order");
-}
+/* ---- object paths ------------------------------------------- */
 
 static void obj_paths(void)
 {
@@ -263,7 +241,6 @@ int main(void)
 	precond();
 	name_parts();
 	target_word();
-	levels();
 	obj_paths();
 	if (fails)
 		printf("precond_api: %d failure(s)\n", fails);

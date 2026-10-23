@@ -360,7 +360,6 @@ static void scan_q(const uint8_t *b, uint64_t n, struct seen *s, uint64_t ceilin
 
 	memset(s, 0, sizeof *s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_children = quota;
 	if (ceiling) {
 		opt.max_resident_bytes = ceiling;

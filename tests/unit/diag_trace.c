@@ -47,7 +47,7 @@ int main(int argc, char **argv)
 	len = cf_kmod(img, sizeof img, 0, 0);
 
 	CK(e2e_scan(img, len, &r));
-	plain = r.n ? r.o[0].n : 0;
+	plain = r.n ? (unsigned)r.o[0].has_verdict : 0;
 	CK(n_diag_facts == 0);                         /* unset: nothing said */
 
 	kscan_on_debug(e2e_sc, on_dbg, NULL);
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
 	CK(strstr(first, "gate=open") != NULL);
 	CK(strstr(first, "answer=yes") != NULL);        /* kmod_give_root matched */
 	CK(strstr(first, "asked-by=-") == NULL);        /* the module that asked is named */
-	CK(r.n && r.o[0].n == plain);                  /* a callback changes no result */
+	CK(r.n && (unsigned)r.o[0].has_verdict == plain);  /* a callback changes no result */
 	kscan_on_debug(e2e_sc, NULL, NULL);
 	printf("diag trace: first fact: %s\n", first);
 	printf("diag trace: %s\n", fails ? "FAILED" : "ok");

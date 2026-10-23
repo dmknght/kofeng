@@ -64,7 +64,6 @@
 #include <kofmod/cab.h>
 #include <kofmod/chm.h>
 #include <kofmod/proc.h>
-#include <kofmod/heur.h>
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 #include <kofmod/script.h>

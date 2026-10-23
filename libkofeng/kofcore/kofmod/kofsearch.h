@@ -113,7 +113,7 @@
  * move. What was missing was a LIST OF NAMES for them, and the editor had
  * invented its own: a host that spells the engine's facts in its own words is
  * a second vocabulary to disagree with the first, which is the mistake
- * kof_touch_name and the region accessors exist to prevent one level down.
+ * the region accessors exist to prevent one level down.
  *
  * So the names live with the facts, and the tools read them.
  *

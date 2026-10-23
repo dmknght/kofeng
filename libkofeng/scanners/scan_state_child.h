@@ -122,10 +122,13 @@ struct kof_scan_cur {
 	 *
 	 * Held on the scanner because a resolver is reached through ctx and ctx
 	 * carries no room of its own - the same route every other host accessor
-	 * takes. Filled from the source at the top of scan_object and empty for
+	 * takes. Set from the source at the top of scan_object and empty for
 	 * every object that was identified rather than declared.
+	 *
+	 * BORROWED, NOT COPIED: it points into `src`'s own table (kof_src_regions_of), which lives
+	 * as long as `src` does, so a table of any length is one table in one place.
 	 */
-	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
+	const struct kof_src_region *rgn;
 	uint32_t n_rgn;
 	uint8_t rgn_fmt;
 	/* The language this object's producer declared, carried the same way
@@ -154,20 +157,6 @@ struct kof_scan_cur {
 	 */
 	struct kgenome_true_all lib;
 	uint8_t lib_ok;
-	/*
-	 * A RULE ASKED FOR EVERYTHING THIS OBJECT CARRIES TO BE OPENED.
-	 *
-	 * KOF_ENG_OPEN_CARRIED, read off the findings of the object about to be
-	 * opened - see the bit in kofmod/heur.h and fmt_wanted in kofmod/kofsig.h.
-	 *
-	 * PER OBJECT, and set from unpack_object's own `want` parameter rather
-	 * than accumulated: the value comes from the EXAMINE pass of this
-	 * object, so there is no path by which one document's evidence raises
-	 * the next document's policy. Set in the same block that clears `stop`
-	 * and for the same reason - before any early return, so a refusal
-	 * cannot leave the previous object's answer standing.
-	 */
-	int raise_carried;
 };
 
 /*
@@ -311,9 +300,11 @@ struct kof_scan_pend {
 	uint8_t subfam;
 	uint8_t lang;
 	/* And what the NEXT child's regions are, spent by kid_push exactly as
-	 * pend_fmt is and cleared there whatever happens to the child. */
-	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
-	uint32_t n_rgn;
+	 * pend_fmt is and cleared there whatever happens to the child. The table is the scanner's
+	 * own buffer, grown to what the producer declares (oc_pend_regions) and kept between
+	 * children like `fixed` and `syms`: freed by scan_free and by kscan_trim. */
+	struct kof_src_region *rgn;
+	uint32_t n_rgn, rgn_cap;
 	uint8_t rgn_fmt;
 	/* And whether the next child is one. Spent by kid_push like the rest. */
 	/*
@@ -335,6 +326,13 @@ struct kof_scan_pend {
 	/* The view's functions, mapped from the parent's - see kgenome_funcs_remap. */
 	struct kgenome_func_set funcs;
 	/*
+	 * THE UNITS OF THE PARENT'S CUT THAT THE VIEW'S DECODE REWROTE, in the view's own
+	 * offsets, sorted and apart - see kof_src_declare_fixed. Kept for the next view and
+	 * only grows.
+	 */
+	struct kof_range *fixed;
+	uint32_t fixed_cap, n_fixed;
+	/*
 	 * AND THE IMAGE IT IS A RENDERING OF - format, architecture, entry and the
 	 * parent's info struct with every file offset carried through the
 	 * transform (see kof_src_declare_desc). `pend_desc.info` points at
@@ -350,7 +348,7 @@ struct kof_scan_pend {
 	/* And which entry it is the content of, or KOF_ENTRY_NONE. */
 	uint32_t entry;
 	/* And what the producing module says has to be DONE to it, in the same
-	 * KOF_ENG_* vocabulary a heuristic rule uses, with the lowest --heur
+	 * KOF_ENG_* vocabulary a module uses, with the lowest --heur
 	 * level the ask is honoured at. See child_want in kofsig.h. */
 	uint32_t want, want_level;
 	/*

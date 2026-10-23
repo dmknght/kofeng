@@ -18,5 +18,5 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 
 	(void)ctx;
 	if (b && n == 0xfffffffeu)      /* never: the call is what the fixture is for */
-		KOF_SCAN_INFECT(KOF_MALVAR_AUTO);
+		{ kof_debug("PeSymProbeTest#00", 0); return; }
 }

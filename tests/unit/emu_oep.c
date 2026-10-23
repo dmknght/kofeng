@@ -244,7 +244,7 @@ static void resolves(void)
 		ck(0, "no machine to resolve against");
 	} else {
 		uint64_t k = kgenome_emu_win_addr_of(e, "GetProcAddress");
-		uint64_t a = kgenome_emu_win_resolve(e, "DeleteFileW");
+		uint64_t a = kgenome_emu_win_resolve(e, "ZzNoSuchExportName");
 		uint64_t b = kgenome_emu_win_resolve(e, "DeleteFileW");
 
 		ck(k && kgenome_emu_win_resolve(e, "GetProcAddress") == k,

@@ -29,5 +29,5 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 {
 	(void)ctx;
 	if (kof_mutation_score(block) >= 50u)
-		KOF_SCAN_INFECT("EndianBlock");
+		{ kof_debug("EndianBlock#EndianBlock", 0); return; }
 }

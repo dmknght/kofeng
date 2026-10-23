@@ -88,7 +88,6 @@ static void scan2(const uint8_t *b, uint64_t n, const char *name, struct seen *s
 
 	memset(s, 0, sizeof *s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	if (!host_defaults) {
 		opt.max_produced_bytes = 256u << 20;
 		opt.max_resident_bytes = 512u << 20;

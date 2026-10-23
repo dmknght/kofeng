@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 
 static int failures;
 
@@ -66,14 +67,16 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = user;
+	struct note_list got;
 	uint32_t i;
 
 	(void)bytes; (void)len;
+	notes_here(&got);
 	s->objects++;
 	if (!res)
 		return 0;
-	for (i = 0; i < res->n; i++)
-		if (strstr(res->v[i].name, s->want)) {
+	for (i = 0; i < got.n; i++)
+		if (strstr(got.name[i], s->want)) {
 			s->hit++;
 			if (name && strstr(name, "//"))
 				s->hit_child++;
@@ -92,6 +95,7 @@ static int scan_where(struct kof_engine *eng, const uint8_t *p, size_t n,
 
 	if (!sc)
 		return -1;
+	notes_watch(sc);
 	memset(&s, 0, sizeof s);
 	s.want = want;
 	memset(&opt, 0, sizeof opt);
@@ -104,7 +108,6 @@ static int scan_where(struct kof_engine *eng, const uint8_t *p, size_t n,
 	 * reached and read as the engine having gone silent about it, which is
 	 * a fault in the test and not in the pass it is about.
 	 */
-	opt.all_matches = 1;
 	if (kscan_bytes(sc, p, n, "fixture.bin", &opt, on_object, &s) <= 0)
 		s.hit = -1;
 	kscan_free(sc);

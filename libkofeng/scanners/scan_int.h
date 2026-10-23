@@ -91,7 +91,7 @@ struct walk {
 	 * Read across one file by scan_file - see the note there on why a file
 	 * with either is never remembered. */
 	uint64_t found;
-	/* Of the file being scanned: whether an object reported a finding, and how many
+	/* Of the file being scanned: whether an object had a verdict, and how many
 	 * verdict events the host was given - the engine's check that what a roll-up
 	 * counts was delivered (sx_scan_file, kof_stats.verdict_lost). */
 	int      file_reported;
@@ -121,12 +121,8 @@ static inline int sx_opened(const struct kof_scanner *sc)
 	return sc->child.n > sc->child.n_views + sc->child.n_carved;
 }
 
-/* A module's report, taken: finding, verdict slot, repair, infected spans. */
-struct kof_finding *sx_mod_report(struct kof_scanner *sc,
-				  const struct kof_obj_ctx *ctx,
-				  const struct kof_scan_option *opt,
-				  struct kof_result *res,
-				  const struct kof_module *m, uint32_t level);
+/* The end of a module's turn: the infected spans it marked, out to the result. */
+void sx_mod_end(struct kof_scanner *sc, struct kof_result *res);
 
 /* ---- one object (scan.c) --------------------------------------------------- */
 void sx_scan_object(struct kof_scanner *sc, kof_buf buf,
@@ -137,16 +133,13 @@ void sx_scan_object(struct kof_scanner *sc, kof_buf buf,
 /* ---- the parallel walk (scan_mt.c) ---------------------------------------- */
 void sx_mtq_put(struct walk *w, const char *path, size_t len);
 
-/* ---- the verdict (verdictor/verdict.c) ---- */
-int sx_verdict_take(struct kof_scanner *sc, const struct kof_finding *f, int all_matches,
-		    int covered);
-int sx_finding_covered(const struct kof_module *m, const struct kof_finding *f);
-/* The object's verdict from the diseases it has (verdictor/syndrome.c). */
-void sx_syndrome_verdict(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
-			 const struct kof_scan_option *opt, struct kof_result *res,
-			 const struct kof_synd_result *r);
-void sx_finding_str(const struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
-		    const struct kof_module *m, struct kof_finding *f);
+/* ---- the verdict (scan_verdict.c) ---- */
+/* The object's verdict from the diseases it has, into the result. */
+void sx_verdict_make(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		     struct kof_result *res);
+/* An unfinished analysis with nothing found becomes a limit, or a moot analysis. */
+void sx_verdict_gap(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
+		    struct kof_result *res, int incomplete);
 
 /* ---- the normalised view (scan_norm*.c) ------------------------------------ */
 
@@ -235,9 +228,6 @@ int sx_prefilter(const struct kof_module *m, const struct kof_obj_ctx *ctx,
 		      uint32_t present, struct kof_stats *st,      struct kof_result *out);
 void sx_need_multi(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
 void sx_need_mutation(struct kof_scanner *sc, struct kof_obj_ctx *ctx);
-uint32_t sx_heur_run(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		     const struct kof_scan_option *opt, struct kof_result *out,
-		     uint32_t phase, uint32_t present, const char **predict);
 int sx_script_forms(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
 		    const struct kof_scan_option *opt, uint32_t pdepth);
 void sx_heur_object(struct kof_scanner *sc, const struct kof_obj_ctx *ctx,
@@ -265,8 +255,7 @@ struct kof_open {
 /* The recovering modules, on every object: no gate, no chain, nothing produced.
  * See KOF_ANALYZE_RECOVER. */
 void sx_recover(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
-		const struct kof_scan_option *opt, struct kof_result *res,
-		uint32_t want);
+		const struct kof_scan_option *opt, struct kof_result *res);
 struct kof_pipeline;
 void sx_open_step(struct kof_pipeline *p);
 uint32_t sx_open_end(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
@@ -324,7 +313,7 @@ const struct kof_module *sx_derived_by(const struct kof_scanner *sc);
  *
  * The opening steps are the module ABI's own (enum kof_analyze) and keep its
  * order; what is new is that the rest of the object's life has names too, so a
- * module can say WHERE it runs instead of the engine deciding by which loop
+ * module could say WHERE it runs instead of the engine deciding by which loop
  * happened to call it. Detectors are not all at the end: a detector that is
  * about what an unpacker produced runs between steps, and the table is what lets
  * that be a declaration and not another loop.
@@ -333,19 +322,18 @@ enum kof_stage {
 	KOF_STAGE_FACTS = 0,    /* identify, regions, library facts - the host    */
 	KOF_STAGE_RECOVER,      /* what the object hides about itself - reported  */
 	KOF_STAGE_DETECT,       /* detectors on the object as it arrived          */
-	KOF_STAGE_EXAMINE,      /* rules about what it IS, before it is opened    */
+	KOF_STAGE_EXAMINE,      /* what it asks of the engine, before it is opened */
 	KOF_STAGE_UNWRAP,       /* the opening steps, in enum kof_analyze order   */
 	KOF_STAGE_UNPACK,
 	KOF_STAGE_DECRYPT,
 	KOF_STAGE_CARVE,
 	KOF_STAGE_NORMZ,        /* the object said plainly - the host's own      */
-	KOF_STAGE_SIMILAR,      /* similarity rules, on the object that is left  */
+	KOF_STAGE_SIMILAR,      /* similarity detectors, on the object that is left */
 	KOF_STAGE_SCRIPT,       /* the second form of a script                    */
 	KOF_STAGE_SERVE,        /* what the engine completed, declared            */
-	KOF_STAGE_VERDICT,      /* rules about what the stages above produced     */
-	KOF_STAGE_RECONCILE,    /* a parent's guesses against its children        */
-	KOF_STAGE_MODEL,        /* the scored model                               */
-	KOF_STAGE_SYNDROME,     /* what the diseases make: the object's verdict   */
+	KOF_STAGE_ANALYSE,      /* the analysis a declaration asked for           */
+	KOF_STAGE_MODEL,        /* the scored model's measurement                 */
+	KOF_STAGE_VERDICT,      /* what the diseases make: the object's verdict   */
 	KOF_STAGE_REPORT,       /* what each diagnose made of it - on request     */
 	KOF_STAGE_COUNT
 };
@@ -374,37 +362,13 @@ struct kof_pipeline {
 	/* what EXAMINE collected */
 	uint32_t                         want;
 	const char                      *predict;
-	/*
-	 * HOW MANY OF out->v A DETECTOR PUT THERE, counted before the
-	 * heuristics ran.
-	 *
-	 * Not out->n, and the difference is the whole reason this field exists.
-	 * By the time this struct is filled the rule heuristics have appended
-	 * their own findings, and a rule heuristic is not a verdict that the
-	 * object has been identified - it is usually the opposite, "I could not
-	 * sx_identify this", which is exactly the object whose remaining steps
-	 * matter most. Stopping on one measured six samples where the parent
-	 * said Heur:Truncated and the payload one layer down said Botnet:Mirai:
-	 * the chain would have ended on the weaker of the two statements and
-	 * deleted the stronger.
-	 *
-	 * Whether a heuristic MAY stop the chain is a question for the rule
-	 * that wrote it rather than for the engine - see enum kof_eng_want,
-	 * which has no word for it yet. Until it does, only a detector counts.
-	 */
-	uint32_t                         det_n;
-	/* A rule said its finding is a conclusion - see KOF_ENG_CONCLUDE.
-	 * Kept apart from det_n because the two are different claims and the
-	 * note on det_n is a measurement about detectors only. */
-	int                              concluded;
 	/* where the pipeline is, and where the OPEN stage is for this object */
 	enum kof_stage                   stage;
 	enum kof_analyze                 step;
 	struct kof_open                  open;
 	/* What the current GROUP of chain rows has produced is measured from these,
 	 * and `yielded` is the group's answer, decided once when the OPEN stage
-	 * ends: the object was opened into children that are not carves. RECONCILE
-	 * reads it - there is no second way to ask. */
+	 * ends: the object was opened into children that are not carves. */
 	uint32_t                         kids0, carved0;
 	int                              yielded;
 };

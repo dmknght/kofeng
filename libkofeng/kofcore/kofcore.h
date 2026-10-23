@@ -246,6 +246,19 @@ static inline uint32_t kof_hash_bytes(const void *p, uint64_t n)
 }
 
 /*
+ * THE SLOT OF A 64-BIT KEY in a table of up to 2^32 slots: the top 32 bits of the Fibonacci product (the multiplier 2^64 / phi spreads a key's low bits, which a
+ * `key & mask` would keep, over the whole word). The caller masks it by its capacity. One spelling of the multiplier: eight tables had written it out, each
+ * a place to get a digit wrong (libgenome/phenotype's text route is the first to read this one).
+ * It kept 24 bits (G15): a table of 2^25 slots took every key to a home in its first 2^24, the second half was only ever reached by probing past a full first, and
+ * a table that needs 2^25 slots - 16 million keys - was quadratic. Only the text route's relation layer reads it; where a key sits in its table moves, and no answer
+ * depends on that (the keys are looked up, never walked).
+ */
+static inline uint32_t kof_hash64_slot(uint64_t k)
+{
+	return (uint32_t)((k * 0x9e3779b97f4a7c15ull) >> 32);
+}
+
+/*
  * The same FNV-1a at 64 bits, for the tables that key on it (the fridge, the
  * collectors' seen-sets). Zero is not a key there - a table uses it for an empty
  * slot - so `kof_hash64_nz` maps it away.
@@ -485,6 +498,13 @@ static inline uint8_t kof_lower_byte(uint8_t c)
 	return (uint8_t)(c | ((ge & ~gt & ~(uint32_t)c & 0x80u) >> 2));
 }
 
+/* The inverse fold: ASCII lower case letters to upper case, every other byte (the 0x80..0xff ones too) is itself. Added with the TEXT route's
+ * move off toupper(), which reads the locale; checked against `(c >= 'a' && c <= 'z') ? c - 32 : c` on all 256 inputs (tests/lib/genome/core_bytes.c). */
+static inline uint8_t kof_upper_byte(uint8_t c)
+{
+	return (uint8_t)(c - ((uint8_t)(c - 'a') < 26u ? 0x20u : 0u));
+}
+
 /*
  * THE REST OF THE BYTE CLASSES, AND THEY LIVE HERE FOR THE SAME REASON
  * kof_lower_byte DOES.
@@ -545,6 +565,20 @@ static inline int kof_is_word_byte(uint8_t c)
 	return kof_is_alnum(c) || c == '_';
 }
 
+/* Is `c` one of the bytes of the NUL-ended `set` (a short literal)? A NUL byte is in no set - strchr answers yes for the terminator, which made a NUL of a
+ * text "a byte that continues the line" (G12) - and a NULL set holds none. A loop and not strchr: the set is a few bytes, so this inlines to a few compares, where
+ * the library call was measured at 15% of the batch lexer (a call for every symbol byte of a text that is mostly symbols). The one definition: the lexers and the
+ * TEXT route's language rows both ask it. */
+static inline int kof_byte_in_set(uint8_t c, const char *set)
+{
+	if (c == 0 || !set)
+		return 0;
+	for (; *set; set++)
+		if ((uint8_t)*set == c)
+			return 1;
+	return 0;
+}
+
 /*
  * The id of a debug note's field: the text after the last dot when there is one,
  * the whole string when there is not, CRC-32'd. The one definition - the engine
@@ -595,6 +629,18 @@ static inline int kof_hex_val(uint8_t c)
 	};
 
 	return (int)v1[c] - 1;
+}
+
+/*
+ * THE HEX DIGIT OF A NIBBLE: the write side of kof_hex_val, ONE table for both cases. Three writers had a table of their own - the literal writer's \x and \u escapes (lower case),
+ * the lib's hex, url and escape encoders (upper case: what a pattern and a %XX are written in) and a digest's text (lower case) - and a fourth copy of a 16-letter string is a fourth
+ * place for a letter to be wrong. Only the low four bits of `v` are read.
+ */
+static inline uint8_t kof_hex_digit(unsigned v, int upper)
+{
+	static const char t[] = "0123456789abcdef0123456789ABCDEF";
+
+	return (uint8_t)t[(v & 15u) + (upper ? 16u : 0u)];
 }
 
 /*

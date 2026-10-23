@@ -71,8 +71,11 @@ int sx_endian_begin(struct kof_scanner *sc, struct kof_obj_ctx *ctx, kof_buf buf
 		return 1;
 	st = kgenome_endian_plan_build(buf, &g, &en->plan);
 	/* A cut header is the parse's finding already; any other incomplete answer
-	 * is ours to say, because the view will be the object half in each order. */
-	if (st != KGENOME_OK && st != KGENOME_BAD_INPUT)
+	 * is ours to say, because the view will be the object half in each order.
+	 * So is a span the plan refused because the object's tables overlap: the plan counted them
+	 * (`dropped`) as "a fact about the file" and nothing read the count, so the bytes it left
+	 * in the file's order went out in a view reported complete (endian_view plan_dropped). */
+	if ((st != KGENOME_OK && st != KGENOME_BAD_INPUT) || en->plan.dropped)
 		oc_scan_limit(sc);
 	return 1;
 }

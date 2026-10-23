@@ -3,8 +3,8 @@
  */
 
 #include "ksb.h"
+#include <databases/diagsrc.h>
 
-#include <databases/syndsrc.h>
 
 /* ---- diagnoses ------------------------------------------------------------
  *
@@ -307,7 +307,7 @@ int ksb_diagnose_main(struct ksb_ctx *ksb, int argc, char **argv)
 	free(text);
 	if (ksb->errors)
 		return 1;
-	if (v.disease[0] && !ksb_disease_note(ksb, v.disease, v.disease_type, DIS_BY_DETECTOR))
+	if (v.disease[0] && !ksb_disease_note(ksb, v.disease, v.disease_type))
 		return 1;
 	diag_users(ksb, v.name, &n_users, &users_len);
 	if (!diag_size(ksb, &v, users_len, &need))

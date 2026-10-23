@@ -196,6 +196,13 @@ static const struct {
 	{ KGENOME_EMU_WIN_MOD_WS2, "shutdown",                2 },
 	{ KGENOME_EMU_WIN_MOD_WS2, "setsockopt",              5 },
 	{ KGENOME_EMU_WIN_MOD_WS2, "ioctlsocket",             3 },
+	/* kernel32's AddVectoredExceptionHandler forwards to these on Windows; a resolver that walks ntdll
+	 * for them finds them there. Same handlers, same arguments. */
+	{ KGENOME_EMU_WIN_MOD_NTDLL, "RtlAddVectoredExceptionHandler",    2 },
+	{ KGENOME_EMU_WIN_MOD_NTDLL, "RtlRemoveVectoredExceptionHandler", 1 },
+	{ KGENOME_EMU_WIN_MOD_MSCOREE, "_CorExeMain",         0 },
+	{ KGENOME_EMU_WIN_MOD_MSCOREE, "_CorDllMain",         3 },
+
 };
 
 /*
@@ -232,7 +239,8 @@ static const struct {
 	{ "msvcrt.dll",   0x0000000186000000ull, 0x71000000ull },
 	{ "ole32.dll",    0x0000000187000000ull, 0x70000000ull },
 	{ "kernelbase.dll", 0x0000000188000000ull, 0x6f000000ull },
-	{ "ws2_32.dll",   0x0000000189000000ull, 0x6e000000ull }
+	{ "ws2_32.dll",   0x0000000189000000ull, 0x6e000000ull },
+	{ "mscoree.dll",  0x000000018a000000ull, 0x6d000000ull }
 };
 
 _Static_assert(sizeof win_api / sizeof win_api[0] == (size_t)KGENOME_EMU_WIN_API__LAST,
@@ -440,6 +448,43 @@ uint64_t kgenome_emu_win_addr_of(struct kgenome_emu *e, const char *name)
 		return base + KGENOME_EMU_WIN_STUB_RVA +
 		       (uint64_t)kgenome_emu_win_api_slot(i) * KGENOME_EMU_WIN_STUB;
 	}
+	/*
+	 * A NAME THE LIBRARIES LIST AND NOTHING MODELS has its stub after the modelled ones, in the order of
+	 * emu_win_names.c (which holds no name win_api[] has): found by the same name, at the same address
+	 * the export directory gives it. Case sensitive, as GetProcAddress is and the sorted list allows.
+	 */
+	{
+		static const unsigned mods[] = {
+			KGENOME_EMU_WIN_MOD_K32, KGENOME_EMU_WIN_MOD_NTDLL, KGENOME_EMU_WIN_MOD_USER32,
+			KGENOME_EMU_WIN_MOD_ADVAPI32, KGENOME_EMU_WIN_MOD_SHELL32, KGENOME_EMU_WIN_MOD_SHLWAPI
+		};
+		unsigned m;
+
+		for (m = 0; m < sizeof mods / sizeof mods[0]; m++) {
+			const struct kgenome_emu_win_name *w = NULL;
+			unsigned first = 0, lo = 0, hi = kgenome_emu_win_export_names(mods[m], &w, &first), k, nm = 0;
+
+			while (lo < hi) {
+				unsigned mid = lo + (hi - lo) / 2u;
+				int c = strcmp(w[mid].name, name);
+
+				if (!c) {
+					uint64_t base = e->win_mod_base[mods[m]];
+
+					if (!base)
+						return 0;
+					for (k = 0; k < KGENOME_EMU_WIN_API_COUNT; k++)
+						nm += win_api[k].mod == mods[m];
+					return base + KGENOME_EMU_WIN_STUB_RVA +
+					       (uint64_t)(nm + mid) * KGENOME_EMU_WIN_STUB;
+				}
+				if (c < 0)
+					lo = mid + 1u;
+				else
+					hi = mid;
+			}
+		}
+	}
 	return 0;
 }
 
@@ -629,32 +674,58 @@ int kgenome_emu_win_is_fake(const struct kgenome_emu *e, uint64_t h)
 	       !((h - WIN_FAKE_BASE) % WIN_FAKE_STEP);
 }
 
-/* A module handle by name, which is what GetModuleHandle and LoadLibrary both
- * come down to. */
-uint64_t kgenome_emu_win_mod_of(struct kgenome_emu *e, const char *name)
+/*
+ * A module handle by name, which is what GetModuleHandle and LoadLibrary both
+ * come down to. `load` is LoadLibrary: it brings a module the process did not
+ * start with (KGENOME_EMU_WIN_MOD_MSCOREE) in, and from then on both calls see
+ * it; without it such a module is absent, which is what GetModuleHandle says
+ * of a library nobody has loaded.
+ */
+static uint64_t mod_find(struct kgenome_emu *e, const char *name, int load)
 {
 	unsigned i;
 
 	for (i = 0; i < KGENOME_EMU_WIN_MOD_COUNT; i++) {
 		const char *n = win_mod[i].name;
 		unsigned len = (unsigned)strlen(n);
+		int hit = 0;
 
 		if (win_eq_nocase(n, name))
-			return e->win_mod_base[i];
+			hit = 1;
 		/* "kernel32" for "kernel32.dll": a guest may leave the suffix
 		 * off and Windows supplies it. */
-		if (len > 4u && !strncmp(n + len - 4u, ".dll", 4u)) {
+		else if (len > 4u && !strncmp(n + len - 4u, ".dll", 4u)) {
 			char bare[64];
 
 			if (len - 4u < sizeof bare) {
 				memcpy(bare, n, len - 4u);
 				bare[len - 4u] = 0;
-				if (win_eq_nocase(bare, name))
-					return e->win_mod_base[i];
+				hit = win_eq_nocase(bare, name);
 			}
 		}
+		if (!hit)
+			continue;
+		if (i >= KGENOME_EMU_WIN_MOD_RESIDENT) {
+			uint32_t bit = 1u << (i - KGENOME_EMU_WIN_MOD_RESIDENT);
+
+			if (!load && !(e->win_loaded & bit))
+				return 0;
+			if (load && e->win_mod_base[i])
+				e->win_loaded |= bit;
+		}
+		return e->win_mod_base[i];
 	}
 	return 0;
+}
+
+uint64_t kgenome_emu_win_mod_of(struct kgenome_emu *e, const char *name)
+{
+	return mod_find(e, name, 0);
+}
+
+uint64_t kgenome_emu_win_mod_load(struct kgenome_emu *e, const char *name)
+{
+	return mod_find(e, name, 1);
 }
 
 /*

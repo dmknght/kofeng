@@ -27,9 +27,16 @@
  *   - the same stager behind a very large PADDING (object size alone, 100 sites)
  */
 
+#define _GNU_SOURCE
+
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "caps_fix.h"
 #include "caps_e2e.h"
 #include "known_miss.h"
+#include "asking_db.h"
 #include "../../libkofeng/scanners/scan.h"
 
 #define ELF_CODE_VA 0x400078ull
@@ -169,12 +176,10 @@ static void sweep(unsigned site_len, const unsigned *sizes, unsigned ns)
 }
 
 /*
- * THE SAME INVARIANT THROUGH THE ENGINE (kscan_bytes against the release database, whose
- * mem_execsyscall diagnose runs the emulator): past the run's bound the object says it was not
- * looked at to the end - `broken` (LIMIT) and the syndrome's `incomplete` - and inside the
- * bound it says nothing. The release database gives this stager no verdict of its own, so what
- * a caller can read is the signal; an object with neither verdict nor signal would read as
- * clean. (KGENOME_TRUNCATED itself is not what kof_scan_incomplete reads - objctx_diag.c:710
+ * THE SAME INVARIANT THROUGH THE ENGINE (kscan_bytes against the product's packs and the
+ * fixture diagnose stager_shape, which runs the emulator): past the run's bound the object says
+ * it was not looked at to the end - `broken` (LIMIT) and the verdict's `verdict_incomplete` -
+ * and inside the bound it says nothing. (KGENOME_TRUNCATED itself is not what kof_scan_incomplete reads - objctx_diag.c:710
  * takes OVER_BUDGET and NOMEM and leaves the per-diagnose limits to diag_unk - so this checks
  * that the other route, an open diagnose answering "cannot say", does carry it.)
  */
@@ -187,7 +192,7 @@ static int engine_said(unsigned sites, unsigned site_len)
 	uint64_t len = cf_elf64(img, BUF, code, n);
 
 	CK(e2e_scan(img, len, &er));
-	return er.n > 0 && (er.o[0].broken == KOF_BROKEN_LIMIT || er.o[0].syn.incomplete);
+	return er.n > 0 && (er.o[0].broken == KOF_BROKEN_LIMIT || er.o[0].vf_incomplete);
 }
 
 static void engine_sweep(void)
@@ -280,7 +285,7 @@ int main(int argc, char **argv)
 	CK(g.st == KGENOME_NOMEM || g.st == KGENOME_OVER_BUDGET || g.st == KGENOME_TRUNCATED ||
 	   g.match);
 
-	CK(e2e_open(argc > 1 ? argv[1] : "build/release/databases"));
+	CK(e2e_open(argc > 1 ? argv[1] : ad_db_asking()));
 	engine_sweep();
 	truncated_without_unk();
 

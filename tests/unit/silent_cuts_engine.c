@@ -16,6 +16,7 @@
  */
 
 #include "caps_fix.h"
+#include "notes.h"
 
 static kof_engine *eng;
 
@@ -27,11 +28,13 @@ struct got {
 static int on_obj(const char *name, const void *b, uint64_t n, const struct kof_result *r, void *u)
 {
 	struct got *g = u;
+	struct note_list got;
 	uint32_t i;
 
 	(void)name; (void)b; (void)n;
-	for (i = 0; i < r->n; i++)
-		if (strstr(r->v[i].name, "GraphGrowTest"))
+	notes_here(&got);
+	for (i = 0; i < got.n; i++)
+		if (strstr(got.name[i], "GraphGrowTest"))
 			g->found++;
 	if (r->broken && !g->broken)
 		g->broken = r->broken;
@@ -61,7 +64,6 @@ static struct got scan(kof_scanner *sc, uint64_t n, const struct kof_stats **st)
 
 	memset(&g, 0, sizeof g);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -89,14 +91,14 @@ int main(int argc, char **argv)
 	big = build(30);
 
 	/* the control: the large object alone, on a fresh scanner */
-	b = kscan_new(eng);
+	b = notes_scanner(eng);
 	CK(b != NULL);
 	g = scan(b, big, NULL);
 	CK(g.found == 1u && g.broken == 0u);
 	kscan_free(b);
 
 	/* the same scanner sees a small object first, then the large one */
-	a = kscan_new(eng);
+	a = notes_scanner(eng);
 	CK(a != NULL);
 	{
 		uint8_t keep[1u << 16];

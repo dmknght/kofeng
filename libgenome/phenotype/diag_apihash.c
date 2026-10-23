@@ -608,7 +608,7 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 		uint32_t before;
 
 		node[i] = 0xffffu;
-		cap = kgenome_nucleo_cap_of_call(c->api, c->arg, &fl);
+		cap = kgenome_nucleo_cap_of_call(KGENOME_NUCLEO_T_PE, c->api, c->arg, &fl);
 		if (cap == KGENOME_NUCLEO_NONE)
 			continue;
 		at = kgenome_image_addr_to_off(obj, c->site);

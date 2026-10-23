@@ -27,11 +27,11 @@
 #include "../../libkofeng/kofcore/kofmod/tar.h"
 #include "../../libkofeng/kofcore/kofmod/reg.h"
 #include "../../libkofeng/analyzers/normalize/executables.h"
-#include "../../libkofeng/analyzers/parsers/scripts/script_norm.h"
 #include "../../libkofeng/analyzers/parsers/containers/zip_parse.h"
 #include "../../libkofeng/analyzers/parsers/containers/tar_parse.h"
 #include "../../libkofeng/analyzers/parsers/containers/reg_parse.h"
 #include "known_miss.h"
+#include "normalizer_consts.h"
 
 static int fails;
 
@@ -302,15 +302,14 @@ static void case_decode_limit(void)
 	free(u.p);
 }
 
-/* ---- script folding: FOLD_MAX_VARS = 64 ---------------------------------------- */
+/* ---- script constants: the variable table is not a bound -------------------------- */
 
+/* The lib's evaluator (normalizer_consts.h) has no table of 64 variables to fill: `fill` assignments ahead of the join change nothing. */
 static void case_fold_vars(unsigned fill)
 {
 	struct tb t = { 0 };
-	const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
-	uint8_t out[1024];
+	struct cset c;
 	unsigned i;
-	uint32_t n;
 	char line[64];
 
 	tb_puts(&t, "<?php\n");
@@ -319,22 +318,23 @@ static void case_fold_vars(unsigned fill)
 		tb_puts(&t, line);
 	}
 	tb_puts(&t, "$p='KOFFOLD';$q='MARKER!';$r=$p.$q;\n");
-	n = kof_script_fold(lx, t.p, (uint32_t)t.n, out, sizeof out);
-	CK(lx != NULL);
-	CK(n >= 14u && memmem(out, n, "KOFFOLDMARKER!", 14) != NULL);
+	consts_of(KGENOME_TEXTUAL_LANG_PHP, t.p, t.n, &c);
+	CK(c.n == 1u && c.c[0].n == 14u && memmem(c.c[0].v, c.c[0].n, "KOFFOLDMARKER!", 14) != NULL);
+	CK(c.st == KGENOME_OK);
+	cset_free(&c);
 	free(t.p);
 }
 
 
-/* ---- script folding: FOLD_MAX_DEPTH = 16 ---------------------------------------- */
+/* ---- script constants: nesting is a bound, and the scan says it fired -------------- */
 
+/* EV_NEST (256, diag_text_eval.c) expressions open inside one another: `levels` calls of str_replace evaluate up to the bound, and past it the value is
+ * not constant and the scan is KGENOME_TRUNCATED - it was KOF_FOLD_DEPTH at 256 in the folder, whose limit the engine turned into oc_scan_limit. */
 static void case_fold_depth(unsigned levels)
 {
 	struct tb t = { 0 };
-	const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
-	uint8_t out[512];
+	struct cset c;
 	unsigned i;
-	uint32_t n;
 
 	tb_puts(&t, "<?php $a=");
 	for (i = 0; i < levels; i++)
@@ -343,20 +343,21 @@ static void case_fold_depth(unsigned levels)
 	for (i = 0; i < levels; i++)
 		tb_puts(&t, ")");
 	tb_puts(&t, ";\n");
-	n = kof_script_fold(lx, t.p, (uint32_t)t.n, out, sizeof out);
-	CK(n == 14u && memmem(out, n, "KOFDEPTHMARKER", 14) != NULL);
+	consts_of(KGENOME_TEXTUAL_LANG_PHP, t.p, t.n, &c);
+	if (levels < 256u)
+		CK(c.n == 1u && c.c[0].n == 14u && memmem(c.c[0].v, c.c[0].n, "KOFDEPTHMARKER", 14) != NULL && c.st == KGENOME_OK);
+	else
+		CK(c.n == 0u && c.st == KGENOME_TRUNCATED);
+	cset_free(&c);
 	free(t.p);
 }
 
-/* ---- folding: what the folder keeps as a bound speaks, and the table is not one -- */
+/* ---- constants: what a bound that fires says, and the table is not one ------------- */
 
 static void case_fold_limit(void)
 {
-	const struct kof_lex *lx = kof_lex_for(KOF_SCRIPT_PHP);
 	struct tb t = { 0 };
-	struct tb u = { 0 };
-	uint8_t out[512];
-	uint32_t n, lim = 0;
+	struct cset c;
 	unsigned i;
 	char line[64];
 
@@ -367,25 +368,33 @@ static void case_fold_limit(void)
 		tb_puts(&t, line);
 	}
 	tb_puts(&t, "$p='KOFFOLD';$q='MARKER!';$r=$p.$q;\n");
-	n = kof_script_fold_ex(lx, t.p, (uint32_t)t.n, out, sizeof out, &lim);
-	CK(n >= 14u && memmem(out, n, "KOFFOLDMARKER!", 14) != NULL);
-	CK(lim == 0u);
-	/* A redefinition does not displace the first, as before. */
+	consts_of(KGENOME_TEXTUAL_LANG_PHP, t.p, t.n, &c);
+	CK(c.n == 1u && c.c[0].n == 14u && memmem(c.c[0].v, c.c[0].n, "KOFFOLDMARKER!", 14) != NULL && c.st == KGENOME_OK);
+	cset_free(&c);
+	/* DIFFERENCE: a redefinition DISPLACES the first (the folder kept the first): the evaluator keeps no control flow, so `$p` is its last assignment for
+	 * every use of it, `$r` included. */
 	tb_puts(&t, "$p='OTHER';$s=$p.$q;\n");
-	n = kof_script_fold_ex(lx, t.p, (uint32_t)t.n, out, sizeof out, &lim);
-	CK(n >= 14u && lim == 0u);
+	consts_of(KGENOME_TEXTUAL_LANG_PHP, t.p, t.n, &c);
+	CK(c.n == 2u && c.c[0].n == 12u && c.c[1].n == 12u && !memcmp(c.c[1].v, "OTHERMARKER!", 12u));
+	CK(c.st == KGENOME_OK);
+	cset_free(&c);
 	/* The recursion bound is stack, kept, and said when it is met. */
-	tb_puts(&u, "<?php $a=");
-	for (i = 0; i < 300u; i++)
-		tb_puts(&u, "str_replace('~','',");
-	tb_puts(&u, "'KOF~DEPTH'");
-	for (i = 0; i < 300u; i++)
-		tb_puts(&u, ")");
-	tb_puts(&u, ";\n");
-	n = kof_script_fold_ex(lx, u.p, (uint32_t)u.n, out, sizeof out, &lim);
-	CK(n == 0u && (lim & KOF_FOLD_DEPTH) != 0u);
+	{
+		struct tb u = { 0 };
+
+		tb_puts(&u, "<?php $a=");
+		for (i = 0; i < 300u; i++)
+			tb_puts(&u, "str_replace('~','',");
+		tb_puts(&u, "'KOF~DEPTH'");
+		for (i = 0; i < 300u; i++)
+			tb_puts(&u, ")");
+		tb_puts(&u, ";\n");
+		consts_of(KGENOME_TEXTUAL_LANG_PHP, u.p, u.n, &c);
+		CK(c.n == 0u && c.st == KGENOME_TRUNCATED);
+		cset_free(&c);
+		free(u.p);
+	}
 	free(t.p);
-	free(u.p);
 }
 
 /* ---- reg: KOF_REG_MAX_EXTENTS = 2048 -------------------------------------------- */
@@ -536,6 +545,8 @@ int main(void)
 	case_fold_vars(70);
 	case_fold_depth(6);
 	case_fold_depth(24);
+	case_fold_depth(255);
+	case_fold_depth(256);
 	case_fold_limit();
 	case_decode_limit();
 	case_reg_extents();

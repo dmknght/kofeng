@@ -22,11 +22,15 @@
 
 #include "failalloc.h"
 #include "hostile_engine.h"
+#include "notes.h"
 
 #include "cov_fixtures_7z.h"
 #include "cov_fixtures_ole.h"
 
 #define SIG_MAX 4096u
+
+/* What the test modules said while the object was scanned - see notes.h. */
+static struct note_list pend;
 
 struct run {
 	char     sig[SIG_MAX];
@@ -38,17 +42,19 @@ static int on_obj(const char *name, const void *bytes, uint64_t len, const struc
 {
 	struct run *r = user;
 	size_t at = strlen(r->sig);
+	struct note_list got;
 	uint32_t i;
 
 	(void)bytes;
+	notes_take(&pend, &got);
 	r->n_obj++;
-	if (res->broken || (res->has_syndrome && res->syndrome.incomplete) || res->dropped)
+	if (res->broken || res->verdict_incomplete)
 		r->signalled++;
 	if (at + 256u < SIG_MAX)
-		at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "[%s|%llu|%u]", name ? name : "", (unsigned long long)len, res->n);
-	for (i = 0; i < res->n; i++)
+		at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "[%s|%llu|%u]", name ? name : "", (unsigned long long)len, got.n);
+	for (i = 0; i < got.n; i++)
 		if (at + 160u < SIG_MAX)
-			at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "{%s}", res->v[i].name);
+			at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "{%s}", got.name[i]);
 	return 0;
 }
 
@@ -68,8 +74,9 @@ static struct run scan_once(kof_engine *eng, const uint8_t *b, uint64_t n, long 
 		r.rc = -1;
 		return r;
 	}
+	kscan_on_debug(sc, notes_on, &pend);
+	memset(&pend, 0, sizeof pend);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;

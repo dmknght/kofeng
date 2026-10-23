@@ -280,7 +280,7 @@ def resize_while_open_leaves_no_ghost_frame():
             v.resize(rows, cols)
             corners = v.text().count('\u256d')
             check(corners == 1, '%d dialog boxes on screen after resize to %dx%d' % (corners, rows, cols))
-            n = sum(1 for l in v.snapshot() if 'no marker selected' in l)
+            n = sum(1 for l in v.snapshot() if 'no verdict' in l)
             check(n <= 1, 'stale status line left behind at %dx%d' % (rows, cols))
 
 

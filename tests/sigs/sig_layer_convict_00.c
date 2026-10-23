@@ -17,5 +17,5 @@ KOF_DEFINE_STR(word, "CONVICT", KOF_CASE_EXACT, KOF_WORD_SUBSTRING);
 KOF_DEFINE_SCAN
 {
 	if (kof_find_str(everything, word))
-		KOF_SCAN_INFECT("Test");
+		{ kof_debug("LayerConvict#Test", 0); return; }
 }

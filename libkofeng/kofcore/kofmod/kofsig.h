@@ -24,14 +24,14 @@
  * THIS FILE IS THE UMBRELLA. A module includes it and nothing under it; the
  * parts are split by what they are for, and the docs sit with their code:
  *
- *   kofabi.h       ABI version, finding level
+ *   kofabi.h       ABI version
  *   kofobjfmt.h    object format, target axis, format and arch names
  *   kofname.h      what a family name and a comment may hold
  *   kofregion.h    region masks, extent bound, measured region shape
  *   kofcontent.h   struct kof_content, the vtable behind ctx->content
  *   kofentry.h     decoder ids, entry kinds, struct kof_entry
  *   kofctx.h       struct kof_obj_ctx, the context a module is handed
- *   kofdefine.h    kof_scan / kof_unpack / kof_cure and the macros defining them
+ *   kofdefine.h    kof_scan / kof_unpack and the macros defining them
  *   kofsearch.h    kof_find_str and its folds, offset forms, anchors
  *   kofmeasure.h   kof_mutation_score and the similarity measures
  *   kofdiagnose.h  kof_diag, diagnose ids, node sharing
@@ -40,7 +40,7 @@
  *   kofmodemu.h    driving the interpreter, reading the machine and the code
  *   kofverdict.h   engine, verdict and malware type lists
  *   kofdeclare.h   declarations the build reads: targets, names, strings
- *   kofhit.h       reporting, marking, curing
+ *   kofhit.h       marking, noting
  */
 
 #ifndef KOFENG_KOFSIG_H

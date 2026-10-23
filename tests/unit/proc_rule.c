@@ -1,14 +1,15 @@
 /*
  * proc_rule.c - the process path, end to end, over synthetic records.
  *
- * WHAT IT IS ACTUALLY TESTING, which is not the two rules.
+ * WHAT IT IS ACTUALLY TESTING, which is not the two fixture modules
+ * (tests/sigs/sig_proc_revshell_00.c and sig_proc_kthread_00.c).
  *
- * It is testing that a collector can hand the engine a process and have a rule
- * in the database decide about it, with no C in between. Every link has to
+ * It is testing that a collector can hand the engine a process and have a module
+ * in the database look at it, with no C in between. Every link has to
  * hold for that: the builder writes the arena in region order, the parser
  * validates the offsets and fills the view, the target byte routes the object
- * to modules that declared KOF_EVT_PROC and to no others, and the rule reads
- * the view and reports. A break anywhere comes back as silence, which is why
+ * to modules that declared KOF_EVT_PROC and to no others, and the module reads
+ * the view and says what it saw (a note). A break anywhere comes back as silence, which is why
  * this asserts on the NEGATIVE cases as hard as on the positive ones - a
  * rule that fires on everything passes any test that only checks it fires.
  *
@@ -22,6 +23,7 @@
 #include <string.h>
 
 #include "kofeng.h"
+#include "notes.h"
 #include "../../libkofeng/kofcore/kofmod/proc.h"
 #include "kofproc.h"
 #include "../../libkofeng/analyzers/parsers/processes/proc_parse.h"
@@ -43,13 +45,15 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct seen *s = (struct seen *)user;
+	struct note_list got;
 
 	(void)name; (void)bytes; (void)len;
+	notes_here(&got);
 	s->examined = res ? (int)res->examined : -1;
 	s->broken = res ? (int)res->broken : -1;
-	if (res && res->n) {
-		snprintf(s->name, sizeof s->name, "%s", res->v[0].name);
-		s->n += (int)res->n;
+	if (res && got.n) {
+		snprintf(s->name, sizeof s->name, "%s", got.name[0]);
+		s->n += (int)got.n;
 	}
 	return 0;
 }
@@ -63,6 +67,7 @@ static const char *scan_rec(kof_scanner *sc, const struct kof_proc_build *b,
 	uint32_t n;
 
 	memset(s, 0, sizeof *s);
+	notes_clear();
 	s->examined = -99;   /* so "callback never fired" is visible */
 	n = kof_proc_build_rec(b, rec, sizeof rec);
 	if (!n) {
@@ -100,7 +105,7 @@ static void base_revshell(struct kof_proc_build *b)
 
 int main(int argc, char **argv)
 {
-	const char *db = argc > 1 ? argv[1] : "build/release/databases";
+	const char *db = argc > 1 ? argv[1] : "build/test/databases-sigs";
 	kof_engine  *eng;
 	kof_scanner *sc;
 	struct kof_proc_build b;
@@ -112,6 +117,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	sc = kscan_new(eng);
+	notes_watch(sc);
 	if (!sc) {
 		keng_close(eng);
 		return 2;

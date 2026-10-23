@@ -181,7 +181,7 @@ static void pe_budget(void)
 	/* NOT CLAIMED CLEAN: no verdict and no broken mark is fine when the object
 	 * carries a finding of its own (an object with a detection is not made
 	 * "unfinished" by a diagnose that could not add to it - see
-	 * sx_syndrome_verdict); what must not happen is no finding AND no mark. */
+	 * sx_verdict_make); what must not happen is no finding AND no mark. */
 	CK(said(&r.o[0], "Dropper") || r.o[0].n > 0);
 	printf("    measured: verdict '%s', broken=%u, examined=%u, findings=%u\n",
 	       r.o[0].verdict, r.o[0].broken, r.o[0].examined, r.o[0].n);

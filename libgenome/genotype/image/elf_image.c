@@ -75,7 +75,7 @@
 #define EM_SPARCV9	43
 #define EM_OPENRISC	92
 #define EM_XTENSA	94
-#define EM_CRIS		113
+#define EM_CRIS		76      /* ELF gABI and glibc: 113 is Altera Nios II, which this called CRIS (image_elf_attack Q1) */
 #define EM_MICROBLAZE	189
 #define EM_X86_64	62
 #define EM_AARCH64	183
@@ -256,8 +256,10 @@ static int read_phdr(kof_buf ph, int is64, int be, struct kgenome_elf_seg *s,
 }
 
 /* sh_link and sh_info, which sit after the fields the section needs to be counted at
- * all: a header cut off before them is still a section (it was one before they were read
- * and stays one), with the two words zero, which no consumer reads as a link. */
+ * all: a caller handing a SHORTER buffer than a whole header gets the two words zero, which no
+ * consumer reads as a link. (parse_sections never does: kof_slice answers an empty buffer for a header
+ * that is not wholly inside the object, so a cut header is the end of the table, said - the comment
+ * here used to promise a section, image_elf_attack Q2.) */
 static int link_info(kof_buf sh, uint64_t at, int be, uint32_t *link, uint32_t *info)
 {
 	if (!kof_rd_u32(sh, at, be, link))
@@ -1304,6 +1306,63 @@ uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 		 * not. */
 		fn(user, kgenome_elf_reloc_call_at(p, r), r->sym, nm);
 		n++;
+	}
+	return n;
+}
+
+/*
+ * THE IMPORTS OF A LINKED OBJECT: the dynamic relocations that fill a GOT slot with the address
+ * of a named symbol - GLOB_DAT (6) and JUMP_SLOT (7), the same two numbers on x86-64 and on i386.
+ * A relocation section is told by its sh_link naming the dynamic symbol table, not by its name
+ * (.rela.plt, .rel.plt, .rela.dyn are the linker's spelling), and either form is read - RELA on
+ * x86-64, REL on i386 - at either width through the same record reader the relocatable table uses.
+ * `r_offset` of a linked object is the slot's ADDRESS, so it is reported as it is; mapping it to
+ * a file offset is the caller's, because a caller wants the address (a call through the slot
+ * computes it) and not the byte.
+ */
+uint32_t kgenome_elf_imports(kof_buf f, const struct kgenome_elf_info *p,
+			 kgenome_elf_import_fn fn, void *user,
+			 enum kgenome_status *status)
+{
+	struct kgenome_elf_symtab t;
+	uint32_t i, n = 0;
+
+	if (status)
+		*status = KGENOME_OK;
+	if (!f.p || !p || !p->valid || !fn || p->e_type == KGENOME_ELF_REL ||
+	    (p->e_machine != 3u && p->e_machine != 62u))
+		return 0;
+	if (!kgenome_elf_symtab_of(f, p, KGENOME_ELF_SYMTAB_DYN, &t) || !t.n || !t.strn)
+		return 0;
+	for (i = 0; i < p->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
+		const int rela = p->sec[i].type == KGENOME_ELF_SHT_RELA;
+		uint32_t lk = p->sec_link[i];
+		uint64_t k, step, have;
+
+		if (!rela && p->sec[i].type != KGENOME_ELF_SHT_REL)
+			continue;
+		if (lk >= p->sec_count || lk >= KGENOME_ELF_MAX_SECTIONS ||
+		    p->sec[lk].type != KGENOME_ELF_SHT_DYNSYM)
+			continue;
+		step = REL_STEP(&t, rela);
+		have = kof_clip_len(f.n, p->sec[i].file_off, p->sec[i].file_size);
+		for (k = 0; k + step <= have; k += step) {
+			struct kgenome_elf_symbol sy;
+			uint64_t roff = 0;
+			uint32_t rty = 0, si = 0;
+			char nm[KGENOME_SYMNAME_MAX];
+
+			if (!rel_at(f, &t, p->sec[i].file_off + k, &roff, &rty, &si))
+				break;
+			if ((rty != 6u && rty != 7u) || !si ||
+			    !kgenome_elf_symbol_at(f, &t, si, &sy) ||
+			    !sy.nameoff || sy.nameoff >= t.strn)
+				continue;
+			if (str_read(f, t.str + sy.nameoff, nm, sizeof nm) && status)
+				*status = kgenome_status_merge(*status, KGENOME_TRUNCATED);
+			fn(user, roff, t.str + sy.nameoff, rty, nm);
+			n++;
+		}
 	}
 	return n;
 }

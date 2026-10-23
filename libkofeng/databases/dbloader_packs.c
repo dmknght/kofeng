@@ -1,5 +1,5 @@
 /*
- * dbloader_packs.c - mapping a pack and reading the diagnose, syndrome and disease tables beside it. Split from dbloader.c; the text is unchanged.
+ * dbloader_packs.c - mapping a pack and reading the diagnose and disease tables beside it. Split from dbloader.c; the text is unchanged.
  */
 
 #define _GNU_SOURCE
@@ -209,15 +209,15 @@ static int pack_cmp(const void *a, const void *b)
  * 65th pack of a directory was not opened and a valid pack past 4 MiB was refused,
  * each with nothing a host could read. A directory's packs are now listed without
  * a bound on how many, and the bound that remains is the ALLOWANCE - the bytes of
- * every pack of a kind it reads (the diagnose packs share one; the syndrome pack
- * and the disease table each have their own). A file that does not fit what is
+ * every pack of a kind it reads (the diagnose packs share one; the disease table
+ * has its own). A file that does not fit what is
  * left is refused WHOLE and counted (diag_packs_refused, kdb_diag_packs_refused).
  */
 #define KOF_KDIG_ALLOW ((uint64_t)256u << 20)
 
 /*
- * A .kdig READ WHOLE, once, for the three kinds of file that share the shape: the
- * diagnose packs, the syndrome pack and the disease table. At most what is left of
+ * A .kdig READ WHOLE, once, for the two kinds of file that share the shape: the
+ * diagnose packs and the disease table. At most what is left of
  * the allowance still `*left` (one per kind of file), at least `min`, starting with `magic` and
  * version 1.
  *
@@ -559,75 +559,32 @@ void kof_db_load_diagnoses(struct kof_engine *e, const char *dir)
 }
 
 /*
- * THE SYNDROMES, from syndromes.kdig - see ksigbuilder's build_syndromes for the
- * layout. Refused WHOLE when the header does not add up, and a record that does
- * not is skipped, as for a diagnose pack: one bad syndrome must not take the
- * others with it and must not be believed either.
+ * FILES AN OLDER BUILD WROTE BESIDE THE DIAGNOSES AND THIS ONE NO LONGER READS.
+ *
+ * A database directory built before the verdict was made of diseases alone holds
+ * `syndromes.kdig`, a pack this build has no reader for. It is refused, not taken
+ * for an absent file: said on stderr and counted in diag_packs_refused
+ * (kdb_diag_packs_refused), so a host sees that part of the directory it was given
+ * is not in use. The only name that lives on in this tree is that file's.
  */
-void kof_db_load_syndromes(struct kof_engine *e, const char *dir)
+void kof_db_refuse_retired(struct kof_engine *e, const char *dir)
 {
-	char p[4096];
-	uint8_t *buf;
-	size_t got, n_rec, i, n = 0;
-	struct kof_synd_in *in = NULL;
-	uint32_t *ids = NULL;
-	size_t n_ids = 0;
-	uint64_t left = KOF_KDIG_ALLOW;
-	/* The bits of a type mask that name a type: anything else is not a syndrome
-	 * of this build. */
-	const uint32_t valid = (uint32_t)((1ull << KOF_MALTYPE_COUNT) - 1u);
+	static const char *const retired[] = { "syndromes.kdig" };
+	size_t i;
 
-	if ((size_t)snprintf(p, sizeof p, "%s/syndromes.kdig", dir) >= sizeof p)
-		return;
-	buf = read_kdig(e, &left, p, "KSYN", "syndrome pack", 8, &got);
-	if (!buf)
-		return;
-	if (!kdig_table(buf, got, &n_rec)) {
-		free(buf);
-		fprintf(stderr, "dbloader: %s has a table longer than the file\n", p);
-		return;
-	}
-	in = calloc(n_rec ? n_rec : 1u, sizeof *in);
-	/* A record names at most 255 diseases, four bytes each, so the file's own
-	 * size bounds what is kept. */
-	ids = malloc((n_rec * 255u + 1u) * sizeof *ids);
-	if (!in || !ids)
-		goto out;
-	for (i = 0; i < n_rec; i++) {
-		uint64_t off, rl;
-		const uint8_t *r;
-		uint32_t cnt, k, mask;
-		size_t first = n_ids;
+	for (i = 0; i < sizeof retired / sizeof retired[0]; i++) {
+		char p[4096];
+		FILE *f;
 
-		/* type mask, count, then count ids: the length must be exactly that */
-		if (!kdig_record(buf, got, i, &off, &rl) || rl < 5u)
+		if ((size_t)snprintf(p, sizeof p, "%s/%s", dir, retired[i]) >= sizeof p)
 			continue;
-		r = buf + off;
-		cnt = r[4];
-		mask = (uint32_t)r[0] | ((uint32_t)r[1] << 8) |
-		       ((uint32_t)r[2] << 16) | ((uint32_t)r[3] << 24);
-		if (rl != 5u + 4u * (uint64_t)cnt || !cnt || !(mask & valid) ||
-		    (mask & ~valid)) {
-			fprintf(stderr, "dbloader: syndrome %zu of %s is not one this "
-				"build can read\n", i, p);
+		f = fopen(p, "rb");
+		if (!f)
 			continue;
-		}
-		for (k = 0; k < cnt; k++) {
-			const uint8_t *q = r + 5u + 4u * k;
-
-			ids[n_ids++] = (uint32_t)q[0] | ((uint32_t)q[1] << 8) |
-				       ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
-		}
-		in[n].type_mask = mask;
-		in[n].n_dis = cnt;
-		in[n].dis = ids + first;
-		n++;
+		fclose(f);
+		fprintf(stderr, "dbloader: %s was written by an older build and is not read\n", p);
+		e->diag_packs_refused++;
 	}
-	e->synd = kof_synd_build(in, (uint32_t)n);
-out:
-	free(in);
-	free(ids);
-	free(buf);
 }
 
 /*
@@ -674,9 +631,9 @@ void kof_db_load_diseases(struct kof_engine *e, const char *dir)
 		id = (uint32_t)buf[at] | ((uint32_t)buf[at + 1u] << 8) |
 		     ((uint32_t)buf[at + 2u] << 16) | ((uint32_t)buf[at + 3u] << 24);
 		L = buf[at + 5u];
-		/* A type is a kof_maltype, or 0xff for a name only a syndrome mentions. */
+		/* A type is a kof_maltype and nothing else: a name no detector declared is not in the table. */
 		if (!id || (i && id <= prev) || !L || at + 6u + L > got ||
-		    (buf[at + 4u] >= KOF_MALTYPE_COUNT && buf[at + 4u] != 0xffu))
+		    buf[at + 4u] >= KOF_MALTYPE_COUNT)
 			goto bad;
 		tab[i].id = id;
 		tab[i].type = buf[at + 4u];
@@ -694,6 +651,7 @@ void kof_db_load_diseases(struct kof_engine *e, const char *dir)
 	return;
 bad:
 	fprintf(stderr, "dbloader: %s does not add up; its names are not used\n", p);
+	e->diag_packs_refused++;
 	free(tab);
 	free(pool);
 	free(buf);

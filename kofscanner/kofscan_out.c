@@ -22,18 +22,16 @@ const char *ksn_col(const struct run *r, const char *c)
 }
 
 
-/* The colour a level speaks in. */
 /*
  * ONE COLUMN, AND WHAT GOES IN IT.
  *
  * The line was "<LEVEL>  <path>: <name>", which spent its widest, first and
  * most-read column on the least specific thing it knew. A reader scanning a
- * page of results wants the finding, and the level is already in the colour it
- * is printed in - so the name takes the column and the level is what colours
- * it. "INFECTED ... : ELF-x64/Botnet:Mirai#el7jd" said the same thing twice.
+ * page of results wants the verdict, so the name takes the column and the colour
+ * says what kind of line it is.
  *
  * Everything printed per object follows that rule: the most specific thing
- * known goes first, coloured by how strongly it is meant. Where there is
+ * known goes first. Where there is
  * nothing more specific - a file that came back clean - the status word stays,
  * because it IS the whole of what is known.
  *
@@ -42,13 +40,6 @@ const char *ksn_col(const struct run *r, const char *c)
  * its path right rather than being cut.
  */
 #define W_TAG 31
-
-static const char *level_col(uint32_t level)
-{
-	if (level == KOF_LEVEL_INFECT)
-		return C_RED;
-	return level == KOF_LEVEL_HEUR ? C_MAG : C_YEL;
-}
 
 
 
@@ -266,27 +257,33 @@ void ksn_say(struct run *r, const char *colour, const char *tag,
 }
 
 /*
- * Report one finished file under -v, once.
- *
- * Only the clean verdict is streamed here: a finding has already printed in
- * full where it was found, and an unexamined file is reported unconditionally
- * by the sweep at exit - see the note there for why "OK" would be a lie.
- */
-/*
  * A VERDICT, FROM THE ENGINE, ALREADY COMPOSED - see kof_on_event_detected.
  *
- * All this tool does with it is put it on the screen. It does not choose
- * which findings count, does not compose a name and does not know the form
- * of one: the engine decided and decoded, and a second tool asking the same
- * engine gets the same line.
+ * All this tool does with it is put it on the screen. It does not compose a name
+ * and does not know the form of one: the engine decided and decoded, and a second
+ * tool asking the same engine gets the same line. Under -v the diagnoses the
+ * verdict was made of follow it, one indented line each, named by the engine
+ * (kdb_diagnose_name); a list the engine cut says how many it did not list.
  */
 void ksn_on_event_detected(const char *object, const char *verdict,
 		       const struct kof_finding *f, void *user)
 {
 	struct run *r = user;
+	uint32_t i;
 
-	if (r && object && verdict)
-		ksn_say(r, level_col(f ? f->level : 0u), verdict, object);
+	if (!r || !object || !verdict)
+		return;
+	ksn_say(r, C_RED, verdict, object);
+	if (!r->verbose || !f)
+		return;
+	for (i = 0; i < f->n_diag; i++) {
+		const char *nm = kdb_diagnose_name(r->eng, f->diag[i]);
+
+		printf("  diagnose %s\n", nm ? nm : "?");
+	}
+	if (f->diag_total > f->n_diag)
+		printf("  diagnose (%u more not listed)\n",
+		       (unsigned)(f->diag_total - f->n_diag));
 }
 
 void ksn_v_say_file(struct run *r, const char *file, size_t flen)
@@ -298,7 +295,7 @@ void ksn_v_say_file(struct run *r, const char *file, size_t flen)
 	e = kverdict_filemap_find(r->files, file, flen);
 	if (!e || e->host)
 		return;
-	if (e->level < 0 && !e->broken && e->examined) {
+	if (!e->has_verdict && !e->broken && e->examined) {
 		e->host = 1;
 		ksn_say(r, C_GRN, "OK", e->file);
 	}
@@ -318,52 +315,6 @@ static void v_file_turn(struct run *r, const char *name, size_t flen)
 		r->cur_file[flen] = '\0';
 		r->cur_len = flen;
 	}
-}
-
-/*
- * Apply a described repair to the file it was described against.
- *
- * IN PLACE AND IN ORDER: the patches first, then the length. Opening for
- * update rather than rewriting means a file that cannot be written is left
- * exactly as it was rather than half replaced.
- *
- * NO BACKUP IS TAKEN HERE. Whether the original is worth keeping is a policy
- * question with a different answer in a lab and on a mail gateway, and
- * guessing it in a scanner would be answering it for everybody.
- */
-static int repair_apply(const char *path, const struct kof_repair *rp)
-{
-	/*
-	 * kof_fopen_rw AND kof_fseek64, NOT fopen AND fseek.
-	 *
-	 * The opener refuses to follow a link: this file was identified by
-	 * scanning THIS file, and if the name now points somewhere else the
-	 * answer is to fail rather than to repair whatever it points at.
-	 *
-	 * The seek is sixty-four bit. `fseek` takes a long, this offset is a
-	 * uint64, and on mingw-w64 a long is thirty-two bits - so the cast that
-	 * used to be here wrapped, and a wrapped offset does not fail, it puts
-	 * the sixteen bytes of a repair somewhere else in the user's file. The
-	 * scanner maps a top level file whole however large it is, and
-	 * kcure_patch bounds the offset by the OBJECT, so the offset really
-	 * can pass 4 GB.
-	 */
-	FILE *f = kof_fopen_rw(path);
-	uint32_t i;
-	int ok = 1;
-
-	if (!f)
-		return 0;
-	for (i = 0; i < rp->n_fix && ok; i++) {
-		if (!kof_fseek64(f, rp->fix[i].off) ||
-		    fwrite(rp->fix[i].b, 1, rp->fix[i].n, f) != rp->fix[i].n)
-			ok = 0;
-	}
-	if (fclose(f) != 0)
-		ok = 0;
-	if (ok && rp->truncate)
-		ok = kof_truncate_file(path, rp->truncate);
-	return ok;
 }
 
 int ksn_on_object(const char *name, const void *bytes, uint64_t len,
@@ -393,84 +344,16 @@ int ksn_on_object(const char *name, const void *bytes, uint64_t len,
 	 * leaves the line alone, which is what the rate limit is protecting.
 	 */
 
-	/* The findings print as the engine hands them over - see ksn_on_event_detected. The
-	 * file-level roll-up (which file this object belongs to, the worst thing found
-	 * anywhere in its tree, whether anything examined it) is the engine's too: one call,
-	 * kverdict_filemap_fold, further down. */
+	/* The verdict prints as the engine hands it over - see ksn_on_event_detected. The
+	 * file-level roll-up (which file this object belongs to, its verdict, whether
+	 * anything examined it) is the engine's too: one call, kverdict_filemap_fold,
+	 * further down. */
 
 	/*
-	 * AND THE REPAIR, WHICH IS NOT A SEPARATE DECISION.
-	 *
-	 * CURE IS WHAT DETECTION MEANS HERE, not a second thing an operator
-	 * opts into. A rule that carries a kof_cure has said what the damage
-	 * is and how to undo it; the engine ran that cure only because the
-	 * rule REPORTED - see the gate in scan.c, which needs rep_valid and
-	 * cure_have together - so by the time a repair exists, the question
-	 * "is this file infected" has already been answered yes by the rule
-	 * that also knows the answer to "what did it change".
-	 *
-	 * This used to sit behind --cure, on the reasoning that a scanner
-	 * which rewrites what it finds cannot be run twice. That reasoning
-	 * describes a scanner that GUESSES. This one does not: the repair is
-	 * two numbers a rule read out of the file being repaired, the host
-	 * refuses any request that does not fit the object, and the file is
-	 * still REPORTED as infected afterwards - the verdict is not softened
-	 * by having been acted on.
-	 *
-	 * ONLY AT THE TOP LEVEL. A repair is described against the OBJECT the
-	 * module saw, and for a child that is bytes the engine produced in
-	 * memory, not a file on disk - there is nothing to write it back to.
-	 */
-	if (res->repair.n_fix && flen == strlen(name)) {
-		uint32_t q;
-		int done = repair_apply(name, &res->repair);
-
-		/*
-		 * GREEN, AND CAPITALISED, BECAUSE IT IS ADDRESSED TO A PERSON.
-		 *
-		 * Every other tag on this column is the verdict, and the verdict
-		 * speaks in the colour of its level - red for infected and so on.
-		 * This one is not a verdict, it is the only line in the output
-		 * that says the scanner CHANGED something, and the reader wants
-		 * to find it at a glance among the red. Green says it went well;
-		 * a repair that could not be written stays red, because that is
-		 * a file still infected and still needing a hand.
-		 */
-		if (done)
-			r->repaired++;
-		ksn_say(r, done ? C_GRN : C_RED,
-		    done ? "  Repaired" : "  NOT repaired", name);
-		/*
-		 * AND THE BYTES ONLY UNDER -v.
-		 *
-		 * "four bytes at 24" is for somebody checking the repair against
-		 * the rule that described it, which is a thing done once while
-		 * writing the rule and never during a sweep. On a run that cures
-		 * a hundred files it is three hundred lines between the reader
-		 * and the summary.
-		 */
-		if (r->verbose) {
-			for (q = 0; q < res->repair.n_fix; q++)
-				printf("             %llu bytes at %llu\n",
-				       (unsigned long long)res->repair.fix[q].n,
-				       (unsigned long long)res->repair.fix[q].off);
-			if (res->repair.truncate)
-				printf("             ends at %llu\n",
-				       (unsigned long long)res->repair.truncate);
-		}
-		if (!done)
-			printf("             could not be written\n");
-	}
-
-	/*
-	 * AND WHERE THE INFECTION IS, when a rule said so - see
+	 * AND WHERE THE INFECTION IS, when a module said so - see
 	 * `struct kof_infected`.
 	 *
-	 * NOT UNDER THE REPAIR, and not conditional on one. A rule may locate a
-	 * family's body without being able to put the host back, and that is
-	 * exactly the case where a reader most wants to be told where it is.
-	 * Printed under -v for the same reason the repair's byte counts are:
-	 * it is for somebody checking a rule, not for a sweep.
+	 * Printed under -v: it is for somebody checking a module, not for a sweep.
 	 */
 	if (r->verbose && res->n_infected) {
 		uint32_t q;
@@ -484,19 +367,19 @@ int ksn_on_object(const char *name, const void *bytes, uint64_t len,
 	}
 
 	/*
-	 * BROKEN is secondary to a finding, not a second verdict beside it.
+	 * BROKEN is secondary to a verdict, not a second one beside it.
 	 *
-	 * A context-keyed encoder comes back both as a rule's Heur:Shellcode and,
-	 * from the unpacker that could not read its key, as "the content is
-	 * encrypted". Those are one thing said twice: the finding is the answer,
-	 * the encryption is only why nothing further could be read - so with a
-	 * finding present it is shown under -v and nowhere else. With no finding it
-	 * IS the verdict and always prints. The reason is still tallied either way.
+	 * A context-keyed encoder comes back both as a verdict and, from the
+	 * unpacker that could not read its key, as "the content is encrypted".
+	 * Those are one thing said twice: the verdict is the answer, the encryption
+	 * is only why nothing further could be read - so with a verdict present it
+	 * is shown under -v and nowhere else. With no verdict it IS the answer and
+	 * always prints. The reason is still tallied either way.
 	 */
 	if (res->broken) {
 		if (res->broken < KOF_BROKEN_COUNT)
 			r->by_reason[res->broken]++;
-		if (res->n == 0 || r->verbose)
+		if (!res->has_verdict || r->verbose)
 			ksn_say(r, C_CYN, kverdict_broken_name(res->broken), name);
 	}
 
@@ -522,15 +405,6 @@ int ksn_on_object(const char *name, const void *bytes, uint64_t len,
 	/* This object's verdict is in the file's entry now, so a change of file
 	 * means the previous one is finished - see run.cur_file. */
 	v_file_turn(r, name, flen);
-
-	if (res->dropped) {
-		char tag[48];
-
-		snprintf(tag, sizeof tag, "+%u finding(s) not reported",
-			 res->dropped);
-		ksn_say(r, C_DIM, tag, name);
-		r->dropped += res->dropped;
-	}
 
 	/*
 	 * PUT THE PROGRESS LINE BACK, and stop here if the reader asked.

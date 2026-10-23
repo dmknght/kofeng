@@ -176,6 +176,32 @@ unsigned kgenome_x86_wgpr(const struct kgenome_x86_insn *in);   /* general regis
 #define KGENOME_X86_TEXT 160u
 size_t kgenome_x86_format(const struct kgenome_x86_insn *in, uint64_t rip, char *buf, size_t cap);
 
+/* Shorten the hex immediates of a formatted instruction in place: 0x0000000000000022 -> 0x22 (a value that is zero keeps one digit). Nothing else changes. */
+void kgenome_x86_shorten(char *text);
+
+/*
+ * WHAT A CONDITIONAL JUMP TESTS, in words: "rdi <= 0x0 (signed)", "(rax & 0x3) != 0", "ZF=1 (equal / zero)". `jcc` is a Jcc (anything else: 0 and
+ * `buf` empty). `setter` is the instruction that last set the flags and `setter_rip` its address, or NULL when it is not known; when it is a CMP or a
+ * TEST the answer is the comparison it made, in its own operands, and otherwise it is the flag condition alone - the same words either way for the
+ * flags, because that is all a jump has of its own. Signed and unsigned comparisons are told apart, because `jl` and `jb` are not the same test.
+ * Returns the length written, 0 when `jcc` is not a conditional jump or `cap` is too small.
+ */
+size_t kgenome_x86_cond_text(const struct kgenome_x86_insn *jcc, const struct kgenome_x86_insn *setter, uint64_t setter_rip,
+			     char *buf, size_t cap);
+
+/*
+ * WHAT A CMP OR A TEST COMPARES, in words: "compare rax with rcx", "compare rdi with 0" (a TEST of a value with itself), "test rax & rcx". The comparison only; what a
+ * jump makes of it is kgenome_x86_cond_text's. Returns the length written, 0 when `in` is neither a CMP nor a TEST or `cap` is too small.
+ */
+size_t kgenome_x86_cmp_text(const struct kgenome_x86_insn *in, uint64_t rip, char *buf, size_t cap);
+
+/*
+ * DOES THIS INSTRUCTION LEAVE THE FLAGS AS THEY WERE: a move, a load of an address, a nop, a push or a pop, a conditional jump or a set / move on
+ * a condition. A reader following the flags from a CMP to the jump that reads them steps over these and stops at anything else; an instruction
+ * not listed here is treated as changing them, which can only make an answer say less. 1 or 0.
+ */
+int kgenome_x86_keeps_flags(const struct kgenome_x86_insn *in);
+
 /* Build operand k (0 <= k < kgenome_x86_nops) of a decoded instruction. */
 void kgenome_x86_operand(const struct kgenome_x86_insn *in, unsigned k, struct kgenome_x86_op *out);
 

@@ -38,6 +38,7 @@
 #include <dirent.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 
 /*
  * UNDER A SANITISER A CRASH IS AN EXIT CODE, NOT A SIGNAL. AddressSanitizer reports and then
@@ -282,7 +283,12 @@ static inline int he_on_object(const char *name, const void *bytes, uint64_t len
 		return 0;
 	t->objects++;
 	t->bytes += len;
-	t->findings += res ? res->n : 0u;
+	{
+		struct note_list got;
+
+		notes_here(&got);
+		t->findings += got.n;
+	}
 	if (nl > t->max_name)
 		t->max_name = nl;
 	if (d > t->max_depth)

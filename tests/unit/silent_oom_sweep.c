@@ -4,7 +4,7 @@
  * THE PROPERTY (CLAUDE.md rule 4, QUALITY_AUDIT II.3: "failure to allocate is a verdict,
  * not a crash"): when an allocation inside a scan is refused, the scan either gives the same
  * answer it gives with memory, or it SAYS it did not - an object marked broken
- * (KOF_BROKEN_*), a counter of kof_stats that moved (limit_hits and the others), a syndrome
+ * (KOF_BROKEN_*), a counter of kof_stats that moved (limit_hits and the others), a verdict
  * flagged incomplete, a non-zero return. The one answer that is a lie is a DIFFERENT result
  * (a finding gone, a child never opened) with every signal at zero: "examined, clean".
  *
@@ -27,10 +27,21 @@
 
 #define _GNU_SOURCE
 
+/* the big-endian objects of the endian tests: the view whose plan, canonical bytes and functions are the
+ * allocations of scan_norm_endian.c (fix_engine2: the sweep had no object that reaches them). Sized as
+ * endian_view.c sizes them - a smaller object is under the normaliser's floor and gets no view - and
+ * included first: the kit's CK is the lib tests' and is dropped for this file's. */
+#define EK_MAX 16384u
+#define EK_CODE_UNITS 1500u
+#include "../lib/genome/endian_kit.h"
+#undef CK
+#include "norm_pe_fx.h"
+
 #include "caps_fix.h"
 #include "caps_pe_fix.h"
 #include "failalloc.h"
 #include "known_miss.h"
+#include "notes.h"
 
 #include <stdarg.h>
 
@@ -39,7 +50,7 @@
 struct run {
 	char     sig[SIG_MAX];
 	unsigned n_obj;
-	unsigned signalled;     /* objects with broken != 0, syndrome.incomplete, or findings dropped */
+	unsigned signalled;     /* objects with broken != 0 or verdict_incomplete */
 	int      rc;
 };
 
@@ -48,18 +59,20 @@ static int on_obj(const char *name, const void *bytes, uint64_t len,
 {
 	struct run *r = user;
 	size_t at = strlen(r->sig);
+	struct note_list got;
 	uint32_t i;
 
 	(void)bytes;
+	notes_here(&got);
 	r->n_obj++;
-	if (res->broken || (res->has_syndrome && res->syndrome.incomplete) || res->dropped)
+	if (res->broken || res->verdict_incomplete)
 		r->signalled++;
 	if (at + 256u < SIG_MAX)
 		at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "[%s|%llu|%u]", name ? name : "",
-				       (unsigned long long)len, res->n);
-	for (i = 0; i < res->n; i++)
+				       (unsigned long long)len, got.n);
+	for (i = 0; i < got.n; i++)
 		if (at + 160u < SIG_MAX)
-			at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "{%s}", res->v[i].name);
+			at += (size_t)snprintf(r->sig + at, SIG_MAX - at, "{%s}", got.name[i]);
 	return 0;
 }
 
@@ -79,13 +92,12 @@ static struct run scan_once(const uint8_t *b, uint64_t n, long nth, long *count,
 	*reached = 0;
 	if (stat_moved)
 		*stat_moved = 0;
-	sc = kscan_new(eng);
+	sc = notes_scanner(eng);
 	if (!sc) {
 		r.rc = -1;
 		return r;
 	}
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -118,6 +130,8 @@ static struct sweep_out sweep(const char *what, const uint8_t *b, uint64_t n, lo
 	(void)scan_once(b, n, 0, &count, &reached, &moved);      /* warm: any one-time table */
 	ctl = scan_once(b, n, 0, &count, &reached, &moved);
 	o.allocs = count;
+	if (verbose)
+		printf("  control [%s]: %u object(s) %s\n", what, ctl.n_obj, ctl.sig);
 	CK(ctl.rc >= 1 && ctl.n_obj >= 1u);
 	for (i = 1; i <= count; i += (i > stride_after ? 1 + i / stride_after : 1)) {
 		struct run r;
@@ -253,6 +267,29 @@ static uint64_t zip_of(unsigned n)
 	return (uint64_t)(p + 22 - zip_img);
 }
 
+/* A big-endian MIPS object: a rule cut from the little-endian build can use its view, so the scan makes
+ * one, and the view's endian plan is built, applied, described and its functions remapped. */
+static uint64_t elf_be_mips(void)
+{
+	static struct ek_obj be;
+
+	ek_build(&be, &ek_archs[0], 1, 1);
+	memcpy(elf_img, be.b, be.n);
+	return be.n;
+}
+
+/* A PE of four writable code sections, each with a wide string, and a data section: the view narrows the
+ * strings and keeps the code, and its region table, boundary table and image description are the
+ * allocations of scan_norm.c (norm_defect_engine N3, N5-N7 found refusals there one at a time). */
+static uint64_t pe_wide_view(void)
+{
+	static uint8_t big[PE_MAX];
+	uint32_t n = build_pe(big, 4, 0xe0000020u);
+
+	memcpy(pe_img, big, n);
+	return n;
+}
+
 int main(int argc, char **argv)
 {
 	struct sweep_out s;
@@ -289,6 +326,20 @@ int main(int argc, char **argv)
 	n = elf_padded();
 	s = sweep("padded elf", elf_img, n, 1500, verbose);
 	printf("  padded elf: %ld allocations, %ld refused, %ld changed the answer, %ld silently (+%ld with no object at all)\n",
+	       s.allocs, s.refused, s.lossy, s.silent, s.empty);
+	CK(s.silent == 0);
+	empty += s.empty;
+
+	n = elf_be_mips();
+	s = sweep("big-endian mips elf", elf_img, n, 1500, verbose);
+	printf("  big-endian mips elf: %ld allocations, %ld refused, %ld changed the answer, %ld silently (+%ld with no object at all)\n",
+	       s.allocs, s.refused, s.lossy, s.silent, s.empty);
+	CK(s.silent == 0);
+	empty += s.empty;
+
+	n = pe_wide_view();
+	s = sweep("pe with a narrowing view", pe_img, n, 1500, verbose);
+	printf("  pe with a narrowing view: %ld allocations, %ld refused, %ld changed the answer, %ld silently (+%ld with no object at all)\n",
 	       s.allocs, s.refused, s.lossy, s.silent, s.empty);
 	CK(s.silent == 0);
 	empty += s.empty;

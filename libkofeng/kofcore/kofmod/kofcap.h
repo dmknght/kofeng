@@ -18,6 +18,7 @@
  * old name, `struct cell_insn` and `enum kof_arch` included. Engine code uses
  * the KGENOME_ / kgenome_ name. */
 #define KOF_FLOWF_WX                       KGENOME_NUCLEO_F_WX
+#define KOF_FLOWF_BUILT                    KGENOME_NUCLEO_F_BUILT
 #define KOF_NUCLEO_ACTION_READ             KGENOME_NUCLEO_ACTION_READ
 #define KOF_NUCLEO_ACTION_WRITE            KGENOME_NUCLEO_ACTION_WRITE
 #define KOF_NUCLEO_ALLOC                   KGENOME_NUCLEO_ALLOC
@@ -31,6 +32,12 @@
 #define KOF_NUCLEO_CRED_PREPARE            KGENOME_NUCLEO_CRED_PREPARE
 #define KOF_NUCLEO_CRED_SET                KGENOME_NUCLEO_CRED_SET
 #define KOF_NUCLEO_CRYPTO                  KGENOME_NUCLEO_CRYPTO
+#define KOF_NUCLEO_DECODE                  KGENOME_NUCLEO_DECODE
+#define KOF_NUCLEO_EVAL                    KGENOME_NUCLEO_EVAL
+#define KOF_NUCLEO_CREATE                  KGENOME_NUCLEO_CREATE
+#define KOF_NUCLEO_DYNCALL                 KGENOME_NUCLEO_DYNCALL
+#define KOF_NUCLEO_DYNLOAD                 KGENOME_NUCLEO_DYNLOAD
+#define KOF_NUCLEO_REQUEST                 KGENOME_NUCLEO_REQUEST
 #define KOF_NUCLEO_DNS                     KGENOME_NUCLEO_DNS
 #define KOF_NUCLEO_EXEC_IMAGE              KGENOME_NUCLEO_EXEC_IMAGE
 #define KOF_NUCLEO_EXEC_REG                KGENOME_NUCLEO_EXEC_REG

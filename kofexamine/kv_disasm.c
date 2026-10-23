@@ -221,6 +221,8 @@ uint64_t dis_span_of(const struct view *v)
 	return rows > 0 ? (uint64_t)rows * 4u : 64u;
 }
 
+static int dis_label(struct view *v, uint64_t foff, char *out, size_t cap);
+
 /*
  * THE LATEST START THAT STILL FILLS THE PANEL, as a region offset.
  *
@@ -242,27 +244,38 @@ static uint64_t dis_last_start(struct view *v, uint64_t lo, uint64_t end,
 	uint64_t back = (uint64_t)rows * DIS_MAX_INSN;
 	uint64_t at = end > lo + back ? dis_sync(v, end - back) : lo;
 	uint64_t ring[256];
-	unsigned n = 0, cap = rows < 256u ? rows : 256u;
+	uint8_t cost[256];
+	unsigned n = 0, cap = rows < 256u ? rows : 256u, k, sum = 0;
 
 	if (!cap)
 		return lo;
 	if (at < lo)                    /* dis_sync can round to before lo */
 		at = lo;
+	/*
+	 * A ROW IS NOT ALWAYS AN INSTRUCTION: a label takes a row of its own, so
+	 * the last window holds fewer instructions where there are labels. The
+	 * walk therefore keeps what each instruction COSTS in rows (one, and one
+	 * more when a label is drawn above it) and the answer is the latest start
+	 * from which the rows to the end still fill the panel.
+	 */
 	while (at < end) {
-		char line[120];
+		char line[DIS_LINE_MAX], lab[8];
 		uint64_t at0 = at;
 
 		ring[n % cap] = at0;
+		cost[n % cap] = dis_label(v, view_map(v, at0, 0), lab, sizeof lab) ? 2u : 1u;
 		n++;
 		if (!dis_format(v, &at, line, sizeof line, NULL, NULL, NULL,
 				NULL, 0) || at <= at0)
 			break;
 	}
-	/* Fewer than a panelful in the trailing window: it all fits, so the
-	 * window can start at the range's beginning. */
-	if (n <= cap)
-		return lo;
-	return ring[n % cap];   /* the oldest kept - exactly `rows` from the end */
+	/* Walk back from the end until the rows add up to a panelful. */
+	for (k = 0; k < n && k < cap; k++) {
+		sum += cost[(n - 1u - k) % cap];
+		if (sum >= cap)
+			return ring[(n - 1u - k) % cap];
+	}
+	return lo;      /* the whole window is less than a panelful: it all fits */
 }
 
 /* THE LATEST START THAT STILL FILLS THE PANEL over the whole region. */
@@ -539,7 +552,7 @@ void dis_sync_bytes(struct view *v)
 	 * range is for is Copy hex and Declare as hex, and both want whole
 	 * instructions. */
 	for (k = 0; k < v->dis_lines; k++)
-		if (v->dis_line_at[k] == b) {
+		if (v->dis_line_at[k] == b && !v->dis_line_lbl[k]) {
 			v->sel_b = b + v->dis_line_len[k] - 1u;
 			break;
 		}
@@ -570,6 +583,166 @@ void dis_sync_bytes(struct view *v)
  * boundaries within a few instructions whatever it is entered at.
  */
 /*
+ * THE ANNOTATIONS: a function's name where it starts, a label where a jump
+ * lands, the callee's name at a call, the syscall's name at a syscall.
+ *
+ * Trailing text on the row, not extra rows: a click, a selection and the copy
+ * all map a screen row to one instruction through dis_line_at, and a row that
+ * stood for no instruction would break every one of those.
+ *
+ * Everything is in FILE OFFSETS, the space the panel's address column and the
+ * formatter's resolved branch targets are already in, and the function table
+ * (mtn_funcs, the one the segmenter uses, sorted by offset) is in the same
+ * space. A name is read from the symbol block through the function's value and
+ * section, as kv_mutation does, so there is no second symbol lookup.
+ */
+static void dis_func_name(struct view *v, const struct kgenome_func *f,
+			  char *out, size_t cap);
+
+static const struct kgenome_func *dis_func_at(struct view *v, uint64_t off,
+					      int *start)
+{
+	char nm[8];
+	const struct kgenome_func_set *fs = mtn_funcs(v, cur_obj(v));
+	uint32_t lo = 0, hi = fs->n;
+
+	/* The last function whose start is <= off. */
+	while (lo < hi) {
+		uint32_t mid = lo + (hi - lo) / 2u;
+
+		if (fs->v[mid].off <= off)
+			lo = mid + 1u;
+		else
+			hi = mid;
+	}
+	if (!lo)
+		return NULL;
+	if (off >= fs->v[lo - 1u].off + fs->v[lo - 1u].len)
+		return NULL;
+	/* A section symbol is a symbol with no name and not a function. */
+	dis_func_name(v, &fs->v[lo - 1u], nm, sizeof nm);
+	if (!nm[0])
+		return NULL;    /* a section symbol is not a function */
+	*start = fs->v[lo - 1u].off == off;
+	return &fs->v[lo - 1u];
+}
+
+/* The function's name as the symbol block records it; empty when it has none. The panel
+ * invents no name for a function without a symbol. */
+static void dis_func_name(struct view *v, const struct kgenome_func *f,
+			  char *out, size_t cap)
+{
+	const struct object *o = cur_obj(v);
+
+	kof_sym_name_at(o->sym, o->sym_n, f->value, (int)f->shndx, out, cap);
+}
+
+/*
+ * The NAME of the function a call or jump goes to, as a comment beside the
+ * address, when the engine's tables say that address is the start of a named
+ * function. It adds what is already known and works nothing out: a jump into
+ * the middle of a function gets no comment, so a jump target is never written
+ * as if it were a function.
+ */
+static int dis_target_name(struct view *v, const struct kgenome_x86_insn *ix,
+			   uint64_t foff, char *out, size_t cap)
+{
+	unsigned cat = kgenome_x86_cat(ix);
+	const struct kgenome_func *t;
+	struct kgenome_x86_op op;
+	int start = 0;
+
+	if (cat != KGENOME_X86_C_CALL && cat != KGENOME_X86_C_UNCOND_BR)
+		return 0;
+	if (!kgenome_x86_nops(ix))
+		return 0;
+	kgenome_x86_operand(ix, 0, &op);
+	if (op.type != KGENOME_X86_OP_REL)
+		return 0;
+	t = dis_func_at(v, foff + ix->len + (uint64_t)op.v, &start);
+	if (!t || !start)
+		return 0;
+	dis_func_name(v, t, out, cap);
+	return out[0] != 0;
+}
+
+/*
+ * The label that goes on a row of its own above the instruction at `foff`: the
+ * name of the function that starts there, as the engine's function table and
+ * symbol block give it. Nothing else is worked out here - no jump targets, no
+ * syscall numbers, no callee names: those are analysis, and the panel shows what
+ * the engine reported and computes none of it. 0 when no function starts here.
+ */
+static int dis_label(struct view *v, uint64_t foff, char *out, size_t cap)
+{
+	const struct kgenome_func *f;
+	const struct object *o = cur_obj(v);
+	char name[64];
+	int start = 0;
+
+	/* ANALYSED: the labels are the engine's (kof_codenotes), a function's and a jump's, and kind says which. */
+	if (o->notes_done) {
+		uint32_t cnt, i;
+		const struct kof_note *nt = kof_codenotes_at(&o->notes, foff, &cnt);
+
+		for (i = 0; i < cnt; i++)
+			if (nt[i].kind == KOF_NOTE_FUNC || nt[i].kind == KOF_NOTE_LABEL) {
+				snprintf(out, cap, "%s", kof_codenotes_text(&o->notes, &nt[i]));
+				return nt[i].kind == KOF_NOTE_FUNC ? 1 : 2;
+			}
+		return 0;
+	}
+	f = dis_func_at(v, foff, &start);
+	if (!f || !start)
+		return 0;
+	dis_func_name(v, f, name, sizeof name);
+	snprintf(out, cap, "%s:", name);
+	return 1;
+}
+
+/* Append `sep` and `what` to a row's text - whole, or not at all when it does not fit: a comment is never cut in the middle of a word. */
+static void dis_say(char *text, size_t cap, const char *sep, const char *what)
+{
+	size_t have = strlen(text), n = strlen(sep) + strlen(what);
+
+	if (have + n + 1u <= cap)
+		snprintf(text + have, cap - have, "%s%s", sep, what);
+}
+
+/*
+ * THE FLAGS, KEPT AS ROWS ARE DRAWN IN ORDER, AND WHAT EACH ROW SAYS OF THEM. A CMP or TEST row says the COMPARISON it makes (`compare rax with 0`); a conditional
+ * jump row says the CONDITION it jumps on (`jump if rax >= 0`), read from the comparison above it - stepping over instructions that leave the flags alone
+ * (kgenome_x86_keeps_flags) and forgetting them at any other, and at a row that is not the next of the last. A jump drawn with no comparison known (the
+ * panel starts at it) says the flag it tests. The words are the lib's (kgenome_x86_cmp_text, kgenome_x86_cond_text); this keeps the one instruction between
+ * rows, which is all that is not the lib's.
+ */
+static void dis_cond_note(struct view *v, const struct kgenome_x86_insn *ix, uint64_t at, uint64_t foff,
+			  char *text, size_t cap)
+{
+	char cd[160], cm[2 * KGENOME_X86_TEXT];
+	const char *sep;
+
+	if (v->dis_next != at)
+		v->dis_fl_ok = 0;
+	sep = strstr(text, "  ; ") ? ", " : "  ; ";
+	if (ix->id == KGENOME_X86_I_CMP || ix->id == KGENOME_X86_I_TEST) {
+		if (kgenome_x86_cmp_text(ix, foff, cm, sizeof cm))
+			dis_say(text, cap, sep, cm);
+		v->dis_fl = *ix;
+		v->dis_fl_rip = foff;
+		v->dis_fl_ok = 1;
+	} else if (ix->id == KGENOME_X86_I_Jcc) {
+		if (kgenome_x86_cond_text(ix, v->dis_fl_ok ? &v->dis_fl : NULL, v->dis_fl_rip, cd, sizeof cd)) {
+			snprintf(cm, sizeof cm, "jump if %s", cd);
+			dis_say(text, cap, sep, cm);
+		}
+	} else if (!kgenome_x86_keeps_flags(ix)) {
+		v->dis_fl_ok = 0;
+	}
+	v->dis_next = at + ix->len;
+}
+
+/*
  * ONE INSTRUCTION, AS A PLAIN LINE: "<offset>  <bytes>  <mnemonic>".
  *
  * The exact text the panel shows and the clipboard gets, from ONE place, so the
@@ -592,7 +765,7 @@ unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 {
 	uint8_t buf[DIS_MAX_INSN];
 	struct kgenome_x86_insn ix;
-	char text[KGENOME_X86_TEXT];
+	char text[DIS_TEXT_MAX];
 	unsigned got, j, w;
 
 	if (ix_len_out)
@@ -608,6 +781,7 @@ unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 			       (unsigned long long)view_map(v, *at, 0));
 	if (kgenome_x86_decode(&ix, buf, got, v->dis_bits == 32 ? 32 : 64) != KGENOME_OK) {
 		snprintf(line + w, cap - w, "%02x%*s (data)", buf[0], 19, "");
+		v->dis_fl_ok = 0;       /* bytes that are not an instruction say nothing of the flags */
 		(*at)++;
 		return 1;
 	}
@@ -621,7 +795,25 @@ unsigned dis_format(struct view *v, uint64_t *at, char *line, size_t cap,
 		w += (unsigned)snprintf(line + w, cap - w, "   ");
 	if (!kgenome_x86_format(&ix, view_map(v, *at, 0), text, sizeof text))
 		text[0] = 0;
-	dis_shorten(text);
+	kgenome_x86_shorten(text);
+	{
+		char nm[64];
+		const struct object *o = cur_obj(v);
+
+		/* The operand keeps its address; what the engine says about the instruction is a comment. */
+		if (o->notes_done) {
+			uint32_t cnt, i;
+			const struct kof_note *nt = kof_codenotes_at(&o->notes, view_map(v, *at, 0), &cnt);
+
+			for (i = 0; i < cnt; i++)
+				if (nt[i].kind == KOF_NOTE_COMMENT)
+					snprintf(text + strlen(text), sizeof text - strlen(text), "  ; %s",
+						 kof_codenotes_text(&o->notes, &nt[i]));
+		} else if (dis_target_name(v, &ix, view_map(v, *at, 0), nm, sizeof nm)) {
+			snprintf(text + strlen(text), sizeof text - strlen(text), "  ; %s", nm);
+		}
+	}
+	dis_cond_note(v, &ix, *at, view_map(v, *at, 0), text, sizeof text);
 	snprintf(line + w, cap - w, "%s", text);
 	if (text_out)
 		snprintf(text_out, text_cap, "%s", text);
@@ -656,6 +848,26 @@ uint64_t dis_sync(struct view *v, uint64_t want)
 	return at;
 }
 
+/*
+ * The row a click or a drag on row `idx` means: itself, or - when it is a label
+ * and has no bytes - the instruction row below it, else the one above. -1 when
+ * the panel has no instruction row at all.
+ */
+int dis_real_row(const struct view *v, int idx)
+{
+	int k;
+
+	if (idx < 0 || idx >= v->dis_lines || !v->dis_line_lbl[idx])
+		return idx;
+	for (k = idx + 1; k < v->dis_lines; k++)
+		if (!v->dis_line_lbl[k])
+			return k;
+	for (k = idx - 1; k >= 0; k--)
+		if (!v->dis_line_lbl[k])
+			return k;
+	return -1;
+}
+
 void draw_disasm(struct out *o, struct view *v)
 {
 	int head = dis_top() - 1;
@@ -664,7 +876,9 @@ void draw_disasm(struct out *o, struct view *v)
 	uint64_t at = dis_sync(v, dis_start(v));
 	uint64_t end = v->dis_len == KGENOME_BROKEN ? v->rgn_len
 					        : v->dis_at + v->dis_len;
-	char note[32];
+	char note[32], label[256];
+	int lkind;
+	uint64_t labeled = KGENOME_BROKEN;      /* the address whose label is already drawn */
 
 	if (!g_disasm_rows)
 		return;
@@ -686,8 +900,8 @@ void draw_disasm(struct out *o, struct view *v)
 	 * also a real and different thing (the ILP32 ABI on amd64), so it is not
 	 * merely unconventional here, it is taken.
 	 */
-	snprintf(note, sizeof note, " Disassembly  [%s] ",
-		 v->dis_bits == 32 ? "x86" : "x64");
+	snprintf(note, sizeof note, " Disassembly  [%s]%s ",
+		 v->dis_bits == 32 ? "x86" : "x64", cur_obj(v)->notes_done ? " analysed" : "");
 	/* The panel's own palette here too, so nothing in this strip is yellow -
 	 * the hex pane above is largely yellow already. */
 	out_fmt(o, A_DIM "--" A_OFF A_D_MNEM "%s" A_OFF, note);
@@ -710,8 +924,8 @@ void draw_disasm(struct out *o, struct view *v)
 	v->dis_lines = 0;
 	for (row = dis_top(); row <= hex_bot(); row++) {
 		uint8_t buf[DIS_MAX_INSN];
-		char text[KGENOME_X86_TEXT];
-		char line[120];
+		char text[DIS_TEXT_MAX];
+		char line[DIS_LINE_MAX];
 		uint64_t at0 = at;              /* before the length is added */
 		int from, to, len;
 		unsigned ix_len = 1;            /* bytes this row stands for */
@@ -720,6 +934,42 @@ void draw_disasm(struct out *o, struct view *v)
 		out_at(o, row, col);
 		if (at >= end) {
 			out_str(o, "\033[K");
+			continue;
+		}
+		/*
+		 * A LABEL IS A ROW OF ITS OWN, as a disassembler draws it: it takes a
+		 * screen row and stands for no instruction, so the instruction under
+		 * it is drawn on the next row (`labeled` stops it being drawn twice).
+		 * It is recorded like any row so that screen row n is still entry n;
+		 * dis_line_lbl marks it so a click or a drag lands on the instruction
+		 * below instead - there are no bytes in a label to select.
+		 */
+		if (at != labeled &&
+		    (lkind = dis_label(v, view_map(v, at, 0), label, sizeof label))) {
+			if (v->dis_lines < (int)(sizeof v->dis_line /
+						 sizeof v->dis_line[0])) {
+				v->dis_line_at[v->dis_lines]  = at;
+				v->dis_line_len[v->dis_lines] = 0;
+				v->dis_line_lbl[v->dis_lines] = 1;
+				snprintf(v->dis_line[v->dis_lines++],
+					 sizeof v->dis_line[0], "%.318s", label);
+			}
+			{
+				/* the name in its colour (a function and a jump label are told apart by it), the xrefs after it dim */
+				const char *xr = strstr(label, "  ; ");
+				size_t nl = xr ? (size_t)(xr - label) : strlen(label);
+
+				out_str(o, lkind == 1 ? A_D_KEY : A_D_IMM);
+				out_add(o, label, nl);
+				out_str(o, A_OFF);
+				if (xr) {
+					out_str(o, A_DIM);
+					out_str(o, xr);
+					out_str(o, A_OFF);
+				}
+				out_str(o, "\033[K");
+			}
+			labeled = at;
 			continue;
 		}
 		/*
@@ -736,6 +986,7 @@ void draw_disasm(struct out *o, struct view *v)
 					 sizeof v->dis_line[0])) {
 			v->dis_line_at[v->dis_lines]  = at0;
 			v->dis_line_len[v->dis_lines] = at - at0;
+			v->dis_line_lbl[v->dis_lines] = 0;
 			snprintf(v->dis_line[v->dis_lines++],
 				 sizeof v->dis_line[0], "%s", line);
 		}
@@ -923,4 +1174,37 @@ void dis_toggle(struct view *v, uint64_t at, uint64_t len)
 	v->dis_follow = len == KGENOME_BROKEN ? v->rgn_at : at;
 	v->dis_bias = 0;
 	dis_bias_to_sel(v);
+}
+
+/*
+ * Analysis > Analyze disassembly: the engine reads the WHOLE object's code once (branches, calls, syscalls, who refers to what) and names what it
+ * found; the panel then shows the part it is looking at. Nothing is worked out here - this asks, keeps the answer on the object and says how it went.
+ * Run again it replaces the answer, which is the only way to see a change in what the engine knows.
+ */
+void dis_analyse(struct view *v)
+{
+	struct object *o = cur_obj(v);
+	int ok;
+
+	kof_codenotes_free(&o->notes);
+	o->notes_done = 0;
+	ok = kof_codenotes_build(&o->ctx, o->buf, mtn_funcs(v, o), o->sym, o->sym_n,
+				 v->dis_bits ? (unsigned)v->dis_bits : (unsigned)dis_default_bits(v), &o->notes);
+	if (ok) {
+		o->notes_done = 1;
+		snprintf(v->act_msg, sizeof v->act_msg, "Analysed the whole object: %u note(s)", o->notes.n);
+	} else {
+		snprintf(v->act_msg, sizeof v->act_msg, o->notes.status == KGENOME_NOMEM
+			 ? "Analysis stopped: out of memory" : "Nothing to analyse: no decoder for this object's code");
+	}
+	v->act_ok = ok;
+}
+
+/* The analysis of the current object no longer holds (the width it was read in changed): drop it, so the panel shows only what is true now. */
+void dis_drop_analysis(struct view *v)
+{
+	struct object *o = cur_obj(v);
+
+	kof_codenotes_free(&o->notes);
+	o->notes_done = 0;
 }

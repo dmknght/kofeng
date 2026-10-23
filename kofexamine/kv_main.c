@@ -15,7 +15,9 @@ static void usage(void)
 	"\n"
 	"  --db D      load that database; without it there is one object\n"
 	"              and no markers\n"
-	"  --bases D   the signature source tree, and where a draft is saved\n"
+	"  --bases D   the content source tree, for Analysis > Rebuild database\n"
+	"  --syndromes D  the tag sources (default: <bases>/syndromes, or\n"
+	"              bases/syndromes), for Analysis > Syndrome table\n"
 	"  --pid N     open a RUNNING PROCESS instead of a file, as a snapshot\n"
 	"  --heur N    0 do not separate what a file carries  1 score and\n"
 	"              descend  2 also interpret (default)\n"
@@ -66,6 +68,7 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	uint32_t n_plg = 0;
 	struct kof_range *probe = v->probe;
 	uint32_t          cap   = v->ed.dr.decl_cap;
+	struct kv_syn    *syn   = v->syn;
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
 	int  heur_off = v->heur_off;
@@ -116,6 +119,7 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	v->ed.dr.blk   = plg;
 	v->ed.dr.n_blk = n_plg;
 	v->ed.dr.decl_cap = cap;
+	v->syn   = syn;
 	editor_attach(v);
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
@@ -218,7 +222,7 @@ static void file_close(struct view *v)
 	 * are the mapping - so there is nothing else to undo", which is the
 	 * same sentence log_window's reset loop already corrected about itself:
 	 * "it stopped being true the moment anything was." The loop below grew
-	 * the frees for touch, finding, info, sym and own; carve
+	 * the frees for info, sym and own; carve
 	 * was never added to it, and it is heap the object keeps so
 	 * that coming back to a row does not re-read it.
 	 *
@@ -238,7 +242,7 @@ static void file_close(struct view *v)
 	 * - frees these three before it claims a slot. Freeing them here and
 	 * leaving the pointers behind would turn this fix into a double free;
 	 * zeroing the slot makes those frees no-ops, and clears the dangling
-	 * finding/sym/own the loop was already leaving in the struct.
+	 * sym/own the loop was already leaving in the struct.
 	 */
 	if (v->log) {
 		kofevt_log_free(v->log);
@@ -252,12 +256,12 @@ static void file_close(struct view *v)
 	for (i = 0; i < v->n_obj; i++) {
 		struct object *o = &v->obj[i];
 
-		kof_touch_free(o->touch, o->n_touch);
 		free(o->diag);
 		kgenome_funcs_free(&o->funcs);
-		free(o->finding);
+		kof_codenotes_free(&o->notes);
 		kof_inspect_free(o->fmt, o->info);
 		free(o->sym);
+		free(o->fixed);
 		free(o->own);
 		free(o->carve);
 		if (o->mapped)
@@ -301,6 +305,7 @@ static void view_free(struct view *v)
 	free(v->ext2);
 	free(v->probe);
 	free(v->ed.dr.blk);
+	syn_free(v->syn);
 	free(v);
 }
 
@@ -339,6 +344,7 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	uint32_t n_plg = 0;
 	struct kof_range *probe = v->probe;
 	uint32_t          cap   = v->ed.dr.decl_cap;
+	struct kv_syn    *syn   = v->syn;
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
 	char keep[KOF_DUMP_PATH_ROOM];
@@ -399,6 +405,7 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	v->ed.dr.blk   = plg;
 	v->ed.dr.n_blk = n_plg;
 	v->ed.dr.decl_cap = cap;
+	v->syn   = syn;
 	editor_attach(v);       /* the clear above zeroed what it borrows */
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
@@ -550,55 +557,6 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	tree_build(v);
 	view_select(v);
 
-	/*
-	 * A file that already matches something opens showing what matched.
-	 *
-	 * That is nearly always the reason for opening it: a researcher looking
-	 * at a detected sample is there to see the rule that caught it, or to
-	 * write the one that should have. Starting on an empty panel makes them
-	 * go and find it first.
-	 */
-	{
-		struct object *o0 = &v->obj[0];
-		/*
-		 * ASKED OF touch_default, not walked again here.
-		 *
-		 * This was a second copy of "the first row that fired", and the
-		 * two then disagreed the moment one of them learned something:
-		 * touch_default came to prefer the strongest verdict and this
-		 * did not, so moving between objects selected the signature and
-		 * OPENING THE FILE selected whichever heuristic happened to sit
-		 * earlier in the database. Measured on a Gafgyt sample - the
-		 * scanner names Botnet:Gafgyt#100!Mutation, the panel opened on
-		 * Heur:Truncated.
-		 */
-		uint32_t k;
-
-		/* The list has to exist before anything can choose from it -
-		 * the same order the node-selection path uses. Without it this
-		 * read an empty list and selected nothing, so a detected file
-		 * opened on a blank panel whenever nothing else had already
-		 * built the list. */
-		object_touch(v, 0);
-		k = touch_default(o0);
-		if (k < o0->n_touch)
-			draft_show(v, k);
-		/*
-		 * AND WHEN NOTHING FIRED, NOTHING IS SELECTED.
-		 *
-		 * The hex pane lights where the SELECTED rule's markers sit, and
-		 * a zeroed selection is rule number zero - so opening a file
-		 * that matched nothing lit up wherever some arbitrary rule's
-		 * marker happened to land, which in a header is often somewhere.
-		 * A highlight reads as "this matched", so the pane was reporting
-		 * a match that had not happened. Past the end means no rule, and
-		 * hit_kind already draws nothing for that.
-		 */
-		if (k == o0->n_touch)
-			v->sel_touch = o0->n_touch;
-	}
-	/* Whatever was auto-loaded is what this file started as, so it is not
-	 * unsaved work. */
 	v->ed.dr.saved_hash = draft_hash(&v->ed);
 	return 1;
 }
@@ -606,22 +564,14 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 int main(int argc, char **argv)
 {
 	/*
-	 * NO DEFAULT BASES DIRECTORY.
-	 *
-	 * It was "kofdraft", and the effect was that Save wrote a signature
-	 * into a directory it created in whatever the working directory
-	 * happened to be. Two keystrokes reach it - F10 opens the bar on the
-	 * File menu and Enter takes its first enabled item, which is Save - so
-	 * a stray Return in a terminal left a generated .c in a source tree
-	 * nobody had pointed the tool at.
+	 * NO DEFAULT BASES DIRECTORY: a rebuild writes into a tree, and one nobody
+	 * named is one nobody expects to be written.
 	 *
 	 * Empty rather than NULL: v->basedir is a fixed buffer and every reader
 	 * of it already tests basedir[0], so "not given" stays one convention
-	 * instead of two. With none given, Save and Save As are refused and
-	 * say why - the honest answer, because there is nowhere the author has
-	 * said to put it.
+	 * instead of two.
 	 */
-	const char *path = NULL, *db = NULL, *base = "";
+	const char *path = NULL, *db = NULL, *base = "", *syn_dir = NULL;
 	/* The process to open instead of a file, or 0. */
 	uint32_t    want_pid = 0;
 	uint64_t last_paint = 0;
@@ -671,9 +621,8 @@ int main(int argc, char **argv)
 	 * The editor borrows what it needs and owns the draft.
 	 *
 	 * Pointers rather than copies for anything that changes while the
-	 * session runs - the object count grows as children are found, and
-	 * `foreign` is set per file - because a copy of a number that changes
-	 * is a number that goes stale.
+	 * session runs - the object count grows as children are found -
+	 * because a copy of a number that changes is a number that goes stale.
 	 */
 	editor_attach(v);
 
@@ -704,6 +653,8 @@ int main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "--bases") && i + 1 < argc)
 			base = argv[++i];
+		else if (!strcmp(argv[i], "--syndromes") && i + 1 < argc)
+			syn_dir = argv[++i];
 		/* Asked for by name, and answered with 0: a reader who typed
 		 * --help did not make a mistake. */
 		else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -732,8 +683,7 @@ int main(int argc, char **argv)
 	 * of writing is after the work: a researcher who has spent an hour on a
 	 * draft should not be told then that the directory they named does not
 	 * exist. A path that is not a directory is refused; one that does not
-	 * exist yet is accepted, since generate() creates it, and a researcher
-	 * naming a new tree means it.
+	 * exist yet is accepted, and a researcher naming a new tree means it.
 	 */
 	if (stat(base, &st) == 0 && !S_ISDIR(st.st_mode)) {
 		fprintf(stderr, "kofviewer: --bases %s is not a directory\n",
@@ -743,6 +693,22 @@ int main(int argc, char **argv)
 	snprintf(v->basedir, sizeof v->basedir, "%s", base);
 	if (db)
 		snprintf(v->dbdir, sizeof v->dbdir, "%s", db);
+	/*
+	 * THE TAG SOURCES, loaded once for the session: the directory is
+	 * `<bases>/syndromes` unless --syndromes names another, and the
+	 * diagnose sources a tag is counted in are `<bases>/diagnoses`. With no
+	 * --bases the tree is the one in the working directory.
+	 */
+	{
+		char sdir[256], ddir[256];
+
+		snprintf(sdir, sizeof sdir, "%s/syndromes",
+			 base[0] ? base : "bases");
+		snprintf(ddir, sizeof ddir, "%s/diagnoses",
+			 base[0] ? base : "bases");
+		v->syn = syn_new(syn_dir ? syn_dir : sdir, ddir);
+		editor_attach(v);
+	}
 
 	/*
 	 * A DIRECTORY IS A REASONABLE THING TO POINT THIS AT.

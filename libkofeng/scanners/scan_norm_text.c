@@ -12,6 +12,11 @@
 #include <string.h>
 
 
+/*
+ * The regions of the object, one entry a disjoint extent, up to `cap` of them. `r` NULL counts them
+ * (the answer is what a table of that size must hold), so a caller can allocate what the object has
+ * instead of choosing a number.
+ */
 uint32_t sx_norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
 			    uint32_t cap)
 {
@@ -27,9 +32,11 @@ uint32_t sx_norm_gather(struct kof_obj_ctx *ctx, struct kof_src_region *r,
 		for (i = 0; i < k && n < cap; i++) {
 			if (!ext[i].len)
 				continue;
-			r[n].mask = mask;
-			r[n].off = ext[i].off;
-			r[n].len = ext[i].len;
+			if (r) {
+				r[n].mask = mask;
+				r[n].off = ext[i].off;
+				r[n].len = ext[i].len;
+			}
 			n++;
 		}
 	}

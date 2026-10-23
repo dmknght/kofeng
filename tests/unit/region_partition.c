@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 
 #include <kofmod/kofsig.h>
+#include "../../libkofeng/analyzers/parsers/scripts/script_route.h"
 #include <kofmod/elf.h>
 #include <kofmod/pe.h>
 
@@ -116,6 +117,13 @@ static int check(const char *path, kof_buf buf, struct kof_obj_ctx *ctx,
 			}
 			all[n_all++] = ext[k];
 		}
+	}
+
+	/* A script in a language the lib lexes has no regions (see script_resolve_scan): nothing to partition. */
+	if (ctx->format == KOF_FMT_SCRIPT && kof_script_textual_lang(ctx->subtype)) {
+		if (n_all)
+			printf("  FAIL %s [%s]: a script the lib lexes declares regions\n", path, fmt);
+		return n_all != 0;
 	}
 
 	qsort(all, n_all, sizeof all[0], cmp_range);

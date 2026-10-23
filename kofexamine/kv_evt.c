@@ -971,7 +971,6 @@ void evt_load(struct view *v)
 					kof_scanner *sc2;
 
 					memset(&so, 0, sizeof so);
-					so.all_matches = 1;
 					so.report_diag = 1;
 					so.heur_level = KOF_HEUR_LEVEL_MAX;
 					sc2 = kscan_new(v->eng);
@@ -984,25 +983,6 @@ void evt_load(struct view *v)
 						v->into_obj = -1;
 						kscan_free(sc2);
 					}
-					/*
-					 * AND THE MARKER TOUCHES, which is a
-					 * second question the panel asks: not
-					 * "did a module fire" but "which of the
-					 * database's markers are in here, and
-					 * for the modules that did not fire,
-					 * why". objects_examine does this for
-					 * every ordinary object and skipped
-					 * this one, because it had no bytes
-					 * when that pass ran.
-					 */
-					c->touched = 1;
-					if (!kof_touch_object(v->eng, c->buf,
-							      &c->ctx, c->fmt,
-							      c->finding,
-							      c->n_finding,
-							      &c->touch,
-							      &c->n_touch))
-						c->n_touch = 0;
 				}
 				if (c->fmt && !had_fmt)
 					v->tree_dirty = 1;

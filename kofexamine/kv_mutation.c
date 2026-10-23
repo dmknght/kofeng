@@ -25,16 +25,6 @@ struct mtn_cut {
 
 /* ---- mutation mode: blocks a researcher marked ------------------------------- */
 
-/*
- * The region a block is MATCHED in, which is not always the one it was cut
- * from - see mtn_block.anywhere. Every place that feeds, scores or writes the
- * block asks here, so the choice cannot be honoured in one of them and
- * forgotten in another.
- */
-uint32_t mtn_mask_of_enum(const struct object *o, const char *word)
-{
-	return kof_region_mask_of(o ? o->fmt : NULL, word);
-}
 
 
 /* Is any block in the list one carried from another sample - which is the only
@@ -358,7 +348,7 @@ static int mtn_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
 	rn = (c->fp && c->fp->region_name && mask != KOF_SCAN_ALL)
 	   ? c->fp->region_name(mask) : NULL;
 	lbl = rn ? kof_region_label(rn) : "ALL";
-	kof_inspect_sym_name(c->o->sym, c->o->sym_n, first ? first->value : 0,
+	kof_sym_name_at(c->o->sym, c->o->sym_n, first ? first->value : 0,
 		    first ? (int)first->shndx : -1, sym, sizeof sym);
 	mtn_mark(c->v, c->o->buf.p, c->o->buf.n, off, off + len, mask, lbl, rn,
 		 KGENOME_MUTATION_RAW, (uint8_t)side, sym);
@@ -371,7 +361,7 @@ static int mtn_take_cb(void *user, uint32_t mask, uint64_t off, uint64_t len,
  * its bytes: the same kgenome_funcs_remap the scanner maps them with when it makes
  * the view, so the table lists the units the scanner will sketch.
  */
-static const struct kgenome_func_set *mtn_funcs(struct view *v, struct object *o)
+const struct kgenome_func_set *mtn_funcs(struct view *v, struct object *o)
 {
 	if (!o->funcs_done) {
 		o->funcs_done = 1;
@@ -496,12 +486,11 @@ void mtn_segment(struct view *v)
 	cut.v = v; cut.o = o; cut.fp = fp;
 	{
 		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
+		const struct kof_scan_cut basis = { mtn_funcs(v, o), &lib, o->fixed, o->n_fixed };
 
-		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, mtn_funcs(v, o),
-				      &lib, &eb, mtn_count_cb, &cut);
+		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, &basis, &eb, mtn_count_cb, &cut);
 		mtn_share(&cut, o->ctx.format);
-		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, mtn_funcs(v, o),
-				      &lib, &eb, mtn_take_cb, &cut);
+		kof_scan_mutation_units(&o->ctx, o->buf, ~0u, &basis, &eb, mtn_take_cb, &cut);
 	}
 	/*
 	 * AND KEPT, so arriving here again costs nothing - see object.carve.
@@ -627,10 +616,10 @@ void mtn_rescore(struct view *v)
 		obj_lib_find(o, &slib);
 	{
 		struct kof_ext_buf eb = kof_ext_fixed(v->ext2, KOF_SCAN_MAX_EXTENTS);
+		const struct kof_scan_cut basis = { mtn_funcs(v, o), o->n_rgn ? NULL : &slib,
+						    o->fixed, o->n_fixed };
 
-		kof_scan_mutation_feed(&ctx, &o->ctx, o->buf, ~0u, 0,
-				     mtn_funcs(v, o),
-				     o->n_rgn ? NULL : &slib, &eb);
+		kof_scan_mutation_feed(&ctx, &o->ctx, o->buf, ~0u, 0, &basis, &eb);
 	}
 	for (i = 0, nb = 0; i < v->ed.dr.n_blk; i++) {
 		if (v->ed.dr.blk[i].n_hash < KGENOME_MUTATION_MIN_HASH)

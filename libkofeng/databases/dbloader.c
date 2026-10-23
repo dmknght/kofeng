@@ -109,7 +109,6 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 	uint32_t blk0 = e->n_blk;
 	uint32_t i;
 	int unpack = (h->kind == KOF_PACK_UNPACK);
-	int heur   = (h->kind == KOF_PACK_HEUR);
 
 	memcpy(e->code + code_at, base + h->sec[KOF_SEC_CODE].off,
 	       (size_t)h->sec[KOF_SEC_CODE].len);
@@ -137,19 +136,11 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 
 	for (i = 0; i < h->n_mods; i++) {
 		struct kof_module *m = unpack ? &e->unp[e->n_unp++]
-				     : heur ? &e->heur[e->n_heur++]
-					    : &e->mods[e->n_mods++];
+					      : &e->mods[e->n_mods++];
 
 		/* Entry offset is zero within each blob; the compiler asserts it,
 		 * so the blob's place in the arena is the entry point. */
 		m->fn = (kof_scan_fn)(void *)(e->code + code_at + pm[i].code_off);
-		/* Zero means the module has none - an offset of zero would be
-		 * kof_scan itself, which is never a cure. */
-		m->cure = pm[i].cure_off
-			  ? (kof_scan_fn)(void *)(e->code + code_at +
-						  pm[i].code_off +
-						  pm[i].cure_off)
-			  : NULL;
 
 		/*
 		 * THE COUNT IS WHAT BOUNDS THE READ, which is the whole reason
@@ -180,16 +171,7 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 		m->n_names   = pm[i].n_names;
 		m->family_off = pm[i].family_off;
 		m->maltype    = pm[i].maltype;
-		m->disease    = pm[i].disease;
-		m->disease_type = pm[i].disease_type;
 		m->step       = pm[i].step;
-		m->heur_phase = pm[i].heur_phase;
-		/* Zero means unstated - a pack written before the field
-		 * existed - and unstated is level 1, which is what every rule
-		 * ran at before there was a choice. */
-		m->heur_level = pm[i].heur_level ? pm[i].heur_level : 1u;
-		m->heur_want  = pm[i].heur_want;
-		m->heur_predict_off = pm[i].heur_predict_off;
 		m->content_off = pm[i].content_off;
 		m->kind       = (uint8_t)h->kind;
 		m->src_off    = pm[i].src_off;
@@ -201,15 +183,12 @@ static void absorb(struct kof_engine *e, const struct kof_db_pack *mp,
 
 		/*
 		 * Only a detector's regions go into the union the scanner
-		 * resolves. An unpacker runs after the searching is done, and a
-		 * heuristic reads what the parse already worked out, so a region
-		 * either of them names must not make every object pay for
-		 * resolving it.
+		 * resolves. An unpacker runs after the searching is done, so a
+		 * region it names must not make every object pay for resolving
+		 * it.
 		 */
-		if (!unpack && !heur)
+		if (!unpack)
 			e->scan_mask |= m->scan_mask;
-		else if (heur)
-			e->heur_scan_mask |= m->scan_mask;
 	}
 }
 
@@ -223,7 +202,7 @@ struct db_load {
 	const char *single[1];
 	uint32_t n_paths, n_ok;
 	uint64_t n_mods, n_str, n_rng, code;
-	uint64_t n_det, n_unp, n_heur;   /* n_mods by what the pack holds: each table is allocated for its own */
+	uint64_t n_det, n_unp;   /* n_mods by what the pack holds: each table is allocated for its own */
 	uint64_t n_blk, n_pool;
 	uint32_t n_blk_packs;      /* packs that carry blocks: one is borrowed, several are copied */
 	int owned;
@@ -276,8 +255,6 @@ static void db_map_packs(struct db_load *L)
 		L->n_mods += h->n_mods;
 		if (h->kind == KOF_PACK_UNPACK)
 			L->n_unp += h->n_mods;
-		else if (h->kind == KOF_PACK_HEUR)
-			L->n_heur += h->n_mods;
 		else
 			L->n_det += h->n_mods;
 		L->n_str  += h->n_str;
@@ -332,16 +309,15 @@ static int db_alloc_tables(struct db_load *L)
 	L->e = e;
 	if (!e)
 		return 0;
-	/* Each table for the modules it will hold: the three kinds were each allocated for ALL of them, and the
+	/* Each table for the modules it will hold: the kinds were each allocated for ALL of them, and the
 	 * ledger charges what the allocator holds, mapped or not (800,000 rules: 235 MB charged, 138 MB used). */
 	e->mods     = calloc(L->n_det  ? L->n_det  : 1, sizeof *e->mods);
 	e->unp      = calloc(L->n_unp  ? L->n_unp  : 1, sizeof *e->unp);
-	e->heur     = calloc(L->n_heur ? L->n_heur : 1, sizeof *e->heur);
 	e->rng_tab  = calloc(n_rng  ? n_rng  : 1, sizeof *e->rng_tab);
 	e->blk_owned = L->n_blk_packs > 1;
 	if (e->blk_owned)
 		e->blk_tab = calloc(n_blk ? n_blk : 1, sizeof *e->blk_tab);
-	if (!e->mods || !e->unp || !e->heur || !e->rng_tab || (e->blk_owned && !e->blk_tab) ||
+	if (!e->mods || !e->unp || !e->rng_tab || (e->blk_owned && !e->blk_tab) ||
 	    !kof_db_arena_open(e, (size_t)code)) {
 		kof_db_free_tables(e);
 		L->e = NULL;
@@ -645,20 +621,19 @@ static void db_live_caps(struct kof_engine *e)
  * live_cap. Summed here because it cannot change once the module list
  * is final, and multi_prepass was recomputing it for every object.
  *
- * All three arrays, because all three run against an object and share
- * its memo - the same reason multi_prepass walks all three.
+ * Both arrays, because both run against an object and share its memo - the
+ * same reason multi_prepass walks both.
  */
-	const struct kof_module *arr[3];
-	uint32_t cnt[3], ai, mi, t, r, b;
+	const struct kof_module *arr[2];
+	uint32_t cnt[2], ai, mi, t, r, b;
 
 	arr[0] = e->mods; cnt[0] = e->n_mods;
 	arr[1] = e->unp;  cnt[1] = e->n_unp;
-	arr[2] = e->heur; cnt[2] = e->n_heur;
 
 	e->live_cap = calloc((size_t)KOF_TARGET_COUNT *
 			     KOF_MULTIMATCH_BITS, sizeof *e->live_cap);
 	if (e->live_cap) {
-		for (ai = 0; ai < 3u; ai++)
+		for (ai = 0; ai < 2u; ai++)
 			for (mi = 0; mi < cnt[ai]; mi++) {
 				const struct kof_module *m =
 					&arr[ai][mi];
@@ -755,25 +730,6 @@ static void db_any_target(struct kof_engine *e)
 		any_target_add(&e->any_target, &e->mods[j]);
 	for (j = 0; j < e->n_unp; j++)
 		any_target_add(&e->any_target, &e->unp[j]);
-	for (j = 0; j < e->n_heur; j++)
-		any_target_add(&e->any_target, &e->heur[j]);
-}
-
-/* Whether any module of any kind, or any diagnose, declares a disease - see
- * kof_engine.reads_diseases. */
-static void db_disease_readers(struct kof_engine *e)
-{
-	uint32_t i;
-
-	e->reads_diseases = 0;
-	for (i = 0; i < e->n_mods && !e->reads_diseases; i++)
-		e->reads_diseases = e->mods[i].disease != 0u;
-	for (i = 0; i < e->n_heur && !e->reads_diseases; i++)
-		e->reads_diseases = e->heur[i].disease != 0u;
-	for (i = 0; i < e->n_unp && !e->reads_diseases; i++)
-		e->reads_diseases = e->unp[i].disease != 0u;
-	for (i = 0; i < e->n_diag && !e->reads_diseases; i++)
-		e->reads_diseases = e->diag[i].disease != 0u;
 }
 
 /* Make the code executable and hand the mappings to the engine. */
@@ -816,10 +772,9 @@ static void db_finish(struct db_load *L)
 		 */
 		if (L->dir_for_diag) {
 			kof_db_load_diagnoses(L->e, L->dir_for_diag);
-			kof_db_load_syndromes(L->e, L->dir_for_diag);
+			kof_db_refuse_retired(L->e, L->dir_for_diag);
 			kof_db_load_diseases(L->e, L->dir_for_diag);
 		}
-		db_disease_readers(L->e);
 	}
 }
 
@@ -894,8 +849,7 @@ void kof_db_free_tables(struct kof_engine *e)
 	free(e->mod_by_target);
 	free(e->live_cap);
 	free(e->unp);
-	free(e->heur);
-	free(e->rng_tab);
+		free(e->rng_tab);
 	free(e->rng_uid);
 	free(e->mask_bits);
 	if (e->blk_owned)
@@ -909,7 +863,6 @@ void kof_db_free_tables(struct kof_engine *e)
 	while (e->n_diag_arena)
 		free(e->diag_arena[--e->n_diag_arena]);
 	free(e->diag_arena);
-	kof_synd_free(e->synd);
 	free(e->disease);
 	free(e->disease_pool);
 	if (e->packs) {

@@ -51,7 +51,7 @@ carries the lib's prefix - kgenome_ / KGENOME_ in libgenome/, kuncoat_ / KUNCOAT
 union / enum tags, enumerators, typedefs, functions, variables. A macro the same header #undefs is a
 local helper. No name is exempt.
 """
-import concurrent.futures, os, re, shutil, subprocess, sys
+import concurrent.futures, glob, os, re, shutil, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -107,7 +107,7 @@ ALLOW = {
 #   detectors  detectors/**                 pattern, mutations, linkage, heur
 #   databases  databases/**                 the loader and packer, which BUILD
 #                                           matchers and so stand above them
-#   verdictor  verdictor/**                 syndromes, verdicts
+#   verdictor  verdictor/**                 verdicts
 #   scanners   scanners/**                  the pipeline that drives all of it
 #   api        libkofeng/kofeng.{c,h}       the public API
 #
@@ -408,8 +408,6 @@ EXEMPT = {
     'getenv in tests': {
         'tests/unit/budget.c: getenv(KOF_BUDGET_TRACE)': 'a trace switch of the test itself',
         'tests/unit/db_scale.c: getenv(KOF_SCALE_MODS)': 'the size of the scale run, chosen by the caller',
-        'tests/unit/rule_roundtrip.c: getenv(RT_DIR)': 'where the round trip writes, chosen by the caller',
-        'tests/unit/rule_roundtrip.c: getenv(RT_WHY)': 'a diagnostic switch of the test itself',
     },
 }
 
@@ -806,6 +804,39 @@ def genome_kof_violations():
             out[f'{src}: {name}'] = ''
     return out
 
+# ---- BYTE CLASSES IN THE TEXT ROUTE AND THE LEXERS -------------------------------------
+#
+# "Use the API. Do not write the logic a second time" (kofeng/CLAUDE.md 2): core's kofcore.h
+# answers "is this byte a letter" (kof_is_alpha), "a letter or a digit or _" (kof_is_word_byte), "a
+# hex digit" (kof_hex_val) and "this byte, lower case" (kof_lower_byte), and every one of them is
+# the same on every locale. The TEXT route (libgenome/phenotype/diag_text*) and the lexers
+# (libgenome/textual/) had four open-coded `(c | 0x20) - 'a'` letter tests of their own, and
+# three of the route's files included <ctype.h> for nothing: a ctype call reads the locale, so in a
+# locale that is not "C" a byte above 0x7f may be a letter and the route reads a script
+# differently from one host to the next. Looked for, in comments-stripped text: the open-coded
+# fold, an include of <ctype.h>, and a call of a ctype function.
+TEXT_FAMILY = re.compile(r'^libgenome/(phenotype/diag_text[^/]*\.[ch]|textual/.*\.[ch])$')
+FOLD_OPEN = re.compile(r"\|\s*0x20u?\s*\)\s*-\s*'a'")
+CTYPE_INC = re.compile(r'^\s*#\s*include\s*<ctype\.h>', re.M)
+CTYPE_CALL = re.compile(r'\b(?:isalpha|isdigit|isalnum|isspace|isupper|islower|isxdigit|ispunct|isprint|isgraph|iscntrl|tolower|toupper)\s*\(')
+
+def text_class_violations():
+    out = {}
+    for src in sorted(sources('libgenome')):
+        if not TEXT_FAMILY.match(src):
+            continue
+        try:
+            text = _strip_comments(open(src, encoding='utf-8', errors='replace').read())
+        except OSError:
+            continue
+        for m in FOLD_OPEN.finditer(text):
+            out[f'{src}:{text.count(chr(10), 0, m.start()) + 1}: open-coded letter test'] = 'kof_is_alpha / kof_is_word_byte / kof_hex_val'
+        if CTYPE_INC.search(text):
+            out[f'{src}: includes <ctype.h>'] = 'the route reads no locale'
+        for m in CTYPE_CALL.finditer(text):
+            out[f'{src}:{text.count(chr(10), 0, m.start()) + 1}: ctype call'] = 'locale dependent'
+    return out
+
 # ---- getenv IN THE TESTS ----------------------------------------------------------
 #
 # The getenv rule is the Makefile's check-rules (the engine, the libs and the tools).
@@ -827,6 +858,143 @@ def tests_getenv_violations():
             if m.group(1) in ('TMPDIR', 'TMP', 'TEMP'):
                 continue    # the caller choosing where scratch files go
             out[f'{src}: getenv({m.group(1)})'] = ''
+    return out
+
+
+# ---- FUZZ COVERAGE ----------------------------------------------------------------
+#
+# Every public function of the lib surfaces - the umbrellas <kgenome.h> and <uncoat.h> with the part headers they
+# name, and the core helpers they expose - needs a row in a fuzz adapter (tests/fuzz/<stage>/*.c: `.covers = "fn ..."`
+# on an FZ_ADAPTER row, and the function is CALLED in that file) or an entry of the EXEMPT tables
+# (tests/fuzz/exempt/*.txt, `function<TAB>reason`). A new public function with neither FAILS here, which is how "every new
+# function is covered" is enforced. permanent.txt holds what bytes cannot drive (a wall clock, a path); wp<N>.txt hold the
+# functions that are only waiting for work package N - the package deletes its lines as it adds its rows, and a function that
+# is both covered and exempt fails too, so the tables cannot go stale. The surface is read from the headers by the same
+# rule as the plan's api.tsv (465 functions when this pass was added): static functions without a body are skipped,
+# static inline ones count.
+FUZZ_TOPS = ('libgenome/kgenome.h', 'libuncoat/uncoat.h')
+FUZZ_CORE = {'kofcore.h', 'range.h', 'rangelist.h', 'heapsort.h', 'kofcmp.h', 'kofbytes.h', 'kofstrlist.h', 'kofentropy.h',
+             'kofhash.h', 'tabgrow.h', 'runlist.h', 'kofbudget.h'}
+FUZZ_NOT_FN = {'if', 'while', 'for', 'sizeof', 'defined', 'switch', 'return', '__attribute__'}
+FUZZ_COVERS = re.compile(r'\.covers\s*=\s*((?:"[^"\n]*"\s*)+)')
+
+def fuzz_headers():
+    seen, stack, out = set(), [t for t in FUZZ_TOPS if os.path.exists(t)], []
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        stack.extend(includes_of(f))
+        base = os.path.basename(f)
+        if f.endswith('_private.h') or (f.startswith('libkofeng') and base not in FUZZ_CORE):
+            continue
+        out.append(f)
+    for c in sorted(FUZZ_CORE):
+        f = 'libkofeng/kofcore/' + c
+        if f not in out and os.path.exists(f):
+            out.append(f)
+    return sorted(out)
+
+def _fuzz_statements(s):
+    res, depth, cur, kind = [], 0, [], None
+    for c in s:
+        if c == '{':
+            if depth == 0:
+                head = ''.join(cur).strip()
+                kind = 'fn' if re.search(r'\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?$', head) else 'agg'
+            depth += 1
+            if depth > 1 or kind == 'agg':
+                cur.append(c)
+            continue
+        if c == '}':
+            depth -= 1
+            if depth == 0 and kind == 'fn':
+                res.append((''.join(cur).strip(), True))
+                cur, kind = [], None
+            else:
+                cur.append(c)
+            continue
+        if depth > 0 and kind == 'fn':
+            continue
+        if c == ';' and depth == 0:
+            res.append((''.join(cur).strip(), False))
+            cur = []
+            continue
+        cur.append(c)
+    return res
+
+def fuzz_functions(path):
+    text = _strip_comments(open(path, encoding='utf-8', errors='replace').read())
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text).replace('\\\n', ' ')
+    text = '\n'.join('' if re.match(r'\s*#', ln) else ln for ln in text.split('\n'))
+    names = []
+    for st, has_body in _fuzz_statements(text):
+        st = ' '.join(st.split())
+        if not st or st.startswith('typedef') or re.match(r'(struct|enum|union)\s+\w+\s*(\{|$)', st) or '(' not in st:
+            continue
+        m = re.match(r'(.*?)\b([A-Za-z_]\w*)\s*\((.*)\)\s*(?:__attribute__.*)?$', st)
+        if not m or not m.group(1).strip() or m.group(2) in FUZZ_NOT_FN:
+            continue
+        if 'static' in m.group(1).split() and not has_body:
+            continue
+        names.append(m.group(2))
+    return names
+
+def fuzz_surface():
+    out = {}
+    for h in fuzz_headers():
+        for n in fuzz_functions(h):
+            out.setdefault(n, h)
+    return out
+
+def fuzz_rows():
+    """(function -> files that cover it), and the covers entries that are wrong."""
+    cov, bad = {}, {}
+    surface = fuzz_surface() if os.path.isdir('tests/fuzz') else {}
+    for src in sorted(sources('tests/fuzz')):
+        if not src.endswith('.c'):
+            continue
+        raw = open(src, encoding='utf-8', errors='replace').read()
+        code = _strip_comments(raw)
+        for m in FUZZ_COVERS.finditer(raw):
+            for fn in ''.join(re.findall(r'"([^"\n]*)"', m.group(1))).split():
+                cov.setdefault(fn, []).append(src)
+                if fn not in surface:
+                    bad[f'{src}: .covers names {fn}'] = 'not a public function of the lib surface (renamed, removed or misspelt)'
+                elif not re.search(r'\b' + re.escape(fn) + r'\s*\(', re.sub(r'"[^"\n]*"', '""', code)):
+                    bad[f'{src}: .covers names {fn}'] = 'the adapter file never calls it'
+    return cov, bad
+
+def fuzz_exempt():
+    out = {}
+    for src in sorted(glob.glob('tests/fuzz/exempt/*.txt')):
+        for ln in open(src, encoding='utf-8'):
+            ln = ln.rstrip('\n')
+            if ln.strip() and not ln.startswith('#'):
+                fn, _, why = ln.partition('\t')
+                if not why.strip():
+                    out[f'{src}: {fn}'] = 'an EXEMPT entry needs a reason after a tab'
+                out.setdefault(fn.strip(), os.path.basename(src))
+    return out
+
+def fuzz_cover_violations():
+    if not os.path.isdir('tests/fuzz'):
+        return {}
+    surface = fuzz_surface()
+    cov, out = fuzz_rows()
+    ex = fuzz_exempt()
+    for k, v in list(ex.items()):
+        if ' ' in k:
+            out[k] = v
+    for fn, h in sorted(surface.items()):
+        if fn not in cov and fn not in ex:
+            out[f'{h}: {fn}'] = 'no adapter row (.covers) and no EXEMPT entry'
+        elif fn in cov and fn in ex:
+            out[f'{h}: {fn}'] = f'covered by {cov[fn][0]} and still in tests/fuzz/exempt/{ex[fn]}: delete the entry'
+    for fn, f in sorted(ex.items()):
+        if ' ' not in fn and fn not in surface:
+            out[f'tests/fuzz/exempt/{f}: {fn}'] = 'not a public function any more: delete the entry'
     return out
 
 def main():
@@ -865,8 +1033,12 @@ def layers_main():
                  f'a .c file is over {SIZE_C} lines or a header over {SIZE_H} (split it by purpose, or record why it is one job in EXEMPT, CLAUDE.md 12):', EXEMPT['file size'])
     rc |= ratchet('no kof name in libgenome', genome_kof_violations(),
                  'libgenome defines a kof_ / KOF_ name (the lib is kgenome_ / KGENOME_, CLAUDE.md 12):')
+    rc |= ratchet('text route byte classes', text_class_violations(),
+                 'the TEXT route or a lexer spells a byte class itself or reads the locale (use kofcore.h: kof_is_alpha, kof_is_word_byte, kof_hex_val, kof_lower_byte):')
     rc |= ratchet('getenv in tests', tests_getenv_violations(),
                  'a test reads the environment (see the note at tests_getenv_violations):', EXEMPT['getenv in tests'])
+    rc |= ratchet('fuzz coverage', fuzz_cover_violations(),
+                 'a public function has no fuzz adapter row and no EXEMPT entry, or a table is stale (tests/fuzz/README.txt):')
     return rc
 
 if __name__ == '__main__':

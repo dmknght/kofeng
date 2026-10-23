@@ -4,23 +4,23 @@
  */
 
 #include "ksb.h"
+#include <databases/diagsrc.h>
 
-#include <databases/syndsrc.h>
 
 /*
- * ---- WHICH SIGNATURE READS WHICH DIAGNOSE --------------------------------
+ * ---- WHICH MODULE READS WHICH DIAGNOSE -----------------------------------
  *
- * Worked out from the sources, never declared. A verdict names a diagnose in
+ * Worked out from the sources, never declared. A module names a diagnose in
  * exactly one place, the call - kof_diag(NAME) or kof_diag_share(cap, A, B) -
  * and that is also the only statement of it that cannot be wrong about what
- * the verdict does. This reads those calls out of every module source in the
- * tree and keeps (diagnose, signature) pairs; the diagnoses are written with
- * the signatures that read them, and the engine runs only the ones somebody
- * does.
+ * the module does. This reads those calls out of every module source in the
+ * tree and keeps (diagnose, module) pairs; the diagnoses are written with
+ * the modules that read them, and the engine runs only the ones somebody
+ * does (or that declare a disease).
  *
  * COMMENTS ARE STRIPPED FIRST. These sources explain themselves at length and
  * more than one of them writes the call out in a comment as an example; a
- * scan that counted those would call a diagnose used by a verdict that only
+ * scan that counted those would call a diagnose used by a module that only
  * mentions it.
  */
 
@@ -49,7 +49,7 @@ struct uses_user {
 	const char *user;
 };
 
-/* Every diagnose one verdict source reads, as (diagnose, user). */
+/* Every diagnose one module source reads, as (diagnose, user). */
 static void uses_note(void *ud, const char *diag)
 {
 	const struct uses_user *u = ud;
@@ -59,18 +59,16 @@ static void uses_note(void *ud, const char *diag)
 }
 
 /*
- * THE VERDICT IS READ BY THE ONE READER - kof_dsrc_parse, which the editor and
- * the diagnose build use - and not by a scan of its own for the call names: two
- * readers of one grammar are two places for it to differ. A source that names
- * kof_diag and that reader refuses is an error here, as it is everywhere.
+ * THE CALLS ARE READ BY THE ONE READER - kof_dsrc_reads, in the library - and not
+ * by a scan of this program's own for the call names: two readers of one grammar
+ * are two places for it to differ. Nothing is required of the module's shape.
  */
 void ksb_uses_scan(struct ksb_ctx *ksb, const char *path)
 {
-	static struct kof_dsrc d;
-	const struct kof_dsrc_report rep = { ksb_dsrc_error, ksb_dsrc_warn, ksb };
 	size_t n = 0;
 	char *t = ksb_slurp(path, &n), user[DIAG_USER_LEN];
 	const char *base = strrchr(path, '/'), *dot;
+	struct uses_user uu;
 
 	if (!t)
 		return;
@@ -79,29 +77,9 @@ void ksb_uses_scan(struct ksb_ctx *ksb, const char *path)
 	dot = strrchr(user, '.');
 	if (dot)
 		user[dot - user] = 0;
-	/* Only a source that reads a diagnose goes to the diagnose reader: its
-	 * vocabulary for a target is the diagnose's, and an ordinary signature
-	 * names others. */
-	{
-		char *code = malloc(n + 1u);
-
-		if (code) {
-			memcpy(code, t, n);
-			code[n] = 0;
-			kof_dsrc_blank_comments(code, n);
-			if (strstr(code, "kof_diag")) {
-				ksb->src_name = path;
-				memset(&d, 0, sizeof d);
-				kof_dsrc_parse(t, n, &d, &rep);
-				if (d.has_cond) {
-					struct uses_user uu = { ksb, user };
-
-					kof_dsrc_cond_names(&d.cond, uses_note, &uu);
-				}
-			}
-			free(code);
-		}
-	}
+	uu.ksb = ksb;
+	uu.user = user;
+	kof_dsrc_reads(t, n, uses_note, &uu);
 	free(t);
 }
 

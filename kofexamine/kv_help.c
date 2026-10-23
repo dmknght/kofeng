@@ -137,8 +137,7 @@ static void abt(const char *fmt, ...)
  * engine that is linked, the database that was found beside it, the formats
  * this build can parse - and a literal would be a fourth place for them to be
  * wrong. Only the two sentences at the top are prose, and they say what the
- * tool is FOR: reading a file the way the engine reads it, and turning what is
- * found into a signature.
+ * tool is FOR: reading a file the way the engine reads it.
  *
  * A SECTION TITLE AND A FIELD NAME ARE COLOURED; A VALUE IS NOT. The eye needs
  * help finding the block it wants, not help reading a number once it is there
@@ -167,19 +166,13 @@ static void about_build(struct view *v)
 	 * each - a reader who has just opened the tool can see the bytes, the
 	 * disassembly and the tree, but not what any of them are offered for,
 	 * and an About that names them is shorter than finding out by clicking.
-	 *
-	 * The last line is the one fact nowhere on that screen: a draft here is
-	 * not a mock-up, it goes through the builder that produces the shipped
-	 * database. It stays even though the list grew, because it is the only
-	 * claim in this box that a reader could not otherwise check.
 	 */
 	abt(A_BOLD "KOFViewer" A_OFF "  -  a TUI file examiner built on the KOF"
-	    " engine,");
-	abt("               with signature generation.");
+	    " engine.");
 	abt("");
 	abt("  " A_DIM "-" A_OFF " a hex view of any region, with the"
-	    " strings and markers");
-	abt("    a signature would look for lit where they sit");
+	    " strings a draft declares");
+	abt("    lit where they sit");
 	abt("  " A_DIM "-" A_OFF " disassembly beside it, and which"
 	    " code refers to which data");
 	abt("  " A_DIM "-" A_OFF " the file's structure as the engine"
@@ -188,11 +181,8 @@ static void about_build(struct view *v)
 	abt("  " A_DIM "-" A_OFF " the unpackers, so a packed or"
 	    " archived payload is examined");
 	abt("    as an object of its own");
-	abt("  " A_DIM "-" A_OFF " a signature generator, from marked"
-	    " bytes to compiled rule");
-	abt("");
-	abt("Signatures drafted here are compiled by the same builder that");
-	abt("produces the shipped database.");
+	abt("  " A_DIM "-" A_OFF " a diagnose draft, from marked bytes to a"
+	    " preview of its conditions");
 	abt("");
 
 	abt(A_ID "Versions" A_OFF);
@@ -227,24 +217,18 @@ static void about_build(struct view *v)
 	abt("");
 
 	/*
-	 * THREE KINDS OF RECORD, THREE ROWS. They were one line reading
-	 * "Signatures N unpackers N heur rules N", which is a sentence to be
-	 * parsed rather than a table to be read - and they are not three
-	 * flavours of one thing: a detector names a family, an unpacker
-	 * produces objects, a rule scores what the parse found. Three rows is
-	 * also what lets a zero stand out, and a database with no unpackers is
-	 * worth noticing.
+	 * TWO KINDS OF RECORD, TWO ROWS: a diagnose names a behaviour, an
+	 * unpacker produces objects. Separate rows are what let a zero stand
+	 * out, and a database with no unpackers is worth noticing.
 	 */
 	abt(A_ID "Database" A_OFF);
 	if (v->eng) {
-		abt("  " A_DIM "Signatures " A_OFF " %u",
-		    kdb_records(v->eng));
+		abt("  " A_DIM "Diagnoses  " A_OFF " %u",
+		    kdb_diagnoses(v->eng));
 		abt("  " A_DIM "Unpackers  " A_OFF " %u",
 		    kdb_unpackers(v->eng));
-		abt("  " A_DIM "Heur rules " A_OFF " %u",
-		    kmatch_rules(v->eng));
 	} else {
-		abt("  " A_DIM "Signatures " A_OFF " " A_WARN "none loaded" A_OFF);
+		abt("  " A_DIM "Diagnoses  " A_OFF " " A_WARN "none loaded" A_OFF);
 	}
 	abt("");
 

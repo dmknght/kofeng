@@ -39,12 +39,11 @@ void draw_marker_line(struct out *o, struct view *v)
 	struct object *ob = cur_obj(v);
 	/* Wide enough for the action slot, which is the longest thing that lands
 	 * here: a dump reports counts, a byte total and a directory name. */
-	char name[80], right[200];
+	char right[200];
 	/* The right hand text is not always a readout: while the draft has the
 	 * focus it can be a complaint, and a complaint in the colour of a
 	 * readout is one people scroll past. */
 	const char *rcol = NULL;
-	uint32_t hit = 0, i;
 
 	/* The rule that closes the draft panel, and so the one that separates
 	 * the status line from whatever is above it. Drawn here rather than in
@@ -140,97 +139,25 @@ void draw_marker_line(struct out *o, struct view *v)
 		out_str(o, A_DIM "  |  " A_OFF);
 	}
 
-	if (!ob->n_touch) {
+	{
 		int32_t hsc = 0;
 		const char *hguess = "Unknown";
 
 		/*
-		 * NO MARKER IS NOT THE SAME AS NOTHING TO SAY.
-		 *
-		 * "no markers" was the whole of this line for an object no
-		 * signature knows, and on an object the heuristic would report
-		 * that reads as an all clear - the one reading it must never
-		 * have. A scan of the same file prints a finding; this said the
-		 * database is quiet, which is true and beside the point.
-		 *
-		 * Spelled the way the scanner spells it, because it is the same
-		 * verdict and a reader should be able to match the two by eye
-		 * rather than by working out that they are about one thing.
+		 * The engine's verdict for the object, spelled as the engine
+		 * spelled it. Nothing else on this line is a verdict: the packer
+		 * tag above is how the object was opened, and the heuristic is
+		 * a score that is on the dashboard.
 		 */
-		/*
-		 * The packer tag wins the line when both apply.
-		 *
-		 * They are not competing readings of the same evidence - one
-		 * says something hid this object's code, the other that its
-		 * structure is wrong - but the status line holds one and the
-		 * packer is the one worth acting on: it names a button to
-		 * press. The heuristic verdict is not lost, it is on the
-		 * dashboard a keystroke away, on its own line.
-		 */
-		if (emu_why_tag(ob->emu_why))
-			out_str(o, A_DIM "no markers" A_OFF);
+		if (ob->heur.has_verdict)
+			out_fmt(o, A_BAD "%s" A_OFF, ob->heur.verdict.name);
+		else if (emu_why_tag(ob->emu_why))
+			out_str(o, A_DIM "no verdict" A_OFF);
 		else if (heur_reports(ob, &hsc, &hguess))
 			out_fmt(o, A_HEUR "Heur:%s#s%d" A_OFF A_DIM
-				"  no marker" A_OFF, hguess, hsc);
+				"  no verdict" A_OFF, hguess, hsc);
 		else
-			out_str(o, A_DIM "no markers" A_OFF);
-	} else {
-		char hits[24], skips[24];
-		int c;
-
-		for (i = 0; i < ob->n_touch; i++)
-			hit += (uint32_t)(ob->touch[i].fired != 0);
-		/*
-		 * "No rule selected" is a real state - it is what an object
-		 * that matched nothing starts in, so that the hex pane does not
-		 * light up wherever some unselected rule's marker happened to
-		 * land. The counts still mean something there; the name does
-		 * not, and reading it would be reading one past the array.
-		 */
-		if (v->sel_touch < ob->n_touch) {
-			kof_touch_name(&ob->touch[v->sel_touch], name, sizeof name);
-		} else {
-			snprintf(name, sizeof name, "no marker selected");
-		}
-
-		/*
-		 * Capitalised, because they are the labels of two controls
-		 * rather than words in a sentence - the same way every other
-		 * button on this screen is written.
-		 *
-		 * "Matched" and "Skipped" rather than "Hit" and "Skip". The
-		 * dashboard has said "matched" and "skipped" for as long as it
-		 * has existed, and the two screens describing one fact in two
-		 * vocabularies is a thing a reader has to translate. They also
-		 * say what happened to the OBJECT: "Hit" is jargon for what
-		 * happened to the module.
-		 */
-		snprintf(hits, sizeof hits, "Matched %u", hit);
-		snprintf(skips, sizeof skips, "Skipped %u", ob->n_touch - hit);
-
-		/*
-		 * <Object> | <Verdict name> | <verdict info>: the name of the
-		 * selected rule first, then how many matched and were skipped.
-		 * They were the other way round, with the name last and followed
-		 * by a count of the rule's markers - which the dashboard and the
-		 * markers list already say, and which crowded the line.
-		 */
-		c = 1 + (int)o->col_hint;
-		v->name_c0 = c;
-		v->name_c1 = c + (int)strlen(name) - 1;
-		c += (int)strlen(name) + 5;
-		v->hit_c0 = c;
-		v->hit_c1 = c + (int)strlen(hits) - 1;
-		c += (int)strlen(hits) + 2;
-		v->skip_c0 = c;
-		v->skip_c1 = c + (int)strlen(skips) - 1;
-
-		out_fmt(o, "%s%s" A_OFF A_DIM "  |  " A_OFF,
-			v->sel_touch < ob->n_touch
-			? touch_colour(&ob->touch[v->sel_touch]) : A_DIM,
-			name);
-		out_fmt(o, "%s%s" A_OFF A_DIM "  %s" A_OFF,
-			hit ? A_BAD : A_DIM, hits, skips);
+			out_str(o, A_DIM "no verdict" A_OFF);
 	}
 
 	/*
@@ -298,54 +225,10 @@ void draw_marker_line(struct out *o, struct view *v)
 		rcol = v->act_ok ? A_SIZE : A_WARN;
 		goto have_right;
 	}
-	/*
-	 * A word about the marker list, while the marker list is what is open.
-	 *
-	 * The panel's commentary below is scoped to the panel having focus,
-	 * which is right for it and wrong here: this dialog is over the panel
-	 * and the reader is not in it, so a note about the row they just
-	 * clicked had nowhere to appear at all.
-	 */
-	if (v->show_list && v->list_depth && v->ed.dr.warn[0]) {
+	if (v->pane == 3 && g_decl_rows && v->ed.dr.warn[0]) {
 		snprintf(right, sizeof right, "%s", v->ed.dr.warn);
 		rcol = v->ed.dr.warn_bad ? A_BAD : A_WARN;
 		goto have_right;
-	}
-	if (v->pane == 3 && g_decl_rows) {
-		/* Nothing is wrong with a draft nobody has begun - see
-		 * draft_started. The reasons appear with the first thing the
-		 * author puts in it, which is when they mean anything. */
-		const char *why = draft_started(&v->ed) ? draft_missing(&v->ed)
-							: NULL;
-		int near_miss = 0;
-		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
-
-		if (v->ed.dr.warn[0]) {
-			snprintf(right, sizeof right, "%s", v->ed.dr.warn);
-			rcol = v->ed.dr.warn_bad ? A_BAD : A_WARN;
-		} else if (why) {
-			/* Something required is absent, which is why the
-			 * button is greyed - an error, and coloured as one. */
-			snprintf(right, sizeof right, "%s", why);
-			rcol = A_BAD;
-		} else if (dup) {
-			/* Both readings are the same kind of thing: a rule in
-			 * the tree worth looking at before writing another.
-			 * Neither is a failure, and the exact-match one is the
-			 * reading that follows a Save As that worked. */
-			snprintf(right, sizeof right, "%s %s",
-				 near_miss ? "all but one marker of"
-					   : "same markers as", dup);
-			rcol = A_WARN;
-		}
-		else if (v->ed.dr.gen_path[0])
-			snprintf(right, sizeof right, "%.*s%s",
-				 (int)sizeof right - 12, v->ed.dr.gen_path,
-				 draft_dirty(&v->ed) ? "  (unsaved)" : "");
-		else
-			right[0] = 0;
-		if (right[0])
-			goto have_right;
 	}
 	if (v->sel_a != KGENOME_BROKEN) {
 		uint64_t lo = v->sel_a < v->sel_b ? v->sel_a : v->sel_b;

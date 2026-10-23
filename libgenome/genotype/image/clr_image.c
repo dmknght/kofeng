@@ -175,27 +175,40 @@ int kgenome_clr_read(kof_buf obj, uint64_t clr_off, kgenome_clr_rva rva,
 			break;
 		}
 		name_at = at + 8u;
-		for (j = 0; j + 1u < sizeof name; j++) {
-			uint8_t c = 0;
+		/*
+		 * A NAME IS UP TO 31 CHARACTERS AND ITS NUL, or the table is short (image_clr_attack C2, C3).
+		 * It was tested by looking at a terminator the code had stored itself at index 31 - so a name of
+		 * 32 or more characters passed, the walk went on from the middle of it, and a header planted
+		 * inside a name was read as a stream - and by the first byte of a buffer nothing had written
+		 * when that byte was the object's end.
+		 */
+		{
+			int ended = 0, readable = 1;
 
-			if (!kof_rd_u8(obj, name_at + j, &c)) {
-				j = 0;
+			for (j = 0; j + 1u < sizeof name; j++) {
+				uint8_t c = 0;
+
+				if (!kof_rd_u8(obj, name_at + j, &c)) {
+					readable = 0;
+					break;
+				}
+				if (!c) {
+					ended = 1;
+					break;
+				}
+				name[j] = (char)c;
+			}
+			if (readable && !ended) {
+				uint8_t c = 1;
+
+				/* 31 characters read: the next byte has to be the NUL */
+				ended = kof_rd_u8(obj, name_at + j, &c) && !c;
+			}
+			if (!ended) {
+				out->anomalies |= KGENOME_CLR_ANOM_STREAM_SHORT;
 				break;
 			}
-			name[j] = (char)c;
-			if (!c)
-				break;
-		}
-		if (!j && name[0] != '\0') {
-			out->anomalies |= KGENOME_CLR_ANOM_STREAM_SHORT;
-			break;
-		}
-		name[sizeof name - 1u] = '\0';
-		if (name[j] != '\0') {
-			/* A name that did not terminate inside the buffer this
-			 * allows is not a stream name. */
-			out->anomalies |= KGENOME_CLR_ANOM_STREAM_SHORT;
-			break;
+			name[j] = '\0';
 		}
 
 		/* The header is padded so the next one starts on a four-byte

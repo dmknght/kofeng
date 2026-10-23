@@ -24,5 +24,5 @@ KOF_DEFINE_HEXSTR(words, "84 62 BD 43 17 61 BD 42 7A 5F BD 41 CD 5D BD 40 50 5C 
 KOF_DEFINE_SCAN
 {
 	if (kof_find_str(code, words))
-		KOF_SCAN_INFECT("EndianMips");
+		{ kof_debug("EndianMips#EndianMips", 0); return; }
 }

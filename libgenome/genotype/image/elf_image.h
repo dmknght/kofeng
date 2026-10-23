@@ -287,6 +287,20 @@ uint32_t kgenome_elf_relcalls(kof_buf f, const struct kgenome_elf_info *p,
 			  enum kgenome_status *status);
 
 /*
+ * THE IMPORTS OF A LINKED OBJECT (a static-PIE and a dynamically linked program both have them): each
+ * GOT slot the dynamic linker fills with the address of a named symbol. `slot` is the slot's ADDRESS
+ * (r_offset), `nameoff` the file offset of the symbol's name, `type` GLOB_DAT (6) or JUMP_SLOT (7) and
+ * `name` the name, cut at KGENOME_SYMNAME_MAX (reported through `status` as KGENOME_TRUNCATED, as in
+ * kgenome_elf_relcalls). Zero when the object has no dynamic symbol table, is relocatable, or is not
+ * x86; returns how many it reported.
+ */
+typedef void (*kgenome_elf_import_fn)(void *user, uint64_t slot, uint64_t nameoff,
+				  uint32_t type, const char *name);
+uint32_t kgenome_elf_imports(kof_buf f, const struct kgenome_elf_info *p,
+			 kgenome_elf_import_fn fn, void *user,
+			 enum kgenome_status *status);
+
+/*
  * The CODE relocation, with a name, whose patched bytes lie inside the
  * instruction at [at, at+len) - or NULL. A call's own relocation patches the
  * displacement inside the branch and is found like any other; a caller that

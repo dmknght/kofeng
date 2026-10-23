@@ -300,23 +300,14 @@ enum kof_pack_machine {
  * the field.
  */
 enum kof_pack_kind {
-	KOF_PACK_DETECT = 0,      /* entry kof_scan; reports findings */
+	KOF_PACK_DETECT = 0,      /* entry kof_scan */
 	KOF_PACK_UNPACK = 1,      /* entry kof_unpack; yields child objects */
 	/*
-	 * entry kof_heur; reports at KOF_LEVEL_HEUR and nothing above it.
-	 *
-	 * Its own kind rather than a detector with a ceiling, for the reason the
-	 * two above are separate: the scan loop walks every detector for every
-	 * object, and a heuristic runs at its own two points in the object's
-	 * life. Mixed into that loop it would be stepped over and rejected on
-	 * every object that is not at the phase it asked for.
-	 *
-	 * What it may NOT do is what makes it a kind and not a convention: no
-	 * family name, no verdict above HEUR, no child objects. The build
-	 * refuses all three - see ksigbuilder - because a check that runs
-	 * when the module does is a check that has already loaded the code.
+	 * 2 WAS THE HEURISTIC-RULE KIND (entry kof_heur) and is retired: the rule
+	 * kind went with the old verdict, and the loader refuses a pack that holds
+	 * it (dbpackcheck.c) rather than guess at it. The value is never reused.
 	 */
-	KOF_PACK_HEUR   = 2
+	KOF_PACK_RETIRED_HEUR = 2
 };
 
 /*
@@ -612,31 +603,23 @@ struct kof_pack_hdr {
  * memo_base is absent on purpose. It depends on which other packs are loaded
  * beside this one, so it is engine state, not a fact about the file.
  *
- * family_off and maltype are what KOF_TARGET_NAME declares, read here rather
- * than composed into every finding's text. KOF_TARGET_NAME is one declaration
- * per source file, and a module with several KOF_SCAN_INFECT/SUSPECT calls used
- * to pay for that declaration again in every one of them - "Botnet.Mirai." typed
- * into the name pool once per finding instead of once per module, because
- * nothing kept the module-scoped fact apart from the per-finding one. Storing it
- * here instead is the same move struct kof_pack_str's off/len already made for a
- * literal: a fact shared by many records lives once, and what varies per record
- * is what the record actually holds.
+ * family_off and maltype are what KOF_TARGET_NAME declares. KOF_TARGET_NAME is one
+ * declaration per source file, so it is stored once per module: the same move
+ * struct kof_pack_str's off/len already made for a literal - a fact shared by
+ * many records lives once, and what varies per record is what the record holds.
  *
  * family_off points into KOF_SEC_NAME_POOL, same pool a name descriptor's off
- * does - a module's family and its findings' variants are both short, both
+ * does - a module's family and its notes' names are both short, both
  * author-chosen text, and interning them together is what lets "Mirai" declared
  * by two different modules share bytes. NUL terminated, unlike a string
  * literal's pool entry, for the same reason a name is: this is printed, not
  * searched. maltype is enum kof_maltype (kofsig.h); the word a reader sees comes
  * from kof_maltype_name, not from anything stored as text.
  *
- * Both are meaningless for an unpack-kind module - KOF_TARGET_NAME is not
- * required there and an unpacker reports nothing by name - but never invalid:
- * the packer interns an empty family for a module that declared none, so
- * family_off is always a real offset to a real (possibly empty) string, and
- * there is nothing here for the loader to reject. Nothing ever calls
- * kof_maltype_name or reads the family pool for such a module; see the note on
- * KOF_TARGET_NAME in kofsig.h for why the declaration is optional there.
+ * Neither is required of an unpack-kind module, but never invalid: the packer
+ * interns an empty family for a module that declared none, so family_off is
+ * always a real offset to a real (possibly empty) string, and there is nothing
+ * here for the loader to reject.
  */
 struct kof_pack_mod {
 	uint32_t code_off;        /* from the start of KOF_SEC_CODE */
@@ -664,42 +647,15 @@ struct kof_pack_mod {
 	uint32_t step;
 
 	/*
-	 * WHEN a heuristic rule runs, and WHAT it asks the engine for.
-	 *
-	 * Their own fields rather than a second meaning for step and
-	 * maltype, which are the two that happen to be spare on a heur module.
-	 * Overloading them would work and would be a trap: the day something
-	 * prints a module's maltype for diagnostics, a rule's want-mask reads
-	 * back as a malware type.
-	 *
-	 * heur_phase is enum kof_heur_phase_id and is a PREFILTER field - the
-	 * scan asks for one phase at a time and must not enter a rule that
-	 * declared the other. heur_want is a mask of enum kof_eng_want, fixed at
-	 * build time so that what a rule can ask for is a property of the source
-	 * and not of the object it is looking at.
-	 *
-	 * Zero and unread on a detector and on an unpacker.
+	 * FOUR RESERVED FIELDS, kept so that no record's layout moves (a pack is a
+	 * file, and the layout is the pack's version). They carried a heuristic
+	 * rule's phase, want-mask, lowest --heur level and predicted family; the rule
+	 * kind went with the old verdict. Written as zero, read by nothing.
 	 */
-	uint32_t heur_phase;
-	uint32_t heur_want;
-
-	/*
-	 * The lowest --heur level at which the rule runs; 0 means unstated and
-	 * is read as 1, so a pack written before this field existed behaves as
-	 * it always did. A PREFILTER field like heur_phase - the scan knows its
-	 * own level and must not enter a rule that asked for more.
-	 */
-	uint32_t heur_level;
-
-	/*
-	 * The family a rule PREDICTS, into KOF_SEC_NAME_POOL like family_off, or
-	 * zero when it predicts nothing.
-	 *
-	 * Its own field and not family_off, because on a rule that slot already
-	 * holds the shape word - "Shellcode" - and the two are different claims.
-	 * See KOF_HEUR_PREDICT in kofmod/heur.h.
-	 */
-	uint32_t heur_predict_off;
+	uint32_t reserved_heur_phase;
+	uint32_t reserved_heur_want;
+	uint32_t reserved_heur_level;
+	uint32_t reserved_heur_predict;
 
 	/*
 	 * THE SOURCE THIS MODULE WAS WRITTEN IN, relative to the bases tree.
@@ -721,42 +677,29 @@ struct kof_pack_mod {
 	uint32_t src_off;
 
 	/*
-	 * WHERE kof_cure() SITS INSIDE THE BLOB, or zero when the module has
-	 * none.
-	 *
-	 * A module's entry is at offset zero and the loader needs no symbol
-	 * table to find it - that is what module.ld buys. A SECOND entry
-	 * cannot be had that way, and the answer is not to relax the first
-	 * rule: the builder already reads the symbol table, so it resolves
-	 * kof_cure once, at build time, and writes the offset here. At run
-	 * time the host calls blob + cure_off and still reads no symbols.
-	 *
-	 * ZERO MEANS NO CURE, which is most modules. A detector that knows
-	 * how to undo what it found says so by having the function; nothing
-	 * else declares it, because a declaration can disagree with the code
-	 * and an exported symbol cannot - the same reasoning that derives a
-	 * module's KIND from which entry it exports.
+	 * RESERVED: where kof_cure() sat inside the blob. The repair a module could
+	 * describe went with the module that named the object. Written as zero,
+	 * read by nothing.
 	 */
-	uint32_t cure_off;
+	uint32_t reserved_cure;
 
 	/*
 	 * WHAT KIND OF CONTENT THIS MODULE TAKES OUT, into KOF_SEC_NAME_POOL like
 	 * the family, or zero when it declared none. See KOF_TARGET_CONTENT in
 	 * kofmod/kofsig.h. Its own field and not the family's: on an unpacker the
-	 * family slot holds the packer's name for a verdict, and a word that names
+	 * family slot holds the packer's name, and a word that names
 	 * a kind of content is a different claim.
 	 */
 	uint32_t content_off;
 
 	/*
-	 * WHAT THIS DETECTOR'S MATCH FINDS, as the id of a disease and the
-	 * kof_maltype it was declared with - see KOF_DECLARE_DISEASE in
-	 * kofmod/kofdiagtree.h. Zero and unread for a module that declared none,
-	 * and for an unpacker. The text is not here: the database carries an id to
-	 * name table (diseases.kdig) for the tools.
+	 * TWO RESERVED FIELDS: the id of the disease a detector's match found and the
+	 * kof_maltype it was declared with. A module no longer finds a disease - a
+	 * diagnose does (its own record, diagnose packs) - so the build refuses
+	 * KOF_DECLARE_DISEASE in a module and writes zero here; read by nothing.
 	 */
-	uint32_t disease;
-	uint32_t disease_type;
+	uint32_t reserved_disease;
+	uint32_t reserved_disease_type;
 };
 
 /*

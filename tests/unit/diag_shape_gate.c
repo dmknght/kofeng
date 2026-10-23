@@ -4,8 +4,9 @@
  *
  * The engine publishes what it read out of the header - see enum
  * kof_diag_fact - and a diagnose registers the conditions it wants those to
- * meet, with KOF_DIAG_HAS_ATTRB. The engine routes on that. The two stager
- * diagnoses register two: a mapping that is writable and executable, and no
+ * meet, with KOF_DIAG_HAS_ATTRB. The engine routes on that. The fixture diagnose
+ * (tests/sigs/diagnoses/stager_shape.c, the shape of the stager diagnoses the product
+ * used to ship) registers two: a mapping that is writable and executable, and no
  * section table.
  *
  * WHY THE ASSERTION IS ON THE ENGINE'S BEHAVIOUR AND NOT ON THE PREDICATE.
@@ -16,11 +17,8 @@
  * exactly like a slow machine. So this watches kof_stats.heur_emu, which is
  * the engine's own count of objects interpreted because something asked.
  *
- * THIS WAS A HEURISTIC RULE, the shellcode_00 rule in bases/heur (gone), which carried the
- * same shape test and asked on the diagnose's behalf. It had to publish a
- * verdict to be allowed to ask - Heur:Meterp?Shellcode on every object it
- * fired on, saying only that the engine had decided to look - and the test
- * lived in a different module from the declaration it was gating.
+ * THIS WAS A HEURISTIC RULE once, which carried the same shape test and asked on the
+ * diagnose's behalf; the rule kind is gone and the declaration is the diagnose's own.
  *
  *
  * WHAT IS ASSERTED
@@ -60,12 +58,16 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "asking_db.h"
 
 static int failures;
 
@@ -151,57 +153,10 @@ static uint64_t build(uint8_t *f, unsigned segs, int sectab, uint64_t body_n,
 	return len;
 }
 
-static char seen[256];
-
-static int on_object(const char *name, const void *bytes, uint64_t len,
-		     const struct kof_result *res, void *user)
-{
-	uint32_t k;
-
-	(void)name; (void)bytes; (void)len; (void)user;
-	/*
-	 * ACROSS EVERY OBJECT OF THE FILE, not just the last one.
-	 *
-	 * This cleared `seen` on entry, so each object overwrote the one
-	 * before and what survived was whatever came last. That held while a
-	 * file of this shape produced exactly one object. It stopped holding
-	 * when the normaliser began making a view of any binary with a long
-	 * zero run - the file reported Heur:Shellcode, the clean view came
-	 * after it, and the finding was erased by an object that had nothing
-	 * to say.
-	 *
-	 * The question this test asks is "did the ENGINE report it", and that
-	 * is a question about the file, so the answer accumulates. Clearing
-	 * belongs to the caller, before the scan, where it already is.
-	 */
-	if (!res)
-		return 0;
-	for (k = 0; k < res->n; k++)
-		if (res->v[k].level == KOF_LEVEL_HEUR && !seen[0]) {
-			snprintf(seen, sizeof seen, "%s", res->v[k].name);
-			break;
-		}
-	return 0;
-}
-
 /*
- * Returns non-zero when the object was reported as a heuristic whose SHAPE is
- * Shellcode. A rule names itself Heur:<predicted-family>#<variant>?<shape>, so
- * the shape "Shellcode" sits after the "?" when there is a prediction (there is
- * one here, Meterp) and right after "Heur:" when there is not. Both are a Heur
- * finding carrying the word Shellcode, which is what this asks.
- */
-/*
- * WHAT THE RULE DOES IS ASK, SO THAT IS WHAT THIS WATCHES.
- *
- * It used to look for "Heur:...Shellcode" in the verdict. The rule now
- * fires with KOF_HEUR_ACT - the shape is a reason to LOOK and not a thing
- * to conclude - so there is no verdict to look for, and a test that kept
- * looking for one would have reported the rule as broken for doing exactly
- * what it was changed to do.
- *
- * kof_stats.heur_emu is the engine's own count of objects interpreted
- * because a rule asked, which is this rule's entire effect.
+ * WHAT THE DECLARATION DOES IS ASK, so that is what this watches: kof_stats.heur_emu is the
+ * engine's own count of objects interpreted because something asked, which is this
+ * declaration's entire effect.
  */
 static int shape_asked(kof_scanner *sc, const char *path,
 			  const uint8_t *f, uint64_t n)
@@ -223,10 +178,9 @@ static int shape_asked(kof_scanner *sc, const char *path,
 	opt.max_produced_bytes = 1u << 20;
 	opt.max_resident_bytes = 16u << 20;
 	opt.max_object_bytes   = 1u << 20;
-	seen[0] = '\0';
 	st = kscan_stats(sc);
 	emu_before = st ? st->heur_emu : 0u;
-	if (kscan_path(sc, path, &opt, on_object, NULL) < 0) {
+	if (kscan_path(sc, path, &opt, NULL, NULL) < 0) {
 		fail("the scan could not run");
 		return 0;
 	}
@@ -236,7 +190,7 @@ static int shape_asked(kof_scanner *sc, const char *path,
 
 int main(int argc, char **argv)
 {
-	const char *db = argc > 1 ? argv[1] : "build/release/databases";
+	const char *db = argc > 1 ? argv[1] : ad_db_asking();
 	const char *path = "build/test/heur_shellcode.tmp";
 	static uint8_t f[16384];
 	kof_engine *eng;

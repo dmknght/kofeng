@@ -12,6 +12,7 @@
 #include "pe/pe_sym.h"
 #include "pe/pe_parse.h"
 #include "funcs.h"
+#include "../scripts/script_sym.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +43,9 @@ static uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
 		return kof_elf_syms(b, info, out, cap);
 	if (format == KOF_FMT_PE)
 		return kof_pe_syms_with(b, info, imports, out, cap);
+	/* A script: the names it calls - see script_sym.c. */
+	if (format == KOF_FMT_SCRIPT)
+		return kof_script_syms(b, info, out, cap);
 	/* Any other format has no symbols to give, which a reader takes as a
 	 * count of zero - the same answer a stripped ELF gives. */
 	return 0;
@@ -72,20 +76,15 @@ static uint32_t kof_syms_build_with(uint32_t format, const uint8_t *data,
  * only grows, so the next object reuses it. Returns the block's length, or 0 when
  * memory was not to be had.
  */
-uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data_n,
-			     const void *info,
-			     const struct kgenome_pe_imptab *imports,
-			     uint8_t **buf, uint32_t *cap, uint32_t *passes)
+/* The grow loop, over a builder that fills `out` (`cap` bytes) with the block and answers its length: the one loop for every format, and for a script whose names come from a scan the engine made. */
+typedef uint32_t (*syms_builder)(void *ctx, uint8_t *out, uint32_t cap);
+
+static uint32_t syms_grow(syms_builder build, void *bctx, uint32_t decl, uint8_t **buf, uint32_t *cap, uint32_t *passes)
 {
-	uint32_t recs = KOF_SYM_MAX_RECS, decl, need;
+	uint32_t recs = KOF_SYM_MAX_RECS, need;
 
 	if (passes)
 		*passes = 0;
-	decl = kof_syms_declared(format, data, data_n, info);
-	/* A PE's imports are counted by the table the caller built; its exports
-	 * are not known up front. */
-	if (!decl && format == KOF_FMT_PE && imports)
-		decl = imports->n;
 	if (decl > recs)
 		recs = decl < KOF_SYM_ABS_MAX_RECS ? decl : KOF_SYM_ABS_MAX_RECS;
 	need = KOF_SYM_BYTES_FOR(recs) < KOF_SYM_ABS_MAX_BYTES
@@ -101,8 +100,7 @@ uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data
 			*buf = g;
 			*cap = need;
 		}
-		n = kof_syms_build_with(format, data, data_n, info, imports,
-					*buf, *cap);
+		n = build(bctx, *buf, *cap);
 		if (passes)
 			(*passes)++;
 		if (n <= KOF_SYM_H_TRUNC ||
@@ -112,6 +110,55 @@ uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data
 		need = need > KOF_SYM_ABS_MAX_BYTES / 4u ? KOF_SYM_ABS_MAX_BYTES
 							 : need * 4u;
 	}
+}
+
+struct build_obj {
+	uint32_t format;
+	const uint8_t *data;
+	uint64_t data_n;
+	const void *info;
+	const struct kgenome_pe_imptab *imports;
+};
+
+static uint32_t build_obj_fn(void *ctx, uint8_t *out, uint32_t cap)
+{
+	const struct build_obj *o = ctx;
+
+	return kof_syms_build_with(o->format, o->data, o->data_n, o->info, o->imports, out, cap);
+}
+
+uint32_t kof_syms_build_grow(uint32_t format, const uint8_t *data, uint64_t data_n,
+			     const void *info,
+			     const struct kgenome_pe_imptab *imports,
+			     uint8_t **buf, uint32_t *cap, uint32_t *passes)
+{
+	struct build_obj o = { format, data, data_n, info, imports };
+	uint32_t decl = kof_syms_declared(format, data, data_n, info);
+
+	/* A PE's imports are counted by the table the caller built; its exports
+	 * are not known up front. */
+	if (!decl && format == KOF_FMT_PE && imports)
+		decl = imports->n;
+	return syms_grow(build_obj_fn, &o, decl, buf, cap, passes);
+}
+
+struct build_script {
+	kof_script_names_fn feed;
+	void *user;
+};
+
+static uint32_t build_script_fn(void *ctx, uint8_t *out, uint32_t cap)
+{
+	const struct build_script *b = ctx;
+
+	return kof_script_syms_with(b->feed, b->user, out, cap);
+}
+
+uint32_t kof_syms_build_grow_script(kof_script_names_fn feed, void *feed_user, uint8_t **buf, uint32_t *cap, uint32_t *passes)
+{
+	struct build_script b = { feed, feed_user };
+
+	return syms_grow(build_script_fn, &b, 0u, buf, cap, passes);
 }
 
 /*
@@ -127,4 +174,41 @@ static uint32_t kof_syms_declared(uint32_t format, const uint8_t *data, uint64_t
 	if (info && format == KOF_FMT_ELF)
 		return kof_elf_syms_declared(kof_buf_make(data, data_n), info);
 	return 0;
+}
+
+/*
+ * THE NAME OF THE SYMBOL AT AN ADDRESS, read out of a symbol block - the one
+ * lookup, for everything that names a symbol from the block: the variable a
+ * payload came out of, the function a block starts at, and the labels of the
+ * disassembly. It is the engine's, so the viewer and the notes read the same way. `shndx` of -1 matches
+ * any section; a relocatable object's values are section-relative, so there the
+ * section is part of the answer. Empty when no record matches.
+ */
+void kof_sym_name_at(const uint8_t *blk, uint32_t n, uint64_t value,
+			int shndx, char *out, size_t cap)
+{
+	const uint8_t *r;
+	uint32_t k;
+
+	out[0] = 0;
+	if (!value)
+		return;
+	for (k = 0; (r = kof_sym_rec(blk, n, k)); k++) {
+		uint32_t j;
+
+		if (kof_sym_u64(r, KOF_SYM_R_VALUE) != value ||
+		    (shndx >= 0 && (int)(r[KOF_SYM_R_SHNDX] |
+					(r[KOF_SYM_R_SHNDX + 1u] << 8)) != shndx))
+			continue;
+		{
+			uint32_t len = 0;
+			const char *nm = kof_sym_name(blk, n, r, &len);
+
+			for (j = 0; j + 1u < cap && j < len; j++)
+				out[j] = nm[j];
+		}
+		out[j] = 0;
+		if (j)
+			return;
+	}
 }

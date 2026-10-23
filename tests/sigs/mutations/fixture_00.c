@@ -42,5 +42,5 @@ void kof_scan(const struct kof_obj_ctx *ctx)
 	 * pattern. The test feeds a damaged copy as well for that reason.
 	 */
 	if (kof_mutation_score(fixture) >= 50u)
-		KOF_SCAN_INFECT("Fixture");
+		{ kof_debug("KofengMutationFixture#Fixture", 0); return; }
 }

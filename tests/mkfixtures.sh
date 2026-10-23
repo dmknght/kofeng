@@ -141,6 +141,21 @@ else
 	skipped="$skipped PE32(no-mingw-w64)"
 fi
 
+# PE files that need no Windows toolchain: mkpe.c writes one PE32 and one PE32+ with sections, base
+# relocations and an import table, byte for byte the same on every host. Without them a machine with no
+# mingw-w64 runs unit_pe_unmap and unit_pe_mapped over nothing and both report success (fix_engine2).
+# Built with the native compiler, which is all it needs; independent of the PE64/PE32 sets above.
+if can_build "${CC:-cc}"; then
+	if "${CC:-cc}" -O0 "$src/mkpe.c" -o "$out/.mkpe" >/dev/null 2>&1 && "$out/.mkpe" "$out"; then
+		built=$((built + 2))
+	else
+		skipped="$skipped synth-pe(mkpe-failed)"
+	fi
+	rm -f "$out/.mkpe"
+else
+	skipped="$skipped synth-pe(no-compiler)"
+fi
+
 # ---- containers ---------------------------------------------------------------
 #
 # The payload every archive holds: an ELF if one was built, so an archive fixture

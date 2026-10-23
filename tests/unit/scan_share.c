@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 #include "known_miss.h"
 
 static unsigned checks, fails;
@@ -49,11 +50,13 @@ struct seen {
 static int on_object(const char *name, const void *bytes, uint64_t len, const struct kof_result *res, void *user)
 {
 	struct seen *s = user;
+	struct note_list got;
 
 	(void)name; (void)bytes; (void)len;
+	notes_here(&got);
 	s->objs++;
 	s->broken |= res->broken;
-	s->finds += res->n;
+	s->finds += got.n;
 	return 0;
 }
 
@@ -62,7 +65,6 @@ static void scan_with(kof_scanner *sc, struct seen *s)
 	struct kof_scan_option opt;
 
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = 256u << 20;
 	opt.max_object_bytes = 64u << 20;
@@ -73,7 +75,7 @@ static void scan_with(kof_scanner *sc, struct seen *s)
 
 static void two_scanners(kof_engine *e)
 {
-	kof_scanner *a = kscan_new(e), *b = kscan_new(e);
+	kof_scanner *a = notes_scanner(e), *b = notes_scanner(e);
 	struct seen sa, sb;
 
 	CK(keng_memory_cap(e) == (512ull << 20), "the default cap is 512 MiB (%llu)", (unsigned long long)keng_memory_cap(e));
@@ -139,7 +141,7 @@ static void many_made_first(void)
 	pthread_barrier_init(&bar, NULL, NT);
 	for (i = 0; i < NT; i++) {
 		memset(&t[i], 0, sizeof t[i]);
-		t[i].sc = kscan_new(eng);
+		t[i].sc = notes_scanner(eng);
 		t[i].bar = &bar;
 		made += t[i].sc != NULL;
 	}
@@ -189,7 +191,6 @@ static void chain_run(unsigned d)
 	chain.made++;
 	memset(&s, 0, sizeof s);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = chain.resident;
 	opt.max_object_bytes = 64u << 20;

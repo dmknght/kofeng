@@ -9,6 +9,7 @@
  */
 
 #include "diagsrc_int.h"
+#include <ctype.h>
 
 
 /*
@@ -26,6 +27,8 @@
 	X(KOF_NUCLEO_READ) X(KOF_NUCLEO_FILE_RENAME) X(KOF_NUCLEO_TIMESTOMP) \
 	X(KOF_NUCLEO_WRITE) X(KOF_NUCLEO_HTTP_CONNECT) X(KOF_NUCLEO_HTTP_FETCH) \
 	X(KOF_NUCLEO_HTTP_OPEN) X(KOF_NUCLEO_HTTP_RECV) X(KOF_NUCLEO_HTTP_SEND) \
+	X(KOF_NUCLEO_DECODE) X(KOF_NUCLEO_EVAL) X(KOF_NUCLEO_REQUEST) \
+	X(KOF_NUCLEO_CREATE) X(KOF_NUCLEO_DYNCALL) X(KOF_NUCLEO_DYNLOAD) \
 	X(KOF_NUCLEO_CAPTURE) X(KOF_NUCLEO_COPY_FROM_USER) X(KOF_NUCLEO_COPY_TO_USER) \
 	X(KOF_NUCLEO_PROT_OFF) X(KOF_NUCLEO_HOOK) X(KOF_NUCLEO_KPROBE_REG) \
 	X(KOF_NUCLEO_KPROBE_UNREG) X(KOF_NUCLEO_KSYM_LOOKUP) X(KOF_NUCLEO_LIST_HIDE) \
@@ -230,6 +233,7 @@ int kof_dsrc_flag_of(const char *w, uint16_t *out)
 {
 	if (strcmp(w, "0") == 0)             { *out = 0; return 1; }
 	if (strcmp(w, "KOF_FLOWF_WX") == 0)  { *out = KGENOME_NUCLEO_F_WX; return 1; }
+	if (strcmp(w, "KOF_FLOWF_BUILT") == 0) { *out = KGENOME_NUCLEO_F_BUILT; return 1; }
 	return 0;
 }
 
@@ -366,19 +370,50 @@ char *kof_dsrc_blanked(const char *t, size_t n)
 	return o;
 }
 
-void kof_dsrc_cond_names(const struct kof_dsrc_cond *c,
-			 void (*fn)(void *ud, const char *diag), void *ud)
+/*
+ * THE DIAGNOSES A MODULE SOURCE READS, from the calls it makes: kof_diag(A),
+ * kof_diag_share(CAP, A, B), kof_diag_str_any/all(A, "..."). Calls `fn` once per
+ * name, in the order the source has them. The one scan the build and any tool share,
+ * over the same blanked text the declarations are read from - a call written in a
+ * comment is a mention and is not here. Nothing about the shape of the module is
+ * required: how the answer is used is the module's business.
+ */
+static void reads_args(const char *code, const char *macro, const int *idx, size_t n_idx,
+		       void (*fn)(void *ud, const char *diag), void *ud)
 {
-	uint32_t i;
+	const size_t L = strlen(macro);
+	const char *p = code;
 
-	for (i = 0; c && i < c->n; i++) {
-		const struct kof_dsrc_term *t = &c->t[i];
+	while ((p = strstr(p, macro)) != NULL) {
+		size_t k;
+		int ok = (p == code || !(isalnum((unsigned char)p[-1]) || p[-1] == '_')) &&
+			 p[L] == '(';
 
-		if (t->a[0])
-			fn(ud, t->a);
-		if (t->kind == KVT_SHARE && t->b[0])
-			fn(ud, t->b);
+		if (ok)
+			for (k = 0; k < n_idx; k++) {
+				char w[KOF_DSRC_NAME_LEN];
+
+				if (kof_dsrc_arg(p, idx[k], w, sizeof w) && w[0] &&
+				    !strchr(w, '"'))
+					fn(ud, w);
+			}
+		p += L;
 	}
+}
+
+void kof_dsrc_reads(const char *text, size_t n,
+		    void (*fn)(void *ud, const char *diag), void *ud)
+{
+	static const int a0[] = { 0 }, ab[] = { 1, 2 };
+	char *code = kof_dsrc_blanked(text, n);
+
+	if (!code)
+		return;
+	reads_args(code, "kof_diag", a0, 1u, fn, ud);
+	reads_args(code, "kof_diag_share", ab, 2u, fn, ud);
+	reads_args(code, "kof_diag_str_any", a0, 1u, fn, ud);
+	reads_args(code, "kof_diag_str_all", a0, 1u, fn, ud);
+	free(code);
 }
 
 
@@ -466,7 +501,7 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		n = snprintf(out, cap, "KOF_DIAG_USE_EMU();");
 		break;
 	case KDS_ANALYSIS: {
-		const char *p[3];
+		const char *p[4];
 		unsigned k = 0, j;
 
 		if (it->a & KOF_DIAG_ANALYSIS_SYSCALL)
@@ -475,6 +510,8 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 			p[k++] = "KOF_DIAG_ANALYSIS_SYMBOL";
 		if (it->a & KOF_DIAG_ANALYSIS_APIHASH)
 			p[k++] = "KOF_DIAG_ANALYSIS_APIHASH";
+		if (it->a & KOF_DIAG_ANALYSIS_TEXT)
+			p[k++] = "KOF_DIAG_ANALYSIS_TEXT";
 		if (!k)
 			return 0;
 		n = snprintf(out, cap, "KOF_DIAG_ANALYSIS(");
@@ -529,7 +566,8 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		if (!(c1 = kof_dsrc_cap_word(it->a)))
 			return 0;
 		n = snprintf(out, cap, "KOF_DIAG_DECLARE_HEAD(%s, %s);", c1,
-			     it->b == KGENOME_NUCLEO_F_WX ? "KOF_FLOWF_WX" : "0");
+			     it->b == KGENOME_NUCLEO_F_WX ? "KOF_FLOWF_WX"
+			     : it->b == KGENOME_NUCLEO_F_BUILT ? "KOF_FLOWF_BUILT" : "0");
 		break;
 	case KDS_TAIL:
 		if (!(c1 = kof_dsrc_cap_word(it->a)))
@@ -562,9 +600,6 @@ size_t kof_dsrc_print(const struct kof_dsrc_item *it, char *out, size_t cap)
 		    !(c2 = kof_dsrc_cap_word(it->b)))
 			return 0;
 		n = snprintf(out, cap, "KOF_DIAG_DECLARE_SEQUENCE(%s, %s);", c1, c2);
-		break;
-	case KDS_VNAME:
-		n = snprintf(out, cap, "KOF_TARGET_NAME(%s, \"%s\");", it->s1, it->s2);
 		break;
 	default:
 		return 0;
@@ -602,15 +637,11 @@ static void sb_put(struct sbuf *s, const char *t, size_t n)
 	s->p[s->n] = 0;
 }
 
-static void sb_str(struct sbuf *s, const char *t)
-{
-	sb_put(s, t, strlen(t));
-}
-
-static void sb_line(struct sbuf *s, const struct kof_dsrc_item *it)
+static void sb_line(struct sbuf *s, const struct kof_dsrc_ops *ops,
+		    const struct kof_dsrc_item *it)
 {
 	char t[512];
-	size_t n = kof_dsrc_print(it, t, sizeof t);
+	size_t n = ops->print(it, ops->ud, t, sizeof t);
 
 	if (!n)
 		return;
@@ -618,8 +649,8 @@ static void sb_line(struct sbuf *s, const struct kof_dsrc_item *it)
 	sb_put(s, "\n", 1);
 }
 
-static char *patch_lines(const char *text, size_t n, const struct kof_dsrc *edited,
-			 size_t *out_n)
+static char *patch_lines(const struct kof_dsrc_ops *ops, const char *text,
+			 size_t n, const struct kof_dsrc *edited, size_t *out_n)
 {
 	struct kof_dsrc *old = calloc(1, sizeof *old);
 	struct sbuf sb = { NULL, 0, 0, 0 };
@@ -633,7 +664,7 @@ static char *patch_lines(const char *text, size_t n, const struct kof_dsrc *edit
 
 	if (!old)
 		return NULL;
-	if (kof_dsrc_parse(text, n, old, NULL) > 0)
+	if (ops->parse(text, n, old) > 0)
 		goto out;               /* a file this cannot read is not patched */
 	for (at = 0; at < n; at++)
 		if (text[at] == '\n')
@@ -685,7 +716,7 @@ static char *patch_lines(const char *text, size_t n, const struct kof_dsrc *edit
 		if (lineno == first_decl) {
 			for (q = 0; q < edited->n && !edited->item[q].line; q++)
 				if (!placed[q]) {
-					sb_line(&sb, &edited->item[q]);
+					sb_line(&sb, ops, &edited->item[q]);
 					placed[q] = 1;
 				}
 		}
@@ -694,7 +725,7 @@ static char *patch_lines(const char *text, size_t n, const struct kof_dsrc *edit
 			if (e < n)
 				sb_put(&sb, "\n", 1);
 		} else if (act[lineno] == 2) {
-			sb_line(&sb, &edited->item[rep[lineno]]);
+			sb_line(&sb, ops, &edited->item[rep[lineno]]);
 		}
 		anchor = lineno;
 		for (q = 0; q < edited->n; q++) {
@@ -705,7 +736,7 @@ static char *patch_lines(const char *text, size_t n, const struct kof_dsrc *edit
 			/* the new items right behind this one, up to the next with a line */
 			for (k = q + 1u; k < edited->n && !edited->item[k].line; k++)
 				if (!placed[k]) {
-					sb_line(&sb, &edited->item[k]);
+					sb_line(&sb, ops, &edited->item[k]);
 					placed[k] = 1;
 				}
 		}
@@ -719,7 +750,7 @@ static char *patch_lines(const char *text, size_t n, const struct kof_dsrc *edit
 		sb_put(&sb, "\n", 1);
 	for (q = 0; q < edited->n; q++)
 		if (!placed[q] && !edited->item[q].line) {
-			sb_line(&sb, &edited->item[q]);
+			sb_line(&sb, ops, &edited->item[q]);
 			placed[q] = 1;
 		}
 	ok = !sb.bad;
@@ -739,213 +770,39 @@ out:
 	return sb.p;
 }
 
-/* ---- the verdict's condition, shown and compared ----------------------------- */
-
-int kof_dsrc_cond_same(const struct kof_dsrc_cond *a, const struct kof_dsrc_cond *b)
+/* The diagnose's own reading and printing, as the patcher's two questions. */
+static int diag_parse(const char *text, size_t n, struct kof_dsrc *d)
 {
-	uint32_t i;
-
-	if (a->n != b->n || strcmp(a->infect, b->infect))
-		return 0;
-	for (i = 0; i < a->n; i++)
-	{
-		uint32_t k;
-
-		if (a->t[i].kind != b->t[i].kind || a->t[i].cap != b->t[i].cap ||
-		    a->t[i].n_str != b->t[i].n_str ||
-		    strcmp(a->t[i].a, b->t[i].a) || strcmp(a->t[i].b, b->t[i].b))
-			return 0;
-		for (k = 0; k < a->t[i].n_str; k++)
-			if (strcmp(a->t[i].str[k], b->t[i].str[k]))
-				return 0;
-	}
-	return 1;
+	return kof_dsrc_parse(text, n, d, NULL);
 }
 
-/* One term as source. */
-static int term_text(const struct kof_dsrc_term *t, char *out, size_t cap)
+static size_t diag_print(const struct kof_dsrc_item *it, void *ud, char *out,
+			 size_t cap)
 {
-	const char *cw;
-
-	if (t->kind == KVT_DIAG)
-		return snprintf(out, cap, "kof_diag(%s)", t->a);
-	if (t->kind == KVT_STR_ANY || t->kind == KVT_STR_ALL) {
-		int o = snprintf(out, cap, "kof_diag_str_%s(%s",
-				 t->kind == KVT_STR_ANY ? "any" : "all", t->a);
-		unsigned k;
-
-		for (k = 0; k < t->n_str && o >= 0 && (size_t)o < cap; k++)
-			o += snprintf(out + o, cap - (size_t)o, ", \"%s\"", t->str[k]);
-		if (o >= 0 && (size_t)o < cap)
-			o += snprintf(out + o, cap - (size_t)o, ")");
-		return o;
-	}
-	cw = kof_dsrc_cap_word(t->cap);
-	if (!cw)
-		return -1;
-	return snprintf(out, cap, "kof_diag_share(%s, %s, %s)", cw, t->a, t->b);
+	(void)ud;
+	return kof_dsrc_print(it, out, cap);
 }
 
 /*
- * THE WRAPPING THE SHIPPED VERDICTS USE: on one line while it fits, otherwise a
- * term to a line, the continuation lined up under the first term's opening.
- * Written to stand where the old text stood, so it carries no leading tab - the
- * source's own is already in front of it.
+ * THE DECLARATIONS BY LINE: the source with `edited` in place of its declarations,
+ * everything that is not a declaration passing through untouched.
+ *
+ * ONE PATCHER FOR EVERY SOURCE THAT IS A LIST OF DECLARATIONS. What it needs from
+ * a kind of file is two answers - how the file is read and how one declaration is
+ * written - so those are the `ops`, and the tag sources (tagsrc.c) are patched by
+ * this same loop instead of a second one.
  */
-static size_t kof_dsrc_cond_print(const struct kof_dsrc_cond *c, char *out, size_t cap)
+char *kof_dsrc_patch_with(const struct kof_dsrc_ops *ops, const char *text,
+			  size_t n, const struct kof_dsrc *edited,
+			  size_t *out_n)
 {
-	char t[KOF_DSRC_MAX_TERM][600];
-	size_t total = 4u, o = 0;
-	uint32_t i;
-	int wrap;
-
-	if (!c->n)
-		return 0;
-	for (i = 0; i < c->n; i++) {
-		int L = term_text(&c->t[i], t[i], sizeof t[i]);
-
-		if (L < 0 || (size_t)L >= sizeof t[i])
-			return 0;
-		total += (size_t)L + 4u;
-	}
-	wrap = total > 70u;
-	o += (size_t)snprintf(out + o, cap - o, "if (");
-	for (i = 0; i < c->n && o < cap; i++) {
-		o += (size_t)snprintf(out + o, cap - o, "%s%s", t[i],
-				      i + 1u < c->n ? (wrap ? " &&\n\t    " : " && ")
-						    : ")");
-	}
-	return o < cap ? o : 0;
+	return patch_lines(ops, text, n, edited, out_n);
 }
 
-int kof_dsrc_verdict_check(const struct kof_dsrc *d,
-			   const struct kof_dsrc_report *r)
-{
-	int errs = 0, fmt = 0, name = 0;
-	uint32_t i, k;
-
-	for (i = 0; i < d->n; i++) {
-		fmt |= d->item[i].kind == KDS_FORMAT;
-		name |= d->item[i].kind == KDS_VNAME;
-	}
-	if (!fmt)
-		kof_dsrc_say_err(r, &errs, 0, "a verdict needs KOF_TARGET_FORMAT");
-	if (!name)
-		kof_dsrc_say_err(r, &errs, 0, "a verdict needs KOF_TARGET_NAME");
-	if (!d->has_cond || !d->cond.n) {
-		kof_dsrc_say_err(r, &errs, 0, "a verdict needs a condition over diagnoses");
-		return errs;
-	}
-	for (i = 0; i < d->cond.n; i++) {
-		const struct kof_dsrc_term *t = &d->cond.t[i];
-		int a = 0, b = 0;
-
-		if (t->kind != KVT_SHARE)
-			continue;
-		for (k = 0; k < d->cond.n; k++)
-			if (d->cond.t[k].kind == KVT_DIAG) {
-				a |= !strcmp(d->cond.t[k].a, t->a);
-				b |= !strcmp(d->cond.t[k].a, t->b);
-			}
-		if (!a || !b)
-			kof_dsrc_say_err(r, &errs, 0, "kof_diag_share joins a diagnose the "
-					     "verdict does not ask for");
-	}
-	return errs;
-}
-
-char *kof_dsrc_verdict_new(const struct kof_dsrc *d, size_t *out_n)
-{
-	struct sbuf sb = { NULL, 0, 0, 0 };
-	char c[2048];
-	size_t L;
-	uint32_t i;
-	static const int order[] = { KDS_FORMAT, KDS_SUBTYPE, KDS_VNAME };
-	unsigned k;
-
-	if (kof_dsrc_verdict_check(d, NULL))
-		return NULL;
-	sb_str(&sb, "#include <kofmod/kofsig.h>\n#include <kofmod/kofcap.h>\n"
-		    "#include <kofmod/kofdiagtree.h>\n\n");
-	for (k = 0; k < sizeof order / sizeof order[0]; k++)
-		for (i = 0; i < d->n; i++)
-			if (d->item[i].kind == order[k])
-				sb_line(&sb, &d->item[i]);
-	L = kof_dsrc_cond_print(&d->cond, c, sizeof c);
-	if (!L) {
-		free(sb.p);
-		return NULL;
-	}
-	sb_str(&sb, "\nvoid kof_scan(const struct kof_obj_ctx *ctx)\n{\n\t");
-	sb_put(&sb, c, L);
-	sb_str(&sb, "\n\t\tKOF_SCAN_INFECT(");
-	sb_str(&sb, d->cond.infect[0] ? d->cond.infect : "KOF_MALVAR_AUTO");
-	sb_str(&sb, ");\n}\n");
-	if (sb.bad) {
-		free(sb.p);
-		return NULL;
-	}
-	if (out_n)
-		*out_n = sb.n;
-	return sb.p;
-}
-
-/*
- * THE DECLARATIONS BY LINE, THEN THE CONDITION BY SPAN. The condition is one
- * unit with no line of its own, and the lines are patched first so the span is
- * looked up in the text that exists by then. Unchanged, the condition's bytes -
- * its wrapping, its comments inside - are never touched.
- */
 char *kof_dsrc_patch(const char *text, size_t n, const struct kof_dsrc *edited,
 		     size_t *out_n)
 {
-	size_t n1 = 0, L, k;
-	char *t1 = patch_lines(text, n, edited, &n1), *t2;
-	struct kof_dsrc *chk;
-	char c[2048];
+	static const struct kof_dsrc_ops diag = { diag_parse, diag_print, NULL };
 
-	if (!t1 || !edited->has_cond) {
-		if (t1 && out_n)
-			*out_n = n1;
-		return t1;
-	}
-	chk = calloc(1, sizeof *chk);
-	if (!chk) {
-		free(t1);
-		return NULL;
-	}
-	if (kof_dsrc_parse(t1, n1, chk, NULL) || !chk->has_cond) {
-		free(chk);
-		free(t1);
-		return NULL;
-	}
-	if (kof_dsrc_cond_same(&chk->cond, &edited->cond)) {
-		free(chk);
-		if (out_n)
-			*out_n = n1;
-		return t1;
-	}
-	L = kof_dsrc_cond_print(&edited->cond, c, sizeof c);
-	if (!L) {
-		free(chk);
-		free(t1);
-		return NULL;
-	}
-	t2 = malloc(n1 - (chk->cond.end - chk->cond.at) + L + 1u);
-	if (!t2) {
-		free(chk);
-		free(t1);
-		return NULL;
-	}
-	k = chk->cond.at;
-	memcpy(t2, t1, k);
-	memcpy(t2 + k, c, L);
-	memcpy(t2 + k + L, t1 + chk->cond.end, n1 - chk->cond.end);
-	n1 = n1 - (chk->cond.end - chk->cond.at) + L;
-	t2[n1] = 0;
-	free(chk);
-	free(t1);
-	if (out_n)
-		*out_n = n1;
-	return t2;
+	return patch_lines(&diag, text, n, edited, out_n);
 }

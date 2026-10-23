@@ -1743,6 +1743,8 @@ enum kgenome_emu_stop kgenome_emu_run(struct kgenome_emu *e)
 				goto fault;
 			if (rc == KGENOME_EMU_RUN_DONE)
 				goto done;
+			if (rc == KGENOME_EMU_RUN_REDIRECT)
+				continue;
 			if (rc != KGENOME_EMU_RUN_OK)
 				goto unsupported;
 			break;

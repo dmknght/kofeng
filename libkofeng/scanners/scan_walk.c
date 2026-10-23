@@ -214,8 +214,7 @@ struct layer_stack {
 
 /*
  * THE SCAN OF ONE OBJECT OF THE TREE: tell the scanner what the walk knows about it
- * (what the producer declared, the regions, the language), decide whether it begins
- * a new subject, and run the pipeline on it. Fills *res; nothing is reported here.
+ * (what the producer declared, the regions, the language) and run the pipeline on it. Fills *res; nothing is reported here.
  */
 static void tree_scan_object(struct walk *w, const struct layer *cur,
 			     struct kof_result *res)
@@ -244,9 +243,11 @@ static void tree_scan_object(struct walk *w, const struct layer *cur,
 	w->sc->cur.src = src;
 	/*
 	 * And the regions, if the producer named any - the one object
-	 * that does is a normalised view. Copied onto the scanner here
+	 * that does is a normalised view. Pointed at from the scanner here
 	 * because a resolver is reached through ctx, and ctx is built
 	 * inside sx_scan_object with nowhere to carry a table of its own.
+	 * The table is the source's and lives as long as `src`, which
+	 * cur.src holds for the whole of the object's scan.
 	 *
 	 * Cleared for every other object, unconditionally, because a
 	 * table left standing would describe the PREVIOUS object and
@@ -254,10 +255,9 @@ static void tree_scan_object(struct walk *w, const struct layer *cur,
 	 */
 	{
 		const struct kof_src_region *r = NULL;
-		uint32_t g, nr = kof_src_regions_of(src, &r);
+		uint32_t nr = kof_src_regions_of(src, &r);
 
-		for (g = 0; g < nr; g++)
-			w->sc->cur.rgn[g] = r[g];
+		w->sc->cur.rgn = nr ? r : NULL;
 		w->sc->cur.n_rgn = nr;
 		w->sc->cur.rgn_fmt = kof_src_region_fmt_of(src);
 	}
@@ -273,38 +273,6 @@ static void tree_scan_object(struct walk *w, const struct layer *cur,
 		w->sc->cur.xw[q].len = cur->xw[q][1];
 	}
 	w->sc->cur.derived_by = cur->derived_by;
-	/*
-	 * A NEW SUBJECT BEGINS A NEW VERDICT - see
-	 * sc->subject.
-	 *
-	 * The slot holds one name for one subject, and the question
-	 * is where a subject ends. NOT at the file: an object that
-	 * came out of a PACKER is the same program decoded, and so
-	 * is the normalised view of that - representations, which is
-	 * why they share the parent's name rather than each earning
-	 * one.
-	 *
-	 * A CONTAINER'S MEMBER IS NOT A REPRESENTATION. Ten files in
-	 * an archive are ten subjects; carrying one member's verdict
-	 * into the next would name a clean file after the infected
-	 * one beside it, which is the worst thing this slot could do.
-	 *
-	 * `from_packer` draws most of that line - it is set for what
-	 * a packer produced and clear for a root and for a
-	 * container's members - but NOT ALL OF IT: a normalised view
-	 * has no packer behind it either, and it is the purest
-	 * representation there is, the same bytes re-laid-out so a
-	 * rule can read them. Clearing the slot for one let the view
-	 * take a verdict its own parent already held, which is the
-	 * duplicate this whole slot exists to remove.
-	 *
-	 * So: a root or a container's member, and not a view.
-	 */
-	if (!cur->from_packer &&
-	    kof_src_kind_of(src) != KOF_ENT_NORMALIZED) {
-		w->sc->subject.have = 0;
-		w->sc->subject.lvl  = 0;
-	}
 	sx_scan_object(w->sc, kof_src_buf(src), w->opt, res, cur->pdepth,
 		    cur->from_packer, cur->inherit_predict, kof_src_fmt_of(src));
 	/*
@@ -517,7 +485,7 @@ static void tree_report(struct walk *w, const struct layer *cur,
 	 * a budget that ran out or a parse that gave up into a
 	 * permanent verdict of "nothing here".
 	 */
-	if (res->n || res->broken)
+	if (res->has_verdict || res->broken)
 		w->found++;
 	{
 		kof_buf ob = kof_src_buf(cur->src);
@@ -526,6 +494,7 @@ static void tree_report(struct walk *w, const struct layer *cur,
 		 * with, passed on rather than rebuilt by the host -
 		 * see kof_result.syms. */
 		res->syms = kof_src_syms_of(cur->src, &res->n_syms);
+		res->fixed = kof_src_fixed_of(cur->src, &res->n_fixed);
 		/* The module that opened THIS object, recorded by the
 		 * engine where it produced a child - see opened_by. */
 		res->opened_by = w->sc->obj.open.opened_by[0] ? w->sc->obj.open.opened_by
@@ -552,25 +521,18 @@ static void tree_report(struct walk *w, const struct layer *cur,
 		if (!cur->name)
 			w->undelivered++;
 		/*
-		 * THE VERDICTS FIRST, each already composed - see
-		 * kof_on_event_detected. The engine says which findings it
-		 * is reporting and hands them over decoded, so a
-		 * host never walks the array deciding for itself.
+		 * THE VERDICT FIRST, already composed - see kof_on_event_detected. The
+		 * engine says which object has one and hands it over decoded, so a host
+		 * never walks the evidence deciding for itself.
 		 */
-		if (res->n && cur->name && !(w->sc->obj.open.superseded && cur->depth))
+		if (res->has_verdict && cur->name &&
+		    !(w->sc->obj.open.superseded && cur->depth))
 			w->file_reported = 1;
-		if (w->opt->on_event_detected && cur->name &&
+		if (w->opt->on_event_detected && res->has_verdict && cur->name &&
 		    !(w->sc->obj.open.superseded && cur->depth)) {
-			uint32_t q;
-
-			for (q = 0; q < res->n; q++)
-				if (res->v[q].is_verdict) {
-					w->file_events++;
-					w->opt->on_event_detected(cur->name,
-						res->v[q].name,
-						&res->v[q],
-						w->opt->event_user);
-				}
+			w->file_events++;
+			w->opt->on_event_detected(cur->name, res->verdict.name,
+						  &res->verdict, w->opt->event_user);
 		}
 		if (w->cb && cur->name && !(w->sc->obj.open.superseded && cur->depth) &&
 		    w->cb(cur->name, ob.p, ob.n, res, w->user) != 0)
@@ -738,11 +700,6 @@ static void scan_tree_body(struct walk *w, struct kof_objsrc *root, const char *
 	w->root = root;
 	memset(&cur, 0, sizeof cur);
 	cur.src = kof_src_ref(root);
-
-	/* The root begins a scope - see the reset beside sx_scan_object below,
-	 * which is where the rule is stated. */
-	w->sc->subject.have = 0;
-	w->sc->subject.lvl  = 0;
 
 	kof_scan_budget(w->sc, kof_src_buf(root).n, w->opt);
 	/* After the budget, which starts the resident account: the name is charged to it. */
@@ -955,12 +912,12 @@ static void scan_one(struct walk *w, const char *path)
 	kof_src_unref(src);
 	/*
 	 * THE ENGINE'S OWN CHECK THAT A COUNTED FILE WAS TOLD. A file whose objects
-	 * reported a finding is one a roll-up counts (kverdict_filemap_fold reads the
-	 * worst finding), and the host was owed a verdict event for it. A file that
-	 * is counted and had none is a verdict LOST - it can only be a defect in what
-	 * takes the slot (sx_verdict_take) - so it is counted where a host can read it
-	 * (kof_stats.verdict_lost, shown by kofscanner as an error) and not left to a
-	 * test to find. Only a host that asked for events can be owed any.
+	 * had a verdict is one a roll-up counts (kverdict_filemap_fold reads
+	 * kof_result.verdict), and the host was owed a verdict event for it. A file
+	 * that is counted and had none is a verdict LOST - a defect of the delivery
+	 * above - so it is counted where a host can read it (kof_stats.verdict_lost,
+	 * shown by kofscanner as an error) and not left to a test to find. Only a
+	 * host that asked for events can be owed any.
 	 */
 	if (w->opt->on_event_detected && w->file_reported) {
 		w->sc->st.verdicts_counted++;

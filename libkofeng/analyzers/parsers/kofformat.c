@@ -1,5 +1,6 @@
 /* The parser list. See kofformat.h for why there is only one of it. */
 
+#include "scripts/script_route.h"
 #include "kofformat.h"
 #include "binaries/elf/elf_parse.h"
 #include "binaries/pe/pe_parse.h"
@@ -618,6 +619,11 @@ const struct kof_parser *kof_parser_of(uint8_t format)
 		if (formats[i].format == format)
 			return &formats[i];
 	return NULL;
+}
+
+int kof_obj_regionless(const struct kof_obj_ctx *ctx)
+{
+	return ctx->format == KOF_FMT_SCRIPT && kof_script_textual_lang(ctx->subtype) != 0;
 }
 
 uint32_t kof_region_mask_of(const struct kof_parser *fp, const char *enum_name)

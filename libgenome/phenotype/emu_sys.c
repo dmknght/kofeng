@@ -1315,10 +1315,23 @@ static uint64_t syscall_do(struct kgenome_emu *e, int *stop_out)
 	{
 		uint32_t raw = (uint32_t)(e->gpr[KGENOME_EMU_RAX] & 0xffffffffu);
 
-		if (raw >= KGENOME_EMU_WIN_API_BASE && raw < KGENOME_EMU_WIN_API_BASE + KGENOME_EMU_WIN_API_COUNT)
+		if (raw >= KGENOME_EMU_WIN_API_BASE &&
+		    raw < KGENOME_EMU_WIN_API_BASE + KGENOME_EMU_WIN_API_COUNT + kgenome_emu_win_export_total())
 			{
 				unsigned wid = raw - KGENOME_EMU_WIN_API_BASE;
-				uint64_t r = kgenome_emu_winapi_do(e, wid, stop_out);
+				uint64_t r;
+
+				if (wid >= KGENOME_EMU_WIN_API_COUNT) {
+					/* A name with a stub and no model: answer 0, and say so. On i386 a count nobody knows
+					 * leaves the callee's cleanup a guess. */
+					*stop_out = 0;
+					e->unmodelled++;
+					if (e->bits == 32 && kgenome_emu_win_export_argc(wid - KGENOME_EMU_WIN_API_COUNT) ==
+								KGENOME_EMU_WIN_ARGC_UNKNOWN)
+						e->unmodelled_guess++;
+					return kgenome_emu_win_export_answer(wid - KGENOME_EMU_WIN_API_COUNT);
+				}
+				r = kgenome_emu_winapi_do(e, wid, stop_out);
 
 				kgenome_emu_win_event_note(e, wid, r);
 

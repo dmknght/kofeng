@@ -30,7 +30,6 @@
 #include "dbkix.h"        /* struct kof_kix: the block index a pack may carry */
 #include "../../kofcore/kofbudget.h"   /* struct kof_budget */
 
-struct kof_synd_set;   /* databases/pack/kofsyndrome.h - only a pointer is held */
 
 /*
  * How many distinct region masks a database may hold.
@@ -168,16 +167,6 @@ struct kof_db_pack {
  */
 struct kof_module {
 	kof_scan_fn fn;
-	/*
-	 * AND HOW TO UNDO WHAT IT FOUND, or NULL.
-	 *
-	 * Resolved the same way fn is - blob plus an offset the build wrote
-	 * down - because the loader reads no symbols. NULL for nearly every
-	 * module: knowing that a file is infected and knowing how to put it
-	 * back are different pieces of work and only the first is usually
-	 * done. See kof_pack_mod.cure_off.
-	 */
-	kof_scan_fn cure;
 
 	/*
 	 * WHAT THIS MODULE IS FOR, AS A LIST OF TARGET IDS.
@@ -239,24 +228,9 @@ struct kof_module {
 	uint32_t family_off;
 	uint32_t maltype;     /* enum kof_maltype */
 
-	/* What the detector's match finds - an id, and the kof_maltype it was
-	 * declared with. Zero and unread for a module that declared none. */
-	uint32_t disease;
-	uint32_t disease_type;
-
 	/* enum kof_analyze; see KOF_ANALYZE_STEP in kofsig.h.
 	 * Meaningless and unread for a detector. */
 	uint32_t step;
-
-	/* For a heuristic rule: which phase it runs in, and what it asks the
-	 * engine to do with an object it fires on. See kofmod/heur.h. */
-	uint32_t heur_phase;
-	uint32_t heur_level;
-	uint32_t heur_want;
-
-	/* The family a rule predicts, into the pack's name pool, or 0. Read with
-	 * kof_db_heur_predict(). */
-	uint32_t heur_predict_off;
 
 	/* The kind of content the module takes out, into the pack's name pool, or
 	 * 0. Read with kof_db_content(). */
@@ -265,10 +239,8 @@ struct kof_module {
 	/*
 	 * enum kof_pack_kind, from the pack this came out of.
 	 *
-	 * The three arrays above already say which kind a module is, so this is
-	 * for the one place that has a module and not the array it came from:
-	 * composing a finding's name, where a rule's word is written "Heur" and
-	 * a detector's is its maltype.
+	 * The arrays above already say which kind a module is, so this is for the
+	 * one place that has a module and not the array it came from.
 	 */
 	uint8_t  kind;
 	/*
@@ -429,8 +401,7 @@ static inline enum kof_precond kof_module_precond(const struct kof_module *m,
  */
 #define KOF_DB_DIAG_NAME       256u
 
-/* One disease in the names table; `type` is a kof_maltype, or 0xff when only a
- * syndrome mentions the name and no detector declared it. */
+/* One disease in the names table; `type` is the kof_maltype it was declared with. */
 struct kof_disease_ent {
 	uint32_t    id;
 	uint8_t     type;
@@ -480,13 +451,6 @@ struct kof_engine {
 	uint32_t              diag_refused;
 	uint32_t              diag_packs_refused;
 	/*
-	 * THE PROFILES, from syndromes.kdig beside the diagnoses: what a set of
-	 * diseases makes - see databases/pack/kofsyndrome.h. NULL when the
-	 * database has none, which is a database that cannot type a finding and is
-	 * otherwise ordinary.
-	 */
-	struct kof_synd_set  *synd;
-	/*
 	 * THE DISEASES' NAMES, from diseases.kdig: id to name and type, ascending by
 	 * id. For a tool that has an id and must show one - a scan reads ids only.
 	 * Empty when the database has none.
@@ -494,14 +458,6 @@ struct kof_engine {
 	struct kof_disease_ent *disease;
 	char                 *disease_pool;
 	uint32_t              n_disease;
-	/*
-	 * DOES ANYTHING THIS DATABASE HOLDS DECLARE A DISEASE - a module of any kind or
-	 * a diagnose. The verdict is read off the set of diseases an object has, so
-	 * only then can a detector reached after a detection add to it. Without one
-	 * no object has a set, and a scan that did not ask for every finding has
-	 * nothing to continue for. Worked out once, when the database is loaded.
-	 */
-	uint8_t               reads_diseases;
 	/* Scratch of the load, freed when it ends: the names the diagnoses' USERS
 	 * sections carried, to match against the modules' sources once. */
 	char                **diag_user;
@@ -582,14 +538,6 @@ struct kof_engine {
 	uint32_t             n_unp;
 
 	/*
-	 * The heuristic rules, in their own array for the same reason: they run
-	 * at two points of their own in an object's life, and neither of the two
-	 * loops above is one of them.
-	 */
-	struct kof_module   *heur;
-	uint32_t             n_heur;
-
-	/*
 	 * EVERY FORMAT ANY LOADED MODULE TARGETS, or-ed into one mask.
 	 *
 	 * Read by the scanner to answer a producer's question: would anything
@@ -599,14 +547,13 @@ struct kof_engine {
 	 * COMPUTED HERE AND NOT READ FROM THE PACK, although a pack header
 	 * carries the same union of its own modules (any_target, dbcore.h).
 	 * That field is per pack, and a database is a directory of them split
-	 * by kind and format - sigs-pe, unpack-elf, heur-elf - so the union
-	 * that matters is over everything actually loaded. Walking the three
+	 * by kind and format - sigs-pe, unpack-elf - so the union
+	 * that matters is over everything actually loaded. Walking the two
 	 * arrays once at load is cheaper than reasoning about which packs came
 	 * back, and it cannot disagree with the modules the scan will run.
 	 *
-	 * ALL THREE ARRAYS. A detector targeting a format will search a child
-	 * of it; an unpacker will try to peel one; a heuristic will gather
-	 * facts from one. Any of the three is a reason the child is worth
+	 * BOTH ARRAYS. A detector targeting a format will search a child of it;
+	 * an unpacker will try to peel one. Either is a reason the child is worth
 	 * making.
 	 */
 	/* One bit per target id - a presence set, since an id is a number and
@@ -753,23 +700,6 @@ struct kof_engine {
 	 */
 	uint32_t scan_mask;
 
-	/*
-	 * THE SAME QUESTION FOR HEURISTICS, kept apart from the union above.
-	 *
-	 * scan_mask is a DETECTOR union and two things read it: which regions
-	 * to resolve, and which objects a module can be skipped on. A
-	 * heuristic belongs in the first and not the second - it runs after
-	 * the searching, so it must not widen the prefilter - and folding it
-	 * into one field would do both.
-	 *
-	 * Without this a heuristic naming a region got nothing at all:
-	 * sym_halves_present returns early unless the region was asked for,
-	 * so a rule scoped to KOF_SCAN_SYM_IMP was answered "absent" on every
-	 * object. MEASURED: a signature scoped that way matched both
-	 * Diamorphine builds and the identical heuristic matched neither.
-	 */
-	uint32_t heur_scan_mask;
-
 	/* APPENDED (memory work): the engine's memory budget, the root of every ledger - see
 	 * kofcore/kofbudget.h. Allocated and freed by keng_open / keng_close (kofeng.c), NULL
 	 * for an engine made any other way, which then has no engine-level cap. */
@@ -872,30 +802,12 @@ const struct kof_str_ent *kof_db_str(const struct kof_engine *,
 const char *kof_db_name(const struct kof_engine *, const struct kof_module *,
 			uint32_t name_id);
 
-/*
- * The same names, in the order the module declares them, for a caller that wants
- * to list what a module can report rather than to resolve one it already has.
- * NULL past the end, and NULL for a record that does not hold together.
- *
- * `id_out` takes the id the module reports for that name, which ksigbuilder set
- * from the source line of the KOF_SCAN_INFECT that names it. That number is the
- * only thread back from a database to the text somebody wrote - the pack carries
- * no path - so a tool that wants to show the logic behind a finding needs it and
- * a source tree of its own. Pass NULL when the text is all that is wanted.
- */
-const char *kof_db_name_at(const struct kof_engine *, const struct kof_module *,
-			   uint32_t index, uint32_t *id_out);
-
 /* The family KOF_TARGET_NAME declared for this module, read from the pack the
  * same way kof_db_name reads a finding's variant - out of the mapping, bounds
  * checked on every call rather than trusted from load time, for the reason
  * kof_db_name's own comment gives. NULL if the record does not hold together;
  * "" (not NULL) for a module that legitimately declared none. */
 const char *kof_db_family(const struct kof_engine *, const struct kof_module *);
-
-/* The family a heuristic rule predicts, or NULL. See KOF_HEUR_PREDICT. */
-const char *kof_db_heur_predict(const struct kof_engine *,
-				const struct kof_module *);
 
 /* The kind of content a module takes out, or NULL. See KOF_TARGET_CONTENT. */
 const char *kof_db_content(const struct kof_engine *,

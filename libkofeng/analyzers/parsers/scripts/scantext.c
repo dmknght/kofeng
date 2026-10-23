@@ -134,6 +134,90 @@ int kof_txt_has(kof_buf f, uint64_t look, const char *t)
 	return kof_txt_find(f, 0, look, t, len) != KOF_TXT_NONE;
 }
 
+uint64_t kof_txt_tag_gt(kof_buf f, uint64_t at, uint64_t end)
+{
+	uint8_t q = 0;
+	uint64_t i;
+
+	for (i = at; i < end; i++) {
+		uint8_t c = f.p[i];
+
+		if (q) {
+			if (c == q)
+				q = 0;
+			continue;
+		}
+		if (c == '"' || c == '\'') {
+			q = c;
+			continue;
+		}
+		if (c == '>')
+			return i;
+	}
+	return end;
+}
+
+/*
+ * The markers that can have byte `c` at offset `k` (k = 1 or 2), both cases of a letter, for every marker long enough to have one; a marker too short to have
+ * that byte is in EVERY entry of the table (it is decided by what was compared before it, as it always was). The fold is kof_txt_tag_at's.
+ */
+static void tags_at_offset(const struct kof_txt_tags *ts, uint32_t k, uint32_t *by_byte)
+{
+	uint32_t t, c, short_mask = 0;
+
+	memset(by_byte, 0, 256u * sizeof *by_byte);
+	for (t = 0; t < ts->n; t++) {
+		uint8_t lo, up;
+
+		if (ts->tag[t].len <= k) {
+			short_mask |= 1u << t;
+			continue;
+		}
+		lo = kof_lower_byte((uint8_t)ts->tag[t].s[k]);
+		up = kof_is_alpha(lo) ? (uint8_t)(lo & 0xdfu) : lo;
+		by_byte[lo] |= 1u << t;
+		by_byte[up] |= 1u << t;
+	}
+	if (short_mask)
+		for (c = 0; c < 256u; c++)
+			by_byte[c] |= short_mask;
+}
+
+uint32_t kof_txt_tags_seen(kof_buf f, uint64_t look, const struct kof_txt_tags *ts, int *decided)
+{
+	uint32_t seen = 0, second[256], third[256];
+	uint64_t i, cap = look < f.n ? look : f.n;
+
+	*decided = 0;
+	tags_at_offset(ts, 1u, second);
+	tags_at_offset(ts, 2u, third);
+	for (i = 0; i < cap; i++) {
+		uint32_t m = ts->first[f.p[i]] & ~seen;
+
+		if (!m)
+			continue;
+		/* the bytes after this one; past the window they read as 0, which no marker holds, so a marker that needs them fails the length test below as it did */
+		m &= second[i + 1u < cap ? f.p[i + 1u] : 0u] & third[i + 2u < cap ? f.p[i + 2u] : 0u];
+		while (m) {
+			uint32_t t = (uint32_t)__builtin_ctz(m);
+
+			m &= m - 1u;
+			if (i + ts->tag[t].len > cap)
+				continue;
+			if (!kof_txt_tag_at(f, i, ts->tag[t].s, ts->tag[t].len))
+				continue;
+			if (((1u << t) & ts->veto_mask) && ts->veto(f, i))
+				continue;
+			seen |= 1u << t;
+			if (ts->tag[t].grp == 0) {
+				*decided = 1;
+				return seen;
+			}
+		}
+	}
+	return seen;
+}
+
 int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len)
 {
 	if (info->n_island >= KOF_SCRIPT_MAX_ISLAND)
@@ -160,6 +244,40 @@ int kof_isl_add(struct kof_script_info *info, uint64_t off, uint64_t len)
 	return 1;
 }
 
+struct isl_keep {
+	kof_buf                f;
+	uint64_t               from;
+	struct kof_script_info *info;
+};
+
+static int isl_keep_sink(void *u, const struct kgenome_textual_island *is)
+{
+	struct isl_keep *k = u;
+	/* "<?" and "<%" open an island that runs through its closing tag; an element (<script ...>) is its body, between its two tags */
+	int tag = is->open_len >= 2u && k->f.p[is->off] == '<' && (k->f.p[is->off + 1u] == '?' || k->f.p[is->off + 1u] == '%');
+	uint64_t off = tag ? is->off : (uint64_t)is->off + is->open_len;
+	uint64_t end = tag ? (uint64_t)is->end_tag + is->close_len : is->end_tag;
+
+	if (is->off < k->from)
+		return 1;
+	if (k->info->n_island >= KOF_SCRIPT_MAX_ISLAND)
+		return 0;
+	/* An element with no closing tag is not an island (the pair is the evidence, not the opener); a tag island that closes must be a block. */
+	if (tag ? is->closed && !kof_script_is_block(k->f, is->off, end) : !is->closed)
+		return 1;
+	return kof_isl_add(k->info, off, end - off);
+}
+
+void kof_isl_lex(kof_buf f, uint64_t from, struct kof_script_info *info, uint32_t lang)
+{
+	struct isl_keep k = { f, from, info };
+	struct kgenome_textual_islands_req rq = { .in = f.p, .n = (uint32_t)f.n, .lang = lang, .sink = isl_keep_sink, .user = &k };
+
+	if (f.p && f.n <= 0xffffffffu)
+		(void)kgenome_textual_islands(&rq);
+	kof_isl_seal(info, f.n);
+}
+
 void kof_isl_seal(struct kof_script_info *info, uint64_t size)
 {
 	uint16_t n = info->n_island;
@@ -176,8 +294,7 @@ static int all_ws(kof_buf f, uint64_t a, uint64_t b)
 	if (b > f.n)
 		return 0;
 	for (; a < b; a++)
-		if (f.p[a] != ' ' && f.p[a] != '\t' &&
-		    f.p[a] != '\n' && f.p[a] != '\r')
+		if (!kof_is_blank_byte(f.p[a]))
 			return 0;
 	return 1;
 }
@@ -253,7 +370,7 @@ int kof_script_is_block(kof_buf f, uint64_t open, uint64_t end)
 
 		if (c == '\n')
 			break;
-		if (c != ' ' && c != '\t' && c != '\r')
+		if (!kof_is_blank_byte(c))
 			return 0;
 	}
 	for (j = end; j < f.n; j++) {
@@ -261,7 +378,7 @@ int kof_script_is_block(kof_buf f, uint64_t open, uint64_t end)
 
 		if (c == '\n')
 			break;
-		if (c != ' ' && c != '\t' && c != '\r')
+		if (!kof_is_blank_byte(c))
 			return 0;
 	}
 	return 1;

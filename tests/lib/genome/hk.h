@@ -23,7 +23,11 @@
 #ifndef KGENOME_TESTS_HK_H
 #define KGENOME_TESTS_HK_H
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+
+#include "../fuzz_kit.h"
 
 #include <signal.h>
 #include <stdint.h>
@@ -52,21 +56,19 @@ static int hk_fails HK_UNUSED;
 
 /* ---- the deterministic generator ----------------------------------------- */
 
-struct hk_rng { uint64_t s; };
+/* The generator is the kit's (fuzz_kit.h): `struct hk_rng` IS `struct fz_rng`, the same xorshift stream, so every fixed-seed run is unchanged. */
+#define hk_rng fz_rng
 
 static inline uint64_t hk_next(struct hk_rng *r) HK_UNUSED;
 static inline uint64_t hk_next(struct hk_rng *r)
 {
-	r->s ^= r->s << 13;
-	r->s ^= r->s >> 7;
-	r->s ^= r->s << 17;
-	return r->s;
+	return fz_rng_next(r);
 }
 
 static inline uint32_t hk_below(struct hk_rng *r, uint32_t n) HK_UNUSED;
 static inline uint32_t hk_below(struct hk_rng *r, uint32_t n)
 {
-	return n ? (uint32_t)(hk_next(r) % n) : 0u;
+	return (uint32_t)fz_below(r, n);
 }
 
 /* Switches of a campaign run outside the suite (a test does not read the environment):
@@ -85,18 +87,16 @@ static unsigned hk_scale(void)
 static void hk_args(int argc, char **argv) HK_UNUSED;
 static void hk_args(int argc, char **argv)
 {
+	struct fz_opts o;
 	int i;
 
-	for (i = 1; i < argc; i++) {
-		if (!strncmp(argv[i], "--scale=", 8)) {
-			long v = strtol(argv[i] + 8, NULL, 10);
-			hk_scale_v = v > 0 && v < 100000 ? (unsigned)v : 1u;
-		} else if (!strcmp(argv[i], "--inline")) {
-			hk_inline_v = 1;
-		} else if (!strcmp(argv[i], "--threads-only")) {
+	fz_opts_init(&o);
+	fz_args(&o, argc, argv);
+	hk_scale_v = o.scale;
+	hk_inline_v = o.inline_run;
+	for (i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--threads-only"))
 			hk_threads_only_v = 1;
-		}
-	}
 }
 
 /* ---- the clock ----------------------------------------------------------- */
@@ -112,30 +112,14 @@ static double hk_now(void)
 /* ---- the guard-page buffer ------------------------------------------------ */
 
 struct hk_gb {
-	uint8_t *map;
-	size_t   len;     /* the whole mapping */
-	size_t   page;
-	size_t   cap;     /* the most bytes a put may hold */
+	struct fz_gb g;     /* the kit's guard buffer: a writable spare page in front, PROT_NONE behind */
 };
 
 static void gb_init(struct hk_gb *g, size_t cap) HK_UNUSED;
 static void gb_init(struct hk_gb *g, size_t cap)
 {
-	size_t pg = (size_t)sysconf(_SC_PAGESIZE);
-	size_t body = (cap + pg - 1u) / pg * pg + pg;   /* one spare page in front */
-
-	g->page = pg;
-	g->cap = cap;
-	g->len = body + pg;
-	g->map = (uint8_t *)mmap(NULL, g->len, PROT_READ | PROT_WRITE,
-				 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (g->map == MAP_FAILED) {
+	if (!fz_gb_init(&g->g, cap, 0, 0)) {
 		perror("mmap");
-		exit(2);
-	}
-	/* the page after the buffer: no access at all */
-	if (mprotect(g->map + body, pg, PROT_NONE) != 0) {
-		perror("mprotect");
 		exit(2);
 	}
 }
@@ -145,23 +129,17 @@ static void gb_init(struct hk_gb *g, size_t cap)
 static uint8_t *gb_put(struct hk_gb *g, const void *src, size_t n) HK_UNUSED;
 static uint8_t *gb_put(struct hk_gb *g, const void *src, size_t n)
 {
-	uint8_t *end = g->map + g->len - g->page;
-	uint8_t *p = end - n;
-
-	if (n > g->cap) {
-		fprintf(stderr, "gb_put: %zu > cap %zu\n", n, g->cap);
+	if (n > g->g.cap) {
+		fprintf(stderr, "gb_put: %zu > cap %zu\n", n, g->g.cap);
 		exit(2);
 	}
-	if (n && src)
-		memmove(p, src, n);
-	return p;
+	return fz_gb_put(&g->g, src, n);
 }
 
 static void gb_free(struct hk_gb *g) HK_UNUSED;
 static void gb_free(struct hk_gb *g)
 {
-	munmap(g->map, g->len);
-	g->map = NULL;
+	fz_gb_free(&g->g);
 }
 
 /* ---- the isolated case ----------------------------------------------------- */
@@ -175,10 +153,24 @@ typedef int (*hk_case_fn)(void *arg);
  * HK_HUNG. The child inherits the parent's stdio buffers emptied. */
 static enum hk_result hk_isolated(hk_case_fn fn, void *arg, unsigned secs,
 				  int *sig) HK_UNUSED;
+struct hk_iso_arg {
+	hk_case_fn fn;
+	void      *arg;
+};
+
+static int hk_iso_child(void *a) HK_UNUSED;
+static int hk_iso_child(void *a)
+{
+	struct hk_iso_arg *x = (struct hk_iso_arg *)a;
+
+	hk_fails = 0;
+	return x->fn(x->arg) ? 1 : 0;
+}
+
 static enum hk_result hk_isolated(hk_case_fn fn, void *arg, unsigned secs, int *sig)
 {
-	int st = 0;
-	pid_t pid;
+	struct hk_iso_arg x = { fn, arg };
+	struct fz_iso iso;
 
 	/* --inline runs the case in this process, so a debugger sees the crash */
 	if (hk_inline_v) {
@@ -186,31 +178,15 @@ static enum hk_result hk_isolated(hk_case_fn fn, void *arg, unsigned secs, int *
 			*sig = 0;
 		return fn(arg) ? HK_FAILED : HK_OK;
 	}
-	fflush(NULL);
-	pid = fork();
-	if (pid < 0) {
+	if (fz_isolate(hk_iso_child, &x, secs, NULL, &iso) < 0) {
 		perror("fork");
 		exit(2);
 	}
-	if (pid == 0) {
-		int rc;
-		signal(SIGALRM, SIG_DFL);
-		alarm(secs);
-		hk_fails = 0;
-		rc = fn(arg);
-		fflush(NULL);
-		_exit(rc ? 1 : 0);
-	}
-	if (waitpid(pid, &st, 0) < 0)
-		return HK_FAILED;
 	if (sig)
-		*sig = 0;
-	if (WIFSIGNALED(st)) {
-		if (sig)
-			*sig = WTERMSIG(st);
-		return WTERMSIG(st) == SIGALRM ? HK_HUNG : HK_CRASHED;
-	}
-	return WEXITSTATUS(st) == 0 ? HK_OK : HK_FAILED;
+		*sig = iso.kind == FZ_EXITED ? 0 : iso.sig;
+	if (iso.kind != FZ_EXITED)
+		return iso.kind == FZ_TIMEOUT ? HK_HUNG : HK_CRASHED;
+	return iso.code == 0 ? HK_OK : HK_FAILED;
 }
 
 /* ---- little-endian / either-endian writers ---------------------------------- */

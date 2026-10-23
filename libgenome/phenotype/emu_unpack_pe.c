@@ -318,10 +318,22 @@ static void pe_watch_handover(struct kgenome_emu *e, const struct kgenome_pe_inf
 }
 
 /* Step 5: the run's own state: the image, the stack range, the stages, rip and the seeds. */
-static void pe_set_run_state(struct kgenome_emu *e, const uint8_t *file, uint64_t n,
-			     const struct kgenome_pe_info *info, uint64_t base,
-			     unsigned bits, uint64_t idle, uint64_t entry)
+/* What step 5 needs, as one request: the image, where it is and how wide, where to start, and whether a
+ * module declared the program's ranges (then the generic handover test is off: the module knows). */
+struct pe_run_req {
+	const uint8_t                *file;
+	uint64_t                      n;
+	const struct kgenome_pe_info *info;
+	uint64_t                      base, idle, entry;
+	unsigned                      bits, n_oep;
+};
+
+static void pe_set_run_state(struct kgenome_emu *e, const struct pe_run_req *rq)
 {
+	const uint8_t *file = rq->file;
+	const uint64_t n = rq->n, base = rq->base, idle = rq->idle, entry = rq->entry;
+	const struct kgenome_pe_info *info = rq->info;
+	const unsigned bits = rq->bits, n_oep = rq->n_oep;
 	uint32_t i;
 
 	kgenome_emu_set_self(e, file, n);
@@ -354,7 +366,10 @@ static void pe_set_run_state(struct kgenome_emu *e, const uint8_t *file, uint64_
 			kgenome_emu_set_image_range(e, base, base + hi);
 			/* And the handover test, which needs that range - see
 			 * kgenome_emu_set_oep_watch. */
-			kgenome_emu_set_oep_watch(e, 1);
+			/* A module that declared where the program is ends the run there and nowhere else: the generic
+			 * test (a balanced jump into written code) fires on the loader's own stage transfers - measured on
+			 * five Themida samples, at 22-72 million instructions, every time inside the loader. */
+			kgenome_emu_set_oep_watch(e, n_oep ? 0 : 1);
 		}
 	}
 	{
@@ -442,6 +457,8 @@ static void pe_report(struct kgenome_emu *e, struct kgenome_emu_unp_report *rep,
 		rep->entry = entry;
 		rep->improvised = improvised;
 		rep->detail = kgenome_emu_stop_detail(e);
+		rep->unmodelled = kgenome_emu_unmodelled_calls(e);
+		rep->unmodelled_guessed = kgenome_emu_unmodelled_guessed(e);
 		/*
 		 * A fault at the sentinel is the stub RETURNING, which
 		 * is how a PE entry point finishes - see
@@ -542,7 +559,8 @@ struct kgenome_emu *kgenome_emu_unp_run_pe(const struct kgenome_emu_unp_pe_req *
 		return NULL;
 	}
 	pe_watch_handover(e, info, base, oep, n_oep);
-	pe_set_run_state(e, file, n, info, base, cfg.bits, idle, entry);
+	pe_set_run_state(e, &(const struct pe_run_req){ .file = file, .n = n, .info = info, .base = base,
+			 .bits = cfg.bits, .idle = idle, .entry = entry, .n_oep = n_oep });
 	pe_declare_watches(e, decl, rep);
 	pe_report(e, rep, kgenome_emu_unp_emu_run_while_producing(e, bud ? bud->max_insn : 0, hand_back, extensions), entry, m.improvised);
 	if (rep && (kgenome_emu_hit(e) & KGENOME_EMU_HIT_DECL))

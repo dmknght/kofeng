@@ -12,9 +12,9 @@
  * THE RECOVERING STEP is the second half. tests/sigs/recover_probe_00.c reports
  * only that it was asked, on an object carrying its sign, and it must be asked
  * whether or not a decrypt produced a child from that object and whether or not a
- * rule had already named it. The last is the one an opening step cannot do: a
- * named object is refused by the gate that decides whether it is worth opening,
- * and it is exactly the object whose description a tool shows first.
+ * rule had already named it. A name is evidence and ends nothing, so a named object
+ * is opened like any other - and it is exactly the object whose description a tool
+ * shows first.
  *
  * REPEATED, with a scanner of its own each time and with one scanner kept: the
  * answer must not depend on which run it is. The modules of a step are visited in
@@ -76,8 +76,6 @@ static uint64_t fold(uint64_t h, const uint8_t *b, uint64_t n)
 static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
-	uint32_t f;
-
 	(void)name;
 	(void)user;
 	if (out.n_obj < KEEP) {
@@ -90,9 +88,6 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 	out.last_n = len;
 	memcpy(out.last, bytes, len < sizeof out.last ? len : sizeof out.last);
 	out.sum = fold(out.sum ^ out.n_obj, bytes, len);
-	for (f = 0; f < res->n; f++)
-		if (strstr(res->v[f].name, "LayerConvict"))
-			out.named++;
 	return 0;
 }
 
@@ -102,6 +97,9 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value, void *user
 	(void)user;
 	if (what && strstr(what, "Probe") && value)
 		out.probe++;
+	/* the module that names the decrypted payload says so as a note - see sig_layer_convict_00.c */
+	if (what && strstr(what, "LayerConvict"))
+		out.named++;
 }
 
 /* magic, four bytes in the clear, then the rest XORed with one byte. */
@@ -264,8 +262,8 @@ int main(int argc, char **argv)
 	/*
 	 * A NAMED OBJECT. It carries the first layer's sign and the recovering
 	 * step's, and a word a rule names it by. The detect stage convicts it, the
-	 * gate then refuses to open it - so no child - and the recovering step still
-	 * runs, because a convicted program is the one whose description is wanted.
+	 * gate still opens it - a finding is evidence - and the recovering step runs,
+	 * because a convicted program is the one whose description is wanted.
 	 */
 	memset(conv, 0x90, sizeof conv);
 	memcpy(conv, "LAYA", 4);
@@ -276,8 +274,8 @@ int main(int argc, char **argv)
 	       o3.probe);
 	if (o3.named == 0u)
 		fail("the rule did not name the object");
-	if (o3.n_obj != 1u)
-		fail("a named object was opened");
+	if (o3.n_obj < 2u)
+		fail("a named object was not opened: a finding must not end the open stage");
 	if (o3.probe != 1u)
 		fail("the recovering step did not run on a named object");
 

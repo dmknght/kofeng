@@ -1,6 +1,6 @@
 /*
  * disease - what a well-formed disease is, decided in one place for the diagnose
- * reader, the syndrome reader and the engine that compares the two.
+ * reader, the detectors that declare one and the engine that compares the two.
  */
 #include <stdio.h>
 #include <string.h>

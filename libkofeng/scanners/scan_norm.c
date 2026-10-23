@@ -47,8 +47,12 @@ struct norm_work {
 	const struct kgenome_true_all *lib;
 	uint64_t n;
 	int changed;
-	struct kof_src_region rgn[KOF_SRC_MAX_REGIONS];
-	struct kof_src_region rgn0[KOF_SRC_MAX_REGIONS];
+	/* The regions of the parent (rgn0, kept) and of the view (rgn, rewritten into the view's
+	 * coordinates): one allocation of what the parent HAS plus the two the library may add.
+	 * They were two arrays of sixteen and a PE with more disjoint code extents lost the
+	 * later ones from the view (norm_defect_engine N3). */
+	struct kof_src_region *rgn;
+	struct kof_src_region *rgn0;
 	/*
 	 * THE BOUNDARY TABLE: every parent offset the view's description names, and
 	 * where the collapse put each. `mk` is what the collapse is asked to report
@@ -69,6 +73,14 @@ struct norm_work {
 	uint32_t nr, n_rgn0, fired;
 	/* The canonical byte order of a big-endian object - scan_norm_endian.c. */
 	struct sx_endian en;
+	/*
+	 * THE UNITS OF THE PARENT'S BLOCK CUT THAT THE DECODE OR THE NARROWING REWROTE - the
+	 * author's, and not a function - which the view keeps whole. Parent offsets from the walk
+	 * (norm_walk) until norm_view_describe carries them through the boundary table, and the
+	 * view's own after.
+	 */
+	struct kof_range *fixed;
+	uint32_t n_fixed, cap_fixed;
 };
 
 /*
@@ -106,25 +118,13 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * being recognised by a side effect. This was "has a declared region
 	 * table", which every view has EXCEPT one made from an object whose
 	 * regions could not be resolved, and that exception was a real one.
+	 *
+	 * ONE TEST FOR BOTH NORMALISERS. The script pass in objctx.c marks the form it
+	 * makes with this same kind, so a view of a view of either is refused here: they were
+	 * once blind to each other (a shell script came back with four views, each a walk
+	 * over bytes already in the tree), and a second, identical test used to follow.
 	 */
 	if (kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
-		return 0;
-	/*
-	 * AND NOT A FORM SOMEBODY ELSE ALREADY MADE.
-	 *
-	 * THE TWO NORMALISERS WERE BLIND TO EACH OTHER. This one marks what it
-	 * produces with a kind of its own; the script pass in objctx.c marks
-	 * its own with KOF_ENT_NORMALIZED, and each guard tested only its own
-	 * mark. So each ran on the other's output and one shell script came
-	 * back with four views - 1.norm, 2.NORMALIZED, then 3.NORMALIZED of the
-	 * first and 4.norm of the second, each a walk over an object already in
-	 * the tree to arrive at bytes already in the tree.
-	 *
-	 * "A FORM OF A FORM IS THE FORM", as the other guard puts it. Both of
-	 * them now say so about both marks.
-	 */
-	if (sc->cur.src &&
-	    kof_src_kind_of(sc->cur.src) == KOF_ENT_NORMALIZED)
 		return 0;
 	/*
 	 * AND NOT A SCRIPT, BECAUSE A SCRIPT HAS ITS OWN NORMALISER.
@@ -210,8 +210,12 @@ static int norm_wanted(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	return 1;
 }
 
-/* The parent's regions, and their coordinates kept for the library cut. */
-static void norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
+/*
+ * The parent's regions, and their coordinates kept for the library cut. 0 when the table could not
+ * be allocated: the view is not made (a view without its parent's regions would rewrite the code
+ * they keep), and the caller says so.
+ */
+static int norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
 {
 	/*
 	 * THE PARENT'S REGIONS FIRST, because they decide what may be rewritten
@@ -221,8 +225,23 @@ static void norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
 	 * refuse: a view of it is still worth having, it simply has nothing to
 	 * keep and nothing to declare, and the transform runs over the whole of
 	 * it exactly as it did before regions were understood here.
+	 *
+	 * COUNTED FIRST AND ALLOCATED TO THE COUNT. The table was sixteen entries and the
+	 * extents past them were not gathered, so the sections they were were not kept as
+	 * code and the view's own table had no region for them. Two more entries are the
+	 * room norm_append_library may add.
 	 */
-	w->nr = sx_norm_gather(ctx, w->rgn, KOF_SRC_MAX_REGIONS);
+	uint32_t n = sx_norm_gather(ctx, NULL, UINT32_MAX);
+
+	w->nr = 0;
+	w->n_rgn0 = 0;
+	if (!n)
+		return 1;
+	w->rgn = malloc(((size_t)n + 2u) * sizeof *w->rgn);
+	w->rgn0 = malloc((size_t)n * sizeof *w->rgn0);
+	if (!w->rgn || !w->rgn0)
+		return 0;
+	w->nr = sx_norm_gather(ctx, w->rgn, n);
 	/*
 	 * THE PARENT'S OWN COORDINATES, KEPT. `rgn` is rewritten into the
 	 * view's below, and the library spans are file offsets - so deciding
@@ -231,6 +250,7 @@ static void norm_gather_regions(struct norm_work *w, struct kof_obj_ctx *ctx)
 	 */
 	memcpy(w->rgn0, w->rgn, w->nr * sizeof w->rgn[0]);
 	w->n_rgn0 = w->nr;
+	return 1;
 }
 
 /*
@@ -474,6 +494,94 @@ static void mark_add(struct norm_work *w, uint64_t off, uint64_t n)
 	w->mk[w->n_mark++] = off;
 }
 
+/*
+ * THE UNITS THE VIEW KEEPS WHOLE: the parent's, where the decode or the narrowing changed them.
+ *
+ * kof_scan_mutation_units is the walk the scanner credits blocks from and the viewer shows them
+ * from, run on the parent's own bytes, so the units are the parent's. A unit that is not a function
+ * (`first` names one) and not the library's is read for a change: the decode has run, so a unit
+ * whose bytes differ from the parent's, or that holds text the collapse will narrow, is one. Cutting
+ * the view again would find other units than the parent's (see by_bytes), and the view's blocks are
+ * the parent's units hashed over what the view holds.
+ *
+ * Every region the parse has (`~0u`), not the ones a loaded rule names: what is kept whole does
+ * not depend on the database. No functions are asked for - a region offered a function at a time
+ * gives its strings from the bytes alone, which is all that is wanted of it here.
+ */
+struct norm_unit_ask {
+	struct norm_work *w;
+	kof_buf buf;
+};
+
+static int norm_unit(void *user, uint32_t region, uint64_t off, uint64_t len, uint32_t side,
+		     const struct kgenome_func *first)
+{
+	struct norm_unit_ask *a = user;
+	struct norm_work *w = a->w;
+
+	(void)region;
+	if (first || side != KGENOME_MUTATION_SIDE_USER)
+		return 0;
+	if (!memcmp(w->tmp + off, a->buf.p + off, (size_t)len) &&
+	    !kof_exe_has_wide(w->tmp + off, len))
+		return 0;
+	if (w->n_fixed == w->cap_fixed) {
+		uint32_t nc = w->cap_fixed ? w->cap_fixed * 2u : 64u;
+		struct kof_range *g = realloc(w->fixed, (size_t)nc * sizeof *g);
+
+		if (!g) {
+			w->cut = 1;     /* the view is cut as its own bytes say - and it is said */
+			return 1;
+		}
+		w->fixed = g;
+		w->cap_fixed = nc;
+	}
+	w->fixed[w->n_fixed].off = off;
+	w->fixed[w->n_fixed].len = len;
+	w->n_fixed++;
+	return 0;
+}
+
+/* Whether the decode changed a byte that the library does not own: only then is there a unit of the
+ * author's to keep whole. Compared a block at a time, so an object it left alone costs one memcmp. */
+static int norm_rewrote(const struct norm_work *w, kof_buf buf)
+{
+	uint64_t i, j;
+
+	for (i = 0; i < buf.n; i += 4096u) {
+		uint64_t e = buf.n - i < 4096u ? buf.n : i + 4096u;
+
+		if (!memcmp(w->tmp + i, buf.p + i, (size_t)(e - i)))
+			continue;
+		for (j = i; j < e; j++)
+			if (w->tmp[j] != buf.p[j] &&
+			    !(w->drop && (w->drop[j >> 3] >> (j & 7u) & 1u)))
+				return 1;
+	}
+	return 0;
+}
+
+static void norm_walk(struct norm_work *w, struct kof_obj_ctx *ctx, kof_buf buf)
+{
+	struct kof_scanner *sc = w->sc;
+	const struct kof_scan_cut cut = { NULL, sc->cur.lib_ok ? &sc->cur.lib : NULL, NULL, 0 };
+	struct norm_unit_ask ask = { w, buf };
+	uint32_t a;
+
+	if (!norm_rewrote(w, buf) && !kof_exe_has_wide(buf.p, buf.n))
+		return;
+	kof_scan_mutation_units(ctx, buf, ~0u, &cut, kof_scan_ext_buf(sc, 1), norm_unit, &ask);
+	/* Sorted, as the cut wants them; the two edges of each go to the boundary table, which says
+	 * where the collapse put them. */
+	_Static_assert(offsetof(struct kof_range, off) == 0, "kof_cmp_u64 reads the offset");
+	if (w->n_fixed > 1u)
+		qsort(w->fixed, w->n_fixed, sizeof *w->fixed, kof_cmp_u64);
+	for (a = 0; a < w->n_fixed; a++) {
+		mark_add(w, w->fixed[a].off, buf.n);
+		mark_add(w, w->fixed[a].off + w->fixed[a].len, buf.n);
+	}
+}
+
 struct mark_ask {
 	struct norm_work *w;
 	uint64_t n;
@@ -681,6 +789,26 @@ static void norm_view_describe(struct norm_work *w, struct kof_obj_ctx *ctx)
 		w->rgn[a].off = o0;
 		w->rgn[a].len = o1 > o0 ? o1 - o0 : 0u;
 	}
+	/*
+	 * THE UNITS THE VIEW KEEPS WHOLE, in the view's own offsets - the same two answers a
+	 * region is, taken from the same table and written over the parent's list. A unit the
+	 * collapse took down to nothing is not one.
+	 */
+	{
+		uint32_t k = 0;
+
+		for (a = 0; a < w->n_fixed; a++) {
+			uint64_t o0 = kgenome_offmap_at(&m, w->fixed[a].off);
+			uint64_t o1 = kgenome_offmap_at(&m, w->fixed[a].off + w->fixed[a].len);
+
+			if (o1 > o0) {
+				w->fixed[k].off = o0;
+				w->fixed[k].len = o1 - o0;
+				k++;
+			}
+		}
+		w->n_fixed = k;
+	}
 	if (w->entry_off != KGENOME_NA && w->entry_off != KGENOME_BROKEN)
 		w->entry_off = kgenome_offmap_at(&m, w->entry_off);
 	if (w->img) {
@@ -734,11 +862,11 @@ static void norm_append_library(struct norm_work *w, kof_buf buf)
 		};
 		uint32_t side, a, b;
 
-		for (side = 0; side < 2u && w->nr < KOF_SRC_MAX_REGIONS; side++) {
+		for (side = 0; side < 2u; side++) {      /* the table has room for both: see norm_gather_regions */
 			uint64_t begin = n;
 
-			for (a = 0; a < w->lib->n && n < buf.n; a++) {
-				uint64_t off = w->lib->span[a].off, e, j;
+			for (a = 0; a < w->lib->n; a++) {
+				uint64_t off = w->lib->span[a].off, e, take;
 				int mine = 0;
 
 				if (off >= buf.n)
@@ -757,8 +885,22 @@ static void norm_append_library(struct norm_work *w, kof_buf buf)
 					}
 				if (!mine)
 					continue;
-				for (j = off; j < e && n < buf.n; j++)
-					out[n++] = buf.p[j];
+				/*
+				 * IN THE VIEW'S BYTE ORDER, which for a big-endian object is not the parent's:
+				 * the plan swaps the body by words and the library is appended from the
+				 * parent, so it is put through the same plan - a copy of the raw words was the
+				 * one range of a canonical view in the old order (norm_defect_endian N9).
+				 */
+				take = e - off;
+				if (take > buf.n - n) {
+					take = buf.n - n;       /* cannot happen (see above), and is said if it does */
+					oc_scan_limit(w->sc);
+				}
+				if (w->en.plan.n)
+					kgenome_endian_range(out + n, buf.p, buf.n, off, take, &w->en.plan);
+				else
+					memcpy(out + n, buf.p + off, (size_t)take);
+				n += take;
 			}
 			if (n > begin) {
 				w->rgn[w->nr].mask = pair[side][1];
@@ -900,12 +1042,30 @@ static void norm_declare(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * this one did not, and the two produce the same kind of thing.
 	 */
 	sc->pend.kind = KOF_ENT_NORMALIZED;
-	{
-		uint32_t a;
+	/* AND THE UNITS IT KEEPS WHOLE - what the view's cut leaves alone; see kof_src_declare_fixed. */
+	if (w->n_fixed) {
+		if (sc->pend.fixed_cap < w->n_fixed) {
+			struct kof_range *g = realloc(sc->pend.fixed, w->n_fixed * sizeof *g);
 
-		for (a = 0; a < w->nr; a++)
-			sc->pend.rgn[a] = w->rgn[a];
-		sc->pend.n_rgn = w->nr;
+			if (g) {
+				sc->pend.fixed = g;
+				sc->pend.fixed_cap = w->n_fixed;
+			} else {
+				OC_LIMIT(sc, "view units not allocated");
+			}
+		}
+		if (sc->pend.fixed_cap >= w->n_fixed) {
+			memcpy(sc->pend.fixed, w->fixed, w->n_fixed * sizeof *w->fixed);
+			sc->pend.n_fixed = w->n_fixed;
+		}
+	}
+	{
+		if (oc_pend_regions(sc, w->nr)) {
+			memcpy(sc->pend.rgn, w->rgn, w->nr * sizeof w->rgn[0]);
+			sc->pend.n_rgn = w->nr;
+		} else {
+			OC_LIMIT(sc, "view regions not allocated");
+		}
 		/*
 		 * IN THE PARENT'S VOCABULARY, and that has to travel with the
 		 * table. These bits were resolved out of the parent, and a bit
@@ -1003,6 +1163,11 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			kgenome_diag_funcs_of_view(&pobj, buf, oc_funcs(ctx),
 					       kof_buf_make(w->out, w->n), &sc->pend.funcs);
 	}
+	/* A set the remap or the allocator cut short is a view whose functions are not all there, and a
+	 * rule that reads one sees "no such function": the object says so, as funcs_of does for the
+	 * parent's own set (norm_defect_engine N6). */
+	if (kgenome_status_is_cut(sc->pend.funcs.status))
+		oc_scan_limit(sc);
 	norm_free_out(w);
 	if (sent == w->n) {
 		/*
@@ -1042,7 +1207,19 @@ static void norm_send_child(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 			 * view that has to be discounted later. */
 			if (sc->child.n > k0)
 				sc->child.n_views++;
+			else
+				/* The push said no (the child quota, the resident ceiling, the table of children
+				 * that could not grow): that is oc_scan_broken's, the sticky stop of the OPEN stage,
+				 * and nothing copies it into this object's result from here - st_verdict reads only
+				 * what `cut` says. A view that was wanted and not made is a limit of the object, as
+				 * the ceiling above says it (silent_oom_sweep: nine allocations of kid_grow changed
+				 * the answer and nothing said so). */
+				oc_scan_limit(sc);
 		}
+	} else {
+		/* The sink stopped taking bytes (a ceiling, the object cap): the view is not made, and the
+		 * object is marked as one whose view was lost. */
+		oc_scan_limit(sc);
 	}
 }
 
@@ -1086,7 +1263,10 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	 * view is an ADDITIONAL object, and a pattern that only matches the
 	 * original still matches the original.
 	 */
-	norm_gather_regions(w, ctx);
+	if (!norm_gather_regions(w, ctx)) {
+		oc_scan_limit(sc);              /* a view that was wanted, lost to the allocator: said */
+		return;
+	}
 	/*
 	 * AND THE STATIC LIBRARY, WHICH LEAVES THE VIEW ALTOGETHER.
 	 *
@@ -1132,11 +1312,16 @@ static void norm_emit_work(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 		return;
 	}
 	oc_diag_trim(sc);
-	if (!norm_alloc(sc, w, buf))
+	if (!norm_alloc(sc, w, buf)) {
+		/* A view known to be possible, lost to the allocator: said, as the ceiling above says it
+		 * (norm_defect_engine N5). Nothing was taken, so there is nothing to give back. */
+		oc_scan_limit(sc);
 		return;
+	}
 	norm_keep_build(w, ctx, buf);
 	norm_drop_build(w, buf);
 	norm_decode(sc, w, buf);
+	norm_walk(w, ctx, buf);
 	norm_marks_build(w, ctx, buf);
 	if (!norm_collapse(w, buf))
 		return;
@@ -1183,4 +1368,7 @@ void sx_norm_emit(struct kof_scanner *sc, struct kof_obj_ctx *ctx,
 	free(w.mk);
 	free(w.mk_to);
 	free(w.img);
+	free(w.fixed);
+	free(w.rgn);
+	free(w.rgn0);
 }

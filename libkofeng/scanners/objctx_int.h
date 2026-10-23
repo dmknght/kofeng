@@ -188,6 +188,46 @@ void oc_names_give_cb(void *sc, uint64_t n);
  * who ran out of room (kof_scanner.ledger.res_why). A macro for __func__. */
 #define scan_charge(sc, n) (((sc)->ledger.res_why = __func__), oc_scan_charge_(sc, n))
 
+/* ---- what a script puts its own literals through (objctx_script_dec.c) ---- */
+struct oc_script_dec;           /* the decode state of one script object: opaque */
+struct oc_script_form_req {
+	uint32_t       lang;    /* enum kgenome_textual_lang_id */
+	const uint8_t *in;
+	uint32_t       n;
+	uint8_t       *out;     /* `cap` bytes, at least KGENOME_TEXTUAL_FORM_CAP(n) */
+	uint64_t       cap;
+	uint8_t        fragment;        /* code with no opening tag */
+	struct oc_script_dec *dec;      /* NULL: no literal is decoded */
+};
+uint64_t oc_script_dec_room(const struct kof_scanner *sc, uint64_t n);
+/*
+ * What a script computes, written where it was computed (objctx_script_consts.c): the number of right sides replaced, with the text in
+ * `*text` (malloc'ed, `*text_n` bytes, `*charged` to give back with oc_scan_release) - or 0 and nothing allocated.
+ */
+/* Does the engine write what a script of this language computes where it was computed: the lib's evaluator reads the language and its row has a `quote`. */
+int oc_script_consts_serves(uint32_t lang);
+uint32_t oc_script_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b, uint8_t **text, uint32_t *text_n, uint64_t *charged);
+/*
+ * THE SCAN OF A SCRIPT'S TEXT, ONE FOR THE NAMES, THE CONSTANTS AND THE GRAPH (objctx_textscan.c).
+ *
+ * oc_syms_build builds the symbol block of an object (a script's from from the names the one scan told (making the scan when no stage has); oc_text_consts hands the constants stage
+ * what the same scan collected, and oc_text_take gives the diagnose stage its graph - NULL unless it is for this very text (the buffer, its length and its language), when
+ * that stage scans for itself. kof_scan_text_drop frees what is held.
+ */
+struct oc_consts;
+uint32_t oc_syms_build(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, const struct kgenome_pe_imptab *imp, uint32_t *passes);
+struct oc_consts *oc_text_consts(struct kof_scanner *sc, uint32_t lang, kof_buf b);
+int oc_text_eval_cut(const struct kof_scanner *sc);
+struct kgenome_diag_scan *oc_text_take(struct kof_scanner *sc, uint32_t lang, kof_buf b);
+/* the constants collector (objctx_script_consts.c): the callbacks of the scan's on_const and on_head, the collector they fill and its release */
+struct oc_consts *oc_consts_new(const struct kof_scanner *sc, uint32_t lang, uint64_t n);
+void oc_consts_free(struct oc_consts *c);
+void oc_consts_on_const(void *u, uint64_t off, uint64_t len, const uint8_t *val, uint32_t n);
+void oc_consts_on_head(void *u, uint64_t off, uint64_t len, const uint8_t *val, uint32_t n);
+struct oc_script_dec *oc_script_dec_new(struct kof_scanner *sc, uint32_t lang, uint64_t room);
+void oc_script_dec_end(struct oc_script_dec *d);
+uint32_t oc_script_form(const struct oc_script_form_req *rq, uint32_t *n_dec);
+
 /* ---- the interpreter, vtable entries (objctx_emu.c) ---- */
 void oc_emu_watch(const struct kof_obj_ctx *ctx, uint64_t rva,
 			uint64_t len);
@@ -219,6 +259,7 @@ int oc_import(const struct kof_obj_ctx *ctx, const char *dll,
 		    const char *fn, uint32_t ordinal, uint64_t iat_rva);
 uint64_t oc_import_bytes(const struct kof_obj_ctx *ctx);
 int oc_import_at(const struct kof_obj_ctx *ctx, uint64_t rva);
+uint64_t oc_sec_span(const struct kof_scanner *sc);
 int oc_image(const struct kof_obj_ctx *ctx);
 uint64_t oc_gather(const struct kof_obj_ctx *ctx, uint32_t mask, uint64_t cap);
 int oc_derive(const struct kof_obj_ctx *ctx);
@@ -235,6 +276,7 @@ void oc_as_format(const struct kof_obj_ctx *ctx, uint8_t fmt,
 
 /* ---- child production (objctx_child.c) ---- */
 void oc_pend_clear(struct kof_scanner *sc);
+int oc_pend_regions(struct kof_scanner *sc, uint32_t need);
 
 /* ---- what the units of the child family share (objctx_child*.c) ---- */
 /*
@@ -312,6 +354,17 @@ struct emu_extra {
 
 /* ---- what the diagnose units share (objctx_diag*.c) ---- */
 void oc_diag_ready(struct kof_scanner *sc, const struct kof_obj_ctx *ctx);
+/* The routines of the diagnose scan diagnose `d` may run on this object (objctx_diag_route.c); zero: the object has nothing for it. */
+unsigned oc_diag_routes(const struct kof_diag *d, const struct kof_obj_ctx *ctx);
+
+/*
+ * THE TEXT ROUTE (objctx_diag_text.c). A script is read by its lexer and not as an object model, so it has its own pieces of the
+ * diagnose stage: whether the route can read this object, which capability a name of its symbols is, and the scan.
+ */
+int oc_text_served(const struct kof_obj_ctx *ctx);
+uint16_t oc_name_cap(const struct kof_obj_ctx *ctx, const char *name);
+struct kgenome_diag_scan *oc_diag_scan_text(struct kof_scanner *sc, const struct kof_obj_ctx *ctx, kof_buf b,
+					    struct kgenome_budget *kb, enum kgenome_status *refused);
 void oc_diag_demand(struct kof_scanner *sc);
 /* Which diagnose was called, in one greppable line (objctx_diag_trace.c). */
 void oc_diag_trace_scan(struct kof_scanner *sc);

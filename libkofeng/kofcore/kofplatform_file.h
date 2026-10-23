@@ -380,34 +380,7 @@ static inline int kof_abs_path(const char *in, char *out, size_t cap)
 }
 #endif
 
-/*
- * Cut a file to `len`, with the platform's own call.
- *
- * Here beside the rest of the file primitives because a caller that repairs
- * an infected binary needs it and there is no portable spelling: POSIX has
- * truncate, Windows needs a handle and SetEndOfFile.
- */
 #ifdef _WIN32
-/*
- * OPEN AN EXISTING FILE TO REPAIR IT, AND SEEK IN IT WITH 64 BITS.
- *
- * Two things the repair path needs and plain fopen/fseek do not give it.
- *
- * NOT FOLLOWING A LINK. The file was identified by scanning THAT file; if the
- * name now points somewhere else, the thing to do is fail, not write into
- * whatever it points at. On POSIX that is O_NOFOLLOW. Windows has reparse
- * points rather than symlinks and _open cannot refuse them, so this side is
- * the same open the rest of this header does and the guarantee is the ACL's -
- * said here rather than implied, because the two platforms are not equal on
- * this point.
- *
- * SIXTY-FOUR BIT OFFSETS. fseek takes a long, and on mingw-w64 a long is
- * thirty-two bits: casting a uint64 offset to it is a wrap, and a wrapped
- * offset does not fail - it seeks somewhere else and the sixteen bytes of a
- * repair land in the middle of the user's file. An infected object larger than
- * 4 GB is unusual and the scanner maps one whole, so the offset really can get
- * there.
- */
 /*
  * REFUSE A REPARSE POINT, which is what O_NOFOLLOW means on this side.
  *
@@ -438,89 +411,6 @@ static inline HANDLE kof_win_open_nofollow(const char *path, DWORD access,
 		return INVALID_HANDLE_VALUE;
 	}
 	return h;
-}
-
-static inline FILE *kof_fopen_rw(const char *path)
-{
-	HANDLE h = kof_win_open_nofollow(path, GENERIC_READ | GENERIC_WRITE,
-					 OPEN_EXISTING, 0);
-	int fd;
-	FILE *fp;
-
-	if (h == INVALID_HANDLE_VALUE)
-		return NULL;
-	fd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
-	if (fd < 0) {
-		CloseHandle(h);
-		return NULL;
-	}
-	fp = _fdopen(fd, "r+b");
-	if (!fp)
-		_close(fd);        /* which closes the handle too */
-	return fp;
-}
-
-static inline int kof_fseek64(FILE *f, uint64_t off)
-{
-	return _fseeki64(f, (__int64)off, SEEK_SET) == 0;
-}
-
-static inline int kof_truncate_file(const char *path, uint64_t len)
-{
-	/* Through the same refusal kof_fopen_rw uses: this is the OTHER half of
-	 * a repair, and cutting a file the name merely points at is the same
-	 * mistake as writing into one. */
-	HANDLE h = kof_win_open_nofollow(path, GENERIC_WRITE, OPEN_EXISTING, 0);
-	LARGE_INTEGER li;
-	int ok;
-
-	if (h == INVALID_HANDLE_VALUE)
-		return 0;
-	li.QuadPart = (LONGLONG)len;
-	ok = SetFilePointerEx(h, li, NULL, FILE_BEGIN) && SetEndOfFile(h);
-	CloseHandle(h);
-	return ok;
-}
-#else
-/* See the Windows side for why the repair path needs its own opener, its own
- * seek and its own truncate. O_NOFOLLOW here is the real thing. */
-static inline FILE *kof_fopen_rw(const char *path)
-{
-	int fd = open(path, O_RDWR | O_NOFOLLOW);
-	FILE *fp;
-
-	if (fd < 0)
-		return NULL;
-	fp = fdopen(fd, "r+b");
-	if (!fp)
-		close(fd);
-	return fp;
-}
-
-static inline int kof_fseek64(FILE *f, uint64_t off)
-{
-	return fseeko(f, (off_t)off, SEEK_SET) == 0;
-}
-
-static inline int kof_truncate_file(const char *path, uint64_t len)
-{
-	/*
-	 * ftruncate ON AN O_NOFOLLOW HANDLE, not truncate() ON A PATH.
-	 *
-	 * truncate(2) resolves the path and follows a symlink, so the opener
-	 * beside this one refusing to follow links bought nothing: a repair is
-	 * a patch AND a cut, and cutting the file a name merely points at is
-	 * the same mistake as writing into it. Caught by unit_cure, which
-	 * asserts both halves rather than the one that had been thought about.
-	 */
-	int fd = open(path, O_WRONLY | O_NOFOLLOW);
-	int ok;
-
-	if (fd < 0)
-		return 0;
-	ok = ftruncate(fd, (off_t)len) == 0;
-	close(fd);
-	return ok;
 }
 #endif
 

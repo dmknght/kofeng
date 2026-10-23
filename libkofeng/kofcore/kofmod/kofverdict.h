@@ -34,36 +34,16 @@
 /*
  * WHICH PART OF THE ENGINE ANSWERED.
  *
- * A verdict says what a file is; this says what looked. They are different
- * questions and they were the same word for a long time - a finding carried
- * "Heur" where its type goes, which told a reader the answer came from a
- * rule and left no room to say what the file actually was.
- *
- * ANALYZER is the parse and what is read off it - a section that is writable
- * and executable, a segment past the end of the file. The three matchers are
- * named for themselves. A finding carries exactly one: whichever reached it.
+ * A verdict says what a file is; this says what looked. A verdict made from a
+ * diagnose that matched carries DIAGNOSE; one made of diseases no diagnose declared
+ * carries NONE (and so no engine word in its name).
  *
  * One list, so the word a verdict prints and the value the engine stores
  * cannot drift - the reason every other enum here is written this way.
- *
- * DIAGNOSE is a value of its own, because a rule whose finding came from the node
- * graph rather than from bytes is a different claim from Pattern and has to read
- * as one - the bytes of a shikata build are new every time and the rule never
- * looked at them.
- *
- * A shape-similarity value, "Overlord", stood between Mutation and Diagnose until
- * the matcher behind it was removed: it identified nothing on its own. The values
- * after it moved up one, so a verdict stored by an older build does not read back
- * as itself.
  */
 #define KOF_ENGINE_LIST(X)                                                   \
 	X(KOF_ENGINE_NONE,     "None")                                       \
-	X(KOF_ENGINE_ANALYZER, "Analyzer")  /* the parse and its anomalies */\
-	X(KOF_ENGINE_PATTERN,  "Pattern")   /* declared bytes and strings   */\
-	X(KOF_ENGINE_MUTATION,   "Mutation")    /* block similarity             */\
-	X(KOF_ENGINE_DIAGNOSE, "Diagnose")  /* what the code does, as a graph */\
-	X(KOF_ENGINE_UNPACKER, "Unpacker")  /* a module that opens containers */ \
-	X(KOF_ENGINE_SYNDROME, "Syndrome")  /* what the diseases make, inferred */
+	X(KOF_ENGINE_DIAGNOSE, "Diagnose")  /* what the code does, as a graph */
 
 enum kof_engine_id {
 #define KOF_ENGINE_X_ENUM(name, word) name,
@@ -71,13 +51,6 @@ enum kof_engine_id {
 #undef KOF_ENGINE_X_ENUM
 	KOF_ENGINE_COUNT
 };
-
-/*
- * The old name of KOF_ENGINE_DIAGNOSE, same value. Kept so a source that
- * spells it the old way - kofexamine does - still compiles; new text says
- * DIAGNOSE.
- */
-#define KOF_ENGINE_PATHOGEN KOF_ENGINE_DIAGNOSE
 
 static inline const char *kof_engine_name(uint32_t v)
 {
@@ -88,14 +61,12 @@ static inline const char *kof_engine_name(uint32_t v)
 }
 
 /*
- * HOW SURE THE ENGINE IS, which is a different axis from what it found and
- * from what looked. It is the first field of a verdict name for that reason:
- * a reader scanning a log sorts by it before anything else.
+ * HOW SURE THE ENGINE IS: an object either has a verdict or it has not. It is the
+ * first field of a verdict name, so a reader scanning a log sorts by it before
+ * anything else.
  */
 #define KOF_VERDICT_LIST(X)                                                  \
 	X(KOF_VERDICT_CLEAN,     "Clean")                                    \
-	X(KOF_VERDICT_HEUR,      "Heur")                                     \
-	X(KOF_VERDICT_SUSPECTED, "Suspected")                                \
 	X(KOF_VERDICT_INFECTED,  "Infected")
 
 enum kof_verdict_id {
@@ -125,20 +96,11 @@ static inline const char *kof_verdict_word(uint32_t v)
 	X(KOF_MALTYPE_DROPPER,  "Dropper")   /* covers downloader */         \
 	X(KOF_MALTYPE_HACKTOOL, "Hacktool")                                  \
 	/*                                                                   \
-	 * A WRAPPER THAT WAS RECOGNISED, not malware: an unpacker that names \
-	 * a packer it cannot open reports under this word, so the finding    \
-	 * reads `Packer:MidgetPack` and no one mistakes it for a family.     \
+	 * A WRAPPER THAT WAS RECOGNISED, not malware: the type an unpacker   \
+	 * declares for a packer it names (KOF_TARGET_NAME), so no one        \
+	 * mistakes the packer for a family.                                  \
 	 */                                                                  \
-	X(KOF_MALTYPE_PACKER,   "Packer")                                    \
-	/*
-	 * NOT A KIND OF MALWARE, which is why it is last and why no
-	 * signature should ever declare it: it is what the ANOMALY model
-	 * reports, and that model says a file's structure is odd, not that
-	 * the file does anything. It sits in this list because a verdict
-	 * needs a word where a type goes and "odd structure" is the honest
-	 * one - see kof_verdict_name.
-	 */                                                                  \
-	X(KOF_MALTYPE_ANOMALY,  "Anomalies")
+	X(KOF_MALTYPE_PACKER,   "Packer")
 
 enum kof_maltype {
 #define KOF_MALTYPE_X_ENUM(name, word) name,

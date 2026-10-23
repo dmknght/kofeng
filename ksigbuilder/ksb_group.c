@@ -154,12 +154,7 @@ int ksb_group_add(struct group *g, uint32_t idx)
 
 static const char *kind_name(uint32_t k)
 {
-	/* "heur" reads as what it is on the filesystem, which is where somebody
-	 * looks first to ask what a database contains. Grouped with the other
-	 * two here rather than defaulting to "sigs", because a pack of rules
-	 * named sigs- is a pack of rules nobody knows is there. */
-	return k == KOF_PACK_UNPACK ? "unpack" :
-	       k == KOF_PACK_HEUR   ? "heur" : "sigs";
+	return k == KOF_PACK_UNPACK ? "unpack" : "sigs";
 }
 
 /* The word a pack's filename starts with, which is its kind and nothing

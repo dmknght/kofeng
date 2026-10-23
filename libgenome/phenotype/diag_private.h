@@ -60,6 +60,18 @@ struct kgenome_diag_hit *kgenome_diag_hit_of(struct kgenome_diag_scan *s, uint32
 void kgenome_diag_hit_nonblock(struct kgenome_diag_scan *s, uint64_t at, uint16_t open_idx);
 void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
 		      uint16_t from, uint8_t role, uint8_t kind);
+/* The same, saying HOW FAR the link was established (enum kgenome_diag_link). kgenome_diag_note_in is
+ * this with KGENOME_DIAG_LINK_PROVEN. */
+int kgenome_diag_name_is_noreturn(const char *name);
+int kgenome_diag_site_noreturn(const struct kgenome_diag_scan *s, uint64_t at);
+/* A link the RUN saw arrive: PROVEN, and it replaces a MAY the code-only routes recorded for the same relation
+ * (kgenome_diag_note_in_how keeps the first statement). The fold of two nodes at one site (merge_sites) asks for it:
+ * the run's node and the code-only route's meet there. */
+int kgenome_diag_note_in_seen(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
+			      uint16_t from, uint8_t role, uint8_t kind);
+/* 1 when the link did not fit (the node holds four) and was dropped. */
+int kgenome_diag_note_in_how(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
+			  uint16_t from, uint8_t role, uint8_t kind, uint8_t how);
 
 /*
  * ---- THE ORIGIN MAP, WHICH EVERY STATIC ROUTINE NEEDS --------------------
@@ -73,9 +85,28 @@ void kgenome_diag_note_in(struct kgenome_diag_scan *s, struct kgenome_diag_hit *
 #define KGENOME_DIAG_ORG_NONE  0xffffu
 #define KGENOME_DIAG_ORG_STACK 0xfffeu
 #define KGENOME_DIAG_ORG_STK   32u
+/* The other producers a register may hold besides `node`: a node's four inputs less this one. */
+#define KGENOME_DIAG_ORG_ALT   3u
 
 struct kgenome_diag_org {
 	uint16_t node;          /* index, KGENOME_DIAG_ORG_NONE, or KGENOME_DIAG_ORG_STACK */
+	/*
+	 * ---- WHICH OF THE PATHS THAT MEET HERE GAVE IT THIS VALUE ------
+	 *
+	 * The walk is one line of code in address order, and a branch makes two paths that meet again
+	 * (an `if` that allocates in both arms, a skip over the one instruction that sets a register).
+	 * Paths that hold different producers leave the register with ALL of them, and none is certain:
+	 * `node` is the one on the path the walk is on, `alt_p1[]` the nodes of the others plus one (zero:
+	 * none, so a struct that was only zeroed means "no other producer"), and `may` says the link made
+	 * from this register is not on every path - it is MAY, however many producers it has. A node holds
+	 * four inputs (kgenome_diag_note_in_how), so a register keeps four producers and a fifth is the
+	 * one thing that is dropped - and said (KGENOME_TRUNCATED), as a fifth link is.
+	 * `may` is also what a call whose callee was not read does to the registers it may have
+	 * overwritten: the producer reaches the consumer if the callee left the register alone, and the
+	 * walk cannot say so. kgenome_diag_org_link is the one place that turns this into links.
+	 */
+	uint16_t alt_p1[KGENOME_DIAG_ORG_ALT];
+	uint8_t  may;
 	/*
 	 * ---- OR THE REGISTER NAMES A SYMBOL ----------------------------
 	 *
@@ -108,6 +139,8 @@ struct kgenome_diag_orgs {
 	 * `stk_cut` for the caller to report.
 	 */
 	uint16_t   stk[KGENOME_DIAG_ORG_STK];
+	uint16_t   stk_alt_p1[KGENOME_DIAG_ORG_STK][KGENOME_DIAG_ORG_ALT];  /* the same slot's other producers (see struct kgenome_diag_org) */
+	uint8_t    stk_may[KGENOME_DIAG_ORG_STK];
 	uint32_t   n_stk, n_lost;
 	uint8_t    stk_cut;
 	uint64_t   carry_to;
@@ -132,6 +165,30 @@ void     kgenome_diag_org_set_sym(struct kgenome_diag_orgs *w, uint8_t r, uint32
 			      int32_t symadd);
 uint32_t kgenome_diag_org_sym(const struct kgenome_diag_orgs *w, uint8_t r, int32_t *add);
 void     kgenome_diag_org_step(struct kgenome_diag_orgs *w, const struct kgenome_cell_insn *in);
+
+/*
+ * ---- WHAT THE LINEAR WALK DOES AT A CONTROL TRANSFER ------------------------------------------
+ *
+ * The sweep reads code in address order and takes no branch, so what it carries from one instruction
+ * to the next is right only inside one straight line. These are the steps that keep it honest where
+ * the line is not straight; the sweep (diag_sweep.c) is the caller and decides when.
+ */
+/* Is anything from an earlier node held in a register or on the stack ring (the carry flags are not counted). */
+int  kgenome_diag_org_any(const struct kgenome_diag_orgs *w);
+/* The register's origin and how it was reached, as links on `h`: the producer PROVEN (or MAY when `may`),
+ * the other producers of a join MAY. Nothing for a register that holds no producer. */
+void kgenome_diag_org_link(struct kgenome_diag_scan *s, struct kgenome_diag_hit *h,
+			   const struct kgenome_diag_orgs *w, uint8_t r, uint8_t role, uint8_t kind);
+/* What the registers in `mask` hold is no longer certain: every origin there becomes MAY. */
+void kgenome_diag_org_demote(struct kgenome_diag_orgs *w, uint16_t mask);
+/* What the registers in `mask` held is gone (overwritten, or the code that follows is another function). */
+void kgenome_diag_org_kill(struct kgenome_diag_orgs *w, uint16_t mask);
+/* The stack ring forgets everything (a different function's frame). 1 when an origin was lost with it. */
+int  kgenome_diag_org_kill_stack(struct kgenome_diag_orgs *w);
+/* Another path arrives with `from`: `to` becomes what both paths hold. A register with different producers
+ * keeps all (the walk's own first) and is MAY; one that only one path holds is MAY. `from` NULL is the path
+ * that holds nothing at all. 1 when a third distinct producer had to be dropped (the caller reports it). */
+int  kgenome_diag_org_merge(struct kgenome_diag_orgs *to, const struct kgenome_diag_orgs *from);
 
 /*
  * Which input of a call each argument is - ONE statement of it, in kofdiag.c,
@@ -198,9 +255,19 @@ void kgenome_diag_run_apihash(struct kgenome_diag_scan *s,
 			  const uint8_t *base, uint64_t size);
 const struct kgenome_pe_imptab *kgenome_diag_imports(struct kgenome_diag_scan *s,
 					     const struct kgenome_obj *obj);
+/* The symbol route's ELF half for a LINKED object: calls through the PLT or the GOT, by name - see
+ * diag_elfimp.c. (A relocatable object's half is diag_sym.c itself.) */
+void kgenome_diag_run_elf_symbol(struct kgenome_diag_scan *s,
+			     const struct kgenome_obj *obj,
+			     const uint8_t *base, uint64_t size);
 void kgenome_diag_run_pe_symbol(struct kgenome_diag_scan *s,
 			    const struct kgenome_obj *obj,
 			    const uint8_t *base, uint64_t size);
+void kgenome_diag_run_text(struct kgenome_diag_scan *s, const struct kgenome_diag_text_req *rq);
+/* The lineage stages, over the nodes the other routes made: diag_lineage.c. */
+void kgenome_diag_run_lineage(struct kgenome_diag_scan *s,
+			  const struct kgenome_obj *obj,
+			  const uint8_t *base, uint64_t size);
 void kgenome_diag_run_emulate(struct kgenome_diag_scan *s,
 			  const struct kgenome_obj *obj,
 			  const uint8_t *base, uint64_t size);

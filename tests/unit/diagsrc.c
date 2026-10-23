@@ -2,7 +2,8 @@
  * diagsrc - a diagnose's source read, shown and written back.
  *
  * What is pinned here is the property the editor depends on and nothing else
- * checks: a file is patched, never regenerated. Every shipped diagnose is read
+ * checks: a file is patched, never regenerated. Every diagnose source of the corpus (the
+ * ones switched off in docs/disabled/ and the fixtures of tests/sigs/) is read
  * and written back unchanged and must come out byte for byte, and an edit
  * changes exactly the declaration lines it names - the comments around them,
  * which carry the evidence for the rule, are never touched. The printer is
@@ -285,164 +286,6 @@ static void long_line(void)
 	free(d);
 }
 
-/* ---- a verdict that reads diagnoses ------------------------------------------- */
-
-static const char vsrc[] =
-	"#include <kofmod/kofsig.h>\n"
-	"\n"
-	"/* WHY: both, because one alone is a packer. kof_diag(NOT_A_TERM) */\n"
-	"KOF_TARGET_FORMAT(KOF_FMT_ELF);\n"
-	"KOF_TARGET_NAME(KOF_MALTYPE_TROJAN, \"Meterp\");\n"
-	"\n"
-	"void kof_scan(const struct kof_obj_ctx *ctx)\n"
-	"{\n"
-	"\tif (kof_diag(DIAG_MEM_EXECSYSCALL) &&\n"
-	"\t    kof_diag(DIAG_NET_RECVSYSCALL) &&\n"
-	"\t    kof_diag_share(KOF_NUCLEO_MEM_READ, DIAG_MEM_EXECSYSCALL,\n"
-	"\t\t\t   DIAG_NET_RECVSYSCALL))\n"
-	"\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n"
-	"}\n";
-
-static void verdict_file(const char *path)
-{
-	size_t n = 0, pn = 0;
-	char *t = slurp(path, &n), *p;
-	struct kof_dsrc *d = calloc(1, sizeof *d);
-
-	if (!t || !d) {
-		CHECK(0, "cannot read %s", path);
-		free(t);
-		free(d);
-		return;
-	}
-	CHECK(kof_dsrc_parse(t, n, d, NULL) == 0 && d->has_cond,
-	      "%s: not read as a verdict", path);
-	CHECK(kof_dsrc_verdict_check(d, NULL) == 0, "%s: fails its own check", path);
-	p = kof_dsrc_patch(t, n, d, &pn);
-	CHECK(p && pn == n && !memcmp(p, t, n), "%s changed by a no-op patch", path);
-	free(p);
-	free(d);
-	free(t);
-}
-
-static void verdicts(void)
-{
-	size_t n = strlen(vsrc), pn = 0, gn = 0;
-	struct kof_dsrc *d = calloc(1, sizeof *d), *e = calloc(1, sizeof *e);
-	struct kof_dsrc *r = calloc(1, sizeof *r);
-	char *p, *g;
-	uint32_t i;
-	static const char *const bad[] = {
-		"void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag(A) || kof_diag(B))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n",
-		"void kof_scan(const struct kof_obj_ctx *c)\n{\n\tint n = 0;\n\tif (kof_diag(A))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n",
-		"void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag(A) && x)\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n"
-	};
-	unsigned k;
-
-	CHECK(kof_dsrc_parse(vsrc, n, d, NULL) == 0 && d->has_cond, "fixture not read");
-	CHECK(d->cond.n == 3 && d->cond.t[0].kind == KVT_DIAG &&
-	      !strcmp(d->cond.t[0].a, "DIAG_MEM_EXECSYSCALL") && d->cond.t[2].kind == KVT_SHARE &&
-	      d->cond.t[2].cap == KGENOME_NUCLEO_MEM_READ &&
-	      !strcmp(d->cond.t[2].b, "DIAG_NET_RECVSYSCALL"),
-	      "terms: %u, a wrapped kof_diag_share was misread", d->cond.n);
-	/* the comment named kof_diag(NOT_A_TERM) and it is not a term */
-	for (i = 0; i < d->cond.n; i++)
-		CHECK(strcmp(d->cond.t[i].a, "NOT_A_TERM"), "a comment was read");
-	CHECK(kof_dsrc_verdict_check(d, NULL) == 0, "fixture fails its own check");
-
-	/* Add a term: only the condition's bytes change. */
-	*e = *d;
-	strcpy(e->cond.t[e->cond.n].a, "DIAG_EXTRA");
-	e->cond.t[e->cond.n].kind = KVT_DIAG;
-	e->cond.t[e->cond.n].n_str = 0;
-	e->cond.t[e->cond.n].cap = 0;
-	e->cond.t[e->cond.n].b[0] = 0;
-	e->cond.n++;
-	p = kof_dsrc_patch(vsrc, n, e, &pn);
-	CHECK(p != NULL, "patch with a new term failed");
-	if (p) {
-		CHECK(!memcmp(p, vsrc, d->cond.at) &&
-		      !memcmp(p + pn - (n - d->cond.end), vsrc + d->cond.end,
-			      n - d->cond.end),
-		      "adding a term touched what is around the condition");
-		CHECK(kof_dsrc_parse(p, pn, r, NULL) == 0 && r->cond.n == 4 &&
-		      !strcmp(r->cond.t[3].a, "DIAG_EXTRA"), "the new term did not read back");
-		free(p);
-	}
-
-	/* Remove the join. */
-	*e = *d;
-	e->cond.n = 2;
-	p = kof_dsrc_patch(vsrc, n, e, &pn);
-	CHECK(p && strstr(p, "kof_diag(DIAG_NET_RECVSYSCALL))") &&
-	      !strstr(p, "kof_diag_share"), "removing the join: %s", p ? p : "(null)");
-	free(p);
-
-	/* Change the format: one declaration line, in place. */
-	*e = *d;
-	for (i = 0; i < e->n; i++)
-		if (e->item[i].kind == KDS_FORMAT)
-			e->item[i].v = KOF_FMT_PE;
-	p = kof_dsrc_patch(vsrc, n, e, &pn);
-	CHECK(p && strstr(p, "KOF_TARGET_FORMAT(KOF_FMT_PE);\n"), "format not changed");
-	CHECK(p && strstr(p, "WHY: both, because one alone is a packer"), "prose lost");
-	free(p);
-
-	/* A string term is read, kept, and written the way it was. */
-	{
-		static const char sv[] =
-			"KOF_TARGET_FORMAT(KOF_FMT_ELF | KOF_FMT_UNKNOWN);\n"
-			"KOF_TARGET_NAME(KOF_MALTYPE_ROOTKIT, \"LKM\");\n"
-			"void kof_scan(const struct kof_obj_ctx *ctx)\n{\n"
-			"\tif (kof_diag(DIAG_A) &&\n"
-			"\t    kof_diag_str_any(DIAG_B, \"sys_call_table\",\n"
-			"\t\t\t     \"x64_sys_call\"))\n"
-			"\t\tKOF_SCAN_INFECT(KOF_MALVAR_GENERIC);\n}\n";
-		size_t sn = strlen(sv), qn = 0;
-		char *q;
-
-		memset(r, 0, sizeof *r);
-		CHECK(kof_dsrc_parse(sv, sn, r, NULL) == 0 && r->has_cond &&
-		      r->cond.n == 2 && r->cond.t[1].kind == KVT_STR_ANY &&
-		      r->cond.t[1].n_str == 2 &&
-		      !strcmp(r->cond.t[1].str[1], "x64_sys_call") &&
-		      !strcmp(r->cond.infect, "KOF_MALVAR_GENERIC"),
-		      "a string term was misread");
-		/* the set of formats is kept as written, though a number cannot say it */
-		q = kof_dsrc_patch(sv, sn, r, &qn);
-		CHECK(q && qn == sn && !memcmp(q, sv, sn), "no-op patch of a string verdict");
-		free(q);
-		r->cond.t[1].n_str = 1;
-		q = kof_dsrc_patch(sv, sn, r, &qn);
-		CHECK(q && strstr(q, "kof_diag_str_any(DIAG_B, \"sys_call_table\"))") &&
-		      strstr(q, "KOF_FMT_ELF | KOF_FMT_UNKNOWN"),
-		      "dropping a string: %s", q ? q : "(null)");
-		free(q);
-	}
-
-	/* A verdict written from nothing reads back as what was written. */
-	g = kof_dsrc_verdict_new(d, &gn);
-	CHECK(g != NULL, "no new verdict");
-	if (g) {
-		memset(r, 0, sizeof *r);
-		CHECK(kof_dsrc_parse(g, gn, r, NULL) == 0 && r->has_cond &&
-		      kof_dsrc_cond_same(&r->cond, &d->cond) &&
-		      kof_dsrc_verdict_check(r, NULL) == 0,
-		      "a generated verdict does not read back the same");
-		free(g);
-	}
-
-	/* What is not this shape is refused, not guessed at. */
-	for (k = 0; k < sizeof bad / sizeof bad[0]; k++) {
-		memset(r, 0, sizeof *r);
-		CHECK(kof_dsrc_parse(bad[k], strlen(bad[k]), r, NULL) > 0 && !r->has_cond,
-		      "verdict %u was accepted", k);
-	}
-	free(d);
-	free(e);
-	free(r);
-}
-
 static void tables(void)
 {
 	size_t i;
@@ -514,79 +357,9 @@ static void disease(void)
 	}
 }
 
-/*
- * THE LIMITS OF A VERDICT'S CONDITION, at exactly their size: KOF_DSRC_MAX_TERM terms are read and one more is
- * refused with a reason; a term of KOF_DSRC_MAX_STR strings is read and a ninth is refused; a string of
- * KOF_DSRC_STR_LEN - 1 bytes is read and one more is refused; a name of KOF_DSRC_NAME_LEN - 1 bytes is read.
- * A limit that refuses is stated, never a quiet cut: the parse fails and the source is not read at all.
- */
-static void cond_limits(void)
-{
-	static char csrc[8192];
-	struct kof_dsrc *d = calloc(1, sizeof *d);
-	unsigned nt, ns, at;
-	char big[KOF_DSRC_STR_LEN + 8u];
-
-	CHECK(d != NULL, "memory");
-	if (!d)
-		return;
-	for (nt = KOF_DSRC_MAX_TERM - 1u; nt <= KOF_DSRC_MAX_TERM + 1u; nt++) {
-		unsigned k;
-
-		at = (unsigned)snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (");
-		for (k = 0; k < nt; k++)
-			at += (unsigned)snprintf(csrc + at, sizeof csrc - at, "%skof_diag(DIAG_T%u)", k ? " && " : "", k);
-		snprintf(csrc + at, sizeof csrc - at, ")\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n");
-		memset(d, 0, sizeof *d);
-		if (nt <= KOF_DSRC_MAX_TERM)
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && d->has_cond && d->cond.n == nt,
-			      "%u terms are read (KOF_DSRC_MAX_TERM is %u): n=%u", nt, KOF_DSRC_MAX_TERM, d->cond.n);
-		else
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0 && !d->has_cond,
-			      "%u terms are refused, and the condition is not taken as read", nt);
-	}
-	for (ns = KOF_DSRC_MAX_STR - 1u; ns <= KOF_DSRC_MAX_STR + 1u; ns++) {
-		unsigned k;
-
-		at = (unsigned)snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag_str_any(DIAG_S");
-		for (k = 0; k < ns; k++)
-			at += (unsigned)snprintf(csrc + at, sizeof csrc - at, ", \"s%u\"", k);
-		snprintf(csrc + at, sizeof csrc - at, "))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n");
-		memset(d, 0, sizeof *d);
-		if (ns <= KOF_DSRC_MAX_STR)
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && d->has_cond && d->cond.t[0].n_str == ns,
-			      "%u strings are read (KOF_DSRC_MAX_STR is %u)", ns, KOF_DSRC_MAX_STR);
-		else
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0 && !d->has_cond, "%u strings are refused", ns);
-	}
-	for (ns = KOF_DSRC_STR_LEN - 1u; ns <= KOF_DSRC_STR_LEN; ns++) {
-		memset(big, 'x', ns);
-		big[ns] = 0;
-		snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag_str_any(DIAG_S, \"%s\"))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n", big);
-		memset(d, 0, sizeof *d);
-		if (ns < KOF_DSRC_STR_LEN)
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && strlen(d->cond.t[0].str[0]) == ns, "a string of %u bytes is read (KOF_DSRC_STR_LEN is %u)", ns, KOF_DSRC_STR_LEN);
-		else
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0, "a string of %u bytes is refused", ns);
-	}
-	for (ns = KOF_DSRC_NAME_LEN - 1u; ns <= KOF_DSRC_NAME_LEN; ns++) {
-		char nm[KOF_DSRC_NAME_LEN + 8u];
-
-		memset(nm, 'N', ns);
-		nm[ns] = 0;
-		snprintf(csrc, sizeof csrc, "void kof_scan(const struct kof_obj_ctx *c)\n{\n\tif (kof_diag(%s))\n\t\tKOF_SCAN_INFECT(KOF_MALVAR_AUTO);\n}\n", nm);
-		memset(d, 0, sizeof *d);
-		if (ns < KOF_DSRC_NAME_LEN)
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) == 0 && strlen(d->cond.t[0].a) == ns, "a name of %u bytes is read (KOF_DSRC_NAME_LEN is %u)", ns, KOF_DSRC_NAME_LEN);
-		else
-			CHECK(kof_dsrc_parse(csrc, strlen(csrc), d, NULL) != 0 && !d->has_cond, "a name of %u bytes is refused, not cut", ns);
-	}
-	free(d);
-}
-
 int main(void)
 {
-	static const char *const dirs[] = { "bases/diagnoses", "tests/sigs/diagnoses" };
+	static const char *const dirs[] = { "docs/disabled/diagnoses", "tests/sigs/diagnoses" };
 	unsigned k, files = 0;
 
 	tables();
@@ -594,8 +367,6 @@ int main(void)
 	mentions();
 	long_line();
 	edits();
-	verdicts();
-	cond_limits();
 	for (k = 0; k < sizeof dirs / sizeof dirs[0]; k++) {
 		DIR *dir = opendir(dirs[k]);
 		struct dirent *de;
@@ -617,42 +388,12 @@ int main(void)
 		closedir(dir);
 	}
 	CHECK(files >= 11u, "only %u diagnose sources found", files);
-	{
-		static const char *const vdirs[] = { "bases/signatures", "tests/sigs" };
-		unsigned vf = 0;
-
-		for (k = 0; k < sizeof vdirs / sizeof vdirs[0]; k++) {
-			DIR *dir = opendir(vdirs[k]);
-			struct dirent *de;
-
-			if (!dir)
-				continue;
-			while ((de = readdir(dir)) != NULL) {
-				size_t L = strlen(de->d_name), tn = 0;
-				char path[512], *t;
-
-				if (L < 3u || strcmp(de->d_name + L - 2u, ".c"))
-					continue;
-				snprintf(path, sizeof path, "%s/%s", vdirs[k], de->d_name);
-				t = slurp(path, &tn);
-				if (t && (strstr(t, "kof_diag(") || strstr(t, "kof_diag_share(") ||
-					  strstr(t, "kof_diag_str_"))) {
-					verdict_file(path);
-					vf++;
-				}
-				free(t);
-			}
-			closedir(dir);
-		}
-		CHECK(vf >= 5u, "only %u verdicts that read diagnoses found", vf);
-		files += vf;
-	}
 	if (fails) {
 		printf("diagsrc: %d failure(s)\n", fails);
 		return 1;
 	}
-	printf("diagsrc: %u shipped sources read, written back and printed, "
-	       "verdicts read and patched, edits touch only their own lines, comments are not read - ok\n",
+	printf("diagsrc: %u diagnose sources read, written back and printed, "
+	       "edits touch only their own lines, comments are not read - ok\n",
 	       files);
 	return 0;
 }

@@ -101,7 +101,7 @@ struct kof_scan_obj_diag {
 	uint8_t use_cut;
 	/*
 	 * DID ANYTHING ASK FOR THE DIAGNOSE ANALYSIS on this object - see
-	 * KOF_ENG_USE_DIAGNOSE. Per object and recomputed, like emu_stance: an
+	 * oc_diag_demand. Per object and recomputed, like emu_stance: an
 	 * ask that survived into the next object would be the leak the
 	 * declaration exists to prevent.
 	 */
@@ -197,6 +197,42 @@ struct kof_scan_obj_emu {
 };
 
 /*
+ * sc->obj.text
+ *
+ * the scan of ONE script's text, made once and shared by the three stages that read it
+ *
+ * The symbol block (the names), the constants stage (oc_script_consts) and the diagnose stage (oc_diag_scan_text) all walk the object's text with the
+ * TEXT route: one walk gives all three, so the first stage to ask makes it - telling the names and, at heuristic level 2, collecting the constants - and keeps
+ * it here for the others; the diagnose stage takes the graph. What identifies the text is the buffer the
+ * object is scanned from (the pointer, the length and the language): another buffer, or an object that is not the one this was made for, is not
+ * this scan's text and gets a scan of its own. Per object; freed by sx_obj_begin and kof_scan_free (kof_scan_text_drop), and what it holds is
+ * charged to this scanner's ceiling for as long as it is held.
+ *
+ * Owner: objctx_textscan.c. Files that touch it: objctx_script_consts.c (holds), objctx_diag_text.c (takes), scan.c (drops).
+ */
+struct oc_consts;
+
+struct kof_scan_obj_text {
+	const uint8_t *base;
+	uint64_t       n;
+	uint32_t       lang;
+	struct kgenome_diag_scan *s;
+	uint64_t       charged;
+	/* the heuristic level asks for the constants of a script (set at object begin), so the scan that makes the names collects them too */
+	uint8_t        deep;
+	/* a bound of the constant evaluator fired during the scan (kgenome_diag_scan_eval_cut != 0): said by the stage that reads the constants (oc_script_consts) */
+	uint8_t        eval_cut;
+	/* the names the scan told, distinct, as the table spells them (static strings), in the order told; `names_lost` when memory was refused for the list */
+	const char   **name;
+	uint32_t       n_name, cap_name;
+	uint8_t        names_lost;
+	/* what the evaluator reported as constants, when the scan was asked for them */
+	struct oc_consts *consts;
+	/* how many scans of the text were made for this object (one is the aim; a stage that finds the scan not what it needs makes its own: tests/unit/text_scan_hold.c reads it) */
+	uint8_t        made;
+};
+
+/*
  * sc->obj.open
  *
  * how ONE object came to exist, and whether it ran out of room
@@ -274,23 +310,6 @@ struct kof_scan_obj_open {
 	 */
 	int superseded;
 	/*
-	 * WHICH OF THIS OBJECT'S FINDINGS SURVIVE IT OPENING.
-	 *
-	 * One bit per slot in kof_result.v, set when a heuristic rule that
-	 * declared KOF_ENG_KEEP_ON_OPEN appended one. Read once, by the drop
-	 * beside the n_kids test in scan_one.
-	 *
-	 * A mask and not a flag on the finding: struct kof_finding is the
-	 * public result ABI, every host copies it by value, and this is a fact
-	 * about how the scan reached the finding rather than about the finding
-	 * - no reader of a result would ever have a use for it.
-	 *
-	 * KOF_MAX_FINDINGS is 16, so a uint32 covers every slot with room to
-	 * spare; a finding past the cap is counted and never stored, so there
-	 * is no bit for it to need.
-	 */
-	uint32_t heur_keep;
-	/*
 	 * Did a packer open THIS object.
 	 *
 	 * The fact belongs to the file that was packed, not to what came out of
@@ -340,9 +359,9 @@ struct kof_scan_obj {
 	uint8_t latch[KOF_OL_COUNT];
 	/* See enum kof_prodkind: how many times each product was made for this object. */
 	uint8_t prod_runs[KOF_PROD_COUNT];
-	uint32_t n_dis_set;
 	struct kof_scan_obj_sym sym;
 	struct kof_scan_obj_diag diag;
+	struct kof_scan_obj_text text;
 	struct kof_scan_obj_emu emu;
 	struct kof_scan_obj_open open;
 };
@@ -351,202 +370,20 @@ struct kof_scan_obj {
  * sc->mod: struct kof_scan_mod
  *
  * PER MODULE, written while a module runs and wiped by sx_mod_begin (scan.c)
- * before the next one. The counts and flags are reset by hand there and not by
- * a memset: three of these are arrays (cure_fix, mutation_blk, infect) whose
- * bytes do not need clearing and whose clearing would be paid for every module
- * of every object.
+ * before the next one. A module reports nothing that names the object, so what is
+ * left is where it said damage is and which module is running.
  *
- * Owner: the report/repair half in objctx.c (what a module says through the
- * ABI), the verdict half in scan_verdict.c (what the finding is named after).
- * Files that touch it: objctx.c, scan.c, scan_verdict.c, objctx_child.c,
- * scan_pipeline.c, scan_heur.c, scan_unpack.c, objctx_diag.c, objctx_emu.c.
+ * Owner: objctx.c (what a module says through the ABI), scan.c (clears it).
+ * Files that touch it: objctx.c, scan.c, objctx_child.c, scan_pipeline.c,
+ * scan_unpack.c, objctx_diag.c, objctx_emu.c.
  */
 struct kof_scan_mod {
-	/*
-	 * WHETHER A SIMILARITY MEASURE ANSWERED, and with what.
-	 *
-	 * The same pair of facts mutation_asked and mutation_hit are, for the
-	 * measures that carry a reference in the module's own rodata rather
-	 * than a declared block - kof_mutation_blocks. A verdict reached through
-	 * one of those is named for it, exactly as a mutation verdict is, so a reader
-	 * of the name knows what recognised the object.
-	 *
-	 * The HIGHEST answer, not the last: a rule may ask twice, and what
-	 * the reader wants is the measurement the verdict could have rested
-	 * on. -1 until something asks.
-	 */
-	/*
-	 * A MODULE OFFERED TO REPAIR THIS OBJECT, and where it says the
-	 * damage starts - see kof_content.cure_offer.
-	 *
-	 * Recorded and not acted on here: what a scan does with an offer is
-	 * the caller's, and a scan that repaired files because it could would
-	 * be a scan nobody could run twice.
-	 */
-	int cure_have;
-	uint64_t cure_at;
-	/*
-	 * AND WHAT THE CURE ASKED FOR, collected and not applied.
-	 *
-	 * A repair rewrites somebody's binary; a scan that did that because
-	 * it could would be a scan nobody could run twice. So the requests
-	 * are gathered here and the caller decides - see kof_content's
-	 * cure_patch and cure_truncate.
-	 *
-	 * SIXTY-FOUR, and eight was the first guess. Putting an entry point
-	 * back is one patch of four, which is what eight was sized for - but
-	 * a repair that cuts a run out of an ELF then has to move every
-	 * section and segment offset that pointed past the cut, and there are
-	 * twenty-six sections in the sample this was measured on. A cap below
-	 * what the format needs is a cap that makes correct repairs
-	 * impossible to express.
-	 */
-	struct {
-		uint64_t off;
-		uint32_t n;
-		uint8_t  b[16];
-	}                    cure_fix[64];
-	uint32_t n_cure_fix;
-	uint64_t cure_trunc;
-	int cure_trunc_set;
 	/* Where a module said the infection is - see struct kof_infected. */
 	struct kof_infected infect[KOF_MAX_INFECTED];
 	uint32_t n_infect;
-	/*
-	 * THE HIGHEST MUTATION SCORE THE MODULE BEING RUN HAS ASKED ABOUT.
-	 *
-	 * A similarity verdict is a MEASUREMENT, and the name it is reported
-	 * under should carry it: "Botnet:Mirai#83!Mutation" says how alike the
-	 * sample was, which is the one thing a reader of such a verdict needs
-	 * and the one thing a hand-written variant cannot know. Recorded where
-	 * it is produced - see c_mutation_score - because nothing downstream can
-	 * work out afterwards which block a rule looked at, or whether it
-	 * looked at one at all.
-	 *
-	 * Reset per module, not per object: two rules on one object are two
-	 * verdicts, each naming what IT measured. -1 is "this module has not
-	 * asked", which is what keeps every other rule's name untouched.
-	 */
-	int mutation_asked;
-	/*
-	 * AND WHICH BLOCKS THOSE WERE - ALL OF THEM, not the best one.
-	 *
-	 * Two rules of one family reported the same thing - the family and a
-	 * percentage - so a reader could not tell which of them fired or which
-	 * block did it. The block's name is the fold of its hashes, which is
-	 * exactly what the source writes after blk_, so a verdict can be taken
-	 * back to the line that produced it.
-	 *
-	 * A CONDITION MAY NAME SEVERAL. "block A and block B" is one verdict
-	 * about the pair: naming it after whichever scored highest described a
-	 * part of the rule and left the other part unmentioned, and two rules
-	 * sharing that one block reported the same name. So every block the
-	 * module asked about is kept, and the verdict is named after the SET -
-	 * see kof_mutation_name_of, which sorts them so the order a C expression
-	 * evaluated them in cannot change the answer.
-	 *
-	 * The score is the set's too: `hit` and `tot` are matched hashes and
-	 * declared hashes summed over these blocks, so the percentage says how
-	 * much of what the rule is made of is in this object. A block asked
-	 * about twice is counted once - see c_mutation_score.
-	 */
-	uint32_t mutation_blk[KOF_MUTATION_NAME_MAX];
-	uint32_t n_mutation_blk;
-	uint32_t mutation_hit;
-	uint32_t mutation_tot;
-	/*
-	 * AND WHETHER A DECLARED STRING OF THIS MODULE WAS FOUND, which is
-	 * what says the mutation residue is not the explanation.
-	 *
-	 * mutation_asked plus mutation_hit answer "was a block asked about, and
-	 * did it find anything". They do not answer "is that what recognised
-	 * the object", and the name claims exactly that - see the contract on
-	 * the similarity fields below: a reader of the name knows what
-	 * recognised it.
-	 *
-	 * A RULE HAS SEVERAL MATCHERS AND THEY ARE NOT ONE EXPRESSION:
-	 *
-	 *     if (kof_find_str_multi(code, s0..s6) >= 2 ||
-	 *         kof_mutation_score(blk) >= 70u)   KOF_SCAN_INFECT(...);
-	 *     if (kof_find_str_any(sym_exp, s7..s13))  KOF_SCAN_INFECT(...);
-	 *
-	 * `||` short-circuits when its LEFT side is true, so a string that
-	 * carries the first matcher keeps kof_mutation_score from ever running
-	 * and mutation_asked stays -1. What it does not cover is the first
-	 * matcher failing BOTH ways and the SECOND one firing: the block was
-	 * scored, found 17 per cent of itself - far under the 70 the rule
-	 * wanted, and under any threshold a rule would use - and a Gafgyt
-	 * sample recognised by an exported symbol came back named
-	 * "#51f88b7c!Mutation?17". The number was real and the sentence it
-	 * formed was false.
-	 *
-	 * SO: a string of this module matched, and the name belongs to the
-	 * string. It costs a combined rule nothing that it had - all three
-	 * mixed rules shipped are `string || mutation`, where a matching string
-	 * means the mutation call never happened.
-	 *
-	 * Reset per module beside the mutation fields and for the same reason.
-	 */
-	int str_hit;
-	/*
-	 * THIS MODULE READ THE NODE GRAPH - see KOF_ENGINE_DIAGNOSE.
-	 *
-	 * Beside str_hit and reset with it, because it answers the same
-	 * question about the same scope: what did THIS module use to reach
-	 * its finding. The verdict's method word is that answer, and a
-	 * finding reached through kof_diag printed as !Pattern sends a
-	 * reader looking for bytes that were never matched.
-	 *
-	 * PER MODULE AND NOT PER OBJECT. Kept beside ovl_asked at first,
-	 * which is per object - so one rule reading the graph relabelled
-	 * another rule's byte match on the same file.
-	 */
-	int diag_read;
-	/*
-	 * AND THE BEST ANY ONE OF THEM SCORED, which is what the verdict
-	 * reports.
-	 *
-	 * `hit` and `tot` summed over the set answer "how much of A and B is
-	 * here", and that is the rule's question only when the rule demanded
-	 * both. A rule that accepts EITHER asks about both blocks all the same
-	 * - two conditions written as separate statements do not short-circuit,
-	 * and even one `||` evaluates its right side whenever its left is false
-	 * - so the sum described a pair the rule had never required together.
-	 *
-	 * Measured on
-	 * HEUR-Backdoor.Linux.Mirai.b-020fd6b946c52e68ea21a1533d6ed5f9f3b50fc1d19eef0c1fd6e8c18802505b:
-	 * 26 of one block's 30 hashes and 26 of another's 128, over a rule
-	 * demanding 80 of either. It reported "Mutation?32" - a number belonging
-	 * to neither block, and below the threshold the branch that fired had
-	 * just cleared.
-	 *
-	 * WHICH OPERATOR IT WAS CANNOT BE SEEN FROM HERE. It lives in the
-	 * module's compiled condition and all that reaches the engine is the
-	 * call. So the number reported is the best single block's containment,
-	 * which is the one statement that is true either way: for "either of
-	 * these" it is the block that carried the verdict, and for "both of
-	 * these" it is the strongest part of a rule whose every part cleared
-	 * its own threshold. It is never a figure no block has and never below
-	 * what the rule demanded.
-	 *
-	 * THE NAME IS STILL THE SET'S - see kof_mutation_name_of. What a rule is
-	 * made of and how much of it is here are two different questions, and
-	 * naming after the best block alone made two rules sharing that block
-	 * report the same thing.
-	 */
-	uint32_t mutation_best;
 	/* Set while a module runs: find_str is called from inside one, and the ids it
 	 * passes are module local, so the host has to know whose they are. */
 	const struct kof_module *cur;
-	/* What the running module reported. A module cannot hold state, so a finding
-	 * has to land here. */
-	uint32_t rep_level, rep_name_id;
-	int rep_valid;
-	/* The last reason the running module recorded for an object it could not
-	 * finish (KOF_BROKEN_*), 0 for none. An unpacker that names a packer it
-	 * cannot open reports and records in either order, and the finding has
-	 * to say WHY - see finding_str. Cleared with the report by mod_begin. */
-	uint32_t rep_reason;
 };
 
 #endif

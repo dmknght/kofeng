@@ -82,15 +82,12 @@ static void module_reset(struct ksb_ctx *ksb)
 	ksb->decl.n_targets = ksb->decl.any_target = 0;
 	memset(ksb->decl.target, 0, sizeof ksb->decl.target);
 	ksb->decl.size_min = 0;
-	ksb->decl.step = ksb->decl.heur_phase = ksb->decl.heur_level = ksb->decl.heur_want = 0;
+	ksb->decl.step = 0;
 	ksb->decl.n_targets = 0;
-	ksb->decl.heur_name[0] = ksb->decl.heur_predict[0] = ksb->decl.content[0] = 0;
+	ksb->decl.content[0] = 0;
 	ksb->decl.family[0] = 0;
 	ksb->decl.maltype = 0;
 	ksb->decl.have_name = 0;
-	ksb->decl.dis_name[0] = 0;
-	ksb->decl.dis_type = 0;
-	ksb->decl.have_dis = 0;
 	ksb->decl.scan_mask_out = 0;
 	ksb->decl.nstr_out = 0;
 	ksb->decl.src_text = NULL;
@@ -105,7 +102,7 @@ static void module_reset(struct ksb_ctx *ksb)
  *     virus_sality_01.c      <type>_<family>_<id>.c, all lower case
  *
  * and it is a CROSS-CHECK, not a second place to declare things. The family
- * a verdict prints still comes from KOF_TARGET_NAME in the source, where an
+ * a module is known by still comes from KOF_TARGET_NAME in the source, where an
  * author can spell it the way it should read; a file name cannot, because
  * file names here are lower case and no rule about case tells an acronym
  * from a word - deriving the family turned "RST" into "Rst".
@@ -120,8 +117,7 @@ static void module_reset(struct ksb_ctx *ksb)
  * So the name must AGREE with the source rather than replace it: the type in
  * front is checked against the declared one, and a signature filed under
  * virus_ that declares itself a trojan fails the build instead of sitting in
- * the wrong group for ever. The id at the end is what makes two signatures
- * over one sample distinct without anyone choosing a number by hand.
+ * the wrong group for ever.
  *
  * The old form carries nothing and is accepted while the tree is moved over.
  * Retiring it is deleting `legacy_ok` and the one test that reads it.
@@ -129,34 +125,11 @@ static void module_reset(struct ksb_ctx *ksb)
 static void nameform_read(struct ksb_ctx *ksb, const char *base)
 {
 	char word[32];
-	const char *u1, *u2, *p, *d;
+	const char *u1, *u2, *p;
 	size_t n;
 	int type_idx;
 
 	ksb->decl.name_type = -1;
-	ksb->decl.name_id[0] = 0;
-
-	/*
-	 * THE ID IS THE TRAILING NUMBER, AND EVERY NAME ALREADY HAS ONE.
-	 *
-	 * Both forms end in _<digits>.c - rst_01.c as much as
-	 * virus_sality_01.c - so the id does not wait on the rename. Tying
-	 * it to the new form was a mistake that would have held the variant
-	 * change hostage to a hundred and forty-one files being moved.
-	 */
-	d = strrchr(base, '_');
-	if (d) {
-		for (p = d + 1; *p && *p != '.'; p++)
-			if (*p < '0' || *p > '9')
-				break;
-		if (*p == '.' && p > d + 1 && !strcmp(p, ".c")) {
-			n = (size_t)(p - d - 1);
-			if (n < sizeof ksb->decl.name_id) {
-				memcpy(ksb->decl.name_id, d + 1, n);
-				ksb->decl.name_id[n] = 0;
-			}
-		}
-	}
 
 	u1 = strchr(base, '_');
 	if (!u1)
@@ -341,20 +314,9 @@ static int module_write_meta(struct ksb_ctx *ksb, struct module_paths *m,
 	fprintf(f, "arch_mask=%u\n", ksb->decl.arch_mask);
 	fprintf(f, "subtype_mask=%u\n", ksb->decl.subtype_mask);
 	fprintf(f, "step=%d\n", ksb->decl.step);
-	fprintf(f, "heur_phase=%d\n", ksb->decl.heur_phase);
-	fprintf(f, "heur_want=%d\n", ksb->decl.heur_want);
-	fprintf(f, "heur_level=%d\n", ksb->decl.heur_level);
-	fprintf(f, "cure_off=%llu\n", (unsigned long long)ksb->kept.cure);
-	fprintf(f, "heur_predict=%s\n", ksb->decl.heur_predict);
 	fprintf(f, "content=%s\n", ksb->decl.content);
-	/* A heuristic rule has no family; its word goes in the same slot, and
-	 * the engine writes "Heur" where a maltype would be. */
-	fprintf(f, "family=%s\n", kind == 2 ? ksb->decl.heur_name
-					    : (ksb->decl.have_name ? ksb->decl.family : ""));
-	fprintf(f, "maltype=%d\n", kind == 2 ? 0
-					     : (ksb->decl.have_name ? ksb->decl.maltype : 0));
-	fprintf(f, "disease=%s\n", ksb->decl.have_dis ? ksb->decl.dis_name : "");
-	fprintf(f, "disease_type=%d\n", ksb->decl.have_dis ? ksb->decl.dis_type : 0);
+	fprintf(f, "family=%s\n", ksb->decl.have_name ? ksb->decl.family : "");
+	fprintf(f, "maltype=%d\n", ksb->decl.have_name ? ksb->decl.maltype : 0);
 	fprintf(f, "nstr=%d\n", ksb->decl.nstr_out);
 	fprintf(f, "blob_len=%ld\n", blob_len);
 	fprintf(f, "kind=%d\n", kind);
@@ -440,12 +402,7 @@ int ksb_module_main(struct ksb_ctx *ksb, int argc, char **argv)
 	if (!ksb_do_build(ksb, src, m.pat, m.obj, m.img, m.raw, lds, &entry))
 		return 1;
 
-	if (!strcmp(entry, "kof_heur"))
-		kind = 2;
-	else if (!strcmp(entry, "kof_unpack"))
-		kind = 1;
-	else
-		kind = 0;
+	kind = !strcmp(entry, "kof_unpack") ? 1 : 0;
 	if (!ksb_kind_checks(ksb, kind))
 		return 1;
 
@@ -459,7 +416,7 @@ int ksb_module_main(struct ksb_ctx *ksb, int argc, char **argv)
 
 	printf("== ok  %s  %ld bytes  kind=%s  strs=%d  target=%s scan=0x%lx\n",
 	       m.blob, blob_len,
-	       kind == 2 ? "heur" : kind == 1 ? "unpack" : "detect",
+	       kind == 1 ? "unpack" : "detect",
 	       ksb->decl.nstr_out, ksb->decl.any_target ? "any" : m.target_line,
 	       ksb->decl.scan_mask_out);
 	return 0;

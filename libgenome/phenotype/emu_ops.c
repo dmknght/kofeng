@@ -747,26 +747,56 @@ int kgenome_emu_run_sys(struct kgenome_emu *e, struct kgenome_emu_insn *ixp)
 	 */
 	case KGENOME_X86_I_INT: {
 		int s = 0;
-		uint64_t ret;
+		uint64_t ret, at;
 		unsigned was = e->bits;
 
+		/*
+		 * INT 0x29 IS __fastfail: the C runtime's last word after a failed check (a corrupt cookie, a
+		 * pure-virtual call, an invalid parameter). On Windows it ends the process whatever handlers there
+		 * are - STATUS_STACK_BUFFER_OVERRUN is not delivered to them - so it ends the run like ExitProcess,
+		 * and does not read as an instruction this build lacks. Only for a guest that has the Windows model.
+		 */
+		if (ixp->op[0].type == KGENOME_X86_OP_IMM && (uint64_t)ixp->op[0].v == 0x29 && e->win_k32_base) {
+			e->stop = KGENOME_EMU_STOP_EXIT;
+			snprintf(e->detail, sizeof e->detail, "fast fail (int 0x29)");
+			goto done;
+		}
 		if (ixp->op[0].type != KGENOME_X86_OP_IMM ||
 		    (uint64_t)ixp->op[0].v != 0x80)
 			goto unsupported;
 		/* int 0x80 is the i386 convention whatever the mode. */
 		e->bits = 32;
+		at = e->rip;
 		ret = kgenome_emu_do_syscall(e, &s);
 		e->bits = was;
 		if (s) { e->stop = (enum kgenome_emu_stop)(s - 1); goto done; }
+		if (e->rip != at)
+			return KGENOME_EMU_RUN_REDIRECT;
 		e->gpr[KGENOME_EMU_RAX] = ret;
 		break;
 	}
 
+	case KGENOME_X86_I_IN: case KGENOME_X86_I_OUT: case KGENOME_X86_I_CLI: case KGENOME_X86_I_STI:
+		kgenome_emu_fault_priv(e);
+		return KGENOME_EMU_RUN_FAULT;
+
 	case KGENOME_X86_I_SYSCALL: {
 		int s = 0;
+		const uint64_t at = e->rip;
 		uint64_t ret = kgenome_emu_do_syscall(e, &s);
 
 		if (s) { e->stop = (enum kgenome_emu_stop)(s - 1); goto done; }
+		/*
+		 * A SYSTEM CALL THAT STARTED A GUEST HANDLER HAS MOVED rip ITSELF
+		 * (RaiseException is dispatched to the vectored handlers: the machine
+		 * is set to run them, with the return address that ends them in the
+		 * stack). Stepping to the next instruction as every other call does
+		 * walked past the handler, into the stub's own `ret`, which popped the
+		 * handler's return address and reported a handler that had never run
+		 * as one that declined.
+		 */
+		if (e->rip != at)
+			return KGENOME_EMU_RUN_REDIRECT;
 		e->gpr[KGENOME_EMU_RAX] = ret;
 		break;
 	}

@@ -45,6 +45,7 @@
 #include <unistd.h>
 #endif
 
+#include <kofcore.h>             /* kof_hex_digit: the one writer table for a hex digit */
 #include <kofhash.h>
 
 /*
@@ -206,7 +207,6 @@ void khash_sha256_final(struct kof_sha256 *s, uint8_t out[32])
 
 void khash_sha256_hex(const uint8_t digest[32], char out[65])
 {
-	static const char hex[] = "0123456789abcdef";
 	unsigned i;
 
 	/*
@@ -217,8 +217,8 @@ void khash_sha256_hex(const uint8_t digest[32], char out[65])
 	 * on a text search - which is how anybody actually looks one up.
 	 */
 	for (i = 0; i < 32u; i++) {
-		out[2u * i]      = hex[digest[i] >> 4];
-		out[2u * i + 1u] = hex[digest[i] & 15u];
+		out[2u * i]      = (char)kof_hex_digit(digest[i] >> 4, 0);
+		out[2u * i + 1u] = (char)kof_hex_digit(digest[i] & 15u, 0);
 	}
 	out[64] = '\0';
 }

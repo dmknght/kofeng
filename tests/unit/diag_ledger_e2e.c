@@ -11,7 +11,7 @@
  * (kof_scan_incomplete) and gives the bytes back when the object is finished
  * (kof_scan_diag_drop). Those are read here the only way a caller can: through
  * kscan_bytes, with kof_scan_option.max_resident_bytes as the ceiling, and from
- * the result - `broken`, the syndrome's `incomplete`, the verdict - and the scan's
+ * the result - `broken`, the verdict's `verdict_incomplete`, the verdict - and the scan's
  * peak_resident.
  *
  * THE FIXTURE is an x86-64 ELF of `k` unrelated reads and then the rwx_exec
@@ -21,7 +21,7 @@
  * pin the size of a graph node.
  *
  *   ceiling below that        the object is not "clean": broken is
- *                             KOF_BROKEN_LIMIT, the syndrome says incomplete and
+ *                             KOF_BROKEN_LIMIT, the verdict says incomplete and
  *                             there is no verdict (a 'no' from a scan that was
  *                             refused its memory is not evidence)
  *   the ceiling itself        finishes whole, verdict Dropper, nothing said
@@ -66,6 +66,7 @@ struct one {
 	int      done;          /* the scan produced an object                        */
 	int      whole;         /* verdict Dropper, not broken, not incomplete        */
 	int      cut;           /* broken == LIMIT, incomplete, no verdict            */
+	int      said;          /* not whole, and says why: incomplete - a verdict a finished graph found may stand */
 	uint64_t peak;
 };
 
@@ -78,7 +79,6 @@ static struct one scan_on(kof_scanner *sc, uint64_t len, uint64_t ceiling)
 
 	memset(&r, 0, sizeof r);
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 64u << 20;
 	opt.max_resident_bytes = ceiling;
 	opt.max_object_bytes = 64u << 20;
@@ -87,9 +87,10 @@ static struct one scan_on(kof_scanner *sc, uint64_t len, uint64_t ceiling)
 	o.done = r.n > 0;
 	if (o.done) {
 		o.whole = e2e_verdict_is(&r.o[0], "Dropper") && r.o[0].broken == 0 &&
-			  !r.o[0].syn.incomplete;
-		o.cut = r.o[0].broken == KOF_BROKEN_LIMIT && r.o[0].syn.incomplete &&
+			  !r.o[0].vf_incomplete;
+		o.cut = r.o[0].broken == KOF_BROKEN_LIMIT && r.o[0].vf_incomplete &&
 			!e2e_verdict_is(&r.o[0], "Dropper");
+		o.said = !o.whole && r.o[0].vf_incomplete;
 	}
 	o.peak = kscan_stats(sc)->peak_resident;
 	return o;
@@ -235,10 +236,12 @@ static void ledger(void)
 	/* the graph is a real charge: not a few bytes */
 	CK(tight > 4096u * 8u);
 
-	/* below it: said, never clean */
+	/* below it: said, never clean. A little below, the nodes may all be there and only the lineage stages short of
+	 * room (an optional product, skipped with a status): the verdict the finished graph found stands and the
+	 * object says it is incomplete; far below, the graph itself is cut and there is no verdict. */
 	sc = kscan_new(e2e_eng);
 	o = scan_on(sc, len, tight - 256u);
-	CK(o.done && o.cut);
+	CK(o.done && o.said);
 	kscan_free(sc);
 	sc = kscan_new(e2e_eng);
 	o = scan_on(sc, len, 1024u);
@@ -255,7 +258,7 @@ static void ledger(void)
 	/* and a refusal on a scanner does not poison the next object: the cut
 	 * scan above charged nothing it did not give back */
 	o = scan_on(sc, len, tight - 256u);
-	CK(o.done && o.cut);
+	CK(o.done && o.said);
 	o = scan_on(sc, len, tight);
 	CK(o.done && o.whole);
 	kscan_free(sc);

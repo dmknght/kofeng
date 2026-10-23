@@ -54,6 +54,8 @@ static void emit(struct kof_scanner *sc, const struct kof_diag *d, const char *g
 		n += snprintf(routes + n, sizeof routes - (size_t)n, "%ssymbol", n ? "," : "");
 	if (d->analysis & KOF_DIAG_ANALYSIS_APIHASH)
 		n += snprintf(routes + n, sizeof routes - (size_t)n, "%sapihash", n ? "," : "");
+	if (d->analysis & KOF_DIAG_ANALYSIS_TEXT)
+		n += snprintf(routes + n, sizeof routes - (size_t)n, "%stext", n ? "," : "");
 	if (d->analysis & KOF_DIAG_USES_EMU)
 		n += snprintf(routes + n, sizeof routes - (size_t)n, "%semu", n ? "," : "");
 	if (!n)
@@ -94,7 +96,7 @@ static void line_of(struct kof_scanner *sc, uint32_t i, int ran)
 /*
  * THE ANALYSIS RAN FOR THIS OBJECT: one line per diagnose something reads (or every
  * diagnose, when the caller asked for the report), once per object. Called after every
- * site that can have run it - a rule's question, the verdict stage, the syndrome.
+ * site that can have run it - a rule's question, the verdict stage.
  */
 void oc_diag_trace_scan(struct kof_scanner *sc)
 {

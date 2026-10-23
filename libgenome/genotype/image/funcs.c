@@ -85,10 +85,38 @@ void kgenome_funcs_free(struct kgenome_func_set *s)
 	memset(s, 0, sizeof *s);
 }
 
-/* The first place `len` bytes at `pat` occur in [from, from + span) of `view`. */
+/* How many bytes of `a` and `b` agree from the start, up to `len`: what one candidate costs. */
+static uint64_t common_len(const uint8_t *a, const uint8_t *b, uint64_t len)
+{
+	uint64_t i = 0;
+
+	while (i + 8u <= len) {
+		uint64_t x, y;
+
+		memcpy(&x, a + i, 8);
+		memcpy(&y, b + i, 8);
+		if (x != y)
+			break;
+		i += 8u;
+	}
+	while (i < len && a[i] == b[i])
+		i++;
+	return i;
+}
+
+/*
+ * The first place `len` bytes at `pat` occur in [from, from + span) of `view`: 1 found (`*at`), 0 not
+ * there, -1 the work ran out.
+ *
+ * THE COST OF A SEARCH IS ITS COMPARES, NOT ONLY THE BYTES IT WALKS. memchr finds every place the first
+ * byte occurs and each of those is compared against the body, so a body that begins with the byte a view
+ * is full of (a zero) costs window x length: 1 MB x 64 KB took 1.06 s and 4 MB x 64 KB 4.69 s while the
+ * bound, which counted the window alone, was nowhere near. `*work` is the caller's allowance; a candidate
+ * that fails is charged the bytes it compared and the byte that differed (norm_defect_image N2).
+ */
 static int find_bytes(const uint8_t *view, uint64_t view_n, uint64_t from,
 		      uint64_t span, const uint8_t *pat, uint64_t len,
-		      uint64_t *at)
+		      uint64_t *at, uint64_t *work)
 {
 	uint64_t end, i;
 
@@ -99,14 +127,22 @@ static int find_bytes(const uint8_t *view, uint64_t view_n, uint64_t from,
 		end = view_n - len + 1u;
 	for (i = from; i < end; i++) {
 		const uint8_t *q = memchr(view + i, pat[0], (size_t)(end - i));
+		uint64_t c, cost;
 
 		if (!q)
 			return 0;
 		i = (uint64_t)(q - view);
-		if (!memcmp(q, pat, (size_t)len)) {
+		c = common_len(q, pat, len);
+		if (c == len) {
 			*at = i;
 			return 1;
 		}
+		cost = c + 1u;
+		if (cost > *work) {
+			*work = 0;
+			return -1;
+		}
+		*work -= cost;
 	}
 	return 0;
 }
@@ -120,8 +156,8 @@ static int find_bytes(const uint8_t *view, uint64_t view_n, uint64_t from,
  * function that is not within its window is not in the view: it was cut, which is an answer.
  *
  * The cost is bounded by the view: a function that is not there is searched for over its whole
- * window, and a run of them makes the windows grow, so the bytes searched in all are held to
- * REMAP_WORK per byte of the view. The set says KGENOME_OVER_BUDGET when that ran out.
+ * window, and a run of them makes the windows grow, so the bytes searched AND the bytes compared in
+ * all are held to REMAP_WORK per byte of the view. The set says KGENOME_OVER_BUDGET when that ran out.
  */
 #define REMAP_WORK 64u
 
@@ -154,6 +190,7 @@ static void funcs_remap(const uint8_t *par, uint64_t par_n,
 	for (i = 0; i < pf->n; i++) {
 		const struct kgenome_func *f = &pf->v[i];
 		uint64_t at, window;
+		int found;
 
 		if (f->off >= par_n || f->len > par_n - f->off)
 			continue;
@@ -185,7 +222,12 @@ static void funcs_remap(const uint8_t *par, uint64_t par_n,
 				kgenome_endian_range(pat, par, par_n, f->off, f->len, plan);
 				want = pat;
 			}
-			if (!find_bytes(view, view_n, cursor, window, want, f->len, &at))
+			found = find_bytes(view, view_n, cursor, window, want, f->len, &at, &work);
+			if (found < 0) {
+				st = KGENOME_OVER_BUDGET;       /* the compares ran out of allowance: said, not dropped */
+				break;
+			}
+			if (!found)
 				continue;
 		}
 		v[n] = *f;

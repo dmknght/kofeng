@@ -10,9 +10,9 @@
  *   2. Identities are compared IN FULL. Two keys that differ in one byte -
  *      including the last one, and including their length - are two keys, even
  *      when they are forced into the same slot.
- *   3. The worst finding is what is kept, by the engine's own ranking, so a
- *      cached answer does not depend on which module happened to be first in
- *      the database.
+ *   3. The verdict is what is kept - the engine's, not a choice among the
+ *      findings - so a cached answer does not depend on which module happened
+ *      to be first in the database.
  *   4. Over-long identities are refused rather than truncated. Truncating is
  *      how two different things become one.
  *   5. Eviction stays bounded and never invents an entry: after storing far
@@ -30,10 +30,10 @@
  * The engine header, which koffridge.h deliberately no longer drags in: it
  * forward-declares struct kof_result so the Windows collector need not compile
  * the whole engine ABI - see the note at the top of that header. A test that
- * BUILDS a verdict needs the real type and the KOF_LEVEL_* values, so it asks
- * for them itself.
+ * BUILDS a verdict needs the real type, so it asks for it itself.
  */
 #include "../../libkofeng/kofeng.h"
+#include "../../libkofeng/kofcore/kofmod/kofverdict.h"
 #include "../../libkoforbit/fridge/koffridge.h"
 #include "../../libkoforbit/fridge/fidset.h"
 
@@ -44,19 +44,6 @@ static void ck(int cond, const char *what)
 	if (!cond) {
 		printf("  FAIL: %s\n", what);
 		fails++;
-	}
-}
-
-static void result_with(struct kof_result *r, uint32_t n,
-			const uint32_t *levels, const char *const *names)
-{
-	uint32_t i;
-
-	memset(r, 0, sizeof *r);
-	r->n = n;
-	for (i = 0; i < n; i++) {
-		r->v[i].level = levels[i];
-		snprintf(r->v[i].name, sizeof r->v[i].name, "%s", names[i]);
 	}
 }
 
@@ -106,9 +93,8 @@ static void *ham_run(void *arg)
 
 			ham_name(want, sizeof want, h->id, k);
 			memset(&res, 0, sizeof res);
-			res.n = 1;
-			res.v[0].level = KOF_LEVEL_INFECT;
-			snprintf(res.v[0].name, sizeof res.v[0].name, "%s",
+			res.has_verdict = 1;
+			snprintf(res.verdict.name, sizeof res.verdict.name, "%s",
 				 want);
 			(void)koffridge_put(h->f, &key, sizeof key, &res);
 
@@ -573,22 +559,23 @@ int main(void)
 		ck(!koffridge_get(f, k, 7, &v), "same prefix, shorter, misses");
 	}
 
-	/* 3. the worst finding is the one kept */
+	/* 3. the verdict is the one kept */
 	{
-		static const uint32_t lv[3] = { KOF_LEVEL_HEUR,
-						KOF_LEVEL_INFECT,
-						KOF_LEVEL_SUSPECT };
-		static const char *const nm[3] = { "PE-x86/Heur:Blob#a?Shell",
-						   "PE-x86/Trojan:Meterp#la8hj",
-						   "PE-x86/Adware:Foo#b" };
 		unsigned char k = 9;
 
-		result_with(&res, 3, lv, nm);
-		ck(koffridge_put(f, &k, 1, &res) == 1, "store 3 findings");
-		ck(koffridge_get(f, &k, 1, &v) == 1, "hit 3 findings");
-		ck(v.findings == 3, "count kept");
-		ck(v.level == KOF_LEVEL_INFECT, "worst level kept");
-		ck(strcmp(v.name, nm[1]) == 0, "worst name kept");
+		memset(&res, 0, sizeof res);
+		res.has_verdict = 1;
+		snprintf(res.verdict.name, sizeof res.verdict.name, "%s#PE-x86/Botnet:cnc.recv",
+			 kof_verdict_word((uint32_t)KOF_VERDICT_INFECTED));
+		ck(koffridge_put(f, &k, 1, &res) == 1, "store a verdict");
+		ck(koffridge_get(f, &k, 1, &v) == 1, "hit a verdict");
+		ck(v.findings == 1, "an object with a verdict counts one");
+		ck(strcmp(v.name, res.verdict.name) == 0, "verdict name kept");
+		/* no verdict: clean, and no name to quote */
+		res.has_verdict = 0;
+		k = 11;
+		ck(koffridge_put(f, &k, 1, &res) == 1 && koffridge_get(f, &k, 1, &v) == 1, "a result with no verdict is stored");
+		ck(v.findings == 0 && v.name[0] == 0, "it counts nothing and names nothing");
 	}
 
 	/* broken is carried, not flattened to clean */
@@ -617,9 +604,8 @@ int main(void)
 
 		ck(koffridge_put(f, &kc, 1, NULL) == 1, "store clean");
 		memset(&res, 0, sizeof res);
-		res.n = 1;
-		res.v[0].level = KOF_LEVEL_INFECT;
-		snprintf(res.v[0].name, sizeof res.v[0].name, "Test:Thing");
+		res.has_verdict = 1;
+		snprintf(res.verdict.name, sizeof res.verdict.name, "Test:Thing");
 		ck(koffridge_put(f, &ki, 1, &res) == 1, "store infected");
 		memset(&res, 0, sizeof res);
 		res.broken = 3;
@@ -663,9 +649,8 @@ int main(void)
 			uint32_t key = i;
 
 			memset(&res, 0, sizeof res);
-			res.n = 1;
-			res.v[0].level = KOF_LEVEL_INFECT;
-			snprintf(res.v[0].name, sizeof res.v[0].name,
+			res.has_verdict = 1;
+			snprintf(res.verdict.name, sizeof res.verdict.name,
 				 "PE-x86/Test:Id#%u", i);
 			(void)koffridge_put(f, &key, sizeof key, &res);
 		}
@@ -708,9 +693,8 @@ int main(void)
 
 		koffridge_clear(f);
 		memset(&res, 0, sizeof res);
-		res.n = 1;
-		res.v[0].level = KOF_LEVEL_INFECT;
-		snprintf(res.v[0].name, sizeof res.v[0].name,
+		res.has_verdict = 1;
+		snprintf(res.verdict.name, sizeof res.verdict.name,
 			 "PE-x86/Trojan:Kept#1");
 		ck(koffridge_put(f, &key_a, sizeof key_a, &res) == 1,
 		   "store before save");

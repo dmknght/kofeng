@@ -16,7 +16,7 @@ def sane(v, r, c):
     check(v.alive(), 'died at %dx%d' % (r, c))
     check('File' in v.row(1), 'menu bar missing at %dx%d: %r' % (r, c, v.row(1)[:40]))
     last = v.row(r).strip()
-    check(last and ('no marker' in last or 'Matched' in last or '|' in last),
+    check(last and ('no verdict' in last or '|' in last),
           'status line missing on the last row at %dx%d: %r' % (r, c, last[:60]))
 
 
@@ -34,7 +34,7 @@ def resize_sweep_back_and_forth_leaves_exactly_one_status_line():
     with ko() as v:
         for r, c in SIZES + SIZES[::-1]:
             v.resize(r, c)
-        n = sum(1 for l in v.snapshot() if 'no marker selected' in l)
+        n = sum(1 for l in v.snapshot() if 'no verdict' in l)
         eq(n, 1, 'stale status lines after many resizes: %d' % n)
 
 
@@ -127,9 +127,9 @@ def resize_under_modal_repaints_the_panes():
         v.menu_item('Analysis', 'Dashboard')
         v.resize(62, 200)
         # the status line must have moved to the new last row
-        check('no marker selected' in v.row(62) or 'Matched' in v.row(62),
+        check('no verdict' in v.row(62),
               'status line not on the new last row: %r' % v.row(62)[:50])
-        check(sum(1 for l in v.snapshot() if 'no marker selected' in l) <= 1, 'stale status line left behind')
+        check(sum(1 for l in v.snapshot() if 'no verdict' in l) <= 1, 'stale status line left behind')
 
 
 @case(A)

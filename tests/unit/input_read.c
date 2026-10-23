@@ -86,6 +86,7 @@ static int env_open(struct env *v, const char *db)
 {
 	v->e = keng_open(db);
 	v->sc = v->e ? kscan_new(v->e) : NULL;
+	notes_watch(v->sc);
 	return v->sc != NULL;
 }
 
@@ -200,7 +201,12 @@ static int seen_cb(const char *name, const void *b, uint64_t len, const struct k
 	struct seen *s = u;
 
 	s->objects++;
-	s->findings += res ? res->n : 0u;
+	{
+		struct note_list got;
+
+		notes_here(&got);
+		s->findings += res ? got.n : 0u;
+	}
 	if (kobj_depth(name) == 0 && !s->have_root) {
 		s->have_root = 1;
 		s->root_len = len;
@@ -340,8 +346,10 @@ static int c_nohandler(void)
 			kof_scan_read_hook(v.sc, NULL);
 		}
 		fresh(p);
-		for (i = 0; i < 4; i++)
+		for (i = 0; i < 4; i++) {
 			sc[i] = kscan_new(v.e);
+			notes_watch(sc[i]);
+		}
 		CK(kscan_path_mt(sc, 4, d, &o, seen_cb, &s) >= 12, "the parallel walk scans the tree");
 		for (i = 0; i < 4; i++)
 			kscan_free(sc[i]);
@@ -902,8 +910,10 @@ static int c_parallel(void)
 	}
 	if (!env_open(&v, DB_SIGS))
 		return 9;
-	for (i = 0; i < 4; i++)
+	for (i = 0; i < 4; i++) {
 		sc[i] = kscan_new(v.e);
+		notes_watch(sc[i]);
+	}
 	memset(&s, 0, sizeof s);
 	atomic_store(&stop_thr, 0);
 	pthread_create(&th, NULL, meddler, NULL);

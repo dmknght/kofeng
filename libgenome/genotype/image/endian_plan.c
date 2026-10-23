@@ -181,6 +181,42 @@ void kgenome_endian_plan_free(struct kgenome_endian_plan *p)
 }
 
 /*
+ * THE SPANS ARE KEPT IN A GAP BUFFER, because the order objects list their sections in is the file's.
+ *
+ * Every span goes in at its sorted place, and the array it goes into used to be moved by that much:
+ * sections listed from the highest offset down made every insert a move of everything already there. A
+ * 0.72 MB big-endian MIPS object of three note sections took 0.56 s against 0.01 s for the same sections
+ * in the other order, and 65536 spans (the bound) cost 51 GB of moves. The gap is where the last span
+ * went in: the next one is usually beside it (a note section's spans, a code section cut at its
+ * strings), so it costs nothing, and a jump to another section moves the gap once, not the tail for
+ * every span. Whoever reads the array while it is being built closes the gap first (plan_close).
+ */
+static void plan_gap_to(struct kgenome_endian_plan *p, uint32_t to)
+{
+	if (to < p->gap_at)
+		memmove(p->v + to + p->gap_n, p->v + to, (size_t)(p->gap_at - to) * sizeof *p->v);
+	else if (to > p->gap_at)
+		memmove(p->v + p->gap_at, p->v + p->gap_at + p->gap_n, (size_t)(to - p->gap_at) * sizeof *p->v);
+	p->gap_at = to;
+}
+
+/* The array as the readers expect it: v[0..n) contiguous, the free slots at the end. */
+static void plan_close(struct kgenome_endian_plan *p)
+{
+	if (p->gap_n) {
+		plan_gap_to(p, p->n);
+		p->gap_n = 0;
+		p->gap_at = p->n;
+	}
+}
+
+/* Logical index i, whichever side of the gap it is on. */
+static const struct kgenome_endian_span *plan_at(const struct kgenome_endian_plan *p, uint32_t i)
+{
+	return &p->v[i < p->gap_at ? i : i + p->gap_n];
+}
+
+/*
  * Add a span, clipped to the object and to whole entries, in sorted order, unless
  * it overlaps one already there. Returns 1 for added or harmlessly empty, 0 when
  * the span was refused - and the status says why, because a refused span is bytes
@@ -205,12 +241,12 @@ static int span_add(struct kgenome_endian_plan *p, uint64_t n, uint64_t off,
 	while (lo < hi) {
 		uint32_t mid = lo + (hi - lo) / 2u;
 
-		if (p->v[mid].off + p->v[mid].len <= off)
+		if (plan_at(p, mid)->off + plan_at(p, mid)->len <= off)
 			lo = mid + 1u;
 		else
 			hi = mid;
 	}
-	if (lo < p->n && p->v[lo].off < off + len) {
+	if (lo < p->n && plan_at(p, lo)->off < off + len) {
 		p->dropped++;           /* the object's own structure overlaps: not a limit */
 		return 0;
 	}
@@ -218,21 +254,27 @@ static int span_add(struct kgenome_endian_plan *p, uint64_t n, uint64_t off,
 		p->status = kgenome_status_merge(p->status, KGENOME_TRUNCATED);
 		return 0;
 	}
-	if (p->n == p->cap) {
+	if (!p->gap_n) {
 		uint32_t nc = p->cap ? p->cap * 2u : 64u;
 
+		/* The gap is empty, so the array is full: grow it, and the new room is the gap. */
 		g = realloc(p->v, (size_t)nc * sizeof *g);
 		if (!g) {
 			p->status = kgenome_status_merge(p->status, KGENOME_NOMEM);
 			return 0;
 		}
 		p->v = g;
+		memmove(p->v + p->gap_at + (nc - p->cap), p->v + p->gap_at,
+			(size_t)(p->n - p->gap_at) * sizeof *p->v);
+		p->gap_n = nc - p->cap;
 		p->cap = nc;
 	}
-	memmove(p->v + lo + 1u, p->v + lo, (size_t)(p->n - lo) * sizeof *p->v);
+	plan_gap_to(p, lo);
 	p->v[lo].off = off;
 	p->v[lo].len = len;
 	p->v[lo].lay = (uint8_t)lay;
+	p->gap_at++;
+	p->gap_n--;
 	p->n++;
 	return 1;
 }
@@ -265,17 +307,17 @@ static void code_span(struct kgenome_endian_plan *p, uint64_t n, uint64_t at,
 		while (lo < hi) {
 			uint32_t mid = lo + (hi - lo) / 2u;
 
-			if (p->v[mid].off + p->v[mid].len <= at)
+			if (plan_at(p, mid)->off + plan_at(p, mid)->len <= at)
 				lo = mid + 1u;
 			else
 				hi = mid;
 		}
-		if (lo < p->n && p->v[lo].off <= at) {  /* inside a span: step past it */
-			at = p->v[lo].off + p->v[lo].len;
+		if (lo < p->n && plan_at(p, lo)->off <= at) {  /* inside a span: step past it */
+			at = plan_at(p, lo)->off + plan_at(p, lo)->len;
 			continue;
 		}
 		{
-			uint64_t stop = lo < p->n && p->v[lo].off < end ? p->v[lo].off : end;
+			uint64_t stop = lo < p->n && plan_at(p, lo)->off < end ? plan_at(p, lo)->off : end;
 
 			lead = (unit - ((addr + (at - (end - have))) % unit)) % unit;
 			if (stop > at && stop - at > lead)
@@ -648,6 +690,7 @@ enum kgenome_status kgenome_endian_plan_build(kof_buf f, const struct kgenome_ob
 	plan_code(out, f, obj, e, 1);
 	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++)
 		plan_section(out, f, obj, e, &e->sec[i]);
+	plan_close(out);
 	if (!out->n)
 		out->ident = 0;
 	return out->status;

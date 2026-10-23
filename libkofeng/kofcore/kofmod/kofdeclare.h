@@ -43,26 +43,20 @@
 #define KOF_TARGET_EVENT(mask)
 
 /*
- * Declare what this module detects: a type from enum kof_maltype, and a family name
- * this module's author picks.
+ * Declare what this module is known as: a type from enum kof_maltype, and a family
+ * name this module's author picks.
  *
- *     KOF_TARGET_NAME(KOF_MALTYPE_BOTNET, "Mirai");
+ *     KOF_TARGET_NAME(KOF_MALTYPE_PACKER, "MidgetPack");
  *
  * Expands to nothing, like KOF_TARGET_FORMAT - ksigbuilder reads it out of the
- * source and composes it into every detection name this file reports, so
- * KOF_SCAN_INFECT/KOF_SCAN_SUSPECT below need only say the variant.
- *
- * Exactly one per file, and required before the first KOF_SCAN_INFECT/SUSPECT call -
- * not merely before compile, but earlier in the source, because a module that never
- * calls either never reports a name and this declaration would constrain nothing for
- * it. That is also why this is not required for an unpack module: it has no findings
- * to name, only bytes to produce.
+ * source into the module's record (family_off, maltype). Nothing composes it into a
+ * report any more: a module names no object, the diseases do. What reads it is the
+ * label the tools show for the module, and an unpack module's family, which routes
+ * the child it makes to that family's decoder first.
  *
  * The family string is free text for now - no character restrictions enforced yet.
  * That is a gap, not a decision: enforcing ASCII-only, no spaces, no separators is
- * planned but not built. A "." in the family would be indistinguishable from the
- * separator the composed name uses between type, family and variant, so avoid it
- * until the check exists to refuse it.
+ * planned but not built.
  */
 #define KOF_TARGET_NAME(type, family)
 
@@ -231,7 +225,7 @@ enum kof_str_word {
  *                      0x1a2b3c4d, 0x5e6f7a8b, ...);
  *
  *     if (kof_mutation_score(cfg) >= 50)
- *             KOF_SCAN_INFECT("Family");
+ *             kof_debug("Family", 0);
  *
  * The hashes are what a researcher's chosen block came to under
  * kof_mutation_mix - see kofmod/kofmutation.h, which also says why the block is a

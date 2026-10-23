@@ -292,6 +292,28 @@ static void read_sections(kof_buf file, struct kgenome_pe_info *p, uint64_t sect
  * declaring more than its section has is describing bytes that are not there, and
  * following it would hand a scan a range past the end of the file.
  */
+/*
+ * How many bytes of the section holding `rva` lie at and after it - in the file for a file layout, in
+ * memory for a mapped one. UINT64_MAX when no section holds it (a mapped image's alignment slack), so
+ * only the object bounds it then. The sections are read as rva_to_off reads them.
+ */
+static uint64_t res_section_room(const struct kgenome_pe_info *p, uint64_t rva)
+{
+	uint32_t i;
+
+	for (i = 0; i < p->sec_count; i++) {
+		const struct kgenome_pe_sec *s = &p->sec[i];
+		const uint64_t span = s->mem_size > s->file_size ? s->mem_size : s->file_size;
+
+		if (rva < s->mem_rva || rva - s->mem_rva >= span)
+			continue;
+		if (kgenome_pe_is_mapped(p))
+			return span - (rva - s->mem_rva);
+		return s->file_size > rva - s->mem_rva ? s->file_size - (rva - s->mem_rva) : 0;
+	}
+	return UINT64_MAX;
+}
+
 static void resolve_resource(struct kgenome_pe_info *p, uint64_t obj_size)
 {
 	uint64_t rva, len, off;
@@ -309,6 +331,21 @@ static void resolve_resource(struct kgenome_pe_info *p, uint64_t obj_size)
 		return;
 	if (len > obj_size - off)
 		len = obj_size - off;
+	/*
+	 * AND TO THE SECTION IT SITS IN, which is what the note above promises and the code did not do
+	 * (image_defect2 E4): a directory that declares more than its section holds became a claimant over
+	 * the sections after it. Those lost their bytes to a RESOURCE region, their claim went to zero, and
+	 * nothing said so - `by_resource` in settle_claims excuses a section trimmed by the resource, which
+	 * is right for the section the directory sits in and wrong for the next one. A file could hide a
+	 * section from the CODE and DATA rules that way. What the directory declares past its own section
+	 * is bytes that are not its own.
+	 */
+	{
+		const uint64_t room = res_section_room(p, rva);
+
+		if (len > room)
+			len = room;
+	}
 	p->res_off = off;
 	p->res_len = len;
 }
@@ -398,6 +435,7 @@ static uint64_t settle_claims(struct kgenome_pe_info *p, uint64_t obj_size)
 	const uint32_t cap = (uint32_t)(sizeof c / sizeof c[0]);
 	uint32_t n = 0, i;
 	uint64_t end = 0;
+	uint64_t covered = 0;           /* the end of everything an earlier claimant kept */
 
 	for (i = 0; i < p->sec_count; i++)
 		p->sec[i].claim_off = p->sec[i].claim_len = 0;
@@ -489,6 +527,15 @@ static uint64_t settle_claims(struct kgenome_pe_info *p, uint64_t obj_size)
 		uint64_t e = kof_sat_add(c[i].got_off, c[i].got_len);
 		int trimmed = c[i].got_len != c[i].len;
 		int by_resource = i > 0 && c[i - 1].tag == RES_TAG;
+		/*
+		 * A COLLISION IS A CLAIM THAT STARTS INSIDE WHAT AN EARLIER ONE KEPT, not a claim that came
+		 * out with fewer bytes than it declared. The second was the test (`trimmed && got_len`), and
+		 * it missed the case that is the whole point of the anomaly: a section that points at bytes
+		 * another section already owns, wholly, has nothing left (got_len 0) and was excused - two
+		 * identical section headers raised nothing, two that overlapped by a byte did. It also
+		 * flagged a claim merely cut by the end of the object (image_pe_attack P5).
+		 */
+		int collided = c[i].len != 0 && c[i].off < covered;
 
 		if (c[i].tag == RES_TAG) {
 			/* The directory did not begin where a section does, so a
@@ -500,13 +547,15 @@ static uint64_t settle_claims(struct kgenome_pe_info *p, uint64_t obj_size)
 				p->res_len = c[i].got_len;
 			}
 		} else if (c[i].tag < KGENOME_PE_MAX_SECTIONS) {
-			if (trimmed && c[i].got_len && !by_resource)
+			if (collided && !by_resource)
 				p->anomalies |= KGENOME_PE_ANOM_SEC_OVERLAP;
 			p->sec[c[i].tag].claim_off = c[i].got_off;
 			p->sec[c[i].tag].claim_len = c[i].got_len;
 		}
 		if (e > end)
 			end = e;
+		if (c[i].got_len && e > covered)
+			covered = e;
 	}
 	return end;
 }
@@ -741,12 +790,22 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 		       (info->characteristics & KGENOME_PE_CHAR_DLL) ? KGENOME_PE_DLL :
 		       KGENOME_PE_EXE;
 
-	if (kof_rd_u32(file, opt + (is64 ? 108 : 92), 0, &tmp32))
-		info->n_dirs = tmp32;
-	if (info->n_dirs != KGENOME_PE_DIR_COUNT)
-		info->anomalies |= KGENOME_PE_ANOM_DIR_COUNT_ODD;
-	if (info->n_dirs > KGENOME_PE_DIR_COUNT)
-		info->n_dirs = KGENOME_PE_DIR_COUNT;
+	/*
+	 * The claim is read where it is, and what the header holds is decided by the one helper the
+	 * unmapper uses too (image_defect2 E1): a count past SizeOfOptionalHeader made the loop below read
+	 * the section table as directories. A claim the header cannot hold is as odd as a count that is
+	 * not 16, so it is said the same way.
+	 */
+	{
+		uint32_t claimed = 0, held;
+
+		if (kof_rd_u32(file, opt + (is64 ? 108 : 92), 0, &tmp32))
+			claimed = tmp32;
+		held = kgenome_pe_dirs_in_header(info->opt_size, is64, claimed);
+		info->n_dirs = held;
+		if (claimed != KGENOME_PE_DIR_COUNT || held != KGENOME_PE_DIR_COUNT)
+			info->anomalies |= KGENOME_PE_ANOM_DIR_COUNT_ODD;
+	}
 
 	dirbase = opt + (is64 ? 112 : 96);
 	for (i = 0; i < info->n_dirs; i++) {

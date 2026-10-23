@@ -115,15 +115,26 @@ uint32_t kdb_unpackers(const kof_engine *e)
 	return e ? e->n_unp : 0;
 }
 
-uint32_t kmatch_rules(const kof_engine *e)
+uint32_t kdb_diagnoses(const kof_engine *e)
 {
-	return e ? e->n_heur : 0;
+	return e ? e->n_diag : 0;
+}
+
+/* The diagnose of this id, or NULL. Linear: a tool asks for the handful a verdict lists. */
+static const struct kof_diag *diag_by_id(const kof_engine *e, uint32_t id)
+{
+	uint32_t i;
+
+	for (i = 0; e && i < e->n_diag; i++)
+		if (e->diag[i].id == id)
+			return &e->diag[i];
+	return NULL;
 }
 
 /*
  * THE NAME OF A DIAGNOSE, FROM ITS ID.
  *
- * An id and not an index, because that is what kof_result.diag carries and a
+ * An id and not an index, because that is what kof_finding.diag (a verdict's list) carries and a
  * caller must never have to know that the database happens to number them
  * from one. The off-by-one lives here, once, rather than in each tool.
  *
@@ -131,10 +142,32 @@ uint32_t kmatch_rules(const kof_engine *e)
  * out of the loaded .kdig and is not composed, so there is nothing to free
  * and nothing that can be stale while the engine is open.
  */
-
-uint32_t kdb_diagnoses(const kof_engine *e)
+const char *kdb_diagnose_name(const kof_engine *e, uint32_t id)
 {
-	return e ? e->n_diag : 0;
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	return d ? d->name : NULL;
+}
+
+uint32_t kdb_diagnose_disease(const kof_engine *e, uint32_t id)
+{
+	const struct kof_diag *d = diag_by_id(e, id);
+
+	return d ? d->disease : 0u;
+}
+
+const char *kdb_disease_name(const kof_engine *e, uint32_t id)
+{
+	const struct kof_disease_ent *d = e ? kof_db_disease(e, id) : NULL;
+
+	return d ? d->name : NULL;
+}
+
+int kdb_disease_type(const kof_engine *e, uint32_t id)
+{
+	const struct kof_disease_ent *d = e ? kof_db_disease(e, id) : NULL;
+
+	return d ? (int)d->type : -1;
 }
 
 int kdb_diag_full(const kof_engine *e)

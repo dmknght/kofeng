@@ -164,14 +164,12 @@
  *   name   the object being described - bold, so a run over a directory can be
  *          scrolled and the boundaries found without reading
  *   bad    something is wrong with the file: an anomaly, a name that escapes its
- *          root, a checksum that disagrees, a region sum that does not add up,
- *          a module every one of whose markers is here
+ *          root, a checksum that disagrees, a region sum that does not add up
  *   warn   something is unusual but not wrong: an encrypted entry, a declared
  *          expansion that is large rather than absurd, a count that does not
- *          match its claim, a module some of whose markers are here
- *   note   a fact worth finding, carrying no judgement: a marker present in the
- *          wrong region, a container kind
- *   dim    what is almost always uninteresting - a module ruled out before it ran
+ *          match its claim
+ *   note   a fact worth finding, carrying no judgement: a container kind
+ *   dim    what is almost always uninteresting
  *
  * Off unless stdout is a terminal, and off when NO_COLOR is set whatever the
  * terminal is: this tool's output is piped into grep and diffed against itself,
@@ -194,88 +192,6 @@
  * format of the thing it came out of.
  */
 static uint8_t g_parent_format;
-
-/* ---- what a scan said -----------------------------------------------------
- *
- * The markers report is printed while an object is being described, and whether
- * a module FIRED is a thing only a scan knows. So a scan is run first and its
- * findings are kept here, keyed by the object name the engine used - which is
- * the same string the report prints as its heading, so the lookup is exact and
- * needs no rule about which object is which.
- *
- * Flat and linear: a scan of one file yields a handful of objects and a handful
- * of findings, and an index would be more code than the search it removes.
- */
-struct verdict {
-	char               *object;
-	/* The finding as the engine handed it over, not a copy of its text:
-	 * kof_touch_object matches a module against it part by part. */
-	struct kof_finding  f;
-};
-
-static struct verdict *g_verdict;
-static uint32_t        g_n_verdict;
-
-static int verdict_collect(const char *name, const void *bytes, uint64_t len,
-			   const struct kof_result *res, void *user)
-{
-	uint32_t i;
-
-	(void)bytes; (void)len; (void)user;
-	for (i = 0; i < res->n; i++) {
-		struct verdict *g = realloc(g_verdict,
-					    (g_n_verdict + 1) * sizeof *g);
-
-		if (!g)
-			return 0;
-		g_verdict = g;
-		g_verdict[g_n_verdict].object = strdup(name);
-		g_verdict[g_n_verdict].f = res->v[i];
-		if (!g_verdict[g_n_verdict].object)
-			return 0;
-		g_n_verdict++;
-	}
-	return 0;
-}
-
-static void verdict_run(kof_engine *eng, const char *path)
-{
-	struct kof_scan_option opt;
-	kof_scanner *sc;
-
-	if (!eng)
-		return;
-	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
-	/*
-	 * The most this build's heuristic can be asked for.
-	 *
-	 * A tool that examines one named file is not a scanner walking a
-	 * filesystem: the reason a level is optional there - it costs a pass
-	 * over every object - is not a reason here, where there is one object
-	 * and somebody is sitting in front of it waiting to be told about it.
-	 * Named rather than numbered so this keeps meaning "the most" as levels
-	 * are added.
-	 */
-	opt.heur_level = KOF_HEUR_LEVEL_MAX;
-	sc = kscan_new(eng);
-	if (!sc)
-		return;
-	kscan_path(sc, path, &opt, verdict_collect, NULL);
-	kscan_free(sc);
-}
-
-static void verdict_free(void)
-{
-	uint32_t i;
-
-	for (i = 0; i < g_n_verdict; i++) {
-		free(g_verdict[i].object);
-	}
-	free(g_verdict);
-	g_verdict = NULL;
-	g_n_verdict = 0;
-}
 
 static const char *C_OFF  = "";
 static const char *C_NAME = "";
@@ -471,6 +387,9 @@ static void print_syms(const uint8_t *blk, uint32_t w);
  */
 static const uint8_t *g_decl_syms;
 static uint32_t       g_decl_syms_n;
+/* The units of the parent's cut the view's decode rewrote - see kof_result.fixed. */
+static const struct kof_range *g_decl_fixed;
+static uint32_t       g_decl_fixed_n;
 
 /*
  * AND THE REGIONS IT DECLARED, for the same reason and with the same lifetime.
@@ -1534,417 +1453,6 @@ static void print_view(uint8_t format, const void *view,
  */
 
 /*
- * What a declared marker actually is, written the way its author wrote it.
- *
- * Two kinds and they are not the same question. A literal's bytes are in the
- * pool and hex is the honest rendering - a marker is bytes, and half of them are
- * not printable in the objects this looks at.
- *
- * A HEX pattern's bytes in the pool are NOT the pattern. They are the compiled
- * program - a header, a step table, an alternative table and a byte/mask area -
- * so hex-encoding them would print the matcher's internals and call them a
- * signature. It is reconstructed instead, which is exact: the compiler throws
- * away only whitespace, and every part it keeps has one spelling.
- *
- * Truncated at a width rather than printed whole. A pattern may be 512 bytes and
- * this is a column in a table; the point of the column is recognising a marker,
- * not carrying it, and the db id beside it is what identifies one exactly.
- */
-#define VALUE_MAX_BYTES 20u
-
-/* The two printers that walked a compiled hex program used to live here. They
- * are gone: kof_touch_str now carries the pattern's spelling, filled once where
- * the pool is read, so no front end reconstructs one. */
-
-static void put_value(const struct kof_touch_str *s, int plain)
-{
-	if (!plain)
-		printf("%s", C_SIZE);
-	/* One field for both kinds, filled where the pool is read. A printer
-	 * does not have to know a hex marker is a program. */
-	printf("%.*s", (int)VALUE_MAX_BYTES * 2, s->text);
-	if (strlen(s->text) > (size_t)VALUE_MAX_BYTES * 2)
-		printf("...");
-	if (!plain)
-		printf("%s", C_OFF);
-}
-
-/* ---- back to the source ----------------------------------------------------
- *
- * A pack carries the line a detection was written on and not the file it was
- * written in - struct kof_pack_mod has no room for a path and no need of one at
- * scan time. So the thread back to the text is (family, line) plus a source tree
- * to look in, which is what --sources is.
- *
- * Matched on the family alone. KOF_TARGET_NAME is one declaration per file by
- * rule, so a family names a file; two files claiming one family is a mistake in
- * the tree rather than a case to resolve, and it is reported as one.
- *
- * Text scanning rather than compiling: this wants the same two facts ksigbuilder
- * --extract reads, and running a build to print a path would make an examiner
- * depend on a toolchain it otherwise does not need.
- */
-#define SRC_MAX       1024u
-#define SRC_MAX_LINES 64u
-
-struct src_ent {
-	char     family[80];
-	char     path[PATH_ROOM];
-	/* The lines this file writes a detection on. Needed because a family does
-	 * NOT name a file: bases/signatures/mirai.c and mirai_42bb.c both declare
-	 * "Mirai" on purpose - one generic, one for a variant - so the family alone
-	 * resolved to whichever the directory happened to list first and put a
-	 * confident wrong path next to every finding from the other. The line an id
-	 * carries belongs to exactly one of them, so family plus line is the key
-	 * that actually identifies a module. */
-	uint32_t line[SRC_MAX_LINES];
-	uint32_t n_line;
-};
-
-static struct src_ent  *g_src;
-static uint32_t         g_n_src;
-
-/*
- * One source: the family it declares and the lines it reports on.
- *
- * Read the restricted way ksigbuilder reads them - KOF_TARGET_NAME's second
- * argument quote to quote, and the line of every KOF_SCAN_INFECT/SUSPECT, which
- * is the number ksigbuilder writes into the name table beside the blob.
- */
-static int src_read(const char *path, struct src_ent *out)
-{
-	FILE *f = fopen(path, "r");
-	char line[1024];
-	uint32_t lineno = 0;
-
-	if (!f)
-		return 0;
-	out->family[0] = 0;
-	out->n_line = 0;
-	while (fgets(line, sizeof line, f)) {
-		char *p, *q;
-		size_t n = 0;
-
-		lineno++;
-		if (!out->family[0] &&
-		    (p = strstr(line, "KOF_TARGET_NAME(")) != NULL &&
-		    (p = strchr(p, ',')) != NULL &&
-		    (q = strchr(p, '"')) != NULL) {
-			for (q++; *q && *q != '"' &&
-			     n + 1 < sizeof out->family; q++)
-				out->family[n++] = *q;
-			out->family[n] = 0;
-		}
-		if ((strstr(line, "KOF_SCAN_INFECT(") ||
-		     strstr(line, "KOF_SCAN_SUSPECT(")) &&
-		    out->n_line < SRC_MAX_LINES)
-			out->line[out->n_line++] = lineno;
-	}
-	fclose(f);
-	return out->family[0] != 0;
-}
-
-static void src_add(const char *path)
-{
-	struct src_ent *e;
-
-	if (g_n_src >= SRC_MAX)
-		return;
-	e = &g_src[g_n_src];
-	if ((size_t)snprintf(e->path, PATH_ROOM, "%s", path) >= PATH_ROOM)
-		return;
-	if (src_read(path, e))
-		g_n_src++;
-}
-
-/* The tree, one level down as well as at the top - the same shape the Makefile
- * globs, because that is the shape a content tree has. */
-static void src_scan(const char *dir, int depth)
-{
-	DIR *d = opendir(dir);
-	struct dirent *e;
-	char path[PATH_ROOM];
-
-	if (!d)
-		return;
-	while ((e = readdir(d)) != NULL) {
-		size_t n = strlen(e->d_name);
-
-		if (e->d_name[0] == '.')
-			continue;
-		if ((size_t)snprintf(path, sizeof path, "%s/%s", dir,
-				     e->d_name) >= sizeof path)
-			continue;
-		if (n > 2 && strcmp(e->d_name + n - 2, ".c") == 0)
-			src_add(path);
-		else if (depth > 0)
-			src_scan(path, depth - 1);
-	}
-	closedir(d);
-}
-
-static int src_open(const char *dir)
-{
-	g_src = calloc(SRC_MAX, sizeof *g_src);
-	if (!g_src)
-		return 0;
-	src_scan(dir, 1);
-	if (!g_n_src)
-		fprintf(stderr, "kofexaminer: no signature sources under %s\n",
-			dir);
-	return 1;
-}
-
-/* The file that declares this family AND reports on this line. Both, for the
- * reason struct src_ent gives. */
-static const char *src_path_of(const char *family, uint32_t line)
-{
-	uint32_t i, k;
-
-	for (i = 0; i < g_n_src; i++) {
-		if (strcmp(g_src[i].family, family) != 0)
-			continue;
-		for (k = 0; k < g_src[i].n_line; k++)
-			if (g_src[i].line[k] == line)
-				return g_src[i].path;
-	}
-	return NULL;
-}
-
-/* ---- what the database already knows -------------------------------------- */
-
-/*
- * The modules whose markers are in this object, and how close each one came.
- *
- * Printed rather than decided on: every line here is an observation, and the one
- * verdict in this tool comes from the unpack pass below, which runs the engine.
- * A module listed as holding every marker has NOT fired - its conditions are
- * compiled code and were never evaluated - and the wording says so.
- */
-static void print_markers(struct kof_engine *eng, kof_buf buf,
-			  const struct kof_obj_ctx *ctx,
-			  const struct kof_parser *fmt,
-			  const char *display)
-{
-	struct kof_touch *v = NULL;
-	uint32_t n = 0, i, j, shown;
-
-	struct kof_finding *names = calloc(g_n_verdict + 1, sizeof *names);
-	uint32_t m = 0, q;
-
-	for (q = 0; q < g_n_verdict && names; q++)
-		if (!strcmp(g_verdict[q].object, display))
-			names[m++] = g_verdict[q].f;
-
-	if (!kof_touch_object(eng, buf, ctx, fmt, names, m, &v, &n)) {
-		free(names);
-		printf("  markers   out of memory\n");
-		return;
-	}
-	free(names);
-	if (n == 0) {
-		printf("  markers   nothing in the database has a marker here\n");
-		kof_touch_free(v, n);
-		return;
-	}
-
-	printf("  markers   %u module(s) have at least one marker in this "
-	       "object\n", n);
-
-	for (i = 0; i < n; i++) {
-		const struct kof_touch *t = &v[i];
-		/* The bucket already ranks these; the colour says the same thing
-		 * without being read. Nothing here has fired - that is the
-		 * scanner's word - so even "every marker" is a warning about
-		 * where to look rather than a verdict. */
-		/*
-		 * The verdict decides the colour, not the marker count.
-		 *
-		 * Red is "this module reported something", which is the only
-		 * row on the screen that is a finding. Every marker of a module
-		 * being present is not that and was coloured as though it were:
-		 * a module asks for what its logic asks for, and five of five
-		 * markers present says nothing about whether that was the
-		 * question. Yellow is the honest colour for it - the bytes are
-		 * here, the module did not call it.
-		 */
-		const char *c = t->fired                        ? C_BAD  :
-				t->kind == KOF_TOUCH_ELSEWHERE  ? C_NOTE :
-				t->kind == KOF_TOUCH_INELIGIBLE ? C_DIM  : C_WARN;
-
-		/*
-		 * The name a scan would print, less the target - which is on the
-		 * format line above and is not this module's to claim anyway.
-		 * Spelled with the engine's own separators so a row here can be
-		 * matched against a verdict by eye rather than by working out
-		 * which family a family name belongs to.
-		 *
-		 * One variant is the common case and is written out. Several and
-		 * only the first is, with a count: which one a module WOULD
-		 * report depends on logic that is compiled code, so listing them
-		 * all would be offering a choice nothing here can resolve.
-		 */
-		char name[96];
-		/* The one it reported, when it reported: a module with three
-		 * variants fired as exactly one of them, and naming a different
-		 * one would disagree with the scanner on the same object. */
-		const char *var = t->fired_name ? t->fired_name :
-				  (t->n_names && t->name[0] ? t->name[0] : NULL);
-
-		/* The engine's spelling, with this tool's own suffix after it
-		 * rather than woven into it - see kverdict_compose. */
-		kverdict_compose(name, sizeof name, NULL,
-				 kof_maltype_name(t->maltype),
-				 t->family[0] ? t->family : "?", var);
-		if (var && !t->fired_name && t->n_names > 1) {
-			size_t at = strlen(name);
-
-			snprintf(name + at, sizeof name - at, " +%u",
-				 t->n_names - 1u);
-		}
-
-		{
-			char head[48];
-
-			/* A module that declares no markers has no count worth
-			 * printing, and "markers (0/0)" would invite the reader
-			 * to look for the zero. It is a structural detection -
-			 * scalars, not searches - and saying so is shorter and
-			 * true. */
-			const char *method = kof_touch_method(t);
-
-			if (method)
-				snprintf(head, sizeof head, "%s", method);
-			else if (!t->n_str)
-				snprintf(head, sizeof head, "structural");
-			else
-				snprintf(head, sizeof head, "%s (%u/%u)",
-					 kof_touch_kind_name(t->kind),
-					 t->kind == KOF_TOUCH_INELIGIBLE
-					 ? t->n_present : t->n_in_rgn,
-					 t->n_str);
-			printf("     %s%-22s%s %s%-34s%s", c, head, C_OFF,
-			       C_ID, name, C_OFF);
-		}
-		/* Where the logic is. Not what it is - that is compiled code -
-		 * but the line somebody can read to find out, which is the
-		 * question a row here raises and cannot answer on its own. */
-		if (g_n_src && t->family[0] && t->n_names) {
-			const char *sp = src_path_of(t->family, t->name_id[0]);
-
-			if (sp)
-				printf("  %s%s:%u%s", C_DIM, sp,
-				       t->name_id[0], C_OFF);
-		}
-		if (t->ruled_out)
-			printf("   %s", t->ruled_out);
-		else if (t->kind == KOF_TOUCH_ELSEWHERE)
-			printf("   present, but not where it looks");
-		printf("\n");
-
-		/* Titled, because four numbers in a row with inline labels reads
-		 * as prose and compares as neither. Dim: it is a legend and the
-		 * rows under it are the content. */
-		printf("        %skind          db id     size  at          "
-		       "value%s\n", C_DIM, C_OFF);
-		/*
-		 * Every marker the module declares, present or not.
-		 *
-		 * The absent ones are the point of the whole section: a module
-		 * at four of five is a variant to write, and which one is
-		 * missing is the first thing its author needs. They were being
-		 * skipped, which left the row saying 4/5 and no way to see
-		 * which four.
-		 *
-		 * Three states, and they are not two: found where the module
-		 * looks, found somewhere else, not in the object at all. The
-		 * middle one already had a note; the last one is the whole row
-		 * dimmed, so a block of them reads as absence rather than as
-		 * data to compare.
-		 */
-		for (j = 0, shown = 0; j < t->n_str && shown < 16u; j++) {
-			const struct kof_touch_str *s = &t->str[j];
-			int miss = s->at == KGENOME_BROKEN;
-			const char *ci = miss ? "" : C_ID;
-			const char *cs = miss ? "" : C_SIZE;
-			const char *cl = miss ? "" : C_LOC;
-			const char *co = miss ? "" : C_OFF;
-			char kind[16];
-
-			shown++;
-
-			/*
-			 * "hex" and "str" are the words the declarations use -
-			 * KOF_DEFINE_HEXSTR and KOF_DEFINE_STR - so the column
-			 * names what a source would have to write, and the two
-			 * are the same width so the column does not step.
-			 *
-			 * "fuw" for the same reason, against "sub": a word that
-			 * is one character shorter than its opposite moves
-			 * every field after it on half the rows.
-			 */
-			if (s->kind == KOF_STR_HEX)
-				snprintf(kind, sizeof kind, "hex");
-			else
-				/* Both rules always, never a default left
-				 * unwritten: "str" alone would mean substring
-				 * and case-sensitive to whoever remembers the
-				 * defaults and nothing to whoever does not. */
-				snprintf(kind, sizeof kind, "str: %s-%s",
-					 (s->flags & KOF_STR_FULLWORD) ? "fuw"
-								       : "sub",
-					 (s->flags & KOF_STR_ICASE) ? "i" : "c");
-
-			/*
-			 * A hex marker's size is what a match COVERS, not
-			 * how big the program that finds it is. The pool
-			 * entry for 2F62696E2F7368002D63 is 74 bytes of
-			 * compiled steps and tables; the pattern is ten.
-			 */
-			{
-				if (miss)
-					printf("%s", C_DIM);
-				printf("        %s%-11s%s %6u %s%8s%s  ",
-				       ci, kind, co, s->uid, cs, s->span, co);
-			}
-			if (miss)
-				printf("%-10s  ", "-");
-			else if (s->sym)
-				/*
-				 * Found in the object's symbol block, which is
-				 * built - so this number is an offset into
-				 * that and not into the file. Marked, because
-				 * a bare number in this column has always
-				 * meant a file offset and the two are not
-				 * interchangeable.
-				 */
-				printf("%s%-10s%s  ", cl,
-				       (s->sym & KOF_SCAN_SYM_IMP)
-				       ? "sym_imp" : "sym_exp", co);
-			else
-				printf("%s%-10llu%s  ", cl,
-				       (unsigned long long)s->at, co);
-			put_value(s, miss);
-			/* The note only means something when regions were
-			 * resolved at all. A module ruled out by its target
-			 * never had its regions looked at, so saying its marker
-			 * is outside them would be inventing a comparison. */
-			if (!miss && t->kind != KOF_TOUCH_INELIGIBLE &&
-			    !s->in_rgn)
-				note_warn("outside its regions");
-			if (miss)
-				printf("%s", C_OFF);
-			printf("\n");
-		}
-		if (t->n_str > shown)
-			printf("        %s... %u more%s\n", C_DIM,
-			       t->n_str - shown, C_OFF);
-
-	}
-	kof_touch_free(v, n);
-}
-
-/*
  * THE BLOCKS - what the engine cuts an object into, with every hash of each.
  *
  * `--blocks` lists the UNITS the similarity matcher reads and a block is made
@@ -1987,7 +1495,7 @@ static int blk_unit(void *user, uint32_t region, uint64_t off, uint64_t len,
 
 	sym[0] = 0;
 	if (first && c->syms)
-		kof_inspect_sym_name(c->syms, c->syms_n, first->value,
+		kof_sym_name_at(c->syms, c->syms_n, first->value,
 				     (int)first->shndx, sym, sizeof sym);
 	nb = kgenome_mutation_minhash(c->buf.p + off, len, KGENOME_MUTATION_RAW, block);
 	c->units++;
@@ -2087,8 +1595,10 @@ static void print_blocks(kof_buf buf, const struct kof_obj_ctx *ctx)
 		 * many ranges the buffer holds and cuts there (it used to be told 4096). */
 		struct kof_ext_buf eb = kof_ext_fixed(ext, (uint32_t)(sizeof ext / sizeof ext[0]));
 
-		kof_scan_mutation_units(ctx, buf, ~0u, &fs, have_lib ? &lib : NULL, &eb,
-				      blk_unit, &c);
+		const struct kof_scan_cut basis = { &fs, have_lib ? &lib : NULL,
+						    g_decl_fixed, g_decl_fixed_n };
+
+		kof_scan_mutation_units(ctx, buf, ~0u, &basis, &eb, blk_unit, &c);
 	}
 	printf("  units     %u\n", c.units);
 	kgenome_funcs_free(&fs);
@@ -2126,8 +1636,7 @@ static void print_scfind(kof_buf buf, const struct kof_obj_ctx *ctx)
 	printf("\n");
 }
 
-static int examine_bytes(kof_buf buf, const char *display, const char *dir,
-			 struct kof_engine *eng)
+static int examine_bytes(kof_buf buf, const char *display, const char *dir)
 {
 	struct kof_obj_ctx ctx;
 	void *view = 0;
@@ -2157,13 +1666,6 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			printf("  format    %sunrecognised%s, %s%llu%s bytes\n",
 			       C_WARN, C_OFF, C_SIZE,
 			       (unsigned long long)buf.n, C_OFF);
-			/* Still worth asking. No format means every module is
-			 * ruled out and every marker is reported as such, which
-			 * is a truthful answer and occasionally the useful one. */
-			if (eng) {
-				ctx.obj_size = buf.n;
-				print_markers(eng, buf, &ctx, NULL, display);
-			}
 			rc = 1;
 			goto out;
 		}
@@ -2301,8 +1803,6 @@ static int examine_bytes(kof_buf buf, const char *display, const char *dir,
 			       ds.regions, (unsigned long long)ds.region_bytes,
 			       (unsigned long long)ds.whole_bytes, dir);
 		}
-		if (eng)
-			print_markers(eng, buf, &ctx, f, display);
 		if (g_blocks)
 			print_blocks(buf, &ctx);
 		if (g_scfind)
@@ -2390,7 +1890,7 @@ static int examine_event_log(const char *path, int colour)
 /*
  * The file on disk, mapped and handed to the same routine as everything else.
  */
-static int examine(const char *path, int dump, struct kof_engine *eng)
+static int examine(const char *path, int dump)
 {
 	struct stat st;
 	void *map;
@@ -2421,7 +1921,7 @@ static int examine(const char *path, int dump, struct kof_engine *eng)
 		return -1;
 	}
 	rc = examine_bytes(kof_buf_make(map, (uint64_t)st.st_size), path,
-			   dump ? dir : 0, eng);
+			   dump ? dir : 0);
 	kof_unmap_file(map, (uint64_t)st.st_size);
 	return rc;
 }
@@ -2474,11 +1974,8 @@ struct unp_run {
 	 */
 	/* And which build of it - see kof_result.packer_build. */
 	char        build[48];
-	/* Carried so a recovered object gets the same treatment its parent got.
-	 * A marker inside an unpacked image is the case where "which module does
-	 * this belong to" is hardest to answer by eye, so leaving the recovered
-	 * objects out of it would omit the answer where it is worth most. */
-	struct kof_engine *touch;
+	/* The engine, to turn the ids a verdict lists back into names. */
+	const kof_engine *eng;
 	uint32_t    produced;
 	uint32_t    partial;
 	/*
@@ -2528,6 +2025,39 @@ static void on_debug(uint32_t fact, const char *what, uint64_t value,
 }
 
 
+/*
+ * THE VERDICT THE ENGINE MADE OF AN OBJECT, and what it was made of: the diagnoses
+ * that matched and the diseases, each named by the engine (kdb_diagnose_name,
+ * kdb_disease_name) from the ids the verdict carries. Nothing is composed here.
+ */
+static void print_verdict(const struct unp_run *u, const struct kof_result *res)
+{
+	const struct kof_finding *f = &res->verdict;
+	uint32_t i;
+
+	if (!res->has_verdict)
+		return;
+	printf("  verdict   %s%s%s\n", C_BAD, f->name, C_OFF);
+	for (i = 0; i < f->n_diag; i++) {
+		const char *nm = kdb_diagnose_name(u->eng, f->diag[i]);
+
+		printf("    diagnose %s\n", nm ? nm : "?");
+	}
+	if (f->diag_total > f->n_diag)
+		printf("    diagnose (%u more not listed)\n",
+		       (unsigned)(f->diag_total - f->n_diag));
+	for (i = 0; i < f->n_disease; i++) {
+		const char *nm = kdb_disease_name(u->eng, f->disease[i]);
+		int ty = kdb_disease_type(u->eng, f->disease[i]);
+
+		printf("    disease  %s (%s)\n", nm ? nm : "?",
+		       ty >= 0 ? kof_maltype_name((uint32_t)ty) : "?");
+	}
+	if (f->disease_total > f->n_disease)
+		printf("    disease  (%u more not listed)\n",
+		       (unsigned)(f->disease_total - f->n_disease));
+}
+
 static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		       const struct kof_result *res, void *user)
 {
@@ -2554,6 +2084,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 			       res->packer_build ? res->packer_build
 						 : res->opened_by, C_OFF);
 		}
+		print_verdict(u, res);
 		return 0;
 	}
 
@@ -2661,32 +2192,18 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		printf("   %sheur %d%s%s d%u%s", C_NOTE, res->heur_score, C_OFF,
 		       C_DIM, res->heur_depth, C_OFF);
 	printf("\n");
+	print_verdict(u, res);
 
 	/*
-	 * Writing is what needs a directory. Looking does not.
-	 *
-	 * These two were one branch, and that was the bug: a recovered object was
-	 * only ever examined as a side effect of being dumped. For a packed sample
-	 * the recovered object is the ONLY one that carries markers - the packed
-	 * parent carries compressed bytes and nothing else - so --markers went
-	 * silent on precisely the files it exists for, and said "nothing in the
-	 * database has a marker here" while the scanner reported the child
-	 * infected. Truthful about the parent and useless about the sample.
-	 */
-	/*
-	 * WHAT THE ENGINE SAID ABOUT THIS OBJECT, BEFORE EITHER PATH LOOKS AT
-	 * IT.
-	 *
-	 * These used to be set further down, past the branch below - so the
-	 * --markers path, which returns there, examined every recovered object
-	 * WITHOUT the regions, the symbols or the language the engine had just
-	 * handed over. That is the one path --markers exists for: a packed
-	 * sample's markers are all in the child. The pane then re-read the
-	 * bytes and answered about them instead, which for a normalised view is
-	 * a different object - see kof_result.region and .lang_known.
+	 * Writing is what needs a directory. Looking does not: a recovered
+	 * object is examined whether or not it is dumped, with the regions, the
+	 * symbols and the language the engine just handed over - see
+	 * kof_result.region and .lang_known.
 	 */
 	g_decl_syms = res->syms;
 	g_decl_syms_n = res->n_syms;
+	g_decl_fixed = res->fixed;
+	g_decl_fixed_n = res->n_fixed;
 	g_decl_view = res->entry_kind == KOF_ENT_NORMALIZED;
 	g_decl_lang = res->lang_known;
 	g_decl_subtype = res->subtype;
@@ -2698,10 +2215,9 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		       g_decl_rgn_n * sizeof g_decl_rgn[0]);
 
 	if (!u->dump_dir) {
-		if (u->touch || g_blocks) {
+		if (g_blocks || g_scfind) {
 			printf("\n");
-			if (examine_bytes(kof_buf_make(bytes, len), name, 0,
-					  u->touch) < 0)
+			if (examine_bytes(kof_buf_make(bytes, len), name, 0) < 0)
 				u->err = 1;
 		}
 		g_decl_syms = NULL;
@@ -2747,7 +2263,7 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 		}
 	}
 	printf("\n");
-	if (examine_bytes(kof_buf_make(bytes, len), name, sub, u->touch) < 0)
+	if (examine_bytes(kof_buf_make(bytes, len), name, sub) < 0)
 		u->err = 1;
 	g_decl_syms = NULL;
 	g_decl_syms_n = 0;
@@ -2759,13 +2275,9 @@ static int on_unpacked(const char *name, const void *bytes, uint64_t len,
 
 /*
  * Run the database's unpackers over one file and report what came out.
- *
- * all_matches is on, and that is not a detail: without it the engine stops at the
- * first detection and never opens the container, which is right for scanning and
- * wrong for a tool whose entire question is what is inside.
  */
 static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
-		       int verbose, int markers)
+		       int verbose)
 {
 	struct kof_scan_option opt;
 	struct unp_run u;
@@ -2773,7 +2285,6 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 
 	memset(&opt, 0, sizeof opt);
 	memset(&u, 0, sizeof u);
-	opt.all_matches = 1;
 	/*
 	 * The most this build's heuristic can be asked for.
 	 *
@@ -2786,7 +2297,7 @@ static int unpack_pass(kof_engine *eng, const char *path, const char *dump_dir,
 	 */
 	opt.heur_level = KOF_HEUR_LEVEL_MAX;
 	u.dump_dir = dump_dir;
-	u.touch = markers ? eng : NULL;
+	u.eng = eng;
 	g_debug = verbose;
 	g_root_path = path;
 
@@ -2833,12 +2344,6 @@ static void usage(const char *argv0)
 		"             versions, methods, counts. Needs --db.\n"
 		"  --color    force colour on; --no-color forces it off. The default\n"
 		"             is colour when stdout is a terminal and NO_COLOR is unset.\n"
-		"  --sources  D  where the signature sources are, so a marker row can\n"
-		"             name the file and line its logic is written on. Needs\n"
-		"             --markers.\n"
-		"  --markers  list every database marker found in the file and whose\n"
-		"             it is, including modules that did not fire, with the\n"
-		"             reason each did not. Needs --db.\n"
 		"  --blocks   list the units the similarity matcher reads - the same cut\n"
 		"             the scanner makes - with region, offset, length, side,\n"
 		"             function, window count, and each unit's block (its\n"
@@ -2866,8 +2371,7 @@ int main(int argc, char **argv)
 {
 	const char *db = NULL;
 	kof_engine *eng = NULL;
-	const char *sources = NULL;
-	int dump = 0, verbose = 0, markers = 0, colour = -1;
+	int dump = 0, verbose = 0, colour = -1;
 	int i, files = 0, bad = 0;
 
 	/* Before argv is read: on Windows it has already lost anything outside
@@ -2888,15 +2392,6 @@ int main(int argc, char **argv)
 		} else if (strcmp(argv[i], "--hashes") == 0) {
 			g_blocks = 1;
 			g_hashes = 1;
-		} else if (strcmp(argv[i], "--markers") == 0) {
-			markers = 1;
-		} else if (strcmp(argv[i], "--sources") == 0) {
-			if (++i >= argc) {
-				fprintf(stderr, "%s: --sources needs a "
-						"directory\n", argv[0]);
-				return 2;
-			}
-			sources = argv[i];
 		} else if (strcmp(argv[i], "--color") == 0 ||
 			   strcmp(argv[i], "--colour") == 0) {
 			colour = 1;
@@ -2934,11 +2429,6 @@ int main(int argc, char **argv)
 		colour = stdout_is_tty();
 	colour_enable(colour);
 
-	if (sources && !src_open(sources)) {
-		fprintf(stderr, "%s: out of memory\n", argv[0]);
-		return 2;
-	}
-
 	if (db) {
 		eng = keng_open(db);
 		if (!eng) {
@@ -2953,36 +2443,29 @@ int main(int argc, char **argv)
 	for (i = 1; i < argc; i++) {
 		int r;
 
-		if (strcmp(argv[i], "--db") == 0 ||
-		    strcmp(argv[i], "--sources") == 0) {
+		if (strcmp(argv[i], "--db") == 0) {
 			i++;               /* its value, already taken */
 			continue;
 		}
 		if (argv[i][0] == '-' && argv[i][1])
 			continue;
 
-		/* Verdicts first: the markers report says whether a module fired
-		 * and that is a scan's answer, so the scan has to have happened
-		 * by the time the report is drawn. */
-		if (markers && eng)
-			verdict_run(eng, argv[i]);
 		/* A log answers itself and skips the parsers - see
 		 * examine_event_log. */
 		if (examine_event_log(argv[i], colour))
 			continue;
-		r = examine(argv[i], dump, markers ? eng : NULL);
+		r = examine(argv[i], dump);
 		if (r >= 0 && eng) {
 			char dir[PATH_ROOM];
 			const char *d = NULL;
 
 			if (dump && kof_dump_dir_for(argv[i], dir, sizeof dir))
 				d = dir;
-			if (!unpack_pass(eng, argv[i], d, verbose, markers))
+			if (!unpack_pass(eng, argv[i], d, verbose))
 				r = -1;
 		}
 
 		files++;
-		verdict_free();
 		if (r < 0) {
 			keng_close(eng);
 			return 2;          /* could not write: see above */

@@ -173,7 +173,7 @@ void kgenome_mutation_cut(const uint8_t *p, uint64_t len, uint32_t avg, uint32_t
  * offered a function at a time (kgenome_mutation_by_function) yields the functions of
  * `funcs` that lie in it - grouped when small, dropped when they are stubs or
  * the library's - and, from the bytes alone, the clusters of
- * strings that such a region holds when .rodata shares its segment (by_string in
+ * strings that such a region holds when .rodata shares its segment (by_bytes in
  * libgenome/celllysis/mutation_units.c). With `funcs` empty only the clusters remain. Any other region is cut by kgenome_mutation_cut at the fixed target
  * KGENOME_MUTATION_SEG_AVG, split where it crosses a library boundary so that no unit
  * spans one. `lib` may be NULL.
@@ -207,6 +207,13 @@ struct kgenome_mutation_req {
 	/* what is known about the object; both may be NULL */
 	const struct kgenome_func_set *funcs;
 	const struct kgenome_true_all *lib;
+	/*
+	 * Extents that are each ONE unit, sorted and apart, or NULL: what the cut must not
+	 * find again for itself. The strings and pieces of the region are cut around them.
+	 * A function region's functions are not affected. See by_bytes.
+	 */
+	const struct kof_range        *fixed;
+	uint32_t                       n_fixed;
 	/* the sink */
 	kgenome_mutation_unit_fn       fn;
 	void                          *user;

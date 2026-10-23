@@ -46,11 +46,11 @@ KOF_DEFINE_SCAN
 	 * a file that simply has none is unremarkable. The two sentinels exist so
 	 * this distinction can be made. */
 	if (ctx->entry_off == KOF_BROKEN)
-		KOF_SCAN_SUSPECT("EntryUnresolved");
+		{ kof_debug("EntryTest#EntryUnresolved", 0); return; }
 	if (ctx->entry_off == KOF_NA)
 		return;
 
 	if (ctx->entry_off > ENTRY_THRESHOLD)
-		KOF_SCAN_INFECT("EntryAboveThreshold");
+		{ kof_debug("EntryTest#EntryAboveThreshold", 0); return; }
 
 }

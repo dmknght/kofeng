@@ -356,6 +356,87 @@ static void data_strings(void)
 	check(hit, "the string cluster does not start a unit");
 }
 
+
+/*
+ * A FIXED EXTENT IS ONE UNIT. A view's decoded strings are not printable, so cutting
+ * the view again would break a parent's cluster into pieces; the producer says
+ * where the unit is and the cut leaves it whole, cutting only around it.
+ */
+static void fixed_units(void)
+{
+	static uint8_t obj[60000];
+	struct kof_range e = { 0, sizeof obj };
+	struct kof_range fx[2] = { { 5000, 600 }, { 20100, 900 } };
+	struct kgenome_func_set fs;
+	struct kgenome_true_all lib;
+	struct got g;
+	uint32_t s = 11, i, j, seen = 0;
+	uint64_t at = 0;
+
+	memset(&fs, 0, sizeof fs);
+	memset(&lib, 0, sizeof lib);
+	for (i = 0; i < sizeof obj; i++) {
+		s = s * 1103515245u + 12345u;
+		obj[i] = (uint8_t)(s >> 16) | 0x80;
+	}
+	for (i = 20000; i < 40000; ) {          /* strings across the second fixed extent */
+		for (j = 0; j < 40 && i < 40000; j++, i++)
+			obj[i] = 'a' + (uint8_t)(j % 26);
+		obj[i - 1] = 0;
+	}
+	memset(&g, 0, sizeof g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj, .n_obj = sizeof obj, .format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_DATA, .ext = &e, .n_ext = 1,
+			.funcs = &fs, .lib = &lib, .fixed = fx, .n_fixed = 2,
+			.fn = take, .user = &g,
+		});
+	for (i = 0; i < g.n; i++) {
+		check(g.off[i] == at, "the fixed units leave a gap or an overlap");
+		at = g.off[i] + g.len[i];
+		for (j = 0; j < 2; j++) {
+			uint64_t a = fx[j].off, b = fx[j].off + fx[j].len;
+
+			if (g.off[i] == a && g.len[i] == fx[j].len)
+				seen++;
+			check(!(g.off[i] < a && g.off[i] + g.len[i] > a) &&
+			      !(g.off[i] < b && g.off[i] + g.len[i] > b),
+			      "a unit spans the edge of a fixed extent");
+		}
+	}
+	check(at == sizeof obj, "the region is not covered with fixed units in it");
+	check(seen == 2u, "a fixed extent is not exactly one unit");
+
+	/* A library span through a fixed unit cuts it like any other unit. */
+	lib.span[0].off = 5200; lib.span[0].len = 100; lib.n = 1;
+	memset(&g, 0, sizeof g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj, .n_obj = sizeof obj, .format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_DATA, .ext = &e, .n_ext = 1,
+			.funcs = &fs, .lib = &lib, .fixed = fx, .n_fixed = 1,
+			.fn = take, .user = &g,
+		});
+	for (i = 0, seen = 0; i < g.n; i++)
+		if (g.off[i] >= 5000u && g.off[i] < 5600u)
+			seen++;
+	check(seen == 3u, "a library span inside a fixed unit does not cut it in three");
+
+	/* In a region offered a function at a time only strings are cut, and the
+	 * fixed unit is still one unit. */
+	lib.n = 0;
+	memset(&g, 0, sizeof g);
+	kgenome_mutation_units(&(const struct kgenome_mutation_req){
+			.p = obj, .n_obj = sizeof obj, .format = KOF_FMT_ELF,
+			.mask = KGENOME_SCAN_ELF_CODE, .ext = &e, .n_ext = 1,
+			.funcs = &fs, .lib = NULL, .fixed = fx, .n_fixed = 1,
+			.fn = take, .user = &g,
+		});
+	for (i = 0, seen = 0; i < g.n; i++)
+		if (g.off[i] == 5000u && g.len[i] == 600u)
+			seen++;
+	check(seen == 1u, "a fixed unit in a function region is not offered whole");
+}
+
 int main(void)
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -363,6 +444,7 @@ int main(void)
 	pe_functions();
 	data_in_code();
 	data_strings();
+	fixed_units();
 	if (failures) {
 		printf("mutation units: %d failure(s)\n", failures);
 		return 1;

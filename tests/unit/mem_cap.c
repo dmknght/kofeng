@@ -152,7 +152,6 @@ static void *th_main(void *p)
 	unsigned i;
 
 	memset(&opt, 0, sizeof opt);
-	opt.all_matches = 1;
 	opt.max_produced_bytes = 1ull << 40;
 	opt.max_object_bytes = 64u << 20;
 	for (i = 0; i < 3u; i++) {

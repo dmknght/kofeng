@@ -39,6 +39,7 @@
 #include <stdint.h>
 
 #include "../../libkofeng/kofeng.h"
+#include "notes.h"
 
 static int fails;
 
@@ -87,6 +88,9 @@ static uint64_t wrap(uint8_t *b, uint64_t cap, const uint8_t *code, uint64_t n)
 	return 0x78u + n;
 }
 
+/* What the test module said while the object was scanned - see notes.h. */
+static struct note_list pend;
+
 struct got {
 	int      n_obj;
 	int      n_diag;
@@ -98,15 +102,16 @@ static int on_object(const char *name, const void *bytes, uint64_t len,
 		     const struct kof_result *res, void *user)
 {
 	struct got *g = user;
-	uint32_t i;
+	struct note_list got;
 
 	(void)name;
 	(void)bytes;
 	(void)len;
+	(void)res;
+	notes_take(&pend, &got);
 	g->n_obj++;
-	for (i = 0; i < res->n; i++)
-		if (strstr(res->v[i].name, "DiagRwxTest"))
-			g->saw_rwx = 1;
+	if (notes_has(&got, "DiagRwxTest"))
+		g->saw_rwx = 1;
 	return 0;
 }
 
@@ -118,6 +123,7 @@ static void run(kof_scanner *sc, const kof_engine *eng, const uint8_t *b,
 
 	memset(&opt, 0, sizeof opt);
 	memset(&g, 0, sizeof g);
+	memset(&pend, 0, sizeof pend);
 	g.eng = eng;
 
 	kscan_bytes(sc, b, n, what, &opt, on_object, &g);
@@ -198,6 +204,8 @@ int main(int argc, char **argv)
 		fails++;
 	}
 	sc = kscan_new(eng);
+	if (sc)
+		kscan_on_debug(sc, notes_on, &pend);
 	if (!sc) {
 		keng_close(eng);
 		return 2;

@@ -20,8 +20,6 @@ void ksb_artefact_free(struct artefact *a)
 	free(a->label);
 	free(a->srcpath);
 	free(a->family);
-	free(a->disease);
-	free(a->heur_predict);
 	free(a->content);
 	free(a->code);
 	free(a->str);
@@ -100,14 +98,6 @@ static int meta_load(struct artefact *a)
 			a->subtype_mask = (uint32_t)strtoul(line + 13, 0, 10);
 		} else if (strncmp(line, "step=", 5) == 0) {
 			a->step = (uint32_t)strtoul(line + 5, 0, 10);
-		} else if (strncmp(line, "heur_phase=", 11) == 0) {
-			a->heur_phase = (uint32_t)strtoul(line + 11, 0, 10);
-		} else if (strncmp(line, "heur_want=", 10) == 0) {
-			a->heur_want = (uint32_t)strtoul(line + 10, 0, 10);
-		} else if (strncmp(line, "heur_level=", 11) == 0) {
-			a->heur_level = (uint32_t)strtoul(line + 11, 0, 10);
-		} else if (strncmp(line, "cure_off=", 9) == 0) {
-			a->cure_off = (uint32_t)strtoul(line + 9, 0, 10);
 		} else if (strncmp(line, "blob_len=", 9) == 0) {
 			blob_len = strtoull(line + 9, 0, 10);
 		} else if (strncmp(line, "kind=", 5) == 0) {
@@ -152,43 +142,16 @@ static int meta_load(struct artefact *a)
 			}
 		} else if (strncmp(line, "maltype=", 8) == 0) {
 			a->maltype = (uint32_t)strtoul(line + 8, 0, 10);
-		} else if (strncmp(line, "disease_type=", 13) == 0) {
-			a->disease_type = (uint32_t)strtoul(line + 13, 0, 10);
-		} else if (strncmp(line, "disease=", 8) == 0) {
-			char *nl = strchr(line + 8, '\n');
-
-			if (nl)
-				*nl = 0;
-			free(a->disease);
-			a->disease = line[8] ? strdup(line + 8) : NULL;
-			if (line[8] && !a->disease) {
-				fclose(f);
-				goto out;
-			}
 		} else if (strncmp(line, "content=", 8) == 0) {
 			char *nl = strchr(line + 8, '\n');
 
 			if (nl)
 				*nl = 0;
 			free(a->content);
-			/* Empty stays NULL, as heur_predict does: nothing declared
-			 * must not intern a zero-length word. */
+			/* Empty stays NULL: nothing declared must not intern a
+			 * zero-length word. */
 			a->content = line[8] ? strdup(line + 8) : NULL;
 			if (line[8] && !a->content) {
-				fclose(f);
-				goto out;
-			}
-		} else if (strncmp(line, "heur_predict=", 13) == 0) {
-			char *nl = strchr(line + 13, '\n');
-
-			if (nl)
-				*nl = 0;
-			free(a->heur_predict);
-			/* Empty stays NULL: a rule that predicts nothing must
-			 * not intern a zero-length name and carry an offset
-			 * that reads as a prediction of "". */
-			a->heur_predict = line[13] ? strdup(line + 13) : NULL;
-			if (line[13] && !a->heur_predict) {
 				fclose(f);
 				goto out;
 			}
@@ -227,15 +190,7 @@ static int meta_load(struct artefact *a)
 				"rebuild the artefacts\n", a->stem);
 		goto out;
 	}
-	/* A rule carries its word in the family slot - see ksigbuilder - and
-	 * a rule with none would report a finding with nothing in the middle. */
-	if (a->kind == KOF_PACK_HEUR && (!a->family || !a->family[0])) {
-		fprintf(stderr, "ksigbuilder: %s: heuristic rule declares no "
-				"name\n", a->stem);
-		goto out;
-	}
-	if (a->kind != KOF_PACK_DETECT && a->kind != KOF_PACK_UNPACK &&
-	    a->kind != KOF_PACK_HEUR) {
+	if (a->kind != KOF_PACK_DETECT && a->kind != KOF_PACK_UNPACK) {
 		fprintf(stderr, "ksigbuilder: %s: unknown kind %u\n", a->stem,
 			a->kind);
 		goto out;
@@ -849,14 +804,10 @@ void ksb_warn_duplicate_patterns(struct artefact *arts, uint32_t n_arts)
 		if (fps[i].fp != fps[i + 1].fp)
 			continue;
 		/*
-		 * ACROSS KINDS IT IS NOT A DUPLICATE, IT IS A PAIR.
-		 *
-		 * The fingerprint is target, regions and patterns, and a
-		 * heuristic rule declares no patterns - so it collides with
-		 * every other pattern-free module for the same format, which is
-		 * every unpacker. The two say different things about the same
-		 * kind of file and neither is redundant. Only two modules of the
-		 * SAME kind saying it are worth a word.
+		 * ACROSS KINDS IT IS NOT A DUPLICATE, IT IS A PAIR. The two say
+		 * different things about the same kind of file and neither is
+		 * redundant. Only two modules of the SAME kind saying it are
+		 * worth a word.
 		 */
 		if (arts[fps[i].idx].kind != arts[fps[i + 1].idx].kind)
 			continue;
