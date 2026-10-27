@@ -49,7 +49,7 @@ struct hv_r3 {
 
 /* LD: 128 symbols of 7 bits: the 100 literals, 256, 258..262, 263..270, 271..284 (= 100 + 1 + 27).
  * DD: slots 0..15, 4 bits. LDD: 0..15, 4 bits. RD: 0..7, 3 bits. */
-static inline void hv_r3_codes(struct hv_r3 *e)
+static inline void hv_r3_codes(struct hv_r3 *e, int filt)
 {
 	unsigned i;
 
@@ -65,6 +65,10 @@ static inline void hv_r3_codes(struct hv_r3 *e)
 		e->dc[i] = 4, e->lowc[i] = 4;
 	for (i = 0; i < 8; i++)
 		e->rc[i] = 3;
+	if (filt) {                                    /* room for symbol 257 (a filter declaration): two 8 bit codes take one 7 bit slot */
+		e->lc[284] = 8;
+		e->lc[257] = 8;
+	}
 	hv_canon(e->lc, 299, e->lcode); hv_canon(e->dc, 60, e->dcode);
 	hv_canon(e->lowc, 17, e->lowcode); hv_canon(e->rc, 28, e->rcode);
 }
@@ -76,7 +80,7 @@ static inline void hv_r3_hist(struct hv_r3 *e, uint8_t b)
 	e->hn++;
 }
 
-static inline void hv_r3_init(struct hv_r3 *e, uint8_t *out, size_t cap, uint8_t *hist, size_t hcap)
+static inline void hv_r3_init_ex(struct hv_r3 *e, uint8_t *out, size_t cap, uint8_t *hist, size_t hcap, int filt)
 {
 	uint8_t table[404];
 
@@ -84,7 +88,7 @@ static inline void hv_r3_init(struct hv_r3 *e, uint8_t *out, size_t cap, uint8_t
 	hv_bw_init(&e->w, out, cap);
 	e->hist = hist;
 	e->hcap = hcap;
-	hv_r3_codes(e);
+	hv_r3_codes(e, filt);
 	/* an LZ block, tables not kept: two zero bits, then the tables */
 	hv_bw_msb(&e->w, 0, 2);
 	memcpy(table, e->lc, 299);
@@ -92,6 +96,11 @@ static inline void hv_r3_init(struct hv_r3 *e, uint8_t *out, size_t cap, uint8_t
 	memcpy(table + 299 + 60, e->lowc, 17);
 	memcpy(table + 299 + 60 + 17, e->rc, 28);
 	hv_rar_tables(&e->w, table, 404);
+}
+
+static inline void hv_r3_init(struct hv_r3 *e, uint8_t *out, size_t cap, uint8_t *hist, size_t hcap)
+{
+	hv_r3_init_ex(e, out, cap, hist, hcap, 0);
 }
 
 static inline void hv_r3_lsym(struct hv_r3 *e, unsigned s)

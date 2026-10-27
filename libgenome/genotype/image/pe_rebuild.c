@@ -261,6 +261,10 @@ uint64_t kgenome_pe_write_hdr(uint8_t *out, uint64_t cap,
 				continue;
 			if (!rva || !tmpl->dir[di].size)
 				continue;
+			/* KNOWN DEFECT E-PEDIR (2026-10-24, R) [sev M]: kgenome_pe_write_hdr tests a parent directory RVA against every sec[k],
+			 * the KGENOME_SECF_PAD ones included, but PAD sections are not written to the section table. Trigger: a directory
+			 * RVA that falls in alignment padding. Effect: the rebuilt header names a directory inside no written section.
+			 * Reproducer: none (read). Fix: skip sec[k] with KGENOME_SECF_PAD in this loop. */
 			for (k = 0; k < n; k++)
 				if (rva >= sec[k].rva &&
 				    rva < sec[k].rva + sec[k].vsize)

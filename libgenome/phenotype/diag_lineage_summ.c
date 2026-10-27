@@ -340,6 +340,11 @@ static int graph_build(struct kgenome_lineage *L, const struct kgenome_codemap *
 		g->fe[fp[from[k]]++] = to[k];
 		g->re[rp[to[k]]++] = from[k];
 		if (from[k] != to[k])
+			/* KNOWN DEFECT D8 (2026-10-24, R) [sev M]: `callers` counts direct calls only, so an exported or address-taken function with
+			 * one direct caller has all its callers "accounted for" and its summary links come out MUST. Trigger: a function also
+			 * called through a pointer or from outside the object. Effect: the link is MUST on one caller's value (link 451/f in
+			 * the lineage audit), the others are never seen. Reproducer: none committed (agent-reported, STATUS D8). Fix: mark a
+			 * function whose address is taken or exported as having an unknown caller and demote its links to MAY. */
 			L->callers[to[k]]++;
 	}
 	/* the functions that can reach a node: a value can only travel between two nodes through them */

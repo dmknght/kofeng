@@ -4,13 +4,12 @@ from dl import status  # noqa
 
 A = 'menu'
 EXPECT = {
-    'File': ['Quit'],
+    'File': ['Next File', 'Previous File', 'Quit'],
     'Edit': ['Find...', 'Go to...'],
-    'Analysis': ['Dashboard', 'Symbols', 'Find shellcode in variables',
-                 'Find infected data', 'Decode string', 'Unpack', 'Dump',
+    'Analysis': ['Dashboard', 'Infection', 'Decode string', 'Unpack', 'Dump',
                  'Rebuild database'],
-    'Switch-File': ['Next', 'Previous'],
     'Help': ['Keyboard', 'About'],
+    'Manage': ['Pathogens', 'Syndromes'],
 }
 
 
@@ -59,9 +58,9 @@ def file_menu_has_only_quit_and_it_is_enabled():
 
 @case(A)
 def disabled_item_click_does_nothing():
-    with ko() as v:
+    with Viewer(FIX('tiny.bin')) as v:
         v.menu_open('Analysis')
-        s = v.popup_item('Find infected data')
+        s = v.popup_item('Infection')
         check(s and not s[3], 'expected disabled: %r' % (s,))
         v.click(s[1] + 2, s[0])
         check(v.alive(), 'viewer died')
@@ -69,11 +68,18 @@ def disabled_item_click_does_nothing():
 
 
 @case(A)
-def find_infected_disabled_on_clean_ko():
+def infection_is_listed_and_greyed_for_now():
+    # one item for both old ones: live when the object has infected ranges or its format can carry shellcode
     with ko() as v:
         v.menu_open('Analysis')
-        it = v.popup_item('Find infected data')
-        check(it and not it[3], 'expected disabled: %r' % (it,))
+        it = v.popup_item('Infection')
+        check(it and not it[3], 'Infection must be listed and greyed (switched off for now): %r' % (it,))
+        check(not v.popup_item('Find shellcode') and not v.popup_item('Find infected'), 'a retired item is still offered')
+        v.esc()
+    with Viewer(FIX('tiny.bin')) as v:
+        v.menu_open('Analysis')
+        it = v.popup_item('Infection')
+        check(it and not it[3], 'expected greyed for a raw blob: %r' % (it,))
 
 
 @case(A)
@@ -133,15 +139,15 @@ def f10_down_enter_runs_item():
 
 @case(A)
 def arrow_skips_disabled_items():
-    with ko() as v:
+    with Viewer(FIX('tiny.bin')) as v:
         v.menu_open('Analysis')
         # walk down 12 times; the selected row (bold / reverse) must never be
-        # the disabled "Find infected data"
+        # the disabled "Infection" (a raw blob: no infected range, no executable image)
         for _ in range(12):
             v.key('down', settle=0.1)
             for y, x, t, en in v.popup():
                 b = v.screen.buffer[y - 1][x]
-                if (b.reverse or b.bold) and 'Find infected' in t:
+                if (b.reverse or b.bold) and 'Infection' in t:
                     raise Fail('cursor landed on disabled item')
         v.esc()
 
@@ -194,8 +200,8 @@ def keyboard_help_lists_f10():
 @case(A)
 def next_prev_enabled_states():
     with ko() as v:
-        v.menu_open('Switch-File')
-        for nm in ('Next', 'Previous'):
+        v.menu_open('File')
+        for nm in ('Next File', 'Previous File'):
             it = v.popup_item(nm)
             check(it and it[3], '%s should be enabled with a clean draft' % nm)
 
@@ -206,11 +212,19 @@ def last_line(v):
 
 
 @case(A)
-def analysis_find_shellcode_reports_when_none():
+def analysis_infection_opens_a_dialog_with_its_two_tabs():
+    raise Skip('the Infection item is switched off until its analysis is reworked (bar_enabled BI_INFECTION)')
+    # the old item printed "No shellcode-like variable here" on the status row; the dialog says why a tab is empty, on the tab
     with ko() as v:
-        v.menu_item('Analysis', 'Find shellcode in variables')
-        v.pump(0.6)
-        check('No shellcode-like variable here' in last_line(v), last_line(v)[-80:])
+        check(v.menu_item('Analysis', 'Infection'), 'no Infection item')
+        v.pump_quiet()
+        d = v.dialog()
+        check(d and 'Infected data' in v.row(2) and 'Shellcode' in v.row(2), 'no Infection dialog: %r' % (v.row(2)[:100],))
+        check(v.row(2).index('Infected data') < v.row(2).index('Shellcode'), 'tabs out of order')
+        check('No shellcode-like variable here' not in last_line(v), 'the retired status message is back')
+        v.click(*v.find('Shellcode', rows=(1, 4)))
+        v.pump_quiet()
+        check(v.has('no variable or data range') or v.has('shape'), 'the Shellcode tab says nothing: %r' % v.show(3, 8))
 
 
 @case(A)
@@ -236,7 +250,7 @@ def analysis_dump_plain_for_non_executable():
     with Viewer(pick(SCRATCH + '/packtest', 1, 5000, 500000)[0]) as v:
         v.menu_open('Analysis')
         check(v.popup_item('Dump'), 'no Dump item for a script')
-        check(not v.popup_item('Symbols'), 'Symbols shown for a script')
+        check(not v.popup_item('Symbols'), 'Symbols shown for a script (the item is retired: the dashboard has the tabs)')
         v.esc()
 
 
@@ -266,30 +280,27 @@ def analysis_rebuild_is_refused_outside_a_source_tree():
 
 
 @case(A)
-def analysis_find_infected_is_greyed_unless_scan_found_infected_ranges():
-    # Design (bar_enabled BI_FINDINF): greyed when n_infected == 0, even for a
-    # detected sample.  No file-infector sample that still triggers a cure
-    # module was available here, so the enabled half is a SKIP.
+def analysis_infection_is_greyed_for_every_object_for_now():
+    # Design (bar_enabled BI_INFECTION): live when the object has infected ranges (the engine reported them) or its format can
+    # carry shellcode (kv_cap); greyed for neither. The infected half is t_dashtabs (the fixture that has an infected range).
     with Viewer(SAMPLES['gafgyt']) as v:
         v.menu_open('Analysis')
-        it = v.popup_item('Find infected data')
-        check(it and not it[3], 'expected greyed for a non-infector: %r' % (it,))
+        it = v.popup_item('Infection')
+        check(it and not it[3], 'Infection must be listed and greyed (switched off for now): %r' % (it,))
         v.esc()
-    inf = os.environ.get('KOF_TUI_INFECTED')       # optional: path to an infected sample
-    if not inf:
-        raise Skip('set KOF_TUI_INFECTED=<path> to test the enabled state')
-    with Viewer(inf) as v:
+    with Viewer(FIX('tiny.bin')) as v:
         v.menu_open('Analysis')
-        it = v.popup_item('Find infected data')
-        check(it and it[3], 'greyed for an infected sample: %r' % (it,))
+        it = v.popup_item('Infection')
+        check(it and not it[3], 'expected greyed for a raw blob: %r' % (it,))
+        v.esc()
 
 
 @case(A)
-def analysis_symbols_item_hidden_without_symbols_and_dashboard_always():
+def analysis_symbols_item_is_retired_and_dashboard_always():
     with Viewer(FIX('tiny.bin')) as v:
         v.menu_open('Analysis')
         check(v.popup_item('Dashboard'), 'Dashboard must always be offered')
-        check(not v.popup_item('Symbols'), 'Symbols offered for a raw blob')
+        check(not v.popup_item('Symbols'), 'the retired Symbols item is offered for a raw blob')
 
 
 @case(A)
@@ -342,3 +353,18 @@ def question_mark_does_nothing_although_usage_mentions_it():
 
 if __name__ == '__main__':
     main(A)
+
+
+@case(A)
+def manage_families_is_live_and_syndromes_is_greyed_for_now():
+    with ko() as v:
+        v.menu_open('Manage')
+        it = v.popup_item('Pathogens')
+        check(it and it[3], 'Pathogens must be enabled: %r' % (it,))
+        it = v.popup_item('Syndromes')
+        check(it and not it[3], 'Syndromes must be listed and greyed (switched off for now): %r' % (it,))
+        v.esc()
+        v.menu_open('Analysis')
+        check(not v.popup_item('Syndrome table') and not v.popup_item('Syndromes'), 'the syndrome item is still in Analysis')
+        v.esc()
+        check('Switch-File' not in ' '.join(v.row(1).split()), 'the Switch-File menu is still on the bar')

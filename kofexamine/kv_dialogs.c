@@ -71,6 +71,8 @@
 /* Rows of plaintext the box shows. Enough for a dropper's script to be read
  * without scrolling, few enough that the form stays on one screen. */
 #define ENC_RES_ROWS 8
+/* The widest the decoder's result window may be, in columns; its rule is drawn from a three-byte glyph, which sizes the buffer. */
+#define ENC_RES_MAX_W 120u
 
 static int  enc_in_text(const struct view *v, int y, int x);
 
@@ -79,10 +81,11 @@ static int  enc_in_text(const struct view *v, int y, int x);
  * draw the box honestly, and the caller draws nothing at all - a box clipped to
  * a screen that cannot hold it is worse than no box.
  */
-static int dframe_begin(struct out *o, struct dframe *f, const char *title,
+int dframe_begin(struct out *o, struct dframe *f, const char *title,
 			int want_w, int want_h, int close)
 {
-	static const char btn[] = "[ Close ]";
+	/* close 1: the "[ Close ]" button, 2: the "[x]" box of a small dialog (the same hit test either way). */
+	const char *btn = close == 2 ? "[x]" : "[ Close ]";
 	int i, fill;
 
 	f->btn_y = f->btn_x0 = f->btn_x1 = -1;
@@ -113,8 +116,8 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 	 * stays on screen. Clamped rather than refused: a terminal that shrank
 	 * under a moved box should bring it back into view, not lose it.
 	 */
-	f->x += f->dx;
-	f->y += f->dy;
+	f->x += f->off.dx;
+	f->y += f->off.dy;
 	if (f->x + f->w - 1 > g_cols)
 		f->x = g_cols - f->w + 1;
 	if (f->x < 1)
@@ -158,7 +161,7 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
 	 * warning written on it was not the one with the bug.
 	 */
 	if (close)
-		fill -= (int)sizeof btn - 1;
+		fill -= (int)strlen(btn);
 	if (fill < 0)
 		fill = 0;
 	for (i = 0; i < fill; i++)
@@ -179,12 +182,12 @@ static int dframe_begin(struct out *o, struct dframe *f, const char *title,
  * where the caller writes. */
 /* Hand the screen back. Every drawer that got a 1 out of dframe_begin calls
  * this, whether or not it drew a bottom rule. */
-static void dframe_done(struct out *o, struct dframe *f)
+void dframe_done(struct out *o, struct dframe *f)
 {
 	out_clip_restore(o, f->save);
 }
 
-static void dframe_row(struct out *o, const struct dframe *f, int r)
+void dframe_row(struct out *o, const struct dframe *f, int r)
 {
 	out_at(o, f->y + 1 + r, f->x);
 	o->col_hint = 0;
@@ -196,7 +199,7 @@ static void dframe_row(struct out *o, const struct dframe *f, int r)
 }
 
 /* Close the row the caller has just written: pad to the edge, then the wall. */
-static void dframe_edge(struct out *o, const struct dframe *f)
+void dframe_edge(struct out *o, const struct dframe *f)
 {
 	while ((int)o->col_hint < f->iw)
 		out_str(o, " ");
@@ -206,7 +209,7 @@ static void dframe_edge(struct out *o, const struct dframe *f)
 }
 
 /* The bottom rule, with an optional caption sitting on it. */
-static void dframe_end(struct out *o, const struct dframe *f, const char *foot)
+void dframe_end(struct out *o, const struct dframe *f, const char *foot)
 {
 	int i, fill;
 
@@ -416,13 +419,13 @@ void draw_enc(struct out *o, struct view *v)
 			       ? (uint32_t)ENC_RES_ROWS : nl;
 		int iw = f->iw - 4;             /* the window's inside */
 		int r;
-		char rule[PROP_TAB_MAX_W * 3u + 1u];
+		char rule[ENC_RES_MAX_W * 3u + 1u];
 		uint32_t k = 0;
 
 		if (iw < 8)
 			iw = 8;
-		if ((uint32_t)iw > PROP_TAB_MAX_W)
-			iw = (int)PROP_TAB_MAX_W;
+		if ((uint32_t)iw > ENC_RES_MAX_W)
+			iw = (int)ENC_RES_MAX_W;
 		/* Clamped here, where how much fits is finally known. */
 		if (nl > (uint32_t)ENC_RES_ROWS) {
 			if (v->enc_voff > nl - (uint32_t)ENC_RES_ROWS)
@@ -542,7 +545,7 @@ void draw_enc(struct out *o, struct view *v)
 }
 
 /* Non-zero when a click landed on the frame's close control. */
-static int dframe_hit_close(const struct dframe *f, int my, int mx)
+int dframe_hit_close(const struct dframe *f, int my, int mx)
 {
 	return f->btn_y >= 0 && my == f->btn_y &&
 	       mx >= f->btn_x0 && mx <= f->btn_x1;
@@ -1000,17 +1003,24 @@ void draw_find(struct out *o, struct view *v)
  * decoder all gain it from the same nine lines - and a box added later gains it
  * without anybody remembering to.
  */
+/* Take hold of a box's offset at the pointer: the one place a drag starts, for a framed dialog (dframe_grab) and for the
+ * dashboard's frame (kv_dd). on_drag moves `off` by the pointer's travel and on_release lets go. */
+void dlg_hold(struct view *v, struct dlg_off *off)
+{
+	v->dlg_move = off;
+	v->dlg_mx = g_mx;
+	v->dlg_my = g_my;
+	v->dlg_mdx = off->dx;
+	v->dlg_mdy = off->dy;
+}
+
 int dframe_grab(struct view *v, struct dframe *f)
 {
 	if (g_my != f->y || g_mx < f->x || g_mx > f->x + f->w - 1)
 		return 0;
 	if (f->btn_y == f->y && g_mx >= f->btn_x0 && g_mx <= f->btn_x1)
 		return 0;
-	v->dlg_move = f;
-	v->dlg_mx = g_mx;
-	v->dlg_my = g_my;
-	v->dlg_mdx = f->dx;
-	v->dlg_mdy = f->dy;
+	dlg_hold(v, &f->off);
 	return 1;
 }
 

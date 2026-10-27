@@ -94,6 +94,6 @@ NOOP     = :
 SILENCE  = 2>/dev/null
 NOW_UTC  = date -u +%Y%m%d%H
 FIND_DEPS = find $(BUILD) -name '*.d' 2>/dev/null
-PYTHON   ?= python3
+PYTHON   ?= python3 -B     # -B: no __pycache__ in the tree when the scripts run
 MKFIXTURES = tests/mkfixtures.sh
 endif

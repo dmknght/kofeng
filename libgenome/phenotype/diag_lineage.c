@@ -64,6 +64,12 @@ const struct kgenome_codemap *kgenome_lineage_codemap(struct kgenome_lineage *L)
 		uint64_t bytes;
 
 		L->cm_done = 1;
+		/* KNOWN DEFECT WP9-F8 (2026-10-25, M) [sev M]: kgenome_lineage_codemap returns NULL on a failed
+		 * kgenome_codemap_build without noting the status. Trigger: allocation refused inside the code map build
+		 * called by the lineage stages. Effect: the map is missing, so are the links the lineage makes through it,
+		 * and the status stays OK (the note below is reached only on success). Reproducer:
+		 * tests/lib/genome/diag_bin_oom.c KNOWN-MISS F8. Fix: before `return NULL` call kgenome_diag_note(L->s,
+		 * L->cm.status ? L->cm.status : KGENOME_NOMEM). */
 		if (!kgenome_codemap_build(L->obj, L->base, L->size, NULL, &L->cm))
 			return NULL;
 		bytes = (uint64_t)L->cm.n * sizeof *L->cm.v + (uint64_t)L->cm.n_to * sizeof *L->cm.by_to;

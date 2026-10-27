@@ -3,6 +3,8 @@
  * the corpora named beside it and are kept with the number they justify.
  */
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <genotype/image/obj.h>
@@ -13,6 +15,7 @@
 
 #include <celllysis/celllysis.h>
 #include <celllysis/xref.h>
+#include <celllysis/range_facts.h>
 
 #include "kofscfind.h"
 
@@ -154,6 +157,10 @@ static int xref_passes(uint32_t x)
  * guesswork: the alphabet is fixed and the transform is reversible. Returns the
  * bytes written, or 0 when the input is not base64 - which is most payloads,
  * and not a failure. */
+/* KNOWN DEFECT D18 (2026-10-24, R) [sev L]: b64 is a second base64 decoder inside the examiner; kuncoat already has
+ * KUNCOAT_ALGO_B64 (decoders/codings.h) and a tool shows engine results, it does not decode. Trigger: any
+ * payload the finder tries as base64. Effect: two decoders that can drift (padding, whitespace, lax mode).
+ * Reproducer: none (read). Fix: call kuncoat_transform with KUNCOAT_ALGO_B64 and delete this function. */
 static uint32_t b64(const uint8_t *in, uint32_t n, uint8_t *out, uint32_t cap)
 {
 	uint32_t i, k = 0, acc = 0, bits = 0;
@@ -527,81 +534,6 @@ struct sweep {
 	int built;
 };
 
-static void sweep_startup(struct sweep *w, const struct kgenome_elf_info *e,
-			  const uint8_t *data, uint64_t n)
-{
-	uint32_t i, wd = e->elf_class == KGENOME_ELFCLASS_64 ? 8u : 4u;
-
-	if (e->entry_addr)
-		kgenome_xref_startup(w->map, e->entry_addr);
-	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
-		const struct kgenome_elf_sec *sec = &e->sec[i];
-		uint64_t k, have;
-
-		if (kgenome_elf_sec_is_code(sec) && strcmp(sec->name, ".text") != 0)
-			kgenome_xref_startup(w->map, sec->mem_addr);
-		if (sec->type != 14u && sec->type != 15u)
-			continue;           /* INIT_ARRAY, FINI_ARRAY */
-		have = kof_clip_len(n, sec->file_off, sec->file_size);
-		for (k = 0; k + wd <= have; k += wd) {
-			uint64_t v = 0, j;
-
-			for (j = 0; j < wd; j++)
-				v |= (uint64_t)data[sec->file_off + k + j] << (8u * j);
-			if (!kgenome_xref_startup(w->map, v))
-				break;
-		}
-	}
-}
-
-static void sweep_build(struct sweep *w, const struct kgenome_obj *obj,
-			const uint8_t *data, uint64_t n)
-{
-	const struct kgenome_elf_info *e = kgenome_obj_elf(obj);
-	uint32_t i, left = KGENOME_XREF_MAX;
-	uint64_t total = 0;
-
-	w->map = kgenome_xref_new();
-	if (!w->map)
-		return;
-	sweep_startup(w, e, data, n);
-	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
-		const struct kgenome_elf_sec *sec = &e->sec[i];
-		uint64_t at, have, pos, end;
-
-		if (!kgenome_elf_sec_is_code(sec))
-			continue;
-		have = kgenome_elf_sec_extent(sec, n, &at);
-		if (!have)
-			continue;
-		total += have;
-		if (have > left) {
-			have = left;
-			w->cut = 1;
-		}
-		left -= (uint32_t)have;
-		kgenome_xref_begin(w->map, obj->arch);
-		for (pos = at, end = at + have; pos < end; ) {
-			struct kgenome_cell_insn ci;
-			uint64_t rem = end - pos;
-			uint32_t len = kgenome_cell_decode(obj->arch, 0, data + pos,
-							   rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem,
-							   sec->mem_addr + (pos - at), &ci);
-
-			if (len) {
-				ci.at = pos;
-				kgenome_xref_feed(w->map, &ci);
-				pos += len;
-			} else {
-				kgenome_xref_feed(w->map, NULL);  /* data in the code */
-				pos++;
-			}
-		}
-	}
-	if (total > KGENOME_XREF_MAX)
-		w->cut = 1;
-}
-
 static uint32_t sweep_ask(void *user, uint64_t va, uint64_t size)
 {
 	struct sweep *w = user;
@@ -609,7 +541,8 @@ static uint32_t sweep_ask(void *user, uint64_t va, uint64_t size)
 
 	if (!w->built) {
 		w->built = 1;
-		sweep_build(w, w->obj, w->data, w->n);
+		/* The reference map of the object's own code is the library's (kgenome_range_xref_build); the examiner only asks it. */
+		w->cut = kgenome_range_xref_build(w->obj, kof_buf_make(w->data, w->n), NULL, &w->map) != KGENOME_OK;
 	}
 	if (!w->map)
 		return KGENOME_XREF_PARTIAL;
@@ -655,6 +588,323 @@ enum kgenome_status kofscfind_find(const struct kgenome_obj *obj,
 	}
 	st = kofscfind_run(&in, out);
 	kgenome_xref_free(w.map);
+	return st;
+}
+
+/* ---- the list of where shellcode could sit ------------------------------------------------------------------ */
+
+#define SHF_ALLOC_      0x2u
+#define SHT_NOBITS_     8u
+#define ET_REL_         1u
+#define PE_CNT_CODE_    0x20u
+
+struct lst {
+	const struct kofscfind_list_in *in;
+	struct kofscfind_list_res      *res;
+};
+
+static void lst_name(char *out, size_t cap, const char *s, size_t smax, const char *suffix)
+{
+	size_t n = 0;
+
+	for (; n + 1u < cap && n < smax && s[n]; n++)
+		out[n] = ((unsigned char)s[n] < 0x20u || (unsigned char)s[n] == 0x7fu) ? '?' : s[n];
+	out[n] = 0;
+	if (suffix && n + 1u < cap)
+		snprintf(out + n, cap - n, "%s", suffix);
+}
+
+static struct kofscfind_row *lst_row(struct lst *l, enum kofscfind_what what)
+{
+	struct kofscfind_row *r;
+
+	l->res->total++;
+	if (l->res->n >= l->in->cap || !l->in->out)
+		return NULL;
+	r = &l->in->out[l->res->n++];
+	memset(r, 0, sizeof *r);
+	r->what = what;
+	r->off = KGENOME_NA;
+	r->seq = l->res->total;
+	return r;
+}
+
+static uint32_t perm_of_flags(uint64_t f)
+{
+	return ((f & SHF_ALLOC_) ? KGENOME_PERM_R : 0u) | ((f & SHF_WRITE_) ? KGENOME_PERM_W : 0u) |
+	       ((f & SHF_EXECINSTR_) ? KGENOME_PERM_X : 0u);
+}
+
+/* The memory of a variable symbol, when it is executable: its file offset and permission. 0 when it is not. */
+static int sym_exec(const struct kgenome_elf_info *e, uint64_t size, const struct kgenome_elf_symbol *s,
+		    uint64_t *va, uint64_t *off, uint32_t *perm)
+{
+	if (!s->shndx || s->shndx >= 0xff00u || !s->size)
+		return 0;
+	if (e->e_type == ET_REL_) {
+		const struct kgenome_elf_sec *c;
+
+		if (s->shndx >= e->sec_count || s->shndx >= KGENOME_ELF_MAX_SECTIONS)
+			return 0;
+		c = &e->sec[s->shndx];
+		if (!(c->flags & SHF_EXECINSTR_) || c->type == SHT_NOBITS_ || c->file_off > size ||
+		    s->value > size - c->file_off ||
+		    s->size > size - c->file_off - s->value)
+			return 0;
+		*va = c->mem_addr + s->value;
+		*off = c->file_off + s->value;
+		*perm = perm_of_flags(c->flags);
+		return 1;
+	} else {
+		const struct kgenome_elf_seg *g;
+
+		/* the segment's file half may be declared past the end of a damaged object: the bytes are not all there */
+		if (!kgenome_elf_va_to_off(e, s->value, s->size, off) || *off > size || s->size > size - *off)
+			return 0;
+		g = kgenome_elf_load_at_off(e, *off);
+		if (!g || !(g->perm & KGENOME_PERM_X))
+			return 0;
+		*va = s->value;
+		*perm = g->perm;
+		return 1;
+	}
+}
+
+static void lst_symbols(struct lst *l, const struct kgenome_elf_info *e)
+{
+	struct kgenome_elf_symtab t;
+	uint64_t i;
+
+	if (!kgenome_elf_symtab_of(l->in->file, e, KGENOME_ELF_SYMTAB_BEST, &t))
+		return;
+	for (i = 0; i < t.n; i++) {
+		struct kgenome_elf_symbol s;
+		struct kofscfind_row *r;
+		uint64_t va, off;
+		uint32_t perm;
+		char nm[KOFSCFIND_ROW_NAME];
+
+		if (!kgenome_elf_symbol_at(l->in->file, &t, i, &s) || (s.info & 0xfu) != STT_OBJECT_ ||
+		    !sym_exec(e, l->in->file.n, &s, &va, &off, &perm))
+			continue;
+		if (l->in->payload_len && va == l->in->payload_va)
+			continue;       /* the finder's own row says it */
+		nm[0] = 0;
+		if (t.strn && s.nameoff < t.strn && kof_in_range(l->in->file, t.str, t.strn)) {
+			uint64_t room = t.strn - s.nameoff, at = t.str + s.nameoff;
+
+			if (room > l->in->file.n - at)
+				room = l->in->file.n - at;
+			lst_name(nm, sizeof nm, (const char *)l->in->file.p + at, (size_t)room, NULL);
+		}
+		r = lst_row(l, KOFSCFIND_W_SYMBOL);
+		if (!r)
+			continue;
+		snprintf(r->name, sizeof r->name, "%s", nm[0] ? nm : "unnamed");
+		r->va = va;
+		r->off = off;
+		r->size = s.size;
+		r->perm = perm;
+	}
+}
+
+static void lst_range(struct lst *l, const char *name, size_t nmax, const char *why, uint64_t va, uint64_t off, uint64_t size,
+		      uint32_t perm)
+{
+	struct kofscfind_row *r = lst_row(l, KOFSCFIND_W_RANGE);
+
+	if (!r)
+		return;
+	lst_name(r->name, sizeof r->name, name, nmax, why);
+	r->va = va;
+	r->off = off;
+	r->size = size;
+	r->perm = perm;
+}
+
+static void lst_elf_ranges(struct lst *l, const struct kgenome_elf_info *e)
+{
+	uint32_t i;
+	char tag[32];
+
+	for (i = 0; i < e->seg_count && i < KGENOME_ELF_MAX_SEGMENTS; i++) {
+		const struct kgenome_elf_seg *g = &e->seg[i];
+
+		if (kgenome_elf_seg_is_load(g) && (g->perm & KGENOME_PERM_X) && (g->perm & KGENOME_PERM_W)) {
+			uint64_t n = kof_clip_len(l->in->file.n, g->file_off, g->file_size);
+
+			snprintf(tag, sizeof tag, "segment #%u", i);
+			lst_range(l, tag, sizeof tag, " (writable and executable)", g->mem_addr, n ? g->file_off : KGENOME_NA,
+				  n ? n : g->mem_size, g->perm);
+		}
+	}
+	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
+		const struct kgenome_elf_sec *s = &e->sec[i];
+		const struct kgenome_elf_seg *g;
+		uint64_t n = kof_clip_len(l->in->file.n, s->file_off, s->file_size);
+
+		if (s->type == SHT_NOBITS_ || !n)
+			continue;
+		if ((s->flags & SHF_EXECINSTR_) && (s->flags & SHF_WRITE_))
+			lst_range(l, s->name, sizeof s->name, " (writable code section)", s->mem_addr, s->file_off, n,
+				  perm_of_flags(s->flags));
+		else if ((s->flags & SHF_ALLOC_) && !(s->flags & SHF_EXECINSTR_) && e->e_type != ET_REL_ &&
+			 (g = kgenome_elf_load_at_off(e, s->file_off)) != NULL && (g->perm & KGENOME_PERM_X))
+			lst_range(l, s->name, sizeof s->name, " (data in an executable segment)", s->mem_addr, s->file_off, n,
+				  g->perm);
+	}
+}
+
+static void lst_pe_ranges(struct lst *l, const struct kgenome_pe_info *p)
+{
+	uint32_t i;
+
+	for (i = 0; i < p->sec_count && i < KGENOME_PE_MAX_SECTIONS; i++) {
+		const struct kgenome_pe_sec *s = &p->sec[i];
+		uint64_t n = kof_clip_len(l->in->file.n, s->file_off, s->file_size);
+
+		if (!(s->perm & KGENOME_PE_PERM_X))
+			continue;
+		if (s->perm & KGENOME_PE_PERM_W)
+			lst_range(l, s->name, sizeof s->name, " (writable and executable section)", s->mem_rva,
+				  n ? s->file_off : KGENOME_NA, n ? n : s->mem_size, s->perm);
+		else if (!(s->characteristics & PE_CNT_CODE_))
+			lst_range(l, s->name, sizeof s->name, " (data section with execute permission)", s->mem_rva,
+				  n ? s->file_off : KGENOME_NA, n ? n : s->mem_size, s->perm);
+	}
+}
+
+/*
+ * THE RULE FOR `strong`, which is this tool's and not the library's: some CODE of the object REFERS to the range (an instruction
+ * counted by the library: a call, a jump, an address taken, a store, an argument; a pointer in a data table is a reference too
+ * but not code's, and measured alone it is common - 40 words of an ARM binary's data point into its own .rodata), AND the range
+ * DECODES AS CODE (the library's shape is code-like: nearly all of it is instructions of the object's architecture) AND it holds
+ * a system-call instruction. Each part alone is common in an ordinary program (a function is referenced and decodes; a table is
+ * referenced; a byte string may hold 0f 05); all three together are what a loader's payload is. The finder's own answer is
+ * strong by itself. It is a rule about evidence, not a verdict: a flagged row is a row to read first.
+ */
+static int is_strong(const struct kofscfind_row *r)
+{
+	const struct kgenome_range_facts *f = &r->facts;
+	uint32_t refs = f->refs.call + f->refs.jump + f->refs.read + f->refs.write + f->refs.arg;
+
+	return r->facts_ok && f->refs_known && refs && f->shape == KGENOME_RANGE_CODE_LIKE && f->syscall;
+}
+
+/* 0: flagged, 1: some evidence (referenced, or code-like with a system call), 2: a candidate with none. */
+static unsigned lst_group(const struct kofscfind_row *r)
+{
+	const struct kgenome_range_facts *f = &r->facts;
+
+	if (r->flagged)
+		return 0;
+	if (r->facts_ok && (f->refs.call + f->refs.jump + f->refs.read + f->refs.write + f->refs.arg + f->refs_ptr ||
+			    (f->shape == KGENOME_RANGE_CODE_LIKE && f->syscall)))
+		return 1;
+	return 2;
+}
+
+static int lst_cmp(const void *pa, const void *pb)
+{
+	const struct kofscfind_row *a = pa, *b = pb;
+	unsigned ga = lst_group(a), gb = lst_group(b);
+
+	if (ga != gb)
+		return ga < gb ? -1 : 1;
+	if (a->va != b->va)
+		return a->va < b->va ? -1 : 1;
+	return a->seq < b->seq ? -1 : a->seq > b->seq;
+}
+
+/* Ask the library about every candidate once, apply the rule, and put the rows with evidence first. */
+static void lst_context(struct lst *l)
+{
+	const struct kofscfind_list_in *in = l->in;
+	struct kgenome_budget bud;
+	struct kgenome_xref *map = NULL;
+	enum kgenome_status xs;
+	uint32_t i;
+	uint64_t base = 0;
+
+	if (!in->out || !in->obj || !in->obj->file_header)
+		return;
+	memset(&bud, 0, sizeof bud);
+	bud.max_steps = KOFSCFIND_LIST_CODE_MAX;
+	xs = kgenome_range_xref_build(in->obj, in->file, &bud, &map);
+	if (in->obj->format == KGENOME_FMT_PE)
+		base = kgenome_obj_pe(in->obj)->image_base;
+	for (i = 0; i < l->res->n; i++) {
+		struct kofscfind_row *r = &in->out[i];
+		struct kgenome_range_req rq;
+
+		if (r->off == KGENOME_NA || !r->size)
+			continue;
+		memset(&rq, 0, sizeof rq);
+		rq.obj = in->obj;
+		rq.file = in->file;
+		rq.off = r->off;
+		rq.size = r->size;
+		rq.va = r->va + base;
+		rq.xref = map;
+		rq.xref_status = xs;
+		(void)kgenome_range_facts(&rq, &r->facts);       /* a cut is in facts.analysed < size: the list status is about rows */
+		r->facts_ok = r->facts.analysed != 0;
+		if (is_strong(r)) {
+			r->strong = 1;
+			r->flagged = 1;
+		}
+	}
+	kgenome_xref_free(map);
+	qsort(in->out, l->res->n, sizeof *in->out, lst_cmp);
+}
+
+enum kgenome_status kofscfind_list(const struct kofscfind_list_in *in, struct kofscfind_list_res *res)
+{
+	struct lst l;
+	enum kgenome_status st = KGENOME_OK;
+	const struct kgenome_obj *o = in->obj;
+
+	memset(res, 0, sizeof *res);
+	l.in = in;
+	l.res = res;
+	if (in->payload_len) {
+		struct kofscfind_row *r = lst_row(&l, KOFSCFIND_W_FINDER);
+
+		if (r) {
+			const struct kgenome_elf_seg *g = NULL;
+			uint64_t off = KGENOME_NA, fo;
+
+			if (o && o->format == KGENOME_FMT_ELF && o->file_header && kgenome_obj_elf(o)->valid &&
+			    kgenome_elf_va_to_off(kgenome_obj_elf(o), in->payload_va, in->payload_len, &fo) && fo <= in->file.n &&
+			    in->payload_len <= in->file.n - fo) {
+				off = fo;
+				g = kgenome_elf_load_at_off(kgenome_obj_elf(o), fo);
+			}
+			snprintf(r->name, sizeof r->name, "%s", "payload");
+			r->va = in->payload_va;
+			r->off = off;
+			r->size = in->payload_len;
+			r->perm = g ? g->perm : 0u;
+			r->flagged = 1;
+			r->bits = in->payload_bits;
+			if (in->payload_bits)
+				snprintf(r->verdict, sizeof r->verdict, "shellcode-like payload, %u-bit", in->payload_bits);
+			else
+				snprintf(r->verdict, sizeof r->verdict, "%s", "shellcode-like payload");
+		}
+	}
+	if (o && o->file_header && o->format == KGENOME_FMT_ELF && kgenome_obj_elf(o)->valid) {
+		lst_symbols(&l, kgenome_obj_elf(o));
+		lst_elf_ranges(&l, kgenome_obj_elf(o));
+	} else if (o && o->file_header && o->format == KGENOME_FMT_PE && kgenome_obj_pe(o)->valid) {
+		lst_pe_ranges(&l, kgenome_obj_pe(o));
+	} else {
+		st = KGENOME_UNSUPPORTED;
+	}
+	if (st == KGENOME_OK)
+		lst_context(&l);
+	if (res->total > res->n && st == KGENOME_OK)
+		st = KGENOME_TRUNCATED;
 	return st;
 }
 

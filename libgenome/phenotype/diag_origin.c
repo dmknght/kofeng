@@ -68,6 +68,159 @@ uint32_t kgenome_diag_org_sym(const struct kgenome_diag_orgs *w, uint8_t r, int3
 	return w->reg[r].symoff;
 }
 
+/* ---- THE STACK RING -----------------------------------------------------------------------------------
+ *
+ * One slot per word the program pushed, the newest KGENOME_DIAG_ORG_STK of them (see struct kgenome_diag_orgs). It
+ * used to count `push` and `pop` and nothing else, so everything else that moves the stack pointer left the
+ * ring where it was: after `add esp,4` (a cdecl caller taking its argument back) the next pop took the argument's
+ * slot and not the one below it, which lost the link; and with one such call a few instructions apart the depth
+ * grew until the ring overflowed (MEASURED: 8 corpus files OK -> TRUNCATED at mask 0x3). The ring now follows
+ * what the stack pointer does by a constant: add/sub of an immediate, `leave`, `mov esp,ebp` and `lea esp,[ebp-N]`
+ * through the depth the frame pointer was given (bp_depth). A move by a register, `alloca`, or anything else the
+ * walk cannot compute leaves the ring as it was - the old behaviour, the honest "not followed".
+ */
+static void ring_push(struct kgenome_diag_orgs *w, uint16_t v, const uint16_t alt[KGENOME_DIAG_ORG_ALT], uint8_t may)
+{
+	if (w->n_stk >= KGENOME_DIAG_ORG_STK) {
+		/* the slot this push reuses belongs to the push KGENOME_DIAG_ORG_STK below it */
+		if (w->stk[w->n_stk % KGENOME_DIAG_ORG_STK] != KGENOME_DIAG_ORG_NONE &&
+		    w->n_stk - KGENOME_DIAG_ORG_STK >= w->n_lost)
+			w->stk_cut = 1;         /* an origin that is gone for good */
+		if (w->n_stk - KGENOME_DIAG_ORG_STK + 1u > w->n_lost)
+			w->n_lost = w->n_stk - KGENOME_DIAG_ORG_STK + 1u;
+	}
+	w->stk[w->n_stk % KGENOME_DIAG_ORG_STK] = v;
+	memcpy(w->stk_alt_p1[w->n_stk % KGENOME_DIAG_ORG_STK], alt, sizeof w->stk_alt_p1[0]);
+	w->stk_may[w->n_stk % KGENOME_DIAG_ORG_STK] = may;
+	w->n_stk++;
+}
+
+/* `count` slots that hold nothing: the room `sub esp,N` makes. A count past the ring is a depth and no more work
+ * (every slot the ring holds is empty after KGENOME_DIAG_ORG_STK of them), and the depth is bounded so that it
+ * cannot wrap. */
+#define RING_DEPTH_MAX 0x100000u
+static void ring_push_none(struct kgenome_diag_orgs *w, uint32_t count)
+{
+	static const uint16_t none[KGENOME_DIAG_ORG_ALT];
+	uint32_t i, direct = count < KGENOME_DIAG_ORG_STK ? count : KGENOME_DIAG_ORG_STK;
+
+	for (i = 0; i < direct; i++)
+		ring_push(w, KGENOME_DIAG_ORG_NONE, none, 0);
+	if (count > direct) {
+		const uint64_t depth = (uint64_t)w->n_stk + (count - direct);
+
+		w->n_stk = depth > RING_DEPTH_MAX ? RING_DEPTH_MAX : (uint32_t)depth;
+		if (w->n_stk > KGENOME_DIAG_ORG_STK && w->n_lost < w->n_stk - KGENOME_DIAG_ORG_STK)
+			w->n_lost = w->n_stk - KGENOME_DIAG_ORG_STK;
+	}
+}
+
+/* The stack pointer moved DOWN by `count` slots (sub esp,N): room for them if the ring can hold them without pushing a
+ * slot the walk still carries out of its window, and a count kept in sp_gap if not. */
+static void ring_grow(struct kgenome_diag_orgs *w, uint32_t count)
+{
+	if ((uint64_t)w->n_stk + count - w->n_lost <= KGENOME_DIAG_ORG_STK) {
+		ring_push_none(w, count);
+		return;
+	}
+	w->sp_gap = count > RING_DEPTH_MAX - w->sp_gap ? RING_DEPTH_MAX : w->sp_gap + count;
+}
+
+/* The stack pointer went UP by `count` slots: the room it made first, then what was pushed. */
+static void ring_shrink(struct kgenome_diag_orgs *w, uint32_t count)
+{
+	const uint32_t t = count < w->sp_gap ? count : w->sp_gap;
+
+	w->sp_gap -= t;
+	count -= t;
+	w->n_stk = count >= w->n_stk ? 0u : w->n_stk - count;
+	if (w->n_lost > w->n_stk)
+		w->n_lost = w->n_stk;
+}
+
+/* put the stack pointer at an absolute depth: what `leave`, `mov esp,ebp` and `lea esp,[ebp-N]` do */
+static void ring_depth(struct kgenome_diag_orgs *w, uint32_t depth)
+{
+	const uint64_t now = (uint64_t)w->n_stk + w->sp_gap;
+
+	if (depth > now)
+		ring_grow(w, (uint32_t)(depth - now));
+	else
+		ring_shrink(w, (uint32_t)(now - depth));
+}
+
+/* What the instruction does to the stack pointer when it is a constant, as a number of slots (positive: the stack
+ * grew). Sets *ok to 0 when it is not one. `unit` is the word: the stack register's own width. */
+static int64_t sp_delta(const struct kgenome_cell_insn *in, uint8_t sp, int *ok)
+{
+	int64_t v;
+	unsigned unit;
+
+	*ok = 0;
+	if (in->n_op < 2u || in->o[0].kind != KGENOME_CELL_O_REG || in->o[0].reg != sp ||
+	    in->o[1].kind != KGENOME_CELL_O_IMM || (in->op != KGENOME_CELL_ADD && in->op != KGENOME_CELL_SUB))
+		return 0;
+	unit = in->o[0].size;
+	if (unit != 4u && unit != 8u)
+		return 0;
+	v = unit == 4u ? (int64_t)(int32_t)(uint32_t)in->o[1].imm : (int64_t)in->o[1].imm;
+	if (in->op == KGENOME_CELL_ADD)
+		v = -v;
+	*ok = 1;
+	return v / (int64_t)unit;
+}
+
+static void ring_follow(struct kgenome_diag_orgs *w, const struct kgenome_cell_insn *in)
+{
+	const uint8_t sp = KGENOME_CELL_REG_SP, bp = KGENOME_CELL_REG_BP;
+	const uint64_t spbp = (1ull << sp) | (1ull << bp);
+	int ok;
+	int64_t d;
+
+	if (w->sp)
+		return;
+	d = sp_delta(in, sp, &ok);
+	if (ok) {
+		if (d > 0)
+			ring_grow(w, d > RING_DEPTH_MAX ? RING_DEPTH_MAX : (uint32_t)d);
+		else if (d < 0)
+			ring_shrink(w, -d > RING_DEPTH_MAX ? RING_DEPTH_MAX : (uint32_t)-d);
+		return;
+	}
+	if (in->op == KGENOME_CELL_MOV && in->n_op > 1u && in->o[0].kind == KGENOME_CELL_O_REG &&
+	    in->o[1].kind == KGENOME_CELL_O_REG) {
+		if (in->o[0].reg == bp && in->o[1].reg == sp) {
+			w->bp_depth = w->n_stk + w->sp_gap;     /* the frame is made here */
+			w->bp_known = 1;
+			return;
+		}
+		if (in->o[0].reg == sp && in->o[1].reg == bp && w->bp_known) {
+			ring_depth(w, w->bp_depth);             /* mov esp,ebp */
+			return;
+		}
+	}
+	if (in->op == KGENOME_CELL_LEA && in->n_op > 1u && in->o[0].kind == KGENOME_CELL_O_REG && in->o[0].reg == sp &&
+	    in->o[1].kind == KGENOME_CELL_O_MEM && in->o[1].reg == bp && in->o[1].index == KGENOME_CELL_REG_NONE &&
+	    (in->o[0].size == 4u || in->o[0].size == 8u) && w->bp_known) {
+		const int64_t slots = -in->o[1].disp / (int64_t)in->o[0].size;  /* below the frame pointer: more */
+		const int64_t at = (int64_t)w->bp_depth + slots;
+
+		ring_depth(w, at < 0 ? 0u : at > RING_DEPTH_MAX ? RING_DEPTH_MAX : (uint32_t)at);
+		return;
+	}
+	/* `leave` is `mov esp,ebp; pop ebp`; the decoder gives it no class and no operand, only the two registers it writes */
+	if (in->op == KGENOME_CELL_OTHER && !in->n_op && in->wmask == spbp) {
+		if (w->bp_known) {
+			ring_depth(w, w->bp_depth);
+			ring_shrink(w, 1u);
+		}
+		w->bp_known = 0;                                /* rbp is the caller's again */
+		return;
+	}
+	if (in->wmask & (1ull << bp))
+		w->bp_known = 0;                                /* anything else that writes it */
+}
+
 void kgenome_diag_org_step(struct kgenome_diag_orgs *w, const struct kgenome_cell_insn *in)
 {
 	uint8_t r, d, e;
@@ -81,18 +234,7 @@ void kgenome_diag_org_step(struct kgenome_diag_orgs *w, const struct kgenome_cel
 			memcpy(alt, w->reg[in->o[0].reg].alt_p1, sizeof alt);
 			may = w->reg[in->o[0].reg].may;
 		}
-		if (w->n_stk >= KGENOME_DIAG_ORG_STK) {
-			/* the slot this push reuses belongs to the push KGENOME_DIAG_ORG_STK below it */
-			if (w->stk[w->n_stk % KGENOME_DIAG_ORG_STK] != KGENOME_DIAG_ORG_NONE &&
-			    w->n_stk - KGENOME_DIAG_ORG_STK >= w->n_lost)
-				w->stk_cut = 1;         /* an origin that is gone for good */
-			if (w->n_stk - KGENOME_DIAG_ORG_STK + 1u > w->n_lost)
-				w->n_lost = w->n_stk - KGENOME_DIAG_ORG_STK + 1u;
-		}
-		w->stk[w->n_stk % KGENOME_DIAG_ORG_STK] = v;
-		memcpy(w->stk_alt_p1[w->n_stk % KGENOME_DIAG_ORG_STK], alt, sizeof alt);
-		w->stk_may[w->n_stk % KGENOME_DIAG_ORG_STK] = may;
-		w->n_stk++;
+		ring_push(w, v, alt, may);
 		return;
 	}
 	if (in->op == KGENOME_CELL_POP) {
@@ -116,8 +258,11 @@ void kgenome_diag_org_step(struct kgenome_diag_orgs *w, const struct kgenome_cel
 			memcpy(w->reg[in->o[0].reg].alt_p1, alt, sizeof alt);
 			w->reg[in->o[0].reg].may = may;
 		}
+		if (in->wmask & (1ull << KGENOME_CELL_REG_BP))
+			w->bp_known = 0;        /* `pop ebp` gives the caller's frame pointer back */
 		return;
 	}
+	ring_follow(w, in);
 	if (in->op == KGENOME_CELL_XCHG && in->n_op > 1u &&
 	    in->o[0].kind == KGENOME_CELL_O_REG && in->o[1].kind == KGENOME_CELL_O_REG) {
 		struct kgenome_diag_org a;
@@ -245,7 +390,136 @@ int kgenome_diag_org_kill_stack(struct kgenome_diag_orgs *w)
 	 * frame (a phantom depth of a hundred slots was MEASURED to make the ring overflow in a long window) */
 	w->n_stk = 0;
 	w->n_lost = 0;
+	w->bp_known = 0;                /* and the frame pointer was that function's */
+	w->sp_gap = 0;
 	return lost;
+}
+
+/* ---- A CALL: WHAT THE CALLEE DID TO THE REGISTERS ------------------------------------------------------
+ *
+ * Moved here from the sweep, which was the only route that asked it: the symbol route (diag_sym.c) had the same
+ * question and no answer, because a decoder gives CALL no written register (W3/W5 there were X2). One callee
+ * reader and one policy, for both.
+ */
+enum diag_callee_kind { CALLEE_NONE = 0, CALLEE_UNKNOWN, CALLEE_KNOWN, CALLEE_GETPC };
+
+void kgenome_diag_callees_init(struct kgenome_diag_callees *c, const struct kgenome_cell_space *sp, unsigned arch,
+			       uint64_t off, uint64_t n)
+{
+	memset(c, 0, sizeof *c);
+	c->sp = sp;
+	c->off = off;
+	c->n = n;
+	/* the complement of what a call must give back (celllysis keeps the one row, so the constant map and this
+	 * cannot disagree about a register); an architecture without a row loses every register to a callee */
+	c->caller_saved = (uint16_t)~kgenome_cell_call_keeps(arch);
+}
+
+/*
+ * Is it a call at all: `call next` (the address of the next instruction) or a callee that begins by popping its own
+ * return address. One decode, no memo - asked for every direct call, also where no register is carried.
+ */
+static int callee_getpc(const struct kgenome_diag_callees *c, const struct kgenome_cell_insn *call)
+{
+	struct kgenome_cell_cur kc;
+	struct kgenome_cell_insn ci;
+
+	if (call->target == call->at + call->len)
+		return 1;
+	if (call->target < c->off || call->target >= c->off + c->n)
+		return 0;
+	memset(&kc, 0, sizeof kc);
+	return kgenome_cell_seek(&kc, call->target, 0) && kgenome_cell_next(&kc, c->sp, &ci) && ci.op == KGENOME_CELL_POP;
+}
+
+/*
+ * WHAT A DIRECT CALLEE WRITES, read from its first instruction to the first `ret`. Only a straight line
+ * is a statement: a branch or a call inside it makes the other paths unread, and "unknown" is the answer.
+ * A register pushed before anything wrote it and popped back is not written (`push rbx; ...; pop rbx`).
+ * The bound is KGENOME_DIAG_CALLEE_INSN and the answers are remembered per target (KGENOME_DIAG_CALLEE_MEMO), so a
+ * call in a loop costs one reading.
+ */
+static int callee_scan(struct kgenome_diag_callees *c, const struct kgenome_cell_insn *call, uint16_t *writes)
+{
+	struct kgenome_cell_cur kc;
+	struct kgenome_cell_insn ci;
+	uint16_t mask = 0, pushed = 0, restored = 0;
+	unsigned i, slot = (unsigned)((call->target * 0x9e3779b97f4a7c15ull) >> 58);
+	int kind = CALLEE_UNKNOWN;
+
+	*writes = 0;
+	if (call->target == call->at + call->len)
+		return CALLEE_GETPC;                    /* `call next`: the address of the next instruction */
+	if (c->memo[slot].kind && c->memo[slot].target == call->target) {
+		*writes = c->memo[slot].writes;
+		return c->memo[slot].kind;
+	}
+	if (call->target < c->off || call->target >= c->off + c->n)
+		return CALLEE_UNKNOWN;
+	memset(&kc, 0, sizeof kc);
+	if (!kgenome_cell_seek(&kc, call->target, 0))
+		return CALLEE_UNKNOWN;
+	for (i = 0; i < KGENOME_DIAG_CALLEE_INSN; i++) {
+		if (!(kc.at < c->off + c->n && kgenome_cell_next(&kc, c->sp, &ci)))
+			break;
+		if (i == 0 && ci.op == KGENOME_CELL_POP) {
+			kind = CALLEE_GETPC;            /* it takes its own return address off the stack */
+			break;
+		}
+		if (ci.op == KGENOME_CELL_RET) {
+			mask = (uint16_t)(mask & ~(pushed & restored));
+			kind = CALLEE_KNOWN;
+			break;
+		}
+		if (ci.op == KGENOME_CELL_CALL || ci.op == KGENOME_CELL_JMP || ci.op == KGENOME_CELL_JCC ||
+		    ci.op == KGENOME_CELL_LOOP || ci.op == KGENOME_CELL_IRET)
+			break;                          /* the paths are not all read */
+		if (ci.op == KGENOME_CELL_PUSH && ci.n_op && ci.o[0].kind == KGENOME_CELL_O_REG && ci.o[0].reg < 16u &&
+		    !(mask & (1u << ci.o[0].reg)))
+			pushed = (uint16_t)(pushed | (1u << ci.o[0].reg));
+		if (ci.op == KGENOME_CELL_POP && ci.n_op && ci.o[0].kind == KGENOME_CELL_O_REG && ci.o[0].reg < 16u &&
+		    (pushed & (1u << ci.o[0].reg)))
+			restored = (uint16_t)(restored | (1u << ci.o[0].reg));
+		mask = (uint16_t)(mask | (uint16_t)(ci.wmask & 0xffffu));
+	}
+	*writes = kind == CALLEE_KNOWN ? mask : 0u;
+	c->memo[slot].target = call->target;
+	c->memo[slot].writes = *writes;
+	c->memo[slot].kind = (uint8_t)kind;
+	return kind;
+}
+
+/* KNOWN DEFECT X11b (2026-10-24, R) [sev M]: kgenome_diag_org_call leaves the ring as it was after a call, so the words an
+ * i386 stdcall callee pops (`ret N`) stay as phantom slots. Trigger: `push a; push b; call stdcall_fn` then a later
+ * pop or push. Effect: the ring drifts by N/4 slots per call and a later pop takes an argument's producer (a wrong
+ * link) or the ring overflows into TRUNCATED. Reproducer: none (read). Fix: shrink the ring by the callee's pop
+ * count, as kgenome_lineage_state_call does from the codemap `ret N` or the API's argc table. */
+void kgenome_diag_org_call(struct kgenome_diag_orgs *w, struct kgenome_diag_callees *c,
+			   const struct kgenome_cell_insn *in, int target_unknown)
+{
+	const uint16_t cs = c->caller_saved;
+	const int direct = !target_unknown && !(in->flags & KGENOME_CELL_F_INDIRECT) && in->target != KGENOME_BROKEN;
+	uint16_t live = 0, writes = 0;
+	unsigned r;
+	int kind = CALLEE_UNKNOWN;
+
+	for (r = 0; r < 16u; r++)
+		if ((cs & (1u << r)) && w->reg[r].node != KGENOME_DIAG_ORG_NONE)
+			live = (uint16_t)(live | (1u << r));
+	/* the callee is read when a register is carried that it could take; otherwise only the one question that
+	 * changes the ring: does it fetch the program counter */
+	if (direct)
+		kind = live ? callee_scan(c, in, &writes) : callee_getpc(c, in) ? CALLEE_GETPC : CALLEE_UNKNOWN;
+	if (kind == CALLEE_GETPC) {
+		ring_push_none(w, 1u);          /* the return address the pop after it takes back */
+		return;
+	}
+	if (!live)
+		return;
+	if (kind == CALLEE_KNOWN)
+		kgenome_diag_org_kill(w, (uint16_t)(live & writes));
+	else
+		kgenome_diag_org_demote(w, live);
 }
 
 /* One register's two paths. `b` NULL: the path that holds nothing. 1 when a producer past the four is dropped. */

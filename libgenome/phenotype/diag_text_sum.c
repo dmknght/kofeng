@@ -635,6 +635,9 @@ static int pend_before(const void *a, const void *b)
  * Every pending link, made. They are grouped by the slot they came from, so the producers a slot reaches are found ONCE for all the links it feeds: a depth-first walk over the
  * edges, a slot met twice not followed again, the nodes it reaches collected. The work (edges followed and links offered) is bounded by the text; one that runs out is reported.
  */
+/* KNOWN DEFECT G3-GEL4Y (2026-10-24, R) [sev M]: kgenome_dtx_sum_resolve links a call result only through the callee's return slot (G3, strict) and a node keeps four inputs, so which four of a context-insensitive union survive is the resolution order.
+ * Trigger: php/053_gel4y.php L133 `$loc=$p."/".nhx($_GET[n])` -> L134 unlink($loc): nhx() has many callers whose arguments fill the four inputs first. Effect: the expected MAY link request -> file-delete is lost.
+ * Reproducer: tests/data/diag_text_expect.tsv row for 053_gel4y.php L133 (run by diag_text_relations). Fix: call-site-sensitive resolution, or order the MAY inputs nearest-first (new link power, later). */
 void kgenome_dtx_sum_resolve(struct kgenome_dtx *x)
 {
 	struct kgenome_dtx_sum *s = x->sum;

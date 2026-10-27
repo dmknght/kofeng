@@ -1195,6 +1195,12 @@ void kof_report_feed(struct kof_report *r, const struct kof_evt *e,
 		 * fingerprint, because that is the one a reader will be looking
 		 * at when they wonder where the file went.
 		 */
+		/* KNOWN DEFECT WP12-23 (2026-10-24, M) [sev M]: feed interns a FILE_NEW
+		 * row (count 0) for every FILE_DELETE; kofrep_find() was meant.
+		 * Trigger: deletes of paths nothing created. Effect: 3000
+		 * deletes fill the 4096-row table and a real create is dropped.
+		 * Reproducer: orbit_store.c case_report_delete. Fix: look the
+		 * row up without interning. */
 		prev = intern(r, KOF_FP_FILE_NEW, kof_evt_object(e));
 		if (prev && prev->count)
 			prev->flags |= KOF_FP_F_SELF_DEL;

@@ -52,6 +52,9 @@ static void on_range(struct oc_consts *a, uint64_t off, uint64_t len, const uint
 		return;
 	}
 	if (a->n == a->cap) {
+		/* KNOWN DEFECT REV-D8c (2026-10-25, Inference) [sev L]: the sub_rec table doubles a uint32 capacity with no overflow guard and no ledger charge (only the arena is bounded, by a->room).
+		 * Trigger: about 2^31 recorded substitutions (records of length 0 are not stopped by room). Effect: cap * 2u wraps to 0, realloc(0) and a write past the table;
+		 * not reachable in practice (a->an and the script size bound it first, not measured). Reproducer: none. Fix: bound a->n by the same allowance as the arena, or refuse when cap > UINT32_MAX / 2. */
 		uint32_t nc = a->cap ? a->cap * 2u : 16u;
 		struct sub_rec *nr = realloc(a->r, (size_t)nc * sizeof *nr);
 

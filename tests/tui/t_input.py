@@ -306,10 +306,10 @@ def f10_when_menu_open_closes_it():
         v.key('f10'); check(not v.popup(), 'second F10 did not close the menu')
 
 
-@case(A, known_bug='UX-2 Ctrl+Q (listed in Help as "quit") is swallowed while Symbols / Find / Goto / Decoder / Help / a menu is open; only the main view and the Properties page honour it')
+@case(A, known_bug='UX-2 Ctrl+Q (listed in Help as "quit") is swallowed while the dashboard Imports tab / Find / Goto / Decoder / Help / a menu is open; only the main view and the Properties page honour it')
 def quit_via_ctrl_q_with_dialog_open():
     stuck = []
-    for name, opener in (('symbols', lambda v: v.menu_item('Analysis', 'Symbols')),
+    for name, opener in (('imports tab', lambda v: open_dash_tab(v, 'Imports')),
                          ('find', lambda v: v.menu_item('Edit', 'Find...')),
                          ('goto', lambda v: v.menu_item('Edit', 'Go to...')),
                          ('decoder', lambda v: v.menu_item('Analysis', 'Decode string')),

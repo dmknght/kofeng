@@ -993,29 +993,6 @@ static void sym_build(struct object *o)
 	}
 }
 
-const char *sc_kind(const uint8_t *b, uint32_t n)
-{
-	if (n >= 6 && b[0] == 0xfc && b[1] == 0x48 && b[2] == 0x83 &&
-	    b[3] == 0xe4 && b[4] == 0xf0 && b[5] == 0xe8)
-		return "msf x64 block_api (Windows, raw)";
-	if (n >= 9 && b[0] == 0xfc && b[1] == 0xe8 && b[2] == 0x82 &&
-	    b[3] == 0x00 && b[4] == 0x00 && b[5] == 0x00 && b[6] == 0x60)
-		return "msf x86 block_api (Windows, raw)";
-	if (n >= 6 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc9 &&
-	    b[3] == 0x48 && b[4] == 0x81 && b[5] == 0xe9)
-		return "msf x64/xor decoder stub";
-	if (n >= 4 && b[0] == 0xd9 && b[1] == 0x74 && b[2] == 0x24)
-		return "msf x86 fnstenv GetPC (shikata family)";
-	if (n >= 8 && (b[4] == 0xd9 || b[5] == 0xd9) &&
-	    (b[5] == 0x74 || b[6] == 0x74))
-		return "msf x86 fnstenv GetPC (shikata family)";
-	if (n >= 4 && b[0] == 0x48 && b[1] == 0x31 && b[2] == 0xc0)
-		return "x86-64 shellcode, no decoder in front";
-	if (n >= 2 && b[0] == 0xeb)
-		return "jmp/pop/xor decoder stub";
-	return "?";
-}
-
 /*
  * THE TOOL'S OWN ANALYSIS OF AN OBJECT'S LOADER, run once and kept on it.
  *
@@ -1023,7 +1000,7 @@ const char *sc_kind(const uint8_t *b, uint32_t n)
  * somebody wrote - so where a shellcode loader keeps its payload is something
  * the examiner works out for itself, with kofscfind, over the object's bytes
  * and the parse the engine already gave it. ONE run per object, here, when the
- * object is examined: the symbols dialog, the menu and the status line read
+ * object is examined: the symbol tables, the menu and the status line read
  * payload_at / payload_len / payload_bits off the object and none of them
  * searches. The result is a place and how it was found, never a verdict.
  *
@@ -1082,7 +1059,7 @@ static void payload_tag(struct view *v, uint32_t at)
 		/*
 		 * WHICH VARIABLE IT CAME OUT OF, read back from the parent's
 		 * symbol block rather than remembered, so the name shown here
-		 * and the row marked in the symbols dialog can only ever be the
+		 * and the row marked in the symbol table can only ever be the
 		 * same symbol. The address is kofscfind's and the block is
 		 * the engine's.
 		 */

@@ -23,6 +23,7 @@ SDK_HDR := $(SDK)/include/kofeng.h \
            $(SDK)/include/kofhash.h \
            $(SDK)/include/kofentropy.h \
            $(SDK)/include/verdictor/verdict.h \
+           $(SDK)/include/verdictor/famcat.h \
            $(SDK)/include/kofmod/kofsig.h \
            $(SDK)/include/kofmod/kofabi.h \
            $(SDK)/include/kofmod/kofobjfmt.h \
@@ -144,6 +145,11 @@ $(SDK)/include/range.h: libkofeng/kofcore/range.h
 
 # What kofeng.h includes from the verdictor, at the path it names it by.
 $(SDK)/include/verdictor/verdict.h: libkofeng/verdictor/verdict.h
+	@$(call MKDIR,$(dir $@))
+	@$(call COPY,$<,$@)
+
+# The malware family catalog the viewer's Manage > Malware Families dialog edits (kofexamine/kv_families.c).
+$(SDK)/include/verdictor/famcat.h: libkofeng/verdictor/famcat.h
 	@$(call MKDIR,$(dir $@))
 	@$(call COPY,$<,$@)
 

@@ -183,6 +183,12 @@ void kof_evt_count(const struct kof_evt *e, struct kof_evt_tally *t)
 }
 
 /* Render step: a process start: the image, and the command line on its own line. */
+/* KNOWN DEFECT WP12-24 (2026-10-24, M) [sev M]: kof_evt_render prints
+ * object/image/cmdline with %s (render_proc_start and the other render steps).
+ * Trigger: a path with ESC / CR chosen by the sample. Effect: it reaches the
+ * terminal as written (AMSI and registry data are sanitised). Reproducer:
+ * orbit_evt.c case_render_controls. Fix: one escaping put-string used by every
+ * render step. */
 static void render_proc_start(const struct kof_evt *e, FILE *out)
 {
 	const char *cl = kof_evt_cmdline(e);

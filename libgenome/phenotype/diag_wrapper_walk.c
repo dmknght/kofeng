@@ -11,6 +11,11 @@
 int kgenome_diag_wrapper_push_u64(uint64_t **v, uint32_t *n, uint32_t *cap, uint64_t x)
 {
 	if (*n == *cap) {
+		/* KNOWN DEFECT REV-D8k (2026-10-25, Inference) [sev L]: kgenome_diag_wrapper_push_u64 (diag_wrapper_walk.c)
+		 * doubles a uint32 capacity (call targets and syscall sites) with no overflow guard and no ledger charge. Trigger:
+		 * an object with 2^31 or more elements of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so
+		 * only a host using the lib directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards
+		 * the doubling) or test cap against UINT32_MAX / 2 before doubling. */
 		uint32_t nc = *cap ? *cap * 2u : 256u;
 		uint64_t *nv = realloc(*v, (size_t)nc * sizeof **v);
 
@@ -189,6 +194,12 @@ static void trace_put(struct kgenome_diag_wrapper_ctx *c, unsigned seg, const st
 
 		if (nc > lim)
 			nc = lim;
+		/* KNOWN DEFECT REV-D3 (2026-10-25, Inference) [sev L]: the wrapper walk trace (diag_wrapper_walk.c) stops growing
+		 * at W_TRACE_BYTES (32 MiB) and the rest of the image is decoded again; a performance defect, not lost evidence
+		 * (`capped` is set). Trigger: a large dynamic ELF whose walk records more than 32 MiB. Effect: up to 33% of the
+		 * reads decoded twice (agent-reported, STATUS D12, not re-measured here). Reproducer: none committed (the large
+		 * dynamic file runs of fix_gbin). Fix: trace by function so a hot segment fits, pack the record tighter, or size
+		 * the cap from the ledger. */
 		if (c->wk->n_tr + rec[0] > nc ||
 		    !wtrace_charge(c->wk, nc - c->wk->cap_tr) ||
 		    !(nt = realloc(c->wk->tr, nc))) {

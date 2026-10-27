@@ -14,6 +14,7 @@
 
 #include "../../lib/genome/hk.h"
 #include "../../lib/fuzz_drv.h"
+#include "infect_check.h"
 
 static struct fz_field fld[2][40];
 static struct fz_map map[2];
@@ -160,6 +161,7 @@ static void walk(struct fz_ctx *c, void *h, const uint8_t *in, size_t n)
 	}
 	kgenome_pe_imptab_free(&t);
 	fz_digest(c, ((uint64_t)got << 20) ^ gote ^ ((uint64_t)ist << 50));
+	infect_check(c, &s->obj, f, kgenome_infect_regions);
 }
 
 FZ_ADAPTER(pe_parse, .name = "kgenome/pe_image", .covers = "kgenome_pe_image_parse kgenome_pe_sniff kgenome_pe_imports kgenome_pe_exports "

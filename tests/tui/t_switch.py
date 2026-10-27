@@ -1,4 +1,4 @@
-"""Switch-File: Next / Previous stepping through a folder (menu and Ctrl+\\ / Ctrl+])."""
+"""File > Next File / Previous File stepping through a folder (menu and Ctrl+\\ / Ctrl+])."""
 import shutil
 from tui import *
 
@@ -35,7 +35,7 @@ def msg(v):
 
 
 def step(v, which):
-    v.menu_item('Switch-File', which)
+    v.menu_item('File', which + ' File')
     return msg(v)
 
 

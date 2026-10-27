@@ -535,6 +535,11 @@ int kgenome_emu_mem_wr(struct kgenome_emu *e, uint64_t va, const void *src, unsi
 			uint64_t dsp = va > sp ? va - sp : sp - va;
 			uint64_t line = va >> 6;
 
+			/* KNOWN DEFECT EMU-045 (2026-10-24, M) [sev M]: a store earns progress credit and a new page restarts it even when the byte
+			 * written is the byte already there, so a keystream loop whose stores are no-ops never reaches the idle ceiling.
+			 * Trigger: emu_unpack of pe300/045.bin (agent-reported measurement). Effect: 289M of 2.08G insns, 3,357,492 bytes
+			 * written of which 235 differ, ends BUDGET "Limit reached". Reproducer: /mnt/games/normtest/emu_unpack_report.md.
+			 * Fix: no credit for a store of the value already present (copy: 289.4M -> 8.4M; needs the owner's identity gate). */
 			if (dsp > (64u << 10) && line != e->last_wr_line) {
 				e->last_wr_line = line;
 				e->idle_credit++;

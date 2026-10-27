@@ -212,6 +212,9 @@ static void symbol_at(uint8_t c, struct bat_pos *st)
 	st->cmd = c == '&' || c == '|';
 }
 
+/* KNOWN DEFECT D15c (2026-10-24, R) [sev M]: kgenome_textual_bat_lex starts a command only at a line start or after & && || |, not after the condition of IF, after ELSE or after DO ("NOT DONE" at the head of this file).
+ * Trigger: `if x rem y` or `... do rem y`: cmd reads a comment there. Effect: the lexer delivers it as code, so its words reach the form and the graph (corpus: 0 such lines).
+ * Reproducer: none yet. Fix: re-arm st.cmd after the IF condition (the diag row already knows it: `cond`), after ELSE and after DO. */
 void kgenome_textual_bat_lex(struct kgenome_textual_lexer *lx)
 {
 	const uint8_t *p = lx->p;

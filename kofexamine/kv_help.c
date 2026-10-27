@@ -404,7 +404,6 @@ void draw_help(struct out *o, struct view *v)
 		pg.line = g_keys;
 		pg.n = (uint32_t)(sizeof keys / sizeof keys[0]);
 		pg.off = (uint32_t *)&v->help_off;
-		pg.close = 1;
 		pg.record = 1;
 		pg.foot = " Esc closes ";
 	} else {
@@ -413,12 +412,11 @@ void draw_help(struct out *o, struct view *v)
 		pg.line = g_about;
 		pg.n = g_n_about;
 		pg.off = (uint32_t *)&v->help_off;
-		pg.close = 1;
 		pg.record = 1;
 		pg.foot = " Esc closes ";
 	}
 	page_draw(o, v, &pg);
-	v->help_btn_y = pg.btn_y;
-	v->help_btn_x0 = pg.btn_x0;
-	v->help_btn_x1 = pg.btn_x1;
+	v->help_btn_y = pg.geo.close_y;
+	v->help_btn_x0 = pg.geo.close_x0;
+	v->help_btn_x1 = pg.geo.close_x1;
 }

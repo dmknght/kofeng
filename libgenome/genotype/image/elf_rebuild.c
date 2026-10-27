@@ -150,6 +150,11 @@ int kgenome_elf_rebuild(uint64_t base, kgenome_elf_rebuild_rd rd, void *user,
 	memset(hole, 0, sizeof hole);
 
 	memcpy(file, eh, EHDR64);
+	/* KNOWN DEFECT E-ELFPH (2026-10-24, R) [sev M]: when the program header table lies past `end` (the last PT_LOAD's file
+	 * content) it is not copied and nothing says so, while the hole loop below also skips p_filesz for it. Trigger: an
+	 * ELF whose e_phoff is past every segment (phoff <= cap). Effect: the rebuilt file keeps e_phoff and e_phnum but the
+	 * table is zeroes, a header that names a table that is not there. Reproducer: none (read). Fix: fail the rebuild or
+	 * zero e_phnum/e_phoff as the section table does. */
 	if (phoff + (uint64_t)phnum * PHENT64 <= end)
 		memcpy(file + phoff, ph, (size_t)phnum * PHENT64);
 

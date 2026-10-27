@@ -150,6 +150,10 @@ static void st_facts(struct kof_pipeline *p)
 		p->ctx.resolve_scan = sx_declared_resolve_scan;
 		/* And out to the caller, which has the same problem the engine
 		 * had: it cannot work these out from the bytes either. */
+		/* KNOWN DEFECT N-REGION16 (2026-10-24, R) [sev M]: this copy clips kof_result.region[] to KOF_MAX_REGIONS (16) and says nothing,
+		 * while the declared table (sc->cur.rgn) is now as long as the producer's. Trigger: a normalised PE with more than 16
+		 * disjoint code extents. Effect: the host sees 16 regions and n_region 16, the rest vanish without a flag or oc_scan_limit.
+		 * Reproducer: corp300/015_240fe (2048 library spans). Fix: report the cut (KOF_BROKEN_LIMIT, limit_hits) or add a total count (ABI). */
 		for (g = 0; g < sc->cur.n_rgn && g < KOF_MAX_REGIONS; g++) {
 			out->region[g].mask = sc->cur.rgn[g].mask;
 			out->region[g].off = sc->cur.rgn[g].off;

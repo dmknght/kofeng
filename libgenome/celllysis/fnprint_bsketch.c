@@ -178,6 +178,11 @@ void kgenome_fnprint_bsketch_build(struct kgenome_fnprint_bsketch *g, const uint
 	g->start = st.v; g->n_start = (uint32_t)st.n;
 	g->from = fr.v; g->to = to.v; g->n_edge = (uint32_t)fr.n;
 	g->bytes = charged;
+	/* KNOWN DEFECT WP9-F14 (2026-10-25, M) [sev L]: the bsketch builder publishes start/from/to with n_start >
+	 * 0 before reached is allocated, and on a refused allocation sets status NOMEM and returns with reached
+	 * NULL. Trigger: that calloc/malloc refused (fnprint is off the scan path). Effect: a reader of reached[i]
+	 * faults (UBSAN null load). Reproducer: fuzz diag/fnprint_bytes (failk); tests_wp9/findings/F14_note.txt.
+	 * Fix: allocate reached before publishing start/from/to, or on failure free them and zero n_start/n_edge. */
 	g->reached = calloc(g->n_start ? g->n_start : 1u, 1);
 	stk = malloc((g->n_start ? g->n_start : 1u) * sizeof *stk);
 	if (!g->reached || !stk) {

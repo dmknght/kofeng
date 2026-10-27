@@ -698,6 +698,11 @@ int kof_scan_incomplete(const struct kof_obj_ctx *ctx)
 	 * allocation that failed count here - the per-diagnose limits are already
 	 * 'cannot say' through diag_unk. */
 	st = kof_scan_diag_status(ctx);
+	/* KNOWN DEFECT REV-D2 (2026-10-24, R) [sev L]: "this analysis stopped short, so the object is limited" is decided in separate
+	 * places with separate rules: here (OVER_BUDGET/NOMEM, TRUNCATED only when asked), kgenome_status_is_cut in
+	 * objctx_diag.c (symbols, PE imports), scan_norm.c (view functions) and pe_sym.c. Trigger: the same status from two
+	 * products. Effect: one cut sets KOF_BROKEN_LIMIT or limit_hits, the same cut elsewhere does not. Reproducer: none (read).
+	 * Fix: one oc_ function maps a lib status to the object's report and every site calls it. */
 	if (st == KGENOME_OVER_BUDGET || st == KGENOME_NOMEM)
 		return 1;
 	/*

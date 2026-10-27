@@ -631,6 +631,12 @@ int kof_report_write_text(struct kof_report *r, FILE *out, int color)
 	write_groups(r, out, &k);
 	write_tagged(r, out, &k);
 	write_foot(r, out, &k);
+	/* KNOWN DEFECT WP12-6 (2026-10-24, M) [sev M]: kof_report_write_text (and _json,
+	 * _candidates below) return 0 whatever the sink did. Trigger: a full
+	 * disk (/dev/full): ferror(out) is set. Effect: the caller learns of a
+	 * truncated report only if it checks ferror itself. Reproducer:
+	 * tests/unit/orbit_store.c case_report. Fix: return ferror(out) ? -1 : 0
+	 * in all three writers. */
 	return 0;
 }
 

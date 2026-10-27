@@ -52,7 +52,8 @@ Exit status is 1 when any case is FAIL or ERROR.
 | `t_hex.py` | hex pane and text pane |
 | `t_disasm.py` | disassembler panel |
 | `t_events.py` | event log tree, event panel, Filter events |
-| `t_symbols.py` | Symbols dialog |
+| `t_symbols.py` | the symbol tables: the dashboard's Imports and Exports tabs (columns, filter, scroll, hscroll, selection, copy) |
+| `t_dashtabs.py` | the dashboard's tab strip (click only), each page's rows, hostile section tables, the retired Symbols item |
 | `t_dialogs.py` | properties page, help boxes, find, goto, decoder, context menus, repaint-after-input sweep |
 | `t_draft.py` | draft panel: Type, Family, Comment, Format, Region, Options, Strings (the Intron table) |
 | `t_mutation.py` | mutation block table (the Blocks tab) |

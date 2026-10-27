@@ -275,6 +275,11 @@ int kgenome_lineage_seed_block(const struct kgenome_lineage_cfg *g, uint32_t b)
  * out, no jump through a register, and at least one call or syscall - what __stack_chk_fail, abort and _exit of a static binary
  * are. A noreturn function that tail-jumps or returns on some path is not found: said, not guessed.
  */
+/* KNOWN DEFECT D10 (2026-10-24, R) [sev M]: noreturn_names lists C/glibc names only; the Windows ones (ExitProcess,
+ * ExitThread, TerminateProcess, RtlExitUserProcess, __fastfail) are missing. Trigger: a PE whose function ends in a
+ * call to ExitProcess. Effect: the block is not ended, the walk runs into the next function and hands it this one's
+ * state (the 540/f mechanism above, wrong links). Reproducer: none (read). Fix: add the names, keyed by the import
+ * name the PE route reports. */
 static const char *const noreturn_names[] = {
 	"exit", "_exit", "_Exit", "abort", "quick_exit", "__stack_chk_fail", "__stack_chk_fail_local", "__assert_fail", "__assert",
 	"__assert_perror_fail", "__chk_fail", "__fortify_fail", "__libc_fatal", "longjmp", "_longjmp", "siglongjmp", "__longjmp_chk",
@@ -390,6 +395,9 @@ static const struct lineage_next lineage_next[] = {
 	{ KGENOME_LINEAGE_W_SKIP, KGENOME_LINEAGE_S_DEMAND },
 };
 
+/* KNOWN DEFECT WP9-F16 (2026-10-25, Inference) [sev L]: kgenome_diag_oblig_next_stage shifts 1u by `bit`
+ * with no range check. Trigger: bit >= 32 (not run: the adapter stays below 19). Effect: undefined shift
+ * (UBSAN stops). Reproducer: none. Fix: `if (bit >= 32u) return 0u;` first. */
 unsigned kgenome_diag_oblig_next_stage(unsigned bit)
 {
 	unsigned i;
@@ -428,6 +436,10 @@ static unsigned input_state(const struct kgenome_lineage *L, const struct kgenom
 	return a->param ? KGENOME_LINEAGE_W_ENTRY : KGENOME_LINEAGE_W_UNREACH;
 }
 
+/* KNOWN DEFECT REV-D7b (2026-10-24, Inference) [sev L]: glob_find (the lineage global table) is a hand-rolled open-addressing table with an unseeded multiplicative
+ * hash, not the shared helper (diag_oatab.h / kof_hash64_slot): CLAUDE.md rule 2. Trigger: keys chosen by the file that
+ * collide in the top bits. Effect: probe chains grow (the G1 flood in the script tables took 20.4 s for 65536 names).
+ * Reproducer: none (review_arch D7, read). Fix: build it on kgenome_oatab (seeded, one probe step) like diag_text_sum. */
 static struct kgenome_lineage_agg *glob_find(const struct kgenome_lineage *L, uint32_t key)
 {
 	uint32_t m, i;

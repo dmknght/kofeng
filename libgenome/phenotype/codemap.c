@@ -63,6 +63,11 @@ static int cm_push(struct cm_build *b, const struct kgenome_codemap_ref *r)
 	struct kgenome_codemap *m = b->m;
 
 	if (m->n == b->cap) {
+		/* KNOWN DEFECT REV-D8e (2026-10-25, Inference) [sev L]: cm_push (codemap.c) doubles a uint32 capacity (code map
+		 * refs) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements of this kind
+		 * (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly). Reproducer:
+		 * none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against UINT32_MAX / 2
+		 * before doubling. */
 		uint32_t nc = b->cap ? b->cap * 2u : 1024u;
 		struct kgenome_codemap_ref *nv = realloc(m->v, (size_t)nc * sizeof *nv);
 
@@ -275,6 +280,12 @@ int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, ui
 		out->status = KGENOME_NOMEM;
 		return 0;
 	}
+	/* KNOWN DEFECT WP9-F5 (2026-10-25, M) [sev M]: kgenome_codemap_build appends refs extent by extent, so m->v
+	 * is not in order of `at` (codemap.h says it is) and holds duplicates. Trigger: two executable segments in
+	 * descending file order, or overlapping ones. Effect: kgenome_codemap_at (binary search) silently misses
+	 * refs that exist: evidence lost on a crafted ELF. Reproducer: tests/lib/genome/diag_known_misses.c f5
+	 * (green until fixed). Fix: sort m->v by `at` and drop equal `at` before cm_index, or read the extents in
+	 * ascending order. */
 	for (i = 0; ok && i < n; i++)
 		ok = cm_read_extent(&b, &ext[i], size, base);
 	if (ok)
@@ -294,6 +305,9 @@ int kgenome_codemap_build(const struct kgenome_obj *obj, const uint8_t *base, ui
 
 void kgenome_codemap_free(struct kgenome_codemap *m)
 {
+	/* KNOWN DEFECT WP9-F3 (2026-10-25, M) [sev L]: kgenome_codemap_free dereferences its argument, unlike every
+	 * other free of the diagnose scan. Trigger: kgenome_codemap_free(NULL). Effect: NULL dereference.
+	 * Reproducer: tests/lib/genome/diag_known_misses.c f3 (green until fixed). Fix: `if (!m) return;` first. */
 	free(m->v);
 	free(m->by_to);
 	memset(m, 0, sizeof *m);

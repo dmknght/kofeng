@@ -25,6 +25,7 @@
 #include "hostile_common.h"
 #include "hostile_enc.h"
 #include "hostile_lzenc.h"
+#include "hostile_bcjenc.h"
 
 #include <decompressors/bcj.h>
 #include <decompressors/bcj2.h>
@@ -99,19 +100,6 @@ static size_t ref_x86(int encoder, uint8_t *buf, size_t size, uint32_t now_pos)
 		}
 	}
 	return pos;
-}
-
-/* code-like bytes: many E8/E9, 00 and FF operands, ordinary bytes */
-static void code_bytes(uint8_t *p, size_t n, uint64_t *rs, unsigned flavour)
-{
-	size_t i;
-
-	for (i = 0; i < n; i++) {
-		uint32_t r = hv_rng32(rs) % 100u;
-
-		p[i] = flavour == 0 ? (uint8_t)hv_rng32(rs) :
-		       r < 15 ? 0xE8 : r < 25 ? 0xE9 : r < 45 ? 0x00 : r < 65 ? 0xFF : r < 70 ? 0x0F : (uint8_t)hv_rng32(rs);
-	}
 }
 
 static void bcj_x86(void)
@@ -231,70 +219,6 @@ static void bcj_xz(void)
 }
 
 /* ---- BCJ2 ------------------------------------------------------------------------------------- */
-
-struct b2 {
-	uint8_t main_s[4000], call_s[4000], jump_s[4000], rc_s[2000];
-	size_t  nm, nc, nj, nr;
-};
-
-static int b2_branch(uint8_t prev, uint8_t b)
-{
-	return b == 0xE8 || b == 0xE9 || (prev == 0x0F && (b & 0xF0) == 0x80);
-}
-
-/* The encoder: convert a candidate when `want` says so (the test's policy), writing the four streams. */
-static int b2_encode(struct b2 *s, const uint8_t *orig, size_t n, uint64_t seed, unsigned convert_pct)
-{
-	uint16_t prob[258];
-	struct hv_lz e;
-	uint64_t rs = seed;
-	size_t i = 0;
-	uint8_t prev = 0;
-
-	memset(&e, 0, sizeof e);
-	hv_lz_rc_start(&e, s->rc_s, sizeof s->rc_s);
-	for (i = 0; i < 258; i++)
-		prob[i] = 1024;
-	s->nm = s->nc = s->nj = 0;
-	i = 0;
-	while (i < n) {
-		uint8_t b = orig[i];
-
-		s->main_s[s->nm++] = b;
-		i++;
-		if (!b2_branch(prev, b)) {
-			prev = b;
-			continue;
-		}
-		{
-			uint16_t *pr = b == 0xE8 ? &prob[prev] : b == 0xE9 ? &prob[256] : &prob[257];
-			int conv = i + 4 <= n && (hv_rng32(&rs) % 100u) < convert_pct;
-
-			hv_lz_bit(&e, pr, conv ? 1u : 0u);
-			if (!conv) {
-				prev = b;
-				continue;
-			}
-			{
-				uint32_t disp = (uint32_t)orig[i] | (uint32_t)orig[i + 1] << 8 | (uint32_t)orig[i + 2] << 16 |
-						(uint32_t)orig[i + 3] << 24;
-				uint32_t abs_addr = disp + (uint32_t)(i + 4);
-				uint8_t *dst = b == 0xE8 ? s->call_s + s->nc : s->jump_s + s->nj;
-
-				dst[0] = (uint8_t)(abs_addr >> 24); dst[1] = (uint8_t)(abs_addr >> 16);
-				dst[2] = (uint8_t)(abs_addr >> 8); dst[3] = (uint8_t)abs_addr;
-				if (b == 0xE8)
-					s->nc += 4;
-				else
-					s->nj += 4;
-			}
-			prev = orig[i + 3];
-			i += 4;
-		}
-	}
-	s->nr = hv_lz_rc_finish(&e);
-	return !e.over && s->nm <= sizeof s->main_s;
-}
 
 /* One call with each stream against its own guard page. */
 static uint64_t b2_call(const struct b2 *s, size_t nm, size_t nc, size_t nj, size_t nr, size_t cap, uint8_t *copy)

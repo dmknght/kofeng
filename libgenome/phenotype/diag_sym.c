@@ -136,6 +136,11 @@ static void gather(struct relgather *g, const struct kgenome_diag_rcall *rc)
 	if (rc->target || cap == KGENOME_NUCLEO_NONE)
 		return;
 	if (g->n == g->cap_n) {
+		/* KNOWN DEFECT REV-D8d (2026-10-25, Inference) [sev L]: relsite grow in the symbol route (diag_sym.c) doubles a
+		 * uint32 capacity (sites of one object) with no overflow guard and no ledger charge. Trigger: an object with 2^31
+		 * or more elements of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the
+		 * lib directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test
+		 * cap against UINT32_MAX / 2 before doubling. */
 		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
 		struct relsite *ns = realloc(g->site, (size_t)nc * sizeof *ns);
 
@@ -191,6 +196,7 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	struct site_at  *by_at = NULL;
 	const struct kgenome_elf_relocs *rt;
 	struct kgenome_cell_space sp;
+	struct kgenome_diag_callees ce;
 	struct relgather g;
 	const struct kgenome_func_set *fg;
 	const struct kgenome_elf_info *ei;
@@ -296,6 +302,7 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 	 * sweep of the section would not.
 	 */
 	kgenome_cell_space_init(&sp, obj, base, size);
+	kgenome_diag_callees_init(&ce, &sp, obj->arch, 0, size);
 	for (j = 0; j < fg->n; j++) {
 		struct kgenome_cell_cur k;
 		struct kgenome_cell_insn in;
@@ -330,6 +337,14 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 			 */
 			if (in.op != KGENOME_CELL_CALL && in.op != KGENOME_CELL_JMP) {
 				kgenome_diag_org_step(&w, &in);
+				/*
+				 * A `ret` ENDS THE LINE, and the decoder writes no register for it, so nothing was
+				 * cleared. What follows in the same function is reached by a branch from earlier
+				 * in it, which this walk does not model: what is carried is reached, not shown -
+				 * the sweep's rule for the code after a jmp that no join reaches.
+				 */
+				if (in.op == KGENOME_CELL_RET)
+					kgenome_diag_org_demote(&w, 0xffffu);
 				if (w.stk_cut) {
 					w.stk_cut = 0;
 					kgenome_diag_note(s, KGENOME_TRUNCATED);
@@ -369,11 +384,11 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 						continue;
 					/* the origin map holds only what a
 					 * call RETURNED - this route states
-					 * provenance and nothing else. */
-					kgenome_diag_note_in(s, h,
-						kgenome_diag_org_of(&w,
-								kgenome_diag_sysv_arg[a]),
-						role, KGENOME_DIAG_KIND_PRODUCED);
+					 * provenance and nothing else - and how sure it is: a link
+					 * the walk reached but did not show is MAY (the same one
+					 * place that turns an origin into links as the sweep). */
+					kgenome_diag_org_link(s, h, &w, kgenome_diag_sysv_arg[a], role,
+							      KGENOME_DIAG_KIND_PRODUCED);
 					/*
 					 * AND WHICH SYMBOL IT NAMED, if the
 					 * relocation table said - see
@@ -398,15 +413,26 @@ void kgenome_diag_run_symbol(struct kgenome_diag_scan *s,
 				}
 			}
 			kgenome_diag_org_step(&w, &in);
+			/*
+			 * WHAT A CALL DID TO THE REGISTERS THE WALK CARRIES, which the step does not say: the decoder gives
+			 * a CALL no written register (X2: the comment here claimed the step cleared rax, and it cleared
+			 * nothing, so an origin survived every call that was not itself a capability). The answer is the
+			 * sweep's (kgenome_diag_org_call): a callee this object resolves by itself is read, any other
+			 * is unknown, and an unknown callee may have overwritten what the ABI lets it. A call that
+			 * carries a relocation has a hole where its displacement is, which decodes as `call next`, so
+			 * its target is not known and must not be read as the program counter being fetched.
+			 */
+			if (in.op == KGENOME_CELL_CALL)
+				kgenome_diag_org_call(&w, &ce, &in, in.target == in.at + in.len);
 			if (w.stk_cut) {
 				w.stk_cut = 0;
 				kgenome_diag_note(s, KGENOME_TRUNCATED);
 			}
 			/*
-			 * AND WHAT IT HANDS BACK, after the step - which
-			 * clears rax as a call's clobber. The result is the
-			 * one thing a call does NOT clobber, and writing it
-			 * second is how both facts are kept.
+			 * AND WHAT IT HANDS BACK, after the call's effect.
+			 * The result is the one thing a call does NOT
+			 * clobber, and writing it last is how both facts
+			 * are kept.
 			 */
 			if (i < g.n && node_of[i] != 0xffffu) {
 				if (kgenome_nucleo_hands_on(sites[i].cap,

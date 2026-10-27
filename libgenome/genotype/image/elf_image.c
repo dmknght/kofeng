@@ -1416,3 +1416,65 @@ int kgenome_elf_va_to_off(const struct kgenome_elf_info *e, uint64_t va, uint64_
 	*off = g->file_off + (va - g->mem_addr);
 	return 1;
 }
+
+/*
+ * One header record of the table at `base`, the way the parse located it: `i` times the
+ * stride the class mandates, added without wrapping. 0 when the record is not wholly in
+ * `f`. kof_slice answers an empty buffer for a range that is not inside, which also
+ * covers a base so large that the sum would wrap (the saturated sum is past the end).
+ */
+static kof_buf elf_hdr_rec(kof_buf f, uint64_t base, uint32_t i, uint64_t size)
+{
+	return kof_slice(f, kof_sat_add(base, (uint64_t)i * size), size);
+}
+
+int kgenome_elf_seg_align(kof_buf f, const struct kgenome_elf_info *e, uint32_t i,
+			  uint64_t *align)
+{
+	int is64, be;
+	kof_buf ph;
+
+	if (!e->valid || i >= e->seg_count || i >= KGENOME_ELF_MAX_SEGMENTS)
+		return 0;
+	is64 = e->elf_class == KGENOME_ELFCLASS_64;
+	be = e->elf_data == KGENOME_ELFDATA_BE;
+	ph = elf_hdr_rec(f, e->phoff, i, is64 ? PHDR64_SIZE : PHDR32_SIZE);
+	if (!ph.n)
+		return 0;
+	if (is64)
+		return kof_rd_u64(ph, 48, be, align);
+	{
+		uint32_t a;
+
+		if (!kof_rd_u32(ph, 28, be, &a))
+			return 0;
+		*align = a;
+		return 1;
+	}
+}
+
+int kgenome_elf_sec_layout(kof_buf f, const struct kgenome_elf_info *e, uint32_t i,
+			   uint64_t *addralign, uint64_t *entsize)
+{
+	int is64, be;
+	kof_buf sh;
+
+	if (!e->valid || i >= e->sec_count || i >= KGENOME_ELF_MAX_SECTIONS)
+		return 0;
+	is64 = e->elf_class == KGENOME_ELFCLASS_64;
+	be = e->elf_data == KGENOME_ELFDATA_BE;
+	sh = elf_hdr_rec(f, e->shoff, i, is64 ? SHDR64_SIZE : SHDR32_SIZE);
+	if (!sh.n)
+		return 0;
+	if (is64)
+		return kof_rd_u64(sh, 48, be, addralign) && kof_rd_u64(sh, 56, be, entsize);
+	{
+		uint32_t a, s;
+
+		if (!kof_rd_u32(sh, 32, be, &a) || !kof_rd_u32(sh, 36, be, &s))
+			return 0;
+		*addralign = a;
+		*entsize = s;
+		return 1;
+	}
+}

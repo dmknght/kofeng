@@ -1,0 +1,2 @@
+kof_inspect_findings	KNOWN DEFECT EX-2: declared in kofexamine/kofinspect.h and defined in no unit (tests/unit/kx_inspect.c pins it); nothing to call
+kof_inspect_mutation	needs a kof_scanner of a loaded engine with a mutation set (struct kof_scanner, sc->eng->blk_tab): not byte-drivable; its argument guards are in tests/unit/kx_inspect.c

@@ -1,4 +1,4 @@
-"""Switch-File Next/Previous with and without a draft, and quitting with one.
+"""File > Next File / Previous File with and without a draft, and quitting with one.
 The draft is never written: the panel's Generate only lists the output
 (t_diagnose.py)."""
 import glob
@@ -19,8 +19,8 @@ def navigation_blocked_with_unsaved_new_draft():
     fs = prep_dir('sig_dirty', [(FIX('tiny.bin'), 'a_x'), (FIX('plain.txt'), 'b_x')])
     with Viewer(fs[0], rows=70, cols=200, copy=False) as v:
         click_in_panel(v, '[?]'); v.type('abc'); v.key('enter')
-        v.menu_open('Switch-File')
-        n = v.popup_item('Next')
+        v.menu_open('File')
+        n = v.popup_item('Next File')
         check(n and not n[3], 'Next enabled with an edited blank draft: %r' % (n,))
         v.esc()
         v.key('ctrl+\\')
@@ -44,7 +44,7 @@ def navigation_resets_draft_for_new_file():
     others = pick(SAMPLES['elf255'], 2, 5000, 80000)
     fs = prep_dir('sig_reset', [(others[0], 'a_x'), (others[1], 'b_x')])
     with Viewer(fs[0], rows=70, cols=200, copy=False) as v:
-        v.menu_item('Switch-File', 'Next')
+        v.menu_item('File', 'Next File')
         r = v.row(head_row(v))
         check('Type [' in r, r[:60])
         check(v.alive())

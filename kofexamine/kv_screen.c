@@ -53,62 +53,13 @@ static size_t g_last_n;
  * what was under it.
  */
 static int g_modal_drawn;
+static struct dlg_off g_prop_drawn;   /* the dashboard's offset the last frame was drawn with */
 
-void redraw(struct view *v)
+/*
+ * Settle the draft panel's height and its scroll before anything asks where it is.
+ */
+static void redraw_draft_rows(struct view *v)
 {
-	struct out o = { 0 };
-	int wiped = 0, under;
-
-	g_fld.room = 0;
-	/* What field_draw paints as selected, normalised once rather than at
-	 * every character - see g_fsel. */
-	if (!fsel_range(v, &g_fsel.lo, &g_fsel.hi))
-		g_fsel.lo = g_fsel.hi = 0;
-	term_size();
-	if (g_term_small) {
-		/* 60 columns written into 40 wrap every line into the next: say so instead */
-		free(g_last);
-		g_last = NULL;
-		g_last_n = 0;
-		term_write("[2J[HTerminal too small - need at least 60x12");
-		return;
-	}
-	/*
-	 * THE SCREEN, as the outermost bound every drawer is inside.
-	 *
-	 * Set here and not in out_add's defaults because a struct out is also
-	 * used as a plain string builder - the clipboard is assembled with the
-	 * same calls - and a builder that silently dropped what did not fit on
-	 * a screen would be a builder that corrupts a copy.
-	 *
-	 * Set AFTER term_size, because this is the size the frame is being
-	 * drawn for.
-	 */
-	out_clip_set(&o, 1, 1, g_rows, g_cols);
-	/*
-	 * AND THE POINTER MAP IS CLEARED WITH IT.
-	 *
-	 * Every rectangle in it describes where something was PAINTED, so it
-	 * lives exactly as long as the frame does. Cleared here rather than in
-	 * the draft panel, which is where it started: the panes drawn before
-	 * the panel register rectangles too, and a clear halfway through the
-	 * frame throws away whatever came first.
-	 */
-	hit_reset(v);
-	if (kof_tty_resize_pending()) {
-		/*
-		 * The cached frame describes a screen of the old size, and the
-		 * terminal has thrown away whatever was on it. Comparing
-		 * against it would let an unchanged frame skip the repaint and
-		 * leave the screen as the resize left it.
-		 */
-		kof_tty_resize_clear();
-		free(g_last);
-		g_last = NULL;
-		g_last_n = 0;
-		term_write("\033[2J");
-		wiped = 1;
-	}
 	/* The panes are laid out around the draft, so its height is settled
 	 * before anything asks where it is. */
 	{
@@ -197,6 +148,15 @@ void redraw(struct view *v)
 				v->prow_off = max_off;
 		}
 	}
+}
+
+/*
+ * Whether the panes are painted this frame, and which full-cover dialog was drawn.
+ * A full-screen modal paints alone; see the notes inside.
+ */
+static int redraw_under(struct view *v, int wiped)
+{
+	int under;
 
 	/*
 	 * Synchronised output, DEC mode 2026.
@@ -245,11 +205,13 @@ void redraw(struct view *v)
 	 * leaving is erased only by what was under it.
 	 */
 	{
-		int modal = v->prop_open   ? 1
-			  : v->sym_open    ? 3
+		/* One id per PAGE of the dashboard: switching tabs repaints the panes under it, because
+		 * what a narrower page leaves of a wider one's edge is erased only by what was beneath. */
+		int modal = v->prop_open   ? 1 + 10 * (int)v->prop_pg
 			  : v->help_open   ? 4
 			  : syn_page_up(v) ? 5
-			  : syn_modal(v)   ? 6 : 0;
+			  : syn_modal(v)   ? 6
+			  : fam_up(v)      ? 7 : 0;
 
 		/* A bar menu opened over the dialog is another picture: it has to be
 		 * erased when it moves or closes, and only the panes can do that. */
@@ -264,9 +226,26 @@ void redraw(struct view *v)
 		 */
 		if (syn_modal(v) && !syn_page_up(v))
 			under = 1;
+		/*
+		 * THE FAMILIES DIALOG IS AS BIG AS ITS CONTENT, so what a smaller or moved box uncovers is erased only by
+		 * what was beneath. Where its boxes are is known only once it is drawn: redraw() asks fam_uncovered() after
+		 * draw_fam and paints the frame again with the panes when a box moved, shrank, opened or closed.
+		 */
+		/* A dashboard that was moved uncovers what it stood on: the panes are painted again while its offset changes. */
+		if (v->prop_open && (v->prop_move.dx != g_prop_drawn.dx || v->prop_move.dy != g_prop_drawn.dy))
+			under = 1;
+		g_prop_drawn = v->prop_move;
 		g_modal_drawn = modal;
 	}
 
+	return under;
+}
+
+/*
+ * The disassembly panel's height, settled before the event panel's.
+ */
+static void redraw_dis_rows(struct view *v)
+{
 	/*
 	 * The panel's height, settled before anything is drawn because every
 	 * geometry helper below reads it. Half of what the hex column has, and
@@ -298,20 +277,13 @@ void redraw(struct view *v)
 	} else {
 		g_disasm_rows = 0;
 	}
+}
 
-	/*
-	 * THE EVENT PANEL'S HEIGHT, settled the same way and after the
-	 * disassembler on purpose: g_disasm_rows is what hex_bot's neighbours
-	 * are measured against, and a panel sized before it would be sized
-	 * against last frame's number.
-	 *
-	 * As tall as the record needs and no taller. Unlike a disassembly,
-	 * which is as long as the reader keeps scrolling, a record has a fixed
-	 * number of fields - so a fixed half-column would leave blank rows the
-	 * hex pane could have had on almost every event. It still gets a cap,
-	 * because a process start with a long command line yields enough rows
-	 * to crowd out the bytes the panel is explaining.
-	 */
+/*
+ * A deferred tree rebuild, here and nowhere else (see tree_dirty).
+ */
+static void redraw_tree_rebuild(struct view *v)
+{
 	/*
 	 * A DEFERRED TREE REBUILD, here and nowhere else.
 	 *
@@ -346,7 +318,26 @@ void redraw(struct view *v)
 		 */
 		view_select(v);
 	}
+}
 
+/*
+ * The event panel's height, settled after the disassembler on purpose.
+ */
+static void redraw_evt_rows(struct view *v)
+{
+	/*
+	 * THE EVENT PANEL'S HEIGHT, settled the same way and after the
+	 * disassembler on purpose: g_disasm_rows is what hex_bot's neighbours
+	 * are measured against, and a panel sized before it would be sized
+	 * against last frame's number.
+	 *
+	 * As tall as the record needs and no taller. Unlike a disassembly,
+	 * which is as long as the reader keeps scrolling, a record has a fixed
+	 * number of fields - so a fixed half-column would leave blank rows the
+	 * hex pane could have had on almost every event. It still gets a cap,
+	 * because a process start with a long command line yields enough rows
+	 * to crowd out the bytes the panel is explaining.
+	 */
 	if (evt_have_rec(v) && v->evt_open && !sym_view(v)) {
 		int room = hex_bot() - hex_top() + 1;
 		int meta[64], warn[64], nm2 = 0, nw2 = 0;
@@ -372,9 +363,14 @@ void redraw(struct view *v)
 	} else {
 		g_evt_rows = 0;
 	}
+}
 
-	out_str(&o, "\033[?2026h");
-	if (under) {
+/*
+ * The frame and the panes, each inside its own rectangle, with the zones the pointer
+ * map is declared from. Painted only when `under` says so.
+ */
+static void redraw_panes(struct out *o, struct view *v)
+{
 		/*
 		 * EACH PANE INSIDE ITS OWN RECTANGLE.
 		 *
@@ -388,19 +384,19 @@ void redraw(struct view *v)
 		 */
 		struct out_clip cl;
 
-		draw_frame(&o, v);
-		cl = out_clip_set(&o, hex_top(), 1, hex_bot(), TREE_W);
-		draw_tree(&o, v);
-		out_clip_restore(&o, cl);
-		cl = out_clip_set(&o, hex_top(), TREE_W + 1, hex_last(),
+		draw_frame(o, v);
+		cl = out_clip_set(o, hex_top(), 1, hex_bot(), TREE_W);
+		draw_tree(o, v);
+		out_clip_restore(o, cl);
+		cl = out_clip_set(o, hex_top(), TREE_W + 1, hex_last(),
 				  g_cols);
 		/* One pane, two renderings - see KV_CAP_TEXT. Everything
 		 * around it, this clip included, is the same either way. */
 		if (text_pane(v))
-			draw_text(&o, v);
+			draw_text(o, v);
 		else
-			draw_hex(&o, v);
-		out_clip_restore(&o, cl);
+			draw_hex(o, v);
+		out_clip_restore(o, cl);
 		/*
 		 * WHERE THE RIGHT BUTTON MEANS SOMETHING, declared by the pane
 		 * that drew it - see the gate at the top of click().
@@ -424,32 +420,38 @@ void redraw(struct view *v)
 			hit_zone(v, hex_top(), TREE_W + 1, hex_last(), g_cols,
 				 HIT_HWHEEL, hit_hwheel_text, 0);
 		}
-		cl = out_clip_set(&o, dis_top() - 1, TREE_W + 1, hex_bot(),
+		cl = out_clip_set(o, dis_top() - 1, TREE_W + 1, hex_bot(),
 				  g_cols);
-		draw_disasm(&o, v);
-		out_clip_restore(&o, cl);
+		draw_disasm(o, v);
+		out_clip_restore(o, cl);
 		if (g_disasm_rows)
 			hit_zone(v, dis_top(), TREE_W + 1, hex_bot(), g_cols,
 				 HIT_R, NULL, 0);
-		cl = out_clip_set(&o, evt_top() - 1, TREE_W + 1, hex_bot(),
+		cl = out_clip_set(o, evt_top() - 1, TREE_W + 1, hex_bot(),
 				  g_cols);
-		draw_evt(&o, v);
-		out_clip_restore(&o, cl);
+		draw_evt(o, v);
+		out_clip_restore(o, cl);
 		/* The event panel's TEXT BOX, not the whole panel: the field
 		 * table above it has no menu. */
 		if (evt_live(v))
 			hit_zone(v, evt_box_top(v), TREE_W + 1,
 				 evt_box_top(v) + EVT_BOX_ROWS - 1, g_cols,
 				 HIT_R, NULL, 0);
-		cl = out_clip_set(&o, decl_top(), 1, g_rows - 1, g_cols);
-		draw_decl(&o, v);
-		out_clip_restore(&o, cl);
+		cl = out_clip_set(o, decl_top(), 1, g_rows - 1, g_cols);
+		draw_decl(o, v);
+		out_clip_restore(o, cl);
 		/* Two rows: the status line, and the rule above it that
 		 * closes the draft panel - see draw_marker_line. */
-		cl = out_clip_set(&o, mark_row() - 1, 1, mark_row(), g_cols);
-		draw_marker_line(&o, v);
-		out_clip_restore(&o, cl);
-	}
+		cl = out_clip_set(o, mark_row() - 1, 1, mark_row(), g_cols);
+		draw_marker_line(o, v);
+		out_clip_restore(o, cl);
+}
+
+/*
+ * The dialogs are painted on every frame, under the panes or not.
+ */
+static void redraw_dialogs(struct out *o, struct view *v)
+{
 	/*
 	 * THE DIALOGS ARE PAINTED ON EVERY FRAME, under the panes or not.
 	 *
@@ -470,7 +472,7 @@ void redraw(struct view *v)
 		 * modal goes under whatever it pops up, not over it.
 		 */
 		if (v->enc_open) {
-			draw_enc(&o, v);
+			draw_enc(o, v);
 			/* Its plaintext window, whose geometry the draw just
 			 * settled - see enc_in_text, which is this rectangle. */
 			if (v->enc_txt_h > 0)
@@ -480,14 +482,110 @@ void redraw(struct view *v)
 					 HIT_R, NULL, 0);
 		}
 		if (v->menu_open)
-			draw_menu(&o, v);
+			draw_menu(o, v);
 		if (v->find_open)
-			draw_find(&o, v);
+			draw_find(o, v);
 		if (v->goto_open)
-			draw_goto(&o, v);
-		if (v->sym_open)
-			draw_symbols(&o, v);
+			draw_goto(o, v);
 	}
+}
+
+/*
+ * Write the frame unless it is the one already on the screen, and keep it for
+ * the comparison. Frees the frame either way.
+ */
+static void redraw_flush(struct out *o)
+{
+	/* Nothing moved: the frame is the one already on the screen. */
+	if (o->n && o->n == g_last_n && !memcmp(o->p, g_last, o->n)) {
+		free(o->p);
+		return;
+	}
+	if (o->n) {
+		char *keep = realloc(g_last, o->n);
+
+		if (keep) {
+			memcpy(keep, o->p, o->n);
+			g_last = keep;
+			g_last_n = o->n;
+		}
+	}
+	if (o->n)
+		(void)kof_write_all(STDOUT_FILENO, o->p, o->n);
+	free(o->p);
+}
+
+/* One frame. Returns 1 when it was NOT written because the families dialog's boxes changed and the panes under them have to be
+ * painted again: the caller runs it once more with `force_under`. */
+static int redraw_pass(struct view *v, int force_under)
+{
+	struct out o = { 0 };
+	int wiped = 0, under, moved = 0;
+
+	g_fld.room = 0;
+	/* What field_draw paints as selected, normalised once rather than at
+	 * every character - see g_fsel. */
+	if (!fsel_range(v, &g_fsel.lo, &g_fsel.hi))
+		g_fsel.lo = g_fsel.hi = 0;
+	term_size();
+	if (g_term_small) {
+		/* 60 columns written into 40 wrap every line into the next: say so instead */
+		free(g_last);
+		g_last = NULL;
+		g_last_n = 0;
+		term_write("[2J[HTerminal too small - need at least 60x12");
+		return 0;
+	}
+	/*
+	 * THE SCREEN, as the outermost bound every drawer is inside.
+	 *
+	 * Set here and not in out_add's defaults because a struct out is also
+	 * used as a plain string builder - the clipboard is assembled with the
+	 * same calls - and a builder that silently dropped what did not fit on
+	 * a screen would be a builder that corrupts a copy.
+	 *
+	 * Set AFTER term_size, because this is the size the frame is being
+	 * drawn for.
+	 */
+	out_clip_set(&o, 1, 1, g_rows, g_cols);
+	/*
+	 * AND THE POINTER MAP IS CLEARED WITH IT.
+	 *
+	 * Every rectangle in it describes where something was PAINTED, so it
+	 * lives exactly as long as the frame does. Cleared here rather than in
+	 * the draft panel, which is where it started: the panes drawn before
+	 * the panel register rectangles too, and a clear halfway through the
+	 * frame throws away whatever came first.
+	 */
+	hit_reset(v);
+	if (kof_tty_resize_pending()) {
+		/*
+		 * The cached frame describes a screen of the old size, and the
+		 * terminal has thrown away whatever was on it. Comparing
+		 * against it would let an unchanged frame skip the repaint and
+		 * leave the screen as the resize left it.
+		 */
+		kof_tty_resize_clear();
+		free(g_last);
+		g_last = NULL;
+		g_last_n = 0;
+		term_write("\033[2J");
+		wiped = 1;
+	}
+	redraw_draft_rows(v);
+
+	under = redraw_under(v, wiped) || force_under;
+
+	redraw_dis_rows(v);
+
+	redraw_tree_rebuild(v);
+
+	redraw_evt_rows(v);
+
+	out_str(&o, "\033[?2026h");
+	if (under)
+		redraw_panes(&o, v);
+	redraw_dialogs(&o, v);
 	/*
 	 * THE BAR IS DRAWN ON EVERY FRAME, modal or not.
 	 *
@@ -505,26 +603,25 @@ void redraw(struct view *v)
 		draw_prop(&o, v);
 	if (syn_modal(v))
 		draw_syn(&o, v);
+	if (fam_up(v)) {
+		draw_fam(&o, v);
+		moved = fam_uncovered(v);
+	}
 	if (v->help_open)
 		draw_help(&o, v);
 	draw_chooser(&o, v);
 	out_str(&o, "\033[?2026l");
 
-	/* Nothing moved: the frame is the one already on the screen. */
-	if (o.n && o.n == g_last_n && !memcmp(o.p, g_last, o.n)) {
+	if (moved && !under) {
 		free(o.p);
-		return;
+		return 1;
 	}
-	if (o.n) {
-		char *keep = realloc(g_last, o.n);
+	redraw_flush(&o);
+	return 0;
+}
 
-		if (keep) {
-			memcpy(keep, o.p, o.n);
-			g_last = keep;
-			g_last_n = o.n;
-		}
-	}
-	if (o.n)
-		(void)kof_write_all(STDOUT_FILENO, o.p, o.n);
-	free(o.p);
+void redraw(struct view *v)
+{
+	if (redraw_pass(v, 0))
+		(void)redraw_pass(v, 1);
 }

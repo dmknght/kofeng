@@ -45,6 +45,7 @@ def ko_viewer(d, rows=60, cols=150):
 
 
 def open_table(v):
+    raise Skip('Manage > Syndromes is switched off for now (bar_enabled BI_SYNTAB); the table code is kept')
     check(v.menu_item('Analysis', 'Syndrome table'), 'no Syndrome table item')
     check(v.wait_for('Syndrome table', 3), 'the page did not open')
 

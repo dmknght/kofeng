@@ -899,6 +899,10 @@ static uint64_t win_handles(struct kgenome_emu *e, unsigned id, int *mine)
 		 * which is what a failed query leaves the caller's buffer
 		 * saying: untouched, and it was zeroed before the call.
 		 */
+		/* KNOWN DEFECT EMU-NTQIP (2026-10-24, M) [sev M]: NtQueryInformationProcess refuses every class, and a loader that uses the
+		 * answer (not only the debugger classes) goes on with garbage. Trigger: PECompact build of 五味传奇 (agent-reported).
+		 * Effect: 0xc0000003 -> VirtualAlloc(0) = 0 -> store to 0x80, FAULT, the unpack stops. Reproducer:
+		 * /mnt/games/normtest/emu_unpack_report.md. Fix: answer the classes a loader reads (ProcessBasicInformation, WoW64). */
 		return 0xc0000003ull;
 	/*
 	 * THE SECOND BATCH: what a protector reaches for once it has kernel32

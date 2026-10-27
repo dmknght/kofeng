@@ -12,6 +12,10 @@
 
 struct kgenome_sysname { uint16_t nr; const char *name; };
 
+/* KNOWN DEFECT REV-D16b (2026-10-25, R) [sev L]: no make target regenerates this file and diffs it against the committed copy, and it cannot be reproduced from the host's headers.
+ * Trigger: tools/gen_sysnames.py run against the UAPI headers of the machine. Effect: here it writes 375 and 452 numbers, the committed file has 385 and 461, so a stale or hand-edited table is not caught.
+ * Reproducer: python3 tools/gen_sysnames.py scratch.c /usr/include/x86_64-linux-gnu/asm/unistd_64.h /usr/include/x86_64-linux-gnu/asm/unistd_32.h && cmp scratch.c libgenome/celllysis/nucleo_sysnames.c (differs).
+ * Fix: pin the two header files (or their number lists) under tools/, generate from them, and add a target that cmp's the result. */
 static const struct kgenome_sysname kgenome_sysnames64[] = {
 	{ 0, "read" },
 	{ 1, "write" },

@@ -481,6 +481,11 @@ static void mark_add(struct norm_work *w, uint64_t off, uint64_t n)
 	if (off > n)
 		off = n;
 	if (w->n_mark == w->cap_mark) {
+		/* KNOWN DEFECT REV-D8h (2026-10-25, Inference) [sev L]: mark_add (scan_norm.c) doubles a uint32 capacity
+		 * (normaliser marks) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements of
+		 * this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly).
+		 * Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against
+		 * UINT32_MAX / 2 before doubling. */
 		uint32_t nc = w->cap_mark ? w->cap_mark * 2u : 64u;
 		uint64_t *g = realloc(w->mk, (size_t)nc * sizeof *g);
 
@@ -526,6 +531,11 @@ static int norm_unit(void *user, uint32_t region, uint64_t off, uint64_t len, ui
 	    !kof_exe_has_wide(w->tmp + off, len))
 		return 0;
 	if (w->n_fixed == w->cap_fixed) {
+		/* KNOWN DEFECT REV-D8r (2026-10-25, Inference) [sev L]: the fixed-range collector (scan_norm.c) doubles a uint32 capacity (fixed ranges of the normaliser view)
+		 * with no overflow guard and no ledger charge. Trigger: 2^31 or more fixed ranges; the engine caps an object at 512 MiB,
+		 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
+		 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
+		 * UINT32_MAX / 2 before doubling. */
 		uint32_t nc = w->cap_fixed ? w->cap_fixed * 2u : 64u;
 		struct kof_range *g = realloc(w->fixed, (size_t)nc * sizeof *g);
 

@@ -108,6 +108,9 @@ static struct cvar *cv_find(struct cv *c, const uint8_t *name, uint32_t n, int m
 	}
 	if (!make)
 		return NULL;
+	/* KNOWN DEFECT REV-D8a (2026-10-24, Inference) [sev L]: cv_find (the shell word reader's variable table) doubles a uint32 capacity with no overflow guard and no ledger charge, unlike the other tables of this file.
+	 * Trigger: 2^31 distinct variables (not reachable below the tree's memory cap: the count is bounded by the text). Effect: `nc` wraps to 0 and realloc(0) is followed by writes past it.
+	 * Reproducer: none. Fix: grow through one helper that computes in uint64_t, refuses past 0xffffffff and charges the ledger (as kgenome_dtx_grow does). */
 	if (c->nv == c->cap) {
 		uint32_t nc = c->cap ? c->cap * 2u : 32u;
 		struct cvar *nv = realloc(c->v, (size_t)nc * sizeof *nv);
@@ -253,6 +256,9 @@ static void collect(struct cv *c)
 }
 
 /* Pass 2: how many times each assigned name is written in the source other than as a read. */
+/* KNOWN DEFECT D15a (2026-10-24, R) [sev M]: census counts a name's mentions over raw bytes, so a name inside a comment or a string counts as one more write (`mentions`).
+ * Trigger: `# x` or `echo x` text naming an assigned variable x. Effect: the variable reads as written again, loses its single-assignment standing, and a constant value that could be followed is not.
+ * Reproducer: none yet (STATUS D15). Fix: count over the lexer's CODE spans only (the spans the walk already has), not over the text. */
 static void census(struct cv *c)
 {
 	const uint8_t *in = c->in;
@@ -764,6 +770,12 @@ void kgenome_dtx_cmd_consts(struct kgenome_dtx *x)
  * command line - the same single-assignment rule, the same expansions - and told as the constants they come to. Not told twice and not a second reader: diag_text_ident.c asks it for
  * the words of the commands that are nodes, so a path held in a variable (`P=/tmp/a; wget -O $P u; chmod +x $P`) is the same constant in both.
  */
+/* KNOWN DEFECT WP9-F17 (2026-10-25, M) [sev M]: cv_new returns NULL on a refused charge or calloc, and collect()
+ * loses a table growth, without kgenome_diag_note. Trigger: an sh variable chain (`a0=/tmp/f; a1=$a0; wget -O $a1
+ * ...; sh $a1`) with allocation 19 or 20 of 39 refused. Effect: command words read the poorer way (diag_text_ident.c
+ * token fallback) or from an incomplete table; graph differs, status OK (G9). Reproducer:
+ * tests_wp9/findings/F17_sh_chain_text_route_g9.bin; fuzz diag/scan_text -DDIAG_STRICT_G9. Fix:
+ * kgenome_diag_note(x->s, KGENOME_NOMEM) at both returns and where collect() loses a growth. */
 static struct kgenome_dtx_cv *cv_new(struct kgenome_dtx *x)
 {
 	struct kgenome_dtx_cv *w;

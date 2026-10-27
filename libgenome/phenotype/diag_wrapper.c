@@ -324,6 +324,12 @@ void kgenome_diag_run_wrappers(struct kgenome_diag_scan *s,
 		return;
 	if (obj->arch != KGENOME_ARCH_X86 && obj->arch != KGENOME_ARCH_X86_64)
 		return;
+	/* KNOWN DEFECT WP9-F7 (2026-10-25, M) [sev M]: kgenome_diag_wrapper_scan returns when
+	 * kgenome_diag_scan_walk answers NULL and notes nothing. Trigger: the walk allocation
+	 * (kgenome_diag_walk_new) refused during a scan. Effect: the wrapper analysis is skipped with the scan
+	 * status OK: a shorter graph reported as whole (G9 class; diag_elfimp.c already notes NOMEM at the same
+	 * shape). Reproducer: tests/lib/genome/diag_bin_oom.c KNOWN-MISS F7 (elf64-prog1). Fix: `if (!wk) {
+	 * kgenome_diag_note(s, KGENOME_NOMEM); return; }`. */
 	wk = kgenome_diag_scan_walk(s);
 	if (!wk)
 		return;

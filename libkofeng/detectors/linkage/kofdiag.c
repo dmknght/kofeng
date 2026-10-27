@@ -729,6 +729,12 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 		node[i].parent = r[4];
 		node[i].role   = r[5];
 		node[i].bits   = r[6];
+		/* KNOWN DEFECT WP9-F13 (2026-10-25, M) [sev L]: kof_diag_load assigns node fields one by one and leaves
+		 * node.val and node.sym of a reused array. Trigger: a record without attributes loaded into a node array
+		 * that was used before. Effect: val and sym keep the old value or a pointer into a string store that may be
+		 * gone (the pack loader callocs its arrays: not reached there). Reproducer:
+		 * tests/unit/diag_load_known_misses.c f13. Fix: set `node[i].val = 0; node[i].sym = NULL;` beside this
+		 * line. */
 		node[i].attr_len = r[7];
 		alen = r[7];
 		at += 8u;
@@ -934,6 +940,11 @@ int kof_diag_load(kof_buf rec, struct kof_diag *out, const struct kof_diag_store
 					for (t = 0; t < 8u; t++)
 						v |= (uint64_t)w[2 + t]
 						     << (t * 8u);
+					/* The bound is on the RUNNING count: a record may carry several WHEN
+					 * sections, and each is only checked against the array on its own. A
+					 * record that does not fit is refused whole, not cut (rule 4). */
+					if (out->n_when >= KOF_DIAG_MAX_WHEN)
+						return 0;
 					out->when[out->n_when].fact = fc;
 					out->when[out->n_when].val = v;
 					out->n_when++;

@@ -160,6 +160,11 @@ static void merge_sites(struct kgenome_diag_scan *s)
 	 * the same one as before.
 	 */
 	{
+		/* KNOWN DEFECT REV-D7g (2026-10-25, Inference) [sev L]: merge_sites (diag_scan.c) keeps a hand-rolled
+		 * open-addressing table of site representatives with its own multiplier, unseeded, instead of the shared helper
+		 * (diag_oatab.h). Trigger: a binary with many nodes at addresses chosen by the file. Effect: none measured (the
+		 * table is sized 2n, so probes stay short on honest input); duplicate logic. Reproducer: none. Fix: use
+		 * kgenome_oatab_* (diag_oatab.h). */
 		uint32_t tm = 1u, *tab = NULL;
 
 		while (tm < 2u * s->n_hit)
@@ -506,6 +511,11 @@ void kgenome_diag_funcs_with_walk(const struct kgenome_obj *obj, const uint8_t *
 		return;
 	if (!walk)
 		walk = own = kgenome_diag_walk_new();
+	/* KNOWN DEFECT WP9-F9 (2026-10-25, M) [sev M]: kgenome_diag_funcs_with_walk ignores a failed
+	 * kgenome_diag_walk_ensure (no else branch). Trigger: allocation refused in the walk while the function
+	 * table of a stripped ELF is built. Effect: the table comes back short with out->status OK (struct
+	 * kgenome_func_set.status exists for NOMEM). Reproducer: tests/lib/genome/diag_bin_oom.c KNOWN-MISS F9
+	 * (funcs). Fix: add `else out->status = KGENOME_NOMEM;`. */
 	if (kgenome_diag_walk_ensure(walk, obj, data, data_n, want_trace)) {
 		ent = kgenome_diag_walk_entries(walk, &n);
 		if (n)
@@ -616,6 +626,11 @@ static void rcall_put(void *user, uint64_t at, uint64_t target, const char *name
 	struct kgenome_diag_rcall *r;
 
 	if (g->n == g->cap) {
+		/* KNOWN DEFECT REV-D8p (2026-10-25, Inference) [sev L]: rcall_put (diag_scan.c) doubles a uint32 capacity (relocation calls)
+		 * with no overflow guard and no ledger charge. Trigger: 2^31 or more relocation calls in a relocatable object; the engine caps an object at 512 MiB,
+		 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
+		 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
+		 * UINT32_MAX / 2 before doubling. */
 		uint32_t nc = g->cap ? g->cap * 2u : 64u;
 		struct kgenome_diag_rcall *nv = realloc(g->v, (size_t)nc * sizeof *nv);
 

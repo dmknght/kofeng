@@ -181,7 +181,11 @@ int kgenome_diag_emu_rel_span_open(struct kgenome_diag_emu_rel_walk *R, struct k
 	S->em = kgenome_emu_fork(*tmpl);
 	if (!S->em) {
 		s->halt = 1;
-		kgenome_diag_note(s, KGENOME_NOMEM);
+		/* A fork the allowance refused is the BUDGET's and the ledger has already said so: out of memory only when
+		 * nothing else did (the same rule as kgenome_diag_emu_build_failed, which cannot be used here - it gives
+		 * back what the template, still alive, holds). */
+		if (s->led.status == KGENOME_OK)
+			kgenome_diag_note(s, KGENOME_NOMEM);
 		return 0;
 	}
 	kgenome_emu_set_rip(S->em, KGENOME_DIAG_REL_BASE + run_lo);

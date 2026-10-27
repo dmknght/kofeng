@@ -50,6 +50,17 @@ uint32_t kentropy_eighths(const void *bytes, uint64_t n);
 uint32_t kentropy_hist(const uint32_t hist[256], uint64_t total);
 
 /*
+ * THE SAME NUMBER IN HUNDREDTHS OF A BIT - 0 to 800, rounded to nearest.
+ *
+ * For a reader that prints bits per byte with two decimals: the eighths above are a
+ * 0.125 step and say nothing of the second decimal. Integer arithmetic only, like
+ * kentropy_hist: log2 of each bucket's share is taken to 12 fractional bits by
+ * repeated squaring, so the error of a bucket's term is far below 0.005 bit. A
+ * bucket above `total` is clamped as kentropy_hist clamps it; zero for no bytes.
+ */
+uint32_t kentropy_hist_centi(const uint32_t hist[256], uint64_t total);
+
+/*
  * THE COUNT ITSELF: add the `n` bytes at `bytes` to `hist`. The one place a byte
  * histogram is built - kentropy_eighths, the emulator's gate windows and the
  * engine's region measure all count through it, and each then asks

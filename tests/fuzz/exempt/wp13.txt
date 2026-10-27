@@ -3,6 +3,7 @@
 kentropy_count	pending WP13 (core/entropy, shape S1)
 kentropy_eighths	pending WP13 (core/entropy, shape S1)
 kentropy_hist	pending WP13 (core/entropy, shape S1)
+kentropy_hist_centi	pending WP13 (core/entropy, shape S1)
 khash_sha256_bytes	pending WP13 (core/hash, shape S1)
 khash_sha256_final	pending WP13 (core/hash, shape S1)
 khash_sha256_hex	pending WP13 (core/hash, shape S1)

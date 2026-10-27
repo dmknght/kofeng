@@ -54,6 +54,10 @@ void on_drag(struct view *v)
 			v->caret = v->fld_b;
 			return;
 		}
+		if (v->prop_bar_drag) {
+			prop_bar_to(v);
+			return;
+		}
 		if (v->dlg_drag) {
 			int r, c;
 
@@ -183,6 +187,7 @@ void on_release(struct view *v)
 		/* The drag is over; what was picked stays picked, so
 		 * Ctrl+C has something to copy after the button comes up. */
 		v->dlg_drag = 0;
+		v->prop_bar_drag = 0;
 		v->sizing = 0;
 		v->bar_drag = 0;
 		/*
@@ -234,31 +239,9 @@ static void on_wheel(struct view *v, int k)
 		 * panels the pointer chooses between.
 		 */
 		g_wheel = down ? 1 : -1;
-		if (!v->sym_open &&
-		    hit_run(v, (g_mod_shift || g_mod_ctrl)
-			       ? (uint8_t)HIT_HWHEEL : (uint8_t)HIT_WHEEL))
+		if (hit_run(v, (g_mod_shift || g_mod_ctrl)
+			    ? (uint8_t)HIT_HWHEEL : (uint8_t)HIT_WHEEL))
 			return;
-
-		/*
-		 * The dialog first, wherever the pointer is.
-		 *
-		 * The rule below - the wheel turns whatever it is over - is
-		 * about panels laid out side by side. A modal is not one of
-		 * those: it is over them, it is the only thing the reader can
-		 * be looking at, and scrolling the tree behind it because the
-		 * pointer happened to be on the left would move something they
-		 * cannot see.
-		 */
-		if (v->sym_open) {
-			/* Shift (or ctrl) turns the wheel sideways, the same
-			 * binding the tree, the draft panel and the marker
-			 * list already use - see the branch below. */
-			if (g_mod_shift || g_mod_ctrl)
-				symd_hscroll(v, down ? 4 : -4);
-			else
-				symd_scroll(v, down ? 3 : -3);
-			return;
-		}
 
 		/* Shift turns the wheel sideways, the way it does in every
 		 * other program that has both. */
@@ -514,6 +497,13 @@ int handle(struct view *v, int k)
 		if (r >= 0)
 			return r;
 	}
+	/* Manage > Pathogens owns the keyboard while up. */
+	{
+		int r = handle_fam_key(v, k);
+
+		if (r >= 0)
+			return r;
+	}
 	{
 		int r = handle_copy_key(v, k);
 
@@ -522,12 +512,6 @@ int handle(struct view *v, int k)
 	}
 	{
 		int r = handle_enc_key(v, k);
-
-		if (r >= 0)
-			return r;
-	}
-	{
-		int r = handle_symd_key(v, k);
 
 		if (r >= 0)
 			return r;

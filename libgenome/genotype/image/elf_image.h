@@ -325,6 +325,69 @@ const struct kgenome_elf_seg *kgenome_elf_load_at_off(const struct kgenome_elf_i
 						  uint64_t off);
 
 /*
+ * THE HEADER FIELDS THE PARSE DOES NOT KEEP, read back from the header record.
+ *
+ * The view (struct kgenome_elf_info) holds what analysis needs. A person reading the
+ * segment and section tables also wants p_align, sh_addralign and sh_entsize, and
+ * adding them to the view would move the layout every module is built against, so
+ * they are read on demand from the same record the parse read, at the same stride
+ * (the one this class mandates, not the header's claim).
+ *
+ * `i` is an index into seg[] / sec[], which is also the index of the program or
+ * section header: the parse stops at the first record it cannot read and keeps none
+ * after it. Each answers 0 and writes nothing when `i` is not a kept record, when
+ * the view is not valid, or when the record is not wholly inside `f` (a buffer that
+ * is not the one the view was parsed from); the status of the table itself is the
+ * parse's anomaly bits, which are not repeated here.
+ */
+int kgenome_elf_seg_align(kof_buf f, const struct kgenome_elf_info *e, uint32_t i,
+			  uint64_t *align);
+int kgenome_elf_sec_layout(kof_buf f, const struct kgenome_elf_info *e, uint32_t i,
+			   uint64_t *addralign, uint64_t *entsize);
+
+/*
+ * ---- WHAT THE HEADERS MEAN, for a person reading the object -----------------
+ *
+ * The view holds numbers (e_type, e_machine, p_type, sh_type, e_flags). A tool that shows
+ * them as words must not carry a table of its own: these answer the questions the numbers
+ * pose, once, in the library. Every one is a pure function of the parse (or of one
+ * number) and reads no file bytes, so a damaged object cannot make any of them read
+ * outside the view; what the parse could not keep (a clamped table, a cut section header)
+ * is simply not in the answer, and the anomaly bits say so.
+ */
+
+/* How the object is linked, decided by the segment TYPES alone (PT_INTERP, PT_DYNAMIC, PT_LOAD). */
+enum kgenome_elf_linking {
+	KGENOME_ELF_LINK_NONE = 0,         /* no loadable, dynamic or interpreter segment: relocatable, core, or no program headers */
+	KGENOME_ELF_LINK_STATIC,           /* loads, no PT_DYNAMIC, no PT_INTERP */
+	KGENOME_ELF_LINK_DYNAMIC,          /* PT_INTERP present: a dynamic linker is asked for */
+	KGENOME_ELF_LINK_DYNAMIC_NOINTERP  /* PT_DYNAMIC without PT_INTERP: a library, or a static-PIE */
+};
+
+struct kgenome_elf_shape {
+	enum kgenome_elf_linking linking;
+	uint8_t has_symtab;   /* a SHT_SYMTAB section of non-zero size was kept */
+	uint8_t has_debug;    /* a kept section whose name starts with ".debug_" */
+};
+
+/*
+ * Fills `out`. A view that is not valid, or whose tables were clamped or cut, answers for
+ * what was KEPT: a missing section table is "no symbol table, no debug", which the caller
+ * tells apart from "stripped" by sec_count == 0. Bounded by the arrays' own capacity.
+ */
+void kgenome_elf_shape(const struct kgenome_elf_info *e, struct kgenome_elf_shape *out);
+
+/*
+ * The kept section whose address range holds the entry address: SHF_ALLOC, not SHT_NULL,
+ * not SHT_NOBITS (nothing executes out of .bss), non-zero size; the first in section order
+ * when several overlap. Returns 0 and sets `*index` and `*delta` (entry_addr minus the
+ * section's address), or -1 and writes nothing. The test is `addr - start < size` in
+ * unsigned arithmetic, so a size or address of UINT64_MAX cannot wrap. A view that is not
+ * valid answers -1.
+ */
+int kgenome_elf_entry_sec(const struct kgenome_elf_info *e, uint32_t *index, uint64_t *delta);
+
+/*
  * Does this object look like ELF at all?
  *
  * Magic only, and deliberately separate from the parse: identifying an object

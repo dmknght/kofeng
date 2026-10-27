@@ -301,6 +301,10 @@ static enum kuncoat_status bz_block(struct kuncoat_bunzip *st, struct bz_br *br,
 
 		for (i = 0; i < alpha_size; i++) {
 			for (;;) {
+				/* KNOWN DEFECT WP5-L-BZ-1 (2026-10-25, M) [sev L]: the code-length limit is KUNCOAT_BZ_MAX_CODELEN (23), libbz2 refuses above 20 (also the max check in the table build above).
+				 * Trigger: a bzip2 block whose Huffman code length reaches 21..23. Effect: the stream decodes correctly (block CRC matches) where the reference tools say
+				 * data error; lenient, no evidence lost. Reproducer: tests_wp5/findings/bunzip_code_length_23_libbz2_refuses.bin.
+				 * Fix: limit to 20 here and at the max test above, or keep 23 and say so in bunzip.h (the compressor never writes above 17). */
 				if (curr < 1 || curr > (int32_t)KUNCOAT_BZ_MAX_CODELEN)
 					return KUNCOAT_CORRUPT;
 				if (!bz_bit(br))

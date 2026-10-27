@@ -41,6 +41,7 @@
 #include <kgenome.h>
 
 #include "hk.h"
+#include <phenotype/diag_private.h>
 
 /* ---- the wrapped calls: link time, no change in the product ------------------------------------ */
 
@@ -271,6 +272,24 @@ static void write_links(const struct kgenome_diag_scan *s, unsigned *must, unsig
 	}
 }
 
+/* Every link names a node of the scan: a second pass over a loop merges the first pass's node numbers, and a link
+ * to a number it did not make would point out of the array. */
+static void links_valid(const char *what, const struct kgenome_diag_scan *s)
+{
+	uint32_t i, cnt = kgenome_diag_scan_count(s);
+	unsigned k;
+
+	for (i = 0; i < cnt; i++) {
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
+
+		for (k = 0; k < h->n_in; k++)
+			if (h->in[k].from >= cnt && h->in[k].from != KGENOME_DIAG_ORG_STACK) {
+				printf("  FAIL %s: node %u has a link from node %u of %u\n", what, i, h->in[k].from, cnt);
+				hk_fails++;
+			}
+	}
+}
+
 /* what a case says: the links into the write, and the status. */
 struct want {
 	const char *what;
@@ -292,6 +311,7 @@ static void expect(const char *what, const struct cb *c, unsigned run, unsigned 
 		printf("  FAIL %s: PROVEN %u MAY %u, wanted PROVEN %u MAY %u\n", what, m, y, must, may);
 		hk_fails++;
 	}
+	links_valid(what, s);
 	kgenome_diag_scan_free(s);
 }
 
@@ -1119,6 +1139,1064 @@ static void t_null_args(void)
 	}
 }
 
+/* ====================================================================================================
+ * THE SECOND ROUND: X1, X2, X3, X5, X8 (found while fixing W1-W6, not fixed there).
+ *
+ *   X1   a CALL did nothing to the constant map, so a constant the callee overwrote was still "known"
+ *        afterwards: `mov edx,7; call g; ...; mov eax,10; syscall` with `g: xor edx,edx; ret` was a node
+ *        that makes memory executable. The map-level cases are in cell_call_clobber.c; here the same
+ *        defect is seen through the sweep (a false capability), and the controls keep what the ABI keeps.
+ *   X2   the symbol route (a relocatable object, diag_sym.c) had W3/W5: the decoder gives CALL and RET no
+ *        written register, so an origin survived any call that was not itself a named capability, and a
+ *        `ret` in the middle of a function changed nothing.
+ *   X3   back edges were not merged (a value written in a loop body and read at the top of the next pass
+ *        kept the first producer as PROVEN), and a tail `jmp` into another function was treated like the
+ *        jmp/call/pop idiom (the code after it, which is the next function, kept every origin as MAY).
+ *   X5   the stack ring counted push and pop and nothing else: `add esp,N`, `sub esp,N`, `leave`,
+ *        `lea esp,[ebp-N]` moved the real stack and not the ring, so a pop took the wrong slot (the link
+ *        was lost) and a cdecl call in a loop grew the depth until the ring overflowed (TRUNCATED).
+ *   X8   rel_image_fail (the relocatable image could not be built) had no test: it needs an ET_REL.
+ *
+ * Why the old tests missed them: (X1) no case put a real call between the write and the read of a constant
+ * (a); (X2) the symbol-route tests (relcalls_shared, diag_nodes, ko_anomalies) check which nodes there are
+ * and that the god_mode shape links, never a link across a call that is not a node (c); (X3) every sweep
+ * test was straight-line or forward-branching; no program had a backward branch with a carried origin (b),
+ * and no program had a function table, so a tail jump had no function to leave (a); (X5) the ring was only
+ * ever fed push and pop (b); (X8) line never executed (a).
+ *
+ * Counted, not timed: the back-edge work is bounded by the number of instructions the sweep decodes
+ * (kgenome_cell_next, wrapped at link time) and a cap that fires says so (KGENOME_TRUNCATED).
+ */
+
+static unsigned cell_next_calls;        /* the instructions the sweep decoded */
+
+int __real_kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+			     struct kgenome_cell_insn *out);
+int __wrap_kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+			     struct kgenome_cell_insn *out);
+int __wrap_kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+			     struct kgenome_cell_insn *out)
+{
+	cell_next_calls++;
+	return __real_kgenome_cell_next(k, sp, out);
+}
+
+static unsigned funcs_calls;            /* the function table asked for (the sweep asks only where a symbol table names functions) */
+
+const struct kgenome_func_set *__real_kgenome_diag_funcs(struct kgenome_diag_scan *s, const struct kgenome_obj *obj);
+const struct kgenome_func_set *__wrap_kgenome_diag_funcs(struct kgenome_diag_scan *s, const struct kgenome_obj *obj);
+const struct kgenome_func_set *__wrap_kgenome_diag_funcs(struct kgenome_diag_scan *s, const struct kgenome_obj *obj)
+{
+	funcs_calls++;
+	return __real_kgenome_diag_funcs(s, obj);
+}
+
+static void p16(uint8_t *b, unsigned at, unsigned v)
+{
+	b[at] = (uint8_t)v;
+	b[at + 1u] = (uint8_t)(v >> 8);
+}
+
+static unsigned al8(unsigned v)
+{
+	return (v + 7u) & ~7u;
+}
+
+static unsigned count_cap(const struct kgenome_diag_scan *s, uint16_t cap)
+{
+	uint32_t i, cnt = kgenome_diag_scan_count(s);
+	unsigned n = 0;
+
+	for (i = 0; i < cnt; i++)
+		if (kgenome_diag_scan_at(s, i)->cap == cap)
+			n++;
+	return n;
+}
+
+/* The links from a node of capability `from` into a node of capability `to`: PROVEN, MAY. */
+static void links_cap(const struct kgenome_diag_scan *s, uint16_t from, uint16_t to, unsigned *must, unsigned *may)
+{
+	uint32_t i, cnt = kgenome_diag_scan_count(s);
+	unsigned k;
+
+	*must = *may = 0;
+	for (i = 0; i < cnt; i++) {
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
+
+		if (h->cap != to)
+			continue;
+		for (k = 0; k < h->n_in; k++) {
+			const struct kgenome_diag_hit *p = h->in[k].from < cnt ? kgenome_diag_scan_at(s, h->in[k].from) : NULL;
+
+			if (!p || p->cap != from)
+				continue;
+			if (h->in[k].how == KGENOME_DIAG_LINK_MAY)
+				(*may)++;
+			else
+				(*must)++;
+		}
+	}
+}
+
+static void expect_cap(const char *what, const struct cb *c, unsigned run, uint16_t cap, unsigned want)
+{
+	struct kgenome_diag_scan *s = scan_cb(c, run);
+	unsigned n;
+
+	if (!s) {
+		printf("  FAIL %s: no scan\n", what);
+		hk_fails++;
+		return;
+	}
+	n = count_cap(s, cap);
+	if (n != want) {
+		printf("  FAIL %s: %u node(s) of that capability, wanted %u\n", what, n, want);
+		hk_fails++;
+	}
+	kgenome_diag_scan_free(s);
+}
+
+/* the same as expect(), with the status too, and a range for the MAY count (a merge may keep a second producer) */
+static void expect_x(const char *what, const struct cb *c, unsigned run, unsigned must, unsigned may_lo, unsigned may_hi,
+		     enum kgenome_status st)
+{
+	struct kgenome_diag_scan *s = scan_cb(c, run);
+	unsigned m = 0, y = 0;
+
+	if (!s) {
+		printf("  FAIL %s: no scan\n", what);
+		hk_fails++;
+		return;
+	}
+	write_links(s, &m, &y);
+	if (m != must || y < may_lo || y > may_hi) {
+		printf("  FAIL %s: PROVEN %u MAY %u, wanted PROVEN %u MAY %u..%u\n", what, m, y, must, may_lo, may_hi);
+		hk_fails++;
+	}
+	if (kgenome_diag_scan_status(s) != st) {
+		printf("  FAIL %s: status %s, wanted %s\n", what, kgenome_status_name(kgenome_diag_scan_status(s)),
+		       kgenome_status_name(st));
+		hk_fails++;
+	}
+	links_valid(what, s);
+	kgenome_diag_scan_free(s);
+}
+
+/* An ELF32 with the machine named (3: i386); the code and the entry are at +0x54. */
+static uint64_t elf32m(uint8_t *b, const struct cb *c, unsigned machine)
+{
+	const uint64_t n = elf32(b, c);
+
+	p16(b, 18, machine);
+	return n;
+}
+
+static struct kgenome_diag_scan *scan_cb32(const struct cb *c, unsigned run)
+{
+	static struct kgenome_obj o;
+
+	return scan_img(elf32m(img, c, 3), run, NULL, 0, &o);
+}
+
+/* ---- X1 ------------------------------------------------------------------------------------------ */
+
+static void t_x1(void)
+{
+	static struct cb c;
+	struct kgenome_diag_scan *s;
+	unsigned g, h;
+
+	/* mprotect(0x401000, 0x1000, 7) with the protection written BEFORE a call whose callee zeroes it */
+	c.n = 0;
+	E(&c, 0xba, 7, 0, 0, 0);                        /* mov edx,7 */
+	h = c.n; E(&c, 0xe8, 0, 0, 0, 0);               /* call g */
+	E(&c, 0xbf, 0, 0x10, 0x40, 0);                  /* mov edi,0x401000 */
+	E(&c, 0xbe, 0, 0x10, 0, 0);                     /* mov esi,0x1000 */
+	E(&c, 0xb8, 10, 0, 0, 0, 0x0f, 0x05);           /* mov eax,10; syscall */
+	exit_sys(&c);
+	g = c.n; E(&c, 0x31, 0xd2); ret(&c);            /* g: xor edx,edx; ret */
+	p32(c.b, h + 1u, (uint32_t)(g - (h + 5u)));
+	expect_cap("X1 callee zeroes edx: no PROT_EXEC", &c, SWEEP, KGENOME_NUCLEO_ALLOC_EXEC, 0);
+	/* the limit, written down: a callee that only returns gets the same answer, because the rule is the
+	 * calling convention's and not a reading of the callee (edx is caller-saved) */
+	c.b[g] = 0xc3; c.n = g + 1u;
+	expect_cap("X1 limit: callee that only returns, edx is the callee's by the ABI", &c, SWEEP, KGENOME_NUCLEO_ALLOC_EXEC, 0);
+
+	/* control: the protection written after the call is the program's */
+	c.n = 0;
+	h = c.n; E(&c, 0xe8, 0, 0, 0, 0);
+	E(&c, 0xba, 7, 0, 0, 0);
+	E(&c, 0xbf, 0, 0x10, 0x40, 0);
+	E(&c, 0xbe, 0, 0x10, 0, 0);
+	E(&c, 0xb8, 10, 0, 0, 0, 0x0f, 0x05);
+	exit_sys(&c);
+	g = c.n; E(&c, 0x31, 0xd2); ret(&c);
+	p32(c.b, h + 1u, (uint32_t)(g - (h + 5u)));
+	expect_cap("X1 control: protection set after the call", &c, SWEEP, KGENOME_NUCLEO_ALLOC_EXEC, 1);
+
+	/* the number: execve's, loaded before a call whose callee overwrites eax (the return value) */
+	c.n = 0;
+	E(&c, 0xb8, 59, 0, 0, 0);
+	h = c.n; E(&c, 0xe8, 0, 0, 0, 0);
+	E(&c, 0x31, 0xff, 0x31, 0xf6, 0x31, 0xd2, 0x0f, 0x05);
+	exit_sys(&c);
+	g = c.n; E(&c, 0x31, 0xc0); ret(&c);
+	p32(c.b, h + 1u, (uint32_t)(g - (h + 5u)));
+	expect_cap("X1 callee overwrites eax: no execve", &c, SWEEP, KGENOME_NUCLEO_EXEC_IMAGE, 0);
+	c.n = 0;
+	h = c.n; E(&c, 0xe8, 0, 0, 0, 0);
+	E(&c, 0xb8, 59, 0, 0, 0);
+	E(&c, 0x31, 0xff, 0x31, 0xf6, 0x31, 0xd2, 0x0f, 0x05);
+	exit_sys(&c);
+	g = c.n; E(&c, 0x31, 0xc0); ret(&c);
+	p32(c.b, h + 1u, (uint32_t)(g - (h + 5u)));
+	expect_cap("X1 control: execve's number after the call", &c, SWEEP, KGENOME_NUCLEO_EXEC_IMAGE, 1);
+
+	/* i386: ebx is callee-saved, so socketcall's sub-call written before the call is still the program's */
+	c.n = 0;
+	E(&c, 0xbb, 1, 0, 0, 0);                        /* mov ebx,1 (SYS_SOCKET) */
+	h = c.n; E(&c, 0xe8, 0, 0, 0, 0);               /* call g */
+	E(&c, 0xb8, 102, 0, 0, 0);                      /* mov eax,102 (socketcall) */
+	E(&c, 0xb9, 0, 0, 0, 0);                        /* mov ecx,0 */
+	E(&c, 0xcd, 0x80);
+	E(&c, 0xb8, 1, 0, 0, 0, 0xcd, 0x80);
+	g = c.n; ret(&c);
+	p32(c.b, h + 1u, (uint32_t)(g - (h + 5u)));
+	s = scan_cb32(&c, SWEEP);
+	CK(s != NULL);
+	if (s) {
+		if (count_cap(s, KGENOME_NUCLEO_NET_OPEN) != 1u) {
+			printf("  FAIL X1 control, i386 ebx across a call: %u net-open node(s), wanted 1\n",
+			       count_cap(s, KGENOME_NUCLEO_NET_OPEN));
+			hk_fails++;
+		}
+		kgenome_diag_scan_free(s);
+	}
+	/* and the number, eax, is not: written before the call it is the callee's */
+	c.n = 0;
+	E(&c, 0xb8, 102, 0, 0, 0);
+	h = c.n; E(&c, 0xe8, 0, 0, 0, 0);
+	E(&c, 0xbb, 1, 0, 0, 0);
+	E(&c, 0xb9, 0, 0, 0, 0);
+	E(&c, 0xcd, 0x80);
+	E(&c, 0xb8, 1, 0, 0, 0, 0xcd, 0x80);
+	g = c.n; ret(&c);
+	p32(c.b, h + 1u, (uint32_t)(g - (h + 5u)));
+	s = scan_cb32(&c, SWEEP);
+	CK(s != NULL);
+	if (s) {
+		if (count_cap(s, KGENOME_NUCLEO_NET_OPEN) != 0u) {
+			printf("  FAIL X1 i386 eax across a call: %u net-open node(s), wanted 0\n",
+			       count_cap(s, KGENOME_NUCLEO_NET_OPEN));
+			hk_fails++;
+		}
+		kgenome_diag_scan_free(s);
+	}
+}
+
+/* ---- X2: an ET_REL (a kernel module's shape) ------------------------------------------------------ */
+
+struct rsym {
+	const char *name;
+	unsigned    off, len;       /* a function this object defines (len != 0), or an import */
+};
+struct rcall {
+	unsigned at;                /* the offset of the call's 4-byte displacement */
+	unsigned sym;               /* index in the rsym list */
+};
+
+/* One .text, its relocations (R_X86_64_PLT32) and a symbol table; returns the file length. */
+static uint64_t rel_obj(uint8_t *b, const struct cb *c, const struct rsym *sy, unsigned nsy,
+			const struct rcall *rc, unsigned nrc)
+{
+	static const char shs[] = "\0.text\0.rela.text\0.symtab\0.strtab\0.shstrtab\0";
+	char str[512];
+	unsigned strn = 1, i, nm[16];
+	const unsigned text_off = 0x40, rela_off = al8(text_off + c->n), sym_off = al8(rela_off + nrc * 24u),
+		       str_off = sym_off + (nsy + 1u) * 24u;
+	unsigned shstr_off, sh_off;
+	uint8_t *p;
+
+	str[0] = 0;
+	for (i = 0; i < nsy; i++) {
+		nm[i] = strn;
+		strn += (unsigned)strlen(sy[i].name) + 1u;
+		memcpy(str + nm[i], sy[i].name, strlen(sy[i].name) + 1u);
+	}
+	shstr_off = str_off + strn;
+	sh_off = al8(shstr_off + (unsigned)sizeof shs);
+	memset(b, 0, sh_off + 6u * 64u);
+	memcpy(b, "\177ELF\2\1\1", 7);
+	p16(b, 16, 1); p16(b, 18, 62); p32(b, 20, 1);
+	p64(b, 40, sh_off);
+	p16(b, 52, 64); p16(b, 58, 64); p16(b, 60, 6); p16(b, 62, 5);
+	memcpy(b + text_off, c->b, c->n);
+	for (i = 0; i < nrc; i++) {
+		p = b + rela_off + i * 24u;
+		p64(p, 0, rc[i].at);
+		p64(p, 8, ((uint64_t)(rc[i].sym + 1u) << 32) | 4u);
+		p64(p, 16, (uint64_t)-4);
+	}
+	for (i = 0; i < nsy; i++) {
+		p = b + sym_off + (i + 1u) * 24u;
+		p32(p, 0, nm[i]);
+		p[4] = 0x12;                                    /* GLOBAL FUNC */
+		p16(p, 6, sy[i].len ? 1u : 0u);
+		p64(p, 8, sy[i].off);
+		p64(p, 16, sy[i].len);
+	}
+	memcpy(b + str_off, str, strn);
+	memcpy(b + shstr_off, shs, sizeof shs);
+	p = b + sh_off;
+	p32(p + 64, 0, 1); p32(p + 64, 4, 1); p64(p + 64, 8, 6);                        /* .text */
+	p64(p + 64, 24, text_off); p64(p + 64, 32, c->n); p64(p + 64, 48, 16);
+	p32(p + 128, 0, 7); p32(p + 128, 4, 4); p64(p + 128, 8, 0x40);                  /* .rela.text */
+	p64(p + 128, 24, rela_off); p64(p + 128, 32, nrc * 24u); p32(p + 128, 40, 3);
+	p32(p + 128, 44, 1); p64(p + 128, 48, 8); p64(p + 128, 56, 24);
+	p32(p + 192, 0, 18); p32(p + 192, 4, 2); p64(p + 192, 24, sym_off);             /* .symtab */
+	p64(p + 192, 32, (nsy + 1u) * 24u); p32(p + 192, 40, 4);
+	p32(p + 192, 44, 1); p64(p + 192, 48, 8); p64(p + 192, 56, 24);
+	p32(p + 256, 0, 26); p32(p + 256, 4, 3); p64(p + 256, 24, str_off);             /* .strtab */
+	p64(p + 256, 32, strn); p64(p + 256, 48, 1);
+	p32(p + 320, 0, 34); p32(p + 320, 4, 3); p64(p + 320, 24, shstr_off);           /* .shstrtab */
+	p64(p + 320, 32, sizeof shs); p64(p + 320, 48, 1);
+	return sh_off + 6u * 64u;
+}
+
+static uint16_t cap_named(const char *name)
+{
+	return (uint16_t)kgenome_nucleo_cap_of_name(KGENOME_NUCLEO_T_ELF, name);
+}
+
+/* A module of one function `fn` (the whole of .text unless `fn_len` says less) calling imports by relocation. */
+struct kmod {
+	struct cb c;
+	struct rsym sy[8];
+	unsigned nsy;
+	struct rcall rc[8];
+	unsigned nrc;
+	unsigned fn_len;
+};
+
+static void km_start(struct kmod *m)
+{
+	memset(m, 0, sizeof *m);
+	m->sy[0].name = "fn";
+	m->nsy = 1;
+}
+
+static unsigned km_import(struct kmod *m, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < m->nsy; i++)
+		if (!strcmp(m->sy[i].name, name))
+			return i;
+	m->sy[m->nsy].name = name;
+	return m->nsy++;
+}
+
+/* `call name` through a relocation: e8 00 00 00 00 */
+static void km_call(struct kmod *m, const char *name)
+{
+	m->rc[m->nrc].at = m->c.n + 1u;
+	m->rc[m->nrc].sym = km_import(m, name);
+	m->nrc++;
+	E(&m->c, 0xe8, 0, 0, 0, 0);
+}
+
+static uint64_t km_image(struct kmod *m)
+{
+	m->sy[0].off = 0;
+	m->sy[0].len = m->fn_len ? m->fn_len : m->c.n;
+	return rel_obj(img, &m->c, m->sy, m->nsy, m->rc, m->nrc);
+}
+
+/* the links from prepare_creds's node into commit_creds's, over the symbol route */
+static void km_expect(const char *what, struct kmod *m, unsigned must, unsigned may)
+{
+	static struct kgenome_obj o;
+	struct kgenome_diag_scan *s = scan_img(km_image(m), KGENOME_DIAG_RUN_SYMBOL, NULL, 0, &o);
+	unsigned y = 0, n = 0;
+
+	if (!s) {
+		printf("  FAIL %s: no scan\n", what);
+		hk_fails++;
+		return;
+	}
+	links_cap(s, cap_named("prepare_creds"), cap_named("commit_creds"), &y, &n);
+	if (y != must || n != may) {
+		printf("  FAIL %s: PROVEN %u MAY %u, wanted PROVEN %u MAY %u\n", what, y, n, must, may);
+		hk_fails++;
+	}
+	kgenome_diag_scan_free(s);
+}
+
+static void t_x2(void)
+{
+	static struct kmod m;
+	unsigned h;
+
+	/* control: the god_mode shape, prepare_creds, move, commit_creds */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7); km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 control, god_mode shape", &m, 1, 0);
+
+	/* a call to an import that is not a capability, between the producer and the consumer: the callee may
+	 * have written rdi, and it is not read, so the link is MAY (the sweep's rule for a callee it does not read) */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7); km_call(&m, "my_helper"); km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 import without a capability between", &m, 0, 1);
+
+	/* the same with a named capability in between (it is a node of its own and clobbers the same registers) */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7); km_call(&m, "kmalloc"); km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 named capability between", &m, 0, 1);
+
+	/* the register the ABI makes the callee keep: rbx holds the cred across the call */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc3); km_call(&m, "my_helper");
+	E(&m.c, 0x48, 0x89, 0xdf); km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 control, rbx across an import call", &m, 1, 0);
+
+	/* rax is the callee's return value: after an unknown call it is not prepare_creds's result */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); km_call(&m, "my_helper"); E(&m.c, 0x48, 0x89, 0xc7); km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 rax after an import call", &m, 0, 1);
+
+	/* a call this object resolves by itself (no relocation): the callee is read, as the sweep reads it.
+	 * helper writes rdi: the origin is gone. */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7);
+	h = m.c.n; E(&m.c, 0xe8, 0, 0, 0, 0);
+	km_call(&m, "commit_creds"); ret(&m.c);
+	m.fn_len = m.c.n;
+	{
+		unsigned hp = m.c.n;
+
+		E(&m.c, 0x31, 0xff); ret(&m.c);                 /* helper: xor edi,edi; ret */
+		p32(m.c.b, h + 1u, (uint32_t)(hp - (h + 5u)));
+		m.sy[m.nsy].name = "helper"; m.sy[m.nsy].off = hp; m.sy[m.nsy].len = 3; m.nsy++;
+	}
+	km_expect("X2 resolved callee writes rdi", &m, 0, 0);
+	/* the same callee only returns: the link stands */
+	m.c.b[m.fn_len] = 0xc3;
+	km_expect("X2 control, resolved callee only returns", &m, 1, 0);
+
+	/* a ret in the middle of the function: what follows it is reached by a branch the route does not model */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7); ret(&m.c); km_call(&m, "commit_creds"); ret(&m.c);
+	km_expect("X2 code after a ret", &m, 0, 1);
+}
+
+/* ---- X5: the stack ring follows the stack pointer ---------------------------------------------- */
+
+static void t_x5(void)
+{
+	static struct cb c;
+	unsigned i;
+
+	/* add rsp,8 gives up a slot: pop rdi then takes the socket the program pushed first */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	E(&c, 0x57, 0x56, 0x48, 0x83, 0xc4, 0x08, 0x5f);        /* push rdi; push rsi; add rsp,8; pop rdi */
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 add rsp", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* sub then add: the frame is made and given back, the slot below it is untouched */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	E(&c, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x83, 0xc4, 0x20, 0x5f);   /* push rdi; sub rsp,0x20; add rsp,0x20; pop rdi */
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 control, sub then add", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* leave: rsp goes back to rbp, the two pushes after `mov rbp,rsp` are gone, and rbp is popped */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	E(&c, 0x57, 0x55, 0x48, 0x89, 0xe5, 0x56, 0x51, 0xc9, 0x5f);   /* push rdi; push rbp; mov rbp,rsp; push rsi; push rcx; leave; pop rdi */
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 leave", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* lea rsp,[rbp-8]: the epilogue of a frame with a callee-saved register below the frame pointer */
+	c.n = 0; sock(&c);
+	E(&c, 0x48, 0x89, 0xc3);                                        /* mov rbx,rax */
+	E(&c, 0x55, 0x48, 0x89, 0xe5, 0x53);                            /* push rbp; mov rbp,rsp; push rbx */
+	E(&c, 0x48, 0x83, 0xec, 0x40, 0x51);                            /* sub rsp,0x40; push rcx */
+	E(&c, 0x48, 0x8d, 0x65, 0xf8, 0x5b, 0x5d);                      /* lea rsp,[rbp-8]; pop rbx; pop rbp */
+	E(&c, 0x48, 0x89, 0xdf);                                        /* mov rdi,rbx */
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 lea rsp,[rbp-8]", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* a cdecl call in a loop of straight-line copies: 40 `push 5; call f; add rsp,8` grew the depth by 40 and
+	 * the ring holds 32, so the socket pushed first was overwritten (TRUNCATED) and the pop found nothing */
+	for (i = 0; i < 2u; i++) {
+		unsigned n = i ? 40u : 31u, k, h[64], f;
+
+		c.n = 0; sock(&c); mov_rdi_rax(&c); E(&c, 0x57);
+		for (k = 0; k < n; k++) {
+			E(&c, 0x6a, 0x05);
+			h[k] = c.n; E(&c, 0xe8, 0, 0, 0, 0);
+			E(&c, 0x48, 0x83, 0xc4, 0x08);
+		}
+		E(&c, 0x5f);
+		write_sys(&c); exit_sys(&c);
+		f = c.n; ret(&c);
+		for (k = 0; k < n; k++)
+			p32(c.b, h[k] + 1u, (uint32_t)(f - (h[k] + 5u)));
+		expect_x(i ? "X5 40 cdecl calls" : "X5 31 cdecl calls", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+	}
+
+	/* `call next; pop rbx` pushes a slot and takes it back: the socket pushed before it is still the top below (rbx, and
+	 * not an argument register: the write must not find the socket through the pop by another road) */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	E(&c, 0x57, 0xe8, 0, 0, 0, 0, 0x5b, 0x5f);              /* push rdi; call next; pop rbx; pop rdi */
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 call next / pop", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+	/* the same through a callee that begins by popping its return address: call L; nop; nop; L: pop rbx */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	E(&c, 0x57, 0xe8, 2, 0, 0, 0, 0x90, 0x90, 0x5b, 0x5f);
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 call L / pop", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+	/* and when no caller-saved register carries anything at the call (the socket is in rbx, pushed): the callee is not
+	 * read, only asked whether it fetches the program counter */
+	c.n = 0; sock(&c);
+	E(&c, 0x48, 0x89, 0xc3, 0x31, 0xc0, 0x53);                      /* mov rbx,rax; xor eax,eax; push rbx */
+	E(&c, 0xe8, 2, 0, 0, 0, 0x90, 0x90, 0x59, 0x5b);                /* call L; nop; nop; L: pop rcx; pop rbx */
+	E(&c, 0x48, 0x89, 0xdf);                                        /* mov rdi,rbx */
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 call L / pop, nothing carried across the call", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+	/* a callee that returns is balanced: nothing is pushed for it (call f; ... f: ret), the socket is still there */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	{
+		unsigned h2;
+
+		E(&c, 0x57);
+		h2 = c.n; E(&c, 0xe8, 0, 0, 0, 0);
+		E(&c, 0x5f);
+		write_sys(&c); exit_sys(&c);
+		p32(c.b, h2 + 1u, (uint32_t)(c.n - (h2 + 5u)));
+		ret(&c);
+	}
+	expect_x("X5 control, call f / ret is balanced", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* a frame bigger than the ring (0x1000 bytes is 512 slots): recording it would push the socket below it out of the
+	 * window (and lose what the program still has, with a status that makes the file "broken"), so the room is counted
+	 * instead and given back by the `add`: the socket is still the one the pop takes */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	E(&c, 0x57, 0x48, 0x81, 0xec, 0x00, 0x10, 0, 0, 0x48, 0x81, 0xc4, 0x00, 0x10, 0, 0, 0x5f);
+	write_sys(&c); exit_sys(&c);
+	expect_x("X5 frame bigger than the ring", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+}
+
+/* ---- X3: back edges ---------------------------------------------------------------------------- */
+
+static void jnz_back(struct cb *c, unsigned target)
+{
+	E(c, 0x0f, 0x85, 0, 0, 0, 0);
+	p32(c->b, c->n - 4u, (uint32_t)(target - c->n));
+}
+static void jmp_back(struct cb *c, unsigned target)
+{
+	E(c, 0xe9, 0, 0, 0, 0);
+	p32(c->b, c->n - 4u, (uint32_t)(target - c->n));
+}
+
+static void t_x3_loops(void)
+{
+	static struct cb c;
+	unsigned loop, i;
+
+	/* the body writes rdi from a second socket: on the second pass the write takes THAT one */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); sock(&c); mov_rdi_rax(&c); test_rcx(&c); jnz_back(&c, loop);
+	exit_sys(&c);
+	expect_x("X3 loop rewrites rdi", &c, SWEEP, 0, 1, 2, KGENOME_OK);
+
+	/* the body kills it: first pass the socket, later none, so MAY */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); E(&c, 0x31, 0xff); test_rcx(&c); jnz_back(&c, loop);
+	exit_sys(&c);
+	expect_x("X3 loop kills rdi", &c, SWEEP, 0, 1, 1, KGENOME_OK);
+
+	/* an unconditional back edge */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); sock(&c); mov_rdi_rax(&c); jmp_back(&c, loop);
+	expect_x("X3 jmp back, loop rewrites rdi", &c, SWEEP, 0, 1, 2, KGENOME_OK);
+
+	/* control: the body only reads rdi, so the link stays PROVEN (a fix that demotes every link in a loop fails here) */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); E(&c, 0x48, 0xff, 0xc9); jnz_back(&c, loop);
+	exit_sys(&c);
+	expect_x("X3 control, loop only reads rdi", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* control: a loop that sets rdi again BEFORE it reads it: every pass the write takes the body's socket */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; sock(&c); mov_rdi_rax(&c); write_sys(&c); test_rcx(&c); jnz_back(&c, loop);
+	exit_sys(&c);
+	expect_x("X3 control, loop sets rdi before the read", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* control: a loop that carries nothing is read once - no origin, no second pass (3 instructions and the exit's 2) */
+	c.n = 0;
+	loop = c.n; E(&c, 0x48, 0xff, 0xc9); jnz_back(&c, loop); exit_sys(&c);
+	cell_next_calls = 0;
+	{
+		struct kgenome_diag_scan *s0 = scan_cb(&c, SWEEP);
+
+		CK(s0 != NULL);
+		if (s0)
+			kgenome_diag_scan_free(s0);
+		if (cell_next_calls != 4u) {
+			printf("  FAIL X3 control, a loop that carries nothing: %u instructions decoded, wanted 4\n", cell_next_calls);
+			hk_fails++;
+		}
+	}
+
+	/* the cap on the loops of one window (32): at the cap every link stays PROVEN, one past it is MAY and said */
+	for (i = 0; i < 2u; i++) {
+		const unsigned n = i ? 33u : 32u;
+		unsigned k;
+		struct kgenome_diag_scan *s;
+		unsigned m, y;
+
+		c.n = 0; sock(&c); mov_rdi_rax(&c);
+		for (k = 0; k < n; k++) {
+			loop = c.n; write_sys(&c); E(&c, 0x48, 0xff, 0xc9); jnz_back(&c, loop);
+		}
+		exit_sys(&c);
+		cell_next_calls = 0;
+		s = scan_cb(&c, SWEEP);
+		CK(s != NULL);
+		if (!s)
+			continue;
+		/* the work: two passes over the window at most (8 + 4 per loop instructions in it), whatever the loop count */
+		if (cell_next_calls > 2u * (8u + 4u * n) || cell_next_calls < 8u + 4u * n) {
+			printf("  FAIL X3 %u loops: %u instructions decoded, wanted %u..%u\n", n, cell_next_calls, 8u + 4u * n,
+			       2u * (8u + 4u * n));
+			hk_fails++;
+		}
+		write_links(s, &m, &y);
+		if (!i && (m != n || y != 0u || kgenome_diag_scan_status(s) != KGENOME_OK)) {
+			printf("  FAIL X3 %u loops: PROVEN %u MAY %u status %s, wanted all PROVEN and ok\n", n, m, y,
+			       kgenome_status_name(kgenome_diag_scan_status(s)));
+			hk_fails++;
+		}
+		if (i && (m + y != n || y == 0u || kgenome_diag_scan_status(s) != KGENOME_TRUNCATED)) {
+			printf("  FAIL X3 %u loops: PROVEN %u MAY %u status %s, wanted MAY for the loops past the cap and TRUNCATED\n",
+			       n, m, y, kgenome_status_name(kgenome_diag_scan_status(s)));
+			hk_fails++;
+		}
+		kgenome_diag_scan_free(s);
+	}
+}
+
+/* the window machinery of the second pass: a RESUMED window, a head before the window began, and no table at all */
+static void t_x3_windows(void)
+{
+	static struct cb c;
+	unsigned loop, far_, m, y;
+	struct kgenome_diag_scan *s;
+	struct kgenome_budget bud;
+	static struct kgenome_obj o;
+	uint64_t al;
+
+	/* A window put down at the idle bound and picked up by the next candidate: the second pass restores the joins the
+	 * window found pending (a jz forward past the whole loop) and still takes back the first pass's claim */
+	c.n = 0;
+	write_sys(&c); test_rcx(&c); far_ = jz_fwd(&c); pad(&c, 70);
+	sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); sock(&c); mov_rdi_rax(&c); test_rcx(&c); jnz_back(&c, loop);
+	here(&c, far_); exit_sys(&c);
+	expect_x("X3 loop in a resumed window", &c, SWEEP, 0, 1, 2, KGENOME_OK);
+	/* its control: the same loop that only reads rdi keeps PROVEN through the pending join and the restore */
+	c.n = 0;
+	write_sys(&c); test_rcx(&c); far_ = jz_fwd(&c); pad(&c, 70);
+	sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); E(&c, 0x48, 0xff, 0xc9); jnz_back(&c, loop);
+	here(&c, far_); exit_sys(&c);
+	expect_x("X3 control, loop in a resumed window only reads rdi", &c, SWEEP, 1, 0, 0, KGENOME_OK);
+
+	/* a join that is pending when the window is put down - a jz past the loop, taken by a path holding socket one - is
+	 * still pending when the second pass of the next window has run: the write after the loop gets both producers */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	test_rcx(&c); far_ = jz_fwd(&c);
+	E(&c, 0x31, 0xff, 0x31, 0xc0);                                  /* xor edi,edi; xor eax,eax: nothing is carried now */
+	pad(&c, 70);
+	sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); E(&c, 0x48, 0xff, 0xc9); jnz_back(&c, loop);
+	here(&c, far_); write_sys(&c); exit_sys(&c);
+	expect_x("X3 resumed window keeps its pending join", &c, SWEEP, 1, 2, 2, KGENOME_OK);
+
+	/* a head the window did not read (its reads were another window's): the claim is taken back without a second
+	 * pass, and said */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); E(&c, 0x31, 0xff); pad(&c, 100);
+	sock(&c); mov_rdi_rax(&c); test_rcx(&c); jnz_back(&c, loop);
+	exit_sys(&c);
+	expect_x("X3 head before the window", &c, SWEEP, 0, 1, 2, KGENOME_TRUNCATED);
+
+	/* the allowance leaves no room for the tables of the sweep: no second pass is possible and the claim is taken
+	 * back all the same - at no allowance does the first pass's PROVEN link come back */
+	c.n = 0; sock(&c); mov_rdi_rax(&c);
+	loop = c.n; write_sys(&c); E(&c, 0x31, 0xff); test_rcx(&c); jnz_back(&c, loop);
+	exit_sys(&c);
+	for (al = 4096; al <= (1u << 21); al += al / 5u + 1u) {
+		memset(&bud, 0, sizeof bud);
+		bud.max_bytes = al;
+		s = scan_img(elf64(img, &c, 0), SWEEP, &bud, 0, &o);
+		if (!s) {
+			CK(0);
+			continue;
+		}
+		write_links(s, &m, &y);
+		if (m != 0u) {
+			printf("  FAIL X3 allowance %llu: PROVEN %u, a loop that kills rdi\n", (unsigned long long)al, m);
+			hk_fails++;
+		}
+		kgenome_diag_scan_free(s);
+	}
+}
+
+/* the ring at the instruction level: the odd forms of what moves the stack pointer */
+static void ring_step(struct kgenome_diag_orgs *w, unsigned arch, const uint8_t *b, unsigned n)
+{
+	struct kgenome_cell_insn in;
+
+	CK(kgenome_cell_decode(arch, 0, b, n, 0x1000, &in) == n);
+	kgenome_diag_org_step(w, &in);
+}
+
+static void ring_fresh(struct kgenome_diag_orgs *w, unsigned depth)
+{
+	unsigned r;
+
+	memset(w, 0, sizeof *w);
+	for (r = 0; r < 16u; r++)
+		w->reg[r].node = KGENOME_DIAG_ORG_NONE;
+	for (r = 0; r < depth; r++) {
+		static const uint8_t push_rdi[] = { 0x57 };
+
+		kgenome_diag_org_set(w, KGENOME_CELL_REG_DI, (uint16_t)(10u + r));
+		ring_step(w, KGENOME_ARCH_X86_64, push_rdi, 1);
+	}
+}
+
+/* AArch64's stack pointer is not x4: `mov x0,x4; write` made x0 "a stack address" (the walk read register 4 as the stack
+ * pointer, as it does on x86), and the write took a link from the stack. */
+static void t_arm64_stack(void)
+{
+	static struct cb c;
+	struct kgenome_diag_scan *s;
+	uint32_t i, cnt;
+	unsigned stack_links = 0, k;
+
+	elf_machine = 0xb7;
+	c.n = 0;
+	w32(&c, 0xaa0403e0u);                           /* mov x0, x4 */
+	w32(&c, 0xd2800808u); w32(&c, 0xd4000001u);     /* write */
+	w32(&c, 0xd2800ba8u); w32(&c, 0xd4000001u);     /* exit */
+	s = scan_cb(&c, SWEEP);
+	elf_machine = 0x3e;
+	CK(s != NULL);
+	if (!s)
+		return;
+	cnt = kgenome_diag_scan_count(s);
+	CK(cnt >= 1u);
+	for (i = 0; i < cnt; i++) {
+		const struct kgenome_diag_hit *h = kgenome_diag_scan_at(s, i);
+
+		for (k = 0; k < h->n_in; k++)
+			stack_links += h->in[k].from == KGENOME_DIAG_ORG_STACK;
+	}
+	if (stack_links) {
+		printf("  FAIL X5 arm64: x4 read as the stack pointer (%u link(s) from the stack)\n", stack_links);
+		hk_fails++;
+	}
+	kgenome_diag_scan_free(s);
+}
+
+static void t_x5_ring(void)
+{
+	struct kgenome_diag_orgs w;
+	static const uint8_t add8[] = { 0x48, 0x83, 0xc4, 0x08 }, add4_64[] = { 0x48, 0x83, 0xc4, 0x04 },
+		add_big[] = { 0x48, 0x81, 0xc4, 0x00, 0x01, 0, 0 }, add_huge[] = { 0x48, 0x81, 0xc4, 0x00, 0x10, 0, 0 }, sub_big[] = { 0x48, 0x81, 0xec, 0x00, 0x10, 0, 0 },
+		sub_mid[] = { 0x48, 0x81, 0xec, 0xc0, 0, 0, 0 }, add_neg[] = { 0x48, 0x83, 0xc4, 0xf0 }, sub_neg[] = { 0x48, 0x83, 0xec, 0xf0 },
+		add4_32[] = { 0x83, 0xc4, 0x04 }, sub8_32[] = { 0x83, 0xec, 0x08 },
+		mov_bp_sp[] = { 0x48, 0x89, 0xe5 }, mov_sp_bp[] = { 0x48, 0x89, 0xec }, leave[] = { 0xc9 },
+		lea_up[] = { 0x48, 0x8d, 0x65, 0x08 }, lea_down[] = { 0x48, 0x8d, 0x65, 0xe8 }, pop_bp[] = { 0x5d },
+		mov_bp_ax[] = { 0x48, 0x89, 0xc5 }, push_rsi[] = { 0x56 }, add_reg[] = { 0x48, 0x01, 0xc4 };
+
+	/* add rsp,8 gives up one slot; the slot below keeps its producer */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, add8, 4);
+	CK(w.n_stk == 2u && w.stk[1] == 11u);
+	/* a word that is not a whole number of slots: nothing moves (the unit is the register's width) */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, add4_64, 4);
+	CK(w.n_stk == 3u);
+	/* a 32-bit stack pointer has 4-byte slots */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86, add4_32, 3);
+	CK(w.n_stk == 2u);
+	ring_step(&w, KGENOME_ARCH_X86, sub8_32, 3);
+	CK(w.n_stk == 4u && w.stk[2] == KGENOME_DIAG_ORG_NONE && w.stk[3] == KGENOME_DIAG_ORG_NONE);
+	/* more than the ring holds: the ring is empty, the depth is not lost, and nothing below zero */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, add_big, 7);
+	CK(w.n_stk == 0u && w.n_lost == 0u);
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, sub_big, 7);
+	CK(w.n_stk == 3u && w.sp_gap == 512u && !w.stk_cut);           /* counted, not pushed: nothing falls out of the ring */
+	ring_step(&w, KGENOME_ARCH_X86_64, add_big, 7);                 /* 32 slots back: out of the room first */
+	CK(w.n_stk == 3u && w.sp_gap == 480u);
+	ring_step(&w, KGENOME_ARCH_X86_64, add_huge, 7);                /* 512 more than are left: the room is gone, no more */
+	CK(w.n_stk == 0u && w.sp_gap == 0u);
+	/* room that does fit is slots: 24 of 32, with 3 held */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, sub_mid, 7);
+	CK(w.n_stk == 3u + 24u && w.sp_gap == 0u && w.stk[3] == KGENOME_DIAG_ORG_NONE);
+	/* the same room when the ring has none left: counted, and no origin is lost */
+	ring_step(&w, KGENOME_ARCH_X86_64, sub_mid, 7);
+	CK(w.n_stk == 27u && w.sp_gap == 24u && !w.stk_cut && w.stk[0] == 10u);
+	/* leave: the frame's room is given back with the rest */
+	ring_fresh(&w, 2);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_bp_sp, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, sub_big, 7);
+	ring_step(&w, KGENOME_ARCH_X86_64, leave, 1);
+	CK(w.n_stk == 1u && w.sp_gap == 0u && !w.bp_known);
+	/* a negative immediate is the other direction */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, add_neg, 4);
+	CK(w.n_stk == 5u);
+	ring_step(&w, KGENOME_ARCH_X86_64, sub_neg, 4);
+	CK(w.n_stk == 3u);
+	/* an add by a register is not followed */
+	ring_fresh(&w, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, add_reg, 3);
+	CK(w.n_stk == 3u);
+	/* the frame pointer: made, used by mov rsp,rbp and lea, unmade by anything that writes it */
+	ring_fresh(&w, 2);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_bp_sp, 3);
+	CK(w.bp_known && w.bp_depth == 2u);
+	ring_step(&w, KGENOME_ARCH_X86_64, push_rsi, 1);
+	ring_step(&w, KGENOME_ARCH_X86_64, push_rsi, 1);
+	CK(w.n_stk == 4u);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_sp_bp, 3);
+	CK(w.n_stk == 2u);
+	ring_step(&w, KGENOME_ARCH_X86_64, lea_down, 4);                /* lea rsp,[rbp-0x18]: three slots below */
+	CK(w.n_stk == 5u);
+	ring_step(&w, KGENOME_ARCH_X86_64, lea_up, 4);                  /* lea rsp,[rbp+8]: one above the frame */
+	CK(w.n_stk == 1u);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_bp_ax, 3);
+	CK(!w.bp_known);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_sp_bp, 3);               /* no frame: not followed */
+	CK(w.n_stk == 1u);
+	ring_step(&w, KGENOME_ARCH_X86_64, lea_down, 4);
+	CK(w.n_stk == 1u);
+	/* leave with a frame: back to the frame pointer's depth and one more pop; without one it is not followed */
+	ring_fresh(&w, 2);
+	ring_step(&w, KGENOME_ARCH_X86_64, push_rsi, 1);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_bp_sp, 3);
+	ring_step(&w, KGENOME_ARCH_X86_64, push_rsi, 1);
+	ring_step(&w, KGENOME_ARCH_X86_64, leave, 1);
+	CK(w.n_stk == 2u && !w.bp_known && w.stk[1] == 11u && w.stk[0] == 10u);
+	ring_fresh(&w, 2);
+	ring_step(&w, KGENOME_ARCH_X86_64, leave, 1);
+	CK(w.n_stk == 2u && !w.bp_known);
+	/* pop rbp hands back the caller's frame pointer */
+	ring_fresh(&w, 2);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_bp_sp, 3);
+	CK(w.bp_known);
+	ring_step(&w, KGENOME_ARCH_X86_64, pop_bp, 1);
+	CK(!w.bp_known);
+	/* kill_stack gives the next function a frame of its own */
+	ring_fresh(&w, 2);
+	ring_step(&w, KGENOME_ARCH_X86_64, mov_bp_sp, 3);
+	(void)kgenome_diag_org_kill_stack(&w);
+	CK(!w.bp_known && w.n_stk == 0u);
+	/* ARM and AArch64 are not x86: their stack pointer is not register 4, so register 4 is an ordinary one */
+	{
+		static const uint8_t a64_add[] = { 0x84, 0x20, 0x00, 0x91 };        /* add x4,x4,#8 */
+		static const uint8_t a64_mov[] = { 0xe0, 0x03, 0x04, 0xaa };        /* mov x0,x4 */
+		static const uint8_t a32_sub[] = { 0x10, 0xd0, 0x4d, 0xe2 };        /* sub sp,sp,#16 */
+
+		ring_fresh(&w, 3);
+		w.sp = 31u;
+		ring_step(&w, KGENOME_ARCH_ARM64, a64_add, 4);
+		CK(w.n_stk == 3u);
+		ring_step(&w, KGENOME_ARCH_ARM64, a64_mov, 4);
+		CK(kgenome_diag_org_of(&w, 0) != KGENOME_DIAG_ORG_STACK);
+		ring_fresh(&w, 3);
+		w.sp = 13u;
+		ring_step(&w, KGENOME_ARCH_ARM, a32_sub, 4);
+		CK(w.n_stk == 3u);
+	}
+}
+
+/* An ELF64 with symbols: a section table, .text, a symbol table of sized STT_FUNC entries (the function table
+ * the sweep reads). The code is at +0x78 as elf64() places it. */
+static uint64_t elf64_funcs(uint8_t *b, const struct cb *c, const unsigned *off, const unsigned *len, unsigned nfn)
+{
+	static const char shs[] = "\0.text\0.symtab\0.strtab\0.shstrtab\0";
+	const unsigned code = 0x78u, sym_off = al8(code + c->n), str_off = sym_off + (nfn + 1u) * 24u;
+	const unsigned shstr_off = str_off + 1u + nfn * 4u, sh_off = al8(shstr_off + (unsigned)sizeof shs);
+	unsigned i;
+	uint8_t *p;
+
+	elf64(b, c, 0);
+	memset(b + code + c->n, 0, sh_off + 5u * 64u - (code + c->n));
+	p64(b, 40, sh_off);
+	p16(b, 60, 5); p16(b, 62, 4);                   /* shnum, shstrndx; shentsize is already 64 */
+	p16(b, 58, 64);
+	for (i = 0; i < nfn; i++) {
+		p = b + sym_off + (i + 1u) * 24u;
+		p32(p, 0, 1u + i * 4u);
+		memcpy(b + str_off + 1u + i * 4u, "fn", 3);
+		b[str_off + 1u + i * 4u + 2u] = (uint8_t)('0' + i);
+		p[4] = 0x12;
+		p16(p, 6, 1);
+		p64(p, 8, 0x400000u + code + off[i]);
+		p64(p, 16, len[i]);
+	}
+	memcpy(b + shstr_off, shs, sizeof shs);
+	p = b + sh_off;
+	p32(p + 64, 0, 1); p32(p + 64, 4, 1); p64(p + 64, 8, 6);                        /* .text */
+	p64(p + 64, 16, 0x400000u + code); p64(p + 64, 24, code); p64(p + 64, 32, c->n); p64(p + 64, 48, 16);
+	p32(p + 128, 0, 7); p32(p + 128, 4, 2); p64(p + 128, 24, sym_off);              /* .symtab */
+	p64(p + 128, 32, (nfn + 1u) * 24u); p32(p + 128, 40, 3);
+	p32(p + 128, 44, 1); p64(p + 128, 48, 8); p64(p + 128, 56, 24);
+	p32(p + 192, 0, 15); p32(p + 192, 4, 3); p64(p + 192, 24, str_off);             /* .strtab */
+	p64(p + 192, 32, 1u + nfn * 4u); p64(p + 192, 48, 1);
+	p32(p + 256, 0, 23); p32(p + 256, 4, 3); p64(p + 256, 24, shstr_off);           /* .shstrtab */
+	p64(p + 256, 32, sizeof shs); p64(p + 256, 48, 1);
+	return sh_off + 5u * 64u;
+}
+
+static void expect_funcs(const char *what, const struct cb *c, const unsigned *off, const unsigned *len, unsigned nfn,
+			 unsigned must, unsigned may)
+{
+	static struct kgenome_obj o;
+	struct kgenome_diag_scan *s = scan_img(elf64_funcs(img, c, off, len, nfn), SWEEP, NULL, 0, &o);
+	unsigned m = 0, y = 0;
+
+	if (!s) {
+		printf("  FAIL %s: no scan\n", what);
+		hk_fails++;
+		return;
+	}
+	write_links(s, &m, &y);
+	if (m != must || y != may) {
+		printf("  FAIL %s: PROVEN %u MAY %u, wanted PROVEN %u MAY %u\n", what, m, y, must, may);
+		hk_fails++;
+	}
+	kgenome_diag_scan_free(s);
+}
+
+static void t_x3_tail(void)
+{
+	static struct cb c;
+	unsigned off[4], len[4], h, a;
+
+	/* A makes the socket and tail-jumps to B; C, which is the next function, writes. The code after the jmp
+	 * is C: nothing reaches it, so its rdi holds nothing of A's. */
+	c.n = 0; off[0] = 0;
+	sock(&c); mov_rdi_rax(&c); h = jmp_fwd(&c);
+	len[0] = c.n;
+	off[1] = c.n; write_sys(&c); ret(&c); len[1] = c.n - off[1];             /* C */
+	off[2] = c.n; here(&c, h); E(&c, 0x31, 0xc0); ret(&c); len[2] = c.n - off[2];   /* B */
+	expect_funcs("X3 tail jmp into another function", &c, off, len, 3, 0, 0);
+
+	/* control: the same bytes with the jump inside ONE function: a jmp/call/pop idiom, the code after it is reached
+	 * by a call later on and keeps the origin as MAY */
+	c.n = 0; off[0] = 0;
+	sock(&c); mov_rdi_rax(&c); h = jmp_fwd(&c);
+	a = c.n; write_sys(&c); ret(&c);                                        /* back: */
+	here(&c, h);
+	call_to(&c, a); exit_sys(&c);
+	len[0] = c.n;
+	expect_funcs("X3 control, jmp over code a later call reaches", &c, off, len, 1, 0, 1);
+
+	/* control: a symbol table with no function in it (the functions are the entries the code is seen to call) is not a
+	 * function table either: the idiom's own `call back` makes `back` an entry, and the jmp over it is not a tail jump */
+	c.n = 0; off[0] = 0;
+	sock(&c); mov_rdi_rax(&c); h = jmp_fwd(&c);
+	a = c.n; write_sys(&c); ret(&c);
+	here(&c, h);
+	call_to(&c, a); exit_sys(&c);
+	expect_funcs("X3 control, symbols but no function symbols", &c, off, len, 0, 0, 1);
+
+	/* control: no function table at all (stripped) leaves the idiom's rule, and does not build the table to find out
+	 * (the table of a stripped file is a walk over the whole file) */
+	c.n = 0;
+	sock(&c); mov_rdi_rax(&c); h = jmp_fwd(&c);
+	write_sys(&c); ret(&c);
+	here(&c, h);
+	E(&c, 0x31, 0xc0); ret(&c);
+	funcs_calls = 0;
+	expect("X3 control, stripped: code after a jmp", &c, SWEEP, 0, 1);
+	if (funcs_calls != 0u) {
+		printf("  FAIL X3 stripped: the function table was asked for %u time(s)\n", funcs_calls);
+		hk_fails++;
+	}
+}
+
+/* ---- X8: a relocatable object whose image cannot be built ---------------------------------------- */
+
+static void t_x8(void)
+{
+	static struct kmod m;
+	static struct kgenome_obj o;
+	struct kgenome_budget bud;
+	struct kgenome_diag_scan *s;
+	enum kgenome_status st;
+	uint64_t len;
+	unsigned ok = 0, refused = 0, nomem = 0, other = 0, seen_ok = 0;
+	uint64_t a;
+
+	/* the kmod_give_root shape: two nodes in one function and a producer, so the emulate route builds the image */
+	km_start(&m);
+	km_call(&m, "prepare_creds"); E(&m.c, 0x48, 0x89, 0xc7);
+	E(&m.c, 0x48, 0xc7, 0x47, 0x08, 0, 0, 0, 0);                    /* mov qword [rdi+8],0 */
+	km_call(&m, "commit_creds"); ret(&m.c);
+	len = km_image(&m);
+
+	/* with the default allowance the image is built and the run happens */
+	s = scan_img(len, KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_EMULATE, NULL, 0, &o);
+	CK(s != NULL);
+	if (s) {
+		want_status("X8 default allowance", s, KGENOME_OK);
+		kgenome_diag_scan_free(s);
+	}
+	/* a growing allowance: below what the image needs the build fails and the BUDGET says so, never "out of
+	 * memory" and never a clean status; above it the run is whole. Monotone: once it is ok it stays ok. */
+	for (a = 4096; a <= (64u << 20); a += a / 3u + 1u) {
+		memset(&bud, 0, sizeof bud);
+		bud.max_bytes = a;
+		km_image(&m);
+		s = scan_img(len, KGENOME_DIAG_RUN_SYMBOL | KGENOME_DIAG_RUN_EMULATE, &bud, 0, &o);
+		if (!s) {
+			CK(0);
+			continue;
+		}
+		st = kgenome_diag_scan_status(s);
+		if (st == KGENOME_OK) {
+			ok++;
+			seen_ok = 1;
+		} else if (st == KGENOME_OVER_BUDGET) {
+			refused++;
+			if (seen_ok) {
+				printf("  FAIL X8 allowance %llu: over budget after an allowance that was ok\n", (unsigned long long)a);
+				hk_fails++;
+			}
+		} else if (st == KGENOME_NOMEM) {
+			nomem++;
+		} else {
+			other++;
+		}
+		kgenome_diag_scan_free(s);
+	}
+	printf("  X8: %u ok, %u over-budget, %u nomem, %u other\n", ok, refused, nomem, other);
+	CK(refused > 0 && ok > 0);
+	CK(nomem == 0);
+	CK(other == 0);
+}
+
 int main(int argc, char **argv)
 {
 	hk_args(argc, argv);
@@ -1141,6 +2219,15 @@ int main(int argc, char **argv)
 	t_chain_work();
 	t_budget_sweep();
 	t_null_args();
+	t_x1();
+	t_x2();
+	t_x5();
+	t_x3_loops();
+	t_x3_tail();
+	t_x3_windows();
+	t_x5_ring();
+	t_arm64_stack();
+	t_x8();
 	printf("diag_graph_bin: %d failure(s)\n", hk_fails);
 	return hk_fails != 0;
 }

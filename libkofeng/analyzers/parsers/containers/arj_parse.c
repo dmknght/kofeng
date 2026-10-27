@@ -266,6 +266,10 @@ int kof_arj_parse(kof_buf file, struct kof_arj_info *a, struct kof_obj_ctx *ctx)
 			continue;
 		}
 
+		/* KNOWN DEFECT WP2-D1b (2026-10-24, M) [sev M]: The arj member walk ends silently on a packed size
+		 * past EOF (as WP2-D1). Trigger: middle of 3 members claims 0xfffffff0. Effect: 1 of 3
+		 * opened, broken 0. Reproducer: tests/unit/ctr_liars.c arj/claimBoth, arj/claimPack. Fix: as
+		 * WP2-D1, from KOF_ARJ_ANOM_TRUNCATED. */
 		if ((uint64_t)csize > file.n - at) {
 			a->anomalies |= KOF_ARJ_ANOM_TRUNCATED;
 			break;

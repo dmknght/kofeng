@@ -536,6 +536,12 @@ static void run_adapter(const struct fz_opts *o, const struct fz_adapter *ad, un
 	struct fz_shared *sh = (struct fz_shared *)mmap(NULL, sizeof *sh, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	struct fz_run R;
 	unsigned first = o->has_only ? o->only : 0u, last = o->has_only ? o->only + 1u : o->iters * o->scale;
+	/* KNOWN DEFECT WP9-F15 (2026-10-25, M) [sev L]: run_adapter arms the HANG backstop (secs = backstop_s or
+	 * 60) once per child run of all iterations, not per case (also WP5-KIT-2). Trigger: a campaign whose child
+	 * runs more than 60 s of cumulative adapter time (ppmd, rar: 500 cases/s). Effect: reported as a HANG at an
+	 * arbitrary iteration (32594 of 40000, 6 per 200k), not reproducible with --only; saved inputs replay in 0
+	 * s. Reproducer: make fuzz ONLY=<slow adapter> ITERS=60000 on a row without .backstop_s (WP9 and WP5 rows
+	 * set it to 1800-3000). Fix: re-arm alarm(secs) per iteration. */
 	unsigned crashes = 0, secs = ad->backstop_s ? ad->backstop_s : 60u;
 	struct fz_lim lim;
 	unsigned i;
@@ -621,6 +627,10 @@ int main(int argc, char **argv)
 	for (i = 0; i < n; i++)
 		v[i] = registry[i];
 	qsort(v, n, sizeof *v, cmp_adapter);
+	/* KNOWN DEFECT WP5-KIT-1 (2026-10-25, M) [sev L]: the `--list` path returns with the adapter list `v` still
+	 * allocated (also the leak half of WP9-F15). Trigger: fuzz_<stage> --list. Effect: LeakSanitizer report,
+	 * exit status 1; stage runs are unaffected. Reproducer: build/fuzz/fuzz_<stage> --list under ASAN. Fix:
+	 * free(v) before the return. */
 	if (o.list) {
 		for (i = 0; i < n; i++)
 			printf("%s\tshape %d\t%s\n", v[i]->name, (int)v[i]->shape, v[i]->covers ? v[i]->covers : "");

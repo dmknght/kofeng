@@ -59,7 +59,9 @@ static void do_proc(uint32_t pid, uint64_t start, int verbose, uint32_t want,
 
 	m = kofa_pmem_open(pid, start, &po, &err);
 	if (!m) {
-		if (err == KOFA_ERR_DENIED)
+		/* DENIED and a failed open (OS: descriptors, memory) both mean
+		 * the process was not looked at; only GONE is routine. */
+		if (err == KOFA_ERR_DENIED || err == KOFA_ERR_OS)
 			t->refused++;
 		return;
 	}

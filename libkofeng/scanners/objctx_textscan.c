@@ -62,6 +62,9 @@ static void name_kept(void *user, const char *name, uint32_t len)
 	struct kof_scan_obj_text *t = user;
 
 	(void)len;
+	/* KNOWN DEFECT REV-D8b (2026-10-24, Inference) [sev L]: the name collector doubles a uint32 capacity (cap_name) with no overflow guard and no ledger charge.
+	 * Trigger: 2^31 names (not reachable below the tree's memory cap: the count is bounded by the text). Effect: `nc` wraps to 0, realloc(0) then writes past the table.
+	 * Reproducer: none. Fix: grow through one checked helper (uint64_t arithmetic, refuse past 0xffffffff, charge the scanner's ledger). */
 	if (t->n_name == t->cap_name) {
 		uint32_t nc = t->cap_name ? t->cap_name * 2u : 32u;
 		const char **nn = realloc(t->name, (size_t)nc * sizeof *nn);

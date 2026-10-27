@@ -399,9 +399,21 @@ static void run_resolver(struct kgenome_diag_apihash_set *a, const struct kgenom
 	uint32_t n_ev, i;
 
 	memset(&first, 0, sizeof first);
+	/* KNOWN DEFECT WP9-F2 (2026-10-25, M) [sev M]: run_resolver gives the first slice DIAG_PE_SLICE (16000)
+	 * instructions whatever budget->max_insn_resolve says. Trigger: kgenome_diag_apihash_run with
+	 * max_insn_resolve below 16000 and a PE that reads the loader data then spins. Effect: budget 100 spends
+	 * 16000 (the engine passes what the tree allowance has left): a cap bypass. Reproducer:
+	 * tests/lib/genome/diag_known_misses.c f2 (green until fixed). Fix: first.max_insn =
+	 * min(bud->max_insn_resolve, DIAG_PE_SLICE). */
 	first.max_insn = DIAG_PE_SLICE;
 	first.insn_spent = bud->insn_spent;
 	memset(&rep, 0, sizeof rep);
+	/* KNOWN DEFECT WP9-F10 (2026-10-25, M) [sev M]: run_resolver passes `.imports = imports`; when the caller
+	 * gives none kgenome_emu_unp_run_pe builds its own table (kgenome_pe_imports, realloc) and its status is
+	 * not merged into the product. Trigger: allocation refused while that table is built. Effect: fewer API
+	 * calls found and the product status stays OK. Reproducer: tests/lib/genome/diag_bin_oom.c KNOWN-MISS F10.
+	 * Fix: build the table in run_resolver (kgenome_pe_imptab_build), merge its status into a->status and pass
+	 * it as `.imports`. */
 	em = kgenome_emu_unp_run_pe(&(const struct kgenome_emu_unp_pe_req){
 			.file = base,
 			.n = size,
@@ -509,6 +521,11 @@ struct kgenome_diag_apihash_set *kgenome_diag_apihash_run(const struct kgenome_o
 	p = kgenome_obj_pe(obj);
 	if (!p || !p->valid)
 		return NULL;
+	/* KNOWN DEFECT WP9-F6 (2026-10-25, R) [sev L]: kgenome_diag_apihash_run answers NULL both for "not a PE"
+	 * and for a refused allocation. Trigger: calloc of the set refused. Effect: the caller cannot report the
+	 * second (NULL is cached as an answer, apihash_done). Reproducer: tests/lib/genome/diag_bin_oom.c (the
+	 * apihash row does not count NULL as silent for this reason). Fix: add a `refused` status member to the
+	 * call (as kgenome_diag_inputs has) or return the set with status NOMEM. */
 	a = calloc(1, sizeof *a);
 	if (!a)
 		return NULL;

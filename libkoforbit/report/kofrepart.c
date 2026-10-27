@@ -510,6 +510,11 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 	}
 
 	snprintf(rel, sizeof rel, "files/%s", f->bytes.file_sha256);
+	/* KNOWN DEFECT WP12-14 (2026-10-24, M) [sev M]: collect_file cuts the 512-byte
+	 * store path in joinp but the report names the untruncated path.
+	 * Trigger: a report directory of 460 bytes. Effect: the copy is written
+	 * under a shortened name. Reproducer: orbit_store.c case_report_finish.
+	 * Fix: refuse (why_not) when joinp truncates. */
 	joinp(store, sizeof store, dir, rel);
 
 	/*
@@ -571,6 +576,12 @@ static int collect_file(struct kof_report *r, const struct kof_report_stage *st,
 		 * digest it does not have, which is the one thing content
 		 * addressing must never allow. */
 		remove(store);
+		/* KNOWN DEFECT WP12-15 (2026-10-24, M) [sev L]: collect_file reports
+		 * every failed copy as KOF_FP_WHY_DENIED ("could not be
+		 * opened"). Trigger: ENOSPC on the copy. Effect: a disk failure
+		 * reads as a permission one. Reproducer:
+		 * tests/unit/orbit_store.c (KM_CHECK). Fix: a KOF_FP_WHY_IO
+		 * value, set from errno of the failed write/fclose. */
 		f->bytes.why_not = KOF_FP_WHY_DENIED;
 		return -1;
 	}
@@ -653,6 +664,12 @@ static void read_written(struct kof_report *r, struct kof_fingerprint *f,
 			 * the same reasoning applies - see the store above. */
 			out = kof_fopen_new(path);
 			if (out) {
+				/* KNOWN DEFECT WP12-16 (2026-10-24, M) [sev M]:
+				 * read_written ignores the failing fclose of
+				 * evidence/NNNN.bin. Trigger: full disk. Effect:
+				 * the fingerprint names a copy the disk never
+				 * got. Reproducer: orbit_store.c. Fix: check
+				 * fclose. */
 				if (fwrite(buf, 1, (size_t)got, out) == got)
 					snprintf(f->bytes.stored,
 						 sizeof f->bytes.stored, "%s",

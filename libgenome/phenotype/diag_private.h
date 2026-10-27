@@ -155,6 +155,22 @@ struct kgenome_diag_orgs {
 	 * the descriptors those calls take came back linked to the stack.
 	 */
 	uint8_t    sp;
+	/*
+	 * THE FRAME POINTER'S DEPTH, for the ring: the depth (n_stk) the ring had when `mov ebp,esp` made the frame, so
+	 * that `leave`, `mov esp,ebp` and `lea esp,[ebp-N]` can put the ring back where the real stack pointer went.
+	 * `bp_known` is 0 until a frame is made and again as soon as anything else writes the register. x86 only
+	 * (`sp` is 0): ARM's push and pop take lists, which the ring counts as one slot, and says nothing of them.
+	 */
+	uint32_t   bp_depth;
+	uint8_t    bp_known;
+	/*
+	 * ROOM THE STACK POINTER MADE THAT THE RING HAS NO SLOTS FOR, in slots: `sub esp,0x200` is 128 words and the ring
+	 * holds 32, so recording it would push every origin the walk is carrying out of the window (MEASURED: 5 corpus
+	 * files OK -> TRUNCATED, to lose what the program still has, below the frame). It is counted here instead and
+	 * given back first by the `add esp,N`, `leave` or `lea` that releases it. A pop that reaches into the room is
+	 * not told apart from one that takes a push made after it: not followed, the old behaviour.
+	 */
+	uint32_t   sp_gap;
 };
 
 void     kgenome_diag_org_clear(struct kgenome_diag_orgs *w, uint8_t r);
@@ -185,6 +201,37 @@ void kgenome_diag_org_demote(struct kgenome_diag_orgs *w, uint16_t mask);
 void kgenome_diag_org_kill(struct kgenome_diag_orgs *w, uint16_t mask);
 /* The stack ring forgets everything (a different function's frame). 1 when an origin was lost with it. */
 int  kgenome_diag_org_kill_stack(struct kgenome_diag_orgs *w);
+/*
+ * ---- WHAT A CALL DOES TO THE ORIGIN MAP: ONE ANSWER FOR EVERY ROUTE -----------------------------------
+ *
+ * The sweep (diag_sweep.c) and the symbol route (diag_sym.c) both walk straight lines of code in which a callee
+ * may have overwritten a register, and both used to say so differently - the symbol route not at all. The decoder
+ * gives CALL no written register, so a step over it clears nothing; this is the one place the call is answered.
+ * A direct callee that is straight line to its `ret` is READ: a register it writes loses its origin, one it does
+ * not write keeps it, one it pushes and pops is not written. A callee with a branch or a call in it, one outside
+ * the region, an indirect call, a call whose target the caller says is not known (`target_unknown`: a relocation
+ * hole): the registers the ABI lets a callee overwrite keep their origin as MAY. `call next` and a callee that
+ * begins by popping its own return address are not calls (they fetch the program counter) and push the slot that
+ * pop takes back.
+ */
+#define KGENOME_DIAG_CALLEE_INSN 64u
+#define KGENOME_DIAG_CALLEE_MEMO 64u
+struct kgenome_cell_space;
+struct kgenome_diag_callee_memo {
+	uint64_t target;
+	uint16_t writes;
+	uint8_t  kind;          /* enum diag_callee_kind, 0 for an empty slot */
+};
+struct kgenome_diag_callees {
+	const struct kgenome_cell_space *sp;
+	uint64_t off, n;        /* the region a callee must lie in: file offsets [off, off + n) */
+	uint16_t caller_saved;  /* the registers the ABI lets a callee overwrite */
+	struct kgenome_diag_callee_memo memo[KGENOME_DIAG_CALLEE_MEMO];
+};
+void kgenome_diag_callees_init(struct kgenome_diag_callees *c, const struct kgenome_cell_space *sp, unsigned arch,
+			       uint64_t off, uint64_t n);
+void kgenome_diag_org_call(struct kgenome_diag_orgs *w, struct kgenome_diag_callees *c,
+			   const struct kgenome_cell_insn *in, int target_unknown);
 /* Another path arrives with `from`: `to` becomes what both paths hold. A register with different producers
  * keeps all (the walk's own first) and is MAY; one that only one path holds is MAY. `from` NULL is the path
  * that holds nothing at all. 1 when a third distinct producer had to be dropped (the caller reports it). */

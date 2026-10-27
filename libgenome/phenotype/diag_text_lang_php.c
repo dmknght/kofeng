@@ -41,6 +41,9 @@ static const char *const casts[] = { "int", "integer", "float", "double", "bool"
 static const char *const cmd_str[] = { "`", NULL };
 static const char *const includes[] = { "include", "include_once", "require", "require_once", NULL };
 
+/* KNOWN DEFECT S2-INTERP (2026-10-24, M) [sev M]: the php row has interp = 1 and no interp_all, so a plain double-quoted string that interpolates ("$f") stays ONE token and carries no flow.
+ * Trigger: `$f = $_GET["a"]; unlink("$f");`. Effect: no request -> file-delete link, while `unlink($f)` has one (3 rows of diag_text_expect.tsv depend on it, e.g. unlink("$delfile")).
+ * Reproducer: /mnt/games/normtest/fix_script2/red_report.md section 9 (the two-line php above). Fix: interp_all = 1 for php (new link power: measure nodes/links and TRUNCATED on the corpora first). */
 const struct kgenome_dtx_lang kgenome_dtx_lang_php = {
 	.id = KGENOME_TEXTUAL_LANG_PHP, .target = KGENOME_NUCLEO_T_PHP, .fold = 1,
 	.sigil = '$', .string_call = 1, .ident_bs = 1, .reads_view = 1,

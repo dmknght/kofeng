@@ -285,6 +285,10 @@ int kof_tar_parse(kof_buf file, struct kof_tar_info *t, struct kof_obj_ctx *ctx)
 			t->end_off = at;
 			break;
 		}
+		/* KNOWN DEFECT WP2-D1c (2026-10-24, R) [sev M]: The tar walk reads a header without "ustar" as the
+		 * end of the archive (WP2 O5). Trigger: ustar members, an old-format header, more members.
+		 * Effect: later members dropped, broken 0. Reproducer: none (read). Fix: accept a header
+		 * whose checksum is right, or mark DAMAGED when non-zero bytes follow the stop. */
 		if (!kof_in_range(file, at + KOF_TAR_MAGIC_AT, 5) ||
 		    memcmp(file.p + at + KOF_TAR_MAGIC_AT, "ustar", 5) != 0)
 			break;      /* not a header: the archive ends here */

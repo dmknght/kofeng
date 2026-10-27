@@ -28,7 +28,9 @@ enum {
 	 * carrying this, for the reason wproc.h states about protected
 	 * processes: a caller must be able to tell "clean" from
 	 * "never looked at". hidepid=2 and another user's processes both land
-	 * here.
+	 * here. Also set, whatever want_refused says, when /proc/<pid>/stat could
+	 * not be opened or read for a reason that is the machine's (EMFILE, ENFILE,
+	 * ENOMEM, EIO): the process was not looked at and must not read as gone.
 	 */
 	KOFA_PF_REFUSED = 1u << 0,
 

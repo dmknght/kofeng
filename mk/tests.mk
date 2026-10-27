@@ -75,6 +75,8 @@ fixtures: | $(TEST)
 # is a test of its own to write, not a define away.
 UNIT_SKIP_WINDOWS := antarc_fan antarc_walk antarc_pev msf_xor ko_anomalies \
                      chan_ring
+include mk/tests_orbit.mk
+include mk/tests_kx.mk
 #
 # thread_region IS THE FIRST ENTRY IN THE REVERSE LIST, and the paragraph above
 # that said the reverse list was empty was wrong rather than out of date. It
@@ -139,7 +141,7 @@ UNIT_LIBS_parse_once := -Wl,--wrap=kgenome_elf_image_parse -Wl,--wrap=kgenome_pe
 # diag_graph_bin counts work and NULL arguments at link time, with no counter or hook in the production code:
 # how many times the wrapper fixpoint asked whether a function could come out differently (C1), and every
 # mem*/qsort call that was handed a NULL pointer, whatever the length (U1: memcmp(NULL, NULL, 0)).
-UNIT_LIBS_diag_graph_bin := -Wl,--wrap=kgenome_diag_wrapper_tseen_retry -Wl,--wrap=memcmp -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memset -Wl,--wrap=qsort
+UNIT_LIBS_diag_graph_bin := -Wl,--wrap=kgenome_diag_wrapper_tseen_retry -Wl,--wrap=memcmp -Wl,--wrap=memcpy -Wl,--wrap=memmove -Wl,--wrap=memset -Wl,--wrap=qsort -Wl,--wrap=kgenome_cell_next -Wl,--wrap=kgenome_diag_funcs
 # The normalise-defect tests count work and inject faults at link time, with no counter or hook in the
 # production code: norm_defect_image counts the bytes any compare is asked for (N2), norm_defect_plan the bytes
 # memmove is asked to move (N4), norm_defect_engine makes the decode of one escape run fail (N8).
@@ -149,6 +151,9 @@ UNIT_LIBS_norm_defect_engine := -Wl,--wrap=kof_exe_decode_run
 # diag_text_oom refuses every allocation of a scan in turn (G9: an allocation that fails must not leave a shorter graph with a clean status); -rdynamic so that the
 # trace it prints for an allocation whose refusal was silent has the names of the functions that made it.
 UNIT_LIBS_diag_text_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -rdynamic
+# diag_bin_oom does the same for the BINARY route (the sweep, symbol, emulate, API-hash and lineage routes, the function table, the code map): every allocation refused in turn,
+# free wrapped as well so that an allocation left behind after a refused call is counted without a sanitiser.
+UNIT_LIBS_diag_bin_oom := -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free -rdynamic
 # diag_text_ops refuses every allocation of a scan over the list, cast and operator shapes in turn (the evaluator's lists: a refusal must be said, never a shorter set of constants with a clean
 # status): malloc, calloc and realloc wrapped, armed only around the scan. text_scan_once counts, at the one call every stage makes, how many times the TEXT route scans a script through the
 # whole pipeline (scans per distinct text: 1): kgenome_diag_scan_text wrapped, no counter in the engine.
@@ -384,7 +389,7 @@ UT_INC_antarc_walk := $(ANTARC_INC)
 # The string codings are an API rather than a dialog - see kofinspect.h - and are
 # linked against kofinspect.c and codec_ui.c alone: nothing in them touches the
 # terminal, and a test that had to drag the panel in would be saying the opposite.
-UT_SRC_codec_forms := kofexamine/kofinspect.c kofexamine/codec_ui.c $(KOFEVT_SRC)
+UT_SRC_codec_forms := $(KOFINSPECT_SRC) kofexamine/codec_ui.c $(KOFEVT_SRC)
 UT_INC_codec_forms := -I$(SDK)/include
 UT_LIB_codec_forms := yes
 UT_INC_code_notes   := -Ilibkofeng -Ilibkofeng/kofcore -Ilibgenome
@@ -462,6 +467,7 @@ UT_INC_grille_host := -Ilibkoforbit/grille -Ilibkoforbit/evt
 UNIT_EXTRA := antarc_fan antarc_pev antarc_walk codec_forms kofscfind cond_expr \
               out_clip fidset fridge proc_rule \
               chan_ring report_model grille_host api_engine_modhelpers code_notes
+UNIT_EXTRA += $(ORBIT_TESTS) $(KX_TESTS)
 
 define UNIT_EXTRA_RULES
 $$(TEST)/unit_$(1)$$(EXE): tests/unit/$(1).c $$(UT_SRC_$(1)) $$(if $$(UT_LIB_$(1)),$$(LIB)) \

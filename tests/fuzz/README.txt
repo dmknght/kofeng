@@ -46,11 +46,17 @@ exempt file and, when it needs a flag or a library, its own stage.mk)
   the k-th allocation failing (the OOM paths); for FZ_BYTES the sink is not called after it refused and the output buffer's
   margins are intact.
 
+STAGE orbit: the collectors' operating system is FAKED by link-time wraps (tests/lib/orbit_sys.h: /proc redirected to a fixture,
+  a fake process connector and fanotify descriptor, failing open / fopen / rename / mkdir, /dev/full for ENOSPC, a fake home, fork)
+  because the library has no seam; the same wrap list (mk/tests_orbit.mk) links the tests/unit/orbit_*.c tests.
+
 EVERY PUBLIC FUNCTION HAS A ROW OR AN EXEMPT ENTRY (make check-rules, tools/check_layers.py, "fuzz coverage")
   The surface is every function of <kgenome.h> and <uncoat.h> and the part headers they name, plus the core helpers they
-  expose (465 when the pass was added). A function needs `.covers` on an adapter row (and a call in that file) or a line
+  expose (465 when the pass was added), and every function of the public headers of libkoforbit/ (the collectors, the event
+  record, the verdict cache, the report, the channel, the host-pure part of grille: stage "orbit", added by WP12; 214). A function needs `.covers` on an adapter row (and a call in that file) or a line
   "function<TAB>reason" in tests/fuzz/exempt/*.txt. permanent.txt: what bytes cannot drive (a wall clock, a path), each with its
-  reason. wp<N>.txt: pending work package N (its lines are the work list). A function that is covered AND still listed fails
+  reason. wp12.txt: the libkoforbit functions that live in Windows-only files (they include windows.h and cannot be built here:
+  the reason names the file) and the two grants that change who owns a shared-memory object. wp<N>.txt: pending work package N (its lines are the work list). A function that is covered AND still listed fails
   too, and so does an entry naming a function that is gone: the tables cannot go stale. A new public function with neither
   fails the build.
 

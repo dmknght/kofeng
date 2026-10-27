@@ -110,6 +110,11 @@ static uint32_t chm_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		 * offset: a region must partition, an entry must be honest, and
 		 * the host clips an entry against the object anyway.
 		 */
+		/* KNOWN DEFECT WP2-D9b (2026-10-24, M) [sev L]: chm_resolve_scan starts CONTENT after the directory
+		 * only, so a byte can be in two regions. Trigger: a 27 byte CHM, no directory, content offset
+		 * 0. Effect: CONTENT overlaps HEADERS. Reproducer: tests/unit/ctr_regions.c (green until
+		 * fixed), tests_wp2/findings/D9_chm_content_region_at_0.bin. Fix: start at max(declared
+		 * offset, end of HEADERS and DIRECTORY). */
 		uint64_t from = c->content_off;
 		uint64_t dir_end = c->dir_off + c->dir_len;
 
@@ -494,6 +499,10 @@ static void chm_place_coded(kof_buf f, struct chw *w)
 			c->n_unreachable++;
 			continue;
 		}
+		/* KNOWN DEFECT WP2-D2b (2026-10-24, M) [sev M]: The chm entry walk drops a file record whose size
+		 * runs past its data (n_unreachable++) without a report. Trigger: middle member claims
+		 * 0xfffffff0. Effect: 2 of 3 opened, broken 0. Reproducer: tests/unit/ctr_liars.c
+		 * chm/claimBoth (row of WP2-D1). Fix: map KOF_CHM_ANOM_ENTRY_PAST_EOF to broken. */
 		if (c->lzx_uncomp_len &&
 		    (uoff > c->lzx_uncomp_len ||
 		     e->len > c->lzx_uncomp_len - uoff)) {
@@ -645,6 +654,9 @@ int kof_chm_parse(kof_buf file, struct kof_chm_info *c, struct kof_obj_ctx *ctx)
 	if (!c->content_off)
 		c->content_off = s1_off + s1_len;
 
+	/* KNOWN DEFECT WP2-D3c (2026-10-24, M) [sev M]: kof_chm_parse opens a chm whose directory offset is past EOF
+	 * as nothing (anomaly bit only). Trigger: ITSF content offset 0x7ffffff0. Effect: broken 0.
+	 * Reproducer: tests/unit/ctr_liars.c chm/offset (row of WP2-D1). Fix: as WP2-D3, set DAMAGED. */
 	if (s1_off + CHM_ITSP_MIN > file.n || !s1_len) {
 		c->anomalies |= KOF_CHM_ANOM_TRUNCATED;
 		goto done;

@@ -875,6 +875,9 @@ def tests_getenv_violations():
 FUZZ_TOPS = ('libgenome/kgenome.h', 'libuncoat/uncoat.h')
 FUZZ_CORE = {'kofcore.h', 'range.h', 'rangelist.h', 'heapsort.h', 'kofcmp.h', 'kofbytes.h', 'kofstrlist.h', 'kofentropy.h',
              'kofhash.h', 'tabgrow.h', 'runlist.h', 'kofbudget.h'}
+# The examiner's terminal-free API (phase B of the examiner suite): the three headers whose functions a person's typing or a corrupt object
+# reaches (goto_parse.h is a header-only static function that this reader does not list; its adapter row has no .covers). The viewer's own units (kv_*.c) and the examiner command (kofexaminer*.c) are not here: they are driven by tests/tui.
+FUZZ_TOOL_HEADERS = ('kofexamine/kofinspect.h', 'kofexamine/codec_ui.h', 'kofexamine/kofscfind.h')
 FUZZ_NOT_FN = {'if', 'while', 'for', 'sizeof', 'defined', 'switch', 'return', '__attribute__'}
 FUZZ_COVERS = re.compile(r'\.covers\s*=\s*((?:"[^"\n]*"\s*)+)')
 
@@ -894,7 +897,15 @@ def fuzz_headers():
         f = 'libkofeng/kofcore/' + c
         if f not in out and os.path.exists(f):
             out.append(f)
-    return sorted(out)
+    for f in FUZZ_TOOL_HEADERS:
+        if os.path.exists(f):
+            out.append(f)
+    # libkoforbit (system-resource handling, orbit): every header that is not private to its directory (`*_int.h`).
+    for d, ds, fs in os.walk('libkoforbit'):
+        for f in sorted(fs):
+            if f.endswith('.h') and not f.endswith(('_int.h', '_private.h')):
+                out.append(os.path.join(d, f))
+    return sorted(set(out))
 
 def _fuzz_statements(s):
     res, depth, cur, kind = [], 0, [], None
@@ -941,11 +952,19 @@ def fuzz_functions(path):
         names.append(m.group(2))
     return names
 
+# The container parsers of the engine (libkofeng/analyzers/parsers/containers/*_parse.h) are the byte-drivable entry points of the
+# container stage, and are in the surface too: sniff, parse, and the view's mem / row / release. They are driven by tests/fuzz/container.
+FUZZ_CONTAINER_FN = re.compile(r'kof_\w+_(?:parse|sniff|release|row|mem)$')
+
 def fuzz_surface():
     out = {}
     for h in fuzz_headers():
         for n in fuzz_functions(h):
             out.setdefault(n, h)
+    for h in sorted(glob.glob('libkofeng/analyzers/parsers/containers/*_parse.h')):
+        for n in fuzz_functions(h):
+            if FUZZ_CONTAINER_FN.match(n):
+                out.setdefault(n, h)
     return out
 
 def fuzz_rows():
@@ -1039,7 +1058,23 @@ def layers_main():
                  'a test reads the environment (see the note at tests_getenv_violations):', EXEMPT['getenv in tests'])
     rc |= ratchet('fuzz coverage', fuzz_cover_violations(),
                  'a public function has no fuzz adapter row and no EXEMPT entry, or a table is stale (tests/fuzz/README.txt):')
+    rc |= known_defect_main()
     return rc
+
+def known_defect_main():
+    """KNOWN DEFECT comments (tools/known_defects.py): count is informational, a malformed one fails."""
+    sys.path.insert(0, os.path.join(ROOT, 'tools'))
+    import known_defects
+    recs, errs = known_defects.scan(ROOT)
+    n = len([r for r in recs if not r['ref']])
+    sv = {k: len([r for r in recs if not r['ref'] and r.get('sev') == k]) for k in 'HML'}
+    print(f'check-layers: KNOWN DEFECT comments: {n} recorded (high {sv["H"]}, medium {sv["M"]}, low {sv["L"]}), {len([r for r in recs if r["ref"]])} test rows pin one (informational)')
+    if errs:
+        print('check-layers: a KNOWN DEFECT comment is malformed, orphaned, duplicated, under bases/, or a test row names an id with no comment (tools/known_defects.py):')
+        for e in errs:
+            print('  ' + e)
+        return 1
+    return 0
 
 if __name__ == '__main__':
     sys.exit(main())

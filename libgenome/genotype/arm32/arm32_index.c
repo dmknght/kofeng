@@ -23,6 +23,11 @@
 #define MAXLIST 64u
 #define MAXROWS 1024u
 
+/* KNOWN DEFECT R1 (2026-10-24, M) [sev M]: the ARM32/Thumb decoder index (kgenome_arm32_lists, _idx, kgenome_*_state, g_pool_*)
+ * is writable global state built on first use (.bss 0x12030), against CLAUDE.md; claim() spins unbounded on the builder.
+ * Trigger: first decode on two threads, or a builder that never publishes state 2. Effect: waiters burn a core.
+ * Reproducer: nm --size-sort on libkgenome.a (audit2/graph_bin). Fix: generate the tables at build time as const
+ * data (as the x86 tables are), or build per context. Same defect as D17 and X7. */
 struct kgenome_arm32_row kgenome_arm32_lists[ARM_POOL];
 uint16_t kgenome_arm32_idx[2 * KGENOME_ARM32_KEYS];
 struct kgenome_arm32_row kgenome_thumb_lists[THUMB_POOL];

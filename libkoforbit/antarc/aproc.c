@@ -78,22 +78,40 @@ size_t kofa_region_describe(const struct kofa_region *r, char *buf, size_t cap)
 
 
 
+int kofa_proc_errno_status(int e)
+{
+	if (e == ENOENT || e == ESRCH)
+		return KOFA_ERR_GONE;
+	if (e == EACCES || e == EPERM)
+		return KOFA_ERR_DENIED;
+	return KOFA_ERR_OS;
+}
+
 int kofa_read_stat(uint32_t pid, struct a_stat *out)
 {
 	char path[64], buf[2048], *close_paren, *p;
-	int fd;
+	int fd, e = 0;
 	ssize_t got;
 	int field;
 
+	out->io_err = 0;
 	snprintf(path, sizeof path, "/proc/%u/stat", (unsigned)pid);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
-		return (errno == EACCES) ? KOFA_ERR_DENIED : KOFA_ERR_GONE;
+	if (fd < 0) {
+		out->io_err = 1;
+		return kofa_proc_errno_status(errno);
+	}
 
 	got = read(fd, buf, sizeof buf - 1);
+	if (got < 0)
+		e = errno;          /* close() may overwrite it */
 	close(fd);
-	if (got <= 0)
-		return KOFA_ERR_GONE;
+	if (got < 0) {
+		out->io_err = 1;
+		return kofa_proc_errno_status(e);
+	}
+	if (got == 0)
+		return KOFA_ERR_GONE;   /* an empty stat: the entry is going away */
 	buf[got] = '\0';
 
 	close_paren = strrchr(buf, ')');
@@ -326,6 +344,12 @@ static int a_sock_known(const uint64_t *ino, uint32_t n, uint64_t want)
 
 /* "0100007F:1F90" - the address is hex, in the byte order the kernel writes
  * it, which for v4 is one little-endian word. */
+/* KNOWN DEFECT WP12-2 (2026-10-24, M) [sev M]: a_net_addr reads hex[0..31] of the
+ * 48-byte lh/rh buffer a_net_table fills. Trigger: a tcp6 row whose address has
+ * fewer than 32 hex digits. Effect: uninitialised stack bytes are read (lh[48]
+ * is not cleared). Reproducer: orbit_plist.c case_net (no crash only); fuzz
+ * orbit/proc_text digests differ. Fix: memset lh/rh or check strlen(hex) >= 2 *
+ * n before the loop. */
 static void a_net_addr(const char *hex, char *out, size_t cap, int v6)
 {
 	unsigned b[16];
@@ -613,8 +637,17 @@ int kofa_plist_next(struct kofa_plist *l, struct kofa_proc *out)
 		rc = kofa_read_stat(out->pid, &st);
 		if (rc == KOFA_ERR_GONE)
 			continue;          /* exited while we walked. Normal. */
-		if (rc == KOFA_ERR_DENIED) {
-			if (!l->o.want_refused)
+		/*
+		 * A stat that could not be opened or read for a reason that is not
+		 * the process's - no descriptor left, no memory, an I/O error - is
+		 * "never looked at", the same state as a refusal, and is listed as
+		 * one whatever want_refused says: that option filters the
+		 * processes the system refused us, not the ones the walk failed to
+		 * read. Dropping them was a walk under RLIMIT_NOFILE listing 0 of 29
+		 * processes. A malformed stat text (io_err clear) is still skipped.
+		 */
+		if (rc == KOFA_ERR_DENIED || (rc == KOFA_ERR_OS && st.io_err)) {
+			if (rc == KOFA_ERR_DENIED && !l->o.want_refused)
 				continue;
 			out->flags |= KOFA_PF_REFUSED;
 			l->comm[0] = '\0';

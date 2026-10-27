@@ -397,6 +397,7 @@ void log_window(struct view *v)
 		 * kept so that returning to an object does not read it again.
 		 */
 		free(v->obj[i].carve);
+		dash_drop(&v->obj[i]);
 		memset(&v->obj[i], 0, sizeof v->obj[i]);
 	}
 	memset(v->pe_of, 0, sizeof v->pe_of);

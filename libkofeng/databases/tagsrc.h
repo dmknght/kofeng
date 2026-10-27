@@ -1,3 +1,8 @@
+/*
+ * SWITCHED OFF (owner, 2026-10-27): the Syndrome table and its tag-source backend (kofexamine/kv_syn.c, kv_syntable.c,
+ * libkofeng/databases/tagsrc*, ksigbuilder/ksb_tags.c) stay in the tree and are to be removed later, when asked. The menu item
+ * is Manage > Syndromes, listed and greyed. Do not extend this code.
+ */
 #ifndef KOFENG_DATABASES_TAGSRC_H
 #define KOFENG_DATABASES_TAGSRC_H
 

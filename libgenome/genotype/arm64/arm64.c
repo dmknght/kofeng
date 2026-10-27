@@ -107,6 +107,10 @@ enum kgenome_status kgenome_arm64_decode_tree(struct kgenome_arm64_insn *out, ui
 #define L1_N (1u << (32 - L1_SHIFT))
 #define L1_MORE 0xffffu
 
+/* KNOWN DEFECT R1-arm64 (2026-10-24, M) [sev L]: the AArch64 level-1 index g_l1 and g_l1_state are writable global state built
+ * on first decode (.bss 0x1020), against CLAUDE.md; l1_init() spin-waits unbounded for the builder. Trigger: first
+ * decode on two threads. Effect: waiters burn a core until state 2. Reproducer: nm on libkgenome.a (audit2/graph_bin).
+ * Fix: emit g_l1 as const data from the table generator. Same defect as D17 and X7. */
 static uint16_t g_l1[L1_N];
 static atomic_int g_l1_state;           /* 0 not built, 1 being built, 2 ready */
 

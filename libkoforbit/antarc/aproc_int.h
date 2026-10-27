@@ -36,9 +36,18 @@ struct a_stat {
 	uint32_t flags;
 	uint64_t start_time;
 	char     comm[64];
+	/* Set by kofa_read_stat when the open or the read FAILED (as opposed to
+	 * the text being malformed); only meaningful with KOFA_ERR_OS. */
+	uint8_t  io_err;
 };
 
 int kofa_read_stat(uint32_t pid, struct a_stat *out);
+
+/* What a failed open or read of a /proc/<pid>/ file means, from its errno: the
+ * process left (ENOENT, ESRCH: KOFA_ERR_GONE, routine), it was refused (EACCES,
+ * EPERM: KOFA_ERR_DENIED), or anything else - EMFILE, ENFILE, ENOMEM, EIO, EINTR -
+ * is the machine failing the walk and is KOFA_ERR_OS, never "gone". */
+int kofa_proc_errno_status(int e);
 void kofa_read_exe(uint32_t pid, char *buf, size_t cap, uint32_t *flags);
 
 #endif /* KOFANTARC_APROC_INT_H */

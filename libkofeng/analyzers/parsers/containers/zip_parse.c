@@ -425,18 +425,36 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 	 * short directory, while every extractor on the machine listed nine.
 	 */
 	{
-		int64_t delta = (int64_t)z->eocd_off -
-				(int64_t)(z->cd_off + z->cd_size);
-		uint64_t moved = (uint64_t)((int64_t)z->cd_off + delta);
+		/*
+		 * The end record must sit exactly where the directory ends, so the
+		 * directory starts at eocd_off - cd_size. Both numbers come from the file
+		 * (a zip64 field is 64 bits wide), so this is unsigned and checked: a size
+		 * that cannot fit before the end record is a directory that does not fit in
+		 * the file, which is REPORTED (CD_PAST_EOF) and not shifted to; a declared
+		 * offset above INT64_MAX has no signed distance and is not shifted either.
+		 * The signed sums this replaced overflowed (undefined) for a field of 2^62
+		 * or more, and wrapped to a plausible offset for a size just under 2^64.
+		 */
+		uint64_t moved = 0;
 
-		if (delta != 0 && (int64_t)z->cd_off + delta >= 0 &&
-		    kof_in_range(file, moved, 4) && kof_rd32_or0(file, moved) == SIG_CENTRAL) {
-			z->base_delta = delta;
-			z->cd_off = moved;
-			z->anomalies |= KOF_ZIP_ANOM_SFX;
+		if (z->cd_size > z->eocd_off) {
+			z->anomalies |= KOF_ZIP_ANOM_CD_PAST_EOF;
+		} else {
+			moved = z->eocd_off - z->cd_size;
+			if (moved != z->cd_off && z->cd_off <= (uint64_t)INT64_MAX &&
+			    kof_in_range(file, moved, 4) &&
+			    kof_rd32_or0(file, moved) == SIG_CENTRAL) {
+				z->base_delta = (int64_t)moved - (int64_t)z->cd_off;
+				z->cd_off = moved;
+				z->anomalies |= KOF_ZIP_ANOM_SFX;
+			}
 		}
 	}
 
+	/* KNOWN DEFECT WP2-D3 (2026-10-24, M) [sev M]: kof_zip_parse opens a zip whose directory offset is past EOF
+	 * as NOTHING (anomaly bit only). Trigger: EOCD offset 0x7ffffff0, or entries that cycle. Effect: rc
+	 * 1, broken 0. Reproducer: tests/unit/ctr_liars.c zip/offset, zip/cycle (row of WP2-D1). Fix: a
+	 * sniffed archive with its directory past EOF sets KOF_BROKEN_DAMAGED. */
 	if (z->cd_off >= file.n) {
 		z->anomalies |= KOF_ZIP_ANOM_CD_PAST_EOF;
 		goto done;
@@ -557,6 +575,12 @@ int kof_zip_parse(kof_buf file, struct kof_zip_info *z, struct kof_obj_ctx *ctx)
 		if (!data)
 			continue;
 		e->data_off = data;
+		/* KNOWN DEFECT WP2-D4 (2026-10-24, M) [sev M]: A STORED member claiming more bytes than the file
+		 * holds becomes a child to EOF: the anomaly bit is set but not reported, and the extent is
+		 * not ended at the next header. Trigger: member b (200 bytes) claims more. Effect: a 710 byte
+		 * child holding the next member and the directory. Reproducer: tests/unit/ctr_liars.c
+		 * zip/claimBoth (green until fixed). Fix: end the extent at the next local header or
+		 * directory offset, mark the entry. */
 		if (!kof_in_range(file, data, e->csize))
 			z->anomalies |= KOF_ZIP_ANOM_DATA_PAST_EOF;
 		add(&s, data, e->csize,

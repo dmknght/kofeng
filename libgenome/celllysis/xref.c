@@ -86,6 +86,7 @@
 #define GPR_RBP KGENOME_CELL_REG_BP
 
 #define NSLOT 8u
+#define XREF_KINDS 5u      /* read, write, call, jump, arg: the order of kgenome_xref_refs */
 
 struct slot {
 	uint32_t base;          /* NGPR when the entry is free */
@@ -106,6 +107,8 @@ struct kgenome_xref {
 	int      run_on;                /* x86, and a run has begun */
 	uint64_t va[USE_MAX];
 	uint8_t  flag[USE_MAX];
+	/* How many references named each address, per kind (kgenome_xref_refs); saturating, never wraps. */
+	uint16_t cnt[USE_MAX][XREF_KINDS];
 	uint16_t slot[USE_HASH];        /* index into va[] plus one; 0 is empty */
 	/*
 	 * The same entries in address order, built once when the sweep is done.
@@ -149,6 +152,11 @@ struct kgenome_xref {
 	int      full;
 };
 
+/* KNOWN DEFECT REV-D7f (2026-10-25, Inference) [sev L]: h_of / h_find (xref.c) are a hand-rolled open-addressing
+ * table (USE_HASH 1024 slots, its own multiplier, unseeded) instead of the shared helper (diag_oatab.h /
+ * kof_hash64_slot). Trigger: any sweep; the keys are addresses a file chooses. Effect: none measured; a second
+ * table to keep correct (full is reported through `full`). Reproducer: none. Fix: use the shared table helper or
+ * kof_hash64_slot. */
 static uint32_t h_of(uint64_t va)
 {
 	va *= 0x9E3779B97F4A7C15ull;
@@ -166,6 +174,18 @@ static uint32_t h_find(const struct kgenome_xref *u, uint64_t va)
 	return h;
 }
 
+/* One more reference of each kind `f` names to entry `e`. */
+static void count_kinds(struct kgenome_xref *u, uint32_t e, uint32_t f)
+{
+	static const uint32_t bit[XREF_KINDS] = { KGENOME_XREF_READ, KGENOME_XREF_WRITE, KGENOME_XREF_CALL, KGENOME_XREF_JUMP,
+						  KGENOME_XREF_ARG };
+	uint32_t k;
+
+	for (k = 0; k < XREF_KINDS; k++)
+		if ((f & bit[k]) && u->cnt[e][k] != 0xffffu)
+			u->cnt[e][k]++;
+}
+
 static void note(struct kgenome_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
 {
 	uint32_t h;
@@ -174,6 +194,7 @@ static void note(struct kgenome_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
 		return;
 	h = h_find(u, va);
 	if (u->slot[h]) {
+		count_kinds(u, u->slot[h] - 1u, f);
 		u->flag[u->slot[h] - 1u] |= (uint8_t)f;
 		u->rgn[u->slot[h] - 1u] |=
 			(uint64_t)1 << (rgn < USE_RGN ? rgn : USE_RGN - 1u);
@@ -186,6 +207,7 @@ static void note(struct kgenome_xref *u, uint64_t va, uint32_t f, uint32_t rgn)
 	u->va[u->n] = va;
 	u->flag[u->n] = (uint8_t)f;
 	u->rgn[u->n] = 0;
+	count_kinds(u, u->n, f);
 	u->n++;
 	u->rgn[u->n - 1u] |= (uint64_t)1 << (rgn < USE_RGN ? rgn : USE_RGN - 1u);
 	u->slot[h] = (uint16_t)u->n;
@@ -568,16 +590,13 @@ static void order_build(struct kgenome_xref *u)
 	u->sorted = 1;
 }
 
-uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n)
+/* The first entry, in address order, whose address is at or above `va`. */
+static uint32_t first_at(struct kgenome_xref *u, uint64_t va)
 {
-	uint32_t lo = 0, hi, f = 0;
+	uint32_t lo = 0, hi;
 
-	if (!u || !va)
-		return 0;
 	if (!u->sorted)
 		order_build(u);
-	if (n < 1u)
-		n = 1u;
 	hi = u->n;
 	while (lo < hi) {                       /* first entry >= va */
 		uint32_t mid = lo + (hi - lo) / 2u;
@@ -587,6 +606,18 @@ uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n)
 		else
 			hi = mid;
 	}
+	return lo;
+}
+
+uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n)
+{
+	uint32_t lo, f = 0;
+
+	if (!u || !va)
+		return 0;
+	if (n < 1u)
+		n = 1u;
+	lo = first_at(u, va);
 	for (; lo < u->n && u->va[u->order[lo]] - va < n; lo++) {
 		uint32_t e = u->order[lo], r;
 
@@ -611,6 +642,27 @@ uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n)
 				f |= u->rgn_flag[r];
 	}
 	return f;
+}
+
+
+void kgenome_xref_refs(struct kgenome_xref *u, uint64_t va, uint64_t n, struct kgenome_xref_refs *out)
+{
+	uint32_t lo;
+
+	memset(out, 0, sizeof *out);
+	if (!u || !va)
+		return;
+	if (n < 1u)
+		n = 1u;
+	for (lo = first_at(u, va); lo < u->n && u->va[u->order[lo]] - va < n; lo++) {
+		const uint16_t *c = u->cnt[u->order[lo]];
+
+		out->read += c[0];
+		out->write += c[1];
+		out->call += c[2];
+		out->jump += c[3];
+		out->arg += c[4];
+	}
 }
 
 int kgenome_xref_full(const struct kgenome_xref *u)

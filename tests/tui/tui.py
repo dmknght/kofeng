@@ -350,9 +350,17 @@ class Viewer:
         self.mouse(b, x, y, True, 0.06)
         self.mouse(b, x, y, False, settle)
 
+    def clicks(self, x, y, n):
+        """n presses in a row on one place, fast enough to count as a double or triple click."""
+        for i in range(n):
+            self.mouse(0, x, y, True, 0.02)
+            self.mouse(0, x, y, False, 0.25 if i == n - 1 else 0.02)
+
     def dclick(self, x, y):
-        self.mouse(0, x, y, True, 0.02); self.mouse(0, x, y, False, 0.02)
-        self.mouse(0, x, y, True, 0.02); self.mouse(0, x, y, False, 0.25)
+        self.clicks(x, y, 2)
+
+    def tclick(self, x, y):
+        self.clicks(x, y, 3)
 
     def rclick(self, x, y):
         self.click(x, y, right=True)
@@ -513,7 +521,7 @@ class Viewer:
                          for y in range(y0, y1 + 1))
 
     # -- menu helpers ----------------------------------------------------------
-    MENUS = ('File', 'Edit', 'Analysis', 'Switch-File', 'Help')
+    MENUS = ('File', 'Edit', 'Analysis', 'Manage', 'Help')
 
     def bar_pos(self, name):
         for nm in (name, name.replace('-', ' ')):
@@ -644,6 +652,20 @@ def run_cases(only=None, area=None, verbose=True, timeout=120):
 
 
 HEXOFF = re.compile(r'[|\u2502\u2503\u254f\u257f\u257d\u2575\u2577] +([0-9a-f]{8}) ')
+
+
+def open_dash_tab(v, tab):
+    """Analysis > Dashboard, then a click on the label of `tab` (Overview, Segments, Sections, Imports, Exports) in the strip
+    that is the dashboard's top rule. The strip is switched by the mouse and by nothing else."""
+    d = v.dialog()
+    if not (d and 'Overview' in d[4]):          # not open yet; an open page is only switched
+        check(v.menu_item('Analysis', 'Dashboard'), 'no Dashboard item')
+    v.pump_quiet()
+    if True:
+        p = v.find(tab, rows=(1, 4))
+        check(p, 'no %s tab in the strip' % tab)
+        v.click(*p)
+        v.pump_quiet()
 
 
 def hex_off(v, y=2):

@@ -7,6 +7,12 @@
  * produced >= what the sink took, a refusal is STOPPED, the sink is not called again after it said no, and when the
  * stream decodes to the end and nothing refused, zlib decodes the same bytes to the same output and consumes as many.
  *
+ * WP5 EXTENSION. The seeds below add what a blind flip of a zlib stream seldom reaches: the TABLES of a dynamic block written by hand
+ * (hostile_enc.h hv_dyn_*): the largest alphabets (HLIT 286, HDIST 30), code lengths of 15, an incomplete literal code, an
+ * over-subscribed one, an incomplete distance code, a single distance code, a distance that points before the start, repeat counts
+ * of 258 by the thousand, stored blocks whose LEN and NLEN disagree, a second block after the first. And the check runs the other way
+ * too: a stream zlib decodes to its end that this decoder does not (and no sink refused) is held against the decoder.
+ *
  * ONE KNOWN DIFFERENCE, not held against the decoder: zlib refuses every incomplete distance code except a single code
  * ("invalid distances set"), kuncoat_inflate tolerates any incomplete one and refuses over-subscribed ones (inflate.c, the note
  * above its second construct()). The smoke run found it (seed 7, iteration 12407; kept as
@@ -17,6 +23,8 @@
 #include <zlib.h>
 
 #include "../../lib/fuzz_drv.h"
+#include "../../lib/uncoat/hostile_common.h"
+#include "../../lib/uncoat/hostile_enc.h"
 
 #define RAW_N 3000u
 
@@ -52,6 +60,89 @@ static const struct fz_field stored_fields[] = {
 };
 static const struct fz_map stored_map = { stored_fields, 2, 0, 0, 0 };
 
+/* A dynamic block with hand-written tables. `lit`/`dist` are the code-length arrays; the body is (len, dist) pairs after one literal. */
+static void dyn_seed(struct fz_corpus *c, const char *name, const uint8_t *ll, unsigned nl, const uint8_t *dl, unsigned nd, const unsigned *lit, unsigned n_lit,
+		     unsigned len, unsigned dist, unsigned reps, int rle)
+{
+	static uint8_t buf[8192];
+	struct hv_bw w;
+	struct hv_dyn t;
+	unsigned i;
+
+	hv_bw_init(&w, buf, sizeof buf);
+	hv_dyn_begin(&w, &t, 1, ll, nl, dl, nd, rle);
+	for (i = 0; i < n_lit; i++)
+		if (t.ll[lit[i]])
+			hv_dyn_sym(&w, &t, lit[i]);
+	for (i = 0; i < reps; i++)
+		if (t.ll[257] && t.dl[0])
+			hv_dyn_match(&w, &t, len, dist);
+	if (t.ll[256])
+		hv_dyn_sym(&w, &t, 256);
+	fz_corpus_add(c, name, buf, hv_defl_end(&w));
+}
+
+static void structure_seeds(struct fz_corpus *c)
+{
+	static const unsigned lits[] = { 'a', 'b', 'a', 'b', 'c' };
+	uint8_t ll[288], dl[32];
+	unsigned i;
+
+	hv_dyn_std_tables(ll, dl);
+	dyn_seed(c, "dyn-std", ll, 286, dl, 30, lits, 5, 10, 3, 4, 1);
+	dyn_seed(c, "dyn-std-norle", ll, 286, dl, 30, lits, 5, 258, 1, 1000, 0);   /* 258-byte runs, a thousand times: a ratio of 1000:1 */
+	dyn_seed(c, "dyn-dist-before-start", ll, 286, dl, 30, lits, 1, 10, 5000, 1, 1);
+	/* the smallest alphabets: HLIT 257 (no length symbols), HDIST 1 */
+	memset(ll, 0, sizeof ll);
+	ll['a'] = 2; ll['b'] = 2; ll['c'] = 2; ll[256] = 2;                          /* complete: 4 * 1/4 */
+	memset(dl, 0, sizeof dl);
+	dl[0] = 1;                                                                   /* a single distance code: one code of one bit */
+	dyn_seed(c, "dyn-min-alphabet", ll, 257, dl, 1, lits, 5, 10, 3, 0, 1);
+	/* incomplete literal code: three of length 2 and the end symbol of length 3 leaves a hole */
+	ll['a'] = 2; ll['b'] = 2; ll['c'] = 2; ll[256] = 3;
+	dyn_seed(c, "dyn-incomplete-lit", ll, 257, dl, 1, lits, 5, 10, 3, 0, 1);
+	/* over-subscribed literal code: five symbols of length 2 */
+	ll['a'] = 2; ll['b'] = 2; ll['c'] = 2; ll[256] = 2; ll['d'] = 2;
+	dyn_seed(c, "dyn-oversubscribed-lit", ll, 257, dl, 1, lits, 5, 10, 3, 0, 1);
+	ll['d'] = 0;
+	/* incomplete distance code (zlib: invalid distances set; this decoder tolerates it: the known difference) */
+	for (i = 0; i < 30; i++)
+		dl[i] = 0;
+	dl[0] = 2; dl[1] = 2;
+	ll[257] = 3; ll[256] = 3; ll['a'] = 3; ll['b'] = 3; ll['c'] = 3; ll['d'] = 3;  /* 6 x 1/8 + hole: incomplete too */
+	dyn_seed(c, "dyn-incomplete-dist", ll, 258, dl, 2, lits, 5, 3, 1, 2, 1);
+	/* code lengths of 15 everywhere that is used (the longest the format has): 2 symbols of length 15 only, over a complete code of
+	 * the 30 distance symbols */
+	memset(ll, 0, sizeof ll);
+	for (i = 0; i < 16; i++)
+		ll[i] = 15;
+	ll[256] = 15;
+	for (i = 0; i < 30; i++)
+		dl[i] = 15;
+	dyn_seed(c, "dyn-length-15", ll, 286, dl, 30, lits, 0, 3, 1, 0, 1);
+	/* two blocks: a dynamic one that is not final, then a stored one */
+	{
+		static uint8_t buf[4096];
+		struct hv_bw w;
+		struct hv_dyn t;
+
+		hv_dyn_std_tables(ll, dl);
+		hv_bw_init(&w, buf, sizeof buf);
+		hv_dyn_begin(&w, &t, 0, ll, 286, dl, 30, 1);
+		hv_dyn_sym(&w, &t, 'x');
+		hv_dyn_match(&w, &t, 20, 1);
+		hv_dyn_sym(&w, &t, 256);
+		hv_defl_stored(&w, (const uint8_t *)"stored tail", 11, 1);
+		fz_corpus_add(c, "dyn-then-stored", buf, hv_defl_end(&w));
+	}
+	/* a stored block whose NLEN is not the complement of LEN */
+	{
+		uint8_t bad[1 + 4 + 8] = { 1, 8, 0, 0x00, 0x00, 'b', 'a', 'd', 'n', 'l', 'e', 'n', '!' };
+
+		fz_corpus_add(c, "stored-bad-nlen", bad, sizeof bad);
+	}
+}
+
 static void seeds(struct fz_corpus *c)
 {
 	uint8_t raw[RAW_N], stored[1 + 4 + 64];
@@ -68,6 +159,7 @@ static void seeds(struct fz_corpus *c)
 	stored[3] = 0xbf; stored[4] = 0xff;       /* NLEN */
 	memcpy(stored + 5, raw, 64);
 	fz_corpus_add_map(c, "stored", stored, sizeof stored, &stored_map);
+	structure_seeds(c);
 }
 
 /* The same stream through zlib: 1 when it ends cleanly with the same output and the same input used. */
@@ -100,6 +192,25 @@ static int zlib_agrees(const uint8_t *in, size_t n, const uint8_t *got, uint64_t
 	return ok;
 }
 
+/* 1 when zlib decodes the whole input as a raw DEFLATE stream to its end (a stream whose output is over 1 MiB is not asked). */
+static int zlib_accepts(const uint8_t *in, size_t n)
+{
+	static uint8_t sink[1u << 20];
+	z_stream z;
+	int r;
+
+	memset(&z, 0, sizeof z);
+	if (inflateInit2(&z, -15) != Z_OK)
+		return 0;
+	z.next_in = (Bytef *)(uintptr_t)in;
+	z.avail_in = (uInt)n;
+	z.next_out = sink;
+	z.avail_out = sizeof sink;
+	r = inflate(&z, Z_FINISH);
+	inflateEnd(&z);
+	return r == Z_STREAM_END;
+}
+
 static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 {
 	struct kuncoat_io io;
@@ -117,6 +228,8 @@ static int run(struct fz_ctx *c, const uint8_t *in, size_t n)
 	FZ_CHECK(c, !c->refused || r == KUNCOAT_STOPPED, "a refusing sink did not end in STOPPED");
 	if (r == KUNCOAT_OK && !c->refused && !c->failk)
 		FZ_CHECK(c, zlib_agrees(in, n, c->out, io.produced, io.consumed), "zlib decodes this stream to a different result");
+	else if (r != KUNCOAT_OK && !c->refused && !c->failk && n)
+		FZ_CHECK(c, !zlib_accepts(in, n), "this decoder refused a stream zlib decodes to its end");
 	fz_digest(c, (uint64_t)r ^ io.produced << 3 ^ io.consumed << 40);
 	return (int)r;
 }

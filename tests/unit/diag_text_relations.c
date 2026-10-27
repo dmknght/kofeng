@@ -161,6 +161,10 @@ static int reach(const struct kgenome_diag_scan *s, uint32_t from, uint32_t to, 
 
 int main(int argc, char **argv)
 {
+	/* KNOWN DEFECT S2-TSV (2026-10-24, M) [sev L]: rows of tests/data/diag_text_expect.tsv state relations the engine does not or should not produce, so the gate counts them as "not found".
+	 * Trigger: the first 100 rows (all php): STALE capability names rows 0,3,9,15,16,17,39; WRONG rows 47,48,49 (eval inside a single-quoted string) and 84 (shared belongs to L664, not L665); SHAPE rows 37,38.
+	 * Effect: 24 of 100 rows read as misses (75 found directly), so the found/missing numbers this test prints are not a coverage measure. Reproducer: /mnt/games/normtest/fix_script2/red_report.md section 9.
+	 * Fix: correct the rows (the engine's spelling, the real sample line) and keep the real gaps as rows; the table is data, so the comment is here, where it is read. */
 	const char *table = "tests/data/diag_text_expect.tsv";
 	int verbose = 0, a, i;
 	int found_direct[4] = { 0 }, found_path[4] = { 0 }, missing[4] = { 0 }, nones = 0, none_with_links = 0, absent = 0, unread = 0, samples = 0;
@@ -204,6 +208,9 @@ int main(int argc, char **argv)
 			free(buf);
 			buf = NULL;
 			snprintf(cur, sizeof cur, "%s", r->path);
+			/* KNOWN DEFECT REV-D12 (2026-10-24, M) [sev L]: the table names its samples by absolute path (1035 rows start with /mnt/games/normtest/s3/), and a sample that is not there is only counted in `absent`.
+			 * Trigger: any checkout without the corpus at that path (CI, another machine). Effect: every row of the missing files is skipped, the test exits 0 and checks nothing.
+			 * Reproducer: tests/data/diag_text_expect.tsv. Fix: store paths relative to a corpus root given as an argument, and fail (or report loudly) when a named file is absent. */
 			f = fopen(r->path, "rb");
 			if (!f) {
 				absent++;

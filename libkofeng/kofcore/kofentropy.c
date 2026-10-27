@@ -76,3 +76,46 @@ uint32_t kentropy_eighths(const void *bytes, uint64_t n)
 	kentropy_count(hist, bytes, n);
 	return kentropy_hist(hist, n);
 }
+
+/* log2(num / den) for num >= den > 0, in Q12 (12 fractional bits). The integer part is the
+ * position of the top bit; the fraction is read off one bit at a time by squaring the
+ * mantissa (in [1, 2) as Q31): a square at or above 2 sets the bit and is halved. */
+static uint64_t log2_ratio_q12(uint64_t num, uint64_t den)
+{
+	uint64_t scaled = (num << 16) / den;
+	unsigned lg = scaled ? 63u - (unsigned)__builtin_clzll(scaled) : 0u, i;
+	uint64_t y, bits = 0;
+
+	if (lg < 16u)
+		return 0;
+	y = lg <= 31u ? scaled << (31u - lg) : scaled >> (lg - 31u);
+	for (i = 0; i < 12u; i++) {
+		y = (y * y) >> 31;
+		bits <<= 1;
+		if (y >= ((uint64_t)1 << 32)) {
+			y >>= 1;
+			bits |= 1u;
+		}
+	}
+	return ((uint64_t)(lg - 16u) << 12) | bits;
+}
+
+uint32_t kentropy_hist_centi(const uint32_t hist[256], uint64_t total)
+{
+	uint64_t acc = 0, n = total, centi;
+	unsigned k;
+
+	if (!hist || !n)
+		return 0;
+	for (k = 0; k < 256u; k++) {
+		uint64_t c = hist[k];
+
+		if (!c)
+			continue;
+		if (c > n)
+			c = n;
+		acc += c * log2_ratio_q12(n, c);
+	}
+	centi = (acc * 100u + n * 2048u) / (n * 4096u);
+	return centi > 800u ? 800u : (uint32_t)centi;
+}

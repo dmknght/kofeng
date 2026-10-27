@@ -60,6 +60,11 @@ static uint32_t cab_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		return 0;
 
 	kof_rl_init(&l, out, max_out);
+	/* KNOWN DEFECT WP2-D10 (2026-10-24, M) [sev L]: cab_resolve_scan ends HEADERS at folders_off while NAMES
+	 * start at files_off, so a reserve area makes them overlap. Trigger: a header announcing a reserve
+	 * area. Effect: HEADERS [0,172) over NAMES [44,186). Reproducer: tests/unit/ctr_regions.c (green
+	 * until fixed), tests_wp2/findings/D10_cab_headers_names_overlap.bin. Fix: end HEADERS at
+	 * min(folders_off, files_off). */
 	if (mask & KOF_SCAN_CAB_HEADERS)
 		kof_rl_add(&l, ctx->obj_size, 0,
 			   c->folders_off ? c->folders_off : CAB_HDR_MIN);
@@ -78,6 +83,11 @@ static uint32_t cab_resolve_scan(const struct kof_obj_ctx *ctx, uint32_t mask,
 		 * size the header declares is checked separately, and a
 		 * mismatch is its own anomaly.
 		 */
+		/* KNOWN DEFECT WP2-D9 (2026-10-24, M) [sev L]: cab_resolve_scan starts DATA after the names only, so
+		 * a byte can be in two regions (searched twice). Trigger: a 48 byte cabinet, no files, data
+		 * offset 0. Effect: DATA overlaps HEADERS. Reproducer: tests/unit/ctr_regions.c (green until
+		 * fixed), tests_wp2/findings/D9_cab_data_region_at_0.bin. Fix: start at max(declared offset,
+		 * end of HEADERS, FOLDERS, NAMES). */
 		uint64_t from = c->data_off;
 
 		if (from < c->names_off + c->names_len)
@@ -227,6 +237,11 @@ static int cab_list(struct cw *w, uint32_t ifold)
 			w->bl = (struct cab_blk *)t;
 		}
 		b = &w->bl[w->bl_n++];
+		/* KNOWN DEFECT WP2-D14 (2026-10-24, M) [sev M]: cab_list takes each block payload at CAB_DATA_HDR (8)
+		 * and ignores the per-block reserve (data_res is read, never used). Trigger: cbCFData 2.
+		 * Effect: every member is shifted by the reserve (right length, first bytes are zeros).
+		 * Reproducer: tests/unit/ctr_valid.c cab CRYPT (green until fixed). Fix: keep data_res, use
+		 * CAB_DATA_HDR + data_res for poff, the block advance and the length check. */
 		b->poff = at + CAB_DATA_HDR;
 		b->ustart = ustart;
 		b->comp = comp;
@@ -666,6 +681,10 @@ static int cab_stored_file(struct cw *w, uint16_t ifold, uint32_t size, uint32_t
 	if (!cab_list(w, ifold))
 		return 0;     /* said by FILES_FULL: the folder's blocks were not all had */
 	off = cab_map(w, ifold, foff, size, &avail, &ok);
+	/* KNOWN DEFECT WP2-D2 (2026-10-24, M) [sev M]: cab_stored_file drops a file record whose size runs past its
+	 * data, saying only an anomaly bit. Trigger: middle member claims 0xfffffff0. Effect: 2 of 3 opened,
+	 * broken 0. Reproducer: tests/unit/ctr_liars.c cab/claimBoth (row of WP2-D1). Fix: report it as
+	 * broken and keep the table going. */
 	if (!ok) {
 		c->anomalies |= KOF_CAB_ANOM_ENTRY_PAST_EOF;
 		return 0;
@@ -745,6 +764,9 @@ static void cab_read_files(struct cw *w)
 	uint64_t at;
 	uint32_t i;
 
+	/* KNOWN DEFECT WP2-D3b (2026-10-24, M) [sev M]: The cab file table is skipped when coffFiles is past EOF
+	 * (anomaly bit only). Trigger: coffFiles 0x7ffffff0. Effect: opens as nothing, broken 0. Reproducer:
+	 * tests/unit/ctr_liars.c cab/offset (row of WP2-D1). Fix: as WP2-D3, set DAMAGED. */
 	if (c->files_off < CAB_HDR_MIN || c->files_off >= file.n) {
 		c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
 		return;
@@ -769,6 +791,11 @@ static void cab_read_files(struct cw *w)
 		kof_rd_u16(file, at + 8u, 0, &ifold);
 		name_at = at + 16u;
 		nlen = kof_cname_len(file, name_at, KOF_CAB_MAX_NAME);
+		/* KNOWN DEFECT WP2-D6 (2026-10-24, M) [sev M]: The cab file walk ends the table at a name with a NUL
+		 * or past KOF_CAB_MAX_NAME (kof_cname_len answers 0). Trigger: one name with a NUL, or 5000
+		 * bytes. Effect: every later file dropped, broken 0, names_invalid 0. Reproducer:
+		 * tests/unit/ctr_names.c (green until fixed). Fix: end only that record, resynchronise on the
+		 * next plausible one, set names_invalid. */
 		if (!nlen) {
 			c->anomalies |= KOF_CAB_ANOM_TRUNCATED;
 			break;

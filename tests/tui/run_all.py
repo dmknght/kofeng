@@ -14,6 +14,7 @@ Scratch files live under /mnt/games/kofscratch (never /tmp); samples are
 copied read-only before the viewer sees them.
 """
 import glob, os, subprocess, sys, time, concurrent.futures as cf
+sys.dont_write_bytecode = True   # no __pycache__ in the tree: the test modules are started with -B too
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -65,7 +66,7 @@ def main(argv):
     mkfixtures.build()          # once, before the workers start
 
     def run(m):
-        cmd = [sys.executable, m] + (['-k', kfilter] if kfilter else [])
+        cmd = [sys.executable, '-B', m] + (['-k', kfilter] if kfilter else [])
         t0 = time.time()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=HERE)
         return m, p.stdout, p.stderr, time.time() - t0

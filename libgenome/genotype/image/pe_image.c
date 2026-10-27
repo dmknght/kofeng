@@ -400,6 +400,10 @@ static void resolve_clr(struct kgenome_pe_info *p, kof_buf file, uint64_t obj_si
 		return;
 	/* "BSJB", then two uint16 versions, a reserved uint32, then the
 	 * length-prefixed version string. */
+	/* KNOWN DEFECT E-CLRDUP (2026-10-24, R) [sev L]: resolve_clr reads the metadata root and its version string a second time;
+	 * kgenome_clr_read (clr_image.c) does the same walk and fills clr.version. Trigger: any managed PE. Effect: two
+	 * readers of one fact (CLAUDE.md rule 2/3) that can disagree on a bound (this one caps at obj_size, the other at
+	 * its stream table). Reproducer: none (read). Fix: drop clr_version here and read info->clr.version. */
 	if (!kof_rd_u32(file, mroot, 0, &tmp32) || tmp32 != 0x424a5342u)
 		return;
 	if (!kof_rd_u32(file, mroot + 12, 0, &vlen) || !vlen)
@@ -875,6 +879,10 @@ int kgenome_pe_image_parse(kof_buf file, struct kgenome_pe_info *info,
 			 * pointing into a section is a claim on bytes that
 			 * already have an owner, and honouring it would put the
 			 * same offset in two regions. */
+			/* KNOWN DEFECT E-CERT (2026-10-24, R) [sev L]: a certificate directory that overlaps an earlier claim (co < last_end) is
+			 * reported KGENOME_PE_ANOM_CERT_PAST_EOF, a name that says "past the end of the file". Trigger: a PE whose security
+			 * directory points into a section. Effect: the anomaly (and heur rule "CertCut", kofheur.c) fires for an overlap, so
+			 * the label over-claims what was measured. Reproducer: none. Fix: its own anomaly bit (CERT_OVERLAP), or reword. */
 			if (co < last_end) {
 				if (co < lim)
 					info->anomalies |= KGENOME_PE_ANOM_CERT_PAST_EOF;
@@ -1202,6 +1210,11 @@ static void imptab_add(void *user, uint64_t slot, const char *dll,
 	if (!t->n_dll || strncmp(t->dll[t->n_dll - 1u], dll,
 				 KGENOME_PE_IMP_DLLLEN - 1u)) {
 		if (t->n_dll == t->cap_dll) {
+			/* KNOWN DEFECT REV-D8m (2026-10-25, Inference) [sev L]: imptab_add doubles a uint32 capacity (the import table (dll names))
+			 * with no overflow guard and no ledger charge. Trigger: an import directory of 2^31 or more distinct library names (a file over 40 GiB); the engine caps an object at 512 MiB,
+			 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
+			 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
+			 * UINT32_MAX / 2 before doubling. */
 			uint32_t nc = t->cap_dll ? t->cap_dll * 2u : 8u;
 			void *nv = realloc(t->dll, (size_t)nc * sizeof *t->dll);
 
@@ -1218,6 +1231,11 @@ static void imptab_add(void *user, uint64_t slot, const char *dll,
 		t->n_dll++;
 	}
 	if (t->n == t->cap) {
+		/* KNOWN DEFECT REV-D8n (2026-10-25, Inference) [sev L]: imptab_add doubles a uint32 capacity (the import table (entries))
+		 * with no overflow guard and no ledger charge. Trigger: an import directory of 2^31 or more entries (input over 8 GiB); the engine caps an object at 512 MiB,
+		 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
+		 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
+		 * UINT32_MAX / 2 before doubling. */
 		uint32_t nc = t->cap ? t->cap * 2u : 256u;
 		void *nv = realloc(t->v, (size_t)nc * sizeof *t->v);
 
@@ -1272,3 +1290,4 @@ uint32_t kgenome_pe_imp_name(kof_buf f, const struct kgenome_pe_imp *e, char *ds
 		return 0;
 	return (uint32_t)strlen(dst);
 }
+

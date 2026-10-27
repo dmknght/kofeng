@@ -407,6 +407,10 @@ static uint64_t c_find_str_where(const struct kof_obj_ctx *ctx, uint32_t str_id,
  * that met an unsupported coding stops producing, and the budget it then fails to
  * spend is a consequence rather than a second problem.
  */
+/* KNOWN DEFECT WP5-ENG-1 (2026-10-25, R) [sev L]: oc_scan_broken_at records a sticky KOF_BROKEN_LIMIT but never counts kof_stats.limit_hits (objctx_child.c and objctx_child_sink.c do).
+ * Trigger: a chain over the resident allowance (PDF /ASCII85Decode + /FlateDecode of 1 MiB under max_resident_bytes 1.5-2 MiB). Effect: the root reads LIMIT, limit_hits stays 0,
+ * while kofresult.h says it counts the object (same family as WP2-D7). Reproducer: tests/unit/suite_decomp_objects.c `ceiling` (accepts either).
+ * Fix: count once on the first sticky LIMIT (if (!open.broken && reason == KOF_BROKEN_LIMIT) st.limit_hits++), or reword kofresult.h. */
 void oc_scan_broken_at(struct kof_scanner *sc, uint32_t reason, const char *file, int line)
 {
 	KOF_TRACE("[cut] %s:%d broken=%u\n", file, line, (unsigned)reason);

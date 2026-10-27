@@ -348,8 +348,11 @@ struct kv_menu {
 	const char *(*label)(void *ud, int i);
 	/* Opens a submenu rather than acting. NULL when none of them can. */
 	int        (*has_sub)(void *ud, int i);
+	/* A tick menu: NULL for none, else 1 when item i is ticked. The label then starts with "[x] " or "[ ] ". */
+	int        (*checked)(void *ud, int i);
 
 	int          w;                          /* column width, borders in */
+	int          cols;                       /* columns of items: 0 or 1 = one; a grid has no rules, items run down a column then the next */
 	const char  *c_on, *c_off, *c_cur;       /* usable, greyed, under cursor */
 };
 
@@ -389,7 +392,7 @@ enum kv_cap {
 	 * SHELLCODE COULD BE CARRIED HERE, so asking is worth offering.
 	 *
 	 * A CAPABILITY AND NOT A FINDING, which is the whole reason it is in
-	 * this table. "Find shellcode" used to be drawn only when a rule had
+	 * this table. The shellcode list used to be offered only when a rule had
 	 * ALREADY reported some - so on the files it exists for, the row was
 	 * missing and a reader was told by its absence that there was nothing
 	 * to ask. That is backwards twice over: the menu is how somebody ASKS,
@@ -401,8 +404,8 @@ enum kv_cap {
 	 *
 	 * NOT KOF_FMT_UNKNOWN, and that is the one difference from KV_CAP_CODE.
 	 * Formatless bytes may well BE shellcode, but then they are the answer
-	 * rather than the place to look for one: offering "find shellcode in
-	 * variables" on a peeled payload asks the reader to search a thing for
+	 * rather than the place to look for one: offering the shellcode list
+	 * on a peeled payload asks the reader to search a thing for
 	 * itself. Variables are a fact about a structured image.
 	 */
 	KV_CAP_SHELLCODE,
@@ -464,6 +467,8 @@ void kv_scrollbar_h(struct out *o, int row, int left, int right,
 int  kv_menu_rows(const struct kv_menu *);
 /* The item on a drawn row, or -1 for a rule and for past the end. */
 int  kv_menu_at_row(const struct kv_menu *, int row);
+/* The item at (row, column) of a menu of several columns; the same as kv_menu_at_row for one column; -1 for none. */
+int  kv_menu_at_cell(const struct kv_menu *, int row, int col);
 /* And the reverse, for a caller anchoring a submenu to the row it opens on. */
 int  kv_menu_row_of(const struct kv_menu *, int item);
 /* The first item Enter could act on, so a menu never opens on a dead row. */

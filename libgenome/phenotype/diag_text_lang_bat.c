@@ -26,6 +26,9 @@ static const struct kgenome_dtx_pathsem pathsem[] = {
 	{ "curl", "-o --output", 0, 1, "-O", NULL },
 };
 
+/* KNOWN DEFECT D15b (2026-10-24, R) [sev M]: the bat row reads neither `set` assignments nor the sets of a `for`, so `set c=powershell` / `for %i in (cmd) do %i` give no value to the command that follows.
+ * Trigger: a batch file that builds the command word with set or for. Effect: the command is an unknown word, the node has no capability and no link (documented at the head of this file as NOT READ).
+ * Reproducer: none yet. Fix: a batch assignment reader beside the sh one in diag_text_cmdval.c (set NAME=value, set /a read as unknown) and `for ... in (list) do` binding the variable per word. */
 const struct kgenome_dtx_lang kgenome_dtx_lang_bat = {
 	.id = KGENOME_TEXTUAL_LANG_BAT,
 	.typed = 1, .target = KGENOME_NUCLEO_T_BAT, .fold = 1,

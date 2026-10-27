@@ -123,4 +123,10 @@ enum kgenome_arch {
  * on purpose. A mask has one bit per member, so this is also its width. */
 #define KGENOME_ARCH_COUNT 20u
 
+/* The architecture as words for a person, with its width: "ARM 32-bit", "x86-64 64-bit". The short word of the
+ * list above (a32, x64) is what a signature writes and is not changed by this; this is the one spelling a tool
+ * shows. NULL for KGENOME_ARCH_OTHER and for a value not in the list: the caller shows what it has (never an
+ * invented name). A pure lookup of one value, nothing read from a file. */
+const char *kgenome_arch_title(uint8_t arch);
+
 #endif /* KGENOME_ARCH_H */

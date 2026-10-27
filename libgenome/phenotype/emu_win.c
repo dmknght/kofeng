@@ -518,6 +518,9 @@ uint64_t kgenome_emu_win_miss_thunk(struct kgenome_emu *e)
 	return 0x10u + 0x10u * (e->win_miss++ % 0xfeu);
 }
 
+/* KNOWN DEFECT S2-CTYPE-a (2026-10-24, R) [sev L]: kgenome_emu_win_resolve tests a guest name with isalpha/isalnum, which follow the host's locale (core's kof_is_alpha / kof_is_word_byte do not).
+ * Trigger: a host that called setlocale() (the engine never does) and a guest import name with a byte >= 0x80. Effect: such a name is accepted as an import and given a miss thunk, or refused, by the host's locale.
+ * Reproducer: none. Fix: kof_is_alpha(c) / kof_is_word_byte(c) from kofcore.h. */
 uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
 {
 	uint64_t a;
@@ -561,6 +564,9 @@ uint64_t kgenome_emu_win_resolve(struct kgenome_emu *e, const char *name)
  * off or put on (the loader supplies it), so LoadLibrary("comctl32") and GetModuleHandle("COMCTL32.DLL") name
  * one library. Returns 0 for a name this table does not model (too short or long, odd characters).
  */
+/* KNOWN DEFECT S2-CTYPE-b (2026-10-24, R) [sev L]: fake_key lower-cases and tests a library name with isalnum/tolower, which follow the host's locale.
+ * Trigger: a host that called setlocale() (the engine never does) and a library name with a byte >= 0x80. Effect: the key differs between hosts, so a modelled library is found or missed by the locale.
+ * Reproducer: none. Fix: kof_is_word_byte(c) and kof_lower_byte(c) from kofcore.h. */
 static int fake_key(const char *name, char *low, size_t cap)
 {
 	size_t i, n = strlen(name);

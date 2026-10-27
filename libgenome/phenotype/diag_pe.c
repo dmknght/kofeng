@@ -86,6 +86,11 @@ static void gather_imports(struct kgenome_diag_scan *s, struct pe_acc *a, kof_bu
 		if (cap == KGENOME_NUCLEO_NONE)
 			continue;
 		if (a->n == a->cap_n) {
+			/* KNOWN DEFECT REV-D8q (2026-10-25, Inference) [sev L]: gather_imports (diag_pe.c) doubles a uint32 capacity (the matched PE imports)
+			 * with no overflow guard and no ledger charge. Trigger: 2^31 or more named imports; the engine caps an object at 512 MiB,
+			 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
+			 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
+			 * UINT32_MAX / 2 before doubling. */
 			uint32_t nc = a->cap_n ? a->cap_n * 2u : 64u;
 			struct pe_imp *nv = realloc(a->v, (size_t)nc * sizeof *nv);
 
@@ -163,6 +168,11 @@ static int grow(struct kgenome_diag_scan *s, void **v, uint32_t *cap, uint32_t n
 	if (n < *cap)
 		return 1;
 	{
+		/* KNOWN DEFECT REV-D8j (2026-10-25, Inference) [sev L]: grow (diag_pe.c), the PE route's generic table grow
+		 * doubles a uint32 capacity (stubs and calls) with no overflow guard and no ledger charge. Trigger: an object with
+		 * 2^31 or more elements of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using
+		 * the lib directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or
+		 * test cap against UINT32_MAX / 2 before doubling. */
 		uint32_t nc = *cap ? *cap * 2u : 256u;
 		void *nv = realloc(*v, (size_t)nc * each);
 

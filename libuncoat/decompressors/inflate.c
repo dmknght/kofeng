@@ -621,6 +621,11 @@ static int build_dynamic(struct kuncoat_inflate *s)
 	 * which for a scanner means not seeing inside archives that everything else
 	 * can open. Over-subscribed is still refused.
 	 */
+	/* KNOWN DEFECT WP0-1 (2026-10-24, M) [sev L]: The block header accepts EVERY incomplete distance code; the
+	 * comment says only a single code and zlib refuses the rest. Trigger: a dynamic block whose distance
+	 * lengths leave a gap with more than one code (fuzz seed 7 iter 12407). Effect: a stream zlib calls
+	 * corrupt is decoded. Reproducer: tests_wp0/findings/inflate_incomplete_distance_{a,b}.bin. Fix:
+	 * accept err > 0 only for one code of length 1. */
 	if (err < 0)
 		return KUNCOAT_CORRUPT;
 	return -1;

@@ -568,6 +568,10 @@ static int lz_run(struct lz_state *z, const uint8_t *in, uint64_t in_len,
 		 * inside the buffer but ahead of the cursor would copy bytes this
 		 * stream never produced.
 		 */
+		/* KNOWN DEFECT WP5-L-LZMA-1 (2026-10-25, M) [sev L]: the window is the output buffer, so a distance up to the bytes produced is accepted (same in the other loop, the end handling and out_cap == 0).
+		 * Trigger: mutated streams: no end marker ended by the cap, distance beyond liblzma's dictionary, LZMA2 first chunk without dictionary reset.
+		 * Effect: OK where liblzma refuses on 0.6-1.2 % (lzma) and 0.1 % (lzma2) of mutated inputs; the strict direction was never seen in 600000 cases.
+		 * Reproducer: none (classes not separated). Fix: none needed unless the owner wants reference strictness (a dictionary size and a reset flag in the request). */
 		if (rep0 == 0 || (uint64_t)rep0 > at - dstart) {
 			status = KUNCOAT_CORRUPT;
 			break;

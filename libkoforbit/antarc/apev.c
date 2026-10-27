@@ -307,6 +307,12 @@ static void prefetch(struct kofa_pev *p, const char *buf, ssize_t n)
 	 */
 	while (n > 0 && NLMSG_OK(h, (size_t)n)) {
 		const struct cn_msg *cn = (const struct cn_msg *)NLMSG_DATA(h);
+		/* KNOWN DEFECT WP12-18 (2026-10-24, M) [sev L]: prefetch and stream_next
+		 * cast cn->data (offset 36 of the message) to struct proc_event,
+		 * which wants 8-byte alignment. Trigger: every connector record.
+		 * Effect: UB on strict-alignment targets, UBSAN abort.
+		 * Reproducer: fuzz orbit/pev_stream seed 1 iter 274. Fix: memcpy
+		 * into an aligned local. */
 		const struct proc_event *ev =
 			(const struct proc_event *)cn->data;
 
@@ -726,6 +732,12 @@ static int to_evt_start(struct kofa_pev *p, const struct proc_event *ev,
 				 * including spaces and brackets - the
 				 * LAST ')' ends it. */
 				rp = strrchr(st, ')');
+				/* KNOWN DEFECT WP12-17 (2026-10-24, R) [sev M]:
+				 * to_evt_start guards rp[1] && rp[2] but reads
+				 * strtoul(rp + 4). Trigger: a stat file ending
+				 * ") S". Effect: reads uninitialised stack (a
+				 * real kernel never writes it). Reproducer:
+				 * none. Fix: guard rp[3] and rp[4]. */
 				if (rp && rp[1] && rp[2])
 					e->ppid = (uint32_t)strtoul(
 						rp + 4, NULL, 10);
@@ -1107,6 +1119,11 @@ static int probe(struct kofa_pev *p, uint32_t ms)
 
 	if (kid == 0)
 		_exit(0);
+	/* KNOWN DEFECT WP12-25 (2026-10-24, M) [sev L]: probe returns 0 when fork()
+	 * fails and the open answers KOFA_ERR_DENIED. Trigger: RLIMIT_NPROC
+	 * reached (EAGAIN). Effect: a resource failure reads as a refusal of the
+	 * connector (WP12-1 family). Reproducer: tests/unit/ orbit_events.c
+	 * case_pev_fork_signal. Fix: a distinct status for fork(). */
 	if (kid < 0)
 		return 0;
 	clock_gettime(CLOCK_MONOTONIC, &t);

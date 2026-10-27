@@ -48,6 +48,9 @@ int kgenome_textual_emit(struct kgenome_textual_lexer *lx, uint32_t len, uint8_t
 	return 1;
 }
 
+/* KNOWN DEFECT REV-D1 (2026-10-24, R) [sev M]: kgenome_textual_lex reports a lexer's cut three ways: n_bound (only sh_lex.c and textual_clike.c feed it), F_OPEN/n_open (depth caps of ruby, psh, tcl, ecma, cfm, perl's here-document table) and a refusal.
+ * Trigger: a hostile text that reaches a cap of a lexer other than sh or the c-like page walks. Effect: the engine's `rs.n_bound` test (objctx_script_dec.c) sees only two of the lexers' bounds; the others surface as open spans or not at all.
+ * Reproducer: none (read; textual_defect_attack.c covers refusal and open counts, not n_bound). Fix: one carrier: every lexer cap does `lx->n_bound++` (changes KOF_BROKEN_LIMIT for hostile deep texts: owner ok first). */
 enum kgenome_textual_status kgenome_textual_lex(const struct kgenome_textual_lex_req *rq,
 						struct kgenome_textual_lex_res *res)
 {

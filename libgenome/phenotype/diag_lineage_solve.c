@@ -89,6 +89,10 @@ int kgenome_lineage_site_in(const struct kgenome_lineage *L, const struct kgenom
 	return 0;
 }
 
+/* KNOWN DEFECT REV-D7a (2026-10-24, Inference) [sev L]: agg_hash (the lineage aggregate table) is a hand-rolled open-addressing table with an unseeded multiplicative
+ * hash, not the shared helper (diag_oatab.h / kof_hash64_slot): CLAUDE.md rule 2. Trigger: keys chosen by the file that
+ * collide in the top bits. Effect: probe chains grow (the G1 flood in the script tables took 20.4 s for 65536 names).
+ * Reproducer: none (review_arch D7, read). Fix: build it on kgenome_oatab (seeded, one probe step) like diag_text_sum. */
 static uint32_t agg_hash(uint32_t k)
 {
 	return (k * 0x9e3779b1u) >> 7;

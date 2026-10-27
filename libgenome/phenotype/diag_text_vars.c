@@ -76,6 +76,9 @@ static struct kgenome_dtx_var *var_find(struct kgenome_dtx *x, const uint8_t *p,
 	return v;
 }
 
+/* KNOWN DEFECT DEFS6 (2026-10-24, R) [sev M]: kgenome_dtx_var_def keeps the latest KGENOME_DTX_DEFS (6) producers of a variable and the latest KGENOME_DTX_PDEFS (4) summary slots; an older one is evicted and `lost` is set (a cap that deletes evidence).
+ * Trigger: a variable assigned more than six times (minified js bundles). Effect: the read reports "variable read with evicted producer", the object is TRUNCATED: 5 js files became Limit reached (agent-reported, merge 11).
+ * Reproducer: smp/js 0009_jquery.form.min.js, 0015_moxie.min.js (corpus s3). Fix: owner decision on the report policy (report only when the evicted producer could reach a node), or grow the lists with the file. */
 void kgenome_dtx_var_def(struct kgenome_dtx_var *v, uint32_t node)
 {
 	uint8_t i;

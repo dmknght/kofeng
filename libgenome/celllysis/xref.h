@@ -178,6 +178,17 @@ void kgenome_xref_feed(void *u, const struct kgenome_cell_insn *in);
 uint32_t kgenome_xref_in(struct kgenome_xref *u, uint64_t va, uint64_t n);
 
 
+/*
+ * HOW MANY TIMES, by kind, the sweep saw code name an address of [va, va + n): the counts behind the flags of
+ * kgenome_xref_in. `read` is a load or an address taken (lea, rip-relative), `write` a store, `call` and `jump` a
+ * transfer of control through it, `arg` it in a register when a call happened. Each address keeps its counts to 65535;
+ * the map keeps 512 distinct addresses, so a caller reads kgenome_xref_full beside it ("none" is only "none seen").
+ */
+struct kgenome_xref_refs {
+	uint32_t read, write, call, jump, arg;
+};
+void kgenome_xref_refs(struct kgenome_xref *u, uint64_t va, uint64_t n, struct kgenome_xref_refs *out);
+
 /* Non-zero when the sweep ran out of room and stopped recording. A caller that
  * needs "definitely not referred to" rather than "referred to" has to treat
  * that as unknown. */

@@ -184,10 +184,38 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 	 */
 	switch (in->op) {
 	case KGENOME_CELL_CALL:
+		/* KNOWN DEFECT X11 (2026-10-24, R) [sev M]: kgenome_cell_state_track pushes a CALL's return address and
+		 * nothing pops it, because the callee's RET is never walked in line. Trigger: `push rbx; call f;
+		 * pop rbx`. Effect: the pop takes the return address, rbx becomes the known constant at_va+len
+		 * (0x400006) and a later syscall number or argument is read wrong. Reproducer: none committed
+		 * (hand-made ELF, report fix_gbin2/further_defects.md). Fix: push only for `call next`; for any
+		 * other call leave the model stack as it was (the callee pops its own return address). */
 		if (in->at_va != KGENOME_BROKEN)
 			stk_push(k, in->at_va + in->len, 1);
 		else
 			stk_push(k, 0, 0);
+		/*
+		 * WHAT THE CALLEE MAY HAVE WRITTEN IS NO LONGER KNOWN, which this did not say for a long
+		 * time: the map was left exactly as the call found it. MEASURED on a hand-made program:
+		 * `mov edx,7; call g; mov edi,..; mov esi,..; mov eax,10; syscall` with `g: xor edx,edx; ret`
+		 * came out as mprotect(.., PROT_EXEC), a capability the program does not have. A
+		 * constant a callee wrote is not an unknown value but a WRONG one.
+		 *
+		 * The rule is the calling convention's, `call_keeps`: what the callee must preserve stays, the
+		 * rest (the argument registers, the return value, the scratch registers) is gone, and so is
+		 * whatever the decoder says the instruction itself writes (ARM's bl writes lr). A callee is
+		 * not read here, so this is an upper bound on what it wrote and the map says "unknown" where
+		 * it may still be right - the side that costs a node and not a false claim.
+		 *
+		 * `call next` is not a call: it fetches the program counter (the pushed address is the
+		 * point of it, and the pop after it is the one place a static walk learns an address), and
+		 * nothing is written. The cursor says the same of a callee that begins by popping its own
+		 * return address, by setting `call_keeps` to every register.
+		 */
+		if (!(in->at_va != KGENOME_BROKEN && in->target_va == in->at_va + in->len)) {
+			k->known &= k->call_keeps;
+			cell_forget_written(k, in, -1);
+		}
 		return;
 	case KGENOME_CELL_PUSH:
 		if (in->n_op && in->o[0].kind == KGENOME_CELL_O_IMM)
@@ -443,6 +471,21 @@ void kgenome_cell_state_track(struct kgenome_cell_state *k, const struct kgenome
 	}
 }
 
+
+/*
+ * THE CALLING CONVENTION'S ROWS: the registers a callee must give back, in the decoder's numbering (x86: ax cx dx
+ * bx sp bp si di, then r8-r15; ARM: r0-r15). The sweep's origin map asks the same question (what may a call have
+ * overwritten) and takes the complement of this, so the two cannot disagree about a register.
+ */
+uint16_t kgenome_cell_call_keeps(unsigned arch)
+{
+	switch (arch) {
+	case KGENOME_ARCH_X86:    return 0xfff8u;       /* ebx esp ebp esi edi */
+	case KGENOME_ARCH_X86_64: return 0xf038u;       /* rbx rsp rbp r12-r15 */
+	case KGENOME_ARCH_ARM:    return 0xeff0u;       /* r4-r11 sp lr pc: r0-r3 and r12 are the callee's */
+	default:                  return 0;             /* AArch64 (x0-x15 are all the callee's) and the rest: nothing */
+	}
+}
 
 void kgenome_cell_state_reset(struct kgenome_cell_state *k)
 {

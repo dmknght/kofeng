@@ -475,6 +475,9 @@ static int big_child(void *arg)
 	he_guard_free(&g);
 	if (!ok)
 		return 1;
+	/* KNOWN DEFECT REV-D11 (2026-10-24, M) [sev L]: big_child asserts a wall-clock time (0.25 s or 2.0 s per hostile page), the one test that decides pass or fail by the clock and not by a work counter.
+	 * Trigger: a slow or loaded machine, a coverage (-O0) or sanitiser build. Effect: the hostile-page row fails with nothing wrong in the lexer (two such tests failed in gcov builds, merge 11 notes).
+	 * Reproducer: this row. Fix: assert the lexer's work counter (the trace-pc counters the textual_defect_work_* tests use) instead of seconds. */
 	if (now() - t0 < (bg->km_what ? 0.25 : 2.0))
 		return 0;
 	return bg->km_what ? KM_BIT : 2;

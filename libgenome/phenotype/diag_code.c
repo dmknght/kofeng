@@ -224,5 +224,10 @@ uint64_t kgenome_diag_code_bytes(const struct kgenome_obj *obj, uint64_t size)
 
 		total += kgenome_diag_extent(obj, i, size, &at);
 	}
+	/* KNOWN DEFECT WP9-F1 (2026-10-25, M) [sev M]: kgenome_diag_code_bytes returns the SUM of the executable
+	 * extents, so overlapping segments count twice. Trigger: 3 PT_LOAD RX over the same 1 KiB. Effect:
+	 * code_bytes 3 KiB for a 1 KiB file; max_insn (64 x code) and max_nodes (code/8) follow it, so a hostile
+	 * file buys a bound larger than its size. Reproducer: tests/lib/genome/diag_known_misses.c f1 (green until
+	 * fixed). Fix: `return total ? (total < size ? total : size) : size;` (better: the union of the extents). */
 	return total ? total : size;
 }

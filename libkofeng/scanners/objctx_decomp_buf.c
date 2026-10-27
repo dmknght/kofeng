@@ -227,6 +227,12 @@ static int buffered_size(struct kof_scanner *sc, uint64_t out_hint,
 			want = room;
 			/* The tail will not fit and will be dropped. Sticky only
 			 * when it was residency that ran out. */
+			/* KNOWN DEFECT WP2-D5 (2026-10-24, Inference) [sev M]: buffered_size makes the residency
+			 * branch of an oversized claim sticky (oc_scan_broken) where one entry should only be
+			 * cut (rule 4); sink read, the branch that fires is not measured. Trigger: a 7z
+			 * folder declares an unpack size over the budget. Effect: the folder after the cut
+			 * one is not walked (2 of 3). Reproducer: tests/unit/ctr_liars.c 7z/claimUnp (green
+			 * until fixed). Fix: oc_entry_cut, and let the module loop go on. */
 			if (by_policy) {
 				capped = 1;     /* said once the output is in the sink: buffered_cut */
 			} else {

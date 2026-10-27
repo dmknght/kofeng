@@ -137,6 +137,10 @@ struct kof_infected {
 
 /* The most declared regions one object reports - see kof_result.region. Matched
  * to KOF_SRC_MAX_REGIONS, which is what a producer may declare. */
+/* KNOWN DEFECT N-REGION16b (2026-10-24, R) [sev L]: the comment above is stale: KOF_SRC_MAX_REGIONS no longer bounds what a
+ * producer may declare (tables are dynamic since fix_normalize N3), so "matched to" is false and the 16 here is a
+ * silent ABI clip. Trigger: any object declaring more than 16 regions. Effect: see N-REGION16 in scan_pipeline.c.
+ * Reproducer: corp300/015_240fe. Fix: reword with the clip, or raise it with the n_region total (ABI decision). */
 #define KOF_MAX_REGIONS 16u
 
 /*

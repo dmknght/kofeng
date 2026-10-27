@@ -76,8 +76,6 @@ static int click_field(struct view *v)
 		return 1;
 	}
 
-	/* Before every other hit test: the box is opaque, and symd_click
-	 * swallows anything that lands inside it. */
 	/*
 	 * THE SYMBOLS DIALOG'S TEXT SELECTION starts here, before the box's own
 	 * hit test.
@@ -583,40 +581,12 @@ static int click_hex(struct view *v, int rclick)
 }
 
 
-void click(struct view *v, int rclick)
+/*
+ * The help box takes the click; one of the steps click() walks, in the order it asks.
+ * 1 when the press was handled.
+ */
+static int click_help(struct view *v)
 {
-	struct object *ob = cur_obj(v);
-
-	/*
-	 * The right button is the hex pane's alone.
-	 *
-	 * Everywhere else it used to do whatever the left button does, which is
-	 * a mouse with one button pretending to have two: right-clicking a tree
-	 * row moved the cursor, right-clicking "hit" opened the dialog. A
-	 * button that duplicates another teaches nothing and surprises whoever
-	 * expected a menu.
-	 */
-	/*
-	 * ASKED OF THE FRAME, NOT OF A LIST KEPT HERE.
-	 *
-	 * This was four rectangles written out in this condition, and every
-	 * pane that grew a context menu had to be added to them. Twice it was
-	 * not: the event panel's text box and the string decoder's plaintext
-	 * window both opened a menu, ran the item, and did nothing - because
-	 * the press was refused here, three screens above anything that could
-	 * have told the reader so, and the rectangle that would have allowed it
-	 * lived in a different function from the code that drew the box.
-	 *
-	 * Now a pane declares its own right-button rectangle where it paints
-	 * it - see hit_zone in redraw - so the two cannot disagree, and a pane
-	 * that forgets is broken only in itself.
-	 *
-	 * menu_open stays here: it is not a property of any
-	 * pane but of what is on top of all of them.
-	 */
-	if (rclick && (v->menu_open || !hit_probe(v, HIT_R)))
-		return;
-
 	/*
 	 * The help box takes the click, the bar takes the row it owns and
 	 * whatever is under an open menu. Both before the panes, for the same
@@ -632,7 +602,7 @@ void click(struct view *v, int rclick)
 		if (v->help_btn_y >= 0 && g_my == v->help_btn_y &&
 		    g_mx >= v->help_btn_x0 && g_mx <= v->help_btn_x1) {
 			v->help_open = 0;
-			return;
+			return 1;
 		}
 		/* Anything else in the box is a SELECTION, through the same
 		 * layer the properties page and the symbol table use - these
@@ -644,20 +614,36 @@ void click(struct view *v, int rclick)
 			v->dlg_ac = v->dlg_bc = c;
 			v->dlg_have = 1;
 			v->dlg_drag = 1;
-			return;
+			return 1;
 		}
 		v->dlg_have = 0;
 		v->dlg_drag = 0;
-		return;
+		return 1;
 	}
+	return 0;
+}
+
+/*
+ * An item of the open menu was pressed. 1 when it was.
+ */
+static int click_bar_item(struct view *v)
+{
 	if (v->bar_open >= 0) {
 		int i = bar_item_at(v, g_my, g_mx);
 
 		if (i >= 0) {
 			bar_run(v, i);
-			return;
+			return 1;
 		}
 	}
+	return 0;
+}
+
+/*
+ * A press on the menu bar row opens the menu under it. 1 when the press was on that row.
+ */
+static int click_bar_title(struct view *v)
+{
 	if (g_my == 1) {
 		int m;
 
@@ -673,14 +659,55 @@ void click(struct view *v, int rclick)
 				break;
 			}
 		}
-		return;
+		return 1;
 	}
-	if (click_bar_menu(v))
-		return;
-	if (click_field(v))
-		return;
-	if (syn_modal(v) && syn_click(v))
-		return;
+	return 0;
+}
+
+/*
+ * A double or triple click on the dashboard, from the geometry the tables returned and the text they recorded - not from
+ * what is drawn, so a cell scrolled partly out of view is taken whole. 2 = the cell under the point, 3 = the whole line
+ * (a table row's cells as the copy takes them; any other line as it reads). The visible part is what is lit; the copy
+ * takes the full text (dlg_select_full). 1 when a selection was made.
+ */
+static int click_pick(struct view *v, int rw, int r, int c, int n)
+{
+	uint32_t slot, row;
+	int k, kind = n >= 2 ? prop_cell_at(v, g_my, g_mx, &slot, &row, &k) : 0;
+	char line[PROP_W];
+
+	if (n == 2 && kind == 2 && k >= 0) {
+		const struct kv_tab_geo *g = &v->prop_tab[slot].geo;
+		const char *t = prop_cell_text(v, slot, row, k);
+
+		if (!t || g->cw[k] <= 0)
+			return 0;
+		dlg_select_full(v, r, g->cx[k], g->cx[k] + g->cw[k] - 1, t, strlen(t));
+		return 1;
+	}
+	if (n == 3) {
+		int last = (int)v->dlg_cols[rw] - 1;
+
+		if (kind == 2) {
+			size_t l = prop_row_text(v, slot, row, line, sizeof line);
+
+			dlg_select_full(v, r, 0, last < 0 ? 0 : last, line, l);
+		} else {
+			dlg_select_full(v, r, 0, last < 0 ? 0 : last, NULL, 0);
+		}
+		return 1;
+	}
+	(void)c;
+	return 0;
+}
+
+/*
+ * A press inside the symbol table or the properties page: a text selection, the
+ * Copy-path button, or a double click on a cell. 1 when the press was handled; 0
+ * when the page is not modal and the press goes on to the panes.
+ */
+static int click_dialog_text(struct view *v)
+{
 	/*
 	 * A DIALOG'S TEXT SELECTION, whichever dialog is up.
 	 *
@@ -689,11 +716,10 @@ void click(struct view *v, int rclick)
 	 * the symbol table already asked this layer. One recording, one
 	 * selection, one Ctrl+C.
 	 */
-	if (v->sym_open || v->prop_open) {
+	if (v->prop_open) {
 		int r, c;
 
 		if (dlg_at(v, g_my, g_mx, &r, &c)) {
-			int a = c, b = c;
 			/*
 			 * THE BUTTON BEFORE THE SELECTION.
 			 *
@@ -728,7 +754,7 @@ void click(struct view *v, int rclick)
 
 					copy_osc52(v->path, n);
 					copy_said(v, n);
-					return;
+					return 1;
 				}
 			}
 
@@ -747,7 +773,6 @@ void click(struct view *v, int rclick)
 			 * click takes the whole cell, which is the gesture a
 			 * table of values actually wants.
 			 */
-			(void)a; (void)b;
 			/* Shift (or ctrl) extends from where the selection
 			 * already starts - the same gesture as in the hex
 			 * pane, including why ctrl is accepted too. */
@@ -755,58 +780,30 @@ void click(struct view *v, int rclick)
 				v->dlg_br = r;
 				v->dlg_bc = c;
 				v->dlg_drag = 1;
-				return;
+				return 1;
 			}
-			/*
-			 * A SECOND PRESS ON THE SAME PLACE TAKES THE WHOLE
-			 * CELL - what a double click means in a table.
-			 *
-			 * Bounded by the CELL and not by the row: a value and
-			 * the name beside it are two facts, and copying the
-			 * name with the value is the thing that made people
-			 * retype the value anyway. The cell's own padding goes
-			 * with it - see the trim - so a short value hands back
-			 * the value and not a run of blanks and the wall.
-			 */
-			{
-				uint64_t now = now_ms();
-				int again = r == v->dlg_click_r &&
-					    c == v->dlg_click_c &&
-					    now - v->dlg_click_ms < 400u;
-				int x0, x1;
-
-				v->dlg_click_r = r;
-				v->dlg_click_c = c;
-				v->dlg_click_ms = now;
-				if (again &&
-				    prop_cell_span(v, g_my, c, &x0, &x1)) {
-					int lim = (int)v->dlg_cols[rw];
-
-					if (x1 >= lim)
-						x1 = lim - 1;
-					while (x1 > x0 &&
-					       v->dlg_line[rw][v->dlg_bx[rw][x1]]
-					       == ' ')
-						x1--;
-					v->dlg_ar = v->dlg_br = r;
-					v->dlg_ac = x0;
-					v->dlg_bc = x1;
-					v->dlg_have = 1;
-					v->dlg_drag = 0;
-					return;
-				}
-			}
+			/* Presses in a row on one place: the second takes the whole cell, the third the whole line. */
+			if (click_pick(v, rw, r, c, dlg_click_count(v, r, c)))
+				return 1;
 			v->dlg_ar = v->dlg_br = r;
 			v->dlg_ac = v->dlg_bc = c;
 			v->dlg_have = 1;
 			v->dlg_drag = 1;
-			return;
+			return 1;
 		}
 		v->dlg_have = 0;
 		v->dlg_drag = 0;
 		if (v->prop_open)
-			return;         /* a modal page: nothing under it takes the click */
+			return 1;         /* a modal page: nothing under it takes the click */
 	}
+	return 0;
+}
+
+/*
+ * The framed dialogs: moving one, then pressing inside the one that is open. 1 when handled.
+ */
+static int click_boxes(struct view *v, int rclick)
+{
 	/*
 	 * MOVING THE BOX IS ASKED ABOUT FIRST, because the title row carries no
 	 * other control and a box being dragged must not also be acting on the
@@ -815,16 +812,21 @@ void click(struct view *v, int rclick)
 	if ((v->enc_open && dframe_grab(v, &g_enc_f)) ||
 	    (v->goto_open && dframe_grab(v, &g_goto_f)) ||
 	    (v->find_open && dframe_grab(v, &g_find_f)))
-		return;
+		return 1;
 	if (v->enc_open && enc_click(v, rclick))
-		return;
-	if (v->sym_open && symd_click(v))
-		return;
+		return 1;
 	if (v->goto_open && goto_click(v))
-		return;
+		return 1;
 	if (v->find_open && find_click(v))
-		return;
+		return 1;
+	return 0;
+}
 
+/*
+ * Any click leaves whatever was being typed; a pattern is committed first.
+ */
+static void click_leave_edit(struct view *v)
+{
 	/*
 	 * A STRING EDIT IS COMMITTED BEFORE THE FOCUS GOES, not dropped.
 	 *
@@ -847,7 +849,13 @@ void click(struct view *v, int rclick)
 	 * puts the focus back if the click landed on a field, so this is the
 	 * whole of "click away to stop editing". */
 	v->edit = 0;
+}
 
+/*
+ * A press while a pick-list is open: a row, the parent list, or away. 1 when handled.
+ */
+static int click_chooser(struct view *v)
+{
 	if (v->ch.open) {
 		/* The row under the pointer is counted from the first one
 		 * DRAWN, which is not item zero once the list scrolls. */
@@ -860,10 +868,10 @@ void click(struct view *v, int rclick)
 			 * it is not a dismiss, and not a row, so it is not a
 			 * pick either. */
 			if (v->ch.sep[k])
-				return;
+				return 1;
 			v->ch.sel = k;
 			ch_take(v);
-			return;
+			return 1;
 		}
 		/*
 		 * A CLICK ON THE PARENT MENU MOVES TO THAT ROW, it does not
@@ -894,19 +902,21 @@ void click(struct view *v, int rclick)
 				v->ch = up;             /* it is the front one */
 				v->ch_up.open = 0;
 				ch_take(v);
-				return;
+				return 1;
 			}
 		}
 		v->ch.open = 0;
 		v->ch_up.open = 0;
-		return;
+		return 1;
 	}
-	if (click_menu(v))
-		return;
-	if (click_scrollbar(v))
-		return;
-	if (click_disasm(v, rclick))
-		return;
+	return 0;
+}
+
+/*
+ * A press in the event panel: its text box or a field row. 1 when handled.
+ */
+static int click_evt_panel(struct view *v, int rclick)
+{
 	/*
 	 * A ROW OF THE EVENT PANEL, which picks the field AND takes the hex
 	 * pane to it.
@@ -955,7 +965,7 @@ void click(struct view *v, int rclick)
 	if (evt_live(v) && rclick && evt_text_at(v, g_my, g_mx, NULL)) {
 		v->menu_ctx = 8;
 		menu_open_at(v, g_my, g_mx);
-		return;
+		return 1;
 	}
 	if (evt_live(v) && !rclick) {
 		int c = 0, r;
@@ -965,7 +975,7 @@ void click(struct view *v, int rclick)
 			v->evt_txt_drag = 1;
 			evt_reveal_char(v, c);
 			evt_sync_hex(v, 0);
-			return;
+			return 1;
 		}
 		r = evt_meta_at(v, g_my, g_mx);
 		if (r >= 0) {
@@ -978,7 +988,7 @@ void click(struct view *v, int rclick)
 			v->evt_txt_a = v->evt_txt_b = 0;
 			if (r == v->evt_sel) {
 				v->evt_sel = -1;
-				return;
+				return 1;
 			}
 			v->evt_sel = r;
 			if (kof_evt_field_extent(&v->evt, (unsigned)r, &fo,
@@ -992,22 +1002,30 @@ void click(struct view *v, int rclick)
 				if (v->rgn_at > hex_max(v))
 					v->rgn_at = hex_max(v);
 			}
-			return;
+			return 1;
 		}
 	}
+	return 0;
+}
+
+/*
+ * A press on the heading of the event or disassembly panel: close, or the mode. 1 when handled.
+ */
+static int click_pane_heads(struct view *v)
+{
 	if (g_evt_rows && g_my == evt_top() - 1 && g_mx > TREE_W) {
 		if (g_mx >= g_cols - 3) {
 			v->evt_open = 0;
 			g_evt_rows = 0;
 		}
-		return;
+		return 1;
 	}
 	if (g_disasm_rows && g_my == dis_top() - 1 && g_mx > TREE_W) {
 		if (g_mx >= g_cols - 3) {
 			v->dis_open = 0;
 			g_disasm_rows = 0;
 			v->dis_have = 0;
-			return;
+			return 1;
 		}
 		/* The mode, where it is written. Anywhere else on the heading
 		 * does nothing, so a stray click on a rule is not a state
@@ -1015,14 +1033,21 @@ void click(struct view *v, int rclick)
 		if (g_mx >= TREE_W + 5 && g_mx <= TREE_W + 24) {
 			v->dis_bits = v->dis_bits == 64 ? 32 : 64;
 			dis_drop_analysis(v);   /* it was made reading the other width */
-			return;
+			return 1;
 		}
-		return;
+		return 1;
 	}
+	return 0;
+}
 
+/*
+ * The draft panel: the sizing row, then its own area down to the marker line. 1 when handled.
+ */
+static int click_draft_area(struct view *v, int rclick)
+{
 	if (g_decl_rows && g_my == hex_bot() + 1) {
 		v->sizing = 1;
-		return;
+		return 1;
 	}
 
 	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row())
@@ -1043,12 +1068,16 @@ void click(struct view *v, int rclick)
 	 */
 	if (g_decl_rows && g_my >= decl_top() && g_my < mark_row()) {
 		hit_run(v, rclick ? (uint8_t)HIT_R : (uint8_t)HIT_L);
-		return;
+		return 1;
 	}
-	if (click_marker_line(v, ob))
-		return;
-	if (click_hex(v, rclick))
-		return;
+	return 0;
+}
+
+/*
+ * The tree and the hex pane: the press moves the cursor in the pane it landed on.
+ */
+static void click_panes(struct view *v)
+{
 	if (g_my >= hex_top() && g_my <= hex_bot()) {
 		if (g_mx <= TREE_W) {
 			uint32_t k = v->tree_top + (uint32_t)(g_my - hex_top());
@@ -1059,5 +1088,82 @@ void click(struct view *v, int rclick)
 			v->pane = 1;
 		}
 	}
+}
+
+void click(struct view *v, int rclick)
+{
+	struct object *ob = cur_obj(v);
+
+	/*
+	 * The right button is the hex pane's alone.
+	 *
+	 * Everywhere else it used to do whatever the left button does, which is
+	 * a mouse with one button pretending to have two: right-clicking a tree
+	 * row moved the cursor, right-clicking "hit" opened the dialog. A
+	 * button that duplicates another teaches nothing and surprises whoever
+	 * expected a menu.
+	 */
+	/*
+	 * ASKED OF THE FRAME, NOT OF A LIST KEPT HERE.
+	 *
+	 * This was four rectangles written out in this condition, and every
+	 * pane that grew a context menu had to be added to them. Twice it was
+	 * not: the event panel's text box and the string decoder's plaintext
+	 * window both opened a menu, ran the item, and did nothing - because
+	 * the press was refused here, three screens above anything that could
+	 * have told the reader so, and the rectangle that would have allowed it
+	 * lived in a different function from the code that drew the box.
+	 *
+	 * Now a pane declares its own right-button rectangle where it paints
+	 * it - see hit_zone in redraw - so the two cannot disagree, and a pane
+	 * that forgets is broken only in itself.
+	 *
+	 * menu_open stays here: it is not a property of any
+	 * pane but of what is on top of all of them.
+	 */
+	if (rclick && (v->menu_open || !hit_probe(v, HIT_R)))
+		return;
+
+	if (click_help(v))
+		return;
+	if (click_bar_item(v))
+		return;
+	if (click_bar_title(v))
+		return;
+	if (click_bar_menu(v))
+		return;
+	if (click_field(v))
+		return;
+	if (fam_click(v, rclick))
+		return;
+	if (syn_modal(v) && syn_click(v))
+		return;
+	if (click_dialog_text(v))
+		return;
+	if (click_boxes(v, rclick))
+		return;
+
+	click_leave_edit(v);
+
+	if (click_chooser(v))
+		return;
+	if (click_menu(v))
+		return;
+	if (click_scrollbar(v))
+		return;
+	if (click_disasm(v, rclick))
+		return;
+	if (click_evt_panel(v, rclick))
+		return;
+	if (click_pane_heads(v))
+		return;
+
+	if (click_draft_area(v, rclick))
+		return;
+	if (click_marker_line(v, ob))
+		return;
+	if (click_hex(v, rclick))
+		return;
+	click_panes(v);
 	(void)rclick;   /* the menu it will open does not exist yet */
 }

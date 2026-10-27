@@ -537,6 +537,11 @@ void kgenome_emu_win_trace(struct kgenome_emu *e, const char *api, const char *a
  * bounded by its code, and a cap would be a place where a call that happened
  * went unrecorded.
  */
+/* KNOWN DEFECT REV-D7h (2026-10-25, Inference) [sev L]: wev_hash / wev_insert (emu_win_exc.c) are a hand-rolled
+ * open-addressing index of the guest API events with its own multiplier, which kof_hash64_slot (kofcore.h) already
+ * spells. Trigger: a guest that calls many distinct (site, API) pairs. Effect: none measured; the multiplier and
+ * the probe loop are written a second time. Reproducer: none. Fix: key it with kof_hash64_slot and the shared
+ * oatab helper. */
 static uint32_t wev_hash(uint64_t site, unsigned api)
 {
 	return (uint32_t)(((site ^ ((uint64_t)api << 56)) *
@@ -571,6 +576,11 @@ void kgenome_emu_win_event_note(struct kgenome_emu *e, unsigned api, uint64_t re
 		}
 	}
 	if (e->n_wev == e->cap_wev) {
+		/* KNOWN DEFECT REV-D8l (2026-10-25, Inference) [sev L]: kgenome_emu_win_event_note (emu_win_exc.c) doubles a
+		 * uint32 capacity (guest API events) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or
+		 * more elements of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib
+		 * directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap
+		 * against UINT32_MAX / 2 before doubling. */
 		uint32_t nc = e->cap_wev ? e->cap_wev * 2u : 64u, k;
 		struct kgenome_emu_win_event *nw = realloc(e->wev, (size_t)nc * sizeof *nw);
 		uint32_t *nt;

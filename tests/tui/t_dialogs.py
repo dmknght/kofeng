@@ -20,7 +20,7 @@ def props():
     v = ko()
     check(v.menu_item('Analysis', 'Dashboard'), 'no Dashboard item')
     d = v.dialog()
-    check(d and 'Properties' in d[4], 'Properties page did not open: %r' % (d,))
+    check(d and 'Overview' in d[4], 'Properties page did not open: %r' % (d,))
     return v
 
 
@@ -35,14 +35,19 @@ def props_opens_with_object_facts():
 
 @case(A)
 def props_wheel_repaints():
-    with props() as v:
+    # a terminal short enough that the overview scrolls (the segment and section lists moved to the Segments and Sections tabs)
+    with ko() as v:
+        v.resize(20, 120)
+        check(v.menu_item('Analysis', 'Dashboard'), 'no Dashboard item')
         check(changed(v, lambda: v.wheel(80, 25, n=2)), 'wheel did not repaint the page')
         check(changed(v, lambda: v.wheel(80, 25, up=True, n=2)), 'wheel up did not repaint')
 
 
 @case(A)
 def props_keys_repaint():
-    with props() as v:
+    with ko() as v:
+        v.resize(20, 120)
+        check(v.menu_item('Analysis', 'Dashboard'), 'no Dashboard item')
         check(changed(v, lambda: v.key('down', 3)), 'Down did not repaint')
         check(changed(v, lambda: v.key('pgdn')), 'PgDn did not repaint')
         check(changed(v, lambda: v.key('end')) or True)
@@ -118,7 +123,7 @@ def props_shows_for_other_formats():
                        ('gaf', lambda: SAMPLES['gafgyt'])):
         with Viewer(maker()) as v:
             check(v.menu_item('Analysis', 'Dashboard'), '%s: no Dashboard item' % key)
-            check(v.dialog() and 'Properties' in v.dialog()[4], '%s: page did not open' % key)
+            check(v.dialog() and 'Overview' in v.dialog()[4], '%s: page did not open' % key)
             v.key('pgdn'); v.key('end'); v.key('home')
             check(v.alive(), '%s: died while paging' % key)
             v.esc()
@@ -551,8 +556,11 @@ def modal_sweep_every_dialog_repaints_on_input():
             opener(v)
             ch = changed(v, lambda: action(v))
             results[name] = ch
-    sweep('symbols', lambda v: v.menu_item('Analysis', 'Symbols'), lambda v: v.wheel(60, 25, n=2))
-    sweep('props',   lambda v: v.menu_item('Analysis', 'Dashboard'), lambda v: v.wheel(80, 25, n=2))
+    sweep('imports tab', lambda v: open_dash_tab(v, 'Imports'), lambda v: v.wheel(60, 25, n=2))
+    def short_props(v):
+        v.resize(20, 120)
+        v.menu_item('Analysis', 'Dashboard')
+    sweep('props',   short_props, lambda v: v.wheel(80, 12, n=2))
     sweep('find',    lambda v: v.menu_item('Edit', 'Find...'), lambda v: v.type('abc'))
     sweep('goto',    lambda v: v.menu_item('Edit', 'Go to...'), lambda v: v.type('123'))
     sweep('enc',     lambda v: v.menu_item('Analysis', 'Decode string'), lambda v: v.type('abc'))
@@ -571,7 +579,7 @@ def modal_sweep_every_dialog_repaints_on_input():
 
 @case(A)
 def modal_sweep_close_restores_panes():
-    for name, opener in (('symbols', lambda v: v.menu_item('Analysis', 'Symbols')),
+    for name, opener in (('imports tab', lambda v: open_dash_tab(v, 'Imports')),
                          ('props', lambda v: v.menu_item('Analysis', 'Dashboard')),
                          ('help', lambda v: v.menu_item('Help', 'Keyboard')),
                          ('about', lambda v: v.menu_item('Help', 'About')),
@@ -587,7 +595,7 @@ def modal_sweep_close_restores_panes():
 
 @case(A, known_bug='BUG-12 redraw(): a bar menu opened (F10 / click on the bar) over a full-cover dialog is never erased - the panes are not repainted under a modal')
 def bar_menu_over_a_dialog_leaves_no_ghost():
-    for name, opener in (('symbols', lambda v: v.menu_item('Analysis', 'Symbols')),
+    for name, opener in (('imports tab', lambda v: open_dash_tab(v, 'Imports')),
                          ('props', lambda v: v.menu_item('Analysis', 'Dashboard')),
                          ('about', lambda v: v.menu_item('Help', 'About'))):
         with ko() as v:
@@ -601,11 +609,11 @@ def bar_menu_over_a_dialog_leaves_no_ghost():
 @case(A, known_bug='BUG-12 (same cause, mouse path)')
 def clicking_the_bar_over_a_dialog_leaves_no_ghost():
     with ko() as v:
-        v.menu_item('Analysis', 'Symbols')
+        open_dash_tab(v, 'Imports')
         ref = v.fingerprint()
         v.menu_open('Help')
         v.esc()
-        check(v.fingerprint() == ref, 'screen differs after clicking Help over the Symbols dialog and closing it')
+        check(v.fingerprint() == ref, 'screen differs after clicking Help over the Imports tab and closing it')
 
 
 @case(A)

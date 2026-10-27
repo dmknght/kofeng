@@ -602,14 +602,45 @@ static int kv_walk(const struct kv_menu *m, int want, int of)
 	return want >= 0 || of >= 0 ? -1 : row;
 }
 
+/* The k-th SHOWN item (0-based), or -1: the order a grid is laid out in. */
+static int kv_nth_shown(const struct kv_menu *m, int k)
+{
+	int i;
+
+	for (i = 0; i < m->n; i++)
+		if (kv_shown(m, i) && k-- == 0)
+			return i;
+	return -1;
+}
+
+static int kv_shown_count(const struct kv_menu *m)
+{
+	int i, n = 0;
+
+	for (i = 0; i < m->n; i++)
+		n += kv_shown(m, i) ? 1 : 0;
+	return n;
+}
+
 int kv_menu_rows(const struct kv_menu *m)
 {
+	if (m->cols > 1)
+		return (kv_shown_count(m) + m->cols - 1) / m->cols;
 	return kv_walk(m, -1, -1);
 }
 
 int kv_menu_at_row(const struct kv_menu *m, int row)
 {
 	return row < 0 ? -1 : kv_walk(m, row, -1);
+}
+
+int kv_menu_at_cell(const struct kv_menu *m, int row, int col)
+{
+	if (m->cols <= 1)
+		return col == 0 ? kv_menu_at_row(m, row) : -1;
+	if (row < 0 || col < 0 || col >= m->cols || row >= kv_menu_rows(m))
+		return -1;
+	return kv_nth_shown(m, col * kv_menu_rows(m) + row);
 }
 
 int kv_menu_row_of(const struct kv_menu *m, int item)
@@ -646,6 +677,33 @@ void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
 {
 	int i, y = top, k, rows = 0;
 	struct out_clip cl;
+
+	if (m->cols > 1) {
+		/* A grid: items run down a column, then the next; every cell is `w` wide and the box is cols * w. */
+		int r, c, nr = kv_menu_rows(m);
+
+		cl = out_clip_set(o, top, left, top + nr - 1, left + m->w * m->cols);
+		for (r = 0; r < nr; r++) {
+			out_at(o, top + r, left);
+			for (c = 0; c < m->cols; c++) {
+				int it = kv_menu_at_cell(m, r, c);
+
+				if (it < 0) {
+					out_fmt(o, "%s%*s" A_OFF, m->c_on, m->w, "");
+					continue;
+				}
+				out_str(o, it == sel || it == sel2 ? m->c_cur : !kv_enabled(m, it) ? m->c_off : m->c_on);
+				if (m->checked)
+					out_fmt(o, " [%c] %-*.*s", m->checked(m->ud, it) ? 'x' : ' ', m->w - 5, m->w - 5,
+						m->label(m->ud, it));
+				else
+					out_fmt(o, " %-*.*s", m->w - 1, m->w - 1, m->label(m->ud, it));
+				out_str(o, A_OFF);
+			}
+		}
+		out_clip_restore(o, cl);
+		return;
+	}
 
 	/*
 	 * A MENU IS A BOX AND IT STAYS IN IT.
@@ -684,7 +742,10 @@ void kv_menu_draw(struct out *o, const struct kv_menu *m, int top, int left,
 		/* The submenu arrow is drawn INSIDE the width, not after it: a
 		 * row that is one column wider than its neighbours puts a step
 		 * in the right edge of the box. */
-		if (m->has_sub && m->has_sub(m->ud, i))
+		if (m->checked)
+			out_fmt(o, " [%c] %-*.*s", m->checked(m->ud, i) ? 'x' : ' ', m->w - 5, m->w - 5,
+				m->label(m->ud, i));
+		else if (m->has_sub && m->has_sub(m->ud, i))
 			out_fmt(o, " %-*.*s>", m->w - 2, m->w - 2,
 				m->label(m->ud, i));
 		else

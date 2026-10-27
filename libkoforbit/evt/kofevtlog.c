@@ -271,6 +271,12 @@ struct kofevt_log_r *kofevt_log_open(const char *path, uint32_t want_rec_size,
 	}
 	/* Written by a build with a bigger header: skip to where its records
 	 * actually start rather than to where ours would. */
+	/* KNOWN DEFECT WP12-7 (2026-10-24, M) [sev L]: kofevt_log_open seeks only when
+	 * hdr_size > sizeof h, build_index seeks to hdr_size. Trigger: a log
+	 * whose header says hdr_size < 64. Effect: the open stream is at byte
+	 * 64, the index starts at hdr_size: 5 records read, count says 2.
+	 * Reproducer: orbit_evt.c case_evtlog_truncated. Fix: refuse a hdr_size
+	 * below sizeof h at open. */
 	if (r->h.hdr_size > sizeof r->h &&
 	    fseek(r->fp, (long)r->h.hdr_size, SEEK_SET) != 0) {
 		if (why) *why = "cannot seek past the header";
@@ -311,6 +317,11 @@ static int skip_one(struct kofevt_log_r *r)
 	memcpy(&tl, head + r->h.len_off, sizeof tl);
 	if ((uint32_t)r->h.head_size + tl > r->h.rec_size)
 		return 0;
+	/* KNOWN DEFECT WP12-8 (2026-10-24, M) [sev L]: skip_one trusts fseek past the
+	 * end of the file: it succeeds. Trigger: a log cut inside its last
+	 * record. Effect: count says 40 while 39 can be read. Reproducer:
+	 * tests/unit/orbit_evt.c case_evtlog_truncated. Fix: compare ftell + tl
+	 * with the file size (or fread the last byte). */
 	if (tl && fseek(r->fp, (long)tl, SEEK_CUR) != 0)
 		return 0;
 	return 1;

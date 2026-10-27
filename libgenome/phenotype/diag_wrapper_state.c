@@ -5,6 +5,10 @@
  */
 #include "diag_wrapper_private.h"
 
+/* KNOWN DEFECT REV-D7e (2026-10-24, Inference) [sev L]: GMISS_BIT (the wrapper global-miss filter) is a hand-rolled hash with an unseeded multiplicative
+ * hash, not the shared helper (diag_oatab.h / kof_hash64_slot): CLAUDE.md rule 2. Trigger: keys chosen by the file that
+ * collide in the top bits. Effect: probe chains grow (the G1 flood in the script tables took 20.4 s for 65536 names).
+ * Reproducer: none (review_arch D7, read). Fix: build it on kgenome_oatab (seeded, one probe step) like diag_text_sum. */
 #define GMISS_BIT(a) ((unsigned)(((a) * 0x9e3779b97f4a7c15ull) >> 52) & 4095u)
 
 /* Charge `n` bytes of the wrapper walk's own tables to the scan's ledger. 0 when

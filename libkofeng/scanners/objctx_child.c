@@ -339,6 +339,10 @@ static int child_close(const struct kof_obj_ctx *ctx)
  * 1. A close that really cannot make a child (quota, allocation) leaves the latch
  * unset and answers 0 as before.
  */
+/* KNOWN DEFECT WP2-D13 (2026-10-25, Inference) [sev M]: oc_child (kunp_rcstruct_done) answers 0 for more than "the host will take no more", and bases/decomp/lha.c and arj.c `break` on that 0.
+ * Trigger: an lha (-lh6-) or arj (method 1) member that cannot be decoded, first in the archive. Effect: the module walk ends there, the stored members after it
+ * are not opened (0 of 2; zip and rar go on) and the root reads DAMAGED. The exact path that answers 0 here is read, not traced; the loops are in the modules (not annotated).
+ * Reproducer: tests/unit/ctr_liars.c coded_first (green until fixed). Fix: make the module loops end only on the host's refusal (sticky stop), and go on after a failed member. */
 int oc_child(const struct kof_obj_ctx *ctx)
 {
 	struct kof_scanner *sc = kof_scan_of(ctx);

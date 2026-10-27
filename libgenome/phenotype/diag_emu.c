@@ -127,6 +127,10 @@ struct route {
  * A direct `syscall` in a loop has the same address and the same call history every lap, so it
  * is a repeat from the third visit on (the first two can differ while the history fills).
  */
+/* KNOWN DEFECT REV-D7d (2026-10-24, Inference) [sev L]: route_identity with the seen set below it is a hand-rolled open-addressing table with an unseeded multiplicative
+ * hash, not the shared helper (diag_oatab.h / kof_hash64_slot): CLAUDE.md rule 2. Trigger: keys chosen by the file that
+ * collide in the top bits. Effect: probe chains grow (the G1 flood in the script tables took 20.4 s for 65536 names).
+ * Reproducer: none (review_arch D7, read). Fix: build it on kgenome_oatab (seeded, one probe step) like diag_text_sum. */
 static uint64_t route_identity(const struct route *R, uint64_t rip)
 {
 	uint64_t c[2], k;

@@ -22,6 +22,8 @@
 
 #include <stdint.h>
 #include <kgenome_status.h>
+#include <kofcore.h>
+#include <celllysis/range_facts.h>
 
 struct kgenome_obj;
 
@@ -72,6 +74,64 @@ enum kgenome_status kofscfind_run(const struct kofscfind_in *in,
 enum kgenome_status kofscfind_find(const struct kgenome_obj *obj,
 				   const uint8_t *data, uint64_t n,
 				   struct kofscfind *out);
+
+/*
+ * THE LIST OF WHERE SHELLCODE COULD SIT, as rows: the table the examiner's Infection dialog shows on its Shellcode tab.
+ *
+ * Three kinds of row, in this order. FINDER: the payload kofscfind located (the caller hands in the answer it cached on the
+ * object, so the sweep is not run again), flagged, with the finder's own words. SYMBOL: an object symbol (a variable) that lives
+ * in memory the loader marks executable - ELF only, as a PE has no variable symbols; the finder's own symbol is the FINDER row
+ * and is not repeated. RANGE: a data range inside executable memory - an ELF section that is not code but sits in an executable
+ * segment, a segment or section that is writable AND executable, a PE section with execute permission that is data or writable.
+ * Each row carries the address (virtual address, or RVA in a PE), the file offset (KGENOME_NA when the file holds none), the size
+ * and the permission as KGENOME_PERM_* bits; the verdict text is the finder's and is empty on the other rows.
+ *
+ * THE FACTS COME FROM kgenome (the parsed view, the symbol reader, the loader's segment lookup); nothing is searched here.
+ * Bounded by KOFSCFIND_ROWS_MAX rows: more is KGENOME_TRUNCATED with `total` the number there would have been, so a cut is said.
+ * On an object that is not a valid ELF or PE the answer is KGENOME_UNSUPPORTED with no rows (the finder row excepted: it is
+ * the caller's own evidence and is returned whenever it was given).
+ */
+#define KOFSCFIND_ROWS_MAX  1024u
+/* The most bytes of code the lister's reference sweep reads (the library's budget.max_steps). The finder's own sweep keeps the
+ * library default (KGENOME_XREF_MAX, 8192) it was measured with; the lister reads the whole code of an ordinary program
+ * (/bin/ls: 130 KB) once. */
+#define KOFSCFIND_LIST_CODE_MAX  (1u << 20)
+#define KOFSCFIND_ROW_NAME  96u
+
+enum kofscfind_what { KOFSCFIND_W_FINDER = 1, KOFSCFIND_W_SYMBOL, KOFSCFIND_W_RANGE };
+
+struct kofscfind_row {
+	char     name[KOFSCFIND_ROW_NAME];  /* a symbol's name (cut for display), or the range and why it is listed; control bytes shown as '?' */
+	char     verdict[40];               /* the finder's verdict text, empty on the other rows */
+	uint32_t what;                      /* enum kofscfind_what */
+	uint32_t perm;                      /* KGENOME_PERM_* of the memory it is in, 0 when the place is not mapped */
+	uint32_t flagged;                   /* 1: the finder flagged it */
+	uint32_t bits;                      /* 32 or 64 where the payload said so, else 0 */
+	uint64_t va, off, size;             /* off KGENOME_NA when the file holds no bytes for it */
+	/* The library's facts about the range (kgenome_range_facts): references from the object's code by kind, decode share and
+	 * system call, entropy, shape. `facts_ok` is 0 when the range has no file bytes (nothing was asked). `strong` is this
+	 * lister's rule (see kofscfind_list in kofscfind.c); `flagged` is the finder OR strong. */
+	struct kgenome_range_facts facts;
+	uint32_t facts_ok;
+	uint32_t strong;
+	uint32_t seq;                       /* the order the candidates were found in: the sort's tie-break */
+};
+
+struct kofscfind_list_in {
+	const struct kgenome_obj *obj;
+	kof_buf                   file;
+	uint64_t                  payload_va, payload_len;   /* the finder's cached answer; payload_len 0: none found */
+	uint32_t                  payload_bits;
+	struct kofscfind_row     *out;
+	uint32_t                  cap;
+};
+
+struct kofscfind_list_res {
+	uint32_t n;       /* rows written */
+	uint32_t total;   /* rows there are */
+};
+
+enum kgenome_status kofscfind_list(const struct kofscfind_list_in *in, struct kofscfind_list_res *res);
 
 /*
  * THE PAYLOAD AS AN OBJECT OF ITS OWN, built by the tool.

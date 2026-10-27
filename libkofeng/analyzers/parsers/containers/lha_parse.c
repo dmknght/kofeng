@@ -282,6 +282,11 @@ int kof_lha_parse(kof_buf file, struct kof_lha_info *l, struct kof_obj_ctx *ctx)
 			break;
 		}
 		body = hdr_end;
+		/* KNOWN DEFECT WP2-D1 (2026-10-24, M) [sev M]: kof_lha_parse ends the walk on a member whose packed
+		 * size runs past EOF, saying only an anomaly bit. Trigger: middle of 3 members claims
+		 * 0xfffffff0. Effect: 1 of 3 opened, broken 0, limit_hits 0. Reproducer:
+		 * tests/unit/ctr_liars.c lha/claimBoth (green until fixed; also pins WP2-D1b, D2, D3). Fix:
+		 * DAMAGED from the TRUNCATED bit, or skip the member and find the next header. */
 		if ((uint64_t)csize > file.n - body) {
 			l->anomalies |= KOF_LHA_ANOM_TRUNCATED;
 			break;

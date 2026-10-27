@@ -122,7 +122,7 @@ def pid_mode_opens_a_process_snapshot():
             v.click(10, 4)
             v.key('down', 3)
             v.menu_item('Analysis', 'Dashboard')
-            check(v.dialog() and 'Properties' in v.dialog()[4], 'no properties for a process')
+            check(v.dialog() and 'Overview' in v.dialog()[4], 'no properties for a process')
             v.esc()
     finally:
         sl.kill()

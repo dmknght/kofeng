@@ -86,6 +86,10 @@ struct hx_step {
  *
  * Static rather than automatic: 8 x 8 x 512 bytes is not a stack frame, and this is
  * a build tool that compiles one pattern at a time. */
+/* KNOWN DEFECT R1c (2026-10-24, R) [sev L]: the pattern compiler keeps hx_step, hx_n_steps, hex_msg and rx_gap_* in writable
+ * statics (.bss 0x24e60 per the graph_bin audit), against the rule "no writable global state". Trigger: two threads compile a
+ * pattern at once. Effect: the steps and the error text of one are overwritten by the other. Reproducer: none (read).
+ * Fix: a context the caller supplies, as the comment above already says. */
 static struct hx_step hx_step[KOF_HEX_MAX_STEPS];
 static uint32_t       hx_n_steps;
 

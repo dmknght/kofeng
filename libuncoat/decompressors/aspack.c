@@ -49,6 +49,11 @@ struct asp {
  * Feed the shift register. Past the end of the input it feeds zeroes, for up to
  * KUNCOAT_ASPACK_LOOKAHEAD bytes - see the note in aspack.h - and fails after that.
  */
+/* KNOWN DEFECT WP5-F-ASP-1 (2026-10-25, M) [sev M]: asp_fill spends the KUNCOAT_ASPACK_LOOKAHEAD (0x10e) zero pad bytes on EVERY symbol, not only the last one's look-ahead.
+ * Trigger: an ASPack block cut short, or declared larger than the stream decodes to. Effect: up to 0x10e*8 bits of symbols are decoded out of zeros, fabricating
+ * thousands of output bytes and status OK once the declared size is reached (339 of 617 cut streams, 12 shapes, wrong or OK).
+ * Reproducer: tests_wp5/findings/aspack_cut_says_OK.bin; row ASPACK_LOOKAHEAD in tests/lib/uncoat/cov_aspack_roundtrip.c (green until fixed).
+ * Fix: allow the pad only to complete the last symbol's window and report TRUNCATED when a symbol's first bit lies in the pad. */
 static int asp_fill(struct asp *s)
 {
 	while (s->bitpos >= 8u) {

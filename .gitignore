@@ -10,3 +10,7 @@ build_det/
 *.swp
 *~
 .DS_Store
+
+# Python bytecode written when the test scripts and the developer tools run.
+__pycache__/
+*.pyc

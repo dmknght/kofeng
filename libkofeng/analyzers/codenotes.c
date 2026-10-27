@@ -70,6 +70,11 @@ static void note_add(struct nb *b, uint64_t at, unsigned kind, const char *fmt, 
 		b->pcap = nc;
 	}
 	if (o->n == b->cap) {
+		/* KNOWN DEFECT REV-D8f (2026-10-25, Inference) [sev L]: the note collector (codenotes.c) doubles a uint32 capacity
+		 * (notes) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements of this kind
+		 * (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly). Reproducer:
+		 * none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against UINT32_MAX / 2
+		 * before doubling. */
 		uint32_t nc = b->cap ? b->cap * 2u : 256u;
 		struct kof_note *nv = realloc(o->v, (size_t)nc * sizeof *nv);
 
@@ -276,6 +281,10 @@ int kof_codenotes_build(const struct kof_obj_ctx *ctx, kof_buf data, const struc
 		have_rel = 1;
 		rp = rel.n ? &rel : NULL;
 	}
+	/* KNOWN DEFECT D18b (2026-10-24, R) [sev L]: kof_codenotes_build builds its own codemap (and relocation table) of the
+	 * object; the lineage stage builds another (diag_lineage.c), so a decode sweep runs twice. Trigger: the examiner's
+	 * disasm panel on an object a scan already analysed. Effect: work done twice, and two tables of one fact.
+	 * Reproducer: none (read, STATUS D12/D18). Fix: the engine publishes its codemap as a product and this adopts it. */
 	if (!kgenome_codemap_build(&gobj, data.p, data.n, rp, &cm)) {
 		out->status = cm.status;
 		if (have_rel)

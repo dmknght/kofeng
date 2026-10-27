@@ -161,6 +161,11 @@ void sx_norm_keep_exec(uint8_t *keep, uint64_t n,
 		sx_bits_clr(keep, r[i].off, end);
 	}
 	/* ...and give back only what is instructions. */
+	/* KNOWN DEFECT E-RWX (2026-10-24, R) [sev L]: the ELF half gives back every PROGBITS+EXEC section whatever its write bit,
+	 * the PE half (sx_norm_keep_exec_pe) takes a writable code section out of the kept set. Trigger: an ELF with a
+	 * writable executable section (a packed or unpacked image). Effect: its strings are never narrowed in the view, the
+	 * case the PE rule was made for (8.6 MB RWX, 7,434 UTF-16LE runs); not measured on ELF. Reproducer: none.
+	 * Fix: measure on an RWX ELF corpus, then apply the same SHF_WRITE test here. */
 	for (i = 0; i < e->sec_count && i < KGENOME_ELF_MAX_SECTIONS; i++) {
 		const struct kgenome_elf_sec *c = &e->sec[i];
 		uint64_t at, have;

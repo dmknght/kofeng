@@ -224,6 +224,10 @@ int kgenome_clr_read(kof_buf obj, uint64_t clr_off, kgenome_clr_rva rva,
 			/* Two headers claiming the same heap. The first wins;
 			 * honouring the second would put one heap's bytes in two
 			 * places, which is what the partition forbids. */
+			/* KNOWN DEFECT E-CLROVER (2026-10-24, R) [sev L]: KGENOME_CLR_ANOM_STREAM_OVER fires only for a repeated stream name, not for
+			 * two differently named streams whose byte ranges overlap. Trigger: #Strings and #Blob headers naming overlapping
+			 * ranges. Effect: one byte is in two heaps (searched twice, the partition's rule broken) and no anomaly is said.
+			 * Reproducer: none (read). Fix: compare clip_stream's range against every earlier slot, set the bit on overlap. */
 			out->anomalies |= KGENOME_CLR_ANOM_STREAM_OVER;
 			continue;
 		}

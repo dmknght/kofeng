@@ -2,6 +2,10 @@
 
 #include "nucleo_private.h"
 
+/* KNOWN DEFECT REV-D16 (2026-10-25, R) [sev L]: no make target regenerates this file and diffs it against the committed copy, so a hand edit or a stale table is not caught.
+ * Trigger: a nucleo_names_*.c changes and tools/gen_nucleo_index.py is not run. Effect: the index answers for the old rows; only tests/lib/genome/nucleo_index.c notices (every row against the scan).
+ * Reproducer: python3 tools/gen_nucleo_index.py scratch.c libgenome/celllysis && cmp scratch.c libgenome/celllysis/nucleo_index.c (equal on 2026-10-25).
+ * Fix: add a target (check-rules or unit) that runs the generator to a scratch file and cmp's it. */
 static const uint16_t idx_elf[512] = {
 	0, 0, 0, 5, 0, 0, 0, 81, 177, 0, 0, 0, 0, 0, 80, 0,
 	0, 0, 0, 40, 0, 8, 163, 0, 0, 0, 130, 0, 0, 0, 35, 0,

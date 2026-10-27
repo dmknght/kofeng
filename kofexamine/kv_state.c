@@ -147,12 +147,8 @@ char   g_clip[8192];
 size_t g_clip_n;
 
 const char *const bar_name[BM_COUNT] = {
-	/*
-	 * Hyphenated, because the bar is a row of single words and a title with
-	 * a space in it reads as two of them - "Switch" and "File" - which is a
-	 * menu that does not exist next to a menu that does.
-	 */
-	"File", "Edit", "Analysis", "Switch-File", "Help"
+	/* One word each: the bar is a row of single words, and a title with a space in it reads as two of them. */
+	"File", "Edit", "Analysis", "Manage", "Help"
 };
 
 /* ---- the properties page --------------------------------------------------------
@@ -188,20 +184,6 @@ const char *const bar_name[BM_COUNT] = {
 struct prop_line g_prop[PROP_MAX];
 uint32_t         g_n_prop;
 
-uint32_t g_prop_tab_off[PROP_TAB_COUNT];
-/*
- * HOW FAR EACH TABLE IS SCROLLED SIDEWAYS, in columns.
- *
- * A value is routinely wider than the column it is in - a PATH or an
- * LD_LIBRARY_PATH runs past any width worth giving it - and the page itself
- * does not scroll sideways, so without this the tail of such a value is
- * unreachable. Shift and the wheel, which is the gesture every terminal
- * already uses for it.
- */
-uint32_t g_prop_tab_hoff[PROP_TAB_COUNT];
-int      g_prop_tab_scroll_v[PROP_TAB_COUNT];
-int      g_prop_tab_scroll_h[PROP_TAB_COUNT];
-
 /* g_mx, g_my are declared beside struct hit - the row callbacks need them. */
 int g_mod_shift;         /* shift was held for it */
 int g_mod_ctrl;          /* and control, which slides text sideways */
@@ -212,7 +194,7 @@ int g_mod_ctrl;          /* and control, which slides text sideways */
 
 /*
  * WHERE EACH DIALOG'S BOX ENDED UP, recorded as it is drawn and read when it is
- * clicked - the same arrangement g_prop_tab_* uses for the tables, and for the
+ * clicked - the same arrangement the dashboard uses (view.prop_geo), and for the
  * same reason: the geometry exists in one place, the drawing, and a second copy
  * of the arithmetic in the click handler is a second thing to keep in step.
  */

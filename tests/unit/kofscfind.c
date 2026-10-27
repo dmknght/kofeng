@@ -17,161 +17,12 @@
 #include <celllysis/celllysis.h>
 #include <celllysis/xref.h>
 #include "../../kofexamine/kofscfind.h"
+#include <uncoat.h>
+#include "known_miss.h"
 
-#define TEXT_VA   0x400100ull
-#define BLOB_N    128u
-
-enum shape {
-	INLINE_CALLED,        /* the blob is a global array, and the code calls it    */
-	INLINE_READ,          /* ... and the code only reads it                       */
-	INLINE_LIBRARY,       /* ... in a file with no PT_INTERP                      */
-	INLINE_TABLE,         /* ... and the blob is one repeated byte                */
-	INLINE_BIGCODE,       /* ... in a file that is mostly code                    */
-	INLINE_BASE64,        /* the blob is base64 text and the code calls it        */
-	POINTER_CALLED        /* the global is a pointer to a clear blob in .rodata   */
-};
+#include "../lib/scf_img.h"
 
 static uint8_t img[1u << 16];
-
-static uint32_t lcg(uint32_t *s)
-{
-	*s = *s * 1664525u + 1013904223u;
-	return *s >> 16;
-}
-
-static void sec_hdr(uint8_t *h, uint32_t name, uint32_t type, uint64_t flags,
-		    uint64_t addr, uint64_t off, uint64_t size, uint32_t link,
-		    uint32_t info, uint64_t esz)
-{
-	put32(h, 0, name);
-	put32(h, 4, type);
-	put64(h, 8, flags);
-	put64(h, 16, addr);
-	put64(h, 24, off);
-	put64(h, 32, size);
-	put32(h, 40, link);
-	put32(h, 44, info);
-	put64(h, 48, 1);
-	put64(h, 56, esz);
-}
-
-/*
- * An x86-64 ELF with PT_INTERP, a .text of a few instructions and a global the
- * code treats in the way `shape` says. Returns the length.
- */
-static uint64_t build(uint8_t *b, enum shape shape)
-{
-	static const char shs[] = "\0.text\0.rodata\0.data\0.symtab\0.strtab\0.shstrtab\0";
-	static const char str[] = "\0_start\0payload\0";
-	const uint64_t text_off = 0x100, ro_off = 0x180, data_off = 0x400;
-	uint64_t var_va, var_n, sym_off, str_off, shstr_off, sh_off, len;
-	uint32_t seed = 0x1234567u, i, code_n = 0;
-	int ptr = shape == POINTER_CALLED, interp = shape != INLINE_LIBRARY;
-	uint8_t *c = b + text_off;
-
-	memset(b, 0, 0x2000);
-	memcpy(b, "\177ELF\2\1\1", 7);
-	put16(b, 16, 2);
-	put16(b, 18, 0x3e);
-	put32(b, 20, 1);
-	put64(b, 24, TEXT_VA);
-	put64(b, 32, 64);
-	put16(b, 52, 64);
-	put16(b, 54, 56);
-	put16(b, 56, 2);
-	put16(b, 58, 64);
-	/* program header 0: PT_INTERP (or PT_NOTE for the library), 1: one RWX PT_LOAD */
-	put32(b, 64, interp ? 3u : 4u);
-	put64(b, 64 + 8, 0xb0);
-	put64(b, 64 + 32, 12);
-	put32(b, 64 + 56, 1);
-	put32(b, 64 + 56 + 4, 7);
-	put64(b, 64 + 56 + 16, 0x400000);
-	put64(b, 64 + 56 + 32, 0x2000);
-	put64(b, 64 + 56 + 40, 0x2000);
-	memcpy(b + 0xb0, "/lib/ld.so", 11);
-
-	/* the data: the blob, or the pointer to it */
-	if (ptr) {
-		/* a clear blob in .rodata that makes a syscall, and a pointer to it */
-		for (i = 0; i < 64u; i++)
-			b[ro_off + i] = (uint8_t)(1u + lcg(&seed) % 254u);
-		b[ro_off + 20] = 0x0f;
-		b[ro_off + 21] = 0x05;
-		b[ro_off + 64] = 0;
-		put64(b, (unsigned)data_off, 0x400000ull + ro_off);
-		var_n = 8;
-	} else {
-		for (i = 0; i < BLOB_N; i++)
-			b[data_off + i] = shape == INLINE_TABLE ? 0x41
-				: (uint8_t)(1u + lcg(&seed) % 254u);
-		if (shape == INLINE_BASE64) {
-			static const char a[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-			for (i = 0; i < BLOB_N; i++)
-				b[data_off + i] = (uint8_t)a[lcg(&seed) % 64u];
-		}
-		var_n = BLOB_N;
-	}
-	var_va = 0x400000ull + data_off;
-
-	/* the code: lea/mov rax,[rip+var]; call rax; ret - or a read and a ret */
-	{
-		uint64_t rip = TEXT_VA + 7u;
-		int32_t rel = (int32_t)(var_va - rip);
-
-		if (shape == INLINE_READ || shape == INLINE_LIBRARY) {
-			/* mov eax,[rip+rel]; ret : the variable is read and nothing more */
-			c[code_n++] = 0x8b; c[code_n++] = 0x05;
-			put32(c, code_n, (uint32_t)(int32_t)(var_va - (TEXT_VA + 6u)));
-			code_n += 4;
-			c[code_n++] = 0xc3;
-		} else {
-			c[code_n++] = 0x48;
-			c[code_n++] = ptr ? 0x8b : 0x8d;
-			c[code_n++] = 0x05;
-			put32(c, code_n, (uint32_t)rel);
-			code_n += 4;
-			c[code_n++] = 0xff; c[code_n++] = 0xd0;     /* call rax */
-			c[code_n++] = 0xc3;
-		}
-		if (shape == INLINE_BIGCODE)
-			code_n = 9000;              /* a program, not a loader */
-	}
-
-	sym_off = (data_off + var_n + 16u + 7u) & ~7ull;
-	str_off = sym_off + 3u * 24u;
-	shstr_off = str_off + sizeof str;
-	sh_off = (shstr_off + sizeof shs + 7u) & ~7ull;
-	memset(b + sym_off, 0, 3u * 24u);
-	put32(b + sym_off + 24, 0, 1);                       /* _start */
-	b[sym_off + 24 + 4] = 0x12;
-	put16(b + sym_off + 24, 6, 1);
-	put64(b + sym_off + 24, 8, TEXT_VA);
-	put64(b + sym_off + 24, 16, code_n);
-	put32(b + sym_off + 48, 0, 8);                       /* payload */
-	b[sym_off + 48 + 4] = 0x11;                          /* GLOBAL OBJECT */
-	put16(b + sym_off + 48, 6, 3);                       /* .data */
-	put64(b + sym_off + 48, 8, var_va);
-	put64(b + sym_off + 48, 16, var_n);
-	memcpy(b + str_off, str, sizeof str);
-	memcpy(b + shstr_off, shs, sizeof shs);
-
-	memset(b + sh_off, 0, 7u * 64u);
-	sec_hdr(b + sh_off + 64, 1, 1, 6, TEXT_VA, text_off, code_n, 0, 0, 0);
-	sec_hdr(b + sh_off + 128, 7, 1, 2, 0x400000ull + ro_off, ro_off, 0x80, 0, 0, 0);
-	sec_hdr(b + sh_off + 192, 15, 1, 3, var_va, data_off, var_n, 0, 0, 0);
-	sec_hdr(b + sh_off + 256, 21, 2, 0, 0, sym_off, 3u * 24u, 5, 1, 24);
-	sec_hdr(b + sh_off + 320, 29, 3, 0, 0, str_off, sizeof str, 0, 0, 0);
-	sec_hdr(b + sh_off + 384, 37, 3, 0, 0, shstr_off, sizeof shs, 0, 0, 0);
-	put64(b, 40, sh_off);
-	put16(b, 60, 7);
-	put16(b, 62, 6);
-	len = sh_off + 7u * 64u;
-	if (shape == INLINE_BIGCODE)
-		len = len;      /* the code is claimed bigger than it is: the section says it */
-	return len;
-}
 
 /* ---- the lib on its own: the sweep is the test's answer ---------------------- */
 
@@ -331,6 +182,7 @@ static void find_tests(void)
 }
 
 
+
 /* ---- the payload as an object (what the viewer derives from the answer) ------ */
 
 /* Parses `n` bytes of `b` as the viewer would an object it was handed, and
@@ -419,12 +271,267 @@ static void image_tests(void)
 	CK(kofscfind_image(NULL, img, len, 1, out, sizeof out) == 0);
 }
 
+/* ---- hostile rows: truncated and corrupt objects, forged answers, caps ------- */
+
+/* The same parse as find_run, but a refusal is an answer here (a truncated object is
+ * allowed not to parse). Returns -1 when the object did not parse, else whether the
+ * search finished; `out` is always written whole when the search ran. */
+static int try_find(const uint8_t *b, uint64_t len, struct kofscfind *out)
+{
+	static struct kof_obj_ctx ctx;
+	static uint8_t view[1u << 16];
+	const struct kof_parser *pl;
+	kof_buf buf = kof_buf_make(b, len);
+	struct kgenome_obj gobj;
+	uint32_t np, i;
+	int ok = 0;
+
+	memset(&ctx, 0, sizeof ctx);
+	memset(view, 0, sizeof view);
+	pl = kof_parser_list(&np);
+	for (i = 0; i < np && !ok; i++)
+		ok = pl[i].sniff && pl[i].sniff(buf) && pl[i].parse &&
+		     pl[i].parse(buf, view, &ctx);
+	if (!ok)
+		return -1;
+	kof_genome_obj(&ctx, &gobj);
+	memset(out, 0xa5, sizeof *out);
+	return kofscfind_find(&gobj, b, len, out) == KGENOME_OK;
+}
+
+/* What every answer must satisfy whatever the object looked like. */
+static void answer_ok(const struct kofscfind *f, uint64_t len, const char *what)
+{
+	if (!f->found)
+		return;
+	if (f->len < 16u || (f->len < KOFSCFIND_SIZE_MIN && !f->bits) || f->len > KOFSCFIND_SIZE_MAX ||
+	    f->at > len || f->len > len - f->at || f->dec_n > KOFSCFIND_SIZE_MAX ||
+	    (f->dec_n && f->len < 8u) || (f->bits != 0 && f->bits != 32 && f->bits != 64)) {
+		printf("  FAIL %s: found=%d at=%llu len=%llu dec_n=%u bits=%u object=%llu\n", what,
+		       f->found, (unsigned long long)f->at, (unsigned long long)f->len,
+		       f->dec_n, f->bits, (unsigned long long)len);
+		fails++;
+	}
+}
+
+static void hostile_tests(void)
+{
+	static const enum shape shapes[] = { INLINE_CALLED, INLINE_BASE64, POINTER_CALLED };
+	static struct kofscfind f;
+	static uint8_t work[1u << 16];
+	static uint8_t out[KOFSCFIND_IMAGE_MAX + 64u];
+	uint64_t len, p, cap, n;
+	unsigned s, v, parsed = 0, found = 0;
+	static const uint8_t flip[] = { 0x00, 0xff, 0x55 };
+
+	for (s = 0; s < sizeof shapes / sizeof shapes[0]; s++) {
+		len = build(img, shapes[s]);
+		/* every prefix: a truncated object is refused or answered inside itself */
+		for (p = 0; p <= len; p++) {
+			int r = try_find(img, p, &f);
+
+			if (r < 0)
+				continue;
+			parsed++;
+			answer_ok(&f, p, "prefix");
+			found += (unsigned)f.found;
+		}
+		/* every byte of the object set to three hostile values in turn */
+		memcpy(work, img, len);
+		for (p = 0; p < len; p++) {
+			uint8_t keep = work[p];
+
+			for (v = 0; v < 3; v++) {
+				int r;
+
+				work[p] = (uint8_t)(flip[v] ^ (v == 2 ? keep : 0));
+				r = try_find(work, len, &f);
+				if (r >= 0)
+					answer_ok(&f, len, "byte flip");
+			}
+			work[p] = keep;
+		}
+	}
+	CK(parsed > 100);   /* the sweep did reach the search, not only the parse refusal */
+	CK(found > 0);      /* and the whole object is among the prefixes */
+
+	/* kofscfind_image: every cap from 0 to one past the need; the bytes after `cap` stay as they were */
+	len = build(img, INLINE_CALLED);
+	CK(find_run(len, &f) && f.found);
+	for (cap = 0; cap <= KOFSCFIND_HDR_ROOM + BLOB_N + 8u; cap++) {
+		uint64_t need = KOFSCFIND_HDR_ROOM + BLOB_N;
+
+		memset(out, 0xcc, sizeof out);
+		n = kofscfind_image(&f, img, len, 1, out, cap);
+		CK(n == (cap >= need ? need : 0));
+		for (p = cap; p < sizeof out; p++)
+			if (out[p] != 0xcc) {
+				CK(!"kofscfind_image wrote past its cap");
+				break;
+			}
+	}
+	/* forged answers: a length that wraps, an offset past the object, a decoded count past the buffer */
+	{
+		struct kofscfind g = f;
+
+		g.len = ~0ull;
+		CK(kofscfind_image(&g, img, len, 1, out, sizeof out) == 0);
+		g = f; g.at = ~0ull;
+		CK(kofscfind_image(&g, img, len, 1, out, sizeof out) == 0);
+		g = f; g.at = len; g.len = 1;
+		CK(kofscfind_image(&g, img, len, 1, out, sizeof out) == 0);
+		g = f; g.dec_n = KOFSCFIND_SIZE_MAX + 1u;
+		n = kofscfind_image(&g, img, len, 1, out, sizeof out);
+		CK(n == 0 || n <= sizeof out);
+		g = f; g.len = KOFSCFIND_SIZE_MAX + 1u;
+		CK(kofscfind_image(&g, img, len, 1, out, sizeof out) == 0);
+		g = f; g.found = 0;
+		CK(kofscfind_image(&g, img, len, 1, out, sizeof out) == 0);
+		CK(kofscfind_image(&f, NULL, len, 1, out, sizeof out) == 0);
+		CK(kofscfind_image(&f, img, len, 1, NULL, sizeof out) == 0);
+	}
+	/* kofscfind_run with no object and a non-ELF object */
+	{
+		struct kofscfind_in in;
+
+		memset(&in, 0, sizeof in);
+		memset(&f, 0x5a, sizeof f);
+		CK(kofscfind_run(&in, &f) != KGENOME_OK || !f.found);
+	}
+}
+
+/* KNOWN DEFECTS pinned (green until fixed): D18 and EX-9, both in kofscfind.c's own b64. */
+static void b64_defect_rows(void)
+{
+	static struct kofscfind f;
+	uint64_t len;
+	uint8_t ref[KOFSCFIND_SIZE_MAX];
+	struct kuncoat_step st;
+	uint64_t got = 0;
+	enum kuncoat_status ks;
+
+	/* EX-9 (2026-10-27, M) [sev L]: kofscfind.c b64() says "a NUL with data after it is not a string and not
+	 * base64" and `break`s on the first NUL whatever follows. Trigger: a base64 blob with a NUL at byte 64 and
+	 * text after it. Effect: the payload is decoded from its first half and shown as the loader's payload.
+	 * Expected (the comment): no decode. Fix: after the NUL, require only NULs to the end of the symbol. */
+	len = build(img, INLINE_BASE64);
+	img[0x400 + 64] = 0;
+	if (find_run(len, &f) && f.found)
+		KM_CHECK(f.dec_n == 0, "b64 stops at a NUL in the middle of the text and decodes the first half", "EX-9");
+	else
+		KM_CHECK(0, "(EX-9 row could not reach the decode: the object is not found with a NUL inside)", "EX-9");
+
+	/* D18: the examiner's decoder and kuncoat's disagree (measured, a space at byte 40 of 128 base64 characters:
+	 * kuncoat skips whitespace and decodes 95 bytes, the finder refuses the text; a NUL at byte 40: the finder
+	 * decodes 30 bytes, kuncoat answers BAD). */
+	len = build(img, INLINE_BASE64);
+	img[0x400 + 40] = ' ';
+	memset(&st, 0, sizeof st);
+	st.algo = KUNCOAT_ALGO_B64;
+	st.dir = KUNCOAT_DECODE;
+	ks = kuncoat_transform(&st, img + 0x400, BLOB_N, ref, sizeof ref, &got);
+	if (find_run(len, &f) && f.found) {
+		int agree = ks == KUNCOAT_OK ? (got == f.dec_n && !memcmp(ref, f.dec, f.dec_n)) : f.dec_n == 0;
+
+		KM_CHECK(agree, "kofscfind b64 and kuncoat B64 give different answers for a space inside the text", "D18");
+	} else {
+		KM_CHECK(0, "(D18 row: the finder did not find the blob with a space inside)", "D18");
+	}
+}
+
+/* ---- the candidate list with its facts (kofscfind_list calls the library once per candidate and applies the strong rule) ---- */
+
+static struct kofscfind_row lrows[KOFSCFIND_ROWS_MAX];
+
+static uint32_t list_img(uint64_t n, uint64_t pay_va, uint64_t pay_len, struct kofscfind_list_res *rs)
+{
+	struct kgenome_obj gobj;
+	struct kofscfind_list_in in;
+
+	CK(parse_img(img, n, &gobj) != NULL);
+	memset(&in, 0, sizeof in);
+	in.obj = &gobj;
+	in.file = kof_buf_make(img, n);
+	in.payload_va = pay_va;
+	in.payload_len = pay_len;
+	in.out = lrows;
+	in.cap = KOFSCFIND_ROWS_MAX;
+	(void)kofscfind_list(&in, rs);
+	return rs->n;
+}
+
+static int row_named(const struct kofscfind_list_res *rs, const char *name)
+{
+	uint32_t i;
+
+	for (i = 0; i < rs->n; i++)
+		if (strcmp(lrows[i].name, name) == 0)
+			return (int)i;
+	return -1;
+}
+
+static void list_tests(void)
+{
+	static const uint8_t code[] = { 0x48, 0x31, 0xc0, 0xb0, 0x3b, 0x0f, 0x05, 0xc3, 0x90, 0x90, 0x90, 0x90 };
+	struct kofscfind_list_res rs;
+	uint64_t len;
+	int r;
+	uint32_t i;
+
+	/* the variable holds instructions with a system call and the code calls it: strong, and first, without the finder's help */
+	len = build(img, INLINE_CALLED);
+	memcpy(img + 0x400, code, sizeof code);
+	memset(img + 0x400 + sizeof code, 0x90, BLOB_N - sizeof code);
+	list_img(len, 0, 0, &rs);
+	r = row_named(&rs, "payload");
+	CK(r == 0 && lrows[0].what == KOFSCFIND_W_SYMBOL);
+	CK(lrows[0].facts_ok && lrows[0].facts.refs_known && lrows[0].facts.refs.call >= 1u && lrows[0].facts.syscall &&
+	   lrows[0].facts.shape == KGENOME_RANGE_CODE_LIKE && lrows[0].strong && lrows[0].flagged);
+	/* another row is strong only when it holds the same bytes (the section the variable is in) */
+	for (i = 1; i < rs.n; i++)
+		CK(!lrows[i].strong || (lrows[i].off <= 0x400u && lrows[i].off + lrows[i].size > 0x400u));
+
+	/* the same bytes and nobody refers to them (the code is overwritten with nops): the facts say code-like with a system call,
+	 * the rule does not fire, and the row is not first of the flagged */
+	memset(img + 0x100, 0x90, 16);
+	list_img(len, 0, 0, &rs);
+	r = row_named(&rs, "payload");
+	CK(r >= 0 && lrows[r].facts.refs_known && lrows[r].facts.refs.call == 0u && lrows[r].facts.refs.read == 0u &&
+	   lrows[r].facts.syscall && lrows[r].facts.shape == KGENOME_RANGE_CODE_LIKE && !lrows[r].strong && !lrows[r].flagged);
+
+	/* a string that is called: text, no system call, not strong */
+	len = build(img, INLINE_CALLED);
+	memcpy(img + 0x400, "hello world, hello world, hello world, hello world, hello world, hello world, hello world, hello world, hello.", 110);
+	list_img(len, 0, 0, &rs);
+	r = row_named(&rs, "payload");
+	CK(r >= 0 && lrows[r].facts.shape == KGENOME_RANGE_TEXT && !lrows[r].facts.syscall && !lrows[r].strong);
+
+	/* the finder's answer: its row first, flagged, with the facts; the same symbol is not listed twice */
+	len = build(img, INLINE_CALLED);
+	list_img(len, 0x400400ull, BLOB_N, &rs);
+	CK(rs.n >= 1u && lrows[0].what == KOFSCFIND_W_FINDER && lrows[0].flagged && lrows[0].facts_ok && lrows[0].size == BLOB_N);
+	CK(lrows[0].facts.refs.call >= 1u && lrows[0].facts.decodes);
+	for (i = 1; i < rs.n; i++)
+		CK(lrows[i].what != KOFSCFIND_W_SYMBOL);
+	/* the rows past the flagged ones are in address order inside each evidence group */
+	{
+		uint32_t k;
+
+		for (k = 2; k < rs.n; k++)
+			CK(lrows[k - 1u].flagged || lrows[k].flagged || lrows[k - 1u].va <= lrows[k].va ||
+			   (lrows[k - 1u].facts.refs.read + lrows[k - 1u].facts.refs.call > 0u) != (lrows[k].facts.refs.read + lrows[k].facts.refs.call > 0u));
+	}
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc; (void)argv;
 	run_tests();
 	find_tests();
 	image_tests();
-	printf("kofscfind: %s\n", fails ? "FAILED" : "ok");
-	return fails != 0;
+	hostile_tests();
+	b64_defect_rows();
+	list_tests();
+	printf("kofscfind: %s\n", fails || km_failed() ? "FAILED" : "ok");
+	return fails != 0 || km_failed();
 }

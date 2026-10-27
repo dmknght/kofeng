@@ -300,120 +300,12 @@ int handle_bar_key(struct view *v, int k)
  */
 int handle_copy_key(struct view *v, int k)
 {
-	if (k == 0x03 && v->sym_open && v->dlg_have) {
-		dlg_copy(v);
-		return 1;
-	}
 	if (k == 0x03 && v->dis_open && (v->dis_have || dis_hex_sel(v)) &&
 	    !v->prop_open && !v->find_open && !v->edit) {
 		dis_copy(v);
 		return 1;
 	}
 
-	/*
-	 * THE SYMBOLS DIALOG OWNS THE KEYBOARD WHILE IT IS UP.
-	 *
-	 * Everything it does not use is swallowed rather than passed down. It
-	 * is a modal over the pane, so a Down arrow meant for the table must
-	 * not scroll a hex pane the reader cannot see - which is the failure
-	 * that makes a dialog feel like it is not really there. The mouse is
-	 * NOT swallowed here: click() holds the hit test for the box, the same
-	 * arrangement the menu bar above needed and for the same reason.
-	 *
-	 * Tab switches halves, because two tabs a click apart want a key too,
-	 * and it is the key every other tabbed thing uses.
-	 */
-	return -1;
-}
-
-/*
- * handle_symd_key - a key while the symbols dialog is open.
- *
- * Lifted out of handle() whole. -1 means "not mine, carry on down the chain",
- * which is what falling out of the bottom of this block used to mean; anything
- * else is what handle() itself would have returned.
- */
-int handle_symd_key(struct view *v, int k)
-{
-	if (v->sym_open && !(k >= K_CLICK && k <= K_RELEASE)) {
-		int pg = symd_rows() > 1 ? symd_rows() - 1 : 1;
-
-		/*
-		 * TYPING GOES TO THE FILTER WHILE IT IS OPEN, and only then.
-		 *
-		 * The dialog's own keys are arrows, Tab and Escape; a field
-		 * that swallowed those would be a field nobody could leave.
-		 * Escape closes the field rather than the dialog, which is the
-		 * one place this differs from the rest of the program and is
-		 * what a reader who mistyped a pattern expects.
-		 */
-		if (v->edit == ED_SYMFILT) {
-			/*
-			 * ONE EDITOR. field_key is what every other field in
-			 * this program uses, so the caret, the selection,
-			 * Ctrl+A and paste behave here the way they do
-			 * everywhere - a hand-written copy is a copy that
-			 * drifts, and this one had already drifted before it
-			 * was a day old.
-			 *
-			 * Two keys are the dialog's rather than the field's:
-			 * the vertical ones scroll the list underneath, which
-			 * is what a reader narrowing a long table expects, and
-			 * Escape closes the FIELD - the dialog's own Escape
-			 * would take the table away with it.
-			 */
-			switch (k) {
-			case K_UP: case K_DOWN: case K_PGUP: case K_PGDN:
-				break;          /* the dialog's, see below */
-			case 27:
-				v->edit = 0;
-				return 1;
-			default: {
-				int r2 = field_key(v, v->sy_filt,
-						   sizeof v->sy_filt, k, NULL);
-
-				if (k == '\r' || k == '\n')
-					v->edit = 0;
-				symd_filter_compile(v);
-				v->sym_at = 0;
-				return r2;
-			}
-			}
-		}
-		switch (k) {
-		/* Escape and the close button, and no letter - see the note on
-		 * bare keys in handle(). */
-		case 27:
-			dlg_close(v);
-			break;
-		case '\t':
-			v->sym_open = v->sym_open == SYMN_IMP ? SYMN_EXP
-							     : SYMN_IMP;
-			v->sym_at = 0;
-			v->sym_hoff = 0;
-			break;
-		case K_UP:    symd_scroll(v, -1);            break;
-		case K_DOWN:  symd_scroll(v, 1);             break;
-		case K_LEFT:  symd_hscroll(v, -4);           break;
-		case K_RIGHT: symd_hscroll(v, 4);            break;
-		case K_PGUP:  symd_scroll(v, -(int64_t)pg);  break;
-		case K_PGDN:  symd_scroll(v, pg);            break;
-		case K_HOME:  v->sym_at = 0;                 break;
-		case K_END:   v->sym_at = symd_max(v);       break;
-		default:      break;
-		}
-		return 1;
-	}
-
-	/*
-	 * The properties page owns the keyboard while it is up.
-	 *
-	 * Unlike the two help boxes it is a page rather than a card, so "any
-	 * key closes" is the wrong contract: the keys a reader reaches for are
-	 * the ones that move down it. Only the three that mean "done" close it,
-	 * and everything else is swallowed so a keystroke meant for the page
-	 * does not land on the draft behind it.
-	 */
 	return -1;
 }
 
@@ -503,79 +395,48 @@ int handle_enc_key(struct view *v, int k)
 int handle_prop_key(struct view *v, int k)
 {
 	if (v->prop_open) {
-		int room = g_rows - 6;
+		/* A page key steps by what the body shows of the scrolling lines. */
+		int room = v->prop_geo.body_rows - (int)v->prop_fixed;
 
 		if (room < 1)
 			room = 1;
+		/* What acts INSIDE a symbol page - the filter field, the sideways pan - before the page's own
+		 * keys below. */
+		if (prop_page_key(v, k))
+			return 1;
 		switch (k) {
 		case K_UP:
-			if (v->prop_off)
-				v->prop_off--;
+			prop_scroll(v, -1, 0);
 			return 1;
 		case K_DOWN:
-			v->prop_off++;
+			prop_scroll(v, 1, 0);
 			return 1;
 		case K_WHEEL_UP:
 		case K_WHEEL_DOWN: {
 			/*
-			 * A WHEEL OVER A TABLE SCROLLS THAT TABLE, and the
-			 * page otherwise.
-			 *
-			 * Which is what a reader means by it: a table with its
-			 * own window is a thing to scroll, and scrolling the
-			 * page under the pointer instead moves the table out
-			 * from under it. The page is still what the wheel gets
-			 * anywhere else, and the arrows and PgUp always mean
-			 * the page - so nothing that worked stops working.
+			 * THE WHEEL MOVES THE PAGE, wherever the pointer is: a table is lines of the page, so there is
+			 * nothing else to scroll. Shift (or ctrl) means sideways, which is the gesture every terminal
+			 * already uses for it and the only way to reach the tail of a wide table row.
 			 */
-			int t = prop_tab_at(v, g_my, g_mx);
+			int sign = k == K_WHEEL_UP ? -1 : 1;
 
-			/*
-			 * ONLY IF IT CAN MOVE. A table with fewer rows than it
-			 * shows has no scroll to take, and taking the wheel
-			 * anyway left the page stuck under it.
-			 */
-			if (t >= 0 && !(g_mod_shift ? g_prop_tab_scroll_h[t]
-						    : g_prop_tab_scroll_v[t]))
-				t = -1;
-			if (t >= 0) {
-				/*
-				 * SHIFT MEANS SIDEWAYS, which is the gesture
-				 * every terminal already uses for it - and the
-				 * only way to reach the tail of a PATH, since
-				 * the page itself has no horizontal scroll.
-				 */
-				uint32_t *off = g_mod_shift
-						? &g_prop_tab_hoff[t]
-						: &g_prop_tab_off[t];
-				uint32_t step = g_mod_shift ? 8u : 1u;
-
-				if (k == K_WHEEL_UP)
-					*off = *off > step ? *off - step : 0u;
-				else
-					*off += step;
-				return 1;
-			}
-			if (k == K_WHEEL_UP)
-				v->prop_off = v->prop_off > 3u
-					      ? v->prop_off - 3u : 0;
+			if (g_mod_shift || g_mod_ctrl)
+				prop_scroll(v, 0, sign * PROP_WHEEL_COLS);
 			else
-				v->prop_off += 3u;
+				prop_scroll(v, sign * PROP_WHEEL_ROWS, 0);
 			return 1;
 		}
 		case K_PGUP:
-			v->prop_off = v->prop_off > (uint32_t)room
-				      ? v->prop_off - (uint32_t)room : 0;
+			prop_scroll(v, -room, 0);
 			return 1;
 		case K_PGDN:
-			v->prop_off += (uint32_t)room;
+			prop_scroll(v, room, 0);
 			return 1;
 		case K_HOME:
 			v->prop_off = 0;
 			return 1;
 		case K_END:
-			/* Clamped where it is drawn, which is the only place
-			 * that knows how many lines there are. */
+			/* Clamped where it is drawn, which is the only place that knows how many lines there are. */
 			v->prop_off = 0xffffffu;
 			return 1;
 		case K_DRAG:
@@ -607,7 +468,7 @@ int handle_prop_key(struct view *v, int k)
 		case 27:
 		case '\r':
 		case '\n':
-			v->prop_open = 0;
+			prop_close(v);
 			return 1;
 		case K_CLICK:
 		case K_RCLICK:
@@ -625,11 +486,13 @@ int handle_prop_key(struct view *v, int k)
 			 * dialog's recorded text and this one is no longer an
 			 * exception to it.
 			 */
-			if (g_my == v->prop_y && g_mx >= v->prop_x0 &&
-			    g_mx <= v->prop_x1) {
-				v->prop_open = 0;
+			if (kv_dd_close_at(&v->prop_geo, g_my, g_mx)) {
+				prop_close(v);
 				return 1;
 			}
+			/* The tab strip and the symbol filter's controls. */
+			if (k == K_CLICK && prop_click(v))
+				return 1;
 			/*
 			 * -1, NOT 0. In this function 0 means "handled, and the
 			 * answer is 0" - and 0 is what handle() returns to quit.

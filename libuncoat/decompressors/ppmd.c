@@ -1532,6 +1532,12 @@ int kuncoat_ppmd_start_asked(struct kuncoat_ppmd *m, int max_order, uint64_t ask
 		return 0;
 	if (m->arena_size != (uint32_t)arena) {
 		free(m->arena);
+		/* KNOWN DEFECT WP2-D12 (2026-10-24, M) [sev M]: kuncoat_ppmd_start_asked callocs up to 64 MiB
+		 * (ARENA_MAX) a block header asks for, without the scan ledger. Trigger: RAR3 member of 80
+		 * bytes {0xa5, 63}, max_resident_bytes 24 MiB. Effect: 64 MiB allocated, peak_resident says
+		 * 976. Reproducer: tests/unit/ctr_resources.c ppmd_arena (green until fixed),
+		 * tests_wp2/findings/D12_rar3_ppmd_arena.bin. Fix: take it from a caller callback charged to
+		 * the ledger, refuse KUNCOAT_OVER_BUDGET. */
 		m->arena = calloc(1, (size_t)arena);       /* zero pages, taken when touched */
 		if (!m->arena) {
 			m->arena_size = 0;
@@ -1619,6 +1625,10 @@ int kuncoat_ppmd_next(struct kuncoat_ppmd *m)
 		do {
 			m->order_fall++;
 			c = ctx_at(m, m->min_context);
+			/* KNOWN DEFECT WP5-F-PPMD-1 (2026-10-25, M) [sev L]: kuncoat_ppmd_next does not latch -1: m->broken stays 0 and min_context has already moved to the suffix.
+			 * Trigger: an escape out of the root context (or another `return -1` exit), then another call on the same model. Effect: the next call continues from a different
+			 * context and can return a symbol, against ppmd.h ("-1 when the stream or the model gave out"); rar3.c stops at the first -1, so nothing in the tree is hurt.
+			 * Reproducer: tests_wp5/findings/ppmd_next_after_minus1_seed0_text.bin. Fix: set m->broken = 1 before each `return -1` of the escape walk. */
 			if (!c || !c->suffix)
 				return -1;
 			m->min_context = c->suffix;

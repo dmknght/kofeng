@@ -479,6 +479,12 @@ static int tree_collect(const char *base, char (**srcs)[TREE_SRC_MAX],
 			 */
 			if (strcmp(e->d_name, "syndromes") == 0)
 				continue;
+			/*
+			 * THE PATHOGEN CATALOG (bases/pathogens: one file per malware family, written by the examiner's Pathogens
+			 * dialog) is data the same way: declarations the tools read, no module, no pack.
+			 */
+			if (strcmp(e->d_name, "pathogens") == 0)
+				continue;
 			sd = opendir(path);
 			if (!sd)
 				continue;

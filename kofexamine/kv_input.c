@@ -149,6 +149,11 @@ static int read_mouse_x10(void)
 	return K_CLICK;
 }
 
+/* KNOWN DEFECT DASH-2 (2026-10-27, R) [sev L]: a horizontal wheel notch (SGR buttons 66 and 67: bit 0x40 with the low bits 2 and 3)
+ * falls through the wheel tests below to `(b & 3) == 2` and arrives as K_RCLICK (67 as K_CLICK), so a tilt wheel clicks.
+ * Trigger: a tilt wheel or a touchpad's sideways scroll over the viewer. Effect: a right or left click where the
+ * pointer is. Reproducer: none yet (read; v.hwheel in tui.py sends shift+wheel, not these buttons).
+ * Fix: map 66/67 to two new sideways events and let the dashboard's sideways scroll (prop_scroll) take them. */
 static int read_mouse(void)
 {
 	char t[32];

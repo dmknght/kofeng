@@ -988,6 +988,10 @@ static int kof_src_tmpfile_in(char *dir_out, size_t dir_cap, const char *first);
  */
 const char *kof_src_tmpdir(void)
 {
+	/* KNOWN DEFECT R1b (2026-10-24, R) [sev L]: kof_src_tmpdir caches its answer in a writable static buffer filled without
+	 * a lock, against the rule "no writable global state". Trigger: two scanners on two threads make their first
+	 * spill file together. Effect: both write `kept`, a reader can see a half-written path (.bss 0x1000 per the graph_bin audit).
+	 * Reproducer: none (read). Fix: fill it under a once flag, or let the host pass the directory. */
 	static char kept[4096];
 	int fd;
 

@@ -826,6 +826,12 @@ uint32_t koffridge_load(struct koffridge *f, const char *path,
 	 * Inserting as it went would put half a cache into the table and then
 	 * discover the half was all there was.
 	 */
+	/* KNOWN DEFECT WP12-11 (2026-10-24, M) [sev M]: koffridge_load callocs
+	 * h.n_entries entries before looking at the file size. Trigger: a
+	 * 40-byte file whose header claims 4194304 entries. Effect: about 1280
+	 * MiB allocated, then the read fails. Reproducer: fuzz orbit/fridge_file
+	 * (FZ_MAY_HIT_CAP). Fix: refuse n_entries * sizeof *buf > the file
+	 * length. */
 	buf = h.n_entries ? calloc(h.n_entries, sizeof *buf) : NULL;
 	if (h.n_entries && !buf) {
 		fclose(fp);

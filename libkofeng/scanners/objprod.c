@@ -57,6 +57,10 @@ static struct kof_prod *prod_take(struct kof_scanner *sc)
 	p->refs = 1;
 	p->n_diag = sc->diag.cap;
 	p->bm = bm;
+	/* KNOWN DEFECT E-PROD (2026-10-24, R) [sev M]: prod_take allocates the product record (bits 3*bm, n_bind n, bind n*sizeof)
+	 * with calloc/malloc and never charges it to the scan's ledger (the engine memory cap, CLAUDE.md "one number").
+	 * Trigger: a database with many diagnoses and a normalised view that lives while other objects scan. Effect: resident
+	 * bytes exceed the cap by this record. Reproducer: none (read). Fix: scan_charge it and return it in kof_prod_unref. */
 	p->bits = malloc(3u * (size_t)bm);
 	p->n_bind = malloc(n);
 	p->bind = malloc((size_t)n * sizeof *p->bind);

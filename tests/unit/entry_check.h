@@ -56,14 +56,15 @@ struct ec_report {
 	uint64_t failed;
 	uint64_t no_table;       /* parsers that publish no entries yet */
 	int      quiet;
+	int      allow_same_range;   /* a format whose entries may name one range twice by design (a CAB's folders over one chain): skip that rule */
 };
 
 /* Is this a method id the engine could actually be handed?
  *
- * The enumeration is not contiguous - 1..13, then the NRV2 variants from 16,
+ * The enumeration is not contiguous - 1..15, the NRV2 variants from 16, aPLib to ASPack at 29..33,
  * then LZMA from 64 carrying lc/lp/pb in the id itself, which is why the top of
  * the range is 288 and not 64. Written out rather than bounded by the largest
- * value, because "less than the biggest" would accept 14 and 15, which name
+ * value, because "less than the biggest" would accept 34 to 63, which name
  * nothing and would reach a decoder switch that has no case for them.
  *
  * THE TOP OF THE FIRST RANGE HAS TO MOVE WHEN A DECODER IS ADDED, and that is
@@ -74,7 +75,13 @@ struct ec_report {
  * perform just as readily, and said nothing. */
 static int ec_method_ok(uint32_t m)
 {
-	if (m >= 1u && m <= 13u)
+	/* 14 (bzip2) and 15 (MSZIP) were missing: a CAB folder's entry names 15, so every cabinet of the container fuzz failed this check
+	 * on a method that is real (WP2). The ids from 29 (aPLib, LZMAT, ASPack) and the MPRESS / ASPack bases are real too. */
+	if (m >= 1u && m <= 15u)
+		return 1;
+	if (m >= KOF_UNP_APLIB && m <= KOF_UNP_ASPACK)
+		return 1;
+	if (m == KOF_UNP_LZMA_MPRESS32 || m == KOF_UNP_LZMA_MPRESS64 || m == KOF_UNP_ASPACK_E8E9)
 		return 1;
 	if (m >= KOF_UNP_LZHUF_ARJ && m <= KOF_UNP_LZHUF_LH7)
 		return 1;
@@ -194,7 +201,7 @@ static int ec_check(const char *what, const struct kof_obj_ctx *ctx,
 			if ((e->flags & KOF_ENT_F_SCATTERED) ||
 			    (tab[k].flags & KOF_ENT_F_SCATTERED))
 				continue;
-			if (tab[k].off == e->off && tab[k].len == e->len &&
+			if (!rep->allow_same_range && tab[k].off == e->off && tab[k].len == e->len &&
 			    e->len) {
 				why = "two entries over the same bytes";
 				goto done;

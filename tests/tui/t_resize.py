@@ -105,7 +105,7 @@ def resize_with_disasm_and_event_panels():
 
 @case(A)
 def resize_every_dialog_open():
-    for name, opener in (('symbols', lambda v: v.menu_item('Analysis', 'Symbols')),
+    for name, opener in (('imports tab', lambda v: open_dash_tab(v, 'Imports')),
                          ('props', lambda v: v.menu_item('Analysis', 'Dashboard')),
                          ('keys', lambda v: v.menu_item('Help', 'Keyboard')),
                          ('about', lambda v: v.menu_item('Help', 'About')),

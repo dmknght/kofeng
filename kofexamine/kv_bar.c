@@ -54,16 +54,17 @@ static const struct {
 	 */
 	int         sep;
 } bar_item[BI_COUNT] = {
-	{ "Quit",           BM_FILE, -1, 0 },
+	{ "Next File",      BM_FILE, -1, 0 },
+	{ "Previous File",  BM_FILE, -1, 0 },
+	{ "Quit",           BM_FILE, -1, 1 },
 	{ "Find...",        BM_EDIT, -1, 0 },
 	{ "Go to...",       BM_EDIT, -1, 0 },
 	{ "Dashboard",         BM_ANALYSIS, -1, 0 },
-	{ "Symbols",           BM_ANALYSIS, -1, 0 },
-	{ "Syndrome table",    BM_ANALYSIS, -1, 0 },
+	{ "Pathogens",  BM_MANAGE, -1, 0 },
+	{ "Syndromes",         BM_MANAGE, -1, 0 },
 	{ "Disassembly",       BM_ANALYSIS, -1, 0 },
 	{ "Analyze disassembly", BM_ANALYSIS, -1, 0 },
-	{ "Find shellcode in variables", BM_ANALYSIS, -1, 0 },
-	{ "Find infected data",       BM_ANALYSIS, -1, 0 },
+	{ "Infection",                BM_ANALYSIS, -1, 0 },
 	{ "Decode string",            BM_ANALYSIS, -1, 0 },
 	{ "Unpack with ...",   BM_ANALYSIS, -1, 1 },
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
@@ -74,13 +75,6 @@ static const struct {
 	{ "Dump",              BM_ANALYSIS, -1, 0 },
 	{ "Separate children", BM_ANALYSIS, -1, 0 },
 	{ "Rebuild database",  BM_ANALYSIS, -1, 0 },
-	/*
-	 * "Next" and "Previous", not "Next file" and "Previous file": the menu
-	 * they are in is called Switch-File, and repeating the noun in every
-	 * item under it is the sort of label that reads like a form.
-	 */
-	{ "Next",              BM_SWITCH, -1, 0 },
-	{ "Previous",          BM_SWITCH, -1, 0 },
 	{ "Filter events",     BM_ANALYSIS, -1, 1 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
 	{ "",                  BM_ANALYSIS, BI_FILTER, 0 },
@@ -288,7 +282,7 @@ static const char *bar_label(struct view *v, int i)
  *
  * Distinct from bar_enabled, which greys an item and says why. Something that
  * cannot apply to this KIND of object should not be a grey row a reader has to
- * click to be told about - Symbols on an event log is not "disabled", it is
+ * click to be told about - Disassembly on an event log is not "disabled", it is
  * meaningless, and a menu that lists it is a menu describing the wrong tool.
  */
 /*
@@ -327,67 +321,6 @@ int obj_maybe_code(const struct object *o)
 	default:
 		return kv_cap(KOF_FMT_UNKNOWN, KV_CAP_CODE);
 	}
-}
-
-/*
- * The object "Find shellcode in variables" would act on, or -1.
- *
- * ONE WALK, SHARED WITH THE ACTION. The item used to be enabled
- * unconditionally and the handler then did this search and printed "No
- * shellcode-like variable here" - so the menu promised something it had not
- * checked, and a reader learned the answer by being refused. Both call this
- * now, so what the menu offers and what the action finds cannot disagree.
- */
-static int findsc_target(const struct view *v)
-{
-	uint32_t me, k;
-
-	if (!v->n_node)
-		return -1;
-	me = v->node[v->sel_node].obj;
-	if (me >= v->n_obj)
-		return -1;
-	if (v->obj[me].payload_of)
-		return (int)me;
-	for (k = 0; k < v->n_obj; k++) {
-		size_t pn = strlen(v->obj[me].name);
-
-		if (k == me || v->obj[k].depth <= v->obj[me].depth)
-			continue;
-		if (strncmp(v->obj[k].name, v->obj[me].name, pn) == 0 &&
-		    v->obj[k].name[pn] == '/' && v->obj[k].payload_of)
-			return (int)k;
-	}
-	/*
-	 * AND THE LOADER ITSELF, WHICH IS WHAT THE RULE ACTUALLY ANSWERED.
-	 *
-	 * THIS NO LONGER DECIDES WHETHER THE ROW IS DRAWN - kv_cap does, on the
-	 * format, so the item is offered on every executable image whether or
-	 * not anything was found. What is left here is the other half: WHAT THE
-	 * ACTION ANSWERS with.
-	 *
-	 * The two tests above both ask about an EXTRACTED payload - a child
-	 * object payload_tag() marked, which needs the child to exist, to be
-	 * ELF, and to have the one-segment no-section shape kofscfind_image
-	 * writes. When kofscfind located a payload and no such object could be
-	 * derived (the list was full, the image did not fit), the walk would
-	 * fall through to -1 and the dialog would say "No shellcode-like
-	 * variable here" over a file where the analysis had the address.
-	 *
-	 * payload_at is that address - what kofscfind answered when the object
-	 * was examined, cached on it (scfind_object in kv_collect.c) and not
-	 * searched for again here. Answering with it lets the handler print
-	 * where and how big
-	 * instead; see the branch there that prints it rather than running
-	 * sc_kind() over the loader's own bytes, which would describe the
-	 * wrong thing confidently.
-	 *
-	 * LAST, so the extracted payload still wins when there is one: its
-	 * bytes are a better answer than an address inside the parent.
-	 */
-	if (v->obj[me].payload_at)
-		return (int)me;
-	return -1;
 }
 
 static int bar_shown(struct view *v, int i)
@@ -436,16 +369,6 @@ static int bar_shown(struct view *v, int i)
 	 * was opened without its children being separated. */
 	case BI_SEPARATE:
 		return v->heur_off && v->n_obj != 0;
-	case BI_SYMS: {
-		const struct object *o = cur_obj(v);
-
-		/* The format, then the file: a format with no symbol table
-		 * cannot have them, and a stripped one of a format that can
-		 * has none to show either. Neither is a wait. */
-		if (!o || !kv_cap(o->ctx.format, KV_CAP_SYMBOLS))
-			return 0;
-		return kof_sym_count(o->sym, o->sym_n) != 0;
-	}
 	case BI_DISANALYSE:
 	case BI_DISASM: {
 		const struct object *ob = cur_obj(v);
@@ -488,34 +411,6 @@ case BI_UNPACKER: {
 			return 0;
 		return obj_maybe_code(ob);
 	}
-	case BI_FINDSC: {
-		/*
-		 * DRAWN FOR EVERY EXECUTABLE IMAGE, whether or not kofscfind
-		 * found anything. This is FORCE ANALYSIS: the reader asking is
-		 * the reason to look.
-		 *
-		 * IT USED TO ASK findsc_target(), AND THAT WAS THE BUG. That
-		 * walk answers about a payload kofscfind located in a global
-		 * variable, by address - which is one shape of loader and not
-		 * the common one. `msfvenom -f elf` emits a 250-byte ELF that
-		 * IS the shellcode, with no sections and no symbols; its
-		 * encoded variants emit a decoder whose payload an unpacker
-		 * produces as a child. Measured on this tree's samples:
-		 * seventeen produce such a child and none has a payload
-		 * symbol for kofscfind to find, so the row was missing on the
-		 * entire family this menu exists for.
-		 *
-		 * ASKED OF kv_cap AND NOT OF TWO ENUM VALUES HERE, because
-		 * "where can shellcode live" is a fact about the FORMAT and
-		 * belongs in the one table that already answers the other three
-		 * questions of that shape - see enum kv_cap. A format added
-		 * tomorrow gets its answer there, once, rather than from
-		 * whichever menu item remembered to list it.
-		 */
-		const struct object *o = cur_obj(v);
-
-		return o && kv_cap(o->ctx.format, KV_CAP_SHELLCODE);
-	}
 	default:
 		break;
 	}
@@ -537,7 +432,7 @@ case BI_UNPACKER: {
 	/*
 	 * WHAT AN EVENT RECORD IS NOT.
 	 *
-	 * Symbols, disassembly, the shellcode finder and the unpackers all
+	 * Disassembly, the shellcode finder and the unpackers all
 	 * ask questions about a parsed executable. A record is a struct: it
 	 * has no symbol table, no instructions, no variables to search and
 	 * nothing for an unpacker to open.
@@ -566,11 +461,9 @@ case BI_UNPACKER: {
 	 */
 	if (v->log && !v->pe_of[v->node[v->sel_node].obj]) {
 		switch (i) {
-		case BI_SYMS:
 		case BI_DISASM:
 		case BI_DISANALYSE:
-		case BI_FINDSC:
-		case BI_FINDINF:
+		case BI_INFECTION:
 		case BI_UNPACKER:
 		case BI_DUMP_STATIC:
 		case BI_DUMP_EMU:
@@ -647,8 +540,12 @@ case BI_UNPACKER:
 		return ob && ob->buf.p && v->rgn_len != 0;
 	}
 	case BI_DASH:      return 1;
-	/* A directory of files, not a property of the object: always. */
-	case BI_SYNTAB:    return v->syn != NULL;
+	/* SWITCHED OFF for now (owner): Syndromes stays listed and greyed. It is the old Syndrome table (kv_syntable.c, kv_syn.c and the
+	 * tag-source backend under databases/tagsrc*): the code stays and is to be removed later, on request. When it is switched back
+	 * on the condition was `v->syn != NULL` (a directory of files, not a property of the object). */
+	case BI_SYNTAB:    return 0;
+	/* Manage > Pathogens: the session's catalog, kept in the view (nothing is stored). Needs no object. */
+	case BI_FAMILIES:  return 1;
 	/* Needs a file to step from, and nothing the reader typed that would be
 	 * lost - moving on is the one action here that throws work away. */
 	case BI_NEXT:
@@ -664,35 +561,12 @@ case BI_UNPACKER:
 	case BI_FIND:      return 1;
 	case BI_GOTO:      return 1;            /* draw_goto / goto_take */
 	/*
-	 * Offered only when there is a table to show. An object with neither
-	 * half - a PE, or a fully stripped ELF - would open a dialog with two
-	 * empty tabs, which is a worse answer than a greyed item: the grey says
-	 * the tool looked and found nothing, the empty box says it might not
-	 * have looked.
+	 * THE INFECTION DIALOG IS SWITCHED OFF FOR NOW (owner): the item stays in the menu, greyed. The analysis behind its two
+	 * tabs (shellcode candidates and the infection-prone regions) is to be reworked against real-world samples before it is
+	 * offered. When it is switched back on, the item is live when the engine reported infected ranges on the object (Infected
+	 * data) or the format can carry shellcode (Shellcode, a capability of the format: kv_cap); the dialog is complete.
 	 */
-	/*
-	 * Always offered on an object, because BOTH answers are answers.
-	 *
-	 * Greying it when nothing was found would make "this file carries no
-	 * payload" indistinguishable from "this build cannot look" - and the
-	 * reader who wants to know is exactly the one who has not looked yet.
-	 * The item costs nothing to run: the rule ran during the scan and this
-	 * only reports what it said.
-	 */
-	case BI_FINDSC:    return 1;    /* shown only when there is one */
-	/*
-	 * GREYED WHEN THE SCAN FOUND NOTHING, which is the opposite of the row
-	 * above and deliberately so. BI_FINDSC forces an analysis - the reader
-	 * asking is the reason to look. This one cannot: the ranges come from a
-	 * module that had already located the damage, and there is no second
-	 * way to work them out. So the grey says "the scan looked and said
-	 * nothing", which is an answer, and clicking it could only repeat it.
-	 */
-	case BI_FINDINF:
-		return v->n_node &&
-		       v->node[v->sel_node].obj < v->n_obj &&
-		       v->obj[v->node[v->sel_node].obj].n_infected != 0;
-	case BI_SYMS:      return 1;    /* shown only when there are symbols */
+	case BI_INFECTION: return 0;
 	/* Always: the text it decodes usually comes from outside the file, so
 	 * there is nothing about the object that could make it unavailable. */
 	case BI_ENCSTR:    return 1;
@@ -984,11 +858,6 @@ void bar_move_item(struct view *v, int dir)
 static const char *bar_why_off(struct view *v, int i)
 {
 	switch (i) {
-	case BI_SYMS:
-		/* Both readings are true of the same object and neither can be
-		 * told from the other: a table that was stripped and one that
-		 * was never written both arrive as no records. */
-		return "No symbols in this object - it is stripped or declares none";
 	case BI_DISANALYSE:
 	case BI_DISASM: {
 		/*
@@ -1141,167 +1010,20 @@ void bar_run(struct view *v, int i)
 		v->edit = 500;
 		v->ed.dr.warn[0] = 0;
 		break;
-	/* The twin of BI_FIND, and it has to be here as well as in
+	/* An item has to be here as well as in
 	 * bar_enabled: an item that reports itself live and has no case falls
 	 * to `default: break;` - the menu closes and nothing happens, which
 	 * is exactly how BI_GOTO looked before the dialog existed. */
-	case BI_SYMS:
-		symd_open(v);
-		return;
 	case BI_SYNTAB:
 		syn_open(v);
 		return;
-	/*
-	 * SHOW what the analysis found, or say plainly that it found nothing.
-	 *
-	 * Both outcomes are reported, and the negative one goes to the status
-	 * line rather than opening an empty dialog - a box with nothing in it
-	 * makes the reader work out which of "nothing found" and "nothing
-	 * shown" they are looking at.
-	 */
-	/*
-	 * GO TO THE PAYLOAD, which is an object of its own.
-	 *
-	 * There used to be a dialog here showing the bytes, then the same
-	 * dialog showing a disassembly. Both are gone: the payload is a child
-	 * object now, so the tree, the hex pane with its selection and its
-	 * right-click menu, the disassembly panel, Find, Go to and the draft
-	 * are all already pointed at it. A dialog was a second, worse copy of
-	 * tools that exist.
-	 *
-	 * So the item's job is to take the reader THERE - the payload is one
-	 * row among however many the tree has - and to say what it looks like,
-	 * which is the one thing the dialog said that the tree does not.
-	 */
-	case BI_FINDSC: {
-		/*
-		 * THE SAME WALK THE MENU ASKED - see findsc_target, which also
-		 * carries the reasoning about why a payload row answers with
-		 * itself.
-		 *
-		 * It used to be repeated here, and the menu asked nothing at
-		 * all: the item was always choosable and this code then printed
-		 * "No shellcode-like variable here". Two copies of a search and
-		 * one of them the only one that ran - so the menu promised what
-		 * it had not checked, and the reader found out by being
-		 * refused. One walk, asked twice, cannot disagree with itself.
-		 */
-		int found = findsc_target(v);
-		uint32_t kid = found >= 0 ? (uint32_t)found : 0u;
-		uint32_t k;
-
-		if (found < 0) {
-			snprintf(v->act_msg, sizeof v->act_msg, "%s",
-				 "No shellcode-like variable here");
-			v->act_ok = 1;
-			v->menu_open = 0;
-			return;
-		}
-		/*
-		 * THE LOADER, NOT THE DERIVED PAYLOAD. There is no payload
-		 * object to describe, so what is shown is what kofscfind
-		 * answered - where and how big - rather than sc_kind() over
-		 * the loader's own bytes, which would describe the wrong thing
-		 * with complete confidence.
-		 */
-		if (!v->obj[kid].payload_of && v->obj[kid].payload_at) {
-			if (v->obj[kid].payload_bits)
-				snprintf(v->act_msg, sizeof v->act_msg,
-					 "payload at 0x%llx, %llu byte(s), "
-					 "%u-bit",
-					 (unsigned long long)
-						 v->obj[kid].payload_at,
-					 (unsigned long long)
-						 v->obj[kid].payload_len,
-					 (unsigned)v->obj[kid].payload_bits);
-			else
-				snprintf(v->act_msg, sizeof v->act_msg,
-					 "payload at 0x%llx, %llu byte(s)",
-					 (unsigned long long)
-						 v->obj[kid].payload_at,
-					 (unsigned long long)
-						 v->obj[kid].payload_len);
-			v->act_ok = 1;
-			v->menu_open = 0;
-			return;
-		}
-		for (k = 0; k < v->n_node; k++)
-			if (v->node[k].obj == kid && !v->node[k].mask &&
-			    !v->node[k].sym) {
-				goto_node(v, k);
-				break;
-			}
-		snprintf(v->act_msg, sizeof v->act_msg, "%s",
-			 sc_kind(v->obj[kid].buf.p,
-				 (uint32_t)v->obj[kid].buf.n));
-		v->act_ok = 1;
-		v->menu_open = 0;
-		return;
-	}
-	/*
-	 * WHERE THE INFECTION IS - see BI_FINDINF and struct kof_infected.
-	 *
-	 * NOTHING IS SEARCHED FOR HERE. The ranges were established during the
-	 * scan by a module that had to find them in order to describe a repair;
-	 * this selects the first one and says what all of them are. A viewer
-	 * that went looking again would be a second opinion about a question
-	 * the engine has already answered, and the two could disagree.
-	 *
-	 * THE BODY IS PREFERRED FOR THE JUMP. A file usually carries both - the
-	 * malware's own bytes and the host's that it overwrote - and the body
-	 * is the larger, the stranger and the one a reader opened the menu to
-	 * look at. The damage is a few hundred bytes at an entry point that the
-	 * repair has probably already put back.
-	 */
-	case BI_FINDINF: {
-		const struct object *ob = cur_obj(v);
-		uint32_t q, pick = 0;
-		size_t at = 0;
-
-		if (!ob || !ob->n_infected) {
-			snprintf(v->act_msg, sizeof v->act_msg, "%s",
-				 "Nothing here was reported as infected");
-			v->act_ok = 1;
-			v->menu_open = 0;
-			return;
-		}
-		for (q = 0; q < ob->n_infected; q++)
-			if (ob->infected[q].kind == KOF_INF_BODY) {
-				pick = q;
-				break;
-			}
-		view_show_in(v, v->node[v->sel_node].obj,
-			     v->node[v->sel_node].sym,
-			     ob->infected[pick].off, 0);
-		{
-			uint64_t a = view_unmap(v, ob->infected[pick].off);
-			uint64_t b = view_unmap(v, ob->infected[pick].off +
-						   ob->infected[pick].len - 1u);
-
-			if (a != KGENOME_BROKEN && b != KGENOME_BROKEN) {
-				v->sel_a = a;
-				v->sel_b = b;
-				v->sel_from_dis = 0;
-			}
-		}
-		/* Every range, not just the one jumped to: the counts are the
-		 * answer and a reader should not have to open the menu twice
-		 * to learn there were two. */
-		for (q = 0; q < ob->n_infected && at < sizeof v->act_msg; q++)
-			at += (size_t)snprintf(v->act_msg + at,
-					       sizeof v->act_msg - at,
-					       "%s%s 0x%llx +%llu",
-					       q ? ", " : "",
-					       ob->infected[q].kind == KOF_INF_BODY
-					       ? "body" : "damage",
-					       (unsigned long long)
-						       ob->infected[q].off,
-					       (unsigned long long)
-						       ob->infected[q].len);
-		v->act_ok = 1;
-		v->menu_open = 0;
-		return;
-	}
+	case BI_FAMILIES:
+		fam_open(v);
+		break;
+	case BI_INFECTION:
+		prop_show_infection(v);
+		v->act_msg[0] = 0;
+		break;
 	case BI_GOTO:
 		v->goto_open = 1;
 		v->find_open = 0;      /* they share the box - see draw_goto */
@@ -1327,8 +1049,7 @@ void bar_run(struct view *v, int i)
 	case BI_DASH:
 		/* Whatever the last copy or dump said belongs to the screen
 		 * it was said on, not to a page opened afterwards. */
-		v->prop_open = 1;
-		v->prop_off = 0;
+		prop_show(v);
 		v->act_msg[0] = 0;
 		break;
 	case BI_KEYS:    v->help_open = 1; v->help_off = 0; break;

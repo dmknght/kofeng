@@ -160,8 +160,42 @@ static int cell_fetch(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
 	out->at = k->at;
 	n = out->n_op;
 	if (out->target_va != KGENOME_BROKEN)
+		/* KNOWN DEFECT WP9-F4 (2026-10-25, M) [sev M]: kgenome_cell_next stores va_to_off() as insn.target without
+		 * clamping it to the buffer (second call site likewise; space.c elf_seg gives a flat space [0, 2^64) to an
+		 * ELF with no program header). Trigger: a segment size past the file (or no program header) and a branch
+		 * landing past the buffer. Effect: target is a file offset past the object and not KGENOME_BROKEN (cell.h);
+		 * a consumer indexing by it reads past the object. Reproducer: tests/lib/genome/diag_known_misses.c f4.
+		 * Fix: after the assignment clamp `target >= sp->size` to KGENOME_BROKEN. */
 		out->target = va_to_off(k, sp, out->target_va);
 	return 1;
+}
+
+/*
+ * WHAT A CALL LEAVES ALONE, for the constant map: the architecture's callee-saved registers, or every register when
+ * the callee only fetches the program counter.
+ *
+ * x86's `call L; db "text"; L: pop reg` is a call that never returns to the call: the callee takes its own
+ * return address off the stack and carries on in the same function, so nothing was overwritten (the same
+ * decision the sweep's callee reader makes, CALLEE_GETPC). One decode of the callee's first instruction
+ * answers it, asked only when the map holds a register a call could take away and only for a direct call.
+ */
+static uint16_t call_keeps(const struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
+			   const struct kgenome_cell_insn *call)
+{
+	const uint16_t keeps = kgenome_cell_call_keeps(sp->arch);
+	struct kgenome_cell_cur t;
+	struct kgenome_cell_insn first;
+
+	if (!(k->st.known & (uint16_t)~keeps) || (call->flags & KGENOME_CELL_F_INDIRECT) ||
+	    call->target == KGENOME_BROKEN || call->target == call->at + call->len ||   /* `call next` is not a call at all */
+	    (sp->arch != KGENOME_ARCH_X86 && sp->arch != KGENOME_ARCH_X86_64))
+		return keeps;
+	memset(&t, 0, sizeof t);
+	t.at = call->target;
+	t.open = 1;
+	if (cell_fetch(&t, sp, &first) && first.op == KGENOME_CELL_POP)
+		return 0xffffu;
+	return keeps;
 }
 
 int kgenome_cell_step(struct kgenome_cell_cur *k, const struct kgenome_cell_space *sp,
@@ -204,6 +238,8 @@ int kgenome_cell_next(struct kgenome_cell_cur *k, const struct kgenome_cell_spac
 		}
 	}
 
+	if (out->op == KGENOME_CELL_CALL)
+		k->st.call_keeps = call_keeps(k, sp, out);
 	kgenome_cell_state_track(&k->st, out);
 	k->at += out->len;
 	return 1;

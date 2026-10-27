@@ -50,6 +50,11 @@ int kofa_pm_scan(int pmfd, uint64_t base, uint64_t size,
 	if ((base & (KOFA_PAGE_SIZE - 1)) || !size)
 		return KOFA_ERR_OS;
 
+	/* KNOWN DEFECT WP12-3 (2026-10-24, M) [sev M]: kofa_pm_scan wraps (size + 4095)
+	 * for a size near 2^64: npages = 0 and the scan answers OK. Trigger:
+	 * maps line "0-ffffffffffffffff". Effect: nothing reported resident for
+	 * a huge region. Reproducer: tests/unit/orbit_pmem.c case_pm_args. Fix:
+	 * reject size > UINT64_MAX - 4095 (KOFA_ERR_OS) first. */
 	npages = (size + KOFA_PAGE_SIZE - 1) >> KOFA_PAGE_SHIFT;
 
 	while (done < npages) {

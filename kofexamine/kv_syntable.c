@@ -1,3 +1,8 @@
+/*
+ * SWITCHED OFF (owner, 2026-10-27): the Syndrome table and its tag-source backend (kofexamine/kv_syn.c, kv_syntable.c,
+ * libkofeng/databases/tagsrc*, ksigbuilder/ksb_tags.c) stay in the tree and are to be removed later, when asked. The menu item
+ * is Manage > Syndromes, listed and greyed. Do not extend this code.
+ */
 #define _GNU_SOURCE
 #include "kv.h"
 
@@ -417,17 +422,16 @@ static void layer_draw(struct out *o, struct view *v, struct syn_layer *ly,
 	pg.off = &ly->off;
 	pg.full = full;
 	pg.width = full ? g_cols : 0;
-	pg.close = 1;
 	pg.foot = foot;
 	page_draw(o, v, &pg);
-	ly->top = pg.top;
-	ly->left = pg.left;
-	ly->w = pg.w;
-	ly->h = pg.h;
+	ly->top = pg.geo.top;
+	ly->left = pg.geo.left;
+	ly->w = pg.geo.w;
+	ly->h = pg.geo.h;
 	ly->shown = pg.shown;
-	ly->btn_y = pg.btn_y;
-	ly->btn_x0 = pg.btn_x0;
-	ly->btn_x1 = pg.btn_x1;
+	ly->btn_y = pg.geo.close_y;
+	ly->btn_x0 = pg.geo.close_x0;
+	ly->btn_x1 = pg.geo.close_x1;
 }
 
 /* The screen row of a line of a layer, or 0 when it is scrolled out. */

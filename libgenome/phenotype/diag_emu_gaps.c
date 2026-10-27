@@ -44,6 +44,11 @@ void kgenome_diag_emu_gather_skip(struct kgenome_diag_emu_skipgather *g,
 	if (at < DIAG_REL_CALLLEN)
 		return;
 	if (g->n == g->cap_n) {
+		/* KNOWN DEFECT REV-D8i (2026-10-25, Inference) [sev L]: the skipped-site list of the emulate route
+		 * (diag_emu_gaps.c) doubles a uint32 capacity (skipped sites) with no overflow guard and no ledger charge.
+		 * Trigger: an object with 2^31 or more elements of this kind (input over 2 GiB; the engine caps an object at 512
+		 * MiB, so only a host using the lib directly). Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h,
+		 * guards the doubling) or test cap against UINT32_MAX / 2 before doubling. */
 		uint32_t nc = g->cap_n ? g->cap_n * 2u : 64u;
 		struct kgenome_diag_emu_skipsite *ns = realloc(g->site, (size_t)nc * sizeof *ns);
 

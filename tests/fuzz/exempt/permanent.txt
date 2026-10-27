@@ -1,3 +1,6 @@
 # Public functions that bytes cannot drive. function<TAB>reason. A function here needs a reason a reviewer can check.
 kgenome_emu_set_deadline	not byte-drivable: the deadline is a wall-clock instant, which a deterministic harness never sets (the step budget is the bound)
 khash_sha256_file	not byte-drivable: it takes a path; the bytes route is khash_sha256_* (WP13), the path route is tested with a file the test makes
+kgenome_elf_shape	pure function of the parsed view (segment and section types), no bytes read; hand-built cases in tests/lib/genome/elf_semantics.c
+kgenome_elf_entry_sec	pure function of the parsed view, unsigned range test; hand-built cases incl. UINT64_MAX in tests/lib/genome/elf_semantics.c
+kgenome_arch_title	pure lookup of one 8-bit value, no input bytes; every value asserted in tests/lib/genome/arch_title.c

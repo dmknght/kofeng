@@ -321,6 +321,11 @@ static void kgenome_elf_funcs_build(kof_buf file, const struct kgenome_elf_info 
 		if (off > file.n || sy.size > file.n - off)
 			continue;
 		if (n == cap) {
+			/* KNOWN DEFECT REV-D8g (2026-10-25, Inference) [sev L]: the function table build (funcs.c) doubles a uint32
+			 * capacity (functions) with no overflow guard and no ledger charge. Trigger: an object with 2^31 or more elements
+			 * of this kind (input over 2 GiB; the engine caps an object at 512 MiB, so only a host using the lib directly).
+			 * Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h, guards the doubling) or test cap against
+			 * UINT32_MAX / 2 before doubling. */
 			uint32_t nc = cap ? cap * 2u : 256u;
 			struct kgenome_func *nv = realloc(v, (size_t)nc * sizeof *nv);
 
@@ -478,6 +483,11 @@ void kgenome_pe_funcs_build(kof_buf file, const struct kgenome_pe_info *p,
 		    (uint64_t)(e - b) > file.n - off)
 			continue;
 		if (n == cap) {
+			/* KNOWN DEFECT REV-D8o (2026-10-25, Inference) [sev L]: the PE unwind-table function build (funcs.c) doubles a uint32 capacity (functions, bounded only by the exception directory: file size / 12)
+			 * with no overflow guard and no ledger charge. Trigger: an exception directory of 2^31 or more entries (input over 24 GiB); the engine caps an object at 512 MiB,
+			 * so only a host using the lib directly. Effect: the doubled capacity wraps to a smaller one and the table
+			 * is overrun. Reproducer: none (read). Fix: use kof_tab_grow (kofcore/tabgrow.h) or test cap against
+			 * UINT32_MAX / 2 before doubling. */
 			uint32_t nc = cap ? cap * 2u : 256u;
 			struct kgenome_func *nv = realloc(v, (size_t)nc * sizeof *nv);
 

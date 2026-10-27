@@ -165,6 +165,12 @@ static int stale_channel(const char *nd)
 	munmap(m, sizeof h);
 	close(fd);
 
+	/* KNOWN DEFECT WP12-12 (2026-10-24, R) [sev L]: stale_channel counts magic 0 (a
+	 * header not yet initialised) as stale. Trigger: a second sensor starts
+	 * inside the first one's initialisation window. Effect: it deletes the
+	 * first one's names. Reproducer: none (unit row shows magic 0 replaced;
+	 * the race is read). Fix: treat magic 0 as stale only when pid is 0 and
+	 * the file is older than a grace period. */
 	if (h.magic != KOF_CHAN_MAGIC)
 		return 1;
 	if (h.pid == 0u)
@@ -826,6 +832,11 @@ int kof_chan_next(struct kof_chan_sub *s, struct kof_evt *out, uint32_t wait_ms)
 				ts.tv_nsec = (long)(slice % 1000u) * 1000000L;
 				(void)nanosleep(&ts, NULL);
 			}
+			/* KNOWN DEFECT WP12-13 (2026-10-24, M) [sev M]: kof_chan_next
+			 * charges a full slice for a wait that returned at once
+			 * (the wake semaphore is never drained). Trigger: a wait
+			 * after a plain read. Effect: a 120 ms wait takes 0 ms.
+			 * Reproducer: orbit_chan.c case_ring. Fix: drain it. */
 			left -= slice;
 		}
 	}

@@ -18,6 +18,8 @@ static void usage(void)
 	"  --bases D   the content source tree, for Analysis > Rebuild database\n"
 	"  --syndromes D  the tag sources (default: <bases>/syndromes, or\n"
 	"              bases/syndromes), for Analysis > Syndrome table\n"
+	"  --pathogens D  where Manage > Pathogens keeps its files (default:\n"
+	"              <bases>/pathogens; without either Save is refused)\n"
 	"  --pid N     open a RUNNING PROCESS instead of a file, as a snapshot\n"
 	"  --heur N    0 do not separate what a file carries  1 score and\n"
 	"              descend  2 also interpret (default)\n"
@@ -71,6 +73,8 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	struct kv_syn    *syn   = v->syn;
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
+	char pathdir[sizeof v->pathdir];
+	struct kv_fam_ui *fam = v->fam;     /* the Pathogens catalog is the session's: it outlives the file */
 	int  heur_off = v->heur_off;
 
 	/*
@@ -100,6 +104,7 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 
 	snprintf(basedir, sizeof basedir, "%s", v->basedir);
 	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
+	snprintf(pathdir, sizeof pathdir, "%s", v->pathdir);
 
 	if (plg) {
 		uint32_t pi;
@@ -123,6 +128,8 @@ static int proc_open(struct view *v, uint32_t pid, kof_engine *eng)
 	editor_attach(v);
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
+	snprintf(v->pathdir, sizeof v->pathdir, "%s", pathdir);
+	v->fam = fam;
 	v->heur_off = heur_off;
 
 	v->sel_a = v->sel_b = KGENOME_BROKEN;
@@ -261,6 +268,7 @@ static void file_close(struct view *v)
 		kof_codenotes_free(&o->notes);
 		kof_inspect_free(o->fmt, o->info);
 		free(o->sym);
+		dash_drop(o);
 		free(o->fixed);
 		free(o->own);
 		free(o->carve);
@@ -306,6 +314,7 @@ static void view_free(struct view *v)
 	free(v->probe);
 	free(v->ed.dr.blk);
 	syn_free(v->syn);
+	fam_free(v);
 	free(v);
 }
 
@@ -347,6 +356,8 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	struct kv_syn    *syn   = v->syn;
 	char basedir[sizeof v->basedir];
 	char dbdir[sizeof v->dbdir];
+	char pathdir[sizeof v->pathdir];
+	struct kv_fam_ui *fam = v->fam;     /* the Pathogens catalog is the session's: it outlives the file */
 	char keep[KOF_DUMP_PATH_ROOM];
 	/*
 	 * Kept only when this is the same file being rebuilt - which is what
@@ -386,6 +397,7 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 
 	snprintf(basedir, sizeof basedir, "%s", v->basedir);
 	snprintf(dbdir, sizeof dbdir, "%s", v->dbdir);
+	snprintf(pathdir, sizeof pathdir, "%s", v->pathdir);
 
 	if (plg) {
 		uint32_t pi;
@@ -409,6 +421,8 @@ int file_open(struct view *v, const char *path, kof_engine *eng)
 	editor_attach(v);       /* the clear above zeroed what it borrows */
 	snprintf(v->basedir, sizeof v->basedir, "%s", basedir);
 	snprintf(v->dbdir, sizeof v->dbdir, "%s", dbdir);
+	snprintf(v->pathdir, sizeof v->pathdir, "%s", pathdir);
+	v->fam = fam;
 	v->emu_mode = emu_mode;
 	v->heur_off = heur_off;
 
@@ -571,7 +585,7 @@ int main(int argc, char **argv)
 	 * of it already tests basedir[0], so "not given" stays one convention
 	 * instead of two.
 	 */
-	const char *path = NULL, *db = NULL, *base = "", *syn_dir = NULL;
+	const char *path = NULL, *db = NULL, *base = "", *syn_dir = NULL, *path_dir = NULL;
 	/* The process to open instead of a file, or 0. */
 	uint32_t    want_pid = 0;
 	uint64_t last_paint = 0;
@@ -655,6 +669,8 @@ int main(int argc, char **argv)
 			base = argv[++i];
 		else if (!strcmp(argv[i], "--syndromes") && i + 1 < argc)
 			syn_dir = argv[++i];
+		else if (!strcmp(argv[i], "--pathogens") && i + 1 < argc)
+			path_dir = argv[++i];
 		/* Asked for by name, and answered with 0: a reader who typed
 		 * --help did not make a mistake. */
 		else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -691,6 +707,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	snprintf(v->basedir, sizeof v->basedir, "%s", base);
+	/* Manage > Pathogens: --pathogens, else <bases>/pathogens; with neither known the dialog's Save refuses. */
+	if (path_dir)
+		snprintf(v->pathdir, sizeof v->pathdir, "%s", path_dir);
+	else if (base[0])
+		snprintf(v->pathdir, sizeof v->pathdir, "%s/pathogens", base);
 	if (db)
 		snprintf(v->dbdir, sizeof v->dbdir, "%s", db);
 	/*
